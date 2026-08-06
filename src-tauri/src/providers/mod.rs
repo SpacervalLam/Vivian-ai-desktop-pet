@@ -1,0 +1,27 @@
+pub mod anthropic;
+pub mod base;
+pub mod chat_completions;
+pub mod doubao;
+pub mod factory;
+pub mod gemini;
+pub mod openai_compat;
+pub mod openai_responses;
+pub mod router;
+pub mod schema;
+pub mod spark;
+pub mod thinking_stripper;
+pub mod wenxin;
+
+pub use anthropic::AnthropicProvider;
+pub use base::{BaseProvider, ChatResponse, LLMRequest, ProviderBase, ProviderStats, StructuredToolCall, ToolDefinition};
+pub use chat_completions::ChatCompletionsProvider;
+pub use doubao::DoubaoProvider;
+pub use factory::{create_task_provider, ClientCache, ProviderKind};
+pub use gemini::GeminiProvider;
+pub use openai_compat::OpenAiCompatProvider;
+pub use openai_responses::OpenAiResponsesProvider;
+pub use router::ModelRouter;
+pub use schema::{emit_response_tool_definition, is_emit_response_call, validate_vivian_response, vivian_response_schema};
+pub use spark::SparkProvider;
+pub use thinking_stripper::{leaks_thinking_in_content, strip_thinking_segments, ThinkingStreamStripper};
+pub use wenxin::WenxinProvider;

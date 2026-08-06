@@ -1,0 +1,132 @@
+{#
+  Vivian System Prompt Template — 结构参考文件
+
+  本文件是 prompt 组装架构的人类可读描述，与 template_engine.rs 中的
+  section_schema() 保持同步。实际的 prompt 组装由 PromptBuilder::build_prompt()
+  执行（保证精确的格式控制），template_engine.rs 的 build_prompt_with_sections()
+  按此结构生成元数据。
+
+  前端 Context Pipeline 通过 get_prompt_section_schema Tauri 命令获取
+  section 定义，实现可视化与后端结构的自动同步。
+
+  层级说明（八层意识模型）：
+  - Framework: 安全规则、会话规则、输出格式
+  - Character: 身份/人格/背景/风格/示例
+  - Mind: 当前心智、工作记忆、自我状态、情绪、内心反应
+  - World: 环境、用户、世界书、事件、观察、室友
+  - Relationship: 关系定义、社交状态、关系事实、共享世界
+  - Memory: 相关经历、关系日志、记忆上下文、记忆规则
+  - UserProfile: 用户事实、动态行为
+  - Generation: 响应决策、工具、渠道指南、在场指南、用户输入
+#}
+
+{# ═══════ Static Zone（API 可缓存，<static>...</static> 标签内）═══════ #}
+
+<static>
+{# ── Framework Layer ── #}
+[FRAMEWORK - DO NOT EMBODY, JUST FOLLOW]
+{{ framework }}
+[END FRAMEWORK]
+
+[FORMAT SPEC - DO NOT EMBODY]
+{{ output_format }}
+[END FORMAT]
+
+{# ── Character Layer（optional）── #}
+{% if character %}
+[CHARACTER - EMBODY THIS]
+{{ character }}
+[END CHARACTER]
+{% endif %}
+
+{# ── Advanced Layer（optional）── #}
+{% if style %}{{ style }}{% endif %}
+{% if relationship %}{{ relationship }}{% endif %}
+{% if examples %}
+[EXAMPLES - REFERENCE ONLY]
+{{ examples }}
+[END EXAMPLES]
+{% endif %}
+</static>
+
+__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__
+
+{# ═══════ Dynamic Zone（每轮变化）═══════ #}
+
+{# ── Layer 2: Current Mind（当前心智）── 紧随身份，最先入脑 ── #}
+{% if mind %}{{ mind }}{% endif %}
+{% if working_memory %}{{ working_memory }}{% endif %}
+{% if self_state %}{{ self_state }}{% endif %}
+{% if emotion %}
+## Emotion Context
+{{ emotion }}
+{% endif %}
+{% if inner_reaction %}{{ inner_reaction }}{% endif %}
+
+{# ── Layer 3: World Snapshot（世界快照）── 我现在身处什么世界 ── #}
+{{ environment }}
+{% if user_entity %}{{ user_entity }}{% endif %}
+{% if roommate_status %}
+## Roommate Status
+{{ roommate_status }}
+Use `talk_to_character` to reach her only when she is online.
+{% endif %}
+{% if roommate_cognitive %}{{ roommate_cognitive }}{% endif %}
+{% if environment_events %}{{ environment_events }}{% endif %}
+
+{# ── Layer 4: Observations（观察）── 我注意到的异常 ── #}
+{% if world_observations %}
+## Recent Observations (notable only)
+{{ world_observations }}
+{% endif %}
+{% if activity_brief %}
+## Recent Activity (background only)
+{{ activity_brief }}
+{% endif %}
+
+{# ── Layer 5: Belief（长期认知）── 已在 Layer 2 Mind 段落中 ── #}
+
+{# ── Layer 6: Relevant Episode（相关经历）── 最近发生过什么 ── #}
+{% if episode %}{{ episode }}{% endif %}
+
+{# 关系日志（Episode 层，记忆分组）#}
+{% if relationship_log %}{{ relationship_log }}{% endif %}
+
+{# ── Layer 7: Profile（画像层）── 用户事实 / 动态行为 / 关系认知 / 共享世界 / 社交状态 ── #}
+{% if user_facts %}{{ user_facts }}{% endif %}
+{% if dynamic_behavior %}{{ dynamic_behavior }}{% endif %}
+{% if relationship_facts %}{{ relationship_facts }}{% endif %}
+{% if shared_world %}{{ shared_world }}{% endif %}
+{% if social_state %}{{ social_state }}{% endif %}
+
+{{ memory }}
+
+{# 首次见面 / 记忆使用规则（互斥） #}
+{% if is_first_meeting %}
+{{ first_meeting_block }}
+{% else %}
+{{ memory_usage_rules }}
+{% endif %}
+
+{% if worldbook %}{{ worldbook }}{% endif %}
+
+{# ── Tail Sections ── #}
+
+[CHAT STYLE - REFERENCE]
+{{ chat_style }}
+[END CHAT STYLE]
+
+{% if channel_guide %}{{ channel_guide }}{% endif %}
+{% if presence_guide %}{{ presence_guide }}{% endif %}
+
+{# 响应模式决策（跨角色 vs 用户对话） #}
+{{ response_decision }}
+
+{# 工具列表（放最后，让 LLM 先进入意识状态再看可用工具） #}
+{{ tools }}
+
+{# ── Layer 8: Task（任务）── 用户输入，在最后 ── #}
+{% if user_input %}
+# User Input
+{{ user_input }}
+{% endif %}

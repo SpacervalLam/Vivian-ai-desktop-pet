@@ -1,0 +1,503 @@
+//! 设置目录（Settings Catalog）—— 三层元数据驱动的配置描述。
+//!
+//! 将所有可配置项按 **基础 / 进阶 / 专家** 三层组织，提供结构化元数据供前端
+//! 动态渲染设置界面（分组、控件类型、范围、可选值），避免前后端字段定义脱节。
+//!
+//! - **Basic（基础层）**：日常配置，所有用户可见（语言、快捷键、AI 模型等）
+//! - **Advanced（进阶层）**：高级用户配置（记忆巩固、主动对话、路由矩阵等）
+//! - **Expert（专家层）**：内部/调试配置（embedding 维度、缓存 TTL 等）
+
+use serde::{Deserialize, Serialize};
+
+/// 设置层级
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SettingLayer {
+    Basic,
+    Advanced,
+    Expert,
+}
+
+/// 控件类型
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum SettingControl {
+    String,
+    Password,
+    Integer,
+    Number,
+    Boolean,
+    Select { options: Vec<String> },
+    /// 多选（混用模式）：值类型为 `Vec<String>`，包含所有被选中的选项
+    MultiSelect { options: Vec<String> },
+}
+
+/// 单条设置描述
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SettingEntry {
+    /// 点号分隔路径（如 "ai.model"）
+    pub key: String,
+    /// 显示名
+    pub label: String,
+    /// 说明
+    pub description: String,
+    /// 层级
+    pub layer: SettingLayer,
+    /// 分组（UI 展示分组）
+    pub group: String,
+    /// 控件
+    pub control: SettingControl,
+    /// 默认值（JSON 值）
+    pub default_value: serde_json::Value,
+}
+
+/// 构建完整设置目录
+pub fn build_catalog() -> Vec<SettingEntry> {
+    vec![
+        // ========== 基础层 ==========
+        SettingEntry {
+            key: "base.language".into(),
+            label: "界面语言".into(),
+            description: "Vivian 回复与界面使用的语言".into(),
+            layer: SettingLayer::Basic,
+            group: "基础".into(),
+            control: SettingControl::Select {
+                options: vec!["zh".into(), "en".into()],
+            },
+            default_value: serde_json::json!("zh"),
+        },
+        SettingEntry {
+            key: "base.shortcut".into(),
+            label: "Vivian 文字快捷键".into(),
+            description: "呼出 Vivian 私聊文字对话框的全局热键".into(),
+            layer: SettingLayer::Basic,
+            group: "基础".into(),
+            control: SettingControl::String,
+            default_value: serde_json::json!("Ctrl+Shift+A"),
+        },
+        SettingEntry {
+            key: "base.shortcut_nana".into(),
+            label: "Nana 文字快捷键".into(),
+            description: "呼出 Nana 私聊文字对话框的全局热键".into(),
+            layer: SettingLayer::Basic,
+            group: "基础".into(),
+            control: SettingControl::String,
+            default_value: serde_json::json!("Ctrl+Shift+Q"),
+        },
+        SettingEntry {
+            key: "base.shortcut_broadcast".into(),
+            label: "群发快捷键".into(),
+            description: "呼出群发输入框（同时向所有角色发言）的全局热键".into(),
+            layer: SettingLayer::Basic,
+            group: "基础".into(),
+            control: SettingControl::String,
+            default_value: serde_json::json!("Ctrl+Shift+Z"),
+        },
+        SettingEntry {
+            key: "ai.provider".into(),
+            label: "AI 提供商".into(),
+            description: "主对话 LLM 的提供商类型".into(),
+            layer: SettingLayer::Basic,
+            group: "AI 模型".into(),
+            control: SettingControl::Select {
+                options: vec!["openai".into(), "anthropic".into(), "azure".into(), "deepseek".into(), "zhipu".into(), "moonshot".into(), "qwen".into(), "gemini".into()],
+            },
+            default_value: serde_json::json!("openai"),
+        },
+        SettingEntry {
+            key: "ai.model".into(),
+            label: "AI 模型".into(),
+            description: "主对话使用的模型名称".into(),
+            layer: SettingLayer::Basic,
+            group: "AI 模型".into(),
+            control: SettingControl::String,
+            default_value: serde_json::json!("gpt-4o"),
+        },
+        SettingEntry {
+            key: "ai.api_key".into(),
+            label: "API Key".into(),
+            description: "主 LLM API 密钥（必填，未配置将终止对话流程）".into(),
+            layer: SettingLayer::Basic,
+            group: "AI 模型".into(),
+            control: SettingControl::Password,
+            default_value: serde_json::json!(""),
+        },
+        SettingEntry {
+            key: "ai.endpoint".into(),
+            label: "API Endpoint".into(),
+            description: "主 LLM API 端点（可使用 ${VAR} 环境变量）".into(),
+            layer: SettingLayer::Basic,
+            group: "AI 模型".into(),
+            control: SettingControl::String,
+            default_value: serde_json::json!(""),
+        },
+        SettingEntry {
+            key: "ai.temperature".into(),
+            label: "温度".into(),
+            description: "生成随机性（0.0-2.0，越高越随机）".into(),
+            layer: SettingLayer::Basic,
+            group: "AI 模型".into(),
+            control: SettingControl::Number,
+            default_value: serde_json::json!(0.8),
+        },
+        SettingEntry {
+            key: "speech_recognition.engine".into(),
+            label: "语音识别引擎".into(),
+            description: "ASR 引擎类型".into(),
+            layer: SettingLayer::Basic,
+            group: "语音".into(),
+            control: SettingControl::Select {
+                options: vec!["whisper".into(), "azure".into(), "aliyun".into()],
+            },
+            default_value: serde_json::json!("whisper"),
+        },
+        SettingEntry {
+            key: "speech_recognition.language".into(),
+            label: "识别语言".into(),
+            description: "语音识别目标语言".into(),
+            layer: SettingLayer::Basic,
+            group: "语音".into(),
+            control: SettingControl::Select {
+                options: vec!["zh".into(), "en".into(), "ja".into()],
+            },
+            default_value: serde_json::json!("zh"),
+        },
+        // ========== 进阶层 ==========
+        SettingEntry {
+            key: "proactive.enabled".into(),
+            label: "主动对话".into(),
+            description: "Vivian 是否会主动发起对话".into(),
+            layer: SettingLayer::Advanced,
+            group: "主动对话".into(),
+            control: SettingControl::Boolean,
+            default_value: serde_json::json!(true),
+        },
+        SettingEntry {
+            key: "proactive.proactivity".into(),
+            label: "主动度".into(),
+            description: "主动对话频率（0.0-1.0，越高越积极）".into(),
+            layer: SettingLayer::Advanced,
+            group: "主动对话".into(),
+            control: SettingControl::Number,
+            default_value: serde_json::json!(0.5),
+        },
+        SettingEntry {
+            key: "proactive.idle_threshold".into(),
+            label: "空闲阈值".into(),
+            description: "用户空闲多少秒后触发主动对话".into(),
+            layer: SettingLayer::Advanced,
+            group: "主动对话".into(),
+            control: SettingControl::Integer,
+            default_value: serde_json::json!(300),
+        },
+        SettingEntry {
+            key: "memory.max_short_term_memory".into(),
+            label: "短期记忆上限".into(),
+            description: "保留的短期记忆条数上限".into(),
+            layer: SettingLayer::Advanced,
+            group: "记忆".into(),
+            control: SettingControl::Integer,
+            default_value: serde_json::json!(50),
+        },
+        SettingEntry {
+            key: "memory.retrieval_strategy".into(),
+            label: "检索策略".into(),
+            description: "记忆检索策略".into(),
+            layer: SettingLayer::Advanced,
+            group: "记忆".into(),
+            control: SettingControl::Select {
+                options: vec!["vector".into(), "keyword".into(), "hybrid".into()],
+            },
+            default_value: serde_json::json!("hybrid"),
+        },
+        SettingEntry {
+            key: "memory.enable_expiration".into(),
+            label: "记忆过期清理".into(),
+            description: "自动清理过期低重要性记忆".into(),
+            layer: SettingLayer::Advanced,
+            group: "记忆".into(),
+            control: SettingControl::Boolean,
+            default_value: serde_json::json!(true),
+        },
+        SettingEntry {
+            key: "memory.consolidation.stage1_short_term_threshold".into(),
+            label: "Stage1 摘要阈值".into(),
+            description: "ShortTerm 达到此条数时触发摘要".into(),
+            layer: SettingLayer::Advanced,
+            group: "记忆".into(),
+            control: SettingControl::Integer,
+            default_value: serde_json::json!(20),
+        },
+        SettingEntry {
+            key: "memory.consolidation.stage1_idle_timeout_sec".into(),
+            label: "Stage1 空闲超时".into(),
+            description: "ShortTerm 空闲多少秒后触发摘要".into(),
+            layer: SettingLayer::Advanced,
+            group: "记忆".into(),
+            control: SettingControl::Number,
+            default_value: serde_json::json!(600.0),
+        },
+        SettingEntry {
+            key: "tools.enable_native_function_calling".into(),
+            label: "原生函数调用".into(),
+            description: "启用 LLM 原生 function calling（而非 JSON 协议）".into(),
+            layer: SettingLayer::Advanced,
+            group: "工具".into(),
+            control: SettingControl::Boolean,
+            default_value: serde_json::json!(false),
+        },
+        SettingEntry {
+            key: "tools.max_iterations".into(),
+            label: "工具最大迭代".into(),
+            description: "单轮对话中工具调用最大迭代次数".into(),
+            layer: SettingLayer::Advanced,
+            group: "工具".into(),
+            control: SettingControl::Integer,
+            default_value: serde_json::json!(5),
+        },
+        SettingEntry {
+            key: "world.enable".into(),
+            label: "世界感知".into(),
+            description: "启用真实世界感知（时间/天气/节日等）".into(),
+            layer: SettingLayer::Advanced,
+            group: "世界".into(),
+            control: SettingControl::Boolean,
+            default_value: serde_json::json!(true),
+        },
+        SettingEntry {
+            key: "world.enable_weather".into(),
+            label: "天气感知".into(),
+            description: "启用天气获取（需配置经纬度）".into(),
+            layer: SettingLayer::Advanced,
+            group: "世界".into(),
+            control: SettingControl::Boolean,
+            default_value: serde_json::json!(true),
+        },
+        SettingEntry {
+            key: "world.enable_inner_monologue".into(),
+            label: "内心独白".into(),
+            description: "启用 Vivian 内心独白生成".into(),
+            layer: SettingLayer::Advanced,
+            group: "世界".into(),
+            control: SettingControl::Boolean,
+            default_value: serde_json::json!(true),
+        },
+        SettingEntry {
+            key: "network.proxy_mode".into(),
+            label: "代理模式".into(),
+            description: "网络代理模式".into(),
+            layer: SettingLayer::Advanced,
+            group: "网络".into(),
+            control: SettingControl::Select {
+                options: vec!["none".into(), "http".into(), "socks5".into()],
+            },
+            default_value: serde_json::json!("none"),
+        },
+        SettingEntry {
+            key: "network.proxy_url".into(),
+            label: "代理地址".into(),
+            description: "代理服务器地址（如 http://127.0.0.1:7890）".into(),
+            layer: SettingLayer::Advanced,
+            group: "网络".into(),
+            control: SettingControl::String,
+            default_value: serde_json::json!(""),
+        },
+        // ========== 网络搜索（已并入"网络"页签） ==========
+        SettingEntry {
+            key: "web_search.providers".into(),
+            label: "启用的搜索引擎".into(),
+            description: "可同时启用多个引擎混用：duckduckgo（零配置）/ searxng（自部署）/ tavily（LLM 优化）。搜索工具会并发调用所有已配置引擎并合并去重结果。注：主对话优先用 LLM 原生搜索，此为补充工具的后端选择".into(),
+            layer: SettingLayer::Advanced,
+            group: "网络搜索".into(),
+            control: SettingControl::MultiSelect {
+                options: vec!["duckduckgo".into(), "searxng".into(), "tavily".into()],
+            },
+            default_value: serde_json::json!(["duckduckgo"]),
+        },
+        SettingEntry {
+            key: "web_search.max_results".into(),
+            label: "结果数".into(),
+            description: "每次搜索返回结果数（1-20）".into(),
+            layer: SettingLayer::Advanced,
+            group: "网络搜索".into(),
+            control: SettingControl::Integer,
+            default_value: serde_json::json!(5),
+        },
+        SettingEntry {
+            key: "web_search.timeout_secs".into(),
+            label: "超时（秒）".into(),
+            description: "搜索请求超时秒数".into(),
+            layer: SettingLayer::Advanced,
+            group: "网络搜索".into(),
+            control: SettingControl::Integer,
+            default_value: serde_json::json!(15),
+        },
+        SettingEntry {
+            key: "web_search.enable_background_knowledge_fetch".into(),
+            label: "Busy 知识采集".into(),
+            description: "Busy 状态下主动检索最新知识入库（使用自建搜索后端）".into(),
+            layer: SettingLayer::Advanced,
+            group: "网络搜索".into(),
+            control: SettingControl::Boolean,
+            default_value: serde_json::json!(true),
+        },
+        SettingEntry {
+            key: "web_search.language".into(),
+            label: "语言偏好".into(),
+            description: "搜索结果语言（如 zh-CN / en / ja），空表示不限定".into(),
+            layer: SettingLayer::Expert,
+            group: "网络搜索".into(),
+            control: SettingControl::String,
+            default_value: serde_json::json!(""),
+        },
+        // SearXNG 配置
+        SettingEntry {
+            key: "web_search.searxng.base_url".into(),
+            label: "SearXNG 地址".into(),
+            description: "SearXNG 实例 URL（如 http://localhost:8080）".into(),
+            layer: SettingLayer::Advanced,
+            group: "网络搜索-SearXNG".into(),
+            control: SettingControl::String,
+            default_value: serde_json::json!(""),
+        },
+        SettingEntry {
+            key: "web_search.searxng.auth_token".into(),
+            label: "SearXNG Token".into(),
+            description: "受保护实例的访问 token（可选）".into(),
+            layer: SettingLayer::Expert,
+            group: "网络搜索-SearXNG".into(),
+            control: SettingControl::Password,
+            default_value: serde_json::json!(""),
+        },
+        // Tavily 配置
+        SettingEntry {
+            key: "web_search.tavily.api_key".into(),
+            label: "Tavily API Key".into(),
+            description: "Tavily API Key（https://tavily.com 注册，免费 1000 次/月）".into(),
+            layer: SettingLayer::Advanced,
+            group: "网络搜索-Tavily".into(),
+            control: SettingControl::Password,
+            default_value: serde_json::json!(""),
+        },
+        SettingEntry {
+            key: "web_search.tavily.include_raw_content".into(),
+            label: "返回原文".into(),
+            description: "Tavily 是否返回原文摘录（true）还是仅摘要（false）".into(),
+            layer: SettingLayer::Expert,
+            group: "网络搜索-Tavily".into(),
+            control: SettingControl::Boolean,
+            default_value: serde_json::json!(true),
+        },
+        SettingEntry {
+            key: "web_search.tavily.search_depth".into(),
+            label: "搜索深度".into(),
+            description: "basic（快速）/ advanced（更全面但更慢，多消耗 1 credit）".into(),
+            layer: SettingLayer::Expert,
+            group: "网络搜索-Tavily".into(),
+            control: SettingControl::Select {
+                options: vec!["basic".into(), "advanced".into()],
+            },
+            default_value: serde_json::json!("basic"),
+        },
+        // ========== 专家层 ==========
+        SettingEntry {
+            key: "memory.embedding.enabled".into(),
+            label: "向量检索".into(),
+            description: "启用 embedding 向量检索".into(),
+            layer: SettingLayer::Expert,
+            group: "记忆-向量".into(),
+            control: SettingControl::Boolean,
+            default_value: serde_json::json!(false),
+        },
+        SettingEntry {
+            key: "memory.embedding.dimension".into(),
+            label: "向量维度".into(),
+            description: "Embedding 向量维度（需与模型匹配）".into(),
+            layer: SettingLayer::Expert,
+            group: "记忆-向量".into(),
+            control: SettingControl::Integer,
+            default_value: serde_json::json!(1536),
+        },
+        SettingEntry {
+            key: "memory.retrieval_weights.recency".into(),
+            label: "时间衰减权重".into(),
+            description: "检索时时间衰减项权重".into(),
+            layer: SettingLayer::Expert,
+            group: "记忆-权重".into(),
+            control: SettingControl::Number,
+            default_value: serde_json::json!(0.2),
+        },
+        SettingEntry {
+            key: "memory.retrieval_weights.relevance".into(),
+            label: "相关性权重".into(),
+            description: "检索时语义相关性项权重".into(),
+            layer: SettingLayer::Expert,
+            group: "记忆-权重".into(),
+            control: SettingControl::Number,
+            default_value: serde_json::json!(0.5),
+        },
+        SettingEntry {
+            key: "memory.retrieval_weights.importance".into(),
+            label: "重要性权重".into(),
+            description: "检索时重要性项权重".into(),
+            layer: SettingLayer::Expert,
+            group: "记忆-权重".into(),
+            control: SettingControl::Number,
+            default_value: serde_json::json!(0.3),
+        },
+        SettingEntry {
+            key: "tools.cache_ttl_secs".into(),
+            label: "工具缓存TTL".into(),
+            description: "工具调用结果缓存过期时间（秒）".into(),
+            layer: SettingLayer::Expert,
+            group: "工具-缓存".into(),
+            control: SettingControl::Integer,
+            default_value: serde_json::json!(300),
+        },
+        SettingEntry {
+            key: "tools.cache_max_size".into(),
+            label: "缓存上限".into(),
+            description: "工具调用结果缓存最大条数".into(),
+            layer: SettingLayer::Expert,
+            group: "工具-缓存".into(),
+            control: SettingControl::Integer,
+            default_value: serde_json::json!(100),
+        },
+        SettingEntry {
+            key: "proactive.tick_interval".into(),
+            label: "主动tick间隔".into(),
+            description: "主动对话检测循环间隔（秒）".into(),
+            layer: SettingLayer::Expert,
+            group: "主动对话".into(),
+            control: SettingControl::Integer,
+            default_value: serde_json::json!(30),
+        },
+        SettingEntry {
+            key: "world.weather_cache_ttl_secs".into(),
+            label: "天气缓存TTL".into(),
+            description: "天气数据缓存过期时间（秒）".into(),
+            layer: SettingLayer::Expert,
+            group: "世界".into(),
+            control: SettingControl::Integer,
+            default_value: serde_json::json!(3600),
+        },
+        SettingEntry {
+            key: "ai.max_tokens".into(),
+            label: "最大Token".into(),
+            description: "单次回复最大 token 数".into(),
+            layer: SettingLayer::Expert,
+            group: "AI 模型".into(),
+            control: SettingControl::Integer,
+            default_value: serde_json::json!(2048),
+        },
+        SettingEntry {
+            key: "ai.enable_vision".into(),
+            label: "视觉理解".into(),
+            description: "启用多模态图片理解".into(),
+            layer: SettingLayer::Expert,
+            group: "AI 模型".into(),
+            control: SettingControl::Boolean,
+            default_value: serde_json::json!(false),
+        },
+    ]
+}

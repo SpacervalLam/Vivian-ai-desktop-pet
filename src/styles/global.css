@@ -1,0 +1,596 @@
+/* ===== CSS Reset ===== */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  height: 100%;
+  background: transparent !important;
+}
+
+ul,
+ol {
+  list-style: none;
+}
+
+button {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+}
+
+button:active:not(:disabled) {
+  transform: translateY(1px);
+  filter: brightness(0.92);
+}
+
+input,
+textarea {
+  font: inherit;
+  color: inherit;
+  outline: none;
+  border: none;
+  background: none;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+img {
+  display: block;
+  max-width: 100%;
+}
+
+/* ===== Base ===== */
+body {
+  background: transparent;
+  margin: 0;
+  overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
+  font-family: system-ui, -apple-system, 'Microsoft YaHei', 'Segoe UI', sans-serif;
+  color: var(--text-primary);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+#root {
+  position: relative;
+}
+
+/* ===== Theme Variables ===== */
+:root {
+  --accent: #6c5ce7;
+  --bg-overlay: rgba(30, 30, 40, 0.95);
+  --text-primary: #ffffff;
+  --text-secondary: rgba(255, 255, 255, 0.65);
+  --text-tertiary: rgba(255, 255, 255, 0.4);
+  --separator: rgba(255, 255, 255, 0.1);
+  --error: #ff6b6b;
+  --success: #51cf66;
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 16px;
+  --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.35);
+  --shadow-lg: 0 16px 48px rgba(0, 0, 0, 0.45);
+}
+
+/* ===== 微信聊天窗口主题变量（深色默认，跟随系统浅色切换） ===== */
+:root {
+  --wx-bg: #111111;
+  --wx-bg-surface: #1C1C1E;
+  --wx-bg-elevated: #2C2C2E;
+  --wx-bg-hover: rgba(255, 255, 255, 0.04);
+  --wx-bg-active: rgba(255, 255, 255, 0.08);
+  --wx-text: #E7E7E7;
+  --wx-text-secondary: rgba(255, 255, 255, 0.4);
+  --wx-text-tertiary: rgba(255, 255, 255, 0.3);
+  --wx-icon: #8C8C8C;
+  --wx-border: rgba(255, 255, 255, 0.08);
+  --wx-border-light: rgba(255, 255, 255, 0.04);
+  --wx-search-bg: rgba(255, 255, 255, 0.06);
+  --wx-bubble-user: #95EC69;
+  --wx-bubble-user-text: #000000;
+  --wx-bubble-ai: #3D3D3D;
+  --wx-bubble-ai-hover: #3A3A3A;
+  --wx-bubble-ai-text: #E7E7E7;
+  --wx-bubble-error: #3D2222;
+  --wx-input-bg: #2C2C2E;
+  --wx-phone-border: rgba(255, 255, 255, 0.18);
+  --wx-shadow: rgba(0, 0, 0, 0.2);
+  --wx-code-bg: #1F1F1F;
+  --wx-code-inline: #FF6B8A;
+  --wx-home-indicator: rgba(255, 255, 255, 0.3);
+  --wx-overlay: rgba(0, 0, 0, 0.5);
+  --wx-placeholder: #8C8C8C;
+  --wx-cursor: #E7E7E7;
+  --wx-thinking: #8e8e93;
+  --wx-menu-shadow: rgba(0, 0, 0, 0.5);
+  --wx-recording-bg: rgba(255, 69, 58, 0.14);
+  --wx-recording-bg-hover: rgba(255, 69, 58, 0.2);
+  --wx-btn-disabled: #3A3A3C;
+  --wx-menu-bg: rgba(40, 40, 40, 0.92);
+  --wx-pill-bg: #3A3A3C;
+  --wx-pill-text: #D0D0D0;
+}
+
+/* 跟随系统浅色（data-theme="dark" 强制深色时跳过；两个浅色块须保持同步） */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --wx-bg: #EDEDED;
+    --wx-bg-surface: #F7F7F7;
+    --wx-bg-elevated: #FFFFFF;
+    --wx-bg-hover: rgba(0, 0, 0, 0.04);
+    --wx-bg-active: rgba(0, 0, 0, 0.08);
+    --wx-text: #111111;
+    --wx-text-secondary: rgba(0, 0, 0, 0.4);
+    --wx-text-tertiary: rgba(0, 0, 0, 0.3);
+    --wx-icon: #666666;
+    --wx-border: rgba(0, 0, 0, 0.08);
+    --wx-border-light: rgba(0, 0, 0, 0.04);
+    --wx-search-bg: rgba(0, 0, 0, 0.05);
+    --wx-bubble-user: #95EC69;
+    --wx-bubble-user-text: #000000;
+    --wx-bubble-ai: #FFFFFF;
+    --wx-bubble-ai-hover: #F2F2F2;
+    --wx-bubble-ai-text: #111111;
+    --wx-bubble-error: #FFF0F0;
+    --wx-input-bg: #FFFFFF;
+    --wx-phone-border: rgba(0, 0, 0, 0.12);
+    --wx-shadow: rgba(0, 0, 0, 0.06);
+    --wx-code-bg: #F5F5F5;
+    --wx-code-inline: #E01E5A;
+    --wx-home-indicator: rgba(0, 0, 0, 0.2);
+    --wx-overlay: rgba(0, 0, 0, 0.3);
+    --wx-placeholder: #999999;
+    --wx-cursor: #111111;
+    --wx-thinking: #999999;
+    --wx-menu-shadow: rgba(0, 0, 0, 0.15);
+    --wx-recording-bg: rgba(255, 69, 58, 0.1);
+    --wx-recording-bg-hover: rgba(255, 69, 58, 0.16);
+    --wx-btn-disabled: #D1D1D6;
+    --wx-menu-bg: rgba(255, 255, 255, 0.92);
+    --wx-pill-bg: #D6D6D6;
+    --wx-pill-text: #111111;
+  }
+}
+
+/* 强制浅色（设置中选择"浅色"时由 JS 设置 data-theme="light"） */
+:root[data-theme="light"] {
+  --wx-bg: #EDEDED;
+  --wx-bg-surface: #F7F7F7;
+  --wx-bg-elevated: #FFFFFF;
+  --wx-bg-hover: rgba(0, 0, 0, 0.04);
+  --wx-bg-active: rgba(0, 0, 0, 0.08);
+  --wx-text: #111111;
+  --wx-text-secondary: rgba(0, 0, 0, 0.4);
+  --wx-text-tertiary: rgba(0, 0, 0, 0.3);
+  --wx-icon: #666666;
+  --wx-border: rgba(0, 0, 0, 0.08);
+  --wx-border-light: rgba(0, 0, 0, 0.04);
+  --wx-search-bg: rgba(0, 0, 0, 0.05);
+  --wx-bubble-user: #95EC69;
+  --wx-bubble-user-text: #000000;
+  --wx-bubble-ai: #FFFFFF;
+  --wx-bubble-ai-hover: #F2F2F2;
+  --wx-bubble-ai-text: #111111;
+  --wx-bubble-error: #FFF0F0;
+  --wx-input-bg: #FFFFFF;
+  --wx-phone-border: rgba(0, 0, 0, 0.12);
+  --wx-shadow: rgba(0, 0, 0, 0.06);
+  --wx-code-bg: #F5F5F5;
+  --wx-code-inline: #E01E5A;
+  --wx-home-indicator: rgba(0, 0, 0, 0.2);
+  --wx-overlay: rgba(0, 0, 0, 0.3);
+  --wx-placeholder: #999999;
+  --wx-cursor: #111111;
+  --wx-thinking: #999999;
+  --wx-menu-shadow: rgba(0, 0, 0, 0.15);
+  --wx-recording-bg: rgba(255, 69, 58, 0.1);
+  --wx-recording-bg-hover: rgba(255, 69, 58, 0.16);
+  --wx-btn-disabled: #D1D1D6;
+  --wx-menu-bg: rgba(255, 255, 255, 0.92);
+  --wx-pill-bg: #D6D6D6;
+  --wx-pill-text: #111111;
+}
+
+/* ===== 设置 / 笔记本面板主题变量（深色默认） ===== */
+:root {
+  --panel-bg: #1A1A1E;
+  --panel-surface: #242428;
+  --panel-elevated: #2C2C30;
+  --panel-bg-hover: rgba(255, 255, 255, 0.04);
+  --panel-bg-active: rgba(255, 255, 255, 0.08);
+  --panel-bg-surface: rgba(255, 255, 255, 0.03);
+  --panel-bg-surface-elevated: rgba(255, 255, 255, 0.06);
+  --panel-bar-bg: rgba(255, 255, 255, 0.05);
+  --panel-text: #E7E7E7;
+  --panel-text-secondary: rgba(255, 255, 255, 0.55);
+  --panel-text-tertiary: rgba(255, 255, 255, 0.35);
+  --panel-text-quaternary: rgba(255, 255, 255, 0.22);
+  --panel-accent: #E7E7E7;
+  --panel-accent-bright: #FFFFFF;
+  --panel-accent-muted: rgba(255, 255, 255, 0.08);
+  --panel-accent-soft: rgba(255, 255, 255, 0.04);
+  --panel-border: rgba(255, 255, 255, 0.12);
+  --panel-border-hover: rgba(255, 255, 255, 0.22);
+  --panel-border-light: rgba(255, 255, 255, 0.06);
+  --panel-border-strong: #E7E7E7;
+  --panel-toggle-off: #3A3A3C;
+  --panel-tag-bg: #2C2C30;
+  --panel-danger: #FF6B6B;
+  --panel-success: #51CF66;
+  --panel-warning: #FFB74D;
+  --panel-info: #64B5F6;
+  --panel-shadow-subtle: 0 1px 2px rgba(0, 0, 0, 0.3), 0 1px 3px rgba(0, 0, 0, 0.2);
+  --panel-shadow-card: 0 2px 8px rgba(0, 0, 0, 0.35), 0 1px 2px rgba(0, 0, 0, 0.2);
+  --panel-shadow-elevated: 0 8px 24px rgba(0, 0, 0, 0.45), 0 2px 6px rgba(0, 0, 0, 0.3);
+  --panel-dots: rgba(255, 255, 255, 0.05);
+  --panel-selected-bg: #E7E7E7;
+  --panel-selected-text: #1A1A1E;
+  --panel-input-bg: #2C2C30;
+  --panel-overlay: rgba(0, 0, 0, 0.6);
+  --panel-scrollbar: rgba(255, 255, 255, 0.12);
+  --panel-scrollbar-hover: rgba(255, 255, 255, 0.22);
+  --panel-sidebar-bg: rgba(44, 44, 48, 0.85);
+  --panel-sidebar-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+  --panel-subtle-bg: rgba(255, 255, 255, 0.04);
+  --panel-subtle-border: rgba(255, 255, 255, 0.08);
+  --panel-grid-line: rgba(255, 255, 255, 0.06);
+  --panel-axis-line: rgba(255, 255, 255, 0.12);
+}
+
+/* 面板浅色：跟随系统 */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --panel-bg: #FAF8F5;
+    --panel-surface: #FFFFFF;
+    --panel-elevated: #FFFFFF;
+    --panel-bg-hover: rgba(0, 0, 0, 0.04);
+    --panel-bg-active: rgba(0, 0, 0, 0.08);
+    --panel-bg-surface: rgba(0, 0, 0, 0.03);
+    --panel-bg-surface-elevated: rgba(0, 0, 0, 0.05);
+    --panel-bar-bg: rgba(255, 255, 255, 0.6);
+    --panel-text: #2C2C2C;
+    --panel-text-secondary: #6B6B6B;
+    --panel-text-tertiary: #9E9E9E;
+    --panel-text-quaternary: #BDBDBD;
+    --panel-accent: #2C2C2C;
+    --panel-accent-bright: #1A1A1A;
+    --panel-accent-muted: rgba(0, 0, 0, 0.08);
+    --panel-accent-soft: rgba(0, 0, 0, 0.04);
+    --panel-border: #E0DCD6;
+    --panel-border-hover: #C0BCB6;
+    --panel-border-light: #ECEAE6;
+    --panel-border-strong: #2C2C2C;
+    --panel-toggle-off: #E0DCD6;
+    --panel-tag-bg: #F5F5F5;
+    --panel-danger: #E53935;
+    --panel-success: #4CAF50;
+    --panel-warning: #FF9800;
+    --panel-info: #2196F3;
+    --panel-shadow-subtle: 0 1px 2px rgba(0, 0, 0, 0.06), 0 1px 3px rgba(0, 0, 0, 0.04);
+    --panel-shadow-card: 0 2px 8px rgba(0, 0, 0, 0.08), 0 1px 2px rgba(0, 0, 0, 0.04);
+    --panel-shadow-elevated: 0 8px 24px rgba(0, 0, 0, 0.10), 0 2px 6px rgba(0, 0, 0, 0.06);
+    --panel-dots: #D9D5CF;
+    --panel-selected-bg: #2C2C2C;
+    --panel-selected-text: #FFFFFF;
+    --panel-input-bg: #FFFFFF;
+    --panel-overlay: rgba(0, 0, 0, 0.3);
+    --panel-scrollbar: rgba(0, 0, 0, 0.12);
+    --panel-scrollbar-hover: rgba(0, 0, 0, 0.22);
+    --panel-sidebar-bg: rgba(255, 255, 255, 0.85);
+    --panel-sidebar-shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
+    --panel-subtle-bg: rgba(0, 0, 0, 0.04);
+    --panel-subtle-border: rgba(0, 0, 0, 0.08);
+    --panel-grid-line: rgba(0, 0, 0, 0.06);
+    --panel-axis-line: rgba(0, 0, 0, 0.12);
+  }
+}
+
+/* 面板浅色：强制 */
+:root[data-theme="light"] {
+  --panel-bg: #FAF8F5;
+  --panel-surface: #FFFFFF;
+  --panel-elevated: #FFFFFF;
+  --panel-bg-hover: rgba(0, 0, 0, 0.04);
+  --panel-bg-active: rgba(0, 0, 0, 0.08);
+  --panel-bg-surface: rgba(0, 0, 0, 0.03);
+  --panel-bg-surface-elevated: rgba(0, 0, 0, 0.05);
+  --panel-bar-bg: rgba(255, 255, 255, 0.6);
+  --panel-text: #2C2C2C;
+  --panel-text-secondary: #6B6B6B;
+  --panel-text-tertiary: #9E9E9E;
+  --panel-text-quaternary: #BDBDBD;
+  --panel-accent: #2C2C2C;
+  --panel-accent-bright: #1A1A1A;
+  --panel-accent-muted: rgba(0, 0, 0, 0.08);
+  --panel-accent-soft: rgba(0, 0, 0, 0.04);
+  --panel-border: #E0DCD6;
+  --panel-border-hover: #C0BCB6;
+  --panel-border-light: #ECEAE6;
+  --panel-border-strong: #2C2C2C;
+  --panel-toggle-off: #E0DCD6;
+  --panel-tag-bg: #F5F5F5;
+  --panel-danger: #E53935;
+  --panel-success: #4CAF50;
+  --panel-warning: #FF9800;
+  --panel-info: #2196F3;
+  --panel-shadow-subtle: 0 1px 2px rgba(0, 0, 0, 0.06), 0 1px 3px rgba(0, 0, 0, 0.04);
+  --panel-shadow-card: 0 2px 8px rgba(0, 0, 0, 0.08), 0 1px 2px rgba(0, 0, 0, 0.04);
+  --panel-shadow-elevated: 0 8px 24px rgba(0, 0, 0, 0.10), 0 2px 6px rgba(0, 0, 0, 0.06);
+  --panel-dots: #D9D5CF;
+  --panel-selected-bg: #2C2C2C;
+  --panel-selected-text: #FFFFFF;
+  --panel-input-bg: #FFFFFF;
+  --panel-overlay: rgba(0, 0, 0, 0.3);
+  --panel-scrollbar: rgba(0, 0, 0, 0.12);
+  --panel-scrollbar-hover: rgba(0, 0, 0, 0.22);
+  --panel-sidebar-bg: rgba(255, 255, 255, 0.85);
+  --panel-sidebar-shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
+  --panel-subtle-bg: rgba(0, 0, 0, 0.04);
+  --panel-subtle-border: rgba(0, 0, 0, 0.08);
+  --panel-grid-line: rgba(0, 0, 0, 0.06);
+  --panel-axis-line: rgba(0, 0, 0, 0.12);
+}
+
+/* ===== 图谱可视化主题变量（深色默认） ===== */
+:root {
+  --graph-paper: #1E1E22;
+  --graph-card: #2A2A2E;
+  --graph-ink: #E0E0E0;
+  --graph-ink-soft: #8A8A8E;
+  --graph-ink-faint: rgba(224, 224, 224, 0.12);
+  --graph-stamp-red: #E05550;
+  --graph-grid: rgba(100, 140, 180, 0.10);
+  --graph-card-92: rgba(42, 42, 46, 0.92);
+  --graph-card-50: rgba(42, 42, 46, 0.5);
+  --graph-ink-25: rgba(224, 224, 224, 0.25);
+  --graph-ink-30: rgba(224, 224, 224, 0.3);
+  --graph-stamp-85: rgba(224, 85, 80, 0.85);
+  --graph-pastel-target: 35, 35, 40;
+  --graph-shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.4);
+  --graph-shadow-md: 0 2px 8px rgba(0, 0, 0, 0.45);
+  --graph-shadow-lg: 0 3px 14px rgba(0, 0, 0, 0.5);
+  --graph-border: rgba(255, 255, 255, 0.18);
+  --graph-line: rgba(122, 158, 199, 0.15);
+}
+
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --graph-paper: #F8F3E7;
+    --graph-card: #FFFDF6;
+    --graph-ink: #3B3428;
+    --graph-ink-soft: #8A7F6C;
+    --graph-ink-faint: rgba(59, 52, 40, 0.14);
+    --graph-stamp-red: #C9403A;
+    --graph-grid: rgba(122, 158, 199, 0.18);
+    --graph-card-92: rgba(255, 253, 246, 0.92);
+    --graph-card-50: rgba(255, 253, 246, 0.5);
+    --graph-ink-25: rgba(59, 52, 40, 0.25);
+    --graph-ink-30: rgba(59, 52, 40, 0.3);
+    --graph-stamp-85: rgba(201, 64, 58, 0.85);
+    --graph-pastel-target: 250, 245, 235;
+    --graph-shadow-sm: 0 1px 3px rgba(59, 52, 40, 0.12);
+    --graph-shadow-md: 0 2px 8px rgba(59, 52, 40, 0.12);
+    --graph-shadow-lg: 0 3px 14px rgba(59, 52, 40, 0.10);
+    --graph-border: rgba(59, 52, 40, 0.22);
+    --graph-line: rgba(122, 158, 199, 0.22);
+  }
+}
+
+:root[data-theme="light"] {
+  --graph-paper: #F8F3E7;
+  --graph-card: #FFFDF6;
+  --graph-ink: #3B3428;
+  --graph-ink-soft: #8A7F6C;
+  --graph-ink-faint: rgba(59, 52, 40, 0.14);
+  --graph-stamp-red: #C9403A;
+  --graph-grid: rgba(122, 158, 199, 0.18);
+  --graph-card-92: rgba(255, 253, 246, 0.92);
+  --graph-card-50: rgba(255, 253, 246, 0.5);
+  --graph-ink-25: rgba(59, 52, 40, 0.25);
+  --graph-ink-30: rgba(59, 52, 40, 0.3);
+  --graph-stamp-85: rgba(201, 64, 58, 0.85);
+  --graph-pastel-target: 250, 245, 235;
+  --graph-shadow-sm: 0 1px 3px rgba(59, 52, 40, 0.12);
+  --graph-shadow-md: 0 2px 8px rgba(59, 52, 40, 0.12);
+  --graph-shadow-lg: 0 3px 14px rgba(59, 52, 40, 0.10);
+  --graph-border: rgba(59, 52, 40, 0.22);
+  --graph-line: rgba(122, 158, 199, 0.22);
+}
+
+/* ===== 手帐风格（Scrapbook）工具类 ===== */
+.scrapbook {
+  --sb-bg: var(--panel-bg);
+  --sb-bg-card: var(--panel-surface);
+  --sb-bg-header: var(--panel-elevated);
+  --sb-text: var(--panel-text);
+  --sb-text-secondary: var(--panel-text-secondary);
+  --sb-text-tertiary: var(--panel-text-tertiary);
+  --sb-border: var(--panel-border-strong);
+  --sb-border-light: var(--panel-border);
+  --sb-accent: #4CAF50;
+  --sb-accent-warm: #E85913;
+  --sb-error: var(--panel-danger);
+  --sb-warning: var(--panel-warning);
+  --sb-tag-yellow: #FFF8E1;
+  --sb-tag-green: #E8F5E9;
+  --sb-tag-gray: var(--panel-tag-bg);
+  --sb-tag-blue: #E3F2FD;
+  --sb-shadow: var(--panel-shadow-card);
+  --text-primary: var(--panel-text);
+  --text-secondary: var(--panel-text-secondary);
+  --text-tertiary: var(--panel-text-tertiary);
+  --separator: var(--panel-border);
+  --accent: #4CAF50;
+}
+
+.scrapbook-bg {
+  background-color: var(--panel-bg);
+  background-image: radial-gradient(circle, var(--panel-dots) 1px, transparent 1px);
+  background-size: 20px 20px;
+}
+
+.scrapbook-card {
+  background: var(--panel-surface);
+  border: 1.5px solid var(--panel-border-strong);
+  border-radius: 12px;
+  box-shadow: var(--panel-shadow-card);
+}
+
+.scrapbook .vivian-scroll::-webkit-scrollbar { width: 6px; }
+.scrapbook .vivian-scroll::-webkit-scrollbar-track { background: transparent; }
+.scrapbook .vivian-scroll::-webkit-scrollbar-thumb { background: var(--panel-scrollbar); border-radius: 3px; }
+.scrapbook .vivian-scroll::-webkit-scrollbar-thumb:hover { background: var(--panel-scrollbar-hover); }
+
+/* ===== 标题行附件区域：水平滚动但隐藏滚动条 ===== */
+.title-accessory-scroll::-webkit-scrollbar {
+  display: none;
+}
+
+/* ===== Custom Scrollbar（精细 6px，悬停反馈） ===== */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.10);
+  border-radius: 3px;
+  transition: background 0.2s ease;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.22);
+}
+
+::-webkit-scrollbar-thumb:active {
+  background: rgba(255, 255, 255, 0.32);
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+.no-scrollbar {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+/* ===== 隐藏 number 输入框的 spinner ===== */
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+input[type="number"] {
+  -moz-appearance: textfield;
+}
+
+/* ===== Animations ===== */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes slideUp {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes mind-inspector-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes mind-inspector-scale-in {
+  from {
+    opacity: 0;
+    transform: scale(0.4);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes mind-inspector-fade-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+@keyframes mind-inspector-scale-out {
+  from {
+    opacity: 1;
+    transform: scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: scale(0.4);
+  }
+}
+
+@keyframes mind-inspector-ripple {
+  0% {
+    transform: translate(-50%, -50%) scale(0);
+    opacity: 0.4;
+  }
+  100% {
+    transform: translate(-50%, -50%) scale(1);
+    opacity: 0;
+  }
+}
+
+.fade-in {
+  animation: fadeIn 0.22s ease-out both;
+}
+
+.slide-up {
+  animation: slideUp 0.26s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+/* ===== Marquee / 跑马灯滚动文字 ===== */
+@keyframes marquee-loop {
+  0% { transform: translateX(0); }
+  100% { transform: translateX(-50%); }
+}
+
+.marquee-pause:hover {
+  animation-play-state: paused;
+}

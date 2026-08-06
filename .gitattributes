@@ -1,0 +1,43 @@
+# 默认：文本文件统一 LF 行尾，确保跨平台协作一致
+* text=lf eol=lf
+
+# Windows 专用脚本保留 CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# 源代码统一 LF
+*.rs text eol=lf
+*.ts text eol=lf
+*.tsx text eol=lf
+*.js text eol=lf
+*.jsx text eol=lf
+*.json text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.toml text eol=lf
+*.html text eol=lf
+*.css text eol=lf
+*.md text eol=lf
+
+# 二进制文件：不做行尾转换，避免损坏
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.moc3 binary
+*.can3 binary
+*.dll binary
+*.exe binary
+*.lib binary
+*.pdb binary
+*.zip binary
+*.gz binary
+
+# 语言统计（GitHub Linguist）
+# Live2D 模型与贴图不计入语言占比
+public/Vivian/**/*.png linguist-vendored
+public/Vivian/**/*.moc3 linguist-vendored
+src-tauri/gen/** linguist-generated
+dist/** linguist-generated

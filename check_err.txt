@@ -1,0 +1,28 @@
+    Checking vivian v1.0.0 (G:\vivian-rs\src-tauri)
+error: future cannot be sent between threads safely
+   --> src\speech\whisper_service.rs:215:9
+    |
+215 | /         tokio::spawn(async move {
+216 | |             mgr.wait_for_health(endpoint, port).await;
+217 | |         });
+    | |__________^ future created by async block is not `Send`
+    |
+    = help: within `{async block@src\speech\whisper_service.rs:215:22: 215:32}`, the trait `std::marker::Send` is not implemented for `*mut ()`
+note: future is not `Send` as this value is used across an await
+   --> src\speech\whisper_service.rs:305:64
+    |
+298 |                     let mut s = self.state.lock();
+    |                         ----- has type `parking_lot::lock_api::MutexGuard<'_, parking_lot::RawMutex, InnerState>` which is not `Send`
+...
+305 |                     if let Some(mut child) = self.child.lock().await.take() {
+    |                                                                ^^^^^ await occurs here, with `mut s` maybe used later
+note: required by a bound in `tokio::spawn`
+   --> C:\Users\86139\.cargo\registry\src\rsproxy.cn-e3de039b2554c837\tokio-1.53.0\src\task\spawn.rs:176:21
+    |
+174 |     pub fn spawn<F>(future: F) -> JoinHandle<F::Output>
+    |            ----- required by a bound in this function
+175 |     where
+176 |         F: Future + Send + 'static,
+    |                     ^^^^ required by this bound in `spawn`
+
+error: could not compile `vivian` (lib) due to 1 previous error

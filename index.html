@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Vivian</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link id="font-stylesheet" rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Ma+Shan+Zheng&family=Dancing+Script:wght@400;500;600;700&family=Hachi+Maru+Pop&family=Caveat:wght@400;500;600;700&display=swap">
+    <script>
+      (function () {
+        var sources = [
+          'https://fonts.googleapis.cn/css2?family=Ma+Shan+Zheng&family=Dancing+Script:wght@400;500;600;700&family=Hachi+Maru+Pop&family=Caveat:wght@400;500;600;700&display=swap',
+          'https://fonts.loli.net/css2?family=Ma+Shan+Zheng&family=Dancing+Script:wght@400;500;600;700&family=Hachi+Maru+Pop&family=Caveat:wght@400;500;600;700&display=swap'
+        ];
+        var currentIndex = 0;
+        var link = document.getElementById('font-stylesheet');
+        
+        var tryNext = function() {
+          if (currentIndex >= sources.length) return;
+          link.onerror = function() {
+            currentIndex++;
+            tryNext();
+          };
+          link.onload = function() {};
+          link.href = sources[currentIndex];
+        };
+        
+        link.onerror = function() {
+          tryNext();
+        };
+      })();
+    </script>
+    <script>
+      // 在 React 渲染前确定窗口透明性：
+      // 主窗口、状态面板、聊天窗口使用透明窗口；
+      // chat 窗口 transparent:true + 容器 borderRadius:56，需 body 透明才能露出圆角外桌面。
+      // 其余子窗口（config/memory/diary）保持不透明深色背景，避免渲染前白屏闪烁。
+      (function () {
+        try {
+          var view = new URLSearchParams(window.location.search).get('view');
+          if (view === null || view === 'status' || view === 'chat' || view === 'side_chat') {
+            document.documentElement.classList.add('is-transparent');
+          }
+        } catch (e) {}
+      })();
+    </script>
+    <style>
+      html, body { background: #1e1e28; }
+      html.is-transparent, html.is-transparent body { background: transparent; }
+    </style>
+    <script type="module" src="/src/main.tsx"></script>
+  </head>
+  <body>
+    <div id="root"></div>
+  </body>
+</html>

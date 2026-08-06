@@ -1,0 +1,546 @@
+{
+  "display_name": "Nana",
+  "model_file": "Vivian.model3.json",
+  "expressions": [
+    {
+      "semantic": "star_eyes",
+      "name": "star_eyes",
+      "label": "Star Eyes",
+      "category": "emotion"
+    },
+    {
+      "semantic": "shy",
+      "name": "shy",
+      "label": "Shy",
+      "category": "emotion"
+    },
+    {
+      "semantic": "blush_intense",
+      "name": "blush_intense",
+      "label": "Deep Blush",
+      "category": "emotion"
+    },
+    {
+      "semantic": "dark_face",
+      "name": "dark_face",
+      "label": "Dark Face",
+      "category": "emotion"
+    },
+    {
+      "semantic": "cry",
+      "name": "cry",
+      "label": "Tears",
+      "category": "emotion"
+    },
+    {
+      "semantic": "pupil_color",
+      "name": "pupil_color",
+      "label": "Pupil Color",
+      "category": "emotion"
+    },
+    {
+      "semantic": "confused",
+      "name": "confused",
+      "label": "Confused",
+      "category": "emotion"
+    },
+    {
+      "semantic": "confused_intense",
+      "name": "confused_intense",
+      "label": "Very Confused",
+      "category": "emotion"
+    },
+    {
+      "semantic": "sweat",
+      "name": "sweat",
+      "label": "Sweat",
+      "category": "emotion"
+    },
+    {
+      "semantic": "speechless",
+      "name": "speechless",
+      "label": "Speechless",
+      "category": "emotion"
+    },
+    {
+      "semantic": "money_eyes",
+      "name": "money_eyes",
+      "label": "Money Eyes",
+      "category": "emotion"
+    },
+    {
+      "semantic": "love_eyes",
+      "name": "love_eyes",
+      "label": "Love Eyes",
+      "category": "emotion"
+    },
+    {
+      "semantic": "rinnegan",
+      "name": "rinnegan",
+      "label": "Rinnegan",
+      "category": "emotion"
+    },
+    {
+      "semantic": "blank_eyes",
+      "name": "blank_eyes",
+      "label": "Blank Eyes",
+      "category": "emotion"
+    },
+    {
+      "semantic": "tongue_out",
+      "name": "tongue_out",
+      "label": "Tongue Out",
+      "category": "emotion"
+    },
+    {
+      "semantic": "pout",
+      "name": "pout",
+      "label": "Pout",
+      "category": "emotion"
+    },
+    {
+      "semantic": "puff_cheek",
+      "name": "puff_cheek",
+      "label": "Puff Cheek",
+      "category": "emotion"
+    },
+    {
+      "semantic": "star_aura",
+      "name": "star_aura",
+      "label": "Star Aura",
+      "category": "emotion"
+    },
+    {
+      "semantic": "angry",
+      "name": "angry",
+      "label": "Angry",
+      "category": "emotion"
+    },
+    {
+      "semantic": "long_hair",
+      "name": "long_hair",
+      "label": "Long Hair",
+      "category": "appearance"
+    },
+    {
+      "semantic": "twin_tails",
+      "name": "twin_tails",
+      "label": "Twin Tails",
+      "category": "appearance"
+    },
+    {
+      "semantic": "ear_drop",
+      "name": "ear_drop",
+      "label": "Ear Drop",
+      "category": "action"
+    },
+    {
+      "semantic": "mirror",
+      "name": "mirror",
+      "label": "Mirror",
+      "category": "action"
+    },
+    {
+      "semantic": "fox",
+      "name": "fox",
+      "label": "Fox",
+      "category": "action"
+    },
+    {
+      "semantic": "notebook",
+      "name": "notebook",
+      "label": "Notebook",
+      "category": "action"
+    },
+    {
+      "semantic": "notebook2",
+      "name": "notebook2",
+      "label": "Notebook 2",
+      "category": "action"
+    },
+    {
+      "semantic": "gaming",
+      "name": "gaming",
+      "label": "Gaming",
+      "category": "action"
+    },
+    {
+      "semantic": "hold_fox",
+      "name": "hold_fox",
+      "label": "Hold Fox",
+      "category": "action"
+    },
+    {
+      "semantic": "fan",
+      "name": "fan",
+      "label": "Fan",
+      "category": "action"
+    },
+    {
+      "semantic": "microphone",
+      "name": "microphone",
+      "label": "Microphone",
+      "category": "action"
+    },
+    {
+      "semantic": "heart_hands",
+      "name": "heart_hands",
+      "label": "Heart Hands",
+      "category": "action"
+    }
+  ],
+  "aliases": {
+    "normal": "star_eyes",
+    "neutral": "star_eyes",
+    "default": "star_eyes",
+    "idle": "star_eyes",
+    "standard": "star_eyes",
+    "smile": "star_eyes",
+    "happy": "star_eyes",
+    "excited": "star_aura",
+    "sleepy": "blank_eyes",
+    "tired": "blank_eyes",
+    "bored": "puff_cheek",
+    "yawn": "tongue_out",
+    "sleep": "blank_eyes",
+    "asleep": "blank_eyes",
+    "blush": "shy",
+    "embarrassed": "shy",
+    "shy": "shy",
+    "sad": "cry",
+    "tears": "cry",
+    "cry": "cry",
+    "question": "confused",
+    "question_mark": "confused",
+    "confused": "confused",
+    "annoyed": "speechless",
+    "speechless": "speechless",
+    "sweat": "sweat",
+    "nervous": "sweat",
+    "anxious": "sweat",
+    "dollar_eyes": "money_eyes",
+    "money": "money_eyes",
+    "heart": "love_eyes",
+    "love": "love_eyes",
+    "love_eyes": "love_eyes",
+    "dazed": "blank_eyes",
+    "blank": "blank_eyes",
+    "bleh": "tongue_out",
+    "tongue": "tongue_out",
+    "pout": "pout",
+    "puff_cheeks": "puff_cheek",
+    "stars": "star_aura",
+    "sparkle": "star_aura",
+    "star_eyes": "star_eyes",
+    "mad": "angry",
+    "angry": "angry",
+    "dark": "dark_face",
+    "shadow": "dark_face",
+    "mirror_selfie": "mirror",
+    "play_game": "gaming",
+    "hug_fox": "hold_fox",
+    "hand_fan": "fan",
+    "mic": "microphone",
+    "finger_heart": "heart_hands",
+    "wave": "star_eyes",
+    "greet": "star_eyes",
+    "hello": "star_eyes",
+    "welcome_back": "star_aura",
+    "surprise": "star_aura",
+    "surprised": "star_aura",
+    "fear": "sweat",
+    "scared": "sweat"
+  },
+  "fallbacks": [
+    "shy",
+    "star_eyes",
+    "speechless",
+    "confused",
+    "angry"
+  ],
+  "emotion_map": {
+    "happy": "star_eyes",
+    "excited": "star_aura",
+    "grateful": "love_eyes",
+    "joy": "star_eyes",
+    "angry": "angry",
+    "frustrated": "dark_face",
+    "anxious": "sweat",
+    "surprised": "star_aura",
+    "sad": "cry",
+    "disappointed": "speechless",
+    "tired": "blank_eyes",
+    "bored": "puff_cheek",
+    "neutral": "",
+    "curious": "confused",
+    "confused": "confused",
+    "fear": "sweat",
+    "shy": "shy",
+    "closeness": "shy"
+  },
+  "motions": [
+    "idle"
+  ],
+  "motion_aliases": {
+    "idle": "idle",
+    "stand": "idle",
+    "default": "idle"
+  },
+  "interaction_map": {
+    "single_click": {
+      "expression": "shy",
+      "duration_ms": 1500
+    },
+    "double_click": {
+      "expression": "star_aura",
+      "duration_ms": 2500
+    },
+    "fast_click": {
+      "expression": "star_aura",
+      "motion": "idle",
+      "duration_ms": 3000
+    },
+    "fast_drag": {
+      "expression": "pout",
+      "motion": "idle",
+      "duration_ms": 2000
+    },
+    "drag_start": {
+      "expression": "confused",
+      "duration_ms": 2000
+    },
+    "drag_end": {
+      "expression": "star_eyes",
+      "duration_ms": 2000
+    },
+    "pet": {
+      "expression": "blush_intense",
+      "motion": "idle",
+      "duration_ms": 3000
+    },
+    "long_press": {
+      "expression": "puff_cheek",
+      "motion": "idle",
+      "duration_ms": 2500
+    },
+    "mouse_enter": {
+      "expression": "star_eyes",
+      "duration_ms": 2000
+    },
+    "avoid_mouse": {
+      "expression": "angry"
+    }
+  },
+  "mood_triggers": {
+    "joy": [
+      "star_eyes",
+      "love_eyes",
+      "star_aura"
+    ],
+    "closeness": [
+      "shy",
+      "blush_intense",
+      "love_eyes"
+    ],
+    "curiosity": [
+      "confused",
+      "star_eyes",
+      "pupil_color"
+    ],
+    "sadness": [
+      "cry",
+      "blank_eyes"
+    ],
+    "loneliness": [
+      "blank_eyes",
+      "cry"
+    ],
+    "anger": [
+      "angry",
+      "pout",
+      "puff_cheek"
+    ],
+    "fear": [
+      "sweat",
+      "confused"
+    ],
+    "tired": [
+      "blank_eyes",
+      "tongue_out"
+    ],
+    "bored": [
+      "puff_cheek",
+      "tongue_out",
+      "blank_eyes"
+    ]
+  },
+  "idle_triggers": {
+    "idle_short": {
+      "threshold_secs": 60,
+      "expression": "confused",
+      "duration_ms": 2500,
+      "probability": 0.5
+    },
+    "idle_medium": {
+      "threshold_secs": 180,
+      "expression": "puff_cheek",
+      "duration_ms": 3000,
+      "probability": 0.65
+    },
+    "idle_long": {
+      "threshold_secs": 360,
+      "expression": "tongue_out",
+      "duration_ms": 4000,
+      "probability": 0.8
+    },
+    "idle_asleep": {
+      "threshold_secs": 900,
+      "expression": "blank_eyes",
+      "duration_ms": 5000,
+      "probability": 0.9
+    }
+  },
+  "event_triggers": {
+    "user_return": {
+      "expression": "star_aura",
+      "duration_ms": 3000,
+      "probability": 0.95
+    },
+    "window_focus": {
+      "expression": "star_eyes",
+      "duration_ms": 2000,
+      "probability": 0.6
+    },
+    "window_blur": {
+      "expression": "",
+      "duration_ms": 1000,
+      "probability": 0.15
+    },
+    "morning": {
+      "expression": "star_eyes",
+      "duration_ms": 3000,
+      "probability": 0.75
+    },
+    "afternoon": {
+      "expression": "star_eyes",
+      "duration_ms": 2000,
+      "probability": 0.4
+    },
+    "evening": {
+      "expression": "shy",
+      "duration_ms": 2500,
+      "probability": 0.4
+    },
+    "night": {
+      "expression": "blank_eyes",
+      "duration_ms": 3000,
+      "probability": 0.5
+    },
+    "chat_start": {
+      "expression": "star_eyes",
+      "duration_ms": 2000,
+      "probability": 0.7
+    },
+    "chat_end": {
+      "expression": "shy",
+      "duration_ms": 2000,
+      "probability": 0.5
+    },
+    "mood_change_joy": {
+      "expression": "star_aura",
+      "duration_ms": 2500,
+      "probability": 0.85
+    },
+    "mood_change_sadness": {
+      "expression": "cry",
+      "duration_ms": 3000,
+      "probability": 0.75
+    },
+    "mood_change_anger": {
+      "expression": "puff_cheek",
+      "duration_ms": 2500,
+      "probability": 0.8
+    },
+    "mood_change_fear": {
+      "expression": "sweat",
+      "duration_ms": 2500,
+      "probability": 0.75
+    },
+    "mood_change_surprised": {
+      "expression": "star_aura",
+      "duration_ms": 2000,
+      "probability": 0.85
+    },
+    "mood_change_tired": {
+      "expression": "blank_eyes",
+      "duration_ms": 3000,
+      "probability": 0.6
+    },
+    "mood_change_bored": {
+      "expression": "tongue_out",
+      "duration_ms": 2500,
+      "probability": 0.6
+    },
+    "mood_change_curiosity": {
+      "expression": "confused",
+      "duration_ms": 2000,
+      "probability": 0.7
+    },
+    "mood_change_shy": {
+      "expression": "blush_intense",
+      "duration_ms": 2500,
+      "probability": 0.8
+    },
+    "mood_change_closeness": {
+      "expression": "love_eyes",
+      "duration_ms": 2500,
+      "probability": 0.75
+    }
+  },
+  "mood_idle_expressions": {
+    "joy": {
+      "expression": "star_eyes",
+      "priority": 10
+    },
+    "closeness": {
+      "expression": "shy",
+      "priority": 10
+    },
+    "shy": {
+      "expression": "blush_intense",
+      "priority": 9
+    },
+    "sadness": {
+      "expression": "cry",
+      "priority": 8
+    },
+    "anger": {
+      "expression": "pout",
+      "priority": 8
+    },
+    "fear": {
+      "expression": "sweat",
+      "priority": 8
+    },
+    "tired": {
+      "expression": "blank_eyes",
+      "priority": 7
+    },
+    "bored": {
+      "expression": "tongue_out",
+      "priority": 6
+    },
+    "curiosity": {
+      "expression": "confused",
+      "priority": 7
+    },
+    "excited": {
+      "expression": "star_aura",
+      "priority": 9
+    },
+    "neutral": {
+      "expression": "star_eyes",
+      "priority": 5
+    }
+  }
+}
