@@ -1,7 +1,8 @@
 //! 用户行为日志（Event 层）—— 记录用户持续状态的起止与时长。
 //!
 //! 当 LLM 在反思阶段判断用户进入了一个持续状态（睡觉/写代码/玩游戏），
-//! 该状态被记录为"进行中"。当状态结束（用户回归 / 切换到新状态 / 系统清除），
+//! 或本地窗口分类器从前台窗口直接推断出活动时，该状态被记录为"进行中"。
+//! 当状态结束（用户回归 / 切换到新状态 / 系统清除），
 //! 程序自动封存（seal）一条带时长的行为事件到本日志。
 //!
 //! 日志是认知引擎（UserCognitionEngine）的证据来源：Rest 时 LLM 汇总近期
@@ -42,7 +43,7 @@ pub struct UserBehaviorEntry {
     pub ended_at: f64,
     /// 持续秒数（ended_at - started_at）
     pub duration_secs: f64,
-    /// 来源：llm_observation（LLM 反思产出）/ return_detected（用户回归时推断）
+    /// 来源：llm_observation（LLM 反思产出）/ local_classifier（本地窗口分类器）/ return_detected（用户回归时推断）
     #[serde(default = "default_source")]
     pub source: String,
     /// 结束原因

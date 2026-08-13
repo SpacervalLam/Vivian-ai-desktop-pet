@@ -6,9 +6,14 @@
 //! - 日志上限 100 条（FIFO 滚动），防止无限增长
 //! - 日志作为内心独白生成的信息源之一，生成后清空重置
 //!
+//! 每条日志同时记录粗粒度分类（category）和细粒度活动标签（activity_label）：
+//! - category：由本地 `classify_window_title()` 产生，用于 to_brief 聚合
+//! - activity_label：由 `world::activity_classifier` 的双层分类器产生，
+//!   包含精确进程名匹配（A 层）和 n-gram 嵌入（B 层），供 BehaviorLog 和认知层消费
+//!
 //! 性能特性：
 //! - 无后台线程，事件回调零延迟
-//! - Mutex 持有时间极短（仅 push 一条 String）
+//! - Mutex 持有时间极短（仅 push 一条记录）
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -17,6 +22,9 @@ use std::sync::Arc;
 use chrono::TimeZone;
 use parking_lot::Mutex;
 use serde::Serialize;
+
+use crate::world::activity_classifier;
+use crate::world::foreground_window::ForegroundWindowSnapshot;
 
 /// 单条活动日志
 #[derive(Debug, Clone, Serialize)]
@@ -31,6 +39,10 @@ pub struct ActivityEntry {
     pub process: String,
     /// 语义分类（如 "编程"/"浏览"/"社交"），由窗口标题推断
     pub category: Option<String>,
+    /// 细粒度活动标签（如 "写代码"/"浏览网页"/"聊天"），
+    /// 由 `world::activity_classifier` 双层分类器产生，
+    /// 仅当分类器命中时存在，未命中时为 None（LLM 反思阶段补充）
+    pub activity_label: Option<String>,
 }
 
 /// 日志上限（FIFO 滚动）
@@ -41,6 +53,9 @@ const MAX_ENTRIES: usize = 100;
 /// 由 WorldStateProvider 在前台窗口切换事件中调用 `record()` 写入。
 /// `enabled` 标志由 `start()`/`stop()` 翻转，用于总开关切换时暂停/恢复记录。
 /// `drain()` 取出全部日志并清空，供内心独白生成消费。
+///
+/// 每次记录同时产生 `activity_label`（由双层分类器推断），
+/// 可通过 `latest_classification()` 获取，供 `UserBehaviorLog` 写入消费。
 pub struct ActivityJournal {
     /// 日志条目（FIFO）
     entries: Arc<Mutex<Vec<ActivityEntry>>>,
@@ -48,6 +63,10 @@ pub struct ActivityJournal {
     last_window: Arc<Mutex<Option<String>>>,
     /// 是否启用记录（由 start/stop 翻转）
     enabled: Arc<AtomicBool>,
+    /// 最新一条分类结果（activity_label, confidence），
+    /// 由 `record()` 写入，供 `UserBehaviorLog` 写入消费。
+    /// 非启用状态或分类器未命中时为 None。
+    latest_classification: Arc<Mutex<Option<(String, f64)>>>,
 }
 
 impl ActivityJournal {
@@ -57,6 +76,7 @@ impl ActivityJournal {
             entries: Arc::new(Mutex::new(Vec::new())),
             last_window: Arc::new(Mutex::new(None)),
             enabled: Arc::new(AtomicBool::new(false)),
+            latest_classification: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -83,7 +103,7 @@ impl ActivityJournal {
     ///
     /// - 未启用时直接返回
     /// - 标题与上次相同时跳过（去重）
-    /// - 标题变化时记录一条日志，FIFO 滚动
+    /// - 标题变化时记录一条日志，包含粗粒度分类和细粒度活动标签，FIFO 滚动
     pub fn record(&self, title: String, process: String) {
         if !self.enabled.load(Ordering::SeqCst) {
             return;
@@ -105,12 +125,26 @@ impl ActivityJournal {
 
         let now = chrono::Local::now();
         let category = classify_window_title(trimmed, &process);
+
+        // 运行双层分类器（A: 精确进程名 → B: n-gram 嵌入）
+        let fw = ForegroundWindowSnapshot {
+            title: trimmed.to_string(),
+            process: process.clone(),
+            pid: 0,
+        };
+        let classification = activity_classifier::classify_foreground_activity(&fw);
+        let activity_label = classification.clone().map(|(label, _)| label);
+
+        // 缓存分类结果，供 UserBehaviorLog 写入消费
+        *self.latest_classification.lock() = classification;
+
         let entry = ActivityEntry {
             timestamp: now.timestamp(),
             time_str: now.format("%H:%M:%S").to_string(),
             window_title: trimmed.to_string(),
             process,
             category,
+            activity_label,
         };
         let mut ents = self.entries.lock();
         if ents.len() >= MAX_ENTRIES {
@@ -141,10 +175,18 @@ impl ActivityJournal {
         self.entries.lock().is_empty()
     }
 
+    /// 获取最新一条分类结果（activity_label, confidence）。
+    ///
+    /// 由 `record()` 在窗口切换时自动写入，供 `UserBehaviorLog` 写入消费。
+    /// 非启用状态或分类器未命中时为 None。
+    pub fn latest_classification(&self) -> Option<(String, f64)> {
+        self.latest_classification.lock().clone()
+    }
+
     /// 将日志格式化为 LLM 可读的摘要文本
     ///
-    /// 按语义分类聚合后输出摘要，而非逐条罗列窗口标题。
-    /// 格式示例：`用户最近主要在：编程（VS Code 12次、Terminal 3次）、浏览（Chrome 5次）、社交（WeChat 2次），共切换 22 次`
+    /// 按活动标签（activity_label）聚合后输出摘要，activity_label 为空时回退到 category。
+    /// 格式示例：`用户最近主要在：写代码（VS Code 12次、Terminal 3次）、浏览网页（Chrome 5次），共切换 22 次`
     /// 空日志返回空字符串。
     pub fn to_brief(&self) -> String {
         let entries = self.entries.lock();
@@ -154,34 +196,35 @@ impl ActivityJournal {
 
         let total = entries.len();
 
-        // 按 category 分组统计，同时记录每个 category 下的 app 频次
-        let mut category_counts: HashMap<String, u32> = HashMap::new();
-        let mut category_apps: HashMap<String, HashMap<String, u32>> = HashMap::new();
+        // 按 activity_label 分组统计（优先），回退到 category
+        let mut group_counts: HashMap<String, u32> = HashMap::new();
+        let mut group_apps: HashMap<String, HashMap<String, u32>> = HashMap::new();
 
         for e in entries.iter() {
-            let cat = e
-                .category
+            let group = e
+                .activity_label
                 .as_deref()
+                .or_else(|| e.category.as_deref())
                 .unwrap_or("其他")
                 .to_string();
-            *category_counts.entry(cat.clone()).or_insert(0) += 1;
+            *group_counts.entry(group.clone()).or_insert(0) += 1;
 
             let app = extract_app_name(&e.window_title, &e.process);
-            let apps = category_apps.entry(cat).or_default();
+            let apps = group_apps.entry(group).or_default();
             *apps.entry(app).or_insert(0) += 1;
         }
 
-        // 按频次降序排列 category
-        let mut sorted_cats: Vec<(String, u32)> = category_counts.into_iter().collect();
-        sorted_cats.sort_by(|a, b| b.1.cmp(&a.1));
+        // 按频次降序排列分组
+        let mut sorted_groups: Vec<(String, u32)> = group_counts.into_iter().collect();
+        sorted_groups.sort_by(|a, b| b.1.cmp(&a.1));
 
-        // 渲染每个分类：分类名（Top3 app 频次）
+        // 渲染每个分组：分组名（Top3 app 频次）
         const TOP_APPS: usize = 3;
-        let parts: Vec<String> = sorted_cats
+        let parts: Vec<String> = sorted_groups
             .iter()
-            .take(5) // 最多显示 5 个分类
-            .map(|(cat, _)| {
-                let apps = category_apps.get(cat).cloned().unwrap_or_default();
+            .take(5) // 最多显示 5 个分组
+            .map(|(group, _)| {
+                let apps = group_apps.get(group).cloned().unwrap_or_default();
                 let mut sorted_apps: Vec<(String, u32)> = apps.into_iter().collect();
                 sorted_apps.sort_by(|a, b| b.1.cmp(&a.1));
                 let app_strs: Vec<String> = sorted_apps
@@ -190,9 +233,9 @@ impl ActivityJournal {
                     .map(|(name, n)| format!("{} {}次", name, n))
                     .collect();
                 if app_strs.is_empty() {
-                    cat.clone()
+                    group.clone()
                 } else {
-                    format!("{}（{}）", cat, app_strs.join("、"))
+                    format!("{}（{}）", group, app_strs.join("、"))
                 }
             })
             .collect();
@@ -214,19 +257,24 @@ impl ActivityJournal {
             return String::new();
         }
 
-        let mut category_counts: HashMap<String, u32> = HashMap::new();
+        let mut group_counts: HashMap<String, u32> = HashMap::new();
         let mut first_ts: Option<i64> = None;
         let mut last_ts: Option<i64> = None;
 
         for e in entries.iter() {
-            let cat = e.category.as_deref().unwrap_or("其他").to_string();
-            *category_counts.entry(cat).or_insert(0) += 1;
+            let group = e
+                .activity_label
+                .as_deref()
+                .or_else(|| e.category.as_deref())
+                .unwrap_or("其他")
+                .to_string();
+            *group_counts.entry(group).or_insert(0) += 1;
             first_ts = Some(first_ts.map_or(e.timestamp, |f| f.min(e.timestamp)));
             last_ts = Some(last_ts.map_or(e.timestamp, |l| l.max(e.timestamp)));
         }
 
-        let mut sorted_cats: Vec<(String, u32)> = category_counts.into_iter().collect();
-        sorted_cats.sort_by(|a, b| b.1.cmp(&a.1));
+        let mut sorted_groups: Vec<(String, u32)> = group_counts.into_iter().collect();
+        sorted_groups.sort_by(|a, b| b.1.cmp(&a.1));
 
         let time_range = match (first_ts, last_ts) {
             (Some(f), Some(l)) => {
@@ -242,10 +290,10 @@ impl ActivityJournal {
             _ => String::new(),
         };
 
-        let parts: Vec<String> = sorted_cats
+        let parts: Vec<String> = sorted_groups
             .iter()
             .take(4)
-            .map(|(cat, n)| format!("{} {}次", cat, n))
+            .map(|(group, n)| format!("{} {}次", group, n))
             .collect();
 
         format!("用户活动{}：{}", time_range, parts.join("、"))

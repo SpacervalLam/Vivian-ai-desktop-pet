@@ -1,10 +1,18 @@
+/**
+ * Scheduler 页 — 定时任务列表 + 表单
+ *
+ * 数据源：invoke('list_scheduled_tasks') / invoke('add_scheduled_reminder') / ...
+ * 刷新：监听 scheduler:changed 事件
+ *
+ * 从 SchedulerWindow.tsx 改造：去除窗口外壳（标题栏/minimize/close/getCurrentWindow），
+ * 适配 MindInspector 的 page 渲染模式。
+ */
+
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { getCurrentWindow } from '@tauri-apps/api/window';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { useTranslation } from 'react-i18next';
-import { changeLanguage } from '../i18n';
-import LoadingSpinner from './LoadingSpinner';
+import LoadingSpinner from '../../LoadingSpinner';
 
 type TaskStatus = 'pending' | 'running' | 'completed' | 'cancelled' | 'failed' | 'paused';
 type TaskType = 'reminder' | 'tool_call';
@@ -63,7 +71,7 @@ function timestampToLocalDateTime(ts: number): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
-const SchedulerWindow: React.FC = () => {
+const SchedulerPage: React.FC = () => {
   const { t } = useTranslation();
   const [tasks, setTasks] = useState<ScheduledTask[]>([]);
   const [tab, setTab] = useState<Tab>('active');
@@ -117,49 +125,6 @@ const SchedulerWindow: React.FC = () => {
       unlisten?.();
     };
   }, [loadTasks]);
-
-  // 语言同步
-  useEffect(() => {
-    let cancelled = false;
-    let unlisten: UnlistenFn | undefined;
-    void (async () => {
-      try {
-        unlisten = await listen<{ language: string }>(
-          'config:language-changed',
-          (e) => {
-            if (e.payload?.language) void changeLanguage(e.payload.language);
-          },
-        );
-        if (cancelled) { unlisten(); return; }
-      } catch {
-        /* ignore */
-      }
-    })();
-    return () => {
-      cancelled = true;
-      unlisten?.();
-    };
-  }, []);
-
-  // 主题：读取 base.theme 配置设置根节点 data-theme，并监听实时变更
-  useEffect(() => {
-    const applyTheme = (theme: string | null | undefined) => {
-      document.documentElement.setAttribute('data-theme', theme === 'light' || theme === 'dark' ? theme : 'system');
-    };
-    let cancelled = false;
-    let unlisten: UnlistenFn | undefined;
-    void (async () => {
-      try {
-        const theme = await invoke<string | null>('get_config', { key: 'base.theme' });
-        if (!cancelled) applyTheme(theme);
-        unlisten = await listen<{ theme: string }>('config:theme-changed', (e) => {
-          applyTheme(e.payload?.theme);
-        });
-        if (cancelled) unlisten();
-      } catch { /* ignore */ }
-    })();
-    return () => { cancelled = true; unlisten?.(); };
-  }, []);
 
   const filtered = useMemo(() => {
     return tasks.filter((t) => {
@@ -225,21 +190,6 @@ const SchedulerWindow: React.FC = () => {
     }
   }, []);
 
-  const closeWindow = useCallback(async () => {
-    try {
-      await getCurrentWindow().close();
-    } catch {
-      /* ignore */
-    }
-  }, []);
-  const minimizeWindow = useCallback(async () => {
-    try {
-      await getCurrentWindow().minimize();
-    } catch {
-      /* ignore */
-    }
-  }, []);
-
   const inputStyle: React.CSSProperties = {
     width: '100%',
     padding: '8px 12px',
@@ -258,73 +208,15 @@ const SchedulerWindow: React.FC = () => {
 
   return (
     <div
-      className="scrapbook scrapbook-bg"
+      className="vivian-scroll"
       style={{
         display: 'flex',
         flexDirection: 'column',
-        height: '100vh',
+        height: '100%',
         overflow: 'hidden',
-        fontFamily:
-          '-apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif',
         color: 'var(--panel-text)',
       }}
     >
-      {/* 标题栏 */}
-      <div
-        data-tauri-drag-region
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          padding: '12px 16px',
-          flexShrink: 0,
-          userSelect: 'none',
-          background: 'var(--panel-bar-bg)',
-          backdropFilter: 'blur(12px)',
-          WebkitBackdropFilter: 'blur(12px)',
-          borderBottom: '1.5px solid var(--panel-border)',
-        }}
-      >
-        <div style={{ fontSize: 16, fontWeight: 700 }}>
-          {t('scheduler_window.title')}
-        </div>
-        <div style={{ display: 'flex', gap: 6 }}>
-          <button
-            onClick={minimizeWindow}
-            title={t('chat.btn_minimize')}
-            style={headerBtn}
-            onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--panel-bg-hover)')}
-            onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
-          >
-            <svg width="16" height="16" viewBox="0 0 24 24">
-              <rect x="4" y="11" width="16" height="2" fill="var(--panel-text-secondary)" />
-            </svg>
-          </button>
-          <button
-            onClick={closeWindow}
-            title={t('chat.btn_close')}
-            style={headerBtn}
-            onMouseEnter={(e) => {
-              e.currentTarget.style.background = 'var(--panel-accent)';
-              e.currentTarget.querySelector('path')?.setAttribute('stroke', 'var(--panel-selected-text)');
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.background = 'transparent';
-              e.currentTarget.querySelector('path')?.setAttribute('stroke', 'var(--panel-text-secondary)');
-            }}
-          >
-            <svg width="16" height="16" viewBox="0 0 24 24">
-              <path
-                d="M6 6l12 12M18 6L6 18"
-                stroke="var(--panel-text-secondary)"
-                strokeWidth="2"
-                strokeLinecap="round"
-              />
-            </svg>
-          </button>
-        </div>
-      </div>
-
       {/* Tab 切换 */}
       <div
         style={{
@@ -686,28 +578,8 @@ const SchedulerWindow: React.FC = () => {
           </div>
         </div>
       )}
-
-      <style>{`
-        .vivian-scroll::-webkit-scrollbar { width: 6px; }
-        .vivian-scroll::-webkit-scrollbar-track { background: transparent; }
-        .vivian-scroll::-webkit-scrollbar-thumb { background: var(--panel-scrollbar); border-radius: 3px; }
-        .vivian-scroll::-webkit-scrollbar-thumb:hover { background: var(--panel-scrollbar-hover); }
-      `}</style>
     </div>
   );
-};
-
-const headerBtn: React.CSSProperties = {
-  width: 32,
-  height: 32,
-  display: 'inline-flex',
-  alignItems: 'center',
-  justifyContent: 'center',
-  border: 'none',
-  background: 'transparent',
-  borderRadius: 8,
-  cursor: 'pointer',
-  transition: 'background 0.15s ease',
 };
 
 const actionBtn: React.CSSProperties = {
@@ -729,4 +601,4 @@ const labelStyle: React.CSSProperties = {
   marginBottom: 4,
 };
 
-export default SchedulerWindow;
+export default SchedulerPage;

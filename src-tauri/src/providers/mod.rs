@@ -11,6 +11,7 @@ pub mod schema;
 pub mod spark;
 pub mod thinking_stripper;
 pub mod wenxin;
+pub mod zhipu;
 
 pub use anthropic::AnthropicProvider;
 pub use base::{BaseProvider, ChatResponse, LLMRequest, ProviderBase, ProviderStats, StructuredToolCall, ToolDefinition};
@@ -25,3 +26,4 @@ pub use schema::{emit_response_tool_definition, is_emit_response_call, validate_
 pub use spark::SparkProvider;
 pub use thinking_stripper::{leaks_thinking_in_content, strip_thinking_segments, ThinkingStreamStripper};
 pub use wenxin::WenxinProvider;
+pub use zhipu::ZhipuProvider;

@@ -75,6 +75,7 @@ impl IcebreakerGenerator {
         dialogue_history: &str,
         lang: &str,
         char_id: &str,
+        idle_seconds: f64,
     ) -> Option<IcebreakerContent> {
         let messages = Self::build_messages(
             level,
@@ -84,6 +85,7 @@ impl IcebreakerGenerator {
             dialogue_history,
             lang,
             char_id,
+            idle_seconds,
         )?;
         let raw = match router.generate(LLMRequest::new("chat", messages)).await {
             Ok(r) => r,
@@ -104,6 +106,7 @@ impl IcebreakerGenerator {
         dialogue_history: &str,
         lang: &str,
         char_id: &str,
+        idle_seconds: f64,
     ) -> Option<Vec<ChatMessage>> {
         if level == IceBreakerLevel::None {
             return None;
@@ -132,23 +135,24 @@ impl IcebreakerGenerator {
         };
 
         let lang_norm = crate::pipeline::prompt_modules::normalize_lang(lang);
+        let elapsed_str = crate::proactive::format_elapsed_lang(idle_seconds, lang_norm);
         let (scene_fmt, time_label, mem_label, recent_label, instr) = match lang_norm {
             "en" => (
-                format!("Scene: user has been away for a while ({level_str} level)"),
+                format!("Scene: user has been away for {elapsed_str} ({level_str} level). Time-since-last-talk is real — calibrate your greeting accordingly (a 5-minute gap is 'just now', a 2-hour gap should feel like catching up)."),
                 "Time",
                 "Memory about the user:",
                 "Recent conversation (for reference only, do not force connections):",
                 "Generate a natural greeting to re-establish connection based on the memory.\nRequirements: short (<30 chars), natural, not contrived. NO poetic lines. NO literary observations. Just a normal, casual greeting like you'd text a friend. Don't ask 'remember when?'. Don't echo the recent conversation unless it naturally fits.\nJSON output: {\"text\": \"greeting\", \"expression\": \"expression_tag\"}",
             ),
             "ja" => (
-                format!("シーン：ユーザーがしばらく離れている（{level_str}レベル）"),
+                format!("シーン：ユーザーが{elapsed_str}離れている（{level_str}レベル）。この経過時間は事実——挨拶の重みをそれに合わせて（5分なら「さっき」、2時間なら「久しぶり」感）。"),
                 "時間",
                 "ユーザーについての記憶：",
                 "最近の会話（参考のみ、無理に関連づけないこと）：",
                 "記憶に基づいて、つながりを取り戻す自然な挨拶を生成して。\n要件: 短く（30字以内）、自然、不自然じゃない。詩的な言葉禁止。文学的な観察禁止。友達にLINEするような普通のカジュアルな挨拶だけ。「覚えてる？」と聞かない。自然に合わない限り最近の会話を繰り返さない。\nJSON出力: {\"text\": \"挨拶\", \"expression\": \"表情タグ\"}",
             ),
             _ => (
-                format!("场景：用户离开了一会儿（{level_str} 级别）"),
+                format!("场景：用户离开了 {elapsed_str}（{level_str} 级别）。这个时长是真实的——请据此校准问候的语气（5分钟是「刚才」，2小时就该有点「好久不见」的感觉）。"),
                 "时间",
                 "关于用户的记忆：",
                 "最近对话（仅供参考，不要强行关联）：",

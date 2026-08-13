@@ -7,9 +7,11 @@ use super::registry::ToolSystem;
 pub mod cross_character_tools;
 pub mod diary_tools;
 pub mod extended_system_ops;
+pub mod file_tools;
 pub mod input_control_tools;
 pub mod media_tools;
 pub mod memory_tools;
+pub mod notebook_tools;
 pub mod perception_tools;
 pub mod pet_tools;
 pub mod presence_tools;
@@ -30,6 +32,7 @@ pub fn register_builtin_tools(tool_system: &ToolSystem) {
         Arc::new(system_ops::OpenApplicationTool::new()),
         Arc::new(system_ops::CloseApplicationTool::new()),
         Arc::new(system_ops::TakeScreenshotTool::new()),
+        Arc::new(system_ops::ScreenshotAnalyzeTool::new()),
         // 扩展系统工具
         Arc::new(extended_system_ops::OpenUrlTool::new()),
         Arc::new(extended_system_ops::GetActiveWindowTool::new()),
@@ -74,6 +77,16 @@ pub fn register_builtin_tools(tool_system: &ToolSystem) {
         Arc::new(web_search_tool::WebSearchTool::new()),
         // 链接分享（搜索后分享有价值的链接卡片）
         Arc::new(share_link_tool::ShareLinkTool::new()),
+        // 笔记本工具（创建/查看/修改/分享卡片风格 HTML 笔记）
+        Arc::new(notebook_tools::CreateNotebookTool::new()),
+        Arc::new(notebook_tools::ListNotebooksTool::new()),
+        Arc::new(notebook_tools::GetNotebookDetailTool::new()),
+        Arc::new(notebook_tools::UpdateNotebookTool::new()),
+        Arc::new(notebook_tools::ShareNotebookTool::new()),
+        // 完整 HTML 笔记（LLM 直接撰写自包含 HTML，经 Shadow DOM 渲染）
+        Arc::new(notebook_tools::CreateHtmlNoteTool::default()),
+        // 文件系统读取（按路径读本地文本/代码/HTML，受沙箱路径校验约束）
+        Arc::new(file_tools::ReadFileTool::default()),
         // 天气预报（Open-Meteo 免费 API，支持 1~16 天预报）
         Arc::new(weather_tools::GetWeatherForecastTool::new()),
     ];

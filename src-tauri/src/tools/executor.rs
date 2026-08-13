@@ -38,6 +38,8 @@ static TOOL_TIMEOUTS: Lazy<HashMap<&'static str, u64>> = Lazy::new(|| {
     m.insert("grep", 60);
     m.insert("web_search", 60);
     m.insert("take_screenshot", 30);
+    // 截屏识图含 LLM 视觉调用，给 90s 余量（截屏 1~2s + 视觉模型 10~60s）
+    m.insert("screenshot_analyze", 90);
     m.insert("open_application", 30);
     m.insert("close_application", 30);
     m.insert("save_memory", 15);

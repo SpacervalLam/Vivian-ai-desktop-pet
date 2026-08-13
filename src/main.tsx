@@ -2,16 +2,6 @@ import { StrictMode } from 'react';
 import type { ReactElement } from 'react';
 import { createRoot } from 'react-dom/client';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import BubbleWindow from './components/BubbleWindow';
-import ChatWindow from './components/ChatWindow';
-import ConfigWindow from './components/ConfigWindow';
-import InputDialog from './components/InputDialog';
-import MemoryWindow from './components/MemoryWindow';
-import SchedulerWindow from './components/SchedulerWindow';
-import TodoWindow from './components/TodoWindow';
-import ToastWindow from './components/ToastWindow';
-import SideChatPanel from './components/SideChatPanel';
-import MessageBannerWindow from './components/MessageBannerWindow';
 import { setCharacterId } from './characterContext';
 import './styles/global.css';
 import './i18n';
@@ -93,37 +83,47 @@ if (!isTauri) {
 
       let element: React.ReactElement;
       switch (view) {
-        case 'chat':
+        case 'chat': {
+          const ChatWindow = (await import('./components/ChatWindow')).default;
           element = <ChatWindow />;
           break;
-        case 'input':
+        }
+        case 'input': {
           // 群发总框：独立窗口，居中显示，broadcast 模式
+          const InputDialog = (await import('./components/InputDialog')).default;
           element = <InputDialog broadcast visible />;
           break;
-        case 'config':
+        }
+        case 'config': {
+          const ConfigWindow = (await import('./components/ConfigWindow')).default;
           element = <ConfigWindow />;
           break;
-        case 'memory':
+        }
+        case 'memory': {
+          const MemoryWindow = (await import('./components/MemoryWindow')).default;
           element = <MemoryWindow />;
           break;
-        case 'bubble':
+        }
+        case 'bubble': {
+          const BubbleWindow = (await import('./components/BubbleWindow')).default;
           element = <BubbleWindow />;
           break;
-        case 'todo':
-          element = <TodoWindow />;
-          break;
-        case 'scheduler':
-          element = <SchedulerWindow />;
-          break;
-        case 'toast':
+        }
+        case 'toast': {
+          const ToastWindow = (await import('./components/ToastWindow')).default;
           element = <ToastWindow />;
           break;
-        case 'side_chat':
+        }
+        case 'side_chat': {
+          const SideChatPanel = (await import('./components/SideChatPanel')).default;
           element = <SideChatPanel />;
           break;
-        case 'message_banner':
+        }
+        case 'message_banner': {
+          const MessageBannerWindow = (await import('./components/MessageBannerWindow')).default;
           element = <MessageBannerWindow />;
           break;
+        }
         default: {
           // 仅主窗口（无 view 参数）加载 App 及其 Live2D 依赖链
           // cubism SDK 必须在 App 模块求值前加载完成，否则 pixi-live2d-display 会抛错

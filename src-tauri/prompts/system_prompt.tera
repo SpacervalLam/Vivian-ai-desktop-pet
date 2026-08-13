@@ -84,20 +84,16 @@ Use `talk_to_character` to reach her only when she is online.
 {{ activity_brief }}
 {% endif %}
 
-{# ── Layer 5: Belief（长期认知）── 已在 Layer 2 Mind 段落中 ── #}
+{# ── 社交关系：关系认知事实、共享世界、社交状态 ── #}
+{% if relationship_facts %}{{ relationship_facts }}{% endif %}
+{% if shared_world %}{{ shared_world }}{% endif %}
+{% if social_state %}{{ social_state }}{% endif %}
 
 {# ── Layer 6: Relevant Episode（相关经历）── 最近发生过什么 ── #}
 {% if episode %}{{ episode }}{% endif %}
 
 {# 关系日志（Episode 层，记忆分组）#}
 {% if relationship_log %}{{ relationship_log }}{% endif %}
-
-{# ── Layer 7: Profile（画像层）── 用户事实 / 动态行为 / 关系认知 / 共享世界 / 社交状态 ── #}
-{% if user_facts %}{{ user_facts }}{% endif %}
-{% if dynamic_behavior %}{{ dynamic_behavior }}{% endif %}
-{% if relationship_facts %}{{ relationship_facts }}{% endif %}
-{% if shared_world %}{{ shared_world }}{% endif %}
-{% if social_state %}{{ social_state }}{% endif %}
 
 {{ memory }}
 
@@ -108,13 +104,13 @@ Use `talk_to_character` to reach her only when she is online.
 {{ memory_usage_rules }}
 {% endif %}
 
+{# ── Layer 7: Profile（画像层）── 用户事实 / 动态行为 ── #}
+{% if user_facts %}{{ user_facts }}{% endif %}
+{% if dynamic_behavior %}{{ dynamic_behavior }}{% endif %}
+
 {% if worldbook %}{{ worldbook }}{% endif %}
 
 {# ── Tail Sections ── #}
-
-[CHAT STYLE - REFERENCE]
-{{ chat_style }}
-[END CHAT STYLE]
 
 {% if channel_guide %}{{ channel_guide }}{% endif %}
 {% if presence_guide %}{{ presence_guide }}{% endif %}

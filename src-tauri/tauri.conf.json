@@ -23,11 +23,11 @@
         "skipTaskbar": true,
         "shadow": false,
         "visible": false,
-        "dragDropEnabled": false
+        "dragDropEnabled": true
       }
     ],
     "security": {
-      "csp": "default-src 'self' asset: http://asset.localhost model: http://model.localhost; img-src 'self' asset: http://asset.localhost model: http://model.localhost data: blob:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://fonts.googleapis.cn https://fonts.loli.net; font-src 'self' https://fonts.gstatic.com https://fonts.googleapis.cn https://fonts.loli.net data:; script-src 'self' 'unsafe-inline' https://cubism.live2d.com; connect-src 'self' asset: http://asset.localhost model: http://model.localhost https: wss: ipc: http://ipc.localhost",
+      "csp": "default-src 'self' asset: http://asset.localhost model: http://model.localhost; img-src 'self' asset: http://asset.localhost model: http://model.localhost data: blob:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.cn https://fonts.loli.net; font-src 'self' https://fonts.gstatic.cn https://fonts.googleapis.cn https://fonts.loli.net data:; script-src 'self' 'unsafe-inline' https://cubism.live2d.com; connect-src 'self' asset: http://asset.localhost model: http://model.localhost https: wss: ipc: http://ipc.localhost",
       "assetProtocol": {
         "enable": true,
         "scope": ["$RESOURCE/**/*", "$APPDATA/**/*", "$HOME/**/*", "**/*"]
@@ -38,6 +38,9 @@
       "active": true,
       "targets": ["nsis", "msi"],
       "windows": {
+        "nsis": {
+          "compression": "lzma"
+        },
         "wix": {
           "language": "zh-CN"
         }

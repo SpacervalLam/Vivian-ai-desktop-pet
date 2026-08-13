@@ -75,12 +75,12 @@ impl WorldState {
     /// 标记用户在场（由 proactive tick 调用，idle_seconds < 60 时触发）
     ///
     /// 返回回归事件：若用户之前离开且携带预期，返回 ReturnEvent。
-    /// 回归前自动封存进行中的持续活动到行为日志。
+    /// 回归前自动封存进行中的持续活动到行为日志（source 标记为 `"return_detected"`）。
     pub fn mark_user_present(&self) -> Option<crate::world::entity_state::ReturnEvent> {
         // 先封存进行中的活动（用户回来意味着上一个持续状态已结束）
         let old_activity = self.user_entity.read().take_current_activity();
         if let Some(activity) = old_activity {
-            self.seal_activity(activity, BehaviorEndReason::UserReturn);
+            self.seal_activity(activity, BehaviorEndReason::UserReturn, "return_detected");
         }
         self.user_entity.read().mark_present()
     }
@@ -100,7 +100,20 @@ impl WorldState {
     /// 若与当前活动同名，仅刷新置信度（视为延续，不封存）。
     /// 若不同名，封存旧活动到行为日志，再设置新活动。
     /// label 为空串时清除活动（封存旧活动）。
+    /// 封存时 source 标记为 `"llm_observation"`。
     pub fn update_user_activity(&self, label: &str, confidence: f64) {
+        self.update_user_activity_inner(label, confidence, "llm_observation");
+    }
+
+    /// 由本地窗口分类器直接驱动，无需等待 LLM 反思。
+    ///
+    /// 与 `update_user_activity` 行为一致，仅封存时 source 标记为 `"local_classifier"`。
+    pub fn update_user_activity_from_classifier(&self, label: &str, confidence: f64) {
+        self.update_user_activity_inner(label, confidence, "local_classifier");
+    }
+
+    /// 内部实现：更新用户活动，指定来源标签
+    fn update_user_activity_inner(&self, label: &str, confidence: f64, source: &str) {
         let label = label.trim();
         if label.is_empty() {
             self.clear_user_activity();
@@ -120,7 +133,7 @@ impl WorldState {
             .read()
             .swap_user_activity(label, confidence);
         if let Some(activity) = old {
-            self.seal_activity(activity, BehaviorEndReason::StateChange);
+            self.seal_activity(activity, BehaviorEndReason::StateChange, source);
         }
     }
 
@@ -128,12 +141,15 @@ impl WorldState {
     pub fn clear_user_activity(&self) {
         let old = self.user_entity.read().take_current_activity();
         if let Some(activity) = old {
-            self.seal_activity(activity, BehaviorEndReason::SystemClear);
+            self.seal_activity(activity, BehaviorEndReason::SystemClear, "system_clear");
         }
     }
 
     /// 封存一条持续活动到行为日志
-    fn seal_activity(&self, activity: crate::world::entity_state::UserActivity, reason: BehaviorEndReason) {
+    ///
+    /// `source` 标记来源：`"llm_observation"`（LLM 反思）/ `"local_classifier"`（本地窗口分类器）/
+    /// `"return_detected"`（用户回归时推断）/ `"system_clear"`（系统清除）。
+    fn seal_activity(&self, activity: crate::world::entity_state::UserActivity, reason: BehaviorEndReason, source: &str) {
         let now = chrono::Local::now().timestamp() as f64;
         let duration_secs = (now - activity.started_at).max(0.0);
         // 过滤掉过短的活动（< 60 秒，视为瞬时动作不值得记录）
@@ -155,7 +171,7 @@ impl WorldState {
             started_at: activity.started_at,
             ended_at: now,
             duration_secs,
-            source: "llm_observation".to_string(),
+            source: source.to_string(),
             ended_by: reason,
             confidence: activity.confidence,
         };

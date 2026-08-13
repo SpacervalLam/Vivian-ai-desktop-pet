@@ -127,20 +127,22 @@ interface ConfigObject {
 }
 
 /**
- * 路由矩阵任务定义 - 12 个真实启用的任务，每个任务独立配置完整模型
+ * 路由矩阵任务定义 - 13 个真实启用的任务，每个任务独立配置完整模型
  *
  * 任务职责说明：
- * - chat:                日常对话与问答（高频，可用便宜模型）
- * - reasoning:           长输入/工具调用深度推理（低频，需强模型）
+ * - chat:                日常对话与问答（高频，人格核心，可用便宜模型）
+ * - reasoning:           长输入/工具调用/动作决策深度推理（自动从 chat 升级，需强模型）
  * - vision_describe:     图片理解（用户发图时使用，必须配置支持视觉的多模态模型）
  * - diary:               智能日记内容生成
- * - memory:              写入时记忆抽取（enrich：关键词/重要性/语义类型分类，高频，建议便宜模型）
- * - consolidation:       离线记忆巩固（三阶段流水线：短期→长期摘要、画像抽取、洞察生成，低频，需深度推理模型）
- * - inner_monologue:     离线内心独白（用户不交互时自主思考，30分钟一次，建议廉价快速模型）
- * - activity_extraction: 活动类型提取（每次对话后台调用，高频，建议便宜模型）
- * - emotion_analysis:    情绪分类分析（每轮对话后台调用，高频，建议便宜模型）
+ * - memory:              写入时记忆抽取（enrich：关键词/重要性/语义类型分类，高频，建议便宜模型，并供 LLM 记忆路由/校验/用户画像复用）
+ * - consolidation:       离线记忆巩固与精修（三阶段流水线、相似记忆精修、冲突仲裁，低频，需深度推理模型）
+ * - reflection:          异步反思（每5轮或30分钟触发，合并意识更新与活动抽取，fire-and-forget，失败静默）
+ * - inner_monologue:     离线内心独白（用户不交互时自主思考，含兴趣话题联网搜索，建议廉价快速模型）
+ * - emotion_analysis:    情绪分类（用户/角色情绪效价与唤醒度，LLM 分类器，建议便宜快速模型）
  * - knowledge_acquisition: 空闲时知识搜索学习（后台低频，建议便宜模型）
- * - interest_search:     内心独白中联网搜索兴趣话题（后台低频，建议便宜模型）
+ * - translation:         跨语言 TTS 文本翻译（仅翻译服务选 LLM 时使用，简单任务，便宜模型即可）
+ * - bystander_judge:     旁观插话判断（用户对话时轻量判断旁观者是否插话，建议便宜快速模型）
+ * - intent_judge:        会话关闭意图判断（每轮对话后判断是否应关闭及关闭原因，建议便宜快速模型）
  */
 const ROUTING_TASKS: { labelKey: string; taskType: string; helpKey: string }[] = [
   { labelKey: 'config.routing_chat', taskType: 'chat', helpKey: 'config.routing_chat_help' },
@@ -149,12 +151,13 @@ const ROUTING_TASKS: { labelKey: string; taskType: string; helpKey: string }[] =
   { labelKey: 'config.routing_diary', taskType: 'diary', helpKey: 'config.routing_diary_help' },
   { labelKey: 'config.routing_memory', taskType: 'memory', helpKey: 'config.routing_memory_help' },
   { labelKey: 'config.routing_consolidation', taskType: 'consolidation', helpKey: 'config.routing_consolidation_help' },
+  { labelKey: 'config.routing_reflection', taskType: 'reflection', helpKey: 'config.routing_reflection_help' },
   { labelKey: 'config.routing_inner_monologue', taskType: 'inner_monologue', helpKey: 'config.routing_inner_monologue_help' },
-  { labelKey: 'config.routing_activity_extraction', taskType: 'activity_extraction', helpKey: 'config.routing_activity_extraction_help' },
   { labelKey: 'config.routing_emotion_analysis', taskType: 'emotion_analysis', helpKey: 'config.routing_emotion_analysis_help' },
   { labelKey: 'config.routing_knowledge_acquisition', taskType: 'knowledge_acquisition', helpKey: 'config.routing_knowledge_acquisition_help' },
-  { labelKey: 'config.routing_interest_search', taskType: 'interest_search', helpKey: 'config.routing_interest_search_help' },
   { labelKey: 'config.routing_translation', taskType: 'translation', helpKey: 'config.routing_translation_help' },
+  { labelKey: 'config.routing_bystander_judge', taskType: 'bystander_judge', helpKey: 'config.routing_bystander_judge_help' },
+  { labelKey: 'config.routing_intent_judge', taskType: 'intent_judge', helpKey: 'config.routing_intent_judge_help' },
 ];
 
 /**
@@ -195,7 +198,7 @@ const PROVIDER_PRESETS: ProviderPreset[] = [
   { id: 'gemini', labelKey: 'config.preset_gemini', providerType: 'gemini', endpoint: 'https://generativelanguage.googleapis.com', defaultModel: 'gemini-3-pro' },
   { id: 'deepseek', labelKey: 'config.preset_deepseek', providerType: 'openai', endpoint: 'https://api.deepseek.com/v1', defaultModel: 'deepseek-chat' },
   { id: 'qwen', labelKey: 'config.preset_qwen', providerType: 'openai', endpoint: 'https://dashscope.aliyuncs.com/compatible-mode/v1', defaultModel: 'qwen3-max' },
-  { id: 'glm', labelKey: 'config.preset_glm', providerType: 'openai', endpoint: 'https://open.bigmodel.cn/api/paas/v4', defaultModel: 'glm-5' },
+  { id: 'glm', labelKey: 'config.preset_glm', providerType: 'zhipu', endpoint: 'https://open.bigmodel.cn/api/paas/v4', defaultModel: 'glm-5' },
   { id: 'moonshot', labelKey: 'config.preset_moonshot', providerType: 'openai', endpoint: 'https://api.moonshot.cn/v1', defaultModel: 'kimi-k2.6' },
   { id: 'doubao', labelKey: 'config.preset_doubao', providerType: 'openai', endpoint: 'https://ark.cn-beijing.volces.com/api/v3', defaultModel: 'doubao-seed-1.6' },
   { id: 'siliconflow', labelKey: 'config.preset_siliconflow', providerType: 'openai', endpoint: 'https://api.siliconflow.cn/v1', defaultModel: 'deepseek-ai/DeepSeek-V3.1' },
@@ -342,6 +345,7 @@ const inputStyle: React.CSSProperties = {
   outline: 'none',
   boxSizing: 'border-box',
   boxShadow: 'var(--panel-shadow-subtle)',
+  transition: 'border-color 0.15s ease, box-shadow 0.15s ease',
 };
 const selectStyle: React.CSSProperties = {
   ...inputStyle,
@@ -355,6 +359,8 @@ const sectionTitleStyle: React.CSSProperties = {
   color: 'var(--panel-text)',
   marginBottom: 14,
   paddingBottom: 8,
+  paddingLeft: 10,
+  borderLeft: '3px solid var(--panel-accent)',
   borderBottom: '1.5px solid var(--panel-border)',
 };
 
@@ -371,7 +377,8 @@ const TextField: React.FC<{
   placeholder?: string;
   type?: 'text' | 'password' | 'number';
   disabled?: boolean;
-}> = ({ label, value, onChange, placeholder, type = 'text', disabled = false }) => (
+  list?: string;
+}> = ({ label, value, onChange, placeholder, type = 'text', disabled = false, list }) => (
   <div style={fieldStyle}>
     <label style={{ ...labelStyle, ...(disabled ? { opacity: 0.5 } : {}) }}>{label}</label>
     <input
@@ -380,6 +387,7 @@ const TextField: React.FC<{
       onChange={(e) => onChange(e.target.value)}
       placeholder={placeholder}
       disabled={disabled}
+      list={list}
       style={{
         ...inputStyle,
         ...(disabled
@@ -928,7 +936,14 @@ const CollapsibleSection: React.FC<{
             <span style={{ flex: '0 0 auto', fontSize: 12, color: isDanger ? accent : 'var(--panel-text-tertiary)' }}>{open ? '▾' : '▸'}</span>
           </span>
           {subtitle && (
-            <span style={{ fontSize: 11, color: 'var(--panel-text-tertiary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{subtitle}</span>
+            <span style={{
+              fontSize: 11,
+              color: 'var(--panel-text-tertiary)',
+              whiteSpace: open ? 'pre-wrap' : 'nowrap',
+              overflow: 'hidden',
+              textOverflow: open ? undefined : 'ellipsis',
+              lineHeight: 1.5,
+            }}>{subtitle}</span>
           )}
         </button>
       </div>
@@ -1091,6 +1106,66 @@ const AuxRefAudiosDrawer: React.FC<{
   );
 };
 
+/// 快捷键配置抽屉 — 收纳通用页的 6 个快捷键录制器，折叠时只显示标题与已配置数量徽章
+const ShortcutsDrawer: React.FC<{
+  label: string;
+  expanded: boolean;
+  onToggle: () => void;
+  configuredCount: number;
+  children: React.ReactNode;
+}> = ({ label, expanded, onToggle, configuredCount, children }) => (
+  <div style={{ marginBottom: 18 }}>
+    <button
+      type="button"
+      onClick={onToggle}
+      style={{
+        width: '100%',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        padding: '8px 0',
+        background: 'transparent',
+        border: 'none',
+        cursor: 'pointer',
+        fontFamily: 'inherit',
+        color: 'var(--panel-text)',
+        fontSize: 13,
+      }}
+    >
+      <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <span
+          style={{
+            display: 'inline-block',
+            transition: 'transform 0.15s',
+            transform: expanded ? 'rotate(90deg)' : 'rotate(0deg)',
+            color: 'var(--panel-text-tertiary)',
+            fontSize: 10,
+          }}
+        >
+          ▸
+        </span>
+        <span style={{ opacity: 0.85 }}>{label}</span>
+        {configuredCount > 0 && (
+          <span
+            style={{
+              padding: '1px 8px',
+              borderRadius: 10,
+              background: 'var(--panel-tag-bg)',
+              color: 'var(--panel-text-secondary)',
+              fontSize: 10,
+              minWidth: 18,
+              textAlign: 'center',
+            }}
+          >
+            {configuredCount}
+          </span>
+        )}
+      </span>
+    </button>
+    {expanded && <div style={{ marginTop: 4 }}>{children}</div>}
+  </div>
+);
+
 const ConfigWindow: React.FC = () => {
   const { t, i18n } = useTranslation();
   const [activeTab, setActiveTab] = useState<TabKey>('general');
@@ -1104,6 +1179,8 @@ const ConfigWindow: React.FC = () => {
   const [saving, setSaving] = useState(false);
   const [savedFlash, setSavedFlash] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  // 快捷键配置抽屉展开状态
+  const [shortcutsExpanded, setShortcutsExpanded] = useState(false);
   const [ttsConfig, setTtsConfig] = useState<TtsConfigState | null>(null);
   // 语音页签当前正在编辑的角色 ID（默认为窗口所属角色）
   // 允许在同一配置窗口内切换编辑 Vivian / Nana 的 TTS 配置
@@ -1131,6 +1208,8 @@ const ConfigWindow: React.FC = () => {
   const [ollamaServiceBusy, setOllamaServiceBusy] = useState(false);
   const [ollamaModels, setOllamaModels] = useState<string[]>([]);
   const [ollamaPulling, setOllamaPulling] = useState(false);
+  // 内置嵌入模型注册表（来自后端 embedding_registry，用于云端模型维度自动填充）
+  const [embeddingModels, setEmbeddingModels] = useState<{ id: string; dimension: number; source: string }[]>([]);
   // Whisper 本地 ASR 服务状态(一键启动/停止 faster-whisper-server)
   const [whisperService, setWhisperService] = useState<WhisperServiceState | null>(null);
   const [whisperServiceBusy, setWhisperServiceBusy] = useState(false);
@@ -1588,6 +1667,21 @@ const ConfigWindow: React.FC = () => {
     }
   }, []);
 
+  // 拉取内置嵌入模型注册表（用于云端模型选择时自动填充维度）
+  const refreshEmbeddingModels = useCallback(async () => {
+    try {
+      const models = await invoke<{ id: string; dimension: number; source: string }[]>('get_embedding_models');
+      setEmbeddingModels(Array.isArray(models) ? models : []);
+    } catch (e) {
+      console.warn('查询嵌入模型注册表失败:', e);
+    }
+  }, []);
+
+  // 挂载时拉取一次嵌入模型注册表
+  useEffect(() => {
+    refreshEmbeddingModels();
+  }, [refreshEmbeddingModels]);
+
   // 嵌入来源为 local 且处于记忆页签时定时轮询服务状态(2s 一次)
   useEffect(() => {
     const isLocal = get<string>('memory.embedding.source', 'cloud') === 'local';
@@ -1693,6 +1787,7 @@ const ConfigWindow: React.FC = () => {
   const toggleWhisperService = async () => {
     if (whisperServiceBusy) return;
     const cur = whisperService?.status;
+    if (cur === 'installing') return; // 安装中不响应点击
     if (cur === 'running' || cur === 'starting') {
       // 停止
       setWhisperServiceBusy(true);
@@ -1706,10 +1801,10 @@ const ConfigWindow: React.FC = () => {
         setWhisperServiceBusy(false);
       }
     } else {
-      // 启动：先保存当前编辑中的 service_* 配置，确保后端读到最新值
+      // 启动：仅持久化 whisper service_* 字段，不触发整体保存/重初始化/关闭窗口
       setWhisperServiceBusy(true);
       try {
-        await handleSave();
+        await persistWhisperServiceConfig();
         const st = await invoke<WhisperServiceState>('start_whisper_service');
         setWhisperService(st);
         prevWhisperStatusRef.current = st.status;
@@ -1727,6 +1822,32 @@ const ConfigWindow: React.FC = () => {
       } finally {
         setWhisperServiceBusy(false);
       }
+    }
+  };
+
+  // 仅持久化 whisper service_* 配置项到后端（不关闭窗口、不触发 reinitialize、不弹保存 toast）
+  // 目的：让 start_whisper_service 命令读到表单中的最新值，避免触发整体保存副作用
+  const persistWhisperServiceConfig = async () => {
+    const fields: Array<[string, ConfigValue]> = [
+      ['speech_recognition.whisper.service_model', get('speech_recognition.whisper.service_model', 'small')],
+      ['speech_recognition.whisper.service_device', get('speech_recognition.whisper.service_device', 'auto')],
+      ['speech_recognition.whisper.service_compute_type', get('speech_recognition.whisper.service_compute_type', 'auto')],
+      ['speech_recognition.whisper.service_port', get('speech_recognition.whisper.service_port', 8000)],
+      ['speech_recognition.whisper.service_python_path', get('speech_recognition.whisper.service_python_path', '') ?? ''],
+      ['speech_recognition.whisper.service_install_path', get('speech_recognition.whisper.service_install_path', '') ?? ''],
+      ['speech_recognition.whisper.service_auto_start', get('speech_recognition.whisper.service_auto_start', false)],
+    ];
+    for (const [key, value] of fields) {
+      try {
+        await invoke('set_config', { key, value });
+      } catch (e) {
+        console.warn(`写入 ${key} 失败:`, e);
+      }
+    }
+    try {
+      await invoke('save_config');
+    } catch (e) {
+      console.warn('save_config 失败:', e);
     }
   };
 
@@ -2192,6 +2313,87 @@ const ConfigWindow: React.FC = () => {
     }
   }, [t]);
 
+  /** 微信快捷键变化处理 */
+  const handleChatShortcutChange = useCallback(async (shortcut: string): Promise<ConflictResult> => {
+    setNested('base.shortcut_chat', shortcut);
+    try {
+      await invoke('set_config', { key: 'base.shortcut_chat', value: shortcut });
+      await invoke('save_config');
+      await invoke('update_text_shortcuts');
+      void emit('toast:show', {
+        message: shortcut
+          ? t('toast.shortcut_applied', { shortcut: formatForDisplay(shortcut) })
+          : t('config.shortcut_recorder_idle'),
+        type: 'success',
+        duration: 4000,
+        key: Date.now(),
+      });
+      return { ok: true };
+    } catch (e) {
+      void emit('toast:show', {
+        message: t('toast.shortcut_register_failed', { shortcut: formatForDisplay(shortcut) }),
+        type: 'error',
+        duration: 4000,
+        key: Date.now(),
+      });
+      return { ok: false, reason: 'conflict' };
+    }
+  }, [t]);
+
+  /** 设置快捷键变化处理 */
+  const handleSettingsShortcutChange = useCallback(async (shortcut: string): Promise<ConflictResult> => {
+    setNested('base.shortcut_settings', shortcut);
+    try {
+      await invoke('set_config', { key: 'base.shortcut_settings', value: shortcut });
+      await invoke('save_config');
+      await invoke('update_text_shortcuts');
+      void emit('toast:show', {
+        message: shortcut
+          ? t('toast.shortcut_applied', { shortcut: formatForDisplay(shortcut) })
+          : t('config.shortcut_recorder_idle'),
+        type: 'success',
+        duration: 4000,
+        key: Date.now(),
+      });
+      return { ok: true };
+    } catch (e) {
+      void emit('toast:show', {
+        message: t('toast.shortcut_register_failed', { shortcut: formatForDisplay(shortcut) }),
+        type: 'error',
+        duration: 4000,
+        key: Date.now(),
+      });
+      return { ok: false, reason: 'conflict' };
+    }
+  }, [t]);
+
+  /** 笔记本快捷键变化处理 */
+  const handleMemoryShortcutChange = useCallback(async (shortcut: string): Promise<ConflictResult> => {
+    setNested('base.shortcut_memory', shortcut);
+    try {
+      await invoke('set_config', { key: 'base.shortcut_memory', value: shortcut });
+      await invoke('save_config');
+      await invoke('update_text_shortcuts');
+      void emit('toast:show', {
+        message: shortcut
+          ? t('toast.shortcut_applied', { shortcut: formatForDisplay(shortcut) })
+          : t('config.shortcut_recorder_idle'),
+        type: 'success',
+        duration: 4000,
+        key: Date.now(),
+      });
+      return { ok: true };
+    } catch (e) {
+      void emit('toast:show', {
+        message: t('toast.shortcut_register_failed', { shortcut: formatForDisplay(shortcut) }),
+        type: 'error',
+        duration: 4000,
+        key: Date.now(),
+      });
+      return { ok: false, reason: 'conflict' };
+    }
+  }, [t]);
+
   // 测试网络连接 —— 通过当前网络设置访问 Google 主页验证代理可用性
   const handleTestConnection = async () => {
     setNetworkTesting(true);
@@ -2515,37 +2717,75 @@ const ConfigWindow: React.FC = () => {
                 { value: 'dark', label: t('config.theme_option_dark') },
               ]}
             />
-            <NumberField
-              label={t('config.field_blink_interval')}
-              value={get('live2d_render.blink_interval', 4000)}
-              onChange={(v) => setNested('live2d_render.blink_interval', v)}
-              min={100}
-              step={100}
-            />
             <ToggleField
               label={t('config.field_smart_positioning')}
               help={t('config.smart_positioning_help')}
               value={get('window.smart_positioning_enabled', true)}
               onChange={(v) => setNested('window.smart_positioning_enabled', v)}
             />
-            <ShortcutRecorder
-              value={get<string>('base.shortcut', 'CommandOrControl+Shift+A')}
-              defaultValue="CommandOrControl+Shift+A"
-              onChange={handleShortcutChange}
-            />
-            <ShortcutRecorder
-              value={get<string>('base.shortcut_nana', 'CommandOrControl+Shift+Q')}
-              defaultValue="CommandOrControl+Shift+Q"
-              onChange={handleNanaShortcutChange}
-              labelKey="config.field_shortcut_nana"
-              helpKey="config.shortcut_nana_help"
-            />
-            <ShortcutRecorder
-              value={get<string>('base.shortcut_broadcast', 'CommandOrControl+Shift+Z')}
-              defaultValue="CommandOrControl+Shift+Z"
-              onChange={handleBroadcastShortcutChange}
-              labelKey="config.field_shortcut_broadcast"
-              helpKey="config.shortcut_broadcast_help"
+            <ShortcutsDrawer
+              label={t('config.section_shortcuts')}
+              expanded={shortcutsExpanded}
+              onToggle={() => setShortcutsExpanded((v) => !v)}
+              configuredCount={[
+                get<string>('base.shortcut', ''),
+                get<string>('base.shortcut_nana', ''),
+                get<string>('base.shortcut_broadcast', ''),
+                get<string>('base.shortcut_chat', ''),
+                get<string>('base.shortcut_settings', ''),
+                get<string>('base.shortcut_memory', ''),
+              ].filter((v) => !!v).length}
+            >
+              <ShortcutRecorder
+                value={get<string>('base.shortcut', 'CommandOrControl+Shift+A')}
+                defaultValue="CommandOrControl+Shift+A"
+                onChange={handleShortcutChange}
+              />
+              <ShortcutRecorder
+                value={get<string>('base.shortcut_nana', 'CommandOrControl+Shift+Q')}
+                defaultValue="CommandOrControl+Shift+Q"
+                onChange={handleNanaShortcutChange}
+                labelKey="config.field_shortcut_nana"
+                helpKey="config.shortcut_nana_help"
+              />
+              <ShortcutRecorder
+                value={get<string>('base.shortcut_broadcast', 'CommandOrControl+Shift+Z')}
+                defaultValue="CommandOrControl+Shift+Z"
+                onChange={handleBroadcastShortcutChange}
+                labelKey="config.field_shortcut_broadcast"
+                helpKey="config.shortcut_broadcast_help"
+              />
+              <ShortcutRecorder
+                value={get<string>('base.shortcut_chat', 'CommandOrControl+Shift+W')}
+                defaultValue="CommandOrControl+Shift+W"
+                onChange={handleChatShortcutChange}
+                labelKey="config.field_shortcut_chat"
+                helpKey="config.shortcut_chat_help"
+              />
+              <ShortcutRecorder
+                value={get<string>('base.shortcut_settings', 'CommandOrControl+Shift+S')}
+                defaultValue="CommandOrControl+Shift+S"
+                onChange={handleSettingsShortcutChange}
+                labelKey="config.field_shortcut_settings"
+                helpKey="config.shortcut_settings_help"
+              />
+              <ShortcutRecorder
+                value={get<string>('base.shortcut_memory', 'CommandOrControl+Shift+N')}
+                defaultValue="CommandOrControl+Shift+N"
+                onChange={handleMemoryShortcutChange}
+                labelKey="config.field_shortcut_memory"
+                helpKey="config.shortcut_memory_help"
+              />
+            </ShortcutsDrawer>
+
+            {/* ── 内心独白 + 主动问候（合并分组，便于联动）── */}
+            <div style={{ ...sectionTitleStyle, marginTop: 24 }}>
+              {t('config.section_world_monologue')}
+            </div>
+            <ToggleField
+              label={t('config.field_world_monologue')}
+              value={get('world.enable_inner_monologue', true)}
+              onChange={(v) => setNested('world.enable_inner_monologue', v)}
             />
 
             {/* ── 主动对话（从独立页签合并）── */}
@@ -2557,6 +2797,16 @@ const ConfigWindow: React.FC = () => {
               value={get('proactive.enabled', true)}
               onChange={(v) => setNested('proactive.enabled', v)}
             />
+
+            {/* 内心独白优化的主动问候：仅当内心独白和主动对话都开启时显示 */}
+            {get('world.enable_inner_monologue', true) && get('proactive.enabled', true) && (
+              <ToggleField
+                label={t('config.field_enable_social_urge_gating')}
+                value={get('proactive.enable_social_urge_gating', true)}
+                onChange={(v) => setNested('proactive.enable_social_urge_gating', v)}
+                help={t('config.monologue_greeting_help')}
+              />
+            )}
             <NumberField
               label={t('config.field_check_interval')}
               value={get('proactive.tick_interval', 10)}
@@ -2687,7 +2937,7 @@ const ConfigWindow: React.FC = () => {
             />
             <SliderField
               label={t('config.field_temperature')}
-              value={get('ai.temperature', 0.7)}
+              value={get('ai.temperature', 0.70)}
               onChange={(v) => setNested('ai.temperature', v)}
               min={0}
               max={2}
@@ -2809,6 +3059,24 @@ const ConfigWindow: React.FC = () => {
                   onChange={(v) => setNested(`routing_matrix.${task.taskType}.endpoint`, v)}
                   placeholder={t('config.ph_endpoint')}
                 />
+                <SliderField
+                  label={t('config.field_temperature')}
+                  value={get(`routing_matrix.${task.taskType}.temperature`, get('ai.temperature', 0.70))}
+                  onChange={(v) => setNested(`routing_matrix.${task.taskType}.temperature`, v)}
+                  min={0}
+                  max={2}
+                  step={0.05}
+                  format={(v) => v.toFixed(2)}
+                  help={t('config.field_route_temperature_help')}
+                />
+                <NumberField
+                  label={t('config.field_max_tokens')}
+                  value={get(`routing_matrix.${task.taskType}.max_tokens`, get('ai.max_tokens', 2048))}
+                  onChange={(v) => setNested(`routing_matrix.${task.taskType}.max_tokens`, v)}
+                  min={64}
+                  step={64}
+                  help={t('config.field_route_max_tokens_help')}
+                />
               </CollapsibleSection>
               );
             })}
@@ -2838,10 +3106,10 @@ const ConfigWindow: React.FC = () => {
             </div>
             <NumberField
               label={t('config.field_tool_max_rounds')}
-              value={get('tools.max_rounds', 4)}
+              value={get('tools.max_rounds', 20)}
               onChange={(v) => setNested('tools.max_rounds', v)}
               min={1}
-              max={10}
+              max={20}
               step={1}
             />
             <div style={{ fontSize: 11, color: 'var(--panel-text-tertiary)', marginTop: -10, marginBottom: 14, lineHeight: 1.5 }}>
@@ -2894,6 +3162,9 @@ const ConfigWindow: React.FC = () => {
               value={get('tools.enable_cache', true)}
               onChange={(v) => setNested('tools.enable_cache', v)}
             />
+            <div style={{ fontSize: 11, color: 'var(--panel-text-tertiary)', marginTop: -10, marginBottom: 14, lineHeight: 1.5 }}>
+              {t('config.field_tool_enable_cache_help')}
+            </div>
             <NumberField
               label={t('config.field_tool_cache_ttl')}
               value={get('tools.cache_ttl_secs', 300)}
@@ -3133,6 +3404,7 @@ const ConfigWindow: React.FC = () => {
                 { value: 'keyword', label: t('config.opt_keyword') },
                 { value: 'vector', label: t('config.opt_vector') },
                 { value: 'hybrid', label: t('config.opt_hybrid') },
+                { value: 'graph', label: t('config.opt_graph') },
               ]}
             />
             <div style={{ fontSize: 11, color: 'var(--panel-text-tertiary)', marginTop: -10, marginBottom: 14, lineHeight: 1.5 }}>
@@ -3151,6 +3423,12 @@ const ConfigWindow: React.FC = () => {
             <div style={{ fontSize: 12, color: 'var(--panel-text-tertiary)', marginBottom: 14, lineHeight: 1.6 }}>
               {t('config.consolidation_description')}
             </div>
+            <ToggleField
+              label={t('config.field_world_consolidation')}
+              help={t('config.world_consolidation_help')}
+              value={get('world.enable_memory_consolidation', true)}
+              onChange={(v) => setNested('world.enable_memory_consolidation', v)}
+            />
             <NumberField
               label={t('config.field_stage1_threshold')}
               help={t('config.field_stage1_threshold_help')}
@@ -3178,7 +3456,7 @@ const ConfigWindow: React.FC = () => {
             <SliderField
               label={t('config.field_weight_recency')}
               help={t('config.field_weight_recency_help')}
-              value={get('memory.retrieval_weights.recency', 0.3)}
+              value={get('memory.retrieval_weights.recency', 0.25)}
               onChange={(v) => setNested('memory.retrieval_weights.recency', v)}
               min={0}
               max={1}
@@ -3188,7 +3466,7 @@ const ConfigWindow: React.FC = () => {
             <SliderField
               label={t('config.field_weight_relevance')}
               help={t('config.field_weight_relevance_help')}
-              value={get('memory.retrieval_weights.relevance', 0.5)}
+              value={get('memory.retrieval_weights.relevance', 0.4)}
               onChange={(v) => setNested('memory.retrieval_weights.relevance', v)}
               min={0}
               max={1}
@@ -3198,7 +3476,7 @@ const ConfigWindow: React.FC = () => {
             <SliderField
               label={t('config.field_weight_importance')}
               help={t('config.field_weight_importance_help')}
-              value={get('memory.retrieval_weights.importance', 0.2)}
+              value={get('memory.retrieval_weights.importance', 0.15)}
               onChange={(v) => setNested('memory.retrieval_weights.importance', v)}
               min={0}
               max={1}
@@ -3254,9 +3532,26 @@ const ConfigWindow: React.FC = () => {
                 <TextField
                   label={t('config.field_embedding_model')}
                   value={get('memory.embedding.model', 'BAAI/bge-m3')}
-                  onChange={(v) => setNested('memory.embedding.model', v)}
+                  onChange={(v) => {
+                    setNested('memory.embedding.model', v);
+                    // 命中内置云端模型注册表时自动填充维度
+                    const known = embeddingModels.find(
+                      (m) => m.source === 'cloud' && m.id === v,
+                    );
+                    if (known) setNested('memory.embedding.dimension', known.dimension);
+                  }}
                   placeholder={t('config.ph_embedding_model')}
+                  list="embedding-cloud-models"
                 />
+                <datalist id="embedding-cloud-models">
+                  {embeddingModels
+                    .filter((m) => m.source === 'cloud')
+                    .map((m) => (
+                      <option key={m.id} value={m.id}>
+                        {m.id} ({m.dimension})
+                      </option>
+                    ))}
+                </datalist>
                 <NumberField
                   label={t('config.field_embedding_dim')}
                   value={get('memory.embedding.dimension', 1024)}
@@ -3269,7 +3564,7 @@ const ConfigWindow: React.FC = () => {
               <>
                 <BrowseTextField
                   label={t('config.field_ollama_path')}
-                  value={get('memory.embedding.ollama_path', '')}
+                  value={get('memory.embedding.ollama_path', 'G:\\ollama\\ollama.exe')}
                   onChange={(v) => setNested('memory.embedding.ollama_path', v)}
                   placeholder="G:\\ollama\\ollama.exe"
                   onBrowse={async () => {
@@ -3441,8 +3736,108 @@ const ConfigWindow: React.FC = () => {
 
                 <ToggleField
                   label={t('config.field_ollama_auto_start')}
+                  help={t('config.field_ollama_auto_start_help')}
                   value={get('memory.embedding.ollama_auto_start', false)}
                   onChange={(v) => setNested('memory.embedding.ollama_auto_start', v)}
+                />
+              </>
+            )}
+
+            {/* 向量索引后端配置（local=内置 sqlite-vec / external=外部向量库） */}
+            <div style={{ ...sectionTitleStyle, marginTop: 28 }}>
+              {t('config.section_vector_store')}
+            </div>
+            <div style={{ fontSize: 12, color: 'var(--panel-text-tertiary)', marginBottom: 14, lineHeight: 1.6 }}>
+              {t('config.vector_store_description')}
+            </div>
+            <SelectField
+              label={t('config.field_vector_store_source')}
+              value={get<string>('memory.vector_store.source', 'local')}
+              onChange={(v) => setNested('memory.vector_store.source', v)}
+              options={[
+                { value: 'local', label: t('config.opt_vector_store_local') },
+                { value: 'external', label: t('config.opt_vector_store_external') },
+              ]}
+            />
+            {get<string>('memory.vector_store.source', 'local') === 'external' && (
+              <>
+                <TextField
+                  label={t('config.field_vector_store_url')}
+                  value={get('memory.vector_store.external_url', '')}
+                  onChange={(v) => setNested('memory.vector_store.external_url', v)}
+                  placeholder="http://localhost:6333"
+                />
+                <TextField
+                  label={t('config.field_vector_store_api_key')}
+                  type="password"
+                  value={get('memory.vector_store.api_key', '')}
+                  onChange={(v) => setNested('memory.vector_store.api_key', v)}
+                  placeholder={t('config.ph_vector_store_api_key')}
+                />
+                <TextField
+                  label={t('config.field_vector_store_collection')}
+                  value={get('memory.vector_store.collection', 'vivian_memories')}
+                  onChange={(v) => setNested('memory.vector_store.collection', v)}
+                  placeholder="vivian_memories"
+                />
+                <NumberField
+                  label={t('config.field_vector_store_hnsw_m')}
+                  value={get('memory.vector_store.hnsw_m', 16)}
+                  onChange={(v) => setNested('memory.vector_store.hnsw_m', v)}
+                  min={4}
+                  max={128}
+                  step={4}
+                />
+                <NumberField
+                  label={t('config.field_vector_store_ef_construction')}
+                  value={get('memory.vector_store.ef_construction', 200)}
+                  onChange={(v) => setNested('memory.vector_store.ef_construction', v)}
+                  min={64}
+                  max={1000}
+                  step={32}
+                />
+              </>
+            )}
+
+            {/* 独立精排（cross-encoder reranker）配置 */}
+            <div style={{ ...sectionTitleStyle, marginTop: 28 }}>
+              {t('config.section_rerank')}
+            </div>
+            <div style={{ fontSize: 12, color: 'var(--panel-text-tertiary)', marginBottom: 14, lineHeight: 1.6 }}>
+              {t('config.rerank_description')}
+            </div>
+            <ToggleField
+              label={t('config.field_rerank_enabled')}
+              help={t('config.field_rerank_enabled_help')}
+              value={get('memory.rerank.enabled', false)}
+              onChange={(v) => setNested('memory.rerank.enabled', v)}
+            />
+            {get('memory.rerank.enabled', false) && (
+              <>
+                <TextField
+                  label={t('config.field_rerank_endpoint')}
+                  value={get('memory.rerank.endpoint', 'http://localhost:11434')}
+                  onChange={(v) => setNested('memory.rerank.endpoint', v)}
+                  placeholder="http://localhost:11434"
+                />
+                <SelectField
+                  label={t('config.field_rerank_model')}
+                  value={get('memory.rerank.model', 'bge-reranker-v2-m3')}
+                  onChange={(v) => setNested('memory.rerank.model', v)}
+                  options={(() => {
+                    const cur = get('memory.rerank.model', 'bge-reranker-v2-m3');
+                    const set = new Set<string>(['bge-reranker-v2-m3', 'bge-reranker-base', ...ollamaModels]);
+                    if (cur && !set.has(cur)) set.add(cur);
+                    return Array.from(set).map((m) => ({ value: m, label: m }));
+                  })()}
+                />
+                <NumberField
+                  label={t('config.field_rerank_top_k')}
+                  value={get('memory.rerank.top_k', 20)}
+                  onChange={(v) => setNested('memory.rerank.top_k', v)}
+                  min={1}
+                  max={100}
+                  step={1}
                 />
               </>
             )}
@@ -3461,6 +3856,7 @@ const ConfigWindow: React.FC = () => {
                 { value: 'whisper', label: t('config.opt_whisper') },
                 { value: 'azure', label: t('config.opt_azure') },
                 { value: 'aliyun', label: t('config.opt_aliyun') },
+                { value: 'openai_whisper', label: t('config.opt_openai_whisper') },
               ]}
               labelExtra={
                 <button
@@ -3472,6 +3868,7 @@ const ConfigWindow: React.FC = () => {
                       whisper: 'whisper',
                       azure: 'azure',
                       aliyun: 'aliyun',
+                      openai_whisper: 'openai_whisper',
                     };
                     const cur = (get('speech_recognition.engine', 'winrt') as string) ?? 'winrt';
                     openAsrHelp(engineToBackend[cur] ?? 'winrt');
@@ -3537,7 +3934,7 @@ const ConfigWindow: React.FC = () => {
                 >
                   <button
                     onClick={toggleWhisperService}
-                    disabled={whisperServiceBusy}
+                    disabled={whisperServiceBusy || whisperService?.status === 'installing'}
                     style={{
                       padding: '6px 14px',
                       border: 'none',
@@ -3545,18 +3942,20 @@ const ConfigWindow: React.FC = () => {
                       background:
                         whisperService?.status === 'running'
                           ? '#e74c3c'
-                          : '#27ae60',
+                          : whisperService?.status === 'installing'
+                            ? '#e67e22'
+                            : '#27ae60',
                       color: '#fff',
                       fontSize: 12,
-                      cursor: whisperServiceBusy ? 'not-allowed' : 'pointer',
+                      cursor: whisperServiceBusy || whisperService?.status === 'installing' ? 'not-allowed' : 'pointer',
                       fontFamily: 'inherit',
-                      opacity: whisperServiceBusy ? 0.6 : 1,
+                      opacity: whisperServiceBusy || whisperService?.status === 'installing' ? 0.6 : 1,
                       display: 'inline-flex',
                       alignItems: 'center',
                       gap: 6,
                     }}
                   >
-                    {whisperServiceBusy && (
+                    {(whisperServiceBusy || whisperService?.status === 'installing') && (
                       <span
                         style={{
                           display: 'inline-block',
@@ -3574,13 +3973,15 @@ const ConfigWindow: React.FC = () => {
                       ? whisperServiceBusy
                         ? t('config.whisper_status_stopping')
                         : t('config.btn_whisper_stop')
-                      : whisperService?.status === 'starting'
-                        ? t('config.whisper_status_starting')
-                        : whisperService?.status === 'stopping'
-                          ? t('config.whisper_status_stopping')
-                          : whisperServiceBusy
-                            ? t('config.whisper_status_starting')
-                            : t('config.btn_whisper_start')}
+                      : whisperService?.status === 'installing'
+                        ? t('config.whisper_status_installing')
+                        : whisperService?.status === 'starting'
+                          ? t('config.whisper_status_starting')
+                          : whisperService?.status === 'stopping'
+                            ? t('config.whisper_status_stopping')
+                            : whisperServiceBusy
+                              ? t('config.whisper_status_starting')
+                              : t('config.btn_whisper_start')}
                   </button>
                   <span
                     style={{
@@ -3592,13 +3993,17 @@ const ConfigWindow: React.FC = () => {
                           ? 'rgba(39,174,96,0.15)'
                           : whisperService?.status === 'crashed'
                             ? 'rgba(231,76,60,0.15)'
-                            : 'var(--panel-bg-surface-elevated)',
+                            : whisperService?.status === 'installing'
+                              ? 'rgba(230,126,34,0.15)'
+                              : 'var(--panel-bg-surface-elevated)',
                       color:
                         whisperService?.status === 'running'
                           ? '#27ae60'
                           : whisperService?.status === 'crashed'
                             ? '#e74c3c'
-                            : 'var(--panel-text-secondary)',
+                            : whisperService?.status === 'installing'
+                              ? '#e67e22'
+                              : 'var(--panel-text-secondary)',
                     }}
                   >
                     {(() => {
@@ -3606,6 +4011,8 @@ const ConfigWindow: React.FC = () => {
                       switch (s) {
                         case 'running':
                           return t('config.whisper_status_running');
+                        case 'installing':
+                          return t('config.whisper_status_installing');
                         case 'starting':
                           return t('config.whisper_status_starting');
                         case 'stopping':
@@ -3945,6 +4352,35 @@ const ConfigWindow: React.FC = () => {
                     />
                   </>
                 )}
+              </>
+            )}
+
+            {(get('speech_recognition.engine', 'winrt') as string) === 'openai_whisper' && (
+              <>
+                <div style={{ ...sectionTitleStyle, marginTop: 16 }}>
+                  {t('config.section_openai_whisper')}
+                </div>
+                <TextField
+                  label={t('config.field_openai_whisper_api_key')}
+                  value={get('speech_recognition.openai_whisper.api_key', '')}
+                  onChange={(v) => setNested('speech_recognition.openai_whisper.api_key', v)}
+                  placeholder="sk-..."
+                  type="password"
+                />
+                <TextField
+                  label={t('config.field_openai_whisper_base_url')}
+                  value={get('speech_recognition.openai_whisper.base_url', 'https://api.openai.com')}
+                  onChange={(v) => setNested('speech_recognition.openai_whisper.base_url', v)}
+                  placeholder="https://api.openai.com"
+                />
+                <NumberField
+                  label={t('config.field_openai_whisper_max_seconds')}
+                  value={get('speech_recognition.openai_whisper.max_audio_seconds', 30)}
+                  onChange={(v) => setNested('speech_recognition.openai_whisper.max_audio_seconds', v)}
+                  min={5}
+                  max={60}
+                  step={5}
+                />
               </>
             )}
 
@@ -5184,7 +5620,14 @@ const ConfigWindow: React.FC = () => {
                 <SelectField
                   label={t('config.field_tts_language')}
                   value={ttsConfig.tts_language ?? ''}
-                  onChange={(v) => setTtsConfig({ ...ttsConfig, tts_language: v || null })}
+                  onChange={(v) => {
+                    const next = { ...ttsConfig, tts_language: v || null };
+                    // 选了 TTS 语言但显示语言为空时，自动填充中文（角色默认中文对话）
+                    if (v && !next.display_language) {
+                      next.display_language = 'zh';
+                    }
+                    setTtsConfig(next);
+                  }}
                   options={[
                     { value: '', label: t('config.opt_lang_same_as_display') },
                     { value: 'zh', label: '中文' },
@@ -5251,6 +5694,24 @@ const ConfigWindow: React.FC = () => {
                             label={t('config.field_endpoint')}
                             value={get('routing_matrix.translation.endpoint', '')}
                             onChange={(v) => setNested('routing_matrix.translation.endpoint', v)}
+                          />
+                          <SliderField
+                            label={t('config.field_temperature')}
+                            value={get('routing_matrix.translation.temperature', get('ai.temperature', 0.70))}
+                            onChange={(v) => setNested('routing_matrix.translation.temperature', v)}
+                            min={0}
+                            max={2}
+                            step={0.05}
+                            format={(v) => v.toFixed(2)}
+                            help={t('config.field_route_temperature_help')}
+                          />
+                          <NumberField
+                            label={t('config.field_max_tokens')}
+                            value={get('routing_matrix.translation.max_tokens', get('ai.max_tokens', 2048))}
+                            onChange={(v) => setNested('routing_matrix.translation.max_tokens', v)}
+                            min={64}
+                            step={64}
+                            help={t('config.field_route_max_tokens_help')}
                           />
                         </>
                       ) : (
@@ -5461,6 +5922,26 @@ const ConfigWindow: React.FC = () => {
               )}
             </div>
 
+            {/* ── 远程访问（Tailscale 场景）── */}
+            <div style={{ ...sectionTitleStyle, marginTop: 24 }}>
+              {t('config.section_remote_access')}
+            </div>
+            <ToggleField
+              label={t('config.field_remote_access_enabled')}
+              value={get<boolean>('network.remote_access.enabled', false)}
+              onChange={(v) => setNested('network.remote_access.enabled', v)}
+              help={t('config.help_remote_access_enabled')}
+            />
+            <NumberField
+              label={t('config.field_remote_access_port')}
+              value={get<number>('network.remote_access.port', 8080)}
+              onChange={(v) => setNested('network.remote_access.port', v)}
+              min={1024}
+              max={65535}
+              step={1}
+              help={t('config.help_remote_access_port')}
+            />
+
             {/* ── 网络搜索（已并入网络页签，多引擎混用）── */}
             <div style={{ ...sectionTitleStyle, marginTop: 24 }}>
               {t('config.section_web_search')}
@@ -5625,19 +6106,6 @@ const ConfigWindow: React.FC = () => {
                 {detectingLocation ? t('config.world_auto_detect_loading') : t('config.world_auto_detect')}
               </button>
             </div>
-            <div style={sectionTitleStyle}>{t('config.section_world_monologue')}</div>
-            <ToggleField
-              label={t('config.field_world_monologue')}
-              value={get('world.enable_inner_monologue', true)}
-              onChange={(v) => setNested('world.enable_inner_monologue', v)}
-            />
-            <div style={sectionTitleStyle}>{t('config.section_world_consolidation')}</div>
-            <ToggleField
-              label={t('config.field_world_consolidation')}
-              help={t('config.world_consolidation_help')}
-              value={get('world.enable_memory_consolidation', true)}
-              onChange={(v) => setNested('world.enable_memory_consolidation', v)}
-            />
 
           </>
         );
@@ -5718,7 +6186,23 @@ const ConfigWindow: React.FC = () => {
         overflow: 'hidden',
       }}
     >
-      <style>{`@keyframes gptsovits-spin{to{transform:rotate(360deg)}}`}</style>
+      <style>{`
+        @keyframes gptsovits-spin{to{transform:rotate(360deg)}}
+        @keyframes cfg-fade{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
+        .scrapbook input:focus,
+        .scrapbook select:focus,
+        .scrapbook textarea:focus {
+          outline: none;
+          border-color: var(--panel-accent) !important;
+          box-shadow: 0 0 0 2px var(--panel-accent-soft), var(--panel-shadow-card) !important;
+        }
+        .scrapbook button { cursor: pointer; }
+        .scrapbook button:hover:not(:disabled) { filter: brightness(1.06); }
+        .scrapbook button:active:not(:disabled) { transform: translateY(0.5px); }
+        @media (prefers-reduced-motion: reduce) {
+          .scrapbook * { animation: none !important; transition: none !important; }
+        }
+      `}</style>
       <div
         data-tauri-drag-region
         style={{
@@ -5863,6 +6347,7 @@ const ConfigWindow: React.FC = () => {
             flex: 1,
             overflowY: 'auto',
             padding: '20px 24px',
+            animation: 'cfg-fade 0.3s cubic-bezier(0.22,0.9,0.28,1)',
           }}
         >
           {tabContent}

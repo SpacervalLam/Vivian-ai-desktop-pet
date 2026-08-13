@@ -13,6 +13,7 @@ use serde_json::{json, Value};
 use crate::cross_character::{build_speaker_prefix, parse_any_speaker_prefix};
 use crate::error::VivianResult;
 use crate::memory::filter::MemoryFilter;
+use crate::memory::user_model::UserModelManager;
 use crate::memory::types::current_timestamp;
 use crate::memory::{estimate_tokens, staleness_text, MemoryManager, MemoryType, RetrievalStrategy};
 use crate::pipeline::base::{Runnable, RunnableConfig};
@@ -43,6 +44,11 @@ pub struct MemoryRetrievalStep {
     /// 可选的 LLM 路由器：注入后启用检索后验证（verifier），
     /// 用小模型过滤掉与问题无关的检索结果，减少幻觉噪声。
     pub router: Option<Arc<crate::providers::ModelRouter>>,
+    /// 用户认知模型：注入后启用多跳关联检索。
+    ///
+    /// 基础向量检索命中表面相似的记忆后，通过 UserModel 的特征/项目展开关联话题，
+    /// 再召回"概念相关但字面不相似"的旧记忆并合并，模拟"想起很久以前说过但能联系起来的内容"。
+    pub user_model: Option<Arc<UserModelManager>>,
 }
 
 impl MemoryRetrievalStep {
@@ -53,6 +59,7 @@ impl MemoryRetrievalStep {
             strategy: None,
             mind: None,
             router: None,
+            user_model: None,
         }
     }
 
@@ -67,6 +74,7 @@ impl MemoryRetrievalStep {
             strategy: None,
             mind: None,
             router: None,
+            user_model: None,
         }
     }
 
@@ -82,6 +90,7 @@ impl MemoryRetrievalStep {
             strategy: Some(strategy),
             mind: None,
             router: None,
+            user_model: None,
         }
     }
 
@@ -94,6 +103,12 @@ impl MemoryRetrievalStep {
     /// 注入 LLM 路由器，启用检索后验证（verifier）
     pub fn with_router(mut self, router: Arc<crate::providers::ModelRouter>) -> Self {
         self.router = Some(router);
+        self
+    }
+
+    /// 注入用户认知模型，启用多跳关联检索
+    pub fn with_user_model(mut self, user_model: Arc<UserModelManager>) -> Self {
+        self.user_model = Some(user_model);
         self
     }
 
@@ -122,6 +137,36 @@ impl MemoryRetrievalStep {
         }
 
         parts.join("\n\n")
+    }
+
+    /// 收集多跳关联检索的查询词。
+    ///
+    /// 优先使用 FastSemantic 产出的话题标签（语义分类，最贴近"用户此刻在聊什么"），
+    /// 不足时回退到对用户输入做轻量分词。返回的小写词用于在 UserModel 中匹配特征/项目。
+    fn collect_query_terms(state: &PipelineState) -> Vec<String> {
+        let mut terms: Vec<String> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        if let Some(fp) = &state.fast_perception {
+            for t in fp.topics.iter().take(4) {
+                let label = t.label.trim().to_lowercase();
+                if !label.is_empty() && seen.insert(label.clone()) {
+                    terms.push(label);
+                }
+            }
+        }
+
+        // 话题标签不足时，从用户输入提取关键词补充信号
+        if terms.len() < 2 && !state.user_input.is_empty() {
+            for tok in crate::memory::tokenize::tokenize(&state.user_input) {
+                let w = tok.to_lowercase();
+                if w.len() >= 2 && seen.insert(w.clone()) && terms.len() < 6 {
+                    terms.push(w);
+                }
+            }
+        }
+
+        terms
     }
 }
 
@@ -209,6 +254,126 @@ impl Runnable for MemoryRetrievalStep {
             // 未注入过滤器：截断到 5 条（保持原行为）
             (items.into_iter().take(5).collect(), None, false)
         };
+
+        // ── 多跳关联检索 ──
+        // 注入用户认知模型时启用：基础检索命中表面相似的记忆后，用当前话题展开
+        // UserModel 特征/项目的关联话题，再召回"概念相关但字面不相似"的旧记忆并合并。
+        // 这模拟"想起很久以前说过但能联系起来的内容"，是普通向量检索无法做到的。
+        let mut multi_hop_applied = false;
+        if let Some(um) = &self.user_model {
+            let terms = Self::collect_query_terms(&state);
+            if !terms.is_empty() {
+                let expanded = um.expand_related_topics(&terms);
+                if !expanded.is_empty() {
+                    multi_hop_applied = true;
+                    let query = format!("关联话题：{}", expanded.join("、"));
+                    // 控制补充量：多跳结果追加在基础结果之后，限制条数避免挤占 token 预算，
+                    // 且能让这些关联记忆自然进入后续截断窗口（总条数 ≤ 5 + 4）。
+                    let extra = self
+                        .memory
+                        .search_memories(&query, strategy, 4)
+                        .await
+                        .unwrap_or_default();
+                    // 按 id 去重合并，避免与基础检索结果重复
+                    let existing: std::collections::HashSet<&str> =
+                        filtered_items.iter().map(|m| m.id.as_str()).collect();
+                    let to_add: Vec<_> = extra
+                        .into_iter()
+                        .filter(|m| !existing.contains(m.id.as_str()))
+                        .collect();
+                    filtered_items.extend(to_add);
+                    tracing::debug!(
+                        "[MemoryRetrievalStep] 多跳关联检索：话题 {:?} 展开为 {:?}，补入 {} 条关联记忆",
+                        terms,
+                        expanded,
+                        filtered_items.len()
+                    );
+                }
+            }
+        }
+
+        // ── 图谱概念路（①）──
+        // 概念层由 ConsolidationStage3.5 写入 KnowledgeGraph 后，query 话题词可通过
+        // 图谱 Concept 实体展开到其关联的 evidence 记忆，实现"概念相关但字面不相似"的召回。
+        let mut graph_concept_applied = false;
+        let concept_seeds = Self::collect_query_terms(&state);
+        if !concept_seeds.is_empty() {
+            let terms: Vec<&str> = concept_seeds.iter().map(|s| s.as_str()).collect();
+            let concept_ids = self
+                .memory
+                .knowledge_graph()
+                .find_concept_memories(&terms, 4);
+            if !concept_ids.is_empty() {
+                let existing: std::collections::HashSet<&str> =
+                    filtered_items.iter().map(|m| m.id.as_str()).collect();
+                let concept_memories = self.memory.get_memories_by_ids(&concept_ids);
+                let to_add: Vec<_> = concept_memories
+                    .into_iter()
+                    .filter(|m| !existing.contains(m.id.as_str()))
+                    .collect();
+                if !to_add.is_empty() {
+                    graph_concept_applied = true;
+                    let add_count = to_add.len();
+                    filtered_items.extend(to_add);
+                    tracing::debug!(
+                        "[MemoryRetrievalStep] 图谱概念路：话题 {:?} 命中概念，补入 {} 条概念记忆",
+                        concept_seeds,
+                        add_count
+                    );
+                }
+            }
+        }
+
+        // ── 结果侧回跳（②）──
+        // 基础检索命中后，用命中记忆携带的主题标签（topic:xxx / concept:xxx）作为第二跳种子，
+        // 再检索"概念相关但第一轮未命中"的记忆并合并。与查询侧多跳互补：
+        // 查询侧从当前话题展开，结果侧从"已命中记忆"往回跳，形成迭代关联。
+        let mut result_reexpand_applied = false;
+        let reexpand_seeds: Vec<String> = filtered_items
+            .iter()
+            .flat_map(|m| {
+                let mut tags: Vec<String> = Vec::new();
+                for t in &m.tags {
+                    if let Some(rest) = t.strip_prefix("topic:") {
+                        tags.push(rest.to_string());
+                    } else if let Some(rest) = t.strip_prefix("concept:") {
+                        tags.push(rest.to_string());
+                    }
+                }
+                tags
+            })
+            .collect();
+        if !reexpand_seeds.is_empty() {
+            let query = format!("关联主题：{}", reexpand_seeds.join("、"));
+            let extra = self
+                .memory
+                .search_memories(&query, strategy, 4)
+                .await
+                .unwrap_or_default();
+            let existing: std::collections::HashSet<&str> =
+                filtered_items.iter().map(|m| m.id.as_str()).collect();
+            let to_add: Vec<_> = extra
+                .into_iter()
+                .filter(|m| !existing.contains(m.id.as_str()))
+                .filter(|m| {
+                    let stripped = parse_any_speaker_prefix(&m.content).0;
+                    let trimmed = stripped.trim();
+                    trimmed != state.user_input.trim()
+                        && (state.resolved_user_input.is_empty()
+                            || trimmed != state.resolved_user_input.trim())
+                })
+                .collect();
+            if !to_add.is_empty() {
+                result_reexpand_applied = true;
+                let add_count = to_add.len();
+                filtered_items.extend(to_add);
+                tracing::debug!(
+                    "[MemoryRetrievalStep] 结果侧回跳：由命中记忆标签 {:?} 补入 {} 条关联记忆",
+                    reexpand_seeds,
+                    add_count
+                );
+            }
+        }
 
         // ── 检索后验证（verifier）──
         // 若注入了 router，用小模型过滤掉与用户问题无关的检索结果，减少幻觉噪声。
@@ -305,16 +470,16 @@ impl Runnable for MemoryRetrievalStep {
                 .any(|t| t.eq_ignore_ascii_case("long_term"))
                 || mem.granularity.eq_ignore_ascii_case("LongTerm")
             {
-                "长期"
+                "印象"
             } else if mem
                 .tags
                 .iter()
                 .any(|t| t.eq_ignore_ascii_case("short_term"))
                 || mem.granularity.eq_ignore_ascii_case("ShortTerm")
             {
-                "短期"
+                "近期"
             } else {
-                "对话"
+                "已读"
             };
             let time = chrono::DateTime::from_timestamp(mem.timestamp as i64, 0)
                 .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
@@ -404,6 +569,9 @@ impl Runnable for MemoryRetrievalStep {
         state.metadata["memory_filter_session_id"] = json!(session_id);
         state.metadata["memory_filter_new_session"] = json!(new_session);
         state.metadata["memory_attention_reranked"] = json!(attention_applied);
+        state.metadata["memory_multi_hop"] = json!(multi_hop_applied);
+        state.metadata["memory_graph_concept"] = json!(graph_concept_applied);
+        state.metadata["memory_result_reexpand"] = json!(result_reexpand_applied);
 
         Ok(state.to_json())
     }
@@ -533,6 +701,16 @@ impl Default for UserMemorySavingRunnable {
 impl Runnable for UserMemorySavingRunnable {
     async fn ainvoke(&self, input: Value, _config: Option<RunnableConfig>) -> VivianResult<Value> {
         let mut state = PipelineState::from_json(input);
+
+        // 启动问候等内部指令跳过保存：避免把合成的问候指令当作"用户消息"写入记忆。
+        if state
+            .metadata
+            .get("skip_memory_save")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            return Ok(state.to_json());
+        }
 
         if !state.should_respond {
             return Ok(state.to_json());
@@ -737,6 +915,16 @@ impl Default for MemorySavingRunnable {
 impl Runnable for MemorySavingRunnable {
     async fn ainvoke(&self, input: Value, _config: Option<RunnableConfig>) -> VivianResult<Value> {
         let mut state = PipelineState::from_json(input);
+
+        // 启动问候等内部指令跳过保存：问候有独立的对话/记忆后处理，避免重复写入。
+        if state
+            .metadata
+            .get("skip_memory_save")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            return Ok(state.to_json());
+        }
 
         if !state.should_respond || state.is_command {
             return Ok(state.to_json());

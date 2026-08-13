@@ -17,7 +17,7 @@ import { useTranslation } from 'react-i18next';
  * 4. 推荐配置
  * 5. 常见问题（FAQ）
  */
-export type AsrBackendKey = 'winrt' | 'whisper' | 'azure' | 'aliyun';
+export type AsrBackendKey = 'winrt' | 'whisper' | 'azure' | 'aliyun' | 'openai_whisper';
 
 interface AsrHelpDrawerProps {
   open: boolean;
@@ -26,7 +26,7 @@ interface AsrHelpDrawerProps {
   onClose: () => void;
 }
 
-const BACKEND_KEYS: AsrBackendKey[] = ['winrt', 'whisper', 'azure', 'aliyun'];
+const BACKEND_KEYS: AsrBackendKey[] = ['winrt', 'whisper', 'azure', 'aliyun', 'openai_whisper'];
 
 const AsrHelpDrawer: React.FC<AsrHelpDrawerProps> = ({ open, initialBackend = 'winrt', onClose }) => {
   const { t } = useTranslation();
@@ -240,6 +240,7 @@ const BackendHelpContent: React.FC<{ backend: AsrBackendKey }> = ({ backend }) =
     whisper: ['server_url', 'api_format', 'api_key', 'max_audio_seconds', 'language'],
     azure: ['speech_key', 'speech_region', 'conversation_mode', 'max_audio_seconds', 'language'],
     aliyun: ['app_key', 'access_key_id', 'access_key_secret', 'max_audio_seconds', 'language'],
+    openai_whisper: ['api_key', 'base_url', 'max_audio_seconds', 'language'],
   };
 
   // 各后端的 prep 步骤数
@@ -248,6 +249,7 @@ const BackendHelpContent: React.FC<{ backend: AsrBackendKey }> = ({ backend }) =
     whisper: 6,
     azure: 4,
     aliyun: 5,
+    openai_whisper: 3,
   };
 
   // 各后端的 FAQ 问答数
@@ -256,6 +258,7 @@ const BackendHelpContent: React.FC<{ backend: AsrBackendKey }> = ({ backend }) =
     whisper: 4,
     azure: 3,
     aliyun: 3,
+    openai_whisper: 3,
   };
 
   const prepCount = prepCounts[backend];

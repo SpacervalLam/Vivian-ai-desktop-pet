@@ -64,6 +64,18 @@ fn is_left_mouse_button_down() -> bool {
     false
 }
 
+/// ESC 键当前是否按下（边缘检测线程轮询用，配合下降沿避免重复触发）
+#[cfg(windows)]
+fn is_escape_down() -> bool {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_ESCAPE};
+    unsafe { GetAsyncKeyState(VK_ESCAPE.0 as i32) as u16 & 0x8000 != 0 }
+}
+
+#[cfg(not(windows))]
+fn is_escape_down() -> bool {
+    false
+}
+
 /// 启动指定角色的光标追踪线程（每 ~60ms 一帧）。
 ///
 /// 每个角色窗口拥有独立的追踪线程，职责：
@@ -202,8 +214,15 @@ pub fn start_cursor_tracking(
             // - 拖动中：不穿透（全窗口响应，避免 mouseup 丢失）
             // - suspend_count > 0：不穿透（右键菜单/Toast/气泡/InputDialog 显示期间）
             // - 光标在中心 1/3 宽 × 4/9 高矩形内：不穿透（响应交互）
+            // - 左键按下：不穿透（可能是文件拖放，需让 OLE 拖放能检测到窗口；
+            //   子类化 WM_NCHITTEST 仍按中心矩形判定，外围区域照样 HTTRANSPARENT 穿透）
             // - 其他：穿透（外围区域事件传递到桌面/其他应用）
             let suspend_active = CLICK_THROUGH_SUSPEND_COUNT.load(Ordering::SeqCst) > 0;
+
+            // 左键按下时可能是从外部拖入文件，此时不能 set_ignore_cursor_events(true)，
+            // 否则 WS_EX_TRANSPARENT 会让 OLE 拖放跳过整个窗口（包括中心矩形），
+            // onDragDropEvent 的 enter 永远不触发。子类化仍保证外围区域穿透。
+            let possible_file_drop = is_left_mouse_button_down();
 
             let in_center_rect = if let (Ok(pos), Ok(size)) =
                 (win.outer_position(), win.outer_size())
@@ -231,7 +250,7 @@ pub fn start_cursor_tracking(
                 true // 获取窗口矩形失败时保守不穿透
             };
 
-            let should_ignore = !is_dragging && !suspend_active && !in_center_rect;
+            let should_ignore = !is_dragging && !suspend_active && !in_center_rect && !possible_file_drop;
 
             // 定期强制重应用：每 ~2s 无条件调用一次 set_ignore_cursor_events，
             // 防止 Tauri/WebView2/Windows 在焦点切换、窗口重绘等事件后重置 WS_EX_TRANSPARENT。
@@ -899,6 +918,10 @@ fn handle_side_chat_double_click(app: &AppHandle, x: i32, y: i32) {
     SIDE_CHAT_LOCKED.store(new_locked, Ordering::SeqCst);
     let _ = app.emit("sidechat:lock_changed", json!({ "locked": new_locked }));
     tracing::info!("[side_chat_hook] 双击切换锁定 → {new_locked}");
+    // 解锁时立即收起隐藏（锁定时不动作）
+    if !new_locked {
+        hide_side_chat_slide(&win);
+    }
 }
 
 /// 启动 side_chat 全局鼠标 Hook（hook 线程 + 消费线程，幂等）。
@@ -1051,6 +1074,8 @@ pub fn start_side_chat_edge_watcher(app: AppHandle) -> Result<(), String> {
 
         let mut hide_countdown: u32 = 0;
         let mut tick: u32 = 0;
+        // ESC 下降沿跟踪：仅在 false→true 跳变时触发解锁，避免按住时重复触发
+        let mut esc_prev = false;
         // 缓存窗口所在显示器的原点与尺寸（物理像素）
         let mut mon: Option<(i32, i32, i32, i32)> = None;
 
@@ -1105,14 +1130,19 @@ pub fn start_side_chat_edge_watcher(app: AppHandle) -> Result<(), String> {
 
             // 光标是否在窗口左侧 20px 竖条内（含容差）：解锁时仅在此区域保持常驻，
             // 光标离开此区域（向右进入窗口主体或移出窗口）即开始收起倒计时
-            let in_left_strip =
+            let (in_left_strip, in_window) =
                 if let (Ok(pos), Ok(size)) = (win.outer_position(), win.outer_size()) {
-                    cx >= pos.x - 4
+                    let strip = cx >= pos.x - 4
                         && cx <= pos.x + 20
                         && cy >= pos.y - 4
-                        && cy <= pos.y + size.height as i32 + 4
+                        && cy <= pos.y + size.height as i32 + 4;
+                    let full = cx >= pos.x
+                        && cx <= pos.x + size.width as i32
+                        && cy >= pos.y
+                        && cy <= pos.y + size.height as i32;
+                    (strip, full)
                 } else {
-                    false
+                    (false, false)
                 };
 
             if !visible {
@@ -1142,6 +1172,16 @@ pub fn start_side_chat_edge_watcher(app: AppHandle) -> Result<(), String> {
                         tracing::info!("[side_chat_edge] 光标离开，自动隐藏");
                     }
                 }
+
+                // 鼠标悬浮在窗口上 + ESC 下降沿：锁定→解锁并立即收起隐藏
+                let esc_now = is_escape_down();
+                if esc_now && !esc_prev && locked && in_window {
+                    SIDE_CHAT_LOCKED.store(false, Ordering::SeqCst);
+                    let _ = app.emit("sidechat:lock_changed", json!({ "locked": false }));
+                    hide_side_chat_slide(&win);
+                    tracing::info!("[side_chat_edge] 悬浮时按 ESC 解锁并隐藏");
+                }
+                esc_prev = esc_now;
             }
 
             thread::sleep(Duration::from_millis(60));
@@ -1880,11 +1920,29 @@ pub fn find_safe_position(
 
                 // 收集其他桌宠窗口信息（用于避让区域），排除自己。
                 // 与自己一致，只取中央 1/3 宽度足迹，两侧透明区不参与避让。
-                let other_pet_windows: Vec<(i32, i32, i32, i32)> = all_pet_windows
+                let mut other_pet_windows: Vec<(i32, i32, i32, i32)> = all_pet_windows
                     .iter()
                     .filter(|(hwnd, _, _, _, _)| *hwnd != self_hwnd)
                     .map(|&(_, px, py, pw, ph)| (px + pw / 3, py, (pw / 3).max(1), ph))
                     .collect();
+
+                // 追加 ChatWindow（微信聊天窗口）和 SideChatPanel（侧边聊天面板）
+                // 的完整矩形作为避让区域，防止桌宠移动到这些窗口上方遮挡用户视图。
+                // 桌宠窗口用中央 1/3 足迹，但这些聊天窗口整体都有可见内容，用完整矩形。
+                for win_label in ["chat", "side_chat"] {
+                    if let Some(ui_win) = app.get_webview_window(win_label) {
+                        if let (Ok(pos), Ok(size)) = (ui_win.outer_position(), ui_win.outer_size()) {
+                            if size.width > 0 && size.height > 0 {
+                                other_pet_windows.push((
+                                    pos.x,
+                                    pos.y,
+                                    size.width as i32,
+                                    size.height as i32,
+                                ));
+                            }
+                        }
+                    }
+                }
 
                 // WDA失败时需要erase回退（但这种情况下评分可能不公平，
                 // 因此提高移动阈值避免乒乓）

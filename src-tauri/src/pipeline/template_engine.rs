@@ -379,7 +379,7 @@ pub fn section_schema() -> PromptSectionSchema {
             id: "dynamic_behavior",
             name: "Dynamic Behavior",
             i18n_key: "dynamic_behavior",
-            layer: SectionLayer::Mind,
+            layer: SectionLayer::UserProfile,
             section_type: SectionType::Dynamic,
             optional: true,
         },
@@ -556,8 +556,11 @@ fn extract_section_content(id: &str, parts: &PromptParts, lang: &str) -> String 
             }
         },
         "output_format" => {
-            // 与 build_prompt 保持同步：原生 FC 或原生 Schema 路径下不注入 OUTPUT_FORMAT
-            if parts.enable_native_fc || parts.has_native_schema {
+            // 与 build_prompt 保持同步：原生 Schema 路径或原生 FC 路径（有工具）下不注入 OUTPUT_FORMAT
+            if parts.has_native_schema
+                || (parts.enable_native_fc
+                    && parts.tools.as_deref().map_or(false, |t| !t.is_empty()))
+            {
                 String::new()
             } else {
                 format!(

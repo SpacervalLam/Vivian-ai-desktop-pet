@@ -46,10 +46,14 @@ pub fn get_all_config(state: State<'_, Arc<AppState>>) -> Result<Value, String> 
 pub fn save_config(state: State<'_, Arc<AppState>>) -> Result<(), String> {
     let config = state.config.read();
     config.save().map_err(err_str)?;
-    // 配置可能变更了模型/路由，清空视觉能力探测缓存让下次发图重新探测
-    if let Some(router) = state.model_router.read().as_ref() {
-        router.clear_vision_capability_cache();
-    }
+    drop(config);
+    // 配置已变更，热重载全局 HTTP 客户端的代理设置（影响天气/Edge TTS/URL 抓取等境外请求）
+    let pc = crate::network::proxy::ProxyConfig::from_app_config(
+        &state.config.read().get_all(),
+    );
+    crate::network::http_client::reload_global_client(pc);
+    // 远程访问配置可能已变更（启用开关 / 端口），同步服务器状态
+    crate::remote::sync_remote_server(state.inner().clone());
     Ok(())
 }
 
@@ -58,10 +62,6 @@ pub fn save_config(state: State<'_, Arc<AppState>>) -> Result<(), String> {
 pub fn reload_config(state: State<'_, Arc<AppState>>) -> Result<(), String> {
     let config = state.config.read();
     config.reload().map_err(err_str)?;
-    // 重载后模型可能已变更，清空视觉能力探测缓存让下次发图重新探测
-    if let Some(router) = state.model_router.read().as_ref() {
-        router.clear_vision_capability_cache();
-    }
     Ok(())
 }
 
@@ -282,6 +282,47 @@ pub async fn get_image_data_url(image_path: String) -> Result<Option<String>, St
         data_dir.join(p)
     };
     image_to_data_url(&abs)
+}
+
+/// 通过文件扩展名检测音频 MIME 类型
+fn detect_audio_mime(path: &std::path::Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_lowercase())
+        .as_deref()
+    {
+        Some("webm") => "audio/webm",
+        Some("ogg") => "audio/ogg",
+        Some("mp4") | Some("m4a") => "audio/mp4",
+        Some("wav") => "audio/wav",
+        Some("mp3") => "audio/mpeg",
+        Some("flac") => "audio/flac",
+        _ => "audio/webm",
+    }
+}
+
+/// 读取已保存的音频文件并返回 data URL
+///
+/// `audio_path` 为相对 `<user_data_dir>` 的路径（如 `audio/xxx.webm`），
+/// 也接受绝对路径。供聊天窗口加载历史语音消息播放使用。
+#[tauri::command]
+pub async fn get_audio_data_url(audio_path: String) -> Result<Option<String>, String> {
+    let p = std::path::Path::new(&audio_path);
+    let abs = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        let data_dir = crate::utils::path::get_user_data_dir();
+        data_dir.join(p)
+    };
+    let bytes = match std::fs::read(&abs) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("读取音频文件失败: {}", e)),
+    };
+    let mime = detect_audio_mime(&abs);
+    let b64 = STANDARD.encode(&bytes);
+    Ok(Some(format!("data:{};base64,{}", mime, b64)))
 }
 
 /// 清除用户自定义头像（删除文件 + 清空配置）

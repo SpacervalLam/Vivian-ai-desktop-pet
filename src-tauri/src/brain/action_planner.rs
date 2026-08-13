@@ -536,7 +536,7 @@ impl ActionExecutor {
             char_id, action_id, tool_name, rationale, user_emotion, idle_seconds, user_present
         ));
         let messages = vec![system, user];
-        let req = LLMRequest::new("action_judge", messages);
+        let req = LLMRequest::new("reasoning", messages);
         let resp = router.generate(req).await?;
         let text = resp.trim().to_lowercase();
         Ok(text.starts_with("yes") || text.contains("是") || text == "y")

@@ -1,6 +1,25 @@
 import { create } from 'zustand';
 import type { MoodState } from '../types';
 
+/** voiceEnabled 的持久化 key（右键菜单运行时静音状态，跨重启保留） */
+const VOICE_ENABLED_STORAGE_KEY = 'vivian.voiceEnabled';
+
+const loadPersistedVoiceEnabled = (): boolean => {
+  try {
+    return localStorage.getItem(VOICE_ENABLED_STORAGE_KEY) === 'true';
+  } catch {
+    return false;
+  }
+};
+
+export const hasPersistedVoiceEnabled = (): boolean => {
+  try {
+    return localStorage.getItem(VOICE_ENABLED_STORAGE_KEY) !== null;
+  } catch {
+    return false;
+  }
+};
+
 /** 已结算的气泡段（从流式气泡中分离出来，独立显示并自动关闭） */
 export interface SettledBubble {
   id: number;
@@ -90,7 +109,7 @@ export const useAppStore = create<AppState>((set) => ({
   isInitialized: false,
   isThinking: false,
   isListening: false,
-  voiceEnabled: false,
+  voiceEnabled: loadPersistedVoiceEnabled(),
   ttsEnabled: false,
   currentBubble: null,
   bubbleCrossCharacter: false,
@@ -110,7 +129,14 @@ export const useAppStore = create<AppState>((set) => ({
   setInitialized: (value) => set({ isInitialized: value }),
   setThinking: (value) => set({ isThinking: value }),
   setListening: (value) => set({ isListening: value }),
-  setVoiceEnabled: (value) => set({ voiceEnabled: value }),
+  setVoiceEnabled: (value) => {
+    try {
+      localStorage.setItem(VOICE_ENABLED_STORAGE_KEY, value ? 'true' : 'false');
+    } catch {
+      /* ignore */
+    }
+    set({ voiceEnabled: value });
+  },
   setTtsEnabled: (value) => set({ ttsEnabled: value }),
 
   showBubble: (text) => {

@@ -12,6 +12,7 @@ pub mod memory;
 pub mod metrics;
 pub mod mind;
 pub mod mind_inspector;
+pub mod notebook;
 pub mod ollama;
 pub mod persona;
 pub mod presence;

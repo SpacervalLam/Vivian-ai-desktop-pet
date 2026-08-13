@@ -63,10 +63,11 @@ pub enum ConfirmationRisk {
     High,
 }
 
-/// pending 请求条目：oneshot sender + 创建时间（用于 TTL 清理）
+/// pending 请求条目：oneshot sender + 创建时间（用于 TTL 清理）+ 请求描述（供远程端轮询展示）
 struct PendingEntry {
     sender: oneshot::Sender<ConfirmationResponse>,
     created_at: Instant,
+    request: ConfirmationRequest,
 }
 
 /// 工具确认注册表
@@ -94,7 +95,7 @@ impl ToolConfirmationRegistry {
     /// - `request_id`：用于 emit 事件给前端
     /// - `receiver`：await 此 receiver 获取用户选择（Deny/AllowOnce/AllowAlways）
     ///   receiver 在 sender 被 drop 时返回 `Err`，表示用户未响应（如关闭窗口或 TTL 清理）
-    pub fn create_request(&self) -> (u64, oneshot::Receiver<ConfirmationResponse>) {
+    pub fn create_request(&self, request: ConfirmationRequest) -> (u64, oneshot::Receiver<ConfirmationResponse>) {
         let id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
         // 惰性清理过期请求，避免 pending 永驻
@@ -104,9 +105,24 @@ impl ToolConfirmationRegistry {
             PendingEntry {
                 sender: tx,
                 created_at: Instant::now(),
+                request,
             },
         );
         (id, rx)
+    }
+
+    /// 列出所有 pending 请求（供远程端轮询展示确认 toast）
+    ///
+    /// 返回按创建顺序排列的请求快照，附带 request_id。
+    pub fn list_pending(&self) -> Vec<ConfirmationRequest> {
+        self.cleanup_expired_locked();
+        let pending = self.pending.lock();
+        let mut list: Vec<ConfirmationRequest> = pending
+            .values()
+            .map(|e| e.request.clone())
+            .collect();
+        list.sort_by_key(|r| r.request_id);
+        list
     }
 
     /// 解决一个 pending 请求
@@ -215,7 +231,16 @@ mod tests {
     #[tokio::test]
     async fn test_create_and_resolve() {
         let registry = ToolConfirmationRegistry::new();
-        let (id, mut rx) = registry.create_request();
+        let req = ConfirmationRequest {
+            request_id: 0,
+            tool: "read_file".to_string(),
+            arguments: serde_json::json!({}),
+            reason: "test".to_string(),
+            risk_level: ConfirmationRisk::Low,
+            char_id: "vivian".to_string(),
+            allow_always_scope: "session".to_string(),
+        };
+        let (id, mut rx) = registry.create_request(req);
 
         // 在另一个"线程"（此处用同步调用模拟）解决请求
         let resolved = registry.resolve_request(id, ConfirmationResponse::AllowOnce);
@@ -235,7 +260,16 @@ mod tests {
     #[tokio::test]
     async fn test_cancel_drops_sender() {
         let registry = ToolConfirmationRegistry::new();
-        let (id, mut rx) = registry.create_request();
+        let req = ConfirmationRequest {
+            request_id: 0,
+            tool: "read_file".to_string(),
+            arguments: serde_json::json!({}),
+            reason: "test".to_string(),
+            risk_level: ConfirmationRisk::Low,
+            char_id: "vivian".to_string(),
+            allow_always_scope: "session".to_string(),
+        };
+        let (id, mut rx) = registry.create_request(req);
         registry.cancel_request(id);
         // sender 被 drop，receiver 收到 Err
         assert!(rx.try_recv().is_err());

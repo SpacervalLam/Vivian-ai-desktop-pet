@@ -14,7 +14,7 @@
 //! 4. **Ownership**：发起方 Owner 若已结束会话，对方默认不重新拉起，
 //!    除非 Continuation Score > 0.8
 //! 5. **CloseReason**：关闭时记录原因（GoodNight/GoodBye/NoResponse/Timeout/...），
-//!    由关键词检测（规则）+ LLM 兜底判定共同决定，触发不同后续行为
+//!    由 `IntentJudge`（规则预检 + LLM 意图判断）共同决定，触发不同后续行为
 //! 6. **通用性**：`pair_key` 已支持 "user" 固定标识，User↔Agent 与 Agent↔Agent
 //!    共用同一套状态机
 //!
@@ -26,7 +26,7 @@
 //!   `start_or_continue` 拿到会话，think 完成后调 `update_after_round`
 //! - 会话进入 Cooling 时，工具返回值标记 `conv_state="cooling"`，A 的 LLM 自己决定下一步
 //! - Cooling 超时由 `sweep_cooling` 清理（挂在 proactive_tick 上）
-//! - 关键词检测命中（晚安/再见/打断）→ 立即 `close_with_reason`
+//! - `IntentJudge` 命中关闭意图（晚安/再见/打断/冲突/话题切换等）→ 立即 `close_with_reason`
 //! - 用户超时无响应 → `sweep_user_session_timeouts` → close(Timeout)
 //! - Episode 封包：会话 close 时触发 `seal_episode`，让经历边界对齐会话边界
 
@@ -35,7 +35,6 @@ pub mod integrity;
 pub mod manager;
 pub mod session;
 
-pub use evaluator::detect_close_reason;
 pub use manager::{maybe_mark_open_loop, ConversationManager, CONVERSATION_MANAGER, TOPIC_PENDING};
 pub use session::{CloseReason, Conversation, ConversationState, ResponseMode};
 

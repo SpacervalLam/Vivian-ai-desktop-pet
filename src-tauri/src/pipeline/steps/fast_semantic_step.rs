@@ -56,7 +56,9 @@ impl Runnable for FastSemanticStep {
                         perception.guidance
                     );
                 }
-                state.fast_perception = Some(perception);
+                state.fast_perception = Some(perception.clone());
+                // 同步填充认知知识需求评估（FastPerceptionResult 已包含 epistemic_assessment）
+                state.epistemic_assessment = Some(perception.epistemic_assessment);
             }
             Err(e) => {
                 tracing::warn!(

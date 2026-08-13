@@ -9,10 +9,12 @@
 //! RRF（Reciprocal Rank Fusion）对分数尺度不敏感，适合融合不同打分体系。
 
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use jieba_rs::Jieba;
 use once_cell::sync::Lazy;
+use parking_lot::Mutex;
 
 use super::graph_store::KnowledgeGraph;
 use super::relational_recall::build_relational_arm;
@@ -22,6 +24,10 @@ use super::vector_search::MemoryVectorStore;
 
 /// RRF 常数：典型值 60，越大会让低排名项权重越大
 const RRF_K: f64 = 60.0;
+
+/// 精确实体/专名命中时的 fused_score 放大系数。
+/// 用于让专有名词查询（如人名/产品名）能命中对应记忆，弥补长文本稀释向量相似度的问题。
+const ENTITY_BOOST: f64 = 3.0;
 
 /// 检索结果归属的认知层级
 ///
@@ -67,6 +73,48 @@ const BM25_B: f64 = 0.75;
 
 /// 全局 jieba 实例（与 filter.rs 共享）
 static JIEBA: Lazy<Jieba> = Lazy::new(Jieba::new);
+
+/// 单条记忆的分词结果缓存：词频表 + 总词数
+struct DocTokens {
+    freqs: HashMap<String, usize>,
+    token_count: usize,
+}
+
+/// 分词缓存：key = memory_id，value = (内容指纹, 分词结果)。
+/// 指纹由 content/tags/description 哈希得到，记忆内容变更后指纹不同会自动重算，
+/// 避免每次对话都对全部候选记忆重复 jieba 分词。
+/// 有界容量，超出阈值整体清空（分词重建成本可接受，换取内存上界）。
+static TOKEN_CACHE: Lazy<Mutex<HashMap<String, (u64, DocTokens)>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+/// 分词缓存最大条目数
+const TOKEN_CACHE_MAX: usize = 8000;
+
+/// 计算记忆内容指纹（content + tags + description 的哈希）
+fn content_fingerprint(content: &str, tags: &[String], desc: &Option<String>) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    content.hash(&mut h);
+    tags.hash(&mut h);
+    desc.hash(&mut h);
+    h.finish()
+}
+
+/// 对单条记忆分词，返回 (词频表, 总词数)
+fn tokenize_entry(e: &MemoryItem) -> (HashMap<String, usize>, usize) {
+    let mut tokens = tokenize(&e.content);
+    for tag in &e.tags {
+        tokens.extend(tokenize(tag));
+    }
+    if let Some(desc) = &e.description {
+        tokens.extend(tokenize(desc));
+    }
+    let len = tokens.len();
+    let mut freqs = HashMap::with_capacity(tokens.len());
+    for t in tokens {
+        *freqs.entry(t).or_insert(0) += 1;
+    }
+    (freqs, len)
+}
 
 /// 检索五因子加权配置
 ///
@@ -122,6 +170,50 @@ impl RetrievalWeights {
     }
 }
 
+/// 结构化/元数据过滤条件（企业级检索预过滤）。
+///
+/// 在混合检索前按 memory_type / 标签 / 时间窗口对候选记忆做精确过滤，
+/// 使调用方可以定向检索（如"只要重要事件""只要某标签的近期记忆"）。
+/// 所有字段均为可选；命中任一字段即参与 AND 语义（多条件同时满足）。
+#[derive(Debug, Clone, Default)]
+pub struct MemoryRetrievalFilter {
+    /// 仅保留这些 memory_type（空/None = 不限）
+    pub memory_types: Option<Vec<String>>,
+    /// 命中任一标签即可（空/None = 不限）
+    pub tags_any: Option<Vec<String>>,
+    /// 仅保留 timestamp >= time_after
+    pub time_after: Option<f64>,
+    /// 仅保留 timestamp < time_before
+    pub time_before: Option<f64>,
+}
+
+impl MemoryRetrievalFilter {
+    /// 判断一条记忆是否满足过滤条件
+    pub fn matches(&self, item: &MemoryItem) -> bool {
+        if let Some(types) = &self.memory_types {
+            if !types.iter().any(|t| t == &item.memory_type) {
+                return false;
+            }
+        }
+        if let Some(tags) = &self.tags_any {
+            if !tags.iter().any(|t| item.tags.iter().any(|it| it == t)) {
+                return false;
+            }
+        }
+        if let Some(after) = self.time_after {
+            if item.timestamp < after {
+                return false;
+            }
+        }
+        if let Some(before) = self.time_before {
+            if item.timestamp >= before {
+                return false;
+            }
+        }
+        true
+    }
+}
+
 /// 单条检索结果（融合后）
 pub struct RetrievalHit {
     pub item: MemoryItem,
@@ -161,6 +253,9 @@ pub fn hybrid_search(
         (Some(emb), Some(store)) if !store.is_empty() => vector_search(store, emb, entries, candidate_k),
         _ => Vec::new(),
     };
+    // 实体/专名补充召回路：从 query 提取显著词（人名/产品名等），对每个显著词单独做
+    // 词面检索，补回长 query 中被 BM25 稀释的专名命中。作为第四路参与 RRF 融合。
+    let entity_hits = entity_arm_search(entries, query, candidate_k);
 
     // 图谱路：仅当查询为关系型（"谁投资了X"/"X和Y的关系"）时命中
     let graph_hits = match graph {
@@ -174,7 +269,7 @@ pub fn hybrid_search(
         None => Vec::new(),
     };
 
-    let fused = rrf_fuse(bm25_hits, vector_hits, graph_hits);
+    let fused = rrf_fuse(bm25_hits, vector_hits, graph_hits, entity_hits);
     let mut reranked = rerank(fused, query);
 
     apply_post_graph_compensation(&mut reranked, entries, query, 2, 0.30);
@@ -235,38 +330,30 @@ fn bm25_search(entries: &[MemoryItem], query: &str, k: usize) -> Vec<(String, f6
         return Vec::new();
     }
 
-    // 计算每条记忆的 token 列表与长度
-    let doc_tokens: Vec<Vec<String>> = entries
-        .iter()
-        .map(|e| {
-            let mut tokens = tokenize(&e.content);
-            for tag in &e.tags {
-                tokens.extend(tokenize(tag));
+    // 从缓存获取每条记忆的分词频次与长度，命中且指纹一致时跳过重复分词
+    let mut cache = TOKEN_CACHE.lock();
+    let mut doc_freqs: Vec<HashMap<String, usize>> = Vec::with_capacity(entries.len());
+    let mut doc_lens: Vec<usize> = Vec::with_capacity(entries.len());
+    for e in entries {
+        let fp = content_fingerprint(&e.content, &e.tags, &e.description);
+        if let Some((cached_fp, dt)) = cache.get(&e.id) {
+            if *cached_fp == fp {
+                doc_freqs.push(dt.freqs.clone());
+                doc_lens.push(dt.token_count);
+                continue;
             }
-            if let Some(desc) = &e.description {
-                tokens.extend(tokenize(desc));
-            }
-            tokens
-        })
-        .collect();
-
-    let doc_freqs: Vec<HashMap<String, usize>> = doc_tokens
-        .iter()
-        .map(|tokens| {
-            let mut m = HashMap::new();
-            for t in tokens {
-                *m.entry(t.clone()).or_insert(0) += 1;
-            }
-            m
-        })
-        .collect();
+        }
+        let (freqs, len) = tokenize_entry(e);
+        doc_lens.push(len);
+        doc_freqs.push(freqs.clone());
+        cache.insert(e.id.clone(), (fp, DocTokens { freqs, token_count: len }));
+    }
+    if cache.len() > TOKEN_CACHE_MAX {
+        cache.clear();
+    }
 
     let n_docs = entries.len() as f64;
-    let avg_dl: f64 = doc_tokens
-        .iter()
-        .map(|t| t.len() as f64)
-        .sum::<f64>()
-        / n_docs.max(1.0);
+    let avg_dl: f64 = doc_lens.iter().map(|&l| l as f64).sum::<f64>() / n_docs.max(1.0);
 
     // IDF（BM25 变体，避免分母为 0）
     let mut df: HashMap<String, usize> = HashMap::new();
@@ -288,7 +375,7 @@ fn bm25_search(entries: &[MemoryItem], query: &str, k: usize) -> Vec<(String, f6
         .enumerate()
         .map(|(i, e)| {
             let freqs = &doc_freqs[i];
-            let dl = doc_tokens[i].len() as f64;
+            let dl = doc_lens[i] as f64;
             let norm = 1.0 - BM25_B + BM25_B * (dl / avg_dl.max(1.0));
             let mut score = 0.0;
             for term in &query_terms {
@@ -325,14 +412,64 @@ fn vector_search(
         .collect()
 }
 
+/// 实体/专名补充召回路（查询增强）
+///
+/// 从 query 中提取"显著词"（非纯中文短词，如人名/产品名 "AlenTinn"，或长度 ≥ 3 的中文词），
+/// 对每个显著词在记忆 content/description/tags 中做词面出现检索，合并为一路候选。
+///
+/// 价值：长 query 中稀有专名会被 BM25 的 IDF 稀释（专名只在极少数文档中出现，
+/// 但和 query 其它共现词一起打分时未必能排进 top-k）。本路把专名单独作为检索词，
+/// 补回被稀释的专名命中，作为 RRF 的第四路参与融合。
+fn entity_arm_search(entries: &[MemoryItem], query: &str, k: usize) -> Vec<(String, f64)> {
+    let query_tokens: std::collections::HashSet<String> = tokenize(query).into_iter().collect();
+    if query_tokens.is_empty() {
+        return Vec::new();
+    }
+    // 仅保留显著词作为独立检索词
+    let significant: Vec<&String> = query_tokens
+        .iter()
+        .filter(|t| {
+            t.chars().count() >= 3 && t.chars().any(|c| !is_cjk(c))
+        })
+        .collect();
+    if significant.is_empty() {
+        return Vec::new();
+    }
+
+    let mut scored: Vec<(String, f64)> = Vec::new();
+    for e in entries {
+        let mut haystack = e.content.to_lowercase();
+        if let Some(desc) = &e.description {
+            haystack.push(' ');
+            haystack.push_str(&desc.to_lowercase());
+        }
+        if !e.tags.is_empty() {
+            haystack.push(' ');
+            haystack.push_str(&e.tags.join(" ").to_lowercase());
+        }
+        // 命中的显著词越多分越高
+        let hits = significant
+            .iter()
+            .filter(|t| haystack.contains(t.as_str()))
+            .count();
+        if hits > 0 {
+            scored.push((e.id.clone(), hits as f64));
+        }
+    }
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    scored.truncate(k);
+    scored
+}
+
 /// RRF 融合三路检索结果
 ///
-/// 输入：bm25_hits / vector_hits / graph_hits 已各自按 score 降序排列
+/// 输入：bm25_hits / vector_hits / graph_hits / entity_hits 已各自按 score 降序排列
 /// 输出：融合后的 (memory_id, bm25_score, vector_score, graph_score, fused_score) 列表，按 fused 降序
 fn rrf_fuse(
     bm25_hits: Vec<(String, f64)>,
     vector_hits: Vec<(String, f64)>,
     graph_hits: Vec<(String, f64)>,
+    entity_hits: Vec<(String, f64)>,
 ) -> Vec<(String, f64, f64, f64, f64)> {
     use std::collections::BTreeMap;
 
@@ -348,6 +485,10 @@ fn rrf_fuse(
     for (rank, (id, score)) in graph_hits.iter().enumerate() {
         graph_map.insert(id.clone(), (rank, *score));
     }
+    let mut entity_map: BTreeMap<String, (usize, f64)> = BTreeMap::new();
+    for (rank, (id, score)) in entity_hits.iter().enumerate() {
+        entity_map.insert(id.clone(), (rank, *score));
+    }
 
     let mut all_ids: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for id in bm25_map.keys() {
@@ -359,6 +500,9 @@ fn rrf_fuse(
     for id in graph_map.keys() {
         all_ids.insert(id.clone());
     }
+    for id in entity_map.keys() {
+        all_ids.insert(id.clone());
+    }
 
     let mut fused: Vec<(String, f64, f64, f64, f64)> = all_ids
         .into_iter()
@@ -366,9 +510,11 @@ fn rrf_fuse(
             let bm25 = bm25_map.get(&id);
             let vec = vec_map.get(&id);
             let graph = graph_map.get(&id);
+            let entity = entity_map.get(&id);
             let bm25_rank = bm25.map(|(r, _)| *r);
             let vec_rank = vec.map(|(r, _)| *r);
             let graph_rank = graph.map(|(r, _)| *r);
+            let entity_rank = entity.map(|(r, _)| *r);
             let bm25_score = bm25.map(|(_, s)| *s).unwrap_or(0.0);
             let vec_score = vec.map(|(_, s)| *s).unwrap_or(0.0);
             let graph_score = graph.map(|(_, s)| *s).unwrap_or(0.0);
@@ -381,6 +527,9 @@ fn rrf_fuse(
                 rrf += 1.0 / (RRF_K + (r as f64 + 1.0));
             }
             if let Some(r) = graph_rank {
+                rrf += 1.0 / (RRF_K + (r as f64 + 1.0));
+            }
+            if let Some(r) = entity_rank {
                 rrf += 1.0 / (RRF_K + (r as f64 + 1.0));
             }
             (id, bm25_score, vec_score, graph_score, rrf)
@@ -458,6 +607,31 @@ fn tokenize(text: &str) -> Vec<String> {
         .map(|s| s.to_lowercase())
         .filter(|s| !s.trim().is_empty() && s.chars().count() > 1)
         .collect()
+}
+
+/// 判断一个字符是否为 CJK 统一表意文字（用于识别"显著词"，如专有名词）
+fn is_cjk(c: char) -> bool {
+    ('\u{4E00}'..='\u{9FFF}').contains(&c)
+}
+
+/// 判断记忆是否命中查询中的"显著词"（实体/专名）。
+///
+/// 显著词 = 长度 ≥ 3，或包含非 CJK 字符（如英文人名/产品名 "AlenTinn"）。
+/// 命中判定：该词在记忆 content / description / tags 中逐字出现。
+fn entity_token_hit(query_tokens: &std::collections::HashSet<String>, item: &MemoryItem) -> bool {
+    let mut haystack = item.content.to_lowercase();
+    if let Some(desc) = &item.description {
+        haystack.push(' ');
+        haystack.push_str(&desc.to_lowercase());
+    }
+    if !item.tags.is_empty() {
+        haystack.push(' ');
+        haystack.push_str(&item.tags.join(" ").to_lowercase());
+    }
+    query_tokens.iter().any(|t| {
+        let significant = t.chars().count() >= 3 || t.chars().any(|c| !is_cjk(c));
+        significant && haystack.contains(t.as_str())
+    })
 }
 
 /// 语义类型对 fused_score 的加权系数。
@@ -540,6 +714,13 @@ pub fn attach_items_with_weights(
             let sem_boost = semantic_type_boost(&item.semantic_type());
             let ks_boost = knowledge_source_boost(&item.metadata);
             hit.fused_score *= sem_boost * ks_boost;
+
+            // 精确实体/专名命中 boost：查询中的"显著词"（非纯中文短词，如人名/产品名）在记忆
+            // 内容/描述/标签中逐字出现时，显著提高 fused_score，确保实体查询（如"AlenTinn"）
+            // 能召回对应记忆，避免因长文本稀释向量相似度而被 min_score 过滤掉。
+            if entity_token_hit(&query_tokens, &hit.item) {
+                hit.fused_score *= ENTITY_BOOST;
+            }
 
             // relevance：直接用 fused_score（已是 RRF 分数，含 boost）
             let raw_relevance = hit.fused_score;
@@ -1110,7 +1291,8 @@ mod tests {
         let bm25 = vec![("m1".to_string(), 1.5), ("m2".to_string(), 0.8)];
         let vec_ = vec![("m2".to_string(), 0.9), ("m3".to_string(), 0.6)];
         let graph = vec![];
-        let fused = rrf_fuse(bm25, vec_, graph);
+        let entity = vec![];
+        let fused = rrf_fuse(bm25, vec_, graph, entity);
         assert_eq!(fused.len(), 3);
         // m2 在两路都出现，应排第一
         assert_eq!(fused[0].0, "m2");
@@ -1177,5 +1359,28 @@ mod tests {
             .and_then(|v| v.as_f64())
             .expect("semantic_boost 应写入 metadata");
         assert!((boost - 1.15).abs() < 1e-6, "user 类型 boost 应为 1.15");
+    }
+
+    #[test]
+    fn bm25_cache_reflects_content_update() {
+        // 同一 memory_id，内容从"苹果"改为"香蕉"后，检索"香蕉"仍应命中（指纹失效触发重算）
+        let a = make_item("m1", "我喜欢吃苹果", 0.5);
+        let _ = bm25_search(&[a], "苹果", 5); // 首次调用填充缓存（内容A）
+        let b = make_item("m1", "我喜欢吃香蕉", 0.5);
+        let hits = bm25_search(&[b], "香蕉", 5); // 内容B 指纹不同，应重算而非命中过期缓存
+        assert!(!hits.is_empty(), "内容变更后应能命中");
+        assert_eq!(hits[0].0, "m1");
+    }
+
+    #[test]
+    fn bm25_cache_stable_across_calls() {
+        let entries = vec![
+            make_item("m1", "我喜欢吃苹果", 0.5),
+            make_item("m2", "今天天气很好", 0.5),
+        ];
+        let r1 = bm25_search(&entries, "苹果", 5);
+        let r2 = bm25_search(&entries, "苹果", 5); // 第二次命中缓存
+        assert!(!r1.is_empty());
+        assert_eq!(r1, r2);
     }
 }

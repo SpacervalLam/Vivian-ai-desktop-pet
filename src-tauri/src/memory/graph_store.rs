@@ -185,6 +185,97 @@ impl KnowledgeGraph {
         (entity_count, edge_count)
     }
 
+    /// 写入概念实体（概念层 → 图谱"主题层"的接入）。
+    ///
+    /// 概念名作为 `EntityType::Concept` 实体节点写入图谱，并与其 `related_topics`
+    /// 之间建立 `Mentions` 边，使 query 的话题词能通过图谱概念路展开到相关记忆。
+    ///
+    /// 幂等：重复写入只更新 `updated_at` 与关联记忆 ID，不重复建边。
+    /// 返回写入的实体数与边数。
+    pub fn ingest_concepts(
+        &self,
+        concept: &str,
+        related_topics: &[String],
+        memory_ids: &[String],
+        timestamp: f64,
+    ) -> (usize, usize) {
+        let mut store = self.inner.write();
+        let mut entity_count = 0;
+        let mut edge_count = 0;
+
+        let concept_name = concept.trim().to_string();
+        if concept_name.is_empty() {
+            return (0, 0);
+        }
+
+        let entry = store.entities.entry(concept_name.clone()).or_insert_with(|| {
+            GraphEntity {
+                name: concept_name.clone(),
+                entity_type: EntityType::Concept,
+                salience: 1.0,
+                memory_ids: Vec::new(),
+                created_at: timestamp,
+                updated_at: timestamp,
+            }
+        });
+        for mid in memory_ids {
+            if !entry.memory_ids.contains(mid) {
+                entry.memory_ids.push(mid.clone());
+            }
+        }
+        entry.updated_at = timestamp;
+        entry.salience = 1.0;
+        entity_count += 1;
+
+        for topic in related_topics {
+            let topic_name = topic.trim().to_string();
+            if topic_name.is_empty() || topic_name == concept_name {
+                continue;
+            }
+            let entry = store.entities.entry(topic_name.clone()).or_insert_with(|| {
+                GraphEntity {
+                    name: topic_name.clone(),
+                    entity_type: EntityType::Concept,
+                    salience: 0.8,
+                    memory_ids: Vec::new(),
+                    created_at: timestamp,
+                    updated_at: timestamp,
+                }
+            });
+            for mid in memory_ids {
+                if !entry.memory_ids.contains(mid) {
+                    entry.memory_ids.push(mid.clone());
+                }
+            }
+            entry.updated_at = timestamp;
+            entity_count += 1;
+
+            let exists = store.edges.iter().any(|e| {
+                e.source == concept_name && e.target == topic_name
+                && e.relation_type == RelationType::Mentions
+            });
+            if !exists {
+                store.edges.push(GraphEdge {
+                    source: concept_name.clone(),
+                    target: topic_name.clone(),
+                    relation_type: RelationType::Mentions,
+                    weight: 0.7,
+                    source_memory_id: memory_ids.first().cloned().unwrap_or_default(),
+                    context: format!("概念 {} 关联主题 {}", concept_name, topic_name),
+                    created_at: timestamp,
+                });
+                edge_count += 1;
+            }
+        }
+
+        drop(store);
+        if entity_count > 0 || edge_count > 0 {
+            *self.dirty.write() = true;
+        }
+
+        (entity_count, edge_count)
+    }
+
     /// 图谱遍历：从种子实体出发，按关系类型过滤，BFS 扩展
     ///
     /// 借鉴 GBrain 的 relationalFanout 递归 CTE，但用内存 BFS 实现。
@@ -287,6 +378,48 @@ impl KnowledgeGraph {
             .take(limit)
             .cloned()
             .collect()
+    }
+
+    /// 按话题词检索概念实体关联的记忆 ID（① 图谱概念路的检索入口）。
+    ///
+    /// 遍历 `EntityType::Concept` 实体，名称与任一话题词匹配（双向子串）的实体，
+    /// 返回其 `memory_ids`（概念关联的 evidence 记忆）。结果去重、按 limit 截断。
+    /// 供检索管线把 query 话题映射到概念，再取回概念所支撑的记忆。
+    pub fn find_concept_memories(&self, terms: &[&str], limit: usize) -> Vec<String> {
+        let store = self.inner.read();
+        let lower_terms: Vec<String> = terms
+            .iter()
+            .map(|t| t.trim().to_lowercase())
+            .filter(|t| !t.is_empty())
+            .collect();
+        if lower_terms.is_empty() {
+            return Vec::new();
+        }
+
+        let mut out: Vec<String> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for (name, entity) in &store.entities {
+            if entity.entity_type != EntityType::Concept || entity.memory_ids.is_empty() {
+                continue;
+            }
+            let name_lower = name.to_lowercase();
+            let matched = lower_terms
+                .iter()
+                .any(|t| name_lower.contains(t) || t.contains(&name_lower));
+            if !matched {
+                continue;
+            }
+            for mid in &entity.memory_ids {
+                if seen.insert(mid.clone()) {
+                    out.push(mid.clone());
+                }
+            }
+            if out.len() >= limit {
+                break;
+            }
+        }
+        out.truncate(limit);
+        out
     }
 
     /// 获取实体详情
@@ -471,5 +604,51 @@ mod tests {
         
         // 清理
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_ingest_concepts_creates_entities_and_edges() {
+        let graph = make_test_graph();
+        let (entities, edges) = graph.ingest_concepts(
+            "agent_autonomy",
+            &["proactive".to_string(), "inner_monologue".to_string()],
+            &["insight1".to_string()],
+            1000.0,
+        );
+        // 概念 + 2 主题 = 3 实体，2 边
+        assert_eq!(entities, 3);
+        assert_eq!(edges, 2);
+        // 幂等：重复写入不新增边
+        let (e2, edge2) = graph.ingest_concepts(
+            "agent_autonomy",
+            &["proactive".to_string()],
+            &["insight2".to_string()],
+            2000.0,
+        );
+        assert_eq!(edge2, 0);
+        assert!(e2 > 0);
+        // 概念实体类型
+        let entity = graph.get_entity("agent_autonomy").expect("概念实体应存在");
+        assert_eq!(entity.entity_type, EntityType::Concept);
+        // 幂等后 memory_ids 累积
+        assert!(entity.memory_ids.contains(&"insight1".to_string()));
+        assert!(entity.memory_ids.contains(&"insight2".to_string()));
+    }
+
+    #[test]
+    fn test_find_concept_memories_by_topic() {
+        let graph = make_test_graph();
+        graph.ingest_concepts(
+            "agent_autonomy",
+            &["proactive".to_string(), "inner_monologue".to_string()],
+            &["insight1".to_string(), "insight2".to_string()],
+            1000.0,
+        );
+        // 话题词命中概念名 → 返回其 evidence 记忆
+        let ids = graph.find_concept_memories(&["autonomy"], 10);
+        assert!(ids.contains(&"insight1".to_string()));
+        assert!(ids.contains(&"insight2".to_string()));
+        // 无关话题 → 空
+        assert!(graph.find_concept_memories(&["cooking"], 10).is_empty());
     }
 }

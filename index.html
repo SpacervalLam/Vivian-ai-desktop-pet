@@ -4,31 +4,41 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Vivian</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link id="font-stylesheet" rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Ma+Shan+Zheng&family=Dancing+Script:wght@400;500;600;700&family=Hachi+Maru+Pop&family=Caveat:wght@400;500;600;700&display=swap">
+    <link rel="preconnect" href="https://fonts.googleapis.cn">
+    <link rel="preconnect" href="https://fonts.gstatic.cn" crossorigin>
+    <style>
+      @font-face {
+        font-family: 'Ma Shan Zheng';
+        font-style: normal;
+        font-weight: 400;
+        font-display: swap;
+        src: url('/fonts/ma-shan-zheng.woff2') format('woff2');
+      }
+    </style>
     <script>
+      // 其余手写字体（Caveat / Dancing Script / Hachi Maru Pop）仍在线加载：
+      // 初始源用可达的中国镜像，失败再依次回退。
       (function () {
-        var sources = [
-          'https://fonts.googleapis.cn/css2?family=Ma+Shan+Zheng&family=Dancing+Script:wght@400;500;600;700&family=Hachi+Maru+Pop&family=Caveat:wght@400;500;600;700&display=swap',
-          'https://fonts.loli.net/css2?family=Ma+Shan+Zheng&family=Dancing+Script:wght@400;500;600;700&family=Hachi+Maru+Pop&family=Caveat:wght@400;500;600;700&display=swap'
-        ];
-        var currentIndex = 0;
-        var link = document.getElementById('font-stylesheet');
-        
-        var tryNext = function() {
-          if (currentIndex >= sources.length) return;
-          link.onerror = function() {
-            currentIndex++;
-            tryNext();
-          };
-          link.onload = function() {};
-          link.href = sources[currentIndex];
+        var fontCss = 'https://fonts.googleapis.cn/css2?family=Dancing+Script:wght@400;500;600;700&family=Hachi+Maru+Pop&family=Caveat:wght@400;500;600;700&display=swap';
+        var fallbackCss = 'https://fonts.loli.net/css2?family=Dancing+Script:wght@400;500;600;700&family=Hachi+Maru+Pop&family=Caveat:wght@400;500;600;700&display=swap';
+        var link = document.createElement('link');
+        link.rel = 'stylesheet';
+        link.href = fontCss;
+        var done = false;
+        link.onload = function () { done = true; };
+        link.onerror = function () {
+          if (done) return;
+          link.href = fallbackCss;
+          link.onerror = function () { done = true; };
         };
-        
-        link.onerror = function() {
-          tryNext();
-        };
+        document.head.appendChild(link);
+        // 兜底超时：4s 未加载完成则切到备用源
+        setTimeout(function () {
+          if (!done) {
+            done = true;
+            link.href = fallbackCss;
+          }
+        }, 4000);
       })();
     </script>
     <script>

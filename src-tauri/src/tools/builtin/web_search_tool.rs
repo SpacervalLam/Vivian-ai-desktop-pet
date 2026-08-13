@@ -33,17 +33,22 @@ pub fn set_app_handle(handle: AppHandle) {
     *APP_HANDLE.write() = Some(handle);
 }
 
-/// 读取当前 WebSearchConfig（AppHandle 未注入时返回 None，走 DuckDuckGo 默认）
-fn read_web_search_config() -> Option<WebSearchConfig> {
-    APP_HANDLE.read().clone().map(|handle| {
-        handle
+/// 读取当前 WebSearchConfig 和代理 URL（AppHandle 未注入时返回 None，走 DuckDuckGo 默认）
+///
+/// 供 WebSearchTool 和 WebContextRunnable（主动搜索）共用。
+pub fn read_search_config() -> (Option<WebSearchConfig>, Option<String>) {
+    let handle_opt = APP_HANDLE.read().clone();
+    handle_opt.map(|handle| {
+        let cfg = handle
             .state::<Arc<AppState>>()
             .config
             .read()
-            .get_all()
-            .web_search
-            .clone()
-    })
+            .get_all();
+        let web_search_config = cfg.web_search.clone();
+        let proxy_config = crate::network::proxy::ProxyConfig::from_app_config(&cfg);
+        let proxy_url = proxy_config.effective_proxy_url();
+        (Some(web_search_config), proxy_url)
+    }).unwrap_or((None, None))
 }
 
 // ============================================================================
@@ -77,19 +82,25 @@ impl Tool for WebSearchTool {
     }
 
     fn description(&self) -> &str {
-        "Search the internet for the latest information, returning titles, links, and snippets. Use when time-sensitive information is needed (news, weather,\
+        "Search the internet for the latest information, returning titles, links, snippets, and each result's source authority tier (P0 official / P1 authoritative / P2 professional community / P3 general reference) plus a confidence tag. Use when time-sensitive information is needed (news, weather,\
          stock prices, latest releases), or when search sources need to be restricted (e.g. only GitHub / Zhihu / papers).\
-         If the model has built-in native web search capability, prefer the native search; this tool serves as a supplement."
+         Do NOT use for pure chit-chat, personal feelings, or questions you can answer from memory/conversation — search is for verifying external facts, not for every reply.\
+         If the model has built-in native web search capability, prefer the native search; this tool serves as a supplement.\n\n\
+         Treat results with evidence discipline: cross-check key numbers or conclusions across 2+ independent sources before asserting them; prefer P0/P1 over P3; when sources conflict, present both sides honestly instead of picking one arbitrarily; and run at most 2 rounds — stop once your core claims have enough independent support, or the remaining gaps are negligible, and do not keep re-searching the same query."
     }
 
     fn description_in(&self, lang: &str) -> &str {
         match lang {
-            "zh" => "搜索互联网以获取最新信息，返回标题、链接和摘要。当需要时效性信息（新闻、天气、股价、最新发布）\
-            或需要限定搜索来源（例如仅 GitHub / 知乎 / 论文）时使用。如果模型已内置原生联网搜索能力，\
-            优先使用原生搜索；本工具作为补充方案。",
-            "ja" => "インターネットを検索して最新情報を取得し、タイトル、リンク、スニペットを返す。時効性の高い情報\
+            "zh" => "搜索互联网以获取最新信息，返回标题、链接、摘要，并为每条结果附上来源权威分级（P0 官方/原始 / P1 权威二手 / P2 专业社区 / P3 一般参考）和信心标注。当需要时效性信息（新闻、天气、股价、最新发布）\
+            或需要限定搜索来源（例如仅 GitHub / 知乎 / 论文）时使用。\
+            不要在纯闲聊、抒发感受、或你能凭记忆/对话直接回答时使用——搜索是为了核验外部事实，不是每句回复都要搜。\
+            如果模型已内置原生联网搜索能力，优先使用原生搜索；本工具作为补充方案。\
+            请对结果保持证据纪律：关键数字或结论在断言前要在 2 个以上独立来源间交叉验证；优先采用 P0/P1 而非 P3；当来源冲突时，如实呈现双方而非任取其一；最多搜索两轮即可终止——一旦核心结论已获得足够的独立来源支持，或剩余缺口可忽略，就停止，不要对同一查询反复搜索。",
+            "ja" => "インターネットを検索して最新情報を取得し、タイトル、リンク、スニペット、および各結果のソース権威レベル（P0 公式/一次 / P1 権威ある二次 / P2 専門コミュニティ / P3 一般参考）と信頼タグを返す。時効性の高い情報\
             （ニュース、天気、株価、最新リリース）が必要な場合や、検索ソースを制限したい場合（例：GitHub / 知乎 / 論文のみ）に使用。\
-            モデルにネイティブのウェブ検索機能が内蔵されている場合はネイティブ検索を優先し、本ツールは補助として使用する。",
+            ただの雑談、感情の表現、記憶や会話からすぐ答えられる質問では使わないこと——検索は外部事実の検証のためであり、毎回の返信には不要。\
+            モデルにネイティブのウェブ検索機能が内蔵されている場合はネイティブ検索を優先し、本ツールは補助として使用する。\
+            結果には証拠規律を持つこと：重要な数字や結論を断言する前に 2 つ以上の独立したソースでクロスチェック；P0/P1 を P3 より優先；ソースが矛盾する場合は一方を恣意的に選ばず両者を正直に提示；検索は最大 2 ラウンドで終了——中核の主張が十分な独立ソースで裏付けられたら、または残りのギャップが無視できるなら停止し、同じクエリを繰り返し検索しない。",
             _ => self.description(),
         }
     }
@@ -180,7 +191,7 @@ impl Tool for WebSearchTool {
         }
 
         // 读取配置（未注入 AppHandle 时走 None = DuckDuckGo 默认）
-        let config = read_web_search_config();
+        let (config, proxy_url) = read_search_config();
 
         let max_results = args
             .get("max_results")
@@ -190,6 +201,7 @@ impl Tool for WebSearchTool {
             .unwrap_or(5);
 
         let config_ref = config.as_ref();
+        let proxy_ref = proxy_url.as_deref();
 
         tracing::info!(
             "[WebSearchTool] 发起搜索: query={:?}, max_results={}, providers={:?}",
@@ -200,11 +212,15 @@ impl Tool for WebSearchTool {
                 .unwrap_or_else(|| vec!["duckduckgo".to_string()])
         );
 
-        let results = WebSearcher::search_with_config(&query, max_results, config_ref).await;
+        let results = WebSearcher::search_with_config(&query, max_results, config_ref, proxy_ref).await;
 
         if results.is_empty() {
             return ToolResult::standard_success(
-                &format!("未找到与「{}」相关的搜索结果", query),
+                &format!(
+                    "未找到与「{}」相关的搜索结果。可能原因：网络/代理不可用，或该查询确实无匹配内容。\
+                    请勿对同一查询反复调用 web_search，改为基于你已有的知识回答用户。",
+                    query
+                ),
                 Some(json!({
                     "query": query,
                     "results": [],
@@ -244,7 +260,8 @@ impl Tool for WebSearchTool {
     }
 
     fn risk(&self) -> ToolRiskTier {
-        ToolRiskTier::Network
+        // web_search 是只读的网络获取，无副作用，归为 Safe 避免每次调用弹窗确认
+        ToolRiskTier::Safe
     }
 
     fn search_hint(&self) -> &str {

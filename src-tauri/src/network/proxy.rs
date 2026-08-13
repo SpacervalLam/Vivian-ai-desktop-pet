@@ -16,7 +16,7 @@ use reqwest::{Client, Proxy};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{VivianError, VivianResult};
-use crate::network::http_retry::{build_client_with_retry, RetryConfig, DEFAULT_CONNECT_TIMEOUT_SECS};
+use crate::network::http_retry::{RetryConfig, DEFAULT_CONNECT_TIMEOUT_SECS};
 
 /// 代理模式
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -93,12 +93,23 @@ impl ProxyConfig {
     /// 解析出实际生效的代理 URL
     ///
     /// - `Direct` → None
-    /// - `System` → 优先 HTTPS_PROXY，其次 HTTP_PROXY
+    /// - `System` → 优先环境变量 HTTPS_PROXY/HTTP_PROXY，环境变量未设时 fallback 到配置的 `url`
     /// - `Custom` → 使用 `self.url`
     pub fn effective_proxy_url(&self) -> Option<String> {
         match self.mode {
             ProxyMode::Direct => None,
-            ProxyMode::System => system_proxy_url(),
+            ProxyMode::System => {
+                // 优先读系统环境变量（Clash/v2ray 等代理软件会设置）
+                if let Some(url) = system_proxy_url() {
+                    return Some(url);
+                }
+                // 环境变量未设时 fallback 到配置的 proxy_url
+                if self.url.is_empty() {
+                    None
+                } else {
+                    Some(self.url.clone())
+                }
+            }
             ProxyMode::Custom => {
                 if self.url.is_empty() {
                     None
@@ -225,8 +236,15 @@ pub fn build_client_with_proxy(proxy_config: &ProxyConfig) -> VivianResult<Clien
                 .map_err(|e| VivianError::Network(format!("构建 reqwest Client 失败: {e}")))
         }
         None => {
-            // Direct 或 System（系统模式下 reqwest 默认读取环境变量）
-            build_client_with_retry(&retry_config)
+            // 不需要代理时显式禁用环境变量代理检测，防止 HTTP_PROXY 等环境变量意外生效
+            Client::builder()
+                .timeout(Duration::from_secs(retry_config.timeout_secs))
+                .connect_timeout(Duration::from_secs(DEFAULT_CONNECT_TIMEOUT_SECS))
+                .pool_max_idle_per_host(10)
+                .tcp_keepalive(Duration::from_secs(60))
+                .no_proxy()
+                .build()
+                .map_err(|e| VivianError::Network(format!("构建 reqwest Client 失败: {e}")))
         }
     }
 }

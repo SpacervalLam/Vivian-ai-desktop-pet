@@ -13,6 +13,8 @@ import {
   Network,
   BookHeart,
   UserCircle,
+  NotebookPen,
+  ListChecks,
 } from 'lucide-react';
 
 // === 颜色（跟随 --panel-* 主题变量） ===
@@ -189,6 +191,8 @@ export type NavKey =
   | 'world'
   | 'graph'
   | 'diary'
+  | 'notebook'
+  | 'tasks'
   | 'profile';
 
 export interface NavItem {
@@ -202,5 +206,7 @@ export const NAV_ITEMS: NavItem[] = [
   { key: 'world', icon: Globe, labelKey: 'mind_inspector.nav_world' },
   { key: 'graph', icon: Network, labelKey: 'mind_inspector.nav_graph' },
   { key: 'diary', icon: BookHeart, labelKey: 'mind_inspector.nav_diary' },
+  { key: 'notebook', icon: NotebookPen, labelKey: 'mind_inspector.nav_notebook' },
+  { key: 'tasks', icon: ListChecks, labelKey: 'mind_inspector.nav_tasks' },
   { key: 'profile', icon: UserCircle, labelKey: 'mind_inspector.nav_profile' },
 ];

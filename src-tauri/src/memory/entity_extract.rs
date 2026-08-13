@@ -32,6 +32,11 @@ pub enum EntityType {
     Organization,
     /// 其他专名（jieba 词性 nz）
     Other,
+    /// 抽象概念（如 agent_autonomy / proactive / inner_monologue）
+    ///
+    /// 由概念层（UserModel）写入，非从文本自动抽取。作为图谱的"主题层"实体，
+    /// 让 query 的话题词能通过图谱概念路命中概念相关记忆。
+    Concept,
 }
 
 impl EntityType {
@@ -52,6 +57,7 @@ impl EntityType {
             Self::Location => "location",
             Self::Organization => "organization",
             Self::Other => "other",
+            Self::Concept => "concept",
         }
     }
 }

@@ -57,126 +57,139 @@ pub struct MemoryVector {
 pub struct MemoryVectorStore {
     conn: Mutex<Connection>,
     dimension: usize,
+    /// 当前嵌入模型 ID（写入向量时记录，用于模型切换后的增量/断点续传重建）
+    model_name: String,
+    /// 外部向量库模式：Some 时所有向量操作走 Qdrant，否则使用内置 sqlite-vec。
+    /// `conn` 仍保留（仅用于持久化 dimension/model 元数据与模型切换检测）。
+    qdrant: Option<super::qdrant::QdrantClient>,
+    /// 外部集合名
+    collection: String,
 }
 
 impl MemoryVectorStore {
     pub fn new(persistence_path: PathBuf, dimension: usize, model_name: &str) -> VivianResult<Self> {
-        let conn = Self::open_connection(&persistence_path, dimension, model_name)?;
-        Ok(Self {
-            conn: Mutex::new(conn),
-            dimension,
-        })
+        Self::open(persistence_path, dimension, model_name, None)
     }
 
     pub fn load_from(path: &Path, dimension: usize, model_name: &str) -> VivianResult<Self> {
-        Self::new(path.to_path_buf(), dimension, model_name)
+        Self::open(path.to_path_buf(), dimension, model_name, None)
     }
 
-    /// 打开 SQLite 连接,加载 vec0 扩展,初始化表结构
-    fn open_connection(path: &Path, dimension: usize, model_name: &str) -> VivianResult<Connection> {
-        if let Some(parent) = path.parent() {
-            tracing::info!("[DIAG] open_connection parent={:?}, exists={}", parent, parent.exists());
+    /// 按配置打开向量库：`config.source == "external"` 时使用外部 Qdrant，否则内置 sqlite-vec。
+    pub fn open_configured(
+        persistence_path: PathBuf,
+        dimension: usize,
+        model_name: &str,
+        config: &crate::config::manager::VectorStoreConfig,
+    ) -> VivianResult<Self> {
+        let external = if config.source == "external" && !config.external_url.trim().is_empty() {
+            Some(super::qdrant::QdrantClient::new(
+                config.external_url.trim().to_string(),
+                config.api_key.trim().to_string(),
+            ))
+        } else {
+            None
+        };
+        Self::open(
+            persistence_path,
+            dimension,
+            model_name,
+            external.map(|q| (q, config)),
+        )
+    }
+
+    fn open(
+        persistence_path: PathBuf,
+        dimension: usize,
+        model_name: &str,
+        external: Option<(super::qdrant::QdrantClient, &crate::config::manager::VectorStoreConfig)>,
+    ) -> VivianResult<Self> {
+        if let Some(parent) = persistence_path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| VivianError::Memory(format!("创建向量目录失败: {e}")))?;
         }
-        tracing::info!("[DIAG] open_connection path={:?}, path_exists={}", path, path.exists());
-
-        // Test: try opening at various paths to isolate the issue
-        let appdata = std::env::var("APPDATA").unwrap_or_default();
-        for (label, test_path) in [
-            ("temp", std::env::temp_dir().join("vivian_test.db")),
-            ("roaming_root", std::path::PathBuf::from(&appdata).join("vivian_test.db")),
-            ("roaming_memory", {
-                let d = std::path::PathBuf::from(&appdata).join("vivian").join("characters").join("nana").join("memory");
-                let _ = std::fs::create_dir_all(&d);
-                d.join("vivian_test.db")
-            }),
-            ("roaming_target", {
-                let d = path.parent().unwrap().to_path_buf();
-                d.join("vivian_test.db")
-            }),
-        ] {
-            let _ = std::fs::remove_file(&test_path);
-            let result = Connection::open_with_flags(
-                &test_path,
-                rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
-                    | rusqlite::OpenFlags::SQLITE_OPEN_CREATE
-                    | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-            );
-            tracing::info!("[DIAG] Test {} at {:?}: {:?}", label, test_path, result.as_ref().map(|_| "OK").map_err(|e| e.to_string()));
-            drop(result);
-            let _ = std::fs::remove_file(&test_path);
-        }
 
         let conn = Connection::open_with_flags(
-            path,
+            &persistence_path,
             rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
                 | rusqlite::OpenFlags::SQLITE_OPEN_CREATE
                 | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )
         .map_err(|e| VivianError::Memory(format!("打开 SQLite 失败: {e}")))?;
-        tracing::info!("[DIAG] open_connection SUCCESS");
 
-        // 启用 WAL 模式提升并发性能
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")
             .map_err(|e| VivianError::Memory(format!("设置 WAL 模式失败: {e}")))?;
 
-        // 加载 sqlite-vec 扩展
-        Self::load_vec_extension(&conn)?;
-
-        // 检测维度变更或模型变更（不同模型的向量空间不兼容，即使维度相同也不能混用）
-        let stored_dim = Self::get_stored_dimension(&conn)?;
-        let stored_model = Self::get_stored_model(&conn)?;
-        let needs_rebuild = match (&stored_dim, &stored_model) {
-            (Some(stored), _) if *stored != dimension => {
-                tracing::warn!(
-                    "向量维度变更: {} → {},重建索引",
-                    stored,
-                    dimension
-                );
-                true
-            }
-            (_, Some(stored)) if stored != model_name => {
-                tracing::warn!(
-                    "嵌入模型变更: {} → {},重建索引（旧向量与新模型向量空间不兼容）",
-                    stored,
-                    model_name
-                );
-                true
-            }
-            _ => false,
-        };
-
-        if needs_rebuild {
-            conn.execute_batch("DROP TABLE IF EXISTS memory_vectors; DROP TABLE IF EXISTS vec_memory;")
-                .map_err(|e| VivianError::Memory(format!("DROP 旧表失败: {e}")))?;
-        }
-
-        // 创建元数据表
+        // 元数据表（始终存在，用于持久化 dimension/model 与模型切换检测）
         conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS memory_vectors (
-                doc_id TEXT PRIMARY KEY,
-                memory_id TEXT NOT NULL,
-                content TEXT NOT NULL,
-                importance REAL NOT NULL,
-                memory_type TEXT NOT NULL,
-                timestamp REAL NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_memory_id ON memory_vectors(memory_id);
-            CREATE TABLE IF NOT EXISTS vector_meta (
+            "CREATE TABLE IF NOT EXISTS vector_meta (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );",
         )
         .map_err(|e| VivianError::Memory(format!("创建元数据表失败: {e}")))?;
 
-        // 创建 vec0 虚拟表
-        let create_vec_sql = format!(
-            "CREATE VIRTUAL TABLE IF NOT EXISTS vec_memory USING vec0(embedding float[{}], doc_id text);",
-            dimension
-        );
-        conn.execute_batch(&create_vec_sql)
-            .map_err(|e| VivianError::Memory(format!("创建 vec0 虚拟表失败: {e}")))?;
+        // 检测维度/模型变更（两者都会使向量空间不兼容，需重建）
+        let stored_dim = Self::get_stored_dimension(&conn)?;
+        let stored_model = Self::get_stored_model(&conn)?;
+        let needs_rebuild = match (&stored_dim, &stored_model) {
+            (Some(stored), _) if *stored != dimension => {
+                tracing::warn!("向量维度变更: {} → {},重建索引", stored, dimension);
+                true
+            }
+            (_, Some(stored)) if stored != model_name => {
+                tracing::warn!("嵌入模型变更: {} → {},重建索引", stored, model_name);
+                true
+            }
+            _ => false,
+        };
+
+        // 外部模式：模型/维度变更时 drop 集合；随后确保集合存在
+        let (qdrant, collection) = match external {
+            Some((client, cfg)) => {
+                let collection = if cfg.collection.trim().is_empty() {
+                    "vivian_memories".to_string()
+                } else {
+                    cfg.collection.trim().to_string()
+                };
+                if needs_rebuild {
+                    let _ = client.drop_collection(&collection);
+                }
+                client.ensure_collection(&collection, dimension, cfg.hnsw_m, cfg.ef_construction)?;
+                (Some(client), collection)
+            }
+            None => {
+                // 本地模式：加载 vec0 扩展，检测重建时 DROP 旧表
+                Self::load_vec_extension(&conn)?;
+                if needs_rebuild {
+                    conn.execute_batch("DROP TABLE IF EXISTS memory_vectors; DROP TABLE IF EXISTS vec_memory;")
+                        .map_err(|e| VivianError::Memory(format!("DROP 旧表失败: {e}")))?;
+                }
+                conn.execute_batch(
+                    "CREATE TABLE IF NOT EXISTS memory_vectors (
+                        doc_id TEXT PRIMARY KEY,
+                        memory_id TEXT NOT NULL,
+                        content TEXT NOT NULL,
+                        importance REAL NOT NULL,
+                        memory_type TEXT NOT NULL,
+                        timestamp REAL NOT NULL,
+                        model TEXT NOT NULL DEFAULT ''
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_memory_id ON memory_vectors(memory_id);
+                    CREATE INDEX IF NOT EXISTS idx_memory_model ON memory_vectors(model);",
+                )
+                .map_err(|e| VivianError::Memory(format!("创建元数据表失败: {e}")))?;
+                // 旧库升级：补齐 model 列
+                Self::ensure_model_column(&conn)?;
+                let create_vec_sql = format!(
+                    "CREATE VIRTUAL TABLE IF NOT EXISTS vec_memory USING vec0(embedding float[{}], doc_id text);",
+                    dimension
+                );
+                conn.execute_batch(&create_vec_sql)
+                    .map_err(|e| VivianError::Memory(format!("创建 vec0 虚拟表失败: {e}")))?;
+                (None, String::new())
+            }
+        };
 
         // 存储当前维度和模型名
         conn.execute(
@@ -190,7 +203,13 @@ impl MemoryVectorStore {
         )
         .map_err(|e| VivianError::Memory(format!("存储模型名失败: {e}")))?;
 
-        Ok(conn)
+        Ok(Self {
+            conn: Mutex::new(conn),
+            dimension,
+            model_name: model_name.to_string(),
+            qdrant,
+            collection,
+        })
     }
 
     /// 加载 sqlite-vec 扩展(释放 vec0.dll 到临时目录后加载)
@@ -247,6 +266,32 @@ impl MemoryVectorStore {
         Ok(dim_str.and_then(|s| s.parse().ok()))
     }
 
+    /// 旧库升级：为 memory_vectors 表补齐 model 列（老版本无此列）
+    fn ensure_model_column(conn: &Connection) -> VivianResult<()> {
+        let has_model: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('memory_vectors') WHERE name='model'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|n| n > 0)
+            .unwrap_or(false);
+        if !has_model {
+            conn.execute(
+                "ALTER TABLE memory_vectors ADD COLUMN model TEXT NOT NULL DEFAULT ''",
+                [],
+            )
+            .map_err(|e| VivianError::Memory(format!("补列 model 失败: {e}")))?;
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_memory_model ON memory_vectors(model)",
+                [],
+            )
+            .map_err(|e| VivianError::Memory(format!("创建 model 索引失败: {e}")))?;
+            tracing::info!("[sqlite-vec] 已为旧库 memory_vectors 补齐 model 列");
+        }
+        Ok(())
+    }
+
     /// 读取已存储的嵌入模型名（用于检测模型变更）
     fn get_stored_model(conn: &Connection) -> VivianResult<Option<String>> {
         let table_exists: bool = conn
@@ -274,9 +319,59 @@ impl MemoryVectorStore {
     }
 
     pub fn len(&self) -> usize {
+        if let Some(q) = &self.qdrant {
+            return q.count_points(&self.collection).unwrap_or(0);
+        }
         let conn = self.conn.lock();
         conn.query_row("SELECT COUNT(*) FROM memory_vectors", [], |row| row.get(0))
             .unwrap_or(0)
+    }
+
+    /// 返回向量库中所有 doc_id（用于孤儿向量清理）
+    pub fn all_doc_ids(&self) -> Vec<String> {
+        if let Some(q) = &self.qdrant {
+            return match q.scroll_doc_ids(&self.collection) {
+                Ok(rows) => rows.into_iter().map(|(doc_id, _, _)| doc_id).collect(),
+                Err(_) => Vec::new(),
+            };
+        }
+        let conn = self.conn.lock();
+        let mut stmt = match conn.prepare("SELECT doc_id FROM memory_vectors") {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        stmt.query_map([], |row| row.get::<_, String>(0))
+            .ok()
+            .map(|rows| rows.filter_map(|r| r.ok()).collect())
+            .unwrap_or_default()
+    }
+
+    /// 返回已由指定模型嵌入的 doc_id 集合（用于增量/断点续传重建：跳过已用当前模型嵌入的条目）
+    pub fn doc_ids_with_model(&self, model: &str) -> std::collections::HashSet<String> {
+        if let Some(q) = &self.qdrant {
+            return match q.scroll_doc_ids(&self.collection) {
+                Ok(rows) => rows
+                    .into_iter()
+                    .filter(|(_, _, m)| m == model)
+                    .map(|(doc_id, _, _)| doc_id)
+                    .collect(),
+                Err(_) => std::collections::HashSet::new(),
+            };
+        }
+        let conn = self.conn.lock();
+        let mut stmt = match conn.prepare("SELECT doc_id FROM memory_vectors WHERE model=?1") {
+            Ok(s) => s,
+            Err(_) => return std::collections::HashSet::new(),
+        };
+        stmt.query_map([model], |row| row.get::<_, String>(0))
+            .ok()
+            .map(|rows| rows.filter_map(|r| r.ok()).collect())
+            .unwrap_or_default()
+    }
+
+    /// 当前模型的标识（供增量重建判定）
+    pub fn model(&self) -> &str {
+        &self.model_name
     }
 
     pub fn is_empty(&self) -> bool {
@@ -285,6 +380,9 @@ impl MemoryVectorStore {
 
     /// 添加/更新向量(事务原子操作)
     pub fn add(&self, vec: MemoryVector) -> VivianResult<()> {
+        if let Some(q) = &self.qdrant {
+            return q.upsert_points(&self.collection, std::slice::from_ref(&vec), &self.model_name);
+        }
         let conn = self.conn.lock();
         let dim = self.dimension;
 
@@ -297,8 +395,8 @@ impl MemoryVectorStore {
 
         let tx = conn.unchecked_transaction().ok();
         conn.execute(
-            "INSERT OR REPLACE INTO memory_vectors(doc_id, memory_id, content, importance, memory_type, timestamp)
-             VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT OR REPLACE INTO memory_vectors(doc_id, memory_id, content, importance, memory_type, timestamp, model)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             rusqlite::params![
                 vec.doc_id,
                 vec.memory_id,
@@ -306,9 +404,14 @@ impl MemoryVectorStore {
                 vec.importance,
                 vec.memory_type,
                 vec.timestamp,
+                self.model_name,
             ],
         )
         .map_err(|e| VivianError::Tool(format!("向量插入失败: {}", e)))?;
+        // 先删除该 doc_id 已有的向量行，避免 vec0 表因 INSERT OR REPLACE 不按 doc_id 去重
+        // 而在反复重建时累积重复行（尤其 IndexDrift 周期性全量重建场景）。
+        conn.execute("DELETE FROM vec_memory WHERE doc_id=?1", [&vec.doc_id])
+            .map_err(|e| VivianError::Tool(format!("向量清理失败: {}", e)))?;
         conn.execute(
             "INSERT OR REPLACE INTO vec_memory(rowid, embedding, doc_id)
              VALUES((SELECT rowid FROM memory_vectors WHERE doc_id=?1), ?2, ?1)",
@@ -324,6 +427,9 @@ impl MemoryVectorStore {
     }
 
     pub fn delete(&self, doc_id: &str) -> VivianResult<()> {
+        if let Some(q) = &self.qdrant {
+            return q.delete_points(&self.collection, &[doc_id.to_string()]);
+        }
         let conn = self.conn.lock();
         let rowid: i64 = match conn
             .query_row(
@@ -343,7 +449,36 @@ impl MemoryVectorStore {
         Ok(())
     }
 
+    /// 彻底移除某 doc_id 的所有向量行（含 vec0 表可能存在的重复行）与元数据。
+    /// 用于孤儿向量清理，避免历史重建造成的重复行残留。
+    pub fn remove(&self, doc_id: &str) -> VivianResult<()> {
+        if let Some(q) = &self.qdrant {
+            return q.delete_points(&self.collection, &[doc_id.to_string()]);
+        }
+        let conn = self.conn.lock();
+        conn.execute("DELETE FROM vec_memory WHERE doc_id=?1", [doc_id])
+            .map_err(|e| VivianError::Tool(format!("向量删除失败: {}", e)))?;
+        conn.execute("DELETE FROM memory_vectors WHERE doc_id=?1", [doc_id])
+            .map_err(|e| VivianError::Tool(format!("向量删除失败: {}", e)))?;
+        Ok(())
+    }
+
     pub fn delete_by_memory_id(&self, memory_id: &str) -> bool {
+        if let Some(q) = &self.qdrant {
+            // 滚动所有点，按 payload.memory_id 过滤后删除
+            let doc_ids: Vec<String> = match q.scroll_doc_ids(&self.collection) {
+                Ok(rows) => rows
+                    .into_iter()
+                    .filter(|(_, m, _)| m == memory_id)
+                    .map(|(doc_id, _, _)| doc_id)
+                    .collect(),
+                Err(_) => Vec::new(),
+            };
+            if doc_ids.is_empty() {
+                return false;
+            }
+            return q.delete_points(&self.collection, &doc_ids).is_ok();
+        }
         let conn = self.conn.lock();
         let doc_ids: Vec<String> = {
             let mut stmt = conn
@@ -382,6 +517,9 @@ impl MemoryVectorStore {
     }
 
     pub fn clear(&self) -> VivianResult<()> {
+        if let Some(q) = &self.qdrant {
+            return q.clear_points(&self.collection);
+        }
         let conn = self.conn.lock();
         conn.execute("DELETE FROM memory_vectors", [])
             .map_err(|e| VivianError::Tool(format!("向量清空失败: {}", e)))?;
@@ -397,6 +535,9 @@ impl MemoryVectorStore {
     pub fn search(&self, query: &[f32], k: usize) -> Vec<(String, String, f64)> {
         if query.len() != self.dimension {
             return Vec::new();
+        }
+        if let Some(q) = &self.qdrant {
+            return q.search(&self.collection, query, k, None).unwrap_or_default();
         }
 
         let conn = self.conn.lock();
@@ -438,6 +579,10 @@ impl MemoryVectorStore {
     }
 
     pub fn save_to(&self) -> VivianResult<()> {
+        // 外部模式：Qdrant 服务端自动持久化，无需本地落盘
+        if self.qdrant.is_some() {
+            return Ok(());
+        }
         // SQLite 自动持久化,无需显式 save
         // WAL 模式下 checkpoint 确保数据落盘
         let conn = self.conn.lock();
@@ -447,12 +592,21 @@ impl MemoryVectorStore {
     }
 
     pub fn deleted_count(&self) -> usize {
-        0 // sqlite-vec 物理删除,无需标记
+        0 // sqlite-vec / Qdrant 物理删除,无需标记
     }
 
     pub fn rebuild_index(&self) {
-        // sqlite-vec 自动维护索引,无需重建
-        tracing::debug!("[sqlite-vec] 索引由数据库自动维护,无需重建");
+        // 本地 sqlite-vec 与外部 Qdrant(HNSW) 均自动维护索引,无需重建
+        tracing::debug!("[vector] 索引由数据库自动维护,无需重建");
+    }
+
+    /// 后端类型（供日志/诊断区分）
+    pub fn backend_name(&self) -> &'static str {
+        if self.qdrant.is_some() {
+            "qdrant"
+        } else {
+            "sqlite-vec"
+        }
     }
 }
 

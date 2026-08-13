@@ -122,6 +122,14 @@ pub struct ScheduledTask {
     /// 旧任务文件无此字段时默认为空串。
     #[serde(default)]
     pub char_id: String,
+    /// 是否已发起"预触发"LLM 调用
+    ///
+    /// 在 `scheduled_time - 5s` 到 `scheduled_time` 之间发起一次主 LLM 调用，
+    /// 把定时任务内容说明作为 user_input 注入完整提示词，
+    /// 让 LLM 提前决定如何进行（回复/工具调用/提醒用户）。
+    /// 此字段防止每秒 tick 重复发起预触发。
+    #[serde(default)]
+    pub pre_triggered: bool,
 }
 
 impl ScheduledTask {
@@ -145,6 +153,7 @@ impl ScheduledTask {
             metadata: serde_json::Value::Object(serde_json::Map::new()),
             completed_at: None,
             char_id: String::new(),
+            pre_triggered: false,
         }
     }
 
@@ -167,6 +176,7 @@ impl ScheduledTask {
             metadata: serde_json::Value::Object(serde_json::Map::new()),
             completed_at: None,
             char_id: String::new(),
+            pre_triggered: false,
         }
     }
 
@@ -211,6 +221,9 @@ pub struct Scheduler {
 struct SchedulerInner {
     tasks: HashMap<String, ScheduledTask>,
     callback: Option<SchedulerCallback>,
+    /// 预触发回调：在 `scheduled_time - 5s` 到 `scheduled_time` 之间触发一次，
+    /// 让主 LLM 提前决定如何进行该定时任务。
+    pre_trigger_callback: Option<SchedulerCallback>,
 }
 
 impl Scheduler {
@@ -225,6 +238,7 @@ impl Scheduler {
             inner: Arc::new(Mutex::new(SchedulerInner {
                 tasks: HashMap::new(),
                 callback: None,
+                pre_trigger_callback: None,
             })),
             persistence_path,
             shutdown: Arc::new(tokio::sync::Notify::new()),
@@ -238,6 +252,15 @@ impl Scheduler {
     /// 设置任务触发回调。
     pub fn set_callback(&self, callback: SchedulerCallback) {
         self.inner.lock().callback = Some(callback);
+    }
+
+    /// 设置预触发回调。
+    ///
+    /// 在 `scheduled_time - 5s` 到 `scheduled_time` 之间触发一次，
+    /// 用于发起主 LLM 调用，让智能体提前决定如何进行定时任务。
+    /// 与正常 `set_callback` 分离，避免影响到期触发的原有行为。
+    pub fn set_pre_trigger_callback(&self, callback: SchedulerCallback) {
+        self.inner.lock().pre_trigger_callback = Some(callback);
     }
 
     /// 调度一个提醒任务，返回任务 ID。
@@ -434,6 +457,49 @@ impl Scheduler {
     /// 集成 InterruptionController：执行前检查是否适合打扰，
     /// 避免在用户专注/静默期触发提醒。
     pub async fn tick(&self) {
+        // ── 预触发检测：在 scheduled_time - 5s 到 scheduled_time 之间
+        // 发起一次主 LLM 调用，让智能体提前决定如何进行定时任务 ──
+        const PRE_TRIGGER_LEAD_SECS: f64 = 5.0;
+        let now = now_ts();
+        let pre_trigger_tasks: Vec<ScheduledTask> = {
+            let mut inner = self.inner.lock();
+            let callback = inner.pre_trigger_callback.clone();
+            if callback.is_none() {
+                // 没有注册预触发回调：跳过检测，避免无谓遍历
+                Vec::new()
+            } else {
+                inner
+                    .tasks
+                    .values_mut()
+                    .filter(|t| {
+                        // 仅 Reminder 类型参与预触发（ToolCall 类型本身即智能体自执行，无需预触发）
+                        t.status == TaskStatus::Pending
+                            && !t.pre_triggered
+                            && t.task_type == TaskType::Reminder
+                            && t.scheduled_time > now
+                            && t.scheduled_time - now <= PRE_TRIGGER_LEAD_SECS
+                    })
+                    .map(|t| {
+                        t.pre_triggered = true;
+                        t.clone()
+                    })
+                    .collect()
+            }
+        };
+
+        if !pre_trigger_tasks.is_empty() {
+            self.persist();
+            let callback = self.inner.lock().pre_trigger_callback.clone();
+            if let Some(cb) = callback {
+                for task in pre_trigger_tasks {
+                    let cb = cb.clone();
+                    tokio::spawn(async move {
+                        cb(task);
+                    });
+                }
+            }
+        }
+
         let due_tasks: Vec<ScheduledTask> = {
             let inner = self.inner.lock();
             inner
@@ -503,6 +569,8 @@ impl Scheduler {
                                 }
                                 t.scheduled_time = next;
                                 t.status = TaskStatus::Pending;
+                                // 重置预触发标志：新一轮等待窗口可再次发起 LLM 预调用
+                                t.pre_triggered = false;
                             } else {
                                 t.status = TaskStatus::Completed;
                                 t.completed_at = Some(now_ts());

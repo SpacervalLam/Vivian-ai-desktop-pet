@@ -50,7 +50,11 @@ export function memoryToGraphNode(m: MemoryItem, ctx: ClassifyContext): MemoryNo
   // 日记索引记忆（tags 含 diary 或 metadata.kind=diary）不作为独立节点渲染，其内容由日记节点承载
   if (tagSet.has('diary') || m.metadata?.kind === 'diary') return null;
 
-  let content = m.content || '';
+  const content0 = m.content || '';
+  // 旁观插话的内部系统指令被误存为记忆，前端不渲染（“现在你想插话。/对用户说，不是对室友…”）
+  if (/(?:现在你想插话|你刚听到用户和|你有机会对用户插话|你插进他们的对话)/.test(content0)) return null;
+
+  let content = content0;
   const memType = m.memory_type || '';
 
   // 解析说话者前缀（支持所有格式）：

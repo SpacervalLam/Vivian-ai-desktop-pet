@@ -315,7 +315,7 @@ pub struct PreParsedExpression {
         };
 
         // 跳过非角色目录
-        if char_name == "expression" || char_name == "world-bg" || char_name == "assets" {
+        if char_name == "expression" || char_name == "world-bg" || char_name == "assets" || char_name == "fonts" {
             continue;
         }
 
@@ -400,7 +400,7 @@ pub fn get_pre_parsed_motions(char_id: &str) -> &[PreParsedMotion] {
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("");
-        if char_name == "expression" || char_name == "world-bg" || char_name == "assets" {
+        if char_name == "expression" || char_name == "world-bg" || char_name == "assets" || char_name == "fonts" {
             continue;
         }
         output.push_str(&format!(
@@ -426,7 +426,7 @@ pub fn get_pre_parsed_expressions(char_id: &str) -> &[PreParsedExpression] {
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("");
-        if char_name == "expression" || char_name == "world-bg" || char_name == "assets" {
+        if char_name == "expression" || char_name == "world-bg" || char_name == "assets" || char_name == "fonts" {
             continue;
         }
         output.push_str(&format!(

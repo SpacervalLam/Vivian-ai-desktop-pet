@@ -365,6 +365,25 @@ impl DialogueManager {
         }
     }
 
+    /// 获取用户可见渠道的近期消息（direct/wechat/proactive 及无标记旧消息）
+    ///
+    /// 仅排除 `cross_character` 渠道消息，使同一用户在不同入口
+    /// （Chat window、侧边栏、微信）切换时共享完整上下文。
+    pub fn get_user_visible_history(&self) -> Vec<ChatMessage> {
+        self.messages
+            .lock()
+            .clone()
+            .into_iter()
+            .filter(|msg| {
+                match msg.meta.as_ref().and_then(|m| m.channel.as_deref()) {
+                    None => true,
+                    Some("cross_character") => false,
+                    Some(_) => true,
+                }
+            })
+            .collect()
+    }
+
     /// 获取当前消息渠道（"wechat" / "direct"）
     pub fn get_channel(&self) -> String {
         self.current_channel.lock().clone()
@@ -956,6 +975,62 @@ impl DialogueManager {
             }
             Err(e) => {
                 tracing::warn!("[DialogueManager] 读取历史文件 patch 失败: {}", e);
+            }
+        }
+    }
+
+    /// Patch 最后一条 assistant 消息的 metadata
+    ///
+    /// 用于在 TTS 合成完成后回写 voice 消息的 audio_path / duration，
+    /// 使历史刷新时能恢复语音气泡。先在 buffer 中查找（未 flush），找不到则回退到磁盘文件。
+    pub fn patch_last_assistant_entry_metadata(&self, patch: serde_json::Value) {
+        // 1. 先在 buffer 中查找
+        let mut buffer = self.buffer.lock();
+        for entry in buffer.iter_mut().rev() {
+            if entry.role == "assistant" {
+                if let (Some(target), Some(src)) =
+                    (entry.metadata.as_object_mut(), patch.as_object())
+                {
+                    for (k, v) in src {
+                        target.insert(k.clone(), v.clone());
+                    }
+                }
+                return;
+            }
+        }
+        drop(buffer);
+
+        // 2. buffer 中找不到（已 flush），回退到磁盘文件
+        let path = self.history_file();
+        if !path.exists() {
+            return;
+        }
+        match std::fs::read_to_string(&path) {
+            Ok(content) => {
+                if let Ok(mut file) = serde_json::from_str::<HistoryFile>(&content) {
+                    let mut patched = false;
+                    for entry in file.messages.iter_mut().rev() {
+                        if entry.role == "assistant" {
+                            if let (Some(target), Some(src)) =
+                                (entry.metadata.as_object_mut(), patch.as_object())
+                            {
+                                for (k, v) in src {
+                                    target.insert(k.clone(), v.clone());
+                                }
+                            }
+                            patched = true;
+                            break;
+                        }
+                    }
+                    if patched {
+                        if let Ok(json) = serde_json::to_string(&file) {
+                            let _ = std::fs::write(&path, json);
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("[DialogueManager] 读取历史文件 patch assistant 失败: {}", e);
             }
         }
     }

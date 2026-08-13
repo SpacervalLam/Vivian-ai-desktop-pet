@@ -97,6 +97,7 @@ body {
   --wx-text-secondary: rgba(255, 255, 255, 0.4);
   --wx-text-tertiary: rgba(255, 255, 255, 0.3);
   --wx-icon: #8C8C8C;
+  --wx-toolbar-icon: #E7E7E7;
   --wx-border: rgba(255, 255, 255, 0.08);
   --wx-border-light: rgba(255, 255, 255, 0.04);
   --wx-search-bg: rgba(255, 255, 255, 0.06);
@@ -137,6 +138,7 @@ body {
     --wx-text-secondary: rgba(0, 0, 0, 0.4);
     --wx-text-tertiary: rgba(0, 0, 0, 0.3);
     --wx-icon: #666666;
+    --wx-toolbar-icon: #181818;
     --wx-border: rgba(0, 0, 0, 0.08);
     --wx-border-light: rgba(0, 0, 0, 0.04);
     --wx-search-bg: rgba(0, 0, 0, 0.05);
@@ -177,6 +179,7 @@ body {
   --wx-text-secondary: rgba(0, 0, 0, 0.4);
   --wx-text-tertiary: rgba(0, 0, 0, 0.3);
   --wx-icon: #666666;
+  --wx-toolbar-icon: #181818;
   --wx-border: rgba(0, 0, 0, 0.08);
   --wx-border-light: rgba(0, 0, 0, 0.04);
   --wx-search-bg: rgba(0, 0, 0, 0.05);

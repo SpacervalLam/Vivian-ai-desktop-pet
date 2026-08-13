@@ -87,6 +87,9 @@ pub struct ActiveThought {
 
 impl ActiveThought {
     /// 创建一个新的种子思绪
+    ///
+    /// `high_priority` 为 true 时放宽初始强度上限（0.85），让 going_to_rest / waking_up /
+    /// festival 等高优先级事件能立即产生独白；普通种子上限保持 0.4，仍需 nourish 积累。
     pub fn new_seed(
         thought_key: &str,
         description: &str,
@@ -96,16 +99,19 @@ impl ActiveThought {
         arousal: f32,
         trigger_kind: &str,
         now: f64,
+        high_priority: bool,
     ) -> Self {
+        let clamp_max = if high_priority { 0.85 } else { 0.4 };
+        let intensity = base_intensity.clamp(0.05, clamp_max);
         Self {
             thought_key: thought_key.to_string(),
             description: description.to_string(),
             context_hint: context_hint.to_string(),
-            intensity: base_intensity.clamp(0.05, 0.4),
+            intensity,
             desire_to_share: 0.1,
             valence: valence.clamp(-1.0, 1.0),
             arousal: arousal.clamp(0.0, 1.0),
-            phase: if base_intensity >= INNER_MONOLOGUE_THRESHOLD {
+            phase: if intensity >= INNER_MONOLOGUE_THRESHOLD {
                 ThoughtPhase::Growing
             } else {
                 ThoughtPhase::Seed
@@ -256,6 +262,7 @@ impl ThoughtLifecycle {
         arousal: f32,
         trigger_kind: &str,
         now: f64,
+        high_priority: bool,
     ) -> bool {
         if let Some(existing) = self.thoughts.iter_mut().find(|t| t.thought_key == thought_key) {
             existing.nourish(RELEVANT_EVENT_BOOST.min(base_intensity * 0.5), Some(context_hint), now);
@@ -271,6 +278,7 @@ impl ThoughtLifecycle {
             arousal,
             trigger_kind,
             now,
+            high_priority,
         );
         self.thoughts.push(thought);
 

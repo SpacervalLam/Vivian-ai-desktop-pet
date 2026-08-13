@@ -65,10 +65,17 @@ mod imp {
         stop_flag: Option<Arc<AtomicBool>>,
         // 16-bit PCM 样本缓冲（16kHz 单声道）
         buffer: Arc<RwLock<VecDeque<i16>>>,
+        // 复用的 HTTP 客户端（直连，绕过代理；Azure 服务国内可直连）
+        client: reqwest::Client,
     }
 
     impl AzureBackend {
         pub(crate) fn new_inner(config: AsrConfig, azure_cfg: AzureSpeechConfig) -> Self {
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .no_proxy()
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new());
             Self {
                 config,
                 azure_cfg,
@@ -78,6 +85,7 @@ mod imp {
                 capture_thread: None,
                 stop_flag: None,
                 buffer: Arc::new(RwLock::new(VecDeque::with_capacity(16000 * 30))),
+                client,
             }
         }
 
@@ -269,11 +277,7 @@ mod imp {
                 self.azure_cfg.speech_region,
                 self.config.language
             );
-            let client = reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(30))
-                .build()
-                .map_err(|e| VivianError::Network(format!("构建 HTTP 客户端失败: {e}")))?;
-            let resp = client
+            let resp = self.client
                 .post(&url)
                 .header("Ocp-Apim-Subscription-Key", &self.azure_cfg.speech_key)
                 .header("Content-Type", "audio/wav; codecs=audio/pcm; samplerate=16000")

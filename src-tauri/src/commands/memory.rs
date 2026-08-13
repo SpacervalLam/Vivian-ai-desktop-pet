@@ -268,6 +268,10 @@ pub async fn purge_expired_recycle_bin(
 /// 12. Presence 在场状态文件（state.json）
 /// 13. User facts 用户事实画像（shared/user_facts.json）—— 让角色"重新认识用户"
 ///
+/// **内容资产层**：
+/// 14. 笔记目录（notebook/）—— 删除整个目录及其下所有 note.json / note.html /
+///     .memory_ref / index.json；知识库条目已随 MemoryManager.entries.clear() 一并清空
+///
 /// 启动问候的「首次见面」判定基于记忆是否为空，由 clear_all_memories 保证。
 /// 由于运行时部分模块（Proactive/Presence/UserFacts 等）的状态在内存中缓存，
 /// 建议前端在清空成功后提示用户重启应用以完全生效。
@@ -357,6 +361,14 @@ pub async fn clear_all_memories(
     let user_facts_path = char_data_dir.join("user_facts.json");
     if user_facts_path.exists() {
         let _ = std::fs::remove_file(&user_facts_path);
+    }
+
+    // ===== 5. 内容资产层：笔记目录 =====
+    // 删除整个 notebook/ 目录（note.json / note.html / .memory_ref / index.json）。
+    // 知识库条目已随上面的 memory.clear_all_memories() 的 entries.clear() 一并清空，
+    // 无需逐个读 .memory_ref 调用 delete_knowledge_document。
+    if let Err(e) = crate::notebook::storage::clear_all(&char_id) {
+        tracing::warn!("[clear_all_memories] 清空角色 {} 笔记目录失败: {e}", char_id);
     }
 
     let _ = app.emit(
@@ -693,4 +705,25 @@ pub async fn rebuild_memory_embeddings(
         tracing::info!("[RebuildEmbeddings] 重建完成 {rebuilt}/{total}");
     });
     Ok(json!({ "started": true, "total": total }))
+}
+
+/// 返回内置已知嵌入模型元数据（供前端在设置表单选择模型时展示维度、自动填充 dimension）。
+#[tauri::command]
+pub fn get_embedding_models() -> Value {
+    json!(
+        crate::memory::embedding_registry::all_models()
+            .iter()
+            .map(|m| {
+                json!({
+                    "id": m.id,
+                    "dimension": m.dimension,
+                    "source": match m.source {
+                        crate::memory::embedding_registry::EmbeddingSource::Cloud => "cloud",
+                        crate::memory::embedding_registry::EmbeddingSource::Local => "local",
+                    },
+                    "display_name": m.display_name,
+                })
+            })
+            .collect::<Vec<_>>()
+    )
 }

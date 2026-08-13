@@ -28,6 +28,12 @@ pub struct SearchResult {
     pub title: String,
     pub url: String,
     pub snippet: String,
+    /// 来源权威分级（P0=官方/原始数据，P1=权威二手，P2=专业社区，P3=一般参考）
+    #[serde(default)]
+    pub source_tier: String,
+    /// 信心标注（CONFIRMED / MAJORITY / DISPUTED / SINGLE-SOURCE / UNKNOWN）
+    #[serde(default)]
+    pub confidence: String,
 }
 
 // ============================================================================
@@ -83,21 +89,41 @@ static TAG_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?s)<[^>]+>").unwrap());
 /// 6. 若所有引擎都返回空（或全部跳过），最终回退到 DuckDuckGo 兜底
 pub struct WebSearcher;
 
+/// 构建带可选代理的 reqwest 客户端
+fn build_search_client(
+    timeout: std::time::Duration,
+    user_agent: Option<&str>,
+    proxy_url: Option<&str>,
+) -> reqwest::Client {
+    let mut builder = reqwest::Client::builder().timeout(timeout);
+    if let Some(ua) = user_agent {
+        builder = builder.user_agent(ua);
+    }
+    if let Some(url) = proxy_url {
+        if let Ok(proxy) = reqwest::Proxy::all(url) {
+            builder = builder.proxy(proxy);
+        }
+    }
+    builder.build().unwrap_or_else(|_| reqwest::Client::new())
+}
+
 impl WebSearcher {
     /// 执行搜索（使用默认 DuckDuckGo 后端）
     ///
     /// 兼容旧调用点：未传入配置时走 DuckDuckGo。
     pub async fn search(query: &str, max_results: usize) -> Vec<SearchResult> {
-        Self::search_with_config(query, max_results, None).await
+        Self::search_with_config(query, max_results, None, None).await
     }
 
     /// 执行搜索（按配置混用多引擎）
     ///
     /// `config` 为 None 时走 DuckDuckGo（保持向后兼容）。
+    /// `proxy_url` 为 Some 时通过代理发送请求（国内网络访问 Tavily/DuckDuckGo 需要）。
     pub async fn search_with_config(
         query: &str,
         max_results: usize,
         config: Option<&crate::config::WebSearchConfig>,
+        proxy_url: Option<&str>,
     ) -> Vec<SearchResult> {
         let timeout = config
             .map(|c| std::time::Duration::from_secs(c.timeout_secs))
@@ -112,7 +138,7 @@ impl WebSearcher {
                 } else {
                     c.providers
                         .iter()
-                        .filter(|p| matches!(p.as_str(), "duckduckgo" | "searxng" | "tavily"))
+                        .filter(|p| matches!(p.as_str(), "duckduckgo" | "searxng" | "tavily" | "bing"))
                         .cloned()
                         .collect()
                 }
@@ -120,14 +146,15 @@ impl WebSearcher {
             .unwrap_or_else(|| vec!["duckduckgo".to_string()]);
 
         if providers.is_empty() {
-            return Self::search_ddg(query, max_results, timeout).await;
+            return Self::search_ddg(query, max_results, timeout, proxy_url).await;
         }
 
         tracing::info!(
-            "[WebSearcher] 混用搜索: query={:?}, providers={:?}, max_results={}",
+            "[WebSearcher] 混用搜索: query={:?}, providers={:?}, max_results={}, proxy={}",
             query,
             providers,
-            max_results
+            max_results,
+            proxy_url.unwrap_or("none")
         );
 
         // 为每个引擎构建一个 future，跳过未配置必要参数的引擎
@@ -141,7 +168,7 @@ impl WebSearcher {
                 "duckduckgo" => {
                     // DuckDuckGo 始终可用
                     futures.push(Box::pin(async move {
-                        let results = Self::search_ddg(query, max_results, timeout).await;
+                        let results = Self::search_ddg(query, max_results, timeout, proxy_url).await;
                         ("duckduckgo", results)
                     }));
                 }
@@ -156,7 +183,7 @@ impl WebSearcher {
                         }
                         futures.push(Box::pin(async move {
                             let results =
-                                Self::search_searxng(query, max_results, cfg, timeout).await;
+                                Self::search_searxng(query, max_results, cfg, timeout, proxy_url).await;
                             ("searxng", results)
                         }));
                     }
@@ -172,8 +199,24 @@ impl WebSearcher {
                         }
                         futures.push(Box::pin(async move {
                             let results =
-                                Self::search_tavily(query, max_results, cfg, timeout).await;
+                                Self::search_tavily(query, max_results, cfg, timeout, proxy_url).await;
                             ("tavily", results)
+                        }));
+                    }
+                }
+                "bing" => {
+                    if let Some(cfg) = config {
+                        if cfg.bing.api_key.is_empty() {
+                            tracing::warn!(
+                                "[WebSearcher] Bing API Key 未配置，跳过该引擎"
+                            );
+                            skipped.push("bing");
+                            continue;
+                        }
+                        futures.push(Box::pin(async move {
+                            let results =
+                                Self::search_bing(query, max_results, cfg, timeout, proxy_url).await;
+                            ("bing", results)
                         }));
                     }
                 }
@@ -185,7 +228,7 @@ impl WebSearcher {
             tracing::warn!(
                 "[WebSearcher] 所有引擎均不可用，回退到 DuckDuckGo 兜底"
             );
-            return Self::search_ddg(query, max_results, timeout).await;
+            return Self::search_ddg(query, max_results, timeout, proxy_url).await;
         }
 
         // 并发执行所有引擎搜索
@@ -222,11 +265,26 @@ impl WebSearcher {
         }
 
         if merged.is_empty() {
+            // 代理失败降级：配置了代理但所有引擎都无结果时，可能是代理不可用。
+            // 用直连重试一次，避免代理挂了导致搜索完全瘫痪。
+            if proxy_url.is_some() {
+                tracing::warn!(
+                    "[WebSearcher] 配置了代理但所有引擎无结果（skipped={:?}），尝试直连重试",
+                    skipped
+                );
+                let direct_results = Box::pin(Self::search_with_config(
+                    query, max_results, config, None,
+                ))
+                .await;
+                if !direct_results.is_empty() {
+                    return direct_results;
+                }
+            }
             tracing::warn!(
                 "[WebSearcher] 所有引擎均无结果（skipped={:?}），回退到 DuckDuckGo 兜底",
                 skipped
             );
-            return Self::search_ddg(query, max_results, timeout).await;
+            return Self::search_ddg(query, max_results, timeout, proxy_url).await;
         }
 
         merged.truncate(max_results);
@@ -241,11 +299,12 @@ impl WebSearcher {
         query: &str,
         max_results: usize,
         timeout: std::time::Duration,
+        proxy_url: Option<&str>,
     ) -> Vec<SearchResult> {
-        let mut results = Self::ddg_html(query, max_results, timeout).await;
+        let mut results = Self::ddg_html(query, max_results, timeout, proxy_url).await;
         if results.is_empty() {
             tracing::warn!("[WebSearcher] HTML 搜索无结果，尝试 lite 回退");
-            results = Self::ddg_lite(query, max_results, timeout).await;
+            results = Self::ddg_lite(query, max_results, timeout, proxy_url).await;
         }
         results.truncate(max_results);
         results
@@ -255,12 +314,9 @@ impl WebSearcher {
         query: &str,
         max_results: usize,
         timeout: std::time::Duration,
+        proxy_url: Option<&str>,
     ) -> Vec<SearchResult> {
-        let client = reqwest::Client::builder()
-            .timeout(timeout)
-            .user_agent(USER_AGENT)
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+        let client = build_search_client(timeout, Some(USER_AGENT), proxy_url);
 
         let resp = client
             .post("https://html.duckduckgo.com/html/")
@@ -295,12 +351,9 @@ impl WebSearcher {
         query: &str,
         max_results: usize,
         timeout: std::time::Duration,
+        proxy_url: Option<&str>,
     ) -> Vec<SearchResult> {
-        let client = reqwest::Client::builder()
-            .timeout(timeout)
-            .user_agent(USER_AGENT)
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+        let client = build_search_client(timeout, Some(USER_AGENT), proxy_url);
 
         let resp = client
             .post("https://lite.duckduckgo.com/lite/")
@@ -338,6 +391,7 @@ impl WebSearcher {
         max_results: usize,
         config: &crate::config::WebSearchConfig,
         timeout: std::time::Duration,
+        proxy_url: Option<&str>,
     ) -> Vec<SearchResult> {
         use crate::config::SearXngConfig;
         let SearXngConfig {
@@ -345,10 +399,7 @@ impl WebSearcher {
             auth_token,
         } = &config.searxng;
 
-        let client = reqwest::Client::builder()
-            .timeout(timeout)
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+        let client = build_search_client(timeout, None, proxy_url);
 
         let mut req = client
             .get(format!("{}/search", base_url.trim_end_matches('/')))
@@ -414,11 +465,13 @@ impl WebSearcher {
                         if title.is_empty() && url.is_empty() {
                             None
                         } else {
-                            Some(SearchResult {
+                            Some(annotate_result(SearchResult {
                                 title,
                                 url,
                                 snippet,
-                            })
+                                source_tier: String::new(),
+                                confidence: String::new(),
+                            }))
                         }
                     })
                     .collect()
@@ -435,6 +488,7 @@ impl WebSearcher {
         max_results: usize,
         config: &crate::config::WebSearchConfig,
         timeout: std::time::Duration,
+        proxy_url: Option<&str>,
     ) -> Vec<SearchResult> {
         use crate::config::TavilyConfig;
         let TavilyConfig {
@@ -443,10 +497,7 @@ impl WebSearcher {
             search_depth,
         } = &config.tavily;
 
-        let client = reqwest::Client::builder()
-            .timeout(timeout)
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+        let client = build_search_client(timeout, None, proxy_url);
 
         let body = serde_json::json!({
             "api_key": api_key,
@@ -509,11 +560,107 @@ impl WebSearcher {
                         if title.is_empty() && url.is_empty() {
                             None
                         } else {
-                            Some(SearchResult {
+                            Some(annotate_result(SearchResult {
                                 title,
                                 url,
                                 snippet,
-                            })
+                                source_tier: String::new(),
+                                confidence: String::new(),
+                            }))
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    // ========================================================================
+    // Bing Search API v7（国内直连可用，无需梯子）
+    // ========================================================================
+
+    async fn search_bing(
+        query: &str,
+        max_results: usize,
+        config: &crate::config::WebSearchConfig,
+        timeout: std::time::Duration,
+        proxy_url: Option<&str>,
+    ) -> Vec<SearchResult> {
+        use crate::config::BingConfig;
+        let BingConfig {
+            api_key,
+            mkt,
+            offset,
+        } = &config.bing;
+
+        let client = build_search_client(timeout, None, proxy_url);
+
+        let count = max_results.min(50);
+        let resp = client
+            .get("https://api.bing.microsoft.com/v7.0/search")
+            .header("Ocp-Apim-Subscription-Key", api_key)
+            .query(&[
+                ("q", query),
+                ("mkt", mkt.as_str()),
+                ("count", &count.to_string()),
+                ("offset", &offset.to_string()),
+            ])
+            .send()
+            .await;
+
+        match resp {
+            Ok(r) => {
+                if !r.status().is_success() {
+                    tracing::warn!("[WebSearcher] Bing 状态: {}", r.status());
+                    return Vec::new();
+                }
+                match r.json::<Value>().await {
+                    Ok(v) => Self::parse_bing(&v, max_results),
+                    Err(e) => {
+                        tracing::warn!("[WebSearcher] Bing JSON 解析失败: {}", e);
+                        Vec::new()
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("[WebSearcher] Bing 请求失败: {}", e);
+                Vec::new()
+            }
+        }
+    }
+
+    fn parse_bing(v: &Value, limit: usize) -> Vec<SearchResult> {
+        v.get("webPages")
+            .and_then(|w| w.get("value"))
+            .and_then(|r| r.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .take(limit)
+                    .filter_map(|item| {
+                        let title = item
+                            .get("name")
+                            .and_then(|t| t.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let url = item
+                            .get("url")
+                            .and_then(|u| u.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let snippet = item
+                            .get("snippet")
+                            .and_then(|c| c.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        if title.is_empty() && url.is_empty() {
+                            None
+                        } else {
+                            Some(annotate_result(SearchResult {
+                                title,
+                                url,
+                                snippet,
+                                source_tier: String::new(),
+                                confidence: String::new(),
+                            }))
                         }
                     })
                     .collect()
@@ -534,6 +681,8 @@ impl WebSearcher {
                 title: String::new(),
                 url: String::new(),
                 snippet: String::new(),
+                source_tier: String::new(),
+                confidence: String::new(),
             };
 
             if i < titles.len() {
@@ -549,7 +698,7 @@ impl WebSearcher {
             }
 
             if !result.url.is_empty() || !result.title.is_empty() {
-                results.push(result);
+                results.push(annotate_result(result));
             }
         }
 
@@ -573,11 +722,13 @@ impl WebSearcher {
                 };
 
                 if !url.is_empty() {
-                    results.push(SearchResult {
+                    results.push(annotate_result(SearchResult {
                         title,
                         url,
                         snippet: String::new(),
-                    });
+                        source_tier: String::new(),
+                        confidence: String::new(),
+                    }));
                 }
             }
         }
@@ -598,11 +749,13 @@ impl WebSearcher {
                 continue;
             }
 
-            results.push(SearchResult {
+            results.push(annotate_result(SearchResult {
                 title: strip_html_tags(title_html),
                 url: decode_ddg_url(href),
                 snippet: String::new(),
-            });
+                source_tier: String::new(),
+                confidence: String::new(),
+            }));
         }
 
         // 填充摘要
@@ -626,6 +779,104 @@ impl WebSearcher {
 fn strip_html_tags(s: &str) -> String {
     let stripped = TAG_RE.replace_all(s, "").to_string();
     decode_html_entities(&stripped).trim().to_string()
+}
+
+/// 依据域名推断来源权威分级（对应 research-guide 的 P0~P3 层级）
+///
+/// - P0：官方/原始来源（政府、学术论文、官方文档、权威白皮书）
+/// - P1：权威二手（主流媒体、行业报告、同行评审）
+/// - P2：专业社区（带数据/代码的技术博客、论坛、问答）
+/// - P3：一般参考（百科、自媒体、未核验内容）
+fn classify_source_tier(url: &str) -> String {
+    let host = url
+        .trim()
+        .trim_start_matches("http://")
+        .trim_start_matches("https://")
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .to_lowercase();
+    let host = host.trim_start_matches("www.").trim_start_matches("m.");
+
+    // P0：政府 / 官方 / 学术 / 原始数据
+    if host.ends_with(".gov")
+        || host.ends_with(".gov.cn")
+        || host.ends_with(".edu")
+        || host.ends_with(".edu.cn")
+        || host.ends_with(".mil")
+        || host.ends_with(".int")
+        || host.eq_ignore_ascii_case("arxiv.org")
+        || host.eq_ignore_ascii_case("doi.org")
+        || host.eq_ignore_ascii_case("semanticscholar.org")
+        || host.eq_ignore_ascii_case("pubmed.ncbi.nlm.nih.gov")
+        || host.eq_ignore_ascii_case("github.com")
+        || host.eq_ignore_ascii_case("docs.rs")
+        || host.eq_ignore_ascii_case("developer.mozilla.org")
+        || host.ends_with(".wikipedia.org")
+        || host.contains("official")
+    {
+        return "P0".to_string();
+    }
+
+    // P1：权威媒体 / 行业报告
+    if host.eq_ignore_ascii_case("reuters.com")
+        || host.eq_ignore_ascii_case("apnews.com")
+        || host.eq_ignore_ascii_case("bbc.com")
+        || host.eq_ignore_ascii_case("bloomberg.com")
+        || host.eq_ignore_ascii_case("ft.com")
+        || host.eq_ignore_ascii_case("wsj.com")
+        || host.eq_ignore_ascii_case("nytimes.com")
+        || host.eq_ignore_ascii_case("nature.com")
+        || host.eq_ignore_ascii_case("science.org")
+        || host.eq_ignore_ascii_case("forbes.com")
+        || host.eq_ignore_ascii_case("gartner.com")
+        || host.eq_ignore_ascii_case("idc.com")
+        || host.contains("report")
+        || host.contains("research")
+    {
+        return "P1".to_string();
+    }
+
+    // P2：专业技术社区 / 问答 / 论坛
+    if host.eq_ignore_ascii_case("stackoverflow.com")
+        || host.eq_ignore_ascii_case("stackexchange.com")
+        || host.eq_ignore_ascii_case("zhihu.com")
+        || host.eq_ignore_ascii_case("medium.com")
+        || host.eq_ignore_ascii_case("dev.to")
+        || host.eq_ignore_ascii_case("csdn.net")
+        || host.eq_ignore_ascii_case("juejin.cn")
+        || host.eq_ignore_ascii_case("segmentfault.com")
+        || host.eq_ignore_ascii_case("opensource.org")
+        || host.contains("blog")
+        || host.contains("docs")
+    {
+        return "P2".to_string();
+    }
+
+    // 其余视为 P3
+    "P3".to_string()
+}
+
+/// 依据来源分级派生信心标注（对应 research-guide 的 CONFIRMED 等）
+///
+/// 单条结果仅代表该来源自身的可信度，最终结论级信心由 LLM 依据多来源综合。
+fn confidence_from_tier(tier: &str) -> String {
+    match tier {
+        "P0" => "CONFIRMED".to_string(),
+        "P1" => "MAJORITY".to_string(),
+        "P2" => "DISPUTED".to_string(),
+        _ => "SINGLE-SOURCE".to_string(),
+    }
+}
+
+/// 为一条搜索结果补齐来源分级与信心标注
+fn annotate_result(mut r: SearchResult) -> SearchResult {
+    if r.source_tier.is_empty() {
+        let tier = classify_source_tier(&r.url);
+        r.source_tier = tier.clone();
+        r.confidence = confidence_from_tier(&tier);
+    }
+    r
 }
 
 /// 解码常见 HTML 实体
@@ -821,5 +1072,25 @@ mod tests {
         assert_eq!(results[0].title, "Example");
         assert_eq!(results[0].url, "https://example.com");
         assert_eq!(results[0].snippet, "This is a snippet");
+    }
+
+    #[test]
+    fn test_classify_source_tier() {
+        assert_eq!(classify_source_tier("https://www.gov.cn/news"), "P0");
+        assert_eq!(classify_source_tier("https://arxiv.org/abs/1234"), "P0");
+        assert_eq!(classify_source_tier("https://github.com/user/repo"), "P0");
+        assert_eq!(classify_source_tier("https://reuters.com/world"), "P1");
+        assert_eq!(classify_source_tier("https://zhihu.com/question/1"), "P2");
+        assert_eq!(classify_source_tier("https://csdn.net/article"), "P2");
+        assert_eq!(classify_source_tier("https://example.com/blog"), "P2");
+        assert_eq!(classify_source_tier("https://some-unknown-site.com/x"), "P3");
+    }
+
+    #[test]
+    fn test_confidence_from_tier() {
+        assert_eq!(confidence_from_tier("P0"), "CONFIRMED");
+        assert_eq!(confidence_from_tier("P1"), "MAJORITY");
+        assert_eq!(confidence_from_tier("P2"), "DISPUTED");
+        assert_eq!(confidence_from_tier("P3"), "SINGLE-SOURCE");
     }
 }

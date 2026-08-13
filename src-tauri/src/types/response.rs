@@ -59,6 +59,10 @@ pub struct AiResponse {
     /// 主对话路径下永远为 speak（即使用户输入很无聊，也要回一个低信息量回复）。
     #[serde(default)]
     pub response_mode: String,
+    /// 微信渠道语音消息标志：为 true 时前端不显示文本，而是合成 TTS 音频后
+    /// 以微信风格语音气泡发出，点击可播放。
+    #[serde(default)]
+    pub voice_message: bool,
 }
 
 fn default_motion() -> String {
@@ -88,6 +92,7 @@ impl AiResponse {
             sticker: String::new(),
             user_emotion: String::new(),
             response_mode: "speak".to_string(),
+            voice_message: false,
         }
     }
 
@@ -105,6 +110,7 @@ impl AiResponse {
             sticker: String::new(),
             user_emotion: String::new(),
             response_mode: "speak".to_string(),
+            voice_message: false,
         }
     }
 }

@@ -57,14 +57,11 @@ const EDGE_VOICES: &[(&str, &str, &str)] = &[
     ("en-US-RyanNeural", "Ryan (男)", "en-US"),
     ("en-US-DavisNeural", "Davis (男)", "en-US"),
     ("ja-JP-NanamiNeural", "七海 (女)", "ja-JP"),
-    ("ja-JP-AoiNeural", "葵 (女)", "ja-JP"),
     ("ja-JP-KeitaNeural", "圭太 (男)", "ja-JP"),
-    ("ja-JP-DaichiNeural", "大地 (男)", "ja-JP"),
 ];
 
 pub struct EdgeTtsBackend {
-    client: reqwest::Client,
-    /// 缓存的 WSS 连接（prewarm 建立，synthesize 复用）
+    /// 不再持有独立 client，统一走全局 client（共享代理配置）
     cached_ws:
         tokio::sync::Mutex<Option<WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>>>,
 }
@@ -72,10 +69,6 @@ pub struct EdgeTtsBackend {
 impl EdgeTtsBackend {
     pub fn new() -> Self {
         Self {
-            client: reqwest::Client::builder()
-                .timeout(Duration::from_secs(30))
-                .build()
-                .unwrap_or_else(|_| reqwest::Client::new()),
             cached_ws: tokio::sync::Mutex::new(None),
         }
     }
@@ -126,15 +119,21 @@ impl EdgeTtsBackend {
             })
             .unwrap_or_default();
         let escaped = escape_xml(text);
+        // xml:lang 从 voice 名提取（如 "ja-JP-NanamiNeural" → "ja-JP"）
+        let voice_lang = voice
+            .split('-')
+            .take(2)
+            .collect::<Vec<_>>()
+            .join("-");
         format!(
-            "<speak version=\"1.0\" xmlns=\"http://www.w3.org/2001/10/synthesis\" xml:lang=\"en-US\">\
+            "<speak version=\"1.0\" xmlns=\"http://www.w3.org/2001/10/synthesis\" xml:lang=\"{}\">\
              <voice name=\"{}\">\
              <prosody {}rate=\"{}\" volume=\"{}\">\
              {}\
              </prosody>\
              </voice>\
              </speak>",
-            voice, pitch_str, rate_str, vol_str, escaped
+            voice_lang, voice, pitch_str, rate_str, vol_str, escaped
         )
     }
 
@@ -143,6 +142,9 @@ impl EdgeTtsBackend {
     /// 跨语言 TTS 场景（display_language=zh + tts_language=ja）下，用户配置的
     /// voice_id 通常是显示语言音色（如 zh-CN-XiaoxiaoNeural）。翻译后文本为
     /// 目标语言，若仍用原音色会出现音色/语言错位。此函数自动切换为目标语言默认音色。
+    ///
+    /// 同时校验配置的 voice 是否在 EDGE_VOICES 列表中存在，避免使用已下架/无效的
+    /// 音色名导致 Edge 服务静默关闭连接（turn.start 后无音频返回）。
     fn resolve_voice(config: &TtsConfig) -> String {
         let configured = config.voice_id.as_deref().filter(|s| !s.is_empty());
 
@@ -155,7 +157,7 @@ impl EdgeTtsBackend {
 
         if let Some(v) = configured {
             let voice_main = v.split('-').next().unwrap_or("");
-            if voice_main == target_main {
+            if voice_main == target_main && Self::is_valid_voice(v) {
                 return v.to_string();
             }
         }
@@ -166,6 +168,11 @@ impl EdgeTtsBackend {
             configured, target_lang, fallback
         );
         fallback.to_string()
+    }
+
+    /// 检查 voice 名称是否在 EDGE_VOICES 列表中
+    fn is_valid_voice(voice: &str) -> bool {
+        EDGE_VOICES.iter().any(|(id, _, _)| *id == voice)
     }
 
     /// 根据语言代码返回该语言的默认 EdgeTTS 音色
@@ -512,7 +519,8 @@ impl TtsBackend for EdgeTtsBackend {
     }
 
     async fn list_voices(&self, _config: &TtsConfig) -> VivianResult<Vec<VoiceInfo>> {
-        match EdgeTtsBackend::fetch_voices_from_api(&self.client).await {
+        let client = crate::network::http_client::get_global_client();
+        match EdgeTtsBackend::fetch_voices_from_api(&client).await {
             Ok(voices) => Ok(voices),
             Err(e) => {
                 tracing::warn!("[TTS] 从 API 获取语音列表失败，使用内置列表: {}", e);
@@ -529,7 +537,7 @@ impl TtsBackend for EdgeTtsBackend {
     }
 
     async fn health_check(&self, _config: &TtsConfig) -> bool {
-        self.client
+        crate::network::http_client::get_global_client()
             .head("https://speech.platform.bing.com")
             .send()
             .await

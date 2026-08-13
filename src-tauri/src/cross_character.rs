@@ -200,16 +200,22 @@ pub struct HandoffContext {
     pub source_fatigue: f64,
     /// 源角色最近 2 轮与用户的对话（按时间顺序，已格式化为 "User: ..." / "I: ..."）
     pub recent_user_dialogue: Vec<String>,
+    /// 目标角色最近 2 轮与用户的对话（让目标知道自己刚和用户聊了什么）
+    pub target_recent_user_dialogue: Vec<String>,
     /// 源角色发起交接的原因简述（由调用方填写，如 "user_asked_for_nana" / "topic_handoff"）
     pub handoff_reason: String,
+    /// 源↔目标角色间的亲密度 [0, 1]（0=陌生, 1=亲密）
+    pub pair_intimacy: f64,
 }
 
 impl HandoffContext {
     /// 渲染为 prompt 注入文本（注入到目标角色合成输入尾部）
     pub fn render(&self, source_name: &str) -> String {
         if self.recent_user_dialogue.is_empty()
+            && self.target_recent_user_dialogue.is_empty()
             && self.source_emotion.is_empty()
             && self.handoff_reason.is_empty()
+            && self.pair_intimacy <= 0.0
         {
             return String::new();
         }
@@ -224,9 +230,27 @@ impl HandoffContext {
                 source_name, self.source_emotion, self.source_fatigue
             ));
         }
+        if self.pair_intimacy > 0.0 {
+            let closeness_label = if self.pair_intimacy >= 0.75 {
+                "很熟"
+            } else if self.pair_intimacy >= 0.5 {
+                "还算熟"
+            } else if self.pair_intimacy >= 0.25 {
+                "一般"
+            } else {
+                "不太熟"
+            };
+            lines.push(format!("你和{}的关系：{}（亲密度{:.0}%）", source_name, closeness_label, self.pair_intimacy * 100.0));
+        }
         if !self.recent_user_dialogue.is_empty() {
             lines.push(format!("{} 最近与用户的对话：", source_name));
             for dlg in &self.recent_user_dialogue {
+                lines.push(format!("  {}", dlg));
+            }
+        }
+        if !self.target_recent_user_dialogue.is_empty() {
+            lines.push("你最近与用户的对话：".to_string());
+            for dlg in &self.target_recent_user_dialogue {
                 lines.push(format!("  {}", dlg));
             }
         }
@@ -235,13 +259,44 @@ impl HandoffContext {
 }
 
 /// 从源角色 Brain 构建交接上下文包
-fn build_handoff_context(source_brain: &crate::brain::Brain, handoff_reason: &str) -> HandoffContext {
+///
+/// `target_brain` 用于提取目标侧最近用户对话，让目标角色在回应时能感知
+/// 自己刚才和用户聊了什么，避免凭空回话或与用户对话内容脱节。
+fn build_handoff_context(
+    source_brain: &crate::brain::Brain,
+    target_brain: &crate::brain::Brain,
+    target_id: &str,
+    handoff_reason: &str,
+) -> HandoffContext {
     let mood = source_brain.psychology.compute_mood();
     let source_emotion = mood.primary_emotion.as_str().to_string();
     let source_fatigue = mood.fatigue;
 
+    // 查询源↔目标角色间的亲密度
+    let pair_intimacy = crate::psychology::social_state::social_state()
+        .get_pair(&source_brain.char_id, target_id)
+        .intimacy;
+
     let recent_user_dialogue: Vec<String> = {
         let history = source_brain.dialogue.get_history_filtered_by_channel(Some("wechat"));
+        let user_turns: Vec<&crate::types::response::ChatMessage> = history
+            .iter()
+            .rev()
+            .filter(|m| m.role == "user")
+            .take(2)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        user_turns
+            .into_iter()
+            .map(|m| format!("User: {}", m.content))
+            .collect()
+    };
+
+    // 目标侧最近与用户的对话，让目标知道自己刚才在聊什么
+    let target_recent_user_dialogue: Vec<String> = {
+        let history = target_brain.dialogue.get_history_filtered_by_channel(Some("wechat"));
         let user_turns: Vec<&crate::types::response::ChatMessage> = history
             .iter()
             .rev()
@@ -261,7 +316,9 @@ fn build_handoff_context(source_brain: &crate::brain::Brain, handoff_reason: &st
         source_emotion,
         source_fatigue,
         recent_user_dialogue,
+        target_recent_user_dialogue,
         handoff_reason: handoff_reason.to_string(),
+        pair_intimacy,
     }
 }
 
@@ -271,6 +328,10 @@ pub static CROSS_CHARACTER_BUS: Lazy<Arc<CrossCharacterBus>> = Lazy::new(|| {
         app_handle: RwLock::new(None),
     })
 });
+
+/// 关系认知事实抽取计数器：按角色对（"a:b" 已排序）计数，每 N 轮触发一次抽取
+static RELATIONSHIP_FACTS_COUNTER: Lazy<RwLock<std::collections::HashMap<String, u32>>> =
+    Lazy::new(|| RwLock::new(std::collections::HashMap::new()));
 
 pub struct CrossCharacterBus {
     /// Tauri AppHandle，由 lib.rs 启动时注入，用于 emit 事件和获取 AppState
@@ -630,10 +691,45 @@ impl CrossCharacterBus {
             );
         });
 
-        // 获取目标角色的 think_lock：用户对话优先，跨角色对话最多等待 8 秒
+        // 互锁检测：源角色和目标角色都在 UserChat turn 时，双方各自持有自己的 think_lock，
+        // 若源角色等待目标锁、目标角色同时等待源锁，会形成死锁（直到超时才打破）。
+        // 此场景下不等待，立即返回 peer_busy，让双方各自完成对用户的回复。
+        //
+        // 同时检查 pending_user：目标角色的用户消息可能在 signal_user_input 之后、
+        // enter_user_turn（注册 turn）之前——此时 turn 尚未登记但即将持有锁。
+        use crate::utils::session_coordinator::TurnKind;
+        let source_in_user = state.session_coordinator.current_turn_kind(&req.source_id)
+            == Some(TurnKind::UserChat);
+        let target_in_user = state.session_coordinator.current_turn_kind(&req.target_id)
+            == Some(TurnKind::UserChat);
+        let target_user_pending = state.session_coordinator.has_pending_user(&req.target_id);
+        if source_in_user && (target_in_user || target_user_pending) {
+            let _ = app.emit(
+                "cross:done",
+                json!({
+                    "stream_id": req.stream_id,
+                    "speaker_id": req.target_id,
+                    "listener_id": req.source_id,
+                    "response_mode": "ignore",
+                    "conv_state": "peer_busy",
+                    "should_continue": false,
+                }),
+            );
+            return Ok(CrossCharacterReply {
+                reply: format!("{}也在回应用户，你们各自回应就好，不用专门叫她", target_name),
+                response_mode: "ignore".to_string(),
+                conv_state: "peer_busy".to_string(),
+                should_continue: false,
+                expression: String::new(),
+                motion: String::new(),
+            });
+        }
+
+        // 获取目标角色的 think_lock：目标可能在旁观插话或跨角色对话中，最多等待 25 秒
         // 超时后放弃，避免源角色 LLM 长时间阻塞，并返回友好提示让对方知道"她在忙"
+        // 超时预算：think_lock 25s + think 执行 ~30s ≈ 55s，工具超时 60s 留余量
         let think_lock = target_instance.think_lock.clone();
-        let _guard = match tokio::time::timeout(Duration::from_secs(8), think_lock.lock()).await {
+        let _guard = match tokio::time::timeout(Duration::from_secs(25), think_lock.lock()).await {
             Ok(guard) => guard,
             Err(_) => {
                 let _ = app.emit(
@@ -648,7 +744,7 @@ impl CrossCharacterBus {
                     }),
                 );
                 return Ok(CrossCharacterReply {
-                    reply: format!("{}现在似乎在忙，没有回应", target_name),
+                    reply: format!("{}现在在忙，暂时没空回应", target_name),
                     response_mode: "ignore".to_string(),
                     conv_state: "target_busy".to_string(),
                     should_continue: false,
@@ -660,6 +756,39 @@ impl CrossCharacterBus {
 
         let brain = target_instance.brain.clone();
         brain.set_stream_emitter(Some(emitter));
+
+        // TOCTOU 加固：获取 think_lock 后再次检查目标角色是否已进入 UserChat turn 或收到 pending_user。
+        // 互锁检测（行 694-726）与 think_lock 获取之间存在时间窗口，
+        // 目标角色可能在此期间收到用户消息即将进入 UserChat。
+        // 此时放弃跨角色对话，让目标角色优先处理用户消息，避免对话历史混乱。
+        //
+        // 注意：此处只检查目标角色。源角色在 UserChat turn 内调用 talk_to_character 是工具调用的
+        // 正常语义（reasoning 阶段发起跨角色对话），不构成死锁条件——死锁需要双方互相等待对方的锁，
+        // 而源角色持有的是自己的 think_lock，目标 think_lock 已被此处获取，目标无法构成反向等待。
+        let target_in_user_now = state.session_coordinator.current_turn_kind(&req.target_id)
+            == Some(TurnKind::UserChat);
+        let target_user_pending_now = state.session_coordinator.has_pending_user(&req.target_id);
+        if target_in_user_now || target_user_pending_now {
+            let _ = app.emit(
+                "cross:done",
+                json!({
+                    "stream_id": req.stream_id,
+                    "speaker_id": req.target_id,
+                    "listener_id": req.source_id,
+                    "response_mode": "ignore",
+                    "conv_state": "peer_busy",
+                    "should_continue": false,
+                }),
+            );
+            return Ok(CrossCharacterReply {
+                reply: format!("{}刚收到用户消息，先让她回应用户", target_name),
+                response_mode: "ignore".to_string(),
+                conv_state: "peer_busy".to_string(),
+                should_continue: false,
+                expression: String::new(),
+                motion: String::new(),
+            });
+        }
 
         // 临时切换 channel 为 cross_character，确保 brain.think 写入 dialogue 时 channel 正确
         // 完成后恢复原 channel，避免影响后续正常对话
@@ -744,7 +873,7 @@ impl CrossCharacterBus {
         // 同时注入共同情境：双方都在观察同一个用户，用户最近的活动是天然共同话题
         let handoff_text = match state.get_character(Some(&req.source_id)) {
             Ok(source_instance) => {
-                let ctx = build_handoff_context(&source_instance.brain, "cross_character_reply");
+                let ctx = build_handoff_context(&source_instance.brain, &brain, &req.target_id, "cross_character_reply");
                 let rendered = ctx.render(&source_name);
                 let activity_brief = source_instance.brain.proactive.activity_journal().to_brief();
                 let shared_context = if activity_brief.is_empty() {
@@ -762,9 +891,28 @@ impl CrossCharacterBus {
         };
         let synthesized_input = format!("{}{}", synthesized_input, handoff_text);
 
+        // 轮次提醒：达到 WARN_ROUNDS 后提醒 LLM 准备结束，达到 MAX_ROUNDS 后强制要求结束语
+        let round_directive = {
+            let r = conv.rounds;
+            if r >= crate::conversation::Conversation::MAX_ROUNDS {
+                format!(
+                    "\n\n[话题结束提醒]\n你们已经聊了{}个来回，话题该收尾了。请自然地说一句结束语结束这段对话，不要再开启新话题或抛出新问题。",
+                    r
+                )
+            } else if r >= crate::conversation::Conversation::WARN_ROUNDS {
+                format!(
+                    "\n\n[话题收尾提示]\n你们已经聊了{}个来回，话题差不多可以开始收尾了。如果当前话题已经充分讨论，请自然地结束；不需要强行延续，也不要再抛出太深的新问题。",
+                    r
+                )
+            } else {
+                String::new()
+            }
+        };
+        let synthesized_input = format!("{}{}", synthesized_input, round_directive);
+
         // 获取目标角色的焦点租约：跨角色 think 期间屏蔽其他角色的主动打断
         let _focus_lease = crate::commands::proactive::FocusLeaseGuard::acquire(&req.target_id);
-        let result = brain.think(&synthesized_input, true).await;
+        let result = brain.think_cross_character(&synthesized_input, true).await;
         drop(_focus_lease);
 
         // 恢复原 channel
@@ -871,85 +1019,10 @@ impl CrossCharacterBus {
                     });
                     dialogue_add_with_meta(&source_dialogue, target_msg, target_meta);
 
-                    // 2.5. 源角色逐条 ShortTerm 记忆：双方对话各一条，确保时间线显示完整对话
-                    // 目标角色通过 brain.think 流水线自动写入 ShortTerm，源角色需要手动补写
-                    let source_shortterm_tags = vec![
-                        "short_term".to_string(),
-                        "cross_character".to_string(),
-                        "dialogue_turn".to_string(),
-                        "assistant".to_string(),
-                    ];
-                    let source_shortterm_meta = json!({
-                        "channel": "cross_character",
-                        "speaker": req.source_id,
-                        "listener": req.target_id,
-                        "perspective": "speaker",
-                        "knowledge_source": "direct",
-                    });
-                    let target_shortterm_tags = vec![
-                        "short_term".to_string(),
-                        "cross_character".to_string(),
-                        "dialogue_turn".to_string(),
-                        "user".to_string(),
-                    ];
-                    let target_shortterm_meta = json!({
-                        "channel": "cross_character",
-                        "speaker": req.target_id,
-                        "listener": req.source_id,
-                        "perspective": "listener",
-                        "knowledge_source": "heard",
-                        "response_mode": response_mode.as_str(),
-                    });
-                    let mem_st = source_memory.clone();
-                    let msg_st = req.message.clone();
-                    let fb_st = target_feedback.clone();
-                    let st_src = source_shortterm_tags.clone();
-                    let st_tgt = target_shortterm_tags.clone();
-                    let meta_st_src = source_shortterm_meta.clone();
-                    let meta_st_tgt = target_shortterm_meta.clone();
-                    let src_id = req.source_id.clone();
-                    let tgt_id = req.target_id.clone();
-                    tokio::spawn(async move {
-                        use crate::memory::types::MemoryType;
-                        // 源角色自己的发言：[I say to {Target}]
-                        let src_prefix = build_speaker_prefix(&src_id, &tgt_id, &src_id);
-                        let src_content = format!("{} {}", src_prefix, msg_st);
-                        if let Err(e) = mem_st
-                            .add_memory_with_metadata(
-                                &src_content,
-                                MemoryType::ShortTerm,
-                                0.2,
-                                st_src,
-                                meta_st_src,
-                            )
-                            .await
-                        {
-                            tracing::warn!(
-                                "[CrossCharacter] 源角色写入自己的发言 ShortTerm 失败: {}",
-                                e
-                            );
-                        }
-                        // 目标角色的回复：[{Target} says to me]
-                        let tgt_prefix = build_speaker_prefix(&tgt_id, &src_id, &src_id);
-                        let tgt_content = format!("{} {}", tgt_prefix, fb_st);
-                        if let Err(e) = mem_st
-                            .add_memory_with_metadata(
-                                &tgt_content,
-                                MemoryType::ShortTerm,
-                                0.2,
-                                st_tgt,
-                                meta_st_tgt,
-                            )
-                            .await
-                        {
-                            tracing::warn!(
-                                "[CrossCharacter] 源角色写入对方回复 ShortTerm 失败: {}",
-                                e
-                            );
-                        }
-                    });
-
-                    // 3. 源角色记忆：以源角色视角记录这次交流
+                    // 2.5. 源角色记忆：合并写入（去冗余）
+                    // 之前分 ShortTerm（2条逐轮）+ CasualConversation（1条总结）= 3 条记忆，
+                    // 内容高度重叠。现合并为 1 条 CasualConversation 总结，带 short_term 标签
+                    // 确保仍可被短期检索，同时减少记忆膨胀。
                     let memory_content = if response_mode.needs_speech() {
                         format!(
                             "我和 {} 聊了聊：我对她说：{}；她回复我：{}",
@@ -986,7 +1059,12 @@ impl CrossCharacterBus {
                                 &content_for_spawn,
                                 MemoryType::CasualConversation,
                                 0.45,
-                                vec!["cross_character".to_string(), "dialogue".to_string(), "topic_summary".to_string()],
+                                vec![
+                                    "cross_character".to_string(),
+                                    "dialogue".to_string(),
+                                    "topic_summary".to_string(),
+                                    "short_term".to_string(),
+                                ],
                                 memory_meta,
                             )
                             .await
@@ -1109,26 +1187,42 @@ impl CrossCharacterBus {
                     }
 
                     // 7. 异步抽取关系认知事实（RelationshipFacts）
-                    // spawn LLM 调用，不阻塞主流程。LLM 不可用时跳过。
+                    // 批量化：每 3 轮跨角色对话才触发一次 LLM 抽取，减少配额消耗。
+                    // 累积的对话内容会在抽取时一起分析（通过 dialogue 历史回溯）。
                     // 非 speak 模式下 final_text 为空，跳过事实抽取（无内容可分析）。
                     if response_mode.needs_speech() && !final_text.is_empty() {
-                        let source_id_for_facts = req.source_id.clone();
-                        let target_id_for_facts = req.target_id.clone();
-                        let source_msg_for_facts = req.message.clone();
-                        let target_reply_for_facts = final_text.clone();
-                        let target_name_for_facts = target_name.clone();
-                        let handle_for_facts = app.clone();
-                        tokio::spawn(async move {
-                            extract_relationship_facts(
-                                &handle_for_facts,
-                                &source_id_for_facts,
-                                &target_id_for_facts,
-                                &target_name_for_facts,
-                                &source_msg_for_facts,
-                                &target_reply_for_facts,
-                            )
-                            .await;
-                        });
+                        let pair_key = {
+                            let a = req.source_id.as_str();
+                            let b = req.target_id.as_str();
+                            if a <= b { format!("{}:{}", a, b) } else { format!("{}:{}", b, a) }
+                        };
+                        let should_extract = {
+                            let mut counter = RELATIONSHIP_FACTS_COUNTER.write();
+                            let entry = counter.entry(pair_key.clone()).or_insert(0u32);
+                            *entry += 1;
+                            *entry >= 3
+                        };
+                        if should_extract {
+                            // 重置计数器
+                            RELATIONSHIP_FACTS_COUNTER.write().remove(&pair_key);
+                            let source_id_for_facts = req.source_id.clone();
+                            let target_id_for_facts = req.target_id.clone();
+                            let source_msg_for_facts = req.message.clone();
+                            let target_reply_for_facts = final_text.clone();
+                            let target_name_for_facts = target_name.clone();
+                            let handle_for_facts = app.clone();
+                            tokio::spawn(async move {
+                                extract_relationship_facts(
+                                    &handle_for_facts,
+                                    &source_id_for_facts,
+                                    &target_id_for_facts,
+                                    &target_name_for_facts,
+                                    &source_msg_for_facts,
+                                    &target_reply_for_facts,
+                                )
+                                .await;
+                            });
+                        }
                     }
                 }
 

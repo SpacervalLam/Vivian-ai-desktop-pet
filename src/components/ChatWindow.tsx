@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { invoke } from '@tauri-apps/api/core';
+import { invoke, convertFileSrc } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { listen, emit, type UnlistenFn } from '@tauri-apps/api/event';
@@ -8,12 +8,13 @@ import { open as openShell } from '@tauri-apps/plugin-shell';
 import { useTranslation } from 'react-i18next';
 import DOMPurify from 'dompurify';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { changeLanguage } from '../i18n';
+import i18n, { changeLanguage } from '../i18n';
 import LoadingSpinner from './LoadingSpinner';
 import { ChatController } from '../controllers/ChatController';
 import RealtimeCallOverlay, { RealtimeCallBubble } from './RealtimeCallWindow';
 import ImageViewer from './ImageViewer';
 import { useAppStore } from '../stores/useAppStore';
+import { useExtractFileText, type FileTextResult } from '../hooks/useTauriCommands';
 import { stripActions } from '../utils/ActionText';
 import type { AiResponse } from '../types';
 
@@ -50,6 +51,15 @@ interface ChatMessage {
     truncated: boolean;
     originalCharCount: number;
   };
+  /** 语音消息：原始音频用于聊天界面播放（发送给 LLM 的仍是 ASR 转写文本） */
+  voice?: {
+    /** 相对用户数据目录的音频路径（历史记录加载时据此懒加载 data URL） */
+    audioPath?: string;
+    /** 立即可用的 data URL（刚发送时由前端录制直接生成） */
+    audioDataUrl?: string;
+    /** 语音时长（秒） */
+    duration: number;
+  };
 }
 
 /** 图片 data URL LRU 缓存（按 imagePath 索引），避免历史刷新时重复读取。
@@ -72,6 +82,28 @@ function imageCacheSet(key: string, value: string): void {
     const oldest = imageCache.keys().next().value;
     if (oldest === undefined) break;
     imageCache.delete(oldest);
+  }
+}
+
+/** 语音 data URL LRU 缓存（按 audioPath 索引），避免历史刷新时重复读取。
+ *  限制 20 条（音频 data URL 体积大于图片），超出时淘汰最久未访问的条目。 */
+const AUDIO_CACHE_MAX = 20;
+const audioCache = new Map<string, string>();
+function audioCacheGet(key: string): string | undefined {
+  const v = audioCache.get(key);
+  if (v !== undefined) {
+    audioCache.delete(key);
+    audioCache.set(key, v);
+  }
+  return v;
+}
+function audioCacheSet(key: string, value: string): void {
+  if (audioCache.has(key)) audioCache.delete(key);
+  audioCache.set(key, value);
+  while (audioCache.size > AUDIO_CACHE_MAX) {
+    const oldest = audioCache.keys().next().value;
+    if (oldest === undefined) break;
+    audioCache.delete(oldest);
   }
 }
 
@@ -101,6 +133,39 @@ const TIME_GAP_MS = 5 * 60 * 1000;
 
 let idCounter = 0;
 const nextId = () => `m-${Date.now()}-${idCounter++}`;
+
+/**
+ * 把录制的音频 Blob 解码并重采样到 16kHz 单声道 f32 PCM，返回 base64 编码的字节流。
+ * 用于非 WinRT ASR 引擎的文件转写路径（transcribe_audio 命令接收 base64 f32 PCM）。
+ */
+async function audioBlobToBase64F32(blob: Blob): Promise<string> {
+  const arrayBuffer = await blob.arrayBuffer();
+  const tmpCtx = new AudioContext();
+  try {
+    const decoded = await tmpCtx.decodeAudioData(arrayBuffer);
+    const targetRate = 16000;
+    const offlineCtx = new OfflineAudioContext(
+      1,
+      Math.max(1, Math.ceil(decoded.duration * targetRate)),
+      targetRate,
+    );
+    const src = offlineCtx.createBufferSource();
+    src.buffer = decoded;
+    src.connect(offlineCtx.destination);
+    src.start();
+    const rendered = await offlineCtx.startRendering();
+    const f32 = rendered.getChannelData(0);
+    const bytes = new Uint8Array(f32.buffer);
+    let binary = '';
+    const chunk = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunk) {
+      binary += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + chunk)) as unknown as number[]);
+    }
+    return btoa(binary);
+  } finally {
+    tmpCtx.close();
+  }
+}
 
 const normalizeTimestamp = (raw: number | string): number => {
   if (typeof raw === 'number') return raw < 1e12 ? raw * 1000 : raw;
@@ -139,6 +204,23 @@ const toChatMessages = (e: HistoryEntry): ChatMessage[] => {
       timestamp: ts,
       imagePath,
       imageDataUrl: imageCacheGet(imagePath || ''),
+    }];
+  }
+
+  // 语音消息：metadata.kind === 'voice'，渲染为微信风格语音气泡，不按行拆分
+  const isVoice = e.metadata?.kind === 'voice';
+  if (isVoice) {
+    const audioPath = typeof e.metadata?.audio_path === 'string' ? e.metadata.audio_path : undefined;
+    const duration = typeof e.metadata?.duration === 'number' ? e.metadata.duration : 0;
+    return [{
+      id: e.id,
+      role,
+      content: e.content,
+      timestamp: ts,
+      voice: {
+        audioPath,
+        duration,
+      },
     }];
   }
 
@@ -515,6 +597,125 @@ const ImageThumb = React.memo(function ImageThumb({ message, onOpen }: { message
   );
 });
 
+/** 语音消息气泡（微信风格）：懒加载历史音频 data URL，点击播放/暂停 */
+const VoiceBubble = React.memo(function VoiceBubble({ message, isUser }: { message: ChatMessage; isUser: boolean }) {
+  const voice = message.voice;
+  const [src, setSrc] = useState<string | null>(voice?.audioDataUrl ?? null);
+  const [playing, setPlaying] = useState(false);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const { t } = useTranslation();
+
+  // 懒加载历史音频 data URL
+  useEffect(() => {
+    if (src) return;
+    if (!voice?.audioPath) return;
+    const cached = audioCacheGet(voice.audioPath);
+    if (cached) {
+      setSrc(cached);
+      return;
+    }
+    let cancelled = false;
+    void invoke<string | null>('get_audio_data_url', { audioPath: voice.audioPath }).then((url) => {
+      if (!cancelled && url) {
+        audioCacheSet(voice.audioPath!, url);
+        setSrc(url);
+      }
+    }).catch(() => { /* ignore */ });
+    return () => { cancelled = true; };
+  }, [src, voice?.audioPath]);
+
+  const duration = voice?.duration ?? 0;
+  // 气泡宽度：基础 70px + 每秒 6px，限制 70~220px
+  const bubbleWidth = Math.max(70, Math.min(220, 70 + duration * 6));
+
+  const togglePlay = useCallback(() => {
+    if (!src) return;
+    if (!audioRef.current) {
+      audioRef.current = new Audio(src);
+      audioRef.current.addEventListener('ended', () => setPlaying(false));
+      audioRef.current.addEventListener('error', () => setPlaying(false));
+    }
+    if (playing) {
+      audioRef.current.pause();
+      setPlaying(false);
+    } else {
+      void audioRef.current.play().then(() => setPlaying(true)).catch(() => setPlaying(false));
+    }
+  }, [src, playing]);
+
+  // 卸载时停止播放
+  useEffect(() => {
+    return () => {
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current = null;
+      }
+    };
+  }, []);
+
+  return (
+    <div
+      onClick={togglePlay}
+      title={src ? t('chat.voice_play_hint', { defaultValue: '点击播放' }) : t('chat.voice_loading', { defaultValue: '加载中…' })}
+      style={{
+        width: bubbleWidth,
+        padding: '10px 14px',
+        borderRadius: isUser ? '18px 4px 18px 18px' : '4px 18px 18px 18px',
+        background: isUser ? 'var(--wx-bubble-user)' : 'var(--wx-bubble-ai)',
+        color: isUser ? 'var(--wx-bubble-user-text)' : 'var(--wx-bubble-ai-text)',
+        display: 'flex',
+        alignItems: 'center',
+        gap: 8,
+        cursor: src ? 'pointer' : 'default',
+        boxShadow: '0 1px 1px var(--wx-shadow)',
+        position: 'relative',
+        userSelect: 'none',
+      }}
+    >
+      {/* 气泡尖角 */}
+      <span style={{
+        position: 'absolute', top: 8,
+        ...(isUser ? { right: -5 } : { left: -5 }),
+        width: 0, height: 0,
+        borderTop: '5px solid transparent',
+        borderBottom: '5px solid transparent',
+        ...(isUser
+          ? { borderLeft: `6px solid ${isUser ? 'var(--wx-bubble-user)' : 'var(--wx-bubble-ai)'}` }
+          : { borderRight: `6px solid ${isUser ? 'var(--wx-bubble-user)' : 'var(--wx-bubble-ai)'}` }),
+      }} />
+      {/* 用户消息：时长在左，图标在右；AI 消息：图标在左，时长在右 */}
+      {isUser && (
+        <span style={{ fontSize: 13, fontVariantNumeric: 'tabular-nums', flex: 1, textAlign: 'right' }}>
+          {Math.round(duration)}″
+        </span>
+      )}
+      {/* 声波/播放图标 */}
+      {!src ? (
+        <LoadingSpinner size={16} color="currentColor" thickness={1.5} />
+      ) : playing ? (
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" style={{ flexShrink: 0 }}>
+          <rect x="6" y="5" width="4" height="14" rx="1" fill="currentColor" />
+          <rect x="14" y="5" width="4" height="14" rx="1" fill="currentColor" />
+        </svg>
+      ) : (
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" style={{ flexShrink: 0 }}>
+          <path d="M8 5v14l11-7z" fill="currentColor" />
+        </svg>
+      )}
+      {/* 用户消息：右侧多一条声波条装饰；AI 消息：左侧 */}
+      <span style={{
+        width: 3, height: 14, borderRadius: 2,
+        background: 'currentColor', opacity: 0.35, flexShrink: 0,
+      }} />
+      {!isUser && (
+        <span style={{ fontSize: 13, fontVariantNumeric: 'tabular-nums', flex: 1 }}>
+          {Math.round(duration)}″
+        </span>
+      )}
+    </div>
+  );
+});
+
 const Bubble = React.memo(function Bubble({ message, onOpenImage, senderName, characterId }: BubbleProps & { senderName?: string; characterId?: string }) {
   const isUser = message.role === 'user';
   const avatarSize = 38;
@@ -524,10 +725,43 @@ const Bubble = React.memo(function Bubble({ message, onOpenImage, senderName, ch
   const hasSticker = !!message.sticker;
   const hasLinkCard = !!message.linkCard;
   const hasFile = !!message.fileMeta;
+  const hasVoice = !!message.voice;
   const [fileExpanded, setFileExpanded] = useState(false);
   const bubbleBg = message.error ? 'var(--wx-bubble-error)' : isUser ? 'var(--wx-bubble-user)' : 'var(--wx-bubble-ai)';
 
   const handleOpenLink = useCallback(async (url: string) => {
+    if (url.startsWith('vivian://notebook/')) {
+      const parts = url.split('/');
+      const charId = parts[3];
+      const noteId = parts[4];
+      if (charId && noteId) {
+        try {
+          const existing = await WebviewWindow.getByLabel('memory');
+          if (existing) {
+            await emit('memory:navigate', { page: 'notebook', notebookId: noteId, notebookCharacter: charId });
+            await existing.setFocus();
+            return;
+          }
+          new WebviewWindow('memory', {
+            url: `/?view=memory&nb_id=${encodeURIComponent(noteId)}&nb_char=${encodeURIComponent(charId)}`,
+            title: i18n.t('memory.title'),
+            width: 1260,
+            height: 896,
+            resizable: true,
+            decorations: false,
+            transparent: false,
+            shadow: true,
+            minWidth: 1260,
+            minHeight: 896,
+            visible: false,
+            dragDropEnabled: true,
+          });
+        } catch (e) {
+          console.error('打开笔记本失败:', e);
+        }
+      }
+      return;
+    }
     try {
       await openShell(url);
     } catch {
@@ -556,6 +790,8 @@ const Bubble = React.memo(function Bubble({ message, onOpenImage, senderName, ch
           />
         ) : hasImage ? (
           <ImageThumb message={message} onOpen={onOpenImage} />
+        ) : hasVoice ? (
+          <VoiceBubble message={message} isUser={isUser} />
         ) : hasLinkCard ? (
           <div
             onClick={() => handleOpenLink(message.linkCard!.url)}
@@ -769,20 +1005,28 @@ const Bubble = React.memo(function Bubble({ message, onOpenImage, senderName, ch
 const LinkageCard: React.FC<{ card: CardMessage; t: (k: string) => string; characterId?: string }> = ({ card, t, characterId }) => {
   const [hover, setHover] = useState(false);
   const onClick = useCallback(async () => {
-    const label = card.cardType === 'todo' ? 'todo' : 'scheduler';
-    const view = card.cardType === 'todo' ? 'todo' : 'scheduler';
+    const page = card.cardType; // 'todo' | 'scheduler'
     try {
-      const existing = await WebviewWindow.getByLabel(label);
-      if (existing) { await existing.setFocus(); return; }
-      new WebviewWindow(label, {
-        url: `/?view=${view}`,
-        title: card.cardType === 'todo' ? t('chat.menu_todo') : t('chat.menu_scheduler'),
-        width: 420, height: 640, resizable: true, decorations: false, transparent: false, shadow: true,
-        alwaysOnTop: true, center: true, minWidth: 320, minHeight: 400,
+      const existing = await WebviewWindow.getByLabel('memory');
+      if (existing) {
+        try {
+          if (await existing.isVisible()) {
+            await emit('memory:navigate', { page });
+            await existing.setFocus();
+            return;
+          }
+        } catch { /* 陈旧引用，继续创建新窗口 */ }
+      }
+      new WebviewWindow('memory', {
+        url: `/?view=memory&nav=${page}`,
+        title: i18n.t('memory.title'),
+        width: 1260, height: 896, resizable: true, decorations: false, transparent: false, shadow: true,
+        minWidth: 1260, minHeight: 896,
         visible: false,
+        dragDropEnabled: true,
       });
     } catch (e) { console.error('打开管理窗口失败:', e); }
-  }, [card, t]);
+  }, [card]);
 
   const accentColor = card.cardType === 'todo' ? '#07C160' : '#FF9500';
   const icon = card.cardType === 'todo' ? '📝' : '⏰';
@@ -864,8 +1108,16 @@ const BatteryIcon: React.FC<{ level?: number }> = ({ level = 100 }) => {
 /* ===== 底部工具栏 SVG 图标 ===== */
 const MicIcon: React.FC<{ recording: boolean; size?: number }> = ({ recording, size = 24 }) => (
   <svg width={size} height={size} viewBox="0 0 24 24" fill="none">
-    <path d="M12 15a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3z" fill={recording ? '#FF453A' : 'currentColor'} />
-    <path d="M6 12a6 6 0 0 0 12 0M12 18v3" stroke={recording ? '#FF453A' : 'currentColor'} strokeWidth="1.6" strokeLinecap="round" />
+    <circle cx="12" cy="12" r="10" stroke={recording ? '#FF453A' : 'currentColor'} strokeWidth="1.5" />
+    <g
+      transform="translate(12 12) rotate(90) scale(0.58) translate(-12 -12)"
+      stroke={recording ? '#FF453A' : 'currentColor'}
+      strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"
+    >
+      <path d="M5 12.55a11 11 0 0 1 14.08 0" />
+      <path d="M8.53 16.11a6 6 0 0 1 6.95 0" />
+      <line x1="12" y1="20" x2="12.01" y2="20" />
+    </g>
     {recording && (
       <circle cx="12" cy="12" r="11" stroke="#FF453A" strokeWidth="1" opacity="0.5">
         <animate attributeName="r" values="11;13;11" dur="1.2s" repeatCount="indefinite" />
@@ -908,25 +1160,270 @@ const ImageIcon: React.FC = () => (
   </svg>
 );
 
-const AudioMessageIcon: React.FC = () => (
+const FileIcon: React.FC = () => (
   <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
-    <rect x="3" y="7" width="18" height="11" rx="3.5" stroke="currentColor" strokeWidth="1.5" />
-    <path d="M7.5 12.5h1M10 10.5v4M12.5 8.5v8M15 11v3M17.5 12.5h-1" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+    <path d="M6 3h7l5 5v13a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
+    <path d="M13 3v5h5" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
+    <path d="M8.5 14h7M8.5 17h5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
   </svg>
 );
 
+const CameraIcon: React.FC = () => (
+  <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
+    <path d="M4 8.5A1.5 1.5 0 0 1 5.5 7h2L9 5h6l1.5 2h2A1.5 1.5 0 0 1 20 8.5v9A1.5 1.5 0 0 1 18.5 19h-13A1.5 1.5 0 0 1 4 17.5v-9z" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
+    <circle cx="12" cy="13" r="3.5" stroke="currentColor" strokeWidth="1.5" />
+  </svg>
+);
+
+const AudioMessageIcon: React.FC = () => (
+  <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
+    {/* 扬声器 */}
+    <path d="M3 10v4h3l4 4V6L6 10H3z" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
+    {/* 声波弧线 */}
+    <path d="M14 9.5a3 3 0 0 1 0 5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+    <path d="M17 7.5a6 6 0 0 1 0 9" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+  </svg>
+);
+
+/* ===== 摄像头拍摄模态组件 ===== */
+interface CameraCaptureProps {
+  open: boolean;
+  onClose: () => void;
+  onCaptured: (base64Data: string, mime: string) => void;
+}
+
+/**
+ * 摄像头拍摄模态：
+ * - open 时通过 getUserMedia 启动摄像头视频流
+ * - 支持拍照（canvas 抓帧）、预览、重拍、使用照片
+ * - 支持前后摄像头切换（移动端/多摄像头设备）
+ * - 关闭/卸载时自动停止所有 track，释放摄像头
+ */
+const CameraCapture: React.FC<CameraCaptureProps> = ({ open, onClose, onCaptured }) => {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [capturedDataUrl, setCapturedDataUrl] = useState<string | null>(null);
+  const [facingMode, setFacingMode] = useState<'user' | 'environment'>('environment');
+  const { t } = useTranslation();
+
+  const startCamera = useCallback(async (mode: 'user' | 'environment') => {
+    setError(null);
+    setCapturedDataUrl(null);
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((tr) => tr.stop());
+      streamRef.current = null;
+    }
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setError(t('chat.camera_no_device', { defaultValue: '未检测到摄像头设备' }));
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: mode, width: { ideal: 1920 }, height: { ideal: 1080 } },
+        audio: false,
+      });
+      streamRef.current = stream;
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        await videoRef.current.play().catch(() => {});
+      }
+    } catch (e) {
+      const errName = (e as DOMException)?.name ?? '';
+      if (errName === 'NotAllowedError' || errName === 'SecurityError') {
+        setError(t('chat.camera_denied', { defaultValue: '无法访问摄像头，请检查系统权限设置' }));
+      } else if (errName === 'NotFoundError' || errName === 'OverconstrainedError') {
+        setError(t('chat.camera_no_device', { defaultValue: '未检测到摄像头设备' }));
+      } else {
+        setError(t('chat.camera_failed', { error: String(e), defaultValue: '摄像头错误：{{error}}' }));
+      }
+    }
+  }, [t]);
+
+  useEffect(() => {
+    if (open) {
+      void startCamera(facingMode);
+    }
+    return () => {
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach((tr) => tr.stop());
+        streamRef.current = null;
+      }
+    };
+  }, [open, facingMode, startCamera]);
+
+  const handleCapture = useCallback(() => {
+    const video = videoRef.current;
+    if (!video || !video.videoWidth) return;
+    const canvas = document.createElement('canvas');
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    setCapturedDataUrl(canvas.toDataURL('image/png'));
+  }, []);
+
+  const handleUse = useCallback(() => {
+    if (!capturedDataUrl) return;
+    const match = capturedDataUrl.match(/^data:([^;]+);base64,(.+)$/);
+    if (!match) return;
+    onCaptured(match[2], match[1]);
+    onClose();
+  }, [capturedDataUrl, onCaptured, onClose]);
+
+  const handleSwitch = useCallback(() => {
+    setFacingMode((m) => (m === 'user' ? 'environment' : 'user'));
+  }, []);
+
+  if (!open) return null;
+
+  // 拍照后的预览界面
+  if (capturedDataUrl) {
+    return (
+      <div style={{
+        position: 'fixed', inset: 0, zIndex: 10000,
+        background: '#000',
+        display: 'flex', flexDirection: 'column',
+      }}>
+        {/* 照片预览区 */}
+        <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }}>
+          <img src={capturedDataUrl} alt="captured" style={{
+            maxWidth: '100%', maxHeight: '100%', objectFit: 'contain',
+          }} />
+        </div>
+        {/* 底部操作栏 */}
+        <div style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'space-around',
+          padding: '20px 40px 40px',
+          background: 'linear-gradient(transparent, rgba(0,0,0,0.8))',
+        }}>
+          <button onClick={() => setCapturedDataUrl(null)} style={{
+            padding: '12px 28px', borderRadius: 24,
+            border: '1.5px solid rgba(255,255,255,0.4)',
+            background: 'rgba(255,255,255,0.1)', color: '#fff', fontSize: 15, cursor: 'pointer',
+            backdropFilter: 'blur(8px)',
+          }}>{t('chat.capture_retake', { defaultValue: '重拍' })}</button>
+          <button onClick={handleUse} style={{
+            padding: '12px 36px', borderRadius: 24, border: 'none',
+            background: '#07c160', color: '#fff', fontSize: 15, cursor: 'pointer', fontWeight: 600,
+          }}>{t('chat.capture_use', { defaultValue: '使用' })}</button>
+        </div>
+      </div>
+    );
+  }
+
+  // 相机取景界面
+  return (
+    <div style={{
+      position: 'fixed', inset: 0, zIndex: 10000,
+      background: '#000',
+      display: 'flex', flexDirection: 'column',
+    }}>
+      {/* 视频预览区 — 全屏铺满 */}
+      <div style={{ flex: 1, position: 'relative', overflow: 'hidden' }}>
+        {error ? (
+          <div style={{
+            position: 'absolute', inset: 0,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            color: '#ff6b6b', fontSize: 14, padding: '0 32px', textAlign: 'center',
+          }}>{error}</div>
+        ) : (
+          <video
+            ref={videoRef}
+            autoPlay
+            playsInline
+            muted
+            style={{
+              width: '100%', height: '100%',
+              objectFit: 'cover',
+              transform: facingMode === 'user' ? 'scaleX(-1)' : 'none',
+            }}
+          />
+        )}
+        {/* 顶部工具栏 */}
+        <div style={{
+          position: 'absolute', top: 0, left: 0, right: 0,
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          padding: '12px 16px',
+          background: 'linear-gradient(rgba(0,0,0,0.5), transparent)',
+        }}>
+          <button onClick={onClose} style={{
+            width: 36, height: 36, borderRadius: '50%',
+            background: 'rgba(0,0,0,0.4)', border: 'none',
+            color: '#fff', fontSize: 18, cursor: 'pointer',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            backdropFilter: 'blur(8px)',
+          }} aria-label={t('chat.capture_close', { defaultValue: '关闭' })}>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+          </button>
+          <button onClick={handleSwitch} style={{
+            width: 36, height: 36, borderRadius: '50%',
+            background: 'rgba(0,0,0,0.4)', border: 'none',
+            color: '#fff', cursor: 'pointer',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            backdropFilter: 'blur(8px)',
+          }} aria-label={t('chat.capture_switch', { defaultValue: '切换摄像头' })}>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M11 19H4a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h5"/><path d="M13 5h7a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2h-5"/>
+              <circle cx="12" cy="12" r="3"/><path d="m18 22-3-3 3-3"/><path d="m6 2 3 3-3 3"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+
+      {/* 底部拍照控制栏 */}
+      <div style={{
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        padding: '24px 0 48px',
+        background: 'linear-gradient(transparent, rgba(0,0,0,0.6))',
+      }}>
+        <button onClick={handleCapture} style={{
+          width: 72, height: 72, borderRadius: '50%',
+          border: '4px solid #fff',
+          background: 'rgba(255,255,255,0.15)',
+          cursor: 'pointer',
+          transition: 'transform 0.1s ease, background 0.15s ease',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+        }}
+        onMouseDown={(e) => { e.currentTarget.style.transform = 'scale(0.9)'; e.currentTarget.style.background = 'rgba(255,255,255,0.3)'; }}
+        onMouseUp={(e) => { e.currentTarget.style.transform = 'scale(1)'; e.currentTarget.style.background = 'rgba(255,255,255,0.15)'; }}
+        onMouseLeave={(e) => { e.currentTarget.style.transform = 'scale(1)'; e.currentTarget.style.background = 'rgba(255,255,255,0.15)'; }}
+        aria-label={t('chat.capture_capture', { defaultValue: '拍照' })}>
+          <span style={{
+            width: 56, height: 56, borderRadius: '50%',
+            background: '#fff',
+          }} />
+        </button>
+      </div>
+    </div>
+  );
+};
+
 /* ===== Emoji 数据 ===== */
+// 积极/消极/中性情绪交替排布，避免前面全是笑脸
 const EMOJI_LIST = [
-  '😀', '😃', '😄', '😁', '😆', '😅', '🤣', '😂',
-  '🙂', '😉', '😊', '😇', '🥰', '😍', '😘', '😗',
-  '😋', '😛', '😜', '🤪', '😝', '🤑', '🤗', '🤭',
-  '🤫', '🤔', '🤐', '🤨', '😐', '😑', '😶', '😏',
-  '😒', '🙄', '😬', '🤥', '😌', '😔', '😪', '🤤',
-  '😴', '😷', '🤒', '🤕', '🤢', '🤮', '🥵', '🥶',
-  '😱', '😨', '😰', '😥', '😢', '😭', '😤', '😠',
-  '😡', '🤬', '👍', '👎', '👏', '🙌', '🤝', '❤️',
-  '💔', '💕', '💖', '💗', '💘', '💝', '🌹', '🌸',
-  '🎉', '🎊', '✨', '🔥', '💯', '👋', '🙏', '💪',
+  // 笑脸与情绪（积极/消极/中性交替）
+  '😀', '😢', '😂', '😠', '😍', '😨', '🤣', '😩', '😊', '😭',
+  '😎', '😰', '🥰', '😖', '😅', '😱', '😘', '😤', '🤔', '🤯',
+  '😏', '🥺', '😐', '😵', '🙃', '😟', '🤩', '😬', '😌', '🤐',
+  '🥳', '😶', '😋', '🙁', '🤪', '😮', '😛', '😯', '🤨', '🥱',
+  '🤗', '🥶', '🤑', '🤒', '🤠', '🤕', '🤭', '🤢', '🤫', '🤮',
+  '🥵', '😪', '🥴', '🤤', '😇', '😔', '😥', '😴', '😷', '🙄',
+  '😒', '🤥', '😡', '🤬', '😑', '😝', '😁', '😆', '😃', '🙂',
+  // 手势与身体
+  '👍', '👎', '👏', '🙏', '👋', '🤝', '🙌', '🤞', '💪', '👊',
+  '✌️', '🤟', '👌', '🤙', '👈', '👉', '👆', '👇', '✋', '🤚',
+  // 心与情感
+  '❤️', '💔', '💕', '🖤', '💖', '💗', '💘', '💝', '💞', '❣️',
+  // 自然与天气
+  '🌹', '🌸', '🌺', '🌻', '🌷', '🌼', '🌈', '☀️', '⛅', '☁️',
+  '🌧️', '⛈️', '❄️', '🔥', '⚡', '💧',
+  // 庆祝与物品
+  '🎉', '🎊', '✨', '🎈', '🎁', '🎂', '🍰', '🍾',
+  // 符号与状态
+  '💯', '✅', '❌', '⭐', '🌟', '💫', '💥', '💢', '❓', '❗',
+  '💬', '💤', '🚫', '🔍', '💡',
 ];
 
 type RenderItem =
@@ -937,8 +1434,8 @@ type RenderItem =
 const ChatWindow: React.FC = () => {
   const { t } = useTranslation();
   // ===== 三视图状态 =====
-  /** 当前视图：home（角色选择）/ private（单角色私聊）/ group（群聊） */
-  const [view, setView] = useState<'home' | 'private' | 'group'>('home');
+  /** 当前视图：home（角色选择）/ private（单角色私聊）/ group（群聊）/ details（聊天详情） */
+  const [view, setView] = useState<'home' | 'private' | 'group' | 'details'>('home');
   /** 在线角色列表 */
   const [characters, setCharacters] = useState<Array<{ id: string; name: string; online: boolean }>>([]);
   // characters 的 ref 镜像，供 setInterval 等闭包读取最新值，避免在 state 更新器内执行副作用
@@ -976,22 +1473,93 @@ const ChatWindow: React.FC = () => {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [cards, setCards] = useState<CardMessage[]>([]);
   const [input, setInput] = useState('');
+  /** @ 提及菜单状态（仅群聊视图） */
+  const [mentionState, setMentionState] = useState<{
+    active: boolean;
+    query: string;
+    startIndex: number;
+    selectedIndex: number;
+  }>({ active: false, query: '', startIndex: -1, selectedIndex: 0 });
+  const mentionStateRef = useRef(mentionState);
+  useEffect(() => { mentionStateRef.current = mentionState; }, [mentionState]);
+  /** 当前 @ 筛选匹配到的在线角色列表 */
+  const mentionList = useMemo(() => {
+    if (!mentionState.active) return [];
+    const q = mentionState.query.toLowerCase();
+    return characters.filter((c) => c.online && c.name.toLowerCase().startsWith(q));
+  }, [mentionState.active, mentionState.query, characters]);
   const [recording, setRecording] = useState(false);
   // 用 ref 跟踪 recording 最新值，供卸载清理和 toggleRecording 闭包读取
   const recordingRef = useRef(false);
   useEffect(() => { recordingRef.current = recording; }, [recording]);
+  // ===== 语音消息录制（按住说话）=====
+  // 与 recording（ASR 转文字写入输入框）不同：voiceRecording 把原始音频存为文件并显示为语音气泡，
+  // 同时启动 ASR 获取转写文本发送给 LLM。两者不能同时进行。
+  const [voiceRecording, setVoiceRecording] = useState(false);
+  const voiceRecordingRef = useRef(false);
+  useEffect(() => { voiceRecordingRef.current = voiceRecording; }, [voiceRecording]);
+  /** 语音消息录制期间累积的 ASR final 文本 */
+  const voiceAsrTextRef = useRef('');
+  /** 本次录音是否走实时 ASR（WinRT 共享麦克风）；false=文件转写模式（cpal 类后端独占麦克风） */
+  const voiceRealtimeAsrRef = useRef(true);
+  /** MediaRecorder 实例（语音消息录制用） */
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  /** 录制启动时刻（计算时长用） */
+  const voiceStartTimeRef = useRef(0);
+  /** 录制计时器（驱动 UI 显示秒数） */
+  const voiceTimerRef = useRef<number | null>(null);
+  /** 录制期间累计的音频 chunks */
+  const voiceChunksRef = useRef<Blob[]>([]);
+  /** 录制选中的 MIME（保存音频时用） */
+  const voiceMimeRef = useRef('audio/webm');
+  /** 录制开始的 pointerId，用于释放 pointer capture */
+  const voicePointerIdRef = useRef<number | null>(null);
+  /** 录制时长（秒，UI 实时显示） */
+  const [voiceDuration, setVoiceDuration] = useState(0);
+  /** 语音消息发送后跳过 chat:user_message 的文本气泡（避免与本地语音气泡重复） */
+  const skipNextUserMessageRef = useRef(false);
   const [initialLoading, setInitialLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [hasMore, setHasMore] = useState(false);
   const [historyLoadedCount, setHistoryLoadedCount] = useState(0);
   const historyLoadedCountRef = useRef(0);
   useEffect(() => { historyLoadedCountRef.current = historyLoadedCount; }, [historyLoadedCount]);
-  const [menuOpen, setMenuOpen] = useState(false);
-  const menuRef = useRef<HTMLDivElement>(null);
-  const { uploadAvatar } = useUserAvatarActions();
+  // ===== 聊天详情（details 视图）：备注名 / 聊天背景，localStorage 持久化 =====
+  const [charRemarks, setCharRemarks] = useState<Record<string, string>>(() => {
+    try { return JSON.parse(localStorage.getItem('vivian_char_remarks') || '{}'); }
+    catch { return {}; }
+  });
+  const [chatBackgrounds, setChatBackgrounds] = useState<Record<string, string>>(() => {
+    try { return JSON.parse(localStorage.getItem('vivian_chat_backgrounds') || '{}'); }
+    catch { return {}; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem('vivian_char_remarks', JSON.stringify(charRemarks)); } catch { /* ignore */ }
+  }, [charRemarks]);
+  useEffect(() => {
+    try { localStorage.setItem('vivian_chat_backgrounds', JSON.stringify(chatBackgrounds)); } catch { /* ignore */ }
+  }, [chatBackgrounds]);
+  // details 视图子界面：'main'（详情主页）/ 'search'（查找聊天内容）
+  const [detailsSubView, setDetailsSubView] = useState<'main' | 'search'>('main');
+  const [detailsSearchQuery, setDetailsSearchQuery] = useState('');
+  const [detailsSearchResults, setDetailsSearchResults] = useState<Array<{ id: string; content: string; role: string; timestamp: number; character_id: string }>>([]);
+  const [detailsSearching, setDetailsSearching] = useState(false);
+  // 备注编辑
+  const [editingRemark, setEditingRemark] = useState(false);
+  const [remarkInput, setRemarkInput] = useState('');
   const setUserAvatarUrl = useAppStore((s) => s.setUserAvatarUrl);
   /** 底部面板：'none' | 'emoji' | 'media' */
   const [bottomPanel, setBottomPanel] = useState<'none' | 'emoji' | 'media'>('none');
+  /** 最近使用的 emoji（持久化到 localStorage，最多保留 16 个） */
+  const [recentEmojis, setRecentEmojis] = useState<string[]>(() => {
+    try {
+      const stored = localStorage.getItem('vivian-recent-emojis');
+      return stored ? JSON.parse(stored) : [];
+    } catch { return []; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem('vivian-recent-emojis', JSON.stringify(recentEmojis)); } catch { /* ignore */ }
+  }, [recentEmojis]);
   /** 通话视图：'none' | 'full' | 'minimized' */
   const [callView, setCallView] = useState<'none' | 'full' | 'minimized'>('none');
   /** 图片大图查看器：src 非 null 时展示 */
@@ -1200,6 +1768,24 @@ const ChatWindow: React.FC = () => {
     viewingRef.current = view === 'private' ? privateCharId : view === 'group' ? 'group' : null;
   }, [view, privateCharId]);
 
+  // 窗口聚焦/可见时清除当前查看会话的未读并刷新预览
+  // 用户切回 ChatWindow 时，正在查看的会话消息已可见，红点应立即清除
+  useEffect(() => {
+    const handleVisible = () => {
+      const viewing = viewingRef.current;
+      if (viewing) {
+        markConversationRead(viewing);
+      }
+      void refreshLastPreviews();
+    };
+    window.addEventListener('focus', handleVisible);
+    document.addEventListener('visibilitychange', handleVisible);
+    return () => {
+      window.removeEventListener('focus', handleVisible);
+      document.removeEventListener('visibilitychange', handleVisible);
+    };
+  }, [markConversationRead, refreshLastPreviews]);
+
   // 加载在线角色列表（挂载时 + 角色上下线事件时刷新）
   // 失败时指数退避重试（最多 4 次），避免偶发 IPC 失败导致私聊入口永久缺失
   const refreshCharacters = useCallback(async () => {
@@ -1266,7 +1852,18 @@ const ChatWindow: React.FC = () => {
       try {
         unlisten = await listen<{ character_id: string; to: string }>('presence:changed', (e) => {
           if (!e.payload?.character_id) return;
-          setPresenceStates((prev) => ({ ...prev, [e.payload.character_id]: e.payload.to }));
+          const newState = e.payload.to;
+          setPresenceStates((prev) => ({ ...prev, [e.payload.character_id]: newState }));
+          // 角色从忙碌恢复为在线/休息时，发送暂存的待发消息
+          if (newState !== 'busy' && newState !== 'offline') {
+            const pending = pendingMessagesRef.current.filter((m) => m.charId === e.payload.character_id);
+            if (pending.length > 0) {
+              pendingMessagesRef.current = pendingMessagesRef.current.filter((m) => m.charId !== e.payload.character_id);
+              for (const m of pending) {
+                void ChatController.sendMessage(m.text, m.charId, 'wechat');
+              }
+            }
+          }
         });
       } catch { /* ignore */ }
       if (cancelled) { unlisten?.(); }
@@ -1292,6 +1889,10 @@ const ChatWindow: React.FC = () => {
   const refreshTimerRef = useRef<number | null>(null);
   /** typing 安全超时：chat:start 后 60s 无 chunk/done/error 自动清除"对方正在输入" */
   const typingSafetyTimerRef = useRef<number | null>(null);
+  /** typing 延迟显示定时器：chat:start 后随机延迟 1-1.5s 再显示"对方正在输入"，避免突兀 */
+  const typingDelayTimerRef = useRef<number | null>(null);
+  /** 待发送消息队列：私聊对象忙碌时暂存消息，待状态恢复在线后发送 */
+  const pendingMessagesRef = useRef<Array<{ charId: string; text: string }>>([]);
   /** 流式缓冲区：按 stream_id 累积未遇到换行符的文本 */
   const streamBuffersRef = useRef<Map<string, string>>(new Map());
   /** stream_id 到段落气泡 id 列表的映射，用于 chat:done 时清理 */
@@ -1457,6 +2058,13 @@ const ChatWindow: React.FC = () => {
               )
             );
             if (dupInHistory) return false;
+          }
+          // 用户消息去重：Busy 延后等场景下前端乐观添加的 user 消息可能与后端写入的重复
+          if (m.role === 'user' && m.content) {
+            const dupUserInHistory = historySlice.some((h) =>
+              h.role === 'user' && h.content === m.content
+            );
+            if (dupUserInHistory) return false;
           }
           // 表情包消息去重：后端持久化的 sticker 在 toChatMessages 中已生成独立气泡，
           // 流式期间 chat:done 事件追加的 sticker 气泡内容相同，丢弃流式副本
@@ -1686,6 +2294,11 @@ const ChatWindow: React.FC = () => {
             }]);
             return;
           }
+          // 群聊频道消息但用户不在群聊视图：增加群聊未读计数
+          if (ch === 'wechat_group') {
+            setUnreadCounts((prev) => ({ ...prev, group: (prev.group ?? 0) + 1 }));
+            return;
+          }
           // 私聊视图：只处理 wechat 频道消息
           if (ch && ch !== 'wechat') return;
           if (viewRef.current === 'private' && cid && privateCharIdRef.current && cid !== privateCharIdRef.current) return;
@@ -1702,21 +2315,20 @@ const ChatWindow: React.FC = () => {
               [cid]: { content: text, timestamp: ts, role: 'assistant' },
             }));
           }
+          // 即时未读计数：不在对应私聊视图时，红点立即+1（不依赖 dialogue:changed debounce）
+          {
+            const convId = cid ?? '';
+            const isViewing = viewRef.current === 'private' && privateCharIdRef.current === convId;
+            if (convId && !isViewing) {
+              setUnreadCounts((prev) => ({ ...prev, [convId]: (prev[convId] ?? 0) + 1 }));
+            }
+          }
         });
         if (cancelled) { unAssistantMsg(); return; }
       } catch { /* ignore */ }
     })();
     return () => { cancelled = true; unTodo?.(); unSched?.(); unLinkCard?.(); unAssistantMsg?.(); };
   }, []);
-
-  useEffect(() => {
-    if (!menuOpen) return;
-    const onDown = (e: MouseEvent) => {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) setMenuOpen(false);
-    };
-    document.addEventListener('mousedown', onDown);
-    return () => document.removeEventListener('mousedown', onDown);
-  }, [menuOpen]);
 
   /** 抽屉打开时，点击非抽屉与非触发按钮区域即收起 */
   useEffect(() => {
@@ -1731,32 +2343,6 @@ const ChatWindow: React.FC = () => {
     return () => document.removeEventListener('mousedown', onDown);
   }, [bottomPanel]);
 
-  const openManageWindow = useCallback(async (kind: 'todo' | 'scheduler') => {
-    setMenuOpen(false);
-    const label = kind;
-    try {
-      const existing = await WebviewWindow.getByLabel(label);
-      if (existing) {
-        // 验证引用仍然存活（防止已关闭窗口的陈旧引用）
-        try {
-          if (await existing.isVisible()) {
-            await existing.setFocus();
-            return;
-          }
-        } catch {
-          // 陈旧引用，继续创建新窗口
-        }
-      }
-      new WebviewWindow(label, {
-        url: `/?view=${kind}`,
-        title: kind === 'todo' ? t('chat.menu_todo') : t('chat.menu_scheduler'),
-        width: 420, height: 640, resizable: true, decorations: false, transparent: false, shadow: true,
-        alwaysOnTop: true, center: true, minWidth: 320, minHeight: 400,
-        visible: false,
-      });
-    } catch (e) { console.error('打开管理窗口失败:', e); }
-  }, [t]);
-
   useEffect(() => {
     let cancelled = false;
     let unlistenUser: UnlistenFn | undefined;
@@ -1770,6 +2356,11 @@ const ChatWindow: React.FC = () => {
       unlistenUser = await listen<{ content: string; timestamp: string; character_id?: string; channel?: string }>('chat:user_message', (event) => {
         const ch = event.payload.channel;
         if (ch && ch !== 'wechat') return;
+        // 语音消息：本地已添加语音气泡，跳过此处重复的文本气泡
+        if (skipNextUserMessageRef.current) {
+          skipNextUserMessageRef.current = false;
+          return;
+        }
         // 群聊视图：用户消息由 handleSend 直接添加，跳过（避免每个角色各发一次导致重复）
         if (viewRef.current === 'group') return;
         // 私聊视图：只处理当前私聊角色的消息
@@ -1809,11 +2400,18 @@ const ChatWindow: React.FC = () => {
         if (viewRef.current !== 'private') return;
         if (cid && cid !== privateCharIdRef.current) return;
         hasStreamingRef.current = true;
-        setPrivateTyping(true);
+        // 随机延迟 1-1.5s 再显示"对方正在输入"，避免发送后立刻显示的突兀感
+        if (typingDelayTimerRef.current !== null) window.clearTimeout(typingDelayTimerRef.current);
+        const typingDelay = 1000 + Math.random() * 500;
+        typingDelayTimerRef.current = window.setTimeout(() => {
+          typingDelayTimerRef.current = null;
+          if (hasStreamingRef.current) setPrivateTyping(true);
+        }, typingDelay);
         // 安全超时：60s 后自动清除 typing（防止 chat:done 事件丢失导致指示器卡死）
         if (typingSafetyTimerRef.current !== null) window.clearTimeout(typingSafetyTimerRef.current);
         typingSafetyTimerRef.current = window.setTimeout(() => {
           typingSafetyTimerRef.current = null;
+          if (typingDelayTimerRef.current !== null) { window.clearTimeout(typingDelayTimerRef.current); typingDelayTimerRef.current = null; }
           if (hasStreamingRef.current) {
             console.warn('[chat:start] typing 安全超时：自动清除对方正在输入');
             hasStreamingRef.current = false;
@@ -1890,11 +2488,12 @@ const ChatWindow: React.FC = () => {
       });
       if (cancelled) { unlistenChunk(); return; }
       // chat:done：输出缓冲区剩余文本作为最终气泡，清理流式状态
-      unlistenDone = await listen<{ text: string; stream_id?: string; sticker?: string; character_id?: string; channel?: string }>('chat:done', (event) => {
+      unlistenDone = await listen<{ text: string; stream_id?: string; sticker?: string; character_id?: string; channel?: string; voice_message?: boolean; voice_audio_path?: string | null; voice_duration?: number | null }>('chat:done', (event) => {
         const sid = event.payload.stream_id ?? '';
         if (!sid) return;
         const finalText = event.payload.text || '';
         const sticker = event.payload.sticker ?? '';
+        const isVoiceMessage = !!event.payload.voice_message && !!event.payload.voice_audio_path;
         const ch = event.payload.channel;
         // 群聊流路由
         if (groupStreamCharMapRef.current.has(sid)) {
@@ -1905,7 +2504,21 @@ const ChatWindow: React.FC = () => {
           const trimmedBuf = buf.trim();
           // 合并文本+表情为一次 setGroupMessages，避免双倍渲染开销
           const newMsgs: ChatMessage[] = [];
-          if (trimmedBuf) {
+          if (isVoiceMessage) {
+            // 语音消息：不显示文本，以语音气泡发出
+            newMsgs.push({
+              id: nextId(),
+              role: 'assistant',
+              content: '',
+              timestamp: Date.now(),
+              streaming: false,
+              character_id: cid,
+              voice: {
+                audioPath: event.payload.voice_audio_path ?? undefined,
+                duration: event.payload.voice_duration ?? 0,
+              },
+            });
+          } else if (trimmedBuf) {
             newMsgs.push({
               id: nextId(),
               role: 'assistant',
@@ -1930,7 +2543,7 @@ const ChatWindow: React.FC = () => {
             setGroupMessages((prev) => [...prev, ...newMsgs]);
           }
           // 立即刷新主面板群聊预览（乐观更新）
-          const previewText = finalText.trim() || buf.trim();
+          const previewText = isVoiceMessage ? '[语音]' : (finalText.trim() || buf.trim());
           if (previewText) {
             setLastPreviews((prev) => ({
               ...prev,
@@ -1953,7 +2566,20 @@ const ChatWindow: React.FC = () => {
         const buf = streamBuffersRef.current.get(sid) ?? '';
         // 输出缓冲区剩余文本（未遇到换行符的最后一段）
         const trimmedBuf = buf.trim();
-        if (trimmedBuf) {
+        if (isVoiceMessage) {
+          // 语音消息：不显示流式文本，以语音气泡发出
+          setMessages((prev) => [...prev, {
+            id: nextId(),
+            role: 'assistant',
+            content: '',
+            timestamp: Date.now(),
+            streaming: false,
+            voice: {
+              audioPath: event.payload.voice_audio_path ?? undefined,
+              duration: event.payload.voice_duration ?? 0,
+            },
+          }]);
+        } else if (trimmedBuf) {
           setMessages((prev) => [...prev, {
             id: nextId(),
             role: 'assistant',
@@ -1974,7 +2600,7 @@ const ChatWindow: React.FC = () => {
           }]);
         }
         // 立即刷新主面板私聊预览（乐观更新）
-        const privatePreviewText = finalText.trim();
+        const privatePreviewText = isVoiceMessage ? '[语音]' : finalText.trim();
         const previewCharId = privateCharIdRef.current;
         if (privatePreviewText && previewCharId) {
           setLastPreviews((prev) => ({
@@ -1985,6 +2611,7 @@ const ChatWindow: React.FC = () => {
         streamBuffersRef.current.delete(sid);
         streamSegmentIdsRef.current.delete(sid);
         streamActiveIdRef.current.delete(sid);
+        if (typingDelayTimerRef.current !== null) { window.clearTimeout(typingDelayTimerRef.current); typingDelayTimerRef.current = null; }
         if (typingSafetyTimerRef.current !== null) { window.clearTimeout(typingSafetyTimerRef.current); typingSafetyTimerRef.current = null; }
         hasStreamingRef.current = false;
         setPrivateTyping(false);
@@ -2063,6 +2690,7 @@ const ChatWindow: React.FC = () => {
         streamBuffersRef.current.delete(sid);
         streamSegmentIdsRef.current.delete(sid);
         streamActiveIdRef.current.delete(sid);
+        if (typingDelayTimerRef.current !== null) { window.clearTimeout(typingDelayTimerRef.current); typingDelayTimerRef.current = null; }
         if (typingSafetyTimerRef.current !== null) { window.clearTimeout(typingSafetyTimerRef.current); typingSafetyTimerRef.current = null; }
         hasStreamingRef.current = false;
         setPrivateTyping(false);
@@ -2132,6 +2760,7 @@ const ChatWindow: React.FC = () => {
         streamBuffersRef.current.delete(sid);
         streamSegmentIdsRef.current.delete(sid);
         streamActiveIdRef.current.delete(sid);
+        if (typingDelayTimerRef.current !== null) { window.clearTimeout(typingDelayTimerRef.current); typingDelayTimerRef.current = null; }
         if (typingSafetyTimerRef.current !== null) { window.clearTimeout(typingSafetyTimerRef.current); typingSafetyTimerRef.current = null; }
         hasStreamingRef.current = false;
         setPrivateTyping(false);
@@ -2148,7 +2777,7 @@ const ChatWindow: React.FC = () => {
       });
       if (cancelled) { unlistenCancelled(); return; }
     })();
-    return () => { cancelled = true; unlistenUser?.(); unlistenUserImage?.(); unlistenStart?.(); unlistenChunk?.(); unlistenDone?.(); unlistenError?.(); unlistenCancelled?.(); if (typingSafetyTimerRef.current !== null) { window.clearTimeout(typingSafetyTimerRef.current); typingSafetyTimerRef.current = null; } };
+    return () => { cancelled = true; unlistenUser?.(); unlistenUserImage?.(); unlistenStart?.(); unlistenChunk?.(); unlistenDone?.(); unlistenError?.(); unlistenCancelled?.(); if (typingDelayTimerRef.current !== null) { window.clearTimeout(typingDelayTimerRef.current); typingDelayTimerRef.current = null; } if (typingSafetyTimerRef.current !== null) { window.clearTimeout(typingSafetyTimerRef.current); typingSafetyTimerRef.current = null; } };
   }, []);
 
   const loadMore = useCallback(() => {
@@ -2216,13 +2845,25 @@ const ChatWindow: React.FC = () => {
     getItemKey: (i) => items[i].key,
   });
 
+  /** 从文本中解析被 @ 提及的在线角色 ID 集合 */
+  const parseMentionedCharIds = useCallback((text: string) => {
+    const mentioned = new Set<string>();
+    for (const c of characters) {
+      if (!c.online) continue;
+      const regex = new RegExp(`@${c.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
+      if (regex.test(text)) mentioned.add(c.id);
+    }
+    return mentioned;
+  }, [characters]);
+
   const handleSend = useCallback(() => {
     const text = input.trim();
     if (!text) return;
     setInput('');
+    setMentionState({ active: false, query: '', startIndex: -1, selectedIndex: 0 });
 
     if (view === 'group') {
-      // 群聊：用户消息只添加一次，然后群发给所有在线角色
+      // 群聊：用户消息只添加一次，然后发给目标角色
       const userTs = Date.now();
       setGroupMessages((prev) => [...prev, { id: nextId(), role: 'user', content: text, timestamp: userTs }]);
       // 立即刷新主面板预览（乐观更新，不等 dialogue:changed 的 500ms debounce）
@@ -2230,8 +2871,13 @@ const ChatWindow: React.FC = () => {
         ...prev,
         group: { content: text, timestamp: userTs, role: 'user' },
       }));
-      const onlineChars = characters.filter((c) => c.online);
-      // 为每个在线角色生成独立 stream_id 并预注册映射，后端会串行处理
+      // @ 提及路由：有 @ 标记时只发给被提及的在线角色，未被 @ 的角色不回应；
+      // 无 @ 标记时群发给所有在线角色
+      const mentionedIds = parseMentionedCharIds(text);
+      const onlineChars = mentionedIds.size > 0
+        ? characters.filter((c) => c.online && mentionedIds.has(c.id))
+        : characters.filter((c) => c.online);
+      // 为每个目标角色生成独立 stream_id 并预注册映射，后端会串行处理
       for (const c of onlineChars) {
         const sid = (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function')
           ? crypto.randomUUID()
@@ -2249,18 +2895,24 @@ const ChatWindow: React.FC = () => {
     }
 
     if (view === 'private' && privateCharId) {
-      // 私聊：通过 ChatController 发送（复用现有流式/TTS/气泡逻辑），显式指定角色
       // 立即刷新主面板预览（乐观更新，不等 dialogue:changed 的 500ms debounce）
       setLastPreviews((prev) => ({
         ...prev,
         [privateCharId]: { content: text, timestamp: Date.now(), role: 'user' },
       }));
+      // 忙碌状态下暂存消息，等状态恢复在线后再发送
+      if (presenceStates[privateCharId] === 'busy') {
+        // 立即在聊天列表显示用户消息（不经过 ChatController，不会触发 chat:user_message 事件）
+        setMessages((prev) => [...prev, { id: nextId(), role: 'user', content: text, timestamp: Date.now() }]);
+        pendingMessagesRef.current.push({ charId: privateCharId, text });
+        return;
+      }
       void ChatController.sendMessage(text, privateCharId, 'wechat');
       return;
     }
 
     // home 视图不发送
-  }, [input, view, characters, privateCharId]);
+  }, [input, view, characters, privateCharId, parseMentionedCharIds, presenceStates]);
 
   const toggleRecording = useCallback(async () => {
     const isRecording = recordingRef.current;
@@ -2326,6 +2978,45 @@ const ChatWindow: React.FC = () => {
     };
   }, [recording]);
 
+  // 语音消息录制期间监听 ASR 事件，把识别结果累积到 voiceAsrTextRef（不写入输入框）
+  // 与 recording 模式互斥：同一时刻只会有一处订阅 asr:event
+  const voiceAsrPartialRef = useRef('');
+  useEffect(() => {
+    if (!voiceRecording) { voiceAsrPartialRef.current = ''; return; }
+    let unlisten: UnlistenFn | undefined;
+    let cancelled = false;
+    (async () => {
+      unlisten = await listen<{
+        type: string;
+        text?: string;
+        confidence?: number;
+        message?: string;
+      }>('asr:event', (e) => {
+        const { type, text } = e.payload;
+        if (type === 'final_result' && text) {
+          // 移除已累积的 partial 尾部，再追加 final（与 recording 模式同样的去重逻辑）
+          const base = voiceAsrTextRef.current.slice(0, voiceAsrTextRef.current.length - voiceAsrPartialRef.current.length);
+          voiceAsrPartialRef.current = '';
+          const separator = base === '' || base.endsWith(' ') ? '' : ' ';
+          voiceAsrTextRef.current = base + separator + text;
+        } else if (type === 'partial_result' && text) {
+          const base = voiceAsrTextRef.current.slice(0, voiceAsrTextRef.current.length - voiceAsrPartialRef.current.length);
+          voiceAsrPartialRef.current = text;
+          voiceAsrTextRef.current = base + text;
+        } else if (type === 'error') {
+          console.warn('[voice] ASR 错误:', e.payload.message);
+        }
+        // 注意：不处理 stopped 事件——voiceRecording 的停止由 handleVoiceStop 控制
+      });
+      if (cancelled) unlisten?.();
+    })();
+    return () => {
+      cancelled = true;
+      unlisten?.();
+      voiceAsrPartialRef.current = '';
+    };
+  }, [voiceRecording]);
+
   // 录音期间 ASR 写入文本后，光标和滚动位置跟随到末尾
   useLayoutEffect(() => {
     if (!recording) return;
@@ -2337,7 +3028,89 @@ const ChatWindow: React.FC = () => {
     el.scrollLeft = el.scrollWidth;
   }, [input, recording]);
 
+  /** 选中 @ 候选角色：把输入框中的 `@query` 替换为 `@角色名 ` */
+  const selectMention = useCallback((charId: string) => {
+    const char = characters.find((c) => c.id === charId);
+    if (!char) return;
+    const ms = mentionStateRef.current;
+    if (ms.startIndex < 0) return;
+    const before = input.slice(0, ms.startIndex);
+    const after = input.slice(ms.startIndex + 1 + ms.query.length);
+    const insert = `@${char.name} `;
+    const newValue = before + insert + after;
+    setInput(newValue);
+    setMentionState({ active: false, query: '', startIndex: -1, selectedIndex: 0 });
+    const newPos = before.length + insert.length;
+    requestAnimationFrame(() => {
+      const el = inputRef.current;
+      if (!el) return;
+      el.focus();
+      el.setSelectionRange(newPos, newPos);
+    });
+  }, [input, characters]);
+
+  /** 检测输入框光标位置是否处于 @ 触发状态，更新 mentionState */
+  const detectMention = useCallback((value: string, cursorPos: number) => {
+    if (view !== 'group') {
+      if (mentionStateRef.current.active) {
+        setMentionState({ active: false, query: '', startIndex: -1, selectedIndex: 0 });
+      }
+      return;
+    }
+    const beforeCursor = value.slice(0, cursorPos);
+    const match = beforeCursor.match(/(?:^|\s)@([\w]*)$/);
+    if (match) {
+      const atStart = (match.index ?? 0) + (match[0].startsWith(' ') ? 1 : 0);
+      const query = match[1];
+      setMentionState((prev) => ({
+        active: true,
+        query,
+        startIndex: atStart,
+        selectedIndex: prev.query === query ? prev.selectedIndex : 0,
+      }));
+    } else if (mentionStateRef.current.active) {
+      setMentionState({ active: false, query: '', startIndex: -1, selectedIndex: 0 });
+    }
+  }, [view]);
+
+  const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    const value = e.target.value;
+    setInput(value);
+    detectMention(value, e.target.selectionStart ?? value.length);
+  };
+
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    // @ 提及菜单激活时优先处理导航/选择
+    const ms = mentionStateRef.current;
+    if (ms.active && mentionList.length > 0) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        setMentionState((prev) => ({
+          ...prev,
+          selectedIndex: (prev.selectedIndex + 1) % mentionList.length,
+        }));
+        return;
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        setMentionState((prev) => ({
+          ...prev,
+          selectedIndex: (prev.selectedIndex - 1 + mentionList.length) % mentionList.length,
+        }));
+        return;
+      }
+      if (e.key === 'Enter' && !e.ctrlKey && !e.shiftKey && !e.metaKey) {
+        e.preventDefault();
+        const target = mentionList[ms.selectedIndex] ?? mentionList[0];
+        if (target) selectMention(target.id);
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        setMentionState({ active: false, query: '', startIndex: -1, selectedIndex: 0 });
+        return;
+      }
+    }
     // Enter 发送，Ctrl+Enter 换行
     if (e.key === 'Enter' && !e.ctrlKey && !e.shiftKey && !e.metaKey) {
       e.preventDefault();
@@ -2398,16 +3171,385 @@ const ChatWindow: React.FC = () => {
     setBottomPanel((prev) => prev === panel ? 'none' : panel);
   }, []);
 
-  /** 点击 emoji */
+  /** 点击 emoji：插入到输入框并记录到最近使用 */
   const handleEmojiClick = useCallback((emoji: string) => {
     setInput((prev) => prev + emoji);
     inputRef.current?.focus();
+    setRecentEmojis((prev) => {
+      const filtered = prev.filter((e) => e !== emoji);
+      return [emoji, ...filtered].slice(0, 16);
+    });
   }, []);
 
-  /** 语音输入（录制真实音频提供给多模态 LLM，功能开发中） */
-  const handleVoiceInputPlaceholder = useCallback(() => {
-    void emit('toast:show', { message: t('chat.voice_input_placeholder'), type: 'info', duration: 3000, key: Date.now() });
-  }, [t]);
+  /** 清理语音录制资源（MediaRecorder / 计时器 / ASR），供 handleVoiceStop 和异常路径复用 */
+  const cleanupVoiceRecording = useCallback(() => {
+    // 手动重置 ref，避免依赖异步 useEffect 同步导致竞态（handleVoiceStart await 期间被取消时 ref 仍为 true）
+    voiceRecordingRef.current = false;
+    if (voiceTimerRef.current !== null) {
+      window.clearInterval(voiceTimerRef.current);
+      voiceTimerRef.current = null;
+    }
+    const mr = mediaRecorderRef.current;
+    if (mr && mr.state !== 'inactive') {
+      try { mr.stop(); } catch { /* ignore */ }
+    }
+    mediaRecorderRef.current = null;
+    voiceChunksRef.current = [];
+    voiceAsrTextRef.current = '';
+    voiceAsrPartialRef.current = '';
+    voicePointerIdRef.current = null;
+    setVoiceRecording(false);
+    setVoiceDuration(0);
+    // 停止 ASR（幂等，未启动时后端直接返回 Ok）
+    void invoke('stop_recognition').catch(() => { /* ignore */ });
+  }, []);
+
+  // handleVoiceStopRef 在 handleVoiceStart 之前声明，供 60s 超时回调读取最新值
+  // 初始值为 no-op，handleVoiceStop 定义后通过 useEffect 更新
+  const handleVoiceStopRef = useRef<() => void>(() => {});
+
+  /**
+   * 按下语音按钮：启动 MediaRecorder + ASR
+   * - 同时打开麦克风（MediaRecorder）和后端流式 ASR（start_recognition）
+   * - ASR final 文本累积在 voiceAsrTextRef，松开后发送给 LLM
+   * - 原始音频保存为文件，显示为微信风格语音气泡
+   */
+  const handleVoiceStart = useCallback(async () => {
+    // home 视图不发送
+    if (view === 'home') return;
+    // 已在录音或 ASR 转文字模式中，不重复启动
+    if (voiceRecordingRef.current || recordingRef.current) return;
+    // 立即标记为录制中，防止 async 等待期间重复触发
+    voiceRecordingRef.current = true;
+
+    voiceAsrTextRef.current = '';
+    voiceAsrPartialRef.current = '';
+    voiceChunksRef.current = [];
+    voiceStartTimeRef.current = Date.now();
+    setVoiceDuration(0);
+
+    // 读取 ASR 引擎类型：仅 WinRT 能与 MediaRecorder 共享麦克风；其他引擎（Azure/Aliyun/Whisper/OpenAI）
+    // 用 cpal 独占麦克风，需走"先录音再文件转写"路径避免麦克风冲突
+    let asrEngine = 'winrt';
+    try {
+      asrEngine = (await invoke<string>('get_config', { key: 'speech_recognition.engine' })) || 'winrt';
+    } catch { /* 默认 winrt */ }
+    const useRealtimeAsr = asrEngine === 'winrt';
+    voiceRealtimeAsrRef.current = useRealtimeAsr;
+
+    // setVoiceRecording(true) 先触发 useEffect 注册 asr:event 监听器，确保事件不丢失
+    setVoiceRecording(true);
+    let asrStarted = false;
+    if (useRealtimeAsr) {
+      // WinRT：先启动后端 ASR（必须在 getUserMedia 之前：前端开麦克风会占用音频会话，
+      //   导致 WinRT SpeechRecognizer 创建失败 [0x800455A0]。WinRT 先开则两者可共享麦克风）
+      try {
+        await invoke('start_recognition', { characterId: privateCharId ?? undefined });
+        asrStarted = true;
+      } catch (err) {
+        // ASR 启动失败不影响音频录制，语音气泡仍可发送（只是没有转写文本）
+        console.warn('[voice] ASR 启动失败:', err);
+        void emit('toast:show', {
+          message: t('chat.voice_asr_failed', { defaultValue: '语音识别启动失败，仅保存语音消息' }),
+          type: 'warning', duration: 4000, key: Date.now(),
+        });
+      }
+    } else {
+      // 非 WinRT：停 TTS（避免扬声器声音被录进麦克风），不启动实时 ASR，转写改在录音结束后进行
+      try {
+        await invoke('stop_speaking', { characterId: privateCharId ?? undefined });
+      } catch { /* ignore */ }
+    }
+
+    // 2. 启动 MediaRecorder（捕获原始音频用于语音气泡播放，与 WinRT 共享麦克风）
+    let stream: MediaStream | null = null;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (err) {
+      voiceRecordingRef.current = false;
+      setVoiceRecording(false);
+      if (asrStarted) { void invoke('stop_recognition').catch(() => {}); }
+      const errName = (err as DOMException)?.name ?? '';
+      const msg = errName === 'NotAllowedError' || errName === 'SecurityError'
+        ? t('chat.voice_mic_denied', { defaultValue: '无法访问麦克风，请检查系统权限设置' })
+        : t('chat.voice_mic_failed', { error: String(err), defaultValue: '麦克风启动失败：{{error}}' });
+      void emit('toast:show', { message: msg, type: 'warning', duration: 5000, key: Date.now() });
+      return;
+    }
+
+    // 选择浏览器支持的 MIME（webm 优先，兼容 ogg/mp4）
+    const candidates = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus', 'audio/ogg', 'audio/mp4'];
+    const mime = candidates.find((m) => {
+      try { return MediaRecorder.isTypeSupported(m); } catch { return false; }
+    }) ?? '';
+    voiceMimeRef.current = mime || 'audio/webm';
+
+    let recorder: MediaRecorder;
+    try {
+      recorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+    } catch (err) {
+      voiceRecordingRef.current = false;
+      setVoiceRecording(false);
+      if (asrStarted) { void invoke('stop_recognition').catch(() => {}); }
+      stream.getTracks().forEach((tr) => tr.stop());
+      void emit('toast:show', { message: t('chat.voice_mic_failed', { error: String(err), defaultValue: '麦克风启动失败：{{error}}' }), type: 'warning', duration: 5000, key: Date.now() });
+      return;
+    }
+    recorder.ondataavailable = (ev) => {
+      if (ev.data && ev.data.size > 0) voiceChunksRef.current.push(ev.data);
+    };
+    recorder.start(100); // 每 100ms 采集一个 chunk
+    // 检查是否在 async 等待期间被取消（用户快速双击）
+    if (!voiceRecordingRef.current) {
+      recorder.stream.getTracks().forEach((tr) => tr.stop());
+      try { recorder.stop(); } catch { /* ignore */ }
+      if (asrStarted) { void invoke('stop_recognition').catch(() => {}); }
+      return;
+    }
+    mediaRecorderRef.current = recorder;
+
+    // 3. 启动计时器
+    voiceTimerRef.current = window.setInterval(() => {
+      const elapsed = (Date.now() - voiceStartTimeRef.current) / 1000;
+      setVoiceDuration(elapsed);
+      // 最长 60 秒自动停止
+      if (elapsed >= 60) {
+        handleVoiceStopRef.current();
+      }
+    }, 100);
+  }, [view, privateCharId, t]);
+
+  /**
+   * 松开语音按钮：停止录制，保存音频，发送语音气泡 + ASR 转写文本给 LLM
+   */
+  const handleVoiceStop = useCallback(() => {
+    if (!voiceRecordingRef.current) return;
+
+    // 清理计时器
+    if (voiceTimerRef.current !== null) {
+      window.clearInterval(voiceTimerRef.current);
+      voiceTimerRef.current = null;
+    }
+
+    const durationSec = (Date.now() - voiceStartTimeRef.current) / 1000;
+    const elapsedMs = Date.now() - voiceStartTimeRef.current;
+
+    const recorder = mediaRecorderRef.current;
+    const chunks = voiceChunksRef.current;
+    const mime = voiceMimeRef.current;
+    const targetCharId = privateCharId;
+    const targetView = view;
+
+    // 太短（< 500ms）视为误触，丢弃
+    if (elapsedMs < 500) {
+      cleanupVoiceRecording();
+      return;
+    }
+
+    // 停止 ASR（仅实时模式启动了 ASR；文件转写模式在录音结束后才调 transcribe_audio）
+    const useRealtimeAsr = voiceRealtimeAsrRef.current;
+    if (useRealtimeAsr) {
+      void invoke('stop_recognition').catch(() => { /* ignore */ });
+    }
+
+    // 等待 ASR final 文本到达（stop_recognition 后后端会产生 final_result 事件）
+    const waitForAsr = useRealtimeAsr
+      ? new Promise<void>((resolve) => {
+          // 给后端 600ms 把 final_result 事件送回来（IPC + WinRT StopAsync + 事件转发）
+          setTimeout(resolve, 600);
+        })
+      : Promise.resolve();
+
+    if (!recorder || recorder.state === 'inactive') {
+      cleanupVoiceRecording();
+      return;
+    }
+
+    recorder.onstop = () => {
+      // 停止所有音频轨道，释放麦克风
+      try {
+        recorder.stream.getTracks().forEach((tr) => tr.stop());
+      } catch { /* ignore */ }
+
+      const blob = new Blob(chunks, { type: mime || 'audio/webm' });
+      voiceChunksRef.current = [];
+
+      if (blob.size === 0) {
+        cleanupVoiceRecording();
+        return;
+      }
+
+      const reader = new FileReader();
+      reader.onloadend = async () => {
+        const dataUrl = reader.result as string;
+        // 提取纯 base64（去掉 data:<mime>;base64, 前缀）
+        const match = dataUrl.match(/^data:[^;]+;base64,(.+)$/);
+        if (!match) {
+          cleanupVoiceRecording();
+          return;
+        }
+        const base64Data = match[1];
+        const finalMime = mime || 'audio/webm';
+
+        // 保存音频文件到用户数据目录
+        let audioPath: string | undefined;
+        try {
+          audioPath = await invoke<string>('save_voice_audio', { base64Data, mime: finalMime });
+        } catch (err) {
+          console.warn('[voice] 保存音频失败:', err);
+        }
+
+        // 获取转写文本：实时模式等待 ASR 事件累积；文件转写模式解码音频后调 transcribe_audio
+        let transcribedText = '';
+        if (useRealtimeAsr) {
+          await waitForAsr;
+          transcribedText = voiceAsrTextRef.current.trim();
+        } else {
+          try {
+            const samplesB64 = await audioBlobToBase64F32(blob);
+            transcribedText = ((await invoke<string>('transcribe_audio', { samplesB64 })) || '').trim();
+          } catch (err) {
+            console.warn('[voice] 文件转写失败:', err);
+            void emit('toast:show', {
+              message: t('chat.voice_asr_failed', { defaultValue: '语音识别启动失败，仅保存语音消息' }),
+              type: 'warning', duration: 4000, key: Date.now(),
+            });
+          }
+        }
+
+        // 清理录制状态
+        voiceAsrTextRef.current = '';
+        voiceAsrPartialRef.current = '';
+        mediaRecorderRef.current = null;
+        voicePointerIdRef.current = null;
+        setVoiceRecording(false);
+        setVoiceDuration(0);
+
+        // 构造语音消息 metadata（持久化到对话历史）
+        const voiceMeta = {
+          kind: 'voice',
+          audio_path: audioPath,
+          duration: Math.round(durationSec * 10) / 10,
+        };
+        // ASR 无转写文本时仍显示语音气泡，仅不发送给 LLM
+        const messageText = transcribedText;
+
+        if (targetView === 'group') {
+          // 群聊：本地添加语音气泡，然后群发给在线角色
+          const userTs = Date.now();
+          const voiceMsg: ChatMessage = {
+            id: nextId(),
+            role: 'user',
+            content: '',
+            timestamp: userTs,
+            voice: { audioPath, audioDataUrl: dataUrl, duration: durationSec },
+          };
+          setGroupMessages((prev) => [...prev, voiceMsg]);
+          setLastPreviews((prev) => ({
+            ...prev,
+            group: { content: messageText || '[语音]', timestamp: userTs, role: 'user' },
+          }));
+
+          if (!messageText) {
+            void emit('toast:show', {
+              message: t('chat.voice_empty_transcript', { defaultValue: '未识别到语音内容，仅保存语音消息' }),
+              type: 'warning', duration: 3000, key: Date.now(),
+            });
+            return;
+          }
+          const onlineChars = characters.filter((c) => c.online);
+          for (const c of onlineChars) {
+            const sid = (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function')
+              ? crypto.randomUUID()
+              : `s-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+            groupStreamCharMapRef.current.set(sid, c.id);
+            groupStreamBuffersRef.current.set(sid, '');
+            void invoke('send_message_stream', {
+              message: messageText,
+              streamId: sid,
+              characterId: c.id,
+              channel: 'wechat_group',
+              whisper: false,
+              fileMetadata: voiceMeta,
+            }).catch((err) => {
+              console.warn(`[语音群发] 角色 ${c.id} 发送失败:`, err);
+              groupStreamCharMapRef.current.delete(sid);
+              groupStreamBuffersRef.current.delete(sid);
+            });
+          }
+          if (onlineChars.length > 0) setGroupStreaming(true);
+          return;
+        }
+
+        if (targetView === 'private' && targetCharId) {
+          // 私聊：本地添加语音气泡，然后发送转写文本给 LLM
+          const userTs = Date.now();
+          const voiceMsg: ChatMessage = {
+            id: nextId(),
+            role: 'user',
+            content: '',
+            timestamp: userTs,
+            voice: { audioPath, audioDataUrl: dataUrl, duration: durationSec },
+          };
+          setMessages((prev) => [...prev, voiceMsg]);
+          setLastPreviews((prev) => ({
+            ...prev,
+            [targetCharId]: { content: messageText || '[语音]', timestamp: userTs, role: 'user' },
+          }));
+
+          if (!messageText) {
+            void emit('toast:show', {
+              message: t('chat.voice_empty_transcript', { defaultValue: '未识别到语音内容，仅保存语音消息' }),
+              type: 'warning', duration: 3000, key: Date.now(),
+            });
+            return;
+          }
+
+          // 忙碌状态下暂存
+          if (presenceStates[targetCharId] === 'busy') {
+            pendingMessagesRef.current.push({ charId: targetCharId, text: messageText });
+            return;
+          }
+          // 标记跳过 chat:user_message 的文本气泡（本地已显示语音气泡）
+          skipNextUserMessageRef.current = true;
+          // 安全超时：2 秒后未匹配到 chat:user_message 则清除标记，避免卡住后续消息
+          setTimeout(() => { skipNextUserMessageRef.current = false; }, 2000);
+          void ChatController.sendMessage(messageText, targetCharId, 'wechat', undefined, voiceMeta);
+        }
+      };
+      reader.readAsDataURL(blob);
+    };
+
+    try {
+      recorder.stop();
+    } catch {
+      cleanupVoiceRecording();
+    }
+  }, [view, privateCharId, characters, presenceStates, t, cleanupVoiceRecording]);
+
+  // 用 ref 保存 handleVoiceStop 最新值，供 handleVoiceStart 中的 60s 超时回调读取
+  // handleVoiceStopRef 已在 handleVoiceStart 之前声明（初始为 no-op），这里只更新值
+  useEffect(() => { handleVoiceStopRef.current = handleVoiceStop; }, [handleVoiceStop]);
+
+  // 组件卸载时清理语音录制资源
+  useEffect(() => {
+    return () => {
+      if (voiceRecordingRef.current) {
+        if (voiceTimerRef.current !== null) {
+          window.clearInterval(voiceTimerRef.current);
+          voiceTimerRef.current = null;
+        }
+        const mr = mediaRecorderRef.current;
+        if (mr && mr.state !== 'inactive') {
+          try { mr.stop(); } catch { /* ignore */ }
+        }
+        if (mr) {
+          try { mr.stream.getTracks().forEach((tr) => tr.stop()); } catch { /* ignore */ }
+        }
+        void invoke('stop_recognition').catch(() => { /* ignore */ });
+      }
+    };
+  }, []);
 
   /** 发送本地图片：弹出文件选择器，调用后端 send_image_message 完成多模态识别与记忆写入 */
   const handleSendImage = useCallback(async () => {
@@ -2424,6 +3566,186 @@ const ChatWindow: React.FC = () => {
       void emit('toast:show', { message: t('chat.image_send_failed'), type: 'error', duration: 3000, key: Date.now() });
     }
   }, [t, privateCharId]);
+
+  // ── 文件拖放：通过 Tauri 原生 onDragDropEvent 获取文件路径 ──
+  const extractFileText = useExtractFileText();
+  const [isDragOver, setIsDragOver] = useState(false);
+
+  // Drop 逻辑用 ref 保存最新闭包，避免 onDragDropEvent 监听器持有过时状态
+  const handleFileDropRef = useRef<(paths: string[]) => void>(() => {});
+  handleFileDropRef.current = (paths: string[]) => {
+    if (paths.length === 0) return;
+
+    if (view === 'home') {
+      void emit('toast:show', {
+        message: t('chat.drag_file_home_hint', { defaultValue: '请先进入对话再发送文件' }),
+        type: 'info', duration: 3000, key: Date.now(),
+      });
+      return;
+    }
+
+    const targetCharIds = view === 'private' && privateCharId
+      ? [privateCharId]
+      : view === 'group'
+        ? characters.filter((c) => c.online).map((c) => c.id)
+        : [];
+    if (targetCharIds.length === 0) return;
+
+    const channel = view === 'group' ? 'wechat_group' : 'wechat';
+
+    void (async () => {
+      for (const filePath of paths) {
+        try {
+          const result: FileTextResult = await extractFileText(filePath);
+
+          if (result.file_type === 'image') {
+            for (const cid of targetCharIds) {
+              await invoke('send_image_message', {
+                sourcePath: filePath,
+                characterId: cid,
+                channel,
+              });
+            }
+          } else if (result.file_type === 'unsupported') {
+            void emit('toast:show', {
+              message: t('toast.file_unsupported', {
+                filename: result.filename,
+                defaultValue: '不支持的文件类型：{{filename}}',
+              }),
+              type: 'warning', duration: 4000, key: Date.now(),
+            });
+          } else {
+            const truncatedHint = result.truncated
+              ? t('toast.file_truncated', {
+                  count: result.original_char_count,
+                  defaultValue: `（文件过长，已截断，原始 ${result.original_char_count} 字符）`,
+                })
+              : '';
+            const message = `[文件：${result.filename}]\n${result.text}${truncatedHint}`;
+            const fileMetadata = {
+              kind: 'file',
+              file_name: result.filename,
+              file_type: result.file_type,
+              truncated: result.truncated,
+              original_char_count: result.original_char_count,
+            };
+            for (const cid of targetCharIds) {
+              void ChatController.sendMessage(message, cid, channel, undefined, fileMetadata);
+            }
+          }
+        } catch (err) {
+          void emit('toast:show', {
+            message: t('toast.file_extract_failed', {
+              error: String(err),
+              defaultValue: '文件处理失败：{{error}}',
+            }),
+            type: 'error', duration: 5000, key: Date.now(),
+          });
+        }
+      }
+    })();
+  };
+
+  // 注册原生拖放事件监听（仅一次）
+  useEffect(() => {
+    let unlisten: UnlistenFn | undefined;
+    void (async () => {
+      unlisten = await getCurrentWindow().onDragDropEvent((event) => {
+        const payload = event.payload;
+        if (payload.type === 'enter') {
+          setIsDragOver(true);
+        } else if (payload.type === 'leave') {
+          setIsDragOver(false);
+        } else if (payload.type === 'drop') {
+          setIsDragOver(false);
+          handleFileDropRef.current(payload.paths);
+        }
+      });
+    })();
+    return () => { unlisten?.(); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /** 发送本地文件：弹出文件选择对话框，提取文本后发送给当前对话角色 */
+  const handleSendFile = useCallback(async () => {
+    try {
+      const selected = await openDialog({
+        multiple: false,
+        filters: [
+          { name: t('chat.file_filter'), extensions: [
+            'txt', 'md', 'markdown', 'log', 'csv', 'tsv', 'rtf', 'pdf',
+            'json', 'yaml', 'yml', 'xml', 'toml', 'ini', 'conf', 'cfg', 'properties',
+            'rs', 'py', 'js', 'ts', 'tsx', 'jsx', 'mjs', 'cjs',
+            'go', 'java', 'c', 'cpp', 'cc', 'cxx', 'h', 'hpp', 'cs', 'rb', 'php',
+            'swift', 'kt', 'sh', 'bash', 'zsh', 'ps1', 'bat', 'cmd',
+            'sql', 'r', 'lua', 'pl', 'dart', 'html', 'htm', 'css', 'scss', 'less', 'svg',
+          ] },
+          { name: t('chat.image_filter'), extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'] },
+        ],
+      });
+      if (!selected || Array.isArray(selected)) return;
+      setBottomPanel('none');
+
+      const filePath = selected as string;
+      const charId = privateCharId;
+      if (!charId) return;
+
+      const result: FileTextResult = await extractFileText(filePath);
+
+      if (result.file_type === 'image') {
+        // 用户在文件选择器中选了图片：走多模态图片发送流程
+        await invoke('send_image_message', { sourcePath: filePath, characterId: charId, channel: 'wechat' });
+      } else if (result.file_type === 'unsupported') {
+        void emit('toast:show', {
+          message: t('toast.file_unsupported', { filename: result.filename, defaultValue: '不支持的文件类型：{{filename}}' }),
+          type: 'warning', duration: 4000, key: Date.now(),
+        });
+      } else {
+        const truncatedHint = result.truncated
+          ? t('toast.file_truncated', { count: result.original_char_count, defaultValue: `（文件过长，已截断，原始 ${result.original_char_count} 字符）` })
+          : '';
+        const message = `[文件：${result.filename}]\n${result.text}${truncatedHint}`;
+        const fileMetadata = {
+          kind: 'file',
+          file_name: result.filename,
+          file_type: result.file_type,
+          truncated: result.truncated,
+          original_char_count: result.original_char_count,
+        };
+        void ChatController.sendMessage(message, charId, 'wechat', undefined, fileMetadata);
+      }
+    } catch (e) {
+      const errMsg = String(e);
+      void emit('toast:show', {
+        message: t('toast.file_extract_failed', { error: errMsg, defaultValue: '文件处理失败：{{error}}' }),
+        type: 'error', duration: 5000, key: Date.now(),
+      });
+    }
+  }, [t, privateCharId, extractFileText]);
+
+  // ── 摄像头拍摄：打开拍摄模态，拍照后保存为临时文件并走 send_image_message ──
+  const [cameraOpen, setCameraOpen] = useState(false);
+
+  const handleCapturePhoto = useCallback(() => {
+    setBottomPanel('none');
+    setCameraOpen(true);
+  }, []);
+
+  /** 拍照完成回调：base64 → save_temp_image → send_image_message */
+  const handlePhotoCaptured = useCallback(async (base64Data: string, mime: string) => {
+    const charId = privateCharId;
+    if (!charId) return;
+    try {
+      const tempPath = await invoke<string>('save_temp_image', { base64Data, mime });
+      await invoke('send_image_message', { sourcePath: tempPath, characterId: charId, channel: 'wechat' });
+    } catch (e) {
+      const errMsg = String(e);
+      void emit('toast:show', {
+        message: t('chat.capture_save_failed', { error: errMsg, defaultValue: '照片保存失败：{{error}}' }),
+        type: 'error', duration: 5000, key: Date.now(),
+      });
+    }
+  }, [privateCharId, t]);
 
   const mdStyles = useMemo(() => (
     <style>{`
@@ -2515,6 +3837,74 @@ const ChatWindow: React.FC = () => {
     if (!privateCharId) return '';
     return characters.find((c) => c.id === privateCharId)?.name ?? privateCharId;
   }, [privateCharId, characters]);
+
+  /** details 视图：搜索当前私聊角色的聊天历史 */
+  const handleDetailsSearch = useCallback(async (query: string) => {
+    const q = query.trim();
+    setDetailsSearchQuery(query);
+    if (!q || !privateCharId) { setDetailsSearchResults([]); return; }
+    setDetailsSearching(true);
+    try {
+      const entries = await invoke<HistoryEntry[]>('get_chat_history', { characterId: privateCharId });
+      const lower = q.toLowerCase();
+      const results = entries.filter((e) => {
+        if (e.role === 'system') return false;
+        const ch = e.metadata?.channel;
+        if (ch !== 'wechat' && ch !== undefined) return false;
+        return e.content.toLowerCase().includes(lower);
+      }).map((e) => ({
+        id: e.id,
+        content: stripActions(e.content),
+        role: e.role,
+        timestamp: normalizeTimestamp(e.timestamp),
+        character_id: privateCharId,
+      }));
+      setDetailsSearchResults(results);
+    } catch (e) {
+      console.error('搜索聊天记录失败:', e);
+      setDetailsSearchResults([]);
+    } finally {
+      setDetailsSearching(false);
+    }
+  }, [privateCharId]);
+
+  /** details 视图：保存备注名 */
+  const handleSaveRemark = useCallback(() => {
+    if (!privateCharId) return;
+    const trimmed = remarkInput.trim();
+    setCharRemarks((prev) => {
+      const next = { ...prev };
+      if (trimmed) next[privateCharId] = trimmed;
+      else delete next[privateCharId];
+      return next;
+    });
+    setEditingRemark(false);
+  }, [privateCharId, remarkInput]);
+
+  /** details 视图：选择并设置聊天背景图 */
+  const handleSetBackground = useCallback(async () => {
+    if (!privateCharId) return;
+    try {
+      const selected = await openDialog({
+        multiple: false,
+        filters: [{ name: t('chat.avatar_image_filter'), extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'] }],
+      });
+      if (!selected || Array.isArray(selected)) return;
+      setChatBackgrounds((prev) => ({ ...prev, [privateCharId]: selected }));
+    } catch (e) {
+      console.warn('设置聊天背景失败:', e);
+    }
+  }, [privateCharId, t]);
+
+  /** details 视图：清除聊天背景 */
+  const handleClearBackground = useCallback(() => {
+    if (!privateCharId) return;
+    setChatBackgrounds((prev) => {
+      const next = { ...prev };
+      delete next[privateCharId];
+      return next;
+    });
+  }, [privateCharId]);
 
   /** 在场状态 → 显示文本与颜色（在线绿 / 忙碌红 / 休息黄 / 离线灰） */
   const presenceDisplay = useCallback((charId: string): { label: string; color: string } => {
@@ -2615,8 +4005,28 @@ const ChatWindow: React.FC = () => {
       color: 'var(--wx-text)',
       position: 'relative',
       ...(!isClosing ? { opacity: 0, transform: 'translateY(40px) scale(0.85)' } : {}),
-    }}>
+    }}
+    >
       {mdStyles}
+
+      {/* ===== 拖拽文件高亮覆盖层 ===== */}
+      {isDragOver && (
+        <div style={{
+          position: 'absolute', inset: 0, zIndex: 9999,
+          background: 'rgba(0, 0, 0, 0.35)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          borderRadius: 44, pointerEvents: 'none',
+        }}>
+          <div style={{
+            padding: '20px 32px', borderRadius: 16,
+            background: 'var(--wx-bg-surface)', color: 'var(--wx-text)',
+            fontSize: 16, fontWeight: 500,
+            border: '2px dashed var(--wx-border)',
+          }}>
+            {t('chat.drag_file_hint', { defaultValue: '松开以发送文件' })}
+          </div>
+        </div>
+      )}
 
       {/* ===== Dynamic Island（始终黑色，不随主题变化） ===== */}
       <div style={{
@@ -2650,11 +4060,12 @@ const ChatWindow: React.FC = () => {
         background: 'var(--wx-bg)',
         borderBottom: '0.5px solid var(--wx-border)',
       }}>
-        {/* 左：返回按钮（home 视图关闭窗口，private/group 视图返回 home）+ 外部未读总数气泡 */}
+        {/* 左：返回按钮（home 关闭窗口，details 返回 private，private/group 返回 home）+ 未读总数气泡 */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
           <button
             onClick={() => {
               if (view === 'home') void closeWindow();
+              else if (view === 'details') { setView('private'); setDetailsSubView('main'); }
               else setView('home');
             }}
             title={view === 'home' ? t('chat.btn_back') : t('chat.back_to_home')}
@@ -2688,40 +4099,26 @@ const ChatWindow: React.FC = () => {
           }}>
             {view === 'home' ? t('chat.home_title')
               : view === 'group' ? t('chat.group_title')
-              : (privateTyping ? t('chat.typing') : (privateCharName || t('chat.title')))}
+              : view === 'details' ? t('chat.details_title')
+              : (privateTyping ? t('chat.typing') : (charRemarks[privateCharId ?? ''] || privateCharName || t('chat.title')))}
           </span>
         </div>
 
-        {/* 右：三点菜单（仅 private 视图显示） */}
+        {/* 右：三点按钮（仅 private 视图显示，点击进入 details 聊天详情界面） */}
         {view === 'private' && (
-          <div ref={menuRef} style={{ position: 'relative' }}>
-            <button
-              onClick={() => setMenuOpen((v) => !v)}
-              title={t('chat.btn_more')}
-              style={navBtn}
-              onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--wx-bg-active)')}
-              onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
-            >
-              <svg width="22" height="22" viewBox="0 0 24 24">
-                <circle cx="6" cy="12" r="1.8" fill="currentColor" />
-                <circle cx="12" cy="12" r="1.8" fill="currentColor" />
-                <circle cx="18" cy="12" r="1.8" fill="currentColor" />
-              </svg>
-            </button>
-            {menuOpen && (
-              <div style={{
-                position: 'absolute', top: 'calc(100% + 4px)', right: 0,
-                minWidth: 150, background: 'var(--wx-bg-elevated)',
-                border: '0.5px solid var(--wx-border)',
-                borderRadius: 10, boxShadow: '0 4px 20px var(--wx-menu-shadow)',
-                padding: '4px 0', zIndex: 200, overflow: 'hidden',
-              }}>
-                <MenuItem label={t('chat.menu_todo')} onClick={() => void openManageWindow('todo')} />
-                <MenuItem label={t('chat.menu_scheduler')} onClick={() => void openManageWindow('scheduler')} />
-                <MenuItem label={t('chat.avatar_upload')} onClick={() => { setMenuOpen(false); void uploadAvatar(); }} />
-              </div>
-            )}
-          </div>
+          <button
+            onClick={() => setView('details')}
+            title={t('chat.btn_more')}
+            style={navBtn}
+            onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--wx-bg-active)')}
+            onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
+          >
+            <svg width="22" height="22" viewBox="0 0 24 24">
+              <circle cx="6" cy="12" r="1.8" fill="currentColor" />
+              <circle cx="12" cy="12" r="1.8" fill="currentColor" />
+              <circle cx="18" cy="12" r="1.8" fill="currentColor" />
+            </svg>
+          </button>
         )}
         {view !== 'private' && <div style={{ width: 36 }} />}
       </div>
@@ -2997,7 +4394,9 @@ const ChatWindow: React.FC = () => {
       {view === 'private' && (
         <div ref={listRef} className="vivian-scroll" onScroll={handleScroll} style={{
           flex: 1, overflowY: 'auto', padding: '12px 14px 8px',
-          background: 'var(--wx-bg)',
+          background: chatBackgrounds[privateCharId ?? '']
+            ? `url("${convertFileSrc(chatBackgrounds[privateCharId!])}") center / cover no-repeat fixed, var(--wx-bg)`
+            : 'var(--wx-bg)',
         }}>
           {initialLoading ? (
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, color: 'var(--wx-icon)', fontSize: 13, marginTop: 40 }}>
@@ -3053,6 +4452,230 @@ const ChatWindow: React.FC = () => {
         </div>
       )}
 
+      {/* ===== Details 视图：聊天详情（类似微信聊天信息页） ===== */}
+      {view === 'details' && privateCharId && (
+        <div className="vivian-scroll" style={{
+          flex: 1, overflowY: 'auto',
+          background: 'var(--wx-bg)',
+        }}>
+          {detailsSubView === 'main' ? (
+            <>
+              {/* 头像 */}
+              <div style={{
+                display: 'flex', flexDirection: 'column', alignItems: 'center',
+                padding: '36px 0 24px', gap: 10,
+              }}>
+                <AiAvatar size={72} characterId={privateCharId} />
+                <span style={{
+                  fontSize: 17, fontWeight: 600, color: 'var(--wx-text)',
+                }}>
+                  {charRemarks[privateCharId] || privateCharName}
+                </span>
+              </div>
+
+              {/* 设置项列表 */}
+              <div style={{
+                margin: '0 8px', borderRadius: 8, overflow: 'hidden',
+                background: 'var(--wx-bg-surface)',
+                borderTop: '0.5px solid var(--wx-border-light)',
+                borderBottom: '0.5px solid var(--wx-border-light)',
+              }}>
+                {/* 编辑备注 */}
+                {editingRemark ? (
+                  <div style={{
+                    padding: '12px 16px',
+                    borderBottom: '0.5px solid var(--wx-border-light)',
+                  }}>
+                    <input
+                      autoFocus
+                      value={remarkInput}
+                      onChange={(e) => setRemarkInput(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === 'Enter') handleSaveRemark(); if (e.key === 'Escape') setEditingRemark(false); }}
+                      placeholder={t('chat.details_remark_placeholder')}
+                      style={{
+                        width: '100%', padding: '6px 10px', fontSize: 15,
+                        background: 'var(--wx-input-bg)', color: 'var(--wx-text)',
+                        border: '0.5px solid var(--wx-border)', borderRadius: 6,
+                        outline: 'none', boxSizing: 'border-box',
+                      }}
+                    />
+                    <div style={{ display: 'flex', gap: 12, marginTop: 8, justifyContent: 'flex-end' }}>
+                      <button
+                        onClick={() => setEditingRemark(false)}
+                        style={{
+                          padding: '4px 16px', fontSize: 14, borderRadius: 4,
+                          background: 'var(--wx-bg-active)', color: 'var(--wx-text)',
+                          border: 'none', cursor: 'pointer',
+                        }}
+                      >{t('cancel')}</button>
+                      <button
+                        onClick={handleSaveRemark}
+                        style={{
+                          padding: '4px 16px', fontSize: 14, borderRadius: 4,
+                          background: 'var(--wx-accent, #576b95)', color: '#fff',
+                          border: 'none', cursor: 'pointer',
+                        }}
+                      >{t('save')}</button>
+                    </div>
+                  </div>
+                ) : (
+                  <button
+                    onClick={() => { setRemarkInput(charRemarks[privateCharId] ?? ''); setEditingRemark(true); }}
+                    style={detailsRowStyle}
+                    onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--wx-bg-active)')}
+                    onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
+                  >
+                    <span style={detailsLabelStyle}>{t('chat.details_edit_remark')}</span>
+                    <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <span style={{ fontSize: 14, color: 'var(--wx-icon)' }}>
+                        {charRemarks[privateCharId] || ''}
+                      </span>
+                      <ChevronRight />
+                    </span>
+                  </button>
+                )}
+
+                {/* 查找聊天内容 */}
+                <button
+                  onClick={() => { setDetailsSubView('search'); setDetailsSearchQuery(''); setDetailsSearchResults([]); }}
+                  style={detailsRowStyle}
+                  onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--wx-bg-active)')}
+                  onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
+                >
+                  <span style={detailsLabelStyle}>{t('chat.details_search_chat')}</span>
+                  <ChevronRight />
+                </button>
+
+                {/* 设置当前聊天背景 */}
+                <button
+                  onClick={handleSetBackground}
+                  style={{ ...detailsRowStyle, borderBottom: 'none' }}
+                  onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--wx-bg-active)')}
+                  onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
+                >
+                  <span style={detailsLabelStyle}>{t('chat.details_set_background')}</span>
+                  <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    {chatBackgrounds[privateCharId] && (
+                      <img
+                        src={convertFileSrc(chatBackgrounds[privateCharId])}
+                        alt=""
+                        style={{ width: 40, height: 40, borderRadius: 6, objectFit: 'cover' }}
+                      />
+                    )}
+                    <ChevronRight />
+                  </span>
+                </button>
+              </div>
+
+              {/* 清除背景（仅在已设置时显示） */}
+              {chatBackgrounds[privateCharId] && (
+                <div style={{ margin: '12px 8px 0' }}>
+                  <button
+                    onClick={handleClearBackground}
+                    style={{
+                      width: '100%', padding: '12px', fontSize: 15,
+                      background: 'var(--wx-bg-surface)', color: 'var(--wx-danger, #FA5151)',
+                      border: 'none', borderRadius: 8, cursor: 'pointer',
+                      borderTop: '0.5px solid var(--wx-border-light)',
+                      borderBottom: '0.5px solid var(--wx-border-light)',
+                    }}
+                    onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--wx-bg-active)')}
+                    onMouseLeave={(e) => (e.currentTarget.style.background = 'var(--wx-bg-surface)')}
+                  >
+                    {t('chat.details_clear_background')}
+                  </button>
+                </div>
+              )}
+            </>
+          ) : (
+            <>
+              {/* 搜索子视图 */}
+              <div style={{
+                padding: '8px 12px', flexShrink: 0,
+                background: 'var(--wx-bg-surface)',
+                borderBottom: '0.5px solid var(--wx-border-light)',
+              }}>
+                <div style={{
+                  display: 'flex', alignItems: 'center', gap: 8,
+                }}>
+                  <button
+                    onClick={() => { setDetailsSubView('main'); }}
+                    style={{
+                      border: 'none', background: 'transparent', cursor: 'pointer',
+                      color: 'var(--wx-icon)', padding: 4, display: 'flex',
+                    }}
+                  >
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
+                      <path d="M15 19l-7-7 7-7" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
+                    </svg>
+                  </button>
+                  <input
+                    autoFocus
+                    value={detailsSearchQuery}
+                    onChange={(e) => handleDetailsSearch(e.target.value)}
+                    placeholder={t('chat.details_search_placeholder')}
+                    style={{
+                      flex: 1, padding: '6px 12px', fontSize: 14,
+                      background: 'var(--wx-input-bg)', color: 'var(--wx-text)',
+                      border: '0.5px solid var(--wx-border)', borderRadius: 6,
+                      outline: 'none',
+                    }}
+                  />
+                </div>
+              </div>
+              <div style={{ padding: '8px 12px' }}>
+                {!detailsSearchQuery.trim() ? (
+                  <div style={{
+                    textAlign: 'center', color: 'var(--wx-icon)', fontSize: 13,
+                    marginTop: 40, opacity: 0.7,
+                  }}>
+                    {t('chat.details_search_hint')}
+                  </div>
+                ) : detailsSearching ? (
+                  <div style={{
+                    display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+                    color: 'var(--wx-icon)', fontSize: 13, marginTop: 40,
+                  }}>
+                    <LoadingSpinner size={14} color="var(--wx-icon)" thickness={1.5} />
+                  </div>
+                ) : detailsSearchResults.length === 0 ? (
+                  <div style={{
+                    textAlign: 'center', color: 'var(--wx-icon)', fontSize: 13,
+                    marginTop: 40, opacity: 0.7,
+                  }}>
+                    {t('chat.details_search_empty')}
+                  </div>
+                ) : (
+                  <div>
+                    {detailsSearchResults.map((r) => (
+                      <div key={r.id} style={{
+                        padding: '12px 14px', marginBottom: 4,
+                        background: 'var(--wx-bg-surface)', borderRadius: 8,
+                      }}>
+                        <div style={{
+                          fontSize: 11, color: 'var(--wx-icon)', marginBottom: 4,
+                        }}>
+                          {r.role === 'user' ? t('chat.role_user_badge') : privateCharName}
+                          {' · '}
+                          {new Date(r.timestamp).toLocaleString()}
+                        </div>
+                        <div style={{
+                          fontSize: 14, color: 'var(--wx-text)',
+                          whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+                          maxHeight: 60, overflow: 'hidden',
+                        }}>
+                          {r.content}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
       {/* ===== Group 视图：群聊消息列表（虚拟滚动） ===== */}
       {view === 'group' && (
         <div ref={groupListRef} className="vivian-scroll" onScroll={handleGroupScroll} style={{
@@ -3101,7 +4724,7 @@ const ChatWindow: React.FC = () => {
       )}
 
       {/* ===== 底部输入区域（仅 private/group 视图） ===== */}
-      {view !== 'home' && (
+      {(view === 'private' || view === 'group') && (
         <div style={{
           flexShrink: 0, background: 'var(--wx-bg-surface)',
           borderTop: '0.5px solid var(--wx-border)',
@@ -3110,15 +4733,71 @@ const ChatWindow: React.FC = () => {
           <div style={{
             display: 'flex', alignItems: 'center', gap: 6,
             padding: '8px 24px',
+            position: 'relative',
           }}>
+            {/* @ 提及上拉菜单（仅群聊视图） */}
+            {view === 'group' && mentionState.active && mentionList.length > 0 && (
+              <div style={{
+                position: 'absolute',
+                bottom: '100%',
+                left: 24,
+                right: 24,
+                marginBottom: 4,
+                background: 'var(--wx-bg-surface)',
+                border: '0.5px solid var(--wx-border)',
+                borderRadius: 8,
+                boxShadow: '0 -4px 16px rgba(0,0,0,0.12)',
+                overflow: 'hidden',
+                zIndex: 50,
+              }}>
+                {mentionList.map((c, i) => (
+                  <div
+                    key={c.id}
+                    onMouseDown={(e) => { e.preventDefault(); selectMention(c.id); }}
+                    onMouseEnter={() => setMentionState((prev) => ({ ...prev, selectedIndex: i }))}
+                    style={{
+                      padding: '8px 14px',
+                      cursor: 'pointer',
+                      fontSize: 14,
+                      color: 'var(--wx-text)',
+                      background: i === mentionState.selectedIndex ? 'var(--wx-bg-active)' : 'transparent',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 8,
+                    }}
+                  >
+                    <span style={{ color: 'var(--wx-accent, #576b95)', fontWeight: 500 }}>@</span>
+                    <span>{c.name}</span>
+                  </div>
+                ))}
+              </div>
+            )}
             <button
-              onClick={handleVoiceInputPlaceholder}
+              onClick={() => { voiceRecordingRef.current ? handleVoiceStop() : handleVoiceStart(); }}
+              disabled={recording}
               title={t('chat.btn_voice_input')}
-              style={toolBtn}
-              onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--wx-bg-active)')}
-              onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
+              style={{
+                ...toolBtn,
+                background: voiceRecording ? 'var(--wx-recording-bg, rgba(255,69,58,0.12))' : 'transparent',
+                color: voiceRecording ? '#FF453A' : 'var(--wx-icon)',
+                cursor: recording ? 'not-allowed' : 'pointer',
+                opacity: recording ? 0.4 : 1,
+                userSelect: 'none',
+                WebkitUserSelect: 'none',
+                touchAction: 'none',
+              }}
             >
-              <AudioMessageIcon />
+              {voiceRecording ? (
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 12, fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>
+                  <span style={{
+                    width: 8, height: 8, borderRadius: '50%', background: '#FF453A',
+                    animation: 'vivian-blink 1s steps(2) infinite',
+                  }} />
+                  {Math.ceil(voiceDuration)}″
+                </span>
+              ) : (
+                <AudioMessageIcon />
+              )}
             </button>
 
             <div style={{
@@ -3128,8 +4807,16 @@ const ChatWindow: React.FC = () => {
               padding: '0 4px 0 14px', minHeight: 36,
             }}>
               <textarea
-                ref={inputRef} value={input} onChange={(e) => setInput(e.target.value)}
+                ref={inputRef} value={input} onChange={handleInputChange}
                 onKeyDown={handleKeyDown}
+                onSelect={(e) => {
+                  const el = e.currentTarget;
+                  detectMention(el.value, el.selectionStart ?? el.value.length);
+                }}
+                onKeyUp={(e) => {
+                  const el = e.currentTarget;
+                  detectMention(el.value, el.selectionStart ?? el.value.length);
+                }}
                 placeholder={view === 'group' ? t('chat.group_input_placeholder') : t('chat.input_placeholder')}
                 rows={1}
                 className="vivian-chat-input"
@@ -3191,27 +4878,58 @@ const ChatWindow: React.FC = () => {
               background: 'var(--wx-bg-surface)',
               transition: 'max-height 200ms ease-out, opacity 180ms ease-out',
             }}>
-              <div style={{
-                height: 160, padding: '8px 12px',
-                borderTop: '0.5px solid var(--wx-border-light)',
-                display: 'grid', gridTemplateColumns: 'repeat(8, 1fr)', gridTemplateRows: 'repeat(3, 1fr)', gap: '4px 0',
-                overflow: 'hidden',
-              }}>
-                {EMOJI_LIST.slice(0, 24).map((emoji, i) => (
-                  <button
-                    key={i}
-                    onClick={() => handleEmojiClick(emoji)}
-                    style={{
-                      width: '100%', border: 'none', background: 'transparent',
-                      fontSize: 26, cursor: 'pointer', borderRadius: 8,
-                      display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    }}
-                    onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--wx-bg-active)')}
-                    onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
-                  >
-                    {emoji}
-                  </button>
-                ))}
+              <div
+                className="vivian-scroll"
+                style={{
+                  height: 160, padding: '4px 10px 8px',
+                  borderTop: '0.5px solid var(--wx-border-light)',
+                  overflowY: 'auto', overflowX: 'hidden',
+                }}
+              >
+                {recentEmojis.length > 0 && (
+                  <>
+                    <div style={{ fontSize: 10, color: 'var(--wx-icon)', padding: '4px 2px 2px', letterSpacing: 0.3 }}>
+                      {t('chat.emoji_recent')}
+                    </div>
+                    <div style={{ display: 'flex', flexWrap: 'wrap' }}>
+                      {recentEmojis.map((emoji, i) => (
+                        <button
+                          key={`r-${i}`}
+                          onClick={() => handleEmojiClick(emoji)}
+                          style={{
+                            width: 32, height: 32, flexShrink: 0, border: 'none', background: 'transparent',
+                            fontSize: 20, cursor: 'pointer', borderRadius: 6,
+                            display: 'flex', alignItems: 'center', justifyContent: 'center',
+                          }}
+                          onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--wx-bg-active)')}
+                          onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
+                        >
+                          {emoji}
+                        </button>
+                      ))}
+                    </div>
+                  </>
+                )}
+                <div style={{ fontSize: 10, color: 'var(--wx-icon)', padding: '4px 2px 2px', letterSpacing: 0.3 }}>
+                  {t('chat.emoji_all')}
+                </div>
+                <div style={{ display: 'flex', flexWrap: 'wrap' }}>
+                  {EMOJI_LIST.map((emoji, i) => (
+                    <button
+                      key={`a-${i}`}
+                      onClick={() => handleEmojiClick(emoji)}
+                      style={{
+                        width: 32, height: 32, flexShrink: 0, border: 'none', background: 'transparent',
+                        fontSize: 20, cursor: 'pointer', borderRadius: 6,
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      }}
+                      onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--wx-bg-active)')}
+                      onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
+                    >
+                      {emoji}
+                    </button>
+                  ))}
+                </div>
               </div>
             </div>
 
@@ -3231,7 +4949,7 @@ const ChatWindow: React.FC = () => {
                   alignContent: 'center', justifyItems: 'center',
                 }}>
                   <button
-                    onClick={() => { setBottomPanel('none'); setCallView('full'); }}
+                    onClick={() => { setBottomPanel('none'); void emit('toast:show', { message: t('chat.voice_call_disabled'), type: 'info', duration: 3000, key: Date.now() }); }}
                     style={{
                       display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6,
                       background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--wx-text)',
@@ -3259,6 +4977,36 @@ const ChatWindow: React.FC = () => {
                       color: 'var(--wx-icon)',
                     }}><ImageIcon /></div>
                     <span style={{ fontSize: 11 }}>{t('chat.send_image_entry')}</span>
+                  </button>
+                  <button
+                    onClick={handleSendFile}
+                    style={{
+                      display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6,
+                      background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--wx-text)',
+                    }}
+                  >
+                    <div style={{
+                      width: 48, height: 48, borderRadius: 14,
+                      background: 'var(--wx-bg-active)',
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      color: 'var(--wx-icon)',
+                    }}><FileIcon /></div>
+                    <span style={{ fontSize: 11 }}>{t('chat.send_file_entry')}</span>
+                  </button>
+                  <button
+                    onClick={handleCapturePhoto}
+                    style={{
+                      display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6,
+                      background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--wx-text)',
+                    }}
+                  >
+                    <div style={{
+                      width: 48, height: 48, borderRadius: 14,
+                      background: 'var(--wx-bg-active)',
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      color: 'var(--wx-icon)',
+                    }}><CameraIcon /></div>
+                    <span style={{ fontSize: 11 }}>{t('chat.capture_photo_entry')}</span>
                   </button>
                 </div>
               </div>
@@ -3294,6 +5042,11 @@ const ChatWindow: React.FC = () => {
         />
       )}
       <ImageViewer src={imageViewerSrc} onClose={() => setImageViewerSrc(null)} />
+      <CameraCapture
+        open={cameraOpen}
+        onClose={() => setCameraOpen(false)}
+        onCaptured={handlePhotoCaptured}
+      />
     </div>
   );
 };
@@ -3309,27 +5062,28 @@ const navBtn: React.CSSProperties = {
 const toolBtn: React.CSSProperties = {
   width: 36, height: 36, flexShrink: 0, display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
   border: 'none', background: 'transparent', borderRadius: 10, cursor: 'pointer', transition: 'background 0.15s ease',
-  color: 'var(--wx-icon)',
+  color: 'var(--wx-toolbar-icon)',
 };
 
-/** 菜单项（无图标） */
-const MenuItem: React.FC<{ label: string; onClick: () => void }> = ({ label, onClick }) => {
-  const [hover, setHover] = useState(false);
-  return (
-    <button
-      onClick={onClick}
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
-      style={{
-        display: 'block', width: '100%', padding: '10px 16px',
-        border: 'none', background: hover ? 'var(--wx-bg-active)' : 'transparent',
-        color: 'var(--wx-text)', fontSize: 14, fontFamily: 'inherit',
-        cursor: 'pointer', textAlign: 'left',
-      }}
-    >
-      {label}
-    </button>
-  );
+/** details 视图行样式（微信设置页风格） */
+const detailsRowStyle: React.CSSProperties = {
+  width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+  padding: '14px 16px', border: 'none', background: 'transparent',
+  cursor: 'pointer', textAlign: 'left',
+  borderBottom: '0.5px solid var(--wx-border-light)',
+  transition: 'background 0.15s ease',
 };
+
+/** details 视图行标签样式 */
+const detailsLabelStyle: React.CSSProperties = {
+  fontSize: 16, color: 'var(--wx-text)',
+};
+
+/** 右箭头图标（微信风格 chevron） */
+const ChevronRight: React.FC = () => (
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" style={{ flexShrink: 0 }}>
+    <path d="M9 6l6 6-6 6" stroke="var(--wx-icon)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+  </svg>
+);
 
 export default ChatWindow;

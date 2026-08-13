@@ -8,6 +8,7 @@ pub mod auto_extractor;
 pub mod conflict;
 pub mod consolidation;
 pub mod embedding;
+pub mod embedding_registry;
 pub mod entity_extract;
 pub mod episode;
 pub mod evidence;
@@ -17,16 +18,19 @@ pub mod graph_store;
 pub mod hooks;
 pub mod ivf_index;
 pub mod llm_enricher;
+pub mod lifecycle;
 pub mod manager;
 pub mod memory_router;
 pub mod ollama_service;
 pub mod pipeline;
 pub mod precision_filter;
+pub mod qdrant;
 pub mod redact;
 pub mod recycle_bin;
 pub mod refiner;
 pub mod relaxation;
 pub mod relational_recall;
+pub mod reranker;
 pub mod retention;
 pub mod retriever;
 pub mod session_compressor;
@@ -40,11 +44,16 @@ pub mod topic_merger;
 pub mod world_knowledge;
 pub mod types;
 pub mod user_facts;
+pub mod user_model;
 pub mod verifier;
 pub mod vector_search;
 
 pub use age::{bump_visit, compute_heat_score, init_heat, staleness_text};
 pub use embedding::{build_embedding, default_embedding, HashingMemoryEmbedding, MemoryEmbeddingProvider};
+pub use embedding_registry::{
+    all_models, lookup as lookup_embedding_model, normalize_dimension, resolve_dimension,
+    EmbeddingModelSpec, EmbeddingSource,
+};
 pub use evidence::{
     apply_evidence_signal, apply_migration_seed, derive_status, evidence_score,
     effective_disputation, effective_reinforcement, maybe_mark_sub_zero, EvidenceSnapshot,
@@ -53,6 +62,7 @@ pub use evidence::{
 pub use event_log::{EventLog, EventRecord, EventType};
 pub use hooks::{HookJudge, HookJudgeLlmClient};
 pub use llm_enricher::{EnricherLlmClient, EnrichedMeta, MemoryEnricher};
+pub use lifecycle::{health_score, is_compressible, plan_compression, CompressionPlan, HealthGrade};
 pub use manager::MemoryManager;
 pub use memory_router::{route_sync, route_with_llm, MemoryDestination, RouteContext, RouterLlmClient};
 pub use pipeline::{ConsolidationPipeline, ConsolidationReport};
@@ -61,7 +71,8 @@ pub use relaxation::{RelaxationLadder, STAGE_NAMES as RELAXATION_STAGE_NAMES};
 pub use retention::{MemoryExpirationRule, MemoryRetentionPolicy, MemoryRetentionGuard, QuadraticDecay};
 pub use refiner::{keyword_prefilter, llm_refine, refine_candidates};
 pub use recycle_bin::{RecycleBin, RecycleBinData, RecycleEntry};
-pub use retriever::{attach_items, attach_items_with_weights, expand_context, hybrid_search, RetrievalHit, RetrievalResultType, RetrievalWeights};
+pub use reranker::{build_reranker, NoopReranker, OllamaRerankClient, Reranker};
+pub use retriever::{attach_items, attach_items_with_weights, expand_context, hybrid_search, MemoryRetrievalFilter, RetrievalHit, RetrievalResultType, RetrievalWeights};
 pub use strategy::{
     create_strategy, AutoStrategy, HybridStrategy, KeywordStrategy, MemoryRetrievalStrategy,
     RetrievalContext, VectorStrategy,
@@ -76,6 +87,11 @@ pub use unified_event_ledger::{
 pub use world_knowledge::{world_knowledge, WorldFact, WorldFactCategory, WorldKnowledgeEngine};
 pub use types::{Granularity, MemoryItem, MemoryType, OpenHook, RetrievalStrategy, SemanticType};
 pub use user_facts::{FactLlmClient, L1RecentState, UserFact, UserFactStore, UserFactType};
+pub use user_model::{
+    CandidateTrait, DetectedEvidence, GoalStatus, ProjectStatus, TraitLifecycle, UserGoal,
+    UserModel, UserModelManager, UserProject, UserTrait, UserTraitCategory,
+    detect_strong_evidence, detect_weak_evidence,
+};
 pub use verifier::{verify_retrieval, VerifierLlmClient};
 pub use vector_search::{cosine_similarity, should_index, MemoryVector, MemoryVectorStore};
 pub use ivf_index::{IvfConfig, IvfIndex, IvfStats};

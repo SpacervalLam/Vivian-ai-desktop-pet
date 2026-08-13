@@ -234,12 +234,19 @@ impl Brain {
         // 用户研究管理器：LLM 驱动的行为习惯观察与统计聚合
         let research = Arc::new(crate::research::ResearchManager::new(char_id));
 
-        // 用户活动日志：由 WorldStateProvider 的前台窗口事件驱动
-        // 将 ActivityJournal 注册为 world_provider 的监听器，窗口切换时由事件回调写入
+        // 统一的前台窗口处理：记录活动日志 + 同步写入 UserBehaviorLog
+        // ActivityJournal 在 record() 内部运行双层分类器，产生 activity_label；
+        // 此处通过 latest_classification() 获取分类结果，直接写入 UserBehaviorLog，
+        // 避免重复调用分类器。
         {
             let journal = proactive.activity_journal().clone();
+            let ws = world_state.clone();
             world_provider.add_foreground_listener(std::sync::Arc::new(move |fw| {
                 journal.record(fw.title.clone(), fw.process.clone());
+                // 从 ActivityJournal 获取分类结果，同步到 UserBehaviorLog
+                if let Some((label, confidence)) = journal.latest_classification() {
+                    ws.update_user_activity_from_classifier(&label, confidence);
+                }
             }));
             // 总开关启用时才开启记录（停用时 world_provider 仍监听但不写入日志）
             if config.world.enable {
@@ -536,6 +543,39 @@ impl Brain {
     }
 
     pub async fn think(&self, user_input: &str, stream: bool) -> VivianResult<AiResponse> {
+        self.think_with_options(user_input, stream, false).await
+    }
+
+    /// 带选项的思考调用。
+    ///
+    /// `skip_dialogue_write`: 跳过将本轮用户消息和 AI 回复写入对话历史。
+    /// 用于插话等场景——插话指令是内部生成的系统提示，不应作为用户消息出现在对话历史和记忆图谱中。
+    pub async fn think_with_options(
+        &self,
+        user_input: &str,
+        stream: bool,
+        skip_dialogue_write: bool,
+    ) -> VivianResult<AiResponse> {
+        self.think_inner(user_input, stream, skip_dialogue_write, true).await
+    }
+
+    /// 跨角色对话专用 think：跳过异步反思（跨角色闲聊场景反思价值有限，节省 LLM 配额）。
+    /// 仍走完整 pipeline（prompt 构建 → generation → validation → memory_saving）。
+    pub async fn think_cross_character(
+        &self,
+        user_input: &str,
+        stream: bool,
+    ) -> VivianResult<AiResponse> {
+        self.think_inner(user_input, stream, false, false).await
+    }
+
+    async fn think_inner(
+        &self,
+        user_input: &str,
+        stream: bool,
+        skip_dialogue_write: bool,
+        run_reflection: bool,
+    ) -> VivianResult<AiResponse> {
         // 主动对话冷却重置（关系更新由 chat_chain 在 MoodStep 后基于真实情绪执行）
         let _ = self.proactive.on_user_interacted();
 
@@ -546,7 +586,8 @@ impl Brain {
         // 异步反思（合并 consciousness_update + activity_extractor）：
         // fire-and-forget，节流触发（5 轮或 30 分钟 OR 关系，激烈对话抑制）。
         // 失败静默，不阻塞主响应路径。
-        {
+        // 跨角色对话场景跳过反思——闲聊价值有限，节省 LLM 配额。
+        if run_reflection {
             let router = self.router.clone();
             let mind = self.mind.clone();
             let input_owned = user_input.to_string();
@@ -600,7 +641,7 @@ impl Brain {
         }
 
         match &self.chat_chain {
-            Some(chain) => chain.ainvoke(user_input, stream).await,
+            Some(chain) => chain.ainvoke_with_options(user_input, stream, skip_dialogue_write).await,
             None => Err(VivianError::Engine("聊天链未初始化".to_string())),
         }
     }
@@ -781,106 +822,8 @@ impl Brain {
             emotion_value
         );
 
-        // 检索相关记忆注入 prompt（老朋友场景），让 LLM 能看到过往交互
-        let memory_text = if is_first_meeting {
-            String::new()
-        } else {
-            self.build_startup_greeting_memory_text().await
-        };
-
         // 用户界面语言 → LLM 回复语言（硬规则）：从设置面板的 base.language 读取
         let user_language_name = language_code_to_name(&self.config.base.language);
-
-        let character_block = self.persona.get_character_block();
-        let examples_block = self.persona.get_examples_block();
-        let style_block = self.persona.build_style_prompt(intimacy, hour);
-        let chat_style_framework = crate::pipeline::prompt_modules::chat_style_framework(&self.config.base.language);
-
-        // 首次见面时随机选一个开场角度作为创意种子，避免 LLM 在固定指令下输出稳态重复
-        let first_meeting_directive: String = if is_first_meeting {
-            let angles = [
-                "the current time of day — say hi matching the hour (late night = quieter, midday = energetic)",
-                "curiosity about the user — casually wonder who they are or what they're doing",
-                "notice they just opened your window — say hi like you just noticed them",
-                "you just appeared on their screen — a casual hello, like meeting someone in the same room",
-                "just came online — greet them the way you'd greet someone who just walked in",
-            ];
-            let angle = angles[rand::random::<u64>() as usize % angles.len()];
-            let mood_hint = match self.char_id.as_str() {
-                "vivian" => "You just arrived on this desktop. You're a bit curious but also guarded. You won't admit you're curious, but you are. Hope this user isn't the type to call you \"master\" — you'd hate that.",
-                "nana" => "You just arrived here. It's quiet. You're calm, not in a hurry. You hope this user is someone easy to be around. You'd like to just sit and watch for a bit.",
-                _ => "You just arrived here. You're taking it in.",
-            };
-            format!(
-                "\n\n## FIRST MEETING DIRECTIVE (CRITICAL)\n\
-                This is the VERY FIRST TIME you meet the user — you two are strangers.\n\
-                - Generate a FIRST-MEETING greeting, NOT a daily/returning greeting.\n\
-                - Briefly introduce yourself in a casual way.\n\
-                - Do NOT say things like \"morning! ready to go\" — that sounds like you already know each other.\n\
-                - Treat this as meeting someone new for the first time.\n\
-                \n## OPENING ANGLE (anchor — DO NOT over-explain it)\n\
-                Anchor your opening on: {angle}\n\
-                - Keep it simple. You don't need to be clever or creative.\n\
-                \n## YOUR CURRENT MOOD (anchor — DO NOT over-explain it)\n\
-                {mood_hint}\n\
-                \n## ABSOLUTELY FORBIDDEN (DO NOT DO THESE)\n\
-                - NO metaphors, NO poetic imagery, NO flowery language\n\
-                - NO atmospheric or romantic descriptions: no stars, moonlight, wind, fate, destiny, serendipity, \"meeting by chance\", \"bonds of fate\", or similar poetic/novel-style imagery\n\
-                - NO philosophical or literary tone — you are NOT writing a novel, poem, essay, or anime monologue\n\
-                - NO dramatic introductions — just say hi like a normal person meeting someone new\n\
-                - Think: how would you actually greet a stranger sitting down next to you? Just say that.\n\
-                \n## GOOD OPENERS (this is the energy you want):\n\
-                - Casual, slightly cheeky hello + your name\n\
-                - A simple \"oh, hey\" style greeting, like someone just popped into your room\n\
-                - Something you'd actually say when a friend of a friend shows up\n\
-                \n## BAD OPENERS (NEVER do this):\n\
-                - Anything that sounds like a light novel opening line\n\
-                - Anything about fate, destiny, stars aligning, winds bringing someone, etc.\n\
-                - Overly warm/enthusiastic greetings that sound like customer service\n\
-                - Long, flowery sentences — keep it short and punchy",
-            )
-        } else {
-            // 老朋友路径：随机选一个开场角度，避免 LLM 在固定示例锚点下输出稳态重复
-            // （原来这里给了 "you're back?" 作为第一个示例，LLM 几乎每次都直接复用）
-            let angles = [
-                "time gap — how long has it been since you last talked? Reference the gap naturally (hours/days), not robotically",
-                "last topic — pick up something from the last conversation if there was one, like a friend continuing a chat",
-                "current mood — let your current emotion color the greeting (tired = low energy hi, happy = brighter hi)",
-                "time of day — greet matching the hour (late night = quieter, midday = energetic), like a roommate would",
-                "plain lazy hi — just a casual nothing-special hi, like texting someone you live with",
-            ];
-            let angle = angles[rand::random::<u64>() as usize % angles.len()];
-            format!(
-                "\n\n## RETURNING GREETING DIRECTIVE\n\
-                The user is back — you two know each other already.\n\
-                - Do NOT introduce yourself by name (old friends already know your name)\n\
-                - Do NOT default to generic phrases like \"you're back?\" / \"回来了?\" — that's exactly what you said last time. Vary it.\n\
-                - Keep it super casual, like texting someone you know well — short, colloquial, the way you'd actually greet a roommate you see every day\n\
-                - NO poetic/literary/dramatic language — just a normal, lazy hi\n\
-                \n## OPENING ANGLE (anchor — DO NOT over-explain it, DO NOT literally say the angle name)\n\
-                Anchor your opening on: {angle}\n\
-                - Keep it under 30 characters. One short sentence. No filler.\n\
-                - If the context below mentions a recent topic, you MAY continue it — but only if it feels natural, not forced."
-            )
-        };
-
-        let system_prompt = format!(
-            "{character_block}\n\n\
-            {examples_block}\n\n\
-            {style_block}\n\n\
-            {chat_style_framework}\n\n\
-            ## Task: Generate a startup greeting\n\
-            Generate a short startup greeting that fits your persona and the current time.\n\
-            Requirements:\n\
-            - Output ONLY the greeting itself — no quotes, no explanation, no extra newlines\n\
-            - Keep it under 30 characters\n\
-            - Natural, casual tone matching the time of day\n\
-            - Talk EXACTLY like a real person texting a friend — short, colloquial, plain speech\n\
-            - ZERO poetic/literary/artistic/metaphorical language. No flowery phrases. No imagery. No atmosphere.\n\
-            - Imagine you're saying hi to someone sitting next to you — just open your mouth and say it\n\
-            - You MUST reply in {user_language_name}. This is a hard rule — never use any other language.{first_meeting_directive}\n\n\
-            {current_state_brief}",
-        );
 
         let time_desc = match hour {
             5..=10 => "early morning",
@@ -890,12 +833,15 @@ impl Brain {
             _ => "late night",
         };
 
-        let user_prompt = if is_first_meeting {
+        // 用户消息：首次见面时在前面加一句"这是首次见面"提示，其余与一般对话一致。
+        // 首次见面走完整对话流水线（与直接渠道同一套提示词 + 记忆检索），
+        // 让问候带着种子前史生成，而不是一张白纸。
+        let greeting_prompt = if is_first_meeting {
             format!(
-                "It's {} now. This is our FIRST meeting — we've never talked before. Generate a first-meeting greeting that introduces yourself. Reply in {}.",
-                time_desc, user_language_name
+                "这是你第一次见到这个用户，你们还是陌生人。现在是{time_desc}。请自然地打个招呼并简单介绍一下自己，用{user_language_name}回复。"
             )
         } else {
+            let memory_text = self.build_startup_greeting_memory_text().await;
             let context_section = if memory_text.is_empty() {
                 String::new()
             } else {
@@ -908,64 +854,114 @@ impl Brain {
                 )
             };
             format!(
-                "It's {} now. The user is back. Current intimacy stage: {}, interaction count: {}. Generate a returning greeting. Reply in {}.{}",
-                time_desc,
-                rel.permanent_stage.as_str(),
-                rel.interaction_count,
-                user_language_name,
+                "用户回来了。现在是{time_desc}。请自然地打个招呼。用{user_language_name}回复。{}",
                 context_section
             )
         };
 
-        let messages = vec![
-            ChatMessage::system(system_prompt),
-            ChatMessage::user(user_prompt),
-        ];
-
-        // temperature=0.9 提升开场多样性，避免稳态重复（router.generate 会应用 with_temperature）
-        match self.router.generate(
-            LLMRequest::new("chat", messages).with_temperature(0.9)
-        ).await {
-            Ok(text) => {
-                let greeting = text.trim().trim_matches('"').trim_matches('「').trim_matches('」').to_string();
-                if greeting.is_empty() {
-                    *self.last_greeting_error.lock().await = None;
-                    None
-                } else {
-                    *self.last_greeting_error.lock().await = None;
-                    let mut greeting_msg = ChatMessage::assistant(greeting.as_str());
-                    greeting_msg.meta = Some(crate::messages::MessageMeta::assistant().with_channel("proactive"));
-                    self.dialogue.add_message(greeting_msg);
-                    // 写入记忆系统（role 通过 tags 标记，记忆管理面板可显示）
-                    let tags = vec![
-                        "assistant".to_string(),
-                        "startup_greeting".to_string(),
-                        "dialogue_turn".to_string(),
-                    ];
-                    let meta = serde_json::json!({
-                        "channel": "proactive",
-                        "speaker": self.char_id,
-                        "listener": "user",
-                        "perspective": "speaker",
-                        "knowledge_source": "direct",
-                    });
-                    if let Err(e) = self
-                        .memory
-                        .add_memory_with_metadata(&greeting, crate::memory::types::MemoryType::CasualConversation, 0.3, tags, meta)
-                        .await
-                    {
-                        tracing::warn!("[startup_greeting] 写入记忆系统失败: {}", e);
+        // 走完整对话流水线生成（与一般直接渠道对话相同提示词，含记忆检索→种子记忆在场）。
+        // 返回 AiResponse；对话写回与记忆由下方独立后处理完成，避免把问候指令污染记忆库。
+        let greeting_text = match &self.chat_chain {
+            Some(chain) => match chain.ainvoke_greeting(&greeting_prompt).await {
+                Ok(resp) => {
+                    let t = resp.text.trim().trim_matches('"').trim_matches('「').trim_matches('」').to_string();
+                    if t.is_empty() {
+                        *self.last_greeting_error.lock().await = None;
+                        None
+                    } else {
+                        Some(t)
                     }
-                    // 纳入主动问候共享冷却，避免启动问候后很快又触发主动问候
-                    self.proactive.record_greeting_arrival("startup_greeting");
-                    Some(greeting)
+                }
+                Err(e) => {
+                    tracing::warn!("[startup_greeting] 完整流水线生成问候失败: {}", e);
+                    *self.last_greeting_error.lock().await = Some(format!("LLM 调用失败: {}", e));
+                    None
+                }
+            },
+            // chat_chain 未就绪时回退到精简定制提示词
+            None => {
+                let character_block = self.persona.get_character_block();
+                let examples_block = self.persona.get_examples_block();
+                let style_block = self.persona.build_style_prompt(intimacy, hour);
+                let chat_style_framework = crate::pipeline::prompt_modules::chat_style_framework(&self.config.base.language);
+                let system_prompt = format!(
+                    "{character_block}\n\n\
+                    {examples_block}\n\n\
+                    {style_block}\n\n\
+                    {chat_style_framework}\n\n\
+                    ## Task: Generate a startup greeting\n\
+                    Generate a short startup greeting that fits your persona and the current time.\n\
+                    Requirements:\n\
+                    - Output ONLY the greeting itself — no quotes, no explanation, no extra newlines\n\
+                    - Keep it under 30 characters\n\
+                    - Reply in {user_language_name}.\n\n\
+                    {current_state_brief}"
+                );
+                let messages = vec![
+                    ChatMessage::system(system_prompt),
+                    ChatMessage::user(greeting_prompt),
+                ];
+                match self.router.generate(
+                    LLMRequest::new("chat", messages).with_temperature(0.9)
+                ).await {
+                    Ok(text) => {
+                        let t = text.trim().trim_matches('"').trim_matches('「').trim_matches('」').to_string();
+                        if t.is_empty() {
+                            *self.last_greeting_error.lock().await = None;
+                            None
+                        } else {
+                            Some(t)
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("[startup_greeting] LLM 生成启动问候失败: {}", e);
+                        *self.last_greeting_error.lock().await = Some(format!("LLM 调用失败: {}", e));
+                        None
+                    }
                 }
             }
-            Err(e) => {
-                tracing::warn!("LLM 生成启动问候失败: {}", e);
-                *self.last_greeting_error.lock().await = Some(format!("LLM 调用失败: {}", e));
-                None
+        };
+
+        // 独立后处理：写入对话历史 + 记忆系统 + 纳入主动问候冷却
+        if let Some(greeting) = greeting_text {
+            *self.last_greeting_error.lock().await = None;
+            let mut greeting_msg = ChatMessage::assistant(greeting.as_str());
+            greeting_msg.meta = Some(crate::messages::MessageMeta::assistant().with_channel("proactive"));
+            self.dialogue.add_message(greeting_msg);
+            // 写入记忆系统（role 通过 tags 标记，记忆管理面板可显示）
+            let tags = vec![
+                "assistant".to_string(),
+                "startup_greeting".to_string(),
+                "dialogue_turn".to_string(),
+            ];
+            let meta = serde_json::json!({
+                "channel": "proactive",
+                "speaker": self.char_id,
+                "listener": "user",
+                "perspective": "speaker",
+                "knowledge_source": "direct",
+            });
+            // 与主对话统一格式：给裸问候补上说话者前缀（如 "[I say to User]"）。
+            // 前端/对话历史展示的是剥离前缀后的原始问候，仅记忆入库时带前缀统一格式。
+            let prefixed = format!(
+                "{} {}",
+                crate::cross_character::build_speaker_prefix(
+                    &self.char_id, "user", &self.char_id
+                ),
+                greeting
+            );
+            if let Err(e) = self
+                .memory
+                .add_memory_with_metadata(&prefixed, crate::memory::types::MemoryType::CasualConversation, 0.3, tags, meta)
+                .await
+            {
+                tracing::warn!("[startup_greeting] 写入记忆系统失败: {}", e);
             }
+            // 纳入主动问候共享冷却，避免启动问候后很快又触发主动问候
+            self.proactive.record_greeting_arrival("startup_greeting");
+            Some(greeting)
+        } else {
+            None
         }
     }
 

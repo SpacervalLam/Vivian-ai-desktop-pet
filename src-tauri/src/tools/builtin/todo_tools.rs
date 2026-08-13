@@ -385,6 +385,86 @@ pub fn list_todo_items(include_completed: bool, priority_filter: Option<u32>) ->
         .collect()
 }
 
+/// 预触发处理：在 `scheduled_time - 5s` 到 `scheduled_time` 之间发起一次主 LLM 调用。
+///
+/// 把定时任务内容说明作为 `user_input` 注入完整提示词链路（persona/memory/上下文），
+/// 让 LLM 提前决定如何进行该定时任务。回复通过 `chat:assistant_message` emit 给前端。
+///
+/// 与 `handle_task_trigger`（到期触发，走桌面通知 + 标准气泡）分离：
+/// - 预触发让 LLM 智能决定（可能调用工具、可能自然提醒、也可能判定不该打扰而简短回复）
+/// - 到期触发保留原有 Reminder 行为作为兜底（系统通知 + 标准气泡），确保到点一定有反馈
+///
+/// `brain.think(directive, false)` 会复用完整提示词构造，并按正常对话流程更新
+/// 记忆/对话历史/关系等运行时状态——预触发被视为智能体的一次真实交互。
+pub async fn handle_task_pre_trigger(task: ScheduledTask, brain: crate::brain::Brain) {
+    use chrono::TimeZone;
+
+    let app_handle = match APP_HANDLE.read().clone() {
+        Some(h) => h,
+        None => {
+            tracing::warn!(
+                "[Scheduler] 预触发任务 {} 但 AppHandle 未注入，跳过",
+                task.id
+            );
+            return;
+        }
+    };
+
+    let task_message = task.message.as_deref().unwrap_or("(无内容)");
+    let scheduled_ts = task.scheduled_time as i64;
+    let scheduled_local = chrono::Local
+        .timestamp_opt(scheduled_ts, 0)
+        .single()
+        .unwrap_or_else(chrono::Local::now);
+    let time_str = scheduled_local.format("%Y-%m-%d %H:%M:%S").to_string();
+    let remaining =
+        (task.scheduled_time - crate::brain::scheduler::now_ts_public()).round() as i64;
+
+    // 构造指令：作为 user_input 注入完整提示词，替换原本的用户消息部分
+    let directive = format!(
+        "[定时任务即将触发]\n任务内容：{}\n计划时间：{}\n剩余：{}秒\n\n\
+         这是你设定的定时任务，马上就要到点触发。请基于你的角色设定、记忆和当前情境，\
+         自然地决定如何进行这个定时任务：可以提醒用户、调用相关工具执行、或自然回复。\
+         你的回复将作为对话气泡发送给用户。",
+        task_message, time_str, remaining
+    );
+
+    tracing::info!(
+        task_id = %task.id,
+        char_id = %task.char_id,
+        "[Scheduler] 预触发：发起主 LLM 调用让智能体决定如何进行定时任务"
+    );
+
+    // 调用 brain.think（非流式）：复用完整提示词构造，user_input 部分被替换为定时任务说明
+    let result = brain.think(&directive, false).await;
+
+    match result {
+        Ok(ai_response) => {
+            if !ai_response.text.is_empty() {
+                let _ = app_handle.emit(
+                    "chat:assistant_message",
+                    json!({
+                        "content": ai_response.text,
+                        "timestamp": chrono::Local::now().to_rfc3339(),
+                    }),
+                );
+            }
+            tracing::info!(
+                task_id = %task.id,
+                text_len = ai_response.text.chars().count(),
+                "[Scheduler] 预触发 LLM 调用完成，已发出回复"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                task_id = %task.id,
+                error = %e,
+                "[Scheduler] 预触发 LLM 调用失败，到期时仍会走原有 Reminder 流程兜底"
+            );
+        }
+    }
+}
+
 /// Complete handling logic when Scheduler task triggers (called by state.rs callback).
 ///
 /// Dispatches by task_type:

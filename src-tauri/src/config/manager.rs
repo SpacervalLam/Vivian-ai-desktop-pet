@@ -133,7 +133,7 @@ pub struct WebSearchConfig {
     #[serde(default)]
     pub provider: String,
     /// 启用的搜索引擎列表（混用模式）
-    /// 候选值：duckduckgo / searxng / tavily
+    /// 候选值：duckduckgo / searxng / tavily / bing
     /// 同时启用多个引擎时，搜索工具会并发调用并合并去重结果
     #[serde(default = "default_web_search_providers")]
     pub providers: Vec<String>,
@@ -156,6 +156,9 @@ pub struct WebSearchConfig {
     /// Tavily 配置（专为 LLM Agent 设计的搜索 API）
     #[serde(default)]
     pub tavily: TavilyConfig,
+    /// Bing Search API 配置（国内直连可用，无需梯子）
+    #[serde(default)]
+    pub bing: BingConfig,
 }
 
 impl Default for WebSearchConfig {
@@ -169,6 +172,7 @@ impl Default for WebSearchConfig {
             language: None,
             searxng: SearXngConfig::default(),
             tavily: TavilyConfig::default(),
+            bing: BingConfig::default(),
         }
     }
 }
@@ -232,6 +236,37 @@ impl Default for TavilyConfig {
 
 fn default_tavily_search_depth() -> String {
     "basic".to_string()
+}
+
+/// Bing Search API 配置（国内直连可用，无需梯子）
+///
+/// 使用 Azure Bing Search API v7，国内直连（cn.bing.com 可访问），
+/// 每月免费 1000 次调用。申请地址：https://portal.azure.com -> Bing Search
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BingConfig {
+    /// Bing Search API Key（Azure Portal 创建 Bing Search 资源获取）
+    #[serde(default)]
+    pub api_key: String,
+    /// Bing 市场代码（如 "zh-CN" / "en-US" / "ja-JP"），默认 "zh-CN"
+    #[serde(default = "default_bing_mkt")]
+    pub mkt: String,
+    /// 搜索结果计数偏移（分页用，默认 0）
+    #[serde(default)]
+    pub offset: u32,
+}
+
+impl Default for BingConfig {
+    fn default() -> Self {
+        Self {
+            api_key: String::new(),
+            mkt: default_bing_mkt(),
+            offset: 0,
+        }
+    }
+}
+
+fn default_bing_mkt() -> String {
+    "zh-CN".to_string()
 }
 
 /// 真实世界感知配置
@@ -354,6 +389,15 @@ pub struct BaseConfig {
     /// 总框快捷键（同时向两个角色发言），弹窗居中显示
     #[serde(default = "default_shortcut_broadcast")]
     pub shortcut_broadcast: String,
+    /// 打开微信主页面快捷键
+    #[serde(default = "default_shortcut_chat")]
+    pub shortcut_chat: String,
+    /// 打开设置快捷键
+    #[serde(default = "default_shortcut_settings")]
+    pub shortcut_settings: String,
+    /// 打开笔记本快捷键
+    #[serde(default = "default_shortcut_memory")]
+    pub shortcut_memory: String,
     /// 用户自定义头像在本机用户数据目录下的相对路径（如 "avatar.png"）。
     /// 为 None 时不使用自定义头像，前端回退到默认蓝色"我"字图标。
     #[serde(default)]
@@ -374,6 +418,18 @@ fn default_shortcut_nana() -> String {
 
 fn default_shortcut_broadcast() -> String {
     "CommandOrControl+Shift+Z".to_string()
+}
+
+fn default_shortcut_chat() -> String {
+    "CommandOrControl+Shift+W".to_string()
+}
+
+fn default_shortcut_settings() -> String {
+    "CommandOrControl+Shift+S".to_string()
+}
+
+fn default_shortcut_memory() -> String {
+    "CommandOrControl+Shift+N".to_string()
 }
 
 fn default_character_live2d_model() -> String {
@@ -579,6 +635,36 @@ pub struct NetworkConfig {
     pub proxy_mode: String,
     pub proxy_url: String,
     pub timeout: f64,
+    /// 远程访问（Tailscale 场景）配置
+    #[serde(default)]
+    pub remote_access: RemoteAccessConfig,
+}
+
+/// 远程访问配置（Tailscale / 内网穿透场景）
+///
+/// 开启后，应用在后台启动一个轻量 HTTP 服务端，暴露聊天接口。
+/// 配合 Tailscale 等组网工具，手机可通过 Tailscale IP 直接访问电脑上的智能体。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteAccessConfig {
+    /// 是否启用远程访问
+    #[serde(default)]
+    pub enabled: bool,
+    /// 监听端口（默认 8080）
+    #[serde(default = "default_remote_port")]
+    pub port: u16,
+}
+
+fn default_remote_port() -> u16 {
+    8080
+}
+
+impl Default for RemoteAccessConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            port: default_remote_port(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -622,6 +708,12 @@ pub struct TaskRouteConfig {
     /// 应用 ID（仅讯飞星火等需要 app_id 的服务商使用）
     #[serde(default)]
     pub app_id: String,
+    /// 生成温度（None 时回退到主 LLM 配置）
+    #[serde(default)]
+    pub temperature: Option<f64>,
+    /// 最大 token 数（None 时回退到主 LLM 配置）
+    #[serde(default)]
+    pub max_tokens: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -638,6 +730,65 @@ pub struct MemoryConfig {
     /// 检索五因子加权配置（recency + relevance + importance + hook_boost + need_sim）
     #[serde(default)]
     pub retrieval_weights: RetrievalWeightsConfig,
+    /// 独立精排（cross-encoder reranker）配置
+    #[serde(default)]
+    pub rerank: RerankConfig,
+    /// 向量索引后端配置（local=内置 sqlite-vec / external=外部向量库如 Qdrant）
+    #[serde(default)]
+    pub vector_store: VectorStoreConfig,
+}
+
+/// 向量索引后端配置。
+///
+/// - `local`：内置 sqlite-vec（默认，零依赖、单机）
+/// - `external`：接入外部向量数据库（如 Qdrant），提供 HNSW 索引、元数据过滤、
+///   持久化快照与备份。需用户自行部署并在设置表单配置连接参数。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VectorStoreConfig {
+    /// 后端来源: "local"（sqlite-vec）| "external"（Qdrant）
+    #[serde(default = "default_vector_store_source")]
+    pub source: String,
+    /// 外部向量库地址（如 `http://localhost:6333`，Qdrant REST）
+    #[serde(default)]
+    pub external_url: String,
+    /// 外部向量库 API Key（Qdrant 启用认证时必填）
+    #[serde(default)]
+    pub api_key: String,
+    /// 外部集合名（每个角色可独立集合，避免多租户隔离冲突）
+    #[serde(default = "default_vector_collection")]
+    pub collection: String,
+    /// HNSW 图 M（向量连接数，越大召回越高、内存占用越大）
+    #[serde(default = "default_hnsw_m")]
+    pub hnsw_m: usize,
+    /// HNSW 建图 ef（越大索引质量越高、建图越慢）
+    #[serde(default = "default_hnsw_ef_construction")]
+    pub ef_construction: usize,
+}
+
+impl Default for VectorStoreConfig {
+    fn default() -> Self {
+        Self {
+            source: default_vector_store_source(),
+            external_url: String::new(),
+            api_key: String::new(),
+            collection: default_vector_collection(),
+            hnsw_m: default_hnsw_m(),
+            ef_construction: default_hnsw_ef_construction(),
+        }
+    }
+}
+
+fn default_vector_store_source() -> String {
+    "local".to_string()
+}
+fn default_vector_collection() -> String {
+    "vivian_memories".to_string()
+}
+fn default_hnsw_m() -> usize {
+    16
+}
+fn default_hnsw_ef_construction() -> usize {
+    200
 }
 
 /// 巩固流水线配置
@@ -735,6 +886,48 @@ fn default_w_min_score() -> f64 {
     0.15
 }
 
+/// 独立精排（cross-encoder reranker）配置
+///
+/// 在混合检索召回之后，对 top-k 候选做二次精排，提升 query-doc 细粒度相关度。
+/// 默认调用本地 Ollama 的 `/api/rerank`（bge-reranker 系列）；未启用或调用失败时
+/// 静默回退到召回顺序，不阻塞检索主流程。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RerankConfig {
+    /// 是否启用精排
+    #[serde(default)]
+    pub enabled: bool,
+    /// Ollama 接口端点（不含 `/api/rerank`，默认 `http://localhost:11434`）
+    #[serde(default = "default_rerank_endpoint")]
+    pub endpoint: String,
+    /// rerank 模型名（默认 bge-reranker-v2-m3）
+    #[serde(default = "default_rerank_model")]
+    pub model: String,
+    /// 参与精排的候选数上限（召回后仅对前 N 条精排，兼顾质量与延迟）
+    #[serde(default = "default_rerank_top_k")]
+    pub top_k: usize,
+}
+
+impl Default for RerankConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            endpoint: default_rerank_endpoint(),
+            model: default_rerank_model(),
+            top_k: default_rerank_top_k(),
+        }
+    }
+}
+
+fn default_rerank_endpoint() -> String {
+    "http://localhost:11434".to_string()
+}
+fn default_rerank_model() -> String {
+    "bge-reranker-v2-m3".to_string()
+}
+fn default_rerank_top_k() -> usize {
+    20
+}
+
 /// 嵌入服务配置
 ///
 /// 独立于 `routing_matrix.memory`（后者用于 LLM 任务），专门控制向量检索的嵌入服务。
@@ -820,6 +1013,9 @@ pub struct SpeechRecognitionConfig {
     /// 阿里云 NLS 后端专属配置（engine=aliyun 时使用）
     #[serde(default)]
     pub aliyun: crate::speech::AliyunAsrConfig,
+    /// OpenAI Whisper API 后端专属配置（engine=openai_whisper 时使用）
+    #[serde(default)]
+    pub openai_whisper: crate::speech::OpenaiWhisperConfig,
 }
 
 /// 豆包端到端实时语音大模型配置（SC2.0）
@@ -976,6 +1172,11 @@ pub struct ProactiveConfig {
     /// （空闲越久 tick 越慢，减少空转 IPC），用户交互立即重置到活跃档。
     #[serde(default = "default_true")]
     pub adaptive_tick_enabled: bool,
+    /// 是否启用"内心独白优化的主动问候"——用 current_thought LLM 产出的 social_urge
+    /// 信号门控问候类触发器，让主动问候在角色"真的想说话"时才触发，而非机械按时。
+    /// 需要同时开启主动对话（enabled）和内心独白（world.enable_inner_monologue）才生效。
+    #[serde(default = "default_true")]
+    pub enable_social_urge_gating: bool,
 }
 
 fn default_away_threshold_seconds() -> u64 {
@@ -995,6 +1196,7 @@ impl Default for ProactiveConfig {
             enable_away_reminder: true,
             away_threshold_seconds: default_away_threshold_seconds(),
             adaptive_tick_enabled: true,
+            enable_social_urge_gating: true,
         }
     }
 }
@@ -1030,6 +1232,9 @@ impl Default for AppConfig {
                 shortcut: default_shortcut(),
                 shortcut_nana: default_shortcut_nana(),
                 shortcut_broadcast: default_shortcut_broadcast(),
+                shortcut_chat: default_shortcut_chat(),
+                shortcut_settings: default_shortcut_settings(),
+                shortcut_memory: default_shortcut_memory(),
                 user_avatar_path: None,
             },
             window: WindowConfig {
@@ -1043,8 +1248,8 @@ impl Default for AppConfig {
                 model: "deepseek-ai/DeepSeek-V3.1".to_string(),
                 api_key: None,
                 endpoint: Some("https://api.siliconflow.cn/v1".to_string()),
-                temperature: 0.7,
-                max_tokens: 2000,
+                temperature: 0.70,
+                max_tokens: 2048,
                 api_secret: None,
                 app_id: None,
                 enable_native_function_calling: true,
@@ -1055,153 +1260,29 @@ impl Default for AppConfig {
                 proxy_mode: "direct".to_string(),
                 proxy_url: String::new(),
                 timeout: 30.0,
+                remote_access: RemoteAccessConfig::default(),
             },
             routing_matrix: {
                 let mut m = HashMap::new();
-                // 日常对话：核心对话任务，DeepSeek-V3.1 中文对话能力强、速度快、价格低
-                m.insert(
-                    "chat".to_string(),
-                    TaskRouteConfig {
-                        provider_type: "openai".to_string(),
-                        model: "deepseek-ai/DeepSeek-V3.1".to_string(),
-                        api_key: String::new(),
-                        endpoint: "https://api.siliconflow.cn/v1".to_string(),
-                        api_secret: String::new(),
-                        app_id: String::new(),
-                    },
-                );
-                // 深度推理：长文本/工具调用/复杂问题，自动从chat升级
-                m.insert(
-                    "reasoning".to_string(),
-                    TaskRouteConfig {
-                        provider_type: "openai".to_string(),
-                        model: "deepseek-ai/DeepSeek-V3.1".to_string(),
-                        api_key: String::new(),
-                        endpoint: "https://api.siliconflow.cn/v1".to_string(),
-                        api_secret: String::new(),
-                        app_id: String::new(),
-                    },
-                );
-                // 智能日记：每天总结当天互动，第一人称叙事
-                m.insert(
-                    "diary".to_string(),
-                    TaskRouteConfig {
-                        provider_type: "openai".to_string(),
-                        model: "deepseek-ai/DeepSeek-V3.1".to_string(),
-                        api_key: String::new(),
-                        endpoint: "https://api.siliconflow.cn/v1".to_string(),
-                        api_secret: String::new(),
-                        app_id: String::new(),
-                    },
-                );
-                // 记忆抽取：高频后台，关键词/重要性/标签抽取
-                m.insert(
-                    "memory".to_string(),
-                    TaskRouteConfig {
-                        provider_type: "openai".to_string(),
-                        model: "deepseek-ai/DeepSeek-V3.1".to_string(),
-                        api_key: String::new(),
-                        endpoint: "https://api.siliconflow.cn/v1".to_string(),
-                        api_secret: String::new(),
-                        app_id: String::new(),
-                    },
-                );
-                // 记忆巩固：夜间离线整理，短期→长期摘要、画像抽取、洞察生成
-                m.insert(
-                    "consolidation".to_string(),
-                    TaskRouteConfig {
-                        provider_type: "openai".to_string(),
-                        model: "deepseek-ai/DeepSeek-V3.1".to_string(),
-                        api_key: String::new(),
-                        endpoint: "https://api.siliconflow.cn/v1".to_string(),
-                        api_secret: String::new(),
-                        app_id: String::new(),
-                    },
-                );
-                // 内心独白：用户离开后自主思考，自然口语化，约1小时1次
-                m.insert(
-                    "inner_monologue".to_string(),
-                    TaskRouteConfig {
-                        provider_type: "openai".to_string(),
-                        model: "deepseek-ai/DeepSeek-V3.1".to_string(),
-                        api_key: String::new(),
-                        endpoint: "https://api.siliconflow.cn/v1".to_string(),
-                        api_secret: String::new(),
-                        app_id: String::new(),
-                    },
-                );
-                // 活动提取：极高频，每轮对话后分类当前活动类型
-                m.insert(
-                    "activity_extraction".to_string(),
-                    TaskRouteConfig {
-                        provider_type: "openai".to_string(),
-                        model: "deepseek-ai/DeepSeek-V3.1".to_string(),
-                        api_key: String::new(),
-                        endpoint: "https://api.siliconflow.cn/v1".to_string(),
-                        api_secret: String::new(),
-                        app_id: String::new(),
-                    },
-                );
-                // 情绪分析：极高频，每轮对话后情绪效价/唤醒度打分
-                m.insert(
-                    "emotion_analysis".to_string(),
-                    TaskRouteConfig {
-                        provider_type: "openai".to_string(),
-                        model: "deepseek-ai/DeepSeek-V3.1".to_string(),
-                        api_key: String::new(),
-                        endpoint: "https://api.siliconflow.cn/v1".to_string(),
-                        api_secret: String::new(),
-                        app_id: String::new(),
-                    },
-                );
-                // 图片理解：用户发图片时描述内容，使用Qwen2.5-VL多模态模型
-                m.insert(
-                    "vision_describe".to_string(),
-                    TaskRouteConfig {
-                        provider_type: "openai".to_string(),
-                        model: "Qwen/Qwen2.5-VL-72B-Instruct".to_string(),
-                        api_key: String::new(),
-                        endpoint: "https://api.siliconflow.cn/v1".to_string(),
-                        api_secret: String::new(),
-                        app_id: String::new(),
-                    },
-                );
-                // 知识采集：空闲时后台搜索学习，低频
-                m.insert(
-                    "knowledge_acquisition".to_string(),
-                    TaskRouteConfig {
-                        provider_type: "openai".to_string(),
-                        model: "deepseek-ai/DeepSeek-V3.1".to_string(),
-                        api_key: String::new(),
-                        endpoint: "https://api.siliconflow.cn/v1".to_string(),
-                        api_secret: String::new(),
-                        app_id: String::new(),
-                    },
-                );
-                // 兴趣搜索：内心独白中联网搜索兴趣话题，低频
-                m.insert(
-                    "interest_search".to_string(),
-                    TaskRouteConfig {
-                        provider_type: "openai".to_string(),
-                        model: "deepseek-ai/DeepSeek-V3.1".to_string(),
-                        api_key: String::new(),
-                        endpoint: "https://api.siliconflow.cn/v1".to_string(),
-                        api_secret: String::new(),
-                        app_id: String::new(),
-                    },
-                );
-                // 翻译服务：跨语言 TTS 时将文本从显示语言翻译为 TTS 语言
-                m.insert(
-                    "translation".to_string(),
-                    TaskRouteConfig {
-                        provider_type: "openai".to_string(),
-                        model: "deepseek-ai/DeepSeek-V3.1".to_string(),
-                        api_key: String::new(),
-                        endpoint: "https://api.siliconflow.cn/v1".to_string(),
-                        api_secret: String::new(),
-                        app_id: String::new(),
-                    },
-                );
+                // 路由矩阵任务键预注册（配置留空，由用户填写）
+                // 空配置的任务在 ModelRouter 中跳过构建 provider，运行时回退到主 LLM API
+                for task_type in [
+                    "chat",
+                    "reasoning",
+                    "diary",
+                    "memory",
+                    "consolidation",
+                    "reflection",
+                    "inner_monologue",
+                    "emotion_analysis",
+                    "vision_describe",
+                    "knowledge_acquisition",
+                    "translation",
+                    "bystander_judge",
+                    "intent_judge",
+                ] {
+                    m.insert(task_type.to_string(), TaskRouteConfig::default());
+                }
                 m
             },
             memory: MemoryConfig {
@@ -1211,6 +1292,8 @@ impl Default for AppConfig {
                 embedding: EmbeddingConfig::default(),
                 consolidation: ConsolidationConfig::default(),
                 retrieval_weights: RetrievalWeightsConfig::default(),
+                rerank: RerankConfig::default(),
+                vector_store: VectorStoreConfig::default(),
             },
             speech_recognition: SpeechRecognitionConfig {
                 engine: "winrt".to_string(),
@@ -1219,6 +1302,7 @@ impl Default for AppConfig {
                 whisper: crate::speech::WhisperConfig::default(),
                 azure: crate::speech::AzureSpeechConfig::default(),
                 aliyun: crate::speech::AliyunAsrConfig::default(),
+                openai_whisper: crate::speech::OpenaiWhisperConfig::default(),
             },
             proactive: ProactiveConfig::default(),
             enable_routing_matrix: true,

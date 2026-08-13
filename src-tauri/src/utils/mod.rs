@@ -164,3 +164,76 @@ pub fn filter_parentheses_sync(text: &str) -> String {
 
     result
 }
+
+/// 清洗 Markdown / 富文本渲染语法，仅保留纯文本内容。
+///
+/// 处理：代码块、粗体、斜体、删除线、行内代码、图片、链接、
+/// 标题前缀、引用前缀、无序/有序列表前缀、分隔线、HTML 标签。
+/// 保留换行与自然空格（不压缩为单行），适合显示与持久化。
+pub fn strip_markdown_syntax(text: &str) -> String {
+    use once_cell::sync::Lazy;
+    use regex::Regex;
+
+    static RE_CODE_BLOCK: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"```[\s\S]*?```").unwrap());
+    static RE_BOLD: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"\*\*(.+?)\*\*").unwrap());
+    static RE_BOLD_UNDER: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"__(.+?)__").unwrap());
+    static RE_ITALIC: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"\*(\S(?:[^*\n]*?\S)?)\*").unwrap());
+    static RE_STRIKE: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"~~(.+?)~~").unwrap());
+    static RE_INLINE_CODE: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"`([^`]+)`").unwrap());
+    static RE_IMAGE: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"!\[([^\]]*)\]\([^)]*\)").unwrap());
+    static RE_LINK: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"\[([^\]]*)\]\([^)]*\)").unwrap());
+    static RE_HEADER: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"(?m)^#{1,6}\s+").unwrap());
+    static RE_BLOCKQUOTE: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"(?m)^>\s?").unwrap());
+    static RE_UL_LIST: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"(?m)^[\s]*[-*+]\s+").unwrap());
+    static RE_OL_LIST: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"(?m)^[\s]*\d+[.)]\s+").unwrap());
+    static RE_HR: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"(?m)^[-*_]{3,}\s*$").unwrap());
+    static RE_HTML_TAG: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"</?[a-zA-Z][^>]*>").unwrap());
+
+    let s = text;
+    let s = RE_CODE_BLOCK.replace_all(&s, "");
+    let s = RE_BOLD.replace_all(&s, "$1");
+    let s = RE_BOLD_UNDER.replace_all(&s, "$1");
+    let s = RE_ITALIC.replace_all(&s, "$1");
+    let s = RE_STRIKE.replace_all(&s, "$1");
+    let s = RE_INLINE_CODE.replace_all(&s, "$1");
+    let s = RE_IMAGE.replace_all(&s, "$1");
+    let s = RE_LINK.replace_all(&s, "$1");
+    let s = RE_HEADER.replace_all(&s, "");
+    let s = RE_BLOCKQUOTE.replace_all(&s, "");
+    let s = RE_UL_LIST.replace_all(&s, "");
+    let s = RE_OL_LIST.replace_all(&s, "");
+    let s = RE_HR.replace_all(&s, "");
+    let s = RE_HTML_TAG.replace_all(&s, "");
+
+    // 压缩连续空行为最多两个换行，去除行尾多余空格
+    let mut out = String::with_capacity(s.len());
+    let mut blank = 0;
+    for line in s.lines() {
+        let trimmed = line.trim_end();
+        if trimmed.is_empty() {
+            blank += 1;
+            if blank <= 1 {
+                out.push('\n');
+            }
+        } else {
+            blank = 0;
+            out.push_str(trimmed);
+            out.push('\n');
+        }
+    }
+    out.trim().to_string()
+}

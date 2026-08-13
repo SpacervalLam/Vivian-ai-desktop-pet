@@ -17,7 +17,7 @@ use crate::utils::path::get_user_data_dir;
 
 use super::tts_audio::{cleanup_temp_file, save_to_temp_file, MciPlayer, MemoryPlayer};
 use super::tts_backend::{
-    create_backend, word_to_mouth_open, TtsBackend, TtsSynthesisResult,
+    create_backend, word_to_mouth_open, AudioFormat, TtsBackend, TtsSynthesisResult,
 };
 
 use std::sync::atomic::Ordering;
@@ -602,6 +602,19 @@ impl TtsConfig {
         cloned
     }
 
+    /// 应用 TTS 控制标记的语速倍率覆盖（书中 9.7 的 [SPEED:x]）。
+    ///
+    /// 直接覆盖 rate 字段，供 `parse_tts_controls` 提取到的语速使用。
+    pub fn with_speed_override(&self, speed: Option<f64>) -> TtsConfig {
+        let mut cloned = self.clone();
+        if let Some(s) = speed {
+            if s > 0.0 {
+                cloned.rate = s;
+            }
+        }
+        cloned
+    }
+
     /// 应用言语上下文(Speech Context)
     ///
     /// 在 emotion prosody 之上叠加场景调整:
@@ -883,6 +896,71 @@ impl TtsManager {
         }
     }
 
+    /// 只合成不播放，保存为音频文件并返回相对路径与估算时长
+    ///
+    /// 用于微信渠道语音消息：LLM 返回 voice_message=true 时，
+    /// 合成 TTS 音频保存到 `<user_data_dir>/audio/` 下，
+    /// 前端以语音气泡展示，点击播放。
+    pub async fn synthesize_to_file(
+        &self,
+        text: &str,
+        emotion: Option<&str>,
+    ) -> VivianResult<(String, f64)> {
+        if text.trim().is_empty() {
+            return Err(VivianError::Speech("文本为空，无法合成".to_string()));
+        }
+
+        let config = self
+            .config
+            .read()
+            .with_emotion_overlay(emotion)
+            .with_emotion_prosody(emotion);
+        let engine = Self::resolve_engine(&config)?;
+        let backend = create_backend(&engine)?;
+        let engine_name = backend.name().to_string();
+
+        let result = self
+            .speak_with_backend(backend.as_ref(), &config, text, &engine_name, emotion)
+            .await?;
+
+        // 保存到 <user_data_dir>/audio/
+        let ext = match result.format {
+            AudioFormat::Mp3 => "mp3",
+            AudioFormat::Wav => "wav",
+            AudioFormat::Pcm => "pcm",
+            AudioFormat::Ogg => "ogg",
+            AudioFormat::Aac => "aac",
+        };
+        let data_dir = get_user_data_dir();
+        let audio_dir = data_dir.join("audio");
+        crate::utils::path::ensure_dir(&audio_dir)
+            .map_err(|e| VivianError::Speech(format!("创建音频目录失败: {e}")))?;
+        let saved_name = format!("{}.{}", uuid::Uuid::new_v4(), ext);
+        let saved_path = audio_dir.join(&saved_name);
+        std::fs::write(&saved_path, &result.audio)
+            .map_err(|e| VivianError::Speech(format!("保存音频文件失败: {e}")))?;
+
+        let rel_path = format!("audio/{}", saved_name);
+
+        // 估算时长：MP3 约 16KB/s（128kbps），WAV/PCM 约 88KB/s（16bit 44.1kHz）
+        let bytes = result.audio.len() as f64;
+        let duration = match result.format {
+            AudioFormat::Mp3 | AudioFormat::Aac | AudioFormat::Ogg => bytes / 16000.0,
+            AudioFormat::Wav | AudioFormat::Pcm => bytes / 88000.0,
+        };
+        // 限制最小 1 秒，避免显示 0″
+        let duration = duration.max(1.0);
+
+        tracing::info!(
+            "[TTS] synthesize_to_file 完成: {} 字, {} 秒, {}",
+            text.chars().count(),
+            duration,
+            rel_path
+        );
+
+        Ok((rel_path, duration))
+    }
+
     /// 获取缓存的后端实例（引擎变更时自动重建，支持 fallback）
     ///
     /// 返回 Arc 包装的后端，调用方可安全持有跨 await。
@@ -1040,6 +1118,15 @@ impl TtsManager {
             return Ok(());
         }
 
+        // 解析 TTS 控制标记（书中 9.7）：剥离 [EMO]/[THINKING]/[SPEED]/[PAUSE]，
+        // 提取语速覆盖与思考停顿。后续全部使用剥离标记后的文本。
+        let controls = parse_tts_controls(text);
+        let text: &str = controls.text.as_str();
+        if text.trim().is_empty() {
+            // 纯标记（如仅 [THINKING]）无可读文本，跳过合成
+            return Ok(());
+        }
+
         // 最近播放去重:防止 proactive tick / wake_from_presence 等多路径在短时间内
         // 重复触发同一句合成(日志显示 5-10s 间隔重复合成)。
         // 30s 窗口覆盖日志中观察到的所有重复间隔,又不至于误杀用户主动"再说一遍"场景。
@@ -1064,6 +1151,7 @@ impl TtsManager {
             .read()
             .with_emotion_overlay(emotion)
             .with_emotion_prosody(emotion)
+            .with_speed_override(controls.speed)
             .with_context(context);
         let engine = Self::resolve_engine(&config)?;
 
@@ -1076,6 +1164,11 @@ impl TtsManager {
 
         self.speaking.store(true, Ordering::SeqCst);
         self.cancel.store(false, Ordering::SeqCst);
+
+        // 思考停顿：播放前静默 N 毫秒（[THINKING]/[PAUSE] 标记），让语气更像人
+        if controls.pause_ms > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(controls.pause_ms)).await;
+        }
 
         // 获取或创建缓存的后端实例（复用 prewarm 建立的连接）
         let cached = self.get_cached_backend().await?;
@@ -1747,6 +1840,10 @@ fn strip_markdown_for_tts(text: &str) -> String {
         Lazy::new(|| Regex::new(r"(?m)^[-*_]{3,}\s*$").unwrap());
     static RE_HTML_TAG: Lazy<Regex> =
         Lazy::new(|| Regex::new(r"</?[a-zA-Z][^>]*>").unwrap());
+    // TTS 控制标记 [EMO:...]/[THINKING]/[SPEED:...]/[PAUSE:...]——绝不朗读
+    static RE_TTS_CONTROLS: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(r"(?i)\[(?:EMO|THINKING|SPEED|PAUSE)(?::[^\]]*)?\]").unwrap()
+    });
 
     let s = text;
     let s = RE_CODE_BLOCK.replace_all(&s, "");
@@ -1763,11 +1860,71 @@ fn strip_markdown_for_tts(text: &str) -> String {
     let s = RE_OL_LIST.replace_all(&s, "");
     let s = RE_HR.replace_all(&s, "");
     let s = RE_HTML_TAG.replace_all(&s, "");
+    let s = RE_TTS_CONTROLS.replace_all(&s, "");
+
+    // 残留下划线替换为空格，避免 TTS 朗读出"下划线"
+    let s = s.replace('_', " ");
 
     // 清洗后可能残留多余空行/空格，压缩为单个空格
     let s = s.replace('\n', " ");
     let s: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
     s
+}
+
+/// 解析 TTS 控制标记（书中 9.7：把"在哪里停顿/用什么语气"的决策权交给主 LLM）。
+///
+/// 支持标记：
+/// - `[THINKING]`：思考停顿，默认 ~500ms
+/// - `[EMO:xxx]`：情绪标记（与现有 expression 系统冗余，此处仅剥离）
+/// - `[SPEED:0.9]`：语速倍率覆盖
+/// - `[PAUSE:800]`：自定义停顿毫秒
+///
+/// 返回剥离标记后的可朗读文本与提取到的停顿/语速控制。
+pub struct TtsControl {
+    /// 剥离标记后的可朗读文本
+    pub text: String,
+    /// 提取到的语速倍率覆盖（如 0.9）
+    pub speed: Option<f64>,
+    /// 提取到的停顿毫秒（THINKING 默认 500，PAUSE 取显式值）
+    pub pause_ms: u64,
+}
+
+pub fn parse_tts_controls(text: &str) -> TtsControl {
+    use once_cell::sync::Lazy;
+    use regex::Regex;
+
+    const THINKING_PAUSE_MS: u64 = 500;
+
+    static RE_SPEED: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"(?i)\[SPEED:\s*([0-9]*\.?[0-9]+)\s*\]").unwrap());
+    static RE_PAUSE: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"(?i)\[PAUSE:\s*([0-9]+)\s*\]").unwrap());
+    static RE_THINKING: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"(?i)\[THINKING\]").unwrap());
+    static RE_ALL: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(r"(?i)\[(?:EMO|THINKING|SPEED|PAUSE)(?::[^\]]*)?\]").unwrap()
+    });
+
+    let speed = RE_SPEED
+        .captures(text)
+        .and_then(|c| c.get(1))
+        .and_then(|m| m.as_str().parse::<f64>().ok())
+        .filter(|s| *s > 0.0);
+    let explicit_pause = RE_PAUSE
+        .captures(text)
+        .and_then(|c| c.get(1))
+        .and_then(|m| m.as_str().parse::<u64>().ok());
+    let has_thinking = RE_THINKING.is_match(text);
+    let pause_ms = explicit_pause
+        .or_else(|| has_thinking.then(|| THINKING_PAUSE_MS))
+        .unwrap_or(0);
+
+    let cleaned = RE_ALL.replace_all(text, "");
+    TtsControl {
+        text: cleaned.trim().to_string(),
+        speed,
+        pause_ms,
+    }
 }
 
 /// 按句切分文本（TTS 早播放用）

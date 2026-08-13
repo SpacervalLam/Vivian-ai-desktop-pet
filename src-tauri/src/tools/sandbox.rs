@@ -89,6 +89,7 @@ fn builtin_safety_profiles() -> HashMap<&'static str, ToolSafetyProfile> {
         "search_files",
         "grep",
         "take_screenshot",
+        "screenshot_analyze",
         "web_search",
         "share_link",
     ] {

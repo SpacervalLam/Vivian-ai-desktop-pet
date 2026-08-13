@@ -31,6 +31,7 @@ use crate::persona::AcquiredBehavior;
 use crate::providers::base::LLMRequest;
 use crate::providers::ModelRouter;
 use crate::types::response::ChatMessage;
+use crate::memory::user_model::UserModelManager;
 
 /// Stage 2 触发热度阈值：MidTerm SessionSummary 的 H_segment ≥ 此值时触发画像/事实抽取
 ///
@@ -94,6 +95,8 @@ pub struct ConsolidationPipeline {
     reflection_backoff: parking_lot::Mutex<HashMap<String, (u32, f64)>>,
     /// 已成功反思的源指纹集合：同批源 ID 已处理过则 short-circuit 跳过。
     reflection_done: parking_lot::Mutex<HashSet<String>>,
+    /// 用户认知模型（可选；注入后 Stage 3 末尾执行概念归并，把 Insight 沉淀为概念层）。
+    user_model: parking_lot::RwLock<Option<Arc<UserModelManager>>>,
 }
 
 impl ConsolidationPipeline {
@@ -109,7 +112,17 @@ impl ConsolidationPipeline {
             run_lock: tokio::sync::Mutex::new(()),
             reflection_backoff: parking_lot::Mutex::new(HashMap::new()),
             reflection_done: parking_lot::Mutex::new(HashSet::new()),
+            user_model: parking_lot::RwLock::new(None),
         }
+    }
+
+    /// 注入用户认知模型，启用 Stage 3 末尾的概念归并（由 BrainChatChain 初始化后调用）。
+    ///
+    /// 注入后，每次 Stage 3 生成 Insight 时，会额外把洞察归纳为高层概念，
+    /// 归并进 UserModel（merge_concept）并写入知识图谱（ingest_concepts），
+    /// 从而让"用户长期在乎什么"沉淀为可检索的概念层。
+    pub fn set_user_model(&self, user_model: Arc<UserModelManager>) {
+        *self.user_model.write() = Some(user_model);
     }
 
     /// 注入锁定核心文本（由 BrainChatChain 在初始化后调用）。
@@ -225,8 +238,12 @@ impl ConsolidationPipeline {
         }
 
         // Stage 3: LongTerm → Insight (聚类洞察)
-        if let Some(count) = self.stage3_insight(memory).await? {
+        if let Some((count, insights)) = self.stage3_insight(memory).await? {
             report.stage3_insights = count;
+            // Stage 3.5: Insight → 概念归并（UserModel + 图谱），把洞察沉淀为概念层
+            if let Some(n) = self.stage3_concept(memory, &insights).await? {
+                report.stage3_concepts = n;
+            }
         }
 
         // 索引漂移检测：长期增删后向量索引可能与记忆条目脱节，必要时全量重建
@@ -1449,7 +1466,7 @@ impl ConsolidationPipeline {
     ///           累计 importance ≥ `stage3_importance_sum`
     /// 动作：LLM 把**自上次反思以来新增**的 LongTerm 聚类生成高层洞察，写入 Insight。
     /// 用 `last_reflection_at` 时间戳去重，避免对相同来源反复生成相似 Insight。
-    async fn stage3_insight(&self, memory: &MemoryManager) -> VivianResult<Option<usize>> {
+    async fn stage3_insight(&self, memory: &MemoryManager) -> VivianResult<Option<(usize, Vec<InsightItem>)>> {
         let new_count = self.new_ltm_count.load(std::sync::atomic::Ordering::Relaxed);
         let imp_sum_raw = self.new_ltm_importance_sum.load(std::sync::atomic::Ordering::Relaxed);
         let imp_sum = imp_sum_raw as f64 / 100.0;
@@ -1547,7 +1564,10 @@ impl ConsolidationPipeline {
 
         let mut created = 0usize;
         let mut reinforced = 0usize;
+        // 本次产出的洞察（供 Stage 3.5 概念归并复用，避免重复 LLM）
+        let mut produced: Vec<InsightItem> = Vec::new();
         for ins in &insights {
+            produced.push((*ins).clone());
             // 查找重叠旧洞察
             let reinforce_target = self.find_reinforce_target(ins, &existing_insights);
 
@@ -1596,7 +1616,136 @@ impl ConsolidationPipeline {
             reinforced,
             now as u64
         );
-        Ok(Some(created + reinforced))
+        Ok(Some((created + reinforced, produced)))
+    }
+
+    /// Stage 3.5: Insight → 概念归并（概念层）
+    ///
+    /// 在 Stage 3 生成 Insight 后执行（需注入 `user_model`）：
+    /// - 用 LLM 把本次洞察归纳为高层概念（key/meaning/related_topics/strength）
+    /// - 归并进 UserModel（`merge_concept`：同名强化、异名新建）
+    /// - 写入知识图谱（`ingest_concepts`：概念作为 Concept 实体 + related_topics 边）
+    ///
+    /// 让"用户长期在乎什么"沉淀为可检索的概念层，支撑跨主题的主题联想。
+    async fn stage3_concept(
+        &self,
+        memory: &MemoryManager,
+        insights: &[InsightItem],
+    ) -> VivianResult<Option<usize>> {
+        let user_model = match self.user_model.read().as_ref() {
+            Some(um) => um.clone(),
+            None => return Ok(None),
+        };
+        if insights.is_empty() {
+            return Ok(None);
+        }
+
+        // 已有概念（供 LLM 判断归并到已有概念 vs 新建）
+        let existing_text = {
+            let model = user_model.read();
+            if model.traits.is_empty() {
+                String::new()
+            } else {
+                model
+                    .traits
+                    .iter()
+                    .map(|t| {
+                        let meaning = if t.meaning.is_empty() {
+                            t.value.clone()
+                        } else {
+                            t.meaning.clone()
+                        };
+                        let rel = if t.related_topics.is_empty() {
+                            "无".to_string()
+                        } else {
+                            t.related_topics.join(" / ")
+                        };
+                        format!("- {}（{}）相关主题：{}", t.key, meaning, rel)
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
+        };
+
+        let insight_text = insights
+            .iter()
+            .map(|i| format!("- [{}] {}", i.source_ids.join(","), i.insight))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let existing_section = if existing_text.is_empty() {
+            "（暂无）".to_string()
+        } else {
+            existing_text
+        };
+
+        let prompt = format!(
+            "请从以下高层洞察中归纳用户的长期概念（\"用户长期在乎什么\"）。\n\n\
+             ## 任务\n\
+             识别跨主题的稳定概念，如自主性、可靠性、UI 审美、工作效率等。\n\
+             每个概念应：\n\
+             - key：概念名（英文小写蛇形，如 agent_autonomy / ui_aesthetic）\n\
+             - value：简要状态（如 high / prefers_soft_ui）\n\
+             - meaning：一句话说明\"用户为什么在乎\"\n\
+             - related_topics：与之关联的主题标签（跨主题关联，如 proactive、inner_monologue、observation）\n\
+             - evidence_ids：支持该概念的洞察来源 ID（直接引用输入的 [id]）\n\
+             - strength：0.0-1.0，该概念对用户的重要程度\n\
+             若某洞察与【已有概念】语义相同，应归并到已有概念而非新建（related_topics 合并）。\n\n\
+             ## 已有概念\n\
+             {}\n\n\
+             ## 新洞察\n\
+             {}\n\n\
+             输出JSON数组，仅输出JSON，无其他文本。",
+            existing_section, insight_text
+        );
+
+        let response = self.router.generate(
+            LLMRequest::new("consolidation", vec![ChatMessage::user(prompt)])
+                .with_json_schema(consolidation_array_schema::<ConceptListSchema>()),
+        ).await?;
+        let concepts = parse_concepts(&response);
+        if concepts.is_empty() {
+            tracing::warn!("[ConsolidationPipeline] Stage 3.5 LLM 返回空概念，跳过");
+            return Ok(None);
+        }
+
+        let now = current_timestamp();
+        let mut merged = 0usize;
+        for c in &concepts {
+            let key = c.key.trim();
+            if key.is_empty() {
+                continue;
+            }
+            user_model.merge_concept(
+                key,
+                &c.value,
+                &c.meaning,
+                &c.related_topics,
+                &c.evidence_ids,
+                c.strength,
+            );
+            // 概念写入知识图谱（Concept 实体 + related_topics 边），供图谱概念检索
+            let (e_count, edge_count) = memory
+                .knowledge_graph()
+                .ingest_concepts(key, &c.related_topics, &c.evidence_ids, now);
+            if e_count > 0 || edge_count > 0 {
+                tracing::debug!(
+                    "[ConsolidationPipeline] Stage 3.5 概念 {} 写入图谱：{} 实体 / {} 边",
+                    key,
+                    e_count,
+                    edge_count
+                );
+            }
+            merged += 1;
+        }
+        let _ = memory.knowledge_graph().save_to_disk();
+
+        tracing::info!(
+            "[ConsolidationPipeline] Stage 3.5: {} 条 Insight → {} 条概念（归并进 UserModel + 图谱）",
+            insights.len(),
+            merged
+        );
+        Ok(Some(merged))
     }
 
     /// Semantic Reinforcement 阈值：新洞察与既有洞察共享 source_ids ≥ 此值时合并。
@@ -1771,6 +1920,8 @@ pub struct ConsolidationReport {
     pub stage1_summaries: usize,
     pub stage2_facts: usize,
     pub stage3_insights: usize,
+    /// Stage 3.5 归并进 UserModel + 图谱的概念数
+    pub stage3_concepts: usize,
     /// Stage 2 第四路抽取的语义级行为画像（由 BrainChatChain 合并到 DynamicBehaviorProfile）
     pub stage2_acquired_behaviors: Vec<AcquiredBehavior>,
     /// Stage 2 第五路抽取的关系信号（由 BrainChatChain 写入关系日志）
@@ -1837,12 +1988,38 @@ fn default_topic() -> String {
     "general".to_string()
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 struct InsightItem {
     insight: String,
     importance: f64,
     #[serde(default)]
     source_ids: Vec<String>,
+}
+
+/// Stage 3.5：概念归纳的 LLM 输出项
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct ConceptItem {
+    /// 概念名（英文小写蛇形，如 agent_autonomy）
+    key: String,
+    /// 简要状态（如 high / prefers_soft_ui）
+    #[serde(default)]
+    value: String,
+    /// 一句话说明"用户为什么在乎"
+    #[serde(default)]
+    meaning: String,
+    /// 关联主题（跨主题关联）
+    #[serde(default)]
+    related_topics: Vec<String>,
+    /// 支持该概念的洞察来源 ID
+    #[serde(default)]
+    evidence_ids: Vec<String>,
+    /// 重要程度 0.0-1.0
+    #[serde(default = "default_concept_strength")]
+    strength: f64,
+}
+
+fn default_concept_strength() -> f64 {
+    0.5
 }
 
 /// LLM 返回的语义级行为画像中间结构（用于反序列化）
@@ -1883,6 +2060,13 @@ struct InsightListSchema {
 
 #[derive(schemars::JsonSchema)]
 #[allow(dead_code)]
+struct ConceptListSchema {
+    /// 概念列表
+    items: Vec<ConceptItem>,
+}
+
+#[derive(schemars::JsonSchema)]
+#[allow(dead_code)]
 struct AcquiredBehaviorListSchema {
     /// 习得行为列表
     items: Vec<AcquiredBehaviorItem>,
@@ -1911,6 +2095,10 @@ fn parse_facts(response: &str) -> Vec<FactItem> {
 }
 
 fn parse_insights(response: &str) -> Vec<InsightItem> {
+    parse_json_array(response)
+}
+
+fn parse_concepts(response: &str) -> Vec<ConceptItem> {
     parse_json_array(response)
 }
 

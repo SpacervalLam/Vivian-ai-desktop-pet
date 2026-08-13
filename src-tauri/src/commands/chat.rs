@@ -1,8 +1,10 @@
 //! 聊天命令 - 消息发送、流式响应与生成控制
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
+use chrono::Timelike;
 use serde_json::json;
 use tauri::{Emitter, Manager, State};
 
@@ -145,7 +147,7 @@ pub async fn send_message(
         router.set_emit_enabled(false);
     }
 
-    // ── 会话生命周期：think 完成后更新会话状态 + 关键词 close 检测 ──
+    // ── 会话生命周期：think 完成后更新会话状态 + 意图判断 close 检测 ──
     {
         let response_mode = result.as_ref().ok().map(|r| r.response_mode.clone()).unwrap_or_else(|| "speak".to_string());
         let reply_text = result.as_ref().ok().map(|r| r.text.clone()).unwrap_or_default();
@@ -156,16 +158,21 @@ pub async fn send_message(
             if mode.needs_speech() { Some(&reply_text) } else { None },
             &message,
         );
-        let user_close = crate::conversation::detect_close_reason(&message);
+        // 意图判断：规则预检 + LLM 判断，优先检查用户输入，再检查 Agent 回复
+        let history: Vec<String> = brain.dialogue.get_history().iter().map(|m| m.content.clone()).collect();
+        let judge = crate::dialogue::intent_judge::IntentJudge::new(
+            state.model_router.read().as_ref().map(|r| std::sync::Arc::new(r.clone())),
+        );
+        let user_close = judge.judge_close_reason(&message, &history).await;
         let agent_close = if user_close.is_none() {
-            crate::conversation::detect_close_reason(&reply_text)
+            judge.judge_close_reason(&reply_text, &history).await
         } else {
             None
         };
         if let Some(reason) = user_close.or(agent_close) {
             let closed_conv = crate::conversation::CONVERSATION_MANAGER.close_with_reason(&conv.id, reason);
             seal_episode_on_close(&brain, &conv);
-            // Open Loop 检测：关键词关闭的会话也检查是否有未聊完的话题
+            // Open Loop 检测：关闭的会话也检查是否有未聊完的话题
             if let Some(closed) = closed_conv {
                 maybe_mark_open_loop(&closed, &brain).await;
             }
@@ -238,11 +245,12 @@ pub async fn send_message_stream(
     };
     let brain = instance.brain.clone();
 
-    // 渠道限制：direct（面对面）在 Busy/Offline 状态拒绝，Rest 允许被叫醒
+    // 渠道限制：direct（面对面）在 Offline 状态拒绝；Busy 正常发送但注入忙碌语境
+    let current_presence = brain.presence.current();
+    let is_busy = current_presence == crate::presence::PresenceState::Busy;
+
     if channel_str == "direct" && !brain.presence.can_direct() {
-        let current = brain.presence.current();
-        let hint = match current {
-            crate::presence::PresenceState::Busy => "对方正忙，稍后再来或发微信",
+        let hint = match current_presence {
             crate::presence::PresenceState::Offline => "对方不在，发微信留言",
             _ => "对方不在场，发微信吧",
         };
@@ -251,12 +259,35 @@ pub async fn send_message_stream(
             json!({
                 "stream_id": &stream_id,
                 "character_id": &char_id,
-                "presence": current.as_str(),
+                "presence": current_presence.as_str(),
                 "hint": hint,
                 "channel": &channel_str,
             }),
         );
         return Ok(());
+    }
+
+    // Busy 状态下微信消息延后处理：角色正在忙，不会立即看到微信
+    if is_busy && channel_str == "wechat" {
+        let _ = app.emit(
+            "chat:busy_deferred",
+            json!({
+                "stream_id": &stream_id,
+                "character_id": &char_id,
+                "channel": &channel_str,
+            }),
+        );
+        // 等待忙碌任务结束（最多 120 秒），期间每 2 秒检查一次状态
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(120);
+        loop {
+            if brain.presence.current() != crate::presence::PresenceState::Busy {
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
     }
 
     let _ = app.emit(
@@ -457,7 +488,13 @@ pub async fn send_message_stream(
     brain.world_state.ingest_dialogue(&message);
     // 获取焦点租约：流式 think 期间屏蔽其他角色的主动打断
     let _focus_lease = crate::commands::proactive::FocusLeaseGuard::acquire(&char_id);
-    let result: VivianResult<AiResponse> = brain.think(&message, true).await;
+    // Busy 状态下 direct 渠道：注入忙碌被呼唤的语境
+    let think_input = if is_busy && channel_str == "direct" {
+        format!("（你从忙碌状态下被用户呼唤）\n{}", message)
+    } else {
+        message.clone()
+    };
+    let result: VivianResult<AiResponse> = brain.think(&think_input, true).await;
     drop(_focus_lease);
     // 修正用户消息 timestamp 为排队时刻：brain.think 在完成后才写入用户消息，
     // 默认 timestamp 是 think 完成时刻，并发发送时会导致顺序错乱
@@ -467,13 +504,92 @@ pub async fn send_message_stream(
     // 若本次为文件消息，将 kind=file 等元信息追加到刚写入的最后一条用户消息。
     // patch_last_user_entry_metadata 在 buffer 未命中时会做全文件读写（read_to_string + write），
     // 移入 spawn_blocking 避免卡住 async 运行时。
-    if let Some(meta) = file_metadata {
+    if let Some(meta) = file_metadata.clone() {
         let dialogue = brain.dialogue.clone();
         let _ = tokio::task::spawn_blocking(move || {
             dialogue.patch_last_user_entry_metadata(meta);
         })
         .await;
     }
+
+    // ── 用户内容入向量知识库 ──
+    // 1. 文件消息：把文件提取的文本内容入库（source="user_file"，永不过期）
+    // 2. 网页链接：检测消息中的 URL，异步抓取页面正文入库（source="user_link"）
+    // 两者均为 fire-and-forget，不阻塞主对话流程，失败只记日志。
+    {
+        let memory = brain.memory.clone();
+        let msg_for_kb = message.clone();
+        let char_id_for_kb = char_id.clone();
+        let file_meta_for_kb = file_metadata.clone();
+        tokio::spawn(async move {
+            // 文件入库
+            if let Some(meta) = file_meta_for_kb {
+                if let Some(file_name) = meta.get("file_name").and_then(|v| v.as_str()) {
+                    // 消息格式为 "[文件：filename]\n<文本内容>"，剥离前缀拿到纯文本
+                    let prefix = format!("[文件：{}]\n", file_name);
+                    let content = if msg_for_kb.starts_with(&prefix) {
+                        msg_for_kb[prefix.len()..].to_string()
+                    } else {
+                        msg_for_kb.clone()
+                    };
+                    if !content.trim().is_empty() {
+                        let title = format!("文件：{}", file_name);
+                        match memory
+                            .add_knowledge_document(
+                                &title,
+                                &content,
+                                vec!["user_file".to_string()],
+                                "user_file",
+                                Some(-1),
+                            )
+                            .await
+                        {
+                            Ok(item) => tracing::info!(
+                                "[Knowledge] 用户文件「{}」已入库，memory_id={}",
+                                file_name,
+                                item.id
+                            ),
+                            Err(e) => tracing::warn!("[Knowledge] 文件入库失败: {}", e),
+                        }
+                    }
+                }
+            } else {
+                // URL 抓取入库（仅非文件消息检测，避免与文件消息冲突）
+                if let Some(url) = crate::network::url_fetcher::extract_first_url(&msg_for_kb) {
+                    tracing::info!("[Knowledge] 检测到用户分享链接，开始抓取: {}", url);
+                    match crate::network::url_fetcher::fetch_page(&url).await {
+                        Ok(page) => {
+                            let tags = vec!["user_link".to_string()];
+                            match memory
+                                .add_knowledge_document(
+                                    &page.title,
+                                    &page.text,
+                                    tags,
+                                    "user_link",
+                                    Some(-1),
+                                )
+                                .await
+                            {
+                                Ok(item) => tracing::info!(
+                                    "[Knowledge] 用户链接「{}」已入库，memory_id={}",
+                                    page.title,
+                                    item.id
+                                ),
+                                Err(e) => tracing::warn!("[Knowledge] 链接入库失败: {}", e),
+                            }
+                        }
+                        Err(e) => tracing::warn!(
+                            "[Knowledge] 抓取链接 {} 失败: {}",
+                            url,
+                            e
+                        ),
+                    }
+                }
+            }
+            let _ = char_id_for_kb;
+        });
+    }
+
     if let Some(router) = state.model_router.read().as_ref() {
         router.set_emit_enabled(false);
     }
@@ -504,7 +620,7 @@ pub async fn send_message_stream(
 
     // ── 会话生命周期：think 完成后更新会话状态 ──
     // 根据本轮 response_mode（speak/non_verbal/internal/ignore）更新 Energy/Novelty/Continuation。
-    // 同时做关键词检测：若用户或 Agent 输出命中晚安/再见/打断 → 立即 close_with_reason。
+    // 同时做意图判断：若用户或 Agent 输出命中关闭意图 → 立即 close_with_reason。
     {
         let response_mode = result.as_ref().ok().map(|r| r.response_mode.clone()).unwrap_or_else(|| "speak".to_string());
         let reply_text = result.as_ref().ok().map(|r| r.text.clone()).unwrap_or_default();
@@ -516,24 +632,27 @@ pub async fn send_message_stream(
             &message,
         );
 
-        // 关键词检测：优先检查用户输入，再检查 Agent 回复
-        // 用户说晚安 → close(GoodNight)；Agent 说晚安也视为自然结束
-        let user_close = crate::conversation::detect_close_reason(&message);
+        // 意图判断：规则预检 + LLM 判断，优先检查用户输入，再检查 Agent 回复
+        let history: Vec<String> = brain.dialogue.get_history().iter().map(|m| m.content.clone()).collect();
+        let judge = crate::dialogue::intent_judge::IntentJudge::new(
+            state.model_router.read().as_ref().map(|r| std::sync::Arc::new(r.clone())),
+        );
+        let user_close = judge.judge_close_reason(&message, &history).await;
         let agent_close = if user_close.is_none() {
-            crate::conversation::detect_close_reason(&reply_text)
+            judge.judge_close_reason(&reply_text, &history).await
         } else {
             None
         };
         if let Some(reason) = user_close.or(agent_close) {
             let closed_conv = crate::conversation::CONVERSATION_MANAGER.close_with_reason(&conv.id, reason);
             tracing::debug!(
-                "[Conversation] 会话 {} 因关键词检测关闭，原因: {}",
+                "[Conversation] 会话 {} 因意图判断关闭，原因: {}",
                 conv.id,
                 reason.as_str()
             );
             // 触发 Episode 封包：让经历边界对齐会话边界
             seal_episode_on_close(&brain, &conv);
-            // Open Loop 检测：关键词关闭的会话也检查是否有未聊完的话题
+            // Open Loop 检测：关闭的会话也检查是否有未聊完的话题
             if let Some(closed) = closed_conv {
                 maybe_mark_open_loop(&closed, &brain).await;
             }
@@ -596,6 +715,36 @@ pub async fn send_message_stream(
                 response.text.clone()
             };
 
+            // 微信渠道语音消息：LLM 返回 voice_message=true 时，合成 TTS 音频文件，
+            // 前端以微信风格语音气泡展示（不显示文本），点击可播放。
+            // direct 渠道已有实时 TTS 播放，不需要语音消息模式。
+            let (voice_audio_path, voice_duration) = if response.voice_message
+                && !is_direct_channel
+                && brain.tts.is_enabled()
+            {
+                match brain
+                    .tts
+                    .synthesize_to_file(&display_text, None)
+                    .await
+                {
+                    Ok((path, dur)) => {
+                        // 回写 dialogue 历史 metadata，使刷新历史时能恢复语音气泡
+                        brain.dialogue.patch_last_assistant_entry_metadata(json!({
+                            "kind": "voice",
+                            "audio_path": &path,
+                            "duration": dur,
+                        }));
+                        (Some(path), Some(dur))
+                    }
+                    Err(e) => {
+                        tracing::warn!("[Chat:{}] 语音消息合成失败，回退为文本: {}", char_id, e);
+                        (None, None)
+                    }
+                }
+            } else {
+                (None, None)
+            };
+
             let _ = app.emit(
                 "chat:done",
                 json!({
@@ -606,6 +755,9 @@ pub async fn send_message_stream(
                     "emotion_score": response.emotion_score,
                     "sticker": response.sticker,
                     "user_emotion": response.user_emotion,
+                    "voice_message": response.voice_message && voice_audio_path.is_some(),
+                    "voice_audio_path": voice_audio_path,
+                    "voice_duration": voice_duration,
                     "source": "formal",
                     "stream_id": &stream_id,
                     "character_id": &char_id,
@@ -644,7 +796,8 @@ pub async fn send_message_stream(
                         .map(|inst| inst.name.clone())
                         .unwrap_or_else(|| speaker_id.clone())
                 };
-                // 仅提取旁观所需字段（id/online/memory/proactive），避免克隆整个 HashMap
+                // 仅提取旁观所需字段，避免克隆整个 HashMap
+                // 主动旁观插话需要额外访问 brain/think_lock/psychology/persona/dialogue
                 let observers: Vec<_> = {
                     let chars = state.characters.read();
                     chars
@@ -656,12 +809,19 @@ pub async fn send_message_stream(
                                 inst.online.clone(),
                                 inst.brain.memory.clone(),
                                 inst.brain.proactive.clone(),
+                                inst.brain.psychology.clone(),
+                                inst.brain.persona.clone(),
+                                inst.brain.dialogue.clone(),
+                                inst.name.clone(),
+                                inst.brain.clone(),
+                                inst.think_lock.clone(),
                             )
                         })
                         .collect()
                 };
+                let playback_gate = state.playback_gate.clone();
                 tokio::spawn(async move {
-                    for (other_id, online_lock, observer_memory, observer_proactive) in observers {
+                    for (other_id, online_lock, observer_memory, observer_proactive, observer_psychology, observer_persona, observer_dialogue, observer_name, observer_brain, observer_think_lock) in observers {
                         // 仅在线角色能旁观（Online 状态；Busy/Rest/Offline 不旁观）
                         if !*online_lock.read() {
                             continue;
@@ -675,6 +835,7 @@ pub async fn send_message_stream(
                             "listener": speaker_id,
                             "perspective": "observer",
                             "knowledge_source": "observed",
+                            "reliability": "second_hand",
                             "observer_id": other_id,
                         });
                         if let Err(e) = observer_memory
@@ -702,6 +863,7 @@ pub async fn send_message_stream(
                             "listener": "user",
                             "perspective": "observer",
                             "knowledge_source": "observed",
+                            "reliability": "second_hand",
                             "observer_id": other_id,
                         });
                         if let Err(e) = observer_memory
@@ -735,6 +897,158 @@ pub async fn send_message_stream(
                         if crate::proactive::roll_with_probability(0.08) {
                             let topic_brief: String = user_msg_full.chars().take(20).collect();
                             observer_proactive.seed_roommate_cue(&speaker_name, &topic_brief);
+                        }
+
+                        // 主动旁观插话评估：用轻量 LLM 判断 B 是否有动机插话
+                        // 绕过概率 roll，每次用户普通消息都进行 LLM 判断，提升插话的合理性
+                        // 轻量调用只判断是否插话，不生成内容——插话内容由主对话流程生成
+                        let mood = observer_psychology.compute_mood();
+                        let mood_hint = format!(
+                            "主导情绪：{}，疲劳度：{:.0}",
+                            mood.primary_emotion.as_str(),
+                            mood.fatigue
+                        );
+                        let intimacy = observer_psychology.relationship().intimacy;
+                        let hour = chrono::Local::now().hour();
+                        let lang = observer_persona.get_language();
+                        // 修复情绪参数注入：使用 build_style_prompt_ex 传入主导情绪，让场景选择感知内心
+                        let system_prompt = observer_persona.build_style_prompt_ex(
+                            intimacy,
+                            hour,
+                            Some(mood.primary_emotion.as_str().to_string()),
+                            None,
+                        );
+
+                        // 旁观记忆作为最近对话参考（不含本轮刚写入的，避免时序竞争）
+                        let bystander_memos =
+                            observer_memory.recent_by_tags(&["bystander", "overheard"], 3);
+                        let dialogue_history = bystander_memos
+                            .iter()
+                            .map(|m| m.content.as_str())
+                            .collect::<Vec<_>>()
+                            .join("\n");
+
+                        if let Some(interjection_directive) = observer_proactive
+                            .evaluate_active_bystander_interjection(
+                                &user_msg_full,
+                                &agent_reply_full,
+                                &speaker_name,
+                                &mood_hint,
+                                &dialogue_history,
+                                &system_prompt,
+                                intimacy,
+                                &lang,
+                            )
+                            .await
+                        {
+                            // 决定插话：spawn 延迟投递任务，让 A 先说完再插话
+                            let app_clone2 = app_clone.clone();
+                            let playback_gate_clone = playback_gate.clone();
+                            let other_id_clone = other_id.clone();
+                            let other_name_clone = observer_name.clone();
+                            let observer_memory_clone = observer_memory.clone();
+                            let observer_dialogue_clone = observer_dialogue.clone();
+                            let observer_brain_clone = observer_brain.clone();
+                            let observer_think_lock_clone = observer_think_lock.clone();
+                            tokio::spawn(async move {
+                                // 基础延迟：让 A 的气泡/TTS 先显示
+                                tokio::time::sleep(Duration::from_secs(3)).await;
+
+                                // 等待 TTS 播放完成（最多再等 12 秒），避免音频冲突
+                                for _ in 0..24 {
+                                    if !playback_gate_clone.is_playing() {
+                                        break;
+                                    }
+                                    tokio::time::sleep(Duration::from_millis(500)).await;
+                                }
+
+                                // 调用主对话流程生成插话内容
+                                // 串行化 brain.think，与 send_message_stream 共用 brain_lock
+                                let _brain_lock = observer_think_lock_clone.clone();
+                                let _brain_guard = _brain_lock.lock().await;
+
+                                // 设置渠道为 proactive，让 dialogue 写入标记为主动气泡路径
+                                let prev_channel = observer_dialogue_clone.get_channel();
+                                observer_dialogue_clone.set_channel("proactive");
+
+                                // 非流式调用主对话流程，插话指令作为 user_input
+                                // 完整 prompt 会包含人设/记忆/情绪/工具等，插话指令出现在末尾
+                                let result = observer_brain_clone
+                                    .think(&interjection_directive, false)
+                                    .await;
+
+                                // 恢复渠道
+                                observer_dialogue_clone.set_channel(&prev_channel);
+                                drop(_brain_guard);
+
+                                let response = match result {
+                                    Ok(r) => r,
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            "[Chat] 旁观者 {}({}) 插话生成失败: {}",
+                                            other_name_clone,
+                                            other_id_clone,
+                                            e
+                                        );
+                                        return;
+                                    }
+                                };
+
+                                let text = response.text;
+                                if text.trim().is_empty() {
+                                    tracing::debug!(
+                                        "[Chat] 旁观者 {}({}) 插话生成为空，跳过",
+                                        other_name_clone,
+                                        other_id_clone
+                                    );
+                                    return;
+                                }
+                                let expression = response.expression;
+
+                                // 写入记忆系统
+                                let meta = json!({
+                                    "channel": "proactive",
+                                    "speaker": &other_id_clone,
+                                    "listener": "user",
+                                    "perspective": "speaker",
+                                    "knowledge_source": "direct",
+                                    "content_type": "bystander_interjection",
+                                });
+                                let _ = observer_memory_clone
+                                    .add_memory_with_metadata(
+                                        &text,
+                                        MemoryType::CasualConversation,
+                                        0.3,
+                                        vec![
+                                            "assistant".to_string(),
+                                            "proactive".to_string(),
+                                            "dialogue_turn".to_string(),
+                                            "bystander_interjection".to_string(),
+                                        ],
+                                        meta,
+                                    )
+                                    .await;
+
+                                // 更新 LAST_SPOKEN，参与跨角色冷却仲裁
+                                crate::commands::proactive::touch_last_spoken(&other_id_clone);
+
+                                // emit proactive:bubble 事件，前端监听后 showBubble + TTS
+                                let _ = app_clone2.emit(
+                                    "proactive:bubble",
+                                    json!({
+                                        "character_id": &other_id_clone,
+                                        "content": &text,
+                                        "expression": &expression,
+                                    }),
+                                );
+
+                                tracing::info!(
+                                    "[Chat] 旁观者 {}({}) 主动插话: {}",
+                                    other_name_clone,
+                                    other_id_clone,
+                                    text
+                                );
+                            });
                         }
                     }
                 });
@@ -1015,6 +1329,9 @@ pub async fn wake_from_presence(
                     "emotion_score": response.emotion_score,
                     "sticker": response.sticker,
                     "user_emotion": response.user_emotion,
+                    "voice_message": false,
+                    "voice_audio_path": null,
+                    "voice_duration": null,
                     "source": "formal",
                     "stream_id": &stream_id,
                     "character_id": &char_id,
@@ -1039,7 +1356,7 @@ pub async fn wake_from_presence(
 ///
 /// 约定 LLM 返回 `{"description":"...","reply":"..."}`。
 /// 解析失败时退化为：description 与 reply 均使用原始文本。
-fn parse_image_description_response(raw: &str) -> (String, String) {
+pub(crate) fn parse_image_description_response(raw: &str) -> (String, String) {
     let trimmed = raw.trim();
     // 尝试剥离 markdown 代码块围栏
     let body = if trimmed.starts_with("```") {
@@ -1105,8 +1422,6 @@ pub async fn send_image_message(
         return Err("VISION_NOT_ENABLED".to_string());
     }
 
-    // 视觉能力探测：首次发图时探测目标模型是否支持图片输入，结果缓存避免重复请求
-    // 不支持时直接拦截，给用户清晰提示换模型，避免 API 报错或静默忽略图片
     let router = {
         let guard = state.model_router.read();
         guard
@@ -1114,43 +1429,6 @@ pub async fn send_image_message(
             .ok_or_else(|| "模型路由未初始化".to_string())?
             .clone()
     };
-    // 探测期间给用户即时反馈（探测请求可能耗时数秒）
-    let _ = app.emit(
-        "toast:show",
-        json!({
-            "message": "正在检测模型视觉能力...",
-            "type": "info",
-            "duration": 4000,
-            "key": format!("vision_probe_{}", chrono::Local::now().timestamp_millis()),
-            "character_id": &char_id,
-        }),
-    );
-    match router.check_vision_capability().await {
-        crate::providers::router::VisionCapability::Supported => {}
-        crate::providers::router::VisionCapability::NotSupported(reason) => {
-            let _ = app.emit(
-                "chat:error",
-                json!({
-                    "reason": "vision_not_supported",
-                    "error": &reason,
-                    "character_id": &char_id,
-                    "channel": &channel_str,
-                }),
-            );
-            // 探测失败尚无 stream_id，chat:error 不会触发前端 toast，需单独 emit
-            let _ = app.emit(
-                "toast:show",
-                json!({
-                    "message": format!("当前模型不支持图片输入：{}\n请在「配置-路由矩阵」为「图片理解」配置视觉模型（如 Qwen-VL / GPT-4o / Gemini）", reason),
-                    "type": "error",
-                    "duration": 8000,
-                    "key": format!("vision_not_supported_{}", chrono::Local::now().timestamp_millis()),
-                    "character_id": &char_id,
-                }),
-            );
-            return Err(format!("视觉模型不可用: {}", reason));
-        }
-    }
 
     let src = std::path::PathBuf::from(&source_path);
     // 图片读取/复制 + base64 编码均为阻塞操作，移入 spawn_blocking 避免卡住 tokio 工作线程
@@ -1227,10 +1505,39 @@ pub async fn send_image_message(
 
     // 注意：此处不启用 emit，避免 LLM 原始 JSON 输出泄露到前端。
     // 仅通过 chat:done 发送解析后的 reply 文本。
-    let system_prompt = "你是图片描述助手。请分析用户发送的图片，返回严格的 JSON：\n\
-        {\"description\": \"对图片内容的客观、详细的中文描述（用于记忆存档，50-150字）\", \
-        \"reply\": \"以薇薇安的口吻对这张图片给出一句自然、温暖的中文回应（20-60字）\"}\n\
-        仅返回 JSON 对象，不要任何其他内容、不要 markdown 代码块。";
+
+    // 提取最近对话历史，注入到 vision_describe 的 system prompt 中，
+    // 让 LLM 能结合上下文理解图片（例如用户说"给你们拍照片"后发了一张角色截图）。
+    let recent_context = {
+        let brain = state.get_character(character_id.as_deref())?.brain;
+        let history = brain.dialogue.get_history();
+        let recent: Vec<String> = history
+            .iter()
+            .rev()
+            .take(6) // 最近 3 轮对话（user + assistant 各 3 条）
+            .map(|m| {
+                let role = if m.role == "user" { "User" } else { "AI" };
+                format!("{}: {}", role, m.content)
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        if recent.is_empty() {
+            String::new()
+        } else {
+            format!("\n## 最近对话上下文\n{}\n\n请结合以上对话理解用户发送这张图片的意图。", recent.join("\n"))
+        }
+    };
+
+    let system_prompt = format!(
+        "你是图片描述助手。请分析用户发送的图片，返回严格的 JSON：\n\
+        {{\"description\": \"对图片内容的客观、详细的中文描述（用于记忆存档，50-150字）\", \
+        \"reply\": \"以角色口吻对这张图片给出自然的中文回应（20-60字）\"}}\n\
+        仅返回 JSON 对象，不要任何其他内容、不要 markdown 代码块。\
+        {}",
+        recent_context
+    );
     let image_detail = state.config.read().get_typed::<String>("ai.image_detail", "auto".to_string());
     let image = MessageImage {
         media_type: mime.clone(),
@@ -1243,7 +1550,7 @@ pub async fn send_image_message(
     let nonce = uuid::Uuid::new_v4().as_simple().to_string();
     let user_text = format!("请描述这张图片。[req:{}]", &nonce[..8]);
     let messages = vec![
-        ChatMessage::system(system_prompt),
+        ChatMessage::system(&system_prompt),
         ChatMessage::user_with_images(user_text, vec![image]),
     ];
 
@@ -1271,6 +1578,9 @@ pub async fn send_image_message(
             "motion": "idle",
             "expression": "",
             "emotion_score": 0,
+            "voice_message": false,
+            "voice_audio_path": null,
+            "voice_duration": null,
             "stream_id": &stream_id,
             "character_id": &char_id,
             "channel": &channel_str,
@@ -1413,7 +1723,7 @@ fn classify_file_extension(ext: &str) -> &'static str {
 }
 
 /// 用编码检测读取文本文件（兼容 GBK / Shift-JIS 等非 UTF-8 编码）
-fn read_text_with_encoding_detection(path: &std::path::Path) -> Result<String, String> {
+pub(crate) fn read_text_with_encoding_detection(path: &std::path::Path) -> Result<String, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("读取文件失败: {}", e))?;
     // 尝试 UTF-8 直接解析
     if let Ok(s) = std::str::from_utf8(&bytes) {
@@ -1428,6 +1738,80 @@ fn read_text_with_encoding_detection(path: &std::path::Path) -> Result<String, S
         tracing::warn!("[extract_file_text] 编码检测可能有误: {:?}", encoding.name());
     }
     Ok(decoded.into_owned())
+}
+
+/// 保存前端拍摄得到的 base64 图片为临时文件，返回临时文件路径。
+///
+/// 前端通过 getUserMedia + canvas 拍照后，将图片以 data URL（base64）形式传入，
+/// 此命令解码后写入系统临时目录，返回完整路径供前端转交给 `send_image_message`。
+///
+/// - `base64_data`：不含 `data:<mime>;base64,` 前缀的纯 base64 字符串
+/// - `mime`：图片 MIME，如 `image/png` / `image/jpeg`，用于决定文件扩展名
+#[tauri::command]
+pub async fn save_temp_image(
+    base64_data: String,
+    mime: String,
+) -> Result<String, String> {
+    let bytes = STANDARD
+        .decode(base64_data.trim())
+        .map_err(|e| format!("base64 解码失败: {}", e))?;
+
+    let ext = match mime.as_str() {
+        "image/png" => "png",
+        "image/jpeg" | "image/jpg" => "jpg",
+        "image/webp" => "webp",
+        "image/bmp" => "bmp",
+        "image/gif" => "gif",
+        _ => "png",
+    };
+
+    let filename = format!("vivian_capture_{}.{}", uuid::Uuid::new_v4(), ext);
+    let temp_path = std::env::temp_dir().join(filename);
+
+    std::fs::write(&temp_path, &bytes)
+        .map_err(|e| format!("写入临时文件失败: {}", e))?;
+
+    Ok(temp_path.to_string_lossy().to_string())
+}
+
+/// 保存前端录制得到的 base64 语音为持久化文件，返回相对用户数据目录的路径。
+///
+/// 前端通过 `MediaRecorder` 录制音频（webm/ogg 等格式），以 data URL（base64）形式传入，
+/// 此命令解码后写入 `<user_data_dir>/audio/` 目录，返回相对路径（如 `audio/<uuid>.webm`）。
+/// 相对路径会写入对话历史的 metadata.audio_path，供后续播放和历史回看使用。
+///
+/// - `base64_data`：不含 `data:<mime>;base64,` 前缀的纯 base64 字符串
+/// - `mime`：音频 MIME，如 `audio/webm`，用于决定文件扩展名
+#[tauri::command]
+pub async fn save_voice_audio(
+    base64_data: String,
+    mime: String,
+) -> Result<String, String> {
+    let bytes = STANDARD
+        .decode(base64_data.trim())
+        .map_err(|e| format!("base64 解码失败: {}", e))?;
+
+    let ext = match mime.as_str() {
+        "audio/webm" => "webm",
+        "audio/ogg" => "ogg",
+        "audio/mp4" | "audio/m4a" => "m4a",
+        "audio/wav" | "audio/x-wav" => "wav",
+        "audio/mpeg" | "audio/mp3" => "mp3",
+        _ => "webm",
+    };
+
+    let data_dir = crate::utils::path::get_user_data_dir();
+    let audio_dir = data_dir.join("audio");
+    crate::utils::path::ensure_dir(&audio_dir)
+        .map_err(|e| format!("创建音频目录失败: {}", e))?;
+
+    let saved_name = format!("{}.{}", uuid::Uuid::new_v4(), ext);
+    let saved_path = audio_dir.join(&saved_name);
+    std::fs::write(&saved_path, &bytes)
+        .map_err(|e| format!("保存音频文件失败: {}", e))?;
+
+    let rel_path = format!("audio/{}", saved_name);
+    Ok(rel_path)
 }
 
 /// 提取文件文本内容。

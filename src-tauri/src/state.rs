@@ -49,6 +49,8 @@ pub struct AppState {
     pub scheduler: Arc<Scheduler>,
     /// 文字输入快捷键跟踪：key 为角色标识（"vivian"/"nana"/"broadcast"），value 为已注册的快捷键字符串
     pub text_shortcuts: parking_lot::Mutex<HashMap<String, String>>,
+    /// 窗口快捷键跟踪：key 为动作标识（"chat"/"settings"/"memory"），value 为已注册的快捷键字符串
+    pub window_shortcuts: parking_lot::Mutex<HashMap<String, String>>,
     /// 长按计时器：按下文字快捷键时启动，松开时取消；满 400ms 触发语音输入（仅 vivian/nana）
     pub voice_shortcut_timer: parking_lot::Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
     /// 当前按住快捷键的角色（互斥锁）：
@@ -126,6 +128,7 @@ impl AppState {
             asr: AsrManager::new_with_config(asr_config),
             scheduler,
             text_shortcuts: parking_lot::Mutex::new(HashMap::new()),
+            window_shortcuts: parking_lot::Mutex::new(HashMap::new()),
             voice_shortcut_timer: parking_lot::Mutex::new(None),
             active_shortcut_role: parking_lot::Mutex::new(None),
             mcp_manager,
@@ -268,6 +271,46 @@ impl AppState {
                     crate::tools::builtin::todo_tools::handle_task_trigger(task, tool_system).await;
                 });
             }));
+
+        // 预触发回调：在 scheduled_time - 5s 发起主 LLM 调用，
+        // 把定时任务内容说明作为 user_input 注入完整提示词，
+        // 让智能体提前决定如何进行该定时任务。
+        let characters_for_pre = self.characters.clone();
+        let active_char_id_for_pre = self.active_character_id.clone();
+        self.scheduler
+            .set_pre_trigger_callback(std::sync::Arc::new(move |task| {
+                let characters = characters_for_pre.clone();
+                let active = active_char_id_for_pre.clone();
+                tauri::async_runtime::spawn(async move {
+                    // 解析 char_id：优先任务记录的 char_id，回退到当前激活角色
+                    let char_id = if !task.char_id.is_empty() {
+                        task.char_id.clone()
+                    } else {
+                        active.read().clone()
+                    };
+
+                    // 从角色表中获取 brain
+                    let brain = {
+                        let chars = characters.read();
+                        chars.get(&char_id).map(|c| c.brain.clone())
+                    };
+
+                    let brain = match brain {
+                        Some(b) => b,
+                        None => {
+                            tracing::warn!(
+                                task_id = %task.id,
+                                char_id = %char_id,
+                                "[Scheduler] 预触发任务找不到角色，跳过 LLM 调用"
+                            );
+                            return;
+                        }
+                    };
+
+                    crate::tools::builtin::todo_tools::handle_task_pre_trigger(task, brain).await;
+                });
+            }));
+
         let scheduler_for_run = self.scheduler.clone();
         tauri::async_runtime::spawn(async move {
             scheduler_for_run.run().await;

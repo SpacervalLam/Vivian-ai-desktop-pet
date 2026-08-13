@@ -1,26 +1,69 @@
-//! Web 上下文流水线步骤 —— 已弃用关键词决策，改为透传。
+//! 主动搜索流水线步骤 —— 基于认知知识需求评估（Epistemic Assessment）驱动搜索。
 //!
-//! 搜索决策完全交由 LLM 通过 `web_search` 工具自主判断，
-//! 本步骤仅保留 Runnable 接口以兼容管线注册。
+//! 设计理念：
+//! - Web Search 是认知能力，而不是用户显式调用的工具
+//! - 认知知识需求评估由 FastSemantic 阶段同步完成（纯规则，不调用 LLM），
+//!   产出多维 EpistemicAssessment（semantic_clarity / factual_dependence /
+//!   temporal_sensitivity / interpretation_risk / knowledge_gap）和 KnowledgeDecision。
+//! - 本步骤读取 EpistemicAssessment，根据 KnowledgeDecision 决定是否主动搜索：
+//!   - SearchRequired → 必须搜索
+//!   - SearchPreferred → 建议搜索（有帮助但非必需）
+//!   - SearchOptional / NoSearch → 跳过
+//! - 搜索结果作为上下文注入 prompt，让 LLM 基于实际资料回答
+//! - 与 LLM function calling 路径互补：预搜索在生成前完成，LLM 生成时仍可自主调用 web_search
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::Value;
 
+use crate::emotion::KnowledgeDecision;
 use crate::error::VivianResult;
+use crate::network::web_context::{SearchResult, WebSearcher};
 use crate::pipeline::base::{Runnable, RunnableConfig};
 use crate::pipeline::state::PipelineState;
 use crate::providers::ModelRouter;
 
 // ============================================================================
-// WebContextRunnable（透传）
+// 搜索结果格式化
 // ============================================================================
 
-/// Web 上下文 Runnable —— 不再做关键词决策，仅透传状态。
+/// 将搜索结果格式化为 prompt 可注入的文本
+fn format_search_results(query: &str, results: &[SearchResult]) -> String {
+    if results.is_empty() {
+        return String::new();
+    }
+
+    let mut lines = Vec::with_capacity(results.len() + 2);
+    lines.push(format!("搜索关键词: {}", query));
+    lines.push("搜索结果:".to_string());
+
+    for (i, r) in results.iter().take(5).enumerate() {
+        lines.push(format!(
+            "{}. {}\n   {}",
+            i + 1,
+            r.title,
+            r.snippet
+        ));
+    }
+
+    lines.join("\n")
+}
+
+// ============================================================================
+// WebContextRunnable（主动搜索）
+// ============================================================================
+
+/// Web 上下文 Runnable —— 基于认知知识需求评估驱动主动搜索。
 ///
-/// 搜索决策已迁移至 LLM function calling 路径：LLM 通过 `web_search` 工具
-/// 自主判断何时需要联网检索，不再依赖关键词匹配。
+/// 与 FastSemantic 阶段同步计算的 EpistemicAssessment 协同工作：
+/// - FastSemantic 产出多维评估（纯规则）
+/// - 本步骤根据 KnowledgeDecision 决策是否搜索
+/// - LLM 生成时仍可自主调用 web_search 工具做进一步搜索
+///
+/// 与 LLM function calling 路径互补：
+/// - 本步骤：在生成前根据 KnowledgeDecision 执行预搜索，结果作为上下文注入 prompt
+/// - LLM 工具调用：生成过程中 LLM 仍可自主调用 web_search 工具做进一步搜索
 pub struct WebContextRunnable {
     pub router: Option<Arc<ModelRouter>>,
 }
@@ -44,8 +87,103 @@ impl Default for WebContextRunnable {
 #[async_trait]
 impl Runnable for WebContextRunnable {
     async fn ainvoke(&self, input: Value, _config: Option<RunnableConfig>) -> VivianResult<Value> {
-        let state = PipelineState::from_json(input);
-        // 搜索决策已迁移至 LLM function calling，本步骤仅透传
+        let mut state = PipelineState::from_json(input);
+
+        // 命令或空输入跳过
+        if state.is_command || state.user_input.trim().is_empty() {
+            return Ok(state.to_json());
+        }
+
+        // 跨角色消息跳过（不影响角色间对话）
+        if state.current_channel == "cross_character" {
+            return Ok(state.to_json());
+        }
+
+        // 读取认知知识需求评估（由 FastSemantic 阶段同步计算）
+        let assessment = match &state.epistemic_assessment {
+            Some(a) => a,
+            None => {
+                // FastSemantic 未运行（极低概率），跳过
+                return Ok(state.to_json());
+            }
+        };
+
+        // 决策是否主动搜索
+        let should_search = matches!(
+            assessment.decision,
+            KnowledgeDecision::SearchRequired | KnowledgeDecision::SearchPreferred
+        );
+
+        if !should_search {
+            tracing::debug!(
+                "[WebContext] 决策: {:?}, 跳过搜索。原因: {}",
+                assessment.decision,
+                assessment.reason
+            );
+            return Ok(state.to_json());
+        }
+
+        // 获取搜索关键词
+        let query = match &assessment.search_query {
+            Some(q) if !q.is_empty() => q.clone(),
+            _ => {
+                // 决策要求搜索但无有效关键词，跳过
+                tracing::debug!("[WebContext] 决策要求搜索但无有效关键词，跳过");
+                return Ok(state.to_json());
+            }
+        };
+
+        // 执行搜索
+        let (config, proxy_url) = crate::tools::builtin::web_search_tool::read_search_config();
+
+        let config_ref = config.as_ref();
+        let proxy_ref = proxy_url.as_deref();
+
+        tracing::info!(
+            "[WebContext] 主动搜索触发: decision={:?}, reason='{}', query={:?}, \
+             clarity={:.2}, factual={:.2}, temporal={:.2}, risk={:.2}, gap={:.2}",
+            assessment.decision,
+            assessment.reason,
+            query,
+            assessment.semantic_clarity,
+            assessment.factual_dependence,
+            assessment.temporal_sensitivity,
+            assessment.interpretation_risk,
+            assessment.knowledge_gap,
+        );
+
+        let results = WebSearcher::search_with_config(
+            &query,
+            5,
+            config_ref,
+            proxy_ref,
+        )
+        .await;
+
+        if !results.is_empty() {
+            let search_text = format_search_results(&query, &results);
+            if !search_text.is_empty() {
+                state.web_context = format!(
+                    "## 主动搜索结果\n\
+                    （系统检测到用户输入可能包含你不熟悉的内容，已预先搜索。\
+                    请基于以下搜索结果回答用户，不要假装你本来就知道这些内容。）\n\n\
+                    {}\n\n\
+                    注意：\n\
+                    - 区分搜索得到的事实和你的推断\n\
+                    - 如果搜索结果仍无法确认用户的意思，要明确告诉用户\n\
+                    - 不要为了保持对话自然而假装知道",
+                    search_text
+                );
+
+                tracing::info!(
+                    "[WebContext] 主动搜索完成: {} 条结果, 已注入 web_context",
+                    results.len()
+                );
+            }
+        } else {
+            tracing::info!("[WebContext] 主动搜索无结果，跳过注入");
+        }
+
         Ok(state.to_json())
     }
 }

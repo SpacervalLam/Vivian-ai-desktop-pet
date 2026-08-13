@@ -43,7 +43,12 @@ const LONG_INPUT_THRESHOLD: usize = 100;
 
 /// 工具执行阶段的精简系统提示（中间轮次不加载完整人设，节省 token）
 const TOOL_EXECUTION_SYSTEM_PROMPT: &str =
-    "你是一个工具执行助手。根据用户请求和工具返回的结果，决定下一步操作。如果搜索结果不够，换关键词用 web_search 继续搜索。对不确定的信息优先搜索而非猜测。如果任务已完成，简要汇报结果。";
+    "你是一个工具执行助手。根据用户请求和工具返回的结果，决定下一步操作。\n\
+     原则：\n\
+     - 资料够用就停：搜索 2-3 次后若已有足够信息，立即执行能直接完成用户请求的工具（如 create_notebook / save_memory / share_link 等），不要为了追求更全而继续搜索。\n\
+     - 轮次有限：工具调用轮次有上限，优先执行能直接达成目标的工具，而非反复检索。\n\
+     - 对不确定的信息优先搜索而非猜测。\n\
+     - 如果任务已完成，简要汇报结果。";
 
 /// 跨角色对话场景的工具执行提示
 ///
@@ -61,16 +66,102 @@ fn has_cross_character_call(calls: &[crate::providers::base::StructuredToolCall]
     calls.iter().any(|c| c.name == "talk_to_character")
 }
 
-/// 工具查到信息后，提醒角色用自己的语气转述关键内容（三语言）。
+/// 判断工具是否为检索类工具（返回需要转述给用户的信息）
+///
+/// 仅检索类工具在 LLM 停止调用工具后需要注入 relay prompt，
+/// 防止 LLM 搜了信息只回"好的"不转述。
+/// 动作类工具（save_memory / open_url 等）不需要 relay prompt。
+fn is_retrieval_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "web_search"
+            | "search_memory"
+            | "recall_by_date_time"
+            | "read_diary_by_date"
+            | "get_recent_interactions"
+            | "observe_user"
+            | "list_todo"
+            | "wallpaper_list"
+            | "summarize_today_context"
+    )
+}
+
+/// 工具查到信息后，提醒角色用自己的语气转述关键内容（三语言 + 渠道感知）。
 /// 与 goal_completed 分支逻辑一致：恢复完整人设后注入，避免角色只给一句评价就结束。
-fn tool_retrieval_relay_prompt() -> &'static str {
+/// 气泡渠道（direct/proactive）精简转述，微信渠道（wechat）可详细展开。
+fn tool_retrieval_relay_prompt(channel: &str) -> String {
     let lang = crate::i18n::get_language();
+    let is_bubble = matches!(channel, "direct" | "proactive");
     if lang.starts_with("en") {
-        "[System] You just retrieved information via a tool. Paraphrase the key findings to the user in your own voice — don't give only a comment or reaction."
+        if is_bubble {
+            "[System] You just retrieved information via a tool. Summarize the key point to the user in ONE or TWO sentences in your own voice — be concise, don't dump everything. Don't give only a comment or reaction.".to_string()
+        } else {
+            "[System] You just retrieved information via a tool. Paraphrase the key findings to the user in your own voice — don't give only a comment or reaction.".to_string()
+        }
     } else if lang.starts_with("ja") {
-        "[システム] ツールで情報を取得しました。キャラクターの口調で検索内容の要点をユーザーに伝えてください。感想や反応だけではいけません。"
+        if is_bubble {
+            "[システム] ツールで情報を取得しました。キャラクターの口調で要点を1〜2文で伝えてください。長々とまとめず、簡潔に。感想や反応だけではいけません。".to_string()
+        } else {
+            "[システム] ツールで情報を取得しました。キャラクターの口調で検索内容の要点をユーザーに伝えてください。感想や反応だけではいけません。".to_string()
+        }
     } else {
-        "[系统提示] 你刚才通过工具查到了信息。请用你的语气把查到的关键内容转述给用户，不要只给出评价或反应。"
+        if is_bubble {
+            "[系统提示] 你刚才通过工具查到了信息。用你的语气把最关键的一点用一两句话告诉用户就行，不要长篇总结。不要只给出评价或反应。".to_string()
+        } else {
+            "[系统提示] 你刚才通过工具查到了信息。请用你的语气把查到的关键内容转述给用户，不要只给出评价或反应。".to_string()
+        }
+    }
+}
+
+/// 工具目标完成后，提醒角色告知用户结果（渠道感知）。
+/// 气泡渠道精简，微信渠道可展开。
+fn goal_completed_prompt(channel: &str) -> String {
+    let lang = crate::i18n::get_language();
+    let is_bubble = matches!(channel, "direct" | "proactive");
+    if lang.starts_with("en") {
+        if is_bubble {
+            "[System] The user's goal was completed via tool calls. Tell the user the result in ONE or TWO sentences in character — be concise. Do not call any more tools.".to_string()
+        } else {
+            "[System] The user's goal was completed via tool calls. Briefly tell the user the result in character. Do not call any more tools.".to_string()
+        }
+    } else if lang.starts_with("ja") {
+        if is_bubble {
+            "[システム] ユーザーの目標はツール呼び出しで完了しました。1〜2文で簡潔に結果を伝えてください。ツールは呼ばないで。".to_string()
+        } else {
+            "[システム] ユーザーの目標はツール呼び出しで完了しました。キャラクターの口調で簡潔に結果を伝えてください。ツールは呼ばないで。".to_string()
+        }
+    } else {
+        if is_bubble {
+            "[系统提示] 用户的目标已通过工具调用完成。用一两句话简短告知用户结果就行，不要再调用任何工具。".to_string()
+        } else {
+            "[系统提示] 用户的目标已通过工具调用完成。请以角色人设口吻简短告知用户结果，不要再调用任何工具。".to_string()
+        }
+    }
+}
+
+/// 工具调用轮次达上限，强制回复（渠道感知）。
+/// 气泡渠道精简，微信渠道可展开。
+fn round_limit_prompt(channel: &str) -> String {
+    let lang = crate::i18n::get_language();
+    let is_bubble = matches!(channel, "direct" | "proactive");
+    if lang.starts_with("en") {
+        if is_bubble {
+            "[System] Tool call rounds reached the limit. Reply to the user NOW in ONE or TWO sentences — briefly say what you did. Don't stay silent.".to_string()
+        } else {
+            "[System] Tool call rounds reached the limit. You must reply to the user now. Briefly explain what you did and what went wrong. Don't stay silent.".to_string()
+        }
+    } else if lang.starts_with("ja") {
+        if is_bubble {
+            "[システム] ツール呼び出し回数が上限に達しました。1〜2文で簡潔に何をしたか伝えてください。黙らないで。".to_string()
+        } else {
+            "[システム] ツール呼び出し回数が上限に達しました。今すぐ返信してください。何をしたか、何が問題だったか簡潔に。黙らないで。".to_string()
+        }
+    } else {
+        if is_bubble {
+            "[系统提示] 工具调用轮次已达上限，你必须立即回复用户。一两句话简要说明你做了什么就行，不要沉默。".to_string()
+        } else {
+            "[系统提示] 工具调用轮次已达上限，你必须立即回复用户。简要说明你做了什么、遇到了什么问题，不要沉默。".to_string()
+        }
     }
 }
 
@@ -114,9 +205,12 @@ pub struct AIResponseGenerationRunnable {
 /// 延迟加载辅助函数：从工具调用结果中检测 `tool_search` 调用，
 /// 把返回的匹配工具加入 `tools` 列表，供下一轮原生 FC 调用。
 ///
-/// - 遍历 `calls` 与 `results`（按下标对应）
-/// - 若某个调用是 `tool_search` 且成功，从 `result.matches` 数组提取工具名
-/// - 在 tool_call_manager 的工具系统中查找并转 `ToolDefinition`，避免重复加入
+/// 工具名来源优先级：
+/// 1. `select:A,B,C` 查询：直接从工具调用参数中提取工具名（最可靠，
+///    不受结果截断影响——`functions_block` 过大时整个 result 会被
+///    `enforce_result_budget` 替换为 `_truncated` 预览版，`matches` 字段丢失）
+/// 2. 关键词查询：从 `result.data.matches` 或 `result.matches` 提取工具名
+///    （`standard_success` 把实际数据包在 `data` 字段里，需兼容两种结构）
 fn inject_deferred_tools_from_results(
     calls: &[crate::providers::base::StructuredToolCall],
     results: &[ToolCallResult],
@@ -124,36 +218,69 @@ fn inject_deferred_tools_from_results(
     tools: &mut Vec<ToolDefinition>,
 ) {
     for (i, r) in results.iter().enumerate() {
-        let tc_name = calls.get(i).map(|c| c.name.as_str()).unwrap_or("");
-        if tc_name != "tool_search" || !r.success {
+        let tc = match calls.get(i) {
+            Some(c) => c,
+            None => continue,
+        };
+        if tc.name != "tool_search" || !r.success {
             continue;
         }
-        let data = match &r.result {
-            Some(d) => d,
-            None => continue,
-        };
-        let matches = match data.get("matches").and_then(|v| v.as_array()) {
-            Some(a) => a,
-            None => continue,
-        };
-        for m in matches {
-            if let Some(name) = m.as_str() {
-                if let Some(tool) = tool_call_manager.tool_system().find_tool(name) {
-                    let def = ToolDefinition {
-                        name: tool.name().to_string(),
-                        description: tool.description().to_string(),
-                        parameters: tool.parameters_schema(),
-                    };
-                    if !tools.iter().any(|t| t.name == def.name) {
-                        tracing::info!(
-                            "[AIResponse][native_fc] tool_search 加载延迟工具: {}",
-                            def.name
-                        );
-                        tools.push(def);
-                    }
+
+        let tool_names: Vec<String> = extract_tool_search_matches(tc, r);
+
+        for name in tool_names {
+            if let Some(tool) = tool_call_manager.tool_system().find_tool(&name) {
+                let def = ToolDefinition {
+                    name: tool.name().to_string(),
+                    description: tool.description().to_string(),
+                    parameters: tool.parameters_schema(),
+                };
+                if !tools.iter().any(|t| t.name == def.name) {
+                    tracing::info!(
+                        "[AIResponse][native_fc] tool_search 加载延迟工具: {}",
+                        def.name
+                    );
+                    tools.push(def);
                 }
             }
         }
+    }
+}
+
+/// 从 `tool_search` 的调用参数和结果中提取匹配的工具名。
+///
+/// 优先解析 `select:` 查询参数（不受结果截断影响），
+/// 关键词查询则从结果 JSON 的 `matches` 字段提取（兼容 `standard_success` 的 `data` 包装）。
+fn extract_tool_search_matches(
+    tc: &crate::providers::base::StructuredToolCall,
+    r: &ToolCallResult,
+) -> Vec<String> {
+    if let Some(query) = tc.arguments.get("query").and_then(|v| v.as_str()) {
+        if let Some(rest) = query
+            .strip_prefix("select:")
+            .or_else(|| query.strip_prefix("SELECT:"))
+        {
+            return rest
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+        }
+    }
+
+    let data = match &r.result {
+        Some(d) => d,
+        None => return Vec::new(),
+    };
+    let matches_value = data
+        .get("matches")
+        .or_else(|| data.get("data").and_then(|d| d.get("matches")));
+    match matches_value.and_then(|v| v.as_array()) {
+        Some(arr) => arr
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect(),
+        None => Vec::new(),
     }
 }
 
@@ -530,10 +657,12 @@ impl AIResponseGenerationRunnable {
         max_rounds: u32,
         compress_threshold_tokens: usize,
         compress_keep_recent: usize,
+        channel: &str,
     ) -> VivianResult<(String, Vec<ToolCallResult>, usize, Option<f64>)> {
         let max_rounds = max_rounds.max(1) as usize;
         let mut current_messages = messages;
         let mut all_results: Vec<ToolCallResult> = Vec::new();
+        let mut all_tool_names: Vec<String> = Vec::new();
         let mut rounds = 0usize;
         let mut final_content = String::new();
         let mut first_tool_executed_at: Option<f64> = None;
@@ -554,11 +683,16 @@ impl AIResponseGenerationRunnable {
                 None
             };
 
-            let compress_result = crate::pipeline::context_compress::compress_conversation(
+            let query = crate::pipeline::context_compress::extract_query(&current_messages);
+            let compress_result = crate::pipeline::context_compress::compress_conversation_context_aware(
+                router,
+                task_type,
                 &mut current_messages,
                 compress_threshold_tokens,
                 compress_keep_recent,
-            );
+                &query,
+            )
+            .await;
             if compress_result.saved_tokens > 0 {
                 tracing::info!(
                     "[AIResponse][native_fc] 第 {} 轮前窗口压缩：节省约 {} tokens，压缩 {} 段历史",
@@ -603,24 +737,38 @@ impl AIResponseGenerationRunnable {
                     "[AIResponse][native_fc] 第 {} 轮无工具调用，结束循环",
                     rounds
                 );
+                let has_retrieval = all_tool_names.iter().any(|n| is_retrieval_tool(n));
                 // 中间轮次使用精简提示，最终回复需恢复完整人设生成
                 if using_minimal_prompt {
                     current_messages[0] = original_system.clone();
-                    if !chat_response.content.is_empty() {
-                        current_messages.push(ChatMessage::assistant(&chat_response.content));
-                    }
-                    if let Ok(persona_reply) = router
-                        .generate(Self::build_chat_request(task_type, current_messages.clone()))
-                        .await
-                    {
-                        if !persona_reply.is_empty() {
+                    if has_retrieval {
+                        // 检索类工具：恢复完整人设后重新生成，确保转述关键内容
+                        if !chat_response.content.is_empty() {
+                            current_messages.push(ChatMessage::assistant(&chat_response.content));
+                        }
+                        if let Ok(persona_reply) = router
+                            .generate(Self::build_chat_request(task_type, current_messages.clone()))
+                            .await
+                        {
+                            if !persona_reply.is_empty() {
+                                let emitter_guard = emitter.read();
+                                if let Some(emitter_fn) = emitter_guard.as_ref() {
+                                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                        emitter_fn(&persona_reply);
+                                    }));
+                                }
+                                final_content = persona_reply;
+                            }
+                        }
+                    } else {
+                        // 动作类工具：直接推送已有回复，不再额外调 LLM
+                        if !final_content.is_empty() {
                             let emitter_guard = emitter.read();
                             if let Some(emitter_fn) = emitter_guard.as_ref() {
                                 let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                    emitter_fn(&persona_reply);
+                                    emitter_fn(&final_content);
                                 }));
                             }
-                            final_content = persona_reply;
                         }
                     }
                 }
@@ -688,6 +836,7 @@ impl AIResponseGenerationRunnable {
                 current_messages.push(ChatMessage::tool_result(content_str, tc_id));
             }
             all_results.extend(results.clone());
+            all_tool_names.extend(chat_response.tool_calls.iter().map(|c| c.name.clone()));
 
             // Goal Satisfaction：工具声明目标已完成 → 终止工具循环，直接生成最终回复。
             // 避免 LLM 在任务已达成时继续推理出多余动作（如壁纸切换成功后又去 web_search 找图）。
@@ -700,9 +849,7 @@ impl AIResponseGenerationRunnable {
                     current_messages[0] = original_system.clone();
                     using_minimal_prompt = false;
                 }
-                current_messages.push(ChatMessage::user(
-                    "[系统提示] 用户的目标已通过工具调用完成。请以角色人设口吻简短告知用户结果，不要再调用任何工具。",
-                ));
+                current_messages.push(ChatMessage::user(goal_completed_prompt(channel)));
                 if let Ok(final_resp) = router
                     .generate(Self::build_chat_request(task_type, current_messages.clone()))
                     .await
@@ -800,9 +947,7 @@ impl AIResponseGenerationRunnable {
             if using_minimal_prompt {
                 current_messages[0] = original_system.clone();
             }
-            current_messages.push(ChatMessage::user(
-                "[系统提示] 工具调用轮次已达上限，你必须立即回复用户。简要说明你做了什么、遇到了什么问题，不要沉默。",
-            ));
+            current_messages.push(ChatMessage::user(round_limit_prompt(channel)));
             if let Ok(forced) = router
                 .generate(Self::build_chat_request(task_type, current_messages.clone()))
                 .await
@@ -845,6 +990,7 @@ impl AIResponseGenerationRunnable {
         max_rounds: u32,
         compress_threshold_tokens: usize,
         compress_keep_recent: usize,
+        channel: &str,
     ) -> VivianResult<(String, Vec<ToolCallResult>, usize, Option<f64>)> {
         // === 第一轮：流式获取 LLM 响应（带重试机制）===
         // DeepSeek V4 Flash 流式 native function calling 偶发失效：
@@ -1099,6 +1245,8 @@ impl AIResponseGenerationRunnable {
 
         let mut all_results: Vec<ToolCallResult> = first_results.clone();
         let mut total_rounds = 1usize;
+        let mut all_tool_names: Vec<String> =
+            first_round_calls.iter().map(|c| c.name.clone()).collect();
 
         // === 延迟加载支持：首轮若调用了 tool_search，把返回的工具加入 tools 列表 ===
         inject_deferred_tools_from_results(&first_round_calls, &first_results, tool_call_manager, &mut tools);
@@ -1172,11 +1320,16 @@ impl AIResponseGenerationRunnable {
                 None
             };
 
-            let compress_result = crate::pipeline::context_compress::compress_conversation(
+            let query = crate::pipeline::context_compress::extract_query(&current_messages);
+            let compress_result = crate::pipeline::context_compress::compress_conversation_context_aware(
+                router,
+                task_type,
                 &mut current_messages,
                 compress_threshold_tokens,
                 compress_keep_recent,
-            );
+                &query,
+            )
+            .await;
             if compress_result.saved_tokens > 0 {
                 tracing::info!(
                     "[AIResponse][native_fc_stream] 后续轮窗口压缩：节省约 {} tokens，压缩 {} 段历史",
@@ -1206,28 +1359,58 @@ impl AIResponseGenerationRunnable {
                 .unwrap_or_else(|| chat_response.content.clone());
 
             if !chat_response.has_tool_calls() {
-                // 工具任务完成，恢复完整人设生成最终回复
+                let has_retrieval = all_tool_names.iter().any(|n| is_retrieval_tool(n));
                 current_messages[0] = original_system.clone();
-                if !chat_response.content.is_empty() {
-                    current_messages.push(ChatMessage::assistant(&chat_response.content));
-                }
-                current_messages.push(ChatMessage::user(tool_retrieval_relay_prompt()));
-                let persona_reply = router
-                    .generate(Self::build_chat_request(task_type, current_messages.clone()))
-                    .await
-                    .unwrap_or_default();
-                let persona_text = JsonParser::extract_text(&persona_reply)
-                    .unwrap_or(persona_reply);
-                if !persona_text.is_empty() {
-                    let emitter_guard = emitter.read();
-                    if let Some(emitter_fn) = emitter_guard.as_ref() {
-                        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            emitter_fn(&persona_text);
-                        }));
+
+                if has_retrieval {
+                    // 检索类工具：注入 relay prompt，确保 LLM 转述关键内容
+                    if !chat_response.content.is_empty() {
+                        current_messages.push(ChatMessage::assistant(&chat_response.content));
                     }
-                    return Ok((persona_text, all_results, total_rounds, Some(first_tool_executed_at)));
+                    current_messages.push(ChatMessage::user(tool_retrieval_relay_prompt(channel)));
+                    let persona_reply = router
+                        .generate(Self::build_chat_request(task_type, current_messages.clone()))
+                        .await
+                        .unwrap_or_default();
+                    let persona_text = JsonParser::extract_text(&persona_reply)
+                        .unwrap_or(persona_reply);
+                    if !persona_text.is_empty() {
+                        let emitter_guard = emitter.read();
+                        if let Some(emitter_fn) = emitter_guard.as_ref() {
+                            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                emitter_fn(&persona_text);
+                            }));
+                        }
+                        return Ok((
+                            persona_text,
+                            all_results,
+                            total_rounds,
+                            Some(first_tool_executed_at),
+                        ));
+                    }
+                    return Ok((
+                        final_content,
+                        all_results,
+                        total_rounds,
+                        Some(first_tool_executed_at),
+                    ));
+                } else {
+                    // 动作类工具：直接使用 LLM 回复，不再注入 relay prompt
+                    if !final_content.is_empty() {
+                        let emitter_guard = emitter.read();
+                        if let Some(emitter_fn) = emitter_guard.as_ref() {
+                            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                emitter_fn(&final_content);
+                            }));
+                        }
+                    }
+                    return Ok((
+                        final_content,
+                        all_results,
+                        total_rounds,
+                        Some(first_tool_executed_at),
+                    ));
                 }
-                return Ok((final_content, all_results, total_rounds, Some(first_tool_executed_at)));
             }
 
             // 继续工具调用循环
@@ -1253,6 +1436,7 @@ impl AIResponseGenerationRunnable {
                 total_rounds,
                 results.len()
             );
+            all_tool_names.extend(chat_response.tool_calls.iter().map(|c| c.name.clone()));
 
             for (i, r) in results.iter().enumerate() {
                 let tc_id = chat_response
@@ -1292,9 +1476,7 @@ impl AIResponseGenerationRunnable {
                     total_rounds
                 );
                 current_messages[0] = original_system.clone();
-                current_messages.push(ChatMessage::user(
-                    "[系统提示] 用户的目标已通过工具调用完成。请以角色人设口吻简短告知用户结果，不要再调用任何工具。",
-                ));
+                current_messages.push(ChatMessage::user(goal_completed_prompt(channel)));
                 if let Ok(final_resp) = router
                     .generate(Self::build_chat_request(task_type, current_messages.clone()))
                     .await
@@ -1458,6 +1640,16 @@ impl Runnable for AIResponseGenerationRunnable {
         let prefixed_input = Self::ensure_speaker_prefix(&state.user_input);
         messages_vec.push(ChatMessage::user(&prefixed_input));
 
+        // Agent 状态栏：以 user-role 元消息追加在用户输入之后、紧邻生成位置。
+        // 键值对 + 时间感操作策略，KV-cache 友好（只追加不修改前缀）。
+        if let Some(status_bar) = crate::pipeline::prompt_modules::build_agent_status_bar(
+            &state.messages,
+            &state.user_input,
+            state.focus_active,
+        ) {
+            messages_vec.push(ChatMessage::user(status_bar));
+        }
+
         // ── 双路径切换：原生 function calling vs 文本路径 ──
         //
         // 满足以下全部条件时走原生路径：
@@ -1499,6 +1691,7 @@ impl Runnable for AIResponseGenerationRunnable {
                     self.max_rounds,
                     self.compress_threshold_tokens,
                     self.compress_keep_recent,
+                    &state.current_channel,
                 )
                 .await
             } else {
@@ -1512,6 +1705,7 @@ impl Runnable for AIResponseGenerationRunnable {
                     self.max_rounds,
                     self.compress_threshold_tokens,
                     self.compress_keep_recent,
+                    &state.current_channel,
                 )
                 .await
             };
@@ -1837,6 +2031,9 @@ impl ResponseParsingRunnable {
             state.response_mode = "speak".to_string();
         }
 
+        // 微信渠道语音消息标志
+        state.voice_message = processed.voice_message;
+
         // no_reply → 不展示回复（API 调用不浪费，通过 text 置空实现）
         if state.intent == "no_reply" {
             state.text = String::new();
@@ -1855,11 +2052,6 @@ impl ResponseParsingRunnable {
         // 工具调用列表同步（保留 AIResponseGenerationRunnable 已设置的 tool_calls）
         if !processed.tool_calls.is_empty() && state.tool_calls.is_empty() {
             state.tool_calls = processed.tool_calls.clone();
-        }
-
-        // 桌宠自控动作指令同步
-        if !processed.control_actions.is_empty() {
-            state.control_actions = processed.control_actions.clone();
         }
     }
 
@@ -1983,6 +2175,7 @@ impl Runnable for ResponseParsingRunnable {
             resp.importance_user = state.importance_user;
             resp.importance_ai = state.importance_ai;
             resp.response_mode = state.response_mode.clone();
+            resp.voice_message = state.voice_message;
         }
 
         Ok(state.to_json())
@@ -2125,8 +2318,8 @@ mod tests {
             text: "本应被清空".to_string(),
             intent: "no_reply".to_string(),
             response_mode: "speak".to_string(),
+            voice_message: false,
             tool_calls: Vec::new(),
-            control_actions: Vec::new(),
         };
         ResponseParsingRunnable::extract_from_processed(&mut state, &processed);
         assert_eq!(state.intent, "no_reply");
@@ -2140,8 +2333,8 @@ mod tests {
             text: "嗯嗯".to_string(),
             intent: "short_reply".to_string(),
             response_mode: "speak".to_string(),
+            voice_message: false,
             tool_calls: Vec::new(),
-            control_actions: Vec::new(),
         };
         ResponseParsingRunnable::extract_from_processed(&mut state, &processed);
         assert_eq!(state.intent, "short_reply");
@@ -2156,8 +2349,8 @@ mod tests {
             text: "你好".to_string(),
             intent: "unknown_intent".to_string(),
             response_mode: "speak".to_string(),
+            voice_message: false,
             tool_calls: Vec::new(),
-            control_actions: Vec::new(),
         };
         ResponseParsingRunnable::extract_from_processed(&mut state, &processed);
         // 非法 intent 不覆盖

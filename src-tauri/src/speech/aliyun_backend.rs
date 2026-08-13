@@ -75,10 +75,17 @@ pub struct AliyunBackend {
     ws_writer: Arc<Mutex<Option<futures::stream::SplitSink<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>, Message>>>>,
     /// WebSocket 读取任务句柄
     read_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    /// 复用的 HTTP 客户端（直连，绕过代理；阿里云 NLS 服务国内可直连）
+    client: reqwest::Client,
 }
 
 impl AliyunBackend {
     pub fn from_config(config: AsrConfig, aliyun_cfg: AliyunAsrConfig) -> Self {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .no_proxy()
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
         Self {
             config,
             aliyun_cfg,
@@ -90,6 +97,7 @@ impl AliyunBackend {
             buffer: Arc::new(RwLock::new(VecDeque::with_capacity(16000 * 60))),
             ws_writer: Arc::new(Mutex::new(None)),
             read_task: Arc::new(Mutex::new(None)),
+            client,
         }
     }
 
@@ -229,7 +237,9 @@ impl AliyunBackend {
     }
 
     /// 用 AccessKeyId + AccessKeySecret 获取阿里云 NLS 临时 token
-    async fn get_token(access_key_id: &str, access_key_secret: &str) -> VivianResult<String> {
+    async fn get_token(&self) -> VivianResult<String> {
+        let access_key_id = &self.aliyun_cfg.access_key_id;
+        let access_key_secret = &self.aliyun_cfg.access_key_secret;
         let params: Vec<(String, String)> = vec![
             ("AccessKeyId".into(), access_key_id.into()),
             ("Action".into(), "CreateToken".into()),
@@ -265,11 +275,8 @@ impl AliyunBackend {
             percent_encode(&signature)
         );
 
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
-            .build()
-            .map_err(|e| VivianError::Network(format!("构建 HTTP 客户端失败: {e}")))?;
-        let resp = client
+        let resp = self
+            .client
             .get(&url)
             .send()
             .await
@@ -597,11 +604,7 @@ impl AsrEngine for AliyunBackend {
         }
 
         // 1. 获取 token
-        let token = Self::get_token(
-            &self.aliyun_cfg.access_key_id,
-            &self.aliyun_cfg.access_key_secret,
-        )
-        .await?;
+        let token = self.get_token().await?;
 
         // 2. 启动 WebSocket 会话
         self.start_ws_session(&token).await?;
@@ -636,11 +639,98 @@ impl AsrEngine for AliyunBackend {
         Ok(())
     }
 
-    async fn transcribe(&self, _audio: &[f32]) -> VivianResult<String> {
-        // 阿里云后端是流式的，不适用一次性 transcribe 接口
-        Err(VivianError::NotImplemented(
-            "阿里云 NLS 后端不支持 transcribe 接口，请使用 start_recording/stop_recording".to_string(),
-        ))
+    async fn transcribe(&self, audio: &[f32]) -> VivianResult<String> {
+        // 一次性文件转写：建连 → 发 StartTranscription → 分帧发 PCM → 发 StopTranscription → 累积 SentenceEnd 结果
+        use tokio_tungstenite::connect_async;
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+        let token = self.get_token().await?;
+        let url = format!("{}?token={}", NLS_GATEWAY, percent_encode(&token));
+        let request = url
+            .into_client_request()
+            .map_err(|e| {
+                let msg = format!("{e}").replace(&token, "***");
+                VivianError::Speech(format!("解析 NLS URL 失败: {}", msg))
+            })?;
+        let (ws_stream, _) = connect_async(request)
+            .await
+            .map_err(|e| {
+                let msg = format!("{e}").replace(&token, "***");
+                VivianError::Network(format!("连接阿里云 NLS WebSocket 失败: {}", msg))
+            })?;
+        let (mut write, mut read) = ws_stream.split();
+
+        // 发 StartTranscription
+        write
+            .send(Message::Text(start_transcription_json(
+                &self.aliyun_cfg.app_key,
+                &self.config.language,
+            )))
+            .await
+            .map_err(|e| VivianError::Network(format!("发送 StartTranscription 失败: {e}")))?;
+
+        // 分帧发送 PCM（200ms = 3200 samples @ 16kHz）
+        let i16_samples: Vec<i16> = audio
+            .iter()
+            .map(|&s| (s.clamp(-1.0, 1.0) * 32767.0) as i16)
+            .collect();
+        for chunk in i16_samples.chunks(3200) {
+            let mut bytes = Vec::with_capacity(chunk.len() * 2);
+            for &s in chunk {
+                bytes.extend_from_slice(&s.to_le_bytes());
+            }
+            write
+                .send(Message::Binary(bytes.into()))
+                .await
+                .map_err(|e| VivianError::Network(format!("发送音频帧失败: {e}")))?;
+        }
+
+        // 发 StopTranscription
+        write
+            .send(Message::Text(stop_transcription_json(
+                &self.aliyun_cfg.app_key,
+            )))
+            .await
+            .map_err(|e| VivianError::Network(format!("发送 StopTranscription 失败: {e}")))?;
+
+        // 读取消息，累积 SentenceEnd 的 result，直到 TranscriptionCompleted 或连接关闭
+        let mut result = String::new();
+        while let Some(msg) = read.next().await {
+            match msg {
+                Ok(Message::Text(t)) => {
+                    let v: serde_json::Value = match serde_json::from_str(&t) {
+                        Ok(v) => v,
+                        Err(_) => continue,
+                    };
+                    let name = v
+                        .get("header")
+                        .and_then(|h| h.get("name"))
+                        .and_then(|s| s.as_str())
+                        .unwrap_or("");
+                    match name {
+                        "SentenceEnd" => {
+                            let text = v
+                                .get("payload")
+                                .and_then(|p| p.get("result"))
+                                .and_then(|s| s.as_str())
+                                .unwrap_or("");
+                            if !text.is_empty() {
+                                if !result.is_empty() {
+                                    result.push(' ');
+                                }
+                                result.push_str(text);
+                            }
+                        }
+                        "TranscriptionCompleted" => break,
+                        _ => {}
+                    }
+                }
+                Ok(Message::Close(_)) | Err(_) => break,
+                _ => {}
+            }
+        }
+        let _ = write.close().await;
+        Ok(result.trim().to_string())
     }
 
     fn is_available(&self) -> bool {

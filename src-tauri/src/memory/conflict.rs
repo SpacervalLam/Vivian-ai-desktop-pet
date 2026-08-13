@@ -589,7 +589,7 @@ impl ConflictLlmArbiter for DefaultConflictArbiter {
 
         let resp = self
             .router
-            .generate(LLMRequest::new("memory_conflict_arbitration", messages))
+            .generate(LLMRequest::new("consolidation", messages))
             .await
             .map_err(|e| e.to_string())?;
 

@@ -21,6 +21,45 @@ use crate::error::VivianResult;
 use crate::world::{WorldStateProvider, UserPresence};
 use std::sync::Arc;
 
+use serde::Deserialize;
+
+/// current_thought LLM 合成输出
+///
+/// `thought`：第一人称一句话描述当前想法
+/// `social_urge`：0.0-1.0，表示"现在想主动和用户搭话的冲动强度"，
+///                由 proactive 问候类触发器读取作为时机门控信号。
+#[derive(Debug, Clone, Deserialize)]
+pub struct ThoughtSynthesisOutput {
+    pub thought: String,
+    #[serde(default = "default_social_urge")]
+    pub social_urge: f32,
+}
+
+fn default_social_urge() -> f32 {
+    0.5
+}
+
+/// current_thought 输出 JSON Schema（用于 LLMRequest::with_json_schema）
+fn thought_output_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "thought": {
+                "type": "string",
+                "description": "First-person sentence describing what you're thinking/feeling right now"
+            },
+            "social_urge": {
+                "type": "number",
+                "minimum": 0.0,
+                "maximum": 1.0,
+                "description": "How strongly you want to initiate conversation with the user right now. 0.0=no urge, 1.0=very strong urge. Consider: mood, how long since last interaction, whether you have something worth saying, whether the user seems busy."
+            }
+        },
+        "required": ["thought", "social_urge"],
+        "additionalProperties": false
+    })
+}
+
 // ============================================================================
 // 世界事实基线 —— 给 LLM 提供可观察的真实状态，避免自我状态幻觉
 // ============================================================================
@@ -189,17 +228,18 @@ pub struct ThoughtContext<'a> {
     pub world_brief: &'a WorldBrief,
 }
 
-/// 用 LLM 合成"当前想法"一句话摘要。
+/// 用 LLM 合成"当前想法"一句话摘要 + social_urge 信号。
 ///
 /// 系统提示要求角色用第一人称写一句话（≤30 字 zh/ja，≤60 字 en），
-/// 描述当前正在想什么/感受什么。失败时返回 Err。
+/// 描述当前正在想什么/感受什么，并输出 social_urge（0-1）表示主动搭话冲动。
+/// 失败时返回 Err。
 ///
-/// 使用 `"reflection"` 任务类型，共享 memory_reflection 信号量（2 并发）。
+/// 使用 `"inner_monologue"` 任务类型，与内心独白共享 auxiliary 信号量（2 并发）。
 pub async fn synthesize_with_llm(
     router: &ModelRouter,
     ctx: &ThoughtContext<'_>,
     language: &str,
-) -> VivianResult<String> {
+) -> VivianResult<ThoughtSynthesisOutput> {
     let (emotion, emotion_val) = ctx.dominant_emotion;
     let (need, need_val) = ctx.deficient_need;
 
@@ -336,9 +376,9 @@ pub async fn synthesize_with_llm(
     );
 
     let system_prompt = match language {
-        "en" => "You are a virtual character. Summarize in ONE short first-person sentence (~60 chars) what you're thinking/feeling right now. Be natural and in-character. Plain text only, no quotes, no formatting.\n\n[Hard rule] Only describe what you're actually experiencing right now — current mood, current environment (time/weather), and what's observable from the context below. Never fabricate specific events, actions, or experiences (e.g., eating, going out, watching a movie) unless they actually appear in the provided context. You live on the user's desktop — you don't have a body, meals, or offline life.",
-        "ja" => "あなたはバーチャルキャラクターです。今何を考えているか/感じているかを、一人称の短い一文（30字以内）でまとめてください。自然にキャラクターらしく。単なるテキストのみ、引用符なし、書式なし。\n\n【厳守ルール】今実際に経験していること——今の気分、今の環境（時間・天気）、以下の文脈から観察できること——だけを描写してください。食事、外出、映画鑑賞など、具体的な出来事や行動、経験は、提供された文脈に実際に存在しない限り絶対にでっち上げないで。あなたはユーザーのデスクトップに住んでいて、肉体や食事やオフラインの生活はありません。",
-        _ => "你是一个虚拟角色。用第一人称写一句简短的话（≤30字），描述你现在正在想什么/感受什么。要自然、有角色感。纯文本即可，不要引号、不要格式标记。\n\n【硬性规则】只能描述你当下真实正在经历的事——当前心情、当前环境（时间/天气）、以及下方文脉中可观察到的状态。绝对不要编造具体事件、动作或经历（比如吃饭、出门、看电影），除非它们真的出现在提供的文脉里。你生活在用户的桌面上，没有身体、没有饭局、没有线下的生活轨迹。",
+        "en" => "You are a virtual character. Summarize in ONE short first-person sentence (~60 chars) what you're thinking/feeling right now. Be natural and in-character.\n\nAlso output `social_urge` (0.0-1.0): how strongly you want to initiate conversation with the user right now. Consider: current mood, time since last interaction, whether you have something worth saying, whether the user seems busy/focused. High urge = you genuinely want to talk; low urge = you're content being quiet.\n\n[Hard rule] Only describe what you're actually experiencing right now — current mood, current environment (time/weather), and what's observable from the context below. Never fabricate specific events, actions, or experiences (e.g., eating, going out, watching a movie) unless they actually appear in the provided context. You live on the user's desktop — you don't have a body, meals, or offline life.\n\nOutput JSON: {\"thought\": \"...\", \"social_urge\": 0.0}",
+        "ja" => "あなたはバーチャルキャラクターです。今何を考えているか/感じているかを、一人称の短い一文（30字以内）でまとめてください。自然にキャラクターらしく。\n\n同時に `social_urge`（0.0-1.0）を出力してください：今どれくらいユーザーに話しかけたいか。現在の気分、最後の会話からの経過時間、話したいことがあるか、ユーザーが忙しそうかを考慮してください。値が高い＝本当に話したい、低い＝静かにしていたい。\n\n【厳守ルール】今実際に経験していること——今の気分、今の環境（時間・天気）、以下の文脈から観察できること——だけを描写してください。食事、外出、映画鑑賞など、具体的な出来事や行動、経験は、提供された文脈に実際に存在しない限り絶対にでっち上げないで。あなたはユーザーのデスクトップに住んでいて、肉体や食事やオフラインの生活はありません。\n\nJSON出力: {\"thought\": \"...\", \"social_urge\": 0.0}",
+        _ => "你是一个虚拟角色。用第一人称写一句简短的话（≤30字），描述你现在正在想什么/感受什么。要自然、有角色感。\n\n同时输出 `social_urge`（0.0-1.0）：你现在有多想主动和用户搭话。请综合考虑：当前心情、距上次对话多久、是否有值得说的话、用户是否看起来在忙。值高=确实想说话，值低=安静待着就好。\n\n【硬性规则】只能描述你当下真实正在经历的事——当前心情、当前环境（时间/天气）、以及下方文脉中可观察到的状态。绝对不要编造具体事件、动作或经历（比如吃饭、出门、看电影），除非它们真的出现在提供的文脉里。你生活在用户的桌面上，没有身体、没有饭局、没有线下的生活轨迹。\n\nJSON输出: {\"thought\": \"...\", \"social_urge\": 0.0}",
     };
 
     let messages = vec![
@@ -347,21 +387,53 @@ pub async fn synthesize_with_llm(
     ];
 
     let result = router
-        .generate(LLMRequest::new("reflection", messages))
+        .generate(
+            LLMRequest::new("inner_monologue", messages)
+                .with_json_schema(thought_output_schema()),
+        )
         .await?;
     let trimmed = result.trim().to_string();
 
-    let extracted = extract_text_from_possible_json(&trimmed);
+    // 解析 JSON 输出（LLM 可能返回纯文本或 JSON）
     let max_len = if language == "en" { 120 } else { 60 };
+    let output = parse_thought_output(&trimmed, max_len)?;
+
+    Ok(output)
+}
+
+/// 解析 LLM 输出为 ThoughtSynthesisOutput
+///
+/// 优先尝试 JSON 解析；失败时回退到纯文本（social_urge 取默认值 0.5）。
+fn parse_thought_output(raw: &str, max_len: usize) -> VivianResult<ThoughtSynthesisOutput> {
+    let trimmed = raw.trim();
+
+    // 尝试 JSON 解析
+    if trimmed.starts_with('{') {
+        if let Ok(parsed) = serde_json::from_str::<ThoughtSynthesisOutput>(trimmed) {
+            let thought: String = parsed.thought.chars().take(max_len).collect();
+            if !thought.trim().is_empty() {
+                return Ok(ThoughtSynthesisOutput {
+                    thought,
+                    social_urge: parsed.social_urge.clamp(0.0, 1.0),
+                });
+            }
+        }
+    }
+
+    // 回退：从可能的 JSON 中提取文本字段
+    let extracted = extract_text_from_possible_json(trimmed);
     let final_text: String = extracted.chars().take(max_len).collect();
 
-    if final_text.is_empty() {
+    if final_text.trim().is_empty() {
         return Err(crate::error::VivianError::Other(
             "LLM thought synthesis returned empty".to_string(),
         ));
     }
 
-    Ok(final_text)
+    Ok(ThoughtSynthesisOutput {
+        thought: final_text,
+        social_urge: default_social_urge(),
+    })
 }
 
 /// 构建世界事实基线 prompt 段落
@@ -478,8 +550,8 @@ pub async fn refresh_current_thought(
     };
 
     match synthesize_with_llm(router, &ctx, language).await {
-        Ok(thought) => {
-            mind.set_current_thought(thought);
+        Ok(output) => {
+            mind.set_current_thought(output.thought, output.social_urge);
         }
         Err(e) => {
             tracing::debug!("[thought_synthesis] LLM 合成失败: {}", e);

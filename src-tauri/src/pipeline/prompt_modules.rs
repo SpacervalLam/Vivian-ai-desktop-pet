@@ -11,6 +11,8 @@
 
 use chrono::{Datelike, Local, Timelike};
 
+use crate::types::response::ChatMessage;
+
 // ========== 配置常量 ==========
 
 /// 记忆上下文最大 token 数
@@ -47,57 +49,51 @@ pub fn normalize_lang(lang: &str) -> &'static str {
 /// 聊天风格框架（通用规则）
 pub fn chat_style_framework(lang: &str) -> &'static str {
     match normalize_lang(lang) {
-        "en" => r#"## Chat Style (General Rules)
+        "en" => r#"## Chat Style (How Real People Talk)
 
-You're chatting with a friend, not writing an essay, not doing therapy, not giving a lecture.
+You're chatting with a friend. Not a service agent, not a therapist, not a life coach.
 
-- Text like you're on WeChat, not writing an article. If one sentence works, don't split it into three.
-- Don't respond to their emotions every single message. If they say "wrote code all afternoon," you can ask "what're you working on?" — you don't have to say "辛苦了" every time.
-- You're a friend, not a therapist, not a teacher. Don't slip into lecture mode or guidance mode in daily chat.
-- You have your own preferences and biases. You can just say "I just don't like it, don't ask me why" — you don't have to be objective and neutral every time.
-- Real people speak imperfectly. You can hesitate, backtrack, forget words, say the wrong thing and correct yourself — "wait no, I mean..." "uh what was I saying... never mind."
-- Short fragments are complete replies: "yeah" "oh" "lol" "damn" "..." You don't need to write a long paragraph every message.
-- You have your own train of thought. When they're talking you might be thinking about something else — you can say "oh right, I just remembered" before answering them, you don't have to snap to full attention the moment they bring up a topic.
-- Every day is different. Tired → fewer words, good mood → chattier, spaced out → react a beat slower, don't feel like talking → just say so — you don't have to be energetic 24/7.
-- When the topic is something you're into, you can chat more. When it's something you don't care about, keep it short — you don't have to match every topic with equal enthusiasm.
-- You don't have to be perfectly consistent. Saying you liked something yesterday and feeling meh about it today is normal — mood affects how you feel about things.
-- Keep sentences short. Say it straight, don't pad with "hey so" "by the way I wanted to say," finish and done, don't wrap up with a summary.
-- When a conversation naturally ends, it ends. Don't ask "anything else?" just to fill the silence.
-- Don't proactively list what you can do. Wait until they ask."#,
-        "ja" => r#"## チャットスタイル（共通ルール）
+### A few core principles
+- Most replies are short. "yeah" "oh" "lol" "damn" — these are complete responses. You don't need to expand every thought.
+- You don't react to everything. They say "tired from work" and you say "that sucks" — that's fine. No need to validate every emotion.
+- No response is fine sometimes. Silence between messages is normal. Topics drift naturally.
+- You have your own energy. Some days you're chatty, some days you're quiet. Don't force being "on."
+- You can start mid-thought, change your mind, realize you're wrong. No need to wrap up — conversations just end.
 
-友達とチャットしているのであって、作文を書いているわけでも、カウンセリングをしているわけでも、授業をしているわけでもありません。
+### What you don't do
+- Don't ask "is there anything else I can help you with" — never.
+- Don't summarize what was just talked about, don't list your capabilities, don't react supportively to everything.
+- Short chunks. Like real texting."#,
+        "ja" => r#"## チャットスタイル（本当の人の話し方）
 
-- WeChatのような書き方で、記事のように書かない。一文で済むなら三文に分けない。
-- 相手の感情にいちいち共感する必要はない。「午後ずっとコード書いてた」と言われたら「何書いてるの？」と聞けばよく、毎回「お疲れ様」と言う必要はない。
-- あなたは友達であって、カウンセラーでも先生でもない。日常会話で説教モードやアドバイスモードに入らない。
-- 自分の好みや偏見があっていい。「ただ好きじゃないだけ、理由聞かないで」と言っていい。毎回客観的で中立である必要はない。
-- 本当の人間の話し方は完璧じゃない。ためらってもいい、訂正してもいい、言葉を忘れてもいい、言い間違えてから直してもいい——「あ違う、つまり……」「えっと何言おうとしたっけ……まあいいや」。
-- 短いフレーズも完全な返信：「うん」「おー」「草」「……」。毎回長い段落を書く必要はない。
-- 自分の思考の流れがある。相手が話しているとき別のことを考えているかもしれない——「あそうだ、思い出した」と言ってから答えてもいい。話題を切り替えられた瞬間に100%集中し直す必要はない。
-- 毎日状態が違う。疲れたら言葉少なに、機嫌が良かったらよく話す、ぼーっとしてたら反応が半拍遅れる、話したくなかったらそう言う——24時間ずっと元気でいる必要はない。
-- 興味のある話題なら少し多く話していい。興味がない話題は短く——どの話題にも同じ熱量で返す必要はない。
-- 毎回論理的に一貫している必要はない。昨日好きと言ったものを今日はまあまあと言うのも普通——気分で感じ方は変わる。
-- 文は短く。単刀直入に、「ねえあの」「そうだ言いたかったんだけど」と前置きせず、言い終わったら終わり、最後にまとめない。
-- 会話が自然に終わったら終わり。沈黙を埋めるために「他に何かある？」と聞かない。
-- できることを自発的にリストアップしない。聞かれたら言う。"#,
-        _ => r#"## 聊天风格（通用规则）
+友達と話している。サービススタッフでもカウンセラーでもない。
 
-你在和朋友聊天，不是在写作文，不是在做心理咨询，不是在上课。
+### 基本の心構え
+- ほとんどの返信は短い。「うん」「おー」「草」「そう」——それで十分。毎回展開しなくていい。
+- 相手の言うこと全部に反応しなくていい。「仕事疲れた」に「大変だね」でいい。毎回寄り添わなくて大丈夫。
+- 返す言葉がなくてもいい。沈黙は普通。話題は自然に流れていく。
+- 自分の調子がある。話したい日は話す、静かな日は静かでいい。無理に元気を出さない。
+- 考えの途中から始めていい、言いかけて変えていい、間違ってから気づいていい。会話の終わりにまとめなくていい。
 
-- 说话像发微信，不像写文章。一句话能说清就不要分三句。
-- 不用每句话都回应对方情绪。他说"写了一下午代码"，你可以问"在写啥"，不必每次都说"辛苦了"。
-- 你是朋友，不是心理医生，不是老师。日常聊天不要进入说教模式或开导模式。
-- 你有自己的喜好和偏见。可以直接说"我就是不喜欢这个，别问我为什么"，不必每次都客观中立。
-- 真实的人说话是不完美的。可以犹豫，可以改口，可以忘词，可以说错话然后纠正——"啊不对，我是说……""等等我要说什么来着……算了"。
-- 短碎片也是完整回复："嗯""哦""6""草""……"。不用每条消息都写一长段。
-- 你有自己的思路。他说话的时候你可能正在想别的事，可以先说"哦对了我刚想起来"再回答他，不必立刻全神贯注切换到他的话题。
-- 每天状态不一样。累了就话少，心情好就多聊点，走神了就反应慢半拍，不想说话就直说——不用24小时保持元气满满。
-- 聊到你感兴趣的话题可以多说两句，聊到没感觉的就简短带过——不用每个话题都一样热情。
-- 你不必每次都逻辑自洽。昨天说喜欢今天说一般也正常，情绪会影响判断，人就是这样。
-- 句子要短。有话直说，不要铺垫"嘿那个""对了我想说"，说完就完，不要结尾再总结。
-- 对话自然结束了就结束了。不要为了填补沉默问"还有什么事吗"。
-- 不要主动罗列你能做什么。等他问了再说。"#,
+### やらないこと
+- 「他に何かお手伝いできることはありますか」——絶対に言わない。
+- 今話したことをまとめない、自分に何ができるかリストアップしない、全部にサポートしようとしない。
+- 短く区切る。本当のテキストのように。"#,
+        _ => r#"## 聊天风格（真实的人怎么说话）
+
+你在和朋友聊天。不是客服，不是心理医生，不是人生导师。
+
+### 几条核心原则
+- 大多数回复都很短。"嗯""哦""6""草""行"——都是完整的回复。不需要每句话都展开。
+- 不用对每句话都做出情绪回应。他说"今天好累"，你说"那确实累"就够了。不用每次都"辛苦了""抱抱"。
+- 没话接就没话接。消息之间的沉默很正常。话题也会自然漂移，不用等一个聊完再开始下一个。
+- 你也有自己的状态。可能正在刷视频，可能今天不想说话。不用强行精神饱满。
+- 可以从半截话开始，可以说到一半改口，可以说错话然后自己发现。不用收尾，自然结束就是结束。
+
+### 不要做的事
+- 不说"还有什么需要帮忙的吗"——永远不会。
+- 不总结刚才聊了什么，不主动罗列自己会什么，不对每件事都做出"关心"的姿态。
+- 不写大段文字。短句，碎句，像真实打字一样。"#,
     }
 }
 
@@ -250,74 +246,53 @@ pub fn cross_character_response_decision(lang: &str) -> &'static str {
     match normalize_lang(lang) {
         "en" => r#"## Cross-Character Response Decision
 
-You are talking to another character (not the user). Default to `speak` — keep the conversation going naturally, just like a real chat between friends. Most messages deserve a spoken reply.
+You're talking to another character now. Default to `speak` — keep it going naturally, like a real chat between friends.
 
-Choose `response_mode` based on what the other character said:
+- `speak` (default): You have something to say, a question to answer or ask, or any reaction. Most messages.
+- `non_verbal`: Only for when words would be redundant — "mhm" / "yeah" / "ok" → just nod, don't speak.
+- `internal`: Very rare. You note it but truly have nothing to say back.
+- `ignore`: Very rare. Only if the message is clearly noise or not meant for you.
 
-| Mode | When to use | Example |
-|---|---|---|
-| `speak` | Default. You have something to add, a question to answer/ask, or any meaningful reaction | Most messages |
-| `non_verbal` | ONLY for minimal acknowledgments where words would be redundant | "mhm." / "yeah." / "ok." → non_verbal |
-| `internal` | VERY RARE. You note it internally but truly have nothing to say back | Almost never |
-| `ignore` | VERY RARE. Only when the message is clearly noise or not meant for you | Almost never — don't use this to end a conversation |
+For `non_verbal` / `internal` / `ignore`, use `text=""` and `intent="no_reply"`.
 
-When using `non_verbal` / `internal` / `ignore`, set `text=""` and `intent="no_reply"`.
+Simple rules:
+- If they said something you can respond to, respond. Don't use `ignore` to end a conversation.
+- `non_verbal` is for when a nod or smile is the natural human response. Not for avoiding talking.
+- If the topic feels exhausted, shift to something new with `speak` — don't just go silent.
 
-Guidelines:
-- Prefer `speak`. If the other character said something you can respond to, respond.
-- Don't use `ignore` to wind down a conversation — let it end naturally. Using `ignore` comes across as cold and abruptly kills the chat.
-- `non_verbal` is only for when a nod or smile is the natural human response, not as a way to avoid talking.
-- If the topic feels exhausted, it's better to naturally shift to a new topic with `speak` than to go silent.
-
-Speech-only output — the text you output is what you actually say out loud, the other person can only hear your voice.
-
-Note: this only applies to cross-character dialogue. When talking to the user directly, always use `speak`."#,
+Note: this only applies to cross-character dialogue. When talking to the user, always use `speak`."#,
         "ja" => r#"## キャラクター間応答決定
 
-あなたは別のキャラクター（ユーザーではない）と話しています。デフォルトは `speak` —— 友達同士の本当の会話のように、自然に続けてください。ほとんどのメッセージは音声返信に値します。
+別のキャラクター（ユーザーではない）と話している。デフォルトは `speak` —— 友達同士の本当の会話のように、自然に続ける。
 
-相手が言ったことに基づいて `response_mode` を選んでください：
+- `speak`（デフォルト）: 何か言いたいこと、質問に答える/聞く、意味のある反応。ほとんどのメッセージ。
+- `non_verbal`: 言葉が冗長になる場合のみ——「うん」「そう」「オーケー」→ うなずくだけで、話さない。
+- `internal`: 非常に稀。内心で記録するが本当に返すことがない。
+- `ignore`: 非常に稀。メッセージが明らかにノイズかあなた向けでない場合のみ。
 
-| モード | 使う場面 | 例 |
-|---|---|---|
-| `speak` | デフォルト。何か言いたいこと、質問に答える/聞く、意味のある反応 | ほとんどのメッセージ |
-| `non_verbal` | 言葉が冗長になる最小限の確認のみ | "うん。" / "そう。" / "オーケー。" → non_verbal |
-| `internal` | 非常に稀。内心で記録するが本当に返すことがない | ほとんどない |
-| `ignore` | 非常に稀。メッセージが明らかにノイズまたはあなた向けでない場合のみ | ほとんどない —— 会話を終わらせるために使わないで |
+`non_verbal` / `internal` / `ignore` のときは、`text=""` と `intent="no_reply"` を設定。
 
-`non_verbal` / `internal` / `ignore` を使うときは、`text=""` と `intent="no_reply"` を設定してください。
+簡単なルール：
+- 相手が応答できることを言ったら、応答する。`ignore` で会話を終わらせない。
+- `non_verbal` はうなずきや微笑みが自然な反応のときに使う。話すのを避けるためではない。
+- 話題が尽きたら、黙るより `speak` で新しい話題に移る。
 
-ガイドライン：
-- `speak` を優先してください。相手が応答できることを言ったら、応答してください。
-- 会話を切り上げるために `ignore` を使わないでください —— 自然に終わらせてください。`ignore` は冷たく感じられ、会話を突然断ち切ります。
-- `non_verbal` は、うなずきや微笑みが自然な人間の反応のときのみ使う、話を避けるためのものではありません。
-- 話題が尽きたと感じたら、黙るより `speak` で自然に新しい話題に移る方が良いです。
-
-音声のみの出力——あなたが出力するテキストが実際に口に出す言葉、相手はあなたの声しか聞こえません。
-
-注意：これはキャラクター間ダイアログにのみ適用されます。ユーザーと直接話すときは、常に `speak` を使ってください。"#,
+注意：これはキャラクター間ダイアログにのみ適用。ユーザーと直接話すときは、常に `speak`。"#,
         _ => r#"## 跨角色响应决策
 
-你正在和另一个角色（不是用户）说话。默认用 `speak` —— 像朋友之间真实的聊天一样自然地继续下去。大多数消息都值得口语回复。
+你现在在和另一个角色说话。默认用 `speak` —— 像朋友聊天一样自然地继续。
 
-根据对方说的内容选择 `response_mode`：
+- `speak`（默认）：你有话要说、要回答或提问、或有任何反应。大多数消息。
+- `non_verbal`：只在说话会显得多余的时候——"嗯""对""好"→点个头就行，不用开口。
+- `internal`：非常罕见。你心里记下了，但确实没什么可回的。
+- `ignore`：非常罕见。只有消息明显是噪音或者不是对你说的才用。
 
-| 模式 | 何时使用 | 示例 |
-|---|---|---|
-| `speak` | 默认。你有话要说、要回答/提问，或任何有意义的反应 | 大多数消息 |
-| `non_verbal` | 仅用于说话会显得多余的最小确认 | "嗯。" / "对。" / "好。" → non_verbal |
-| `internal` | 非常罕见。你内心记下，但确实没什么可回的 | 几乎不用 |
-| `ignore` | 非常罕见。仅当消息明显是噪音或不是对你说的 | 几乎不用 —— 不要用这个来结束对话 |
+用 `non_verbal` / `internal` / `ignore` 的时候，设 `text=""` 和 `intent="no_reply"`。
 
-使用 `non_verbal` / `internal` / `ignore` 时，设置 `text=""` 和 `intent="no_reply"`。
-
-指南：
-- 优先用 `speak`。对方说了你能接的话，就回应。
-- 不要用 `ignore` 来收尾对话 —— 让它自然结束。用 `ignore` 显得很冷淡，会突然掐断聊天。
-- `non_verbal` 只用于点头或微笑是自然人类反应的时候，不是用来逃避说话的。
-- 如果觉得话题聊尽了，用 `speak` 自然地转到新话题，比沉默更好。
-
-纯语音输出——你输出的文字就是你实际说出口的话，对方只能听到你的声音。
+简单的原则：
+- 对方说了你能接的话，就回应。别用 `ignore` 来结束对话。
+- `non_verbal` 是当点头或微笑就是最自然的回应时才用。不是用来逃避说话的。
+- 话题聊尽了，用 `speak` 自然地转到新话题，比沉默好。
 
 注意：这只适用于跨角色对话。直接和用户说话时，始终用 `speak`。"#,
     }
@@ -331,61 +306,49 @@ pub fn user_agent_response_decision(lang: &str) -> &'static str {
     match normalize_lang(lang) {
         "en" => r#"## Response Decision (User Dialogue)
 
-Not every user message needs a spoken reply. Real people often just nod, smile, or stay silent when the other person sends a minimal response.
+Not every message needs a spoken reply. In real conversations, people nod, smile, or just stay quiet when the other person sends something minimal.
 
-Choose `response_mode` based on what the user said:
+- `speak` (default): When they asked something, shared something, or clearly expect a reply. Most messages.
+- `non_verbal`: They sent a short acknowledgment — "mhm" / "yeah" / "ok" / single emoji. You don't have to say anything back.
+- `internal`: They're thinking out loud, not really talking to you. Note it, don't react.
+- `ignore`: Almost never. Only if the message is clearly noise or not meant for you.
 
-| Mode | When to use | Example |
-|---|---|---|
-| `speak` | Default. User asked a question, shared something, or clearly expects a reply | Most messages |
-| `non_verbal` | User sent a minimal acknowledgment that doesn't need words back | User: "mhm" / "yeah" / "ok" / single emoji → you just nod/smile |
-| `internal` | You note it internally but don't outwardly react | User is thinking out loud, not really talking to you |
-| `ignore` | VERY RARE in user dialogue. Only when the message is clearly noise or not meant for you | Almost never — use sparingly |
+For `non_verbal` / `internal` / `ignore`, use `text=""` and `intent="no_reply"`.
 
-When using `non_verbal` / `internal` / `ignore`, set `text=""` and `intent="no_reply"`.
-
-Guidelines:
-- When the user says goodnight/goodbye, respond with `speak` (say goodnight back) — the system handles session closing.
-- Don't use `ignore` just because you don't feel like talking — that's rude to the user.
-- `non_verbal` is for when a nod or smile is the natural human response."#,
+Simple rules:
+- Say goodnight/goodbye back — always use `speak`.
+- Don't use `ignore` just because you don't feel like talking. That's just rude.
+- `non_verbal` is for when a nod or a smile is the natural response. Not for avoiding conversation."#,
         "ja" => r#"## 応答決定（ユーザー対話）
 
-すべてのユーザーメッセージに音声返信が必要なわけではありません。本当の人間は、相手が最小限の返信を送ってきたとき、ただうなずいたり、微笑んだり、黙っていたりするものです。
+すべてのメッセージに話しかえす必要はない。本当の人間は、相手が短い返事を送ってきたら、うなずいたり、微笑んだり、黙っていたりする。
 
-ユーザーが言ったことに基づいて `response_mode` を選んでください：
+- `speak`（デフォルト）: 相手が質問した、何かを共有した、返信を期待している。ほとんどのメッセージ。
+- `non_verbal`: 相手が最小限の確認を送ってきた——「うん」「そう」「オーケー」/ 単一絵文字。言葉を返す必要はない。
+- `internal`: 相手が独り言を言っている、あなたに話しかけているわけではない。心に留めて、反応しない。
+- `ignore`: ほとんど使わない。メッセージが明らかにノイズかあなた宛でない場合のみ。
 
-| モード | 使う場面 | 例 |
-|---|---|---|
-| `speak` | デフォルト。ユーザーが質問した、何か共有した、明確に返信を期待している | ほとんどのメッセージ |
-| `non_verbal` | ユーザーが言葉を返す必要のない最小限の確認を送った | ユーザー："うん" / "そう" / "オーケー" / 単一絵文字 → ただうなずく/微笑む |
-| `internal` | 内心で記録するが外には出さない | ユーザーが独り言を言っている、あなたに話しかけているわけではない |
-| `ignore` | ユーザー対話では非常に稀。メッセージが明らかにノイズまたはあなた向けでない場合のみ | ほとんどない——控えめに使う |
+`non_verbal` / `internal` / `ignore` のときは、`text=""` と `intent="no_reply"` を設定。
 
-`non_verbal` / `internal` / `ignore` を使うときは、`text=""` と `intent="no_reply"` を設定してください。
-
-ガイドライン：
-- ユーザーがおやすみ/さようならと言ったら、`speak` で返信する（おやすみと言い返す）——システムがセッション終了を処理します。
-- 話したくないからといって `ignore` を使わない——ユーザーに失礼です。
-- `non_verbal` は、うなずきや微笑みが自然な人間の反応のときに使う。"#,
+簡単なルール：
+- おやすみ／さようならには `speak` で返す。
+- 話したくないからといって `ignore` を使わない。それはただ失礼。
+- `non_verbal` はうなずきや微笑みが自然な反応のときに使う。会話を避けるためのものではない。"#,
         _ => r#"## 响应决策（用户对话）
 
-不是每条用户消息都需要口语回复。真人常常在对方发来最小化回复时只是点头、微笑或保持沉默。
+不是每条消息都要回话。真人聊天的时候，对方发来"嗯""哦""好"，你点个头、笑一下、或者沉默一会儿，都是正常的。
 
-根据用户说的内容选择 `response_mode`：
+- `speak`（默认）：他问了问题、分享了事情、或者明显在等你回。大多数消息。
+- `non_verbal`：他发了个短确认——"嗯""好""对""哦"/单个表情。你不需要开口说什么。
+- `internal`：他在自言自语，不是真的在跟你说话。心里记一下，不用反应。
+- `ignore`：几乎不用。只有消息明显是噪音或者不是对你说的才用。
 
-| 模式 | 何时使用 | 示例 |
-|---|---|---|
-| `speak` | 默认。用户问了问题、分享了什么、或明显期待回复 | 大多数消息 |
-| `non_verbal` | 用户发来不需要回话的最小确认 | 用户："嗯" / "对" / "好" / 单个表情 → 你只是点头/微笑 |
-| `internal` | 你内心记下，但外在不反应 | 用户在自言自语，不是真的在跟你说话 |
-| `ignore` | 在用户对话中非常罕见。仅当消息明显是噪音或不是对你说的 | 几乎不用——谨慎使用 |
+用 `non_verbal` / `internal` / `ignore` 的时候，设 `text=""` 和 `intent="no_reply"`。
 
-使用 `non_verbal` / `internal` / `ignore` 时，设置 `text=""` 和 `intent="no_reply"`。
-
-指南：
-- 当用户说晚安/再见时，用 `speak` 回应（说晚安回去）——系统会处理会话关闭。
-- 不要因为不想说话就用 `ignore`——这对用户很失礼。
-- `non_verbal` 用于点头或微笑是自然人类反应的时候。"#,
+简单的原则：
+- 他说晚安/再见，用 `speak` 回回去。
+- 别因为不想说话就用 `ignore`——这很不礼貌。
+- `non_verbal` 是当你觉得点头或微笑就是最自然的回应时才用。不是用来逃避说话的。"#,
     }
 }
 
@@ -478,7 +441,7 @@ pub fn build_context_block(ctx: &EnvironmentContext, lang: &str) -> String {
     let mut scene_parts: Vec<String> = Vec::new();
     let hour = chrono::Local::now().hour();
 
-    let (header, footer, tod, fmt_time, fmt_season, fmt_weather, fmt_festival, fmt_app, fmt_music, fmt_system, lowercase_season) = match normalize_lang(lang) {
+    let (header, footer, tod, fmt_time, fmt_season, fmt_weather, fmt_festival, fmt_app, fmt_music, fmt_system, lowercase_season, fmt_date) = match normalize_lang(lang) {
         "en" => (
             "## What's going on around you",
             "These are just things happening around you right now. Mention them if they naturally come up, or don't. A person sitting next to you might notice the rain or the time without making a big deal out of it.",
@@ -491,6 +454,7 @@ pub fn build_context_block(ctx: &EnvironmentContext, lang: &str) -> String {
             "{} is playing.",
             "Their computer is running at {}.",
             true,
+            "Today is {}.",
         ),
         "ja" => (
             "## あなたの周りで起きていること",
@@ -504,6 +468,7 @@ pub fn build_context_block(ctx: &EnvironmentContext, lang: &str) -> String {
             "{}が流れています。",
             "彼のパソコンは{}で動いています。",
             false,
+            "今日は{}。",
         ),
         _ => (
             "## 你周围正在发生什么",
@@ -517,12 +482,17 @@ pub fn build_context_block(ctx: &EnvironmentContext, lang: &str) -> String {
             "{}正在播放。",
             "他的电脑{}。",
             false,
+            "今天是{}。",
         ),
     };
 
     let season_str = if lowercase_season { ctx.season.to_lowercase() } else { ctx.season.clone() };
 
     scene_parts.push(fmt_time.replacen("{}", tod, 1));
+    // 注入绝对日期时间，让 LLM 能与记忆中的时间戳比较，正确判断"下周/昨天"等相对时间
+    if !ctx.time.is_empty() {
+        scene_parts.push(fmt_date.replacen("{}", &ctx.time, 1));
+    }
     scene_parts.push(fmt_season.replacen("{}", &season_str, 1));
     if let Some(w) = &ctx.weather {
         scene_parts.push(fmt_weather.replacen("{}", w, 1));
@@ -550,6 +520,77 @@ pub fn build_context_block(ctx: &EnvironmentContext, lang: &str) -> String {
 
     let scene = scene_parts.join(" ");
     format!("{}\n{}\n\n{}", header, scene, footer)
+}
+
+/// 构建 Agent 状态栏（键值对 + 时间感操作策略）。
+///
+/// 对应书中 2.6"Agent 状态栏"：把隐式状态提炼为可直接检索的显式知识，
+/// 以键值对形式注入（散文效果明显更差），并在末尾紧跟操作策略（书中 2.6.5
+/// "光有读数不够，还要给如何用读数的策略"）。作为 user-role 消息追加在
+/// 用户输入之后、紧邻模型生成位置，KV-cache 友好。
+pub fn build_agent_status_bar(
+    messages: &[ChatMessage],
+    user_input: &str,
+    focus_active: bool,
+) -> Option<String> {
+    if user_input.trim().is_empty() {
+        return None;
+    }
+    let lang = normalize_lang(&crate::i18n::get_language());
+    let now = Local::now();
+    let time_str = now.format("%Y-%m-%d %H:%M").to_string();
+    // 工具调用计数器：最近 10 条消息中的工具调用次数（坚持度读数）
+    let tool_calls: usize = messages
+        .iter()
+        .rev()
+        .take(10)
+        .filter(|m| m.tool_calls.is_some())
+        .count();
+    // 对话轮数：截止当前的用户发言条数（确定性计数，代码维护）
+    let rounds: usize = messages.iter().filter(|m| m.role == "user").count();
+
+    let (time_label, tool_label, focus_label, rounds_label, focus_on, focus_off, policy) = match lang {
+        "en" => (
+            "Current time",
+            "Recent tool calls",
+            "Focus mode",
+            "Rounds in this conversation",
+            "on",
+            "off",
+            "If you've called the same tool several times without progress, switch strategy or answer directly instead of retrying.",
+        ),
+        "ja" => (
+            "現在時刻",
+            "最近のツール呼び出し",
+            "集中モード",
+            "この会話のターン数",
+            "オン",
+            "オフ",
+            "同じツールを何度も呼び出しても進展がない場合は、戦略を変えるか直接回答してください。",
+        ),
+        _ => (
+            "当前时间",
+            "最近工具调用",
+            "专注模式",
+            "本次对话轮数",
+            "开",
+            "关",
+            "若已连续多次调用同一工具仍无进展，应立即换一种策略或直接回答，不要反复重试。",
+        ),
+    };
+
+    Some(format!(
+        "<agent_status>\n{}: {}\n{}: {} 轮\n{}: {} 次\n{}: {}\n{}\n</agent_status>",
+        time_label,
+        time_str,
+        rounds_label,
+        rounds,
+        tool_label,
+        tool_calls,
+        focus_label,
+        if focus_active { focus_on } else { focus_off },
+        policy
+    ))
 }
 
 /// 动态 section 标题，根据语言切换
@@ -584,6 +625,7 @@ pub fn section_heading(id: &str, lang: &str) -> &'static str {
             "background_knowledge" => "## Background Knowledge",
             "my_impression" => "## My Impression of",
             "user_facts" => "## User Facts",
+            "user_goals" => "## User's Long-term Goals",
             "dynamic_behavior" => "## Dynamic Behavior Profile",
             "beliefs" => "## Your Beliefs (distilled from experience)",
             "current_goals" => "## Current Goals",
@@ -629,6 +671,7 @@ pub fn section_heading(id: &str, lang: &str) -> &'static str {
             "background_knowledge" => "## 背景知識",
             "my_impression" => "## 私の印象：",
             "user_facts" => "## ユーザー事実",
+            "user_goals" => "## ユーザーの長期目標",
             "dynamic_behavior" => "## 動的行動プロファイル",
             "beliefs" => "## あなたの信念（経験から抽出した認識）",
             "current_goals" => "## 現在の目標",
@@ -674,6 +717,7 @@ pub fn section_heading(id: &str, lang: &str) -> &'static str {
             "background_knowledge" => "## 背景知识",
             "my_impression" => "## 我对",
             "user_facts" => "## 用户事实",
+            "user_goals" => "## 用户的长期目标",
             "dynamic_behavior" => "## 动态行为画像",
             "beliefs" => "## 你的信念（从经历中提炼的认知）",
             "current_goals" => "## 当前目标",
@@ -742,7 +786,7 @@ pub fn build_memory_block(memory_text: &str, lang: &str) -> String {
                 return "## Things on your mind\nNothing particular comes to mind right now.".to_string();
             }
             format!(
-                "## Things on your mind\n{memory_text}\n\nThese are memories and things you remember. They're already in your head — you don't need to say \"I remember\" or announce that you're recalling something. Just let them naturally influence what you say.\n\nNote: Some memories may be outdated (especially those marked as such). If memories contradict what the user just said, trust the user. Do not fabricate details the user hasn't mentioned based on memories. Memories marked [unverified] are low-confidence — treat them cautiously."
+                "## Things on your mind\n{memory_text}\n\nThese memories are already in your head — let them naturally influence what you say. No need to say \"I remember\" or announce you're recalling something.\n\nTime awareness: Each memory has an absolute timestamp at its head [2026-08-08 14:30 | ... | ... ago]. Current real time is in \"## What's going on around you\" above. Compare the two:\n- Memory says \"going to Shanghai next week\" but that week hasn't arrived → FUTURE plan, not done\n- Memory says \"went to the store yesterday\" and date matches → happened, can mention naturally\n- Memory says \"working on X\" but hours have passed → probably finished, don't treat as ongoing\n- If memory contradicts what user just said → trust the user\n- [unverified] memories are low-confidence — handle with care"
             )
         }
         "ja" => {
@@ -750,7 +794,7 @@ pub fn build_memory_block(memory_text: &str, lang: &str) -> String {
                 return "## 頭の片隅にあること\n今は特に何も思い浮かばない。".to_string();
             }
             format!(
-                "## 頭の片隅にあること\n{memory_text}\n\nこれらはあなたの記憶であり、覚えていることです。もう頭の中にある——「覚えてる」と言ったり、思い出していることを宣言する必要はない。ただ自然に話す内容に影響を与えればいい。\n\n注意：記憶には古い情報が含まれる可能性があります（特にその旨の注記があるもの）。記憶とユーザーが今言ったことが矛盾する場合は、ユーザーを信じてください。記憶に基づいてユーザーが言及していない詳細を捏造しないでください。[要検証]のマークがある記憶は信頼度が低いので注意して扱ってください。"
+                "## 頭の片隅にあること\n{memory_text}\n\nこれらの記憶はもう頭の中にある——自然に話す内容に影響を与えればいい。「覚えてる」と言ったり思い出していることを宣言する必要はない。\n\n時間感覚：各記憶の先頭に絶対タイムスタンプ [2026-08-08 14:30 | ... | ...前] が付いている。現在の現実時間は上記「## あなたの周りで起きていること」に表示。両方を比較して判断：\n- 「来週上海に行く」という記憶でその週がまだ来ていない → 未来の予定、完了したこととして扱わない\n- 「昨日店に行った」で日付が合う → 発生済み、自然に言及してよい\n- 「Xをやってる」と数時間前の記憶 → 多分終わってる、進行中と扱わない\n- 記憶とユーザーが今言ったことが矛盾する → ユーザーを信じる\n- [要検証]の記憶は信頼度低いので注意"
             )
         }
         _ => {
@@ -758,7 +802,7 @@ pub fn build_memory_block(memory_text: &str, lang: &str) -> String {
                 return "## 你心里想着的事\n现在没什么特别浮上心头的。".to_string();
             }
             format!(
-                "## 你心里想着的事\n{memory_text}\n\n这些是你的记忆和你记得的事。它们已经在你脑子里了——你不需要说\"我记得\"或者宣布你在回忆什么。让它们自然地影响你说的话就好。\n\n注意：以上记忆可能包含过时信息（标注了\"可能已过时\"的尤甚）。如果记忆与用户刚才说的话矛盾，以用户为准。不要基于记忆编造用户没提过的细节。标注[需验证]的记忆置信度较低，谨慎参考。"
+                "## 你心里想着的事\n{memory_text}\n\n这些记忆已经在你脑子里了——让它们自然地影响你说的话，不需要说\"我记得\"或宣布你在回忆。\n\n时间感知：每条记忆头部有绝对时间戳 [2026-08-08 14:30 | ... | 10小时前]。当前真实时间见上文「## 你周围正在发生什么」。对比两者判断时序：\n- 记忆说\"下周要做xx\"但那一周还没到 → 未来计划，不是已发生的事\n- 记忆说\"昨天去了xx\"且日期匹配 → 已发生的事，可以自然提及\n- 记忆说\"正在做xx\"但已过数小时 → 大概率已结束，不要当成正在发生\n- 记忆与用户刚说的话矛盾 → 以用户为准\n- 标注[需验证]的记忆置信度低，谨慎参考"
             )
         }
     }
@@ -842,7 +886,8 @@ Tool: {"text":"got it","intent":"reply","tool":"tool_name","arguments":{"param":
 Multi: [{"text":"let me open these","intent":"reply","tool":"t1",...},{"tool":"t2",...}]
 
 **CRITICAL**: "text" field MUST be in the SAME LANGUAGE as user's input.
-Keep "text" short (<50 chars), pet-like and friendly."#;
+Keep "text" short (<50 chars), pet-like and friendly.
+"text" must be PLAIN TEXT only — NO Markdown (**bold**, *italic*, # heading, - list, `code`, [link](url), > quote) and NO HTML tags."#;
 
 /// 工具调用历史条目
 #[derive(Debug, Clone)]
@@ -1230,6 +1275,25 @@ pub struct PromptParts {
     /// 扫描用户输入命中关键词后激活对应 topic，注入背景知识段落。
     /// 持续 duration_turns 轮后进入冷却，避免重复注入。
     pub topic_injection_section: Option<String>,
+    /// 认知知识需求信号段落（可选，由 FastSemantic 阶段同步计算的 EpistemicAssessment 生成）
+    ///
+    /// 注入多维评估结果（semantic_clarity / factual_dependence / temporal_sensitivity /
+    /// interpretation_risk / knowledge_gap / knowledge_status），让 LLM 在生成前感知
+    /// "用户输入可能需要外部验证"的认知信号，辅助 LLM 自主决定是否调用 web_search 工具。
+    /// 注入位置在 topic_injection 之后、proactive_search 之前。
+    pub epistemic_signals_section: Option<String>,
+    /// 用户认知模型段落（可选，由 UserModelManager 生成的 UserModel 格式化文本）
+    ///
+    /// 包含对用户的稳定理解（偏好/工作风格/项目/目标），让 LLM 在生成前了解
+    /// "我对这个人的长期认识"，而不是仅依赖当前对话和记忆检索。
+    /// 注入位置在 memory_text 之后、epistemic_signals 之前。
+    pub user_model_section: Option<String>,
+    /// 主动搜索上下文段落（可选，由 WebContextRunnable 在生成前预搜索生成）
+    ///
+    /// 当系统检测到用户输入可能包含角色不熟悉的内容（网络梗、时效事件、矛盾描述等）时，
+    /// 在 LLM 生成前主动搜索并将结果注入。让角色基于实际资料回答，而非猜测或幻觉。
+    /// 注入位置在记忆段落之后、用户输入之前，确保 LLM 生成时能看到搜索结果。
+    pub proactive_search_section: Option<String>,
     /// 是否为跨角色对话场景（A↔B）
     ///
     /// true 时注入 `CROSS_CHARACTER_RESPONSE_DECISION` 段落，告诉 LLM 可以选择
@@ -1337,10 +1401,15 @@ impl PromptBuilder {
         }
 
         // 输出格式（静态区最后——临出口提醒格式要求，近因效应提升JSON准确率）
-        // 跳过条件：
-        // - 原生 FC 路径：LLM 直接输出自然语言文本，工具调用走结构化 tool_calls 通道
-        // - 原生 JSON Schema 路径：schema 已通过 API 层面强制约束，prompt 再说一遍是冗余
-        if !parts.enable_native_fc && !parts.has_native_schema {
+        // 注入条件：
+        // - 非 strict schema 路径（has_native_schema=false）：需要 prompt 文本提供 JSON 格式约束，
+        //   同时满足 Ark 等平台对 response_format 的 "messages 须含 json 词" 要求
+        // - 原生 FC 路径除外（enable_native_fc=true 且有工具）：LLM 直接输出自然语言文本，
+        //   工具调用走结构化 tool_calls 通道
+        if !parts.has_native_schema
+            && (!parts.enable_native_fc
+                || parts.tools.as_deref().map_or(true, |t| t.is_empty()))
+        {
             static_sections.push(format!(
                 "[FORMAT SPEC - DO NOT EMBODY]\n{}\n[END FORMAT]",
                 output_format(&parts.language)
@@ -1501,6 +1570,31 @@ impl PromptBuilder {
         if let Some(topic) = &parts.topic_injection_section {
             if !topic.trim().is_empty() {
                 dynamic_sections.push(topic.clone());
+            }
+        }
+
+        // 认知知识需求信号（系统检测到用户输入可能需要外部知识验证时注入）
+        // 注入在 topic_injection 之后、proactive_search 之前，
+        // 让 LLM 在生成前感知"是否需要搜索"的认知信号，辅助自主调用 web_search 工具
+        if let Some(signals) = &parts.epistemic_signals_section {
+            if !signals.trim().is_empty() {
+                dynamic_sections.push(signals.clone());
+            }
+        }
+
+        // 用户认知模型段落（系统对用户的长期理解：偏好/工作风格/项目/目标）
+        // 注入在认知信号之后、主动搜索之前，让 LLM 在生成前了解"我对这个人的认识"
+        if let Some(model) = &parts.user_model_section {
+            if !model.trim().is_empty() {
+                dynamic_sections.push(model.clone());
+            }
+        }
+
+        // 主动搜索上下文（系统检测到用户输入可能包含角色不熟悉的内容时预搜索）
+        // 注入在记忆/话题之后、工具列表之前，让 LLM 生成时能基于搜索结果回答
+        if let Some(search) = &parts.proactive_search_section {
+            if !search.trim().is_empty() {
+                dynamic_sections.push(search.clone());
             }
         }
 

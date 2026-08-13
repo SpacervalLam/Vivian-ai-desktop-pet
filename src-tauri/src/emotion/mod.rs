@@ -37,7 +37,7 @@ pub use bridge::{
     EmotionBridge, EmotionContext, EmotionPipelineResult, ExpressionTrigger,
 };
 pub use embedding_classifier::EmbeddingEmotionClassifier;
-pub use fast_semantic::{DimensionResult, FastPerceptionResult, FastSemanticAnalyzer};
+pub use fast_semantic::{DimensionResult, EpistemicAssessment, FastPerceptionResult, FastSemanticAnalyzer, KnowledgeDecision, KnowledgeStatus};
 pub use llm_classifier::{
     parse_llm_response, EmotionLlmClient, LlmEmotionClassifier, ProviderLlmAdapter,
 };
@@ -104,16 +104,17 @@ impl EmotionResult {
     }
 }
 
-// ============== EmotionAnalyzer（关键词）==============
+// ============== EmotionAnalyzer（同步分析器）==============
 
-/// 情感分析器 - 基于中文关键词的情感识别
+/// 情感分析器
 ///
 /// 注入 `EmotionLlmClient` 后，`async_analyze` 会优先走 LLM 分类，
-/// 失败时回退到关键词分析；`analyze` 始终为同步关键词分析（向后兼容）。
+/// 失败时回退到 neutral。`analyze` 始终返回 neutral（同步兜底用）。
+///
+/// 注：不再使用关键词匹配，情绪分类由嵌入分类器（`EmbeddingEmotionClassifier`）
+/// 和 LLM 分类器（`LlmEmotionClassifier`）完成，`EmotionAnalyzer` 保留为
+/// 同步接口的占位符，确保调用方不受影响。
 pub struct EmotionAnalyzer {
-    happy_keywords: Vec<&'static str>,
-    sad_keywords: Vec<&'static str>,
-    angry_keywords: Vec<&'static str>,
     /// 可选 LLM 客户端，注入后 `async_analyze` 优先走 LLM
     llm_client: Option<Arc<dyn EmotionLlmClient>>,
 }
@@ -121,27 +122,15 @@ pub struct EmotionAnalyzer {
 impl EmotionAnalyzer {
     pub fn new() -> Self {
         Self {
-            happy_keywords: vec![
-                "开心", "高兴", "快乐", "喜悦", "兴奋", "愉快", "幸福", "喜欢", "爱", "棒",
-                "好", "哈哈", "嘿嘿", "呵呵", "😊", "😄", "😀", "😁", "🙂",
-            ],
-            sad_keywords: vec![
-                "难过", "伤心", "悲伤", "哭", "失望", "孤独", "寂寞", "痛苦", "心疼", "郁闷",
-                "沮丧", "无奈", "😢", "😭", "😔", "😞",
-            ],
-            angry_keywords: vec![
-                "生气", "愤怒", "气死", "烦死", "讨厌", "可恶", "滚", "闭嘴", "混蛋", "烦",
-                "恼火", "😤", "😠", "😡",
-            ],
             llm_client: None,
         }
     }
 
     /// 注入 LLM 客户端构造分析器
     pub fn new_with_llm(client: Arc<dyn EmotionLlmClient>) -> Self {
-        let mut analyzer = Self::new();
-        analyzer.llm_client = Some(client);
-        analyzer
+        Self {
+            llm_client: Some(client),
+        }
     }
 
     /// 链式构建器：注入 LLM 路由器
@@ -160,55 +149,22 @@ impl EmotionAnalyzer {
         self.llm_client.is_some()
     }
 
-    /// 分析文本中的情感
-    pub fn analyze(&self, text: &str) -> EmotionResult {
-        let mut happy_count = 0u32;
-        let mut sad_count = 0u32;
-        let mut angry_count = 0u32;
-
-        for kw in &self.happy_keywords {
-            happy_count += text.matches(kw).count() as u32;
-        }
-        for kw in &self.sad_keywords {
-            sad_count += text.matches(kw).count() as u32;
-        }
-        for kw in &self.angry_keywords {
-            angry_count += text.matches(kw).count() as u32;
-        }
-
-        let total = happy_count + sad_count + angry_count;
-        if total == 0 {
-            return EmotionResult {
-                emotion: "neutral".to_string(),
-                intensity: 0.0,
-                valence: 0.0,
-                arousal: 0.0,
-                source: "keyword".to_string(),
-                ..Default::default()
-            };
-        }
-
-        let (emotion, valence, arousal) = if happy_count >= sad_count && happy_count >= angry_count {
-            ("happy", 0.7, 0.5)
-        } else if sad_count >= happy_count && sad_count >= angry_count {
-            ("sad", -0.6, -0.3)
-        } else {
-            ("angry", -0.7, 0.7)
-        };
-
-        let intensity = (total as f64 / (text.chars().count().max(1) as f64) * 10.0).min(1.0);
-
+    /// 同步分析入口：始终返回 neutral（关键词匹配已移除）
+    ///
+    /// 情绪分类已由嵌入分类器和 LLM 分类器完成，此方法仅作为同步兜底，
+    /// 确保调用方始终能获得一个有效结果。
+    pub fn analyze(&self, _text: &str) -> EmotionResult {
         EmotionResult {
-            emotion: emotion.to_string(),
-            intensity,
-            valence,
-            arousal,
+            emotion: "neutral".to_string(),
+            intensity: 0.0,
+            valence: 0.0,
+            arousal: 0.0,
             source: "keyword".to_string(),
             ..Default::default()
         }
     }
 
-    /// 异步分析入口：优先 LLM 分类，失败回退关键词
+    /// 异步分析入口：优先 LLM 分类，失败回退 neutral
     pub async fn async_analyze(&self, text: &str) -> EmotionResult {
         if let Some(client) = &self.llm_client {
             let classifier = LlmEmotionClassifier::new(Some(client.clone()));
@@ -217,7 +173,7 @@ impl EmotionAnalyzer {
                 return result;
             }
             tracing::debug!(
-                "[EmotionAnalyzer] LLM 降级({})，回退关键词分析",
+                "[EmotionAnalyzer] LLM 降级({})，回退 neutral",
                 result.source
             );
         }
@@ -496,10 +452,10 @@ mod tests {
 
     #[test]
     fn test_analyze_happy() {
+        // 关键词匹配已移除，analyze 始终返回 neutral
         let analyzer = EmotionAnalyzer::new();
         let result = analyzer.analyze("今天真的很开心，哈哈");
-        assert_eq!(result.emotion, "happy");
-        assert!(result.valence > 0.0);
+        assert_eq!(result.emotion, "neutral");
         assert_eq!(result.source, "keyword");
     }
 
@@ -513,19 +469,18 @@ mod tests {
 
     #[test]
     fn test_analyze_sad() {
+        // 关键词匹配已移除，analyze 始终返回 neutral
         let analyzer = EmotionAnalyzer::new();
         let result = analyzer.analyze("我好难过，想哭");
-        assert_eq!(result.emotion, "sad");
-        assert!(result.valence < 0.0);
+        assert_eq!(result.emotion, "neutral");
     }
 
     #[test]
     fn test_analyze_angry() {
+        // 关键词匹配已移除，analyze 始终返回 neutral
         let analyzer = EmotionAnalyzer::new();
         let result = analyzer.analyze("气死我了，烦死了");
-        assert_eq!(result.emotion, "angry");
-        assert!(result.valence < 0.0);
-        assert!(result.arousal > 0.0);
+        assert_eq!(result.emotion, "neutral");
     }
 
     #[test]

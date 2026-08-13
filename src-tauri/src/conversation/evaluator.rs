@@ -1,6 +1,6 @@
 //! Conversation Evaluator —— 会话评估纯函数集。
 //!
-//! 把"该不该继续/为什么结束/能量/新鲜度/连续性"等评估逻辑从 ConversationManager
+//! 把"该不该继续/能量/新鲜度/连续性"等评估逻辑从 ConversationManager
 //! 拆出，让 Manager 只负责状态机写入与仓储，评估由纯函数完成。
 //!
 //! 设计原则：
@@ -11,54 +11,10 @@
 //! 与 Manager 的关系：
 //! - Manager 的 `update_after_round` / `start_or_continue` 等方法在持锁后调用
 //!   Evaluator 的纯函数计算指标，再根据指标写状态
-//! - 外部调用方（chat.rs / cross_character.rs）直接调 Evaluator 的 `detect_close_reason`
+//! - 关闭原因判断由 `IntentJudge::judge_close_reason`（LLM 驱动）完成，见
+//!   `crate::dialogue::intent_judge`
 
-use super::session::{CloseReason, Conversation, ResponseMode};
-
-/// 检测是否命中关闭关键词
-///
-/// 返回 `Some(reason)` 表示应立即关闭会话；
-/// 返回 `None` 表示未命中，交由 Energy/Novelty/Continuation 状态机自然推进。
-///
-/// 规则优先级：GoodNight > GoodBye > Interrupted
-pub fn detect_close_reason(text: &str) -> Option<CloseReason> {
-    let lower = text.to_lowercase();
-    let trimmed = text.trim();
-
-    // 晚安关键词（中英）
-    let goodnight_hits = [
-        "晚安", "睡了", "睡觉了", "去睡了", "休息了", "去休息", "上床了",
-        "good night", "goodnight", "gonna sleep", "going to bed", "bed time", "sleep tight",
-    ];
-    if goodnight_hits.iter().any(|k| lower.contains(k)) {
-        return Some(CloseReason::GoodNight);
-    }
-
-    // 再见关键词（中英）
-    let goodbye_hits = [
-        "拜拜", "再见", "走了", "我先走了", "回头见", "下次聊", "回聊", "撤了", "下线了",
-        "bye", "goodbye", "see you", "gotta go", "leaving", "catch you later", "talk later",
-    ];
-    if goodbye_hits.iter().any(|k| lower.contains(k)) {
-        return Some(CloseReason::GoodBye);
-    }
-
-    // 中途打断关键词（用户表示暂时离开但意图回来）
-    let interrupted_hits = [
-        "等一下", "稍等", "我先忙", "老板电话", "电话来了", "接个电话", "有人找我",
-        "等会再说", "待会回来", "马上回来", "brb", "hold on", "one sec", "hang on",
-    ];
-    if interrupted_hits.iter().any(|k| lower.contains(k)) {
-        return Some(CloseReason::Interrupted);
-    }
-
-    // 兜底：空消息或极短消息不判定
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    None
-}
+use super::session::{Conversation, ResponseMode};
 
 /// 计算新信息密度 [0, 1]
 ///
@@ -186,30 +142,6 @@ pub fn compute_continuation_score(conv: &Conversation) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_detect_goodnight() {
-        assert_eq!(detect_close_reason("晚安啦"), Some(CloseReason::GoodNight));
-        assert_eq!(detect_close_reason("good night"), Some(CloseReason::GoodNight));
-    }
-
-    #[test]
-    fn test_detect_goodbye() {
-        assert_eq!(detect_close_reason("拜拜"), Some(CloseReason::GoodBye));
-        assert_eq!(detect_close_reason("bye"), Some(CloseReason::GoodBye));
-    }
-
-    #[test]
-    fn test_detect_interrupted() {
-        assert_eq!(detect_close_reason("稍等一下"), Some(CloseReason::Interrupted));
-        assert_eq!(detect_close_reason("brb"), Some(CloseReason::Interrupted));
-    }
-
-    #[test]
-    fn test_detect_none() {
-        assert_eq!(detect_close_reason("今天天气不错"), None);
-        assert_eq!(detect_close_reason(""), None);
-    }
 
     #[test]
     fn test_novelty_question_mark() {

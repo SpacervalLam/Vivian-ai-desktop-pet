@@ -67,13 +67,16 @@ pub fn spawn_knowledge_acquisition(
             }),
         );
 
-        // 从 AppState 读取 web_search 配置（按 provider 切换后端）
-        let web_search_config = app
-            .state::<std::sync::Arc<AppState>>()
-            .config
-            .read()
-            .get_all()
-            .web_search;
+        // 从 AppState 读取 web_search 配置 + 代理 URL
+        let (web_search_config, proxy_url) = {
+            let cfg = app
+                .state::<std::sync::Arc<AppState>>()
+                .config
+                .read()
+                .get_all();
+            let proxy_config = crate::network::proxy::ProxyConfig::from_app_config(&cfg);
+            (cfg.web_search.clone(), proxy_config.effective_proxy_url())
+        };
 
         // 检查开关：用户可在配置中关闭 Busy 状态知识采集
         if !web_search_config.enable_background_knowledge_fetch {
@@ -120,7 +123,7 @@ pub fn spawn_knowledge_acquisition(
         if cancel.is_cancelled() {
             return;
         }
-        let result = run_knowledge_acquisition(&char_id, &router, &memory, &web_search_config, &app, &proactive).await;
+        let result = run_knowledge_acquisition(&char_id, &router, &memory, &web_search_config, &proxy_url, &app, &proactive).await;
 
         // 注：want_to_share_knowledge 播种已由 run_knowledge_acquisition 内部完成
         // （仅对内化类主题播种，分享类已直接发给用户）
@@ -314,6 +317,7 @@ async fn run_knowledge_acquisition(
     router: &ModelRouter,
     memory: &MemoryManager,
     web_search_config: &WebSearchConfig,
+    proxy_url: &Option<String>,
     app: &AppHandle,
     proactive: &ProactiveOrchestrator,
 ) -> AcquisitionResult {
@@ -402,7 +406,8 @@ async fn run_knowledge_acquisition(
         let results = WebSearcher::search_with_config(
             &tw.topic,
             SEARCH_RESULTS_PER_TOPIC,
-            Some(web_search_config),
+            Some(&web_search_config),
+            proxy_url.as_deref(),
         )
         .await;
         if results.is_empty() {

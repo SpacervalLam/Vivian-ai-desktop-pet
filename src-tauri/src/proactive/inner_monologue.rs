@@ -198,7 +198,7 @@ impl InnerMonologueGenerator {
         match self
             .router
             .generate(
-                LLMRequest::new("interest_search", messages).with_search(true),
+                LLMRequest::new("inner_monologue", messages).with_search(true),
             )
             .await
         {

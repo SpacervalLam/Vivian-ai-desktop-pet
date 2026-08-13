@@ -39,7 +39,7 @@ import {
 } from 'lucide-react';
 import FlipCard from './FlipCard';
 import { CARD_BG, getTimePeriod, getSeasonKey, getWeatherKey } from './world-card-backgrounds';
-import { COLORS, TYPO, SPACING, RADIUS } from '../design-system';
+import { COLORS, TYPO, SPACING, RADIUS, EASE, DURATION } from '../design-system';
 import {
   Card,
   EmptyState,
@@ -305,6 +305,16 @@ if (typeof document !== 'undefined' && !document.getElementById(KEYFRAMES_STYLE_
   0% { transform: translateX(0); }
   100% { transform: translateX(-50%); }
 }
+@keyframes world-rise-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.world-rise-in {
+  animation: world-rise-in 0.5s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .world-rise-in { animation: none; }
+}
 `;
   document.head.appendChild(style);
 }
@@ -562,16 +572,22 @@ const ResearchTaskRow: React.FC<ResearchTaskRowProps> = ({ task }) => {
   const { t } = useTranslation();
   const color = STATUS_COLOR[task.status];
   const latestSample = task.samples.length > 0 ? task.samples[task.samples.length - 1] : null;
+  const [hovered, setHovered] = useState(false);
 
   return (
     <div
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
       style={{
         display: 'flex',
         alignItems: 'flex-start',
         gap: SPACING.md,
-        padding: SPACING.sm,
-        borderBottom: `1px solid ${COLORS.subtleBorder}`,
-        marginBottom: -1,
+        padding: `${SPACING.sm}px ${SPACING.sm + 2}px`,
+        borderRadius: RADIUS.sm,
+        background: hovered ? COLORS.bgHover : COLORS.subtleBg,
+        border: `1px solid ${hovered ? COLORS.borderHover : COLORS.subtleBorder}`,
+        marginBottom: SPACING.xs,
+        transition: `background ${DURATION.fast}s ${EASE.swift}, border-color ${DURATION.fast}s ${EASE.swift}`,
       }}
     >
       <div
@@ -673,7 +689,7 @@ const ResearchPanel: React.FC<ResearchPanelProps> = ({ tasks, snapshot, behavior
   if (activeTaskCount > 0) summaryHint.push(`${activeTaskCount} ${t('mind_inspector.world.research_active')}`);
 
   return (
-    <div>
+    <div className="world-rise-in">
       {/* 摘要卡片 */}
       <Card
         style={{ cursor: hasData ? 'pointer' : 'default' }}
@@ -846,8 +862,11 @@ const ResearchPanel: React.FC<ResearchPanelProps> = ({ tasks, snapshot, behavior
                       display: 'flex',
                       alignItems: 'flex-start',
                       gap: SPACING.sm,
-                      padding: `${SPACING.xs}px 0`,
-                      borderBottom: idx < behaviors.length - 1 ? `1px solid ${COLORS.subtleBorder}` : 'none',
+                      padding: SPACING.sm,
+                      borderRadius: RADIUS.sm,
+                      background: COLORS.subtleBg,
+                      border: `1px solid ${COLORS.subtleBorder}`,
+                      marginBottom: idx < behaviors.length - 1 ? SPACING.xs : 0,
                     }}
                   >
                     <div
@@ -906,8 +925,11 @@ const ResearchPanel: React.FC<ResearchPanelProps> = ({ tasks, snapshot, behavior
                     <div
                       key={b.id}
                       style={{
-                        padding: `${SPACING.xs}px 0`,
-                        borderBottom: idx < beliefs.length - 1 ? `1px solid ${COLORS.subtleBorder}` : 'none',
+                        padding: SPACING.sm,
+                        borderRadius: RADIUS.sm,
+                        background: COLORS.subtleBg,
+                        border: `1px solid ${COLORS.subtleBorder}`,
+                        marginBottom: idx < beliefs.length - 1 ? SPACING.xs : 0,
                       }}
                     >
                       <div style={{ display: 'flex', alignItems: 'center', gap: SPACING.xs, flexWrap: 'wrap', marginBottom: 2 }}>
@@ -1289,7 +1311,7 @@ const WorldPage: React.FC = () => {
         gap: SPACING.sectionGap,
       }}
     >
-      <div>
+      <div className="world-rise-in">
         <SectionTitle style={{ marginBottom: SPACING.md }}>
           <span style={{ display: 'inline-flex', alignItems: 'center', gap: SPACING.xs }}>
             <StatusDot color={COLORS.accent} pulse />

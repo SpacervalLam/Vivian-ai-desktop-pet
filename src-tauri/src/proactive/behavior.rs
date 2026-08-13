@@ -703,18 +703,21 @@ fn build_proactive_directive(
 fn proactive_output_format(lang_norm: &str) -> &'static str {
     match lang_norm {
         "en" => "Output format (JSON): {\"text\": \"...\", \"expression\": \"expression_tag\", \"delivery_channel\": \"bubble\"|\"chat_window\"}\n\
+The text field must be plain text only — no Markdown (no **bold**, *italic*, # heading, - list, `code`, [link](url), > quote) and no HTML tags.\n\
 delivery_channel guide:\n\
 - \"bubble\" (default): desktop pet bubble — for self-talk, mood, casual remarks not expecting a reply\n\
 - \"chat_window\": send to the WeChat-style chat window — use when you actually want to start a conversation, share something, or say something that deserves the user's attention (greeting, question, welcome-back, share)\n\
 \
 Optional fields (only when sharing valuable content): content_type (\"share\"|\"greeting\"), value_score (0.0-1.0)",
         "ja" => "出力形式（JSON）: {\"text\": \"...\", \"expression\": \"表情タグ\", \"delivery_channel\": \"bubble\"|\"chat_window\"}\n\
+text フィールドは純粋なテキストのみ——Markdown 厳禁（**太字**、*斜体*、# 見出し、- リスト、`コード`、[リンク](url)、> 引用 など）。HTML タグも禁止。\n\
 delivery_channel ガイド:\n\
 - \"bubble\"（デフォルト）: デスクトップペットのバブル——独り言、気分、返事を期待しない軽い発言に\n\
 - \"chat_window\": WeChat風チャット窓へ送信——会話を始めたい、何か共有したい、ユーザーの注意を引く価値がある発言（挨拶、質問、おかえり、共有）に\n\
 \
 任意フィールド（価値あるコンテンツを共有する時だけ）: content_type (\"share\"|\"greeting\"), value_score (0.0-1.0)",
         _ => "输出格式（JSON）: {\"text\": \"...\", \"expression\": \"表情标签\", \"delivery_channel\": \"bubble\"|\"chat_window\"}\n\
+text 字段必须是纯文本——严禁 Markdown 语法（**粗体**、*斜体*、# 标题、- 列表、`代码`、[链接](url)、> 引用 等），也不要用 HTML 标签。\n\
 delivery_channel 指引:\n\
 - \"bubble\"（默认）: 桌宠气泡——用于自言自语、心情、不期待回复的随口发言\n\
 - \"chat_window\": 发到微信风格聊天窗口——当你确实想发起对话、分享东西、或说的话值得用户注意时使用（问候、提问、欢迎回归、分享）\n\

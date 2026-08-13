@@ -2,9 +2,9 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { getCurrentWindow, currentMonitor, LogicalSize, LogicalPosition } from '@tauri-apps/api/window';
 import type { Effect } from '@tauri-apps/api/window';
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
-import { listen, emit } from '@tauri-apps/api/event';
+import { listen, emit, type UnlistenFn } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
-import { useAppStore } from './stores/useAppStore';
+import { useAppStore, hasPersistedVoiceEnabled } from './stores/useAppStore';
 import { useTranslation } from 'react-i18next';
 import {
   useConfig,
@@ -342,6 +342,9 @@ async function openWindow(
       maxHeight: isFullscreen ? undefined : (resizable ? undefined : height),
       windowEffects: options.windowEffects,
       visible: false,
+      // 启用 Tauri 原生拖放，通过 onDragDropEvent 获取文件路径
+      // （HTML5 File.path 在 Tauri v2 已移除，需用原生事件获取路径）
+      dragDropEnabled: true,
     });
 
     // 4. 追踪引用 + 注册关闭清理
@@ -1098,8 +1101,9 @@ export default function App() {
         const ttsOn = !!ttsConfigRef.current?.enabled;
         // 同步后端 TTS 配置到 store
         useAppStore.getState().setTtsEnabled(ttsOn);
-        // 后端启用时，前端 voiceEnabled 自动跟随启用（首次启动/后端开启时）
-        if (ttsOn) {
+        // 后端启用且无持久化值（首次启动）时，前端 voiceEnabled 自动跟随启用；
+        // 已有持久化值时尊重用户上次的选择，避免重启后静音状态丢失
+        if (ttsOn && !hasPersistedVoiceEnabled()) {
           useAppStore.getState().setVoiceEnabled(true);
         }
         // 读取最新 state（set 后闭包中的 store 仍是旧快照），初始化 TtsStreamQueue
@@ -1476,9 +1480,10 @@ export default function App() {
             reasoning: t('config.routing_reasoning'),
             diary: t('config.routing_diary'),
             memory: t('config.routing_memory'),
-            consolidation: t('config.routing_memory'),
-            emotion_analysis: t('config.routing_memory'),
-            inner_monologue: t('config.routing_diary'),
+            consolidation: t('config.routing_consolidation'),
+            reflection: t('config.routing_reflection'),
+            emotion_analysis: t('config.routing_emotion_analysis'),
+            inner_monologue: t('config.routing_inner_monologue'),
           };
           const taskLabel = taskLabelMap[taskType] ?? taskType;
           let reasonText = '';
@@ -1679,6 +1684,46 @@ export default function App() {
         unlisten = await listen<{ text: string; character_id?: string }>('proactive:chunk', (event) => {
           if (event.payload?.character_id && event.payload.character_id !== getCharacterId()) return;
           proactiveStreamTextRef.current += event.payload.text;
+        });
+        if (!unlisten) return;
+      } catch {
+        /* ignore */
+      }
+    })();
+    return () => {
+      safeUnlisten(unlisten);
+    };
+  }, []);
+
+  // 主动旁观插话监听：用户与角色 A 对话时，旁观者 B 经 LLM 判断后主动插话
+  // 后端 emit proactive:bubble 事件，前端负责 showBubble + TTS + 写入 chat:assistant_message
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void (async () => {
+      try {
+        unlisten = await listen<{
+          character_id: string;
+          content: string;
+          expression?: string;
+        }>('proactive:bubble', (event) => {
+          if (event.payload?.character_id && event.payload.character_id !== getCharacterId()) return;
+          const rawText = event.payload?.content ?? '';
+          if (!rawText) return;
+          const text = stripActions(rawText);
+          if (!text) return;
+          void (async () => {
+            if (ttsConfigRef.current?.enabled) {
+              TtsStreamQueue.feedSync(text, {});
+              await TtsStreamQueue.flushSync();
+            }
+            BubbleController.showBubble(text);
+            void emit('chat:assistant_message', {
+              content: text,
+              timestamp: new Date().toISOString(),
+              character_id: getCharacterId() ?? undefined,
+              channel: 'proactive',
+            });
+          })();
         });
         if (!unlisten) return;
       } catch {
@@ -2404,8 +2449,18 @@ export default function App() {
     void (async () => {
       try {
         unlisten = await listen<{ character_id?: string }>('input:voice_shortcut', (event) => {
+          const cid = event.payload?.character_id;
+          // broadcast：群发语音，所有角色窗口都响应
+          if (cid === 'broadcast') {
+            void ensureSideChatWindow({ showInput: true, autoVoice: true, show: true, lock: true });
+            void emit('sidechat:show_input', {
+              broadcast: true,
+              auto_start_voice: true,
+            });
+            return;
+          }
           // 多角色过滤：仅活跃角色窗口响应全局语音快捷键
-          if (event.payload?.character_id && event.payload.character_id !== getCharacterId()) return;
+          if (cid && cid !== getCharacterId()) return;
           // 先退出隐藏到角落模式（全屏隐藏 / 睡眠隐藏均生效）
           const wasSleep = hideReasonRef.current === 'sleep';
           requestRestoreRef.current?.();
@@ -2609,112 +2664,99 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ── 文件拖放：将文件内容发送给当前角色 ──
+  // ── 文件拖放：通过 Tauri 原生 onDragDropEvent 获取文件路径 ──
   const extractFileText = useExtractFileText();
   const [isDragOver, setIsDragOver] = useState(false);
   // 拖拽期间是否已 suspend 穿透（避免重复调用）
   const dragSuspendedRef = useRef(false);
 
-  const handleDragOver = useCallback((e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    if (!isDragOver) {
-      setIsDragOver(true);
-      // 文件拖入窗口时 suspend 穿透，确保后续 drag/drop 事件能到达 React 层
-      if (!dragSuspendedRef.current) {
-        dragSuspendedRef.current = true;
-        void invoke('suspend_click_through', { reason: 'file_drag' }).catch(() => {});
-      }
-    }
-  }, [isDragOver]);
-
-  const handleDragLeave = useCallback((e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    // 仅在离开窗口根元素时清除高亮（避免子元素切换导致闪烁）
-    if (e.currentTarget === e.target) {
-      setIsDragOver(false);
-      if (dragSuspendedRef.current) {
-        dragSuspendedRef.current = false;
-        void invoke('resume_click_through', { reason: 'file_drag' }).catch(() => {});
-      }
-    }
-  }, []);
-
-  const handleDrop = useCallback(async (e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsDragOver(false);
-    if (dragSuspendedRef.current) {
-      dragSuspendedRef.current = false;
-      void invoke('resume_click_through', { reason: 'file_drag' }).catch(() => {});
-    }
-
-    const files = e.dataTransfer?.files;
-    if (!files || files.length === 0) return;
-
+  // Drop 逻辑用 ref 保存最新闭包，避免 onDragDropEvent 监听器持有过时状态
+  const handleFileDropRef = useRef<(paths: string[]) => void>(() => {});
+  handleFileDropRef.current = (paths: string[]) => {
     const charId = getCharacterId() ?? undefined;
-    if (!charId) return;
+    if (!charId || paths.length === 0) return;
 
-    // 逐个处理拖入的文件
-    for (let i = 0; i < files.length; i++) {
-      const file = files[i];
-      // Tauri 在 File 对象上注入了 path 属性（完整文件路径）
-      const filePath = (file as File & { path?: string }).path;
-      if (!filePath) {
-        showToast(t('toast.file_no_path', { defaultValue: '无法获取文件路径' }), 'warning', 4000);
-        continue;
-      }
+    void (async () => {
+      for (const filePath of paths) {
+        try {
+          const result: FileTextResult = await extractFileText(filePath);
 
-      try {
-        const result: FileTextResult = await extractFileText(filePath);
-
-        if (result.file_type === 'image') {
-          // 图片：转走 send_image_message（多模态）
-          await invoke('send_image_message', {
-            sourcePath: filePath,
-            characterId: charId,
-          });
-        } else if (result.file_type === 'unsupported') {
+          if (result.file_type === 'image') {
+            await invoke('send_image_message', {
+              sourcePath: filePath,
+              characterId: charId,
+            });
+          } else if (result.file_type === 'unsupported') {
+            showToast(
+              t('toast.file_unsupported', {
+                filename: result.filename,
+                defaultValue: '不支持的文件类型：{{filename}}',
+              }),
+              'warning',
+              4000,
+            );
+          } else {
+            const truncatedHint = result.truncated
+              ? t('toast.file_truncated', {
+                  count: result.original_char_count,
+                  defaultValue: `（文件过长，已截断，原始 ${result.original_char_count} 字符）`,
+                })
+              : '';
+            const message = `[文件：${result.filename}]\n${result.text}${truncatedHint}`;
+            const fileMetadata = {
+              kind: 'file',
+              file_name: result.filename,
+              file_type: result.file_type,
+              truncated: result.truncated,
+              original_char_count: result.original_char_count,
+            };
+            void ChatController.sendMessage(message, charId, 'wechat', undefined, fileMetadata);
+          }
+        } catch (err) {
           showToast(
-            t('toast.file_unsupported', {
-              filename: result.filename,
-              defaultValue: '不支持的文件类型：{{filename}}',
+            t('toast.file_extract_failed', {
+              error: String(err),
+              defaultValue: '文件处理失败：{{error}}',
             }),
-            'warning',
-            4000,
+            'error',
+            5000,
           );
-        } else {
-          // 文本 / PDF：包装成消息发送，携带结构化文件元数据（与图片消息 kind=image 对称）
-          const truncatedHint = result.truncated
-            ? t('toast.file_truncated', {
-                count: result.original_char_count,
-                defaultValue: `（文件过长，已截断，原始 ${result.original_char_count} 字符）`,
-              })
-            : '';
-          const message = `[文件：${result.filename}]\n${result.text}${truncatedHint}`;
-          const fileMetadata = {
-            kind: 'file',
-            file_name: result.filename,
-            file_type: result.file_type,
-            truncated: result.truncated,
-            original_char_count: result.original_char_count,
-          };
-          void ChatController.sendMessage(message, charId, 'wechat', undefined, fileMetadata);
         }
-      } catch (err) {
-        const errMsg = String(err);
-        showToast(
-          t('toast.file_extract_failed', {
-            error: errMsg,
-            defaultValue: '文件处理失败：{{error}}',
-          }),
-          'error',
-          5000,
-        );
       }
-    }
-  }, [extractFileText, showToast, t]);
+    })();
+  };
+
+  // 注册原生拖放事件监听（仅一次）
+  useEffect(() => {
+    let unlisten: UnlistenFn | undefined;
+    void (async () => {
+      unlisten = await getCurrentWindow().onDragDropEvent((event) => {
+        const payload = event.payload;
+        if (payload.type === 'enter') {
+          setIsDragOver(true);
+          if (!dragSuspendedRef.current) {
+            dragSuspendedRef.current = true;
+            void invoke('suspend_click_through', { reason: 'file_drag' }).catch(() => {});
+          }
+        } else if (payload.type === 'leave') {
+          setIsDragOver(false);
+          if (dragSuspendedRef.current) {
+            dragSuspendedRef.current = false;
+            void invoke('resume_click_through', { reason: 'file_drag' }).catch(() => {});
+          }
+        } else if (payload.type === 'drop') {
+          setIsDragOver(false);
+          if (dragSuspendedRef.current) {
+            dragSuspendedRef.current = false;
+            void invoke('resume_click_through', { reason: 'file_drag' }).catch(() => {});
+          }
+          handleFileDropRef.current(payload.paths);
+        }
+      });
+    })();
+    return () => { unlisten?.(); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // 背景层窗口拖拽
   const handleBackgroundMouseDown = useCallback(async (e: React.MouseEvent) => {
@@ -2931,6 +2973,27 @@ export default function App() {
     });
   }, [t]);
 
+  // 窗口快捷键：后端 emit "window:shortcut" 事件，前端根据 action 打开对应窗口
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void (async () => {
+      unlisten = await listen<{ action: string }>('window:shortcut', (e) => {
+        switch (e.payload.action) {
+          case 'chat':
+            openChat();
+            break;
+          case 'settings':
+            openConfig();
+            break;
+          case 'memory':
+            openMemory();
+            break;
+        }
+      });
+    })();
+    return () => { unlisten?.(); };
+  }, [openChat, openConfig, openMemory]);
+
   // Ctrl+滚轮缩放：100ms debounce + rAF 帧同步
   //
   // 闪烁根因：SetWindowPos 触发 DWM 立即更新窗口几何，但 WebView2 内部
@@ -3012,20 +3075,14 @@ export default function App() {
       }}
       onMouseDown={handleBackgroundMouseDown}
       onContextMenu={handleContextMenu}
-      onDragOver={handleDragOver}
-      onDragLeave={handleDragLeave}
-      onDrop={handleDrop}
     >
-      {/* 文件拖放高亮遮罩 */}
+      {/* 文件拖放文字提示（简化：仅文字，无蓝色遮罩） */}
       {isDragOver && (
         <div
           style={{
             position: 'absolute',
             inset: 0,
             zIndex: 9999,
-            background: 'rgba(100, 140, 255, 0.15)',
-            border: '2px dashed rgba(100, 140, 255, 0.8)',
-            borderRadius: '12px',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
@@ -3066,6 +3123,7 @@ export default function App() {
           void configApi
             .set('window.smart_positioning_enabled', next)
             .then(() => configApi.save())
+            .then(() => emit('config:saved', {}))
             .catch(() => {
               /* ignore */
             });

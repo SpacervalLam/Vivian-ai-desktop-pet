@@ -18,6 +18,7 @@ use crate::providers::openai_compat::{CacheStrategy, OpenAiCompatProvider};
 use crate::providers::openai_responses::OpenAiResponsesProvider;
 use crate::providers::spark::SparkProvider;
 use crate::providers::wenxin::WenxinProvider;
+use crate::providers::zhipu::ZhipuProvider;
 
 /// 客户端缓存类型
 ///
@@ -47,6 +48,7 @@ pub enum ProviderKind {
     Wenxin,
     Spark,
     ChatCompletions,
+    Zhipu,
     Custom,
 }
 
@@ -56,6 +58,7 @@ impl ProviderKind {
     /// 兼容旧配置：`openai` / `gemini` / `anthropic` / `wenxin` / `spark` / `custom`
     /// `doubao` / `doubao_responses` 走火山方舟 Responses API 专用路径。
     /// `openai_responses` / `responses_api` 走 OpenAI 官方 Responses API 路径。
+    /// `zhipu` / `glm` 走智谱 GLM Chat Completions 专用路径（含联网搜索）。
     /// 未知值统一回退到 `Custom`（按 OpenAI 兼容处理）。
     pub fn from_str(s: &str) -> Self {
         let lower = s.to_lowercase();
@@ -74,6 +77,7 @@ impl ProviderKind {
             "chat_completions" | "chat-completions" | "openai_chat" | "openai-chat" => {
                 ProviderKind::ChatCompletions
             }
+            "zhipu" | "glm" | "chatglm" | "bigmodel" => ProviderKind::Zhipu,
             "custom" => ProviderKind::Custom,
             _ => ProviderKind::Custom,
         }
@@ -89,6 +93,7 @@ impl ProviderKind {
             ProviderKind::Wenxin => "wenxin",
             ProviderKind::Spark => "spark",
             ProviderKind::ChatCompletions => "chat_completions",
+            ProviderKind::Zhipu => "zhipu",
             ProviderKind::Custom => "custom",
         }
     }
@@ -102,8 +107,8 @@ pub fn create_task_provider(
     config: &AppConfig,
     client_cache: &ClientCache,
 ) -> VivianResult<Box<dyn BaseProvider>> {
-    let temperature = config.ai.temperature;
-    let max_tokens = config.ai.max_tokens;
+    let temperature = task_config.temperature.unwrap_or(config.ai.temperature);
+    let max_tokens = task_config.max_tokens.unwrap_or(config.ai.max_tokens);
 
     // 按 endpoint 域名分流：国内厂商强制直连，国外厂商沿用全局代理配置
     let mut proxy_config = ProxyConfig::from_app_config(config);
@@ -242,6 +247,17 @@ fn create_provider_by_kind(
         }
         ProviderKind::ChatCompletions | ProviderKind::Custom => {
             let provider = ChatCompletionsProvider::new(
+                provider_config,
+                temperature,
+                max_tokens,
+                effective_proxy_url,
+                client,
+            )
+            .with_instructions(Some(prompt_modules::build_instructions(lang)));
+            Ok(Box::new(provider))
+        }
+        ProviderKind::Zhipu => {
+            let provider = ZhipuProvider::new(
                 provider_config,
                 temperature,
                 max_tokens,

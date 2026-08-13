@@ -128,6 +128,15 @@ pub struct UserFact {
     /// 是否锁定（L0 层用，锁定后不会被自动覆盖或冲突仲裁改写）
     #[serde(default)]
     pub is_pinned: bool,
+    /// 来源叙事背景（"为什么"存这条，帮助消歧；对应书中 Advanced JSON Cards 的 backstory）
+    #[serde(default)]
+    pub backstory: Option<String>,
+    /// 主体身份（该事实关于谁，如用户自己/家人/朋友；对应书中 Advanced JSON Cards 的 person）
+    #[serde(default)]
+    pub person: Option<String>,
+    /// 与主体的关系上下文（"为谁"存，避免同名实体混淆）
+    #[serde(default)]
+    pub relationship: Option<String>,
 }
 
 /// L1 近期状态层 — 用户最近的目标、项目、偏好（带轮次衰减）
@@ -301,6 +310,9 @@ impl UserFactStore {
                 source_memory_id: source_memory_id.map(|s| s.to_string()),
                 reasoning: item.reasoning,
                 is_pinned: false,
+                backstory: Some(backstory_snippet(user_input)),
+                person: None,
+                relationship: None,
             };
 
             self.upsert_fact(fact, llm).await?;
@@ -312,6 +324,9 @@ impl UserFactStore {
                 source_memory_id: source_memory_id.map(|s| s.to_string()),
                 reasoning: None,
                 is_pinned: false,
+                backstory: Some(backstory_snippet(user_input)),
+                person: None,
+                relationship: None,
             });
         }
 
@@ -504,6 +519,9 @@ impl UserFactStore {
                 source_memory_id: None,
                 reasoning: Some("manual_edit".to_string()),
                 is_pinned: pinned || existing.map(|e| e.is_pinned).unwrap_or(false),
+                backstory: None,
+                person: None,
+                relationship: None,
             };
             inner.basic_data.insert(fact_type, fact);
         } else {
@@ -521,6 +539,9 @@ impl UserFactStore {
                     source_memory_id: None,
                     reasoning: Some("manual_edit".to_string()),
                     is_pinned: false,
+                    backstory: None,
+                    person: None,
+                    relationship: None,
                 });
             }
         }
@@ -606,7 +627,15 @@ impl UserFactStore {
             lines.push("【偏好档案】".to_string());
             for fact_type in &l05_types {
                 if let Some(fact) = inner.basic_data.get(fact_type) {
-                    lines.push(format!("- {}：{}", fact_type.label_zh(), fact.content));
+                    lines.push(match &fact.backstory {
+                        Some(b) if !b.trim().is_empty() => format!(
+                            "- {}：{}（来源：{}）",
+                            fact_type.label_zh(),
+                            fact.content,
+                            b
+                        ),
+                        _ => format!("- {}：{}", fact_type.label_zh(), fact.content),
+                    });
                 }
             }
         }
@@ -635,7 +664,12 @@ impl UserFactStore {
             lines.push(String::new());
             lines.push("【关于用户的其他事实】".to_string());
             for fact in inner.custom_facts.iter().take(10) {
-                lines.push(format!("- {}", fact.content));
+                lines.push(match &fact.backstory {
+                    Some(b) if !b.trim().is_empty() => {
+                        format!("- {}（来源：{}）", fact.content, b)
+                    }
+                    _ => format!("- {}", fact.content),
+                });
             }
         }
 
@@ -865,4 +899,17 @@ fn strip_code_fence(s: &str) -> &str {
         return after;
     }
     s
+}
+
+/// 从用户本轮输入截取一段作为事实的来源叙事背景（backstory）。
+///
+/// 用于消歧：同一条事实在不同语境下含义可能不同，保留"为什么"可帮助后续正确解读。
+fn backstory_snippet(user_input: &str) -> String {
+    const MAX_CHARS: usize = 120;
+    let trimmed = user_input.trim();
+    if trimmed.chars().count() <= MAX_CHARS {
+        trimmed.to_string()
+    } else {
+        format!("{}…", trimmed.chars().take(MAX_CHARS).collect::<String>())
+    }
 }

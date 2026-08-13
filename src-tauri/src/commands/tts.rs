@@ -102,13 +102,25 @@ pub async fn speak_text(
     let tts = character.brain.tts.clone();
     let config_snapshot = tts.get_config();
     tracing::info!(
-        "[TTS] 当前配置: enabled={} engine={:?} volume={} rate={}",
-        config_snapshot.enabled, config_snapshot.engine, config_snapshot.volume, config_snapshot.rate
+        "[TTS] 当前配置: enabled={} engine={:?} volume={} rate={} display_lang={:?} tts_lang={:?} trans_provider={:?}",
+        config_snapshot.enabled,
+        config_snapshot.engine,
+        config_snapshot.volume,
+        config_snapshot.rate,
+        config_snapshot.display_language,
+        config_snapshot.tts_language,
+        config_snapshot.translation_provider
     );
 
     // 跨语言翻译：display_language 与 tts_language 不同时，先翻译文本再送 TTS
+    // 当 tts_language 已配置但 display_language 缺失时，默认 display_language = "zh"
+    // （角色主要使用中文对话，用户配置了 tts_language=ja 显然是想翻译中文到日语）
+    let display_lang = config_snapshot
+        .display_language
+        .clone()
+        .or_else(|| config_snapshot.tts_language.as_ref().map(|_| "zh".to_string()));
     let tts_text = if let (Some(from), Some(to)) =
-        (config_snapshot.display_language.as_deref(), config_snapshot.tts_language.as_deref())
+        (display_lang.as_deref(), config_snapshot.tts_language.as_deref())
     {
         if from != to {
             let provider = config_snapshot.translation_provider.as_deref().unwrap_or("google");

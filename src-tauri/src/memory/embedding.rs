@@ -433,54 +433,59 @@ pub fn default_embedding_with_dim(dim: usize) -> Arc<dyn MemoryEmbeddingProvider
 
 /// 嵌入服务工厂：根据 `MemoryConfig.embedding` 选择远程或哈希
 ///
-/// 选择规则：
+/// 选择规则（统一优先使用用户配置的嵌入模型，未配置才回退到哈希）：
 /// - `source == "local"`：使用本地 Ollama（http://localhost:11434/v1）
-/// - `source == "cloud"` 且 `api_key` 与 `endpoint` 非空：使用远程嵌入
-/// - 否则使用 256 维哈希嵌入
+/// - `api_key` 与 `endpoint` 非空：使用远程嵌入
+/// - 否则回退到 256 维哈希嵌入
 pub fn build_embedding(config: &AppConfig) -> Arc<dyn MemoryEmbeddingProvider> {
-    if config.memory.embedding.enabled {
-        // 本地 Ollama 模式
-        if config.memory.embedding.source == "local" {
-            let model = if config.memory.embedding.ollama_model.trim().is_empty() {
-                "bge-m3".to_string()
-            } else {
-                config.memory.embedding.ollama_model.clone()
-            };
-            let provider = RemoteMemoryEmbedding::new(
-                "ollama".to_string(),
-                Some("http://localhost:11434/v1".to_string()),
-                Some(model),
-            )
-            .with_dimension(config.memory.embedding.dimension);
-            tracing::info!(
-                "[MemoryEmbedding] 启用本地 Ollama 嵌入: model={}, dim={}",
-                provider.model_name(),
-                provider.dim()
-            );
-            return Arc::new(provider);
-        }
+    let emb = &config.memory.embedding;
 
-        // 云端模式
-        let api_key = config.memory.embedding.api_key.trim();
-        let endpoint = config.memory.embedding.endpoint.trim();
-        if !api_key.is_empty() && !endpoint.is_empty() {
-            let provider = RemoteMemoryEmbedding::new(
-                api_key.to_string(),
-                Some(endpoint.to_string()),
-                Some(config.memory.embedding.model.clone()),
-            )
-            .with_dimension(config.memory.embedding.dimension);
-            tracing::info!(
-                "[MemoryEmbedding] 启用远程嵌入: model={}, dim={}",
-                provider.model_name(),
-                provider.dim()
-            );
-            return Arc::new(provider);
-        }
-        tracing::warn!("[MemoryEmbedding] embedding.enabled=true 但 api_key/endpoint 为空，回退到哈希嵌入");
+    // 本地 Ollama 模式
+    if emb.source == "local" {
+        let model = if emb.ollama_model.trim().is_empty() {
+            "bge-m3".to_string()
+        } else {
+            emb.ollama_model.clone()
+        };
+        // 用注册表自动校正维度，避免维度填错导致向量索引反复重建
+        let dim = super::embedding_registry::normalize_dimension(&model, emb.dimension);
+        let provider = RemoteMemoryEmbedding::new(
+            "ollama".to_string(),
+            Some("http://localhost:11434/v1".to_string()),
+            Some(model),
+        )
+        .with_dimension(dim);
+        tracing::info!(
+            "[MemoryEmbedding] 启用本地 Ollama 嵌入: model={}, dim={}",
+            provider.model_name(),
+            provider.dim()
+        );
+        return Arc::new(provider);
     }
 
-    tracing::info!("[MemoryEmbedding] 启用哈希嵌入 (dim=256)");
+    // 云端模式
+    let api_key = emb.api_key.trim();
+    let endpoint = emb.endpoint.trim();
+    if !api_key.is_empty() && !endpoint.is_empty() {
+        let dim = super::embedding_registry::normalize_dimension(&emb.model, emb.dimension);
+        let provider = RemoteMemoryEmbedding::new(
+            api_key.to_string(),
+            Some(endpoint.to_string()),
+            Some(emb.model.clone()),
+        )
+        .with_dimension(dim);
+        tracing::info!(
+            "[MemoryEmbedding] 启用远程嵌入: model={}, dim={}",
+            provider.model_name(),
+            provider.dim()
+        );
+        return Arc::new(provider);
+    }
+
+    // 未配置任何嵌入模型时，才回退到离线哈希嵌入
+    tracing::warn!(
+        "[MemoryEmbedding] 未配置嵌入模型（source 非 local 且无 api_key/endpoint），回退到哈希嵌入"
+    );
     default_embedding()
 }
 

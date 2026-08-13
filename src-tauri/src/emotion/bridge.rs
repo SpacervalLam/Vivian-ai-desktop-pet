@@ -1,9 +1,9 @@
 //! EmotionBridge — 情感桥接器
 //!
-//!   - 连接 EmotionAnalyzer（关键词）、LlmEmotionClassifier、PsychologyManager、
+//!   - 连接 EmotionAnalyzer、LlmEmotionClassifier、PsychologyManager、
 //!     Expression Manager（通过回调）
-//!   - `process_emotion(text)` 流水线：关键词快分析 → LLM 深度分析 →
-//!     更新 PsychologyManager → 触发表情 → 返回综合结果
+//!   - `process_emotion(text)` 流水线：LLM 深度分析 → 更新 PsychologyManager →
+//!     触发表情 → 返回综合结果
 //!   - 入口：`analyze_and_track(text) -> EmotionContext`
 //!     （综合分析并更新心理状态）、`get_current_emotion()`、
 //!     `get_emotion_history(limit)`
@@ -82,7 +82,7 @@ impl EmotionPipelineResult {
 /// 对 PsychologyManager 的影响。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmotionContext {
-    /// 关键词分析原始情感（EmotionAnalyzer 直接结果，可能不在 14 类中）
+    /// 流水线分析结果原始情感（与 classified_emotion 相同，关键词分析已移除）
     pub original_emotion: String,
     /// LLM 分类后情感（14 类 LLM 情绪之一，规范化后）
     pub classified_emotion: String,
@@ -202,30 +202,36 @@ impl EmotionBridge {
         Err("即时嵌入分类器未配置，请在设置中启用向量检索".to_string())
     }
 
-    /// 处理单条文本：关键词分析 + LLM 深度分析 + 状态更新 + 表情触发
+    /// 处理单条文本：LLM 深度分析 + 状态更新 + 表情触发
+    ///
+    /// 注：不再使用关键词快速分析，情绪分类由 LLM 分类器（有 LLM 时）
+    /// 或嵌入分类器（`classify_instant`）完成。`analyzer` 保留为同步兜底占位符。
     pub async fn process_emotion(&self, text: &str) -> EmotionPipelineResult {
         // 1. 检查缓存
         if let Some(cached) = self.check_cache(text) {
             return cached;
         }
 
-        // 2. 关键词快速分析（同步）
-        let keyword_result = self.analyzer.analyze(text);
-
-        // 3. LLM 深度分析（异步）
+        // 2. LLM 深度分析（异步）
         let llm_result = self.classifier.classify(text).await;
 
-        // 4. 选择最终结果：LLM 成功则用 LLM，否则用关键词
+        // 3. 选择最终结果：LLM 成功则用 LLM，否则返回 neutral
         let (final_result, source) = if llm_result.source == "llm" {
             (llm_result, "llm".to_string())
-        } else if self.classifier.has_llm() {
-            tracing::debug!(
-                "[EmotionBridge] LLM 降级到关键词：source={}",
-                llm_result.source
-            );
-            (keyword_result.clone(), "keyword_llm_fallback".to_string())
         } else {
-            (keyword_result.clone(), "keyword".to_string())
+            let source = if self.classifier.has_llm() {
+                "llm_fallback".to_string()
+            } else {
+                "no_llm".to_string()
+            };
+            (
+                EmotionResult {
+                    emotion: "neutral".to_string(),
+                    source: source.clone(),
+                    ..Default::default()
+                },
+                source,
+            )
         };
 
         // 5. 规范化情绪标签到 14 类
@@ -270,14 +276,16 @@ impl EmotionBridge {
     ///
     /// 执行 process_emotion 流水线后，附加感知偏见与更新状态，
     /// 返回包含原始情感/分类后情感/强度/valence/arousal/影响的上下文。
+    ///
+    /// 注：`original_emotion` 与 `classified_emotion` 相同（关键词分析已移除，
+    /// 情绪分类完全由 LLM 分类器完成）。
     pub async fn analyze_and_track(&self, text: &str) -> EmotionContext {
         let pipeline = self.process_emotion(text).await;
-        let original_emotion = self.analyzer.analyze(text).emotion;
         let perception_bias = self.get_perception_bias();
         let pet_status_updated = !pipeline.pet_emotion.is_empty();
 
         EmotionContext {
-            original_emotion,
+            original_emotion: pipeline.emotion.clone(),
             classified_emotion: pipeline.emotion.clone(),
             intensity: pipeline.intensity,
             valence: pipeline.valence,

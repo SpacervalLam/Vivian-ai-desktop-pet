@@ -124,30 +124,34 @@ impl ValidationRunnable {
         router: &ModelRouter,
         memory_text: &str,
         reply_text: &str,
+        dialogue_history: &str,
     ) -> Result<Option<String>, String> {
         let lang_norm =
             crate::pipeline::prompt_modules::normalize_lang(&crate::i18n::get_language());
         let (system, user) = match lang_norm {
             "en" => (
-                "You are a hallucination detector. Check if the AI reply contains claims that contradict or fabricate information not supported by the memories or conversation. Output 'OK' if no issue, or 'ISSUE: <brief description>' if a potential hallucination is found. Be conservative — only flag clear contradictions or fabrications.",
+                "You are a hallucination detector. Check if the AI reply contains claims that contradict or fabricate information not supported by the memories or recent conversation. Output 'OK' if no issue, or 'ISSUE: <brief description>' if a potential hallucination is found. Be conservative — only flag clear contradictions or fabrications. Characters mentioned in the conversation history are real, not fabricated.",
                 format!(
-                    "Memories:\n{}\n\nAI reply:\n{}\n\nCheck for hallucinations:",
+                    "Recent conversation:\n{}\n\nMemories:\n{}\n\nAI reply:\n{}\n\nCheck for hallucinations:",
+                    dialogue_history,
                     memory_text,
                     reply_text
                 ),
             ),
             "ja" => (
-                "あなたは幻覚検出器です。AIの返信に記憶と矛盾する、または記憶や会話で裏付けられない虚構の情報が含まれているか確認してください。問題なければ 'OK'、問題があれば 'ISSUE: <簡潔な説明>' と出力してください。明らかな矛盾や虚構のみをフラグしてください。",
+                "あなたは幻覚検出器です。AIの返信に記憶と矛盾する、または記憶や最近の会話で裏付けられない虚構の情報が含まれているか確認してください。問題なければ 'OK'、問題があれば 'ISSUE: <簡潔な説明>' と出力してください。明らかな矛盾や虚構のみをフラグしてください。会話履歴に登場するキャラクターは実在します。",
                 format!(
-                    "記憶：\n{}\n\nAIの返信：\n{}\n\n幻覚チェック：",
+                    "最近の会話：\n{}\n\n記憶：\n{}\n\nAIの返信：\n{}\n\n幻覚チェック：",
+                    dialogue_history,
                     memory_text,
                     reply_text
                 ),
             ),
             _ => (
-                "你是幻觉检测器。检查 AI 回复中是否包含与记忆矛盾或编造了记忆和对话中不存在的信息。如果没有问题输出 'OK'，如果发现潜在幻觉输出 'ISSUE: <简要描述>'。保守判断——只标记明确的矛盾或编造。",
+                "你是幻觉检测器。检查 AI 回复中是否包含与记忆或最近对话矛盾、或编造了记忆和对话中不存在的信息。如果没有问题输出 'OK'，如果发现潜在幻觉输出 'ISSUE: <简要描述>'。保守判断——只标记明确的矛盾或编造。会话历史中出现过的角色是真实存在的，不算编造。",
                 format!(
-                    "记忆：\n{}\n\nAI 回复：\n{}\n\n幻觉检查：",
+                    "最近对话：\n{}\n\n记忆：\n{}\n\nAI 回复：\n{}\n\n幻觉检查：",
+                    dialogue_history,
                     memory_text,
                     reply_text
                 ),
@@ -233,7 +237,27 @@ impl Runnable for ValidationRunnable {
                 && !mem_text.is_empty()
                 && reply_text.chars().count() >= HALLUCINATION_CHECK_MIN_LEN
             {
-                match Self::check_faithfulness(router, mem_text, reply_text).await {
+                // 从 state.messages 提取最近对话历史，让幻觉检测能感知上下文。
+                // 避免把"会话中出现过的角色"误判为"编造的角色"。
+                let dialogue_history: String = state
+                    .messages
+                    .iter()
+                    .rev()
+                    .take(8)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .map(|m| {
+                        let role = match m.role.as_str() {
+                            "user" => "User",
+                            "assistant" => "AI",
+                            other => other,
+                        };
+                        format!("{}: {}", role, m.content)
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                match Self::check_faithfulness(router, mem_text, reply_text, &dialogue_history).await {
                     Ok(Some(issue)) => {
                         tracing::warn!(
                             "[Validation] 幻觉检测发现问题: {}",

@@ -90,6 +90,9 @@ pub struct PipelineState {
     /// cross_character.rs 读取此字段决定是否进入 Cooling、是否投递下一轮。
     #[serde(default = "default_response_mode")]
     pub response_mode: String,
+    /// 微信渠道语音消息标志：为 true 时前端不显示文本，合成 TTS 后以语音气泡发出
+    #[serde(default)]
+    pub voice_message: bool,
     /// 话题活跃度
     #[serde(default = "default_topic_activeness")]
     pub topic_activeness: i32,
@@ -160,6 +163,9 @@ pub struct PipelineState {
     /// Web 检索上下文（WebContextRunnable 注入）
     #[serde(default)]
     pub web_context: String,
+    /// 用户认知模型文本（UserModelManager 注入，PromptBuildingStep 读取）
+    #[serde(default)]
+    pub user_model_text: String,
     /// 工具描述文本
     #[serde(default)]
     pub tools_text: String,
@@ -309,6 +315,12 @@ pub struct PipelineState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fast_perception: Option<crate::emotion::FastPerceptionResult>,
 
+    /// 认知知识需求评估（在 FastSemantic 阶段同步计算）
+    ///
+    /// 多维评估用户输入是否需要外部知识验证，驱动 WebContext 预搜索和 Prompt 认知信号注入。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub epistemic_assessment: Option<crate::emotion::EpistemicAssessment>,
+
     // ── 原有 Rust 字段（保留以兼容现有步骤）──
     /// 对话消息列表
     #[serde(default)]
@@ -343,6 +355,7 @@ impl Default for PipelineState {
             full_response: default_full_response(),
             intent: default_intent(),
             response_mode: default_response_mode(),
+            voice_message: false,
             topic_activeness: default_topic_activeness(),
             focus_active: false,
             focus_extra_tokens: 0,
@@ -363,6 +376,7 @@ impl Default for PipelineState {
             memory_text: String::new(),
             context_text: String::new(),
             web_context: String::new(),
+            user_model_text: String::new(),
             tools_text: String::new(),
             tool_definitions: Vec::new(),
             tools_text_fallback: None,
@@ -407,6 +421,7 @@ impl Default for PipelineState {
             behavior_drive: None,
             event_summary: String::new(),
             fast_perception: None,
+            epistemic_assessment: None,
             // 原有 Rust 字段
             messages: Vec::new(),
             memories: Vec::new(),

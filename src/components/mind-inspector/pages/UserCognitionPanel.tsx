@@ -60,6 +60,19 @@ interface CurrentStateProps {
   snapshot: WorldSnapshotView | undefined;
 }
 
+const confidenceColor = (c: number): string => {
+  if (c >= 0.85) return COLORS.success;
+  if (c >= 0.7) return COLORS.event.mood;
+  return COLORS.textQuaternary;
+};
+
+const SOURCE_LABEL: Record<string, string> = {
+  local_classifier: '本地分类器',
+  llm_observation: 'LLM 观察',
+  return_detected: '回归检测',
+  system_clear: '系统清除',
+};
+
 const CurrentStateSection: React.FC<CurrentStateProps> = ({ snapshot }) => {
   const { t } = useTranslation();
   const presence = snapshot?.user_presence;
@@ -91,6 +104,31 @@ const CurrentStateSection: React.FC<CurrentStateProps> = ({ snapshot }) => {
         <>
           <div style={{ ...TYPO.h2, color: COLORS.accent, marginBottom: 4 }}>
             {activity.label}
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: SPACING.xs, marginBottom: 4 }}>
+            {/* 置信度指示条 */}
+            <div
+              style={{
+                width: 48,
+                height: 3,
+                borderRadius: 2,
+                background: COLORS.subtleBorder,
+                overflow: 'hidden',
+              }}
+            >
+              <div
+                style={{
+                  width: `${Math.round(activity.confidence * 100)}%`,
+                  height: '100%',
+                  borderRadius: 2,
+                  background: confidenceColor(activity.confidence),
+                  transition: 'width 0.3s ease',
+                }}
+              />
+            </div>
+            <span style={{ ...TYPO.caption, fontSize: 10, color: confidenceColor(activity.confidence) }}>
+              {Math.round(activity.confidence * 100)}%
+            </span>
           </div>
           <div style={{ ...TYPO.body, fontSize: 12, color: COLORS.textSecondary }}>
             {t('mind_inspector.cognition.since_label', { duration: elapsedLabel })}
@@ -167,6 +205,14 @@ const BehaviorTimelineSection: React.FC<BehaviorTimelineProps> = ({ behaviors })
                   <Tag color={COLORS.event.observation}>
                     {formatDuration(entry.duration_secs)}
                   </Tag>
+                  {/* 置信度 */}
+                  <span style={{ ...TYPO.caption, fontSize: 10, color: confidenceColor(entry.confidence) }}>
+                    {Math.round(entry.confidence * 100)}%
+                  </span>
+                  {/* 来源标签 */}
+                  <span style={{ ...TYPO.caption, fontSize: 10, color: COLORS.textTertiary }}>
+                    {SOURCE_LABEL[entry.source] ?? entry.source}
+                  </span>
                 </div>
                 <div style={{ ...TYPO.caption, fontSize: 10, color: COLORS.textQuaternary, marginTop: 2 }}>
                   {formatTime(entry.started_at)} → {formatTime(entry.ended_at)}

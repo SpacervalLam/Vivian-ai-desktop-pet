@@ -16,7 +16,15 @@
 //! - 从最旧组开始逐组丢弃，直到 token 达标
 //!
 //! **Level 3: Reminder Inject**（由 `compaction_reminder` 模块处理）
+//!
+//! 此外提供**上下文感知压缩**（`compress_conversation_context_aware`）：在丢弃大块
+//! 工具结果时，用 LLM 结合当前查询与已知信息生成针对性摘要（而非机械截断），
+//! 对应书中"上下文感知压缩"：把查询意图纳入压缩决策，显著提升信息密度。
 
+use std::time::Duration;
+
+use crate::providers::base::LLMRequest;
+use crate::providers::ModelRouter;
 use crate::types::response::ChatMessage;
 use crate::utils::token_estimate::{estimate_message_tokens, estimate_messages_tokens};
 
@@ -456,6 +464,188 @@ pub fn compress_conversation(
     let dropped_count = dropped_summaries.len();
 
     // 单次重建：head + 聚合摘要 + kept_groups + tail
+    let mut result = Vec::with_capacity(2 + kept_groups.len() * 3 + keep_recent);
+    result.push(messages[0].clone());
+    if !dropped_summaries.is_empty() {
+        result.push(build_aggregate_summary(&dropped_summaries));
+    }
+    for group in &kept_groups {
+        for m in group.messages() {
+            result.push(m.clone());
+        }
+    }
+    result.extend(messages[mid_end..].iter().cloned());
+    let after = estimate_messages_tokens(&result);
+    *messages = result;
+
+    CompressResult {
+        saved_tokens: before.saturating_sub(after),
+        dropped_groups: dropped_count,
+    }
+}
+
+/// 上下文感知的 LLM 摘要：针对单个被丢弃的工具调用组，结合当前查询生成高密度摘要。
+///
+/// 返回 `None` 表示失败/超时，由调用方回退到确定性摘要。
+async fn llm_summarize_bundle(
+    router: &ModelRouter,
+    task_type: &str,
+    query: &str,
+    tool_names: &str,
+    content: &str,
+) -> Option<String> {
+    const TIMEOUT: Duration = Duration::from_secs(6);
+    const MAX_INPUT_CHARS: usize = 6000;
+
+    let content: String = content.chars().take(MAX_INPUT_CHARS).collect();
+    let lang = crate::i18n::get_language();
+    let (system, user) = match crate::pipeline::prompt_modules::normalize_lang(&lang) {
+        "en" => (
+            "You are a context-aware summarizer for an agent's tool results. Given the current user query and what is already known, compress the tool output into a concise high-density summary. Keep key facts, names, numbers, URLs and file paths exactly as-is. Omit noise and reproduction. Output only the summary.",
+            format!(
+                "Current query: {}\n\nTool: {}\n\nTool output:\n{}\n\nSummary:",
+                query, tool_names, content
+            ),
+        ),
+        "ja" => (
+            "あなたはエージェントのツール実行結果をコンテキスト認識で要約します。現在のユーザークエリと既知の情報を踏まえ、ツール出力を簡潔な高密度要約に圧縮してください。重要な事実・固有名詞・数値・URL・ファイルパスはそのまま保持し、ノイズや重複は省いてください。要約のみ出力してください。",
+            format!(
+                "現在のクエリ：{}\n\nツール：{}\n\nツール出力：\n{}\n\n要約：",
+                query, tool_names, content
+            ),
+        ),
+        _ => (
+            "你是上下文感知的摘要器。针对 Agent 的工具执行结果，结合当前用户查询与已知信息，压缩为简洁的高密度摘要。保留关键事实、专有名词、数字、URL 与文件路径（原样），剔除噪声与重复。只输出摘要。",
+            format!(
+                "当前查询：{}\n\n工具：{}\n\n工具输出：\n{}\n\n摘要：",
+                query, tool_names, content
+            ),
+        ),
+    };
+    let messages = vec![
+        ChatMessage::system(system),
+        ChatMessage::user(&user),
+    ];
+    let fut = router.generate(LLMRequest::new(task_type, messages));
+    match tokio::time::timeout(TIMEOUT, fut).await {
+        Ok(Ok(s)) if !s.trim().is_empty() => Some(s.trim().to_string()),
+        _ => None,
+    }
+}
+
+/// 从消息列表中提取最近一条真实用户输入作为压缩查询参照。
+pub fn extract_query(messages: &[ChatMessage]) -> String {
+    messages
+        .iter()
+        .rev()
+        .find(|m| m.role == "user" && !m.content.trim().is_empty())
+        .map(|m| m.content.trim().to_string())
+        .unwrap_or_default()
+}
+
+/// 将消息组内容扁平化为可摘要文本（工具名 + 助手表述 + 工具结果）。
+fn flatten_bundle_content(group: &MessageGroup) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for m in group.messages() {
+        if !m.content.trim().is_empty() {
+            parts.push(m.content.trim().to_string());
+        }
+    }
+    parts.join("\n")
+}
+
+/// 上下文感知压缩：在确定性压缩基础上，对被丢弃的工具调用组用 LLM 结合
+/// 当前查询生成针对性摘要（书中 2.7 的"上下文感知压缩"）。
+///
+/// 与 `compress_conversation` 的区别仅在被丢弃组的摘要来源：这里优先用 LLM
+/// 生成面对当前任务的摘要，失败时回退到确定性预览摘要。分组、原子性与
+/// 阈值逻辑保持一致。
+pub async fn compress_conversation_context_aware(
+    router: &ModelRouter,
+    task_type: &str,
+    messages: &mut Vec<ChatMessage>,
+    threshold_tokens: usize,
+    keep_recent: usize,
+    query: &str,
+) -> CompressResult {
+    // Level 1: Soft Trim（与确定性路径一致）
+    soft_trim_tool_results(messages);
+
+    let before = estimate_messages_tokens(messages);
+    if before <= threshold_tokens {
+        return CompressResult::default();
+    }
+
+    let len = messages.len();
+    let mid_end = len.saturating_sub(keep_recent);
+    if mid_end <= 1 {
+        return CompressResult::default();
+    }
+
+    let (mut mid_groups, _) = build_mid_groups(messages, 1, mid_end);
+    for group in &mut mid_groups {
+        match group {
+            MessageGroup::Single(m) => truncate_message(m),
+            MessageGroup::ToolBundle {
+                assistant,
+                tool_results,
+            } => {
+                truncate_message(assistant);
+                for r in tool_results.iter_mut() {
+                    truncate_message(r);
+                }
+            }
+        }
+    }
+
+    let head_tail_tokens: usize = messages[..1]
+        .iter()
+        .chain(messages[mid_end..].iter())
+        .map(|m| estimate_message_tokens(m))
+        .sum();
+    let mid_tokens: usize = mid_groups.iter().map(|g| g.token_count()).sum();
+    if head_tail_tokens + mid_tokens <= threshold_tokens {
+        let mut result = Vec::with_capacity(messages.len());
+        result.push(messages[0].clone());
+        for group in &mid_groups {
+            for m in group.messages() {
+                result.push(m.clone());
+            }
+        }
+        result.extend(messages[mid_end..].iter().cloned());
+        let after = estimate_messages_tokens(&result);
+        *messages = result;
+        return CompressResult {
+            saved_tokens: before.saturating_sub(after),
+            dropped_groups: 0,
+        };
+    }
+
+    let mut kept_groups: Vec<MessageGroup> = mid_groups.into_iter().collect();
+    let mut dropped_summaries: Vec<String> = Vec::new();
+
+    while !kept_groups.is_empty() {
+        let remaining_mid: usize = kept_groups.iter().map(|g| g.token_count()).sum();
+        if head_tail_tokens + remaining_mid <= threshold_tokens {
+            break;
+        }
+        let dropped = kept_groups.remove(0);
+        // 工具调用组：优先用 LLM 生成上下文感知摘要，失败回退到确定性摘要
+        let summary = match &dropped {
+            MessageGroup::ToolBundle { .. } => {
+                let names = dropped.tool_names().join(", ");
+                let content = flatten_bundle_content(&dropped);
+                llm_summarize_bundle(router, task_type, query, &names, &content)
+                    .await
+                    .unwrap_or_else(|| compact_group_to_summary(&dropped))
+            }
+            _ => compact_group_to_summary(&dropped),
+        };
+        dropped_summaries.push(summary);
+    }
+
+    let dropped_count = dropped_summaries.len();
+
     let mut result = Vec::with_capacity(2 + kept_groups.len() * 3 + keep_recent);
     result.push(messages[0].clone());
     if !dropped_summaries.is_empty() {

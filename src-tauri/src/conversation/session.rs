@@ -77,7 +77,7 @@ pub enum ConversationState {
 /// - `Interrupted` → 用户回来后可恢复旧会话（"刚刚说到哪了？"）
 /// - `Timeout` → 长时间无互动，自然淡出
 ///
-/// 由关键词检测（规则）+ LLM 兜底判定共同决定。
+/// 由 `IntentJudge`（规则预检 + LLM 意图判断）共同决定。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CloseReason {
@@ -194,7 +194,7 @@ pub struct Conversation {
     pub closed_at: Option<f64>,
     /// 关闭原因
     ///
-    /// 由关键词检测（规则）+ LLM 兜底判定共同决定。
+    /// 由 `IntentJudge`（规则预检 + LLM 意图判断）决定。
     /// 不同原因触发不同后续行为（如 GoodNight → 睡眠时间内不主动搭话）。
     pub close_reason: Option<CloseReason>,
     /// 用户最近一次发言时间戳（用于 NoResponse/Timeout 判定）
@@ -233,6 +233,12 @@ impl Conversation {
 
     /// 抢救回 Active 所需的 Continuation Score（Cooling 期间收到新消息时检查）
     pub const RESCUE_THRESHOLD: f64 = 0.80;
+
+    /// 轮次提醒阈值：达到此轮次后在提示词中提醒 LLM 准备结束话题
+    pub const WARN_ROUNDS: u32 = 10;
+
+    /// 轮次硬上限：达到此轮次后强制进入 Cooling，要求 LLM 给出结束语
+    pub const MAX_ROUNDS: u32 = 20;
 
     pub fn new(id: String, owner: &str, participant: &str, topic: &str) -> Self {
         let now = chrono::Local::now().timestamp() as f64;

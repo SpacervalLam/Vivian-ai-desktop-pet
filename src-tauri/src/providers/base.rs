@@ -98,7 +98,7 @@ pub struct ToolDefinition {
 #[derive(Debug, Clone)]
 pub struct LLMRequest {
     /// 任务类型(路由 key):chat / reasoning / reflection / consolidation /
-    /// inner_monologue / activity_extraction / vision_describe 等
+    /// inner_monologue / vision_describe 等
     pub task_type: String,
     /// 对话消息数组(含 system / user / assistant / tool 角色)
     pub messages: Vec<ChatMessage>,

@@ -101,7 +101,7 @@ impl ChatCompletionsProvider {
     /// - user + images：content 转数组 `[{"type":"text",...},{"type":"image_url",...}]`
     /// - assistant + tool_calls：追加 `tool_calls` 字段
     /// - tool：`{"role":"tool","tool_call_id":"...","content":"..."}`
-    fn build_messages(messages: &[ChatMessage], instructions: &Option<String>) -> Vec<Value> {
+    pub(crate) fn build_messages(messages: &[ChatMessage], instructions: &Option<String>) -> Vec<Value> {
         let mut result: Vec<Value> = Vec::new();
 
         // instructions 作为首条 system 消息注入
@@ -208,17 +208,22 @@ impl ChatCompletionsProvider {
         Some(Value::Array(arr))
     }
 
-    /// 注入 response_format（json_object 或 json_schema）
-    fn inject_response_format(body: &mut Value, json_schema: &Option<Value>) {
-        if let Some(schema) = json_schema {
+    /// 注入 response_format（按能力分级：json_schema / json_object / 不注入）
+    fn inject_response_format(&self, body: &mut Value, json_schema: &Option<Value>) {
+        if json_schema.is_none() {
+            return;
+        }
+        if self.supports_structured_output() {
             body["response_format"] = json!({
                 "type": "json_schema",
                 "json_schema": {
                     "name": "vivian_response",
-                    "schema": schema,
+                    "schema": json_schema,
                     "strict": true
                 }
             });
+        } else if self.supports_json_mode() {
+            body["response_format"] = json!({"type": "json_object"});
         }
     }
 
@@ -282,7 +287,7 @@ impl ChatCompletionsProvider {
     }
 
     /// 从 Chat Completions 响应中提取文本内容
-    fn extract_content(json_val: &Value) -> VivianResult<String> {
+    pub(crate) fn extract_content(json_val: &Value) -> VivianResult<String> {
         if let Some(choices) = json_val["choices"].as_array() {
             if let Some(first) = choices.first() {
                 let content = first["message"]["content"].as_str().unwrap_or("");
@@ -295,7 +300,7 @@ impl ChatCompletionsProvider {
     }
 
     /// 从 Chat Completions 响应中提取完整结构化结果（含 tool_calls）
-    fn extract_chat_response(json_val: &Value) -> VivianResult<ChatResponse> {
+    pub(crate) fn extract_chat_response(json_val: &Value) -> VivianResult<ChatResponse> {
         let choices = json_val["choices"]
             .as_array()
             .ok_or_else(|| VivianError::Provider("响应缺少 choices 数组".to_string()))?;
@@ -496,7 +501,7 @@ impl BaseProvider for ChatCompletionsProvider {
             "temperature": self.base.effective_temperature(),
             "max_tokens": self.base.effective_max_tokens(),
         });
-        Self::inject_response_format(&mut body, &json_schema);
+        self.inject_response_format(&mut body, &json_schema);
         self.call_with_retry(body, Some(&prompt_key)).await
     }
 
@@ -518,7 +523,7 @@ impl BaseProvider for ChatCompletionsProvider {
             "max_tokens": self.base.effective_max_tokens(),
             "stream": true,
         });
-        Self::inject_response_format(&mut body, &json_schema);
+        self.inject_response_format(&mut body, &json_schema);
 
         let client = self.base.get_client();
         let req = self

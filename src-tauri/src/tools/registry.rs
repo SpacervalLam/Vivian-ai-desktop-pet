@@ -136,10 +136,9 @@ impl ToolSystem {
         allow_always_scope: &str,
     ) -> Option<ConfirmationResponse> {
         let handle = self.app_handle.read().clone()?;
-        let (id, rx) = self.confirmation.create_request();
 
         let request = ConfirmationRequest {
-            request_id: id,
+            request_id: 0, // create_request 会分配真实 id，稍后回填
             tool: tool.to_string(),
             arguments: arguments.clone(),
             reason,
@@ -147,6 +146,8 @@ impl ToolSystem {
             char_id: char_id.to_string(),
             allow_always_scope: allow_always_scope.to_string(),
         };
+        let (id, rx) = self.confirmation.create_request(request.clone());
+        let request = ConfirmationRequest { request_id: id, ..request };
 
         // emit 给发起角色对应的主窗口（label = char_id），避免广播到其他角色窗口
         // 导致多角色同时使用工具时 suspend/resume 计数器失配
@@ -160,6 +161,20 @@ impl ToolSystem {
             self.confirmation.cancel_request(id);
             return None;
         }
+
+        // 同步压入远程通知队列，供手机端确认 toast 轮询展示
+        crate::remote::push_toast(
+            "confirmation",
+            "智能体请求确认",
+            &request.reason,
+            &request.char_id,
+            serde_json::json!({
+                "request_id": request.request_id,
+                "tool": request.tool,
+                "risk_level": request.risk_level,
+                "allow_always_scope": request.allow_always_scope,
+            }),
+        );
 
         // 等待用户响应（超时由 config.tools.confirmation_timeout_secs 控制，避免永久阻塞）
         let timeout_secs = *self.confirmation_timeout_secs.read();

@@ -48,12 +48,12 @@ impl SubagentTask {
     pub fn route_key(&self) -> &'static str {
         match self {
             SubagentTask::InnerMonologue => "inner_monologue",
-            SubagentTask::ProactiveMessage => "proactive",
-            SubagentTask::MemoryConsolidation => "memory_consolidation",
-            SubagentTask::QueryRewrite => "query_rewrite",
-            SubagentTask::StartupGreeting => "startup_greeting",
-            SubagentTask::SceneAnalysis => "scene_analysis",
-            SubagentTask::EmotionClassification => "emotion_classification",
+            SubagentTask::ProactiveMessage => "chat",
+            SubagentTask::MemoryConsolidation => "consolidation",
+            SubagentTask::QueryRewrite => "memory",
+            SubagentTask::StartupGreeting => "chat",
+            SubagentTask::SceneAnalysis => "vision_describe",
+            SubagentTask::EmotionClassification => "emotion_analysis",
         }
     }
 
@@ -297,7 +297,7 @@ mod tests {
     #[test]
     fn test_task_routing() {
         assert_eq!(SubagentTask::InnerMonologue.route_key(), "inner_monologue");
-        assert_eq!(SubagentTask::ProactiveMessage.route_key(), "proactive");
+        assert_eq!(SubagentTask::ProactiveMessage.route_key(), "chat");
     }
 
     #[test]

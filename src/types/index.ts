@@ -161,6 +161,7 @@ export interface MindState {
   cognition_mode: 'regular' | 'focus' | 'true_name';
   focus_charge: number;
   current_thought: string;
+  inner_monologue_enabled?: boolean;
 }
 
 /** 世界快照 - 对应后端 WorldSnapshot */
@@ -576,6 +577,7 @@ export interface GptSoVitsServiceState {
 /** Whisper 本地 ASR 服务状态 - 对应 backend `WhisperServiceState` */
 export type WhisperServiceStatus =
   | 'stopped'
+  | 'installing'
   | 'starting'
   | 'running'
   | 'stopping'

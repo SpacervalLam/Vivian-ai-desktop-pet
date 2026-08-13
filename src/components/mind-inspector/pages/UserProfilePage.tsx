@@ -1,10 +1,11 @@
 /**
- * User Profile 页 — 用户画像查看与编辑
+ * User Profile 页 — 用户画像查看与编辑（身份资料卡风格）
  *
  * 数据源：invoke('get_user_facts', { characterId })
  * 编辑：invoke('set_user_fact' / 'pin_user_fact' / 'delete_user_fact')
  *
  * 分层展示：
+ * - 身份卡 Hero：姓名 + 关键标签（年龄/性别/职业/所在地）— 角色主题渐变
  * - L0 基础身份（姓名/年龄/性别/职业/所在地）— 可编辑、可锁定
  * - L0.5 结构化偏好（生日/作息/常用网站/喜欢的游戏/兴趣爱好）— 可编辑、可锁定
  * - L1 近期状态（最近目标/当前项目/近期偏好）— 只读，由对话中自动抽取
@@ -13,7 +14,7 @@
  * 视觉风格：iOS 面板（磨砂玻璃 + continuous corners），与 WorldPage 一致。
  */
 
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 import { invoke } from '@tauri-apps/api/core';
@@ -92,6 +93,46 @@ const BASIC_FIELD_DEFS: Array<{ type: string; layer: 'L0' | 'L0.5' }> = [
   { type: 'hobby', layer: 'L0.5' },
 ];
 
+// 入场揭示动画关键帧（一次性注入，并尊重系统“减弱动态效果”设置）
+const REVEAL_KEYFRAMES_ID = 'mind-inspector-profile-reveal';
+if (
+  typeof document !== 'undefined' &&
+  !document.getElementById(REVEAL_KEYFRAMES_ID)
+) {
+  const style = document.createElement('style');
+  style.id = REVEAL_KEYFRAMES_ID;
+  style.textContent = `
+@keyframes mind-inspector-rise {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  #mind-inspector-profile-root [data-reveal] {
+    animation: none !important;
+    opacity: 1 !important;
+  }
+}`;
+  document.head.appendChild(style);
+}
+
+// 入场封装：为子区块提供渐次浮现动画（delay 为秒）
+const Reveal: React.FC<{ delay?: number; style?: React.CSSProperties; children?: React.ReactNode }> = ({
+  delay = 0,
+  style,
+  children,
+}) => (
+  <div
+    data-reveal
+    style={{
+      animation: `mind-inspector-rise ${DURATION.slow}s ${EASE.decel} both`,
+      animationDelay: `${delay}s`,
+      ...style,
+    }}
+  >
+    {children}
+  </div>
+);
+
 // ============================================================
 // 工具函数
 // ============================================================
@@ -166,10 +207,26 @@ const CharacterTabs: React.FC<CharacterTabsProps> = ({ character, setCharacter, 
 };
 
 // ============================================================
-// FactField — 单条基础字段（展示 + 内联编辑 + 锁定）
+// RowDivider — 详情列表行之间的细分割线
 // ============================================================
 
-interface FactFieldProps {
+const RowDivider: React.FC = () => (
+  <div
+    aria-hidden
+    style={{
+      height: 1,
+      marginLeft: 122,
+      marginRight: SPACING.cardPadding,
+      background: COLORS.border,
+    }}
+  />
+);
+
+// ============================================================
+// IdentityRow — 单条资料字段（详情列表行：标签 + 值 + 内联编辑 + 锁定）
+// ============================================================
+
+interface IdentityRowProps {
   fact: UserFactView | null;
   label: string;
   placeholder: string;
@@ -178,7 +235,7 @@ interface FactFieldProps {
   saving: boolean;
 }
 
-const FactField: React.FC<FactFieldProps> = ({
+const IdentityRow: React.FC<IdentityRowProps> = ({
   fact,
   label,
   placeholder,
@@ -187,6 +244,7 @@ const FactField: React.FC<FactFieldProps> = ({
   saving,
 }) => {
   const { t } = useTranslation();
+  const [hovered, setHovered] = useState(false);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
@@ -220,18 +278,20 @@ const FactField: React.FC<FactFieldProps> = ({
 
   const isEmpty = !fact || !fact.content;
   const isPinned = fact?.is_pinned ?? false;
+  const showActions = hovered || editing || isPinned || fact?.is_manual;
 
   return (
     <div
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
       style={{
         display: 'flex',
         alignItems: 'center',
         gap: SPACING.sm,
-        padding: `${SPACING.sm}px ${SPACING.md}px`,
-        borderRadius: RADIUS.md,
-        background: isEmpty ? 'transparent' : COLORS.bgSurface,
-        border: `1px solid ${isPinned ? COLORS.borderAccent : COLORS.subtleBorder}`,
-        transition: `border-color ${DURATION.fast}s ${EASE.swift}`,
+        padding: `${SPACING.sm + 2}px ${SPACING.cardPadding}px`,
+        minHeight: 44,
+        background: hovered && !editing ? COLORS.bgHover : 'transparent',
+        transition: `background ${DURATION.fast}s ${EASE.swift}`,
       }}
     >
       {/* 标签 */}
@@ -239,7 +299,7 @@ const FactField: React.FC<FactFieldProps> = ({
         style={{
           ...TYPO.micro,
           color: COLORS.textTertiary,
-          minWidth: 72,
+          minWidth: 96,
           flexShrink: 0,
         }}
       >
@@ -274,6 +334,7 @@ const FactField: React.FC<FactFieldProps> = ({
       ) : (
         <span
           onDoubleClick={startEdit}
+          title={isEmpty ? placeholder : fact!.content}
           style={{
             flex: 1,
             minWidth: 0,
@@ -299,13 +360,12 @@ const FactField: React.FC<FactFieldProps> = ({
             flexShrink: 0,
             ...TYPO.micro,
             color: COLORS.textQuaternary,
+            opacity: hovered ? 1 : 0.6,
+            transition: `opacity ${DURATION.fast}s ${EASE.swift}`,
           }}
         >
           {fact!.is_manual && (
-            <Tag
-              color={COLORS.accent}
-              style={{ padding: '1px 6px', fontSize: 10 }}
-            >
+            <Tag color={COLORS.accent} style={{ padding: '1px 6px', fontSize: 10 }}>
               {t('mind_inspector.profile.manual_badge')}
             </Tag>
           )}
@@ -313,8 +373,16 @@ const FactField: React.FC<FactFieldProps> = ({
         </span>
       )}
 
-      {/* 操作按钮 */}
-      <div style={{ display: 'flex', gap: 2, flexShrink: 0 }}>
+      {/* 操作按钮（hover / 锁定 / 手动时显示） */}
+      <div
+        style={{
+          display: 'flex',
+          gap: 2,
+          flexShrink: 0,
+          opacity: showActions ? 1 : 0,
+          transition: `opacity ${DURATION.fast}s ${EASE.swift}`,
+        }}
+      >
         {editing ? (
           <>
             <IconButton
@@ -511,6 +579,7 @@ const AddCustomFact: React.FC<{ onAdd: (content: string) => Promise<void> }> = (
     <div
       style={{
         display: 'flex',
+        alignItems: 'center',
         gap: SPACING.xs,
         padding: `${SPACING.sm}px ${SPACING.md}px`,
         borderRadius: RADIUS.md,
@@ -518,7 +587,7 @@ const AddCustomFact: React.FC<{ onAdd: (content: string) => Promise<void> }> = (
         background: 'transparent',
       }}
     >
-      <Plus size={16} style={{ color: COLORS.textTertiary, flexShrink: 0, marginTop: 3 }} />
+      <Plus size={16} style={{ color: COLORS.textTertiary, flexShrink: 0 }} />
       <input
         type="text"
         value={value}
@@ -700,6 +769,7 @@ const UserProfilePage: React.FC = () => {
 
   return (
     <div
+      id="mind-inspector-profile-root"
       style={{
         flex: 1,
         display: 'flex',
@@ -711,172 +781,180 @@ const UserProfilePage: React.FC = () => {
       }}
     >
       {/* 顶部：角色切换 + 错误提示 */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: SPACING.md }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: SPACING.md }}>
-          <CharacterTabs character={character} setCharacter={setCharacter} t={t} />
-          <span style={{ ...TYPO.body, color: COLORS.textTertiary, fontSize: 13.5 }}>
-            {t('mind_inspector.profile.subtitle', {
-              char: t(`mind_inspector.common.char_${character}`),
-            })}
-          </span>
+      <Reveal delay={0}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: SPACING.md }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: SPACING.md }}>
+            <CharacterTabs character={character} setCharacter={setCharacter} t={t} />
+            <span style={{ ...TYPO.body, color: COLORS.textTertiary, fontSize: 13.5 }}>
+              {t('mind_inspector.profile.subtitle', {
+                char: t(`mind_inspector.common.char_${character}`),
+              })}
+            </span>
+          </div>
+          {error && (
+            <span style={{ ...TYPO.micro, color: COLORS.danger }}>
+              {t('mind_inspector.common.failed')}: {error}
+            </span>
+          )}
         </div>
-        {error && (
-          <span style={{ ...TYPO.micro, color: COLORS.danger }}>
-            {t('mind_inspector.common.failed')}: {error}
-          </span>
-        )}
-      </div>
+      </Reveal>
 
       {/* === L0 基础身份 === */}
-      <section>
-        <SectionTitle style={{ marginBottom: SPACING.sm }}>
-          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-            <UserCircle size={14} />
-            {t('mind_inspector.profile.section_basic')}
-          </span>
-        </SectionTitle>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: SPACING.xs }}>
-          {l0Fields.map((def) => {
-            const fact = basicMap.get(def.type) ?? null;
-            return (
-              <FactField
-                key={def.type}
-                fact={fact}
-                label={t(`mind_inspector.profile.field_${def.type}`)}
-                placeholder={t(`mind_inspector.profile.placeholder_${def.type}`)}
-                onSave={(content) => handleSaveFact(def.type, content)}
-                onTogglePin={() => handleTogglePin(def.type, fact?.is_pinned ?? false)}
-                saving={busyField === def.type}
-              />
-            );
-          })}
-        </div>
-      </section>
+      <Reveal delay={0.12}>
+        <section>
+          <SectionTitle style={{ marginBottom: SPACING.sm }}>
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+              <UserCircle size={14} />
+              {t('mind_inspector.profile.section_basic')}
+            </span>
+          </SectionTitle>
+          <Card style={{ padding: 0, overflow: 'hidden' }}>
+            {l0Fields.map((def, idx) => (
+              <Fragment key={def.type}>
+                {idx > 0 && <RowDivider />}
+                <IdentityRow
+                  fact={basicMap.get(def.type) ?? null}
+                  label={t(`mind_inspector.profile.field_${def.type}`)}
+                  placeholder={t(`mind_inspector.profile.placeholder_${def.type}`)}
+                  onSave={(content) => handleSaveFact(def.type, content)}
+                  onTogglePin={() => handleTogglePin(def.type, basicMap.get(def.type)?.is_pinned ?? false)}
+                  saving={busyField === def.type}
+                />
+              </Fragment>
+            ))}
+          </Card>
+        </section>
+      </Reveal>
 
       {/* === L0.5 结构化偏好 === */}
-      <section>
-        <SectionTitle style={{ marginBottom: SPACING.sm }}>
-          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-            <Heart size={14} />
-            {t('mind_inspector.profile.section_preferences')}
-          </span>
-        </SectionTitle>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: SPACING.xs }}>
-          {l05Fields.map((def) => {
-            const fact = basicMap.get(def.type) ?? null;
-            return (
-              <FactField
-                key={def.type}
-                fact={fact}
-                label={t(`mind_inspector.profile.field_${def.type}`)}
-                placeholder={t(`mind_inspector.profile.placeholder_${def.type}`)}
-                onSave={(content) => handleSaveFact(def.type, content)}
-                onTogglePin={() => handleTogglePin(def.type, fact?.is_pinned ?? false)}
-                saving={busyField === def.type}
-              />
-            );
-          })}
-        </div>
-      </section>
+      <Reveal delay={0.18}>
+        <section>
+          <SectionTitle style={{ marginBottom: SPACING.sm }}>
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+              <Heart size={14} />
+              {t('mind_inspector.profile.section_preferences')}
+            </span>
+          </SectionTitle>
+          <Card style={{ padding: 0, overflow: 'hidden' }}>
+            {l05Fields.map((def, idx) => (
+              <Fragment key={def.type}>
+                {idx > 0 && <RowDivider />}
+                <IdentityRow
+                  fact={basicMap.get(def.type) ?? null}
+                  label={t(`mind_inspector.profile.field_${def.type}`)}
+                  placeholder={t(`mind_inspector.profile.placeholder_${def.type}`)}
+                  onSave={(content) => handleSaveFact(def.type, content)}
+                  onTogglePin={() => handleTogglePin(def.type, basicMap.get(def.type)?.is_pinned ?? false)}
+                  saving={busyField === def.type}
+                />
+              </Fragment>
+            ))}
+          </Card>
+        </section>
+      </Reveal>
 
       {/* === L1 近期状态（只读） === */}
-      <section>
-        <SectionTitle style={{ marginBottom: SPACING.sm }}>
-          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-            <Sparkles size={14} />
-            {t('mind_inspector.profile.section_recent')}
-            {l1 && l1.round_count > 0 && (
-              <span
-                style={{
-                  ...TYPO.micro,
-                  color: COLORS.textQuaternary,
-                  fontWeight: 400,
-                  marginLeft: SPACING.xs,
-                  textTransform: 'none',
-                  letterSpacing: 0,
-                }}
-              >
-                {t('mind_inspector.profile.recent_meta', {
-                  rounds: l1.round_count,
-                  time: formatRelative(l1.generated_at, t),
-                })}
-              </span>
-            )}
-          </span>
-        </SectionTitle>
-        {!hasL1Data ? (
-          <EmptyState
-            text={t('mind_inspector.profile.recent_empty')}
-            style={{ padding: SPACING.md }}
-          />
-        ) : (
-          <div style={{ display: 'flex', gap: SPACING.cardGap, flexWrap: 'wrap' }}>
-            <L1StateCard
-              icon={<Target size={16} />}
-              title={t('mind_inspector.profile.recent_goals')}
-              items={l1!.recent_goals}
-              emptyText={t('mind_inspector.profile.recent_empty')}
-              accent={accent}
-            />
-            <L1StateCard
-              icon={<Briefcase size={16} />}
-              title={t('mind_inspector.profile.recent_projects')}
-              items={l1!.current_projects}
-              emptyText={t('mind_inspector.profile.recent_empty')}
-              accent={accent}
-            />
-            <L1StateCard
-              icon={<Heart size={16} />}
-              title={t('mind_inspector.profile.recent_preferences')}
-              items={l1!.recent_preferences}
-              emptyText={t('mind_inspector.profile.recent_empty')}
-              accent={accent}
-            />
-          </div>
-        )}
-      </section>
-
-      {/* === L2 自由事实 === */}
-      <section>
-        <SectionTitle style={{ marginBottom: SPACING.sm }}>
-          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-            <Plus size={14} />
-            {t('mind_inspector.profile.section_custom')}
-            {profile && profile.custom_facts.length > 0 && (
-              <span
-                style={{
-                  ...TYPO.micro,
-                  color: COLORS.textQuaternary,
-                  fontWeight: 400,
-                  marginLeft: SPACING.xs,
-                  textTransform: 'none',
-                  letterSpacing: 0,
-                }}
-              >
-                {profile.custom_facts.length}
-              </span>
-            )}
-          </span>
-        </SectionTitle>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: SPACING.xs }}>
-          <AddCustomFact onAdd={handleAddCustom} />
-          {profile && profile.custom_facts.length === 0 ? (
+      <Reveal delay={0.24}>
+        <section>
+          <SectionTitle style={{ marginBottom: SPACING.sm }}>
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+              <Sparkles size={14} />
+              {t('mind_inspector.profile.section_recent')}
+              {l1 && l1.round_count > 0 && (
+                <span
+                  style={{
+                    ...TYPO.micro,
+                    color: COLORS.textQuaternary,
+                    fontWeight: 400,
+                    marginLeft: SPACING.xs,
+                    textTransform: 'none',
+                    letterSpacing: 0,
+                  }}
+                >
+                  {t('mind_inspector.profile.recent_meta', {
+                    rounds: l1.round_count,
+                    time: formatRelative(l1.generated_at, t),
+                  })}
+                </span>
+              )}
+            </span>
+          </SectionTitle>
+          {!hasL1Data ? (
             <EmptyState
-              text={t('mind_inspector.profile.custom_empty')}
+              text={t('mind_inspector.profile.recent_empty')}
               style={{ padding: SPACING.md }}
             />
           ) : (
-            profile!.custom_facts.map((fact) => (
-              <CustomFactItem
-                key={`${fact.content}-${fact.timestamp}`}
-                fact={fact}
-                onDelete={() => handleDeleteCustom(fact.content)}
-                deleting={busyField === `del-${fact.content}`}
+            <div style={{ display: 'flex', gap: SPACING.cardGap, flexWrap: 'wrap' }}>
+              <L1StateCard
+                icon={<Target size={16} />}
+                title={t('mind_inspector.profile.recent_goals')}
+                items={l1!.recent_goals}
+                emptyText={t('mind_inspector.profile.recent_empty')}
+                accent={accent}
               />
-            ))
+              <L1StateCard
+                icon={<Briefcase size={16} />}
+                title={t('mind_inspector.profile.recent_projects')}
+                items={l1!.current_projects}
+                emptyText={t('mind_inspector.profile.recent_empty')}
+                accent={accent}
+              />
+              <L1StateCard
+                icon={<Heart size={16} />}
+                title={t('mind_inspector.profile.recent_preferences')}
+                items={l1!.recent_preferences}
+                emptyText={t('mind_inspector.profile.recent_empty')}
+                accent={accent}
+              />
+            </div>
           )}
-        </div>
-      </section>
+        </section>
+      </Reveal>
+
+      {/* === L2 自由事实 === */}
+      <Reveal delay={0.3}>
+        <section>
+          <SectionTitle style={{ marginBottom: SPACING.sm }}>
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+              <Plus size={14} />
+              {t('mind_inspector.profile.section_custom')}
+              {profile && profile.custom_facts.length > 0 && (
+                <span
+                  style={{
+                    ...TYPO.micro,
+                    color: COLORS.textQuaternary,
+                    fontWeight: 400,
+                    marginLeft: SPACING.xs,
+                    textTransform: 'none',
+                    letterSpacing: 0,
+                  }}
+                >
+                  {profile.custom_facts.length}
+                </span>
+              )}
+            </span>
+          </SectionTitle>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: SPACING.xs }}>
+            <AddCustomFact onAdd={handleAddCustom} />
+            {profile && profile.custom_facts.length === 0 ? (
+              <EmptyState
+                text={t('mind_inspector.profile.custom_empty')}
+                style={{ padding: SPACING.md }}
+              />
+            ) : (
+              profile!.custom_facts.map((fact) => (
+                <CustomFactItem
+                  key={`${fact.content}-${fact.timestamp}`}
+                  fact={fact}
+                  onDelete={() => handleDeleteCustom(fact.content)}
+                  deleting={busyField === `del-${fact.content}`}
+                />
+              ))
+            )}
+          </div>
+        </section>
+      </Reveal>
     </div>
   );
 };

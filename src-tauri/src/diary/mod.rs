@@ -100,7 +100,7 @@ impl Default for DiaryConfig {
     fn default() -> Self {
         Self {
             enable_auto_diary: true,
-            min_interaction_threshold: 10,
+            min_interaction_threshold: 20,
             max_diary_length: 500,
         }
     }
@@ -383,7 +383,8 @@ fn current_timestamp() -> f64 {
 /// 条件（全部满足）：
 /// - 自动日记已开启
 /// - 今天尚未生成过日记
-/// - 互动轮次达阈值
+/// - 自上次日记（或初次启动）以来，微信渠道与直接渠道的直接对话消息
+///   累计达 `min_interaction_threshold` 条（默认 20），素材不足时不触发
 /// - 触发分数 ≥ 30（含 23:00 后时间兜底，详见 calculate_trigger_score）
 pub async fn should_trigger(brain: &Brain) -> (bool, String) {
     let config = match get_config(&brain.char_id) {
@@ -409,14 +410,26 @@ pub async fn should_trigger(brain: &Brain) -> (bool, String) {
         Err(_) => {}
     }
 
-    // 获取最近 24h 交互
-    let interactions = intelligent_generator::collect_recent_interactions(&brain.memory).await;
-    if interactions.len() < config.min_interaction_threshold {
+    // 素材收集起点：上次日记生成时间；无日记则从初次启动（0.0）开始
+    let since = match get_latest_entry(&brain.char_id) {
+        Ok(Some(entry)) => entry.created_at as f64,
+        _ => 0.0,
+    };
+
+    // 收集自上次日记（或初次启动）以来的交互记录
+    let interactions = intelligent_generator::collect_interactions_since(&brain.memory, since).await;
+
+    // 仅统计微信渠道与直接渠道的直接对话消息作为日记素材
+    let direct_dialogue_count = interactions
+        .iter()
+        .filter(|r| r.channel == "direct" || r.channel == "wechat")
+        .count();
+    if direct_dialogue_count < config.min_interaction_threshold {
         return (
             false,
             format!(
-                "互动轮次不足（{}/{}）",
-                interactions.len(),
+                "直接对话素材不足（{}/{}）",
+                direct_dialogue_count,
                 config.min_interaction_threshold
             ),
         );

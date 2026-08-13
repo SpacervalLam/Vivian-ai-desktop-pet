@@ -19,6 +19,7 @@ use super::whisper_backend::{WhisperBackend, WhisperConfig, WhisperStreamingMode
 use super::whisper_realtime::WhisperRealtimeBackend;
 use super::azure_backend::{AzureBackend, AzureSpeechConfig};
 use super::aliyun_backend::{AliyunBackend, AliyunAsrConfig};
+use super::openai_whisper_backend::{OpenaiWhisperBackend, OpenaiWhisperConfig};
 
 // ---------------------------------------------------------------------------
 // 识别结果（保留原有类型，供现有代码使用）
@@ -60,17 +61,20 @@ impl RecognitionResult {
 /// - Whisper：本地 Whisper 推理（需 `whisper` feature + ggml 模型文件）
 /// - Azure：Azure Cognitive Services Speech-to-Text REST API（需订阅密钥）
 /// - Aliyun：阿里云 NLS 实时语音识别（WebSocket 流式，支持 partial）
+/// - OpenaiWhisper：OpenAI Whisper API 云端识别（需 API Key）
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum AsrBackendType {
     /// Windows 原生 WinRT/SAPI 语音识别
     Winrt,
-    /// Whisper 语音识别（HTTP 客户端，调用外部 Whisper 服务）
+    /// 本地 Whisper 语音识别（HTTP 客户端，调用本地 whisper.cpp / faster-whisper-server）
     Whisper,
     /// Azure Speech 云端识别（REST API）
     Azure,
     /// 阿里云 NLS 实时语音识别（WebSocket 流式）
     Aliyun,
+    /// OpenAI Whisper API 云端识别（REST API）
+    OpenaiWhisper,
 }
 
 impl Default for AsrBackendType {
@@ -85,6 +89,7 @@ impl AsrBackendType {
             "whisper" => AsrBackendType::Whisper,
             "azure" => AsrBackendType::Azure,
             "aliyun" => AsrBackendType::Aliyun,
+            "openai_whisper" | "openaiwhisper" => AsrBackendType::OpenaiWhisper,
             _ => AsrBackendType::Winrt,
         }
     }
@@ -141,6 +146,9 @@ pub struct AsrConfig {
     /// 阿里云 NLS 后端子配置（仅 engine=Aliyun 时使用）
     #[serde(default)]
     pub aliyun: AliyunAsrConfig,
+    /// OpenAI Whisper API 后端子配置（仅 engine=OpenaiWhisper 时使用）
+    #[serde(default)]
+    pub openai_whisper: OpenaiWhisperConfig,
 }
 
 impl Default for AsrConfig {
@@ -156,6 +164,7 @@ impl Default for AsrConfig {
             whisper: WhisperConfig::default(),
             azure: AzureSpeechConfig::default(),
             aliyun: AliyunAsrConfig::default(),
+            openai_whisper: OpenaiWhisperConfig::default(),
         }
     }
 }
@@ -171,6 +180,7 @@ impl AsrConfig {
             whisper: s.whisper.clone(),
             azure: s.azure.clone(),
             aliyun: s.aliyun.clone(),
+            openai_whisper: s.openai_whisper.clone(),
             ..Default::default()
         }
     }
@@ -284,6 +294,10 @@ pub fn create_asr_backend(config: &AsrConfig) -> Box<dyn AsrEngine + Send + Sync
         AsrBackendType::Aliyun => {
             Box::new(AliyunBackend::from_config(config.clone(), config.aliyun.clone()))
         }
+        AsrBackendType::OpenaiWhisper => Box::new(OpenaiWhisperBackend::from_config(
+            config.clone(),
+            config.openai_whisper.clone(),
+        )),
     }
 }
 

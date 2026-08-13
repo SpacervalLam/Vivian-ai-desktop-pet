@@ -667,6 +667,9 @@ pub struct FastPerceptionResult {
     /// 查询文本的嵌入向量（不序列化，供 ToolSemanticFilter 等下游复用，避免重复嵌入）
     #[serde(skip)]
     pub query_embedding: Arc<Vec<f32>>,
+    /// 认知知识需求评估（在 analyze 中同步计算，不额外嵌入）
+    #[serde(default)]
+    pub epistemic_assessment: EpistemicAssessment,
 }
 
 impl Default for FastPerceptionResult {
@@ -680,7 +683,315 @@ impl Default for FastPerceptionResult {
             guidance: String::new(),
             suggested_modules: vec![],
             query_embedding: Arc::new(Vec::new()),
+            epistemic_assessment: EpistemicAssessment::default(),
         }
+    }
+}
+
+// ==================== 知识需求评估（Epistemic Assessment） ====================
+
+/// 知识需求决策
+///
+/// 替代单一置信度阈值，从"是否自信"转向"是否需要外部证据"。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum KnowledgeDecision {
+    /// 不需要搜索，模型已知/常识
+    NoSearch,
+    /// 可选搜索，模型可能够用但搜索也无妨
+    SearchOptional,
+    /// 建议搜索，有帮助但非必需
+    SearchPreferred,
+    /// 必须搜索，缺乏外部事实无法可靠回答
+    SearchRequired,
+    /// 搜索后仍不确定，需要追问用户澄清
+    SearchThenAsk,
+}
+
+impl Default for KnowledgeDecision {
+    fn default() -> Self {
+        Self::NoSearch
+    }
+}
+
+/// 知识状态
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum KnowledgeStatus {
+    /// 模型已有足够知识
+    Known,
+    /// 很可能知道
+    ProbablyKnown,
+    /// 不确定是否知道
+    Unknown,
+    /// 存在歧义，无法确定指代
+    Ambiguous,
+    /// 需要外部验证
+    RequiresVerification,
+    /// 可能是一个网络梗/流行语
+    PossiblyMeme,
+    /// 可能是一个近期事件
+    PossiblyRecent,
+}
+
+impl Default for KnowledgeStatus {
+    fn default() -> Self {
+        Self::Known
+    }
+}
+
+/// 认知知识需求评估（Epistemic Assessment）
+///
+/// 多维评估用户输入是否需要外部知识验证，替代单一置信度阈值。
+/// 核心问题不是"我有多确定"，而是"为了给出可靠回答，是否需要从外部世界获得证据"。
+///
+/// 四个核心维度：
+/// - semantic_clarity：我理解用户在说什么吗？
+/// - factual_dependence：回答这个问题是否依赖外部事实？
+/// - temporal_sensitivity：这个事实是否可能随时间变化？
+/// - interpretation_risk：如果不搜索，自行解释会不会容易误解用户？
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EpistemicAssessment {
+    /// 语义清晰度（0~1）：我理解用户在说什么吗？
+    /// 低 = 指代不明/语义模糊/无法确定实体
+    pub semantic_clarity: f64,
+    /// 外部事实依赖度（0~1）：回答这个问题是否依赖外部世界的事实？
+    /// 高 = 需要查证外部事实才能回答
+    pub factual_dependence: f64,
+    /// 时效敏感性（0~1）：这个事实是否可能随时间变化？
+    /// 高 = 当前时间敏感，搜索优先
+    pub temporal_sensitivity: f64,
+    /// 解释风险（0~1）：如果不搜索，自行解释会不会很容易误解用户？
+    /// 高 = 歧义/梗/隐喻/荒诞组合，猜错的代价大
+    pub interpretation_risk: f64,
+    /// 知识缺口（0~1）：模型是否有足够的知识来回答？
+    /// 高 = 涉及特定专名/事件/文化背景，模型可能缺乏
+    pub knowledge_gap: f64,
+    /// 知识状态分类
+    pub knowledge_status: KnowledgeStatus,
+    /// 最终决策
+    pub decision: KnowledgeDecision,
+    /// 决策理由（用于日志）
+    pub reason: String,
+    /// 建议的搜索关键词
+    pub search_query: Option<String>,
+}
+
+impl Default for EpistemicAssessment {
+    fn default() -> Self {
+        Self {
+            semantic_clarity: 1.0,
+            factual_dependence: 0.0,
+            temporal_sensitivity: 0.0,
+            interpretation_risk: 0.0,
+            knowledge_gap: 0.0,
+            knowledge_status: KnowledgeStatus::Known,
+            decision: KnowledgeDecision::NoSearch,
+            reason: String::new(),
+            search_query: None,
+        }
+    }
+}
+
+/// 评估认知知识需求
+///
+/// 纯规则启发式评估，不调用 LLM：
+/// - 检测模糊指代（"那个事""你听说了"）
+/// - 检测矛盾/荒诞描述（"被东方明珠攻击"）
+/// - 检测网络梗/流行语特征
+/// - 检测多个专有名词的异常组合
+/// - 检测时效性内容（"最近""今天" + 非问候语）
+/// - 复用 FastPerceptionResult 的意图/话题维度
+pub fn evaluate_epistemic_state(
+    input: &str,
+    _lang: &str,
+    perception: Option<&FastPerceptionResult>,
+) -> EpistemicAssessment {
+    let trimmed = input.trim();
+    let input_len = trimmed.chars().count();
+
+    // 短输入：语义清晰，无外部依赖，无时效性，无歧义
+    if input_len < 4 {
+        return EpistemicAssessment {
+            semantic_clarity: 1.0,
+            factual_dependence: 0.0,
+            temporal_sensitivity: 0.0,
+            interpretation_risk: 0.0,
+            knowledge_gap: 0.0,
+            knowledge_status: KnowledgeStatus::Known,
+            decision: KnowledgeDecision::NoSearch,
+            reason: "输入过短，无需搜索".to_string(),
+            search_query: None,
+        };
+    }
+
+    let mut clarity: f64 = 1.0;
+    let mut factual: f64 = 0.0;
+    let mut temporal: f64 = 0.0;
+    let mut risk: f64 = 0.0;
+    let mut gap: f64 = 0.0;
+    let mut reasons: Vec<String> = Vec::new();
+
+    // 1. 模糊指代检测 → 降低语义清晰度，增加解释风险
+    let ambiguity_markers = ["那个事", "那个瓜", "那个视频", "那个新闻", "最近那个", "今天那个", "你听说了", "你知道那个", "这个梗", "那件事"];
+    for marker in &ambiguity_markers {
+        if trimmed.contains(marker) {
+            clarity = (clarity - 0.40).max(0.0);
+            risk = (risk + 0.35).min(1.0);
+            gap = (gap + 0.25).min(1.0);
+            reasons.push(format!("模糊指代: '{}'", marker));
+            break;
+        }
+    }
+
+    // 2. 矛盾/荒诞描述检测 → 提高解释风险
+    let contradiction_patterns = [
+        ("被", "攻击"), ("被", "炸"), ("被", "曝光"),
+    ];
+    for (a, b) in &contradiction_patterns {
+        if trimmed.contains(a) && trimmed.contains(b) {
+            clarity = (clarity - 0.20).max(0.0);
+            risk = (risk + 0.30).min(1.0);
+            factual = (factual + 0.30).min(1.0);
+            reasons.push(format!("疑似矛盾描述: '{}' + '{}'", a, b));
+            break;
+        }
+    }
+
+    // 3. 网络梗/流行语检测 → 提高解释风险，降低语义清晰度
+    let meme_patterns = ["梗", "表情包", "热搜", "上热搜", "出圈", "刷屏", "破防", "yyds", "绝绝子", "栓Q", "芭比Q"];
+    let meme_hit = meme_patterns.iter().any(|p| trimmed.contains(p));
+    if meme_hit {
+        clarity = (clarity - 0.15).max(0.0);
+        risk = (risk + 0.25).min(1.0);
+        factual = (factual + 0.15).min(1.0);
+        reasons.push("疑似网络梗/流行语".to_string());
+    }
+
+    // 4. 多个专有名词异常组合 → 提高知识缺口
+    let proper_nouns = [
+        "上海", "北京", "广州", "深圳", "成都", "杭州", "南京", "武汉", "西安", "重庆",
+        "虹桥", "浦东", "东方明珠", "外滩", "故宫", "长城", "西湖", "天河",
+        "蜜雪冰城", "喜茶", "奈雪", "星巴克", "麦当劳", "肯德基", "海底捞", "瑞幸",
+        "B站", "抖音", "快手", "小红书", "微博", "知乎", "贴吧", "豆瓣",
+    ];
+    let proper_noun_hits: Vec<&str> = proper_nouns.iter().filter(|pn| trimmed.contains(*pn)).copied().collect();
+    if proper_noun_hits.len() >= 2 {
+        gap = (gap + 0.25).min(1.0);
+        factual = (factual + 0.20).min(1.0);
+        risk = (risk + 0.15).min(1.0);
+        reasons.push(format!("多个专有名词组合: {}", proper_noun_hits.join("+")));
+    }
+
+    // 5. 复用 FastPerceptionResult 的意图置信度
+    if let Some(fp) = perception {
+        if fp.intent.label == "question" && fp.intent.confidence < 0.5 {
+            clarity = (clarity - 0.15).max(0.0);
+            factual = (factual + 0.15).min(1.0);
+            reasons.push(format!("question 意图置信度低: {:.2}", fp.intent.confidence));
+        }
+        if fp.intent.label == "tool_request" && fp.intent.confidence < 0.5 {
+            clarity = (clarity - 0.10).max(0.0);
+            reasons.push(format!("tool_request 意图置信度低: {:.2}", fp.intent.confidence));
+        }
+    }
+
+    // 6. 时效性内容检测 → 提高时效敏感性
+    let recency_markers = ["最近", "今天", "刚刚", "昨天", "这周", "本周", "今年", "去年"];
+    let greeting_patterns = ["你好", "早上好", "晚上好", "晚安", "嗨", "hello", "hi"];
+    let has_recency = recency_markers.iter().any(|m| trimmed.contains(m));
+    let is_greeting = greeting_patterns.iter().any(|g| trimmed.to_lowercase().contains(g));
+    if has_recency && !is_greeting && input_len > 6 {
+        temporal = (temporal + 0.35).min(1.0);
+        factual = (factual + 0.20).min(1.0);
+        reasons.push("时效性内容可能需要验证".to_string());
+    }
+
+    // 7. 复杂问句 + 较长 → 提高知识缺口
+    if (trimmed.contains('？') || trimmed.contains('?')) && input_len > 15 {
+        factual = (factual + 0.10).min(1.0);
+        gap = (gap + 0.10).min(1.0);
+        reasons.push("复杂问句".to_string());
+    }
+
+    // 8. 实体/名词组合 + 问号 → 强搜索信号（如"英伟达现在市值多少"）
+    if proper_noun_hits.len() >= 1 && (trimmed.contains('？') || trimmed.contains('?')) {
+        temporal = (temporal + 0.15).min(1.0);
+        factual = (factual + 0.25).min(1.0);
+        if !has_recency {
+            // 专名+问号但不含时效词 → 知识事实，gap 提升
+            gap = (gap + 0.20).min(1.0);
+        }
+    }
+
+    // 确定知识状态
+    let knowledge_status = if risk > 0.6 {
+        if trimmed.contains("梗") || meme_hit {
+            KnowledgeStatus::PossiblyMeme
+        } else if has_recency {
+            KnowledgeStatus::PossiblyRecent
+        } else {
+            KnowledgeStatus::Ambiguous
+        }
+    } else if factual > 0.6 {
+        KnowledgeStatus::RequiresVerification
+    } else if gap > 0.5 {
+        KnowledgeStatus::Unknown
+    } else if clarity < 0.6 {
+        KnowledgeStatus::Ambiguous
+    } else {
+        KnowledgeStatus::Known
+    };
+
+    // 决策映射
+    let decision = if temporal >= 0.7 {
+        KnowledgeDecision::SearchRequired
+    } else if risk >= 0.7 {
+        KnowledgeDecision::SearchRequired
+    } else if factual >= 0.7 && gap >= 0.5 {
+        KnowledgeDecision::SearchRequired
+    } else if clarity < 0.4 {
+        KnowledgeDecision::SearchPreferred
+    } else if factual >= 0.5 && temporal >= 0.3 {
+        KnowledgeDecision::SearchPreferred
+    } else if factual >= 0.4 {
+        KnowledgeDecision::SearchOptional
+    } else {
+        KnowledgeDecision::NoSearch
+    };
+
+    // 搜索关键词：当决策不低于 SearchPreferred 时提取
+    let search_query = if matches!(decision, KnowledgeDecision::SearchRequired | KnowledgeDecision::SearchPreferred) {
+        let cleaned = trimmed
+            .replace('？', " ")
+            .replace('?', " ")
+            .replace('！', " ")
+            .replace('!', " ")
+            .trim()
+            .to_string();
+        if cleaned.chars().count() >= 4 {
+            Some(cleaned)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let reason = if reasons.is_empty() {
+        "无显著知识需求信号".to_string()
+    } else {
+        reasons.join("; ")
+    };
+
+    EpistemicAssessment {
+        semantic_clarity: clarity,
+        factual_dependence: factual,
+        temporal_sensitivity: temporal,
+        interpretation_risk: risk,
+        knowledge_gap: gap,
+        knowledge_status,
+        decision,
+        reason,
+        search_query,
     }
 }
 
@@ -757,6 +1068,13 @@ impl FastSemanticAnalyzer {
         // 推荐模块
         let suggested_modules = suggest_modules(&intent, &topics, &relationship);
 
+        // 认知知识需求评估（纯规则，不额外嵌入）
+        let epistemic_assessment = evaluate_epistemic_state(
+            trimmed,
+            &self.language,
+            None,
+        );
+
         let result = FastPerceptionResult {
             emotion,
             intent,
@@ -766,6 +1084,7 @@ impl FastSemanticAnalyzer {
             guidance,
             suggested_modules,
             query_embedding: Arc::new(query_emb),
+            epistemic_assessment,
         };
 
         self.put_cache(trimmed.to_string(), result.clone());

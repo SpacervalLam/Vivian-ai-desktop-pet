@@ -44,8 +44,17 @@ pub async fn start_recognition(
     state: State<'_, Arc<AppState>>,
     character_id: Option<String>,
 ) -> Result<(), String> {
-    if let Some(cid) = character_id {
-        state.reset_generation_cancel(&cid);
+    if let Some(cid) = &character_id {
+        state.reset_generation_cancel(cid);
+    }
+    // 半双工协调：若 TTS 正在播放，先停止 TTS 再启动录音，
+    // 避免麦克风录到扬声器声音（回声/自激）
+    if state.playback_gate.is_playing() {
+        if let Ok(character) = state.get_character(character_id.as_deref()) {
+            let planner = crate::speech::get_planner().await;
+            let _ = planner.stop_speaker(&character.id).await;
+        }
+        state.playback_gate.mark_finished();
     }
     state.asr.start_recognition().await.map_err(|e| e.to_string())
 }
@@ -62,6 +71,30 @@ pub fn get_recognition_status(state: State<'_, Arc<AppState>>) -> Result<bool, S
     Ok(state.asr.is_recording())
 }
 
+/// 对音频文件进行一次性语音转文字（非实时，用于 cpal 类后端避免麦克风冲突）。
+///
+/// `samples_b64`：base64 编码的小端 f32 PCM 字节流（16kHz 单声道）。
+/// 前端用 Web Audio API 解码录制的 webm/ogg 并重采样到 16kHz 后编码传入。
+/// 返回识别文本。
+#[tauri::command]
+pub async fn transcribe_audio(
+    state: State<'_, Arc<AppState>>,
+    samples_b64: String,
+) -> Result<String, String> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(samples_b64.trim())
+        .map_err(|e| format!("base64 解码失败: {e}"))?;
+    if bytes.len() % 4 != 0 {
+        return Err("音频数据长度不是 4 的倍数（f32 PCM）".into());
+    }
+    let samples: Vec<f32> = bytes
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect();
+    state.asr.transcribe(&samples).await.map_err(|e| e.to_string())
+}
+
 /// 即时更新 ASR 运行时配置（设置面板保存后调用，无需重启应用）
 ///
 /// 从当前 AppConfig.speech_recognition 读取并注入 AsrManager，
@@ -73,19 +106,22 @@ pub async fn update_asr_config(state: State<'_, Arc<AppState>>) -> Result<(), St
     state.asr.set_config(asr_config).await.map_err(|e| e.to_string())
 }
 
-/// 注册三个文字输入快捷键（Vivian/Nana 私聊 + 群发总框）
+/// 注册文字输入快捷键（Vivian/Nana 私聊 + 群发总框）和窗口快捷键（微信/设置/笔记本）
 ///
-/// 在 app setup 时调用一次。已注册的快捷键通过 AppState.text_shortcuts 跟踪，
-/// key 为角色标识（"vivian"/"nana"/"broadcast"），value 为快捷键字符串。
+/// 在 app setup 时调用一次。文字快捷键通过 AppState.text_shortcuts 跟踪，
+/// 窗口快捷键通过 AppState.window_shortcuts 跟踪，
+/// key 为标识（"vivian"/"nana"/"broadcast" 或 "chat"/"settings"/"memory"），value 为快捷键字符串。
 pub fn register_text_shortcuts(app: AppHandle, state: &Arc<AppState>) {
     let base = state.config.read().get_all().base.clone();
-    let entries: [(&str, &str); 3] = [
+
+    // 文字快捷键
+    let text_entries: [(&str, &str); 3] = [
         ("vivian", &base.shortcut),
         ("nana", &base.shortcut_nana),
         ("broadcast", &base.shortcut_broadcast),
     ];
-    let mut map = state.text_shortcuts.lock();
-    for (role, sc) in entries {
+    let mut text_map = state.text_shortcuts.lock();
+    for (role, sc) in text_entries {
         if sc.is_empty() {
             continue;
         }
@@ -93,12 +129,32 @@ pub fn register_text_shortcuts(app: AppHandle, state: &Arc<AppState>) {
             tracing::warn!("[text_shortcut] 注册 {} 快捷键 {} 失败: {}", role, sc, e);
         } else {
             tracing::info!("[text_shortcut] 已注册 {} 快捷键: {}", role, sc);
-            map.insert(role.to_string(), sc.to_string());
+            text_map.insert(role.to_string(), sc.to_string());
+        }
+    }
+    drop(text_map);
+
+    // 窗口快捷键
+    let win_entries: [(&str, &str); 3] = [
+        ("chat", &base.shortcut_chat),
+        ("settings", &base.shortcut_settings),
+        ("memory", &base.shortcut_memory),
+    ];
+    let mut win_map = state.window_shortcuts.lock();
+    for (action, sc) in win_entries {
+        if sc.is_empty() {
+            continue;
+        }
+        if let Err(e) = app.global_shortcut().register(sc) {
+            tracing::warn!("[window_shortcut] 注册 {} 快捷键 {} 失败: {}", action, sc, e);
+        } else {
+            tracing::info!("[window_shortcut] 已注册 {} 快捷键: {}", action, sc);
+            win_map.insert(action.to_string(), sc.to_string());
         }
     }
 }
 
-/// 更新文字输入快捷键（设置面板保存后调用）
+/// 更新文字输入快捷键和窗口快捷键（设置面板保存后调用）
 ///
 /// 先解绑所有旧快捷键，再从配置读取新值重新注册。
 #[tauri::command]
@@ -106,32 +162,57 @@ pub fn update_text_shortcuts(
     app: AppHandle,
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), String> {
-    // 先解绑所有旧快捷键
-    let old_map = state.text_shortcuts.lock().clone();
-    for (_role, sc) in &old_map {
+    // 先解绑所有旧文字快捷键
+    let old_text = state.text_shortcuts.lock().clone();
+    for (_role, sc) in &old_text {
+        let _ = app.global_shortcut().unregister(sc.as_str());
+    }
+    // 先解绑所有旧窗口快捷键
+    let old_win = state.window_shortcuts.lock().clone();
+    for (_action, sc) in &old_win {
         let _ = app.global_shortcut().unregister(sc.as_str());
     }
 
     // 从配置读取新值重新注册
     let base = state.config.read().get_all().base.clone();
-    let entries: [(&str, &str); 3] = [
+
+    // 文字快捷键
+    let text_entries: [(&str, &str); 3] = [
         ("vivian", &base.shortcut),
         ("nana", &base.shortcut_nana),
         ("broadcast", &base.shortcut_broadcast),
     ];
-    let mut new_map = std::collections::HashMap::new();
-    for (role, sc) in entries {
+    let mut new_text = std::collections::HashMap::new();
+    for (role, sc) in text_entries {
         if sc.is_empty() {
             continue;
         }
         app.global_shortcut()
             .register(sc)
             .map_err(|e| format!("注册快捷键失败: {}", e))?;
-        new_map.insert(role.to_string(), sc.to_string());
+        new_text.insert(role.to_string(), sc.to_string());
     }
+    *state.text_shortcuts.lock() = new_text;
 
-    *state.text_shortcuts.lock() = new_map;
-    tracing::info!("[text_shortcut] 文字快捷键已更新");
+    // 窗口快捷键
+    let win_entries: [(&str, &str); 3] = [
+        ("chat", &base.shortcut_chat),
+        ("settings", &base.shortcut_settings),
+        ("memory", &base.shortcut_memory),
+    ];
+    let mut new_win = std::collections::HashMap::new();
+    for (action, sc) in win_entries {
+        if sc.is_empty() {
+            continue;
+        }
+        app.global_shortcut()
+            .register(sc)
+            .map_err(|e| format!("注册快捷键失败: {}", e))?;
+        new_win.insert(action.to_string(), sc.to_string());
+    }
+    *state.window_shortcuts.lock() = new_win;
+
+    tracing::info!("[shortcut] 文字快捷键与窗口快捷键已更新");
     Ok(())
 }
 
@@ -159,22 +240,31 @@ pub async fn start_whisper_service(
         let c = state.config.read();
         c.get_all().speech_recognition.whisper.clone()
     };
-    if cfg.service_python_path.as_deref().map(|s| s.is_empty()).unwrap_or(true)
-        && which_faster_whisper_server().is_none()
-    {
-        return Err(
-            "未在 PATH 中找到 faster-whisper-server。请先执行 `pip install faster-whisper-server`，或在\"Python 路径\"字段填入 python.exe 路径".to_string(),
-        );
-    }
+    // 解析应用代理配置，透传给 pip 安装子进程
+    let proxy_url = {
+        let c = state.config.read();
+        let pc = crate::network::proxy::ProxyConfig::from_app_config(&c.get_all());
+        pc.effective_proxy_url()
+    };
 
     let svc = crate::speech::whisper_service().await;
-    let new_state = svc.start(&cfg).await.map_err(|e| e.to_string())?;
+    let new_state = svc.start(&cfg, proxy_url).await.map_err(|e| e.to_string())?;
 
-    // 启动成功后回写 server_url 与 api_format，让 ASR 后端立即指向本地服务
-    let port = cfg.service_port.unwrap_or(8000);
-    let endpoint = format!("http://127.0.0.1:{port}");
-    let app_state = state.inner().clone();
-    persist_whisper_runtime_config(&app_state, &endpoint).await?;
+    // 仅在服务已进入 Starting/Running 状态时回写 server_url。
+    // Installing 状态由后台异步安装+启动，回写交由 get_whisper_service_status
+    // 轮询时检测 Running 跃迁完成，避免在服务未就绪时写入无效端点。
+    if matches!(
+        new_state.status,
+        crate::speech::WhisperServiceStatus::Starting
+            | crate::speech::WhisperServiceStatus::Running
+    ) {
+        let port = cfg.service_port.unwrap_or(8000);
+        let endpoint = format!("http://127.0.0.1:{port}");
+        let app_state = state.inner().clone();
+        if let Err(e) = persist_whisper_runtime_config(&app_state, &endpoint).await {
+            tracing::warn!("[Whisper] 回写运行时配置失败: {e}");
+        }
+    }
 
     Ok(serde_json::to_value(new_state).map_err(|e| e.to_string())?)
 }
@@ -191,10 +281,37 @@ pub async fn stop_whisper_service() -> Result<Value, String> {
 ///
 /// 内部会先调用 `refresh()` 检查子进程是否仍存活（防止状态失真），
 /// 再返回当前 `WhisperServiceState`。前端可定时轮询此接口（建议 2s 一次）。
+///
+/// 副作用：若服务已进入 Running 但配置中的 server_url 尚未指向本地端点
+/// （例如从 Installing 后台安装完成跃迁而来），此处自动回写 server_url
+/// 并触发 ASR 配置热重载，保证一键启动流程闭环。
 #[tauri::command]
-pub async fn get_whisper_service_status() -> Result<Value, String> {
+pub async fn get_whisper_service_status(
+    state: State<'_, Arc<AppState>>,
+) -> Result<Value, String> {
     let svc = crate::speech::whisper_service().await;
     let cur = svc.refresh().await;
+
+    // 检测 Running 跃迁：服务已就绪但 server_url 未指向本地端点时回写
+    if matches!(
+        cur.status,
+        crate::speech::WhisperServiceStatus::Running
+    ) {
+        if let Some(port) = cur.port {
+            let expected = format!("http://127.0.0.1:{port}");
+            let current_url = {
+                let c = state.config.read();
+                c.get_all().speech_recognition.whisper.server_url.clone()
+            };
+            if current_url != expected {
+                let app_state = state.inner().clone();
+                if let Err(e) = persist_whisper_runtime_config(&app_state, &expected).await {
+                    tracing::warn!("[Whisper] Running 跃迁回写 server_url 失败: {e}");
+                }
+            }
+        }
+    }
+
     Ok(serde_json::to_value(cur).map_err(|e| e.to_string())?)
 }
 
@@ -231,32 +348,15 @@ async fn persist_whisper_runtime_config(
     Ok(())
 }
 
-/// 检查 PATH 中是否存在 faster-whisper-server 可执行文件
-fn which_faster_whisper_server() -> Option<std::path::PathBuf> {
-    let exe_name = if cfg!(target_os = "windows") {
-        "faster-whisper-server.exe"
-    } else {
-        "faster-whisper-server"
-    };
-    std::env::var_os("PATH").and_then(|paths| {
-        std::env::split_paths(&paths).find_map(|dir| {
-            let full = dir.join(exe_name);
-            if full.is_file() {
-                Some(full)
-            } else {
-                None
-            }
-        })
-    })
-}
-
 /// 在 ASR 引擎切换到 whisper 或应用启动时检查是否需要自动拉起本地 Whisper 服务
 ///
 /// 仅当 `service_auto_start = true` 时触发。前端无需调用，由 `lib.rs` 在 setup 阶段调用。
 pub async fn maybe_autostart_whisper_service(state: &Arc<AppState>) {
-    let cfg = {
+    let (cfg, proxy_url) = {
         let c = state.config.read();
-        c.get_all().speech_recognition.whisper.clone()
+        let whisper_cfg = c.get_all().speech_recognition.whisper.clone();
+        let pc = crate::network::proxy::ProxyConfig::from_app_config(&c.get_all());
+        (whisper_cfg, pc.effective_proxy_url())
     };
     if !cfg.service_auto_start {
         return;
@@ -273,7 +373,7 @@ pub async fn maybe_autostart_whisper_service(state: &Arc<AppState>) {
         return;
     }
     let svc = crate::speech::whisper_service().await;
-    match svc.start(&cfg).await {
+    match svc.start(&cfg, proxy_url).await {
         Ok(s) => {
             tracing::info!("[lib] Whisper 服务自动启动已触发: {:?}", s.status);
             if matches!(

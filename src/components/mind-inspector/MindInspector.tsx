@@ -7,6 +7,7 @@
 
 import React, { useState, useMemo, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
+import { listen } from '@tauri-apps/api/event';
 import {
   COLORS,
   TYPO,
@@ -26,6 +27,8 @@ import MindPage from './pages/MindPage';
 import WorldPage from './pages/WorldPage';
 import GraphPage, { invalidatePastelCache } from './pages/GraphPage';
 import DiaryPage from './pages/DiaryPage';
+import NotebookPage from './pages/NotebookPage';
+import TasksPage from './pages/TasksPage';
 import UserProfilePage from './pages/UserProfilePage';
 
 // === 关键帧（页面切换动画） ===
@@ -122,6 +125,44 @@ const MindInspector: React.FC = () => {
     setHeaderExtra(null);
   }, [activeNav]);
 
+  // 读取 URL 参数（首次打开窗口时定位笔记 / 跳到 todo/scheduler tab）+ 监听 memory:navigate 事件
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    const params = new URLSearchParams(window.location.search);
+    const nbId = params.get('nb_id');
+    const nbChar = params.get('nb_char');
+    const navParam = params.get('nav');
+    if (nbId) {
+      setActiveNav('notebook');
+      setPageParams({
+        notebookId: nbId,
+        notebookCharacter: (nbChar as 'vivian' | 'nana') || 'vivian',
+      });
+    } else if (navParam === 'todo' || navParam === 'scheduler') {
+      setActiveNav('tasks');
+    }
+    void (async () => {
+      unlisten = await listen<{ page: string; notebookId?: string; notebookCharacter?: string }>(
+        'memory:navigate',
+        (e) => {
+          const p = e.payload;
+          if (p.page === 'notebook' && p.notebookId) {
+            setActiveNav('notebook');
+            setPageParams({
+              notebookId: p.notebookId,
+              notebookCharacter: (p.notebookCharacter as 'vivian' | 'nana') || 'vivian',
+            });
+          } else if (p.page === 'todo' || p.page === 'scheduler') {
+            setActiveNav('tasks');
+          }
+        },
+      );
+    })();
+    return () => {
+      unlisten?.();
+    };
+  }, []);
+
   const navigateTo = (page: NavKey, params?: PageParams) => {
     setActiveNav(page);
     setPageParams(params ?? {});
@@ -153,6 +194,10 @@ const MindInspector: React.FC = () => {
         return <GraphPage />;
       case 'diary':
         return <DiaryPage />;
+      case 'notebook':
+        return <NotebookPage />;
+      case 'tasks':
+        return <TasksPage />;
       case 'profile':
         return <UserProfilePage />;
       default:

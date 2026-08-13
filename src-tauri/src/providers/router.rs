@@ -16,7 +16,7 @@ use crate::providers::base::{
 };
 use crate::providers::factory::{create_task_provider, ClientCache};
 use crate::resilience::{classify_llm_error_from_str, error_kind_to_message_key, LlmErrorKind};
-use crate::types::response::{ChatMessage, MessageImage};
+use crate::types::response::ChatMessage;
 
 /// 模型路由
 ///
@@ -55,13 +55,18 @@ pub struct ModelRouter {
     /// 防止后处理 LLM 调用（记忆巩固 / 内心独白 / 日记等）同时挤占主对话资源。
     /// 分组规则见 `semaphore_for_task`：
     /// - chat / reasoning / vision_describe → 3 并发（用户交互路径，最高优先级）
-    /// - memory / reflection / consolidation → 2 并发（记忆/反思/巩固）
-    /// - emotion_analysis / inner_monologue / diary / activity_extraction
-    ///   / knowledge_acquisition / interest_search → 2 并发（辅助后台任务）
+    /// - memory / reflection / consolidation → 3 并发（记忆/反思/巩固）
+    /// - emotion_analysis / inner_monologue / diary / knowledge_acquisition
+    ///   / translation / bystander_judge / intent_judge → 2 并发（辅助后台任务）
     /// - 其他 → 3 并发（兜底）
     semaphores: Arc<HashMap<String, Arc<Semaphore>>>,
     /// LLM 错误 toast 冷却追踪：error_kind → 上次发送时间，防止同类型错误反复弹窗
     error_toast_cooldown: Arc<RwLock<HashMap<LlmErrorKind, Instant>>>,
+    /// 路由回退事件冷却追踪：task_type → 上次发送时间
+    ///
+    /// 防止同一任务反复回退（如 inner_monologue 熔断后每次调用都回退）导致 toast 刷屏。
+    /// 按 task_type 维度冷却：不同任务的回退各自独立计数。
+    route_fallback_cooldown: Arc<RwLock<HashMap<String, Instant>>>,
     /// 是否走代理链路（基于 `config.network.proxy_mode` 判断，非 direct 即视为走代理）
     ///
     /// 让辅助任务能据此调整超时：代理链路通常比直连慢，需要更长等待时间。
@@ -73,28 +78,6 @@ pub struct ModelRouter {
     /// 熔断后自动重试当前请求（不带 schema），对上层透明。
     /// 熔断持续到进程重启或 `reload`（reload 创建新 ModelRouter 实例，自然重置）。
     strict_broken: Arc<AtomicBool>,
-    /// 视觉能力探测缓存：model 名 → 探测结果
-    ///
-    /// 首次发图前调 `check_vision_capability` 探测目标 provider 是否支持图片输入。
-    /// 探测结果按 model 名缓存，避免重复请求。reload 时随 ModelRouter 重建自动清空。
-    vision_capability_cache: Arc<RwLock<HashMap<String, VisionCapability>>>,
-}
-
-/// 视觉能力探测结果
-///
-/// 用 16x16 PNG 探测目标模型是否接受图片输入：
-/// - `Supported`：API 正常返回 → 后续发图直接走原流程
-/// - `NotSupported`：API 拒绝 / 报错 / 静默忽略图片 → 阻止发图，提示用户换模型
-#[derive(Debug, Clone)]
-pub enum VisionCapability {
-    Supported,
-    NotSupported(String),
-}
-
-impl VisionCapability {
-    pub fn is_supported(&self) -> bool {
-        matches!(self, Self::Supported)
-    }
 }
 
 /// 任务 → 信号量分组的并发上限
@@ -105,6 +88,9 @@ const SEMAPHORE_GROUP_AUXILIARY: usize = 2;
 /// LLM 错误 toast 冷却时间：同类错误在此时间内不重复弹窗
 const ERROR_TOAST_COOLDOWN_SECS: u64 = 60;
 
+/// 路由回退事件冷却时间：同一任务在此时间内的回退不重复发 toast
+const ROUTE_FALLBACK_COOLDOWN_SECS: u64 = 120;
+
 /// 解析任务类型对应的信号量分组名
 ///
 /// 返回 (组名, 并发上限)，由 `ModelRouter::new` 在构造时据此创建 Semaphore
@@ -113,16 +99,16 @@ fn semaphore_for_task(task_type: &str) -> (&'static str, usize) {
         "chat" | "reasoning" | "vision_describe" => {
             ("chat_reasoning", SEMAPHORE_GROUP_CHAT_REASONING)
         }
-        "memory" | "consolidation" => {
+        "memory" | "reflection" | "consolidation" => {
             ("memory_reflection", SEMAPHORE_GROUP_MEMORY_REFLECTION)
         }
         "emotion_analysis"
         | "inner_monologue"
         | "diary"
-        | "activity_extraction"
         | "knowledge_acquisition"
-        | "interest_search"
-        | "translation" => ("auxiliary", SEMAPHORE_GROUP_AUXILIARY),
+        | "translation"
+        | "bystander_judge"
+        | "intent_judge" => ("auxiliary", SEMAPHORE_GROUP_AUXILIARY),
         _ => ("chat_reasoning", SEMAPHORE_GROUP_CHAT_REASONING),
     }
 }
@@ -166,6 +152,8 @@ impl ModelRouter {
                     endpoint: endpoint.to_string(),
                     api_secret: config.ai.api_secret.clone().unwrap_or_default(),
                     app_id: config.ai.app_id.clone().unwrap_or_default(),
+                    temperature: None,
+                    max_tokens: None,
                 };
                 match create_task_provider(&task_config, config, &client_cache) {
                     Ok(p) => {
@@ -244,11 +232,11 @@ impl ModelRouter {
             emit_enabled: Arc::new(AtomicBool::new(false)),
             semaphores: Arc::new(Self::build_semaphores()),
             error_toast_cooldown: Arc::new(RwLock::new(HashMap::new())),
+            route_fallback_cooldown: Arc::new(RwLock::new(HashMap::new())),
             uses_proxy: config.network.proxy_mode != "direct",
             strict_broken: Arc::new(AtomicBool::new(
                 load_strict_broken_model().as_deref() == Some(config.ai.model.trim()),
             )),
-            vision_capability_cache: Arc::new(RwLock::new(HashMap::new())),
         })
     }
 
@@ -376,124 +364,6 @@ impl ModelRouter {
         tracing::info!("[ModelRouter] 已清空客户端缓存（{} 条）", count);
     }
 
-    /// 视觉能力探测（首次发图前调用，结果缓存到 `vision_capability_cache`）
-    ///
-    /// 探测路径与 `vision_describe` 任务的实际路由一致：
-    /// - 路由矩阵启用且有 `vision_describe` 任务 provider → 用该 provider
-    /// - 否则 → 用主 LLM API
-    ///
-    /// 探测请求绕过 `query_with_fallback`，直接调 provider 的 `call_chat`：
-    /// - 避免 fallback 掩盖真实结果
-    /// - 避免 emit route_fallback / route_status 污染路由矩阵 UI
-    /// - 不联网、不注入 schema
-    ///
-    /// 判定逻辑：
-    /// - 调用成功且响应非空 → `Supported`
-    /// - 调用失败 → `NotSupported(原因)`
-    /// - 无可用 provider → `NotSupported(未配置模型)`
-    pub async fn check_vision_capability(&self) -> VisionCapability {
-        // 1. 选取目标 provider（与 vision_describe 实际路由一致）
-        //    main_provider 是 Arc<Option<Box<...>>>，需多层解包取 &dyn BaseProvider
-        let provider: Option<&dyn BaseProvider> = if self.enable_routing_matrix {
-            self.task_providers
-                .get("vision_describe")
-                .map(|p| p.as_ref())
-                .or_else(|| {
-                    self.main_provider
-                        .as_ref()
-                        .as_ref()
-                        .map(|b| &**b)
-                })
-        } else {
-            self.main_provider
-                .as_ref()
-                .as_ref()
-                .map(|b| &**b)
-        };
-
-        let provider = match provider {
-            Some(p) => p,
-            None => {
-                return VisionCapability::NotSupported("未配置视觉模型".to_string());
-            }
-        };
-        let model = provider.get_model().to_string();
-
-        // 2. 命中缓存直接返回
-        if let Some(cached) = self.vision_capability_cache.read().get(&model) {
-            tracing::debug!(
-                "[ModelRouter] 视觉能力缓存命中: model={} supported={}",
-                model,
-                cached.is_supported()
-            );
-            return cached.clone();
-        }
-
-        // 3. 构造探测请求：16x16 透明 PNG
-        //    部分服务商（如豆包）要求最小 14x14，16x16 安全满足
-        const PROBE_PNG_B64: &str =
-            "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAEklEQVR4nGNgGAWjYBSMAggAAAQQAAFVN1rQAAAAAElFTkSuQmCC";
-        let image = MessageImage {
-            media_type: "image/png".to_string(),
-            data: PROBE_PNG_B64.to_string(),
-            url: None,
-            detail: Some("low".to_string()),
-        };
-        let messages = vec![
-            ChatMessage::system("You are a vision capability probe. Reply with exactly: OK"),
-            ChatMessage::user_with_images("Describe this image in one word.", vec![image]),
-        ];
-
-        tracing::info!(
-            "[ModelRouter] 探测视觉能力: model={} (首次发图探测)",
-            model
-        );
-
-        let capability = match provider.call_chat(messages).await {
-            Ok(resp) => {
-                let trimmed = resp.trim();
-                if trimmed.is_empty() {
-                    tracing::warn!(
-                        "[ModelRouter] 视觉探测响应为空: model={} (API 可能静默忽略图片输入)",
-                        model
-                    );
-                    VisionCapability::NotSupported("API 返回空响应".to_string())
-                } else {
-                    tracing::info!(
-                        "[ModelRouter] 视觉能力确认: model={} supported=true resp_len={}",
-                        model,
-                        trimmed.len()
-                    );
-                    VisionCapability::Supported
-                }
-            }
-            Err(e) => {
-                let err_str = e.to_string();
-                tracing::warn!(
-                    "[ModelRouter] 视觉探测失败: model={} error={}",
-                    model,
-                    err_str
-                );
-                VisionCapability::NotSupported(err_str)
-            }
-        };
-
-        // 4. 写缓存
-        self.vision_capability_cache
-            .write()
-            .insert(model.clone(), capability.clone());
-        capability
-    }
-
-    /// 清除视觉能力缓存（配置变更 / 用户手动重试时调用）
-    pub fn clear_vision_capability_cache(&self) {
-        let count = self.vision_capability_cache.read().len();
-        self.vision_capability_cache.write().clear();
-        if count > 0 {
-            tracing::info!("[ModelRouter] 已清空视觉能力缓存（{} 条）", count);
-        }
-    }
-
     /// 热重载
     ///
     /// 基于新配置重建 providers 与客户端缓存，返回新实例。
@@ -506,9 +376,22 @@ impl ModelRouter {
     }
 
     /// 内部：发送路由回退事件
+    ///
+    /// 带冷却机制：同一 task_type 在 ROUTE_FALLBACK_COOLDOWN_SECS 内不重复发送，
+    /// 防止熔断状态下（如 inner_monologue 反复回退）toast 刷屏。
     fn emit_route_fallback(&self, task_type: &str, error: &str) {
         if !self.emit_enabled.load(Ordering::Relaxed) {
             return;
+        }
+        {
+            let mut cooldowns = self.route_fallback_cooldown.write();
+            let now = Instant::now();
+            if let Some(last_time) = cooldowns.get(task_type) {
+                if last_time.elapsed().as_secs() < ROUTE_FALLBACK_COOLDOWN_SECS {
+                    return;
+                }
+            }
+            cooldowns.insert(task_type.to_string(), now);
         }
         let error_kind = classify_llm_error_from_str(error);
         let message_key = error_kind_to_message_key(&error_kind);
@@ -675,6 +558,10 @@ impl ModelRouter {
                             result.clone()
                         }
                     );
+                    // 回退主 LLM 成功，恢复绿色状态
+                    if last_error.is_some() {
+                        self.emit_route_status(task_type, "ok");
+                    }
                     return Ok(result);
                 }
                 Err(e) => {
@@ -682,6 +569,7 @@ impl ModelRouter {
                         "[ModelRouter] 主 LLM API 失败: {}",
                         e
                     );
+                    self.emit_route_status(task_type, "error");
                     last_error = Some(e);
                 }
             }
@@ -1071,6 +959,10 @@ impl ModelRouter {
                 match Self::invoke_with_tools(provider, messages.clone(), tools.clone()).await {
                     Ok(resp) => {
                         Self::log_llm_response(task_type, &resp);
+                        // 回退主 LLM 成功，恢复绿色状态
+                        if last_error.is_some() {
+                            self.emit_route_status(task_type, "ok");
+                        }
                         return Ok(resp);
                     }
                     Err(e) => {
@@ -1078,6 +970,7 @@ impl ModelRouter {
                             "[ModelRouter] 主 LLM API native fc 失败: {}",
                             e
                         );
+                        self.emit_route_status(task_type, "error");
                         last_error = Some(e);
                     }
                 }
@@ -1168,7 +1061,8 @@ impl ModelRouter {
                 let args = serde_json::to_string(&tc.arguments).unwrap_or_default();
                 let args_cap = 1000;
                 let args_preview = if args.len() > args_cap {
-                    format!("{}...<truncated>", &args[..args_cap])
+                    let truncated = Self::safe_truncate(&args, args_cap);
+                    format!("{}...<truncated>", truncated)
                 } else {
                     args
                 };

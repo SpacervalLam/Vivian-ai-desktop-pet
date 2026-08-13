@@ -455,11 +455,15 @@ fn validate_mood_tag(tag: &str) -> String {
     }
 }
 
-/// 从 MemoryManager 获取最近 24 小时的交互记录
+/// 收集自指定时间戳（exclusive）以来的交互记录
 ///
-/// 仅采集"用户 ↔ 当前角色"的对话，排除跨角色对话、内心独白、日记本身等非用户素材。
-pub(crate) async fn collect_recent_interactions(memory: &MemoryManager) -> Vec<InteractionRecord> {
-    let cutoff_secs = chrono::Local::now().timestamp() - 24 * 3600;
+/// 用于"自上次日记生成以来"的素材统计：传入上次日记的 `created_at`，
+/// 返回该时间点之后所有"用户↔当前角色"的对话记录。无日记时传入 0.0
+/// 即可覆盖初次启动以来的全部记忆。
+pub(crate) async fn collect_interactions_since(
+    memory: &MemoryManager,
+    since: f64,
+) -> Vec<InteractionRecord> {
     let memories = match memory.get_all_memories().await {
         Ok(m) => m,
         Err(e) => {
@@ -469,7 +473,7 @@ pub(crate) async fn collect_recent_interactions(memory: &MemoryManager) -> Vec<I
     };
     let filtered: Vec<MemoryItem> = memories
         .into_iter()
-        .filter(|m| m.timestamp >= cutoff_secs as f64)
+        .filter(|m| m.timestamp > since)
         .collect();
     extract_user_dialogue(filtered)
 }
@@ -846,7 +850,10 @@ pub(crate) async fn generate_content_via_llm(
 
     let response = brain
         .router
-        .generate(crate::providers::base::LLMRequest::new("diary", messages))
+        .generate(
+            crate::providers::base::LLMRequest::new("diary", messages)
+                .with_json_schema(diary_content_schema()),
+        )
         .await
         .map_err(|e| {
             tracing::error!("[DiaryGenerator] LLM 调用失败: {e}");
@@ -854,6 +861,23 @@ pub(crate) async fn generate_content_via_llm(
         })?;
 
     Ok(parse_diary_json(&response))
+}
+
+/// 日记输出 JSON Schema
+///
+/// GLM 走 json_object 模式（不约束 schema），结构由 prompt 文本约束。
+/// 此 schema 仅作为标志激活 response_format 注入。
+fn diary_content_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "content": {"type": "string"},
+            "keywords": {"type": "object"},
+            "mood_tag": {"type": "string"},
+            "ongoing_story_update": {"type": "object"}
+        },
+        "required": ["content"]
+    })
 }
 
 /// 构造日记 Prompt
@@ -1185,19 +1209,21 @@ fn build_prompt(ctx: &DailyContext, lang: &str) -> (String, String) {
 
 /// 解析 LLM 返回的日记 JSON，包含容错处理
 pub fn parse_diary_json(response: &str) -> DiaryContent {
+    let trimmed = strip_markdown_code_fence(response);
+
     // 第一步：尝试直接解析
-    if let Ok(result) = serde_json::from_str::<Value>(response) {
+    if let Ok(result) = serde_json::from_str::<Value>(trimmed) {
         if let Some(content) = extract_content_and_keywords(&result) {
             return content;
         }
     }
 
     // 第二步：尝试提取 JSON 块（从第一个 { 到最后一个 }）
-    let start_idx = response.find('{');
-    let end_idx = response.rfind('}');
+    let start_idx = trimmed.find('{');
+    let end_idx = trimmed.rfind('}');
     if let (Some(s), Some(e)) = (start_idx, end_idx) {
         if s < e {
-            let json_str = &response[s..=e];
+            let json_str = &trimmed[s..=e];
             if let Ok(result) = serde_json::from_str::<Value>(json_str) {
                 if let Some(content) = extract_content_and_keywords(&result) {
                     return content;
@@ -1209,12 +1235,30 @@ pub fn parse_diary_json(response: &str) -> DiaryContent {
     // 最后回退：返回纯文本作为 content
     tracing::warn!("[DiaryGenerator] LLM 返回格式不符合 JSON 规范，使用回退策略");
     DiaryContent {
-        content: response.to_string(),
+        content: trimmed.to_string(),
         keywords: Vec::new(),
         structured_keywords: None,
         mood_tag: None,
         story_update: None,
     }
+}
+
+/// 剥离 markdown 代码块围栏（```json ... ``` 或 ``` ... ```）
+fn strip_markdown_code_fence(s: &str) -> &str {
+    let s = s.trim_start();
+    if let Some(rest) = s.strip_prefix("```") {
+        // 跳过语言标记（如 json）
+        let after_lang = match rest.find('\n') {
+            Some(idx) => &rest[idx + 1..],
+            None => rest,
+        };
+        // 去除结尾的 ```
+        if let Some(end) = after_lang.rfind("```") {
+            return after_lang[..end].trim();
+        }
+        return after_lang.trim();
+    }
+    s
 }
 
 fn extract_content_and_keywords(result: &Value) -> Option<DiaryContent> {
@@ -1294,6 +1338,15 @@ mod tests {
         let result = parse_diary_json(response);
         assert_eq!(result.content, "测试");
         assert_eq!(result.keywords, vec!["a".to_string()]);
+    }
+
+    #[test]
+    fn test_parse_diary_json_markdown_fence() {
+        let response = "```json\n{\"content\": \"围栏测试\", \"keywords\": [\"a\"], \"mood_tag\": \"good\"}\n```";
+        let result = parse_diary_json(response);
+        assert_eq!(result.content, "围栏测试");
+        assert_eq!(result.keywords, vec!["a".to_string()]);
+        assert_eq!(result.mood_tag, Some("good".to_string()));
     }
 
     #[test]

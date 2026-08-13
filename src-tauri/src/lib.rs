@@ -22,6 +22,7 @@ pub mod messages;
 pub mod mind;
 pub mod metrics;
 pub mod network;
+pub mod notebook;
 pub mod persona;
 pub mod self_state;
 pub mod pet_controller;
@@ -30,6 +31,7 @@ pub mod presence;
 pub mod proactive;
 pub mod providers;
 pub mod psychology;
+pub mod remote;
 pub mod research;
 pub mod resilience;
 pub mod speech;
@@ -163,7 +165,7 @@ pub fn run() {
                     };
                     let pressed = event.state == tauri_plugin_global_shortcut::ShortcutState::Pressed;
 
-                    // 文字快捷键：短按立即触发文本输入，长按 400ms 触发语音输入（仅 vivian/nana）
+                    // 文字快捷键：短按立即触发文本输入，长按 400ms 触发语音输入
                     // 互斥：任一角色快捷键按住期间，其他角色快捷键按下事件被忽略，
                     // 避免 voice_shortcut_timer 单槽位被覆盖导致旧计时器无法 abort。
                     let text_map = state.text_shortcuts.lock().clone();
@@ -190,20 +192,18 @@ pub fn run() {
                                         _ => return,
                                     };
                                     let _ = app.emit(event_name, serde_json::json!({}));
-                                    // vivian/nana 启动长按计时器，满 1 秒触发语音输入
-                                    if role == "vivian" || role == "nana" {
-                                        let app_handle = app.clone();
-                                        let char_id = role.clone();
-                                        // 当前回调运行在全局快捷键 hook 线程，非 Tokio runtime 上下文
-                                        let handle = tauri::async_runtime::spawn(async move {
-                                            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-                                            let _ = app_handle.emit(
-                                                "input:voice_shortcut",
-                                                serde_json::json!({ "character_id": char_id }),
-                                            );
-                                        });
-                                        *state.voice_shortcut_timer.lock() = Some(handle);
-                                    }
+                                    // 所有角色快捷键启动长按计时器，满 400ms 触发语音输入
+                                    let app_handle = app.clone();
+                                    let char_id = role.clone();
+                                    // 当前回调运行在全局快捷键 hook 线程，非 Tokio runtime 上下文
+                                    let handle = tauri::async_runtime::spawn(async move {
+                                        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                                        let _ = app_handle.emit(
+                                            "input:voice_shortcut",
+                                            serde_json::json!({ "character_id": char_id }),
+                                        );
+                                    });
+                                    *state.voice_shortcut_timer.lock() = Some(handle);
                                 } else {
                                     // 松开时取消长按计时器，并释放互斥锁
                                     // 仅当松开的角色 == 当前按住的角色时才释放，
@@ -218,6 +218,22 @@ pub fn run() {
                                     }
                                 }
                                 return;
+                            }
+                        }
+                    }
+
+                    // 窗口快捷键：按下直接 emit 对应事件，无长按/互斥逻辑
+                    if pressed {
+                        let win_map = state.window_shortcuts.lock().clone();
+                        for (action, sc) in &win_map {
+                            if let Ok(parsed) = tauri_plugin_global_shortcut::Shortcut::from_str(sc) {
+                                if shortcut == &parsed {
+                                    let _ = app.emit(
+                                        "window:shortcut",
+                                        serde_json::json!({ "action": action }),
+                                    );
+                                    return;
+                                }
                             }
                         }
                     }
@@ -239,6 +255,8 @@ pub fn run() {
             commands::chat::send_message_stream,
             commands::chat::stop_generation,
             commands::chat::send_image_message,
+            commands::chat::save_temp_image,
+            commands::chat::save_voice_audio,
             commands::chat::extract_file_text,
             commands::chat::wake_from_presence,
             commands::memory::get_memories,
@@ -265,6 +283,7 @@ pub fn run() {
             commands::memory::list_relationship_facts,
             commands::memory::get_social_state_snapshot,
             commands::memory::rebuild_memory_embeddings,
+            commands::memory::get_embedding_models,
             commands::mind::get_mind_state,
             commands::mind::get_world_snapshot,
             commands::mind::list_beliefs,
@@ -292,6 +311,7 @@ pub fn run() {
             commands::config::reload_config,
             commands::config::test_network_connection,
             commands::config::get_image_data_url,
+            commands::config::get_audio_data_url,
             commands::emotion::get_current_mood,
             commands::emotion::get_mood_history,
             commands::emotion::get_recent_events,
@@ -320,6 +340,7 @@ pub fn run() {
             commands::speech::start_recognition,
             commands::speech::stop_recognition,
             commands::speech::get_recognition_status,
+            commands::speech::transcribe_audio,
             commands::speech::update_asr_config,
             commands::speech::update_text_shortcuts,
             commands::speech::start_whisper_service,
@@ -495,11 +516,26 @@ pub fn run() {
             commands::todo::cancel_scheduled_task,
             commands::todo::pause_scheduled_task,
             commands::todo::resume_scheduled_task,
+            commands::notebook::list_notebooks,
+            commands::notebook::get_notebook_html,
+            commands::notebook::get_notebook_detail,
+            commands::notebook::create_notebook,
+            commands::notebook::update_notebook,
+            commands::notebook::delete_notebook,
+            commands::notebook::import_html_note,
         ])
         .setup(|app| {
             // 初始化 Windows Job Object（KILL_ON_JOB_CLOSE 兜底）
             // 必须在任何子进程启动前完成，确保所有子进程都能被绑定
             crate::utils::job_object::init();
+
+            // 初始化全局 HTTP 客户端（注入代理配置，影响天气/Edge TTS/URL 抓取等境外请求）
+            // 必须在任何外部网络请求发生前完成
+            {
+                let cfg = app.state::<Arc<AppState>>().inner().clone();
+                let pc = crate::network::proxy::ProxyConfig::from_app_config(&cfg.config.read().get_all());
+                crate::network::http_client::init_global_client(pc);
+            }
 
             // 初始化系统托盘
             if let Err(e) = commands::system_tray::setup_tray(app.handle()) {
@@ -523,7 +559,9 @@ pub fn run() {
                 crate::tools::builtin::presence_tools::set_app_handle(app.handle().clone());
                 crate::tools::builtin::web_search_tool::set_app_handle(app.handle().clone());
                 crate::tools::builtin::share_link_tool::set_app_handle(app.handle().clone());
+                crate::tools::builtin::notebook_tools::set_app_handle(app.handle().clone());
                 crate::tools::builtin::weather_tools::set_app_handle(app.handle().clone());
+                crate::tools::builtin::system_ops::set_app_handle(app.handle().clone());
                 crate::mind::reasoning_trace::set_app_handle(app.handle().clone());
                 crate::memory::ollama_service::set_app_handle(app.handle().clone());
                 crate::cross_character::CROSS_CHARACTER_BUS.initialize(
@@ -590,8 +628,11 @@ pub fn run() {
 
                             // 启动时立即为所有在线角色触发一次 current_thought 合成
                             // 避免 Mind Inspector 首次打开时显示空白
+                            // 受 enable_inner_monologue 开关控制（与内心独白共享同一滑块）
                             {
-                                let language = state.config.read().get_all().base.language.clone();
+                                let config_snap = state.config.read().get_all().clone();
+                                let enable_thought = config_snap.world.enable_inner_monologue;
+                                let language = config_snap.base.language.clone();
                                 let lang_code = if language.starts_with("ja") {
                                     "ja"
                                 } else if language.starts_with("en") {
@@ -603,6 +644,10 @@ pub fn run() {
                                 for instance in chars.values() {
                                     if *instance.online.read() {
                                         let mind = instance.brain.mind.clone();
+                                        if !enable_thought {
+                                            mind.clear_current_thought();
+                                            continue;
+                                        }
                                         let router = instance.brain.router.clone();
                                         let world_provider = instance.brain.world_provider.clone();
                                         let lang = lang_code.to_string();
@@ -727,6 +772,22 @@ pub fn run() {
                                 }
                             }
 
+                            // 为每个角色启动独立的热梗采集循环（每 7 天一次，SNS 平台定向）
+                            // 保持角色"懂梗玩梗"人设，与 Busy 知识采集完全独立
+                            for instance in state.characters.read().values() {
+                                let brain = instance.brain.clone();
+                                let char_id = brain.char_id.clone();
+                                let app_for_meme = handle.clone();
+                                let router_for_meme = brain.router.clone();
+                                let memory_for_meme = brain.memory.clone();
+                                crate::presence::spawn_meme_acquisition_loop(
+                                    char_id,
+                                    app_for_meme,
+                                    router_for_meme,
+                                    memory_for_meme,
+                                );
+                            }
+
                             // 为每个在线角色创建独立窗口
                             //
                             // 窗口尺寸按角色模型画布比例计算：
@@ -763,7 +824,10 @@ pub fn run() {
                                 .always_on_top(true)
                                 .skip_taskbar(true)
                                 .shadow(false)
-                                .visible(true);
+                                .visible(true)
+                                // 关闭 Tauri 对 OS 文件拖放的拦截，让原生 HTML5 ondrop 事件直达
+                                // React 层（App.tsx 的 handleDrop 负责发送文件给当前角色）
+                                .disable_drag_drop_handler();
 
                                 match builder.build() {
                                     Ok(win) => {
@@ -801,6 +865,9 @@ pub fn run() {
 
                             tracing::info!("所有角色初始化完成，发送 app:ready 事件");
                             let _ = handle.emit("app:ready", ());
+
+                            // 启动远程访问 HTTP 服务（按配置启停，支持自定义端口）
+                            crate::remote::sync_remote_server(state.clone());
 
                             // 启动时打印当前 web_search provider，便于调试
                             let web_search_cfg = state.config.read().get_all().web_search;

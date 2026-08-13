@@ -131,24 +131,54 @@ impl OpenAiCompatProvider {
         }
     }
 
-    /// 注入 Responses API 的 Structured Outputs（`text.format.type=json_schema`）
+    /// 注入 Responses API 的结构化输出约束（`text.format`）
     ///
-    /// 通过 API 层强制 LLM 返回合法 JSON 并约束字段，避免 prompt 约束被违反。
+    /// 按能力分级注入：
+    /// - `supports_structured_output()=true` → `text.format.type=json_schema` (strict)
+    ///   通过 API 层强制 LLM 返回合法 JSON 并约束字段
+    /// - `supports_json_mode()=true`（但不支持 strict）→ `text.format.type=json_object`
+    ///   仅保证返回合法 JSON 语法，字段约束由 prompt 文本的 output_format 段提供
+    /// - 都不支持 → 不注入，纯 prompt 文本约束
+    ///
     /// 适用场景：纯文本对话路径（call_chat / call_chat_with_search / call_stream_chat）。
-    ///
     /// **不适用场景**：function calling 路径（`invoke` / `stream_with_tools`），因 OpenAI 协议
     /// 禁止 `tools` 与 `text.format` 同时使用（会返回 400 错误），调用方需确保不传入 schema。
-    ///
-    /// Responses API 原生支持 `text.format.type=json_schema`，无需像 Chat Completions
-    /// 那样降级为 `json_object` 或向 messages 追加 "json" 字样提示。
     fn inject_json_schema(&self, body: &mut Value, json_schema: &Option<serde_json::Value>) {
-        if let Some(schema) = json_schema {
+        if json_schema.is_none() {
+            return;
+        }
+        if self.supports_structured_output() {
             body["text"] = json!({
                 "format": {
                     "type": "json_schema",
                     "name": "vivian_response",
-                    "schema": schema,
+                    "schema": json_schema,
                     "strict": true
+                }
+            });
+        } else if self.supports_json_mode() {
+            // OpenAI / Ark 等 Responses API 兼容平台要求：使用 json_object 模式时，
+            // input 中必须出现 "json" 一词，否则返回 400 InvalidParameter。
+            // 检查 input 数组的序列化文本是否包含 "json"（不区分大小写），
+            // 不满足时向 input 末尾追加一条轻量提示，确保关键词存在，保证结构化输出路径可用。
+            let input_contains_json = body
+                .get("input")
+                .map(|v| v.to_string().to_lowercase().contains("json"))
+                .unwrap_or(false);
+            if !input_contains_json {
+                if let Some(input) = body.get_mut("input").and_then(|v| v.as_array_mut()) {
+                    input.push(json!({
+                        "role": "user",
+                        "content": "(Please respond in JSON format.)"
+                    }));
+                    tracing::debug!(
+                        "[inject_json_schema] input 不含 'json' 关键词，已追加提示以保证 json_object 模式可用"
+                    );
+                }
+            }
+            body["text"] = json!({
+                "format": {
+                    "type": "json_object"
                 }
             });
         }
@@ -394,7 +424,12 @@ impl OpenAiCompatProvider {
             .as_array()
             .map(|arr| arr.iter().any(|item| item["type"].as_str() == Some("function_call")))
             .unwrap_or(false);
-        if has_function_calls {
+        // 检查是否存在 reasoning 项（模型只输出思考内容，无最终 message 文本）
+        let has_reasoning = json["output"]
+            .as_array()
+            .map(|arr| arr.iter().any(|item| item["type"].as_str() == Some("reasoning")))
+            .unwrap_or(false);
+        if has_function_calls || has_reasoning {
             Ok(String::new())
         } else {
             Err(VivianError::Provider(
@@ -935,9 +970,11 @@ impl BaseProvider for OpenAiCompatProvider {
         true
     }
 
-    /// Responses API 原生支持 Structured Outputs (text.format.json_schema)
+    /// 第三方兼容平台（Ark/SiliconFlow 等）的 Responses API 对 strict json_schema 支持有限，
+    /// 返回 false。此时 `inject_json_schema` 会降级为 `text.format.type=json_object`，
+    /// 由 API 保证返回合法 JSON 语法，字段约束由 prompt 文本的 output_format 段提供。
     fn supports_structured_output(&self) -> bool {
-        true
+        false
     }
 
     /// Responses API 兼容 JSON Mode (text.format.json_object 等价语义)

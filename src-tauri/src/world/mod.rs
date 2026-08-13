@@ -8,6 +8,8 @@
 //! - 天气失败即"不知道"，不做时间推断兜底
 //! - WorldSnapshot 是轻量可克隆快照，由 WorldStateProvider 缓存与产出
 
+pub mod activity_classifier;
+pub mod activity_corpus;
 pub mod entity_state;
 pub mod events;
 pub mod foreground_window;

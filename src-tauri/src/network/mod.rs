@@ -2,6 +2,7 @@ pub mod http_client;
 pub mod http_retry;
 pub mod proxy;
 pub mod request_utils;
+pub mod url_fetcher;
 pub mod web_context;
 
 pub use http_client::{close_global_sessions, get_global_client};

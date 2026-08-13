@@ -2,8 +2,6 @@
 
 use std::sync::Arc;
 
-use chrono::TimeZone;
-
 use once_cell::sync::Lazy;
 use parking_lot::RwLock;
 use serde_json::{json, Value};
@@ -49,6 +47,7 @@ pub fn record_cross_character_spoken(char_id: &str, text: &str) {
         let truncated: String = text.chars().take(80).collect();
         last_spoken_text.insert(char_id.to_string(), truncated);
     }
+    record_speak_history(char_id);
 }
 
 /// 仅更新角色的 `LAST_SPOKEN` 时间戳，不覆盖 `LAST_SPOKEN_TEXT`。
@@ -59,6 +58,8 @@ pub fn touch_last_spoken(char_id: &str) {
     let now_ts = chrono::Local::now().timestamp() as f64;
     let mut last_spoken = LAST_SPOKEN.write();
     last_spoken.insert(char_id.to_string(), now_ts);
+    drop(last_spoken);
+    record_speak_history(char_id);
 }
 
 /// 跨角色发言文本记录：与 `LAST_SPOKEN` 同步写入，保留最近一次发言的文本快照。
@@ -113,6 +114,55 @@ pub fn set_talk_frequency_adjust(char_id: &str, value: f64) {
 /// 标记角色刚发言：把软频率调整值压低到 TALK_FREQ_AFTER_SPOKEN
 pub fn mark_spoken_frequency(char_id: &str) {
     set_talk_frequency_adjust(char_id, TALK_FREQ_AFTER_SPOKEN);
+}
+
+/// 近期发言历史：每角色保留最近 20 条发言时间戳，用于计算发言比例
+static RECENT_SPEAK_HISTORY: Lazy<RwLock<std::collections::HashMap<String, Vec<f64>>>> =
+    Lazy::new(|| RwLock::new(std::collections::HashMap::new()));
+
+/// 发言历史保留窗口（秒）：超过此时间的记录被清理
+const SPEAK_HISTORY_WINDOW_SECS: f64 = 600.0;
+/// 每角色保留的最大记录数
+const SPEAK_HISTORY_MAX_ENTRIES: usize = 20;
+
+/// 记录一次发言到历史（在 record_cross_character_spoken / touch_last_spoken 中调用）
+fn record_speak_history(char_id: &str) {
+    let now_ts = chrono::Local::now().timestamp() as f64;
+    let mut map = RECENT_SPEAK_HISTORY.write();
+    let entry = map.entry(char_id.to_string()).or_default();
+    entry.push(now_ts);
+    // 清理过期记录
+    entry.retain(|&ts| now_ts - ts <= SPEAK_HISTORY_WINDOW_SECS);
+    // 限制条数
+    if entry.len() > SPEAK_HISTORY_MAX_ENTRIES {
+        let drain_count = entry.len() - SPEAK_HISTORY_MAX_ENTRIES;
+        entry.drain(..drain_count);
+    }
+}
+
+/// 计算角色在近 SPEAK_HISTORY_WINDOW_SECS 内的发言占比 [0, 1]
+///
+/// 返回 0.5 表示双方发言次数均等；> 0.5 表示本角色说得更多。
+/// 用于动态调整 reluctance / yield_delay：说得多的一方更克制，说得少的一方更积极。
+pub fn compute_speak_ratio(char_id: &str) -> f64 {
+    let now_ts = chrono::Local::now().timestamp() as f64;
+    let map = RECENT_SPEAK_HISTORY.read();
+    let my_count = map
+        .get(char_id)
+        .map(|v| v.iter().filter(|&&ts| now_ts - ts <= SPEAK_HISTORY_WINDOW_SECS).count())
+        .unwrap_or(0);
+    let other_count: usize = map
+        .iter()
+        .filter(|(k, _)| *k != char_id)
+        .flat_map(|(_, v)| v.iter())
+        .filter(|&&ts| now_ts - ts <= SPEAK_HISTORY_WINDOW_SECS)
+        .count();
+    let total = my_count + other_count;
+    if total == 0 {
+        0.5
+    } else {
+        my_count as f64 / total as f64
+    }
 }
 
 /// 策略 D：发言优先级仲裁 —— 记录每个角色最近一次"成功产出主动消息"的时间戳。
@@ -537,24 +587,28 @@ pub async fn proactive_tick(
 
     // 跨角色发言冷却（策略 D：按被阻塞角色的 reluctance 乘数差异化）：
     // 检查其他角色是否在冷却窗口内发言过。
-    // 冷却时长 = CROSS_ROLE_COOLDOWN_SECS × 本角色的 reluctance。
-    // Vivian（reluctance=2.0）被阻塞 30s，Nana（reluctance=4.0）被阻塞 60s，
-    // 让两个角色的恢复窗口不对称，避免"前后脚"问候。
+    // 冷却时长 = CROSS_ROLE_COOLDOWN_SECS × 动态 reluctance。
+    // 动态调整：近 10 分钟发言比例 > 0.5（说得多）时 reluctance 上浮，让对方有更多机会接话；
+    // 比例 < 0.5（说得少）时 reluctance 下调，让自己更容易开口。
     {
         let now_ts = chrono::Local::now().timestamp() as f64;
         let last_spoken = LAST_SPOKEN.read();
         let behavior = crate::character_behavior::get_behavior(&char_id);
-        let effective_cooldown = CROSS_ROLE_COOLDOWN_SECS * behavior.arbitration.reluctance;
+        let speak_ratio = compute_speak_ratio(&char_id);
+        // ratio 0.5 → ×1.0（基准），ratio 1.0 → ×1.5（更克制），ratio 0.0 → ×0.6（更积极）
+        let ratio_mult = 0.6 + (speak_ratio - 0.5).clamp(-0.5, 0.5) * 1.8;
+        let effective_cooldown = CROSS_ROLE_COOLDOWN_SECS * behavior.arbitration.reluctance * ratio_mult;
         let blocked_by = last_spoken.iter().find(|(lbl, &ts)| {
             *lbl != &char_id && (now_ts - ts) < effective_cooldown
         });
         if let Some((other_lbl, ts)) = blocked_by {
             tracing::debug!(
-                "[Proactive] {} 跳过：{} 在 {:.1}s 前刚发言（冷却窗口 {:.0}s）",
+                "[Proactive] {} 跳过：{} 在 {:.1}s 前刚发言（冷却窗口 {:.0}s, ratio={:.2}）",
                 char_id,
                 other_lbl,
                 now_ts - ts,
-                effective_cooldown
+                effective_cooldown,
+                speak_ratio
             );
             return Ok(json!({
                 "produced": false,
@@ -565,18 +619,23 @@ pub async fn proactive_tick(
     }
 
     // 策略 D：仲裁让步延迟 —— 被仲裁抑制的角色在 yield_delay_secs 内不得发言
+    // 动态调整：发言比例高的一方让步延迟更长，给对方更多发言空间
     {
         let now_ts = chrono::Local::now().timestamp() as f64;
         let suppression = YIELD_SUPPRESSION.read();
         if let Some(&suppressed_at) = suppression.get(&char_id) {
             let behavior = crate::character_behavior::get_behavior(&char_id);
-            let delay = behavior.arbitration.yield_delay_secs;
+            let speak_ratio = compute_speak_ratio(&char_id);
+            // ratio 0.5 → ×1.0，ratio 1.0 → ×1.5，ratio 0.0 → ×0.5
+            let ratio_mult = 0.5 + (speak_ratio - 0.5).clamp(-0.5, 0.5) * 2.0;
+            let delay = behavior.arbitration.yield_delay_secs * ratio_mult;
             if delay > 0.0 && (now_ts - suppressed_at) < delay {
                 tracing::debug!(
-                    "[Proactive] {} 跳过：仲裁让步延迟中（{:.0}s / {:.0}s）",
+                    "[Proactive] {} 跳过：仲裁让步延迟中（{:.0}s / {:.0}s, ratio={:.2}）",
                     char_id,
                     now_ts - suppressed_at,
-                    delay
+                    delay,
+                    speak_ratio
                 );
                 return Ok(json!({
                     "produced": false,
@@ -1175,6 +1234,7 @@ pub async fn proactive_tick(
     // 主动行为按 delivery_channel 派发到对应渠道
     // - Bubble：写入 dialogue channel="proactive"（桌宠气泡路径，被 wechat 过滤排除）
     // - ChatWindow：写入 dialogue channel="wechat" + emit chat:assistant_message（前端 ChatWindow 立即追加气泡）
+    // 用户不在场时，全部强制改为 ChatWindow（见下方覆盖逻辑），避免气泡无人看到
     // Share 类强制 value_score 门槛，未达标跳过发送（待分享池后续阶段实现）
 
     // 播放边界感知：TTS 正在播放时跳过本轮投递，避免音频冲突
@@ -1193,6 +1253,15 @@ pub async fn proactive_tick(
             "reason": "tts_playing",
         }));
     }
+    // 用户不在场时，主动消息全部强制走 ChatWindow（微信面板），
+    // 避免桌宠气泡无人看到。覆盖写入 user_messages 让下游投递、记忆、旁观过滤、
+    // 返回前端字段统一使用生效渠道。
+    if !ctx.user_present {
+        for action in &mut user_messages {
+            action.delivery_channel = crate::proactive::DeliveryChannel::ChatWindow;
+        }
+    }
+
     for action in &user_messages {
         if matches!(action.content_type, crate::proactive::ContentType::Share) {
             let score = action.value_score.unwrap_or(0.0);
@@ -1217,11 +1286,12 @@ pub async fn proactive_tick(
             continue;
         }
 
+        let clean_content = crate::utils::strip_markdown_syntax(&action.content);
         let channel_str = match action.delivery_channel {
             crate::proactive::DeliveryChannel::Bubble => "proactive",
             crate::proactive::DeliveryChannel::ChatWindow => "wechat",
         };
-        let mut m = ChatMessage::assistant(&action.content);
+        let mut m = ChatMessage::assistant(&clean_content);
         m.meta = Some(MessageMeta::new(MessageSource::Assistant).with_channel(channel_str));
         brain.dialogue.add_message(m);
 
@@ -1232,7 +1302,7 @@ pub async fn proactive_tick(
                 "chat:assistant_message",
                 json!({
                     "character_id": &char_id,
-                    "content": &action.content,
+                    "content": &clean_content,
                     "channel": "wechat",
                 }),
             );
@@ -1243,7 +1313,7 @@ pub async fn proactive_tick(
                 None => true,
             };
             if need_banner {
-                let preview: String = action.content.chars().take(60).collect();
+                let preview: String = clean_content.chars().take(60).collect();
                 let _ = app.emit(
                     "wechat:message_banner",
                     json!({
@@ -1252,6 +1322,14 @@ pub async fn proactive_tick(
                         "kind": "proactive",
                         "timestamp": chrono::Local::now().timestamp() as f64,
                     }),
+                );
+                // 同步压入远程通知队列，供手机端 toast 轮询展示
+                crate::remote::push_toast(
+                    "proactive",
+                    "智能体消息",
+                    &preview,
+                    &char_id,
+                    json!({ "kind": "proactive" }),
                 );
             }
         }
@@ -1293,9 +1371,10 @@ pub async fn proactive_tick(
                     "knowledge_source": "direct",
                     "content_type": format!("{:?}", action.content_type).to_lowercase(),
                 });
+                let clean_for_mem = crate::utils::strip_markdown_syntax(&action.content);
                 let _ = memory
                     .add_memory_with_metadata(
-                        &action.content,
+                        &clean_for_mem,
                         crate::memory::types::MemoryType::CasualConversation,
                         action.importance as f64,
                         vec![
@@ -1344,6 +1423,7 @@ pub async fn proactive_tick(
                             "listener": "user",
                             "perspective": "observer",
                             "knowledge_source": "observed",
+                            "reliability": "second_hand",
                             "observer_id": other_id,
                         });
                         if let Err(e) = observer_memory
@@ -1387,9 +1467,12 @@ pub async fn proactive_tick(
     };
 
     // 策略 D：告知前端本角色的跨角色冷却时长（对方发言后本角色应等待的毫秒数）
+    // 使用与仲裁逻辑一致的动态 reluctance
     let behavior = crate::character_behavior::get_behavior(&char_id);
+    let speak_ratio = compute_speak_ratio(&char_id);
+    let ratio_mult = 0.6 + (speak_ratio - 0.5).clamp(-0.5, 0.5) * 1.8;
     let effective_cross_cooldown_ms =
-        (CROSS_ROLE_COOLDOWN_SECS * behavior.arbitration.reluctance * 1000.0) as u64;
+        (CROSS_ROLE_COOLDOWN_SECS * behavior.arbitration.reluctance * ratio_mult * 1000.0) as u64;
 
     Ok(json!({
         "produced": produced,
@@ -1445,6 +1528,26 @@ async fn deliver_cross_character_messages(
                         msg.content,
                         reply
                     );
+                    // Path B 续聊：目标回复有价值且建议继续时，spawn 一次反向续聊
+                    // （目标→源），让对话能自然延续一轮。限制最多 1 次避免循环。
+                    if reply.should_continue && reply.response_mode == "speak" && !reply.reply.is_empty() {
+                        let app_clone = app.clone();
+                        let state_clone = state.clone();
+                        let source_id_for_followup = target_id.clone();
+                        let target_id_for_followup = char_id.to_string();
+                        let reply_text = reply.reply.clone();
+                        tokio::spawn(async move {
+                            let followup_stream_id = generate_cross_stream_id();
+                            let followup_req = CrossCharacterRequest {
+                                source_id: source_id_for_followup,
+                                target_id: target_id_for_followup,
+                                message: reply_text,
+                                stream_id: followup_stream_id,
+                            };
+                            // 续聊不关心回复，仅投递
+                            let _ = CROSS_CHARACTER_BUS.send(&app_clone, &state_clone, followup_req).await;
+                        });
+                    }
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -1489,7 +1592,8 @@ pub async fn drain_proactive_messages(
             crate::proactive::DeliveryChannel::Bubble => "proactive",
             crate::proactive::DeliveryChannel::ChatWindow => "wechat",
         };
-        let mut m = ChatMessage::assistant(&action.content);
+        let clean_content = crate::utils::strip_markdown_syntax(&action.content);
+        let mut m = ChatMessage::assistant(&clean_content);
         m.meta = Some(MessageMeta::new(MessageSource::Assistant).with_channel(channel_str));
         brain.dialogue.add_message(m);
     }
@@ -1510,10 +1614,11 @@ pub async fn drain_proactive_messages(
                 "knowledge_source": "direct",
                 "content_type": format!("{:?}", action.content_type).to_lowercase(),
             });
+            let clean_for_mem = crate::utils::strip_markdown_syntax(&action.content);
             let _ = brain
                 .memory
                 .add_memory_with_metadata(
-                    &action.content,
+                    &clean_for_mem,
                     crate::memory::types::MemoryType::CasualConversation,
                     action.importance as f64,
                     vec![
@@ -1573,8 +1678,10 @@ pub fn update_proactive_config(
 ///
 /// 从当前 AppConfig 读取 world 段并注入 WorldStateProvider，
 /// 让 enable / enable_weather / enable_inner_monologue /
-/// enable_memory_consolidation / latitude / longitude / sleep_start_hour / sleep_end_hour
+/// latitude / longitude / sleep_start_hour / sleep_end_hour
 /// 等字段立即生效。
+/// 注意：`enable_memory_consolidation` 不在此列——它只在 Brain 构造时读取一次决定是否创建
+/// MemoryConsolidator，实际靠 handleSave 中的 `reinitialize` 重建 Brain 生效。
 /// - 关闭天气功能时同步清空天气缓存
 /// - 总开关切换时启停活动日志后台线程
 #[tauri::command]
@@ -1596,12 +1703,16 @@ pub fn update_world_config(
     state.world_provider.update_config(cfg.clone());
 
     // 各角色的 ActivityJournal 仍按角色独立启停（每角色独立的行为日志）
+    // 同时：内心独白开关关闭时立即清空 current_thought 缓存（与当前想法共享同一滑块）
     let apply_journal = |brain: &crate::brain::brain::Brain| {
         let journal = brain.proactive.activity_journal().clone();
         if cfg.enable {
             journal.start();
         } else {
             journal.stop();
+        }
+        if !cfg.enable_inner_monologue {
+            brain.mind.clear_current_thought();
         }
     };
     if let Some(cid) = character_id {

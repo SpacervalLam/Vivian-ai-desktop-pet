@@ -5,10 +5,10 @@
  * - payload: { character_id, preview, kind?, timestamp? }
  *
  * 横幅显示头像 + 角色昵称 + 消息预览，点击后调用 show_side_chat_animated 打开微信窗口。
- * 多条消息按队列展示，每条自动消失（默认 5 秒）。
+ * 同一角色的多条消息合并到单个横幅，预览前加 [x条] 计数前缀；链接消息加 [Link] 前缀。
  */
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { listen, emit, type UnlistenFn } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
@@ -22,10 +22,17 @@ interface BannerPayload {
   timestamp?: number;
 }
 
-interface BannerItem extends BannerPayload {
+interface BannerItem {
   id: number;
+  character_id: string;
   name: string;
   avatarSrc: string;
+  /** 累计消息条数（同一角色合并计数） */
+  count: number;
+  /** 最新一条消息的预览文本 */
+  preview: string;
+  /** 最新一条是否为链接卡片 */
+  isLink: boolean;
 }
 
 interface CharacterInfo {
@@ -132,7 +139,21 @@ export default function MessageBannerWindow() {
     setItems((prev) => prev.filter((it) => it.id !== id));
   }, []);
 
+  // 每个角色横幅的自动消失定时器（合并新消息时重置，给最新消息完整展示时间）
+  const bannerTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+  const scheduleRemoval = useCallback((character_id: string, id: number) => {
+    const timers = bannerTimers.current;
+    const existing = timers.get(character_id);
+    if (existing) clearTimeout(existing);
+    const timer = setTimeout(() => {
+      timers.delete(character_id);
+      removeItem(id);
+    }, 5000);
+    timers.set(character_id, timer);
+  }, [removeItem]);
+
   // 监听 wechat:message_banner 事件
+  // 同一角色的多条消息合并到单个横幅，不堆叠多个横幅
   useEffect(() => {
     let unlisten: UnlistenFn | undefined;
     let cancelled = false;
@@ -142,15 +163,38 @@ export default function MessageBannerWindow() {
         if (!p?.character_id) return;
         playNotificationSound();
         const info = charMap.get(p.character_id);
-        const item: BannerItem = {
-          ...p,
-          id: nextId++,
-          name: info?.name ?? p.character_id,
-          avatarSrc: `/${capitalizeCharId(p.character_id)}/icon.png`,
-        };
-        setItems((prev) => [...prev, item]);
-        // 5 秒后自动消失
-        setTimeout(() => removeItem(item.id), 5000);
+        const name = info?.name ?? p.character_id;
+        const avatarSrc = `/${capitalizeCharId(p.character_id)}/icon.png`;
+        const isLink = p.kind === 'link_card';
+        setItems((prev) => {
+          const existingIdx = prev.findIndex((it) => it.character_id === p.character_id);
+          if (existingIdx >= 0) {
+            // 合并：计数 +1，更新预览为最新一条，更新 isLink
+            const existing = prev[existingIdx];
+            const merged: BannerItem = {
+              ...existing,
+              count: existing.count + 1,
+              preview: p.preview,
+              isLink,
+            };
+            const next = [...prev];
+            next[existingIdx] = merged;
+            scheduleRemoval(p.character_id, merged.id);
+            return next;
+          }
+          // 新建横幅
+          const item: BannerItem = {
+            id: nextId++,
+            character_id: p.character_id,
+            name,
+            avatarSrc,
+            count: 1,
+            preview: p.preview,
+            isLink,
+          };
+          scheduleRemoval(p.character_id, item.id);
+          return [...prev, item];
+        });
       });
       if (cancelled) {
         unlisten();
@@ -160,8 +204,11 @@ export default function MessageBannerWindow() {
     return () => {
       cancelled = true;
       unlisten?.();
+      // 清理所有定时器
+      bannerTimers.current.forEach((t) => clearTimeout(t));
+      bannerTimers.current.clear();
     };
-  }, [charMap, removeItem]);
+  }, [charMap, removeItem, scheduleRemoval]);
 
   // 窗口可见性：有横幅时显示，全部清除后隐藏
   const hasContent = items.length > 0;
@@ -307,24 +354,9 @@ export default function MessageBannerWindow() {
             }}
           />
           <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 2 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-              <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--panel-text, #fff)' }}>
-                {it.name}
-              </span>
-              {it.kind === 'link_card' && (
-                <span
-                  style={{
-                    fontSize: 10,
-                    padding: '1px 6px',
-                    borderRadius: 4,
-                    background: 'rgba(7, 193, 96, 0.18)',
-                    color: '#07c160',
-                  }}
-                >
-                  链接
-                </span>
-              )}
-            </div>
+            <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--panel-text, #fff)' }}>
+              {it.name}
+            </span>
             <div
               style={{
                 fontSize: 12,
@@ -334,6 +366,9 @@ export default function MessageBannerWindow() {
                 whiteSpace: 'nowrap',
               }}
             >
+              {it.count > 1 && `[${it.count}条]`}
+              {it.isLink && '[Link]'}
+              {it.count > 1 || it.isLink ? ' ' : ''}
               {it.preview}
             </div>
           </div>

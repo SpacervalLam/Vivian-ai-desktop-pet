@@ -549,33 +549,35 @@ impl ExpectationEngine {
 
     /// 从文本抽取活动意图（Gap 1）
     ///
-    /// 仅在用户明说"我去 X" / "我准备 X" / "开始 X" 等活动意图信号词 + 活动关键词
-    /// 同时出现时产出，避免在用户讨论 X 话题时误判（如"上班真累"不应触发活动状态切换）。
+    /// 用 n-gram 嵌入余弦相似度将用户文本与已知活动种子短语的质心向量做比较，
+    /// 匹配到已知活动时直接产出意图。种子短语已包含"去吃饭""洗澡去""我去睡觉"等意图变体，
+    /// 因此"我去洗澡""准备睡觉""开始上班"等自然表达会与对应活动质心匹配。
+    ///
+    /// 对"去上海玩""去朋友家"等未匹配到已知活动的目的地型表达，
+    /// 回退提取"去"后内容直接作为活动标签。
+    ///
+    /// 注意：不再使用预设关键词列表判断意图信号，而是完全依赖 n-gram 嵌入的语义相似度。
+    /// 种子短语的意图变体覆盖率在构建时已确保，用户的新表达通过 n-gram 重叠自然匹配。
     pub fn extract_activity_intent(text: &str) -> Option<ActivityIntent> {
         let text = text.trim();
         if text.is_empty() {
             return None;
         }
-        // 活动意图信号词：必须是"开始/去做"某事，而非讨论某事
-        let intent_signals = [
-            "我去", "我准备", "我要去", "我要开始", "我开始", "准备开始",
-            "去吃饭", "去洗澡", "去睡觉", "去上班", "去开会", "去散步", "去运动", "去跑步",
-            "吃饭去", "睡觉去", "下班", "上班去", "出门去", "出去一下",
-        ];
-        let has_intent = intent_signals.iter().any(|s| text.contains(s));
-        if !has_intent {
-            return None;
+
+        // 用 n-gram 嵌入匹配文本最相似的已知活动
+        if let Some((label, similarity)) = match_activity_by_ngram(text) {
+            let t = ACTIVITY_NGRAM_THRESHOLD;
+            let confidence = 0.70 + (similarity - t) / (1.0 - t) * 0.20;
+            let confidence = confidence.clamp(0.70, 0.90);
+            return Some(ActivityIntent {
+                label: label.to_string(),
+                confidence,
+            });
         }
-        // 在意图信号词存在的前提下，匹配活动关键词
-        for (keyword, _min, _max, _activity, label) in ACTIVITY_MAP {
-            if text.contains(keyword) {
-                return Some(ActivityIntent {
-                    label: label.to_string(),
-                    confidence: 0.85,
-                });
-            }
-        }
-        None
+
+        // 回退：嵌入未匹配到已知活动时，
+        // 提取"去"后的内容作为活动标签（支持"去上海玩""去朋友家"等地点型活动）
+        Self::extract_go_to_activity(text)
     }
 
     /// 抽取显式时长（"20分钟"、"半小时"、"2小时后回来"）
@@ -661,54 +663,247 @@ impl ExpectationEngine {
         None
     }
 
-    /// 从活动关键词推断常识范围
+    /// 从活动嵌入匹配推断常识范围
+    ///
+    /// 先用 n-gram 嵌入检查文本是否包含离开意图（与 `LEAVING_INTENT_CENTROID` 比较），
+    /// 再匹配已知活动，避免"洗澡真舒服"等讨论性表达触发预期回归。
     fn extract_from_activity(text: &str) -> Option<ExpectedReturn> {
-        for (keyword, min, max, activity, _label) in ACTIVITY_MAP {
-            if text.contains(keyword) {
-                // 必须包含"离开意图"信号词才认定为离开预期
-                let leaving_signals = ["去", "我", "回", "出", "一下", "马上", "等"];
-                if leaving_signals.iter().any(|s| text.contains(s)) {
-                    return Some(ExpectedReturn {
-                        min_secs: *min,
-                        max_secs: *max,
-                        source: ExpectationSource::CommonSense {
-                            activity: activity.to_string(),
-                        },
-                    });
-                }
+        let text = text.trim();
+        if text.len() < 2 {
+            return None;
+        }
+
+        // 用 n-gram 嵌入检查离开意图，代替预设关键词列表匹配
+        let text_vec = compute_ngram_vector(text);
+        let leaving_sim = cosine_similarity(&text_vec, &LEAVING_INTENT_CENTROID);
+        if leaving_sim < 0.15 {
+            return None;
+        }
+
+        // 匹配已知活动
+        if let Some((label, _similarity)) = match_activity_by_ngram_vec(&text_vec) {
+            if let Some(entry) = ACTIVITY_EMBEDDINGS.get(label) {
+                return Some(ExpectedReturn {
+                    min_secs: entry.min_secs,
+                    max_secs: entry.max_secs,
+                    source: ExpectationSource::CommonSense {
+                        activity: entry.category.to_string(),
+                    },
+                });
             }
         }
         None
     }
+
+    /// 提取"去X"模式的活动标签（兜底策略）
+    ///
+    /// 嵌入匹配未命中时，提取"去"后的内容直接作为活动标签。
+    /// 如"我去上海玩" → "去上海玩"，"我去朋友家" → "去朋友家"。
+    fn extract_go_to_activity(text: &str) -> Option<ActivityIntent> {
+        let go_pos = text.find("去")?;
+        let after_go = &text[go_pos + "去".len()..];
+        if after_go.is_empty() {
+            return None;
+        }
+        let max_len = after_go
+            .char_indices()
+            .take(6)
+            .find(|&(_, c)| "了吧啊呢，。！？".contains(c))
+            .map(|(i, _)| i)
+            .unwrap_or_else(|| {
+                after_go
+                    .char_indices()
+                    .nth(6)
+                    .map(|(i, _)| i)
+                    .unwrap_or(after_go.len())
+            });
+        let destination = after_go[..max_len].trim();
+        if destination.is_empty() || destination.len() < 2 {
+            return None;
+        }
+        let filler = ["一下", "了", "吧", "啊", "呢", "会儿", "那儿"];
+        if filler.iter().any(|f| destination == *f) {
+            return None;
+        }
+        let label = format!("去{}", destination);
+        Some(ActivityIntent {
+            label,
+            confidence: 0.75,
+        })
+    }
 }
 
-/// 活动 + 时长 + 标签的统一映射表
+// ════════════════════════════════════════════════════════════════════
+// 活动嵌入匹配器：用字符 n-gram 余弦相似度代替预设关键词匹配
+// ════════════════════════════════════════════════════════════════════
+
+use std::collections::HashMap;
+use std::sync::LazyLock;
+
+type NGramVector = HashMap<String, f64>;
+
+const ACTIVITY_NGRAM_N: usize = 3;
+const ACTIVITY_NGRAM_THRESHOLD: f64 = 0.25;
+
+/// 活动标签 → 种子短语 → 常识时长 → 英文标识
+struct ActivityEntry {
+    centroid: NGramVector,
+    min_secs: f64,
+    max_secs: f64,
+    category: &'static str,
+}
+
+/// 活动标签 → 种子短语列表（用于构建 n-gram 质心）
 ///
-/// 字段：(关键词, min_secs, max_secs, activity_英文标识, label_中文标签)
-const ACTIVITY_MAP: &[(&str, f64, f64, &str, &str)] = &[
-    ("洗澡", 600.0, 2400.0, "shower", "洗澡"),
-    ("沐浴", 600.0, 2400.0, "shower", "洗澡"),
-    ("吃饭", 1200.0, 3600.0, "meal", "吃饭"),
-    ("吃饭去", 1200.0, 3600.0, "meal", "吃饭"),
-    ("午饭", 1200.0, 3600.0, "meal", "吃饭"),
-    ("晚饭", 1200.0, 3600.0, "meal", "吃饭"),
-    ("早饭", 600.0, 1800.0, "meal", "吃饭"),
-    ("睡觉", 21600.0, 36000.0, "sleep", "睡觉"),
-    ("睡一觉", 21600.0, 36000.0, "sleep", "睡觉"),
-    ("午休", 1800.0, 5400.0, "nap", "午休"),
-    ("午睡", 1800.0, 5400.0, "nap", "午休"),
-    ("出门", 1800.0, 14400.0, "outing", "出门"),
-    ("出去", 1800.0, 14400.0, "outing", "出门"),
-    ("上班", 28800.0, 36000.0, "work", "上班"),
-    ("工作", 3600.0, 28800.0, "work", "工作"),
-    ("开会", 1800.0, 7200.0, "meeting", "开会"),
-    ("散步", 900.0, 3600.0, "walk", "散步"),
-    ("运动", 1800.0, 7200.0, "exercise", "运动"),
-    ("跑步", 1800.0, 5400.0, "exercise", "跑步"),
-    ("看电影", 5400.0, 10800.0, "movie", "看电影"),
-    ("买东西", 1800.0, 7200.0, "shopping", "买东西"),
-    ("买菜", 1200.0, 3600.0, "shopping", "买菜"),
+/// 字段：(活动标签, 种子短语列表, 常识最小秒数, 常识最大秒数, 活动英文标识)
+/// 种子短语是用户可能表达该活动的自然语言变体，n-gram 质心从中自动计算。
+const ACTIVITY_SEED_PHRASES: &[(&str, &[&str], f64, f64, &str)] = &[
+    ("洗澡", &["洗澡", "沐浴", "洗个澡", "冲个凉", "泡澡", "洗澡去", "洗好澡", "我去洗澡", "准备洗澡"], 600.0, 2400.0, "shower"),
+    ("吃饭", &["吃饭", "吃个饭", "吃午饭", "吃晚饭", "吃早饭", "干饭", "进食", "吃面", "吃外卖", "去吃饭", "吃饭去", "我去吃饭", "准备吃饭"], 1200.0, 3600.0, "meal"),
+    ("睡觉", &["睡觉", "睡了", "就寝", "睡了觉", "睡一觉", "去睡", "休息", "想睡", "躺着", "早点睡", "我去睡觉", "准备睡觉", "开始睡觉"], 21600.0, 36000.0, "sleep"),
+    ("午休", &["午休", "午睡", "小憩", "眯一会儿", "趴一会儿", "我去午休", "准备午休"], 1800.0, 5400.0, "nap"),
+    ("出门", &["出门", "出去", "出去了", "出门了", "出去一下", "外出", "出趟门", "出去一趟", "我出门了", "准备出门", "下班", "下班了", "我下班了"], 1800.0, 14400.0, "outing"),
+    ("上班", &["上班", "去公司", "去上班", "上班了", "打工", "上班去", "上工", "我去上班", "准备上班", "开始上班"], 28800.0, 36000.0, "work"),
+    ("工作", &["工作", "干活", "加班", "处理工作", "做项目", "写方案", "赶工", "开始工作", "我要工作"], 3600.0, 28800.0, "work"),
+    ("开会", &["开会", "会议", "开个会", "视频会议", "电话会议", "腾讯会议", "钉钉会议", "我去开会", "准备开会", "开始开会"], 1800.0, 7200.0, "meeting"),
+    ("散步", &["散步", "走走", "出去走走", "溜达", "遛弯", "走一走", "下楼走走", "我去散步", "准备散步"], 900.0, 3600.0, "walk"),
+    ("运动", &["运动", "锻炼", "健身", "去运动", "活动一下", "做运动", "去健身", "我去运动", "准备运动"], 1800.0, 7200.0, "exercise"),
+    ("跑步", &["跑步", "去跑", "晨跑", "夜跑", "跑步去", "跑跑步", "跑会儿步", "我去跑步", "准备跑步"], 1800.0, 5400.0, "exercise"),
+    ("看电影", &["看电影", "看个电影", "追剧", "看剧", "看片子", "刷剧", "追番", "看番", "我去看电影", "准备看个电影"], 5400.0, 10800.0, "movie"),
+    ("买东西", &["买东西", "购物", "买点东西", "去超市", "去商场", "逛超市", "采购", "我去买东西", "准备买东西"], 1800.0, 7200.0, "shopping"),
+    ("做饭", &["做饭", "做菜", "煮饭", "烧菜", "炒菜", "下厨", "煮面", "煮饺子", "我去做饭", "准备做饭"], 1800.0, 5400.0, "cooking"),
+    ("洗碗", &["洗碗", "刷碗", "洗盘子", "收拾碗筷", "我去洗碗", "准备洗碗"], 600.0, 1800.0, "dishwashing"),
+    ("打扫", &["打扫", "收拾", "扫地", "拖地", "整理", "做卫生", "大扫除", "清洁", "我去打扫", "准备打扫"], 1200.0, 7200.0, "cleaning"),
+    ("旅游", &["旅游", "旅行", "出游", "出去玩", "度假", "去旅游", "旅行去", "出远门", "旅游去", "我要出去玩", "准备旅游"], 14400.0, 86400.0, "travel"),
+    ("聚餐", &["聚餐", "吃饭局", "饭局", "聚会吃饭", "约饭", "约饭局", "一起吃饭", "我去聚餐", "准备聚餐"], 3600.0, 10800.0, "dinner"),
+    ("约会", &["约会", "约了", "相亲", "去见", "赴约", "去约会", "约好", "我去约会", "准备约会"], 3600.0, 14400.0, "date"),
+    ("逛街", &["逛街", "逛商场", "逛超市", "逛夜市", "压马路", "我去逛街", "准备逛街"], 1800.0, 10800.0, "shopping"),
+    ("学习", &["学习", "看书", "读书", "复习", "做作业", "写作业", "预习", "备考", "刷题", "背单词", "听课", "我去学习", "准备学习", "开始学习"], 1800.0, 14400.0, "study"),
+    ("去医院", &["去医院", "看医生", "看病", "体检", "去医院看病", "看病去", "我要去医院", "准备去医院"], 3600.0, 14400.0, "hospital"),
+    ("理发", &["理发", "剪头发", "剪发", "做头发", "理个发", "我去理发", "准备理发"], 1800.0, 5400.0, "haircut"),
+    ("去朋友家", &["去朋友家", "朋友家", "去朋友那", "找朋友", "朋友家玩", "去朋友家玩", "我去朋友家", "准备去朋友家"], 3600.0, 14400.0, "visiting"),
 ];
+
+/// 预计算的活动嵌入质心
+static ACTIVITY_EMBEDDINGS: LazyLock<HashMap<&'static str, ActivityEntry>> = LazyLock::new(|| {
+    let mut map = HashMap::new();
+    for &(label, seeds, min, max, cat) in ACTIVITY_SEED_PHRASES {
+        let mut centroid = NGramVector::new();
+        let count = seeds.len() as f64;
+        for seed in seeds {
+            let vec = compute_ngram_vector(seed);
+            for (k, v) in vec {
+                *centroid.entry(k).or_insert(0.0) += v / count;
+            }
+        }
+        let norm: f64 = centroid.values().map(|v| v * v).sum();
+        if norm > 0.0 {
+            for v in centroid.values_mut() {
+                *v /= norm.sqrt();
+            }
+        }
+        map.insert(
+            label,
+            ActivityEntry { centroid, min_secs: min, max_secs: max, category: cat },
+        );
+    }
+    map
+});
+
+/// 计算文本的字符 n-gram 向量（归一化至单位长度）
+fn compute_ngram_vector(text: &str) -> NGramVector {
+    let chars: Vec<char> = text.chars().collect();
+    let n = ACTIVITY_NGRAM_N.min(chars.len());
+    let mut counts = HashMap::new();
+    for i in 0..=chars.len().saturating_sub(n) {
+        let gram: String = chars[i..i + n].iter().collect();
+        *counts.entry(gram).or_insert(0.0) += 1.0;
+    }
+    let norm: f64 = counts.values().map(|v| v * v).sum();
+    if norm > 0.0 {
+        for v in counts.values_mut() {
+            *v /= norm.sqrt();
+        }
+    }
+    counts
+}
+
+/// 计算两个归一化 n-gram 向量的余弦相似度
+fn cosine_similarity(a: &NGramVector, b: &NGramVector) -> f64 {
+    let (smaller, larger) = if a.len() <= b.len() { (a, b) } else { (b, a) };
+    let mut dot = 0.0;
+    for (k, va) in smaller {
+        if let Some(vb) = larger.get(k) {
+            dot += va * vb;
+        }
+    }
+    dot
+}
+
+/// 离开意图种子短语（用于判断用户是否正在离开去做某事）
+///
+/// 与 `intent_signals` 关键词列表语义等价，但通过 n-gram 嵌入质心做余弦相似度比较，
+/// 避免预设关键词匹配。
+const LEAVING_INTENT_SEEDS: &[&str] = &[
+    "我去洗澡", "我去吃饭", "我去睡觉", "我去上班", "我出门了",
+    "出去一下", "出去一趟", "下班",
+    "去洗澡", "去吃饭", "去睡觉", "去上班", "去开会",
+    "去运动", "去跑步", "去散步", "出去玩",
+    "洗澡去", "吃饭去", "睡觉去", "上班去", "出门去",
+    "开始工作", "我走了", "出发了", "外出",
+    "马上回来", "一会儿回来",
+];
+
+/// 预计算的离开意图嵌入质心
+static LEAVING_INTENT_CENTROID: LazyLock<NGramVector> = LazyLock::new(|| {
+    let mut centroid = NGramVector::new();
+    let count = LEAVING_INTENT_SEEDS.len() as f64;
+    for seed in LEAVING_INTENT_SEEDS {
+        let vec = compute_ngram_vector(seed);
+        for (k, v) in vec {
+            *centroid.entry(k).or_insert(0.0) += v / count;
+        }
+    }
+    let norm: f64 = centroid.values().map(|v| v * v).sum();
+    if norm > 0.0 {
+        for v in centroid.values_mut() {
+            *v /= norm.sqrt();
+        }
+    }
+    centroid
+});
+
+/// 用 n-gram 嵌入匹配文本最相似的已知活动
+///
+/// 返回 `(活动标签, 相似度)`，相似度低于阈值时返回 None。
+fn match_activity_by_ngram(text: &str) -> Option<(&'static str, f64)> {
+    let text = text.trim();
+    if text.len() < 2 {
+        return None;
+    }
+    let vec = compute_ngram_vector(text);
+    match_activity_by_ngram_vec(&vec)
+}
+
+/// 用预计算 n-gram 向量匹配已知活动（避免重复计算）
+fn match_activity_by_ngram_vec(vec: &NGramVector) -> Option<(&'static str, f64)> {
+    let mut best_label: Option<&'static str> = None;
+    let mut best_sim = 0.0;
+    for (&label, entry) in ACTIVITY_EMBEDDINGS.iter() {
+        let sim = cosine_similarity(vec, &entry.centroid);
+        if sim > best_sim {
+            best_sim = sim;
+            best_label = Some(label);
+        }
+    }
+    best_label.and_then(|label| {
+        if best_sim >= ACTIVITY_NGRAM_THRESHOLD {
+            Some((label, best_sim))
+        } else {
+            None
+        }
+    })
+}
 
 // ── 辅助函数 ──
 

@@ -17,6 +17,7 @@ impl MemoryRecall {
     ///
     /// `recent_memory`：缓存的最近对话/记忆文本，作为"最近对话"与话题来源。
     /// `system_prompt`：来自 PersonaEngine 的人设风格约束，为空时使用兜底。
+    /// `idle_seconds`：距上次对话的秒数，让 LLM 感知回忆的"远度"。
     /// LLM 失败则返回 None（不交互）。
     pub async fn generate_llm(
         router: &ModelRouter,
@@ -24,8 +25,10 @@ impl MemoryRecall {
         system_prompt: &str,
         lang: &str,
         char_id: &str,
+        idle_seconds: f64,
     ) -> Option<String> {
-        let messages = Self::build_messages(recent_memory, system_prompt, lang, char_id)?;
+        let messages =
+            Self::build_messages(recent_memory, system_prompt, lang, char_id, idle_seconds)?;
         let raw = match router.generate(LLMRequest::new("chat", messages)).await {
             Ok(r) => r,
             Err(e) => {
@@ -42,6 +45,7 @@ impl MemoryRecall {
         system_prompt: &str,
         lang: &str,
         char_id: &str,
+        idle_seconds: f64,
     ) -> Option<Vec<ChatMessage>> {
         let memory = recent_memory.trim();
         if memory.len() < 5 {
@@ -76,6 +80,7 @@ impl MemoryRecall {
         }
 
         let lang_norm = crate::pipeline::prompt_modules::normalize_lang(lang);
+        let elapsed_str = crate::proactive::format_elapsed_lang(idle_seconds, lang_norm);
         let sys = if system_prompt.trim().is_empty() {
             match (lang_norm, char_id) {
                 ("en", "nana" | "娜娜") => "You are Nana, a desktop pet AI. Personality: gentle, composed, warm, like a caring older sister. Keep replies short and natural. No customer-service speech. Never address the user as 'User'.".to_string(),
@@ -91,21 +96,24 @@ impl MemoryRecall {
 
         let prompt = match lang_norm {
             "en" => format!(
-                "Based on the recent conversation, generate a natural recall-style question that mentions something you previously talked about.\n\
+                "Time since last talk: {elapsed_str}. This is real — calibrate the recall accordingly (a 5-minute gap means 'just now', a 2-hour gap means it's fine to bring up something from earlier).\n\
+                 Based on the recent conversation, generate a natural recall-style question that mentions something you previously talked about.\n\
                  Requirements: short (<30 chars), natural, not contrived. Don't ask 'remember when?'. Don't repeat the recent conversation verbatim.\n\n\
                  Recent conversation:\n{lines_str}\n\n\
                  Mentionable topic: {topic}\n\
                  JSON output: {{\"text\": \"question\"}}"
             ),
             "ja" => format!(
-                "最近の会話に基づいて、以前話したことに触れる自然な回想風の質問を生成して。\n\
+                "最後の会話から: {elapsed_str}。この経過時間は事実——回想の重みをそれに合わせて（5分なら「さっき」、2時間なら以前のことを持ち出しても自然）。\n\
+                 最近の会話に基づいて、以前話したことに触れる自然な回想風の質問を生成して。\n\
                  要件: 短く（30字以内）、自然、不自然じゃない。「覚えてる？」は聞かない。最近の会話をそのまま繰り返さない。\n\n\
                  最近の会話:\n{lines_str}\n\n\
                  触れられる話題: {topic}\n\
                  JSON出力: {{\"text\": \"質問\"}}"
             ),
             _ => format!(
-                "基于最近对话，生成一个自然的回忆式提问，提到你们之前聊过的某件事。\n\
+                "距上次对话已过: {elapsed_str}。这个时长是真实的——请据此校准回忆的语气（5分钟是「刚才」的事，2小时就可以自然提起之前聊过的内容）。\n\
+                 基于最近对话，生成一个自然的回忆式提问，提到你们之前聊过的某件事。\n\
                  要求：简短（<30字）、自然、不造作。不要问「还记得吗」。不要逐字复述最近对话。\n\n\
                  最近对话:\n{lines_str}\n\n\
                  可提及的话题: {topic}\n\

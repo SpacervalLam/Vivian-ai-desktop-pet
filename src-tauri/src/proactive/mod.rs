@@ -140,6 +140,71 @@ pub fn hour_in_window(hour: u32, start: u32, end: u32) -> bool {
     }
 }
 
+/// 将秒数格式化为多语言时长字符串（如 "1小时23分钟" / "1h23min" / "1時間23分"）
+///
+/// 用于主动问候提示词中向 LLM 表达"距上次对话已过多久"，
+/// 避免把旧事说成刚发生。`lang_norm` 取值："en" / "ja" / 其他（按中文处理）。
+pub(crate) fn format_elapsed_lang(secs: f64, lang_norm: &str) -> String {
+    let s = secs.max(0.0) as u64;
+    if s < 60 {
+        return match lang_norm {
+            "en" => format!("{}s", s),
+            "ja" => format!("{}秒", s),
+            _ => format!("{}秒", s),
+        };
+    }
+    let m = s / 60;
+    if m < 60 {
+        return match lang_norm {
+            "en" => format!("{}min", m),
+            "ja" => format!("{}分", m),
+            _ => format!("{}分钟", m),
+        };
+    }
+    let h = m / 60;
+    let remain_m = m % 60;
+    if h < 24 {
+        return match lang_norm {
+            "en" => {
+                if remain_m == 0 { format!("{}h", h) } else { format!("{}h{}min", h, remain_m) }
+            }
+            "ja" => {
+                if remain_m == 0 { format!("{}時間", h) } else { format!("{}時間{}分", h, remain_m) }
+            }
+            _ => {
+                if remain_m == 0 { format!("{}小时", h) } else { format!("{}小时{}分钟", h, remain_m) }
+            }
+        };
+    }
+    let d = h / 24;
+    let remain_h = h % 24;
+    match lang_norm {
+        "en" => {
+            if remain_h == 0 { format!("{}d", d) } else { format!("{}d{}h", d, remain_h) }
+        }
+        "ja" => {
+            if remain_h == 0 { format!("{}日", d) } else { format!("{}日{}時間", d, remain_h) }
+        }
+        _ => {
+            if remain_h == 0 { format!("{}天", d) } else { format!("{}天{}小时", d, remain_h) }
+        }
+    }
+}
+
+/// 将 Unix 秒时间戳格式化为多语言相对时间（如 "3小时前" / "3h ago" / "3時間前"）
+///
+/// 用于记忆/对话历史注入提示词时让 LLM 感知"这条信息是多久前的"。
+pub(crate) fn format_relative_time_lang(unix_secs: f64, lang_norm: &str) -> String {
+    let now = chrono::Local::now().timestamp() as f64;
+    let elapsed = (now - unix_secs).max(0.0);
+    let dur = format_elapsed_lang(elapsed, lang_norm);
+    match lang_norm {
+        "en" => format!("{} ago", dur),
+        "ja" => format!("{}前", dur),
+        _ => format!("{}前", dur),
+    }
+}
+
 /// 根据用户空闲时间计算推荐的 tick 间隔（毫秒）
 ///
 /// 策略 A：乘以角色专属的随机抖动因子（TickJitterConfig），
@@ -226,6 +291,9 @@ pub struct ProactiveOrchestrator {
     last_user_active: RwLock<bool>,
     /// 用户是否曾离开（回归欢迎用）
     last_user_was_away: RwLock<bool>,
+    /// 用户开始离开的时间戳（WelcomeBack 判定离开持续时长的可靠依据，
+    /// 替代前端传入的 away_seconds）
+    away_since: RwLock<Option<f64>>,
     /// LLM 路由器（可选，注入后 BehaviorDecider / IcebreakerGenerator / MemoryRecall
     /// 优先调用 LLM 生成；不可用时回退到启发式模板池）
     model_router: RwLock<Option<Arc<ModelRouter>>>,
@@ -424,6 +492,7 @@ impl ProactiveOrchestrator {
             last_app_category: RwLock::new(String::new()),
             last_user_active: RwLock::new(true),
             last_user_was_away: RwLock::new(false),
+            away_since: RwLock::new(None),
             model_router: RwLock::new(None),
             psychology: RwLock::new(None),
             config: RwLock::new(ProactiveConfig::default()),
@@ -707,15 +776,16 @@ impl ProactiveOrchestrator {
         };
         let mut prob = 0.08 + loneliness * 0.30 + sadness * 0.10 - joy * 0.05;
         // 用户不在屏幕前时，角色更可能找室友聊天（无事可做 + 略感孤单）
+        // 用户离场时概率大幅提升，支持持续跨角色交流
         if !user_present {
-            prob += 0.15;
+            prob += 0.35;
         }
         // 三人共处一室语义：用户和某角色聊天时，另一角色仍可旁听+插话
         // 用时间衰减替代原 5min 硬屏蔽：
         // - < 2min：用户真正在打字，几乎不打断（×0.0）
         // - 2-5min：用户可能停顿，低概率接话（×0.4）
         // - 5-15min：正常概率
-        // - >15min：用户实际离开，概率提升（+0.15）
+        // - >15min：用户实际离开，概率提升（+0.20）
         let now_ts = chrono::Local::now().timestamp() as f64;
         let secs_since_interaction = now_ts - self.state.read().last_interaction_time;
         if secs_since_interaction < 120.0 {
@@ -723,7 +793,7 @@ impl ProactiveOrchestrator {
         } else if secs_since_interaction < 300.0 {
             prob *= 0.4;
         } else if secs_since_interaction > 900.0 {
-            prob += 0.15;
+            prob += 0.20;
         }
         // 关系状态差异化：A↔B intimacy 调节发起意愿
         // 关系近更想找对方聊，关系远不太主动
@@ -737,7 +807,9 @@ impl ProactiveOrchestrator {
                 prob -= 0.10;
             }
         }
-        prob.clamp(0.05, 0.75)
+        // 用户离场时上限提升至 0.90，支持持续跨角色交流
+        let max_prob = if !user_present { 0.90 } else { 0.75 };
+        prob.clamp(0.05, max_prob)
     }
 
     /// 计算旁观插话的基础概率（情绪驱动，不含时机衰减）
@@ -982,6 +1054,7 @@ impl ProactiveOrchestrator {
                             context,
                             &thought_key,
                             &context_hint,
+                            &companion.id,
                             &companion.name,
                         ) {
                             self.push_message(
@@ -992,6 +1065,10 @@ impl ProactiveOrchestrator {
                             self.thought_lifecycle.write().mark_expressed(&thought_key, context.now);
                             produced = true;
                             tracing::info!("[thought_lifecycle] 思绪{}升级为对室友分享", thought_key);
+                        } else {
+                            // LLM 失败也标记已表达，避免每 tick 重试同一思绪形成死循环
+                            self.thought_lifecycle.write().mark_expressed(&thought_key, context.now);
+                            tracing::warn!("[thought_lifecycle] 思绪{}对室友分享生成失败，标记已表达避免重试", thought_key);
                         }
                     }
                 }
@@ -1024,6 +1101,10 @@ impl ProactiveOrchestrator {
                             thought_key,
                             value_score
                         );
+                    } else {
+                        // LLM 失败也标记已表达，避免每 tick 重试同一思绪形成死循环
+                        self.thought_lifecycle.write().mark_expressed(&thought_key, context.now);
+                        tracing::warn!("[thought_lifecycle] 思绪{}知识分享生成失败，标记已表达避免重试", thought_key);
                     }
                 } else if self.is_knowledge_share_in_cooldown() {
                     // 分享冷却中：推迟表达，不标记 expressed，等冷却结束后再次尝试
@@ -1042,6 +1123,10 @@ impl ProactiveOrchestrator {
                     self.thought_lifecycle.write().mark_expressed(&thought_key, context.now);
                     produced = true;
                     tracing::info!("[thought_lifecycle] 思绪{}升级为主动分享", thought_key);
+                } else {
+                    // LLM 失败也标记已表达，避免每 tick 重试同一思绪形成死循环
+                    self.thought_lifecycle.write().mark_expressed(&thought_key, context.now);
+                    tracing::warn!("[thought_lifecycle] 思绪{}主动分享生成失败，标记已表达避免重试", thought_key);
                 }
             }
         }
@@ -1339,6 +1424,7 @@ impl ProactiveOrchestrator {
                 0.3,
                 "want_to_share_knowledge",
                 context.now,
+                false,
             );
             if is_new {
                 tracing::info!(
@@ -1363,6 +1449,7 @@ impl ProactiveOrchestrator {
                 0.3,
                 "want_to_share_with_roommate",
                 context.now,
+                false,
             );
             if is_new_rm {
                 tracing::info!(
@@ -1425,6 +1512,7 @@ impl ProactiveOrchestrator {
                     seed.arousal,
                     seed.trigger_kind,
                     context.now,
+                    seed.high_priority,
                 );
                 if is_new || seed.high_priority {
                     tracing::debug!(
@@ -1628,6 +1716,9 @@ impl ProactiveOrchestrator {
                     }
                     None => {
                         tracing::debug!("[inner_monologue] 本次未生成独白（LLM 返回空或失败）");
+                        // 即使 LLM 失败也标记独白完成，避免每 tick 重复选同一条思绪形成死循环
+                        let mut lc = lifecycle_for_mono.write();
+                        lc.mark_monologue_done(&thought_key);
                     }
                 }
             });
@@ -1687,7 +1778,6 @@ impl ProactiveOrchestrator {
             .as_ref()
             .map(|p| p.get_language())
             .unwrap_or_else(|| "zh".to_string());
-        let _ = lang;
         let intimacy = psychology
             .as_ref()
             .map(|p| p.relationship().intimacy * 100.0)
@@ -1697,6 +1787,36 @@ impl ProactiveOrchestrator {
             .map(|p| p.build_style_prompt(intimacy, snap.hour))
             .unwrap_or_default();
         let thoughts_context = self.thought_lifecycle.read().build_context_hint();
+
+        // 最近对话历史（让 LLM 感知上下文，避免突兀或重复）
+        let dialogue_history = {
+            let dialogue = self.dialogue.read().clone();
+            dialogue
+                .as_ref()
+                .map(|d| {
+                    d.get_history()
+                        .into_iter()
+                        .rev()
+                        .take(4)
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .rev()
+                        .map(|m| format!("{}: {}", m.role, m.content))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                })
+                .unwrap_or_default()
+        };
+
+        // 真实工具调用历史（禁止编造未发生的操作）
+        let tool_history = {
+            let ts_opt = self.tool_system.read().clone();
+            ts_opt
+                .as_ref()
+                .map(|ts| behavior::format_recent_tool_history(ts, &lang))
+                .unwrap_or_default()
+        };
+
         let thought_key = thought_key.to_string();
         let context_hint = context_hint.to_string();
 
@@ -1704,16 +1824,32 @@ impl ProactiveOrchestrator {
             use crate::providers::base::LLMRequest;
             use crate::types::response::ChatMessage;
 
+            let dialogue_section = if dialogue_history.is_empty() {
+                String::new()
+            } else {
+                format!("## 最近对话\n{}\n\n", dialogue_history)
+            };
+            let tool_section = if tool_history.is_empty() {
+                String::new()
+            } else {
+                format!("## 最近实际执行的操作\n{}\n（只能提及上述真实操作，不要编造未发生的人类生活行为）\n\n", tool_history)
+            };
+
             let user_msg = format!(
                 "你心里一直在想一件事，现在忍不住想说出来。\n\n\
-                 ## 你此刻心里想的是\n{}\n\n{}\n\n\
-                 ## 当前状态\n- 心情：{}\n- 时段：{}点\n\n\
-                 请用一句简短自然的话把这个念头说出来，对用户说。就像人忍不住开口说话那样，不要长篇大论，不要刻意组织语言，就随口说一句，20字以内。\n\n\
+                 ## 你此刻心里想的是\n{hint}\n\n\
+                 {other_thoughts}\
+                 {dialogue}\
+                 {tools}\
+                 ## 当前状态\n- 心情：{mood}\n- 时段：{hour}点\n\n\
+                 请用一句简短自然的话把这个念头说出来，对用户说。就像人忍不住开口说话那样，不要长篇大论，不要刻意组织语言，就随口说一句，25字以内。\n\n\
                  严格输出JSON：{{\"text\": \"你要说的话\", \"expression\": \"表情名\"}}",
-                context_hint,
-                if thoughts_context.is_empty() { String::new() } else { format!("## 其他心绪\n{}", thoughts_context) },
-                mind_state,
-                snap.hour,
+                hint = context_hint,
+                other_thoughts = if thoughts_context.is_empty() { String::new() } else { format!("## 其他心绪\n{}\n\n", thoughts_context) },
+                dialogue = dialogue_section,
+                tools = tool_section,
+                mood = mind_state,
+                hour = snap.hour,
             );
 
             let messages = vec![
@@ -1887,6 +2023,7 @@ impl ProactiveOrchestrator {
         _ctx: &TickContext,
         thought_key: &str,
         context_hint: &str,
+        roommate_id: &str,
         roommate_name: &str,
     ) -> Option<String> {
         let router = self.model_router.read().clone()?;
@@ -1898,15 +2035,43 @@ impl ProactiveOrchestrator {
         let wp = self.world_provider.read().clone()?;
         let snap = wp.snapshot(None);
 
-        let intimacy = psychology
+        let user_intimacy = psychology
             .as_ref()
             .map(|p| p.relationship().intimacy * 100.0)
             .unwrap_or(50.0);
         let system_prompt = persona
             .as_ref()
-            .map(|p| p.build_style_prompt(intimacy, snap.hour))
+            .map(|p| p.build_style_prompt(user_intimacy, snap.hour))
             .unwrap_or_default();
         let thoughts_context = self.thought_lifecycle.read().build_context_hint();
+
+        // A↔B 亲密度（角色间关系）
+        let pair_intimacy = crate::psychology::social_state::social_state()
+            .get_pair(&self.char_id, roommate_id)
+            .intimacy;
+
+        // 最近跨角色对话历史（从统一事件账本检索）
+        let recent_dialogue = {
+            let ledger = crate::memory::unified_event_ledger::unified_event_ledger();
+            let events = ledger.events_between(&self.char_id, roommate_id, 3);
+            if events.is_empty() {
+                String::new()
+            } else {
+                let lines: Vec<String> = events
+                    .iter()
+                    .map(|e| {
+                        let preview: String = e.content_preview.chars().take(60).collect();
+                        if e.sender == self.char_id {
+                            format!("- 我对{}说：{}", roommate_name, preview)
+                        } else {
+                            format!("- {}对我说：{}", roommate_name, preview)
+                        }
+                    })
+                    .collect();
+                format!("## 最近你们聊过的话题\n{}\n", lines.join("\n"))
+            }
+        };
+
         let thought_key = thought_key.to_string();
         let context_hint = context_hint.to_string();
         let roommate_name = roommate_name.to_string();
@@ -1915,19 +2080,33 @@ impl ProactiveOrchestrator {
             use crate::providers::base::LLMRequest;
             use crate::types::response::ChatMessage;
 
+            // 关系远近描述
+            let closeness = if pair_intimacy >= 0.75 {
+                "你们关系很好，可以随口搭话"
+            } else if pair_intimacy >= 0.5 {
+                "你们还算熟，自然地搭话就行"
+            } else if pair_intimacy >= 0.25 {
+                "你们关系一般，稍微客气一点"
+            } else {
+                "你们还不太熟，找个自然的话题开口"
+            };
+
             let user_msg = format!(
-                "你心里有件事想和室友{}聊聊。\n\n\
-                 ## 你想聊的是\n{}\n\n{}\n\n\
-                 ## 当前状态\n- 心情：{}\n- 时段：{}点\n\n\
-                 请用一句简短自然的话对{}说，就像室友之间随口聊天那样。不要长篇大论，不要刻意组织语言，20字以内。\n\n\
-                 严格输出JSON：{{\"text\": \"你要对{}说的话\", \"expression\": \"表情名\"}}",
-                roommate_name,
-                context_hint,
-                if thoughts_context.is_empty() { String::new() } else { format!("## 其他心绪\n{}", thoughts_context) },
-                mind_state,
-                snap.hour,
-                roommate_name,
-                roommate_name,
+                "你心里有件事想和室友{roommate}聊聊。这是你主动想找ta说话，不是ta先找你的。\n\n\
+                 ## 你想聊的是\n{hint}\n\n\
+                 {other_thoughts}\
+                 {recent}\
+                 ## 当前状态\n- 心情：{mood}\n- 时段：{hour}点\n- 和{roommate}的关系：{closeness}\n\n\
+                 请用一句简短自然的话对{roommate}说，就像室友之间随口聊天那样。不要长篇大论，不要刻意组织语言，25字以内。\n\
+                 注意：只能提及上面上下文中真实出现的内容，不要编造你没做过的事或没发生过的对话。\n\n\
+                 严格输出JSON：{{\"text\": \"你要对{roommate}说的话\", \"expression\": \"表情名\"}}",
+                roommate = roommate_name,
+                hint = context_hint,
+                other_thoughts = if thoughts_context.is_empty() { String::new() } else { format!("## 其他心绪\n{}\n", thoughts_context) },
+                recent = recent_dialogue,
+                mood = mind_state,
+                hour = snap.hour,
+                closeness = closeness,
             );
 
             let messages = vec![
@@ -2002,6 +2181,10 @@ impl ProactiveOrchestrator {
         let active = ctx.idle_seconds < 60.0;
         let mut was_away = self.last_user_was_away.write();
         if !active {
+            // 首次检测到离开时记录时间戳，用于 WelcomeBack 判定离开持续时长
+            if !*was_away {
+                *self.away_since.write() = Some(ctx.now);
+            }
             *was_away = true;
         }
         *self.last_user_active.write() = active;
@@ -2026,19 +2209,20 @@ impl ProactiveOrchestrator {
     fn try_special_date_greeting(&self, now: f64) -> bool {
         let dt = chrono::Local::now();
         let today_key = format!("{:02}-{:02}", dt.month(), dt.day());
-        let greetings: &[(&str, &str)] = &[
-            ("01-01", "新年快乐！新的一年也要开开心心的~"),
-            ("02-14", "今天是情人节呢……你、你有什么安排吗？"),
-            ("03-08", "今天是妇女节，祝所有女孩子节日快乐~"),
-            ("05-01", "劳动节快乐！今天要好好休息哦~"),
-            ("06-01", "儿童节快乐！在我心里你永远是个小孩子~"),
-            ("09-10", "教师节快乐~感谢所有老师"),
-            ("10-01", "国庆快乐！假期好好放松一下~"),
-            ("12-25", "圣诞快乐！你收到礼物了吗？"),
-            ("12-31", "今天是跨年夜呢，今年过得怎么样？"),
+        // 节日映射：(日期, 节日名, 兜底文案)
+        let festivals: &[(&str, &str, &str)] = &[
+            ("01-01", "元旦/新年", "新年快乐！新的一年也要开开心心的~"),
+            ("02-14", "情人节", "今天是情人节呢……你、你有什么安排吗？"),
+            ("03-08", "妇女节", "今天是妇女节，祝所有女孩子节日快乐~"),
+            ("05-01", "劳动节", "劳动节快乐！今天要好好休息哦~"),
+            ("06-01", "儿童节", "儿童节快乐！在我心里你永远是个小孩子~"),
+            ("09-10", "教师节", "教师节快乐~感谢所有老师"),
+            ("10-01", "国庆节", "国庆快乐！假期好好放松一下~"),
+            ("12-25", "圣诞节", "圣诞快乐！你收到礼物了吗？"),
+            ("12-31", "跨年夜", "今天是跨年夜呢，今年过得怎么样？"),
         ];
-        let greeting = greetings.iter().find(|(k, _)| *k == today_key);
-        if greeting.is_none() {
+        let festival = festivals.iter().find(|(k, _, _)| *k == today_key);
+        if festival.is_none() {
             return false;
         }
         let mut state = self.state.write();
@@ -2046,15 +2230,80 @@ impl ProactiveOrchestrator {
             return false;
         }
         state.last_special_date = today_key.clone();
-        state.last_interaction_time = now;
+        // 注意：不更新 last_interaction_time，理由同 update_trigger_time
         state
             .last_trigger_times
             .insert(ProactiveTrigger::HourlyGreeting.as_str().to_string(), now);
         drop(state);
-        let text = greeting.unwrap().1.to_string();
+
+        let (_, festival_name, fallback) = festival.unwrap();
+        let text = self.generate_festival_greeting(festival_name)
+            .unwrap_or_else(|| fallback.to_string());
         self.push_message(ProactiveTrigger::HourlyGreeting, text, now);
         let _ = self.save_to();
         true
+    }
+
+    /// 通过 LLM 生成节日问候（失败时返回 None，由调用方回退到兜底文案）
+    fn generate_festival_greeting(&self, festival_name: &str) -> Option<String> {
+        let router = self.model_router.read().clone()?;
+        let handle = tokio::runtime::Handle::try_current().ok()?;
+        let persona = self.persona.read().clone();
+        let psychology = self.psychology.read().clone();
+        let wp = self.world_provider.read().clone()?;
+        let snap = wp.snapshot(None);
+
+        let intimacy = psychology
+            .as_ref()
+            .map(|p| p.relationship().intimacy * 100.0)
+            .unwrap_or(50.0);
+        let system_prompt = persona
+            .as_ref()
+            .map(|p| p.build_style_prompt(intimacy, snap.hour))
+            .unwrap_or_default();
+        let char_id = self.char_id.clone();
+        let festival_name = festival_name.to_string();
+
+        let result = handle.block_on(async move {
+            use crate::providers::base::LLMRequest;
+            use crate::types::response::ChatMessage;
+
+            let user_msg = format!(
+                "今天是{}。请用你的风格对用户说一句节日问候，简短自然，像随口说的，25字以内。\n\
+                 不要客套话，不要百科式介绍，用你自己的语气。只能提及节日本身，不要编造你没做过的事。\n\n\
+                 严格输出JSON：{{\"text\": \"你要说的话\", \"expression\": \"表情名\"}}",
+                festival_name
+            );
+
+            let messages = vec![
+                ChatMessage::system(if system_prompt.is_empty() {
+                    "你是一个住在电脑里的桌宠角色，有自己的想法和感受。说话简短自然，像真人随口聊天一样。".to_string()
+                } else {
+                    system_prompt
+                }),
+                ChatMessage::user(user_msg),
+            ];
+
+            match router.generate(LLMRequest::new("chat", messages).with_temperature(0.9)).await {
+                Ok(text) => {
+                    let text = text.trim();
+                    if let Some(content) = Self::parse_proactive_json(text) {
+                        if content.text.len() >= 2 { Some(content.text) } else { None }
+                    } else {
+                        None
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!("[festival_greeting] {} LLM 生成失败: {}", char_id, e);
+                    None
+                }
+            }
+        });
+
+        if let Some(ref content) = result {
+            tracing::info!("[festival_greeting] {} 节日问候: '{}'", self.char_id, content);
+        }
+        result
     }
 
     /// 综合检查触发条件
@@ -2099,6 +2348,12 @@ impl ProactiveOrchestrator {
                 return false;
             }
         }
+
+        // 策略 G：social_urge 提前触发说明
+        // current_thought 每 60s 调 LLM 顺便产出 social_urge（0-1），
+        // urge 很高时（>= 0.8）在 check_specific 中放宽问候的"特定条件"（整点/空闲阈值等），
+        // 让角色在"真的想说话"时提前问候。urge 中/低时不拦截规则触发（保底不漏）。
+        // 具体实现见 check_specific 开头。可通过 proactive.enable_social_urge_gating 关闭。
 
         // 冷却检查（所有触发器共用）—— min_trigger_interval 作为全局下限
         // 策略 B：冷却秒数乘以角色专属 cooldown_mult
@@ -2218,6 +2473,52 @@ impl ProactiveOrchestrator {
         minute: u32,
         orchestrator: &Self,
     ) -> bool {
+        // 策略 G：social_urge 双向门控
+        // current_thought 每 60s 调 LLM 顺便产出 social_urge（0-1），
+        // 表示角色"现在想主动搭话"的冲动强度。
+        //   urge >= 0.8 → 提前触发（跳过整点/空闲阈值等特定条件）
+        //   urge < 0.3  → 拦截规则（时间到但角色不想说话，推迟到下次）
+        //   中间值      → 正常规则触发（保底）
+        // 规则本身没有语义，时间到不一定适合问候；但 urge 持续低时不问候也合理。
+        // 通用门控（冷却/时机分数/概率）已在 check_trigger 前置流程中检查，这里不重复。
+        // WelcomeBack 不受影响：它有自己的"用户刚回来"语义，不应被 urge 绕过。
+        // 可通过 proactive.enable_social_urge_gating 开关关闭。
+        if orchestrator.config.read().enable_social_urge_gating
+            && matches!(
+                trigger,
+                ProactiveTrigger::HourlyGreeting
+                    | ProactiveTrigger::IdleGreeting
+                    | ProactiveTrigger::Icebreaker
+            )
+        {
+            const URGE_HIGH: f32 = 0.8;
+            const URGE_LOW: f32 = 0.3;
+            let urge = orchestrator
+                .mind
+                .read()
+                .as_ref()
+                .map(|m| m.social_urge_snapshot())
+                .unwrap_or(0.5);
+            if urge >= URGE_HIGH {
+                tracing::debug!(
+                    "[check_specific] {} 提前触发：social_urge={:.2} >= {:.2}",
+                    trigger.as_str(),
+                    urge,
+                    URGE_HIGH
+                );
+                return true;
+            }
+            if urge < URGE_LOW {
+                tracing::debug!(
+                    "[check_specific] {} 推迟：social_urge={:.2} < {:.2}",
+                    trigger.as_str(),
+                    urge,
+                    URGE_LOW
+                );
+                return false;
+            }
+        }
+
         match trigger {
             // 同小时已问候过则跳过；每小时的头 2 分钟不问候
             ProactiveTrigger::HourlyGreeting => {
@@ -2246,7 +2547,15 @@ impl ProactiveOrchestrator {
             ProactiveTrigger::WelcomeBack => {
                 let was_away = *orchestrator.last_user_was_away.read();
                 let active = *orchestrator.last_user_active.read();
-                was_away && active && ctx.away_seconds >= throttle.min_away_seconds as f64
+                // 用 away_since 时间戳计算离开时长，替代前端传入的 away_seconds（后者基于
+                // lastUserMessageRef，会把"发完消息后空闲"误判为"离开"，导致 30 分钟后回来
+                // 触发 WelcomeBack 但用户其实一直在屏幕前）
+                let away_duration = orchestrator
+                    .away_since
+                    .read()
+                    .map(|ts| (ctx.now - ts).max(0.0))
+                    .unwrap_or(0.0);
+                was_away && active && away_duration >= throttle.min_away_seconds as f64
             }
             ProactiveTrigger::HealthReminder => {
                 orchestrator.check_health_reminder(ctx, state, hour, minute)
@@ -2289,13 +2598,13 @@ impl ProactiveOrchestrator {
                 }
             }
             ProactiveTrigger::CrossCharacterReply => {
-                // 室友在线 + 最近 90s 内主动发言过 → 本角色有概率回应/搭话
-                // （概率已在 check_trigger 中 roll 过，这里只检查"事件条件"）
+                // 室友在线 + 最近 180s 内主动发言过 → 本角色有概率回应/搭话
+                // 事件窗口与触发器冷却(180s)对齐，避免窗口短于冷却导致漏掉发言
                 let companion = orchestrator.companions_snapshot.read();
                 match companion.as_ref() {
                     Some(c) => match c.last_spoke_secs_ago {
-                        // 室友最近 90s 内发言过：正常触发条件
-                        Some(secs) => secs <= 90.0,
+                        // 室友最近 180s 内发言过：正常触发条件
+                        Some(secs) => secs <= 180.0,
                         // 冷启动破冰：室友在线但从未发言过（last_spoke_secs_ago=None）
                         // 两个角色都等对方先说话会死锁，以低概率触发一次破冰
                         None => roll_with_probability(0.20),
@@ -2658,7 +2967,9 @@ impl ProactiveOrchestrator {
                 .as_ref()
                 .map(|p| p.build_style_prompt(intimacy, hour))
                 .unwrap_or_default();
-            // 取最近 6 条对话历史，格式化为 "role: content"
+            // 取最近 6 条对话历史，格式化为 "[相对时间] role: content"
+            // 带相对时间标注，让 LLM 感知每条对话距现在多久，避免把旧事说成刚发生
+            let lang_norm = crate::pipeline::prompt_modules::normalize_lang(&lang);
             let history = dialogue
                 .as_ref()
                 .map(|d| {
@@ -2669,7 +2980,19 @@ impl ProactiveOrchestrator {
                         .collect::<Vec<_>>()
                         .into_iter()
                         .rev()
-                        .map(|m| format!("{}: {}", m.role, m.content))
+                        .map(|m| {
+                            let ts_prefix = m
+                                .timestamp
+                                .map(|t| {
+                                    let unix = t.timestamp() as f64;
+                                    format!(
+                                        "[{}] ",
+                                        format_relative_time_lang(unix, lang_norm)
+                                    )
+                                })
+                                .unwrap_or_default();
+                            format!("{}{}: {}", ts_prefix, m.role, m.content)
+                        })
                         .collect::<Vec<_>>()
                         .join("\n")
                 })
@@ -2701,6 +3024,7 @@ impl ProactiveOrchestrator {
         tokio::task::block_in_place(|| {
             handle.block_on(async move {
                 // 记忆检索（含知识库：busy 状态网络搜索获得的信息），让主动问候有真实素材
+                // 每条记忆带相对时间标注（如"3小时前"），让 LLM 区分刚发生的事与旧记忆
                 let memory_text = if let Some(mem_mgr) = memory_arc.as_ref() {
                     match mem_mgr
                         .search_memories(
@@ -2710,14 +3034,20 @@ impl ProactiveOrchestrator {
                         )
                         .await
                     {
-                        Ok(items) if !items.is_empty() => items
-                            .iter()
-                            .map(|m| {
-                                let imp = (m.importance * 100.0) as u32;
-                                format!("- {}（重要性:{}%）", m.content, imp)
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n"),
+                        Ok(items) if !items.is_empty() => {
+                            let lang_norm_mem =
+                                crate::pipeline::prompt_modules::normalize_lang(&lang_clone);
+                            items
+                                .iter()
+                                .map(|m| {
+                                    let imp = (m.importance * 100.0) as u32;
+                                    let rel_time =
+                                        format_relative_time_lang(m.timestamp, lang_norm_mem);
+                                    format!("- {}（{}，重要性:{}%）", m.content, rel_time, imp)
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n")
+                        }
                         _ => String::new(),
                     }
                 } else {
@@ -2762,10 +3092,11 @@ impl ProactiveOrchestrator {
                             &llm_ctx.dialogue_history,
                             &lang_clone,
                             &self.char_id,
+                            idle_seconds,
                         )?
                     }
                     ProactiveTrigger::MemoryRecall => {
-                        MemoryRecall::build_messages(&mem, &system_prompt_clone, &lang_clone, &self.char_id)?
+                        MemoryRecall::build_messages(&mem, &system_prompt_clone, &lang_clone, &self.char_id, idle_seconds)?
                     }
                     #[allow(unreachable_patterns)]
                     _ => return None,
@@ -2786,6 +3117,193 @@ impl ProactiveOrchestrator {
                 Self::parse_proactive_json(&raw)
             })
         })
+    }
+
+    /// 主动旁观插话评估（轻量判断）
+    ///
+    /// 用户与说话角色 A 对话时，立即用轻量 LLM 判断本角色（旁观者 B）是否有动机插话。
+    /// 绕过概率 roll 和 proactive_tick 周期，每次用户普通消息都进行 LLM 判断。
+    /// 提示词包含 B 的人设、当前情绪、亲密度、旁观记忆和刚听到的对话，让 LLM 判断 B 是否有动机插话。
+    /// 只判断是否插话，不生成插话内容——插话内容由主对话流程生成。
+    /// 返回 Some(String) 表示要插话（String 为插话指令，传给 brain.think），None 表示不插话或冷却中。
+    pub async fn evaluate_active_bystander_interjection(
+        &self,
+        user_msg: &str,
+        agent_reply: &str,
+        speaker_name: &str,
+        mood_hint: &str,
+        dialogue_history: &str,
+        system_prompt: &str,
+        intimacy: f64,
+        lang: &str,
+    ) -> Option<String> {
+        let now = chrono::Local::now().timestamp() as f64;
+        let trigger = ProactiveTrigger::BystanderInterjection;
+
+        // 冷却检查（BystanderInterjection 120s 冷却 × 角色 cooldown_mult）
+        let throttle = TriggerThrottle::get(trigger);
+        let cfg = self.config.read().clone();
+        let behavior_cfg = crate::character_behavior::get_behavior(&self.char_id);
+        let mods = behavior_cfg.trigger_modifiers;
+        let effective_cooldown = ((throttle.cooldown_seconds as f64 * mods.cooldown_mult) as u64)
+            .max(cfg.min_trigger_interval);
+        {
+            let state = self.state.read();
+            if let Some(&last) = state.last_trigger_times.get(trigger.as_str()) {
+                if now - last < effective_cooldown as f64 {
+                    tracing::debug!(
+                        "[Proactive:{}] 主动旁观插话冷却中，跳过",
+                        self.char_id
+                    );
+                    return None;
+                }
+            }
+        }
+
+        let router = match self.model_router.read().clone() {
+            Some(r) => r,
+            None => {
+                tracing::debug!(
+                    "[Proactive:{}] model_router 未设置，跳过主动旁观插话",
+                    self.char_id
+                );
+                return None;
+            }
+        };
+
+        // 构造轻量判断提示词（只判断是否插话，不生成内容）
+        let (scene_text, overheard_label, mood_label, intimacy_label, recent_label, judge_instr) = match crate::pipeline::prompt_modules::normalize_lang(lang) {
+            "en" => (
+                "Scene: you just overheard a conversation between the user and your roommate. You were NOT part of it — you just happened to be in the same room and heard them. Now decide whether you have a motive to chime in TO THE USER.",
+                "What you overheard:",
+                "Your current state:",
+                "Intimacy with user:",
+                "Recent overheard conversations (for reference):",
+                "Decide whether you have a motive to chime in right now. Interjection should be occasional — only chime in when:\n- The topic genuinely interests you (your own interests, not your roommate's)\n- You have a unique take or tease\n- The situation naturally invites it\nDo NOT chime in just because you can. Most of the time you should stay silent. If your fatigue is high, or your mood doesn't fit, or the topic is unrelated to you, stay silent.\nReturn JSON: {\"should_interject\": true or false}",
+            ),
+            "ja" => (
+                "シーン：ユーザーとルームメイトの会話を聞いてしまった。あなたは参加していない——たまたま同じ部屋にいて聞こえただけ。今、ユーザーに向けて口を挟む動機があるか判断して。",
+                "聞こえた会話：",
+                "あなたの現在の状態：",
+                "ユーザーとの親密度：",
+                "最近聞いた会話（参考）：",
+                "今すぐ口を挟む動機があるか判断して。插話は偶発的であるべき——以下の場合のみ挟む:\n- 話題が本当に自分の興味を引いた（ルームメイトの趣味ではなく自分の）\n- 独自の見解やツッコミがある\n- 状況が自然にそれを誘う\n「挟めるから」という理由で挟まない。大抵は黙っているべき。疲労度が高い、または気分が合わない、または話題が自分に関係ない場合は黙っている。\nJSON出力: {\"should_interject\": true または false}",
+            ),
+            _ => (
+                "场景：你刚听到用户和室友的对话。你没有参与——只是碰巧在同一个房间听到了。现在判断你是否有动机对用户插话。",
+                "你听到的对话：",
+                "你的当前状态：",
+                "与用户的亲密度：",
+                "最近旁观记忆：",
+                "判断你此刻是否有动机插话。插话应该是偶发的——只在以下情况插话:\n- 话题确实引起了你的兴趣（你自己的兴趣，不是室友的）\n- 你有独特的看法或吐槽\n- 情境自然适合插话\n不要因为「能插话就插话」。大多数时候应该保持沉默。如果你当前疲劳度高，或者情绪不适合，或者话题与你无关，就不要插话。\n返回 JSON: {\"should_interject\": true 或 false}",
+            ),
+        };
+
+        let overheard = format!(
+            "[User says to {}] {}\n[{} says to User] {}",
+            speaker_name, user_msg, speaker_name, agent_reply
+        );
+
+        let mut user_parts: Vec<String> = vec![scene_text.to_string()];
+        user_parts.push(format!("{}\n{}", overheard_label, overheard));
+        user_parts.push(format!("{}\n{}", mood_label, mood_hint));
+        user_parts.push(format!("{} {:.2}", intimacy_label, intimacy));
+        if !dialogue_history.is_empty() {
+            user_parts.push(format!("{}\n{}", recent_label, dialogue_history));
+        }
+        user_parts.push(judge_instr.to_string());
+
+        let messages = vec![
+            crate::types::response::ChatMessage::system(system_prompt),
+            crate::types::response::ChatMessage::user(user_parts.join("\n\n")),
+        ];
+
+        let response = match router
+            .generate(LLMRequest::new("bystander_judge", messages))
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::debug!(
+                    "[Proactive:{}] 主动旁观插话 LLM 调用失败: {}",
+                    self.char_id,
+                    e
+                );
+                return None;
+            }
+        };
+
+        // 更新冷却时间（无论是否插话，都记录本次评估，避免每条消息都调 LLM）
+        {
+            let mut state = self.state.write();
+            state
+                .last_trigger_times
+                .insert(trigger.as_str().to_string(), now);
+        }
+
+        // 解析判断结果：只提取 should_interject 字段
+        let should_interject = Self::parse_interjection_judgment(&response);
+
+        if should_interject {
+            tracing::info!(
+                "[Proactive:{}] 主动旁观插话评估：决定插话",
+                self.char_id
+            );
+            // 构造插话指令（传给 brain.think 作为 user_input，出现在完整 prompt 末尾）
+            let (directive_scene, directive_instr) = match crate::pipeline::prompt_modules::normalize_lang(lang) {
+                "en" => (
+                    format!("You just overheard a conversation between the user and {}:\n{}\n\nNow you want to chime in.", speaker_name, overheard),
+                    "Address the USER, not your roommate. This is you butting into THEIR conversation. You may comment on or tease about the topic you heard, but don't pretend to share your roommate's interests — your own interests are your own.",
+                ),
+                "ja" => (
+                    format!("ユーザーと{}の会話を聞いてしまった:\n{}\n\n今、口を挟みたい。", speaker_name, overheard),
+                    "ユーザーに向けて。ルームメイトではなく。これは彼らの会話に割り込むあなた。聞いた話題についてコメントしたりからかったりするのはいいが、ルームメイトの趣味を自分のもののように装わないで——あなたの趣味はあなた自身のもの。",
+                ),
+                _ => (
+                    format!("你刚听到用户和{}的对话:\n{}\n\n现在你想插话。", speaker_name, overheard),
+                    "对用户说，不是对室友。这是你插进他们的对话。你可以评论或吐槽听到的话题，但不要假装和室友有同样的兴趣——你的兴趣是你自己的。",
+                ),
+            };
+            Some(format!("{}\n\n{}", directive_scene, directive_instr))
+        } else {
+            tracing::debug!(
+                "[Proactive:{}] 主动旁观插话评估：决定不插话",
+                self.char_id
+            );
+            None
+        }
+    }
+
+    /// 解析插话判断 LLM 响应
+    ///
+    /// 提取 should_interject 布尔字段。容错多种格式（true/false/1/0/yes/no）。
+    fn parse_interjection_judgment(response: &str) -> bool {
+        // 提取首个 { 到末个 } 的子串
+        let start = match response.find('{') {
+            Some(s) => s,
+            None => return false,
+        };
+        let end = match response.rfind('}') {
+            Some(e) => e + 1,
+            None => return false,
+        };
+        if end <= start {
+            return false;
+        }
+        let json_str = &response[start..end];
+        let val: serde_json::Value = match serde_json::from_str(json_str) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
+        if let Some(b) = val.get("should_interject").and_then(|v| v.as_bool()) {
+            return b;
+        }
+        // 容错：字符串形式
+        if let Some(s) = val.get("should_interject").and_then(|v| v.as_str()) {
+            let lower = s.to_lowercase();
+            return matches!(lower.as_str(), "true" | "1" | "yes" | "y");
+        }
+        false
     }
 
     fn push_message(&self, trigger: ProactiveTrigger, content: String, now: f64) {
@@ -2866,7 +3384,9 @@ impl ProactiveOrchestrator {
         state
             .last_trigger_times
             .insert(trigger.as_str().to_string(), now);
-        state.last_interaction_time = now;
+        // 注意：不更新 last_interaction_time —— 该字段应只由真实用户交互更新（on_user_interacted）。
+        // 主动消息发出后覆盖它会导致 GREETING_SUPPRESSION_AFTER_INTERACTION_SECS 误判，
+        // 把"刚发了主动消息"当成"用户刚交互"，从而抑制后续 5 分钟内的合理问候。
         if trigger == ProactiveTrigger::HourlyGreeting {
             state.last_hour_greeted = hour as i32;
         }
@@ -2891,6 +3411,7 @@ impl ProactiveOrchestrator {
         }
         if trigger == ProactiveTrigger::WelcomeBack {
             *self.last_user_was_away.write() = false;
+            *self.away_since.write() = None;
         }
     }
 
@@ -3234,6 +3755,7 @@ impl Default for ProactiveOrchestrator {
                 last_app_category: RwLock::new(String::new()),
                 last_user_active: RwLock::new(true),
                 last_user_was_away: RwLock::new(false),
+                away_since: RwLock::new(None),
                 model_router: RwLock::new(None),
                 psychology: RwLock::new(None),
                 config: RwLock::new(ProactiveConfig::default()),
@@ -3271,4 +3793,4 @@ impl Default for ProactiveOrchestrator {
     }
 }
 
-use chrono::{Datelike, TimeZone};
+use chrono::Datelike;

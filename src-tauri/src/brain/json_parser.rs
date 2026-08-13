@@ -986,12 +986,12 @@ pub struct ProcessedResponse {
     /// LLM 在 JSON 中返回，未返回时默认 "speak"。
     /// 主对话路径下永远视为 "speak"（即便 LLM 返回非 speak 值）。
     pub response_mode: String,
+    /// 微信渠道语音消息标志：为 true 时前端不显示文本，合成 TTS 后以语音气泡发出
+    #[serde(default)]
+    pub voice_message: bool,
     /// 提取到的工具调用列表（不参与 LLM Schema 约束，工具调用走原生 FC 通道）。
     #[schemars(skip)]
     pub tool_calls: Vec<Value>,
-    /// 桌宠自控动作指令（不参与 LLM Schema 约束，Live2D 模型控制：expression/motion/mouse_follow）。
-    #[schemars(skip)]
-    pub control_actions: Vec<Value>,
 }
 
 /// JSON 处理器，负责 LLM 响应的 JSON 提取与解析。
@@ -1214,19 +1214,17 @@ impl JsonProcessor {
             .unwrap_or("")
             .to_string();
 
-        // 提取 control_actions 数组（桌宠自控指令）
-        let control_actions: Vec<Value> = map
-            .and_then(|m| m.get("control_actions"))
-            .and_then(|v| v.as_array())
-            .map(|arr| arr.to_vec())
-            .unwrap_or_default();
+        let voice_message = map
+            .and_then(|m| m.get("voice_message"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
 
         ProcessedResponse {
             text,
             intent: get_str("intent", "reply"),
             response_mode: get_str("response_mode", "speak"),
+            voice_message,
             tool_calls,
-            control_actions,
         }
     }
 }

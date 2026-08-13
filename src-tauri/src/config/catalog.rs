@@ -94,6 +94,33 @@ pub fn build_catalog() -> Vec<SettingEntry> {
             default_value: serde_json::json!("Ctrl+Shift+Z"),
         },
         SettingEntry {
+            key: "base.shortcut_chat".into(),
+            label: "微信快捷键".into(),
+            description: "打开微信主页面的全局热键".into(),
+            layer: SettingLayer::Basic,
+            group: "基础".into(),
+            control: SettingControl::String,
+            default_value: serde_json::json!("Ctrl+Shift+W"),
+        },
+        SettingEntry {
+            key: "base.shortcut_settings".into(),
+            label: "设置快捷键".into(),
+            description: "打开设置窗口的全局热键".into(),
+            layer: SettingLayer::Basic,
+            group: "基础".into(),
+            control: SettingControl::String,
+            default_value: serde_json::json!("Ctrl+Shift+S"),
+        },
+        SettingEntry {
+            key: "base.shortcut_memory".into(),
+            label: "笔记本快捷键".into(),
+            description: "打开笔记本窗口的全局热键".into(),
+            layer: SettingLayer::Basic,
+            group: "基础".into(),
+            control: SettingControl::String,
+            default_value: serde_json::json!("Ctrl+Shift+N"),
+        },
+        SettingEntry {
             key: "ai.provider".into(),
             label: "AI 提供商".into(),
             description: "主对话 LLM 的提供商类型".into(),
@@ -138,7 +165,7 @@ pub fn build_catalog() -> Vec<SettingEntry> {
             layer: SettingLayer::Basic,
             group: "AI 模型".into(),
             control: SettingControl::Number,
-            default_value: serde_json::json!(0.8),
+            default_value: serde_json::json!(0.70),
         },
         SettingEntry {
             key: "speech_recognition.engine".into(),
@@ -173,6 +200,15 @@ pub fn build_catalog() -> Vec<SettingEntry> {
             default_value: serde_json::json!(true),
         },
         SettingEntry {
+            key: "proactive.enable_social_urge_gating".into(),
+            label: "内心独白优化主动问候".into(),
+            description: "用内心独白的社交冲动信号门控问候时机，让主动问候在角色真的想说话时才触发".into(),
+            layer: SettingLayer::Advanced,
+            group: "主动对话".into(),
+            control: SettingControl::Boolean,
+            default_value: serde_json::json!(true),
+        },
+        SettingEntry {
             key: "proactive.proactivity".into(),
             label: "主动度".into(),
             description: "主动对话频率（0.0-1.0，越高越积极）".into(),
@@ -197,7 +233,7 @@ pub fn build_catalog() -> Vec<SettingEntry> {
             layer: SettingLayer::Advanced,
             group: "记忆".into(),
             control: SettingControl::Integer,
-            default_value: serde_json::json!(50),
+            default_value: serde_json::json!(20),
         },
         SettingEntry {
             key: "memory.retrieval_strategy".into(),
@@ -206,9 +242,9 @@ pub fn build_catalog() -> Vec<SettingEntry> {
             layer: SettingLayer::Advanced,
             group: "记忆".into(),
             control: SettingControl::Select {
-                options: vec!["vector".into(), "keyword".into(), "hybrid".into()],
+                options: vec!["auto".into(), "vector".into(), "keyword".into(), "hybrid".into(), "graph".into()],
             },
-            default_value: serde_json::json!("hybrid"),
+            default_value: serde_json::json!("auto"),
         },
         SettingEntry {
             key: "memory.enable_expiration".into(),
@@ -235,7 +271,7 @@ pub fn build_catalog() -> Vec<SettingEntry> {
             layer: SettingLayer::Advanced,
             group: "记忆".into(),
             control: SettingControl::Number,
-            default_value: serde_json::json!(600.0),
+            default_value: serde_json::json!(1800.0),
         },
         SettingEntry {
             key: "tools.enable_native_function_calling".into(),
@@ -244,7 +280,7 @@ pub fn build_catalog() -> Vec<SettingEntry> {
             layer: SettingLayer::Advanced,
             group: "工具".into(),
             control: SettingControl::Boolean,
-            default_value: serde_json::json!(false),
+            default_value: serde_json::json!(true),
         },
         SettingEntry {
             key: "tools.max_iterations".into(),
@@ -306,11 +342,11 @@ pub fn build_catalog() -> Vec<SettingEntry> {
         SettingEntry {
             key: "web_search.providers".into(),
             label: "启用的搜索引擎".into(),
-            description: "可同时启用多个引擎混用：duckduckgo（零配置）/ searxng（自部署）/ tavily（LLM 优化）。搜索工具会并发调用所有已配置引擎并合并去重结果。注：主对话优先用 LLM 原生搜索，此为补充工具的后端选择".into(),
+            description: "可同时启用多个引擎混用：duckduckgo（零配置）/ searxng（自部署）/ tavily（LLM 优化）/ bing（国内直连）。搜索工具会并发调用所有已配置引擎并合并去重结果。注：主对话优先用 LLM 原生搜索，此为补充工具的后端选择".into(),
             layer: SettingLayer::Advanced,
             group: "网络搜索".into(),
             control: SettingControl::MultiSelect {
-                options: vec!["duckduckgo".into(), "searxng".into(), "tavily".into()],
+                options: vec!["duckduckgo".into(), "searxng".into(), "tavily".into(), "bing".into()],
             },
             default_value: serde_json::json!(["duckduckgo"]),
         },
@@ -399,6 +435,25 @@ pub fn build_catalog() -> Vec<SettingEntry> {
             },
             default_value: serde_json::json!("basic"),
         },
+        // Bing Search API 配置
+        SettingEntry {
+            key: "web_search.bing.api_key".into(),
+            label: "Bing Search API Key".into(),
+            description: "Azure Bing Search API Key（https://portal.azure.com 创建 Bing Search 资源获取，国内直连，免费 1000 次/月）".into(),
+            layer: SettingLayer::Advanced,
+            group: "网络搜索-Bing".into(),
+            control: SettingControl::Password,
+            default_value: serde_json::json!(""),
+        },
+        SettingEntry {
+            key: "web_search.bing.mkt".into(),
+            label: "Bing 市场代码".into(),
+            description: "搜索结果市场（如 zh-CN / en-US / ja-JP），默认 zh-CN".into(),
+            layer: SettingLayer::Expert,
+            group: "网络搜索-Bing".into(),
+            control: SettingControl::String,
+            default_value: serde_json::json!("zh-CN"),
+        },
         // ========== 专家层 ==========
         SettingEntry {
             key: "memory.embedding.enabled".into(),
@@ -416,7 +471,7 @@ pub fn build_catalog() -> Vec<SettingEntry> {
             layer: SettingLayer::Expert,
             group: "记忆-向量".into(),
             control: SettingControl::Integer,
-            default_value: serde_json::json!(1536),
+            default_value: serde_json::json!(1024),
         },
         SettingEntry {
             key: "memory.retrieval_weights.recency".into(),
@@ -425,7 +480,7 @@ pub fn build_catalog() -> Vec<SettingEntry> {
             layer: SettingLayer::Expert,
             group: "记忆-权重".into(),
             control: SettingControl::Number,
-            default_value: serde_json::json!(0.2),
+            default_value: serde_json::json!(0.25),
         },
         SettingEntry {
             key: "memory.retrieval_weights.relevance".into(),
@@ -434,7 +489,7 @@ pub fn build_catalog() -> Vec<SettingEntry> {
             layer: SettingLayer::Expert,
             group: "记忆-权重".into(),
             control: SettingControl::Number,
-            default_value: serde_json::json!(0.5),
+            default_value: serde_json::json!(0.40),
         },
         SettingEntry {
             key: "memory.retrieval_weights.importance".into(),
@@ -443,7 +498,7 @@ pub fn build_catalog() -> Vec<SettingEntry> {
             layer: SettingLayer::Expert,
             group: "记忆-权重".into(),
             control: SettingControl::Number,
-            default_value: serde_json::json!(0.3),
+            default_value: serde_json::json!(0.15),
         },
         SettingEntry {
             key: "tools.cache_ttl_secs".into(),
@@ -461,7 +516,7 @@ pub fn build_catalog() -> Vec<SettingEntry> {
             layer: SettingLayer::Expert,
             group: "工具-缓存".into(),
             control: SettingControl::Integer,
-            default_value: serde_json::json!(100),
+            default_value: serde_json::json!(1000),
         },
         SettingEntry {
             key: "proactive.tick_interval".into(),

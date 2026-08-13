@@ -14,10 +14,10 @@ import { useAppStore } from '../stores/useAppStore';
 
 /** 空文本/取消时的最短停留时间 */
 const MIN_CLOSE_MS = 3000;
-/** 打字机每字间隔（ms） */
-const TYPEWRITER_INTERVAL_MS = 35;
-/** 打字机每 tick 最大揭示字数（追赶用） */
-const TYPEWRITER_BURST = 2;
+/** 打字机每字间隔（ms）：原 setInterval(35ms)*2字 ≈ 17.5ms/字 */
+const TYPEWRITER_MS_PER_CHAR = 17.5;
+/** 单帧最大揭示字符数：防止掉帧后一次性蹦出过多文本 */
+const TYPEWRITER_MAX_CHARS_PER_FRAME = 4;
 
 /** 流式气泡兜底 auto-close 时长（ms）。
  *  showStreamingBubble 不设置 auto-close（等待 showBubble 接管），
@@ -47,8 +47,12 @@ function computeDuration(text: string): number {
 class BubbleControllerClass {
   private streamingBubble = false;
   private autoCloseTimer: ReturnType<typeof setTimeout> | null = null;
-  /** 打字机定时器 */
-  private typewriterTimer: ReturnType<typeof setInterval> | null = null;
+  /** 打字机 rAF 句柄 */
+  private typewriterRaf: number | null = null;
+  /** 打字机时间累积（ms）：基于帧间隔累积，对齐帧率平滑揭示 */
+  private typewriterAccumMs = 0;
+  /** 打字机上一帧时间戳 */
+  private typewriterLastTs: number | null = null;
   /** 当前已揭示给用户看到的文本 */
   private displayedText = '';
   /** 流式累积的完整目标文本 */
@@ -256,31 +260,59 @@ class BubbleControllerClass {
     this.settledTimers.clear();
   }
 
-  /** 启动打字机定时器（如已运行则不重复启动） */
+  /**
+   * 启动打字机（requestAnimationFrame 驱动，对齐帧率）。
+   *
+   * 用 rAF 替代 setInterval：每帧最多一次 setState，避免帧间多次触发重渲染；
+   * 基于帧间隔时间累积计算应揭示字符数，掉帧时自动平滑追赶，
+   * 不会像 setInterval 那样在主线程繁忙时积压后密集触发。
+   */
   private startTypewriter(): void {
-    if (this.typewriterTimer) return;
-    this.typewriterTimer = setInterval(() => {
+    if (this.typewriterRaf !== null) return;
+    this.typewriterAccumMs = 0;
+    this.typewriterLastTs = null;
+    const step = (ts: number) => {
+      if (this.typewriterRaf === null) return; // 已被 stopTypewriter 取消
+      if (this.typewriterLastTs === null) {
+        this.typewriterLastTs = ts;
+      }
+      const dt = ts - this.typewriterLastTs;
+      this.typewriterLastTs = ts;
+      this.typewriterAccumMs += dt;
+
       if (this.displayedText.length >= this.targetText.length) {
-        // 已追上目标文本，停止打字机
         this.stopTypewriter();
         return;
       }
-      // 每次揭示 TYPEWRITER_BURST 个字符
-      const nextLen = Math.min(
-        this.displayedText.length + TYPEWRITER_BURST,
-        this.targetText.length
-      );
-      this.displayedText = this.targetText.slice(0, nextLen);
-      useAppStore.setState({ currentBubble: this.displayedText });
-    }, TYPEWRITER_INTERVAL_MS);
+
+      // 按时间累积计算应揭示字符数，平滑追赶
+      let charsToReveal = Math.floor(this.typewriterAccumMs / TYPEWRITER_MS_PER_CHAR);
+      if (charsToReveal > 0) {
+        // 限制单帧最大揭示数，防止严重掉帧后一次蹦出过多
+        charsToReveal = Math.min(charsToReveal, TYPEWRITER_MAX_CHARS_PER_FRAME);
+        this.typewriterAccumMs -= charsToReveal * TYPEWRITER_MS_PER_CHAR;
+        const nextLen = Math.min(
+          this.displayedText.length + charsToReveal,
+          this.targetText.length
+        );
+        if (nextLen > this.displayedText.length) {
+          this.displayedText = this.targetText.slice(0, nextLen);
+          useAppStore.setState({ currentBubble: this.displayedText });
+        }
+      }
+      this.typewriterRaf = requestAnimationFrame(step);
+    };
+    this.typewriterRaf = requestAnimationFrame(step);
   }
 
   /** 停止打字机（不刷新显示） */
   private stopTypewriter(): void {
-    if (this.typewriterTimer) {
-      clearInterval(this.typewriterTimer);
-      this.typewriterTimer = null;
+    if (this.typewriterRaf !== null) {
+      cancelAnimationFrame(this.typewriterRaf);
+      this.typewriterRaf = null;
     }
+    this.typewriterLastTs = null;
+    this.typewriterAccumMs = 0;
   }
 
   /** 立即显示完整目标文本并停止打字机 */

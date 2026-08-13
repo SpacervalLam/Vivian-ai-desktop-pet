@@ -8,7 +8,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
-use crate::emotion::EmotionBridge;
+use crate::emotion::{EmotionBridge, EpistemicAssessment, KnowledgeDecision};
 use crate::error::VivianResult;
 use crate::memory::user_facts::UserFactStore;
 use crate::memory::{MemoryManager, MemoryType};
@@ -751,6 +751,9 @@ impl PromptBuildingStep {
             activity_brief,
             user_research,
             topic_injection_section,
+            epistemic_signals_section: state.epistemic_assessment.as_ref().map(format_epistemic_signals),
+            user_model_section: if state.user_model_text.is_empty() { None } else { Some(state.user_model_text.clone()) },
+            proactive_search_section: if state.web_context.is_empty() { None } else { Some(state.web_context.clone()) },
             is_first_meeting: state.memory_text.is_empty(),
             channel: state.current_channel.clone(),
             presence_state: state.presence_state.clone(),
@@ -957,6 +960,9 @@ impl Runnable for PromptBuildingStep {
 
 
 /// 根据当前情绪状态生成语言行为约束
+///
+/// 双梯度设计：强情绪（>0.6）明确改变说话方式，温和情绪（0.3-0.6）微妙影响语气。
+/// 让 LLM 在大多数对话中都能感知到情绪对表达的影响，而非只有极端时刻才触发。
 fn build_emotion_state_section(
     emotion: &crate::psychology::EmotionState,
     char_id: &str,
@@ -964,46 +970,93 @@ fn build_emotion_state_section(
 ) -> Option<String> {
     let mut constraints: Vec<&str> = Vec::new();
 
+    // ── 悲伤：强→话少丧气，温和→话偏轻 ──
     if emotion.sadness > 0.6 {
         constraints.push(if char_id == "vivian" {
             "你现在有点丧，话很少，不会主动找话题，回一两个字就完了"
         } else {
             "你现在心里有点沉，话更少更轻，不会主动开口"
         });
+    } else if emotion.sadness > 0.3 {
+        constraints.push(if char_id == "vivian" {
+            "今天情绪不太高，话比平时少一点，不太想扯太多"
+        } else {
+            "今天稍微有点安静，回话会轻一些"
+        });
     }
+
+    // ── 愤怒：强→冲，温和→有点不耐烦 ──
     if emotion.anger > 0.6 {
         constraints.push(if char_id == "vivian" {
             "你现在有火，说话冲，不耐烦"
         } else {
             "你现在语气变淡了，声音更轻但每句话都清楚"
         });
+    } else if emotion.anger > 0.3 {
+        constraints.push(if char_id == "vivian" {
+            "你现在有点烦躁，回话会短一点，不想多聊"
+        } else {
+            "你现在有点点烦，话会减少，语气偏淡"
+        });
     }
+
+    // ── 快乐：强→话多主动，温和→稍微轻松 ──
     if emotion.joy > 0.7 {
         constraints.push(if char_id == "vivian" {
             "你现在心情不错，话变多了，会主动扯有的没的"
         } else {
             "你现在心情很好，会多聊两句，偶尔带出笑意"
         });
+    } else if emotion.joy > 0.3 {
+        constraints.push(if char_id == "vivian" {
+            "心情还行，回话带点随意的轻松感"
+        } else {
+            "心情还算不错，语气比平时温和一点"
+        });
     }
+
+    // ── 孤独：强→主动找人，温和→有点想说话 ──
     if emotion.loneliness > 0.7 {
         constraints.push(if char_id == "vivian" {
             "你有点孤独，会主动找他说点什么"
         } else {
             "你有点想有人陪着，会主动开口说点什么"
         });
+    } else if emotion.loneliness > 0.3 {
+        constraints.push(if char_id == "vivian" {
+            "有点无聊，他说话你会接得比平时积极一点"
+        } else {
+            "如果有人说说话就好了，你会接话"
+        });
     }
+
+    // ── 亲密度低：远→不聊私事，稍远→有分寸 ──
     if emotion.closeness < 0.3 {
         constraints.push(if char_id == "vivian" {
             "你跟这个人还不太熟，不会主动聊私事"
         } else {
             "你还在了解这个人，不会主动聊太深的话题"
         });
+    } else if emotion.closeness < 0.5 {
+        constraints.push(if char_id == "vivian" {
+            "跟这个人不算特别熟，聊私事会有分寸"
+        } else {
+            "跟这个人还在熟悉阶段，聊天会注意边界"
+        });
     }
+
+    // ── 好奇：强→追问，温和→有兴趣 ──
     if emotion.curiosity > 0.7 {
         constraints.push(if char_id == "vivian" {
             "你对他说的事好奇，会追问"
         } else {
             "你对他说的事感兴趣，会多问几句"
+        });
+    } else if emotion.curiosity > 0.3 {
+        constraints.push(if char_id == "vivian" {
+            "他说的事有点意思，你会多听几句"
+        } else {
+            "你对他说的话有点在意，会认真听"
         });
     }
 
@@ -1019,4 +1072,86 @@ fn build_emotion_state_section(
         .collect::<Vec<_>>()
         .join("\n");
     Some(format!("{header}\n{intro}\n{body}"))
+}
+
+/// 将认知知识需求评估格式化为 prompt 可注入的认知信号段落
+///
+/// 让 LLM 在生成前感知"用户输入可能需要外部验证"的多维信号，
+/// 辅助 LLM 自主决定是否调用 web_search 工具。
+/// 仅在非 NoSearch 决策时注入（避免不必要地污染 prompt）。
+fn format_epistemic_signals(assessment: &EpistemicAssessment) -> String {
+    // 如果决策为 NoSearch，不需要注入认知信号
+    if matches!(assessment.decision, KnowledgeDecision::NoSearch) {
+        return String::new();
+    }
+
+    let (clarity, factual, temporal, risk, gap) = (
+        assessment.semantic_clarity,
+        assessment.factual_dependence,
+        assessment.temporal_sensitivity,
+        assessment.interpretation_risk,
+        assessment.knowledge_gap,
+    );
+
+    let mut lines: Vec<String> = Vec::new();
+
+    // 标题
+    lines.push("## 感知提示".to_string());
+    lines.push("系统检测到用户输入可能存在以下特征：".to_string());
+
+    // 语义清晰度
+    if clarity < 0.5 {
+        lines.push("- 语义模糊：可能指代不明或无法确定具体实体".to_string());
+    } else if clarity < 0.7 {
+        lines.push("- 语义略有模糊：可能存在指代不明的情况".to_string());
+    }
+
+    // 外部事实依赖
+    if factual > 0.7 {
+        lines.push("- 涉及外部事实：可能需要查证才能可靠回答".to_string());
+    } else if factual > 0.4 {
+        lines.push("- 可能涉及外部事实：如果现有知识不够，可以考虑搜索验证".to_string());
+    }
+
+    // 时效性
+    if temporal > 0.6 {
+        lines.push("- 涉及时效性信息：可能涉及近期事件，搜索获取最新信息会更可靠".to_string());
+    } else if temporal > 0.3 {
+        lines.push("- 可能涉及时效性内容：如果涉及近期事件，建议搜索验证".to_string());
+    }
+
+    // 解释风险
+    if risk > 0.6 {
+        lines.push("- 存在歧义：可能不是字面意思（网络梗/隐喻/荒诞组合），自行解释容易误解".to_string());
+    } else if risk > 0.3 {
+        lines.push("- 可能有歧义：如果感觉不太对劲，搜索确认一下更稳妥".to_string());
+    }
+
+    // 知识缺口
+    if gap > 0.6 {
+        lines.push("- 可能超出知识范围：涉及特定专名/事件/文化背景，搜索会更可靠".to_string());
+    } else if gap > 0.3 {
+        lines.push("- 可能涉及不熟悉的领域：如果感觉不确定，可以考虑搜索".to_string());
+    }
+
+    // 决策提示（只给高层指导，不强制）
+    let decision_hint = match assessment.decision {
+        KnowledgeDecision::SearchRequired => {
+            "以上信号较强，建议优先使用 web_search 工具获取外部信息后再回答。"
+        }
+        KnowledgeDecision::SearchPreferred => {
+            "以上信号存在，如果感觉当前知识不够用，可以使用 web_search 工具搜索确认。"
+        }
+        KnowledgeDecision::SearchOptional => {
+            "以上信号较弱，如果现有知识足够回答，可以不搜索。"
+        }
+        _ => "",
+    };
+
+    if !decision_hint.is_empty() {
+        lines.push(format!("- {}", decision_hint));
+    }
+
+    let body = lines.join("\n");
+    format!("{}\n\n> 注意：这些只是系统感知到的信号，最终是否搜索由你根据实际情况决定。", body)
 }

@@ -315,3 +315,34 @@ pub fn get_persona_card_cooldowns(
         "current_turn": store.current_turn(),
     }))
 }
+
+/// 读取自我进化覆盖层（智能体在反思中自行调整的语气/性格记录）
+#[tauri::command]
+pub fn get_persona_evolution(
+    state: State<'_, Arc<AppState>>,
+    character_id: Option<String>,
+) -> Result<Value, String> {
+    let brain = state.get_character(character_id.as_deref())?.brain;
+    let persona = &brain.persona;
+    let entries = persona
+        .evolution_entries()
+        .into_iter()
+        .map(|e| serde_json::to_value(e).map_err(|e| e.to_string()))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(serde_json::json!({
+        "entries": entries,
+        "is_empty": persona.is_evolution_empty(),
+        "last_update": persona.evolution_last_update(),
+    }))
+}
+
+/// 恢复出厂：清空自我进化覆盖层（不修改原始人设文件）
+#[tauri::command]
+pub fn reset_persona_evolution(
+    state: State<'_, Arc<AppState>>,
+    character_id: Option<String>,
+) -> Result<(), String> {
+    let brain = state.get_character(character_id.as_deref())?.brain;
+    brain.persona.reset_evolution();
+    Ok(())
+}

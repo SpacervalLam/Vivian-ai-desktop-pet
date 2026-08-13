@@ -293,13 +293,14 @@ impl Tool for SearchMemoryTool {
     }
 
     fn description(&self) -> &str {
-        "Search the long-term memory store for memories containing the specified keywords. Results are sorted by importance."
+        "Search the long-term memory store for memories containing the specified keywords. Results are sorted by importance.\
+         Use when you need to recall what was said/done in the past. Do NOT use to store new info (that's save_memory), and do not search when the answer is already in recent conversation."
     }
 
     fn description_in(&self, lang: &str) -> &str {
         match lang {
-            "zh" => "在长期记忆库中搜索包含指定关键词的记忆。结果按重要性排序。",
-            "ja" => "長期記憶ストアから指定キーワードを含む記憶を検索する。結果は重要度順でソートされる。",
+            "zh" => "在长期记忆库中搜索包含指定关键词的记忆，结果按重要性排序。当你需要回忆过去说过/做过的事时使用。不要用它来保存新信息（那是 save_memory 的职责）；如果答案已经在最近的对话里，也不必搜索。",
+            "ja" => "長期記憶ストアから指定キーワードを含む記憶を検索し、重要度順でソートする。過去に話した・行ったことを思い出すときに使用。新しい情報の保存には使わないこと（それは save_memory の役割）。答えが最近の会話にすでにある場合は検索不要。",
             _ => self.description(),
         }
     }

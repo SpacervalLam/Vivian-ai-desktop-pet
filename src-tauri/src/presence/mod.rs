@@ -16,11 +16,13 @@
 
 pub mod background_tasks;
 pub mod config;
+pub mod meme_acquisition;
 
 pub use background_tasks::{
     spawn_knowledge_acquisition, spawn_memory_consolidation, spawn_user_cognition_consolidation,
 };
 pub use config::PresenceConfig;
+pub use meme_acquisition::spawn_meme_acquisition_loop;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -80,9 +82,9 @@ impl PresenceState {
     }
 
     /// 是否允许面对面对话（direct 渠道）
-    /// Online 正常对话；Rest 允许被叫醒迷糊应答；Busy/Offline 拒绝
+    /// Online/Busy 正常对话；Rest 允许被叫醒迷糊应答；Offline 拒绝
     pub fn can_direct(&self) -> bool {
-        matches!(self, PresenceState::Online | PresenceState::Rest)
+        matches!(self, PresenceState::Online | PresenceState::Busy | PresenceState::Rest)
     }
 
     /// 是否允许微信（wechat 渠道）

@@ -214,7 +214,10 @@ impl TriggerThrottle {
             },
             ProactiveTrigger::CrossCharacterReply => Self {
                 threshold: 0.4,
-                cooldown_seconds: 90,
+                // 180s：与 companion_spoke 种子冷却（300s）拉开梯度，
+                // 触发器路径（被动响应）频率高于思绪路径（主动分享），
+                // 但不过频以免淹没自然积累的对室友分享。
+                cooldown_seconds: 180,
                 // 静态概率字段未被使用——CrossCharacterReply 的概率由
                 // ProactiveOrchestrator::compute_cross_reply_probability 基于心情状态动态计算
                 // （loneliness 越高概率越大）。这里保留 0.0 仅满足结构体完整性。

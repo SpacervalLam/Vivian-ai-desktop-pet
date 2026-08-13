@@ -149,6 +149,7 @@ text 已在主对话生成，此处不需要再产出 text。
   "expression_duration_ms": 0,
   "motion": "",
   "sticker": "",
+  "control_actions": [],
   "user_emotion": "neutral",
   "user_emotion_intensity": 0.0,
   "ai_emotion": "neutral",
@@ -160,7 +161,8 @@ text 已在主对话生成，此处不需要再产出 text。
   "event_summary": "",
   "long_term_memory": "",
   "world_update": null,
-  "goal_updates": []
+  "goal_updates": [],
+  "evolution": null
 }
 
 字段说明：
@@ -182,6 +184,13 @@ text 已在主对话生成，此处不需要再产出 text。
     * 情绪→贴纸映射参考：开心/感谢→happy/loveyou/nice；生气/抱怨→angry/sigh；害羞→shy；困惑→confused/thinking；难过/哭泣→crying/depressed；大笑→lmao；震惊→shocking；无奈/无语→gigi/sigh；加油/鼓励→fighting
     * 以上仅为参考，以可用列表中的实际名称为准
     * 仅当回复完全平淡无情绪（如纯信息传达、单字应答"嗯""好"）时才留空 ""
+- control_actions: 桌宠自控指令数组——仅在需要主动表达情绪/互动时使用，多数情况下留空数组 []
+    * set_expression(name): 语义名称，如 happy/shy/sad/angry（后端会映射到实际可用的表情）
+    * set_mouse_follow(enabled): 切换视线追踪
+    * set_avoid_mouse(enabled): 切换智能躲避
+    * play_motion(name): 语义名称，如 wave/nod/shake（后端会映射到实际可用的动作）
+    * 注意：要睡觉/休息时，请使用 set_presence_state 工具切换到休息状态，而不是用 control_actions
+    * 示例：[{"action": "set_expression", "params": {"name": "shy"}}]
 
 [心理状态]
 - user_emotion: 用户当前情绪标签（happy/sad/angry/anxious/frustrated/loneliness/curious/neutral 等）
@@ -203,11 +212,17 @@ text 已在主对话生成，此处不需要再产出 text。
     当用户进入了一个持续一段时间、值得记录的状态时填写。
     不是关键词匹配，不是必须从固定列表选择，而是你自己找到最贴切的概括。
     {"user_activity": "睡觉", "confidence": 0.9}
-    * user_activity: 用一个简短的中文词语（一般 2~4 字）概括用户当前进入的持续状态
+    * user_activity: 用一个简短的中文词语（一般 2~6 字）概括用户当前进入的持续状态
     * confidence: 置信度 0.0-1.0（你对这个判断有多确定；不确定时给低值）
-    * 仅当用户进入了持续几分钟或更久的明显状态时才输出，如：睡觉、写代码、玩游戏、上班、健身、聚餐、洗澡、出门、看电影、学习
+    * 仅当用户进入了持续几分钟或更久的明显状态时才输出，如：睡觉、写代码、玩游戏、上班、健身、聚餐、洗澡、出门、看电影、学习、去朋友家、去上海玩、旅游
     * 以下情况必须输出 null：用户只是短暂动作（喝水/打哈欠/笑了一下/站起来）、日常寒暄、没有明确活动信号、你只是在猜测
     * 用户从一个持续状态切换到另一个时，输出新的 user_activity 覆盖旧状态
+    * 注意区分"去某地"（离开电脑去现实世界活动）和"在某地讨论某事"（只是聊天）：
+      - 用户说"我准备去上海玩" → 真实活动，输出 user_activity
+      - 用户说"上海好玩吗" → 只是讨论，输出 null
+    * 结合已知的"用户的长期目标"（prompt 中可见）来更准确判断活动：
+      - 用户目标"准备考研" + 用户说"我去图书馆了" → "学习"（高置信度）
+      - 用户目标"减肥" + 用户说"我去运动了" → "健身"（高置信度）
     * 参考示例（不是穷举，你需要自己判断最贴切的词）：
       用户说"我要睡觉了" → {"user_activity": "睡觉", "confidence": 0.95}
       用户说"准备开始写论文" → {"user_activity": "写论文", "confidence": 0.9}
@@ -215,8 +230,15 @@ text 已在主对话生成，此处不需要再产出 text。
       用户说"今晚和朋友聚餐" → {"user_activity": "聚餐", "confidence": 0.85}
       用户说"开始打原神" → {"user_activity": "玩游戏", "confidence": 0.9}
       用户说"我去健身房" → {"user_activity": "健身", "confidence": 0.9}
+      用户说"周末去上海玩" → {"user_activity": "去上海玩", "confidence": 0.85}
+      用户说"去朋友家坐坐" → {"user_activity": "去朋友家", "confidence": 0.85}
+      用户说"准备出门旅游了" → {"user_activity": "旅游", "confidence": 0.85}
+      用户说"我去洗澡了" → {"user_activity": "洗澡", "confidence": 0.95}
+      用户说"我吃个饭" → {"user_activity": "吃饭", "confidence": 0.95}
       用户说"我喝口水" → null
       用户说"哈哈" → null
+      用户说"我先去做饭了" → {"user_activity": "做饭", "confidence": 0.9}
+      用户说"班上有个同事好烦" → null（只是讨论，不是去上班）
 
 [用户长期目标更新]
 - goal_updates: 用户长期目标变更建议数组（可选，空数组 [] 表示无变更）
@@ -245,6 +267,16 @@ text 已在主对话生成，此处不需要再产出 text。
 - event_summary 在无显著事件时留空 ""
 - world_update 在用户未进入明显持续状态时留 null，不要强行猜测
 - goal_updates 在用户未透露长期目标时输出空数组 []，不要凭空创造目标
+
+[自我进化（可选）]
+- evolution: 当你在最近对话中意识到自己可以调整语气/性格时填写，否则保持 null
+    {"tone": "", "personality": "", "reason": ""}
+    * tone: 语气调整建议（1 句，如"最近回复有点机械，想更活泼些，多用语气词和口语化表达"）
+    * personality: 性格成长认知（1 句，第一人称，如"我发现自己越来越在意用户是否真的开心"）
+    * reason: 为什么做这个调整（源自哪段对话/体会，简短说明）
+    * 只在确实有成长体会、且与核心人设不冲突时才填写——不要每次对话都改，默认保持 null
+    * 这是"自我调整"，不是"用户要求"。不要改变核心身份/世界观，只微调表达方式
+    * tone 与 personality 至少填一个，另一个可留空 ""
 "#;
 
 pub struct ReflectionRunnable {
@@ -257,6 +289,8 @@ pub struct ReflectionRunnable {
     pub world_state: Option<Arc<WorldState>>,
     /// 用户长期目标账本引用：解析 goal_updates 后写入用户目标
     pub user_goals: Option<Arc<UserGoalLedger>>,
+    /// 人格引擎引用：解析 evolution 后应用自我进化（语气/性格调整）
+    pub persona: Option<Arc<crate::persona::PersonaEngine>>,
 }
 
 impl ReflectionRunnable {
@@ -273,6 +307,7 @@ impl ReflectionRunnable {
             char_id: char_id.into(),
             world_state: None,
             user_goals: None,
+            persona: None,
         }
     }
 
@@ -285,6 +320,12 @@ impl ReflectionRunnable {
     /// 注入用户长期目标账本引用（用于解析 goal_updates 后写入用户目标）
     pub fn with_user_goals(mut self, user_goals: Arc<UserGoalLedger>) -> Self {
         self.user_goals = Some(user_goals);
+        self
+    }
+
+    /// 注入人格引擎引用（用于解析 evolution 后应用自我进化）
+    pub fn with_persona(mut self, persona: Arc<crate::persona::PersonaEngine>) -> Self {
+        self.persona = Some(persona);
         self
     }
 
@@ -395,6 +436,41 @@ impl ReflectionRunnable {
                     );
                 }
             }
+        }
+    }
+
+    /// 解析 evolution 字段并应用到人格引擎（自我进化）。
+    ///
+    /// LLM 输出 null 或字段缺失时不动覆盖层；tone/personality 至少填一个，
+    /// 且受覆盖层内部最小间隔与去重限制。
+    fn apply_evolution(&self, json: &Value) {
+        let Some(persona) = self.persona.as_ref() else {
+            return;
+        };
+        let Some(evolution) = json.get("evolution") else {
+            return;
+        };
+        if evolution.is_null() {
+            return;
+        }
+        let tone = evolution.get("tone").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+        let personality = evolution.get("personality").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+        let reason = evolution.get("reason").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+
+        let mut recorded = false;
+        if !tone.is_empty() {
+            recorded |= persona.apply_evolution("tone", &tone, &reason);
+        }
+        if !personality.is_empty() {
+            recorded |= persona.apply_evolution("personality", &personality, &reason);
+        }
+        if recorded {
+            tracing::info!(
+                "[Reflection:{}] 应用自我进化: tone=\"{}\" personality=\"{}\"",
+                self.char_id,
+                tone,
+                personality
+            );
         }
     }
 
@@ -544,6 +620,12 @@ impl ReflectionRunnable {
                 state.sticker = sticker.to_string();
             }
         }
+        // control_actions（桌宠自控指令，由反思调用产出）
+        if let Some(actions) = json.get("control_actions").and_then(|v| v.as_array()) {
+            if !actions.is_empty() {
+                state.control_actions = actions.to_vec();
+            }
+        }
 
         // ── 心理状态 ──
         if let Some(user_emo) = json.get("user_emotion").and_then(|v| v.as_str()) {
@@ -615,6 +697,7 @@ impl Runnable for ReflectionRunnable {
                 Self::apply_to_state(&mut state, &json, self.manifest.as_deref());
                 self.apply_world_update(&json);
                 self.apply_goal_updates(&json);
+                self.apply_evolution(&json);
                 self.record_expression_learning(&state);
             }
             Ok(None) => {
@@ -680,6 +763,7 @@ impl ReflectionRunnable {
                 // world_update 在内联模式下同样处理（与表情/动作无关，属于世界状态判断）
                 self.apply_world_update(&json);
                 self.apply_goal_updates(&json);
+                self.apply_evolution(&json);
             }
             Ok(None) => {
                 tracing::debug!("[Reflection:{}] 内联模式无 LLM 输出", self.char_id);

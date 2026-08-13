@@ -64,6 +64,25 @@ import {
 } from '../shared-components';
 import type { MindState } from '../../../types';
 
+// === 区块渐次入场动画（尊重系统减弱动效设置，配合 .mi-rise 类使用） ===
+const RISE_KEYFRAMES_ID = 'mind-inspector-rise';
+if (typeof document !== 'undefined' && !document.getElementById(RISE_KEYFRAMES_ID)) {
+  const style = document.createElement('style');
+  style.id = RISE_KEYFRAMES_ID;
+  style.textContent = `
+@keyframes mind-inspector-rise {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.mi-rise {
+  animation: mind-inspector-rise 0.5s cubic-bezier(0.1, 0.9, 0.2, 1) both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .mi-rise { animation: none !important; }
+}`;
+  document.head.appendChild(style);
+}
+
 // ============================================================
 // 类型定义
 // ============================================================
@@ -365,6 +384,8 @@ interface CharacterMindPanelProps {
   loading: boolean;
   error: string | null;
   presenceState: string;
+  /** 进入当前在场状态的时间戳（Unix 秒） */
+  presenceSince: number;
 }
 
 // 大尺寸象限图（模块级 + memo，防止父组件重渲染时卸载重建导致坐标点闪烁）
@@ -466,6 +487,7 @@ const CharacterMindPanel: React.FC<CharacterMindPanelProps> = ({
   loading,
   error,
   presenceState,
+  presenceSince,
 }) => {
   const { t } = useTranslation();
   const nav = useNavigation();
@@ -479,6 +501,13 @@ const CharacterMindPanel: React.FC<CharacterMindPanelProps> = ({
   const [ripples, setRipples] = useState<Array<{ id: number; x: number; y: number }>>([]);
   const lastRippleTs = useRef(0);
 
+  // 每秒滴答，用于刷新在场状态持续时长显示
+  const [, setNowTick] = useState(0);
+  useEffect(() => {
+    const id = window.setInterval(() => setNowTick((n) => n + 1), 1000);
+    return () => window.clearInterval(id);
+  }, []);
+
   const closeQuadrant = () => {
     setQuadrantClosing(true);
   };
@@ -490,7 +519,9 @@ const CharacterMindPanel: React.FC<CharacterMindPanelProps> = ({
 
   const goals = mind?.goals ?? [];
   const activeGoal = goals.find((g) => g.active) ?? goals[0];
-  const thought = extractThoughtText(mind?.current_thought ?? '');
+  // 内心独白/当前想法开关关闭时不显示想法内容（由后端清空缓存，此处防御性兜底）
+  const thoughtEnabled = mind?.inner_monologue_enabled !== false;
+  const thought = thoughtEnabled ? extractThoughtText(mind?.current_thought ?? '') : '';
   const valence = mood?.valence ?? 0;
   const arousal = mood?.arousal ?? 0;
 
@@ -501,6 +532,17 @@ const CharacterMindPanel: React.FC<CharacterMindPanelProps> = ({
     if (normalized === 'rest') return { labelKey: 'chat.status_rest', color: COLORS.warning, pulse: false };
     if (normalized === 'offline') return { labelKey: 'chat.status_offline', color: COLORS.textTertiary, pulse: false };
     return { labelKey: 'chat.status_online', color: COLORS.success, pulse: true };
+  })();
+
+  // 当前状态已持续时长（秒）
+  const presenceElapsedSecs = Math.max(0, Math.floor(Date.now() / 1000 - (presenceSince || Date.now() / 1000)));
+  const presenceDurationLabel = (() => {
+    const secs = presenceElapsedSecs;
+    if (secs < 60) return `${secs}秒`;
+    if (secs < 3600) return `${Math.floor(secs / 60)}分${secs % 60}秒`;
+    const h = Math.floor(secs / 3600);
+    const m = Math.floor((secs % 3600) / 60);
+    return `${h}小时${m}分`;
   })();
 
   // 心理学全维度条形图行
@@ -821,26 +863,6 @@ const CharacterMindPanel: React.FC<CharacterMindPanelProps> = ({
     );
   };
 
-  // 微透卡片容器（Apple 风格：极淡背景 + 模糊 + 细边框）
-  const SectionCard: React.FC<{ children?: React.ReactNode; style?: React.CSSProperties }> = ({
-    children,
-    style,
-  }) => (
-    <div
-      style={{
-        padding: SPACING.md,
-        borderRadius: RADIUS.md,
-        background: COLORS.subtleBg,
-        border: `1px solid ${COLORS.subtleBorder}`,
-        backdropFilter: 'blur(8px)',
-        WebkitBackdropFilter: 'blur(8px)',
-        ...style,
-      }}
-    >
-      {children}
-    </div>
-  );
-
   // 心情默认展示 3 个核心情绪，展开后显示全部
   const topEmotions = psychState
     ? [
@@ -896,7 +918,8 @@ const CharacterMindPanel: React.FC<CharacterMindPanelProps> = ({
       ) : (
         <>
           {/* === Thought（视觉中心，引述风格） === */}
-          <SectionCard>
+          <div className="mi-rise">
+            <Card hover>
             <div style={{ ...TYPO.caption, color: COLORS.textTertiary, marginBottom: SPACING.sm }}>
               {t('mind_inspector.mind.current_thought')}
             </div>
@@ -919,10 +942,12 @@ const CharacterMindPanel: React.FC<CharacterMindPanelProps> = ({
                 {thought || t('mind_inspector.mind.thought_empty')}
               </div>
             </div>
-          </SectionCard>
+          </Card>
+          </div>
 
           {/* === Mood（大尺寸象限图 + 细条形情绪） === */}
-          <SectionCard>
+          <div className="mi-rise" style={{ animationDelay: '60ms' }}>
+            <Card hover>
             <div
               role="button"
               onClick={() => setMoodExpanded((v) => !v)}
@@ -968,9 +993,10 @@ const CharacterMindPanel: React.FC<CharacterMindPanelProps> = ({
                     <MoodMetric key={em.label} label={em.label} value={em.value} iconKey={em.iconKey} />
                   ))
                 ) : (
-                  <div style={{ ...TYPO.micro, color: COLORS.textTertiary }}>
-                    {t('mind_inspector.mind.no_psychology_data')}
-                  </div>
+                  <EmptyState
+                    text={t('mind_inspector.mind.no_psychology_data')}
+                    style={{ padding: `${SPACING.sm}px`, ...TYPO.micro } as React.CSSProperties}
+                  />
                 )}
               </div>
             </div>
@@ -997,9 +1023,9 @@ const CharacterMindPanel: React.FC<CharacterMindPanelProps> = ({
                   >
                     <div style={{ width: 2, height: 11, borderRadius: RADIUS.xs, background: accent }} />
                     <Sparkles size={11} color={accent} strokeWidth={1.8} />
-                    <span style={{ ...TYPO.caption, color: COLORS.textSecondary }}>
+                    <SectionTitle style={{ color: accent }}>
                       {t('mind_inspector.mind.emotion_dims')}
-                    </span>
+                    </SectionTitle>
                   </div>
                   <AnimatedMetricList
                     items={[
@@ -1033,9 +1059,9 @@ const CharacterMindPanel: React.FC<CharacterMindPanelProps> = ({
                   >
                     <div style={{ width: 2, height: 11, borderRadius: RADIUS.xs, background: COLORS.info }} />
                     <Target size={11} color={COLORS.info} strokeWidth={1.8} />
-                    <span style={{ ...TYPO.caption, color: COLORS.textSecondary }}>
+                    <SectionTitle style={{ color: COLORS.info }}>
                       {t('mind_inspector.mind.need_dims')}
-                    </span>
+                    </SectionTitle>
                   </div>
                   <AnimatedMetricList
                     items={[
@@ -1067,9 +1093,9 @@ const CharacterMindPanel: React.FC<CharacterMindPanelProps> = ({
                   >
                     <div style={{ width: 2, height: 11, borderRadius: RADIUS.xs, background: COLORS.success }} />
                     <Users size={11} color={COLORS.success} strokeWidth={1.8} />
-                    <span style={{ ...TYPO.caption, color: COLORS.textSecondary }}>
+                    <SectionTitle style={{ color: COLORS.success }}>
                       {t('mind_inspector.mind.relationship_dims')}
-                    </span>
+                    </SectionTitle>
                   </div>
                   <AnimatedMetricList
                     items={[
@@ -1083,10 +1109,12 @@ const CharacterMindPanel: React.FC<CharacterMindPanelProps> = ({
                 </div>
               </div>
             )}
-          </SectionCard>
+            </Card>
+          </div>
 
          {/* === Goal（Apple Reminder 风格） === */}
-          <SectionCard>
+          <div className="mi-rise" style={{ animationDelay: '120ms' }}>
+            <Card hover>
             <div style={{ display: 'flex', alignItems: 'center', gap: SPACING.sm, marginBottom: SPACING.sm }}>
               <Target size={13} color={COLORS.textTertiary} strokeWidth={1.5} />
               <span style={{ ...TYPO.caption, color: COLORS.textTertiary }}>
@@ -1103,10 +1131,12 @@ const CharacterMindPanel: React.FC<CharacterMindPanelProps> = ({
             >
               {activeGoal?.description || t('mind_inspector.mind.no_active_goal')}
             </div>
-          </SectionCard>
+            </Card>
+          </div>
 
           {/* === Status（圆环状态指示器） === */}
-          <SectionCard>
+          <div className="mi-rise" style={{ animationDelay: '180ms' }}>
+            <Card hover>
             <div style={{ ...TYPO.caption, color: COLORS.textTertiary, marginBottom: SPACING.sm }}>
               {t('mind_inspector.mind.online_status')}
             </div>
@@ -1131,10 +1161,10 @@ const CharacterMindPanel: React.FC<CharacterMindPanelProps> = ({
                     strokeWidth={2}
                     strokeLinecap="round"
                     strokeDasharray={62.8}
-                    strokeDashoffset={62.8 * (1 - (mind?.focus_charge ?? 0))}
+                    strokeDashoffset={0}
                     transform="rotate(-90 12 12)"
                     style={{
-                      transition: `stroke-dashoffset ${DURATION.slow}s ${EASE.ios}`,
+                      transition: `stroke ${DURATION.slow}s ${EASE.ios}`,
                     }}
                   />
                   <circle
@@ -1156,11 +1186,12 @@ const CharacterMindPanel: React.FC<CharacterMindPanelProps> = ({
                     fontVariantNumeric: 'tabular-nums',
                   }}
                 >
-                  {t('mind_inspector.mind.focus_charge')} {Math.round((mind?.focus_charge ?? 0) * 100)}%
+                  {t('mind_inspector.cognition.since_label', { duration: presenceDurationLabel })}
                 </div>
               </div>
             </div>
-          </SectionCard>
+            </Card>
+          </div>
         </>
       )}
 
@@ -1268,7 +1299,8 @@ const LiveMindView: React.FC = () => {
   const [errorV, setErrorV] = useState<string | null>(null);
   const [errorN, setErrorN] = useState<string | null>(null);
   // 各角色在场状态（presence）：online / busy / rest / offline，与 ChatWindow 数据源保持一致
-  const [presenceStates, setPresenceStates] = useState<Record<string, string>>({});
+  // 同时记录进入当前状态的 Unix 秒时间戳，用于心智页持续时长显示
+  const [presenceStates, setPresenceStates] = useState<Record<string, { state: string; since: number }>>({});
 
   useEffect(() => {
     let cancelled = false;
@@ -1328,16 +1360,19 @@ const LiveMindView: React.FC = () => {
     let unlisten: (() => void) | null = null;
     void (async () => {
       try {
-        const states = await invoke<Array<{ character_id: string; state: string }>>('get_all_presence_states');
+        const states = await invoke<Array<{ character_id: string; state: string; since: number }>>('get_all_presence_states');
         if (cancelled) return;
-        const map: Record<string, string> = {};
-        for (const s of states) map[s.character_id] = s.state;
+        const map: Record<string, { state: string; since: number }> = {};
+        for (const s of states) map[s.character_id] = { state: s.state, since: s.since ?? Date.now() / 1000 };
         setPresenceStates(map);
       } catch { /* ignore */ }
       try {
         unlisten = await listen<{ character_id: string; to: string }>('presence:changed', (e) => {
           if (!e.payload?.character_id) return;
-          setPresenceStates((prev) => ({ ...prev, [e.payload.character_id]: e.payload.to }));
+          setPresenceStates((prev) => ({
+            ...prev,
+            [e.payload.character_id]: { state: e.payload.to, since: Date.now() / 1000 },
+          }));
         });
       } catch { /* ignore */ }
     })();
@@ -1358,7 +1393,8 @@ const LiveMindView: React.FC = () => {
             psychState={vivianPsych}
             loading={loadingV}
             error={errorV}
-            presenceState={presenceStates['vivian'] ?? 'online'}
+            presenceState={presenceStates['vivian']?.state ?? 'online'}
+            presenceSince={presenceStates['vivian']?.since ?? Date.now() / 1000}
           />
         }
         right={
@@ -1369,7 +1405,8 @@ const LiveMindView: React.FC = () => {
             psychState={nanaPsych}
             loading={loadingN}
             error={errorN}
-            presenceState={presenceStates['nana'] ?? 'online'}
+            presenceState={presenceStates['nana']?.state ?? 'online'}
+            presenceSince={presenceStates['nana']?.since ?? Date.now() / 1000}
           />
         }
       />
@@ -1843,7 +1880,7 @@ const ExamplesEditor: React.FC<{ t: TFunction; charId: CharacterId }> = ({ t, ch
   };
 
   if (!loaded) {
-    return <div style={{ ...TYPO.micro, color: COLORS.textTertiary, padding: SPACING.sm }}>Loading...</div>;
+    return <EmptyState spinner text={t('mind_inspector.mind.loading_pipeline')} />;
   }
 
   const inputStyle: React.CSSProperties = {

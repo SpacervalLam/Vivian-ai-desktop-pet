@@ -71,6 +71,12 @@ pub struct Mind {
     ///
     /// None 表示尚未完成首次 LLM 合成（冷启动时由模板 fallback 填充）。
     pub current_thought: Arc<RwLock<Option<String>>>,
+    /// LLM 合成的"社交冲动"信号（0.0-1.0）
+    ///
+    /// 由 current_thought 的 LLM 调用顺便产出，表示角色"现在想主动和用户搭话"的强度。
+    /// proactive 问候类触发器读取此值作为时机门控：urge 低时推迟问候，urge 高时正常触发。
+    /// 默认 0.5（中性），LLM 失败时保持上次值。
+    pub social_urge: Arc<RwLock<f32>>,
     /// current_thought 累积缓冲区（内心 OS 提示词注入用）
     ///
     /// 每次 `set_current_thought` 写入新值前，把即将被覆盖的旧值连同时间戳推入。
@@ -139,6 +145,7 @@ impl Mind {
             working_memory,
             current_activity,
             current_thought: Arc::new(RwLock::new(None)),
+            social_urge: Arc::new(RwLock::new(0.5)),
             accumulated_thoughts: Arc::new(RwLock::new(Vec::new())),
             thought_refresh_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             persistence_dir: mind_dir,
@@ -268,12 +275,18 @@ impl Mind {
         self.current_thought.read().clone()
     }
 
-    /// 写入 LLM 合成的"当前想法"
+    /// 清空"当前想法"缓存（功能禁用时调用，不推入累积缓冲区）
+    pub fn clear_current_thought(&self) {
+        *self.current_thought.write() = None;
+        *self.social_urge.write() = 0.5;
+    }
+
+    /// 写入 LLM 合成的"当前想法" + social_urge 信号
     ///
     /// 副作用：写入前把即将被覆盖的旧值（如非空）连同时间戳推入
     /// `accumulated_thoughts` 缓冲区，供下次内心 OS 消费。
     /// 超出 `MAX_ACCUMULATED_THOUGHTS` 时丢弃最旧条目。
-    pub fn set_current_thought(&self, thought: String) {
+    pub fn set_current_thought(&self, thought: String, social_urge: f32) {
         {
             let mut cur = self.current_thought.write();
             if let Some(prev) = cur.take() {
@@ -283,6 +296,12 @@ impl Mind {
             }
             *cur = Some(thought);
         }
+        *self.social_urge.write() = social_urge.clamp(0.0, 1.0);
+    }
+
+    /// 读取 social_urge 信号（0.0-1.0）
+    pub fn social_urge_snapshot(&self) -> f32 {
+        *self.social_urge.read()
     }
 
     /// 把一条旧 current_thought 推入累积缓冲区（带本地时间戳）
@@ -523,6 +542,25 @@ impl Mind {
                     .map(|(entity, _w)| entity.clone())
                     .collect();
                 lines.push(format!("{}{}", focus_label, entries.join(sep)));
+                sections.push(lines.join("\n"));
+            }
+        }
+
+        // User Goals：用户长期人生阶段目标（"准备考研" / "写毕业论文"），
+        // 让 LLM 知道"用户当前在忙什么人生大事"，辅助理解用户现实活动。
+        // 独立于角色的运行时 Goal 系统，由 reflection 阶段 LLM 抽取维护。
+        {
+            let active = self.user_goals.active_goals();
+            if !active.is_empty() {
+                let header = crate::pipeline::prompt_modules::section_heading("user_goals", lang);
+                let mut lines = vec![header.to_string()];
+                for g in &active {
+                    let deadline = g.deadline.map(|d| d.format("%m/%d").to_string());
+                    match deadline {
+                        Some(d) => lines.push(format!("- {}（截止 {}）", g.label, d)),
+                        None => lines.push(format!("- {}", g.label)),
+                    }
+                }
                 sections.push(lines.join("\n"));
             }
         }

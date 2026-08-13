@@ -29,6 +29,7 @@ const CONFIRMATION_REQUIRED_TOOLS: &[&str] = &[
     "search_files",
     "grep",
     "take_screenshot",
+    "screenshot_analyze",
     "cancel_scheduled",
     "delete_todo",
 ];

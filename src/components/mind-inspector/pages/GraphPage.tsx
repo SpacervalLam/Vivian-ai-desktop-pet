@@ -1085,13 +1085,32 @@ const GraphPage: React.FC = () => {
     const roleToId = (role: 'user' | 'agent' | 'roommate'): string =>
       role === 'user' ? 'user' : role === 'agent' ? agentId : roommateId;
 
-    memories.forEach((m) => {
-      const results = memoryToGraphNodes(m, { character, roommateChar, now });
-      results.forEach((res) => {
-        addNode(res.node);
-        timedNodes.push({ node: res.node });
-        res.edgeRoles.forEach((role) => {
-          edges.push({ source: roleToId(role), target: res.node.id, kind: 'relation' });
+    // 广播群发时，同一用户消息会同时产生：直接对话节点（speaker=user,非旁观）与旁观节点
+    // （speaker=user,perspective=observer）。二者正文相同，只保留直接对话节点，跳过旁观节点。
+    const memoryResults = memories
+      .map((m) => memoryToGraphNodes(m, { character, roommateChar, now }))
+      .filter((res) => res && res.length > 0);
+    const directUserBodies = new Set<string>();
+    memoryResults.forEach((res) => {
+      res.forEach((r) => {
+        const n = r.node;
+        if (n.speaker === 'user' && n.type === 'dialogue' && !n.bystander && n.preview) {
+          directUserBodies.add(n.preview.trim());
+        }
+      });
+    });
+
+    memoryResults.forEach((res) => {
+      res.forEach((r) => {
+        const n = r.node;
+        // 跳过与直接对话用户节点正文相同的旁观用户节点（广播去重）
+        if (n.speaker === 'user' && n.bystander && n.preview && directUserBodies.has(n.preview.trim())) {
+          return;
+        }
+        addNode(n);
+        timedNodes.push({ node: n });
+        r.edgeRoles.forEach((role) => {
+          edges.push({ source: roleToId(role), target: n.id, kind: 'relation' });
         });
       });
     });
@@ -2067,8 +2086,9 @@ const GraphPage: React.FC = () => {
                 y1={CORE_Y + 34}
                 x2={TIMELINE_X}
                 y2={svgHeight - BOTTOM_PADDING + 10}
-                stroke={'var(--graph-ink-30)'}
-                strokeWidth={1.5}
+                stroke={COLORS.success}
+                strokeWidth={2}
+                opacity={0.75}
               />
             )}
 

@@ -213,11 +213,22 @@ impl ConversationManager {
         // 记录到历史（保留最近 5 轮，用于 Open Loop 检测）
         conv.record_continuation_score(conv.continuation_score);
 
+        // 轮次硬上限：达到 MAX_ROUNDS 后强制进入 Cooling，避免 token 过度消耗
+        let force_end = conv.rounds >= Conversation::MAX_ROUNDS;
+
         // 根据得分决定状态转换
         if response_mode == ResponseMode::Ignore {
             // Ignore 直接进入 Cooling
             conv.state = ConversationState::Cooling;
             conv.cooling_since = Some(now);
+        } else if force_end {
+            // 轮次达上限：强制进入 Cooling 结束话题
+            conv.state = ConversationState::Cooling;
+            conv.cooling_since = Some(now);
+            tracing::info!(
+                "[conversation] 会话 {} 达到 {} 轮上限，强制进入 Cooling",
+                conv.id, Conversation::MAX_ROUNDS
+            );
         } else if conv.continuation_score < Conversation::CONTINUATION_THRESHOLD
             || conv.energy < Conversation::ENERGY_THRESHOLD
             || conv.novelty < Conversation::NOVELTY_THRESHOLD

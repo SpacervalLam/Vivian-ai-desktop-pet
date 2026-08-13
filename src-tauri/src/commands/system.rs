@@ -142,6 +142,9 @@ pub async fn reinitialize(
     if let Some(router) = state.model_router.read().as_ref() {
         router.set_app_handle(app.clone());
     }
+    // 热更新工具确认超时（ToolSystem 在 AppState::new() 一次性构造，reinitialize 不重建）
+    let confirmation_timeout = state.config.read().get_all().tools.confirmation_timeout_secs;
+    state.tool_system.update_confirmation_timeout(confirmation_timeout);
     let _ = app.emit("app:ready", ());
     tracing::info!("[reinitialize] 重新初始化完成");
     Ok(())

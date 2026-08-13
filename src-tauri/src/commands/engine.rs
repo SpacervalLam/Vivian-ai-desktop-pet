@@ -334,7 +334,11 @@ pub async fn try_wake_greeting(
         let _ = brain
             .memory
             .add_memory_with_metadata(
-                g,
+                &format!(
+                    "{} {}",
+                    crate::cross_character::build_speaker_prefix(&char_id, "user", &char_id),
+                    g
+                ),
                 crate::memory::types::MemoryType::CasualConversation,
                 0.35,
                 vec!["assistant".to_string(), "wake_greeting".to_string(), "dialogue_turn".to_string()],

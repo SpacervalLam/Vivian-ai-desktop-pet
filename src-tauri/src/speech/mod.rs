@@ -45,6 +45,7 @@ pub mod whisper_backend;
 pub mod whisper_realtime;
 pub mod whisper_service;
 pub mod winrt_backend;
+pub mod openai_whisper_backend;
 
 pub use aliyun_backend::{AliyunAsrConfig, AliyunBackend};
 pub use asr::{
@@ -70,6 +71,7 @@ pub use whisper_backend::{
     WhisperApiFormat, WhisperBackend, WhisperConfig, WhisperStreamingMode,
 };
 pub use whisper_realtime::WhisperRealtimeBackend;
+pub use openai_whisper_backend::{OpenaiWhisperBackend, OpenaiWhisperConfig};
 pub use whisper_service::{
     service as whisper_service, WhisperServiceManager, WhisperServiceState, WhisperServiceStatus,
 };

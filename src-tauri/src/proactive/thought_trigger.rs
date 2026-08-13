@@ -371,7 +371,7 @@ impl ThoughtTriggerEvaluator {
                         .map(truncate_snippet)
                         .unwrap_or_default();
                     let key = format!("companion_spoke_{}", comp.id);
-                    if self.check_cooldown("companion_spoke", now, 600.0) {
+                    if self.check_cooldown("companion_spoke", now, 300.0) {
                         seeds.push(ThoughtSeed {
                             thought_key: key,
                             description: format!("{}刚说话了", comp.name),
@@ -501,8 +501,8 @@ impl ThoughtTriggerEvaluator {
 
         // 新鲜感需求高时，智能体想做一些自己感兴趣的事
         // 起始强度低（0.35），需要积累才会表达，避免频繁打扰
+        // 不要求 user_present：用户不在场时角色也会有"想做点自己的事"的念头（走内心独白）
         if needs_novelty > 0.7
-            && user_present
             && self.check_cooldown("own_desire", now, 1800.0)
         {
             let (desire_desc, desire_hint) = match char_id {
@@ -549,14 +549,16 @@ impl ThoughtTriggerEvaluator {
         }
 
         // ==== 背景思考（极低频率的随机思绪）====
+        // intensity 设为 0.32（略高于 INNER_MONOLOGUE_THRESHOLD=0.30），确保能触发一次独白；
+        // 独白后 mark_monologue_done 衰减 0.35，强度降到 0 以下自然消退，不会刷屏。
 
         if now - self.last_background_ts > 7200.0 {
             if rand::rng().random_bool(0.15) {
                 seeds.push(ThoughtSeed {
                     thought_key: "background".into(),
                     description: "随机思绪".into(),
-                    context_hint: String::new(),
-                    intensity: 0.15,
+                    context_hint: "脑子里突然冒出一些零碎的念头，没什么特别的缘由".into(),
+                    intensity: 0.32,
                     valence: 0.0,
                     arousal: 0.05,
                     base_desire: 0.0,

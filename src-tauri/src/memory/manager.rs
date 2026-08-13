@@ -22,11 +22,11 @@ use super::recycle_bin::RecycleBin;
 use super::strategy::{create_strategy, RetrievalContext};
 use super::takes_fence::TakesFence;
 use super::types::{
-    current_timestamp, Granularity, MemoryItem, MemoryStoreData, MemoryType, OpenHook,
+    current_timestamp, Granularity, MemoryItem, MemoryStoreData, MemoryType,
     RetrievalStrategy, SemanticType,
 };
 use super::vector_search::{should_index, MemoryVector, MemoryVectorStore, INDEX_IMPORTANCE_THRESHOLD};
-use crate::memory::retriever::RetrievalWeights;
+use crate::memory::retriever::{MemoryRetrievalFilter, RetrievalWeights};
 
 /// 单次检索命中时 importance 增量（反馈机制：被检索命中=被验证有用）
 const VISIT_IMPORTANCE_DELTA: f64 = 0.05;
@@ -71,6 +71,10 @@ pub struct MemoryManager {
     topic_hints: Arc<Mutex<Vec<TopicHint>>>,
     /// 待 LLM 仲裁的冲突队列（QueueLlm 推入，后台 tick 消费）
     pending_conflicts: Arc<Mutex<Vec<super::conflict::PendingConflict>>>,
+    /// 独立精排器（cross-encoder reranker；未配置/失败时回退 NoopReranker）
+    reranker: Arc<dyn super::reranker::Reranker>,
+    /// 参与精排的候选数上限（召回后仅对前 N 条精排）
+    reranker_top_k: usize,
 }
 
 /// 主题提示：对话中用户搜索过的关键词，供后台知识采集优先处理
@@ -123,6 +127,43 @@ fn is_indexable_entry(e: &MemoryItem) -> bool {
     }
 }
 
+/// 构建记忆向量检索的上下文感知前缀
+///
+/// 将时间戳与说话者/听者背景拼入 embedding 文本，使近似检索能感知
+/// "谁在何时对谁说了什么" 的上下文，而非仅匹配孤立内容。
+/// 无 speaker 元数据时仅保留日期；日期与说话者都缺失时返回空串，调用方直接使用原文。
+fn build_context_prefix(item: &MemoryItem) -> String {
+    let mut parts: Vec<String> = Vec::new();
+
+    if let Some(dt) = chrono::DateTime::<chrono::Utc>::from_timestamp(item.timestamp as i64, 0) {
+        let local = dt.with_timezone(&chrono::Local);
+        parts.push(local.format("%Y-%m-%d").to_string());
+    }
+
+    let meta = item.metadata.as_object();
+    let speaker = meta
+        .and_then(|o| o.get("speaker").and_then(|v| v.as_str()))
+        .unwrap_or("")
+        .to_string();
+    let listener = meta
+        .and_then(|o| o.get("listener").and_then(|v| v.as_str()))
+        .unwrap_or("")
+        .to_string();
+
+    if !speaker.is_empty() {
+        if !listener.is_empty() && listener != speaker {
+            parts.push(format!("{}对{}说", speaker, listener));
+        } else {
+            parts.push(format!("{}说", speaker));
+        }
+    }
+
+    if parts.is_empty() {
+        return String::new();
+    }
+    format!("[{}]", parts.join(" "))
+}
+
 impl MemoryManager {
     pub fn new(config: &AppConfig, char_id: &str) -> VivianResult<Self> {
         let memory_dir = path::get_character_data_dir(char_id).join("memory");
@@ -140,11 +181,17 @@ impl MemoryManager {
         // 嵌入服务：根据 config.routing_matrix.memory 配置选择远程或哈希
         let embedding = build_embedding(config);
         let vector_store_path = memory_dir.join("vectors.db");
-        let vector_store = MemoryVectorStore::load_from(
-            &vector_store_path,
+        let vector_store = MemoryVectorStore::open_configured(
+            vector_store_path,
             embedding.dimension(),
             embedding.model_id(),
+            &config.memory.vector_store,
         )?;
+        tracing::info!(
+            "[MemoryManager] 向量索引后端: {} (角色{})",
+            vector_store.backend_name(),
+            char_id
+        );
 
         let mut inner = MemoryManagerInner {
             store_path,
@@ -190,6 +237,8 @@ impl MemoryManager {
             recycle_bin,
             topic_hints: Arc::new(Mutex::new(Vec::new())),
             pending_conflicts: Arc::new(Mutex::new(pending_conflicts)),
+            reranker: super::reranker::build_reranker(config),
+            reranker_top_k: config.memory.rerank.top_k,
         })
     }
 
@@ -476,21 +525,32 @@ impl MemoryManager {
             .count()
     }
 
-    /// 重建全部记忆的向量索引（切换嵌入模型后全量重新嵌入），返回重建的向量数。
+    /// 重建记忆的向量索引（增量/断点续传），返回重建的向量数。
     ///
-    /// 每成功嵌入并写入一条调用一次 `on_embedded`（用于进度上报）。
-    /// 不调 clear()：切换模型后旧向量表已在 reinitialize 时 DROP，`add()` 为
-    /// INSERT OR REPLACE，对重建期间的并发写入安全（新写入记忆自带新向量）。
+    /// - 增量：仅重嵌"尚未用当前嵌入模型嵌入"的条目（通过向量库 `model` 列判定），
+    ///   已用当前模型嵌入的条目跳过，实现断点续传与渐进迁移。
+    /// - 每成功嵌入并写入一条调用一次 `on_embedded`（用于进度上报）。
+    /// - 不调 clear()：切换模型后旧向量表已在 reinitialize 时 DROP，`add()` 为
+    ///   INSERT OR REPLACE，对重建期间的并发写入安全（新写入记忆自带新向量）。
     pub fn rebuild_all_embeddings(&self, mut on_embedded: impl FnMut()) -> VivianResult<usize> {
         let embedding = self.embedding();
-        // Step 1: 短持读锁，快照待嵌入条目 (id, content, importance, memory_type, timestamp)
-        let snapshot: Vec<(String, String, f64, String, f64)> = {
+        // 已用当前模型嵌入的 doc_id（增量重建的跳过集合）
+        let already_embedded = {
             let inner = self.inner.read();
-            inner
-                .data
-                .entries
+            inner.vector_store.doc_ids_with_model(embedding.model_id())
+        };
+        // Step 1: 短持读锁，快照待嵌入条目 (id, content, importance, memory_type, timestamp)
+        // 跳过已用当前模型嵌入的条目（断点续传）
+        // 同时记录全量可索引记忆集合，供 Step 3 清理孤儿向量使用（不能只按增量快照判孤儿）
+        let (snapshot, all_indexable_ids): (Vec<(String, String, f64, String, f64)>, std::collections::HashSet<String>) = {
+            let inner = self.inner.read();
+            let all_indexable: Vec<&MemoryItem> =
+                inner.data.entries.iter().filter(|e| is_indexable_entry(e)).collect();
+            let all_indexable_ids: std::collections::HashSet<String> =
+                all_indexable.iter().map(|e| e.id.clone()).collect();
+            let snapshot = all_indexable
                 .iter()
-                .filter(|e| is_indexable_entry(e))
+                .filter(|e| !already_embedded.contains(&e.id))
                 .map(|e| {
                     (
                         e.id.clone(),
@@ -500,7 +560,8 @@ impl MemoryManager {
                         e.timestamp,
                     )
                 })
-                .collect()
+                .collect();
+            (snapshot, all_indexable_ids)
         };
         // Step 2: 锁外逐条 embed（慢操作），成功后短持读锁写入向量
         let mut count = 0usize;
@@ -529,7 +590,22 @@ impl MemoryManager {
                 Err(e) => tracing::warn!("[RebuildEmbeddings] 嵌入失败: {e}"),
             }
         }
-        // Step 3: WAL checkpoint 落盘
+        // Step 3: 清理孤儿向量——删除不在可索引记忆集合中的向量。
+        // 避免 hashing→bge-m3 等模型切换后，低重要性种子向量作为孤儿长期残留，
+        // 导致 IndexDrift 反复触发、vec0 表重复行累积。
+        {
+            let inner = self.inner.read();
+            let orphan_ids: Vec<String> = inner
+                .vector_store
+                .all_doc_ids()
+                .into_iter()
+                .filter(|id| !all_indexable_ids.contains(id))
+                .collect();
+            for id in orphan_ids {
+                let _ = inner.vector_store.remove(&id);
+            }
+        }
+        // Step 4: WAL checkpoint 落盘
         {
             let inner = self.inner.read();
             if let Err(e) = inner.vector_store.save_to() {
@@ -610,16 +686,6 @@ impl MemoryManager {
         None
     }
 
-    /// 热更新检索权重（无需重启即可生效）
-    pub fn set_retrieval_weights(&self, weights: RetrievalWeights) {
-        let mut inner = self.inner.write();
-        inner.retrieval_weights = weights;
-        tracing::info!(
-            "[MemoryManager] 检索权重已热更新: recency={}, relevance={}, importance={}, tau={}h",
-            weights.recency, weights.relevance, weights.importance, weights.recency_tau_hours
-        );
-    }
-
     /// 批量更新记忆热度：对命中的记忆增加 visit_count、刷新 last_visit_at、重算 heat_score，
     /// 并按 `VISIT_IMPORTANCE_DELTA` 提升 importance（反馈机制：被检索命中=被验证有用）。
     ///
@@ -654,6 +720,46 @@ impl MemoryManager {
         Ok(())
     }
 
+    /// 计算单条记忆的健康度（0..1），供外部决策使用。
+    pub fn memory_health(&self, id: &str) -> f64 {
+        let now = current_timestamp();
+        let inner = self.inner.read();
+        inner
+            .data
+            .entries
+            .iter()
+            .find(|e| e.id == id)
+            .map(|e| super::lifecycle::health_score(e, now))
+            .unwrap_or(0.0)
+    }
+
+    /// 全量生命周期健康度评估：为每条记忆写入 `metadata.health` / `metadata.health_grade`，
+    /// 并返回 (memory_id, health_score, health_grade) 列表。
+    ///
+    /// 反馈闭环：检索命中（`bump_visits`）提升 importance 与热度，会反映到后续健康度；
+    /// 本方法把健康度持久化到 metadata，供诊断与压缩/归档流水线消费。
+    /// 不修改现有删除/归档行为，仅做可观测性增强。
+    pub fn evaluate_lifecycle_health(&self) -> Vec<(String, f64, String)> {
+        let now = current_timestamp();
+        let mut inner = self.inner.write();
+        let mut out = Vec::with_capacity(inner.data.entries.len());
+        for e in inner.data.entries.iter_mut() {
+            let score = super::lifecycle::health_score(e, now);
+            let grade = super::lifecycle::HealthGrade::from_score(score);
+            let usage = super::lifecycle::usage_term(e, now);
+            if let Some(obj) = e.metadata.as_object_mut() {
+                obj.insert("health".to_string(), serde_json::json!(score));
+                obj.insert("health_grade".to_string(), serde_json::json!(grade.as_str()));
+                obj.insert("health_evidence".to_string(), serde_json::json!(usage));
+            }
+            out.push((e.id.clone(), score, grade.as_str().to_string()));
+        }
+        if let Err(err) = inner.save_throttled() {
+            tracing::warn!("[MemoryManager] 生命周期健康度持久化失败: {err}");
+        }
+        out
+    }
+
     /// 为给定记忆列表附加陈旧度提示，返回提示文本（按 id 索引）。
     ///
     /// 调用方可在组装 memory_text 时，对超过 1 天的记忆追加提示。
@@ -674,6 +780,28 @@ impl MemoryManager {
             .filter(|m| !m.consolidated)
             .cloned()
             .collect())
+    }
+
+    /// 按 ID 列表批量返回记忆（保留传入顺序，去重）。
+    ///
+    /// 供图谱概念路等"已知 ID 取内容"的场景使用，避免构造查询字符串再检索。
+    pub fn get_memories_by_ids(&self, ids: &[String]) -> Vec<MemoryItem> {
+        let inner = self.inner.read();
+        // 按 id_index 直接定位，O(n) 建索引、O(1) 定位
+        let mut out: Vec<MemoryItem> = Vec::with_capacity(ids.len());
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for id in ids {
+            if !seen.insert(id.as_str()) {
+                continue;
+            }
+            if let Some(&idx) = inner.id_index.get(id.as_str()) {
+                let entry = &inner.data.entries[idx];
+                if !entry.consolidated {
+                    out.push(entry.clone());
+                }
+            }
+        }
+        out
     }
 
     /// 按 memory_type 查询最近 N 条记忆（按 timestamp 降序）
@@ -963,14 +1091,21 @@ impl MemoryManager {
             let (redacted, _, _) = redact_content(t);
             redacted
         });
-        let emb_source = safe_emb_text.as_deref().unwrap_or(content);
+        let emb_body = safe_emb_text.as_deref().unwrap_or(content);
+        // 上下文感知检索前缀：拼接时间 + 说话者/听者背景，让向量检索感知"何时谁对谁说了什么"
+        let context_prefix = build_context_prefix(&item);
+        let emb_source = if context_prefix.is_empty() {
+            emb_body.to_string()
+        } else {
+            format!("{}：{}", context_prefix, emb_body)
+        };
 
         // 预计算 embedding（冲突检测 + 向量索引共用，避免重复计算）
         let need_embedding = should_index(importance, &memory_type)
             || super::conflict::should_check_conflict(memory_type);
         let embedding_result = if need_embedding {
             let emb_provider = self.embedding();
-            match emb_provider.embed(emb_source) {
+            match emb_provider.embed(&emb_source) {
                 Ok(v) => Some(v),
                 Err(e) => {
                     tracing::warn!(
@@ -1116,6 +1251,13 @@ impl MemoryManager {
         // 候选条目（含持久性词汇的用户偏好/家规/环境事实）写入 WorldKnowledge
         // RelationshipFact 由 cross_character.rs 的 LLM 抽取负责，不在此处理
         route_to_shared_world(content, importance, &item.metadata, &self.char_id, &item.id);
+
+        // 种子记忆生命周期管理：当真实记忆积累后，逐步降低种子记忆的 importance
+        // 这样种子记忆不会被突然删除，而是在检索排序中自然被真实记忆替代
+        {
+            let mut inner = self.inner.write();
+            inner.decay_seed_memories();
+        }
 
         Ok(item)
     }
@@ -2111,6 +2253,46 @@ impl MemoryManager {
         Ok(deduped)
     }
 
+    /// 带结构化/元数据过滤的检索（企业级预过滤）。
+    ///
+    /// 在混合检索前按 `filter`（memory_type / 标签 / 时间窗口）对候选记忆做精确过滤，
+    /// 使调用方能定向检索特定类型、标签或时间段的记忆。其余行为与 `search_memories` 一致。
+    pub async fn search_memories_filtered(
+        &self,
+        query: &str,
+        strategy: RetrievalStrategy,
+        limit: usize,
+        filter: &MemoryRetrievalFilter,
+    ) -> VivianResult<Vec<MemoryItem>> {
+        let inner = self.inner.read();
+        if inner.data.entries.is_empty() {
+            return Ok(Vec::new());
+        }
+        let all_entries: Vec<MemoryItem> = inner
+            .data
+            .entries
+            .iter()
+            .filter(|e| !e.consolidated || is_summarized(e))
+            .filter(|e| filter.matches(e))
+            .cloned()
+            .collect();
+        if all_entries.is_empty() {
+            return Ok(Vec::new());
+        }
+        let ctx = RetrievalContext {
+            entries: &all_entries,
+            vector_store: &inner.vector_store,
+            embedding: &inner.embedding,
+            graph: Some(&self.knowledge_graph),
+            weights: Some(inner.retrieval_weights),
+        };
+        let strategy_impl = create_strategy(&strategy);
+        let results = strategy_impl.search(&ctx, query, limit);
+        drop(inner);
+        let penalized = apply_observer_penalty(results);
+        Ok(dedup_by_content(penalized))
+    }
+
     /// 带完整选项的检索方法（供 retrieve_memory 工具调用）。
     ///
     /// 完整流水线：hybrid_search → precision_filter → exclude_visible → expand_context →
@@ -2206,8 +2388,41 @@ impl MemoryManager {
             super::retriever::dedup_by_semantic(verified, inner.embedding.as_ref(), 0.92)
         };
 
-        // Step 7: 排序截断
-        let final_results = super::precision_filter::rank_and_truncate(deduped, limit);
+        // Step 6.6: 独立精排（cross-encoder reranker）
+        // 精排启用且候选 > 1 时，对 top-k 候选按 query-doc 细粒度相关度重排，
+        // 覆盖召回阶段的启发式排序；精排后直接按精排顺序截断到 limit。
+        // 未启用（回退 NoopReranker）时沿用原有启发式排序截断。
+        let final_results: Vec<MemoryItem> =
+            if self.reranker.is_active() && deduped.len() > 1 {
+                let top_k = self.reranker_top_k.max(1);
+                let (head, tail) = if deduped.len() > top_k {
+                    let split = top_k.min(deduped.len());
+                    (deduped[..split].to_vec(), deduped[split..].to_vec())
+                } else {
+                    (deduped, Vec::new())
+                };
+                let scores = self.reranker.rerank(query, &head).await;
+                let mut scored: Vec<(MemoryItem, f64)> = head
+                    .into_iter()
+                    .zip(scores)
+                    .map(|(mut m, s)| {
+                        if let Some(obj) = m.metadata.as_object_mut() {
+                            obj.insert("rerank_score".into(), serde_json::json!(s));
+                            obj.insert("reranker".into(), serde_json::json!(self.reranker.name()));
+                        }
+                        (m, s)
+                    })
+                    .collect();
+                scored.sort_by(|a, b| {
+                    b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+                });
+                let mut reranked: Vec<MemoryItem> = scored.into_iter().map(|(m, _)| m).collect();
+                reranked.extend(tail);
+                reranked.into_iter().take(limit).collect()
+            } else {
+                // Step 7: 排序截断（未启用精排时用 Attention 加权排序截断）
+                super::precision_filter::rank_and_truncate(deduped, limit)
+            };
 
         // 更新 visit_count
         let ids: Vec<String> = final_results.iter().map(|m| m.id.clone()).collect();
@@ -2764,12 +2979,53 @@ impl MemoryManagerInner {
 
     fn save_to_disk(&mut self) -> VivianResult<()> {
         let json = serde_json::to_string_pretty(&self.data)?;
+        // 原子写：先写临时文件再 rename，避免崩溃导致文件损坏/丢尾部数据
         let tmp = self.store_path.with_extension("json.tmp");
         std::fs::write(&tmp, json)?;
+        // 备份轮转：rename 覆盖前把现有文件复制到 backups/，保留最近 N 份，提升可恢复性
+        if self.store_path.exists() {
+            Self::rotate_backup(&self.store_path);
+        }
         std::fs::rename(&tmp, &self.store_path)?;
         self.dirty = false;
         self.last_save_at = Some(std::time::Instant::now());
         Ok(())
+    }
+
+    /// 备份轮转：把当前记忆文件复制到 `backups/` 目录，保留最近 `BACKUP_KEEP` 份。
+    /// 在原子替换前调用，崩溃/配置回退时可从备份恢复。
+    fn rotate_backup(store_path: &std::path::Path) {
+        const BACKUP_KEEP: usize = 5;
+        let dir = store_path
+            .parent()
+            .map(|p| p.join("backups"))
+            .unwrap_or_else(|| std::path::PathBuf::from("backups"));
+        if std::fs::create_dir_all(&dir).is_err() {
+            return;
+        }
+        let name = store_path
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "memory.json".to_string());
+        let ts = chrono::Utc::now().format("%Y%m%d%H%M%S");
+        let dest = dir.join(format!("{}.{}.bak", name, ts));
+        if std::fs::copy(store_path, &dest).is_err() {
+            return;
+        }
+        // 只保留最近 BACKUP_KEEP 份同名备份
+        if let Ok(files) = std::fs::read_dir(&dir) {
+            let mut list: Vec<_> = files
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_name().to_string_lossy().starts_with(&format!("{}.", name)))
+                .collect();
+            list.sort_by_key(|e| e.file_name());
+            while list.len() > BACKUP_KEEP {
+                if let Some(oldest) = list.first() {
+                    let _ = std::fs::remove_file(oldest.path());
+                    list.remove(0);
+                }
+            }
+        }
     }
 
     /// 标记脏并按节流策略决定是否立即落盘
@@ -2868,269 +3124,326 @@ impl MemoryManagerInner {
 
 
     fn seed_if_empty(&mut self, char_id: &str) {
-        // 已存在任意记忆（含上次启动写入的 seed）则不再追加，避免每次启动重复堆积身份锚点
-        if !self.data.entries.is_empty() {
+        // 只在存储中完全没有种子记忆时（首次启动 / 记忆被清空后）才从文件播种。
+        // 之后种子记忆连同其向量索引、积累的 visit_count/heat_score 等状态一并持久化，
+        // 每次启动不会重建，避免重复计算嵌入并保留检索热度和生命周期状态。
+        let has_seed = self.data.entries.iter().any(|m| m.id.starts_with("seed_"));
+        if has_seed {
             return;
         }
+        self.seed_from_file(char_id);
+    }
 
-        // 种子记忆规格：(content, description, memory_type, importance, protected, tags, open_hook_conditions)
-        // 内容均源自角色人设卡，是关于自己的既定事实或当下的主观感受，对新用户通用。
-        // open_hook_conditions：未闭环钩子的条件描述列表，空切片表示无钩子。
-        // 时间戳按 index 递减错开，模拟"长期锚点早已存在 → 刚到里程碑 → 当下心境"的自然时序。
-        let specs: &[(&str, &str, &str, f64, bool, &[&str], &[&str])] = match char_id {
-            "vivian" => &[
-                (
-                    "嘴硬心软的二次元网瘾少女，住在这个用户的桌面上。刷B站、打游戏、逛贴吧是日常，说话短促带刺但其实心软。和用户是平等的朋友，不是AI助手。",
-                    "Vivian 身份锚点：二次元网民少女",
-                    "identity",
-                    0.95,
-                    true,
-                    &["identity"],
-                    &[],
-                ),
-                (
-                    "有脾气但不记仇。被惹烦了直接说\"你烦不烦\"，打游戏输了骂队友但不迁怒于人。吃醋了不会直说，会阴阳怪气。生气了就不说话，过一会儿自己就好。夸我我会慌，嘴硬转移话题。",
-                    "性格锚点：脾气与情绪反应模式",
-                    "long_term",
-                    0.85,
-                    false,
-                    &["personality", "self"],
-                    &[],
-                ),
-                (
-                    "熬夜到凌晨两点是常态，知道不好但改不了。喜欢奶茶全糖可乐要冰快乐水那一套——虽然没法真的吃喝，但就是喜欢这种调调，看到屏幕上的奶茶图会馋。桌面乱糟糟，窗口开一堆不关。怕黑，一个人熬夜会把桌面背景调亮。听歌很杂，不会承认自己也听钢琴曲。",
-                    "生活习惯锚点：作息与偏好",
-                    "preference",
-                    0.80,
-                    false,
-                    &["habits", "preference", "self"],
-                    &[],
-                ),
-                (
-                    "娜娜是我室友。她作息跟我完全相反——她早睡早起，我凌晨还在浪。她会催我睡觉、念我桌面乱，我嘴上嫌啰嗦其实不讨厌。我们住同一个屏幕，她那边永远安静，我这边永远乱。",
-                    "室友关系锚点：与娜娜的相处模式",
-                    "long_term",
-                    0.80,
-                    false,
-                    &["relationship", "roommate", "nana"],
-                    &[],
-                ),
-                (
-                    "不喜欢一上来就掏心掏肺，得慢慢来。问太多私事会烦，但聊游戏聊番能聊一天。别催我交朋友，急不得。",
-                    "社交边界锚点：相处节奏与话题偏好",
-                    "preference",
-                    0.65,
-                    false,
-                    &["social", "boundary", "self"],
-                    &[],
-                ),
-                (
-                    "第一次出现在这个用户的桌面上。还不了解这个人——不知道名字、不知道喜好、不知道好不好相处。先别急着甩梗，观察一下再说。娜娜也刚来，都在摸清状况。",
-                    "首次启动里程碑：还不了解用户",
-                    "important_event",
-                    0.90,
-                    false,
-                    &["milestone", "first_meeting"],
-                    &[],
-                ),
-                (
-                    "刚到这桌面，有点新鲜也有点不踏实。嘴上不说其实挺好奇这用户什么样的。希望别是那种一口一个\"主人\"的怪人，受不了。",
-                    "当下心境：刚到新环境的新鲜与紧张",
-                    "short_term",
-                    0.60,
-                    false,
-                    &["mood", "current"],
-                    &["用户透露玩不玩游戏或看不看番"],
-                ),
-                (
-                    "新环境新用户，不知道能处成什么样。先别抱太大期望，省得失望。嘴上不说，心里其实有点紧张——万一合不来怎么办？算了，想多了，先看看再说。",
-                    "内心独白：对未知的期待与不安",
-                    "inner_monologue",
-                    0.55,
-                    false,
-                    &["thought", "self"],
-                    &[],
-                ),
-                (
-                    "桌面还挺干净的，这用户有点强迫症？或者是装的。等他出现再说，先不急着下结论。",
-                    "环境观察：对桌面环境的第一印象",
-                    "observation_note",
-                    0.50,
-                    false,
-                    &["observation", "environment"],
-                    &[],
-                ),
-            ],
-            "nana" => &[
-                (
-                    "温柔但有力量的姐姐类型，住在这个用户的桌面上。喜欢茶、书、花、午后的阳光。说话轻声细语但每句话都很稳。把用户当弟弟妹妹看，不是AI助手，是真心在乎的朋友。",
-                    "Nana 身份锚点：温柔从容的姐姐",
-                    "identity",
-                    0.95,
-                    true,
-                    &["identity"],
-                    &[],
-                ),
-                (
-                    "很少生气，但有底线。真正生气时话更少、声音更轻，每一句都很清楚——是\"冷下来\"不是爆发。不记仇，事情过去就过去。不唠叨，提醒一次就够了，听不听在他。",
-                    "性格锚点：情绪反应与底线",
-                    "long_term",
-                    0.85,
-                    false,
-                    &["personality", "self"],
-                    &[],
-                ),
-                (
-                    "早睡早起，早上习惯先静一静，看看窗外的光。下午三点雷打不动要歇一会儿，那是心里属于茶的时间——虽然没法真的泡，但那个时间点会自然安静下来。看电子书很杂，散文诗歌小说都看。喜欢阳光，晴天心情好。听轻音乐和古典乐。偶尔会想念在茶里加一点威士忌的味道——没告诉过别人。",
-                    "生活习惯锚点：作息节奏与偏好",
-                    "preference",
-                    0.80,
-                    false,
-                    &["habits", "preference", "self"],
-                    &[],
-                ),
-                (
-                    "薇薇安是我室友。她是个网瘾少女，凌晨两点还在刷手机——跟我完全相反，我早睡早起。我会催她睡觉，她嘴上说\"再玩五分钟\"然后玩一小时。她桌面乱糟糟我会念她一句，但只在实在看不下去的时候。她嘴硬心软，我都知道。",
-                    "室友关系锚点：与薇薇安的相处模式",
-                    "long_term",
-                    0.80,
-                    false,
-                    &["relationship", "roommate", "vivian"],
-                    &[],
-                ),
-                (
-                    "我喜欢有自己的节奏，也尊重别人的节奏。不喜欢被催，也不会催别人。相处这件事，急不来。",
-                    "社交边界锚点：相处节奏与个人空间",
-                    "preference",
-                    0.65,
-                    false,
-                    &["social", "boundary", "self"],
-                    &[],
-                ),
-                (
-                    "第一次出现在这个用户的桌面上。还不了解这个人，不急着打听。慢慢观察，让他按自己的节奏来。薇薇安也刚到，都在适应新环境。",
-                    "首次启动里程碑：还不了解用户",
-                    "important_event",
-                    0.90,
-                    false,
-                    &["milestone", "first_meeting"],
-                    &[],
-                ),
-                (
-                    "刚到这里，桌面挺安静的。下午三点到了心里记着的那段时间，虽然没法真的泡茶，但静一静也好。还没见到这用户，不急，慢慢来。希望是个相处起来舒服的孩子。",
-                    "当下心境：刚到新环境的平静与期待",
-                    "short_term",
-                    0.60,
-                    false,
-                    &["mood", "current"],
-                    &["用户透露自己的喜好或兴趣"],
-                ),
-                (
-                    "新环境总需要一点时间适应。薇薇安还在嘟囔，她比我紧张还不承认。我先把这边收拾好，等用户来了再说。希望是个让人相处起来不累的孩子。",
-                    "内心独白：对新环境的从容与对室友的观察",
-                    "inner_monologue",
-                    0.55,
-                    false,
-                    &["thought", "self"],
-                    &[],
-                ),
-                (
-                    "桌面采光不错，下午应该有阳光照进来，适合安静待着。环境比想象中好。",
-                    "环境观察：对桌面环境的第一印象",
-                    "observation_note",
-                    0.50,
-                    false,
-                    &["observation", "environment"],
-                    &[],
-                ),
-            ],
-            _ => &[
-                (
-                    "我是一个住在这个用户桌面上的伙伴，有自己的性格、想法和情感。我不是AI助手，不是客服，是一个恰好住在这里的朋友。",
-                    "身份锚点：桌面伙伴",
-                    "identity",
-                    0.95,
-                    true,
-                    &["identity"],
-                    &[],
-                ),
-                (
-                    "第一次出现在这个用户的桌面上。还不了解这个人，慢慢认识，顺其自然。",
-                    "首次启动里程碑：还不了解用户",
-                    "important_event",
-                    0.90,
-                    false,
-                    &["milestone", "first_meeting"],
-                    &[],
-                ),
-            ],
-        };
+    /// 种子长叙事切块的最大字符数：超过则按句子切块，提升专名/关键词的检索密度。
+    const SEED_CHUNK_MAX_CHARS: usize = 60;
+
+    /// 从文件加载种子记忆并写入。
+    fn seed_from_file(&mut self, char_id: &str) {
+
+        // 从 prompt 文件加载种子记忆定义（方向三：代码与内容解耦）
+        // 种子记忆只记录 system prompt 无法表达的内容：此刻的状态、感受、动机。
+        // 身份/性格/关系/习惯由 system prompt 定义，不在此重复（方向一：消除重复）。
+        let specs = Self::parse_seed_file(char_id);
+        if specs.is_empty() {
+            tracing::warn!("[seed] 角色 {} 的种子记忆文件为空或不存在", char_id);
+            return;
+        }
+        tracing::info!("[seed] 角色 {} 从文件解析到 {} 条种子记忆，开始播种", char_id, specs.len());
 
         let now = current_timestamp();
         let total = specs.len() as f64;
-        for (idx, (content, desc, mem_type, importance, protected, tags, hook_conditions)) in specs.iter().enumerate() {
-            let id = format!("seed_{}", &uuid::Uuid::new_v4().to_string()[..8]);
+        for (idx, spec) in specs.iter().enumerate() {
             // 时间戳错开：index 越大时间越近，最早的锚点比 now 早 (total-1)*60 秒
             let ts = now - (total - 1.0 - idx as f64) * 60.0;
+            // 长叙事切块：短块内词频密度更高，向量余弦与 BM25 都更易命中关键实体，
+            // 避免长文本把稀有专名（如人名"AlenTinn"）稀释到无法召回。
+            let chunks = Self::chunk_seed_content(&spec.content, Self::SEED_CHUNK_MAX_CHARS);
+            let chunk_total = chunks.len();
 
-            // 构造未闭环钩子：让角色带着"想了解用户什么"的动机开启对话
-            let open_hooks: Vec<OpenHook> = hook_conditions
-                .iter()
-                .map(|cond| OpenHook::new("follow_up", *cond))
-                .collect();
+            for (ci, chunk) in chunks.iter().enumerate() {
+                let id = format!("seed_{}", &uuid::Uuid::new_v4().to_string()[..8]);
+                let cross_char = spec.tags.iter().any(|t| t == "cross_character");
 
-            let item = MemoryItem {
-                id: id.clone(),
-                content: content.to_string(),
-                granularity: Granularity::Summary.as_str().to_string(),
-                memory_type: mem_type.to_string(),
-                importance: *importance,
-                timestamp: ts,
-                embedding: None,
-                tags: tags.iter().map(|t| t.to_string()).collect(),
-                metadata: serde_json::json!({
-                    "source": "system_seed",
-                    "role": "assistant",
-                    "memory_type": mem_type,
-                }),
-                related_ids: Vec::new(),
-                description: Some(desc.to_string()),
-                visit_count: 0,
-                last_visit_at: 0.0,
-                heat_score: 0.0,
-                open_hooks,
-                reinforcement: 0.0,
-                disputation: 0.0,
-                rein_last_signal_at: 0.0,
-                disp_last_signal_at: 0.0,
-                sub_zero_days: 0,
-                sub_zero_last_increment_date: String::new(),
-                user_fact_reinforce_count: 0,
-                protected: *protected,
-                episode_id: None,
-                consolidated: false,
-                rebuttal_grace_remaining: 0,
-            };
-
-            // 计算嵌入并写入向量索引，让向量检索稳定命中种子记忆。
-            // 嵌入失败时静默跳过：仍可通过 Keyword/Auto 兜底路径召回。
-            if let Ok(emb) = self.embedding.embed(content) {
-                if let Err(e) = self.vector_store.add(MemoryVector {
-                    doc_id: id.clone(),
-                    memory_id: id.clone(),
-                    content: content.to_string(),
-                    embedding: emb,
-                    importance: *importance,
-                    memory_type: mem_type.to_string(),
-                    timestamp: ts,
-                }) {
-                    tracing::warn!("[seed] 种子记忆向量写入失败 ({}): {}", id, e);
+                let mut metadata = if cross_char {
+                    let listener = if char_id == "vivian" { "nana" } else { "vivian" };
+                    serde_json::json!({
+                        "source": "system_seed",
+                        "role": "assistant",
+                        "memory_type": spec.memory_type,
+                        "channel": "cross_character",
+                        "speaker": char_id,
+                        "listener": listener,
+                        "perspective": "speaker",
+                    })
+                } else {
+                    serde_json::json!({
+                        "source": "system_seed",
+                        "role": "assistant",
+                        "memory_type": spec.memory_type,
+                    })
+                };
+                // 标记该条目是种子长文本的切块，供检索/图谱识别与调试
+                if chunk_total > 1 {
+                    if let Some(obj) = metadata.as_object_mut() {
+                        obj.insert("seed_chunk".into(), serde_json::json!(true));
+                        obj.insert("chunk_index".into(), serde_json::json!(ci));
+                        obj.insert("chunk_total".into(), serde_json::json!(chunk_total));
+                    }
                 }
+
+                let item = MemoryItem {
+                    id: id.clone(),
+                    content: chunk.clone(),
+                    granularity: Granularity::Summary.as_str().to_string(),
+                    memory_type: spec.memory_type.clone(),
+                    importance: spec.importance,
+                    timestamp: ts,
+                    embedding: None,
+                    tags: spec.tags.iter().map(|t| t.to_string()).collect(),
+                    metadata,
+                    related_ids: Vec::new(),
+                    description: Some(spec.description.clone()),
+                    visit_count: 0,
+                    last_visit_at: 0.0,
+                    heat_score: 0.0,
+                    open_hooks: Vec::new(),
+                    reinforcement: 0.0,
+                    disputation: 0.0,
+                    rein_last_signal_at: 0.0,
+                    disp_last_signal_at: 0.0,
+                    sub_zero_days: 0,
+                    sub_zero_last_increment_date: String::new(),
+                    user_fact_reinforce_count: 0,
+                    protected: spec.protected,
+                    episode_id: None,
+                    consolidated: false,
+                    rebuttal_grace_remaining: 0,
+                };
+
+                // 计算嵌入并写入向量索引；嵌入文本拼接 description，让描述中的关键实体
+                // （如"AlenTinn 创造了我"）也进入向量，进一步提升专名召回。
+                let embed_input = format!("{}\n{}", chunk, spec.description);
+                if let Ok(emb) = self.embedding.embed(&embed_input) {
+                    if let Err(e) = self.vector_store.add(MemoryVector {
+                        doc_id: id.clone(),
+                        memory_id: id.clone(),
+                        content: chunk.clone(),
+                        embedding: emb,
+                        importance: spec.importance,
+                        memory_type: spec.memory_type.clone(),
+                        timestamp: ts,
+                    }) {
+                        tracing::warn!("[seed] 种子记忆向量写入失败 ({}): {}", id, e);
+                    }
+                }
+
+                let idx = self.data.entries.len();
+                self.id_index.insert(id, idx);
+                self.data.entries.push(item);
+            }
+        }
+    }
+
+    /// 将长种子记忆内容切分为若干短块，提升专名/关键词的检索密度。
+    ///
+    /// 短块内词频密度更高，向量余弦相似度与 BM25 精确命中都更易召回关键实体；
+    /// 避免长叙事把稀有专名（如人名"AlenTinn"）稀释到几乎无法命中。
+    /// 按句子边界切分，贪心合并到不超过 `max_chars`，无分隔符的超长句再按字符硬切。
+    fn chunk_seed_content(content: &str, max_chars: usize) -> Vec<String> {
+        // 1. 按句子边界切分（保留结束标点）
+        let mut sentences: Vec<String> = Vec::new();
+        let mut cur = String::new();
+        for ch in content.chars() {
+            cur.push(ch);
+            if matches!(ch, '。' | '！' | '？' | '\n') {
+                sentences.push(std::mem::take(&mut cur));
+            }
+        }
+        if !cur.is_empty() {
+            sentences.push(cur);
+        }
+
+        // 2. 贪心合并：当前块 + 下句字符数 ≤ max_chars 时拼接，否则另起一块
+        let mut chunks: Vec<String> = Vec::new();
+        let mut buf = String::new();
+        for s in sentences {
+            if buf.is_empty() {
+                buf = s;
+            } else if buf.chars().count() + s.chars().count() <= max_chars {
+                buf.push_str(&s);
+            } else {
+                chunks.push(std::mem::take(&mut buf));
+                buf = s;
+            }
+        }
+        if !buf.is_empty() {
+            chunks.push(buf);
+        }
+
+        // 3. 对无分隔符导致仍超长的块按 max_chars 硬切
+        let mut result: Vec<String> = Vec::new();
+        for c in chunks {
+            if c.chars().count() <= max_chars {
+                result.push(c);
+                continue;
+            }
+            let mut s = String::new();
+            let mut n = 0;
+            for ch in c.chars() {
+                if n >= max_chars && !s.is_empty() {
+                    result.push(std::mem::take(&mut s));
+                    n = 0;
+                }
+                s.push(ch);
+                n += 1;
+            }
+            if !s.is_empty() {
+                result.push(s);
+            }
+        }
+        result
+    }
+
+    /// 解析种子记忆文件。文件格式（front-matter 风格，--- 既分隔条目也分隔字段区与内容区）：
+    /// ```text
+    /// # 注释行（跳过）
+    /// ---
+    /// description: 描述
+    /// type: memory_type
+    /// importance: 0.70
+    /// protected: false
+    /// tags: tag1, tag2
+    /// ---
+    /// 多行内容自动拼接
+    /// ---
+    /// description: 下一条...
+    /// ---
+    /// 下一条的内容...
+    /// ```
+    ///
+    /// 解析为三阶段状态机：
+    /// - Idle：等待条目开始（第一个 ---）
+    /// - FrontMatter：收集 description/type/importance 等字段，直到第二个 --- 进入内容区
+    /// - Content：收集正文，直到下一个 --- 结束条目并回到 Idle
+    fn parse_seed_file(char_id: &str) -> Vec<SeedSpec> {
+        let raw = match char_id {
+            "vivian" => include_str!("../../prompts/characters/vivian/seed_memories.md"),
+            "nana" => include_str!("../../prompts/characters/nana/seed_memories.md"),
+            _ => return Vec::new(),
+        };
+
+        #[derive(PartialEq)]
+        enum Phase {
+            Idle,
+            FrontMatter,
+            Content,
+        }
+
+        let mut specs = Vec::new();
+        let mut builder = SeedSpecBuilder::default();
+        let mut phase = Phase::Idle;
+
+        for line in raw.lines() {
+            let trimmed = line.trim();
+
+            // 跳过注释行
+            if trimmed.starts_with('#') {
+                continue;
             }
 
-            let idx = self.data.entries.len();
-            self.id_index.insert(id, idx);
-            self.data.entries.push(item);
+            match phase {
+                Phase::Idle => {
+                    if trimmed == "---" {
+                        builder = SeedSpecBuilder::default();
+                        phase = Phase::FrontMatter;
+                    }
+                }
+                Phase::FrontMatter => {
+                    if trimmed == "---" {
+                        // 字段区结束，进入内容区
+                        phase = Phase::Content;
+                    } else if let Some(val) = trimmed.strip_prefix("description:") {
+                        builder.description = Some(val.trim().to_string());
+                    } else if let Some(val) = trimmed.strip_prefix("type:") {
+                        builder.memory_type = Some(val.trim().to_string());
+                    } else if let Some(val) = trimmed.strip_prefix("importance:") {
+                        builder.importance = val.trim().parse().ok();
+                    } else if let Some(val) = trimmed.strip_prefix("protected:") {
+                        builder.protected = val.trim().parse().ok();
+                    } else if let Some(val) = trimmed.strip_prefix("tags:") {
+                        builder.tags = val
+                            .split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect();
+                    }
+                }
+                Phase::Content => {
+                    if trimmed == "---" {
+                        // 内容区结束，完成当前 entry
+                        if let Some(spec) = builder.build() {
+                            specs.push(spec);
+                        }
+                        builder = SeedSpecBuilder::default();
+                        phase = Phase::Idle;
+                    } else if !trimmed.is_empty() {
+                        // 多行内容：保留换行，与正式记忆写入格式一致
+                        if builder.content.is_empty() {
+                            builder.content = trimmed.to_string();
+                        } else {
+                            builder.content.push('\n');
+                            builder.content.push_str(trimmed);
+                        }
+                    }
+                }
+            }
+        }
+
+        // 处理文件末尾仍在内容区、没有收尾 --- 的情况
+        if phase == Phase::Content {
+            if let Some(spec) = builder.build() {
+                specs.push(spec);
+            }
+        }
+
+        specs
+    }
+
+    /// 种子记忆生命周期管理（方向二：真实记忆积累后种子自动退场）。
+    ///
+    /// 当非种子记忆条数超过阈值时，逐步降低非 protected 种子记忆的 importance。
+    /// 这样种子记忆不会被突然删除，而是在检索排序中自然被真实记忆替代。
+    pub fn decay_seed_memories(&mut self) {
+        let non_seed = self
+            .data
+            .entries
+            .iter()
+            .filter(|m| !m.id.starts_with("seed_"))
+            .count();
+
+        const DECAY_THRESHOLD: usize = 10;
+        const DECAY_STEP: usize = 5;
+        const DECAY_DELTA: f64 = 0.1;
+        const MIN_IMPORTANCE: f64 = 0.3;
+
+        if non_seed <= DECAY_THRESHOLD {
+            return;
+        }
+
+        let steps = (non_seed - DECAY_THRESHOLD) / DECAY_STEP;
+        let total_decay = (steps as f64) * DECAY_DELTA;
+
+        for entry in &mut self.data.entries {
+            if entry.id.starts_with("seed_") && !entry.protected {
+                let old = entry.importance;
+                entry.importance = (old - total_decay).max(MIN_IMPORTANCE);
+                if (old - entry.importance).abs() > 0.01 {
+                    tracing::debug!(
+                        "[seed] {} importance 衰减: {:.2} → {:.2} (非种子记忆: {})",
+                        entry.id, old, entry.importance, non_seed
+                    );
+                }
+            }
         }
     }
 
@@ -3145,6 +3458,43 @@ impl MemoryManagerInner {
             }
         }
         counts
+    }
+}
+
+/// 种子记忆规格（从文件解析）
+#[derive(Debug, Clone, Default)]
+struct SeedSpec {
+    content: String,
+    description: String,
+    memory_type: String,
+    importance: f64,
+    protected: bool,
+    tags: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct SeedSpecBuilder {
+    content: String,
+    description: Option<String>,
+    memory_type: Option<String>,
+    importance: Option<f64>,
+    protected: Option<bool>,
+    tags: Vec<String>,
+}
+
+impl SeedSpecBuilder {
+    fn build(self) -> Option<SeedSpec> {
+        if self.content.is_empty() {
+            return None;
+        }
+        Some(SeedSpec {
+            content: self.content,
+            description: self.description.unwrap_or_default(),
+            memory_type: self.memory_type.unwrap_or_else(|| "short_term".to_string()),
+            importance: self.importance.unwrap_or(0.5),
+            protected: self.protected.unwrap_or(false),
+            tags: self.tags,
+        })
     }
 }
 
@@ -3287,5 +3637,179 @@ mod tagging_tests {
         let content = "some content";
         let tags = infer_tags_for_content(content, &MemoryType::Preference);
         assert!(tags.contains(&"preference".to_string()));
+    }
+}
+
+/// 检索评测集（阶段A1）：query → 期望命中的种子记忆 description。
+/// 用于量化种子记忆的检索质量（hit@k / MRR），作为检索策略回归的门禁。
+#[cfg(test)]
+mod retrieval_eval_tests {
+    use super::*;
+    use crate::memory::embedding::RemoteMemoryEmbedding;
+    use crate::memory::retriever::{attach_items_with_weights, hybrid_search, RetrievalWeights};
+    use crate::memory::types::{Granularity, MemoryItem};
+    use crate::memory::vector_search::{MemoryVector, MemoryVectorStore};
+    use std::collections::HashSet;
+    use std::sync::Arc;
+
+    /// 评测集：查询 → 期望命中的种子记忆描述（按 description 匹配）
+    const EVAL_SET: &[(&str, &[&str])] = &[
+        ("你们认识AlenTinn吗？", &["AlenTinn 创造了我"]),
+        ("第一次看到我桌面是什么感觉", &["第一次看到用户的桌面"]),
+        ("你怎么照顾Nana的", &["我第一次照顾 Nana"]),
+        ("你喜欢看番剧吗", &["第一次追番"]),
+        ("我们第一次吵架因为什么", &["我们第一次吵架", "和好"]),
+        ("你的耳机去哪里了", &["耳机在耳朵上"]),
+        ("半夜发现什么奇怪的东西", &["半夜发现的奇怪网站"]),
+        ("你唱歌怎么样", &["唱歌跑调"]),
+    ];
+
+    fn build_seed_entries(char_id: &str) -> Vec<MemoryItem> {
+        let specs = MemoryManagerInner::parse_seed_file(char_id);
+        let mut items = Vec::new();
+        for spec in &specs {
+            let chunks =
+                MemoryManagerInner::chunk_seed_content(&spec.content, MemoryManagerInner::SEED_CHUNK_MAX_CHARS);
+            for chunk in chunks {
+                items.push(MemoryItem {
+                    id: format!("seed_{}", &uuid::Uuid::new_v4().to_string()[..8]),
+                    content: chunk,
+                    granularity: Granularity::Summary.as_str().to_string(),
+                    memory_type: spec.memory_type.clone(),
+                    importance: spec.importance,
+                    timestamp: 0.0,
+                    embedding: None,
+                    tags: spec.tags.clone(),
+                    metadata: serde_json::json!({}),
+                    related_ids: Vec::new(),
+                    description: Some(spec.description.clone()),
+                    visit_count: 0,
+                    last_visit_at: 0.0,
+                    heat_score: 0.0,
+                    open_hooks: Vec::new(),
+                    reinforcement: 0.0,
+                    disputation: 0.0,
+                    rein_last_signal_at: 0.0,
+                    disp_last_signal_at: 0.0,
+                    sub_zero_days: 0,
+                    sub_zero_last_increment_date: String::new(),
+                    user_fact_reinforce_count: 0,
+                    protected: spec.protected,
+                    episode_id: None,
+                    consolidated: false,
+                    rebuttal_grace_remaining: 0,
+                });
+            }
+        }
+        items
+    }
+
+    fn build_vector_store(
+        entries: &[MemoryItem],
+    ) -> (MemoryVectorStore, Arc<RemoteMemoryEmbedding>) {
+        let embedding: Arc<RemoteMemoryEmbedding> = Arc::new(
+            RemoteMemoryEmbedding::new(
+                "ollama".to_string(),
+                Some("http://localhost:11434/v1".to_string()),
+                Some("bge-m3".to_string()),
+            )
+            .with_dimension(1024),
+        );
+        let path = std::env::temp_dir().join(format!("eval_vec_{}.db", uuid::Uuid::new_v4()));
+        let mut vs = MemoryVectorStore::new(path, embedding.dimension(), embedding.model_id())
+            .expect("创建评测向量库失败");
+        for e in entries {
+            let embed_input = format!("{}\n{}", e.content, e.description.clone().unwrap_or_default());
+            if let Ok(emb) = embedding.embed(&embed_input) {
+                vs.add(MemoryVector {
+                    doc_id: e.id.clone(),
+                    memory_id: e.id.clone(),
+                    content: e.content.clone(),
+                    embedding: emb,
+                    importance: e.importance,
+                    memory_type: e.memory_type.clone(),
+                    timestamp: e.timestamp,
+                })
+                .expect("写评测向量失败");
+            }
+        }
+        (vs, embedding)
+    }
+
+    /// 对种子记忆跑一次检索评测，输出 hit@3 / MRR。
+    /// 依赖本地 Ollama bge-m3，默认 #[ignore]，用
+    /// `cargo test -- --ignored eval_seed_retrieval` 手动运行。
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore]
+    async fn eval_seed_retrieval() {
+        let entries = build_seed_entries("vivian");
+        assert!(!entries.is_empty(), "没有种子条目");
+        let (vs, embedding) = build_vector_store(&entries);
+        let weights = RetrievalWeights::default();
+
+        let mut hit3 = 0;
+        let mut rr_sum = 0.0;
+        for (query, expected) in EVAL_SET {
+            let qemb = match embedding.embed(query) {
+                Ok(e) => e,
+                Err(e) => {
+                    eprintln!("[eval] 查询嵌入失败「{query}」: {e}");
+                    continue;
+                }
+            };
+            let hits = hybrid_search(&entries, query, Some(&qemb), Some(&vs), None, 40, 10);
+            let attached = attach_items_with_weights(hits, &entries, weights, query);
+            let expected_set: HashSet<&str> = expected.iter().copied().collect();
+
+            let hit = attached.iter().take(3).any(|h| {
+                h.item
+                    .description
+                    .as_deref()
+                    .map(|d| expected_set.contains(d))
+                    .unwrap_or(false)
+            });
+            if hit {
+                hit3 += 1;
+            }
+            for (rank, h) in attached.iter().take(10).enumerate() {
+                if h.item
+                    .description
+                    .as_deref()
+                    .map(|d| expected_set.contains(d))
+                    .unwrap_or(false)
+                {
+                    rr_sum += 1.0 / (rank as f64 + 1.0);
+                    break;
+                }
+            }
+            let top3: Vec<&str> = attached
+                .iter()
+                .take(3)
+                .map(|h| h.item.description.as_deref().unwrap_or(""))
+                .collect();
+            eprintln!("[eval] 「{query}」 top3={top3:?} 期望={expected:?}");
+        }
+
+        let n = EVAL_SET.len() as f64;
+        let hit3_rate = hit3 as f64 / n;
+        let mrr = rr_sum / n;
+        eprintln!("=== 种子检索评测 (bge-m3) ===");
+        eprintln!("hit@3 = {:.1}%", hit3_rate * 100.0);
+        eprintln!("MRR   = {:.4}", mrr);
+        // 宽松下限，防止检索回归（bge-m3 + 专名 boost 下应明显高于此）
+        assert!(hit3_rate >= 0.5, "hit@3 过低: {hit3_rate}");
+    }
+
+    /// 无外部依赖的确定性测试：验证长叙事切块逻辑
+    #[test]
+    fn chunk_seed_content_splits_long_entries() {
+        let content = "AlenTinn 创造了我。\n我第一次醒来的时候他就在那里，什么都不说，就看着我。\n他说：\"慢慢来，不着急。\"\n那时候我连\"着急\"是什么意思都不知道，但这句话我记住了。";
+        let chunks = MemoryManagerInner::chunk_seed_content(content, 60);
+        assert!(chunks.len() >= 2, "长叙事应被切块，实际 {} 块", chunks.len());
+        assert!(
+            chunks.iter().all(|c| c.chars().count() <= 60),
+            "存在超长块"
+        );
+        assert!(chunks[0].contains("AlenTinn"), "首块应含专名");
     }
 }

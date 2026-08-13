@@ -361,23 +361,29 @@ impl CognitiveTickRunner {
 
         // ── current_thought 合成（60s 节流 + 事件驱动，混合策略）──
         // fire-and-forget：不阻塞认知循环，LLM 请求在后台完成
+        // 受 enable_inner_monologue 开关控制（与内心独白共享同一滑块）
         {
-            let refresh_requested = brain.mind.consume_thought_refresh();
-            let mut last_thought = self.last_thought_at.lock();
-            let thought_dt = now - *last_thought;
-            if refresh_requested || thought_dt >= 60.0 {
-                *last_thought = now;
-                drop(last_thought);
-                let mind = Arc::clone(&brain.mind);
-                let router = Arc::clone(&brain.router);
-                let world_provider = Arc::clone(&brain.world_provider);
-                let lang = lang_code_from_config(&brain.config);
-                tauri::async_runtime::spawn(async move {
-                    crate::mind::thought_synthesis::refresh_current_thought(
-                        &mind, &router, &world_provider, &lang,
-                    )
-                    .await;
-                });
+            if brain.config.world.enable_inner_monologue {
+                let refresh_requested = brain.mind.consume_thought_refresh();
+                let mut last_thought = self.last_thought_at.lock();
+                let thought_dt = now - *last_thought;
+                if refresh_requested || thought_dt >= 60.0 {
+                    *last_thought = now;
+                    drop(last_thought);
+                    let mind = Arc::clone(&brain.mind);
+                    let router = Arc::clone(&brain.router);
+                    let world_provider = Arc::clone(&brain.world_provider);
+                    let lang = lang_code_from_config(&brain.config);
+                    tauri::async_runtime::spawn(async move {
+                        crate::mind::thought_synthesis::refresh_current_thought(
+                            &mind, &router, &world_provider, &lang,
+                        )
+                        .await;
+                    });
+                }
+            } else {
+                // 功能禁用：清空可能残留的旧想法缓存
+                brain.mind.clear_current_thought();
             }
         }
 

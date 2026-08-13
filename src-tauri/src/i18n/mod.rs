@@ -321,7 +321,7 @@ impl I18n {
             "routing_help_chat": "用于日常对话、闲聊、告别消息等轻量级交互。\n当用户发送普通聊天消息且不需要工具调用时使用此模型。",
             "routing_help_reasoning": "用于工具调用、复杂推理、代码执行等需要逻辑分析的任务。\n当用户请求打开应用、操作文件、执行系统命令时使用此模型。",
             "routing_help_diary": "用于智能日记生成。\n每天结束时，Vivian 会调用此模型总结当天的对话内容，生成日记条目。",
-            "routing_help_memory": "用于记忆写入增强、自动抽取、窗口压缩摘要、情绪分析、意图分类等后台任务。\n包括：\n• 写入时 LLM 增强（抽取 description/keywords/importance）\n• AutoExtractor 抽取 ADD/UPDATE/DELETE 长期记忆\n• 对话窗口压缩摘要（>21000 token 触发）\n• 远程嵌入服务（复用 api_key+endpoint）",
+            "routing_help_memory": "用于记忆写入增强、记忆路由仲裁、写入校验、用户画像抽取等后台任务。\n包括：\n• 写入时 LLM 增强（抽取 description/keywords/importance）\n• AutoExtractor 抽取 ADD/UPDATE/DELETE 长期记忆\n• 记忆路由仲裁 / 写入校验 / 用户画像抽取\n• 远程嵌入服务（复用 api_key+endpoint）",
             "routing_help_memory_extract": "从对话内容中提取结构化记忆条目（事件、偏好、事实）。\n要求：JSON 严格、字段完整、错误抛出异常而非静默退。",
             "routing_help_memory_consolidate": "将多条相似记忆去重/合并/冲突消解。\nPhase 6 LightMem 离线批处理专用，调用频率低但质量要求高。",
             "routing_help_graph_entity": "从文本中抽取实体（人名、地名、概念）与关系。\n知识图谱 RAG 路径第一环，结构化输出必须严格。",

@@ -9,6 +9,7 @@
 //! 持久化：`%APPDATA%\Vivian\persona\persona.json`
 
 pub mod dynamic_profile;
+pub mod evolution;
 pub mod persona_card;
 pub mod persona_decision;
 pub mod prompt_render;
@@ -18,6 +19,7 @@ pub mod tone_injector;
 pub mod worldbook;
 
 pub use dynamic_profile::{AcquiredBehavior, AcquiredBehaviorCategory, DynamicBehaviorProfile};
+pub use evolution::{EvolutionCandidate, EvolutionEntry, PersonaEvolution, PersonaEvolutionStore};
 pub use persona_card::{CardStatus, PersonaCard, PersonaCardStore, PersonaEvent};
 pub use persona_decision::PersonaDecisionWeights;
 pub use prompt_render::StylePreset;
@@ -47,6 +49,8 @@ pub struct PersonaEngine {
     base_expression: RwLock<CharacterExpression>,
     /// 界面语言（影响风格约束块标题语言）
     language: RwLock<String>,
+    /// 自我进化覆盖层（独立于原始人设文件，智能体反思中自行调整语气/性格）
+    evolution: PersonaEvolutionStore,
 }
 
 impl PersonaEngine {
@@ -75,6 +79,11 @@ impl PersonaEngine {
             PersonaCardStore::fallback()
         });
 
+        let evolution = PersonaEvolutionStore::new(char_id).unwrap_or_else(|e| {
+            tracing::warn!("[PersonaEngine] 自我进化覆盖层初始化失败，使用内存模式: {e}");
+            PersonaEvolutionStore::fallback()
+        });
+
         tracing::info!(
             "[PersonaEngine] 初始化完成: name={}, role={}, taboos={}, scenes={}",
             config.identity.name,
@@ -91,6 +100,7 @@ impl PersonaEngine {
             card_store,
             base_expression: RwLock::new(config.expression),
             language: RwLock::new("zh".to_string()),
+            evolution,
         })
     }
 
@@ -362,9 +372,61 @@ impl PersonaEngine {
     ///
     /// 作为 prompt 静态段第一模块，让 LLM 明确"我是谁"。
     /// 始终使用 Core Persona，不受卡片覆盖影响。
+    /// 末尾追加自我进化覆盖层（如有），让 LLM 感知"我最近对自己做的调整"。
     pub fn get_character_block(&self) -> String {
         let lang = self.language.read().clone();
-        prompt_render::render_character_block(&self.config.read(), &lang)
+        let mut block = prompt_render::render_character_block(&self.config.read(), &lang);
+        if let Some(evolution_text) = self.evolution.render(&lang) {
+            if !block.trim().is_empty() {
+                block.push_str("\n\n");
+            }
+            block.push_str(&evolution_text);
+        }
+        block
+    }
+
+    // ===== 自我进化覆盖层（智能体反思中自行调整，独立于原始人设） =====
+
+    /// 应用一条自我进化调整（语气 or 性格）。
+    ///
+    /// 由反思流程调用。受最小间隔限制，返回是否成功记录。
+    /// 只影响最终拼入 prompt 的覆盖层，不修改原始人设文件。
+    pub fn apply_evolution(&self, kind: &str, text: &str, reason: &str) -> bool {
+        let added = self.evolution.add_entry(kind, text, reason);
+        if added {
+            tracing::info!(
+                "[PersonaEngine] 自我进化已记录: kind={}, text=\"{}\"",
+                kind,
+                text
+            );
+        }
+        added
+    }
+
+    /// 恢复出厂：清空自我进化覆盖层（原始人设文件不受影响）
+    pub fn reset_evolution(&self) {
+        self.evolution.reset();
+        tracing::info!("[PersonaEngine] 自我进化覆盖层已清空（恢复出厂）");
+    }
+
+    /// 自我进化覆盖层是否为空
+    pub fn is_evolution_empty(&self) -> bool {
+        self.evolution.is_empty()
+    }
+
+    /// 最近一次自我进化调整时间
+    pub fn evolution_last_update(&self) -> f64 {
+        self.evolution.last_update()
+    }
+
+    /// 自我进化记录列表
+    pub fn evolution_entries(&self) -> Vec<EvolutionEntry> {
+        self.evolution.entries()
+    }
+
+    /// 待晋升的自我进化候选（未达跨轨迹支持门槛，尚不生效）
+    pub fn evolution_candidates(&self) -> Vec<EvolutionCandidate> {
+        self.evolution.candidates()
     }
 
     /// 渲染 Few-shot examples 块（角色专属示例）
@@ -592,6 +654,7 @@ impl Default for PersonaEngine {
                 card_store: PersonaCardStore::fallback(),
                 base_expression: RwLock::new(default_config.expression),
                 language: RwLock::new("zh".to_string()),
+                evolution: PersonaEvolutionStore::fallback(),
             }
         })
     }

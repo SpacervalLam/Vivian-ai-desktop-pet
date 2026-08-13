@@ -27,6 +27,7 @@ use crate::memory::llm_enricher::{EnricherLlmClient, MemoryEnricher};
 use crate::memory::time_stamped::TimeStampedMemory;
 use crate::memory::types::{MemoryType, RetrievalStrategy};
 use crate::memory::user_facts::{FactLlmClient, UserFactStore};
+use crate::memory::user_model::UserModelManager;
 use crate::memory::MemoryManager;
 use crate::config::manager::AppConfig;
 use crate::persona::{DynamicBehaviorProfile, PersonaEngine};
@@ -204,6 +205,15 @@ pub struct BrainChatChain {
     batch_accumulator: BatchAccumulator,
     /// 话题信号缓冲：检测话题切换 + 稳定后慢存储到记忆
     pub topic_signal_buffer: Arc<super::topic_signal::TopicSignalBuffer>,
+    /// 用户认知模型管理器：将散落的记忆证据组织成"对这个人的理解"
+    ///
+    /// 负责：
+    /// - 管理 UserTrait（偏好/工作风格/价值观等稳定抽象）
+    /// - 管理 UserGoal（长期/当前/已完成目标）
+    /// - 管理 UserProject（项目生命周期 + 当前注意力激活）
+    /// - 强证据在线更新（规则匹配，不调用 LLM）
+    /// - 在 prompt 中注入"我对你的了解"段落，让 LLM 感知长期认知
+    pub user_model: Arc<UserModelManager>,
 }
 
 impl BrainChatChain {
@@ -268,6 +278,12 @@ impl BrainChatChain {
         let retrieval_strategy = RetrievalStrategy::from_str(&config.memory.retrieval_strategy);
         let enable_expiration = config.memory.enable_expiration;
 
+        // 用户认知模型管理器：从磁盘加载已有用户模型数据，无需 LLM
+        // 将散落的记忆证据组织成"对这个人的理解"，在 prompt 中注入"我对你的了解"段落
+        let user_model = Arc::new(UserModelManager::new(char_id));
+        // 注入巩固流水线：Stage 3 末尾把 Insight 归并为概念层（UserModel + 图谱）
+        pipeline.set_user_model(user_model.clone());
+
         // 组装流水线步骤（每步用 TimingMiddleware 包装，输出 stage 耗时日志）
         let mut steps = RunnableSequence::new();
         steps.add_step(Box::new(TimingMiddleware::new(
@@ -309,7 +325,8 @@ impl BrainChatChain {
                     retrieval_strategy,
                 )
                 .with_mind(mind.clone())
-                .with_router(router.clone()),
+                .with_router(router.clone())
+                .with_user_model(user_model.clone()),
             ),
         )));
         // Prompt 组装：注入 PsychologyManager，提供五层心理架构 + 关系上下文
@@ -386,14 +403,15 @@ impl BrainChatChain {
         let prompt_step = prompt_step.with_topic_injection(topic_injection_mgr);
         // 克隆一份供 ProactiveOrchestrator 复用主对话完整 prompt（人设/记忆/知识库/环境等）
         let prompt_step_shared = prompt_step.clone();
-        steps.add_step(Box::new(TimingMiddleware::new(
-            "prompt_building",
-            Box::new(prompt_step),
-        )));
         // Web 检索决策：在生成前根据用户问题决定是否开启联网搜索
         steps.add_step(Box::new(TimingMiddleware::new(
             "web_context",
             Box::new(WebContextRunnable::with_router(router.clone())),
+        )));
+        // Prompt 组装：注入人设/记忆/工具/认知信号/主动搜索结果等上下文
+        steps.add_step(Box::new(TimingMiddleware::new(
+            "prompt_building",
+            Box::new(prompt_step),
         )));
         // AI 响应生成（智能路由 + 故障降级 + JSON 提取 + 工具调用执行）
         // 工具调用管理器：max_iterations / feedback_history_chars 从 config.tools 读取
@@ -458,6 +476,7 @@ impl BrainChatChain {
             reflection = reflection.with_world_state(ws);
         }
         reflection = reflection.with_user_goals(mind.user_goals.clone());
+        reflection = reflection.with_persona(persona.clone());
         steps.add_step(Box::new(TimingMiddleware::new(
             "reflection",
             Box::new(reflection),
@@ -518,6 +537,7 @@ impl BrainChatChain {
             invoke_count: AtomicU64::new(0),
             batch_accumulator: BatchAccumulator::new(3),
             topic_signal_buffer: Arc::new(super::topic_signal::TopicSignalBuffer::new()),
+            user_model,
         }
     }
 
@@ -893,13 +913,14 @@ Choose the appropriate expression, motion, and sticker. Leave empty if nothing f
     async fn prepare_pipeline_state(&self, user_input: &str) -> PipelineState {
         let mut state = PipelineState::default();
         state.user_input = user_input.to_string();
-        // 工作记忆通道隔离：当当前渠道为用户对话（direct/wechat）时，
-        // 只加载同一渠道的短期上下文，排除跨角色对话（cross_character）避免污染。
+        // 工作记忆通道隔离：仅隔离 cross_character（两个 AI 角色之间的私聊），
+        // 避免其污染用户↔AI 主上下文。用户可见渠道（direct/wechat/proactive）
+        // 视为同一对话，切换入口时上下文连续。
         let current_ch = self.dialogue.get_channel();
         state.messages = if current_ch == "cross_character" {
             self.dialogue.get_history_filtered_by_channel(Some("cross_character"))
         } else {
-            self.dialogue.get_history_filtered_by_channel(Some(&current_ch))
+            self.dialogue.get_user_visible_history()
         };
         // 会话回顾注入：从 TimeStampedMemory 摘要构造 recap 消息，插入消息列表头部
         {
@@ -916,6 +937,13 @@ Choose the appropriate expression, motion, and sticker. Leave empty if nothing f
         if let Some(self_state) = &self.self_state {
             state.self_state_text = self_state.snapshot().serialize_for_prompt(&self.language);
         }
+
+        // 用户认知模型注入：将 UserModel 格式化为"我对你的了解"段落
+        // 在 prompt 中注入，让 LLM 感知"我对这个人的长期认识"
+        state.user_model_text = self
+            .user_model
+            .format_for_prompt(&self.language)
+            .unwrap_or_default();
 
         // 凝神模式状态机更新：本轮输入 + 当前用户情绪 → 评分 → 三态切换
         {
@@ -1010,6 +1038,10 @@ Choose the appropriate expression, motion, and sticker. Leave empty if nothing f
         response.expression_duration_ms = final_state.expression_duration_ms;
         response.motion = final_state.motion.clone();
         response.sticker = final_state.sticker.clone();
+        // text 字段仅保留纯文本，剥离 Markdown / 富文本渲染语法，以及 TTS 控制标记
+        // （[EMO]/[THINKING]/[SPEED]/[PAUSE] 是 TTS 指令，不应显示在聊天气泡里）
+        let tts_ctrl = crate::speech::tts::parse_tts_controls(&response.text);
+        response.text = crate::utils::strip_markdown_syntax(&tts_ctrl.text);
 
         self.record_reasoning_trace(user_input, &final_state, &response);
 
@@ -1023,6 +1055,19 @@ Choose the appropriate expression, motion, and sticker. Leave empty if nothing f
     /// 2. 调用 AutoExtractor 从本轮对话中抽取长期记忆（ADD/UPDATE/DELETE）
     /// 3. 每 `CONSOLIDATOR_INTERVAL` 次调用一次 MemoryRetentionGuard 清理过期记忆
     pub async fn ainvoke(&self, user_input: &str, stream: bool) -> VivianResult<AiResponse> {
+        self.ainvoke_with_options(user_input, stream, false).await
+    }
+
+    /// 带选项的对话链调用。
+    ///
+    /// `skip_dialogue_write`: 跳过将本轮用户消息和 AI 回复写入对话历史。
+    /// 用于插话等场景——插话指令是内部生成的系统提示，不应作为用户消息出现在对话历史和记忆图谱中。
+    pub async fn ainvoke_with_options(
+        &self,
+        user_input: &str,
+        stream: bool,
+        skip_dialogue_write: bool,
+    ) -> VivianResult<AiResponse> {
         let state = self.prepare_pipeline_state(user_input).await;
 
         let (final_state, response) = self
@@ -1055,6 +1100,15 @@ Choose the appropriate expression, motion, and sticker. Leave empty if nothing f
                 .map(|t| t.label.clone())
                 .collect();
             if !topic_labels.is_empty() {
+                // 更新用户认知模型中的项目激活度（基于当前话题信号）
+                self.user_model.update_project_activations(&topic_labels);
+
+                // 共现式关联构建：把当前话题关联到最近更新的特征，
+                // 让特征逐渐积累"用户常把它和哪些话题一起讨论"，供多跳检索使用。
+                // 窗口 10 分钟：仅当某特征在本轮附近被强化过才建立关联，避免无关话题硬塞。
+                self.user_model
+                    .associate_active_traits_with_topics(&topic_labels, 600.0);
+
                 self.topic_signal_buffer
                     .record_topics(&self.char_id, topic_labels.clone());
                 if let Some(topics_to_flush) = self.topic_signal_buffer.should_flush(&self.char_id) {
@@ -1225,7 +1279,7 @@ Choose the appropriate expression, motion, and sticker. Leave empty if nothing f
         }
 
         // ── 后处理：桌宠自控动作（control_actions）──
-        // chat 任务产出的 Live2D 模型控制（expression/motion）由执行器分发到 PetController。
+        // control_actions 由反思调用产出，在此分发到 PetController。
         // best-effort：单条失败不影响主流程；executor 未注入时跳过。
         if !final_state.control_actions.is_empty() {
             if let Some(executor) = &self.control_action_executor {
@@ -1252,6 +1306,7 @@ Choose the appropriate expression, motion, and sticker. Leave empty if nothing f
             let user_facts = self.user_facts.clone();
             let hook_judge = self.hook_judge.clone();
             let dynamic_profile = self.dynamic_profile.clone();
+            let user_model = self.user_model.clone();
             let user_emotion = final_state.user_emotion.clone();
             let ai_emotion = self.emotion_bridge.get_current_emotion().emotion;
             // 记忆系统存原文（剥离 [X 对你说] 前缀），LLM 可见的前缀已在 generation 层处理
@@ -1272,6 +1327,7 @@ Choose the appropriate expression, motion, and sticker. Leave empty if nothing f
                     user_facts,
                     hook_judge,
                     dynamic_profile,
+                    user_model,
                     &user_input_owned,
                     &response_clone,
                     &user_emotion,
@@ -1309,7 +1365,8 @@ Choose the appropriate expression, motion, and sticker. Leave empty if nothing f
         }
 
         // ── 后处理：将当前轮次写入对话管理器，确保下一次调用时历史会累积。
-        if final_state.should_respond {
+        // skip_dialogue_write 时跳过：插话等内部指令不应作为用户消息出现在对话历史和记忆图谱中。
+        if final_state.should_respond && !skip_dialogue_write {
             let clean_ai = MemorySavingRunnable::strip_json_if_any(&response.text);
             let channel = self.dialogue.get_channel();
             // 解析 [X 对你说] 前缀：剥离前缀存原文，用 speaker/listener 元数据标注来源
@@ -1421,6 +1478,21 @@ Choose the appropriate expression, motion, and sticker. Leave empty if nothing f
         Ok(response)
     }
 
+    /// 启动问候专用：走完整对话流水线生成，但跳过记忆写入与对话写回。
+    ///
+    /// 与一般直接渠道对话复用同一套完整提示词（含记忆检索 → 种子记忆进入 prompt），
+    /// 同时设置 `skip_memory_save`，让 UserMemorySavingRunnable / MemorySavingRunnable
+    /// 跳过写入——问候的对话历史与记忆由调用方（Brain::generate_startup_greeting）
+    /// 独立完成后处理，避免把合成的问候指令当作用户消息污染记忆库。
+    pub async fn ainvoke_greeting(&self, user_input: &str) -> VivianResult<AiResponse> {
+        let mut state = self.prepare_pipeline_state(user_input).await;
+        state.metadata["skip_memory_save"] = serde_json::json!(true);
+        let (_, response) = self
+            .execute_pipeline_and_build_response(state, false, user_input)
+            .await?;
+        Ok(response)
+    }
+
     /// 后处理：将对话写入 TimeStampedMemory + 触发 AutoExtractor + 定期 RetentionGuard + 巩固流水线。
     ///
     /// **fire-and-forget 模式**：此函数设计为在 `tokio::spawn` 中调用，不阻塞主响应路径。
@@ -1435,6 +1507,7 @@ Choose the appropriate expression, motion, and sticker. Leave empty if nothing f
         user_facts: Arc<UserFactStore>,
         hook_judge: Arc<HookJudge>,
         dynamic_profile: Arc<DynamicBehaviorProfile>,
+        user_model: Arc<UserModelManager>,
         user_input: &str,
         response: &AiResponse,
         user_emotion: &str,
@@ -1501,6 +1574,54 @@ Choose the appropriate expression, motion, and sticker. Leave empty if nothing f
             Ok(_) => {}
             Err(e) => {
                 tracing::warn!("[BrainChatChain] UserFactStore 提取失败: {}", e);
+            }
+        }
+
+        // 2.5.5 用户认知模型：强证据检测与弱证据积累
+        // 在非跨角色对话时，从用户输入中检测偏好/工作方式/兴趣/目标等信号
+        // 强证据直接更新 UserTrait，弱证据进入候选池等待批量归纳
+        if !is_cross_character {
+            use crate::memory::user_model::{detect_strong_evidence, detect_weak_evidence};
+
+            // 强证据检测
+            let strong_evidence = detect_strong_evidence(user_input);
+            for ev in &strong_evidence {
+                if ev.is_contradiction {
+                    user_model.apply_contradicting_evidence(&ev.key, "realtime", ev.strength);
+                } else {
+                    user_model.apply_strong_evidence(
+                        ev.category,
+                        &ev.key,
+                        &ev.value,
+                        &ev.scope,
+                        "realtime",
+                        ev.strength,
+                    );
+                }
+            }
+            if !strong_evidence.is_empty() {
+                tracing::debug!(
+                    "[BrainChatChain] 用户认知模型：检测到 {} 条强证据",
+                    strong_evidence.len()
+                );
+            }
+
+            // 弱证据检测（进入候选池）
+            let weak_evidence = detect_weak_evidence(user_input);
+            for ev in &weak_evidence {
+                user_model.add_candidate_evidence(
+                    ev.category,
+                    &ev.key,
+                    &ev.value,
+                    "realtime",
+                    ev.strength,
+                );
+            }
+            if !weak_evidence.is_empty() {
+                tracing::debug!(
+                    "[BrainChatChain] 用户认知模型：检测到 {} 条弱证据（进入候选池）",
+                    weak_evidence.len()
+                );
             }
         }
 
@@ -1607,6 +1728,20 @@ Choose the appropriate expression, motion, and sticker. Leave empty if nothing f
                 }
                 // Stage 2 第六路抽取的 L1 近期状态更新到 UserFactStore
                 if let Some(l1) = report.stage2_recent_state {
+                    // 从 L1 近期状态自动注册项目到用户认知模型
+                    for project_desc in &l1.current_projects {
+                        if !project_desc.trim().is_empty() {
+                            // 使用项目描述的前 20 字作为项目名
+                            let project_name: String = project_desc.chars().take(20).collect();
+                            user_model.upsert_project(
+                                &project_name,
+                                project_desc,
+                                Vec::new(),
+                                "active",
+                                crate::memory::user_model::ProjectStatus::Active,
+                            );
+                        }
+                    }
                     if let Err(e) = user_facts.update_recent_state(
                         l1.recent_goals,
                         l1.current_projects,

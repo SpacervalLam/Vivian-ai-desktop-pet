@@ -158,7 +158,7 @@ impl Tool for TalkToCharacterTool {
         };
 
         let reply_result = tokio::time::timeout(
-            std::time::Duration::from_secs(30),
+            std::time::Duration::from_secs(60),
             CROSS_CHARACTER_BUS.send_from_tool(req),
         )
         .await;
@@ -188,7 +188,7 @@ impl Tool for TalkToCharacterTool {
                 })),
             ),
             Err(_) => ToolResult::standard_error(
-                "跨角色对话超时：目标角色在 30 秒内未响应",
+                "跨角色对话超时：目标角色在 60 秒内未响应",
                 Some("CrossCharacterTimeout"),
                 Some(json!({
                     "target_character_id": target_id,
@@ -231,7 +231,13 @@ fn format_reply_for_llm(target_id: &str, reply: &CrossCharacterReply) -> String 
             format!("{} 听到了，没有回应，似乎在思考。", target_id)
         }
         "ignore" => {
-            format!("{} 没有回应。", target_id)
+            // reply 字段携带了具体的忙碌原因（peer_busy/target_busy/user_input_pending），
+            // 优先使用它让源角色 LLM 准确理解对方状态，而非笼统的"没有回应"
+            if !reply.reply.is_empty() {
+                reply.reply.clone()
+            } else {
+                format!("{} 没有回应。", target_id)
+            }
         }
         _ => format!("{} 回复：{}", target_id, reply.reply),
     }

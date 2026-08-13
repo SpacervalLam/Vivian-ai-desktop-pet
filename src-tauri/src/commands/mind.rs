@@ -66,6 +66,8 @@ pub async fn get_mind_state(
 
     // current_thought: 仅使用 LLM 合成缓存，不存在时留空
     let current_thought = brain.mind.current_thought_snapshot().unwrap_or_default();
+    // 内心独白/当前想法总开关（前端据此决定是否显示占位文本）
+    let inner_monologue_enabled = brain.config.world.enable_inner_monologue;
 
     Ok(json!({
         "character_id": instance.id,
@@ -75,6 +77,7 @@ pub async fn get_mind_state(
         "cognition_mode": cognition_mode,
         "focus_charge": focus_charge,
         "current_thought": current_thought,
+        "inner_monologue_enabled": inner_monologue_enabled,
     }))
 }
 
