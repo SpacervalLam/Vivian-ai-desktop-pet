@@ -175,8 +175,7 @@ impl MemoryVectorStore {
                         timestamp REAL NOT NULL,
                         model TEXT NOT NULL DEFAULT ''
                     );
-                    CREATE INDEX IF NOT EXISTS idx_memory_id ON memory_vectors(memory_id);
-                    CREATE INDEX IF NOT EXISTS idx_memory_model ON memory_vectors(model);",
+                    CREATE INDEX IF NOT EXISTS idx_memory_id ON memory_vectors(memory_id);",
                 )
                 .map_err(|e| VivianError::Memory(format!("创建元数据表失败: {e}")))?;
                 // 旧库升级：补齐 model 列
@@ -266,7 +265,7 @@ impl MemoryVectorStore {
         Ok(dim_str.and_then(|s| s.parse().ok()))
     }
 
-    /// 旧库升级：为 memory_vectors 表补齐 model 列（老版本无此列）
+    /// 旧库升级：为 memory_vectors 表补齐 model 列（老版本无此列），并确保索引存在
     fn ensure_model_column(conn: &Connection) -> VivianResult<()> {
         let has_model: bool = conn
             .query_row(
@@ -282,13 +281,14 @@ impl MemoryVectorStore {
                 [],
             )
             .map_err(|e| VivianError::Memory(format!("补列 model 失败: {e}")))?;
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_memory_model ON memory_vectors(model)",
-                [],
-            )
-            .map_err(|e| VivianError::Memory(format!("创建 model 索引失败: {e}")))?;
             tracing::info!("[sqlite-vec] 已为旧库 memory_vectors 补齐 model 列");
         }
+        // 无论新旧库都确保 model 索引存在（在列就绪后创建，避免旧库建索引时报 no such column）
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_memory_model ON memory_vectors(model)",
+            [],
+        )
+        .map_err(|e| VivianError::Memory(format!("创建 model 索引失败: {e}")))?;
         Ok(())
     }
 
