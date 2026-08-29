@@ -1,0 +1,319 @@
+/* ==========================================================================
+   Mind Inspector 外壳 — 清新插画手账（暖纸 + 印章青蓝 + 低饱和贴纸色）
+   依赖 CodeAgentPage.css 中 .codex-root 提供的手账变量与点阵纸面。
+   ========================================================================== */
+
+/* 整个心智观察器窗口的手账纸面（纵向：封面条 + 主体） */
+.mind-scrapbook-window {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* 手账本封面条 */
+.mind-sb-cover {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+  padding: 12px 16px 11px;
+  margin: 10px 14px 14px;
+  border-radius: 16px 20px 16px 20px;
+  background: var(--codex-paper-card);
+  border: 1px solid var(--codex-line-light);
+  box-shadow: var(--codex-shadow-md);
+  z-index: 5;
+  gap: 10px;
+}
+
+.mind-sb-cover-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.6px;
+  color: var(--codex-ink);
+  min-width: 0;
+  flex-shrink: 0;
+}
+
+.mind-sb-cover-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 999px;
+  background: var(--codex-accent);
+  box-shadow: 0 0 0 3px var(--codex-accent-soft);
+}
+
+.mind-sb-cover-divider {
+  width: 1px;
+  height: 14px;
+  background: var(--codex-line);
+  opacity: 0.7;
+}
+
+.mind-sb-cover-sub {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--codex-ink-soft);
+  white-space: nowrap;
+}
+
+/* 封面条右侧：页面注入工具栏 + 日期印章（并入封面条，替代独立标题栏） */
+.mind-sb-cover-extra {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+  min-width: 0;
+  max-width: 75%;
+}
+
+/* 封面右侧日期印章 */
+.mind-sb-cover-seal {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 11px 2px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 1px;
+  color: var(--codex-accent-deep);
+  background: var(--sticker-sky-soft);
+  border: 1px dashed var(--sticker-sky);
+  transform: rotate(2deg);
+  user-select: none;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* 封面条右侧窗口控制按钮（最小化 / 关闭） */
+.mind-sb-cover-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.mind-sb-cover-btn {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: var(--codex-tape-yellow);
+  color: var(--codex-ink);
+  cursor: pointer;
+  border: 1px solid rgba(178, 130, 42, 0.2);
+  box-shadow: var(--codex-shadow-sm);
+  transition: transform 0.12s ease, box-shadow 0.12s ease, background 0.12s ease;
+}
+
+.mind-sb-cover-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--codex-shadow-md);
+}
+
+.mind-sb-cover-btn.close:hover {
+  background: var(--codex-warm);
+  color: #fffaf0;
+}
+
+/* 主体（导航 + 内容） */
+.mind-sb-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  overflow: hidden;
+}
+
+/* 左侧导航轨道 */
+.mind-nav-rail {
+  width: 88px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 10px;
+  padding: 16px 0 20px;
+  pointer-events: none;
+}
+
+/* 贴纸导航卡：圆润插画风 + 顶部彩带 */
+.mind-nav-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 14px 6px 12px;
+  border-radius: 18px 22px 18px 22px;
+  background: var(--codex-paper-card);
+  border: 1px solid var(--codex-line);
+  box-shadow: var(--codex-shadow-md);
+  backdrop-filter: blur(14px) saturate(150%);
+  -webkit-backdrop-filter: blur(14px) saturate(150%);
+  pointer-events: auto;
+}
+
+/* 导航按钮（图标 + 文字标签竖排） */
+.mind-nav-btn {
+  position: relative;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  padding: 8px 4px 7px;
+  border-radius: 14px 16px 14px 16px;
+  background: transparent;
+  color: var(--codex-ink-soft);
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    color 0.15s ease,
+    transform 0.12s ease,
+    box-shadow 0.12s ease;
+}
+
+.mind-nav-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: -0.2px;
+}
+
+.mind-nav-btn:hover {
+  background: var(--sticker-sky-soft);
+  color: var(--codex-accent-deep);
+  transform: translateY(-1px) rotate(-1deg);
+}
+
+.mind-nav-btn.active {
+  background: var(--sticker-sky);
+  color: #1F2A31;
+  box-shadow: var(--codex-shadow-md);
+}
+
+/* 激活态左侧高亮划痕 */
+.mind-nav-btn .mind-nav-active-bar {
+  position: absolute;
+  left: -8px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 5px;
+  height: 24px;
+  border-radius: 999px;
+  background: var(--codex-accent);
+  box-shadow: 0 0 8px rgba(83, 125, 150, 0.45);
+}
+
+/* 右侧内容主区域 */
+.mind-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* 页面内容滚动区 */
+.mind-page-content {
+  flex: 1;
+  min-width: 0;
+  overflow: auto;
+  padding: 0 22px 22px 8px;
+}
+
+/* ===================== 子页面手账 Tab 栏（圆润胶囊贴纸） ===================== */
+
+.mind-tabs {
+  display: inline-flex;
+  gap: 6px;
+  padding: 6px;
+  width: fit-content;
+  border-radius: var(--radius-pill);
+  background: var(--codex-paper-card);
+  border: 1px solid var(--codex-line-light);
+  box-shadow: var(--codex-shadow-sm);
+  margin-bottom: 10px;
+  position: relative;
+}
+
+.mind-tabs::before {
+  content: '';
+  position: absolute;
+  top: -7px;
+  left: 26px;
+  width: 44px;
+  height: 15px;
+  background: var(--codex-tape-yellow);
+  opacity: 0.7;
+  transform: rotate(-3deg);
+  pointer-events: none;
+}
+
+.mind-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 16px;
+  border: none;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--codex-ink-soft);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  transition: background 0.12s ease, color 0.12s ease, transform 0.12s ease, box-shadow 0.12s ease;
+}
+
+.mind-tab:hover {
+  background: var(--sticker-sky-soft);
+  color: var(--codex-accent-deep);
+  transform: translateY(-1px);
+}
+
+.mind-tab.active {
+  background: var(--sticker-sky);
+  color: #1F2A31;
+  box-shadow: var(--codex-shadow-sm);
+}
+
+/* ===================== 记忆窗口外壳 ===================== */
+
+.mind-memory-window {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* ===================== 深色模式适配 ===================== */
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .codex-root .mind-nav-card,
+  :root[data-theme="dark"] .codex-root .mind-nav-card {
+    background: rgba(43, 36, 30, 0.92);
+  }
+  :root:not([data-theme="light"]) .codex-root .mind-sb-cover,
+  :root[data-theme="dark"] .codex-root .mind-sb-cover {
+    background: rgba(43, 36, 30, 0.9);
+  }
+  :root:not([data-theme="light"]) .codex-root .mind-tabs,
+  :root[data-theme="dark"] .codex-root .mind-tabs {
+    background: rgba(43, 36, 30, 0.92);
+  }
+}
+
+:root[data-theme="dark"] .codex-root .mind-nav-card { background: rgba(43, 36, 30, 0.92); }
+:root[data-theme="dark"] .codex-root .mind-sb-cover { background: rgba(43, 36, 30, 0.9); }
+:root[data-theme="dark"] .codex-root .mind-tabs { background: rgba(43, 36, 30, 0.92); }

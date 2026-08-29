@@ -1,0 +1,61 @@
+# ===== Rust / Tauri =====
+src-tauri/target/
+target_check/
+src-tauri/gen/schemas/
+src-tauri/cargo_check*.txt
+
+# ===== Node.js / Frontend =====
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# ===== Vite =====
+*.tsbuildinfo
+
+# ===== IDE / Editor =====
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ===== Tauri WebView 缓存 =====
+.webview-data/
+
+# ===== 环境变量与密钥 =====
+.env
+.env.*
+!.env.example
+
+# ===== 日志与运行时数据 =====
+*.log
+logs/
+src-tauri/logs/
+
+# ===== 构建产物 =====
+*.exe
+*.dll
+*.lib
+*.pdb
+
+# ===== 用户运行时数据（不应入库） =====
+vivian_data/
+
+# ===== Live2D 模型文件（版权资产，不入库） =====
+# 模型本体、贴图、表情、动作等均为版权资产，需用户自行放置
+# model_manifest.json 为项目自有配置（表情/动作语义映射），允许入库
+public/Nana/*
+!public/Nana/model_manifest.json
+public/Vivian/*
+!public/Vivian/model_manifest.json
+
+# ===== 加密资源与密钥（构建产物，不入库） =====
+src-tauri/assets_enc/
+src-tauri/asset_key.bin
+src-tauri/vivian.bundle.enc
+src-tauri/vivian.bundle.index.json

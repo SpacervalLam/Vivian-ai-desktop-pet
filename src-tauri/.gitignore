@@ -1,0 +1,11 @@
+# Rust 构建产物
+/target/
+
+# Tauri 生成的 schema（由 tauri-build 自动生成）
+/gen/schemas/
+
+# 增量编译缓存
+*.rmeta
+*.rlib
+
+# 锁文件（保留 Cargo.lock 以确保可复现构建）

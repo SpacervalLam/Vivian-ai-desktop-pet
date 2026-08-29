@@ -1,0 +1,22 @@
+{
+  "enabled": true,
+  "rate": 1.0,
+  "volume": 1.0,
+  "engine": "gptsovits",
+  "fallback_engine": "edgetts",
+  "retry_count": 1,
+  "gpt_sovits_url": "http://127.0.0.1:9880",
+  "gpt_sovits_install_path": "D:\\GPT-SoVITS-v3lora-20250228",
+  "gpt_sovits_gpt_model": "D:/GPT-SoVITS-v3lora-20250228/GPT_SoVITS/pretrained_models/gsv-v2final-pretrained/s1bert25hz-5kh-longer-epoch=12-step=369668.ckpt",
+  "gpt_sovits_sovits_model": "D:/GPT-SoVITS-v3lora-20250228/GPT_SoVITS/pretrained_models/gsv-v2final-pretrained/s2G2333k.pth",
+  "gpt_sovits_port": 9880,
+  "gpt_sovits_python_path": "D:/GPT-SoVITS-v3lora-20250228/runtime/python.exe",
+  "gpt_sovits_ref_audio": null,
+  "gpt_sovits_prompt_text": "不知不觉中，这本书记录了了太多悲欢离合，每一页都变得沉甸甸的",
+  "gpt_sovits_auto_start": true,
+  "gpt_sovits_dual_instance": false,
+  "gpt_sovits_second_port": 9881,
+  "fish_speech_auto_start": false,
+  "fish_speech_half": false,
+  "fish_speech_compile": false
+}

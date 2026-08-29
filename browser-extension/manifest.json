@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "Vivian 浏览器桥",
+  "version": "1.0.0",
+  "description": "连接 Vivian 桌面宠物到你的真实 Chrome 标签页，让 AI 角色可以在保留登录态的前提下帮你读取、点击、输入、滚动与导航网页。",
+  "minimum_chrome_version": "116",
+  "permissions": ["tabs", "activeTab", "storage", "cookies", "alarms"],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "src/background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["src/content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

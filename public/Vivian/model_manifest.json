@@ -1,0 +1,390 @@
+{
+  "display_name": "Vivian",
+  "model_file": "nana.model3.json",
+  "expressions": [
+    {
+      "semantic": "love_eyes",
+      "name": "爱心眼",
+      "label": "Love Eyes",
+      "category": "emotion"
+    },
+    {
+      "semantic": "dizzy",
+      "name": "晕晕眼",
+      "label": "Dizzy",
+      "category": "emotion"
+    },
+    {
+      "semantic": "tears",
+      "name": "泪眼",
+      "label": "Tears",
+      "category": "emotion"
+    },
+    {
+      "semantic": "blindfold",
+      "name": "眼罩",
+      "label": "Blindfold",
+      "category": "emotion"
+    },
+    {
+      "semantic": "dark_face",
+      "name": "黑脸",
+      "label": "Dark Face",
+      "category": "emotion"
+    },
+    {
+      "semantic": "angry_symbol",
+      "name": "生气符号",
+      "label": "Angry Symbol",
+      "category": "emotion"
+    },
+    {
+      "semantic": "confused",
+      "name": "困惑符号",
+      "label": "Confused",
+      "category": "emotion"
+    },
+    {
+      "semantic": "blood_1",
+      "name": "血迹一段",
+      "label": "Blood Stage 1",
+      "category": "action"
+    },
+    {
+      "semantic": "blood_2",
+      "name": "血迹二段",
+      "label": "Blood Stage 2",
+      "category": "action"
+    },
+    {
+      "semantic": "reach_hand",
+      "name": "伸手",
+      "label": "Reach Hand",
+      "category": "action"
+    },
+    {
+      "semantic": "holding_knife",
+      "name": "默认手拿刀",
+      "label": "Holding Knife",
+      "category": "action"
+    }
+  ],
+  "aliases": {
+    "normal": "love_eyes",
+    "neutral": "love_eyes",
+    "default": "love_eyes",
+    "idle": "love_eyes",
+    "standard": "love_eyes",
+    "smile": "love_eyes",
+    "happy": "love_eyes",
+    "warm": "love_eyes",
+    "heart": "love_eyes",
+    "heart_eyes": "love_eyes",
+    "affectionate": "love_eyes",
+    "sad": "tears",
+    "cry": "tears",
+    "crying": "tears",
+    "tear": "tears",
+    "dazed": "dizzy",
+    "spiral_eyes": "dizzy",
+    "confused_symbol": "confused",
+    "question": "confused",
+    "question_mark": "confused",
+    "puzzled": "confused",
+    "surprise": "confused",
+    "mad": "angry_symbol",
+    "angry": "angry_symbol",
+    "dark": "dark_face",
+    "shadow": "dark_face",
+    "serious": "dark_face",
+    "stern": "dark_face",
+    "blind": "blindfold",
+    "eye_mask": "blindfold",
+    "sleepy": "blindfold",
+    "tired": "blindfold",
+    "bored": "blindfold",
+    "yawn": "blindfold",
+    "sleep": "blindfold",
+    "asleep": "blindfold",
+    "blood": "blood_1",
+    "blood_stage_1": "blood_1",
+    "blood_stage_2": "blood_2",
+    "reach": "reach_hand",
+    "hand": "reach_hand",
+    "knife": "holding_knife",
+    "wave": "love_eyes",
+    "greet": "love_eyes",
+    "hello": "love_eyes",
+    "welcome_back": "love_eyes"
+  },
+  "fallbacks": [
+    "love_eyes",
+    "confused",
+    "dark_face",
+    "tears"
+  ],
+  "emotion_map": {
+    "happy": "love_eyes",
+    "excited": "love_eyes",
+    "grateful": "love_eyes",
+    "joy": "love_eyes",
+    "angry": "angry_symbol",
+    "frustrated": "dark_face",
+    "anxious": "dizzy",
+    "surprised": "confused",
+    "sad": "tears",
+    "disappointed": "dark_face",
+    "tired": "blindfold",
+    "bored": "blindfold",
+    "neutral": "",
+    "curious": "confused",
+    "confused": "confused",
+    "fear": "dizzy"
+  },
+  "motions": [
+    "idle",
+    "idle_chase"
+  ],
+  "motion_aliases": {
+    "idle": "idle",
+    "stand": "idle",
+    "default": "idle",
+    "chase": "idle_chase",
+    "throw": "idle_chase"
+  },
+  "interaction_map": {
+    "single_click": {
+      "expression": "love_eyes",
+      "duration_ms": 1500
+    },
+    "double_click": {
+      "expression": "reach_hand",
+      "duration_ms": 2500
+    },
+    "fast_click": {
+      "expression": "love_eyes",
+      "motion": "idle",
+      "duration_ms": 3000
+    },
+    "fast_drag": {
+      "expression": "dizzy",
+      "motion": "idle",
+      "duration_ms": 2000
+    },
+    "drag_start": {
+      "expression": "reach_hand",
+      "duration_ms": 2000
+    },
+    "drag_end": {
+      "expression": "love_eyes",
+      "duration_ms": 2000
+    },
+    "pet": {
+      "expression": "love_eyes",
+      "motion": "idle",
+      "duration_ms": 3000
+    },
+    "long_press": {
+      "expression": "dark_face",
+      "motion": "idle",
+      "duration_ms": 2500
+    },
+    "mouse_enter": {
+      "expression": "love_eyes",
+      "duration_ms": 2000
+    },
+    "mouse_leave": {
+      "expression": "",
+      "duration_ms": 1000
+    },
+    "avoid_mouse": {
+      "expression": "angry_symbol"
+    }
+  },
+  "mood_triggers": {
+    "joy": [
+      "love_eyes"
+    ],
+    "closeness": [
+      "love_eyes"
+    ],
+    "curiosity": [
+      "confused",
+      "love_eyes"
+    ],
+    "sadness": [
+      "tears",
+      "blindfold"
+    ],
+    "loneliness": [
+      "blindfold",
+      "tears"
+    ],
+    "anger": [
+      "angry_symbol",
+      "dark_face"
+    ],
+    "fear": [
+      "dizzy",
+      "confused"
+    ],
+    "tired": [
+      "blindfold"
+    ],
+    "bored": [
+      "blindfold",
+      "confused"
+    ]
+  },
+  "idle_triggers": {
+    "idle_short": {
+      "threshold_secs": 60,
+      "expression": "confused",
+      "duration_ms": 2500,
+      "probability": 0.4
+    },
+    "idle_medium": {
+      "threshold_secs": 180,
+      "expression": "confused",
+      "duration_ms": 3000,
+      "probability": 0.6
+    },
+    "idle_long": {
+      "threshold_secs": 360,
+      "expression": "dizzy",
+      "duration_ms": 4000,
+      "probability": 0.8
+    },
+    "idle_asleep": {
+      "threshold_secs": 900,
+      "expression": "blindfold",
+      "duration_ms": 3600000,
+      "probability": 0.95
+    }
+  },
+  "event_triggers": {
+    "user_return": {
+      "expression": "love_eyes",
+      "duration_ms": 3000,
+      "probability": 0.9
+    },
+    "window_focus": {
+      "expression": "love_eyes",
+      "duration_ms": 2000,
+      "probability": 0.5
+    },
+    "window_blur": {
+      "expression": "",
+      "duration_ms": 1000,
+      "probability": 0.2
+    },
+    "morning": {
+      "expression": "love_eyes",
+      "duration_ms": 3000,
+      "probability": 0.7
+    },
+    "afternoon": {
+      "expression": "love_eyes",
+      "duration_ms": 2000,
+      "probability": 0.4
+    },
+    "evening": {
+      "expression": "blindfold",
+      "duration_ms": 3000,
+      "probability": 0.4
+    },
+    "night": {
+      "expression": "blindfold",
+      "duration_ms": 3000,
+      "probability": 0.5
+    },
+    "chat_start": {
+      "expression": "love_eyes",
+      "duration_ms": 2000,
+      "probability": 0.6
+    },
+    "chat_end": {
+      "expression": "love_eyes",
+      "duration_ms": 2000,
+      "probability": 0.4
+    },
+    "mood_change_joy": {
+      "expression": "love_eyes",
+      "duration_ms": 2500,
+      "probability": 0.8
+    },
+    "mood_change_sadness": {
+      "expression": "tears",
+      "duration_ms": 3000,
+      "probability": 0.7
+    },
+    "mood_change_anger": {
+      "expression": "angry_symbol",
+      "duration_ms": 2500,
+      "probability": 0.8
+    },
+    "mood_change_fear": {
+      "expression": "dizzy",
+      "duration_ms": 2500,
+      "probability": 0.7
+    },
+    "mood_change_surprised": {
+      "expression": "confused",
+      "duration_ms": 2000,
+      "probability": 0.8
+    },
+    "mood_change_tired": {
+      "expression": "blindfold",
+      "duration_ms": 3000,
+      "probability": 0.6
+    },
+    "mood_change_bored": {
+      "expression": "blindfold",
+      "duration_ms": 2500,
+      "probability": 0.7
+    },
+    "mood_change_curiosity": {
+      "expression": "confused",
+      "duration_ms": 2000,
+      "probability": 0.7
+    }
+  },
+  "mood_idle_expressions": {
+    "joy": {
+      "expression": "love_eyes",
+      "priority": 10
+    },
+    "closeness": {
+      "expression": "love_eyes",
+      "priority": 10
+    },
+    "sadness": {
+      "expression": "tears",
+      "priority": 8
+    },
+    "anger": {
+      "expression": "angry_symbol",
+      "priority": 9
+    },
+    "fear": {
+      "expression": "dizzy",
+      "priority": 8
+    },
+    "tired": {
+      "expression": "dizzy",
+      "priority": 7
+    },
+    "bored": {
+      "expression": "confused",
+      "priority": 6
+    },
+    "curiosity": {
+      "expression": "confused",
+      "priority": 7
+    },
+    "neutral": {
+      "expression": "love_eyes",
+      "priority": 5
+    }
+  }
+}

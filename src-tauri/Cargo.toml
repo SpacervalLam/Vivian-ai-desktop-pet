@@ -1,0 +1,198 @@
+[package]
+name = "vivian"
+version = "1.0.0"
+description = "Vivian AI Desktop Pet"
+authors = ["Vivian"]
+edition = "2021"
+rust-version = "1.75"
+default-run = "vivian"
+
+[lib]
+name = "vivian_lib"
+# 仅保留 rlib：cdylib 仅供移动端使用，桌面端无引用；移除后 rustc 免去
+# 第二次完整代码生成，非增量编译峰值内存近乎减半（避免 rustc-LLVM OOM）
+crate-type = ["lib"]
+
+[build-dependencies]
+tauri-build = { version = "2.0", features = [] }
+cc = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[dependencies]
+# Tauri
+tauri = { version = "2.1", features = ["tray-icon", "image-png", "image-ico", "protocol-asset"] }
+tauri-plugin-shell = "2.0"
+tauri-plugin-dialog = "2.0"
+tauri-plugin-fs = "2.0"
+tauri-plugin-notification = "2.0"
+tauri-plugin-global-shortcut = "2.0"
+tauri-plugin-os = "2.0"
+tauri-plugin-single-instance = "2.0"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+# JSON Schema 自动生成（LLM Structured Outputs 用，对齐 ProcessedResponse）
+schemars = { version = "0.8", features = ["preserve_order"] }
+
+# Async runtime
+tokio = { version = "1.41", features = ["full"] }
+async-trait = "0.1"
+futures = "0.3"
+
+# Logging & tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
+tracing-appender = "0.2"
+
+# HTTP & networking
+# 注: reqwest 0.12 已将代理(reqwest::Proxy)支持合并到核心，无需单独 feature
+reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls", "http2", "multipart"], default-features = false }
+# WebSocket (edge-tts 流式合成)
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+
+# HTTP server (remote access via Tailscale)
+# ws: 浏览器自动化桥（/ext/bridge）的 WebSocket 通道
+axum = { version = "0.7", features = ["ws"] }
+tower-http = { version = "0.5", features = ["cors", "fs"] }
+
+# Error handling
+thiserror = "2.0"
+anyhow = "1.0"
+
+# Time & date
+chrono = { version = "0.4", features = ["serde"] }
+
+# Collections & utilities
+parking_lot = "0.12"
+once_cell = "1.20"
+uuid = { version = "1.11", features = ["v4", "serde"] }
+regex = "1.11"
+glob = "0.3"
+# URL 百分号编码（discovery 多平台源的查询词编码）
+urlencoding = "2"
+# Token 计数（记忆系统窗口压缩阈值用）
+tiktoken-rs = "0.12"
+# 随机数（TTS 口型同步随机开合值）
+rand = "0.9"
+# 非 UTF-8（GBK 等）文本检测与解码
+encoding_rs = "0.8"
+chardetng = "0.1"
+
+# Cryptography (for caching hashes + asset decryption)
+md-5 = "0.10"
+# 讯飞星火 WebSocket 鉴权需要 HMAC-SHA256 + base64
+sha2 = "0.10"
+hmac = "0.12"
+base64 = "0.22"
+# Live2D 美术资源 AES-256-GCM 加密
+aes-gcm = "0.10"
+# Bundle 压缩（构建期 zstd 压缩，运行时解压）
+zstd = "0.13"
+# WebView2 冻结/恢复（隐藏窗口渲染进程挂起省内存），版本与 tauri 依赖树对齐
+webview2-com = "0.38.2"
+windows-core = "0.61"
+
+# Database & storage
+rusqlite = { version = "0.32", features = ["bundled", "load_extension"] }
+
+# Chinese tokenization (for RAG/BM25)
+jieba-rs = "0.7"
+
+# PDF text extraction (for file drag-and-drop)
+pdf-extract = "0.7"
+
+# LRU cache (for query rewrite caching)
+lru = "0.12"
+
+
+# System info
+sysinfo = "0.32"
+# 系统语言检测（首次启动时根据系统 locale 设置默认界面语言）
+sys-locale = "0.3"
+
+# ASR - 麦克风采集（Whisper / Azure 后端共用，跨平台）
+cpal = "0.15"
+# TTS - 内存音频播放（替代 MCI 临时文件路径，支持 MP3/WAV/OGG 解码）
+rodio = "0.19"
+
+# Windows-specific
+[target.'cfg(windows)'.dependencies]
+winreg = "0.55"
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Shell",
+    "Win32_Graphics_Gdi",
+    "Win32_Media_Multimedia",
+    "Win32_System_Com",
+    # 交互终端: ConPTY 伪控制台 + 匿名管道 + 文件读写 + 属性列表
+    "Win32_System_Console",
+    "Win32_System_Pipes",
+    "Win32_System_Kernel",
+    "Win32_System_IO",
+    "Win32_Storage_FileSystem",
+    # 用户活动检测: GetLastInputInfo / GetTickCount
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_System_SystemInformation",
+    # 系统睡眠/唤醒感知: PowerRegisterSuspendResumeNotification
+    "Win32_System_Power",
+    # WinRT 语音识别所需
+    "Foundation",
+    "Globalization",
+    "Media_SpeechRecognition",
+    # TTS 所需: WinRT 语音合成 + 流
+    "Media_SpeechSynthesis",
+    "Media_Core",
+    "Storage_Streams",
+    # OCR 所需: Windows.Media.Ocr + 位图编码
+    "Media_Ocr",
+    "Graphics_Imaging",
+    # 地理定位: Windows.Devices.Geolocation（系统定位）
+    "Devices_Geolocation",
+    # 系统音乐感知: Windows.Media.Control（SMTC 读取当前播放）
+    "Media_Control",
+    # 系统音量感知: Core Audio API（IAudioEndpointVolume）
+    "Win32_Media_Audio",
+    "Win32_Media_Audio_Endpoints",
+    # 网络连通性监听: INetworkListManagerEvents（网络变化触发重新定位）
+    "Win32_Networking_NetworkListManager",
+    # 网络接口类型查询: ConvertInterfaceGuidToLuid / GetIfEntry2 / MIB_IF_ROW2
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    # Job Object: 子进程生命周期绑定（KILL_ON_JOB_CLOSE 兜底）
+    "Win32_System_JobObjects",
+    # 进程存活检测: OpenProcess / PROCESS_QUERY_LIMITED_INFORMATION
+    "Win32_System_Threading",
+    # CreateJobObjectW 的 SECURITY_ATTRIBUTES 参数需要
+    "Win32_Security",
+] }
+
+[features]
+default = []
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+overflow-checks = false
+strip = "symbols"
+
+[profile.dev]
+# opt-level=0：O1 会驱动 LLVM 完整优化管线，叠加本 crate 的重度泛型
+# （tauri/axum/tokio/schemars），非增量编译峰值内存 ~7GB 在 16GB 机器上
+# 边缘徘徊（偶发 rustc-LLVM OOM）。O0 峰值降至 ~2-3GB，彻底稳定。
+opt-level = 0
+debug = "line-tables-only"
+# 关闭增量编译：Windows 下 rustc 写 target/debug/incremental 的
+# pre-lto-bitcode 偶发 os error 5（拒绝访问，杀软/并发文件锁）触发 ICE，
+# 每次需清缓存全量重编 6 分钟以上。关闭后单次编译稍慢但稳定可复现。
+incremental = false
+# 收窄并行代码生成单元：非增量模式下 dev 默认 256 个 CGU 各持独立 LLVM
+# 上下文，峰值内存易触发 rustc-LLVM OOM；16 个单元可显著降低峰值内存
+codegen-units = 16
