@@ -416,20 +416,7 @@ const ProviderPresetRow: React.FC<{
 
   return (
     <>
-      <style>
-        {`.provider-hscroll{scrollbar-width:none;-ms-overflow-style:none}
-.provider-hscroll::-webkit-scrollbar{width:0;height:0;display:none}
-.provider-zone{position:absolute;top:0;bottom:0;width:28px;display:flex;align-items:center;justify-content:center;z-index:3;cursor:pointer;user-select:none;background:rgba(112,112,128,0.10);transition:background .15s ease}
-.provider-zone::after{content:'';width:0;height:0;border-top:6px solid transparent;border-bottom:6px solid transparent;opacity:.7;transition:opacity .15s ease,transform .15s ease}
-.provider-zone-left{left:0;border-radius:8px 0 0 8px}
-.provider-zone-left::after{border-right:10px solid var(--panel-text-secondary)}
-.provider-zone-right{right:0;border-radius:0 8px 8px 0}
-.provider-zone-right::after{border-left:10px solid var(--panel-text-secondary)}
-.provider-zone:hover{background:rgba(112,112,128,0.22)}
-.provider-zone:hover::after{opacity:1;transform:scale(1.14)}
-.provider-zone-left:hover::after{border-right-color:var(--panel-accent)}
-.provider-zone-right:hover::after{border-left-color:var(--panel-accent)}`}
-      </style>
+      {/* 样式（.provider-hscroll 隐藏滚动条 + .provider-zone 感应块）见 global.css */}
       <div style={{ position: 'relative' }}>
         <div
           ref={scrollRowRef}
@@ -4479,38 +4466,43 @@ const ConfigWindow: React.FC = () => {
                     background: 'var(--panel-card)',
                   }}
                 >
-                  <div style={{ display: 'flex', alignItems: 'flex-end', gap: 8, marginBottom: 8 }}>
-                  <TextField
-                    label={t('config.field_work_model_name')}
-                    value={m.name}
-                    onChange={(v) => patchWorkModel(idx, { name: v })}
-                    placeholder={t('config.work_models_name_ph')}
-                    style={{ flex: 1, minWidth: 0, marginBottom: 0 }}
-                  />
-                    <button
-                      type="button"
-                      onClick={() => removeWorkModel(m.id)}
-                      style={{
-                        flexShrink: 0,
-                        display: 'inline-flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        width: 32,
-                        height: 32,
-                        border: '1px solid var(--panel-border)',
-                        background: 'transparent',
-                        color: 'var(--panel-danger)',
-                        cursor: 'pointer',
-                        borderRadius: 8,
-                        transition: 'background 0.15s ease, border-color 0.15s ease, opacity 0.15s ease',
-                        opacity: 0.75,
-                      }}
-                      onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(229, 57, 53, 0.12)'; e.currentTarget.style.borderColor = 'rgba(229, 57, 53, 0.4)'; e.currentTarget.style.opacity = '1'; }}
-                      onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.borderColor = 'var(--panel-border)'; e.currentTarget.style.opacity = '0.75'; }}
-                      title={t('config.work_models_remove')}
-                    >
-                      <Trash2 size={15} strokeWidth={2} />
-                    </button>
+                  {/* 别名输入框与删除按钮同行：label 在行外，input 与按钮同一 flex 行，
+                      按钮高度随行拉伸与输入框完全齐平（border/radius 与输入框一致） */}
+                  <div style={{ ...fieldStyle, marginBottom: 8 }}>
+                    <label style={labelStyle}>{t('config.field_work_model_name')}</label>
+                    <div style={{ display: 'flex', gap: 8, alignItems: 'stretch' }}>
+                      <input
+                        type="text"
+                        value={m.name}
+                        onChange={(e) => patchWorkModel(idx, { name: e.target.value })}
+                        placeholder={t('config.work_models_name_ph')}
+                        style={{ ...inputStyle, flex: 1, minWidth: 0, boxSizing: 'border-box' }}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => removeWorkModel(m.id)}
+                        style={{
+                          flexShrink: 0,
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          width: 44,
+                          border: '1.5px solid var(--panel-border)',
+                          background: 'transparent',
+                          color: 'var(--panel-danger)',
+                          cursor: 'pointer',
+                          borderRadius: 12,
+                          transition: 'background 0.15s ease, border-color 0.15s ease, opacity 0.15s ease',
+                          opacity: 0.75,
+                          boxSizing: 'border-box',
+                        }}
+                        onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(229, 57, 53, 0.12)'; e.currentTarget.style.borderColor = 'rgba(229, 57, 53, 0.4)'; e.currentTarget.style.opacity = '1'; }}
+                        onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.borderColor = 'var(--panel-border)'; e.currentTarget.style.opacity = '0.75'; }}
+                        title={t('config.work_models_remove')}
+                      >
+                        <Trash2 size={15} strokeWidth={2} />
+                      </button>
+                    </div>
                   </div>
                   <WorkModelProviderSelector
                     model={m}
@@ -4740,20 +4732,22 @@ const ConfigWindow: React.FC = () => {
             </div>
             <NumberField
               label={t('config.field_tool_max_result_chars')}
-              value={get('tools.max_result_chars', 4000)}
-              onChange={(v) => setNested('tools.max_result_chars', v)}
-              min={500}
+              value={(get('tools.max_result_chars', 4000) as number) === 0 ? -1 : (get('tools.max_result_chars', 4000) as number)}
+              onChange={(v) => setNested('tools.max_result_chars', v === -1 ? 0 : v)}
+              min={-1}
               step={500}
+              help={t('config.field_unlimited_hint')}
             />
             <div style={{ fontSize: 11, color: 'var(--panel-text-tertiary)', marginTop: -10, marginBottom: 14, lineHeight: 1.5 }}>
               {t('config.field_tool_max_result_chars_help')}
             </div>
             <NumberField
               label={t('config.field_tool_feedback_history_chars')}
-              value={get('tools.feedback_history_chars', 2000)}
-              onChange={(v) => setNested('tools.feedback_history_chars', v)}
-              min={200}
+              value={(get('tools.feedback_history_chars', 2000) as number) === 0 ? -1 : (get('tools.feedback_history_chars', 2000) as number)}
+              onChange={(v) => setNested('tools.feedback_history_chars', v === -1 ? 0 : v)}
+              min={-1}
               step={200}
+              help={t('config.field_unlimited_hint')}
             />
             <div style={{ fontSize: 11, color: 'var(--panel-text-tertiary)', marginTop: -10, marginBottom: 14, lineHeight: 1.5 }}>
               {t('config.field_tool_feedback_history_chars_help')}

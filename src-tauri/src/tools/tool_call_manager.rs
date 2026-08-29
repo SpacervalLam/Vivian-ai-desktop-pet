@@ -136,9 +136,13 @@ impl ToolCallManager {
         self
     }
 
-    /// 设置反馈提示词中工具结果 JSON 的截断长度（最小为 100）
+    /// 设置反馈提示词中工具结果 JSON 的截断长度（0 = 不限制，设置中填 -1；其余最小为 100）
     pub fn with_feedback_history_chars(mut self, chars: u32) -> Self {
-        self.feedback_history_chars = (chars as usize).max(100);
+        self.feedback_history_chars = if chars == 0 {
+            0
+        } else {
+            (chars as usize).max(100)
+        };
         self
     }
 

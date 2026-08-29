@@ -134,7 +134,12 @@ fn value_to_compact_string(v: &Value) -> String {
 /// 大结果会**落盘到 spill 目录**（`%APPDATA%\Vivian\spill\`），LLM 上下文只拿到
 /// 头部预览 + 文件路径定位，需要全文时可经 `read_spilled_result` 命令读取——
 /// 避免超大结果直接塞进 LLM 上下文或丢失。
+///
+/// `max_chars == 0` 表示不限制（设置中填 -1）：跳过预算检查原样返回。
 fn enforce_result_budget(tool_name: &str, data: Value, max_chars: usize) -> Value {
+    if max_chars == 0 {
+        return data;
+    }
     let serialized = value_to_compact_string(&data);
     if serialized.chars().count() <= max_chars {
         return data;
@@ -230,6 +235,10 @@ pub fn budget_result(tool_name: String, data: Value, max_chars: usize) -> Value 
 /// 尾部常承载退出码/报错/diff 结果等高信息量收尾，比纯截头保留得更多。
 /// 供编程智能体与陪伴链路（工具反馈历史）共用。
 pub fn prune_head_tail(content: &str, max: usize) -> String {
+    // 0 = 不限制（设置中填 -1）：原样返回
+    if max == 0 {
+        return content.to_string();
+    }
     let len = content.chars().count();
     if len <= max {
         return content.to_string();
