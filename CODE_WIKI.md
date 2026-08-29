@@ -11,6 +11,10 @@
 ## 目录
 
 - [顶层架构](#顶层架构)
+- [前端架构](#前端架构)
+  - [前端构建（多窗口按需加载）](#前端构建多窗口按需加载)
+  - [心智观察器页面合并（MindInspector）](#心智观察器页面合并mindinspector)
+  - [暖纸主题（UI 视觉统一）](#暖纸主题ui-视觉统一)
 - [核心数据结构](#核心数据结构)
 - [模块详解](#模块详解)
   - [brain/ —— 大脑核心](#brain--大脑核心)
@@ -83,37 +87,6 @@ flowchart TD
     BRAIN --> MOD7 & MOD8 & MOD9 & MOD10 & MOD11 & MOD12
 ```
 
-#### 前端构建（多窗口按需加载）
-
-桌宠由多个 Tauri 窗口组成（主 Live2D 窗口 / Chat / Memory / Config / Bubble / Toast / SideChat / MessageBanner 等），每个窗口通过 `?view=` 参数加载不同的 React 组件。
-
-- **逐窗口动态 import**（[`src/main.tsx`](file:///g:/vivian-rs/src/main.tsx)）：`main.tsx` 不再静态导入全部窗口组件，而是按 `view` 参数对各自组件做 `await import(...)`。主窗口（无 view）只加载 App + Live2D 依赖链（pixi），不再打包 Chat / Memory / MindInspector / Config 等它用不到的代码，显著降低主窗口首帧解析量。
-- **vendor 拆包**（[`vite.config.ts`](file:///g:/vivian-rs/vite.config.ts)）：`build.rollupOptions.output.manualChunks` 将稳定依赖拆成独立 chunk —— `react`（react/react-dom/zustand）、`tauri`（@tauri-apps）、`i18n`（i18next/react-i18next）、`pixi`（pixi.js/pixi-live2d-display，仅主窗口用）。多窗口共享这些 chunk 的高效缓存、并行加载。
-- **target es2022**：WebView2 为常青 Chromium，无需为旧浏览器降级转译，减少产物体积。
-- **按需 chunk 兜底**：其余依赖（echarts / mermaid / katex 等）保持 Vite 默认基于动态 import 的按需拆包，不合并成单一巨型 vendor 包（避免本来懒加载的库被提前加载）。
-- **Main 控制器窗口瘦身**（[`src/main.tsx`](file:///g:/vivian-rs/src/main.tsx)）：隐藏控制器分支（`view=hidden_controller`）直接 return 不渲染任何 React 组件，同时跳过 i18n 初始化与 global.css 加载，仅保留最小 Tauri IPC 桥接层，消除控制器窗口的 UI 渲染开销。
-
-#### 心智观察器页面合并（MindInspector）
-
-Memory 窗口（`MemoryWindow`，默认全屏大小）内嵌 [`MindInspector.tsx`](file:///g:/vivian-rs/src/components/mind-inspector/MindInspector.tsx)，侧边栏导航合并为 3 项，整个心智观察器使用「手账暖纸 + 纸胶带 + 点阵底纹」视觉体系：
-
-- **外壳结构**（`MindInspector.tsx`）：纵向 = 顶部封面条（`.mind-sb-cover`，「Mind Scrapbook | 当前页名」+ 日期印章）+ 主体（左贴纸导航栏 `mind-nav-rail` 3 项 + 右内容区 `mind-page-content`）。窗口顶部原生标题栏已删除——封面条标题区即窗口拖拽区（`data-tauri-drag-region`），最小化/关闭按钮直接置于封面条右侧；页面经 `NavigationContext.setHeaderExtra` 注入的工具栏（如 DiaryPage 的角色切换/日期筛选）与日期印章、窗口按钮并排显示在封面条右侧，不再单独占一行
-- **综合页（overview）** = [`OverviewPage.tsx`](file:///g:/vivian-rs/src/components/mind-inspector/pages/OverviewPage.tsx)：页内顶部手账 Tab 切换 `mind`（MindPage）/ `world`（WorldPage）/ `graph`（GraphPage）/ `profile`（UserProfilePage），缓存上次选择；页头 = 大标题「综合」+ 铅笔虚线 + 当前子视图胶囊
-- **创作页（journal）** = [`JournalPage.tsx`](file:///g:/vivian-rs/src/components/mind-inspector/pages/JournalPage.tsx)：子 tab 切换 `diary`（DiaryPage）/ `notebook`（NotebookPage）/ `planner`（PlannerPage，待办+定时合并），支持 `memory:navigate` 事件定位；页头同样为「创作」大标题 + 子视图胶囊
-- **工作页（code）**：Codex 布局 + 手账风格三栏工作台，由 [`CodeAgentPageNew.tsx`](file:///g:/vivian-rs/src/components/mind-inspector/pages/CodeAgentPageNew.tsx) 提供实际实现（左栏会话/工作区管理 / 中栏对话流 + 单轮工作过程分组折叠 / 右栏检查器：概览 + 轨迹 + 内嵌终端）
-
-**兼容跳转**：`MindInspector` 的 `resolveNav` 把合并前的子视图跳转（`navigateTo('mind'/'world'/'graph'/'profile'/'diary'/'notebook'/'todo'/'scheduler')`、URL 参数 `nav=...`、`nb_id`、`memory:navigate` 事件）统一映射为「合并页主键 + `pageParams.sub`」，由合并页跟随切换子 tab。导航定义与 `NavKey` 在 [`design-system.ts`](file:///g:/vivian-rs/src/components/mind-inspector/design-system.ts)。
-
-#### 暖纸主题（UI 视觉统一）
-
-心智观察器与设置窗口（`ConfigWindow`）共用一套「暖纸信纸」视觉基调，由三处集中 token 驱动：
-
-- **颜色 token**（[`global.css`](file:///g:/vivian-rs/src/styles/global.css)）：`--panel-*` 三块（深色默认 / 浅色跟随 / 浅色强制）重映射为「纸本 + 墨 + 印章青蓝」，对齐宣纸质感——纸张 `#F5EFE4` / 浮起卡 `#FBF7EE` / 侧边栏 `#EFE8DB`；墨色 5 档（浓墨 `#2A2622` → 极淡墨 `#8F867B`）；分割线 `#D8CFBE`；唯一强调色「印章青蓝」`#537D96`（hover `#3F6179`）；语义色克制墨染（成功墨绿 `#4A6B4A` / 危险深朱 `#8B2C1F`）
-- **质感**：`.scrapbook-bg` 用多层 `radial-gradient` 模拟宣纸颗粒与暖斑（无需外部图片）；`.scrapbook-card` 收为 1px 细边框 + 3px 极小圆角；全局滚动条改用 `--panel-scrollbar` token（浅色下不再不可见）
-- **排版**（[`design-system.ts`](file:///g:/vivian-rs/src/components/mind-inspector/design-system.ts)）：正文切衬线（`Noto Serif SC` / 宋体家族），英文/数字装饰标题保留手写体（`Caveat`）作点缀；圆角 token 极方化（控件「印章取方」：xs 2px / md 4px / xl 8px），呼应信纸邀纸感
-
-页面侧边栏外壳在 `MindInspector.tsx` 挂 `scrapbook-bg` 纸纹底、激活高亮线用印章青蓝；`ConfigWindow` 根容器同样挂纸纹并切衬线字体。视觉整体由 token 层驱动，切换深/浅主题时暖纸调性保持一致。
-
 ### CharacterInstance（角色实例）
 
 定义于 [`state.rs`](file:///g:/vivian-rs/src-tauri/src/state.rs)。每个角色独立持有一份完整资源：
@@ -144,6 +117,41 @@ pub struct AppState {
     // ... 更多共享资源
 }
 ```
+
+---
+
+## 前端架构
+
+### 前端构建（多窗口按需加载）
+
+桌宠由多个 Tauri 窗口组成（主 Live2D 窗口 / Chat / Memory / Config / Bubble / Toast / SideChat / MessageBanner 等），每个窗口通过 `?view=` 参数加载不同的 React 组件。
+
+- **逐窗口动态 import**（[`src/main.tsx`](file:///g:/vivian-rs/src/main.tsx)）：`main.tsx` 不再静态导入全部窗口组件，而是按 `view` 参数对各自组件做 `await import(...)`。主窗口（无 view）只加载 App + Live2D 依赖链（pixi），不再打包 Chat / Memory / MindInspector / Config 等它用不到的代码，显著降低主窗口首帧解析量。
+- **vendor 拆包**（[`vite.config.ts`](file:///g:/vivian-rs/vite.config.ts)）：`build.rollupOptions.output.manualChunks` 将稳定依赖拆成独立 chunk —— `react`（react/react-dom/zustand）、`tauri`（@tauri-apps）、`i18n`（i18next/react-i18next）、`pixi`（pixi.js/pixi-live2d-display，仅主窗口用）。多窗口共享这些 chunk 的高效缓存、并行加载。
+- **target es2022**：WebView2 为常青 Chromium，无需为旧浏览器降级转译，减少产物体积。
+- **按需 chunk 兜底**：其余依赖（echarts / mermaid / katex 等）保持 Vite 默认基于动态 import 的按需拆包，不合并成单一巨型 vendor 包（避免本来懒加载的库被提前加载）。
+- **Main 控制器窗口瘦身**（[`src/main.tsx`](file:///g:/vivian-rs/src/main.tsx)）：隐藏控制器分支（`view=hidden_controller`）直接 return 不渲染任何 React 组件，同时跳过 i18n 初始化与 global.css 加载，仅保留最小 Tauri IPC 桥接层，消除控制器窗口的 UI 渲染开销。
+
+### 心智观察器页面合并（MindInspector）
+
+Memory 窗口（`MemoryWindow`，默认全屏大小）内嵌 [`MindInspector.tsx`](file:///g:/vivian-rs/src/components/mind-inspector/MindInspector.tsx)，侧边栏导航合并为 3 项，整个心智观察器使用「手账暖纸 + 纸胶带 + 点阵底纹」视觉体系：
+
+- **外壳结构**（`MindInspector.tsx`）：纵向 = 顶部封面条（`.mind-sb-cover`，「Mind Scrapbook | 当前页名」+ 日期印章）+ 主体（左贴纸导航栏 `mind-nav-rail` 3 项 + 右内容区 `mind-page-content`）。窗口顶部原生标题栏已删除——封面条标题区即窗口拖拽区（`data-tauri-drag-region`），最小化/关闭按钮直接置于封面条右侧；页面经 `NavigationContext.setHeaderExtra` 注入的工具栏（如 DiaryPage 的角色切换/日期筛选）与日期印章、窗口按钮并排显示在封面条右侧，不再单独占一行
+- **综合页（overview）** = [`OverviewPage.tsx`](file:///g:/vivian-rs/src/components/mind-inspector/pages/OverviewPage.tsx)：页内顶部手账 Tab 切换 `mind`（MindPage）/ `world`（WorldPage）/ `graph`（GraphPage）/ `profile`（UserProfilePage），缓存上次选择；页头 = 大标题「综合」+ 铅笔虚线 + 当前子视图胶囊
+- **创作页（journal）** = [`JournalPage.tsx`](file:///g:/vivian-rs/src/components/mind-inspector/pages/JournalPage.tsx)：子 tab 切换 `diary`（DiaryPage）/ `notebook`（NotebookPage）/ `planner`（PlannerPage，待办+定时合并），支持 `memory:navigate` 事件定位；页头同样为「创作」大标题 + 子视图胶囊
+- **工作页（code）**：Codex 布局 + 手账风格三栏工作台，由 [`CodeAgentPageNew.tsx`](file:///g:/vivian-rs/src/components/mind-inspector/pages/CodeAgentPageNew.tsx) 提供实际实现（左栏会话/工作区管理 / 中栏对话流 + 单轮工作过程分组折叠 / 右栏检查器：概览 + 轨迹 + 内嵌终端）
+
+**兼容跳转**：`MindInspector` 的 `resolveNav` 把合并前的子视图跳转（`navigateTo('mind'/'world'/'graph'/'profile'/'diary'/'notebook'/'todo'/'scheduler')`、URL 参数 `nav=...`、`nb_id`、`memory:navigate` 事件）统一映射为「合并页主键 + `pageParams.sub`」，由合并页跟随切换子 tab。导航定义与 `NavKey` 在 [`design-system.ts`](file:///g:/vivian-rs/src/components/mind-inspector/design-system.ts)。
+
+### 暖纸主题（UI 视觉统一）
+
+心智观察器与设置窗口（`ConfigWindow`）共用一套「暖纸信纸」视觉基调，由三处集中 token 驱动：
+
+- **颜色 token**（[`global.css`](file:///g:/vivian-rs/src/styles/global.css)）：`--panel-*` 三块（深色默认 / 浅色跟随 / 浅色强制）重映射为「纸本 + 墨 + 印章青蓝」，对齐宣纸质感——纸张 `#F5EFE4` / 浮起卡 `#FBF7EE` / 侧边栏 `#EFE8DB`；墨色 5 档（浓墨 `#2A2622` → 极淡墨 `#8F867B`）；分割线 `#D8CFBE`；唯一强调色「印章青蓝」`#537D96`（hover `#3F6179`）；语义色克制墨染（成功墨绿 `#4A6B4A` / 危险深朱 `#8B2C1F`）
+- **质感**：`.scrapbook-bg` 用多层 `radial-gradient` 模拟宣纸颗粒与暖斑（无需外部图片）；`.scrapbook-card` 收为 1px 细边框 + 3px 极小圆角；全局滚动条改用 `--panel-scrollbar` token（浅色下不再不可见）
+- **排版**（[`design-system.ts`](file:///g:/vivian-rs/src/components/mind-inspector/design-system.ts)）：正文切衬线（`Noto Serif SC` / 宋体家族），英文/数字装饰标题保留手写体（`Caveat`）作点缀；圆角 token 极方化（控件「印章取方」：xs 2px / md 4px / xl 8px），呼应信纸邀纸感
+
+页面侧边栏外壳在 `MindInspector.tsx` 挂 `scrapbook-bg` 纸纹底、激活高亮线用印章青蓝；`ConfigWindow` 根容器同样挂纸纹并切衬线字体。视觉整体由 token 层驱动，切换深/浅主题时暖纸调性保持一致。
 
 ---
 
@@ -1564,7 +1572,12 @@ LLM 输出含标记的 text
 | [`diary.rs`](file:///g:/vivian-rs/src-tauri/src/commands/diary.rs) | 日记 |
 | [`tools.rs`](file:///g:/vivian-rs/src-tauri/src/commands/tools.rs) | 工具管理（`list_tools` 返回全部注册工具含 `is_custom` 字段供设置页区分自进化工具，不过滤禁用项；`get_tool_history` / `confirm_tool_execution`） |
 | [`todo.rs`](file:///g:/vivian-rs/src-tauri/src/commands/todo.rs) | 待办 |
-| [`system.rs`](file:///g:/vivian-rs/src-tauri/src/commands/system.rs) | 系统操作（含 `factory_reset` 恢复出厂：锁死 tick → 停后台子系统 → 逐角色清空数据 → 写 `.factory_reset_pending` 清扫标记 → 重启；`factory_reset_sweep_if_pending` 在 `AppState::new()` 前按保留清单清扫用户数据目录，见[持久化模式](#持久化模式)；`backup_user_data` 导出备份 / `restore_user_data` 导入备份——校验 `.altn` 文件、写入恢复标记并自动重启，前端导入走与恢复出厂同级的二次确认弹窗，见[恢复出厂设置](#恢复出厂设置数据重置)） |
+| [`system.rs`](file:///g:/vivian-rs/src-tauri/src/commands/system.rs) | 系统操作（含 `factory_reset` 恢复出厂：锁死 tick → 停后台子系统 → 逐角色清空数据 → 写 `.factory_reset_pending` 清扫标记 → 重启；`factory_reset_sweep_if_pending` 在 `AppState::new()` 前按保留清单清扫用户数据目录，见[持久化模式](#持久化模式)） |
+| [`backup.rs`](file:///g:/vivian-rs/src-tauri/src/commands/backup.rs) | 数据备份（`backup_user_data` 导出 `.altn` 备份 / `restore_user_data` 导入备份——校验备份文件、写入恢复标记并自动重启，前端导入走与恢复出厂同级的二次确认弹窗，见[恢复出厂设置](#恢复出厂设置数据重置)） |
+| [`discovery.rs`](file:///g:/vivian-rs/src-tauri/src/commands/discovery.rs) | 内容发现画像（`get_discovery_profile` 查看画像 / `update_discovery_interest_weight` 调整兴趣权重 / 增删不喜欢主题 / `respond_interest_probe` 回应兴趣探针 / `bootstrap_from_bangumi` 公开收藏导入） |
+| [`plugins.rs`](file:///g:/vivian-rs/src-tauri/src/commands/plugins.rs) | 插件清单（`list_plugins` / `plugin_paths` / `list_skills` 技能管理面板，不展示内置风格预设） |
+| [`tasks.rs`](file:///g:/vivian-rs/src-tauri/src/commands/tasks.rs) | 自治任务查询与取消（`list_agent_tasks` / `get_agent_task`（含后代谱系树）/ `cancel_agent_task`） |
+| [`terminal.rs`](file:///g:/vivian-rs/src-tauri/src/commands/terminal.rs) | 内嵌终端（ConPTY 会话：`terminal_create` / `terminal_write` / `terminal_resize` / `terminal_kill` / `terminal_list`，供编程页 TerminalPanel 消费） |
 | [`window.rs`](file:///g:/vivian-rs/src-tauri/src/commands/window.rs) | 窗口管理；含 `chat` 窗口右缘三态侧边栏（Hidden/Peek/Expanded，边缘检测线程 + WH_MOUSE_LL Hook + ease-out cubic 220ms 滑动动画 + 状态化鼠标穿透，`show_side_chat_animated`/`expand_side_chat`/`collapse_side_chat` 等命令带 `label` 参数）+ 拖拽惯性甩飞与屏幕边缘回弹（见 [engine/ 章节](#engine--live2d-表现层)）+ WebView 冻结/恢复（`freeze_webview`/`thaw_webview`，窗口隐藏时通过 WebView2 `TrySuspend`/`Resume` 挂起/恢复渲染进程，配合 `visibilitychange` 事件补拉隐藏期间的数据） |
 | [`speech.rs`](file:///g:/vivian-rs/src-tauri/src/commands/speech.rs) | 语音 |
 | [`tts.rs`](file:///g:/vivian-rs/src-tauri/src/commands/tts.rs) | TTS |
@@ -1585,7 +1598,7 @@ LLM 输出含标记的 text
 | [`rag.rs`](file:///g:/vivian-rs/src-tauri/src/commands/rag.rs) | RAG |
 | [`system_tray.rs`](file:///g:/vivian-rs/src-tauri/src/commands/system_tray.rs) | 系统托盘 |
 
-#### remote/ —— 远程访问 HTTP 服务
+### remote/ —— 远程访问 HTTP 服务
 
 [`remote/`](file:///g:/vivian-rs/src-tauri/src/remote) 在应用后台启动一个轻量 axum HTTP 服务，暴露聊天与数据接口，并托管手机端 Web 前端。配合 Tailscale 等组网工具，手机可通过组网 IP 直接访问电脑上的智能体，实现移动端远程陪伴。
 
