@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Vivian</title>
+    <link rel="preconnect" href="https://fonts.googleapis.cn">
+    <link rel="preconnect" href="https://fonts.gstatic.cn" crossorigin>
+    <style>
+      @font-face {
+        font-family: 'Ma Shan Zheng';
+        font-style: normal;
+        font-weight: 400;
+        font-display: swap;
+        src: url('/fonts/ma-shan-zheng.woff2') format('woff2');
+      }
+    </style>
+    <script>
+      // 其余手写字体（Caveat / Dancing Script / Hachi Maru Pop）仍在线加载：
+      // 初始源用可达的中国镜像，失败再依次回退。
+      (function () {
+        var fontCss = 'https://fonts.googleapis.cn/css2?family=Dancing+Script:wght@400;500;600;700&family=Hachi+Maru+Pop&family=Caveat:wght@400;500;600;700&display=swap';
+        var fallbackCss = 'https://fonts.loli.net/css2?family=Dancing+Script:wght@400;500;600;700&family=Hachi+Maru+Pop&family=Caveat:wght@400;500;600;700&display=swap';
+        var link = document.createElement('link');
+        link.rel = 'stylesheet';
+        link.href = fontCss;
+        var done = false;
+        link.onload = function () { done = true; };
+        link.onerror = function () {
+          if (done) return;
+          link.href = fallbackCss;
+          link.onerror = function () { done = true; };
+        };
+        document.head.appendChild(link);
+        // 兜底超时：4s 未加载完成则切到备用源
+        setTimeout(function () {
+          if (!done) {
+            done = true;
+            link.href = fallbackCss;
+          }
+        }, 4000);
+      })();
+    </script>
+    <script>
+      // 在 React 渲染前确定窗口透明性：
+      // 主窗口、状态面板、聊天窗口使用透明窗口；
+      // chat 窗口 transparent:true + 容器 borderRadius:56，需 body 透明才能露出圆角外桌面。
+      // 其余子窗口（config/memory/diary）保持不透明深色背景，避免渲染前白屏闪烁。
+      (function () {
+        try {
+          var view = new URLSearchParams(window.location.search).get('view');
+          if (view === null || view === 'status' || view === 'chat' || view === 'side_chat') {
+            document.documentElement.classList.add('is-transparent');
+          }
+        } catch (e) {}
+      })();
+    </script>
+    <style>
+      html, body { background: #1e1e28; }
+      html.is-transparent, html.is-transparent body { background: transparent; }
+    </style>
+    <script type="module" src="/src/main.tsx"></script>
+  </head>
+  <body>
+    <div id="root"></div>
+  </body>
+</html>

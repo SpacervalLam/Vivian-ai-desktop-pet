@@ -1,0 +1,7 @@
+{
+  "name": "llm-providers",
+  "version": "1.1.1",
+  "description": "LLM 供应商预设插件：厂商卡片（端点 / 协议变体 / 模型建议 / 上下文窗口 / 输出上限 / 核对元数据）与「联网核对官方 API 文档」技能。设置 → LLM 页的供应商卡片数据源，运行时可经 update_provider_preset 工具更新，无需改前端代码。",
+  "skills": ["skills/*.md"],
+  "providers": "providers.json"
+}

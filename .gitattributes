@@ -1,0 +1,61 @@
+# 默认：文本文件统一 LF 行尾，确保跨平台协作一致
+* text=lf eol=lf
+
+# Windows 专用脚本保留 CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# 源代码统一 LF
+*.rs text eol=lf
+*.ts text eol=lf
+*.tsx text eol=lf
+*.js text eol=lf
+*.jsx text eol=lf
+*.json text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.toml text eol=lf
+*.html text eol=lf
+*.css text eol=lf
+*.md text eol=lf
+
+# 二进制文件：不做行尾转换，避免损坏
+#
+# 注意：上面的 `* text=lf eol=lf` 是「全量默认」，任何没有在这里显式声明为
+# binary 的二进制扩展名都会被 git 当成文本做 CRLF→LF 归一化。字体/图片里
+# 恰好出现 0x0D 0x0A 字节对时会被删掉 0x0D，文件长度与自身头部声明的长度
+# 不再一致，Chromium 直接拒绝解码（表现为「字体没有加载」且零报错）。
+# 新增二进制资源类型时务必同步补一行。
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.avif binary
+*.woff2 binary
+*.woff binary
+*.ttf binary
+*.otf binary
+*.glb binary
+*.gltf binary
+*.bin binary
+*.mp3 binary
+*.wav binary
+*.ogg binary
+*.moc3 binary
+*.can3 binary
+*.dll binary
+*.exe binary
+*.lib binary
+*.pdb binary
+*.zip binary
+*.gz binary
+
+# 语言统计（GitHub Linguist）
+# Live2D 模型与贴图不计入语言占比
+public/Vivian/**/*.png linguist-vendored
+public/Vivian/**/*.moc3 linguist-vendored
+src-tauri/gen/** linguist-generated
+dist/** linguist-generated

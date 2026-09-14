@@ -1,0 +1,11 @@
+{
+  "name": "Vivian & Nana",
+  "short_name": "Vivian&Nana",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#F2F2F7",
+  "theme_color": "#0A84FF",
+  "icons": [
+    { "src": "/app-icon.png", "sizes": "any", "type": "image/png" }
+  ]
+}

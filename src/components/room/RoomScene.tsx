@@ -1,0 +1,2265 @@
+/**
+ * 房间 3D 场景——日式动漫风（赛璐璐着色 + 描边）。
+ *
+ * 视觉管线：
+ *   程序化贴图 → MeshToonMaterial（4 级色阶）→ 反面外扩描边 → 三点布光 + 软阴影
+ *   → 窗口光束 / 浮尘 / 自发光小物件（屏幕、灯泡、串灯）
+ *   → 场景雾 → 后处理链（线性 HDR 泛光 → 色调映射 → sRGB）
+ *
+ *   雾和泛光的参数都在 dormLayout.json 的 postfx 里，改 JSON 就能调，不用重建。
+ *   按 P 可以整段关掉雾 + 泛光 + 色调映射做 A/B 对照。
+ *
+ *   家具 / 道具走描边；角色（GLB 的 Q 版）不描边，避免写实模型被框出一道卡通线。
+ *
+ * 逻辑部分（PetAgent 状态机 + A* 寻路 + 20Hz 定步长）和之前一样，没动。
+ * 窗口隐藏时整条管线暂停。
+ *
+ * 不在本次范围：角色骨骼动画、昼夜变化、热点点击交互。
+ */
+
+import { useEffect, useRef, useState } from 'react';
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
+import { FPSControls, Collider } from './anime/fpsControls';
+import { buildFurnitureColliders, buildWallColliders, buildSceneColliders, buildBoxColliders } from './anime/collider';
+import { PetAgent } from './agents/usePetAgent';
+import layoutData from './dormLayout.json';
+
+import { setOutlineDistanceScale, setToonKeyLight, toonGradient, makeRng } from './anime/toon';
+import { mergeByMaterial, freezeStatic } from './anime/merge';
+import { buildExteriorGround, buildStreetscape, buildApartmentShell, buildConvenienceStore, buildStreetscapeRipples, buildApartmentEaveDrips, buildSubwayEntrance, buildIzakaya, buildSmallPark, buildMidRiseBlock, buildViaduct, buildShoppingMall, buildUtilityPoles, buildStreetFurniture, buildStreetBookStore, STRS, FLOORS, APT_X0, APT_X1, APT_ZN, APT_ZB, APT_WALL_BOXES, APT_CORRIDOR_N } from './anime/exterior';
+import {
+  setArtStyle,
+  outlineProp,
+  buildRoomShell,
+  buildWindow,
+  buildRain,
+  buildWetGround,
+  buildDesk,
+  buildChair,
+  buildBed,
+  buildShelf,
+  buildFridge,
+  buildRug,
+  buildLowTable,
+  buildCushion,
+  buildLifestyleDetails,
+  type LifestyleConfig,
+  type RainConfig,
+  type PoolSpec,
+  buildCeilingLantern,
+  buildStringLights,
+  buildSunbeam,
+  type BeamConfig,
+  buildDustMotes,
+  buildSofa,
+  buildTV,
+  buildFloorLamp,
+  buildKitchen,
+  buildDining,
+  buildBathroom,
+  buildScroll,
+  buildGameStation,
+  buildEntrySet,
+  buildDoor,
+  buildEntryDoor,
+  buildGlassDoor,
+  buildFusuma,
+  buildBalconyProps,
+  buildUpholsteredBed,
+  buildMetalBed,
+  buildWardrobe,
+  buildDisplayCabinet,
+  buildWineCabinet,
+  buildIslandKitchen,
+  buildGamingDesk,
+  buildMarbleTable,
+  buildCurvedSofa,
+  // 专用件：替换此前用 shelf/fridge/cushionItem 顶替的镜子、鞋柜、洗衣机等
+  buildMirror,
+  buildShoeCabinet,
+  buildBench,
+  buildWasher,
+  buildSideboard,
+  buildVanity,
+  buildSideTable,
+  buildStool,
+  buildLoungeChair,
+  buildBookcase,
+  buildToilet,
+  buildPlant,
+  buildJpBookRack,
+  buildJpTvBoard,
+  buildJpRug,
+  buildJpLowSofa,
+  buildJpCenterTable,
+  buildJpZabuton,
+  buildJpFloorLamp,
+  buildJpPlant,
+  buildJpFloorClutter,
+  buildJpSlatWall,
+  buildJpDiningTable,
+  buildJpDiningChair,
+  buildJpPendant,
+  buildJpDiningRug,
+  buildJpKitchenCounter,
+  buildJpKitchenShelf,
+  buildJpFridge,
+  // 日式公寓 · 全屋扩展：卧室 / 玄关收纳 / 卫浴 / 阳台 / 灯具 / 杂物 / 墙饰
+  buildJpBed,
+  buildJpNightstand,
+  buildJpWardrobe,
+  buildJpDesk,
+  buildJpDeskChair,
+  buildJpLoungeChair,
+  buildJpMirror,
+  buildJpShoeCabinet,
+  buildJpBench,
+  buildJpClosetShelf,
+  buildJpToilet,
+  buildJpBath,
+  buildJpVanity,
+  buildJpWasher,
+  buildJpBalconyTable,
+  buildJpBalconyChair,
+  buildJpPlanter,
+  buildJpCeilLamp,
+  buildJpLifestyleDetails,
+  buildJpWallClock,
+  buildJpPoster,
+} from './anime/props';
+
+const TICK_DT = 0.05; // 20Hz 逻辑
+
+/**
+ * 第一人称上次退出的位置 + 朝向（模块级，跨组件重挂存活）。
+ * 进入第一人称时直接加载，实现"在地图内自由活动后，下次进来还在老地方、面朝老方向"。
+ */
+type SavedFps = { x: number; y: number; z: number; yaw: number; pitch: number };
+let savedFpsState: SavedFps | null = null;
+
+type DayPeriod = 'morning' | 'noon' | 'dusk' | 'night';
+type WeatherKind = 'clear' | 'drizzle' | 'storm' | 'snow';
+
+const PERIOD_LABELS: Record<DayPeriod, string> = {
+  morning: '早晨', noon: '正午', dusk: '黄昏', night: '深夜',
+};
+const WEATHER_LABELS: Record<WeatherKind, string> = {
+  clear: '晴', drizzle: '小雨', storm: '暴雨', snow: '雪',
+};
+
+type FurnitureSpec = {
+  id: string;
+  kind: string;
+  nav?: boolean;
+  /** 绕 Y 的朝向弧度。不写 = 0，即默认"背靠 -Z 墙、面朝 +Z"。 */
+  rot?: number;
+  /** 墙侧 id：厚装饰挂进对应 decor 组，相机绕到墙外侧时跟着墙一起让开。 */
+  wall?: string;
+  /** 个别家具的附加色（座布団等）。 */
+  color?: string;
+  /** 款式：同一 kind 下的形态分支（如 buildDoor 的 variant）。 */
+  variant?: string;
+  pos: [number, number, number];
+  size: [number, number, number];
+};
+
+/**
+ * 保留逐件 mesh、不参与合批的散点摆件 kind（见装配处注释）：
+ * lifestyle 一件道具的零件散落房间各处，合批会把跨房间的同材质件熔成一个
+ * mesh，导致遍历补碰撞只能按整体 AABB 收盒（隐形碰撞墙）。
+ */
+const PIECE_KEEP_RAW = new Set(['lifestyle', 'jpLifestyle']);
+
+const FURNITURE_BUILDERS: Record<string, (spec: FurnitureSpec) => THREE.Object3D> = {
+  window: buildWindow,
+  desk: buildDesk,
+  chair: buildChair,
+  bed: buildBed,
+  shelf: buildShelf,
+  fridge: buildFridge,
+  rug: buildRug,
+  table: buildLowTable,
+  cushionItem: (spec) => buildCushion(spec.pos, spec.color),
+  sofa: buildSofa,
+  tv: buildTV,
+  floorLamp: buildFloorLamp,
+  kitchen: buildKitchen,
+  dining: buildDining,
+  bath: buildBathroom,
+  scroll: buildScroll,
+  game: buildGameStation,
+  entrySet: buildEntrySet,
+  door: buildDoor,
+  entryDoor: buildEntryDoor,
+  glassDoor: buildGlassDoor,
+  fusuma: buildFusuma,
+  balcony: buildBalconyProps,
+  upholsteredBed: buildUpholsteredBed,
+  metalBed: buildMetalBed,
+  wardrobe: buildWardrobe,
+  displayCabinet: buildDisplayCabinet,
+  wineCabinet: buildWineCabinet,
+  islandKitchen: buildIslandKitchen,
+  gamingDesk: buildGamingDesk,
+  marbleTable: buildMarbleTable,
+  curvedSofa: buildCurvedSofa,
+  // 专用件：此前镜子/鞋柜/洗衣机/吧台凳都是拿 shelf/fridge/cushionItem 顶替的，
+  // 镜子里长书、洗衣机贴冰箱贴。这些错位只能靠补专用件解决，改配色救不了。
+  mirror: buildMirror,
+  shoeCabinet: buildShoeCabinet,
+  bench: buildBench,
+  washer: buildWasher,
+  sideboard: buildSideboard,
+  vanity: buildVanity,
+  sideTable: buildSideTable,
+  stool: buildStool,
+  loungeChair: buildLoungeChair,
+  bookcase: buildBookcase,
+  toilet: buildToilet,
+  plant: (spec) => buildPlant((spec as unknown as { scale?: number }).scale ?? 1),
+  // lifestyle 是唯一不走 size 的 kind：拖鞋/伞/快递箱等摆件坐标直接挂在同一条目上，
+  // 所以在这里收口做一次转换，别把 any 散到调用处。
+  lifestyle: (spec) => buildLifestyleDetails(spec as unknown as LifestyleConfig),
+  // 日式公寓 LDK 重设计：全部新几何 + 新纹理
+  jpBookRack: buildJpBookRack,
+  jpTvBoard: buildJpTvBoard,
+  jpRug: buildJpRug,
+  jpLowSofa: buildJpLowSofa,
+  jpCenterTable: buildJpCenterTable,
+  jpZabuton: buildJpZabuton,
+  jpFloorLamp: buildJpFloorLamp,
+  jpPlant: buildJpPlant,
+  jpFloorClutter: buildJpFloorClutter,
+  jpSlatWall: buildJpSlatWall,
+  jpDiningTable: buildJpDiningTable,
+  jpDiningChair: buildJpDiningChair,
+  jpPendant: buildJpPendant,
+  jpDiningRug: buildJpDiningRug,
+  jpKitchenCounter: buildJpKitchenCounter,
+  jpKitchenShelf: buildJpKitchenShelf,
+  jpFridge: buildJpFridge,
+  // 日式公寓 · 全屋扩展
+  jpBed: buildJpBed,
+  jpNightstand: buildJpNightstand,
+  jpWardrobe: buildJpWardrobe,
+  jpDesk: buildJpDesk,
+  jpDeskChair: buildJpDeskChair,
+  jpLoungeChair: buildJpLoungeChair,
+  jpMirror: buildJpMirror,
+  jpShoeCabinet: buildJpShoeCabinet,
+  jpBench: buildJpBench,
+  jpClosetShelf: buildJpClosetShelf,
+  jpToilet: buildJpToilet,
+  jpBath: buildJpBath,
+  jpVanity: buildJpVanity,
+  jpWasher: buildJpWasher,
+  jpBalconyTable: buildJpBalconyTable,
+  jpBalconyChair: buildJpBalconyChair,
+  jpPlanter: buildJpPlanter,
+  jpLifestyle: (spec) => buildJpLifestyleDetails(spec as unknown as LifestyleConfig),
+};
+
+/**
+ * 把 GLB 里的 PBR 材质换成卡通材质。
+ * 扫描出来的 Q 版模型带的金属度/粗糙度在赛璐璐风格下全是噪音，
+ * 但 color / map / emissive 要原样保留，否则角色会变成一坨白。
+ *
+ * GLB 自带的贴图（map / normalMap）推进 sink，供卸载时精确 dispose——
+ * 程序化贴图是模块级单例，不能进统一清理。
+ */
+function toonifyModel(root: THREE.Object3D, sink: THREE.Texture[]): void {
+  const gradientMap = toonGradient();
+  // 转换后材质会丢弃的贴图槽位，全部推进 sink 供卸载时 dispose——
+  // 只收 map/normalMap 的话，其余槽位的 GPU 纹理在卸载后无人释放。
+  const TEXTURE_SLOTS: Array<keyof THREE.MeshStandardMaterial> = [
+    'map', 'normalMap', 'emissiveMap', 'metalnessMap', 'roughnessMap',
+    'aoMap', 'alphaMap', 'bumpMap', 'lightMap', 'displacementMap',
+  ];
+  root.traverse((o) => {
+    const mesh = o as THREE.Mesh;
+    if (!mesh.isMesh) return;
+
+    const src = mesh.material as THREE.Material | THREE.Material[];
+    const convert = (mat: THREE.Material): THREE.Material => {
+      if ((mat as THREE.MeshToonMaterial).isMeshToonMaterial) return mat;
+      const std = mat as THREE.MeshStandardMaterial;
+      for (const slot of TEXTURE_SLOTS) {
+        const tex = std[slot] as THREE.Texture | undefined;
+        if (tex && !sink.includes(tex)) sink.push(tex);
+      }
+      const next = new THREE.MeshToonMaterial({
+        color: std.color ? std.color.clone() : new THREE.Color(0xffffff),
+        map: std.map ?? null,
+        gradientMap,
+        transparent: std.transparent ?? false,
+        opacity: std.opacity ?? 1,
+        side: std.side ?? THREE.FrontSide,
+        alphaTest: std.alphaTest ?? 0,
+        vertexColors: std.vertexColors ?? false,
+      });
+      if (std.emissive) {
+        next.emissive = std.emissive.clone();
+        next.emissiveIntensity = std.emissiveIntensity ?? 1;
+      }
+      if (std.normalMap) next.normalMap = std.normalMap;
+      mat.dispose();
+      return next;
+    };
+
+    mesh.material = Array.isArray(src) ? src.map(convert) : convert(src);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+  });
+}
+
+export function RoomScene() {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const hudStatsRef = useRef<HTMLDivElement>(null);
+  const hudAgentsRef = useRef<HTMLDivElement>(null);
+  const fpsDebugRef = useRef<HTMLDivElement>(null);
+  const hudModeRef = useRef<HTMLDivElement>(null);
+  const hudCrosshairRef = useRef<HTMLDivElement>(null);
+  const hudDoorPromptRef = useRef<HTMLDivElement>(null);
+  const environmentToggleRef = useRef<((period: DayPeriod, weather: WeatherKind) => void) | null>(null);
+  const environmentRef = useRef<{ period: DayPeriod; weather: WeatherKind }>({ period: 'night', weather: 'drizzle' });
+  const [hudVisible, setHudVisible] = useState(false);
+  const [period, setPeriod] = useState<DayPeriod>('night');
+  const [weather, setWeather] = useState<WeatherKind>('drizzle');
+  // 观察者模式（默认：OrbitControls 自由视角 + 单向透视墙）↔ 第一人称（PointerLock）
+  const [mode, setMode] = useState<'observe' | 'firstPerson'>('observe');
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    const layout = layoutData as any;
+    setArtStyle(layout.palette, layout.style);
+    /**
+     * 主光方向喂给材质分档。必须在这里调（任何 builder 之前）：finish 的高光方向
+     * 是烘焙进 shader 的常量，材质一建就定型，事后改不回来。
+     * 取 key.position 归一化 = 表面指向光源的方向（DirectionalLight 默认 target 在原点）。
+     */
+    const KP = layout.lighting.key.position as [number, number, number];
+    setToonKeyLight(KP[0], KP[1], KP[2]);
+
+    let alive = true;
+
+    /* ---------------- Renderer / Scene / Camera ---------------- */
+
+    const scene = new THREE.Scene();
+    // 窗口不透明：场景铺底色，全屏房间视觉完整（透明窗口 + WebGL 在 Windows
+    // 是 GPU 崩溃高危组合，已改回不透明）。底色本身在下方 FX 解析后设置。
+
+    /* ---------------- 后处理配置（可在 dormLayout.json 的 postfx 里热调） ---------------- */
+
+    const FX = (layout.postfx ?? {}) as {
+      background?: string;
+      toneMapping?: string;
+      exposure?: number;
+      bloom?: { strength?: number; radius?: number; threshold?: number };
+      fog?: { color?: string; near?: number; far?: number } | null;
+    };
+    const BLOOM = FX.bloom ?? {};
+    type EnvironmentProfile = {
+      background: string; fog: string; ambient: string; hemiSky: string; hemiGround: string;
+      key: string; fill: string; rim: string; exposure: number; keyMul: number; fillMul: number; rimMul: number;
+    };
+    const PERIODS: Record<DayPeriod, EnvironmentProfile> = {
+      morning: { background: '#a9c8dc', fog: '#c2d8df', ambient: '#f7e8cf', hemiSky: '#b9d4e4', hemiGround: '#68776e', key: '#ffe2b5', fill: '#c6dce4', rim: '#f2d6b6', exposure: 1.04, keyMul: 0.82, fillMul: 0.75, rimMul: 0.55 },
+      noon: { background: '#8fc7ee', fog: '#c5e1ef', ambient: '#fff8e8', hemiSky: '#b9dcf5', hemiGround: '#6f806f', key: '#fff5d2', fill: '#dcecf4', rim: '#fff3d1', exposure: 1.14, keyMul: 1.35, fillMul: 0.58, rimMul: 0.42 },
+      dusk: { background: '#d88f76', fog: '#d9b6a3', ambient: '#f0c3a2', hemiSky: '#c68e8d', hemiGround: '#514b50', key: '#ffbd76', fill: '#a79ab1', rim: '#f4a978', exposure: 1.0, keyMul: 0.68, fillMul: 0.52, rimMul: 0.85 },
+      night: { background: FX.background ?? '#1b2230', fog: FX.fog?.color ?? '#131e2c', ambient: '#9FB4D2', hemiSky: '#93AACE', hemiGround: '#262A33', key: '#FFDCA8', fill: '#93ACD6', rim: '#AEC4E8', exposure: FX.exposure ?? 1, keyMul: 1, fillMul: 1, rimMul: 1 },
+    };
+    const WEATHER_TUNING: Record<WeatherKind, {
+      tint: string; tintAmount: number; exposure: number; keyMul: number; fillMul: number; rimMul: number;
+    }> = {
+      clear: { tint: '#ffffff', tintAmount: 0, exposure: 1, keyMul: 1, fillMul: 1, rimMul: 1 },
+      drizzle: { tint: '#8398aa', tintAmount: 0.12, exposure: 0.95, keyMul: 0.86, fillMul: 1.08, rimMul: 0.9 },
+      storm: { tint: '#465464', tintAmount: 0.34, exposure: 0.76, keyMul: 0.58, fillMul: 0.88, rimMul: 0.7 },
+      snow: { tint: '#d8e5ea', tintAmount: 0.18, exposure: 1.03, keyMul: 0.92, fillMul: 1.06, rimMul: 0.92 },
+    };
+
+    /**
+     * 世界底色 = 雨夜夜空。微缩底座时代这里是暖米色 #e7d8c4（模型摆台的衬底）；
+     * 拆底座进街区之后，底色就是环绕整个世界的夜空——窗外、楼顶之上、
+     * 街道尽头都是它。必须和雾色同族：远处物体是"融进夜空"，不是蒙了层灰。
+     */
+    scene.background = new THREE.Color(FX.background ?? '#1b2230');
+
+    /**
+     * 场景雾：雨夜的空气。
+     *
+     * 近端约 14m——相机距焦点约 15m，室内基本不吃雾，只有房间最远角略褪；
+     * 远端 70m——中景楼群（25~45m）褪 20%~80%，世界地面边缘（±85m）被雾
+     * 完全吞掉，看不到"世界的边缘"。远景幕布和窗外贴图类材质走 noFog，
+     * 它们的空气透视是画出来的，不吃场景雾。
+     */
+    // 存一份引用：按 P 做 A/B 对照时要能整段摘掉雾
+    let roomFog: THREE.Fog | null = null;
+    if (FX.fog) {
+      // 这里在 B 声明之前，直接用 layout.room.bounds，别引用 B（会踩 TDZ）
+      const fb = layout.room.bounds;
+      const fr = Math.hypot((fb.x1 - fb.x0) / 2, (fb.z1 - fb.z0) / 2);
+      roomFog = new THREE.Fog(
+        new THREE.Color(FX.fog.color ?? '#e0d3c2'),
+        FX.fog.near ?? fr * 2.0,
+        FX.fog.far ?? fr * 6.5
+      );
+      scene.fog = roomFog;
+    }
+
+    const cam = layout.camera;
+    /**
+     * 单元抬高层高：这户是公寓楼的 203 室，整户（外壳/家具/角色/阳台湿地）
+     * 挂在 unitGroup 下抬到二楼。楼下是 101-103 外墙（exterior.ts），
+     * 世界地面留在 y=0。所有吃世界 Y 的硬编码（相机、FPS 眼高、雨禁区、
+     * 碰撞盒、天花剔除）都从这一个常量派生，改层高只动这里。
+     */
+    const UNIT_LIFT = 3.4;
+    // far 平面要罩住世界地面的最远角：地面 ±85m，相机最远拉到 ~25m，
+    // 角上相距可达 ~140m——裁掉的话被雾吞掉的地面边缘会露出背景色的"世界裂缝"
+    const camera = new THREE.PerspectiveCamera(cam.fov, 1, 0.1, 220);
+    camera.position.set(cam.position[0], cam.position[1] + UNIT_LIFT, cam.position[2]);
+    camera.lookAt(cam.target[0], cam.target[1] + UNIT_LIFT, cam.target[2]);
+
+    /**
+     * 锁定水平视野而不是竖直视野。
+     * 布局里的 fov 是按 16:9 调的，房间窗口一旦更方（4:3、竖屏），
+     * 按竖直 fov 走就会把房间左右两边切掉，所以窄窗口时要反向张开竖直 fov。
+     */
+    let isFirstPerson = false; // 提前声明，供 applyProjection 按模式选视野
+    const BASE_FOV = cam.fov;  // 观察者模式视野（偏窄，构图用）
+    const FPS_FOV = 52;        // 第一人称视野（广角沉浸，相对观察者 34° 多出的量已减半：70→52）
+    const BASE_ASPECT = 1.78;
+    const applyProjection = (w: number, h: number) => {
+      const aspect = w / Math.max(1, h);
+      camera.aspect = aspect;
+      const refFov = isFirstPerson ? FPS_FOV : BASE_FOV;
+      const halfH = Math.tan(THREE.MathUtils.degToRad(refFov) / 2) * Math.max(1, BASE_ASPECT / aspect);
+      camera.fov = THREE.MathUtils.radToDeg(2 * Math.atan(halfH));
+      camera.updateProjectionMatrix();
+    };
+    applyProjection(container.clientWidth, container.clientHeight);
+
+    // 不透明渲染：不设 alpha（默认不透明画布），也不用 clearAlpha 0
+    const renderer = new THREE.WebGLRenderer({
+      antialias: true,
+      // 提示 WebView2 用独显渲染：双显卡机器默认可能落到集显，集显驱动下
+      // 全屏 WebGL 容易 context lost / GPU 进程崩溃
+      powerPreference: 'high-performance',
+    });
+    // [TEMP-DEBUG] 几何排查用，验证完即删
+    (window as any).__ROOM__ = { scene, camera, renderer, THREE };
+    renderer.setSize(container.clientWidth, Math.max(1, container.clientHeight));
+    // 全屏渲染负载高：像素比封顶 1.5，避免 2x 的 4 倍像素把 GPU/显存逼到崩溃
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    /**
+     * 色调映射。
+     *
+     * 原先是 NoToneMapping，理由是"ACES 会把饱和的赛璐璐色压灰"——这个理由对 ACES
+     * 成立（它连中间调一起压），但对 Neutral 不成立：Neutral 只滚降高光
+     * （阈值在 0.8 以上才开始压缩），中间调原样保留，赛璐璐的平涂色不会变灰。
+     *
+     * 换掉它的实际原因是高光在切：环境光 0.62 + 半球 0.72 + 主光 1.3 叠下来，
+     * 受光面早就超过 1.0 被 clamp 成死白，墙面细节在亮部全丢。Neutral 把这些
+     * 收回来，同时让超过 1.0 的部分成为泛光的合法输入（见下面的 composer）。
+     * 想退回原样就把 postfx.toneMapping 写成 "none"。
+     */
+    const TONE_MAPPINGS: Record<string, THREE.ToneMapping> = {
+      none: THREE.NoToneMapping,
+      linear: THREE.LinearToneMapping,
+      aces: THREE.ACESFilmicToneMapping,
+      agx: THREE.AgXToneMapping,
+      neutral: THREE.NeutralToneMapping,
+    };
+    const baseToneMapping = TONE_MAPPINGS[FX.toneMapping ?? 'neutral'] ?? THREE.NeutralToneMapping;
+    renderer.toneMapping = baseToneMapping;
+    renderer.toneMappingExposure = FX.exposure ?? 1;
+    // three 在 shadow pass 之后才 reset 统计，默认读数不含阴影开销。
+    // 关掉自动重置、改为每帧开头手动重置，draw call 才是整帧的真实数字。
+    renderer.info.autoReset = false;
+    container.appendChild(renderer.domElement);
+
+    /* ---------------- 后处理链 ----------------
+     *
+     * RenderPass（线性 HDR，HalfFloat 不截断）
+     *   → UnrealBloomPass（只对超过阈值的亮部起雾，屏幕/灯泡/霓虹才会发光）
+     *   → OutputPass（最后一步才做色调映射 + sRGB 转换）
+     *
+     * 顺序不能颠倒：泛光必须作用在**色调映射之前**的线性 HDR 上。反过来的话
+     * 亮部已经被压回 1.0 以内，"哪些地方过曝了"这个信息就没了，泛光会变成
+     * 一层糊在整幅画面上的白纱。
+     */
+
+    // 自己建 RT 而不是用 composer 的默认 RT：默认的没有 MSAA，
+    // 而渲染器上的 antialias:true 只作用于默认帧缓冲，一旦走 composer 就失效，
+    // 描边和家具棱角会立刻开始闪锯齿。samples=4 是给 composer 补回抗锯齿。
+    const dpr = renderer.getPixelRatio();
+    const fxTarget = new THREE.WebGLRenderTarget(
+      Math.max(1, Math.floor(container.clientWidth * dpr)),
+      Math.max(1, Math.floor(container.clientHeight * dpr)),
+      { type: THREE.HalfFloatType, samples: 4 }
+    );
+    const composer = new EffectComposer(renderer, fxTarget);
+    composer.setPixelRatio(dpr);
+    composer.setSize(container.clientWidth, Math.max(1, container.clientHeight));
+
+    composer.addPass(new RenderPass(scene, camera));
+    const bloomPass = new UnrealBloomPass(
+      new THREE.Vector2(container.clientWidth, Math.max(1, container.clientHeight)),
+      BLOOM.strength ?? 0.34,
+      BLOOM.radius ?? 0.62,
+      BLOOM.threshold ?? 0.86
+    );
+    composer.addPass(bloomPass);
+    composer.addPass(new OutputPass());
+
+    // A/B 对照开关：按 P 在"整条后处理链"和"直出"之间切，用来判断这一步到底
+    // 带来了多少变化，不用改代码重启。
+    let fxOn = true;
+
+    /* ---------------- 场景范围（阴影相机 / 底座定位反推，不写死） ----------------
+     * 相机/阴影的活动范围全部从 layout.room.bounds 反推，不写死。
+     * 之前这些数字是按 11×8.5 的老户型硬编码的，户型一放大，
+     * 远端房间直接掉出阴影相机，出现"家具悬空没影子/影子被切一半"。
+     */
+    const B = layout.room.bounds;
+    const sceneRadius = Math.hypot((B.x1 - B.x0) / 2, (B.z1 - B.z0) / 2);
+
+    /* ---------------- Observer mode (OrbitControls) ---------------- */
+
+    // 默认观察者模式：自由旋转 + 缩放 + 平移，墙面单向透视（剖面娃娃屋）。
+    // 按 Enter 进入第一人称。观察者视角沿用 layout.camera 的构图。
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.target.set(cam.target[0], cam.target[1] + UNIT_LIFT, cam.target[2]);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.07;
+    controls.enableRotate = true;
+    controls.enablePan = true;
+    controls.screenSpacePanning = true;
+    controls.enableZoom = true;
+    controls.zoomSpeed = 0.85;
+    controls.rotateSpeed = 0.65;
+    controls.panSpeed = 0.65;
+    controls.minDistance = 3.5;
+    // 拉远上限按"整栋楼进画"定，不按房间尺度：默认构图是 30~45° 俯视的
+    // 微缩全景（相机离目标约 38m），sceneRadius*2.8 只有 24m，会把默认机位
+    // 一进场就夹回来，整栋楼被切成一半。
+    controls.maxDistance = sceneRadius * 5.5;
+    controls.minPolarAngle = THREE.MathUtils.degToRad(20);
+    controls.maxPolarAngle = THREE.MathUtils.degToRad(82);
+    // 视线目标同样要能抬到楼层中部（默认看向 y≈5.5 世界标高，约二层半），
+    // 原来只允许 UNIT_LIFT+1.45 以内的贴地范围。
+    controls.target.y = THREE.MathUtils.clamp(controls.target.y, UNIT_LIFT + 0.55, UNIT_LIFT + 3.2);
+    controls.update();
+    (window as any).__ROOM__.controls = controls;
+
+    /**
+     * 首帧后补一次投影 + 控制器更新。页面刚加载时容器（Tauri 窗口）可能尚未完成
+     * 首次布局，applyProjection / setSize 当时拿到的是 0 或错误尺寸，观察者相机投影
+     * 会退化（fov/aspect 算错），表现为"首帧构图和之后不一样"。下一帧布局已就绪，
+     * 这里用真实尺寸重算一次，让观察者相机从第一帧起就是正确构图。
+     */
+    requestAnimationFrame(() => {
+      if (!alive) return;
+      applyProjection(container.clientWidth, container.clientHeight);
+      renderer.setSize(container.clientWidth, Math.max(1, container.clientHeight));
+      composer.setSize(container.clientWidth, Math.max(1, container.clientHeight));
+      controls.update();
+    });
+
+    /* ---------------- First-person controls ---------------- */
+
+    const fps = new FPSControls(camera, renderer.domElement);
+    // floorY 只作为「最低地面」兜底（街道 y=0）。上层楼板/外廊/楼梯平台/斜坡
+    // 由动态支撑面 supportY 实时给出，所以第一人称能在整张地图（含 2F/3F/4F）自由上下。
+    fps.floorY = 0;
+    // 初始位置：客厅中央，眼睛高度 = 地板（UNIT_LIFT）+ 1.6m
+    const spawnPos = layout.characters?.Vivian?.startPos ?? layout.characters?.Nana?.startPos ?? [0, 0, 4];
+    fps.setPosition(spawnPos[0], UNIT_LIFT + 1.8, spawnPos[2]);
+    // 初始朝向：朝南（朝向房间深处）
+    fps.setRotation(0, 0);
+
+    let colliders: Collider[] = [];
+
+    // 观察者模式 WASD/方向键/Space/Shift 按键状态（仅非第一人称时生效）
+    const obsKeys: Record<string, boolean> = {};
+    const _obsDir = new THREE.Vector3();
+    const _obsRight = new THREE.Vector3();
+    // 飞行时 OrbitControls.target 允许活动的整座微缩场景范围（留余量）。
+    // 公寓外壳 AABB ≈ [-31.15,-0.47,-8]~[38.25,14.05,8.28]，便利店到 z≈27；
+    // 放宽到下面这个范围，既能飞到街区/便利店自由探索，又不会把模型拖丢。
+    const OBS_TGT_MIN = new THREE.Vector3(-40, 0.2, -15);
+    const OBS_TGT_MAX = new THREE.Vector3(45, 14, 32);
+
+    // 门洞列表：决定 buildWallColliders 在哪些墙段挖开口。
+    // 必须与观察者模式的 nav 栅格（navGrid.wallAABBs）保持同一套「可走洞口」口径——
+    // 凡是「落地、非窗」的洞口（pass 拱门 / glass 落地玻璃门 / door / entryDoor）都该挖开，
+    // 否则第一人称走到那里会被实心墙挡住，而观察者模式的宠物却走得过去（两个校验口径不一致）。
+    const furnitureDoors = (layout.furniture as FurnitureSpec[])
+      .filter((f) => f.kind === 'door' || f.kind === 'entryDoor')
+      .map((f) => {
+        const alongX = Math.abs(Math.cos(f.rot ?? 0)) > 0.707;
+        return { x: f.pos[0], z: f.pos[2], width: f.size[0], alongX, kind: f.kind };
+      });
+    const wallDoorways = (
+      layout.shell.walls as Array<{
+        axis: 'x' | 'z';
+        at: number;
+        from: number;
+        to: number;
+        openings?: Array<{ kind: string; a: number; b: number; y0?: number; navCut?: 'east' | 'west' }>;
+      }>
+    ).flatMap((w) =>
+      (w.openings ?? [])
+        // 与 navGrid 同口径：落地（y0<0.1）且非窗才算可走洞口
+        .filter((op) => op.kind !== 'window' && (op.y0 ?? 0) < 0.1)
+        .map((op) => {
+          const center = (op.a + op.b) / 2;
+          // navCut：视觉开口取整段（a..b，门框渲染用），但可通过的门洞只切指定半边，
+          // 另一半恒为实心——日式推拉门西半固定扇不可过，仅东半可推拉通过。
+          const gapA = op.navCut === 'east' ? center : op.a;
+          const gapB = op.navCut === 'west' ? center : op.b;
+          return w.axis === 'z'
+            ? { x: (gapA + gapB) / 2, z: w.at, width: gapB - gapA, alongX: true }
+            : { x: w.at, z: (gapA + gapB) / 2, width: gapB - gapA, alongX: false };
+        })
+    );
+    // 只挖「两侧都是房间」的洞口。通向室外的洞口（东墙 door-entry 是入户门、
+    // 洞外就是楼道/虚空）必须保持实心，否则玩家能直接走出楼外；而通向阳台的
+    // 落地玻璃门两侧分别是客厅/餐厅与 balcony 房间，照常放行。
+    // 用「两侧是否落在房间内」判定，比按 exterior 标记过滤更可靠——南外墙既有
+    // 通阳台的玻璃门（要挖），也有窗（不挖），单看 exterior 会一刀切错。
+    const roomRects = layout.shell.rooms as Array<{ x0: number; x1: number; z0: number; z1: number }>;
+    const insideRoom = (x: number, z: number) =>
+      roomRects.some((r) => x > r.x0 && x < r.x1 && z > r.z0 && z < r.z1);
+    const doorways = [...furnitureDoors, ...wallDoorways].filter((d) => {
+      // 入户门（entryDoor）朝公共外廊开，必须能进出：门外是挑出的外廊防滑地面 + 腰壁栏杆，
+      // 不会掉楼。豁免「两侧都在房间内」过滤，否则北墙门洞被实心墙堵死、按 F 开了门也过不去。
+      if ((d as { kind?: string }).kind === 'entryDoor') return true;
+      const off = 0.3; // 探到墙两侧 30cm，跨过墙厚（12cm）
+      return d.alongX
+        ? insideRoom(d.x, d.z - off) && insideRoom(d.x, d.z + off)
+        : insideRoom(d.x - off, d.z) && insideRoom(d.x + off, d.z);
+    });
+
+    // 门开关动画：构建循环里填充 leaf 引用，渲染循环按「路径穿过 + 靠近」驱动开合
+    const doors: Array<{
+      leaf: THREE.Group;
+      leaf2?: THREE.Group;
+      x: number;
+      z: number;
+      alongX: boolean;
+      width: number;
+      height: number;
+      openAngle: number;
+      current: number;
+      slide: boolean;
+      openOffset: number;
+      openHold: number;
+      heldTarget: number;
+      manualOpen: boolean;
+      cosR: number;
+      sinR: number;
+      collider: Collider;
+      colliderFixed?: Collider; // 推拉门固定半扇盒（恒挡门洞一侧）
+      colliderSlide?: Collider; // 推拉门动半扇盒（随开度滑移，让出另一侧）
+    }> = [];
+
+    // 第一人称门碰撞缓冲：渲染循环里复用，避免每帧 new 数组（GC 压力）
+    const blockerBuf: Collider[] = [];
+    let nightHorizonRing: THREE.Object3D | null = null;
+
+    // 第一人称下，当前最近、且处于触发范围内的门（供 F 键开门 + "F 打开" 提示显示）。
+    // 观察者模式下恒为 null。
+    let nearDoor: typeof doors[number] | null = null;
+
+    const setEnvironment = (nextPeriod: DayPeriod, nextWeather: WeatherKind) => {
+      const profile = PERIODS[nextPeriod];
+      const tuning = WEATHER_TUNING[nextWeather];
+      const precipitation = nextWeather === 'drizzle' || nextWeather === 'storm';
+      const wet = nextWeather === 'drizzle' || nextWeather === 'storm';
+      const storm = nextWeather === 'storm';
+      const tint = new THREE.Color(tuning.tint);
+      const mixColor = (hex: string) => new THREE.Color(hex).lerp(tint, tuning.tintAmount);
+      environmentRef.current = { period: nextPeriod, weather: nextWeather };
+      scene.background = new THREE.Color(profile.background).lerp(tint, tuning.tintAmount * 0.38);
+      scene.fog = new THREE.Fog(new THREE.Color(profile.fog).lerp(tint, tuning.tintAmount * 0.5), FX.fog?.near ?? sceneRadius * 2.0, FX.fog?.far ?? sceneRadius * 6.5);
+      renderer.toneMappingExposure = profile.exposure * tuning.exposure;
+      ambient.color.copy(mixColor(profile.ambient));
+      hemi.color.copy(mixColor(profile.hemiSky));
+      hemi.groundColor.copy(mixColor(profile.hemiGround));
+      fill.color.copy(mixColor(profile.fill));
+      rim.color.copy(mixColor(profile.rim));
+      key.color.copy(mixColor(profile.key));
+      key.intensity = L.key.intensity * profile.keyMul * tuning.keyMul;
+      fill.intensity = L.fill.intensity * profile.fillMul * tuning.fillMul;
+      rim.intensity = L.rim.intensity * profile.rimMul * tuning.rimMul;
+      if (rainObj) rainObj.visible = precipitation;
+      if (snowObj) snowObj.visible = nextWeather === 'snow';
+      for (const o of weatherFxObjects) o.visible = wet && o !== rainObj;
+      if (wetGroundObj) wetGroundObj.visible = wet;
+      if (rainObj) rainObj.scale.setScalar(storm ? 1.18 : 0.78);
+      if (rainObj) rainObj.userData.weatherIntensity = storm ? '暴雨' : '小雨';
+      if (snowObj) snowObj.userData.weatherIntensity = nextWeather === 'snow' ? '降雪' : '隐藏';
+      // 远景贴图只用于晴天；雨天/雪天恢复纯色背景 + 原场景雾距，避免贴图被雨雪空气感抢戏。
+      if (nightHorizonRing) nightHorizonRing.visible = nextWeather === 'clear';
+      setPeriod(nextPeriod);
+      setWeather(nextWeather);
+    };
+    environmentToggleRef.current = setEnvironment;
+    (window as any).__ROOM__.setEnvironment = setEnvironment;
+    (window as any).__ROOM__.setWeather = (kind: WeatherKind) => setEnvironment(environmentRef.current.period, kind);
+
+    // 构建碰撞体列表（墙体 + 栏杆 + nav 家具），全部由 dormLayout.json 驱动。
+    // 与 navGrid 同源：nav 走得过去的地方，第一人称也必须走得过去。
+    colliders = [
+      ...buildFurnitureColliders(layout.furniture),
+      // 墙体只认 shell.walls（真正建了墙面的那几面），门洞处开口。
+      // 不能用 shell.rooms 的矩形边界推——开放式 LDK 的房间分界线上没有墙，
+      // 按房间推会造出看不见却过不去的「空气墙」。
+      ...buildWallColliders(
+        layout.shell.walls,
+        layout.room.height,
+        layout.shell.wallThickness,
+        doorways,
+        layout.shell.railing
+      ),
+    ];
+    // 碰撞盒生成器以地板 y=0 为基准，整户（203 室）抬高后垂直方向全部偏移
+    // （2D 水平碰撞不受影响，但跳跃/蹲起的 3D 检测要用对的 y 区间）
+    for (const c of colliders) {
+      c.min.y += UNIT_LIFT;
+      c.max.y += UNIT_LIFT;
+    }
+
+    /* ---- 地图级结构碰撞体（世界坐标，不随整户抬高）----
+     * 让第一人称能走出 203 室、在街道/便利店/公寓各层外廊与折返平台间自由行动，
+     * 并经由东端外置钢楼梯（斜坡）上下 2F/3F/4F，而不会掉进虚空或被单一地平线卡死。
+     *   - floor：可站立薄板（街道地面 / 各层楼板 / 北侧外廊 / 楼梯平台），只作落地支撑
+     *   - ramp ：三跑外楼梯，用 heightAt 取 (x,z) 处表面高度，平滑无抖动
+     * 这些与 unitColliders 拼接后一起传给 fps.update；楼梯/平台网格已在 exterior.ts
+     * 标了 noCollide，不会和这里的 floor/ramp 盒重复成空气墙。 */
+    const worldColliders: Collider[] = [];
+    const addFloor = (x0: number, x1: number, z0: number, z1: number, y: number, src: string) => {
+      worldColliders.push({
+        min: new THREE.Vector3(x0, y - 0.02, z0),
+        max: new THREE.Vector3(x1, y + 0.02, z1),
+        kind: 'floor',
+        source: src,
+      });
+    };
+    // 街道 / 便利店地面（一层，世界 y=0）——也作为「掉出楼板后的兜底落点」
+    addFloor(-40, 45, -15, 32, 0, 'street');
+    // 公寓一楼（地面层）主体楼板：楼体 footprint 正下方的正式地板，堵死
+    // 「穿透二楼后落到 street 板、又被公寓外壳围墙关在一楼盒子里」的陷阱。
+    addFloor(APT_X0, APT_X1, APT_ZN, APT_ZB, 0, 'apt-floor-0');
+    // 公寓各层：主体楼板（覆盖 203 等室内）+ 北侧外廊（挑出 1.25m）+ 东端三块楼梯平台
+    for (const lvl of FLOORS) {
+      addFloor(APT_X0, APT_X1, APT_ZN, APT_ZB, lvl, `apt-floor-${lvl}`);          // 主体楼板
+      addFloor(APT_X0, STRS.lx0, APT_CORRIDOR_N, APT_ZN, lvl, `corridor-${lvl}`); // 北侧外廊
+      addFloor(STRS.lx0, STRS.lx1, STRS.za0, STRS.zb1, lvl, `wp-${lvl}`);         // 西平台
+      addFloor(STRS.lx1, STRS.wx1, STRS.zb0, STRS.zb1, lvl, `walk-${lvl}`);       // 步行廊
+      addFloor(STRS.wx1, STRS.ex1, STRS.za0, STRS.zb1, lvl, `tp-${lvl}`);         // 折返平台
+    }
+    // 斜坡：三跑外楼梯（heightAt 取表面高度；不阻挡水平/垂直移动）
+    const addRamp = (
+      xBot: number, yBot: number, xTop: number, yTop: number, z0: number, z1: number, src: string
+    ) => {
+      const dx = xBot - xTop;
+      worldColliders.push({
+        min: new THREE.Vector3(xTop, yBot, z0),
+        max: new THREE.Vector3(xBot, yTop, z1),
+        kind: 'ramp',
+        source: src,
+        heightAt: (x: number, z: number) => {
+          if (z < z0 || z > z1) return null;
+          if (x < xTop || x > xBot) return null;
+          const t = (xBot - x) / dx; // 1 在 xBot，0 在 xTop
+          return yBot + (yTop - yBot) * t;
+        },
+      });
+    };
+    addRamp(STRS.f1Bot, 0, STRS.lx1, FLOORS[0], STRS.za0, STRS.za1, 'stair-1'); // 地面 → 2F
+    addRamp(STRS.wx1, FLOORS[0], STRS.lx1, FLOORS[1], STRS.za0, STRS.za1, 'stair-2'); // 2F → 3F
+    addRamp(STRS.wx1, FLOORS[1], STRS.lx1, FLOORS[2], STRS.za0, STRS.za1, 'stair-3'); // 3F → 4F
+
+    // 第一人称碰撞体 = 单元内（墙/家具，已抬高）+ 地图级结构（地板/斜坡）
+    // 用 let：公寓外壳建好后再追加楼梯/平台/外廊栏杆盒（见下方 buildApartmentShell 之后）
+    let fpsColliders = colliders.concat(worldColliders);
+
+    // 第一人称落点：吸附到脚下最近的合法楼层楼板，绝不悬空 / 掉楼。
+    // 存档坐标只有在「脚下有二楼及以上支撑」时才恢复（保留楼层书签），
+    // 否则强制回落二楼出生点；出生点也先吸附到二楼楼板顶面，避免卡在楼层夹层。
+    const STEP_UP = 0.45;
+    const snapAt = (x: number, z: number, footRef: number): number | null => {
+      let best: number | null = null;
+      for (const c of fpsColliders) {
+        if (c.kind !== 'floor' && c.kind !== 'ramp') continue;
+        const cx = Math.max(c.min.x, Math.min(x, c.max.x));
+        const cz = Math.max(c.min.z, Math.min(z, c.max.z));
+        const dx = x - cx, dz = z - cz;
+        if (dx * dx + dz * dz > 0.0225) continue;
+        let top: number | null = null;
+        if (c.kind === 'ramp') { const h = c.heightAt?.(x, z); if (h == null) continue; top = h; }
+        else top = c.max.y;
+        if (top <= footRef + STEP_UP && (best == null || top > best)) best = top;
+      }
+      return best;
+    };
+
+    // 观察者模式 ↔ 第一人称。默认观察者，按 Enter 进入第一人称——
+    // 观察者模式需要鼠标旋转/缩放，不能用点击画面（会跟 OrbitControls 冲突），
+    // 键盘事件同样满足 requestPointerLock 的用户手势要求。
+    // （isFirstPerson 已在上方投影计算处声明；进入/退出第一人称时切换并复算视野）
+    fps.init();
+    fps.onLock = () => {
+      if (!alive) return;
+      isFirstPerson = true;
+      applyProjection(container.clientWidth, container.clientHeight); // 第一人称切广角
+      controls.enabled = false;
+      // 吸附到脚下最近合法楼层；存档只在脚下有二楼层支撑时才恢复，否则回落出生点。
+      const eye = 1.6;
+      let placed = false;
+      if (savedFpsState) {
+        const g = snapAt(savedFpsState.x, savedFpsState.z, savedFpsState.y - eye);
+        if (g != null && g >= UNIT_LIFT - 0.1) {
+          fps.setPosition(savedFpsState.x, g + eye, savedFpsState.z);
+          fps.setRotation(savedFpsState.yaw, savedFpsState.pitch);
+          placed = true;
+        }
+      }
+      if (!placed) {
+        const g = snapAt(spawnPos[0], spawnPos[2], UNIT_LIFT);
+        // 首次进入（无存档）：恒落在二楼楼板（UNIT_LIFT）。即使 snapAt 因碰撞体
+        // 尚未就绪返回了更低楼层，也强制抬到二楼，杜绝"出生即掉到一楼"。
+        const floorY = g == null ? UNIT_LIFT : Math.max(g, UNIT_LIFT);
+        fps.setPosition(spawnPos[0], floorY + eye, spawnPos[2]);
+        fps.setRotation(0, 0);
+      }
+      setMode('firstPerson');
+      // ESC 一律关闭公寓窗口（看护线程在指针锁定下也能收到），不只是退出第一人称
+      if (hudModeRef.current) hudModeRef.current.textContent = '第一人称 · ESC 退出公寓';
+      if (hudCrosshairRef.current) hudCrosshairRef.current.style.opacity = '1';
+    };
+    fps.onUnlock = () => {
+      if (!alive) return;
+      // 退出第一人称：先记录当前位置 + 面朝方向，下次进入直接加载（地图内自由活动后的"书签"）
+      const p = fps.getPosition();
+      const r = fps.getRotation();
+      savedFpsState = { x: p.x, y: p.y, z: p.z, yaw: r.yaw, pitch: r.pitch };
+      // 意外解锁（ESC 退出锁定 / Alt+Tab / 锁定请求失败）→ 回到观察者模式，
+      // 并复位到观察者初始构图（全景概览），避免停在第一人称的房间内部角度。
+      isFirstPerson = false;
+      applyProjection(container.clientWidth, container.clientHeight); // 观察者退回原视野
+      controls.enabled = true;
+      // 退出第一人称时清掉飞行按键状态，避免观察者在 FPS 期间按住的键"卡住"继续飞
+      for (const k in obsKeys) obsKeys[k] = false;
+      camera.position.set(cam.position[0], cam.position[1] + UNIT_LIFT, cam.position[2]);
+      controls.target.set(cam.target[0], cam.target[1] + UNIT_LIFT, cam.target[2]);
+      controls.update();
+      setMode('observe');
+      if (hudModeRef.current) hudModeRef.current.textContent = '观察者模式 · WASD飞行 / Space升 Shift降 / Enter进入第一人称';
+      if (hudCrosshairRef.current) hudCrosshairRef.current.style.opacity = '0';
+    };
+
+    // Enter 键：观察者模式下进入第一人称
+    const onEnterKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Enter' || isFirstPerson) return;
+      e.preventDefault();
+      fps.requestLock();
+    };
+    window.addEventListener('keydown', onEnterKey);
+
+    // 观察者模式飞行：WASD/方向键 水平飞行，Space 上升、Shift 下降。
+    // 仅非第一人称时响应——第一人称下这些键交给 FPSControls 处理，互不冲突。
+    const onObsKeyDown = (e: KeyboardEvent) => {
+      if (isFirstPerson) return;
+      const k = e.key.toLowerCase();
+      if (k === 'w' || k === 'a' || k === 's' || k === 'd' ||
+          k === 'arrowup' || k === 'arrowdown' || k === 'arrowleft' || k === 'arrowright' ||
+          k === ' ' || k === 'shift') {
+        obsKeys[k === ' ' ? 'space' : k] = true;
+        // 空格/方向键默认会滚动页面，吃掉避免观察者飞行时页面跟着滚
+        if (k === ' ' || k.startsWith('arrow')) e.preventDefault();
+      }
+    };
+    const onObsKeyUp = (e: KeyboardEvent) => {
+      const k = e.key.toLowerCase();
+      obsKeys[k === ' ' ? 'space' : k] = false;
+    };
+    window.addEventListener('keydown', onObsKeyDown);
+    window.addEventListener('keyup', onObsKeyUp);
+
+    /* ---------------- Lighting ---------------- */
+
+    const L = layout.lighting;
+    const ambient = new THREE.AmbientLight(new THREE.Color(L.ambient.color), L.ambient.intensity);
+    scene.add(ambient);
+    const hemi = new THREE.HemisphereLight(new THREE.Color(L.hemi.sky), new THREE.Color(L.hemi.ground), L.hemi.intensity);
+    scene.add(hemi);
+
+    const key = new THREE.DirectionalLight(new THREE.Color(L.key.color), L.key.intensity);
+    key.position.set(L.key.position[0], L.key.position[1], L.key.position[2]);
+    key.castShadow = true;
+    // 软阴影下 1024 对十几米的场景已够（~1cm/texel），2048 显存和阴影 pass 都翻倍
+    key.shadow.mapSize.set(1024, 1024);
+    // 正交阴影相机罩住套房的包围球（留 5% 余量），户型再怎么扩建都不会漏
+    const shadowR = sceneRadius * 1.05 + 0.4;
+    key.shadow.camera.near = 0.5;
+    key.shadow.camera.far = 12 + sceneRadius * 2.6;
+    key.shadow.camera.left = -shadowR;
+    key.shadow.camera.right = shadowR;
+    key.shadow.camera.top = shadowR;
+    key.shadow.camera.bottom = -shadowR;
+    key.shadow.bias = -0.0006;
+    key.shadow.normalBias = 0.022;
+    // 主光默认 target 在原点——整户抬高后阴影正交框会偏到楼下。
+    // 显式指到单元中心，阴影范围始终罩住 203 室本体。
+    key.target.position.set((B.x0 + B.x1) / 2, UNIT_LIFT + 1.0, (B.z0 + B.z1) / 2);
+    scene.add(key.target);
+    /**
+     * 阴影不再逐帧重画。太阳不动、家具全冻结，唯一会变的只有两个角色的影子。
+     * 改成"角色的水平位移超过阈值才重画一次"：站着不动时阴影 pass 完全跳过，
+     * 走动时才按需刷新。角色只占画面很小一块，隔一帧刷一次的延迟看不出来。
+     */
+    key.shadow.autoUpdate = false;
+    key.shadow.needsUpdate = true;
+    scene.add(key);
+
+    const fill = new THREE.DirectionalLight(new THREE.Color(L.fill.color), L.fill.intensity);
+    fill.position.set(L.fill.position[0], L.fill.position[1], L.fill.position[2]);
+    scene.add(fill);
+
+    // 逆光勾边：从窗口方向打过来，给角色和家具边缘补一道暖色轮廓
+    const rim = new THREE.DirectionalLight(new THREE.Color(L.rim.color), L.rim.intensity);
+    rim.position.set(L.rim.position[0], L.rim.position[1], L.rim.position[2]);
+    scene.add(rim);
+
+    /* ---------------- 世界地面（室外层 Stage 1） ----------------
+     *
+     * 微缩底座已拆：房间不再摆在展示底座上，而是站在雨夜街区里。
+     * 地面只有一张（湿沥青，170m 见方，边缘被雾吞掉），居中跟着房间
+     * 包围盒走——户型一旦扩建，地面不会一侧贴墙、另一侧空出一块。
+     */
+    const exteriorGround = buildExteriorGround();
+    exteriorGround.position.set((B.x0 + B.x1) / 2, 0, (B.z0 + B.z1) / 2);
+    scene.add(exteriorGround);
+    freezeStatic(exteriorGround);
+
+    /* ---------------- 近景街道层（室外层 Stage 2） ----------------
+     *
+     * 对面楼群 + 路灯 + 街道湿地。楼体用世界绝对坐标，不跟房间包围盒
+     * 居中——户型扩建时楼不该跟着挪。整层走标准装配：合批 → 描边 →
+     * add → 冻结；不进 FPS 碰撞（阳台栏杆拦着，玩家出不去）。
+     */
+    const streetscape = buildStreetscape();
+    nightHorizonRing = streetscape.getObjectByName('night-horizon-ring') ?? null;
+    // 初始化默认状态：夜间小雨不显示远景贴图，保留原有雾距模式。
+    if (nightHorizonRing) nightHorizonRing.visible = false;
+    // 合批前收集碰撞：合批会把 bldg-* 子组合并进大 mesh、丢掉其 sceneCollideSkip 标记，
+    // 且合并出的大 mesh 直接挂根下会被收成横跨整片楼群的巨型盒。这里先收，只对路灯这类
+    // 该挡人的实体生成碰撞盒（楼群 bldg-* 整组标了 skip）。
+    const streetSceneColliders = buildSceneColliders(streetscape);
+    mergeByMaterial(streetscape);
+    outlineProp(streetscape);
+    scene.add(streetscape);
+    freezeStatic(streetscape);
+
+    /* ---------------- 公寓楼外壳（203 所在的这栋三层） ----------------
+     *
+     * 地面层（101-103 门脸 + 楼道入口 + 贩卖机 + 自行车）、同层邻居 202/203、
+     * 三楼 301-303、屋顶。203 那一段的外皮是房间自己的 shell，这里不重复建。
+     *
+     * 用世界绝对坐标，挂 scene 而不是 unitGroup —— 它包含楼下和邻居，
+     * 只有 203 那一户才跟着 UNIT_LIFT 抬高。走标准装配，不进 FPS 碰撞。
+     */
+    // 公寓楼全部走声明式碰撞：楼体四壁（APT_WALL_BOXES）与阳台栏杆 / 外廊腰壁 /
+    // 外置楼梯栏杆 / 自行车（shell.boxes）拼成同一张表，统一交给 buildBoxColliders。
+    // 好处是不再有「按 userData 标记遍历场景」的专用收集器，也不必赶在合批前收集。
+    const apartmentShell = buildApartmentShell();
+    fpsColliders = fpsColliders.concat(
+      buildBoxColliders([...APT_WALL_BOXES, ...apartmentShell.boxes])
+    );
+    mergeByMaterial(apartmentShell.group);
+    outlineProp(apartmentShell.group);
+    scene.add(apartmentShell.group);
+    freezeStatic(apartmentShell.group);
+
+    /* ---------------- 湿地涟漪 + 屋檐滴水（动效层，不得冻结） ----------------
+     *
+     * 这两层每帧改 scale/opacity，必须加进未冻结的组——freezeStatic 会把
+     * matrixAutoUpdate 关掉，挂进公寓/街道组就定格不动了。所以它们各自返回
+     * { object, update }，单独挂 scene，更新收进 sceneFx 统一驱动。
+     */
+    const sceneFx: Array<(t: number) => void> = [];
+    const streetRipples = buildStreetscapeRipples();
+    scene.add(streetRipples.object);
+    sceneFx.push(streetRipples.update);
+    const aptDrips = buildApartmentEaveDrips();
+    scene.add(aptDrips.object);
+    sceneFx.push(aptDrips.update);
+    const weatherFxObjects: THREE.Object3D[] = [streetRipples.object, aptDrips.object];
+
+    /* ---------------- 街角便利店（街对过，近景主体） ----------------
+     *
+     * 便利店是 203 阳台和客厅的主景观：店门在 z14，距阳台栏杆 7.7m。
+     * 静态部分走标准装配；动效部分（招牌灯箱 / 自动门 / 红绿灯）单独挂在
+     * scene 下，不能合批（材质每帧改）也不能冻结（门每帧滑）。
+     */
+    const store = buildConvenienceStore();
+    // 合批前收集碰撞：货架/吧台/冷饮柜这类该挡人的实体生成碰撞盒（store-mass 主体体量
+    // 标了 skip，不把店门堵死；自动门玻璃门扇透明，遍历里也自然跳过）。
+    const storeSceneColliders = buildSceneColliders(store.group).concat(buildSceneColliders(store.dynamic));
+    mergeByMaterial(store.group);
+    outlineProp(store.group);
+    scene.add(store.group);
+    freezeStatic(store.group);
+    scene.add(store.dynamic);
+
+    /* ---------------- 近景城市节点（地铁 / 居酒屋 / 小公园） ---------------- */
+    const subwayEntrance = buildSubwayEntrance();
+    mergeByMaterial(subwayEntrance);
+    outlineProp(subwayEntrance);
+    scene.add(subwayEntrance);
+    freezeStatic(subwayEntrance);
+
+    const izakaya = buildIzakaya();
+    mergeByMaterial(izakaya);
+    outlineProp(izakaya);
+    scene.add(izakaya);
+    freezeStatic(izakaya);
+
+    const smallPark = buildSmallPark();
+    mergeByMaterial(smallPark);
+    outlineProp(smallPark);
+    scene.add(smallPark);
+    freezeStatic(smallPark);
+
+    /* ---------------- 近景高模临街书店（学园都市式学生街排面） ---------------- */
+    const bookStore = buildStreetBookStore();
+    mergeByMaterial(bookStore);
+    outlineProp(bookStore);
+    scene.add(bookStore);
+    freezeStatic(bookStore);
+
+    /* ---------------- 中景商住混合街区 ---------------- */
+    const midRise = buildMidRiseBlock();
+    mergeByMaterial(midRise);
+    outlineProp(midRise);
+    scene.add(midRise);
+    freezeStatic(midRise);
+
+    /* ---------------- 远景城市骨架（高架 / 商场） ---------------- */
+    const viaduct = buildViaduct();
+    mergeByMaterial(viaduct);
+    scene.add(viaduct);
+    freezeStatic(viaduct);
+
+    const shoppingMall = buildShoppingMall();
+    mergeByMaterial(shoppingMall);
+    scene.add(shoppingMall);
+    freezeStatic(shoppingMall);
+
+    // 城市基础设施：电线杆+架空电线 / 街道设施（售货机·快递柜·路牌）
+    const utilityPoles = buildUtilityPoles();
+    mergeByMaterial(utilityPoles);
+    scene.add(utilityPoles);
+    freezeStatic(utilityPoles);
+
+    const streetFurniture = buildStreetFurniture();
+    mergeByMaterial(streetFurniture);
+    scene.add(streetFurniture);
+    freezeStatic(streetFurniture);
+
+    /* ---------------- 单元组（203 室，整户抬高到二楼） ----------------
+     *
+     * 这户是公寓楼的一个单元：shell/家具/角色/阳台湿地/浮尘全部挂进
+     * unitGroup，组本身抬高 UNIT_LIFT。楼下地面层和邻居外墙归 exterior.ts
+     * 管，世界地面留在 y=0。组创建后立刻手动算一次矩阵——后面每个子树的
+     * freezeStatic 都会用父级 matrixWorld 烘焙，不先算准就会冻出少 3.4m
+     * 的错位。
+     */
+    const unitGroup = new THREE.Group();
+    unitGroup.name = 'unit-203';
+    unitGroup.position.y = UNIT_LIFT;
+    scene.add(unitGroup);
+    unitGroup.updateMatrixWorld(true);
+
+    /* ---------------- Room shell ---------------- */
+
+    /**
+     * 外壳 v2：多房间 + 墙段 + 洞口。每个墙侧登记一个 decor 组，
+     * 相机绕到那一侧的墙外时，挂在该墙上的厚装饰（窗框窗帘、门扇、玻璃滑门框）
+     * 跟着墙一起让开——墙平面本身靠 FrontSide 背面剔除自动消失。
+     */
+    const shell = buildRoomShell(layout);
+    console.log('[room] shell 构建完成, wallSides:', shell.wallSides.length, 'wallMeshes:', shell.wallMeshes.length, 'ceilingMeshes:', shell.ceilingMeshes.length);
+    /** 观察者模式：墙板/天花板/墙装饰 视线剔除 */
+    const wallMeshes = shell.wallMeshes;
+    const ceilingMeshes = shell.ceilingMeshes;
+    /**
+     * 装饰组不参与整体合并：它们是空壳，家具随后才按墙侧挂进去。
+     * 标 noMerge 让合并只处理墙/地板/天花/栏杆本体。
+     *
+     * 洞口断面同理要躲开整体合并，但理由不同：所有断面共用一份 revealMat，
+     * 一旦参与整体合并就会**跨墙压成一个 mesh**，观察者模式再也没法按墙剔除它
+     * ——墙隐了、窗洞那一圈断面还框在半空（看着像窗户的外侧轮廓没跟着消失）。
+     * 躲开之后再按墙侧各自合一次，合并后每侧只剩 1 个 mesh，剔除能力也保住了。
+     */
+    for (const ws of shell.wallSides) {
+      ws.decor.userData.noMerge = true;
+      ws.roomSideDecor.userData.noMerge = true;
+      ws.reveals.userData.noMerge = true;
+    }
+    shell.interiorReveals.userData.noMerge = true;
+    mergeByMaterial(shell.group);
+    // noMerge 只对"父级发起的合批"生效，拿它当 root 单独调仍然照常合并
+    for (const ws of shell.wallSides) mergeByMaterial(ws.reveals);
+    mergeByMaterial(shell.interiorReveals);
+    // 房间外壳整体不参与遍历补碰撞：地板/天花板 mesh 若被遍历收进去，会在地面高度生成
+    // 水平阻挡盒把玩家钉死在地板；墙体碰撞只认 buildWallColliders（门洞在 layout 层挖）。
+    shell.group.userData.sceneCollideSkip = true;
+    unitGroup.add(shell.group);
+    const wallDecor = new Map<string, THREE.Group>();
+    const roomSideDecor = new Map<string, THREE.Group>();
+    for (const ws of shell.wallSides) {
+      wallDecor.set(ws.id, ws.decor);
+      roomSideDecor.set(ws.id, ws.roomSideDecor);
+    }
+
+    /* ---------------- Furniture ---------------- */
+
+    // 已被 buildFurnitureColliders 覆盖的家具 id（nav!==false 且有正尺寸）。
+    // 这些组的 mesh 标 furnitureRoot=true，遍历补碰撞时跳过，避免重复成更大盒子造成夹点；
+    // 门/窗/地毯/浴室（nav:false）以及 lifestyle/落地灯等无尺寸摆件不标，落到遍历里补碰撞。
+    const navFurnitureIds = new Set(
+      (layout.furniture as FurnitureSpec[])
+        .filter((f) => f.nav !== false && Array.isArray(f.size) && (f.size as number[])[0] > 0 && (f.size as number[])[2] > 0)
+        .map((f) => f.id)
+    );
+
+    console.log('[room] 开始构建家具, 总数:', (layout.furniture as FurnitureSpec[]).length);
+    for (const it of layout.furniture as FurnitureSpec[]) {
+      try {
+      const build = FURNITURE_BUILDERS[it.kind];
+      if (!build) {
+        console.warn(`[room] 未知道具类型 kind=${it.kind}（id=${it.id}），跳过`);
+        continue;
+      }
+      const obj = build(it);
+      // 标 furnitureRoot 的家具组在 buildSceneColliders 遍历里被跳过（碰撞已由 layout 尺寸盒覆盖）。
+      // 仅「有尺寸的 nav 家具 + 门/窗/地毯/浴室」标 true；lifestyle/落地灯等无尺寸摆件留 false，
+      // 让遍历给它们补实体碰撞。
+      obj.userData.furnitureRoot =
+        navFurnitureIds.has(it.id) ||
+        it.kind === 'door' || it.kind === 'entryDoor' || it.kind === 'glassDoor' || it.kind === 'fusuma' ||
+        it.kind === 'window' || it.kind === 'rug' || it.kind === 'bath' || it.kind === 'toilet' ||
+        it.kind === 'jpRug' || it.kind === 'jpDiningRug' || it.kind === 'jpZabuton' ||
+        it.kind === 'jpPlant' || it.kind === 'jpFloorClutter' || it.kind === 'jpSlatWall' ||
+        it.kind === 'jpKitchenShelf' || it.kind === 'jpPendant' ||
+        it.kind === 'jpBath' || it.kind === 'jpToilet' || it.kind === 'jpPlanter';
+      obj.position.set(it.pos[0], it.pos[1], it.pos[2]);
+      // rot：布局里声明的朝向修正（比如桌前椅子要背对桌沿、面向桌子）
+      if (typeof it.rot === 'number') obj.rotation.y = it.rot;
+
+      // 门：不做合批/冻结——门扇要独立旋转做开关动画，合批会把门扇并进静态
+      // mesh、冻结会锁死 matrix。门框（door-frame）静态描边，门扇（door-leaf）描边壳
+      // 挂 leaf 下跟随旋转。
+      if (it.kind === 'door' || it.kind === 'entryDoor' || it.kind === 'fusuma' || it.kind === 'glassDoor') {
+        let frame: THREE.Group | null = null;
+        let leaf: THREE.Group | null = null;
+        let leaf2: THREE.Group | null = null;
+        obj.traverse((o) => {
+          if (!frame && o.name === 'door-frame') frame = o as THREE.Group;
+          if (!leaf && o.name === 'door-leaf') leaf = o as THREE.Group;
+          if (!leaf2 && o.name === 'door-leaf2') leaf2 = o as THREE.Group;
+        });
+        // 描边在 add 之前：此时 obj 还没挂进 scene，matrixWorld == 本地矩阵，烘焙最稳
+        if (frame) outlineProp(frame);
+        if (leaf) outlineProp(leaf);
+        if (leaf2) outlineProp(leaf2);
+        const decorGroup = it.wall ? wallDecor.get(it.wall) : undefined;
+        (decorGroup ?? unitGroup).add(obj);
+        if (leaf) {
+          const rot = it.rot ?? 0;
+          const cosR = Math.cos(rot);
+          const sinR = Math.sin(rot);
+          const alongX = Math.abs(cosR) > 0.707;
+          const w = it.size[0];
+          const h = it.size[1];
+          const halfT = 0.05;
+          const slide = it.kind === 'fusuma' || it.kind === 'glassDoor';
+          const y0 = UNIT_LIFT + (it.pos[1] ?? 0);
+          const y1 = y0 + h;
+          // 推拉门：固定半扇（leaf）恒挡门洞一侧，动半扇（leaf2）随开度滑向固定半扇、让出另一侧。
+          // 两半扇盒始终参与碰撞——关门时合盖整门洞、开门时仅留固定半扇那侧挡，被推开的半边才放行。
+          // 盒的世界半边由门朝向（rot）决定：局部 +x 轴世界投影 = (cosR, 0, -sinR)，固定半扇局部中心 x=-w/4。
+          let colliderFixed: Collider | undefined;
+          let colliderSlide: Collider | undefined;
+          if (slide) {
+            if (alongX) {
+              const fx = it.pos[0] + cosR * (-w / 4);
+              colliderFixed = { min: new THREE.Vector3(fx - w / 4, y0, it.pos[2] - halfT), max: new THREE.Vector3(fx + w / 4, y1, it.pos[2] + halfT) };
+              const sx0 = it.pos[0] + cosR * (w / 4); // current=0：动半扇在右半
+              colliderSlide = { min: new THREE.Vector3(sx0 - w / 4, y0, it.pos[2] - halfT), max: new THREE.Vector3(sx0 + w / 4, y1, it.pos[2] + halfT) };
+            } else {
+              const fz = it.pos[2] - sinR * (-w / 4);
+              colliderFixed = { min: new THREE.Vector3(it.pos[0] - halfT, y0, fz - w / 4), max: new THREE.Vector3(it.pos[0] + halfT, y1, fz + w / 4) };
+              const sz0 = it.pos[2] - sinR * (w / 4); // current=0：动半扇在右半
+              colliderSlide = { min: new THREE.Vector3(it.pos[0] - halfT, y0, sz0 - w / 4), max: new THREE.Vector3(it.pos[0] + halfT, y1, sz0 + w / 4) };
+            }
+          }
+          doors.push({
+            leaf,
+            leaf2: leaf2 ?? undefined,
+            x: it.pos[0],
+            z: it.pos[2],
+            alongX,
+            width: w,
+            height: h,
+            openAngle: -1.82,
+            current: 0,
+            slide,
+            openOffset: slide ? w / 2 : 0,
+            openHold: 0,
+            heldTarget: 0,
+            manualOpen: false,
+            cosR,
+            sinR,
+            collider: alongX
+              ? {
+                  min: new THREE.Vector3(it.pos[0] - w / 2, y0, it.pos[2] - halfT),
+                  max: new THREE.Vector3(it.pos[0] + w / 2, y1, it.pos[2] + halfT),
+                }
+              : {
+                  min: new THREE.Vector3(it.pos[0] - halfT, y0, it.pos[2] - w / 2),
+                  max: new THREE.Vector3(it.pos[0] + halfT, y1, it.pos[2] + w / 2),
+                },
+            colliderFixed,
+            colliderSlide,
+          });
+        }
+        continue;
+      }
+
+      // 窗：先按 window-wall / room-side 两个子组分别合批再挂组。
+      // 必须先拆再合批——mergeByMaterial 会把整棵子树按材质压平、抽空命名子组，
+      // 若先合批再拆，真实几何会全落到 obj 根节点，丢失"窗框跟墙隐 / 窗台永远可见"的归属。
+      if (it.kind === 'window') {
+        // 窗是贴在墙面上的薄构件，不参与地面投影，否则会糊出一片脏影子
+        obj.traverse((o) => { (o as THREE.Mesh).castShadow = false; });
+        const decorGroup = it.wall ? wallDecor.get(it.wall) : undefined;
+        const rsd = it.wall ? roomSideDecor.get(it.wall) : undefined;
+        const wallG = obj.getObjectByName('window-wall') as THREE.Group | null;
+        const roomG = obj.getObjectByName('room-side') as THREE.Group | null;
+        // 摘出子组后 obj 不再进场景——必须把 obj 的墙位/朝向继承给子组，
+        // 否则窗框脱离 obj 会丢位置（跑到装饰组原点）并丢失旋转（朝向错乱=“水平前后”）。
+        if (wallG) {
+          wallG.position.copy(obj.position);
+          wallG.rotation.copy(obj.rotation);
+          wallG.scale.copy(obj.scale);
+          wallG.userData.furnitureRoot = true; // 窗框随墙走，碰撞由 buildWallColliders 接管，遍历跳过
+          mergeByMaterial(wallG);
+          outlineProp(wallG);
+          (decorGroup ?? unitGroup).add(wallG); // 贴墙：跟墙一起隐
+          freezeStatic(wallG);
+        }
+        if (roomG) {
+          roomG.position.copy(obj.position);
+          roomG.rotation.copy(obj.rotation);
+          roomG.scale.copy(obj.scale);
+          roomG.userData.furnitureRoot = true; // 窗台凸入室内，碰撞由 buildWallColliders 接管，遍历跳过
+          mergeByMaterial(roomG);
+          outlineProp(roomG);
+          (rsd ?? unitGroup).add(roomG); // 凸入室内：永远可见
+          freezeStatic(roomG);
+        }
+        if (!wallG && !roomG) (decorGroup ?? unitGroup).add(obj);
+        continue;
+      }
+
+      // 地毯这类贴地的东西不要投影，否则会糊出一片脏影子
+      if (it.kind === 'rug' || it.kind === 'jpRug' || it.kind === 'jpDiningRug') obj.traverse((o) => { (o as THREE.Mesh).castShadow = false; });
+      // 散点小摆件（lifestyle 拖鞋/伞/布包/纸箱/垃圾桶…）保留逐件 mesh，不参与合批：
+      // 这类道具的零件散落在房间各处，合批会把「同材质、相距数米」的件熔成一个 mesh，
+      // 遍历补碰撞（buildSceneColliders）只能按合并后的整体 AABB 收盒——玄关的拖鞋/伞
+      // 和客厅的布包同材质就会并出横跨半套房的隐形碰撞墙（实测 5.3m×8.9m 大盒），
+      // 视觉上没家具却走不过去。逐件保留后每件自己收小盒；件数约 20，合批收益本就有限。
+      if (!PIECE_KEEP_RAW.has(it.kind)) mergeByMaterial(obj);
+      // 先合批再描边：描边长在合并后的少数几个 mesh 上，反过来会把几千个壳也卷进来
+      // （散点摆件不合并也照常描边——addOutline 按描边分级把整件道具并成 1~2 个壳）
+      outlineProp(obj);
+      // 挂墙的厚装饰进对应墙侧的 decor 组；其余（含玻璃滑门——两侧都看得见）直接进场景
+      const decorGroup = it.wall ? wallDecor.get(it.wall) : undefined;
+      (decorGroup ?? unitGroup).add(obj);
+      // 家具位置再也不会变，冻结掉逐帧的矩阵重算
+      freezeStatic(obj);
+      } catch (e) {
+        console.error(`[room] 家具构建异常 id=${it.id} kind=${it.kind}:`, e);
+      }
+    }
+
+    /* ---------------- Props ---------------- */
+
+    const P = layout.props;
+
+    /**
+     * 天花板挂件组：天花板也是朝内的单面（法线朝下），相机升到天花板上方向下
+     * 俯视时它被背面剔除，吊灯/吸顶灯这种实体必须跟着一起让开。阳台露天无天花，
+     * 不受影响。
+     */
+    const ceilingY = layout.room.height;
+    const ceilingDecor = new THREE.Group();
+    unitGroup.add(ceilingDecor);
+
+    /** 摆件的统一收口：合批 → 描边 → 挂进父级 → 冻结。顺序不能乱。 */
+    const placeProp = (obj: THREE.Object3D, parent: THREE.Object3D, outline = true) => {
+      mergeByMaterial(obj);
+      if (outline) outlineProp(obj);
+      parent.add(obj);
+      freezeStatic(obj);
+    };
+
+    if (P.lantern) placeProp(buildCeilingLantern(P.lantern.pos, layout.room.height), ceilingDecor);
+
+    for (const c of P.ceilLamps ?? []) {
+      placeProp(buildJpCeilLamp({ pos: c.pos, ceilingH: layout.room.height }), ceilingDecor);
+    }
+
+    /**
+     * 挂墙装饰（默认朝 +Z）按 wall 朝内法线方向旋转。
+     * ws.dir 是外墙的朝室内法线（dir=+1 朝 +X / +Z；dir=-1 朝 -X / -Z）。
+     * 绕 Y 的映射（实证值，别凭直觉推）：rot=0→+Z，+π/2→+X，π→-Z，-π/2→-X。
+     *   axis='x' dir=+1 → 朝 +X（西墙），rot=+π/2；dir=-1 → 朝 -X（东墙），rot=-π/2
+     *   axis='z' dir=+1 → 朝 +Z（北墙），rot=0；   dir=-1 → 朝 -Z（南墙），rot=π
+     * 不转会侧立（box 0.018 厚面朝室内）；转反则正脸朝墙里、室内只看到背板。
+     */
+    const wallRotY = (wallId: string | undefined): number => {
+      if (!wallId) return 0;
+      const ws = shell.wallSides.find((w) => w.id === wallId);
+      if (!ws) return 0;
+      if (ws.axis === 'x') return ws.dir > 0 ? Math.PI / 2 : -Math.PI / 2;
+      return ws.dir > 0 ? 0 : Math.PI;
+    };
+
+    placeProp(buildJpWallClock(P.clock.pos, wallRotY(P.clock.wall)), wallDecor.get(P.clock.wall) ?? scene);
+    placeProp(buildJpPoster(P.poster.pos, P.poster.size, wallRotY(P.poster.wall)), wallDecor.get(P.poster.wall) ?? scene);
+    if (P.stringLights) {
+      const sl = buildStringLights(P.stringLights.from, P.stringLights.to, P.stringLights.sag);
+      // 灯串是贴顶的细管，遍历收进去会沿天花板拉出一排薄碰撞盒（玩家本就走不到）；
+      // 它不参与第一人称碰撞，直接跳过。
+      sl.userData.sceneCollideSkip = true;
+      placeProp(sl, wallDecor.get(P.stringLights.wall) ?? scene);
+    }
+
+    // 光束（每扇进光的窗/玻璃门一条）和浮尘是纯叠加混合，不能描边。
+    // 光束本身是静止的，照样冻结；浮尘每帧改写顶点，保持鲜活。
+    for (const sb of (P.sunbeams ?? []) as BeamConfig[]) {
+      const beam = buildSunbeam(sb);
+      // 挂进所属墙的 decor 组，不能挂 scene：光束是从窗口拉到地面的大四边形，
+      // 脱离墙之后，观察者模式把墙剔掉的瞬间它就变成几片悬空的白条（看着像窗棂）。
+      // 走 decor 而不是 roomSideDecor —— decor 的语义就是「跟墙同进退」。
+      const parent = sb.wall ? wallDecor.get(sb.wall) : undefined;
+      // 没写 wall 或写错 id 都会静默退回 scene，等于把这个 bug 原样放回去，所以必须喊出来
+      if (!parent) console.warn(`[room] 光束未绑定到有效墙侧（wall=${sb.wall ?? '未填'}），观察者模式下不会随墙隐藏`);
+      (parent ?? unitGroup).add(beam);
+      freezeStatic(beam);
+    }
+
+    const motes = buildDustMotes(P.motes);
+    unitGroup.add(motes.object);
+
+    /* ---------------- 雨夜层：雨丝 + 阳台湿地反光 ----------------
+     *
+     * 这套户型里只有阳台（ceiling:false）是露天的，也是唯一"雨真的会落到的
+     * 室外地面"。所以 JSON 里这套湿地反光只铺阳台：房间里淋不到雨，铺了
+     * 就是撒谎。街道层面的湿地/路灯已随室外层 Stage 2 接走（见上方
+     * streetscape 装配），雨区 margin 扩到盖住南街。
+     */
+
+    const W = (layout.weather ?? {}) as {
+      rain?: {
+        count: number; speed: number; size: number; opacity: number; wind?: number;
+        /** 跟随模式下雨区的水平半径（米，以焦点为心）。 */
+        radius?: number;
+        /** 雨区是否跟随焦点，默认 true。 */
+        follow?: boolean;
+        top?: number; layers?: number; farSize?: number; farOpacity?: number;
+      };
+      wetPools?: PoolSpec[];
+      sparkle?: { count?: number; area?: number; center?: [number, number] };
+    };
+
+    /** 雨的对象 / 每帧更新（null = 这局没下雨）。update 的 focus = 雨区跟随的焦点。 */
+    let rainObj: THREE.Group | null = null;
+    let rainUpdate: ((dt: number, focus?: { x: number; z: number }) => void) | null = null;
+    let wetGroundObj: THREE.Object3D | null = null;
+    let snowObj: THREE.Points | null = null;
+    let snowUpdate: ((dt: number, focus?: { x: number; z: number }) => void) | null = null;
+    /** 相机是否正处在有顶室内——室内一滴雨都不该有。 */
+    let rainIndoors: ((x: number, y: number, z: number) => boolean) | null = null;
+
+    if (W.rain && W.rain.count > 0) {
+      const R = W.rain;
+      // 雨区跟随焦点（见 buildRain 的 followCamera）：半径只要罩住焦点四周的
+      // 可见范围，不必像固定区域那样一路外扩到盖住南街。
+      const radius = R.radius ?? 12;
+      const top = R.top ?? 14;
+      const area = {
+        x: [-radius, radius],
+        y: [0, top],
+        z: [-radius, radius],
+      } as RainConfig['area'];
+      // 落雨禁区 = 有顶房间的并集包围盒（+UNIT_LIFT：整户在二楼）。
+      // ceiling:false 的阳台不算禁区，雨要落进阳台；禁区上方（屋顶之上）不拦，
+      // 观察者模式俯视时能看到檐外落雨。邻居/地面层的外壳不用禁——它们内部
+      // 不可见，雨丝穿进去也被不透明立面挡住。
+      const roofed = (layout.shell.rooms as Array<{ x0: number; x1: number; z0: number; z1: number; ceiling?: boolean }>).filter((r) => r.ceiling !== false);
+      const exclude = roofed.length
+        ? {
+            min: [Math.min(...roofed.map((r) => r.x0)), UNIT_LIFT - 0.2, Math.min(...roofed.map((r) => r.z0))] as [number, number, number],
+            max: [Math.max(...roofed.map((r) => r.x1)), UNIT_LIFT + layout.room.height + 0.1, Math.max(...roofed.map((r) => r.z1))] as [number, number, number],
+          }
+        : undefined;
+      // 「相机是否在有顶房间里」逐间判，而不是套用上面那个并集盒：并集盒是
+      // 矩形，L 形户型里房间之间的凹口会被误判成室内。阳台 ceiling:false 不在
+      // roofed 里，所以站阳台不算室内、照常淋雨。
+      const yLo = UNIT_LIFT - 0.2;
+      const yHi = UNIT_LIFT + layout.room.height + 0.1;
+      rainIndoors = (x, y, z) =>
+        y > yLo && y < yHi &&
+        roofed.some((r) => x > r.x0 && x < r.x1 && z > r.z0 && z < r.z1);
+      const rain = buildRain({
+        count: R.count,
+        area,
+        exclude,
+        followCamera: R.follow !== false,
+        speed: R.speed,
+        size: R.size,
+        opacity: R.opacity,
+        wind: R.wind,
+        layers: R.layers,
+        farSize: R.farSize,
+        farOpacity: R.farOpacity,
+      });
+      scene.add(rain.object);
+      rainObj = rain.object;
+      rainUpdate = rain.update;
+    }
+
+    // 雪：用柔和白色点粒子表现慢速飘雪，和雨丝分开，切换天气时只改可见性。
+    {
+      const snowCount = 520;
+      const snowPos = new Float32Array(snowCount * 3);
+      const snowSpeed = new Float32Array(snowCount);
+      const snowRnd = makeRng(20260906);
+      const snowRadius = W.rain?.radius ?? 15;
+      const snowTop = W.rain?.top ?? 14;
+      for (let i = 0; i < snowCount; i++) {
+        snowPos[i * 3] = (snowRnd() - 0.5) * snowRadius * 2;
+        snowPos[i * 3 + 1] = snowRnd() * snowTop;
+        snowPos[i * 3 + 2] = (snowRnd() - 0.5) * snowRadius * 2;
+        snowSpeed[i] = 0.28 + snowRnd() * 0.42;
+      }
+      const snowGeo = new THREE.BufferGeometry();
+      snowGeo.setAttribute('position', new THREE.BufferAttribute(snowPos, 3));
+      const snow = new THREE.Points(snowGeo, new THREE.PointsMaterial({
+        color: '#fffaf0', size: 0.09, transparent: true, opacity: 0.82,
+        depthWrite: false, sizeAttenuation: true,
+      }));
+      snow.name = 'snow';
+      snow.frustumCulled = false;
+      snow.visible = false;
+      scene.add(snow);
+      snowObj = snow;
+      let snowOriginX = 0;
+      let snowOriginZ = 0;
+      snowUpdate = (dt, focus) => {
+        if (focus) {
+          snowOriginX = focus.x;
+          snowOriginZ = focus.z;
+          snow.position.set(snowOriginX, 0, snowOriginZ);
+        }
+        const attr = snowGeo.getAttribute('position') as THREE.BufferAttribute;
+        const arr = attr.array as Float32Array;
+        for (let i = 0; i < snowCount; i++) {
+          const yIndex = i * 3 + 1;
+          arr[yIndex] -= snowSpeed[i] * dt;
+          arr[i * 3] += Math.sin((clockT + i) * 0.7) * 0.0015;
+          arr[i * 3 + 2] += Math.cos((clockT + i) * 0.55) * 0.0012;
+          if (arr[yIndex] < 0) {
+            arr[yIndex] = snowTop;
+            arr[i * 3] = (snowRnd() - 0.5) * snowRadius * 2;
+            arr[i * 3 + 2] = (snowRnd() - 0.5) * snowRadius * 2;
+          }
+        }
+        attr.needsUpdate = true;
+      };
+    }
+
+    if (W.wetPools?.length) {
+      const wet = buildWetGround(W.wetPools, {
+        sparkleCount: W.sparkle?.count,
+        area: W.sparkle?.area,
+        center: W.sparkle?.center,
+      });
+      unitGroup.add(wet);
+      wetGroundObj = wet;
+      weatherFxObjects.push(wet);
+      // 光斑和碎光点是叠加混合的透明件，不能参与合批（透明要按距离排序），
+      // 也不描边 —— 描边壳会把光晕框出一圈实线。
+      freezeStatic(wet);
+    }
+
+    // 外墙、地板、天花连同已经挂进去的装饰一起冻结。必须等家具都挂完再调，
+    // 否则 decor 组里的家具会拿到还没算过的父级矩阵。
+    freezeStatic(shell.group);
+
+    /* ---- 场景遍历全量补碰撞 ----
+     * 给所有未被 layout 驱动碰撞（家具尺寸盒/墙体门洞盒/栏杆/floor/ramp）覆盖的实体几何
+     * 补碰撞盒：室内落地灯/lifestyle 摆件（拖鞋/伞/快递箱）/阳台件/吊灯，室外路灯/便利店
+     * 货架/吧台/冷饮柜等——第一人称原本能直接穿过去，现在都会挡人。
+     * 见 collider.ts buildSceneColliders 的跳过规则：房间外壳（地板/墙/天花）整体标了
+     * sceneCollideSkip、有尺寸的 nav 家具标了 furnitureRoot、门/窗/地毯/浴室也跳过——
+     * 它们各自已有更准的碰撞盒，不会被重复收、也不会把门堵死。
+     *
+     * 室外（街道楼群/便利店）的碰撞在「合批前」收集：合批会把 bldg-* 与 store-mass 子组合并
+     * 进大 mesh、丢掉其 sceneCollideSkip 标记，合并出的大 mesh 直接挂根下会被收成横跨整片
+     * 楼群的巨型盒；合批前收集则每根路灯/每个货架还是独立小 mesh，只标了 skip 的楼群主体/
+     * 便利店主体被跳过，门洞（透明玻璃门扇）也自然跳过，不会把入户门/店门重新堵死。
+     * 公寓外壳（203 所在楼体）整体不进遍历——它的主体是实心整块、门洞只在 layout 层挖，
+     * 遍历会重新把入户门堵死；楼体与栏杆/自行车走声明式盒（见 buildBoxColliders），
+     * 各层落脚面由 worldColliders 的 floor / ramp 盒接管。 */
+    fpsColliders = fpsColliders.concat(
+      buildSceneColliders(unitGroup),
+      streetSceneColliders,
+      storeSceneColliders
+    );
+
+    console.log('[room] 初始化完成, 进入渲染循环');
+
+    /* ---------------- Characters ---------------- */
+
+    /**
+     * 阴影的重画请求。装配时置 true 保证首帧一定画一次；
+     * GLB 是异步加载的，角色落进场景时也置一次，否则要等它走一步才有影子。
+     */
+    let shadowPending = true;
+
+    const loader = new GLTFLoader();
+    const agents: PetAgent[] = [];
+    const bodies: THREE.Object3D[] = [];
+    // GLB 自带贴图的登记表：卸载时精确 dispose，不碰程序化贴图单例
+    const gltfTextures: THREE.Texture[] = [];
+
+    const charEntries = Object.entries(
+      layout.characters as Record<string, { model: string; height: number; startPos: [number, number, number]; startFacing: number }>
+    );
+
+    charEntries.forEach(([id, cfg], idx) => {
+      // placeholder 管位移和朝向，body 管上下浮动和走路时的左右晃
+      const placeholder = new THREE.Object3D();
+      placeholder.position.set(cfg.startPos[0], 0, cfg.startPos[2]);
+      const body = new THREE.Object3D();
+      placeholder.add(body);
+      unitGroup.add(placeholder);
+      bodies[idx] = body;
+      agents[idx] = new PetAgent(id, cfg.startPos, cfg.startFacing);
+
+      loader.load(
+        cfg.model,
+        (gltf) => {
+          if (!alive) {
+            gltf.scene.traverse((o: any) => { o.geometry?.dispose?.(); o.material?.dispose?.(); });
+            gltf.scene.traverse((o: any) => {
+              const mats = Array.isArray(o.material) ? o.material : [o.material];
+              for (const m of mats ?? []) {
+                m?.map?.dispose?.();
+                m?.normalMap?.dispose?.();
+              }
+            });
+            return;
+          }
+          const model = gltf.scene;
+          // 按包围盒把角色 normalize 到 layout 里指定的目标身高（米）。
+          // GLB 生成器的输出尺度每次可能不同，写死 scale 是这次尺寸错配的根因。
+          const bbox = new THREE.Box3().setFromObject(model);
+          const nativeHeight = bbox.max.y - bbox.min.y;
+          if (nativeHeight > 0) {
+            model.scale.setScalar(cfg.height / nativeHeight);
+          }
+          toonifyModel(model, gltfTextures);
+          // 角色不加描边：卡通描边线在偏写实的 Q 版角色身上反而像描边画报，
+          // 与三渲二家具的风格拼不到一起。让角色只靠色阶和软阴影"立"起来。
+          body.add(model);
+          // 模型是异步落进场景的，此时它的影子还没进过 shadow map
+          shadowPending = true;
+        },
+        undefined,
+        (err) => console.error('[room] GLB load failed for', id, err)
+      );
+    });
+
+    /* ---------------- Resize / Visibility ---------------- */
+
+    const onResize = () => {
+      const w = container.clientWidth;
+      const h = Math.max(1, container.clientHeight);
+      renderer.setSize(w, h);
+      // composer 有自己的一套 RT（含我们传进去的 MSAA target），不跟着 setSize
+      // 的话后处理会一直按首帧的分辨率画，窗口一变就拉伸模糊
+      composer.setSize(w, h);
+      applyProjection(w, h);
+    };
+    window.addEventListener('resize', onResize);
+
+    let running = true;
+    const onVisibility = () => { running = !document.hidden; };
+    document.addEventListener('visibilitychange', onVisibility);
+
+    /**
+     * P：整段第 ① 步的 A/B 对照。
+     *
+     * 三项一起切才是有效对照——泛光在 composer 里、雾在 scene 上、色调映射在
+     * renderer 上，只切其中一个，看到的差别会被另外两项盖住，等于白切。
+     * 关掉时走 renderer.render 直出：此时 three 会自己应用 renderer.toneMapping，
+     * 所以必须显式退回 NoToneMapping，否则"关掉"之后色调映射还在生效。
+     *
+     * 切换 scene.fog 会触发全场材质重编译（USE_FOG 定义变了），第一下会卡一帧，
+     * 这是调试开关，可以接受。
+     */
+    const onFxKey = (e: KeyboardEvent) => {
+      if (e.key !== 'p' && e.key !== 'P') return;
+      fxOn = !fxOn;
+      scene.fog = fxOn ? roomFog : null;
+      renderer.toneMapping = fxOn ? baseToneMapping : THREE.NoToneMapping;
+    };
+    window.addEventListener('keydown', onFxKey);
+
+    // 第一人称：靠近门时按 F 开/关门（manualOpen 切换）。nearDoor 由渲染循环每帧刷新，
+    // 指向触发范围内最近的一道门；观察者模式下 nearDoor 恒为 null，此处理器直接返回。
+    const onDoorKey = (e: KeyboardEvent) => {
+      if (!isFirstPerson || !nearDoor) return;
+      if (e.key === 'f' || e.key === 'F') {
+        nearDoor.manualOpen = !nearDoor.manualOpen;
+      }
+    };
+    window.addEventListener('keydown', onDoorKey);
+
+    /* ---------------- Render loop ---------------- */
+
+    let lastT = performance.now();
+    let frameCount = 0;
+    let fpsT = lastT;
+    let clockT = 0;
+    let raf = 0;
+
+    // 上一帧记录的角色位置，用来判断影子是否需要重画
+    const prevAgentPos = agents.map((a) => ({ x: a.pos.x, z: a.pos.z }));
+    const SHADOW_MOVE_EPS = 0.0015;
+
+    // 上一帧相机位置（第一人称下用作玩家移动方向，判定是否正在穿门）
+    const prevCamPos = { x: camera.position.x, z: camera.position.z };
+
+    /**
+     * 判断一段折线（角色 A* 路径 / 第一人称移动前瞻）是否穿过某道门洞，
+     * 并返回开门旋转方向符号：门从「穿入侧」往「穿出侧」甩，避免门扇扫到角色。
+     * - alongX：门洞沿 X 布置，穿过方向是 Z；返回 -sign(Δz)
+     * - 否则： 门洞沿 Z 布置，穿过方向是 X；返回 -sign(Δx)
+     */
+    function pathCrossesDoor(
+      pts: { x: number; z: number }[],
+      d: { x: number; z: number; alongX: boolean; width: number }
+    ): { hit: boolean; sign: number } {
+      const half = d.width / 2 + 0.25;
+      for (let i = 0; i < pts.length - 1; i++) {
+        const a = pts[i];
+        const b = pts[i + 1];
+        if (d.alongX) {
+          const dz0 = a.z - d.z;
+          const dz1 = b.z - d.z;
+          if (dz0 === 0 || dz1 === 0 || (dz0 < 0) !== (dz1 < 0)) {
+            const t = dz0 === dz1 ? 0 : (d.z - a.z) / (b.z - a.z);
+            const xc = a.x + t * (b.x - a.x);
+            if (Math.abs(xc - d.x) <= half) return { hit: true, sign: -Math.sign(b.z - a.z) || 1 };
+          }
+        } else {
+          const dx0 = a.x - d.x;
+          const dx1 = b.x - d.x;
+          if (dx0 === 0 || dx1 === 0 || (dx0 < 0) !== (dx1 < 0)) {
+            const t = dx0 === dx1 ? 0 : (d.x - a.x) / (b.x - a.x);
+            const zc = a.z + t * (b.z - a.z);
+            if (Math.abs(zc - d.z) <= half) return { hit: true, sign: -Math.sign(b.x - a.x) || 1 };
+          }
+        }
+      }
+      return { hit: false, sign: 0 };
+    }
+
+    /**
+     * 取角色 A* 路径中「当前位置往前 maxDist 米」以内的折线段。
+     * 避免把整条长路径都拿去判定——否则角色只是远远路过、最终会穿过这道门，
+     * 门就会提前开。
+     */
+    function lookaheadPath(
+      a: { pos: { x: number; z: number }; path: { x: number; z: number }[]; pathIdx: number },
+      maxDist: number
+    ): { x: number; z: number }[] {
+      const pts = [{ x: a.pos.x, z: a.pos.z }];
+      let acc = 0;
+      for (let i = a.pathIdx; i < a.path.length; i++) {
+        const p = a.path[i];
+        const last = pts[pts.length - 1];
+        const seg = Math.hypot(p.x - last.x, p.z - last.z);
+        if (acc + seg > maxDist) {
+          const t = (maxDist - acc) / seg;
+          pts.push({ x: last.x + (p.x - last.x) * t, z: last.z + (p.z - last.z) * t });
+          break;
+        }
+        pts.push({ x: p.x, z: p.z });
+        acc += seg;
+      }
+      return pts;
+    }
+
+    const render = () => {
+      raf = requestAnimationFrame(render);
+      if (!running) { lastT = performance.now(); return; }
+
+      const now = performance.now();
+      const elapsed = Math.min((now - lastT) / 1000, 0.25);
+      lastT = now;
+      clockT += elapsed;
+      renderer.info.reset();
+
+      // 逻辑 tick（20Hz 固定步长）
+      let acc = elapsed;
+      while (acc > 0) {
+        const step = Math.min(acc, TICK_DT);
+        for (const a of agents) a.tick(step);
+        acc -= step;
+      }
+
+      for (let i = 0; i < bodies.length; i++) {
+        const body = bodies[i];
+        const a = agents[i];
+        if (!body || !a) continue;
+        const parent = body.parent!;
+        parent.position.x = a.pos.x;
+        parent.position.z = a.pos.z;
+        parent.rotation.y = a.facing;
+
+        // 走路：踏步幅度更大 + 左右轻晃；站定：只剩呼吸
+        const walking = a.state === 'walk';
+        const phase = clockT * (walking ? 9 : 1.6) + i * 1.7;
+        body.position.y = Math.abs(Math.sin(phase)) * (walking ? 0.032 : 0.011);
+        body.rotation.z = walking ? Math.sin(phase) * 0.045 : 0;
+      }
+
+      motes.update(clockT);
+      const weatherFocus = isFirstPerson ? camera.position : controls.target;
+      if (rainUpdate && rainObj) {
+        // 相机在有顶房间里 → 整场雨收起来并停更（省掉每实例的矩阵合成）。
+        const indoors = rainIndoors
+          ? rainIndoors(camera.position.x, camera.position.y, camera.position.z)
+          : false;
+          const activeRain = environmentRef.current.weather === 'drizzle' || environmentRef.current.weather === 'storm';
+        rainObj.visible = activeRain && !indoors;
+        if (activeRain && !indoors) rainUpdate(elapsed, weatherFocus);
+      }
+      if (snowUpdate && snowObj) {
+        if (environmentRef.current.weather === 'snow') {
+          snowObj.visible = true;
+          snowUpdate(elapsed, weatherFocus);
+        } else {
+          snowObj.visible = false;
+        }
+      }
+      // 湿地涟漪 / 屋檐滴水：与浮尘同时间基（clockT），错开相位各自循环
+      for (const fx of sceneFx) fx(clockT);
+      // 街角动效：招牌呼吸 / 自动门开合 / 红绿灯换色。全靠绝对时间算相位，
+      // 标签页切回来时不会卡在半开的门上。
+      store.update(clockT);
+
+      // 只有角色挪动了才重画阴影（首帧的 needsUpdate 已在装配时置好）
+      let shadowDirty = false;
+      for (let i = 0; i < agents.length; i++) {
+        const a = agents[i];
+        const p = prevAgentPos[i];
+        if (!a || !p) continue;
+        if (Math.abs(a.pos.x - p.x) > SHADOW_MOVE_EPS || Math.abs(a.pos.z - p.z) > SHADOW_MOVE_EPS) {
+          p.x = a.pos.x;
+          p.z = a.pos.z;
+          shadowDirty = true;
+        }
+      }
+      key.shadow.needsUpdate = shadowDirty || shadowPending;
+      shadowPending = false;
+
+      // 门开关动画：由「角色路径需要穿过门洞」驱动，但必须「靠近门洞」才开——
+      // 有经过意图也不能提前开（满足"不要在角色靠近/远离时就自动开/关"：仅靠近不够，
+      // 还要有穿过意图；有意图但还远也不开）。
+      // - 观察者模式：PetAgent 有 A* 路径，路径穿过门洞「且」角色已靠近才开。
+      // - 第一人称：相机即角色、没有规划路径，用「移动方向是否穿过门洞」判定，
+      //   且同样要已靠近；站着不动即使贴着门也不开（除非已站在门洞里）。
+      let doorMoved = false;
+      const DOOR_NEAR = 1.3;  // 角色到门洞中心的最近距离阈值：超过此距离即使有穿过意图也不开
+      const PATH_LOOKAHEAD = 0.9; // 观察者模式只前瞻路径前方这么远——远处路过的门不会提前开
+      const DOOR_HOLD = 1.4;  // 门保持开启的宽限秒数：玩家穿过/走远后避免猛关
+      // 第一人称：先找出触发范围内最近的一道门（用于显示 "F 打开" 提示 + 接收 F 键）
+      nearDoor = null;
+      if (isFirstPerson) {
+        let bestD = Infinity;
+        for (const d of doors) {
+          const dc = Math.hypot(camera.position.x - d.x, camera.position.z - d.z);
+          if (dc < DOOR_NEAR && dc < bestD) { bestD = dc; nearDoor = d; }
+        }
+      }
+      for (const d of doors) {
+        // PetAgent（角色）到门洞中心的最近距离——用于 PetAgent 自动开关门（两种模式都生效）
+        let agentMin = Infinity;
+        for (const a of agents) {
+          const dist = Math.hypot(a.pos.x - d.x, a.pos.z - d.z);
+          if (dist < agentMin) agentMin = dist;
+        }
+        // 第一人称相机到门洞中心的最近距离——仅用于"靠近弹 F 提示 + 手动开"
+        let playerMin = Infinity;
+        if (isFirstPerson) {
+          playerMin = Math.hypot(camera.position.x - d.x, camera.position.z - d.z);
+        }
+        // 综合最近距离（reset manualOpen 用）
+        const minDist = Math.min(agentMin, playerMin);
+
+        let wantOpen = false;
+        let openVal = 0; // 期望开门量（带符号：平开门含甩向，推拉门为正 openOffset）
+
+        // PetAgent 自动开关门：两种模式都生效（修复"进第一人称后角色走到门前门不开"）。
+        // 路径穿过门洞「且」角色已靠近才开——与观察者模式原逻辑一致。第一人称模式下这一支
+        // 原先被整个关在 else 里，导致角色自动开关门在第一人称下彻底失效。
+        if (agentMin < DOOR_NEAR) {
+          for (const a of agents) {
+            if (a.state !== 'walk' || a.path.length === 0) continue;
+            const pts = lookaheadPath(a, PATH_LOOKAHEAD);
+            const r = pathCrossesDoor(pts, d);
+            if (r.hit) {
+              wantOpen = true;
+              openVal = d.slide ? d.openOffset : d.openAngle;
+              break;
+            }
+          }
+          // 安全：角色已站在门洞里也保持开启，避免门扇扫到角色
+          if (!wantOpen) {
+            for (const a of agents) {
+              const half = d.width / 2 + 0.12;
+              if (d.alongX) {
+                if (Math.abs(a.pos.z - d.z) < 0.45 && Math.abs(a.pos.x - d.x) < half) {
+                  wantOpen = true;
+                  openVal = d.slide ? d.openOffset : d.openAngle;
+                }
+              } else {
+                if (Math.abs(a.pos.x - d.x) < 0.45 && Math.abs(a.pos.z - d.z) < half) {
+                  wantOpen = true;
+                  openVal = d.slide ? d.openOffset : d.openAngle;
+                }
+              }
+            }
+          }
+        }
+
+        // 第一人称手动触发（F 键）叠加：靠近门 + 按 F 才开，玩家走远自动收回。
+        // 这里只处理玩家主动开门，"玩家靠近自动开"仍不做（靠近只弹提示），符合既有需求。
+        if (isFirstPerson && d.manualOpen) {
+          wantOpen = true;
+          openVal = d.slide ? d.openOffset : d.openAngle;
+          if (minDist > DOOR_NEAR * 1.8) d.manualOpen = false;
+        }
+
+        // 宽限：角色刚穿过门、wantOpen 立刻变 false 时，保持开门 DOOR_HOLD 秒，让其走远再关
+        if (wantOpen) {
+          d.openHold = DOOR_HOLD;
+          d.heldTarget = openVal;
+        } else if (d.openHold > 0) {
+          d.openHold = Math.max(0, d.openHold - elapsed);
+        }
+        const target = wantOpen || d.openHold > 0 ? d.heldTarget : 0;
+
+        const rate = 4; // 开合角速度 rad/s
+        const before = d.current;
+        if (target < d.current) {
+          d.current = Math.max(target, d.current - rate * elapsed);
+        } else {
+          d.current = Math.min(target, d.current + rate * elapsed);
+        }
+        // 只有角度/位移实际变化才刷新矩阵——门静止时跳过 updateMatrixWorld 的整棵子树重算
+        if (Math.abs(d.current - before) > 1e-4) {
+          doorMoved = true;
+          if (d.slide) {
+            // 推拉门（fusuma）：只把其中一扇推到与另一扇重合——左半扇固定不动，
+            // 右半扇（leaf2）沿局部 X 向左滑 width/2 与左半扇重叠，右半门洞因此打开。
+            d.leaf.position.x = -d.width / 4;            // 固定半扇：始终盖住左半门洞
+            if (d.leaf2) d.leaf2.position.x = d.width / 4 - d.current; // 动半扇：current=0 在右半，current=width/2 与左半重合
+            d.leaf.updateMatrix();
+            d.leaf.updateMatrixWorld(true);
+            if (d.leaf2) {
+              d.leaf2.updateMatrix();
+              d.leaf2.updateMatrixWorld(true);
+            }
+          } else {
+            d.leaf.rotation.y = d.current;
+            // 门挂在被 freeze 的 decor 组下，matrixAutoUpdate 已关：手动重算本地矩阵，
+            // 再强制刷新世界矩阵并递归子物体（门扇面板/把手/描边壳跟着转）
+            d.leaf.updateMatrix();
+            d.leaf.updateMatrixWorld(true);
+          }
+        }
+      }
+      // 门扇动了就重渲阴影（静态阴影 autoUpdate 关着，门扇投影要跟着门转）
+      if (doorMoved) key.shadow.needsUpdate = true;
+      prevCamPos.x = camera.position.x;
+      prevCamPos.z = camera.position.z;
+
+      if (isFirstPerson) {
+        // 第一人称：WASD 移动 + 碰撞检测。关着的门（> -0.5 rad ≈ 28°）挡路。
+        // blockers 缓冲在 effect 顶层预分配复用，避免渲染循环每帧 new 数组
+        blockerBuf.length = 0;
+        for (const d of doors) {
+          if (d.slide) {
+            // 推拉门：固定半扇恒挡 + 动半扇随开度滑移，二者并集即「仍被遮挡的部分」。
+            // 不再用整门盒按阈值全放/全挡——否则开门时两半扇一起放行，固定半扇那侧也被穿过。
+            if (d.colliderFixed) blockerBuf.push(d.colliderFixed);
+            if (d.colliderSlide) {
+              const off = d.width / 4 - d.current; // 动半扇局部中心 x：关门=+w/4（右半），全开=−w/4（与固定半扇重合）
+              if (d.alongX) {
+                const cx = d.x + d.cosR * off;
+                d.colliderSlide.min.x = cx - d.width / 4;
+                d.colliderSlide.max.x = cx + d.width / 4;
+              } else {
+                const cz = d.z - d.sinR * off;
+                d.colliderSlide.min.z = cz - d.width / 4;
+                d.colliderSlide.max.z = cz + d.width / 4;
+              }
+              blockerBuf.push(d.colliderSlide);
+            }
+          } else {
+            // 平开门：整扇旋转，开到足够角度后整扇离开门洞，按阈值放行
+            const blockThresh = 0.5;
+            if (Math.abs(d.current) < blockThresh) blockerBuf.push(d.collider);
+          }
+        }
+        fps.update(elapsed, blockerBuf.length ? fpsColliders.concat(blockerBuf) : fpsColliders);
+        setOutlineDistanceScale(0); // 第一人称描边距离固定
+        // 第一人称下墙/顶/墙装饰全部可见
+        for (let i = 0; i < wallMeshes.length; i++) wallMeshes[i].visible = true;
+        for (let i = 0; i < ceilingMeshes.length; i++) ceilingMeshes[i].visible = true;
+        ceilingDecor.visible = true;
+        for (const ws of shell.wallSides) {
+          ws.decor.visible = true;
+          ws.roomSideDecor.visible = true;
+          ws.reveals.visible = true;
+        }
+      } else {
+        // 观察者模式：WASD/方向键 水平飞行 + Space/Shift 垂直飞行。
+        // 鼠标旋转/缩放仍由 OrbitControls 处理（controls.update 在下方调用）。
+        // 关键：飞行时相机和 OrbitControls.target 必须同步平移。否则只动相机、target
+        // 不动，OrbitControls 会把"相机相对 target 的偏移变化"当成绕 target 旋转/缩放——
+        // 结果 A/D 看起来像在转视角而不是横移（用户反馈的 bug）。
+        if (obsKeys['w'] || obsKeys['s'] || obsKeys['a'] || obsKeys['d'] ||
+            obsKeys['arrowup'] || obsKeys['arrowdown'] || obsKeys['arrowleft'] || obsKeys['arrowright'] ||
+            obsKeys['space'] || obsKeys['shift']) {
+          const obsSpeed = 14; // 飞行速度 m/s
+          const obsDist = obsSpeed * elapsed;
+          // 相机前向的水平投影（XZ 平面）
+          camera.getWorldDirection(_obsDir);
+          _obsDir.y = 0;
+          if (_obsDir.lengthSq() < 1e-6) _obsDir.set(0, 0, -1);
+          _obsDir.normalize();
+          // 右向量 = 前 × 上（A/D 横移用这个，不是转向）
+          _obsRight.crossVectors(_obsDir, camera.up).normalize();
+          let mx = 0, mz = 0;
+          if (obsKeys['w'] || obsKeys['arrowup']) { mx += _obsDir.x; mz += _obsDir.z; }
+          if (obsKeys['s'] || obsKeys['arrowdown']) { mx -= _obsDir.x; mz -= _obsDir.z; }
+          if (obsKeys['d'] || obsKeys['arrowright']) { mx += _obsRight.x; mz += _obsRight.z; }
+          if (obsKeys['a'] || obsKeys['arrowleft']) { mx -= _obsRight.x; mz -= _obsRight.z; }
+          const mlen = Math.hypot(mx, mz);
+          const dx = mlen > 1e-6 ? (mx / mlen) * obsDist : 0;
+          const dz = mlen > 1e-6 ? (mz / mlen) * obsDist : 0;
+          let vy = 0;
+          if (obsKeys['space']) vy += 1;
+          if (obsKeys['shift']) vy -= 1;
+          const dy = vy * obsDist;
+          if (dx !== 0 || dz !== 0 || dy !== 0) {
+            const nx = camera.position.x + dx;
+            const ny = camera.position.y + dy;
+            const nz = camera.position.z + dz;
+            // 相机与 target 一起平移：相对偏移 (camera-target) 不变，
+            // OrbitControls 不会把它解读成旋转/缩放，A/D 才是纯横移。
+            // 观察者模式不做碰撞（用户要求），飞行可自由穿过模型。
+            camera.position.set(nx, ny, nz);
+            controls.target.x += dx;
+            controls.target.y += dy;
+            controls.target.z += dz;
+          }
+        }
+        // 观察者模式：OrbitControls.target 限制在整座微缩场景范围内（留余量，见
+        // OBS_TGT_MIN/MAX），既能飞到街区/便利店自由探索，又不会把模型拖丢。
+        // 若钳制改变了 target，相机同步同样的位移——保持 (camera-target) 偏移不变，
+        // 飞行/平移后不会突然"转一下视角"。
+        const prevTx = controls.target.x, prevTy = controls.target.y, prevTz = controls.target.z;
+        controls.target.x = THREE.MathUtils.clamp(controls.target.x, OBS_TGT_MIN.x, OBS_TGT_MAX.x);
+        controls.target.y = THREE.MathUtils.clamp(controls.target.y, OBS_TGT_MIN.y, OBS_TGT_MAX.y);
+        controls.target.z = THREE.MathUtils.clamp(controls.target.z, OBS_TGT_MIN.z, OBS_TGT_MAX.z);
+        camera.position.x += controls.target.x - prevTx;
+        camera.position.y += controls.target.y - prevTy;
+        camera.position.z += controls.target.z - prevTz;
+        controls.update();
+        setOutlineDistanceScale(camera.position.distanceTo(controls.target));
+
+        // 天花板俯视剖切（dollhouse 视角）：相机高过屋顶就把顶拿掉，
+        // 从上面看进去是剖面，平视时屋顶照常。
+        const camY = camera.position.y;
+        const showCeiling = camY <= UNIT_LIFT + layout.room.height + 0.3;
+        for (let i = 0; i < ceilingMeshes.length; i++) {
+          ceilingMeshes[i].visible = showCeiling;
+        }
+        ceilingDecor.visible = showCeiling;
+
+        // 墙板/墙装饰/洞口断面不再做相机侧显隐：203 的外墙后面现在是
+        // 真实的公寓楼和街区（不是虚空），从街上看就该看到这户的外墙皮——
+        // 它本来就是"公寓二楼亮着灯的那户"的立面。材质本就 DoubleSide，
+        // 墙两面都画，外侧看到的是墙皮背面（米白，夜里读作公寓外墙）。
+        for (let i = 0; i < wallMeshes.length; i++) wallMeshes[i].visible = true;
+        for (const ws of shell.wallSides) {
+          ws.decor.visible = true;
+          ws.roomSideDecor.visible = true;
+          ws.reveals.visible = true;
+        }
+      }
+      if (fxOn) composer.render();
+      else renderer.render(scene, camera);
+
+      frameCount++;
+      if (now - fpsT > 250) {
+        const fpsVal = Math.round((frameCount * 1000) / (now - fpsT));
+        const info = renderer.info.render;
+        // 直接写 DOM，不走 React state：HUD 每 250ms 刷新一次，
+        // 用 setState 会把整个组件（连带这个 effect 的闭包）每 250ms 重建一遍。
+        if (hudStatsRef.current) {
+          hudStatsRef.current.textContent =
+            `${fpsVal} fps · ${info.calls} draw · ${Math.round(info.triangles / 1000)}k tri`;
+        }
+        if (hudAgentsRef.current) {
+          hudAgentsRef.current.textContent = agents
+            .map((a) => `${a.id}  ${a.stateLabel}  ${a.pos.x.toFixed(1)},${a.pos.z.toFixed(1)}`)
+            .join('\n');
+        }
+        if (fpsDebugRef.current) {
+          fpsDebugRef.current.textContent = isFirstPerson
+            ? `FPS y=${fps.dbgPlayerY.toFixed(2)} ground=${fps.dbgGroundY.toFixed(2)} ${fps.dbgGrounded ? 'GND' : 'AIR'}`
+            : '';
+        }
+        if (hudDoorPromptRef.current) {
+          // 仅关门且靠近时提示「F 打开」；开门后不再显示「F 关闭」按钮，
+          // 玩家走远后门自动收回 manualOpen 并经 DOOR_HOLD 宽限自行关闭。
+          if (isFirstPerson && nearDoor && nearDoor.current <= 0.5) {
+            hudDoorPromptRef.current.textContent = 'F 打开';
+            hudDoorPromptRef.current.style.opacity = '1';
+          } else {
+            hudDoorPromptRef.current.style.opacity = '0';
+          }
+        }
+        frameCount = 0;
+        fpsT = now;
+      }
+    };
+    render();
+
+    /* ---------------- Cleanup ---------------- */
+
+    return () => {
+      alive = false;
+      cancelAnimationFrame(raf);
+      controls.dispose();
+      fps.dispose();
+      // composer 的 RT 是它自己建的，renderer.dispose() 不管。漏掉会留一对
+      // HalfFloat + MSAA 的 renderbuffer——这两个是显存大户，StrictMode 双挂载
+      // 就是两份
+      composer.dispose();
+      window.removeEventListener('keydown', onEnterKey);
+      window.removeEventListener('keydown', onFxKey);
+      window.removeEventListener('keydown', onDoorKey);
+      window.removeEventListener('keydown', onObsKeyDown);
+      window.removeEventListener('keyup', onObsKeyUp);
+      window.removeEventListener('resize', onResize);
+      document.removeEventListener('visibilitychange', onVisibility);
+      // 阴影贴图是惰性创建的 WebGLRenderTarget，renderer.dispose() 不会释放，
+      // 必须显式 dispose 灯光的 shadow.map，否则孤儿 RT 持续占显存
+      scene.traverse((o: any) => {
+        if (o.isLight && o.shadow?.map) o.shadow.map.dispose();
+      });
+      scene.traverse((o: any) => {
+        if (o.geometry) o.geometry.dispose();
+        if (o.material) {
+          if (Array.isArray(o.material)) {
+            o.material.forEach((mm: any) => {
+              // 模块级缓存材质（toonCache / outlineMatCache）是共享单例，
+              // 卸载时 dispose 会让缓存里的材质失效（program 反复重建），跳过
+              if (!mm.userData?.__roomCached) mm.dispose();
+            });
+          } else if (!o.material.userData?.__roomCached) {
+            o.material.dispose();
+          }
+        }
+      });
+      // GLB 贴图是每次加载的独立实例，随场景一起释放；
+      // 程序化贴图 / gradientMap 是模块级单例，刻意不 dispose
+      // （StrictMode 会挂载两次，第一次销毁贴图，第二次就拿到废图了）
+      for (const t of gltfTextures) t.dispose();
+      // 先 forceContextLoss 再 dispose：renderer.dispose() 只清 three 内部缓存，
+      // 不归还 GL 上下文——某些驱动上（WebView2 集显）要等 GC/Chromium 逐出，
+      // StrictMode 双挂载会留下孤儿 context
+      renderer.forceContextLoss();
+      renderer.dispose();
+      if (renderer.domElement.parentNode === container) {
+        container.removeChild(renderer.domElement);
+      }
+      // 注意：程序化贴图是模块级单例，这里刻意不 dispose ——
+      // StrictMode 会挂载两次，第一次卸载时销毁贴图，第二次就拿到废图了。
+      environmentToggleRef.current = null;
+      (window as any).__ROOM__.setEnvironment = undefined;
+      (window as any).__ROOM__.setWeather = undefined;
+    };
+  }, []);
+
+  /* ---------------- HUD ---------------- */
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'h' || e.key === 'H') setHudVisible((v) => !v);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
+  return (
+    <div style={{ position: 'absolute', inset: 0, background: '#e7d8c4' }}>
+      <div ref={containerRef} style={{ position: 'absolute', inset: 0 }} />
+
+      <div style={{
+        position: 'absolute', top: 14, left: 14, display: 'flex', alignItems: 'center', gap: 8,
+        padding: '7px 9px', borderRadius: 14, background: 'rgba(20, 28, 42, 0.82)',
+        border: '1px solid rgba(255,255,255,0.18)', boxShadow: '0 4px 14px rgba(0,0,0,0.2)',
+        zIndex: 20, color: '#fff', fontSize: 11, fontWeight: 700,
+      }}>
+        <span style={{ opacity: 0.72 }}>时间</span>
+        {(['morning', 'noon', 'dusk', 'night'] as DayPeriod[]).map((item) => (
+          <button key={item} type="button" onClick={() => environmentToggleRef.current?.(item, weather)}
+            aria-pressed={period === item}
+            style={{ border: 0, borderRadius: 8, padding: '6px 8px', cursor: 'pointer', color: period === item ? '#3c4b55' : 'rgba(255,255,255,0.72)', background: period === item ? '#f5d98b' : 'transparent', fontSize: 11, fontWeight: 700 }}>
+            {PERIOD_LABELS[item]}
+          </button>
+        ))}
+        <span style={{ width: 1, height: 20, background: 'rgba(255,255,255,0.2)', margin: '0 2px' }} />
+        <span style={{ opacity: 0.72 }}>天气</span>
+        {(['clear', 'drizzle', 'storm', 'snow'] as WeatherKind[]).map((item) => (
+          <button key={item} type="button" onClick={() => environmentToggleRef.current?.(period, item)}
+            aria-pressed={weather === item}
+            style={{ border: 0, borderRadius: 8, padding: '6px 8px', cursor: 'pointer', color: weather === item ? '#3c4b55' : 'rgba(255,255,255,0.72)', background: weather === item ? '#b9d9f2' : 'transparent', fontSize: 11, fontWeight: 700 }}>
+            {WEATHER_LABELS[item]}
+          </button>
+        ))}
+      </div>
+
+      {hudVisible && (
+        <div
+          style={{
+            position: 'absolute', top: 12, right: 12, padding: '10px 14px',
+            background: 'rgba(255,252,246,0.86)', color: '#6b4f5e',
+            border: '1px solid rgba(107,79,94,0.25)', borderRadius: 12,
+            boxShadow: '0 4px 14px rgba(107,79,94,0.15)',
+            fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+            fontSize: 12, lineHeight: 1.7, pointerEvents: 'none', minWidth: 168,
+          }}
+        >
+          <div ref={hudStatsRef} style={{ fontWeight: 700, letterSpacing: 0.5 }} />
+          <div style={{ height: 1, background: 'rgba(107,79,94,0.18)', margin: '6px 0' }} />
+          <div ref={hudAgentsRef} style={{ whiteSpace: 'pre-line' }} />
+          <div ref={fpsDebugRef} style={{ marginTop: 6, color: '#7fd1ff', fontFamily: 'ui-monospace, monospace' }} />
+          <div ref={hudModeRef} style={{ marginTop: 6, color: '#C9A961', fontWeight: 600 }}>观察者模式 · Enter 进入</div>
+          <div ref={hudCrosshairRef} style={{
+            position: 'fixed', top: '50%', left: '50%',
+            transform: 'translate(-50%, -50%)',
+            pointerEvents: 'none', opacity: 0,
+            transition: 'opacity 0.2s ease',
+            zIndex: 10,
+          }}>
+            {/* 十字准星 */}
+            <svg width="24" height="24" viewBox="0 0 24 24" style={{ display: 'block' }}>
+              <line x1="12" y1="4" x2="12" y2="9" stroke="#C9A961" strokeWidth="1.5" strokeLinecap="round" opacity="0.85"/>
+              <line x1="12" y1="15" x2="12" y2="20" stroke="#C9A961" strokeWidth="1.5" strokeLinecap="round" opacity="0.85"/>
+              <line x1="4" y1="12" x2="9" y2="12" stroke="#C9A961" strokeWidth="1.5" strokeLinecap="round" opacity="0.85"/>
+              <line x1="15" y1="12" x2="20" y2="12" stroke="#C9A961" strokeWidth="1.5" strokeLinecap="round" opacity="0.85"/>
+              {/* 中心点 */}
+              <circle cx="12" cy="12" r="1" fill="#C9A961" opacity="0.6"/>
+            </svg>
+          </div>
+          <div style={{ marginTop: 6, opacity: 0.55, fontSize: 11 }}>
+            WASD 移动 · 鼠标视角 · Shift/右键 跑 · Space 跳 · Ctrl 蹲
+          </div>
+          <div style={{ marginTop: 6, opacity: 0.55, fontSize: 11 }}>ESC 退出公寓 · 按 H 隐藏</div>
+        </div>
+      )}
+
+      {/* 第一人称靠近门时的 "F 打开" 提示：固定位置，由渲染循环按 nearDoor 控制显隐 */}
+      <div
+        ref={hudDoorPromptRef}
+        style={{
+          position: 'fixed', left: '50%', bottom: 96,
+          transform: 'translateX(-50%)',
+          padding: '8px 16px',
+          background: 'rgba(40, 30, 28, 0.72)',
+          color: '#fff',
+          borderRadius: 10,
+          fontSize: 14, fontWeight: 700, letterSpacing: 1,
+          pointerEvents: 'none', userSelect: 'none',
+          zIndex: 16, whiteSpace: 'nowrap',
+          opacity: 0, transition: 'opacity 0.15s ease',
+        }}
+      >
+        F 打开
+      </div>
+
+      {mode === 'observe' && (
+        <div
+          style={{
+            position: 'absolute', left: '50%', bottom: 28,
+            transform: 'translateX(-50%)',
+            padding: '8px 18px',
+            background: 'rgba(255, 252, 246, 0.82)',
+            color: '#6b4f5e',
+            borderRadius: 999,
+            border: '1px solid rgba(107, 79, 94, 0.22)',
+            boxShadow: '0 4px 16px rgba(60, 45, 40, 0.18)',
+            fontSize: 13,
+            fontWeight: 600,
+            letterSpacing: 0.5,
+            pointerEvents: 'none',
+            userSelect: 'none',
+            zIndex: 15,
+            whiteSpace: 'nowrap',
+          }}
+        >
+          观察者模式 · WASD飞行 / Space升 Shift降 / 拖动旋转 / 滚轮缩放 · Enter进入第一人称
+        </div>
+      )}
+    </div>
+  );
+}

@@ -1,0 +1,130 @@
+.chibi-pet-canvas {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
+  --atlas-url: url('/chibi/vivian-atlas.webp');
+}
+
+.chibi-pet-nana {
+  --atlas-url: url('/chibi/nana-atlas.webp');
+}
+
+.chibi-pet-stage {
+  --gaze-x: 0px;
+  --gaze-y: 0px;
+  position: relative;
+  width: min(96vw, 94vh);
+  aspect-ratio: 1;
+  transform: translate(var(--gaze-x), var(--gaze-y));
+  transform-origin: 50% 92%;
+  transition: transform 140ms ease-out, filter 180ms ease;
+  will-change: transform;
+}
+
+.chibi-pet-shadow {
+  position: absolute;
+  z-index: 0;
+  left: 25%;
+  right: 25%;
+  bottom: 4.2%;
+  height: 7%;
+  border-radius: 50%;
+  background: radial-gradient(ellipse, rgba(53, 39, 67, 0.28), rgba(53, 39, 67, 0));
+  filter: blur(3px);
+  transform-origin: center;
+  animation: chibi-shadow-breathe 4.1s ease-in-out infinite;
+  pointer-events: none;
+}
+
+.chibi-pet-sprite {
+  position: absolute;
+  z-index: 1;
+  inset: 0;
+  outline: none;
+  cursor: grab;
+  /* 背景图与格位定位由动作词汇表在行内给出，此处只提供默认图集 */
+  background-image: var(--atlas-url);
+  background-repeat: no-repeat;
+  filter: drop-shadow(0 8px 8px rgba(44, 30, 61, 0.22));
+  transform-origin: 50% 90%;
+  animation: chibi-idle-breathe 4.1s ease-in-out infinite;
+  transition: filter 160ms ease;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* 定格姿态只改变舞台形变，图集格位由词汇表计算 */
+.pose-happy .chibi-pet-sprite { animation: chibi-happy-pop 620ms cubic-bezier(.2,.85,.28,1.18) both; }
+.pose-drag .chibi-pet-sprite { cursor: grabbing; animation: chibi-drag-sway 460ms ease-in-out infinite alternate; }
+.pose-dizzy .chibi-pet-sprite { animation: chibi-dizzy 900ms ease-in-out infinite; }
+.pose-talk .chibi-pet-sprite { animation: chibi-talk 420ms ease-in-out infinite alternate; }
+.pose-listen .chibi-pet-sprite { animation: chibi-listen 1.3s ease-in-out infinite alternate; }
+.pose-walk .chibi-pet-sprite { animation: chibi-walk-step 420ms ease-in-out infinite alternate; }
+
+/* 转身与眨眼的帧序列画的就是整体形变，叠加 CSS 形变会互相打架，故关掉呼吸； */
+/* 表情类动作（cast/angry/smug/think）保持默认呼吸，与改版前一致 */
+.pose-turn .chibi-pet-sprite,
+.pose-blink .chibi-pet-sprite {
+  animation: none;
+}
+
+.chibi-pet-stage.is-pressed .chibi-pet-sprite {
+  animation: none;
+  transform: translateY(1.2%) scale(.98);
+  filter: drop-shadow(0 5px 6px rgba(44, 30, 61, 0.19));
+}
+
+@keyframes chibi-idle-breathe {
+  0%, 100% { transform: translateY(0) rotate(-.4deg); }
+  50% { transform: translateY(-1.8%) rotate(.5deg); }
+}
+
+@keyframes chibi-shadow-breathe {
+  0%, 100% { transform: scaleX(1); opacity: .72; }
+  50% { transform: scaleX(.88); opacity: .52; }
+}
+
+@keyframes chibi-happy-pop {
+  0% { transform: translateY(2%) scale(.95, 1.04); }
+  42% { transform: translateY(-6%) scale(1.05, .96) rotate(1.2deg); }
+  72% { transform: translateY(1%) scale(.98, 1.02) rotate(-.6deg); }
+  100% { transform: translateY(0) scale(1); }
+}
+
+@keyframes chibi-drag-sway {
+  from { transform: translateY(1%) rotate(-3deg) scale(.98, 1.02); }
+  to { transform: translateY(-1%) rotate(3deg) scale(1.02, .98); }
+}
+
+@keyframes chibi-dizzy {
+  0%, 100% { transform: translateX(0) rotate(0); }
+  25% { transform: translateX(-2%) rotate(-2deg); }
+  75% { transform: translateX(2%) rotate(2deg); }
+}
+
+@keyframes chibi-talk {
+  from { transform: translateY(0) scaleY(1); }
+  to { transform: translateY(-1.5%) scaleY(1.015); }
+}
+
+@keyframes chibi-listen {
+  from { transform: translateX(-1%) rotate(-1deg); }
+  to { transform: translateX(1%) rotate(1deg); }
+}
+
+@keyframes chibi-walk-step {
+  from { transform: translateY(0) rotate(-1.2deg); }
+  to { transform: translateY(-2.4%) rotate(1.2deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chibi-pet-sprite,
+  .chibi-pet-shadow {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}

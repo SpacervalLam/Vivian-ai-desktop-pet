@@ -1,0 +1,7 @@
+# 内置插件目录是「数据文件」，不是普通文档/源码：
+# - skills/*.md 带 YAML front-matter（--- name/description ---），Markdown 格式化器会把
+#   开头的 --- 规范化成 *** 、结尾的 --- 拉长成整行连字符，导致 parse_skill_file 兜底、
+#   description 变成 "***"、技能静默失效。
+# - providers.json 用紧凑单行数组（mainModels 等），格式化器会炸开成多行、制造无意义 diff。
+# 因此整目录排除，禁止任何 Prettier / 编辑器默认格式化器改写。
+src-tauri/plugins/

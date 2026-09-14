@@ -1,0 +1,472 @@
+import React, { useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import { invoke } from '@tauri-apps/api/core';
+
+/** 插件清单条目（对齐后端 plugins::PluginInventoryEntry） */
+interface PluginEntry {
+  /** 稳定的插件目录 key，供后端重载/删除使用 */
+  key: string;
+  name: string;
+  version: string;
+  description: string;
+  skills: string[];
+  tools: string[];
+  mcp_servers: string[];
+  providers: string[];
+  status: string;
+  /** 信任状态：trusted / changed（曾信任但清单已变更）/ untrusted */
+  trust: string;
+  reason?: string | null;
+  dir: string;
+}
+
+/** 内置插件（播种体系所有，禁删；改内置的正确方式是复制为新插件） */
+const BUILTIN_PLUGIN_NAMES = ['llm-providers', 'plugin-authoring'];
+
+/** 技能条目（对齐后端 commands::plugins::SkillEntryInfo） */
+interface SkillEntry {
+  name: string;
+  description: string;
+  scope: string | null;
+  origin: string; // user / plugin
+  body_len: number;
+}
+
+/** 插件运行时诊断（对齐后端 commands::plugins::plugin_diagnostics） */
+interface PluginDiagnostics {
+  last_report: {
+    plugins: string[];
+    skills: string[];
+    tools: string[];
+    mcp_servers: string[];
+    protocols: string[];
+    skipped: string[];
+  } | null;
+  /** 运行时静默决策登记（MCP 占用跳过 / 工具重名 / provider 冲突等），最新在前 */
+  events: string[];
+}
+
+const sectionTitle: React.CSSProperties = {
+  fontSize: 14,
+  fontWeight: 700,
+  color: 'var(--panel-text)',
+  margin: '0 0 12px',
+};
+
+/** 内联确认状态 */
+interface ConfirmState {
+  type: 'trust' | 'delete';
+  plugin: PluginEntry;
+}
+
+/** 设置窗口「插件/技能」页：盘点插件与技能清单（只读，不装载/卸载）。 */
+const PluginsPanel: React.FC = () => {
+  const { t } = useTranslation();
+  const [plugins, setPlugins] = useState<PluginEntry[] | null>(null);
+  const [skills, setSkills] = useState<SkillEntry[] | null>(null);
+  const [diag, setDiag] = useState<PluginDiagnostics | null>(null);
+  const [paths, setPaths] = useState<{ plugins_dir: string; skills_dir: string } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [confirm, setConfirm] = useState<ConfirmState | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const [p, s, d, dg] = await Promise.all([
+          invoke<PluginEntry[]>('list_plugins'),
+          invoke<SkillEntry[]>('list_skills'),
+          invoke<{ plugins_dir: string; skills_dir: string }>('plugin_paths'),
+          invoke<PluginDiagnostics>('plugin_diagnostics'),
+        ]);
+        if (cancelled) return;
+        setPlugins(p);
+        setSkills(s);
+        setPaths(d);
+        setDiag(dg);
+      } catch (e) {
+        if (!cancelled) setError(String(e));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  /** 重新盘点插件/技能清单（重载/删除后调用） */
+  const refresh = async () => {
+    try {
+      const [p, s, dg] = await Promise.all([
+        invoke<PluginEntry[]>('list_plugins'),
+        invoke<SkillEntry[]>('list_skills'),
+        invoke<PluginDiagnostics>('plugin_diagnostics'),
+      ]);
+      setPlugins(p);
+      setSkills(s);
+      setDiag(dg);
+      setError(null);
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const onReload = async (key: string) => {
+    setError(null);
+    try {
+      await invoke('reload_plugin', { name: key });
+      await refresh();
+    } catch (e) {
+      setError(t('config.plugins.reload_failed', { error: String(e) }));
+    }
+  };
+
+  /** 信任插件：记录清单指纹并立即装载（未信任插件的贡献不装载） */
+  const onTrust = async (plugin: PluginEntry) => {
+    setConfirm({ type: 'trust', plugin });
+  };
+
+  const executeTrust = async () => {
+    if (!confirm) return;
+    const plugin = confirm.plugin;
+    setConfirm(null);
+    setError(null);
+    try {
+      await invoke('trust_plugin', { key: plugin.key });
+      await refresh();
+    } catch (e) {
+      setError(t('config.plugins.trust_failed', { error: String(e) }));
+    }
+  };
+
+  const trustLabel = (trust: string): string => {
+    if (trust === 'trusted') return '';
+    return trust === 'changed'
+      ? t('config.plugins.status_changed')
+      : t('config.plugins.status_untrusted');
+  };
+
+  const onDelete = async (plugin: PluginEntry) => {
+    setConfirm({ type: 'delete', plugin });
+  };
+
+  const executeDelete = async () => {
+    if (!confirm) return;
+    const plugin = confirm.plugin;
+    setConfirm(null);
+    setError(null);
+    try {
+      await invoke('delete_plugin', { name: plugin.key });
+      await refresh();
+    } catch (e) {
+      setError(t('config.plugins.delete_failed', { error: String(e) }));
+    }
+  };
+
+  const originLabel = (origin: string): string => {
+    if (origin === 'plugin') return t('config.plugins.origin_plugin');
+    return t('config.plugins.origin_user');
+  };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 22 }}>
+      {/* 内联确认栏 */}
+      {confirm && (
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 10,
+            padding: '10px 14px',
+            borderRadius: 8,
+            border: '1px solid var(--panel-border-strong)',
+            background: 'var(--panel-surface)',
+          }}
+        >
+          <span style={{ fontSize: 13, color: 'var(--panel-text)', flex: 1 }}>
+            {confirm.type === 'trust'
+              ? t('config.plugins.trust_confirm', { name: confirm.plugin.name })
+              : t('config.plugins.delete_confirm', { name: confirm.plugin.name })}
+          </span>
+          <button
+            onClick={confirm.type === 'trust' ? executeTrust : executeDelete}
+            style={{
+              fontSize: 12,
+              padding: '4px 14px',
+              borderRadius: 6,
+              border: 'none',
+              background: confirm.type === 'delete' ? '#8B2C1F' : 'var(--panel-accent)',
+              color: '#fff',
+              cursor: 'pointer',
+              fontWeight: 600,
+            }}
+          >
+            {t('common.confirm')}
+          </button>
+          <button
+            onClick={() => setConfirm(null)}
+            style={{
+              fontSize: 12,
+              padding: '4px 14px',
+              borderRadius: 6,
+              border: '1px solid var(--panel-border)',
+              background: 'transparent',
+              color: 'var(--panel-text)',
+              cursor: 'pointer',
+            }}
+          >
+            {t('common.cancel')}
+          </button>
+        </div>
+      )}
+
+      <div style={sectionTitle}>{t('config.plugins.section_plugins')}</div>
+      {error ? (
+        <div style={{ fontSize: 13, color: '#E53935' }}>{error}</div>
+      ) : plugins === null ? (
+        <div style={{ fontSize: 13, color: 'var(--panel-text-secondary)' }}>{t('mind_inspector.common.loading')}</div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          {plugins.length === 0 && (
+            <div style={{ fontSize: 13, color: 'var(--panel-text-secondary)' }}>
+              {t('config.plugins.no_plugins')}
+              {paths && (
+                <span>{t('config.plugins.plugins_dir_hint', { dir: paths.plugins_dir })}</span>
+              )}
+            </div>
+          )}
+          {plugins.map((p) => (
+            <div
+              key={p.key}
+              title={p.dir}
+              style={{
+                border: '1px solid var(--panel-border)',
+                borderRadius: 8,
+                padding: '8px 12px',
+                background: 'var(--panel-surface)',
+                boxShadow: 'var(--panel-shadow-subtle)',
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 2 }}>
+                <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--panel-text)' }}>{p.name}</span>
+                <span style={{ fontSize: 11, color: 'var(--panel-text-tertiary)' }}>v{p.version}</span>
+                {BUILTIN_PLUGIN_NAMES.includes(p.name) && (
+                  <span
+                    style={{
+                      fontSize: 11,
+                      padding: '1px 6px',
+                      borderRadius: 999,
+                      color: 'var(--panel-text-tertiary)',
+                      border: '1px solid var(--panel-border)',
+                    }}
+                  >
+                    {t('config.plugins.builtin')}
+                  </span>
+                )}
+                {trustLabel(p.trust) && (
+                  <span
+                    style={{
+                      fontSize: 11,
+                      padding: '1px 8px',
+                      borderRadius: 999,
+                      color: '#8a5a00',
+                      border: '1px solid var(--panel-border-strong)',
+                    }}
+                  >
+                    {trustLabel(p.trust)}
+                  </span>
+                )}
+                <span
+                  style={{
+                    fontSize: 11,
+                    padding: '1px 8px',
+                    borderRadius: 999,
+                    color: p.status === 'loaded' ? 'var(--panel-text)' : '#8B2C1F',
+                    border: `1px solid ${p.status === 'loaded' ? 'var(--panel-border-strong)' : 'var(--panel-border)'}`,
+                  }}
+                >
+                  {p.status === 'loaded' ? t('config.plugins.status_loaded') : t('config.plugins.status_skipped')}
+                </span>
+                <div style={{ flex: 1 }} />
+                {!BUILTIN_PLUGIN_NAMES.includes(p.name) && p.trust !== 'trusted' && (
+                  <button
+                    onClick={() => onTrust(p)}
+                    style={{
+                      fontSize: 11,
+                      padding: '3px 10px',
+                      borderRadius: 6,
+                      border: '1px solid var(--panel-border-strong)',
+                      background: 'var(--panel-surface)',
+                      color: 'var(--panel-text)',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    {t('config.plugins.trust')}
+                  </button>
+                )}
+                <button
+                  onClick={() => onReload(p.key)}
+                  style={{
+                    fontSize: 11,
+                    padding: '3px 10px',
+                    borderRadius: 6,
+                    border: '1px solid var(--panel-border)',
+                    background: 'var(--panel-surface)',
+                    color: 'var(--panel-text)',
+                    cursor: 'pointer',
+                  }}
+                >
+                  {t('config.plugins.reload')}
+                </button>
+                {!BUILTIN_PLUGIN_NAMES.includes(p.name) && (
+                  <button
+                    onClick={() => onDelete(p)}
+                    style={{
+                      fontSize: 11,
+                      padding: '3px 10px',
+                      borderRadius: 6,
+                      border: '1px solid var(--panel-border)',
+                      background: 'var(--panel-surface)',
+                      color: '#8B2C1F',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    {t('config.plugins.delete')}
+                  </button>
+                )}
+              </div>
+              {p.description && (
+                <div
+                  style={{
+                    fontSize: 12,
+                    color: 'var(--panel-text-secondary)',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  {p.description}
+                </div>
+              )}
+              <div style={{ fontSize: 12, color: 'var(--panel-text-secondary)' }}>
+                {[
+                  p.skills.length > 0 ? t('config.plugins.skills_count', { n: p.skills.length }) : '',
+                  p.tools.length > 0 ? t('config.plugins.tools_count', { n: p.tools.length }) : '',
+                  p.providers.length > 0 ? t('config.plugins.providers_count', { n: p.providers.length }) : '',
+                  p.mcp_servers.length > 0 ? `MCP ${p.mcp_servers.length}` : '',
+                  p.reason ? t('config.plugins.skip_reason', { reason: p.reason }) : '',
+                ].filter(Boolean).join(' · ') || '—'}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div style={sectionTitle}>{t('config.plugins.section_diag')}</div>
+      <div
+        style={{
+          border: '1px solid var(--panel-border)',
+          borderRadius: 8,
+          padding: '10px 12px',
+          background: 'var(--panel-surface)',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 8,
+        }}
+      >
+        {diag?.last_report ? (
+          <div style={{ fontSize: 12, color: 'var(--panel-text-secondary)' }}>
+            {t('config.plugins.diag_last_report')}
+            {t('config.plugins.diag_loaded', { n: diag.last_report.plugins.length })}
+            {t('config.plugins.diag_skills', { n: diag.last_report.skills.length })}
+            {t('config.plugins.diag_tools', { n: diag.last_report.tools.length })}
+            {t('config.plugins.diag_mcp', { n: diag.last_report.mcp_servers.length })}
+            {diag.last_report.protocols.length > 0 &&
+              t('config.plugins.diag_protocols', { n: diag.last_report.protocols.length })}
+          </div>
+        ) : (
+          <div style={{ fontSize: 12, color: 'var(--panel-text-secondary)' }}>
+            {t('config.plugins.diag_no_report')}
+          </div>
+        )}
+        {diag && diag.last_report && diag.last_report.skipped.length > 0 && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+            <div style={{ fontSize: 12, fontWeight: 600, color: '#8a5a00' }}>
+              {t('config.plugins.diag_skipped_title', { n: diag.last_report.skipped.length })}
+            </div>
+            {diag.last_report.skipped.map((entry, i) => (
+              <div key={i} style={{ fontSize: 12, color: '#8a5a00', wordBreak: 'break-all' }}>
+                · {entry}
+              </div>
+            ))}
+          </div>
+        )}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--panel-text)' }}>
+            {t('config.plugins.diag_events')}
+          </div>
+          {diag && diag.events.length > 0 ? (
+            diag.events.map((entry, i) => (
+              <div key={i} style={{ fontSize: 12, color: 'var(--panel-text-secondary)', wordBreak: 'break-all' }}>
+                · {entry}
+              </div>
+            ))
+          ) : (
+            <div style={{ fontSize: 12, color: 'var(--panel-text-tertiary)' }}>
+              {t('config.plugins.diag_no_events')}
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div style={sectionTitle}>{t('config.plugins.section_skills')}</div>
+      {error ? null : skills === null ? (
+        <div style={{ fontSize: 13, color: 'var(--panel-text-secondary)' }}>{t('mind_inspector.common.loading')}</div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {skills.length === 0 && (
+            <div style={{ fontSize: 13, color: 'var(--panel-text-secondary)' }}>
+              {t('config.plugins.no_skills')}
+              {paths && (
+                <span>{t('config.plugins.skills_dir_hint', { dir: paths.skills_dir })}</span>
+              )}
+            </div>
+          )}
+          {skills.map((s) => (
+            <div
+              key={s.name}
+              title={s.description || s.name}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 10,
+                padding: '6px 12px',
+                borderBottom: '1px solid var(--panel-border)',
+              }}
+            >
+              <span style={{ fontSize: 13, fontWeight: 500, color: 'var(--panel-text)', minWidth: 120 }}>
+                {s.name}
+              </span>
+              <span style={{ fontSize: 11, color: 'var(--panel-text-tertiary)', flexShrink: 0 }}>
+                {originLabel(s.origin)}
+              </span>
+              <span
+                style={{
+                  flex: 1,
+                  fontSize: 12,
+                  color: 'var(--panel-text-secondary)',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                {s.description || '—'}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default PluginsPanel;

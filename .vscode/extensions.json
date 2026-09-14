@@ -1,0 +1,16 @@
+# Vivian 开发环境推荐扩展
+
+## Rust
+- rust-lang.rust-analyzer
+- serayuzgur.crates
+
+## 前端
+- dbaeumer.vscode-eslint
+- esbenp.prettier-vscode
+
+## Tauri
+- tauri-apps.tauri-vscode
+
+## 通用
+- ms-azuretools.vscode-docker
+- EditorConfig.EditorConfig

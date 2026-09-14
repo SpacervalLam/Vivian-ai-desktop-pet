@@ -1,0 +1,62 @@
+    Checking vivian v1.0.0 (G:\vivian-rs\src-tauri)
+error[E0015]: cannot call non-const associated function `HashMap::<std::string::String, std::sync::Arc<CompiledSpec>>::new` in statics
+   --> src\providers\protocol_registry.rs:144:74
+    |
+144 | static DYNAMIC: RwLock<HashMap<String, Arc<CompiledSpec>>> = RwLock::new(HashMap::new());
+    |                                                                          ^^^^^^^^^^^^^^
+    |
+    = note: calls in statics are limited to constant functions, tuple structs and tuple variants
+    = note: consider wrapping this expression in `std::sync::LazyLock::new(|| ...)`
+
+warning: unused import: `Tool`
+  --> src\pipeline\react.rs:39:27
+   |
+39 | use crate::tools::types::{Tool as _, ToolSemantics};
+   |                           ^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `futures::StreamExt`
+  --> src\providers\declarative.rs:14:5
+   |
+14 | use futures::StreamExt;
+   |     ^^^^^^^^^^^^^^^^^^
+
+warning: value assigned to `finish_reason` is never read
+   --> src\pipeline\steps\generation.rs:681:21
+    |
+681 |                     finish_reason = resp.finish_reason.clone();
+    |                     ^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `finish_reason` is never read
+   --> src\pipeline\steps\generation.rs:702:21
+    |
+702 |                     finish_reason = resp.finish_reason.clone();
+    |                     ^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: variable does not need to be mutable
+   --> src\providers\declarative.rs:180:13
+    |
+180 |         let mut set_field = |body: &mut Value, name: &str, value: Value| {
+    |             ----^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `c`
+   --> src\providers\js_runtime.rs:257:54
+    |
+257 |             move |_this: &JsValue, args: &[JsValue], c: &mut Context| {
+    |                                                      ^ help: if this is intentional, prefix it with an underscore: `_c`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+For more information about this error, try `rustc --explain E0015`.
+warning: `vivian` (lib) generated 6 warnings
+error: could not compile `vivian` (lib) due to 1 previous error; 6 warnings emitted

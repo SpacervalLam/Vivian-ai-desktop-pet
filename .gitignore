@@ -1,0 +1,74 @@
+# ===== Rust / Tauri =====
+src-tauri/target/
+target_check/
+src-tauri/gen/schemas/
+src-tauri/cargo_check*.txt
+
+# ===== Node.js / Frontend =====
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# ===== Vite =====
+*.tsbuildinfo
+
+# ===== IDE / Editor =====
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ===== Tauri WebView 缓存 =====
+.webview-data/
+
+# ===== 环境变量与密钥 =====
+.env
+.env.*
+!.env.example
+
+# ===== 日志与运行时数据 =====
+*.log
+logs/
+src-tauri/logs/
+
+# ===== 构建产物 =====
+*.exe
+*.dll
+*.lib
+*.pdb
+
+# ===== 用户运行时数据（不应入库） =====
+vivian_data/
+# 工作侧智能体在「选定工作区」下生成的跨会话项目记忆（<工作区>/.vivian/memory.md）
+# 每个工作区各一份、由 LLM 每轮重写，属本地运行时状态，不入库
+.vivian/
+
+# ===== 构建期脚本（本地工具，不入库） =====
+# 注意：encrypt-assets / doctor / check-* 等构建与哨兵脚本都在这里，
+# ignore 后新 clone 无法直接构建，需自行补齐 scripts/
+scripts/
+
+# ===== 加密资源与密钥（构建产物，不入库） =====
+src-tauri/assets_enc/
+src-tauri/asset_key.bin
+src-tauri/vivian.bundle.enc
+src-tauri/vivian.bundle.index.json
+
+# ===== AI 会话产物=====
+.workbuddy/
+.workbuddy-ai/
+MEMORY_OPTIMIZATION.md
+.texture-backup-4096/
+.glb-backup-4096/
+.config-backup-*/
+
+# ===== 本地临时区（脚本中间产物 / 归档 / 缓存，不入库） =====
+tmp/
+.npm-cache/
+.npm-cache-tmp/

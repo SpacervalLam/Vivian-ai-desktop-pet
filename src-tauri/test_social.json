@@ -1,0 +1,17 @@
+{
+  "agent_pairs": {
+    "nana|vivian": {
+      "trust": 0.4,
+      "intimacy": 0.2,
+      "respect": 0.4,
+      "dependency": 0.2,
+      "familiarity": 0.1,
+      "permanent_stage": "stranger",
+      "interaction_count": 1,
+      "consecutive_positive": 0,
+      "consecutive_negative": 0,
+      "last_interaction_time": 1789291727.0,
+      "milestones": []
+    }
+  }
+}

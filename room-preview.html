@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>宿舍房间 · 美术预览（免 Tauri）</title>
+    <style>
+      html, body { margin: 0; height: 100%; overflow: hidden; }
+      body { background: #e7d8c4; }
+      #root { position: absolute; inset: 0; }
+      canvas { display: block; touch-action: none; cursor: grab; }
+      canvas:active { cursor: grabbing; }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/roomPreview.tsx"></script>
+  </body>
+</html>

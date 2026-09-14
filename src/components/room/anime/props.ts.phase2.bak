@@ -1,0 +1,3559 @@
+/**
+ * 日式宿舍房间的一整套道具。
+ *
+ * 每一件都是"组合体"而不是单个 box：床有床头板/褥子/被子/枕头，书桌有显示器/
+ * 键盘/台灯/马克杯，书架里塞满书。全部程序化生成，所以改配色只需要动调色板。
+ *
+ * 约定：
+ *  - 每个 buildXxx(spec) 返回一个 Group，group 的原点 = 家具在地面的落脚中心
+ *  - spec.pos = [x, y, z]，spec.size = [宽X, 高Y, 深Z]
+ *  - 家具自身的局部坐标里，y=0 就是地板
+ */
+
+import * as THREE from 'three';
+import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
+import {
+  toon,
+  emissive,
+  addOutline,
+  makeRng,
+  woodFloorTexture,
+  wallTexture,
+  tatamiTexture,
+  tileTexture,
+  deckTexture,
+  furnitureWoodTexture,
+  rugTexture,
+  rainStreakTexture,
+  rainBlobTexture,
+  rainGlassTexture,
+  puddleRippleTexture,
+  dripTexture,
+  curtainTexture,
+  posterTexture,
+  screenTexture,
+  softDotTexture,
+  beamTexture,
+  lightPoolTexture,
+  wetStreakTexture,
+  marbleTexture,
+  velvetTexture,
+} from './toon';
+
+/* ============================================================================
+ * 模块级风格状态
+ * ========================================================================== */
+
+type ArtStyle = { outlineColor: string; outlineWidth: number; night?: boolean };
+
+let PAL: Record<string, string> = {};
+let STYLE: ArtStyle = { outlineColor: '#3d2f3a', outlineWidth: 0.0035, night: true };
+
+/** 夜景开关。决定窗外贴图、玻璃水痕、地面色温这一整组分支。 */
+let NIGHT = true;
+
+export function setArtStyle(palette: Record<string, string>, style?: Partial<ArtStyle>): void {
+  PAL = palette ?? {};
+  STYLE = { outlineColor: '#3d2f3a', outlineWidth: 0.0035, night: true, ...(style ?? {}) };
+  NIGHT = STYLE.night !== false;
+}
+
+function C(key: string, fallback: string): string {
+  return PAL[key] ?? fallback;
+}
+
+/** 给一件家具描边。scale 用于抵消父级缩放对描边厚度的影响。 */
+export function outlineProp(g: THREE.Object3D, scale = 1): THREE.Object3D {
+  return addOutline(g, STYLE.outlineWidth / Math.max(0.0001, scale), STYLE.outlineColor);
+}
+
+/* ============================================================================
+ * 小工具
+ * ========================================================================== */
+
+type ShadowMode = 'both' | 'cast' | 'receive' | 'none';
+
+function m(
+  geo: THREE.BufferGeometry,
+  mat: THREE.Material,
+  pos: [number, number, number] = [0, 0, 0],
+  shadow: ShadowMode = 'both'
+): THREE.Mesh {
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.position.set(pos[0], pos[1], pos[2]);
+  mesh.castShadow = shadow === 'both' || shadow === 'cast';
+  mesh.receiveShadow = shadow === 'both' || shadow === 'receive';
+  return mesh;
+}
+
+/**
+ * 方块基元统一带倒角。真实家具没有数学意义上的锐边——光打到锐边上没有任何
+ * 过渡，赛璐璐色阶下边缘是一条生硬的明暗跳变，这是"糙"的主要来源之一。
+ * 倒角给边缘一小段圆弧，色阶在弧上滚出一档过渡色，剪影也柔。
+ *
+ * 半径 8mm：5.9m 默认机位下亚像素，只贡献明暗过渡不改变剪影；第一人称
+ * 贴脸时刚好能读出"这是有厚度的板件"。薄件由 RoundedBoxGeometry 内部
+ * 把半径钳到 min(边长)/2，不会撑爆。
+ *
+ * 代价：segments=2 时每 box 约 300 三角形（锐边盒 12 个），全屋 260 处
+ * 合计约 8 万三角形，对 GPU 无感；几何是非索引的，合批侧见 merge.ts 的
+ * 索引归一处理。
+ */
+const BEVEL_RADIUS = 0.008;
+const box = (w: number, h: number, d: number) =>
+  new RoundedBoxGeometry(w, h, d, 2, BEVEL_RADIUS);
+const cyl = (rt: number, rb: number, h: number, seg = 16, openEnded = false) =>
+  new THREE.CylinderGeometry(rt, rb, h, seg, 1, openEnded);
+const sph = (r: number, w = 12, h = 10) => new THREE.SphereGeometry(r, w, h);
+
+/**
+ * 把几何的 UV 按世界尺寸缩放，让贴图的物理尺度脱离物体大小。
+ *
+ * 背景：贴图 repeat 是"每个几何平铺几次"，写死成常量后，同一张木地板铺在
+ * 4.8m 宽的主卧和 10.2m 长的走廊上，板条实际尺寸会差好几倍，而且长宽比被
+ * 非等比拉歪。改成 repeat 恒为 1、由 UV 承载尺寸：uv *= 尺寸 / 贴图代表的米数，
+ * 全屋木纹、瓷砖、墙纸的图案尺度就锁死了。
+ *
+ * 附带好处：UV 不同的地板可以共用同一个材质实例，同材质的地板就能合批。
+ */
+export function scaleUV(geo: THREE.BufferGeometry, sx: number, sy: number): THREE.BufferGeometry {
+  const uv = geo.getAttribute('uv') as THREE.BufferAttribute | undefined;
+  if (!uv) return geo;
+  for (let i = 0; i < uv.count; i++) uv.setXY(i, uv.getX(i) * sx, uv.getY(i) * sy);
+  uv.needsUpdate = true;
+  return geo;
+}
+
+/**
+ * 一张贴图代表多大的一块面（米）。
+ * 木工/瓦工的现实尺寸：地板条长 1.6m、宽 0.2m；地砖 0.45m 见方；
+ * 榻榻米半叠 0.9×1.8m（贴图是正方形铺满，所以 XY 不相等）；防腐木板窄一些。
+ */
+const FLOOR_TILE: Record<RoomDef['floor'], [number, number]> = {
+  wood: [1.6, 1.6],
+  tile: [1.8, 1.8],
+  tatami: [0.9, 1.8],
+  deck: [1.2, 1.2],
+};
+
+/** 墙纸：一张贴图代表 1.6m 见方，樱花簇的间距由此固定。 */
+const WALL_TILE = 1.6;
+
+/* ============================================================================
+ * 房间外壳：地板 / 墙 / 天花 / 踢脚线
+ * ========================================================================== */
+
+export type WallOpening = {
+  /** door=室内门洞（落地，门扇另做家具）；window=窗洞；glass=玻璃滑门；pass=纯通道洞口 */
+  kind: 'door' | 'window' | 'glass' | 'pass';
+  /** 沿墙方向的洞口范围（世界坐标，a < b） */
+  a: number;
+  b: number;
+  /** 竖向范围；door/pass 是 0 ~ 门楣高 */
+  y0: number;
+  y1: number;
+};
+
+export type WallSeg = {
+  id: string;
+  /** 法线轴：'z' = 墙沿 X 铺、法线指 ±Z；'x' = 墙沿 Z 铺、法线指 ±X */
+  axis: 'x' | 'z';
+  /** 墙所在的坐标（如 axis 'z' → 墙在 z = at） */
+  at: number;
+  /** 沿墙方向的范围 */
+  from: number;
+  to: number;
+  /** 外墙朝屋内的法线方向；内墙（exterior=false）恒为双面，忽略此值 */
+  dir?: 1 | -1;
+  exterior?: boolean;
+  openings?: WallOpening[];
+};
+
+export type RoomDef = {
+  id: string;
+  x0: number; x1: number; z0: number; z1: number;
+  floor: 'wood' | 'tile' | 'tatami' | 'deck';
+  /** 阳台这类露天区不铺天花 */
+  ceiling?: boolean;
+};
+
+export type ShellConfig = {
+  room: { bounds: { x0: number; x1: number; z0: number; z1: number }; height: number };
+  shell: {
+    wallThickness: number;
+    rooms: RoomDef[];
+    walls: WallSeg[];
+    /** 阳台栏杆：沿边一圈，不挡视线也不参与剖面剔除 */
+    railing?: Array<{ axis: 'x' | 'z'; at: number; from: number; to: number }>;
+  };
+};
+
+/** 一个"墙面 + 该侧的厚装饰（门框/玻璃门/窗帘）"。装饰组按相机在墙哪一侧显隐。 */
+export type WallSide = {
+  id: string;
+  axis: 'x' | 'z';
+  at: number;
+  dir: 1 | -1;
+  /** 贴墙装饰（窗框/门框）。跟随墙显隐。 */
+  decor: THREE.Group;
+  // 注意：decor 和 roomSideDecor 在观察者模式下**都**跟随墙显隐（见 RoomScene 渲染循环）。
+  // 早期注释写的是「roomSideDecor 永远可见」，早已不成立——墙被视线剔除时凸入室内的
+  // 窗帘/窗台也得一起隐，否则剖切面上会吊着一层无墙的装饰。
+  /** 凸入室内的部分（窗台/窗帘/盆栽）。 */
+  roomSideDecor: THREE.Group;
+  /**
+   * 该侧的洞口断面（窗台/门楣/门套侧壁）。跟随墙显隐。
+   * 内墙的断面两侧房间都看得见，统一走 `ShellResult.interiorReveals` 恒显示，
+   * 那种墙的这个组是空的。
+   */
+  reveals: THREE.Group;
+};
+
+export type ShellResult = {
+  group: THREE.Group;
+  wallSides: WallSide[];
+  wallMeshes: THREE.Mesh[];
+  ceilingMeshes: THREE.Mesh[];
+  /** 内墙的洞口断面：两侧房间都看得见，不参与逐侧剔除。 */
+  interiorReveals: THREE.Group;
+};
+
+/**
+ * 房间外壳 v3：多房间 L 形套房（第一人称双面模式）。
+ *
+ * 墙体全部 DoubleSide：第一人称在房间内部，从任何角度都能看到墙的正面。
+ * 不再是剖面娃娃屋——相机进入房间后需要看到完整的室内空间。
+ *
+ * 地板按房间分铺：木地板/瓷砖/榻榻米/防腐木。天花同理，阳台露天不铺。
+ *
+ * 每面墙的每一侧登记一个 WallSide：厚装饰（窗框窗帘、门扇、玻璃滑门）由
+ * RoomScene 按布局里的 wall 字段挂进对应 decor 组。
+ *
+ * 墙/天花/侧壁全部投影且 shadowSide=DoubleSide：太阳是房间外的平行光，
+ * 直射光只允许从窗洞进来。
+ */
+export function buildRoomShell(layout: ShellConfig): ShellResult {
+  const g = new THREE.Group();
+  const H = layout.room.height;
+  const t = layout.shell.wallThickness;
+
+  /** 收集所有墙板 mesh，供观察者模式做视线剔除（背对相机的墙隐藏） */
+  const wallMeshes: THREE.Mesh[] = [];
+  const ceilingMeshes: THREE.Mesh[] = [];
+
+  const floorMat = toon(C(NIGHT ? 'floorTintNight' : 'floorTint', '#ffffff'), { map: woodFloorTexture() });
+  // 这两份要就地改 shadowSide，必须独占，免得改动顺着共享缓存流到别处。
+  // 第一人称模式：墙体全部双面（从房间内部看需要看到墙的正面）
+  const wallMat = toon(C(NIGHT ? 'wallTintNight' : 'wallTint', '#ffffff'), { map: wallTexture(), unique: true, side: THREE.DoubleSide });
+  const ceilMat = toon(C('ceiling', '#fdf7ec'), { unique: true, side: THREE.DoubleSide });
+  /**
+   * 洞口侧壁（窗台/门楣/两侧门套的那一圈窄面）是墙的**断面**，不是墙面。
+   * 断面不贴墙纸——现实里它是抹灰见光，而且这圈面只有 12cm 宽，
+   * 铺一张 1.6m 见方的墙纸上去等于把图案放大十几倍，近看是一坨糊色。
+   */
+  const revealMat = toon(C('reveal', '#efe6d6'), { unique: true });
+  /**
+   * 墙/天花是朝内的单面平面，而 three 的阴影 pass 对 FrontSide 材质只渲染背面
+   * （shadowSide 默认映射 FrontSide→BackSide）。朝光的那一面是正面的墙会被整个
+   * 剔除掉，直射光就从墙里漏进来了。显式设 DoubleSide 让墙真正挡光。
+   */
+  wallMat.shadowSide = THREE.DoubleSide;
+  ceilMat.shadowSide = THREE.DoubleSide;
+  revealMat.shadowSide = THREE.DoubleSide;
+
+  const wallSides: WallSide[] = [];
+  const decorFor = (id: string, axis: 'x' | 'z', at: number, dir: 1 | -1): WallSide => {
+    const decor = new THREE.Group();
+    const roomSideDecor = new THREE.Group();
+    const reveals = new THREE.Group();
+    g.add(decor);
+    g.add(roomSideDecor);
+    g.add(reveals);
+    const ws: WallSide = { id, axis, at, dir, decor, roomSideDecor, reveals };
+    wallSides.push(ws);
+    return ws;
+  };
+
+  /* ---------------- 地板 / 天花（按房间） ---------------- */
+
+  /**
+   * 地面材质按铺装种类共享一份实例 —— 各房间的尺寸差异已经由 UV 缩放承担，
+   * 不再需要为每个房间 clone 一份材质去改 repeat。共享是后面合批的前提。
+   */
+  const floorMats: Record<RoomDef['floor'], THREE.Material> = {
+    wood: floorMat,
+    tatami: toon('#ffffff', { map: tatamiTexture() }),
+    tile: toon('#ffffff', { map: tileTexture() }),
+    // 阳台木地板带色偏而不是纯白：纯白会让木材贴图原样输出暖橙，
+    // 在冷灰立面正中横着断开一条（邻居户全是湿混凝土）。
+    deck: toon(C('deck', '#9a8a70'), { map: deckTexture(), finish: 'wet' }),
+  };
+
+  for (const r of layout.shell.rooms) {
+    const w = r.x1 - r.x0, d = r.z1 - r.z0;
+    const cx = (r.x0 + r.x1) / 2, cz = (r.z0 + r.z1) / 2;
+    const [tx, tz] = FLOOR_TILE[r.floor];
+    const fgeo = scaleUV(new THREE.PlaneGeometry(w, d), w / tx, d / tz);
+    const fl = m(fgeo, floorMats[r.floor], [cx, 0, cz], 'receive');
+    fl.rotation.x = -Math.PI / 2;
+    g.add(fl);
+    if (r.ceiling !== false) {
+      const ce = m(new THREE.PlaneGeometry(w, d), ceilMat, [cx, H, cz], 'both');
+      ce.rotation.x = Math.PI / 2;
+      ce.userData.noMerge = true;
+      ce.userData.isCeiling = true;
+      ceilingMeshes.push(ce);
+      g.add(ce);
+    }
+  }
+
+  /* ---------------- 墙 ---------------- */
+
+  /** 一块墙板：axis='z' → 板在 XY 面、法线指 dir*Z；axis='x' → 法线指 dir*X。 */
+  const piece = (axis: 'x' | 'z', at: number, a0: number, a1: number, y0: number, y1: number, dir: 1 | -1) => {
+    const len = a1 - a0, cy = (y0 + y1) / 2, c = (a0 + a1) / 2;
+    if (len < 0.01 || y1 - y0 < 0.01) return;
+    // 墙纸按米制寻址：墙有多长多高，UV 就铺几张贴图，墙纸图案尺度与墙段尺寸无关。
+    const pgeo = scaleUV(new THREE.PlaneGeometry(len, y1 - y0), len / WALL_TILE, (y1 - y0) / WALL_TILE);
+    let mesh: THREE.Mesh;
+    if (axis === 'z') {
+      mesh = m(pgeo, wallMat, [c, cy, at], 'both');
+      if (dir < 0) mesh.rotation.y = Math.PI;
+    } else {
+      mesh = m(pgeo, wallMat, [at, cy, c], 'both');
+      mesh.rotation.y = dir > 0 ? Math.PI / 2 : -Math.PI / 2;
+    }
+    // 标记法线方向：世界空间中这面墙"朝向"哪一侧
+    mesh.userData.isWallPiece = true;
+    mesh.userData.wallAxis = axis;
+    mesh.userData.wallAt = at;       // 墙所在轴线坐标
+    mesh.userData.wallDir = dir;     // 法线方向（+1/-1）
+    mesh.userData.noMerge = true;    // 墙板不参与合批，保留独立 visible 控制
+    wallMeshes.push(mesh);
+    g.add(mesh);
+  };
+
+  /**
+   * 洞口侧壁：四圈窄面，法线朝洞口中心。mid = 侧壁所在平面（墙厚的中间）。
+   * target 为 null 表示这一侧不生成断面（内墙两侧只需生成一次，见下方调用处）。
+   */
+  const reveal = (axis: 'x' | 'z', mid: number, op: WallOpening, target: THREE.Group | null) => {
+    if (!target) return;
+    const ow = op.b - op.a, oh = op.y1 - op.y0;
+    const ca = (op.a + op.b) / 2;
+    const mk = (geo: THREE.PlaneGeometry, pos: [number, number, number], rx: number, ry: number) => {
+      const mesh = m(geo, revealMat, pos, 'both');
+      if (rx) mesh.rotation.x = rx;
+      if (ry) mesh.rotation.y = ry;
+      target.add(mesh);
+    };
+    if (axis === 'z') {
+      if (op.y0 > 0.01) mk(new THREE.PlaneGeometry(ow, t), [ca, op.y0, mid], -Math.PI / 2, 0);   // 窗台下侧壁
+      if (H - op.y1 > 0.01) mk(new THREE.PlaneGeometry(ow, t), [ca, op.y1, mid], Math.PI / 2, 0); // 门楣下侧壁
+      mk(new THREE.PlaneGeometry(t, oh), [op.a, (op.y0 + op.y1) / 2, mid], 0, Math.PI / 2);
+      mk(new THREE.PlaneGeometry(t, oh), [op.b, (op.y0 + op.y1) / 2, mid], 0, -Math.PI / 2);
+    } else {
+      if (op.y0 > 0.01) mk(new THREE.PlaneGeometry(ow, t), [mid, op.y0, ca], -Math.PI / 2, 0);
+      if (H - op.y1 > 0.01) mk(new THREE.PlaneGeometry(ow, t), [mid, op.y1, ca], Math.PI / 2, 0);
+      mk(new THREE.PlaneGeometry(t, oh), [mid, (op.y0 + op.y1) / 2, op.a], 0, Math.PI / 2);
+      mk(new THREE.PlaneGeometry(t, oh), [mid, (op.y0 + op.y1) / 2, op.b], 0, -Math.PI / 2);
+    }
+  };
+
+  /** 沿墙切洞：返回全高段 + 处理下坎/门楣/侧壁。 */
+  const buildWallRun = (
+    axis: 'x' | 'z',
+    at: number,
+    dir: 1 | -1,
+    from: number,
+    to: number,
+    ops: WallOpening[],
+    revealMid: number,
+    revealTarget: THREE.Group | null
+  ) => {
+    const sorted = [...(ops ?? [])].sort((p, q) => p.a - q.a);
+    let cursor = from;
+    for (const op of sorted) {
+      if (op.a > cursor) piece(axis, at, cursor, op.a, 0, H, dir);
+      if (op.y0 > 0.01) piece(axis, at, op.a, op.b, 0, op.y0, dir);
+      if (H - op.y1 > 0.01) piece(axis, at, op.a, op.b, op.y1, H, dir);
+      reveal(axis, revealMid, op, revealTarget);
+      cursor = Math.max(cursor, op.b);
+    }
+    if (to > cursor) piece(axis, at, cursor, to, 0, H, dir);
+  };
+
+  /** 内墙的洞口断面：两侧房间都看得见，不能跟着任何一侧剔除，所以单独一个组。 */
+  const interiorReveals = new THREE.Group();
+  g.add(interiorReveals);
+
+  for (const w of layout.shell.walls) {
+    const ops = w.openings ?? [];
+    if (w.exterior) {
+      const dir = (w.dir ?? 1) as 1 | -1;
+      const ws = decorFor(w.id, w.axis, w.at, dir);
+      // 外墙：名义线就是内表面，洞口侧壁向外侧探出 t/2；断面归这一侧，跟着墙剔除
+      buildWallRun(w.axis, w.at, dir, w.from, w.to, ops, w.at - dir * t / 2, ws.reveals);
+    } else {
+      // 内墙：名义线两侧各让出 t/2，各朝一侧房间；洞口侧壁铺满中间的墙厚。
+      // 两侧的 run 传进来的 revealMid 都是 w.at，断面位置完全重合——
+      // 生成两份就是精确共面的重复面（z-fighting），只让第一份生成。
+      buildWallRun(w.axis, w.at - t / 2, -1, w.from, w.to, ops, w.at, interiorReveals);
+      buildWallRun(w.axis, w.at + t / 2, 1, w.from, w.to, ops, w.at, null);
+      decorFor(`${w.id}:a`, w.axis, w.at - t / 2, -1);
+      decorFor(`${w.id}:b`, w.axis, w.at + t / 2, 1);
+    }
+  }
+
+  /* ---------------- 阳台栏杆 ---------------- */
+
+  if (layout.shell.railing) {
+    // 203 的阳台栏杆和邻居户是同一条阳台线，从街上看必须连成一道——
+    // 早先它是米白（#f4f0e8 / #e8e2d6），在冷灰立面中间断成两截亮白，
+    // 是"立面被切成两种材质"的直接来源。这里跟 exterior.ts 的 EXT.railing
+    // 取同一组炭灰金属色，palette 里可用 railing / railTop 覆盖。
+    const railMat = toon(C('railing', '#3f4650'), { finish: 'metal' });
+    const postMat = toon(C('railTop', '#4b525c'), { finish: 'metal' });
+    const rh = 1.05; // 栏杆高度
+    for (const r of layout.shell.railing) {
+      const len = r.to - r.from;
+      const c = (r.from + r.to) / 2;
+      // 立柱间距 ~0.55m
+      const n = Math.max(2, Math.round(len / 0.55) + 1);
+      for (let i = 0; i < n; i++) {
+        const p = r.from + (len * i) / (n - 1);
+        const post = m(box(0.055, rh, 0.055), postMat,
+          r.axis === 'z' ? [p, rh / 2, r.at] : [r.at, rh / 2, p], 'cast');
+        g.add(post);
+      }
+      // 顶扶手 + 底横档 + 竖栅
+      const rail = m(box(r.axis === 'z' ? len : 0.07, 0.05, r.axis === 'z' ? 0.07 : len), railMat,
+        r.axis === 'z' ? [c, rh, r.at] : [r.at, rh, c], 'cast');
+      g.add(rail);
+      g.add(m(box(r.axis === 'z' ? len : 0.05, 0.04, r.axis === 'z' ? 0.05 : len), postMat,
+        r.axis === 'z' ? [c, 0.08, r.at] : [r.at, 0.08, c], 'none'));
+      for (let p = r.from + 0.14; p < r.to - 0.05; p += 0.115) {
+        g.add(m(box(r.axis === 'z' ? 0.018 : 0.03, rh - 0.1, r.axis === 'z' ? 0.03 : 0.018), postMat,
+          r.axis === 'z' ? [p, (rh - 0.1) / 2 + 0.06, r.at] : [r.at, (rh - 0.1) / 2 + 0.06, p], 'none'));
+      }
+    }
+  }
+
+  return { group: g, wallSides, wallMeshes, ceilingMeshes, interiorReveals };
+}
+
+/* ============================================================================
+ * 雨
+ * ========================================================================== */
+
+export type RainConfig = {
+  count: number;
+  area: { x: [number, number]; y: [number, number]; z: [number, number] };
+  /** 雨不能落进房间里，这个盒子里的点会被丢掉重摇。 */
+  exclude?: { min: [number, number, number]; max: [number, number, number] };
+  /** 雨滴下落速度（米/秒）。 */
+  speed: number;
+  /** 水平风速（米/秒），与 speed 一起决定雨丝倾角 ≈ atan2(wind, speed)。
+   *  默认 1.5，配合 speed 6.0 给出约 14° 的斜雨。日式动画常用 10–20°。 */
+  wind?: number;
+  /** 中景雨丝基础长度（米）。近层 ×nearLenScale / 远层 ×farLenScale。默认 0.13。 */
+  streakLen?: number;
+  /** 中景雨丝基础宽度（米）。默认 0.014。 */
+  streakWidth?: number;
+  /** 纵深分层数，默认 3。 */
+  layers?: number;
+  /** 最远档长度缩放，默认 0.40。 */
+  farLenScale?: number;
+  /** 最远档宽度缩放，默认 0.55。 */
+  farWidScale?: number;
+  /** 最远档亮度缩放（颜色倍率），默认 0.30。 */
+  farBrightScale?: number;
+  /** 最近档长度缩放（相对中景），默认 2.2。 */
+  nearLenScale?: number;
+  /** 最近档宽度缩放，默认 3.0。 */
+  nearWidScale?: number;
+  /** 最近档亮度缩放，默认 1.15。 */
+  nearBrightScale?: number;
+
+  /** 兼容字段（旧版 size / opacity / farSize / farOpacity / wind=横向漂移）的别名映射，
+   *  让旧配置不用改也能工作。 */
+  /** @deprecated 用 streakLen */
+  size?: number;
+  /** @deprecated 用 nearBrightScale */
+  opacity?: number;
+  /** @deprecated 用 farLenScale */
+  farSize?: number;
+  /** @deprecated 用 farBrightScale */
+  farOpacity?: number;
+};
+
+type RainLayer = {
+  mesh: THREE.InstancedMesh;
+  count: number;
+  /** 每实例的世界坐标（每帧更新） */
+  px: Float32Array; py: Float32Array; pz: Float32Array;
+  /** 每实例的当前下落速度（米/秒），决定倾角和帧位移 */
+  spd: Float32Array;
+  /** 每实例的长/宽缩放（在基础矩形尺寸上的倍率，制造"长长短短"的差异） */
+  lenScale: Float32Array;
+  widScale: Float32Array;
+  /** 每实例的亮度（已经预乘到 instanceColor 里） */
+  bright: Float32Array;
+  /** z 带（每实例落回顶端时只在带内重摇） */
+  band: [number, number];
+  /** x 范围（落回顶端时在范围内重摇） */
+  areaX: [number, number];
+  yRange: [number, number];
+  /** 水平风速（米/秒，整层共享） */
+  wind: number;
+};
+
+/**
+ * 一场雨。
+ *
+ * 用 InstancedMesh 而不是 Points：Points 的方块永远正对相机，纹理再竖也是
+ * 屏幕上永远竖的——做不出斜雨。InstancedMesh 给每根雨丝一个独立的旋转矩阵，
+ * 跟着风速倾斜，就有了日式动画里那种"被风斜吹过来的雨"。
+ *
+ * 三个 z 带 × 三种外观：
+ *  - 最近（z 最大那一段）：软椭圆纹理 + 大尺寸 + 较亮 → "景前大雨滴"，营造
+ *    "摄像机正站在雨里"的近距虚化感。这是参考图里最显眼的层次。
+ *  - 中景（中间）：细条纹理 + 中等长度 → 雨幕主体。
+ *  - 远景（z 最小那一段）：细条 + 短 + 暗 + 数量多 → "雨幕"空气透视。
+ *
+ * 倾角：rotation.z = atan2(wind, spd[i])，每实例随自身速度略有差异（≈ 11–16°），
+ * 自然不整齐。
+ *
+ * 长度变化：每实例 lenScale ∈ [0.75, 1.25]，制造"长雨丝 + 中等 + 小雨丝"混合。
+ */
+export function buildRain(cfg: RainConfig): { object: THREE.Group; update: (dt: number) => void } {
+  const [x0, x1] = cfg.area.x;
+  const [y0, y1] = cfg.area.y;
+  const [z0, z1] = cfg.area.z;
+  const ex = cfg.exclude;
+  /** 落入"有顶房间"并集包围盒内（室内/楼下实心体量）——这些地方不该有雨。
+   *  注意：判定是整盒（含 x/z 柱 + y 区间），所以檐上(y 在盒顶之上)的雨仍会
+   *  落、只是被不透明楼体挡住看不见；真正要清掉的是盒内那段（玩家站在 203
+   *  里能看到的那截）。 */
+  const inExclude = (x: number, y: number, z: number): boolean =>
+    !!ex &&
+    x > ex.min[0] && x < ex.max[0] &&
+    y > ex.min[1] && y < ex.max[1] &&
+    z > ex.min[2] && z < ex.max[2];
+  const speed = cfg.speed;
+  // 兼容映射：旧的 size/opacity/farSize/farOpacity 也吃进来
+  const baseLen   = cfg.streakLen   ?? cfg.size     ?? 0.13;
+  const baseWid   = cfg.streakWidth               ?? 0.014;
+  const nearLenK  = cfg.nearLenScale              ?? 2.2;
+  const nearWidK  = cfg.nearWidScale              ?? 3.0;
+  const nearBriK  = cfg.nearBrightScale           ?? 1.15;
+  const farLenK   = cfg.farLenScale    ?? cfg.farSize     ?? 0.40;
+  const farWidK   = cfg.farWidScale                ?? 0.55;
+  const farBriK   = cfg.farBrightScale ?? cfg.farOpacity  ?? 0.30;
+  const baseBri   = cfg.nearBrightScale ? 1.0 : (cfg.opacity ?? 0.28);
+  // 真正用的亮度基准 = 中景亮度 = near / nearBriK；远层 ×farBriK；近层 ×nearBriK
+  const midBri    = baseBri / nearBriK;
+  const wind      = cfg.wind ?? 1.5;
+  const layers    = Math.max(1, Math.floor(cfg.layers ?? 3));
+
+  /** 层权重：近档密一些、远档也密（远景靠数量撑"雨幕"）。
+   *  参考：近 18% / 中 50% / 远 32%。 */
+  const weights: number[] = [];
+  let wSum = 0;
+  if (layers === 1) {
+    weights.push(1); wSum = 1;
+  } else if (layers === 3) {
+    weights.push(0.18, 0.50, 0.32); wSum = 1;
+  } else {
+    for (let L = 0; L < layers; L++) {
+      const t = L / (layers - 1);
+      weights.push(1.4 - 0.7 * t);
+      wSum += weights[L];
+    }
+  }
+
+  const group = new THREE.Group();
+  group.name = 'rain';
+  const built: RainLayer[] = [];
+  const band = (z1 - z0) / layers;
+  const rnd = makeRng(20260831);
+
+  const texStreak = rainStreakTexture();
+  const texBlob = rainBlobTexture();
+
+  const m = new THREE.Matrix4();
+  const sV = new THREE.Vector3();
+  const pV = new THREE.Vector3();
+  const c = new THREE.Color();
+  const baseCol = new THREE.Color().setRGB(0.82, 0.88, 0.94);   // 冷蓝偏白
+
+  for (let L = 0; L < layers; L++) {
+    const t = layers === 1 ? 0 : L / (layers - 1);
+    // 长度 / 宽度 / 亮度：插值在 mid → far（t=1）或 mid → near（t=0）之间
+    let quadH: number, quadW: number, briK: number;
+    if (L === 0) {              // 最近
+      quadH = baseLen * nearLenK;
+      quadW = baseWid * nearWidK;
+      briK = midBri * nearBriK;
+    } else if (L === layers - 1) {  // 最远
+      quadH = baseLen * farLenK;
+      quadW = baseWid * farWidK;
+      briK = midBri * farBriK;
+    } else {                    // 中间
+      // 3 层时只有 L=0/1/2；多于 3 层时按 t 线性
+      const tt = layers === 1 ? 0 : (L / (layers - 1));
+      quadH = baseLen * (nearLenK + (1 - nearLenK) * tt);
+      quadW = baseWid * (nearWidK + (1 - nearWidK) * tt);
+      briK = midBri * (nearBriK + (1 - nearBriK) * tt);
+    }
+    // 修正：layers=3 时 L=1 应是中景 base 长度，不是上面那公式的奇怪值
+    if (layers === 3 && L === 1) {
+      quadH = baseLen;
+      quadW = baseWid;
+      briK = midBri;
+    }
+
+    // L=0 占 z 最大那一段（相机在 +z），越远越往 -z
+    const bz1 = z1 - (z1 - z0) * (L / layers);
+    const bz0 = bz1 - band;
+    const n = L === layers - 1
+      ? cfg.count - built.reduce((s, l) => s + l.count, 0)
+      : Math.round((cfg.count * weights[L]) / wSum);
+    if (n <= 0) continue;
+
+    const isNear = L === 0;
+    const tex = isNear ? texBlob : texStreak;
+    const geo = new THREE.PlaneGeometry(quadW, quadH);
+    // 把矩形锚点挪到底边中点：drop 位置 = 矩形底边中点，雨丝沿 +Y 延伸（斜向上 = 上风方向）
+    geo.translate(0, quadH / 2, 0);
+
+    const mat = new THREE.MeshBasicMaterial({
+      map: tex,
+      color: 0xffffff,
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.NormalBlending,    // 透明度纹理别用 Additive——会烧白
+      side: THREE.DoubleSide,
+    });
+
+    const mesh = new THREE.InstancedMesh(geo, mat, n);
+    mesh.frustumCulled = false;
+    mesh.renderOrder = 10 + (layers - L);   // 近层最后画（盖在远层上）
+    mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+
+    // instanceColor：亮度预乘进去（material.color=white，纹理已经是冷蓝）
+    const colorArr = new Float32Array(n * 3);
+    mesh.instanceColor = new THREE.InstancedBufferAttribute(colorArr, 3);
+    mesh.instanceColor.setUsage(THREE.DynamicDrawUsage);
+
+    const px = new Float32Array(n), py = new Float32Array(n), pz = new Float32Array(n);
+    const spd = new Float32Array(n);
+    const lenScale = new Float32Array(n), widScale = new Float32Array(n);
+    const bright = new Float32Array(n);
+
+    for (let i = 0; i < n; i++) {
+      let x = 0, y = 0, z = 0;
+      // 落在房间里的重摇，最多试 8 次，试不出来就认了
+      for (let k = 0; k < 8; k++) {
+        x = x0 + rnd() * (x1 - x0);
+        y = y0 + rnd() * (y1 - y0);
+        z = bz0 + rnd() * (bz1 - bz0);
+        if (!ex) break;
+        const inside =
+          x > ex.min[0] && x < ex.max[0] &&
+          y > ex.min[1] && y < ex.max[1] &&
+          z > ex.min[2] && z < ex.max[2];
+        if (!inside) break;
+      }
+      px[i] = x; py[i] = y; pz[i] = z;
+      // 远档略压慢，制造"远处雨感觉在飘"的层次
+      spd[i] = speed * (1 - 0.16 * t) * (0.85 + rnd() * 0.30);
+      // 长度 0.75..1.25，宽度 0.85..1.15：避免"一整屏雨丝长得一样"
+      lenScale[i] = 0.75 + rnd() * 0.50;
+      widScale[i] = 0.85 + rnd() * 0.30;
+      bright[i] = briK * (0.70 + rnd() * 0.55);
+
+      const tilt = Math.atan2(wind, spd[i]);
+      const qTilt = _qEulerZ.setFromAxisAngle(_zAxis, tilt);
+      sV.set(widScale[i], lenScale[i], 1);
+      pV.set(x, y, z);
+      m.compose(pV, qTilt, sV);
+      mesh.setMatrixAt(i, m);
+      c.copy(baseCol).multiplyScalar(bright[i]);
+      mesh.setColorAt(i, c);
+    }
+    mesh.instanceMatrix.needsUpdate = true;
+    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+
+    group.add(mesh);
+    built.push({
+      mesh, count: n, px, py, pz, spd, lenScale, widScale, bright,
+      band: [bz0, bz1], areaX: [x0, x1], yRange: [y0, y1], wind,
+    });
+  }
+
+  const update = (dt: number) => {
+    const span = y1 - y0;
+    for (const L of built) {
+      const attr = L.mesh.instanceMatrix;
+      const arr = attr.array as Float32Array;
+      for (let i = 0; i < L.count; i++) {
+        // 位置更新：水平风恒速，下落速度按每实例
+        L.px[i] += L.wind * dt;
+        L.py[i] -= L.spd[i] * dt;
+        if (L.py[i] < L.yRange[0]) {
+          L.py[i] += span;
+          L.px[i] = L.areaX[0] + Math.random() * (L.areaX[1] - L.areaX[0]);
+          L.pz[i] = L.band[0] + Math.random() * (L.band[1] - L.band[0]);
+        }
+        if (L.px[i] > L.areaX[1]) L.px[i] -= L.areaX[1] - L.areaX[0];
+
+        // 室内/实心体量禁区：每帧复核。落进盒内的雨（从檐上落下、或横向风
+        // 飘进来的）立刻重摇到盒外，保证"室内不是下雨区"——否则玩家站在 203
+        // 里会看到雨丝穿堂而过。
+        if (inExclude(L.px[i], L.py[i], L.pz[i])) {
+          for (let k = 0; k < 8; k++) {
+            L.px[i] = L.areaX[0] + Math.random() * (L.areaX[1] - L.areaX[0]);
+            L.py[i] = L.yRange[0] + Math.random() * (L.yRange[1] - L.yRange[0]);
+            L.pz[i] = L.band[0] + Math.random() * (L.band[1] - L.band[0]);
+            if (!inExclude(L.px[i], L.py[i], L.pz[i])) break;
+          }
+        }
+
+        // 重新合成矩阵（位置 + 倾角 + 缩放）
+        const tilt = Math.atan2(L.wind, L.spd[i]);
+        _qEulerZ.setFromAxisAngle(_zAxis, tilt);
+        sV.set(L.widScale[i], L.lenScale[i], 1);
+        pV.set(L.px[i], L.py[i], L.pz[i]);
+        m.compose(pV, _qEulerZ, sV);
+        m.toArray(arr, i * 16);
+      }
+      attr.needsUpdate = true;
+    }
+  };
+
+  return { object: group, update };
+}
+
+// 共享给所有帧的临时对象，省得每实例每帧 new Quaternion
+const _zAxis = new THREE.Vector3(0, 0, 1);
+const _qEulerZ = new THREE.Quaternion();
+
+/* ============================================================================
+ * 湿地面反光
+ * ========================================================================== */
+
+export type PoolSpec = {
+  pos: [number, number];
+  size: number;
+  color: string;
+  opacity: number;
+  /** 沿 Y 轴的旋转，让光斑不是清一色的正圆。 */
+  rot?: number;
+  /**
+   * 'pool'（默认）= 灯脚下一团圆光晕；
+   * 'streak' = 湿地上被拉长的倒影，沿 z 方向拖出一条软光带。
+   * 夜里站在街上看，湿路面的主角是后者，所以沿街那几处都用 streak。
+   */
+  shape?: 'pool' | 'streak';
+  /** streak 的长度（米）。省略时按 size * 5 估一个。 */
+  len?: number;
+};
+
+/**
+ * 湿地面的反光。
+ *
+ * 这里不做真正的镜面反射（要再渲一遍整个场景，代价太大），做的是动画背景里
+ * 真正被用的那种画法：在每个光源正下方的地面上铺一团软光晕，再撒一层会闪的
+ * 碎光点。物理上"不对"，但视觉上这就是湿沥青该有的样子，而且从任何角度看都成立
+ * ——真镜面反而只有在特定角度才对。
+ */
+export function buildWetGround(
+  pools: PoolSpec[],
+  opts: {
+    sparkleCount?: number;
+    area?: number;
+    /**
+     * 碎光点的铺开中心，默认原点。
+     *
+     * 必须能指定：这套房间只有阳台（z 4.7..6.3）是露天的，而碎光点画在
+     * y=0.008——比室内地板（y=0）高 8mm。不挪中心的话，它们会一路洒进客厅、
+     * 主卧的地板上，变成"室内地上浮着一层会闪的蓝点"。
+     */
+    center?: [number, number];
+  } = {}
+): THREE.Group {
+  const g = new THREE.Group();
+
+  for (const p of pools) {
+    const streak = p.shape === 'streak';
+    const len = p.len ?? p.size * 5;
+    const pool = new THREE.Mesh(
+      // 平面先转到水平：局部 height 落在世界 z 上，所以拉长的是第二个参数
+      new THREE.PlaneGeometry(p.size, streak ? len : p.size),
+      new THREE.MeshBasicMaterial({
+        map: streak ? wetStreakTexture() : lightPoolTexture(),
+        color: new THREE.Color(p.color),
+        transparent: true,
+        opacity: p.opacity,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      })
+    );
+    pool.rotation.x = -Math.PI / 2;
+    pool.rotation.z = p.rot ?? 0;
+    // 拉长倒影从光源脚下朝观察者（+z）拖出去：几何中心要往 +z 挪半个长度
+    pool.position.set(p.pos[0], 0.006, p.pos[1] + (streak ? len / 2 : 0));
+    pool.renderOrder = 2;
+    g.add(pool);
+  }
+
+  // 碎光点：湿地面上那些会随视角变化的小亮点，用固定点云近似
+  const count = opts.sparkleCount ?? 0;
+  const area = opts.area ?? 0;
+  if (count > 0 && area > 0) {
+    const [scx, scz] = opts.center ?? [0, 0];
+    const pos = new Float32Array(count * 3);
+    const rnd = makeRng(60214);
+    for (let i = 0; i < count; i++) {
+      pos[i * 3] = scx + (rnd() - 0.5) * area * 2;
+      pos[i * 3 + 1] = 0.008;
+      pos[i * 3 + 2] = scz + (rnd() - 0.5) * area * 2;
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    const sparkles = new THREE.Points(
+      geo,
+      new THREE.PointsMaterial({
+        size: 0.035,
+        map: softDotTexture(),
+        color: new THREE.Color(C('sparkle', '#dde4ea')),
+        transparent: true,
+        opacity: 0.5,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+        sizeAttenuation: true,
+      })
+    );
+    sparkles.frustumCulled = false;
+    g.add(sparkles);
+  }
+
+  return g;
+}
+
+/* ============================================================================
+ * 湿地涟漪（雨打积水）
+ * ========================================================================== */
+
+export type PuddleRippleOpts = {
+  /** 撒开半边长（世界 x/z），默认 5.2 */
+  area?: number;
+  /** 撒开中心 [x, z]，默认 [0.3, 9.5]（街心湿地面） */
+  center?: [number, number];
+  /** 涟漪数量，默认 28 */
+  count?: number;
+  /** 离地高度（米），默认 0.014——刚好浮在湿地光斑之上 */
+  y?: number;
+  /** 固定随机种子，默认 98831 */
+  seed?: number;
+  /** 涟漪颜色，默认冷蓝白 '#a9c2e6' */
+  color?: string;
+};
+
+/**
+ * 湿地面上一圈圈"刚被雨点敲过"的同心环。
+ *
+ * 和 buildWetGround 那套静态光斑不同：涟漪是**动的**——每圈从一点冒出、
+ * 向外扩张、同时淡出，然后再从别处冒出。正是这点连续的运动，让"地面是湿的、
+ * 且雨还在下"这件事被读出来（静态光斑只能说明"曾经湿"）。
+ *
+ * 每个涟漪一个 Sprite + 独立材质（Sprite 的 opacity 是材质级的，必须各占一份
+ * 才能各自淡入淡出）。数量几十个，透明件走 additive 之外的 NormalBlending，
+ * 叠在湿地光斑之上只是"添一层冷色"，不会烧白。
+ *
+ * 注意：返回对象必须加进**未冻结**的组（见 exterior.ts 的 buildStreetscapeRipples），
+ * 否则 freezeStatic 把 matrixAutoUpdate 关掉后，每帧改 scale 不会重算世界矩阵，
+ * 涟漪就定格不动了。
+ */
+export function buildPuddleRipples(opts: PuddleRippleOpts = {}): { object: THREE.Group; update: (t: number) => void } {
+  const area = opts.area ?? 5.2;
+  const [cx, cz] = opts.center ?? [0.3, 9.5];
+  const count = opts.count ?? 28;
+  const y = opts.y ?? 0.014;
+  const seed = opts.seed ?? 98831;
+  const color = new THREE.Color(opts.color ?? '#a9c2e6');
+  const tex = puddleRippleTexture();
+
+  const g = new THREE.Group();
+  g.name = 'puddle-ripples';
+  const rnd = makeRng(seed);
+
+  type Ripple = { sprite: THREE.Sprite; base: number; phase: number; period: number };
+  const ripples: Ripple[] = [];
+
+  for (let i = 0; i < count; i++) {
+    const x = cx + (rnd() - 0.5) * area * 2;
+    const z = cz + (rnd() - 0.5) * area * 2;
+    const base = 0.42 + rnd() * 0.55; // 最终直径（米）
+    const mat = new THREE.SpriteMaterial({
+      map: tex,
+      color,
+      transparent: true,
+      opacity: 0.5,
+      depthWrite: false,
+      blending: THREE.NormalBlending,
+    });
+    const s = new THREE.Sprite(mat);
+    s.position.set(x, y, z);
+    s.scale.set(base * 0.5, base * 0.5, 1);
+    s.renderOrder = 3;
+    g.add(s);
+    ripples.push({
+      sprite: s,
+      base,
+      phase: rnd(),                 // 错开起始相位
+      period: 1.8 + rnd() * 2.4,    // 每圈 1.8~4.2s 一个生命周期
+    });
+  }
+
+  const update = (t: number) => {
+    for (const r of ripples) {
+      // 生命周期进度 [0,1)，到头即重生（相位错开，不会整片同步冒）
+      const p = (t / r.period + r.phase) % 1;
+      // 扩张：从 0.5 倍长到 1.0 倍
+      const grow = 0.5 + p * 0.5;
+      const sc = r.base * grow;
+      r.sprite.scale.set(sc, sc, 1);
+      // 淡入淡出：中段最亮，首尾几乎不可见——像一圈圈水波涌起又平复
+      r.sprite.material.opacity = Math.sin(p * Math.PI) * 0.5;
+    }
+  };
+
+  return { object: g, update };
+}
+
+/* ============================================================================
+ * 屋檐滴水
+ * ========================================================================== */
+
+export type DripEdge = {
+  /** 沿 x 的滴水段范围（世界坐标） */
+  x0: number;
+  x1: number;
+  /** 外缘 z（滴水垂到这条线外侧一点点） */
+  z: number;
+  /** 檐口底标高（滴水从这里往下挂），世界 y */
+  y: number;
+  /** 这一段的滴水数量，省略按长度估算（每 ~1.4m 一滴） */
+  count?: number;
+};
+
+/**
+ * 阳台/雨棚外缘垂下来的一排细短水线 + 底端水珠。
+ *
+ * 屋檐滴水是雨夜最容易被忽略、缺了却不对劲的细节：没有它，阳台栏杆下沿是
+ * 干的，整栋楼少了"雨刚顺着檐口淌下去"的那一下。这里把 dripTexture 贴到一排
+ * 竖直 Sprite 上，垂在阳台外缘正下方，并让它们轻微地伸缩/明暗起伏，
+ * 像水珠在汇聚、欲滴未滴。
+ *
+ * Sprite 的纵向轴天然对齐屏幕上方，所以无论相机怎么绕，水线都读成"竖直下垂"，
+ * 比 plane 单面billboard 更稳。同样走 NormalBlending + 低透明度，冷蓝不烧白。
+ */
+export function buildEaveDrips(edges: DripEdge[]): { object: THREE.Group; update: (t: number) => void } {
+  const g = new THREE.Group();
+  g.name = 'eave-drips';
+  const tex = dripTexture();
+  const rnd = makeRng(70711);
+  const color = new THREE.Color('#bcd2ee');
+
+  type Drip = { sprite: THREE.Sprite; baseW: number; baseH: number; phase: number; freq: number };
+  const drips: Drip[] = [];
+
+  for (const e of edges) {
+    const n = e.count ?? Math.max(3, Math.round((e.x1 - e.x0) / 1.4));
+    for (let i = 0; i < n; i++) {
+      const x = e.x0 + (i + 0.5 + (rnd() - 0.5) * 0.3) * (e.x1 - e.x0) / n;
+      const w = 0.05 + rnd() * 0.04;
+      const h = 0.18 + rnd() * 0.16;
+      const mat = new THREE.SpriteMaterial({
+        map: tex,
+        color,
+        transparent: true,
+        opacity: 0.5,
+        depthWrite: false,
+        blending: THREE.NormalBlending,
+      });
+      const s = new THREE.Sprite(mat);
+      // 顶点落在檐口底（e.y），整条 Sprite 往下挂
+      s.position.set(x, e.y - h * 0.4, e.z);
+      s.scale.set(w, h, 1);
+      s.renderOrder = 4;
+      g.add(s);
+      drips.push({
+        sprite: s,
+        baseW: w,
+        baseH: h,
+        phase: rnd() * Math.PI * 2,
+        freq: 0.6 + rnd() * 0.8,
+      });
+    }
+  }
+
+  const update = (t: number) => {
+    for (const d of drips) {
+      const k = 0.5 + 0.5 * Math.sin(t * d.freq + d.phase);
+      // 水珠汇聚时略伸长、变亮；将滴未滴时缩回、变淡
+      d.sprite.scale.set(d.baseW, d.baseH * (0.8 + 0.5 * k), 1);
+      d.sprite.material.opacity = 0.34 + 0.3 * k;
+    }
+  };
+
+  return { object: g, update };
+}
+
+/* ============================================================================
+ * 路灯
+ * ========================================================================== */
+
+/**
+ * 街边那盏灯。它是整个场景里最冷区域中唯一的一处暖光，
+ * 和房间里透出来的暖光隔着雨呼应，是"孤独但依然温暖"这句情绪的具体载体。
+ */
+export function buildStreetLamp(
+  pos: [number, number, number],
+  height = 2.35,
+  opts: { halo?: boolean } = {}
+): THREE.Group {
+  const g = new THREE.Group();
+  const poleMat = toon(C('lampPole', '#4a5163'));
+
+  g.add(m(cyl(0.115, 0.14, 0.05, 14), poleMat, [0, 0.025, 0], 'both'));
+  g.add(m(cyl(0.038, 0.052, height, 12), poleMat, [0, height / 2, 0], 'cast'));
+  g.add(m(cyl(0.056, 0.056, 0.035, 12), poleMat, [0, height * 0.06, 0], 'cast'));
+
+  // 横挑臂 + 灯头
+  const armLen = 0.30;
+  const arm = m(cyl(0.026, 0.030, armLen, 10), poleMat, [armLen / 2, height - 0.03, 0], 'cast');
+  arm.rotation.z = Math.PI / 2;
+  g.add(arm);
+  g.add(m(box(0.24, 0.075, 0.19), poleMat, [armLen, height - 0.075, 0], 'cast'));
+  g.add(m(box(0.20, 0.030, 0.15), toon('#e3e8ee'), [armLen, height - 0.125, 0], 'cast'));
+
+  // 灯泡：自发光本体 + 一圈光晕。
+  // 光晕用 Sprite 而不是 Plane —— 场景是可以绕着转的，Plane 转到侧面就变成一条线了，
+  // Sprite 永远正对相机，从哪个角度看都是一团光。
+  // halo:false 时省掉这圈 Sprite（透明叠加件）——灯泡本体亮度过 bloom threshold
+  // 后由泛光给光晕，适合对透明材质数量有预算的外景层。
+  const bulbY = height - 0.145;
+  g.add(m(sph(0.045, 12, 10), emissive('#e3d3b4'), [armLen, bulbY, 0], 'none'));
+  if (opts.halo !== false) {
+    const glow = new THREE.Sprite(
+      new THREE.SpriteMaterial({
+        map: lightPoolTexture(),
+        color: new THREE.Color('#dcc79c'),
+        transparent: true,
+        opacity: 0.55,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      })
+    );
+    glow.scale.setScalar(0.62);
+    glow.position.set(armLen, bulbY, 0);
+    g.add(glow);
+  }
+
+  const light = new THREE.PointLight(0xffc887, 1.5, 6.0, 2);
+  light.position.set(armLen, bulbY - 0.05, 0);
+  g.add(light);
+
+  // 灯下地面那一团湿反光。交给 buildWetGround 统一铺，这里只标位置
+  g.userData.poolAt = [pos[0] + armLen, pos[2]];
+
+  g.position.set(pos[0], 0, pos[2]);
+  return g;
+}
+
+/* ============================================================================
+ * 窗
+ * ========================================================================== */
+
+/**
+ * 窗口。spec.size 在这里的含义和其他家具不同：
+ *   size = [洞口宽, 窗台高, 窗顶高]  —— 因为窗口是"墙上的洞"，高度是绝对标高而不是尺寸
+ */
+export function buildWindow(
+  spec: { pos: [number, number, number]; size: [number, number, number] }
+): THREE.Group {
+  const g = new THREE.Group();
+  // 拆两组：贴墙部分跟随墙隐，凸入室内的永远可见
+  const wallSurface = new THREE.Group();   wallSurface.name = 'window-wall';
+  const roomSide = new THREE.Group();       roomSide.name = 'room-side';
+  g.add(wallSurface);
+  g.add(roomSide);
+  const halfW = spec.size[0] / 2;
+  const y0 = spec.size[1];      // 窗台高（世界 Y）
+  const y1 = spec.size[2];      // 窗顶高（世界 Y）
+  const cy = (y0 + y1) / 2;
+  const h = y1 - y0;
+
+  // 窗框的 rot 已经把本地 +z 轴对齐到室内侧（west rot=π/2、east rot=−π/2、
+  // north rot=0、south rot=π，本地 +z 旋转后始终指向室内）。所以"贴墙件"的 z 偏移
+  // 固定朝本地 +z 即可：窗框 box 中心贴在墙的室内侧（+0.06），水痕层挂在室外
+  // 侧（-0.20），窗台/窗帘等凸入室内的件朝 +0.09。之前偏移写死在室外侧（z 恒为负），
+  // 导致室内看不到窗框、observer 转到室外又只看到窗框背面——表现就是"窗框法线错"。
+  const frameZ = 0.06;
+  const skyZ = -0.20;
+  const innerZ = 0.09;
+
+  const frameMat = toon(C('windowFrame', '#fdfaf5'));
+  const sillMat = toon(C('windowSill', '#f3e7d3'));
+  const rodMat = toon(C('metal', '#b9bcc4'), { finish: 'metal' });
+
+  // 窗口不再有贴图：室外层 Stage 2 起，窗外是真 3D 街区（exterior.ts），
+  // 原来那张 emissive 平面画已拆除。nightCityTexture 留给远景幕布（Stage 3）。
+  // 玻璃上的雨水贴图层已去掉：隔着 8m 街道 + 真实雨丝 + 雾，玻璃水痕贴上去
+  // 反而糊一档亮度，看不清店里/邻户的剪影。雨夜玻璃的湿润感交给玻璃自身的
+  // finish:'glass' 边缘亮 + 街道湿地反光的反射斑来传达。
+
+  // 窗框（贴墙室内侧 frameZ）。
+  // 窗框有 0.12 厚度，若整框送 Inverted Hull 描边，厚度侧面会被一起外扩，
+  // 斜视窗外侧时露出一根与窗平面垂直的突兀短条（即报的「窗最外边错误条」）。
+  // 拆两层：厚度填充件（实体、noOutline+noMerge，有厚度感但不描边）+
+  // 正面薄框（朝室内、参与描边，只给窗框正面清晰轮廓，不再有侧面短条）。
+  const fw = 0.085;
+  const addFrameBar = (w: number, hh: number, x: number, y: number) => {
+    const fill = m(box(w, hh, 0.12), frameMat, [x, y, frameZ], 'cast');
+    fill.userData.noOutline = true;
+    fill.userData.noMerge = true;
+    wallSurface.add(fill);
+    wallSurface.add(m(box(w, hh, 0.018), frameMat, [x, y, frameZ + 0.06 + 0.01], 'cast'));
+  };
+  addFrameBar(halfW * 2 + fw * 2, fw, 0, y1 + fw / 2);   // 上横框
+  addFrameBar(halfW * 2 + fw * 2, fw, 0, y0 - fw / 2);   // 下横框
+  addFrameBar(fw, h + fw, -halfW - fw / 2, cy);          // 左竖框
+  addFrameBar(fw, h + fw, halfW + fw / 2, cy);           // 右竖框
+  // 中竖梃（窗中央唯一的竖直分隔条；去掉横向的 midH，避免窗中央出现水平白条）。
+  // 同样拆两层，避免其厚度侧面被描边外扩出短条。
+  const midFill = m(box(0.045, h, 0.07), frameMat, [0, cy, frameZ], 'cast');
+  midFill.userData.noOutline = true;
+  midFill.userData.noMerge = true;
+  wallSurface.add(midFill);
+  wallSurface.add(m(box(0.045, h, 0.018), frameMat, [0, cy, frameZ + 0.035 + 0.01], 'cast'));
+
+  // 窗台（贴墙侧，跟随墙一起隐藏；之前放 room-side 永远可见，observer 转墙时
+  // 窗框隐了它还在，留一条水平白条突兀横着。移入 window-wall 组随墙隐。）
+  wallSurface.add(m(box(halfW * 2 + 0.24, 0.07, 0.22), sillMat, [0, y0 - 0.02, innerZ], 'both'));
+
+  // 窗帘杆 + 杆头
+  const rod = m(cyl(0.016, 0.016, halfW * 2 + 0.5, 10), rodMat, [0, y1 + 0.20, innerZ], 'cast');
+  rod.rotation.z = Math.PI / 2;
+  roomSide.add(rod);
+  for (const s of [-1, 1]) {
+    roomSide.add(m(sph(0.028, 10, 8), rodMat, [s * (halfW + 0.25), y1 + 0.20, innerZ], 'cast'));
+  }
+
+  // 两幅窗帘：给平面加正弦起伏做褶子。上沿挂在杆上，下沿垂到窗台以下一点
+  const curtainMat = toon('#ffffff', { map: curtainTexture(), side: THREE.DoubleSide });
+  const drapeTop = y1 + 0.18;
+  const drapeBottom = y0 - 0.13;
+  const drapeH = drapeTop - drapeBottom;
+  for (const s of [-1, 1]) {
+    const geo = new THREE.PlaneGeometry(0.66, drapeH, 12, 1);
+    const p = geo.getAttribute('position') as THREE.BufferAttribute;
+    for (let i = 0; i < p.count; i++) {
+      const u = p.getX(i) / 0.66 + 0.5;
+      p.setZ(i, Math.sin(u * Math.PI * 5) * 0.05);
+    }
+    geo.computeVertexNormals();
+    const drape = m(geo, curtainMat, [s * (halfW - 0.14), (drapeTop + drapeBottom) / 2, innerZ], 'cast');
+    // 双面的褶皱片描边会互相糊成一团黑，别描
+    drape.userData.noOutline = true;
+    roomSide.add(drape);
+  }
+
+  // 窗台上的小盆栽
+  const plant = buildPlant(0.85);
+  plant.position.set(-halfW + 0.28, y0 + 0.03, innerZ);
+  roomSide.add(plant);
+
+  // 窗台边摞着的几本书
+  const stack = new THREE.Group();
+  const rnd = makeRng(808);
+  let y = 0;
+  for (let i = 0; i < 3; i++) {
+    const th = 0.035 + rnd() * 0.02;
+    const col = ['#a86b5c', '#5c7488', '#b98f63'][i];
+    stack.add(m(box(0.20, th, 0.15), toon(col), [(rnd() - 0.5) * 0.02, y + th / 2, (rnd() - 0.5) * 0.02], 'cast'));
+    y += th;
+  }
+  stack.position.set(halfW - 0.30, y0 + 0.03, innerZ);
+  roomSide.add(stack);
+
+  // 风铃
+  const chime = new THREE.Group();
+  chime.add(m(cyl(0.003, 0.003, 0.20, 6), toon('#e8dcc4'), [0, -0.10, 0], 'none'));
+  chime.add(m(sph(0.042, 12, 10), toon('#e0e8e6', { transparent: true, opacity: 0.75 }), [0, -0.23, 0], 'cast'));
+  chime.add(m(new THREE.PlaneGeometry(0.03, 0.13), toon('#fdf6ea', { side: THREE.DoubleSide }), [0, -0.33, 0.005], 'none'));
+  chime.position.set(halfW - 0.62, y1 + 0.20, innerZ);
+  roomSide.add(chime);
+
+  return g;
+}
+
+/* ============================================================================
+ * 书桌
+ * ========================================================================== */
+
+export function buildDesk(spec: { pos: [number, number, number]; size: [number, number, number] }): THREE.Group {
+  const g = new THREE.Group();
+  const W = spec.size[0], H = spec.size[1], D = spec.size[2];
+  const topY = H;
+
+  const woodMat = toon('#ffffff', { map: furnitureWoodTexture() });
+  const legMat = toon(C('deskLeg', '#b09070'));
+  const panelMat = toon(C('deskPanel', '#b39377'));
+  const darkMat = toon(C('dark', '#43434f'));
+  const metalMat = toon(C('metal', '#b9bcc4'), { finish: 'metal' });
+
+  // 桌面 + 四周一圈稍深的封边
+  g.add(m(box(W + 0.04, 0.045, D + 0.02), woodMat, [0, topY - 0.022, 0], 'both'));
+  g.add(m(box(W + 0.05, 0.016, D + 0.03), panelMat, [0, topY - 0.05, 0], 'cast'));
+
+  // 四条腿
+  for (const sx of [-1, 1]) {
+    for (const sz of [-1, 1]) {
+      g.add(m(box(0.06, topY - 0.06, 0.06), legMat, [sx * (W / 2 - 0.06), (topY - 0.06) / 2, sz * (D / 2 - 0.06)], 'cast'));
+    }
+  }
+  // 后挡板
+  g.add(m(box(W - 0.14, 0.42, 0.03), panelMat, [0, topY - 0.30, -D / 2 + 0.03], 'cast'));
+
+  // 右侧抽屉柜
+  const dwW = 0.5, dwH = topY - 0.10;
+  g.add(m(box(dwW, dwH, D - 0.08), panelMat, [W / 2 - dwW / 2 - 0.06, dwH / 2, 0], 'both'));
+  for (let i = 0; i < 3; i++) {
+    const dy = dwH * (0.18 + i * 0.29);
+    g.add(m(box(dwW - 0.05, dwH * 0.24, 0.02), woodMat, [W / 2 - dwW / 2 - 0.06, dy, D / 2 - 0.02], 'cast'));
+    g.add(m(cyl(0.012, 0.012, 0.12, 8), metalMat, [W / 2 - dwW / 2 - 0.06, dy, D / 2 + 0.03], 'cast').rotateZ(Math.PI / 2));
+  }
+
+  /* ---- 桌面上的东西 ---- */
+
+  // 显示器
+  const mon = new THREE.Group();
+  mon.add(m(cyl(0.115, 0.13, 0.018, 20), darkMat, [0, 0.009, 0], 'cast'));
+  // 立柱高度要和屏体下沿接上：屏体中心 y=0.45、自身高 0.43，绕 X 俯仰 0.05rad 后
+  // 下沿落在 y≈0.235，同时往 -Z 缩 11mm（仍在立柱 50mm 的进深范围内）。
+  // 原来只有 0.20 高（顶端 0.21），屏体底下空着 25mm，看着是断开的。
+  mon.add(m(box(0.05, 0.24, 0.05), darkMat, [0, 0.13, 0], 'cast'));
+  const panel = new THREE.Group();
+  panel.add(m(box(0.70, 0.43, 0.03), darkMat, [0, 0, 0], 'cast'));
+  const screen = m(new THREE.PlaneGeometry(0.63, 0.36), emissive('#ffffff', { map: screenTexture() }), [0, 0, 0.019], 'none');
+  panel.add(screen);
+  panel.position.set(0, 0.45, 0);
+  panel.rotation.x = 0.05;
+  mon.add(panel);
+  mon.position.set(-0.05, topY, -0.10);
+  g.add(mon);
+
+  // 桌垫 + 键盘 + 鼠标
+  g.add(m(box(0.66, 0.005, 0.26), toon('#e8d9c2'), [-0.05, topY + 0.003, 0.11], 'none'));
+  g.add(m(box(0.46, 0.018, 0.15), toon('#f2efe6'), [-0.05, topY + 0.014, 0.11], 'cast'));
+  g.add(m(box(0.055, 0.028, 0.085), toon('#f2efe6'), [0.30, topY + 0.019, 0.11], 'cast'));
+
+  // 台灯：底座 + 两节灯臂 + 灯罩 + 亮着的灯泡
+  const lampX = -W / 2 + 0.22;
+  const lamp = new THREE.Group();
+  lamp.add(m(cyl(0.075, 0.085, 0.022, 18), toon(C('accent', '#c2a49c')), [0, 0.011, 0], 'cast'));
+  const arm1 = m(cyl(0.012, 0.012, 0.26, 8), toon(C('accent', '#c2a49c')), [0, 0.14, 0], 'cast');
+  arm1.rotation.x = -0.22;
+  lamp.add(arm1);
+  const arm2 = m(cyl(0.011, 0.011, 0.20, 8), toon(C('accent', '#c2a49c')), [0.09, 0.28, 0], 'cast');
+  arm2.rotation.z = 1.1;
+  lamp.add(arm2);
+  const shade = m(cyl(0.035, 0.082, 0.09, 14, true), toon('#fdf3e0', { side: THREE.DoubleSide }), [0.18, 0.31, 0.02], 'cast');
+  shade.rotation.z = -0.55;
+  lamp.add(shade);
+  lamp.add(m(sph(0.026, 10, 8), emissive('#e8d9b8'), [0.20, 0.285, 0.03], 'none'));
+  lamp.position.set(lampX, topY, -0.02);
+  g.add(lamp);
+  const lampLight = new THREE.PointLight(0xffd9a0, 0.35, 1.6, 2);
+  lampLight.position.set(lampX + 0.20, topY + 0.30, 0.03);
+  g.add(lampLight);
+
+  // 马克杯
+  const mug = new THREE.Group();
+  mug.add(m(cyl(0.037, 0.033, 0.09, 16), toon('#fdf6f0'), [0, 0.045, 0], 'cast'));
+  const handle = m(new THREE.TorusGeometry(0.024, 0.006, 6, 14), toon('#fdf6f0'), [0.042, 0.046, 0], 'cast');
+  handle.rotation.y = Math.PI / 2;
+  mug.add(handle);
+  mug.add(m(cyl(0.033, 0.033, 0.004, 16), toon('#7a6552'), [0, 0.088, 0], 'none'));
+  mug.position.set(0.44, topY, 0.02);
+  g.add(mug);
+
+  // 一摞书：整摞放进自己的 group，方便整体挪位置
+  const stackRoot = new THREE.Group();
+  const rnd = makeRng(1207);
+  let by = 0;
+  for (let i = 0; i < 4; i++) {
+    const th = 0.022 + rnd() * 0.016;
+    const col = ['#a86b5c', '#5c7488', '#6a9c78', '#b98f63'][i];
+    const bk = m(box(0.19, th, 0.14), toon(col), [(rnd() - 0.5) * 0.03, by + th / 2, (rnd() - 0.5) * 0.03], 'cast');
+    bk.rotation.y = (rnd() - 0.5) * 0.22;
+    stackRoot.add(bk);
+    by += th;
+  }
+  stackRoot.position.set(-W / 2 + 0.28, topY, 0.14);
+  g.add(stackRoot);
+
+  // 笔筒
+  const cup = new THREE.Group();
+  cup.add(m(cyl(0.036, 0.032, 0.095, 14), toon('#a4b8c8'), [0, 0.0475, 0], 'cast'));
+  for (let i = 0; i < 3; i++) {
+    const a = (i / 3) * Math.PI * 2;
+    cup.add(m(cyl(0.005, 0.005, 0.14, 6), toon(['#c2a49c', '#ddcba8', '#6a9c78'][i]),
+      [Math.cos(a) * 0.014, 0.085, Math.sin(a) * 0.014], 'none'));
+  }
+  cup.position.set(W / 2 - 0.72, topY, -0.02);
+  g.add(cup);
+
+  // 便签纸
+  const paper = m(box(0.15, 0.006, 0.21), toon('#fffdf6'), [W / 2 - 0.45, topY + 0.004, 0.06], 'none');
+  paper.rotation.y = -0.24;
+  g.add(paper);
+
+  return g;
+}
+
+/* ============================================================================
+ * 椅子
+ * ========================================================================== */
+
+export function buildChair(spec: { pos: [number, number, number]; size: [number, number, number] }): THREE.Group {
+  const g = new THREE.Group();
+  const W = spec.size[0];
+  const seatY = 0.44;
+
+  const woodMat = toon('#ffffff', { map: furnitureWoodTexture() });
+  const cushionMat = toon(C('accent', '#c2a49c'));
+
+  g.add(m(box(W, 0.055, W), woodMat, [0, seatY, 0], 'both'));
+  g.add(m(box(W - 0.04, 0.05, W - 0.04), cushionMat, [0, seatY + 0.05, 0], 'cast'));
+
+  const back = m(box(W - 0.02, 0.44, 0.05), woodMat, [0, seatY + 0.30, -W / 2 + 0.03], 'cast');
+  back.rotation.x = 0.09;
+  g.add(back);
+  g.add(m(box(W - 0.10, 0.05, 0.06), woodMat, [0, seatY + 0.16, -W / 2 + 0.05], 'cast'));
+
+  for (const sx of [-1, 1]) {
+    for (const sz of [-1, 1]) {
+      g.add(m(box(0.045, seatY, 0.045), woodMat, [sx * (W / 2 - 0.05), seatY / 2, sz * (W / 2 - 0.05)], 'cast'));
+    }
+  }
+  // 横撑
+  for (const sz of [-1, 1]) {
+    g.add(m(box(W - 0.10, 0.03, 0.03), woodMat, [0, 0.14, sz * (W / 2 - 0.05)], 'cast'));
+  }
+  g.add(m(box(0.03, 0.03, W - 0.10), woodMat, [-(W / 2 - 0.05), 0.14, 0], 'cast'));
+
+  return g;
+}
+
+/* ============================================================================
+ * 床
+ * ========================================================================== */
+
+export function buildBed(spec: { pos: [number, number, number]; size: [number, number, number] }): THREE.Group {
+  const g = new THREE.Group();
+  const W = spec.size[0];      // 沿 X 的宽
+  const L = spec.size[2];      // 沿 Z 的长（床头在 -Z 端）
+
+  const frameMat = toon('#ffffff', { map: furnitureWoodTexture() });
+  const sheetMat = toon(C('mattress', '#fdf8f0'));
+  const blanketMat = toon(C('blanket', '#a4b8c8'));
+  const pillowMat = toon(C('pillow', '#f6f1ea'));
+
+  // 床架
+  g.add(m(box(W, 0.24, L), frameMat, [0, 0.20, 0], 'both'));
+  for (const sx of [-1, 1]) {
+    for (const sz of [-1, 1]) {
+      g.add(m(box(0.09, 0.08, 0.09), frameMat, [sx * (W / 2 - 0.07), 0.04, sz * (L / 2 - 0.07)], 'cast'));
+    }
+  }
+  // 床头板 / 床尾板
+  g.add(m(box(W, 0.72, 0.07), frameMat, [0, 0.52, -L / 2 - 0.02], 'both'));
+  g.add(m(box(W - 0.06, 0.40, 0.06), frameMat, [0, 0.44, L / 2 + 0.02], 'both'));
+
+  // 褥子
+  g.add(m(box(W - 0.05, 0.16, L - 0.06), sheetMat, [0, 0.40, 0], 'both'));
+
+  // 枕头（略微歪一点，别太对称，太对称会像样板间）
+  const pillow = m(box(0.58, 0.14, 0.30), pillowMat, [0.02, 0.55, -L / 2 + 0.28], 'cast');
+  pillow.rotation.y = 0.09;
+  g.add(pillow);
+  const pillow2 = m(box(0.34, 0.11, 0.24), toon('#f1ece3'), [-0.30, 0.53, -L / 2 + 0.30], 'cast');
+  pillow2.rotation.y = -0.22;
+  g.add(pillow2);
+
+  // 被子（下半身盖着，上沿翻折一层）
+  const bTop = 0.43;
+  g.add(m(box(W + 0.01, 0.11, 1.16), blanketMat, [0, bTop + 0.055, -L / 2 + 0.92], 'both'));
+  g.add(m(box(W + 0.015, 0.10, 0.13), toon('#f2ece4'), [0, bTop + 0.06, -L / 2 + 0.30], 'cast'));
+
+  // 猫咪抱枕
+  const plush = new THREE.Group();
+  plush.add(m(sph(0.11, 12, 10), toon('#fdf6ee'), [0, 0.09, 0], 'cast'));
+  const head = m(sph(0.085, 12, 10), toon('#fdf6ee'), [0, 0.215, 0.01], 'cast');
+  plush.add(head);
+  for (const s of [-1, 1]) {
+    const ear = m(new THREE.ConeGeometry(0.032, 0.055, 8), toon('#f0e9e0'), [s * 0.05, 0.285, 0.01], 'cast');
+    ear.rotation.z = s * 0.25;
+    plush.add(ear);
+  }
+  for (const s of [-1, 1]) {
+    plush.add(m(sph(0.012, 8, 6), toon('#544c4e'), [s * 0.032, 0.222, 0.078], 'none'));
+  }
+  plush.add(m(sph(0.010, 8, 6), toon('#c49a92'), [0, 0.198, 0.086], 'none'));
+  const tail = m(cyl(0.014, 0.02, 0.16, 8), toon('#fdf6ee'), [0, 0.07, -0.10], 'cast');
+  tail.rotation.x = 0.9;
+  plush.add(tail);
+  plush.position.set(-0.26, bTop + 0.10, -L / 2 + 0.42);
+  plush.rotation.y = 0.5;
+  g.add(plush);
+
+  return g;
+}
+
+/* ============================================================================
+ * 书架
+ * ========================================================================== */
+
+/** 一排竖着的书（沿 Z 排开，书脊朝 +X）。 */
+function buildBookRow(len: number, depth: number, seed: number): THREE.Group {
+  const g = new THREE.Group();
+  const rnd = makeRng(seed);
+  const colors = ['#a86b5c', '#5c7488', '#b98f63', '#6a9c78', '#7d7590', '#b08a80', '#4f8f95'];
+
+  let z = -len / 2 + 0.02;
+  while (z < len / 2 - 0.05) {
+    const th = 0.026 + rnd() * 0.038;
+    const hh = 0.16 + rnd() * 0.13;
+    if (z + th > len / 2) break;
+    const col = colors[Math.floor(rnd() * colors.length)];
+    const bk = m(box(depth, hh, th), toon(col), [0, hh / 2, z + th / 2], 'cast');
+    // 书脊上的烫金细线
+    const band = m(box(depth + 0.002, 0.008, th * 0.9), toon('#dcc79c'), [0, hh * 0.82, z + th / 2], 'none');
+    g.add(bk, band);
+    z += th + 0.004;
+  }
+
+  // 末尾歪着靠一本
+  if (rnd() > 0.4) {
+    const lean = m(box(depth, 0.22, 0.045), toon(colors[Math.floor(rnd() * colors.length)]), [0, 0.11, len / 2 - 0.04], 'cast');
+    lean.rotation.x = 0.30;
+    g.add(lean);
+  }
+
+  return g;
+}
+
+export function buildShelf(spec: { pos: [number, number, number]; size: [number, number, number] }): THREE.Group {
+  const g = new THREE.Group();
+  const D = spec.size[0];      // 进深（X）
+  const H = spec.size[1];      // 高
+  const Wz = spec.size[2];     // 宽（沿 Z）
+
+  const woodMat = toon('#ffffff', { map: furnitureWoodTexture() });
+  const backMat = toon(C('shelfBack', '#b09070'));
+
+  // 背板 + 两侧板
+  g.add(m(box(0.02, H, Wz), backMat, [-D / 2 + 0.01, H / 2, 0], 'both'));
+  for (const s of [-1, 1]) {
+    g.add(m(box(D, H, 0.026), woodMat, [0, H / 2, s * (Wz / 2 - 0.013)], 'both'));
+  }
+
+  // 层板：5 层
+  const shelfYs = [0.02, 0.47, 0.92, 1.37, 1.80];
+  for (const y of shelfYs) {
+    g.add(m(box(D - 0.01, 0.026, Wz - 0.05), woodMat, [0.005, y, 0], 'both'));
+  }
+
+  // 第 1、2 层：书
+  const r1 = buildBookRow(Wz - 0.10, D - 0.07, 21);
+  r1.position.set(0.015, shelfYs[0] + 0.013, 0);
+  g.add(r1);
+  const r2 = buildBookRow(Wz - 0.10, D - 0.07, 88);
+  r2.position.set(0.015, shelfYs[1] + 0.013, 0);
+  g.add(r2);
+
+  // 第 3 层：漫画合订本 + 一个小摆件
+  const rnd = makeRng(404);
+  let z = -Wz / 2 + 0.10;
+  for (let i = 0; i < 5; i++) {
+    const w = 0.05 + rnd() * 0.03;
+    const col = ['#c2a49c', '#a4b8c8', '#ddcba8', '#a8b8ac', '#a89aa8'][i];
+    g.add(m(box(D - 0.08, 0.20, w), toon(col), [0.015, shelfYs[2] + 0.113, z], 'cast'));
+    z += w + 0.008;
+  }
+  /**
+   * 一个小相框。
+   *
+   * 两层方向都要对：框体是 X 方向 12mm 的薄板，正面法线朝 ±X；而 PlaneGeometry
+   * 默认躺在 XY 面、法线 +Z，直接塞进去会和框面互相垂直（照片横穿出框外）。
+   * 所以照片自己要先绕 Y 转 90°，躺进框面所在的 YZ 平面、法线转到 +X。
+   *
+   * 整框朝 +X（书架开口方向，也就是朝着房间）立在第 3 层，并略微后仰靠住层板。
+   * 底下要正好落在层板面上：层板顶面在 shelfYs[2]+0.013，框高 0.14，故中心取
+   * shelfYs[2]+0.013+0.07（后仰角极小，cos 带来的高度损失可忽略）。
+   */
+  const fr = new THREE.Group();
+  fr.add(m(box(0.012, 0.14, 0.11), toon('#fdf6ea'), [0, 0, 0], 'cast'));
+  const photo = m(new THREE.PlaneGeometry(0.088, 0.118), emissive('#ffffff', { map: posterTexture() }), [0.008, 0, 0], 'none');
+  photo.rotation.y = Math.PI / 2;
+  fr.add(photo);
+  fr.rotation.z = 0.09; // 绕 Z 正转 = 顶边往 -X 倒，也就是向后靠着层板
+  fr.position.set(D / 2 - 0.05, shelfYs[2] + 0.083, Wz / 2 - 0.18);
+  g.add(fr);
+
+  // 第 4 层：收纳盒 + 杂志
+  g.add(m(box(D - 0.09, 0.16, 0.30), toon('#a8b8ac'), [0.01, shelfYs[3] + 0.093, -Wz / 2 + 0.24], 'cast'));
+  g.add(m(box(D - 0.09, 0.16, 0.30), toon('#ddcba8'), [0.01, shelfYs[3] + 0.093, -Wz / 2 + 0.58], 'cast'));
+  for (let i = 0; i < 3; i++) {
+    const mg = m(box(D - 0.10, 0.012, 0.21), toon(['#c2a49c', '#a4b8c8', '#f1ece3'][i]), [0.015, shelfYs[3] + 0.02 + i * 0.014, Wz / 2 - 0.20], 'cast');
+    mg.rotation.x = i === 2 ? 0.04 : 0;
+    g.add(mg);
+  }
+
+  // 顶上：绿植 + 一个小手办盒
+  const plant = buildPlant(1.0);
+  plant.position.set(0.02, H + 0.013, -Wz / 2 + 0.22);
+  g.add(plant);
+
+  const figure = new THREE.Group();
+  figure.add(m(box(0.14, 0.14, 0.11), toon('#fdf6ea', { transparent: true, opacity: 0.55 }), [0, 0.07, 0], 'cast'));
+  figure.add(m(box(0.11, 0.02, 0.09), toon('#c2a49c'), [0, 0.01, 0], 'cast'));
+  figure.add(m(sph(0.035, 10, 8), toon('#f0e9e0'), [0, 0.055, 0], 'cast'));
+  figure.add(m(cyl(0.022, 0.03, 0.06, 10), toon('#a4b8c8'), [0, 0.10, 0], 'cast'));
+  figure.position.set(0.02, H + 0.013, Wz / 2 - 0.20);
+  g.add(figure);
+
+  return g;
+}
+
+/* ============================================================================
+ * 冰箱
+ * ========================================================================== */
+
+export function buildFridge(spec: { pos: [number, number, number]; size: [number, number, number] }): THREE.Group {
+  const g = new THREE.Group();
+  const W = spec.size[0], H = spec.size[1], D = spec.size[2];
+
+  const bodyMat = toon(C('fridge', '#f4f1e8'));
+  const doorMat = toon(C('fridgeDoor', '#eae5d8'));
+  const metalMat = toon(C('metal', '#b9bcc4'), { finish: 'metal' });
+
+  g.add(m(box(W - 0.02, H, D), bodyMat, [-0.01, H / 2, 0], 'both'));
+  // 门（朝 +X，也就是朝房间）
+  g.add(m(box(0.026, H - 0.06, D - 0.03), doorMat, [W / 2, H / 2, 0], 'both'));
+  // 上下门分缝
+  g.add(m(box(0.03, 0.012, D - 0.04), toon('#cfc7b6'), [W / 2 + 0.005, H * 0.66, 0], 'none'));
+  // 把手
+  for (const y of [H * 0.80, H * 0.52]) {
+    g.add(m(box(0.03, 0.17, 0.028), metalMat, [W / 2 + 0.026, y, D / 2 - 0.10], 'cast'));
+  }
+  // 冰箱贴 & 便签
+  const notes: Array<[number, number, string]> = [
+    [H * 0.86, -0.10, '#f1ece3'], [H * 0.78, 0.06, '#dfe6dc'],
+    [H * 0.70, -0.02, '#e2d8c2'], [H * 0.40, 0.08, '#e3e8ee'], [H * 0.32, -0.09, '#f1ece3'],
+  ];
+  for (const [y, z, col] of notes) {
+    g.add(m(box(0.006, 0.075, 0.075), toon(col), [W / 2 + 0.014, y, z], 'none'));
+  }
+
+  // 顶上放一盆小绿植
+  const plant = buildPlant(0.8);
+  plant.position.set(0, H, -0.05);
+  g.add(plant);
+
+  return g;
+}
+
+/* ============================================================================
+ * 地毯 / 矮桌 / 座布団
+ * ========================================================================== */
+
+export function buildRug(spec: { pos: [number, number, number]; size: [number, number, number] }): THREE.Group {
+  const g = new THREE.Group();
+  const W = spec.size[0], D = spec.size[2];
+
+  // 底下压一层深色，等于给地毯加了一圈"厚度"
+  g.add(m(new THREE.PlaneGeometry(W + 0.06, D + 0.06), toon('#bda49e'), [0, 0.004, 0], 'receive').rotateX(-Math.PI / 2));
+  const top = m(new THREE.PlaneGeometry(W, D), toon('#ffffff', { map: rugTexture() }), [0, 0.008, 0], 'receive');
+  top.rotation.x = -Math.PI / 2;
+  g.add(top);
+  return g;
+}
+
+export function buildLowTable(spec: { pos: [number, number, number]; size: [number, number, number] }): THREE.Group {
+  const g = new THREE.Group();
+  const r = spec.size[0] / 2;
+  const H = spec.size[1];
+
+  const woodMat = toon('#ffffff', { map: furnitureWoodTexture() });
+
+  // 底盘与立柱的半径跟着桌面走。原来底盘写死 0.26m：0.45m 的床头柜
+  // 底盘和桌面一样大，0.4m 的边几底盘比桌面还大一圈，既难看又被顶进墙里。
+  const baseR = Math.min(0.26, r * 0.72);
+  const colR = Math.max(0.032, r * 0.16);
+
+  g.add(m(cyl(r, r, 0.045, 26), woodMat, [0, H - 0.022, 0], 'both'));
+  g.add(m(cyl(colR, colR * 1.25, H - 0.05, 12), woodMat, [0, (H - 0.05) / 2, 0], 'cast'));
+  g.add(m(cyl(baseR * 0.92, baseR, 0.03, 18), woodMat, [0, 0.015, 0], 'cast'));
+
+  // 茶壶
+  const pot = new THREE.Group();
+  const body = m(sph(0.078, 14, 12), toon('#a4b8c8'), [0, 0.065, 0], 'cast');
+  body.scale.set(1, 0.85, 1);
+  pot.add(body);
+  pot.add(m(cyl(0.026, 0.03, 0.018, 12), toon('#93aac0'), [0, 0.123, 0], 'cast'));
+  pot.add(m(sph(0.016, 8, 6), toon('#ddcba8'), [0, 0.136, 0], 'cast'));
+  const spout = m(cyl(0.011, 0.016, 0.07, 8), toon('#a4b8c8'), [0.075, 0.078, 0], 'cast');
+  spout.rotation.z = -0.85;
+  pot.add(spout);
+  const handle = m(new THREE.TorusGeometry(0.032, 0.007, 6, 14), toon('#a4b8c8'), [-0.078, 0.075, 0], 'cast');
+  handle.rotation.y = Math.PI / 2;
+  pot.add(handle);
+  pot.position.set(0, H, 0);
+  g.add(pot);
+
+  // 两只茶杯
+  for (const [cx, cz, col] of [[-r * 0.62, r * 0.34, '#fdf6f0'], [r * 0.55, -r * 0.38, '#f1ece3']] as Array<[number, number, string]>) {
+    g.add(m(cyl(0.033, 0.028, 0.05, 14), toon(col), [cx, H + 0.025, cz], 'cast'));
+    g.add(m(cyl(0.028, 0.028, 0.004, 14), toon('#b09070'), [cx, H + 0.048, cz], 'none'));
+  }
+
+  return g;
+}
+
+export function buildCushion(pos: [number, number, number], color = '#f1ece3', rot = 0): THREE.Group {
+  const g = new THREE.Group();
+  g.add(m(box(0.46, 0.085, 0.46), toon(color), [0, 0.045, 0], 'both'));
+  // 中间一个凹口
+  g.add(m(sph(0.022, 8, 6), toon('#cbbbb4'), [0, 0.083, 0], 'none'));
+  // 四角的小流苏
+  for (const sx of [-1, 1]) {
+    for (const sz of [-1, 1]) {
+      g.add(m(sph(0.016, 8, 6), toon('#cbbbb4'), [sx * 0.215, 0.03, sz * 0.215], 'none'));
+    }
+  }
+  g.position.set(pos[0], pos[1], pos[2]);
+  g.rotation.y = rot;
+  return g;
+}
+
+/* ============================================================================
+ * 套房扩展：客厅 / 厨房 / 卫浴 / 和室 / 电竞 / 玄关 / 门 / 阳台
+ * ========================================================================== */
+
+/** 客厅三人沙发。size = [进深X(默认朝 +X), 高, 长Z]，面朝 +X。 */
+export function buildSofa(spec: { pos: [number, number, number]; size: [number, number, number] }): THREE.Group {
+  const g = new THREE.Group();
+  const D = spec.size[0], H = spec.size[1], L = spec.size[2];
+  const seatH = 0.40;
+
+  const bodyMat = toon('#e8e0d2');
+  const cushionMat = toon(C('sofa', '#bfa49c'));
+  const legMat = toon(C('wood', '#b09070'));
+
+  // 底箱 + 两侧扶手 + 靠背（靠背在 -X 侧，面朝 +X）
+  g.add(m(box(D, seatH, L), bodyMat, [0, seatH / 2, 0], 'both'));
+  g.add(m(box(D, H - seatH, 0.16), bodyMat, [0, seatH + (H - seatH) / 2, L / 2 - 0.08], 'cast'));
+  g.add(m(box(D, H - seatH, 0.16), bodyMat, [0, seatH + (H - seatH) / 2, -L / 2 + 0.08], 'cast'));
+  g.add(m(box(0.18, H, L), bodyMat, [-D / 2 + 0.09, H / 2, 0], 'both'));
+  // 四条小短腿
+  for (const sz of [-1, 1]) {
+    g.add(m(box(0.05, 0.10, 0.05), legMat, [sz * (D / 2 - 0.08), 0.05, L / 2 - 0.10], 'cast'));
+    g.add(m(box(0.05, 0.10, 0.05), legMat, [sz * (D / 2 - 0.08), 0.05, -L / 2 + 0.10], 'cast'));
+  }
+  // 三个坐垫 + 两个靠枕，坐出"陷进去"的感觉
+  for (const z of [-L / 2 + 0.55, 0, L / 2 - 0.55]) {
+    const c = m(box(D - 0.30, 0.13, 0.52), cushionMat, [0.02, seatH + 0.065, z], 'cast');
+    g.add(c);
+  }
+  for (const [z, col, ry] of [[-L / 2 + 0.35, '#bda49e', 0.18], [L / 2 - 0.35, '#a8b8ac', -0.15]] as Array<[number, string, number]>) {
+    const p = m(box(0.13, 0.30, 0.30), toon(col), [-D / 2 + 0.20, seatH + 0.20, z], 'cast');
+    p.rotation.z = -0.16;
+    p.rotation.y = ry;
+    g.add(p);
+  }
+  return g;
+}
+
+/** 电视柜 + 电视。size = [柜深, 柜高, 柜长]，屏幕面朝 +X。 */
+export function buildTV(spec: { pos: [number, number, number]; size: [number, number, number] }): THREE.Group {
+  const g = new THREE.Group();
+  const D = spec.size[0], H = spec.size[1], L = spec.size[2];
+
+  const woodMat = toon('#ffffff', { map: furnitureWoodTexture() });
+  const darkMat = toon(C('dark', '#43434f'));
+
+  g.add(m(box(D, H, L), woodMat, [0, H / 2, 0], 'both'));
+  // 抽屉缝 + 拉手
+  for (const z of [-L / 4, L / 4]) {
+    g.add(m(box(D + 0.01, H * 0.62, 0.012), toon('#b39377'), [0, H / 2, z], 'none'));
+    g.add(m(box(0.02, 0.02, 0.14), toon(C('metal', '#b9bcc4'), { finish: 'metal' }), [D / 2 + 0.01, H * 0.62, z], 'none'));
+  }
+  // 电视：底座 + 支架 + 屏幕
+  g.add(m(box(0.16, 0.015, 0.42), darkMat, [0, H + 0.008, 0], 'cast'));
+  g.add(m(box(0.03, 0.16, 0.05), darkMat, [0, H + 0.09, 0], 'cast'));
+  g.add(m(box(0.035, 0.62, 1.10), darkMat, [0, H + 0.44, 0], 'cast'));
+  // 屏幕面朝 +X（贴在 box +X 面上）；PlaneGeometry 默认法线 +Z，绕 Y 转 +π/2 后法线指向 +X；凸出 0.5mm 避免和框面 z-fight
+  const screen = m(new THREE.PlaneGeometry(1.04, 0.56), emissive('#e0e8ec', { map: screenTexture() }), [0.018, H + 0.44, 0], 'none');
+  screen.rotation.y = Math.PI / 2;
+  g.add(screen);
+  return g;
+}
+
+/** 落地灯。 */
+export function buildFloorLamp(spec: { pos: [number, number, number] }): THREE.Group {
+  const g = new THREE.Group();
+  const metalMat = toon(C('metal', '#b9bcc4'), { finish: 'metal' });
+  g.add(m(cyl(0.11, 0.13, 0.02, 16), metalMat, [0, 0.01, 0], 'cast'));
+  g.add(m(cyl(0.014, 0.014, 1.32, 8), metalMat, [0, 0.68, 0], 'cast'));
+  const shade = m(cyl(0.14, 0.19, 0.26, 16, true), toon('#fdf3e0', { side: THREE.DoubleSide }), [0, 1.42, 0], 'cast');
+  g.add(shade);
+  g.add(m(sph(0.045, 10, 8), emissive('#e8d9b8'), [0, 1.36, 0], 'none'));
+  const light = new THREE.PointLight(0xffd9a0, 0.45, 3.2, 2);
+  light.position.set(0, 1.38, 0);
+  g.add(light);
+  return g;
+}
+
+/**
+ * 厨房：操作台 + 水槽 + 灶台 + 吊柜 + 台面小物。
+ * size = [长X, 台高, 进深Z]，紧贴 -Z 墙（背面在 -Z）。
+ */
+export function buildKitchen(spec: { pos: [number, number, number]; size: [number, number, number] }): THREE.Group {
+  const g = new THREE.Group();
+  const L = spec.size[0], H = spec.size[1], D = spec.size[2];
+
+  const counterMat = toon('#f2ede2');
+  const cabinetMat = toon('#d3c9b6');
+  const woodMat = toon('#ffffff', { map: furnitureWoodTexture() });
+  const metalMat = toon(C('metal', '#b9bcc4'), { finish: 'metal' });
+  const darkMat = toon(C('dark', '#43434f'));
+
+  // 地柜 + 台面 + 踢脚
+  g.add(m(box(L, H - 0.06, D), cabinetMat, [0, (H - 0.06) / 2, 0], 'both'));
+  // 台面只在"前脸"出檐 15mm，背面与地柜背板齐平。原来前后各出 10mm，
+  // 背面那 10mm 正好啃进 120mm 厚的隔墙里。
+  g.add(m(box(L + 0.02, 0.05, D + 0.02), counterMat, [0, H - 0.03, 0.015], 'both'));
+  g.add(m(box(L - 0.08, 0.08, D - 0.06), toon('#8a8378'), [0, 0.04, 0.01], 'none'));
+  // 柜门缝
+  const nDoors = Math.round(L / 0.5);
+  for (let i = 1; i < nDoors; i++) {
+    g.add(m(box(0.012, H - 0.14, 0.012), toon('#b8ac93'), [-L / 2 + (L * i) / nDoors, (H - 0.06) / 2, D / 2], 'none'));
+  }
+
+  // 水槽（左侧内嵌）+ 龙头
+  const sinkX = -L / 2 + 0.45;
+  g.add(m(box(0.46, 0.02, 0.34), metalMat, [sinkX, H - 0.045, 0], 'none'));
+  const faucet = m(cyl(0.013, 0.013, 0.30, 8), metalMat, [sinkX, H + 0.15, -D / 2 + 0.08], 'cast');
+  g.add(faucet);
+  const spout = m(cyl(0.011, 0.011, 0.16, 8), metalMat, [sinkX, H + 0.28, -D / 2 + 0.16], 'cast');
+  spout.rotation.x = Math.PI / 2;
+  g.add(spout);
+  // 洗好的盘子立在沥水架里
+  for (let i = 0; i < 3; i++) {
+    const plate = m(cyl(0.09, 0.09, 0.012, 14), toon('#fdf6f0'), [sinkX - 0.16 + i * 0.05, H + 0.10, -0.05], 'cast');
+    plate.rotation.z = Math.PI / 2 - 0.35;
+    plate.rotation.y = 0.2;
+    g.add(plate);
+  }
+
+  // 灶台（右侧）：面板 + 两个炉眼 + 小锅
+  const stoveX = L / 2 - 0.42;
+  g.add(m(box(0.52, 0.015, 0.40), darkMat, [stoveX, H + 0.008, 0], 'none'));
+  for (const dz of [-0.09, 0.09]) {
+    g.add(m(new THREE.TorusGeometry(0.085, 0.012, 6, 18), toon('#5c5c68'), [stoveX - 0.09, H + 0.02, dz], 'cast'));
+    g.add(m(new THREE.TorusGeometry(0.085, 0.012, 6, 18), toon('#5c5c68'), [stoveX + 0.09, H + 0.02, dz], 'cast'));
+  }
+  const pot = m(cyl(0.10, 0.09, 0.10, 14), toon('#c9c4bb'), [stoveX - 0.09, H + 0.06, -0.09], 'cast');
+  g.add(pot);
+  g.add(m(new THREE.TorusGeometry(0.045, 0.008, 6, 14), metalMat, [stoveX - 0.09, H + 0.06, -0.09], 'none'));
+
+  /**
+   * 吊柜：贴在 -Z 侧上方（台面正上方的墙面）。
+   * 柜深 0.33，中心必须放在 -D/2 + 0.185，柜背才和地柜背面（-D/2）齐平。
+   * 原来写 -D/2 + 0.02，柜体会往墙里再探出 145mm，直接戳穿 120mm 厚的墙——
+   * 厨房靠墙摆放时的穿模就是这么来的。
+   */
+  const upY0 = H + 0.55, upY1 = 2.18;
+  const upZ = -D / 2 + 0.185;
+  g.add(m(box(L - 0.25, upY1 - upY0, 0.33), cabinetMat, [0, (upY0 + upY1) / 2, upZ], 'both'));
+  g.add(m(box(L - 0.25, 0.02, 0.35), counterMat, [0, upY1 + 0.01, upZ + 0.015], 'none'));
+  for (let i = 1; i < 3; i++) {
+    g.add(m(box(0.012, upY1 - upY0 - 0.04, 0.012), toon('#b8ac93'), [-L / 2 + 0.125 + ((L - 0.25) * i) / 3, (upY0 + upY1) / 2, -D / 2 + 0.19], 'none'));
+  }
+
+  // 台面小物：砧板 + 调味罐
+  const board = m(box(0.28, 0.018, 0.20), woodMat, [-0.25, H + 0.034, 0.02], 'cast');
+  board.rotation.y = 0.12;
+  g.add(board);
+  for (const [dx, col] of [[-0.08, '#c2a49c'], [0.0, '#a4b8c8'], [0.08, '#ddcba8']] as Array<[number, string]>) {
+    g.add(m(cyl(0.030, 0.030, 0.11, 10), toon(col), [L / 2 - 0.75 + dx, H + 0.10, D / 2 - 0.12], 'cast'));
+  }
+  return g;
+}
+
+/** 餐桌 + 两把餐椅。size = [桌面宽X, 桌高, 桌深Z]。 */
+export function buildDining(spec: { pos: [number, number, number]; size: [number, number, number] }): THREE.Group {
+  const g = new THREE.Group();
+  const W = spec.size[0], H = spec.size[1], D = spec.size[2];
+
+  const woodMat = toon('#ffffff', { map: furnitureWoodTexture() });
+  const legMat = toon(C('deskLeg', '#b09070'));
+
+  g.add(m(box(W, 0.045, D), woodMat, [0, H - 0.022, 0], 'both'));
+  for (const sx of [-1, 1]) {
+    for (const sz of [-1, 1]) {
+      g.add(m(box(0.055, H - 0.05, 0.055), legMat, [sx * (W / 2 - 0.06), (H - 0.05) / 2, sz * (D / 2 - 0.06)], 'cast'));
+    }
+  }
+  // 两把餐椅分坐两端（±X，位置不变），座面朝向桌面，椅背贴在外侧
+  for (const sx of [-1, 1]) {
+    const chair = new THREE.Group();
+    chair.add(m(box(0.38, 0.04, 0.38), woodMat, [0, 0.44, 0], 'both'));
+    // 靠背板：厚度沿 X、宽度沿 Z，这样椅背能贴到椅子 ±X 外侧并面向桌面
+    const back = m(box(0.045, 0.42, 0.38), woodMat, [sx * 0.165, 0.66, 0], 'cast');
+    back.rotation.z = -sx * 0.06; // 靠背略向后仰（远离桌面）
+    chair.add(back);
+    for (const cx of [-1, 1]) {
+      for (const cz of [-1, 1]) {
+        chair.add(m(box(0.035, 0.44, 0.035), legMat, [cx * 0.15, 0.22, cz * 0.15], 'cast'));
+      }
+    }
+    chair.position.set(sx * (W / 2 + 0.30), 0, 0); // 位置保持餐桌两端，不改动
+    chair.rotation.y = 0; // 西侧椅子还原为原朝向；东侧椅子保持改对状态（背朝房间外侧）
+    g.add(chair);
+  }
+  // 桌上一只小水壶 + 两个杯子
+  g.add(m(cyl(0.055, 0.065, 0.22, 12), toon('#a8b8ac'), [0, H + 0.11, 0], 'cast'));
+  for (const [x, z, col] of [[-0.16, 0.10, '#fdf6f0'], [0.14, -0.12, '#f1ece3']] as Array<[number, number, string]>) {
+    g.add(m(cyl(0.032, 0.027, 0.055, 12), toon(col), [x, H + 0.03, z], 'cast'));
+  }
+  return g;
+}
+
+/**
+ * 卫生间三件套：浴缸 + 马桶 + 洗手台（含镜柜）。
+ * 布局假定：浴缸沿 -X 墙（进深方向），马桶贴 -Z 墙，洗手台贴 +Z 墙。
+ * size 参数给 [房间宽X, 不用, 房间深Z]，家具按房间相对定位。
+ */
+export function buildBathroom(spec: { pos: [number, number, number]; size: [number, number, number]; toilet?: boolean }): THREE.Group {
+  const g = new THREE.Group();
+  const W = spec.size[0], D = spec.size[2];
+  const xL = -W / 2, zB = -D / 2, zF = D / 2;
+
+  /**
+   * 洁具位置原来是写死的偏移量，只在 3.2×2.4 那种宽卫生间里才不打架：
+   * 房间一窄，浴缸（贴 -X 墙、长 1.70）就会横向撞上洗手台（宽 0.90、固定在 x=-0.35），
+   * 纵向又会撞上洗手台的 Z 区间——这就是卫生间里那堆穿模。
+   * 现在全部改成按房间实际尺寸推：缸长自适应、洗手台在"浴缸右缘 ~ +X 墙"之间居中并限宽。
+   */
+  const tubW = 0.75;
+  // 缸长上限 = 房间进深 - 0.90（给两端各留 0.45 检修缝），保证和洗手台在 Z 上不重叠
+  const tubHalfLen = Math.min(1.70, Math.max(0.90, D - 0.90)) / 2;
+  const tubX = xL + 0.045 + tubW / 2;
+  const vanRight = W / 2 - 0.05;
+  const vanLeft = tubX + tubW / 2 + 0.08;
+  const vanW = Math.max(0.50, Math.min(0.90, vanRight - vanLeft));
+  const vanX = (vanLeft + vanRight) / 2;
+
+  const porcelainMat = toon('#f7f8f6');
+  const tileMat = toon('#dfe8ea');
+  const metalMat = toon(C('metal', '#b9bcc4'), { finish: 'metal' });
+  const woodMat = toon('#ffffff', { map: furnitureWoodTexture() });
+
+  /* 浴缸：沿 -X 墙，长边贴墙 */
+  const tub = new THREE.Group();
+  const tubLen = tubHalfLen * 2;
+  tub.add(m(box(tubW, 0.52, tubLen), porcelainMat, [0, 0.26, 0], 'both'));
+  // 内膛（深色水面 + 一圈内壁）
+  tub.add(m(box(tubW - 0.15, 0.03, tubLen - 0.15), toon('#cbd8d6'), [0.03, 0.50, 0], 'none'));
+  tub.add(m(box(tubW - 0.12, 0.36, tubLen - 0.12), tileMat, [0.02, 0.32, 0], 'none'));
+  // 缸沿龙头
+  const tf = m(cyl(0.013, 0.013, 0.26, 8), metalMat, [-0.28, 0.60, 0], 'cast');
+  tub.add(tf);
+  const tspout = m(cyl(0.011, 0.011, 0.14, 8), metalMat, [-0.21, 0.71, 0], 'cast');
+  tspout.rotation.z = Math.PI / 2;
+  tub.add(tspout);
+  tub.position.set(tubX, 0, 0);
+  g.add(tub);
+
+  /* 马桶：贴 -Z 墙，朝 +Z（spec.toilet === false 时跳过，独立トイレ由 buildToilet 负责） */
+  if (spec.toilet !== false) {
+    const toilet = new THREE.Group();
+    toilet.add(m(box(0.36, 0.20, 0.50), porcelainMat, [0, 0.10, 0], 'both'));
+    const bowl = m(cyl(0.19, 0.16, 0.14, 16), porcelainMat, [0, 0.24, 0.05], 'cast');
+    bowl.scale.set(1, 1, 1.25);
+    toilet.add(bowl);
+    toilet.add(m(cyl(0.17, 0.17, 0.012, 16), toon('#eef0ee'), [0, 0.315, 0.05], 'none'));
+    // 水箱贴墙
+    toilet.add(m(box(0.36, 0.42, 0.16), porcelainMat, [0, 0.32, -0.20], 'both'));
+    toilet.add(m(box(0.14, 0.025, 0.04), metalMat, [0, 0.46, -0.12], 'cast'));
+    toilet.position.set(W / 2 - 0.55, 0, zB + 0.42);
+    g.add(toilet);
+  }
+
+  /* 洗手台 + 镜柜：贴 +Z 墙，朝 -Z */
+  const van = new THREE.Group();
+  van.add(m(box(vanW, 0.50, 0.30), woodMat, [0, 0.70, 0], 'both'));
+  van.add(m(box(vanW + 0.04, 0.04, 0.34), porcelainMat, [0, 0.96, 0], 'both'));
+  const basin = m(cyl(0.16, 0.13, 0.10, 16), porcelainMat, [0, 1.00, -0.01], 'cast');
+  van.add(basin);
+  const vf = m(cyl(0.011, 0.011, 0.22, 8), metalMat, [0, 1.10, 0.12], 'cast');
+  van.add(vf);
+  const vsp = m(cyl(0.009, 0.009, 0.12, 8), metalMat, [0, 1.19, 0.06], 'cast');
+  vsp.rotation.x = Math.PI / 2;
+  van.add(vsp);
+  // 镜柜（emissive 镜面 + 木框）
+  const mirrorW = Math.max(0.42, vanW - 0.20);
+  van.add(m(box(mirrorW, 0.65, 0.05), woodMat, [0, 1.65, 0.10], 'both'));
+  const mirror = m(new THREE.PlaneGeometry(mirrorW - 0.10, 0.55), emissive('#e4eaec'), [0, 1.65, 0.072], 'none');
+  van.add(mirror);
+  // 一条小毛巾
+  van.add(m(box(Math.min(0.30, vanW * 0.34), 0.02, 0.34), toon('#f1ece3'), [vanW / 2 - 0.22, 0.985, 0], 'cast'));
+  van.position.set(vanX, 0, zF - 0.20);
+  van.rotation.y = Math.PI;
+  g.add(van);
+
+  return g;
+}
+
+/** 和室小物件：挂轴（床之间墙上）+ 矮桌上不需要，桌复用 buildLowTable。 */
+export function buildScroll(spec: { pos: [number, number, number] }): THREE.Group {
+  const g = new THREE.Group();
+  // 挂轴：面朝 +X（挂 -X 墙）
+  g.add(m(box(0.03, 0.72, 0.30), toon('#f2ecdc'), [0, 0, 0], 'cast'));
+  g.add(m(box(0.032, 0.035, 0.34), toon('#544c4e'), [0, 0.375, 0], 'cast'));
+  g.add(m(box(0.032, 0.035, 0.34), toon('#544c4e'), [0, -0.375, 0], 'cast'));
+  // 轴心画面：远山 + 一轮月
+  g.add(m(new THREE.PlaneGeometry(0.20, 0.50), emissive('#f7f2e4'), [0.017, 0, 0], 'none'));
+  g.add(m(sph(0.035, 10, 8), toon('#e2dac6'), [0.017, 0.14, -0.04], 'none'));
+  g.add(m(new THREE.CircleGeometry(0.075, 16), toon('#a9c4b2'), [0.018, -0.10, 0.04], 'none'));
+  return g;
+}
+
+/**
+ * 电竞房：双人位战斗桌 + 双屏 + 主机(RGB) + 电竞椅 + 墙面灯带。
+ * size = [桌宽X, 桌高, 桌深Z]，桌面沿 -Z 墙，面朝 +Z。
+ */
+export function buildGameStation(spec: { pos: [number, number, number]; size: [number, number, number] }): THREE.Group {
+  const g = new THREE.Group();
+  const W = spec.size[0], H = spec.size[1], D = spec.size[2];
+
+  const darkMat = toon(C('dark', '#43434f'));
+  const blackMat = toon('#2f2f37');
+  const metalMat = toon(C('metal', '#b9bcc4'), { finish: 'metal' });
+
+  // 桌板 + 桌腿（两侧整块侧板，电竞桌的常见样式）
+  g.add(m(box(W, 0.04, D), blackMat, [0, H - 0.02, 0], 'both'));
+  for (const sx of [-1, 1]) {
+    g.add(m(box(0.05, H - 0.04, D - 0.06), blackMat, [sx * (W / 2 - 0.04), (H - 0.04) / 2, 0], 'cast'));
+  }
+  // 桌面理线架
+  g.add(m(box(W - 0.3, 0.02, 0.06), metalMat, [0, H + 0.09, -D / 2 + 0.08], 'none'));
+
+  /* 主显示器（大曲面感：宽面板 + 轻微弯折用两块拼） */
+  const mon = new THREE.Group();
+  mon.add(m(box(0.05, 0.28, 0.05), darkMat, [0, 0.14, 0], 'cast'));
+  const scr = new THREE.Group();
+  scr.add(m(box(0.05, 0.44, 0.98), darkMat, [0, 0, 0], 'cast'));
+  for (const dz of [-0.245, 0.245]) {
+    const wing = m(box(0.05, 0.44, 0.24), darkMat, [0, 0, dz * 1.04], 'cast');
+    wing.rotation.y = dz > 0 ? -0.14 : 0.14;
+    scr.add(wing);
+  }
+  const c = new THREE.Color('#b0c4d0');
+  const s1 = m(new THREE.PlaneGeometry(0.42, 0.38), emissive('#b0c4d0'), [0.027, 0.02, -0.36], 'none');
+  const s2 = m(new THREE.PlaneGeometry(0.42, 0.38), emissive(c.offsetHSL(0.05, 0, 0).getStyle()), [0.027, 0.02, 0.36], 'none');
+  scr.add(s1, s2);
+  scr.position.set(0, 0.50, 0);
+  mon.add(scr);
+  mon.position.set(-0.35, H, -0.10);
+  g.add(mon);
+
+  /* 副屏（竖屏，右侧） */
+  const sub = new THREE.Group();
+  sub.add(m(box(0.04, 0.20, 0.04), darkMat, [0, 0.10, 0], 'cast'));
+  sub.add(m(box(0.03, 0.40, 0.24), darkMat, [0, 0.40, 0], 'cast'));
+  sub.add(m(new THREE.PlaneGeometry(0.20, 0.34), emissive('#8fae96'), [0.017, 0.40, 0], 'none'));
+  sub.position.set(W / 2 - 0.45, H, -0.08);
+  g.add(sub);
+
+  /* 主机：桌下右侧，正面朝 +Z，RGB 三条灯带 */
+  const tower = new THREE.Group();
+  tower.add(m(box(0.22, 0.46, 0.46), blackMat, [0, 0.23, 0], 'both'));
+  tower.add(m(new THREE.PlaneGeometry(0.16, 0.38), emissive('#34343c'), [0, 0.24, 0.231], 'none'));
+  for (const [y, col] of [[0.38, '#b0705f'], [0.24, '#b0c4d0'], [0.10, '#8fae96']] as Array<[number, string]>) {
+    tower.add(m(box(0.012, 0.025, 0.40), emissive(col), [0.115, y, 0], 'none'));
+  }
+  tower.position.set(W / 2 - 0.18, 0, 0.02);
+  g.add(tower);
+
+  /* 键盘 + 鼠标 + 鼠标垫 + 耳机挂架 */
+  g.add(m(box(0.40, 0.018, 0.15), toon('#3a3a42'), [-0.35, H + 0.01, 0.22], 'cast'));
+  g.add(m(box(0.30, 0.002, 0.22), toon('#43434f'), [-0.35, H + 0.003, 0.22], 'none'));
+  g.add(m(box(0.06, 0.026, 0.10), toon('#3a3a42'), [0.12, H + 0.015, 0.24], 'cast'));
+  const hook = m(new THREE.TorusGeometry(0.035, 0.008, 6, 12, Math.PI), metalMat, [W / 2 - 0.32, H + 0.12, -D / 2 + 0.10], 'cast');
+  g.add(hook);
+  const headset = m(box(0.16, 0.05, 0.10), toon('#3a3a42'), [W / 2 - 0.32, H + 0.15, -D / 2 + 0.10], 'cast');
+  g.add(headset);
+
+  /* 电竞椅：高背 + 头枕 + 五爪底座 */
+  const chair = new THREE.Group();
+  chair.add(m(cyl(0.03, 0.03, 0.30, 8), metalMat, [0, 0.20, 0], 'cast'));
+  for (let i = 0; i < 5; i++) {
+    const a = (i / 5) * Math.PI * 2;
+    const leg = m(box(0.28, 0.03, 0.05), blackMat, [Math.cos(a) * 0.14, 0.045, Math.sin(a) * 0.14], 'cast');
+    leg.rotation.y = -a;
+    chair.add(leg);
+    chair.add(m(sph(0.028, 8, 6), toon('#43434f'), [Math.cos(a) * 0.27, 0.028, Math.sin(a) * 0.27], 'none'));
+  }
+  chair.add(m(box(0.48, 0.08, 0.46), blackMat, [0, 0.38, 0], 'both'));
+  chair.add(m(box(0.46, 0.10, 0.42), toon('#565063'), [0, 0.45, 0], 'cast'));
+  const backrest = m(box(0.46, 0.72, 0.10), blackMat, [0, 0.86, -0.20], 'both');
+  backrest.rotation.x = 0.10;
+  chair.add(backrest);
+  const backCushion = m(box(0.40, 0.60, 0.08), toon('#565063'), [0, 0.88, -0.15], 'cast');
+  backCushion.rotation.x = 0.10;
+  chair.add(backCushion);
+  chair.add(m(box(0.26, 0.12, 0.09), toon('#565063'), [0, 1.30, -0.24], 'cast'));
+  chair.position.set(-0.35, 0, 0.62);
+  g.add(chair);
+
+  /* 墙面 RGB 灯带（-Z 墙上方，横贯桌宽）+ 一张海报 */
+  for (const [y, col] of [[2.35, '#b0705f'], [2.28, '#b0c4d0']] as Array<[number, string]>) {
+    g.add(m(box(W - 0.4, 0.025, 0.015), emissive(col), [0, y, -D / 2 + 0.12], 'none'));
+  }
+  const poster = m(new THREE.PlaneGeometry(0.36, 0.50), toon('#a89aa8'), [W / 2 - 0.55, 1.55, -D / 2 + 0.121], 'none');
+  poster.userData.noOutline = true;
+  g.add(poster);
+
+  return g;
+}
+
+/** 玄关：鞋柜 + 地垫 + 换鞋凳。size = [柜宽X, 柜高, 柜深Z]，柜贴 +Z 墙。 */
+export function buildEntrySet(spec: { pos: [number, number, number]; size: [number, number, number] }): THREE.Group {
+  const g = new THREE.Group();
+  const W = spec.size[0], H = spec.size[1], D = spec.size[2];
+
+  const woodMat = toon('#ffffff', { map: furnitureWoodTexture() });
+
+  // 鞋柜（上下两段，中间留格放钥匙）
+  g.add(m(box(W, H, D), woodMat, [0, H / 2, 0], 'both'));
+  g.add(m(box(W + 0.01, 0.02, D + 0.01), toon('#b39377'), [0, H * 0.62, 0], 'none'));
+  g.add(m(box(W - 0.06, 0.26, 0.01), toon('#f2ede2'), [0, H * 0.62 + 0.16, -D / 2 - 0.002], 'none'));
+  for (const s of [-1, 1]) {
+    g.add(m(cyl(0.012, 0.012, 0.10, 8), toon(C('metal', '#b9bcc4'), { finish: 'metal' }), [s * W / 4, H * 0.35, -D / 2 - 0.012], 'cast').rotateZ(Math.PI / 2));
+  }
+  // 地垫（welcome mat）：跟着柜体正面走，别再写死 z=-1.05（柜深一变就浮到墙外）
+  g.add(m(box(0.60, 0.012, 0.40), toon('#bda49e'), [0, 0.006, -D / 2 - 0.78], 'none'));
+  // 换鞋小凳
+  const bench = new THREE.Group();
+  bench.add(m(box(0.40, 0.04, 0.26), woodMat, [0, 0.26, 0], 'both'));
+  for (const sx of [-1, 1]) bench.add(m(box(0.04, 0.24, 0.22), toon('#b09070'), [sx * 0.16, 0.12, 0], 'cast'));
+  /**
+   * 换鞋凳：必须待在柜体正面（-Z 侧）的地面上，且 X 落在柜宽之内。
+   * 原来放在 -W/2 - 0.30，凳子（宽 0.40）会整体伸到柜体外 0.50m，
+   * 玄关柜一排到墙就必然插进墙里。
+   */
+  bench.position.set(W / 2 - 0.30, 0, -D / 2 - 0.18);
+  g.add(bench);
+  return g;
+}
+
+/**
+ * 室内门：门框（洞口里）+ 开着的门扇。
+ * size = [门宽, 门高, 0]，pos = 洞口中心（地面），rot = 门扇开合基准。
+ * 门扇默认朝 +X 开（挂在 a 端铰链上），通过 rot 摆到各个墙面。
+ */
+export function buildDoor(spec: { pos: [number, number, number]; size: [number, number, number]; rot?: number }): THREE.Group {
+  const g = new THREE.Group();
+  const W = spec.size[0], H = spec.size[1];
+
+  const frameMat = toon('#ffffff', { map: furnitureWoodTexture() });
+  const doorMat = toon(C('door', '#e9dcc8'));
+
+  // 门框：两侧梃 + 上槛（在墙厚 0.12 内）。包进 door-frame 组，供 RoomScene 单独描边（静态）
+  const frame = new THREE.Group();
+  frame.name = 'door-frame';
+  for (const s of [-1, 1]) {
+    frame.add(m(box(0.10, H + 0.06, 0.05), frameMat, [s * (W / 2 + 0.02), (H + 0.06) / 2, 0], 'cast'));
+  }
+  frame.add(m(box(W + 0.14, 0.10, 0.05), frameMat, [0, H + 0.05, 0], 'cast'));
+  g.add(frame);
+
+  // 门扇：铰链在 -X 端，挂在独立 pivot（door-leaf）上，开关动画由 RoomScene 按距离驱动
+  const leaf = new THREE.Group();
+  leaf.name = 'door-leaf';
+  const panel = m(box(W, H - 0.04, 0.038), doorMat, [W / 2, (H - 0.04) / 2, 0], 'cast');
+  leaf.add(panel);
+  // 门把
+  leaf.add(m(cyl(0.012, 0.012, 0.10, 8), toon(C('metal', '#b9bcc4'), { finish: 'metal' }), [W - 0.06, H * 0.47, 0.04], 'cast'));
+  leaf.position.set(-W / 2, 0, 0);
+  leaf.rotation.y = 0; // 默认关闭；RoomScene 按角色/玩家距离在 [0, -1.82] 之间驱动
+  g.add(leaf);
+
+  if (spec.rot) g.rotation.y = spec.rot;
+  g.position.set(spec.pos[0], spec.pos[1], spec.pos[2]);
+  return g;
+}
+
+/** 入户门：外墙面上的实体防盗门（关着）。size = [门宽, 门高, 0]。 */
+export function buildEntryDoor(spec: { pos: [number, number, number]; size: [number, number, number]; rot?: number }): THREE.Group {
+  const g = new THREE.Group();
+  const W = spec.size[0], H = spec.size[1];
+
+  const doorMat = toon(C('entryDoor', '#7a8794'));
+  const frameMat = toon('#4a5460');
+  const metalMat = toon(C('metal', '#b9bcc4'), { finish: 'metal' });
+
+  // 门框：两侧梃 + 上槛。包进 door-frame 组，供 RoomScene 单独描边（静态）
+  const frame = new THREE.Group();
+  frame.name = 'door-frame';
+  for (const s of [-1, 1]) {
+    frame.add(m(box(0.05, H + 0.08, 0.14), frameMat, [s * (W / 2 + 0.02), (H + 0.08) / 2, 0], 'cast'));
+  }
+  frame.add(m(box(W + 0.14, 0.08, 0.14), frameMat, [0, H + 0.04, 0], 'cast'));
+  g.add(frame);
+
+  // 门扇：铰链在 -X 端，挂在独立 pivot（door-leaf）上，开关动画由 RoomScene 按距离驱动
+  const leaf = new THREE.Group();
+  leaf.name = 'door-leaf';
+  leaf.add(m(box(W, H, 0.06), doorMat, [W / 2, H / 2, 0], 'both'));
+  // 门上的两道凹槽线 + 猫眼 + 圆把手（全部随门扇旋转）
+  leaf.add(m(box(W - 0.16, 0.012, 0.012), toon('#5d6873'), [W / 2, H * 0.62, 0.032], 'none'));
+  leaf.add(m(box(W - 0.16, 0.012, 0.012), toon('#5d6873'), [W / 2, H * 0.40, 0.032], 'none'));
+  leaf.add(m(cyl(0.022, 0.022, 0.015, 10), metalMat, [W / 2 - W * 0.22, H * 0.76, 0.035], 'none').rotateX(Math.PI / 2));
+  leaf.add(m(sph(0.035, 10, 8), metalMat, [W / 2 - W * 0.30, H * 0.48, 0.06], 'cast'));
+  leaf.position.set(-W / 2, 0, 0);
+  leaf.rotation.y = 0; // 默认关闭
+  g.add(leaf);
+
+  if (spec.rot) g.rotation.y = spec.rot;
+  g.position.set(spec.pos[0], spec.pos[1], spec.pos[2]);
+  return g;
+}
+
+/**
+ * 玻璃滑门（LDK↔阳台 / 和室↔阳台）：门框 + 双轨 + 两扇玻璃，一扇半开。
+ * size = [总宽, 总高, 0]，pos = 洞口中心。两扇都吃进墙厚里。
+ */
+export function buildGlassDoor(spec: { pos: [number, number, number]; size: [number, number, number]; rot?: number }): THREE.Group {
+  const g = new THREE.Group();
+  const W = spec.size[0], H = spec.size[1];
+
+  const frameMat = toon(C('windowFrame', '#fdfaf5'));
+  const metalMat = toon(C('metal', '#b9bcc4'), { finish: 'metal' });
+  // 玻璃：半透明，但 depthWrite 必须关 —— 否则透明面写入深度缓冲后会把背后的
+  // 另一扇玻璃 / 阳台景物提前剔除，看起来就像一扇实心白门（透明排序伪影）。
+  //
+  // finish:'glass' 给玻璃一层冷色边缘亮 + 高光。透明面拿不到描边（描边壳是不透明的
+  // BackSide 外扩壳，铺满轮廓之后会从玻璃后面整片透上来，把玻璃填成实心板），
+  // 形状全靠这层高光读出来，所以它是必需的而不是锦上添花。
+  const glassMat = toon('#dfeaf0', {
+    transparent: true,
+    opacity: 0.18,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+    finish: 'glass',
+  });
+
+  // 上框 + 下轨 + 中梃
+  g.add(m(box(W, 0.07, 0.12), frameMat, [0, H - 0.035, 0], 'cast'));
+  g.add(m(box(W, 0.05, 0.14), frameMat, [0, 0.025, 0], 'cast'));
+  g.add(m(box(0.05, H, 0.12), frameMat, [-W / 2 + 0.025, H / 2, 0], 'cast'));
+  g.add(m(box(0.05, H, 0.12), frameMat, [W / 2 - 0.025, H / 2, 0], 'cast'));
+
+  // 两扇玻璃门：左半扇固定（door-leaf），右半扇（door-leaf2）可沿局部 X 向左滑到
+  // 与左半扇重合，右半门洞因此打开——和 fusuma 同一套推拉逻辑，由 RoomScene 按
+  // 「路径穿过 + 靠近」驱动。关着时两扇并拢盖住整面门洞（current=0 即闭合态）。
+  const pw = W / 2;
+  const mkPane = (handleSide: 1 | -1): THREE.Group => {
+    const p = new THREE.Group();
+    p.add(m(box(pw - 0.02, H - 0.16, 0.03), glassMat, [0, H / 2, 0], 'none'));
+    // 每扇自己的细框 + 竖把手；把手必须位于两扇相接的那一侧（门洞中央），
+    // 因此左半扇用 +x、右半扇用 -x。
+    p.add(m(box(pw - 0.02, 0.045, 0.045), frameMat, [0, H - 0.10, 0], 'cast'));
+    p.add(m(box(pw - 0.02, 0.045, 0.045), frameMat, [0, 0.10, 0], 'cast'));
+    p.add(m(box(0.04, H - 0.20, 0.045), frameMat, [-pw / 2 + 0.01, H / 2, 0], 'cast'));
+    p.add(m(box(0.04, H - 0.20, 0.045), frameMat, [pw / 2 - 0.01, H / 2, 0], 'cast'));
+    p.add(m(box(0.035, 0.22, 0.05), metalMat, [handleSide * (pw / 2 - 0.05), H * 0.48, 0.01], 'cast'));
+    return p;
+  };
+  const leaf = mkPane(1);
+  leaf.name = 'door-leaf';
+  leaf.position.set(-pw / 2, 0, 0);   // 固定半扇：盖住左半门洞
+  g.add(leaf);
+  const leaf2 = mkPane(-1);
+  leaf2.name = 'door-leaf2';
+  leaf2.position.set(pw / 2, 0, 0.03); // 动半扇：初始盖右半；开门向左滑与左半重合（z 略前避免 z-fighting）
+  g.add(leaf2);
+
+  if (spec.rot) g.rotation.y = spec.rot;
+  g.position.set(spec.pos[0], spec.pos[1], spec.pos[2]);
+  return g;
+}
+
+/**
+ * 日式推拉门（障子·fusuma）：墙洞里的固定外框 + 两扇可滑动的障子面板，
+ * 关着时并拢盖住整个门洞；开门时把右半扇（leaf2）向左滑到与左半扇（leaf）重合——
+ * 只有「其中一扇推到和另一扇重合」，右半门洞因此打开，而非两扇向两侧分开。
+ * size = [总宽, 总高, 0]，pos = 洞口中心。两扇都吃进墙厚里。
+ * 门扇分组名 door-leaf / door-leaf2，由 RoomScene 按「路径穿过 + 靠近」滑动。
+ */
+export function buildFusuma(spec: { pos: [number, number, number]; size: [number, number, number]; rot?: number }): THREE.Group {
+  const g = new THREE.Group();
+  const W = spec.size[0], H = spec.size[1];
+
+  const frameMat = toon('#3f342a');  // 深木色框
+  const paperMat = toon('#f2ead8', { transparent: true, opacity: 0.9, side: THREE.DoubleSide }); // 障子纸：暖白半透
+  const latticeMat = toon('#4a3b2e'); // 格栅：深木色
+
+  // 固定外框（墙厚内）：上槛 + 下槛 + 两侧梃，供 RoomScene 单独描边（静态）
+  const frame = new THREE.Group();
+  frame.name = 'door-frame';
+  frame.add(m(box(W + 0.06, 0.09, 0.10), frameMat, [0, H - 0.045, 0], 'cast'));
+  frame.add(m(box(W + 0.06, 0.09, 0.10), frameMat, [0, 0.045, 0], 'cast'));
+  for (const s of [-1, 1]) {
+    frame.add(m(box(0.07, H, 0.10), frameMat, [s * (W / 2 + 0.03), H / 2, 0], 'cast'));
+  }
+  g.add(frame);
+
+  // 两扇障子面板（各宽 W/2），名称 door-leaf / door-leaf2，供 RoomScene 滑动动画
+  const pw = W / 2;
+  const mkPanel = (): THREE.Group => {
+    const p = new THREE.Group();
+    // 纸面
+    p.add(m(box(pw - 0.02, H - 0.14, 0.03), paperMat, [0, H / 2, 0], 'none'));
+    // 面板外框
+    p.add(m(box(pw - 0.02, 0.05, 0.05), frameMat, [0, H - 0.08, 0], 'cast'));
+    p.add(m(box(pw - 0.02, 0.05, 0.05), frameMat, [0, 0.08, 0], 'cast'));
+    p.add(m(box(0.05, H - 0.16, 0.05), frameMat, [-pw / 2 + 0.02, H / 2, 0], 'cast'));
+    p.add(m(box(0.05, H - 0.16, 0.05), frameMat, [pw / 2 - 0.02, H / 2, 0], 'cast'));
+    // 障子格：横 3 道 + 竖 2 道（细格栅，只描边不投影）
+    for (let i = 1; i <= 3; i++) {
+      p.add(m(box(pw - 0.06, 0.022, 0.05), latticeMat, [0, (H - 0.16) * (i / 4) + 0.10, 0], 'none'));
+    }
+    for (let i = 1; i <= 2; i++) {
+      p.add(m(box(0.022, H - 0.20, 0.05), latticeMat, [(i - 1.5) * (pw / 3), H / 2, 0], 'none'));
+    }
+    return p;
+  };
+  const leaf = mkPanel();
+  leaf.name = 'door-leaf';
+  leaf.position.set(-pw / 2, 0, 0);
+  g.add(leaf);
+  const leaf2 = mkPanel();
+  leaf2.name = 'door-leaf2';
+  // 右半扇略向前（+z）一点：开门滑到与左半扇重合时不会和左半扇 z-fighting
+  leaf2.position.set(pw / 2, 0, 0.04);
+  g.add(leaf2);
+
+  if (spec.rot) g.rotation.y = spec.rot;
+  g.position.set(spec.pos[0], spec.pos[1], spec.pos[2]);
+  return g;
+}
+
+/** 阳台小件：晾衣杆 + 晾着的衣物 + 花箱 + 空调外机 + 咖啡桌椅。 */
+export function buildBalconyProps(spec: { pos: [number, number, number] }): THREE.Group {
+  const g = new THREE.Group();
+  const metalMat = toon(C('metal', '#b9bcc4'), { finish: 'metal' });
+  const woodMat = toon('#ffffff', { map: furnitureWoodTexture() });
+
+  /* 晾衣杆：两根立杆 + 横杆 + 晾着一条毛巾一件 T 恤 */
+  const pole = new THREE.Group();
+  for (const sx of [-1, 1]) {
+    pole.add(m(cyl(0.022, 0.026, 1.55, 8), toon('#d8d2c4'), [sx * 1.1, 0.775, 0], 'cast'));
+  }
+  const bar = m(cyl(0.014, 0.014, 2.3, 8), metalMat, [0, 1.55, 0], 'cast');
+  bar.rotation.z = Math.PI / 2;
+  pole.add(bar);
+  // 毛巾（搭下来）+ T 恤（带肩线）
+  const towel = m(box(0.32, 0.55, 0.012), toon('#f1ece3'), [-0.55, 1.26, 0], 'cast');
+  pole.add(towel);
+  const shirt = m(box(0.40, 0.48, 0.012), toon('#a8b8ac'), [0.25, 1.29, 0], 'cast');
+  pole.add(shirt);
+  pole.add(m(box(0.42, 0.06, 0.014), toon('#a4b8c8'), [0.25, 1.52, 0], 'cast'));
+  pole.position.set(0, 0, 0);
+  g.add(pole);
+
+  /* 花箱 ×2：沿栏杆一排小花 */
+  for (const [x, z, cols] of [
+    [-0.6, 1.05, ['#c2a49c', '#ddcba8', '#c2a49c']],
+    [0.9, 1.05, ['#a8b8ac', '#f1ece3', '#a89aa8']],
+  ] as Array<[number, number, string[]]>) {
+    const boxG = new THREE.Group();
+    boxG.add(m(box(0.68, 0.16, 0.24), woodMat, [0, 0.08, 0], 'cast'));
+    boxG.add(m(box(0.62, 0.04, 0.20), toon('#6b584a'), [0, 0.17, 0], 'none'));
+    for (let i = 0; i < 3; i++) {
+      boxG.add(m(sph(0.045, 8, 6), toon(cols[i]), [-0.20 + i * 0.20, 0.24, 0], 'cast'));
+      boxG.add(m(box(0.012, 0.10, 0.012), toon('#6a9c78'), [-0.20 + i * 0.20, 0.19, 0], 'none'));
+    }
+    boxG.position.set(x, 0, z);
+    g.add(boxG);
+  }
+
+  /* 空调外机：贴玄关外墙（+Z 侧墙面），带栅格和风扇网 */
+  const ac = new THREE.Group();
+  ac.add(m(box(0.72, 0.52, 0.28), toon('#d9dde0'), [0, 0.30, 0], 'both'));
+  ac.add(m(box(0.74, 0.03, 0.30), toon('#b8bec4'), [0, 0.045, 0], 'cast'));
+  for (let i = 0; i < 5; i++) {
+    ac.add(m(box(0.64, 0.008, 0.008), toon('#aab0b6'), [0, 0.24 + i * 0.045, 0.142], 'none'));
+  }
+  ac.add(m(new THREE.CircleGeometry(0.16, 18), toon('#c4c9ce'), [-0.16, 0.30, 0.141], 'none'));
+  for (let i = 0; i < 4; i++) {
+    const spoke = m(box(0.26, 0.010, 0.006), toon('#aab0b6'), [-0.16, 0.30, 0.143], 'none');
+    spoke.rotation.z = (i / 4) * Math.PI;
+    ac.add(spoke);
+  }
+  // 支架
+  for (const sx of [-1, 1]) {
+    ac.add(m(box(0.04, 0.24, 0.04), toon('#8a8f95'), [sx * 0.26, 0.12, -0.14], 'cast'));
+  }
+  ac.position.set(2.55, 0, -0.42);
+  g.add(ac);
+
+  /* 一套小咖啡桌椅 */
+  const cafe = new THREE.Group();
+  cafe.add(m(cyl(0.20, 0.20, 0.035, 16), woodMat, [0, 0.42, 0], 'both'));
+  cafe.add(m(cyl(0.03, 0.04, 0.40, 8), metalMat, [0, 0.20, 0], 'cast'));
+  const stool = new THREE.Group();
+  stool.add(m(cyl(0.15, 0.15, 0.03, 12), woodMat, [0, 0.42, 0], 'both'));
+  stool.add(m(cyl(0.025, 0.035, 0.40, 8), metalMat, [0, 0.20, 0], 'cast'));
+  stool.position.set(0.55, 0, 0.28);
+  cafe.add(stool);
+  // 桌上一杯东西
+  cafe.add(m(cyl(0.035, 0.028, 0.09, 10), toon('#fdf6f0'), [0, 0.48, 0.04], 'cast'));
+  cafe.position.set(1.75, 0, 0.35);
+  g.add(cafe);
+
+  return g;
+}
+
+/** 简洁吸顶灯（卧室/和室/卫浴/玄关）。半球罩 + 小夜灯点光。 */
+export function buildCeilLamp(spec: { pos: [number, number, number]; ceilingH: number }): THREE.Group {
+  const g = new THREE.Group();
+  const y = spec.ceilingH;
+  g.add(m(cyl(0.10, 0.13, 0.025, 14), toon('#e8e2d6'), [0, y - 0.012, 0], 'cast'));
+  const dome = m(sph(0.115, 14, 8), toon('#fdf6ea', { emissive: '#e8dcbe', emissiveIntensity: 0.55, side: THREE.DoubleSide }), [0, y - 0.045, 0], 'cast');
+  g.add(dome);
+  const light = new THREE.PointLight(0xffe9c8, 0.38, 3.4, 2);
+  light.position.set(0, y - 0.12, 0);
+  g.add(light);
+  g.position.set(spec.pos[0], 0, spec.pos[2]);
+  return g;
+}
+
+/**
+ * 有生活逻辑的零散物件：拖鞋/雨伞在玄关，纸箱在鞋柜边，垃圾桶在卧室书桌旁，
+ * 帆布包靠 LDK 墙根。这些物件不参与导航，只负责把样板间变成"有人长期住过"的空间。
+ */
+/**
+ * 零散生活物件的摆放位置。
+ *
+ * 这些坐标原来写死在函数里，户型一改它们就全部落到错误的位置——
+ * 一半插进墙体、一半悬在半空，是"穿模"投诉里最难排查的一类。
+ * 现在全部由 dormLayout.json 的 lifestyle 条目驱动，函数只负责造形。
+ */
+export type LifestyleConfig = {
+  /** 拖鞋：每项 [x, z, 朝向弧度] */
+  slippers?: Array<[number, number, number]>;
+  /** 靠墙的折叠伞 [x, z]（伞顶朝 -X 倒） */
+  umbrella?: [number, number];
+  /** 帆布包 [x, z, 朝向弧度] */
+  bag?: [number, number, number];
+  /** 快递纸箱的落点 [x, z]，两只叠着放 */
+  parcels?: [number, number];
+  /** 垃圾桶 [x, z] */
+  bin?: [number, number];
+  /** 贴墙的拍立得/便签：[x, y, z, 绕Y弧度, 颜色] */
+  cards?: Array<[number, number, number, number, string]>;
+};
+
+const LIFESTYLE_DEFAULTS: Required<LifestyleConfig> = {
+  slippers: [[4.62, 0.55, -0.20], [4.36, 0.62, 0.12]],
+  umbrella: [2.42, 0.25],
+  bag: [-1.58, -0.45, -0.18],
+  parcels: [4.72, 1.12],
+  bin: [-3.12, -3.75],
+  cards: [
+    [-5.488, 1.62, -3.85, Math.PI / 2, '#e6dad4'],
+    [-5.488, 1.38, -3.55, Math.PI / 2, '#c8d4da'],
+    [-5.488, 1.10, -3.80, Math.PI / 2, '#ddcba8'],
+  ],
+};
+
+export function buildLifestyleDetails(cfg?: LifestyleConfig): THREE.Group {
+  const g = new THREE.Group();
+  const wood = toon('#ad9276');
+  const pale = toon('#f6eee3');
+  const blue = toon('#a8bcc8');
+  const dark = toon('#54525c');
+  const paper = toon('#fffaf0');
+
+  const D = { ...LIFESTYLE_DEFAULTS, ...(cfg ?? {}) };
+  const slipColors = ['#c0a49c', '#a8bcc8'];
+
+  // 玄关拖鞋：成双但不完全平行，保留刚脱下来的随意感。
+  for (const [i, [x, z, rot]] of D.slippers.entries()) {
+    const col = slipColors[i % slipColors.length];
+    const slipper = m(box(0.13, 0.045, 0.31), toon(col), [x, 0.025, z], 'cast');
+    slipper.rotation.y = rot;
+    g.add(slipper);
+    const strap = m(new THREE.TorusGeometry(0.052, 0.012, 6, 12, Math.PI), toon('#f3ede5'), [x, 0.065, z - 0.035], 'cast');
+    strap.rotation.x = Math.PI / 2;
+    strap.rotation.z = rot;
+    g.add(strap);
+  }
+
+  // 玄关墙边的折叠伞：靠玄关西墙（X=2.2，开口 Z∈[0.55,1.35] 以南的实墙段）。
+  // 弯柄接口对齐见 buildLifestyleDetails 内注释：环心放 (0, 0.78, R)。
+  const umbrella = new THREE.Group();
+  umbrella.add(m(cyl(0.010, 0.010, 0.78, 8), dark, [0, 0.39, 0], 'cast'));
+  const canopy = m(new THREE.ConeGeometry(0.105, 0.42, 12, 1, true), blue, [0, 0.34, 0], 'cast');
+  canopy.rotation.x = Math.PI;
+  umbrella.add(canopy);
+  const handle = m(new THREE.TorusGeometry(0.050, 0.010, 6, 12, Math.PI * 1.25), dark, [0, 0.78, 0.05], 'cast');
+  handle.rotation.y = Math.PI / 2;
+  umbrella.add(handle);
+  // 倾角 +0.10 = 顶往 -X 倒（靠向墙）；伞冠 z 占 [0.115,0.335]，避开门口动线
+  umbrella.position.set(D.umbrella[0], 0, D.umbrella[1]);
+  umbrella.rotation.z = 0.10;
+  g.add(umbrella);
+
+  // LDK 墙根的帆布包（靠卧室东墙，餐厅旁）。
+  const bag = new THREE.Group();
+  bag.add(m(box(0.34, 0.34, 0.13), pale, [0, 0.17, 0], 'cast'));
+  for (const sx of [-1, 1]) {
+    const h = m(new THREE.TorusGeometry(0.085, 0.012, 6, 14, Math.PI), wood, [sx * 0.085, 0.35, 0], 'cast');
+    h.rotation.x = Math.PI / 2;
+    bag.add(h);
+  }
+  bag.position.set(D.bag[0], 0, D.bag[1]);
+  bag.rotation.y = D.bag[2];
+  g.add(bag);
+
+  // 鞋柜旁的两只快递纸箱。
+  const parcelA = m(box(0.34, 0.18, 0.28), toon('#bda283'), [D.parcels[0], 0.09, D.parcels[1]], 'cast');
+  parcelA.rotation.y = 0.08;
+  g.add(parcelA);
+  const parcelB = m(box(0.25, 0.14, 0.23), toon('#bda283'), [D.parcels[0] - 0.06, 0.25, D.parcels[1] - 0.02], 'cast');
+  parcelB.rotation.y = -0.10;
+  g.add(parcelB);
+
+  // 书桌旁的小垃圾桶和一团废纸。
+  const bin = m(cyl(0.12, 0.095, 0.28, 14, true), dark, [D.bin[0], 0.14, D.bin[1]], 'cast');
+  g.add(bin);
+  g.add(m(sph(0.035, 7, 6), paper, [D.bin[0] - 0.16, 0.035, D.bin[1] + 0.17], 'cast'));
+
+  /**
+   * 墙面生活痕迹：卧室西墙的小照片/便签，均贴墙不投影。
+   *
+   * 贴墙的东西必须和墙一样是"朝内"的单面平面，不能用薄 box：box 朝向房间外
+   * 那面是正面会被渲染出来，于是墙让开视线时它们还悬在半空。改成法线朝房间内
+   * 的 Plane 之后，它们和墙一起被背面剔除，视觉上等于跟墙长在一起。
+   */
+  for (const [x, y, z, ry, col] of D.cards) {
+    const card = m(new THREE.PlaneGeometry(0.24, 0.18), toon(col), [x, y, z], 'none');
+    card.userData.noOutline = true;
+    card.rotation.y = ry;
+    g.add(card);
+  }
+
+  return g;
+}
+
+/* ============================================================================
+ * 灯具 / 墙面装饰
+ * ========================================================================== */
+
+/** 和风纸灯笼（吊灯）。 */
+export function buildCeilingLantern(pos: [number, number, number], ceilingH: number): THREE.Group {
+  const g = new THREE.Group();
+  const hangY = ceilingH - 0.42;
+
+  const cordMat = toon('#544c4e');
+  g.add(m(cyl(0.006, 0.006, 0.42, 6), cordMat, [0, hangY + 0.21, 0], 'none'));
+
+  // 提灯那种鼓肚子的轮廓
+  const profile: THREE.Vector2[] = [
+    new THREE.Vector2(0.001, -0.19),
+    new THREE.Vector2(0.095, -0.175),
+    new THREE.Vector2(0.17, -0.10),
+    new THREE.Vector2(0.195, 0.0),
+    new THREE.Vector2(0.17, 0.10),
+    new THREE.Vector2(0.095, 0.175),
+    new THREE.Vector2(0.001, 0.19),
+  ];
+  const lanternMat = toon('#fff6e2', { emissive: '#dcc79c', emissiveIntensity: 0.9, side: THREE.DoubleSide });
+  g.add(m(new THREE.LatheGeometry(profile, 20), lanternMat, [0, hangY, 0], 'cast'));
+
+  // 上下木盖
+  g.add(m(cyl(0.05, 0.05, 0.022, 12), toon('#a08066'), [0, hangY + 0.20, 0], 'cast'));
+  g.add(m(cyl(0.05, 0.045, 0.022, 12), toon('#a08066'), [0, hangY - 0.20, 0], 'cast'));
+  // 竹骨横箍
+  for (const [y, r] of [[-0.13, 0.152], [-0.05, 0.192], [0.05, 0.192], [0.13, 0.152]] as Array<[number, number]>) {
+    const ring = m(new THREE.TorusGeometry(r, 0.004, 6, 22), toon('#d6c3a2'), [0, hangY + y, 0], 'none');
+    ring.rotation.x = Math.PI / 2;
+    g.add(ring);
+  }
+
+  const light = new THREE.PointLight(0xffd9a0, 0.5, 4.6, 2);
+  light.position.set(0, hangY - 0.1, 0);
+  g.add(light);
+
+  g.position.set(pos[0], 0, pos[2]);
+  return g;
+}
+
+export function buildWallClock(pos: [number, number, number], rot = 0): THREE.Group {
+  const g = new THREE.Group();
+  const caseMat = toon('#fdf6ea');
+  const rimMat = toon(C('accent', '#c2a49c'));
+
+  const body = m(cyl(0.165, 0.165, 0.045, 26), caseMat, [0, 0, 0], 'cast');
+  body.rotation.x = Math.PI / 2;
+  g.add(body);
+
+  const rim = m(new THREE.TorusGeometry(0.162, 0.014, 8, 30), rimMat, [0, 0, 0.024], 'cast');
+  g.add(rim);
+
+  const face = m(new THREE.CircleGeometry(0.148, 28), toon('#fffdf7'), [0, 0, 0.024], 'none');
+  g.add(face);
+
+  // 12 个刻度
+  for (let i = 0; i < 12; i++) {
+    const a = (i / 12) * Math.PI * 2;
+    const tick = m(box(0.008, i % 3 === 0 ? 0.028 : 0.018, 0.004), toon('#6b5a5f'),
+      [Math.sin(a) * 0.122, Math.cos(a) * 0.122, 0.027], 'none');
+    tick.rotation.z = -a;
+    g.add(tick);
+  }
+
+  // 指针：几何体先平移，让旋转轴落在中心
+  const hourGeo = box(0.013, 0.082, 0.004).translate(0, 0.032, 0);
+  const hour = m(hourGeo, toon('#544c4e'), [0, 0, 0.028], 'none');
+  hour.rotation.z = -2.2;
+  g.add(hour);
+  const minGeo = box(0.009, 0.122, 0.004).translate(0, 0.050, 0);
+  const min = m(minGeo, toon('#544c4e'), [0, 0, 0.030], 'none');
+  min.rotation.z = 0.6;
+  g.add(min);
+  g.add(m(cyl(0.012, 0.012, 0.012, 10), toon(C('accent', '#c2a49c')), [0, 0, 0.032], 'none').rotateX(Math.PI / 2));
+
+  g.position.set(pos[0], pos[1], pos[2]);
+  g.rotation.y = rot;
+  return g;
+}
+
+export function buildPoster(
+  pos: [number, number, number],
+  size: [number, number],
+  /** 绕 Y 旋转：默认朝 +Z，传 -π/2 让法线指向 +X（挂在西墙朝室内） */
+  rot = 0
+): THREE.Group {
+  const g = new THREE.Group();
+  g.add(m(box(size[0] + 0.05, size[1] + 0.05, 0.018), toon('#fdf8ef'), [0, 0, 0], 'cast'));
+  // 画面要比框面再往里 5mm，不然两个面几乎共面会 z-fighting
+  g.add(m(new THREE.PlaneGeometry(size[0], size[1]), emissive('#ffffff', { map: posterTexture() }), [0, 0, 0.014], 'none'));
+  g.position.set(pos[0], pos[1], pos[2]);
+  g.rotation.y = rot;
+  return g;
+}
+
+/** 一串小彩灯，沿悬链线垂在窗前。 */
+export function buildStringLights(from: [number, number, number], to: [number, number, number], sag = 0.14): THREE.Group {
+  const g = new THREE.Group();
+  const N = 40;
+  const pts: THREE.Vector3[] = [];
+  for (let i = 0; i <= N; i++) {
+    const t = i / N;
+    const x = from[0] + (to[0] - from[0]) * t;
+    const z = from[2] + (to[2] - from[2]) * t;
+    const y = from[1] + (to[1] - from[1]) * t - Math.sin(t * Math.PI) * sag;
+    pts.push(new THREE.Vector3(x, y, z));
+  }
+
+  const curve = new THREE.CatmullRomCurve3(pts);
+  g.add(m(new THREE.TubeGeometry(curve, 48, 0.005, 5, false), toon('#5a4a50'), [0, 0, 0], 'none'));
+
+  const bulbColors = ['#efe6d0', '#f2e8e4', '#cfe6ff', '#efe6d0', '#e2eae0'];
+  for (let i = 2; i < N; i += 3) {
+    const p = curve.getPointAt(i / N);
+    g.add(m(sph(0.023, 10, 8), emissive(bulbColors[i % bulbColors.length]), [p.x, p.y - 0.032, p.z], 'none'));
+    const cap = m(cyl(0.008, 0.010, 0.014, 8), toon('#6b5a5f'), [p.x, p.y - 0.014, p.z], 'none');
+    g.add(cap);
+  }
+
+  const mid = curve.getPointAt(0.5);
+  const glow = new THREE.PointLight(0xffe0b0, 0.35, 2.6, 2);
+  glow.position.set(mid.x, mid.y - 0.1, mid.z);
+  g.add(glow);
+
+  return g;
+}
+
+/* ============================================================================
+ * 通用小物件
+ * ========================================================================== */
+
+/** 一盆观叶植物。scale=1 时高约 0.3m。 */
+export function buildPlant(scale = 1): THREE.Group {
+  const g = new THREE.Group();
+  const potMat = toon('#c1745a');
+  const soilMat = toon('#6b584a');
+  const leafMat = toon('#6a9c78');
+
+  g.add(m(cyl(0.075, 0.058, 0.095, 14), potMat, [0, 0.0475, 0], 'cast'));
+  g.add(m(cyl(0.080, 0.080, 0.016, 14), toon('#b0664f'), [0, 0.096, 0], 'cast'));
+  g.add(m(cyl(0.068, 0.068, 0.012, 14), soilMat, [0, 0.101, 0], 'none'));
+
+  const leafGeo = new THREE.SphereGeometry(0.05, 8, 6);
+  leafGeo.scale(0.5, 0.16, 1.0);
+  const rnd = makeRng(6161);
+  for (let i = 0; i < 8; i++) {
+    const a = (i / 8) * Math.PI * 2 + rnd() * 0.3;
+    const len = 0.8 + rnd() * 0.55;
+    const leaf = m(leafGeo, leafMat, [0, 0, 0], 'cast');
+    leaf.scale.set(1, 1, len);
+    leaf.position.set(Math.cos(a) * 0.05 * len, 0.11 + rnd() * 0.03, Math.sin(a) * 0.05 * len);
+    leaf.rotation.y = -a;
+    leaf.rotation.x = -0.55 - rnd() * 0.25;
+    g.add(leaf);
+  }
+  g.add(m(sph(0.026, 8, 6), toon('#7fb08a'), [0, 0.135, 0], 'cast'));
+
+  g.scale.setScalar(scale);
+  return g;
+}
+
+/* ============================================================================
+ * 窗口光束 + 地面光斑
+ * ========================================================================== */
+
+export type BeamConfig = {
+  x0: number; x1: number;   // 窗口左右（世界 X）
+  y0: number; y1: number;   // 窗口上下（世界 Y）
+  z: number;                // 窗口所在平面（世界 Z）
+  dir: [number, number, number]; // 光线前进方向
+  sheets?: number;
+  opacity?: number;
+  /**
+   * 光束来自哪面墙（shell.walls 的 id）。RoomScene 靠它把光束挂进该墙的
+   * decor 组——光束是从窗口一直拉到地面的大四边形，脱离墙独立挂 scene 的话，
+   * 观察者模式把墙剔掉之后它就变成几片悬在半空的白条。
+   */
+  wall?: string;
+};
+
+/**
+ * 窗户漏进来的一道阳光。做法：沿光线方向切几张"薄片"，
+ * 每片从窗口竖边一直拉到地面，叠加混合后就成了一道有体积感的光柱。
+ */
+export function buildSunbeam(cfg: BeamConfig): THREE.Group {
+  const g = new THREE.Group();
+  const dir = new THREE.Vector3(...cfg.dir).normalize();
+  if (dir.y >= -0.05) return g; // 方向不对就别画了
+
+  const tex = beamTexture();
+  const mat = new THREE.MeshBasicMaterial({
+    map: tex,
+    transparent: true,
+    opacity: cfg.opacity ?? 0.11,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+  });
+
+  const n = cfg.sheets ?? 3;
+  for (let i = 0; i < n; i++) {
+    const t = n === 1 ? 0.5 : i / (n - 1);
+    const x = cfg.x0 + (cfg.x1 - cfg.x0) * (0.12 + t * 0.76);
+
+    // 窗口上的竖边两点 → 沿光线投到地面
+    const p0 = new THREE.Vector3(x, cfg.y1, cfg.z);
+    const p1 = new THREE.Vector3(x, cfg.y0, cfg.z);
+    const t0 = p0.y / -dir.y;
+    const t1 = p1.y / -dir.y;
+    const p3 = p0.clone().addScaledVector(dir, t0);
+    const p2 = p1.clone().addScaledVector(dir, t1);
+
+    const geo = new THREE.BufferGeometry();
+    // 顶点顺序：p0(窗上) p1(窗下) p2(地-下沿) p3(地-上沿)
+    geo.setAttribute('position', new THREE.Float32BufferAttribute([
+      p0.x, p0.y, p0.z, p1.x, p1.y, p1.z, p2.x, p2.y, p2.z, p3.x, p3.y, p3.z,
+    ], 3));
+    // u = 从窗口往地面的推进度，v = 高度
+    geo.setAttribute('uv', new THREE.Float32BufferAttribute([0, 1, 0, 0, 1, 0, 1, 1], 2));
+    geo.setIndex([0, 1, 2, 0, 2, 3]);
+    geo.computeVertexNormals();
+
+    const sheet = new THREE.Mesh(geo, mat);
+    sheet.renderOrder = 3;
+    g.add(sheet);
+  }
+
+  // 地面上的那块亮斑
+  const proj: THREE.Vector3[] = [];
+  for (const [x, y] of [[cfg.x0, cfg.y0], [cfg.x1, cfg.y0], [cfg.x1, cfg.y1], [cfg.x0, cfg.y1]] as Array<[number, number]>) {
+    const p = new THREE.Vector3(x, y, cfg.z);
+    proj.push(p.clone().addScaledVector(dir, p.y / -dir.y));
+  }
+  const cx = (proj[0].x + proj[2].x) / 2;
+  const cz = (proj[0].z + proj[2].z) / 2;
+  // 只比投影轮廓大一圈，太大就会铺到墙外去（虽然被墙挡住看不见，但会盖到家具底下）
+  const spanX = Math.abs(proj[1].x - proj[0].x) + 0.8;
+  const spanZ = Math.abs(proj[2].z - proj[0].z) + 0.8;
+  const pool = new THREE.Mesh(
+    new THREE.PlaneGeometry(spanX, spanZ),
+    new THREE.MeshBasicMaterial({
+      map: lightPoolTexture(), transparent: true, opacity: 0.34,
+      blending: THREE.AdditiveBlending, depthWrite: false,
+    })
+  );
+  pool.rotation.x = -Math.PI / 2;
+  pool.position.set(cx, 0.012, cz);
+  pool.renderOrder = 2;
+  g.add(pool);
+
+  return g;
+}
+
+/* ============================================================================
+ * 浮尘
+ * ========================================================================== */
+
+export type MotesConfig = {
+  count: number;
+  bounds: { x: [number, number]; y: [number, number]; z: [number, number] };
+};
+
+/**
+ * 空气里飘的灰尘。逆光时特别明显，是日式动画背景的标志性细节。
+ * 返回 update(t) 交给渲染循环调用。
+ */
+export function buildDustMotes(cfg: MotesConfig): { object: THREE.Points; update: (t: number) => void } {
+  const n = cfg.count;
+  const pos = new Float32Array(n * 3);
+  const seed = new Float32Array(n);
+  const rnd = makeRng(31415);
+
+  for (let i = 0; i < n; i++) {
+    pos[i * 3] = cfg.bounds.x[0] + rnd() * (cfg.bounds.x[1] - cfg.bounds.x[0]);
+    pos[i * 3 + 1] = cfg.bounds.y[0] + rnd() * (cfg.bounds.y[1] - cfg.bounds.y[0]);
+    pos[i * 3 + 2] = cfg.bounds.z[0] + rnd() * (cfg.bounds.z[1] - cfg.bounds.z[0]);
+    seed[i] = rnd() * 100;
+  }
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+
+  const mat = new THREE.PointsMaterial({
+    size: 0.032,
+    map: softDotTexture(),
+    transparent: true,
+    opacity: 0.62,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    sizeAttenuation: true,
+  });
+
+  const points = new THREE.Points(geo, mat);
+  points.frustumCulled = false;
+
+  const base = pos.slice();
+  const y0 = cfg.bounds.y[0];
+  const y1 = cfg.bounds.y[1];
+
+  const update = (t: number) => {
+    const attr = geo.getAttribute('position') as THREE.BufferAttribute;
+    const arr = attr.array as Float32Array;
+    for (let i = 0; i < n; i++) {
+      const s = seed[i];
+      const rise = (t * 0.035 + s * 0.37) % 1;
+      arr[i * 3] = base[i * 3] + Math.sin(t * 0.28 + s) * 0.09;
+      arr[i * 3 + 1] = y0 + rise * (y1 - y0);
+      arr[i * 3 + 2] = base[i * 3 + 2] + Math.cos(t * 0.22 + s * 1.7) * 0.07;
+    }
+    attr.needsUpdate = true;
+  };
+
+  return { object: points, update };
+}
+
+/* ============================================================================
+ * 豪华公寓 · 新素材 builder
+ *
+ * 设计原则：
+ *  - 每空间 1-2 件陈述件（软包床头/弧形沙发/大理石茶几/整墙书柜/嵌入式衣柜）
+ *  - 材质表现靠纹理与形状，不靠饱和度：大理石 veining、天鹅绒刷痕、亚麻垂坠
+ *  - 灯光分层：吊灯 + LED 灯带 + 壁灯 + 落地灯
+ *
+ * 【配色基线以 dormLayout.json 的 palette 为准，别信下面的 fallback 值】
+ * 这一节 builder 里的 C('walnut', …) / C('brass', …) 是按早年「欧式豪宅」方向
+ * 写的，现 palette 已把 walnut / brass 覆盖成浅木（#C9B79A）和灰金属
+ * （#B0AEA6），与 2026-09-01 定的北欧日式基线一致。文件里的 fallback hex
+ * 只是键缺失时的兜底，运行时不会生效 —— 改配色请改 palette，别改这里。
+ * ========================================================================== */
+
+/* ---------------- 软包床（主卧陈述件） ---------------- */
+
+/**
+ * 软包床头是豪华主卧的标志：织物包面 + 黄铜收边，比光秃秃的木床头
+ * 多一层"酒店套房"的质感。床体胡桃木，床品奶油白+淡绿被。
+ */
+export function buildUpholsteredBed(spec: { pos: [number, number, number]; size: [number, number, number] }): THREE.Group {
+  const g = new THREE.Group();
+  const [w, h, d] = spec.size;
+  const walnut = toon(C('walnut', '#a8875f'), { map: furnitureWoodTexture() });
+  const linen = toon(C('linen', '#E8E2D5'), { map: velvetTexture('#E8E2D5') });
+  const brass = toon(C('brass', '#b3aea2'), { finish: 'metal' });
+  const white = toon('#FAF7F0');
+  const blanket = toon(C('blanket', '#C4D0C0'));
+
+  g.add(m(box(w, h * 0.55, d), walnut, [0, h * 0.275, 0], 'both'));
+  g.add(m(box(w - 0.1, h * 0.45, d - 0.1), white, [0, h * 0.55 + h * 0.225, 0], 'both'));
+
+  const headboardH = 1.0;
+  g.add(m(box(w + 0.1, headboardH, 0.15), linen, [0, h * 0.5 + headboardH / 2, -d / 2 - 0.075], 'both'));
+  g.add(m(box(w + 0.1, 0.03, 0.03), brass, [0, h * 0.5 + headboardH, -d / 2 - 0.075], 'both'));
+  g.add(m(box(0.04, headboardH, 0.04), brass, [-w / 2 - 0.03, h * 0.5 + headboardH / 2, -d / 2 - 0.075], 'both'));
+  g.add(m(box(0.04, headboardH, 0.04), brass, [w / 2 + 0.03, h * 0.5 + headboardH / 2, -d / 2 - 0.075], 'both'));
+
+  const blanketD = d * 0.6;
+  g.add(m(box(w - 0.15, 0.1, blanketD), blanket, [0, h * 0.8, d / 2 - blanketD / 2], 'both'));
+  const pillowW = w / 2 - 0.15;
+  g.add(m(box(pillowW, 0.12, 0.25), white, [-w / 4, h * 0.86, -d / 2 + 0.2], 'both'));
+  g.add(m(box(pillowW, 0.12, 0.25), white, [w / 4, h * 0.86, -d / 2 + 0.2], 'both'));
+
+  return g;
+}
+
+/* ---------------- 铁艺床（次卧/客房） ---------------- */
+
+/**
+ * 铁艺床头是"青年公寓/客房"的标志：竖栅比软包更轻盈，
+ * 适合次卧这种不需要陈述件的房间。
+ *
+ * 结构：四根铸铁立柱撑起床箱 → 床箱上铺床垫 → 床头竖栅 + 床尾矮栅。
+ * 旧版没有床腿，床垫整块悬在 0.2m 高的空中；床头/床尾的"横杆"又把
+ * cyl(半径, 半径, w) 当横杆用，结果是一根 1.1m 长的铁棍竖直插在床上、
+ * 床尾那根还一路戳到地面下 0.05m。横杆必须绕 Z 转 90° 让圆柱沿 X 躺倒。
+ */
+export function buildMetalBed(spec: { pos: [number, number, number]; size: [number, number, number] }): THREE.Group {
+  const g = new THREE.Group();
+  const [w, h, d] = spec.size;
+  const metal = toon(C('dark', '#3a3630'));
+  const walnut = toon(C('walnut', '#a8875f'), { map: furnitureWoodTexture() });
+  const white = toon('#FAF7F0');
+  const blanket = toon(C('blanket', '#C4D0C0'));
+
+  // 床箱顶面就是 spec 高度 h；下面 55% 让给床腿，床才不会"浮"着
+  const legH = h * 0.55;
+  const boxH = h - legH;
+  const lx = w / 2 - 0.045, lz = d / 2 - 0.06;
+
+  g.add(m(box(w - 0.12, boxH, d - 0.12), walnut, [0, legH + boxH / 2, 0], 'both'));
+  for (const sx of [-1, 1]) for (const sz of [-1, 1]) {
+    g.add(m(cyl(0.020, 0.024, legH, 8), metal, [sx * lx, legH / 2, sz * lz], 'cast'));
+  }
+  // 落地横撑：两条沿 Z、一条沿 X，把四条腿连成框
+  for (const sx of [-1, 1]) {
+    g.add(m(cyl(0.011, 0.011, d - 0.14, 8), metal, [sx * lx, 0.06, 0], 'cast').rotateX(Math.PI / 2));
+  }
+  g.add(m(cyl(0.011, 0.011, w - 0.11, 8), metal, [0, 0.06, 0], 'cast').rotateZ(Math.PI / 2));
+
+  // 床头竖栅 + 横杆（横杆绕 Z 转 90°，圆柱轴 Y → X）
+  const railH = 0.62, nBars = 7;
+  for (let i = 0; i < nBars; i++) {
+    const x = -w / 2 + 0.08 + ((w - 0.16) * i) / (nBars - 1);
+    g.add(m(cyl(0.016, 0.016, railH, 8), metal, [x, h + railH / 2, -d / 2 + 0.03], 'cast'));
+  }
+  g.add(m(cyl(0.024, 0.024, w - 0.10, 8), metal, [0, h + railH, -d / 2 + 0.03], 'cast').rotateZ(Math.PI / 2));
+
+  // 床尾矮栅 + 横杆
+  const footH = 0.30;
+  for (let i = 0; i < nBars; i++) {
+    const x = -w / 2 + 0.08 + ((w - 0.16) * i) / (nBars - 1);
+    g.add(m(cyl(0.014, 0.014, footH, 8), metal, [x, h + footH / 2, d / 2 - 0.03], 'cast'));
+  }
+  g.add(m(cyl(0.020, 0.020, w - 0.10, 8), metal, [0, h + footH, d / 2 - 0.03], 'cast').rotateZ(Math.PI / 2));
+
+  // 床垫 + 被子 + 双枕
+  const matH = 0.22;
+  g.add(m(box(w - 0.10, matH, d - 0.10), white, [0, h + matH / 2, 0], 'both'));
+  g.add(m(box(w - 0.15, 0.10, d * 0.6), blanket, [0, h + matH + 0.05, d * 0.2], 'both'));
+  const pillowW = w / 2 - 0.15;
+  g.add(m(box(pillowW, 0.12, 0.25), white, [-w / 4, h + matH + 0.06, -d / 2 + 0.2], 'both'));
+  g.add(m(box(pillowW, 0.12, 0.25), white, [w / 4, h + matH + 0.06, -d / 2 + 0.2], 'both'));
+
+  return g;
+}
+
+/* ---------------- 嵌入式衣柜（衣帽间陈述件） ---------------- */
+
+/**
+ * 通顶嵌入式衣柜：玻璃门 + LED 灯带 + 内部挂杆/隔板可见。
+ * 和普通书架的区别就在"通顶 + 玻璃 + 灯"这三件套上。
+ */
+export function buildWardrobe(spec: { pos: [number, number, number]; size: [number, number, number] }): THREE.Group {
+  const g = new THREE.Group();
+  const [w, h, d] = spec.size;
+  const walnut = toon(C('walnut', '#a8875f'), { map: furnitureWoodTexture() });
+  const brass = toon(C('brass', '#b3aea2'), { finish: 'metal' });
+  const glass = new THREE.MeshPhysicalMaterial({ color: 0xffffff, transparent: true, opacity: 0.15, roughness: 0.05, metalness: 0, side: THREE.DoubleSide });
+  const led = emissive('#FFF8E0');
+
+  g.add(m(box(w, h, d), walnut, [0, h / 2, 0], 'both'));
+
+  const doorW = w / 2 - 0.02;
+  g.add(m(new THREE.PlaneGeometry(doorW, h - 0.1), glass, [-w / 4, h / 2, d / 2 + 0.01], 'none'));
+  g.add(m(new THREE.PlaneGeometry(doorW, h - 0.1), glass, [w / 4, h / 2, d / 2 + 0.01], 'none'));
+
+  g.add(m(box(0.02, h - 0.1, 0.02), brass, [-w / 2 + 0.01, h / 2, d / 2], 'both'));
+  g.add(m(box(0.02, h - 0.1, 0.02), brass, [w / 2 - 0.01, h / 2, d / 2], 'both'));
+  g.add(m(box(0.02, h - 0.1, 0.02), brass, [0, h / 2, d / 2], 'both'));
+
+  g.add(m(box(w - 0.1, 0.02, 0.05), led, [0, h - 0.05, 0], 'none'));
+
+  // 挂衣杆：绕 Z 转 90° 让圆柱沿 X 躺倒。不转的话 cyl 的轴是 Y，
+  // 1.9m 长的杆子会变成两根竖棍——上一根顶到 2.56m，下一根插进地板 3cm。
+  g.add(m(cyl(0.015, 0.015, w - 0.1, 8), brass, [0, h * 0.7, 0], 'none').rotateZ(Math.PI / 2));
+  g.add(m(cyl(0.015, 0.015, w - 0.1, 8), brass, [0, h * 0.4, 0], 'none').rotateZ(Math.PI / 2));
+
+  g.add(m(box(w - 0.1, 0.02, d - 0.1), walnut, [0, h * 0.25, 0], 'none'));
+  g.add(m(box(w - 0.1, 0.02, d - 0.1), walnut, [0, h * 0.55, 0], 'none'));
+
+  return g;
+}
+
+/* ---------------- 展示柜（客厅） ---------------- */
+
+/**
+ * 客厅展示柜：玻璃门 + LED + 内部陈列（花瓶/雕塑/装饰），
+ * 和普通书架拉开差距的关键是"展示品本身"。
+ */
+export function buildDisplayCabinet(spec: { pos: [number, number, number]; size: [number, number, number] }): THREE.Group {
+  const g = new THREE.Group();
+  const [w, h, d] = spec.size;
+  const walnut = toon(C('walnut', '#a8875f'), { map: furnitureWoodTexture() });
+  const brass = toon(C('brass', '#b3aea2'), { finish: 'metal' });
+  const glass = new THREE.MeshPhysicalMaterial({ color: 0xffffff, transparent: true, opacity: 0.12, roughness: 0.05, side: THREE.DoubleSide });
+
+  g.add(m(box(w, h, d), walnut, [0, h / 2, 0], 'both'));
+  g.add(m(new THREE.PlaneGeometry(w - 0.05, h - 0.1), glass, [0, h / 2, d / 2 + 0.01], 'none'));
+  g.add(m(box(w - 0.1, 0.02, 0.05), emissive('#FFF8E0'), [0, h - 0.05, 0], 'none'));
+
+  for (const y of [h * 0.3, h * 0.55, h * 0.8]) {
+    g.add(m(box(w - 0.1, 0.02, d - 0.1), walnut, [0, y, 0], 'none'));
+  }
+
+  const terracotta = toon(C('terracotta', '#B86B4A'));
+  g.add(m(cyl(0.05, 0.08, 0.15, 12), terracotta, [-w / 4, h * 0.3 + 0.075, 0], 'none'));
+  g.add(m(sph(0.05, 12, 10), brass, [w / 4, h * 0.55 + 0.05, 0], 'none'));
+  g.add(m(box(0.08, 0.12, 0.08), brass, [0, h * 0.8 + 0.06, 0], 'none'));
+
+  return g;
+}
+
+/* ---------------- 酒柜（餐厅） ---------------- */
+
+/**
+ * 餐厅酒柜：玻璃门 + LED + 斜放酒瓶架。斜放的酒瓶是酒柜
+ * 和普通柜子的唯一视觉差异，必须做出来。
+ */
+export function buildWineCabinet(spec: { pos: [number, number, number]; size: [number, number, number] }): THREE.Group {
+  const g = new THREE.Group();
+  const [w, h, d] = spec.size;
+  const walnut = toon(C('walnut', '#a8875f'), { map: furnitureWoodTexture() });
+  const glass = new THREE.MeshPhysicalMaterial({ color: 0xffffff, transparent: true, opacity: 0.12, roughness: 0.05, side: THREE.DoubleSide });
+  const bottle = toon('#3a4a3a');
+  const bottleCap = toon(C('brass', '#b3aea2'), { finish: 'metal' });
+
+  g.add(m(box(w, h, d), walnut, [0, h / 2, 0], 'both'));
+  g.add(m(new THREE.PlaneGeometry(w - 0.05, h - 0.1), glass, [0, h / 2, d / 2 + 0.01], 'none'));
+  g.add(m(box(w - 0.1, 0.02, 0.05), emissive('#FFF8E0'), [0, h - 0.05, 0], 'none'));
+
+  const rows = 4, cols = 3;
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const x = -w / 2 + (c + 0.5) * (w / cols);
+      const y = h * 0.12 + r * (h * 0.18);
+      const bg = new THREE.Group();
+      bg.position.set(x, y, 0);
+      bg.rotation.z = Math.PI / 4;
+      bg.add(m(cyl(0.03, 0.03, 0.18, 8), bottle, [0, 0, 0], 'none'));
+      bg.add(m(cyl(0.012, 0.012, 0.05, 8), bottleCap, [0, 0.115, 0], 'none'));
+      g.add(bg);
+    }
+  }
+
+  return g;
+}
+
+/* ---------------- 大理石岛台（厨房陈述件） ---------------- */
+
+/**
+ * 厨房岛台：大理石台面（边缘外挑）+ 胡桃木柜体 + 黄铜五金。
+ * 和普通厨房台面的差距全在"大理石 + 黄铜"上。
+ */
+export function buildIslandKitchen(spec: { pos: [number, number, number]; size: [number, number, number] }): THREE.Group {
+  const g = new THREE.Group();
+  const [w, h, d] = spec.size;
+  const marble = toon('#ffffff', { map: marbleTexture() });
+  const walnut = toon(C('walnut', '#a8875f'), { map: furnitureWoodTexture() });
+  const brass = toon(C('brass', '#b3aea2'), { finish: 'metal' });
+
+  g.add(m(box(w + 0.06, 0.04, d + 0.06), marble, [0, h - 0.02, 0], 'both'));
+  g.add(m(box(w, h - 0.04, d), walnut, [0, (h - 0.04) / 2, 0], 'both'));
+  g.add(m(box(w, 0.02, d), brass, [0, 0.01, 0], 'none'));
+  for (let i = 0; i < 4; i++) {
+    g.add(m(box(0.15, 0.02, 0.02), brass, [-w / 2 + 0.3 + (i * (w - 0.6)) / 3, h * 0.7, d / 2], 'both'));
+  }
+
+  return g;
+}
+
+/* ---------------- 电竞桌（电竞房陈述件） ---------------- */
+
+/**
+ * 电竞桌：黑色桌面 + 双屏（主+竖屏副）+ 机械键盘背光 + RGB 灯条。
+ * 和普通书桌的差距在"双屏 + 背光 + RGB"这三件上。
+ */
+export function buildGamingDesk(spec: { pos: [number, number, number]; size: [number, number, number] }): THREE.Group {
+  const g = new THREE.Group();
+  const [w, h, d] = spec.size;
+  const dark = toon(C('dark', '#3a3630'));
+  const metal = toon(C('brass', '#b3aea2'), { finish: 'metal' });
+  const screen = emissive('#1a2332', { map: screenTexture() });
+
+  g.add(m(box(w, 0.05, d), dark, [0, h - 0.025, 0], 'both'));
+  for (const sx of [-1, 1]) for (const sz of [-1, 1]) {
+    g.add(m(box(0.05, h - 0.05, 0.05), metal, [sx * (w / 2 - 0.1), (h - 0.05) / 2, sz * (d / 2 - 0.1)], 'both'));
+  }
+
+  const monW = 0.5, monH = 0.3;
+  const mon1 = new THREE.Group();
+  mon1.position.set(-0.15, h + 0.15, -d / 2 + 0.1);
+  mon1.add(m(box(monW, monH, 0.03), dark, [0, 0, 0], 'both'));
+  mon1.add(m(new THREE.PlaneGeometry(monW - 0.04, monH - 0.04), screen, [0, 0, 0.02], 'none'));
+  g.add(mon1);
+
+  const mon2 = new THREE.Group();
+  mon2.position.set(0.32, h + 0.15, -d / 2 + 0.1);
+  mon2.rotation.y = -0.3;
+  mon2.add(m(box(0.25, 0.45, 0.03), dark, [0, 0, 0], 'both'));
+  mon2.add(m(new THREE.PlaneGeometry(0.21, 0.41), screen, [0, 0, 0.02], 'none'));
+  g.add(mon2);
+
+  g.add(m(box(0.4, 0.03, 0.15), emissive('#4a5568'), [-0.1, h + 0.015, 0.1], 'none'));
+  g.add(m(box(0.06, 0.03, 0.1), dark, [0.25, h + 0.015, 0.1], 'both'));
+
+  const rgbColors = ['#b5705e', '#d8c08a', '#7fa88a', '#9dbdd0', '#8f8fa8'];
+  for (let i = 0; i < 5; i++) {
+    g.add(m(box(w / 5 - 0.02, 0.02, 0.02), emissive(rgbColors[i]), [-w / 2 + (i + 0.5) * (w / 5), h - 0.06, d / 2 + 0.01], 'none'));
+  }
+
+  return g;
+}
+
+/* ---------------- 大理石茶几（客厅陈述件） ---------------- */
+
+/**
+ * 大理石茶几：大理石台面 + 黄铜细腿。和普通木茶几的差距
+ * 全在"大理石 + 细腿"——细腿让茶几看起来是"飘"在地毯上的。
+ */
+export function buildMarbleTable(spec: { pos: [number, number, number]; size: [number, number, number] }): THREE.Group {
+  const g = new THREE.Group();
+  const [w, h, d] = spec.size;
+  const marble = toon('#ffffff', { map: marbleTexture() });
+  const brass = toon(C('brass', '#b3aea2'), { finish: 'metal' });
+
+  g.add(m(box(w, 0.05, d), marble, [0, h - 0.025, 0], 'both'));
+  for (const sx of [-1, 1]) for (const sz of [-1, 1]) {
+    g.add(m(cyl(0.025, 0.025, h - 0.05, 12), brass, [sx * (w / 2 - 0.1), (h - 0.05) / 2, sz * (d / 2 - 0.1)], 'both'));
+  }
+
+  return g;
+}
+
+/**
+ * 专用家具（替换此前被复用的 shelf / fridge / cushionItem）。
+ *
+ * 背景：之前"穿衣镜""鞋柜""洗衣机""吧台凳"都是拿书架、冰箱、座布団顶替的，
+ * 于是镜子里长出一排书、洗衣机上贴着冰箱贴、吧台凳是个带流苏的粉坐垫。
+ * 这些错位的根源是 kind 复用，只能靠补专用件解决，改配色救不了。
+ *
+ * 造型原则（北欧日式）：细腿、浅木、圆角、无装饰线脚，靠比例而不是花纹。
+ */
+
+/** 书柜：柜体 + 层板 + 书。面朝 +Z（背板贴 -Z 墙）。size = [宽X, 高, 深Z]。 */
+export function buildBookcase(spec: { pos: [number, number, number]; size: [number, number, number] }): THREE.Group {
+  const g = new THREE.Group();
+  const W = spec.size[0], H = spec.size[1], D = spec.size[2];
+
+  const woodMat = toon('#ffffff', { map: furnitureWoodTexture() });
+  const backMat = toon(C('shelfBack', '#b09070'));
+
+  // 背板 + 两侧板
+  g.add(m(box(W, H, 0.02), backMat, [0, H / 2, -D / 2 + 0.01], 'both'));
+  for (const s of [-1, 1]) {
+    g.add(m(box(0.026, H, D), woodMat, [s * (W / 2 - 0.013), H / 2, 0], 'both'));
+  }
+
+  // 层板：0.42m 层距，顶格留给绿植
+  const nShelf = Math.max(1, Math.floor((H - 0.5) / 0.42));
+  const shelfYs: number[] = [0.03];
+  for (let i = 1; i <= nShelf; i++) shelfYs.push(Math.min(H - 0.45, i * 0.42));
+  for (const y of shelfYs) {
+    g.add(m(box(W - 0.05, 0.026, D - 0.01), woodMat, [0, y, 0], 'both'));
+  }
+
+  // 每层一排书。满墙的书是压迫感，随机留空格才是书柜该有的样子
+  const bookCols = ['#c2a49c', '#a4b8c8', '#ddcba8', '#a8b8ac', '#d6c3a2', '#bda49e'];
+  for (let li = 0; li < shelfYs.length; li++) {
+    const y0 = shelfYs[li];
+    const y1 = li + 1 < shelfYs.length ? shelfYs[li + 1] : H - 0.06;
+    const bookH = Math.min(0.30, (y1 - y0) * 0.82);
+    if (bookH < 0.12) continue;
+    const rnd = makeRng(900 + li * 31);
+    let x = -W / 2 + 0.05;
+    while (x < W / 2 - 0.16) {
+      const bw = 0.03 + rnd() * 0.025;
+      if (rnd() > 0.24) {
+        const tilt = rnd() > 0.85 ? (rnd() - 0.5) * 0.2 : 0;
+        // 书是「厚 bw 沿 X（书脊并排的方向）、高 bookH 沿 Y、进深沿 Z」。
+        // 旧代码把 X/Z 写反了：每本书在 X 上占 0.22m 却按 5cm 步进排，
+        // 整排书互相叠成一坨，Z 向上又薄成 3cm 的纸片。
+        const bk = m(box(bw, bookH, (D - 0.06) * 0.78), toon(bookCols[Math.floor(rnd() * bookCols.length)]),
+          [x + bw / 2, y0 + 0.013 + bookH / 2, 0], 'cast');
+        bk.rotation.z = tilt;
+        g.add(bk);
+      }
+      x += bw + 0.004;
+    }
+  }
+
+  // 顶格一盆绿植，仅此一件
+  const plant = buildPlant(0.85);
+  plant.position.set(W / 2 - 0.14, H - 0.45 + 0.013, 0);
+  g.add(plant);
+
+  return g;
+}
+
+/**
+ * 细腿：日式家具的典型特征，腿径 30mm 左右，末端微收。
+ *
+ * 网格原点在腿的「顶端」——也就是与座板 / 柜底相接的那一头，柱体向下延伸到
+ * y = -h。这样调用方把腿摆到接缝高度再旋转，旋转中心就正好是接缝点：
+ * 腿脚只会向外撇开，绝不会绕腿中点旋转而把半截腿转到地面以下。
+ *（旧实现把原点留在腿中点，调用方又用 position.set(x, 0, z) 把 y 覆盖回 0，
+ *  结果每条腿都有一半埋进地板。）
+ */
+function taperLeg(h: number, r = 0.018, mat: THREE.Material) {
+  const geo = cyl(r * 0.82, r, h, 10);
+  geo.translate(0, -h / 2, 0);
+  return m(geo, mat, [0, 0, 0], 'cast');
+}
+
+/** 穿衣镜：全身镜。size = [厚X, 高Y, 宽Z]，镜面朝 +X。 */
+export function buildMirror(spec: { pos: [number, number, number]; size: [number, number, number] }): THREE.Group {
+  const g = new THREE.Group();
+  const [, H, W] = spec.size;
+  const frameMat = toon('ffffff', { map: furnitureWoodTexture() });
+  // 镜面用低饱和的冷灰：三渲二里没有真实反射，靠"比周围暗一档 + 冷色相"
+  // 让眼睛把它读成玻璃，而不是一块灰板。
+  const glassMat = toon('#b8c2c4');
+
+  // 外框（细木框，40mm 见方）
+  const fw = 0.04;
+  for (const s of [-1, 1]) {
+    g.add(m(box(0.06, H, fw), frameMat, [0, H / 2, s * (W / 2 - fw / 2)], 'both'));
+  }
+  g.add(m(box(0.06, fw, W - fw * 2), frameMat, [0, H - fw / 2, 0], 'both'));
+  g.add(m(box(0.06, fw, W - fw * 2), frameMat, [0, fw / 2, 0], 'both'));
+
+  // 镜面本体
+  g.add(m(box(0.02, H - fw * 2, W - fw * 2), glassMat, [0.005, H / 2, 0], 'receive'));
+
+  // 一道斜向的高光带：静态贴图模拟反光，避免整片死板。
+  //
+  // 镜面是 YZ 平面、法线朝 +X，高光片必须平贴在镜面上。旧代码写成
+  // rotation.set(π/2, 0, 0.32)，把面片翻成了水平——一片 0.17×1.31m 的板子
+  // 横插在镜子外面，既穿墙又让包围盒虚胖。这里改用两级变换：先在自身平面内
+  // 绕法线斜 0.32rad，再由 pivot 把整片面转到朝 +X，方向不会歧义。
+  const sheenPivot = new THREE.Group();
+  sheenPivot.position.set(0.017, H / 2, -W * 0.12);
+  sheenPivot.rotation.y = Math.PI / 2; // 面片法线 +Z 转到 +X，与镜面同向
+  const sheen = m(
+    new THREE.PlaneGeometry(W * 0.34, (H - fw * 2) * 0.86),
+    toon('#d4dadd', { transparent: true, opacity: 0.5 }),
+    [0, 0, 0], 'none'
+  );
+  sheen.rotation.z = 0.32; // 绕自身法线斜过来
+  sheenPivot.add(sheen);
+  g.add(sheenPivot);
+
+  // 落地的斜撑脚：让镜子有明确的支撑关系，不再像一块贴地的板
+  for (const s of [-1, 1]) {
+    const foot = m(box(0.05, 0.06, 0.05), frameMat, [s * 0.005, 0.03, s * (W / 2 - fw / 2)], 'cast');
+    g.add(foot);
+  }
+
+  return g;
+}
+
+/** 玄关鞋柜：下半封闭柜门 + 中段开放格 + 木质台面。size = [进深X, 高Y, 宽Z] */
+export function buildShoeCabinet(spec: { pos: [number, number, number]; size: [number, number, number] }): THREE.Group {
+  const g = new THREE.Group();
+  const D = spec.size[0], H = spec.size[1], W = spec.size[2];
+  const woodMat = toon('ffffff', { map: furnitureWoodTexture() });
+  const panelMat = toon(C('door', '#EDE8DE'));
+  const pullMat = toon(C('metal', '#B0AEA6'), { finish: 'metal' });
+
+  // 柜体落地。原本做成悬空 80mm，但没有支撑件就是"漂浮物体"，
+  // 改成底部踢脚内收 60mm——视觉上仍有轻盈的阴影缝，但柜子是实打实落在地上的。
+  const kick = 0.06;
+  g.add(m(box(D, H - kick, W), panelMat, [0, kick + (H - kick) / 2, 0], 'both'));
+  g.add(m(box(D - 0.08, kick, W - 0.06), toon('#D6D2CA'), [0.02, kick / 2, 0], 'cast'));
+
+  // 两扇柜门 + 中缝
+  for (const s of [-1, 1]) {
+    g.add(m(box(0.02, H - kick - 0.32, W / 2 - 0.012), woodMat,
+      [D / 2 + 0.005, kick + (H - kick + 0.32) / 2, s * (W / 4)], 'both'));
+  }
+  // 隐形拉手：一条横向的凹槽色块，比凸出的把手更克制
+  for (const s of [-1, 1]) {
+    g.add(m(box(0.012, 0.016, 0.16), pullMat,
+      [D / 2 + 0.016, H - 0.30, s * (W / 4) + s * 0.06], 'none'));
+  }
+
+  // 顶部台面（略微出檐）
+  g.add(m(box(D + 0.04, 0.035, W + 0.04), woodMat, [0.01, H + 0.017, 0], 'both'));
+
+  // 台面上的生活痕迹：一个小托盘 + 一只马克杯，仅此而已
+  g.add(m(box(D * 0.5, 0.014, 0.16), toon(C('terracotta', '#B5836E')), [0.01, H + 0.041, -W * 0.22], 'cast'));
+  const cup = m(cyl(0.032, 0.028, 0.085, 14), toon('#EFE8DC'), [0.01, H + 0.077, W * 0.18], 'cast');
+  g.add(cup);
+
+  return g;
+}
+
+/** 换鞋凳：细腿木质长凳。size = [进深X, 座高Y, 长Z] */
+export function buildBench(spec: { pos: [number, number, number]; size: [number, number, number] }): THREE.Group {
+  const g = new THREE.Group();
+  const D = spec.size[0], H = spec.size[1], W = spec.size[2];
+  const woodMat = toon('ffffff', { map: furnitureWoodTexture() });
+  const cushionMat = toon(C('linen', '#EDE8DE'));
+
+  // 座板
+  g.add(m(box(D, 0.05, W), woodMat, [0, H - 0.025, 0], 'both'));
+  // 薄坐垫（只盖住座面，不包边）
+  g.add(m(box(D - 0.03, 0.035, W - 0.05), cushionMat, [0, H + 0.017, 0], 'both'));
+
+  // 四根细腿，微微外撇：腿顶钉在座板底面（H-0.05），绕顶端旋转让脚向外张开
+  for (const sx of [-1, 1]) for (const sz of [-1, 1]) {
+    const leg = taperLeg(H - 0.05, 0.019, woodMat);
+    leg.position.set(sx * (D / 2 - 0.05), H - 0.05, sz * (W / 2 - 0.06));
+    leg.rotation.z = sx * 0.04;
+    leg.rotation.x = -sz * 0.04;
+    g.add(leg);
+  }
+  // 横撑
+  g.add(m(box(0.024, 0.024, W - 0.12), woodMat, [0, H * 0.32, 0], 'cast'));
+
+  return g;
+}
+
+/** 滚筒洗衣机 / 烘干机。size = [宽X, 高Y, 深Z]，正面（舱门）朝 +X。 */
+export function buildWasher(spec: { pos: [number, number, number]; size: [number, number, number] }): THREE.Group {
+  const g = new THREE.Group();
+  const W = spec.size[0], H = spec.size[1], D = spec.size[2];
+  const body = toon(C('fridge', '#EDEAE3'));
+  const doorMat = toon('#c3c8cc');
+  const glassMat = toon('#8e9aa0');
+  const trim = toon(C('metal', '#B0AEA6'), { finish: 'metal' });
+
+  g.add(m(box(W, H, D), body, [0, H / 2, 0], 'both'));
+
+  // 顶部控制条（正面 +X 面）
+  g.add(m(box(W - 0.04, 0.075, D - 0.05), toon('#DFDBD2'), [0, H - 0.055, 0], 'both'));
+  // 旋钮 + 两个按键：都放在正面（+X 面），与滚筒（玻璃视窗）同一面
+  const knob = m(cyl(0.032, 0.032, 0.022, 16), trim, [W / 2 + 0.011, H - 0.038, -0.10], 'cast');
+  knob.rotation.z = Math.PI / 2; // 轴沿 X：钮凸出正面，与滚筒同面
+  g.add(knob);
+  for (let i = 0; i < 2; i++) {
+    g.add(m(box(0.012, 0.026, 0.03), trim, [W / 2 + 0.006, H - 0.038, 0.0 + i * 0.09], 'none'));
+  }
+
+  // 舱门：外圈金属环 + 内嵌玻璃视窗
+  const ring = m(cyl(0.20, 0.20, 0.03, 28), doorMat, [0, 0, 0], 'cast');
+  ring.rotation.z = Math.PI / 2;
+  ring.position.set(W / 2 + 0.012, H * 0.55, 0);
+  g.add(ring);
+  const glass = m(cyl(0.155, 0.155, 0.024, 26), glassMat, [0, 0, 0], 'cast');
+  glass.rotation.z = Math.PI / 2;
+  glass.position.set(W / 2 + 0.026, H * 0.55, 0);
+  g.add(glass);
+
+  // 底座踢脚
+  g.add(m(box(W - 0.02, 0.06, D - 0.02), toon('#D6D2CA'), [0, 0.03, 0], 'cast'));
+
+  return g;
+}
+
+/** 餐边柜：矮柜 + 台面摆件。size = [进深X, 高Y, 宽Z] */
+export function buildSideboard(spec: { pos: [number, number, number]; size: [number, number, number] }): THREE.Group {
+  const g = new THREE.Group();
+  const D = spec.size[0], H = spec.size[1], W = spec.size[2];
+  const woodMat = toon('ffffff', { map: furnitureWoodTexture() });
+  const panelMat = toon(C('door', '#EDE8DE'));
+
+  // 柜体悬空 0.10 由细腿撑起，不做整柜贴地——矮柜离开地面才有轻盈感
+  const legH = 0.10;
+  g.add(m(box(D, H - legH, W), panelMat, [0, legH + (H - legH) / 2, 0], 'both'));
+  // 两扇对开门 + 细缝
+  for (const s of [-1, 1]) {
+    g.add(m(box(0.018, H - legH - 0.10, W / 2 - 0.008), woodMat,
+      [D / 2 + 0.004, legH + (H - legH) / 2, s * (W / 4)], 'both'));
+  }
+  // 台面出檐
+  g.add(m(box(D + 0.05, 0.032, W + 0.05), woodMat, [0.012, H + 0.016, 0], 'both'));
+
+  // 台面：一个花瓶 + 一叠书 + 一只陶碗——生活感靠三件小物带出，不再堆
+  const vase = m(cyl(0.045, 0.058, 0.20, 16), toon(C('accent', '#8FA98D')), [0.012, H + 0.132, -W * 0.26], 'cast');
+  g.add(vase);
+  for (let i = 0; i < 3; i++) {
+    g.add(m(box(D * 0.55, 0.022, 0.16), toon(['#C6CFCE', '#D8CDB8', '#BFA98A'][i]),
+      [0.012, H + 0.043 + i * 0.024, W * 0.18], 'cast'));
+  }
+  const bowl = m(sph(0.075, 16, 10), toon(C('terracotta', '#B5836E')), [0.012, H + 0.048, -W * 0.02], 'cast');
+  bowl.scale.set(1, 0.5, 1);
+  g.add(bowl);
+
+  // 细腿：从地面撑到柜底。腿顶钉在柜体底面 y = legH，绕顶端旋转微微外撇
+  for (const sx of [-1, 1]) for (const sz of [-1, 1]) {
+    const leg = taperLeg(legH, 0.016, woodMat);
+    leg.position.set(sx * (D / 2 - 0.05), legH, sz * (W / 2 - 0.07));
+    leg.rotation.z = sx * 0.035;
+    leg.rotation.x = -sz * 0.035;
+    g.add(leg);
+  }
+  return g;
+}
+
+/** 浴室洗手台柜：台上盆 + 龙头 + 柜体 + 镜柜。size = [宽X, 高Y, 深Z]，正面朝 +X。 */
+export function buildVanity(spec: { pos: [number, number, number]; size: [number, number, number] }): THREE.Group {
+  const g = new THREE.Group();
+  const W = spec.size[0], H = spec.size[1], D = spec.size[2];
+  const woodMat = toon('ffffff', { map: furnitureWoodTexture() });
+  const stoneMat = toon(C('marble', '#F2F0EA'));
+  const metalMat = toon(C('metal', '#B0AEA6'), { finish: 'metal' });
+
+  // 柜体（悬空，底部离地 0.15）
+  g.add(m(box(W, H - 0.15, D), woodMat, [0, 0.15 + (H - 0.15) / 2, 0], 'both'));
+  // 台面
+  g.add(m(box(W + 0.03, 0.04, D + 0.03), stoneMat, [0, H + 0.02, 0], 'both'));
+
+  // 台上盆（椭圆柱 + 内凹）
+  const basin = m(cyl(0.21, 0.18, 0.13, 24), stoneMat, [0, H + 0.105, 0], 'both');
+  g.add(basin);
+  g.add(m(cyl(0.175, 0.165, 0.03, 22), toon('#DCD8CE'), [0, H + 0.155, 0], 'receive'));
+
+  // 龙头：竖管 + 弯嘴
+  g.add(m(cyl(0.018, 0.018, 0.22, 12), metalMat, [0, H + 0.15, -D / 2 + 0.07], 'cast'));
+  const spout = m(cyl(0.014, 0.014, 0.13, 10), metalMat, [0, H + 0.255, -D / 2 + 0.13], 'cast');
+  spout.rotation.x = Math.PI / 2;
+  g.add(spout);
+
+  // 镜柜：贴墙竖在台面上方，照明用自发光条
+  const mw = W - 0.08, mh = 0.72;
+  g.add(m(box(0.06, mh, mw), woodMat, [-D / 2 + 0.03, H + 0.30 + mh / 2, 0], 'both'));
+  g.add(m(box(0.012, mh - 0.06, mw - 0.06), toon('#b8c2c4'),
+    [-D / 2 + 0.062, H + 0.30 + mh / 2, 0], 'receive'));
+  // 镜前灯带
+  g.add(m(box(0.02, 0.018, mw - 0.10), emissive('#FFF3DC'),
+    [-D / 2 + 0.068, H + 0.30 + mh + 0.02, 0], 'none'));
+
+  // 台面上的小物：一只皂碟
+  g.add(m(box(0.09, 0.014, 0.07), toon('#EFE8DC'), [W / 2 - 0.10, H + 0.047, D / 2 - 0.10], 'cast'));
+
+  return g;
+}
+
+/** 边几：细腿小圆几。size = [直径, 高, -] */
+export function buildSideTable(spec: { pos: [number, number, number]; size: [number, number, number] }): THREE.Group {
+  const g = new THREE.Group();
+  const R = spec.size[0] / 2, H = spec.size[1];
+  const woodMat = toon('ffffff', { map: furnitureWoodTexture() });
+
+  g.add(m(cyl(R, R, 0.03, 28), woodMat, [0, H - 0.015, 0], 'both'));
+  // 三根细腿，比四根更透气
+  for (let i = 0; i < 3; i++) {
+    const a = (i / 3) * Math.PI * 2 + 0.4;
+    const leg = taperLeg(H - 0.03, 0.015, woodMat);
+    leg.position.set(Math.cos(a) * R * 0.68, H - 0.03, Math.sin(a) * R * 0.68);
+    leg.rotation.z = Math.cos(a) * 0.05;
+    leg.rotation.x = -Math.sin(a) * 0.05;
+    g.add(leg);
+  }
+  // 桌上一只马克杯
+  g.add(m(cyl(0.033, 0.029, 0.088, 14), toon('#EFE8DC'), [R * 0.3, H + 0.044, -R * 0.2], 'cast'));
+  return g;
+}
+
+/** 吧台凳：细腿圆凳。size = [座面直径, 座高, -] */
+export function buildStool(spec: { pos: [number, number, number]; size: [number, number, number] }): THREE.Group {
+  const g = new THREE.Group();
+  const R = spec.size[0] / 2, H = spec.size[1];
+  const woodMat = toon('ffffff', { map: furnitureWoodTexture() });
+  const seatMat = toon(C('linen', '#EDE8DE'));
+
+  g.add(m(cyl(R, R, 0.045, 24), woodMat, [0, H - 0.022, 0], 'both'));
+  g.add(m(cyl(R - 0.008, R - 0.008, 0.028, 24), seatMat, [0, H + 0.014, 0], 'both'));
+  for (let i = 0; i < 4; i++) {
+    const a = (i / 4) * Math.PI * 2 + 0.6;
+    const leg = taperLeg(H - 0.045, 0.014, woodMat);
+    leg.position.set(Math.cos(a) * R * 0.72, H - 0.045, Math.sin(a) * R * 0.72);
+    leg.rotation.z = Math.cos(a) * 0.07;
+    leg.rotation.x = -Math.sin(a) * 0.07;
+    g.add(leg);
+  }
+  // 脚踏圈
+  const ringR = R * 0.78, ringH = H * 0.30;
+  const ring = m(new THREE.TorusGeometry(ringR, 0.009, 6, 20), woodMat, [0, ringH, 0], 'cast');
+  ring.rotation.x = Math.PI / 2;
+  g.add(ring);
+  return g;
+}
+
+/** 休闲椅：一把简洁的单椅（木框 + 软座 + 软靠）。size = [宽X, 高Y, 深Z] */
+export function buildLoungeChair(spec: { pos: [number, number, number]; size: [number, number, number] }): THREE.Group {
+  const g = new THREE.Group();
+  const W = spec.size[0], H = spec.size[1], D = spec.size[2];
+  const woodMat = toon('ffffff', { map: furnitureWoodTexture() });
+  const fabMat = toon(C('sofa', '#B8B2A4'));
+
+  const seatY = H * 0.44;
+  // 座面 + 靠背（靠背略微后仰）
+  g.add(m(box(W, 0.10, D * 0.86), fabMat, [0, seatY, 0], 'both'));
+  const back = m(box(W, H * 0.46, 0.09), fabMat, [0, seatY + H * 0.23, -D / 2 + 0.05], 'both');
+  back.rotation.x = -0.12;
+  g.add(back);
+  // 一根软垫搭在靠背上，带出"有人坐过"的松弛感
+  const pad = m(box(W * 0.62, 0.20, 0.07), toon(C('linen', '#EDE8DE')), [0, seatY + 0.18, -D / 2 + 0.11], 'both');
+  pad.rotation.x = -0.16;
+  g.add(pad);
+  // 木框：两条扶手 + 四腿
+  for (const s of [-1, 1]) {
+    g.add(m(box(0.035, 0.06, D * 0.86), woodMat, [s * (W / 2 - 0.018), seatY + 0.10, 0], 'both'));
+  }
+  for (const sx of [-1, 1]) for (const sz of [-1, 1]) {
+    const leg = taperLeg(seatY - 0.05, 0.018, woodMat);
+    leg.position.set(sx * (W / 2 - 0.05), seatY - 0.05, sz * (D / 2 - 0.09));
+    leg.rotation.z = sx * 0.05;
+    leg.rotation.x = -sz * 0.05;
+    g.add(leg);
+  }
+  return g;
+}
+
+/* ---------------- 独立トイレ（马桶间专用件） ---------------- */
+
+/**
+ * 独立马桶间：马桶 + 角落小洗手台 + 毛巾杆。日式住宅把トイレ从浴室里分出来，
+ * 这间只有 1.2×2.0m，洁具沿 -Z 墙排、洗手台塞在 +X 角。
+ */
+export function buildToilet(spec: { pos: [number, number, number]; size: [number, number, number] }): THREE.Group {
+  const g = new THREE.Group();
+  const [w, , d] = spec.size;
+  const porcelain = toon('#f7f8f6');
+  const metal = toon(C('metal', '#b9bcc4'), { finish: 'metal' });
+  const wood = toon('#ffffff', { map: furnitureWoodTexture() });
+
+  /* 马桶：水箱贴 -Z，朝 +Z */
+  const toilet = new THREE.Group();
+  toilet.add(m(box(0.36, 0.20, 0.50), porcelain, [0, 0.10, 0], 'both'));
+  const bowl = m(cyl(0.19, 0.16, 0.14, 16), porcelain, [0, 0.24, 0.05], 'cast');
+  bowl.scale.set(1, 1, 1.25);
+  toilet.add(bowl);
+  toilet.add(m(cyl(0.17, 0.17, 0.012, 16), toon('#eef0ee'), [0, 0.315, 0.05], 'none'));
+  toilet.add(m(box(0.36, 0.42, 0.16), porcelain, [0, 0.32, -0.20], 'both'));
+  toilet.add(m(box(0.14, 0.025, 0.04), metal, [0, 0.46, -0.12], 'cast'));
+  toilet.position.set(-w / 2 + 0.28, 0, -d / 2 + 0.30);
+  g.add(toilet);
+
+  /* 角落洗手台：贴 +X 墙 */
+  const sink = new THREE.Group();
+  sink.add(m(box(0.34, 0.50, 0.30), wood, [0, 0.55, 0], 'both'));
+  sink.add(m(box(0.38, 0.04, 0.34), porcelain, [0, 0.82, 0], 'both'));
+  sink.add(m(cyl(0.12, 0.10, 0.08, 16), porcelain, [0, 0.86, 0], 'cast'));
+  sink.add(m(cyl(0.010, 0.010, 0.18, 8), metal, [0, 0.95, 0.10], 'cast'));
+  sink.position.set(w / 2 - 0.20, 0, d / 2 - 0.22);
+  g.add(sink);
+
+  /* 毛巾杆：贴 -Z 墙，横杆绕 Z 转 90° 让圆柱沿 X 躺倒 */
+  g.add(m(cyl(0.012, 0.012, 0.36, 8), metal, [w / 2 - 0.24, 0.95, -d / 2 + 0.06], 'cast').rotateZ(Math.PI / 2));
+
+  return g;
+}
+
+/* ---------------- 弧形沙发（客厅陈述件） ---------------- */
+
+/**
+ * 弧形沙发：三段拼弧 + 绒面 + 金属脚。弧线是客厅的构图陈述件，
+ * 面料色随 palette.accent（当前为柔和绿），不再是固定的深绿天鹅绒。
+ */
+export function buildCurvedSofa(spec: { pos: [number, number, number]; size: [number, number, number] }): THREE.Group {
+  const g = new THREE.Group();
+  const [w, h, d] = spec.size;
+  const velvet = toon(C('accent', '#5A6E54'), { map: velvetTexture(C('accent', '#5A6E54')) });
+  const brass = toon(C('brass', '#b3aea2'), { finish: 'metal' });
+
+  const segW = w / 3;
+  const seatH = h * 0.55;
+  const backH = h * 0.45;
+
+  g.add(m(box(segW, seatH, d * 0.7), velvet, [0, seatH / 2, 0], 'both'));
+  g.add(m(box(segW, backH, 0.2), velvet, [0, seatH + backH / 2, -d * 0.25], 'both'));
+
+  const left = new THREE.Group();
+  left.position.set(-segW, 0, 0.05);
+  left.rotation.y = 0.26;
+  left.add(m(box(segW, seatH, d * 0.7), velvet, [0, seatH / 2, 0], 'both'));
+  left.add(m(box(segW, backH, 0.2), velvet, [0, seatH + backH / 2, -d * 0.25], 'both'));
+  g.add(left);
+
+  const right = new THREE.Group();
+  right.position.set(segW, 0, 0.05);
+  right.rotation.y = -0.26;
+  right.add(m(box(segW, seatH, d * 0.7), velvet, [0, seatH / 2, 0], 'both'));
+  right.add(m(box(segW, backH, 0.2), velvet, [0, seatH + backH / 2, -d * 0.25], 'both'));
+  g.add(right);
+
+  const cushionW = segW - 0.1;
+  g.add(m(box(cushionW, 0.15, 0.2), velvet, [-segW, seatH + 0.075, 0.05], 'both'));
+  g.add(m(box(cushionW, 0.15, 0.2), velvet, [0, seatH + 0.075, 0], 'both'));
+  g.add(m(box(cushionW, 0.15, 0.2), velvet, [segW, seatH + 0.075, 0.05], 'both'));
+
+  for (const sx of [-1, 1]) for (const sz of [-1, 1]) {
+    g.add(m(cyl(0.03, 0.03, 0.05, 8), brass, [sx * (w / 2 - 0.1), 0.025, sz * (d * 0.35 - 0.1)], 'cast'));
+  }
+
+  return g;
+}

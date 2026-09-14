@@ -1,0 +1,178 @@
+{
+  "version": 1,
+  "characters": ["vivian", "nana"],
+  "atlas": {
+    "cols": 3,
+    "rows": 2,
+    "poses": [
+      { "name": "idle", "label": "待机", "category": "state", "promptable": false },
+      { "name": "happy", "label": "开心", "category": "emotion", "promptable": false },
+      { "name": "drag", "label": "被拎起", "category": "state", "promptable": false },
+      { "name": "dizzy", "label": "晕乎乎", "category": "emotion", "promptable": true },
+      { "name": "talk", "label": "说话", "category": "state", "promptable": false },
+      { "name": "listen", "label": "聆听", "category": "state", "promptable": false }
+    ]
+  },
+  "animations": [
+    {
+      "name": "walk",
+      "label": "走动",
+      "category": "action",
+      "promptable": false,
+      "sheet": "/chibi/walk/{character}/{character}-walk-{direction}-sheet.webp",
+      "directions": ["left", "right"],
+      "cols": 4,
+      "rows": 4,
+      "frames": 14,
+      "loop": true,
+      "durations": [90, 82, 76, 72, 68, 84, 78, 72, 82, 82, 72, 68, 88, 76]
+    },
+    {
+      "name": "turn",
+      "label": "转身",
+      "category": "action",
+      "promptable": false,
+      "sheet": "/chibi/motion/{character}/{character}-turn-{direction}-sheet.webp",
+      "directions": ["left", "right"],
+      "cols": 4,
+      "rows": 2,
+      "frames": 5,
+      "loop": false,
+      "durations": [53, 40, 35, 38, 78]
+    },
+    {
+      "name": "blink",
+      "label": "眨眼",
+      "category": "action",
+      "promptable": true,
+      "sheet": "/chibi/motion/{character}/{character}-blink-sheet.webp",
+      "cols": 3,
+      "rows": 2,
+      "frames": 6,
+      "loop": false,
+      "durations": [55, 48, 58, 78, 70, 105]
+    },
+    {
+      "name": "cast",
+      "label": "施法",
+      "category": "action",
+      "promptable": true,
+      "sheet": "/chibi/motion/{character}/{character}-cast-sheet.webp",
+      "cols": 4,
+      "rows": 3,
+      "frames": 12,
+      "loop": false,
+      "durations": [70, 80, 80, 80, 85, 85, 85, 85, 85, 90, 90, 95]
+    },
+    {
+      "name": "happy",
+      "label": "开心",
+      "category": "emotion",
+      "promptable": true,
+      "sheet": "/chibi/motion/{character}/{character}-happy-sheet.webp",
+      "cols": 4,
+      "rows": 3,
+      "frames": 12,
+      "loop": false,
+      "durations": [70, 80, 80, 80, 85, 85, 85, 85, 85, 90, 90, 95]
+    },
+    {
+      "name": "angry",
+      "label": "生气",
+      "category": "emotion",
+      "promptable": true,
+      "sheet": "/chibi/motion/{character}/{character}-angry-sheet.webp",
+      "cols": 4,
+      "rows": 3,
+      "frames": 12,
+      "loop": false,
+      "durations": [70, 80, 80, 80, 85, 85, 85, 85, 85, 90, 90, 95]
+    },
+    {
+      "name": "think",
+      "label": "思考",
+      "category": "emotion",
+      "promptable": true,
+      "sheet": "/chibi/motion/{character}/{character}-think-sheet.webp",
+      "cols": 4,
+      "rows": 3,
+      "frames": 12,
+      "loop": false,
+      "durations": [70, 80, 80, 80, 85, 85, 85, 85, 85, 90, 90, 95]
+    },
+    {
+      "name": "smug",
+      "label": "得意",
+      "category": "emotion",
+      "promptable": true,
+      "sheet": "/chibi/motion/{character}/{character}-smug-sheet.webp",
+      "cols": 4,
+      "rows": 3,
+      "frames": 12,
+      "loop": false,
+      "durations": [70, 80, 80, 80, 85, 85, 85, 85, 85, 90, 90, 95]
+    }
+  ],
+  "expression_aliases": {
+    "star_eyes": "happy",
+    "star_aura": "happy",
+    "love_eyes": "happy",
+    "money_eyes": "happy",
+    "shy": "happy",
+    "blush_intense": "happy",
+    "smile": "happy",
+    "joy": "happy",
+    "heart_hands": "happy",
+    "angry": "angry",
+    "angry_symbol": "angry",
+    "pout": "angry",
+    "puff_cheek": "angry",
+    "huff": "angry",
+    "rinnegan": "angry",
+    "confused": "think",
+    "confused_intense": "think",
+    "blank_eyes": "dizzy",
+    "tears": "dizzy",
+    "cry": "dizzy",
+    "sweat": "dizzy",
+    "speechless": "dizzy",
+    "blindfold": "dizzy",
+    "dizzy": "dizzy",
+    "sleepy": "dizzy",
+    "ear_drop": "dizzy",
+    "tongue_out": "smug",
+    "smug_symbol": "smug",
+    "dark_face": "drag"
+  },
+  "emotion_map": {
+    "joy": "happy",
+    "closeness": "happy",
+    "anger": "angry",
+    "curiosity": "think",
+    "fear": "dizzy",
+    "sadness": "dizzy",
+    "loneliness": "dizzy"
+  },
+  "idle_triggers": {
+    "idle_short": { "threshold_secs": 45, "expression": "", "motion": "think", "duration_ms": 2600, "probability": 0.4 },
+    "idle_medium": { "threshold_secs": 150, "expression": "", "motion": "think", "duration_ms": 3200, "probability": 0.6 },
+    "idle_long": { "threshold_secs": 360, "expression": "", "motion": "smug", "duration_ms": 3000, "probability": 0.8 },
+    "idle_asleep": { "threshold_secs": 720, "expression": "dizzy", "motion": "", "duration_ms": 4000, "probability": 0.95 }
+  },
+  "event_triggers": {
+    "user_return": { "expression": "", "motion": "happy", "duration_ms": 2400, "probability": 0.85 },
+    "chat_end": { "expression": "", "motion": "happy", "duration_ms": 2000, "probability": 0.5 },
+    "music_start": { "expression": "", "motion": "happy", "duration_ms": 2200, "probability": 0.6 },
+    "battery_low": { "expression": "", "motion": "angry", "duration_ms": 2600, "probability": 0.7 }
+  },
+  "mood_idle_expressions": {
+    "joy": { "expression": "happy", "priority": 10 },
+    "closeness": { "expression": "happy", "priority": 8 },
+    "anger": { "expression": "angry", "priority": 12 },
+    "curiosity": { "expression": "think", "priority": 6 },
+    "fear": { "expression": "dizzy", "priority": 5 },
+    "sadness": { "expression": "dizzy", "priority": 5 },
+    "loneliness": { "expression": "dizzy", "priority": 4 }
+  },
+  "smug_cues": ["得意", "傲娇", "嘴硬", "本小姐", "被夸", "赢了", "炫耀"]
+}
