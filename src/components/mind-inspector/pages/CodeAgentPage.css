@@ -6134,3 +6134,85 @@
 .codex-trust-dot.untrusted {
   background: var(--codex-ink-faint);
 }
+
+/* ---------- 工作树（隔离执行）---------- */
+
+/* 卡内的次级折叠区：一条虚线把它与上方状态区隔开，靠左侧竖线建立
+   「这是子列表」的层次，不再额外套一层卡片边框。 */
+.codex-pinned-sub {
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--codex-line-light);
+}
+.codex-pinned-subhead {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  padding: 2px 0;
+  border: 0;
+  background: none;
+  color: var(--codex-ink-soft);
+  font-size: 11.5px;
+  text-align: left;
+  cursor: pointer;
+}
+.codex-pinned-subhead:hover {
+  color: var(--codex-ink);
+}
+.codex-pinned-sub-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.codex-pinned-sub-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 6px;
+  padding-left: 7px;
+  border-left: 1px solid var(--codex-line-light);
+}
+
+/* 一棵工作树：首行名字 + 标记，次行分支名或游离状态 */
+.codex-pinned-wt {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.codex-pinned-wt-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.codex-pinned-wt-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11.5px;
+  color: var(--codex-ink-soft);
+}
+.codex-pinned-wt-tag {
+  flex-shrink: 0;
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: var(--codex-line-light);
+  color: var(--codex-ink-faint);
+  font-size: 11px;
+  line-height: 1.4;
+}
+.codex-pinned-wt-tag.warn {
+  background: var(--codex-warning-soft);
+  color: var(--codex-warning);
+}
+.codex-pinned-wt-meta {
+  color: var(--codex-ink-faint);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

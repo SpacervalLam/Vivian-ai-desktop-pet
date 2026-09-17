@@ -45,6 +45,7 @@ pub mod work_agent_tools;
 pub mod work_todo_tools;
 pub mod work_question_tools;
 pub mod work_subagent_tools;
+pub mod work_worktree_tools;
 pub mod workflow_tools;
 
 /// 注册所有内置工具到工具系统
@@ -91,6 +92,8 @@ pub fn register_builtin_tools(tool_system: &Arc<ToolSystem>) {
         Arc::new(work_subagent_tools::WorkDelegateTool::new()),
         // 后台子任务的收集 / 取消 / 列表
         Arc::new(work_subagent_tools::WorkJobTool::new()),
+        // 工作智能体隔离执行工具（工作树生命周期：列出 / 新建 / 移除）
+        Arc::new(work_worktree_tools::WorkIsolateTool::new()),
         // 定时任务工具
         Arc::new(scheduler_tools::ScheduleReminderTool::new()),
         Arc::new(scheduler_tools::ManageScheduledTool::new()),

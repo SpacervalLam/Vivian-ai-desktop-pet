@@ -167,6 +167,33 @@ pub struct GitBranchList {
     pub default_base: Option<String>,
 }
 
+/// 一个工作树（`git worktree list --porcelain` 的一项）
+///
+/// 工作树是同一份 `.git` 挂出来的工作目录：主工作树就是仓库本身，附加工作树
+/// 用来做**隔离执行** —— 智能体或用户在独立目录里改代码，不污染当前工作区，
+/// 改坏了整棵目录丢掉即可，不必在脏工作区里做反向操作。
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct GitWorktreeInfo {
+    /// 工作树绝对路径
+    pub path: String,
+    /// 目录名（界面直接展示，省得前端再切一次路径）
+    pub name: String,
+    /// 检出的分支短名；detached HEAD 时为空
+    pub branch: String,
+    /// 是否处于 detached HEAD
+    pub detached: bool,
+    /// 是否为仓库主工作树（唯一那个含 `.git` 目录的）
+    pub is_main: bool,
+    /// 是否被 `git worktree lock` 锁定
+    pub locked: bool,
+    /// 是否有未提交改动 —— 移除前据此判断要不要 force，也是「能不能直接丢」的依据
+    pub dirty: bool,
+    /// 变更文件数（dirty 时的规模提示）
+    pub changed_files: i32,
+    /// 当前 HEAD 短 hash
+    pub head: String,
+}
+
 // ============ 只读探测 ============
 
 /// 未跟踪文件的行数上限：超过就不再读内容，避免 `git status` 被一个
@@ -459,6 +486,126 @@ pub fn git_branch_diff(working_directory: String, base: String) -> GitBranchDiff
     out
 }
 
+/// 截断成短 hash。
+fn short_hash(sha: &str) -> String {
+    sha.chars().take(7).collect()
+}
+
+/// 取路径最后一段（兼容两种斜杠）。
+fn last_segment(p: &str) -> String {
+    p.replace('\\', "/")
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or("")
+        .to_string()
+}
+
+/// 解析 `git worktree list --porcelain`。
+///
+/// 格式是若干连续的「块」，块内按行给键值、块之间夹空行：
+/// ```text
+/// worktree G:/repo
+/// HEAD 3f2a1b0...
+/// branch refs/heads/main
+///
+/// worktree C:/tmp/wt
+/// HEAD 9c8d7e6...
+/// detached
+/// ```
+/// `detached` / `bare` / `pruned` 这类是无值行，出现即视为真；`locked` 后面
+/// 可能跟一句原因，但我们只关心锁没锁。块不显式切分——遇到下一个 `worktree`
+/// 行就开新项，靠这个就够，不必额外维护状态机。
+fn parse_worktree_porcelain(text: &str) -> Vec<GitWorktreeInfo> {
+    let mut out: Vec<GitWorktreeInfo> = Vec::new();
+    for raw in text.lines() {
+        let line = raw.trim_end();
+        if line.is_empty() {
+            continue;
+        }
+        let (key, rest) = match line.split_once(' ') {
+            Some((k, v)) => (k, v.trim()),
+            None => (line, ""),
+        };
+        match key {
+            "worktree" => out.push(GitWorktreeInfo {
+                path: rest.to_string(),
+                name: last_segment(rest),
+                ..Default::default()
+            }),
+            "HEAD" => {
+                if let Some(cur) = out.last_mut() {
+                    cur.head = short_hash(rest);
+                }
+            }
+            "branch" => {
+                if let Some(cur) = out.last_mut() {
+                    // refs/heads/feature/x → feature/x
+                    cur.branch = rest.strip_prefix("refs/heads/").unwrap_or(rest).to_string();
+                }
+            }
+            "detached" => {
+                if let Some(cur) = out.last_mut() {
+                    cur.detached = true;
+                    cur.branch.clear();
+                }
+            }
+            "locked" => {
+                if let Some(cur) = out.last_mut() {
+                    cur.locked = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// 探测某个工作树是否有未提交改动，返回 `(是否脏, 变更文件数)`。
+///
+/// 目录已被手工删除时按「干净」处理：这既不是能用报错表达的状态，
+/// 对界面来说也等同于「没什么可丢的」。
+fn worktree_dirtiness(path: &str) -> (bool, i32) {
+    if !Path::new(path).is_dir() {
+        return (false, 0);
+    }
+    match run_git_opt(path, &["status", "--porcelain"]) {
+        Some(text) => (
+            true,
+            text.lines().filter(|l| !l.trim().is_empty()).count() as i32,
+        ),
+        None => (false, 0),
+    }
+}
+
+/// 列出仓库的全部工作树。
+///
+/// 主工作树恒为第一项（`git worktree list` 的输出顺序有此保证，无需再比路径）。
+/// 每棵附加工作树会多跑一次 `git status` 判断脏否 —— 这一次子进程是值得的：
+/// 它是「移除要不要 force」和界面上「能不能直接丢」的唯一依据。
+#[tauri::command]
+pub fn git_worktree_list(working_directory: String) -> Vec<GitWorktreeInfo> {
+    let dir = working_directory.trim();
+    if dir.is_empty() || !Path::new(dir).is_dir() {
+        return Vec::new();
+    }
+    let Ok(raw) = run_git(dir, &["worktree", "list", "--porcelain"]) else {
+        return Vec::new();
+    };
+
+    parse_worktree_porcelain(&raw)
+        .into_iter()
+        .enumerate()
+        .map(|(idx, mut wt)| {
+            wt.is_main = idx == 0;
+            let (dirty, changed) = worktree_dirtiness(&wt.path);
+            wt.dirty = dirty;
+            wt.changed_files = changed;
+            wt
+        })
+        .collect()
+}
+
 // ============ 写操作 ============
 
 /// 暂存全部改动 → 提交 →（可选）推送。
@@ -561,6 +708,204 @@ pub fn git_commit_push(
     }
 
     result.ok = true;
+    result
+}
+
+// ============ 工作树写操作 ============
+
+/// 路径同义判断：统一斜杠、忽略大小写、去掉结尾分隔符。
+///
+/// Windows 上同一路径可能以 `G:/repo`、`G:\repo`、`g:/repo/` 三种样子出现，
+/// 直接比字符串做护栏会漏判。
+fn same_path(a: &str, b: &str) -> bool {
+    let norm = |s: &str| s.replace('\\', "/").trim_end_matches('/').to_lowercase();
+    norm(a) == norm(b)
+}
+
+/// 校验工作树名字。名字会同时当目录名和分支名用，所以必须挡住路径穿越
+/// （`..`、`/`、`\`）与 Windows 保留字符。
+///
+/// 不做「自动纠正」而是直接拒绝：静默把用户输入改写成另一个名字，下次他按自己
+/// 输入的名字去目录里找会找不到。限制在 ASCII 是连带考虑——这个名字会进分支名，
+/// 非 ASCII 在各类 git 前端里显示效果参差。
+fn sanitize_slug(slug: &str) -> Result<String, String> {
+    let s = slug.trim();
+    if s.is_empty() {
+        return Err("工作树名字不能为空".into());
+    }
+    if !s
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err("名字只能用字母、数字、中划线和下划线".into());
+    }
+    Ok(s.to_string())
+}
+
+/// 仓库根目录的绝对路径。
+fn repo_root(dir: &str) -> Result<String, String> {
+    run_git(dir, &["rev-parse", "--show-toplevel"]).map_err(|e| format!("不在 git 仓库内：{e}"))
+}
+
+/// 隔离工作树的落盘根：`<仓库父目录>/<仓库名>-worktrees/`。
+///
+/// 放仓库同级而非系统临时目录，是因为这些工作树里放的是**改到一半的代码**，
+/// 被临时目录清理掉就等于丢工作；也不放进仓库内部，免得被搜索、打包和
+/// `git status` 反复扫到。
+fn worktrees_root(root: &str) -> std::path::PathBuf {
+    let p = Path::new(root);
+    let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("repo");
+    match p.parent() {
+        Some(parent) => parent.join(format!("{name}-worktrees")),
+        None => p.join(".worktrees"),
+    }
+}
+
+/// 新建一棵隔离工作树。
+///
+/// 落盘到 `<仓库父目录>/<仓库名>-worktrees/<名字>`，并签出 `vivian/<名字>` 分支。
+/// **刻意不用 detached HEAD**：游离提交没有分支引用兜底，一旦被 gc 就真没了，
+/// 而这里装的恰恰是做了一半的活，值一条分支。`vivian/` 前缀让它和人工分支一眼可分。
+///
+/// 同名分支已存在时不再用 `-b`（会直接失败），改为签出该分支——这正是
+/// 「同名工作树重建」的语义，比抛一句 git 报错更贴近用户意图。
+#[tauri::command]
+pub fn git_worktree_add(working_directory: String, slug: String, base: String) -> GitActionResult {
+    let mut result = GitActionResult::default();
+    let dir = working_directory.trim().to_string();
+    if dir.is_empty() {
+        result.error = Some("未选择工作区".into());
+        return result;
+    }
+    let slug = match sanitize_slug(&slug) {
+        Ok(s) => s,
+        Err(e) => {
+            result.error = Some(e);
+            return result;
+        }
+    };
+    let root = match repo_root(&dir) {
+        Ok(r) => r,
+        Err(e) => {
+            result.error = Some(e);
+            return result;
+        }
+    };
+
+    let target = worktrees_root(&root).join(&slug);
+    let target_str = target.to_string_lossy().to_string();
+    if target.exists() {
+        result.error = Some(format!("目录已存在：{target_str}"));
+        return result;
+    }
+
+    // git worktree add 不会替我们建父目录，这里先补上。
+    if let Some(parent) = target.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            result.error = Some(format!("创建父目录失败：{e}"));
+            return result;
+        }
+    }
+
+    let branch = format!("vivian/{slug}");
+    let branch_ref = format!("refs/heads/{branch}");
+    let branch_exists = run_git_opt(&dir, &["rev-parse", "--verify", &branch_ref]).is_some();
+    let base_rev = if base.trim().is_empty() {
+        "HEAD".to_string()
+    } else {
+        base.trim().to_string()
+    };
+
+    let mut args: Vec<String> = vec!["worktree".into(), "add".into()];
+    if branch_exists {
+        args.push(target_str.clone());
+        args.push(branch.clone());
+    } else {
+        args.push("-b".into());
+        args.push(branch.clone());
+        args.push(target_str.clone());
+        args.push(base_rev);
+    }
+    let argv: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+
+    match run_git(&dir, &argv) {
+        Ok(out) => {
+            result.steps.push(GitStepResult {
+                step: "worktree-add".into(),
+                ok: true,
+                output: if out.is_empty() { target_str } else { out },
+            });
+            result.ok = true;
+        }
+        Err(e) => {
+            result.steps.push(GitStepResult {
+                step: "worktree-add".into(),
+                ok: false,
+                output: e.clone(),
+            });
+            result.error = Some(format!("创建隔离工作树失败：{e}"));
+        }
+    }
+    result
+}
+
+/// 移除一棵附加工作树。
+///
+/// 两道护栏：
+/// 1. **主工作树不可移除** —— 它就是仓库本身，git 也会拒绝；提前拦下来，
+///    省得用户只看到一句莫名其妙的 git 报错。
+/// 2. 有未提交改动时必须显式 `force`。默认拒绝是刻意的：那里面可能是人或智能体
+///    做了一半的活，静默丢掉等于数据丢失。前端会拿返回的改动规模弹确认框，
+///    用户点过之后才带 `force` 再调一次。
+#[tauri::command]
+pub fn git_worktree_remove(working_directory: String, path: String, force: bool) -> GitActionResult {
+    let mut result = GitActionResult::default();
+    let dir = working_directory.trim().to_string();
+    let target = path.trim().to_string();
+    if dir.is_empty() || target.is_empty() {
+        result.error = Some("未选择工作区或工作树".into());
+        return result;
+    }
+
+    if let Ok(root) = repo_root(&dir) {
+        if same_path(&root, &target) {
+            result.error = Some("主工作树就是仓库本身，不能移除".into());
+            return result;
+        }
+    }
+
+    let (dirty, changed) = worktree_dirtiness(&target);
+    if dirty && !force {
+        result.error = Some(format!(
+            "该工作树有 {changed} 个文件未提交，移除会一并丢弃；确认后带 force 重试"
+        ));
+        return result;
+    }
+
+    let mut argv = vec!["worktree", "remove"];
+    if force {
+        argv.push("--force");
+    }
+    argv.push(&target);
+
+    match run_git(&dir, &argv) {
+        Ok(out) => {
+            result.steps.push(GitStepResult {
+                step: "worktree-remove".into(),
+                ok: true,
+                output: if out.is_empty() { target.clone() } else { out },
+            });
+            result.ok = true;
+        }
+        Err(e) => {
+            result.steps.push(GitStepResult {
+                step: "worktree-remove".into(),
+                ok: false,
+                output: e.clone(),
+            });
+            result.error = Some(format!("移除工作树失败：{e}"));
+        }
+    }
     result
 }
 

@@ -33,7 +33,7 @@ import { confirm as confirmDialog } from '@tauri-apps/plugin-dialog';
 import {
   GitBranch, GitCompare, FolderGit2, Plug, Sparkles, Link2,
   ChevronDown, ChevronRight, RefreshCw, Loader2, TriangleAlert,
-  Upload, Check,
+  Upload, Check, Plus, Trash2,
 } from 'lucide-react';
 
 // ============ 后端结构的前端镜像 ============
@@ -92,6 +92,19 @@ interface GitActionResult {
   ok: boolean;
   steps: { step: string; ok: boolean; output: string }[];
   error: string | null;
+}
+
+/** 对齐 `commands::git::GitWorktreeInfo` */
+interface GitWorktreeInfo {
+  path: string;
+  name: string;
+  branch: string;
+  detached: boolean;
+  is_main: boolean;
+  locked: boolean;
+  dirty: boolean;
+  changed_files: number;
+  head: string;
 }
 
 /** 对齐 `commands::plugins::PluginInventoryEntry` */
@@ -192,6 +205,16 @@ const PinnedSummary: React.FC<PinnedSummaryProps> = ({ workingDirectory, visible
   const [diff, setDiff] = useState<GitBranchDiff | null>(null);
   const [diffLoading, setDiffLoading] = useState(false);
 
+  // ---- 工作树（隔离执行）----
+  // 列表只在区块展开时拉：它是比 git status 更重的探测（每棵工作树各跑一次 status），
+  // 没必要跟着 8 秒轮询一起跑。
+  const [worktreesOpen, setWorktreesOpen] = useState(false);
+  const [worktrees, setWorktrees] = useState<GitWorktreeInfo[] | null>(null);
+  const [worktreesLoading, setWorktreesLoading] = useState(false);
+  const [newWorktreeName, setNewWorktreeName] = useState('');
+  const [worktreeBusy, setWorktreeBusy] = useState(false);
+  const [worktreeError, setWorktreeError] = useState<string | null>(null);
+
   // 「来源」
   const [sourcesOpen, setSourcesOpen] = useState(false);
   const [plugins, setPlugins] = useState<PluginEntry[] | null>(null);
@@ -201,6 +224,8 @@ const PinnedSummary: React.FC<PinnedSummaryProps> = ({ workingDirectory, visible
 
   /** 请求序号：工作区切得快时，旧响应不能覆盖新工作区的状态 */
   const reqSeq = useRef(0);
+  /** 工作树清单用独立序号：与状态轮询共用会让彼此把对方的响应作废 */
+  const wtSeq = useRef(0);
 
   const toggleEnv = useCallback(() => setEnvOpen((prev) => !prev), []);
 
@@ -288,6 +313,125 @@ const PinnedSummary: React.FC<PinnedSummaryProps> = ({ workingDirectory, visible
       await runAction(msg, push);
     },
     [commitMessage, runAction, status, t, workingDirectory],
+  );
+
+  // ---- 工作树（隔离执行）----
+  //
+  // 工作树的用途是隔离执行：在仓库同级另开一处干净副本干活，改坏了整棵丢掉，
+  // 不必在脏工作区里做反向操作。这里只管生命周期（新建 / 移除 / 查看），
+  // 落盘位置与分支逻辑都在后端 commands::git。
+
+  /** 拉工作树清单。失败时置空数组而非抛错：没有工作树本身不是异常状态。 */
+  const refreshWorktrees = useCallback(async () => {
+    if (!workingDirectory) {
+      setWorktrees([]);
+      return;
+    }
+    const seq = ++wtSeq.current;
+    setWorktreesLoading(true);
+    try {
+      const res = await invoke<GitWorktreeInfo[]>('git_worktree_list', { workingDirectory });
+      if (seq !== wtSeq.current) return;
+      setWorktrees(res);
+      setWorktreeError(null);
+    } catch (e) {
+      if (seq !== wtSeq.current) return;
+      setWorktrees([]);
+      setWorktreeError(String(e));
+    } finally {
+      if (seq === wtSeq.current) setWorktreesLoading(false);
+    }
+  }, [workingDirectory]);
+
+  // 只在区块展开时拉。工作树探测是「每棵各跑一次 git status」，比状态轮询重，
+  // 跟着 8 秒定时器一起跑没有意义。
+  useEffect(() => {
+    if (visible && worktreesOpen) void refreshWorktrees();
+  }, [visible, worktreesOpen, refreshWorktrees]);
+
+  // 换工作区就作废上一次的清单，否则会显示成别的仓库的工作树。
+  useEffect(() => {
+    setWorktrees(null);
+    setWorktreeError(null);
+  }, [workingDirectory]);
+
+  /** 新建隔离工作树。确认框写清落盘位置，免得建完不知道东西去哪了。 */
+  const handleAddWorktree = useCallback(async () => {
+    const name = newWorktreeName.trim();
+    if (!name) return;
+    const where = baseName(status?.root || workingDirectory);
+    const ok = await confirmDialog(
+      t('mind_inspector.pinned_worktree_add_confirm', { name, where }),
+      { title: t('mind_inspector.pinned_worktree_add_title'), kind: 'info' },
+    ).catch(() => false);
+    if (!ok) return;
+    setWorktreeBusy(true);
+    setWorktreeError(null);
+    try {
+      const res = await invoke<GitActionResult>('git_worktree_add', {
+        workingDirectory,
+        slug: name,
+        base: '',
+      });
+      if (res.ok) {
+        setNewWorktreeName('');
+        await refreshWorktrees();
+      } else {
+        setWorktreeError(res.error || null);
+      }
+    } catch (e) {
+      setWorktreeError(String(e));
+    } finally {
+      setWorktreeBusy(false);
+    }
+  }, [newWorktreeName, status, workingDirectory, refreshWorktrees, t]);
+
+  /**
+   * 移除工作树。
+   *
+   * 一律先弹确认：工作树里可能是做了一半的活或游离提交，不该被一次误触丢掉。
+   * 措辞按脏净分轻重，脏的连改动规模一并说清。
+   */
+  const handleRemoveWorktree = useCallback(
+    async (wt: GitWorktreeInfo) => {
+      setWorktreeBusy(true);
+      setWorktreeError(null);
+      try {
+        const call = (force: boolean) =>
+          invoke<GitActionResult>('git_worktree_remove', {
+            workingDirectory,
+            path: wt.path,
+            force,
+          });
+
+        // 一次确认就够：脏净判断取自已拉取的清单，措辞按它分轻重。
+        // force 跟着这次判断走；后端在 force=false 时仍会挡住脏工作树，
+        // 万一清单快照过期，由它兜底。
+        const ok = await confirmDialog(
+          wt.dirty
+            ? t('mind_inspector.pinned_worktree_dirty_confirm', {
+                name: wt.name,
+                n: wt.changed_files,
+              })
+            : t('mind_inspector.pinned_worktree_remove_confirm', { name: wt.name }),
+          { title: t('mind_inspector.pinned_worktree_remove'), kind: 'warning' },
+        ).catch(() => false);
+        if (!ok) return;
+
+        const res = await call(wt.dirty);
+        if (!res.ok) {
+          setWorktreeError(res.error || null);
+          return;
+        }
+        await refreshWorktrees();
+        await refreshStatus();
+      } catch (e) {
+        setWorktreeError(String(e));
+      } finally {
+        setWorktreeBusy(false);
+      }
+    },
+    [workingDirectory, refreshWorktrees, refreshStatus, t],
   );
 
   /** 展开「比较分支」：拉分支清单并默认选中基准分支 */
@@ -634,6 +778,116 @@ const PinnedSummary: React.FC<PinnedSummaryProps> = ({ workingDirectory, visible
                       ) : null}
                     </div>
                   )}
+
+                  {/* 工作树：隔离执行的入口与清单 */}
+                  <div className="codex-pinned-sub">
+                    <button
+                      type="button"
+                      className="codex-pinned-subhead"
+                      onClick={() => setWorktreesOpen((v) => !v)}
+                      aria-expanded={worktreesOpen}
+                    >
+                      {worktreesOpen ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                      <FolderGit2 size={12} />
+                      <span className="codex-pinned-sub-title">
+                        {t('mind_inspector.pinned_worktrees')}
+                      </span>
+                      {worktrees && worktrees.length > 0 && (
+                        <span className="codex-pinned-muted">{worktrees.length}</span>
+                      )}
+                    </button>
+
+                    {worktreesOpen && (
+                      <div className="codex-pinned-sub-body">
+                        {worktreesLoading && !worktrees ? (
+                          <div className="codex-pinned-hint">
+                            <Loader2 size={12} className="codex-spin" />
+                            {t('mind_inspector.pinned_loading')}
+                          </div>
+                        ) : (
+                          <>
+                            {(worktrees ?? []).map((wt) => (
+                              <div key={wt.path} className="codex-pinned-wt">
+                                <div className="codex-pinned-wt-row">
+                                  <span className="codex-pinned-wt-name" title={wt.path}>
+                                    {wt.name}
+                                  </span>
+                                  {wt.is_main && (
+                                    <span className="codex-pinned-wt-tag">
+                                      {t('mind_inspector.pinned_worktree_main')}
+                                    </span>
+                                  )}
+                                  {wt.dirty && (
+                                    <span className="codex-pinned-wt-tag warn">
+                                      {t('mind_inspector.pinned_worktree_changed', {
+                                        n: wt.changed_files,
+                                      })}
+                                    </span>
+                                  )}
+                                  {!wt.is_main && (
+                                    <button
+                                      type="button"
+                                      className="codex-pinned-icon-btn"
+                                      onClick={() => void handleRemoveWorktree(wt)}
+                                      disabled={worktreeBusy}
+                                      title={t('mind_inspector.pinned_worktree_remove')}
+                                    >
+                                      <Trash2 size={11} />
+                                    </button>
+                                  )}
+                                </div>
+                                <div className="codex-pinned-wt-meta mono">
+                                  {wt.detached
+                                    ? t('mind_inspector.pinned_detached')
+                                    : wt.branch || wt.head}
+                                </div>
+                              </div>
+                            ))}
+
+                            {worktrees && worktrees.length === 0 && (
+                              <div className="codex-pinned-hint">
+                                {t('mind_inspector.pinned_worktree_none')}
+                              </div>
+                            )}
+
+                            <div className="codex-pinned-form-row">
+                              <input
+                                className="codex-pinned-input"
+                                value={newWorktreeName}
+                                onChange={(e) => setNewWorktreeName(e.target.value)}
+                                placeholder={t('mind_inspector.pinned_worktree_placeholder')}
+                                disabled={worktreeBusy}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter') {
+                                    e.preventDefault();
+                                    void handleAddWorktree();
+                                  }
+                                }}
+                              />
+                              <button
+                                type="button"
+                                className="codex-pinned-btn"
+                                disabled={worktreeBusy || !newWorktreeName.trim()}
+                                onClick={() => void handleAddWorktree()}
+                              >
+                                {worktreeBusy
+                                  ? <Loader2 size={12} className="codex-spin" />
+                                  : <Plus size={12} />}
+                                {t('mind_inspector.pinned_worktree_add')}
+                              </button>
+                            </div>
+
+                            {worktreeError && (
+                              <div className="codex-pinned-hint err">
+                                <TriangleAlert size={12} />
+                                {worktreeError}
+                              </div>
+                            )}
+                          </>
+                        )}
+                      </div>
+                    )}
+                  </div>
 
                   {/* 写操作结果：逐条步骤 + 失败原因 */}
                   {actionResult && (
