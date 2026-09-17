@@ -338,6 +338,12 @@ pub fn coding_delete_session(session_id: String) -> Result<bool, String> {
     Ok(CODING_AGENT.delete_session(&session_id))
 }
 
+/// 重命名会话（侧边栏右键菜单）。返回更新后的会话，前端直接替换列表项。
+#[tauri::command]
+pub fn coding_rename_session(session_id: String, title: String) -> Result<CodingSession, String> {
+    CODING_AGENT.rename_session(&session_id, &title)
+}
+
 /// 取消正在运行的会话任务。
 #[tauri::command]
 pub fn coding_cancel_session(session_id: String) -> Result<bool, String> {

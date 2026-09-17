@@ -445,6 +445,7 @@ pub fn run() {
             commands::coding_agent::coding_list_available_models,
             commands::coding_agent::coding_list_sessions,
             commands::coding_agent::coding_delete_session,
+            commands::coding_agent::coding_rename_session,
             commands::coding_agent::coding_cancel_session,
             commands::coding_agent::coding_send_message,
             commands::coding_agent::coding_list_dir_tree,

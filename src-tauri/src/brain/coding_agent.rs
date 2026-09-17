@@ -258,6 +258,9 @@ const FILE_REF_MAX_CHARS: usize = 8000;
 /// 单条消息文件引用数量上限。
 const FILE_REF_MAX_COUNT: usize = 8;
 
+/// 会话标题长度上限（字符数，非字节）。自动标题与手动重命名共用同一口径。
+const SESSION_TITLE_MAX_CHARS: usize = 30;
+
 /// 会话中的一条消息（用户文本 / 助手回复 / 工具调用 / 工具结果 / 错误）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CodingMessage {
@@ -980,6 +983,31 @@ impl CodingAgentService {
         }
     }
 
+    /// 手动重命名会话（用户从侧边栏右键菜单发起）。
+    ///
+    /// 与「首条用户消息自动截取前 30 字」是两条**互斥**的命名路径：自动命名只在
+    /// `title` 为空时触发（见 `push_message` / `send_message`），所以这里写进去的
+    /// 名字会被后续消息保留，不会被下一轮自动标题覆盖。
+    ///
+    /// 因此用户输入要先把首尾空白裁掉再判空——否则一个空格就能把 `title` 占住，
+    /// 却在前端渲染时等于空标题，等于同时废掉手动与自动两条路径。
+    /// 运行中不拒绝：改名不碰会话执行状态，中途改完立刻生效正是想要的。
+    pub fn rename_session(&self, session_id: &str, title: &str) -> Result<CodingSession, String> {
+        let trimmed = title.trim();
+        if trimmed.is_empty() {
+            return Err("会话名称不能为空".into());
+        }
+        // 与自动标题同一口径（按字符截断，不是字节），避免一个改名把超长文本塞进列表
+        let normalized: String = trimmed.chars().take(SESSION_TITLE_MAX_CHARS).collect();
+        let mut guard = self.sessions.write();
+        let s = guard.get_mut(session_id).ok_or("会话不存在")?;
+        s.title = normalized;
+        let updated = s.clone();
+        drop(guard);
+        self.persist();
+        Ok(updated)
+    }
+
     /// 设置单条消息级反馈（"up" / "down"，传空值清除）。消息下标基于会话消息列表。
     pub fn set_message_feedback(&self, session_id: &str, message_index: usize, rating: &str) -> Result<(), String> {
         let mut guard = self.sessions.write();
@@ -1226,7 +1254,7 @@ impl CodingAgentService {
             if let Some(s) = guard.get_mut(session_id) {
                 // 斜杠命令不作为会话标题（首条用户消息为命令时保持标题为空）
                 if s.title.is_empty() && msg.role == CodingRole::User && !msg.content.starts_with('/') {
-                    let t: String = msg.content.chars().take(30).collect();
+                    let t: String = msg.content.chars().take(SESSION_TITLE_MAX_CHARS).collect();
                     s.title = t;
                 }
                 s.updated_at = chrono::Utc::now().timestamp_millis();
@@ -1582,7 +1610,7 @@ impl CodingAgentService {
             let first = s.title.is_empty();
             // 斜杠命令不作为会话标题
             if first && !text.trim_start().starts_with('/') {
-                let t: String = text.chars().take(30).collect();
+                let t: String = text.chars().take(SESSION_TITLE_MAX_CHARS).collect();
                 s.title = t;
             }
             (s.working_directory.clone(), s.extra_workspaces.clone())

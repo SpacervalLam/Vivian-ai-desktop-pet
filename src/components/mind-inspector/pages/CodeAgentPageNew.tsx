@@ -3409,7 +3409,6 @@ const CodeAgentPage: React.FC = () => {
   const [renameSessionId, setRenameSessionId] = useState<string | null>(null);
   const [renameSessionDraft, setRenameSessionDraft] = useState('');
   const [deleteSessionId, setDeleteSessionId] = useState<string | null>(null);
-  const [sessionTitles, setSessionTitles] = useState<Record<string, string>>({});
   const [pinnedSessions, setPinnedSessions] = useState<Set<string>>(() => new Set());
   const [unreadSessions, setUnreadSessions] = useState<Set<string>>(() => new Set());
 
@@ -3928,7 +3927,7 @@ const CodeAgentPage: React.FC = () => {
     if (!target) return;
     if (action === 'rename') {
       setRenameSessionId(id);
-      setRenameSessionDraft(sessionTitles[id] || target.title || '未命名');
+      setRenameSessionDraft(target.title || t('mind_inspector.code_untitled', { defaultValue: '未命名' }));
     } else if (action === 'pin') {
       setPinnedSessions((prev) => { const next = new Set(prev); next.has(id) ? next.delete(id) : next.add(id); return next; });
     } else if (action === 'unread') {
@@ -3944,7 +3943,28 @@ const CodeAgentPage: React.FC = () => {
         switchSession(fork);
       } catch (e) { notifyError(t('mind_inspector.code_fork_failed', { e: String(e) })); }
     }
-  }, [sessionMenu, sessions, sessionTitles, handleDelete, switchSession, messages.length, refreshSessions, notifyError, t]);
+  }, [sessionMenu, sessions, handleDelete, switchSession, messages.length, refreshSessions, notifyError, t]);
+
+  /**
+   * 提交会话重命名：写回后端并同步本地列表。
+   *
+   * 之前这里只写一份纯前端覆盖表，名字只活在当前渲染里——列表一刷新就回到
+   * 后端标题，重开会话更是彻底丢失。现在以后端返回的 `title` 为准。
+   */
+  const commitSessionRename = useCallback(async () => {
+    const id = renameSessionId;
+    if (!id) return;
+    // 空名直接当作放弃：后端会拒，前端也没必要发这一趟
+    const next = renameSessionDraft.trim();
+    if (!next) { setRenameSessionId(null); return; }
+    try {
+      const updated = await invoke<CodingSession>('coding_rename_session', { sessionId: id, title: next });
+      setSessions((prev) => prev.map((s) => (s.session_id === id ? { ...s, title: updated.title } : s)));
+    } catch (e) {
+      notifyError(t('mind_inspector.code_rename_failed', { e: String(e) }));
+    }
+    setRenameSessionId(null);
+  }, [renameSessionId, renameSessionDraft, notifyError, t]);
 
   useEffect(() => {
     if (!sessionMenu) return;
@@ -5204,7 +5224,7 @@ const CodeAgentPage: React.FC = () => {
                         )}
                         <div style={{ minWidth: 0, flex: 1 }}>
                           <div className="codex-session-title">
-                            {sessionTitles[s.session_id] || s.title || t('mind_inspector.code_untitled', { defaultValue: '未命名' })}
+                            {s.title || t('mind_inspector.code_untitled', { defaultValue: '未命名' })}
                           </div>
                           
                         </div>
@@ -5313,7 +5333,7 @@ const CodeAgentPage: React.FC = () => {
                             )}
                             <div style={{ minWidth: 0, flex: 1 }}>
                               <div className="codex-session-title">
-                                {sessionTitles[s.session_id] || s.title || t('mind_inspector.code_untitled', { defaultValue: '未命名' })}
+                                {s.title || t('mind_inspector.code_untitled', { defaultValue: '未命名' })}
                               </div>
                               
                             </div>
@@ -5343,8 +5363,8 @@ const CodeAgentPage: React.FC = () => {
             <div className="codex-session-modal-backdrop" onMouseDown={() => setRenameSessionId(null)}>
               <div className="codex-theme codex-session-modal" onMouseDown={(e) => e.stopPropagation()}>
                 <h3>{t('mind_inspector.code_rename_session')}</h3>
-                <input autoFocus value={renameSessionDraft} onChange={(e) => setRenameSessionDraft(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && renameSessionDraft.trim()) { setSessionTitles((p) => ({ ...p, [renameSessionId]: renameSessionDraft.trim() })); setRenameSessionId(null); } }} />
-                <div className="codex-session-modal-actions"><button type="button" onClick={() => setRenameSessionId(null)}>{t('mind_inspector.code_cancel')}</button><button type="button" className="primary" onClick={() => { if (renameSessionDraft.trim()) setSessionTitles((p) => ({ ...p, [renameSessionId]: renameSessionDraft.trim() })); setRenameSessionId(null); }}>{t('mind_inspector.code_save')}</button></div>
+                <input autoFocus value={renameSessionDraft} onChange={(e) => setRenameSessionDraft(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') void commitSessionRename(); else if (e.key === 'Escape') setRenameSessionId(null); }} />
+                <div className="codex-session-modal-actions"><button type="button" onClick={() => setRenameSessionId(null)}>{t('mind_inspector.code_cancel')}</button><button type="button" className="primary" onClick={() => void commitSessionRename()}>{t('mind_inspector.code_save')}</button></div>
               </div>
             </div>
           )}
