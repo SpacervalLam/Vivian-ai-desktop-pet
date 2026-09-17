@@ -563,6 +563,7 @@ PreProcessing → UserMemorySaving → [QueryRewrite ∥ FastSemantic] → Memor
 - **工作模型预设源**：候选模型在设置 → LLM 页签「工作智能体模型」区维护（每项含别名/服务商/模型/端点/密钥，支持增删改，删除为垃圾桶图标按钮；供应商下拉复用完整厂商预设列表、别名可改。不再提供「设为当前工作模型」按钮——当前选中统一在编程页模型下拉切换，编程页切换经 `select_work_model` 同步 `active_work_model`），列表经 `work_models` 持久化、当前选中经 `active_work_model` 持久化，供编程页模型下拉回显与 `ModelRouter` 覆盖恢复。前端不再暴露 temperature 与单次输出预算——工作智能体请求统一省略 `temperature`（服务端默认，推理模型兼容），`max_tokens` 由后端按服务商分级默认（`work_model_default_max_tokens`：Claude 64000 / Gemini 65536 / OpenAI·Qwen·GLM·Grok 32768 / Moonshot·豆包·Mistral 16384 / DeepSeek·SiliconFlow·Groq·Together·OpenRouter·文心·星火·本地 8192 / 未知 8192），给足编程输出能力又不触发各家硬上限
 - **角色化系统提示**：system prompt 按 `char_id` 注入人设（Vivian 傲娇吐槽 / Nana 温柔友好），限定 Windows + PowerShell 环境与工作目录沙箱边界，强调"先看（list_dir/grep/read）再动手、局部用 edit_file、改后跑命令验证"。**能力进化角色定位**：白名单含进化工具（create_skill / use_skill / search_skill / create_tool / create_plugin），system prompt 明确"你也是能力进化事件的执行主体"并引导用法——任务中总结出可复用流程用 create_skill 沉淀、缺少可执行原语用 create_tool 构建（预览卡片授权）、一组相关能力要整体装卸时用 create_plugin 打包
 - **编程页 UI（Codex 布局 + 手账风格）**：入口为 [`CodeAgentPageNew.tsx`](file:///g:/vivian-rs/src/components/mind-inspector/pages/CodeAgentPageNew.tsx)，左栏为会话/工作区管理（会话按工作区分组或单列表、支持搜索、最近更新/手动排序、「新会话」主点击直接建会话 + 下拉箭头保留手动选目录），中栏为对话流 + 底部输入卡片（`/` 斜杠命令、图片多模态草稿、权限/模型/推理选择），右栏为检查器（概览 / 轨迹 / 内嵌终端，可整体收纳）；左右侧边栏均可拖拽调整宽度，收起 / 呼出为 320ms 缓动过渡（内容整块滑出而非被逐帧压扁，拖拽调宽时自动关掉过渡，否则宽度会滞后于鼠标）。消息按角色区分渲染：助手消息经 `MarkdownText` 做完整 Markdown 排版（标题 / 列表 / 任务清单 / 表格 / 引用 / 代码块 / 行内码 / 链接，本地文件链接渲染为文件卡片并在右侧预览打开，见 [`codeMarkdown.tsx`](file:///g:/vivian-rs/src/components/mind-inspector/pages/codeMarkdown.tsx)），文件类工具（read/write/edit）以手账风格代码块 + unified diff 高亮展示，非 Markdown 文本文件 read 结果经 SourceFileView 以 highlight.js 语法高亮 + 行号展示并支持行内编辑保存（coding_write_file）与超大文件分页懒加载；`edit_file` 卡片折叠时摘要行即显示 `+N −M` 改动量。空态下发送消息会先自动建会话（用设置里的默认工作区，未配置则建成无工作区模式会话，均不弹目录选择框）；无工作模型时发送改为高亮模型下拉并引导跳转设置 LLM 页
+- **富文本输入区（composer）**：底部输入框不再是纯 `<textarea>`，而是块级富文本编辑器（[`ComposerEditor.tsx`](file:///g:/vivian-rs/src/components/mind-inspector/pages/ComposerEditor.tsx)，`contentEditable`）——**粘贴的 markdown 直接按消息区那套规则渲染成块**（标题/列表/引用/代码块/表格，与上方回复同一套观感，所见即所发），**手打的字符保持原样**（敲 `# ` 不会自己变标题，不打扰正常输入）。抹黑选中任意文字浮出格式卡：加粗 / 斜体 / 链接 + 块类型下拉（正文 / 标题 1-3 / 有序 / 无序）。**发送给模型的仍是 markdown 字符串**——块编辑器只是输入层的呈现，斜杠命令、@-mention、语音输入与排队/引导逻辑全部沿用原有文本通路，行为不变。顺带修好了消息正文与工具输出**无法抹黑复制**的老问题（全局禁选文字是为窗口拖拽，正文与输入区补回 `user-select: text`）
 - **斜杠命令**：输入 `/` 弹出命令菜单（按命令名/标签字母模糊筛选，↑↓ + Enter 选择，选中命令插入输入框补参数；命令名后输入空格自动收起菜单）。后端 `handle_slash_command` 拦截分发 6 个命令——`/goal`（查看/设置/清除会话目标，注入 system prompt）/ `/plan`（切换计划模式；`/plan approve` 把最近方案固化为已批准执行依据，`/plan off` 退出）/ `/compact`（较早历史交 LLM 压缩成摘要替换进上下文）/ `/permission`（查看/切换权限预设）/ `/feedback`（记录反馈）/ `/export`（导出会话为 Markdown）。命令结果以消息流展示，不消耗 agent loop 轮次
 - **@-mention 文件引用**：输入框输入 `@` 弹出工作目录文件选择器（标签/路径模糊筛选，↑↓+Enter 选中），选中插入 `@路径`；发送时后端读取所引文件内容注入上下文（沙箱校验、截断上限），消息气泡以文件图标展示引用，读取失败显式标注错误
 - **产物面板与消息操作**：会话概览侧展示「产物」卡片（write/edit 成功写入的文件清单，相对路径 + 全文定位）；每条消息 hover 提供复制 / 有帮助 / 没帮助（消息级评分）/ 从此处派生新会话（fork，复制该消息为止的历史为独立会话）
@@ -739,6 +740,16 @@ Hidden（默认完全隐藏，整体位于屏外右侧）
 - **状态化鼠标穿透**：被动展示态（输入框关闭）窗口鼠标穿透不挡桌面；交互态（输入框打开 `set_side_chat_input_open`）关闭穿透可打字；`set_side_chat_locked` 锁定时常驻不自动隐藏
 - **预创建**（`src/App.tsx::ensureWechatWindow`）：启动时预创建屏幕右缘屏外隐藏的 `chat` 窗口（iPhone 17 比例 390×845、无边框透明、置顶、跳过任务栏），避免首次呼出冷启动 WebView2 延迟
 - **side_chat 独立**：直接对话面板（`label="side_chat"`）停靠屏幕左缘，通过显式传 `label:'side_chat'` 与微信抽屉解耦，不参与右缘三态逻辑
+
+#### Toast 通知窗口（toast）
+
+通知与工具确认卡片（三态确认 / 一键操作）渲染在独立透明窗口里：每个在线角色一个（`${charId}_toast`）+ 启动期专用的 `startup_toast`，全部**高度固定为屏幕的一半**、贴屏幕右下角，纵向由跨窗口堆叠协议错开互不遮挡。
+
+- **容量固定才有"先出后进"**：窗口高度固定后，能放几条是确定常量。新 toast 放不下时先把最老的平滑请出（滑出淡出动画播完再入场）——顶部条目不会被窗口边界裁掉；确认卡与进度条目（原地刷新）不可被请走，实在无处可让时仍会入场（宁可被裁也不吞消息）
+- **堆叠是滑动不是跳变**：条目垂直位置写进 CSS transform，增删条目时整列平滑滑动，没有重排造成的一帧跳变
+- **透明区域完全穿透**：窗口是一整块真实窗口，透明不等于不挡鼠标。只有确认卡 / 带按钮 toast 的矩形接收鼠标事件，其余透明区域不挡桌面、任务栏与其它窗口（`commands/toast_hit.rs` 按光标位置动态切换穿透，且只在状态翻转时调用——该调用会触发透明窗口整块重绘，无条件高频调用会导致持续闪烁）
+- **同一文案只弹一条**：跨窗口内容去重 + 让位自愈（`utils/toastDedup.ts`），两只桌宠同屏时广播事件不会各弹一条；原地刷新的进度条目豁免去重。**判据是「同一个 key 第二次出现」而非「payload 带不带 key」**——一次性提示普遍自带 `key: Date.now()`（用一次就丢），按后者判会把整张去重网关掉，症状就是同一条 toast 在两只桌宠上各弹一条。因此 `key` 的语义已收窄为「这条有身份、后续会用同一个值再来更新它」，`showToast` 不再有 `key ?? Date.now()` 的兜底默认值（那条兜底还会让同一毫秒发出的两条 toast 撞 key 互相顶掉）
+- 调试：根目录 `toast-preview.html` 免 Tauri 预览页（`npm run dev` 后访问），双开不同 `?character_id=` 可复现多窗口场景
 
 #### 暖纸 UI 主题
 
@@ -1116,7 +1127,7 @@ Vivian 的配置位于用户数据目录 `%APPDATA%\Vivian\`（Windows）。
 > - **周期重发**：启动期间后台任务每 800ms 重发最新进度快照，toast 窗口任意时刻挂载都能在 800ms 内收到当前进度；
 > - **单调递增**：多角色依次预加载时百分比钳制为单调递增，各嵌入阶段（情绪语料逐批、语义语料逐维度、种子记忆逐条）以当前进度为基点做区间映射，进度条不回跳；
 > - **延迟创建与失败重试**：`startup_toast` 窗口延迟 800ms 后异步创建，创建失败（如快速重启时上一实例的 WebView2 子进程仍持有 user data folder 锁触发 `ERROR_BUSY`）会自动退避重试（10 次 × 800ms），避免窗口 WebView 创建失败导致进度 toast 完全无法显示；
-> - **穿透固定窗口**：`startup_toast` 与普通角色 toast 窗口对齐——置顶、定位屏幕右上角、高度撑满屏幕、隐藏任务栏且不抢焦点，并设为点击穿透（`set_ignore_cursor_events`）+ 固定大小（`resizable=false`），不遮挡屏幕右上区域的鼠标操作且不可被拖拽改尺寸；
+> - **穿透固定窗口**：`startup_toast` 与普通角色 toast 窗口对齐同一套几何——置顶、**高度固定为屏幕的一半**、贴屏幕右下角、隐藏任务栏且不抢焦点，固定大小（`resizable=false`）不可拖拽改尺寸；与角色 toast 的纵向错开由跨窗口堆叠协议承担（startup 始终排最上），透明区域始终鼠标穿透。窗口体系详见[Toast 通知窗口](#toast-通知窗口toast)；
 
 ### 错误处理
 

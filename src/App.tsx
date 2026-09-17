@@ -746,6 +746,12 @@ export default function App() {
   /** 显示一条 toast（窗口就绪时直接 emit，未就绪时缓存并触发窗口创建）。
    *  传入固定 `key` 可原地更新同一条 toast；`duration <= 0` 表示持久显示（不自动关闭）。
    *
+   *  **`key` 的语义是「这条有身份，后续会用同一个值再来更新它」**，只给需要原地刷新的
+   *  条目（如重建进度的固定 key）。一次性提示不要传 key——曾经的默认值 `Date.now()`
+   *  看似无害，实际做了两件坏事：同一毫秒发出的两条 toast 会撞上同一个 key 而互相顶掉；
+   *  而接收侧的跨窗口去重又会把「带 key 的条目」整体豁免，导致同一条文案在两只桌宠上
+   *  各弹一条。需要 key 时请传一个跨次调用稳定的常量。
+   *
    *  `owner` 决定这条 toast 弹到哪个角色的窗口：
    *  - `undefined`（默认）：归属当前窗口角色。用于本窗口自己发起的事件
    *    （文件拖放、语音未开启等），以及 payload 已带 character_id 的定向事件。
@@ -754,7 +760,6 @@ export default function App() {
    *    无归属的 toast 统一由主角色的 toast 窗口呈现（见 ToastWindow 的归属判定）。 */
   const showToast = useCallback(
     (message: string, type: ToastType = 'info', duration: number = 3000, key?: number, action?: ToastAction, owner?: string | null) => {
-      const toastKey = key ?? Date.now();
       // 归属解析：显式指定优先；`null` 与「当前窗口无角色」都归一为 undefined（无归属），
       // 由接收侧按主角色窗口收敛。
       const ownerId = owner === undefined ? (getCharacterId() ?? undefined) : (owner ?? undefined);
@@ -762,9 +767,9 @@ export default function App() {
       // toast 显示期间不再需要 suspend/resume_click_through 配对。
 
       if (toastReadyRef.current) {
-        void emit('toast:show', { message, type, duration, key: toastKey, character_id: ownerId, action });
+        void emit('toast:show', { message, type, duration, key, character_id: ownerId, action });
       } else {
-        pendingToastRef.current.push({ message, type, duration, key: toastKey, action, owner: ownerId });
+        pendingToastRef.current.push({ message, type, duration, key, action, owner: ownerId });
         void ensureToastWindow();
       }
     },
@@ -783,7 +788,7 @@ export default function App() {
         const pending = pendingToastRef.current;
         pendingToastRef.current = [];
         for (const p of pending) {
-          void emit('toast:show', { message: p.message, type: p.type, duration: p.duration, key: p.key ?? Date.now(), action: p.action, character_id: p.owner });
+          void emit('toast:show', { message: p.message, type: p.type, duration: p.duration, key: p.key, action: p.action, character_id: p.owner });
         }
         const pendingConfirms = pendingConfirmRef.current;
         pendingConfirmRef.current = [];
@@ -802,7 +807,7 @@ export default function App() {
             const pending = pendingToastRef.current;
             pendingToastRef.current = [];
             for (const p of pending) {
-              void emit('toast:show', { message: p.message, type: p.type, duration: p.duration, key: p.key ?? Date.now(), action: p.action, character_id: p.owner });
+              void emit('toast:show', { message: p.message, type: p.type, duration: p.duration, key: p.key, action: p.action, character_id: p.owner });
             }
             const pendingConfirms = pendingConfirmRef.current;
             pendingConfirmRef.current = [];

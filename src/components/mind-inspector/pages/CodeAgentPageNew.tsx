@@ -29,6 +29,7 @@ import {
 import './CodeAgentPage.css';
 import TrajectoryPanel from './TrajectoryPanel';
 import TurnRail, { buildTurns } from './TurnRail';
+import ComposerEditor, { type ComposerEditorHandle } from './ComposerEditor';
 import PinnedSummary from './PinnedSummary';
 import { MarkdownFileContext, MarkdownText, FileChip } from './codeMarkdown';
 import { SourceFileView } from './SourceFileView';
@@ -3467,7 +3468,9 @@ const CodeAgentPage: React.FC = () => {
   const dragDepthRef = useRef(0);
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
-  const inputRef = useRef<HTMLTextAreaElement | null>(null);
+  const inputRef = useRef<ComposerEditorHandle | null>(null);
+  /** 输入区外层容器：斜杠 / @-mention 菜单以它定位（富文本编辑器拿不到 textarea 的 rect） */
+  const composerRef = useRef<HTMLDivElement | null>(null);
   const activeIdRef = useRef<string | null>(null);
   activeIdRef.current = activeId;
   const runningRef = useRef(false);
@@ -4533,10 +4536,11 @@ const CodeAgentPage: React.FC = () => {
     }
   }, [activeSession]);
 
-  const handleInputChange = useCallback((value: string, event?: React.ChangeEvent<HTMLTextAreaElement>) => {
+  const handleInputChange = useCallback((value: string) => {
     setInput(value);
     const text = value;
-    const rect = event?.target.getBoundingClientRect();
+    // 菜单定位改用输入区容器（富文本编辑器没有 textarea 那样的矩形）
+    const rect = composerRef.current?.getBoundingClientRect();
     const lastWord = text.split(/\s+/).pop() ?? '';
 
     // @-mention：当前词以 @ 开头时打开文件选择菜单
@@ -4629,7 +4633,7 @@ const CodeAgentPage: React.FC = () => {
       void (async () => {
         const el = inputRef.current;
         if (!el) return;
-        const current = el.value;
+        const current = el.getMarkdown();
         const baseLen = asrBaseLenRef.current;
         if (baseLen > current.length) return;
         const base = current.slice(0, baseLen);
@@ -4638,7 +4642,7 @@ const CodeAgentPage: React.FC = () => {
         try {
           const polished = await invoke<string>('polish_asr_text', { text: asrPart });
           const trimmed = (polished ?? '').trim();
-          if (!trimmed || inputRef.current?.value !== current) return;
+          if (!trimmed || inputRef.current?.getMarkdown() !== current) return;
           setInput(base.trim() ? `${base.replace(/\s+$/, '')} ${trimmed}` : trimmed);
         } catch {
           // 润色失败保留原文
@@ -4655,7 +4659,7 @@ const CodeAgentPage: React.FC = () => {
         await invoke('stop_recognition');
         setVoiceRecording(false);
       } else {
-        asrBaseLenRef.current = inputRef.current?.value.length ?? 0;
+        asrBaseLenRef.current = inputRef.current?.getMarkdown().length ?? 0;
         await invoke('start_recognition');
         setVoiceRecording(true);
       }
@@ -4908,32 +4912,20 @@ const CodeAgentPage: React.FC = () => {
           </div>
         </div>
       )}
-      <div className="codex-composer-input-row">
-        <textarea
+      <div className="codex-composer-input-row" ref={composerRef}>
+        <ComposerEditor
           ref={inputRef}
           value={input}
-          onChange={(e) => handleInputChange(e.target.value, e)}
-          onPaste={(e) => {
-            const files = Array.from(e.clipboardData?.files ?? []);
-            if (files.length > 0) {
-              e.preventDefault();
-              addImages(files);
-            }
+          onChange={handleInputChange}
+          onSubmit={() => void handleSend()}
+          onEscape={() => {
+            if (slashMenu.visible) setSlashMenu((prev) => ({ ...prev, visible: false }));
+            if (atMenu.visible) setAtMenu((prev) => ({ ...prev, visible: false }));
           }}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' && !e.shiftKey) {
-              e.preventDefault();
-              void handleSend();
-            } else if (e.key === 'Escape') {
-              if (slashMenu.visible) setSlashMenu((prev) => ({ ...prev, visible: false }));
-              if (atMenu.visible) setAtMenu((prev) => ({ ...prev, visible: false }));
-            }
-          }}
+          onPasteFiles={addImages}
           placeholder={running
             ? t('mind_inspector.code_input_thinking')
             : t('mind_inspector.code_input_compose')}
-          rows={1}
-          className="codex-composer-textarea"
         />
       </div>
       <div className="codex-composer-toolbar">

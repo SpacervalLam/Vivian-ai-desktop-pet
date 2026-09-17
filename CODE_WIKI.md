@@ -20,6 +20,7 @@
   - [暖纸主题（UI 视觉统一）](#暖纸主题ui-视觉统一)
   - [3D 公寓窗口](#3d-公寓窗口)
   - [ConnectionsPanel.tsx —— 外部连接页](#connectionspaneltsx--外部连接页)
+  - [ToastWindow.tsx —— Toast 通知窗口](#toastwindowtsx--toast-通知窗口)
 - [核心数据结构](#核心数据结构)
 - [模块详解](#模块详解)
   - [brain/ —— 大脑核心](#brain--大脑核心)
@@ -232,6 +233,20 @@ Memory 窗口（`MemoryWindow`，默认全屏大小）内嵌 [`MindInspector.tsx
 - **内置连接器区**：浏览器桥卡片（连接状态 + 从 `list_tools` 实时取 `mcp__browser__*` 工具清单 + 扩展安装引导），未连接时展开三步引导
 - **凭据状态子区**（卡片内，不与 MCP Servers 并列）：平台登录态网格。**它不是连接、也不提供任何工具**——只是扩展 Cookie 哨兵探测出的 `HashMap<String, bool>`（`server.rs::report_platform_status`），唯一消费方是 `discovery/sources/*` 的被动采集器。放在桥卡片内可避免用户误以为「登录某平台即获得该平台工具」
 - **MCP Servers 区**：原工具页的 MCP 增删改 UI，状态与加载逻辑一并从 `ConfigWindow` 迁入本组件（`ConfigWindow` 不再持有 `mcpServers` / `mcpEditing` / `mcpSaving`）
+
+### ToastWindow.tsx —— Toast 通知窗口
+
+屏幕右下角的通知体系：每个在线角色一个独立透明窗口（`${charId}_toast`）+ 启动期专用的 `startup_toast`。全部窗口几何一致（宽 400/360、**高度固定为屏幕的一半**、贴屏幕右下角），纵向错开交给跨窗口堆叠协议（[`toastDedup.ts`](file:///g:/vivian-rs/src/utils/toastDedup.ts) 的 `STACK_ORDER`，各窗口广播占用高度 `toast:stack`）。
+
+- **半屏高是容量管理的前提**：可用高度 = 窗口高 − 上下留白 − 跨窗口偏移，是一个确定常量。窗口若随内容伸缩，增删条目与重新测高之间必有一帧错位，那一帧里顶部 toast 就会被窗口边界裁掉——这正是旧实现（按 scrollHeight 自适应窗口）偶发被裁的根因
+- **堆叠是位移驱动**：条目全部 `position:absolute; bottom:0`，垂直距离写进 `transform`（`StackSlot`，负责布局盒测高与退场动画）。增删条目 = transform 过渡的平滑滑动，没有 flex 重排的一帧跳变；从顶部淘汰一条时下方条目的位置本来就不变，无需做高度塌陷动画
+- **先出后进**：新 toast 一律以 `phase:'queued'` 入队，`实地高度 + 间隙 + 估算高度 ≤ 可用高度` 才放行；放不下先从最老的开始标记 `exiting`（滑出淡出），等退场条目摘干净再放行下一条——排序上"正在退场"的窗口不会准入新条目，避免一边出一边进时中间仍是溢出态。确认卡与原地刷新条目（`inplace`）不可被淘汰；无处可让时直接放行——宁可顶部被裁也不吞消息
+- **区域级点击穿透**（[`commands/toast_hit.rs`](file:///g:/vivian-rs/src-tauri/src/commands/toast_hit.rs)）：窗口是一整块真实 HWND，透明 ≠ 不挡鼠标，而 WM_NCHITTEST 返回 HTTRANSPARENT 不能跨进程递点击，唯一手段是 `set_ignore_cursor_events`。前端只把「确认卡 / 带 action 按钮的 toast」的**布局盒**（`offsetLeft/offsetWidth/offsetHeight`——不能用 `getBoundingClientRect`，堆叠位置与入场退场都是 transform，后者会把动画中间态量成最终位置且不会再有渲染来纠正）上报 `set_toast_hit_regions`；Rust 侧 8ms 轮询光标，命中矩形才关穿透，且**只在状态翻转时下发**——该调用会改写 GWL_EXSTYLE 并触发 SWP_FRAMECHANGED 使透明窗口整块重绘，桌宠历史上"每 60ms 无条件调用"的持续闪烁即源于此。无可交互区域时轮询线程直接退出（空闲零开销）
+- **跨窗口去重**（[`toastDedup.ts`](file:///g:/vivian-rs/src/utils/toastDedup.ts)）：归属路由（payload 带 `character_id`）+ 内容指纹闸门 + 「让位自愈」（优先级低的窗口撤下自己的副本），保证同一文案在屏幕上只存在一条。**原地刷新的判据是 `ToastKeyTracker` 观察到的"同一个 key 重复出现"**，而不是"payload 带不带 key"——一次性提示普遍自带 `key: Date.now()`（用一次就丢），按后者判会把整张去重网关掉，症状就是同一条 toast 在两只桌宠上各弹一条（`scripts/toast-dedup.test.ts` 场景 J 用真实 payload 形状锁住这条）
+- **`key` 的语义收窄在 `App.tsx::showToast`**：`key` 现在只表示「这条有身份，后续会用同一个值再来更新它」，**不再有 `key ?? Date.now()` 的兜底默认值**。这条兜底曾同时造成两个问题——同一毫秒发出的两条 toast 撞上同一个 key 互相顶掉；以及每条一次性提示都被打上数字 key，被接收侧的旧判据（`typeof key === 'number'`）整体豁免出跨窗口去重。需要原地刷新就传一个跨次调用稳定的常量，不需要就干脆不传
+- **`inplace` 标记取代对 key 形式的猜测**：`ToastItem.inplace` 是真正参与判断的字段——容量管理不淘汰它、`toast:shown` 让位不动它、可见去重跳过它。判据来自 `ToastKeyTracker.isRepeat(key, now)`（`KEY_REPEAT_WINDOW_MS`=60s 窗口，比内容去重窗 2s 宽得多，因为进度条可能连着刷新几十秒，中间任何一次刷新被误判成一次性提示就会把进度冻住）
+- **只有真正落屏的 key 才登记**：`keyTrackerRef.note()` 放在去重分支之后——被拦下的那条不该让后续同名到达获得豁免，否则一次误放的重复会自我加固成永久例外
+- **调试**：`toast-preview.html` + `src/toastPreview.tsx` 免 Tauri 预览（注入假 Tauri bridge，`BroadcastChannel` 跨页中继模拟全局广播），双开不同 `?character_id=` 复现多窗口；`?chars=offline` 模拟主角色解析失败、`?theme=dark` 强制深色
 
 ---
 
@@ -583,6 +598,16 @@ pub struct MemoryItem {
 - **本地文件链接卡片**：`[标签](路径)` 的目标判定为本地路径（`file://` / 盘符 / UNC / `/abs` / 含路径分隔符且带已知扩展名的相对路径）时，渲染为图标 + 标签的文件卡片（图标按扩展名挑：代码 / `#` / 花括号 / 文档 / 图片），点击经 `MarkdownFileContext` 的 `onOpenFile` 回调送右侧预览打开（相对路径按会话工作区补全，见 `resolveWorkspacePath`）；其余按外链。宿主经 React context 注入回调，不在 `MessageRow` → `MessageBubble` 层层透传。
 - **流式逐块淡入**：`animate` prop 打开时根节点挂 `data-md-animated`，子块 opacity 0→1 并注入递增 `animation-delay`；块 key 由下标决定，React 复用已有 DOM，已存在块不重放动画。仅流式文本启用，历史消息静态。
 - **正文阅读宽度**：正文块（段落/标题/列表/引用）`max-width: 680px`，代码块与表格突破该限占满整列。
+
+**富文本输入区（`ComposerEditor.tsx`）**：底部输入卡片的内容层，把原来的 `<textarea>` 换成 `contentEditable` 块编辑器。**外部真源仍是 markdown 字符串**——发送、斜杠命令、@-mention 插入都基于 `value`，`ComposerEditorHandle` 只暴露 `focus()` / `insertText()` / `getMarkdown()` 三个方法给 `CodeAgentPageNew`（原来的 `inputRef.current.value` 全部换成 `getMarkdown()`，语音输入的算基线长度、润色前后的"内容没变"判定都靠它取即时值，不能依赖 React state）。
+
+- **只有粘贴才解析，手打不做语法转换**：粘贴的文本经 `parseBlocks` 拆成块序列并走 `.codex-md-*` 类名渲染（与上方消息区同一套观感，输入框里看到的就是发出去的样子）；手打字符保持原样，敲 `# ` 不会自己变成标题。纯文本粘贴（解析结果只有单个 `p`）交回浏览器默认插入，不接管
+- **DOM 是打字期间的唯一真相**：块内容由 ref **只写一次**（`BlockNode` 的 `setRef` 打 `data-hydrated` 标记后不再触碰），之后编辑全交给浏览器，`onInput` 时读回 DOM → 序列化 → `onChange(md)`。若改用受控的 `dangerouslySetInnerHTML`，每次 render 都会重设内容——光标弹回开头、原生撤销栈失效。`value` 与内部最近一次 emit 的 `lastEmittedRef` 不一致才判定为「外部写入」并整篇重解析，这条判据是外部插入（斜杠命令 / @-mention）与内部编辑共存的关键
+- **序列化双向对齐 `codeMarkdown`**：`inlineMdToHtml` / `inlineHtmlToMd` 的规则与 `renderInline` 严格同源（含「不解析 `_` 系」「`2**3` 按运算符处理」两条），块级各自处理列表嵌套缩进、表格单元格 `|` 转义、引用逐行加 `> `、code 块走 `textContent` 而非 innerHTML
+- **抹黑选中浮出格式卡**：监听 `selectionchange`，选区内锚点落在编辑器里才出卡（`portal` 到 body，带 `codex-theme` 拿主题变量，`fixed` 定位，`onMouseDown` 阻止默认以免点击时选区丢失）。提供链接 / 加粗 / 斜体 + 块类型下拉（Body / H1-H3 / 有序 / 无序）。行内格式走 `document.execCommand`（已废弃但选区操作仍是最省事的路径）；切块类型**先 `readMarkdown()` 同步 DOM 现状再换标签**，否则会拿旧 `html` 覆盖用户刚敲的字
+- **Shift+Enter 换行走 `insertLineBreak`**：直接在根节点回车会让浏览器造出「没有块标记」的新元素，读回时只能按标签兜底；`insertLineBreak` 产生 `<br>`，序列化后是块内的 `\n`
+- **占位符与空态标记写在 `dataset` 上**（`data-empty` / `data-placeholder` + `::before`），不走 React state——每次按键都重渲染会把光标弹走
+- **对话正文可选中**：`CodeAgentPage.css` 给消息区与编辑器补 `user-select: text`（全局 `body { user-select: none }` 是为窗口拖拽时不误选文字），选中高亮沿用系统默认色
 
 #### 编程工具集（`tools/builtin/coding_tools.rs`）
 
@@ -2260,6 +2285,7 @@ LLM 输出含标记的 text
 | [`coding_agent.rs`](file:///g:/vivian-rs/src-tauri/src/commands/coding_agent.rs) | 编程智能体（`coding_new_session` / `coding_list_sessions` / `coding_delete_session` / `coding_cancel_session` / `coding_send_message`） |
 | [`rag.rs`](file:///g:/vivian-rs/src-tauri/src/commands/rag.rs) | RAG |
 | [`system_tray.rs`](file:///g:/vivian-rs/src-tauri/src/commands/system_tray.rs) | 系统托盘 |
+| [`toast_hit.rs`](file:///g:/vivian-rs/src-tauri/src/commands/toast_hit.rs) | toast 窗口的区域级点击穿透：登记前端上报的可交互矩形，8ms 轮询光标命中才关穿透；只在状态翻转时下发（该调用触发透明窗口整块重绘，高频无条件调用会持续闪烁）。详见 [ToastWindow.tsx](#toastwindowtsx--toast-通知窗口) |
 
 ### remote/ —— 远程访问 HTTP 服务
 
@@ -2654,7 +2680,7 @@ lib.rs::setup
   - **周期重发**：启动期间后台任务每 800ms 调用 `resend_last_progress` 重发最新快照，toast 窗口任意时刻挂载都能在 800ms 内收到当前进度（预检因此无需等待前端就绪，Ollama 可立即启动）；
   - **单调递增**：百分比经 `LAST_PERCENT` 钳制为单调递增，多角色依次预加载时不回跳；情绪语料逐批（progress_callback）、语义语料逐维度、种子记忆逐条以当前进度为基点做区间映射上报细粒度进度；
   - **延迟创建与失败重试**：`startup_toast` 由 setup 内部 async spawn 延迟 800ms 后创建，避免与 main 窗口 WebView2 初始化并发。创建失败（如快速重启时上一实例 WebView2 子进程仍持有 user data folder 锁触发 `ERROR_BUSY`）时按 `TOAST_RETRY_LEFT`（10 次 × 800ms）退避重试，成功或重试耗尽即停，保证窗口 WebView 创建失败时进度 toast 仍能出现；
-  - **穿透固定窗口**：`startup_toast` 与角色 toast 窗口参数对齐——透明、无边框、置顶、跳过任务栏、不抢焦点（`focused=false`）、初始隐藏；创建成功后 `set_ignore_cursor_events(true)` 设为点击穿透（进度 toast 无交互元素，避免 400px 宽的全高窗口遮挡屏幕右上区域鼠标操作），`resizable(false)` 固定尺寸不可拖拽调整。
+  - **穿透固定窗口**：`startup_toast` 与角色 toast 窗口参数对齐——透明、无边框、置顶、跳过任务栏、不抢焦点（`focused=false`）、初始隐藏；几何与角色 toast 统一（宽 360、**高度固定为屏幕的一半**、贴屏幕右下角，纵向由跨窗口堆叠协议错开），`resizable(false)` 固定尺寸不可拖拽调整；点击穿透由 [`toast_hit.rs`](file:///g:/vivian-rs/src-tauri/src/commands/toast_hit.rs) 的区域级命中接管——进度条目无可交互矩形，整窗保持穿透，不遮挡屏幕右下区域的鼠标操作。
 - **开机自动启动**：配置项 `base.auto_start`（默认 `false`），设置窗口「通用」页可开关；保存时通过 `utils::autostart::set_auto_start` 写入/删除 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 下的 `VivianDesktopPet` 值（当前用户启动项），启动时也会按配置同步一次。
 - **种子向量修复**：`MemoryManagerInner::ensure_seed_vectors` 按 `seed_` 条目逐条核对向量库，缺失即补建；补建失败会导致 `MemoryManager::new` 失败，从而阻止 API 开放，避免“种子记忆存在于 JSON 但检索不到”的静默问题。
 - **恢复出厂清扫**：`factory_reset` 命令（`commands/system.rs`）在重启前写入 `.factory_reset_pending` 标记；下次 `run()` 在 `AppState::new()` 之前调用 `commands::system::factory_reset_sweep_if_pending` 消费标记——此时数据文件尚未被打开，可按保留清单（配置 / 凭据与安全白名单 / `python-libs`、`pids`、`logs`、`mcp` 基础设施 / `skills`、`plugins` 扩展）删除其余全部用户数据（含记忆、聊天历史、截图 `screenshots/`、图片 `images/`、笔记、编程会话、内容发现数据与历史遗留目录），随后删除标记并按首次启动路径重建（角色由配置驱动注册，MemoryManager 播种种子记忆）。

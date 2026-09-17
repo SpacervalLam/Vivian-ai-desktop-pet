@@ -21,7 +21,7 @@ import { listen, emit } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow, currentMonitor, LogicalPosition, LogicalSize } from '@tauri-apps/api/window';
 import { open as shellOpen } from '@tauri-apps/plugin-shell';
-import { stackRank, toastFingerprint, ToastDedupGate } from '../utils/toastDedup';
+import { stackRank, toastFingerprint, ToastDedupGate, ToastKeyTracker } from '../utils/toastDedup';
 import Toast, { type ToastAction, type ToastType } from './Toast';
 import ConfirmToast, {
   type AllowAlwaysScope,
@@ -48,6 +48,13 @@ interface ToastItem {
   progress?: number;
   /** 附带的一键操作（如主题切换确认按钮） */
   action?: ToastAction;
+  /**
+   * 是否是「原地刷新」条目（同一 key 会被反复喂新文案的进度条）。
+   *
+   * 只有它为 true 的条目才豁免内容去重——判据来自 `ToastKeyTracker` 的观察结果，
+   * 而不是"payload 里有没有 key"（那条判据会被 `key: Date.now()` 这种一次性 key 击穿）。
+   */
+  inplace: boolean;
   phase: ToastPhase;
 }
 
@@ -286,6 +293,15 @@ export default function ToastWindow() {
    */
   const dedupGateRef = useRef(new ToastDedupGate(myCharId));
 
+  /**
+   * key 重复出现的追踪器：判定某次到达是「原地刷新」还是「一次性提示」。
+   *
+   * 这个判据是去重网能否生效的关键。曾经用 `typeof key === 'number'` 当代理——结果是
+   * 一次性提示普遍自带的 `key: Date.now()` 把整张去重网关掉了：同一条文案在每个角色的
+   * toast 窗口各弹一条。详见 utils/toastDedup.ts 里 ToastKeyTracker 的注释。
+   */
+  const keyTrackerRef = useRef(new ToastKeyTracker());
+
   const [items, setItems] = useState<ToastItem[]>([]);
   const [confirms, setConfirms] = useState<ConfirmItem[]>([]);
   /**
@@ -399,6 +415,8 @@ export default function ToastWindow() {
               type: 'info' as ToastType,
               duration: 0,
               progress: pct,
+              // 整段启动进度共用这一条，后续事件都是刷新它 → 不参与内容去重
+              inplace: true,
               phase: 'queued' as ToastPhase,
             },
           ];
@@ -468,13 +486,14 @@ export default function ToastWindow() {
           // 事件一旦广播，每只桌宠的 toast 窗口都会各自渲染一条同样的文案。
           const owned = p.character_id ? p.character_id === myCharId : canRenderUnowned();
           const toastType = p.type ?? 'info';
-          // 内容去重只针对「一次性提示」：数字 key 用于持久进度条目（记忆重建 /
-          // 嵌入初始化）的原地刷新，同一条会被反复喂新文案，按内容去重会把刷新
-          // 误判成重复、把进度冻住。字符串 key（presence 类）是一次性提示，照常去重。
-          const dedupable = typeof p.key !== 'number';
+          const now = Date.now();
+          // 原地刷新（同一个 key 第二次出现）才豁免内容去重：进度条会被反复喂新文案，
+          // 按内容去重会把刷新误判成重复、把进度冻住。One-shot 提示（哪怕自带
+          // `key: Date.now()`）一律参与去重——这是"同一内容在屏幕上只存在一条"的前提。
+          const refresh = keyTrackerRef.current.isRepeat(p.key, now);
+          const dedupable = !refresh;
           const fp = dedupable ? toastFingerprint(p.message, toastType) : '';
           if (dedupable && owned) {
-            const now = Date.now();
             const gate = dedupGateRef.current;
             gate.prune(now);
             // 本窗口重复收到同一内容，或另一窗口已认领且优先级更高 → 不追加
@@ -494,6 +513,8 @@ export default function ToastWindow() {
                   type: p.type ?? next[idx].type,
                   duration: p.duration ?? next[idx].duration,
                   progress: p.progress ?? next[idx].progress,
+                  // 被刷新过就确认了它的身份：此后不再参与跨窗口让位
+                  inplace: true,
                 };
                 return next;
               }
@@ -503,10 +524,10 @@ export default function ToastWindow() {
             // 可见去重（兜底时间窗）：上一条同内容还在屏幕上时，不重复追加。
             // 2s 时间窗只防「快速连发」，拦不住「间隔 >2s 但前一条 3s 自动关闭尚未到期」的重发——
             // 那条场景里前一条还在屏幕上，再弹一条就变成上下叠两条。
-            // 持久进度条目（数字 key）是「原地刷新」的占位，不算重复。
+            // 原地刷新条目是「同一条的更新」，不算重复。
             if (dedupable) {
               for (const it of prev) {
-                if (typeof it.key === 'number') continue;
+                if (it.inplace) continue;
                 if (toastFingerprint(it.message, it.type) === fp) return prev;
               }
             }
@@ -520,6 +541,8 @@ export default function ToastWindow() {
                 duration: p.duration ?? 3000,
                 progress: p.progress,
                 action: p.action,
+                // 命中的是同一条的逻辑身份（此前那条已被移除），仍然按原地刷新对待
+                inplace: refresh,
                 // 入场要过容量管理这一关：先排队，许可下达后才切到 live
                 phase: 'queued' as ToastPhase,
               },
@@ -528,13 +551,16 @@ export default function ToastWindow() {
           if (dedupable && owned) {
             // 同步登记 + 广播认领：登记是同步的，同一 tick 内到达的第二条相同内容
             // 会被上面拦住；广播让其他窗口据此让位。
-            dedupGateRef.current.claim(fp, Date.now());
+            dedupGateRef.current.claim(fp, now);
             void emit('toast:shown', { char_id: myCharId, fp }).catch(() => {});
           }
+          // 只有真正走到这里的 key 才算"落过屏"：被去重拦下的那条不该让后续同名到达
+          // 获得豁免，否则一次误放的重复会自我加固成永久例外。
+          keyTrackerRef.current.note(p.key, now);
         }),
         // 跨窗口内容去重：另一窗口宣告呈现了某条内容。若它优先级更高，本窗口让位，
         // 撤掉自己那条同样的一次性提示——保证同一内容在屏幕上只存在一条。
-        // 带 key 的持久条目不受影响（进度刷新本就会重复同一句文案）。
+        // 原地刷新条目（进度条那类）不受影响：它本就该在自己的窗口里持续更新。
         listen<{ char_id: string; fp: string }>('toast:shown', (e) => {
           const id = e.payload?.char_id;
           const fp = e.payload?.fp;
@@ -543,7 +569,7 @@ export default function ToastWindow() {
           if (!yieldToPeer) return; // 对方优先级更低 → 保留本窗口那条
           setItems((prev) => {
             const next = prev.filter(
-              (it) => it.key != null || toastFingerprint(it.message, it.type) !== fp,
+              (it) => it.inplace || toastFingerprint(it.message, it.type) !== fp,
             );
             return next.length === prev.length ? prev : next;
           });
@@ -627,6 +653,8 @@ export default function ToastWindow() {
                   type: 'info' as ToastType,
                   duration: 0,
                   progress: pct,
+                  // 固定 key + 反复刷新 → 原地刷新条目，不参与内容去重
+                  inplace: true,
                   phase: 'queued' as ToastPhase,
                 },
               ];

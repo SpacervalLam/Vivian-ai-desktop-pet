@@ -57,6 +57,54 @@ export function toastFingerprint(message: string, type: string): string {
 /** 跨窗口内容去重的时间窗（毫秒）：窗口期内同一内容只呈现一次 */
 export const DEDUP_WINDOW_MS = 2000;
 
+/**
+ * 「同一个 key 还会再来」的判定窗口（毫秒）。
+ *
+ * 比内容去重窗宽得多：原地刷新的条目（进度条）可能连着刷新几十秒，中间任何一次刷新
+ * 若被误判成「一次性提示」，就会被内容去重拦住、进度冻住。
+ */
+export const KEY_REPEAT_WINDOW_MS = 60_000;
+
+/**
+ * 判定「这次到达是原地刷新，还是一次性提示」——只看**同一个 key 是否重复出现**。
+ *
+ * 为什么不能用 key 的类型或有无来判：payload 里的 `key` 本意是「这条有身份，后续会用
+ * 同一个值再来更新它」，但这个语义只有在**第二次见到同一个值**时才成立。而现实里一次性
+ * 提示也普遍自带 `key: Date.now()`（用一次就丢，没人会拿它回来更新），于是「有 key 就豁免
+ * 去重」等于把几乎所有一次性提示都排除在跨窗口去重之外——同一条文案就会在每个角色的
+ * toast 窗口各弹一条。判据必须落在可观察的行为上（key 重复出现），而不是 key 的形式。
+ *
+ * 只登记**真正落屏**的 key：被去重拦下、根本没显示的那条不该让后续同名到达获得豁免。
+ */
+export class ToastKeyTracker {
+  private seen = new Map<string | number, number>();
+
+  /** 清理超窗记录，避免长期运行下无限增长 */
+  prune(now: number): void {
+    for (const [key, at] of this.seen) {
+      if (now - at >= KEY_REPEAT_WINDOW_MS) this.seen.delete(key);
+    }
+  }
+
+  /** 只读判定：这个 key 之前是否已经落过屏（true = 本次到达是原地刷新） */
+  isRepeat(key: string | number | undefined | null, now: number): boolean {
+    if (key == null) return false;
+    this.prune(now);
+    return this.seen.has(key);
+  }
+
+  /** 登记某个 key 已落屏 */
+  note(key: string | number | undefined | null, now: number): void {
+    if (key == null) return;
+    this.seen.set(key, now);
+  }
+
+  /** 供测试断言内部状态 */
+  debugState(): { tracked: number } {
+    return { tracked: this.seen.size };
+  }
+}
+
 /** 其他窗口宣告的认领记录 */
 interface PeerClaim {
   charId: string;
