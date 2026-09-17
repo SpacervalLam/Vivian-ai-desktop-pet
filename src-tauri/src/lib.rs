@@ -27,6 +27,7 @@ pub mod memory;
 pub mod messages;
 pub mod mind;
 pub mod metrics;
+pub mod music;
 pub mod network;
 pub mod notebook;
 pub mod persona;
@@ -340,7 +341,7 @@ pub fn run() {
             commands::config::get_all_config,
             commands::config::save_config,
             commands::config::reload_config,
-            commands::config::test_network_connection,
+            commands::config::diagnose_network,
             commands::config::test_llm_route,
             commands::config::get_token_usage,
             commands::config::clear_token_usage,
@@ -421,6 +422,7 @@ pub fn run() {
             commands::history::get_latest_previews,
             commands::history::search_chat_history,
             commands::chat::update_last_assistant_timestamp,
+            commands::pet_reaction::generate_pet_reaction,
             commands::window::set_window_position,
             commands::window::get_window_position,
             commands::window::get_cursor_position,
@@ -434,6 +436,9 @@ pub fn run() {
             commands::coding_agent::coding_set_mode,
             commands::coding_agent::coding_list_workspaces,
             commands::coding_agent::coding_set_workspace,
+            commands::coding_agent::coding_add_workspace,
+            commands::coding_agent::coding_remove_workspace,
+            commands::coding_agent::coding_set_workspace_read_only,
             commands::coding_agent::coding_set_permission,
             commands::coding_agent::coding_set_model,
             commands::coding_agent::coding_set_reasoning_level,
@@ -449,7 +454,6 @@ pub fn run() {
             commands::coding_agent::coding_set_message_feedback,
             commands::coding_agent::coding_fork_session,
             commands::coding_agent::coding_get_work_todos,
-            commands::coding_agent::coding_write_work_todos,
             commands::coding_agent::coding_respond_question,
             commands::coding_agent::coding_pending_question,
             commands::tasks::list_agent_tasks,
@@ -464,6 +468,10 @@ pub fn run() {
             commands::plugins::reload_plugin,
             commands::plugins::unload_plugin,
             commands::plugins::delete_plugin,
+            commands::git::git_repo_status,
+            commands::git::git_list_branches,
+            commands::git::git_branch_diff,
+            commands::git::git_commit_push,
             commands::terminal::terminal_create,
             commands::terminal::terminal_write,
             commands::terminal::terminal_resize,
@@ -479,6 +487,7 @@ pub fn run() {
             commands::window::expand_side_chat,
             commands::window::collapse_side_chat,
             commands::window::start_side_chat_mouse_hook,
+            commands::toast_hit::set_toast_hit_regions,
             commands::window::toggle_always_on_top,
             commands::window::set_window_size,
             commands::window::set_window_rect,
@@ -499,6 +508,7 @@ pub fn run() {
             commands::window::is_foreground_fullscreen,
             commands::window::find_safe_position,
             commands::window::debug_log,
+            commands::inspector::report_inspector_attention,
             commands::system_tray::set_tray_tooltip,
             commands::system_tray::update_tray_icon,
             commands::system_tray::show_tray_message,
@@ -1592,6 +1602,7 @@ pub(crate) fn create_character_windows_early(
         .position(offset_x, 100.0)
         .transparent(true)
         .decorations(false)
+        .resizable(false)
         .always_on_top(true)
         .skip_taskbar(true)
         .shadow(false)
@@ -1692,6 +1703,7 @@ pub(crate) fn create_character_windows(handle: &tauri::AppHandle, state: &Arc<Ap
         .position(offset_x, 100.0)
         .transparent(true)
         .decorations(false)
+        .resizable(false)
         .always_on_top(true)
         .skip_taskbar(true)
         .shadow(false)

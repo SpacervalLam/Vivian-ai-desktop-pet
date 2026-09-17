@@ -536,7 +536,8 @@ impl ActionExecutor {
             char_id, action_id, tool_name, rationale, user_emotion, idle_seconds, user_present
         ));
         let messages = vec![system, user];
-        let req = LLMRequest::new(crate::providers::base::TASK_WORK_AGENT, messages);
+        let req = LLMRequest::new(crate::providers::base::TASK_WORK_AGENT, messages)
+            .with_character_id(char_id.to_string());
         let resp = router.generate(req).await?;
         let text = resp.trim().to_lowercase();
         Ok(text.starts_with("yes") || text.contains("是") || text == "y")
@@ -622,6 +623,8 @@ mod tests {
             lay_low: false,
             is_user_chatting: false,
             is_speaking_leader: true,
+            visible_work_session: None,
+            viewing_work_page: false,
         }
     }
 

@@ -1,7 +1,7 @@
 //! 插件创建工具 - create_plugin
 //!
 //! 运行时插件创造的执行侧（创造模式）：把一组能力贡献（技能 / 可执行工具 /
-//! MCP server 声明 / 供应商预设）打包为一个完整插件，校验通过后原子落盘并
+//! MCP server 声明 / LLM 与嵌入供应商预设）打包为一个完整插件，校验通过后原子落盘并
 //! 立即装载——技能与工具下一轮即可用，MCP server 立即连接。
 //!
 //! 与其他能力沉淀工具的分工：
@@ -23,7 +23,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
-use crate::plugins::ProviderPresetData;
+use crate::plugins::{EmbeddingProviderPresetData, ProviderPresetData};
 use crate::skills::SkillService;
 use crate::tools::custom_tools::CustomToolDef;
 use crate::tools::mcp::McpServerConfig;
@@ -38,6 +38,56 @@ pub struct CreatePluginTool {
     skill_service: Arc<SkillService>,
     mcp_manager: Arc<McpManager>,
     tool_system: Arc<ToolSystem>,
+}
+
+/// 删除一个自建插件（内置插件由核心保护，永远不可通过此工具删除）。
+pub struct DeletePluginTool {
+    skill_service: Arc<SkillService>,
+    mcp_manager: Arc<McpManager>,
+    tool_system: Arc<ToolSystem>,
+}
+
+impl DeletePluginTool {
+    pub fn new(
+        skill_service: Arc<SkillService>,
+        mcp_manager: Arc<McpManager>,
+        tool_system: Arc<ToolSystem>,
+    ) -> Self {
+        Self { skill_service, mcp_manager, tool_system }
+    }
+}
+
+#[async_trait]
+impl Tool for DeletePluginTool {
+    fn name(&self) -> &str { "delete_plugin" }
+    fn description(&self) -> &str {
+        "Permanently delete one user-created plugin after user approval, unloading its skills, tools, MCP servers and JS runtime first. Built-in plugins are protected and cannot be deleted. Use only when the user explicitly asks to remove the whole plugin; deleting one provider preset uses manage_provider_preset instead."
+    }
+    fn description_in(&self, lang: &str) -> &str {
+        if lang == "zh" { "经用户确认后永久删除一个自建插件，并先卸载其技能、工具、MCP server 与 JS 运行时。内置插件禁止删除。只有用户明确要求移除整个插件时才用；删除单条 Provider 预设应使用 manage_provider_preset。" } else { self.description() }
+    }
+    fn parameters_schema(&self) -> Value {
+        json!({"type":"object","properties":{"name":{"type":"string","description":"Exact user-created plugin directory id"}},"required":["name"],"additionalProperties":false})
+    }
+    async fn validate_input(&self, input: &Value, _ctx: &ToolUseContext) -> ValidationResult {
+        let name = input.get("name").and_then(Value::as_str).unwrap_or("").trim();
+        if name.is_empty() { ValidationResult::failure("name 不能为空", 2) } else { ValidationResult::success(None) }
+    }
+    async fn check_permissions(&self, input: &Value, _ctx: &ToolUseContext) -> PermissionResult {
+        let name = input.get("name").and_then(Value::as_str).unwrap_or("");
+        PermissionResult::ask(&format!("将永久删除自建插件「{name}」及其目录，是否继续？"))
+    }
+    async fn call(&self, args: Value, _ctx: &ToolUseContext) -> ToolResult {
+        let name = args.get("name").and_then(Value::as_str).unwrap_or("").trim();
+        match crate::plugins::delete_plugin(&self.skill_service, &self.mcp_manager, &self.tool_system, name).await {
+            Ok(()) => ToolResult::standard_success(&format!("自建插件「{name}」已卸载并删除"), Some(json!({"name":name,"deleted":true}))),
+            Err(e) => ToolResult::standard_error("删除插件失败", Some(&e), None),
+        }
+    }
+    fn is_read_only(&self) -> bool { false }
+    fn category(&self) -> ToolCategory { ToolCategory::System }
+    fn risk(&self) -> ToolRiskTier { ToolRiskTier::Shell }
+    fn search_hint(&self) -> &str { "delete remove uninstall plugin 删除 移除 卸载 插件" }
 }
 
 impl CreatePluginTool {
@@ -263,6 +313,26 @@ fn parse_providers(input: &Value) -> Result<Vec<ProviderPresetData>, String> {
         .collect()
 }
 
+fn parse_embeddings(input: &Value) -> Result<Vec<EmbeddingProviderPresetData>, String> {
+    let Some(arr) = input.get("embeddings").and_then(Value::as_array) else {
+        return Ok(Vec::new());
+    };
+    arr.iter()
+        .map(|p| {
+            Ok(EmbeddingProviderPresetData {
+                id: p.get("id").and_then(Value::as_str).unwrap_or("").trim().to_string(),
+                provider: p.get("provider").and_then(Value::as_str).unwrap_or("").trim().to_string(),
+                endpoint: p.get("endpoint").and_then(Value::as_str).unwrap_or("").trim().to_string(),
+                model: p.get("model").and_then(Value::as_str).unwrap_or("").trim().to_string(),
+                dimension: p.get("dimension").and_then(Value::as_u64).unwrap_or(0) as usize,
+                recommended_for: p.get("recommendedFor").and_then(Value::as_str).map(str::to_string),
+                verified_at: None,
+                verified_source: p.get("verifiedSource").and_then(Value::as_str).map(str::to_string),
+            })
+        })
+        .collect()
+}
+
 #[async_trait]
 impl Tool for CreatePluginTool {
     fn name(&self) -> &str {
@@ -272,9 +342,9 @@ impl Tool for CreatePluginTool {
     fn description(&self) -> &str {
         "Package a set of capability contributions into a complete plugin, persist it atomically \
          and load it immediately (skills usable next turn, MCP servers connected right away). \
-         A plugin bundles four contribution types: skills (markdown prompt knowledge), tools \
+         A plugin bundles five contribution types: skills (markdown prompt knowledge), tools \
          (PowerShell-backed executable tools, same format as create_tool), mcpServers (stdio \
-         MCP server declarations), providers (LLM provider presets). Use this when the user \
+         MCP server declarations), providers (LLM provider presets), and embeddings (cloud embedding presets). Use this when the user \
          wants a coherent, uninstallable capability bundle instead of a single skill or tool. \
          Semantics: same plugin name = update (old contributions unloaded, replaced whole); \
          built-in plugins (llm-providers, plugin-authoring) are read-only — copy them into a \
@@ -285,9 +355,10 @@ impl Tool for CreatePluginTool {
     fn description_in(&self, lang: &str) -> &str {
         match lang {
             "zh" => "把一组能力贡献打包为完整插件：校验通过后原子落盘并立即装载\
-            （技能与工具下一轮可用，MCP server 立即连接）。插件是四类贡献的打包分发单元：\
+            （技能与工具下一轮可用，MCP server 立即连接）。插件是五类贡献的打包分发单元：\
             skills（markdown 提示词知识）、tools（PowerShell 可执行工具，格式同 create_tool）、\
-            mcpServers（stdio MCP server 声明）、providers（LLM 供应商预设）。\
+            mcpServers（stdio MCP server 声明）、providers（LLM 供应商预设）、\
+            embeddings（云端嵌入供应商预设）。\
             当用户要的是可整体装载/卸载/删除的能力包而非单条技能或单个工具时使用。\
             语义：同名插件 = 更新（旧贡献整体卸载后替换）；内置插件（llm-providers、\
             plugin-authoring）禁止覆盖——要改内置的，复制成新插件再改。\
@@ -380,6 +451,11 @@ impl Tool for CreatePluginTool {
                     "type": "array",
                     "description": "LLM provider presets (same semantics as update_provider_preset rows); field names camelCase (id, providerType, endpoint, defaultModel, mainModels, ...)",
                     "items": { "type": "object" }
+                },
+                "embeddings": {
+                    "type": "array",
+                    "description": "Cloud embedding provider presets: complete camelCase rows with id/provider/endpoint/model/dimension and optional recommendedFor/verifiedSource",
+                    "items": { "type": "object" }
                 }
             },
             "required": ["name", "version", "description"]
@@ -451,6 +527,11 @@ impl Tool for CreatePluginTool {
                         "type": "array",
                         "description": "LLM 供应商预设（语义同 update_provider_preset 的行）；字段名 camelCase（id、providerType、endpoint、defaultModel、mainModels、…）",
                         "items": { "type": "object" }
+                    },
+                    "embeddings": {
+                        "type": "array",
+                        "description": "云端嵌入供应商预设：完整 camelCase 行，含 id/provider/endpoint/model/dimension，可选 recommendedFor/verifiedSource",
+                        "items": { "type": "object" }
                     }
                 },
                 "required": ["name", "version", "description"]
@@ -477,7 +558,7 @@ impl Tool for CreatePluginTool {
             return ValidationResult::failure("description 是必填项", 2);
         }
         // 结构性预检（深度校验在落盘函数统一执行，这里拦住明显的形状错误）
-        for field in ["skills", "tools", "mcpServers", "providers"] {
+        for field in ["skills", "tools", "mcpServers", "providers", "embeddings"] {
             if let Some(v) = input.get(field) {
                 if !v.is_array() {
                     return ValidationResult::failure(&format!("{field} 必须是数组"), 2);
@@ -534,6 +615,10 @@ impl Tool for CreatePluginTool {
                 Ok(v) => v,
                 Err(e) => return ToolResult::standard_error(&e, None, None),
             },
+            embeddings: match parse_embeddings(&args) {
+                Ok(v) => v,
+                Err(e) => return ToolResult::standard_error(&e, None, None),
+            },
         };
 
         // 1. 原子落盘（全量校验内建）
@@ -565,7 +650,7 @@ impl Tool for CreatePluginTool {
 
         ToolResult::standard_success(
             &format!(
-                "插件「{}」v{} 已创建并装载（{}）：{} 条技能、{} 个工具、{} 个 MCP server、{} 条供应商预设。\
+                "插件「{}」v{} 已创建并装载（{}）：{} 条技能、{} 个工具、{} 个 MCP server、{} 条 LLM 预设、{} 条嵌入预设。\
                  技能与工具现在就可用；用户可在设置 → 插件页重载或删除。",
                 draft.name,
                 args.get("version").and_then(|v| v.as_str()).unwrap_or(""),
@@ -573,7 +658,8 @@ impl Tool for CreatePluginTool {
                 report.skills.len(),
                 report.tools.len(),
                 report.mcp_servers.len(),
-                draft.providers.len()
+                draft.providers.len(),
+                draft.embeddings.len()
             ),
             Some(json!({
                 "name": draft.name,
@@ -582,6 +668,7 @@ impl Tool for CreatePluginTool {
                 "tools": report.tools,
                 "mcp_servers": report.mcp_servers,
                 "providers": draft.providers.iter().map(|p| p.id.clone()).collect::<Vec<_>>(),
+                "embeddings": draft.embeddings.iter().map(|p| p.id.clone()).collect::<Vec<_>>(),
             })),
         )
     }

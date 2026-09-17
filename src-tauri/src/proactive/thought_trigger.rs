@@ -43,11 +43,15 @@ pub struct ThoughtSeed {
 pub struct ThoughtTriggerEvaluator {
     last_user_present: Option<bool>,
     last_primary_emotion: Option<EmotionLabel>,
+    /// 上次主导情绪强度（用于"强度显著跳跃"判定，修复标签抖动导致的频繁播种）
+    last_primary_intensity: Option<f64>,
     last_companion_spoke_secs: Option<f64>,
     last_companion_id: Option<String>,
     last_event_ts_by_type: HashMap<&'static str, f64>,
     last_background_ts: f64,
     last_deep_reflection_ts: f64,
+    /// 上次音乐签名（曲名, 是否播放中），用于检测"开始播放/切歌"并播种音乐种子
+    last_music: Option<(String, bool)>,
 }
 
 impl ThoughtTriggerEvaluator {
@@ -55,11 +59,13 @@ impl ThoughtTriggerEvaluator {
         Self {
             last_user_present: None,
             last_primary_emotion: None,
+            last_primary_intensity: None,
             last_companion_spoke_secs: None,
             last_companion_id: None,
             last_event_ts_by_type: HashMap::new(),
             last_background_ts: 0.0,
             last_deep_reflection_ts: 0.0,
+            last_music: None,
         }
     }
 
@@ -325,12 +331,75 @@ impl ThoughtTriggerEvaluator {
             }
         }
 
+        // ==== 音乐变化种子（用户开始播放 / 切换曲目）====
+
+        // 只在"正在播放且有曲名"时签名记；暂停/停止归 None，不产生种子
+        let cur_music_sig: Option<(String, bool)> = snap
+            .music
+            .as_ref()
+            .filter(|m| m.status == crate::world::PlaybackStatus::Playing && !m.title.is_empty())
+            .map(|m| (m.title.clone(), true));
+        let music_seeded = cur_music_sig.is_some()
+            && self.last_music != cur_music_sig
+            && self.check_cooldown("music_seed", now, 900.0);
+        if music_seeded {
+            if let Some((title, _)) = &cur_music_sig {
+                seeds.push(ThoughtSeed {
+                    thought_key: "music_changed".into(),
+                    description: format!("用户开始听：{}", title),
+                    context_hint: format!("用户开始播放音乐《{}》，你想听一耳朵", title),
+                    intensity: 0.35,
+                    valence: 0.2,
+                    arousal: 0.3,
+                    base_desire: 0.1,
+                    trigger_kind: "music_changed",
+                    high_priority: false,
+                });
+                self.last_event_ts_by_type.insert("music_seed", now);
+            }
+        }
+        self.last_music = cur_music_sig;
+
+        // ==== 应用切换种子（用户从一类应用切到另一类）====
+
+        if activity_snapshot.len() >= 2 && self.check_cooldown("app_switch_seed", now, 900.0) {
+            let latest = &activity_snapshot[activity_snapshot.len() - 1];
+            let prev = &activity_snapshot[activity_snapshot.len() - 2];
+            if let (Some(new_cat), Some(old_cat)) = (&latest.category, &prev.category) {
+                if new_cat != old_cat
+                    && !matches!(new_cat.as_str(), "系统" | "其他" | "")
+                    && !matches!(old_cat.as_str(), "系统" | "其他" | "")
+                {
+                    seeds.push(ThoughtSeed {
+                        thought_key: "app_switch".into(),
+                        description: format!("用户从{}切换到{}", old_cat, new_cat),
+                        context_hint: format!("用户刚从「{}」切到了「{}」，好像换了件事做", old_cat, new_cat),
+                        intensity: 0.32,
+                        valence: 0.1,
+                        arousal: 0.2,
+                        base_desire: 0.1,
+                        trigger_kind: "app_switch",
+                        high_priority: false,
+                    });
+                    self.last_event_ts_by_type.insert("app_switch_seed", now);
+                }
+            }
+        }
+
         // ==== 情绪变化 ====
 
         if mood.primary_intensity > 0.6 {
             let emotion_zh = emotion_display_zh(&mood.primary_emotion);
-            let is_shift = self.last_primary_emotion.as_ref() != Some(&mood.primary_emotion);
-            if is_shift || self.check_cooldown("emotion", now, 900.0) {
+            let label_shifted = self.last_primary_emotion.as_ref() != Some(&mood.primary_emotion);
+            // 标签变化本身不直接播种：需同时满足"强度显著跳跃(≥0.15)"且"情绪切换冷却(300s)"，
+            // 修复标签抖动（如 Joy↔Curiosity 来回横跳）导致的频繁独白。
+            let intensity_jump = self
+                .last_primary_intensity
+                .map_or(false, |prev| (mood.primary_intensity - prev).abs() >= 0.15);
+            let is_shift =
+                label_shifted && intensity_jump && self.check_cooldown("emotion_shift", now, 300.0);
+            let lingering = !label_shifted && self.check_cooldown("emotion", now, 900.0);
+            if is_shift || lingering {
                 let (val, ar) = emotion_valence_arousal(&mood.primary_emotion);
                 let strength = if is_shift { 0.45 } else { 0.3 };
                 seeds.push(ThoughtSeed {
@@ -350,6 +419,8 @@ impl ThoughtTriggerEvaluator {
                 });
                 if is_shift {
                     self.last_event_ts_by_type.insert("emotion_shift", now);
+                } else {
+                    self.last_event_ts_by_type.insert("emotion", now);
                 }
             }
         }
@@ -571,6 +642,7 @@ impl ThoughtTriggerEvaluator {
 
         self.last_user_present = Some(user_present);
         self.last_primary_emotion = Some(mood.primary_emotion);
+        self.last_primary_intensity = Some(mood.primary_intensity);
 
         // 记录事件种子的交互计数供后续使用
         let _ = interaction_count_today;

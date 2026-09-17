@@ -31,6 +31,21 @@ pub struct ProviderCallOptions {
     pub temperature: Option<f64>,
     pub max_tokens: Option<u32>,
     pub max_tokens_extra: u32,
+    /// 存在惩罚：对本轮已出现过的 token 施加固定惩罚，抑制"同一句话/同一个词反复出现"。
+    ///
+    /// **协议支持面是不完整的**，因此按 provider 分别决定是否写入请求体：
+    /// - 支持：OpenAI Chat Completions（`/chat/completions`）、Gemini `generationConfig`
+    /// - **不支持**：OpenAI Responses API（`/responses` 对未知参数直接 400）、
+    ///   Anthropic Messages（协议无此字段）
+    ///
+    /// `None` 或 `0.0` 表示不发送该字段（不发送 == 服务端默认 == 0）。
+    /// 由 `ModelRouter::call_options` 按任务类型注入，只有真正支持该参数的 provider
+    /// 才会读取（见 `ProviderBase::apply_sampling_penalties`）。
+    pub presence_penalty: Option<f64>,
+    /// 频率惩罚：按 token 出现次数成比例惩罚，比存在惩罚更激进地压制高频复读。
+    ///
+    /// 协议支持面与 `presence_penalty` 完全一致（同上）。
+    pub frequency_penalty: Option<f64>,
     pub reasoning: Option<ReasoningPreference>,
     /// 本次调用要求的结构化输出 schema。使用 Arc 避免嵌套作用域重复复制大对象。
     pub json_schema: Option<Arc<Value>>,
@@ -49,6 +64,8 @@ impl ProviderCallOptions {
             max_tokens_extra: self
                 .max_tokens_extra
                 .saturating_add(inner.max_tokens_extra),
+            presence_penalty: inner.presence_penalty.or(self.presence_penalty),
+            frequency_penalty: inner.frequency_penalty.or(self.frequency_penalty),
             reasoning: inner.reasoning.or(self.reasoning),
             json_schema: inner.json_schema.or(self.json_schema),
             request_fingerprint: inner.request_fingerprint.or(self.request_fingerprint),
@@ -194,10 +211,25 @@ pub struct LLMRequest {
     pub max_tokens_override: Option<u32>,
     /// 在 provider 默认值或 `max_tokens_override` 基础上追加的输出预算。
     pub max_tokens_extra: u32,
+    /// 请求级存在惩罚覆盖（None 表示沿用 `ModelRouter` 按任务类型给出的默认值）。
+    ///
+    /// 协议支持面见 `ProviderCallOptions::presence_penalty`：只有 Chat Completions
+    /// 与 Gemini 路径会真正下发，Responses / Anthropic 路径静默忽略。
+    pub presence_penalty: Option<f64>,
+    /// 请求级频率惩罚覆盖（None 表示沿用 `ModelRouter` 默认值）。
+    pub frequency_penalty: Option<f64>,
     /// JSON Schema 结构化输出约束(None 表示不启用)
     pub json_schema: Option<serde_json::Value>,
     /// 推理/思维链偏好(模式 + 档位，按模型能力映射为各家 wire 字段)
     pub reasoning: ReasoningPreference,
+    /// 发起本次 LLM 调用的角色 ID（None = 无归属/全局任务）。
+    ///
+    /// 仅供错误通知（llm:error / chat:route_fallback）做角色路由：
+    /// 归属明确时 toast 只弹到该角色窗口，无归属则不弹。
+    ///
+    /// 注意：`LLMRequest` 不参与序列化（wire 层由各 provider 自建请求体），
+    /// 因此这里不能挂 `#[serde(default)]` —— 该结构体没有 serde derive。
+    pub character_id: Option<String>,
 }
 
 impl LLMRequest {
@@ -212,8 +244,11 @@ impl LLMRequest {
             temperature_override: None,
             max_tokens_override: None,
             max_tokens_extra: 0,
+            presence_penalty: None,
+            frequency_penalty: None,
             json_schema: None,
             reasoning: ReasoningPreference::AUTO,
+            character_id: None,
         }
     }
 
@@ -253,6 +288,17 @@ impl LLMRequest {
         self
     }
 
+    /// 设置请求级惩罚参数（覆盖 `ModelRouter` 按任务类型给出的默认值）。
+    ///
+    /// 传 `0.0` 等价于"该请求不发送此字段"（见 `ProviderBase::sanitize_penalty`），
+    /// 因此可以用 `with_penalties(0.0, 0.0)` 在某个具体请求上关掉惩罚
+    /// ——例如要求逐字复述的任务不该被惩罚参数干扰。
+    pub fn with_penalties(mut self, presence: f64, frequency: f64) -> Self {
+        self.presence_penalty = Some(presence);
+        self.frequency_penalty = Some(frequency);
+        self
+    }
+
     /// 设置 JSON Schema 约束
     pub fn with_json_schema(mut self, schema: serde_json::Value) -> Self {
         self.json_schema = Some(schema);
@@ -272,6 +318,15 @@ impl LLMRequest {
     /// 设置推理偏好（模式 + 档位）
     pub fn with_reasoning_pref(mut self, pref: ReasoningPreference) -> Self {
         self.reasoning = pref;
+        self
+    }
+
+    /// 设置路线：发起本次调用的角色 ID（None = 无归属/全局任务）。
+    ///
+    /// 错误通知（llm:error / chat:route_fallback）按此路由 toast 归属；
+    /// 调用方在其作用域存在角色上下文时应显式传入。
+    pub fn with_character_id(mut self, char_id: impl Into<String>) -> Self {
+        self.character_id = Some(char_id.into());
         self
     }
 
@@ -574,6 +629,25 @@ pub struct ProviderStats {
     pub failed_calls: u64,
 }
 
+/// 惩罚参数在请求体中的字段名。各厂商命名不同，由调用方按协议选择。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PenaltyKeys {
+    pub presence: &'static str,
+    pub frequency: &'static str,
+}
+
+/// 蛇形命名：OpenAI Chat Completions / 智谱 / 火山方舟等 OpenAI 兼容协议。
+pub const PENALTY_KEYS_SNAKE: PenaltyKeys = PenaltyKeys {
+    presence: "presence_penalty",
+    frequency: "frequency_penalty",
+};
+
+/// 驼峰命名：Gemini `generationConfig` 内的 `presencePenalty` / `frequencyPenalty`。
+pub const PENALTY_KEYS_CAMEL: PenaltyKeys = PenaltyKeys {
+    presence: "presencePenalty",
+    frequency: "frequencyPenalty",
+};
+
 pub struct ProviderBase {
     pub api_key: String,
     pub base_url: String,
@@ -732,6 +806,52 @@ impl ProviderBase {
         }
     }
 
+    /// 惩罚参数的合法化：`None` / 非有限值 / `0.0` 一律视为"不发送"。
+    ///
+    /// `0.0` 与"不发送"在语义上完全等价（都是服务端默认的 0 惩罚），
+    /// 而省略字段能避免严格校验的服务端因未知参数报 400。
+    fn sanitize_penalty(value: Option<f64>) -> Option<f64> {
+        value.filter(|v| v.is_finite() && *v != 0.0)
+    }
+
+    /// 当前生效的存在惩罚（`None` = 本次请求不发送该字段）。
+    pub fn effective_presence_penalty(&self) -> Option<f64> {
+        Self::sanitize_penalty(ProviderCallOptions::current().presence_penalty)
+    }
+
+    /// 当前生效的频率惩罚（`None` = 本次请求不发送该字段）。
+    pub fn effective_frequency_penalty(&self) -> Option<f64> {
+        Self::sanitize_penalty(ProviderCallOptions::current().frequency_penalty)
+    }
+
+    /// 把惩罚参数写进一个 JSON 对象（键名由 `keys` 决定）。
+    ///
+    /// 拆成"对象版"是为了让 Gemini 复用：它的采样参数在嵌套的
+    /// `generationConfig` 里，且键名是驼峰，无法走顶层版。
+    pub fn apply_sampling_penalties_to(
+        &self,
+        obj: &mut serde_json::Map<String, serde_json::Value>,
+        keys: PenaltyKeys,
+    ) {
+        if let Some(p) = self.effective_presence_penalty() {
+            obj.insert(keys.presence.to_string(), serde_json::json!(p));
+        }
+        if let Some(f) = self.effective_frequency_penalty() {
+            obj.insert(keys.frequency.to_string(), serde_json::json!(f));
+        }
+    }
+
+    /// 把惩罚参数写进请求体顶层（OpenAI Chat Completions 家族的形状）。
+    ///
+    /// **只在真正支持该参数的 provider 里调用**。Responses API（`/responses`）
+    /// 与 Anthropic Messages 都不接受这两个字段，写入会被服务端以 400 拒绝，
+    /// 因此那两条路径必须保持不调用——这不是遗漏，见 `ProviderCallOptions` 的文档。
+    pub fn apply_sampling_penalties(&self, body: &mut serde_json::Value, keys: PenaltyKeys) {
+        if let Some(obj) = body.as_object_mut() {
+            self.apply_sampling_penalties_to(obj, keys);
+        }
+    }
+
     /// 设置推理偏好运行时覆盖（None 表示不干预，交由服务端默认）。
     pub fn set_reasoning_pref(&self, pref: Option<ReasoningPreference>) {
         *self.reasoning_pref.write() = pref;
@@ -836,5 +956,94 @@ impl ProviderBase {
             successful_calls: breaker.success_count as u64,
             failed_calls: breaker.failure_count as u64,
         }
+    }
+}
+
+#[cfg(test)]
+mod sampling_penalty_tests {
+    use super::*;
+
+    fn test_base() -> ProviderBase {
+        ProviderBase::new(
+            "test-key".to_string(),
+            "https://example.invalid/v1".to_string(),
+            "test-model".to_string(),
+            0.7,
+            256,
+        )
+    }
+
+    /// `0.0` / 非有限值必须折叠成"不发送"。
+    ///
+    /// 这不是美化：Responses API 对未知参数直接 400，而"发送 0.0"与
+    /// "不发送"在语义上完全等价（服务端默认就是 0 惩罚），所以没有任何理由冒险。
+    #[test]
+    fn sanitize_penalty_folds_zero_and_non_finite() {
+        assert_eq!(ProviderBase::sanitize_penalty(None), None);
+        assert_eq!(ProviderBase::sanitize_penalty(Some(0.0)), None);
+        assert_eq!(ProviderBase::sanitize_penalty(Some(f64::NAN)), None);
+        assert_eq!(ProviderBase::sanitize_penalty(Some(f64::INFINITY)), None);
+        assert_eq!(ProviderBase::sanitize_penalty(Some(0.3)), Some(0.3));
+        assert_eq!(ProviderBase::sanitize_penalty(Some(-0.5)), Some(-0.5));
+    }
+
+    /// 作用域外不得写入任何惩罚字段——provider 默认值来自请求级作用域，
+    /// 不能因为进程里别的请求设过就泄漏进来。
+    #[test]
+    fn penalties_absent_outside_call_scope() {
+        let base = test_base();
+        let mut body = serde_json::json!({"model": "test-model"});
+        base.apply_sampling_penalties(&mut body, PENALTY_KEYS_SNAKE);
+        assert!(body.get("presence_penalty").is_none(), "无作用域时不应写入 presence_penalty");
+        assert!(body.get("frequency_penalty").is_none(), "无作用域时不应写入 frequency_penalty");
+        assert_eq!(base.effective_presence_penalty(), None);
+        assert_eq!(base.effective_frequency_penalty(), None);
+    }
+
+    /// 作用域内写入，且蛇形 / 驼峰两套键名各自正确（Gemini 走嵌套驼峰）。
+    #[tokio::test]
+    async fn penalties_written_inside_scope_with_per_protocol_keys() {
+        let base = test_base();
+        let options = ProviderCallOptions {
+            presence_penalty: Some(0.3),
+            frequency_penalty: Some(0.2),
+            ..ProviderCallOptions::default()
+        };
+        scope_provider_call(options, async {
+            let mut openai_style = serde_json::json!({"model": "m"});
+            base.apply_sampling_penalties(&mut openai_style, PENALTY_KEYS_SNAKE);
+            assert_eq!(openai_style["presence_penalty"], serde_json::json!(0.3));
+            assert_eq!(openai_style["frequency_penalty"], serde_json::json!(0.2));
+
+            let mut gemini_style = serde_json::json!({"generationConfig": {}});
+            if let Some(cfg) = gemini_style
+                .get_mut("generationConfig")
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                base.apply_sampling_penalties_to(cfg, PENALTY_KEYS_CAMEL);
+            }
+            assert_eq!(gemini_style["generationConfig"]["presencePenalty"], serde_json::json!(0.3));
+            assert_eq!(gemini_style["generationConfig"]["frequencyPenalty"], serde_json::json!(0.2));
+            // 驼峰路径不得污染顶层（反之亦然）
+            assert!(gemini_style.get("presence_penalty").is_none());
+        })
+        .await;
+    }
+
+    /// 作用域内显式传 0.0 等价于"本请求关闭惩罚"，请求体保持干净。
+    #[tokio::test]
+    async fn zero_penalty_inside_scope_omits_field() {
+        let base = test_base();
+        let options = ProviderCallOptions {
+            presence_penalty: Some(0.0),
+            frequency_penalty: Some(0.0),
+            ..ProviderCallOptions::default()
+        };
+        scope_provider_call(options, async {
+            let mut body = serde_json::json!({});
+            base.apply_sampling_penalties(&mut body, PENALTY_KEYS_SNAKE);
+            assert_eq!(body, serde_json::json!({}), "0.0 必须折叠为不发送");
+        })
+        .await;
     }
 }

@@ -382,6 +382,34 @@ impl OllamaServiceManager {
         false
     }
 
+    /// 预热嵌入模型并延长驻留时间。失败不影响服务可用性，由调用方决定是否降级。
+    pub async fn warm_embedding_model(model: &str) -> VivianResult<()> {
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .timeout(std::time::Duration::from_secs(60))
+            .build()?;
+        let response = client
+            .post("http://127.0.0.1:11434/api/embed")
+            .json(&serde_json::json!({
+                "model": model,
+                "input": "warmup",
+                "keep_alive": "30m"
+            }))
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let detail = response.text().await.unwrap_or_default();
+            return Err(VivianError::Provider(format!(
+                "Ollama 嵌入预热 HTTP {}: {}",
+                status.as_u16(),
+                detail.chars().take(300).collect::<String>()
+            )));
+        }
+        Ok(())
+    }
+
     /// 代理相关环境变量：子进程拉取模型时可能继承父进程代理设置，
     /// 导致本地代理（如 Clash/V2Ray）未运行时无法访问 registry.ollama.ai
     const PROXY_ENV_VARS: [&str; 6] = [

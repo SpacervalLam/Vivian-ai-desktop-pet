@@ -84,12 +84,20 @@ pub fn get_scheduler() -> Option<Arc<Scheduler>> {
 }
 
 /// emit scheduler:changed 事件（供 scheduler_tools 调用）
+///
+/// 归属由任务自身的 `char_id` 决定（取消/暂停/恢复时任务仍在调度器中）：
+/// 空串表示无归属（如用户在 Todo 窗口手动创建），前端据此不弹 toast。
 pub fn emit_scheduler_changed(action: &str, task_id: &str) {
+    let character_id = get_scheduler()
+        .and_then(|s| s.get_task(task_id))
+        .map(|t| t.char_id.clone())
+        .unwrap_or_default();
     emit_event(
         "scheduler:changed",
         &json!({
             "action": action,
             "task_id": task_id,
+            "character_id": character_id,
             "source": "tool",
         }),
     );
@@ -195,12 +203,12 @@ fn parse_due_date(due_date: &str) -> Option<f64> {
 }
 
 /// 为待办创建/更新定时提醒，返回 reminder_id
-fn schedule_reminder_for(title: &str, due_date: &str) -> Option<String> {
+fn schedule_reminder_for(title: &str, due_date: &str, character_id: &str) -> Option<String> {
     let ts = parse_due_date(due_date)?;
     let scheduler = SCHEDULER.read().clone()?;
     let msg = format!("待办提醒：{}", title);
     let rid = scheduler.schedule_reminder(msg.clone(), ts);
-    // emit scheduler:changed 事件（action=added）
+    // emit scheduler:changed 事件（action=added），归属与待办操作发起方一致
     emit_event(
         "scheduler:changed",
         &json!({
@@ -211,6 +219,7 @@ fn schedule_reminder_for(title: &str, due_date: &str) -> Option<String> {
                 "scheduled_time": ts,
                 "message": msg,
             },
+            "character_id": character_id,
             "source": "todo",
         }),
     );
@@ -227,12 +236,16 @@ fn cancel_reminder(reminder_id: &Option<String>) {
 }
 
 /// emit todo:changed 事件
-fn emit_todo_changed(action: &str, item: &TodoItem) {
+///
+/// `character_id` 为待办操作发起方的角色归属：LLM 工具调用路径传入发起角色，
+/// UI 窗口手动操作传入空串（前端据此不弹 toast）。
+fn emit_todo_changed(action: &str, item: &TodoItem, character_id: &str) {
     emit_event(
         "todo:changed",
         &json!({
             "action": action,
             "item": item,
+            "character_id": character_id,
         }),
     );
 }
@@ -248,11 +261,12 @@ pub fn add_todo_item(
     priority: u32,
     due_date: Option<&str>,
     event_time: Option<&str>,
+    character_id: &str,
 ) -> TodoItem {
     let mut reminder_id = None;
     if let Some(dd) = due_date {
         if !dd.is_empty() {
-            reminder_id = schedule_reminder_for(title, dd);
+            reminder_id = schedule_reminder_for(title, dd, character_id);
         }
     }
 
@@ -275,7 +289,7 @@ pub fn add_todo_item(
         list.saved_at = chrono::Local::now().timestamp_millis() as f64;
     }
     save_todo_list();
-    emit_todo_changed("added", &item);
+    emit_todo_changed("added", &item, character_id);
     item
 }
 
@@ -290,6 +304,7 @@ pub fn update_todo_item(
     priority: Option<u32>,
     due_date: Option<&str>,
     event_time: Option<&str>,
+    character_id: &str,
 ) -> Result<TodoItem, String> {
     let mut list = TODO_LIST.write();
     let found = list.items.iter_mut().find(|it| it.id == id);
@@ -320,7 +335,7 @@ pub fn update_todo_item(
                     it.reminder_id = None;
                     // 创建新 reminder
                     if let Some(ref nd) = new_due {
-                        it.reminder_id = schedule_reminder_for(&it.title, nd);
+                        it.reminder_id = schedule_reminder_for(&it.title, nd, character_id);
                     }
                     it.due_date = new_due;
                 }
@@ -328,7 +343,7 @@ pub fn update_todo_item(
             let updated = it.clone();
             drop(list);
             save_todo_list();
-            emit_todo_changed("updated", &updated);
+            emit_todo_changed("updated", &updated, character_id);
             Ok(updated)
         }
         None => Err(format!("未找到 id={}", id)),
@@ -336,7 +351,7 @@ pub fn update_todo_item(
 }
 
 /// 标记待办完成（取消关联的 reminder）
-pub fn complete_todo_item(id: &str) -> Result<TodoItem, String> {
+pub fn complete_todo_item(id: &str, character_id: &str) -> Result<TodoItem, String> {
     let mut list = TODO_LIST.write();
     let found = list.items.iter_mut().find(|it| it.id == id);
     match found {
@@ -348,7 +363,7 @@ pub fn complete_todo_item(id: &str) -> Result<TodoItem, String> {
             let updated = it.clone();
             drop(list);
             save_todo_list();
-            emit_todo_changed("completed", &updated);
+            emit_todo_changed("completed", &updated, character_id);
             Ok(updated)
         }
         None => Err(format!("未找到 id={}", id)),
@@ -356,7 +371,7 @@ pub fn complete_todo_item(id: &str) -> Result<TodoItem, String> {
 }
 
 /// 删除待办（取消关联的 reminder）
-pub fn delete_todo_item(id: &str) -> bool {
+pub fn delete_todo_item(id: &str, character_id: &str) -> bool {
     let mut list = TODO_LIST.write();
     let before = list.items.len();
     let removed_item = list.items.iter().find(|it| it.id == id).cloned();
@@ -370,7 +385,11 @@ pub fn delete_todo_item(id: &str) -> bool {
         save_todo_list();
         emit_event(
             "todo:changed",
-            &json!({ "action": "deleted", "item": { "id": id } }),
+            &json!({
+                "action": "deleted",
+                "item": { "id": id },
+                "character_id": character_id,
+            }),
         );
     }
     removed
@@ -401,7 +420,7 @@ pub fn list_todo_items(include_completed: bool, priority_filter: Option<u32>) ->
 /// `items` 为新的待办列表（保留传入的 id 若存在，否则生成新 id）。
 /// 旧的未完成项被移除；已完成项保留历史但不在新列表（传入方应携带完整列表）。
 /// 返回替换后的完整待办列表。
-pub fn replace_todo_items(items: Vec<TodoItem>) -> Vec<TodoItem> {
+pub fn replace_todo_items(items: Vec<TodoItem>, character_id: &str) -> Vec<TodoItem> {
     let mut list = TODO_LIST.write();
 
     // 取消被移除项的关联提醒（保留项无需动）
@@ -438,7 +457,11 @@ pub fn replace_todo_items(items: Vec<TodoItem>) -> Vec<TodoItem> {
     // 事件：整表替换（前端据此刷新）
     emit_event(
         "todo:changed",
-        &json!({ "action": "replaced", "items": normalized }),
+        &json!({
+            "action": "replaced",
+            "items": normalized,
+            "character_id": character_id,
+        }),
     );
     normalized
 }
@@ -565,10 +588,14 @@ pub async fn handle_task_trigger(task: ScheduledTask, tool_system: Arc<ToolSyste
                 }),
             );
 
-            // 3. 刷新前端任务列表
+            // 3. 刷新前端任务列表（归属=创建该任务的角色）
             emit_event(
                 "scheduler:changed",
-                &json!({ "action": "triggered", "task": task }),
+                &json!({
+                    "action": "triggered",
+                    "task": task,
+                    "character_id": task.char_id,
+                }),
             );
         }
         TaskType::ToolCall => {
@@ -620,7 +647,11 @@ pub async fn handle_task_trigger(task: ScheduledTask, tool_system: Arc<ToolSyste
 
             emit_event(
                 "scheduler:changed",
-                &json!({ "action": "triggered", "task": task }),
+                &json!({
+                    "action": "triggered",
+                    "task": task,
+                    "character_id": task.char_id,
+                }),
             );
         }
     }
@@ -722,7 +753,7 @@ impl Tool for AddTodoTool {
         PermissionResult::allow()
     }
 
-    async fn call(&self, args: Value, _ctx: &ToolUseContext) -> ToolResult {
+    async fn call(&self, args: Value, ctx: &ToolUseContext) -> ToolResult {
         let title = args.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
         let description = args
             .get("description")
@@ -739,6 +770,7 @@ impl Tool for AddTodoTool {
             priority,
             due_date.as_deref(),
             event_time.as_deref(),
+            &ctx.char_id,
         );
 
         // due_date 已提供但 reminder_id 为 None：说明指定时间已过，提醒被跳过
@@ -997,9 +1029,9 @@ impl Tool for CompleteTodoTool {
         PermissionResult::allow()
     }
 
-    async fn call(&self, args: Value, _ctx: &ToolUseContext) -> ToolResult {
+    async fn call(&self, args: Value, ctx: &ToolUseContext) -> ToolResult {
         let id = args.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        match complete_todo_item(&id) {
+        match complete_todo_item(&id, &ctx.char_id) {
             Ok(item) => ToolResult::standard_success(
                 "已完成待办",
                 Some(json!({ "id": id, "title": item.title })),
@@ -1133,7 +1165,7 @@ impl Tool for ManageTodoTool {
         }
     }
 
-    async fn call(&self, args: Value, _ctx: &ToolUseContext) -> ToolResult {
+    async fn call(&self, args: Value, ctx: &ToolUseContext) -> ToolResult {
         let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("");
         let id = args.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
 
@@ -1152,6 +1184,7 @@ impl Tool for ManageTodoTool {
                     priority,
                     due_date.as_deref(),
                     event_time.as_deref(),
+                    &ctx.char_id,
                 ) {
                     Ok(item) => ToolResult::standard_success(
                         "已更新待办",
@@ -1161,7 +1194,7 @@ impl Tool for ManageTodoTool {
                 }
             }
             "delete" => {
-                if delete_todo_item(&id) {
+                if delete_todo_item(&id, &ctx.char_id) {
                     ToolResult::standard_success("已删除待办", Some(json!({ "id": id })))
                 } else {
                     ToolResult::standard_error(
@@ -1334,7 +1367,7 @@ impl Tool for UpdateTodoTool {
         PermissionResult::allow()
     }
 
-    async fn call(&self, args: Value, _ctx: &ToolUseContext) -> ToolResult {
+    async fn call(&self, args: Value, ctx: &ToolUseContext) -> ToolResult {
         let items: Vec<TodoItem> = args
             .get("items")
             .and_then(|v| v.as_array())
@@ -1352,7 +1385,7 @@ impl Tool for UpdateTodoTool {
                 let mut reminder_id = None;
                 if let Some(ref dd) = due_date {
                     if !dd.is_empty() {
-                        reminder_id = schedule_reminder_for(&title, dd);
+                        reminder_id = schedule_reminder_for(&title, dd, &ctx.char_id);
                     }
                 }
                 TodoItem {
@@ -1380,7 +1413,7 @@ impl Tool for UpdateTodoTool {
             return ToolResult::standard_error("items 不能为空", Some("至少保留一项待办"), None);
         }
 
-        let replaced = replace_todo_items(items);
+        let replaced = replace_todo_items(items, &ctx.char_id);
         ToolResult::standard_success(
             &format!("待办列表已整表替换，共 {} 条", replaced.len()),
             Some(json!({ "items": replaced })),

@@ -33,6 +33,58 @@ pub struct EmbeddingModelSpec {
 
 /// 内置模型注册表（按来源分组）
 const CLOUD_MODELS: &[EmbeddingModelSpec] = &[
+    // 中国大陆首选：百炼 OpenAI 兼容接口，中文/多语/代码检索兼顾。
+    EmbeddingModelSpec {
+        id: "qwen3.7-text-embedding",
+        dimension: 1024,
+        source: EmbeddingSource::Cloud,
+        display_name: "Alibaba Cloud qwen3.7-text-embedding (1024 default)",
+    },
+    EmbeddingModelSpec {
+        id: "qwen3.7-text-embedding-flash",
+        dimension: 1024,
+        source: EmbeddingSource::Cloud,
+        display_name: "Alibaba Cloud qwen3.7-text-embedding-flash (1024 default)",
+    },
+    EmbeddingModelSpec {
+        id: "text-embedding-v4",
+        dimension: 1024,
+        source: EmbeddingSource::Cloud,
+        display_name: "Alibaba Cloud text-embedding-v4 (1024 default)",
+    },
+    // 国际服务首选：Voyage 4 系列使用 OpenAI 风格 /v1/embeddings 响应。
+    EmbeddingModelSpec {
+        id: "voyage-4-large",
+        dimension: 1024,
+        source: EmbeddingSource::Cloud,
+        display_name: "Voyage AI voyage-4-large (1024 default)",
+    },
+    EmbeddingModelSpec {
+        id: "voyage-4",
+        dimension: 1024,
+        source: EmbeddingSource::Cloud,
+        display_name: "Voyage AI voyage-4 (1024 default)",
+    },
+    EmbeddingModelSpec {
+        id: "voyage-4-lite",
+        dimension: 1024,
+        source: EmbeddingSource::Cloud,
+        display_name: "Voyage AI voyage-4-lite (1024 default)",
+    },
+    // 通用 OpenAI 生态选项。
+    EmbeddingModelSpec {
+        id: "text-embedding-3-small",
+        dimension: 1536,
+        source: EmbeddingSource::Cloud,
+        display_name: "OpenAI text-embedding-3-small (1536)",
+    },
+    EmbeddingModelSpec {
+        id: "text-embedding-3-large",
+        dimension: 3072,
+        source: EmbeddingSource::Cloud,
+        display_name: "OpenAI text-embedding-3-large (3072)",
+    },
+    // 第三方托管的开源 BGE 模型；保留兼容，不再作为默认推荐。
     EmbeddingModelSpec {
         id: "BAAI/bge-m3",
         dimension: 1024,
@@ -50,18 +102,6 @@ const CLOUD_MODELS: &[EmbeddingModelSpec] = &[
         dimension: 512,
         source: EmbeddingSource::Cloud,
         display_name: "BAAI/bge-small-zh-v1.5 (512)",
-    },
-    EmbeddingModelSpec {
-        id: "text-embedding-3-small",
-        dimension: 1536,
-        source: EmbeddingSource::Cloud,
-        display_name: "OpenAI text-embedding-3-small (1536)",
-    },
-    EmbeddingModelSpec {
-        id: "text-embedding-3-large",
-        dimension: 3072,
-        source: EmbeddingSource::Cloud,
-        display_name: "OpenAI text-embedding-3-large (3072)",
     },
 ];
 
@@ -103,16 +143,17 @@ pub fn lookup(id: &str) -> Option<&'static EmbeddingModelSpec> {
 
 /// 解析某模型的真实维度；未知模型返回 `None`（由调用方回退到配置值）
 pub fn resolve_dimension(id: &str) -> Option<usize> {
-    lookup(id).map(|s| s.dimension)
+    lookup(id).map(|s| s.dimension).or_else(|| {
+        crate::plugins::load_embedding_provider_presets()
+            .into_iter()
+            .find(|p| p.model == id.trim())
+            .map(|p| p.dimension)
+    })
 }
 
-/// 返回全部已知模型元数据（供前端渲染候选项）
+/// 返回核心内置的本地模型元数据。云端候选由 llm-providers 插件贡献。
 pub fn all_models() -> Vec<EmbeddingModelSpec> {
-    CLOUD_MODELS
-        .iter()
-        .chain(LOCAL_MODELS.iter())
-        .cloned()
-        .collect()
+    LOCAL_MODELS.to_vec()
 }
 
 /// 对配置中的维度做校正：
@@ -149,6 +190,8 @@ mod tests {
 
     #[test]
     fn lookup_known_models() {
+        assert_eq!(lookup("qwen3.7-text-embedding").map(|s| s.dimension), Some(1024));
+        assert_eq!(lookup("voyage-4").map(|s| s.dimension), Some(1024));
         assert_eq!(lookup("bge-m3").map(|s| s.dimension), Some(1024));
         assert_eq!(lookup("nomic-embed-text").map(|s| s.dimension), Some(768));
         assert_eq!(

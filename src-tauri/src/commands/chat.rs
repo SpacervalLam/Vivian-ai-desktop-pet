@@ -1648,7 +1648,8 @@ pub async fn send_image_message(
     ];
 
     let llm_result = router
-        .generate(LLMRequest::new("vision_describe", messages))
+        .generate(LLMRequest::new("vision_describe", messages)
+            .with_character_id(char_id.clone()))
         .await;
 
     let (description, reply) = match llm_result {

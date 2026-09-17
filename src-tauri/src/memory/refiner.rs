@@ -88,7 +88,8 @@ pub async fn llm_refine(
         target_n
     ));
     let messages = vec![system, user];
-    let resp = router.generate(LLMRequest::new("consolidation", messages)).await?;
+    let resp = router.generate(LLMRequest::new("consolidation", messages)
+        .with_character_id(char_id.to_string())).await?;
     let selected_ids = parse_selected_ids(&resp, candidates.len());
 
     let mut refined: Vec<MemoryItem> = Vec::with_capacity(target_n);

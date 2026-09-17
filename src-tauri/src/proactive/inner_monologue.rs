@@ -144,7 +144,8 @@ impl InnerMonologueGenerator {
             .router
             .generate(
                 LLMRequest::new("inner_monologue", messages)
-                    .with_json_schema(monologue_response_schema()),
+                    .with_json_schema(monologue_response_schema())
+                    .with_character_id(char_id.to_string()),
             )
             .await
         {
@@ -198,7 +199,8 @@ impl InnerMonologueGenerator {
         match self
             .router
             .generate(
-                LLMRequest::new("inner_monologue", messages).with_search(true),
+                LLMRequest::new("inner_monologue", messages).with_search(true)
+                    .with_character_id(char_id.to_string()),
             )
             .await
         {
@@ -465,6 +467,12 @@ impl InnerMonologueGenerator {
                 memory: "## A small thing I remember from recently",
                 interest: "## Info I actually obtained via search earlier (just glanced at, might not think about)",
                 accumulated_thoughts: "## Thoughts that flashed through my head just now (with timestamps)",
+                environment: "## Around me right now",
+                env_music: "- Music playing: ",
+                env_foreground: "- The user is currently using: ",
+                env_system: "- System load: ",
+                env_muted: "- The system volume is muted",
+                env_offline: "- The network is currently disconnected",
                 closing: "\nWrite a thought that naturally pops into your head right now.",
             },
             "ja" => UserPromptLabels {
@@ -482,6 +490,12 @@ impl InnerMonologueGenerator {
                 memory: "## 最近覚えている小さなこと",
                 interest: "## 前に検索で実際に取得した情報（ちらっと見ただけ、思いつかないかも）",
                 accumulated_thoughts: "## さっき脳裏をよぎった考え（タイムスタンプ付き）",
+                environment: "## 今の周りの様子",
+                env_music: "- 流れている音楽：",
+                env_foreground: "- ユーザーが今使っているアプリ：",
+                env_system: "- システム負荷：",
+                env_muted: "- システム音量がミュートになっている",
+                env_offline: "- ネットワークが切断されている",
                 closing: "\n今、脳に自然に浮かんだ考えを書いて。",
             },
             _ => UserPromptLabels {
@@ -499,6 +513,12 @@ impl InnerMonologueGenerator {
                 memory: "## 最近记得的一点事",
                 interest: "## 你之前通过搜索实际获取的资讯（随便瞟到的，不一定会去想）",
                 accumulated_thoughts: "## 刚才脑子里闪过的念头（带时间戳）",
+                environment: "## 此刻的环境",
+                env_music: "- 正在放的音乐：",
+                env_foreground: "- 用户正在用的应用：",
+                env_system: "- 系统负载：",
+                env_muted: "- 系统音量被静音了",
+                env_offline: "- 网络当前断开了",
                 closing: "\n写一段此刻脑子里自然冒出来的想法吧。",
             },
         };
@@ -563,6 +583,86 @@ impl InnerMonologueGenerator {
                 }
             };
             lines.push(line);
+        }
+
+        // 环境实况（音乐 / 前台应用 / 负载 / 音量 / 网络）
+        //
+        // 这几项都是"她待在用户电脑里就能直接感知到"的事实，且特别适合内心独白
+        // （单曲循环了一下午、又在写代码、机器风扇起飞了……）。
+        // 此前只喂给主对话 prompt（`prompt_modules::with_world`），内心 OS 拿不到，
+        // 导致独白长期只在"时间 + 天气"上打转。
+        //
+        // 有选择地渲染：音乐 / 前台应用只要有就写；系统负载、静音、断网只在
+        // "值得一提"时出现，避免每篇独白都在念 CPU 数字。
+        {
+            let mut env_lines: Vec<String> = Vec::new();
+            if let Some(m) = &snap.music {
+                if !m.title.trim().is_empty() {
+                    let artist = if m.artist.trim().is_empty() {
+                        match lang_norm {
+                            "en" => "unknown artist",
+                            "ja" => "不明",
+                            _ => "未知歌手",
+                        }
+                    } else {
+                        m.artist.trim()
+                    };
+                    env_lines.push(format!(
+                        "{}{} — {} ({})",
+                        labels.env_music,
+                        m.title.trim(),
+                        artist,
+                        m.status.as_str()
+                    ));
+                }
+            }
+            if let Some(fw) = &snap.foreground_window {
+                let app = if fw.process.trim().is_empty() {
+                    fw.title.trim()
+                } else {
+                    fw.process.trim()
+                };
+                if !app.is_empty() {
+                    let title = fw.title.trim();
+                    env_lines.push(if title.is_empty() || title == app {
+                        format!("{}{}", labels.env_foreground, app)
+                    } else {
+                        format!("{}{}（{}）", labels.env_foreground, app, title)
+                    });
+                }
+            }
+            if let Some(s) = &snap.system {
+                if s.cpu_usage >= 60.0 || s.memory_usage_pct >= 85.0 {
+                    env_lines.push(match lang_norm {
+                        "en" => format!(
+                            "{}{:.0}% CPU, {:.0}% RAM",
+                            labels.env_system, s.cpu_usage, s.memory_usage_pct
+                        ),
+                        "ja" => format!(
+                            "{}{:.0}% CPU、メモリ {:.0}%",
+                            labels.env_system, s.cpu_usage, s.memory_usage_pct
+                        ),
+                        _ => format!(
+                            "{}{:.0}% CPU、内存 {:.0}%",
+                            labels.env_system, s.cpu_usage, s.memory_usage_pct
+                        ),
+                    });
+                }
+            }
+            if let Some(v) = &snap.volume {
+                if v.muted {
+                    env_lines.push(labels.env_muted.to_string());
+                }
+            }
+            if let Some(n) = &snap.network_status {
+                if !n.connected {
+                    env_lines.push(labels.env_offline.to_string());
+                }
+            }
+            if !env_lines.is_empty() {
+                lines.push(format!("\n{}", labels.environment));
+                lines.extend(env_lines);
+            }
         }
 
         lines.push(format!("\n{}", labels.feeling));
@@ -651,6 +751,13 @@ struct UserPromptLabels {
     memory: &'static str,
     interest: &'static str,
     accumulated_thoughts: &'static str,
+    /// 环境实况段标题（音乐 / 前台应用 / 负载 / 音量 / 网络）
+    environment: &'static str,
+    env_music: &'static str,
+    env_foreground: &'static str,
+    env_system: &'static str,
+    env_muted: &'static str,
+    env_offline: &'static str,
     closing: &'static str,
 }
 

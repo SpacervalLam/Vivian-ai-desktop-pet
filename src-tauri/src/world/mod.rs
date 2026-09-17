@@ -44,7 +44,7 @@ use crate::config::WorldConfig;
 
 pub use events::{WorldEvent, WorldEventDetector, WorldEventKind};
 pub use foreground_window::{get_foreground_window, subscribe_foreground_events, ForegroundWindowSnapshot};
-pub use music::{MusicSnapshot, MusicSource, PlaybackStatus};
+pub use music::{MusicSnapshot, MusicSource, PlaybackAction, PlaybackStatus};
 pub use network_status::{get_network_status, NetworkStatusSnapshot};
 pub use network_watch::subscribe_network_events;
 pub use system_metrics::{ProcessMemoryAgg, SystemMetrics, SystemMetricsCollector};

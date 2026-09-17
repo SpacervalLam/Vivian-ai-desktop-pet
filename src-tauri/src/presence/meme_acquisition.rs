@@ -506,7 +506,8 @@ async fn generate_meme_keywords(
     ];
 
     let resp = router
-        .generate(LLMRequest::new("knowledge_acquisition", messages))
+        .generate(LLMRequest::new("knowledge_acquisition", messages)
+            .with_character_id(char_id.to_string()))
         .await
         .map_err(|e| e.to_string())?;
 
@@ -585,7 +586,8 @@ async fn summarize_meme_results(
     ];
 
     let resp = router
-        .generate(LLMRequest::new("knowledge_acquisition", messages))
+        .generate(LLMRequest::new("knowledge_acquisition", messages)
+            .with_character_id(char_id.to_string()))
         .await
         .map_err(|e| e.to_string())?;
 

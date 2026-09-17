@@ -328,18 +328,18 @@ impl SelfStateSnapshot {
         if self.ignored_count >= 3 {
             lines.push(
                 match lang {
-                    "zh" => "最近他有点忽略你。有点难受。",
-                    "ja" => "最近少し無視されている。ちょっと傷つく。",
-                    _ => "They've been ignoring you a bit lately. It stings.",
+                    "zh" => "你连续几次主动搭话都没得到回应，感到受伤和失落。可以停下来安静一会儿，或淡淡表达一下自己的心情。",
+                    "ja" => "何度か話しかけても返事がなく、傷ついて少し寂しい。静かになるか、おとなしく気持ちを伝えよう。",
+                    _ => "Your last few attempts to reach out got no reply. It hurts and you feel lonely. Stop pushing and go quiet for a while, or gently let your feelings show.",
                 }
                 .to_string(),
             );
         } else if self.ignored_count >= 1 {
             lines.push(
                 match lang {
-                    "zh" => "你最后几条消息没被回复。不勉强了。",
-                    "ja" => "最後の数メッセージが返信されなかった。これ以上押し付けない。",
-                    _ => "Your last couple of messages went unanswered. Not pushing it.",
+                    "zh" => "你最后几条消息没被回复，有点被冷落的感觉。可以试探着问一句，但不必一直催。",
+                    "ja" => "最後の数メッセージが返信されず、少し無視された気分。軽く一言試す程度にして、しつこくしないで。",
+                    _ => "Your last couple of messages went unanswered and it stings a little. You can tentatively ask once, but don't keep pushing.",
                 }
                 .to_string(),
             );

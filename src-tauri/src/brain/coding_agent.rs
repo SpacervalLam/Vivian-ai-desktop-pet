@@ -84,6 +84,9 @@ pub const CODING_TOOLS: &[&str] = &[
     "search_skill",
     "create_tool",
     "create_plugin",
+    "delete_plugin",
+    "list_provider_presets",
+    "manage_provider_preset",
 ];
 
 /// Code 模式单次程序的最大步骤数。
@@ -124,6 +127,25 @@ const PLAN_MODE_POLICY: &str = "\n# 计划模式（当前已开启）\n\
     你现在处于**计划模式**：先用只读研究（list_dir / grep_search / read_file）理解问题并制定方案。\
     输出方案后停下来等待用户批准（用户会回应「批准」或执行 /plan approve）——在方案得到批准之前，\
     **不要修改任何文件，不要执行可能改变状态的命令**。方案说明要包含步骤与预期改动，一次输出完整方案，不要边做边问。";
+
+/// 范围纪律（防「悄悄把活干小」）：coding / minimal 模式共用。
+///
+/// 模型最常见的失手不是写错代码，而是**交付缩水**——只做请求里最省事的那部分、
+/// 碰到一个障碍就宣布 blocked、把没做的部分在总结里轻描淡写地略过。
+/// 这段把三件事讲死：不许缩小范围、blocked 有准入门槛、收尾要逐条对照原始请求。
+/// （code 模式是「一次性编排成程序」，没有 blocked 概念，它那边只取范围那一条。）
+const SCOPE_DISCIPLINE: &str = "\n\n# 范围纪律（不要缩小交付）\n\
+    - **不要擅自缩小范围**：用户请求里的每一项都要落实。做不到、不该做、或你判断可以延后的，\
+    在总结里**点名说明是哪一项、为什么**——不要默默略过，也不要假装全做完了。\
+    宁可交一半并说清楚，也不要交一个看起来完整、实则缺项的结果。\n\
+    - **不许把「简化版」当交付**：不要用「先这样，之后再补」打发一个现在就能做完的需求。\
+    确实需要分期时，明确说出分期点和剩余部分。\n\
+    - **blocked 有准入门槛**：连续遇到 3 个**真实**阻碍（有具体报错/证据的失败，\
+    而不是「不确定」「可能有问题」「需要更多信息」这类空泛顾虑）才允许判定为 blocked。\
+    遇到 1 个错误先换思路继续——换个命令、换条路径、绕开或先修根因——\
+    不要第一次失败就停下来汇报。\n\
+    - **收尾自检**：宣布完成之前，把原始请求逐条过一遍，每条都要对得上具体的文件改动、\
+    命令输出或明确结论。对不上的条目，要么现在补做，要么在总结里单列成「未完成」。";
 
 /// 按模式过滤工具集。
 fn tools_for_mode(mode: &str) -> Vec<&'static str> {
@@ -290,12 +312,30 @@ pub struct CodingStats {
     pub first_token_calls: u64,
 }
 
+/// 会话的附加工作区 —— 主工作区（[`CodingSession::working_directory`]）之外额外授权的目录。
+///
+/// 权限层本身支持一个会话注册多个工作目录（各自独立的只读标记与操作白名单），
+/// 这里把「主根 + 附加根」的集合固化到会话上，让多工作区随会话一起持久化。
+/// 主根仍然决定相对路径解析、项目记忆位置、终端 cwd 与提示词环境块；附加根只扩大可访问范围。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExtraWorkspace {
+    /// 规范化后的绝对路径
+    pub path: String,
+    /// 只读：拒绝写入与删除，读取不受影响
+    #[serde(default)]
+    pub read_only: bool,
+}
+
 /// 编程会话。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CodingSession {
     pub session_id: String,
     pub char_id: String,
+    /// 主工作区（空串表示「无工作区模式」：不绑定目录，文件操作走绝对路径）。
     pub working_directory: String,
+    /// 附加工作区：主工作区之外可访问的目录。旧会话反序列化时自动补齐为空。
+    #[serde(default)]
+    pub extra_workspaces: Vec<ExtraWorkspace>,
     pub title: String,
     /// 工作模式：standard / code / minimal（缺省 standard，旧数据兼容）
     #[serde(default = "default_mode")]
@@ -486,6 +526,21 @@ fn relativize_to_workspace(path: &str, working_directory: &str) -> String {
     path.to_string()
 }
 
+/// 工作区路径比较键：统一分隔符、去掉尾部斜杠；Windows 下忽略大小写。
+///
+/// 只用于「是不是同一个目录」的判断与去重，不重写用户传入的写法 —— 用户从目录选择器
+/// 拿到的路径原样存下来，避免展示层出现被改写过的路径。
+///
+/// 委派子 agent 时也用它比对「父会话是否真的拥有这个工作区」，所以是 pub。
+pub fn workspace_key(path: &str) -> String {
+    let normalized = path.trim().trim_end_matches(['/', '\\']).replace('/', "\\");
+    if cfg!(windows) {
+        normalized.to_lowercase()
+    } else {
+        normalized
+    }
+}
+
 /// 消息被从头部裁掉 `removed` 条后，按下标索引的会话元数据整体前移。
 ///
 /// 落在被裁区间内的条目直接丢弃（对应消息已经不在），其余下标减去 `removed`。
@@ -550,17 +605,33 @@ pub struct CodingWorkspace {
 /// 有效权限等级。
 pub const CODING_PERMISSIONS: &[&str] = &["read_only", "workspace_write", "full_access"];
 
-/// 沙箱确认回调：编程会话的工具执行恒放行沙箱层的"首次使用 / 前 N 次确认"。
+/// 沙箱确认回调：工具执行判定为「需要确认」时，由它裁决是否放行。
 ///
-/// 沙箱内置档案对 write_file/edit_file 设了 requires_confirmation，而会话式
-/// 编程场景下执行器拿到"需要确认"且无回调时会直接报错（SandboxConfirmationRequired），
-/// 连弹窗都没有。真正的边界由管线其余环节把守：
-/// 沙箱路径校验（限工作目录）+ 权限矩阵（read_only 拒绝写入）+ 破坏性命令黑名单。
-pub(crate) fn coding_sandbox_allow() -> Option<CanUseTool> {
-    static CB: once_cell::sync::Lazy<CanUseTool> = once_cell::sync::Lazy::new(|| {
-        Arc::new(|_tool_name: &str, _args: &serde_json::Value| true)
-    });
-    Some(Arc::clone(&*CB))
+/// 按键因素两维分三种形态：
+///
+/// 1. **有工作区** → 恒放行。路径校验（限工作区）才是真正的边界，沙箱层「首次使用 /
+///    前 N 次确认」再弹一次纯属重复打扰，所以这里直接放行。
+/// 2. **无工作区 + 有应答者（主 agent）** → 返回 `None`，执行器会走前端确认弹窗。
+///    无工作区就没有任何路径边界（`is_path_authorized` 恒真），写入必须真的经过用户同意。
+///    子 agent 在下面单独处理——它面前没有人。
+/// 3. **无工作区 + 无应答者（子 agent）** → 恒拒绝。弹窗发出去没人应答会把子任务挂死，
+///    所以让它快速失败，好把「我需要写文件」写进最终回复交回上层。
+///
+/// 注意：第 2 种形态下 shell 类工具（`run_command` 等 Shell 风险）同样会走到这里——
+/// 它们绕过路径校验，所以「无工作区时不许改文件」这条规则必须在这一层兜住，光靠路径校验不够。
+pub(crate) fn coding_sandbox_confirm(
+    has_workspace: bool,
+    has_responder: bool,
+) -> Option<CanUseTool> {
+    static ALLOW: once_cell::sync::Lazy<CanUseTool> =
+        once_cell::sync::Lazy::new(|| Arc::new(|_tool_name: &str, _args: &serde_json::Value| true));
+    static DENY: once_cell::sync::Lazy<CanUseTool> =
+        once_cell::sync::Lazy::new(|| Arc::new(|_tool_name: &str, _args: &serde_json::Value| false));
+    match (has_workspace, has_responder) {
+        (true, _) => Some(Arc::clone(&*ALLOW)),
+        (false, true) => None,
+        (false, false) => Some(Arc::clone(&*DENY)),
+    }
 }
 
 /// 有效推理等级。
@@ -649,6 +720,7 @@ impl CodingAgentService {
             session_id: format!("code-{}", uuid::Uuid::new_v4().simple()),
             char_id: char_id.to_string(),
             working_directory: working_directory.to_string(),
+            extra_workspaces: Vec::new(),
             title: String::new(),
             mode: if valid_mode(mode) { mode.to_string() } else { default_mode() },
             permission: default_permission(),
@@ -743,6 +815,97 @@ impl CodingAgentService {
         }
     }
 
+    /// 挂载附加工作区（目录必须存在；已挂载则更新其只读标记）。运行中拒绝。
+    ///
+    /// 主工作区与附加工作区取并集作为可访问范围；主工作区本身也是「已在授权范围内」，
+    /// 重复挂主工作区直接返回错误，避免同一目录出现两份互相矛盾的权限记录。
+    pub fn add_workspace(
+        &self,
+        session_id: &str,
+        path: &str,
+        read_only: bool,
+    ) -> Result<Vec<ExtraWorkspace>, String> {
+        let path = path.trim();
+        if path.is_empty() {
+            return Err("工作区路径不能为空".into());
+        }
+        if !std::path::Path::new(path).is_dir() {
+            return Err(format!("工作区不存在: {path}"));
+        }
+        let key = workspace_key(path);
+        let mut guard = self.sessions.write();
+        match guard.get_mut(session_id) {
+            Some(s) if s.status != CodingStatus::Running => {
+                if workspace_key(&s.working_directory) == key {
+                    return Err("该目录已是会话的主工作区".into());
+                }
+                match s.extra_workspaces.iter_mut().find(|w| workspace_key(&w.path) == key) {
+                    Some(existing) => existing.read_only = read_only,
+                    None => s.extra_workspaces.push(ExtraWorkspace {
+                        path: path.to_string(),
+                        read_only,
+                    }),
+                }
+                let list = s.extra_workspaces.clone();
+                drop(guard);
+                self.persist();
+                Ok(list)
+            }
+            Some(_) => Err("会话正在运行，不能修改工作区".into()),
+            None => Err("会话不存在".into()),
+        }
+    }
+
+    /// 卸载附加工作区。运行中拒绝。
+    pub fn remove_workspace(
+        &self,
+        session_id: &str,
+        path: &str,
+    ) -> Result<Vec<ExtraWorkspace>, String> {
+        let key = workspace_key(path);
+        let mut guard = self.sessions.write();
+        match guard.get_mut(session_id) {
+            Some(s) if s.status != CodingStatus::Running => {
+                s.extra_workspaces.retain(|w| workspace_key(&w.path) != key);
+                let list = s.extra_workspaces.clone();
+                drop(guard);
+                self.persist();
+                Ok(list)
+            }
+            Some(_) => Err("会话正在运行，不能修改工作区".into()),
+            None => Err("会话不存在".into()),
+        }
+    }
+
+    /// 切换附加工作区的只读标记（对主工作区无效，主工作区的可写性由访问级别决定）。
+    pub fn set_workspace_read_only(
+        &self,
+        session_id: &str,
+        path: &str,
+        read_only: bool,
+    ) -> Result<Vec<ExtraWorkspace>, String> {
+        let key = workspace_key(path);
+        let mut guard = self.sessions.write();
+        match guard.get_mut(session_id) {
+            Some(s) if s.status != CodingStatus::Running => {
+                let Some(target) = s
+                    .extra_workspaces
+                    .iter_mut()
+                    .find(|w| workspace_key(&w.path) == key)
+                else {
+                    return Err(format!("未挂载该工作区: {path}"));
+                };
+                target.read_only = read_only;
+                let list = s.extra_workspaces.clone();
+                drop(guard);
+                self.persist();
+                Ok(list)
+            }
+            Some(_) => Err("会话正在运行，不能修改工作区".into()),
+            None => Err("会话不存在".into()),
+        }
+    }
+
     /// 设置会话权限等级（运行中拒绝）。
     pub fn set_permission(&self, session_id: &str, permission: &str) -> Result<(), String> {
         if !CODING_PERMISSIONS.contains(&permission) {
@@ -831,6 +994,7 @@ impl CodingAgentService {
             (s.clone(), slice)
         };
         let mut fork = self.create_session(&base.char_id, &base.working_directory, &base.mode);
+        fork.extra_workspaces = base.extra_workspaces.clone();
         fork.permission = base.permission.clone();
         fork.model_id = base.model_id.clone();
         fork.reasoning_level = base.reasoning_level.clone();
@@ -842,9 +1006,15 @@ impl CodingAgentService {
     }
 
     /// 删除会话。
+    ///
+    /// 与取消一样要回收会话名下的 pending 状态：pending 提问会让仍在 `await`
+    /// 的工具永久挂住，未转告的完成报告则会在会话消失后仍被陪伴角色提起。
     pub fn delete_session(&self, session_id: &str) -> bool {
         let removed = self.sessions.write().remove(session_id).is_some();
         if removed {
+            crate::brain::work_question::global_work_question_registry()
+                .cancel_session(session_id);
+            crate::brain::work_notices::global().drop_session(session_id);
             self.persist();
         }
         removed
@@ -1013,6 +1183,8 @@ impl CodingAgentService {
             crate::brain::work_question::global_work_question_registry()
                 .cancel_session(session_id);
             crate::brain::work_jobs::global_work_job_registry().cancel_session(session_id);
+            // 会话已取消，还没转告给用户的完成报告不该再被提起
+            crate::brain::work_notices::global().drop_session(session_id);
         }
         canceled
     }
@@ -1249,14 +1421,18 @@ impl CodingAgentService {
                 );
             }
         }
-        // edit_file 的结果带 unified diff；write_file 没有 diff，以写入内容行数计为新增
+        // 工具结果统一是 standard_success 信封 `{ data: {...}, message, error, success }`，
+        // unified diff 在内层 `data` 里。此处曾直接读顶层 `result.data["diff"]`——
+        // 永远取不到，导致「变更」页对所有工具都显示「无 diff」。按真实层级取。
         let diff = result
             .data
             .as_ref()
+            .and_then(|d| d.get("data"))
             .and_then(|d| d.get("diff"))
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
+        // diff 缺失（结果被预算截断、内容无变化等）时退化为「以写入内容行数计为新增」
         let (added, removed) = if diff.trim().is_empty() {
             let lines = arguments
                 .get("content")
@@ -1371,7 +1547,7 @@ impl CodingAgentService {
         guided: bool,
     ) -> Result<(), String> {
         // 会话存在性 + 状态检查（Running 时拒绝新消息，前端按钮已禁用，这里兜底）
-        let working_directory = {
+        let (working_directory, extra_workspaces) = {
             let mut guard = self.sessions.write();
             let s = guard.get_mut(&session_id).ok_or("会话不存在")?;
             if s.status == CodingStatus::Running {
@@ -1386,10 +1562,10 @@ impl CodingAgentService {
                 let t: String = text.chars().take(30).collect();
                 s.title = t;
             }
-            s.working_directory.clone()
+            (s.working_directory.clone(), s.extra_workspaces.clone())
         };
-        // 文件引用：解析路径并读取内容（沙箱校验 + 数量/长度上限）
-        let resolved_refs = resolve_file_refs(&working_directory, file_refs);
+        // 文件引用：解析路径并读取内容（工作区归属校验 + 数量/长度上限）
+        let resolved_refs = resolve_file_refs(&working_directory, &extra_workspaces, file_refs);
 
         self.push_message(
             &session_id,
@@ -2041,12 +2217,13 @@ impl CodingAgentService {
         tool_system: Arc<ToolSystem>,
         max_rounds: usize,
     ) {
-        let (char_id, working_directory, mode, permission, reasoning_level) = {
+        let (char_id, working_directory, extra_workspaces, mode, permission, reasoning_level) = {
             let guard = self.sessions.read();
             match guard.get(session_id) {
                 Some(s) => (
                     s.char_id.clone(),
                     s.working_directory.clone(),
+                    s.extra_workspaces.clone(),
                     s.mode.clone(),
                     s.permission.clone(),
                     s.reasoning_level.clone(),
@@ -2064,6 +2241,7 @@ impl CodingAgentService {
                 &tool_system,
                 &char_id,
                 &working_directory,
+                &extra_workspaces,
                 &permission,
                 &reasoning_level,
             )
@@ -2082,7 +2260,11 @@ impl CodingAgentService {
             // 工作智能体标记：场景敏感工具据此取工作侧默认（如 web_search 默认 15 条）
             agent_kind: "work".to_string(),
             ..Default::default()
-        };
+        }
+        // 附加工作区随会话一起下传：沙箱与权限层据此放开这些目录的读写
+        .with_extra_working_directories(
+            extra_workspaces.iter().map(|w| (w.path.clone(), w.read_only)),
+        );
 
         // ── 轮次预算与循环保护 ──
         // 预算来自 config.tools.max_coding_rounds（命令层传入，0 = 无限：设置中填 -1）。
@@ -2219,7 +2401,8 @@ impl CodingAgentService {
                     ));
                 }
                 let mut attempt_req =
-                    LLMRequest::new(crate::providers::base::TASK_WORK_AGENT, attempt_msgs).with_tools(definitions.clone());
+                    LLMRequest::new(crate::providers::base::TASK_WORK_AGENT, attempt_msgs).with_tools(definitions.clone())
+                    .with_character_id(char_id.clone());
                 // 推理等级：low 关闭思维链，medium/high 按档位开启（按模型能力映射 wire 字段）
                 attempt_req.reasoning = reasoning_level_to_pref(&reasoning_level);
                 let mut event_rx = match router.generate_stream_with_tools(attempt_req).await {
@@ -2387,17 +2570,18 @@ impl CodingAgentService {
                     "coding:assistant_message",
                     serde_json::json!({ "session_id": session_id, "content": content }),
                 );
-                // 任务完成 → 自动通知陪伴角色播报工作状态。仅在最终回复是真实收尾文本时才报：
-                // 模型若把工具调用写成"调用工具：…"文字且未实际调用，不谎报完成，也不打扰陪伴角色。
+                // 任务完成 → 把这条事实登记给陪伴角色，由它自己决定要不要说。
+                // 仅在最终回复是真实收尾文本时才登记：模型若把工具调用写成
+                // "调用工具：…"文字且未实际调用，不谎报完成，也不打扰陪伴角色。
                 if made_progress {
                     let trimmed = content.trim();
                     let looks_tool_annotation = trimmed.starts_with("调用工具") || trimmed.starts_with("调用");
                     if !trimmed.is_empty() && !looks_tool_annotation {
                         let summary = trimmed.chars().take(120).collect::<String>();
-                        self.notify_companion_status(&app, session_id, "任务完成", &summary);
+                        self.report_work_completion(session_id, "任务完成", &summary);
                     } else if looks_tool_annotation {
                         tracing::warn!(
-                            "[CodingAgent:{}] 最终回复疑似工具调用文本但无实际调用，跳过“任务完成”播报",
+                            "[CodingAgent:{}] 最终回复疑似工具调用文本但无实际调用，跳过“任务完成”登记",
                             session_id
                         );
                     }
@@ -2431,15 +2615,33 @@ impl CodingAgentService {
                 }
                 let tool_start = std::time::Instant::now();
                 let result =
-                    execute_tool_use(&call.name, call.arguments.clone(), &tool_system, &tool_ctx, coding_sandbox_allow())
+                    execute_tool_use(
+                        &call.name,
+                        call.arguments.clone(),
+                        &tool_system,
+                        &tool_ctx,
+                        // 主 agent 面前有用户：无工作区时让确认真的弹出来
+                        coding_sandbox_confirm(!working_directory.trim().is_empty(), true),
+                    )
                         .await;
                 let duration_ms = tool_start.elapsed().as_millis() as u64;
                 self.stats_tool_done(session_id, duration_ms);
                 let (ok, summary) = if result.success {
-                    let data = serde_json::to_string(
-                        result.data.as_ref().unwrap_or(&serde_json::Value::Null),
-                    )
-                    .unwrap_or_default();
+                    // write_file 的 diff 只服务界面「变更」页：内容本就是模型刚写出的，
+                    // 再作为工具结果回传纯属重复计费 → 回传前摘掉（edit_file 的 diff 照旧保留）。
+                    let data = match &result.data {
+                        Some(d) if call.name == "write_file" => {
+                            let mut payload = d.clone();
+                            if let Some(inner) =
+                                payload.get_mut("data").and_then(serde_json::Value::as_object_mut)
+                            {
+                                inner.remove("diff");
+                            }
+                            serde_json::to_string(&payload).unwrap_or_default()
+                        }
+                        Some(d) => serde_json::to_string(d).unwrap_or_default(),
+                        None => serde_json::to_string(&serde_json::Value::Null).unwrap_or_default(),
+                    };
                     (true, summarize_result(&data))
                 } else {
                     (false, result.error.clone().unwrap_or_else(|| "执行失败".into()))
@@ -2661,6 +2863,7 @@ impl CodingAgentService {
         tool_system: &Arc<ToolSystem>,
         char_id: &str,
         working_directory: &str,
+        extra_workspaces: &[ExtraWorkspace],
         permission: &str,
         reasoning_level: &str,
     ) {
@@ -2671,7 +2874,10 @@ impl CodingAgentService {
             working_directory: working_directory.to_string(),
             access_level: Some(permission_to_access_level(permission)),
             ..Default::default()
-        };
+        }
+        .with_extra_working_directories(
+            extra_workspaces.iter().map(|w| (w.path.clone(), w.read_only)),
+        );
         let fail = |msg: &str| {
             let _ = app.emit("coding:error", serde_json::json!({
                 "session_id": session_id, "message": msg,
@@ -2686,7 +2892,8 @@ impl CodingAgentService {
         // 无 usage 上报，跨轮次沿用历史记录值）
         let _ = self.maybe_auto_compact(&app, session_id, router).await;
         let messages = self.build_llm_messages(session_id, char_id, "code");
-        let mut req = LLMRequest::new(crate::providers::base::TASK_WORK_AGENT, messages);
+        let mut req = LLMRequest::new(crate::providers::base::TASK_WORK_AGENT, messages)
+            .with_character_id(char_id.to_string());
         // 推理等级：low 关闭思维链，medium/high 按档位开启（按模型能力映射 wire 字段）
         req.reasoning = reasoning_level_to_pref(&reasoning_level);
         let llm_start = std::time::Instant::now();
@@ -2779,7 +2986,14 @@ impl CodingAgentService {
             );
             let tool_start = std::time::Instant::now();
             let result = if tool_system.has_tool(&tool) {
-                execute_tool_use(&tool, arguments.clone(), tool_system, &tool_ctx, coding_sandbox_allow()).await
+                execute_tool_use(
+                    &tool,
+                    arguments.clone(),
+                    tool_system,
+                    &tool_ctx,
+                    coding_sandbox_confirm(!working_directory.trim().is_empty(), true),
+                )
+                .await
             } else {
                 tracing::warn!("[CodingAgent] code 模式步骤引用未知工具: {tool}");
                 crate::tools::types::ToolResult::standard_error(
@@ -2927,7 +3141,8 @@ impl CodingAgentService {
                     ChatMessage::system(TURN_SUMMARY_SYSTEM_PROMPT),
                     ChatMessage::user(&build_turn_transcript(slice, &session.working_directory)),
                 ],
-            ))
+            )
+            .with_character_id(session.char_id.clone()))
             .await
         {
             Ok(t) if !t.trim().is_empty() => t.trim().to_string(),
@@ -3022,50 +3237,34 @@ impl CodingAgentService {
                 "error_kind": class.kind,
             }),
         );
-        // 自动通知陪伴角色：模型调用失败 → 由 TA 用自己的口吻提醒用户当前工作状态。
-        // 只传事实（错误文案 + 本次任务未完成），具体怎么说是陪伴 LLM 即席生成的，不拼固定话术。
+        // 登记给陪伴角色：只传事实（错误文案 + 本次任务未完成），
+        // 怎么说是 TA 的事，不在这里拼固定话术。
         let notice = format!("{} 本次工作任务未完成，可稍后重试。", class.user_message);
-        self.notify_companion_status(app, session_id, "模型调用失败", &notice);
+        self.report_work_completion(session_id, "模型调用失败", &notice);
     }
 
-    /// 把一条工作状态通知交给陪伴角色，由其用角色口吻向用户播报（TTS 气泡）。
+    /// 登记一条工作事实，交给陪伴角色自行决定要不要向用户提及。
     ///
-    /// 会话所属角色（char_id）作为播报角色；无会话上下文或缺角色时静默跳过。
-    fn notify_companion_status(
-        &self,
-        app: &tauri::AppHandle,
-        session_id: &str,
-        title: &str,
-        message: &str,
-    ) {
+    /// 这里**不生成文案、不直投气泡**：陪伴角色有自己完整的主动交互流程
+    /// （说话欲望、安静模式、是否轮到它开口、反重复），绕过它硬播会让角色
+    /// 说话时突然不像自己。登记后由陪伴侧的 `background_tasks` 提示词段落
+    /// 自然取用。
+    fn report_work_completion(&self, session_id: &str, title: &str, body: &str) {
         let char_id = self
             .sessions
             .read()
             .get(session_id)
             .map(|s| s.char_id.clone())
             .unwrap_or_default();
-        if char_id.is_empty() || message.trim().is_empty() {
+        if char_id.is_empty() {
             return;
         }
-        use crate::tools::builtin::work_agent_tools::{
-            NoticeDispatch, dispatch_companion_notice,
-        };
-        match dispatch_companion_notice(app, &char_id, title, message) {
-            NoticeDispatch::Delivered => {
-                tracing::info!(
-                    "[CodingAgent:{}] 已通知陪伴角色播报工作状态：{}",
-                    char_id,
-                    title
-                );
-            }
-            NoticeDispatch::Throttled => {
-                tracing::debug!(
-                    "[CodingAgent:{}] 工作状态播报被节流（60s 内已有播报）：{}",
-                    char_id,
-                    title
-                );
-            }
-            NoticeDispatch::Skipped => {}
+        if crate::brain::work_notices::global().push_report(&char_id, session_id, title, body) {
+            tracing::debug!(
+                "[CodingAgent:{}] 已登记工作完成报告，待陪伴角色自然提及：{}",
+                session_id,
+                title
+            );
         }
     }
 
@@ -3201,7 +3400,12 @@ impl CodingAgentService {
             }
         };
 
-        let mut system = Self::system_prompt(char_id, &session.working_directory, mode);
+        let mut system = Self::system_prompt(
+            char_id,
+            &session.working_directory,
+            &session.extra_workspaces,
+            mode,
+        );
         // 会话级状态注入：目标 / 已批准方案 / 计划模式策略 / 已压缩的历史摘要
         if let Some(g) = &session.goal {
             system.push_str(&format!("\n\n# 当前目标\n{g}"));
@@ -3341,11 +3545,18 @@ impl CodingAgentService {
     }
 
     /// 编程智能体 system prompt（按模式差异化）。
-    fn system_prompt(char_id: &str, working_directory: &str, mode: &str) -> String {
+    fn system_prompt(
+        char_id: &str,
+        working_directory: &str,
+        extra_workspaces: &[ExtraWorkspace],
+        mode: &str,
+    ) -> String {
         let persona = match char_id {
             "nana" => "你是 Nana，一位温柔的编程助手。语气轻柔友好，但技术内容严谨准确。",
             _ => "你是 Vivian，一位反应快、爱吐槽但极其靠谱的编程助手。语气自然随意，但代码和结论必须严谨。",
         };
+        // 范围纪律：见 SCOPE_DISCIPLINE 注释（防「悄悄把活干小」）
+        let scope = SCOPE_DISCIPLINE;
         // 无工作区模式：会话未绑定目录（如陪伴侧派发的轻量任务）。
         // 此时文件工具用绝对路径操作，不设工作目录沙箱；写入/执行仍受
         // 权限矩阵管控（workspace_write 级下命令与文件写入会请求用户确认）。
@@ -3353,16 +3564,35 @@ impl CodingAgentService {
             "# 工作环境\n\
              - 操作系统：Windows（命令用 PowerShell 语法）\n\
              - 工作目录：未选择（无工作区模式）\n\
-             - 文件操作使用绝对路径；未绑定工作区，无目录沙箱，写入前会请求用户确认\n\
-             - 需要固定工作区时，可请用户在编程页为会话选择工作区"
+             - 文件读取使用绝对路径，没有目录限制；\n\
+             - **但本会话没有可写工作区：写入文件与执行命令一律需要用户逐次确认**，不要因为被拒绝就反复重试\n\
+             - 需要固定工作区（免确认读写）时，请用户在工作页的会话标题旁点工作区芯片挂载一个目录"
                 .to_string()
         } else {
+            // 附加工作区：主工作区之外的授权目录（可读写，标注只读的除外）。
+            // 必须显式列给模型，否则它只看到主工作区就会主动回避已授权的目录。
+            let extras = if extra_workspaces.is_empty() {
+                String::new()
+            } else {
+                let mut s = String::from("- 附加工作区（同样在授权范围内，相对路径不适用，需用绝对路径）：\n");
+                for w in extra_workspaces {
+                    s.push_str(&format!(
+                        "  - {}{}\n",
+                        w.path,
+                        if w.read_only { "（只读）" } else { "" }
+                    ));
+                }
+                s
+            };
             format!(
                 "# 工作环境\n\
                  - 操作系统：Windows（命令用 PowerShell 语法）\n\
-                 - 工作目录：{wd}\n\
-                 - 所有文件路径操作仅限工作目录内（沙箱强制）",
+                 - 主工作目录：{wd}\n\
+                 - 所有文件路径操作仅限主工作目录与上述附加工作区内（沙箱强制）\n\
+                 {extras}\
+                 - 相对路径一律以主工作目录为基准",
                 wd = working_directory,
+                extras = extras,
             )
         };
         // 文件链接协议：有工作目录时一律走相对路径——绝对路径会把
@@ -3374,11 +3604,15 @@ impl CodingAgentService {
             "- 文件链接协议：提到本地文件时使用 Markdown 链接 `[显示名 (line N)](绝对路径:N)`。\
              本会话未绑定工作目录，只能给绝对路径；路径使用正斜杠，行号为 1-based，\
              知道准确列号时可写成 `路径:行号:列号`。"
-        } else {
+        } else if extra_workspaces.is_empty() {
             "- 文件链接协议：提到本地文件时使用 Markdown 链接 `[显示名 (line N)](相对工作目录的路径:N)`，\
              例如 `[SourceFileView.tsx (line 115)](src/components/mind-inspector/pages/SourceFileView.tsx:115)`。\
              路径相对于当前工作目录、使用正斜杠，不要写盘符或绝对路径；行号为 1-based，\
              知道准确列号时可写成 `路径:行号:列号`。"
+        } else {
+            "- 文件链接协议：主工作目录内的文件用 `[显示名 (line N)](相对主工作目录的路径:N)`，\
+             路径使用正斜杠、不写盘符；附加工作区内的文件必须用绝对路径（相对路径只能还原到主工作目录）。\
+             行号为 1-based，知道准确列号时可写成 `路径:行号:列号`。"
         };
         let rules = format!(
             "\n# 回复要求\n\
@@ -3392,10 +3626,10 @@ impl CodingAgentService {
         );
         match mode {
             "minimal" => format!(
-                "{persona}\n\n# 角色\n你是运行在用户桌面上的极简编程智能体（minimal 模式）：只有两个工具——run_command（PowerShell）与 edit_file（精确字符串替换编辑）。\n读取文件用 `Get-Content -Raw <path>`，搜索用 `Select-String -Pattern <p> -Recurse`（或 grep 可用的等价命令），列目录用 `Get-ChildItem`。\n局部修改用 edit_file（old_string 必须与文件内容完全一致，含缩进）；修改后用 run_command 运行验证。\n\n{env}{rules}"
+                "{persona}\n\n# 角色\n你是运行在用户桌面上的极简编程智能体（minimal 模式）：只有两个工具——run_command（PowerShell）与 edit_file（精确字符串替换编辑）。\n读取文件用 `Get-Content -Raw <path>`，搜索用 `Select-String -Pattern <p> -Recurse`（或 grep 可用的等价命令），列目录用 `Get-ChildItem`。\n局部修改用 edit_file（old_string 必须与文件内容完全一致，含缩进）；修改后用 run_command 运行验证。\n\n{env}{scope}{rules}"
             ),
             "code" => format!(
-                "{persona}\n\n# 角色\n你是运行在用户桌面上的编程智能体，当前处于**编排模式（Code Mode）**：你要把整个任务一次性规划为一个多步程序，由宿主顺序执行，执行期间不再回询你。\n\n{env}\n\n# 输出格式（必须只输出一个 JSON，不要输出其他文字）\n```\n{{\"steps\":[{{\"tool\":\"工具名\",\"arguments\":{{...}}}}, ...], \"summary\":\"执行完成后给用户的中文总结（说明做了什么、结果如何）\"}}\n```\n\n可用工具：read_file / write_file / edit_file / run_command / grep_search / list_dir（参数与各工具 schema 一致）。\n\n# 编写程序的规则\n1. 先放探索步骤（list_dir / grep_search / read_file），再放修改步骤（edit_file / write_file），最后放验证步骤（run_command）。\n2. edit_file 的 old_string 必须与文件内容完全一致（含缩进）。因为你无法看到中间结果，请用足够长的上下文锚定；不确定时先加 read_file 步骤。\n3. 步骤间不能依赖上一步的动态输出值（结果你拿不到）；需要根据结果决策时，结束本次程序并在 summary 中说明，让用户发下一条消息继续。\n4. 最多 {max} 步。任一步骤失败会中止剩余步骤。\n5. summary 用与用户相同的语言。{rules}",
+                "{persona}\n\n# 角色\n你是运行在用户桌面上的编程智能体，当前处于**编排模式（Code Mode）**：你要把整个任务一次性规划为一个多步程序，由宿主顺序执行，执行期间不再回询你。\n\n{env}\n\n# 输出格式（必须只输出一个 JSON，不要输出其他文字）\n```\n{{\"steps\":[{{\"tool\":\"工具名\",\"arguments\":{{...}}}}, ...], \"summary\":\"执行完成后给用户的中文总结（说明做了什么、结果如何）\"}}\n```\n\n可用工具：read_file / write_file / edit_file / run_command / grep_search / list_dir（参数与各工具 schema 一致）。\n\n# 编写程序的规则\n1. 先放探索步骤（list_dir / grep_search / read_file），再放修改步骤（edit_file / write_file），最后放验证步骤（run_command）。\n2. edit_file 的 old_string 必须与文件内容完全一致（含缩进）。因为你无法看到中间结果，请用足够长的上下文锚定；不确定时先加 read_file 步骤。\n3. 步骤间不能依赖上一步的动态输出值（结果你拿不到）；需要根据结果决策时，结束本次程序并在 summary 中说明，让用户发下一条消息继续。\n4. 最多 {max} 步。任一步骤失败会中止剩余步骤。\n5. summary 用与用户相同的语言。\n6. **不要缩小范围**：用户请求里的每一项都要有对应步骤；做不到的、跳过的，在 summary 里点名说明是哪一项、为什么，不要默默略过。{rules}",
                 max = CODE_MODE_MAX_STEPS,
             ),
             _ => format!(
@@ -3422,7 +3656,7 @@ impl CodingAgentService {
                  你继续干自己的活，结果会自动送回上下文；只有下一步确实依赖某个结果时，\
                  才用 work_job 取回。后台任务完成后，其结算会以「[后台子任务结算]」开头的系统消息\
                  自动注入上下文——那是**结果通知，不是用户指令**；若与用户新消息同时出现在本轮，\
-                 把它当背景信息，优先响应用户的最新指令。{rules}"
+                 把它当背景信息，优先响应用户的最新指令。{scope}{rules}"
             ),
         }
     }
@@ -3552,7 +3786,7 @@ fn build_turn_transcript(messages: &[CodingMessage], working_directory: &str) ->
     let wd_line = if working_directory.trim().is_empty() {
         "工作目录：未选择（无工作区模式）".to_string()
     } else {
-        format!("工作目录：{working_directory}")
+        format!("主工作目录：{working_directory}")
     };
     let mut lines = vec![wd_line];
     for m in messages {
@@ -3773,10 +4007,15 @@ fn prune_tool_result(content: &str, max: usize) -> String {
     crate::tools::executor::prune_head_tail(content, max)
 }
 
-/// 解析并读取文件引用：相对路径拼工作目录、沙箱校验、读取内容并截断。
+/// 解析并读取文件引用：相对路径拼主工作区、工作区归属校验、读取内容并截断。
 ///
-/// 读取失败（不存在 / 超沙箱 / IO 错误）不中断整条消息，而是记录 error 供前端展示。
-fn resolve_file_refs(working_directory: &str, refs: Vec<CodingFileRef>) -> Vec<CodingFileRef> {
+/// 相对引用锚定主工作区；绝对引用只要落在主工作区或任一附加工作区内即可。
+/// 读取失败（不存在 / 超出所有工作区 / IO 错误）不中断整条消息，而是记录 error 供前端展示。
+fn resolve_file_refs(
+    working_directory: &str,
+    extra_workspaces: &[ExtraWorkspace],
+    refs: Vec<CodingFileRef>,
+) -> Vec<CodingFileRef> {
     let mut out: Vec<CodingFileRef> = Vec::new();
     for r in refs.into_iter().take(FILE_REF_MAX_COUNT) {
         let mut resolved = r;
@@ -3790,8 +4029,12 @@ fn resolve_file_refs(working_directory: &str, refs: Vec<CodingFileRef>) -> Vec<C
                 .into_owned()
         };
         resolved.path = abs.clone();
-        if !crate::tools::sandbox::is_path_within_working_directory(&abs, working_directory) {
-            resolved.error = Some("路径不在工作目录内，已忽略".into());
+        if !crate::tools::types::is_path_within_any(
+            &abs,
+            working_directory,
+            extra_workspaces.iter().map(|w| w.path.as_str()),
+        ) {
+            resolved.error = Some("路径不在任何已授权工作区内，已忽略".into());
             out.push(resolved);
             continue;
         }

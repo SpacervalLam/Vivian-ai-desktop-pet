@@ -86,6 +86,10 @@ pub struct WorldBrief {
     pub user_activity_elapsed_secs: Option<f64>,
     /// 前台窗口标题（用户当前正在看的应用）
     pub foreground_title: Option<String>,
+    /// 当前正在播放的音乐描述（"artist - title"，None = 没在放/读取失败）
+    ///
+    /// 让一句话思绪能自然带上"他还在循环那首歌"这类观察，而不只是天气与时间。
+    pub music_desc: Option<String>,
     /// 用户活跃长期目标摘要（最多 3 条，按 deadline 紧迫度排序）
     ///
     /// 从 Mind.user_goals 派生，让 LLM 有"用户当前处于什么人生阶段"的上下文。
@@ -119,6 +123,18 @@ impl WorldBrief {
             .as_ref()
             .map(|fw| fw.title.clone())
             .filter(|t| !t.is_empty());
+        let music_desc = snap.music.as_ref().and_then(|m| {
+            let title = m.title.trim();
+            if title.is_empty() {
+                return None;
+            }
+            let artist = m.artist.trim();
+            Some(if artist.is_empty() {
+                title.to_string()
+            } else {
+                format!("{artist} - {title}")
+            })
+        });
         Self {
             local_time: snap.local_time,
             weather_desc,
@@ -127,6 +143,7 @@ impl WorldBrief {
             user_activity,
             user_activity_elapsed_secs,
             foreground_title,
+            music_desc,
             active_goals: Vec::new(),
         }
     }
@@ -440,10 +457,10 @@ fn parse_thought_output(raw: &str, max_len: usize) -> VivianResult<ThoughtSynthe
 ///
 /// 把可观察真实状态格式化为 LLM 可读的事实清单，作为"现实基线"防止自我状态幻觉。
 fn build_world_brief_section(brief: &WorldBrief, language: &str) -> String {
-    let (header, time_lbl, weather_lbl, user_state_lbl, away_lbl, activity_lbl, fg_lbl, goals_lbl, unknown) = match language {
-        "en" => ("## Reality baseline (observable facts)\n", "Time: ", "Weather: ", "User state: ", "away for {}m", "User activity: ", "User's current app: ", "User's active long-term goals: ", "unknown"),
-        "ja" => ("## 現実の基礎事実（観察可能な事実）\n", "時間：", "天気：", "ユーザー状態：", "{}分間不在", "ユーザーの活動：", "ユーザーの現在のアプリ：", "ユーザーの長期目標：", "不明"),
-        _ => ("## 现实基线（可观察事实）\n", "时间：", "天气：", "用户状态：", "已离开 {} 分钟", "用户活动：", "用户当前应用：", "用户的长期目标：", "未知"),
+    let (header, time_lbl, weather_lbl, user_state_lbl, away_lbl, activity_lbl, fg_lbl, music_lbl, goals_lbl, unknown) = match language {
+        "en" => ("## Reality baseline (observable facts)\n", "Time: ", "Weather: ", "User state: ", "away for {}m", "User activity: ", "User's current app: ", "Music playing: ", "User's active long-term goals: ", "unknown"),
+        "ja" => ("## 現実の基礎事実（観察可能な事実）\n", "時間：", "天気：", "ユーザー状態：", "{}分間不在", "ユーザーの活動：", "ユーザーの現在のアプリ：", "流れている音楽：", "ユーザーの長期目標：", "不明"),
+        _ => ("## 现实基线（可观察事实）\n", "时间：", "天气：", "用户状态：", "已离开 {} 分钟", "用户活动：", "用户当前应用：", "正在放的音乐：", "用户的长期目标：", "未知"),
     };
 
     let mut lines = vec![header.to_string()];
@@ -473,6 +490,9 @@ fn build_world_brief_section(brief: &WorldBrief, language: &str) -> String {
     }
     if let Some(fg) = &brief.foreground_title {
         lines.push(format!("{}{}", fg_lbl, fg));
+    }
+    if let Some(music) = &brief.music_desc {
+        lines.push(format!("{}{}", music_lbl, music));
     }
     // 活跃长期目标（带剩余天数）
     if !brief.active_goals.is_empty() {

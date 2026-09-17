@@ -42,6 +42,7 @@ src-tauri/logs/
 *.dll
 *.lib
 *.pdb
+*.tmp
 
 # ===== 用户运行时数据（不应入库） =====
 vivian_data/
@@ -72,3 +73,26 @@ MEMORY_OPTIMIZATION.md
 tmp/
 .npm-cache/
 .npm-cache-tmp/
+
+# ===== Blender 美术工程（开发链路，不入库 / 不进包） =====
+# 应用运行只需要 public/room/models/vivian-furniture.glb（进 dist → 进安装包）。
+# /blender/ 下的 .blend 源工程、中间 glb、导出贴图、验证截图全部属于开发过程文件，
+# 构建链为：export-base.mjs → build_blender.py → export_blender.py → verify-room.mjs
+#
+# 代价须知：忽略后 vivian-furniture.blend 将不再有任何版本管理，仅存本机一份。
+# 若要保留该源工程入库，把 /blender/ 那行注释掉，并保留下面一行反选：
+#   !/blender/room/vivian-furniture.blend
+/blender/
+*.blend1
+*.blend2
+
+# ===== 开发调试残留（仅本地，不入库） =====
+# src-tauri 根目录的 txt 都是 cargo check / cargo test 的输出重定向，源码不放这里
+src-tauri/*.txt
+# cargo test 在工作目录生成的向量库与状态快照
+# （见 src/memory/strategy.rs 与 src/psychology/social_state.rs 的测试模块）
+src-tauri/test_vectors.json
+src-tauri/test_social.json
+# 无任何引用的散落测试文件、锁文件副本
+src-tauri/test_sqlite.rs
+src-tauri/Cargo.lock.tmp

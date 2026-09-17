@@ -92,6 +92,12 @@ struct PendingWorkQuestion {
     sender: oneshot::Sender<WorkQuestionAnswer>,
     created_at: Instant,
     session_id: String,
+    /// 发起该会话的角色 id。
+    ///
+    /// 提问要不要转告用户由陪伴侧决定，而陪伴侧是按角色组织的，
+    /// 所以这里必须直接存下来——只存 session_id 的话，
+    /// 想按角色取 pending 就得反过来去查工作会话表。
+    char_id: String,
     request: WorkQuestionRequest,
 }
 
@@ -110,6 +116,7 @@ impl WorkQuestionRegistry {
     /// 创建一个提问请求，返回 `(question_id, receiver)`。
     pub fn create_question(
         &self,
+        char_id: String,
         session_id: String,
         question: String,
         context: Option<String>,
@@ -125,6 +132,7 @@ impl WorkQuestionRegistry {
                 sender: tx,
                 created_at: Instant::now(),
                 session_id: session_id.clone(),
+                char_id,
                 request: WorkQuestionRequest {
                     question_id: id,
                     session_id,
@@ -146,6 +154,20 @@ impl WorkQuestionRegistry {
             .values()
             .find(|e| e.session_id == session_id)
             .map(|e| e.request.clone())
+    }
+
+    /// 取某角色名下所有 pending 提问（陪伴侧据此判断"有没有事卡在用户那儿"）。
+    pub fn pending_for_char(&self, char_id: &str) -> Vec<WorkQuestionRequest> {
+        if char_id.is_empty() {
+            return Vec::new();
+        }
+        self.cleanup_expired_locked();
+        self.pending
+            .lock()
+            .values()
+            .filter(|e| e.char_id == char_id)
+            .map(|e| e.request.clone())
+            .collect()
     }
 
     /// 回传用户回答，唤醒正在等待的工具。

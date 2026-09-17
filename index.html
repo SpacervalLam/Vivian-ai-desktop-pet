@@ -45,11 +45,23 @@
       // 在 React 渲染前确定窗口透明性：
       // 主窗口、状态面板、聊天窗口使用透明窗口；
       // chat 窗口 transparent:true + 容器 borderRadius:56，需 body 透明才能露出圆角外桌面。
-      // 其余子窗口（config/memory/diary）保持不透明深色背景，避免渲染前白屏闪烁。
+      // toast 窗口同样是 transparent:true，且高度撑满屏幕、贴屏幕边缘锚定
+      // （启动进度贴右上、角色通知贴右下）：若 body 落到不透明底色，会沿屏幕
+      // 边缘糊出一条整高的色带，把窗口透明性整个废掉——只有内容区域该可见。
+      // memory（心智观察器）也是 transparent:true：入场时整窗内容从桌宠矩形
+      // 缩放到全屏，卡片之外必须透出桌面，否则会看到一圈不透明底色。
+      // 其余子窗口（config/diary）保持不透明深色背景，避免渲染前白屏闪烁。
       (function () {
         try {
           var view = new URLSearchParams(window.location.search).get('view');
-          if (view === null || view === 'status' || view === 'chat' || view === 'side_chat') {
+          if (
+            view === null ||
+            view === 'status' ||
+            view === 'chat' ||
+            view === 'side_chat' ||
+            view === 'toast' ||
+            view === 'memory'
+          ) {
             document.documentElement.classList.add('is-transparent');
           }
         } catch (e) {}

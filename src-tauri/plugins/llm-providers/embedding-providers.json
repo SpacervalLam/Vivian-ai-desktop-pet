@@ -1,0 +1,66 @@
+[
+  {
+    "id": "alibaba-qwen37",
+    "provider": "Alibaba Cloud Model Studio",
+    "endpoint": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "model": "qwen3.7-text-embedding",
+    "dimension": 1024,
+    "recommendedFor": "中国大陆、中文、多语和代码检索"
+  },
+  {
+    "id": "alibaba-qwen37-flash",
+    "provider": "Alibaba Cloud Model Studio",
+    "endpoint": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "model": "qwen3.7-text-embedding-flash",
+    "dimension": 1024,
+    "recommendedFor": "中国大陆低成本、低延迟检索"
+  },
+  {
+    "id": "alibaba-embedding-v4",
+    "provider": "Alibaba Cloud Model Studio",
+    "endpoint": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "model": "text-embedding-v4",
+    "dimension": 1024,
+    "recommendedFor": "中文通用检索"
+  },
+  {
+    "id": "voyage-4-large",
+    "provider": "Voyage AI",
+    "endpoint": "https://api.voyageai.com/v1",
+    "model": "voyage-4-large",
+    "dimension": 1024,
+    "recommendedFor": "国际服务、质量优先"
+  },
+  {
+    "id": "voyage-4",
+    "provider": "Voyage AI",
+    "endpoint": "https://api.voyageai.com/v1",
+    "model": "voyage-4",
+    "dimension": 1024,
+    "recommendedFor": "国际服务、质量和价格平衡"
+  },
+  {
+    "id": "voyage-4-lite",
+    "provider": "Voyage AI",
+    "endpoint": "https://api.voyageai.com/v1",
+    "model": "voyage-4-lite",
+    "dimension": 1024,
+    "recommendedFor": "国际服务、成本和延迟优先"
+  },
+  {
+    "id": "openai-embedding-3-small",
+    "provider": "OpenAI",
+    "endpoint": "https://api.openai.com/v1",
+    "model": "text-embedding-3-small",
+    "dimension": 1536,
+    "recommendedFor": "OpenAI 生态兼容"
+  },
+  {
+    "id": "openai-embedding-3-large",
+    "provider": "OpenAI",
+    "endpoint": "https://api.openai.com/v1",
+    "model": "text-embedding-3-large",
+    "dimension": 3072,
+    "recommendedFor": "OpenAI 生态、质量优先"
+  }
+]

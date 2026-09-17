@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 use crate::error::{VivianError, VivianResult};
 use crate::providers::base::{
     parse_stream_usage, BaseProvider, ChatResponse, ProviderBase, StreamEvent,
-    StructuredToolCall, ToolDefinition,
+    StructuredToolCall, ToolDefinition, PENALTY_KEYS_CAMEL,
 };
 use crate::resilience::{classify_error, ErrorCategory};
 use crate::types::response::ChatMessage;
@@ -205,6 +205,13 @@ impl GeminiProvider {
                 };
                 generation_config["thinkingConfig"] = json!({"thinkingLevel": level});
             }
+        }
+        // 采样惩罚：Gemini 的 generationConfig 原生支持 presencePenalty / frequencyPenalty
+        // （驼峰命名，与 OpenAI 家族的蛇形不同，故走 `PenaltyKeys` 参数化）。
+        // 未配置时该函数不写入任何字段，请求体与改动前完全一致。
+        if let Some(cfg) = generation_config.as_object_mut() {
+            self.base
+                .apply_sampling_penalties_to(cfg, PENALTY_KEYS_CAMEL);
         }
         let mut body = json!({
             "contents": contents,

@@ -48,7 +48,8 @@ Vivian 是一个常驻桌面的多角色 AI 陪伴型宠物系统，支持两个
 
 - 日常陪伴对话（流式响应 + 多 Provider 路由 + 联网搜索 + 流式安全过滤）
 - 桌面自动化（应用控制、文件操作、媒体控制、屏幕感知、输入模拟）
-- 真实浏览器自动化（精简 Chrome 扩展桥：读取/点击/输入/导航真实标签页，保留登录态；设置页「浏览器平台」面板监测各平台登录态与连接状态，见[多平台内容发现与推荐](#多平台内容发现与推荐)）
+- 音乐搜索与播放（按歌名找歌并放出来：本地曲库真正解码播放；流媒体平台经深链打开搜索页；能读系统当前播放状态并定向控制具体播放器。见[音乐搜索与播放](#音乐搜索与播放)）
+- 真实浏览器自动化（精简 Chrome 扩展桥：读取/点击/输入/导航真实标签页，保留登录态；工具注册为 `mcp__browser__*`，与外部 MCP server 同处「外部连接」页——桥卡片内附各平台登录态监测，见[多平台内容发现与推荐](#多平台内容发现与推荐)）
 - 主动关怀（基于作息学习与情绪状态的健康提醒、破冰、压力监控）
 - 日程助理（把群通知直接转发进聊天框，角色自动识别转来的材料、抽取事件与时间地点要求，高置信直接建待办并告知、可一句话撤销；提醒时间按记忆中的住址/通勤/作息智能提前——留足路程与准备时间，记忆不足会先问，到点经 Scheduler 桌面通知 + 主动开口提醒）
 - 自我演化（人格、关系、需求、情绪的四层心理因果链 + 凝神/专注模式）
@@ -137,9 +138,9 @@ Vivian 是一个常驻桌面的多角色 AI 陪伴型宠物系统，支持两个
 - **冲突检测**（`conflict.rs`）：写入热路径上的三阶段流水线——语义相似度检测 → LLM 判定（冲突/补充/无关）→ 自动合并/覆盖/保留，避免矛盾记忆污染上下文。`QueueLlm` 决策通过 `pending_conflicts` 持久化队列由 `CognitiveTickRunner` 每 5 分钟批量消费（最多 5 条/次，指数退避重试 3 次），`DefaultConflictArbiter` 基于 reflection 路由调用 LLM 仲裁，输出 `ArbitrationOutcome` 决定保留/合并/覆盖
 - **证据驱动记忆可信度**（`evidence.rs`）：每条记忆携带 `reinforcement` / `disputation` 双独立时钟半衰期衰减字段。7 种证据来源（user_fact / user_confirm / user_rebut / user_ignore / user_keyword_rebut / migration_seed / promote_merge）按不同 delta 权重更新评分。`evidence_score = reinforcement - disputation`，`protected` 记忆返回 +∞ 永不归档。分数跌破 `ARCHIVE_THRESHOLD (-2.0)` 时启动 `sub_zero_days` 归档倒计时，累积 14 天后真正归档
 - **事件溯源**（`event_log.rs`）：append-only `events.ndjson` 日志，15 种事件类型覆盖记忆生命周期（fact.added / reflection.synthesized / persona.fact_added / reflection.evidence_updated 等）。写入契约：append-before-mutate（事件先落盘再修改视图），Sentinel 游标持久化，Reconciler 启动时尾部重放，handler 幂等。10K 行 / 90 天触发 compaction
-- **多级对话存档（伪常驻上下文）**（`conversation_archive.rs` + `session_compressor.rs`）：`DialogueManager` 维护固定 10 条消息窗口，超出部分被静默丢弃；`TimeStampedMemory` 窗口溢出时经 LLM 压缩为段摘要，**升级为多级存档**——L1（对话段压缩）→ L(n) 满 4 条时合并最旧 3 条为 L(n+1)（上限 L3，指数收敛），存档持久化为 `memory/conversation_archive.jsonl` + 明文 `archive_plain/`。每轮对话把全部存档渲染为 `[CONVERSATION ARCHIVE]` 块注入历史头部（仅取头尾、数量封顶防膨胀），让"之前聊过什么"**天然在场不依赖检索命中**；存档为空时回退单层 `[CONVERSATION RECAP]` 注入。压缩成本摊销（触发式 LLM，正常轮次零额外调用）
+- **多级对话存档（伪常驻上下文）**（`conversation_archive.rs` + `session_compressor.rs`）：L1 满 4 条时合并最旧 3 条为更高层级，最高 L3；索引持久化为 `conversation_archive.jsonl`，摘要写入前脱敏并原子重写。明文 `archive_plain/` 仅在 `VIVIAN_MEMORY_PLAIN_MIRROR` 显式开启时生成；每轮最多注入 8 条摘要，正常轮次不额外调用 LLM。
 - **对话历史 JSONL 化**（`dialogue/mod.rs`）：`full_chat_history.json` 全量读改写 → `history/chat_history.jsonl` **追加写**（flush 仅 append 新行 + 尾部 20 条缓存重复检测），旧文件自动迁移为 `.migrated`；patch 类低频回写（时间戳/语音回填）走整文件重写可接受
-- **统一事件账本**（`unified_event_ledger.rs`）：全局共享的环境事件索引层，在保留各角色 MemoryManager 隔离存储的前提下，所有对话/动作/交互抽象为统一事件。事件包含 timestamp/sender/receiver/event_type/content_preview/context_tags/visibility/source_memory/associated_char_id；可见性分为 Public（跨角色对话/广播，所有角色可见）、Participants（用户↔智能体对话，仅参与方可见）、Private(observer_id)（旁观记忆，仅指定角色可见）。行为事件（long_idle/quiet_mode/mood_event/presence_log 等）通过 `register_world_event` 写入账本（sender=system/receiver=all/visibility=Public/associated_char_id=当前角色ID），不写入 MemoryManager；MemoryManager 只保留 AI 主观记忆。支持按可见性查询、实体-实体检索（A↔B 双向事件流）、LLM 摘要压缩（超限自动压缩旧事件），前端通过 `list_unified_events` 命令分页查询
+- **统一事件账本**（`unified_event_ledger.rs`）：全局共享的环境事件索引层，在保留各角色 MemoryManager 隔离存储的前提下，所有对话/动作/交互抽象为统一事件。事件包含 timestamp/sender/receiver/event_type/content_preview/context_tags/visibility/source_memory/associated_char_id；可见性分为 Public（跨角色对话/广播，所有角色可见）、Participants（用户↔智能体对话，仅参与方可见）、Private(observer_id)（旁观记忆，仅指定角色可见）。行为事件（long_idle/quiet_mode/mood_event/presence_log 等）通过 `register_world_event` 写入账本（sender=system/receiver=all/visibility=Public/associated_char_id=当前角色ID），不写入 MemoryManager；MemoryManager 只保留 AI 主观记忆。**事件覆盖补全**：被冷落过程事件（`user_ignored`，连续第 N 次主动搭话未获回应）、用户关键操作事件（`user_media_changed` 开始播放/切歌 600s 节流、`user_app_switched` 应用类别切换 180s 节流）均入账本。事件重要性分级驱动下游排序（dialogue 0.9 / compacted_summary 0.85 / action 0.7 / user_ignored·ignored_message·mood_shift·mood_event 0.6 / user_media_changed·user_app_switched·observer_note 0.5），日记 / recap / 对话 prompt / 内心独白素材（`build_prompt_section`）自动消费，无需改动下游。支持按可见性查询、实体-实体检索（A↔B 双向事件流）、LLM 摘要压缩（超限自动压缩旧事件），前端通过 `list_unified_events` 命令分页查询
 - **用户认知模型**（`user_model.rs`）：在记忆系统之上新增一层"对这个人的稳定理解"——把碎片化的记忆证据组织成用户特征、目标、项目的结构化认知模型。包含：
   - **UserTrait（用户特征）**：类别化特征键值对（如 `ui_style → custom_css`），带置信度/稳定性/重要性/生命周期（Emerging → Active → Stable → Fading → Contradicted），可反向追溯证据记忆
   - **UserGoal（用户目标）**：用户长期目标（如"准备考研"），带 deadline/优先级/状态机（Active/Paused/Completed/Abandoned），由强证据直接注册
@@ -170,7 +171,7 @@ Vivian 是一个常驻桌面的多角色 AI 陪伴型宠物系统，支持两个
 
 - **步骤级熔断**：`pipeline`、`belief`、`memory_md` 三步分别跟踪连续失败计数，连续失败 ≥ 5 次写入 `paused_reason` 熔断暂停——暂停期间完全跳过该步骤，不再烧 LLM；1 小时后半开重试，成功后自动恢复正常。暂停原因经 `get_memory_health` 展示在记忆页健康条
 - **断点续跑**：Stage 1 摘要写库前先把源 ID 记入 `consolidation_progress_<char_id>.json`（上下文键 = 角色 + 逻辑日，跨天作废），崩溃后重启补完「已摘要未标记」的 ShortTerm（出现在 SessionSummary 的 `promoted_from` 中 → 补 `mark_summarized` 防重复摘要；未出现 → 走正常重摘要防漏摘要），水位文件原子写，损坏自动备份后按空态处理
-- **memory.md 整理步**：角色长期记忆笔记行数超过 60 行时，用 memory 路由（机械整理，不需人设）rewrite 合并去重、删过时、按主题分节；`write_memory_md` 内部校验预算上限，超限拒绝写、原文件不动；不超阈值不触发，不浪费 LLM 调用
+- **memory.md 整理步**（`memory/memory_md.rs` 两区模型）：文件按分节标题形态分**已整理区**（主题分节）与**待整理区**（日期分节 `## YYYY-MM-DD HH:MM`，原始沉淀）。`tidy_need` 按 `TidyNeed` 分派：`Incremental`（待整理区非空行数 ≥ 12）只把新增沉淀交 LLM，产出条目由 `merge_entries` 机械并入正文，合并后逼近 1700 字符自动回落全量压缩；`FullCompaction`（总字符 > 1700）读全文按主题重排。写预算硬不变量 2000 字符，`enforce_char_budget` 优先驱逐最旧日期分节、仍超限才驱逐正文分节，注入侧恒读全文不截断；用 memory 路由（不需人设）
 
 #### 体验连续性（Experience Continuity）
 
@@ -258,7 +259,8 @@ PreProcessing → UserMemorySaving → [QueryRewrite ∥ FastSemantic] → Memor
 - **死循环检测**（`doom_loop.rs`）：追踪每轮 `(tool_name, args)` 签名（BTreeMap 规范化），同一签名连续出现 ≥ 阈值次时判定死循环，生成注入消息打断
 - **多级上下文压缩**（`context_compress.rs`）：三级策略——Soft Trim（tool_result 截断）→ Group Drop（`MessageGroup` 原子分组，保证 tool_call+result 不拆分）→ Reminder Inject
 - **压缩后提醒**（`compaction_reminder.rs`）：从被丢弃的中段消息中提取活跃工具名和最后用户话题，注入系统提醒防止 LLM 丢失任务上下文
-- **Prompt 模板引擎**（`template_engine.rs` + `prompt_modules.rs`）：`section_schema()` 定义 32 个 section 的结构元数据，`build_prompt()` 采用 U 型注意力优化布局 + 分层意识模型，并带预算裁剪。静态区使用 `<static>` 标签包裹提升云端 API 缓存命中率，布局顺序为：Character（人格核心最先入脑）→ Style/Relationship → Examples（近因效应）→ Framework（技术规则，不内化）→ FORMAT SPEC（临出口提醒）→ 伪静态归位（响应决策 / 渠道指南 / 内联标签格式——内容不随轮次变化，移入静态区随 `<static>` 前缀缓存复用）；`</static>` 后输出 `__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__` 边界标记，generation 层据此把动态区切为 user 便签（历史之后注入），静态区进入 system 前缀缓存。动态区按分层意识排序：Current Mind（Belief/Goal/Attention + Working Memory + Self State + 情绪上下文）→ **记忆组**（Relevant Episode + 关系日志 + 记忆本体合并为单一 `## 你记得的事`，上移至 Mind 之后避开 U 型注意力谷底；首次见面提示与精简记忆使用规则并入记忆块）→ World Snapshot（环境上下文 / 用户在场与近期活动与观察 / 室友状态与认知印象 / 环境事件）→ 社交关系（关系认知事实 / 共享世界 / 社交状态）→ 画像组（用户事实 / 认知模型 / 动态行为合并为 `## 你对用户的了解`）→ 知识背景（Worldbook / 话题注入 / 技能 / 搜索信号 / 日程信号 / 主动搜索上下文）→ 尾区（在场指南 / 内心反应 / 语气注入 / 快速感知引导 / 推荐工具 / 工具列表 / 用户输入最末）。每个动态 section 带裁剪优先级（rank 越大越先丢），总体超过 30KB 时按 rank 丢弃低价值段，记忆组/环境/工具/用户输入永不丢弃。`build_prompt_with_sections()` 产出 prompt + 逐 section 元数据（char_count / token_estimate / present），前端 Context Pipeline 通过 `get_prompt_section_schema` + `get_last_prompt_breakdown` 命令消费 schema 驱动可视化。功能提示词（心理洞察/信念生成/思维合成/日记生成/记忆提取）全部动态化，使用角色名变量而非硬编码"Vivian"；跨角色语音指南使用行为化描述（"你说话比她快，句子更短"）替代数值化标签（"sass=0.65"）；内心反应使用中文生成并按角色差异化（Vivian 直率吐槽 / Nana 温柔关心）
+- **Prompt 模板引擎**（`template_engine.rs` + `prompt_modules.rs`）：静态区用 `<static>` 包裹并通过 `__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__` 将动态区切为历史后的 user 便签，提升前缀缓存复用。动态区按 Current Mind → 记忆组 → World Snapshot → 社交关系 → 画像组 → 知识背景 → 尾区排列；记忆组明确“本轮空召回不代表首次见面”。预算使用 tokenizer 估算，并按当前路由模型的上下文窗口、关系阶段（用户等级 0–4）及任务类型动态计算：基础为窗口的 1/8，限制在 4K–32K，且不超过窗口的 40%；超限按 rank 丢弃低价值段，记忆组、环境、工具和用户输入不可裁剪。
+- **陪伴侧持续思考**（`thinking_tools.rs` + `react.rs`）：复杂问题可调用无外部副作用的 `continue_thinking`，在完整人格上下文中分析、核验、规划或反思，再决定调用真实工具或作答；普通闲聊不续轮。内部推演最多 4 轮，达到上限恢复人格并强制收尾，不暴露完整思维链；外部工具仍沿用 doom-loop、goal_completed、上下文压缩和 `max_rounds` 防护。
 - **生成与提示词拆分**：主对话 LLM 只输出 `text / intent / tool / arguments`，表情/动作/桌宠自控指令（control_actions）由反思调用（ReflectionRunnable）统一产出，表情/动作可用列表（manifest_context）不再注入主对话 prompt。表情/动作有五类触发路径：(1) **LLM 内联标签模式**（`config.inline_expression.enabled`）——主 LLM 在文本中嵌入 `<e name="happy" dur="3000"/>` / `<m name="wave"/>` 标签，流式输出时由 `InlineTagScanner` 实时扫描剥离并 emit `chat:inline_meta` 事件驱动桌宠，零额外 LLM 开销；(2) **LLM 子调用模式**（默认）——`ExpressionMotionRunnable` 在 text 完成后独立调用 LLM 选择表情/动作；(3) **嵌入即时反应**——`analyze_emotion_instant` 命令调用 `EmbeddingEmotionClassifier`（基于 `MemoryEmbeddingProvider`，预置 14 类情绪语料 210 条，Top-K=5 余弦相似度投票），在用户消息发送瞬间（Layer 1）与 AI 文本首段完成时（Layer 2）触发即时 FACS 反应，写入桌宠 `instant` 层（优先级 1.5），反思调用完成时由 `manual` 层接管并自动清除 `instant` 层；嵌入失败时弹 toast 报错，不降级到关键词分析；(4) **用户交互即时反馈**——桌宠窗口的单击/双击/拖动/长按手势由前端 `ChibiPetCanvas` + `App.tsx` 本地规则处理（摸头台词 / 拖拽表情联动 / 长按手势入口），零 LLM 开销；(5) **自动规则触发**——`auto_expression_tick` 定时检查空闲阶段/心情持续/程序事件（`engine/auto_trigger.rs`），纯规则概率触发。反思调用产出的 `control_actions` 中的 `set_expression` / `play_motion` 接受语义名（happy / shy / wave / nod 等），后端通过 `ResourceManifest` 归一化映射到实际资源名
 - **LLM 输出纯文本约束**：`text` 字段严禁包含 Markdown / 富文本渲染语法（`**粗体**` / `*斜体*` / `# 标题` / `- 列表` / `` `代码` `` / `[链接](url)` / `> 引用` / HTML 标签等），由 prompt 教导（`output_format.en.md` 英文模板的 `[OUTPUT_FIELDS]` 规范明确禁止，回复语言由 "same language as user input" 约束）+ 后处理清洗（`strip_markdown_syntax` 在 `execute_pipeline_and_build_response` 收口点和主动消息派发点统一剥离）双重保障
 - **回复验证**：`ValidationRunnable` 在 `ResponseParsing` 之后、`ExpressionMotion` 之前执行——空文本检测（should_respond=true 但 text 为空时记录 warning）、长度上限截断（超过 500 字符时在句边界截断）、基础空白清理；注入 `ModelRouter` 后还启用轻量幻觉检测（当记忆上下文非空且回复 ≥30 字符时，用 `memory` 任务小模型检查回复是否与记忆矛盾或编造信息，仅记录 warning 不修改回复，超时/失败时跳过）
@@ -335,7 +337,7 @@ PreProcessing → UserMemorySaving → [QueryRewrite ∥ FastSemantic] → Memor
   - **主动截屏观察**（`maybe_screen_peek` + `spawn_screen_peek_task`，异步）：窗口切换引发好奇，经用户同意后截屏 + 视觉理解再基于屏幕内容搭话。复用 `screenshot_analyze` 工具抽出的原语 `capture_screen_png_bytes` / `describe_screen_bytes`；未授权时先推气泡"可以让我看一眼你的屏幕吗～"并弹三按钮确认 toast（拒绝/放行一次/始终允许——走 `ToolSystem.request_confirmation`，与工具执行共享同一份 `confirm_tool_execution` 会话级放行记忆），拒绝后 2 小时内不再请求；需 `ai.enable_vision` 开启
   - **应用持续时长提醒**（`maybe_app_duration_reminder`）：`poll_window` 维护"应用会话"跟踪（按 `SmartAppClassifier` 分类，类别变化/回到桌面时重置计时），按类别差异化阈值提醒（写代码/办公 50 分钟、游戏/看剧 75 分钟、浏览器/聊天 90 分钟，utility/other 不提醒），按应用语义生成关心或调侃（写代码→劝休息、游戏→宠溺调侃），触发后重置计时 + 2 小时冷却
   - **深夜未眠关心**（`maybe_late_night`）：凌晨 1-4 点用户仍活跃（idle<300s）时温柔提醒睡眠，按本地日期去重每晚只提醒一次
-  - **音乐切换搭话**（`maybe_music_changed`）：对比前后 tick 的 `MusicSnapshot` 检测播放/切歌变化（无→播放、暂停→恢复、播放中切歌），按 SMTC `source_app` 关键词过滤视频播放器（避免"看剧"被当"听歌"），基于曲目信息（《歌名》- 歌手）自然搭话；45 分钟冷却 + 概率 0.3 抽样
+  - **音乐切换搭话**（`maybe_music_changed`）：对比前后 tick 的 `MusicSnapshot` 检测播放/切歌变化（无→播放、暂停→恢复、播放中切歌），按 SMTC `source_app` 关键词过滤视频播放器（避免"看剧"被当"听歌"），基于曲目信息（《歌名》- 歌手）自然搭话；45 分钟冷却 + 概率 0.3 抽样。播放/切歌同时注册 `user_media_changed` 事件入账本（600s 节流），即使关闭搭话触发器，"用户开始播放音乐"这一事实仍被日记 / 独白 / recap 感知
 - **social_urge 双向门控**（`check_specific` 开头）：复用 current_thought 每 60s LLM 调用顺便产出的 `social_urge`（0-1，表示角色"现在想主动搭话"的冲动强度）对问候类触发器做语义化时机调节，而非机械按时触发。`urge >= 0.8` → 跳过整点/空闲阈值等特定条件提前触发；`urge < 0.3` → 推迟规则触发（时间到但角色不想说话就不硬凑，下个 tick 重新评估）；中间值 → 正常规则触发保底。WelcomeBack 豁免（用户刚回来必须问候）。通用门控（冷却/时机分数/概率/5 分钟静默期）仍生效，urge 高不绕过"用户在忙"等合理性约束。可通过 `proactive.enable_social_urge_gating` 开关关闭
 - **时间信息注入**（修复"把旧事说成刚发生"问题）：主动问候的提示词三层注入具体时间信息，让 LLM 正确建模事件远度——(1) Icebreaker / MemoryRecall 的 `build_messages` 接收 `idle_seconds` 参数，场景描述从模糊的"warm 级别"改为"用户离开了 1小时23分钟"；(2) 记忆检索结果带相对时间（如"3小时前"），利用 `MemoryItem.timestamp` 计算；(3) 对话历史带相对时间标注（如"[3小时前] role: content"），利用 `ChatMessage.timestamp` 计算。`format_elapsed_lang` / `format_relative_time_lang` 工具函数支持中/英/日三语时长格式化
 - **主动消息完整 prompt 复用**（`proactive/behavior.rs::build_messages_with_full_prompt`）：注入 `prompt_step` 后，主动触发器（系统压力/日出日落/深夜关怀等）的主动消息统一走主对话完整 prompt——复用 `PromptBuildingStep::build_parts`（人设/记忆/环境/关系/心理/用户画像等全量上下文），触发器专属指令、主动消息输出格式、真实工具调用历史作为 `user_input` 末尾段附加（近因效应）；最近对话历史以结构化 `Vec<ChatMessage>` 注入 `PipelineState.messages`，让完整 prompt 的近期自我发言（反重复）/ tone_injection / worldbook 段落真正拿到"最近聊了什么"
@@ -350,7 +352,7 @@ PreProcessing → UserMemorySaving → [QueryRewrite ∥ FastSemantic] → Memor
 - **话题池**：`DailyTopicPool` + `TopicTree` 维护话题新鲜度
 - **生活服务**：`HealthReminder` / `Recommender` / `StressMonitor`
 - **偏好学习**（`preference_learner.rs`）：per-trigger EWMA 算法学习用户对不同触发器的响应概率，被忽略的触发器概率倍率降低，被响应的触发器概率倍率升高，自动适应用户偏好
-- **思绪生命周期**（`thought_lifecycle.rs` + `thought_trigger.rs`）：事件驱动的内心独白与主动表达架构，让"想说点什么"从概率 roll 转为"事件→种子→滋长→阈值表达"的自然积累过程。14 类思绪种子（going_to_rest / waking_up / user_left / user_return / long_silence / weather_shift / environmental_event / festival / activity_pattern / emotion_accumulation / cross_character_spoke / want_to_share_with_roommate / deep_reflection / background）经 5 阶段流转（Seed→Growing→Active→Expressed→Faded），intensity≥0.30 产生内心独白，≥0.70 可主动表达。`want_to_share_with_roommate` 种子检测分享诱因（用户行为类别切换起始强度 0.55 / 显著世界事件 0.60 / 情绪累积 0.50），单次诱因即可接近表达阈值，驱动角色主动找室友聊
+- **思绪生命周期**（`thought_lifecycle.rs` + `thought_trigger.rs`）：事件驱动的内心独白与主动表达架构，让"想说点什么"从概率 roll 转为"事件→种子→滋长→阈值表达"的自然积累过程。16 类思绪种子（going_to_rest / waking_up / user_left / user_return / long_silence / weather_shift / environmental_event / festival / activity_pattern / emotion_accumulation / cross_character_spoke / want_to_share_with_roommate / deep_reflection / background / music_changed / app_switch）经 5 阶段流转（Seed→Growing→Active→Expressed→Faded），intensity≥0.30 产生内心独白，≥0.70 可主动表达。`want_to_share_with_roommate` 种子检测分享诱因（用户行为类别切换起始强度 0.55 / 显著世界事件 0.60 / 情绪累积 0.50），单次诱因即可接近表达阈值，驱动角色主动找室友聊。**种子年龄门**：普通种子播种后需存活 ≥120s 才可产独白（恢复"种子→滋长→独白"的积累语义，避免播种当 tick 立即出独白），高优先级种子（休息/醒来/节日）豁免；**情绪抖动修复**：主导情绪标签变化需伴随强度跳跃 ≥0.15 且 300s 切换冷却才播种 `emotion_accumulation`（同标签萦绕 900s 冷却），修复标签来回横跳导致的频繁独白。新增 `music_changed`（用户开始播放/切歌，900s 冷却）与 `app_switch`（活动日志相邻两条应用类别变化，900s 冷却）两类多维信号种子
 - **多角色去同步（六策略）**（`character_behavior.rs`）：防止多角色同时发声的六层互补机制，所有参数按角色人设差异化配置：
   - **A. Tick 相位抖动**（`TickJitterConfig`）：`compute_adaptive_tick_ms` 对基础间隔施加角色专属随机乘数（Vivian 0.8~1.2 / Nana 0.9~1.4），使两角色的 tick 节拍在物理层自然错开
   - **B. 人设驱动权重分化**（`TimingWeights` + `TriggerModifiers`）：`TimingJudger::score_with_weights` 接受角色专属权重向量（Vivian 偏重 idle 信号 / Nana 偏重 time 信号），`TriggerModifiers` 对阈值/冷却/概率施加角色倍率（Vivian 阈值 ×1.2 冷却 ×1.5 概率 ×0.8 更矜持 / Nana 阈值 ×0.8 冷却 ×0.7 概率 ×1.3 更积极）
@@ -394,7 +396,7 @@ PreProcessing → UserMemorySaving → [QueryRewrite ∥ FastSemantic] → Memor
 
 让 Vivian 在用户离线时自主思考并记录用户活动：
 
-- **内心独白**（`proactive/inner_monologue.rs`）：冷却到期（默认 30 分钟）时调用 LLM "inner_monologue" 任务生成 50-120 字第一人称独白，写入记忆（类型 `InnerMonologue`，标签含 `inner_os` / `inner_monologue` / `autonomous`），不打扰用户。生成时以世界快照 + 心理状态 + 近期对话记忆 + 用户活动日志为信息源，生成后清空活动日志重新记录
+- **内心独白**（`proactive/inner_monologue.rs`）：冷却到期（默认 30 分钟）时调用 LLM "inner_monologue" 任务生成 50-120 字第一人称独白，写入记忆（类型 `InnerMonologue`，标签含 `inner_os` / `inner_monologue` / `autonomous`），不打扰用户。生成时以世界快照 + 心理状态 + 近期对话记忆 + 用户活动日志 + 统一事件账本（`build_prompt_section` 注入近期 `user_ignored` / `user_media_changed` / `user_app_switched` 等事件，让内心 OS 能"消化"被冷落与用户关键操作）为信息源，生成后清空活动日志重新记录。**全局多维门控**（`evaluate_monologue_gates` 纯函数）：产出前依次评估——每日硬上限（默认 12 条，高优先级/深度反思也不可超）→ 最小间隔（默认 25 分钟，当日交互越多间隔越长：`1500 × (1 + min(交互数,10) × 0.1)` 秒；高优先级/深度反思豁免）→ 用户密集操作（`user_present && idle<60s` 时等安静；豁免同上）→ 低唤醒负面情绪（`arousal≤0.15 && valence<0` 时"懒得想"；豁免同上）。被拒时思绪保留、后续 tick 自然重试；通过时同步更新 `last_inner_monologue_ts` / 每日计数（跨天滚动重置）防跨 tick 双发
 - **当前想法**（`mind/thought_synthesis.rs`）：每 60s 调用 LLM 生成角色当前思维片段，输出 JSON `{ thought, social_urge }`——`thought` 为第一人称想法文本，`social_urge`（0-1）表示角色"想主动搭话"的冲动强度，综合考虑心情、距上次对话时间、是否有话可说、用户是否在忙。`social_urge` 写入 `Mind.social_urge` 供 proactive 模块的双向门控使用（见[主动对话编排](#主动对话编排)章节），零额外 LLM 调用成本。LLM 失败时 `social_urge` 保持上次值不重置，避免一次失败丢信号；解析失败时回退纯文本 thought + 默认 0.5 urge
 - **用户活动日志**（`proactive/activity_journal.rs`）：后台原生 Rust 线程（Win32 API，非 PowerShell）每 5 秒轮询前台聚焦窗口标题，仅在变化时记录一条带时间戳的日志（FIFO 上限 100 条）。内心独白生成时 `drain()` 消费并清空，作为 Vivian "观察用户"的信息源。线程仅在总开关开启时运行，平时 sleep 不占 CPU
 
@@ -465,12 +467,13 @@ PreProcessing → UserMemorySaving → [QueryRewrite ∥ FastSemantic] → Memor
 | 感知 | GetCursorPosition / GetIdleState / GetForegroundAppContext / OcrScreenText / GetWindowTree |
 | 输入控制 | MoveMouse / ClickMouse / DragMouse / ScrollMouse / PressKey / Hotkey / TypeText |
 | 壁纸 | WallpaperList / WallpaperSet / WallpaperPause / WallpaperStop（Wallpaper Engine 集成） |
+| 音乐 | music_now_playing（读系统当前播放，SMTC，`Safe`）、music_play（按名字找歌并播放，`Shell` 需确认；已知路径时传 `track_id` 跳过检索，多结果时结果里附候选清单）。检索内嵌在 `music_play` 里，不单独暴露「搜索」工具。搜索范围：显式 `directory` > 配置曲库 > 「音乐/下载/桌面」兜底；歌在别处时桌宠可用 `run_command`（`CODING_TOOLS` 归属 `Both`）`Get-ChildItem -Recurse` 扫任意位置再用 `track_id` 播，注意 `grep_search` 的 `BINARY_EXTS` 硬编码跳过音频、看不到音乐文件。播放类控制优先走 SMTC 定向（`media_control` 的 `target_app`），可指定播放器并有回执；流媒体深链只能打开搜索页（`auto_played=false`） |
 | 笔记本 | create_notebook / list_notebooks / update_notebook / share_notebook / create_html_note / read_file（卡片风格 + 完整 HTML 笔记生成、枚举已有笔记、按路径读文件、微信链接卡片分享） |
 | 技能 | use_skill（按名称激活技能，返回完整正文指引供 LLM 遵循，正文不常驻上下文）、search_skill（按自然语言 BM25 召回可见技能的名称+描述+关键词，不含正文，选定后再 use_skill 加载——与 tool_search 两段式同构）、create_skill（智能体自主沉淀方法论为技能，可带 keywords 检索线索，写入即注册） |
 | 自建工具 | create_tool（智能体把「PowerShell 脚本 + JSON Schema」封装为可执行新工具，stdin 收 JSON 参数 / stdout 出结果，创建经预览卡片授权后立即注册、跨会话持久） |
 | 插件 | create_plugin（把技能 / 可执行工具 / MCP server 声明 / 供应商预设四类贡献打包为完整插件，校验通过原子落盘并**立即装载**——技能与工具下一轮可用、MCP 立即连接；同名 = 整体替换更新，内置插件禁改） |
 | 后台任务/编排 | run_job / manage_job（后台命令执行与轮询）、spawn_subagent / subagent_control（子代理委派/查询/取消，report 回传）、run_workflow（多步编排 + 并行扇出）、delegate_to_work_agent / get_work_status（派活给工作智能体，无工作区也可工作）、notify_companion（工作智能体阶段成果 → 陪伴角色人设化播报）。权限分工：**闸门在"新起子代理"这一侧**——`spawn_subagent` 申报 `Shell` 且需确认；`subagent_control` 只操作智能体自己的任务登记表，申报 `Safe` 且 `check_permissions` 恒放行，查询/取消/延续/取报告全程不弹确认 |
-| MCP | mcp__{server_id}__{tool_name}（外部 MCP server 动态注册） |
+| MCP | mcp__{server_id}__{tool_name}（外部 MCP server 动态注册；浏览器桥为内置连接器，占 `browser` 这个 server id） |
 
 工具行为要点：`GetWindowInfoTool.get_window_info` 返回真实窗口信息（`{x, y, width, height, visible, always_on_top}`），而非模拟数据；`SetPetState` 的 `state` 参数取值限于 `["idle","active","sleeping","thinking","listening"]` 枚举，非法值返回包含允许值列表的错误提示；`SetMood` 的 `mood` 参数取值限于 `["happy","calm","sad","excited","angry","neutral"]` 枚举；`PlayAnimation` 的 `animation` 为自由格式（模型级动作名），仅做非空校验。截屏路径校验：`capture_screen_region` 的 `save_path` 通过 `is_path_safe` 检查路径穿越，`take_screenshot` 限定保存到 `screenshots` 白名单目录。
 
@@ -484,18 +487,18 @@ PreProcessing → UserMemorySaving → [QueryRewrite ∥ FastSemantic] → Memor
 - **工具构建工具 create_tool（能力自进化执行侧）**：把「PowerShell 脚本 + JSON Schema」封装为可执行新工具（[`custom_tools.rs`](file:///g:/vivian-rs/src-tauri/src/tools/custom_tools.rs)）——调用参数 JSON 写入脚本 stdin（`$args = [Console]::In.ReadToEnd() | ConvertFrom-Json`），stdout 作为结果，持久化到 `<用户数据目录>/tools/<name>.json` 并**注册即生效**（注册表实时读取，同一 agent 循环内可立即调用；重启后启动装载 + 30s 热重载）。**创建经预览卡片授权**：`risk()=Shell` + `check_permissions` 显式 ask + executor 能力进化门（宿主自动放行回调不绕过），卡片展示名称/描述/参数 schema/完整脚本/权限等级/动态注入等级，用户三态决定；每次调用仍走 Shell 级三态确认。动态注入等级（`deferred` 参数）自选：始终注入完整 schema 或仅列名经 `tool_search` 按需加载（省 token）；`ToolSearchTool` 改持 `Weak<ToolSystem>` 从活注册表搜索，运行时注册的延迟工具可被搜到。数量无上限
 - **插件打包工具 create_plugin（能力自进化的分发单元）**：把一组相关能力贡献打包为**完整插件**（[`plugin_tools.rs`](file:///g:/vivian-rs/src-tauri/src/tools/builtin/plugin_tools.rs)）——四类贡献点一次提交：`skills`（markdown 提示词知识）、`tools`（可执行工具，契约同 create_tool）、`mcpServers`（stdio MCP server 声明）、`providers`（LLM 供应商预设行）。语义：**校验全绿才落盘**（名字规则 / schema 为 object / 脚本黑名单 / MCP id 与 command / 预设行，任一不合法整体拒绝且错误指明条目），落盘走 `write_plugin_files`（临时目录写满 → rename 替换，更新 = 整体替换非增量，写不出坏数据），落盘后立即 `plugins::load_one`（先卸旧贡献再装新）——技能与工具下一轮可用、MCP server 立即连接。防护：`risk()=Shell` + `check_permissions` 显式 ask，预览卡片展示各贡献点概要 + **MCP 命令行与工具脚本全文**（shell 级敏感点逐条可见）；同名插件 = 更新（version 应递增，旧贡献全部卸载后整体替换，删除的工具定义会真的消失，须传完整贡献列表）；内置插件 `llm-providers` / `plugin-authoring` 禁止覆盖。创建技能见设置 → 插件页可重载/删除插件，插件格式约定由内置插件 `plugin-authoring` 的同名技能承载（见[技能系统](#技能系统skills)）
 - **插件贡献点工具装载时序**（`state.rs`）：插件工具注册（`plugins::load_all_tools`）位于 initialize() 内 `register_builtin_tools` 之后、自建工具装载之前——防影子化 `has_tool` 校验先对内置工具生效，与自建工具同名时自建覆盖插件（用户直接创建的一等公民优先）；技能与 MCP 合并仍在 AppState 构造期（MCP 须早于 `init_all`，插件 server 才会被连接）
-- **工具级开关（`config.tools.disabled_tools`）**：设置 → 工具页签可逐工具启用/禁用（两张卡片网格 + 右侧胶囊开关，附搜索框与启用计数）。禁用的工具**不注入 LLM**（prompt 文本与 FC tools 均过滤，`list_tools_for_scene` / `get_tool_schemas` 统一处理）、**执行入口直接拒绝**（`execute_tool_use` 早退防御 LLM 幻觉调用）；`list_tools` 命令仍返回全部工具供界面重新启用。开关按 `ToolCategory`（文件/网络/系统/记忆/媒体/桌面/MCP）分组收纳为可折叠抽屉，保存后经 `save_config` 热同步到 `ToolSystem` 即时生效
+- **工具级开关（`config.tools.disabled_tools`，分侧）**：设置 → 工具页签可逐工具启用/禁用（卡片网格 + 右侧胶囊开关，附搜索框与启用计数），页签顶部以「陪伴侧工具 / 工作侧工具」两个 tab 切换——**开关按智能体侧别隔离**，同一工具（如 `web_search`）在一侧禁用不影响另一侧。工具归属侧别由 [`registry.rs`](file:///g:/vivian-rs/src-tauri/src/tools/registry.rs) 的 `tool_scope()` **单一真相源**推导（`ToolScope` ∈ `Companion` / `Work` / `Both`，读 `WORK_AGENT_ONLY_TOOLS` 与 `CODING_TOOLS` 两张清单），设置页展示、陪伴侧工具面、工作侧工具面**共用这一处判定**（此前设置页直接 dump 全量注册表，与智能体实际工具面不一致）。配置字段为 `DisabledTools{companion, work}`，自定义反序列化兼容旧的扁平 `Vec<String>`（旧全局禁用 → 两侧都禁用，行为等价）。禁用的工具**不注入该侧 LLM**（陪伴侧 `list_tools_for_scene` / 工作侧 `get_tool_schemas` 各自按本侧集合过滤）、**执行入口按 `agent_kind` 映射的侧别直接拒绝**（`execute_tool_use` 早退防御 LLM 幻觉调用）；`list_tools` 命令仍返回全部工具（附 `scope` / 分侧 `enabled` / `locked` 字段）供界面重新启用。**锁定工具**（`WORK_LOCKED_TOOLS`：`read_file` / `list_dir` / `grep_search`）在**工作侧**不可禁用——它们是只读基座，禁掉后任何编程任务都会立刻失败；设置页对它们渲染「常驻」徽标而非开关；可变更类（`run_command` / `write_file` / `edit_file`）不锁，出于安全关闭它们是用户的合法操作。开关按 `ToolCategory`（文件/网络/系统/记忆/媒体/桌面/MCP）分组收纳为可折叠抽屉，保存后经 `save_config` 热同步到 `ToolSystem` 即时生效
 - **自进化工具前端标识（`Tool::is_custom`）**：自建工具（`DynamicTool`）在设置 → 工具页签卡片以特殊样式区分——虚线主色边框 + 淡紫渐变底 + Sparkles 星标 + 「自进化」徽标（中/英/日三语），与内置工具的实线卡片一眼可辨；`list_tools` 命令返回 `is_custom` 字段驱动
 - **执行参数「-1 = 无限」**：设置 → 工具页「执行参数」区的迭代/轮次上限（文本路径最大迭代、原生 FC 最大轮次、编程智能体最大轮次）填 `-1` 表示不设上限。后端以哨兵值 `0` 存储并消费：`react.rs` FC 循环（`config.tools.max_rounds`，默认 20，`default_tool_max_rounds()` 同源）与 `tool_call_manager.rs` 反馈循环解为 `usize::MAX`（不再钳到 4 轮）、`coding_agent.rs` 编程循环跳过预算检查与 2/3·5/6 软预算提醒（防溢出）；循环仍由 LLM 停止调用工具 / `goal_completed` / 停滞检测 / 收益递减检测自然终止，不会失控
 - **工具反馈路径三语化 + PERSONA_LOAD**（`tool_call_manager.rs::build_feedback_prompt`）：工具执行结果反馈提示词按界面语言三语化（`## 工具执行结果` / `## Tool Execution Results` / `## ツール実行結果`），顶部注入 `build_tool_minimal_identity`（携带 PERSONA_LOAD 标志 + 角色精简人设）+ `tool_minimal_output_format`（按界面语言约束输出语言），末尾按角色区分人设语气红线（Nana 温柔从容 / Vivian 傲娇嘴硬）并禁止客服/助手语气，与主对话保持一致
 - **浏览器可信来源白名单**（`tools/trusted_origins.rs`）：对高信任站点做规范化精确/通配匹配，命中时 `browser_navigate` 直接放行免确认，把信任边界收敛到白名单站点。两级合并——内置默认（`BUILTIN`：github/bilibili/zhihu/baidu/bing/google/duckduckgo/wikipedia/doubao/taobao/jd）+ 用户配置 `<用户数据目录>/trusted_origins.json`（`{"origins": [...]}`，支持 `example.com` 子域通配 / `*.example.com` 显式通配 / `exact:example.com` 精确匹配）。首次运行自动生成带 `_hint` 说明的模板；文件变更通过 mtime 检测自动热重载，无需重启
 - **可观测性**：`ToolObservability` + `ToolMetrics` + `ToolCallRecord`
-- **沙箱**：`ToolRiskLevel` / `ToolSafetyProfile` / `ProtectionMode` 三层安全模型。路径参数递归遍历 JSON 参数树提取所有可疑路径值，不再依赖固定参数名；危险命令检测覆盖 `rm -rf` / `rm -fr` / `rm -r -f` / `--recursive --force` / `format c:` / `del /f /s` 等多种变体组合；`normalize_path`（`types.rs`）真正解析父目录分量（栈 `pop()` 抵消 `..`，`/a/b/../c` 归一为 `/a/c`），与 `sandbox.rs` 的 `normalize_path_buf` 对齐，避免简单过滤 `..` 导致权限评估错路径；无内置安全档案的工具经通用检查（危险命令 / 路径穿越）后放行，风险分级交由下游权限系统（access_level × risk 矩阵 + always 规则 + 用户确认）统一管理
-- **风险等级申报**：每个工具通过 `risk()` 声明 `ToolRiskTier`（6 级，副作用由低到高）：`Safe` < `FsRead` < `FsWrite` < `Shell` < `Network` < `InputControl`。与 `AgentAccessLevel`（`read-only` / `fs-read` / `fs-write` / `full-control`）经 `policy_for()` 矩阵共同决定 `allow` / `ask` / `deny`。定级规则（逐条向下匹配，命中即定级）：模拟键鼠/剪贴板 → `InputControl`；联网或外发 → `Network`；执行进程 / 拉起后台智能体 / 改系统状态 → `Shell`；写盘 → `FsWrite`；读盘 → `FsRead`；皆否 → `Safe`。当前分布：`Safe` 24 / `FsRead` 16 / `FsWrite` 19 / `Shell` 14 / `Network` 2 / `InputControl` 4。权限矩阵 Deny 时返回提示并引导用户在设置中提升访问级别（如 InputControl 需 FullControl）；always 规则优先级统一为 `always_deny > always_ask > always_allow`，`always_allow` 仍优先于矩阵 Ask 判定。**两个易踩的坑**：① `Tool::risk()` 的 trait 缺省值是 `Safe`，而 `Safe` 在任何访问级别下都直接放行——有副作用的工具忘了覆盖 `risk()` 等于悄悄放行，新工具必须显式声明；② 默认级别 `full-control` 下除 `InputControl` 外全部 `Allow`，所以调整风险等级只影响低权限级别、不会给默认用户新增弹窗。当前分布 Safe 24 / FsRead 16 / FsWrite 19 / Shell 14 / Network 2 / InputControl 4（合计 79 个工具），与 CODE_WIKI 工具权限节一致
+- **沙箱**：`ToolRiskLevel` / `ToolSafetyProfile` / `ProtectionMode` 三层安全模型。路径参数递归遍历 JSON 参数树提取所有可疑路径值，不再依赖固定参数名；危险命令检测覆盖 `rm -rf` / `rm -fr` / `rm -r -f` / `--recursive --force` / `format c:` / `del /f /s` 等多种变体组合；`normalize_path`（`types.rs`）真正解析父目录分量（栈 `pop()` 抵消 `..`，`/a/b/../c` 归一为 `/a/c`），避免简单过滤 `..` 导致权限评估错路径；**「路径是否在授权范围内」全链路只走一个口径** `tools::types::is_path_within_any(path, primary, extras)`（`ToolUseContext::is_path_authorized` 委托给它），沙箱硬闸门（参数路径 + 命令文本）、各工具 `validate_input` 与 `@-引用解析` 共用，四处结论必须一致；**shell 命令是一段不透明程序**，`extract_paths` 只认 path-ish 键名（`command` / `cmd` 不是），抓不到命令内容，故额外做一层**尽力而为**的命令文本检查（`split_shell_tokens` 引号感知切词 + `extract_literal_absolute_paths` 只认盘符绝对 / UNC），字面绝对路径越界即拒；这是检测不是边界——动态拼装（`$p='D:'; …`）与经子进程间接访问都漏，真正封死需 OS 级约束（Job Object / 受限令牌 / AppContainer）；无内置安全档案的工具经通用检查（危险命令 / 路径穿越）后放行，风险分级交由下游权限系统（access_level × risk 矩阵 + always 规则 + 用户确认）统一管理
+- **风险等级申报**：每个工具通过 `risk()` 声明 `ToolRiskTier`（6 级，副作用由低到高）：`Safe` < `FsRead` < `FsWrite` < `Shell` < `Network` < `InputControl`。与 `AgentAccessLevel`（`read-only` / `fs-read` / `fs-write` / `full-control`）经 `policy_for()` 矩阵共同决定 `allow` / `ask` / `deny`。定级规则（逐条向下匹配，命中即定级）：模拟键鼠/剪贴板 → `InputControl`；联网或外发 → `Network`；执行进程 / 拉起后台智能体 / 改系统状态 → `Shell`；写盘 → `FsWrite`；读盘 → `FsRead`；皆否 → `Safe`。当前分布：`Safe` 24 / `FsRead` 16 / `FsWrite` 19 / `Shell` 14 / `Network` 2 / `InputControl` 4。权限矩阵 Deny 时返回提示并引导用户在设置中提升访问级别（如 InputControl 需 FullControl）；always 规则优先级统一为 `always_deny > bypass > always_ask > always_allow`——**显式拒绝是最高优先级，Bypass 模式也不能越过**，`always_allow` 仍优先于矩阵 Ask 判定。**两个易踩的坑**：① `Tool::risk()` 的 trait 缺省值是 `Safe`，而 `Safe` 在任何访问级别下都直接放行——有副作用的工具忘了覆盖 `risk()` 等于悄悄放行，新工具必须显式声明；② 默认级别为 `fs-write`：工作区读写与联网直接允许，Shell 需要确认，InputControl 被拒绝；`full-control` 必须由用户显式启用。当前分布 Safe 24 / FsRead 16 / FsWrite 19 / Shell 14 / Network 2 / InputControl 4（合计 79 个工具），与 CODE_WIKI 工具权限节一致
 - **文件操作安全策略**：6 个文件工具（read_file / write_file / edit_file / list_directory / search_files / grep）调用 `tools::sandbox::is_path_safe` 进行路径穿越校验（拒绝 `../` / `..\` / 绝对路径越界）；`is_sensitive_path` 拒绝写入系统敏感目录（Windows / Program Files / System32 等）；写入操作前再校验目标路径合法性。文件操作强制递归深度限制（最大 10 层）、结果条数上限（grep 500 / list_directory 5000 / search_files 1000）、`read_file` 使用 `BufReader` 按行读取并支持 offset/limit 跳过，grep 正则使用 `Lazy<Regex>` 预编译复用，所有阻塞 IO 操作均通过 `tokio::task::spawn_blocking` 隔离到线程池避免阻塞 async 运行时。**编码自适应读取**：`read_file` 与 `grep` 先采样前 8KB，经 `chardetng` 检测编码（UTF-8 走快速路径），再用 `encoding_rs` 逐行解码（`read_until(b'\n')` 按字节分行，0x0A 不会作为 GBK/UTF-8 尾字节出现，行切分安全），GBK 等非 UTF-8 文件不再返回乱码或中断；grep 遇到非 UTF-8 行时按检测编码解码后继续匹配，而非在首个非法行处终止
 - **Shell 执行禁用**：`brain::computer_control::execute_shell` 直接返回错误，防止 LLM 通过 shell 命令实现 RCE；`computer_control::open_app` 使用白名单映射表（app_map），未注册的应用名拒绝启动。`open_application` 工具内置 16 种危险程序黑名单（cmd.exe / powershell.exe / wscript.exe / rundll32.exe / regedit.exe 等），路径形式输入做文件名校验，纯应用名通过 where.exe/PATH/Program Files/Start Menu/UWP 五级解析链查找，整个解析过程通过 `spawn_blocking` 异步执行；UWP 解析路径对 AppID 实施 `is_safe_appid` 白名单校验（仅允许字母/数字/`.`/`_`/`-`/`!`），防止 PowerShell 注入；打开网址请使用 `open_url`（仅允许 http/https 协议，拒绝 file:///javascript:/data: 等危险协议）；剪贴板操作使用 `clip.exe` 通过 stdin 管道写入，不拼接 PowerShell 命令避免命令注入
 - **GPT-SoVITS 服务安全**：服务状态通过 `Arc<RwLock<ServiceState>>` 缓存实时更新，HTTP Client 复用连接池；端口占用杀进程时精确解析 netstat 输出匹配目标端口，避免误杀无辜进程
-- **用户确认**：权限矩阵判定 Ask 的操作通过 `tool:confirmation_request` 事件发起三态确认（拒绝 / 放行一次 / 始终允许），前端在 toast 子窗口渲染三按钮确认卡片，30 秒倒计时无操作自动拒绝，pending 请求带 5 分钟 TTL 自动清理避免内存泄漏。「始终允许」分两种范围：`open_application` 写入应用信任列表（`%APPDATA%\vivian\trusted_apps.json`，持久生效），其余工具写入会话级放行列表（应用重启后重置）；命中信任列表或会话放行的工具直接执行、不弹确认。高危工具默认始终需要确认：`CONFIRMATION_REQUIRED_TOOLS` 列表（10 个工具——文件 6 个 `read_file` / `write_file` / `edit_file` / `list_directory` / `search_files` / `grep`，屏幕 2 个 `take_screenshot` / `screenshot_analyze`，任务/待办删除 2 个 `cancel_scheduled` / `delete_todo`）跳过矩阵直接走 Ask 确认流，即使权限系统判定 Allow；用户仍可用 `always_allow` / `always_deny` / `bypass` 规则覆盖。该名单与风险等级正交——例如 `take_screenshot` 的 `risk()` 是 `Safe`（无副作用）但因隐私敏感仍强制确认
+- **用户确认**：权限矩阵判定 Ask 的操作通过 `tool:confirmation_request` 事件发起三态确认（拒绝 / 放行一次 / 始终允许），前端在 toast 子窗口渲染三按钮确认卡片，30 秒倒计时无操作自动拒绝，pending 请求带 5 分钟 TTL 自动清理避免内存泄漏。「始终允许」分两种范围：`open_application` 写入应用信任列表（`%APPDATA%\vivian\trusted_apps.json`，持久生效），其余工具写入会话级放行列表（应用重启后重置）；命中信任列表或会话放行的工具直接执行、不弹确认。高危工具默认始终需要确认：`CONFIRMATION_REQUIRED_TOOLS` 列表（10 个工具——文件 6 个 `read_file` / `write_file` / `edit_file` / `list_directory` / `search_files` / `grep`，屏幕 2 个 `take_screenshot` / `screenshot_analyze`，任务/待办删除 2 个 `cancel_scheduled` / `delete_todo`）跳过矩阵直接走 Ask 确认流，即使权限系统判定 Allow；`always_allow` / `bypass` 可让名单内工具免确认，但 `always_deny` 优先级高于两者，命中即拒绝。该名单与风险等级正交——例如 `take_screenshot` 的 `risk()` 是 `Safe`（无副作用）但因隐私敏感仍强制确认
 - **原生 function calling**：当服务商支持时走结构化 tools 字段路径，不占 prompt token、调用更准确
 - **工具语义驱动的 relay prompt**（`ToolSemantics`）：原生 FC 路径中，LLM 停止调用工具后的"转述 vs 直接确认"由工具**自声明语义**决定。`Tool` trait 默认方法 `semantics()`——`is_read_only()` 为真推导为 `Retrieval`（产出信息，收尾需 relay 转述关键内容）、否则为 `Action`（改变状态，收尾直接确认）；个别工具可覆盖（如 `observe_user` 写入观察记录但仍需人格 relay，故显式声明 `Retrieval`）。收尾阶段按本轮实际调用过的工具语义聚合，必要时注入 relay prompt 要求 LLM 转述而非只回"好的"，动作类则沿用已有回复避免吞消息或错道歉
 - **搜索失败提示优化**：`web_search` 工具在无结果时返回明确提示，说明可能原因（网络/代理不可用或查询无匹配），并建议 LLM 基于已有知识回答而非反复调用同一查询，避免无效重试浪费 token
@@ -543,11 +546,11 @@ PreProcessing → UserMemorySaving → [QueryRewrite ∥ FastSemantic] → Memor
 
 编程智能体以会话式 agent-loop 形态运行，让桌宠角色具备**结对编程**能力：在记忆观察器的「工作」页签选择项目目录后，用自然语言让角色阅读、修改、构建并调试代码。角色（Vivian / Nana）会按人设语气工作，但代码与结论保持严谨。
 
-- **编程工具闭环**（`tools/builtin/coding_tools.rs`）：`write_file`（UTF-8 写入、自动建父目录）/ `edit_file`（精确字符串替换，旧串须文件中唯一或显式 `replace_all`，防误改；成功后内嵌 unified diff——每处替换一行 hunk 含上下文、相邻替换自动合并、6 hunk / 100 行 / 4000 字符体积受控，供前端 diff 渲染与 LLM 感知自身改动）/ `run_command`（PowerShell 非交互执行，120s 超时、输出按 8000 字符截断、破坏性命令黑名单直接拒绝、`CREATE_NO_WINDOW` 隐藏控制台）/ `grep_search`（递归内容搜索，跳过 .git/node_modules/target 与二进制）/ `list_dir`（树状目录，深度受限），另含编排与语义能力——`run_workflow`（一次提交多步工具脚本，连续 `parallel:true` 步骤扇出并发执行）/ `lsp_query`（经语言服务器做定义/引用/实现/hover 语义查询）/ `notify_companion`（阶段成果发给陪伴人格播报）。全部经 `sandbox::is_path_safe` 校验并申报风险分级（FsRead/FsWrite/Shell），写/执行类自动进入审批矩阵；**工作区写入免确认**——执行器按工具上下文注册已授权工作目录，`workspace_write` / `full_access` 会话在工作区内写文件直接放行（沙箱路径校验 + read_only 权限矩阵 + 破坏性命令黑名单仍是兜底防线），`read_only` 会话照旧拒绝写入；编程会话的工具执行注入沙箱确认回调，跳过沙箱层"首次/前 N 次使用"确认（该层在会话式场景下无弹窗回调，只会直接报错拦截）
+- **编程工具闭环**（`tools/builtin/coding_tools.rs`）：`write_file`（UTF-8 写入、自动建父目录）/ `edit_file`（精确字符串替换，旧串须文件中唯一或显式 `replace_all`，防误改；成功后内嵌 unified diff——每处替换一行 hunk 含上下文、相邻替换自动合并、6 hunk / 100 行 / 4000 字符体积受控，供前端 diff 渲染与 LLM 感知自身改动）/ `run_command`（PowerShell 非交互执行，120s 超时、输出按 8000 字符截断、破坏性命令黑名单直接拒绝、`CREATE_NO_WINDOW` 隐藏控制台）/ `grep_search`（递归内容搜索，跳过 .git/node_modules/target 与二进制）/ `list_dir`（树状目录，深度受限），另含编排与语义能力——`run_workflow`（一次提交多步工具脚本，连续 `parallel:true` 步骤扇出并发执行）/ `lsp_query`（经语言服务器做定义/引用/实现/hover 语义查询）/ `notify_companion`（阶段成果发给陪伴人格播报）。全部经 `sandbox::is_path_safe` 校验并申报风险分级（FsRead/FsWrite/Shell），写/执行类自动进入审批矩阵；**工作区写入免确认**——执行器把工具上下文的**主工作区 + 全部附加工作区**注册为已授权目录（附加目录各自带只读标记），`workspace_write` / `full_access` 会话在这些目录内写文件直接放行（沙箱路径校验 + read_only 权限矩阵 + 破坏性命令黑名单仍是兜底防线），`read_only` 会话照旧拒绝写入；嵌套工作区按**最长匹配**（最具体）判定权限，避免结论随 HashMap 迭代顺序摆动。编程会话注入的沙箱确认回调按「**有没有工作区** × **有没有应答者**」分三形态：有工作区 → 恒放行（路径校验才是边界，沙箱层"首次/前 N 次使用"确认在该层无弹窗回调、只会直接报错拦截，故跳过）；无工作区 + 主 agent（有用户）→ 交回前端三态确认弹窗；无工作区 + 子 agent（无人应答）→ 恒拒绝，快速失败后由子 agent 把需求写进结果交回上层。**Shell 类工具必须在这一层兜住**：`run_command` 的参数里没有可识别的路径键，绕过参数路径校验，所以"无工作区时不许改文件"这条规则光靠参数校验不成立。有工作区时则由沙箱的命令文本路径检查（字面绝对路径越界即拒）覆盖，两者分工：确认回调管「没有路径边界时要不要放行」，命令文本检查管「有边界时命令有没有绕出去」
 - **会话式 agent 循环**（`brain/coding_agent.rs`）：用户消息 → LLM（原生 function calling，仅暴露编程白名单工具）→ 工具逐个顺序执行并经 `execute_tool_use` 走主对话同一套沙箱/守卫 → 结果按 `tool_call_id` 关联回填历史 → 循环直到 LLM 产出纯文本回复。轮次预算由 `tools.max_coding_rounds` 控制（默认 48，设置-工具可调）：循环内置软预算提醒（用到 2/3、5/6 时注入收尾提示）、停滞检测（相同工具+参数连续重复 ≥3 次 / 同一工具连续失败且错误摘要相同 ≥3 次时注入"重新分析"），本轮回有实质进展（成功写/改/执行）时耗尽自动续轮一次（+base/3，封顶 96），耗尽且无进展则硬停止并弹出去向选择条（继续 / 补充说明后继续 / 停止）。历史消息裁剪 60 条 + 工具结果头尾裁剪（超 6000 字符保留头部 2/3 + 尾部 1/6，中段折叠标记，尾部的退出码/报错/diff 收尾不丢失）控制上下文体积；可随时取消
 - **工作待办清单（`work_todo_write`，整表替换）**：复杂/多步任务先建清单——每条一个具体步骤，三态（pending / in_progress / completed）。工具每次提交**完整清单**（整表替换，没有局部修改、没有按下标的单条编辑），强制规则内嵌在工具描述（每步先建 / 完成即标不得批量 / 至多一项进行中 / 单步任务跳过）。清单经 `render_work_plan` 注入每一轮 system prompt 成为「当前执行计划」，模型无需主动回读；清单全部完成但循环仍在跑时注入一次收尾提醒；新一轮对话若清单已全部完成则归档清空，否则跨轮保留（长任务可多轮推进）。随会话持久化
 - **方向询问（`work_ask_user`，选择题）**：推进方向确实分叉、且读代码/跑命令都无法判断该走哪条时，给出 2-4 个选项问用户——工具 `call()` 挂起等待（oneshot + TTL 30 分钟），等待期间不产生 token、不消耗轮次预算；用户在编程面板点选 / 自由输入 / 跳过，答案以工具返回值回流（不伪装成用户消息，上下文保持 append-only）。会话取消时联动撤销挂起中的问题，避免 loop 永久挂起
-- **子 agent 委派（`work_delegate` / `work_job`）**：把自包含子任务交给**独立上下文**的子 agent（自己的消息历史 + 工具循环，只回传最终文本，中间探索不进主上下文）。前台模式 `await` 结果；`background: true` 派到后台立刻返回任务号，主 agent 继续干活——任务终结后结算经收件箱**主动注入下一轮上下文**（模型不必记得回查），`work_job` 可提前取回 / 取消 / 列表。委派深度上限 2 层；子 agent 默认只读探索 + 命令工具，**不能向用户提问**（未决问题写进最终结果带回父级）
+- **子 agent 委派（`work_delegate` / `work_job`）**：把自包含子任务交给**独立上下文**的子 agent（自己的消息历史 + 工具循环，只回传最终文本，中间探索不进主上下文）。前台模式 `await` 结果；`background: true` 派到后台立刻返回任务号，主 agent 继续干活——任务终结后结算经收件箱**主动注入下一轮上下文**（模型不必记得回查），`work_job` 可提前取回 / 取消 / 列表。委派深度上限 2 层；子 agent 默认只读探索 + 命令工具，**不能向用户提问**（未决问题写进最终结果带回父级）。**工作区范围由父会话限定**——`workspaces` 参数省略则继承父会话全部，给数组则只用给定的这些，给 `[]` 则一个都不给；只能从父会话自己拥有的工作区里选（传了不属于本会话的目录直接报错，否则等于绕过父会话的沙箱边界），且只读工作区只能进附加列表（主工作区的可写性由访问级别决定，把它提成主根会凭空放大授权）。**零工作区的子 agent = 不允许修改任何文件**（可读、不可写、不可执行命令），受限子 agent 会被提示把「需要别处的信息」写进最终结果交回上层而不是反复试错
 - **收益递减检测**（`brain/budget.rs::OutputBudgetTracker`）：防"空转"——每轮循环结束后按本轮 LLM 输出 token（无 usage 上报时按工具结果摘要字符近似）+ 实质进展标志记录产出，连续 3 轮低产出且无实质进展（写/改/执行类工具成功）判定收益递减，提前提示收尾停机（`record` / `record_chars` 双模式适配有/无 usage 场景），与 `DoomLoopTracker` 的"完全相同的重复调用"互补——前者抓短暂回复空转，后者抓同签名重复
 - **流式输出与思维链**：LLM 文本逐字转发（`coding:chunk` 打字机）、推理链增量（`coding:thinking_chunk`）在「思考占位」内渐进展开灰色推理文本，避免长时间静默
 - **会话摘要入库记忆**：每轮 agent loop 结束后，把本轮对话（用户请求 → 工具调用 → 助手回复）经 LLM 摘要（memory 路由，失败退化为规则摘要）写入会话所属角色的记忆库（ShortTerm，tags `coding_session`/`work`，metadata 带 `source=session_id` / 工作目录 / 说话人），让角色在主对话中可回忆自己做过的工作
@@ -559,7 +562,7 @@ PreProcessing → UserMemorySaving → [QueryRewrite ∥ FastSemantic] → Memor
 - **会话级运行时配置**：每会话独立持久化 `permission`（read_only / workspace_write / full_access）、`model_id`（工作智能体模型，与路由热切换同步）、`reasoning_level`（low / medium / high，low 关闭思维链）。权限经 `ToolUseContext.access_level` 会话级覆盖接入工具审批矩阵（read_only 只读、workspace_write 文件写入、full_access 完全控制），模型切换复用 `select_work_model` 运行时热切换
 - **工作模型预设源**：候选模型在设置 → LLM 页签「工作智能体模型」区维护（每项含别名/服务商/模型/端点/密钥，支持增删改，删除为垃圾桶图标按钮；供应商下拉复用完整厂商预设列表、别名可改。不再提供「设为当前工作模型」按钮——当前选中统一在编程页模型下拉切换，编程页切换经 `select_work_model` 同步 `active_work_model`），列表经 `work_models` 持久化、当前选中经 `active_work_model` 持久化，供编程页模型下拉回显与 `ModelRouter` 覆盖恢复。前端不再暴露 temperature 与单次输出预算——工作智能体请求统一省略 `temperature`（服务端默认，推理模型兼容），`max_tokens` 由后端按服务商分级默认（`work_model_default_max_tokens`：Claude 64000 / Gemini 65536 / OpenAI·Qwen·GLM·Grok 32768 / Moonshot·豆包·Mistral 16384 / DeepSeek·SiliconFlow·Groq·Together·OpenRouter·文心·星火·本地 8192 / 未知 8192），给足编程输出能力又不触发各家硬上限
 - **角色化系统提示**：system prompt 按 `char_id` 注入人设（Vivian 傲娇吐槽 / Nana 温柔友好），限定 Windows + PowerShell 环境与工作目录沙箱边界，强调"先看（list_dir/grep/read）再动手、局部用 edit_file、改后跑命令验证"。**能力进化角色定位**：白名单含进化工具（create_skill / use_skill / search_skill / create_tool / create_plugin），system prompt 明确"你也是能力进化事件的执行主体"并引导用法——任务中总结出可复用流程用 create_skill 沉淀、缺少可执行原语用 create_tool 构建（预览卡片授权）、一组相关能力要整体装卸时用 create_plugin 打包
-- **编程页 UI（Codex 布局 + 手账风格）**：入口为 [`CodeAgentPageNew.tsx`](file:///g:/vivian-rs/src/components/mind-inspector/pages/CodeAgentPageNew.tsx)，左栏为会话/工作区管理（会话按工作区分组或单列表、支持搜索、最近更新/手动排序、工作区固定不可改），中栏为对话流 + 底部输入卡片（`/` 斜杠命令、图片多模态草稿、权限/模型/推理选择），右栏为检查器（概览 / 轨迹 / 内嵌终端，可整体收纳）；左右侧边栏均可拖拽调整宽度。消息按角色区分渲染：助手消息经 `MarkdownText` 做完整 Markdown 排版（标题 / 列表 / 任务清单 / 表格 / 引用 / 代码块 / 行内码 / 链接，本地文件链接渲染为文件卡片并在右侧预览打开，见 [`codeMarkdown.tsx`](file:///g:/vivian-rs/src/components/mind-inspector/pages/codeMarkdown.tsx)），文件类工具（read/write/edit）以手账风格代码块 + unified diff 高亮展示，非 Markdown 文本文件 read 结果经 SourceFileView 以 highlight.js 语法高亮 + 行号展示并支持行内编辑保存（coding_write_file）与超大文件分页懒加载；`edit_file` 卡片折叠时摘要行即显示 `+N −M` 改动量。空态下发送消息会先弹目录选择自动建会话；无工作模型时发送改为高亮模型下拉并引导跳转设置 LLM 页
+- **编程页 UI（Codex 布局 + 手账风格）**：入口为 [`CodeAgentPageNew.tsx`](file:///g:/vivian-rs/src/components/mind-inspector/pages/CodeAgentPageNew.tsx)，左栏为会话/工作区管理（会话按工作区分组或单列表、支持搜索、最近更新/手动排序、「新会话」主点击直接建会话 + 下拉箭头保留手动选目录），中栏为对话流 + 底部输入卡片（`/` 斜杠命令、图片多模态草稿、权限/模型/推理选择），右栏为检查器（概览 / 轨迹 / 内嵌终端，可整体收纳）；左右侧边栏均可拖拽调整宽度，收起 / 呼出为 320ms 缓动过渡（内容整块滑出而非被逐帧压扁，拖拽调宽时自动关掉过渡，否则宽度会滞后于鼠标）。消息按角色区分渲染：助手消息经 `MarkdownText` 做完整 Markdown 排版（标题 / 列表 / 任务清单 / 表格 / 引用 / 代码块 / 行内码 / 链接，本地文件链接渲染为文件卡片并在右侧预览打开，见 [`codeMarkdown.tsx`](file:///g:/vivian-rs/src/components/mind-inspector/pages/codeMarkdown.tsx)），文件类工具（read/write/edit）以手账风格代码块 + unified diff 高亮展示，非 Markdown 文本文件 read 结果经 SourceFileView 以 highlight.js 语法高亮 + 行号展示并支持行内编辑保存（coding_write_file）与超大文件分页懒加载；`edit_file` 卡片折叠时摘要行即显示 `+N −M` 改动量。空态下发送消息会先自动建会话（用设置里的默认工作区，未配置则建成无工作区模式会话，均不弹目录选择框）；无工作模型时发送改为高亮模型下拉并引导跳转设置 LLM 页
 - **斜杠命令**：输入 `/` 弹出命令菜单（按命令名/标签字母模糊筛选，↑↓ + Enter 选择，选中命令插入输入框补参数；命令名后输入空格自动收起菜单）。后端 `handle_slash_command` 拦截分发 6 个命令——`/goal`（查看/设置/清除会话目标，注入 system prompt）/ `/plan`（切换计划模式；`/plan approve` 把最近方案固化为已批准执行依据，`/plan off` 退出）/ `/compact`（较早历史交 LLM 压缩成摘要替换进上下文）/ `/permission`（查看/切换权限预设）/ `/feedback`（记录反馈）/ `/export`（导出会话为 Markdown）。命令结果以消息流展示，不消耗 agent loop 轮次
 - **@-mention 文件引用**：输入框输入 `@` 弹出工作目录文件选择器（标签/路径模糊筛选，↑↓+Enter 选中），选中插入 `@路径`；发送时后端读取所引文件内容注入上下文（沙箱校验、截断上限），消息气泡以文件图标展示引用，读取失败显式标注错误
 - **产物面板与消息操作**：会话概览侧展示「产物」卡片（write/edit 成功写入的文件清单，相对路径 + 全文定位）；每条消息 hover 提供复制 / 有帮助 / 没帮助（消息级评分）/ 从此处派生新会话（fork，复制该消息为止的历史为独立会话）
@@ -568,9 +571,11 @@ PreProcessing → UserMemorySaving → [QueryRewrite ∥ FastSemantic] → Memor
 - **LSP 语义导航卡片**：`lsp_query` 的定义/引用/实现结果渲染为按文件分组的可点击导航行（`:行:列` + 打开文件，经系统默认编辑器打开），hover 结果渲染为滚动等宽文本
 - **可视化组件卡片（`show_widget`）**：工作智能体把 SVG 流程图/架构图/时序图/状态图渲染为编程页内联卡片——约束系统（viewBox 固定 680 宽、颜色显式填、暖纸色板、禁渐变阴影/emoji/script/事件、字体≥11px）内嵌在工具 description，随 schema 每轮注入；SVG 作为工具载荷（`widgets` 字段）单向推给前端、不进 LLM 上下文（画图不污染后续对话 token）；前端经 dompurify 白名单 sanitize 后内联渲染，失败降级为可展开的原始代码卡片。与 `send_image` 同走 `push_agent_*` 通道，随会话持久化
 - **阶段成果播报（notify_companion）**：工作智能体在到达阶段性节点（阶段完成/验证通过/重要发现）时，把成果经 `notify_companion` 工具发给陪伴人格——由陪伴角色走完整陪伴管线（记忆/情绪/人设生效）生成一两句人设化播报，经 `proactive:bubble` 主动对用户说话（TTS + 桌宠气泡 + 聊天记录），并写入对话历史与记忆（channel=proactive，trigger=work_report）；每角色 60 秒节流防止刷屏，节流期内的成果由轮末摘要自然入库
-- **工作区固定**：工作区只在「新建任务」时通过目录选择器确定，创建会话后固定不可更改；工作区分组标题支持重命名（本地显示名）与删除工作区（删除其下会话）。**无工作区模式**：陪伴侧 `delegate_to_work_agent` 派发的任务允许不绑定工作区（未显式指定且无历史工作区时）——system prompt 呈现"未选择（无工作区模式）：文件操作使用绝对路径、无目录沙箱、写入前确认"，轻量任务与 create_skill/create_tool 等进化事件无需先选目录即可执行
+- **多工作区（主工作区 + 附加工作区）**：一个会话可以挂多个工作区，「是否在授权范围内」取并集。**主工作区**唯一，决定相对路径解析、项目记忆位置（`.vivian/memory.md`）、终端 cwd 与 system prompt 环境块；**附加工作区**只扩大可访问范围，每个自带只读标记。管理入口是会话顶栏的**工作区芯片**（`+N` 徽标提示附加数量），展开后可挂载目录、逐个切换只读/可写、移除，以及更换主工作区——**更换时原主工作区降级为附加工作区而非被丢弃**（换主目录不该让 agent 静默失去对原目录的访问权）。工作区分组标题支持重命名（本地显示名）与删除工作区（删除其下会话）
+- **「新会话」不再强制选目录**：主点击直接建会话——设置里配了默认工作区就建在该目录，未配置则建成**无工作区模式**会话；配置了默认工作区但目录已失效时才退回目录选择框（配置过期不静默降级成无沙箱会话）。下拉箭头保留手动入口（使用默认工作区 / 选择工作区…）。**无工作区模式**：不绑定目录，文件读取可用绝对路径、没有目录限制，但**没有可写工作区——写入与执行命令一律需用户逐次确认**（Shell 类工具绕过路径校验，必须在确认层兜住）；陪伴侧 `delegate_to_work_agent` 派发的轻量任务与 create_skill/create_tool 等进化事件无需先选目录即可执行
 - **图片发收**：用户侧——微信聊天支持文件选择/摄像头 → `send_image_message` 多模态理解；编程页支持拖放/文件选择上传多图预览（`AttachmentRail`）→ 随 `coding_send_message` 带 base64 图片发给 LLM 理解。智能体侧——工具 `send_image` 把本地图片（生成的图表、截屏、项目里的图片文件）发给用户：编程会话下作为助手消息追加（base64 内联随会话持久化，恢复时直接渲染）；微信聊天下写入对话历史并 emit `chat:assistant_image` 实时插入图片气泡，窗口不可见时弹消息横幅，caption 作为跟进文本。双通道路由由 `session_id` 是否命中编程会话自动判定；图片副本持久化存储于 `<用户数据目录>\images\`
 - **内嵌终端**（`TerminalPanel`，xterm.js + ConPTY）：终端标签位于右栏检查器内，标签名沿用工作区目录名；标签可多开、可关闭，终端区域随右栏整体收纳/展开，不随切页销毁
+- **置顶摘要**（`PinnedSummary`）：主工作区右侧的信息列，仿 Codex 的「环境信息」面板。它是**贴在右缘的一条信息列**——对话消息区、输入区、统计行、「回到底部」按钮统一向右让出「面板宽 + 18px 呼吸缝」，正文永远不会被盖住；主工作区的滚动条仍留在整条工作区的最右侧（在卡片右边），卡片与对话区之间也没有分隔线。窗口不够宽时先压缩面板自身（250 → 186），再压正文区，全程 320ms 过渡（与两侧边栏同一条曲线）；呼出 / 收起是**两轴同时**的——横向宽度边让位边张开，纵向由 `clip-path` **从上往下揭开 / 从下往上收掉**，动画期间卡片内容不横向平移。整块的收起 / 呼出由顶栏的便签按钮（模式下拉与右侧检查器按钮之间）控制，可见性跨会话记住、默认展开。两块内容——**环境信息**：变更 `+N -M` 与改动文件数、仓库目录、当前分支、与上游的领先/落后、最近提交；`提交或推送` 内联表单（执行前弹确认框，写明会暂存全部改动）与 `比较分支`（选基准分支看领先/落后/增删/提交列表）。**来源**：插件 / 技能 / MCP 三类外部来源的计数汇总，展开可看插件明细与信任状态（绿=生效 / 黄=清单变更待重认 / 灰=未信任）。数据来自新增的 [`commands/git.rs`](file:///g:/vivian-rs/src-tauri/src/commands/git.rs)（走系统 git CLI，未跟踪文件的行数也计入 `+N`）
 
 ### 内容创作与观察
 
@@ -628,15 +633,18 @@ PreProcessing → UserMemorySaving → [QueryRewrite ∥ FastSemantic] → Memor
 
 不再依赖 LLM 单一触发路径，新增 4 大类纯规则触发机制（零 LLM 开销、即时响应），所有触发通过概率门控 + 冷却时间避免机械重复：
 
-- **用户直接交互触发**（纯前端规则：`ChibiPetCanvas` 渲染层上报单击/双击 + `App.tsx` 手势判定，零 LLM 开销）：
+- **用户直接交互触发**（纯前端规则：`ChibiPetCanvas` 渲染层上报单击/双击/戳毛了 + `App.tsx` 手势判定，零 LLM 开销）：
   | 交互 | 触发条件 | 反馈 |
   |-----|---------|------|
-  | 单击 | 点击宠物本体 | 本地摸头台词 + 短音效；在线且空闲时再以冷却方式异步请求一次 AI 自然回应 |
-  | 双击 | 双击宠物本体 | 刷新活跃度（不触发台词） |
+  | 单击 | 点击宠物本体 | 按权重从反应池抽一个表情（`smug` 4 / `think` 3 / `happy` 3 / 什么都不播 3），短音效；再以冷却方式异步请求一次 AI 自然回应 |
+  | 双击 | 双击宠物本体 | 展开侧边聊天窗 + `talk` 姿态 |
+  | **戳毛了** | 5 秒窗口内累计 7 点（每戳一下 1 点，与上一戳间隔 <350ms 的猛戳额外 1 点） | `angry` 表情 + 对应的 AI 台词；并进入 2.5 秒「气头上」，期间每戳一次续期，停手满 2.5 秒才消气、从零重新攒 |
   | 拖动 | 按住后移动窗口 | pout（嘟嘴）表情联动，松手重置 |
-  | **长按 1 秒** | 按住任意桌宠不拖动满 1 秒 | 打开心智观察器，见[心智观察器（详情窗口）](#心智观察器详情窗口) |
+  | **长按 1 秒** | 按住任意桌宠不拖动满 1 秒 | 心智观察器的开关：还没开或已最小化就打开（从桌宠位置长到全屏），正显示在屏幕上则最小化，见[心智观察器（详情窗口）](#心智观察器详情窗口) |
 
-  长按过程反馈：按住超过 0.2 秒后在鼠标按住位置挂载环形进度槽（`HoldProgressRing`，SVG 弧线从 12 点方向顺时针 0.8 秒填满），进度环出现的同时播放「施法召唤窗口」动画（12 帧雪碧图，每帧时长按进度环填充时长等比缩放，与进度环同步填满）；满 1 秒触发打开。松手、窗口位移超 10px（拖拽判定——拖拽时窗口跟随光标、client 坐标不变，必须以窗口位移检测）或后端 `drag:cancelled` 任一路径取消；取消时施法动画从当前帧倒放回初始帧后归位
+  单击不再固定播 `happy`（但 `happy` 仍在池子里，只是不再是必然）：戳十次看十张一样的脸，反馈就退化成按钮了。池子里是「被戳一下」可能有的几种态度（被摸高兴了、得意、琢磨这是什么、懒得理），四者权重写在 `ChibiPetCanvas.tsx` 的 `TAP_REACTIONS`，调手感只改这一处。「什么都没发生」是**主动抽样**的结果，不是兜底——待机与自然眨眼照常继续。戳毛了与单击互斥，由 `noteTap` 的账本判定（窗口与阈值见同文件的 `TAP_ANNOY_*` 常量）：双击的两次点击同样入账（双击只是同时还另有用途），但正常使用节奏——两次双击、每 4 秒戳一下——永远不会攒满。后端 `generate_pet_reaction` 相应新增 `rough_click` 动作（语料与账本文案、20 秒节流窗口），让台词的态度跟脸上的表情对得上
+
+  长按过程反馈：按住超过 0.2 秒后在鼠标按住位置挂载环形进度槽（`HoldProgressRing`，SVG 弧线从 12 点方向顺时针 0.8 秒填满），进度环出现的同时播放「施法召唤窗口」动画（12 帧雪碧图，每帧时长按进度环填充时长等比缩放，与进度环同步填满）；满 1 秒触发动作：它是观察器的**开关**——它此刻已经摆在屏幕上（可见且未最小化）就最小化，否则打开（从没开过）或提到前台（被最小化了 / 被 hide 过）。已经存在时**不重建窗口**（重名重建必然失败），显形连同动画整个交给窗口自己：此刻已经在屏上就「收拢再展开」重播一遍（展开段与首开逐帧一致）；此刻被最小化了，则跟首开走同一条「先摆好首帧再显形」的路——如果先把它还原出来，那次还原本身就是一次呼出，紧接着再播一遍入场就是第二次，看起来像呼出了两回。松手、窗口位移超 10px（拖拽判定——拖拽时窗口跟随光标、client 坐标不变，必须以窗口位移检测）或后端 `drag:cancelled` 任一路径取消；取消时施法动画从当前帧倒放回初始帧后归位
 
 - **空闲检测渐进触发**（5 阶段）：用户不交互时，`auto_expression_tick`（4 秒间隔）按空闲时间分阶段渐进触发，概率随时间递增
   | 阶段 | 空闲时间 | 典型表情/动作 | 触发概率 |
@@ -680,7 +688,7 @@ PreProcessing → UserMemorySaving → [QueryRewrite ∥ FastSemantic] → Memor
 - **表情管理**：`ExpressionManager` 支持表情栈与定时恢复（`set_expression` 压栈 / `revert_expression` 弹栈 / `start_revert_timer` 定时恢复），表情为动作名驱动（词表见「表情库」）
 - **状态机**：`PetState`（Idle / Interacting / Panicked / Playing / AiTalking）+ `StateTransition` 显式状态机，支持事件驱动的状态流转
 - **动作优先级**：5 级优先级（Idle=0 / Low=10 / Normal=50 / High=100 / Critical=200）控制动作打断与队列
-- **鼠标跟随**：两级跟随（`window` / `off`），交互事件（鼠标进入/点击/拖动）刷新 5-8 秒跟随窗口，窗口内跟随、超时回归自主；后端 `cursor_tracking` 线程每 60ms 推送 `cursor:position` 事件，光标位置未变化时跳过 emit，窗口隐藏时停止跟踪
+- **鼠标跟随**：两级跟随（`window` / `off`），交互事件（鼠标进入/点击/拖动）刷新 5-8 秒跟随窗口，窗口内跟随、超时回归自主；跟随由前端 `pointermove` 驱动（输入事件不受 WebView2 失焦节流影响），后端 `cursor_tracking` 线程只负责窗口拖动与拖拽物理、不再推送光标坐标事件，窗口隐藏时停止跟踪
 - **拖拽惯性甩飞 + 边缘回弹 + 拖太快会晕**（`window.rs`，`cursor_tracking` 线程）：快速拖拽松手时，用松手前最近 120ms 的全局光标轨迹（`GetCursorPos` 轮询，不受窗口追逐延迟影响）计算初速度，窗口带惯性滑行——指数摩擦衰减（约 350ms 半衰期）自然停住，速度低于阈值即静止；慢速拖动（< 0.5 px/ms）不触发甩飞，不影响精确摆放。碰撞边界不是窗口矩形，而是桌宠身体足迹（窗口中央 1/3 宽 × 4/9 高，与点击穿透中心矩形同口径）——桌宠本体只在该范围内渲染，全透明边缘可滑出屏幕外 1/3 宽度，视觉上是角色本体撞到屏幕边缘弹回（法向速度乘 0.6 回弹系数，几次反弹后静止）。甩飞中以虚拟屏幕（多显示器并集）为边界；途中再按住桌宠会立即被「接住」；智能避让等程序化移动不会被覆盖（每帧重读窗口实际位置作积分基点）。**拖动中若手速确实很快**，桌宠会切到 `dizzy`（晕乎乎）表情——判定门槛收得**极紧，只有极端疯狂甩动才触发**：需同时满足 ① 连续 4 帧（约 240ms）瞬时速度都 ≥ 3.2 px/ms（约 3200px/s）② 这段连续区间内峰值冲到过 4.2 px/ms（约 4200px/s）。日常拖动（300–800px/s）、正常快速平移（≈1200px/s）乃至**用力甩动（≈2000px/s）都不会触发**，单帧速度尖峰（手抖、采样抖动）也不计入；稳定「贴着阈值快拖」因缺峰值同样不触发。触发后按 450ms 节流、每次刷新 1.2s，触发即清空连续段与峰值（下一次需重新累计一整段疯狂甩动），松手即清节流窗口。**撞边晕乎乎只认「被自己甩飞速度撞出去」**：仅当某帧积分前窗口该轴仍在界内、且法向速度朝外把窗口推出边界时才算撞击（`resolve_axis_collision`），因此智能避让 / 环境走动 / 全屏隐藏把桌宠**自行挪到墙边**只会被几何夹紧，不会误触发晕眩
 
 #### 智能避让（图像处理定位）
@@ -688,11 +696,21 @@ PreProcessing → UserMemorySaving → [QueryRewrite ∥ FastSemantic] → Memor
 基于实时屏幕图像分析的智能避让系统，使桌宠自动避开用户正在查看的内容区域：
 
 - **后端**：Win32 GDI `StretchBlt` 降采样捕获屏幕 → 32px 块方差分析 → BFS 连通分量 → FNV-1a 哈希比对（检测屏幕变化）
-- **前端**：2.5 秒基础轮询间隔，连续 unchanged 时逐步延长到 30 秒，变化时立即恢复；分步缓动动画（easeInOutCubic）平滑移动
+- **前端**：2.5 秒基础轮询间隔，连续 unchanged 时按 2.5 秒步长逐步延长到 20 秒（`POLL_INTERVAL_MAX_MS`），变化时立即恢复；分步缓动动画（easeInOutCubic）平滑移动
 - **智能跳检**：用户切换前台窗口时（Win32 EVENT_SYSTEM_FOREGROUND）立即触发一次检测
 - **桌宠被操作时自动让路（含「滑动途中打断」）**：用户按住 / 拖动 / 长按桌宠期间，避让整体停摆，且**已经开始的滑动会当帧停住**——`useSmartPositioning` 维护两条互补信号：`focusedRef`（`onFocusChanged`）与 `userInteractingRef`（捕获阶段的 window `mousedown`/`mouseup`）。`runCheck` 入口短路 + 每次 `find_safe_position` 异步返回后重查 + `animatePosition` 的**逐帧** `shouldAbort()`（含滑动会话 token）三层拦截。这样做的原因：`mousedown` 早于焦点事件，长按期间窗口无位移也可能尚未获得焦点，只守入口会让「按下之前就已启动的滑动」继续跑完（实测会再滑 6 步）。松手后延迟 250ms 补跑一次检查，失焦后由 `FOREGROUND_DEBOUNCE_MS`(700ms) 防抖恢复
 - **可配置**：`window.smart_positioning_enabled` 开关，右键菜单打开时临时禁用
-- **走动节奏规划（前端 `src/chibi/walkPlan.ts`）**：避让位移的「几何 → 节奏」由 `planSmartMove(dx, dy)` 纯函数推导——步数按水平距离分档（`ceil(|dx|/300) × 14` 帧，图集周期整数倍），总时长按滑动速度上限 clamp 到 450–1000ms，帧间隔 clamp 到 33–98ms 防高频抖动；`|dx| < 40px` 的纯纵向位移不播走动（腿为侧向），仅由窗口缓动滑动表达。窗口位移用固定 32ms 采样步长、easeInOutCubic 缓动，与走动帧率解耦
+- **走动节奏规划（前端 `src/chibi/walkPlan.ts`）**：位移的「几何 → 节奏」由一对纯函数推导——`planSmartMove(dx, dy)` 给避让，`planAmbientWalk(dx, speedScale?)` 给[自主漫步](#自主漫步随机走动)，两者共用同一个收敛核心，差别只在**速度锚点**。避让的三条约束对应「上下移动走路过快」这条根因（按 B+D+A 落地）：(B) 位移时长 `slideMs = clamp(travel / 0.6, 400, 1400)`——本次挪动的**权威时间轴**，随距离缩放，不再固定 700ms；(D) 步数由**水平位移** `|dx|` 推（每前进 `300/14 ≈ 21.4px` 推一格），纵向挪动交给窗口滑动——所以纵向为主 / 纯纵向（`|dx| < 40px`）不播走动，腿不会去表达它表达不了的方向；(A，兜底) 帧间隔限幅到图集**原生节奏带** `[0.75, 1.35]×`（≈58–105ms，原生均值 77.9ms）：下沿防「用放大帧率去追远超步行能力的位移」（超速碎步），上沿防读不出摆腿。限幅命中时**改步数**（步幅变长/短）而不是改时长，于是 `durationMs === frames × frameDelayMs` 仍成立——**走动收尾与窗口到位同时发生**，且**任意 walking 计划的帧间隔都落在原生带内、绝不超速**（实测 150/600/1200px → 67/59/58ms 每帧，长位移触地板 58ms；速度相同的 900px 与 1200px 帧间隔一致）。更早的版本把步数按全距离 `hypot(dx,dy)` 推、帧间隔下限只 17ms（≈4.6× 原生超速），正是纵向挪动走路过快的根因。窗口位移的采样（固定 32ms 步长、最短 24 步、easeInOutCubic 缓动）统一在 `src/chibi/slideTrack.ts` 的 `runSlide()`，避开与走动帧率耦合——避让与自主漫步共用这一条时间轴
+- **位移前后的转身过渡**：有水平分量的避让位移是「转身 → 走动/滑动 → 回身」三段——`playTurn` 转完**停在侧身末帧**（不回落基准姿态，避免「转身完成」与「起步走动」之间闪一帧正面待机），滑动与走动共用同一段时间轴（走动收尾即窗口到位），收尾由 `playTurnBack` 从末帧倒放回正面、再回落 `moodTone` 基调。打断路径同样收尾（`abortToRest`）：用户按下时交给精灵自身的 mousedown 处理，其余打断（获得焦点、卸载）把角色送回基准姿态，不留侧身或抬腿的定格
+
+#### 自主漫步（随机走动）
+
+`presenceState === 'online'` 时桌宠会自己沿屏幕横向溜达，是「自己在活着」的主要可见信号（`ChibiPetCanvas` 的 ambient 调度，`src/chibi/walkPlan.ts` + `src/chibi/slideTrack.ts`）：
+
+- **节奏**：走完一趟起算**静息 48–120 秒**（均值约 84 秒）再起步；被占用（说话 / 全屏 / 避让 / 被按住 / 未停在基准姿态）时**不消耗静息期**，改按 8–14 秒短暂重试，腾出手就接着走；上线首趟 10–25 秒（静息期的语义是"刚走过一趟，歇一会儿"，启动时并不成立，按静息期算会让桌宠头两分钟杵在原地）
+- **距离与时长**：单次距离在**对数尺度**上取 `[140, 900]px`——中位 355、均值 408，约 19% 落在 200px 内的短挪动、17% 超过 650px，连续可辨、不是分档抽签。时长**不是独立随机数**，由 `planAmbientWalk` 按图集原生步速（走满一个周期前进 300px / 耗时 1090ms ≈ 0.2752 px/ms，每次叠 ±15% 步频抖动）从距离反推，所以走多远就花多久（441ms–3.86s），长距离那 17% 会明显更像"溜达"而不是"挪一下"
+- **边界**：朝向由**实际**位移定（贴边截断后抽签方向可能与实际反号）；离屏幕边不足一个完整步长时朝里走；两边都放不下 `WALK_DISTANCE_MIN_PX`(140px) 就放弃这趟，不硬塞一段比转身动画还短的位移。走完由 `playTurnBack` 回身并回落 `moodTone` 基调
+- **与避让同源**：走动节奏走 `walkPlan`、窗口采样走 `slideTrack.runSlide`，与[智能避让](#智能避让图像处理定位)完全共用——帧间隔恒在图集原生节奏带内，**腿摆一格、地面挪一格**（此前漫步只切走动姿态而不给帧数/帧间隔，腿按图集原生节奏无限空转：一个 1.09s 的腿周期只覆盖约 26–40px 地面，腿超速 7–11 倍，脚在地上打滑）
 
 #### 全屏隐藏
 
@@ -779,8 +797,9 @@ Hidden（默认完全隐藏，整体位于屏外右侧）
 - **后台循环看门狗**（`utils/watchdog.rs`）：scheduler / 热梗采集 / 技能热重载 / 对话刷新等常驻后台循环每轮上报心跳，守护任务（60s 周期）发现超过 3× 期望间隔（下限 120s）无心跳即判定停摆，error 级报错并调用注册的重启回调重新拉起（无回调则只报警），循环绝不静默停摆
 - **步骤级熔断**（`memory/step_health.rs`）：巩固流水线等长时任务的每步独立跟踪连续失败计数，≥ 阈值转 `paused` 暂停（写入显式 `paused_reason`），冷却后半开重试；同根因错误签名只打一次 error，恢复时打恢复日志
 - **损坏状态文件统一处理**（`utils/fs.rs::load_json_or_backup`）：JSON 状态文件解析失败时 error 级大声报错、将损坏现场重命名为 `.corrupt-<ts>` 保留、按空态/默认值继续（不阻断启动）；全仓状态加载点统一走该入口，杜绝静默 `.ok()` 丢弃
-- **熔断器**（`resilience/`）：三态（Closed / Open / HalfOpen）+ 滑动窗口 + 失败率判定
-- **HTTP 重试**（`network/http_retry.rs`）：可配置重试状态码与退避
+- **熔断器**（`resilience/`）：三态（Closed / Open / HalfOpen）+ 滑动窗口 + 失败率判定；半开只放行**一个**探测请求，其余并发请求立即拒绝（否则「探测」退化成全放行，充值瞬间积压请求一起涌入、任一失败就打回熔断）；探测以时刻记账，60s 未回报结果则重新放行——探测请求可能提前返回（响应解析失败 `?` 短路）或按设计跳过记账（大 prompt），用布尔占位会把它永久卡在半开
+- **HTTP 重试**（`network/http_retry.rs`）：可配置重试状态码与退避；**429 必须读响应体定性**——厂商把「欠费 / 配额耗尽」也映射到 429（智谱业务码 1113、OpenAI `insufficient_quota`），与真限流同码，只有读到 body 才能区分，前者不退避
+- **LLM 错误分类**（`resilience/`）：错误提示（`LlmErrorKind`，驱动 toast + i18n）与重试判定（`ErrorCategory`，驱动退避）**共用同一张厂商映射表**，统一入口 `classify_structured` —— 先从 provider 错误串解出 `(HTTP 状态码, 业务码, message)` 三元组再查表。各家语义互斥：同为 403，火山方舟是欠费、OpenRouter 是内容审核、Together 是上下文超长；同为 429，智谱欠费与限流共码、靠业务码 1113 区分。表未覆盖时回落到关键字启发式（仅供提示用），重试判定则**只在能解出状态码时才采信**，避免子串误伤（request_id 里的 `400`）把可重试的请求误判为不可重试
 - **限流器**（`brain/rate_limiter.rs`）：Token bucket
 - **指标系统**（`metrics.rs`）：Counter / Histogram / Gauge 全局单例，每日轮转持久化
 - **功能开关**（`feature_flags.rs`）：17 个预定义 flag，分 6 类（Core / Experimental / Performance / Ui / Integration / Debug），支持 `requires_restart` 标记，持久化于 `%APPDATA%\Vivian\config\feature_flags.json`
@@ -1051,13 +1070,13 @@ Vivian 的配置位于用户数据目录 `%APPDATA%\Vivian\`（Windows）。
 | 任务类型 | 用途 |
 |---------|------|
 | `chat` | 日常闲聊与问答（高频，可用便宜模型） |
-| `reasoning` | 长输入（>100 字）的深度推理（低频，需强模型） |
+| `reasoning` | 长输入或携带工具的深度推理；陪伴侧复杂请求可在此任务中进行多轮内部推演 |
 | `diary` | 日记内容生成 |
 | `memory` | 写入时抽取关键词/重要性/语义类型（高频，建议便宜模型） |
 | `embedding` | 记忆向量索引的嵌入服务（用于语义检索） |
 | `consolidation` | 夜间记忆巩固（睡眠时整理记忆，低频，需深度推理模型） |
-| `reflection` | 异步反思（每 5 轮或 30 分钟触发，合并意识更新与活动抽取，fire-and-forget，建议便宜快速模型） |
-| `inner_monologue` | 离线内心独白（用户不交互时自主思考，30 分钟一次，建议廉价快速模型） |
+| `reflection` | 回复后的结构化反思（表情/动作、情绪、世界状态、目标、记忆与进化字段）；跨角色闲聊入口可显式跳过 |
+| `inner_monologue` | 离线内心独白（用户不交互时自主思考，默认 25 分钟最小间隔 + 每日上限 12 条，建议廉价快速模型） |
 | `bystander_judge` | 旁观插话二值判断（轻量 LLM 仅返回 should_interject 布尔值，建议廉价快速模型） |
 
 - 未配置的任务将回退到 LLM 主配置。
@@ -1068,6 +1087,10 @@ Vivian 的配置位于用户数据目录 `%APPDATA%\Vivian\`（Windows）。
 
 > **工作智能体模型预设**（`work_models` + `active_work_model`）：在设置 → LLM 页签「工作智能体模型」区可为编程智能体预设多组模型（别名 / 服务商 / 模型 / 端点 / 密钥），当前选中在编程页模型下拉热切换。单次输出预算与 temperature 不在此配置——`max_tokens` 由后端按服务商分级默认（`work_model_default_max_tokens`，避免沿用聊天用的 2048 限制代码生成），`temperature` 请求体统一省略（服务端默认）。
 
+> **默认工作区**（`default_workspace`）：同一页签「默认工作区」区可选择编程页「新会话」默认使用的工作目录（留空则每次建成无工作区模式会话）。改动经 `config:saved` 事件即时同步到已打开的工作页，无需重启。
+
+> ⚠️ **加配置项的硬约束**：`ConfigManager::set_no_save` 会把整份配置 JSON 重新 `serde_json::from_value::<AppConfig>`，而 serde 默认**忽略未知字段**——只在 `config.yaml` 里塞一个新键会被**静默丢弃**，`get_config` 永远读不到。所以任何新配置项都必须先在 Rust 的 `AppConfig` 结构体（以及手写的 `impl Default`）里加字段，前端才能通过 `set_config` 写进去。
+
 ### 配置方式
 
 1. **可视化**：右键桌宠 → 设置（ConfigWindow 提供 9 个 Tab：通用 / AI / 工具 / 记忆 / 语音 / 网络 / 浏览器 / 插件 / 关于）
@@ -1076,7 +1099,7 @@ Vivian 的配置位于用户数据目录 `%APPDATA%\Vivian\`（Windows）。
 
 > **远程访问**：`network.remote_access.enabled` 控制后台 HTTP 服务开关，`network.remote_access.port` 控制监听端口（默认 8080）。在设置窗口「网络」页签提供滑块与端口输入，保存后立即生效（见[远程访问](#远程访问手机端-remote-access)章节）。
 
-> **真实世界感知**功能会消耗额外 Token（内心独白每 30 分钟一次 LLM 调用、夜间记忆巩固调用深度推理模型）。设置入口合并于「通用」页（原独立「感知」页签已并入）：含总开关、天气与经纬度配置，可按需关闭以节省 Token。
+> **真实世界感知**功能会消耗额外 Token（内心独白默认 ≥25 分钟一次、每日上限 12 条，夜间记忆巩固调用深度推理模型）。设置入口合并于「通用」页（原独立「感知」页签已并入）：含总开关、天气与经纬度配置，可按需关闭以节省 Token。
 
 > **开机自动启动**：`base.auto_start` 控制是否在登录 Windows 后自动启动 Vivian。可在设置窗口「通用」页开启/关闭，保存后立即写入当前用户启动项（`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`，值名 `VivianDesktopPet`）。
 
@@ -1172,13 +1195,13 @@ npx tsc --noEmit                  # TS 类型检查
 - **U 型注意力调度**：静态区 Character 开头（最先入脑）→ Framework/Format 末尾（临出口提醒）；动态区**记忆组上移至 Mind 之后**（黄金位置，避开 U 型谷底），利用 LLM 注意力偏置提升人格稳定性、格式准确率与记忆利用
 - **静态/动态分离**：静态内容（人格/框架/示例/伪静态段落）用 `<static>` 标签包裹，动态内容（心智/记忆/世界/画像）在后，`</static>` 后输出 `__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__` 边界标记供 generation 层把动态区切为 user 便签复用前缀缓存
 - **分组合并**：记忆组（Episode + 关系日志 + 记忆本体）与画像组（用户事实 + 认知模型 + 动态行为）分别合并为单一 section，顶层动态 section 从 30+ 收敛到约 10 个，减少独立标题的注意力稀释
-- **预算裁剪**：动态区每个 section 带裁剪优先级，总体超过 30KB 时按 rank 丢弃低价值段（语气注入/推荐工具/社交状态先丢），记忆组/环境/工具/用户输入永不丢弃
+- **预算裁剪**：动态区按 tokenizer 估算；本轮预算根据路由模型上下文窗口、关系阶段和任务类型自动调整（4K–32K，且不超过模型窗口的 40%），超限时按 rank 丢弃低价值段；记忆组/环境/工具/用户输入永不丢弃
 - **规则英文化 + 标记化**：framework 规则（安全/输出格式/能力边界/会话/称呼/节奏/风格/响应决策/渠道/在场指南）统一英文 SCREAMING_SNAKE 标记（`[SAFETY_RULES]` `[OUTPUT_FIELDS]` `[RESPONSE_MODES]` 等），回复语言由 "same language as user input" + `LANG_*` 语言标志控制；记忆条目元数据自然语言化（去 `imp=/mood=` 数值符号，重要性用 `[重点]` 表达）
 - **功能提示词动态化**：心理洞察/信念生成/思维合成/日记生成/记忆提取等功能模块全部使用角色名变量，支持多角色架构
 - **行为化语音指南**：跨角色对话时注入角色专属行为约束（"你说话比她快，句子更短"），替代数值化标签（如 sass=0.65）
 - **内心反应中文化+角色化**：第一人称内心想法使用中文生成，按角色差异化（Vivian 直率吐槽 / Nana 温柔关心）
 - **功能性任务提示词三语覆盖**：功能模块 LLM 提示词（记忆抽取/验证/路由/巩固、主动交互行为/破冰/回忆/内心独白、对话意图判断/共指消解/策略摘要、心智信念生成/用户认知、日记生成、情绪分类、查询重写等 40+ 个任务）均实现中/日/英三语，通过 `normalize_lang` 统一切换；framework 规则层例外（统一英文，见上）。说话者标记全项目统一为 `[User says to me]` / `[I say to User]` 第一人称格式
-- **数据源编排优化**：记忆上下文 token 预算 1250 + 类型标签（印象/近期/已读）+ 重要性排序（`[重点]` 标记高重要度）；反思/异步反思注入对话历史和 AI 回复；AugmentReplyService 记忆按重要性升序排序（重要的排在 LLM 注意力更佳的末尾）；日记对话片段附带时间戳 + 截断 150 字符；记忆验证/用户事实抽取注入已有数据避免重复
+- **数据源编排优化**：记忆上下文按 token 预算和重要性排序注入，带类型、时间、`[重点]` 与 `[需验证]` 标记；Reflection 只接收最终用户输入与最终回复，持续思考 checkpoint 不写入长期记忆；事实抽取和记忆验证要求可核验的用户原文证据
 
 ### 完整代码文档
 
@@ -1191,7 +1214,7 @@ npx tsc --noEmit                  # TS 类型检查
 - 心理学五层架构与昼夜节律锚点
 - 工具系统 7 步执行管线与权限网关矩阵
 
-（无独立专题文档；工具权限矩阵见 CODE_WIKI「沙箱 / 风险等级申报」节）
+（无独立专题文档；工具权限矩阵见 CODE_WIKI「沙箱 / 风险等级申报」节，工作区授权范围与沙箱确认回调见「授权工作区：一个判定口径，四处消费」/「沙箱确认回调」两节）
 
 ### 调试
 
@@ -1223,7 +1246,12 @@ npx tsc --noEmit                  # TS 类型检查
 | 外部向量库（Qdrant）不可用 | Qdrant 未启动或地址/认证错误 | 在设置「记忆」页签确认 `memory.vector_store.source=external` 下地址/api_key 正确、Qdrant 已运行；`local` 模式无需外部服务 |
 | 智能精排不生效 | 未启用或 Ollama 未装 rerank 模型 | 在设置「记忆」页签开启 `memory.rerank.enabled` 并 `ollama pull bge-reranker-v2-m3`；未启用会自动回退原排序 |
 | 工具调用卡住 | 超时或权限被拒 | 查看 `tool:confirmation_request` 事件与 `metrics.json`；编程页工作区写文件被拒时确认会话权限为 `workspace_write` / `full_access`（`read_only` 会拒绝写入） |
+| 编程页读/写某个目录总被拒（提示"不在任何已授权工作区中"） | 该目录没挂到当前会话上 | 点会话顶栏的**工作区芯片** → 「挂载目录…」把它加为附加工作区；只读操作也要挂载，路径校验不区分读写 |
+| 无工作区会话里每次写文件 / 跑命令都弹确认 | 预期行为：无工作区就没有路径边界，只能逐次授权 | 点工作区芯片挂一个目录即可转成"工作区内免确认"；想让「新会话」默认就带上目录，去设置 → LLM 页签配「默认工作区」 |
+| `run_command` 报「命令引用了工作区之外的绝对路径」 | 沙箱对命令文本做字面绝对路径检查（命令里的路径无法靠参数校验拦住） | 改用工作区内的相对路径；确实要访问那个目录就点工作区芯片「挂载目录…」把它加为附加工作区。注意这是**尽力而为的检测**：动态拼装的路径（`$p='D:'; …`）不会报错但也意味着没有真正封死 shell，需要的话用 `full-control` 之外的访问级别自行约束 |
+| 子 agent 报 `UserDenied` 而用户端没弹过确认 | 父会话给它的 `workspaces` 是空数组（无人应答时确认一律拒绝） | 见「子 agent 委派」——零工作区是有意限制；需要它写文件就改传具体工作区路径 |
 | 智能避让不工作 | 配置关闭或屏幕无变化 | 检查 `window.smart_positioning_enabled` 是否为 true；无变化时轮询间隔自动延长 |
+| 桌宠不再自己走动（自主漫步） | 静息期本就长（48–120 秒，均值约 84 秒），且**心情基调不是 `idle` 时永不漫步** | 节奏/距离常数集中在 `ChibiPetCanvas.tsx` 顶部（`WALK_REST_*` / `WALK_DISTANCE_*` / `WALK_BLOCKED_RETRY_*` / `WALK_STARTUP_*`）；被占用（说话 / 全屏 / 避让 / 被按住）时**不消耗静息期**，只按 8–14 秒重试，腾出手就接着走。另外 `poseNameRef.current !== 'idle'` 这道门槛意味着后端用 `mood_tone` 把基调设成非 idle（如 `dizzy`）之后漫步**彻底停摆**——属现有行为，如需放开应改用 `isAtRest()` |
 | 天气感知失效 | Open-Meteo 不可达或经纬度未配置 | 检查 `world.enable_weather` 与 `world.latitude` / `world.longitude`；失败时按"不知道"处理，不阻断其他功能 |
 | 内心独白不生成 | 路由矩阵未配置 inner_monologue 任务 | 在设置窗口 → 通用页「真实世界感知」区确认 `enable_inner_monologue` 开启，并在 AI 页签为 `inner_monologue` 任务配置廉价快速模型 |
 | 记忆巩固未执行 | 不在睡眠窗口或冷却未到期 | 确认 `world.enable_memory_consolidation` 开启；巩固仅在 `sleep_start_hour`..`sleep_end_hour` 窗口内且距上次 ≥ 6 小时触发 |

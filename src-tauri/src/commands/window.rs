@@ -316,7 +316,7 @@ pub fn watch_room_escape(app: AppHandle) {
             missing_since = None;
 
             let esc_now = is_escape_down();
-            if esc_now && !esc_prev && is_room_foreground(&win) {
+            if esc_now && !esc_prev && is_window_foreground(&win) {
                 // 下降沿 + 前台窗口：直接关闭。close 触发 CloseRequested，
                 // 由 lib.rs 的 on_window_event 兜底恢复角色窗口与心智观察器。
                 let _ = win.close();
@@ -338,15 +338,16 @@ pub fn stop_room_escape_watcher() {
     ROOM_ESC_GEN.fetch_add(1, Ordering::SeqCst);
 }
 
-/// room 窗口当前是否为前台窗口
+/// 窗口当前是否为系统前台窗口。
 ///
 /// 两个来源都查，任一为 true 即视为前台，避免单个来源在透明/无边框窗口上
-/// 误判 false 导致 ESC 看护失灵。
+/// 误判 false（房间的 ESC 看护与心智观察器的注意力判定都依赖它，误判 false
+/// 分别会让 ESC 失灵、让陪伴角色误以为用户没在看而多嘴）。
 ///
 /// Windows 下先比对 GetForegroundWindow：它是纯本地调用，而 win.is_focused()
 /// 每次都要往主线程发一条消息再阻塞等回执——20ms 一轮的轮询里，房间不在前台时
 /// 那就是每秒 50 次无谓的主线程往返。
-fn is_room_foreground(win: &WebviewWindow) -> bool {
+pub(crate) fn is_window_foreground(win: &WebviewWindow) -> bool {
     #[cfg(windows)]
     {
         use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
@@ -360,10 +361,10 @@ fn is_room_foreground(win: &WebviewWindow) -> bool {
 }
 
 // ============ 全屏光标追踪 ============
-// WebView2 在窗口失去焦点/不可见时会节流 setInterval、requestAnimationFrame，
-// 前端定时器驱动的鼠标跟随在光标移出窗口后会失灵。
-// 由 Rust 原生线程定时获取全局光标位置（同线程还负责窗口拖动），
-// 坐标变化时向窗口 emit `cursor:position` 事件，前端据此实现窗口外鼠标跟随。
+// 由 Rust 原生线程定时获取全局光标位置（同线程负责窗口拖动与拖拽物理）。
+// 本线程不再向前端推送 `cursor:position`：鼠标跟随已改由前端 pointermove 实现
+// （WebView2 在窗口失焦/不可见时会节流前端定时器，但 pointermove 由输入事件驱动、
+// 不受节流影响），后端坐标事件全仓无人消费，已删除。
 //
 // 注意：桌宠窗口**不做**点击穿透，整窗响应鼠标。历史上本线程会按光标是否落在
 // 窗口中心矩形内反复调用 set_ignore_cursor_events，而该调用在 Windows 上会
@@ -374,6 +375,15 @@ fn is_room_foreground(win: &WebviewWindow) -> bool {
 /// 每个角色窗口拥有独立的追踪线程，互不干扰
 static CURSOR_TRACKING_THREADS: Lazy<Mutex<std::collections::HashMap<String, (Arc<AtomicBool>, JoinHandle<()>)>>> =
     Lazy::new(|| Mutex::new(std::collections::HashMap::new()));
+
+// ⚠️ 本子系统里所有事件都必须用 `emit_to(&label, ...)`，不能用 `win.emit(...)`。
+//
+// `WebviewWindow::emit` 走的是 `Manager::emit`，语义是**全量广播给所有 webview**
+// （见 tauri `Emitter` trait 默认实现），不是"发给这个窗口"。桌宠每个角色一个窗口、
+// 各自跑一份 App.tsx，所以广播会让两只桌宠同时响应同一件事——实际表现是拖 A 触发晕眩时
+// B 也一起晕。`emit_to` 传 label 走 `Manager::emit_to`，按 `AnyLabel` 匹配前端注册的
+// `WebviewWindow { label }` 监听器（`getCurrentWindow().listen()` 正是这种注册），
+// 只投给本角色窗口。label 就是 character_id（`get_webview_window(&char_id)` 取窗口）。
 
 /// 应用正在退出的全局标志，光标追踪线程在循环顶部检查本标志并立即退出
 pub(crate) static APP_EXITING: AtomicBool = AtomicBool::new(false);
@@ -424,8 +434,8 @@ fn is_escape_down() -> bool {
 ///
 /// 每个角色窗口拥有独立的追踪线程，职责：
 /// - 窗口拖动（DRAG_OFFSET 驱动 SetWindowPos）
-/// - 向本窗口推送全局光标坐标（`cursor:position` 事件），
-///   前端据此实现跨窗口鼠标跟随
+/// - 拖拽速度采样与「拖太快/撞边 → 晕乎乎」判定
+/// - 松手时按光标轨迹触发惯性甩飞
 ///
 /// 桌宠窗口不做点击穿透：整窗响应鼠标，因此本线程不再改写窗口样式。
 #[tauri::command]
@@ -454,8 +464,6 @@ pub fn start_cursor_tracking(
     let thread = thread::spawn(move || {
         tracing::info!("[cursor_tracking] 线程启动: {char_id_for_thread}");
 
-        // 上一帧光标坐标，用于跳过未变化帧的 emit
-        let mut last_cursor: (i32, i32) = (i32::MIN, i32::MIN);
         // 拖拽期间的光标轨迹采样（时刻, x, y），松手时计算惯性甩飞初速度
         let mut drag_samples: std::collections::VecDeque<(std::time::Instant, f64, f64)> =
             std::collections::VecDeque::new();
@@ -509,7 +517,6 @@ pub fn start_cursor_tracking(
                 }
             };
 
-            let cursor_moved = (c.x as i32) != last_cursor.0 || (c.y as i32) != last_cursor.1;
             let label = char_id_for_thread.clone();
 
             let mut is_dragging = DRAG_OFFSET
@@ -528,8 +535,10 @@ pub fn start_cursor_tracking(
                     tracing::info!(
                         "[cursor_tracking] 左键已抬起但拖动状态残留（mouseup 丢失），强制清除: {label}"
                     );
-                    // 通知前端重置拖动会话状态（dragSessionRef、拖拽表情）
-                    let _ = win.emit("drag:cancelled", json!({}));
+                    // 通知前端重置拖动会话状态（dragSessionRef、拖拽表情）。
+                    // 必须 emit_to：广播的话另一只桌宠也会收到，跟着复位拖拽表情、
+                    // 并打断它自己的长按召唤进度环（见本子系统顶部的说明）。
+                    let _ = win.emit_to(&label, "drag:cancelled", json!({}));
                 }
                 is_dragging = false;
             }
@@ -586,7 +595,9 @@ pub fn start_cursor_tracking(
                             // 避免持续超速时峰值一旦达标就永远保有资格
                             fast_drag_streak = 0;
                             fast_drag_peak = 0.0;
-                            let _ = win.emit(
+                            // emit_to：晕乎乎是「这一只被抓着甩懵了」，广播会让另一只也晕
+                            let _ = win.emit_to(
+                                &label,
                                 "drag:dizzy",
                                 json!({
                                     "duration_ms": DRAG_FAST_DIZZY_MS,
@@ -594,24 +605,6 @@ pub fn start_cursor_tracking(
                                 }),
                             );
                         }
-                    }
-                }
-            } else {
-                // 光标坐标推送（前端据此实现鼠标跟随，不受穿透影响）
-                if let (Ok(pos), Ok(size)) = (win.outer_position(), win.outer_size()) {
-                    if cursor_moved {
-                        let _ = win.emit(
-                            "cursor:position",
-                            serde_json::json!({
-                                "character_id": &label,
-                                "cursor_x": c.x as i32,
-                                "cursor_y": c.y as i32,
-                                "window_x": pos.x,
-                                "window_y": pos.y,
-                                "window_w": size.width as i32,
-                                "window_h": size.height as i32,
-                            }),
-                        );
                     }
                 }
             }
@@ -631,10 +624,6 @@ pub fn start_cursor_tracking(
                 }
             }
             prev_is_dragging = is_dragging;
-
-            if cursor_moved {
-                last_cursor = (c.x as i32, c.y as i32);
-            }
 
             thread::sleep(Duration::from_millis(60));
         }
@@ -1118,8 +1107,10 @@ fn start_fling(win: WebviewWindow, label: &str, vx: f64, vy: f64) {
 
                     // 撞上屏幕边缘 → 临时晕乎乎：撞得越狠晕得越久。
                     // 法向速度低于阈值的轻贴边缘不触发，避免贴边滑行时抖出表情。
+                    // emit_to：撞边晕的是这一只，别把另一只也叫醒（见本子系统顶部说明）
                     if let Some(dizzy_ms) = bounce_dizzy_ms(impact) {
-                        let _ = win.emit(
+                        let _ = win.emit_to(
+                            &label,
                             "drag:dizzy",
                             json!({
                                 "duration_ms": dizzy_ms,

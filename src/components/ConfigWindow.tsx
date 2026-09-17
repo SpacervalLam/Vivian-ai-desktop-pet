@@ -14,11 +14,12 @@ import TtsHelpDrawer, { TtsBackendKey } from './TtsHelpDrawer';
 import AsrHelpDrawer, { AsrBackendKey } from './AsrHelpDrawer';
 import ShortcutRecorder, { type ConflictResult, formatForDisplay } from './ShortcutRecorder';
 import ClearConfirmDialog from './ClearConfirmDialog';
+import NetworkDiagnosisDialog from './NetworkDiagnosisDialog';
 import SetupGuideModal from './SetupGuideModal';
 import type { FishSpeechServiceState, GptSoVitsServiceState, GptSoVitsServiceStatus, OllamaServiceState, WhisperServiceState } from '../types';
 import PluginsPanel from './plugins/PluginsPanel';
-import BrowserPanel from './BrowserPanel';
-import { Settings, Cpu, Wrench, Database, Mic, Wifi, Compass, Puzzle, Info, Trash2, Sparkles, ExternalLink } from 'lucide-react';
+import ConnectionsPanel from './ConnectionsPanel';
+import { Settings, Cpu, Wrench, Database, Mic, Wifi, Cable, Puzzle, Info, Trash2, Sparkles, ExternalLink, Activity } from 'lucide-react';
 
 type TabKey =
   | 'general'
@@ -27,7 +28,7 @@ type TabKey =
   | 'memory'
   | 'voice'
   | 'network'
-  | 'browser'
+  | 'connections'
   | 'plugins'
   | 'about';
 
@@ -130,7 +131,7 @@ const tabs: { key: TabKey; labelKey: string; icon: React.ElementType }[] = [
   { key: 'memory', labelKey: 'config.tab_memory', icon: Database },
   { key: 'voice', labelKey: 'config.tab_voice', icon: Mic },
   { key: 'network', labelKey: 'config.tab_network', icon: Wifi },
-  { key: 'browser', labelKey: 'config.tab_browser', icon: Compass },
+  { key: 'connections', labelKey: 'config.tab_connections', icon: Cable },
   { key: 'plugins', labelKey: 'config.tab_plugins', icon: Puzzle },
   { key: 'about', labelKey: 'config.tab_about', icon: Info },
 ];
@@ -156,7 +157,7 @@ interface ConfigObject {
  * - knowledge_acquisition: 空闲时知识搜索学习（后台低频，建议便宜模型）
  * - translation:         跨语言 TTS 文本翻译（仅翻译服务选 LLM 时使用，简单任务，便宜模型即可）
  * - bystander_judge:     旁观插话判断（用户对话时轻量判断旁观者是否插话，建议便宜快速模型）
- * - intent_judge:        会话关闭意图判断（每轮对话后判断是否应关闭及关闭原因，建议便宜快速模型）
+ * - intent_judge:        会话关闭意图判断 + 桌宠反应（每轮对话后判断是否应关闭及关闭原因；用户摸头/双击/长按/拖拽/甩飞桌宠时生成一句短反应。极高频，建议最便宜的快速模型）
  * - asr_polish:          语音识别结果整理（识别结束后修正同音字/语气词/标点，建议便宜快速模型）
  */
 const ROUTING_TASKS: { labelKey: string; taskType: string; helpKey: string }[] = [
@@ -248,7 +249,12 @@ const presetMatches = (p: ProviderPreset, type: string, endpoint: string): boole
     (pr) => pr.providerType === type && (endpoint === '' || pr.endpoint === endpoint),
   );
 
-const PROVIDER_PRESETS: ProviderPreset[] = [
+/**
+ * 厂商预设表。导出供 App.tsx 在 LLM 错误 toast 里反查：
+ * 错误事件只带 endpoint，据此拿 consoleUrl 与显示名，给「余额不足」类
+ * 错误挂上直达对应厂商控制台的动作。
+ */
+export const PROVIDER_PRESETS: ProviderPreset[] = [
   { id: 'openai', labelKey: 'config.preset_openai', providerType: 'openai', endpoint: 'https://api.openai.com/v1', defaultModel: 'gpt-5.5', mainModels: ['gpt-5.5', 'gpt-5.6', 'gpt-5', 'o3', 'o4-mini'], contextWindow: 400_000, suggestedMaxTokens: 32768, consoleUrl: 'https://platform.openai.com/api-keys', protocols: [
     { providerType: 'openai', labelKey: 'config.proto_responses', endpoint: 'https://api.openai.com/v1' },
     { providerType: 'chat_completions', labelKey: 'config.proto_chat_completions', endpoint: 'https://api.openai.com/v1' },
@@ -1591,8 +1597,13 @@ const ToggleField: React.FC<{
  * 工具开关卡片 —— 设置-工具页的工具级启用/禁用开关
  *
  * 卡片布局：工具名 + 类别徽标 + 描述 + 右侧胶囊开关；
- * 禁用态整体降为半透明。开关状态写入
- * `config.tools.disabled_tools`，保存后由后端同步到 ToolSystem 即时生效。
+ * 禁用态整体降为半透明。开关状态写入**该侧**的
+ * `config.tools.disabled_tools.<side>`（陪伴侧 / 工作侧各自独立），
+ * 保存后由后端同步到 ToolSystem 即时生效。
+ *
+ * `locked` 为真时（如工作侧的 read_file / list_dir / grep_search）不渲染开关，
+ * 改为展示锁定徽标——它们是工作智能体的只读基座工具，禁用后任何编程任务
+ * 都会立即失败，故不允许关闭。
  */
 const ToolSwitchCard: React.FC<{
   name: string;
@@ -1602,7 +1613,9 @@ const ToolSwitchCard: React.FC<{
   custom: boolean;
   customBadge: string;
   onToggle: () => void;
-}> = ({ name, description, categoryLabel, enabled, custom, customBadge, onToggle }) => (
+  locked?: boolean;
+  lockedLabel?: string;
+}> = ({ name, description, categoryLabel, enabled, custom, customBadge, onToggle, locked, lockedLabel }) => (
   <div
     style={{
       display: 'flex',
@@ -1692,38 +1705,57 @@ const ToolSwitchCard: React.FC<{
         {description || '—'}
       </div>
     </div>
-    <button
-      type="button"
-      role="switch"
-      aria-checked={enabled}
-      onClick={onToggle}
-      style={{
-        flexShrink: 0,
-        width: 36,
-        height: 20,
-        borderRadius: 10,
-        border: 'none',
-        background: enabled ? 'var(--panel-accent)' : 'var(--panel-toggle-off)',
-        position: 'relative',
-        cursor: 'pointer',
-        transition: 'background 0.2s ease',
-        padding: 0,
-      }}
-    >
+    {locked ? (
       <span
+        title={lockedLabel}
         style={{
-          position: 'absolute',
-          top: 2,
-          left: enabled ? 18 : 2,
-          width: 16,
-          height: 16,
-          borderRadius: '50%',
-          background: 'var(--panel-surface)',
-          transition: 'left 0.2s ease',
-          boxShadow: 'var(--panel-shadow-subtle)',
+          flexShrink: 0,
+          padding: '2px 8px',
+          fontSize: 10,
+          fontWeight: 500,
+          color: 'var(--panel-text-tertiary)',
+          background: 'var(--panel-bg-hover)',
+          border: '1px solid var(--panel-border)',
+          borderRadius: 999,
+          whiteSpace: 'nowrap',
         }}
-      />
-    </button>
+      >
+        {lockedLabel}
+      </span>
+    ) : (
+      <button
+        type="button"
+        role="switch"
+        aria-checked={enabled}
+        onClick={onToggle}
+        style={{
+          flexShrink: 0,
+          width: 36,
+          height: 20,
+          borderRadius: 10,
+          border: 'none',
+          background: enabled ? 'var(--panel-accent)' : 'var(--panel-toggle-off)',
+          position: 'relative',
+          cursor: 'pointer',
+          transition: 'background 0.2s ease',
+          padding: 0,
+        }}
+      >
+        <span
+          style={{
+            position: 'absolute',
+            top: 2,
+            left: enabled ? 18 : 2,
+            width: 16,
+            height: 16,
+            borderRadius: '50%',
+            background: 'var(--panel-surface)',
+            transition: 'left 0.2s ease',
+            boxShadow: 'var(--panel-shadow-subtle)',
+          }}
+        />
+      </button>
+    )}
   </div>
 );
 
@@ -2201,7 +2233,17 @@ const ConfigWindow: React.FC = () => {
   const [ollamaModels, setOllamaModels] = useState<string[]>([]);
   const [ollamaPulling, setOllamaPulling] = useState(false);
   // 内置嵌入模型注册表（来自后端 embedding_registry，用于云端模型维度自动填充）
-  const [embeddingModels, setEmbeddingModels] = useState<{ id: string; dimension: number; source: string }[]>([]);
+  const [embeddingModels, setEmbeddingModels] = useState<
+    {
+      id: string;
+      dimension: number;
+      source: string;
+      display_name: string;
+      provider?: string | null;
+      endpoint?: string | null;
+      recommended_for?: string | null;
+    }[]
+  >([]);
   // Whisper 本地 ASR 服务状态(一键启动/停止 faster-whisper-server)
   const [whisperService, setWhisperService] = useState<WhisperServiceState | null>(null);
   const [whisperServiceBusy, setWhisperServiceBusy] = useState(false);
@@ -2227,25 +2269,26 @@ const ConfigWindow: React.FC = () => {
   const [diaryConfig, setDiaryConfig] = useState<DiaryConfigState | null>(null);
   const [diaryLoading, setDiaryLoading] = useState(false);
 
-  // 网络连接测试状态
-  const [networkTesting, setNetworkTesting] = useState(false);
+  // 网络检测弹窗（完整诊断：代理 / Hosts / 连通性 / TCP / 丢包）
+  const [networkDiagnosisOpen, setNetworkDiagnosisOpen] = useState(false);
 
   // 地理定位自动检测状态
   const [detectingLocation, setDetectingLocation] = useState(false);
-  const [networkTestResult, setNetworkTestResult] = useState<string | null>(null);
-  const [networkTestSuccess, setNetworkTestSuccess] = useState<boolean | null>(null);
 
-  // MCP server 管理
-  const [mcpServers, setMcpServers] = useState<Array<{
-    id: string; name: string; enabled: boolean; tool_count: number; alive: boolean;
+  // 工具页签：全部注册工具清单（后端 list_tools）。
+  // scope 由后端单一真相源推导（companion / work / both），决定卡片归入哪一侧；
+  // locked 标记该侧不可禁用的基座工具（如工作侧 read_file）。
+  const [toolList, setToolList] = useState<Array<{
+    name: string;
+    description: string;
+    category: string;
+    is_custom: boolean;
+    scope: 'companion' | 'work' | 'both';
+    companion_locked: boolean;
+    work_locked: boolean;
   }>>([]);
-  const [mcpEditing, setMcpEditing] = useState<{
-    id: string; name: string; command: string; args: string; enabled: boolean;
-  } | null>(null);
-  const [mcpSaving, setMcpSaving] = useState(false);
-  // 工具页签：全部注册工具清单（后端 list_tools，名称/描述/类别；
-  // 描述按当前界面语言返回；is_custom 标记智能体自进化创造的自建工具）
-  const [toolList, setToolList] = useState<Array<{ name: string; description: string; category: string; is_custom: boolean }>>([]);
+  // 工具页签当前查看的智能体侧别（陪伴侧 / 工作侧开关互相独立）
+  const [toolSideTab, setToolSideTab] = useState<'companion' | 'work'>('companion');
   // 工具开关卡片的搜索过滤词
   const [toolSearch, setToolSearch] = useState('');
   const [clearMemoriesOpen, setClearMemoriesOpen] = useState(false);
@@ -2348,6 +2391,24 @@ const ConfigWindow: React.FC = () => {
     if (workModelsActiveId === id) {
       setNested('active_work_model', null as unknown as ConfigValue);
       void invoke('clear_work_model').catch((e) => console.warn(e));
+    }
+  };
+
+  // ===== 默认工作区（工作页「新建任务」的默认目录）=====
+  // 后端为 Option<String>：空串统一归一化为 null，避免 yaml 里留下无意义的空字段。
+  const defaultWorkspace = (config?.default_workspace ?? '') as string;
+  const setDefaultWorkspace = (v: string) =>
+    setNested('default_workspace', (v.trim() ? v : null) as unknown as ConfigValue);
+  const handlePickDefaultWorkspace = async () => {
+    try {
+      const dir = await open({
+        directory: true,
+        multiple: false,
+        title: t('config.section_default_workspace'),
+      });
+      if (typeof dir === 'string' && dir) setDefaultWorkspace(dir);
+    } catch {
+      /* 用户取消或对话框不可用：保持原值 */
     }
   };
 
@@ -2737,7 +2798,17 @@ const ConfigWindow: React.FC = () => {
   // 拉取内置嵌入模型注册表（用于云端模型选择时自动填充维度）
   const refreshEmbeddingModels = useCallback(async () => {
     try {
-      const models = await invoke<{ id: string; dimension: number; source: string }[]>('get_embedding_models');
+      const models = await invoke<
+        {
+          id: string;
+          dimension: number;
+          source: string;
+          display_name: string;
+          provider?: string | null;
+          endpoint?: string | null;
+          recommended_for?: string | null;
+        }[]
+      >('get_embedding_models');
       setEmbeddingModels(Array.isArray(models) ? models : []);
     } catch (e) {
       console.warn('查询嵌入模型注册表失败:', e);
@@ -3112,13 +3183,19 @@ const ConfigWindow: React.FC = () => {
     return () => { unlisten?.(); };
   }, []);
 
-  // 切换到工具页签时加载 MCP server 列表与注册工具清单
+  // 切换到工具页签时加载注册工具清单
+  // （MCP server 列表已随「外部连接」页迁走，由 ConnectionsPanel 自行加载）
   useEffect(() => {
     if (activeTab === 'tools') {
-      invoke<Array<{ id: string; name: string; enabled: boolean; tool_count: number; alive: boolean }>>('list_mcp_servers')
-        .then(setMcpServers)
-        .catch(() => { /* 忽略 */ });
-      invoke<{ tools: Array<{ name: string; description: string; category: string; is_custom: boolean }> }>('list_tools')
+      invoke<{ tools: Array<{
+        name: string;
+        description: string;
+        category: string;
+        is_custom: boolean;
+        scope: 'companion' | 'work' | 'both';
+        companion_locked: boolean;
+        work_locked: boolean;
+      }> }>('list_tools')
         .then((res) => setToolList(res?.tools ?? []))
         .catch(() => { /* 忽略 */ });
     }
@@ -3566,51 +3643,16 @@ const ConfigWindow: React.FC = () => {
     }
   }, [t]);
 
-  // 测试网络连接 —— 通过当前网络设置访问 Google 主页验证代理可用性
-  const handleTestConnection = async () => {
-    setNetworkTesting(true);
-    setNetworkTestResult(null);
-    setNetworkTestSuccess(null);
-    try {
-      // 先把当前 UI 中（可能尚未保存）的网络设置同步到后端内存配置，
-      // 确保手动模式下使用的是用户刚填写的代理地址，而非上次保存的值
-      const proxyMode = get<string>('network.proxy_mode', 'direct');
-      const proxyUrl = get<string>('network.proxy_url', '');
-      const timeout = get<number>('network.timeout', 30);
-      await invoke('set_config', { key: 'network.proxy_mode', value: proxyMode });
-      await invoke('set_config', { key: 'network.proxy_url', value: proxyUrl });
-      await invoke('set_config', { key: 'network.timeout', value: timeout });
-
-      const result = await invoke<{
-        success: boolean;
-        status_code: number | null;
-        elapsed_ms: number;
-        proxy_mode: string;
-        effective_proxy: string | null;
-        error: string | null;
-      }>('test_network_connection');
-      if (result.success) {
-        setNetworkTestSuccess(true);
-        setNetworkTestResult(
-          t('config.test_connection_success', {
-            status: result.status_code ?? 0,
-            elapsed: result.elapsed_ms,
-          })
-        );
-      } else {
-        setNetworkTestSuccess(false);
-        setNetworkTestResult(
-          t('config.test_connection_failed', { error: result.error ?? 'Unknown' })
-        );
-      }
-    } catch (e) {
-      setNetworkTestSuccess(false);
-      setNetworkTestResult(
-        t('config.test_connection_failed', { error: String(e) })
-      );
-    } finally {
-      setNetworkTesting(false);
-    }
+  // 网络检测 —— 把当前 UI 中（可能尚未保存）的网络设置同步到后端内存配置，
+  // 保证检测的就是用户眼前这份配置。真实诊断逻辑在后端 `network::diagnose`，
+  // 结果由 NetworkDiagnosisDialog 呈现。
+  const syncNetworkConfigForDiagnosis = async () => {
+    const proxyMode = get<string>('network.proxy_mode', 'direct');
+    const proxyUrl = get<string>('network.proxy_url', '');
+    const timeout = get<number>('network.timeout', 30);
+    await invoke('set_config', { key: 'network.proxy_mode', value: proxyMode });
+    await invoke('set_config', { key: 'network.proxy_url', value: proxyUrl });
+    await invoke('set_config', { key: 'network.timeout', value: timeout });
   };
 
   // ===== 供应商预设核对（一键激活） =====
@@ -3950,15 +3992,10 @@ const ConfigWindow: React.FC = () => {
     }
   };
 
-  const clearNetworkTest = () => {
-    setNetworkTestResult(null);
-    setNetworkTestSuccess(null);
-  };
-
   const handleTabChange = (tab: TabKey) => {
-    // 离开网络页签时清空测试结果
+    // 离开网络页签时收起检测弹窗（弹窗不跨页签残留）
     if (activeTab === 'network' && tab !== 'network') {
-      clearNetworkTest();
+      setNetworkDiagnosisOpen(false);
     }
     setActiveTab(tab);
   };
@@ -3971,7 +4008,7 @@ const ConfigWindow: React.FC = () => {
   // 2) 兜底强制销毁 destroy()（不触发 close-requested，绕过任何 preventClose）；
   // 3) 最后退回前端 close()。
   const closeWindow = async () => {
-    clearNetworkTest();
+    setNetworkDiagnosisOpen(false);
     const win = getCurrentWindow();
     const label = win.label;
     try {
@@ -4869,6 +4906,19 @@ const ConfigWindow: React.FC = () => {
             >
               + {t('config.work_models_add')}
             </button>
+
+            <div style={{ ...sectionTitleStyle, marginTop: 28 }}>{t('config.section_default_workspace')}</div>
+            <div style={{ fontSize: 12, color: 'var(--panel-text-tertiary)', marginBottom: 14, lineHeight: 1.5 }}>
+              {t('config.default_workspace_description')}
+            </div>
+            <BrowseTextField
+              label={t('config.field_default_workspace_path')}
+              value={defaultWorkspace}
+              onChange={setDefaultWorkspace}
+              placeholder={t('config.default_workspace_placeholder')}
+              onBrowse={() => void handlePickDefaultWorkspace()}
+              browseLabel={t('config.default_workspace_browse')}
+            />
           </>
         );
       case 'tools':
@@ -4891,14 +4941,23 @@ const ConfigWindow: React.FC = () => {
               </div>
             ) : (
               (() => {
-                const disabledSet = new Set((get('tools.disabled_tools', []) as string[]));
+                const side = toolSideTab;
+                // 该侧的工具面：陪伴侧 = scope∈{companion,both}；工作侧 = scope∈{work,both}
+                const sideTools = toolList.filter((tl) =>
+                  side === 'companion' ? tl.scope !== 'work' : tl.scope !== 'companion',
+                );
+                // 分侧禁用集合：只读本侧（另一侧的开关互不影响）
+                const disabledSet = new Set((get(`tools.disabled_tools.${side}`, []) as string[]));
+                const isLocked = (tl: { companion_locked: boolean; work_locked: boolean }) =>
+                  side === 'companion' ? tl.companion_locked : tl.work_locked;
                 const kw = toolSearch.trim().toLowerCase();
-                const match = (tl: { name: string; description: string; category: string; is_custom: boolean }) =>
+                const match = (tl: { name: string; description: string }) =>
                   !kw ||
                   tl.name.toLowerCase().includes(kw) ||
                   (tl.description ?? '').toLowerCase().includes(kw);
-                const filtered = toolList.filter(match);
-                const enabledCount = filtered.filter((tl) => !disabledSet.has(tl.name)).length;
+                const filtered = sideTools.filter(match);
+                // 锁定工具恒为启用，计入"已启用"分子
+                const enabledCount = filtered.filter((tl) => isLocked(tl) || !disabledSet.has(tl.name)).length;
 
                 // 工具按类型归类，固定顺序展示
                 const CATEGORY_ORDER = ['file', 'web', 'system', 'memory', 'media', 'pet', 'mcp'];
@@ -4909,7 +4968,8 @@ const ConfigWindow: React.FC = () => {
                 const cardGrid = (tools: typeof filtered) => (
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 8 }}>
                     {tools.map((tl) => {
-                      const enabled = !disabledSet.has(tl.name);
+                      const locked = isLocked(tl);
+                      const enabled = locked || !disabledSet.has(tl.name);
                       return (
                         <ToolSwitchCard
                           key={tl.name}
@@ -4919,11 +4979,15 @@ const ConfigWindow: React.FC = () => {
                           custom={!!tl.is_custom}
                           customBadge={t('config.tool_badge_custom')}
                           enabled={enabled}
+                          locked={locked}
+                          lockedLabel={t('config.tool_badge_locked')}
                           onToggle={() => {
+                            if (locked) return;
+                            // 分侧写入：仅改本侧集合，另一侧的开关不受影响
                             const next = new Set(disabledSet);
                             if (enabled) next.add(tl.name);
                             else next.delete(tl.name);
-                            setNested('tools.disabled_tools', Array.from(next));
+                            setNested(`tools.disabled_tools.${side}`, Array.from(next));
                           }}
                         />
                       );
@@ -4933,6 +4997,38 @@ const ConfigWindow: React.FC = () => {
 
                 return (
                   <>
+                    {/* 侧别切换：陪伴侧与工作侧是两条独立产品线，工具面与开关互相独立 */}
+                    <div style={{ display: 'flex', gap: 6, marginBottom: 10 }}>
+                      {(['companion', 'work'] as const).map((s) => {
+                        const active = s === side;
+                        const count = toolList.filter((tl) =>
+                          s === 'companion' ? tl.scope !== 'work' : tl.scope !== 'companion',
+                        ).length;
+                        return (
+                          <button
+                            key={s}
+                            type="button"
+                            onClick={() => setToolSideTab(s)}
+                            style={{
+                              flex: 1,
+                              padding: '7px 10px',
+                              borderRadius: 8,
+                              fontSize: 12,
+                              fontFamily: 'inherit',
+                              cursor: 'pointer',
+                              border: active
+                                ? '1px solid var(--panel-accent)'
+                                : '1px solid var(--panel-border)',
+                              background: active ? 'rgba(124, 92, 255, 0.12)' : 'transparent',
+                              color: active ? 'var(--panel-accent)' : 'var(--panel-text-secondary)',
+                            }}
+                          >
+                            {t(s === 'companion' ? 'config.tools_side_companion' : 'config.tools_side_work')}
+                            {` (${count})`}
+                          </button>
+                        );
+                      })}
+                    </div>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
                       <input
                         type="text"
@@ -4954,7 +5050,7 @@ const ConfigWindow: React.FC = () => {
                           key={g.cat}
                           defaultOpen={false}
                           title={`${t(`config.tool_cat_${g.cat}`)} (${
-                            g.tools.filter((tl) => !disabledSet.has(tl.name)).length
+                            g.tools.filter((tl) => isLocked(tl) || !disabledSet.has(tl.name)).length
                           }/${g.tools.length})`}
                         >
                           {cardGrid(g.tools)}
@@ -5073,7 +5169,7 @@ const ConfigWindow: React.FC = () => {
             <div style={{ ...sectionTitleStyle, marginTop: 28 }}>{t('config.section_tools_permission')}</div>
             <SelectField
               label={t('config.field_tool_access_level')}
-              value={get('tools.access_level', 'full-control')}
+              value={get('tools.access_level', 'fs-write')}
               onChange={(v) => setNested('tools.access_level', v)}
               options={[
                 { value: 'read-only', label: t('config.access_level_readonly') },
@@ -5086,185 +5182,6 @@ const ConfigWindow: React.FC = () => {
               {t('config.field_tool_access_level_help')}
             </div>
 
-            <div style={{ ...sectionTitleStyle, marginTop: 28 }}>{t('config.section_mcp')}</div>
-            <div style={{
-              fontSize: 12,
-              color: 'var(--panel-text-secondary)',
-              lineHeight: 1.7,
-              padding: '10px 12px',
-              marginBottom: 12,
-              background: 'var(--panel-bg-hover)',
-              borderRadius: 8,
-              border: '1px solid var(--panel-border)',
-            }}>
-              {t('config.mcp_description')}
-            </div>
-
-            {/* 已连接 server 列表 */}
-            {mcpServers.length > 0 && (
-              <div style={{ marginBottom: 12 }}>
-                {mcpServers.map((s) => (
-                  <div key={s.id} style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                    padding: '8px 12px',
-                    marginBottom: 4,
-                    background: 'var(--panel-bg-hover)',
-                    borderRadius: 6,
-                    border: '1px solid var(--panel-border)',
-                  }}>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                      <span style={{ fontSize: 13, color: 'var(--panel-text)' }}>
-                        {s.name} <span style={{ color: 'var(--panel-text-tertiary)', fontSize: 11 }}>({s.id})</span>
-                      </span>
-                      <span style={{ fontSize: 11, color: s.alive ? '#4ade80' : '#f87171' }}>
-                        {s.alive ? t('config.mcp_alive') : t('config.mcp_dead')} · {s.tool_count} {t('config.mcp_tools')}
-                      </span>
-                    </div>
-                    <button
-                      onClick={async () => {
-                        try {
-                          await invoke('remove_mcp_server', { serverId: s.id });
-                          const refreshed = await invoke<Array<typeof s>>('list_mcp_servers');
-                          setMcpServers(refreshed);
-                          void emit('toast:show', { message: t('config.mcp_removed'), type: 'success', duration: 4000, key: Date.now() });
-                        } catch (e) {
-                          void emit('toast:show', { message: String(e), type: 'error', duration: 4000, key: Date.now() });
-                        }
-                      }}
-                      style={{
-                        padding: '4px 10px',
-                        fontSize: 12,
-                        background: 'rgba(248, 113, 113, 0.15)',
-                        border: '1px solid rgba(248, 113, 113, 0.3)',
-                        borderRadius: 6,
-                        color: '#f87171',
-                        cursor: 'pointer',
-                      }}
-                    >
-                      {t('config.mcp_remove')}
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {/* 添加新 server */}
-            {mcpEditing ? (
-              <div style={{
-                padding: '12px',
-                marginBottom: 12,
-                background: 'var(--panel-bg-hover)',
-                borderRadius: 8,
-                border: '1px solid var(--panel-border)',
-              }}>
-                <TextField
-                  label={t('config.mcp_field_id')}
-                  value={mcpEditing.id}
-                  onChange={(v) => setMcpEditing({ ...mcpEditing, id: v })}
-                  placeholder="filesystem"
-                />
-                <TextField
-                  label={t('config.mcp_field_name')}
-                  value={mcpEditing.name}
-                  onChange={(v) => setMcpEditing({ ...mcpEditing, name: v })}
-                  placeholder="Filesystem MCP"
-                />
-                <TextField
-                  label={t('config.mcp_field_command')}
-                  value={mcpEditing.command}
-                  onChange={(v) => setMcpEditing({ ...mcpEditing, command: v })}
-                  placeholder="npx"
-                />
-                <TextField
-                  label={t('config.mcp_field_args')}
-                  value={mcpEditing.args}
-                  onChange={(v) => setMcpEditing({ ...mcpEditing, args: v })}
-                  placeholder="-y @modelcontextprotocol/server-filesystem /tmp"
-                />
-                <div style={{ fontSize: 11, color: 'var(--panel-text-tertiary)', marginTop: -10, marginBottom: 14, lineHeight: 1.5 }}>
-                  {t('config.mcp_field_args_help')}
-                </div>
-                <ToggleField
-                  label={t('config.mcp_field_enabled')}
-                  value={mcpEditing.enabled}
-                  onChange={(v) => setMcpEditing({ ...mcpEditing, enabled: v })}
-                />
-                <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-                  <button
-                    onClick={async () => {
-                      setMcpSaving(true);
-                      try {
-                        const args = mcpEditing.args.trim().split(/\s+/).filter(Boolean);
-                        await invoke('add_mcp_server', {
-                          config: {
-                            id: mcpEditing.id,
-                            name: mcpEditing.name,
-                            transport: 'stdio',
-                            command: mcpEditing.command,
-                            args,
-                            env: {},
-                            cwd: null,
-                            enabled: mcpEditing.enabled,
-                          },
-                        });
-                        const refreshed = await invoke<Array<typeof mcpServers[number]>>('list_mcp_servers');
-                        setMcpServers(refreshed);
-                        setMcpEditing(null);
-                        void emit('toast:show', { message: t('config.mcp_added'), type: 'success', duration: 4000, key: Date.now() });
-                      } catch (e) {
-                        void emit('toast:show', { message: String(e), type: 'error', duration: 4000, key: Date.now() });
-                      } finally {
-                        setMcpSaving(false);
-                      }
-                    }}
-                    disabled={mcpSaving || !mcpEditing.id || !mcpEditing.command}
-                    style={{
-                      padding: '6px 16px',
-                      fontSize: 13,
-                      background: mcpSaving ? 'rgba(74, 222, 128, 0.3)' : 'rgba(74, 222, 128, 0.15)',
-                      border: '1px solid rgba(74, 222, 128, 0.3)',
-                      borderRadius: 6,
-                      color: '#4ade80',
-                      cursor: mcpSaving ? 'wait' : 'pointer',
-                      opacity: (mcpSaving || !mcpEditing.id || !mcpEditing.command) ? 0.6 : 1,
-                    }}
-                  >
-                    {mcpSaving ? t('config.mcp_connecting') : t('config.mcp_add')}
-                  </button>
-                  <button
-                    onClick={() => setMcpEditing(null)}
-                    style={{
-                      padding: '6px 16px',
-                      fontSize: 13,
-                      background: 'var(--panel-bg-surface-elevated)',
-                      border: '1px solid var(--panel-border)',
-                      borderRadius: 6,
-                      color: 'var(--panel-text-secondary)',
-                      cursor: 'pointer',
-                    }}
-                  >
-                    {t('config.mcp_cancel')}
-                  </button>
-                </div>
-              </div>
-            ) : (
-              <button
-                onClick={() => setMcpEditing({ id: '', name: '', command: '', args: '', enabled: true })}
-                style={{
-                  padding: '6px 16px',
-                  fontSize: 13,
-                  background: 'var(--panel-bg-surface-elevated)',
-                  border: '1px solid var(--panel-border)',
-                  borderRadius: 6,
-                  color: 'var(--panel-text)',
-                  cursor: 'pointer',
-                }}
-              >
-                + {t('config.mcp_add_server')}
-              </button>
-            )}
           </>
         );
       case 'memory':
@@ -5415,14 +5332,17 @@ const ConfigWindow: React.FC = () => {
                 />
                 <TextField
                   label={t('config.field_embedding_model')}
-                  value={get('memory.embedding.model', 'BAAI/bge-m3')}
+                  value={get('memory.embedding.model', '')}
                   onChange={(v) => {
                     setNested('memory.embedding.model', v);
-                    // 命中内置云端模型注册表时自动填充维度
+                    // 命中插件贡献的云端预设时同步填充端点和维度
                     const known = embeddingModels.find(
                       (m) => m.source === 'cloud' && m.id === v,
                     );
-                    if (known) setNested('memory.embedding.dimension', known.dimension);
+                    if (known) {
+                      setNested('memory.embedding.dimension', known.dimension);
+                      if (known.endpoint) setNested('memory.embedding.endpoint', known.endpoint);
+                    }
                   }}
                   placeholder={t('config.ph_embedding_model')}
                   list="embedding-cloud-models"
@@ -5432,7 +5352,7 @@ const ConfigWindow: React.FC = () => {
                     .filter((m) => m.source === 'cloud')
                     .map((m) => (
                       <option key={m.id} value={m.id}>
-                        {m.id} ({m.dimension})
+                        {m.display_name}
                       </option>
                     ))}
                 </datalist>
@@ -7901,39 +7821,27 @@ const ConfigWindow: React.FC = () => {
             />
             <div style={{ ...fieldStyle, display: 'flex', alignItems: 'center', gap: 12 }}>
               <button
-                onClick={handleTestConnection}
-                disabled={networkTesting}
+                onClick={() => setNetworkDiagnosisOpen(true)}
                 style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 7,
                   padding: '8px 16px',
                   border: '1px solid var(--panel-border)',
                   borderRadius: 6,
-                  background: networkTesting ? 'var(--panel-toggle-off)' : 'var(--panel-bg-active)',
+                  background: 'var(--panel-bg-active)',
                   color: 'var(--panel-text)',
                   fontSize: 13,
                   fontFamily: 'inherit',
-                  cursor: networkTesting ? 'not-allowed' : 'pointer',
-                  opacity: networkTesting ? 0.6 : 1,
+                  cursor: 'pointer',
                 }}
               >
-                {networkTesting ? t('config.test_connection_testing') : t('config.test_connection')}
+                <Activity size={14} strokeWidth={2.2} />
+                {t('config.diag_open')}
               </button>
-              {networkTesting ? (
-                <span style={{ fontSize: 12, color: '#ffffff', fontWeight: 500 }}>
-                  {t('config.test_connection_testing')}
-                </span>
-              ) : (
-                networkTestResult && (
-                  <span
-                    style={{
-                      fontSize: 12,
-                      color: networkTestSuccess ? '#4caf50' : '#f44336',
-                      fontWeight: 500,
-                    }}
-                  >
-                    {networkTestResult}
-                  </span>
-                )
-              )}
+              <span style={{ fontSize: 12, color: 'var(--panel-text-tertiary)', lineHeight: 1.45 }}>
+                {t('config.diag_open_help')}
+              </span>
             </div>
 
             {/* ── 远程访问（Tailscale 场景）：启用开关与章节标题同行 ── */}
@@ -8185,8 +8093,8 @@ const ConfigWindow: React.FC = () => {
         );
       case 'plugins':
         return <PluginsPanel />;
-      case 'browser':
-        return <BrowserPanel />;
+      case 'connections':
+        return <ConnectionsPanel />;
     }
   }, [
     activeTab,
@@ -8194,16 +8102,10 @@ const ConfigWindow: React.FC = () => {
     ttsConfig,
     diaryConfig,
     diaryLoading,
-    networkTesting,
-    networkTestResult,
-    networkTestSuccess,
     saving,
     saveError,
     t,
     handleShortcutChange,
-    mcpServers,
-    mcpEditing,
-    mcpSaving,
     detectingLocation,
     appVersion,
     osInfo,
@@ -8580,6 +8482,13 @@ const ConfigWindow: React.FC = () => {
         loadingLabel={t('config.restore_btn_loading')}
         onConfirm={handleRestoreConfirm}
         onCancel={() => setRestoreConfirmOpen(false)}
+      />
+
+      {/* 网络检测弹窗（完整诊断） */}
+      <NetworkDiagnosisDialog
+        open={networkDiagnosisOpen}
+        onClose={() => setNetworkDiagnosisOpen(false)}
+        beforeRun={syncNetworkConfigForDiagnosis}
       />
 
       {/* 配置引导弹窗 */}

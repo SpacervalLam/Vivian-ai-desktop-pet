@@ -87,7 +87,8 @@ impl IcebreakerGenerator {
             char_id,
             idle_seconds,
         )?;
-        let raw = match router.generate(LLMRequest::new("chat", messages)).await {
+        let raw = match router.generate(LLMRequest::new("chat", messages)
+            .with_character_id(char_id.to_string())).await {
             Ok(r) => r,
             Err(e) => {
                 tracing::debug!("[IceBreaker] proactive LLM 查询失败，跳过本次破冰: {}", e);

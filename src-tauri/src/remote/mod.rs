@@ -1095,7 +1095,8 @@ async fn image_chat_handler(
     ];
 
     let llm_result = router
-        .generate(LLMRequest::new("vision_describe", messages))
+        .generate(LLMRequest::new("vision_describe", messages)
+            .with_character_id(char_id.clone()))
         .await;
 
     let (description, reply) = match llm_result {
@@ -1370,6 +1371,13 @@ async fn list_todos(
     Ok(Json(serde_json::json!({ "items": items, "total": items.len() })))
 }
 
+/// 远程 HTTP API 没有角色上下文，待办的 `character_id` 一律传空串。
+///
+/// 空串在 `todo_tools` 中的语义是「无归属操作」：`todo:changed` /
+/// `scheduler:changed` 事件仍会广播，但前端据 `character_id` 为空判定为
+/// UI/远程操作而不弹 toast，避免在两只桌宠上各弹一条。
+const REMOTE_NO_CHAR: &str = "";
+
 async fn add_todo(
     State(_state): State<RemoteAppState>,
     Json(req): Json<TodoWriteRequest>,
@@ -1380,6 +1388,7 @@ async fn add_todo(
         req.priority.unwrap_or(1),
         req.due_date.as_deref(),
         req.event_time.as_deref(),
+        REMOTE_NO_CHAR,
     );
     Ok(Json(serde_json::json!({ "item": item })))
 }
@@ -1411,6 +1420,7 @@ async fn update_todo(
         req.priority,
         req.due_date.as_deref(),
         req.event_time.as_deref(),
+        REMOTE_NO_CHAR,
     )
     .map_err(err_status)?;
     Ok(Json(serde_json::json!({ "item": item })))
@@ -1420,7 +1430,8 @@ async fn complete_todo(
     State(_state): State<RemoteAppState>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let item = crate::tools::builtin::todo_tools::complete_todo_item(&id).map_err(err_status)?;
+    let item = crate::tools::builtin::todo_tools::complete_todo_item(&id, REMOTE_NO_CHAR)
+        .map_err(err_status)?;
     Ok(Json(serde_json::json!({ "item": item })))
 }
 
@@ -1428,7 +1439,7 @@ async fn delete_todo(
     State(_state): State<RemoteAppState>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    if crate::tools::builtin::todo_tools::delete_todo_item(&id) {
+    if crate::tools::builtin::todo_tools::delete_todo_item(&id, REMOTE_NO_CHAR) {
         Ok(Json(serde_json::json!({ "deleted": true })))
     } else {
         Err((StatusCode::NOT_FOUND, "待办不存在".to_string()))

@@ -106,7 +106,7 @@ impl UserCognitionEngine {
     pub fn new(router: Arc<ModelRouter>) -> Self {
         Self {
             router,
-            merge_overlap_threshold: 2,
+            merge_overlap_threshold: 1,
         }
     }
 
@@ -219,7 +219,8 @@ impl UserCognitionEngine {
             .generate(LLMRequest::new(
                 "reflection",
                 vec![ChatMessage::user(prompt)],
-            ))
+            )
+            .with_character_id(mind.char_id.clone()))
             .await?;
 
         let parsed = match parse_cognition_response(&response) {

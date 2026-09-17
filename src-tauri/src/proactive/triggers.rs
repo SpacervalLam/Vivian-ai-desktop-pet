@@ -47,6 +47,12 @@ pub enum ProactiveTrigger {
     LateNight,
     /// 音乐切换 —— 用户开始播放/切换新曲目时，基于 SMTC 曲目信息自然搭话
     MusicChanged,
+    /// 工作侧待转达 —— 工作智能体的后台任务完成了，或者卡在等用户拍板上。
+    ///
+    /// 与其它触发器最大的不同：素材不由角色自己想出来，而是工作智能体放进
+    /// 提示词「后台任务」段落里的既成事实，这里的指令只回答"怎么把这件事说出去"。
+    /// 由 `tick` 的专门路径处理，不进常规触发循环。
+    WorkNotice,
 }
 
 impl ProactiveTrigger {
@@ -72,10 +78,11 @@ impl ProactiveTrigger {
             ProactiveTrigger::AppDuration => "app_duration",
             ProactiveTrigger::LateNight => "late_night",
             ProactiveTrigger::MusicChanged => "music_changed",
+            ProactiveTrigger::WorkNotice => "work_notice",
         }
     }
 
-    pub fn all() -> [ProactiveTrigger; 20] {
+    pub fn all() -> [ProactiveTrigger; 21] {
         [
             ProactiveTrigger::HourlyGreeting,
             ProactiveTrigger::IdleGreeting,
@@ -97,6 +104,7 @@ impl ProactiveTrigger {
             ProactiveTrigger::AppDuration,
             ProactiveTrigger::LateNight,
             ProactiveTrigger::MusicChanged,
+            ProactiveTrigger::WorkNotice,
         ]
     }
 
@@ -129,6 +137,9 @@ impl ProactiveTrigger {
             ProactiveTrigger::AppDuration => 74,
             // 音乐切换：好奇心驱动的轻量搭话
             ProactiveTrigger::MusicChanged => 16,
+            // 工作侧待转达：后台已经停下等用户了，属于"用户需要知道"的事，
+            // 仅次于健康类提醒；但仍低于 WelcomeBack/TeasingResponse 这些直接互动
+            ProactiveTrigger::WorkNotice => 85,
         }
     }
 }
@@ -341,6 +352,16 @@ impl TriggerThrottle {
                 threshold: 0.0,
                 cooldown_seconds: 2700,
                 probability: 0.3,
+                min_idle_seconds: 0,
+                min_drag_distance: 0.0,
+                min_away_seconds: 0,
+            },
+            // 工作侧待转达：事件驱动，不进常规触发循环，这里的阈值/概率不参与判定；
+            // 真正的去重靠素材本身的"已转达"标记 + 30 分钟冷却兜底
+            ProactiveTrigger::WorkNotice => Self {
+                threshold: 0.0,
+                cooldown_seconds: 1800,
+                probability: 1.0,
                 min_idle_seconds: 0,
                 min_drag_distance: 0.0,
                 min_away_seconds: 0,

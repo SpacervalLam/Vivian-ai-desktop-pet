@@ -259,6 +259,7 @@ impl Tool for WorkAskUserTool {
 
         let registry = global_work_question_registry();
         let (question_id, rx) = registry.create_question(
+            context.char_id.clone(),
             session_id.clone(),
             question.clone(),
             ctx_text.clone(),

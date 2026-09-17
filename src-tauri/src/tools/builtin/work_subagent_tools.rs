@@ -17,6 +17,7 @@ use std::sync::{Arc, RwLock};
 use async_trait::async_trait;
 use tauri::{AppHandle, Emitter, Manager};
 
+use crate::brain::coding_agent::workspace_key;
 use crate::brain::coding_subagent::{
     run_subagent, SubagentRequest, SubagentStop, SUBAGENT_DEFAULT_ROUNDS, SUBAGENT_DEFAULT_TOOLS,
     SUBAGENT_MAX_DEPTH, SUBAGENT_MAX_ROUNDS,
@@ -25,7 +26,7 @@ use crate::brain::work_jobs::{global_work_job_registry, WorkJobStatus};
 use crate::state::AppState;
 use crate::tools::types::{
     AgentAccessLevel, PermissionResult, Tool, ToolCategory, ToolResult, ToolRiskTier, ToolUseContext,
-    ValidationResult,
+    ValidationResult, WorkingDirectoryPermission,
 };
 
 static APP_HANDLE: Lazy<RwLock<Option<AppHandle>>> = Lazy::new(|| RwLock::new(None));
@@ -45,7 +46,9 @@ It runs its own tool loop and returns ONLY its final text, so its exploration st
 context. Use it for work you can hand off whole (survey a module, verify a hypothesis, implement \
 one isolated change), not for things a single tool call settles. \
 The subagent cannot ask the user anything, so resolve ambiguity yourself; if a genuine fork \
-remains, say so in `context` and it will pick a direction and report which one it took.";
+remains, say so in `context` and it will pick a direction and report which one it took. \
+It inherits all of your workspaces by default; use `workspaces` to give it only some of them, \
+or none at all (you can only pick from workspaces you already have).";
 
 const DESC_DELEGATE_ZH: &str = "把一个自包含的子任务委派给一个全新的子 agent。\
 默认等待结果并返回它的最终文本；`background: true` 时立即返回任务号，你可以继续干活——\
@@ -55,7 +58,9 @@ const DESC_DELEGATE_ZH: &str = "把一个自包含的子任务委派给一个全
 中间的探索过程不会进你的上下文。适用于能整块交出去的工作（摸清一个模块、验证一个猜测、\
 完成一处独立改动），而不是一次工具调用就能解决的事。\
 子 agent 无法向用户提问，所以歧义要你自己消化；如果确实存在分叉，在 `context` 里说明，\
-它会自行选一条路并汇报选了哪条。";
+它会自行选一条路并汇报选了哪条。\
+它默认继承你的全部工作区；用 `workspaces` 可以只给它其中几个、甚至一个都不给\
+（只能从你已有的工作区里选，不能给它你没有的目录）。";
 
 const DESC_DELEGATE_JA: &str = "自己完結したサブタスクを新しいサブエージェントに委任します。\
 既定では結果を待って最終テキストを返します。`background: true` なら即座にジョブ ID を返し、\
@@ -66,7 +71,9 @@ const DESC_DELEGATE_JA: &str = "自己完結したサブタスクを新しいサ
 独自のツールループを回し、**最終テキストだけ**を返します。途中の探索はあなたのコンテキストに\
 入りません。1モジュールの調査、仮説の検証、独立した1箇所の変更など、丸ごと任せられる作業に\
 使い、1回のツール呼び出しで済むことには使わないでください。サブエージェントはユーザーに\
-質問できません。曖昧さは自分で解消し、本当に分岐があるなら `context` に書いてください。";
+質問できません。曖昧さは自分で解消し、本当に分岐があるなら `context` に書いてください。\
+既定ではあなたの全てのワークスペースを継承します。`workspaces` で一部だけ、\
+あるいは一つも与えないこともできます（自分が持っていないディレクトリは渡せません）。";
 
 const DESC_JOB_EN: &str = "Collect, cancel, or list background subagent jobs started with \
 `work_delegate` (`background: true`). `output` returns a finished job's full text; if it is still \
@@ -84,6 +91,87 @@ const DESC_JOB_JA: &str = "バックグラウンドのサブエージェント�
 返します。実行中ならブロックせずその旨を伝えます。`cancel` は不要になったジョブを放棄します。\
 `list` はセッション内の全ジョブと状態を表示します。完了した結果は自動的に届くため、\
 次の一手が特定の結果に依存するときだけ `output` を使ってください。";
+
+/// 父会话当前拥有的工作区（主工作区在前，附加工作区在后）。
+///
+/// 主工作区在会话模型里没有只读标记（它的可写性由访问级别决定），这里统一按可写登记。
+fn parent_workspaces(ctx: &ToolUseContext) -> Vec<WorkingDirectoryPermission> {
+    let mut roots: Vec<WorkingDirectoryPermission> = Vec::new();
+    if !ctx.working_directory.trim().is_empty() {
+        roots.push(WorkingDirectoryPermission {
+            path: ctx.working_directory.clone(),
+            permissions: vec!["read".to_string(), "write".to_string(), "delete".to_string()],
+            is_read_only: false,
+        });
+    }
+    roots.extend(ctx.extra_working_directories.iter().cloned());
+    roots
+}
+
+/// 解析 `work_delegate` 的 `workspaces` 参数，得出子 agent 的工作区集合。
+///
+/// - 省略 / `null`：继承父会话全部工作区（与历史行为一致）
+/// - 数组：只用给定的这些；**空数组表示一个都不给**（子 agent 进入无工作区模式）
+///
+/// 两条硬约束，都是权限收缩方向、不能违反：
+/// 1. 只能选父会话自己拥有的路径 —— 否则子 agent 就拿到了父会话没有的目录，
+///    等于绕过父会话的沙箱边界；
+/// 2. **主工作区必须可写**，所以只读工作区只能进附加列表。会话模型里主工作区的可写性
+///    由访问级别决定、没有独立只读标记，把一个只读目录提成主根会凭空放大授权。
+///
+/// 返回 `(主工作区, 附加工作区, 是否显式限定过)`。
+fn resolve_subagent_workspaces(
+    args: &Value,
+    ctx: &ToolUseContext,
+) -> Result<(String, Vec<WorkingDirectoryPermission>, bool), String> {
+    let own = parent_workspaces(ctx);
+    let items = match args.get("workspaces") {
+        None | Some(Value::Null) => {
+            return Ok((
+                ctx.working_directory.clone(),
+                ctx.extra_working_directories.clone(),
+                false,
+            ))
+        }
+        Some(Value::Array(items)) => items,
+        Some(_) => return Err("workspaces 必须是路径数组".to_string()),
+    };
+
+    let mut primary: Option<String> = None;
+    let mut extras: Vec<WorkingDirectoryPermission> = Vec::new();
+    for item in items {
+        let Some(raw) = item.as_str() else {
+            return Err("workspaces 只接受路径字符串".to_string());
+        };
+        let raw = raw.trim();
+        if raw.is_empty() {
+            continue;
+        }
+        let key = workspace_key(raw);
+        let Some(found) = own.iter().find(|w| workspace_key(&w.path) == key) else {
+            let owned = if own.is_empty() {
+                "（本会话没有工作区）".to_string()
+            } else {
+                own.iter().map(|w| w.path.clone()).collect::<Vec<_>>().join("、")
+            };
+            return Err(format!(
+                "不能把 '{raw}' 交给子 agent：它不属于本会话的工作区。\
+                 本会话的工作区是：{owned}。只能在这里面选；要什么都不给就传空数组 []。"
+            ));
+        };
+        if extras.iter().any(|w| workspace_key(&w.path) == key) {
+            continue;
+        }
+        // 第一个可写工作区当主工作区；只读的只能当附加工作区
+        if primary.is_none() && !found.is_read_only {
+            primary = Some(found.path.clone());
+        } else {
+            extras.push(found.clone());
+        }
+    }
+
+    Ok((primary.unwrap_or_default(), extras, true))
+}
 
 /// 工作智能体委派子任务。
 pub struct WorkDelegateTool;
@@ -238,6 +326,20 @@ impl Tool for WorkDelegateTool {
             .map(|n| (n as usize).clamp(1, SUBAGENT_MAX_ROUNDS))
             .unwrap_or(SUBAGENT_DEFAULT_ROUNDS);
 
+        // 工作区范围：默认继承父会话全部，可选地收窄成子集，甚至一个都不给。
+        // 在这里就校验完，避免把非法请求带进后台任务（那时已经没有调用方可以报错了）。
+        let (child_workspace, child_extra_workspaces, workspaces_restricted) =
+            match resolve_subagent_workspaces(&args, context) {
+                Ok(v) => v,
+                Err(msg) => {
+                    return ToolResult::standard_error(
+                        &msg,
+                        Some("SubagentWorkspaceDenied"),
+                        None,
+                    )
+                }
+            };
+
         let app = match APP_HANDLE.read().unwrap().clone() {
             Some(a) => a,
             None => {
@@ -280,7 +382,9 @@ impl Tool for WorkDelegateTool {
                 tools,
                 max_rounds,
                 depth: context.subagent_depth,
-                working_directory: context.working_directory.clone(),
+                working_directory: child_workspace.clone(),
+                extra_workspaces: child_extra_workspaces.clone(),
+                workspaces_restricted,
                 access_level: context
                     .access_level
                     .clone()
@@ -332,7 +436,9 @@ impl Tool for WorkDelegateTool {
             tools,
             max_rounds,
             depth: context.subagent_depth,
-            working_directory: context.working_directory.clone(),
+            working_directory: child_workspace,
+            extra_workspaces: child_extra_workspaces,
+            workspaces_restricted,
             access_level: context
                 .access_level
                 .clone()
@@ -570,11 +676,16 @@ fn truncate_for_display(text: &str, max: usize) -> String {
 
 impl WorkDelegateTool {
     fn schema_for(lang: &str) -> Value {
-        let (task, ctx, tools, rounds, bg) = match lang {
+        let (task, ctx, tools, ws, rounds, bg) = match lang {
             "zh" => (
                 "子任务描述。要自包含：目标 + 相关路径 + 约束。",
                 "子 agent 看不到主会话，把它需要知道的背景一次写清。",
                 "额外开放的工具名（在默认只读探索工具之外）。",
+                "给子 agent 的工作区，只能从本会话已有的工作区里选。省略 = 继承全部；\
+                 给 [] = 一个都不给（它只能按绝对路径操作，写文件会请求确认）。\
+                 只给该子任务真正需要的那些——收窄范围能减少它越界乱翻。\
+                 列表里第一个可写工作区会成为它的主工作区（决定相对路径与命令 cwd）；\
+                 只读工作区只会作为附加目录。",
                 "轮次预算（默认 12，上限 24）。",
                 "true = 派到后台并立即返回任务号，主流程继续；false（默认）= 等待结果。",
             ),
@@ -582,6 +693,10 @@ impl WorkDelegateTool {
                 "サブタスクの説明。目標・関連パス・制約を含めて自己完結させてください。",
                 "サブエージェントはメイン会話を見られません。必要な背景をここに書いてください。",
                 "追加で許可するツール名（既定の読み取り専用探索ツールに加えて）。",
+                "サブエージェントに与えるワークスペース。このセッションが既に持つものだけ選べます。\
+                 省略 = 全て継承；[] = 一つも与えない（絶対パスのみで動作し、書き込みは確認が必要）。\
+                 そのサブタスクに本当に必要なものだけを渡してください。\
+                 リスト内で最初の書き込み可能なものがメインになり、読み取り専用は追加扱いになります。",
                 "ラウンド予算（既定 12、上限 24）。",
                 "true = バックグラウンドに送り即座にジョブ ID を返します。false（既定）= 結果を待ちます。",
             ),
@@ -589,6 +704,11 @@ impl WorkDelegateTool {
                 "The subtask. Make it self-contained: goal, relevant paths, constraints.",
                 "The subagent cannot see your conversation — write every piece of background it needs.",
                 "Extra tool names to allow on top of the default read-only exploration set.",
+                "Workspaces to give the subagent — only paths already in this conversation's \
+                 workspace set. Omit to inherit all of them; pass [] to give none (it then works \
+                 with absolute paths only, and writes ask for confirmation). \
+                 Pass only what the subtask really needs. The first writable one becomes its main \
+                 workspace; read-only ones stay as extra directories.",
                 "Round budget for the child (default 12, hard cap 24).",
                 "true = run in the background and return a job id immediately; false (default) = wait for the result.",
             ),
@@ -601,6 +721,11 @@ impl WorkDelegateTool {
                 "tools": {
                     "type": "array",
                     "description": tools,
+                    "items": { "type": "string" }
+                },
+                "workspaces": {
+                    "type": "array",
+                    "description": ws,
                     "items": { "type": "string" }
                 },
                 "max_rounds": { "type": "integer", "description": rounds, "minimum": 1 },

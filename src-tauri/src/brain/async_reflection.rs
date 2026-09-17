@@ -212,7 +212,8 @@ pub async fn run_async_reflection(
     let timeout_secs = if router.uses_proxy() { 20u64 } else { 10u64 };
     let result = tokio::time::timeout(
         Duration::from_secs(timeout_secs),
-        router.generate(LLMRequest::new("reflection", messages)),
+        router.generate(LLMRequest::new("reflection", messages)
+        .with_character_id(char_id.clone())),
     )
     .await;
 

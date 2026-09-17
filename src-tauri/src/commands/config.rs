@@ -9,7 +9,6 @@ use serde_json::{json, Value};
 use tauri::State;
 
 use crate::config::manager::WorkModelProfile;
-use crate::network::proxy::{build_client_with_proxy, ProxyConfig};
 use crate::state::AppState;
 
 fn err_str(e: impl std::fmt::Display) -> String {
@@ -64,10 +63,12 @@ pub fn save_config(state: State<'_, Arc<AppState>>) -> Result<(), String> {
         &state.config.read().get_all(),
     );
     crate::network::http_client::reload_global_client(pc);
-    // 工具开关可能已变更：同步用户禁用的工具集合到 ToolSystem（即时生效，
-    // 禁用工具立即从 LLM 工具列表移除并被执行入口拒绝）
-    let disabled_tools = state.config.read().get_all().tools.disabled_tools.clone();
-    state.tool_system.set_disabled_tools(disabled_tools);
+    // 工具开关可能已变更：同步用户禁用的工具（分陪伴侧 / 工作侧）到 ToolSystem
+    // （即时生效，禁用工具立即从对应侧的 LLM 工具列表移除并被执行入口拒绝）
+    let disabled = state.config.read().get_all().tools.disabled_tools.clone();
+    state
+        .tool_system
+        .set_disabled_tools(disabled.companion, disabled.work);
     // 远程访问配置可能已变更（启用开关 / 端口），同步服务器状态。
     // 若应用尚未完成初始化（含种子记忆注入与语料嵌入预加载），先不启动远程 HTTP 服务，
     // 待 lib.rs 在初始化完成后统一调用 sync_remote_server 开放 API。
@@ -88,86 +89,22 @@ pub fn reload_config(state: State<'_, Arc<AppState>>) -> Result<(), String> {
     Ok(())
 }
 
-/// 网络连接测试结果
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NetworkTestResult {
-    /// 是否连通
-    pub success: bool,
-    /// HTTP 状态码（若收到响应）
-    pub status_code: Option<u16>,
-    /// 耗时（毫秒）
-    pub elapsed_ms: u64,
-    /// 使用的代理模式
-    pub proxy_mode: String,
-    /// 实际生效的代理 URL（仅显示，可能为 None）
-    pub effective_proxy: Option<String>,
-    /// 错误信息（失败时）
-    pub error: Option<String>,
-}
-
-/// 测试网络连接 —— 通过当前网络设置访问 Google 主页验证代理可用性
+/// 网络检测 —— 按运行时真实链路逐项诊断出网能力
 ///
-/// 使用 `AppConfig.network` 中的代理模式 / 代理地址 / 超时构建专属客户端，
-/// 发送 GET 请求到 `https://www.google.com`，返回连接结果。
+/// 取代早期只对 `https://www.google.com` 发一次 GET 的「代理检测」：现在返回
+/// 五项独立结论（代理检测 / Hosts 解析 / 服务连通性 / TCP 连接延迟 / 丢包率），
+/// 检测目标取运行时实际使用的服务端点。实现见 [`crate::network::diagnose`]。
+///
+/// 读配置只在同步块内完成，避免 parking_lot guard 跨 await。
 #[tauri::command]
-pub async fn test_network_connection(
+pub async fn diagnose_network(
     state: State<'_, Arc<AppState>>,
-) -> Result<NetworkTestResult, String> {
-    // 在跨 await 之前完成对配置读锁的获取与释放，避免 guard 跨 await 导致 Future 不满足 Send
-    let (proxy_config, effective_proxy, proxy_mode) = {
+) -> Result<crate::network::diagnose::NetworkDiagnosisReport, String> {
+    let app_config = {
         let config = state.config.read();
-        let app_config = config.get_all();
-        let pc = ProxyConfig::from_app_config(&app_config);
-        let ep = pc.effective_proxy_url();
-        let pm = pc.mode.as_str().to_string();
-        (pc, ep, pm)
+        config.get_all()
     };
-
-    // 测试目标 —— Google 主页，作为代理可用性的典型判定
-    const TEST_URL: &str = "https://www.google.com";
-
-    let client = match build_client_with_proxy(&proxy_config) {
-        Ok(c) => c,
-        Err(e) => {
-            return Ok(NetworkTestResult {
-                success: false,
-                status_code: None,
-                elapsed_ms: 0,
-                proxy_mode,
-                effective_proxy,
-                error: Some(format!("客户端构建失败: {}", e)),
-            });
-        }
-    };
-
-    let start = std::time::Instant::now();
-    let result = client.get(TEST_URL).send().await;
-    let elapsed_ms = start.elapsed().as_millis() as u64;
-
-    match result {
-        Ok(resp) => Ok(NetworkTestResult {
-            success: true,
-            status_code: Some(resp.status().as_u16()),
-            elapsed_ms,
-            proxy_mode,
-            effective_proxy,
-            error: None,
-        }),
-        Err(e) => Ok(NetworkTestResult {
-            success: false,
-            status_code: None,
-            elapsed_ms,
-            proxy_mode,
-            effective_proxy,
-            error: Some(if e.is_timeout() {
-                format!("请求超时（{}s）", proxy_config.timeout_secs)
-            } else if e.is_connect() {
-                format!("连接失败: {}", e)
-            } else {
-                e.to_string()
-            }),
-        }),
-    }
+    Ok(crate::network::diagnose::run_diagnosis(&app_config).await)
 }
 
 // ===== LLM 路由 API 可用性测试（一键检测）=====

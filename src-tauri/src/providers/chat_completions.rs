@@ -26,7 +26,7 @@ use crate::config::manager::ProviderConfig;
 use crate::error::{VivianError, VivianResult};
 use crate::providers::base::{
     parse_stream_usage, BaseProvider, ChatResponse, ProviderBase, StreamEvent, StructuredToolCall,
-    ToolDefinition,
+    ToolDefinition, PENALTY_KEYS_SNAKE,
 };
 use crate::providers::thinking_stripper::{
     leaks_thinking_in_content, strip_thinking_segments, ThinkingStreamStripper,
@@ -484,6 +484,10 @@ impl BaseProvider for ChatCompletionsProvider {
         });
         // 工作智能体模式：省略 temperature（服务端默认）
         self.base.strip_temperature(&mut body);
+        // 采样惩罚：存在/频率惩罚。标准 Chat Completions 协议原生支持这两个字段，
+        // 是陪伴对话在采样层抑制"同一句话反复说"最直接的手段。
+        self.base
+            .apply_sampling_penalties(&mut body, PENALTY_KEYS_SNAKE);
         self.apply_reasoning_fields(&mut body, false);
         self.call_with_retry(body, Some(&prompt_key)).await
     }
@@ -524,6 +528,10 @@ impl BaseProvider for ChatCompletionsProvider {
         });
         // 工作智能体模式：省略 temperature（服务端默认）
         self.base.strip_temperature(&mut body);
+        // 采样惩罚：存在/频率惩罚。标准 Chat Completions 协议原生支持这两个字段，
+        // 是陪伴对话在采样层抑制"同一句话反复说"最直接的手段。
+        self.base
+            .apply_sampling_penalties(&mut body, PENALTY_KEYS_SNAKE);
         self.apply_reasoning_fields(&mut body, false);
         self.inject_response_format(&mut body, &json_schema);
         self.call_with_retry(body, Some(&prompt_key)).await
@@ -549,6 +557,10 @@ impl BaseProvider for ChatCompletionsProvider {
         });
         // 工作智能体模式：省略 temperature（服务端默认）
         self.base.strip_temperature(&mut body);
+        // 采样惩罚：存在/频率惩罚。标准 Chat Completions 协议原生支持这两个字段，
+        // 是陪伴对话在采样层抑制"同一句话反复说"最直接的手段。
+        self.base
+            .apply_sampling_penalties(&mut body, PENALTY_KEYS_SNAKE);
         self.apply_reasoning_fields(&mut body, false);
         self.inject_response_format(&mut body, &json_schema);
 
@@ -725,6 +737,10 @@ impl BaseProvider for ChatCompletionsProvider {
         });
         // 工作智能体模式：省略 temperature（服务端默认）
         self.base.strip_temperature(&mut body);
+        // 采样惩罚：存在/频率惩罚。标准 Chat Completions 协议原生支持这两个字段，
+        // 是陪伴对话在采样层抑制"同一句话反复说"最直接的手段。
+        self.base
+            .apply_sampling_penalties(&mut body, PENALTY_KEYS_SNAKE);
         self.apply_reasoning_fields(&mut body, true);
         let schema = crate::providers::base::ProviderCallOptions::current_json_schema();
         self.inject_response_format(&mut body, &schema);
@@ -782,6 +798,10 @@ impl BaseProvider for ChatCompletionsProvider {
         });
         // 工作智能体模式：省略 temperature（服务端默认）
         self.base.strip_temperature(&mut body);
+        // 采样惩罚：存在/频率惩罚。标准 Chat Completions 协议原生支持这两个字段，
+        // 是陪伴对话在采样层抑制"同一句话反复说"最直接的手段。
+        self.base
+            .apply_sampling_penalties(&mut body, PENALTY_KEYS_SNAKE);
         self.apply_reasoning_fields(&mut body, !tools.is_empty());
         let schema = crate::providers::base::ProviderCallOptions::current_json_schema();
         self.inject_response_format(&mut body, &schema);

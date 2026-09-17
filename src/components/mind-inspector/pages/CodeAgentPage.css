@@ -325,7 +325,7 @@
   flex-shrink: 0;
   cursor: col-resize;
   background: transparent;
-  transition: background 0.1s ease;
+  transition: background 0.1s ease, opacity 0.2s ease;
   user-select: none;
 }
 
@@ -333,6 +333,38 @@
 .codex-resize-handle:active {
   background: var(--codex-accent);
   opacity: 0.6;
+}
+
+/* 对应侧收起时手柄淡出并停用。手柄改为常驻渲染：条件渲染会让它瞬间消失，
+   那 6px 的布局跳变正好落在侧栏收放动画的第一帧上，看得出「顿一下」。 */
+.codex-resize-handle.hidden {
+  opacity: 0;
+  pointer-events: none;
+  cursor: default;
+}
+
+/* 拖拽调宽期间必须关掉宽度过渡：否则每一帧的目标宽度都被 0.32s 缓动拖住，
+   手感会变成「橡皮筋追鼠标」，越拖越滞后。 */
+.codex-sidebar.resizing,
+.codex-inspector.resizing {
+  transition: none;
+}
+
+/* 尊重系统的「减少动态效果」偏好 */
+@media (prefers-reduced-motion: reduce) {
+  .codex-sidebar,
+  .codex-inspector,
+  .codex-brand-title,
+  .codex-new-row,
+  .codex-sidebar-scroll,
+  .codex-pinned,
+  .codex-pinned.collapsed,
+  .codex-main-col .codex-chat,
+  .codex-main-col .codex-composer-wrap,
+  .codex-main-col .codex-stats-line,
+  .codex-main-col .codex-to-bottom {
+    transition: none;
+  }
 }
 
 /* ===================== 左侧：任务会话栏 ===================== */
@@ -347,6 +379,10 @@
   border-right: 2px dashed var(--codex-line);
   position: relative;
   z-index: 2;
+  /* 收放过渡。左侧刻意不用 overflow:hidden 裁切——它收起后还剩 54px 窄条，
+     内层一旦固定宽度，折叠按钮就没法在窄条里居中了。改用「宽度缓动 + 内容
+     快速淡出」：内容 0.16s 就透明，之后那点挤压重排根本看不见。 */
+  transition: width 0.32s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 /* 侧栏顶部装饰纸胶带 */
@@ -379,6 +415,11 @@
   font-weight: 700;
   letter-spacing: 0.5px;
   color: var(--codex-ink);
+  /* 收起时淡出并收掉占位，让折叠按钮在窄条里居中。
+     用 max-width 而不是 display:none —— display 不可过渡，会先闪一下再收缩。 */
+  max-width: 200px;
+  overflow: hidden;
+  transition: opacity 0.16s ease, max-width 0.32s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .codex-brand-badge {
@@ -391,8 +432,23 @@
   letter-spacing: 1px;
 }
 
-.codex-new-btn {
+/* 新建任务：主按钮（走默认工作区）+ 右侧下拉箭头（手动选目录）同一行 */
+.codex-new-row {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
   margin: 0 12px 10px;
+  /* 收起时高度也要收掉，否则窄条里会留一块空白 */
+  max-height: 60px;
+  transition: max-height 0.32s cubic-bezier(0.4, 0, 0.2, 1),
+              margin 0.32s cubic-bezier(0.4, 0, 0.2, 1),
+              opacity 0.16s ease;
+}
+
+.codex-new-btn {
+  flex: 1;
+  min-width: 0;
   height: 40px;
   display: flex;
   align-items: center;
@@ -420,11 +476,55 @@
   cursor: wait;
 }
 
+.codex-new-caret {
+  flex-shrink: 0;
+  width: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1.5px dashed var(--codex-line);
+  border-radius: 10px 12px 10px 12px;
+  background: var(--codex-paper);
+  color: var(--codex-ink);
+  cursor: pointer;
+  box-shadow: var(--codex-shadow-sm);
+  transition: border-color 0.12s ease, background 0.12s ease;
+}
+
+.codex-new-caret:hover,
+.codex-new-caret.open {
+  border-color: var(--codex-accent);
+  background: #fbf4e6;
+}
+
+.codex-new-caret:disabled {
+  opacity: 0.5;
+  cursor: wait;
+}
+
+.codex-new-menu {
+  top: calc(100% + 6px);
+}
+
+/* 下拉项下方的一行小字：默认工作区路径 / 手动选择说明 */
+.codex-new-menu-hint {
+  padding: 0 9px 4px 31px;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--codex-ink-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .codex-sidebar-scroll {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  /* 水平裁切：收窄过程中内容不会甩到对话区上 */
+  overflow-x: hidden;
   padding: 0 10px 18px;
+  transition: opacity 0.16s ease;
 }
 
 .codex-sidebar-section {
@@ -451,41 +551,130 @@
   background: repeating-linear-gradient(90deg, var(--codex-line) 0 4px, transparent 4px 8px);
 }
 
+/* 工作区芯片（topbar）：显示主工作区目录名，点击展开工作区管理菜单。
+   附加上工作区数量以 +N 徽标提示。 */
 .codex-workspace-chip {
-  width: 100%;
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 8px 10px;
+  gap: 5px;
+  max-width: 100%;
+  padding: 2px 7px 2px 6px;
   border: 1px solid var(--codex-line-light);
-  border-radius: 12px 8px 12px 8px;
+  border-radius: 9px 7px 9px 7px;
   background: var(--codex-paper);
   color: var(--codex-ink-soft);
-  font-size: 12px;
+  font-size: 11.5px;
+  font-family: inherit;
   cursor: pointer;
-  box-shadow: var(--codex-shadow-sm);
+  transition: border-color 0.12s ease, background 0.12s ease;
 }
 
-.codex-workspace-chip span {
+.codex-workspace-chip:hover {
+  border-color: var(--codex-line);
+  background: #fffcf3;
+}
+
+.codex-workspace-chip:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.codex-workspace-chip .codex-workspace-name {
+  min-width: 0;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.codex-workspace-badge {
+  flex: 0 0 auto;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--codex-accent-deep);
+  background: var(--codex-tape-blue);
+  padding: 1px 6px;
+  border-radius: 999px;
+  letter-spacing: 0.5px;
+}
+
+/* ===== 工作区管理菜单 ===== */
+
+.codex-ws-menu {
+  min-width: 300px;
+  max-width: 400px;
+}
+
+.codex-ws-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 9px;
+  border-radius: 9px;
+  font-size: 12px;
+}
+
+.codex-ws-badge {
+  flex: 0 0 auto;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 999px;
+  letter-spacing: 0.5px;
+  color: var(--codex-accent-deep);
+  background: rgba(83, 125, 150, 0.16);
+}
+
+.codex-ws-badge-extra {
+  color: var(--codex-warm);
+  background: var(--codex-warm-soft);
+}
+
+.codex-ws-path {
   flex: 1;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  text-align: left;
+  color: var(--codex-ink-soft);
 }
 
-.codex-workspace-chip .codex-workspace-lock-hint {
+.codex-ws-toggle {
+  flex: 0 0 auto;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--codex-line-light);
+  background: transparent;
+  color: var(--codex-ink-faint);
+  font-size: 10px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: border-color 0.12s ease, color 0.12s ease;
+}
+
+.codex-ws-toggle.ro {
+  color: var(--codex-warm);
+  border-color: var(--codex-warm-soft);
+}
+
+.codex-ws-remove {
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
-  font-size: 10px;
-  font-weight: 600;
-  color: var(--codex-accent-deep);
-  background: var(--codex-tape-blue);
-  padding: 1px 7px 1px 6px;
-  border-radius: 999px;
-  letter-spacing: 1px;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--codex-ink-faint);
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.codex-ws-remove:hover {
+  background: rgba(229, 57, 53, 0.12);
+  color: #e53935;
 }
 
 /* ===== 左侧栏收纳 ===== */
@@ -520,11 +709,28 @@
   justify-content: center;
 }
 
+/* 品牌标题与徽章在窄条里必须真的不占位，否则折叠按钮居中不了 */
 .codex-sidebar.collapsed .codex-brand-title,
-.codex-sidebar.collapsed .codex-brand-badge,
-.codex-sidebar.collapsed .codex-new-btn,
+.codex-sidebar.collapsed .codex-brand-badge {
+  opacity: 0;
+  max-width: 0;
+  overflow: hidden;
+}
+
+/* 会话列表与新建按钮：淡出 + 收掉高度，但不卸载 ——
+   卸载的话动画一开始内容就没了，只剩一条空栏在缩，看着像闪屏 */
+.codex-sidebar.collapsed .codex-new-row {
+  max-height: 0;
+  margin-top: 0;
+  margin-bottom: 0;
+  opacity: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+
 .codex-sidebar.collapsed .codex-sidebar-scroll {
-  display: none;
+  opacity: 0;
+  pointer-events: none;
 }
 
 .codex-sidebar.collapsed .codex-sidebar-collapse-btn {
@@ -750,6 +956,13 @@
   padding: 6px 8px;
   border-radius: 7px;
   font-size: 12px;
+  /* 手写体（项目已加载的 Caveat 拉丁 + 本地 Ma Shan Zheng 中文）。
+     两处继承是这里必须写死的原因：
+     1) reset 里 button 是 font: inherit，字重会从 .codex-session-group-title 拿到 700；
+     2) --codex-font 首选 'Kalam' 从未引入，回退链一路掉到 Microsoft YaHei（黑体）。
+     合起来就是这个菜单项看上去「加粗黑体」的原因。 */
+  font-family: 'Caveat', 'Ma Shan Zheng', 'Dancing Script', 'Segoe Print', 'KaiTi', '楷体', cursive;
+  font-weight: 400;
   color: var(--codex-ink-soft);
   cursor: pointer;
   text-align: left;
@@ -826,7 +1039,7 @@
 
 .codex-session-title {
   font-size: 13px;
-  font-weight: 600;
+  font-weight: 400;
   color: var(--codex-ink);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -874,6 +1087,29 @@
   background: var(--codex-danger-soft);
 }
 
+.codex-session-unread-dot { width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; background: var(--codex-accent); box-shadow: 0 0 0 3px var(--codex-accent-soft); }
+.codex-session-status-spinner { flex: 0 0 auto; color: var(--codex-accent); }
+.codex-session-status-question { flex: 0 0 auto; color: var(--codex-warm); }
+.codex-session-context-menu { position: fixed; z-index: 1000; display: flex; flex-direction: column; min-width: 150px; padding: 5px; border: 1px solid var(--codex-line, #d9dde3); border-radius: 10px; background-color: var(--codex-paper-card, #ffffff) !important; box-shadow: var(--codex-shadow-lg, 0 12px 32px rgba(20, 24, 28, 0.2)); }
+.codex-session-context-menu button { border: 0; border-radius: 6px; padding: 7px 10px; color: var(--codex-ink, #252a30); background: transparent; text-align: left; cursor: pointer; font-size: 12px; font-family: 'Caveat', 'Ma Shan Zheng', 'Dancing Script', 'Segoe Print', 'KaiTi', '楷体', cursive; font-weight: 400; }
+.codex-session-context-menu button:hover { background: var(--codex-accent-soft); }
+.codex-session-context-menu button.danger { color: var(--codex-danger); }
+.codex-session-context-menu.scrapbook { background: #fffaf2 !important; border-color: #e7d8c4; color: #403a34; }
+.codex-session-context-menu.minimal { background: #ffffff !important; border-color: #d9dde3; color: #252a30; }
+.codex-session-context-menu button.danger { color: #b42318 !important; }
+.codex-session-modal-backdrop { position: fixed; inset: 0; z-index: 1100; display: grid; place-items: center; background: rgba(20, 24, 28, 0.28); }
+.codex-session-modal { width: min(360px, calc(100vw - 32px)); padding: 18px; border: 1px solid var(--codex-line, #d9dde3); border-radius: 14px; background-color: var(--codex-paper-card, #ffffff) !important; box-shadow: var(--codex-shadow-lg, 0 12px 32px rgba(20, 24, 28, 0.2)); color: var(--codex-ink, #252a30); }
+.codex-session-modal h3 { margin: 0 0 12px; font-size: 15px; }
+.codex-session-modal p { margin: 0 0 14px; color: var(--codex-ink-soft); font-size: 13px; }
+.codex-session-modal input { width: 100%; height: 30px; box-sizing: border-box; padding: 0 9px; border: 1px solid var(--codex-line); border-radius: 7px; background: var(--codex-paper); color: var(--codex-ink); outline: none; font-size: 12px; line-height: 28px; }
+.codex-session-modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+.codex-session-modal-actions button { height: 28px; min-height: 28px; border: 1px solid var(--codex-line); border-radius: 7px; padding: 0 11px; background: transparent; color: var(--codex-ink-soft); cursor: pointer; font-size: 12px; line-height: 26px; }
+.codex-session-modal-actions button.primary { background: var(--codex-accent); border-color: var(--codex-accent); color: white; }
+.codex-session-modal-actions button.danger { background: var(--codex-danger); border-color: var(--codex-danger); color: white; }
+.codex-session-modal.scrapbook { background: #fffaf2 !important; border-color: #e7d8c4; color: #403a34; }
+.codex-session-modal.minimal { background: #ffffff !important; border-color: #d9dde3; color: #252a30; }
+.codex-session-modal-actions button.danger { background: #b42318 !important; border-color: #b42318 !important; color: #ffffff !important; }
+
 .codex-tree {
   display: flex;
   flex-direction: column;
@@ -910,6 +1146,22 @@
   margin-top: 6px;
   border-top: 1px dashed var(--codex-line-light);
   padding-top: 6px;
+}
+
+.codex-tree-label {
+  width: 100%;
+  border: 0;
+  cursor: pointer;
+  text-align: left;
+}
+
+.codex-tree-label > svg:last-child {
+  margin-left: auto;
+  transition: transform 0.16s ease;
+}
+
+.codex-tree-label > svg:last-child.collapsed {
+  transform: rotate(-90deg);
 }
 
 .codex-workspace-tree {
@@ -1464,6 +1716,16 @@
   text-overflow: ellipsis;
 }
 
+/* 可点击：点击行在右侧预览页签打开文件（仅保留指针，不加悬浮高光） */
+.codex-deliverable-row.is-clickable {
+  cursor: pointer;
+}
+
+.codex-deliverable-row.is-clickable:focus-visible {
+  outline: 2px solid var(--codex-accent);
+  outline-offset: 1px;
+}
+
 /* ===================== 中央：对话区 ===================== */
 
 .codex-main {
@@ -1474,6 +1736,87 @@
   flex-direction: column;
   position: relative;
   background: transparent;
+}
+
+/* 顶栏以下的那条横向带。置顶摘要绝对定位贴在 `.codex-main-col` 右边缘，
+   不参与这里的 flex 分配（只留一个 `.codex-main-col` 撑满），
+   所以它必须靠 `--codex-pinned-reserve` 让位而不是靠 flex 挤压。 */
+.codex-main-body {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  align-items: stretch;
+}
+
+/* 对话列：消息列表 + 回到底部 + 输入区 + 统计。
+   position:relative 同时是 `.codex-to-bottom` 与置顶摘要的定位基准。
+   ----------------------------------------------------------------------
+   三个宽度变量的**唯一来源**（React 内联 style 写入，其余规则只读）：
+     --codex-pinned-w           动画值，收起时为 0（面板宽度与留白都跟它走）
+     --codex-pinned-w-expanded  展开值，收起期间不变（内层靠它保持展开宽度）
+     --codex-pinned-reserve     为面板让出的总宽度，收起时为 0
+     --codex-sb-w               对话滚动条实测宽度
+   纵向显隐（从上往下揭开 / 从下往上收掉）不占变量，纯靠 `.codex-pinned`
+   上的 `clip-path` 切换，见文件末尾置顶摘要那一节。
+   常量（PINNED_W_*、PINNED_GAP_W）都在 CodeAgentPageNew.tsx 顶部，改就改那里。
+   ---------------------------------------------------------------------- */
+.codex-main-col {
+  --codex-pinned-w: 0px;
+  --codex-pinned-w-expanded: 250px;
+  --codex-pinned-reserve: 0px;
+  --codex-sb-w: 10px;
+
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+
+/* --------------------------------------------------------------------------
+   为置顶摘要让位：对话区 / 输入区 / 统计行统一右缩 `--codex-pinned-reserve`。
+
+   用 `max(基准, 留白)` 而不是 `calc(基准 + 留白)`：留白 = 面板宽 + 呼吸缝，
+   它一旦张开就远大于基准内边距（最小 186 + 18），此时正文右缘恰好停在面板
+   左侧 `PINNED_GAP_W` 处——就是「刚好不遮挡」；收起时 reserve 归零，max()
+   取回基准值，左右内边距重新对称。
+
+   **基准内边距必须走 `--codex-*-pad-x` 变量，不能在这里写死。** 主题会用
+   `padding` 简写覆写 `.codex-chat`（`.mind-main[data-ui-style="minimal"] .codex-chat`
+   是 0,3,0；窄屏的 `.mind-inspector-root.is-work-page .workbench-root .codex-chat`
+   是 0,4,0），都高于这里的 0,2,0，写死的 padding-right 会被整条盖掉，让位直接
+   失效（实测：展开时右内边距仍是 34px，窄窗下正文被面板压住 196px）。
+   所以基准值改由主题声明变量、这里只负责合成最终值，全局只有这一处写
+   padding-right。
+
+   四者的过渡必须与面板的宽度过渡**同曲线同步**，否则收起动画期间正文会与
+   面板错位（面板已经在缩，正文还留在原位，看起来像在互相撞）。
+   -------------------------------------------------------------------------- */
+.codex-main-col .codex-chat {
+  padding-right: max(var(--codex-chat-pad-x, 32px), var(--codex-pinned-reserve, 0px));
+  /* 无论有没有溢出都预留滚动条槽：置顶摘要靠它定 `right`，不留的话
+     内容从「不溢出」变成「溢出」时面板会横跳一个滚动条的宽度。
+     槽在 border 与 padding 之间，所以正文可用宽是 `宽 - 槽 - 内边距`。 */
+  scrollbar-gutter: stable;
+  transition: padding-right 0.32s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.codex-main-col .codex-composer-wrap {
+  padding-right: max(var(--codex-composer-pad-x, 16px), var(--codex-pinned-reserve, 0px));
+  transition: padding-right 0.32s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.codex-main-col .codex-stats-line {
+  padding-right: max(32px, var(--codex-pinned-reserve, 0px));
+  transition: padding-right 0.32s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.codex-main-col .codex-to-bottom {
+  /* 位置固定，不随置顶摘要呼出收起而左右移动；展开时允许覆盖在其上 */
+  right: var(--codex-to-bottom-right, 32px);
+  transition: right 0.32s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .codex-topbar {
@@ -1526,10 +1869,14 @@
 }
 
 .codex-chat {
+  /* 左右内边距的**基准值**。主题若要改它，请覆写这个变量而不要用 `padding`
+     简写——`.codex-main-col .codex-chat` 那条让位规则（见上文）靠
+     `max(基准, 留白)` 合成最终的 padding-right，主题简写会把合成结果整个盖掉。 */
+  --codex-chat-pad-x: 32px;
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 18px 32px 8px;
+  padding: 18px var(--codex-chat-pad-x) 8px;
   position: relative;
 }
 
@@ -1538,6 +1885,154 @@
   margin: 0 auto;
   display: flex;
   flex-direction: column;
+}
+
+/* ===================== 对话定位轨（左侧小横杠） ===================== */
+
+/* 包一层是为了给定位轨一个"只覆盖对话区"的定位基准（不含顶栏与输入区） */
+.codex-chat-area {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 滚动锚点：零高度标记，定位轨据此判断"当前停留的是哪一轮" */
+.codex-turn-anchor {
+  display: block;
+  height: 0;
+  scroll-margin-top: 12px;
+}
+
+/* 轨道本身撑满对话区高度（好让内层横杠列有可比较的 max-height），横杠列在其中垂直居中。
+   注意：**不能在这一层裁剪** —— 预览卡是向右伸出轨道的绝对定位子元素，clip 会把它切掉。 */
+.codex-rail {
+  position: absolute;
+  left: 4px;
+  top: 0;
+  bottom: 0;
+  width: 30px;
+  z-index: 16;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: flex-start;
+  /* 轨道本身不拦事件，只有横杠可点 —— 否则左侧这条会挡住正文的选词与点击 */
+  pointer-events: none;
+}
+
+/* 横杠列：只在这里裁剪，超长会话时最多铺满对话区高度 */
+.codex-rail-col {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  max-height: 100%;
+  overflow: hidden;
+}
+
+.codex-rail-tick {
+  flex: 0 0 auto;
+  display: block;
+  height: 2px;
+  min-height: 2px;
+  padding: 0;
+  border: none;
+  border-radius: 2px;
+  background: var(--codex-line);
+  cursor: pointer;
+  pointer-events: auto;
+  transition: width 0.18s cubic-bezier(0.22, 1, 0.36, 1), background 0.14s ease;
+}
+
+.codex-rail-tick.on {
+  background: var(--codex-ink);
+}
+
+/* 轮次多时收紧节奏，尽量让整列容得下（见 .codex-rail-col 的 max-height） */
+.codex-rail.dense .codex-rail-tick {
+  height: 1.5px;
+  min-height: 1.5px;
+}
+
+.codex-rail.dense .codex-rail-col {
+  gap: 2px;
+}
+
+.codex-rail.dense2 .codex-rail-tick {
+  height: 1px;
+  min-height: 1px;
+}
+
+.codex-rail.dense2 .codex-rail-col {
+  gap: 1px;
+}
+
+/* 悬停预览：手账主题下是便签（暖纸 + 虚线描边 + 纸胶带） */
+.codex-rail-pop {
+  position: absolute;
+  left: 100%;
+  margin-left: 4px;
+  width: 272px;
+  transform: translateY(-50%);
+  z-index: 2;
+  padding: 9px 13px 11px;
+  border-radius: 12px 8px 12px 8px;
+  border: 1.5px dashed var(--codex-line);
+  background: var(--codex-paper-card);
+  box-shadow: var(--codex-shadow-md);
+  color: var(--codex-ink);
+  pointer-events: none;
+  animation: codex-rail-pop-in 0.14s ease-out;
+}
+
+.codex-rail-pop::before {
+  content: '';
+  position: absolute;
+  top: -8px;
+  left: 20px;
+  width: 54px;
+  height: 16px;
+  border-radius: 2px;
+  background: var(--codex-tape-yellow);
+  transform: rotate(-3.5deg);
+  pointer-events: none;
+}
+
+/* 首行：用户消息，单行省略号 */
+.codex-rail-pop-user {
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.5;
+  color: var(--codex-ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 其后：智能体最终总结，最多 3 行 */
+.codex-rail-pop-summary {
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--codex-ink-soft);
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
+}
+
+@keyframes codex-rail-pop-in {
+  from { opacity: 0; transform: translateY(-50%) translateX(-4px); }
+  to { opacity: 1; transform: translateY(-50%) translateX(0); }
+}
+
+/* 布局窄于此时对话区只剩四百来像素，预览卡（272px）会溢到右侧检查器上 —— 直接隐藏轨道 */
+@media (max-width: 940px) {
+  .codex-rail { display: none; }
 }
 
 .codex-empty {
@@ -1585,8 +2080,10 @@
 /* ===================== 输入区：线格纸手账卡片 ===================== */
 
 .codex-composer-wrap {
+  /* 与 `--codex-chat-pad-x` 同理：基准值走变量，让位规则才压得住主题的简写。 */
+  --codex-composer-pad-x: 16px;
   flex-shrink: 0;
-  padding: 0 16px 10px;
+  padding: 0 var(--codex-composer-pad-x) 10px;
 }
 
 .codex-composer-inner {
@@ -1618,6 +2115,14 @@
   background: var(--codex-tape-pink);
   opacity: 0.65;
   pointer-events: none;
+}
+
+/* 焦点提示放在「卡片」这一层，而不是里面的 textarea 上。
+   textarea 自身那圈 2px accent 描边已去掉（见 MindInspectorThemes.css 的例外段）：
+   手账主题的 accent 是印章青蓝，画在卡片内里像一个凭空出现的蓝框。
+   这里改用描边色变化——不引入新颜色，纸感也不破坏。 */
+.codex-composer:focus-within {
+  border-color: var(--codex-ink-faint);
 }
 
 .codex-composer-input-row {
@@ -2383,6 +2888,13 @@
   white-space: nowrap;
 }
 
+.codex-tool-label {
+  flex-shrink: 0;
+  color: var(--codex-ink);
+  font-weight: 400;
+  line-height: 20px;
+}
+
 .codex-tool-duration {
   font-family: var(--codex-mono);
   font-size: 11px;
@@ -2414,6 +2926,7 @@
   cursor: pointer;
   font-size: 13.5px;
   text-align: left;
+  line-height: 20px;
 }
 
 .codex-tool-group-header:hover {
@@ -2421,9 +2934,10 @@
 }
 
 .codex-tool-group-label {
-  font-weight: 600;
+  font-weight: 400;
   color: var(--codex-ink);
   flex-shrink: 0;
+  line-height: 20px;
 }
 
 .codex-tool-group-meta {
@@ -2435,6 +2949,7 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  line-height: 20px;
 }
 
 .codex-tool-group-fail {
@@ -2929,11 +3444,29 @@
   border-left: 2px dashed var(--codex-line);
   position: relative;
   z-index: 2;
+  /* 收起靠宽度归零 + 裁切，而不是 display:none —— display 不可过渡。
+     内层保持展开宽度，所以动画期间内容是「整块滑出去」；若让内容跟着变窄
+     逐帧重排，终端（xterm）和代码预览会明显抖动，宽度归零时还可能算出 0 列。 */
+  overflow: hidden;
+  transition: width 0.32s cubic-bezier(0.4, 0, 0.2, 1),
+              border-left-width 0.32s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
-/* 右侧栏整体收纳 */
+/* 内层固定展开宽度，由外层的 overflow:hidden 负责裁切 */
+.codex-inspector-inner {
+  display: flex;
+  flex-direction: column;
+  flex: 1 0 auto;
+  min-height: 0;
+  /* 高度锚定到外层：flex-shrink 为 0，若高度只由内容决定，长列表会把内层撑
+     得比右栏更高，被外层的 overflow:hidden 裁掉，且内层/列表都不产生滚动条。 */
+  height: 100%;
+}
+
+/* 右侧栏整体收纳：宽度由 inline style 收到 0，这里只收掉边框和交互 */
 .codex-inspector.collapsed {
-  display: none;
+  border-left-width: 0;
+  pointer-events: none;
 }
 
 .codex-inspector::before {
@@ -2954,7 +3487,7 @@
   flex-wrap: nowrap;
   align-items: stretch;
   gap: 2px;
-  padding: 10px 12px 0;
+  padding: 10px 18px 0;
   border-bottom: 1.5px dashed var(--codex-line);
   overflow-x: auto;
   overflow-y: hidden;
@@ -3149,6 +3682,17 @@
 
 .codex-changes-item.selected {
   background: var(--codex-accent-soft);
+}
+
+/* 文件类型图标：语言 / 格式的官方 logo（public/icons/languages/） */
+.codex-file-lang {
+  flex-shrink: 0;
+  width: 15px;
+  height: 15px;
+  display: block;
+  object-fit: contain;
+  user-select: none;
+  pointer-events: none;
 }
 
 .codex-changes-name {
@@ -3629,7 +4173,10 @@
 
 .codex-to-bottom {
   position: absolute;
-  right: 32px;
+  /* 基准 `right`（主题可覆写变量）。位置固定，不随置顶摘要呼出收起移动——
+     展开时按钮会浮在面板上方（z-index 高于面板），即「可以覆盖在卡片上」。 */
+  --codex-to-bottom-right: 32px;
+  right: var(--codex-to-bottom-right);
   bottom: 132px;
   width: 34px;
   height: 34px;
@@ -3742,7 +4289,11 @@
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) .workbench-root .codex-new-btn:hover,
-  :root[data-theme="dark"] .workbench-root .codex-new-btn:hover {
+  :root[data-theme="dark"] .workbench-root .codex-new-btn:hover,
+  :root:not([data-theme="light"]) .workbench-root .codex-new-caret:hover,
+  :root:not([data-theme="light"]) .workbench-root .codex-new-caret.open,
+  :root[data-theme="dark"] .workbench-root .codex-new-caret:hover,
+  :root[data-theme="dark"] .workbench-root .codex-new-caret.open {
     background: var(--codex-paper-card);
   }
   :root:not([data-theme="light"]) .workbench-root .codex-empty-note,
@@ -3799,9 +4350,15 @@
   :root[data-theme="dark"] .workbench-root .codex-workspace-chip {
     background: var(--codex-paper);
   }
+  :root:not([data-theme="light"]) .workbench-root .codex-workspace-chip:hover,
+  :root[data-theme="dark"] .workbench-root .codex-workspace-chip:hover {
+    background: var(--codex-paper-card);
+  }
 }
 
-:root[data-theme="dark"] .workbench-root .codex-new-btn:hover { background: var(--codex-paper-card); }
+:root[data-theme="dark"] .workbench-root .codex-new-btn:hover,
+:root[data-theme="dark"] .workbench-root .codex-new-caret:hover,
+:root[data-theme="dark"] .workbench-root .codex-new-caret.open { background: var(--codex-paper-card); }
 :root[data-theme="dark"] .workbench-root .codex-empty-note { background: rgba(43, 36, 30, 0.6); }
 :root[data-theme="dark"] .workbench-root .codex-topbar { background: rgba(43, 36, 30, 0.78); }
 :root[data-theme="dark"] .workbench-root .codex-msg-user-bubble { background: #3a3126; border-color: #6b5b48; }
@@ -3815,6 +4372,7 @@
 :root[data-theme="dark"] .workbench-root .codex-session-tools-panel { background: var(--codex-paper-card); }
 :root[data-theme="dark"] .workbench-root .codex-group-menu { background: var(--codex-paper-card); }
 :root[data-theme="dark"] .workbench-root .codex-workspace-chip { background: var(--codex-paper); }
+:root[data-theme="dark"] .workbench-root .codex-workspace-chip:hover { background: var(--codex-paper-card); }
 
 /* ===================== 动画 ===================== */
 
@@ -3878,6 +4436,13 @@
   flex-direction: column;
 }
 
+/* 轨迹页：高度锚定后列表自己滚，头部工具条与时间线保持固定。
+   这里保留 pane 的 overflow-y:auto 作为兜底 —— 万一上层高度链断了，
+   内容撑开时至少还能整体滚，不会整块被右栏的 overflow:hidden 裁掉。 */
+.codex-inspector-pane.codex-trajectory-pane {
+  min-height: 0;
+}
+
 .codex-trajectory {
   display: flex;
   flex-direction: column;
@@ -3898,6 +4463,7 @@
 }
 
 .codex-trajectory-fold {
+  flex-shrink: 0;
   border: 1px dashed var(--codex-line);
   border-radius: 8px;
   background: transparent;
@@ -3915,11 +4481,17 @@
 
 .codex-trajectory-table {
   flex: 1;
-  min-height: 0;
+  /* 0 会让列表被压没；给个下限，详情展开时列表仍留三行可见 */
+  min-height: 84px;
   overflow-y: auto;
+  /* 滚到尽头不要把滚动传导给外层面板 */
+  overscroll-behavior: contain;
   display: flex;
   flex-direction: column;
   gap: 1px;
+  /* 列表滚动条显式化：默认主题的滑块太淡，容易让人以为这里不能滚 */
+  scrollbar-width: thin;
+  scrollbar-color: var(--panel-scrollbar-hover, rgba(128, 128, 128, 0.4)) transparent;
   border: 1px solid var(--codex-line-light);
   border-radius: 10px;
   background: var(--codex-paper);
@@ -3932,6 +4504,9 @@
   align-items: center;
   gap: 6px;
   width: 100%;
+  /* 行是列表里的 flex 项，默认可收缩：不锁死的话行数一多就会被挤扁，
+     而不是撑出滚动高度。 */
+  flex-shrink: 0;
   text-align: left;
   padding: 4px 6px;
   border: none;
@@ -4115,21 +4690,37 @@
   overflow-y: auto;
 }
 
-/* 头部工具区（搜索 + 视图切换 + 折叠） */
+/* 头部工具区（搜索 + 折叠）。宽窄由右栏决定：
+   统计文字先被压缩，剩下的宽度全部给搜索框；窄到装不下时整行换行，
+   搜索框仍独占该行剩余宽度。 */
 .codex-trajectory-head {
   flex-wrap: wrap;
+}
+
+/* 统计文字可压缩（默认 min-width:auto 会顶住不缩，搜索框就吃不到空间） */
+.codex-trajectory-head > span {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .codex-trajectory-tools {
   display: flex;
   align-items: center;
   gap: 6px;
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .codex-trajectory-search {
   display: flex;
   align-items: center;
   gap: 4px;
+  /* 吃掉工具区剩余宽度；下限保证窄栏下输入区仍可用 */
+  flex: 1 1 auto;
+  min-width: 88px;
   border: 1px dashed var(--codex-line);
   border-radius: 8px;
   padding: 2px 6px;
@@ -4143,12 +4734,14 @@
 }
 
 .codex-trajectory-search input {
+  flex: 1 1 0;
+  min-width: 0;
+  width: auto;
   border: none;
   outline: none;
   background: transparent;
   font-size: 11px;
   color: var(--codex-ink);
-  width: 88px;
   font-family: inherit;
 }
 
@@ -4158,6 +4751,7 @@
 
 .codex-trajectory-search button {
   display: inline-flex;
+  flex-shrink: 0;
   border: none;
   background: transparent;
   color: var(--codex-ink-faint);
@@ -4175,6 +4769,38 @@
 /* 虚拟滚动行 */
 .codex-trajectory-table.virtual {
   padding: 4px 4px;
+}
+
+/* 虚拟列表的撑高容器：行全部绝对定位，它的内容高度是 0，
+   不锁死就会被 flex 压成 0 高 —— 那样列表没有滚动高度，等于滚不动。 */
+.codex-trajectory-table.virtual > div {
+  flex-shrink: 0;
+}
+
+/* 键盘滚动：聚焦后方向键 / PageUp / PageDown 生效 */
+.codex-trajectory-table:focus-visible {
+  outline: 1px dashed var(--codex-accent);
+  outline-offset: 1px;
+}
+
+.codex-trajectory-table::-webkit-scrollbar {
+  width: 8px;
+}
+
+.codex-trajectory-table::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.codex-trajectory-table::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 7px;
+  background: var(--panel-scrollbar-hover, rgba(128, 128, 128, 0.4));
+  background-clip: padding-box;
+}
+
+.codex-trajectory-table::-webkit-scrollbar-thumb:hover {
+  background: rgba(128, 128, 128, 0.6);
+  background-clip: padding-box;
 }
 
 .codex-trajectory-vrow {
@@ -4660,34 +5286,7 @@
 }
 
 
-/* ===== 工作智能体独立待办（右侧检查器） ===== */
-.codex-worktodo-add {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-bottom: 8px;
-}
-
-.codex-worktodo-input {
-  flex: 1;
-  min-width: 0;
-  border: 1px solid var(--codex-line-light);
-  border-radius: 8px;
-  background: var(--codex-paper-2, var(--codex-paper));
-  color: var(--codex-ink);
-  font-size: 12.5px;
-  padding: 6px 9px;
-  outline: none;
-}
-
-.codex-worktodo-input::placeholder {
-  color: var(--codex-ink-faint);
-}
-
-.codex-worktodo-input:focus {
-  border-color: var(--codex-ink-soft);
-}
-
+/* ===== 工作智能体独立待办（右侧检查器，只读展示） ===== */
 .codex-worktodo-list {
   display: flex;
   flex-direction: column;
@@ -4698,60 +5297,18 @@
 
 .codex-worktodo-row {
   display: flex;
-  align-items: flex-start;
-  gap: 8px;
+  align-items: center;
+  gap: 7px;
   padding: 6px 8px;
   border-radius: 8px;
   background: var(--codex-paper-2, rgba(0,0,0,0.02));
-  cursor: pointer;
   font-size: 12.5px;
   color: var(--codex-ink);
-  transition: opacity 0.15s ease;
-}
-
-.codex-worktodo-row:hover {
-  background: var(--codex-paper-3, rgba(0,0,0,0.045));
-}
-
-.codex-worktodo-row input[type="checkbox"] {
-  margin-top: 2px;
-  accent-color: var(--codex-accent, #b7791f);
-  cursor: pointer;
 }
 
 .codex-worktodo-title {
   line-height: 1.45;
   word-break: break-word;
-}
-
-.codex-worktodo-row.done .codex-worktodo-title {
-  text-decoration: line-through;
-  opacity: 0.45;
-}
-
-
-.codex-worktodo-row.pending,
-.codex-worktodo-row.in_progress,
-.codex-worktodo-row.completed {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-}
-
-.codex-worktodo-start {
-  border: none;
-  background: transparent;
-  color: var(--codex-accent, #b7791f);
-  font-size: 9px;
-  padding: 0 1px;
-  cursor: pointer;
-  opacity: 0.85;
-  flex-shrink: 0;
-}
-
-.codex-worktodo-start:hover {
-  opacity: 1;
-  transform: scale(1.15);
 }
 
 .codex-worktodo-status {
@@ -4779,30 +5336,6 @@
   color: var(--codex-ink-faint);
   text-decoration: line-through;
   opacity: 0.8;
-}
-
-.codex-worktodo-del {
-  border: none;
-  background: transparent;
-  color: var(--codex-ink-faint);
-  font-size: 12px;
-  line-height: 1;
-  padding: 0 2px;
-  cursor: pointer;
-  opacity: 0.5;
-  flex-shrink: 0;
-}
-
-.codex-worktodo-del:hover {
-  opacity: 1;
-  color: #c0392b;
-}
-
-.codex-worktodo-error {
-  margin: 4px 0 0;
-  font-size: 10px;
-  line-height: 1.4;
-  color: #c0392b;
 }
 
 /* ===== 工作智能体询问卡片（选择题） ===== */
@@ -5112,4 +5645,492 @@
   border-top: 1px solid var(--codex-line-light);
   max-height: 320px;
   overflow: auto;
+}
+
+/* ==========================================================================
+   置顶摘要（PinnedSummary）—— 主工作区右侧的信息列
+   --------------------------------------------------------------------------
+   两块独立可折叠卡片：
+     ① 环境信息 —— git 仓库状态 + 提交 / 比较操作
+     ② 来源     —— 插件 / 技能 / MCP 汇总
+   定位：绝对贴在 `.codex-main-col` 的右边缘、**对话滚动条的左侧**（`right` 取
+   实测滚动条宽度 `--codex-sb-w`），所以滚动条始终在它右边。宽度取自祖先给的
+   `--codex-pinned-w`，对话区 / 输入区 / 统计行则靠 `--codex-pinned-reserve`
+   右缩同样的量——面板浮在那块留白上，不盖住任何正文。
+   收起时宽度归零 + `overflow:hidden`，靠内层固定展开宽度做裁切，内容不会在
+   动画期间被逐帧压窄重排。宽度过渡与两侧边栏用同一条曲线，节奏保持一致。
+
+   呼出 / 收起是**两轴同时**的：
+     · 横向 —— `width` 走 0 ↔ 250。这条必须留着：面板的横向占位一旦先于对话区
+       的让位出现，动画途中就会压住正文（让位靠 `--codex-pinned-reserve`，而
+       面板盒宽恒小于它，所以同步走就永远不重叠）。
+     · 纵向 —— `clip-path: inset()` 把可见区从**顶边往下**揭开、从**底边往上**
+       收掉，这是用户要求的主方向。
+   内层固定为展开宽度并**靠右对齐**（`align-items:flex-end`），所以内容在动画
+   期间一动不动——只是被一块从右上角向外扩张的窗口逐步揭开，读起来是「卡片
+   从上往下落下来」而不是「从右边滑进来」。`overflow:hidden` 负责横向裁切。
+   与正文之间**不画分隔线**：面板自己就是主工作区的一部分，靠卡片自身的描边
+   和留白区分即可。
+   ========================================================================== */
+
+.codex-pinned {
+  position: absolute;
+  top: 0;
+  right: var(--codex-sb-w, 10px);
+  bottom: 0;
+  /* 宽度只认祖先的变量（React 写在 `.codex-main-col` 上），收起时它是 0 */
+  width: var(--codex-pinned-w, 250px);
+  /* 收起时把内容横向切掉；展开时也靠它保证内层固定宽度不撑破外层 */
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  /* 内层宽度固定为展开值，靠右对齐：外层变窄时它从**左侧**被 overflow 切掉，
+     内容本身不移动。若按默认的左对齐，整块内容会跟着外层左缘一起左移 250px，
+     看起来就变成「从右边滑进来」了。 */
+  align-items: flex-end;
+  /* 纵向显隐。展开态写 `inset(0 0 0 0)` 而不是 `none` —— 两端形状一致才可插值。
+     收起态底边内缩 100% ⇒ 可见高度归零；展开时底边从顶边一路降到底边，
+     即「从上往下揭开」；收起时反向，即「从下往上收掉」。 */
+  clip-path: inset(0 0 0 0);
+  transition: width 0.32s cubic-bezier(0.4, 0, 0.2, 1),
+              clip-path 0.32s cubic-bezier(0.4, 0, 0.2, 1),
+              /* visibility 是阶跃插值：0→1 之间都算 visible，所以配 0.32s 的延迟
+                 就能让它「动画播完才真正隐藏」，既不影响过渡又退出 tab 序列。 */
+              visibility 0s linear 0s;
+}
+
+/* 收起态：宽度由变量收到 0、纵向可见区归零，这里只负责断开交互并退出 tab 序列 */
+.codex-pinned.collapsed {
+  pointer-events: none;
+  visibility: hidden;
+  clip-path: inset(0 0 100% 0);
+  transition: width 0.32s cubic-bezier(0.4, 0, 0.2, 1),
+              clip-path 0.32s cubic-bezier(0.4, 0, 0.2, 1),
+              visibility 0s linear 0.32s;
+}
+
+/* 内层固定为展开宽度（收起期间也保持），由外层的 overflow:hidden 负责横向裁切 */
+.codex-pinned-inner {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  box-sizing: border-box;
+  height: 100%;
+  min-height: 0;
+  width: var(--codex-pinned-w-expanded, 250px);
+  padding: 14px 12px 16px;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+.codex-pinned-inner::-webkit-scrollbar {
+  width: 6px;
+}
+.codex-pinned-inner::-webkit-scrollbar-thumb {
+  background: var(--panel-scrollbar);
+  border-radius: 3px;
+}
+.codex-pinned-inner::-webkit-scrollbar-thumb:hover {
+  background: var(--panel-scrollbar-hover);
+}
+
+/* 拖拽调宽期间关掉过渡：主工作区宽度每帧都在变，面板宽度与四处留白也跟着重算，
+   不关的话全被缓动拖住，和两侧边栏一样变成「橡皮筋追鼠标」。 */
+.codex-main-body.resizing .codex-pinned,
+.codex-main-body.resizing .codex-main-col .codex-chat,
+.codex-main-body.resizing .codex-main-col .codex-composer-wrap,
+.codex-main-body.resizing .codex-main-col .codex-stats-line,
+.codex-main-body.resizing .codex-main-col .codex-to-bottom {
+  transition: none;
+}
+
+.codex-pinned-card {
+  pointer-events: auto;
+  border: 1px solid var(--codex-line);
+  border-radius: 10px 12px 10px 12px;
+  /* 极简主题下 --codex-pinned-bg 被覆写成纯白（见 MindInspectorThemes.css）；
+     其余主题退回纸卡色，顺带修掉「深色手账里卡片还是奶油色」的老问题。 */
+  background: var(--codex-pinned-bg, var(--codex-paper-card));
+  box-shadow: var(--codex-shadow-sm);
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.codex-pinned-head {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  padding: 7px 10px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: 1.4px;
+  color: var(--codex-ink-soft);
+  text-align: left;
+  transition: background 0.15s ease;
+}
+.codex-pinned-head:hover {
+  background: var(--codex-paper-deep);
+}
+.codex-pinned-head-title {
+  flex: 1;
+  min-width: 0;
+}
+
+/* 环境信息卡收起时的「有未提交改动」提示点 */
+.codex-pinned-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--codex-warm);
+  flex-shrink: 0;
+  box-shadow: 0 0 0 2px var(--codex-warm-soft);
+}
+
+.codex-pinned-body {
+  padding: 2px 10px 8px;
+  border-top: 1px dashed var(--codex-line-light);
+  /* 卡内不再自己滚：面板是整列高的，滚动交给 `.codex-pinned-inner`。
+     两层滚动条叠在一起会让「比较分支」那种长列表很难操作。 */
+  overflow: visible;
+}
+
+/* ---------- 键值行 ---------- */
+
+.codex-pinned-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 3.5px 0;
+  font-size: 12px;
+  color: var(--codex-ink-soft);
+}
+
+.codex-pinned-key {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--codex-ink-faint);
+  flex-shrink: 0;
+}
+
+.codex-pinned-val {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  color: var(--codex-ink);
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.codex-pinned-val.mono {
+  font-family: var(--codex-mono);
+  font-size: 11px;
+}
+
+.codex-pinned-muted {
+  color: var(--codex-ink-faint);
+  font-weight: 500;
+  font-size: 11px;
+}
+.codex-pinned-clean {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--codex-success);
+}
+
+/* diff 增删：+N 绿 / -M 红，与编辑器 diff 的通用约定一致 */
+.codex-diff-add,
+.codex-diff-del {
+  font-style: normal;
+  font-family: var(--codex-mono);
+  font-size: 11px;
+  font-weight: 700;
+}
+.codex-diff-add {
+  color: var(--codex-success);
+}
+.codex-diff-del {
+  color: var(--codex-danger);
+}
+
+.codex-pinned-ahead {
+  font-style: normal;
+  color: var(--codex-success);
+  font-weight: 700;
+  font-size: 11px;
+}
+.codex-pinned-behind {
+  font-style: normal;
+  color: var(--codex-warning);
+  font-weight: 700;
+  font-size: 11px;
+}
+
+/* ---------- 最近提交 ---------- */
+
+.codex-pinned-commit {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  margin-top: 5px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  background: var(--panel-subtle-bg);
+  font-size: 11px;
+  overflow: hidden;
+}
+.codex-pinned-hash {
+  font-family: var(--codex-mono);
+  font-size: 10.5px;
+  color: var(--codex-accent-deep);
+  flex-shrink: 0;
+}
+.codex-pinned-subject {
+  flex: 1;
+  min-width: 0;
+  color: var(--codex-ink-soft);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.codex-pinned-time {
+  color: var(--codex-ink-faint);
+  font-size: 10px;
+  flex-shrink: 0;
+}
+
+/* ---------- 操作区 ---------- */
+
+.codex-pinned-actions {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 7px;
+  flex-wrap: wrap;
+}
+
+.codex-pinned-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border: 1px solid var(--codex-line);
+  border-radius: 6px 8px 6px 8px;
+  background: var(--codex-paper-card);
+  color: var(--codex-ink-soft);
+  font-family: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+.codex-pinned-btn:hover:not(:disabled) {
+  background: var(--codex-accent-soft);
+  border-color: var(--codex-accent);
+  color: var(--codex-accent-deep);
+}
+.codex-pinned-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.codex-pinned-btn.primary {
+  background: var(--codex-accent-soft);
+  border-color: var(--codex-accent);
+  color: var(--codex-accent-deep);
+}
+.codex-pinned-btn.active {
+  background: var(--codex-tape-blue);
+  border-color: var(--codex-accent);
+}
+
+.codex-pinned-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  margin-left: auto;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--codex-ink-faint);
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.codex-pinned-icon-btn:hover {
+  background: var(--codex-accent-soft);
+  color: var(--codex-accent-deep);
+}
+
+/* ---------- 内联表单（提交 / 比较） ---------- */
+
+.codex-pinned-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--codex-line-light);
+}
+
+.codex-pinned-input,
+.codex-pinned-select {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 5px 7px;
+  border: 1px solid var(--codex-line);
+  border-radius: 6px;
+  background: var(--codex-paper-card);
+  color: var(--codex-ink);
+  font-family: inherit;
+  font-size: 11.5px;
+  outline: none;
+  transition: border-color 0.15s ease;
+}
+.codex-pinned-input:focus,
+.codex-pinned-select:focus {
+  border-color: var(--codex-accent);
+}
+.codex-pinned-input::placeholder {
+  color: var(--codex-ink-faint);
+}
+
+.codex-pinned-form-row {
+  display: flex;
+  gap: 5px;
+}
+.codex-pinned-form-row .codex-pinned-btn {
+  flex: 1;
+  justify-content: center;
+}
+
+/* ---------- 比较结果 ---------- */
+
+.codex-pinned-diff {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 11px;
+}
+.codex-pinned-diff-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--codex-ink-soft);
+  flex-wrap: wrap;
+}
+.codex-pinned-diff-commit {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  overflow: hidden;
+}
+
+/* ---------- 提示 / 结果 ---------- */
+
+.codex-pinned-hint {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 8px 0 4px;
+  color: var(--codex-ink-faint);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+.codex-pinned-hint.err {
+  color: var(--codex-danger);
+}
+
+.codex-pinned-result {
+  margin-top: 8px;
+  padding: 6px 7px;
+  border-radius: 6px;
+  background: var(--codex-success-soft);
+  font-size: 11px;
+}
+.codex-pinned-result.err {
+  background: var(--codex-danger-soft);
+}
+.codex-pinned-result-step {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--codex-ink-soft);
+  overflow: hidden;
+}
+.codex-pinned-result-name {
+  font-family: var(--codex-mono);
+  font-size: 10.5px;
+  flex-shrink: 0;
+}
+.codex-pinned-result-out {
+  flex: 1;
+  min-width: 0;
+  color: var(--codex-ink-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.codex-pinned-result-err {
+  margin-top: 4px;
+  color: var(--codex-danger);
+  line-height: 1.45;
+  word-break: break-word;
+}
+
+.codex-pinned-foot {
+  margin-top: 6px;
+  color: var(--codex-ink-faint);
+  font-size: 10px;
+  text-align: right;
+}
+
+/* ---------- 来源明细 ---------- */
+
+.codex-pinned-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--codex-line-light);
+}
+.codex-pinned-list-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--codex-ink-soft);
+  overflow: hidden;
+}
+.codex-pinned-list-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 插件信任状态点：绿=已信任生效，黄=清单变更待重认，灰=未信任 */
+.codex-trust-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.codex-trust-dot.trusted {
+  background: var(--codex-success);
+}
+.codex-trust-dot.changed {
+  background: var(--codex-warning);
+}
+.codex-trust-dot.untrusted {
+  background: var(--codex-ink-faint);
 }

@@ -1,11 +1,20 @@
 ---
 name: verify-provider-presets
-description: 联网核对各家 LLM 供应商官方 API 文档，更新修正供应商预设数据（update_provider_preset 工具写入 llm-providers 插件数据；开发机上同步内置兜底与后端分级预算），保证端点 / 协议 / 模型名 / 上下文窗口 / 输出上限与官方一致
+description: 联网核对 LLM 与云端嵌入供应商官方 API 文档，并用 list_provider_presets / manage_provider_preset 新增、更新或删除过期预设，保证端点、协议、模型、维度和上下文参数与官方一致
 ---
 
 # 联网核对供应商预设
 
-本技能把「上网核对各供应商官方 API 文档 → 修正过期/错误预设」沉淀为可重复执行的流程。
+本技能把「盘点当前预设 → 上网核对官方 API 文档 → 结构化新增、更新或删除预设」沉淀为可重复执行的流程，覆盖 LLM 与云端嵌入服务。
+
+开始时先经 `tool_search` 加载 `list_provider_presets` 和 `manage_provider_preset`，再调用前者取得当前完整行。不得凭记忆直接覆盖或删除。
+
+写入规则：
+
+- `action=upsert, kind=llm`：提交完整 LLM 行；兼容旧流程的 `update_provider_preset` 仍可使用。
+- `action=upsert, kind=embedding`：提交完整的 id/provider/endpoint/model/dimension，并附 `verifiedSource`。
+- `action=delete`：仅在官方确认服务或模型已经退役、且当前 id 确实存在时使用；删除预设不会删除 API Key，也不会切换当前运行配置。
+- 新服务使用新稳定 id；已有 id 不改名。
 LLM 厂商迭代极快：模型名退役、上下文窗口翻倍、端点迁移、新协议上线，预设数据随时会过期。
 执行本技能时**逐家核对、只信官方文档、逐字段修订**。
 
@@ -17,7 +26,7 @@ LLM 厂商迭代极快：模型名退役、上下文窗口翻倍、端点迁移�
 - **不存在 → 运行时路径**（打包安装版）：只做核对 + `update_provider_preset` 工具写入，
   结果中注明「内置兜底与源码分级未同步，属开发期待办」
 
-同时扫描核对队列：读当前预设（经 tool_search 精确加载 `update_provider_preset`
+同时扫描核对队列：先用 `list_provider_presets` 读取当前 LLM 与嵌入预设（经 tool_search 精确加载
 工具或直接读插件数据文件），`verifiedAt` 距今超过 **30 天**或缺失的预设进入本次
 核对队列；30 天内的跳过（除非用户点名要求核对某家）。
 

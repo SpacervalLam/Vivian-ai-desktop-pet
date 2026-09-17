@@ -19,7 +19,7 @@ use serde_json::Value;
 
 use super::confirmation::{confirmation_info, ConfirmationResponse};
 use super::permission::{check_tool_permission, requires_permission};
-use super::registry::{is_work_agent_only, ToolSystem};
+use super::registry::{is_work_agent_only, AgentSide, ToolSystem};
 use super::types::{
     AgentAccessLevel, PermissionContext, ToolErrorCode, ToolResult, ToolUseContext,
 };
@@ -69,7 +69,7 @@ impl Default for ToolRuntimeConfig {
         Self {
             default_tool_timeout_secs: 120,
             max_result_chars: 4000,
-            access_level: AgentAccessLevel::FullControl,
+            access_level: AgentAccessLevel::FsWrite,
         }
     }
 }
@@ -404,10 +404,16 @@ pub async fn execute_tool_use(
         }
     };
 
-    // 1.05 用户禁用的工具直接拒绝（正常情况下禁用工具不会出现在 LLM 工具列表中，
-    // 此处防御 LLM 幻觉调用旧工具名 / 历史消息重放）
-    if tool_system.is_tool_disabled(tool_name) {
-        tracing::warn!("[ToolExecutor] 工具 {} 已被用户禁用，拒绝执行", tool_name);
+    // 1.05 用户在**本侧**禁用的工具直接拒绝（正常情况下禁用工具不会出现在该侧
+    // LLM 工具列表中，此处防御幻觉调用旧工具名 / 历史消息重放）。
+    // 禁用状态分侧隔离：陪伴侧与工作侧各自判定，同一工具在一侧禁用不影响另一侧。
+    let agent_side = AgentSide::from_agent_kind(&context.agent_kind);
+    if tool_system.is_tool_disabled(tool_name, agent_side) {
+        tracing::warn!(
+            "[ToolExecutor] 工具 {} 已被用户在 {:?} 侧禁用，拒绝执行",
+            tool_name,
+            agent_side
+        );
         return ToolResult::standard_error(
             &format!("工具 {tool_name} 已被用户在设置中禁用，无法执行。请改用其他可用工具。"),
             None,
@@ -517,6 +523,11 @@ pub async fn execute_tool_use(
     // 会话级访问级别覆盖优先（编程智能体按会话权限控制），否则回退全局 runtime config
     let access_level = context.access_level.unwrap_or(runtime_cfg.access_level);
     let mut permission_context = PermissionContext::default().with_access_level(access_level);
+    // 注入本轮用户原话，供「预授权」档判定：用户已说清目标（"帮我把壁纸换成这张"）
+    // 时，对应低风险工具不再重复弹窗。为 None 时预授权一律不成立（宁可多问一次）。
+    if let Some(user_message) = context.user_message.as_deref() {
+        permission_context.current_user_input = Some(user_message.to_string());
+    }
     // 注册工具上下文的工作目录为已授权目录：工作目录内的读写操作免用户确认
     // （路径范围已由各工具 validate_input 的沙箱校验限制在工作目录内；
     //   ReadOnly 访问级别注册为只读目录，写入仍会被权限检查拒绝）
@@ -525,6 +536,11 @@ pub async fn execute_tool_use(
             context.working_directory.clone(),
             access_level == AgentAccessLevel::ReadOnly,
         );
+    }
+    // 附加工作区同样注册为已授权目录，各自带自己的只读标记。
+    // 允许互相嵌套：命中多个时权限层取最长匹配（最具体的那个），结论不随迭代顺序变化。
+    for dir in &context.extra_working_directories {
+        permission_context.add_working_directory(dir.path.clone(), dir.is_read_only);
     }
     if requires_permission(tool.as_ref(), &validated_args, &permission_context) {
         let permission =
@@ -540,8 +556,8 @@ pub async fn execute_tool_use(
         }
 
         if permission.requires_confirmation() {
-            // 能力进化事件（create_tool）例外：宿主的 can_use_tool 自动放行回调
-            // （如工作智能体的 coding_sandbox_allow）不适用——新工具创建必须经
+            // 能力进化事件（create_tool）例外：宿主的 can_use_tool 回调
+            // （如编程侧的 coding_sandbox_confirm）不适用——新工具创建必须经
             // 用户预览卡片授权，无论发起方是陪伴侧还是工作智能体
             let evolution_gate = tool_name == "create_tool";
             if let Some(cb) = &can_use_tool {

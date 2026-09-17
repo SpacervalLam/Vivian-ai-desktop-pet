@@ -119,8 +119,11 @@ impl AppState {
             tool_config.enable_cache,
             tool_config.confirmation_timeout_secs,
         ));
-        // 用户禁用的工具集合（设置-工具的开关状态）
-        tool_system.set_disabled_tools(tool_config.disabled_tools.clone());
+        // 用户禁用的工具（设置-工具的开关状态），按陪伴侧 / 工作侧分别注入
+        tool_system.set_disabled_tools(
+            tool_config.disabled_tools.companion.clone(),
+            tool_config.disabled_tools.work.clone(),
+        );
         // 浏览器自动化桥：创建即注入到 browser_* 工具可读的全局，供其派发操作。
         let browser_bridge = crate::browser_bridge::BridgeState::new();
         crate::browser_bridge::tools::set_bridge(Arc::clone(&browser_bridge));
@@ -351,6 +354,13 @@ impl AppState {
         // 插件创建（运行时插件创造：打包技能/工具/MCP/预设为完整插件，落盘即装载）
         self.tool_system.register_tool(std::sync::Arc::new(
             crate::tools::builtin::plugin_tools::CreatePluginTool::new(
+                self.skill_service.clone(),
+                self.mcp_manager.clone(),
+                self.tool_system.clone(),
+            ),
+        ));
+        self.tool_system.register_tool(std::sync::Arc::new(
+            crate::tools::builtin::plugin_tools::DeletePluginTool::new(
                 self.skill_service.clone(),
                 self.mcp_manager.clone(),
                 self.tool_system.clone(),

@@ -59,6 +59,9 @@ pub struct AppConfig {
     /// 当前选中的工作智能体模型 id（None 表示未切换，走默认路由）
     #[serde(default)]
     pub active_work_model: Option<String>,
+    /// 工作页「新建任务」的默认工作区目录（None/空串表示未设置，此时由用户每次选择）。
+    #[serde(default)]
+    pub default_workspace: Option<String>,
 }
 
 /// 音乐驱动动画配置
@@ -629,6 +632,21 @@ pub struct AiConfig {
     /// - `high`：高分辨率切片，细节更好但 token 消耗高
     #[serde(default = "default_image_detail")]
     pub image_detail: String,
+    /// 存在惩罚（presence penalty）：对本轮已出现过的 token 施加固定惩罚，
+    /// 抑制"一句话里同一个词/同一个句式反复出现"这类复读。
+    ///
+    /// **只对支持该参数的协议生效**：Chat Completions（`/chat/completions`）与
+    /// Gemini `generationConfig`；Responses API（`/responses`）对未知参数会直接 400、
+    /// Anthropic Messages 协议没有该字段，这两条路径会静默忽略
+    /// （判据见 `providers::base::ProviderCallOptions::presence_penalty`）。
+    ///
+    /// 取值区间 [-2.0, 2.0]，0 表示关闭。
+    #[serde(default = "default_presence_penalty")]
+    pub presence_penalty: f64,
+    /// 频率惩罚（frequency penalty）：按 token 出现次数成比例惩罚，比存在惩罚更激进。
+    /// 取值区间与生效范围同 `presence_penalty`。
+    #[serde(default = "default_frequency_penalty")]
+    pub frequency_penalty: f64,
     /// 上下文窗口大小（tokens）
     ///
     /// 用于编程智能体自动压缩的阈值判定（达到窗口 75% 时归档早期历史）。
@@ -640,6 +658,55 @@ pub struct AiConfig {
     /// None 表示不干预（交由服务端默认；思考爆炸防护模型映射安全档位）。
     #[serde(default)]
     pub reasoning: Option<ReasoningPreference>,
+}
+
+/// 分侧禁用的工具名（陪伴侧 / 工作侧各自独立）。
+///
+/// 陪伴侧与工作侧是两条独立产品线，同一工具（如 web_search）在一侧禁用
+/// 不应影响另一侧，因此禁用状态按侧别隔离存储。
+///
+/// **兼容旧格式**：早期为扁平 `Vec<String>`（全局禁用）。自定义反序列化会把
+/// 旧列表同时写入两侧（`companion` 与 `work`），保持升级前的行为
+/// ——旧配置里的"全局禁用"等价于"两侧都禁用"。
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct DisabledTools {
+    /// 陪伴侧禁用的工具名
+    pub companion: Vec<String>,
+    /// 工作侧禁用的工具名
+    pub work: Vec<String>,
+}
+
+impl<'de> serde::Deserialize<'de> for DisabledTools {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        /// 反序列化中间态：兼容旧的扁平列表与新分侧结构
+        #[derive(serde::Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            /// 旧格式：全局禁用列表
+            Legacy(Vec<String>),
+            /// 新格式：分侧
+            Split {
+                #[serde(default)]
+                companion: Vec<String>,
+                #[serde(default)]
+                work: Vec<String>,
+            },
+        }
+
+        // `Option` 包一层：`disabled_tools:`（空值 / null）不报错，退化为无禁用
+        Ok(match Option::<Raw>::deserialize(deserializer)? {
+            None => DisabledTools::default(),
+            // 旧全局禁用 → 两侧都禁用，行为等价于升级前
+            Some(Raw::Legacy(names)) => DisabledTools {
+                companion: names.clone(),
+                work: names,
+            },
+            Some(Raw::Split { companion, work }) => DisabledTools { companion, work },
+        })
+    }
 }
 
 /// 工具系统配置（设置窗口「工具」页签）
@@ -727,13 +794,13 @@ pub struct ToolConfig {
     pub compress_keep_recent: usize,
 
     // ── 工具级开关 ──
-    /// 用户在设置-工具中禁用的工具名列表
+    /// 用户在设置-工具中禁用的工具名（按**陪伴侧 / 工作侧**分别记录）
     ///
-    /// 禁用的工具：不注入 LLM 的工具列表（prompt 文本与 FC tools 字段）、
-    /// 不进入编程智能体 schema，且执行入口直接拒绝（防 LLM 幻觉调用）。
-    /// `list_tools` 命令仍返回全部工具（供设置界面重新启用）。
+    /// 禁用的工具：不注入**该侧**的 LLM 工具列表（prompt 文本与 FC tools 字段）、
+    /// 不进入该侧 schema，且执行入口按 `agent_kind` 对应的侧别直接拒绝
+    /// （防 LLM 幻觉调用）。`list_tools` 命令仍返回全部工具（供设置界面重新启用）。
     #[serde(default)]
-    pub disabled_tools: Vec<String>,
+    pub disabled_tools: DisabledTools,
 }
 
 impl Default for ToolConfig {
@@ -754,7 +821,7 @@ impl Default for ToolConfig {
             access_level: default_access_level(),
             compress_threshold_tokens: default_compress_threshold_tokens(),
             compress_keep_recent: default_compress_keep_recent(),
-            disabled_tools: Vec::new(),
+            disabled_tools: DisabledTools::default(),
         }
     }
 }
@@ -790,7 +857,9 @@ fn default_cache_strategy() -> String {
     "auto".to_string()
 }
 fn default_access_level() -> String {
-    "full-control".to_string()
+    // 安全默认：工作区读写与联网可用；shell 和输入控制需用户显式授权。
+    // 已有用户的持久化配置不受影响。
+    "fs-write".to_string()
 }
 fn default_compress_threshold_tokens() -> usize {
     20000
@@ -800,6 +869,17 @@ fn default_compress_keep_recent() -> usize {
 }
 fn default_image_detail() -> String {
     "auto".to_string()
+}
+
+/// 陪伴对话默认存在惩罚。0.3 是"能压住复读、又不会让句子散架"的经验值。
+fn default_presence_penalty() -> f64 {
+    0.3
+}
+
+/// 陪伴对话默认频率惩罚。比存在惩罚略低：陪伴回复偏短，
+/// 短文本上频率惩罚过强会让措辞明显变生硬。
+fn default_frequency_penalty() -> f64 {
+    0.2
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1138,10 +1218,10 @@ pub struct EmbeddingConfig {
     /// API Key
     #[serde(default)]
     pub api_key: String,
-    /// 接口端点（OpenAI 兼容，如 `https://api.siliconflow.cn/v1`）
+    /// 接口端点（OpenAI Embeddings 兼容）
     #[serde(default)]
     pub endpoint: String,
-    /// 模型名称（如 `text-embedding-3-small` / `BAAI/bge-large-zh-v1.5`）
+    /// 模型名称；默认留空，由用户根据服务商选择
     #[serde(default = "default_embedding_model")]
     pub model: String,
     /// 向量维度（须与所选模型一致；用于检测维度变更并清空旧索引）
@@ -1178,7 +1258,7 @@ impl Default for EmbeddingConfig {
 }
 
 fn default_embedding_model() -> String {
-    "BAAI/bge-m3".to_string()
+    String::new()
 }
 
 fn default_embedding_dim() -> usize {
@@ -1402,6 +1482,21 @@ pub struct ProactiveConfig {
     /// 是否启用音乐切换触发器（用户开始播放/切换曲目时基于 SMTC 信息自然搭话）
     #[serde(default = "default_true")]
     pub enable_music_trigger: bool,
+    /// 内心独白（内心OS）最小间隔（秒）：同一角色两次内心OS之间的全局下限。
+    /// 内心OS 不打扰用户，但过于频繁会显得"话痨"，故设较长下限（25 分钟）。
+    #[serde(default = "default_inner_monologue_min_interval_secs")]
+    pub inner_monologue_min_interval_secs: u64,
+    /// 内心独白每日上限：单角色每天最多产出多少条内心OS。
+    #[serde(default = "default_inner_monologue_daily_max")]
+    pub inner_monologue_daily_max: u32,
+}
+
+fn default_inner_monologue_min_interval_secs() -> u64 {
+    1500
+}
+
+fn default_inner_monologue_daily_max() -> u32 {
+    12
 }
 
 fn default_backoff_multiplier() -> f64 {
@@ -1442,6 +1537,8 @@ impl Default for ProactiveConfig {
             enable_app_duration_trigger: true,
             enable_late_night_trigger: true,
             enable_music_trigger: true,
+            inner_monologue_min_interval_secs: default_inner_monologue_min_interval_secs(),
+            inner_monologue_daily_max: default_inner_monologue_daily_max(),
         }
     }
 }
@@ -1502,6 +1599,8 @@ impl Default for AppConfig {
                 enable_native_function_calling: true,
                 enable_vision: false,
                 image_detail: default_image_detail(),
+                presence_penalty: default_presence_penalty(),
+                frequency_penalty: default_frequency_penalty(),
                 context_window: None,
                 reasoning: None,
             },
@@ -1570,6 +1669,7 @@ impl Default for AppConfig {
             video_animations: VideoAnimationsConfig::default(),
             work_models: Vec::new(),
             active_work_model: None,
+            default_workspace: None,
         }
     }
 }
@@ -1724,6 +1824,25 @@ impl ConfigManager {
                 config.web_search.max_results = 0;
             }
             config.web_search.max_results_default_migrated = true;
+        }
+
+        // ── 配置迁移：浏览器桥工具名 → MCP 命名空间 ──
+        // 桥工具已收进 MCP 命名空间（`browser_click` → `mcp__browser__click`），
+        // 用户此前禁用的旧名若不迁移，会因匹配不上而被静默重新启用。
+        // 映射是幂等的（新名不再以 `browser_` 开头），无需迁移标记。
+        for list in [
+            &mut config.tools.disabled_tools.companion,
+            &mut config.tools.disabled_tools.work,
+        ] {
+            for name in list.iter_mut() {
+                if let Some(new_name) = crate::browser_bridge::tools::to_mcp_name(name) {
+                    *name = new_name;
+                }
+            }
+            // 保序去重：旧名与新名可能同时存在（如 `browser_click` 与
+            // `mcp__browser__click`），`Vec::dedup` 只去相邻重复项，不够用
+            let mut seen = std::collections::HashSet::new();
+            list.retain(|name| seen.insert(name.clone()));
         }
 
         Ok(config)

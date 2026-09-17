@@ -6,7 +6,8 @@
 //!
 //! 设计原则：
 //! - Belief 必须可溯源：每条 draft 必须带 source_memory_ids（来自 Insight 或 LongTerm）
-//! - 合并优先：写入时走 BeliefStore::upsert_with_merge，证据交集 ≥ 2 则强化既有 Belief
+//! - 合并优先：写入时走 BeliefStore::upsert_with_merge，按"statement 精确匹配 →
+//!   embedding 语义相似度 → 证据交集(同 subject/category 兜底)"分层去重，强化既有 Belief
 //! - Goal 稀少：每次最多产 1-2 条新 Goal，且 deactivate 旧 Goal 避免堆积
 //! - 失败静默：LLM 返回空或解析失败不阻塞巩固流程
 
@@ -86,7 +87,7 @@ impl BeliefGenerator {
     pub fn new(router: Arc<ModelRouter>) -> Self {
         Self {
             router,
-            merge_overlap_threshold: 2,
+            merge_overlap_threshold: 1,
         }
     }
 
@@ -227,7 +228,8 @@ impl BeliefGenerator {
             .generate(LLMRequest::new(
                 "reflection",
                 vec![ChatMessage::user(prompt)],
-            ))
+            )
+            .with_character_id(mind.char_id.clone()))
             .await?;
 
         let parsed = match parse_response(&response) {

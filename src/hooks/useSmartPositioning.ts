@@ -8,6 +8,7 @@ import type { ChibiPetCanvasHandle } from '../components/ChibiPetCanvas';
 import { positioningCoordinator } from './positioningCoordinator';
 import { getCharacterId } from '../characterContext';
 import { planSmartMove } from '../chibi/walkPlan';
+import { runSlide } from '../chibi/slideTrack';
 
 const POLL_INTERVAL_BASE_MS = 2_500;
 const POLL_INTERVAL_MAX_MS = 20_000;
@@ -19,11 +20,6 @@ const CHARACTER_OFFSET_MS: Record<string, number> = {
   nana: 800,
 };
 const MIN_MOVE_DISTANCE = 24;
-// 窗口位移的采样间隔。它与走动帧率解耦：位移按固定时间步长推进，走动节奏由
-// walkPlan 单独推导，两者不再互相牵制——此前位移只有十步、走动帧间隔却被压到几毫秒，
-// 十几次窗口定位和上百次逐帧重渲染挤在同一段时间里抢主线程，反而把滑动拖得更卡。
-const MOVE_STEP_MS = 32;
-const MIN_POSITION_STEPS = 8;
 
 interface SafeRegion {
   x: number;
@@ -35,10 +31,6 @@ interface SafeRegion {
 interface FindSafePositionResult {
   unchanged: boolean;
   region: SafeRegion | null;
-}
-
-function easeInOutCubic(t: number): number {
-  return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
 }
 
 export function useSmartPositioning(
@@ -153,38 +145,52 @@ export function useSmartPositioning(
         userInteractingRef.current ||
         focusedRef.current;
 
+      /**
+       * 打断时把角色送回基准姿态。
+       *
+       * 用户按下时由精灵自身的 mousedown 收尾（它会把动作切回基调），这里不抢——
+       * 否则会盖掉随后下发的「被拎起」姿态。其余打断（获得焦点、卸载）如果不收尾，
+       * 角色会定格在侧身或抬腿的格子上。
+       */
+      const abortToRest = () => {
+        if (!userInteractingRef.current) petRef.current?.resetExpression();
+      };
+
       // 有水平分量才转身起步。腿是侧向的，纵向挪动既不需要转身也不需要摆腿，
       // 由窗口滑动本身表达；这类位移此前会播一段与移动方向无关的碎步。
+      // 转身是位移的入场过渡：转完停在侧身（playTurn 不回落基准姿态），紧接着起步。
       let walkDone: Promise<boolean> | undefined;
       if (plan.walking) {
         const turned = await petRef.current?.playTurn(plan.direction);
-        if (shouldAbort()) return;
+        if (shouldAbort()) return abortToRest();
         if (turned) {
           walkDone = petRef.current?.playWalk(plan.direction, plan.frames, plan.frameDelayMs);
         }
       }
 
-      // 窗口按计划时长滑到位。采样步长固定，单步位移随距离变化，
-      // 这里只控制采样密度，让滑动在视觉上连续。
-      const steps = Math.max(MIN_POSITION_STEPS, Math.round(plan.durationMs / MOVE_STEP_MS));
-      const stepMs = plan.durationMs / steps;
-      for (let i = 1; i <= steps; i++) {
-        if (shouldAbort()) return;
-        const eased = easeInOutCubic(i / steps);
-        const x = Math.round(startX + (targetX - startX) * eased);
-        const y = Math.round(startY + (targetY - startY) * eased);
-        void invoke('set_window_position', { x, y });
-        if (i < steps) {
-          await new Promise((r) => setTimeout(r, stepMs));
-        }
-      }
+      // 窗口按计划时长滑到位。时间轴是共享的：walkPlan 保证 durationMs === frames ×
+      // frameDelayMs，且 durationMs 与 slideMs 相差不超过一个帧间隔，所以走动的播放
+      // 窗口与这段滑动基本等长、快慢同涨同落。
+      const completed = await runSlide({
+        fromX: startX,
+        fromY: startY,
+        toX: targetX,
+        toY: targetY,
+        durationMs: plan.durationMs,
+        apply: (x, y) => {
+          void invoke('set_window_position', { x, y });
+        },
+        shouldAbort,
+      });
+      if (!completed) return abortToRest();
 
-      // 走动与滑动共用同一段时间轴，等走动收尾再回基准姿态：否则角色会停在
-      // 抬腿到一半的格子上，或者腿还在摆就被硬切回待机。
-      // 中途被打断时同样要归位——否则会定格在抬腿那一帧。
+      // 走动与滑动共用同一段时间轴，等走动收尾再回身：否则角色会停在抬腿到一半的
+      // 格子上，或者腿还在摆就被硬切回待机。回身是位移的退场过渡，转回正面后才回落基调。
+      // 走动若被别的动作（说话/表情）抢走，那是新动作的舞台，不再插手去盖它。
       if (walkDone) {
-        await walkDone;
-        petRef.current?.resetExpression();
+        const walked = await walkDone;
+        if (shouldAbort()) return abortToRest();
+        if (walked) await petRef.current?.playTurnBack();
       }
     };
 

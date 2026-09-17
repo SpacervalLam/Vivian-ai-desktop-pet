@@ -95,6 +95,9 @@
   --codex-tape-pink: #f4f4f5;
   --codex-tape-blue: #eeeef0;
   --codex-tape-green: #ecf6ef;
+  /* 置顶摘要的卡片底色。极简主题要求纯白：手账那张奶油纸（--codex-paper-card
+     是 #fafafa，更早甚至是 rgba(255,252,243)）在极简的灰白界面里明显发黄。 */
+  --codex-pinned-bg: #fff;
   --codex-shadow-sm: 0 1px 2px rgba(0, 0, 0, .04);
   --codex-shadow-md: 0 8px 24px rgba(0, 0, 0, .07);
   --codex-shadow-lg: 0 18px 48px rgba(0, 0, 0, .12);
@@ -179,6 +182,10 @@
     --panel-menu: #242424;
     --panel-tip: #242424;
     --panel-sidebar-fill: #141414;
+    /* 深色极简下的置顶摘要卡片：比页面(#181818)略亮一档，读起来才像卡片。
+       必须在这里也声明一次——上面那个浅色块同样命中深色环境，漏了的话
+       卡片会保持纯白，在深色界面里刺眼。 */
+    --codex-pinned-bg: #242424;
   }
 }
 
@@ -225,6 +232,8 @@
   --panel-menu: #242424;
   --panel-tip: #242424;
   --panel-sidebar-fill: #141414;
+  /* 深色极简下的置顶摘要卡片：比页面(#181818)略亮一档，读起来才像卡片 */
+  --codex-pinned-bg: #242424;
 }
 
 .mind-main[data-ui-style="minimal"].is-work-page .mind-page-content {
@@ -274,6 +283,15 @@
   background: var(--panel-bg-hover) !important;
   color: var(--codex-ink);
   box-shadow: none;
+}
+
+/* 极简主题把 codex-icon-btn 的背景统一压成 transparent（上面那条 !important），
+   连带把内联的「已开启」底色也压掉了——置顶摘要与右侧检查器的开关于是看不出
+   按没按。这里按 aria 状态把开启态补回来。 */
+.mind-main[data-ui-style="minimal"] .codex-icon-btn[aria-pressed="true"],
+.mind-main[data-ui-style="minimal"] .codex-icon-btn[aria-expanded="true"] {
+  background: var(--panel-bg-active) !important;
+  color: var(--codex-ink);
 }
 
 .mind-main[data-ui-style="minimal"] .codex-new-btn {
@@ -346,7 +364,13 @@
   font-weight: 500;
 }
 
-.mind-main[data-ui-style="minimal"] .codex-chat { padding: 22px 34px 10px; }
+/* 只给纵向内边距；左右内边距交给 `--codex-chat-pad-x`，由 CodeAgentPage.css 的
+   让位规则用 `max(基准, 留白)` 合成 padding-right。这里若写 `padding` 简写，
+   会把让位结果整条盖掉（本选择器 0,3,0 > 让位规则的 0,2,0）。 */
+.mind-main[data-ui-style="minimal"] .codex-chat {
+  padding-block: 22px 10px;
+  --codex-chat-pad-x: 34px;
+}
 
 .mind-main[data-ui-style="minimal"] .codex-chat-inner,
 .mind-main[data-ui-style="minimal"] .codex-composer-inner,
@@ -368,6 +392,15 @@
   box-shadow: none;
 }
 
+/* 对话定位轨的悬停预览：极简主题下是素卡片 —— 去掉便签的虚线描边、纸胶带与异形圆角 */
+.mind-main[data-ui-style="minimal"] .codex-rail-pop {
+  border: 1px solid var(--codex-line-light);
+  border-radius: 8px;
+  background: var(--codex-paper-card);
+}
+
+.mind-main[data-ui-style="minimal"] .codex-rail-pop::before { display: none; }
+
 .mind-main[data-ui-style="minimal"] .codex-msg-act { border-radius: 5px; }
 
 .mind-main[data-ui-style="minimal"] .codex-tool-card,
@@ -381,8 +414,10 @@
   box-shadow: none;
 }
 
+/* 同上：左右内边距走变量，让 CodeAgentPage.css 的让位规则能合成 padding-right。 */
 .mind-main[data-ui-style="minimal"] .codex-composer-wrap {
-  padding: 4px 20px 10px;
+  padding-block: 4px 10px;
+  --codex-composer-pad-x: 20px;
 }
 
 .mind-main[data-ui-style="minimal"] .codex-composer {
@@ -482,6 +517,18 @@
 .mind-inspector-root .workbench-root input:focus-visible {
   outline: 2px solid var(--codex-accent);
   outline-offset: 2px;
+}
+
+/* 例外：工作页里「装在一张纸卡片里的输入框」不画这圈 accent 描边。
+   它们本身就是卡片的一块内里，焦点提示已经由更合适的东西承担——
+   `.codex-composer` 有 `:focus-within`（描边 + 阴影），
+   `.codex-pinned-input` / `-select` 有 `:focus { border-color }`。
+   再加一圈 2px accent 就像卡片里凭空多出一个蓝框（手账主题的 accent 是印章青蓝，
+   看着尤其像浏览器默认焦点框）。选择器要压过上面那条（0,3,1），故多带一层类。 */
+.mind-inspector-root .workbench-root .codex-composer-textarea:focus-visible,
+.mind-inspector-root .workbench-root .codex-pinned-input:focus-visible,
+.mind-inspector-root .workbench-root .codex-pinned-select:focus-visible {
+  outline: none;
 }
 
 .mind-inspector-root .codex-topbar-context {
@@ -654,8 +701,10 @@
   border-radius: 5px;
 }
 
+/* 基准 `right` 也走变量：让位规则要用 `max(基准, 留白 + 滚动条槽)` 把它
+   一起推离置顶摘要，写死 `right` 会让按钮在面板展开后压在面板底下。 */
 .mind-main[data-ui-style="minimal"] .codex-to-bottom {
-  right: 22px;
+  --codex-to-bottom-right: 22px;
   bottom: 116px;
   width: 30px;
   height: 30px;
@@ -798,7 +847,8 @@
     width: min(320px, 31vw) !important;
   }
 
-  .mind-inspector-root.is-work-page .workbench-root .codex-chat { padding-inline: 22px; }
+  /* 同样只改基准变量，不碰 padding —— 见文件上方 `.codex-chat` 的说明。 */
+  .mind-inspector-root.is-work-page .workbench-root .codex-chat { --codex-chat-pad-x: 22px; }
 }
 
 @media (max-width: 940px) {
@@ -824,8 +874,8 @@
     padding: 0;
   }
 
-  .mind-inspector-root.is-work-page .workbench-root .codex-chat { padding-inline: 14px; }
-  .mind-inspector-root.is-work-page .workbench-root .codex-composer-wrap { padding-inline: 10px; }
+  .mind-inspector-root.is-work-page .workbench-root .codex-chat { --codex-chat-pad-x: 14px; }
+  .mind-inspector-root.is-work-page .workbench-root .codex-composer-wrap { --codex-composer-pad-x: 10px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

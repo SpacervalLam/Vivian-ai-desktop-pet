@@ -559,7 +559,8 @@ impl ConsolidationPipeline {
 
         let response = self.router.generate(
             LLMRequest::new("consolidation", vec![ChatMessage::user(prompt)])
-                .with_json_schema(consolidation_array_schema::<SummaryListSchema>()),
+                .with_json_schema(consolidation_array_schema::<SummaryListSchema>())
+                .with_character_id(memory.char_id().to_string()),
         ).await?;
         let summaries = parse_summaries(&response);
 
@@ -1672,7 +1673,8 @@ impl ConsolidationPipeline {
 
         let response = self.router.generate(
             LLMRequest::new("consolidation", vec![ChatMessage::user(prompt)])
-                .with_json_schema(consolidation_array_schema::<InsightListSchema>()),
+                .with_json_schema(consolidation_array_schema::<InsightListSchema>())
+                .with_character_id(memory.char_id().to_string()),
         ).await?;
         let insights = parse_insights(&response);
 
@@ -1835,7 +1837,8 @@ impl ConsolidationPipeline {
 
         let response = self.router.generate(
             LLMRequest::new("consolidation", vec![ChatMessage::user(prompt)])
-                .with_json_schema(consolidation_array_schema::<ConceptListSchema>()),
+                .with_json_schema(consolidation_array_schema::<ConceptListSchema>())
+                .with_character_id(memory.char_id().to_string()),
         ).await?;
         let concepts = parse_concepts(&response);
         if concepts.is_empty() {

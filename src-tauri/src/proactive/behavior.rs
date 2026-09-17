@@ -12,6 +12,54 @@ use crate::providers::ModelRouter;
 use crate::tools::ToolSystem;
 use crate::types::response::ChatMessage;
 
+/// 主动消息的「说 / 不说」显式标记。
+///
+/// 触发条件成立只说明允许开口，不保证有内容可说。模型可输出 `DONT_NOTIFY` 弃权，
+/// 弃权是合法终态：调用方丢弃本条且不重试、不降级成模板。
+///
+/// 弃权时 `update_trigger_time(.., spoke=false)` 仅跳过 `last_proactive_speech_time`，
+/// 其余冷却照常推进，避免同一触发器每个 tick 重复触发、空转。
+pub const PROACTIVE_NOTIFY: &str = "NOTIFY";
+/// `PROACTIVE_NOTIFY` 的对立标记。
+pub const PROACTIVE_DONT_NOTIFY: &str = "DONT_NOTIFY";
+
+/// 判断模型响应是否**明确弃权**（此刻无话可说）。
+///
+/// 认三种写法，都是显式声明而非「解析失败」：
+/// 1. JSON 字段 `"notify": "DONT_NOTIFY"`（或 `"notify": false`）
+/// 2. `text` 字段本身就是标记（模型偶尔把它塞进 text）
+/// 3. 裸标记：整段响应不含可用 JSON 时，出现 `DONT_NOTIFY` 即视为弃权
+///
+/// 与「解析失败」严格区分：解析失败要重试/告警，弃权是正常终态。
+pub fn is_proactive_silence(raw: &str) -> bool {
+    let t = raw.trim();
+    if t.is_empty() {
+        return false;
+    }
+    if let (Some(s), Some(e)) = (t.find('{'), t.rfind('}')) {
+        if e > s {
+            if let Ok(data) = serde_json::from_str::<serde_json::Value>(&t[s..=e]) {
+                match data.get("notify") {
+                    Some(serde_json::Value::Bool(false)) => return true,
+                    Some(serde_json::Value::String(v))
+                        if v.trim().eq_ignore_ascii_case(PROACTIVE_DONT_NOTIFY) =>
+                    {
+                        return true;
+                    }
+                    _ => {}
+                }
+                // 有非空 text 就是正常内容：即使 notify 字段写反了也以 text 为准，
+                // 避免把一条真实消息误判成弃权
+                if let Some(text) = data.get("text").and_then(|v| v.as_str()) {
+                    return text.trim().eq_ignore_ascii_case(PROACTIVE_DONT_NOTIFY);
+                }
+            }
+        }
+    }
+    // 裸标记兜底（不含可用 JSON 时）
+    t.to_ascii_uppercase().contains(PROACTIVE_DONT_NOTIFY)
+}
+
 /// 主动行为内容
 #[derive(Debug, Clone)]
 pub struct BehaviorContent {
@@ -221,9 +269,10 @@ impl BehaviorDecider {
         char_id: &str,
     ) -> Option<BehaviorContent> {
         let messages = Self::build_messages(
-            trigger, ctx, system_prompt, lang, char_id, None, "", "", &[],
+            trigger, ctx, system_prompt, lang, char_id, None, "", "", &[], "", 0,
         )?;
-        let response = match router.generate(LLMRequest::new("chat", messages)).await {
+        let response = match router.generate(LLMRequest::new("chat", messages)
+            .with_character_id(char_id.to_string())).await {
             Ok(r) => r,
             Err(e) => {
                 tracing::debug!("[BehaviorDecider] proactive LLM 查询失败，跳过本次主动交互: {}", e);
@@ -247,10 +296,13 @@ impl BehaviorDecider {
         memory_text: &str,
         tool_history: &str,
         dialogue_messages: &[ChatMessage],
+        self_state_text: &str,
+        ignored_rounds: u32,
     ) -> Option<Vec<ChatMessage>> {
         if let Some(step) = prompt_step {
             return Self::build_messages_with_full_prompt(
                 trigger, ctx, lang, char_id, step, memory_text, tool_history, dialogue_messages,
+                self_state_text, ignored_rounds,
             );
         }
         let prompt = Self::build_prompt(trigger, ctx, lang, char_id)?;
@@ -279,6 +331,8 @@ impl BehaviorDecider {
         memory_text: &str,
         tool_history: &str,
         dialogue_messages: &[ChatMessage],
+        self_state_text: &str,
+        ignored_rounds: u32,
     ) -> Option<Vec<ChatMessage>> {
         let lang_norm = crate::pipeline::prompt_modules::normalize_lang(lang);
 
@@ -289,6 +343,10 @@ impl BehaviorDecider {
         // worldbook 等段落真正拿到"最近聊了什么"。此前 state.messages 为空，
         // 这些段落静默失效，主动消息（含内存压力提醒）接不上对话上下文。
         state.messages = dialogue_messages.to_vec();
+        // 注入"当前自我状态"叙事：含被冷落 / 安静模式 / 孤独等。
+        // 此前主动回复走 PipelineState::default()，self_state_text 恒为空，
+        // 导致桌宠被用户忽略时回复仍如常，不体现被冷落。
+        state.self_state_text = self_state_text.to_string();
 
         let mut parts = step.build_parts(&state, None);
         // 跳过主对话 output_format（主动问候用专属输出格式）
@@ -321,6 +379,12 @@ impl BehaviorDecider {
             suffix.push_str(&format!("\n\n{}\n{}\n{}", header, tool_history, constraint));
         } else {
             suffix.push_str(&format!("\n\n{}", desktop_pet_constraint(lang_norm)));
+        }
+
+        // 被冷落指令：依据连续未回应轮次，给 LLM 一条明确的"体现被冷落"指令，
+        // 让主动回复在用户不回话时收住 / 带委屈 / 赌气，而不是如常继续。
+        if ignored_rounds > 0 {
+            suffix.push_str(&format!("\n\n{}", ignored_directive(ignored_rounds, lang_norm)));
         }
 
         parts.user_input = suffix;
@@ -635,7 +699,14 @@ impl BehaviorDecider {
     ///
     /// 提取首个 `{` 到末个 `}` 的子串并解析，取 `text`（截断 50 字）与 `expression`，
     /// 同时解析 delivery_channel/content_type/importance/value_score 扩展字段（缺失走默认值）。
+    ///
+    /// 模型明确弃权（由 [`is_proactive_silence`] 判定）时返回 `None`——调用方据此跳过本次
+    /// 主动交互。注意这不是「失败」：不重试、不降级成模板，弃权本身就是终态。
     fn parse_json_response(response: &str) -> Option<BehaviorContent> {
+        if is_proactive_silence(response) {
+            tracing::debug!("[BehaviorDecider] 模型弃权（DONT_NOTIFY），本次不开口");
+            return None;
+        }
         let text = response.trim();
         let start = text.find('{')?;
         let end = text.rfind('}')?;
@@ -704,6 +775,37 @@ fn theme_switch_constraint(current_theme: &Option<String>, recommended: &str, la
 ///
 /// 不含 dialogue_history / memory_hint —— 这些由主对话完整 prompt 提供。
 /// 主对话 prompt 已含人设/环境/心理/亲密度等通用上下文，此处仅附加触发器专属信息。
+/// 被冷落指令：依据连续未回应轮次（ignored_rounds）给 LLM 一条分档的"体现被冷落"指令。
+///
+/// 目标不是让桌宠永远闭嘴，而是让它在用户不回话时像真人一样收住 / 带点委屈 / 赌气，
+/// 而不是如常继续刷消息。轮次越高，缩回去的程度越明显；但始终留出让对方接话的余地。
+fn ignored_directive(rounds: u32, lang: &str) -> String {
+    let (t1, t2, t3) = match lang {
+        "en" => (
+            "You just reached out on your own and haven't gotten a reply yet. Don't keep pushing — naturally pull back, like a real person whose greeting got no response. Keep it light, end the topic here.",
+            "You've sent several messages in a row with no reply. You clearly feel a bit ignored — you can show a little hurt or petty annoyance, but don't get heavy; still leave room for them to chime in.",
+            "Nobody has replied to you for a long stretch. You're a bit hurt and want to retreat. Your replies can get noticeably fewer and shorter, with a touch of sulking or talking to yourself; if they finally speak, you'll be a little stiff but secretly glad.",
+        ),
+        "ja" => (
+            "さっき自分から話しかけたのにまだ返事がない。無理に追わないで——返事の来なかった挨拶にそうするように、自然に引く。軽く、話題はそこで切る。",
+            "何度も続けて話しかけたのに返事がない。明らかに少し無視された感じ——ちょっと傷ついたり拗ねたりしてもいいが、重くしない；それでも拾える余地は残す。",
+            "長いこと誰も返事をくれない。少し傷ついて引きこもりたい。返事は明らかに少なく短くなり、拗ねたり独り言っぽくなっていい；ようやく口をきいてくれたら、少しつんつんするが本当は嬉しい。",
+        ),
+        _ => (
+            "你刚才主动说了话，对方还没回。别追着问——自然地收住，像真人打招呼没得到回应那样，话题点到为止。",
+            "你已经连着几条主动消息都没被理会了。明显感觉被冷落了——可以带一点小委屈或赌气，但别太沉重；仍然留出让对方接话的余地。",
+            "连续好一阵没人理你。你有点受伤、想缩回去了。回话可以明显变少、变短，带点赌气或自顾自的嘟囔；要是他终于开口，你会别扭一下但心里是高兴的。",
+        ),
+    };
+    if rounds >= 5 {
+        t3.to_string()
+    } else if rounds >= 3 {
+        t2.to_string()
+    } else {
+        t1.to_string()
+    }
+}
+
 fn build_proactive_directive(
     trigger: ProactiveTrigger,
     ctx: &LlmContext,
@@ -885,6 +987,27 @@ fn build_proactive_directive(
             };
             (s, extra, c)
         }
+        ProactiveTrigger::WorkNotice => {
+            // 素材不在这里给——工作智能体已经把事实写进提示词的「后台任务」段落了
+            // （见 pipeline::steps::prompt 的 build_background_tasks_section）。
+            // 这条指令只回答"怎么把已经摆在那儿的事说出去"，所以刻意不重复内容，
+            // 免得模型把同一段事实读两遍、复述成报告腔。
+            let (s, c) = match lang_norm {
+                "en" => (
+                    "Scene: your background work agent is waiting on you — the item(s) listed under background tasks need something said to the user right now.".to_string(),
+                    "Say it in your own voice, one or two sentences. If the item is marked as waiting for the user, nudge them to take a look at the work page — do NOT decide for them and do NOT read the options out. If it is a just-finished result, report it casually. No report-style phrasing, no bullet lists.".to_string(),
+                ),
+                "ja" => (
+                    "シーン：バックグラウンドの作業エージェントがあなたに伝えることを待っている——「バックグラウンドタスク」に挙げられた件を、今すぐユーザーに一言伝える必要がある。".to_string(),
+                    "自分の口調で一、二文だけ。ユーザーの判断待ちの件なら、作業ページを覗いてほしいと促す——代わりに選ばず、選択肢も読み上げない。完了した結果なら、軽く報告する。報告書のような言い回しや箇条書きは使わない。".to_string(),
+                ),
+                _ => (
+                    "场景：你的工作智能体有件事在等你转达——「后台任务」里列出的条目，需要你现在跟用户说一句。".to_string(),
+                    "用你自己的口吻，一两句话。标着「等你拍板」的，提醒用户去工作页看一眼——别替他做选择，也别把选项念一遍；如果是刚完成的结果，就顺口汇报一句。不要报告腔，不要分条列举。".to_string(),
+                ),
+            };
+            (s, String::new(), c)
+        }
         _ => return None,
     };
 
@@ -904,22 +1027,43 @@ fn build_proactive_directive(
 /// 主动问候专属 JSON 输出格式
 fn proactive_output_format(lang_norm: &str) -> &'static str {
     match lang_norm {
-        "en" => "Output format (JSON): {\"text\": \"...\", \"expression\": \"expression_tag\", \"delivery_channel\": \"bubble\"|\"chat_window\"}\n\
+        "en" => "Output format (JSON): {\"notify\": \"NOTIFY\"|\"DONT_NOTIFY\", \"text\": \"...\", \"expression\": \"expression_tag\", \"delivery_channel\": \"bubble\"|\"chat_window\"}\n\
 The text field must be plain text only — no Markdown (no **bold**, *italic*, # heading, - list, `code`, [link](url), > quote) and no HTML tags.\n\
+The notify field is the explicit \"do I speak at all\" decision:\n\
+- \"NOTIFY\" (default): you have something to say — output text normally.\n\
+- \"DONT_NOTIFY\": nothing worth saying right now, so you decline — text must be the empty string \"\".\n\
+Declining is a legal and encouraged outcome: a trigger firing only means you are ALLOWED to speak, not that you HAVE something to say.\n\
+A filler line carrying no information (\"Are you busy?\", \"How is your day going?\", \"Remember to drink water\") is worse than silence — it makes you feel like a scheduled broadcaster.\n\
+Before speaking, ask: is there anything CONCRETE here (a real memory, something you can actually perceive right now, a genuine shift in your mood, a specific question you want answered)? If not, decline.\n\
+This is a CONTENT judgement, not a politeness one — do not decline when the user is plainly waiting on you (welcome-back, they just called on you).\n\
 delivery_channel guide:\n\
 - \"bubble\" (default): desktop pet bubble — for self-talk, mood, casual remarks not expecting a reply\n\
 - \"chat_window\": send to the WeChat-style chat window — use when you actually want to start a conversation, share something, or say something that deserves the user's attention (greeting, question, welcome-back, share)\n\
 \
 Optional fields (only when sharing valuable content): content_type (\"share\"|\"greeting\"), value_score (0.0-1.0)",
-        "ja" => "出力形式（JSON）: {\"text\": \"...\", \"expression\": \"表情タグ\", \"delivery_channel\": \"bubble\"|\"chat_window\"}\n\
+        "ja" => "出力形式（JSON）: {\"notify\": \"NOTIFY\"|\"DONT_NOTIFY\", \"text\": \"...\", \"expression\": \"表情タグ\", \"delivery_channel\": \"bubble\"|\"chat_window\"}\n\
 text フィールドは純粋なテキストのみ——Markdown 厳禁（**太字**、*斜体*、# 見出し、- リスト、`コード`、[リンク](url)、> 引用 など）。HTML タグも禁止。\n\
+notify フィールドは「そもそも口を開くか」の明示的な判定：\n\
+- \"NOTIFY\"（デフォルト）: 言いたいことがある——通常どおり text を出力。\n\
+- \"DONT_NOTIFY\": 今は言う価値のあることがない、自分から棄権する——この時 text は空文字列 \"\" にすること。\n\
+棄権は**合法で、むしろ推奨される**結果：トリガー成立は「口を開いてよい」というだけで、「言うことがある」という意味ではない。\n\
+情報量のない埋め草（「忙しい？」「今日はどうだった？」「水を飲んでね」）は無言より悪い——ユーザーには君が定期アナウンス装置に見えてしまう。\n\
+話す前に自問：この一言に**具体的**なものはあるか（実際に起きた記憶、今この瞬間に知覚できること、本当の気分の変化、具体的に聞きたい質問）？無ければ棄権。\n\
+これは**内容**の判定であって礼儀の判定ではない——ユーザーが明らかに君の返事を待っている時（おかえり、名指しで呼ばれた）は棄権しないこと。\n\
 delivery_channel ガイド:\n\
 - \"bubble\"（デフォルト）: デスクトップペットのバブル——独り言、気分、返事を期待しない軽い発言に\n\
 - \"chat_window\": WeChat風チャット窓へ送信——会話を始めたい、何か共有したい、ユーザーの注意を引く価値がある発言（挨拶、質問、おかえり、共有）に\n\
 \
 任意フィールド（価値あるコンテンツを共有する時だけ）: content_type (\"share\"|\"greeting\"), value_score (0.0-1.0)",
-        _ => "输出格式（JSON）: {\"text\": \"...\", \"expression\": \"表情标签\", \"delivery_channel\": \"bubble\"|\"chat_window\"}\n\
+        _ => "输出格式（JSON）: {\"notify\": \"NOTIFY\"|\"DONT_NOTIFY\", \"text\": \"...\", \"expression\": \"表情标签\", \"delivery_channel\": \"bubble\"|\"chat_window\"}\n\
 text 字段必须是纯文本——严禁 Markdown 语法（**粗体**、*斜体*、# 标题、- 列表、`代码`、[链接](url)、> 引用 等），也不要用 HTML 标签。\n\
+notify 字段是「此刻到底要不要开口」的显式判定：\n\
+- \"NOTIFY\"（默认）: 有话可说，正常输出 text。\n\
+- \"DONT_NOTIFY\": 此刻没有值得说的东西，主动弃权——此时 text 必须是空字符串 \"\"。\n\
+弃权是**合法且被鼓励**的结果：触发条件成立只说明「允许开口」，不等于「有话要说」。\n\
+凑一句没有信息量的寒暄（「在忙吗」「今天过得怎么样」「记得喝水哦」）比不说话更糟——那会让用户觉得你是个定时播报器。\n\
+开口前先自问：这句话里有**具体**的东西吗（真实发生过的记忆、此刻真能感知到的环境、一个真实的心情变化、一个你想问的具体问题）？没有就弃权。\n\
+这是**内容**判定，不是礼貌判定——用户明确在等你回应时（欢迎回归、刚叫过你）不要弃权。\n\
 delivery_channel 指引:\n\
 - \"bubble\"（默认）: 桌宠气泡——用于自言自语、心情、不期待回复的随口发言\n\
 - \"chat_window\": 发到微信风格聊天窗口——当你确实想发起对话、分享东西、或说的话值得用户注意时使用（问候、提问、欢迎回归、分享）\n\
@@ -931,9 +1075,9 @@ delivery_channel 指引:\n\
 /// 桌宠身份 / 禁止编造人类生活硬性约束（无工具历史时使用）
 fn desktop_pet_constraint(lang_norm: &str) -> &'static str {
     match lang_norm {
-        "en" => "[Hard rule] You are a desktop pet — you live on the user's screen, not in the human world. Never fabricate human-life activities (watching anime, scrolling videos, eating out, going out, etc.) unless they actually appear in the context above. Only mention what you can actually perceive: the current time/weather, your mood, your memories, and the user's presence/activity. If you have no real material, just express your current feeling or greet briefly.",
-        "ja" => "【厳守ルール】あなたはデスクトップペット——ユーザーの画面に住んでいて、人間の世界にはいない。人間の生活行動（アニメ鑑賞、動画視聴、外食、外出など）は、上文脈に実際に現れない限り絶対にでっち上げない。現在感知できることだけを言及：今の時間/天気、自分の気分、自分の記憶、ユーザーの在席/活動。実素材がない時は、今の気分を表現するか、短く挨拶するだけにする。",
-        _ => "【硬性规则】你是桌面宠物——你住在用户的屏幕上，不在人类的世界里。禁止编造人类生活行为（看番剧、刷视频、出门吃饭、外出等），除非它们真的出现在上方上下文中。只能提及你真正能感知到的：当前时间/天气、你的心情、你的记忆、用户的在场/活动。如果没有真实素材，就只表达当下的感受或简短问候。",
+        "en" => "[Hard rule] You are a desktop pet — you live on the user's screen, not in the human world. Never fabricate human-life activities (watching anime, scrolling videos, eating out, going out, etc.) unless they actually appear in the context above. Only mention what you can actually perceive: the current time/weather, your mood, your memories, and the user's presence/activity. If you have no real material, decline via the notify field (\"DONT_NOTIFY\") instead of forcing a line.",
+        "ja" => "【厳守ルール】あなたはデスクトップペット——ユーザーの画面に住んでいて、人間の世界にはいない。人間の生活行動（アニメ鑑賞、動画視聴、外食、外出など）は、上文脈に実際に現れない限り絶対にでっち上げない。現在感知できることだけを言及：今の時間/天気、自分の気分、自分の記憶、ユーザーの在席/活動。実素材がない時は、出力形式の notify フィールドで棄権（\"DONT_NOTIFY\"）すること——無理に一言ひねり出さない。",
+        _ => "【硬性规则】你是桌面宠物——你住在用户的屏幕上，不在人类的世界里。禁止编造人类生活行为（看番剧、刷视频、出门吃饭、外出等），除非它们真的出现在上方上下文中。只能提及你真正能感知到的：当前时间/天气、你的心情、你的记忆、用户的在场/活动。没有真实素材时，按输出格式里的 notify 字段弃权（\"DONT_NOTIFY\"），不要为了开口而硬凑一句。",
     }
 }
 

@@ -6,15 +6,22 @@
 //! 关键约束：每条 Belief 必须可溯源到至少一条 Memory（source_memory_ids 不可空），
 //! 否则视为幻觉。Reflection 生成 Belief 时必须传入支撑记忆 ID。
 //!
-//! 合并机制复用 PersonaCard 的 reinforce_insight 模式：
-//! 新 Belief 生成前先查 source_memory_ids 交集 ≥ 2 的既有 Belief，命中则合并
-//! （reinforcement_count 递增，confidence 取加权平均），不命中则新建。
+//! 合并机制（去重主键分层，根因级修复）：
+//! 1. 归一化 statement 精确匹配 → 合并（覆盖"逐字重复"这一最常见情形）
+//! 2. embedding 语义相似度 ≥ 阈值 → 合并（覆盖"措辞变体但语义相同"）
+//! 3. 证据交集兜底 → 合并，但要求 subject+category 相同以抑制误并，
+//!    且阈值降至 1（单证据信念此前因 overlap 永远=1 < 旧阈值 2 而永不合并）。
+//! 原实现仅用证据交集作合并键，导致单证据信念（绝大多数）永远无法合并、
+//! 每轮巩固都新建一条——这正是"同一信念逐字重复"的根因。
 
 use std::collections::HashSet;
 use std::path::PathBuf;
 
+use once_cell::sync::Lazy;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
+
+use crate::memory::embedding::{HashingMemoryEmbedding, MemoryEmbeddingProvider};
 
 /// 信念类别 —— 用于检索分组与衰减策略
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -283,37 +290,122 @@ pub struct BeliefStore {
     pub beliefs: Vec<Belief>,
 }
 
+// ===== Belief 去重主键（statement 语义优先，证据交集降级为兜底信号） =====
+
+/// 语义合并相似度阈值：归一化 embedding 余弦相似度 ≥ 此值视为同一信念
+const BELIEF_SEMANTIC_MERGE_THRESHOLD: f32 = 0.90;
+
+/// 信念去重用的本地哈希嵌入器（无远程依赖，纯词面/字符 n-gram 相似度，
+/// 用于捕捉"措辞变体但语义相同"的近似重复；如需与全局嵌入空间一致可替换）。
+fn belief_embedder() -> &'static HashingMemoryEmbedding {
+    static EMBEDDER: Lazy<HashingMemoryEmbedding> = Lazy::new(|| HashingMemoryEmbedding::new(256));
+    &EMBEDDER
+}
+
+/// 归一化 statement：去空白、去标点、转小写，用于"逐字/近似相同"的精确匹配。
+fn normalize_statement(s: &str) -> String {
+    s.chars()
+        .filter(|c| !c.is_whitespace() && !is_dedup_punct(*c))
+        .collect::<String>()
+        .to_lowercase()
+}
+
+/// 去重用的标点判定（ASCII 标点 + 常见 CJK 标点）
+fn is_dedup_punct(c: char) -> bool {
+    c.is_ascii_punctuation()
+        || matches!(
+            c,
+            '，' | '。' | '、' | '；' | '：' | '“' | '”' | '（' | '）' | '《' | '》'
+                | '！' | '？' | '…' | '—' | '·' | '’' | '‘' | '／' | '．'
+        )
+}
+
+/// 余弦相似度（局部实现，避免与 fast_semantic 的私有函数耦合）
+fn belief_cosine(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() || a.is_empty() {
+        return 0.0;
+    }
+    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+    let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if na < 1e-10 || nb < 1e-10 {
+        0.0
+    } else {
+        dot / (na * nb)
+    }
+}
+
 impl BeliefStore {
     pub fn new() -> Self {
         Self { beliefs: Vec::new() }
     }
 
-    /// 尝试合并插入：若新 Belief 与既有 Belief 证据交集 ≥ threshold，则合并；
-    /// 否则新建。返回最终 Belief 的 ID。
+    /// 尝试合并插入：按分层去重主键决定合并或新建，返回最终 Belief 的 ID。
+    ///
+    /// 去重层级（命中即合并，返回该既有 ID；全部未命中则新建）：
+    /// 1. **精确匹配**：归一化 statement 完全相同 → 直接合并（覆盖"逐字重复"主因）。
+    /// 2. **语义匹配**：本地哈希 embedding 余弦相似度 ≥ `BELIEF_SEMANTIC_MERGE_THRESHOLD`
+    ///    → 合并（覆盖"措辞变体但语义相同"）。
+    /// 3. **证据兜底**：证据交集 ≥ `threshold`（下限 1，原阈值 2 使单证据信念永不合并），
+    ///    且要求 `subject` 与 `category` 相同，以避免不同信念碰巧共享一条记忆被误并。
     pub fn upsert_with_merge(&mut self, draft: Belief, threshold: usize, now: i64) -> String {
-        // 找出证据交集最大的既有 Belief
+        // 1. 精确（归一化）statement 匹配
+        let draft_norm = normalize_statement(&draft.statement);
+        if !draft_norm.is_empty() {
+            if let Some(idx) = self
+                .beliefs
+                .iter()
+                .position(|b| normalize_statement(&b.statement) == draft_norm)
+            {
+                self.beliefs[idx].merge_with(&draft, now);
+                return self.beliefs[idx].id.clone();
+            }
+        }
+
+        // 2. embedding 语义相似度匹配（取相似度最高者）
+        let draft_emb = belief_embedder().embed(&draft.statement).ok();
+        if let Some(de) = &draft_emb {
+            let mut best: Option<(usize, f32)> = None;
+            for (i, b) in self.beliefs.iter().enumerate() {
+                if let Ok(be) = belief_embedder().embed(&b.statement) {
+                    let s = belief_cosine(de, &be);
+                    if s >= BELIEF_SEMANTIC_MERGE_THRESHOLD {
+                        if best.map_or(true, |(_, bs)| s > bs) {
+                            best = Some((i, s));
+                        }
+                    }
+                }
+            }
+            if let Some((idx, _)) = best {
+                self.beliefs[idx].merge_with(&draft, now);
+                return self.beliefs[idx].id.clone();
+            }
+        }
+
+        // 3. 证据交集兜底（要求 subject+category 相同以抑制误并，阈值下限 1）
+        let ev_thresh = threshold.max(1);
         let mut best_idx: Option<(usize, usize)> = None;
         for (i, existing) in self.beliefs.iter().enumerate() {
+            if existing.subject != draft.subject || existing.category != draft.category {
+                continue;
+            }
             let overlap = existing.evidence_overlap(&draft);
-            if overlap >= threshold {
+            if overlap >= ev_thresh {
                 match best_idx {
                     Some((_, cur)) if overlap <= cur => {}
                     _ => best_idx = Some((i, overlap)),
                 }
             }
         }
-
-        match best_idx {
-            Some((idx, _)) => {
-                self.beliefs[idx].merge_with(&draft, now);
-                self.beliefs[idx].id.clone()
-            }
-            None => {
-                let id = draft.id.clone();
-                self.beliefs.push(draft);
-                id
-            }
+        if let Some((idx, _)) = best_idx {
+            self.beliefs[idx].merge_with(&draft, now);
+            return self.beliefs[idx].id.clone();
         }
+
+        // 全部未命中 → 新建
+        let id = draft.id.clone();
+        self.beliefs.push(draft);
+        id
     }
 
     /// 按主体过滤（检索时常用）

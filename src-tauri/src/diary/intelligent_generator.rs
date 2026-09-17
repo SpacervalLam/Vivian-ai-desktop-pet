@@ -852,7 +852,8 @@ pub(crate) async fn generate_content_via_llm(
         .router
         .generate(
             crate::providers::base::LLMRequest::new("diary", messages)
-                .with_json_schema(diary_content_schema()),
+                .with_json_schema(diary_content_schema())
+                .with_character_id(brain.char_id.clone()),
         )
         .await
         .map_err(|e| {

@@ -652,6 +652,74 @@ impl PsychologyManager {
         feedback
     }
 
+    /// 规则层"被冷落→情绪映射"：连续主动搭话未获回应时累积负面情绪。
+    ///
+    /// `severity` ∈[0,1]，反映冷落程度（例如由连续 ignored_count 归一化）。
+    /// 推高 loneliness / sadness / belonging（归属饥饿），压低 joy / closeness。
+    /// 不依赖 LLM——即使 LLM 未产出情绪增量，被冷落也会真实改变心情。
+    pub fn apply_cold_shoulder(&self, severity: f64) {
+        let severity = severity.clamp(0.0, 1.0);
+        if severity <= 0.0 {
+            return;
+        }
+        let sensitivity_mult = {
+            let state = self.state.read();
+            state.persona.traits.sensitivity_multiplier()
+        };
+        let emotion_delta = EmotionDeltas {
+            loneliness: 0.14 * severity,
+            sadness: 0.06 * severity,
+            joy: -0.08 * severity,
+            closeness: -0.06 * severity,
+            ..Default::default()
+        };
+        let need_delta = NeedDeltas {
+            belonging: 0.08 * severity,
+            expression: 0.05 * severity,
+            ..Default::default()
+        };
+        {
+            let mut state = self.state.write();
+            let snapshot: &mut PsychologySnapshot = &mut *state;
+            snapshot.emotion.apply_delta(&emotion_delta, sensitivity_mult);
+            snapshot.needs.apply_delta(&need_delta);
+            let _ = snapshot.emotion.apply_interactions();
+        }
+        let _ = self.persist();
+    }
+
+    /// 用户终于回应时的缓解：降低被冷落的负面情绪，恢复正常状态。
+    ///
+    /// 在用户真实交互且此前曾处于"被冷落"状态时调用，让桌宠语气回暖。
+    pub fn apply_user_answered_relief(&self) {
+        let sensitivity_mult = {
+            let state = self.state.read();
+            state.persona.traits.sensitivity_multiplier()
+        };
+        let emotion_delta = EmotionDeltas {
+            loneliness: -0.20,
+            sadness: -0.12,
+            anger: -0.05,
+            joy: 0.10,
+            closeness: 0.10,
+            curiosity: 0.05,
+            ..Default::default()
+        };
+        let need_delta = NeedDeltas {
+            belonging: -0.10,
+            expression: -0.05,
+            ..Default::default()
+        };
+        {
+            let mut state = self.state.write();
+            let snapshot: &mut PsychologySnapshot = &mut *state;
+            snapshot.emotion.apply_delta(&emotion_delta, sensitivity_mult);
+            snapshot.needs.apply_delta(&need_delta);
+            let _ = snapshot.emotion.apply_interactions();
+        }
+        let _ = self.persist();
+    }
+
     /// 计算连续点击时的避让鼠标概率（基于当前心理状态）
     ///
     /// 返回 0.0-1.0 的概率值。公式设计见 apply_user_interaction 注释。
@@ -1294,4 +1362,52 @@ impl PsychologyManager {
 /// 持久化到文件的路径辅助
 pub fn default_psychology_path(data_dir: &std::path::Path) -> std::path::PathBuf {
     data_dir.join("psychology.json")
+}
+
+#[cfg(test)]
+mod cold_shoulder_tests {
+    use super::*;
+
+    fn manager(name: &str) -> PsychologyManager {
+        let path = std::env::temp_dir().join(format!("psych_cold_shoulder_{}.json", name));
+        PsychologyManager::load_or_init(path)
+    }
+
+    #[test]
+    fn test_cold_shoulder_raises_loneliness() {
+        let m = manager("lonely");
+        let before = m.emotion().loneliness;
+        m.apply_cold_shoulder(1.0);
+        assert!(m.emotion().loneliness > before);
+    }
+
+    #[test]
+    fn test_cold_shoulder_lowers_joy_closeness() {
+        let m = manager("down");
+        let before = m.emotion();
+        m.apply_cold_shoulder(1.0);
+        let after = m.emotion();
+        assert!(after.joy < before.joy);
+        assert!(after.closeness < before.closeness);
+    }
+
+    #[test]
+    fn test_cold_shoulder_zero_noop() {
+        let m = manager("noop");
+        let before = m.emotion().loneliness;
+        m.apply_cold_shoulder(0.0);
+        assert!((m.emotion().loneliness - before).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_user_answered_relief_cures_cold_shoulder() {
+        let m = manager("relief");
+        m.apply_cold_shoulder(1.0);
+        let cold = m.emotion();
+        assert!(cold.loneliness > cold.closeness);
+        m.apply_user_answered_relief();
+        let relieved = m.emotion();
+        assert!(relieved.loneliness < cold.loneliness);
+        assert!(relieved.closeness > cold.closeness);
+    }
 }

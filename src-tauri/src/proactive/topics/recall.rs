@@ -29,7 +29,8 @@ impl MemoryRecall {
     ) -> Option<String> {
         let messages =
             Self::build_messages(recent_memory, system_prompt, lang, char_id, idle_seconds)?;
-        let raw = match router.generate(LLMRequest::new("chat", messages)).await {
+        let raw = match router.generate(LLMRequest::new("chat", messages)
+            .with_character_id(char_id.to_string())).await {
             Ok(r) => r,
             Err(e) => {
                 tracing::debug!("[RecallTopic] proactive LLM 查询失败，跳过本次回忆提问: {}", e);
@@ -73,7 +74,12 @@ impl MemoryRecall {
             .map(|s| s.trim())
             .filter(|s| s.len() > 4)
             .last()
-            .map(|s| s.chars().take(15).collect::<String>())
+            .map(|s| {
+                strip_speaker_prefix(s)
+                    .chars()
+                    .take(15)
+                    .collect::<String>()
+            })
             .unwrap_or_else(|| memory.chars().take(15).collect());
         if topic.is_empty() {
             return None;
@@ -142,5 +148,40 @@ impl MemoryRecall {
         } else {
             Some(text_owned)
         }
+    }
+}
+
+/// 去掉 `user: ` / `assistant: ` 这类说话人前缀。
+///
+/// `recent_memory` 由 `ProactiveOrchestrator::refresh_recent_memory_from_dialogue`
+/// 按 `role: content` 逐行填充；直接取末句会把说话人带进"可提及的话题"里
+/// （"assistant: 那你早点睡"），既占字数又干扰模型判断话题归属。
+fn strip_speaker_prefix(line: &str) -> &str {
+    for role in ["user", "assistant", "system", "tool"] {
+        if let Some(rest) = line.strip_prefix(role) {
+            if let Some(rest) = rest.strip_prefix(':') {
+                return rest.trim_start();
+            }
+        }
+    }
+    line
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_speaker_prefix;
+
+    #[test]
+    fn strips_known_role_prefixes() {
+        assert_eq!(strip_speaker_prefix("assistant: 那你早点睡"), "那你早点睡");
+        assert_eq!(strip_speaker_prefix("user:今天面试砸了"), "今天面试砸了");
+        assert_eq!(strip_speaker_prefix("  user: x"), "  user: x");
+    }
+
+    #[test]
+    fn keeps_unrelated_text() {
+        // 前缀不完整（没有冒号）时不能误伤，例如 "username: foo"
+        assert_eq!(strip_speaker_prefix("username: foo"), "username: foo");
+        assert_eq!(strip_speaker_prefix("今天天气不错"), "今天天气不错");
     }
 }

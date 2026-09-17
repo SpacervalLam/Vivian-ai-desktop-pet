@@ -11,6 +11,7 @@ import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { BookOpen, House, LayoutGrid } from 'lucide-react';
 import { openRoomWindow } from '../../utils/roomWindow';
+import { reportInspectorNav } from '../../utils/inspectorAttention';
 import {
   EASE,
   DURATION,
@@ -77,6 +78,7 @@ const NavButton: React.FC<{
 const MindInspector: React.FC = () => {
   const { t } = useTranslation();
   const [activeNav, setActiveNav] = useState<NavKey>('overview');
+  const [navRevealed, setNavRevealed] = useState(false);
   const [pageParams, setPageParams] = useState<PageParams>({});
   const [uiStyle, setUiStyle] = useState<InspectorUiStyle>(readUiStyle);
 
@@ -92,6 +94,13 @@ const MindInspector: React.FC = () => {
   const [animKey, setAnimKey] = useState(0);
   useEffect(() => {
     setAnimKey((k) => k + 1);
+  }, [activeNav]);
+
+  // 把当前页签上报给后端：工作智能体卡在等用户拍板时，靠它判断用户看不看得见
+  // 那条提问——用户停在别的页签时，工作页的 coding:question 监听器压根没挂载。
+  // 这里必须挂在窗口级组件上（而非工作页组件），否则离开工作页就再也没人上报了。
+  useEffect(() => {
+    reportInspectorNav(activeNav);
   }, [activeNav]);
 
   // 挂载时刷新 pastel 主题色缓存，应对用户切换主题后重新打开 Mind Inspector 的场景
@@ -244,6 +253,7 @@ const MindInspector: React.FC = () => {
     <NavigationProvider value={navContext}>
       <div
         className={`codex-theme mind-inspector-root mind-scrapbook-window${activeNav === 'code' ? ' is-work-page' : ''}`}
+        data-nav-revealed={navRevealed ? 'true' : 'false'}
       >
         {/* 手账本封面条（全局标题 + 窗口拖拽区 + 最小化/关闭按钮） */}
         <header className="mind-sb-cover">
@@ -330,18 +340,32 @@ const MindInspector: React.FC = () => {
 
         {/* 左侧贴纸导航栏 */}
         <div className="mind-sb-body">
-          <aside className="mind-nav-rail">
-            <div className="mind-nav-card sb-tape">
-              {NAV_ITEMS.map((item) => (
-                <NavButton
-                  key={item.key}
-                  item={item}
-                  active={item.key === activeNav}
-                  onClick={() => setActiveNav(item.key)}
-                />
-              ))}
-            </div>
-          </aside>
+          <div
+            className={`mind-nav-dock${navRevealed ? ' is-revealed' : ''}`}
+            onMouseEnter={() => setNavRevealed(true)}
+            onMouseLeave={() => setNavRevealed(false)}
+            onFocusCapture={() => setNavRevealed(true)}
+            onBlurCapture={(event) => {
+              const next = event.relatedTarget;
+              if (!(next instanceof Node) || !event.currentTarget.contains(next)) {
+                setNavRevealed(false);
+              }
+            }}
+          >
+            <div className="mind-nav-hotspot" aria-hidden="true" />
+            <aside className="mind-nav-rail">
+              <div className="mind-nav-card">
+                {NAV_ITEMS.map((item) => (
+                  <NavButton
+                    key={item.key}
+                    item={item}
+                    active={item.key === activeNav}
+                    onClick={() => setActiveNav(item.key)}
+                  />
+                ))}
+              </div>
+            </aside>
+          </div>
 
           {/* 右侧内容区 */}
           <main
@@ -357,6 +381,7 @@ const MindInspector: React.FC = () => {
             </div>
           </main>
         </div>
+
       </div>
     </NavigationProvider>
   );

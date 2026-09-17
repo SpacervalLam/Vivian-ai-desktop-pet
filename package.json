@@ -9,7 +9,8 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build"
+    "tauri:build": "tauri build",
+    "test:toast-dedup": "node scripts/toast-dedup.test.ts"
   },
   "dependencies": {
     "@tanstack/react-virtual": "^3.14.6",

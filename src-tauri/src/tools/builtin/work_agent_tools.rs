@@ -364,154 +364,10 @@ impl Tool for GetWorkStatusTool {
     }
 }
 
-// ===== notify_companion =====
-
-/// 即时播报节流：每角色最小间隔（秒），避免 agent 循环内连续刷屏。
-const NOTIFY_MIN_INTERVAL_SECS: f64 = 60.0;
-
-/// 每角色最近一次即时播报时间戳。
-static LAST_NOTIFY: Lazy<RwLock<std::collections::HashMap<String, f64>>> =
-    Lazy::new(|| RwLock::new(std::collections::HashMap::new()));
-
-/// 通知投递结果
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NoticeDispatch {
-    /// 已排队投递（异步生成播报 + 气泡/TTS）
-    Delivered,
-    /// 距上次播报不足 60s，被节流
-    Throttled,
-    /// 参数不完整（缺角色或内容），跳过
-    Skipped,
-}
-
-/// 让陪伴角色向用户播报一条工作状态通知。
+/// 把需要用户知道的事交给陪伴角色，由 TA 以角色口吻转告。
 ///
-/// 供 `notify_companion` 工具（工作智能体主动调用）与 CodingAgent 自动触发
-/// （模型调用失败 / 任务完成）通用。校验与节流同步完成，投递为异步不阻塞调用方；
-/// 通知走完整陪伴管线（think → `proactive:bubble` 气泡 + TTS），不改写工作会话历史。
-pub fn dispatch_companion_notice(
-    app: &tauri::AppHandle,
-    char_id: &str,
-    title: &str,
-    message: &str,
-) -> NoticeDispatch {
-    let message = message.trim();
-    if char_id.is_empty() || message.is_empty() {
-        return NoticeDispatch::Skipped;
-    }
-    let title = if title.trim().is_empty() { "工作进展" } else { title };
-
-    // 节流：60s 内已有即时播报 → 本次不重复打扰
-    let now = chrono::Local::now().timestamp() as f64;
-    let throttled = {
-        let map = LAST_NOTIFY.read();
-        map.get(char_id).map(|&ts| now - ts < NOTIFY_MIN_INTERVAL_SECS).unwrap_or(false)
-    };
-    if throttled {
-        return NoticeDispatch::Throttled;
-    }
-    LAST_NOTIFY.write().insert(char_id.to_string(), now);
-
-    tauri::async_runtime::spawn(deliver_notice_async(
-        app.clone(),
-        char_id.to_string(),
-        title.to_string(),
-        message.to_string(),
-        now,
-    ));
-    NoticeDispatch::Delivered
-}
-
-/// 异步生成播报并投递（TTS 气泡 + 对话历史 + 记忆），不阻塞调用方。
-async fn deliver_notice_async(
-    app: tauri::AppHandle,
-    char_id: String,
-    title: String,
-    message: String,
-    now: f64,
-) {
-    let state = app.state::<Arc<AppState>>();
-    let instance = match state.get_character(Some(char_id.as_str())) {
-        Ok(i) => i,
-        Err(e) => {
-            tracing::warn!("[NotifyCompanion] 角色不存在: {e}");
-            return;
-        }
-    };
-    let brain = instance.brain.clone();
-
-    // 以内部事件形态走完整陪伴管线（记忆/情绪/人设全部生效）；
-    // skip_dialogue_write=true：通知本身不作为用户消息落历史
-    let input = format!(
-        "（系统通知：你的工作智能体有一条工作状态要转告用户）\n标题：{title}\n内容：{message}\n\n请以你的口吻，用一两句话自然地向用户播报这条工作状态——像顺手提一句你刚忙完的事，不要机械复述，不要列表。"
-    );
-    let response = match brain.think_with_options(&input, false, true).await {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!("[NotifyCompanion:{}] 生成播报失败: {e}", char_id);
-            return;
-        }
-    };
-    let text = crate::utils::strip_markdown_syntax(response.text.trim());
-    if text.is_empty() {
-        tracing::debug!("[NotifyCompanion:{}] 播报为空，跳过投递", char_id);
-        return;
-    }
-
-    // 对话历史 + 记忆（与主动消息同构：channel=proactive）
-    let mut m = crate::types::response::ChatMessage::assistant(&text);
-    m.meta = Some(crate::messages::MessageMeta::new(crate::messages::MessageSource::Assistant)
-        .with_channel("proactive"));
-    brain.dialogue.add_message(m);
-    {
-        let memory = brain.memory.clone();
-        let cid = char_id.clone();
-        let mem_text = text.clone();
-        tokio::spawn(async move {
-            let meta = serde_json::json!({
-                "channel": "proactive",
-                "speaker": cid,
-                "listener": "user",
-                "perspective": "speaker",
-                "knowledge_source": "direct",
-                "trigger": "work_report",
-            });
-            let _ = memory
-                .add_memory_with_metadata(
-                    &mem_text,
-                    crate::memory::types::MemoryType::CasualConversation,
-                    0.4,
-                    vec![
-                        "assistant".to_string(),
-                        "proactive".to_string(),
-                        "work_report".to_string(),
-                    ],
-                    meta,
-                )
-                .await;
-        });
-    }
-
-    // 发言时间戳 + 前端投递（proactive:bubble：TTS + 气泡 + 聊天记录）
-    crate::commands::proactive::touch_last_spoken(&char_id);
-    let _ = tauri::Emitter::emit(
-        &app,
-        "proactive:bubble",
-        json!({
-            "character_id": &char_id,
-            "content": &text,
-            "expression": response.expression,
-        }),
-    );
-    let _ = tauri::Emitter::emit(
-        &app,
-        "proactive:spoken",
-        json!({ "character_id": &char_id, "timestamp": now }),
-    );
-    tracing::info!("[NotifyCompanion:{}] 已播报工作状态：{}", char_id, title);
-}
-
-/// 把阶段性成果发送给陪伴角色，由其以人设口吻主动向用户播报。
+/// 只登记事实，不生成文案、不直投气泡——文案由陪伴角色在它自己的主动交互
+/// 流程里生成（人设、语气、反重复都在那儿），否则角色一开口就不像自己。
 pub struct NotifyCompanionTool;
 
 impl NotifyCompanionTool {
@@ -533,13 +389,13 @@ impl Tool for NotifyCompanionTool {
     }
 
     fn description(&self) -> &str {
-        "Send a staged work result to your companion persona, who will proactively tell the user about it in the character's own voice. Call when you reach a meaningful milestone — a phase finished, a build passing, an important finding — not for every small step. One short report per milestone."
+        "Hand something to your companion persona so it tells the user in the character's own voice. Use it for things the user should know but cannot see in the work panel — a key finding, a blocker, a decision they need to make. Do NOT use it for routine progress the panel already shows: if the user is looking at this session's work page, the message will not be repeated out loud."
     }
 
     fn description_in(&self, lang: &str) -> &str {
         match lang {
-            "zh" => "把阶段性工作成果发送给你的陪伴人格，由 TA 以角色口吻主动向用户播报。在到达有意义的节点时调用——某阶段完成、构建通过、重要发现——而不是每小步都报。每个节点一次简短汇报。",
-            "ja" => "段階的な作業成果をコンパニオンペルソナに送信し、キャラ口調でユーザーに能動的に報告してもらう。意味のあるマイルストーン到達時——フェーズ完了、ビルド成功、重要な発見——に呼び出す。小さな一歩ごとに呼ばない。マイルストーンごとに1回の簡潔な報告。",
+            "zh" => "把需要用户知道的事交给你的陪伴人格，由 TA 以角色口吻转告用户。用于用户在工作面板上看不到、但应该知道的信息——关键发现、卡点、需要他拍板的事。不要用来说面板上本来就显示着的常规进度：用户正看着本会话的工作页时，这条不会再重复说。",
+            "ja" => "ユーザーが知っておくべきことをコンパニオンペルソナに渡し、キャラ口調で伝えてもらう。作業パネルでは見えないが知っておくべき情報——重要な発見、詰まり、判断を仰ぐ事柄——に使う。パネルに既に表示されている通常の進捗には使わない：ユーザーがこのセッションの作業ページを見ている場合は口頭で繰り返されない。",
             _ => self.description(),
         }
     }
@@ -598,37 +454,46 @@ impl Tool for NotifyCompanionTool {
     }
 
     async fn call(&self, args: Value, context: &ToolUseContext) -> ToolResult {
-        let Some(app) = APP_HANDLE.read().clone() else {
-            return ToolResult::standard_error("无法播报（后端未初始化）", Some("AppUnavailable"), None);
-        };
         let char_id = context.char_id.clone();
+        if char_id.is_empty() {
+            return ToolResult::standard_error(
+                "缺少角色上下文，无法转达",
+                Some("NoCharacter"),
+                None,
+            );
+        }
         let title = args
             .get("title")
             .and_then(|v| v.as_str())
-            .unwrap_or("工作进展")
-            .to_string();
+            .unwrap_or("工作进展");
         let message = args
             .get("message")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .trim()
             .to_string();
-
-        match dispatch_companion_notice(&app, &char_id, &title, &message) {
-            NoticeDispatch::Delivered => ToolResult::standard_success(
-                "已把阶段成果发给陪伴角色，TA 会用自己的口吻向用户播报。",
-                None,
-            ),
-            NoticeDispatch::Throttled => ToolResult::standard_success(
-                "已记录该阶段成果（距上次播报不足 60 秒，本次不即时播报，稍后自然提及）。",
-                None,
-            ),
-            NoticeDispatch::Skipped => ToolResult::standard_error(
-                "缺少角色上下文，无法播报",
-                Some("NoCharacter"),
-                None,
-            ),
+        if message.is_empty() {
+            return ToolResult::standard_error("message 不能为空", Some("EmptyMessage"), None);
         }
+
+        let ok = crate::brain::work_notices::global().push_alert(
+            &char_id,
+            &context.session_id,
+            title,
+            &message,
+        );
+        if !ok {
+            return ToolResult::standard_error(
+                "登记失败（角色或内容为空）",
+                Some("NotifyFailed"),
+                None,
+            );
+        }
+        ToolResult::standard_success(
+            "已登记，陪伴角色会用自己的口吻转告用户。\
+             若用户此刻正开着这个会话的工作页，就不会再重复说一遍——他已经看到了。",
+            None,
+        )
     }
 
     fn is_read_only(&self) -> bool {

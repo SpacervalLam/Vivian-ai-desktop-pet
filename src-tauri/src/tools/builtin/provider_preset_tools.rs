@@ -15,7 +15,7 @@
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
-use crate::plugins::{ProviderPresetData, ProviderProtocolData};
+use crate::plugins::{EmbeddingProviderPresetData, ProviderPresetData, ProviderProtocolData};
 use crate::tools::types::{
     PermissionResult, Tool, ToolCategory, ToolResult, ToolRiskTier, ToolUseContext, ValidationResult,
 };
@@ -338,5 +338,199 @@ impl Tool for UpdateProviderPresetTool {
             "Guessing today's date for verification metadata (system clock stamps it)",
             "Using it before actually checking the official docs (verification-first workflow)",
         ]
+    }
+}
+
+/// 读取当前实际生效的 LLM 与嵌入预设，供智能体核对前先盘点完整行。
+pub struct ListProviderPresetsTool;
+
+impl ListProviderPresetsTool {
+    pub fn new() -> Self { Self }
+}
+
+#[async_trait]
+impl Tool for ListProviderPresetsTool {
+    fn name(&self) -> &str { "list_provider_presets" }
+    fn description(&self) -> &str {
+        "List the currently effective LLM and cloud embedding provider presets contributed by trusted plugins. Use this before updating or deleting a preset so you preserve complete rows and stable ids. Never returns API keys."
+    }
+    fn description_in(&self, lang: &str) -> &str {
+        if lang == "zh" { "列出受信任插件当前实际生效的 LLM 与云端嵌入供应商预设。更新或删除前先调用，以保留完整字段并确认稳定 id；结果不包含 API Key。" } else { self.description() }
+    }
+    fn parameters_schema(&self) -> Value {
+        json!({"type":"object","properties":{"kind":{"type":"string","enum":["all","llm","embedding"],"description":"Preset kind; default all"}},"additionalProperties":false})
+    }
+    async fn validate_input(&self, input: &Value, _ctx: &ToolUseContext) -> ValidationResult {
+        match input.get("kind").and_then(Value::as_str).unwrap_or("all") {
+            "all" | "llm" | "embedding" => ValidationResult::success(None),
+            _ => ValidationResult::failure("kind 仅支持 all、llm 或 embedding", 2),
+        }
+    }
+    async fn check_permissions(&self, _input: &Value, _ctx: &ToolUseContext) -> PermissionResult {
+        PermissionResult::allow()
+    }
+    async fn call(&self, args: Value, _ctx: &ToolUseContext) -> ToolResult {
+        crate::plugins::ensure_builtin_plugins();
+        let kind = args.get("kind").and_then(Value::as_str).unwrap_or("all");
+        let llm = if kind == "all" || kind == "llm" { crate::plugins::load_provider_presets() } else { Vec::new() };
+        let embedding = if kind == "all" || kind == "embedding" { crate::plugins::load_embedding_provider_presets() } else { Vec::new() };
+        ToolResult::standard_success(
+            &format!("当前有 {} 条 LLM 预设、{} 条嵌入预设", llm.len(), embedding.len()),
+            Some(json!({"llm": llm, "embedding": embedding})),
+        )
+    }
+    fn is_read_only(&self) -> bool { true }
+    fn category(&self) -> ToolCategory { ToolCategory::System }
+    fn should_defer(&self) -> bool { true }
+    fn search_hint(&self) -> &str { "list provider presets 供应商预设 列出 盘点 embedding llm" }
+}
+
+/// 云端嵌入预设的结构化 upsert，以及两类 Provider 预设的安全删除入口。
+pub struct ManageProviderPresetTool;
+
+impl ManageProviderPresetTool {
+    pub fn new() -> Self { Self }
+}
+
+fn parse_embedding_preset(input: &Value) -> Result<EmbeddingProviderPresetData, String> {
+    let get = |name: &str| input.get(name).and_then(Value::as_str).unwrap_or("").trim().to_string();
+    let preset = EmbeddingProviderPresetData {
+        id: get("id"),
+        provider: get("provider"),
+        endpoint: get("endpoint"),
+        model: get("model"),
+        dimension: input.get("dimension").and_then(Value::as_u64).unwrap_or(0) as usize,
+        recommended_for: input.get("recommendedFor").and_then(Value::as_str).map(str::to_string),
+        verified_at: None,
+        verified_source: input.get("verifiedSource").and_then(Value::as_str).map(str::to_string),
+    };
+    if preset.id.is_empty() || preset.provider.is_empty() || preset.endpoint.is_empty()
+        || preset.model.is_empty() || preset.dimension == 0
+    {
+        return Err("embedding upsert 需要完整的 id/provider/endpoint/model/dimension".into());
+    }
+    Ok(preset)
+}
+
+#[async_trait]
+impl Tool for ManageProviderPresetTool {
+    fn name(&self) -> &str { "manage_provider_preset" }
+    fn description(&self) -> &str {
+        "Manage provider preset data in the built-in llm-providers plugin. Actions: upsert a complete LLM or cloud embedding preset, or delete either kind by stable id. Verify current official docs first and call list_provider_presets before replacing/deleting. This changes preset metadata only, never API keys or the active runtime selection."
+    }
+    fn description_in(&self, lang: &str) -> &str {
+        if lang == "zh" { "管理内置 llm-providers 插件中的供应商预设：可完整新增/更新 LLM 或云端嵌入预设，也可按稳定 id 删除。操作前必须核对当前官方文档并先调用 list_provider_presets；只修改候选预设，不读取或修改 API Key，也不会擅自切换当前运行配置。" } else { self.description() }
+    }
+    fn parameters_schema(&self) -> Value {
+        json!({
+            "type":"object",
+            "properties":{
+                "action":{"type":"string","enum":["upsert","delete"]},
+                "kind":{"type":"string","enum":["llm","embedding"]},
+                "id":{"type":"string","description":"Stable preset id"},
+                "labelKey":{"type":"string"}, "label":{"type":"string"},
+                "providerType":{"type":"string"}, "endpoint":{"type":"string"},
+                "defaultModel":{"type":"string"}, "mainModels":{"type":"array","items":{"type":"string"}},
+                "contextWindow":{"type":"integer"}, "suggestedMaxTokens":{"type":"integer"},
+                "needsSecret":{"type":"boolean"}, "needsAppId":{"type":"boolean"},
+                "consoleUrl":{"type":"string"}, "protocols":{"type":"array","items":{"type":"object"}},
+                "provider":{"type":"string"}, "model":{"type":"string"},
+                "dimension":{"type":"integer","minimum":1}, "recommendedFor":{"type":"string"},
+                "verifiedSource":{"type":"string","description":"Official documentation URL used for verification"}
+            },
+            "required":["action","kind","id"],
+            "additionalProperties":false
+        })
+    }
+    async fn validate_input(&self, input: &Value, _ctx: &ToolUseContext) -> ValidationResult {
+        let action = input.get("action").and_then(Value::as_str).unwrap_or("");
+        let kind = input.get("kind").and_then(Value::as_str).unwrap_or("");
+        let id = input.get("id").and_then(Value::as_str).unwrap_or("").trim();
+        if !matches!(action, "upsert" | "delete") || !matches!(kind, "llm" | "embedding") || id.is_empty() {
+            return ValidationResult::failure("action/kind/id 不合法", 2);
+        }
+        if action == "upsert" {
+            let result = if kind == "llm" { parse_preset(input).map(|_| ()) } else { parse_embedding_preset(input).map(|_| ()) };
+            if let Err(e) = result { return ValidationResult::failure(&e, 2); }
+        }
+        ValidationResult::success(None)
+    }
+    async fn check_permissions(&self, input: &Value, _ctx: &ToolUseContext) -> PermissionResult {
+        if input.get("action").and_then(Value::as_str) == Some("delete") {
+            let kind = input.get("kind").and_then(Value::as_str).unwrap_or("provider");
+            let id = input.get("id").and_then(Value::as_str).unwrap_or("");
+            PermissionResult::ask(&format!("将删除 {kind} 供应商预设「{id}」（不会删除 API Key），是否继续？"))
+        } else {
+            PermissionResult::allow()
+        }
+    }
+    async fn call(&self, args: Value, _ctx: &ToolUseContext) -> ToolResult {
+        let action = args.get("action").and_then(Value::as_str).unwrap_or("");
+        let kind = args.get("kind").and_then(Value::as_str).unwrap_or("");
+        let id = args.get("id").and_then(Value::as_str).unwrap_or("");
+        if action == "delete" {
+            return match crate::plugins::remove_provider_preset(kind, id) {
+                Ok((id, version)) => ToolResult::standard_success(
+                    &format!("{kind} 供应商预设 {id} 已删除（插件版本 {version}）"),
+                    Some(json!({"action":"delete","kind":kind,"id":id,"version":version})),
+                ),
+                Err(e) => ToolResult::standard_error("删除供应商预设失败", Some(&e), None),
+            };
+        }
+        if kind == "llm" {
+            let verified_source = args.get("verifiedSource").and_then(Value::as_str).map(str::to_string);
+            match parse_preset(&args).and_then(|mut p| { p.verified_source = verified_source; crate::plugins::upsert_provider_preset(p) }) {
+                Ok((row, version, is_new)) => ToolResult::standard_success(
+                    &format!("LLM 预设 {} 已{}（插件版本 {version}）", row.id, if is_new {"新增"} else {"更新"}),
+                    Some(json!({"action":"upsert","kind":"llm","id":row.id,"isNew":is_new,"version":version})),
+                ),
+                Err(e) => ToolResult::standard_error("更新 LLM 供应商预设失败", Some(&e), None),
+            }
+        } else {
+            match parse_embedding_preset(&args).and_then(crate::plugins::upsert_embedding_provider_preset) {
+                Ok((row, version, is_new)) => ToolResult::standard_success(
+                    &format!("嵌入预设 {} 已{}（插件版本 {version}）", row.id, if is_new {"新增"} else {"更新"}),
+                    Some(json!({"action":"upsert","kind":"embedding","id":row.id,"isNew":is_new,"version":version})),
+                ),
+                Err(e) => ToolResult::standard_error("更新嵌入供应商预设失败", Some(&e), None),
+            }
+        }
+    }
+    fn is_read_only(&self) -> bool { false }
+    fn category(&self) -> ToolCategory { ToolCategory::System }
+    fn should_defer(&self) -> bool { true }
+    fn risk(&self) -> ToolRiskTier { ToolRiskTier::FsWrite }
+    fn search_hint(&self) -> &str { "manage provider preset update add delete 供应商 预设 嵌入 更新 新增 删除" }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_complete_embedding_preset() {
+        let p = parse_embedding_preset(&json!({
+            "id": "vendor-model",
+            "provider": "Vendor",
+            "endpoint": "https://api.example.com/v1",
+            "model": "embed-v2",
+            "dimension": 1024,
+            "recommendedFor": "multilingual",
+            "verifiedSource": "https://docs.example.com/embeddings"
+        }))
+        .expect("完整嵌入预设应可解析");
+        assert_eq!(p.dimension, 1024);
+        assert_eq!(p.model, "embed-v2");
+        assert!(p.verified_at.is_none());
+    }
+
+    #[test]
+    fn rejects_partial_embedding_preset() {
+        assert!(parse_embedding_preset(&json!({
+            "id": "vendor-model",
+            "provider": "Vendor",
+            "endpoint": "https://api.example.com/v1"
+        }))
+        .is_err());
     }
 }

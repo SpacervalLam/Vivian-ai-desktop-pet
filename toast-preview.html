@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Toast 堆叠 · 预览（免 Tauri）</title>
+    <style>
+      html, body { margin: 0; height: 100%; overflow: hidden; }
+      /* 预览页整页代表那个半屏高的 toast 窗口：body 尺寸 == 窗口客户区尺寸，
+         ToastWindow 直接用 window.innerHeight 换算可用容量，两边口径一致。
+         渐变只是替桌面背景占位——真窗口是透明的，里面才是桌面。 */
+      body { background: linear-gradient(135deg, #EDE7DC 0%, #DCD5C7 55%, #CFE0DE 100%); }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/toastPreview.tsx"></script>
+  </body>
+</html>

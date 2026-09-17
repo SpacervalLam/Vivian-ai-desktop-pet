@@ -96,6 +96,9 @@ struct PluginManifest {
     /// 内容为 `ProviderPresetData` 的 JSON 数组
     #[serde(default)]
     providers: Option<String>,
+    /// 云端嵌入服务预设数据文件（相对插件目录）
+    #[serde(default)]
+    embeddings: Option<String>,
     /// JS 插件入口 glob（相对插件目录，如 ["js/*.js"] 或 ["js"]）。
     /// 声明后由 js_host 创建独立 JS 运行时装载（ctx.skill/tool/provider/mcp 贡献面）
     #[serde(default)]
@@ -175,6 +178,24 @@ pub struct ProviderPresetData {
     pub verified_source: Option<String>,
 }
 
+/// 云端嵌入服务预设。运行时仍复用统一的 OpenAI-compatible 嵌入适配器，
+/// 插件只贡献可热更新的厂商端点、模型与维度元数据。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmbeddingProviderPresetData {
+    pub id: String,
+    pub provider: String,
+    pub endpoint: String,
+    pub model: String,
+    pub dimension: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recommended_for: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified_source: Option<String>,
+}
+
 /// 插件清单条目（设置窗口「插件」页只读盘点用）
 #[derive(Debug, Clone, Serialize)]
 pub struct PluginInventoryEntry {
@@ -192,6 +213,8 @@ pub struct PluginInventoryEntry {
     pub mcp_servers: Vec<String>,
     /// 贡献的供应商预设 id（设置 → LLM 页厂商卡片数据）
     pub providers: Vec<String>,
+    /// 贡献的云端嵌入服务预设 id
+    pub embeddings: Vec<String>,
     /// "loaded"（正常装载）或 "skipped"（清单缺失/解析失败/命名非法）
     pub status: String,
     /// 信任状态：`trusted` / `changed`（曾信任但清单已变更）/ `untrusted`
@@ -365,6 +388,14 @@ fn manifest_fingerprint(pdir: &Path, manifest: &PluginManifest) -> String {
     }
     paths.extend(glob_json_files(pdir, &protocols_glob));
     if let Some(rel) = manifest.providers.as_deref() {
+        if is_safe_manifest_path(rel) {
+            let path = pdir.join(rel);
+            if path.is_file() && is_safe_plugin_path(pdir, &path) {
+                paths.push(path);
+            }
+        }
+    }
+    if let Some(rel) = manifest.embeddings.as_deref() {
         if is_safe_manifest_path(rel) {
             let path = pdir.join(rel);
             if path.is_file() && is_safe_plugin_path(pdir, &path) {
@@ -946,11 +977,97 @@ pub fn load_provider_presets() -> Vec<ProviderPresetData> {
     by_id.into_iter().map(|(_, _, p)| p).collect()
 }
 
+fn read_embedding_provider_presets(
+    pdir: &Path,
+    manifest: &PluginManifest,
+) -> Vec<EmbeddingProviderPresetData> {
+    let Some(rel) = manifest.embeddings.as_deref() else {
+        return Vec::new();
+    };
+    if !is_safe_manifest_path(rel) {
+        tracing::warn!("[Plugins] 拒绝越界嵌入预设路径声明: {rel}");
+        return Vec::new();
+    }
+    let path = pdir.join(rel);
+    if !is_safe_plugin_path(pdir, &path) {
+        tracing::warn!("[Plugins] 拒绝插件目录外嵌入预设路径: {}", path.display());
+        return Vec::new();
+    }
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        tracing::warn!("[Plugins] 嵌入预设文件读取失败: {}", path.display());
+        return Vec::new();
+    };
+    match serde_json::from_str::<Vec<EmbeddingProviderPresetData>>(&content) {
+        Ok(rows) => rows
+            .into_iter()
+            .filter(|p| {
+                !p.id.trim().is_empty()
+                    && p.id
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                    && !p.provider.trim().is_empty()
+                    && !p.endpoint.trim().is_empty()
+                    && !p.model.trim().is_empty()
+                    && p.dimension > 0
+            })
+            .collect(),
+        Err(e) => {
+            tracing::warn!("[Plugins] 嵌入预设文件解析失败 {}: {e}", path.display());
+            Vec::new()
+        }
+    }
+}
+
+/// 加载所有受信任插件贡献的云端嵌入预设；同 id 先到保留，内置 id 不可覆盖。
+pub fn load_embedding_provider_presets() -> Vec<EmbeddingProviderPresetData> {
+    let builtin_ids: std::collections::HashSet<String> =
+        serde_json::from_str::<Vec<EmbeddingProviderPresetData>>(BUILTIN_PLUGIN_EMBEDDINGS)
+            .map(|rows| rows.into_iter().map(|p| p.id).collect())
+            .unwrap_or_default();
+    let mut dirs: Vec<PathBuf> = std::fs::read_dir(plugins_dir())
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.is_dir() && p.join("plugin.json").exists())
+                .collect()
+        })
+        .unwrap_or_default();
+    dirs.sort();
+    let mut rows: Vec<(String, String, EmbeddingProviderPresetData)> = Vec::new();
+    for pdir in dirs {
+        let key = pdir.file_name().and_then(|s| s.to_str()).unwrap_or_default();
+        let Ok((name, manifest)) = read_manifest(&pdir) else { continue };
+        if !BUILTIN_PLUGIN_DIRS.contains(&key)
+            && trust_status_of(key, &cached_fingerprint(&pdir, &manifest)) != "trusted"
+        {
+            continue;
+        }
+        for preset in read_embedding_provider_presets(&pdir, &manifest) {
+            if builtin_ids.contains(&preset.id) && key != BUILTIN_PLUGIN_DIR {
+                tracing::warn!("[Plugins] 插件 {name} 的嵌入预设 {} 与内置 id 冲突，已跳过", preset.id);
+                continue;
+            }
+            match rows.iter_mut().find(|(id, _, _)| *id == preset.id) {
+                None => rows.push((preset.id.clone(), name.clone(), preset)),
+                Some((_, owner, existing)) if key == BUILTIN_PLUGIN_DIR => {
+                    *owner = name.clone();
+                    *existing = preset;
+                }
+                Some(_) => tracing::warn!("[Plugins] 嵌入预设 {} 冲突，插件 {name} 的声明已跳过", preset.id),
+            }
+        }
+    }
+    rows.into_iter().map(|(_, _, p)| p).collect()
+}
+
 /// 内置插件 llm-providers：供应商预设数据 + 预设核对技能。
 /// 编译期嵌入（src-tauri/plugins/llm-providers/），启动时播种到用户插件目录。
 const BUILTIN_PLUGIN_DIR: &str = "llm-providers";
 const BUILTIN_PLUGIN_MANIFEST: &str = include_str!("../plugins/llm-providers/plugin.json");
 const BUILTIN_PLUGIN_PROVIDERS: &str = include_str!("../plugins/llm-providers/providers.json");
+const BUILTIN_PLUGIN_EMBEDDINGS: &str =
+    include_str!("../plugins/llm-providers/embedding-providers.json");
 const BUILTIN_PLUGIN_SKILL_VERIFY: &str =
     include_str!("../plugins/llm-providers/skills/verify-provider-presets.md");
 
@@ -1027,6 +1144,10 @@ pub fn ensure_builtin_plugins() {
         &[
             (plugins_dir().join(BUILTIN_PLUGIN_DIR).join("providers.json"), BUILTIN_PLUGIN_PROVIDERS),
             (
+                plugins_dir().join(BUILTIN_PLUGIN_DIR).join("embedding-providers.json"),
+                BUILTIN_PLUGIN_EMBEDDINGS,
+            ),
+            (
                 plugins_dir()
                     .join(BUILTIN_PLUGIN_DIR)
                     .join("skills")
@@ -1063,6 +1184,104 @@ pub fn upsert_provider_preset(
     // 确保插件文件存在（不存在则播种、版本过旧则升级——之后统一在其上修改）
     ensure_builtin_plugins();
     upsert_provider_preset_at(&plugins_dir().join(BUILTIN_PLUGIN_DIR), preset)
+}
+
+/// 更新或新增内置 llm-providers 插件中的云端嵌入预设。
+pub fn upsert_embedding_provider_preset(
+    mut preset: EmbeddingProviderPresetData,
+) -> Result<(EmbeddingProviderPresetData, String, bool), String> {
+    ensure_builtin_plugins();
+    validate_embedding_preset(&preset)?;
+    let dir = plugins_dir().join(BUILTIN_PLUGIN_DIR);
+    let path = dir.join("embedding-providers.json");
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| format!("读取 embedding-providers.json 失败: {e}"))?;
+    let mut rows: Vec<EmbeddingProviderPresetData> = serde_json::from_str(&content)
+        .map_err(|e| format!("解析 embedding-providers.json 失败: {e}"))?;
+    preset.verified_at = Some(chrono::Local::now().format("%Y-%m-%d").to_string());
+    let is_new = match rows.iter().position(|p| p.id == preset.id) {
+        Some(i) => {
+            rows[i] = preset.clone();
+            false
+        }
+        None => {
+            rows.push(preset.clone());
+            true
+        }
+    };
+    let body = serde_json::to_string_pretty(&rows)
+        .map_err(|e| format!("序列化 embedding-providers.json 失败: {e}"))?;
+    crate::utils::fs::write_atomic(&path, &body)
+        .map_err(|e| format!("写入 embedding-providers.json 失败: {e}"))?;
+    let version = bump_plugin_version(&dir.join("plugin.json"))?;
+    invalidate_fingerprint_cache();
+    Ok((preset, version, is_new))
+}
+
+fn validate_embedding_preset(p: &EmbeddingProviderPresetData) -> Result<(), String> {
+    if p.id.trim().is_empty()
+        || !p.id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err("嵌入预设 id 非法（仅允许字母/数字/-/_）".into());
+    }
+    if p.provider.trim().is_empty() || p.endpoint.trim().is_empty() || p.model.trim().is_empty() {
+        return Err("嵌入预设 provider、endpoint、model 均不能为空".into());
+    }
+    if p.dimension == 0 {
+        return Err("嵌入预设 dimension 必须大于 0".into());
+    }
+    Ok(())
+}
+
+/// 从内置供应商插件删除一条 LLM 或嵌入预设；删除的是预设元数据，不触碰凭据。
+pub fn remove_provider_preset(kind: &str, id: &str) -> Result<(String, String), String> {
+    ensure_builtin_plugins();
+    let id = id.trim();
+    if id.is_empty() {
+        return Err("id 不能为空".into());
+    }
+    let dir = plugins_dir().join(BUILTIN_PLUGIN_DIR);
+    let removed = match kind {
+        "llm" => {
+            let path = dir.join("providers.json");
+            let content = std::fs::read_to_string(&path)
+                .map_err(|e| format!("读取 providers.json 失败: {e}"))?;
+            let mut rows: Vec<ProviderPresetData> = serde_json::from_str(&content)
+                .map_err(|e| format!("解析 providers.json 失败: {e}"))?;
+            let before = rows.len();
+            rows.retain(|p| p.id != id);
+            if rows.len() == before { false } else {
+                let body = serde_json::to_string_pretty(&rows)
+                    .map_err(|e| format!("序列化 providers.json 失败: {e}"))?;
+                crate::utils::fs::write_atomic(&path, &body)
+                    .map_err(|e| format!("写入 providers.json 失败: {e}"))?;
+                true
+            }
+        }
+        "embedding" => {
+            let path = dir.join("embedding-providers.json");
+            let content = std::fs::read_to_string(&path)
+                .map_err(|e| format!("读取 embedding-providers.json 失败: {e}"))?;
+            let mut rows: Vec<EmbeddingProviderPresetData> = serde_json::from_str(&content)
+                .map_err(|e| format!("解析 embedding-providers.json 失败: {e}"))?;
+            let before = rows.len();
+            rows.retain(|p| p.id != id);
+            if rows.len() == before { false } else {
+                let body = serde_json::to_string_pretty(&rows)
+                    .map_err(|e| format!("序列化 embedding-providers.json 失败: {e}"))?;
+                crate::utils::fs::write_atomic(&path, &body)
+                    .map_err(|e| format!("写入 embedding-providers.json 失败: {e}"))?;
+                true
+            }
+        }
+        _ => return Err("kind 仅支持 llm 或 embedding".into()),
+    };
+    if !removed {
+        return Err(format!("未找到 {kind} 预设: {id}"));
+    }
+    let version = bump_plugin_version(&dir.join("plugin.json"))?;
+    invalidate_fingerprint_cache();
+    Ok((id.to_string(), version))
 }
 
 /// `upsert_provider_preset` 的目录参数化实现（测试用临时目录隔离）。
@@ -1181,6 +1400,10 @@ pub fn scan_inventory() -> Vec<PluginInventoryEntry> {
                         .into_iter()
                         .map(|p| p.id)
                         .collect(),
+                    embeddings: read_embedding_provider_presets(&pdir, &manifest)
+                        .into_iter()
+                        .map(|p| p.id)
+                        .collect(),
                     name: name.clone(),
                     version: manifest.version,
                     description: manifest.description,
@@ -1204,6 +1427,7 @@ pub fn scan_inventory() -> Vec<PluginInventoryEntry> {
                 tools: Vec::new(),
                 mcp_servers: Vec::new(),
                 providers: Vec::new(),
+                embeddings: Vec::new(),
                 status: "skipped".into(),
                 trust: "untrusted".into(),
                 reason: Some(reason),
@@ -1884,6 +2108,8 @@ pub struct PluginDraft {
     pub mcp_servers: Vec<McpServerConfig>,
     /// 供应商预设（落盘为 providers.json）
     pub providers: Vec<ProviderPresetData>,
+    /// 云端嵌入预设（落盘为 embedding-providers.json）
+    pub embeddings: Vec<EmbeddingProviderPresetData>,
 }
 
 /// 校验并原子落盘一个插件草稿，返回插件目录路径。
@@ -1997,6 +2223,9 @@ pub fn write_plugin_files(draft: &PluginDraft) -> Result<PathBuf, String> {
             return Err(format!("供应商预设 {} 缺 provider_type", preset.id));
         }
     }
+    for preset in &draft.embeddings {
+        validate_embedding_preset(preset)?;
+    }
 
     // ---- 落盘（临时目录 → 替换正式目录）----
     let base = plugins_dir();
@@ -2016,12 +2245,16 @@ pub fn write_plugin_files(draft: &PluginDraft) -> Result<PathBuf, String> {
         "tools": if draft.tools.is_empty() { Vec::<String>::new() } else { vec!["tools/*.json".to_string()] },
         "mcp_servers": draft.mcp_servers,
         "providers": if draft.providers.is_empty() { serde_json::Value::Null } else { serde_json::json!("providers.json") },
+        "embeddings": if draft.embeddings.is_empty() { serde_json::Value::Null } else { serde_json::json!("embedding-providers.json") },
     });
     let manifest = {
         // providers 为 null 时移除键（Option 语义）
         let mut m = manifest;
         if m.get("providers").map(|v| v.is_null()).unwrap_or(false) {
             m.as_object_mut().unwrap().remove("providers");
+        }
+        if m.get("embeddings").map(|v| v.is_null()).unwrap_or(false) {
+            m.as_object_mut().unwrap().remove("embeddings");
         }
         m
     };
@@ -2051,6 +2284,14 @@ pub fn write_plugin_files(draft: &PluginDraft) -> Result<PathBuf, String> {
         )
         .map_err(|e| format!("写 providers.json 失败: {e}"))?;
     }
+    if !draft.embeddings.is_empty() {
+        std::fs::write(
+            tmp.join("embedding-providers.json"),
+            serde_json::to_vec_pretty(&draft.embeddings)
+                .map_err(|e| format!("序列化 embedding-providers.json 失败: {e}"))?,
+        )
+        .map_err(|e| format!("写 embedding-providers.json 失败: {e}"))?;
+    }
 
     // 三段式原子替换（final→backup, tmp→final, 删 backup），复用 utils::fs::write_atomic_dir
     let final_dir = base.join(name);
@@ -2058,12 +2299,13 @@ pub fn write_plugin_files(draft: &PluginDraft) -> Result<PathBuf, String> {
         .map_err(|e| format!("落盘插件目录失败（已回滚）: {e}"))?;
 
     tracing::info!(
-        "[Plugins] 插件 {name} v{} 已落盘（{} 条技能、{} 个工具、{} 个 MCP server、{} 条预设）",
+        "[Plugins] 插件 {name} v{} 已落盘（{} 条技能、{} 个工具、{} 个 MCP server、{} 条 LLM 预设、{} 条嵌入预设）",
         draft.version.trim(),
         draft.skills.len(),
         draft.tools.len(),
         draft.mcp_servers.len(),
-        draft.providers.len()
+        draft.providers.len(),
+        draft.embeddings.len()
     );
     Ok(final_dir)
 }
@@ -2159,7 +2401,23 @@ mod tests {
             serde_json::from_str(BUILTIN_PLUGIN_MANIFEST).expect("内置 plugin.json 应可解析");
         assert_eq!(manifest.name, "llm-providers");
         assert!(manifest.providers.is_some());
+        assert!(manifest.embeddings.is_some());
         assert!(!manifest.skills.is_empty());
+    }
+
+    #[test]
+    fn builtin_embedding_providers_json_parses() {
+        let rows: Vec<EmbeddingProviderPresetData> =
+            serde_json::from_str(BUILTIN_PLUGIN_EMBEDDINGS)
+                .expect("内置 embedding-providers.json 应可解析");
+        assert!(!rows.is_empty());
+        assert!(rows.iter().all(|p| {
+            !p.id.is_empty()
+                && !p.provider.is_empty()
+                && !p.endpoint.is_empty()
+                && !p.model.is_empty()
+                && p.dimension > 0
+        }));
     }
 
     #[test]

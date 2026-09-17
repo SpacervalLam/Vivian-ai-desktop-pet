@@ -1031,10 +1031,15 @@ mod tests {
 
     #[test]
     fn test_resolve_invocation_uses_path_when_no_python() {
-        let cfg = WhisperConfig::default();
+        let mut cfg = WhisperConfig::default();
+        cfg.service_install_path = Some(
+            std::env::temp_dir()
+                .join("vivian-test-whisper-not-installed")
+                .to_string_lossy()
+                .into_owned(),
+        );
         let (program, args, cwd, _envs) = resolve_invocation(&cfg, None).unwrap();
         assert_eq!(program, "faster-whisper-server");
-        assert!(args.contains(&"--model".to_string()));
         assert!(args.contains(&"small".to_string()));
         assert!(args.contains(&"--port".to_string()));
         assert!(args.contains(&"8000".to_string()));
@@ -1048,11 +1053,24 @@ mod tests {
         cfg.service_port = Some(9000);
         cfg.service_device = Some("cuda".into());
         cfg.service_compute_type = Some("float16".into());
-        let (_, args, _, _) = resolve_invocation(&cfg, None).unwrap();
+        cfg.service_install_path = Some(
+            std::env::temp_dir()
+                .join("vivian-test-whisper-not-installed-overrides")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        let (_, args, _, envs) = resolve_invocation(&cfg, None).unwrap();
         assert!(args.contains(&"large-v3".to_string()));
         assert!(args.contains(&"9000".to_string()));
-        assert!(args.contains(&"cuda".to_string()));
-        assert!(args.contains(&"float16".to_string()));
+        let config_path = envs
+            .iter()
+            .find(|(name, _)| *name == "FWS_CONFIG_PATH")
+            .map(|(_, value)| value)
+            .expect("应通过 FWS_CONFIG_PATH 传入设备配置");
+        let yaml = std::fs::read_to_string(config_path).expect("临时 Whisper 配置应可读");
+        assert!(yaml.contains("device: cuda"));
+        assert!(yaml.contains("compute_type: float16"));
+        let _ = std::fs::remove_file(config_path);
     }
 
     #[test]

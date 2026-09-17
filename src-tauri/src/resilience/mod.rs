@@ -13,6 +13,12 @@ pub enum CircuitState {
     HalfOpen,
 }
 
+/// 半开探测的兜底时长。
+///
+/// 探测请求可能不回报结果：响应解析失败会提前 `?` 返回，大 prompt 又按设计跳过
+/// 熔断器记账。以时刻记账 + 超时重新放行，可避免熔断器被这类请求永久卡在半开。
+const PROBE_TIMEOUT: Duration = Duration::from_secs(60);
+
 #[derive(Debug, Clone)]
 pub struct CircuitBreaker {
     pub name: String,
@@ -29,6 +35,12 @@ pub struct CircuitBreaker {
     pub window_size: u32,
     /// 触发失败率判定的最小样本数（默认 5）
     pub min_samples: u32,
+    /// 半开探测请求的放行时刻。
+    ///
+    /// 半开只应放行一个请求去试探后端是否恢复，其余立即拒绝，否则「探测」会退化成
+    /// 全放行——刚充值的瞬间积压请求一起涌入，其中任一失败就立刻打回熔断。
+    /// 记时刻而非布尔量，是为了让超时未回报的探测能够重新放行（见 [`PROBE_TIMEOUT`]）。
+    probe_started_at: Option<Instant>,
 }
 
 impl CircuitBreaker {
@@ -45,17 +57,35 @@ impl CircuitBreaker {
             recent_results: VecDeque::new(),
             window_size: 20,
             min_samples: 5,
+            probe_started_at: None,
+        }
+    }
+
+    /// 半开探测是否还能放行：无探测在飞行中，或上一个探测已超时未回报。
+    fn probe_slot_available(&self) -> bool {
+        match self.probe_started_at {
+            None => true,
+            Some(at) => at.elapsed() >= PROBE_TIMEOUT,
         }
     }
 
     pub fn allow_request(&mut self) -> bool {
         match self.state {
             CircuitState::Closed => true,
-            CircuitState::HalfOpen => true,
+            CircuitState::HalfOpen => {
+                if self.probe_slot_available() {
+                    self.probe_started_at = Some(Instant::now());
+                    true
+                } else {
+                    false
+                }
+            }
             CircuitState::Open => {
                 if let Some(last) = self.last_failure_time {
                     if last.elapsed() >= self.reset_timeout {
                         self.state = CircuitState::HalfOpen;
+                        // 放行的这一个请求即探测请求
+                        self.probe_started_at = Some(Instant::now());
                         true
                     } else {
                         false
@@ -71,6 +101,8 @@ impl CircuitBreaker {
         self.failure_count = 0;
         self.success_count += 1;
         self.push_result(true);
+        // 探测已回报结果，释放半开占位
+        self.probe_started_at = None;
         self.state = CircuitState::Closed;
     }
 
@@ -78,6 +110,8 @@ impl CircuitBreaker {
         self.failure_count += 1;
         self.last_failure_time = Some(Instant::now());
         self.push_result(false);
+        // 探测已回报结果，释放半开占位
+        self.probe_started_at = None;
 
         // 半开状态失败 → 立即熔断
         if self.state == CircuitState::HalfOpen {
@@ -120,6 +154,7 @@ impl CircuitBreaker {
         self.success_count = 0;
         self.last_failure_time = None;
         self.recent_results.clear();
+        self.probe_started_at = None;
     }
 
     pub fn get_stats(&self) -> serde_json::Value {
@@ -140,6 +175,36 @@ pub enum ErrorCategory {
     Permanent,
     Transient,
     RateLimit,
+}
+
+/// 把细分的错误类别折叠成「该不该重试」的三分类。
+///
+/// 两个 API 的分工：`LlmErrorKind` 决定给用户看什么提示，`ErrorCategory` 决定
+/// 要不要退避重试。二者必须同源，否则会出现「提示说余额不足、后台却在猛重试」。
+///
+/// `CircuitBreakerOpen` 归 Transient 是沿用的既有语义：熔断器自身会拦掉后续请求，
+/// 重试判定无需替它兜底。
+fn kind_to_category(kind: &LlmErrorKind) -> ErrorCategory {
+    match kind {
+        LlmErrorKind::RateLimited => ErrorCategory::RateLimit,
+        LlmErrorKind::ServerError
+        | LlmErrorKind::Overloaded
+        | LlmErrorKind::Timeout
+        | LlmErrorKind::NetworkError
+        | LlmErrorKind::CircuitBreakerOpen
+        | LlmErrorKind::Unknown => ErrorCategory::Transient,
+        // 欠费、认证失败、模型不存在、上下文超长、内容审核、参数错误：
+        // 重试多少次都不会变好，必须立刻失败并把问题交回给人。
+        LlmErrorKind::InvalidApiKey
+        | LlmErrorKind::InsufficientBalance
+        | LlmErrorKind::QuotaExceeded
+        | LlmErrorKind::ModelNotFound
+        | LlmErrorKind::ContextLengthExceeded
+        | LlmErrorKind::ContentPolicy
+        | LlmErrorKind::BadRequest
+        | LlmErrorKind::RegionNotSupported
+        | LlmErrorKind::PermissionDenied => ErrorCategory::Permanent,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -168,6 +233,17 @@ pub fn classify_error(error: &dyn std::error::Error) -> ErrorCategory {
 }
 
 pub fn classify_error_from_str(msg: &str) -> ErrorCategory {
+    if msg.contains("circuit_breaker") || msg.contains("熔断器") {
+        return ErrorCategory::Transient;
+    }
+
+    // 与错误提示共用同一张厂商映射表。Provider 错误里混着语义完全相反的两类故障，
+    // 结构化判定必须优先：智谱欠费的提示是「429 + 您的账户已欠费」，只看见 429 会判成
+    // 限流类，而限流是可重试类——等于在余额耗尽时反复重试。
+    if let Some(kind) = classify_structured(msg) {
+        return kind_to_category(&kind);
+    }
+
     let msg = msg.to_lowercase();
     if msg.contains("401")
         || msg.contains("invalid_api_key")
@@ -184,6 +260,11 @@ pub fn classify_error_from_str(msg: &str) -> ErrorCategory {
     } else if msg.contains("insufficient")
         || msg.contains("balance")
         || msg.contains("quota")
+        // 欠费类在中文与各厂商自有命名下没有统一词根，逐一列出：
+        // 阿里百炼 Arrearage、火山/百度 overdue、智谱「账户已欠费」
+        || msg.contains("arrearage")
+        || msg.contains("overdue")
+        || msg.contains("欠费")
         || (msg.contains("403") && !msg.contains("country") && !msg.contains("region") && !msg.contains("territory"))
     {
         ErrorCategory::Permanent
@@ -248,12 +329,268 @@ pub fn classify_llm_error(error: &dyn std::error::Error) -> LlmErrorKind {
     classify_llm_error_from_str(&error.to_string())
 }
 
-pub fn classify_llm_error_from_str(msg: &str) -> LlmErrorKind {
-    let lower = msg.to_lowercase();
+/// provider 响应里的结构化错误字段。
+///
+/// 各厂商对同一故障类别用完全不同的「状态码 + 业务码」组合表达，仅凭 HTTP 状态码
+/// 会判错，仅凭错误串子串匹配也会判错（见 [`extract_status_code`] 的边界说明）。
+/// 因此统一先解出三元组，再由 [`classify_vendor_error`] 查表定性。
+#[derive(Debug, Default)]
+struct ParsedProviderError {
+    status: Option<u16>,
+    /// 厂商业务码或 OpenAI 的 `error.type`，保留原始大小写以便还原驼峰形态
+    code: Option<String>,
+    /// 服务端 `message`，已转小写
+    message: String,
+}
 
-    if lower.contains("circuit_breaker") || lower.contains("熔断器") {
+/// 仅当三位数出现在紧跟左括号的位置时才认定是状态码，并要求落在已知集合内。
+///
+/// provider 层统一把响应格式化为 `… 请求失败 (402 Payment Required): {json}`，
+/// 左括号是可靠的锚点。若放宽成全文子串匹配，`request_id=4012…`、`bandwidth 500`
+/// 这类噪声都会被误认成 HTTP 状态。
+const RECOGNIZED_STATUS: &[u16] = &[400, 401, 402, 403, 404, 408, 409, 422, 429, 498, 499, 500, 502, 503, 504];
+
+fn extract_status_code(raw: &str) -> Option<u16> {
+    for (i, _) in raw.match_indices('(') {
+        let rest = raw[i + 1..].trim_start_matches(|c: char| !c.is_ascii_digit());
+        let digits: String = rest.chars().take(3).collect();
+        if digits.len() == 3 {
+            if let Ok(n) = digits.parse::<u16>() {
+                if RECOGNIZED_STATUS.contains(&n) {
+                    return Some(n);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// 键名大小写不敏感取值。
+///
+/// 信封字段大小写不统一：`error.code`（OpenAI 系）、`error.Code`（腾讯云兼容层）、
+/// `Error.Code`（腾讯云原生 API）必须同等对待，精确匹配会整条路径落空。
+fn pick_ci<'a>(obj: &'a serde_json::Value, key: &str) -> Option<&'a serde_json::Value> {
+    obj.as_object()?
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(key))
+        .map(|(_, v)| v)
+}
+
+fn find_error_code(value: &serde_json::Value) -> Option<String> {
+    let mut containers: Vec<&serde_json::Value> = vec![value];
+    if let Some(r) = pick_ci(value, "Response") {
+        containers.push(r);
+    }
+    for k in ["error", "Error", "base_resp"] {
+        if let Some(c) = pick_ci(value, k) {
+            containers.push(c);
+            // 腾讯云原生形态 Response.Error 的内层
+            if let Some(inner) = pick_ci(c, "Error") {
+                containers.push(inner);
+            }
+        }
+    }
+    for container in containers {
+        for key in ["code", "type", "status_code"] {
+            let Some(v) = pick_ci(container, key) else { continue };
+            match v {
+                // 腾讯混元的业务码是整型，其余多为字符串，两种都要接住
+                serde_json::Value::String(s) if !s.is_empty() => return Some(s.clone()),
+                serde_json::Value::Number(n) => return Some(n.to_string()),
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
+fn extract_code_and_message(raw: &str) -> (Option<String>, String) {
+    if let Some(start) = raw.find('{') {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(raw[start..].trim()) {
+            let code = find_error_code(&value);
+            let message = pick_ci(&value, "error")
+                .or_else(|| pick_ci(&value, "Error"))
+                .and_then(|e| pick_ci(e, "message").or_else(|| pick_ci(e, "Message")))
+                .and_then(|m| m.as_str())
+                .unwrap_or("")
+                .to_lowercase();
+            return (code, message);
+        }
+    }
+    (None, String::new())
+}
+
+/// 业务码 / message 是否命中任一关键词。
+///
+/// 同时比对原串与「去分隔符」形态，兼顾三种命名风格：
+/// `insufficient_balance`（下划线）、`AccountOverdueError`（驼峰）、`1113`（纯数字）。
+fn matches_any(code: &Option<String>, needles: &[&str]) -> bool {
+    let Some(c) = code else { return false };
+    let lower = c.to_lowercase();
+    let flat = lower.replace(['_', '-', '.', ' '], "");
+    needles.iter().any(|n| {
+        // needle 同样要归一化：业务码有下划线、驼峰、纯数字三种书写，
+        // 不统一大小写的话形如 `PrepaidBillOverdue` 的驼峰永远匹配不上。
+        let needle = n.to_lowercase();
+        let needle_flat = needle.replace(['_', '-', '.', ' '], "");
+        lower.contains(&needle) || flat.contains(&needle_flat)
+    })
+}
+
+fn message_matches(message: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|n| message.contains(n))
+}
+
+/// 按 (状态码, 业务码, message) 查厂商映射表，返回 None 表示本表未覆盖。
+///
+/// 判定顺序是本表的关键：同一状态码下必须先排除「厂商把钱的问题塞进来的情况」，
+/// 才能落到该状态码的默认语义。
+fn classify_vendor_error(p: &ParsedProviderError) -> Option<LlmErrorKind> {
+    let status = p.status?;
+    let code = &p.code;
+    let msg = &p.message;
+
+    match status {
+        401 => Some(LlmErrorKind::InvalidApiKey),
+        404 => Some(LlmErrorKind::ModelNotFound),
+        408 => Some(LlmErrorKind::Timeout),
+        500 | 502 | 504 => Some(LlmErrorKind::ServerError),
+        503 => Some(LlmErrorKind::Overloaded),
+
+        // 402 在多数 OpenAI 兼容层的本义就是「没钱」：DeepSeek、腾讯混元(403004)、
+        // MiniMax(1008)、小米 MiMo、OpenRouter。两家例外同属配额而非余额：
+        // 腾讯把「免费额度耗尽」也放在 402（401007/401008），Together 用 402 表达
+        // 月度消费上限——都不会因为重试而恢复。
+        402 => {
+            if matches_any(code, &["401007", "401008"])
+                || message_matches(msg, &["monthly spend", "spending limit", "monthly limit"])
+            {
+                return Some(LlmErrorKind::QuotaExceeded);
+            }
+            Some(LlmErrorKind::InsufficientBalance)
+        }
+
+        // 429 只有一部分是真限流。多家厂商把「没钱」映射到 429：
+        // 智谱业务码 1113、阿里账单逾期、百度 AppBuilder 断供、OpenAI 配额耗尽、
+        // Kimi 额度耗尽、Anthropic tier 月度上限。这类降级在多数 firms 不返回
+        // Retry-After，退避重试只会把失败记录刷满熔断器。
+        429 => {
+            if matches_any(
+                code,
+                &[
+                    "1113",
+                    "PrepaidBillOverdue",
+                    "PostpaidBillOverdue",
+                    "BILLING_INSUFFICIENT_BALANCE",
+                ],
+            ) || message_matches(msg, &["insufficient balance", "账户已欠费", "余额不足"])
+            {
+                return Some(LlmErrorKind::InsufficientBalance);
+            }
+            if matches_any(
+                code,
+                &[
+                    "insufficient_quota",
+                    "exceeded_current_quota",
+                    "enforced_spend_limit_reached",
+                ],
+            ) {
+                return Some(LlmErrorKind::QuotaExceeded);
+            }
+            Some(LlmErrorKind::RateLimited)
+        }
+
+        // 403 的语义在各厂商互相排斥：火山方舟与百度用它报欠费，OpenRouter 报内容
+        // 审核命中，Together 报上下文超长，其余才是真正的权限不足。按状态码统一提示
+        // 「权限不足」会严重误导，必须落到 code 上区分。
+        403 => {
+            if matches_any(code, &["AccountOverdueError", "ServiceOverdue", "account_overdue"])
+                || message_matches(
+                    msg,
+                    &[
+                        "overdue balance",
+                        "overdue account",
+                        "overdue payment",
+                        "access denied due to overdue",
+                    ],
+                )
+            {
+                return Some(LlmErrorKind::InsufficientBalance);
+            }
+            if matches_any(code, &["moderation"]) || message_matches(msg, &["moderation flagged"])
+            {
+                return Some(LlmErrorKind::ContentPolicy);
+            }
+            if message_matches(msg, &["context length", "max_tokens", "context window"]) {
+                return Some(LlmErrorKind::ContextLengthExceeded);
+            }
+            Some(LlmErrorKind::PermissionDenied)
+        }
+
+        // 400 通常是请求格式错误，但两家把余额问题放在 400：阿里百炼的 Arrearage，
+        // Anthropic 的「credit balance is too low」。落进 BadRequest 会让用户误以为
+        // 是自己的请求写错了。
+        400 => {
+            if matches_any(code, &["Arrearage", "OUT_OF_SERVICE"])
+                || message_matches(
+                    msg,
+                    &["credit balance is too low", "account is in good standing"],
+                )
+            {
+                return Some(LlmErrorKind::InsufficientBalance);
+            }
+            Some(LlmErrorKind::BadRequest)
+        }
+
+        _ => None,
+    }
+}
+
+/// 结构化分类的统一入口：能从错误串里解出 HTTP 状态码时才返回 Some。
+///
+/// `classify_error_from_str`（决定重不重试）与 `classify_llm_error_from_str`
+/// （决定给用户看什么）都必须从这里过，保证同一张厂商表是唯一真源；
+/// 解不出状态码时各自回落到自己的关键字启发式。
+fn classify_structured(msg: &str) -> Option<LlmErrorKind> {
+    if msg.contains("circuit_breaker") || msg.contains("熔断器") {
+        return Some(LlmErrorKind::CircuitBreakerOpen);
+    }
+    let status = extract_status_code(msg)?;
+    let (code, message) = extract_code_and_message(msg);
+    classify_vendor_error(&ParsedProviderError {
+        status: Some(status),
+        code,
+        message,
+    })
+}
+
+/// 供重试判定使用：只在能从错误串里结构化解出故障类别时才给出结论。
+///
+/// 返回 `None` 表示无法定性（例如本地错误被包装成 `Provider`），此时调用方应沿用
+/// 「可重试」的默认语义。刻意不走关键字兜底：兜底会在子串上误伤——错误串里偶然
+/// 出现 `400`（request_id、token 数）就会被判成不可重试，而「误判为不可重试」会
+/// 直接让请求失败，「误判为可重试」只是多退避几次，两者代价不对称。
+pub fn classified_retry_verdict(msg: &str) -> Option<bool> {
+    let kind = classify_structured(msg)?;
+    Some(matches!(
+        kind_to_category(&kind),
+        ErrorCategory::Transient | ErrorCategory::RateLimit
+    ))
+}
+
+pub fn classify_llm_error_from_str(msg: &str) -> LlmErrorKind {
+    if msg.contains("circuit_breaker") || msg.contains("熔断器") {
         return LlmErrorKind::CircuitBreakerOpen;
     }
+
+    // 先按 (状态码, 业务码, message) 查厂商映射表。必须优先于下面的子串匹配：
+    // 智谱欠费的提示是「429 + 您的账户已欠费」，子串匹配只看得见 "429" 会判成限流，
+    // 而限流是可重试类——等于在余额耗尽时反复重试。
+    if let Some(kind) = classify_structured(msg) {
+        return kind;
+    }
+
+    let lower = msg.to_lowercase();
 
     if lower.contains("invalid_api_key")
         || lower.contains("invalid authentication")
@@ -269,6 +606,11 @@ pub fn classify_llm_error_from_str(msg: &str) -> LlmErrorKind {
         || lower.contains("insufficient balance")
         || lower.contains("insufficient_quota")
         || lower.contains("余额不足")
+        // 各厂商自有命名，无统一词根：阿里百炼 Arrearage、火山/百度 overdue、
+        // 智谱「账户已欠费」。这条兜底只在结构化判定未命中时生效。
+        || lower.contains("arrearage")
+        || lower.contains("overdue")
+        || lower.contains("欠费")
     {
         return LlmErrorKind::InsufficientBalance;
     }
@@ -588,5 +930,315 @@ where
                 attempt += 1;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 走一遍完整分类入口：结构化命中优先，未命中落到 Unknown（真实链路由后续
+    /// 关键字兜底，这里只验证厂商映射表本身的判定）。
+    fn kind_of(raw: &str) -> LlmErrorKind {
+        if raw.contains("circuit_breaker") || raw.contains("熔断器") {
+            return LlmErrorKind::CircuitBreakerOpen;
+        }
+        match extract_status_code(raw) {
+            Some(status) => {
+                let (code, message) = extract_code_and_message(raw);
+                classify_vendor_error(&ParsedProviderError {
+                    status: Some(status),
+                    code,
+                    message,
+                })
+                .unwrap_or(LlmErrorKind::Unknown)
+            }
+            None => LlmErrorKind::Unknown,
+        }
+    }
+
+    /// 智谱欠费是 429 + 业务码 1113 的中文提示。旧实现只看见 "429" 会判成限流，
+    /// 而限流属可重试类——等于在余额耗尽时反复重试，务必守住。
+    #[test]
+    fn deepseek_402_is_insufficient_balance() {
+        let e = r#"Responses API 请求失败 (402 Payment Required): {"error":{"message":"Insufficient Balance","type":"unknown_error","code":"invalid_request_error"}}"#;
+        assert_eq!(kind_of(e), LlmErrorKind::InsufficientBalance);
+    }
+
+    #[test]
+    fn zhipu_arrears_is_balance_not_rate_limit() {
+        let e = r#"Responses API 请求失败 (429 Too Many Requests): {"error":{"code":"1113","message":"您的账户已欠费，请充值后重试"}}"#;
+        assert_eq!(kind_of(e), LlmErrorKind::InsufficientBalance);
+    }
+
+    /// 上面那条不能矫枉过正：智谱真正的限流（业务码 1302）仍要识别为限流。
+    #[test]
+    fn zhipu_real_rate_limit_stays_rate_limited() {
+        let e = r#"Responses API 请求失败 (429 Too Many Requests): {"error":{"code":"1302","message":"您的账户已达到速率限制"}}"#;
+        assert_eq!(kind_of(e), LlmErrorKind::RateLimited);
+    }
+
+    #[test]
+    fn volcengine_overdue_is_balance() {
+        let e = r#"Responses API 请求失败 (403 Forbidden): {"error":{"code":"AccountOverdueError","message":"your account has an overdue balance"}}"#;
+        assert_eq!(kind_of(e), LlmErrorKind::InsufficientBalance);
+    }
+
+    /// 同为 403：火山方舟的 AccessDenied 是权限问题，不能与欠费混为一谈。
+    #[test]
+    fn volcengine_access_denied_is_permission() {
+        let e = r#"Responses API 请求失败 (403 Forbidden): {"error":{"code":"AccessDenied","message":"do not have access to the requested resource"}}"#;
+        assert_eq!(kind_of(e), LlmErrorKind::PermissionDenied);
+    }
+
+    #[test]
+    fn dashscope_arrearage_400_is_balance() {
+        let e = r#"Responses API 请求失败 (400 Bad Request): {"error":{"code":"Arrearage","message":"please make sure your account is in good standing"}}"#;
+        assert_eq!(kind_of(e), LlmErrorKind::InsufficientBalance);
+    }
+
+    #[test]
+    fn dashscope_bill_overdue_429_is_balance() {
+        let e = r#"Responses API 请求失败 (429 Too Many Requests): {"error":{"code":"PrepaidBillOverdue","message":"your prepaid bill is overdue"}}"#;
+        assert_eq!(kind_of(e), LlmErrorKind::InsufficientBalance);
+    }
+
+    #[test]
+    fn openai_insufficient_quota_is_quota_not_rate_limit() {
+        let e = r#"Responses API 请求失败 (429 Too Many Requests): {"error":{"message":"You exceeded your current quota","type":"insufficient_quota"}}"#;
+        assert_eq!(kind_of(e), LlmErrorKind::QuotaExceeded);
+    }
+
+    #[test]
+    fn openai_plain_rate_limit_stays_rate_limited() {
+        let e = r#"Responses API 请求失败 (429 Too Many Requests): {"error":{"type":"rate_limit_exceeded","message":"Rate limit reached for requests"}}"#;
+        assert_eq!(kind_of(e), LlmErrorKind::RateLimited);
+    }
+
+    #[test]
+    fn anthropic_credit_too_low_400_is_balance() {
+        let e = r#"Responses API 请求失败 (400 Bad Request): {"error":{"message":"Your credit balance is too low to access the API"}}"#;
+        assert_eq!(kind_of(e), LlmErrorKind::InsufficientBalance);
+    }
+
+    #[test]
+    fn anthropic_enforced_spend_limit_is_quota() {
+        let e = r#"Responses API 请求失败 (429 Too Many Requests): {"error":{"code":"enforced_spend_limit_reached","message":"spend limit reached"}}"#;
+        assert_eq!(kind_of(e), LlmErrorKind::QuotaExceeded);
+    }
+
+    /// 腾讯返回整型业务码且键名是 `Code`（非小写 code），必须接住。
+    #[test]
+    fn hunyuan_integer_code_and_mixed_case_key() {
+        let e = r#"Responses API 请求失败 (402 Payment Required): {"error":{"Code":403004,"Message":"余额不足"}}"#;
+        assert_eq!(kind_of(e), LlmErrorKind::InsufficientBalance);
+        // 401007/401008 是免费额度耗尽，属配额而非余额
+        let e2 = r#"Responses API 请求失败 (402 Payment Required): {"error":{"Code":401007,"Message":"free quota exhausted"}}"#;
+        assert_eq!(kind_of(e2), LlmErrorKind::QuotaExceeded);
+    }
+
+    #[test]
+    fn minimax_underscore_code_and_base_resp() {
+        let e = r#"Responses API 请求失败 (402 Payment Required): {"base_resp":{"status_code":1008}}"#;
+        assert_eq!(kind_of(e), LlmErrorKind::InsufficientBalance);
+    }
+
+    #[test]
+    fn baidu_wenxin_overdue_403_is_balance() {
+        let e = r#"API 请求失败 (403 Forbidden): {"error":{"code":"account_overdue","message":"Access denied due to overdue account"}}"#;
+        assert_eq!(kind_of(e), LlmErrorKind::InsufficientBalance);
+    }
+
+    /// 同为 403：OpenRouter 用它表示内容审核命中，按「权限不足」提示会误导。
+    #[test]
+    fn openrouter_403_moderation_is_content_policy() {
+        let e = r#"Responses API 请求失败 (403 Forbidden): {"error":{"message":"moderation flagged this request"}}"#;
+        assert_eq!(kind_of(e), LlmErrorKind::ContentPolicy);
+    }
+
+    /// 同为 402：Together 用它表示月度消费上限，属配额而非余额。
+    #[test]
+    fn together_402_is_monthly_spend_cap() {
+        let e = r#"Responses API 请求失败 (402 Payment Required): {"error":{"message":"You have reached your monthly spending limit"}}"#;
+        assert_eq!(kind_of(e), LlmErrorKind::QuotaExceeded);
+    }
+
+    #[test]
+    fn together_403_context_length_is_not_permission() {
+        let e = r#"Responses API 请求失败 (403 Forbidden): {"error":{"message":"input + max_tokens exceeds the model context length"}}"#;
+        assert_eq!(kind_of(e), LlmErrorKind::ContextLengthExceeded);
+    }
+
+    #[test]
+    fn auth_and_server_paths() {
+        assert_eq!(
+            kind_of(r#"请求失败 (401 Unauthorized): {"error":{"message":"Incorrect API key provided"}}"#),
+            LlmErrorKind::InvalidApiKey
+        );
+        assert_eq!(
+            kind_of(r#"请求失败 (500 Internal Server Error): {"error":{"message":"boom"}}"#),
+            LlmErrorKind::ServerError
+        );
+        assert_eq!(
+            kind_of(r#"请求失败 (503 Service Unavailable): {"error":{"message":"overloaded"}}"#),
+            LlmErrorKind::Overloaded
+        );
+    }
+
+    #[test]
+    fn circuit_breaker_is_local_not_http() {
+        assert_eq!(
+            kind_of("熔断器已打开: 熔断器已打开: provider:deepseek-flash"),
+            LlmErrorKind::CircuitBreakerOpen
+        );
+    }
+
+    /// 状态码只认紧跟左括号的位置：request_id 里的数字不得污染分类。
+    #[test]
+    fn status_code_does_not_leak_from_request_id() {
+        let e = "provider call failed, quote request id 401299 in your ticket";
+        assert_eq!(kind_of(e), LlmErrorKind::Unknown);
+    }
+
+    #[test]
+    fn ip_port_is_not_status_code() {
+        assert_eq!(
+            kind_of("connect error to upstream (127.0.0.1:8080): timeout"),
+            LlmErrorKind::Unknown
+        );
+    }
+
+    // ------------------------------------------------ 重试判定与提示必须同源
+
+    /// 提示说「余额不足」、后台却在猛重试，是这次要防的核心不一致。
+    #[test]
+    fn arrears_is_permanent_so_retry_stops() {
+        let e = r#"Responses API 请求失败 (429 Too Many Requests): {"error":{"code":"1113","message":"您的账户已欠费，请充值后重试"}}"#;
+        assert_eq!(classify_error_from_str(e), ErrorCategory::Permanent);
+    }
+
+    /// 真限流仍要可重试，别把两种情况一起判死。
+    #[test]
+    fn real_rate_limit_stays_retryable() {
+        let e = r#"Responses API 请求失败 (429 Too Many Requests): {"error":{"code":"1302","message":"您的账户已达到速率限制"}}"#;
+        assert_eq!(classify_error_from_str(e), ErrorCategory::RateLimit);
+
+        let e2 = r#"Responses API 请求失败 (429 Too Many Requests): {"error":{"type":"rate_limit_exceeded","message":"Rate limit reached"}}"#;
+        assert_eq!(classify_error_from_str(e2), ErrorCategory::RateLimit);
+    }
+
+    #[test]
+    fn permanent_and_transient_split() {
+        // 401 invalid_api_key：密钥错了，重试一万次也没用 —— 必须判 Permanent
+        assert_eq!(
+            classify_error_from_str(
+                r#"请求失败 (401 Unauthorized): {"error":{"message":"invalid_api_key"}}"#
+            ),
+            ErrorCategory::Permanent
+        );
+        assert_eq!(
+            classify_error_from_str(r#"请求失败 (500 Internal Server Error): {"error":{"message":"boom"}}"#),
+            ErrorCategory::Transient
+        );
+        assert_eq!(
+            classify_error_from_str(r#"请求失败 (503 Service Unavailable): {"error":{"message":"overloaded"}}"#),
+            ErrorCategory::Transient
+        );
+    }
+
+    /// 纯响应体（无状态码前缀）也不能误判：这是 HTTP 层拿 body 判定的入口形态。
+    #[test]
+    fn body_only_judgement() {
+        assert_eq!(
+            classify_error_from_str(r#"{"error":{"code":"Arrearage","message":"account is in good standing"}}"#),
+            ErrorCategory::Permanent
+        );
+    }
+
+    // ------------------------------------------------ 半开只放行一个探测
+
+    fn breaker() -> CircuitBreaker {
+        // 阈值 2、失败率 1.0、冷却 30s
+        CircuitBreaker::new("test", 2, 1.0, Duration::from_secs(30))
+    }
+
+    /// 打满阈值进入熔断。
+    fn trip(b: &mut CircuitBreaker) {
+        b.record_failure();
+        b.record_failure();
+        assert_eq!(b.state, CircuitState::Open);
+    }
+
+    #[test]
+    fn half_open_admits_single_probe_only() {
+        let mut b = breaker();
+        trip(&mut b);
+
+        // 冷却期内一律拒绝
+        assert!(!b.allow_request());
+        assert!(!b.allow_request());
+
+        // 把冷却时间拨过去，触发半开
+        b.last_failure_time = Some(Instant::now() - Duration::from_secs(31));
+        assert!(b.allow_request(), "首个请求应被放行作为探测");
+        assert_eq!(b.state, CircuitState::HalfOpen);
+
+        // 关键：探测在飞行中时，其余并发请求必须被拒，
+        // 否则充值瞬间积压请求一起涌入，任一失败就立刻打回熔断。
+        assert!(!b.allow_request(), "探测在飞行中时不得放行第二个请求");
+        assert!(!b.allow_request());
+    }
+
+    #[test]
+    fn half_open_probe_success_closes_circuit() {
+        let mut b = breaker();
+        trip(&mut b);
+        b.last_failure_time = Some(Instant::now() - Duration::from_secs(31));
+        assert!(b.allow_request());
+
+        b.record_success();
+        assert_eq!(b.state, CircuitState::Closed);
+        assert!(b.allow_request(), "恢复正常后应全部放行");
+    }
+
+    #[test]
+    fn half_open_probe_failure_reopens_circuit() {
+        let mut b = breaker();
+        trip(&mut b);
+        b.last_failure_time = Some(Instant::now() - Duration::from_secs(31));
+        assert!(b.allow_request());
+
+        b.record_failure();
+        assert_eq!(b.state, CircuitState::Open);
+        assert!(!b.allow_request(), "探测失败后应重新进入冷却");
+    }
+
+    /// 探测请求可能没回报结果（响应解析失败会提前 `?` 返回，大 prompt 又按设计
+    /// 跳过熔断记账）。超时后必须能重新放行，否则熔断器永久卡在半开。
+    #[test]
+    fn stuck_probe_does_not_deadlock() {
+        let mut b = breaker();
+        trip(&mut b);
+        b.last_failure_time = Some(Instant::now() - Duration::from_secs(31));
+        assert!(b.allow_request());
+
+        // 探测没有回报任何结果时，仍然被挡住
+        assert!(!b.allow_request());
+
+        // 把探测时刻拨到超时之前
+        b.probe_started_at = Some(Instant::now() - (PROBE_TIMEOUT + Duration::from_secs(1)));
+        assert!(b.allow_request(), "探测超时后应重新放行，避免永久卡死");
+    }
+
+    #[test]
+    fn reset_clears_probe_slot() {
+        let mut b = breaker();
+        trip(&mut b);
+        b.last_failure_time = Some(Instant::now() - Duration::from_secs(31));
+        assert!(b.allow_request());
+
+        b.reset();
+        assert_eq!(b.state, CircuitState::Closed);
+        assert!(b.allow_request());
     }
 }

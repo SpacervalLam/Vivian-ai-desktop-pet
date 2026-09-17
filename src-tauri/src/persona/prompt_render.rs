@@ -710,7 +710,84 @@ pub fn render_persona_config_block(config: &PersonaConfig) -> String {
     parts.join("\n\n")
 }
 
-/// 渲染 Character 块：协议 + 结构化配置 + 身份 + 人格 + 背景 + 兴趣 + 外观 + 说话风格 + 经典台词 + 关系
+/// 渲染语言风格块（`LanguageStyle` → `[LANGUAGE_STYLE]`）
+///
+/// `LanguageStyle` 是人格卡片可覆盖的结构化口癖配置（`persona_card.rs` 的
+/// `language_style_override` → `mod.rs` 的卡片覆盖逻辑），但此前从未被任何渲染
+/// 代码消费——卡片里设的口头禅 / 语气词 / 长度偏好全部空转，实际只有自然语言
+/// `speech.md` 生效。此处把它压成紧凑规则块，补上这条通路。
+///
+/// 与 `chat_style_framework()` 一致统一用英文：项目约定规则类内容英文，回复语言
+/// 由 `LANG_*` 标志与 output_format 的 "same language as user input" 控制。
+///
+/// 只输出有信息量的行：空列表与关闭项不占 token。整个块最多 7 行。
+pub fn render_language_style_block(config: &PersonaConfig) -> String {
+    let ls = &config.language_style;
+    let mut lines: Vec<String> = Vec::new();
+
+    if !ls.catchphrases.is_empty() {
+        lines.push(format!(
+            "CATCHPHRASES     {} — drop them in naturally, not every message",
+            ls.catchphrases.join(" / ")
+        ));
+    }
+
+    if ls.use_sentence_final_particles && !ls.preferred_sentence_final_particles.is_empty() {
+        lines.push(format!(
+            "SENTENCE_FINAL   let some sentences trail off with {}",
+            ls.preferred_sentence_final_particles.join(" ")
+        ));
+    }
+
+    match ls.response_length_bias.trim().to_ascii_lowercase().as_str() {
+        "long" => lines.push(
+            "LENGTH_BIAS      longer is fine when the moment calls for it".to_string(),
+        ),
+        "medium" => {
+            lines.push("LENGTH_BIAS      mid-length — never a wall of text".to_string())
+        }
+        "short" => lines.push(
+            "LENGTH_BIAS      keep it SHORT, a few words is often the whole reply".to_string(),
+        ),
+        _ => {}
+    }
+
+    if ls.prefer_rhetorical_questions {
+        lines.push(
+            "RHETORICAL_OK    a rhetorical question sometimes beats a statement".to_string(),
+        );
+    }
+
+    if !ls.allow_teasing {
+        lines.push("NO_TEASING       don't tease or poke fun".to_string());
+    } else if ls.teasing_cooldown > 0 {
+        lines.push(format!(
+            "TEASE_SPARINGLY  at most one tease per {} exchanges",
+            ls.teasing_cooldown
+        ));
+    }
+
+    lines.push(if ls.max_consecutive_questions <= 1 {
+        "ONE_QUESTION     never stack two questions in one message".to_string()
+    } else {
+        format!(
+            "QUESTION_LIMIT   at most {} questions per message",
+            ls.max_consecutive_questions
+        )
+    });
+
+    if ls.use_action_descriptions {
+        lines.push("ACTION_DESC_OK   *action* descriptions are allowed".to_string());
+    }
+
+    if lines.is_empty() {
+        return String::new();
+    }
+
+    format!("[LANGUAGE_STYLE]\n{}\n[/LANGUAGE_STYLE]", lines.join("\n"))
+}
+
+/// 渲染 Character 块：协议 + 结构化配置 + 语言风格 + 身份 + 人格 + 背景 + 兴趣 + 外观 + 说话风格 + 经典台词 + 关系
 ///
 /// 所有段落均支持用户自定义覆盖（CanonQuotes / PersonaConfig 除外，它们作为出厂常驻骨架），
 /// 留空则使用 characters/{id}/ 下的出厂 md 文件。
@@ -719,7 +796,8 @@ pub fn render_persona_config_block(config: &PersonaConfig) -> String {
 /// 1. `[PERSONA_LOAD]` 硬约束标志（快速红线的压缩骨架）
 /// 2. `[PERSONA_PROTOCOL]` 配置协议（解析规则 + 优先级链，do-not-embody）
 /// 3. `【PERSONA_CONFIG】` 结构化人格配置（底层 + 顶层行为规则）
-/// 4. 自然语言段落（identity / personality / background / ...）
+/// 4. `[LANGUAGE_STYLE]` 结构化口癖/长度偏好（人格卡片可覆盖，规则类英文）
+/// 5. 自然语言段落（identity / personality / background / ...）
 
 /// Character 块注入档位（按关系熟悉度裁剪低频参考段落）
 ///
@@ -786,6 +864,12 @@ pub fn render_character_block_tiered(
     }
     if !persona_config.trim().is_empty() {
         head.push(persona_config);
+    }
+    // 结构化语言风格：紧跟在 persona_config 之后，同属"可被卡片覆盖的结构化配置"，
+    // 与后面的自然语言 speech.md 互补（前者是可调旋钮，后者是语感长文）。
+    let language_style = render_language_style_block(config);
+    if !language_style.is_empty() {
+        head.push(language_style);
     }
 
     format!("{}\n\n{}", head.join("\n\n"), sections.join("\n\n---\n\n"))
@@ -925,6 +1009,34 @@ mod tests {
 
         // 精简档应显著短于完整档
         assert!(compact.len() < full.len());
+    }
+
+    /// 回归守卫：`LanguageStyle` 曾经是"定义了但从不渲染"的死字段
+    /// （9 个字段在 schemas.rs 有定义、有默认值、可被卡片覆盖，却零读取方）。
+    /// 这类 bug 静默失效、不报错，只能靠断言钉住。
+    #[test]
+    fn test_language_style_block_is_rendered_into_character_block() {
+        let config = default_persona_for("vivian");
+
+        let block = render_language_style_block(&config);
+        assert!(block.starts_with("[LANGUAGE_STYLE]"), "缺块标记: {block}");
+        assert!(block.ends_with("[/LANGUAGE_STYLE]"));
+        assert!(block.contains("CATCHPHRASES"), "口头禅行缺失");
+        assert!(block.contains("lol"), "默认口头禅内容缺失");
+        assert!(block.contains("LENGTH_BIAS"), "长度偏好行缺失");
+        assert!(block.contains("ONE_QUESTION"), "提问数约束行缺失");
+
+        // 关闭语气词 → 该行消失（关闭项不占 token）
+        let mut off = default_persona_for("vivian");
+        off.language_style.use_sentence_final_particles = false;
+        assert!(!render_language_style_block(&off).contains("SENTENCE_FINAL"));
+
+        // 关键：必须真的拼进 Character 块——这才是当初断掉的那一环
+        let full = render_character_block_tiered(&config, "zh", CharacterBlockTier::Full);
+        assert!(
+            full.contains("[LANGUAGE_STYLE]"),
+            "Character 块未注入语言风格块（回归）"
+        );
     }
 
     #[test]

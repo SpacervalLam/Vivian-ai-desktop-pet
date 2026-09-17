@@ -20,7 +20,8 @@ import { ModelCanvas, type ModelRendererHandle } from './components/ModelCanvas'
 import type { ChibiInteraction } from './components/ChibiPetCanvas';
 import VideoAnimationLayer from './components/VideoAnimationLayer';
 import SystemTray, { syncTrayMenuCheck } from './components/SystemTray';
-import type { ToastType } from './components/Toast';
+import type { ToastType, ToastAction } from './components/Toast';
+import { PROVIDER_PRESETS } from './components/ConfigWindow';
 import { ChatController } from './controllers/ChatController';
 import { BubbleController, computeDuration } from './controllers/BubbleController';
 import { TtsStreamQueue } from './controllers/TtsStreamQueue';
@@ -33,14 +34,29 @@ import { changeLanguage } from './i18n';
 import type { BubblePosition } from './components/MessageBubble';
 import { getCharacterId } from './characterContext';
 import { stripActions } from './utils/ActionText';
-import { raiseWindow, RAISE_UNLISTEN } from './utils/windowRaiser';
+import { raiseWindow, isWindowOnScreen, RAISE_UNLISTEN } from './utils/windowRaiser';
 import { openRoomWindow } from './utils/roomWindow';
+import { buildPetRectQuery, emitPetReveal, type PetRect } from './utils/petReveal';
 import HoldProgressRing from './components/HoldProgressRing';
 
 const ENVIRONMENT_UPDATE_INTERVAL_MS = 30_000;
 /** 兜底轮询间隔（防 pet:action_pending 事件丢失；事件驱动为主，降频减少 IPC） */
 const PET_ACTION_DRAIN_INTERVAL_MS = 2500;
 const IDLE_AWAY_THRESHOLD_SECONDS = 300;
+
+/**
+ * 按厂商 endpoint 反查预设（忽略结尾斜杠与大小写，前缀匹配以兼容用户
+ * 在 endpoint 后追加路径的写法，如 `https://api.deepseek.com/v1`）。
+ * 找不到（custom endpoint）返回 undefined，错误 toast 就不挂控制台动作。
+ */
+function findProviderPresetByEndpoint(endpoint: string) {
+  const norm = endpoint.replace(/\/+$/, '').toLowerCase();
+  if (!norm) return undefined;
+  return PROVIDER_PRESETS.find((p) => {
+    const urls = [p.endpoint, ...(p.protocols ?? []).map((pr) => pr.endpoint)];
+    return urls.some((u) => u && norm.startsWith(u.replace(/\/+$/, '').toLowerCase()));
+  });
+}
 /** 等待 Brain 初始化的超时（毫秒），超时后用兜底问候
  *  预加载流程包含种子记忆注入与情绪/语义语料嵌入，远程嵌入可能需要较长时间，
  *  因此超时放宽到 120s；后端 `send_message` 在初始化完成前也会拒绝请求作为双保险。 */
@@ -89,20 +105,19 @@ function estimateBubbleHeight(text: string): number {
 const CHARACTER_WINDOW_SIZE = { w: 213.2, h: 246.8 };
 const getWindowSize = (_charId: string | null) => CHARACTER_WINDOW_SIZE;
 
-const LOCAL_TOUCH_LINES: Record<'vivian' | 'nana', string[]> = {
-  vivian: [
-    '嗯？是在叫我吗？',
-    '我有好好待在这里哦。',
-    '轻一点啦，光环都要歪了。',
-    '今天也一起加油吧。',
-  ],
-  nana: [
-    '被你发现我在发呆了。',
-    '尾巴可不是枕头哦。',
-    '再摸一下也不是不可以。',
-    '我在听呢。',
-  ],
-};
+/**
+ * 用户对桌宠的动作 —— 与后端 `generate_pet_reaction` 的 `action` 参数一一对应。
+ *
+ * 前四个来自 ChibiPetCanvas 的点击手势与长按进度环（`rough_click` 是画布判定
+ * 「戳得太频繁/太急」后的结果），后两个来自后端甩飞线程发出的 `drag:dizzy` 事件。
+ */
+type PetAction =
+  | 'single_click'
+  | 'double_click'
+  | 'rough_click'
+  | 'long_press'
+  | 'fast_drag'
+  | 'edge_bounce';
 
 let petSfxContext: AudioContext | null = null;
 
@@ -268,9 +283,34 @@ function charScopedLabel(base: string): string {
   return `${getCharacterId() ?? 'main'}_${base}`;
 }
 
+/** 自显形窗口的兜底超时：子窗口若因事件丢失或脚本异常始终没显形，到这个点强制显示，
+ *  避免窗口永远不出现（长按看起来毫无反应）。1600ms 是给 webview 冷启动留的余量。 */
+const SELF_REVEAL_FALLBACK_MS = 1600;
+
+/** 给「显形归子窗口」的窗口挂一个兜底显形。
+ *
+ *  子窗口负责显形是入场动画的前提（先摆好首帧再让窗口出现），代价是显形这条链
+ *  多了一环：事件没送到、或它自己脚本异常，窗口就会一直不出现。这里补一个超时兜底，
+ *  到点还没在屏上就自己把它放出来——宁可直接显形、没有动画，也不能让长按没反应。
+ *  最小化也算「没在屏上」，所以还原要在 show 之前。 */
+function armSelfRevealFallback(win: WebviewWindow): void {
+  window.setTimeout(() => {
+    void (async () => {
+      try {
+        if (await isWindowOnScreen(win)) return;
+        await win.unminimize();
+        await win.show();
+      } catch {
+        /* 窗口已销毁 */
+      }
+    })();
+  }, SELF_REVEAL_FALLBACK_MS);
+}
+
 /** 创建或聚焦独立窗口。
- *  若 getByLabel 返回的引用实际已关闭（isVisible() === false），
- *  视为陈旧引用，丢弃并重新创建，避免"第二次点击无反应"。 */
+ *  复用判定：`isVisible()` 抛异常才说明引用已失效（窗口已销毁），此时丢弃引用重新创建；
+ *  它返回 false 只说明窗口被 hide 过，仍然复用——raiseWindow 负责把它 show 回来。
+ *  窗口已存在却去重建是走不通的（label 冲突），所以「存在即复用」是唯一安全的规则。 */
 async function openWindow(
   label: string,
   view: string,
@@ -292,22 +332,59 @@ async function openWindow(
     fullscreen?: boolean;
       /** 追加到子窗口 URL 的额外 query（如 guide=1） */
       extraQuery?: string;
+    /**
+     * 由子窗口自己决定显形时机——两条路径都不代它显形：创建时不自动 show，
+     * 复用时也**不**还原/显示（只做 Z 序与焦点）。
+     * 用于「先摆好首帧再出现」的入场动画：心智观察器从桌宠矩形长到全屏时，
+     * 若沿用「created 即 show」会先闪一帧全屏大图；已被最小化时更明显——
+     * 先还原一次再播一遍入场，就是呼出了两回。超时未显形时有兜底显示。
+     */
+    selfReveal?: boolean;
+    /**
+     * 窗口已经打开且可见时的回调——取代「只聚焦就返回」的默认行为。
+     *
+     * 不传则维持原样（提升 Z 序 + 聚焦）。需要重播入场动画的窗口传它：
+     * 复用已有窗口既不能 navigate（会整页 reload、丢掉当前页签与输入），
+     * 也不能重建（label 冲突），所以只能由子窗口收到通知后自己再播一遍。
+     */
+    onExisting?: (win: WebviewWindow) => void;
   } = {},
   t?: (key: string) => string,
 ) {
   // 按角色区分 label，避免多角色窗口的子窗口冲突
   const fullLabel = charScopedLabel(label);
 
+  // 复用分支的判定与动作必须分开：
+  // - 活性探测（`isVisible()`）只认「抛异常」＝窗口真的被销毁了。返回 false 不代表窗口没了，
+  //   那只是它被 hide 过——恰恰是该被 show 回来的对象，按「已销毁」处理会害得下面重名重建，
+  //   而重名重建必然失败。
+  // - 提到前台的动作单独兜：它失败只意味着这次没提到前台，绝不能顺势被当成「窗口已销毁」。
+  //   误判的后果是走到下面用同一个 label 再建一次，Tauri 报 label 冲突（只有 console 里
+  //   一行 tauri://error），对外表现就是「点了毫无反应」。
+  //
+  // 这条路径上曾经还顺手补一次 `setResizable(false)`。窗口的 resizable 在创建时就定死了
+  // （openMemory 传的就是 false，全仓也没有第二处改它），这次重设是冗余的；
+  // 而它依赖的 `core:window:allow-set-resizable` 权限从未授予，调用必然 reject——
+  // 于是每次「已打开后再长按」都在这里抛错、被当成窗口已死，整个复用路径全废。
+  // 窗口创建时本身就带这个约束，重设删掉即可；真需要一个可复用的重设入口，
+  // 该做的是补权限，而不是让它继续吞掉异常。
+
   // 1. 检查追踪缓存：窗口仍在存活 → 直接聚焦
   const tracked = CHILD_WINDOWS.get(fullLabel);
   if (tracked) {
+    let alive = false;
     try {
-      if (await tracked.isVisible()) {
-        await raiseWindow(tracked, label);
-        return;
-      }
+      await tracked.isVisible();
+      alive = true;
     } catch {
       // 窗口已销毁，isVisible 抛异常 → 清理缓存
+      alive = false;
+    }
+    if (alive) {
+      await raiseWindow(tracked, label, options.selfReveal).catch(() => {});
+      options.onExisting?.(tracked);
+      if (options.selfReveal) armSelfRevealFallback(tracked);
+      return;
     }
     CHILD_WINDOWS.delete(fullLabel);
   }
@@ -316,25 +393,30 @@ async function openWindow(
   try {
     const existing = await WebviewWindow.getByLabel(fullLabel);
     if (existing) {
+      let alive = false;
       try {
-        const visible = await existing.isVisible();
-        if (visible) {
-          // 窗口确实还活着 → 纳入追踪并聚焦
-          CHILD_WINDOWS.set(fullLabel, existing);
-          if (!CLOSE_CLEANUP_REGISTERED.has(fullLabel)) {
-            CLOSE_CLEANUP_REGISTERED.add(fullLabel);
-            void existing.onCloseRequested(() => {
-              CHILD_WINDOWS.delete(fullLabel);
-              CLOSE_CLEANUP_REGISTERED.delete(fullLabel);
-              const u = RAISE_UNLISTEN.get(label);
-              if (u) { u(); RAISE_UNLISTEN.delete(label); }
-            });
-          }
-          await raiseWindow(existing, label);
-          return;
-        }
+        await existing.isVisible();
+        alive = true;
       } catch {
         // 陈旧引用：窗口已关闭但标签未清理 → 继续创建新窗口
+        alive = false;
+      }
+      if (alive) {
+        // 窗口确实还活着 → 纳入追踪并聚焦
+        CHILD_WINDOWS.set(fullLabel, existing);
+        if (!CLOSE_CLEANUP_REGISTERED.has(fullLabel)) {
+          CLOSE_CLEANUP_REGISTERED.add(fullLabel);
+          void existing.onCloseRequested(() => {
+            CHILD_WINDOWS.delete(fullLabel);
+            CLOSE_CLEANUP_REGISTERED.delete(fullLabel);
+            const u = RAISE_UNLISTEN.get(label);
+            if (u) { u(); RAISE_UNLISTEN.delete(label); }
+          });
+        }
+        await raiseWindow(existing, label, options.selfReveal).catch(() => {});
+        options.onExisting?.(existing);
+        if (options.selfReveal) armSelfRevealFallback(existing);
+        return;
       }
     }
   } catch {
@@ -381,9 +463,14 @@ async function openWindow(
       if (u) { u(); RAISE_UNLISTEN.delete(label); }
     });
     // 5. 窗口创建后显示（visible:false 创建，webview 就绪后 show）
-    win.once('tauri://created', () => {
-      void win.show().catch(() => {});
-    });
+    if (options.selfReveal) {
+      // 显形交给子窗口（入场动画需要先把首帧摆成桌宠大小再 show）
+      armSelfRevealFallback(win);
+    } else {
+      win.once('tauri://created', () => {
+        void win.show().catch(() => {});
+      });
+    }
     win.once('tauri://error', (e) => {
       console.error(`[openWindow] 窗口 "${fullLabel}" 创建失败:`, e);
     });
@@ -470,9 +557,6 @@ export default function App() {
   useEffect(() => { presenceStateRef.current = presenceState; }, [presenceState]);
   // 唤醒点击计数器：rest 状态需 3 次连续点击、busy 状态 1 次即唤醒
   const wakeClickRef = useRef<{ count: number; lastTime: number }>({ count: 0, lastTime: 0 });
-  const lastLocalTouchLineRef = useRef<number>(-1);
-  const lastTapAiEnhanceRef = useRef<number>(0);
-  const tapAiTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   /** 基础窗口尺寸（模型加载后按比例计算，缩放基于此） */
   const baseWindowSizeRef = useRef<{ w: number; h: number }>({ w: 0, h: 0 });
   /** 当前用户缩放因子 */
@@ -491,6 +575,13 @@ export default function App() {
   const [videoActive, setVideoActive] = useState(false);
   /** Ollama 就绪 toast 是否已弹出（每个应用生命周期只弹一次） */
   const ollamaToastedRef = useRef(false);
+  /**
+   * 最近一次 LLM 错误 toast 的时间戳。
+   *
+   * 启动问候失败与 LLM 调用失败常常是同一根因（问候本身要走主 LLM），
+   * 两条路径各弹一次会让用户看到两条说同一件事的 toast，用它做短窗抑制。
+   */
+  const lastLlmErrorToastAtRef = useRef(0);
   // 统一隐藏管理：全屏应用聚焦隐藏到角落（受智能避让开关控制）/ Rest 退到角落 / Offline 真正 hide_window
   // 暴露 hiddenCorner（驱动角落感知按钮）、requestRestore（按钮点击召回 + 唤醒）、
   // hideForSleep / restoreFromSleep（Rest 时退到角落）
@@ -571,7 +662,7 @@ export default function App() {
   // Toast 子窗口管理：屏幕右下角的透明、点击穿透窗口
   const toastReadyRef = useRef<boolean>(false);
   // 窗口未就绪时缓存的 toast 请求
-  const pendingToastRef = useRef<Array<{ message: string; type: ToastType; duration: number; key?: number }>>([]);
+  const pendingToastRef = useRef<Array<{ message: string; type: ToastType; duration: number; key?: number; action?: ToastAction; owner?: string }>>([]);
   // 窗口未就绪时缓存的工具确认请求（载荷原样转发给 toast 子窗口）
   const pendingConfirmRef = useRef<ToolConfirmPayload[]>([]);
 
@@ -580,7 +671,10 @@ export default function App() {
     const toastLabel = charScopedLabel('toast');
     const existing = await WebviewWindow.getByLabel(toastLabel);
     if (existing) return;
-    // 先取屏幕尺寸，用于窗口高度（撑满屏幕高度）+ 定位到右下角
+    // 先取屏幕尺寸，用于窗口高度（固定为屏幕的一半）+ 定位到右下角。
+    // 半屏高是 ToastWindow 容量管理的前提：可用空间是确定的，新 toast 放不下时就先让
+    // 最老的平滑退出再入场；若高度跟着内容伸缩，增删条目与重新测高之间必有一帧错位，
+    // 那一帧里顶部的 toast 就会被窗口边界裁掉。
     let screenW = 0;
     let screenH = 0;
     try {
@@ -593,7 +687,7 @@ export default function App() {
     } catch {
       /* ignore */
     }
-    const toastHeight = screenH > 0 ? screenH : TOAST_WINDOW_HEIGHT;
+    const toastHeight = screenH > 0 ? Math.round(screenH / 2) : TOAST_WINDOW_HEIGHT;
     // 直接使用构造函数返回的实例（getByLabel 在窗口未完全创建时可能返回 null）
     const win = new WebviewWindow(toastLabel, {
       url: `/?view=toast&character_id=${getCharacterId() ?? ''}`,
@@ -614,7 +708,9 @@ export default function App() {
     win.once('tauri://created', async () => {
       try {
         if (screenW > 0 && screenH > 0) {
-          await win.setPosition(new LogicalPosition(screenW - TOAST_WINDOW_WIDTH, 0));
+          await win.setPosition(
+            new LogicalPosition(screenW - TOAST_WINDOW_WIDTH, screenH - toastHeight),
+          );
         }
         await win.setIgnoreCursorEvents(true);
       } catch {
@@ -648,17 +744,27 @@ export default function App() {
   }, []);
 
   /** 显示一条 toast（窗口就绪时直接 emit，未就绪时缓存并触发窗口创建）。
-   *  传入固定 `key` 可原地更新同一条 toast；`duration <= 0` 表示持久显示（不自动关闭）。 */
+   *  传入固定 `key` 可原地更新同一条 toast；`duration <= 0` 表示持久显示（不自动关闭）。
+   *
+   *  `owner` 决定这条 toast 弹到哪个角色的窗口：
+   *  - `undefined`（默认）：归属当前窗口角色。用于本窗口自己发起的事件
+   *    （文件拖放、语音未开启等），以及 payload 已带 character_id 的定向事件。
+   *  - `null`：显式声明「无归属」。用于全局事件——它们被广播给每个角色窗口，
+   *    若各自都按自身角色 emit，同一条文案就会在每个 toast 窗口各弹一次。
+   *    无归属的 toast 统一由主角色的 toast 窗口呈现（见 ToastWindow 的归属判定）。 */
   const showToast = useCallback(
-    (message: string, type: ToastType = 'info', duration: number = 3000, key?: number) => {
+    (message: string, type: ToastType = 'info', duration: number = 3000, key?: number, action?: ToastAction, owner?: string | null) => {
       const toastKey = key ?? Date.now();
+      // 归属解析：显式指定优先；`null` 与「当前窗口无角色」都归一为 undefined（无归属），
+      // 由接收侧按主角色窗口收敛。
+      const ownerId = owner === undefined ? (getCharacterId() ?? undefined) : (owner ?? undefined);
       // 点击穿透功能已移除：桌宠窗口始终整窗响应鼠标，
       // toast 显示期间不再需要 suspend/resume_click_through 配对。
 
       if (toastReadyRef.current) {
-        void emit('toast:show', { message, type, duration, key: toastKey, character_id: getCharacterId() ?? undefined });
+        void emit('toast:show', { message, type, duration, key: toastKey, character_id: ownerId, action });
       } else {
-        pendingToastRef.current.push({ message, type, duration, key: toastKey });
+        pendingToastRef.current.push({ message, type, duration, key: toastKey, action, owner: ownerId });
         void ensureToastWindow();
       }
     },
@@ -677,7 +783,7 @@ export default function App() {
         const pending = pendingToastRef.current;
         pendingToastRef.current = [];
         for (const p of pending) {
-          void emit('toast:show', { ...p, key: p.key ?? Date.now(), character_id: getCharacterId() ?? undefined });
+          void emit('toast:show', { message: p.message, type: p.type, duration: p.duration, key: p.key ?? Date.now(), action: p.action, character_id: p.owner });
         }
         const pendingConfirms = pendingConfirmRef.current;
         pendingConfirmRef.current = [];
@@ -696,7 +802,7 @@ export default function App() {
             const pending = pendingToastRef.current;
             pendingToastRef.current = [];
             for (const p of pending) {
-              void emit('toast:show', { ...p, key: p.key ?? Date.now(), character_id: getCharacterId() ?? undefined });
+              void emit('toast:show', { message: p.message, type: p.type, duration: p.duration, key: p.key ?? Date.now(), action: p.action, character_id: p.owner });
             }
             const pendingConfirms = pendingConfirmRef.current;
             pendingConfirmRef.current = [];
@@ -718,11 +824,14 @@ export default function App() {
     void (async () => {
       const unProgress = await listen<{ current: number; total: number }>('memory:rebuild_progress', (e) => {
         const { current, total } = e.payload ?? { current: 0, total: 0 };
-        showToast(t('config.rebuilding_embeddings_progress', { current, total }), 'info', 0, REBUILD_TOAST_KEY);
+        // 向量重建是全局操作（不隶属任何角色），而事件会广播给每个角色窗口。
+        // 显式声明无归属（owner=null）交由主角色窗口呈现；否则每个角色窗口都按
+        // 自身身份 emit 一条，同一条进度会在每只桌宠的 toast 窗口各弹一次。
+        showToast(t('config.rebuilding_embeddings_progress', { current, total }), 'info', 0, REBUILD_TOAST_KEY, undefined, null);
       });
       const unDone = await listen<{ rebuilt: number; total: number }>('memory:rebuild_done', (e) => {
         const rebuilt = e.payload?.rebuilt ?? 0;
-        showToast(t('config.toast_rebuild_ok', { count: rebuilt }), 'success', 4000, REBUILD_TOAST_KEY);
+        showToast(t('config.toast_rebuild_ok', { count: rebuilt }), 'success', 4000, REBUILD_TOAST_KEY, undefined, null);
       });
       if (cancelled) { safeUnlisten(unProgress); safeUnlisten(unDone); return; }
       unlistens.push(unProgress, unDone);
@@ -880,45 +989,54 @@ export default function App() {
   }, []);
 
   /**
-   * 单击先走零等待的本地台词与短音效；在线且空闲时，再以冷却方式异步请求一次
-   * AI 自然回应。AI 失败不会撤销或延迟本地反馈。
+   * 请求一次桌宠轻量反应。
+   *
+   * 用户对桌宠做出动作时调用：后端用一次极简 prompt（精简人设 + 低权重历史对话窗口
+   * + 本次动作描述）走 `intent_judge` 那档 flash 模型生成一句短反应，同时把这次操作
+   * 作为有意义的用户行为记进统一事件账本。
+   *
+   * 完全静默：未配置模型 / 超时 / 失败时后端返回 null，这里不显示任何气泡，
+   * 也不再回退到写死的固定台词。同类动作的节流在后端做，前端不重复计时。
+   */
+  const requestPetReaction = useCallback((action: PetAction, impact?: number) => {
+    void invoke<string | null>('generate_pet_reaction', {
+      action,
+      impact: impact ?? null,
+      characterId: getCharacterId() ?? undefined,
+    })
+      .then((text) => {
+        const reply = text?.trim();
+        if (!reply) return;
+        // 生成期间用户可能已经开了新一轮对话：别用桌宠反应盖掉流式气泡
+        if (ChatController.isStreaming) return;
+        BubbleController.showBubble(reply, Math.max(2600, reply.length * 220));
+      })
+      .catch(() => {
+        /* 静默：桌宠反应失败不该打扰用户 */
+      });
+  }, []);
+
+  /**
+   * 单击/双击桌宠：本地短音效 + 一次轻量 AI 反应（取代原先写死的固定台词）。
+   *
+   * `rough_click` 是画布判定「戳烦了」后的结果（短时间内戳得太多或太急），
+   * 表情由画布自己切到生气，这里只负责让台词也跟着换个态度。
+   * 长按（心智观察器）与甩飞晕眩（drag:dizzy）走各自的入口调同一个 requestPetReaction。
+   * 从 rest/busy 唤醒仍由 onModelClick 的连续点击计数负责，不在这里重复处理。
    */
   const handleChibiInteraction = useCallback((interaction: ChibiInteraction) => {
-    // 长按触发打开心智观察器后紧接着的 click 是松手余波，不触发摸头台词
+    // 长按触发打开心智观察器后紧接着的 click 是松手余波，不触发反应
     if (Date.now() - holdCompletedAtRef.current < 500) return;
     lastActivityRef.current = Date.now();
     lastBubbleFromProactiveRef.current = 0;
-    if (interaction !== 'single_click') return;
 
-    const characterId = (getCharacterId() ?? 'vivian').toLowerCase().includes('nana') ? 'nana' : 'vivian';
-    const lines = LOCAL_TOUCH_LINES[characterId];
-    let nextIndex = Math.floor(Math.random() * lines.length);
-    if (lines.length > 1 && nextIndex === lastLocalTouchLineRef.current) {
-      nextIndex = (nextIndex + 1) % lines.length;
+    // 双击本身会展开侧边聊天窗、有自己的反馈，不叠提示音
+    if (interaction !== 'double_click') {
+      const characterId = (getCharacterId() ?? 'vivian').toLowerCase().includes('nana') ? 'nana' : 'vivian';
+      playPetTapSound(characterId);
     }
-    lastLocalTouchLineRef.current = nextIndex;
-    BubbleController.showBubble(lines[nextIndex], 2600);
-    playPetTapSound(characterId);
-
-    const now = Date.now();
-    if (
-      presenceStateRef.current === 'online'
-      && !ChatController.isStreaming
-      && now - lastTapAiEnhanceRef.current >= 45_000
-    ) {
-      lastTapAiEnhanceRef.current = now;
-      if (tapAiTimerRef.current) clearTimeout(tapAiTimerRef.current);
-      tapAiTimerRef.current = setTimeout(() => {
-        tapAiTimerRef.current = null;
-        if (presenceStateRef.current !== 'online' || ChatController.isStreaming) return;
-        void ChatController.triggerWakeInteraction(getCharacterId() ?? undefined).catch(() => {});
-      }, 650);
-    }
-  }, []);
-
-  useEffect(() => () => {
-    if (tapAiTimerRef.current) clearTimeout(tapAiTimerRef.current);
-  }, []);
+    requestPetReaction(interaction);
+  }, [requestPetReaction]);
 
   /** 确保/展开微信窗口（label='chat'，右缘三态侧边栏）。
    *  创建为屏幕右缘屏外隐藏，由 Rust 三态机制（edge watcher + mouse hook +
@@ -1297,7 +1415,12 @@ export default function App() {
             LifecycleController.showGreetingBubble(result.greeting);
           }
         } else if (result.error) {
-          showToast(t('toast.greeting_failed', { error: result.error }), 'warning', 6000);
+          // 问候失败几乎总是主 LLM 调用失败的同一次故障（问候要走主 LLM），
+          // 而 llm:error 已经就同一个错误弹过提示了。短窗内不再重复，
+          // 否则用户会看到两条说同一件事的 toast。原始错误请查日志。
+          if (Date.now() - lastLlmErrorToastAtRef.current > 3000) {
+            showToast(t('toast.greeting_failed'), 'warning', 6000);
+          }
         }
       } catch {
         /* ignore */
@@ -1622,7 +1745,7 @@ export default function App() {
         unlisten = await listen<{ character_id?: string; character_name?: string }>('diary:written', (event) => {
           // 多角色过滤：仅当前角色窗口显示对应角色的日记 toast
           if (event.payload?.character_id && event.payload.character_id !== getCharacterId()) return;
-          showToast(t('toast.diary_written', { name: event.payload?.character_name ?? '' }), 'success', 4000);
+          showToast(t('toast.diary_written', { name: event.payload?.character_name ?? '' }), 'success', 4000, undefined, undefined, event.payload?.character_id || null);
         });
         if (cancelled) { safeUnlisten(unlisten); return; }
       } catch {
@@ -1644,13 +1767,14 @@ export default function App() {
       try {
         const un1 = await listen<{ character_id?: string }>('chat:config_error', (event) => {
           if (event.payload?.character_id && event.payload.character_id !== getCharacterId()) return;
-          showToast(t('toast.api_not_configured'), 'warning', 6000);
+          // 归属原样透传：空归属交给主角色窗口，避免每个角色窗口各弹一条
+          showToast(t('toast.api_not_configured'), 'warning', 6000, undefined, undefined, event.payload?.character_id || null);
         });
         if (cancelled) { un1(); return; }
         unlistens.push(un1);
         const un2 = await listen<{ character_id?: string }>('llm:not_configured', (event) => {
           if (event.payload?.character_id && event.payload.character_id !== getCharacterId()) return;
-          showToast(t('toast.api_not_configured'), 'warning', 6000);
+          showToast(t('toast.api_not_configured'), 'warning', 6000, undefined, undefined, event.payload?.character_id || null);
         });
         if (cancelled) { un2(); return; }
         unlistens.push(un2);
@@ -1671,7 +1795,10 @@ export default function App() {
     let unlisten: (() => void) | undefined;
     void (async () => {
       try {
-        unlisten = await listen<{ task_type: string; message_key?: string; error?: string }>('chat:route_fallback', (event) => {
+        unlisten = await listen<{ task_type: string; message_key?: string; error?: string; character_id?: string }>('chat:route_fallback', (event) => {
+          // 归属守卫：有归属时只响应属于本角色的回退；无归属转交主角色窗口（同 llm:error）
+          const owner = event.payload?.character_id;
+          if (owner && owner !== getCharacterId()) return;
           const taskType = event.payload?.task_type ?? '';
           const messageKey = event.payload?.message_key;
           const rawError = event.payload?.error ?? '';
@@ -1695,9 +1822,9 @@ export default function App() {
           }
           if (reasonText) {
             const shortReason = reasonText.length > 40 ? reasonText.slice(0, 40) + '…' : reasonText;
-            showToast(t('toast.route_fallback_reason', { task: taskLabel, reason: shortReason }), 'warning', 5000);
+            showToast(t('toast.route_fallback_reason', { task: taskLabel, reason: shortReason }), 'warning', 5000, undefined, undefined, owner || null);
           } else {
-            showToast(t('toast.route_fallback', { task: taskLabel }), 'warning', 5000);
+            showToast(t('toast.route_fallback', { task: taskLabel }), 'warning', 5000, undefined, undefined, owner || null);
           }
         });
         if (cancelled) { safeUnlisten(unlisten); return; }
@@ -1718,19 +1845,44 @@ export default function App() {
     let unlisten: (() => void) | undefined;
     void (async () => {
       try {
-        unlisten = await listen<{ task_type: string; message_key: string; error: string; error_kind: string }>('llm:error', (event) => {
-          const { message_key: messageKey, error: rawError } = event.payload ?? {};
+        unlisten = await listen<{ task_type: string; message_key: string; error: string; error_kind: string; endpoint: string; character_id?: string }>('llm:error', (event) => {
+          // 归属守卫：**有归属**时只弹给触发本次调用的角色。
+          // 无归属（后台任务未声明角色 / 旧版后端未下发）不丢弃，转交主角色窗口呈现一次——
+          // 严格丢弃会让「余额不足」这类必须让用户知道的错误彻底消失，而广播又会让
+          // 每只桌宠各弹一条。两者之间只有「主角色窗口认领」这一个既不重复也不丢信息的解。
+          const owner = event.payload?.character_id;
+          if (owner && owner !== getCharacterId()) return;
+          const { message_key: messageKey } = event.payload ?? {};
           if (!messageKey) return;
-          const key = messageKey.replace('toast.', '');
-          const translated = t(key as any, { error: rawError });
-          let message: string;
-          if (translated && !translated.includes('llm_error_')) {
-            message = translated;
-          } else {
-            message = t('toast.llm_error_unknown', { error: rawError?.slice(0, 200) ?? '' });
+          // messageKey 后端下发时**已带 `toast.` 前缀**（如 toast.llm_error_insufficient_balance），
+          // 必须原样查表。此前这里先 replace 掉前缀再查，i18n 永远命中不了，
+          // 导致所有 LLM 错误都退化成通用文案、而厂商分类结果被白白丢掉。
+          const translated = t(messageKey as any);
+          // 未命中 i18n 时回落到通用文案，且不回显原始错误串：厂商响应体里带
+          // request_id、endpoint、计费信息，不适合直接呈现给用户。排查请查日志。
+          const message = translated && !translated.includes('llm_error_')
+            ? translated
+            : t('toast.llm_error_unknown');
+          const kind = event.payload?.error_kind ?? '';
+          // 熔断器打开是本地自我保护，会自行恢复，不打扰用户
+          if (kind === 'circuit_breaker_open') return;
+          lastLlmErrorToastAtRef.current = Date.now();
+          const isPermanent = ['invalid_api_key', 'insufficient_balance', 'quota_exceeded', 'model_not_found', 'region_not_supported', 'permission_denied'].includes(kind);
+          // 欠费 / 配额类错误挂「前往 xx 控制台」动作：endpoint 由 Rust 下发，
+          // 是这次调用实际使用的 provider（含路由回退后的真实厂商），
+          // 据此反查厂商预设拿 consoleUrl 与显示名；custom endpoint 查不到就不挂。
+          let action: ToastAction | undefined;
+          if (kind === 'insufficient_balance' || kind === 'quota_exceeded') {
+            const preset = findProviderPresetByEndpoint(event.payload?.endpoint ?? '');
+            if (preset?.consoleUrl) {
+              action = {
+                kind: 'open_url',
+                url: preset.consoleUrl,
+                label: t('toast.goto_console', { vendor: t(preset.labelKey as any) }),
+              };
+            }
           }
-          const isPermanent = ['invalid_api_key', 'insufficient_balance', 'quota_exceeded', 'model_not_found', 'region_not_supported', 'permission_denied'].includes(event.payload?.error_kind ?? '');
-          showToast(message, isPermanent ? 'error' : 'warning', isPermanent ? 10000 : 6000);
+          showToast(message, isPermanent ? 'error' : 'warning', isPermanent ? 10000 : 6000, undefined, action, owner || null);
         });
         if (cancelled) { safeUnlisten(unlisten); return; }
       } catch {
@@ -1750,9 +1902,11 @@ export default function App() {
     let unlisten: (() => void) | undefined;
     void (async () => {
       try {
-        unlisten = await listen<{ action: string; item: { title?: string; id: string } }>(
+        unlisten = await listen<{ action: string; item: { title?: string; id: string }; character_id?: string }>(
           'todo:changed',
           (event) => {
+            // 归属守卫：只弹给发起变更的角色（UI 手动操作无归属，不弹）
+            if (event.payload?.character_id !== getCharacterId()) return;
             const { action, item } = event.payload;
             let message = '';
             switch (action) {
@@ -1787,9 +1941,11 @@ export default function App() {
     let unlisten: (() => void) | undefined;
     void (async () => {
       try {
-        unlisten = await listen<{ action: string; task: { message?: string } }>(
+        unlisten = await listen<{ action: string; task: { message?: string }; character_id?: string }>(
           'scheduler:changed',
           (event) => {
+            // 归属守卫：只弹给创建该任务的角色（手动创建/旧任务无归属，不弹）
+            if (event.payload?.character_id !== getCharacterId()) return;
             const { action, task } = event.payload;
             let message = '';
             switch (action) {
@@ -2417,24 +2573,9 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 主动消息被忽略检测：如果气泡显示后用户 8 秒内无新互动，标记为忽略
-  useEffect(() => {
-    if (!lastBubbleFromProactiveRef.current) return;
-    const id = window.setTimeout(async () => {
-      const sinceBubble = Date.now() - lastBubbleFromProactiveRef.current;
-      const sinceActivity = Date.now() - lastActivityRef.current;
-      // 用户既没有点击气泡也没有发新消息
-      if (sinceBubble > 8000 && sinceActivity > 8000) {
-        try {
-          await proactiveApi.markIgnored();
-        } catch {
-          /* ignore */
-        }
-        lastBubbleFromProactiveRef.current = 0;
-      }
-    }, 9000);
-    return () => window.clearTimeout(id);
-  }, [lastBubbleFromProactiveRef.current, proactiveApi]);
+  // 主动消息"被冷落"检测已迁移到后端（proactive.tick 内的权威判定，见 proactive/mod.rs）：
+  // 主动消息投递后若用户在场且超过 IGNORE_TIMEOUT_SECS 仍未回应，则 on_ignored 一次。
+  // 前端不再用 ref 驱动的定时器判定（ref 变化不触发重渲染，原实现不可靠且 ignored_count 恒为 0）。
 
   // requestRestore / hideForSleep / restoreFromSleep / hideForOffline / restoreFromOffline 引用 ——
   // 让快捷键回调和事件监听器能调用最新的闭包，无需重新注册
@@ -2741,7 +2882,8 @@ export default function App() {
         }>('chat:presence_blocked', (event) => {
           if (event.payload?.character_id && event.payload.character_id !== getCharacterId()) return;
           const hint = event.payload.hint || t('chat.presence_blocked_default');
-          void emit('toast:show', { message: hint, type: 'warning', duration: 5000, key: `presence_blocked_${Date.now()}`, character_id: getCharacterId() ?? undefined });
+          // 同 presence:wake_deferred：原样转发归属，空归属交由主角色窗口收敛
+          void emit('toast:show', { message: hint, type: 'warning', duration: 5000, key: `presence_blocked_${Date.now()}`, character_id: event.payload?.character_id || undefined });
         });
         if (cancelled) { safeUnlisten(unlisten); return; }
       } catch {
@@ -2770,11 +2912,15 @@ export default function App() {
         }>('presence:wake_deferred', (event) => {
           if (event.payload?.character_id && event.payload.character_id !== getCharacterId()) return;
           const hint = event.payload.hint || t('toast.wake_deferred_default');
+          // 原样转发 payload 的归属，而不是改写成本窗口角色：本监听是宽松守卫
+          // （空归属时所有角色窗口都会通过），若各自标成自身角色，就会各弹一条。
+          // 空归属保持为空 → 接收侧按「无归属只弹主角色窗口」收敛。
           void emit('toast:show', {
             message: hint,
             type: 'info',
             duration: 4000,
             key: `wake_deferred_${Date.now()}`,
+            character_id: event.payload?.character_id || undefined,
           });
         });
         if (cancelled) { safeUnlisten(unlisten); return; }
@@ -2905,7 +3051,9 @@ export default function App() {
     // 施法动画与进度环同步播放，此时应已自然播完；兜底立即归位（不倒放）
     petRef.current?.stopCast();
     holdActionRef.current();
-  }, []);
+    // 长按本身也是一次用户动作：记进事件账本，并让桌宠随口反应一句
+    requestPetReaction('long_press');
+  }, [requestPetReaction]);
 
   const startHold = useCallback((clientX: number, clientY: number) => {
     // 新长按会话：上一段施法（含取消倒放）直接归位，避免与本次叠加
@@ -3053,8 +3201,20 @@ export default function App() {
     let unlistenDizzy: (() => void) | undefined;
     void (async () => {
       try {
-        unlistenDizzy = await win.listen<{ duration_ms?: number }>('drag:dizzy', (event) => {
+        unlistenDizzy = await win.listen<{
+          duration_ms?: number;
+          reason?: string;
+          impact?: number;
+        }>('drag:dizzy', (event) => {
           applyDizzy(event.payload?.duration_ms ?? 0);
+          // 「被甩懵了」是一次实打实的用户动作：除了切表情，也让桌宠反应一句
+          // （后端据此记进统一事件账本，并带节流合并连续撞击）
+          const reason = event.payload?.reason;
+          if (reason === 'fast_drag') {
+            requestPetReaction('fast_drag');
+          } else if (reason === 'edge_bounce') {
+            requestPetReaction('edge_bounce', event.payload?.impact);
+          }
         });
       } catch {
         /* listen 不可用时跳过 */
@@ -3073,7 +3233,7 @@ export default function App() {
         dizzyTimerRef.current = null;
       }
     };
-  }, []);
+  }, [requestPetReaction]);
 
   // 右键：桌宠窗口不弹菜单（统一从系统托盘菜单访问），仅拦截默认行为
   const handleContextMenu = useCallback((e: React.MouseEvent) => {
@@ -3197,17 +3357,71 @@ export default function App() {
     // 心智观察器默认全屏大小（CSS 逻辑像素，Tauri 窗口尺寸同单位）
     const fullW = window.screen.width;
     const fullH = window.screen.height;
-    void openWindow('memory', 'memory', t('memory.title'), fullW, fullH, {
-      decorations: false,
-      transparent: false,
-      shadow: true,
-      minWidth: 1260,
-      minHeight: 896,
-    });
+    // 入场动画：窗口从桌宠当前矩形「长」到全屏。两条路径共用同一个矩形：
+    // - 新建：把桌宠的物理矩形随 URL 带过去，由子窗口自己折算成 CSS px 并播放；
+    // - 已存在：不能再 navigate（会整页 reload），改由事件通知子窗口自己再播一遍。
+    // 取不到位置就退化为普通显示（没有动画），不阻塞打开。
+    //
+    // 两条路径的「显形」都由子窗口负责（`selfReveal`）：它得先把首帧摆成桌宠大小
+    // 再让窗口出现。尤其是被最小化的时候——若这里先把窗口还原出来，用户会先看到
+    // 整屏复位一次、再看到它缩回桌宠长出来，等于呼出了两回。
+    void (async () => {
+      let petRect: PetRect | null = null;
+      try {
+        const petWin = getCurrentWindow();
+        const [pos, size] = await Promise.all([petWin.outerPosition(), petWin.outerSize()]);
+        petRect = { x: pos.x, y: pos.y, w: size.width, h: size.height };
+      } catch {
+        petRect = null;
+      }
+      // 收窄成局部 const：闭包里捕获 let 会丢掉类型收窄，这里显式固一份
+      const rect = petRect;
+      const onExisting = rect ? () => { void emitPetReveal('memory', rect); } : undefined;
+      void openWindow('memory', 'memory', t('memory.title'), fullW, fullH, {
+        decorations: false,
+        resizable: false,
+        // 入场动画缩放期间，卡片之外必须透出桌面，故用透明窗口 + 去阴影；
+        // 静止态由 .codex-theme 的纸面背景铺满整窗，与不透明窗口视觉一致。
+        transparent: true,
+        shadow: false,
+        selfReveal: true,
+        minWidth: 1260,
+        minHeight: 896,
+        extraQuery: rect ? buildPetRectQuery(rect) : undefined,
+        // 已打开时：提到前台后再从桌宠位置重播一次入场，观感与首开一致
+        onExisting,
+      });
+    })();
   }, [t]);
 
-  // 长按桌宠触发的动作：打开心智观察器（与托盘菜单、快捷键同一入口）
-  holdActionRef.current = openMemory;
+  /** 长按桌宠触发的动作：心智观察器的**开关**。
+   *
+   *  它此刻已经开在屏幕上（可见且未最小化）→ 长按是「收起来」，直接最小化；
+   *  其余情况（没开过 / 已被最小化 / 被 hide）都走 `openMemory`：打开、提到前台、播入场动画。
+   *
+   *  判据为什么是「在不在屏上」而不是窗口焦点：按下桌宠那一刻焦点就被桌宠窗口抢走了，
+   *  子窗口的失焦回调还会顺手把它降回非置顶；等 1 秒长按成立时它早已不是前台窗口，
+   *  按焦点判断这个动作根本触发不了。
+   *
+   *  托盘菜单与全局快捷键不走这里——它们要的是明确的「打开」，不该变成开关。 */
+  const toggleMemory = useCallback(() => {
+    void (async () => {
+      let win: WebviewWindow | null = null;
+      try {
+        win = await WebviewWindow.getByLabel(charScopedLabel('memory'));
+      } catch {
+        win = null;
+      }
+      if (win && (await isWindowOnScreen(win))) {
+        await win.minimize().catch(() => {});
+        return;
+      }
+      openMemory();
+    })();
+  }, [openMemory]);
+
+  // 长按桌宠触发的动作：开关心智观察器（与托盘菜单、快捷键共用 openMemory）
+  holdActionRef.current = toggleMemory;
 
   // 3D 公寓窗口：固定屏幕尺寸 + 无边框 + 透明背景。
   // 与心智观察器共用 utils/roomWindow 的入口，保证两处打开的是同一个实例。

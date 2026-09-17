@@ -372,8 +372,16 @@ pub struct ToolUseContext {
     pub session_id: String,
     /// 用户 ID
     pub user_id: String,
-    /// 工作目录
+    /// 主工作目录（决定相对路径解析、终端 cwd 与提示词环境块；空串表示无工作区模式）
     pub working_directory: String,
+    /// 附加工作目录：主工作区之外额外授权的目录，逐个带只读标记与操作白名单。
+    ///
+    /// 与 [`PermissionContext::additional_working_directories`] 同一种表达。
+    /// 沙箱硬闸门与权限确认闸门共用 [`ToolUseContext::is_path_authorized`] 做
+    /// 「是否在任一授权根内」的判定 —— 两层口径必须一致，否则会出现
+    /// 「沙箱放行、权限拒绝」这类互相矛盾的结论。
+    #[serde(default)]
+    pub extra_working_directories: Vec<WorkingDirectoryPermission>,
     /// 调用时间戳
     pub timestamp: DateTime<Utc>,
     /// Vivian 当前主导情绪标签（如 "joy" / "sadness" / "neutral"）
@@ -422,6 +430,7 @@ impl Default for ToolUseContext {
             working_directory: std::env::current_dir()
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_default(),
+            extra_working_directories: Vec::new(),
             timestamp: Utc::now(),
             current_emotion: None,
             intimacy_stage: None,
@@ -444,6 +453,7 @@ impl ToolUseContext {
             working_directory: std::env::current_dir()
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_default(),
+            extra_working_directories: Vec::new(),
             timestamp: Utc::now(),
             current_emotion: None,
             intimacy_stage: None,
@@ -463,9 +473,57 @@ impl ToolUseContext {
         self
     }
 
+    /// 设置主工作目录（不再接收第二个参数时保留既有附加目录）
     pub fn with_working_directory(mut self, dir: impl Into<String>) -> Self {
         self.working_directory = dir.into();
         self
+    }
+
+    /// 追加一个附加工作目录（主工作区之外的授权目录）。
+    pub fn with_extra_working_directory(mut self, path: impl Into<String>, read_only: bool) -> Self {
+        let path = path.into();
+        self.extra_working_directories.push(WorkingDirectoryPermission {
+            permissions: if read_only {
+                vec!["read".to_string()]
+            } else {
+                vec!["read".to_string(), "write".to_string(), "delete".to_string()]
+            },
+            is_read_only: read_only,
+            path,
+        });
+        self
+    }
+
+    /// 批量设置附加工作目录（覆盖既有）。
+    pub fn with_extra_working_directories(
+        mut self,
+        dirs: impl IntoIterator<Item = (String, bool)>,
+    ) -> Self {
+        self.extra_working_directories = dirs
+            .into_iter()
+            .map(|(path, read_only)| WorkingDirectoryPermission {
+                permissions: if read_only {
+                    vec!["read".to_string()]
+                } else {
+                    vec!["read".to_string(), "write".to_string(), "delete".to_string()]
+                },
+                is_read_only: read_only,
+                path,
+            })
+            .collect();
+        self
+    }
+
+    /// 路径是否落在任一授权工作区内（主工作区 + 附加目录）。
+    ///
+    /// 与沙箱硬闸门、各工具 `validate_input` 共用 [`is_path_within_any`]，
+    /// 保证「是否在授权范围内」在全链路只有一个判定口径。
+    pub fn is_path_authorized(&self, path: &str) -> bool {
+        is_path_within_any(
+            path,
+            &self.working_directory,
+            self.extra_working_directories.iter().map(|d| d.path.as_str()),
+        )
     }
 
     /// 设置调用方智能体类型（"chat" / "work"）
@@ -615,10 +673,8 @@ impl Default for PermissionMode {
 ///   下都不弹确认」。有副作用的工具必须显式覆盖，否则等于悄悄放行。
 /// - `Safe` 只表示「无副作用」，不表示「不敏感」。截屏类工具虽无副作用，
 ///   但仍通过 [`super::permission::is_confirmation_required_tool`] 强制走确认流程。
-/// - 调整等级只影响**非默认访问级别**：默认 `full-control` 下
-///   `Safe`/`FsRead`/`FsWrite`/`Shell`/`Network` 一律 `Allow`，
-///   只有 `InputControl` 会 `Ask`。因此改等级是「收紧低权限级别」，
-///   不会给默认用户新增弹窗。
+/// - 默认采用 `fs-write`（工作区读写 + 网络）；`full-control` 必须由用户显式启用。
+///   已有用户的持久化选择保持不变。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ToolRiskTier {
@@ -881,15 +937,25 @@ pub struct PermissionContext {
     /// 额外工作目录（路径 → 权限集合）
     pub additional_working_directories: HashMap<String, WorkingDirectoryPermission>,
     /// 始终允许的工具规则
+    #[serde(default)]
     pub always_allow: Vec<String>,
     /// 始终拒绝的工具规则
+    #[serde(default)]
     pub always_deny: Vec<String>,
     /// 始终询问的工具规则
+    #[serde(default)]
     pub always_ask: Vec<String>,
+    /// 本轮用户消息原文。
+    ///
+    /// 供「预授权」档判定用：用户已经说清目标（"帮我把壁纸换成这张"）时，
+    /// 对应的低风险工具不再重复弹窗确认。为 `None` 时预授权一律不成立——
+    /// 也就是"拿不到用户原话就当没说清"，宁可多问一次。
+    #[serde(default)]
+    pub current_user_input: Option<String>,
 }
 
 fn default_access_level_enum() -> AgentAccessLevel {
-    AgentAccessLevel::FullControl
+    AgentAccessLevel::FsWrite
 }
 
 /// 工作目录权限
@@ -907,11 +973,12 @@ impl Default for PermissionContext {
     fn default() -> Self {
         Self {
             mode: PermissionMode::Default,
-            access_level: AgentAccessLevel::FullControl,
+            access_level: AgentAccessLevel::FsWrite,
             additional_working_directories: HashMap::new(),
             always_allow: Vec::new(),
             always_deny: Vec::new(),
             always_ask: Vec::new(),
+            current_user_input: None,
         }
     }
 }
@@ -955,27 +1022,25 @@ impl PermissionContext {
     }
 
     /// 检查路径是否在工作目录中
+    ///
+    /// 与 [`check_file_permission`](super::permission::check_file_permission)
+    /// 共用 [`is_path_within`]，保证「是否在授权目录内」在全链路只有一个判定口径。
     pub fn is_path_in_working_directory(&self, path: &str) -> bool {
-        let normalized = normalize_path(path);
-        for wd in self.additional_working_directories.values() {
-            let wd_normalized = normalize_path(&wd.path);
-            if normalized.starts_with(&wd_normalized) {
-                return true;
-            }
-        }
-        false
+        self.additional_working_directories
+            .values()
+            .any(|wd| is_path_within(path, &wd.path))
     }
 
     /// 获取工作目录权限
+    ///
+    /// 与 [`check_file_permission`](super::permission::check_file_permission) 一样取
+    /// **最长匹配**：工作区可以互相嵌套，取第一个匹配会让结论随 HashMap 迭代顺序摆动。
     pub fn get_working_directory_permissions(&self, path: &str) -> Option<&[String]> {
-        let normalized = normalize_path(path);
-        for wd in self.additional_working_directories.values() {
-            let wd_normalized = normalize_path(&wd.path);
-            if normalized.starts_with(&wd_normalized) {
-                return Some(&wd.permissions);
-            }
-        }
-        None
+        self.additional_working_directories
+            .values()
+            .filter(|wd| is_path_within(path, &wd.path))
+            .max_by_key(|wd| wd.path.len())
+            .map(|wd| wd.permissions.as_slice())
     }
 }
 
@@ -999,6 +1064,35 @@ pub fn normalize_path(path: &str) -> String {
         }
     }
     out.to_string_lossy().replace('/', "\\").to_lowercase()
+}
+
+/// 以路径组件而非字符串前缀判断 path 是否位于 root 内。
+///
+/// 字符串前缀会把相邻同名前缀目录误认成授权目录的子路径；
+/// Path::starts_with 按组件比较，可保持工作区授权边界封闭。
+pub fn is_path_within(path: &str, root: &str) -> bool {
+    let normalized_path = normalize_path(path);
+    let normalized_root = normalize_path(root);
+    std::path::Path::new(&normalized_path)
+        .starts_with(std::path::Path::new(&normalized_root))
+}
+
+/// 路径是否落在任一授权工作区内（主工作区 + 附加工作区集合）。
+///
+/// 全链路唯一的「是否在授权范围内」判定：沙箱硬闸门、各工具 `validate_input` 与
+/// 权限层的归属检查都走这里，避免出现「沙箱放行、权限拒绝」这类互相矛盾的结论。
+///
+/// 主工作区为空串时视为「无目录沙箱」，一律返回 true —— 无工作区模式依赖这一点：
+/// 文件操作走绝对路径，写入是否放行交给权限层向用户确认。
+pub fn is_path_within_any<'a>(
+    path: &str,
+    primary: &str,
+    extras: impl IntoIterator<Item = &'a str>,
+) -> bool {
+    if primary.is_empty() {
+        return true;
+    }
+    is_path_within(path, primary) || extras.into_iter().any(|dir| is_path_within(path, dir))
 }
 
 /// 工具定义（用于序列化和传输）

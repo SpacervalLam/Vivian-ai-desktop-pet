@@ -695,9 +695,34 @@ impl SmartMemoryExtractor {
         // 话题总结统一标签（合并原 user_dialogue_summary / agent_dialogue_summary）
         // subject 字段（user/self/general）仍保留在 tags 中以区分总结主语
         tags.push("topic_summary".to_string());
+        // 走 **enriched** 写入路径（而不是 `add_memory_with_metadata`）。
+        //
+        // 旧实现直接调 `add_memory_with_metadata` → `add_memory_inner(embedding_text=None)`，
+        // 完全绕过 `MemoryEnricher`：`metadata["semantic_type"]` 永远不会被写入，
+        // 于是 `MemoryItem::semantic_type()` 对**每一条** AutoExtractor 产出的记忆
+        // 都返回 `General`，检索侧的 `semantic_type_boost` 恒为最低档 0.95
+        // （User/Feedback 本应 1.15、Relationship 1.10、SharedMemory/Project 1.05）。
+        //
+        // 后果不是"少一点点加成"，而是**排序退化**：用户偏好、关系事件、共同经历
+        // 这些最该被想起来的记忆，在 BM25/向量分数接近时无法压过普通闲聊，
+        // 直接表现为"她记不住我说过的事"——活人感缺失的主因之一。
+        //
+        // `keywords` / `description` / `summary` 同理：三者都只在 enriched 路径写入，
+        // 缺了 `description` 还会让 BM25 索引少一段可匹配文本。
+        //
+        // 代价：`MemoryType::LongTerm` 在 `should_enrich` 白名单内，每条抽取记忆
+        // 会多一次轻量 LLM 调用（enricher 侧另有失败回退到规则化写入，
+        // 增强失败不影响入库）。
         let item = if let Some(meta) = context_meta {
             memory
-                .add_memory_with_metadata(content, MemoryType::LongTerm, importance, tags, meta.clone())
+                .add_memory_enriched_with_metadata(
+                    content,
+                    MemoryType::LongTerm,
+                    importance,
+                    tags,
+                    Some(meta.clone()),
+                    None,
+                )
                 .await?
         } else {
             // fallback：调用方未传 context_meta 时，按角色自身对话总结兜底标注
@@ -709,7 +734,14 @@ impl SmartMemoryExtractor {
                 "knowledge_source": "extracted",
             });
             memory
-                .add_memory_with_metadata(content, MemoryType::LongTerm, importance, tags, fallback_meta)
+                .add_memory_enriched_with_metadata(
+                    content,
+                    MemoryType::LongTerm,
+                    importance,
+                    tags,
+                    Some(fallback_meta),
+                    None,
+                )
                 .await?
         };
         // 附加未闭环钩子（非空时）
@@ -1476,8 +1508,11 @@ mod tests {
             ChatMessage::assistant("hi there"),
         ];
         let text = build_dialog_text(&messages);
-        assert!(text.contains("User: hello"));
-        assert!(text.contains("AI: hi there"));
+        // 断言跟随 `build_dialog_text` 现行输出格式（说话人前缀标记，与
+        // `pipeline::steps::generation::ensure_speaker_prefix` 同一套）。
+        // 旧断言 `"User: hello"` 是格式改版前的残留，早已失效。
+        assert!(text.contains("[User says to me] hello"), "实际输出: {text}");
+        assert!(text.contains("[I say to User] hi there"), "实际输出: {text}");
     }
 
     #[test]

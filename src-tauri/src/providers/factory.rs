@@ -411,11 +411,11 @@ fn create_provider_by_kind(
     effective_proxy_url: Option<String>,
     client: Option<reqwest::Client>,
     cache_strategy: CacheStrategy,
-    _lang: &str,
+    lang: &str,
     include_instructions: bool,
 ) -> VivianResult<Box<dyn BaseProvider>> {
     let instructions = if include_instructions {
-        Some(prompt_modules::build_instructions())
+        Some(prompt_modules::build_instructions(lang))
     } else {
         None
     };

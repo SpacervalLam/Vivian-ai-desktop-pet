@@ -7,12 +7,14 @@
  */
 
 import React, { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo, lazy, Suspense } from 'react';
+import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import { listen, emit, type UnlistenFn } from '@tauri-apps/api/event';
 import { invoke, convertFileSrc } from '@tauri-apps/api/core';
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { open as openDialog, confirm as confirmDialog } from '@tauri-apps/plugin-dialog';
 import { raiseWindow } from '../../../utils/windowRaiser';
+import { reportInspectorSession } from '../../../utils/inspectorAttention';
 import {
   Plus, Trash2, ChevronDown, ChevronRight, Loader2,
   FileText, FilePlus, FileEdit, Terminal as TerminalIcon, Search, FolderTree,
@@ -21,10 +23,12 @@ import {
   Activity, Send, Square, ArrowDown, ArrowUp, List,
   PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, SlidersHorizontal, Ellipsis,
   Goal, ClipboardList, History, MessageSquare, Download, Copy, ThumbsUp, ThumbsDown, GitFork, Mic, Brain,
-  HelpCircle, FileDiff, FileCode, Palette, Globe, Settings, File as FileIcon, Info,
+  HelpCircle, FileDiff, Settings, File as FileIcon, Info, StickyNote,
 } from 'lucide-react';
 import './CodeAgentPage.css';
 import TrajectoryPanel from './TrajectoryPanel';
+import TurnRail, { buildTurns } from './TurnRail';
+import PinnedSummary from './PinnedSummary';
 import { MarkdownFileContext, MarkdownText, FileChip } from './codeMarkdown';
 import { SourceFileView } from './SourceFileView';
 import DOMPurify from 'dompurify';
@@ -116,10 +120,20 @@ interface CodingFileChangeView {
   line?: number;
 }
 
+/** 会话的附加工作区（主工作区之外额外授权的目录）。 */
+interface ExtraWorkspace {
+  path: string;
+  /** 只读：拒绝写入与删除，读取不受影响 */
+  read_only: boolean;
+}
+
 interface CodingSession {
   session_id: string;
   char_id: string;
+  /** 主工作区：决定相对路径、项目记忆、终端 cwd 与提示词环境块；空串表示无工作区模式 */
   working_directory: string;
+  /** 附加工作区：主工作区之外可访问的目录（旧会话可能没有该字段） */
+  extra_workspaces?: ExtraWorkspace[];
   title: string;
   mode: string;
   permission?: 'read_only' | 'workspace_write' | 'full_access' | string;
@@ -192,6 +206,32 @@ function useWheelHorizontalScroll<T extends HTMLElement>(): React.RefObject<T> {
 }
 
 // ============ 常量 ============
+
+/** 置顶摘要显隐的落盘键：'0' = 用户主动关过，其余（含未设置）= 默认展开 */
+const PINNED_VISIBLE_KEY = 'vivian.code_agent.pinned_summary_visible';
+
+/**
+ * 置顶摘要的宽度策略。
+ *
+ * 它是**贴在主工作区右缘的一条信息列**（绝对定位，紧贴对话滚动条的左边），
+ * 自己不参与 flex 分配——对话区靠 CSS 变量 `--codex-pinned-reserve` 留出的
+ * 右内边距让位，这样滚动条才能留在整条工作区的最右侧。
+ * 三个常量构成一条优先级：先保证对话区至少 CHAT_MIN_W（按对话区的 border-box
+ * 宽度算，即「整条工作区宽度 − 面板宽度」），剩下的才给面板；面板自己也不低于
+ * PINNED_W_MIN（再窄「提交或推送」这排按钮就会换行，很难看）。
+ * 窗口够宽时面板恒为 PINNED_W_IDEAL，宽度一动不动，不会有任何多余动画。
+ */
+const PINNED_W_IDEAL = 250;
+const PINNED_W_MIN = 186;
+const CHAT_MIN_W = 430;
+/**
+ * 面板与正文之间的呼吸缝（px），随 `--codex-pinned-reserve` 一起给出去。
+ *
+ * 因为让位用的是 `max(基准内边距, 面板宽 + 呼吸缝)`（见 CodeAgentPage.css），
+ * 展开时正文右缘恰好停在面板左侧这么宽的位置——「刚好不遮挡」。
+ * 面板收起时整条留白一起归零，正文立刻回到左右对称的内边距。
+ */
+const PINNED_GAP_W = 18;
 
 const MODES: Array<{ key: 'standard' | 'code' | 'minimal'; label: string; hint: string }> = [
   { key: 'standard', label: '标准模式', hint: '功能完整的编码 Agent，支持文件编辑、Shell、文件与网页检索、Skills、计划、目标、子代理和工作流。' },
@@ -1023,7 +1063,7 @@ const ToolCallCard: React.FC<{
       <button type="button" onClick={() => setExpanded((v) => !v)} className="codex-tool-header">
         <span style={{ color: statusColor, display: 'inline-flex', flexShrink: 0 }}>{meta.icon}</span>
         <span className="codex-tool-badge">{t('mind_inspector.code_tool_call')}</span>
-        <span style={{ fontWeight: 600, color: 'var(--codex-ink)' }}>{toolLabel}</span>
+        <span className="codex-tool-label">{toolLabel}</span>
         <span className="codex-tool-name">{name}</span>
         {durationMs != null && !running && (
           <span className="codex-tool-duration">{formatDuration(durationMs)}</span>
@@ -2108,9 +2148,126 @@ const PermissionDropdown: React.FC<{
               <span style={{ display: 'inline-flex', color: 'var(--codex-ink-faint)' }}>{perm.icon}</span>
               <span style={{ flex: 1 }}>{perm.label}</span>
               <span className="codex-dropdown-hint">{t(`mind_inspector.${permKey(perm.key)}`, { defaultValue: perm.hint })}</span>
-              {perm.key === value && <span style={{ display: 'inline-flex', color: 'var(--codex-ink)' }}><Check size={14} /></span>}
             </button>
           ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
+/**
+ * 工作区芯片 + 管理菜单。
+ *
+ * 主工作区决定相对路径、项目记忆、终端 cwd 与提示词环境块；附加工作区只扩大可访问范围
+ * （可逐个设为只读）。会话运行中不改工作区，与后端「运行中拒绝」保持一致。
+ */
+const WorkspaceDropdown: React.FC<{
+  workingDirectory: string;
+  extraWorkspaces: ExtraWorkspace[];
+  disabled: boolean;
+  onAdd: () => void;
+  onRemove: (path: string) => void;
+  onToggleReadOnly: (path: string, readOnly: boolean) => void;
+  onSetPrimary: () => void;
+}> = ({ workingDirectory, extraWorkspaces, disabled, onAdd, onRemove, onToggleReadOnly, onSetPrimary }) => {
+  const { t } = useTranslation();
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const onDocDown = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    window.addEventListener('mousedown', onDocDown);
+    return () => window.removeEventListener('mousedown', onDocDown);
+  }, []);
+
+  /** 目录名（芯片上只展示 basename，完整路径放 title / 菜单里）。 */
+  const folderName = (p: string) => p.split(/[\\/]/).filter(Boolean).pop() || p;
+
+  return (
+    <div ref={ref} className="codex-dropdown codex-ws-dropdown">
+      <button
+        type="button"
+        disabled={disabled}
+        onClick={() => setOpen((o) => !o)}
+        className="codex-workspace-chip"
+        title={workingDirectory || t('mind_inspector.code_no_workspace')}
+      >
+        <FolderOpen size={11} style={{ flexShrink: 0 }} />
+        <span className="codex-workspace-name">
+          {workingDirectory ? folderName(workingDirectory) : t('mind_inspector.code_no_workspace')}
+        </span>
+        {extraWorkspaces.length > 0 && (
+          <span className="codex-workspace-badge">+{extraWorkspaces.length}</span>
+        )}
+        <ChevronDown size={11} style={{ flexShrink: 0, color: 'var(--codex-ink-faint)' }} />
+      </button>
+      {open && (
+        <div className="codex-dropdown-menu codex-ws-menu">
+          <div className="codex-dropdown-label">{t('mind_inspector.code_workspaces')}</div>
+          {/* 主工作区：不可移除（移除后会话就变成无工作区模式，属于语义跳变，要换用下面的「更换」） */}
+          <div className="codex-ws-row">
+            <span className="codex-ws-badge">{t('mind_inspector.code_workspace_primary')}</span>
+            <span className="codex-ws-path" title={workingDirectory}>
+              {workingDirectory || t('mind_inspector.code_workspace_none')}
+            </span>
+          </div>
+          {extraWorkspaces.map((w) => (
+            <div key={w.path} className="codex-ws-row">
+              <span className="codex-ws-badge codex-ws-badge-extra">
+                {t('mind_inspector.code_workspace_extra')}
+              </span>
+              <span className="codex-ws-path" title={w.path}>{w.path}</span>
+              <button
+                type="button"
+                className={`codex-ws-toggle ${w.read_only ? 'ro' : 'rw'}`}
+                onClick={() => onToggleReadOnly(w.path, !w.read_only)}
+                title={w.read_only
+                  ? t('mind_inspector.code_workspace_make_writable')
+                  : t('mind_inspector.code_workspace_make_readonly')}
+              >
+                {w.read_only
+                  ? t('mind_inspector.code_workspace_readonly')
+                  : t('mind_inspector.code_workspace_writable')}
+              </button>
+              <button
+                type="button"
+                className="codex-ws-remove"
+                onClick={() => onRemove(w.path)}
+                title={t('mind_inspector.code_workspace_remove')}
+              >
+                <X size={12} />
+              </button>
+            </div>
+          ))}
+          <div className="codex-dropdown-sep" />
+          <button
+            type="button"
+            className="codex-dropdown-item"
+            onClick={() => { setOpen(false); onAdd(); }}
+          >
+            <span style={{ display: 'inline-flex', color: 'var(--codex-ink-faint)' }}><Plus size={13} /></span>
+            <span style={{ flex: 1 }}>{t('mind_inspector.code_workspace_add')}</span>
+          </button>
+          <button
+            type="button"
+            className="codex-dropdown-item"
+            onClick={() => { setOpen(false); onSetPrimary(); }}
+          >
+            <span style={{ display: 'inline-flex', color: 'var(--codex-ink-faint)' }}><FolderTree size={13} /></span>
+            <span style={{ flex: 1 }}>
+              {workingDirectory
+                ? t('mind_inspector.code_workspace_change_primary')
+                : t('mind_inspector.code_workspace_pick_primary')}
+            </span>
+          </button>
+          {workingDirectory && (
+            <div className="codex-new-menu-hint">
+              {t('mind_inspector.code_workspace_change_primary_hint')}
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -2370,7 +2527,8 @@ const FileRefMenu: React.FC<{
 };
 
 // 会话产物卡片：列出本会话生成/修改的文件（write_file / edit_file 成功记录）。
-const DeliverablesCard: React.FC<{ cwd: string; deliverables: string[] }> = ({ cwd, deliverables }) => {
+// onOpen 可选：传入后每一行变为可点击，点击在右侧预览页签打开该文件。
+const DeliverablesCard: React.FC<{ cwd: string; deliverables: string[]; onOpen?: (path: string) => void }> = ({ cwd, deliverables, onOpen }) => {
   const { t } = useTranslation();
   const rel = (p: string) => {
     const norm = p.replace(/\\/g, '/');
@@ -2387,7 +2545,20 @@ const DeliverablesCard: React.FC<{ cwd: string; deliverables: string[] }> = ({ c
       ) : (
         <div className="codex-deliverable-list">
           {deliverables.map((p) => (
-            <div key={p} className="codex-deliverable-row" title={p}>
+            <div
+              key={p}
+              className={`codex-deliverable-row${onOpen ? ' is-clickable' : ''}`}
+              title={onOpen ? `${p} · ${t('mind_inspector.code_click_to_preview')}` : p}
+              role={onOpen ? 'button' : undefined}
+              tabIndex={onOpen ? 0 : undefined}
+              onClick={onOpen ? () => onOpen(p) : undefined}
+              onKeyDown={onOpen ? (e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  onOpen(p);
+                }
+              } : undefined}
+            >
               <span className="codex-deliverable-icon"><FileText size={12} /></span>
               <span className="codex-deliverable-name">{rel(p).split('/').pop()}</span>
               <span className="codex-deliverable-path">{rel(p)}</span>
@@ -2490,23 +2661,107 @@ const ContextSpaceCard: React.FC<{ session: CodingSession | null }> = ({ session
   );
 };
 
-/** 按文件扩展名选择类型图标（变更列表行）。 */
-function fileTypeIcon(path: string): React.ReactNode {
-  const ext = (path.split('.').pop() ?? '').toLowerCase();
-  const common = { size: 14, strokeWidth: 1.8, style: { flexShrink: 0, color: 'var(--codex-ink-faint)' } } as const;
-  switch (ext) {
-    case 'ts': case 'tsx': case 'js': case 'jsx': case 'rs': case 'go': case 'py':
-    case 'java': case 'c': case 'cpp': case 'h': case 'rb': case 'kt': case 'swift':
-      return <FileCode {...common} />;
-    case 'json': return <Braces {...common} />;
-    case 'css': case 'scss': case 'less': return <Palette {...common} />;
-    case 'md': case 'txt': return <FileText {...common} />;
-    case 'html': case 'htm': case 'vue': return <Globe {...common} />;
-    case 'toml': case 'yaml': case 'yml': case 'ini': case 'cfg': case 'env': case 'lock':
-      return <Settings {...common} />;
-    default: return <FileIcon {...common} />;
-  }
+/**
+ * 变更列表的文件类型图标：按扩展名映射到语言 / 格式的官方 logo
+ * （public/icons/languages/，与 public/icons/providers 同一套图标源）。
+ *
+ * 原实现把 ts / tsx / js / rs / go / py / java / c / cpp… 全部映射到同一个
+ * FileCode，视觉上无法区分文件类型。这里换成真实品牌 logo，一眼可辨。
+ * 未收录的类型回退到通用文件图标，与编辑器对未知扩展名的处理一致。
+ */
+const LANG_ICON: Record<string, string> = {
+  // 语言
+  rs: 'rust',
+  py: 'python', pyw: 'python', pyi: 'python',
+  ts: 'typescript', mts: 'typescript', cts: 'typescript',
+  js: 'javascript', mjs: 'javascript', cjs: 'javascript',
+  jsx: 'react', tsx: 'react',
+  go: 'go',
+  java: 'openjdk',
+  cpp: 'cplusplus', cc: 'cplusplus', cxx: 'cplusplus',
+  hpp: 'cplusplus', hh: 'cplusplus', hxx: 'cplusplus',
+  c: 'c', h: 'c',
+  cs: 'dotnet',
+  rb: 'ruby',
+  kt: 'kotlin', kts: 'kotlin',
+  swift: 'swift',
+  php: 'php',
+  lua: 'lua',
+  dart: 'dart',
+  scala: 'scala', sc: 'scala',
+  ex: 'elixir', exs: 'elixir',
+  hs: 'haskell',
+  clj: 'clojure', cljs: 'clojure', cljc: 'clojure',
+  zig: 'zig',
+  nim: 'nim',
+  jl: 'julia',
+  r: 'r',
+  // 脚本 / shell
+  sh: 'gnubash', bash: 'gnubash', zsh: 'gnubash', ksh: 'gnubash',
+  // 标记 / 数据 / 样式
+  html: 'html5', htm: 'html5',
+  css: 'css',
+  scss: 'sass', sass: 'sass',
+  less: 'less',
+  vue: 'vuedotjs',
+  svelte: 'svelte',
+  xml: 'xml',
+  svg: 'svg',
+  json: 'json', jsonc: 'json', json5: 'json',
+  yaml: 'yaml', yml: 'yaml',
+  toml: 'toml',
+  md: 'markdown', markdown: 'markdown', mdx: 'markdown',
+  sql: 'mysql',
+  graphql: 'graphql', gql: 'graphql',
+  env: 'dotenv',
+  gitignore: 'git', gitattributes: 'git',
+  // 构建
+  cmake: 'cmake',
+  gradle: 'gradle',
+  dockerfile: 'docker',
+};
+
+/** 无扩展名的约定文件名 → logo（整名匹配，优先于扩展名） */
+const LANG_ICON_BY_NAME: Record<string, string> = {
+  dockerfile: 'docker',
+  makefile: 'gnubash',
+  'cmakelists.txt': 'cmake',
+  '.gitignore': 'git',
+  '.gitattributes': 'git',
+  '.env': 'dotenv',
+};
+
+/** 解析文件对应的 logo 名；未收录返回 null，由调用方回退到通用文件图标。 */
+function langIconName(path: string): string | null {
+  const base = (path.split(/[\\/]/).pop() ?? '').toLowerCase();
+  const byName = LANG_ICON_BY_NAME[base];
+  if (byName) return byName;
+  const ext = base.includes('.') ? (base.split('.').pop() ?? '') : '';
+  return LANG_ICON[ext] ?? null;
 }
+
+/** 变更列表行首的类型图标 */
+const FileTypeIcon: React.FC<{ path: string }> = ({ path }) => {
+  const slug = langIconName(path);
+  if (!slug) {
+    return (
+      <FileIcon
+        size={14}
+        strokeWidth={1.8}
+        style={{ flexShrink: 0, color: 'var(--codex-ink-faint)' }}
+      />
+    );
+  }
+  return (
+    <img
+      className="codex-file-lang"
+      src={`icons/languages/${slug}.svg`}
+      alt=""
+      aria-hidden="true"
+      draggable={false}
+    />
+  );
+};
 
 // ============ 右侧「预览」页：多页签文件预览 ============
 
@@ -2738,7 +2993,7 @@ const ChangeListCard: React.FC<{ changes: FileChange[] }> = ({ changes }) => {
                   title={c.path}
                   onClick={() => setSelected(selected === i ? null : i)}
                 >
-                  {fileTypeIcon(c.path)}
+                  <FileTypeIcon path={c.path} />
                   <span className="codex-changes-name">{base}</span>
                   <span className="codex-changes-stats">
                     {c.added > 0 && <span className="codex-changes-add">+{c.added}</span>}
@@ -2771,17 +3026,17 @@ const ChangeListCard: React.FC<{ changes: FileChange[] }> = ({ changes }) => {
 
 /**
  * 工作智能体独立待办（随编程会话持久化，与陪伴智能体 todo 完全分离）。
- * 会话切换时一次性拉取；此后监听 work_todo:changed 实时刷新——
- * 与工作智能体通过 work_todo_write 工具修改的是同一份数据，也可手动编辑。
  *
- * 存储是**整表替换**语义：手动增/删/勾选一律取回整表、本地改好、整体回写。
+ * **只读面板**：清单的唯一写入方是工作智能体的 `work_todo_write` 工具，用户不参与
+ * 增删改。所以这里既没有输入框也没有勾选/删除按钮，也没有回写命令——面板只负责把
+ * 智能体当前的计划如实展示出来。
+ *
+ * 会话切换时一次性拉取；此后监听 work_todo:changed 实时刷新。
  */
 const WorkTodosCard: React.FC<{ sessionId: string }> = ({ sessionId }) => {
   const { t } = useTranslation();
   const [items, setItems] = useState<WorkTodoItem[]>([]);
-  const [draft, setDraft] = useState('');
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
 
   const refresh = useCallback(async () => {
     if (!sessionId) return;
@@ -2818,52 +3073,6 @@ const WorkTodosCard: React.FC<{ sessionId: string }> = ({ sessionId }) => {
     };
   }, [sessionId]);
 
-  /** 整表回写：本地改好整张表再提交；被后端拒绝时展示原因并回滚到服务端状态。 */
-  const commit = (next: WorkTodoItem[]) => {
-    setError('');
-    void invoke<WorkTodoItem[]>('coding_write_work_todos', { sessionId, todos: next })
-      .then(setItems)
-      .catch((e) => {
-        setError(typeof e === 'string' ? e : String(e));
-        void refresh();
-      });
-  };
-
-  const add = () => {
-    const content = draft.trim();
-    if (!content) return;
-    if (items.some((it) => it.content === content)) {
-      setError(t('mind_inspector.code_todo_duplicate'));
-      return;
-    }
-    setDraft('');
-    commit([...items, { content, status: 'pending' }]);
-  };
-
-  /** 勾选：completed ⇄ pending。 */
-  const toggle = (i: number) => {
-    const next: WorkTodoItem[] = items.map((it, idx) =>
-      idx === i ? { ...it, status: it.status === 'completed' ? 'pending' : 'completed' } : it,
-    );
-    commit(next);
-  };
-
-  /** 推进状态；置为 in_progress 时把其他进行中项退回 pending（单 active 纪律）。 */
-  const setStatus = (i: number, status: WorkTodoItem['status']) => {
-    const next: WorkTodoItem[] = items.map((it, idx) => {
-      if (idx === i) return { ...it, status };
-      if (status === 'in_progress' && it.status === 'in_progress') {
-        return { ...it, status: 'pending' };
-      }
-      return it;
-    });
-    commit(next);
-  };
-
-  const remove = (i: number) => {
-    commit(items.filter((_, idx) => idx !== i));
-  };
-
   const statusLabel = (s: string) => {
     if (s === 'in_progress') return t('mind_inspector.code_todo_in_progress');
     if (s === 'completed') return t('mind_inspector.code_todo_completed');
@@ -2880,63 +3089,18 @@ const WorkTodosCard: React.FC<{ sessionId: string }> = ({ sessionId }) => {
           {cnt('completed')}/{items.length}
         </span>
       </div>
-      <div className="codex-worktodo-add">
-        <input
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') add();
-          }}
-          placeholder={t('mind_inspector.code_todo_placeholder')}
-          className="codex-worktodo-input"
-        />
-        <button
-          type="button"
-          className="codex-icon-btn"
-          style={{ width: 24, height: 24, flexShrink: 0 }}
-          onClick={add}
-          title={t('mind_inspector.code_todo_add')}
-        >
-          <Plus size={13} />
-        </button>
-      </div>
-      {error ? <div className="codex-worktodo-error">{error}</div> : null}
       {items.length === 0 ? (
         <div className="codex-empty-note">
           {loading ? '…' : t('mind_inspector.code_todo_empty')}
         </div>
       ) : (
         <div className="codex-worktodo-list">
-          {items.map((it, i) => (
+          {items.map((it) => (
             <div key={it.content} className={`codex-worktodo-row ${it.status}`}>
-              <input
-                type="checkbox"
-                checked={it.status === 'completed'}
-                onChange={() => toggle(i)}
-                title={t('mind_inspector.code_todo_check')}
-              />
-              {it.status === 'pending' ? (
-                <button
-                  type="button"
-                  className="codex-worktodo-start"
-                  onClick={() => setStatus(i, 'in_progress')}
-                  title={t('mind_inspector.code_todo_start')}
-                >
-                  ▶
-                </button>
-              ) : null}
               <span className="codex-worktodo-title">{it.content}</span>
               <span className={`codex-worktodo-status codex-worktodo-status-${it.status}`}>
                 {statusLabel(it.status)}
               </span>
-              <button
-                type="button"
-                className="codex-worktodo-del"
-                onClick={() => remove(i)}
-                title={t('mind_inspector.code_todo_remove')}
-              >
-                ×
-              </button>
             </div>
           ))}
         </div>
@@ -3119,6 +3283,86 @@ const CodeAgentPage: React.FC = () => {
   const [leftWidth, setLeftWidth] = useState(268);
   const [rightWidth, setRightWidth] = useState(360);
   const resizeRef = useRef<{ side: 'left' | 'right'; startX: number; startWidth: number } | null>(null);
+  /**
+   * 正在拖拽调宽的那一侧。
+   *
+   * 宽度过渡是给「收起 / 呼出」用的；拖拽期间必须关掉，否则每一帧的目标宽度都被
+   * 0.32s 缓动拖住，手感会变成「橡皮筋追鼠标」。用 state 而非 ref：它要驱动 class
+   * 变化、必须触发重渲染（只在按下 / 松开各变一次，开销可忽略）。
+   */
+  const [resizing, setResizing] = useState<'left' | 'right' | null>(null);
+
+  /**
+   * 置顶摘要（主工作区右侧信息列）的显隐。
+   *
+   * 面板默认开着——它的价值就是「不主动看也在」，关掉是用户为了腾视野做的主动选择，
+   * 所以默认值必须与「上次关过」区分开：只有显式存过 '0' 才默认收起。
+   * 落盘跨会话记住，省得每次进工作页都要再关一遍。
+   */
+  const [pinnedVisible, setPinnedVisible] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(PINNED_VISIBLE_KEY) !== '0';
+    } catch {
+      /* 加固过的 WebView 可能禁用 localStorage，退回默认展开 */
+      return true;
+    }
+  });
+  const togglePinnedSummary = useCallback(() => {
+    setPinnedVisible((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem(PINNED_VISIBLE_KEY, next ? '1' : '0');
+      } catch {
+        /* 存不下不影响本次会话内的开关 */
+      }
+      return next;
+    });
+  }, []);
+
+  /**
+   * 主工作区「顶栏以下那条横向带」的实测宽度（不含顶栏）。
+   *
+   * 置顶摘要的宽度要靠它算——面板占多宽 = 对话区少多宽，所以必须知道总共有多少
+   * 可分配。窗口被拖窄时 ResizeObserver 会重算，面板跟着收，而不是把对话区挤到
+   * 没法读。
+   */
+  const mainBodyRef = useRef<HTMLDivElement | null>(null);
+  const [mainBodyW, setMainBodyW] = useState(0);
+
+  /**
+   * 对话区滚动条的实测宽度。
+   *
+   * 滚动条长在 `.codex-chat` 的右边缘，而置顶摘要要贴在它**左边**（用户要求
+   * 「滑动条在卡片右侧」），所以面板的 `right` 必须正好等于这条滚动条的宽度。
+   * 不写死数值：主题里同时有 `scrollbar-width: thin` 与 `::-webkit-scrollbar{width:10px}`，
+   * 实际取值由 Chromium 决定，还会随 DPI / 系统设置变。配合 `.codex-chat` 的
+   * `scrollbar-gutter: stable`（无论有没有溢出都预留），这个差值恒等于滚动条宽度。
+   */
+  const [scrollbarW, setScrollbarW] = useState(0);
+
+  useLayoutEffect(() => {
+    const el = mainBodyRef.current;
+    if (!el) return;
+    // 首帧同步量一次：等 ResizeObserver 的异步回调，初始那次宽度变化会被当成
+    // 「收起 → 展开」播一遍动画，进页面就闪一下。
+    const measure = () => {
+      setMainBodyW(el.clientWidth);
+      const chat = scrollRef.current;
+      if (chat) setScrollbarW(chat.offsetWidth - chat.clientWidth);
+    };
+    measure();
+    if (typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
+  /** 置顶摘要展开时的实际宽度：先满足对话区的最小可用宽度，剩下的才给面板 */
+  const pinnedWidth = useMemo(() => {
+    if (mainBodyW <= 0) return PINNED_W_IDEAL;
+    const spare = mainBodyW - CHAT_MIN_W;
+    return Math.max(PINNED_W_MIN, Math.min(PINNED_W_IDEAL, spare));
+  }, [mainBodyW]);
 
   // 会话列表视图
   const [sessionView, setSessionView] = useState<'workspace' | 'flat'>('workspace');
@@ -3129,8 +3373,22 @@ const CodeAgentPage: React.FC = () => {
   const [manualOrder, setManualOrder] = useState<string[]>([]);
   const [workspaceTitles, setWorkspaceTitles] = useState<Record<string, string>>({});
   const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState<string | null>(null);
+  const [workspaceTreeOpen, setWorkspaceTreeOpen] = useState(true);
   const [renamingWorkspace, setRenamingWorkspace] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState('');
+  const [sessionMenu, setSessionMenu] = useState<{ id: string; x: number; y: number } | null>(null);
+  const [renameSessionId, setRenameSessionId] = useState<string | null>(null);
+  const [renameSessionDraft, setRenameSessionDraft] = useState('');
+  const [deleteSessionId, setDeleteSessionId] = useState<string | null>(null);
+  const [sessionTitles, setSessionTitles] = useState<Record<string, string>>({});
+  const [pinnedSessions, setPinnedSessions] = useState<Set<string>>(() => new Set());
+  const [unreadSessions, setUnreadSessions] = useState<Set<string>>(() => new Set());
+
+  /** 设置里配置的默认工作区：新建任务直接建到这里，不再强制弹目录选择框。空串表示未设置。 */
+  const [defaultWorkspace, setDefaultWorkspace] = useState('');
+  /** 左侧「新会话」按钮旁下拉菜单（默认工作区 / 手动选目录）的开关。 */
+  const [newMenuOpen, setNewMenuOpen] = useState(false);
+  const newMenuRef = useRef<HTMLDivElement | null>(null);
 
   // 右侧检查器：概览 / 轨迹 / 变更 / 预览 / 终端（待办清单已并入概览页）
   const [rightTab, setRightTab] = useState<'overview' | 'trajectory' | 'changes' | 'preview' | 'terminal'>('overview');
@@ -3161,6 +3419,7 @@ const CodeAgentPage: React.FC = () => {
       return [...prev, { path, key: `pv-${previewCounter.current}` }];
     });
     setRightTab('preview');
+    setRightCollapsed(false);
   }, []);
 
   /** 关闭一个预览页签；关闭最后一个时回到空态。 */
@@ -3185,6 +3444,13 @@ const CodeAgentPage: React.FC = () => {
   activeIdRef.current = activeId;
   const runningRef = useRef(false);
   runningRef.current = running;
+
+  // 上报当前激活会话：工作智能体卡在等用户拍板时，后端靠它判断用户看得见的
+  // 是哪一条提问。只有工作页会挂载本组件，所以离开工作页后由 MindInspector
+  // 的页签上报接管判定（nav ≠ code 时后端直接当作"看不见"）。
+  useEffect(() => {
+    reportInspectorSession(activeId);
+  }, [activeId]);
 
   // 语音输入：录音状态 + ASR 累积（partial 尾部替换 / final 追加）
   const [voiceRecording, setVoiceRecording] = useState(false);
@@ -3264,6 +3530,7 @@ const CodeAgentPage: React.FC = () => {
       startX: e.clientX,
       startWidth: side === 'left' ? leftWidth : rightWidth,
     };
+    setResizing(side);
   }, [leftWidth, rightWidth]);
 
   useEffect(() => {
@@ -3278,6 +3545,7 @@ const CodeAgentPage: React.FC = () => {
     };
     const onUp = () => {
       resizeRef.current = null;
+      setResizing(null);
     };
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup', onUp);
@@ -3447,6 +3715,16 @@ const CodeAgentPage: React.FC = () => {
     }
   }, []);
 
+  /** 读取设置中的默认工作区（未配置时后端返回 null/空串）。 */
+  const refreshDefaultWorkspace = useCallback(async (): Promise<string> => {
+    try {
+      const v = await invoke<string | null>('get_config', { key: 'default_workspace' });
+      return typeof v === 'string' ? v : '';
+    } catch {
+      return '';
+    }
+  }, []);
+
   /** 打开设置窗口并跳到 LLM 页（已存在则聚焦 + 热切换页签）。 */
   const openLlmSettings = useCallback(async () => {
     let win: WebviewWindow | null = null;
@@ -3480,6 +3758,7 @@ const CodeAgentPage: React.FC = () => {
 
   useEffect(() => {
     void (async () => {
+      setDefaultWorkspace(await refreshDefaultWorkspace());
       const list = await refreshSessions();
       if (list.length > 0 && !activeIdRef.current) {
         const latest = [...list].sort((a, b) => b.updated_at - a.updated_at)[0];
@@ -3539,44 +3818,67 @@ const CodeAgentPage: React.FC = () => {
     }
   }, [creating, refreshSessions, switchSession, t, notifyError]);
 
-  /** 保证存在一个可用会话：已有则复用，无则弹目录选择并新建。返回会话 id，取消/失败返回 null。 */
-  const ensureSession = useCallback(async (): Promise<string | null> => {
-    if (activeId) return activeId;
-    let dir: string | null = null;
+  /** 弹出目录选择框；用户取消或对话框失败返回 null。 */
+  const pickDirectory = useCallback(async (): Promise<string | null> => {
     try {
-      dir = await openDialog({ directory: true, multiple: false });
+      const dir = await openDialog({ directory: true, multiple: false });
+      return typeof dir === 'string' && dir ? dir : null;
     } catch (e) {
       notifyError(t('mind_inspector.code_select_dir_failed', { e: String(e) }));
       return null;
     }
-    if (typeof dir !== 'string' || !dir) return null;
-    const created = await createSessionInWorkspace(dir);
-    return created?.session_id ?? null;
-  }, [activeId, createSessionInWorkspace, t, notifyError]);
+  }, [t, notifyError]);
 
+  /**
+   * 新建会话的默认路径，全程不弹目录选择框：
+   * - 配置了默认工作区 → 建在该目录；
+   * - 未配置 → 建成「无工作区模式」会话（后端一等公民：不绑定目录、文件操作走绝对路径、
+   *   写入前请求用户确认），把「点一下就新建」做成不被打断的行为。
+   * 例外：默认目录已失效（被删除/改名）属于配置过期，此时退回手动选择让用户重新指向，
+   * 而不是静默降级成一个没有沙箱的会话。
+   */
+  const createSessionByDefault = useCallback(async (): Promise<CodingSession | null> => {
+    if (!defaultWorkspace) return createSessionInWorkspace('');
+    const created = await createSessionInWorkspace(defaultWorkspace);
+    if (created) return created;
+    const dir = await pickDirectory();
+    if (!dir) return null;
+    return createSessionInWorkspace(dir);
+  }, [defaultWorkspace, createSessionInWorkspace, pickDirectory]);
+
+  /** 保证存在一个可用会话：已有则复用，无则按默认工作区新建。返回会话 id，取消/失败返回 null。 */
+  const ensureSession = useCallback(async (): Promise<string | null> => {
+    if (activeId) return activeId;
+    const created = await createSessionByDefault();
+    return created?.session_id ?? null;
+  }, [activeId, createSessionByDefault]);
+
+  /** 「新会话」主点击：用默认工作区一键新建。 */
   const handleCreate = useCallback(async () => {
     if (creating) return;
-    let dir: string | null = null;
-    try {
-      dir = await openDialog({ directory: true, multiple: false });
-    } catch (e) {
-      notifyError(t('mind_inspector.code_select_dir_failed', { e: String(e) }));
-      return;
-    }
-    if (typeof dir !== 'string' || !dir) return;
-    await createSessionInWorkspace(dir);
-  }, [creating, createSessionInWorkspace, t, notifyError]);
+    await createSessionByDefault();
+  }, [creating, createSessionByDefault]);
 
-  const handleDelete = useCallback(async (id: string) => {
+  /** 「新会话」下拉菜单：本次手动指定目录新建。 */
+  const handleCreateWithPick = useCallback(async () => {
+    if (creating) return;
+    const dir = await pickDirectory();
+    if (!dir) return;
+    await createSessionInWorkspace(dir);
+  }, [creating, pickDirectory, createSessionInWorkspace]);
+
+  const handleDelete = useCallback(async (id: string, skipConfirm = false) => {
     const target = sessions.find((s) => s.session_id === id);
     const title = target?.title?.trim() || t('mind_inspector.code_untitled', { defaultValue: '未命名' });
     // Tauri WebView 中 window.confirm 可能被静默吞掉（不弹窗直接放行），
     // 用 dialog 插件的原生确认框保证弹窗真实可见
-    const ok = await confirmDialog(
-      t('mind_inspector.code_delete_session_confirm', { title }),
-      { title: t('mind_inspector.code_delete_confirm_title', { defaultValue: '删除会话' }), kind: 'warning' },
-    );
-    if (!ok) return;
+    if (!skipConfirm) {
+      const ok = await confirmDialog(
+        t('mind_inspector.code_delete_session_confirm', { title }),
+        { title: t('mind_inspector.code_delete_confirm_title', { defaultValue: '删除会话' }), kind: 'warning' },
+      );
+      if (!ok) return;
+    }
     try {
       await invoke('coding_delete_session', { sessionId: id });
       const list = await refreshSessions();
@@ -3586,6 +3888,41 @@ const CodeAgentPage: React.FC = () => {
       }
     } catch { /* ignore */ }
   }, [sessions, refreshSessions, switchSession, t]);
+
+  const handleSessionContextAction = useCallback(async (action: 'rename' | 'pin' | 'unread' | 'delete' | 'fork') => {
+    const id = sessionMenu?.id;
+    if (!id) return;
+    setSessionMenu(null);
+    const target = sessions.find((s) => s.session_id === id);
+    if (!target) return;
+    if (action === 'rename') {
+      setRenameSessionId(id);
+      setRenameSessionDraft(sessionTitles[id] || target.title || '未命名');
+    } else if (action === 'pin') {
+      setPinnedSessions((prev) => { const next = new Set(prev); next.has(id) ? next.delete(id) : next.add(id); return next; });
+    } else if (action === 'unread') {
+      setUnreadSessions((prev) => { const next = new Set(prev); next.has(id) ? next.delete(id) : next.add(id); return next; });
+    } else if (action === 'delete') {
+      setDeleteSessionId(id);
+    } else if (action === 'fork') {
+      switchSession(target);
+      const index = Math.max(0, messages.length - 1);
+      try {
+        const fork = await invoke<CodingSession>('coding_fork_session', { sessionId: id, messageIndex: index });
+        await refreshSessions();
+        switchSession(fork);
+      } catch (e) { notifyError(t('mind_inspector.code_fork_failed', { e: String(e) })); }
+    }
+  }, [sessionMenu, sessions, sessionTitles, handleDelete, switchSession, messages.length, refreshSessions, notifyError, t]);
+
+  useEffect(() => {
+    if (!sessionMenu) return;
+    const close = () => setSessionMenu(null);
+    const onKey = (event: KeyboardEvent) => { if (event.key === 'Escape') close(); };
+    document.addEventListener('mousedown', close);
+    document.addEventListener('keydown', onKey);
+    return () => { document.removeEventListener('mousedown', close); document.removeEventListener('keydown', onKey); };
+  }, [sessionMenu]);
 
   const handleSend = useCallback(async () => {
     const text = input.trim();
@@ -3788,6 +4125,88 @@ const CodeAgentPage: React.FC = () => {
     } catch { /* ignore */ }
   }, [activeId, running, activeSession]);
 
+  // ===== 工作区管理（主工作区 + 附加工作区）=====
+  /** 只更新本地会话记录：工作区命令都返回最新列表，不必整表刷新。 */
+  const patchSessionWorkspaces = useCallback(
+    (sessionId: string, patch: Partial<CodingSession>) => {
+      setSessions((prev) => prev.map((s) => (s.session_id === sessionId ? { ...s, ...patch } : s)));
+    },
+    [],
+  );
+
+  /** 挂载附加工作区（默认可写：多挂一个目录即多一个可写根，用户可在菜单里改成只读）。 */
+  const handleAddWorkspace = useCallback(async () => {
+    if (!activeId || running) return;
+    const dir = await pickDirectory();
+    if (!dir) return;
+    try {
+      const list = await invoke<ExtraWorkspace[]>('coding_add_workspace', {
+        sessionId: activeId, path: dir, readOnly: false,
+      });
+      patchSessionWorkspaces(activeId, { extra_workspaces: list });
+    } catch (e) {
+      notifyError(t('mind_inspector.code_workspace_add_failed', { e: String(e) }));
+    }
+  }, [activeId, running, pickDirectory, patchSessionWorkspaces, t, notifyError]);
+
+  const handleRemoveWorkspace = useCallback(async (path: string) => {
+    if (!activeId || running) return;
+    try {
+      const list = await invoke<ExtraWorkspace[]>('coding_remove_workspace', {
+        sessionId: activeId, path,
+      });
+      patchSessionWorkspaces(activeId, { extra_workspaces: list });
+    } catch (e) {
+      notifyError(t('mind_inspector.code_workspace_remove_failed', { e: String(e) }));
+    }
+  }, [activeId, running, patchSessionWorkspaces, t, notifyError]);
+
+  const handleToggleWorkspaceReadOnly = useCallback(async (path: string, readOnly: boolean) => {
+    if (!activeId || running) return;
+    try {
+      const list = await invoke<ExtraWorkspace[]>('coding_set_workspace_read_only', {
+        sessionId: activeId, path, readOnly,
+      });
+      patchSessionWorkspaces(activeId, { extra_workspaces: list });
+    } catch (e) {
+      notifyError(t('mind_inspector.code_workspace_readonly_failed', { e: String(e) }));
+    }
+  }, [activeId, running, patchSessionWorkspaces, t, notifyError]);
+
+  /**
+   * 更换主工作区。
+   *
+   * 原主工作区**降级为附加工作区**而不是直接丢弃：换主目录不该让 agent 静默失去对原目录的
+   * 访问权（可能正要跨目录改东西）。真不想要了，可以在菜单里手动移除那个附加目录。
+   */
+  const handleSetPrimaryWorkspace = useCallback(async () => {
+    if (!activeId || running) return;
+    const dir = await pickDirectory();
+    if (!dir) return;
+    const previousPrimary = activeSession?.working_directory ?? '';
+    try {
+      await invoke('coding_set_workspace', { sessionId: activeId, workspace: dir });
+      let extras = activeSession?.extra_workspaces ?? [];
+      if (previousPrimary && previousPrimary !== dir) {
+        try {
+          extras = await invoke<ExtraWorkspace[]>('coding_add_workspace', {
+            sessionId: activeId, path: previousPrimary, readOnly: false,
+          });
+        } catch {
+          // 原目录已不存在 / 与新主工作区重复：保持附加列表不变即可
+        }
+      }
+      patchSessionWorkspaces(activeId, { working_directory: dir, extra_workspaces: extras });
+      void loadFileTree(dir);
+      inputRef.current?.focus();
+    } catch (e) {
+      notifyError(t('mind_inspector.code_workspace_set_failed', { e: String(e) }));
+    }
+  }, [
+    activeId, running, activeSession, patchSessionWorkspaces,
+    loadFileTree, pickDirectory, t, notifyError,
+  ]);
+
   const toggleDir = useCallback((path: string) => {
     setExpandedDirs((prev) => {
       const n = new Set(prev);
@@ -3821,6 +4240,10 @@ const CodeAgentPage: React.FC = () => {
       const isMine = (p: unknown) => guard(p) && p.session_id === activeIdRef.current;
       const append = (msg: CodingMessage) => setMessages((prev) => [...prev, msg]);
 
+      // 设置窗口保存后同步默认工作区，改完设置无需重启/重开工作页即可生效
+      await add('config:saved', () => {
+        void refreshDefaultWorkspace().then(setDefaultWorkspace);
+      });
       await add('coding:question', (p) => {
         if (!isMine(p)) return;
         setAsk(p as WorkQuestionRequest);
@@ -3976,7 +4399,24 @@ const CodeAgentPage: React.FC = () => {
       });
     })();
     return () => { cancelled = true; unlistens.forEach((fn) => fn()); };
-  }, [refreshSessions, loadFileTree]);
+  }, [refreshSessions, loadFileTree, refreshDefaultWorkspace]);
+
+  // 「新会话」下拉菜单：点击外部或按 Esc 关闭（与页面其它下拉框一致）
+  useEffect(() => {
+    if (!newMenuOpen) return;
+    const onDocDown = (e: MouseEvent) => {
+      if (newMenuRef.current && !newMenuRef.current.contains(e.target as Node)) setNewMenuOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setNewMenuOpen(false);
+    };
+    window.addEventListener('mousedown', onDocDown);
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('mousedown', onDocDown);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [newMenuOpen]);
 
   const onScroll = useCallback(() => {
     const el = scrollRef.current;
@@ -4001,6 +4441,9 @@ const CodeAgentPage: React.FC = () => {
 
   const canSend = input.trim().length > 0 || draftImages.length > 0 || draftRefs.length > 0;
   const isEmptyChat = !activeSession || messages.length === 0;
+
+  // 左侧对话定位轨：一轮对话一根横杠（锚点由消息列表按轮首下标投放）
+  const turns = useMemo(() => buildTurns(messages, running), [messages, running]);
 
   // 预算耗尽横幅的进展数据（仅横幅显示时计算）
   const budgetProgress = useMemo(
@@ -4275,10 +4718,11 @@ const CodeAgentPage: React.FC = () => {
     });
   }, []);
 
-  // 工作区标题
+  // 工作区标题（无工作区模式的会话 dir 为空串：取不到目录名，会给分组标题留一片空白，故显式兜底）
   const workspaceDisplayName = useCallback((dir: string) => {
+    if (!dir) return t('mind_inspector.code_no_workspace');
     return workspaceTitles[dir] || dir.split(/[\\/]/).pop() || dir;
-  }, [workspaceTitles]);
+  }, [workspaceTitles, t]);
 
   // 删除工作区（删除该工作区下的所有会话）
   const deleteWorkspace = useCallback(async (dir: string) => {
@@ -4300,6 +4744,29 @@ const CodeAgentPage: React.FC = () => {
       }
     }
   }, [sessions, refreshSessions, switchSession]);
+
+  // 工作区管理菜单（重命名 / 删除工作区）：点菜单外部或按 Esc 关闭
+  const workspaceMenuRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (workspaceMenuOpen === null) return;
+    const onDocDown = (event: MouseEvent) => {
+      const target = event.target as Element | null;
+      if (workspaceMenuRef.current && target && workspaceMenuRef.current.contains(target)) return;
+      // 「⋯」按钮自己负责开合，这里放行；否则会先被关掉、再被它 toggle 开回来
+      if (target?.closest?.('.codex-group-more-btn')) return;
+      setWorkspaceMenuOpen(null);
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setWorkspaceMenuOpen(null);
+    };
+    window.addEventListener('mousedown', onDocDown);
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('mousedown', onDocDown);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [workspaceMenuOpen]);
 
   // 重命名工作区（本地显示标题）
   const startRenameWorkspace = useCallback((dir: string) => {
@@ -4440,11 +4907,9 @@ const CodeAgentPage: React.FC = () => {
               if (atMenu.visible) setAtMenu((prev) => ({ ...prev, visible: false }));
             }
           }}
-          placeholder={activeSession
-            ? (running
-              ? t('mind_inspector.code_input_thinking')
-              : t('mind_inspector.code_input_compose'))
-            : t('mind_inspector.code_input_no_session')}
+          placeholder={running
+            ? t('mind_inspector.code_input_thinking')
+            : t('mind_inspector.code_input_compose')}
           rows={1}
           className="codex-composer-textarea"
         />
@@ -4510,14 +4975,17 @@ const CodeAgentPage: React.FC = () => {
     <MarkdownFileContext.Provider value={mdFileCtx}>
     <div className="codex-theme workbench-root">
       {/* ===== 左侧：任务会话栏 ===== */}
-      <aside className={`codex-sidebar ${leftCollapsed ? 'collapsed' : ''}`} style={{ width: leftCollapsed ? 54 : leftWidth }}>
+      <aside
+        className={`codex-sidebar ${leftCollapsed ? 'collapsed' : ''}${resizing === 'left' ? ' resizing' : ''}`}
+        style={{ width: leftCollapsed ? 54 : leftWidth }}
+      >
         <div className="codex-brand">
-          {!leftCollapsed && (
-            <span className="codex-brand-title">
-              <Code2 size={22} strokeWidth={1.6} />
-              Work
-            </span>
-          )}
+          {/* 品牌标题不随收起卸载：卸载的话动画一开始标题就没了，只剩宽度在缩，
+              看起来是「内容闪一下 → 空条收缩」。改由 CSS 淡出 + 收掉占位。 */}
+          <span className="codex-brand-title">
+            <Code2 size={22} strokeWidth={1.6} />
+            Work
+          </span>
           <button
             type="button"
             onClick={() => setLeftCollapsed((v) => !v)}
@@ -4528,15 +4996,79 @@ const CodeAgentPage: React.FC = () => {
             {leftCollapsed ? <PanelLeftOpen size={16} /> : <PanelLeftClose size={16} />}
           </button>
         </div>
-        {!leftCollapsed && (
-          <button type="button" onClick={() => void handleCreate()} disabled={creating} className="codex-new-btn">
-            <Plus size={15} />
-            {t('mind_inspector.code_new_session', { defaultValue: '新建任务' })}
-          </button>
-        )}
+        {/* 会话列表与新建按钮同样常驻渲染，收起时由 CSS 淡出 + 收掉占位，
+            这样宽度动画期间内容是「跟着滑走」而不是「先消失再收缩」。 */}
+        <div className="codex-new-row" ref={newMenuRef}>
+            <button type="button" onClick={() => void handleCreate()} disabled={creating} className="codex-new-btn">
+              <Plus size={15} />
+              {t('mind_inspector.code_new_session', { defaultValue: '新建任务' })}
+            </button>
+            {/* 下拉箭头：保留手动指定工作区的入口（主点击走默认工作区，不再弹框） */}
+            <button
+              type="button"
+              disabled={creating}
+              className={`codex-new-caret ${newMenuOpen ? 'open' : ''}`}
+              onClick={() => setNewMenuOpen((v) => !v)}
+              title={t('mind_inspector.code_new_session_options', { defaultValue: '新建任务选项' })}
+              aria-label={t('mind_inspector.code_new_session_options', { defaultValue: '新建任务选项' })}
+              aria-expanded={newMenuOpen}
+            >
+              <ChevronDown size={13} />
+            </button>
+            {newMenuOpen && (
+              <div className="codex-dropdown-menu codex-new-menu">
+                <button
+                  type="button"
+                  className="codex-dropdown-item"
+                  onClick={() => { setNewMenuOpen(false); void handleCreate(); }}
+                >
+                  <span style={{ display: 'inline-flex', color: 'var(--codex-ink-faint)' }}><Folder size={14} /></span>
+                  <span style={{ flex: 1 }}>
+                    {defaultWorkspace
+                      ? t('mind_inspector.code_new_session_default')
+                      : t('mind_inspector.code_new_session_blank')}
+                  </span>
+                </button>
+                <div className="codex-new-menu-hint" title={defaultWorkspace}>
+                  {defaultWorkspace || t('mind_inspector.code_new_session_no_default')}
+                </div>
+                <div className="codex-dropdown-sep" />
+                <button
+                  type="button"
+                  className="codex-dropdown-item"
+                  onClick={() => { setNewMenuOpen(false); void handleCreateWithPick(); }}
+                >
+                  <span style={{ display: 'inline-flex', color: 'var(--codex-ink-faint)' }}><FolderOpen size={14} /></span>
+                  <span style={{ flex: 1 }}>{t('mind_inspector.code_new_session_pick')}</span>
+                </button>
+                <div className="codex-new-menu-hint">{t('mind_inspector.code_new_session_pick_hint')}</div>
+              </div>
+            )}
+        </div>
 
-        {!leftCollapsed && (
         <div className="codex-sidebar-scroll">
+          {activeSession?.working_directory ? (
+            <div className="codex-sidebar-section codex-tree-section">
+              <button
+                type="button"
+                className="codex-sidebar-label codex-tree-label"
+                onClick={() => setWorkspaceTreeOpen((open) => !open)}
+                aria-expanded={workspaceTreeOpen}
+              >
+                <FolderTree size={12} />
+                {t('mind_inspector.code_workspace_files', { defaultValue: '工作区文件' })}
+                <ChevronDown className={workspaceTreeOpen ? '' : 'collapsed'} size={12} />
+              </button>
+              {workspaceTreeOpen && (
+                <WorkspaceFileTree
+                  key={activeSession.session_id}
+                  root={activeSession.working_directory}
+                  onOpenFile={openPreview}
+                />
+              )}
+            </div>
+          ) : null}
+
           <div className="codex-sidebar-section">
             <div className="codex-sidebar-label codex-session-label">
               <FileText size={12} />
@@ -4634,7 +5166,9 @@ const CodeAgentPage: React.FC = () => {
                       <div
                         key={s.session_id}
                         onClick={() => switchSession(s)}
+                        onContextMenu={(e) => { e.preventDefault(); setSessionMenu({ id: s.session_id, x: e.clientX, y: e.clientY }); }}
                         className={`codex-session-item ${active ? 'active' : ''}`}
+                        title={s.title || t('mind_inspector.code_untitled', { defaultValue: '未命名' })}
                       >
                         {sessionSort === 'manual' && (
                           <div className="codex-session-manual">
@@ -4656,24 +5190,13 @@ const CodeAgentPage: React.FC = () => {
                         )}
                         <div style={{ minWidth: 0, flex: 1 }}>
                           <div className="codex-session-title">
-                            {s.title || t('mind_inspector.code_untitled', { defaultValue: '未命名' })}
+                            {sessionTitles[s.session_id] || s.title || t('mind_inspector.code_untitled', { defaultValue: '未命名' })}
                           </div>
-                          <div className="codex-session-meta">
-                            <FolderOpen size={11} />
-                            <span>{s.working_directory.split(/[\\/]/).pop() || s.working_directory}</span>
-                            {s.status === 'running' && (
-                              <Loader2 size={10} className="codex-spin" style={{ color: 'var(--codex-accent)' }} />
-                            )}
-                          </div>
+                          
                         </div>
-                        <button
-                          type="button"
-                          title={t('mind_inspector.code_delete')}
-                          onClick={(e) => { e.stopPropagation(); void handleDelete(s.session_id); }}
-                          className="codex-session-delete"
-                        >
-                          <Trash2 size={11} />
-                        </button>
+                        {s.status === 'running' && <Loader2 className="codex-session-status-spinner codex-spin" size={13} aria-label="工作中" />}
+                        {s.session_id === activeId && ask && <HelpCircle className="codex-session-status-question" size={14} aria-label="等待确认" />}
+                        {unreadSessions.has(s.session_id) && <span className="codex-session-unread-dot" aria-label="未读" />}
                       </div>
                     );
                   })
@@ -4721,7 +5244,7 @@ const CodeAgentPage: React.FC = () => {
                           </button>
                         </div>
                         {workspaceMenuOpen === dir && (
-                          <div className="codex-group-menu" onClick={(e) => e.stopPropagation()}>
+                          <div ref={workspaceMenuRef} className="codex-group-menu" onClick={(e) => e.stopPropagation()}>
                             <button
                               type="button"
                               onClick={() => startRenameWorkspace(dir)}
@@ -4752,7 +5275,9 @@ const CodeAgentPage: React.FC = () => {
                           <div
                             key={s.session_id}
                             onClick={() => switchSession(s)}
+                            onContextMenu={(e) => { e.preventDefault(); setSessionMenu({ id: s.session_id, x: e.clientX, y: e.clientY }); }}
                             className={`codex-session-item ${active ? 'active' : ''}`}
+                            title={s.title || t('mind_inspector.code_untitled', { defaultValue: '未命名' })}
                           >
                             {sessionSort === 'manual' && (
                               <div className="codex-session-manual">
@@ -4774,24 +5299,13 @@ const CodeAgentPage: React.FC = () => {
                             )}
                             <div style={{ minWidth: 0, flex: 1 }}>
                               <div className="codex-session-title">
-                                {s.title || t('mind_inspector.code_untitled', { defaultValue: '未命名' })}
+                                {sessionTitles[s.session_id] || s.title || t('mind_inspector.code_untitled', { defaultValue: '未命名' })}
                               </div>
-                              <div className="codex-session-meta">
-                                <FolderOpen size={11} />
-                                <span>{s.working_directory.split(/[\\/]/).pop() || s.working_directory}</span>
-                                {s.status === 'running' && (
-                                  <Loader2 size={10} className="codex-spin" style={{ color: 'var(--codex-accent)' }} />
-                                )}
-                              </div>
+                              
                             </div>
-                            <button
-                              type="button"
-                              title={t('mind_inspector.code_delete')}
-                              onClick={(e) => { e.stopPropagation(); void handleDelete(s.session_id); }}
-                              className="codex-session-delete"
-                            >
-                              <Trash2 size={11} />
-                            </button>
+                            {s.status === 'running' && <Loader2 className="codex-session-status-spinner codex-spin" size={13} aria-label="工作中" />}
+                            {s.session_id === activeId && ask && <HelpCircle className="codex-session-status-question" size={14} aria-label="等待确认" />}
+                            {unreadSessions.has(s.session_id) && <span className="codex-session-unread-dot" aria-label="未读" />}
                           </div>
                         );
                       })}
@@ -4800,28 +5314,39 @@ const CodeAgentPage: React.FC = () => {
             </div>
           </div>
 
-          {/* 工作区文件树：点击文件在右侧「预览」页打开 */}
-          {activeSession?.working_directory ? (
-            <div className="codex-sidebar-section codex-tree-section">
-              <div className="codex-sidebar-label">
-                <FolderTree size={12} />
-                {t('mind_inspector.code_workspace_files', { defaultValue: '工作区文件' })}
-              </div>
-              <WorkspaceFileTree
-                key={activeSession.session_id}
-                root={activeSession.working_directory}
-                onOpenFile={openPreview}
-              />
-            </div>
-          ) : null}
-
         </div>
-        )}
+        {typeof document !== 'undefined' && createPortal(<>
+          {sessionMenu && (
+            <div className="codex-theme codex-session-context-menu" style={{ left: sessionMenu.x, top: sessionMenu.y }} onMouseDown={(e) => e.stopPropagation()} onContextMenu={(e) => e.preventDefault()}>
+              <button type="button" onClick={() => void handleSessionContextAction('rename')}>重命名</button>
+              <button type="button" onClick={() => void handleSessionContextAction('pin')}>{pinnedSessions.has(sessionMenu.id) ? '取消置顶' : '置顶'}</button>
+              <button type="button" onClick={() => void handleSessionContextAction('unread')}>{unreadSessions.has(sessionMenu.id) ? '标记为已读' : '标记为未读'}</button>
+              <button type="button" onClick={() => void handleSessionContextAction('fork')}>分叉</button>
+              <button type="button" className="danger" onClick={() => void handleSessionContextAction('delete')}>永久删除</button>
+            </div>
+          )}
+          {renameSessionId && (
+            <div className="codex-session-modal-backdrop" onMouseDown={() => setRenameSessionId(null)}>
+              <div className="codex-theme codex-session-modal" onMouseDown={(e) => e.stopPropagation()}>
+                <h3>重命名会话</h3>
+                <input autoFocus value={renameSessionDraft} onChange={(e) => setRenameSessionDraft(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && renameSessionDraft.trim()) { setSessionTitles((p) => ({ ...p, [renameSessionId]: renameSessionDraft.trim() })); setRenameSessionId(null); } }} />
+                <div className="codex-session-modal-actions"><button type="button" onClick={() => setRenameSessionId(null)}>取消</button><button type="button" className="primary" onClick={() => { if (renameSessionDraft.trim()) setSessionTitles((p) => ({ ...p, [renameSessionId]: renameSessionDraft.trim() })); setRenameSessionId(null); }}>保存</button></div>
+              </div>
+            </div>
+          )}
+          {deleteSessionId && (
+            <div className="codex-session-modal-backdrop" onMouseDown={() => setDeleteSessionId(null)}>
+              <div className="codex-theme codex-session-modal" onMouseDown={(e) => e.stopPropagation()}><h3>永久删除会话？</h3><p>删除后无法恢复。</p><div className="codex-session-modal-actions"><button type="button" onClick={() => setDeleteSessionId(null)}>取消</button><button type="button" className="danger" onClick={() => { setDeleteSessionId(null); void handleDelete(deleteSessionId, true); }}>永久删除</button></div></div>
+            </div>
+          )}
+        </>, document.body)}
       </aside>
 
-      {!leftCollapsed && (
-        <div className="codex-resize-handle left" onMouseDown={(e) => startResize(e, 'left')} />
-      )}
+      {/* 拖拽手柄常驻（收起时淡出并停用），否则它一消失布局会瞬跳 6px */}
+      <div
+        className={`codex-resize-handle left${leftCollapsed ? ' hidden' : ''}`}
+        onMouseDown={(e) => startResize(e, 'left')}
+      />
 
       {/* ===== 中央：对话区 ===== */}
       <main className="codex-main">
@@ -4831,11 +5356,6 @@ const CodeAgentPage: React.FC = () => {
             <span className="codex-topbar-context">
               <span className="codex-topbar-title">
                 {activeSession?.title || t('mind_inspector.code_untitled', { defaultValue: '未命名' })}
-              </span>
-              <span className="codex-topbar-path" title={activeSession?.working_directory}>
-                {activeSession
-                  ? activeSession.working_directory
-                  : t('mind_inspector.code_no_workspace', { defaultValue: '未选择工作区' })}
               </span>
             </span>
           </div>
@@ -4855,6 +5375,21 @@ const CodeAgentPage: React.FC = () => {
                   )}
                 </span>
               )}
+              <button
+                type="button"
+                onClick={togglePinnedSummary}
+                title={pinnedVisible
+                  ? t('mind_inspector.pinned_hide')
+                  : t('mind_inspector.pinned_show')}
+                aria-label={pinnedVisible
+                  ? t('mind_inspector.pinned_hide')
+                  : t('mind_inspector.pinned_show')}
+                aria-pressed={pinnedVisible}
+                className="codex-icon-btn"
+                style={{ background: pinnedVisible ? 'var(--codex-tape-blue)' : 'var(--codex-tape-yellow)' }}
+              >
+                <StickyNote size={15} />
+              </button>
               <button
                 type="button"
                 onClick={toggleRightSidebar}
@@ -4883,190 +5418,258 @@ const CodeAgentPage: React.FC = () => {
           </div>
         )}
 
-        <div ref={scrollRef} onScroll={onScroll} className="codex-chat">
-          {!activeSession ? (
-            <div className="codex-empty">
-              <div className="codex-hero">
-                <div className="codex-hero-title">
-                  {t('mind_inspector.code_hero_title', { defaultValue: '你想让 Vivian & Nana 帮你做什么？' })}
-                </div>
-                <div className="codex-hero-sub">{t('mind_inspector.code_hero_sub')}</div>
-              </div>
-              <div style={{ width: '100%', maxWidth: 780 }}>{composer}</div>
-            </div>
-          ) : messages.length === 0 ? (
-            <div className="codex-empty">
-              <div className="codex-hero">
-                <div className="codex-hero-title">
-                  <Code2 size={26} strokeWidth={1.5} />
-                  {activeSession.title || t('mind_inspector.code_untitled', { defaultValue: '未命名' })}
-                </div>
-                <div className="codex-hero-sub">{activeSession.working_directory}</div>
-              </div>
-              <div style={{ width: '100%', maxWidth: 780 }}>{composer}</div>
-            </div>
-          ) : (
-            <>
-              <div className="codex-chat-inner">
-                <GoalPlanBar
-                  goal={activeSession?.goal ?? null}
-                  plan={activeSession?.plan ?? null}
-                  planMode={activeSession?.plan_mode ?? false}
-                  onRun={(text) => sendContinuation(text)}
-                />
-                {groupChatMessages(messages, running).map((it) => {
-                  if (it.kind === 'group') {
-                    return (
-                      <ToolProcessGroup
-                        key={`grp-${it.index}`}
-                        msgs={it.msgs}
-                        settled={it.settled}
-                        sessionRunning={running}
-                        cwd={activeSession?.working_directory ?? ''}
-                      />
-                    );
-                  }
-                  const { msg, index: i } = it;
-                  if (msg.role === 'tool_use' || msg.role === 'tool_result') {
-                    // 后端聚合落库的"工具调用意图"消息（record_assistant_tool_calls：
-                    // 无 tool_name / tool_call_id，tool_arguments 是整个调用数组）。
-                    // 逐个调用的参数与结果已由 tool_result 消息完整承载，这里跳过渲染，
-                    // 否则会出现一张空标题、正文为整段 JSON、永远"运行中"的大空块。
-                    if (msg.role === 'tool_use' && !msg.tool_name) return null;
-                    const wfRun =
-                      msg.role === 'tool_result' &&
-                      msg.tool_name === 'run_workflow' &&
-                      tryParseWorkflowRun(msg.content);
-                    if (wfRun) {
-                      return <WorkflowVizCard key={`${msg.tool_call_id ?? i}-${i}`} run={wfRun} />;
-                    }
-                    const lsp = msg.role === 'tool_result' && msg.tool_name === 'lsp_query'
-                      ? parseLspResult(msg.content)
-                      : null;
-                    if (lsp) {
-                      return (
-                        <LspVizCard
-                          key={`${msg.tool_call_id ?? i}-${i}`}
-                          parsed={lsp}
-                          cwd={activeSession?.working_directory ?? ''}
-                        />
-                      );
-                    }
-                    return (
-                      <ToolCallCard
-                        key={`${msg.tool_call_id ?? i}-${i}`}
-                        name={msg.tool_name ?? ''}
-                        argumentsJson={
-                          msg.tool_arguments
-                            ? typeof msg.tool_arguments === 'string'
-                              ? msg.tool_arguments
-                              : JSON.stringify(msg.tool_arguments)
-                            : ''
-                        }
-                        result={msg.role === 'tool_result' ? msg.content : undefined}
-                        success={msg.tool_success ?? null}
-                        running={msg.role === 'tool_use' && running}
-                        durationMs={msg.tool_duration_ms ?? null}
-                      />
-                    );
-                  }
-                  return (
-                    <MessageRow
-                      key={i}
-                      index={i}
-                      msg={msg}
-                      feedback={msgFeedback[i] ?? null}
-                      changedFiles={msgChanges[i] ?? null}
-                      onCopy={handleCopyMessage}
-                      onFork={(idx) => void handleFork(idx)}
-                      onFeedback={(idx, rating) => void handleFeedback(idx, rating)}
-                      onOpenImage={(src, alt) => setLightbox({ src, alt })}
-                    />
-                  );
-                })}
-                {streamingText && (
-                  <div className="codex-msg-assistant">
-                    <MarkdownText text={streamingText} keyPrefix="stream" animate />
-                    <span className="codex-cursor" />
-                  </div>
-                )}
-                {thinking && (
-                  <div className="codex-thinking">
-                    <div className="codex-thinking-status">
-                      <Braces size={15} strokeWidth={1.8} className="codex-breathe" style={{ color: 'var(--codex-ink-faint)' }} />
-                      <span>
-                        {compacting
-                          ? t('mind_inspector.code_compacting', { defaultValue: '正在压缩上下文…' })
-                          : t('mind_inspector.code_thinking', { defaultValue: '正在思考…' })}
-                      </span>
-                      <span className="codex-dots"><i /><i /><i /></span>
+        {/* 顶栏以下是一条横向带。置顶摘要是「贴在右边缘的一条信息列」：
+            对话区 / 输入区 / 统计行统一用 padding-right 让出 --codex-pinned-reserve，
+            面板绝对定位浮在那块留白上——所以它既不盖正文，又不会把对话滚动条挤到
+            自己左边（滚动条属于铺满整条宽度的 `.codex-chat`，始终在最右侧）。
+            让位规则是 `max(主题基准内边距, 留白)`：展开时正文右缘停在面板左侧
+            PINNED_GAP_W 处，收起时 max() 取回基准值、左右内边距重新对称。
+            呼出 / 收起是**两轴同时**的：横向宽度 0 ↔ 250（这条保证任何一帧都不
+            压住正文），纵向由 CSS 的 `clip-path` 从上往下揭开 / 从下往上收掉。
+            拖拽调宽期间（resizing）要关掉过渡，否则宽度被缓动拖住，手感会变成
+            「橡皮筋追鼠标」——和两侧边栏同一个道理。
+            宽度变量挂在 `.codex-main-col` 上，面板与四处让位共用同一个源。 */}
+        <div
+          ref={mainBodyRef}
+          className={`codex-main-body${resizing ? ' resizing' : ''}`}
+        >
+          <div
+            className="codex-main-col"
+            style={{
+              // 动画值：收起时为 0，面板宽度过渡与留白过渡都跟它走
+              '--codex-pinned-w': `${pinnedVisible ? pinnedWidth : 0}px`,
+              // 展开值：收起期间保持不变，内层靠它维持展开宽度（裁切而不重排）
+              '--codex-pinned-w-expanded': `${pinnedWidth}px`,
+              // 为面板让出的总宽度（面板 + 呼吸缝）。收起时必须是 0——
+              // 若留着呼吸缝，正文会一直偏左，左右内边距不再对称。
+              // 不加滚动条宽：槽位于 `.codex-chat` 的 border 与 padding 之间，
+              // 正文可用宽本来就扣掉了它，所以 padding-right 给到「面板 + 缝」
+              // 就足以让正文右缘停在面板左侧 PINNED_GAP_W 处。
+              '--codex-pinned-reserve': pinnedVisible
+                ? `${pinnedWidth + PINNED_GAP_W}px`
+                : '0px',
+              '--codex-sb-w': `${scrollbarW}px`,
+            } as React.CSSProperties}
+          >
+            <div className="codex-chat-area">
+              <div ref={scrollRef} onScroll={onScroll} className="codex-chat">
+                {!activeSession ? (
+                  <div className="codex-empty">
+                    <div className="codex-hero">
+                      <div className="codex-hero-title">
+                        {t('mind_inspector.code_hero_title', { defaultValue: '你想让 Vivian & Nana 帮你做什么？' })}
+                      </div>
+                      <div className="codex-hero-sub">
+                        {defaultWorkspace ? t('mind_inspector.code_hero_sub_default') : t('mind_inspector.code_hero_sub')}
+                      </div>
                     </div>
-                    {thinkingText && !compacting && (
-                      <div className="codex-thinking-chain">{thinkingText}</div>
-                    )}
+                    <div style={{ width: '100%', maxWidth: 780 }}>{composer}</div>
                   </div>
+                ) : messages.length === 0 ? (
+                  <div className="codex-empty">
+                    <div className="codex-hero">
+                      <div className="codex-hero-title">
+                        <Code2 size={26} strokeWidth={1.5} />
+                        {activeSession.title || t('mind_inspector.code_untitled', { defaultValue: '未命名' })}
+                      </div>
+                      <div className="codex-hero-sub">
+                        {activeSession.working_directory || t('mind_inspector.code_no_workspace')}
+                      </div>
+                    </div>
+                    <div style={{ width: '100%', maxWidth: 780 }}>{composer}</div>
+                  </div>
+                ) : (
+                  <>
+                    <div className="codex-chat-inner">
+                      <GoalPlanBar
+                        goal={activeSession?.goal ?? null}
+                        plan={activeSession?.plan ?? null}
+                        planMode={activeSession?.plan_mode ?? false}
+                        onRun={(text) => sendContinuation(text)}
+                      />
+                      {groupChatMessages(messages, running).map((it) => {
+                        if (it.kind === 'group') {
+                          return (
+                            <ToolProcessGroup
+                              key={`grp-${it.index}`}
+                              msgs={it.msgs}
+                              settled={it.settled}
+                              sessionRunning={running}
+                              cwd={activeSession?.working_directory ?? ''}
+                            />
+                          );
+                        }
+                        const { msg, index: i } = it;
+                        if (msg.role === 'tool_use' || msg.role === 'tool_result') {
+                          // 后端聚合落库的"工具调用意图"消息（record_assistant_tool_calls：
+                          // 无 tool_name / tool_call_id，tool_arguments 是整个调用数组）。
+                          // 逐个调用的参数与结果已由 tool_result 消息完整承载，这里跳过渲染，
+                          // 否则会出现一张空标题、正文为整段 JSON、永远"运行中"的大空块。
+                          if (msg.role === 'tool_use' && !msg.tool_name) return null;
+                          const wfRun =
+                            msg.role === 'tool_result' &&
+                            msg.tool_name === 'run_workflow' &&
+                            tryParseWorkflowRun(msg.content);
+                          if (wfRun) {
+                            return <WorkflowVizCard key={`${msg.tool_call_id ?? i}-${i}`} run={wfRun} />;
+                          }
+                          const lsp = msg.role === 'tool_result' && msg.tool_name === 'lsp_query'
+                            ? parseLspResult(msg.content)
+                            : null;
+                          if (lsp) {
+                            return (
+                              <LspVizCard
+                                key={`${msg.tool_call_id ?? i}-${i}`}
+                                parsed={lsp}
+                                cwd={activeSession?.working_directory ?? ''}
+                              />
+                            );
+                          }
+                          return (
+                            <ToolCallCard
+                              key={`${msg.tool_call_id ?? i}-${i}`}
+                              name={msg.tool_name ?? ''}
+                              argumentsJson={
+                                msg.tool_arguments
+                                  ? typeof msg.tool_arguments === 'string'
+                                    ? msg.tool_arguments
+                                    : JSON.stringify(msg.tool_arguments)
+                                  : ''
+                              }
+                              result={msg.role === 'tool_result' ? msg.content : undefined}
+                              success={msg.tool_success ?? null}
+                              running={msg.role === 'tool_use' && running}
+                              durationMs={msg.tool_duration_ms ?? null}
+                            />
+                          );
+                        }
+                        return (
+                          <React.Fragment key={i}>
+                            {/* 轮首锚点：定位轨据此判断当前停留在哪一轮、以及点击后滚到哪。
+                                轮首必然是用户消息（工具消息只会落进 ToolProcessGroup），
+                                所以只需在这一支投放。 */}
+                            {msg.role === 'user' && (
+                              <div className="codex-turn-anchor" data-turn-anchor={i} />
+                            )}
+                            <MessageRow
+                              index={i}
+                              msg={msg}
+                              feedback={msgFeedback[i] ?? null}
+                              changedFiles={msgChanges[i] ?? null}
+                              onCopy={handleCopyMessage}
+                              onFork={(idx) => void handleFork(idx)}
+                              onFeedback={(idx, rating) => void handleFeedback(idx, rating)}
+                              onOpenImage={(src, alt) => setLightbox({ src, alt })}
+                            />
+                          </React.Fragment>
+                        );
+                      })}
+                      {streamingText && (
+                        <div className="codex-msg-assistant">
+                          <MarkdownText text={streamingText} keyPrefix="stream" animate />
+                          <span className="codex-cursor" />
+                        </div>
+                      )}
+                      {thinking && (
+                        <div className="codex-thinking">
+                          <div className="codex-thinking-status">
+                            <Braces size={15} strokeWidth={1.8} className="codex-breathe" style={{ color: 'var(--codex-ink-faint)' }} />
+                            <span>
+                              {compacting
+                                ? t('mind_inspector.code_compacting', { defaultValue: '正在压缩上下文…' })
+                                : t('mind_inspector.code_thinking', { defaultValue: '正在思考…' })}
+                            </span>
+                            <span className="codex-dots"><i /><i /><i /></span>
+                          </div>
+                          {thinkingText && !compacting && (
+                            <div className="codex-thinking-chain">{thinkingText}</div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  </>
                 )}
+                <div style={{ height: 16 }} />
               </div>
-            </>
-          )}
-          <div style={{ height: 16 }} />
-        </div>
 
-        {!atBottom && (
-          <button type="button" title={t('mind_inspector.code_scroll_bottom')} onClick={scrollToBottom} className="codex-to-bottom">
-            <ChevronDown size={15} />
-          </button>
-        )}
+              {/* 左侧对话定位轨：滚动驱动的状态全在组件内部，不引起消息列表重渲染 */}
+              <TurnRail scrollRef={scrollRef} turns={turns} />
+            </div>
 
-        {!isEmptyChat && (
-          <div className="codex-composer-wrap">
-            {budgetStopped && budgetProgress && (
-              <BudgetStopBanner
-                progress={budgetProgress}
-                hint={budgetHint}
-                onContinue={() => sendContinuation(t('mind_inspector.code_continue_task'))}
-                onRefine={() => {
-                  setBudgetHint(true);
-                  inputRef.current?.focus();
-                }}
-                onStop={() => {
-                  setBudgetStopped(false);
-                  setBudgetHint(false);
-                }}
-              />
+            {!atBottom && (
+              <button type="button" title={t('mind_inspector.code_scroll_bottom')} onClick={scrollToBottom} className="codex-to-bottom">
+                <ChevronDown size={15} />
+              </button>
             )}
-            {subagent || bgJobs > 0 ? (
-              <div className="codex-subagent-bar">
-                <Loader2 size={12} className="codex-breathe" />
-                <span>
-                  {subagent
-                    ? t('mind_inspector.code_subagent_running')
-                    : t('mind_inspector.code_bg_jobs_running', { n: bgJobs })}
-                </span>
-                <span className="codex-subagent-depth">
-                  {subagent ? `L${subagent.depth}` : `${bgJobs}`}
-                </span>
+
+            {!isEmptyChat && (
+              <div className="codex-composer-wrap">
+                {budgetStopped && budgetProgress && (
+                  <BudgetStopBanner
+                    progress={budgetProgress}
+                    hint={budgetHint}
+                    onContinue={() => sendContinuation(t('mind_inspector.code_continue_task'))}
+                    onRefine={() => {
+                      setBudgetHint(true);
+                      inputRef.current?.focus();
+                    }}
+                    onStop={() => {
+                      setBudgetStopped(false);
+                      setBudgetHint(false);
+                    }}
+                  />
+                )}
+                {subagent || bgJobs > 0 ? (
+                  <div className="codex-subagent-bar">
+                    <Loader2 size={12} className="codex-breathe" />
+                    <span>
+                      {subagent
+                        ? t('mind_inspector.code_subagent_running')
+                        : t('mind_inspector.code_bg_jobs_running', { n: bgJobs })}
+                    </span>
+                    <span className="codex-subagent-depth">
+                      {subagent ? `L${subagent.depth}` : `${bgJobs}`}
+                    </span>
+                  </div>
+                ) : null}
+                {ask && ask.session_id === activeId ? (
+                  <WorkQuestionCard
+                    key={ask.question_id}
+                    question={ask}
+                    onDone={() => setAsk(null)}
+                  />
+                ) : null}
+                <div className="codex-composer-inner">{composer}</div>
               </div>
-            ) : null}
-            {ask && ask.session_id === activeId ? (
-              <WorkQuestionCard
-                key={ask.question_id}
-                question={ask}
-                onDone={() => setAsk(null)}
-              />
-            ) : null}
-            <div className="codex-composer-inner">{composer}</div>
+            )}
+            <StatsLine stats={stats} />
+
+            {/* 置顶摘要：环境信息（git 仓库状态）+ 来源（插件 / 技能 / MCP）。
+                绝对定位贴在 `.codex-main-col` 的右边缘（滚动条左侧），所以它不参与
+                flex 分配——对话区靠上面那条 `--codex-pinned-reserve` 留白让位。
+                整块显隐由顶栏「模式下拉」与「检查器开关」之间的那个按钮控制。 */}
+            <PinnedSummary
+              workingDirectory={activeSession?.working_directory ?? ''}
+              visible={pinnedVisible}
+            />
           </div>
-        )}
-        <StatsLine stats={stats} />
+        </div>
       </main>
 
-      {!rightCollapsed && (
-        <div className="codex-resize-handle right" onMouseDown={(e) => startResize(e, 'right')} />
-      )}
+      <div
+        className={`codex-resize-handle right${rightCollapsed ? ' hidden' : ''}`}
+        onMouseDown={(e) => startResize(e, 'right')}
+      />
 
       {/* ===== 右侧：检查器（概览 / 轨迹 / 终端） ===== */}
-      <aside className={`codex-inspector ${rightCollapsed ? 'collapsed' : ''}`} style={{ width: rightWidth }}>
+      {/* 收起时宽度收到 0（而不是 display:none）——display 不可过渡，只能做宽度动画。
+          内层固定为展开宽度，由外层的 overflow:hidden 裁切：这样动画期间内容是
+          「整块滑出去」，不会被逐帧压窄重排（终端和代码预览一旦重排会明显抖动）。 */}
+      <aside
+        className={`codex-inspector ${rightCollapsed ? 'collapsed' : ''}${resizing === 'right' ? ' resizing' : ''}`}
+        style={{ width: rightCollapsed ? 0 : rightWidth }}
+      >
+        <div className="codex-inspector-inner" style={{ width: rightWidth }}>
           <div className="codex-inspector-tabs" ref={inspectorTabsRef}>
             <button
               type="button"
@@ -5123,7 +5726,7 @@ const CodeAgentPage: React.FC = () => {
               {/* 上下文空间：上下文占用与构成占比 */}
               <ContextSpaceCard session={activeSession} />
 
-              <DeliverablesCard cwd={activeSession?.working_directory ?? ''} deliverables={deliverables} />
+              <DeliverablesCard cwd={activeSession?.working_directory ?? ''} deliverables={deliverables} onOpen={openPreview} />
 
               {queue.length > 0 && (
                 <div className="codex-info-card">
@@ -5147,7 +5750,8 @@ const CodeAgentPage: React.FC = () => {
                 </div>
                 <div className="codex-info-row">
                   <span className="codex-info-value" style={{ maxWidth: '100%', whiteSpace: 'normal' }}>
-                    {activeSession ? activeSession.working_directory : t('mind_inspector.code_no_workspace', { defaultValue: '未选择工作区' })}
+                    {activeSession?.working_directory
+                      || t('mind_inspector.code_no_workspace', { defaultValue: '未选择工作区' })}
                   </span>
                 </div>
               </div>
@@ -5227,7 +5831,8 @@ const CodeAgentPage: React.FC = () => {
               ) : null}
             </div>
           )}
-        </aside>
+        </div>
+      </aside>
 
       {/* ===== 覆盖层 ===== */}
       {dragActive && <DropOverlay />}

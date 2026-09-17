@@ -18,9 +18,30 @@ use serde::{Deserialize, Serialize};
 use tokio::time::sleep;
 
 use crate::error::{VivianError, VivianResult};
+use crate::resilience::{classify_error_from_str, ErrorCategory};
 
 /// 可重试 HTTP 状态码集合
+///
+/// 注意 429 在此集合中只是「候选」：它既可能是真限流（该退避），也可能是厂商把
+/// 欠费 / 配额耗尽映射到了 429。是否需要重试取决于响应体，判定见
+/// [`is_retryable_llm_response`]。
 pub const RETRYABLE_STATUS_CODES: &[u16] = &[429, 500, 502, 503, 504];
+
+/// 判定一次 LLM 响应是否值得重试（需要响应体参与判定）。
+///
+/// 纯状态码无法区分 429 的两种含义：智谱欠费是 429 + 业务码 1113、OpenAI 是
+/// 429 + `insufficient_quota`、Kimi 是 429 + `exceeded_current_quota_error`，
+/// 而真正的限流也是 429。前者重试不会恢复，只会持续打请求。
+///
+/// 实现上把状态码拼回错误串前缀，复用 provider 层同一张厂商映射表，
+/// 避免这里再维护一份判定规则。
+pub fn is_retryable_llm_response(status: u16, body: &str) -> bool {
+    let synthetic = format!("({status}) {body}");
+    matches!(
+        classify_error_from_str(&synthetic),
+        ErrorCategory::Transient | ErrorCategory::RateLimit
+    )
+}
 
 /// 默认连接建立超时（秒）
 ///
@@ -156,6 +177,30 @@ where
                 if !is_retryable_status_code(status) {
                     return Ok(resp);
                 }
+
+                // 429 需要读响应体才能定性。厂商把「欠费 / 配额耗尽」也映射到 429，
+                // 这类故障退避重试不会恢复，只会把失败记录刷满并拖慢熔断。
+                // 读体后 resp 已被消耗，故只用于判定，不再返回给调用方。
+                if status == 429 {
+                    let body = resp.text().await.unwrap_or_default();
+                    if !is_retryable_llm_response(status, &body) {
+                        tracing::warn!(
+                            "[HTTP Retry] 429 响应体判定为不可恢复故障，放弃重试 (attempt {}/{})",
+                            attempt,
+                            max_attempts
+                        );
+                        return Err(HttpRetryError {
+                            message: format!(
+                                "HTTP 429 且响应体表明为不可恢复故障: {}",
+                                body.chars().take(200).collect::<String>()
+                            ),
+                            status_code: Some(status),
+                            attempts: attempt,
+                            last_error: None,
+                        });
+                    }
+                }
+
                 // 可重试状态码
                 tracing::warn!(
                     "[HTTP Retry] 请求返回状态码 {} (attempt {}/{})",

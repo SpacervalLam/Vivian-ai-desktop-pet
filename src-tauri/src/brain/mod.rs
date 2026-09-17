@@ -44,6 +44,7 @@ pub mod tool_leak_filter;
 pub mod topic_signal;
 pub mod workflow;
 pub mod work_question;
+pub mod work_notices;
 
 // 主要导出（保持向后兼容）
 pub use brain::Brain;

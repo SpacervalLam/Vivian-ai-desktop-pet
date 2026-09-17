@@ -7,7 +7,7 @@
 //! - 工具风险等级评估
 
 use std::collections::HashMap;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, Path};
 use std::sync::Arc;
 
 use once_cell::sync::Lazy;
@@ -266,9 +266,10 @@ impl ToolSandbox {
         args: &Value,
         context: Option<&ToolUseContext>,
     ) -> SafetyResult {
-        // 1. 危险命令检查
-        if let Some(cmd) = extract_command(args) {
-            if is_dangerous_command(&cmd) {
+        // 1. 危险命令检查（命令文本在 2.5 复用，故先取出来）
+        let command = extract_command(args);
+        if let Some(cmd) = &command {
+            if is_dangerous_command(cmd) {
                 return SafetyResult::denied(format!(
                     "检测到危险命令被沙箱拦截: {}",
                     tool_name
@@ -287,10 +288,48 @@ impl ToolSandbox {
             }
             if enforce_working_dir {
                 if let Some(c) = context {
-                    if !is_path_within_working_directory(&path, &c.working_directory) {
+                    // 多工作区：主工作区或任一附加目录内都算授权。
+                    // 判定走 ToolUseContext::is_path_authorized，与各工具的 validate_input、
+                    // 权限层的归属检查共用同一口径；主工作区为空串时此处恒通过（无目录沙箱）。
+                    if !c.is_path_authorized(&path) {
+                        let primary = if c.working_directory.is_empty() {
+                            "未绑定"
+                        } else {
+                            c.working_directory.as_str()
+                        };
                         return SafetyResult::denied(format!(
-                            "路径不在工作目录中: {} (工作目录: {})",
-                            path, c.working_directory
+                            "路径不在任何已授权工作区中: {} (主工作区: {primary})",
+                            path
+                        ));
+                    }
+                }
+            }
+        }
+
+        // 2.5 命令文本里的**字面绝对路径**必须落在授权工作区内。
+        //
+        // 为什么需要单独一条：shell 是路径校验的天然缺口——命令是一段不透明程序，
+        // 参数里没有路径键（`command` / `cmd` 不是 path-ish 键名），`extract_paths`
+        // 抓不到命令内容。所以工作区边界对 `run_command` 一直是"建议性"的：
+        // 进程 cwd 虽已绑到工作区（相对路径受限），但模型随手写个 `type D:\other\x.txt`
+        // 就能绕出去。
+        //
+        // 这是**尽力而为**的检测，不是安全边界：路径可以动态拼装
+        // （`$p = 'D:'; Get-Content "$p\other\x.txt"`），真要封死需要 OS 级约束
+        // （Job Object / 受限令牌 / AppContainer）。本层的目标是挡住「意外越界」，
+        // 并给出可操作的补救路径——把该目录挂成会话的附加工作区。
+        //
+        // 只对**工作会话**生效：陪伴侧没有"声明过的工作区"（其 working_directory 只是
+        // 进程 cwd），拿它当边界属于凭空收紧，会误伤用户正常的跨目录操作。
+        if let (Some(cmd), Some(c)) = (&command, context) {
+            if c.is_work_agent() && !c.working_directory.is_empty() {
+                for path in extract_literal_absolute_paths(cmd) {
+                    if !c.is_path_authorized(&path) {
+                        return SafetyResult::denied(format!(
+                            "命令引用了工作区之外的绝对路径: {path}（主工作区: {}）。\
+                             需要访问该目录时，请用户在工作页把它挂为会话的附加工作区，\
+                             或改用工作区内的相对路径。",
+                            c.working_directory
                         ));
                     }
                 }
@@ -388,6 +427,86 @@ fn collect_commands_recursive(value: &Value, out: &mut Vec<String>) {
         }
         _ => {}
     }
+}
+
+/// 引号感知的 shell 词法切分——引号内的空白不切分。
+///
+/// 必须做对引号，否则 `"G:\my project\a.txt"` 会被切成 `G:\my` + `project\a.txt`，
+/// 而 `G:\my` 落在工作区 `G:\my project` **之外**，会把合法命令误判成越界。
+/// 未闭合的引号按"到行尾"处理（命令本就畸形，交给执行阶段报错）。
+fn split_shell_tokens(command: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut quote: Option<char> = None;
+    for ch in command.chars() {
+        match quote {
+            Some(q) => {
+                if ch == q {
+                    quote = None;
+                    if !cur.trim().is_empty() {
+                        out.push(std::mem::take(&mut cur));
+                    } else {
+                        cur.clear();
+                    }
+                } else {
+                    cur.push(ch);
+                }
+            }
+            None => {
+                if ch == '"' || ch == '\'' {
+                    if !cur.trim().is_empty() {
+                        out.push(std::mem::take(&mut cur));
+                    } else {
+                        cur.clear();
+                    }
+                    quote = Some(ch);
+                } else if ch.is_whitespace()
+                    || matches!(ch, ';' | '|' | ',' | '(' | ')' | '{' | '}' | '[' | ']' | '`')
+                {
+                    if !cur.trim().is_empty() {
+                        out.push(std::mem::take(&mut cur));
+                    } else {
+                        cur.clear();
+                    }
+                } else {
+                    cur.push(ch);
+                }
+            }
+        }
+    }
+    if !cur.trim().is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+/// 从命令行文本里提取**字面绝对路径**（盘符绝对 `C:\…` / `C:/…` / UNC `\\server\share`）。
+///
+/// 刻意只认这两种形态，不猜"看起来像路径"的相对串：
+/// - 相对路径已被进程 cwd（绑在工作区）约束住，无需再判；
+/// - `..` 穿越已由 [`is_path_safe`] 在上一步拦下；
+/// - 把 `/xxx` 之类也当绝对路径会和 PowerShell 开关（`/silent`）混淆。
+///
+/// 覆盖不到动态拼装的路径——本函数是「尽力而为」的意外越界检测，不是安全边界，
+/// 调用方（`check_tool_safety`）的注释里写明了这一限制与真正的解法。
+fn extract_literal_absolute_paths(command: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for token in split_shell_tokens(command) {
+        let t = token.trim().trim_matches(|c: char| matches!(c, '\'' | '"' | '`'));
+        let b = t.as_bytes();
+        let drive_absolute = b.len() >= 3
+            && b[0].is_ascii_alphabetic()
+            && b[1] == b':'
+            && (b[2] == b'\\' || b[2] == b'/');
+        let unc = t.starts_with("\\\\");
+        if !(drive_absolute || unc) {
+            continue;
+        }
+        if !out.iter().any(|p| p.eq_ignore_ascii_case(t)) {
+            out.push(t.to_string());
+        }
+    }
+    out
 }
 
 /// 判断字符串是否像文件路径
@@ -504,27 +623,9 @@ pub fn is_path_safe(path: &str) -> bool {
     !p.components().any(|c| matches!(c, Component::ParentDir))
 }
 
-/// 检查路径是否在工作目录内
-pub fn is_path_within_working_directory(path: &str, working_directory: &str) -> bool {
-    let normalized_target = normalize_path_buf(PathBuf::from(path));
-    let normalized_base = normalize_path_buf(PathBuf::from(working_directory));
-    normalized_target.starts_with(&normalized_base)
-}
-
-/// 规范化路径（展开 `.`，移除 `..`，统一为绝对路径风格）
-fn normalize_path_buf(p: PathBuf) -> PathBuf {
-    let mut out = PathBuf::new();
-    for component in p.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                out.pop();
-            }
-            other => out.push(other.as_os_str()),
-        }
-    }
-    out
-}
+// 单根工作目录判定已移除：工作区可能是「主工作区 + 若干附加目录」的集合，
+// 归属判定统一走 `tools::types::is_path_within_any`（经 `ToolUseContext::is_path_authorized`
+// 与权限层共用），避免这里再长出第二套单根口径。
 
 fn generate_first_time_warning(tool_name: &str, risk_level: ToolRiskLevel) -> String {
     match risk_level {
@@ -555,4 +656,128 @@ fn generate_worry_message(tool_name: &str) -> String {
 /// 创建默认的沙箱实例
 pub fn default_sandbox() -> Arc<ToolSandbox> {
     Arc::new(ToolSandbox::new(ProtectionMode::Cautious, 600))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn work_ctx(root: &str) -> ToolUseContext {
+        ToolUseContext::new("s", "u")
+            .with_working_directory(root)
+            .with_agent_kind("work")
+    }
+
+    #[test]
+    fn quoted_path_with_spaces_stays_one_token() {
+        // 引号内的空白不能切分：否则 `G:\my` 会落在工作区 `G:\my project` 之外，
+        // 把合法命令误判成越界。
+        let toks = split_shell_tokens(r#"type "G:\my project\a.txt" --raw"#);
+        assert!(
+            toks.iter().any(|t| t == r"G:\my project\a.txt"),
+            "引号内容被切碎了: {toks:?}"
+        );
+    }
+
+    #[test]
+    fn extracts_only_absolute_paths() {
+        let got = extract_literal_absolute_paths(
+            r#"Set-Location D:\other; type C:/x.txt; foo %TEMP%\a; bar /silent; type .\rel.txt"#,
+        );
+        assert_eq!(
+            got,
+            vec![r"D:\other".to_string(), "C:/x.txt".to_string()],
+            "只应提取盘符绝对的路径"
+        );
+    }
+
+    #[test]
+    fn extracts_unc_and_dedupes_case_insensitively() {
+        let got = extract_literal_absolute_paths(r#"copy \\nas\share\a.txt d:\b.txt D:\B.TXT"#);
+        assert_eq!(
+            got,
+            vec![r"\\nas\share\a.txt".to_string(), r"d:\b.txt".to_string()],
+            "UNC 要认，大小写不同的重复项要去重"
+        );
+    }
+
+    #[test]
+    fn shell_command_reaching_outside_workspace_is_denied() {
+        let sandbox = ToolSandbox::new(ProtectionMode::Permissive, 600);
+        let ctx = work_ctx("G:\\work");
+        let r = sandbox.check_tool_safety(
+            "run_command",
+            &json!({ "command": "type D:\\other\\secret.txt" }),
+            Some(&ctx),
+        );
+        assert!(!r.allowed, "工作区外的绝对路径必须被拒");
+        assert!(r.message.contains("D:\\other\\secret.txt"), "{}", r.message);
+    }
+
+    #[test]
+    fn shell_command_inside_workspace_passes() {
+        let sandbox = ToolSandbox::new(ProtectionMode::Permissive, 600);
+        let ctx = work_ctx("G:\\work");
+        for cmd in [
+            "cargo build",
+            "type G:\\work\\src\\main.rs",
+            // 工作区内带空格的引号路径：切词必须按引号走，否则会被误判
+            r#"& "G:\work\my app\a.exe" --flag"#,
+        ] {
+            let r = sandbox.check_tool_safety("run_command", &json!({ "command": cmd }), Some(&ctx));
+            assert!(r.allowed, "`{cmd}` 不该被拦: {}", r.message);
+        }
+    }
+
+    #[test]
+    fn shell_command_inside_a_spaced_workspace_passes() {
+        let sandbox = ToolSandbox::new(ProtectionMode::Permissive, 600);
+        let ctx = work_ctx("G:\\my work");
+        let r = sandbox.check_tool_safety(
+            "run_command",
+            &json!({ "command": r#"type "G:\my work\a.txt""# }),
+            Some(&ctx),
+        );
+        assert!(r.allowed, "带空格的工作区路径不该被误拦: {}", r.message);
+    }
+
+    #[test]
+    fn companion_shell_is_not_bounded_by_process_cwd() {
+        // 陪伴侧没有「声明过的工作区」，其 working_directory 只是进程 cwd。
+        // 拿它当边界属于凭空收紧，会误伤用户正常的跨目录操作。
+        let sandbox = ToolSandbox::new(ProtectionMode::Permissive, 600);
+        let ctx = ToolUseContext::new("s", "u").with_working_directory("G:\\app");
+        let r = sandbox.check_tool_safety(
+            "run_command",
+            &json!({ "command": "type D:\\photos\\list.txt" }),
+            Some(&ctx),
+        );
+        assert!(r.allowed, "陪伴侧不应被进程 cwd 限制: {}", r.message);
+    }
+
+    #[test]
+    fn no_workspace_session_has_no_path_boundary_to_enforce() {
+        // 无工作区模式：没有可比的边界，这条检查不生效（写入由确认回调兜）
+        let sandbox = ToolSandbox::new(ProtectionMode::Permissive, 600);
+        let ctx = work_ctx("");
+        let r = sandbox.check_tool_safety(
+            "run_command",
+            &json!({ "command": "type D:\\other\\x.txt" }),
+            Some(&ctx),
+        );
+        assert!(r.allowed, "无工作区时不该由本层拒绝: {}", r.message);
+    }
+
+    #[test]
+    fn traversal_in_command_is_still_caught() {
+        let sandbox = ToolSandbox::new(ProtectionMode::Permissive, 600);
+        let ctx = work_ctx("G:\\work");
+        let r = sandbox.check_tool_safety(
+            "run_command",
+            &json!({ "command": r"type ..\..\outside\x.txt" }),
+            Some(&ctx),
+        );
+        assert!(!r.allowed, "命令里的 .. 穿越仍应被拦");
+    }
 }

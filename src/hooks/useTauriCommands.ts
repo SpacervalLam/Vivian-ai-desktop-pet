@@ -246,7 +246,9 @@ export function useMood() {
 /** 工具系统 */
 export function useTools() {
   const list = useCallback(async (): Promise<ToolInfo[]> => {
-    const raw = await invoke<{ tools: ToolInfo[]; total: number }>('list_tools', { characterId: getCharacterId() ?? undefined });
+    // 注意：list_tools 是全局工具清单（返回全部注册工具 + 分侧 scope 与开关状态），
+    // 不接受 characterId；设置页与智能体工具面的一致性由后端 tool_scope 单一真相源保证。
+    const raw = await invoke<{ tools: ToolInfo[]; total: number }>('list_tools');
     return raw.tools ?? [];
   }, []);
 
@@ -365,15 +367,11 @@ export function useProactive() {
     return invoke<{ messages: unknown[] }>('drain_proactive_messages', { characterId: getCharacterId() ?? undefined });
   }, []);
 
-  const markIgnored = useCallback(async (): Promise<void> => {
-    return invoke('mark_proactive_ignored', { characterId: getCharacterId() ?? undefined });
-  }, []);
-
   const updateConfig = useCallback(async (): Promise<void> => {
     return invoke('update_proactive_config', { characterId: getCharacterId() ?? undefined });
   }, []);
 
-  return { getStatus, start, stop, tick, drainMessages, markIgnored, updateConfig };
+  return { getStatus, start, stop, tick, drainMessages, updateConfig };
 }
 
 /** 环境信息 */

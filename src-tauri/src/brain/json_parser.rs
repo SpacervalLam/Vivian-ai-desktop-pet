@@ -989,6 +989,12 @@ pub struct ProcessedResponse {
     /// 微信渠道语音消息标志：为 true 时前端不显示文本，合成 TTS 后以语音气泡发出
     #[serde(default)]
     pub voice_message: bool,
+    /// 本轮回复实际依赖的记忆条目 id（归因/调试用）。
+    ///
+    /// **前端永不展示**：这是内部可追溯性字段，不是给用户看的引用。见
+    /// `output_format.en.md` 的 `memory_used` 说明。
+    #[serde(default)]
+    pub memory_used: Vec<String>,
     /// 提取到的工具调用列表（不参与 LLM Schema 约束，工具调用走原生 FC 通道）。
     #[schemars(skip)]
     pub tool_calls: Vec<Value>,
@@ -1219,11 +1225,34 @@ impl JsonProcessor {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
+        // 记忆归因（`memory_used`）：本轮回复实际依赖了哪些记忆条目。
+        //
+        // 用途仅限归因与调试——**前端永不展示、回复文本里永不出现**。
+        // 这是 Astra `<oai-mem-citation>` 引用块的改造版：直接让桌面宠物在回复末尾
+        // 输出"引用自 memory.md 第 47 行"会当场撕碎人设，所以把可追溯性收进 JSON
+        // 内部字段：既能定位"这句话她根据哪条记忆说的"，又不破坏沉浸感。
+        //
+        // 只收字符串数组；非数组 / 非字符串元素静默忽略（模型偶尔会返回
+        // 逗号分隔的字符串或对象数组，不值得为此丢掉整条回复）。
+        let memory_used: Vec<String> = map
+            .and_then(|m| m.get("memory_used"))
+            .and_then(|v| v.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.as_str())
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+
         ProcessedResponse {
             text,
             intent: get_str("intent", "reply"),
             response_mode: get_str("response_mode", "speak"),
             voice_message,
+            memory_used,
             tool_calls,
         }
     }

@@ -6,12 +6,13 @@
 //!
 //! 通过 [`build_embedding`] 根据 `MemoryConfig` 选择实现。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
-use parking_lot::RwLock;
+use parking_lot::Mutex;
 use tokio::sync::Semaphore;
 
 use crate::config::manager::AppConfig;
@@ -34,40 +35,51 @@ const EMBEDDING_CACHE_CAP: usize = 512;
 /// 存哈希而不是完整文本：记忆正文动辄数百到数千字节，原实现把整段文本
 /// 当作 HashMap 的 key，光 key 就能吃掉与向量本身同量级的内存。
 /// 附记字节长度是为了把 64 位哈希的碰撞概率再压低若干个数量级。
-type EmbeddingCacheKey = (u64, usize, String, usize);
+type EmbeddingCacheKey = (u64, usize, String, String, usize);
 
 /// 全局嵌入缓存：避免对同一段文本重复发起远程嵌入调用
-static EMBEDDING_CACHE: Lazy<RwLock<HashMap<EmbeddingCacheKey, Vec<f32>>>> =
-    Lazy::new(|| RwLock::new(HashMap::new()));
+#[derive(Default)]
+struct EmbeddingCache {
+    values: HashMap<EmbeddingCacheKey, Vec<f32>>,
+    recency: VecDeque<EmbeddingCacheKey>,
+}
 
-fn embedding_cache_key(text: &str, model: &str, dim: usize) -> EmbeddingCacheKey {
-    (fnv1a_64(text), text.len(), model.to_string(), dim)
+static EMBEDDING_CACHE: Lazy<Mutex<EmbeddingCache>> =
+    Lazy::new(|| Mutex::new(EmbeddingCache::default()));
+
+fn embedding_cache_key(text: &str, provider: &str, model: &str, dim: usize) -> EmbeddingCacheKey {
+    (fnv1a_64(text), text.len(), provider.to_string(), model.to_string(), dim)
 }
 
 /// 查询全局嵌入缓存
-pub fn embedding_cache_get(text: &str, model: &str, dim: usize) -> Option<Vec<f32>> {
-    EMBEDDING_CACHE
-        .read()
-        .get(&embedding_cache_key(text, model, dim))
-        .cloned()
+pub fn embedding_cache_get(text: &str, provider: &str, model: &str, dim: usize) -> Option<Vec<f32>> {
+    let key = embedding_cache_key(text, provider, model, dim);
+    let mut cache = EMBEDDING_CACHE.lock();
+    let value = cache.values.get(&key).cloned();
+    if value.is_some() {
+        cache.recency.retain(|existing| existing != &key);
+        cache.recency.push_back(key);
+    }
+    value
 }
 
 /// 写入全局嵌入缓存，超限时清空一半
-pub fn embedding_cache_put(text: &str, model: &str, dim: usize, vec: Vec<f32>) {
-    let mut cache = EMBEDDING_CACHE.write();
-    if cache.len() >= EMBEDDING_CACHE_CAP {
-        let drop_count = cache.len() / 2;
-        let keys: Vec<_> = cache.keys().take(drop_count).cloned().collect();
-        for k in keys {
-            cache.remove(&k);
+pub fn embedding_cache_put(text: &str, provider: &str, model: &str, dim: usize, vec: Vec<f32>) {
+    let key = embedding_cache_key(text, provider, model, dim);
+    let mut cache = EMBEDDING_CACHE.lock();
+    cache.recency.retain(|existing| existing != &key);
+    if cache.values.len() >= EMBEDDING_CACHE_CAP && !cache.values.contains_key(&key) {
+        if let Some(oldest) = cache.recency.pop_front() {
+            cache.values.remove(&oldest);
         }
     }
-    cache.insert(embedding_cache_key(text, model, dim), vec);
+    cache.recency.push_back(key.clone());
+    cache.values.insert(key, vec);
 }
 
 /// 当前缓存条目数（用于诊断与测试）
 pub fn embedding_cache_size() -> usize {
-    EMBEDDING_CACHE.read().len()
+    EMBEDDING_CACHE.lock().values.len()
 }
 
 /// 同步嵌入服务 trait（Memory 路径专用）
@@ -227,23 +239,27 @@ pub struct OpenAIEmbedding {
 
 impl OpenAIEmbedding {
     pub fn new(api_key: String, base_url: Option<String>, model: Option<String>) -> Self {
-        let base_url = base_url.unwrap_or_else(|| "https://api.openai.com/v1".to_string());
+        let base_url = base_url
+            .unwrap_or_else(|| "https://api.openai.com/v1".to_string())
+            .trim_end_matches('/')
+            .to_string();
         // 本地端点（Ollama 等）禁用系统代理：reqwest 默认读取系统代理设置，
         // Clash 等代理不转发 localhost 会导致嵌入请求连接被拒
         let is_local = base_url.contains("localhost") || base_url.contains("127.0.0.1");
-        let client = if is_local {
-            reqwest::Client::builder()
-                .no_proxy()
-                .build()
-                .unwrap_or_default()
-        } else {
-            reqwest::Client::new()
-        };
+        let mut builder = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(60))
+            .pool_max_idle_per_host(4)
+            .tcp_keepalive(Duration::from_secs(60));
+        if is_local {
+            builder = builder.no_proxy();
+        }
+        let client = builder.build().unwrap_or_default();
         Self {
             client,
             api_key,
             base_url,
-            model: model.unwrap_or_else(|| "BAAI/bge-m3".to_string()),
+            model: model.unwrap_or_else(|| "text-embedding-3-small".to_string()),
             dimension: 1024,
         }
     }
@@ -251,6 +267,100 @@ impl OpenAIEmbedding {
     pub fn with_dimension(mut self, dim: usize) -> Self {
         self.dimension = dim;
         self
+    }
+
+    fn cache_provider_id(&self) -> &str {
+        &self.base_url
+    }
+
+    fn is_ollama(&self) -> bool {
+        self.base_url.contains("localhost:11434") || self.base_url.contains("127.0.0.1:11434")
+    }
+
+    fn embeddings_url(&self) -> String {
+        if self.is_ollama() {
+            format!("{}/api/embed", self.base_url.trim_end_matches("/v1"))
+        } else if self.base_url.ends_with("/embeddings") {
+            self.base_url.clone()
+        } else {
+            format!("{}/embeddings", self.base_url)
+        }
+    }
+
+    async fn post_embeddings(&self, inputs: serde_json::Value) -> VivianResult<serde_json::Value> {
+        let mut body = serde_json::json!({ "model": self.model, "input": inputs });
+        if self.is_ollama() {
+            body["keep_alive"] = serde_json::Value::String("30m".to_string());
+        }
+        let url = self.embeddings_url();
+        for attempt in 1..=3 {
+            let response = self
+                .client
+                .post(&url)
+                .header("Authorization", format!("Bearer {}", self.api_key))
+                .json(&body)
+                .send()
+                .await;
+            let resp = match response {
+                Ok(resp) => resp,
+                Err(error) if attempt < 3 && (error.is_connect() || error.is_timeout()) => {
+                    tokio::time::sleep(Duration::from_millis(250 * attempt as u64)).await;
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
+            };
+            let status = resp.status();
+            let response_body = resp.text().await?;
+            if status.is_success() {
+                return serde_json::from_str(&response_body).map_err(Into::into);
+            }
+            let retryable = status.as_u16() == 429 || status.is_server_error();
+            if retryable && attempt < 3 {
+                tracing::warn!(
+                    "[MemoryEmbedding] HTTP {}，准备第 {} 次重试",
+                    status.as_u16(),
+                    attempt + 1
+                );
+                tokio::time::sleep(Duration::from_millis(250 * attempt as u64)).await;
+                continue;
+            }
+            let detail = serde_json::from_str::<serde_json::Value>(&response_body)
+                .ok()
+                .and_then(|v| {
+                    v.get("message")
+                        .or_else(|| v.get("error"))
+                        .map(|m| m.to_string())
+                })
+                .unwrap_or_else(|| response_body.chars().take(500).collect());
+            return Err(VivianError::Provider(format!(
+                "embedding HTTP {}: {}",
+                status.as_u16(),
+                detail
+            )));
+        }
+        Err(VivianError::Network("embedding 请求重试耗尽".into()))
+    }
+
+    fn parse_embedding(&self, value: &serde_json::Value) -> VivianResult<Vec<f32>> {
+        let array = value
+            .as_array()
+            .ok_or_else(|| VivianError::Provider("embedding 向量不是数组".into()))?;
+        let vector: Vec<f32> = array
+            .iter()
+            .map(|v| {
+                v.as_f64()
+                    .map(|n| n as f32)
+                    .ok_or_else(|| VivianError::Provider("embedding 向量包含非数值元素".into()))
+            })
+            .collect::<VivianResult<_>>()?;
+        if vector.len() != self.dimension {
+            return Err(VivianError::Provider(format!(
+                "embedding 维度不匹配: 期望 {}, 实际 {}",
+                self.dimension,
+                vector.len()
+            )));
+        }
+        Ok(vector)
     }
 }
 
@@ -261,31 +371,30 @@ impl EmbeddingService for OpenAIEmbedding {
     }
 
     async fn embed(&self, text: &str) -> VivianResult<Vec<f32>> {
-        if let Some(cached) = embedding_cache_get(text, &self.model, self.dimension) {
+        if let Some(cached) = embedding_cache_get(
+            text,
+            self.cache_provider_id(),
+            &self.model,
+            self.dimension,
+        ) {
             return Ok(cached);
         }
-        let url = format!("{}/embeddings", self.base_url);
-        let body = serde_json::json!({
-            "model": self.model,
-            "input": text,
-        });
         let resp = self
-            .client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .json(&body)
-            .send()
-            .await?
-            .json::<serde_json::Value>()
+            .post_embeddings(serde_json::Value::String(text.to_string()))
             .await?;
-
-        let emb: Vec<f32> = resp["data"][0]["embedding"]
-            .as_array()
-            .ok_or_else(|| VivianError::Other("OpenAI embedding 响应格式错误".into()))?
-            .iter()
-            .filter_map(|v| v.as_f64().map(|f| f as f32))
-            .collect();
-        embedding_cache_put(text, &self.model, self.dimension, emb.clone());
+        let raw = if self.is_ollama() {
+            &resp["embeddings"][0]
+        } else {
+            &resp["data"][0]["embedding"]
+        };
+        let emb = self.parse_embedding(raw)?;
+        embedding_cache_put(
+            text,
+            self.cache_provider_id(),
+            &self.model,
+            self.dimension,
+            emb.clone(),
+        );
         Ok(emb)
     }
 
@@ -294,7 +403,12 @@ impl EmbeddingService for OpenAIEmbedding {
         let mut miss_indices: Vec<usize> = Vec::new();
         let mut miss_texts: Vec<String> = Vec::new();
         for (i, t) in texts.iter().enumerate() {
-            if let Some(cached) = embedding_cache_get(t, &self.model, self.dimension) {
+            if let Some(cached) = embedding_cache_get(
+                t,
+                self.cache_provider_id(),
+                &self.model,
+                self.dimension,
+            ) {
                 results[i] = Some(cached);
             } else {
                 miss_indices.push(i);
@@ -304,36 +418,35 @@ impl EmbeddingService for OpenAIEmbedding {
         if miss_texts.is_empty() {
             return Ok(results.into_iter().map(|o| o.unwrap()).collect());
         }
-        let url = format!("{}/embeddings", self.base_url);
-        let body = serde_json::json!({
-            "model": self.model,
-            "input": miss_texts,
-        });
-        let resp = self
-            .client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .json(&body)
-            .send()
-            .await?
-            .json::<serde_json::Value>()
-            .await?;
-
-        let data = resp["data"]
-            .as_array()
-            .ok_or_else(|| VivianError::Other("OpenAI embedding 响应格式错误".into()))?;
-        for (i, item) in data.iter().enumerate() {
-            let emb: Vec<f32> = item["embedding"]
-                .as_array()
-                .ok_or_else(|| VivianError::Other("embedding 格式错误".into()))?
-                .iter()
-                .filter_map(|v| v.as_f64().map(|f| f as f32))
-                .collect();
-            let miss_idx = *miss_indices.get(i).ok_or_else(|| {
+        let resp = self.post_embeddings(serde_json::json!(miss_texts)).await?;
+        let data = if self.is_ollama() {
+            resp["embeddings"].as_array()
+        } else {
+            resp["data"].as_array()
+        }
+        .ok_or_else(|| VivianError::Provider("embedding 响应缺少向量数组".into()))?;
+        for (position, item) in data.iter().enumerate() {
+            let response_index = if self.is_ollama() {
+                position
+            } else {
+                item.get("index")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as usize)
+                    .unwrap_or(position)
+            };
+            let raw = if self.is_ollama() { item } else { &item["embedding"] };
+            let emb = self.parse_embedding(raw)?;
+            let miss_idx = *miss_indices.get(response_index).ok_or_else(|| {
                 VivianError::Other("embedding 响应条数与请求不匹配".into())
             })?;
-            let miss_text = &miss_texts[i];
-            embedding_cache_put(miss_text, &self.model, self.dimension, emb.clone());
+            let miss_text = &miss_texts[response_index];
+            embedding_cache_put(
+                miss_text,
+                self.cache_provider_id(),
+                &self.model,
+                self.dimension,
+                emb.clone(),
+            );
             results[miss_idx] = Some(emb);
         }
         if results.iter().any(|o| o.is_none()) {
@@ -434,19 +547,23 @@ impl RemoteMemoryEmbedding {
     }
 
     fn block_embed(&self, text: &str) -> VivianResult<Vec<f32>> {
-        let _permit = self
-            .concurrency
-            .try_acquire()
-            .map_err(|_| VivianError::Other("嵌入并发数已达上限，请稍后重试".into()))?;
-        run_blocking_on(self.inner.embed(text))
+        run_blocking_on(async {
+            let _permit = tokio::time::timeout(Duration::from_secs(5), self.concurrency.acquire())
+                .await
+                .map_err(|_| VivianError::Timeout("等待嵌入并发许可超时".into()))?
+                .map_err(|_| VivianError::Other("嵌入服务已关闭".into()))?;
+            self.inner.embed(text).await
+        })
     }
 
     fn block_embed_batch(&self, texts: &[String]) -> VivianResult<Vec<Vec<f32>>> {
-        let _permit = self
-            .concurrency
-            .try_acquire()
-            .map_err(|_| VivianError::Other("嵌入并发数已达上限，请稍后重试".into()))?;
-        run_blocking_on(self.inner.embed_batch(texts))
+        run_blocking_on(async {
+            let _permit = tokio::time::timeout(Duration::from_secs(5), self.concurrency.acquire())
+                .await
+                .map_err(|_| VivianError::Timeout("等待嵌入并发许可超时".into()))?
+                .map_err(|_| VivianError::Other("嵌入服务已关闭".into()))?;
+            self.inner.embed_batch(texts).await
+        })
     }
 }
 
@@ -682,6 +799,50 @@ mod tests {
         let results = emb.embed_batch(&texts).unwrap();
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].len(), 64);
+    }
+
+    #[test]
+    fn embedding_url_normalizes_cloud_and_ollama_endpoints() {
+        let cloud = OpenAIEmbedding::new(
+            "key".into(),
+            Some("https://api.example.com/v1/".into()),
+            Some("model".into()),
+        );
+        assert_eq!(cloud.embeddings_url(), "https://api.example.com/v1/embeddings");
+
+        let full = OpenAIEmbedding::new(
+            "key".into(),
+            Some("https://api.example.com/v1/embeddings".into()),
+            Some("model".into()),
+        );
+        assert_eq!(full.embeddings_url(), "https://api.example.com/v1/embeddings");
+
+        let ollama = OpenAIEmbedding::new(
+            "ollama".into(),
+            Some("http://127.0.0.1:11434/v1".into()),
+            Some("bge-m3".into()),
+        );
+        assert_eq!(ollama.embeddings_url(), "http://127.0.0.1:11434/api/embed");
+    }
+
+    #[test]
+    fn embedding_parser_rejects_wrong_dimension_and_non_numbers() {
+        let embedding = OpenAIEmbedding::new("key".into(), None, Some("model".into()))
+            .with_dimension(2);
+        assert_eq!(embedding.parse_embedding(&serde_json::json!([1.0, 2.0])).unwrap(), vec![1.0, 2.0]);
+        assert!(embedding.parse_embedding(&serde_json::json!([1.0])).is_err());
+        assert!(embedding.parse_embedding(&serde_json::json!([1.0, "bad"])).is_err());
+    }
+
+    #[test]
+    fn embedding_cache_is_isolated_by_provider() {
+        let text = "provider-isolation-test";
+        embedding_cache_put(text, "provider-a", "same-model", 2, vec![1.0, 0.0]);
+        assert_eq!(
+            embedding_cache_get(text, "provider-a", "same-model", 2),
+            Some(vec![1.0, 0.0])
+        );
+        assert_eq!(embedding_cache_get(text, "provider-b", "same-model", 2), None);
     }
 
     fn cosine_sim(a: &[f32], b: &[f32]) -> f32 {

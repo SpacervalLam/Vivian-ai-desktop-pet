@@ -218,6 +218,16 @@ fn compact_args_preview(args: &serde_json::Value, max_len: usize) -> String {
 /// 用于在无 `can_use_tool` 回调时，通过 Tauri 事件向前端请求确认。
 /// 未覆盖的工具走兜底分支，附带紧凑参数预览避免只显示工具名。
 pub fn confirmation_info(tool_name: &str, args: &serde_json::Value) -> (ConfirmationRisk, String) {
+    // 浏览器桥工具在模型侧是 MCP 命名空间名（`mcp__browser__*`），
+    // 但下面的分支文案是按扩展线名（`browser_*`）写的，先归一化再匹配。
+    let wire;
+    let tool_name = match crate::browser_bridge::tools::wire_name(tool_name) {
+        Some(name) => {
+            wire = name;
+            wire.as_str()
+        }
+        None => tool_name,
+    };
     match tool_name {
         "write_file" => {
             let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("?");

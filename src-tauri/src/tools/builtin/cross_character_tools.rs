@@ -216,9 +216,9 @@ impl Tool for TalkToCharacterTool {
         ToolCategory::Pet
     }
 
-    /// 权限风险等级：执行进程或改变系统状态
+    /// 权限风险等级：跨角色对话仅为角色间传话，无进程/系统副作用
     fn risk(&self) -> ToolRiskTier {
-        ToolRiskTier::Shell
+        ToolRiskTier::Safe
     }
 }
 

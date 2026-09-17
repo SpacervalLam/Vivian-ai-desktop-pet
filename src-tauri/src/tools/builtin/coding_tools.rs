@@ -13,7 +13,7 @@
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
-use crate::tools::sandbox::{is_path_safe, is_path_within_working_directory};
+use crate::tools::sandbox::is_path_safe;
 use crate::tools::types::{
     PermissionResult, Tool, ToolCategory, ToolResult, ToolRiskTier, ToolUseContext, ValidationResult,
 };
@@ -113,9 +113,9 @@ impl Tool for WriteFileTool {
         if !is_path_safe(path) {
             return ValidationResult::failure("路径包含穿越序列（..），已被沙箱拦截", 2);
         }
-        if !is_path_within_working_directory(path, &ctx.working_directory) {
+        if !ctx.is_path_authorized(path) {
             return ValidationResult::failure(
-                &format!("路径不在工作目录内，已拒绝写入: {}（工作目录: {}）", path, ctx.working_directory),
+                &format!("路径不在任何已授权工作区内，已拒绝写入: {}", path),
                 2,
             );
         }
@@ -142,11 +142,22 @@ impl Tool for WriteFileTool {
             }
         }
         let existed = p.exists();
+        // 写入前的旧内容：用于生成「变更」页可见的 unified diff。
+        // 读不到（新建 / 非 UTF-8 文本）按「无旧内容」处理 → 全文记作新增。
+        let previous = if existed { std::fs::read_to_string(p).ok() } else { None };
         match std::fs::write(p, content.as_bytes()) {
-            Ok(()) => ToolResult::standard_success(
-                &format!("已{}文件「{}」（{} 字符）", if existed { "覆写" } else { "创建" }, path, content.chars().count()),
-                Some(json!({ "path": path, "existed": existed, "bytes": content.len() })),
-            ),
+            Ok(()) => {
+                let diff = build_write_diff(&path, previous.as_deref(), &content);
+                ToolResult::standard_success(
+                    &format!("已{}文件「{}」（{} 字符）", if existed { "覆写" } else { "创建" }, path, content.chars().count()),
+                    Some(json!({
+                        "path": path,
+                        "existed": existed,
+                        "bytes": content.len(),
+                        "diff": diff,
+                    })),
+                )
+            }
             Err(e) => ToolResult::standard_error(&format!("写入文件失败: {e}"), None, None),
         }
     }
@@ -170,6 +181,158 @@ impl Tool for WriteFileTool {
     fn search_hint(&self) -> &str {
         "write create file code script save 编程 写文件 代码"
     }
+}
+
+// ============================================================================
+// write_file 的 unified diff
+// ============================================================================
+
+/// 写入 diff 的行数上限（比 edit_file 宽松：新建文件的 diff 就是整份内容）。
+const WRITE_DIFF_MAX_LINES: usize = 300;
+/// 变化中段超过该规模即退化为整段替换，避免 LCS 的 O(N*M) 内存失控。
+const WRITE_DIFF_LCS_BUDGET: usize = 4_000_000;
+
+/// 生成整文件写入的 unified diff（供「变更」页展示）。
+///
+/// - `previous` 为 None（文件原本不存在 / 不是 UTF-8 文本）→ 全文记作新增：
+///   hunk 头 `@@ -0,0 +1,N @@`，每行 `+`。
+/// - 否则先剥离公共前缀与后缀，只对真正变化的中段求 LCS——「万行文件改一行」
+///   这类场景工作集极小，不会付出全量代价。
+///
+/// 输出受行数 / 字符预算约束，与 `edit_file` 的 diff 共用「变更」页渲染。
+fn build_write_diff(path: &str, previous: Option<&str>, content: &str) -> String {
+    let new_lines: Vec<&str> = content.lines().collect();
+    let old_lines: Vec<&str> = previous.map(|p| p.lines().collect()).unwrap_or_default();
+
+    // 前后皆空：没有可展示的内容
+    if new_lines.is_empty() && old_lines.is_empty() {
+        return String::new();
+    }
+
+    // 新建：整文件新增
+    if old_lines.is_empty() {
+        let mut out = vec![format!("--- {path}"), format!("+++ {path}")];
+        out.push(format!("@@ -0,0 +1,{} @@", new_lines.len()));
+        out.extend(new_lines.iter().map(|l| format!("+{l}")));
+        return cap_write_diff(out, false);
+    }
+
+    // 剥离公共前缀 / 后缀（循环上界已保证不会下溢）
+    let mut prefix = 0usize;
+    while prefix < old_lines.len() && prefix < new_lines.len() && old_lines[prefix] == new_lines[prefix] {
+        prefix += 1;
+    }
+    let mut suffix = 0usize;
+    while suffix < old_lines.len() - prefix
+        && suffix < new_lines.len() - prefix
+        && old_lines[old_lines.len() - 1 - suffix] == new_lines[new_lines.len() - 1 - suffix]
+    {
+        suffix += 1;
+    }
+    let old_mid = &old_lines[prefix..old_lines.len() - suffix];
+    let new_mid = &new_lines[prefix..new_lines.len() - suffix];
+
+    // 内容完全一致：无变更
+    if old_mid.is_empty() && new_mid.is_empty() {
+        return String::new();
+    }
+
+    // 变化区过大 → 退化为整段替换（内存恒定）。两侧各分一半行预算，
+    // 否则行数上限会被删除行吃光，新增行一行都看不见。
+    let per_side = WRITE_DIFF_MAX_LINES.saturating_sub(12) / 2;
+    let (body, body_truncated) = if old_mid.len().saturating_mul(new_mid.len()) > WRITE_DIFF_LCS_BUDGET {
+        (
+            full_replace_lines(old_mid, new_mid, per_side),
+            old_mid.len() > per_side || new_mid.len() > per_side,
+        )
+    } else {
+        (lcs_diff_lines(old_mid, new_mid), false)
+    };
+
+    let back = DIFF_CONTEXT.min(prefix);
+    let fwd = DIFF_CONTEXT.min(suffix);
+    let old_block = back + old_mid.len() + fwd;
+    let new_block = back + new_mid.len() + fwd;
+    let start = prefix - back + 1; // 1-based
+    // 旧侧为空（纯插入）时起点写 0，与 git 的 `-0,0` 表示法一致
+    let old_start = if old_block == 0 { 0 } else { start };
+
+    let mut out = vec![format!("--- {path}"), format!("+++ {path}")];
+    out.push(format!("@@ -{old_start},{old_block} +{start},{new_block} @@"));
+    out.extend(old_lines[prefix - back..prefix].iter().map(|l| format!(" {l}")));
+    out.extend(body);
+    out.extend(
+        new_lines[new_lines.len() - suffix..new_lines.len() - suffix + fwd]
+            .iter()
+            .map(|l| format!(" {l}")),
+    );
+    cap_write_diff(out, body_truncated)
+}
+
+/// 行级 LCS diff：返回带 `' '` / `'-'` / `'+'` 前缀的行。
+/// 规模由调用方按 `WRITE_DIFF_LCS_BUDGET` 保证有界。
+fn lcs_diff_lines(old: &[&str], new: &[&str]) -> Vec<String> {
+    let (n, m) = (old.len(), new.len());
+    let mut dp = vec![0u32; (n + 1) * (m + 1)];
+    let at = |i: usize, j: usize| i * (m + 1) + j;
+    for i in (0..n).rev() {
+        for j in (0..m).rev() {
+            dp[at(i, j)] = if old[i] == new[j] {
+                dp[at(i + 1, j + 1)] + 1
+            } else {
+                dp[at(i + 1, j)].max(dp[at(i, j + 1)])
+            };
+        }
+    }
+    let mut out = Vec::with_capacity(n + m);
+    let (mut i, mut j) = (0usize, 0usize);
+    while i < n && j < m {
+        if old[i] == new[j] {
+            out.push(format!(" {}", old[i]));
+            i += 1;
+            j += 1;
+        } else if dp[at(i + 1, j)] >= dp[at(i, j + 1)] {
+            out.push(format!("-{}", old[i]));
+            i += 1;
+        } else {
+            out.push(format!("+{}", new[j]));
+            j += 1;
+        }
+    }
+    out.extend(old[i..].iter().map(|l| format!("-{l}")));
+    out.extend(new[j..].iter().map(|l| format!("+{l}")));
+    out
+}
+
+/// 变化区过大时的退化表示：旧段整体删除 + 新段整体新增（不做最小化，内存恒定）。
+/// `per_side` 限制每侧行数，保证增删两侧都看得见。
+fn full_replace_lines(old: &[&str], new: &[&str], per_side: usize) -> Vec<String> {
+    let mut out: Vec<String> = old.iter().take(per_side).map(|l| format!("-{l}")).collect();
+    out.extend(new.iter().take(per_side).map(|l| format!("+{l}")));
+    out
+}
+
+/// diff 输出预算：超行数 / 字符上限即在行边界截断并标注。
+/// `body_truncated` 用于上游已经丢过内容（退化路径）的情形。
+fn cap_write_diff(mut out: Vec<String>, body_truncated: bool) -> String {
+    let mut truncated = body_truncated;
+    if out.len() > WRITE_DIFF_MAX_LINES {
+        out.truncate(WRITE_DIFF_MAX_LINES);
+        truncated = true;
+    }
+    let mut text = out.join("\n");
+    if text.chars().count() > DIFF_MAX_CHARS {
+        let cut: String = text.chars().take(DIFF_MAX_CHARS).collect();
+        text = match cut.rfind('\n') {
+            Some(idx) => cut[..idx].to_string(),
+            None => cut,
+        };
+        truncated = true;
+    }
+    if truncated {
+        text.push_str("\n…（diff 过大已截断）");
+    }
+    text
 }
 
 // ============================================================================
@@ -355,9 +518,9 @@ impl Tool for EditFileTool {
         if !is_path_safe(path) {
             return ValidationResult::failure("路径包含穿越序列（..），已被沙箱拦截", 2);
         }
-        if !is_path_within_working_directory(path, &ctx.working_directory) {
+        if !ctx.is_path_authorized(path) {
             return ValidationResult::failure(
-                &format!("路径不在工作目录内，已拒绝编辑: {}（工作目录: {}）", path, ctx.working_directory),
+                &format!("路径不在任何已授权工作区内，已拒绝编辑: {}", path),
                 2,
             );
         }
@@ -716,8 +879,8 @@ impl Tool for GrepSearchTool {
                 if !is_path_safe(dir) {
                     return ValidationResult::failure("目录路径包含穿越序列，已被沙箱拦截", 2);
                 }
-                if !is_path_within_working_directory(dir, &ctx.working_directory) {
-                    return ValidationResult::failure("目录不在工作目录内，已拒绝", 2);
+                if !ctx.is_path_authorized(dir) {
+                    return ValidationResult::failure("目录不在任何已授权工作区内，已拒绝", 2);
                 }
             }
         }
@@ -904,8 +1067,8 @@ impl Tool for ListDirTool {
                 if !is_path_safe(dir) {
                     return ValidationResult::failure("目录路径包含穿越序列，已被沙箱拦截", 2);
                 }
-                if !is_path_within_working_directory(dir, &ctx.working_directory) {
-                    return ValidationResult::failure("目录不在工作目录内，已拒绝", 2);
+                if !ctx.is_path_authorized(dir) {
+                    return ValidationResult::failure("目录不在任何已授权工作区内，已拒绝", 2);
                 }
             }
         }
@@ -985,5 +1148,76 @@ fn walk_tree(dir: &std::path::Path, prefix: &str, depth: usize, out: &mut Vec<St
             let child_prefix = format!("{prefix}{}", if last { "    " } else { "│   " });
             walk_tree(&entry.path(), &child_prefix, depth - 1, out, count);
         }
+    }
+}
+
+#[cfg(test)]
+mod write_diff_tests {
+    use super::*;
+
+    /// 新建文件：全文记作新增，hunk 头 `-0,0 +1,N`，且不应出现删除行。
+    #[test]
+    fn new_file_is_all_added() {
+        let d = build_write_diff("a.py", None, "print(1)\nprint(2)\n");
+        assert!(d.starts_with("--- a.py\n+++ a.py\n@@ -0,0 +1,2 @@"), "head:/n{d}");
+        assert!(d.contains("\n+print(1)"), "{d}");
+        assert!(d.contains("\n+print(2)"), "{d}");
+        assert!(
+            !d.lines().any(|l| l.starts_with('-') && !l.starts_with("---")),
+            "new file must have no deletion lines:/n{d}"
+        );
+    }
+
+    /// 覆写：真正变化的行要同时出现删除与新增，并且保留上下文行。
+    #[test]
+    fn overwrite_keeps_removals() {
+        let d = build_write_diff("f.txt", Some("a\nb\nc\nd\n"), "a\nB\nc\nd\n");
+        assert!(d.contains("@@ -1,4 +1,4 @@"), "head:/n{d}");
+        assert!(d.contains("-b"), "{d}");
+        assert!(d.contains("+B"), "{d}");
+        assert!(d.contains(" a"), "context kept:/n{d}");
+        assert!(d.contains(" d"), "context kept:/n{d}");
+    }
+
+    /// 内容一致：不产生 diff（前端据此显示「无改动」）。
+    #[test]
+    fn identical_content_has_no_diff() {
+        assert_eq!(build_write_diff("f", Some("x\ny\n"), "x\ny\n"), "");
+    }
+
+    /// 大文件改一行：公共前后缀剥离后工作集极小，输出只含 1 增 1 删。
+    #[test]
+    fn large_file_single_change_is_minimal() {
+        let old: String = (1..=500).map(|i| format!("line{i}\n")).collect();
+        let new = old.replace("line250\n", "CHANGED\n");
+        let d = build_write_diff("big.txt", Some(&old), &new);
+        let added = d.lines().filter(|l| l.starts_with('+') && !l.starts_with("+++")).count();
+        let removed = d.lines().filter(|l| l.starts_with('-') && !l.starts_with("---")).count();
+        assert_eq!((added, removed), (1, 1), "diff:/n{d}");
+        assert!(d.contains("-line250"), "{d}");
+        assert!(d.contains("+CHANGED"), "{d}");
+    }
+
+    /// 上下文收敛：只保留变化点前后各 DIFF_CONTEXT 行。
+    #[test]
+    fn context_is_bounded() {
+        let old: String = (1..=200).map(|i| format!("l{i}\n")).collect();
+        let new = old.replace("l100\n", "l100x\n");
+        let d = build_write_diff("c.txt", Some(&old), &new);
+        let lines = d.lines().count();
+        assert!(lines <= 2 + 1 + (DIFF_CONTEXT * 2 + 2), "too many lines ({lines}):\n{d}");
+    }
+
+    /// 超大变化区走整段替换兜底：不触发 LCS 内存失控，且增删两侧都要看得见。
+    #[test]
+    fn huge_change_falls_back_to_full_replace() {
+        let old: String = (1..=3000).map(|i| format!("a{i}\n")).collect();
+        let new: String = (1..=3000).map(|i| format!("b{i}\n")).collect();
+        let d = build_write_diff("h.txt", Some(&old), &new);
+        assert!(d.contains("-a1"), "旧段删除应可见:\n{d}");
+        assert!(d.contains("+b1"), "新段新增应可见（不能被删除行挤掉）:\n{d}");
+        assert!(d.contains("已截断"), "应标注截断:\n{d}");
+        // 兜底路径同样受行数预算约束
+        assert!(d.lines().count() <= WRITE_DIFF_MAX_LINES + 1, "not capped");
     }
 }

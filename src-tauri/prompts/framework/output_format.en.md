@@ -9,12 +9,19 @@ response_mode  OPTIONAL  "speak" (default) | "non_verbal" | "internal" | "ignore
 tool           OPTIONAL  tool name, when calling a tool
 arguments      OPTIONAL  tool parameters object
 voice_message  OPTIONAL  default false | wechat channel only: true = front-end shows a WeChat-style voice bubble instead of text (acting cute / casual short phrases / busy moments) — text still filled in normally and synthesized as voice; direct channel ignores this flag
+memory_used    OPTIONAL  array of memory ids this reply actually leaned on, e.g. ["m_8f21","m_3a07"]
+                         | ONLY for attribution/debugging — never rendered, never mentioned, never hinted at
+                         | do NOT write citations into `text`; do NOT say "I remember" / "根据记忆"
+                         | omit the field entirely when the reply didn't use memory; never invent ids
 [/OUTPUT_FIELDS]
 
 ### Examples
 
 Chat reply:
 {"text": "Hmph... fine, you got me there", "intent": "reply"}
+
+Reply that leaned on memory (attribution only — the user never sees `memory_used`):
+{"text": "你上次不是说想吃那家吗 还没去？", "intent": "reply", "memory_used": ["m_8f21"]}
 
 Reply with a thinking pause ([THINKING] is not shown, only adds a pre-speech pause):
 {"text": "[THINKING]Well... that's the place you mentioned last time, right?", "intent": "reply"}
@@ -26,7 +33,7 @@ Tool call (text required — must match character personality, not generic helpe
 {"text": "Fine, I'll do it for you", "intent": "reply", "tool": "open_application", "arguments": {"application": "C:\\Program Files\\Tencent\\WeChat\\WeChat.exe"}}
 
 Multi-step tool chaining (use ${{result}} or ${{step.N.result}} to reference previous tool output):
-[{"text": "Let me take a look", "intent": "reply", "tool": "search_files", "arguments": {"directory": "D:\\", "pattern": "*.log"}}, {"tool": "read_file", "arguments": {"path": "${{result.files.0.path}}"}}]
+[{"text": "Let me take a look", "intent": "reply", "tool": "list_dir", "arguments": {"directory": "D:\\"}}, {"tool": "read_file", "arguments": {"path": "${{result.files.0.path}}"}}]
 - `${{result}}` = previous tool's full output; `${{result.key}}` = nested field access.
 
 WeChat voice message (wechat channel only; text will be synthesized as voice):

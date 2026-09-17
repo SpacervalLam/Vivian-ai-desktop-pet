@@ -6,11 +6,18 @@ use serde_json::{json, Value};
 use tauri::State;
 
 use crate::state::AppState;
+use crate::tools::registry::{is_tool_locked, tool_scope, AgentSide};
 
 /// List all registered tools
 ///
 /// `description` 字段按当前界面语言返回（调用 `Tool::description_in`），
 /// 与 ToolSemanticFilter 语义匹配使用的描述保持一致。
+///
+/// 返回全部注册工具（**不做**禁用过滤），供设置页展示与重新启用；同时给出
+/// 每个工具的归属侧别与分侧开关状态，让设置页能如实分区渲染：
+/// - `scope`：`companion` / `work` / `both`，由 [`tool_scope`] 单一真相源推导
+/// - `companion_enabled` / `work_enabled`：该侧是否启用（未被禁用）
+/// - `companion_locked` / `work_locked`：该侧是否锁定（锁定 = 不可禁用）
 #[tauri::command]
 pub fn list_tools(state: State<'_, Arc<AppState>>) -> Result<Value, String> {
     let tool_system = &state.tool_system;
@@ -20,13 +27,19 @@ pub fn list_tools(state: State<'_, Arc<AppState>>) -> Result<Value, String> {
     let tool_defs: Vec<Value> = tools
         .iter()
         .map(|t| {
+            let name = t.name();
             json!({
-                "name": t.name(),
+                "name": name,
                 "description": t.description_in(normalized),
                 "input_schema": t.parameters_schema_in(normalized),
                 "is_read_only": t.is_read_only(),
                 "category": t.category(),
                 "is_custom": t.is_custom(),
+                "scope": tool_scope(name).as_str(),
+                "companion_enabled": !tool_system.is_tool_disabled(name, AgentSide::Companion),
+                "work_enabled": !tool_system.is_tool_disabled(name, AgentSide::Work),
+                "companion_locked": is_tool_locked(name, AgentSide::Companion),
+                "work_locked": is_tool_locked(name, AgentSide::Work),
             })
         })
         .collect();

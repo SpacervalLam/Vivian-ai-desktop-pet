@@ -3,7 +3,7 @@
 //! - [`PromptBuildingStep`]：注入 PersonaEngine / EmotionBridge / PsychologyManager
 //!   关系上下文由 PsychologyManager 统一提供（原 RelationshipManager 已整合）
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -129,6 +129,10 @@ pub struct PromptBuildingStep {
     pub enable_native_fc: bool,
     /// 当前 provider 是否支持原生 JSON Schema 约束（true 时不注入 output_format prompt 文本）
     pub has_native_schema: bool,
+    /// 主模型上下文窗口；任务路由未单独配置时使用。
+    pub default_context_window: usize,
+    /// task_type → 路由模型上下文窗口。
+    pub task_context_windows: HashMap<String, usize>,
     /// 当前界面语言（zh-CN / en / ja），用于加载对应语言的 framework 段落
     pub language: String,
 }
@@ -195,6 +199,8 @@ impl PromptBuildingStep {
             expression_motion_names: None,
             enable_native_fc: false,
             has_native_schema: false,
+            default_context_window: 131_072,
+            task_context_windows: HashMap::new(),
             language: String::from("zh-CN"),
         }
     }
@@ -226,6 +232,8 @@ impl PromptBuildingStep {
             expression_motion_names: None,
             enable_native_fc: false,
             has_native_schema: false,
+            default_context_window: 131_072,
+            task_context_windows: HashMap::new(),
             language: String::from("zh-CN"),
         }
     }
@@ -239,6 +247,25 @@ impl PromptBuildingStep {
     /// 注入界面语言，用于加载对应语言的 framework 段落
     pub fn with_language(mut self, lang: impl Into<String>) -> Self {
         self.language = lang.into();
+        self
+    }
+
+    /// 注入模型窗口配置，供每轮按 task_type 计算提示词预算。
+    pub fn with_prompt_budget_config(mut self, config: &crate::config::manager::AppConfig) -> Self {
+        self.default_context_window = config.ai.context_window
+            .unwrap_or_else(|| crate::providers::capabilities::default_context_window(&config.ai.model)) as usize;
+        self.task_context_windows = if config.enable_routing_matrix {
+            config.routing_matrix.iter().filter_map(|(task_type, route)| {
+                if route.model.trim().is_empty() && route.context_window.is_none() {
+                    return None;
+                }
+                let window = route.context_window
+                    .unwrap_or_else(|| crate::providers::capabilities::default_context_window(&route.model));
+                Some((task_type.clone(), window as usize))
+            }).collect()
+        } else {
+            HashMap::new()
+        };
         self
     }
 
@@ -868,7 +895,28 @@ impl PromptBuildingStep {
             if text.is_empty() { None } else { Some(text) }
         };
 
+        // 首次见面：由"持久记忆库 + 对话历史"独立判定，**不能从本轮空召回推断**。
+        // 字段契约见 prompt_modules.rs 中 `is_first_meeting` 的文档注释；
+        // brain.rs 的 generate_startup_greeting 是同一判据的正确实现。
+        //
+        // 旧实现 `state.memory_text.is_empty()` 会把"这轮没召回到高相关记忆"误判成
+        // "第一次见面"，从而触发 human_feel 的 NO_ONBOARDING 反例（自我介绍 / 破冰
+        // 脚本）——召回为空远比真·首次见面常见（短查询、rewrite 跳过、分数低于
+        // min_score 被过滤都会命中），这是陪伴侧"机器感"的一个直接来源。
+        //
+        // 注：state.messages 此刻只含历史——本轮用户消息要到 chat_chain 末尾才入历史。
+        // memory 未注入时取 false（宁可漏掉一次破冰，也不要误判出自我介绍）。
+        let is_first_meeting = self
+            .memory
+            .as_ref()
+            .map(|m| m.non_seed_count() == 0)
+            .unwrap_or(false)
+            && state.messages.is_empty();
+
         PromptParts {
+            model_context_window: None,
+            user_level: 0,
+            task_type: String::new(),
             user_input: state.user_input.clone(),
             memory_text: state.memory_text.clone(),
             memory_md_section,
@@ -896,7 +944,7 @@ impl PromptBuildingStep {
             schedule_signals_section: state.schedule_assessment.as_ref().and_then(format_schedule_signals),
             user_model_section: if state.user_model_text.is_empty() { None } else { Some(state.user_model_text.clone()) },
             proactive_search_section: if state.web_context.is_empty() { None } else { Some(state.web_context.clone()) },
-            is_first_meeting: state.memory_text.is_empty(),
+            is_first_meeting,
             channel: state.current_channel.clone(),
             presence_state: state.presence_state.clone(),
             roommate_status,
@@ -925,9 +973,6 @@ impl PromptBuildingStep {
     }
 }
 
-/// 构建后台任务段落（运行中 + 待汇报完成报告）。
-///
-/// 无任务时返回空串（不注入段落）。
 /// 抽取本角色最近说过的话，拼成反重复清单
 ///
 /// 只取 **自己** 的发言：跨角色对话里 messages 混着对方角色的台词，
@@ -1017,60 +1062,175 @@ fn build_recent_self_utterances(
     ))
 }
 
+/// 构建后台任务段落。三个来源互相独立：
+///
+/// - **自治任务**（`TaskService`）：本角色自己派出去的活，运行中的 + 刚完成待汇报的
+/// - **工作完成报告**（`work_notices`）：工作智能体（编程向）刚干完的事，取走即消费
+/// - **等你拍板的提问**：工作智能体正卡在用户那儿，用户没回答前每轮都注入——
+///   它是阻塞用户任务的未闭合环，不能像报告那样说一次就丢
+///
+/// 全部为空时返回空串（不注入段落）。
 fn build_background_tasks_section(char_id: &str, language: &str) -> String {
-    let Some(ts) = crate::brain::task_service::global() else {
-        return String::new();
-    };
-    let running = ts.running_top_level_for(char_id);
-    let pending = ts.unconsumed_reports_for(char_id);
-    if running.is_empty() && pending.is_empty() {
+    let task_service = crate::brain::task_service::global();
+    let running = task_service
+        .as_ref()
+        .map(|ts| ts.running_top_level_for(char_id))
+        .unwrap_or_default();
+    let pending = task_service
+        .as_ref()
+        .map(|ts| ts.unconsumed_reports_for(char_id))
+        .unwrap_or_default();
+    // 工作智能体的完成报告：取走即消费（每份只说一次）
+    let notices = crate::brain::work_notices::global();
+    let work_reports = notices.take_reports_for(char_id);
+    // 工作智能体卡在用户拍板上的提问：用户没回答前，每轮都该被看见
+    let attentions = crate::brain::work_notices::pending_attention_for(char_id);
+
+    if running.is_empty()
+        && pending.is_empty()
+        && work_reports.is_empty()
+        && attentions.is_empty()
+    {
         return String::new();
     }
+
     let lang = crate::pipeline::prompt_modules::normalize_lang(language);
     let heading = crate::pipeline::prompt_modules::section_heading("background_tasks", lang);
-    let (running_label, done_label, report_label, failed_label, guide): (&str, &str, &str, &str, &str) = match lang {
-        "en" => (
-            "Running in background",
-            "Just finished (not yet reported to the user)",
-            "Report",
-            " failed",
-            "Naturally report the finished results above to the user in this reply, in your own voice.",
-        ),
-        "ja" => (
-            "バックグラウンドで実行中",
-            "完了済み（まだユーザーに報告していない）",
-            "報告",
-            " 失敗",
-            "上記の完了結果は、今回の返信で自分の口調でユーザーに自然に報告してください。",
-        ),
-        _ => (
-            "后台进行中",
-            "刚完成（尚未向用户汇报）",
-            "报告",
-            "失败",
-            "上面刚完成的结果，请在本次回复中用自己的口吻自然地向用户汇报。",
-        ),
-    };
+    let l = bg_task_labels(lang);
     let short_id = |id: &str| -> String { id.chars().take(12).collect() };
     let mut lines = vec![heading.to_string()];
+
     for t in running.iter().take(5) {
         let d: String = t.directive.chars().take(60).collect();
-        lines.push(format!("- [{running_label}] {d}（已 {steps} 步，任务 {id}）", steps = t.steps, id = short_id(&t.task_id)));
+        lines.push(format!(
+            "- [{}] {d}（{steps} / {id}）",
+            l.running,
+            steps = t.steps,
+            id = short_id(&t.task_id)
+        ));
     }
     for t in pending.iter().take(3) {
         let d: String = t.directive.chars().take(60).collect();
         let body = t
             .report
             .clone()
-            .unwrap_or_else(|| t.error.clone().unwrap_or_else(|| "（无详细输出）".into()));
+            .unwrap_or_else(|| t.error.clone().unwrap_or_else(|| l.no_detail.to_string()));
         let body: String = body.chars().take(400).collect();
-        let status = if t.status == "failed" { failed_label } else { "" };
-        lines.push(format!("- [{done_label}{status}] {d}\n  {report_label}：{body}"));
+        let status = if t.status == "failed" { l.failed } else { "" };
+        lines.push(format!("- [{}{status}] {d}\n  {}：{body}", l.done, l.report));
     }
-    if !pending.is_empty() {
-        lines.push(guide.to_string());
+    for r in work_reports.iter().take(3) {
+        let body: String = r.body.chars().take(200).collect();
+        lines.push(format!("- [{}] {body}", r.title));
+    }
+
+    // 提问先按「这轮是首次提醒还是已经提醒过」分流，再统一标记已提醒。
+    // 首次给"去提醒用户"，之后改给"他已经知道了，别反复催"——否则
+    // 用户每跟角色说一句话就被催一次。
+    let mut fresh_attention = false;
+    let mut stale_attention = false;
+    for q in attentions.iter().take(3) {
+        if notices.attention_reminded(q.question_id) {
+            stale_attention = true;
+        } else {
+            fresh_attention = true;
+            notices.mark_attention_reminded(q.question_id);
+        }
+        let question: String = q.question.chars().take(150).collect();
+        lines.push(format!("- [{}] {question}", l.attention));
+        if let Some(ctx) = &q.context {
+            let ctx: String = ctx.chars().take(150).collect();
+            if !ctx.trim().is_empty() {
+                lines.push(format!("  {}：{ctx}", l.attention_context));
+            }
+        }
+        let opts: Vec<&str> = q.options.iter().map(|o| o.label.as_str()).collect();
+        if !opts.is_empty() {
+            lines.push(format!("  {}：{}", l.attention_options, opts.join(" / ")));
+        }
+    }
+
+    if !pending.is_empty() || !work_reports.is_empty() {
+        lines.push(l.report_guide.to_string());
+    }
+    if fresh_attention {
+        lines.push(l.attention_guide.to_string());
+    } else if stale_attention {
+        lines.push(l.attention_seen.to_string());
     }
     lines.join("\n")
+}
+
+/// `background_tasks` 段落的三语文案。
+///
+/// 集中在这里而不是散在渲染逻辑里——段落现在有三个来源
+/// （自治任务 / 工作完成报告 / 等你拍板的提问），文案散开就没法对着改。
+struct BgTaskLabels {
+    running: &'static str,
+    done: &'static str,
+    report: &'static str,
+    failed: &'static str,
+    no_detail: &'static str,
+    report_guide: &'static str,
+    attention: &'static str,
+    attention_context: &'static str,
+    attention_options: &'static str,
+    attention_guide: &'static str,
+    attention_seen: &'static str,
+}
+
+fn bg_task_labels(lang: &str) -> BgTaskLabels {
+    match lang {
+        "en" => BgTaskLabels {
+            running: "Running in background",
+            done: "Just finished (not yet reported to the user)",
+            report: "Report",
+            failed: " failed",
+            no_detail: "(no output)",
+            report_guide:
+                "Naturally report the finished results above to the user in this reply, in your own voice.",
+            attention: "Waiting for your call",
+            attention_context: "Context",
+            attention_options: "Options",
+            attention_guide: "The item marked \"Waiting for your call\" is blocked on the user — \
+the background job can't continue until they answer. In your own voice, tell them in one sentence \
+to take a look at the work page. Don't decide for them, and don't read the options out.",
+            attention_seen: "You have already told the user about the \"Waiting for your call\" item \
+and they haven't answered. Don't keep nagging — bring it up only if they ask.",
+        },
+        "ja" => BgTaskLabels {
+            running: "バックグラウンドで実行中",
+            done: "完了済み（まだユーザーに報告していない）",
+            report: "報告",
+            failed: " 失敗",
+            no_detail: "（詳細出力なし）",
+            report_guide:
+                "上記の完了結果は、今回の返信で自分の口調でユーザーに自然に報告してください。",
+            attention: "あなたの判断待ち",
+            attention_context: "背景",
+            attention_options: "選択肢",
+            attention_guide: "「あなたの判断待ち」と付いた件はユーザーの返答待ちで、\
+バックグラウンドの処理が止まっています。自分の口調で、作業ページを覗いてほしいと一言だけ\
+伝えてください。代わりに選ばず、選択肢も読み上げないこと。",
+            attention_seen: "「あなたの判断待ち」の件はすでにユーザーに伝えましたが、\
+まだ返答がありません。何度も急かさず、聞かれたときに触れてください。",
+        },
+        _ => BgTaskLabels {
+            running: "后台进行中",
+            done: "刚完成（尚未向用户汇报）",
+            report: "报告",
+            failed: "失败",
+            no_detail: "（无详细输出）",
+            report_guide: "上面刚完成的结果，请在本次回复中用自己的口吻自然地向用户汇报。",
+            attention: "等你拍板",
+            attention_context: "背景",
+            attention_options: "待选",
+            attention_guide: "上面标着「等你拍板」的事卡在用户那儿——后台正等着这个回答才能\
+继续。请用你自己的口吻，用一句话提醒用户去工作页看一眼。别替他做选择，也别把选项念一遍。",
+            attention_seen: "上面标着「等你拍板」的事你已经提醒过用户，他还没有回答。\
+不必反复催促；他问起时再说。",
+        },
+    }
 }
 
 /// 构建 Episode 段落文本
@@ -1131,7 +1291,7 @@ impl Default for PromptBuildingStep {
 
 #[async_trait]
 impl Runnable for PromptBuildingStep {
-    async fn ainvoke(&self, input: Value, _config: Option<RunnableConfig>) -> VivianResult<Value> {
+    async fn ainvoke(&self, input: Value, config: Option<RunnableConfig>) -> VivianResult<Value> {
         let mut state = PipelineState::from_json(input);
 
         // 工具范围只算一次：场景 + 隐藏集 + 语义召回。文本通道（build_parts）与
@@ -1143,7 +1303,14 @@ impl Runnable for PromptBuildingStep {
             .map(|ts| self.compute_tool_scope(ts, &state));
 
         // 使用模块化提示词构建器 + 模板引擎元数据（Section Schema 驱动）
-        let parts = self.build_parts(&state, tool_scope.as_ref());
+        let mut parts = self.build_parts(&state, tool_scope.as_ref());
+        let task_type = config.as_ref().map(RunnableConfig::task_type)
+            .unwrap_or_else(|| "chat".to_string());
+        parts.model_context_window = Some(self.task_context_windows.get(&task_type)
+            .copied().unwrap_or(self.default_context_window));
+        parts.user_level = self.psychology.as_ref()
+            .map(|psy| psy.relationship().stage()).unwrap_or(0);
+        parts.task_type = task_type;
 
         // 待汇报的后台任务报告 id：随 state 传给生成步骤，
         // 动态便签进入请求后由生成步骤标记消费（每份报告只注入一次）

@@ -15,6 +15,7 @@ pub mod jobs_tools;
 pub mod lsp_tools;
 pub mod media_tools;
 pub mod memory_tools;
+pub mod music_tools;
 pub mod notebook_tools;
 pub mod perception_tools;
 pub mod pet_tools;
@@ -62,6 +63,8 @@ pub fn register_builtin_tools(tool_system: &Arc<ToolSystem>) {
         // 供应商预设更新（联网核对官方 API 文档后的结构化落点：整行 upsert +
         // 系统时钟写核对日期 + 自动递增插件版本防播种覆盖）
         Arc::new(provider_preset_tools::UpdateProviderPresetTool::new()),
+        Arc::new(provider_preset_tools::ListProviderPresetsTool::new()),
+        Arc::new(provider_preset_tools::ManageProviderPresetTool::new()),
         // 记忆工具
         Arc::new(memory_tools::SaveMemoryTool::new()),
         Arc::new(memory_tools::SearchMemoryTool::new()),
@@ -119,6 +122,10 @@ pub fn register_builtin_tools(tool_system: &Arc<ToolSystem>) {
         Arc::new(cross_character_tools::TalkToCharacterTool::new()),
         // 媒体控制工具（合并播放/暂停/上下首/音量/静音为单工具）
         Arc::new(media_tools::MediaControlTool::new()),
+        // 音乐（读当前播放 / 按名字找歌并播放；不单独暴露「搜索」工具，
+        // 检索内嵌在 music_play 里，避免同一件事拆成两个工具）
+        Arc::new(music_tools::MusicNowPlayingTool),
+        Arc::new(music_tools::MusicPlayTool),
         // 桌面感知工具
         Arc::new(perception_tools::GetForegroundAppContextTool::new()),
         // 输入控制工具
@@ -181,6 +188,44 @@ pub fn register_builtin_tools(tool_system: &Arc<ToolSystem>) {
     let count = tools.len();
     for tool in &tools {
         tool_system.register_tool(Arc::clone(tool));
+    }
+
+    // 历史名 → 真实名别名。
+    //
+    // 工具改名后旧名仍可能出现在 few-shot 示例、用户配置、历史对话与模型记忆中，
+    // 别名表把旧名解析到新名，避免查不到工具。`normalize_tool_name` 只去分隔符、
+    // 不重排词序（`setwallpaper` ≠ `wallpaperset`），无法覆盖该场景。
+    //
+    // 目标未注册的条目被 `register_alias` 忽略并 warn，表内可保留暂未注册的名字而不报错。
+    let alias_pairs: &[(&str, &str)] = &[
+        ("set_wallpaper", "wallpaper_set"),
+        ("set_wallpaper_from_file", "wallpaper_set"),
+        ("list_directory", "list_dir"),
+        ("search_files", "grep_search"),
+        ("grep", "grep_search"),
+        ("cancel_scheduled", "manage_scheduled"),
+        ("delete_todo", "manage_todo"),
+        ("take_screenshot", "screenshot_analyze"),
+    ];
+    let alias_count = tool_system.register_aliases(alias_pairs);
+    tracing::info!(
+        "已注册 {} 条工具别名（共 {} 条候选，目标未注册的条目已忽略）",
+        alias_count,
+        alias_pairs.len()
+    );
+
+    // 确认名单自检：名单里的名字必须对应真实注册的工具，否则强制确认会静默失效
+    // （不报错、无测试覆盖，表现为该问的没问）。
+    let unresolved = crate::tools::permission::unresolved_confirmation_names(|name| {
+        tool_system.has_tool(name)
+    });
+    if !unresolved.is_empty() {
+        tracing::error!(
+            "⚠️ 确认名单里以下名字没有对应已注册工具，这些工具的强制确认**不会生效**：{:?}。\
+             请检查 permission.rs 的 CONFIRM_AT_ACTION_TOOLS / DISPATCHER_SAFE_ACTIONS \
+             是否与 Tool::name() 的真实返回值一致。",
+            unresolved
+        );
     }
 
     // 注册 ToolSearchTool（延迟工具搜索元工具）

@@ -30,10 +30,21 @@
   z-index: 5;
   gap: 10px;
   transition: box-shadow 0.2s ease;
+  box-sizing: border-box;
+  height: 54px;
 }
 
 .mind-sb-cover:hover {
   box-shadow: var(--codex-shadow-lg);
+}
+
+.mind-diary-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  flex-shrink: 0;
+  min-height: 34px;
+  padding: 0 4px;
 }
 
 .mind-sb-cover-title {
@@ -170,10 +181,41 @@
   min-height: 0;
   display: flex;
   overflow: hidden;
+  position: relative;
+  /* 左侧留白：内容不再贴住窗口最左缘，留出呼吸空间也更美观 */
+  padding-left: 16px;
 }
 
-/* 左侧导航轨道 */
+/* 左缘呼出热区：挂在窗口根层，始终停在窗口最左缘、跨整高；
+   鼠标靠近最左缘即揭示非常驻导航栏（不受内容区 padding 影响，能命中真正的窗口边缘） */
+.mind-nav-dock {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 24px;
+  z-index: 40;
+  pointer-events: auto;
+}
+
+.mind-nav-dock.is-revealed {
+  width: 122px;
+}
+
+.mind-nav-hotspot {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 24px;
+  z-index: 1;
+}
+
+/* 左侧导航轨道——非常驻悬浮：默认滑出屏幕外，鼠标靠近左缘或悬停其上（或键盘聚焦）时才呼出，
+   覆盖在内容之上（上一层，z-index 高于内容），不再占用内容区左侧一列宽度 */
 .mind-nav-rail {
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  left: 12px;
   width: 88px;
   flex-shrink: 0;
   display: flex;
@@ -183,6 +225,19 @@
   gap: 10px;
   padding: 16px 0 20px;
   pointer-events: none;
+  z-index: 30;
+  transform: translateX(-135%);
+  opacity: 0;
+  transition:
+    transform 0.3s var(--codex-ease, cubic-bezier(0.16, 1, 0.3, 1)),
+    opacity 0.2s ease;
+}
+
+/* 由 dock 的 React hover/focus 状态控制展开，避免 :has 与 pointer-events 在边缘切换时竞态 */
+.mind-nav-dock.is-revealed .mind-nav-rail {
+  transform: translateX(0);
+  opacity: 1;
+  pointer-events: auto;
 }
 
 /* 贴纸导航卡：圆润插画风 + 顶部彩带 */
@@ -261,6 +316,13 @@
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  margin-left: 0;
+  transition: margin-left 0.3s var(--codex-ease, cubic-bezier(0.16, 1, 0.3, 1));
+}
+
+/* 导航展开时为主内容让出空间，避免导航卡片覆盖页面内容 */
+.mind-inspector-root[data-nav-revealed='true'] .mind-main {
+  margin-left: 80px;
 }
 
 /* 页面内容滚动区 */

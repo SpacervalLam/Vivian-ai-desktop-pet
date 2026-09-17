@@ -165,7 +165,9 @@ pub async fn preflight(handle: &AppHandle, state: &Arc<AppState>) -> bool {
 
     // 2. 嵌入服务配置状态（local 需路径+模型；云端需 API Key + Endpoint + 模型）
     let emb = cfg.memory.embedding.clone();
-    let embedding_ok = if emb.source == "local" {
+    let embedding_ok = if !emb.enabled {
+        true
+    } else if emb.source == "local" {
         !emb.ollama_path.trim().is_empty() && !emb.ollama_model.trim().is_empty()
     } else {
         !emb.api_key.trim().is_empty()
@@ -185,7 +187,7 @@ pub async fn preflight(handle: &AppHandle, state: &Arc<AppState>) -> bool {
 
     // 3. 本地 Ollama 嵌入：立即启动服务并等待就绪，再继续初始化；
     //    云端嵌入不启动任何本地服务
-    if emb.source == "local" {
+    if emb.enabled && emb.source == "local" {
         tracing::info!(
             "[Startup] 本地 Ollama 嵌入已配置，先启动服务并检查模型 {}",
             emb.ollama_model
@@ -216,6 +218,11 @@ pub async fn preflight(handle: &AppHandle, state: &Arc<AppState>) -> bool {
             open_config_with_guide(handle);
             return false;
         }
+        if let Err(e) = OllamaServiceManager::warm_embedding_model(&emb.ollama_model).await {
+            tracing::warn!("[Startup] Ollama 嵌入模型预热失败（非致命）: {}", e);
+        } else {
+            tracing::info!("[Startup] Ollama 嵌入模型 {} 已预热", emb.ollama_model);
+        }
         tracing::info!("[Startup] Ollama 嵌入服务与模型已就绪");
         emit_progress(35, 100, "Ollama 嵌入服务与模型已就绪");
     }
@@ -232,8 +239,8 @@ static TOAST_RETRY_LEFT: AtomicUsize = AtomicUsize::new(10);
 ///
 /// 普通角色窗口尚未创建时，也需要一个 ToastWindow 来显示启动进度；
 /// 该窗口使用 `character_id=startup`，只处理 `startup:progress`，不会干扰角色 toast。
-/// 与普通角色 toast 窗口对齐：置顶、定位屏幕右上角、高度撑满屏幕、隐藏任务栏且不抢焦点，
-/// 避免进度条被其他窗口遮挡或停在不预期位置导致用户完全看不到。
+/// 与普通角色 toast 窗口对齐同一套几何：高度固定为屏幕的一半、锚定右下角，
+/// 隐藏任务栏且不抢焦点，最终由跨窗口堆叠协议把启动进度顶到角色 toast 之上。
 /// 创建失败（如与其他窗口的 WebView2 初始化并发触发 ERROR_BUSY）时延迟重试，
 /// 确保启动进度 toast 一定能出现。
 pub fn ensure_startup_toast() {
@@ -244,10 +251,13 @@ pub fn ensure_startup_toast() {
         TOAST_RETRY_LEFT.store(0, Ordering::SeqCst);
         return;
     }
-    // 主显示器尺寸（逻辑像素），用于撑满屏幕高度并定位右上角
-    // 宽度收窄到 360：startup 窗口内容锚定右上（toast 宽 ~360），贴右缘更自然，
-    // 且与角色 toast 窗口（400px 宽、右下锚定）错开，互不遮盖
-    let (pos_x, height) = handle
+    // 主显示器尺寸（逻辑像素）。
+    // 高度取屏幕的一半、贴屏幕右下角——与角色 toast 窗口（400px 宽、右下锚定）同一套
+    // 几何：ToastWindow 的容量管理依赖「半屏高」这个确定值，启动窗口也得跟着，
+    // 否则它的可用高度比对方大一倍，同一套准入判定会算出两个不同的答案。
+    // 宽度收窄到 360： startup 窗口内容锚定右上（toast 宽 ~360），贴右缘更自然。
+    // 两个窗口的纵向错开由跨窗口堆叠协议承担（startup 始终排在最上）。
+    let (pos_x, pos_y, height) = handle
         .primary_monitor()
         .ok()
         .flatten()
@@ -255,9 +265,10 @@ pub fn ensure_startup_toast() {
             let factor = m.scale_factor();
             let w = m.size().width as f64 / factor;
             let h = m.size().height as f64 / factor;
-            (w - 360.0, h)
+            let hh = (h / 2.0).max(1.0);
+            (w - 360.0, h - hh, hh)
         })
-        .unwrap_or((0.0, 600.0));
+        .unwrap_or((0.0, 0.0, 600.0));
     match WebviewWindowBuilder::new(
         &handle,
         "startup_toast",
@@ -265,7 +276,7 @@ pub fn ensure_startup_toast() {
     )
     .title("Vivian Startup")
     .inner_size(360.0, height)
-    .position(pos_x, 0.0)
+    .position(pos_x, pos_y)
     .resizable(false)
     .transparent(true)
     .decorations(false)

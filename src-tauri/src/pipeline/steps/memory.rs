@@ -519,6 +519,10 @@ impl Runnable for MemoryRetrievalStep {
                 .map(|s| format!(" [{}]", s))
                 .unwrap_or_default();
             // 置信度标记：combined_score 或 temporal_adjusted_score 低于阈值的标注 [需验证]
+            //
+            // ⚠️ 这里量的是**检索相关性**（这条记忆跟当前问题有多像），
+            // 不是**记忆本身可不可信**。两者是独立的：一条记忆可以字面高度匹配、
+            // 但已经被用户当面否认过。后者由下面的 evidence_hint 负责。
             let confidence_hint = {
                 let score = mem
                     .metadata
@@ -533,6 +537,24 @@ impl Runnable for MemoryRetrievalStep {
                     ""
                 }
             };
+            // 证据可信度标记：来自 `memory::evidence` 的 reinforcement / disputation 双时钟。
+            //
+            // 这套评分一直只活在存储层，prompt 层看不到——于是模型可能拿一条
+            // 已经被用户反驳过的记忆去说「我记得你说过……」，用户回一句
+            // 「我什么时候说过这个？」就出戏了。
+            //
+            // 只标**负面**证据（正面不加标记）：绝大多数记忆都处于 Pending（待定），
+            // 给它们都打标记等于没打；真正需要模型改变行为的只有"被否认过"这一种。
+            let evidence_hint = {
+                use crate::memory::evidence::{derive_status, EvidenceStatus};
+                match derive_status(mem, now) {
+                    // score ≤ ARCHIVE_THRESHOLD(-2.0)：净负面证据压过了正面证据
+                    EvidenceStatus::ArchiveCandidate => " [存疑]",
+                    // 刚被反驳、正面证据还在宽限期内恢复 → 同样不该主动引用
+                    _ if mem.rebuttal_grace_remaining > 0 => " [刚被否认]",
+                    _ => "",
+                }
+            };
             // 重要度引导：高重要度的关键记忆打上 [重点] 标记，引导 LLM 作答时更重视
             let emphasis_mark = if mem.importance >= IMPORTANCE_EMPHASIS_THRESHOLD {
                 " [重点]"
@@ -543,8 +565,9 @@ impl Runnable for MemoryRetrievalStep {
             // 不再输出 imp=x.xx / mood=... 等数据库元数据——重要性由 [重点] 标记表达，
             // 数值符号只会把"自然回忆"变成"查表结果"。
             memory_parts.push(format!(
-                "[{} | {}] {}{}{}{}{}",
-                time, type_label, role_prefix, content, emphasis_mark, stale_hint, confidence_hint
+                "[{} | {}] {}{}{}{}{}{}",
+                time, type_label, role_prefix, content, emphasis_mark, stale_hint,
+                confidence_hint, evidence_hint
             ));
             memory_details.push(json!({
                 "id": mem.id,

@@ -3,7 +3,7 @@
 //! 当前工具：
 //! - `read_file`：按绝对路径读取本地文本/代码/HTML 文件内容。
 //!   所有路径操作都经过沙箱校验（`sandbox::is_path_safe` 防路径穿越 +
-//!   `is_path_within_working_directory` 工作目录约束），只读、无副作用。
+//!   `ToolUseContext::is_path_authorized` 工作区归属约束），只读、无副作用。
 //!
 //! 用途：用户给出本地文件路径（如"读一下 C:\xxx\note.html"）时，智能体可读取
 //! 文件内容后配合 `create_html_note` 等工具将其转化为笔记。
@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 
 use crate::commands::chat::read_text_with_encoding_detection;
-use crate::tools::sandbox::{is_path_safe, is_path_within_working_directory};
+use crate::tools::sandbox::is_path_safe;
 use crate::tools::types::{
     PermissionResult, Tool, ToolCategory, ToolResult, ToolRiskTier, ToolUseContext, ValidationResult,
 };
@@ -102,9 +102,9 @@ impl Tool for ReadFileTool {
         if !is_path_safe(path) {
             return ValidationResult::failure("路径包含穿越序列（..），已被沙箱拦截", 2);
         }
-        if !is_path_within_working_directory(path, &ctx.working_directory) {
+        if !ctx.is_path_authorized(path) {
             return ValidationResult::failure(
-                &format!("路径不在工作目录内，已拒绝读取: {}（工作目录: {}）", path, ctx.working_directory),
+                &format!("路径不在任何已授权工作区内，已拒绝读取: {}", path),
                 2,
             );
         }

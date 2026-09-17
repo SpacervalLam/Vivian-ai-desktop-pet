@@ -319,6 +319,10 @@ impl Brain {
             mind.clone(),
         ));
 
+        // 让主动编排器也能拿到 SelfState：主动回复 prompt 由此携带"被冷落 / 安静 / 孤独"
+        // 等自我叙事，使桌宠在用户不回话时不再如常继续，而是体现被忽略。
+        proactive.set_self_state(self_state.clone());
+
         // 初始化聊天链：注入 PetController 时启用 control_actions 执行
         let chat_chain = Some(Arc::new(match pet_controller {
             Some(pc) => BrainChatChain::new(
@@ -973,7 +977,11 @@ impl Brain {
                 let character_block = self.persona.get_character_block();
                 let examples_block = self.persona.get_examples_block();
                 let style_block = self.persona.build_style_prompt(intimacy, hour);
-                let chat_style_framework = crate::pipeline::prompt_modules::chat_style_framework();
+                // 单句生成路径：只带聊天风格 + AI 腔禁用词表（不含会话/称呼/输出格式规则）。
+        // 一句话最容易滑向客服腔（"晚上好呀~ 今天过得怎么样呢"），所以禁用词表必带。
+        let chat_style_framework = crate::pipeline::prompt_modules::short_line_framework(
+            &self.config.base.language,
+        );
                 let system_prompt = format!(
                     "{character_block}\n\n\
                     {examples_block}\n\n\
@@ -993,6 +1001,7 @@ impl Brain {
                 ];
                 match self.router.generate(
                     LLMRequest::new("chat", messages).with_temperature(0.9)
+                        .with_character_id(self.char_id.clone())
                 ).await {
                     Ok(text) => {
                         let t = text.trim().trim_matches('"').trim_matches('「').trim_matches('」').to_string();
@@ -1202,7 +1211,11 @@ impl Brain {
         let character_block = self.persona.get_character_block();
         let examples_block = self.persona.get_examples_block();
         let style_block = self.persona.build_style_prompt(intimacy, hour);
-        let chat_style_framework = crate::pipeline::prompt_modules::chat_style_framework();
+        // 单句生成路径：只带聊天风格 + AI 腔禁用词表（不含会话/称呼/输出格式规则）。
+        // 一句话最容易滑向客服腔（"晚上好呀~ 今天过得怎么样呢"），所以禁用词表必带。
+        let chat_style_framework = crate::pipeline::prompt_modules::short_line_framework(
+            &self.config.base.language,
+        );
 
         let system_prompt = format!(
             "{character_block}\n\n\
@@ -1244,7 +1257,8 @@ impl Brain {
             ChatMessage::user(user_prompt),
         ];
 
-        match self.router.generate(LLMRequest::new("chat", messages)).await {
+        match self.router.generate(LLMRequest::new("chat", messages)
+            .with_character_id(self.char_id.clone())).await {
             Ok(text) => {
                 let greeting = text.trim().trim_matches('"').trim_matches('「').trim_matches('」').to_string();
                 if greeting.is_empty() {
@@ -1280,7 +1294,11 @@ impl Brain {
         let character_block = self.persona.get_character_block();
         let examples_block = self.persona.get_examples_block();
         let style_block = self.persona.build_style_prompt(intimacy, hour);
-        let chat_style_framework = crate::pipeline::prompt_modules::chat_style_framework();
+        // 单句生成路径：只带聊天风格 + AI 腔禁用词表（不含会话/称呼/输出格式规则）。
+        // 一句话最容易滑向客服腔（"晚上好呀~ 今天过得怎么样呢"），所以禁用词表必带。
+        let chat_style_framework = crate::pipeline::prompt_modules::short_line_framework(
+            &self.config.base.language,
+        );
 
         let (state_desc, reason_desc) = match (target_state, &reason) {
             (PresenceState::Rest, PresenceChangeReason::MoodDriven) => (
@@ -1347,7 +1365,8 @@ impl Brain {
             ChatMessage::user(user_prompt),
         ];
 
-        match self.router.generate(LLMRequest::new("chat", messages)).await {
+        match self.router.generate(LLMRequest::new("chat", messages)
+            .with_character_id(self.char_id.clone())).await {
             Ok(text) => {
                 let farewell = text.trim().trim_matches('"').trim_matches('「').trim_matches('」').to_string();
                 if farewell.is_empty() {

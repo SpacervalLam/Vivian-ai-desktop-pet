@@ -751,7 +751,8 @@ async fn decide_topics_with_intent(
     ];
 
     let resp = router
-        .generate(LLMRequest::new("knowledge_acquisition", messages))
+        .generate(LLMRequest::new("knowledge_acquisition", messages)
+            .with_character_id(char_id.to_string()))
         .await
         .map_err(|e| e.to_string())?;
 

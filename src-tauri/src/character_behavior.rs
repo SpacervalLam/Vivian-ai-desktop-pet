@@ -160,6 +160,8 @@ impl TriggerAffinity {
             | ProactiveTrigger::AppDuration
             | ProactiveTrigger::LateNight
             | ProactiveTrigger::MusicChanged => 1.0,
+            // 工作侧待转达：由工作智能体的事实驱动，不走概率门控，取中性亲和度
+            ProactiveTrigger::WorkNotice => 1.0,
         }
     }
 }

@@ -378,8 +378,21 @@ export interface ToolInfo {
   name: string;
   description: string;
   category: string;
-  parameters_schema: Record<string, unknown>;
+  /** 后端字段名为 input_schema（此处为历史别名，部分调用方仍用它） */
+  parameters_schema?: Record<string, unknown>;
   is_read_only?: boolean;
+  /** 是否为智能体自进化创建的自建工具 */
+  is_custom?: boolean;
+  /** 工具归属侧别（后端由单一真相源推导） */
+  scope?: 'companion' | 'work' | 'both';
+  /** 陪伴侧是否启用（未被用户禁用） */
+  companion_enabled?: boolean;
+  /** 工作侧是否启用（未被用户禁用） */
+  work_enabled?: boolean;
+  /** 陪伴侧是否锁定（锁定 = 不可禁用） */
+  companion_locked?: boolean;
+  /** 工作侧是否锁定（锁定 = 不可禁用） */
+  work_locked?: boolean;
 }
 
 /** 系统信息 - 对应 backend `get_system_info` 返回 */

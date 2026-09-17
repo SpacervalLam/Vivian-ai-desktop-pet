@@ -541,7 +541,8 @@ impl TaskService {
              不要输出 JSON 之外的任何文字。",
         );
         let user = ChatMessage::user(task_text);
-        let req = LLMRequest::new(crate::providers::base::TASK_WORK_AGENT, vec![system, user]);
+        let req = LLMRequest::new(crate::providers::base::TASK_WORK_AGENT, vec![system, user])
+            .with_character_id(char_id.to_string());
         let resp = match router.generate(req).await {
             Ok(t) => t,
             Err(e) => {
@@ -574,7 +575,8 @@ impl TaskService {
              若目标极简单无需规划，回答“无需额外计划，直接执行”。不要输出 JSON。",
         );
         let user = ChatMessage::user(format!("角色：{char_id}\n目标：{directive}\n\n请给出只读执行计划："));
-        let req = LLMRequest::new(crate::providers::base::TASK_WORK_AGENT, vec![system, user]);
+        let req = LLMRequest::new(crate::providers::base::TASK_WORK_AGENT, vec![system, user])
+            .with_character_id(char_id.to_string());
         match router.generate(req).await {
             Ok(t) => t.trim().to_string(),
             Err(e) => {

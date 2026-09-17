@@ -70,7 +70,7 @@ interface CreatePluginArgs {
 const previewLabel: React.CSSProperties = {
   fontSize: 11,
   fontWeight: 600,
-  color: '#8A8A8A',
+  color: 'var(--panel-text-tertiary)',
   marginBottom: 2,
 };
 
@@ -84,12 +84,18 @@ const previewValue: React.CSSProperties = {
   marginBottom: 8,
 };
 
-/** 脚本/schema 等长文本的滚动预览样式 */
+/**
+ * 脚本/schema 等长文本的滚动预览样式。
+ *
+ * 底色必须走主题变量：原先写死 `rgba(44, 44, 44, 0.06)`（深灰 6%），
+ * 在深色暖调主题的 #373028 底上几乎不可见，代码块看着像"没有背景"。
+ * `--panel-bg-surface` 三套主题各自定义（深色为浅色 5% 叠加），才是对的做法。
+ */
 const previewCode: React.CSSProperties = {
   ...previewValue,
   fontFamily: 'Consolas, "Courier New", monospace',
   fontSize: 11,
-  background: 'rgba(44, 44, 44, 0.06)',
+  background: 'var(--panel-bg-surface)',
   borderRadius: 6,
   padding: '6px 8px',
   maxHeight: 150,
@@ -101,10 +107,16 @@ const previewCode: React.CSSProperties = {
 /** 无操作自动视为拒绝的倒计时秒数 */
 const COUNTDOWN_SECONDS = 30;
 
+/**
+ * 风险等级配色。
+ *
+ * 取主题语义色而非固定 Material 色：设置面板是暖纸调，硬编码的
+ * #2196F3 蓝 / #FF9800 橙 在深色暖底上很跳，且不随明暗主题变化。
+ */
 const riskAccent: Record<ConfirmRiskLevel, string> = {
-  low: '#2196F3',
-  medium: '#FF9800',
-  high: '#E53935',
+  low: 'var(--panel-info)',
+  medium: 'var(--panel-warning)',
+  high: 'var(--panel-danger)',
 };
 
 /**
@@ -179,48 +191,66 @@ const ConfirmToast: React.FC<ConfirmToastProps> = ({
     fontWeight: 600,
     fontFamily: 'inherit',
     cursor: 'pointer',
-    border: '1.5px solid var(--panel-border-strong)',
+    // 1px 而非 1.5px：与卡片统一到细线层级，靠背景色区分三个按钮而非靠重边框
+    border: '1px solid var(--panel-border-strong)',
     transition: 'opacity 0.15s ease, transform 0.1s ease',
   };
 
   return (
     <div
       style={{
-        transform: visible ? 'translateX(0)' : 'translateX(120%)',
+        position: 'relative',
+        overflow: 'hidden',
+        transform: visible ? 'translateX(0) scale(1)' : 'translateX(28px) scale(0.94)',
         opacity: visible ? 1 : 0,
-        transition: 'transform 0.25s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.25s ease',
+        transition:
+          'transform 320ms cubic-bezier(0.16, 1, 0.3, 1), opacity 200ms ease',
         width: '100%',
         boxSizing: 'border-box',
-        padding: '12px 14px',
-        borderRadius: 10,
-        background: 'var(--panel-surface)',
+        // 左侧多留 3px 给风险色条
+        padding: '12px 14px 12px 17px',
+        borderRadius: 12,
+        background: 'var(--panel-elevated)',
         color: 'var(--panel-text)',
-        border: '1.5px solid var(--panel-border-strong)',
-        boxShadow: 'var(--panel-shadow-elevated)',
+        border: '1px solid var(--panel-border)',
+        // 与 Toast 同一套层次：外层投影 + 内顶高光
+        boxShadow:
+          'var(--panel-shadow-elevated), inset 0 1px 0 rgba(255, 255, 255, 0.05)',
         pointerEvents: 'auto',
         fontFamily: 'inherit',
         fontSize: 13,
-        lineHeight: 1.5,
+        lineHeight: 1.55,
       }}
     >
+      {/* 左侧风险色条：与 Toast 同一套视觉语言，等级一眼可辨 */}
+      <span
+        style={{
+          position: 'absolute',
+          left: 0,
+          top: 0,
+          bottom: 0,
+          width: 3,
+          background: accent,
+        }}
+      />
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
-        <span
-          style={{
-            display: 'inline-flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            width: 20,
-            height: 20,
-            borderRadius: '50%',
-            background: accent,
-            color: '#fff',
-            fontSize: 12,
-            fontWeight: 700,
-            flexShrink: 0,
-          }}
+        <svg
+          width={19}
+          height={19}
+          viewBox="0 0 24 24"
+          fill="none"
+          aria-hidden
+          style={{ color: accent, flexShrink: 0 }}
         >
-          ?
-        </span>
+          <circle cx={12} cy={12} r={10} fill="currentColor" opacity={0.16} />
+          <path
+            d="M9.6 9.5a2.5 2.5 0 1 1 3.4 2.3c-.8.3-1.2 1-1.2 1.8M11.8 16.6h.01"
+            stroke="currentColor"
+            strokeWidth={2.1}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
         <span style={{ fontWeight: 700, fontSize: 13 }}>
           {isCreatePlugin
             ? t('tool_confirm.create_plugin_title')
@@ -233,8 +263,11 @@ const ConfirmToast: React.FC<ConfirmToastProps> = ({
             style={{
               padding: '1px 8px',
               borderRadius: 999,
-              background: accent,
-              color: '#fff',
+              // 描边式而非实心：accent 在强制浅色主题下是 #2196F3，
+              // 实心底配白字对比度不足；描边 + accent 文字在三套主题下都成立。
+              background: 'var(--panel-bg-surface-elevated)',
+              color: accent,
+              border: `1px solid ${accent}`,
               fontSize: 11,
               fontWeight: 600,
               flexShrink: 0,
@@ -248,7 +281,7 @@ const ConfirmToast: React.FC<ConfirmToastProps> = ({
           style={{
             marginLeft: 'auto',
             fontSize: 11,
-            color: '#8A8A8A',
+            color: 'var(--panel-text-tertiary)',
             fontVariantNumeric: 'tabular-nums',
           }}
         >
@@ -259,7 +292,7 @@ const ConfirmToast: React.FC<ConfirmToastProps> = ({
       <div style={{ wordBreak: 'break-word', whiteSpace: 'pre-wrap', marginBottom: 4 }}>
         {reason}
       </div>
-      <div style={{ fontSize: 11, color: '#8A8A8A', marginBottom: 8 }}>{tool}</div>
+      <div style={{ fontSize: 11, color: 'var(--panel-text-tertiary)', marginBottom: 8 }}>{tool}</div>
       {isCreateTool ? (
         <div style={{ marginBottom: 10 }}>
           <div style={previewLabel}>{t('tool_confirm.field_name')}</div>
@@ -294,7 +327,7 @@ const ConfirmToast: React.FC<ConfirmToastProps> = ({
         <div style={{ marginBottom: 10 }}>
           <div style={previewLabel}>{t('tool_confirm.field_name')}</div>
           <div style={{ ...previewValue, fontFamily: 'Consolas, "Courier New", monospace' }}>
-            {pluginArgs.name || '?'} <span style={{ color: '#8A8A8A' }}>v{pluginArgs.version || ''}</span>
+            {pluginArgs.name || '?'} <span style={{ color: 'var(--panel-text-tertiary)' }}>v{pluginArgs.version || ''}</span>
           </div>
 
           <div style={previewLabel}>{t('tool_confirm.field_description')}</div>
@@ -344,8 +377,8 @@ const ConfirmToast: React.FC<ConfirmToastProps> = ({
             style={{
               fontSize: 11,
               lineHeight: 1.45,
-              color: '#8A8A8A',
-              background: 'rgba(44, 44, 44, 0.06)',
+              color: 'var(--panel-text-tertiary)',
+              background: 'var(--panel-bg-surface)',
               borderRadius: 6,
               padding: '6px 8px',
               marginBottom: 10,
@@ -363,7 +396,7 @@ const ConfirmToast: React.FC<ConfirmToastProps> = ({
         style={{
           height: 3,
           borderRadius: 2,
-          background: 'rgba(44, 44, 44, 0.12)',
+          background: 'var(--panel-bg-active)',
           overflow: 'hidden',
           marginBottom: 10,
         }}

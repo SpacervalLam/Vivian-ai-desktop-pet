@@ -161,7 +161,26 @@ impl TtsBackend for GptSoVitsBackend {
     }
 
     async fn health_check(&self, config: &TtsConfig) -> bool {
-        Self::base_url(config).is_ok()
+        let Ok(base) = Self::base_url(config) else {
+            return false;
+        };
+        // 配置存在不等于服务可用；用轻量 GET 验证进程确实可达。
+        // 不同 GPT-SoVITS 版本可能没有 /docs，因此收到 404/405 也说明服务已响应。
+        match self
+            .client
+            .get(format!("{}/docs", base.trim_end_matches('/')))
+            .timeout(Duration::from_secs(2))
+            .send()
+            .await
+        {
+            Ok(resp) => resp.status().is_success()
+                || resp.status() == reqwest::StatusCode::NOT_FOUND
+                || resp.status() == reqwest::StatusCode::METHOD_NOT_ALLOWED,
+            Err(e) => {
+                tracing::debug!("[TTS] GPT-SoVITS health_check 失败: {e}");
+                false
+            }
+        }
     }
 }
 

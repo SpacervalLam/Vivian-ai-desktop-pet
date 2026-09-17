@@ -1199,8 +1199,7 @@ const DiaryPage: React.FC = () => {
     }
   }, [filteredEntries, selectedId]);
 
-  // === 标题行工具栏（注入共享 header 右侧） ===
-  const setHeaderExtra = nav?.setHeaderExtra;
+  // === 标题行工具栏（放在日记页内容区，不占用全局封面条） ===
   const toolbar = useMemo(
     () => (
       <DiaryToolbar
@@ -1214,11 +1213,6 @@ const DiaryPage: React.FC = () => {
     ),
     [character, dateFilter, searchQuery, entryDates],
   );
-  useEffect(() => {
-    if (!setHeaderExtra) return;
-    setHeaderExtra(toolbar);
-    return () => setHeaderExtra(null);
-  }, [toolbar, setHeaderExtra]);
 
   // === 选中日记 ===
   const selectedEntry = useMemo(() => {
@@ -1308,6 +1302,7 @@ const DiaryPage: React.FC = () => {
   return (
     <PageShell>
       <TopBar character={character} setCharacter={setCharacter} t={t} />
+      <div className="mind-diary-toolbar">{toolbar}</div>
 
       <div style={{ flex: 1, display: 'flex', gap: SPACING.lg, minHeight: 0 }}>
         {/* ===== 左侧：便签列表（40%） ===== */}

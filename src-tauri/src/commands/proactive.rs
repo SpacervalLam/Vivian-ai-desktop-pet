@@ -572,6 +572,10 @@ pub async fn proactive_tick(
         is_user_chatting: crate::conversation::CONVERSATION_MANAGER.is_any_user_session_active()
             && system_idle_seconds < 90.0,
         is_speaking_leader: false,
+        // 心智观察器注意力：窗口层现算，页签/会话取自前端上报。
+        // 保守缺省——查不到就当作"用户看不见"，宁可多提醒一次。
+        visible_work_session: crate::commands::inspector::visible_work_session(&app),
+        viewing_work_page: crate::commands::inspector::is_viewing_work_page(&app),
     };
 
     // ── World Entity State 桥接：把 idle_seconds 翻译为用户在场/离开信号 ──
@@ -1157,6 +1161,22 @@ pub async fn proactive_tick(
 
     // 清理流式回调
     brain.proactive.set_stream_emitter(None);
+
+    // 工作侧素材转达（后台任务完成 / 卡在等用户拍板）。
+    //
+    // 只在角色这一轮本来没打算说话时才补一条——它已经在说别的事了，就别再插队。
+    // 放在 tick **之后**而不是 tick 里面，是为了绕开角色侧那两层"少说话"的收敛：
+    // lay_low 与安静模式都是角色被冷落后的自我退避，不该把用户自己要求的提醒
+    // 一起退掉（安静模式尤其致命：用户埋头干活不搭理桌宠时它必然开着，
+    // 而那正是最需要这条提醒的时候）。详见 ProactiveOrchestrator::relay_work_notice。
+    //
+    // 生成的消息与 tick 产出的消息同路：一起走下面的 drain → 仲裁 → 投递，
+    // 因此跨角色碰撞仲裁、发言预占、TTS 播放边界照常生效。
+    let produced = if produced {
+        produced
+    } else {
+        brain.proactive.relay_work_notice(&ctx)
+    };
 
     let all_messages = brain.drain_proactive_messages();
     drop(_proactive_guard);

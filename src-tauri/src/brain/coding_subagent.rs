@@ -16,11 +16,11 @@ use std::sync::Arc;
 use serde_json::Value;
 use tauri::Emitter;
 
-use crate::brain::coding_agent::{coding_sandbox_allow, summarize_result};
+use crate::brain::coding_agent::{coding_sandbox_confirm, summarize_result};
 use crate::providers::base::{LLMRequest, StreamEvent, ToolDefinition};
 use crate::providers::router::ModelRouter;
 use crate::tools::executor::execute_tool_use;
-use crate::tools::types::{AgentAccessLevel, ToolUseContext};
+use crate::tools::types::{AgentAccessLevel, ToolUseContext, WorkingDirectoryPermission};
 use crate::tools::ToolSystem;
 use crate::types::response::{ChatMessage, MessageToolCall};
 
@@ -82,6 +82,16 @@ pub struct SubagentRequest {
     /// 发起方的深度；子 agent 内执行的工具将看到 `depth + 1`。
     pub depth: usize,
     pub working_directory: String,
+    /// 附加工作区（主工作区之外的授权目录，逐个带只读标记）。
+    ///
+    /// 由上层 `work_delegate` 决定：默认继承父会话的全部工作区，也可以只给一个子集，
+    /// 甚至一个都不给（此时 `working_directory` 为空串，子 agent 进入无工作区模式）。
+    pub extra_workspaces: Vec<WorkingDirectoryPermission>,
+    /// 上层是否**显式限定**过工作区范围（而非默认继承）。
+    ///
+    /// 用于提示词：受限的子 agent 不该反复尝试越界路径，而应把「需要别处的信息」
+    /// 写进最终回复交回上层处理。
+    pub workspaces_restricted: bool,
     pub access_level: AgentAccessLevel,
     pub char_id: String,
     /// 协作式取消标志（后台任务才有）。置位后在下一个轮次边界收手。
@@ -112,17 +122,54 @@ fn definitions_for(tool_system: &ToolSystem, allowed: &[String]) -> Vec<ToolDefi
 }
 
 /// 子 agent 的 system prompt。
-fn subagent_system_prompt(working_directory: &str, depth: usize, max_rounds: usize) -> String {
+fn subagent_system_prompt(
+    working_directory: &str,
+    extra_workspaces: &[WorkingDirectoryPermission],
+    workspaces_restricted: bool,
+    depth: usize,
+    max_rounds: usize,
+) -> String {
     let has_wd = !working_directory.trim().is_empty();
+    // 被上层限定过范围时，明确告诉它越界不会有结果——否则它会把轮次烧在反复被沙箱拒绝上，
+    // 而这本来是可以直接汇报给上层的信息差。
+    let scope = if !workspaces_restricted {
+        ""
+    } else if has_wd {
+        "\n- 你的工作区范围由上层指定：只有上面列出的目录在授权范围内，文件工具的路径校验会拒绝\
+         其它位置，不要尝试越界。如果任务需要别处的信息，在最终回复里写清「需要哪里的什么信息、\
+         为什么需要」，由上层决定是否重新派发——不要用一堆失败的尝试凑答案。"
+    } else {
+        "\n- 上层没有给你任何工作区：本任务不绑定目录。你可以用绝对路径**读取**文件，\
+         但**不能修改任何文件、也不能执行命令**——这类调用会被直接拒绝。\
+         如果任务本来就需要写入或跑命令，不要反复尝试：在最终回复里说明需要做什么、为什么，\
+         由上层决定是否换一种派发方式（给它一个工作区）。"
+    };
     let env = if has_wd {
-        format!("- 工作目录：{working_directory}（文件操作仅限该目录内）")
+        let extras = if extra_workspaces.is_empty() {
+            String::new()
+        } else {
+            let mut s = String::from("\n- 附加工作区（同样在授权范围内，需用绝对路径）：");
+            for w in extra_workspaces {
+                s.push_str(&format!(
+                    "\n  - {}{}",
+                    w.path,
+                    if w.is_read_only { "（只读）" } else { "" }
+                ));
+            }
+            s
+        };
+        format!(
+            "- 主工作目录：{working_directory}（文件操作仅限该目录与下列附加工作区内）{extras}"
+        )
     } else {
         "- 工作目录：未选择（文件操作使用绝对路径）".to_string()
     };
+    let env = format!("{env}{scope}");
     // 与主智能体一致：有工作目录走相对路径，没有才退回绝对路径
     let link_protocol = if has_wd {
-        "提到本地文件时使用可点击 Markdown 链接 `[文件名 (line N)](相对工作目录的路径:N)`：\
-         路径相对于工作目录、使用正斜杠、行号从 1 开始，不要写盘符或绝对路径。"
+        "提到主工作目录内的本地文件时使用可点击 Markdown 链接 \
+         `[文件名 (line N)](相对主工作目录的路径:N)`：路径使用正斜杠、行号从 1 开始，\
+         不要写盘符或绝对路径；提到附加工作区内的文件时给绝对路径（相对路径只能还原到主工作目录）。"
     } else {
         "提到本地文件时使用可点击 Markdown 链接 `[文件名 (line N)](绝对路径:N)`：\
          路径使用正斜杠、行号从 1 开始（本任务无工作目录，只能给绝对路径）。"
@@ -174,7 +221,14 @@ pub async fn run_subagent(
         agent_kind: "work".to_string(),
         subagent_depth: child_depth,
         ..Default::default()
-    };
+    }
+    // 附加工作区随子 agent 一起下传：子任务与父会话拥有同样的可访问范围，
+    // 否则子 agent 查父会话已授权的目录会被沙箱拒绝，只能把问题丢回上层。
+    .with_extra_working_directories(
+        req.extra_workspaces
+            .iter()
+            .map(|w| (w.path.clone(), w.is_read_only)),
+    );
 
     let mut user_prompt = String::from("# 任务\n") + &req.task;
     if let Some(ctx) = req.context.as_deref().filter(|c| !c.trim().is_empty()) {
@@ -185,6 +239,8 @@ pub async fn run_subagent(
     let mut messages: Vec<ChatMessage> = vec![
         ChatMessage::system(subagent_system_prompt(
             &req.working_directory,
+            &req.extra_workspaces,
+            req.workspaces_restricted,
             child_depth,
             max_rounds,
         )),
@@ -228,7 +284,8 @@ pub async fn run_subagent(
         rounds += 1;
 
         let mut llm_req = LLMRequest::new(crate::providers::base::TASK_WORK_AGENT, messages.clone())
-            .with_tools(definitions.clone());
+            .with_tools(definitions.clone())
+            .with_character_id(req.char_id.clone());
         llm_req.reasoning = crate::brain::coding_agent::reasoning_level_to_pref("medium");
         let mut rx = router
             .generate_stream_with_tools(llm_req)
@@ -291,7 +348,9 @@ pub async fn run_subagent(
                 call.arguments.clone(),
                 tool_system,
                 &tool_ctx,
-                coding_sandbox_allow(),
+                // 子 agent 面前没有应答者：无工作区时确认一律拒绝，避免弹窗发出后无人回答把
+                // 子任务挂死。它会快速失败，并把「需要写文件」写进最终回复交回上层。
+                coding_sandbox_confirm(!req.working_directory.trim().is_empty(), false),
             )
             .await;
             tool_calls_total += 1;

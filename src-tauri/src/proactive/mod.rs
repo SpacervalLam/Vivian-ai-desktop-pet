@@ -540,6 +540,23 @@ pub struct ProactiveState {
     /// 上次特殊日期问候（MM-DD）
     #[serde(default)]
     pub last_special_date: String,
+    /// 最近一次主动消息投递时间戳（Unix 秒），用于后端权威判定"被冷落"。
+    /// 投递后若用户在场且超过 `IGNORE_TIMEOUT_SECS` 仍未回应
+    /// （`last_interaction_time` 仍早于该值），则判一次冷落（`on_ignored`）。
+    /// 用户真实交互 / 进入安静模式时清零。此前依赖前端定时器标记，
+    /// 但 ref 变化不触发重渲染导致检测不可靠、ignored_count 恒为 0，
+    /// 使得"被冷落"全链路（安静模式 / 心情 / 会话关闭）完全失活。
+    #[serde(default)]
+    pub pending_proactive_at: f64,
+    /// 上次产出内心独白的时间戳（Unix 秒），用于全局最小间隔门（B1）
+    #[serde(default)]
+    pub last_inner_monologue_ts: f64,
+    /// 内心独白每日计数的归属日期（"YYYY-MM-DD"），跨天时滚动重置（B1）
+    #[serde(default)]
+    pub monologue_day: String,
+    /// 当日已产出的内心独白数量（B1 每日上限）
+    #[serde(default)]
+    pub monologue_count_today: u32,
 }
 
 // ============ 主动交互编排器 ============
@@ -563,7 +580,7 @@ pub struct ProactiveOrchestrator {
     behavior_mode: BehaviorModeManager,
     /// 压力监测器
     stress_monitor: RwLock<StressMonitor>,
-    /// 最近记忆文本（供破冰/回忆参考）
+    /// 最近记忆文本（破冰与回忆场景注入）
     recent_memory: RwLock<String>,
     /// 当前应用分类（活动冷却用）
     last_app_category: RwLock<String>,
@@ -635,6 +652,9 @@ pub struct ProactiveOrchestrator {
     /// 工具系统（可选，注入后主动问候 prompt 注入最近真实工具调用历史，
     /// 让 AI 只能提及真实做过的操作，禁止编造）
     tool_system: RwLock<Option<Arc<crate::tools::ToolSystem>>>,
+    /// 自我状态聚合器（可选，注入后主动回复 prompt 携带"被冷落 / 安静模式 / 孤独"等
+    /// 自我叙事，让桌宠的回复体现被忽略，而不是如常继续发消息）
+    self_state: RwLock<Option<Arc<crate::self_state::SelfState>>>,
     /// 上次 Busy 知识采集完成时间戳（秒），用于采集任务级冷却（避免每次 Busy 都采集）
     last_knowledge_acquisition_ts: Arc<parking_lot::Mutex<f64>>,
     /// 上次知识分享表达时间戳（秒），用于分享冷却（避免频繁推送链接/分享消息）
@@ -650,6 +670,10 @@ pub struct ProactiveOrchestrator {
     app_session_start: RwLock<f64>,
     /// 上次 tick 的音乐快照（供 music_changed 检测播放/切歌变化）
     last_music: RwLock<Option<crate::world::MusicSnapshot>>,
+    /// 上次注册 user_media_changed 事件的时间戳（秒），600s 节流防连播刷屏
+    last_media_event_ts: RwLock<f64>,
+    /// 上次注册 user_app_switched 事件的时间戳（秒），180s 节流
+    last_app_switch_event_ts: RwLock<f64>,
     /// 上次深夜未眠提醒日期（"YYYY-MM-DD"），每晚只提醒一次
     last_late_night_date: RwLock<String>,
 }
@@ -696,6 +720,22 @@ pub const SHARE_VALUE_THRESHOLD: f32 = 0.70;
 
 /// 主动消息有效期（秒）：超过此时间的待发送消息视为过时并丢弃
 const PROACTIVE_MSG_TTL_SECS: f64 = 300.0;
+
+/// 后端权威冷落判定窗口（秒）：主动消息投递后，用户在场且超过此时间未回应
+/// （`last_interaction_time` 仍早于该消息）即判一次冷落。
+/// 与前端 8s 定时器解耦，改为由 `tick` 稳定驱动；给真人留出合理的回应时间。
+const IGNORE_TIMEOUT_SECS: f64 = 45.0;
+
+/// 「最近对话」槽位（`recent_memory`）取用的历史条数。
+///
+/// 6 条 ≈ 最近 3 轮问答，够让内心 OS 接住当前话题，又不会把 prompt 撑长。
+const RECENT_MEMORY_TURNS: usize = 6;
+
+/// 「最近对话」单条截断长度（字符）。长回答只留开头，避免一条占满预算。
+const RECENT_MEMORY_ENTRY_CHARS: usize = 60;
+
+/// 「最近对话」整体长度上限（字符）。超出部分由 `set_recent_memory` 截断。
+const RECENT_MEMORY_MAX_CHARS: usize = 600;
 
 /// 待发送的主动行为
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -816,6 +856,7 @@ impl ProactiveOrchestrator {
             thought_lifecycle: Arc::new(RwLock::new(ThoughtLifecycle::new())),
             prompt_step: RwLock::new(None),
             tool_system: RwLock::new(None),
+            self_state: RwLock::new(None),
             last_knowledge_acquisition_ts: Arc::new(parking_lot::Mutex::new(0.0)),
             last_knowledge_share_ts: Arc::new(parking_lot::Mutex::new(0.0)),
             memory_pressure_active: RwLock::new(false),
@@ -823,6 +864,8 @@ impl ProactiveOrchestrator {
             app_session_category: RwLock::new(String::new()),
             app_session_start: RwLock::new(now_ts),
             last_music: RwLock::new(None),
+            last_media_event_ts: RwLock::new(0.0),
+            last_app_switch_event_ts: RwLock::new(0.0),
             last_late_night_date: RwLock::new(String::new()),
         })
     }
@@ -930,6 +973,12 @@ impl ProactiveOrchestrator {
     /// 让 AI 只能提及真实做过的操作，禁止编造看了番剧/刷了视频等未发生的事）
     pub fn set_tool_system(&self, ts: Arc<crate::tools::ToolSystem>) {
         *self.tool_system.write() = Some(ts);
+    }
+
+    /// 注入自我状态聚合器（启用后主动回复 prompt 携带"被冷落 / 安静模式 / 孤独"等
+    /// 自我叙事，让桌宠的回复体现被忽略，而不是如常继续发消息）
+    pub fn set_self_state(&self, ss: Arc<crate::self_state::SelfState>) {
+        *self.self_state.write() = Some(ss);
     }
 
     /// 获取活动日志记录器（后台线程记录前台窗口切换）
@@ -1165,16 +1214,72 @@ impl ProactiveOrchestrator {
         }
     }
 
-    /// 设置最近记忆文本（供破冰/回忆参考）
+    /// 设置最近记忆文本（破冰与回忆场景注入）
     pub fn set_recent_memory(&self, text: &str) {
-        let truncated: String = text.chars().take(300).collect();
+        let truncated: String = text.chars().take(RECENT_MEMORY_MAX_CHARS).collect();
         *self.recent_memory.write() = truncated;
+    }
+
+    /// 从对话历史刷新「最近对话」槽位（`recent_memory`）。
+    ///
+    /// 这个槽位被三处消费：
+    /// - 内心独白的 `memory_hint`（让内心 OS 能"接着刚才聊的往下想"）
+    /// - `MemoryRecall` 触发条件（`has_relevant_memory || !recent_memory.is_empty()`）
+    /// - 主动对话 prompt（破冰时避免重复刚说过的话）
+    ///
+    /// 但它的 setter 长期无人调用 → 槽位恒为空 → 上面三处**静默降级**：
+    /// 内心独白只能靠记忆库里蒸馏过的片段去"猜"刚才聊了什么。
+    ///
+    /// 在 `on_user_interacted`（每次用户发言的开头）调用。取最近
+    /// [`RECENT_MEMORY_TURNS`] 条 user/assistant 消息，逐条截断后拼接。
+    /// 只读快照，不写对话库。
+    pub fn refresh_recent_memory_from_dialogue(&self) {
+        let text = {
+            let dialogue = self.dialogue.read().clone();
+            let Some(d) = dialogue.as_ref() else {
+                return;
+            };
+            let history = d.get_history();
+            let start = history.len().saturating_sub(RECENT_MEMORY_TURNS);
+            history[start..]
+                .iter()
+                // 只保留真实对话轮次，跳过 system / tool 噪声
+                .filter(|m| {
+                    matches!(m.role.as_str(), "user" | "assistant") && !m.content.trim().is_empty()
+                })
+                .map(|m| {
+                    format!(
+                        "{}: {}",
+                        m.role,
+                        crate::utils::truncate_chars(&m.content, RECENT_MEMORY_ENTRY_CHARS)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        if text.trim().is_empty() {
+            return;
+        }
+        self.set_recent_memory(&text);
     }
 
     /// 心理状态
     pub fn get_mind_state(&self) -> PetMindState {
         let state = self.state.read();
         PetMindState::from_str(&state.mind_state)
+    }
+
+    /// 被冷落时的说话欲望增量（三段式：试探→克制→退让）。
+    ///
+    /// - ignored 0：不额外增长
+    /// - ignored 1~2：试探/克制——小幅提升靠近（不被无限放大）
+    /// - ignored >=3：退让——转为负向，明显收敛主动搭话
+    fn ignored_speech_trend(ignored: u32, boost: f64) -> f64 {
+        match ignored {
+            0 => 0.0,
+            1 | 2 => boost,
+            _ => -boost * 0.5,
+        }
     }
 
     /// 单次 tick：由调用方每 10 秒触发一次
@@ -1202,9 +1307,8 @@ impl ProactiveOrchestrator {
             let mut desire = self.speech_desire.write();
             let ignored = self.state.read().ignored_count;
             let mut delta = sd_cfg.base_growth;
-            if ignored > 0 {
-                delta += sd_cfg.ignored_boost * (ignored as f64).min(3.0);
-            }
+            // 三段式：试探(1~2)小幅靠近、退让(>=3)收敛，避免越冷落越唠叨
+            delta += Self::ignored_speech_trend(ignored, sd_cfg.ignored_boost);
             if context.idle_seconds < 60.0 {
                 delta -= sd_cfg.user_busy_decay;
             }
@@ -1227,6 +1331,32 @@ impl ProactiveOrchestrator {
         let hour = chrono::Local::now().format("%H").to_string().parse::<u32>().unwrap_or(12);
         let minute = chrono::Local::now().format("%M").to_string().parse::<u32>().unwrap_or(0);
 
+        // 0.7. 权威后端冷落检测（替代不可靠的前端定时器）
+        //      记录最近一次主动消息投递时间（pending_proactive_at）。若用户在场且超过
+        //      IGNORE_TIMEOUT_SECS 仍未回应（last_interaction_time 仍早于该消息），判一次冷落。
+        //      用户已回应 / 不在场 / 已在安静模式 → 仅清掉待判定，不计入冷落。
+        {
+            let mut state = self.state.write();
+            if state.pending_proactive_at > 0.0 {
+                let elapsed = now - state.pending_proactive_at;
+                if elapsed >= IGNORE_TIMEOUT_SECS {
+                    let responded_since = state.last_interaction_time >= state.pending_proactive_at;
+                    let user_available = context.user_present
+                        && context.idle_seconds <= self.config.read().away_threshold_seconds as f64;
+                    if responded_since || !user_available || state.quiet_mode {
+                        // 已回应 / 用户不在 / 已在安静模式 → 清掉待判定，不算冷落
+                        state.pending_proactive_at = 0.0;
+                    } else {
+                        // 在场、未回应、超时、且不在安静模式 → 判一次冷落，本 tick 不再产出消息
+                        state.pending_proactive_at = 0.0;
+                        drop(state);
+                        let _ = self.on_ignored();
+                        return Ok(false);
+                    }
+                }
+            }
+        }
+
         // 1. 轮询窗口：更新应用分类 + 用户活动
         self.poll_window(context);
 
@@ -1246,6 +1376,7 @@ impl ProactiveOrchestrator {
             if state.quiet_mode && now > state.quiet_mode_until {
                 state.quiet_mode = false;
                 state.ignored_count = 0;
+                state.pending_proactive_at = 0.0;
                 tracing::info!("安静模式结束，恢复主动交互");
             }
             if state.quiet_mode {
@@ -1561,7 +1692,7 @@ impl ProactiveOrchestrator {
                 if let Some(behavior) = self.generate_content(trigger, context, hour, minute) {
                     let action = behavior.into_action(trigger, now);
                     self.push_action(action, trigger);
-                    self.update_trigger_time(trigger, now, hour, minute);
+                    self.update_trigger_time(trigger, now, hour, minute, true);
                     tick_msg_count += 1;
                 }
             }
@@ -1595,7 +1726,7 @@ impl ProactiveOrchestrator {
             if let Some(behavior) = self.generate_content(ProactiveTrigger::CrossCharacterReply, context, hour, minute) {
                 let action = behavior.into_action(ProactiveTrigger::CrossCharacterReply, now);
                 self.push_action(action, ProactiveTrigger::CrossCharacterReply);
-                self.update_trigger_time(ProactiveTrigger::CrossCharacterReply, now, hour, minute);
+                self.update_trigger_time(ProactiveTrigger::CrossCharacterReply, now, hour, minute, true);
                 return true;
             }
         }
@@ -1690,6 +1821,110 @@ impl ProactiveOrchestrator {
     /// - 本次 tick 检测到 Sunrise/Sunset 世界事件（is_daytime 转换瞬间只检测到一次）
     /// - 1 小时冷却兜底，防止事件检测器异常时重复提醒
     ///
+    /// 转达工作侧素材：后台任务完成了，或者卡在等用户拍板上。
+    ///
+    /// 一条判据统管三类来源——**用户看不见素材所属的会话时，才需要动嘴**。
+    /// 看得见就没必要复读，工作页上本来就写着；用户过会儿切走了，
+    /// 素材还在队列里（各自有 TTL），那时再说也不迟。
+    ///
+    /// # 调用位置
+    ///
+    /// 由命令层在 `tick` 之后调用，以绕开 `tick` 内的两类收敛闸门
+    /// （`lay_low`：今日主动次数上限 / 刚被忽略 / Rest 状态；
+    /// `quiet_mode`：连续被冷落 N 次后角色自我退避 1 小时），避免它们把用户
+    /// 主动要求的提醒一并收敛掉。命令层调用仍经过跨角色碰撞仲裁、发言预占、
+    /// 会话协调与 TTS 播放边界，仅不受角色侧情绪收敛约束。
+    ///
+    /// 三类素材只在优先与消费方式上不同：
+    /// - **必须转达**（`notify_companion` 工具登记）优先，说成功即消费——一件事只说一次。
+    /// - **等你拍板**（工作智能体挂在 `work_ask_user`）说成功不消费，
+    ///   靠冷却节流反复提醒，直到用户回答、提问从注册表移除。
+    /// - **完成报告**在此不消费，由提示词段落的 `work_notices` 取走。
+    pub fn relay_work_notice(&self, context: &TickContext) -> bool {
+        let now = context.now;
+        let notices = crate::brain::work_notices::global();
+        let visible = context.visible_work_session.as_deref();
+        // 用户看得见这条素材所属的会话 → 不必复读，工作页上本来就写着。
+        let invisible = |session_id: &str| visible != Some(session_id);
+
+        // 冷却只约束"需要用户动一下"的那两类（必须转达 / 等你拍板）：
+        // 提问在用户拍板前会一直 pending，不设冷却就会每 10 秒催他一次。
+        // 8 分钟意味着提问的 30 分钟寿命里最多催三四次——够到，又不至于唠叨。
+        // 完成报告是一次性的（生成时就被提示词消费掉），不占冷却。
+        const REPEAT_SECS: f64 = 480.0;
+        let cooled = {
+            let state = self.state.read();
+            state
+                .last_trigger_times
+                .get(ProactiveTrigger::WorkNotice.as_str())
+                .map(|&last| now - last < REPEAT_SECS)
+                .unwrap_or(false)
+        };
+
+        // 优先级：必须转达 > 等你拍板 > 完成报告。
+        // 每个 tick 只说一件事，剩下的留给下一个 tick——挤在一轮里连着冒泡
+        // 比晚十秒说更烦人。
+        let mut target: Option<(Option<String>, String, bool)> = None;
+        if !cooled {
+            if let Some(a) = notices.next_alert_for(&self.char_id) {
+                if invisible(&a.session_id) {
+                    target = Some((Some(a.session_id), a.title, true));
+                }
+            }
+            if target.is_none() {
+                target = crate::brain::work_notices::pending_attention_for(&self.char_id)
+                    .into_iter()
+                    .find(|q| invisible(&q.session_id))
+                    .map(|q| (Some(q.session_id), q.question, false));
+            }
+        }
+        // 完成报告：只在用户看不见工作页时给一次搭话机会。他正看着结果就
+        // 没必要再念一遍；其余时候素材留在提示词里，角色下次自然开口会带上。
+        if target.is_none() && !context.viewing_work_page && notices.has_report_for(&self.char_id)
+        {
+            target = Some((None, "完成报告".to_string(), false));
+        }
+        let Some((session_id, label, from_alert)) = target else {
+            return false;
+        };
+
+        let router = match self.model_router.read().clone() {
+            Some(r) => r,
+            None => return false,
+        };
+        let hour = chrono::Local::now()
+            .format("%H")
+            .to_string()
+            .parse::<u32>()
+            .unwrap_or(12);
+        let content =
+            match self.try_llm_content(ProactiveTrigger::WorkNotice, context, hour, &router, None) {
+                Some(c) if !c.text.trim().is_empty() => c.text,
+                _ => return false,
+            };
+
+        // 说成功了才消费素材：生成失败要留到下个 tick 重试
+        if from_alert {
+            if let Some(sid) = &session_id {
+                notices.take_alert(sid);
+            }
+        }
+        self.push_message(ProactiveTrigger::WorkNotice, content, now);
+        // 完成报告（唯一没有会话归属的一类）是一次性的，不占冷却锚点——
+        // 否则一条报告就能把更紧急的提醒整整压后 8 分钟。
+        if session_id.is_some() {
+            self.update_trigger_time(ProactiveTrigger::WorkNotice, now, hour, 0, true);
+        }
+
+        tracing::info!(
+            "[proactive:{}] 已转达工作侧素材（{}）：{}",
+            self.char_id,
+            session_id.as_deref().unwrap_or("完成报告"),
+            label
+        );
+        true
+    }
+
     /// 主题建议门控：当前生效主题（含"跟随系统"按系统偏好解析）已是推荐主题时，
     /// 提示词禁止建议切换主题，且不再弹确认 toast（避免"本来就用浅色还让用户改浅色"）。
     fn maybe_sunrise_sunset_reminder(&self, context: &TickContext, now: f64) -> bool {
@@ -1735,7 +1970,7 @@ impl ProactiveOrchestrator {
         // 推送提醒消息（气泡渠道）
         self.push_message(trigger, content, now);
         // 记录触发时间，纳入共享冷却
-        self.update_trigger_time(trigger, now, hour, 0);
+        self.update_trigger_time(trigger, now, hour, 0, true);
 
         // 弹出推荐切换浅色/深色主题的 toast
         self.emit_theme_recommendation_toast(is_sunrise);
@@ -1833,7 +2068,7 @@ impl ProactiveOrchestrator {
         };
 
         self.push_message(trigger, content, now);
-        self.update_trigger_time(trigger, now, hour, 0);
+        self.update_trigger_time(trigger, now, hour, 0, true);
 
         // 进程明细已随 system_hint 注入生成提示（try_llm_content 内按需采集），
         // 此处不重复枚举进程，避免内存高压时刻雪上加霜。
@@ -1921,7 +2156,7 @@ impl ProactiveOrchestrator {
             .to_string()
             .parse::<u32>()
             .unwrap_or(12);
-        this.update_trigger_time(ProactiveTrigger::ScreenPeek, now, hour, 0);
+        this.update_trigger_time(ProactiveTrigger::ScreenPeek, now, hour, 0, true);
 
         // 异步执行：权限确认（如需）→ 截屏 → 视觉理解 → 生成搭话 → 入队
         // 消息在下一次 tick（约 10s 后）被 drain 送达前端
@@ -2090,7 +2325,7 @@ impl ProactiveOrchestrator {
         };
 
         self.push_message(trigger, content, now);
-        self.update_trigger_time(trigger, now, hour, 0);
+        self.update_trigger_time(trigger, now, hour, 0, true);
         *self.last_late_night_date.write() = today;
 
         tracing::info!("[proactive:{}] 深夜未眠提醒已推送（{}:00 仍在用电脑）", self.char_id, hour);
@@ -2148,7 +2383,7 @@ impl ProactiveOrchestrator {
         };
 
         self.push_message(trigger, content, now);
-        self.update_trigger_time(trigger, now, hour, 0);
+        self.update_trigger_time(trigger, now, hour, 0, true);
         // 重置会话计时：本次提醒后重新累计（配合冷却避免反复打扰）
         *self.app_session_start.write() = now;
 
@@ -2185,23 +2420,7 @@ impl ProactiveOrchestrator {
 
         // 检测播放/切歌变化（对比上次 tick 的状态）
         let prev = self.last_music.read().clone();
-        let is_media_changed = match (&current, &prev) {
-            (Some(cur), None) => {
-                cur.status == crate::world::PlaybackStatus::Playing && !cur.title.is_empty()
-            }
-            (Some(cur), Some(prev_m)) => {
-                if cur.status != crate::world::PlaybackStatus::Playing {
-                    false
-                } else if prev_m.status != crate::world::PlaybackStatus::Playing {
-                    // 暂停/停止 → 恢复播放
-                    true
-                } else {
-                    // 播放中切换曲目
-                    cur.title != prev_m.title
-                }
-            }
-            (None, _) => false,
-        };
+        let is_media_changed = music_change_kind(current.as_ref(), prev.as_ref()).is_some();
         // 无论是否触发都记录最新状态（含停止播放 None）
         *self.last_music.write() = current.clone();
 
@@ -2220,6 +2439,39 @@ impl ProactiveOrchestrator {
         if !is_media_changed {
             return false;
         }
+
+        // 用户关键操作事件入账本（在触发器配置门之前：即使关闭搭话触发器，
+        // "用户开始播放音乐"这一事实也应被日记 / 独白 / recap 感知）。
+        // 600s 节流：自动连播不刷屏，每 10 分钟记一条足够还原"今天听了什么"。
+        if current.is_some() {
+            let last_evt = *self.last_media_event_ts.read();
+            if now - last_evt >= 600.0 {
+                *self.last_media_event_ts.write() = now;
+                let text = current
+                    .as_ref()
+                    .map(|m| {
+                        let artist = if m.artist.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" - {}", m.artist)
+                        };
+                        format!("用户开始播放音乐：{}{}", m.title, artist)
+                    })
+                    .unwrap_or_else(|| "用户播放状态变化".to_string());
+                crate::memory::unified_event_ledger::register_world_event(
+                    "user_media_changed",
+                    &text,
+                    vec![
+                        "behavior".to_string(),
+                        "media".to_string(),
+                        "music".to_string(),
+                    ],
+                    chrono::Local::now().timestamp() as f64,
+                    Some(&self.char_id),
+                );
+            }
+        }
+
         if !self.config.read().enable_music_trigger {
             return false;
         }
@@ -2262,7 +2514,7 @@ impl ProactiveOrchestrator {
         };
 
         self.push_message(trigger, content, now);
-        self.update_trigger_time(trigger, now, hour, 0);
+        self.update_trigger_time(trigger, now, hour, 0, true);
 
         tracing::info!("[proactive:{}] 音乐切换搭话已推送", self.char_id);
         true
@@ -2506,15 +2758,67 @@ impl ProactiveOrchestrator {
         // Step 5: 检查是否有思绪需要内心独白（Level 1）
         let mono_candidate = {
             let lifecycle = self.thought_lifecycle.read();
-            lifecycle.pick_monologue_candidate()
-                .map(|t| (t.thought_key.clone(), t.context_hint.clone(), t.trigger_kind.clone()))
+            lifecycle.pick_monologue_candidate(context.now)
+                .map(|t| (t.thought_key.clone(), t.context_hint.clone(), t.trigger_kind.clone(), t.high_priority))
         };
 
-        if let Some((ref key, ref ctx, kind)) = mono_candidate {
+        if let Some((ref key, ref ctx, kind, high_priority)) = mono_candidate {
+
+            // 全局多维门控（B1+B3）：每日上限 / 最小间隔 / 用户密集操作 / 低唤醒负面。
+            // 被拒时保留思绪（不 mark_monologue_done），后续 tick 自然重试。
+            let (mono_min_interval, mono_daily_max) = {
+                let c = self.config.read();
+                (c.inner_monologue_min_interval_secs, c.inner_monologue_daily_max)
+            };
+            let is_exempt = high_priority || kind == "deep_reflection";
+            let (last_ts, count_today, day) = {
+                let s = self.state.read();
+                (s.last_inner_monologue_ts, s.monologue_count_today, s.monologue_day.clone())
+            };
+            let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+            let count_for_today = if day == today { count_today } else { 0 };
+            let gate_pass = evaluate_monologue_gates(
+                context.now,
+                last_ts,
+                count_for_today,
+                mono_min_interval,
+                mono_daily_max,
+                context.interaction_count_today,
+                context.user_present,
+                context.idle_seconds,
+                mood.arousal,
+                mood.valence,
+                is_exempt,
+            );
+            if !gate_pass {
+                return share_candidate;
+            }
+            // 通过门控：同步更新内心独白状态（防跨 tick 双发）
+            {
+                let mut s = self.state.write();
+                if s.monologue_day != today {
+                    s.monologue_day = today;
+                    s.monologue_count_today = 0;
+                }
+                s.last_inner_monologue_ts = context.now;
+                s.monologue_count_today = s.monologue_count_today.saturating_add(1);
+            }
 
             let thoughts_context = self.thought_lifecycle.read().build_context_hint();
             let is_deep_reflection = kind == "deep_reflection";
 
+            let lang = self
+                .persona
+                .read()
+                .as_ref()
+                .map(|p| p.get_language())
+                .unwrap_or_else(|| "zh".to_string());
+            let lang_norm = crate::pipeline::prompt_modules::normalize_lang(&lang);
+
+            // 独白是最主要的消费方：开写之前再刷一次，确保拿到的是"包含她上一句回复"
+            // 的最新对话快照（`on_user_interacted` 那次刷新发生在用户发言的瞬间，
+            // 那时她的回复还没落库）。
+            self.refresh_recent_memory_from_dialogue();
             let recent_mem = self.recent_memory.read().clone();
             let activity_brief = self.activity_journal.to_brief();
             let mut memory_hint = if activity_brief.is_empty() {
@@ -2525,19 +2829,22 @@ impl ProactiveOrchestrator {
             if !thoughts_context.is_empty() {
                 memory_hint = format!("{memory_hint}\n\n{thoughts_context}");
             }
+            // 近期环境事件（统一事件账本）：被冷落 / 用户切歌 / 用户甩飞桌宠等
+            // 程序确定的事实进入独白素材，让内心 OS 能"消化"今天发生的事。
+            // 选取时会给高情感浓度事件（user_pet_action / user_ignored / mood_shift…）
+            // 保底一半名额，不会被同期的对话事件（importance 0.9）整片挤掉；
+            // 深层反思要复盘一整天，预算更大。
+            let events_budget = if is_deep_reflection { 15 } else { 8 };
+            if let Some(events_section) = crate::memory::unified_event_ledger::unified_event_ledger()
+                .build_prompt_section(&self.char_id, events_budget, &lang)
+            {
+                memory_hint = format!("{memory_hint}\n\n{events_section}");
+            }
             if is_deep_reflection {
                 if let Some(summary) = self.build_today_summary(&memory) {
                     memory_hint = format!("{memory_hint}\n\n## 今天的回顾\n{summary}");
                 }
             }
-
-            let lang = self
-                .persona
-                .read()
-                .as_ref()
-                .map(|p| p.get_language())
-                .unwrap_or_else(|| "zh".to_string());
-            let lang_norm = crate::pipeline::prompt_modules::normalize_lang(&lang);
 
             // 旁观记忆注入：检索最近 3 条旁观对话，让内心独白能"消化"旁听到的内容
             // 注意：这些只是你"听到"的话，室友的兴趣不代表你的兴趣，不要把室友的话题内化成自己的
@@ -2806,7 +3113,8 @@ impl ProactiveOrchestrator {
                 ChatMessage::user(&user_msg),
             ];
             router
-                .generate(LLMRequest::new("proactive", messages))
+                .generate(LLMRequest::new("proactive", messages)
+                    .with_character_id(self.char_id.clone()))
                 .await
         });
 
@@ -2927,7 +3235,7 @@ impl ProactiveOrchestrator {
                 ChatMessage::user(user_msg),
             ];
 
-            match router.generate(LLMRequest::new("chat", messages).with_temperature(0.9)).await {
+            match router.generate(LLMRequest::new("chat", messages).with_temperature(0.9).with_character_id(self.char_id.clone())).await {
                 Ok(text) => {
                     let text = text.trim();
                     if let Some(content) = Self::parse_proactive_json(text) {
@@ -3040,7 +3348,7 @@ impl ProactiveOrchestrator {
                 ChatMessage::user(user_msg),
             ];
 
-            match router.generate(LLMRequest::new("chat", messages).with_temperature(0.9)).await {
+            match router.generate(LLMRequest::new("chat", messages).with_temperature(0.9).with_character_id(self.char_id.clone())).await {
                 Ok(text) => {
                     let text = text.trim();
                     // 解析 {text, value_score}
@@ -3184,7 +3492,7 @@ impl ProactiveOrchestrator {
                 ChatMessage::user(user_msg),
             ];
 
-            match router.generate(LLMRequest::new("chat", messages).with_temperature(0.9)).await {
+            match router.generate(LLMRequest::new("chat", messages).with_temperature(0.9).with_character_id(self.char_id.clone())).await {
                 Ok(text) => {
                     let text = text.trim();
                     if let Some(content) = Self::parse_proactive_json(text) {
@@ -3219,15 +3527,17 @@ impl ProactiveOrchestrator {
                 ProactiveTrigger::IdleGreeting => cfg.enable_idle_trigger,
                 ProactiveTrigger::WindowTrigger => cfg.enable_window_change_trigger,
                 ProactiveTrigger::WelcomeBack => cfg.enable_away_reminder,
-                // 事件驱动触发器（日出/日落/系统压力/主动截屏/应用时长/深夜未眠/音乐切换）
-                // 由 tick 中专门路径处理，不进入常规触发循环（check_specific 也返回 false 双重保险）
+                // 事件驱动触发器（日出/日落/系统压力/主动截屏/应用时长/深夜未眠/音乐切换/
+                // 工作侧待转达）由 tick 中专门路径处理，不进入常规触发循环
+                // （check_specific 也返回 false 双重保险）
                 ProactiveTrigger::Sunrise
                 | ProactiveTrigger::Sunset
                 | ProactiveTrigger::SystemPressure
                 | ProactiveTrigger::ScreenPeek
                 | ProactiveTrigger::AppDuration
                 | ProactiveTrigger::LateNight
-                | ProactiveTrigger::MusicChanged => false,
+                | ProactiveTrigger::MusicChanged
+                | ProactiveTrigger::WorkNotice => false,
                 _ => true,
             })
             .collect()
@@ -3243,8 +3553,33 @@ impl ProactiveOrchestrator {
             {
                 let mut sess_cat = self.app_session_category.write();
                 if *sess_cat != category {
+                    let old_cat = sess_cat.clone();
                     *sess_cat = category.clone();
                     *self.app_session_start.write() = ctx.now;
+                    // 用户关键操作事件入账本：应用类别切换（编程→游戏→社交…）。
+                    // 仅 leader 注册（避免双角色重复）；180s 节流；
+                    // 跳过无意义类别（系统/其他/空）。
+                    if ctx.is_speaking_leader
+                        && is_meaningful_app_category(&old_cat)
+                        && is_meaningful_app_category(&category)
+                        && ctx.now - *self.last_app_switch_event_ts.read() >= 180.0
+                    {
+                        *self.last_app_switch_event_ts.write() = ctx.now;
+                        let title_preview: String =
+                            ctx.active_window.chars().take(40).collect();
+                        crate::memory::unified_event_ledger::register_world_event(
+                            "user_app_switched",
+                            &format!("用户从「{}」切换到「{}」：{}", old_cat, category, title_preview),
+                            vec![
+                                "behavior".to_string(),
+                                "app_switch".to_string(),
+                                format!("from:{}", old_cat),
+                                format!("to:{}", category),
+                            ],
+                            chrono::Local::now().timestamp() as f64,
+                            Some(&self.char_id),
+                        );
+                    }
                 }
             }
             // 记录习惯数据
@@ -3374,7 +3709,7 @@ impl ProactiveOrchestrator {
                 ChatMessage::user(user_msg),
             ];
 
-            match router.generate(LLMRequest::new("chat", messages).with_temperature(0.9)).await {
+            match router.generate(LLMRequest::new("chat", messages).with_temperature(0.9).with_character_id(self.char_id.clone())).await {
                 Ok(text) => {
                     let text = text.trim();
                     if let Some(content) = Self::parse_proactive_json(text) {
@@ -3757,15 +4092,16 @@ impl ProactiveOrchestrator {
             // 不经 check_trigger 通用门控（时机/概率/冷却系数），
             // 此处返回 false 防止常规触发循环在冷却到期后"凭空"生成日出日落问候
             ProactiveTrigger::Sunrise | ProactiveTrigger::Sunset => false,
-            // 系统压力 / 主动截屏 / 应用时长 / 深夜未眠 / 音乐切换同为事件驱动，
+            // 系统压力 / 主动截屏 / 应用时长 / 深夜未眠 / 音乐切换 / 工作侧待转达同为事件驱动，
             // 由 tick 中专门路径处理（maybe_system_pressure_reminder / maybe_screen_peek /
-            // maybe_app_duration_reminder / maybe_late_night / maybe_music_changed），
-            // 不进常规触发循环
+            // maybe_app_duration_reminder / maybe_late_night / maybe_music_changed /
+            // maybe_work_notice），不进常规触发循环
             ProactiveTrigger::SystemPressure
             | ProactiveTrigger::ScreenPeek
             | ProactiveTrigger::AppDuration
             | ProactiveTrigger::LateNight
-            | ProactiveTrigger::MusicChanged => false,
+            | ProactiveTrigger::MusicChanged
+            | ProactiveTrigger::WorkNotice => false,
         }
     }
 
@@ -3959,7 +4295,14 @@ impl ProactiveOrchestrator {
     }
 
     /// 从完整 LLM 响应文本解析 BehaviorContent（含扩展字段）
+    ///
+    /// 模型明确弃权（`notify: "DONT_NOTIFY"`，由 [`behavior::is_proactive_silence`] 判定）
+    /// 时返回 `None`——调用方据此跳过本次主动交互。弃权不是失败：不重试、不降级成模板。
     fn parse_proactive_json(raw: &str) -> Option<BehaviorContent> {
+        if behavior::is_proactive_silence(raw) {
+            tracing::debug!("[Proactive] 模型弃权（DONT_NOTIFY），本条不产出");
+            return None;
+        }
         let text = raw.trim();
         let start = text.find('{');
         let end = text.rfind('}');
@@ -4031,6 +4374,7 @@ impl ProactiveOrchestrator {
                 | ProactiveTrigger::AppDuration
                 | ProactiveTrigger::LateNight
                 | ProactiveTrigger::MusicChanged
+                | ProactiveTrigger::WorkNotice
         ) {
             return None;
         }
@@ -4252,6 +4596,15 @@ impl ProactiveOrchestrator {
                     .as_ref()
                     .map(|ts| behavior::format_recent_tool_history(ts, &lang_clone))
                     .unwrap_or_default();
+                // 注入"当前自我状态"叙事（含被冷落 / 安静模式 / 孤独等），让主动回复体现被忽略
+                let self_state_text = self
+                    .self_state
+                    .read()
+                    .as_ref()
+                    .map(|s| s.snapshot().serialize_for_prompt(&lang_clone))
+                    .unwrap_or_default();
+                // 连续未回应轮次：用于给 LLM 一条分档的"体现被冷落"指令
+                let ignored_rounds = self.state.read().ignored_count;
                 // 统一构造 messages，然后流式调用 LLM
                 let messages = match trigger {
                     ProactiveTrigger::HourlyGreeting
@@ -4271,7 +4624,8 @@ impl ProactiveOrchestrator {
                     | ProactiveTrigger::ScreenPeek
                     | ProactiveTrigger::AppDuration
                     | ProactiveTrigger::LateNight
-                    | ProactiveTrigger::MusicChanged => {
+                    | ProactiveTrigger::MusicChanged
+                    | ProactiveTrigger::WorkNotice => {
                         BehaviorDecider::build_messages(
                             trigger,
                             &llm_ctx,
@@ -4282,6 +4636,8 @@ impl ProactiveOrchestrator {
                             &memory_text,
                             &tool_history,
                             &dialogue_messages,
+                            &self_state_text,
+                            ignored_rounds,
                         )?
                     }
                     ProactiveTrigger::Icebreaker => {
@@ -4306,6 +4662,26 @@ impl ProactiveOrchestrator {
 
                 // 流式调用 LLM，实时推送 text 增量
                 let raw = Self::stream_query_and_parse(&router_clone, messages, &emitter).await?;
+
+                // 模型明确弃权（由 behavior::is_proactive_silence 判定）：推进冷却后返回
+                // 「本次无内容」。弃权不是失败，不重试、不降级成模板；此处 spoke=false，
+                // 不更新 last_proactive_speech_time，其余冷却照常推进，避免同一触发器重复触发、空转。
+                if behavior::is_proactive_silence(&raw) {
+                    tracing::debug!(
+                        "[Proactive] 模型弃权，本次不开口（trigger={}）",
+                        trigger.as_str()
+                    );
+                    let minute = {
+                        use chrono::{TimeZone, Timelike};
+                        chrono::Local
+                            .timestamp_opt(ctx.now as i64, 0)
+                            .single()
+                            .map(|t| t.minute())
+                            .unwrap_or(0)
+                    };
+                    self.update_trigger_time(trigger, ctx.now, hour, minute, false);
+                    return None;
+                }
 
                 // BystanderInterjection 走严格 JSON 解析：text 为空表示不插话
                 if matches!(trigger, ProactiveTrigger::BystanderInterjection) {
@@ -4421,7 +4797,8 @@ impl ProactiveOrchestrator {
         ];
 
         let response = match router
-            .generate(LLMRequest::new("bystander_judge", messages))
+            .generate(LLMRequest::new("bystander_judge", messages)
+                .with_character_id(self.char_id.clone()))
             .await
         {
             Ok(r) => r,
@@ -4549,6 +4926,7 @@ impl ProactiveOrchestrator {
         }
 
         let mut msgs = self.pending_messages.write();
+        let action_ts = action.timestamp;
         msgs.push(action);
         if msgs.len() > 10 {
             msgs.remove(0);
@@ -4561,6 +4939,8 @@ impl ProactiveOrchestrator {
             state.consecutive_interruptions =
                 (state.consecutive_interruptions + 1).min(max_level + 2);
             state.last_interruption_at = chrono::Local::now().timestamp() as f64;
+            // 权威后端冷落检测锚点：记录本次主动消息投递时间，tick 内据此判定是否被忽略
+            state.pending_proactive_at = action_ts;
         }
         // 记录到近期发送缓冲区（保留最近 5 条，防止跨 tick 重复）
         {
@@ -4590,7 +4970,19 @@ impl ProactiveOrchestrator {
         tracing::info!("主动消息入队: {}", trigger.as_str());
     }
 
-    fn update_trigger_time(&self, trigger: ProactiveTrigger, now: f64, hour: u32, minute: u32) {
+    /// 推进触发器冷却时间。
+    ///
+    /// `spoke=false` 表示触发器已处理但模型弃权、未实际开口：仅跳过
+    /// `last_proactive_speech_time`（供问候类触发器判断「刚说完又接着说」），
+    /// 其余冷却照常推进，避免同一触发器每个 tick 重复触发、空转。
+    fn update_trigger_time(
+        &self,
+        trigger: ProactiveTrigger,
+        now: f64,
+        hour: u32,
+        minute: u32,
+        spoke: bool,
+    ) {
         let mut state = self.state.write();
         state
             .last_trigger_times
@@ -4603,7 +4995,9 @@ impl ProactiveOrchestrator {
         // 回归问候（15:47 / 15:49、19:38 / 19:40），用户只是短暂进出，
         // 她却把同一句寒暄换了个说法再说一遍。真人打过招呼对方没理，会等。
         // 因此另记一个字段，专供问候类触发器做间隔判定。
-        state.last_proactive_speech_time = now;
+        if spoke {
+            state.last_proactive_speech_time = now;
+        }
         if trigger == ProactiveTrigger::HourlyGreeting {
             state.last_hour_greeted = hour as i32;
         }
@@ -4770,13 +5164,21 @@ impl ProactiveOrchestrator {
             // 用户真实交互：退避计数归零，让角色获得"重新活跃"的资格
             state.consecutive_interruptions = 0;
             state.last_interaction_time = chrono::Local::now().timestamp() as f64;
+            // 用户真实交互 = 已回应：清空待判定锚点，避免下一 tick 误判冷落
+            state.pending_proactive_at = 0.0;
             *self.last_user_was_away.write() = false;
             was_ignored
         };
+        // 刷新「最近对话」槽位：内心独白 / MemoryRecall / 主动对话 prompt 都读它。
+        // 放在这里而不是各个消费点，是因为用户每发一条消息就更新一次，
+        // 任何时刻读取到的都至多落后一轮，且三处消费点无需各自感知对话管理器。
+        self.refresh_recent_memory_from_dialogue();
         // 偏好学习：用户响应了上一个主动消息（正信号）
         self.preference_learner.record_response(true);
         if had_ignored {
             if let Some(psy) = self.psychology.read().as_ref() {
+                // 用户终于回应：拆下被冷落的负面情绪，语气回暖
+                psy.apply_user_answered_relief();
                 if let Err(e) = psy.apply_proactive_feedback(true, &self.char_id) {
                     tracing::warn!("[Proactive] apply_proactive_feedback(true) 失败: {}", e);
                 }
@@ -4819,10 +5221,32 @@ impl ProactiveOrchestrator {
         }
         // 偏好学习：用户忽略了上一个主动消息（负信号）
         self.preference_learner.record_response(false);
+        // 规则层冷落映射：按连续被忽略次数把"被冷落"写入真实情绪，
+        // 让心情（compute_mood）随冷落加深而偏向孤独/失落，即使 LLM 无增量也会变化。
+        let severity = (self.state.read().ignored_count as f64).min(3.0) / 3.0;
         if let Some(psy) = self.psychology.read().as_ref() {
+            psy.apply_cold_shoulder(severity);
             if let Err(e) = psy.apply_proactive_feedback(false, &self.char_id) {
                 tracing::warn!("[Proactive] apply_proactive_feedback(false) 失败: {}", e);
             }
+        }
+
+        // 冷落过程事件入统一事件账本：每次判定（第 1/2/3... 次）都注册，
+        // 让日记 / recap / 对话 prompt / 内心独白都能看到"用户冷落我"的过程。
+        // 冷落判定本身有 45s 超时 + 退避间隔，天然限频，无需额外节流。
+        {
+            let count = self.state.read().ignored_count;
+            crate::memory::unified_event_ledger::register_world_event(
+                "user_ignored",
+                &format!("被冷落：连续第 {} 次主动搭话未获回应", count),
+                vec![
+                    "behavior".to_string(),
+                    "ignored".to_string(),
+                    format!("count:{}", count),
+                ],
+                chrono::Local::now().timestamp() as f64,
+                Some(&self.char_id),
+            );
         }
 
         // 关闭 User↔Agent 会话（NoResponse）
@@ -4953,6 +5377,19 @@ pub struct TickContext {
     /// false 时跳过触发器评估与消息生成，仅执行后台状态维护
     /// （homeostasis / 窗口轮询 / 在场检查 / 世界事件 / 内心独白）。
     pub is_speaking_leader: bool,
+    /// 用户此刻看得见的工作会话（`commands::inspector::visible_work_session`）。
+    ///
+    /// `Some(id)` = 心智观察器可见、处于前台、停在工作页，且激活的是该会话；
+    /// `None` = 用户看不见工作页（窗口没开 / 被最小化 / 不在前台 / 停在别的页签）。
+    ///
+    /// 工作侧素材要不要主动说出去取决于它：用户已经能自己看到的东西，
+    /// 没必要再用嘴讲一遍；看不到就必须提醒。
+    pub visible_work_session: Option<String>,
+    /// 用户此刻是否正看着工作页（不要求选中了某条会话）。
+    ///
+    /// 完成报告没有会话归属，判据只要这一条。与 `visible_work_session` 的差别在
+    /// 用户停在工作页却没选会话时体现出来：那种情况仍算"正看着"。
+    pub viewing_work_page: bool,
 }
 
 impl Default for ProactiveOrchestrator {
@@ -4997,6 +5434,7 @@ impl Default for ProactiveOrchestrator {
                 stream_emitter: new_shared_stream_emitter(),
                 preference_learner: TriggerPreferenceLearner::default(),
                 char_id: "vivian".to_string(),
+                self_state: RwLock::new(None),
                 companions_snapshot: Arc::new(RwLock::new(None)),
                 speech_desire: RwLock::new(
                     crate::character_behavior::get_behavior("vivian").speech_desire.initial_desire,
@@ -5018,6 +5456,8 @@ impl Default for ProactiveOrchestrator {
                 app_session_category: RwLock::new(String::new()),
                 app_session_start: RwLock::new(now_ts),
                 last_music: RwLock::new(None),
+                last_media_event_ts: RwLock::new(0.0),
+                last_app_switch_event_ts: RwLock::new(0.0),
                 last_late_night_date: RwLock::new(String::new()),
             }
         })
@@ -5025,3 +5465,184 @@ impl Default for ProactiveOrchestrator {
 }
 
 use chrono::Datelike;
+
+/// 音乐播放变化类型（供主动消息触发与思绪种子共用）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MusicChangeKind {
+    /// 静默 → 开始播放
+    StartPlaying,
+    /// 暂停/停止 → 恢复播放
+    Resume,
+    /// 播放中切换曲目
+    TrackChanged,
+}
+
+/// 判定音乐快照的变化类型：无变化返回 None。
+///
+/// 与 `maybe_music_changed` 原有判定逻辑一致：
+/// - 无 → 播放（Playing 且有曲名）视为 StartPlaying
+/// - 非播放 → 播放 视为 Resume
+/// - 播放中曲名变化 视为 TrackChanged
+pub(crate) fn music_change_kind(
+    current: Option<&crate::world::MusicSnapshot>,
+    prev: Option<&crate::world::MusicSnapshot>,
+) -> Option<MusicChangeKind> {
+    use crate::world::PlaybackStatus;
+    let cur = current?;
+    match prev {
+        None => {
+            if cur.status == PlaybackStatus::Playing && !cur.title.is_empty() {
+                Some(MusicChangeKind::StartPlaying)
+            } else {
+                None
+            }
+        }
+        Some(prev_m) => {
+            if cur.status != PlaybackStatus::Playing {
+                None
+            } else if prev_m.status != PlaybackStatus::Playing {
+                Some(MusicChangeKind::Resume)
+            } else if cur.title != prev_m.title {
+                Some(MusicChangeKind::TrackChanged)
+            } else {
+                None
+            }
+        }
+    }
+}
+
+/// 应用类别是否有记录价值（排除系统/其他/空）
+pub(crate) fn is_meaningful_app_category(cat: &str) -> bool {
+    !cat.is_empty() && cat != "系统" && cat != "其他"
+}
+
+/// 内心独白（内心OS）多维门控：纯函数，便于单测。
+///
+/// 依次评估：每日上限 → 最小间隔（交互越多间隔越长）→ 用户密集操作 → 低唤醒负面情绪。
+/// 高优先级思绪（休息/醒来/节日）与深度反思豁免间隔/密集/低唤醒门，但不豁免每日硬上限。
+///
+/// 返回 true 表示允许本 tick 产出内心独白。
+#[allow(clippy::too_many_arguments)]
+fn evaluate_monologue_gates(
+    now: f64,
+    last_ts: f64,
+    count_today: u32,
+    min_interval_secs: u64,
+    daily_max: u32,
+    interactions_today: u32,
+    user_present: bool,
+    idle_secs: f64,
+    arousal: f64,
+    valence: f64,
+    is_exempt_high_priority: bool,
+) -> bool {
+    // 1. 每日硬上限：豁免类也不可超
+    if count_today >= daily_max {
+        return false;
+    }
+    if is_exempt_high_priority {
+        return true;
+    }
+    // 2. 最小间隔：当天交互越频繁，间隔越长（避免在活跃对话中频繁插心理活动）
+    let interaction_mult = 1.0 + (interactions_today.min(10) as f64) * 0.1;
+    let effective_interval = min_interval_secs as f64 * interaction_mult;
+    if now - last_ts < effective_interval {
+        return false;
+    }
+    // 3. 用户密集操作：正在活跃使用时等安静下来再想
+    if user_present && idle_secs < 60.0 {
+        return false;
+    }
+    // 4. 低唤醒负面：平静且情绪低落时"懒得想"
+    if arousal <= 0.15 && valence < 0.0 {
+        return false;
+    }
+    true
+}
+
+#[cfg(test)]
+mod monologue_gate_tests {
+    use super::evaluate_monologue_gates;
+
+    #[test]
+    fn daily_cap_blocks_even_exempt() {
+        // 每日硬上限：豁免类也不可超
+        assert!(!evaluate_monologue_gates(
+            1000.0, 0.0, 12, 1500, 12, 0, true, 300.0, 0.5, 0.0, true
+        ));
+    }
+
+    #[test]
+    fn exempt_bypasses_interval_dense_and_low_arousal() {
+        // 高优先级豁免：间隔不足 + 密集操作 + 低唤醒负面，仍通过
+        assert!(evaluate_monologue_gates(
+            100.0, 90.0, 0, 1500, 12, 0, true, 10.0, 0.05, -0.5, true
+        ));
+    }
+
+    #[test]
+    fn min_interval_rejects() {
+        assert!(!evaluate_monologue_gates(
+            100.0, 90.0, 0, 1500, 12, 0, true, 300.0, 0.5, 0.0, false
+        ));
+    }
+
+    #[test]
+    fn dense_ops_rejects() {
+        assert!(!evaluate_monologue_gates(
+            100_000.0, 0.0, 0, 1500, 12, 0, true, 30.0, 0.5, 0.0, false
+        ));
+    }
+
+    #[test]
+    fn low_arousal_negative_rejects() {
+        assert!(!evaluate_monologue_gates(
+            100_000.0, 0.0, 0, 1500, 12, 0, false, 300.0, 0.1, -0.2, false
+        ));
+    }
+
+    #[test]
+    fn normal_passes() {
+        assert!(evaluate_monologue_gates(
+            100_000.0, 0.0, 0, 1500, 12, 0, false, 300.0, 0.5, 0.0, false
+        ));
+    }
+
+    #[test]
+    fn interaction_count_lengthens_interval() {
+        // interactions_today=10 → effective_interval = 1500 * 2.0 = 3000，
+        // now-last=2000 仍 < 3000 → 拒
+        assert!(!evaluate_monologue_gates(
+            2000.0, 0.0, 0, 1500, 12, 10, false, 300.0, 0.5, 0.0, false
+        ));
+    }
+}
+
+#[cfg(test)]
+mod ignored_speech_trend_tests {
+    use super::*;
+
+    fn trend(ignored: u32) -> f64 {
+        ProactiveOrchestrator::ignored_speech_trend(ignored, 0.1)
+    }
+
+    #[test]
+    fn test_no_boost_when_not_ignored() {
+        assert_eq!(trend(0), 0.0);
+    }
+
+    #[test]
+    fn test_probe_and_restraint_stay_positive() {
+        // 试探(1)与克制(2)都小幅靠近，且不被无限放大
+        assert_eq!(trend(1), 0.1);
+        assert_eq!(trend(2), 0.1);
+    }
+
+    #[test]
+    fn test_withdrawal_goes_negative() {
+        // 退让(>=3)转为负向，收敛主动搭话
+        assert!(trend(3) < 0.0);
+        assert!(trend(5) < 0.0);
+        assert!(trend(3) > trend(5));
+    }
+}

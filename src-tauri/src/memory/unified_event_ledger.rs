@@ -19,6 +19,7 @@
 //! - `DialogueManager::add_message_with_metadata` 写入对话消息后直接注册事件
 //! - `cross_character.rs` 跨角色对话时显式注册 Public 事件
 //! - `commands/chat.rs` 旁观记忆注册为 Private 事件
+//! - `commands/pet_reaction.rs` 用户对桌宠的物理动作注册为 `user_pet_action`
 //! - `PromptBuildingStep` 读取近期事件注入 prompt 的"环境事件"段落
 
 use std::path::PathBuf;
@@ -599,8 +600,11 @@ impl UnifiedEventLedger {
     }
 
     /// 生成可注入 prompt 的近期环境事件段落
+    ///
+    /// `n` 是条数预算。选取走 [`Self::select_events_for_prompt`]，会为高情感浓度的
+    /// 事件保底配额，避免它们被同期的对话事件（`dialogue` 0.9）整片挤掉。
     pub fn build_prompt_section(&self, char_id: &str, n: usize, lang: &str) -> Option<String> {
-        let events = self.recent_events_visible_to(char_id, n);
+        let events = self.select_events_for_prompt(char_id, n);
         if events.is_empty() {
             return None;
         }
@@ -633,6 +637,41 @@ impl UnifiedEventLedger {
             ));
         }
         Some(lines.join("\n"))
+    }
+
+    /// 为 prompt 挑选事件：在重要性排序之上，给高情感浓度事件保底配额。
+    ///
+    /// 纯按 importance 取 top-N 时，一次「被甩飞」「被冷落」很容易被同期的
+    /// 对话事件挤出预算。这里给前者留出 `budget / 2` 的保底名额
+    /// （不足则用其余事件补满）。
+    ///
+    /// 返回按**时间正序**（早 → 晚）排列，便于 prompt 里读成一条时间线。
+    fn select_events_for_prompt(&self, char_id: &str, budget: usize) -> Vec<UnifiedEvent> {
+        if budget == 0 {
+            return Vec::new();
+        }
+        let pool = self.recent_events_visible_to(char_id, budget.saturating_mul(3).max(budget));
+        let quota = (budget / 2).max(1);
+        // `recent_events_visible_to` 返回的是「重要性升序」（先按重要性倒序取前 N，再 reverse），
+        // 因此从末尾往前遍历 = 按重要性从高到低挑选，保底名额会落在最重要的那些上。
+        let mut priority: Vec<UnifiedEvent> = Vec::new();
+        let mut rest: Vec<UnifiedEvent> = Vec::new();
+        for event in pool.into_iter().rev() {
+            if priority.len() < quota && is_prompt_priority_event(&event.event_type) {
+                priority.push(event);
+            } else {
+                rest.push(event);
+            }
+        }
+        let mut picked = priority;
+        let need = budget.saturating_sub(picked.len());
+        picked.extend(rest.into_iter().take(need));
+        picked.sort_by(|a, b| {
+            a.timestamp
+                .partial_cmp(&b.timestamp)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        picked
     }
 
     /// 清空全部事件
@@ -717,12 +756,44 @@ struct PendingCompaction {
     count: usize,
 }
 
+/// 是否为「高情感浓度」事件——prompt 选取时享受保底配额。
+///
+/// 判据是情感浓度，不是重要性数值：`dialogue`(0.9) / `compacted_summary`(0.85) /
+/// `action`(0.7) 本来就排在最前，无需保底；而这里列出的类型基础权重只有
+/// 0.5~0.6，一旦同期对话密集（对话事件数量远超其他），它们就会被挤出预算——
+/// 而这些恰恰是日记 / 内心独白 / 主动对话最该取材的东西
+/// （"用户今天把桌宠甩到墙上好几次" 比 "今天聊了很多" 更能写进内心 OS）。
+fn is_prompt_priority_event(event_type: &str) -> bool {
+    matches!(
+        event_type,
+        // 用户亲手对角色做的动作（摸头 / 双击 / 长按 / 甩飞撞边……）
+        "user_pet_action"
+            // 被冷落
+            | "user_ignored"
+            | "ignored_message"
+            // 情绪/心境转变
+            | "mood_shift"
+            | "mood_event"
+            // 用户的关键操作（切歌 / 切换应用）
+            | "user_media_changed"
+            | "user_app_switched"
+            // 旁听到的片段
+            | "observer_note"
+    )
+}
+
 /// 事件重要性权重（按 event_type 推断）
 fn event_base_importance(event_type: &str) -> f64 {
     match event_type {
         "dialogue" => 0.9,
         "action" => 0.7,
-        "mood_shift" | "mood_event" => 0.6,
+        // 被冷落过程事件：与 mood_shift 同级，日记/独白/recap 均可感知
+        "user_ignored" | "ignored_message" | "mood_shift" | "mood_event" => 0.6,
+        // 用户对桌宠的物理动作（摸头/双击/长按/甩飞撞边）：与 mood_shift 同级——
+        // 用户亲手对角色做的事情感浓度高，日记/独白/recap 都应能取材
+        "user_pet_action" => 0.6,
+        // 用户关键操作（切歌/切换应用）：中等级别，供日记与独白素材
+        "user_media_changed" | "user_app_switched" => 0.5,
         "observer_note" => 0.5,
         "compacted_summary" => 0.85,
         "presence_log" | "long_idle" | "quiet_mode" => 0.3,
@@ -984,6 +1055,70 @@ mod tests {
             visibility,
             associated_char_id: None,
         }
+    }
+
+    fn make_typed_event(
+        sender: &str,
+        receiver: &str,
+        event_type: &str,
+        ts: f64,
+    ) -> UnifiedEvent {
+        UnifiedEvent {
+            event_type: event_type.to_string(),
+            ..make_event(sender, receiver, EventVisibility::Participants, ts)
+        }
+    }
+
+    /// 构造一个只含内存态账本（不落盘、不压缩）
+    fn make_ledger(inner: LedgerInner) -> UnifiedEventLedger {
+        UnifiedEventLedger {
+            inner: RwLock::new(inner),
+            persistence_path: PathBuf::from("test.json"),
+            app_handle: Mutex::new(None),
+            compacting: std::sync::atomic::AtomicBool::new(false),
+            router: Mutex::new(None),
+        }
+    }
+
+    #[test]
+    fn test_select_events_reserves_quota_for_salient_events() {
+        let now = chrono::Local::now().timestamp() as f64;
+        let mut bucket: Vec<UnifiedEvent> = Vec::new();
+        // 12 条对话事件（importance 0.9）：纯按重要性取 top-6 时会把预算全吃掉
+        for i in 0..12 {
+            bucket.push(make_typed_event("user", "vivian", "dialogue", now - i as f64 * 60.0));
+        }
+        // 3 条用户对桌宠的物理动作（importance 0.6，同一天 → 衰减同为 0.95）
+        for i in 0..3 {
+            bucket.push(make_typed_event(
+                "user",
+                "vivian",
+                "user_pet_action",
+                now - 7200.0 - i as f64 * 60.0,
+            ));
+        }
+        let mut inner = LedgerInner::default();
+        inner.character_events.insert("vivian".to_string(), bucket);
+        let ledger = make_ledger(inner);
+
+        let picked = ledger.select_events_for_prompt("vivian", 6);
+        assert_eq!(picked.len(), 6, "预算 6 条应被填满");
+        let salient = picked
+            .iter()
+            .filter(|e| e.event_type == "user_pet_action")
+            .count();
+        assert_eq!(salient, 3, "3 条高情感浓度事件应全部保底入选");
+        // 返回按时间正序，便于 prompt 里读成一条时间线
+        assert!(
+            picked.windows(2).all(|w| w[0].timestamp <= w[1].timestamp),
+            "选取结果应按时间正序返回"
+        );
+    }
+
+    #[test]
+    fn test_select_events_zero_budget() {
+        let ledger = make_ledger(LedgerInner::default());
+        assert!(ledger.select_events_for_prompt("vivian", 0).is_empty());
     }
 
     #[test]

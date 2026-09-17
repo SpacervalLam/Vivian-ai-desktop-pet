@@ -31,6 +31,8 @@ pub fn add_todo_item(
         priority.unwrap_or(1),
         due_date.as_deref(),
         event_time.as_deref(),
+        // UI 窗口手动操作无角色归属，不弹 toast
+        "",
     );
     Ok(json!({ "item": item }))
 }
@@ -54,6 +56,8 @@ pub fn update_todo_item(
         priority,
         due_date.as_deref(),
         event_time.as_deref(),
+        // UI 窗口手动操作无角色归属，不弹 toast
+        "",
     )?;
     Ok(json!({ "item": item }))
 }
@@ -61,14 +65,14 @@ pub fn update_todo_item(
 /// 标记待办完成
 #[tauri::command]
 pub fn complete_todo_item(id: String) -> Result<Value, String> {
-    let item = todo_tools::complete_todo_item(&id)?;
+    let item = todo_tools::complete_todo_item(&id, "")?;
     Ok(json!({ "item": item }))
 }
 
 /// 删除待办
 #[tauri::command]
 pub fn delete_todo_item(id: String) -> Result<bool, String> {
-    if todo_tools::delete_todo_item(&id) {
+    if todo_tools::delete_todo_item(&id, "") {
         Ok(true)
     } else {
         Err("待办不存在".to_string())
@@ -97,6 +101,12 @@ pub fn add_scheduled_reminder(
     } else {
         state.scheduler.schedule_reminder(&message, scheduled_time)
     };
+    // 手动 UI 创建的任务无角色归属（char_id 为空），前端据此不弹 toast
+    let character_id = state
+        .scheduler
+        .get_task(&id)
+        .map(|t| t.char_id.clone())
+        .unwrap_or_default();
     let _ = app.emit(
         "scheduler:changed",
         json!({
@@ -108,6 +118,7 @@ pub fn add_scheduled_reminder(
                 "message": message,
                 "repeat_interval": repeat_interval,
             },
+            "character_id": character_id,
             "source": "manual",
         }),
     );
@@ -123,9 +134,19 @@ pub fn cancel_scheduled_task(
 ) -> Result<bool, String> {
     let ok = state.scheduler.cancel_task(&id);
     if ok {
+        // 归属取任务自身 char_id（角色创建的提醒取消时弹回该角色）
+        let character_id = state
+            .scheduler
+            .get_task(&id)
+            .map(|t| t.char_id.clone())
+            .unwrap_or_default();
         let _ = app.emit(
             "scheduler:changed",
-            json!({ "action": "cancelled", "task": { "id": id } }),
+            json!({
+                "action": "cancelled",
+                "task": { "id": id },
+                "character_id": character_id,
+            }),
         );
     }
     Ok(ok)
@@ -140,9 +161,18 @@ pub fn pause_scheduled_task(
 ) -> Result<bool, String> {
     let ok = state.scheduler.pause_task(&id);
     if ok {
+        let character_id = state
+            .scheduler
+            .get_task(&id)
+            .map(|t| t.char_id.clone())
+            .unwrap_or_default();
         let _ = app.emit(
             "scheduler:changed",
-            json!({ "action": "paused", "task": { "id": id } }),
+            json!({
+                "action": "paused",
+                "task": { "id": id },
+                "character_id": character_id,
+            }),
         );
     }
     Ok(ok)
@@ -157,9 +187,18 @@ pub fn resume_scheduled_task(
 ) -> Result<bool, String> {
     let ok = state.scheduler.resume_task(&id);
     if ok {
+        let character_id = state
+            .scheduler
+            .get_task(&id)
+            .map(|t| t.char_id.clone())
+            .unwrap_or_default();
         let _ = app.emit(
             "scheduler:changed",
-            json!({ "action": "resumed", "task": { "id": id } }),
+            json!({
+                "action": "resumed",
+                "task": { "id": id },
+                "character_id": character_id,
+            }),
         );
     }
     Ok(ok)

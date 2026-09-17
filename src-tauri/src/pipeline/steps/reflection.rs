@@ -601,7 +601,8 @@ impl ReflectionRunnable {
         let router = self.router.as_ref()?;
         let messages = self.build_messages(state);
 
-        match router.generate(LLMRequest::new("chat", messages)).await {
+        match router.generate(LLMRequest::new("chat", messages)
+            .with_character_id(self.char_id.clone())).await {
             Ok(text) => {
                 let trimmed = text.trim();
                 if trimmed.is_empty() {

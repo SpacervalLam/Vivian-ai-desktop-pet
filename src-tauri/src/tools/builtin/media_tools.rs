@@ -1,7 +1,9 @@
-//! 媒体控制工具 - 播放/暂停、上一首、下一首、音量调节、静音
+//! 媒体控制工具：播放/暂停、上一首、下一首、音量调节、静音。
 //!
-//! 通过 Windows keybd_event 模拟媒体键，控制全局媒体播放与音量。
-//! 通过统一的 action 参数分发到不同的媒体键。
+//! 播放类动作（play_pause / next / previous）优先走 SMTC（`world::MusicSource::control`），
+//! 可定向到具体播放器（`target_app`）并有成功回执；失败时降级为媒体键。
+//! 指定 `target_app` 时 SMTC 失败不降级（媒体键无法定向）。
+//! 音量与静音无 SMTC 对应 API，始终用媒体键。
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -11,6 +13,7 @@ use crate::tools::types::{
     ValidationResult,
 };
 use crate::utils::process::silent_command;
+use crate::world::{MusicSource, PlaybackAction};
 
 /// 通过 PowerShell 调用 keybd_event 发送一次按键（down + up）
 fn send_vk(vk: u8) -> Result<(), String> {
@@ -59,10 +62,9 @@ fn map_action(action: &str) -> Option<(u8, &'static str)> {
     }
 }
 
-/// 媒体控制工具：通过 action 参数发送对应的媒体键
+/// 媒体控制工具：通过 `action` 参数发送对应的媒体键
 ///
-/// 整合原有的 6 个媒体键工具（play_pause / next_track / previous_track /
-/// volume_up / volume_down / mute），减少 tool 数量与 token 开销。
+/// 整合 play_pause / next_track / previous_track / volume_up / volume_down / mute 六个动作。
 pub struct MediaControlTool;
 
 impl MediaControlTool {
@@ -84,23 +86,31 @@ impl Tool for MediaControlTool {
     }
 
     fn description(&self) -> &str {
-        "Send a media key to control global media playback or system volume.\
-         The action parameter specifies which media key to send:\
+        "Control global media playback or system volume.\
+         The action parameter specifies what to do:\
          play_pause, next_track, previous_track, volume_up, volume_down, mute.\n\
+         Playback actions go through the system media session (so they can target a specific \
+         player and report what ended up playing), falling back to media keys if that fails. \
+         Volume and mute always use media keys.\n\
          Typical scenario: call when the user says \"play/pause\", \"next track\", \"volume up\", \"mute\"."
     }
 
     fn description_in(&self, lang: &str) -> &str {
         match lang {
-            "zh" => "发送媒体键控制全局媒体播放或系统音量。\
-         action 参数指定要发送的媒体键：\
+            "zh" => "控制全局媒体播放或系统音量。\
+         action 参数指定动作：\
          play_pause（播放/暂停）、next_track（下一首）、previous_track（上一首）、\
          volume_up（音量增大）、volume_down（音量减小）、mute（静音切换）。\n\
-         典型场景：当用户说\"播放/暂停\"、\"下一首\"、\"音量增大\"、\"静音\"时调用。",
-            "ja" => "メディアキーを送信してグローバルなメディア再生やシステム音量を制御する。\
-         action パラメータで送信するメディアキーを指定する：\
+         播放类动作优先走系统媒体会话（可定向到具体播放器、并能回报最终在放什么），\
+         失败时降级为模拟媒体键；音量与静音始终用媒体键。\n\
+         典型场景：当用户说\"播放/暂停\"、\"下一首\"、\"音量增大\"、\"静音\"时调用。\n\
+         注意：想按歌名找歌并播放请用 music_play，不要用本工具。",
+            "ja" => "グローバルなメディア再生やシステム音量を制御する。\
+         action パラメータで動作を指定する：\
          play_pause（再生/一時停止）、next_track（次のトラック）、previous_track（前のトラック）、\
          volume_up（音量を上げる）、volume_down（音量を下げる）、mute（ミュート切り替え）。\n\
+         再生系の操作はシステムメディアセッションを優先し（特定のプレイヤーを指定でき、\
+         最終的に何が再生されているかを返せる）、失敗時はメディアキーにフォールバックする。\n\
          典型的なシナリオ：ユーザーが\"再生/一時停止\"\"次のトラック\"\"音量を上げて\"\"ミュート\"と言った時に呼び出す。",
             _ => self.description(),
         }
@@ -108,11 +118,18 @@ impl Tool for MediaControlTool {
 
     fn usage_corpus(&self, lang: &str) -> &'static str {
         match lang {
-            "zh" => "放首歌\n暂停一下\n下一首\n音量小一点\n别放了",
+            "zh" => "放首歌\n暂停一下\n下一首\n音量小一点\n别放了\n静音",
             "en" => "play some music\npause it\nnext track\nturn it down\nstop playing",
             "ja" => "音楽をかけて\n一時停止して\n次の曲\n音量を下げて\n再生を止めて",
             _ => "",
         }
+    }
+
+    fn anti_use_cases(&self) -> &[&str] {
+        &[
+            "Find a specific song by name and play it (use music_play instead)",
+            "Just checking what is currently playing (use music_now_playing instead)",
+        ]
     }
 
     fn parameters_schema(&self) -> Value {
@@ -123,6 +140,10 @@ impl Tool for MediaControlTool {
                     "type": "string",
                     "enum": ["play_pause", "next_track", "previous_track", "volume_up", "volume_down", "mute"],
                     "description": "Media key action to send."
+                },
+                "target_app": {
+                    "type": "string",
+                    "description": "Optional. Restrict the action to a specific player, matched against its app id (e.g. \"cloudmusic\", \"spotify\", \"qqmusic\"). Omit to use the system's current session."
                 }
             },
             "required": ["action"]
@@ -138,6 +159,10 @@ impl Tool for MediaControlTool {
                         "type": "string",
                         "enum": ["play_pause", "next_track", "previous_track", "volume_up", "volume_down", "mute"],
                         "description": "要发送的媒体键动作。"
+                    },
+                    "target_app": {
+                        "type": "string",
+                        "description": "可选。把动作限定到某个播放器（按应用标识匹配，如 \"cloudmusic\"、\"spotify\"、\"qqmusic\"）。省略则作用于系统当前会话。"
                     }
                 },
                 "required": ["action"]
@@ -149,6 +174,10 @@ impl Tool for MediaControlTool {
                         "type": "string",
                         "enum": ["play_pause", "next_track", "previous_track", "volume_up", "volume_down", "mute"],
                         "description": "送信するメディアキーアクション。"
+                    },
+                    "target_app": {
+                        "type": "string",
+                        "description": "任意。動作を特定のプレイヤーに限定する（アプリ ID で照合、例 \"cloudmusic\"、\"spotify\"、\"qqmusic\"）。省略時はシステムの現在のセッション。"
                     }
                 },
                 "required": ["action"]
@@ -173,11 +202,18 @@ impl Tool for MediaControlTool {
     }
 
     async fn check_permissions(&self, _input: &Value, _ctx: &ToolUseContext) -> PermissionResult {
-        PermissionResult::allow()
+        PermissionResult::ask("控制媒体（播放/暂停/音量/静音）需要用户确认")
     }
 
     async fn call(&self, args: Value, _ctx: &ToolUseContext) -> ToolResult {
         let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("");
+        let target_app = args
+            .get("target_app")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+
         let (vk, label) = match map_action(action) {
             Some(v) => v,
             None => {
@@ -189,10 +225,58 @@ impl Tool for MediaControlTool {
             }
         };
 
+        // 播放类动作优先走 SMTC：可定向到具体播放器、有成功回执、能读回曲名做校验。
+        // 音量/静音没有 SMTC 对应 API，直接发媒体键。
+        let is_playback = matches!(action, "play_pause" | "next_track" | "previous_track");
+        if is_playback {
+            if let Some(pa) = PlaybackAction::parse(action) {
+                match MusicSource::new().control(pa, target_app.clone()).await {
+                    Ok(snapshot) => {
+                        let now = snapshot
+                            .map(|s| format!("{} — {}", s.artist, s.title))
+                            .unwrap_or_default();
+                        let message = if now.is_empty() {
+                            format!("已通过系统媒体会话执行「{}」", label)
+                        } else {
+                            format!("已执行「{}」，当前播放：{}", label, now)
+                        };
+                        return ToolResult::standard_success(
+                            &message,
+                            Some(json!({
+                                "action": action,
+                                "via": "smtc",
+                                "now_playing": now,
+                                "target_app": target_app,
+                            })),
+                        );
+                    }
+                    Err(e) => {
+                        tracing::debug!("[MediaControl] SMTC 控制失败，准备降级媒体键: {}", e);
+                        // 指定 target_app 时不降级：媒体键是全局的、无法定向，会误控其他播放器
+                        if target_app.is_some() {
+                            return ToolResult::standard_error(
+                                &format!(
+                                    "定向控制「{}」失败：{}。媒体键无法定向，故不做降级（避免误控其他播放器）。",
+                                    target_app.as_deref().unwrap_or(""), e
+                                ),
+                                Some("MediaTargetedControlFailed"),
+                                Some(json!({ "action": action, "target_app": target_app })),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
         match send_vk_async(vk).await {
             Ok(()) => ToolResult::standard_success(
                 &format!("已发送 {}", label),
-                Some(json!({ "key": label, "vk": vk, "action": action })),
+                Some(json!({
+                    "key": label,
+                    "vk": vk,
+                    "action": action,
+                    "via": "media_key",
+                })),
             ),
             Err(e) => ToolResult::standard_error(
                 "媒体键发送失败",
@@ -211,6 +295,6 @@ impl Tool for MediaControlTool {
     }
 
     fn risk(&self) -> ToolRiskTier {
-        ToolRiskTier::InputControl
+        ToolRiskTier::FsWrite
     }
 }

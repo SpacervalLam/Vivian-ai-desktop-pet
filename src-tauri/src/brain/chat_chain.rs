@@ -356,6 +356,7 @@ impl BrainChatChain {
         .with_char_id(char_id)
         .with_native_fc(config.tools.enable_native_function_calling)
         .with_native_schema(router.supports_structured_output())
+        .with_prompt_budget_config(config)
         .with_language(config.base.language.clone());
         // Inject inline expression/motion tag config: when enabled, inject tag format spec + available expression/motion list into prompt
         let prompt_step = if config.inline_expression.enabled {

@@ -2,8 +2,8 @@
 //!
 //! 负责扫描模型目录并分类加载纹理（chibi 图集与贴图）等资源。
 //!
-//! 动作/表情文件已随 Live2D 渲染后端移除，角色清单与动作词汇来自构建期嵌入的
-//! chibi 动作词汇表（`pre_parsed::chibi_animations_json`），由前端按词汇表帧时长推进。
+//! 动作/表情不在此处加载：角色清单与动作词汇来自构建期嵌入的 chibi 动作词汇表
+//! （`pre_parsed::chibi_animations_json`），由前端按词汇表帧时长推进。
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

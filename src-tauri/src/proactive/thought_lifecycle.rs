@@ -26,6 +26,10 @@ use serde::{Deserialize, Serialize};
 pub const INNER_MONOLOGUE_THRESHOLD: f32 = 0.30;
 pub const PROACTIVE_SHARE_THRESHOLD: f32 = 0.70;
 
+/// 普通思绪的年龄门（秒）：播种后至少存活该时长才可产内心独白。
+/// 恢复"种子→滋长→独白"的积累语义；高优先级思绪豁免。
+pub const SEED_MIN_AGE_SECS: f64 = 120.0;
+
 /// 思绪自然衰减速率（每秒衰减量，在无新事件滋养时）
 const NATURAL_DECAY_PER_SEC: f32 = 0.0008;
 /// 相关新事件对思绪的增幅
@@ -83,6 +87,9 @@ pub struct ActiveThought {
     pub expressed: bool,
     /// 触发这个思绪的事件类型
     pub trigger_kind: String,
+    /// 是否高优先级（休息/醒来/节日等）：跳过年龄门与频率门豁免
+    #[serde(default)]
+    pub high_priority: bool,
 }
 
 impl ActiveThought {
@@ -120,11 +127,18 @@ impl ActiveThought {
             last_nourished_at: now,
             expressed: false,
             trigger_kind: trigger_kind.to_string(),
+            high_priority,
         }
     }
 
+    /// 普通思绪的年龄门：播种后至少存活 SEED_MIN_AGE_SECS 才能产独白。
+    /// 高优先级思绪（休息/醒来/节日）立即响应，不受年龄门限制。
+    fn passes_age_gate(&self, now: f64) -> bool {
+        self.high_priority || (now - self.created_at) >= SEED_MIN_AGE_SECS
+    }
+
     /// 是否应该产生内心独白
-    pub fn should_produce_monologue(&self) -> bool {
+    pub fn should_produce_monologue(&self, now: f64) -> bool {
         if self.expressed {
             return false;
         }
@@ -132,6 +146,10 @@ impl ActiveThought {
             return false;
         }
         if matches!(self.phase, ThoughtPhase::Faded) {
+            return false;
+        }
+        // 年龄门：恢复"种子→滋长→独白"的积累语义，避免播种当 tick 立即出独白
+        if !self.passes_age_gate(now) {
             return false;
         }
         self.phase != ThoughtPhase::Active || self.intensity > INNER_MONOLOGUE_THRESHOLD + 0.15
@@ -314,10 +332,10 @@ impl ThoughtLifecycle {
     }
 
     /// 获取当前最强烈的可独白思绪（返回引用），不改变状态
-    pub fn pick_monologue_candidate(&self) -> Option<&ActiveThought> {
+    pub fn pick_monologue_candidate(&self, now: f64) -> Option<&ActiveThought> {
         self.thoughts
             .iter()
-            .filter(|t| t.should_produce_monologue())
+            .filter(|t| t.should_produce_monologue(now))
             .max_by(|a, b| a.intensity.partial_cmp(&b.intensity).unwrap_or(std::cmp::Ordering::Equal))
     }
 
@@ -403,5 +421,24 @@ impl ThoughtLifecycle {
 impl Default for ThoughtLifecycle {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn age_gate_blocks_fresh_normal_seed() {
+        // 普通种子：播种后 < 2 分钟不出独白，跨过年龄门后才出
+        let t = ActiveThought::new_seed("k", "d", "c", 0.4, 0.0, 0.3, "test", 1000.0, false);
+        assert!(!t.should_produce_monologue(1000.0 + 30.0));
+        assert!(t.should_produce_monologue(1000.0 + SEED_MIN_AGE_SECS + 1.0));
+    }
+
+    #[test]
+    fn high_priority_bypasses_age_gate() {
+        let t = ActiveThought::new_seed("k", "d", "c", 0.5, 0.0, 0.3, "test", 1000.0, true);
+        assert!(t.should_produce_monologue(1000.0 + 1.0));
     }
 }

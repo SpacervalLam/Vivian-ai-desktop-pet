@@ -40,8 +40,6 @@ const KIND_LABEL: Record<TrajectoryKind, string> = {
 const VIRTUALIZATION_THRESHOLD = 100;
 /** 单行高度（px，行高 26 + 1 间隙）。 */
 const ROW_HEIGHT = 27;
-/** 时间线 duration 模式下相邻事件的最小可见宽度（ms）。 */
-const TIMELINE_MIN_SPAN_MS = 150;
 /** 拖拽判定的最小位移（px）。 */
 const MINIMUM_DRAG_PX = 3;
 
@@ -83,12 +81,6 @@ function formatDuration(ms: number): string {
   if (s < 60) return `${Math.round(s * 10) / 10}s`;
   const whole = Math.round(s);
   return `${Math.floor(whole / 60)}m${whole % 60}s`;
-}
-
-function formatClock(ms: number): string {
-  const d = new Date(ms);
-  const two = (v: number) => String(v).padStart(2, '0');
-  return `${two(d.getHours())}:${two(d.getMinutes())}:${two(d.getSeconds())}`;
 }
 
 /** messages → 轮次分组的轨迹记录流（每条 user 消息开启一个新轮次）。 */
@@ -203,8 +195,6 @@ export class TrajectorySearchIndex {
 
 // ============ 时间线模型 ============
 
-type TimelineMode = 'sequence' | 'duration';
-
 interface TimeRange {
   start: number;
   end: number;
@@ -234,49 +224,27 @@ function laneFor(kind: TrajectoryKind): number {
   return 0;
 }
 
-/** 记录流 → 三泳道时间线模型。sequence 等宽序数域，duration 时间戳域。 */
+/** 记录流 → 三泳道时间线模型。域是等宽的序数（第 n 条事件占一格的宽度）。 */
 function deriveTimeline(
   records: readonly TrajectoryRecord[],
-  mode: TimelineMode,
   toolLabel: (name: string) => string,
 ): TimelineModel | null {
   if (records.length === 0) return null;
   const spans: TimelineSpan[] = [];
   const turnBoundaries: { turn: number; time: number }[] = [];
-  if (mode === 'sequence') {
-    records.forEach((record, i) => {
-      if (record.kind === 'user') turnBoundaries.push({ turn: record.turn, time: i });
-      spans.push({
-        index: record.index,
-        kind: record.kind,
-        isError: record.kind === 'error' || record.message.tool_success === false,
-        lane: laneFor(record.kind),
-        start: i,
-        end: i + 1,
-        label: recordTooltip(record, toolLabel),
-      });
-    });
-    return { domainStart: 0, domainEnd: records.length, spans, turnBoundaries };
-  }
   records.forEach((record, i) => {
-    const start = record.message.timestamp;
-    const next = records[i + 1];
-    let end = next ? next.message.timestamp : start + TIMELINE_MIN_SPAN_MS;
-    if (end - start < TIMELINE_MIN_SPAN_MS) end = start + TIMELINE_MIN_SPAN_MS;
-    if (record.kind === 'user') turnBoundaries.push({ turn: record.turn, time: start });
+    if (record.kind === 'user') turnBoundaries.push({ turn: record.turn, time: i });
     spans.push({
       index: record.index,
       kind: record.kind,
       isError: record.kind === 'error' || record.message.tool_success === false,
       lane: laneFor(record.kind),
-      start,
-      end,
+      start: i,
+      end: i + 1,
       label: recordTooltip(record, toolLabel),
     });
   });
-  const domainStart = spans[0]?.start ?? 0;
-  const domainEnd = spans[spans.length - 1]?.end ?? 1;
-  return { domainStart, domainEnd, spans, turnBoundaries };
+  return { domainStart: 0, domainEnd: records.length, spans, turnBoundaries };
 }
 
 /** 选中区间内的记录索引集合（区间与 span 相交即命中）。 */
@@ -313,7 +281,6 @@ function clampFraction(value: number): number {
 
 interface TrajectoryTimelineProps {
   model: TimelineModel | null;
-  mode: TimelineMode;
   range: TimeRange | null;
   selectedIndex: number | null;
   searchMatchIndexes: ReadonlySet<number> | null;
@@ -333,7 +300,6 @@ const clamp = (value: number, min: number, max: number): number =>
 
 const TrajectoryTimeline: React.FC<TrajectoryTimelineProps> = ({
   model,
-  mode,
   range,
   selectedIndex,
   searchMatchIndexes,
@@ -361,7 +327,7 @@ const TrajectoryTimeline: React.FC<TrajectoryTimelineProps> = ({
   const [panning, setPanning] = useState(false);
 
   const fullDuration = model ? Math.max(1, model.domainEnd - model.domainStart) : 1;
-  const minZoom = model === null ? 1 : Math.min(mode === 'sequence' ? 4 : 1000, fullDuration);
+  const minZoom = model === null ? 1 : Math.min(4, fullDuration);
   const viewportDuration = viewport === null
     ? fullDuration
     : Math.min(fullDuration, Math.max(minZoom, viewport.end - viewport.start));
@@ -388,8 +354,7 @@ const TrajectoryTimeline: React.FC<TrajectoryTimelineProps> = ({
     });
   }, [model, selectedIndex]);
 
-  // 模式切换重置视口；选中区间脱离数据域时清除
-  useEffect(() => { setViewport(null); }, [mode]);
+  // 选中区间脱离数据域时清除
   useEffect(() => {
     if (
       model !== null && range !== null
@@ -683,10 +648,9 @@ const TrajectoryTimeline: React.FC<TrajectoryTimelineProps> = ({
             {t('mind_inspector.code_traj_reset_btn')}
           </button>
         )}
-        <span className="codex-timeline-mode">
-          {mode === 'sequence' ? t('mind_inspector.code_traj_sequence') : `${formatClock(domainStart)} → ${formatClock(domainStart + domainDuration)}`}
-          {spanStride > 1 ? ` · ${t('mind_inspector.code_traj_sampled')}` : ''}
-        </span>
+        {spanStride > 1 && (
+          <span className="codex-timeline-mode">{t('mind_inspector.code_traj_sampled')}</span>
+        )}
       </div>
     </div>
   );
@@ -711,7 +675,6 @@ const TrajectoryPanel: React.FC<TrajectoryPanelProps> = ({ messages, running, to
   const records = useMemo(() => deriveTrajectoryRecords(messages), [messages]);
   const [selected, setSelected] = useState<number | null>(null);
   const [collapsedTurns, setCollapsedTurns] = useState<ReadonlySet<number>>(EMPTY_SET);
-  const [timelineMode, setTimelineMode] = useState<TimelineMode>('sequence');
   const [timelineRange, setTimelineRange] = useState<TimeRange | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchIndex] = useState(() => new TrajectorySearchIndex());
@@ -728,8 +691,8 @@ const TrajectoryPanel: React.FC<TrajectoryPanelProps> = ({ messages, running, to
   );
 
   const timelineModel = useMemo(
-    () => deriveTimeline(records, timelineMode, toolLabel),
-    [records, timelineMode, toolLabel],
+    () => deriveTimeline(records, toolLabel),
+    [records, toolLabel],
   );
 
   const focusIndexes = useMemo(
@@ -964,14 +927,6 @@ const TrajectoryPanel: React.FC<TrajectoryPanelProps> = ({ messages, running, to
               </button>
             )}
           </label>
-          <button
-            type="button"
-            className="codex-trajectory-fold"
-            onClick={() => setTimelineMode(timelineMode === 'sequence' ? 'duration' : 'sequence')}
-            title={timelineMode === 'sequence' ? t('mind_inspector.code_traj_switch_duration') : t('mind_inspector.code_traj_switch_sequence')}
-          >
-            {timelineMode === 'sequence' ? t('mind_inspector.code_traj_sequence') : t('mind_inspector.code_traj_duration')}
-          </button>
           {collapsibleTurns.length > 0 && (
             <button
               type="button"
@@ -986,7 +941,6 @@ const TrajectoryPanel: React.FC<TrajectoryPanelProps> = ({ messages, running, to
 
       <TrajectoryTimeline
         model={timelineModel}
-        mode={timelineMode}
         range={timelineRange}
         selectedIndex={selected}
         searchMatchIndexes={searchMatches}
@@ -997,10 +951,22 @@ const TrajectoryPanel: React.FC<TrajectoryPanelProps> = ({ messages, running, to
       <div
         ref={tableRef}
         className={`codex-trajectory-table ${virtualizationEnabled ? 'virtual' : ''}`}
+        // 可聚焦：方向键 / PageUp / PageDown / Home / End 直接滚动列表
+        tabIndex={0}
+        role="list"
+        aria-label={t('mind_inspector.code_inspector_trajectory')}
         onScroll={onTableScroll}
       >
         {virtualizationEnabled ? (
-          <div style={{ height: virtualizer.getTotalSize(), position: 'relative' }}>
+          <div
+            style={{
+              height: virtualizer.getTotalSize(),
+              position: 'relative',
+              // 行全部绝对定位，容器自身内容高度为 0：不允许被 flex 压缩，
+              // 否则没有滚动高度、虚拟列表完全滚不动。
+              flexShrink: 0,
+            }}
+          >
             {virtualizer.getVirtualItems().map((item) => {
               const row = rows[item.index];
               if (row === undefined) return null;

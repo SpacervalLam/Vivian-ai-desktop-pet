@@ -21,6 +21,7 @@ use serde_json::Value;
 
 use crate::error::{VivianError, VivianResult};
 use crate::pipeline::base::{Runnable, RunnableConfig};
+use crate::resilience::classified_retry_verdict;
 
 /// 默认重试间隔初始值
 const DEFAULT_INITIAL_DELAY: Duration = Duration::from_millis(100);
@@ -31,17 +32,22 @@ const DEFAULT_BACKOFF_BASE: u32 = 2;
 
 /// 判断错误是否值得重试
 ///
-/// 默认重试瞬时错误（Network / Provider / Timeout / Io），不重试
-/// 配置错误、权限拒绝、熔断器已打开等不可恢复错误。
+/// `Provider` 变体里混着语义完全相反的两类故障，不能一律重试：限流、5xx、网络抖动
+/// 该退避重试，而欠费、API Key 失效、上下文超长重试多少次都不会好——后者在余额耗尽
+/// 时会变成持续打请求。
+///
+/// 判定走 provider 层同一张厂商映射表，但**仅在能结构化解出状态码时**才采信结论：
+/// 解不出（本地错误被包装成 Provider）时沿用「可重试」。关键字兜底不予采用，
+/// 它会在 request_id、token 数这类子串上误伤，而误判为不可重试会直接让请求失败。
 pub fn is_retryable(err: &VivianError) -> bool {
-    matches!(
-        err,
+    match err {
+        VivianError::Provider(msg) => classified_retry_verdict(msg).unwrap_or(true),
         VivianError::Network(_)
-            | VivianError::Provider(_)
-            | VivianError::Timeout(_)
-            | VivianError::Io(_)
-            | VivianError::Database(_)
-    )
+        | VivianError::Timeout(_)
+        | VivianError::Io(_)
+        | VivianError::Database(_) => true,
+        _ => false,
+    }
 }
 
 /// 指数退避 + jitter 计算第 n 次重试的等待时长

@@ -714,20 +714,34 @@ pub async fn rebuild_memory_embeddings(
 /// 返回内置已知嵌入模型元数据（供前端在设置表单选择模型时展示维度、自动填充 dimension）。
 #[tauri::command]
 pub fn get_embedding_models() -> Value {
-    json!(
-        crate::memory::embedding_registry::all_models()
-            .iter()
-            .map(|m| {
-                json!({
-                    "id": m.id,
-                    "dimension": m.dimension,
-                    "source": match m.source {
-                        crate::memory::embedding_registry::EmbeddingSource::Cloud => "cloud",
-                        crate::memory::embedding_registry::EmbeddingSource::Local => "local",
-                    },
-                    "display_name": m.display_name,
-                })
+    let mut models = crate::memory::embedding_registry::all_models()
+        .iter()
+        .map(|m| {
+            json!({
+                "id": m.id,
+                "dimension": m.dimension,
+                "source": "local",
+                "display_name": m.display_name,
+                "provider": Value::Null,
+                "endpoint": Value::Null,
+                "recommended_for": Value::Null,
             })
-            .collect::<Vec<_>>()
-    )
+        })
+        .collect::<Vec<_>>();
+    models.extend(
+        crate::plugins::load_embedding_provider_presets()
+            .into_iter()
+            .map(|p| {
+                json!({
+                    "id": p.model,
+                    "dimension": p.dimension,
+                    "source": "cloud",
+                    "display_name": format!("{} {} ({})", p.provider, p.model, p.dimension),
+                    "provider": p.provider,
+                    "endpoint": p.endpoint,
+                    "recommended_for": p.recommended_for,
+                })
+            }),
+    );
+    json!(models)
 }

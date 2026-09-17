@@ -5,6 +5,7 @@
 //! 2. 强化近期重要记忆（提升 importance）
 //! 3. 衰减无关的临时记忆
 //! 4. Belief/Goal 生成（Stage 4）：从 Insight + LongTerm 提炼信念写入 Mind
+//! 5. memory.md 整理（Stage 5）：由 [`MemoryConsolidator::tidy_memory_md`] 按 [`TidyNeed`] 分派增量整理或全量压缩
 //!
 //! 设计：复用现有 MemoryManager 与 ConsolidationPipeline，不重复造轮子。
 //!
@@ -34,8 +35,25 @@ const FAILURE_RETRY_SEC: f64 = 30.0 * 60.0;
 /// 熔断暂停后的半开重试等待（1 小时）——暂停期间完全跳过该步骤，不烧 LLM
 const PAUSE_COOLDOWN_SEC: f64 = 3600.0;
 
-/// memory.md 整理 system prompt：机械合并去重，不需要人设（用 memory 路由便宜模型）。
-const MEMORY_MD_TIDY_SYSTEM_PROMPT: &str = "你是角色长期记忆笔记的整理器。把下面的笔记合并去重、删除过时或一次性内容、按主题分节组织（如 相处约定 / 承诺 / 教训 / 梗）。保留所有仍然有效的信息，每条一行、简洁。只输出重写后的 markdown 正文，不要输出文件标题、前言或总结。重写后须精简（控制在 1500 字符内）。";
+/// memory.md **全量压缩** system prompt：机械合并去重，不需要人设（用 memory 路由便宜模型）。
+///
+/// 这是兜底路径（文件逼近预算上限时触发），输入是全文、输出是按主题重排的精简正文。
+/// 增量整理路径由 [`MEMORY_MD_INCREMENTAL_SYSTEM_PROMPT`] 与 `memory_md::merge_entries` 约定。
+const MEMORY_MD_TIDY_SYSTEM_PROMPT: &str = "你是角色长期记忆笔记的整理器。把下面的笔记合并去重、删除过时或一次性内容、按主题分节组织（如 相处约定 / 承诺 / 教训 / 梗；`## 近期补充` 分节里的条目要归入合适的主题）。保留所有仍然有效的信息，每条一行、简洁。只输出重写后的 markdown 正文，不要输出文件标题、前言或总结。重写后须精简（控制在 1500 字符内）。";
+
+/// memory.md **增量整理** system prompt。
+///
+/// 输入只有「新增沉淀」（几百字符），已整理正文仅用于去重比对，
+/// 因此成本远低于全量压缩，可高频触发。与 `memory_md::merge_entries` 协议一致：
+/// 普通行 = 新增条目，`REPLACE: 旧 => 新` = 就地改写正文里的某条。
+const MEMORY_MD_INCREMENTAL_SYSTEM_PROMPT: &str = "你是角色长期记忆笔记的整理器。输入分两部分：「已整理的正文」（仅供你去重参考）和「新增沉淀」（本次要处理的原始素材）。\n\
+只处理新增沉淀，输出需要并入正文的条目：\n\
+- 每条一行，以 `- ` 开头，简洁陈述（如 `- 主人不喜欢香菜`），不带日期、不加引号、不解释。\n\
+- 合并新增沉淀里重复或同类的内容。\n\
+- 丢弃一次性的、已失效的、没有长期价值的内容——这类不必输出。\n\
+- 已整理正文里已经有的信息不要重复输出。\n\
+- 若新增沉淀明确更新或推翻了正文里的某一条，输出一行 `REPLACE: 正文里的原条目 => 新条目`，其中原条目必须与正文逐字一致。\n\
+不要输出标题、前言、总结或任何解释性文字。";
 
 /// 健康状态持久化路径（按角色隔离，避免多角色互相覆盖）
 fn health_path(char_id: &str) -> PathBuf {
@@ -161,27 +179,33 @@ impl MemoryConsolidator {
             }
         }
 
-        // Stage 5: memory.md 整理（仅在行数超阈值时触发，避免每日空跑浪费 LLM）
+        // Stage 5: memory.md 整理
+        // 按需触发（`memory_md::tidy_need` 判定）：待整理沉淀攒够行数走**增量整理**
+        // （LLM 只读新增部分，机械并入正文），文件逼近预算上限才走**全量压缩**。
+        // 两者都不满足则完全不动，一次 LLM 都不烧。
         // 机械合并去重，用 memory 路由（不需人设）；失败熔断沿用现有机制
         if !self.char_id.is_empty() {
             if let Some(reason) = self.health.is_paused("memory_md") {
                 tracing::warn!("[MemoryConsolidator] memory.md 整理处于熔断暂停，跳过：{}", reason);
                 all_ok = false;
-            } else if crate::memory::memory_md::needs_tidy(&self.char_id) {
-                match self.tidy_memory_md().await {
-                    Ok(true) => {
-                        tracing::info!("[MemoryConsolidator] memory.md 已整理合并");
-                        self.health.mark_success("memory_md");
-                        *self.memory_md_last_tidy.lock() = now;
-                    }
-                    Ok(false) => {
-                        // 不需要整理（文件已被写侧驱逐压在阈值内 / 或为空）
-                        self.health.mark_success("memory_md");
-                    }
-                    Err(e) => {
-                        tracing::warn!("[MemoryConsolidator] memory.md 整理失败: {}", e);
-                        self.health.mark_failure("memory_md", &e.to_string());
-                        all_ok = false;
+            } else {
+                let need = crate::memory::memory_md::tidy_need(&self.char_id);
+                if need != crate::memory::memory_md::TidyNeed::None {
+                    match self.tidy_memory_md(need).await {
+                        Ok(true) => {
+                            tracing::info!("[MemoryConsolidator] memory.md 已整理合并（{need:?}）");
+                            self.health.mark_success("memory_md");
+                            *self.memory_md_last_tidy.lock() = now;
+                        }
+                        Ok(false) => {
+                            // 不需要整理（文件已被写侧驱逐压在阈值内 / 或为空）
+                            self.health.mark_success("memory_md");
+                        }
+                        Err(e) => {
+                            tracing::warn!("[MemoryConsolidator] memory.md 整理失败: {}", e);
+                            self.health.mark_failure("memory_md", &e.to_string());
+                            all_ok = false;
+                        }
                     }
                 }
             }
@@ -195,17 +219,78 @@ impl MemoryConsolidator {
         true
     }
 
-    /// 整理角色长期记忆笔记（memory.md）：LLM 合并去重、删过时、按主题分节。
+    /// 整理角色长期记忆笔记（memory.md）。
     ///
-    /// 返回 `Ok(true)` 表示已重写；`Ok(false)` 表示无需整理（文件为空）；
+    /// `need` 由 `memory_md::tidy_need` 判定，两条路径：
+    /// - [`TidyNeed::Incremental`]：LLM 只读「待整理区」（新增沉淀），产出条目后由
+    ///   `memory_md::merge_entries` 机械并入「已整理区」。输入规模从「全文」降到
+    ///   「新增部分」；若并入后反而超预算，自动回落全量压缩。
+    /// - [`TidyNeed::FullCompaction`]：LLM 读全文，按主题重排并精简（兜底路径）。
+    ///
+    /// 返回 `Ok(true)` 表示已重写；`Ok(false)` 表示无需整理（文件为空 / 没有待整理内容）；
     /// `Err` 表示整理失败（LLM 调用失败 / 返回空 / 重写后超预算被 write_memory_md 拒绝），
     /// 失败时保留原笔记不动。
-    async fn tidy_memory_md(&self) -> Result<bool, String> {
-        let existing = match crate::memory::memory_md::read_memory_md_raw(&self.char_id) {
+    async fn tidy_memory_md(
+        &self,
+        need: crate::memory::memory_md::TidyNeed,
+    ) -> Result<bool, String> {
+        use crate::memory::memory_md;
+
+        let existing = match memory_md::read_memory_md_raw(&self.char_id) {
             Some(t) => t,
             None => return Ok(false),
         };
         let router = self.pipeline.router();
+
+        // ── 增量路径：只把新增沉淀交给 LLM，机械并入已整理正文 ──────────────
+        if need == memory_md::TidyNeed::Incremental {
+            let regions = memory_md::split_regions(&existing);
+            if regions.pending_body.trim().is_empty() {
+                return Ok(false);
+            }
+            let pending_lines = regions
+                .pending_body
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .count();
+            let entries = router
+                .generate(LLMRequest::new(
+                    "memory",
+                    vec![
+                        ChatMessage::system(MEMORY_MD_INCREMENTAL_SYSTEM_PROMPT),
+                        ChatMessage::user(format!(
+                            "（已整理的正文，仅供你去重参考，不要复述）\n{}\n\n（新增沉淀，需并入）\n{}",
+                            regions.consolidated_body, regions.pending_body
+                        )),
+                    ],
+                )
+                .with_character_id(self.char_id.clone()))
+                .await
+                .map_err(|e| format!("增量整理 LLM 调用失败：{e}"))?;
+
+            let entries = entries.trim();
+            if !entries.is_empty() {
+                let merged = memory_md::merge_entries(&regions.consolidated_body, entries);
+                match memory_md::write_memory_md(&self.char_id, &merged) {
+                    Ok(()) => {
+                        tracing::info!(
+                            "[MemoryConsolidator] memory.md 增量整理完成：已并入 {pending_lines} 行待整理沉淀"
+                        );
+                        return Ok(true);
+                    }
+                    // 并入后超预算 → 回落全量压缩（它才有权精简正文）
+                    Err(e) => {
+                        tracing::info!("[MemoryConsolidator] 增量并入后超预算（{e}），转全量压缩");
+                    }
+                }
+            } else {
+                tracing::info!(
+                    "[MemoryConsolidator] 增量整理无新增条目，转全量压缩以清空待整理区"
+                );
+            }
+        }
+
+        // ── 全量压缩（兜底 / 文件逼近上限）──────────────────────────────────
         let rewritten = router
             .generate(LLMRequest::new(
                 "memory",
@@ -213,7 +298,8 @@ impl MemoryConsolidator {
                     ChatMessage::system(MEMORY_MD_TIDY_SYSTEM_PROMPT),
                     ChatMessage::user(format!("（当前 memory.md 全文，需整理合并）\n{existing}")),
                 ],
-            ))
+            )
+            .with_character_id(self.char_id.clone()))
             .await
             .map_err(|e| format!("整理 LLM 调用失败：{e}"))?;
         let rewritten = rewritten.trim().to_string();
@@ -221,7 +307,7 @@ impl MemoryConsolidator {
             return Err("整理 LLM 返回空内容（已保留原笔记）".into());
         }
         // write_memory_md 内部校验预算上限，超限返回 Err → 保留原文件不写
-        crate::memory::memory_md::write_memory_md(&self.char_id, &rewritten)?;
+        memory_md::write_memory_md(&self.char_id, &rewritten)?;
         Ok(true)
     }
 

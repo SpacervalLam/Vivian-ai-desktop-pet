@@ -18,6 +18,7 @@ use crate::brain::json_parser::{
 use crate::cross_character::parse_any_speaker_prefix;
 use crate::error::{VivianError, VivianResult};
 use crate::pipeline::base::{Runnable, RunnableConfig};
+use crate::pipeline::decorators::is_retryable;
 use crate::pipeline::state::PipelineState;
 use crate::providers::base::{
     LLMRequest, ProviderCallOptions, StreamEvent as ProviderStreamEvent, ToolDefinition,
@@ -425,7 +426,9 @@ impl AIResponseGenerationRunnable {
                             attempt + 1,
                             e
                         );
-                        if attempt == max_retries - 1 {
+                        // 欠费 / API Key 失效 / 上下文超长属不可恢复错误，重试只会
+                        // 让失败记录翻倍（一次对话即产生 3 条），提前结束。
+                        if !is_retryable(&e) || attempt == max_retries - 1 {
                             return Err(e);
                         }
                     }
@@ -1293,6 +1296,17 @@ impl ResponseParsingRunnable {
         // 微信渠道语音消息标志
         state.voice_message = processed.voice_message;
 
+        // 记忆归因（memory_used）：只记录不展示。
+        // 有值时才打日志——绝大多数回复不带这个字段，无条件打会把日志淹掉。
+        state.memory_used = processed.memory_used.clone();
+        if !processed.memory_used.is_empty() {
+            tracing::debug!(
+                "[ResponseParsing] 本轮回复引用记忆 {} 条: {:?}",
+                processed.memory_used.len(),
+                processed.memory_used
+            );
+        }
+
         // no_reply → 不展示回复（API 调用不浪费，通过 text 置空实现）
         if state.intent == "no_reply" {
             state.text = String::new();
@@ -1578,6 +1592,7 @@ mod tests {
             intent: "no_reply".to_string(),
             response_mode: "speak".to_string(),
             voice_message: false,
+            memory_used: Vec::new(),
             tool_calls: Vec::new(),
         };
         ResponseParsingRunnable::extract_from_processed(&mut state, &processed);
@@ -1593,6 +1608,7 @@ mod tests {
             intent: "short_reply".to_string(),
             response_mode: "speak".to_string(),
             voice_message: false,
+            memory_used: Vec::new(),
             tool_calls: Vec::new(),
         };
         ResponseParsingRunnable::extract_from_processed(&mut state, &processed);
@@ -1609,6 +1625,7 @@ mod tests {
             intent: "unknown_intent".to_string(),
             response_mode: "speak".to_string(),
             voice_message: false,
+            memory_used: Vec::new(),
             tool_calls: Vec::new(),
         };
         ResponseParsingRunnable::extract_from_processed(&mut state, &processed);

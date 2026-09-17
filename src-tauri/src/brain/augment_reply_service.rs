@@ -565,7 +565,8 @@ impl AugmentReplyService {
                 ChatMessage::system(system_prompt),
                 ChatMessage::user(user_prompt),
             ];
-            match router.generate(LLMRequest::new("chat", messages)).await {
+            match router.generate(LLMRequest::new("chat", messages)
+                .with_character_id(req.char_id.clone())).await {
                 Ok(raw) => {
                     let text = raw.trim().to_string();
                     if !text.is_empty() {

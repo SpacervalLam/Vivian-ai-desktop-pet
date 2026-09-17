@@ -1,6 +1,6 @@
 {
   "name": "plugin-authoring",
-  "version": "1.0.0",
-  "description": "插件创作技能：四类贡献点（技能 / 可执行工具 / MCP server / 供应商预设）的格式约定、命名空间规则、防影子化与内置插件保护，配合 create_plugin 工具使用。",
+  "version": "1.1.0",
+  "description": "插件创作技能：技能、可执行工具、MCP server、LLM Provider 与嵌入 Provider 五类贡献点的格式约定，配合 create_plugin 使用。",
   "skills": ["skills/*.md"]
 }

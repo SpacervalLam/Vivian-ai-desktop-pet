@@ -29,6 +29,7 @@ import { FPSControls, Collider } from './anime/fpsControls';
 import { buildFurnitureColliders, buildWallColliders, buildSceneColliders, buildBoxColliders } from './anime/collider';
 import { PetAgent } from './agents/usePetAgent';
 import layoutData from './dormLayout.json';
+import { blenderFurnitureIds, loadBlenderFurniture, type FurnitureSlot } from './blenderFurniture';
 
 import { setOutlineDistanceScale, setToonKeyLight, toonGradient, makeRng } from './anime/toon';
 import { mergeByMaterial, freezeStatic } from './anime/merge';
@@ -1147,6 +1148,7 @@ export function RoomScene() {
         .map((f) => f.id)
     );
 
+    const blenderSlots: FurnitureSlot[] = [];
     console.log('[room] 开始构建家具, 总数:', (layout.furniture as FurnitureSpec[]).length);
     for (const it of layout.furniture as FurnitureSpec[]) {
       try {
@@ -1156,6 +1158,7 @@ export function RoomScene() {
         continue;
       }
       const obj = build(it);
+      if (blenderFurnitureIds.has(it.id)) blenderSlots.push({ root: obj, spec: it });
       // 标 furnitureRoot 的家具组在 buildSceneColliders 遍历里被跳过（碰撞已由 layout 尺寸盒覆盖）。
       // 仅「有尺寸的 nav 家具 + 门/窗/地毯/浴室」标 true；lifestyle/落地灯等无尺寸摆件留 false，
       // 让遍历给它们补实体碰撞。
@@ -1554,6 +1557,7 @@ export function RoomScene() {
      * GLB 是异步加载的，角色落进场景时也置一次，否则要等它走一步才有影子。
      */
     let shadowPending = true;
+    const disposeBlenderFurniture = loadBlenderFurniture(blenderSlots, () => { shadowPending = true; });
 
     const loader = new GLTFLoader();
     const agents: PetAgent[] = [];
@@ -2086,6 +2090,7 @@ export function RoomScene() {
 
     return () => {
       alive = false;
+      disposeBlenderFurniture();
       cancelAnimationFrame(raf);
       controls.dispose();
       fps.dispose();

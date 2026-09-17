@@ -27,11 +27,95 @@ use super::types::{Tool, ToolCategory, ToolDefinition, ToolScene};
 /// 字段与 system prompt 工具清单）以及 `tool_search` 的检索域都不包含它们；
 /// 执行层另有硬门兜底（防幻觉盲调 / 历史重放）。轻量沉淀（create_skill）
 /// 不在名单内，陪伴侧可直接使用。
-pub const WORK_AGENT_ONLY_TOOLS: &[&str] = &["create_tool", "create_plugin"];
+pub const WORK_AGENT_ONLY_TOOLS: &[&str] = &["create_tool", "create_plugin", "delete_plugin"];
 
 /// 判断工具是否为工作智能体专属工具
 pub fn is_work_agent_only(name: &str) -> bool {
     WORK_AGENT_ONLY_TOOLS.contains(&name)
+}
+
+/// 智能体侧别 —— 两条独立产品线（陪伴 / 工作）的区分维度。
+///
+/// 用于工具禁用状态的**分侧隔离**：同一工具在一侧被禁用不影响另一侧。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AgentSide {
+    /// 陪伴侧（agent_kind != "work"：vivian / nana / 薇薇安）
+    Companion,
+    /// 工作侧（agent_kind == "work"：编程智能体）
+    Work,
+}
+
+impl AgentSide {
+    /// 由 `ToolUseContext.agent_kind` 映射：`"work"` → 工作侧，其余 → 陪伴侧。
+    pub fn from_agent_kind(kind: &str) -> Self {
+        if kind == "work" {
+            AgentSide::Work
+        } else {
+            AgentSide::Companion
+        }
+    }
+}
+
+/// 工具归属的侧别 —— 单一真相源。
+///
+/// 由两张既有清单推导（[`WORK_AGENT_ONLY_TOOLS`] 与
+/// [`crate::brain::coding_agent::CODING_TOOLS`]），取代此前散落在三处的隐式判断：
+/// 本文件的 `is_work_agent_only` 过滤、工作侧白名单、设置页直接 dump 全量。
+/// 设置页展示、陪伴侧工具面、工作侧工具面现在都从这一个函数取侧别，
+/// 新增工具不会再出现"忘记同步某处"的不一致。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolScope {
+    /// 仅陪伴侧可用（不在工作侧白名单）
+    Companion,
+    /// 仅工作侧可用（能力进化事件：create_tool / create_plugin / delete_plugin）
+    Work,
+    /// 两侧都可用
+    Both,
+}
+
+impl ToolScope {
+    /// 序列化给前端的标识（`list_tools` 输出与设置页分区依据）
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ToolScope::Companion => "companion",
+            ToolScope::Work => "work",
+            ToolScope::Both => "both",
+        }
+    }
+
+    /// 该工具是否出现在指定侧的工具面上
+    pub fn includes(self, side: AgentSide) -> bool {
+        matches!(
+            (self, side),
+            (ToolScope::Both, _)
+                | (ToolScope::Companion, AgentSide::Companion)
+                | (ToolScope::Work, AgentSide::Work)
+        )
+    }
+}
+
+/// 推导工具归属侧别（单一真相源）。
+pub fn tool_scope(name: &str) -> ToolScope {
+    if WORK_AGENT_ONLY_TOOLS.contains(&name) {
+        ToolScope::Work
+    } else if crate::brain::coding_agent::CODING_TOOLS.contains(&name) {
+        ToolScope::Both
+    } else {
+        ToolScope::Companion
+    }
+}
+
+/// 工作侧不可禁用的只读基座工具。
+///
+/// 禁用后工作智能体连"看看项目结构 / 读一个文件"都做不到，任何编程任务都会
+/// 立即失败——这几乎不会是用户的真实意图，故锁定。**可变更类**工具
+/// （run_command / write_file / edit_file）不在此列：出于安全考虑关掉它们是
+/// 用户的合法开关，不做限制。
+pub const WORK_LOCKED_TOOLS: &[&str] = &["read_file", "list_dir", "grep_search"];
+
+/// 判断某侧的工具是否被锁定（锁定 = 不可禁用，`is_tool_disabled` 恒为 false）。
+pub fn is_tool_locked(name: &str, side: AgentSide) -> bool {
+    matches!(side, AgentSide::Work) && WORK_LOCKED_TOOLS.contains(&name)
 }
 
 /// 工具系统 - 整合所有工具组件的统一入口
@@ -69,11 +153,13 @@ pub struct ToolSystem {
     /// `ToolScene::from_full_context` 据此判断 `has_recent_tool_use`，
     /// 进而决定注入 `Task` 还是 `Chat` 场景的工具集。
     last_tool_call_at: RwLock<Option<Instant>>,
-    /// 用户禁用的工具名集合（来自 `config.tools.disabled_tools`）
+    /// 用户禁用的工具名，按侧别隔离（来自 `config.tools.disabled_tools.companion` / `.work`）
     ///
-    /// 禁用的工具不注入 LLM 工具列表（prompt 文本 / FC tools / 编程智能体 schema），
-    /// 执行入口直接拒绝。`list_tools`（设置界面用）不受影响。
-    disabled_tools: RwLock<HashSet<String>>,
+    /// 分侧的意义：陪伴侧与工作侧是两条独立产品线，同一工具（如 web_search）
+    /// 在一侧禁用不应影响另一侧。禁用的工具不注入**该侧**的 LLM 工具列表
+    /// （陪伴侧 `list_tools_for_scene` / 工作侧 `get_tool_schemas`），执行入口按
+    /// `agent_kind` 映射出的侧别直接拒绝。`list_tools`（设置界面用）不受影响。
+    disabled_tools: RwLock<HashMap<AgentSide, HashSet<String>>>,
     /// Cordis 运行时上下文引用（策略缝 guard / post-execute 的分发目标）。
     ///
     /// 由 AppState 初始化时注入；用于 `execute_tool_use` 在 pre/post 阶段
@@ -97,7 +183,7 @@ impl ToolSystem {
             app_handle: RwLock::new(None),
             confirmation_timeout_secs: RwLock::new(600),
             last_tool_call_at: RwLock::new(None),
-            disabled_tools: RwLock::new(HashSet::new()),
+            disabled_tools: RwLock::new(HashMap::new()),
             policy_ctx: RwLock::new(None),
         }
     }
@@ -125,21 +211,38 @@ impl ToolSystem {
             app_handle: RwLock::new(None),
             confirmation_timeout_secs: RwLock::new(confirmation_timeout_secs.max(10)),
             last_tool_call_at: RwLock::new(None),
-            disabled_tools: RwLock::new(HashSet::new()),
+            disabled_tools: RwLock::new(HashMap::new()),
             policy_ctx: RwLock::new(None),
         }
     }
 
-    /// 更新用户禁用的工具名集合（设置保存 / 启动加载时调用）
+    /// 更新用户禁用的工具名（设置保存 / 启动加载时调用）
     ///
-    /// 直接整体替换：设置界面按 `config.tools.disabled_tools` 全量写入。
-    pub fn set_disabled_tools(&self, names: Vec<String>) {
-        *self.disabled_tools.write() = names.into_iter().collect();
+    /// 直接整体替换：设置界面按 `config.tools.disabled_tools` 的
+    /// `companion` / `work` 两个列表全量写入对应侧。
+    pub fn set_disabled_tools(&self, companion: Vec<String>, work: Vec<String>) {
+        let mut map = HashMap::new();
+        map.insert(
+            AgentSide::Companion,
+            companion.into_iter().collect::<HashSet<_>>(),
+        );
+        map.insert(AgentSide::Work, work.into_iter().collect::<HashSet<_>>());
+        *self.disabled_tools.write() = map;
     }
 
-    /// 查询工具是否被用户禁用
-    pub fn is_tool_disabled(&self, name: &str) -> bool {
-        self.disabled_tools.read().contains(name)
+    /// 查询工具在指定侧是否被用户禁用。
+    ///
+    /// 锁定工具（如工作侧 read_file）恒为 false ——
+    /// 它们不可被禁用，配置里即使残留对应条目也不生效。
+    pub fn is_tool_disabled(&self, name: &str, side: AgentSide) -> bool {
+        if is_tool_locked(name, side) {
+            return false;
+        }
+        self.disabled_tools
+            .read()
+            .get(&side)
+            .map(|set| set.contains(name))
+            .unwrap_or(false)
     }
 
     /// 注入 Cordis 运行时上下文（启用 guard / post-execute 策略缝）。
@@ -293,6 +396,42 @@ impl ToolSystem {
         }
     }
 
+    /// 注册工具别名：`from` 会解析到 `to`。
+    ///
+    /// 用途是**兼容历史名字**——工具改名后，已经沉淀在 few-shot 示例、用户配置、
+    /// 历史对话里的旧名字仍然能命中（否则模型照示例发旧名会直接查不到工具）。
+    ///
+    /// ⚠️ 别名只在 `find_tool` 的**第二级**匹配生效，且**不做词序重排**：
+    /// `normalize_tool_name` 只去分隔符，`set_wallpaper`→`setwallpaper` 与
+    /// `wallpaper_set`→`wallpaperset` 是两个不同的键，指望规范化兜底是不成立的。
+    ///
+    /// 返回是否注册成功（`to` 未注册时返回 false，避免留下指向空目标的悬空别名）。
+    pub fn register_alias(&self, from: &str, to: &str) -> bool {
+        let from = from.trim();
+        let to = to.trim();
+        if from.is_empty() || to.is_empty() || from == to {
+            return false;
+        }
+        if !self.tools.read().contains_key(to) {
+            tracing::warn!("注册别名失败：目标工具 '{}' 未注册（别名 '{}' 被忽略）", to, from);
+            return false;
+        }
+        self.aliases.write().insert(from.to_string(), to.to_string());
+        tracing::debug!("注册工具别名: {} → {}", from, to);
+        true
+    }
+
+    /// 注册一批别名，返回成功注册的数量。
+    ///
+    /// 传 `&[("旧名", "真名")]`。单项失败只 warn 不中断——别名是兼容性兜底，
+    /// 不该因为一个目标工具没注册就把其余别名一起丢掉。
+    pub fn register_aliases(&self, pairs: &[(&str, &str)]) -> usize {
+        pairs
+            .iter()
+            .filter(|(from, to)| self.register_alias(from, to))
+            .count()
+    }
+
     /// 仅当当前注册项仍归指定 owner 时注销工具。
     pub fn unregister_tool_if_owner(&self, name: &str, owner: &str) -> bool {
         let mut tools = self.tools.write();
@@ -386,20 +525,19 @@ impl ToolSystem {
     /// 注入 prompt 作为软提示，引导但不强制 LLM 的工具选择。
     /// 延迟加载由 `should_defer` 控制（在 `tool_call_manager` 中分流）。
     ///
-    /// 用户在设置中禁用的工具（`config.tools.disabled_tools`）在此过滤，
-    /// 不进入 LLM 的工具列表。
+    /// 陪伴侧工具面：只返回归属陪伴侧的 [`ToolScope`]（`Companion` / `Both`），
+    /// 并按**陪伴侧**的禁用集合过滤（`config.tools.disabled_tools.companion`）。
     ///
-    /// 例外：`WORK_AGENT_ONLY_TOOLS` 中的工具（如 create_tool）是能力进化
-    /// 事件，执行主体统一收口到工作智能体——陪伴侧所有经 `ToolScene` 暴露
-    /// 的工具面（API tools 字段 / system prompt 工具清单 / 延迟工具名列表）
-    /// 都不含它们。工作智能体不走本方法（用 `CODING_TOOLS` 白名单），不受影响。
+    /// 侧别判定统一走 [`tool_scope`]（单一真相源），不再在本方法内硬编码
+    /// "排除 WORK_AGENT_ONLY_TOOLS"。工作智能体不走本方法（用 `CODING_TOOLS`
+    /// 白名单 ∩ `get_tool_schemas`），其禁用集合是独立的 `...work`，
+    /// 两侧互不影响。
     pub fn list_tools_for_scene(&self, _scene: ToolScene) -> Vec<Arc<dyn Tool>> {
         let tools = self.tools.read();
-        let disabled = self.disabled_tools.read();
         tools
             .values()
-            .filter(|t| !disabled.contains(t.name()))
-            .filter(|t| !is_work_agent_only(t.name()))
+            .filter(|t| tool_scope(t.name()).includes(AgentSide::Companion))
+            .filter(|t| !self.is_tool_disabled(t.name(), AgentSide::Companion))
             .map(Arc::clone)
             .collect()
     }
@@ -430,16 +568,16 @@ impl ToolSystem {
         self.categories.read().keys().copied().collect()
     }
 
-    /// 获取所有工具的 schema 定义
+    /// 获取所有工具的 schema 定义（**工作侧**视角）。
     ///
-    /// 用户禁用的工具（`config.tools.disabled_tools`）被过滤
-    /// （编程智能体的 FC tools 字段由此生成）。
+    /// 按工作侧的禁用集合（`config.tools.disabled_tools.work`）过滤；
+    /// 编程智能体的 FC tools 字段由此生成（再与 `CODING_TOOLS` 白名单取交集）。
+    /// 陪伴侧的过滤在 [`Self::list_tools_for_scene`] 中按陪伴侧集合独立进行。
     pub fn get_tool_schemas(&self) -> Vec<ToolDefinition> {
         let tools = self.tools.read();
-        let disabled = self.disabled_tools.read();
         tools
             .values()
-            .filter(|t| !disabled.contains(t.name()))
+            .filter(|t| !self.is_tool_disabled(t.name(), AgentSide::Work))
             .map(|t| t.to_definition())
             .collect()
     }
@@ -517,4 +655,138 @@ fn rebuild_normalized_index(tools: &HashMap<String, Arc<dyn Tool>>) -> HashMap<S
             .or_insert_with(|| name.clone());
     }
     index
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use serde_json::json;
+
+    // 注意：`super::*` 只带来 registry 模块自己 `use` 进来的名字
+    // （Tool / ToolCategory / ToolDefinition / ToolScene），`tools/mod.rs` 的
+    // 重导出**不在**其中——这几个必须显式按 `types` 路径引入。
+    use crate::tools::types::{PermissionResult, ToolResult, ToolRiskTier, ToolUseContext, ValidationResult};
+
+    /// 夹具：只有名字重要，其余全走最小实现。
+    struct NamedTool(&'static str);
+
+    #[async_trait]
+    impl Tool for NamedTool {
+        fn name(&self) -> &str {
+            self.0
+        }
+
+        fn description(&self) -> &str {
+            "registry test tool"
+        }
+
+        fn parameters_schema(&self) -> Value {
+            json!({"type": "object"})
+        }
+
+        async fn validate_input(
+            &self,
+            _input: &Value,
+            _context: &ToolUseContext,
+        ) -> ValidationResult {
+            ValidationResult::success(None)
+        }
+
+        async fn check_permissions(
+            &self,
+            _input: &Value,
+            _context: &ToolUseContext,
+        ) -> PermissionResult {
+            PermissionResult::allow()
+        }
+
+        async fn call(&self, _args: Value, _context: &ToolUseContext) -> ToolResult {
+            ToolResult::success(json!({}))
+        }
+
+        fn is_read_only(&self) -> bool {
+            false
+        }
+
+        fn category(&self) -> ToolCategory {
+            ToolCategory::System
+        }
+
+        fn risk(&self) -> ToolRiskTier {
+            ToolRiskTier::FsRead
+        }
+    }
+
+    fn system_with(names: &[&'static str]) -> ToolSystem {
+        let ts = ToolSystem::new();
+        for n in names {
+            ts.register_tool(Arc::new(NamedTool(n)));
+        }
+        ts
+    }
+
+    /// 别名表必须能将改名后的旧名解析到新名——这是它存在的唯一理由。
+    /// 若仅有 `retain`/`clear` 而无注册调用点，整张表是死的，旧名查不到工具，
+    /// 且该失效编译器不报、无测试覆盖。
+    #[test]
+    fn alias_resolves_a_renamed_tool() {
+        let ts = system_with(&["wallpaper_set"]);
+        assert!(ts.find_tool("set_wallpaper").is_none(), "未注册别名前旧名不该可解析");
+
+        assert!(ts.register_alias("set_wallpaper", "wallpaper_set"));
+        let tool = ts.find_tool("set_wallpaper").expect("别名应能解析到真实工具");
+        assert_eq!(tool.name(), "wallpaper_set");
+        assert!(ts.has_tool("set_wallpaper"));
+    }
+
+    /// 规范化匹配**不能**替代别名表：它只去分隔符、不重排词序。
+    ///
+    /// 这条是上一个测试的前提说明——`set_wallpaper` → `setwallpaper`，
+    /// `wallpaper_set` → `wallpaperset`，两者不等。所以不能指望规范化兜底。
+    #[test]
+    fn normalization_cannot_substitute_for_an_alias() {
+        assert_ne!(
+            normalize_tool_name("set_wallpaper"),
+            normalize_tool_name("wallpaper_set")
+        );
+        // 但纯分隔符差异仍由规范化兜住
+        assert_eq!(
+            normalize_tool_name("Wallpaper-Set"),
+            normalize_tool_name("wallpaper_set")
+        );
+    }
+
+    /// 目标没注册时必须**拒绝**注册别名，否则会埋下一个"看着有映射、
+    /// 实际解析不到"的哑弹。
+    #[test]
+    fn alias_to_unregistered_target_is_refused() {
+        let ts = system_with(&["wallpaper_set"]);
+        assert!(!ts.register_alias("set_wallpaper", "no_such_tool"));
+        assert!(ts.find_tool("set_wallpaper").is_none());
+    }
+
+    #[test]
+    fn alias_rejects_empty_and_self_reference() {
+        let ts = system_with(&["wallpaper_set"]);
+        assert!(!ts.register_alias("", "wallpaper_set"));
+        assert!(!ts.register_alias("wallpaper_set", ""));
+        assert!(!ts.register_alias("wallpaper_set", "wallpaper_set"));
+        assert!(!ts.register_alias("  ", "wallpaper_set"));
+    }
+
+    /// 批量注册只统计成功项：一个目标没注册不该把其余别名一起丢掉。
+    #[test]
+    fn batch_alias_registration_counts_only_successes() {
+        let ts = system_with(&["wallpaper_set", "list_dir"]);
+        let n = ts.register_aliases(&[
+            ("set_wallpaper", "wallpaper_set"),
+            ("list_directory", "list_dir"),
+            ("grep", "grep_search"), // 目标未注册 → 应被跳过
+        ]);
+        assert_eq!(n, 2);
+        assert!(ts.find_tool("set_wallpaper").is_some());
+        assert!(ts.find_tool("list_directory").is_some());
+        assert!(ts.find_tool("grep").is_none());
+    }
 }

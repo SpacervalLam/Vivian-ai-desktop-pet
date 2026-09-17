@@ -712,7 +712,7 @@ impl Tool for WallpaperSetTool {
     }
 
     async fn check_permissions(&self, _input: &Value, _ctx: &ToolUseContext) -> PermissionResult {
-        PermissionResult::allow()
+        PermissionResult::ask("更换桌面壁纸需要用户确认")
     }
 
     async fn call(&self, args: Value, _ctx: &ToolUseContext) -> ToolResult {
@@ -943,7 +943,7 @@ impl Tool for WallpaperSetTool {
 
     /// 权限风险等级：执行进程或改变系统状态
     fn risk(&self) -> ToolRiskTier {
-        ToolRiskTier::Shell
+        ToolRiskTier::FsWrite
     }
 
     // 长尾工具：延迟加载，需通过 tool_search 唤起
@@ -1197,7 +1197,7 @@ impl Tool for WallpaperControlTool {
     }
 
     async fn check_permissions(&self, _input: &Value, _ctx: &ToolUseContext) -> PermissionResult {
-        PermissionResult::allow()
+        PermissionResult::ask("控制壁纸（暂停/停止/静音等）需要用户确认")
     }
 
     async fn call(&self, args: Value, _ctx: &ToolUseContext) -> ToolResult {
@@ -1468,7 +1468,7 @@ impl Tool for WallpaperControlTool {
 
     /// 权限风险等级：执行进程或改变系统状态
     fn risk(&self) -> ToolRiskTier {
-        ToolRiskTier::Shell
+        ToolRiskTier::FsWrite
     }
 
     // 长尾工具：延迟加载，需通过 tool_search 唤起

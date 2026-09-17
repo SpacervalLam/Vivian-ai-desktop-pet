@@ -25,9 +25,11 @@ import {
   type ChibiAnimationSpec,
   type ChibiDirection,
 } from '../chibi/motionRegistry';
+import { planAmbientWalk } from '../chibi/walkPlan';
+import { runSlide } from '../chibi/slideTrack';
 import './ChibiPetCanvas.css';
 
-export type ChibiInteraction = 'single_click' | 'double_click';
+export type ChibiInteraction = 'single_click' | 'double_click' | 'rough_click';
 
 /** 词表里声明过的动作名；pose 状态即动作名，不再单独维护一份枚举。 */
 type ChibiPose = string;
@@ -39,8 +41,45 @@ const CAST_SPEC = animation('cast');
 const IDLE_SPEC = pose('idle');
 const IDLE_SLOT = IDLE_SPEC.slot;
 
-const WALK_MIN_DELAY_MS = 7_000;
-const WALK_DELAY_RANGE_MS = 5_000;
+/**
+ * 自主漫步的静息间隔（ms）：一趟走完至少歇这么久再起步。
+ *
+ * 上一版是固定 [7s, 12s)、平均每 9.5s 起步一次——间隔只由常数决定、与上下文无关，
+ * 于是它既不是对「安静待着」的表达，也不是对「该有动静」的回应，只是节拍器。
+ * 现在换成一段足够长的静息期；长距离漫步本身占用更久（时长由距离推），
+ * 一趟远路自然把下一次推得更后。
+ */
+const WALK_REST_MIN_MS = 48_000;
+const WALK_REST_RANGE_MS = 72_000;
+
+/** 因被占用（说话/全屏/避让/被按住）而错过时点时的重试间隔（ms），比静息期短得多。 */
+const WALK_BLOCKED_RETRY_MIN_MS = 8_000;
+const WALK_BLOCKED_RETRY_RANGE_MS = 6_000;
+
+/**
+ * 上线后第一趟漫步的等待（ms）。
+ *
+ * 不直接套用静息期：静息期的语义是「刚走过一趟，歇一会儿」，上线时并不成立——
+ * 真按 48–120s 算，用户打开桌宠后将近两分钟看不到它挪窝，第一印象偏"死"。
+ */
+const WALK_STARTUP_MIN_MS = 10_000;
+const WALK_STARTUP_RANGE_MS = 15_000;
+
+/**
+ * 单次漫步的距离区间（px）。
+ *
+ * 上一版是 [58, 122) 的均匀分布：区间本来就窄，落在屏幕上不管抽到哪一头都像"同一小步"；
+ * 而且时长是另一根独立的随机数（[2400, 3300) ms），于是"走 58px"和"走 120px"花一样
+ * 的时间——位移与时长脱钩，速度纯随机。现在时长不再是独立随机数，由 walkPlan 按图集
+ * 原生步速从距离反推（走多远就花多久），距离本身则在对数尺度上取样（见 walkOnce）：
+ * 多数是几步的短挪动，偶尔来一趟横跨半屏的长溜达，不存在"档位"台阶。
+ */
+const WALK_DISTANCE_MIN_PX = 140;
+const WALK_DISTANCE_MAX_PX = 900;
+
+/** 桌宠与屏幕边缘保持的间隙（px）：贴着边站会显得被裁掉一半。 */
+const EDGE_MARGIN_PX = 8;
+
 const TURN_IN_FRAMES = Array.from({ length: TURN_SPEC.frames }, (_, index) => index);
 const TURN_OUT_FRAMES = [...TURN_IN_FRAMES].reverse();
 const BLINK_FRAMES = Array.from({ length: BLINK_SPEC.frames }, (_, index) => index);
@@ -50,6 +89,54 @@ const BLINK_MIN_DELAY_MS = 3_200;
 const BLINK_DELAY_RANGE_MS = 4_300;
 /** 双击/单击等交互让动作停留的默认时长。 */
 const POSE_HOLD_MS = 900;
+
+/**
+ * 单击（摸头）的反应池：`[动作名, 权重]`，空串代表「这一下不播表情」。
+ *
+ * 早先是写死的 `happy`——戳十次看十张一样的脸，反馈就退化成按钮了。现在变成一排
+ * 「被戳一下」可能有的态度：被摸高兴了、得意、琢磨这是什么、或者懒得理你。权重不等
+ * 是刻意的：`happy` 不再是必然，但仍是被摸头最自然的那一个；`smug` 稍多给一点，
+ * 因为随机池里最需要的是「和上一次不一样」。空串要占够比例，否则池子退化成
+ * 「每次都有表情」——那只是把单调从一张脸换成了四张脸。
+ */
+const TAP_REACTIONS: ReadonlyArray<readonly [string, number]> = [
+  ['smug', 4],
+  ['think', 3],
+  ['happy', 3],
+  ['', 3],
+];
+
+/**
+ * 戳烦了的判定。
+ *
+ * 点击本身不携带力度，能测的只有次数和时间——所以「太频繁」和「太粗暴」不是两套
+ * 规则，而是同一个账本上的两种计法：每戳一下记一笔，与上一戳贴得极近（猛戳）再记一笔。
+ * 只统计最近 {@link TAP_ANNOY_WINDOW_MS} 内的账，于是慢慢戳永远攒不满，停手就自动清账。
+ *
+ * 攒够 {@link TAP_ANNOY_THRESHOLD} 就生气：清空账本、进入气头上，这期间怎么戳都是生气
+ * （每戳一次把气头续期），停手满 {@link TAP_ANNOY_HOLD_MS} 才消气、从零重新攒。
+ */
+const TAP_ANNOY_WINDOW_MS = 5_000;
+/** 两戳间隔短于此值即视为「猛戳」，额外记一笔。 */
+const TAP_ROUGH_INTERVAL_MS = 350;
+const TAP_ANNOY_THRESHOLD = 7;
+const TAP_ANNOY_HOLD_MS = 2_500;
+
+/**
+ * 从反应池里按权重抽一个动作名，空串表示这次不播表情。
+ *
+ * 不播是**主动的**结果而非兜底：这一下只是被戳了，角色该干嘛干嘛去，
+ * 所以调用方拿到空串时什么都不做，让待机与自然眨眼照常继续。
+ */
+function pickTapReaction(): string {
+  const total = TAP_REACTIONS.reduce((sum, [, weight]) => sum + weight, 0);
+  let roll = Math.random() * total;
+  for (const [motion, weight] of TAP_REACTIONS) {
+    roll -= weight;
+    if (roll < 0) return motion;
+  }
+  return '';
+}
 
 const wait = (durationMs: number) => new Promise<void>((resolve) => {
   window.setTimeout(resolve, durationMs);
@@ -68,11 +155,24 @@ export interface ChibiPetCanvasHandle {
   previewWalk: (direction: 'left' | 'right') => void;
   previewTurn: (direction: 'left' | 'right') => void;
   previewBlink: () => void;
-  /** 智能避让开场：快速转身面向 direction，转身结束 resolve（false 表示被打断）。 */
+  /**
+   * 智能避让开场：快速转身面向 direction，转身结束 resolve（false 表示被打断）。
+   *
+   * 结束后**停在转身末帧**（侧身面向移动方向），不回落基准姿态——回落会让「转身完成」
+   * 与「起步走动」之间闪一帧正面待机。由调用方接着播走动（`playWalk`）或回正
+   * （`playTurnBack`）。
+   */
   playTurn: (direction: 'left' | 'right') => Promise<boolean>;
   /**
+   * 智能避让收尾：从侧身反向转回正面，随后回落到心情基调。false 表示被打断。
+   *
+   * 与 `playTurn` 配对，构成位移前后的转身过渡；走动未播（纵向位移）时不必调用。
+   */
+  playTurnBack: () => Promise<boolean>;
+  /**
    * 智能避让用：按给定的帧数与帧间隔播放走动，走到收尾时 resolve。
-   * frames 由调用方按距离分档、恒为图集周期整数倍；false 表示被新动作或用户按压打断。
+   * frames / frameDelayMs 由 `planSmartMove` 推导，二者相乘即窗口位移时长；
+   * false 表示被新动作或用户按压打断。
    */
   playWalk: (direction: 'left' | 'right', frames: number, frameDelayMs: number) => Promise<boolean>;
   /** 长按进度环出现时开始"施法召唤窗口"动画：durationMs 内正向播完（与进度环填充同步）；不被 pressed 状态打断。 */
@@ -90,6 +190,10 @@ export interface ChibiPetCanvasProps {
   onModelClick?: () => void;
   mouseFollowMode?: 'always' | 'window' | 'off';
   onScaleChange?: (scale: number) => void;
+  /**
+   * 一次点击手势的结果：单击、双击，或「戳烦了」（{@link TAP_ANNOY_THRESHOLD}）。
+   * 前两者由点击节奏区分，`rough_click` 由画布内的戳烦了账本判定，三者互斥。
+   */
   onInteraction?: (interaction: ChibiInteraction) => void;
   onOpenQuickChat?: () => void;
   /** Kept compatible with ModelCanvas while stage walking is coordinated above the renderer. */
@@ -140,6 +244,10 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
     const sequenceTokenRef = useRef(0);
     const poseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const clickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    /** 戳烦了账本：最近这几次点击的时刻（只保留 TAP_ANNOY_WINDOW_MS 内的）。 */
+    const tapLogRef = useRef<number[]>([]);
+    /** 气头上到什么时候；早于此值前的点击都算「还没消气」。 */
+    const annoyedUntilRef = useRef(0);
     const scaleRef = useRef(1);
     const suppressClickUntilRef = useRef(0);
     /** 心情基调格位：一次性动作播完回落到它，而不是硬编码 idle。由后端 mood_tone 下发。 */
@@ -290,7 +398,8 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
     const playTurn = useCallback(async (direction: ChibiDirection): Promise<boolean> => {
       clearPoseTimer();
       const token = ++sequenceTokenRef.current;
-      const completed = await playFrames(
+      // 不 returnToTone：停在转身末帧（侧身），由调用方接走动或回正。
+      return playFrames(
         TURN_SPEC,
         TURN_IN_FRAMES,
         TURN_SPEC.durations,
@@ -298,26 +407,56 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
         TURN_SPEC.name,
         direction,
       );
+    }, [clearPoseTimer, playFrames]);
+
+    /** 智能避让收尾回身：末帧起步倒放回正面，播完回落到心情基调。 */
+    const playTurnBack = useCallback(async (): Promise<boolean> => {
+      clearPoseTimer();
+      const token = ++sequenceTokenRef.current;
+      // 不传 direction：沿用走动时的朝向，图集方向与转身前保持一致
+      const completed = await playFrames(
+        TURN_SPEC,
+        TURN_OUT_FRAMES,
+        TURN_OUT_DURATIONS,
+        token,
+        TURN_SPEC.name,
+      );
       if (completed) returnToTone(token);
       return completed;
     }, [clearPoseTimer, playFrames, returnToTone]);
+
+    /**
+     * 起步走动：写好推进参数并切到走动姿态，返回本次走动的会话代号与「播完」的承诺。
+     *
+     * 帧数与帧间隔都由调用方按 walkPlan 算好（frames × frameDelayMs 即窗口滑动时长），
+     * 这里只负责推进——于是腿和窗口收尾同时发生。
+     *
+     * 会话代号要露出来，是因为自主漫步得和窗口滑动**并行**跑：它必须自己判断这次走动
+     * 有没有被别的动作（说话/表情/用户按压）接过——token 变了就该当帧停下窗口。
+     */
+    const beginWalk = useCallback((
+      direction: ChibiDirection,
+      frames: number,
+      frameDelayMs: number,
+    ): { token: number; done: Promise<boolean> } => {
+      clearPoseTimer();
+      const token = ++sequenceTokenRef.current;
+      walkTargetFramesRef.current = frames > 0 ? frames : null;
+      walkFrameDelayMsRef.current = frameDelayMs > 0 ? frameDelayMs : null;
+      setWalkDirection(direction);
+      setActivePose(WALK_SPEC.name);
+      // 帧数不再限定为图集周期的整数倍（见 walkPlan）：可能停在任意一格，紧接着的
+      // playTurnBack 会立刻换掉这一格，所以不会留下「抬腿到一半」的定格。
+      const done = wait(Math.max(0, frames) * Math.max(0, frameDelayMs))
+        .then(() => sequenceTokenRef.current === token && !pressedRef.current);
+      return { token, done };
+    }, [clearPoseTimer, setActivePose]);
 
     const playWalk = useCallback(async (
       direction: ChibiDirection,
       frames: number,
       frameDelayMs: number,
-    ): Promise<boolean> => {
-      clearPoseTimer();
-      const token = ++sequenceTokenRef.current;
-      // 帧数与帧间隔都由调用方按「距离分档 + 总时长反推」算好并限幅，这里只负责推进。
-      walkTargetFramesRef.current = frames > 0 ? frames : null;
-      walkFrameDelayMsRef.current = frameDelayMs > 0 ? frameDelayMs : null;
-      setWalkDirection(direction);
-      setActivePose(WALK_SPEC.name);
-      // 帧数恒为图集周期的整数倍，播满即停在第一格，不会留一个抬腿到一半的姿势。
-      await wait(Math.max(0, frames) * Math.max(0, frameDelayMs));
-      return sequenceTokenRef.current === token && !pressedRef.current;
-    }, [clearPoseTimer, setActivePose]);
+    ): Promise<boolean> => beginWalk(direction, frames, frameDelayMs).done, [beginWalk]);
 
     // 长按"施法召唤窗口"：与进度环同步的正向播放 + 取消倒放。
     // 会话（token/当前帧/缩放后帧时长）记在 ref，取消/完成据此从当前帧接续；
@@ -428,11 +567,12 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
       previewTurn,
       previewBlink,
       playTurn,
+      playTurnBack,
       playWalk,
       startCast,
       cancelCast,
       stopCast,
-    }), [applyMotion, cancelCast, clearPoseTimer, onScaleChange, previewBlink, previewTurn, previewWalk, returnToTone, startCast, stopCast, playTurn, playWalk]);
+    }), [applyMotion, cancelCast, clearPoseTimer, onScaleChange, previewBlink, previewTurn, previewWalk, returnToTone, startCast, stopCast, playTurn, playTurnBack, playWalk]);
 
     // 动作图集在首次真正播放前预取：切换到走动/表情时不必等图集下载。
     //
@@ -483,8 +623,8 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
       const frameDelay = walkFrameDelayMsRef.current;
       const targetFrames = walkTargetFramesRef.current;
       const advance = (current: number, shown: number) => {
-        // 指定了帧数时播满即停。调用方给的帧数是图集周期的整数倍，所以停在第一格；
-        // 若这个约束被破坏，角色会停在抬腿到一半的格子上，切回基准姿态时像腿突然落地。
+        // 指定了帧数时播满即停。帧数由位移时长与帧间隔推导（不保证是周期的整数倍），
+        // 停在哪一格都有可能；紧随其后的回身动画会立即接管这一格。
         if (targetFrames != null && shown >= targetFrames) return;
         timer = window.setTimeout(() => {
           if (cancelled) return;
@@ -621,105 +761,187 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
       if (!ambientMotionEnabled || previewMode) return undefined;
       let cancelled = false;
       let timer: number | null = null;
-      const schedule = () => {
-        if (!cancelled) timer = window.setTimeout(() => void walkOnce(), WALK_MIN_DELAY_MS + Math.random() * WALK_DELAY_RANGE_MS);
+
+      /** 被占用（说话/全屏/避让/被按住）时短暂退避后重试，不消耗静息期。 */
+      const scheduleRetry = () => {
+        if (cancelled) return;
+        if (timer !== null) window.clearTimeout(timer);
+        timer = window.setTimeout(
+          () => void walkOnce(),
+          WALK_BLOCKED_RETRY_MIN_MS + Math.random() * WALK_BLOCKED_RETRY_RANGE_MS,
+        );
       };
+
+      /**
+       * 走完一趟后的静息。被占用期间不排静息期，所以这里的等待只发生在「刚走过」
+       * 或「主动决定不走」之后，语义干净：起点固定，间隔可控。
+       */
+      const scheduleRest = () => {
+        if (cancelled) return;
+        if (timer !== null) window.clearTimeout(timer);
+        timer = window.setTimeout(
+          () => void walkOnce(),
+          WALK_REST_MIN_MS + Math.random() * WALK_REST_RANGE_MS,
+        );
+      };
+
       const walkOnce = async () => {
         if (
           cancelled || pressedRef.current || poseNameRef.current !== 'idle' ||
           positioningCoordinator.fullscreenHidden || positioningCoordinator.fullscreenInFlight ||
           positioningCoordinator.smartPositioningInFlight || positioningCoordinator.ambientMoveInFlight
         ) {
-          schedule();
+          scheduleRetry();
           return;
         }
         positioningCoordinator.ambientMoveInFlight = true;
-        try {
-          const windowHandle = getCurrentWindow();
+        // 只有「被占用」才值得重试；能走到判断这一步说明是主动决定不走，按静息期处理。
+        let retry = false;
+        try {          const windowHandle = getCurrentWindow();
           const [position, size, monitor] = await Promise.all([
             windowHandle.outerPosition(),
             windowHandle.outerSize(),
             currentMonitor(),
           ]);
-          if (!monitor || cancelled) return;
-          const minX = monitor.position.x + 8;
-          const maxX = monitor.position.x + monitor.size.width - size.width - 8;
+          if (cancelled) return;
+          if (!monitor) {
+            retry = true;
+            return;
+          }
+
+          const minX = monitor.position.x + EDGE_MARGIN_PX;
+          const maxX = monitor.position.x + monitor.size.width - size.width - EDGE_MARGIN_PX;
+          /** 朝这个方向还剩多少可走空间（可能为负：桌宠已在边界外）。 */
+          const roomFor = (dir: number) => (dir > 0 ? maxX - position.x : position.x - minX);
+
           let direction = Math.random() < 0.5 ? -1 : 1;
-          if (position.x < minX + 90) direction = 1;
-          if (position.x > maxX - 90) direction = -1;
-          const targetX = Math.max(minX, Math.min(maxX, position.x + direction * (58 + Math.random() * 62)));
-          if (Math.abs(targetX - position.x) < 18) return;
-          const nextDirection: ChibiDirection = direction < 0 ? 'left' : 'right';
-          const token = ++sequenceTokenRef.current;
-          const turned = await playFrames(
-            TURN_SPEC,
-            TURN_IN_FRAMES,
-            TURN_SPEC.durations,
-            token,
-            TURN_SPEC.name,
-            nextDirection,
+          // 贴着边就朝里走；两边都放不下一个完整步长（屏幕比桌宠还窄、多屏错位），
+          // 这一趟直接放弃——硬塞出来的位移会比转身动画还短，只是徒劳地抖一下。
+          if (roomFor(direction) < WALK_DISTANCE_MIN_PX) direction = -direction;
+          const room = roomFor(direction);
+          if (room < WALK_DISTANCE_MIN_PX) return;
+
+          // 距离在对数尺度上取样：多数落在短端（几步就到），长距离偶尔出现，
+          // 且连续可辨——不是"58px 档 / 120px 档"这种台阶。再按可用空间截断。
+          const distance = Math.min(
+            room,
+            WALK_DISTANCE_MIN_PX *
+              Math.pow(WALK_DISTANCE_MAX_PX / WALK_DISTANCE_MIN_PX, Math.random()),
           );
+          const targetX = Math.max(
+            minX,
+            Math.min(maxX, Math.round(position.x + direction * distance)),
+          );
+          // 朝向必须由**实际**位移定，而不是抽签的方向：贴边截断后两者可能反号。
+          const dx = targetX - position.x;
+          if (Math.abs(dx) < WALK_DISTANCE_MIN_PX) return;
+
+          // 时长与步数都由距离推（walkPlan）：走多远就花多久，腿摆一格地面挪一格。
+          const plan = planAmbientWalk(dx);
+          if (!plan.walking) return;
+          const nextDirection: ChibiDirection = dx < 0 ? 'left' : 'right';
+
+          const turned = await playTurn(nextDirection);
           if (!turned || cancelled) return;
-          setActivePose(WALK_SPEC.name);
-          const duration = 2_400 + Math.random() * 900;
-          const steps = 48;
-          for (let step = 1; step <= steps; step += 1) {
-            if (cancelled || pressedRef.current || sequenceTokenRef.current !== token) break;
-            const progress = step / steps;
-            const eased = progress < 0.5
-              ? 2 * progress * progress
-              : 1 - Math.pow(-2 * progress + 2, 2) / 2;
-            await invoke('set_window_position', {
-              x: Math.round(position.x + (targetX - position.x) * eased),
-              y: position.y,
-            }).catch(() => {});
-            if (step < steps) await new Promise((resolve) => setTimeout(resolve, duration / steps));
-          }
-          if (!cancelled && !pressedRef.current && sequenceTokenRef.current === token) {
-            await playFrames(
-              TURN_SPEC,
-              TURN_OUT_FRAMES,
-              TURN_OUT_DURATIONS,
-              token,
-              TURN_SPEC.name,
-            );
-          }
-          if (!cancelled) returnToTone(token);
+
+          // 走动与窗口滑动并行、共用同一条时长轴（frames × frameDelayMs === durationMs）。
+          const walk = beginWalk(nextDirection, plan.frames, plan.frameDelayMs);
+          const slid = await runSlide({
+            fromX: position.x,
+            fromY: position.y,
+            toX: targetX,
+            toY: position.y,
+            durationMs: plan.durationMs,
+            apply: (x, y) => {
+              void invoke('set_window_position', { x, y }).catch(() => {});
+            },
+            shouldAbort: () =>
+              cancelled || pressedRef.current || sequenceTokenRef.current !== walk.token,
+          });
+          // 被打断：窗口停在半途，姿态交给接管者，不再插手。
+          if (!slid) return;
+          if (!(await walk.done)) return;
+          await playTurnBack();
         } catch {
-          // Smart avoidance remains the authority; ambient walking is optional staging.
+          // 智能避让仍是权威；自主漫步只是可选的舞台调度，出错就安静跳过这一趟。
+          retry = true;
         } finally {
           positioningCoordinator.ambientMoveInFlight = false;
-          schedule();
+          if (retry) scheduleRetry();
+          else scheduleRest();
         }
       };
-      schedule();
+
+      // 首趟：上线后不久走一次（静息期语义此时不适用），之后按静息期节奏走。
+      timer = window.setTimeout(
+        () => void walkOnce(),
+        WALK_STARTUP_MIN_MS + Math.random() * WALK_STARTUP_RANGE_MS,
+      );
       return () => {
         cancelled = true;
         if (timer !== null) window.clearTimeout(timer);
         positioningCoordinator.ambientMoveInFlight = false;
       };
-    }, [ambientMotionEnabled, playFrames, previewMode, returnToTone, setActivePose]);
+    }, [ambientMotionEnabled, beginWalk, playTurn, playTurnBack, previewMode]);
 
     useEffect(() => () => {
       clearPoseTimer();
       if (clickTimerRef.current) clearTimeout(clickTimerRef.current);
     }, [clearPoseTimer]);
 
+    /**
+     * 记一笔点击，返回「这一下是否算戳烦了」。
+     *
+     * 记账口径见 {@link TAP_ANNOY_WINDOW_MS} 一带的注释。双击的两次点击同样入账——
+     * 双击只是同时还另有用途（开快捷聊天），不代表这两下不算戳。
+     */
+    const noteTap = useCallback((now: number): boolean => {
+      // 气头上：照旧算生气，并把气头往后续（只要还在戳就不消气）
+      if (now < annoyedUntilRef.current) {
+        annoyedUntilRef.current = now + TAP_ANNOY_HOLD_MS;
+        return true;
+      }
+
+      const recent = tapLogRef.current.filter((at) => now - at < TAP_ANNOY_WINDOW_MS);
+      recent.push(now);
+      // 基准分=窗口中戳了几下；猛戳额外记一笔——「又戳一次」和「连着猛戳」不是一回事
+      let score = recent.length;
+      for (let index = 1; index < recent.length; index += 1) {
+        if (recent[index] - recent[index - 1] < TAP_ROUGH_INTERVAL_MS) score += 1;
+      }
+      if (score < TAP_ANNOY_THRESHOLD) {
+        tapLogRef.current = recent;
+        return false;
+      }
+      // 攒够了：清账再生气，退出气头后从零重新攒，不会因为一笔旧账一直气下去
+      tapLogRef.current = [];
+      annoyedUntilRef.current = now + TAP_ANNOY_HOLD_MS;
+      return true;
+    }, []);
+
     const handleClick = () => {
       // 窗口发生过实际拖动时，mouseup 后浏览器仍可能补发 click；该 click 不应触发台词。
       if (Date.now() < suppressClickUntilRef.current) return;
+      const annoyed = noteTap(Date.now());
       if (clickTimerRef.current) {
         clearTimeout(clickTimerRef.current);
         clickTimerRef.current = null;
-        applyMotion('talk', 700);
-        onInteraction?.('double_click');
+        // 被戳毛了的时候双击照样开聊天，但脸上的态度不再是配合
+        applyMotion(annoyed ? 'angry' : 'talk', annoyed ? undefined : 700);
+        onInteraction?.(annoyed ? 'rough_click' : 'double_click');
         onOpenQuickChat?.();
         return;
       }
       clickTimerRef.current = setTimeout(() => {
         clickTimerRef.current = null;
-        applyMotion('happy', 1200);
-        onInteraction?.('single_click');
+        const reaction = annoyed ? 'angry' : pickTapReaction();
+        // 空串 = 这一下不播表情：什么都不做，待机与自然眨眼照常继续。
+        // 这张生气脸正播着就不重播——同一口气上被反复打断在第 0 帧会看起来像卡住。
+        // （鼠标点击其实轮不到这里：mousedown 早已把动画切回基调了，拦住的是
+        //   键盘回车/空格这条不经过 mousedown 的路径。）
+        const alreadyAngry = annoyed && poseNameRef.current === 'angry';
+        if (reaction && !alreadyAngry) applyMotion(reaction);
+        onInteraction?.(annoyed ? 'rough_click' : 'single_click');
       }, 230);
     };
 

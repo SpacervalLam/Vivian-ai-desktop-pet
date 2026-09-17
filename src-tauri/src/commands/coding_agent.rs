@@ -10,7 +10,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 
 use crate::brain::coding_agent::{
-    CodingAgentService, CodingSession, CodingWorkspace,
+    CodingAgentService, CodingSession, CodingWorkspace, ExtraWorkspace,
 };
 use crate::state::AppState;
 
@@ -249,10 +249,42 @@ pub fn coding_list_workspaces() -> Vec<CodingWorkspace> {
     CODING_AGENT.list_workspaces()
 }
 
-/// 切换会话工作目录（目录必须存在；运行中拒绝）。
+/// 切换会话主工作目录（目录必须存在；运行中拒绝）。
+///
+/// 主工作区决定相对路径解析、项目记忆位置、终端 cwd 与提示词环境块；
+/// 只扩大可访问范围请用 [`coding_add_workspace`]。
 #[tauri::command]
 pub fn coding_set_workspace(session_id: String, workspace: String) -> Result<(), String> {
     CODING_AGENT.set_workspace(&session_id, &workspace)
+}
+
+/// 挂载附加工作区（目录必须存在；已挂载则更新只读标记；运行中拒绝）。返回最新列表。
+#[tauri::command]
+pub fn coding_add_workspace(
+    session_id: String,
+    path: String,
+    read_only: bool,
+) -> Result<Vec<ExtraWorkspace>, String> {
+    CODING_AGENT.add_workspace(&session_id, &path, read_only)
+}
+
+/// 卸载附加工作区（运行中拒绝）。返回最新列表。
+#[tauri::command]
+pub fn coding_remove_workspace(
+    session_id: String,
+    path: String,
+) -> Result<Vec<ExtraWorkspace>, String> {
+    CODING_AGENT.remove_workspace(&session_id, &path)
+}
+
+/// 切换附加工作区的只读标记（运行中拒绝）。返回最新列表。
+#[tauri::command]
+pub fn coding_set_workspace_read_only(
+    session_id: String,
+    path: String,
+    read_only: bool,
+) -> Result<Vec<ExtraWorkspace>, String> {
+    CODING_AGENT.set_workspace_read_only(&session_id, &path, read_only)
 }
 
 /// 设置会话权限等级（read_only / workspace_write / full_access；运行中拒绝）。
@@ -384,21 +416,6 @@ pub fn coding_get_work_todos(
     session_id: String,
 ) -> Result<Vec<crate::brain::coding_agent::WorkTodo>, String> {
     let items = CODING_AGENT.list_work_todos(&session_id)?;
-    emit_work_todo_changed(&app, &session_id, &items);
-    Ok(items)
-}
-
-/// 整表替换写入工作待办清单。
-///
-/// 与 `work_todo_write` 工具共用同一入口：前端面板的手动增/删/勾选，同样是
-/// 取回整张表、本地改好、再整体回写。
-#[tauri::command]
-pub fn coding_write_work_todos(
-    app: tauri::AppHandle,
-    session_id: String,
-    todos: Vec<crate::brain::coding_agent::WorkTodo>,
-) -> Result<Vec<crate::brain::coding_agent::WorkTodo>, String> {
-    let items = CODING_AGENT.write_work_todos(&session_id, todos)?;
     emit_work_todo_changed(&app, &session_id, &items);
     Ok(items)
 }

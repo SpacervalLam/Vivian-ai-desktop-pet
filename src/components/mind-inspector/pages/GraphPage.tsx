@@ -121,6 +121,8 @@ const CORE_Y = 55;
 const CORE_Y_SECONDARY = 90;
 const TOP_PADDING = 150;
 const BOTTOM_PADDING = 60;
+/** 画布最小高度：与滚动容器 / SVG 的 minHeight 保持一致，避免 viewBox 与元素高度不等导致缩放 */
+const MIN_CANVAS_H = 520;
 
 const SPRING_K = 0.08;
 const SPRING_DAMPING = 0.72;
@@ -132,8 +134,8 @@ const NODE_TYPE_KEYS: Record<NodeType, string> = {
   agent: 'type_agent',
   belief: 'type_belief',
   episode: 'type_episode',
-  dialogue: 'type_dialogue',
-  wechat: 'type_wechat',
+  dialogue: 'type_chat',
+  wechat: 'type_chat',
   topic_summary: 'type_topic_summary',
   important_event: 'type_important_event',
   goal: 'type_goal',
@@ -705,8 +707,30 @@ const GraphPage: React.FC = () => {
   const [hoverClient, setHoverClient] = useState<{ x: number; y: number } | null>(null);
   const [version, setVersion] = useState(0);
   const [modalNode, setModalNode] = useState<GraphNode | null>(null);
-  // 类型筛选：null = 全部（仅影响 SVG 内节点渲染，不改数据层）
-  const [typeFilter, setTypeFilter] = useState<NodeType | null>(null);
+  // 类型筛选：空集 = 全部；筛选会重建比例尺与布局，只作用于视图层，不改数据层
+  const [activeTypes, setActiveTypes] = useState<Set<NodeType>>(new Set());
+  const markViewAnchor = useCallback(() => {
+    // 记录当前视口中心时间：筛选切换会压缩/展开时间轴，重排后据此回到同一时间位置
+    const vr = visibleRangeRef.current;
+    pendingAnchorRef.current = effScaleRef.current?.yToTs((vr.topY + vr.bottomY) / 2) ?? null;
+  }, []);
+  const toggleTypes = useCallback((types: NodeType[]) => {
+    markViewAnchor();
+    setActiveTypes((prev) => {
+      const next = new Set(prev);
+      const allActive = types.every((tp) => prev.has(tp));
+      if (allActive) {
+        types.forEach((tp) => next.delete(tp));
+      } else {
+        types.forEach((tp) => next.add(tp));
+      }
+      return next;
+    });
+  }, [markViewAnchor]);
+  const clearTypes = useCallback(() => {
+    markViewAnchor();
+    setActiveTypes(new Set());
+  }, [markViewAnchor]);
 
   const svgRef = useRef<SVGSVGElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -717,6 +741,8 @@ const GraphPage: React.FC = () => {
   const rafRef = useRef<number | null>(null);
   const neighborMapRef = useRef<Map<string, string[]>>(new Map());
   const sessionPeerRef = useRef<Map<string, string[]>>(new Map());
+  /** 节点 id → 时间戳：筛选态下定位「时间上最近的可见节点」用 */
+  const nodeTsRef = useRef<Map<string, number>>(new Map());
   const pendingFocusRef = useRef<{ targetChar: CharacterId; timestamp: number; preview: string } | null>(null);
   const [focusPulse, setFocusPulse] = useState<string | null>(null);
 
@@ -877,6 +903,38 @@ const GraphPage: React.FC = () => {
     scaleRef.current = scale;
   }, [scale]);
 
+  /** 当前生效比例尺（筛选态为压缩后的比例尺），供筛选切换时记录锚点时间 */
+  const effScaleRef = useRef<TimeScale>(scale);
+
+  /**
+   * 求聚焦目标应滚动到的 SVG y。
+   * 筛选态下目标节点可能不在可见集合内（类型不匹配，或本就是尚未加载内容的骨架点），
+   * 而时间轴此时已被压缩，全局比例尺算出的 y 不再对应画布上的任何真实位置——
+   * 退回到「时间上最近的可见节点」，保证跳转落点仍在同一时间附近。
+   * 非筛选态维持原语义：布局里没有就用骨架索引的 y 兜底。
+   */
+  const resolveFocusY = useCallback(
+    (targetId: string, timestamp: number, fallbackY: number | null): number | null => {
+      const pos = layoutRef.current.get(targetId);
+      if (pos) return pos.y;
+      if (activeTypes.size === 0) return fallbackY;
+      const tsMap = nodeTsRef.current;
+      let bestY: number | null = null;
+      let bestDist = Infinity;
+      layoutRef.current.forEach((ln) => {
+        const ts = tsMap.get(ln.id);
+        if (ts == null) return;
+        const d = Math.abs(ts - timestamp);
+        if (d < bestDist) {
+          bestDist = d;
+          bestY = ln.y;
+        }
+      });
+      return bestY ?? fallbackY;
+    },
+    [activeTypes],
+  );
+
   // 聚焦到最接近指定时间戳的记忆骨架点（旁观记录跨角色跳转 / 刷新定位用）
   const focusNearestMemory = useCallback(
     (timestamp: number, preview: string) => {
@@ -905,16 +963,15 @@ const GraphPage: React.FC = () => {
       setFocusPulse(targetId);
       setTimeout(() => setFocusPulse(null), 2000);
       requestAnimationFrame(() => {
-        const pos = layoutRef.current.get(targetId);
         const container = containerRef.current;
-        const y = pos ? pos.y : fallbackY;
-        if (y != null && container) {
-          const targetY = y - container.clientHeight / 2;
-          container.scrollTo({ top: Math.max(0, targetY), behavior: 'smooth' });
+        if (!container) return;
+        const y = resolveFocusY(targetId, timestamp, fallbackY);
+        if (y != null) {
+          container.scrollTo({ top: Math.max(0, y - container.clientHeight / 2), behavior: 'smooth' });
         }
       });
     },
-    [skeleton, memories, scale],
+    [skeleton, memories, scale, resolveFocusY],
   );
 
   // 记忆内容加载完成后聚焦到最近记忆（由外部跳转触发）
@@ -1202,8 +1259,28 @@ const GraphPage: React.FC = () => {
     const auxItems = timedNodes.filter((it) => it.node.type === 'belief' || it.node.type === 'relationship');
     const goalItems = timedNodes.filter((it) => it.node.type === 'goal');
 
+    // ── 筛选态：比例尺与布局按「可见类型」重建，只保留可见节点 ──
+    // 全量比例尺由完整骨架驱动，筛选后若沿用会把该类型之外的整段时间留在图上，
+    // 形成大片垂直留白。这里改为以可见节点的时间戳重算一条压缩比例尺：
+    // 相邻间距仍走 clamp(gap × K, MIN_SPACING, MAX_SPACING)，长时间空档被压到 MAX_SPACING，
+    // 于是筛选视图按时间顺序紧凑排列，画布高度随之收缩。
+    const filterActive = activeTypes.size > 0;
+    const isTypeVisible = (n: GraphNode): boolean =>
+      !filterActive || activeTypes.has(n.type) || n.type === 'user' || n.type === 'agent';
+    // 被折叠的 summarized 子节点不参与比例尺（不可见却占位会把画布撑高），
+    // 但仍会被布局安置在时间戳插值位置，保证父摘要展开后能立即渲染
+    const isCollapsedChild = (n: GraphNode): boolean =>
+      !!n.summarized && !!n.parentSummaryId && !expandedSummaryIds.has(n.parentSummaryId);
+    const visibleNodes = filterActive ? nodes.filter(isTypeVisible) : nodes;
+
+    const effScale = filterActive
+      ? buildTimeScale(
+          visibleNodes.filter((n) => n.type !== 'user' && n.type !== 'agent' && !isCollapsedChild(n)).map((n) => n.timestamp),
+          { topPadding: TOP_PADDING, bottomPadding: BOTTOM_PADDING },
+        )
+      : scale;
+
     const svgW = 800;
-    const svgH = scale.svgHeight;
 
     const layout = new Map<string, LayoutNode>();
     const prevLayout = layoutRef.current;
@@ -1219,11 +1296,13 @@ const GraphPage: React.FC = () => {
     // 已加载内容节点：按骨架索引定位（最新在上），与骨架占位点精确对齐
     // 没有骨架索引的节点（如被摘要的原始对话）按时间戳插值定位
     // session_summary 节点：时间戳已对齐到子节点，强制使用时间戳定位以与子节点处于同一时间段
+    // 筛选态下骨架索引失效（骨架是全集，索引对应的时间点已不在压缩比例尺上），一律按时间戳定位
     contentItems.forEach((item) => {
+      if (!isTypeVisible(item.node)) return;
       item.node.side = (item.node.type === 'dialogue' || item.node.type === 'wechat') ? 'right' : 'left';
       const useTsPosition = item.node.type === 'session_summary' && item.node.childIds && item.node.childIds.length > 0;
-      const idx = useTsPosition ? undefined : skIndex.get(item.node.id);
-      const y = idx !== undefined ? scale.yAtIndex(idx) : scale.tsToY(item.node.timestamp);
+      const idx = (filterActive || useTsPosition) ? undefined : skIndex.get(item.node.id);
+      const y = idx !== undefined ? effScale.yAtIndex(idx) : effScale.tsToY(item.node.timestamp);
       const x = item.node.side === 'left'
         ? TIMELINE_X - NODE_OFFSET_X - (item.node.type === 'session_summary' ? SUMMARY_EXTRA_OFFSET : 0)
         : TIMELINE_X + NODE_OFFSET_X;
@@ -1233,14 +1312,24 @@ const GraphPage: React.FC = () => {
 
     // 辅助节点（信念/关系）：不在骨架中，按时间戳插值定位
     auxItems.forEach((item) => {
-      const y = scale.tsToY(item.node.timestamp);
+      if (!isTypeVisible(item.node)) return;
+      const y = effScale.tsToY(item.node.timestamp);
       const x = item.node.side === 'left' ? TIMELINE_X - NODE_OFFSET_X : TIMELINE_X + NODE_OFFSET_X;
       layout.set(item.node.id, { id: item.node.id, x, y, fixed: false, ...carryOffset(item.node.id), vx: 0, vy: 0 });
       edges.push({ source: 'timeline', target: item.node.id, kind: 'timeline' });
     });
 
-    // 目标节点：钉在核心节点下方水平带状区
+    // 目标节点：常规视图钉在核心节点下方水平带状区；筛选态改走时间轴，与其他类型一样按时间排列
     goalItems.forEach((item, i) => {
+      if (!isTypeVisible(item.node)) return;
+      if (filterActive) {
+        const y = effScale.tsToY(item.node.timestamp);
+        const x = TIMELINE_X + NODE_OFFSET_X;
+        item.node.side = 'right';
+        layout.set(item.node.id, { id: item.node.id, x, y, fixed: false, ...carryOffset(item.node.id), vx: 0, vy: 0 });
+        edges.push({ source: 'timeline', target: item.node.id, kind: 'timeline' });
+        return;
+      }
       const x = 180 + (i % 3) * 220;
       const y = 118 + Math.floor(i / 3) * 40;
       item.node.side = 'right';
@@ -1252,7 +1341,13 @@ const GraphPage: React.FC = () => {
       const sizeById = new Map<string, number>();
       timedNodes.forEach(({ node }) => sizeById.set(node.id, nodeSize(node.importance)));
       const sideIds: { left: string[]; right: string[] } = { left: [], right: [] };
-      [...contentItems, ...auxItems].forEach((item) => {
+      // 筛选态下目标节点改走时间轴，纳入同侧防碰撞；
+      // 折叠的 summarized 子节点不参与（不可见，且其时间戳可能被压缩比例尺钳到端点，
+      // 参与推挤会把可见节点顶下去、重新撑出留白）
+      const collisionItems = filterActive
+        ? [...contentItems, ...auxItems, ...goalItems].filter((item) => !isCollapsedChild(item.node))
+        : [...contentItems, ...auxItems];
+      collisionItems.forEach((item) => {
         if (layout.has(item.node.id)) sideIds[item.node.side].push(item.node.id);
       });
       const COLLISION_GAP = 4;
@@ -1285,26 +1380,42 @@ const GraphPage: React.FC = () => {
       // 不再强制聚集到父节点周围，子节点保持时间轴自然位置
     }
 
-    // 骨架占位点：尚未加载内容的骨架点在时间轴上以淡点呈现（居中于时间轴）
-    const placeholders: Array<{ id: string; x: number; y: number; color: string }> = [];
-    skeleton.forEach((p, i) => {
-      if (nodeIds.has(p.id)) return;
-      const y = scale.yAtIndex(i);
-      if (y < visibleRange.topY || y > visibleRange.bottomY) return;
-      placeholders.push({ id: p.id, x: TIMELINE_X, y, color: p.kind === 'diary' ? '#8B4513' : COLORS.event.observation });
+    // ── 画布高度：以可见节点的实际最低点兜底 ──
+    // 同侧防碰撞会把节点往下推，可能超出比例尺估算的高度，这里取两者较大值，
+    // 保证筛选后画布刚好包住内容（留白被压掉，且不会把最深节点裁掉）
+    let contentBottom = 0;
+    const nodeById = new Map(nodes.map((n) => [n.id, n]));
+    layout.forEach((ln) => {
+      const n = nodeById.get(ln.id);
+      if (!n || !isTypeVisible(n) || isCollapsedChild(n)) return;
+      contentBottom = Math.max(contentBottom, ln.y + nodeSize(n.importance) / 2);
     });
+    const svgH = Math.max(MIN_CANVAS_H, effScale.svgHeight, contentBottom + BOTTOM_PADDING);
+
+    // 骨架占位点：尚未加载内容的骨架点在时间轴上以淡点呈现（居中于时间轴）
+    // 筛选态下骨架点无法判定类型（骨架只有 id/ts/kind），一律不画，避免出现无法归类的幽灵点
+    const placeholders: Array<{ id: string; x: number; y: number; color: string }> = [];
+    if (!filterActive) {
+      skeleton.forEach((p, i) => {
+        if (nodeIds.has(p.id)) return;
+        const y = scale.yAtIndex(i);
+        if (y < visibleRange.topY || y > visibleRange.bottomY) return;
+        placeholders.push({ id: p.id, x: TIMELINE_X, y, color: p.kind === 'diary' ? '#8B4513' : COLORS.event.observation });
+      });
+    }
 
     // 时间刻度：在整个时间范围生成整齐刻度
-    const targetTickCount = Math.max(4, Math.min(30, Math.floor(scale.totalContent / 90)));
-    const ticks: TimeTick[] = scale.breakpoints.length > 0
-      ? niceTicks(scale.minTs, scale.maxTs, targetTickCount).map((tk) => ({
-          y: scale.tsToY(tk.ts),
+    const targetTickCount = Math.max(4, Math.min(30, Math.floor(effScale.totalContent / 90)));
+    const ticks: TimeTick[] = effScale.breakpoints.length > 0
+      ? niceTicks(effScale.minTs, effScale.maxTs, targetTickCount).map((tk) => ({
+          y: effScale.tsToY(tk.ts),
           label: tk.label,
           timestamp: tk.ts,
         }))
       : [];
 
     layoutRef.current = layout;
+    effScaleRef.current = effScale;
 
     const neighborMap = new Map<string, string[]>();
     edges.forEach((edge) => {
@@ -1315,9 +1426,12 @@ const GraphPage: React.FC = () => {
       neighborMap.get(edge.target)!.push(edge.source);
     });
     neighborMapRef.current = neighborMap;
+    nodeTsRef.current = new Map(nodes.map((n) => [n.id, n.timestamp]));
 
     // ── 在场状态分段：从 presence_log 记忆提取历史状态，驱动时间轴分段着色 ──
-    const presenceSegments: Array<{ y1: number; y2: number; state: string }> = [];
+    // 先按时间戳建段，再经有效比例尺映射为 y：筛选态下比例尺被压缩，
+    // 落在可见时间窗之外的历史状态段不再呈现（否则会挤成时间轴两端的色块）
+    const presenceRanges: Array<{ startTs: number; endTs: number; state: string }> = [];
     const presenceEvents = memories
       .filter((m) => m.tags?.includes('presence_log') || (m.metadata as Record<string, unknown> | undefined)?.kind === 'presence_log')
       .map((m) => ({
@@ -1329,12 +1443,12 @@ const GraphPage: React.FC = () => {
       .sort((a, b) => a.ts - b.ts);
 
     if (presenceEvents.length > 0) {
-      // 最早状态段：从 scale.minTs 到第一个事件
+      // 最早状态段：从 effScale.minTs 到第一个事件
       const firstFrom = presenceEvents[0].from.toLowerCase();
       if (firstFrom) {
-        presenceSegments.push({
-          y1: scale.tsToY(presenceEvents[0].ts),
-          y2: scale.tsToY(scale.minTs),
+        presenceRanges.push({
+          startTs: effScale.minTs,
+          endTs: presenceEvents[0].ts,
           state: firstFrom,
         });
       }
@@ -1342,18 +1456,26 @@ const GraphPage: React.FC = () => {
       for (let i = 0; i < presenceEvents.length; i++) {
         const startTs = presenceEvents[i].ts;
         const endTs = i + 1 < presenceEvents.length ? presenceEvents[i + 1].ts : Date.now();
-        presenceSegments.push({
-          y1: scale.tsToY(endTs),
-          y2: scale.tsToY(startTs),
+        presenceRanges.push({
+          startTs,
+          endTs,
           state: presenceEvents[i].to.toLowerCase(),
         });
       }
     }
 
-    return { graphNodes: nodes, graphEdges: edges, svgWidth: svgW, svgHeight: svgH, timeTicks: ticks, placeholders, presenceSegments };
-  }, [beliefs, relationships, memories, diaries, mind, character, t, skeleton, skIndex, scale, visibleRange, cacheVersion]);
+    const presenceSegments = presenceRanges
+      .filter((r) => r.endTs >= effScale.minTs && r.startTs <= effScale.maxTs)
+      .map((r) => ({
+        y1: effScale.tsToY(r.endTs),
+        y2: effScale.tsToY(r.startTs),
+        state: r.state,
+      }));
 
-  const { graphNodes, graphEdges, svgWidth, svgHeight, timeTicks, placeholders, presenceSegments } = graphData;
+    return { graphNodes: nodes, graphEdges: edges, svgWidth: svgW, svgHeight: svgH, timeTicks: ticks, placeholders, presenceSegments, effScale };
+  }, [beliefs, relationships, memories, diaries, mind, character, t, skeleton, skIndex, scale, visibleRange, cacheVersion, activeTypes, expandedSummaryIds]);
+
+  const { graphNodes, graphEdges, svgWidth, svgHeight, timeTicks, placeholders, presenceSegments, effScale } = graphData;
 
   // ── 顶部工作台：类型统计 Chip（含筛选交互）──
   const typeChips = useMemo<TypeChipDef[]>(() => {
@@ -1361,21 +1483,23 @@ const GraphPage: React.FC = () => {
     graphNodes.forEach((n) => {
       counts.set(n.type, (counts.get(n.type) ?? 0) + 1);
     });
-    const defs: Array<{ type: NodeType; label: string; color: string }> = [
-      { type: 'session_summary', label: t('mind_inspector.graph.type_session_summary'), color: '#7C3AED' },
-      { type: 'dialogue', label: t('mind_inspector.graph.type_dialogue'), color: COLORS.event.dialogue },
-      { type: 'wechat', label: t('mind_inspector.graph.type_wechat'), color: COLORS.event.dialogue },
-      { type: 'belief', label: t('mind_inspector.graph.type_belief'), color: COLORS.event.belief },
-      { type: 'episode', label: t('mind_inspector.graph.type_episode'), color: COLORS.event.observation },
-      { type: 'reading', label: t('mind_inspector.graph.type_reading'), color: COLORS.event.reading },
-      { type: 'goal', label: t('mind_inspector.graph.type_goal'), color: COLORS.event.goal },
-      { type: 'relationship', label: t('mind_inspector.graph.type_relationship'), color: COLORS.event.relationship },
-      { type: 'inner_thought', label: t('mind_inspector.graph.type_inner_thought'), color: COLORS.event.mood },
-      { type: 'diary', label: t('mind_inspector.graph.type_diary'), color: '#8B4513' },
+    const defs: Array<Omit<TypeChipDef, 'count'>> = [
+      { id: 'session_summary', types: ['session_summary'], label: t('mind_inspector.graph.type_session_summary'), color: '#7C3AED' },
+      { id: 'chat', types: ['dialogue', 'wechat'], label: t('mind_inspector.graph.type_chat'), color: COLORS.event.dialogue },
+      { id: 'belief', types: ['belief'], label: t('mind_inspector.graph.type_belief'), color: COLORS.event.belief },
+      { id: 'episode', types: ['episode'], label: t('mind_inspector.graph.type_episode'), color: COLORS.event.observation },
+      { id: 'reading', types: ['reading'], label: t('mind_inspector.graph.type_reading'), color: COLORS.event.reading },
+      { id: 'goal', types: ['goal'], label: t('mind_inspector.graph.type_goal'), color: COLORS.event.goal },
+      { id: 'relationship', types: ['relationship'], label: t('mind_inspector.graph.type_relationship'), color: COLORS.event.relationship },
+      { id: 'inner_thought', types: ['inner_thought'], label: t('mind_inspector.graph.type_inner_thought'), color: COLORS.event.mood },
+      { id: 'diary', types: ['diary'], label: t('mind_inspector.graph.type_diary'), color: '#8B4513' },
     ];
     return defs
-      .filter((d) => (counts.get(d.type) ?? 0) > 0)
-      .map((d) => ({ ...d, count: counts.get(d.type) ?? 0 }));
+      .filter((d) => d.types.some((tp) => (counts.get(tp) ?? 0) > 0))
+      .map((d) => ({
+        ...d,
+        count: d.types.reduce((sum, tp) => sum + (counts.get(tp) ?? 0), 0),
+      }));
   }, [graphNodes, t]);
 
   // ── 日期搜索：解析日期串 → 定位到最近的骨架点并滚动聚焦 ──
@@ -1410,28 +1534,44 @@ const GraphPage: React.FC = () => {
       });
       if (bestIdx < 0) return;
       const targetId = skeleton[bestIdx].id;
+      const targetTs = skeleton[bestIdx].ts;
+      const fallbackY = scale.yAtIndex(bestIdx);
       setSelectedNode(targetId);
       setFocusPulse(targetId);
       setTimeout(() => setFocusPulse(null), 2000);
       requestAnimationFrame(() => {
-        const pos = layoutRef.current.get(targetId);
         const container = containerRef.current;
-        const y = pos ? pos.y : scale.yAtIndex(bestIdx);
-        if (container && y != null) {
+        if (!container) return;
+        const y = resolveFocusY(targetId, targetTs, fallbackY);
+        if (y != null) {
           container.scrollTo({ top: Math.max(0, y - container.clientHeight / 2), behavior: 'smooth' });
         }
       });
     },
-    [skeleton, scale],
+    [skeleton, scale, resolveFocusY],
   );
 
-  // 筛选视图：仅保留目标类型 + 核心节点（user/agent）
+  // 筛选视图：仅保留已选类型 + 核心节点（user/agent）；空集 = 显示全部
   const filteredNodes = useMemo(
     () =>
-      typeFilter === null
+      activeTypes.size === 0
         ? graphNodes
-        : graphNodes.filter((n) => n.type === typeFilter || n.type === 'user' || n.type === 'agent'),
-    [graphNodes, typeFilter],
+        : graphNodes.filter((n) => activeTypes.has(n.type) || n.type === 'user' || n.type === 'agent'),
+    [graphNodes, activeTypes],
+  );
+
+  // 会话手绘圈只在「聊天」被选中时呈现：圈本身是聊天分组的注记，
+  // 其他类型视图里它既没有对应节点、也解释不了任何东西
+  const showSessionRings = activeTypes.has('dialogue') || activeTypes.has('wechat');
+
+  // 迷你地图数据源：筛选态下密度条改由压缩比例尺的断点构成，
+  // 使其与压缩后的时间轴一一对应（骨架点的时间跨度已不代表可见内容）
+  const minimapSkeleton = useMemo(
+    () =>
+      activeTypes.size === 0
+        ? skeleton
+        : effScale.breakpoints.map((bp) => ({ id: `bp:${bp.ts}`, ts: bp.ts, kind: 'memory' as const })),
+    [activeTypes, skeleton, effScale],
   );
 
 
@@ -1532,15 +1672,16 @@ const GraphPage: React.FC = () => {
     return pt.matrixTransform(ctm.inverse());
   }, []);
 
-  // 骨架刷新后按中心时间戳重锚滚动，避免高度变化导致视口跳变
+  // 骨架刷新 / 筛选切换后按中心时间戳重锚滚动，避免高度变化导致视口跳变
   useLayoutEffect(() => {
     const anchorTs = pendingAnchorRef.current;
     if (anchorTs == null) return;
     pendingAnchorRef.current = null;
     const container = containerRef.current;
     if (!container) return;
-    container.scrollTop = Math.max(0, svgYToScrollTop(scale.tsToY(anchorTs)));
-  }, [scale, svgYToScrollTop]);
+    // 用生效比例尺换算：筛选态时间轴被压缩，只有压缩比例尺的 y 才对得上锚点时间
+    container.scrollTop = Math.max(0, svgYToScrollTop(effScale.tsToY(anchorTs)));
+  }, [scale, effScale, svgYToScrollTop]);
 
   // SVG 高度变化后强制重算可见范围：visibleRange 在渲染期经 getScreenCTM 计算，
   // 此时 DOM 尚未提交新高度，CTM 仍是旧值；高度提交后须刷新一次以得到正确视口范围
@@ -1549,6 +1690,10 @@ const GraphPage: React.FC = () => {
   }, [svgHeight]);
 
   // ── 内容懒加载：按可见骨架索引带拉取缺失的记忆/日记内容 ──
+  // 筛选态例外：压缩比例尺只覆盖「已加载内容」的时间窗，按窗口懒加载会自我封闭
+  // （永远只能看到进入筛选前已加载的那一段），因此筛选态直接拉满整个骨架时间范围。
+  // 载荷很小（本机全量记忆 JSON < 1MB，且序列化前已剥离 embedding），
+  // 拉取结果进入区间缓存，清除筛选后不会再重复请求。
   useEffect(() => {
     if (skeleton.length === 0 || scale.breakpoints.length === 0) return;
     const char = character;
@@ -1557,6 +1702,7 @@ const GraphPage: React.FC = () => {
     const timer = setTimeout(() => {
       const bps = scale.breakpoints;
       const n = bps.length;
+      const filterActive = activeTypes.size > 0;
       const topTs = scale.yToTs(visibleRange.topY);
       const botTs = scale.yToTs(visibleRange.bottomY);
       const tsLo = Math.min(topTs, botTs);
@@ -1578,12 +1724,12 @@ const GraphPage: React.FC = () => {
       }
       // 视口可能落在骨架时间范围之外（顶部/底部留白）或两断点之间，
       // 钳制到有效索引并用 min/max 取最近的有效索引带
-      const firstIdx = Math.max(0, Math.min(n - 1, first));
-      const lastIdx = Math.max(0, Math.min(n - 1, last));
+      const firstIdx = filterActive ? 0 : Math.max(0, Math.min(n - 1, first));
+      const lastIdx = filterActive ? n - 1 : Math.max(0, Math.min(n - 1, last));
 
       const OVERSCAN_PTS = 30;
       const i0 = Math.max(0, Math.min(firstIdx, lastIdx) - OVERSCAN_PTS);
-      const i1 = Math.min(n - 1, Math.max(firstIdx, lastIdx) + OVERSCAN_PTS);
+      const i1 = filterActive ? n - 1 : Math.min(n - 1, Math.max(firstIdx, lastIdx) + OVERSCAN_PTS);
       const afterMs = bps[i0].ts;
       const beforeMs = bps[i1].ts + 1;
 
@@ -1657,7 +1803,7 @@ const GraphPage: React.FC = () => {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [visibleRange, skeleton, scale, character]);
+  }, [visibleRange, skeleton, scale, character, activeTypes]);
 
   const handleNodeMouseDown = (e: React.MouseEvent, nodeId: string) => {
     e.preventDefault();
@@ -2017,8 +2163,9 @@ const GraphPage: React.FC = () => {
       <GraphOverviewBar
         character={character}
         chips={typeChips}
-        activeFilter={typeFilter}
-        onFilterChange={setTypeFilter}
+        activeTypes={activeTypes}
+        onToggleTypes={toggleTypes}
+        onClear={clearTypes}
         onDateSearch={handleDateSearch}
       />
 
@@ -2312,8 +2459,8 @@ const GraphPage: React.FC = () => {
             />
           ))}
 
-          {/* 会话圈：同一次会话的节点用手绘圈圈起；任一成员被拖拽时隐藏 */}
-          {sessionGroups.map((sg) => {
+          {/* 会话圈：同一次会话的节点用手绘圈圈起；仅「聊天」筛选态显示，任一成员被拖拽时隐藏 */}
+          {showSessionRings && sessionGroups.map((sg) => {
             // 任一成员有位移时隐藏圈
             for (const id of sg.memberIds) {
               const ln = layoutRef.current.get(id);
@@ -2805,8 +2952,8 @@ const GraphPage: React.FC = () => {
 
         {/* 迷你地图：日期跳转导航 */}
         <Minimap
-          skeleton={skeleton}
-          scale={scale}
+          skeleton={minimapSkeleton}
+          scale={effScale}
           height={containerHeight}
           visibleRange={visibleRange}
           svgHeight={svgHeight}

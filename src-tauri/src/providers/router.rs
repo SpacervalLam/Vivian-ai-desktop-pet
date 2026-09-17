@@ -42,8 +42,14 @@ use crate::types::response::ChatMessage;
 pub struct ModelRouter {
     /// 主 LLM API provider —— 由 `config.ai` 构建，必须配置
     main_provider: Arc<Option<Box<dyn BaseProvider>>>,
+    /// 主 LLM API 的 endpoint。LLM 错误 toast 用它把用户引导到对应厂商的控制台
+    /// （充值页因厂商而异，前端按 endpoint 反查预设里的 consoleUrl）。
+    main_endpoint: String,
     /// 任务专属 provider —— 每个任务独立配置的模型实例
     task_providers: Arc<HashMap<String, Box<dyn BaseProvider>>>,
+    /// 任务类型 → 该任务绑定的 provider endpoint。查不到的任务回退 `main_endpoint`
+    /// （路由矩阵关闭或任务未配置时全部走主 API）。
+    task_endpoints: Arc<HashMap<String, String>>,
     /// 工作智能体模型热切换覆盖
     ///
     /// 用户为工作智能体选择的 provider 实例。`None` 表示未覆盖。
@@ -101,6 +107,31 @@ pub struct ModelRouter {
     task_reasoning: Arc<HashMap<String, ReasoningPreference>>,
     /// 当前工作模型的默认推理偏好。
     work_reasoning: Arc<RwLock<Option<ReasoningPreference>>>,
+    /// 陪伴对话默认存在惩罚（`config.ai.presence_penalty`）。
+    ///
+    /// 只对"角色正在说话"的任务类型注入，见 `conversational_penalties`。
+    presence_penalty: f64,
+    /// 陪伴对话默认频率惩罚（`config.ai.frequency_penalty`）。
+    frequency_penalty: f64,
+}
+
+/// 需要注入惩罚参数的"角色说话"任务类型。
+///
+/// 与 `generation.rs::build_chat_request` 注入响应 Schema 的集合保持一致——
+/// 那三个类型就是角色真正产出台词的路径（`reasoning` 是携带工具定义时
+/// 由 `chat` 升级而来，见 `TASK_WORK_AGENT` 的文档）。
+///
+/// **不含 `work_agent`**：编程任务要的是确定性，惩罚参数只会让代码措辞发散；
+/// 也不含 reflection / consolidation / memory 等结构化抽取任务——它们的输出
+/// 是 JSON，抑制重复没有意义，反而可能影响字段复现的稳定性。
+const CONVERSATIONAL_TASK_TYPES: &[&str] = &["chat", "reasoning", "vision_describe"];
+
+/// 该任务类型是否属于"角色正在说话"（需要注入采样惩罚）。
+///
+/// 独立成自由函数是为了可测：`ModelRouter` 的构造需要完整 `AppConfig`
+/// 与真实网络客户端，而这里的判据本身是纯字符串匹配。
+fn is_conversational_task(task_type: &str) -> bool {
+    CONVERSATIONAL_TASK_TYPES.contains(&task_type)
 }
 
 /// 任务 → 信号量分组的并发上限
@@ -218,6 +249,8 @@ impl ModelRouter {
         //    仅在 enable_routing_matrix=true 时构建；关闭时跳过，所有任务回退到主 API
         let mut task_providers: HashMap<String, Box<dyn BaseProvider>> = HashMap::new();
         let mut task_reasoning = HashMap::new();
+        // 任务 → endpoint 映射：错误 toast 用它引导用户前往对应厂商控制台
+        let mut task_endpoints: HashMap<String, String> = HashMap::new();
         if config.enable_routing_matrix {
             for (task_type, task_config) in &config.routing_matrix {
                 // 跳过空配置（未填写 model 或 endpoint 的任务）→ 由主 API 兜底
@@ -247,6 +280,7 @@ impl ModelRouter {
                             cfg.endpoint
                         );
                         task_providers.insert(task_type.clone(), provider);
+                        task_endpoints.insert(task_type.clone(), cfg.endpoint.clone());
                         if let Some(reasoning) = cfg.reasoning {
                             task_reasoning.insert(task_type.clone(), reasoning);
                         }
@@ -280,7 +314,9 @@ impl ModelRouter {
 
         Ok(Self {
             main_provider: Arc::new(main_provider),
+            main_endpoint: config.ai.endpoint.as_deref().unwrap_or("").trim().to_string(),
             task_providers: Arc::new(task_providers),
+            task_endpoints: Arc::new(task_endpoints),
             reasoning_override: Arc::new(RwLock::new(reasoning_override)),
             enable_routing_matrix: config.enable_routing_matrix,
             enable_search: Arc::new(AtomicBool::new(false)),
@@ -301,6 +337,8 @@ impl ModelRouter {
                     .and_then(|id| config.work_models.iter().find(|m| m.id == id))
                     .and_then(|profile| profile.route.reasoning),
             )),
+            presence_penalty: config.ai.presence_penalty,
+            frequency_penalty: config.ai.frequency_penalty,
         })
     }
 
@@ -492,6 +530,20 @@ impl ModelRouter {
         }
     }
 
+    /// 本请求应使用的惩罚参数。非"角色说话"的任务返回 `(None, None)`。
+    ///
+    /// 请求级字段优先（`LLMRequest::with_penalties`），未设置时用配置默认值。
+    /// `0.0` 交由 `ProviderBase::sanitize_penalty` 折叠成"不发送"。
+    fn conversational_penalties(&self, request: &LLMRequest) -> (Option<f64>, Option<f64>) {
+        if !is_conversational_task(&request.task_type) {
+            return (None, None);
+        }
+        (
+            Some(request.presence_penalty.unwrap_or(self.presence_penalty)),
+            Some(request.frequency_penalty.unwrap_or(self.frequency_penalty)),
+        )
+    }
+
     fn call_options(&self, request: &LLMRequest) -> ProviderCallOptions {
         let fingerprint_source = serde_json::json!({
             "tools": request.tools,
@@ -499,11 +551,14 @@ impl ModelRouter {
             "stream": request.stream,
         })
         .to_string();
+        let (presence_penalty, frequency_penalty) = self.conversational_penalties(request);
         ProviderCallOptions {
             enable_search: Some(request.enable_search),
             temperature: request.temperature_override,
             max_tokens: request.max_tokens_override,
             max_tokens_extra: request.max_tokens_extra,
+            presence_penalty,
+            frequency_penalty,
             reasoning: Some(self.effective_request_reasoning(
                 &request.task_type,
                 request.reasoning,
@@ -546,7 +601,9 @@ impl ModelRouter {
     ///
     /// 带冷却机制：同一 task_type 在 ROUTE_FALLBACK_COOLDOWN_SECS 内不重复发送，
     /// 防止熔断状态下（如 inner_monologue 反复回退）toast 刷屏。
-    fn emit_route_fallback(&self, task_type: &str, error: &str) {
+    ///
+    /// `character_id` 为触发本次调用的角色归属（空串 = 无归属，前端不弹 toast）。
+    fn emit_route_fallback(&self, task_type: &str, error: &str, character_id: &str) {
         if !self.emit_enabled.load(Ordering::Relaxed) {
             return;
         }
@@ -571,6 +628,7 @@ impl ModelRouter {
                     "error": error,
                     "error_kind": error_kind,
                     "message_key": message_key,
+                    "character_id": character_id,
                     "fallback_to": "main",
                 }),
             );
@@ -603,8 +661,17 @@ impl ModelRouter {
     /// 带冷却机制：同类 error_kind 在 COOLDOWN_SECS 内不重复弹窗，防止 Permanent 错误反复刷屏。
     /// Permanent 类错误（InvalidApiKey/InsufficientBalance/QuotaExceeded/ModelNotFound/
     /// RegionNotSupported/PermissionDenied）冷却时间更长（5 分钟），因为需要用户手动修复。
-    fn emit_llm_error_toast(&self, task_type: &str, error: &str) {
+    ///
+    /// 熔断器打开不在此通知：它是本地自我保护，冷却结束会自行半开探测，用户无需介入；
+    /// 且「余额不足」引发的连续失败会同时触发熔断，两条 toast 并存时后者会盖掉真正该看的那条。
+    ///
+    /// `character_id` 为触发本次调用的角色归属（空串 = 无归属，前端不弹 toast）。
+    fn emit_llm_error_toast(&self, task_type: &str, error: &str, endpoint: &str, character_id: &str) {
         let error_kind = classify_llm_error_from_str(error);
+
+        if matches!(error_kind, LlmErrorKind::CircuitBreakerOpen) {
+            return;
+        }
 
         let cooldown = match error_kind {
             LlmErrorKind::InvalidApiKey
@@ -628,6 +695,9 @@ impl ModelRouter {
         }
 
         let message_key = error_kind_to_message_key(&error_kind);
+        // endpoint 由调用方在失败现场传入：本次调用最后实际失败的 provider 的 endpoint
+        // （跟随 fallback 链，而非任务最初的优选 endpoint）。前端按它反查厂商预设，
+        // 把「余额不足」类错误挂上直达对应厂商控制台的动作。
         let handle_guard = self.app_handle.read();
         if let Some(handle) = handle_guard.as_ref() {
             let _ = handle.emit(
@@ -637,6 +707,8 @@ impl ModelRouter {
                     "error": error,
                     "error_kind": error_kind,
                     "message_key": message_key,
+                    "character_id": character_id,
+                    "endpoint": endpoint,
                 }),
             );
         }
@@ -647,6 +719,7 @@ impl ModelRouter {
         task_type: &str,
         messages: Vec<ChatMessage>,
         json_schema: Option<serde_json::Value>,
+        character_id: &str,
     ) -> VivianResult<String> {
         Self::log_llm_request(task_type, &messages, &[]);
         // 按任务分组获取并发信号量，acquire 后才执行（防止后处理 LLM 同时挤占主对话）
@@ -663,6 +736,9 @@ impl ModelRouter {
         };
 
         let mut last_error: Option<VivianError> = None;
+        // 跟随 last_error 一起记录：最后实际失败的 provider 的 endpoint，
+        // 供 llm:error toast 反查厂商直达控制台。为 None 时前端查不到就不挂动作。
+        let mut last_error_endpoint: Option<String> = None;
         let enable_search = self.is_enable_search();
 
         // 0. 工作智能体覆盖模型优先（仅 reasoning 任务）——用户显式选择，优先级高于路由矩阵
@@ -687,7 +763,7 @@ impl ModelRouter {
                         e
                     );
                     self.emit_route_status(task_type, "error");
-                    self.emit_route_fallback(task_type, &e.to_string());
+                    self.emit_route_fallback(task_type, &e.to_string(), character_id);
                     last_error = Some(e);
                 }
             }
@@ -717,8 +793,9 @@ impl ModelRouter {
                             e
                         );
                         self.emit_route_status(task_type, "error");
-                        self.emit_route_fallback(task_type, &e.to_string());
+                        self.emit_route_fallback(task_type, &e.to_string(), character_id);
                         last_error = Some(e);
+                        last_error_endpoint = self.task_endpoints.get(task_type).cloned();
                     }
                 }
             }
@@ -750,13 +827,19 @@ impl ModelRouter {
                     );
                     self.emit_route_status(task_type, "error");
                     last_error = Some(e);
+                    last_error_endpoint = Some(self.main_endpoint.clone());
                 }
             }
         }
 
         let err = last_error
             .unwrap_or_else(|| VivianError::Provider("没有可用的提供商".to_string()));
-        self.emit_llm_error_toast(task_type, &err.to_string());
+        self.emit_llm_error_toast(
+            task_type,
+            &err.to_string(),
+            last_error_endpoint.as_deref().unwrap_or(""),
+            character_id,
+        );
         Err(err)
     }
 
@@ -765,6 +848,7 @@ impl ModelRouter {
         task_type: &str,
         messages: Vec<ChatMessage>,
         json_schema: Option<serde_json::Value>,
+        character_id: &str,
     ) -> VivianResult<mpsc::Receiver<StreamEvent>> {
         Self::log_llm_request(task_type, &messages, &[]);
         // permit 由返回流的转发任务持有，直到流结束或调用方丢弃 receiver。
@@ -801,7 +885,7 @@ impl ModelRouter {
                         e
                     );
                     self.emit_route_status(task_type, "error");
-                    self.emit_route_fallback(task_type, &e.to_string());
+                    self.emit_route_fallback(task_type, &e.to_string(), character_id);
                 }
             }
         }
@@ -833,7 +917,7 @@ impl ModelRouter {
                             e
                         );
                         self.emit_route_status(task_type, "error");
-                        self.emit_route_fallback(task_type, &e.to_string());
+                        self.emit_route_fallback(task_type, &e.to_string(), character_id);
                     }
                 }
             }
@@ -857,7 +941,7 @@ impl ModelRouter {
                 }
                 Err(e) => {
                     self.emit_route_status(task_type, "error");
-                    self.emit_llm_error_toast(task_type, &e.to_string());
+                    self.emit_llm_error_toast(task_type, &e.to_string(), &self.main_endpoint, character_id);
                     return Err(e);
                 }
             }
@@ -974,6 +1058,7 @@ impl ModelRouter {
                 stream,
                 tools,
                 json_schema,
+                character_id,
                 ..
             } = request.clone();
             // tools 非空应走 generate_with_tools,这里防御性检查
@@ -988,10 +1073,11 @@ impl ModelRouter {
             } else {
                 json_schema.clone()
             };
+            let char_id = character_id.as_deref().unwrap_or("");
             let result = scope_provider_call(options, async {
                 if stream {
                     // 流式:累积所有 chunk 返回完整文本
-                    let mut rx = self.query_stream(&task_type, messages, effective_schema).await?;
+                    let mut rx = self.query_stream(&task_type, messages, effective_schema, char_id).await?;
                     let mut buf = String::new();
                     while let Some(event) = rx.recv().await {
                         match event {
@@ -1007,7 +1093,7 @@ impl ModelRouter {
                     }
                     Ok(buf)
                 } else {
-                    self.query_with_fallback(&task_type, messages, effective_schema).await
+                    self.query_with_fallback(&task_type, messages, effective_schema, char_id).await
                 }
             })
             .await;
@@ -1038,6 +1124,7 @@ impl ModelRouter {
                 tools,
                 json_schema,
                 stream: _,
+                character_id,
                 ..
             } = request.clone();
             if !tools.is_empty() {
@@ -1052,7 +1139,7 @@ impl ModelRouter {
             };
             let rx = scope_provider_call(
                 options,
-                self.query_stream(&task_type, messages, effective_schema),
+                self.query_stream(&task_type, messages, effective_schema, character_id.as_deref().unwrap_or("")),
             )
             .await;
             // strict 拒绝检测:仅在流未开始时(返回 Err)可重试;流已开始则无法重试
@@ -1083,11 +1170,12 @@ impl ModelRouter {
                 tools,
                 json_schema,
                 stream: _,
+                character_id,
                 ..
             } = request.clone();
             let result = scope_provider_call(
                 options,
-                self.query_with_tools(&task_type, messages, tools),
+                self.query_with_tools(&task_type, messages, tools, character_id.as_deref().unwrap_or("")),
             )
             .await;
             // strict 拒绝检测:熔断后重试(不带 schema)
@@ -1117,11 +1205,12 @@ impl ModelRouter {
                 tools,
                 json_schema,
                 stream: _,
+                character_id,
                 ..
             } = request.clone();
             let rx = scope_provider_call(
                 options,
-                self.query_stream_with_tools(&task_type, messages, tools),
+                self.query_stream_with_tools(&task_type, messages, tools, character_id.as_deref().unwrap_or("")),
             )
             .await;
             // strict 拒绝检测:仅在流未开始时(返回 Err)可重试;流已开始则无法重试
@@ -1256,6 +1345,7 @@ impl ModelRouter {
         task_type: &str,
         messages: Vec<ChatMessage>,
         tools: Vec<ToolDefinition>,
+        character_id: &str,
     ) -> VivianResult<ChatResponse> {
         Self::log_llm_request(task_type, &messages, &tools);
         // 按任务分组获取并发信号量
@@ -1271,6 +1361,8 @@ impl ModelRouter {
         };
 
         let mut last_error: Option<VivianError> = None;
+        // 跟随 last_error 一起记录：最后实际失败的 provider 的 endpoint
+        let mut last_error_endpoint: Option<String> = None;
 
         // 0. 工作智能体覆盖模型优先（仅 reasoning 任务）——用户显式选择，优先级高于路由矩阵
         if let Some(provider) = self.override_provider_for(task_type) {
@@ -1292,7 +1384,7 @@ impl ModelRouter {
                             e
                         );
                         self.emit_route_status(task_type, "error");
-                        self.emit_route_fallback(task_type, &e.to_string());
+                        self.emit_route_fallback(task_type, &e.to_string(), character_id);
                         last_error = Some(e);
                     }
                 }
@@ -1325,8 +1417,9 @@ impl ModelRouter {
                                 e
                             );
                             self.emit_route_status(task_type, "error");
-                            self.emit_route_fallback(task_type, &e.to_string());
+                            self.emit_route_fallback(task_type, &e.to_string(), character_id);
                             last_error = Some(e);
+                            last_error_endpoint = self.task_endpoints.get(task_type).cloned();
                         }
                     }
                 } else {
@@ -1362,6 +1455,7 @@ impl ModelRouter {
                         );
                         self.emit_route_status(task_type, "error");
                         last_error = Some(e);
+                        last_error_endpoint = Some(self.main_endpoint.clone());
                     }
                 }
             }
@@ -1373,7 +1467,12 @@ impl ModelRouter {
                 task_type
             ))
         });
-        self.emit_llm_error_toast(task_type, &err.to_string());
+        self.emit_llm_error_toast(
+            task_type,
+            &err.to_string(),
+            last_error_endpoint.as_deref().unwrap_or(""),
+            character_id,
+        );
         Err(err)
     }
 
@@ -1475,6 +1574,7 @@ impl ModelRouter {
         task_type: &str,
         messages: Vec<ChatMessage>,
         tools: Vec<ToolDefinition>,
+        character_id: &str,
     ) -> VivianResult<mpsc::Receiver<StreamEvent>> {
         Self::log_llm_request(task_type, &messages, &tools);
         // 按任务分组获取并发信号量
@@ -1514,7 +1614,7 @@ impl ModelRouter {
                             e
                         );
                         self.emit_route_status(task_type, "error");
-                        self.emit_route_fallback(task_type, &e.to_string());
+                        self.emit_route_fallback(task_type, &e.to_string(), character_id);
                     }
                 }
             } else {
@@ -1551,7 +1651,7 @@ impl ModelRouter {
                                 e
                             );
                             self.emit_route_status(task_type, "error");
-                            self.emit_route_fallback(task_type, &e.to_string());
+                            self.emit_route_fallback(task_type, &e.to_string(), character_id);
                         }
                     }
                 }
@@ -1577,7 +1677,7 @@ impl ModelRouter {
                     }
                     Err(e) => {
                         self.emit_route_status(task_type, "error");
-                        self.emit_llm_error_toast(task_type, &e.to_string());
+                        self.emit_llm_error_toast(task_type, &e.to_string(), &self.main_endpoint, character_id);
                         return Err(e);
                     }
                 }
@@ -1700,5 +1800,45 @@ impl ModelRouter {
             save_strict_broken_models(&broken);
         }
         true
+    }
+}
+
+#[cfg(test)]
+mod conversational_penalty_tests {
+    use super::is_conversational_task;
+
+    /// 惩罚参数只应注入"角色正在说话"的任务。
+    ///
+    /// 三个正例与 `generation.rs::build_chat_request` 注入响应 Schema 的集合一致
+    /// ——`reasoning` 是携带工具定义时由 `chat` 升级而来。
+    #[test]
+    fn only_spoken_output_tasks_get_penalties() {
+        for task in ["chat", "reasoning", "vision_describe"] {
+            assert!(is_conversational_task(task), "{task} 应注入采样惩罚");
+        }
+    }
+
+    /// 反例守卫：结构化抽取与工作智能体任务绝不能拿到惩罚参数。
+    ///
+    /// - `work_agent`：编程任务要确定性，惩罚只会让代码措辞发散
+    /// - `reflection` / `consolidation` / `memory` / `auto_extract`：输出是 JSON，
+    ///   抑制重复没有收益，反而可能扰动字段复现的稳定性
+    /// - `emotion_analysis` / `inner_monologue`：短分类输出，同样无收益
+    #[test]
+    fn structured_and_work_tasks_are_excluded() {
+        for task in [
+            "work_agent",
+            "reflection",
+            "consolidation",
+            "memory",
+            "auto_extract",
+            "inner_monologue",
+            "emotion_analysis",
+            "translation",
+            "query_rewrite",
+            "farewell",
+        ] {
+            assert!(!is_conversational_task(task), "{task} 不应注入采样惩罚");
+        }
     }
 }
