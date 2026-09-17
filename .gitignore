@@ -14,9 +14,7 @@ dist-ssr/
 *.tsbuildinfo
 
 # ===== IDE / Editor =====
-.vscode/*
-!.vscode/extensions.json
-!.vscode/settings.json
+.vscode/
 .idea/
 *.swp
 *.swo
@@ -54,6 +52,13 @@ vivian_data/
 # 注意：encrypt-assets / doctor / check-* 等构建与哨兵脚本都在这里，
 # ignore 后新 clone 无法直接构建，需自行补齐 scripts/
 scripts/
+
+# ===== 免 Tauri 预览页（本地开发工具，不入库） =====
+# 免 Tauri 跑设置面板 / Toast 用的 mock 入口，只服务本地调试，不参与应用运行、不进 dist。
+# 注意：*-preview.html 会在未追踪文件里生效；room-preview.html 与 src/roomPreview.tsx
+# 早在首个 commit 就已入库，已追踪文件不受 .gitignore 约束，故仍在版本库里。
+*-preview.html
+src/*Preview.tsx
 
 # ===== 加密资源与密钥（构建产物，不入库） =====
 src-tauri/assets_enc/
