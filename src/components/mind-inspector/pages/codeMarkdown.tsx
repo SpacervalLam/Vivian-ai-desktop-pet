@@ -121,7 +121,7 @@ const looksLikeOperator = (prev: string, next: string): boolean =>
   isAsciiAlnum(prev) && isAsciiAlnum(next);
 
 /** 内联渲染上下文就是 `MarkdownFileContext` 的值，直接从它派生以免两处定义漂移。 */
-type InlineCtx = React.ContextType<typeof MarkdownFileContext>;
+export type InlineCtx = React.ContextType<typeof MarkdownFileContext>;
 
 /**
  * 行内语法：`code`、**粗**、*斜*、~~删除~~、[文字](链接)。
@@ -290,14 +290,23 @@ const CodeBlock: React.FC<{ lang: string; code: string }> = ({ lang, code }) => 
 /** `checked` 为 null 表示普通条目，true / false 表示任务清单条目 */
 type ListNode = { text: string; checked: boolean | null; children: ListNode[] };
 
+/**
+ * 块在源码里的行区间（0-based，半开区间 `[start, end)`）。
+ *
+ * 渲染态的就地编辑靠它把块映射回对应的原文行：编辑时取出这几行原文交给用户改，
+ * 提交后替换回同一区间。**改的始终是原文片段**，不必把渲染后的 DOM 反推成
+ * markdown —— 那条路（嵌套列表缩进、转义字符、行尾空格换行）是有损的。
+ */
+export type BlockSpan = { start: number; end: number };
+
 type Block =
-  | { kind: 'p'; text: string }
-  | { kind: 'h'; level: number; text: string }
-  | { kind: 'hr' }
-  | { kind: 'quote'; lines: string[] }
-  | { kind: 'list'; ordered: boolean; items: ListNode[] }
-  | { kind: 'code'; lang: string; code: string }
-  | { kind: 'table'; header: string[]; rows: string[][] };
+  | { kind: 'p'; text: string; span: BlockSpan }
+  | { kind: 'h'; level: number; text: string; span: BlockSpan }
+  | { kind: 'hr'; span: BlockSpan }
+  | { kind: 'quote'; lines: string[]; span: BlockSpan }
+  | { kind: 'list'; ordered: boolean; items: ListNode[]; span: BlockSpan }
+  | { kind: 'code'; lang: string; code: string; span: BlockSpan }
+  | { kind: 'table'; header: string[]; rows: string[][]; span: BlockSpan };
 
 const RE_FENCE = /^\s*```\s*([A-Za-z0-9+#._-]*)\s*$/;
 const RE_HEADING = /^(#{1,6})\s+(.*)$/;
@@ -334,7 +343,7 @@ function buildList(rows: { indent: number; text: string }[]): ListNode[] {
   return roots;
 }
 
-function parseBlocks(src: string): Block[] {
+export function parseBlocks(src: string): Block[] {
   const lines = src.replace(/\r\n?/g, '\n').split('\n');
   const blocks: Block[] = [];
   let i = 0;
@@ -350,6 +359,7 @@ function parseBlocks(src: string): Block[] {
     // 围栏代码块：未闭合时把余下内容整体当代码（流式输出会走到这里）
     const fence = RE_FENCE.exec(line);
     if (fence) {
+      const start = i;
       const lang = fence[1] || '';
       const body: string[] = [];
       i += 1;
@@ -358,36 +368,38 @@ function parseBlocks(src: string): Block[] {
         i += 1;
       }
       if (i < lines.length) i += 1; // 跳过收尾围栏
-      blocks.push({ kind: 'code', lang, code: body.join('\n') });
+      blocks.push({ kind: 'code', lang, code: body.join('\n'), span: { start, end: i } });
       continue;
     }
 
     const heading = RE_HEADING.exec(line);
     if (heading) {
-      blocks.push({ kind: 'h', level: heading[1].length, text: heading[2].trim() });
+      blocks.push({ kind: 'h', level: heading[1].length, text: heading[2].trim(), span: { start: i, end: i + 1 } });
       i += 1;
       continue;
     }
 
     if (RE_HR.test(line)) {
-      blocks.push({ kind: 'hr' });
+      blocks.push({ kind: 'hr', span: { start: i, end: i + 1 } });
       i += 1;
       continue;
     }
 
     // 引用块：连续 `>` 行合并，内部再按块解析
     if (RE_QUOTE.test(line)) {
+      const start = i;
       const inner: string[] = [];
       while (i < lines.length && RE_QUOTE.test(lines[i])) {
         inner.push(RE_QUOTE.exec(lines[i])![1]);
         i += 1;
       }
-      blocks.push({ kind: 'quote', lines: inner });
+      blocks.push({ kind: 'quote', lines: inner, span: { start, end: i } });
       continue;
     }
 
     // 表格：本行含 `|` 且下一行是分隔行
     if (line.includes('|') && i + 1 < lines.length && RE_TABLE_SEP.test(lines[i + 1])) {
+      const start = i;
       const header = splitRow(line);
       const rows: string[][] = [];
       i += 2;
@@ -395,13 +407,14 @@ function parseBlocks(src: string): Block[] {
         rows.push(splitRow(lines[i]));
         i += 1;
       }
-      blocks.push({ kind: 'table', header, rows });
+      blocks.push({ kind: 'table', header, rows, span: { start, end: i } });
       continue;
     }
 
     // 列表：连续列表行（含空行后的续行归上一项不处理，保持简单）
     const item = RE_ITEM.exec(line);
     if (item) {
+      const start = i;
       const ordered = /^\d/.test(item[2]);
       const rows: { indent: number; text: string }[] = [];
       while (i < lines.length) {
@@ -411,11 +424,12 @@ function parseBlocks(src: string): Block[] {
         rows.push({ indent: m[1].replace(/\t/g, '  ').length, text: m[4] });
         i += 1;
       }
-      blocks.push({ kind: 'list', ordered, items: buildList(rows) });
+      blocks.push({ kind: 'list', ordered, items: buildList(rows), span: { start, end: i } });
       continue;
     }
 
     // 段落：吃到空行或下一个块级起点
+    const start = i;
     const para: string[] = [line];
     i += 1;
     while (i < lines.length) {
@@ -426,7 +440,7 @@ function parseBlocks(src: string): Block[] {
       para.push(cur);
       i += 1;
     }
-    blocks.push({ kind: 'p', text: para.join('\n') });
+    blocks.push({ kind: 'p', text: para.join('\n'), span: { start, end: i } });
   }
 
   return blocks;
@@ -535,6 +549,28 @@ export const MarkdownText: React.FC<{ text: string; keyPrefix?: string; animate?
     </div>
   );
 };
+
+/**
+ * 逐块渲染，并把每块与它的源码行区间一起交出去。
+ *
+ * 与 `MarkdownText` 的区别在于暴露块边界：后者一次渲染整段、调用方拿不到「哪几行
+ * 是这一段」。需要**块级就地编辑**的宿主（右侧文件预览的渲染态）用这个 —— 编辑时
+ * 按 `span` 取出那几行原文交给用户改，提交后替换回同一区间，全程不碰渲染结果。
+ *
+ * 引用块内部是递归解析的，其子块的 `span` 相对于引用块自身的文本，不适用于
+ * 按整篇文件定位，宿主按顶层块编辑即可。
+ */
+export function renderMarkdownBlocks(
+  src: string,
+  keyPrefix: string,
+  ctx: InlineCtx,
+): { key: string; node: React.ReactNode; span: BlockSpan }[] {
+  return parseBlocks(src).map((b, i) => ({
+    key: `${keyPrefix}-${i}`,
+    node: renderBlocks([b], `${keyPrefix}-${i}`, ctx)[0],
+    span: b.span,
+  }));
+}
 
 export default MarkdownText;
 

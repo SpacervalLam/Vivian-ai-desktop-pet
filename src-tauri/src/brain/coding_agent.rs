@@ -217,6 +217,29 @@ pub struct CodingWidget {
     pub code: String,
 }
 
+/// `coding:error` 事件的结构化分类。
+///
+/// 前端按 `kind` 分支处理，**不要去匹配 message 文案**：文案是给人看的展示值，
+/// 会随措辞调整（且未来要本地化），拿它当协议用，改一个标点就会静默断线。
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodingErrorKind {
+    /// 单轮工具调用轮数预算耗尽（含续轮后再度耗尽），已硬停止，等用户下一条消息
+    BudgetExhausted,
+    /// 预算耗尽但检测到任务仍在推进，自动续轮一次，循环继续（非终止性提示）
+    BudgetExtended,
+    /// 连续多轮无实质产出，收益递减保护提前停止
+    LowOutputStop,
+    /// 用户主动取消
+    Canceled,
+    /// 模型声明要调用工具，但调用数据在流式传输中反复丢失
+    ToolStreamLost,
+    /// LLM 调用失败（细分类型见同载荷的 error_type / error_kind）
+    LlmFailure,
+    /// 命令或程序生成阶段的失败
+    CommandFailed,
+}
+
 /// 用户消息附带的文件引用（@-mention 注入上下文）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CodingFileRef {
@@ -1693,7 +1716,11 @@ impl CodingAgentService {
                 );
                 let _ = app.emit(
                     "coding:error",
-                    serde_json::json!({ "session_id": session_id, "message": e }),
+                    serde_json::json!({
+                        "session_id": session_id,
+                        "kind": CodingErrorKind::CommandFailed,
+                        "message": e,
+                    }),
                 );
             }
         }
@@ -2325,6 +2352,7 @@ impl CodingAgentService {
                 );
                 let _ = app.emit("coding:error", serde_json::json!({
                     "session_id": session_id,
+                    "kind": CodingErrorKind::BudgetExtended,
                     "message": format!("已达到单轮最大工具调用轮数（{old_budget}），自动续轮 {} 轮", budget - old_budget),
                 }));
             }
@@ -2333,7 +2361,9 @@ impl CodingAgentService {
             if self.is_canceled(session_id) {
                 self.finish_turn(app.clone(), session_id, CodingStatus::Canceled);
                 let _ = app.emit("coding:error", serde_json::json!({
-                    "session_id": session_id, "message": "已取消",
+                    "session_id": session_id,
+                    "kind": CodingErrorKind::Canceled,
+                    "message": "已取消",
                 }));
                 return;
             }
@@ -2526,7 +2556,11 @@ impl CodingAgentService {
                 self.push_error(session_id, m);
                 let _ = app.emit(
                     "coding:error",
-                    serde_json::json!({ "session_id": session_id, "message": m }),
+                    serde_json::json!({
+                        "session_id": session_id,
+                        "kind": CodingErrorKind::ToolStreamLost,
+                        "message": m,
+                    }),
                 );
                 self.finish_turn(app.clone(), session_id, CodingStatus::Idle);
                 return;
@@ -2609,7 +2643,9 @@ impl CodingAgentService {
                 if self.is_canceled(session_id) {
                     self.finish_turn(app.clone(), session_id, CodingStatus::Canceled);
                     let _ = app.emit("coding:error", serde_json::json!({
-                        "session_id": session_id, "message": "已取消",
+                        "session_id": session_id,
+                        "kind": CodingErrorKind::Canceled,
+                        "message": "已取消",
                     }));
                     return;
                 }
@@ -2753,6 +2789,7 @@ impl CodingAgentService {
                 );
                 let _ = app.emit("coding:error", serde_json::json!({
                     "session_id": session_id,
+                    "kind": CodingErrorKind::LowOutputStop,
                     "message": format!("连续 {low_rounds} 轮无实质产出，已提前停止（收益递减保护）"),
                 }));
                 self.finish_turn(app.clone(), session_id, CodingStatus::Idle);
@@ -2780,6 +2817,7 @@ impl CodingAgentService {
         );
         let _ = app.emit("coding:error", serde_json::json!({
             "session_id": session_id,
+            "kind": CodingErrorKind::BudgetExhausted,
             "message": format!("已达到单轮最大工具调用轮数（{budget}）"),
         }));
         self.finish_turn(app.clone(), session_id, CodingStatus::Idle);
@@ -2880,7 +2918,9 @@ impl CodingAgentService {
         );
         let fail = |msg: &str| {
             let _ = app.emit("coding:error", serde_json::json!({
-                "session_id": session_id, "message": msg,
+                "session_id": session_id,
+                "kind": CodingErrorKind::CommandFailed,
+                "message": msg,
             }));
         };
 
@@ -3232,6 +3272,7 @@ impl CodingAgentService {
             "coding:error",
             serde_json::json!({
                 "session_id": session_id,
+                "kind": CodingErrorKind::LlmFailure,
                 "message": class.user_message,
                 "error_type": class.error_type,
                 "error_kind": class.kind,

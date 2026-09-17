@@ -4,15 +4,21 @@
  * - 只读：highlight.js 语法高亮 + 行号 gutter
  * - 编辑：等宽 textarea + 行号，保存走 `coding_write_file`
  * - 超大文件：初始只收首段，`coding_read_file_lines` 分页续读「加载更多」
+ * - markdown 另有两种模式：源码（高亮）与渲染（块级就地编辑），工具栏可切换
  *
  * 高亮产物经 DOMPurify 白名单过滤后再注入，与 WidgetCard 同一套安全链路。
+ *
+ * 渲染态编辑刻意不碰渲染结果：点某一块的铅笔后，按块记的源码行区间取出那几行原文
+ * 交给 textarea，提交时替换回同一区间。于是不存在「把 DOM 反推回 markdown」这一步
+ * —— 那条路在嵌套列表缩进、转义字符、行尾空格换行上都是有损的。
  */
 
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { Loader2, Pencil, Save, X } from 'lucide-react';
+import { Loader2, Pencil, Save, X, Eye, Code2 } from 'lucide-react';
 import DOMPurify from 'dompurify';
 import hljs from 'highlight.js/lib/core';
+import { MarkdownFileContext, renderMarkdownBlocks } from './codeMarkdown';
 // 语言按需注册（各语言体积 2~8KB，静态引入避免运行时异步加载）
 import javascript from 'highlight.js/lib/languages/javascript';
 import typescript from 'highlight.js/lib/languages/typescript';
@@ -116,12 +122,35 @@ export const SourceFileView: React.FC<{
   const [savedFlash, setSavedFlash] = useState(false);
   const [editError, setEditError] = useState<string | null>(null);
 
+  // markdown 的两种模式：源码（语法高亮）与渲染（块级就地编辑）
+  const [mode, setMode] = useState<'source' | 'rendered'>('source');
+  const [editingBlock, setEditingBlock] = useState<number | null>(null);
+  const [blockDraft, setBlockDraft] = useState('');
+  const [blockSaving, setBlockSaving] = useState(false);
+  const [blockError, setBlockError] = useState<string | null>(null);
+
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const gutterRef = useRef<HTMLDivElement | null>(null);
   const editHighlightRef = useRef<HTMLPreElement | null>(null);
   const readonlyScrollRef = useRef<HTMLDivElement | null>(null);
+  const mdCtx = useContext(MarkdownFileContext);
 
   const lang = useMemo(() => langForPath(data.path), [data.path]);
+  const isMarkdown = lang === 'markdown';
+
+  /** 原文。渲染态直接用它；源码态另外走高亮后的 codeLines。 */
+  const content = useMemo(() => lines.join('\n'), [lines]);
+
+  /**
+   * 渲染态的块序列（每项带源码行区间）。只在 markdown + 渲染模式 + 未进入整体编辑时
+   * 计算：解析整篇是 O(行数)，没必要在源码态白跑一遍。
+   */
+  const mdBlocks = useMemo(
+    () => (isMarkdown && mode === 'rendered' && !editing
+      ? renderMarkdownBlocks(content, 'srcmd', mdCtx)
+      : []),
+    [isMarkdown, mode, editing, content, mdCtx],
+  );
 
   // 只读态：高亮整段并拆成行（hljs 的 span 不跨行，拆分安全）
   const codeLines = useMemo(() => highlightHtml(lines.join('\n'), lang).split('\n'), [lines, lang]);
@@ -159,6 +188,52 @@ export const SourceFileView: React.FC<{
       setSaving(false);
     }
   }, [draft, data.path, saving]);
+
+  // ---- 渲染态：块级就地编辑 ----
+
+  const startBlockEdit = useCallback(
+    (index: number, start: number, end: number) => {
+      setBlockDraft(lines.slice(start, end).join('\n'));
+      setEditingBlock(index);
+      setBlockError(null);
+    },
+    [lines],
+  );
+
+  const cancelBlockEdit = useCallback(() => {
+    setEditingBlock(null);
+    setBlockDraft('');
+    setBlockError(null);
+  }, []);
+
+  /**
+   * 提交块编辑：把 draft 替换回它原来占的那几行，然后写盘。
+   *
+   * 走的是与整体编辑同一个 `coding_write_file`。改完就地重新解析，块的行区间随
+   * 行数变化自然更新 —— 不需要手工维护后面块的偏移。
+   */
+  const saveBlockEdit = useCallback(
+    async (start: number, end: number) => {
+      if (blockSaving) return;
+      setBlockSaving(true);
+      setBlockError(null);
+      try {
+        const next = [...lines.slice(0, start), ...blockDraft.split('\n'), ...lines.slice(end)];
+        await invoke('coding_write_file', { path: data.path, content: next.join('\n') });
+        setLines(next);
+        setTotalLines(next.length);
+        setEditingBlock(null);
+        setBlockDraft('');
+        setSavedFlash(true);
+        window.setTimeout(() => setSavedFlash(false), 1800);
+      } catch (e) {
+        setBlockError(String(e));
+      } finally {
+        setBlockSaving(false);
+      }
+    },
+    [blockDraft, blockSaving, data.path, lines],
+  );
 
   const loadMore = useCallback(async () => {
     if (loadingMore) return;
@@ -210,6 +285,19 @@ export const SourceFileView: React.FC<{
         </span>
         <span className="codex-src-spacer" />
         {savedFlash && <span className="codex-src-saved">已保存</span>}
+        {isMarkdown && !editing && (
+          <button
+            type="button"
+            className="codex-src-btn"
+            onClick={() => {
+              cancelBlockEdit();
+              setMode((m) => (m === 'rendered' ? 'source' : 'rendered'));
+            }}
+            title={mode === 'rendered' ? '查看源码' : '渲染预览'}
+          >
+            {mode === 'rendered' ? <Code2 size={13} /> : <Eye size={13} />}
+          </button>
+        )}
         {editing ? (
           <>
             <button type="button" className="codex-src-btn" onClick={cancelEdit} title="取消">
@@ -219,7 +307,7 @@ export const SourceFileView: React.FC<{
               {saving ? <Loader2 size={13} className="codex-spin" /> : <Save size={13} />}
             </button>
           </>
-        ) : (
+        ) : mode === 'source' ? (
           <button
             type="button"
             className="codex-src-btn"
@@ -229,10 +317,11 @@ export const SourceFileView: React.FC<{
           >
             <Pencil size={13} />
           </button>
-        )}
+        ) : null}
       </div>
 
       {editError && <div className="codex-src-error">{editError}</div>}
+      {blockError && <div className="codex-src-error">{blockError}</div>}
 
       {editing ? (
         <div className="codex-src-scroll codex-src-editor">
@@ -262,6 +351,61 @@ export const SourceFileView: React.FC<{
               aria-label={`Edit ${data.path}`}
             />
           </div>
+        </div>
+      ) : mode === 'rendered' ? (
+        <div className="codex-src-scroll">
+          {mdBlocks.length === 0 ? (
+            <div className="codex-src-more">（空文档）</div>
+          ) : (
+            <div className="codex-md codex-src-md">
+              {mdBlocks.map((b, i) => (
+                <div key={b.key} className="codex-src-mdblock" data-md-block={i}>
+                  {editingBlock === i ? (
+                    <div className="codex-src-mdblock-editor">
+                      <textarea
+                        className="codex-src-mdblock-area"
+                        value={blockDraft}
+                        onChange={(e) => setBlockDraft(e.target.value)}
+                        spellCheck={false}
+                        autoFocus
+                        aria-label="编辑这一段"
+                      />
+                      <div className="codex-src-mdblock-actions">
+                        <button type="button" className="codex-src-btn" onClick={cancelBlockEdit} title="取消">
+                          <X size={13} />
+                        </button>
+                        <button
+                          type="button"
+                          className="codex-src-btn codex-src-btn-primary"
+                          onClick={() => void saveBlockEdit(b.span.start, b.span.end)}
+                          disabled={blockSaving}
+                          title="保存"
+                        >
+                          {blockSaving ? <Loader2 size={13} className="codex-spin" /> : <Save size={13} />}
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <>
+                      {/* 已有块在编辑时不挂铅笔：避免开着编辑框又去点另一块；
+                          超大文件（分页未完）也不给改，否则写盘会截断未加载的部分 */}
+                      {!hasMore && editingBlock === null && (
+                        <button
+                          type="button"
+                          className="codex-src-mdblock-btn"
+                          onClick={() => startBlockEdit(i, b.span.start, b.span.end)}
+                          title="编辑这一段"
+                        >
+                          <Pencil size={11} />
+                        </button>
+                      )}
+                      {b.node}
+                    </>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       ) : (
         <div className="codex-src-scroll" ref={readonlyScrollRef}>

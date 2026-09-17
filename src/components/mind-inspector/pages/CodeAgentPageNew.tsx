@@ -9,6 +9,7 @@
 import React, { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo, lazy, Suspense } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
+import type { TFunction } from 'i18next';
 import { listen, emit, type UnlistenFn } from '@tauri-apps/api/event';
 import { invoke, convertFileSrc } from '@tauri-apps/api/core';
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
@@ -58,6 +59,21 @@ function resolveWorkspacePath(path: string, cwd?: string): string {
  * 后者代表执行失败、渲染成红色警示，前者只是提示，混用会把正常状态读成故障。
  */
 type CodingRole = 'user' | 'assistant' | 'tool_use' | 'tool_result' | 'error' | 'notice';
+
+/**
+ * `coding:error` 事件的结构化分类，与后端 `CodingErrorKind` 一一对应。
+ *
+ * 前端一律按它分支，不要去匹配 message 文案——文案是给人看的展示值，
+ * 会随措辞调整（且未来要本地化），拿它当协议用，改一个标点就会静默断线。
+ */
+type CodingErrorKind =
+  | 'budget_exhausted'
+  | 'budget_extended'
+  | 'low_output_stop'
+  | 'canceled'
+  | 'tool_stream_lost'
+  | 'llm_failure'
+  | 'command_failed';
 
 interface CodingMessage {
   role: CodingRole;
@@ -332,18 +348,28 @@ function filterSlashCommands(query: string): SlashCommand[] {
   return ranked.map((r) => r.cmd);
 }
 
-const TOOL_META: Record<string, { icon: React.ReactNode; label: string }> = {
-  read_file: { icon: <FileText size={14} />, label: '读取文件' },
-  write_file: { icon: <FilePlus size={14} />, label: '写入文件' },
-  edit_file: { icon: <FileEdit size={14} />, label: '编辑文件' },
-  run_command: { icon: <TerminalIcon size={14} />, label: '执行命令' },
-  grep_search: { icon: <Search size={14} />, label: '搜索代码' },
-  list_dir: { icon: <FolderTree size={14} />, label: '目录结构' },
-  compose_program: { icon: <Braces size={14} />, label: '组合程序' },
+/**
+ * 工具图标表。**只放图标**：展示名一律走 i18n 的 `code_tool_<工具名>`
+ * （三语齐全），未收录的工具回退原始工具名——所以这里不能再放中文 label，
+ * 否则调用方会不小心直接把写死的中文渲染出去。
+ */
+const TOOL_META: Record<string, { icon: React.ReactNode }> = {
+  read_file: { icon: <FileText size={14} /> },
+  write_file: { icon: <FilePlus size={14} /> },
+  edit_file: { icon: <FileEdit size={14} /> },
+  run_command: { icon: <TerminalIcon size={14} /> },
+  grep_search: { icon: <Search size={14} /> },
+  list_dir: { icon: <FolderTree size={14} /> },
+  compose_program: { icon: <Braces size={14} /> },
 };
 
-function toolMeta(name: string) {
-  return TOOL_META[name] ?? { icon: <Wrench size={14} />, label: name };
+function toolMeta(name: string): { icon: React.ReactNode } {
+  return TOOL_META[name] ?? { icon: <Wrench size={14} /> };
+}
+
+/** 工具展示名。key 缺失（未收录的新工具）时 t 会回显 defaultValue，即原始工具名。 */
+function toolLabel(name: string, t: TFunction): string {
+  return t(`mind_inspector.code_tool_${name}`, { defaultValue: name });
 }
 
 // ============ 格式化 ============
@@ -774,6 +800,7 @@ const FileToolBody: React.FC<{ path: string; result?: string; name: string }> = 
 
 /** show_widget 组件卡片：受控渲染（dompurify 白名单）+ 失败降级 + 源码展开。 */
 const WidgetCard: React.FC<{ widget: CodingWidget }> = ({ widget }) => {
+  const { t } = useTranslation();
   const [showSource, setShowSource] = useState(false);
   const sanitized = useMemo(() => {
     try {
@@ -793,7 +820,7 @@ const WidgetCard: React.FC<{ widget: CodingWidget }> = ({ widget }) => {
           className="codex-widget-card-toggle"
           onClick={() => setShowSource((s) => !s)}
         >
-          {showSource ? '收起源码' : '源码'}
+          {showSource ? t('mind_inspector.code_hide_source') : t('mind_inspector.code_show_source')}
         </button>
       </div>
       {ok ? (
@@ -801,7 +828,7 @@ const WidgetCard: React.FC<{ widget: CodingWidget }> = ({ widget }) => {
       ) : (
         <div className="codex-widget-card-error">
           <XCircle size={14} style={{ flexShrink: 0 }} />
-          <span>组件内容未通过安全过滤，无法渲染</span>
+          <span>{t('mind_inspector.code_sanitize_blocked')}</span>
         </div>
       )}
       {showSource && (
@@ -1031,7 +1058,7 @@ const ToolCallCard: React.FC<{
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState(!!running);
   const meta = toolMeta(name);
-  const toolLabel = t(`mind_inspector.code_tool_${name}`, { defaultValue: meta.label });
+  const label = toolLabel(name, t);
   const tr = (key: string, opts?: Record<string, unknown>) => t(key, { ...opts, defaultValue: '' });
   const statusColor = running
     ? 'var(--codex-accent)'
@@ -1063,7 +1090,7 @@ const ToolCallCard: React.FC<{
       <button type="button" onClick={() => setExpanded((v) => !v)} className="codex-tool-header">
         <span style={{ color: statusColor, display: 'inline-flex', flexShrink: 0 }}>{meta.icon}</span>
         <span className="codex-tool-badge">{t('mind_inspector.code_tool_call')}</span>
-        <span className="codex-tool-label">{toolLabel}</span>
+        <span className="codex-tool-label">{label}</span>
         <span className="codex-tool-name">{name}</span>
         {durationMs != null && !running && (
           <span className="codex-tool-duration">{formatDuration(durationMs)}</span>
@@ -1216,9 +1243,9 @@ const ToolProcessGroup: React.FC<{
   }, [msgs]);
 
   const metaParts: string[] = [];
-  if (stats.steps > 0) metaParts.push(`${stats.steps} 步`);
-  if (stats.pending > 0) metaParts.push(`${stats.pending} 步进行中`);
-  if (stats.files > 0) metaParts.push(`${stats.files} 个文件`);
+  if (stats.steps > 0) metaParts.push(t('mind_inspector.code_tool_group_steps', { n: stats.steps }));
+  if (stats.pending > 0) metaParts.push(t('mind_inspector.code_tool_group_pending', { n: stats.pending }));
+  if (stats.files > 0) metaParts.push(t('mind_inspector.code_tool_group_files', { n: stats.files }));
   if (stats.ms > 0) metaParts.push(formatDuration(stats.ms));
 
   return (
@@ -1553,7 +1580,8 @@ const LspVizCard: React.FC<{ parsed: LspParsed; cwd: string }> = ({ parsed, cwd 
 interface TurnProgress {
   rounds: number;
   failed: number;
-  tools: { name: string; label: string; count: number }[];
+  /** 只统计工具名与次数：展示名在渲染时由 i18n 决定，数据层不掺文案 */
+  tools: { name: string; count: number }[];
   files: string[];
 }
 
@@ -1580,7 +1608,7 @@ function computeTurnProgress(messages: CodingMessage[]): TurnProgress {
   }
   const tools = [...toolCounts.entries()]
     .sort((a, b) => b[1] - a[1])
-    .map(([name, count]) => ({ name, label: toolMeta(name).label, count }));
+    .map(([name, count]) => ({ name, count }));
   return { rounds, failed, tools, files: [...files].slice(0, 5) };
 }
 
@@ -1608,7 +1636,7 @@ const BudgetStopBanner: React.FC<{
           <div className="codex-budget-chips">
             {progress.tools.map((tl) => (
               <span key={tl.name} className="codex-budget-chip" title={tl.name}>
-                {t(`mind_inspector.code_tool_${tl.name}`, { defaultValue: tl.label })} ×{tl.count}
+                {toolLabel(tl.name, t)} ×{tl.count}
               </span>
             ))}
           </div>
@@ -3158,7 +3186,7 @@ const WorkQuestionCard: React.FC<{ question: WorkQuestionRequest; onDone: () => 
       <div className="codex-ask-head">
         <HelpCircle size={13} />
         <span>{t('mind_inspector.code_ask_title')}</span>
-        {question.multi_select ? <span className="codex-ask-multi">多选</span> : null}
+        {question.multi_select ? <span className="codex-ask-multi">{t('mind_inspector.code_multi_select')}</span> : null}
       </div>
       <div className="codex-ask-question">{question.question}</div>
       {question.context ? <div className="codex-ask-context">{question.context}</div> : null}
@@ -4355,18 +4383,16 @@ const CodeAgentPage: React.FC = () => {
       });
       await add('coding:error', (p) => {
         if (!isMine(p)) return;
-        const message = (p as { message: string }).message;
+        const payload = p as { message: string; kind?: CodingErrorKind };
         setThinking(false);
         setThinkingText('');
         setStreamingText('');
-        append({ role: 'error', content: message, timestamp: Date.now() });
+        append({ role: 'error', content: payload.message, timestamp: Date.now() });
         // 工具轮次预算耗尽硬停止 → 弹出去向选择条。
-        // 注意区分"自动续轮"提示（含"自动续轮"，任务仍在继续）与硬停止
-        // （含"自动停止"/"可发送新消息继续"）。
-        if (
-          message.includes('已达到单轮最大工具调用轮数') &&
-          (message.includes('自动停止') || message.includes('可发送新消息继续'))
-        ) {
+        // 只认后端给的结构化 kind（见 CodingErrorKind）：message 是给人看的展示值，
+        // 拿它做 includes 匹配，后端改一次措辞前端就会静默失效。
+        // 自动续轮是 budget_extended，任务仍在推进，不弹这条。
+        if (payload.kind === 'budget_exhausted') {
           setBudgetStopped(true);
           setBudgetHint(false);
         }
@@ -4810,10 +4836,6 @@ const CodeAgentPage: React.FC = () => {
     sessionGroups.get(key)!.push(s);
   }
 
-  const modeLabel = MODES.find((m) => m.key === (activeSession?.mode || 'standard'))?.label ?? '标准模式';
-  const permissionLabel = PERMISSIONS.find((p) => p.key === permission)?.label ?? 'Workspace Write';
-  const reasoningLabel = REASONING_LEVELS.find((l) => l.key === reasoningLevel)?.label ?? 'High';
-
   const composer = (
     <div className="codex-composer">
       {draftImages.length > 0 && (
@@ -5194,9 +5216,9 @@ const CodeAgentPage: React.FC = () => {
                           </div>
                           
                         </div>
-                        {s.status === 'running' && <Loader2 className="codex-session-status-spinner codex-spin" size={13} aria-label="工作中" />}
-                        {s.session_id === activeId && ask && <HelpCircle className="codex-session-status-question" size={14} aria-label="等待确认" />}
-                        {unreadSessions.has(s.session_id) && <span className="codex-session-unread-dot" aria-label="未读" />}
+                        {s.status === 'running' && <Loader2 className="codex-session-status-spinner codex-spin" size={13} aria-label={t('mind_inspector.code_working')} />}
+                        {s.session_id === activeId && ask && <HelpCircle className="codex-session-status-question" size={14} aria-label={t('mind_inspector.code_waiting_confirm')} />}
+                        {unreadSessions.has(s.session_id) && <span className="codex-session-unread-dot" aria-label={t('mind_inspector.code_unread_dot')} />}
                       </div>
                     );
                   })
@@ -5303,9 +5325,9 @@ const CodeAgentPage: React.FC = () => {
                               </div>
                               
                             </div>
-                            {s.status === 'running' && <Loader2 className="codex-session-status-spinner codex-spin" size={13} aria-label="工作中" />}
-                            {s.session_id === activeId && ask && <HelpCircle className="codex-session-status-question" size={14} aria-label="等待确认" />}
-                            {unreadSessions.has(s.session_id) && <span className="codex-session-unread-dot" aria-label="未读" />}
+                            {s.status === 'running' && <Loader2 className="codex-session-status-spinner codex-spin" size={13} aria-label={t('mind_inspector.code_working')} />}
+                            {s.session_id === activeId && ask && <HelpCircle className="codex-session-status-question" size={14} aria-label={t('mind_inspector.code_waiting_confirm')} />}
+                            {unreadSessions.has(s.session_id) && <span className="codex-session-unread-dot" aria-label={t('mind_inspector.code_unread_dot')} />}
                           </div>
                         );
                       })}
@@ -5318,25 +5340,25 @@ const CodeAgentPage: React.FC = () => {
         {typeof document !== 'undefined' && createPortal(<>
           {sessionMenu && (
             <div className="codex-theme codex-session-context-menu" style={{ left: sessionMenu.x, top: sessionMenu.y }} onMouseDown={(e) => e.stopPropagation()} onContextMenu={(e) => e.preventDefault()}>
-              <button type="button" onClick={() => void handleSessionContextAction('rename')}>重命名</button>
-              <button type="button" onClick={() => void handleSessionContextAction('pin')}>{pinnedSessions.has(sessionMenu.id) ? '取消置顶' : '置顶'}</button>
-              <button type="button" onClick={() => void handleSessionContextAction('unread')}>{unreadSessions.has(sessionMenu.id) ? '标记为已读' : '标记为未读'}</button>
-              <button type="button" onClick={() => void handleSessionContextAction('fork')}>分叉</button>
-              <button type="button" className="danger" onClick={() => void handleSessionContextAction('delete')}>永久删除</button>
+              <button type="button" onClick={() => void handleSessionContextAction('rename')}>{t('mind_inspector.code_rename')}</button>
+              <button type="button" onClick={() => void handleSessionContextAction('pin')}>{pinnedSessions.has(sessionMenu.id) ? t('mind_inspector.code_unpin') : t('mind_inspector.code_pin')}</button>
+              <button type="button" onClick={() => void handleSessionContextAction('unread')}>{unreadSessions.has(sessionMenu.id) ? t('mind_inspector.code_mark_read') : t('mind_inspector.code_mark_unread')}</button>
+              <button type="button" onClick={() => void handleSessionContextAction('fork')}>{t('mind_inspector.code_fork')}</button>
+              <button type="button" className="danger" onClick={() => void handleSessionContextAction('delete')}>{t('mind_inspector.code_delete_forever')}</button>
             </div>
           )}
           {renameSessionId && (
             <div className="codex-session-modal-backdrop" onMouseDown={() => setRenameSessionId(null)}>
               <div className="codex-theme codex-session-modal" onMouseDown={(e) => e.stopPropagation()}>
-                <h3>重命名会话</h3>
+                <h3>{t('mind_inspector.code_rename_session')}</h3>
                 <input autoFocus value={renameSessionDraft} onChange={(e) => setRenameSessionDraft(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && renameSessionDraft.trim()) { setSessionTitles((p) => ({ ...p, [renameSessionId]: renameSessionDraft.trim() })); setRenameSessionId(null); } }} />
-                <div className="codex-session-modal-actions"><button type="button" onClick={() => setRenameSessionId(null)}>取消</button><button type="button" className="primary" onClick={() => { if (renameSessionDraft.trim()) setSessionTitles((p) => ({ ...p, [renameSessionId]: renameSessionDraft.trim() })); setRenameSessionId(null); }}>保存</button></div>
+                <div className="codex-session-modal-actions"><button type="button" onClick={() => setRenameSessionId(null)}>{t('mind_inspector.code_cancel')}</button><button type="button" className="primary" onClick={() => { if (renameSessionDraft.trim()) setSessionTitles((p) => ({ ...p, [renameSessionId]: renameSessionDraft.trim() })); setRenameSessionId(null); }}>{t('mind_inspector.code_save')}</button></div>
               </div>
             </div>
           )}
           {deleteSessionId && (
             <div className="codex-session-modal-backdrop" onMouseDown={() => setDeleteSessionId(null)}>
-              <div className="codex-theme codex-session-modal" onMouseDown={(e) => e.stopPropagation()}><h3>永久删除会话？</h3><p>删除后无法恢复。</p><div className="codex-session-modal-actions"><button type="button" onClick={() => setDeleteSessionId(null)}>取消</button><button type="button" className="danger" onClick={() => { setDeleteSessionId(null); void handleDelete(deleteSessionId, true); }}>永久删除</button></div></div>
+              <div className="codex-theme codex-session-modal" onMouseDown={(e) => e.stopPropagation()}><h3>{t('mind_inspector.code_delete_session_title')}</h3><p>{t('mind_inspector.code_delete_session_note')}</p><div className="codex-session-modal-actions"><button type="button" onClick={() => setDeleteSessionId(null)}>{t('mind_inspector.code_cancel')}</button><button type="button" className="danger" onClick={() => { setDeleteSessionId(null); void handleDelete(deleteSessionId, true); }}>{t('mind_inspector.code_delete_forever')}</button></div></div>
             </div>
           )}
         </>, document.body)}
@@ -5762,7 +5784,7 @@ const CodeAgentPage: React.FC = () => {
                 key={activeId ?? 'none'}
                 messages={messages}
                 running={running}
-                toolLabel={(name) => toolMeta(name).label}
+                toolLabel={(name) => toolLabel(name, t)}
               />
             </div>
           ) : rightTab === 'changes' ? (

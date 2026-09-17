@@ -1568,6 +1568,74 @@
 .codex-src-more-btn:disabled { opacity: 0.6; cursor: default; }
 .codex-src-more-error { font-size: 12px; color: var(--codex-danger); }
 
+/* ---------- markdown 渲染态（块级就地编辑） ---------- */
+
+.codex-src-md {
+  padding: 10px 12px;
+}
+
+/* 每块各成一层：铅笔只在 hover 时露出，免得正文被一排按钮打散注意力，
+   也保证普通点击/拖拽仍然是在选择文本而不是触发编辑 */
+.codex-src-mdblock {
+  position: relative;
+  padding: 2px 0;
+  border-radius: 6px;
+}
+.codex-src-mdblock:hover {
+  background: color-mix(in srgb, var(--codex-accent) 6%, transparent);
+}
+.codex-src-mdblock-btn {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid var(--codex-line-light);
+  border-radius: 5px;
+  background: var(--codex-paper);
+  color: var(--codex-ink-soft);
+  cursor: pointer;
+}
+.codex-src-mdblock:hover .codex-src-mdblock-btn {
+  display: inline-flex;
+}
+.codex-src-mdblock-btn:hover {
+  color: var(--codex-ink);
+  border-color: var(--codex-accent);
+}
+
+.codex-src-mdblock-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.codex-src-mdblock-area {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 84px;
+  padding: 8px 10px;
+  border: 1px solid var(--codex-accent);
+  border-radius: 6px;
+  background: var(--codex-paper);
+  color: var(--codex-ink);
+  font-family: var(--codex-mono);
+  font-size: 12.5px;
+  line-height: 1.6;
+  resize: vertical;
+}
+.codex-src-mdblock-area:focus {
+  outline: none;
+}
+.codex-src-mdblock-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 5px;
+}
+
 /* hljs token 主题 */
 .codex-src .hljs-keyword, .codex-src .hljs-selector-tag, .codex-src .hljs-literal,
 .codex-src .hljs-section, .codex-src .hljs-doctag, .codex-src .hljs-meta-keyword { color: var(--src-kw); }
