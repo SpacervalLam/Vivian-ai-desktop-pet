@@ -1358,11 +1358,221 @@
   min-width: 0;
   padding: 10px;
   overflow: auto;
+  /* 全局 body 是 user-select: none（拖窗口时不误选文字），预览区要显式打开：
+     这里要支持「抹黑选中一段 → 添加到对话 / 就地改写」 */
+  user-select: text;
+  -webkit-user-select: text;
 }
 
 .codex-preview-text .codex-pre {
   margin: 0;
 }
+
+/* ===================== 预览页：抹黑选中 → 就地改写 ===================== */
+
+/* 选区浮卡：外层只负责定位（portal 到 body），内层才是那颗药丸 */
+.codex-selbubble {
+  position: fixed;
+  transform: translateX(-50%);
+  z-index: 900;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
+.codex-selbubble-pill {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--codex-line);
+  border-radius: 999px;
+  background: var(--codex-paper-card);
+  box-shadow: var(--codex-shadow-md);
+}
+
+.codex-selbubble-btn {
+  padding: 5px 12px;
+  border-radius: 999px;
+  font-family: var(--codex-font);
+  font-size: 12.5px;
+  color: var(--codex-ink);
+  white-space: nowrap;
+}
+
+.codex-selbubble-btn:hover {
+  background: var(--codex-accent-soft);
+  color: var(--codex-accent-deep);
+}
+
+.codex-selbubble-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.codex-selbubble-btn:disabled:hover {
+  background: transparent;
+  color: var(--codex-ink);
+}
+
+.codex-selbubble-sep {
+  width: 1px;
+  height: 16px;
+  background: var(--codex-line);
+}
+
+.codex-selbubble-inputwrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 4px 2px 12px;
+}
+
+.codex-selbubble-inputwrap input {
+  width: 260px;
+  border: none;
+  outline: none;
+  background: transparent;
+  font-family: var(--codex-font);
+  font-size: 12.5px;
+  color: var(--codex-ink);
+}
+
+.codex-selbubble-send {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 26px;
+  height: 26px;
+  border-radius: 999px;
+  background: var(--codex-ink);
+  color: var(--codex-paper-card);
+}
+
+.codex-selbubble-send:disabled { opacity: 0.35; }
+.codex-selbubble-send:not(:disabled):hover { background: var(--codex-accent-deep); }
+
+.codex-selbubble-error {
+  max-width: 340px;
+  padding: 4px 10px;
+  border-radius: 8px;
+  background: var(--codex-danger-soft);
+  color: var(--codex-danger);
+  font-size: 11.5px;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+/* 就地改写的 diff 卡片：原文 / 改写 上下对照 + 编辑 / 拒绝 / 接受。
+   外层是 fixed 浮层，不占 markdown/source 的布局空间。 */
+.codex-editcard-overlay {
+  position: fixed;
+  z-index: 901;
+  width: min(560px, calc(100vw - 24px));
+  max-height: calc(100vh - 24px);
+  transform: translateX(-50%);
+  pointer-events: auto;
+}
+
+.codex-editcard-overlay.is-above {
+  transform: translate(-50%, -100%);
+}
+
+.codex-editcard {
+  max-height: calc(100vh - 24px);
+  overflow: auto;
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--codex-line);
+  border-radius: 10px;
+  background: var(--codex-paper-card);
+  box-shadow: var(--codex-shadow-sm);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.codex-editcard-before,
+.codex-editcard-after {
+  padding: 6px 10px;
+  border-radius: 6px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.codex-editcard-before {
+  background: var(--codex-danger-soft);
+  color: var(--codex-ink-soft);
+}
+
+.codex-editcard-after {
+  margin-top: 6px;
+  background: var(--codex-success-soft);
+  color: var(--codex-ink);
+}
+
+.codex-editcard-refine {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  padding: 2px 4px 2px 10px;
+  border: 1px solid var(--codex-line);
+  border-radius: 999px;
+}
+
+.codex-editcard-refine input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  font-family: var(--codex-font);
+  font-size: 12.5px;
+  color: var(--codex-ink);
+}
+
+.codex-editcard-error {
+  margin-top: 8px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--codex-danger-soft);
+  color: var(--codex-danger);
+  font-size: 11.5px;
+  word-break: break-word;
+}
+
+.codex-editcard-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.codex-editcard-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 12px;
+  border-radius: 7px;
+  font-family: var(--codex-font);
+  font-size: 12.5px;
+  color: var(--codex-ink-soft);
+}
+
+.codex-editcard-btn:hover {
+  background: var(--codex-accent-soft);
+  color: var(--codex-accent-deep);
+}
+
+.codex-editcard-btn:disabled { opacity: 0.5; cursor: default; }
+
+.codex-editcard-deny { color: var(--codex-danger); }
+.codex-editcard-deny:hover { background: var(--codex-danger-soft); color: var(--codex-danger); }
+
+.codex-editcard-accept { color: var(--codex-success); font-weight: 600; }
+.codex-editcard-accept:hover { background: var(--codex-success-soft); color: var(--codex-success); }
 
 /* ===================== 源码查看 / 编辑 ===================== */
 

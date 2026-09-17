@@ -168,7 +168,8 @@ fn semaphore_for_task(task_type: &str) -> (&'static str, usize) {
         | "translation"
         | "bystander_judge"
         | "intent_judge"
-        | "asr_polish" => ("auxiliary", SEMAPHORE_GROUP_AUXILIARY),
+        | "asr_polish"
+        | "text_rewrite" => ("auxiliary", SEMAPHORE_GROUP_AUXILIARY),
         _ => ("chat_reasoning", SEMAPHORE_GROUP_CHAT_REASONING),
     }
 }

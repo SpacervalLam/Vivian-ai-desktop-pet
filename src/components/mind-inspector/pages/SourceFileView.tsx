@@ -110,7 +110,11 @@ export const SourceFileView: React.FC<{
   data: SourceFileData;
   targetLine?: number;
   navigationRevision?: number;
-}> = ({ data, targetLine, navigationRevision }) => {
+  /** markdown 预览页默认展示渲染态；源码预览仍默认展示源码态。 */
+  initialMode?: 'source' | 'rendered';
+  /** 宿主同步缓存，避免切换页签后重新挂载丢失刚刚手动保存的内容。 */
+  onContentSaved?: (content: string) => void;
+}> = ({ data, targetLine, navigationRevision, initialMode = 'source', onContentSaved }) => {
   const [lines, setLines] = useState<string[]>(() => (data.content ?? '').split('\n'));
   const [totalLines, setTotalLines] = useState<number>(data.total_lines ?? (data.content ?? '').split('\n').length);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -123,7 +127,7 @@ export const SourceFileView: React.FC<{
   const [editError, setEditError] = useState<string | null>(null);
 
   // markdown 的两种模式：源码（语法高亮）与渲染（块级就地编辑）
-  const [mode, setMode] = useState<'source' | 'rendered'>('source');
+  const [mode, setMode] = useState<'source' | 'rendered'>(initialMode);
   const [editingBlock, setEditingBlock] = useState<number | null>(null);
   const [blockDraft, setBlockDraft] = useState('');
   const [blockSaving, setBlockSaving] = useState(false);
@@ -180,14 +184,15 @@ export const SourceFileView: React.FC<{
       setTotalLines(next.length);
       setEditing(false);
       setDraft('');
-      setSavedFlash(true);
-      window.setTimeout(() => setSavedFlash(false), 1800);
+       setSavedFlash(true);
+       onContentSaved?.(draft);
+       window.setTimeout(() => setSavedFlash(false), 1800);
     } catch (e) {
       setEditError(String(e));
     } finally {
       setSaving(false);
     }
-  }, [draft, data.path, saving]);
+  }, [draft, data.path, saving, onContentSaved]);
 
   // ---- 渲染态：块级就地编辑 ----
 
@@ -225,6 +230,7 @@ export const SourceFileView: React.FC<{
         setEditingBlock(null);
         setBlockDraft('');
         setSavedFlash(true);
+        onContentSaved?.(next.join('\n'));
         window.setTimeout(() => setSavedFlash(false), 1800);
       } catch (e) {
         setBlockError(String(e));
@@ -232,7 +238,7 @@ export const SourceFileView: React.FC<{
         setBlockSaving(false);
       }
     },
-    [blockDraft, blockSaving, data.path, lines],
+    [blockDraft, blockSaving, data.path, lines, onContentSaved],
   );
 
   const loadMore = useCallback(async () => {

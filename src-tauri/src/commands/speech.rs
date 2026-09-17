@@ -156,7 +156,10 @@ pub async fn polish_asr_text(
 }
 
 /// 清理 LLM 润色响应：去代码块包裹与首尾引号
-fn parse_polished_text(raw: &str) -> String {
+///
+/// 预览页的「就地改写」也要复用同一套清理（同为「只要正文」的短文本生成），
+/// 因此对外可见。
+pub fn parse_polished_text(raw: &str) -> String {
     let mut result = raw.trim().to_string();
 
     if result.starts_with("```") {

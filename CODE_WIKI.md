@@ -246,7 +246,7 @@ Memory 窗口（`MemoryWindow`，默认全屏大小）内嵌 [`MindInspector.tsx
 - **`key` 的语义收窄在 `App.tsx::showToast`**：`key` 现在只表示「这条有身份，后续会用同一个值再来更新它」，**不再有 `key ?? Date.now()` 的兜底默认值**。这条兜底曾同时造成两个问题——同一毫秒发出的两条 toast 撞上同一个 key 互相顶掉；以及每条一次性提示都被打上数字 key，被接收侧的旧判据（`typeof key === 'number'`）整体豁免出跨窗口去重。需要原地刷新就传一个跨次调用稳定的常量，不需要就干脆不传
 - **`inplace` 标记取代对 key 形式的猜测**：`ToastItem.inplace` 是真正参与判断的字段——容量管理不淘汰它、`toast:shown` 让位不动它、可见去重跳过它。判据来自 `ToastKeyTracker.isRepeat(key, now)`（`KEY_REPEAT_WINDOW_MS`=60s 窗口，比内容去重窗 2s 宽得多，因为进度条可能连着刷新几十秒，中间任何一次刷新被误判成一次性提示就会把进度冻住）
 - **只有真正落屏的 key 才登记**：`keyTrackerRef.note()` 放在去重分支之后——被拦下的那条不该让后续同名到达获得豁免，否则一次误放的重复会自我加固成永久例外
-- **调试**：`toast-preview.html` + `src/toastPreview.tsx` 免 Tauri 预览（注入假 Tauri bridge，`BroadcastChannel` 跨页中继模拟全局广播），双开不同 `?character_id=` 复现多窗口；`?chars=offline` 模拟主角色解析失败、`?theme=dark` 强制深色
+- **调试**：可自建免 Tauri 预览页——按 `.gitignore` 的「免 Tauri 预览页」约定放一个 `*-preview.html` + `src/*Preview.tsx`（注入假 Tauri bridge，`BroadcastChannel` 跨页中继模拟全局广播），双开不同 `?character_id=` 复现多窗口；建议再支持 `?chars=offline` 模拟主角色解析失败、`?theme=dark` 强制深色。这类预览页是本地开发工具、不入库，仓库里不保留现成文件
 
 ---
 

@@ -6,7 +6,7 @@
  * - 后端连接保持 coding_* 命令与 coding:* 事件流（发送/取消/模式/权限/模型/推理/工作区）
  */
 
-import React, { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo, lazy, Suspense } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo, useContext, lazy, Suspense } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
@@ -31,8 +31,9 @@ import TrajectoryPanel from './TrajectoryPanel';
 import TurnRail, { buildTurns } from './TurnRail';
 import ComposerEditor, { type ComposerEditorHandle } from './ComposerEditor';
 import PinnedSummary from './PinnedSummary';
-import { MarkdownFileContext, MarkdownText, FileChip } from './codeMarkdown';
+import { MarkdownFileContext, MarkdownText, FileChip, renderMarkdownBlocks } from './codeMarkdown';
 import { SourceFileView } from './SourceFileView';
+import { PreviewEditCard, SelectionBubble, resolveSelectionTarget, type PendingEdit, type SelectionTarget } from './PreviewSelectionEdit';
 import DOMPurify from 'dompurify';
 
 const TerminalPanel = lazy(() => import('./TerminalPanel'));
@@ -2841,7 +2842,9 @@ const PreviewPanel: React.FC<{
   messages: CodingMessage[];
   baseKey: string;
   target?: { path: string; line: number; revision: number } | null;
-}> = ({ tabs, activePath, onSelect, onClose, onOpenFromChat, messages, baseKey, target }) => {
+  /** 「添加到对话」：把预览里选中的文字写进下方输入框（由 CodeAgentPage 注入） */
+  onAddToConversation?: (text: string) => void;
+}> = ({ tabs, activePath, onSelect, onClose, onOpenFromChat, messages, baseKey, target, onAddToConversation }) => {
   const { t } = useTranslation();
   const tabsRef = useWheelHorizontalScroll<HTMLDivElement>();
   // path → 预览状态缓存（按会话隔离，切换会话自动重建）
@@ -2879,6 +2882,234 @@ const PreviewPanel: React.FC<{
   }, [baseKey]);
 
   const docPaths = useMemo(() => collectChatDocs(messages), [messages]);
+
+  // ============ 就地改写：抹黑选中 → 浮卡 → diff 卡片 ============
+  //
+  // 全程不产生会话消息：改写走 `rewrite_preview_selection` 这个一次性 LLM 调用，
+  // 结果只在预览页里以卡片呈现，用户接受才写盘。
+
+  const mdCtx = useContext(MarkdownFileContext);
+  const bodyRef = useRef<HTMLDivElement | null>(null);
+
+  /** 待裁决的改写（同一时刻只留一张卡） */
+  const [pending, setPending] = useState<PendingEdit | null>(null);
+  const [pendingBusy, setPendingBusy] = useState(false);
+  const [pendingError, setPendingError] = useState<string | null>(null);
+
+  const [bubble, setBubble] = useState<{ x: number; y: number; mode: 'menu' | 'edit'; canEdit: boolean } | null>(null);
+  const [instruction, setInstruction] = useState('');
+  const [rewriting, setRewriting] = useState(false);
+  const [selError, setSelError] = useState<string | null>(null);
+
+  /** 接受改写后自增，用来强制重挂载子视图（SourceFileView 的行数据只在挂载时取一次） */
+  const [contentRev, setContentRev] = useState(0);
+
+  /**
+   * 选中那一刻的落点快照。
+   *
+   * 等用户在浮卡输入框里敲完字再提交时，DOM 选区早就没了（焦点已经移走），
+   * 所以必须在 selectionchange 里当场把「选中了哪段文字 / 对应哪几行」记下来。
+   */
+  const selRef = useRef<SelectionTarget | null>(null);
+  /** 指令输入框开着时，别因为正文选区塌陷就把浮卡收掉 */
+  const keepBubbleRef = useRef(false);
+
+  const activeData = activeItem?.data ?? null;
+  const activeIsMarkdown =
+    !!activeData && activeData.kind === 'text' && /\.(md|markdown)$/i.test(activeData.path);
+
+  /** 超大文件只读了首段，写盘会截断未加载的部分 —— 禁用就地改写 */
+  const canInlineEdit = !!activeData && activeData.kind === 'text' && !activeData.truncated;
+
+  /**
+   * markdown 预览的块序列（每块带源码行区间）。
+   *
+   * 用 `renderMarkdownBlocks` 取得块边界：选区映射仍需要它，正文渲染则复用
+   * `SourceFileView`，这样 markdown 也保留源码/渲染切换和手动编辑能力。
+   */
+  const mdBlocks = useMemo(
+    () => (activeIsMarkdown
+      ? renderMarkdownBlocks(activeData?.content ?? '', `preview-${activePath ?? ''}`, mdCtx)
+      : []),
+    [activeIsMarkdown, activeData?.content, activePath, mdCtx],
+  );
+
+  // selectionchange 的监听器只注册一次，块序列通过 ref 读最新值
+  const mdBlocksRef = useRef(mdBlocks);
+  mdBlocksRef.current = mdBlocks;
+  const sourceRef = useRef('');
+  sourceRef.current = activeData?.content ?? '';
+  const canInlineEditRef = useRef(false);
+  canInlineEditRef.current = canInlineEdit;
+
+  const syncPreviewContent = useCallback((path: string, content: string) => {
+    const current = cache.get(path);
+    if (!current?.data) return;
+    const normalized = content.replace(/\r\n?/g, '\n');
+    cache.set(path, {
+      ...current,
+      data: { ...current.data, content: normalized, total_lines: normalized.split('\n').length, truncated: false },
+    });
+    setPending((prev) => (prev?.path === path ? null : prev));
+    setBump((v) => v + 1);
+  }, [cache]);
+
+  useEffect(() => {
+    const onSelectionChange = () => {
+      const sel = window.getSelection();
+      const root = bodyRef.current;
+      if (!sel || !root || sel.rangeCount === 0 || sel.isCollapsed) {
+        if (!keepBubbleRef.current) setBubble(null);
+        return;
+      }
+      const range = sel.getRangeAt(0);
+      if (!root.contains(range.commonAncestorContainer)) { setBubble(null); return; }
+      const target = resolveSelectionTarget(range, mdBlocksRef.current, sourceRef.current);
+      if (!target) { setBubble(null); return; }
+
+      selRef.current = target;
+
+      // 正在输入指令：只更新落点快照，浮卡位置与输入内容都不动
+      if (keepBubbleRef.current) return;
+
+      const rect = range.getBoundingClientRect();
+      const placeBelow = rect.bottom + 56 < window.innerHeight;
+      setSelError(null);
+      setInstruction('');
+      setBubble({
+        x: Math.min(Math.max(rect.left + rect.width / 2, 150), window.innerWidth - 150),
+        y: placeBelow ? rect.bottom + 8 : Math.max(rect.top - 48, 8),
+        mode: 'menu',
+        canEdit: canInlineEditRef.current && target.replaceStart !== null && target.replaceEnd !== null,
+      });
+    };
+    document.addEventListener('selectionchange', onSelectionChange);
+    return () => document.removeEventListener('selectionchange', onSelectionChange);
+  }, []);
+
+  // 切页签 / 切会话时，未裁决的卡片与浮卡都作废
+  useEffect(() => {
+    setPending(null);
+    setPendingError(null);
+    setBubble(null);
+    setSelError(null);
+    keepBubbleRef.current = false;
+  }, [activePath, baseKey]);
+
+  const closeBubble = useCallback(() => {
+    keepBubbleRef.current = false;
+    setBubble(null);
+    setInstruction('');
+    setSelError(null);
+  }, []);
+
+  const handleAddToChat = useCallback(() => {
+    const s = selRef.current;
+    if (!s) return;
+    // 先清掉正文选区再写输入框：insertText 之后会把光标落进 composer，
+    // 这时候再 removeAllRanges 会把刚放好的光标一起清掉
+    window.getSelection()?.removeAllRanges();
+    onAddToConversation?.(s.text);
+    closeBubble();
+  }, [onAddToConversation, closeBubble]);
+
+  const startEditMode = useCallback(() => {
+    if (!canInlineEdit) return;
+    keepBubbleRef.current = true;
+    setSelError(null);
+    setBubble((prev) => (prev ? { ...prev, mode: 'edit' } : prev));
+  }, [canInlineEdit]);
+
+  /**
+   * 跑一次改写。
+   *
+   * `from` 决定错误落在哪儿、结果怎么处理：浮卡提交 → 生成卡片；卡片里「编辑」→ 原地替换改写结果。
+   */
+  const runRewrite = useCallback(
+    async (instr: string, from: 'bubble' | 'card') => {
+      const s = selRef.current;
+      if (!s || rewriting) return;
+      if (s.replaceStart === null || s.replaceEnd === null) {
+        const message = '无法将选中内容映射回文件原文，请改用源码视图或直接手动编辑';
+        if (from === 'bubble') setSelError(message);
+        else setPendingError(message);
+        return;
+      }
+      setRewriting(true);
+      if (from === 'bubble') setSelError(null);
+      else setPendingError(null);
+      try {
+        const rewritten = await invoke<string>('rewrite_preview_selection', {
+          selection: s.text,
+          instruction: instr,
+          context: s.context || null,
+        });
+        if (from === 'bubble') {
+          setPending({
+            path: activePath ?? '',
+            start: s.start,
+            end: s.end,
+            anchor: s.anchor,
+            replaceStart: s.replaceStart,
+            replaceEnd: s.replaceEnd,
+            anchorRect: s.anchorRect,
+            original: s.text,
+            rewritten,
+            instruction: instr,
+            context: s.context,
+          });
+          window.getSelection()?.removeAllRanges();
+          keepBubbleRef.current = false;
+          setBubble(null);
+          setInstruction('');
+        } else {
+          // 卡片里再改一轮：改的还是同一段，行区间不动，只换改写结果
+          setPending((prev) => (prev ? { ...prev, rewritten, instruction: instr } : prev));
+        }
+      } catch (e) {
+        if (from === 'bubble') setSelError(String(e));
+        else setPendingError(String(e));
+      } finally {
+        setRewriting(false);
+      }
+    },
+    [rewriting, activePath],
+  );
+
+  /** 接受：把改写结果替换回它对应的那几行并写盘，然后刷新缓存让正文立刻更新 */
+  const acceptEdit = useCallback(async () => {
+    const p = pending;
+    const d = activeItem?.data;
+    if (!p || !d || p.path !== d.path || pendingBusy) return;
+    setPendingBusy(true);
+    setPendingError(null);
+    try {
+      const currentContent = (d.content ?? '').replace(/\r\n?/g, '\n');
+      if (p.replaceStart < 0 || p.replaceEnd > currentContent.length || p.replaceStart >= p.replaceEnd) {
+        throw new Error('预览内容已变化，请重新选择后再试');
+      }
+      const currentSelection = currentContent.slice(p.replaceStart, p.replaceEnd);
+      if (currentSelection !== p.original && currentSelection.trim() !== p.original.trim()) {
+        throw new Error('预览内容已变化，请重新选择后再试');
+      }
+      const nextContent = `${currentContent.slice(0, p.replaceStart)}${p.rewritten}${currentContent.slice(p.replaceEnd)}`;
+      const nextLines = nextContent.split('\n');
+      await invoke('coding_write_file', { path: p.path, content: nextContent });
+      cache.set(p.path, {
+        path: p.path,
+        loading: false,
+        error: '',
+        data: { ...d, content: nextContent, total_lines: nextLines.length },
+      });
+      setPending(null);
+      setContentRev((v) => v + 1);
+      setBump((v) => v + 1);
+    } catch (e) {
+      setPendingError(String(e));
+    } finally {
+      setPendingBusy(false);
+    }
+  }, [pending, activeItem, pendingBusy, cache]);
 
   const renderContent = (item: PreviewItem | null) => {
     if (!item) {
@@ -2936,19 +3167,16 @@ const PreviewPanel: React.FC<{
       );
     }
     // text：代码走带高亮/行号的源码视图，markdown 走渲染视图
-    const isMarkdown = /\.(md|markdown)$/i.test(d.path);
     return (
       <div className="codex-preview-text">
-        {isMarkdown
-          ? <MarkdownText text={d.content ?? ''} keyPrefix="preview" />
-          : (
-            <SourceFileView
-              key={d.path}
-              data={d}
-              targetLine={target?.path === d.path ? target.line : undefined}
-              navigationRevision={target?.path === d.path ? target.revision : undefined}
-            />
-          )}
+        <SourceFileView
+          key={`${d.path}#${contentRev}`}
+          data={d}
+          targetLine={target?.path === d.path ? target.line : undefined}
+          navigationRevision={target?.path === d.path ? target.revision : undefined}
+          initialMode={/\.(md|markdown)$/i.test(d.path) ? 'rendered' : 'source'}
+          onContentSaved={(content) => syncPreviewContent(d.path, content)}
+        />
       </div>
     );
   };
@@ -2987,7 +3215,38 @@ const PreviewPanel: React.FC<{
         )}
       </div>
       {/* 内容区 */}
-      <div className="codex-preview-body">{renderContent(activeItem)}</div>
+      <div className="codex-preview-body" ref={bodyRef}>{renderContent(activeItem)}</div>
+
+      {/* diff 也走 portal：它是预览页上一层的浮卡，不插入任何 markdown 块之间。 */}
+      {pending && pending.path === activePath && (
+        <PreviewEditCard
+          edit={pending}
+          busy={pendingBusy || rewriting}
+          error={pendingError}
+          onRefine={(instr) => void runRewrite(instr, 'card')}
+          onReject={() => { setPending(null); setPendingError(null); }}
+          onAccept={() => void acceptEdit()}
+        />
+      )}
+
+      {/* 抹黑选中后的浮卡：portal 到 body，fixed 定位 */}
+      {bubble && (
+        <SelectionBubble
+          x={bubble.x}
+          y={bubble.y}
+          mode={bubble.mode}
+          instruction={instruction}
+          busy={rewriting}
+          error={selError}
+          canEdit={bubble.canEdit}
+          editDisabledReason={t('mind_inspector.code_sel_edit_blocked')}
+          onInstructionChange={setInstruction}
+          onAddToChat={handleAddToChat}
+          onStartEdit={startEditMode}
+          onSubmit={() => void runRewrite(instruction.trim(), 'bubble')}
+          onCancel={closeBubble}
+        />
+      )}
     </div>
   );
 };
@@ -3470,6 +3729,19 @@ const CodeAgentPage: React.FC = () => {
   const inputRef = useRef<ComposerEditorHandle | null>(null);
   /** 输入区外层容器：斜杠 / @-mention 菜单以它定位（富文本编辑器拿不到 textarea 的 rect） */
   const composerRef = useRef<HTMLDivElement | null>(null);
+
+  /**
+   * 预览页「添加到对话」：把选中的文字插进下方输入框。
+   *
+   * 走 composer 自己的 `insertText`，所以插进去的内容仍然可编辑、可撤销，
+   * 也不会产生任何会话记录 —— 用户还没点发送。
+   */
+  const handleAddPreviewSelectionToChat = useCallback((text: string) => {
+    if (!text.trim()) return;
+    inputRef.current?.insertText(text);
+    inputRef.current?.focus();
+  }, []);
+
   const activeIdRef = useRef<string | null>(null);
   activeIdRef.current = activeId;
   const runningRef = useRef(false);
@@ -5814,6 +6086,7 @@ const CodeAgentPage: React.FC = () => {
                 onClose={closePreview}
                 onOpenFromChat={openPreview}
                 target={previewTarget}
+                onAddToConversation={handleAddPreviewSelectionToChat}
               />
             </div>
           ) : (

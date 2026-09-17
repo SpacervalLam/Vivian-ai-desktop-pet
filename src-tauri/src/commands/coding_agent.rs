@@ -190,6 +190,76 @@ pub fn coding_write_file(path: String, content: String) -> Result<(), String> {
     std::fs::write(p, content.as_bytes()).map_err(|e| format!("写入文件失败: {e}"))
 }
 
+/// 预览页「就地改写」：按用户给的编辑指令重写被选中的那段文字。
+///
+/// 这是**无会话上下文**的一次性调用 —— 不写会话消息、不落工作区记录，
+/// 结果只回给前端，由用户在预览页里接受或拒绝。
+///
+/// 走路由矩阵 `text_rewrite` 任务（辅助分组，不占对话并发额度、不加采样惩罚）。
+/// 与 `polish_asr_text` 不同，这里失败直接返回 Err 由前端提示：改写是用户主动
+/// 触发的交互，静默降级返回原文会让人误以为改写已经生效。
+#[tauri::command]
+pub async fn rewrite_preview_selection(
+    state: State<'_, Arc<AppState>>,
+    selection: String,
+    instruction: String,
+    context: Option<String>,
+) -> Result<String, String> {
+    let selection = selection.trim().to_string();
+    if selection.is_empty() {
+        return Err("没有选中任何文字".into());
+    }
+    let instruction = instruction.trim().to_string();
+    if instruction.is_empty() {
+        return Err("请先描述要如何修改".into());
+    }
+
+    let character = state.get_character(None)?;
+
+    // 上文语境只用于消歧（代词指代、术语一致性），提示里明确禁止它顺手改掉周围段落。
+    let system_prompt = "你是文档编辑助手。用户会给你一段【选中文本】和一条【编辑要求】，\
+        请严格按照编辑要求重写这段文本。\n\
+        要求：\n\
+        1. 只输出重写后的文本本身，不要任何解释、前言、序号或引号包裹\n\
+        2. 保持原文的语言（中文就输出中文，英文就输出英文）\n\
+        3. 保持原文的 markdown 标记风格（标题层级、列表符号、强调符号等），除非编辑要求明确要求改动\n\
+        4. 编辑要求未涉及的部分尽量保持原样，不要自作主张扩写或删减信息\n\
+        5. 不要输出 diff、不要用 ``` 代码块包裹，直接给正文";
+
+    let mut user_content = String::new();
+    if let Some(ctx) = context.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
+        user_content.push_str("【上文语境（仅供参考，不要修改这部分）】\n");
+        user_content.push_str(ctx);
+        user_content.push_str("\n\n");
+    }
+    user_content.push_str("【选中文本】\n");
+    user_content.push_str(&selection);
+    user_content.push_str("\n\n【编辑要求】\n");
+    user_content.push_str(&instruction);
+
+    let messages = vec![
+        crate::types::response::ChatMessage::system(system_prompt),
+        crate::types::response::ChatMessage::user(&user_content),
+    ];
+    let request = crate::providers::base::LLMRequest::new("text_rewrite", messages)
+        .with_temperature(0.3)
+        .with_character_id(character.id.clone());
+
+    let raw = character
+        .brain
+        .router
+        .generate(request)
+        .await
+        .map_err(|e| format!("改写失败: {e}"))?;
+
+    // 复用语音润色的清理逻辑：去代码块包裹、去首尾引号
+    let rewritten = crate::commands::speech::parse_polished_text(&raw);
+    if rewritten.is_empty() {
+        return Err("模型返回了空内容".into());
+    }
+    Ok(rewritten)
+}
+
 /// 全局编程智能体服务单例。
 pub static CODING_AGENT: Lazy<Arc<CodingAgentService>> =
     Lazy::new(|| Arc::new(CodingAgentService::new()));
