@@ -42,6 +42,14 @@ src-tauri/logs/
 *.pdb
 *.tmp
 
+# ===== 临时与备份文件 =====
+# 曾经因为缺 *.bak 这一条，src/components/room/ 下 16 个手改备份（.phase2 / .phase3 /
+# .jp-redesign 等，共 1.27MB）被提交进库。改源码前留的备份一律不进库 ——
+# 要留历史请用 git（分支 / stash / commit），不要用文件副本。
+*.bak
+*.orig
+*.rej
+
 # ===== 用户运行时数据（不应入库） =====
 vivian_data/
 # 工作侧智能体在「选定工作区」下生成的跨会话项目记忆（<工作区>/.vivian/memory.md）
@@ -54,9 +62,14 @@ vivian_data/
 scripts/
 
 # ===== 免 Tauri 预览页（本地开发工具，不入库） =====
-# 免 Tauri 跑设置面板 / Toast 用的 mock 入口，只服务本地调试，不参与应用运行、不进 dist。
-# 注意：*-preview.html 会在未追踪文件里生效；room-preview.html 与 src/roomPreview.tsx
-# 早在首个 commit 就已入库，已追踪文件不受 .gitignore 约束，故仍在版本库里。
+# 免 Tauri 跑设置面板 / Toast / 房间用的 mock 入口，只服务本地调试，不参与应用运行、不进 dist。
+# room-preview.html 与 src/roomPreview.tsx 曾因「首个 commit 就在库里」而豁免于本规则，
+# 已于 2026-09-18 一并删除。注意它们曾被 scripts/room/export-base.mjs 与 verify-room.mjs
+# 用 Playwright 访问 http://127.0.0.1:1420/room-preview.html —— 要再跑房间美术构建链，
+# 需先 `git checkout b80c635 -- room-preview.html src/roomPreview.tsx` 恢复
+# （b80c635 = 删除前最后一个含这两个文件的提交）。
+# 另：src/components/SkeletalRigPreview.tsx 名字带 Preview，但被 main.tsx 动态 import，
+# 是应用运行时组件，不在此列，别误删。
 *-preview.html
 src/*Preview.tsx
 
