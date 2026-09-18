@@ -13,7 +13,7 @@ import type { TFunction } from 'i18next';
 import { listen, emit, type UnlistenFn } from '@tauri-apps/api/event';
 import { invoke, convertFileSrc } from '@tauri-apps/api/core';
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
-import { open as openDialog, confirm as confirmDialog } from '@tauri-apps/plugin-dialog';
+import { open as openDialog, save as saveDialog, confirm as confirmDialog } from '@tauri-apps/plugin-dialog';
 import { raiseWindow } from '../../../utils/windowRaiser';
 import { reportInspectorSession } from '../../../utils/inspectorAttention';
 import {
@@ -33,6 +33,7 @@ import ComposerEditor, { type ComposerEditorHandle } from './ComposerEditor';
 import PinnedSummary from './PinnedSummary';
 import { MarkdownFileContext, MarkdownText, FileChip, renderMarkdownBlocks } from './codeMarkdown';
 import { SourceFileView } from './SourceFileView';
+import OfficePreview from './OfficePreview';
 import { PreviewEditCard, SelectionBubble, resolveSelectionTarget, type PendingEdit, type SelectionTarget } from './PreviewSelectionEdit';
 import DOMPurify from 'dompurify';
 
@@ -53,6 +54,9 @@ function resolveWorkspacePath(path: string, cwd?: string): string {
 }
 
 // ============ 类型 ============
+
+/** 拖拽手柄宽度，与 `.codex-resize-handle` 的 width 保持一致（算右侧栏拖动上限用） */
+const RESIZE_HANDLE_W = 6;
 
 /**
  * 消息角色。
@@ -2799,7 +2803,7 @@ const FileTypeIcon: React.FC<{ path: string }> = ({ path }) => {
 interface CodingFileRead {
   path: string;
   name: string;
-  kind: 'text' | 'image' | 'pdf' | 'binary';
+  kind: 'text' | 'image' | 'pdf' | 'office' | 'binary';
   content?: string | null;
   size: number;
   total_lines?: number | null;
@@ -2838,13 +2842,17 @@ const PreviewPanel: React.FC<{
   activePath: string | null;
   onSelect: (path: string) => void;
   onClose: (path: string) => void;
+  /** 关闭全部预览页签（页签右键菜单「关闭所有标签页」） */
+  onCloseAll: () => void;
   onOpenFromChat: (path: string) => void;
   messages: CodingMessage[];
   baseKey: string;
   target?: { path: string; line: number; revision: number } | null;
   /** 「添加到对话」：把预览里选中的文字写进下方输入框（由 CodeAgentPage 注入） */
   onAddToConversation?: (text: string) => void;
-}> = ({ tabs, activePath, onSelect, onClose, onOpenFromChat, messages, baseKey, target, onAddToConversation }) => {
+  /** 页内错误提示（由 CodeAgentPage 注入，用于右键菜单动作失败时的反馈） */
+  onNotifyError?: (msg: string) => void;
+}> = ({ tabs, activePath, onSelect, onClose, onCloseAll, onOpenFromChat, messages, baseKey, target, onAddToConversation, onNotifyError }) => {
   const { t } = useTranslation();
   const tabsRef = useWheelHorizontalScroll<HTMLDivElement>();
   // path → 预览状态缓存（按会话隔离，切换会话自动重建）
@@ -3111,6 +3119,72 @@ const PreviewPanel: React.FC<{
     }
   }, [pending, activeItem, pendingBusy, cache]);
 
+  // ============ 页签右键菜单 ============
+  //
+  // 菜单走 portal + position:fixed 按鼠标坐标定位，不放进 `.codex-preview-tabs` 里，
+  // 否则会被那个容器的 overflow 裁掉、还会跟着页签栏横向滚动跑偏。
+
+  const [tabMenu, setTabMenu] = useState<{ path: string; x: number; y: number } | null>(null);
+
+  // 点菜单外 / 按 Esc 收起
+  useEffect(() => {
+    if (!tabMenu) return;
+    const close = () => setTabMenu(null);
+    const onKey = (event: KeyboardEvent) => { if (event.key === 'Escape') close(); };
+    document.addEventListener('mousedown', close);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', close);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [tabMenu]);
+
+  // 切页签 / 切会话时菜单作废，否则它会悬在一个已经关掉的页签上
+  useEffect(() => { setTabMenu(null); }, [activePath, baseKey]);
+
+  /** 用系统默认程序打开该文件 */
+  const openWithSystem = useCallback((path: string) => {
+    void import('@tauri-apps/plugin-shell')
+      .then((m) => m.open(path))
+      .catch((e) => onNotifyError?.(String(e)));
+  }, [onNotifyError]);
+
+  /** 在文件资源管理器中定位该文件 */
+  const revealInExplorer = useCallback(async (path: string) => {
+    try {
+      await invoke('coding_reveal_in_explorer', { path });
+    } catch (e) {
+      onNotifyError?.(String(e));
+    }
+  }, [onNotifyError]);
+
+  /** 另存为：先弹保存对话框选目标，再让后端做字节级复制（图片 / PDF / 二进制同样适用） */
+  const saveAs = useCallback(async (path: string) => {
+    const name = path.split(/[\\/]/).pop() || 'file';
+    const dot = name.lastIndexOf('.');
+    const ext = dot > 0 ? name.slice(dot + 1) : '';
+    try {
+      const target = await saveDialog({
+        defaultPath: path,
+        filters: ext ? [{ name: ext.toUpperCase(), extensions: [ext] }] : undefined,
+      });
+      if (!target) return; // 用户取消
+      await invoke('coding_copy_file_to', { from: path, to: target });
+    } catch (e) {
+      onNotifyError?.(String(e));
+    }
+  }, [onNotifyError]);
+
+  const handleTabMenuAction = useCallback((action: 'open' | 'reveal' | 'saveAs' | 'closeAll') => {
+    const path = tabMenu?.path;
+    setTabMenu(null);
+    if (action === 'closeAll') { onCloseAll(); return; }
+    if (!path) return;
+    if (action === 'open') openWithSystem(path);
+    else if (action === 'reveal') void revealInExplorer(path);
+    else if (action === 'saveAs') void saveAs(path);
+  }, [tabMenu, onCloseAll, openWithSystem, revealInExplorer, saveAs]);
+
   const renderContent = (item: PreviewItem | null) => {
     if (!item) {
       return (
@@ -3158,6 +3232,20 @@ const PreviewPanel: React.FC<{
         />
       );
     }
+    if (d.kind === 'office') {
+      // Office 文档不能按文本读（会整屏乱码），按格式分流渲染：
+      // docx → mammoth HTML，xls/xlsx → 表格；其余退化成「用系统程序打开」卡片
+      return (
+        <OfficePreview
+          path={d.path}
+          name={d.name}
+          size={d.size}
+          onOpenExternal={openWithSystem}
+          onReveal={(p) => void revealInExplorer(p)}
+          onSaveAs={(p) => void saveAs(p)}
+        />
+      );
+    }
     if (d.kind === 'binary') {
       return (
         <div className="codex-preview-binary">
@@ -3195,8 +3283,20 @@ const PreviewPanel: React.FC<{
                 key={tab.key}
                 role="tab"
                 aria-selected={active}
-                className={`codex-preview-tab ${active ? 'active' : ''}`}
+                className={`codex-preview-tab ${active ? 'active' : ''}${tabMenu?.path === tab.path ? ' menu-open' : ''}`}
                 onClick={() => onSelect(tab.path)}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  // 页签栏贴着面板右上角，靠右/靠下右键时菜单会被窗口切掉，先夹进视口
+                  const MENU_W = 160;
+                  const MENU_H = 150;
+                  setTabMenu({
+                    path: tab.path,
+                    x: Math.min(e.clientX, Math.max(8, window.innerWidth - MENU_W - 8)),
+                    y: Math.min(e.clientY, Math.max(8, window.innerHeight - MENU_H - 8)),
+                  });
+                }}
                 title={tab.path}
               >
                 <FileText size={11} />
@@ -3246,6 +3346,22 @@ const PreviewPanel: React.FC<{
           onSubmit={() => void runRewrite(instruction.trim(), 'bubble')}
           onCancel={closeBubble}
         />
+      )}
+
+      {/* 页签右键菜单：portal 到 body，fixed 定位在鼠标处 */}
+      {typeof document !== 'undefined' && tabMenu && createPortal(
+        <div
+          className="codex-theme codex-context-menu codex-preview-tab-menu"
+          style={{ left: tabMenu.x, top: tabMenu.y }}
+          onMouseDown={(e) => e.stopPropagation()}
+          onContextMenu={(e) => e.preventDefault()}
+        >
+          <button type="button" onClick={() => handleTabMenuAction('open')}>{t('mind_inspector.code_tab_menu_open')}</button>
+          <button type="button" onClick={() => handleTabMenuAction('reveal')}>{t('mind_inspector.code_tab_menu_reveal')}</button>
+          <button type="button" onClick={() => handleTabMenuAction('saveAs')}>{t('mind_inspector.code_tab_menu_save_as')}</button>
+          <button type="button" onClick={() => handleTabMenuAction('closeAll')}>{t('mind_inspector.code_tab_menu_close_all')}</button>
+        </div>,
+        document.body,
       )}
     </div>
   );
@@ -3570,7 +3686,9 @@ const CodeAgentPage: React.FC = () => {
   const [rightCollapsed, setRightCollapsed] = useState(false);
   const [leftWidth, setLeftWidth] = useState(268);
   const [rightWidth, setRightWidth] = useState(360);
-  const resizeRef = useRef<{ side: 'left' | 'right'; startX: number; startWidth: number } | null>(null);
+  /** 工作区根节点：右侧栏拖动上限要按它的实际宽度算（窗口尺寸可变，不能写死） */
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const resizeRef = useRef<{ side: 'left' | 'right'; startX: number; startWidth: number; maxWidth: number } | null>(null);
   /**
    * 正在拖拽调宽的那一侧。
    *
@@ -3720,6 +3838,13 @@ const CodeAgentPage: React.FC = () => {
     });
   }, [activePreview]);
 
+  /** 关闭全部预览页签（页签右键菜单「关闭所有标签页」）。 */
+  const closeAllPreview = useCallback(() => {
+    setPreviewTabs([]);
+    setActivePreview(null);
+    setPreviewTarget(null);
+  }, []);
+
   const [draftImages, setDraftImages] = useState<DraftAttachment[]>([]);
   const [dragActive, setDragActive] = useState(false);
   const [lightbox, setLightbox] = useState<{ src: string; alt: string } | null>(null);
@@ -3824,6 +3949,20 @@ const CodeAgentPage: React.FC = () => {
     setRightCollapsed((v) => !v);
   }, []);
 
+  /**
+   * 右侧检查器的拖动上限。
+   *
+   * 不设固定像素上限 —— 用户可以一路拉到把中央对话区挤没，也就是「全屏」。
+   * 唯一的硬边界是工作区自身宽度减去左侧栏与两条 6px 手柄：再往右拖，aside 只会
+   * 溢出被 `.workbench-root` 的 overflow:hidden 裁掉，观感上像卡住了，不如提前夹住。
+   */
+  const maxRightWidth = useCallback(() => {
+    const root = rootRef.current;
+    if (!root) return Number.MAX_SAFE_INTEGER;
+    const leftOccupied = (leftCollapsed ? 54 : leftWidth) + RESIZE_HANDLE_W * 2;
+    return Math.max(260, root.clientWidth - leftOccupied);
+  }, [leftCollapsed, leftWidth]);
+
   const startResize = useCallback((e: React.MouseEvent, side: 'left' | 'right') => {
     e.preventDefault();
     e.stopPropagation();
@@ -3831,9 +3970,12 @@ const CodeAgentPage: React.FC = () => {
       side,
       startX: e.clientX,
       startWidth: side === 'left' ? leftWidth : rightWidth,
+      // 上限在按下那一刻定死：拖动期间左侧栏不会变，按当下布局算最直观，
+      // 也免得在 mousemove 里读到闭包里的旧值。
+      maxWidth: side === 'right' ? maxRightWidth() : Number.MAX_SAFE_INTEGER,
     };
     setResizing(side);
-  }, [leftWidth, rightWidth]);
+  }, [leftWidth, rightWidth, maxRightWidth]);
 
   useEffect(() => {
     const onMove = (e: MouseEvent) => {
@@ -3842,7 +3984,7 @@ const CodeAgentPage: React.FC = () => {
       if (r.side === 'left') {
         setLeftWidth(Math.max(180, Math.min(460, r.startWidth + (e.clientX - r.startX))));
       } else {
-        setRightWidth(Math.max(260, Math.min(640, r.startWidth - (e.clientX - r.startX))));
+        setRightWidth(Math.max(260, Math.min(r.maxWidth, r.startWidth - (e.clientX - r.startX))));
       }
     };
     const onUp = () => {
@@ -3856,6 +3998,13 @@ const CodeAgentPage: React.FC = () => {
       window.removeEventListener('mouseup', onUp);
     };
   }, []);
+
+  // 窗口变小后，之前拉出来的宽度可能已经超过工作区：收回来，否则 aside 会被裁掉一截
+  useEffect(() => {
+    const onResize = () => setRightWidth((w) => Math.min(w, maxRightWidth()));
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, [maxRightWidth]);
 
   const handleAddTermTab = useCallback(() => {
     const cwd = activeSession?.working_directory ?? '';
@@ -4722,6 +4871,33 @@ const CodeAgentPage: React.FC = () => {
     return () => { cancelled = true; unlistens.forEach((fn) => fn()); };
   }, [refreshSessions, loadFileTree, refreshDefaultWorkspace]);
 
+  // Ctrl+B：切换左侧边栏（工作页快捷键）。
+  //
+  // 语义对齐 VS Code —— 焦点落在输入框 / 正文里也照常生效，刻意不做「正在输入」守卫。
+  // 理由：光标停在对话输入框里按 Ctrl+B 才是最自然的时机，若这里静默忽略，用户只会
+  // 觉得快捷键坏了。工作页里 Ctrl+B 本来也没有别的归属：就地编辑器只吃
+  // Ctrl+Z / Ctrl+Y / Enter（见 MarkdownLiveEditor.onKeyDown），而浏览器给
+  // contenteditable 的默认「加粗」动作恰好被 preventDefault 挡掉 —— 那件事本来就不该
+  // 发生，它会把 <b> 塞进 DOM、破坏就地编辑的偏移换算。
+  //
+  // 监听挂在 window 上：组件本身只在工作页挂载（MindInspector 的 case 'code'），
+  // 所以天然只对工作页生效，不会污染别的页面。
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey) || e.shiftKey || e.altKey) return;
+      if (e.key.toLowerCase() !== 'b') return;
+      // 输入法组合期间不抢键：部分中文输入法用 Ctrl+B 翻页
+      if (e.isComposing) return;
+      // 长按不重复触发，否则每帧翻一次、配合宽度过渡会抖成一团
+      if (e.repeat) return;
+      // 必须挡：浏览器默认用 Ctrl+B 打开书签管理器
+      e.preventDefault();
+      setLeftCollapsed((v) => !v);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
   // 「新会话」下拉菜单：点击外部或按 Esc 关闭（与页面其它下拉框一致）
   useEffect(() => {
     if (!newMenuOpen) return;
@@ -5279,7 +5455,7 @@ const CodeAgentPage: React.FC = () => {
 
   return (
     <MarkdownFileContext.Provider value={mdFileCtx}>
-    <div className="codex-theme workbench-root">
+    <div className="codex-theme workbench-root" ref={rootRef}>
       {/* ===== 左侧：任务会话栏 ===== */}
       <aside
         className={`codex-sidebar ${leftCollapsed ? 'collapsed' : ''}${resizing === 'left' ? ' resizing' : ''}`}
@@ -5296,8 +5472,10 @@ const CodeAgentPage: React.FC = () => {
             type="button"
             onClick={() => setLeftCollapsed((v) => !v)}
             className="codex-sidebar-collapse-btn"
-            title={leftCollapsed ? t('mind_inspector.code_expand_left') : t('mind_inspector.code_collapse_left')}
-            aria-label={leftCollapsed ? t('mind_inspector.code_expand_left') : t('mind_inspector.code_collapse_left')}
+            /* 提示里带上快捷键，否则 Ctrl+B 没人发现得了。
+               本工程为 Windows 目标，直接写 Ctrl+B，不做平台判定。 */
+            title={`${leftCollapsed ? t('mind_inspector.code_expand_left') : t('mind_inspector.code_collapse_left')} (Ctrl+B)`}
+            aria-label={`${leftCollapsed ? t('mind_inspector.code_expand_left') : t('mind_inspector.code_collapse_left')} (Ctrl+B)`}
           >
             {leftCollapsed ? <PanelLeftOpen size={16} /> : <PanelLeftClose size={16} />}
           </button>
@@ -6084,9 +6262,11 @@ const CodeAgentPage: React.FC = () => {
                 messages={messages}
                 onSelect={setActivePreview}
                 onClose={closePreview}
+                onCloseAll={closeAllPreview}
                 onOpenFromChat={openPreview}
                 target={previewTarget}
                 onAddToConversation={handleAddPreviewSelectionToChat}
+                onNotifyError={notifyError}
               />
             </div>
           ) : (

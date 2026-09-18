@@ -102,6 +102,14 @@
   --codex-shadow-md: 0 8px 24px rgba(0, 0, 0, .07);
   --codex-shadow-lg: 0 18px 48px rgba(0, 0, 0, .12);
   --codex-font: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  /* 极简主题的整个立意就是「去手写、去纸感」，所以 markdown 也不跟手账那套走：
+     正文与标题一律压回无衬线；标题换回真实字重 600（无衬线有真粗体，
+     不存在手写体那种「合成粗体糊成一坨」的问题，不需要压到 400）。
+     注意这套变量只在这里定义一次即可 —— 下面的深色极简块只覆盖颜色，
+     自定义属性照样继承得到。 */
+  --codex-md-font: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --codex-md-hand: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --codex-md-h-weight: 600;
   --panel-bg: #fff;
   --panel-surface: #fafafa;
   --panel-elevated: #fff;

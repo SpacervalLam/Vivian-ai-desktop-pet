@@ -527,9 +527,11 @@ pub struct MemoryItem {
 - **左栏（会话/工作区管理）**：「新会话」按钮（主点击 + 下拉箭头，见下）、会话按工作区分组或单列表，可按最近更新/手动排序，支持搜索会话；工作区分组标题提供三点菜单（重命名 / 删除工作区）和新建当前工作区会话的加号按钮；主工作区非空时展示工作区文件树
 - **中栏（flex:1）**：空态 hero / 会话顶栏（会话标题 + **工作区芯片** + 运行状态 + 模式切换）/ 消息流（消息按角色区分渲染，文件类工具 read/write/edit 以手账风格代码块 + diff 高亮展示；非文件工具 `ToolCallCard` 紧凑展示；用户/助手消息含图片时渲染为图片缩略图气泡，点击经 `onOpenImage` 打开大图）+ 底部输入卡片。空态下 `canSend` 只看输入内容（不再要求已有会话），直接发送会经 `ensureSession` 先建会话再继续发。
 - **中栏内部结构**：顶栏以下是一条横向带 `.codex-main-body`，里面只有一个 `.codex-main-col`（对话区 + 回到底部 + 输入区 + 统计 + 置顶摘要）。摘要是**绝对定位贴在右缘的信息列**（`right: var(--codex-sb-w)`，紧贴滚动条左边），不参与 flex 分配——四处内容靠 `padding-right: max(基准, --codex-pinned-reserve)` 让位，所以正文永远不会被面板盖住，同时滚动条能留在整条工作区的最右侧
-- **右栏（检查器，可整体收纳）**：概览统计（轮次/步数/LLM 与工具耗时/首 token/缓存命中/token 用量）+ 内嵌终端标签页；标签名沿用工作区目录名，支持多开/关闭；左右侧边栏均可拖拽调整宽度
-- **侧边栏收放过渡**：两侧收起/呼出走 320ms `cubic-bezier(0.4,0,0.2,1)` 宽度缓动；拖拽调宽期间挂 `.resizing` 关掉过渡（否则每帧目标宽度被缓动拖住，手感变成橡皮筋追鼠标）。右栏内层 `.codex-inspector-inner` 保持展开宽度、由外层 `overflow:hidden` 裁切，动画期间内容整块滑出而不逐帧重排；左栏收起后仍留 54px 窄条，故不裁切，改为内容 `opacity` 快速淡出 + 品牌标题/新建按钮收掉占位。两侧内容均**不随收起卸载**（否则动画一开始内容就消失，只剩空栏在缩）；拖拽手柄也常驻渲染，收起时淡出，避免它消失时布局瞬跳 6px。已用无头 Chrome 逐帧采样宽度验证 14 项（含「拖拽 0 中间帧」「内层宽度恒定」），脚本见 `.workbuddy-ai/tmp/sidebar-transition-verify.mjs`
-- **置顶摘要的收放过渡**：与两侧边栏同一条曲线（320ms），同样「宽度归零 + 内层固定宽度裁切 + 不卸载」；**两轴同时**——横向宽度 0 ↔ 250，纵向由 `clip-path: inset()` 从上往下揭开 / 从下往上收掉（内层靠右对齐，动画期间内容不横向平移）；额外用 `visibility` 延迟切换让收起后退出 tab 序列。宽度不是固定值，而是按主工作区实测宽度动态算（先保对话区 `CHAT_MIN_W`=430，面板在 250~186 之间自适应）。四处让位（`padding-right` / `right`）必须与面板宽度过渡同曲线同步，否则收起期间正文与面板会互相错位。脚本见 `.workbuddy-ai/tmp/pinned-dock-verify.mjs`（46 项，覆盖滚动条在面板右侧、无分隔线、呼吸缝恒为 18px、四个让位元素在 1440/900/640/560 四个视口下都不被遮挡、三档主题基准内边距、真实鼠标点击聚焦后无描边 + 对照元素仍有描边、手账主题同样成立，以及纵向方向：底边内缩 0%↔100% 单调、顶边内缩恒为 0、内层未裁切左缘恒定）
+- **右栏（检查器，可整体收纳）**：概览统计（轮次/步数/LLM 与工具耗时/首 token/缓存命中/token 用量）+ 预览标签页 + 内嵌终端标签页；标签名沿用工作区目录名，支持多开/关闭；左右侧边栏均可拖拽调整宽度
+- **侧边栏收放过渡**：两侧收起/呼出走 320ms `cubic-bezier(0.4,0,0.2,1)` 宽度缓动；拖拽调宽期间挂 `.resizing` 关掉过渡（否则每帧目标宽度被缓动拖住，手感变成橡皮筋追鼠标）。右栏内层 `.codex-inspector-inner` 保持展开宽度、由外层 `overflow:hidden` 裁切，动画期间内容整块滑出而不逐帧重排；左栏收起后仍留 54px 窄条，故不裁切，改为内容 `opacity` 快速淡出 + 品牌标题/新建按钮收掉占位。两侧内容均**不随收起卸载**（否则动画一开始内容就消失，只剩空栏在缩）；拖拽手柄也常驻渲染，收起时淡出，避免它消失时布局瞬跳 6px。已用无头 Chrome 逐帧采样宽度验证 14 项（含「拖拽 0 中间帧」「内层宽度恒定」）。
+- **右栏拖动上限（`maxRightWidth`）**：右栏**不设固定像素上限**——用户可以一路拉到把中央对话区挤没（即"全屏"）。唯一的硬边界是工作区自身宽度减去左栏占用与两条 `RESIZE_HANDLE_W`（6px，与 `.codex-resize-handle` 的 width 必须保持一致）：再往右 `aside` 只会溢出被 `.workbench-root` 的 `overflow:hidden` 裁掉，观感上像卡住了，不如提前夹住。上限在 **mousedown 那一刻算好存进 `resizeRef`**（`maxWidth` 字段），不在 `mousemove` 里现算——拖动期间左栏不会变，按当下布局算最直观，也免得在逐帧回调里读到闭包里的旧值。工作区根节点宽度靠 `rootRef` 实测（窗口尺寸可变，不能写死）
+- **Ctrl+B 切换左侧边栏**：`CodeAgentPage` 内一个 window 级 `keydown` 监听，`Ctrl/Cmd+B` → `preventDefault()` + `setLeftCollapsed((v) => !v)`。四道守卫：`shiftKey/altKey` 直接 return、`e.isComposing`（部分中文输入法用 Ctrl+B 翻页）、`e.repeat`（长按不连翻，否则配合宽度过渡会抖成一团）；`preventDefault` 是必须的，否则浏览器会打开书签管理器。**刻意不做「正在输入」守卫**——语义对齐 VS Code：光标停在对话输入框里按 Ctrl+B 才是最自然的时机，静默忽略只会让人以为快捷键坏了；工作页里 Ctrl+B 本来也没有别的归属（就地编辑器只吃 Ctrl+Z / Ctrl+Y / Enter），而浏览器给 `contenteditable` 的默认「加粗」动作恰好被这次 `preventDefault` 挡掉——那件事本来就不该发生，它会把 `<b>` 塞进 DOM、破坏就地编辑的偏移换算。监听挂 window 不会污染别的页面：组件只在工作页挂载（`MindInspector.tsx` 的 `case 'code'`）。折叠按钮的 `title` / `aria-label` 追加 ` (Ctrl+B)`，否则快捷键无从发现（本工程为 Windows 目标，直接写 Ctrl+B，不做平台判定）
+- **置顶摘要的收放过渡**：与两侧边栏同一条曲线（320ms），同样「宽度归零 + 内层固定宽度裁切 + 不卸载」；**两轴同时**——横向宽度 0 ↔ 250，纵向由 `clip-path: inset()` 从上往下揭开 / 从下往上收掉（内层靠右对齐，动画期间内容不横向平移）；额外用 `visibility` 延迟切换让收起后退出 tab 序列。宽度不是固定值，而是按主工作区实测宽度动态算（先保对话区 `CHAT_MIN_W`=430，面板在 250~186 之间自适应）。四处让位（`padding-right` / `right`）必须与面板宽度过渡同曲线同步，否则收起期间正文与面板会互相错位。已用无头 Chrome 验证 46 项，覆盖滚动条在面板右侧、无分隔线、呼吸缝恒为 18px、四个让位元素在 1440/900/640/560 四个视口下都不被遮挡、三档主题基准内边距、真实鼠标点击聚焦后无描边 + 对照元素仍有描边、手账主题同样成立，以及纵向方向：底边内缩 0%↔100% 单调、顶边内缩恒为 0、内层未裁切左缘恒定。
 
 **「新会话」按钮（`handleCreate` / `createSessionByDefault`）**：主点击**不弹目录选择框**，直接建会话：
 
@@ -589,9 +591,50 @@ pub struct MemoryItem {
 
 **源码查看/编辑视图（`SourceFileView`，文件 read 结果的文本分支）**：文件类工具 `read` 返回的文本文件（`coding_read_file`），非 Markdown 时经此组件渲染——只读态用 highlight.js 语法高亮 + 行号 gutter；编辑态为等宽 textarea + 行号，保存走 `coding_write_file`。超大文件初始只收首段，`coding_read_file_lines` 分页「加载更多」（单次行数 `CHUNK_LINES` 与后端 `coding_read_file_lines` 的 count 上限对齐）。高亮产物经 DOMPurify 白名单（`span` / `class`）过滤后再注入，与 `WidgetCard` 同一套安全链路。
 
+Markdown 文件另有**源码 / 渲染两态**（顶栏切换）：渲染态交给 `MarkdownLiveEditor` 做所见即所得就地编辑（见下）；分页未完（`hasMore`）时不给编辑——写盘会把还没加载的部分截断，退化成只读块视图并提示「超大文件需先加载全部才能编辑」。渲染态的落盘与回填由本组件负责（`saveRenderedContent` → `coding_write_file` → 同步 `lines` / `totalLines` / 宿主缓存）。
+
 - **语法映射**：扩展名 → hljs 语言名集中在 `EXT_LANG`（`ts/tsx/js/jsx/mjs/cjs`、`css/scss/less`、`json/yaml/yml`、`html/htm/xml/svg/vue`、`md/markdown/mdx`、`rs`、`py`、`sh/bash/zsh/ps1/bat/cmd`、`c/h`、`cpp`、`java`、`go`、`sql`、`diff/patch`、`ini/env` 等）。各语言模块从 `highlight.js/lib/languages/*` 按需**静态 `import`** 并在模块顶部 `registerLanguage`，避免运行时异步加载。
 - **TOML 由 ini 语法原生覆盖**：`highlight.js` 的 `ini` 语法（`ini.js`）`name` 为「TOML, also INI」且 `aliases: ['toml']`，注册 `ini` 后 `getLanguage('toml')` 即命中该语法，TOML 高亮来自 ini 语法本身；**不要补 `import 'highlight.js/lib/languages/toml'`**——该文件不在 `highlight.js` 发布物内，静态 import 会让 Vite 预转换直接抛 `Failed to resolve import`（历史上已因此崩过构建）。
 - **未知语言退化为转义纯文本**：`highlightHtml` 先查 `hljs.getLanguage(lang)`，未注册语言走 `escapeHtml` 转义后由 DOMPurify 过滤，内容不丢也不报错。
+
+**右侧预览面板（`PreviewPanel`，右栏检查器的「预览」页签）**：消息里的本地文件链接卡片、文件树、工具卡片中的路径都从这里打开；`previewTabs` 多页签（`{path, key}`），按会话隔离的 path → 内容缓存（`baseKey` = 会话 id，切会话自动重建），内容按 `coding_read_file` 返回的 `kind` 分流——`text` → `SourceFileView`、`image` → 图片视图、`pdf` → 内嵌 PDF、`office` → `OfficePreview`、`binary` → 二进制提示卡。
+
+- **页签右键菜单**：打开（交给系统默认程序，`@tauri-apps/plugin-shell` 的 `open`，动态 import）/ 在文件资源管理器中显示 / 另存为 / 关闭所有标签页（`onCloseAll` 清空 `previewTabs` + `activePreview` + `previewTarget`）。菜单走 **portal 到 body + `position:fixed` 按鼠标坐标定位**，不放进 `.codex-preview-tabs` 里——那个容器有 `overflow`，菜单会被裁掉、还会跟着页签栏横向滚动跑偏。坐标按菜单尺寸（160×150）夹进视口，靠右 / 靠下右键时才不会被窗口切掉。收起时机三处：点菜单外（`document` mousedown）、按 Esc、以及**切页签 / 切会话时菜单作废**（否则它会悬在一个已经关掉的页签上）
+- **另存为走字节级复制**：先弹 `save` 对话框选目标（`defaultPath` 给原路径、`filters` 按原扩展名），取消则直接返回；确认后由 `coding_copy_file_to` 复制。**不能在前端读文本再写回**——预览里的图片 / PDF / 二进制同样要能另存，这些内容没有可用的文本形态
+- **后端配套命令**（`commands/coding_agent.rs`）：`coding_reveal_in_explorer`（Windows 走 `explorer /select,<路径>`——**必须是单参数形式**，拆成 `/select,` + 路径两个参数会被当成两个待打开对象而失效；macOS `open -R`；Linux 无统一「选中」语义，退化为 `xdg-open` 打开所在目录）；`coding_copy_file_to`（`std::fs::copy`，目标父目录不存在则 `create_dir_all`，**源与目标同路径直接当成功**——用户可能把另存对话框指回了原文件）。两者都注册进 `lib.rs` 的 `invoke_handler`。菜单动作失败经 `onNotifyError` 回吐页内 toast
+
+**Office 文档预览（`OfficePreview`）**：`.docx/.xlsx` 等 OOXML 本质是 zip、`.doc/.xls` 是 OLE2 复合文档，按文本硬读只会得到一整屏乱码。后端 `coding_read_file` 因此**在文本读取分支之前**单列一类 `kind === 'office'`（`OFFICE_EXTS` 覆盖 doc/docx/docm/dot/dotx/rtf、xls/xlsx/xlsm/xlsb/xlt、ppt/pptx/pptm/pot/pps、odt/ods/odp/odg、wps/wpt/et/ett/dps/dpt 等 30 余种后缀），前端按格式分流：
+
+| 分流 | 格式 | 渲染 |
+|---|---|---|
+| `word` | docx / docm / dotx / dotm | **mammoth** 转 HTML（保留标题 / 加粗 / 列表 / 表格），产物过 `DOMPurify.sanitize(..., {USE_PROFILES:{html:true}})` 后注入 |
+| `excel` | xlsx / xlsm / xlsb / xls / xlt / xltx / xltm / ods | **SheetJS** `XLSX.read` → 按工作表切换渲染表格 |
+| `other` | doc / ppt / pptx / odt / rtf / wps … | 无可用网页渲染方案，退化成信息卡 + 三个动作按钮 |
+
+- **字节走 asset 协议**：`fetch(convertFileSrc(path))` → `arrayBuffer()`，比让 Rust 端 base64 一遍再传回来省一半开销（`tauri.conf` 的 `assetProtocol.scope` 为 `**/*`）
+- **两个解析库都动态 `import`**：`mammoth` 的浏览器包是 UMD，默认导出挂在 `default` 上，取不到就退回模块本身（`mod.default ?? mod`）；只有真的预览到对应格式时才把这坨体积加载进来
+- **三道降级**：体积 > 40MB 跳过解析直接劝用外部程序；解析抛错（损坏 / 加密 / 后缀名对不上）退化成同一张信息卡并附错误详情；解析结果为空（空文档）同样退化——**任何一条路径下「用系统程序打开」都还在**，预览失败不等于用户拿不到文件
+- **表格截断**：`MAX_TABLE_ROWS = 300` / `MAX_TABLE_COLS = 60`，整张百万行的表塞进 DOM 会把预览页拖死；截断时底部提示「仅显示前 300 行」。`sheet_to_json` 用 `raw: false` 取**单元格的展示值**（日期、千分位、百分比都按 Excel 里的样子给），不是底层序列号
+- **迟到结果丢弃**：`aliveRef` 在卸载 / 换文件时置 false，`await` 之后逐个检查——否则切走文件后旧解析结果会盖到新文件上
+
+**markdown 所见即所得就地编辑（`MarkdownLiveEditor`）**：预览态直接就是编辑区——没有铅笔按钮、没有弹窗 textarea，把光标放进渲染结果里打字 / 删字即可，敲完 `**加粗**` 的最后一个 `*`，星号立刻消失、只剩加粗的「加粗」。
+
+- **核心手法：DOM 里存的就是 markdown 原文**。渲染时不丢弃语法标记，而是把它们包进 `<span class="md-mark">`（CSS `display:none`），格式交给 `<strong>` / `<h2>` / `<ul>` 这些结构元素承担。于是：`textContent`（跳过 `data-md-ui` 子树——复制按钮、勾选框这类纯视觉件）**逐字符等于原文**，不需要把 DOM 反推成 markdown（那条路在嵌套列表缩进、转义字符、行尾空格上都是有损的，见 `codeMarkdown` 里同一条结论）；光标 / 选区 / 退格全是浏览器原生行为，**不需要任何 offset 换算表**。纯渲染部分独立在 [`markdownLiveHtml.ts`](file:///g:/vivian-rs/src/components/mind-inspector/pages/markdownLiveHtml.ts)，不依赖 React / DOM，可单独跑不变量测试
+- **重渲染判据**：比较「重新生成的 HTML（先经浏览器解析再序列化归一）与当前 DOM 的 `innerHTML` 是否一致」。纯打字时两者相等（都是同一段文本节点）→ 不重渲染、光标天然不动；只有敲出或破坏一个语法构造时才重建 DOM，并把光标按原文偏移放回去
+- **块级回写**：只把**真的变了**的块写回原文，避免用户改一段、整个文件被重排成规范形式。块数与 DOM 块壳数一致才走逐块回写，否则整篇重渲染。**空文档要特判**：`docHtml('')` 的占位段 `<p><br></p>` **不带** `data-md-block`，于是 `els.length === 0` 且 `oldBlocks.length === 0`，条件 `0 === 0` 竟然成立、循环体一次都不执行、`srcRef` 原地不动，紧接着 `scheduleRender` 看到 DOM 变了就把 `innerHTML` 重置回占位段——**用户敲的字被抹掉**。所以条件必须带前置 `els.length > 0`
+- **已知取舍**：重渲染会重建 DOM、浏览器原生 undo 栈随之失效（故自维护撤销栈，`Ctrl+Z` / `Ctrl+Shift+Z` / `Ctrl+Y`）；中文输入法组合期间（composition）不重渲染，否则会把候选词打断；`Enter` 自己插换行文本节点（交给浏览器会塞 `<div>` / `<br>`，破坏偏移换算）；粘贴只取 `text/plain`
+- **踩过的坑：`mark('\n')` 不产生断行**。换行符落在 `display:none` 的 `md-mark` 里，**它本身不产生任何断行**——凡是「同一块内唯一的分隔手段就是 `mark('\n')`」的地方都会塌成一行。引用块就踩过：多行引用在就地编辑态里挤成一行（聊天区没这问题，因为那边是把引用内容重新 `parseBlocks` 成块来渲染的）。修法是每行套一层 `<span class="md-line">`（CSS `display:block`），换行标记仍留在行内只为让 `textContent` 还原原文；该规则的作用域挂 `.codex-md` 而非 `.md-live`——断行是「引用块能不能读」的硬要求，绑在宿主类上太脆
+- **不变量测试**（改这块必须跑，属本地 dev 工具、不入库）：用 jsdom 加载**真实模块**跑三类断言——A 严格还原（渲染出的 `textContent` 逐字符等于 markdown 原文）、B 幂等（把渲染结果重新 `parseBlocks`，块结构必须不变，**硬门禁**）、C 引用行壳数（`md-line` 数量 == 引用行数），外加空文档占位契约（占位段不含 `data-md-block` 且文本为空）。语料 48 篇 / 63 个块。打包这步必须 `--format=cjs`——ESM 产物不认 `NODE_PATH`，jsdom 会解析不到
+
+**markdown 排版与 codex 风格字体（`--codex-md-*`）**：正文走一套专为 markdown 新开的字体变量，**刻意不复用 `--codex-font`**——那条链首选 `Kalam` 从未引入，回退会一路掉到 Microsoft YaHei（黑体），与暖纸信纸风对不上（同样的坑见 `.codex-group-menu`）。中文走本地打包的 `Ma Shan Zheng`（`public/fonts/ma-shan-zheng.woff2`，3.2MB，`@font-face` 在 `index.html`，必然可用），西文用它的拉丁字形、后面接衬线兜底；标题与表头另走装饰手写体 `--codex-md-hand`（`Caveat` → `Ma Shan Zheng` → `Dancing Script` → `Segoe Print` → 楷体）。正文基准 `--md-fs: 15px` / `line-height: 1.78` / `--md-measure: 680px`（约 45 个中文字一行，代码块与表格突破此限）。
+
+- **手写体只有 400 一个字重**，写 700 会被浏览器**合成粗体**（笔画糊成一坨「加粗黑体」感），所以标题字重也做成变量 `--codex-md-h-weight`（默认 400，极简主题覆盖成 600）
+- 一二级标题压一道**荧光笔底**（`linear-gradient(transparent 62%, var(--codex-tape-yellow) 62%)`，`width: fit-content` 是必须的——标题是块级，不收回宽度就会把整条 680px 全刷上色）；`strong` 同样补一道荧光笔底（手写体加不了粗，强调才立得住）
+- 四~六级标题与正文同字号、字重又压回了 400，改用强调色 `--codex-accent-deep` 与正文区分，否则会跟普通段落长得一模一样
+- 引用块做成**和纸胶带便签**（`--codex-tape-blue` 底 + 左侧强调色竖条 + `4px 10px 10px 4px` 非对称圆角）；分隔线改虚线；表头走手写体 + 强调色 + `--panel-bg-surface` 浅底 + 更重的下边框；表格隔行浅底防串行
+- **等宽代码块显式清掉正文加的字距**（`letter-spacing: normal`）——`.codex-md` 为手写体加了 `0.012em`，不清掉每个字符都会被撑开、列对不齐
+- **极简主题整体压回无衬线**（`MindInspectorThemes.css` 里 `--codex-md-font` / `--codex-md-hand` 一并覆盖，`--codex-md-h-weight: 600`）——该主题的立意就是「去手写、去纸感」；这套变量只在那里定义一次即可，深色极简块只覆盖颜色、自定义属性照样继承得到
+- **验证手法**（免构建，脚本属本地 dev 工具、不入库）：① 写一个 CSS 变量体检脚本，扫 CSS 定义 **加** TS/TSX 里 React inline style 的 `['--x' as string]:` 键（漏后者会把 `TrajectoryPanel.tsx` 的 `--lane` 误报成缺失），去注释后扫描，并区分「未定义但有兜底」与真缺失；② 另建一份免构建预览页（直接 `<link>` 真实样式表，**不要粘贴副本**，否则验的是副本），配无头 Chrome CDP 读计算样式断言。两个坑：**不能用中文字符量宽度判断字体是否生效**（中文字形在任何中文字体里都是全角等宽，换字体宽度不变——第一版得出 `ma=320 serif=320` 的假失败，要用西文串），**无头 Chrome 默认 `prefers-color-scheme: dark`**（不先 `Emulation.setEmulatedMedia` 钉住浅色，基准值量到的其实是深色，颜色断言会集体失败）。预览页还须复刻主题祖先链（`.mind-main[data-ui-style]` + `.codex-theme.workbench-root` 必须落在**同一个**元素上），否则极简主题的覆盖全部失效
 
 **Markdown 正文渲染（`codeMarkdown.tsx` / `MarkdownText`）**：助手回复以 markdown 为主，直接产出 React 节点（不拼 HTML、不走 dangerouslySetInnerHTML，零新增依赖）。块级——围栏代码块（语言标签 + 复制）、ATX 标题（1.5/1.25/1.125/1 倍递减）、分割线、引用（左侧竖条）、有序/无序列表（disc→circle→square 嵌套）、任务清单（`- [ ]` / `- [x]`，无项目符号 + 方框，完成项转灰）、表格、段落；行内——`code`、`**粗**`、`*斜*`、`~~删~~`、链接。
 - **有意不解析 `_` 系**（`_斜_` / `__粗__`）：`some_var_name`、`__init__` 这类标识符在工作回复里太常见，误伤成本高于收益。`*` / `**` 两侧都是 ASCII 字母数字时按运算符处理（`2*3*4`、`2**3` 保持字面量），中文两侧不受限（`这是*斜体*文字` 正常）。`**` 找不到闭合时整对定界符按字面量消费，避免第二个 `*` 落进斜体分支吞掉后续整段。
@@ -788,8 +831,8 @@ match 臂和 `commands/chat.rs` 里的 `chat:inline_meta` 映射，三处漏一�
 `resolve_prompt_budget(baseline) == 65_536`（window/2 × level2 × chat）与 `> 25_000`
 （必须显著高于静态区）。改 `base` 除数时这两条会一起失败——这是故意的，别只改数字了事。
 
-**量测脚本**：`.workbuddy-ai/tmp/measure_static_region.py`（引 tiktoken cl100k，
-与运行时 `estimate_tokens` 同一编码器）。改人设文件后重跑即可看体积变化。
+**量测方式**：自建一个量测脚本（引 tiktoken cl100k，与运行时 `estimate_tokens`
+同一编码器；属本地调试工具，不入库）。改人设文件后重跑即可看体积变化。
 
 #### `is_first_meeting` 判据（2026-09-15 修正）
 
@@ -1843,7 +1886,7 @@ body {
 - 代理检测与连通性检测**刻意分开**：前者只验证"代理进程在监听"，后者验证"能否真的出网"。分开才能在报告里区分「代理没开」和「代理开着但出不去」。
 - ICMP 走系统 `ping.exe` 而非 raw socket——Windows 上裸 ICMP 需要管理员权限。输出解析要兼容中/日/英与 Unix 四种区域设置写法（`(0% 丢失)` / `(0% の損失)` / `(0% loss)` / `0% packet loss`）。
 - 服务连通性探测超时收口到 `min(配置超时, 15s)`：诊断是交互式操作，配置里 30s 的超时会让弹窗长时间空转。
-- 静态复现页 `.workbuddy-ai/tmp/network-diagnosis-preview.html`（引用真实 `global.css`，可切换三组检测结果组合），改样式时同步维护。
+- 改样式时另建一份静态复现页对照（引用真实 `global.css`，可切换三组检测结果组合）—— 按 `.gitignore` 约定属本地工具，不入库。
 
 #### WebSearcher 多引擎混用
 
@@ -2076,7 +2119,7 @@ pub fn patch_last_assistant_entry_metadata(&self, patch: serde_json::Value)
   3. `frameDelayMs = clamp(slideMs / strideFrames, A_LO, A_HI)` 其中 `A_LO = round(0.75 × 原生均值) ≈ 58`、`A_HI = round(1.35 × 原生均值) ≈ 105`——把时长按帧数均分再夹到图集原生节奏带（A 兜底）。原生均值 = walk 14 帧时长之和 ÷ 14 ≈ 77.9ms。下沿防「用放大帧率去追远超步行能力的位移」（超速碎步），上沿防读不出摆腿；
   4. 限幅命中时**改步数**而不是改时长：`frameDelayMs < A_LO` ⇒ `frames = floor(slideMs / A_LO)`（少迈几帧、步幅变长）；`> A_HI` ⇒ `frames = ceil(slideMs / A_HI)`（多迈几帧、步幅变短）；`durationMs = frames × frameDelayMs` 按整帧回写 ⇒ `durationMs === frames × frameDelayMs` 严格成立，**走动收尾与窗口到位同时发生，且帧间隔绝不跌破原生地板（杜绝纵向挪动的超速碎步）**（实测 150/600/1200px → 67/59/58ms 每帧，长位移触地板 58ms；纯水平速度相同的 900px 与 1200px 帧间隔一致）
   - 踩过的坑：把第 2、3 步反过来（先按 `PX_PER_FRAME / speed` 定帧间隔、再让帧数填满时长）会让短位移的时长在 410–490ms 之间来回跳（帧数 5↔6 翻转，同一档距离两次挪动快慢不一），实测相邻档最大逆序 13ms，现方案 3ms
-  - 更早的一版是「步数按 `hypot(dx,dy)` 推、帧间隔 clamp 到 33–98ms、再按帧时间轴回写时长」，两个后果：270px 以上位移全部撞上 33ms 下限（播放速度与移动速度脱钩），且 450px 位移被拖成 924ms。再早还有「帧间隔下限只 17ms」的版本——17ms ≈ 4.6× 原生节奏，正是纵向挪动走路过快的根因。对照组脚本见 `.workbuddy-ai/tmp/walk-plan-timing-test.mjs` C 段（复现你消息里算的那条 `round(travel/7)` + 固定 700ms 旧实现：纵向大位移帧间隔 7–49ms、总时长恒≈700ms、纯纵向仍播走动）
+  - 更早的一版是「步数按 `hypot(dx,dy)` 推、帧间隔 clamp 到 33–98ms、再按帧时间轴回写时长」，两个后果：270px 以上位移全部撞上 33ms 下限（播放速度与移动速度脱钩），且 450px 位移被拖成 924ms。再早还有「帧间隔下限只 17ms」的版本——17ms ≈ 4.6× 原生节奏，正是纵向挪动走路过快的根因。对照组脚本的 C 段（复现那条 `round(travel/7)` + 固定 700ms 旧实现：纵向大位移帧间隔 7–49ms、总时长恒≈700ms、纯纵向仍播走动）
   - 窗口位移的采样统一在 `src/chibi/slideTrack.ts` 的 `runSlide()`：固定 32ms 采样步长、**最短 24 步**（D：对齐采样率，避免十几步定位 + 上百次逐帧重渲染挤在同一段时间里抢主线程）、easeInOutCubic 缓动，采样密度与走动帧率解耦。提取成独立模块的原因：避让与自主漫步此前各写一份采样循环（避让三次缓动 + 32ms 采样、漫步二次缓动 + 写死 48 步），同一位移在两处呈现的加速度不同
 - **自主漫步（`planAmbientWalk`）**：与避让共用 `composeWalkPlan`，只把速度锚点换成图集自身的地面速度 `CYCLE_TRAVEL_PX / Σdurations = 300 / 1090 ≈ 0.2752 px/ms`，默认 `speedScale = 1 ± 0.15`（`AMBIENT_SPEED_JITTER`，每趟抽一次做步频抖动，避免长距离漫步变成节拍器；幅度压在安全带内，所以**限幅永不命中**——帧间隔恒为原生节奏本身，实测 140–900px 全域零限幅）。时长完全由距离决定（`|dx| / speed`），于是「走多远花多久」，步数与地面位移严格一一对应
   - 调用方是 `ChibiPetCanvas` 的 ambient effect（`presenceState === 'online'` 时启用）：静息 `48–120s`（**走完一趟起算**）/ 被占用重试 `8–14s`（**被占用不消耗静息期**，只有「刚走过」或「主动决定不走」才排静息，语义才干净）/ 上线首趟 `10–25s`（静息期的含义是"刚走过一趟、歇一会儿"，启动时并不成立，直接套用会让桌宠头两分钟杵在原地）；距离**对数均匀**取 `[140, 900]px`（中位 355 / 均值 408 / 均值时长 1.5s）；`roomFor(dir)` 判该方向剩余空间、贴边则朝里走，两边都放不下 `WALK_DISTANCE_MIN_PX` 就放弃这趟（硬塞出来的位移会比转身动画还短）；朝向由**实际** `dx` 定，而不是抽签的方向——贴边截断后两者可能反号。启用条件除 `presenceState === 'online'` 外还有一道 `poseNameRef.current !== 'idle'` 门槛：后端用 `mood_tone` 把基调设成非 idle（如 `dizzy`）之后漫步**彻底停摆**——这是沿用下来的行为，语义上更该用眨眼那套 `isAtRest()`（它把「停在当前心情基调上」也算作静止）

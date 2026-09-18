@@ -452,6 +452,8 @@ pub fn run() {
             commands::coding_agent::coding_read_file,
             commands::coding_agent::coding_read_file_lines,
             commands::coding_agent::coding_write_file,
+            commands::coding_agent::coding_reveal_in_explorer,
+            commands::coding_agent::coding_copy_file_to,
             commands::coding_agent::rewrite_preview_selection,
             commands::coding_agent::coding_set_message_feedback,
             commands::coding_agent::coding_fork_session,

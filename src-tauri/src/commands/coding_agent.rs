@@ -71,7 +71,7 @@ pub fn coding_list_dir_tree(
 pub struct CodingFileRead {
     pub path: String,
     pub name: String,
-    /// text / image / pdf / binary
+    /// text / image / pdf / office / binary
     pub kind: String,
     /// 文本文件内容（kind == "text" 时；超长文件仅含首段）
     pub content: Option<String>,
@@ -118,6 +118,21 @@ pub fn coding_read_file(path: String) -> Result<CodingFileRead, String> {
     // PDF：内嵌 iframe 渲染
     if ext == "pdf" {
         return Ok(CodingFileRead { path, name, kind: "pdf".into(), content: None, size, total_lines: None, truncated: false });
+    }
+
+    // Office 文档：**不能**落进下面的文本读取分支。
+    //
+    // .docx/.xlsx/.pptx 本质是 zip（OOXML），.doc/.xls/.ppt 是 OLE2 复合文档，
+    // 按文本硬读只会得到一整屏乱码。这里单独标成 office，交给前端按格式渲染
+    // （docx → HTML、xls/xlsx → 表格；其余无网页渲染方案的走「用系统程序打开」卡片）。
+    const OFFICE_EXTS: &[&str] = &[
+        "doc", "docx", "docm", "dot", "dotx", "dotm", "rtf",
+        "xls", "xlsx", "xlsm", "xlsb", "xlt", "xltx", "xltm",
+        "ppt", "pptx", "pptm", "pot", "potx", "potm", "pps", "ppsx",
+        "odt", "ods", "odp", "odg", "wps", "wpt", "et", "ett", "dps", "dpt",
+    ];
+    if OFFICE_EXTS.contains(&ext.as_str()) {
+        return Ok(CodingFileRead { path, name, kind: "office".into(), content: None, size, total_lines: None, truncated: false });
     }
 
     // 其余一律尝试按文本读取（编码检测兜底）；纯二进制（如 exe/dll/zip）会读到乱码，
@@ -188,6 +203,69 @@ pub fn coding_write_file(path: String, content: String) -> Result<(), String> {
         }
     }
     std::fs::write(p, content.as_bytes()).map_err(|e| format!("写入文件失败: {e}"))
+}
+
+/// 在系统文件管理器中定位并选中该文件（预览页签右键菜单「在文件资源管理器中显示」）。
+///
+/// 只负责把文件管理器「呼出来并选中」，不打开文件本身；Windows 走 `explorer /select,`，
+/// macOS 走 `open -R`，Linux 没有统一的「选中」语义，退化为打开所在目录。
+#[tauri::command]
+pub fn coding_reveal_in_explorer(path: String) -> Result<(), String> {
+    let p = std::path::Path::new(&path);
+    if !p.exists() {
+        return Err(format!("文件不存在: {path}"));
+    }
+    let target = p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+
+    // explorer 的参数解析很特殊：必须是 `/select,<路径>` 这样的单参数形式，
+    // 拆成两个参数（`/select,` + 路径）会被当成两个待打开对象而失效。
+    #[cfg(windows)]
+    let spawned = crate::utils::process::silent_command("explorer")
+        .arg(format!("/select,{}", target.to_string_lossy()))
+        .spawn();
+
+    #[cfg(target_os = "macos")]
+    let spawned = crate::utils::process::silent_command("open")
+        .arg("-R")
+        .arg(&target)
+        .spawn();
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let spawned = crate::utils::process::silent_command("xdg-open")
+        .arg(target.parent().unwrap_or(std::path::Path::new(".")))
+        .spawn();
+
+    #[cfg(not(any(windows, unix)))]
+    let spawned: std::io::Result<std::process::Child> = Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "当前平台不支持在文件管理器中显示",
+    ));
+
+    spawned.map(|_| ()).map_err(|e| format!("在文件管理器中显示失败: {e}"))
+}
+
+/// 把文件字节级复制到目标路径（预览页签右键菜单「另存为」）。
+///
+/// 走字节复制而不是「前端读文本再写回」：预览里的图片 / PDF / 二进制同样要能另存，
+/// 这些内容在前端并没有可用的文本形态。目标父目录不存在时自动创建。
+#[tauri::command]
+pub fn coding_copy_file_to(from: String, to: String) -> Result<(), String> {
+    let src = std::path::Path::new(&from);
+    if !src.is_file() {
+        return Err(format!("文件不存在: {from}"));
+    }
+    let dst = std::path::Path::new(&to);
+    if let Some(parent) = dst.parent() {
+        if !parent.as_os_str().is_empty() && !parent.exists() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("创建目标目录失败: {e}"))?;
+        }
+    }
+    // 同一路径直接当成功：用户可能把另存对话框指回了原文件
+    if src == dst {
+        return Ok(());
+    }
+    std::fs::copy(src, dst).map_err(|e| format!("另存为失败: {e}"))?;
+    Ok(())
 }
 
 /// 预览页「就地改写」：按用户给的编辑指令重写被选中的那段文字。

@@ -1557,6 +1557,19 @@ const resources = {
         code_tab_preview: '预览',
         code_preview_no_tab: '暂无打开的文件',
         code_preview_close: '关闭',
+        code_tab_menu_open: '打开',
+        code_tab_menu_reveal: '在文件资源管理器中显示',
+        code_tab_menu_save_as: '另存为',
+        code_tab_menu_close_all: '关闭所有标签页',
+        code_office_unknown_type: '未知格式',
+        code_office_open_external: '用系统程序打开',
+        code_office_reveal: '在资源管理器中显示',
+        code_office_no_renderer: '{{ext}} 暂不支持内嵌渲染，请用系统程序打开查看',
+        code_office_parsing: '正在解析文档…',
+        code_office_parse_failed: '文档解析失败，可能是文件损坏或已加密',
+        code_office_empty: '文档内容为空',
+        code_office_too_large: '文件过大（{{size}}），已跳过解析',
+        code_office_rows_truncated: '仅显示前 {{n}} 行',
         code_preview_chat_docs: '对话文档',
         code_preview_binary: '二进制文件：{{name}}（{{size}} KB）',
         code_sel_add_to_chat: '添加到对话',
@@ -2735,6 +2748,9 @@ const resources = {
 
       // ===== ChatWindow =====
       chat: {
+        voice_asr_failed: '语音识别启动失败，仅保存语音消息',
+        drag_file_hint: '松开以发送文件',
+        drag_file_home_hint: '请先进入对话再发送文件',
         title: '薇薇安',
         status_typing: '正在输入…',
         status_online: '在线',
@@ -2851,7 +2867,14 @@ const resources = {
       },
 
       // ===== Toast =====
+      ui: {
+        drop_file_hint: '松开以发送文件',
+      },
       toast: {
+        image_dropped: '已发送图片：{{filename}}',
+        file_unsupported: '不支持的文件类型：{{filename}}',
+        file_truncated: '（文件过长，已截断，原始 {{count}} 字符）',
+        file_extract_failed: '文件处理失败：{{error}}',
         diary_written: '{{name}}的日记写好了',
         api_not_configured: '还没配置 LLM 服务，去 设置 → LLM 里配置 API Key、Endpoint 和模型',
         route_fallback: '路由「{{task}}」的 API 调用失败，已自动切换到主 LLM API',
@@ -2949,6 +2972,8 @@ const resources = {
 
       // ===== 定时任务窗口 =====
       scheduler_window: {
+        btn_pause: '暂停',
+        btn_resume: '恢复',
         title: '定时任务',
         btn_add: '添加提醒',
         btn_cancel: '取消任务',
@@ -4501,6 +4526,19 @@ const resources = {
         code_tab_preview: 'Preview',
         code_preview_no_tab: 'No file open',
         code_preview_close: 'Close',
+        code_tab_menu_open: 'Open',
+        code_tab_menu_reveal: 'Show in File Explorer',
+        code_tab_menu_save_as: 'Save as',
+        code_tab_menu_close_all: 'Close all tabs',
+        code_office_unknown_type: 'Unknown format',
+        code_office_open_external: 'Open with system app',
+        code_office_reveal: 'Show in file manager',
+        code_office_no_renderer: 'Inline preview is not available for {{ext}}. Open it with a system app.',
+        code_office_parsing: 'Parsing document…',
+        code_office_parse_failed: 'Failed to parse this document. It may be corrupted or encrypted.',
+        code_office_empty: 'This document is empty',
+        code_office_too_large: 'File is too large ({{size}}), parsing skipped',
+        code_office_rows_truncated: 'Showing the first {{n}} rows only',
         code_preview_chat_docs: 'Chat documents',
         code_preview_binary: 'Binary file: {{name}} ({{size}} KB)',
         code_sel_add_to_chat: 'Add to chat',
@@ -5667,6 +5705,9 @@ const resources = {
 
       // ===== ChatWindow =====
       chat: {
+        voice_asr_failed: 'Voice recognition failed to start; saving the voice message only',
+        drag_file_hint: 'Release to send the file',
+        drag_file_home_hint: 'Open a conversation first, then send files',
         title: 'Vivian',
         status_typing: 'typing…',
         status_online: 'online',
@@ -5783,7 +5824,14 @@ const resources = {
       },
 
       // ===== Toast =====
+      ui: {
+        drop_file_hint: 'Release to send the file',
+      },
       toast: {
+        image_dropped: 'Image sent: {{filename}}',
+        file_unsupported: 'Unsupported file type: {{filename}}',
+        file_truncated: '(File too long, truncated; original {{count}} characters)',
+        file_extract_failed: 'File processing failed: {{error}}',
         diary_written: '{{name}}\'s diary is done',
         api_not_configured: 'Main LLM API not configured yet. Go to Settings → LLM to set up API Key, Endpoint, and Model',
         route_fallback: 'Route "{{task}}" failed, switched to main LLM API',
@@ -5881,6 +5929,8 @@ const resources = {
 
       // ===== Scheduler Window =====
       scheduler_window: {
+        btn_pause: 'Pause',
+        btn_resume: 'Resume',
         title: 'Scheduled Tasks',
         btn_add: 'Add Reminder',
         btn_cancel: 'Cancel Task',
@@ -7429,6 +7479,19 @@ const resources = {
         code_tab_preview: 'プレビュー',
         code_preview_no_tab: '開いているファイルはありません',
         code_preview_close: '閉じる',
+        code_tab_menu_open: '開く',
+        code_tab_menu_reveal: 'エクスプローラーで表示',
+        code_tab_menu_save_as: '名前を付けて保存',
+        code_tab_menu_close_all: 'すべてのタブを閉じる',
+        code_office_unknown_type: '不明な形式',
+        code_office_open_external: 'アプリで開く',
+        code_office_reveal: 'フォルダーで表示',
+        code_office_no_renderer: '{{ext}} は埋め込み表示に対応していません。アプリで開いてください',
+        code_office_parsing: 'ドキュメントを解析中…',
+        code_office_parse_failed: '解析に失敗しました。ファイルが破損または暗号化されている可能性があります',
+        code_office_empty: '内容が空です',
+        code_office_too_large: 'ファイルが大きすぎます（{{size}}）。解析を省略しました',
+        code_office_rows_truncated: '先頭 {{n}} 行のみ表示',
         code_preview_chat_docs: '会話ドキュメント',
         code_preview_binary: 'バイナリファイル: {{name}}（{{size}} KB）',
         code_sel_add_to_chat: '会話に追加',
@@ -8593,6 +8656,9 @@ const resources = {
       },
 
       chat: {
+        voice_asr_failed: '音声認識を開始できませんでした。音声メッセージのみ保存します',
+        drag_file_hint: 'ドロップしてファイルを送信',
+        drag_file_home_hint: '先に会話を開いてからファイルを送信してください',
         title: '薇薇安',
         status_typing: '入力中…',
         status_online: 'オンライン',
@@ -8709,7 +8775,14 @@ const resources = {
       },
 
       // ===== Toast =====
+      ui: {
+        drop_file_hint: 'ドロップしてファイルを送信',
+      },
       toast: {
+        image_dropped: '画像を送信しました: {{filename}}',
+        file_unsupported: '対応していないファイル形式: {{filename}}',
+        file_truncated: '（ファイルが長すぎるため切り詰めました。元は {{count}} 文字）',
+        file_extract_failed: 'ファイルの処理に失敗しました: {{error}}',
         diary_written: '{{name}}の日記を書き終えました',
         api_not_configured: 'LLM サービスが未設定です。設定 → LLM で API Key、Endpoint、モデルを設定してください',
         route_fallback: 'ルート「{{task}}」の呼び出しに失敗、メイン LLM API に切り替えました',
@@ -8807,6 +8880,8 @@ const resources = {
 
       // ===== スケジュールタスクウィンドウ =====
       scheduler_window: {
+        btn_pause: '一時停止',
+        btn_resume: '再開',
         title: 'スケジュールタスク',
         btn_add: 'リマインダー追加',
         btn_cancel: 'タスクキャンセル',

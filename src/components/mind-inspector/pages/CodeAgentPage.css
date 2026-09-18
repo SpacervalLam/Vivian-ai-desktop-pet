@@ -47,6 +47,19 @@
   --codex-font: 'Kalam', 'Segoe Print', 'STKaiti', 'KaiTi', '楷体', 'PingFang SC', 'Microsoft YaHei', sans-serif;
   --codex-mono: 'Cascadia Code', 'JetBrains Mono', 'SF Mono', Consolas, 'Courier New', monospace;
 
+  /* ---------- markdown 排版字体 ----------
+     刻意不复用 --codex-font：那条链首选 'Kalam' 从未引入，回退会一路掉到
+     Microsoft YaHei（黑体），与暖纸信纸风对不上（同样的坑见 .codex-group-menu）。
+     中文走本地打包的 Ma Shan Zheng（@font-face 在 index.html，3.2MB woff2，必然可用），
+     西文用它的拉丁字形，后面接衬线兜底 —— 与 design-system 的 TYPO.fontFamily 一致。 */
+  --codex-md-font: 'Ma Shan Zheng', 'Noto Serif SC', 'Source Han Serif SC', 'Songti SC', 'STSong', 'SimSun', 'EB Garamond', 'PT Serif', Georgia, 'Times New Roman', serif;
+  /* 装饰手写体（标题、表头）：西文先吃在线加载的 Caveat，中文回落 Ma Shan Zheng。
+     与 .codex-group-menu 用的是同一套栈。 */
+  --codex-md-hand: 'Caveat', 'Ma Shan Zheng', 'Dancing Script', 'Segoe Print', 'KaiTi', '楷体', cursive;
+  /* 手写体只有 400 一个字重，写 700 会被浏览器合成粗体（糊成一坨「加粗黑体」感），
+     所以标题字重也做成变量 —— 极简主题换回无衬线后要覆盖成 600。 */
+  --codex-md-h-weight: 400;
+
   /* 将整个心智观察器内的 --panel-* 统一为手账暖纸，使所有子页面自动继承 */
   --panel-bg: #f6efe1;
   --panel-surface: #fffcf3;
@@ -1097,6 +1110,17 @@
 .codex-session-context-menu.scrapbook { background: #fffaf2 !important; border-color: #e7d8c4; color: #403a34; }
 .codex-session-context-menu.minimal { background: #ffffff !important; border-color: #d9dde3; color: #252a30; }
 .codex-session-context-menu button.danger { color: #b42318 !important; }
+
+/* 通用右键菜单卡（页签右键等复用；与会话菜单同一套视觉） */
+.codex-context-menu { position: fixed; z-index: 1000; display: flex; flex-direction: column; min-width: 150px; padding: 5px; border: 1px solid var(--codex-line, #d9dde3); border-radius: 10px; background-color: var(--codex-paper-card, #ffffff) !important; box-shadow: var(--codex-shadow-lg, 0 12px 32px rgba(20, 24, 28, 0.2)); }
+.codex-context-menu button { border: 0; border-radius: 6px; padding: 7px 10px; color: var(--codex-ink, #252a30); background: transparent; text-align: left; cursor: pointer; font-size: 12px; font-family: 'Caveat', 'Ma Shan Zheng', 'Dancing Script', 'Segoe Print', 'KaiTi', '楷体', cursive; font-weight: 400; }
+.codex-context-menu button:hover { background: var(--codex-accent-soft); }
+.codex-context-menu button.danger { color: #b42318 !important; }
+.codex-context-menu.scrapbook { background: #fffaf2 !important; border-color: #e7d8c4; color: #403a34; }
+.codex-context-menu.minimal { background: #ffffff !important; border-color: #d9dde3; color: #252a30; }
+
+/* 菜单正对着的那个页签：保持高亮，明确菜单作用对象 */
+.codex-preview-tab.menu-open { background: var(--codex-accent-soft); border-color: var(--codex-line); color: var(--codex-ink); }
 .codex-session-modal-backdrop { position: fixed; inset: 0; z-index: 1100; display: grid; place-items: center; background: rgba(20, 24, 28, 0.28); }
 .codex-session-modal { width: min(360px, calc(100vw - 32px)); padding: 18px; border: 1px solid var(--codex-line, #d9dde3); border-radius: 14px; background-color: var(--codex-paper-card, #ffffff) !important; box-shadow: var(--codex-shadow-lg, 0 12px 32px rgba(20, 24, 28, 0.2)); color: var(--codex-ink, #252a30); }
 .codex-session-modal h3 { margin: 0 0 12px; font-size: 15px; }
@@ -1339,6 +1363,325 @@
   border: none;
   background: #fff;
 }
+
+/* ============ Office 文档预览 ============ */
+
+.codex-office-loading {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: var(--codex-ink-faint);
+  font-size: 12px;
+}
+
+/* 文档 / 表格共用的滚动容器：撑满预览区，内容自己滚 */
+.codex-office-scroll {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  padding: 14px 16px;
+}
+
+/* ---- Word：mammoth 产出的结构化 HTML ---- */
+
+.codex-office-doc {
+  color: var(--codex-ink);
+  font-size: 13px;
+  line-height: 1.75;
+  word-break: break-word;
+}
+
+.codex-office-doc h1,
+.codex-office-doc h2,
+.codex-office-doc h3,
+.codex-office-doc h4,
+.codex-office-doc h5,
+.codex-office-doc h6 {
+  margin: 16px 0 8px;
+  line-height: 1.35;
+  font-weight: 600;
+  color: var(--codex-ink);
+}
+
+.codex-office-doc h1 { font-size: 19px; }
+.codex-office-doc h2 { font-size: 17px; }
+.codex-office-doc h3 { font-size: 15px; }
+.codex-office-doc h4,
+.codex-office-doc h5,
+.codex-office-doc h6 { font-size: 13.5px; }
+
+.codex-office-doc p { margin: 0 0 9px; }
+.codex-office-doc ul,
+.codex-office-doc ol { margin: 0 0 9px; padding-left: 22px; }
+.codex-office-doc li { margin: 2px 0; }
+.codex-office-doc strong { font-weight: 600; }
+.codex-office-doc em { font-style: italic; }
+.codex-office-doc a { color: var(--codex-accent); }
+
+.codex-office-doc img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 6px;
+}
+
+.codex-office-doc blockquote {
+  margin: 0 0 9px;
+  padding: 2px 0 2px 11px;
+  border-left: 3px solid var(--codex-line);
+  color: var(--codex-ink-soft);
+}
+
+.codex-office-doc table {
+  width: 100%;
+  margin: 0 0 12px;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.codex-office-doc th,
+.codex-office-doc td {
+  padding: 5px 8px;
+  border: 1px solid var(--codex-line-light);
+  text-align: left;
+  vertical-align: top;
+}
+
+.codex-office-doc th {
+  background: var(--codex-paper);
+  font-weight: 600;
+}
+
+/* ---- Excel：工作表切换 + 网格 ---- */
+
+.codex-office-sheet {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.codex-office-sheet-tabs {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 4px;
+  padding: 4px 8px;
+  overflow-x: auto;
+  flex-shrink: 0;
+  scrollbar-width: none;
+  border-bottom: 1px solid var(--codex-line-light);
+  background: var(--codex-paper);
+}
+
+.codex-office-sheet-tabs::-webkit-scrollbar { display: none; }
+
+.codex-office-sheet-tab {
+  flex-shrink: 0;
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 3px 9px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--codex-ink-soft);
+  cursor: pointer;
+  font-size: 11.5px;
+}
+
+.codex-office-sheet-tab:hover { background: rgba(83, 125, 150, 0.08); }
+
+.codex-office-sheet-tab.active {
+  background: var(--codex-accent-soft);
+  border-color: var(--codex-line);
+  color: var(--codex-ink);
+  font-weight: 600;
+}
+
+.codex-office-table {
+  border-collapse: collapse;
+  font-size: 11.5px;
+  font-family: var(--codex-mono);
+  color: var(--codex-ink);
+}
+
+.codex-office-table td {
+  max-width: 260px;
+  padding: 3px 8px;
+  border: 1px solid var(--codex-line-light);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: top;
+}
+
+.codex-office-table tr:first-child td {
+  background: var(--codex-paper);
+  font-weight: 600;
+  position: sticky;
+  top: 0;
+}
+
+.codex-office-truncated {
+  flex-shrink: 0;
+  padding: 6px 12px;
+  border-top: 1px solid var(--codex-line-light);
+  background: var(--codex-paper);
+  color: var(--codex-ink-faint);
+  font-size: 11.5px;
+}
+
+/* ---- 无法内嵌渲染 / 解析失败时的信息卡 ---- */
+
+.codex-office-card {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 26px 18px;
+  text-align: center;
+}
+
+.codex-office-card-icon { color: var(--codex-ink-faint); }
+
+.codex-office-card-name {
+  max-width: 100%;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--codex-ink);
+  word-break: break-all;
+}
+
+.codex-office-card-meta {
+  font-size: 11.5px;
+  color: var(--codex-ink-faint);
+}
+
+.codex-office-card-note {
+  max-width: 300px;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--codex-ink-soft);
+}
+
+.codex-office-card-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 5px;
+  max-width: 320px;
+  padding: 6px 9px;
+  border-radius: 7px;
+  background: var(--codex-danger-soft);
+  color: var(--codex-danger);
+  font-size: 11.5px;
+  line-height: 1.5;
+  text-align: left;
+  word-break: break-word;
+}
+
+.codex-office-card-error svg { flex-shrink: 0; margin-top: 2px; }
+
+.codex-office-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 7px;
+  margin-top: 5px;
+}
+
+.codex-office-card-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 27px;
+  padding: 0 11px;
+  border: 1px solid var(--codex-line);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--codex-ink-soft);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.codex-office-card-actions button:hover {
+  background: var(--codex-accent-soft);
+  color: var(--codex-ink);
+}
+
+.codex-office-card-actions button.primary {
+  background: var(--codex-accent);
+  border-color: var(--codex-accent);
+  color: #fff;
+}
+
+/* ============ markdown 预览：所见即所得就地编辑 ============ */
+
+.md-live-wrap {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.md-live-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  padding: 3px 12px;
+  border-bottom: 1px dashed var(--codex-line-light);
+  color: var(--codex-ink-faint);
+  font-size: 11px;
+}
+
+.md-live-saving {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--codex-accent-deep);
+}
+
+.md-live-disabled { color: var(--codex-warm); }
+
+/* 编辑区本身就是滚动容器，所以光标/滚动位置由它自己持有 */
+.md-live {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  padding: 12px 16px 28px;
+  outline: none;
+  cursor: text;
+}
+
+/*
+ * 语法标记：唯一作用是让 textContent 还原出 markdown 原文（见 MarkdownLiveEditor
+ * 顶部说明），因此永远不显示。用户打字时它们还是普通文本、照常可见；只有凑成一个
+ * 完整构造之后才被包进这里藏起来。
+ */
+.md-live .md-mark { display: none; }
+
+.md-live-block { position: relative; }
+
+/* 表格分隔行只贡献原文文本，不参与排版 */
+.md-live-tablesep { display: none; }
+
+/* 引用块里的行壳：必须 display:block 才断得开行。
+   行内那个 mark('\n') 是 display:none 的，指望它断行会让多行引用挤成一行。
+   作用域挂在 .codex-md 而不是 .md-live：md-line 虽然只有就地编辑器会产出，
+   但断行是「引用块能不能读」的硬要求，绑在宿主类上太脆。 */
+.codex-md .md-line { display: block; }
+
+/* 视觉件（复制按钮、勾选框、文件链接）在编辑区里仍要能点 */
+.md-live [contenteditable='false'] { cursor: pointer; }
 
 .codex-preview-binary {
   flex: 1;
@@ -2449,7 +2792,10 @@
   max-height: 130px;
   overflow-y: auto;
   padding: 8px 0;
-  font-family: var(--codex-font);
+  /* 与上方消息区同字体。这里必须显式写出来：`.codex-md`（在文件更后面）也设了
+     font-family，同优先级下源码顺序靠后的它会把这条覆盖掉 —— 与其依赖顺序，
+     不如直接指向同一个变量，意图才明确。 */
+  font-family: var(--codex-md-font);
   color: var(--codex-ink);
   caret-color: var(--codex-accent);
   outline: none;
@@ -2919,14 +3265,21 @@
 /* ===================== Markdown 正文排版 ===================== */
 
 /* 尺度：字号 F 为基准，块间距 S = F/4，标题按 1.5/1.25/1.125/1 递减，
-   段落、列表、代码块之间留白逐级放大，保证长回复的阅读节奏。 */
+   段落、列表、代码块之间留白逐级放大，保证长回复的阅读节奏。
+
+   字体与行距是按手写体调的：Ma Shan Zheng 的笔画比黑体「满」，同字号下字面更大、
+   重心更散，行距沿用原来的 1.62 会显得挤成一团，所以给到 1.78；字距也松一档。
+   代码块与表格仍是等宽/常规字体，不跟着手写。 */
 .codex-md {
-  --md-fs: 14.5px;
+  --md-fs: 15px;
   --md-s: 4px;
-  /* 正文阅读宽度：约 47 个中文字/行；代码块与表格可突破此限占满整列 */
+  /* 正文阅读宽度：约 45 个中文字/行（15px 字号下 680 / 15 ≈ 45）；
+     代码块与表格可突破此限占满整列 */
   --md-measure: 680px;
+  font-family: var(--codex-md-font);
   font-size: var(--md-fs);
-  line-height: 1.62;
+  line-height: 1.78;
+  letter-spacing: 0.012em;
   color: var(--codex-ink);
   word-break: break-word;
 }
@@ -2954,19 +3307,43 @@
 
 .codex-md-p { margin: 0 0 10px; }
 
-.codex-md-h { font-weight: 700; color: var(--codex-ink); }
-.codex-md-h1 { font-size: calc(var(--md-fs) * 1.5); line-height: 1.35; margin: 4px 0 10px; }
-.codex-md-h2 { font-size: calc(var(--md-fs) * 1.25); line-height: 1.4; margin: 18px 0 8px; }
-.codex-md-h3 { font-size: calc(var(--md-fs) * 1.125); line-height: 1.4; margin: 16px 0 6px; }
-.codex-md-h4, .codex-md-h5, .codex-md-h6 { font-size: var(--md-fs); margin: 14px 0 4px; }
+/* 标题走装饰手写体（西文 Caveat + 中文 Ma Shan Zheng）。字重用变量而不是写死 700：
+   手写体只有 400 一个字重，写 700 会被浏览器合成粗体，笔画糊成一坨。 */
+.codex-md-h {
+  font-family: var(--codex-md-hand);
+  font-weight: var(--codex-md-h-weight);
+  letter-spacing: 0.02em;
+  color: var(--codex-ink);
+}
+.codex-md-h1 { font-size: calc(var(--md-fs) * 1.55); line-height: 1.3; margin: 4px 0 12px; }
+.codex-md-h2 { font-size: calc(var(--md-fs) * 1.3); line-height: 1.35; margin: 20px 0 8px; }
+.codex-md-h3 { font-size: calc(var(--md-fs) * 1.15); line-height: 1.4; margin: 17px 0 6px; }
+/* 四~六级标题与正文同字号，字重又压回了 400（手写体加不了粗），所以改用强调色
+   与正文区分 —— 否则它们会跟普通段落长得一模一样。 */
+.codex-md-h4, .codex-md-h5, .codex-md-h6 {
+  font-size: var(--md-fs);
+  color: var(--codex-accent-deep);
+  margin: 14px 0 4px;
+}
+/* 一二级标题压一道荧光笔。手写体没法靠加粗拉层级，就用这道底把标题「划」出来 ——
+   手账里最常见的强调法，也和便签、胶带那套色板是一路的。
+   `width: fit-content` 是必须的：标题是块级，不收回宽度就会把整条 680px 全刷上色。 */
+.codex-md-h1,
+.codex-md-h2 {
+  width: fit-content;
+  padding: 0 2px;
+  background-image: linear-gradient(transparent 62%, var(--codex-tape-yellow) 62%);
+  background-repeat: no-repeat;
+}
 
 .codex-md-ul, .codex-md-ol { margin: 0 0 10px; padding-inline-start: 22px; }
 .codex-md-ul { list-style-type: disc; }
 .codex-md-ol { list-style-type: decimal; }
 .codex-md-ul .codex-md-ul { list-style-type: circle; }
 .codex-md-ul .codex-md-ul .codex-md-ul { list-style-type: square; }
-.codex-md-li { margin: 3px 0; padding-inline-start: 2px; }
-.codex-md-li::marker { color: var(--codex-ink-soft); font-weight: 700; }
+.codex-md-li { margin: 4px 0; padding-inline-start: 2px; }
+/* 项目符号用强调色，与正文黑字拉开一档 */
+.codex-md-li::marker { color: var(--codex-accent); font-weight: 700; }
 .codex-md-li > .codex-md-ul, .codex-md-li > .codex-md-ol { margin: 3px 0 0; }
 .codex-md-li > .codex-md-p:last-child { margin-bottom: 0; }
 
@@ -2982,7 +3359,10 @@
   flex: none;
   width: 15px;
   height: 15px;
-  margin-top: 4px;
+  /* 与首行文字垂直居中：li 是 align-items:flex-start，所以这里要手动让位。
+     (行高 1.78 × 15px = 26.7px − 方框 15px) / 2 ≈ 6px —— 行距改成 1.78 后
+     原来的 4px 会让方框偏高约 2px。 */
+  margin-top: 6px;
   border: 1.5px solid var(--codex-line);
   border-radius: 4px;
   display: inline-flex;
@@ -2998,28 +3378,32 @@
 .codex-md-task-body { flex: 1; min-width: 0; }
 .codex-md-task[data-checked] .codex-md-task-body { color: var(--codex-ink-faint); }
 
+/* 引用块做成一张便签贴纸：淡蓝胶带底 + 左侧强调条。
+   底色用 --codex-tape-*（手账/极简 × 明/暗 四种组合都定义了值），不写死颜色。 */
 .codex-md-quote {
   position: relative;
   margin: 0 0 12px;
-  padding: 4px 0 4px 18px;
+  padding: 8px 14px 8px 16px;
+  border-radius: 4px 10px 10px 4px;
+  background: var(--codex-tape-blue);
   color: var(--codex-ink-soft);
 }
 .codex-md-quote::after {
   content: '';
   position: absolute;
   inset-inline-start: 0;
-  top: 4px;
-  bottom: 4px;
+  top: 0;
+  bottom: 0;
   width: 3px;
-  border-radius: 2px;
-  background: var(--codex-line);
+  border-radius: 4px 0 0 4px;
+  background: var(--codex-accent);
 }
 .codex-md-quote > *:last-child { margin-bottom: 0; }
 
 .codex-md-hr {
-  margin: 20px 0;
+  margin: 22px 0;
   border: 0;
-  border-top: 1px solid var(--codex-line-light);
+  border-top: 1px dashed var(--codex-line);
 }
 
 .codex-md-code {
@@ -3029,6 +3413,9 @@
   border: 1px solid rgba(83, 125, 150, 0.14);
   font-family: var(--codex-mono);
   font-size: 0.88em;
+  /* .codex-md 给正文加了 0.012em 字距（为手写体），等宽代码必须清掉，
+     否则每个字符都被撑开、列对不齐 */
+  letter-spacing: normal;
   color: var(--codex-accent-deep);
 }
 
@@ -3076,6 +3463,8 @@
   font-family: var(--codex-mono);
   font-size: 12.5px;
   line-height: 1.6;
+  /* 同上：清掉继承来的正文手写字距 */
+  letter-spacing: normal;
   color: var(--codex-ink);
 }
 .codex-md-pre code { font-family: inherit; }
@@ -3084,10 +3473,15 @@
 .codex-md-table { border-collapse: separate; border-spacing: 0; width: 100%; font-size: 13px; }
 .codex-md-th {
   text-align: left;
-  font-weight: 700;
+  /* 表头也走手写体，和标题呼应；字重同样交给变量（不能写死 700，手写体会被合成粗体）。
+     少了加粗，就靠手写体 + 强调色 + 一道浅底 + 更重的下边框四样把表头立起来。 */
+  font-family: var(--codex-md-hand);
+  font-weight: var(--codex-md-h-weight);
+  letter-spacing: 0.02em;
   padding: 6px 12px 6px 0;
   border-bottom: 1px solid var(--codex-line);
-  color: var(--codex-ink);
+  background: var(--panel-bg-surface);
+  color: var(--codex-accent-deep);
   white-space: nowrap;
 }
 .codex-md-td {
@@ -3095,6 +3489,9 @@
   vertical-align: top;
   border-bottom: 1px solid var(--codex-line-light);
 }
+/* 隔行浅底：表格行多时眼睛不容易串行。底色取 --panel-bg-surface，
+   两套主题、明暗模式都自适应。 */
+.codex-md-tr:nth-child(even) .codex-md-td { background: var(--panel-bg-surface); }
 .codex-md-tr:last-child .codex-md-td { border-bottom: none; }
 .codex-md-th:last-child, .codex-md-td:last-child { padding-right: 0; }
 
@@ -3187,7 +3584,14 @@
   gap: 2px;
 }
 
-.codex-md strong { font-weight: 700; }
+.codex-md strong {
+  font-weight: 700;
+  /* 手写体没有粗体字重，浏览器只能合成粗体，笔画会糊；补一道荧光笔底，
+     强调才立得住。极简主题里 tape-yellow 是浅灰，那里就只是一道很淡的底，不突兀。 */
+  background-image: linear-gradient(transparent 58%, var(--codex-tape-yellow) 58%);
+  padding: 0 1px;
+  border-radius: 2px;
+}
 .codex-md del { color: var(--codex-ink-faint); }
 
 .codex-msg-error {

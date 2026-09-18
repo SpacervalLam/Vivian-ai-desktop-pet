@@ -1217,10 +1217,10 @@ const WorldPage: React.FC = () => {
             bgImage={CARD_BG.network}
             value={
               snap.network_status?.connected
-                ? (snap.network_status.name || t('mind_inspector.network.connected'))
-                : t('mind_inspector.network.disconnected')
+                ? (snap.network_status.name || t('mind_inspector.world.network.connected'))
+                : t('mind_inspector.world.network.disconnected')
             }
-            hint={snap.network_status?.interface_type || t('mind_inspector.network.hint')}
+            hint={snap.network_status?.interface_type || t('mind_inspector.world.network.hint')}
           />
         }
         back={

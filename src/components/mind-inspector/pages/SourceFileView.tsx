@@ -19,6 +19,7 @@ import { Loader2, Pencil, Save, X, Eye, Code2 } from 'lucide-react';
 import DOMPurify from 'dompurify';
 import hljs from 'highlight.js/lib/core';
 import { MarkdownFileContext, renderMarkdownBlocks } from './codeMarkdown';
+import MarkdownLiveEditor from './MarkdownLiveEditor';
 // 语言按需注册（各语言体积 2~8KB，静态引入避免运行时异步加载）
 import javascript from 'highlight.js/lib/languages/javascript';
 import typescript from 'highlight.js/lib/languages/typescript';
@@ -126,12 +127,8 @@ export const SourceFileView: React.FC<{
   const [savedFlash, setSavedFlash] = useState(false);
   const [editError, setEditError] = useState<string | null>(null);
 
-  // markdown 的两种模式：源码（语法高亮）与渲染（块级就地编辑）
+  // markdown 的两种模式：源码（语法高亮）与渲染（所见即所得就地编辑）
   const [mode, setMode] = useState<'source' | 'rendered'>(initialMode);
-  const [editingBlock, setEditingBlock] = useState<number | null>(null);
-  const [blockDraft, setBlockDraft] = useState('');
-  const [blockSaving, setBlockSaving] = useState(false);
-  const [blockError, setBlockError] = useState<string | null>(null);
 
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const gutterRef = useRef<HTMLDivElement | null>(null);
@@ -146,8 +143,8 @@ export const SourceFileView: React.FC<{
   const content = useMemo(() => lines.join('\n'), [lines]);
 
   /**
-   * 渲染态的块序列（每项带源码行区间）。只在 markdown + 渲染模式 + 未进入整体编辑时
-   * 计算：解析整篇是 O(行数)，没必要在源码态白跑一遍。
+   * 渲染态的块序列（每项带源码行区间）。只在 markdown + 渲染模式 + 分页未完时计算：
+   * 那时不给编辑（写盘会截断没加载的部分），退化成只读的块视图。
    */
   const mdBlocks = useMemo(
     () => (isMarkdown && mode === 'rendered' && !editing
@@ -194,51 +191,22 @@ export const SourceFileView: React.FC<{
     }
   }, [draft, data.path, saving, onContentSaved]);
 
-  // ---- 渲染态：块级就地编辑 ----
+  // ---- 渲染态：所见即所得编辑 ----
+  //
+  // 编辑与光标全部交给 `MarkdownLiveEditor`（DOM 里存的是 markdown 原文），
+  // 这里只负责落盘与把新内容同步回本地 state / 宿主缓存。
 
-  const startBlockEdit = useCallback(
-    (index: number, start: number, end: number) => {
-      setBlockDraft(lines.slice(start, end).join('\n'));
-      setEditingBlock(index);
-      setBlockError(null);
+  const saveRenderedContent = useCallback(
+    async (next: string) => {
+      await invoke('coding_write_file', { path: data.path, content: next });
+      const nextLines = next.split('\n');
+      setLines(nextLines);
+      setTotalLines(nextLines.length);
+      setSavedFlash(true);
+      onContentSaved?.(next);
+      window.setTimeout(() => setSavedFlash(false), 1800);
     },
-    [lines],
-  );
-
-  const cancelBlockEdit = useCallback(() => {
-    setEditingBlock(null);
-    setBlockDraft('');
-    setBlockError(null);
-  }, []);
-
-  /**
-   * 提交块编辑：把 draft 替换回它原来占的那几行，然后写盘。
-   *
-   * 走的是与整体编辑同一个 `coding_write_file`。改完就地重新解析，块的行区间随
-   * 行数变化自然更新 —— 不需要手工维护后面块的偏移。
-   */
-  const saveBlockEdit = useCallback(
-    async (start: number, end: number) => {
-      if (blockSaving) return;
-      setBlockSaving(true);
-      setBlockError(null);
-      try {
-        const next = [...lines.slice(0, start), ...blockDraft.split('\n'), ...lines.slice(end)];
-        await invoke('coding_write_file', { path: data.path, content: next.join('\n') });
-        setLines(next);
-        setTotalLines(next.length);
-        setEditingBlock(null);
-        setBlockDraft('');
-        setSavedFlash(true);
-        onContentSaved?.(next.join('\n'));
-        window.setTimeout(() => setSavedFlash(false), 1800);
-      } catch (e) {
-        setBlockError(String(e));
-      } finally {
-        setBlockSaving(false);
-      }
-    },
-    [blockDraft, blockSaving, data.path, lines, onContentSaved],
+    [data.path, onContentSaved],
   );
 
   const loadMore = useCallback(async () => {
@@ -295,10 +263,7 @@ export const SourceFileView: React.FC<{
           <button
             type="button"
             className="codex-src-btn"
-            onClick={() => {
-              cancelBlockEdit();
-              setMode((m) => (m === 'rendered' ? 'source' : 'rendered'));
-            }}
+            onClick={() => setMode((m) => (m === 'rendered' ? 'source' : 'rendered'))}
             title={mode === 'rendered' ? '查看源码' : '渲染预览'}
           >
             {mode === 'rendered' ? <Code2 size={13} /> : <Eye size={13} />}
@@ -327,7 +292,6 @@ export const SourceFileView: React.FC<{
       </div>
 
       {editError && <div className="codex-src-error">{editError}</div>}
-      {blockError && <div className="codex-src-error">{blockError}</div>}
 
       {editing ? (
         <div className="codex-src-scroll codex-src-editor">
@@ -359,60 +323,18 @@ export const SourceFileView: React.FC<{
           </div>
         </div>
       ) : mode === 'rendered' ? (
-        <div className="codex-src-scroll">
-          {mdBlocks.length === 0 ? (
-            <div className="codex-src-more">（空文档）</div>
-          ) : (
+        hasMore ? (
+          /* 分页未完：不给编辑，写盘会把还没加载的部分截断。退化成只读块视图。 */
+          <div className="codex-src-scroll">
+            <div className="codex-src-more">超大文件需先加载全部才能编辑</div>
             <div className="codex-md codex-src-md">
-              {mdBlocks.map((b, i) => (
-                <div key={b.key} className="codex-src-mdblock" data-md-block={i}>
-                  {editingBlock === i ? (
-                    <div className="codex-src-mdblock-editor">
-                      <textarea
-                        className="codex-src-mdblock-area"
-                        value={blockDraft}
-                        onChange={(e) => setBlockDraft(e.target.value)}
-                        spellCheck={false}
-                        autoFocus
-                        aria-label="编辑这一段"
-                      />
-                      <div className="codex-src-mdblock-actions">
-                        <button type="button" className="codex-src-btn" onClick={cancelBlockEdit} title="取消">
-                          <X size={13} />
-                        </button>
-                        <button
-                          type="button"
-                          className="codex-src-btn codex-src-btn-primary"
-                          onClick={() => void saveBlockEdit(b.span.start, b.span.end)}
-                          disabled={blockSaving}
-                          title="保存"
-                        >
-                          {blockSaving ? <Loader2 size={13} className="codex-spin" /> : <Save size={13} />}
-                        </button>
-                      </div>
-                    </div>
-                  ) : (
-                    <>
-                      {/* 已有块在编辑时不挂铅笔：避免开着编辑框又去点另一块；
-                          超大文件（分页未完）也不给改，否则写盘会截断未加载的部分 */}
-                      {!hasMore && editingBlock === null && (
-                        <button
-                          type="button"
-                          className="codex-src-mdblock-btn"
-                          onClick={() => startBlockEdit(i, b.span.start, b.span.end)}
-                          title="编辑这一段"
-                        >
-                          <Pencil size={11} />
-                        </button>
-                      )}
-                      {b.node}
-                    </>
-                  )}
-                </div>
-              ))}
+              {mdBlocks.map((b, i) => <div key={b.key} className="codex-src-mdblock" data-md-block={i}>{b.node}</div>)}
             </div>
-          )}
-        </div>
+          </div>
+        ) : (
+          /* 渲染态直接就是编辑区：没有铅笔按钮，点进去就能打字 */
+          <MarkdownLiveEditor content={content} onSave={saveRenderedContent} />
+        )
       ) : (
         <div className="codex-src-scroll" ref={readonlyScrollRef}>
           <div className="codex-src-code">

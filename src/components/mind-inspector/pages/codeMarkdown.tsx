@@ -299,7 +299,7 @@ type ListNode = { text: string; checked: boolean | null; children: ListNode[] };
  */
 export type BlockSpan = { start: number; end: number };
 
-type Block =
+export type Block =
   | { kind: 'p'; text: string; span: BlockSpan }
   | { kind: 'h'; level: number; text: string; span: BlockSpan }
   | { kind: 'hr'; span: BlockSpan }
