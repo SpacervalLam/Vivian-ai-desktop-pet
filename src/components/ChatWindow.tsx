@@ -1575,6 +1575,19 @@ const ChatWindow: React.FC = () => {
   const bottomPanelTriggersRef = useRef<HTMLDivElement>(null);
   const bottomPanelDrawerRef = useRef<HTMLDivElement>(null);
   const [isClosing, setIsClosing] = useState(false);
+  /**
+   * 入场是否已完成。
+   *
+   * 根节点的「入场前」隐藏样式（opacity:0 + 缩小下坠）以前挂在 `!isClosing` 上，
+   * 于是「没在关窗」和「还没入场」被同一个布尔量绑死：入场动画的 fill:forwards
+   * 一旦被撤掉（关窗动画就是后创建、按 WAAPI 顺序覆盖它），根节点就永久停在
+   * opacity:0。而 chat 是**复用同一个窗口**的右缘三态侧边栏——下次 peek 露出的
+   * 那 10px 探出条就是这块 DOM，内容透明 = 窗口在但看不见（探出条一起消失）。
+   *
+   * 拆出独立标志后：入场动画播完即 entered=true，此后根节点不再依赖任何动画
+   * 覆盖即可见；关窗动画结束时把 isClosing 复位也不会把窗口留在透明态。
+   */
+  const [entered, setEntered] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   /** 各会话未读消息数（键：角色 ID 或 'group'） */
   const [unreadCounts, setUnreadCounts] = useState<Record<string, number>>({});
@@ -1777,8 +1790,13 @@ const ChatWindow: React.FC = () => {
 
   // 窗口聚焦/可见时清除当前查看会话的未读并刷新预览
   // 用户切回 ChatWindow 时，正在查看的会话消息已可见，红点应立即清除
-  // 同时处理「退出后再次显示」：复位 isClosing 并重播进入动画，
-  // 否则退出动画 fill:forwards 残留 opacity:0，重开后窗口不可见（三态异常）
+  //
+  // 关于「退出后再次显示」：这里只做**锦上添花**的重播入场动画，不能当兜底。
+  // 该窗口由 Rust 侧 show()/hide() 控制，而 Tauri 的 WebviewWindow::show/hide
+  // 只动窗口（ShowWindow），不会同步 WebView2 controller 的 IsVisible
+  // （wry 仅在创建时 SetIsVisible 一次）——所以 document.visibilityState 恒为
+  // 'visible'，visibilitychange 永不触发；show() 也不聚焦，focus 同样不可靠。
+  // 真正保证「退出后窗口仍可见」的是 closeWindow 自己的 settle（见下方注释）。
   const isClosingRef = useRef(false);
   useEffect(() => { isClosingRef.current = isClosing; }, [isClosing]);
   useEffect(() => {
@@ -3277,13 +3295,35 @@ const ChatWindow: React.FC = () => {
     setIsClosing(true);
     const el = rootRef.current;
     if (el) {
-      el.animate(
+      // 先撤掉在跑的动画（入场动画的 fill:forwards 会和关窗动画抢 opacity/transform）
+      try { el.getAnimations().forEach((a) => a.cancel()); } catch { /* ignore */ }
+      // 时长压到 200ms：Rust 侧的收回滑动是 220ms，400ms 的关窗动画后 180ms 本来
+      // 就发生在窗口滑出屏幕之后（白播），压短后动画保证在窗口仍可见时跑完，
+      // finished 一定会到 —— 不依赖「窗口隐藏期间时间线是否还在推进」。
+      const exit = el.animate(
         [
           { opacity: 1, transform: 'translateY(0) scale(1)' },
           { opacity: 0, transform: 'translateY(80px) scale(0.78)' },
         ],
-        { duration: 400, easing: 'cubic-bezier(0.65, 0, 1, 1)', fill: 'forwards' },
+        { duration: 200, easing: 'cubic-bezier(0.65, 0, 1, 1)', fill: 'forwards' },
       );
+      // 关窗动画不能以 fill:forwards 永久把根节点钉在 opacity:0：chat 是**复用**的
+      // 右缘三态窗口，下次 peek 露出的探出条就是这块 DOM，残留动画会让窗口
+      // 「在但看不见」（连 10px 探出条一起消失）。动画一结束就复位；
+      // 顺带放掉 isClosing，否则退出按钮第二次点击会被 `if (isClosing) return` 吃掉。
+      // 用标志位保证 finished 与兜底定时器只生效一次。
+      let settled = false;
+      const settle = () => {
+        if (settled) return;
+        settled = true;
+        // 兜底路径可能早于动画自然结束：必须撤销它，否则 fill:forwards 继续压住 opacity
+        try { exit.cancel(); } catch { /* ignore */ }
+        setEntered(true);
+        setIsClosing(false);
+      };
+      exit.finished.then(settle).catch(() => { /* 被新的入场动画取代 */ });
+      // 兜底：窗口隐藏期间计时器会被节流，但 1s 内必定跑到；此时窗口早在屏外，复位不可见
+      window.setTimeout(settle, 1000);
     }
     // 微信窗口为右缘抽屉：点击退出 → 动画收回屏幕右侧并隐藏（保留窗口复用）
     void invoke('collapse_side_chat', { label: 'chat' }).catch(() => {});
@@ -3314,7 +3354,7 @@ const ChatWindow: React.FC = () => {
     try { el.getAnimations().forEach((a) => a.cancel()); } catch { /* ignore */ }
     el.style.opacity = '';
     el.style.transform = '';
-    el.animate(
+    const enter = el.animate(
       [
         { opacity: 0, transform: 'translateY(40px) scale(0.85)' },
         { opacity: 1, transform: 'translateY(-6px) scale(1.02)', offset: 0.5 },
@@ -3323,6 +3363,11 @@ const ChatWindow: React.FC = () => {
       ],
       { duration: 600, easing: 'cubic-bezier(0.34, 1.56, 0.64, 1)', fill: 'forwards' },
     );
+    // 入场完成即撤掉「入场前隐藏」的内联样式：之后根节点的可见性不再依赖
+    // 这条 fill:forwards 动画存在（被关窗动画覆盖/撤销后仍回到可见静止态）
+    enter.finished
+      .then(() => setEntered(true))
+      .catch(() => { /* 被新的关窗动画取代：由 closeWindow 收尾 */ });
   }, []);
 
   /** 切换底部面板（emoji/media），点击同一按钮则收起 */
@@ -4178,7 +4223,7 @@ const ChatWindow: React.FC = () => {
       fontFamily: '-apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif',
       color: 'var(--wx-text)',
       position: 'relative',
-      ...(!isClosing ? { opacity: 0, transform: 'translateY(40px) scale(0.85)' } : {}),
+      ...(!entered ? { opacity: 0, transform: 'translateY(40px) scale(0.85)' } : {}),
     }}
     >
       {mdStyles}

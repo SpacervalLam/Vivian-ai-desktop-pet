@@ -1,37 +1,28 @@
 /**
  * 「窗口从桌宠矩形扩展到全屏」的入场动画。
  *
- * 背景：长按桌宠打开心智观察器时，希望窗口看起来是从桌宠的位置长出来、
- * 一路铺满全屏。若真去逐帧改窗口几何（SetWindowPos 反复改 x/y/w/h），
- * WebView2 每帧都要重建交换链、整棵 DOM 重新排版，必然掉帧；而且窗口一变尺寸，
- * 内部布局就会换行、跳动，做不出「丝滑」。项目里既有的窗口动画
- * （`spawn_side_chat_slide` 等）也都只动位置、不动尺寸，正是这个原因。
+ * 若逐帧改窗口几何（SetWindowPos 反复改 x/y/w/h），WebView2 每帧重建交换链、
+ * 整棵 DOM 重新排版，必然掉帧且布局跳动。故改用纯合成层：窗口一次性按最终（全屏）
+ * 尺寸创建、内容布局只算一次；入场时给根节点整体做 transform（translate + scale）
+ * 从「桌宠矩形」插值到「整屏」，全程只改 GPU 合成矩阵、不触发重排，即 60fps 丝滑缩放。
  *
- * 所以这里改用纯合成层的做法：窗口一次性按**最终**（全屏）尺寸创建，内容布局
- * 只算一次；入场时给根节点整体做一次 transform（translate + scale），
- * 从「桌宠矩形」插值到「整屏」。全程只改 GPU 合成矩阵，不触发任何重排，
- * 因此是 60fps 的丝滑缩放，而不是逐帧 resize 的抖动。
+ * 前提：窗口必须 `transparent: true`，否则缩放时其余部分露出不透明底色。
+ * 坐标系：调用方传入的桌宠矩形是物理像素（Tauri `outerPosition` / `outerSize`），
+ * 本模块用当前窗口 `scaleFactor` 折算为 CSS px，跨不同缩放比例的显示器也不会错位。
  *
- * 前提：窗口必须是 `transparent: true`——卡片之外要透出桌面，
- * 否则缩放时窗口其余部分会露出不透明底色。
+ * 两条播放路径按「窗口此刻在不在屏上」二选一：
+ * - `playPetReveal`：窗口尚未上屏时（新建 / 最小化 / hide），先把内容压成桌宠矩形再显形。
+ * - `replayPetReveal`：窗口已上屏时，先沿同一条变换路径收拢回桌宠矩形再展开，
+ *   两段观感对齐（差别只在有没有那段收拢）。窗口最小化时若直接 replay 会先还原一次、
+ *   再收拢展开，视觉上呼出两回——故必须二选一。
  *
- * 坐标系：调用方传进来的桌宠矩形是**物理像素**（Tauri `outerPosition` /
- * `outerSize` 的原生单位）。本模块用当前窗口的 `scaleFactor` 折算成本窗口的
- * CSS px，这样即使桌宠位于另一块缩放比例不同的显示器上也不会错位。
- *
- * 两条播放路径，按「窗口此刻在不在屏上」二选一：
- * - `playPetReveal`：窗口还没有摆在屏幕上时（新建、被最小化、被 hide），
- *   先把内容压成桌宠矩形再自行显形，用户看到的第一眼就是那张小卡片。
- * - `replayPetReveal`：窗口已经摆在屏幕上时，先沿同一条变换路径「收拢」回
- *   桌宠矩形，再原路展开。展开段与首次打开逐帧一致，因此两条路径的最终观感
- *   对齐（差别只在有没有那段收拢）。
- *
- * 二选一这一步不能省：窗口被最小化时若照旧走 replay，就得先把窗口还原才看得见内容，
- * 而那一次还原本身就是一次「呼出」，随后再收拢展开就是第二次——视觉上呼出了两回。
+ * 此外本模块还承载「预热」的握手协议（`buildPrewarmQuery` / `parsePrewarmSession` /
+ * `emitPrewarmReady`）：长按桌宠 0.1s 就把窗口建出来加载，但一律不上屏；等长按成立
+ * 才发 `pet:reveal` 让它长出来。三条路径共用同一套桌宠矩形与显形语义。
  */
 
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { emitTo } from '@tauri-apps/api/event';
+import { emit, emitTo } from '@tauri-apps/api/event';
 
 /** 入场动画时长（毫秒） */
 export const PET_REVEAL_DURATION_MS = 340;
@@ -66,11 +57,74 @@ export const PET_RECT_QUERY = {
 /** 由桌宠矩形拼出 query 片段，供 `openWindow` 的 `extraQuery` 使用 */
 export function buildPetRectQuery(rect: PetRect): string {
   const p = new URLSearchParams();
+  setPetRectParams(p, rect);
+  return p.toString();
+}
+
+/** 把桌宠矩形写进已有的 query 参数表 */
+function setPetRectParams(p: URLSearchParams, rect: PetRect): void {
   p.set(PET_RECT_QUERY.x, String(Math.round(rect.x)));
   p.set(PET_RECT_QUERY.y, String(Math.round(rect.y)));
   p.set(PET_RECT_QUERY.w, String(Math.round(rect.w)));
   p.set(PET_RECT_QUERY.h, String(Math.round(rect.h)));
+}
+
+/** 预热会话号随子窗口 URL 携带的 query 键 */
+export const PET_PREWARM_QUERY = 'prewarm';
+
+/**
+ * 拼出「预热窗口」的 query：桌宠矩形 + 预热会话号 + `hidden=1`。
+ *
+ * 预热窗口是长按 0.1s 时就建出来、但**不允许自己上屏**的窗口：加载可以提前，
+ * 显形必须等到长按成立。所以除了随 URL 带过去的桌宠矩形（入场动画的起点），
+ * 还要两样东西：
+ * - 会话号：子窗口就绪后按它回执，桌宠据此确认「这一下是我等的那一次」
+ *   （memory 是共享窗口，两个角色桌宠可能同时预热，回执只该被发起者认领）；
+ * - `hidden=1`：main.tsx 对子窗口的「渲染完两帧就 show」兜底必须跳过，
+ *   否则预热窗口会在长按还没成立时自己冒出来。显形改由 `pet:reveal` 驱动。
+ */
+export function buildPrewarmQuery(rect: PetRect | null, session: number): string {
+  const p = new URLSearchParams();
+  if (rect) setPetRectParams(p, rect);
+  p.set(PET_PREWARM_QUERY, String(session));
+  p.set('hidden', '1');
   return p.toString();
+}
+
+/** 从 `location.search` 解析预热会话号；不是预热窗口（没带这个参数）返回 `null` */
+export function parsePrewarmSession(search: string): number | null {
+  const raw = new URLSearchParams(search).get(PET_PREWARM_QUERY);
+  if (raw === null || raw === '') return null;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : null;
+}
+
+/** 子窗口 → 桌宠：预热窗口已就绪（`pet:reveal` 监听已挂好） */
+export const PET_PREWARM_READY_EVENT = 'pet:prewarm_ready';
+
+export interface PetPrewarmReady {
+  /** 发起预热的会话号，原样回执 */
+  session: number;
+}
+
+/**
+ * 子窗口侧：宣告「预热就绪，随时可以接显形事件」。
+ *
+ * 为什么需要这个回执：`pet:reveal` 是事件，子窗口的监听挂上之前发出去就丢了，
+ * 而预热正是把「建窗口」提前到了长按成立之前——建完不等于加载完，两者之间
+ * 隔着一整个页面冷启。没有回执，长按成立时发的事件可能打在空处，窗口只能靠
+ * 兜底定时器迟到显形。
+ *
+ * 走全局 `emit` 而非 `emitTo`：子窗口并不知道桌宠窗口的 label（多角色下是
+ * vivian/nana 等），而这条回执本身极轻；桌宠侧按会话号比对，非本会话的丢弃。
+ */
+export async function emitPrewarmReady(session: number): Promise<void> {
+  const payload: PetPrewarmReady = { session };
+  try {
+    await emit(PET_PREWARM_READY_EVENT, payload);
+  } catch {
+    /* IPC 失败：桌宠侧有等待上限兜底，退化为「长按成立后照常打开」 */
+  }
 }
 
 /**

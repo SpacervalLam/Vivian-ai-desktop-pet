@@ -198,7 +198,7 @@ impl ToolScene {
                 "当前是陪伴对话场景，工作能力已直接注入：查资料（web_search / web_fetch）、\
                  后台任务（run_job / manage_job）、待办（update_todo / add_todo）、\
                  计划（plan_task）、多步编排（run_workflow）、向用户提问（ask_user）、\
-                 派发大型工程任务（delegate_to_work_agent + get_work_status）。\
+                 把大型工程任务以用户身份写成完整提示词交给共享的工作智能体执行，并读取其总结（delegate_to_work_agent + get_work_status）。\
                  优先直接使用这些能力完成用户请求；未列出的工具先调用 tool_search 加载。"
             }
             ToolScene::Task => {

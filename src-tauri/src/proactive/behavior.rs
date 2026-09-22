@@ -343,9 +343,8 @@ impl BehaviorDecider {
         // worldbook 等段落真正拿到"最近聊了什么"。此前 state.messages 为空，
         // 这些段落静默失效，主动消息（含内存压力提醒）接不上对话上下文。
         state.messages = dialogue_messages.to_vec();
-        // 注入"当前自我状态"叙事：含被冷落 / 安静模式 / 孤独等。
-        // 此前主动回复走 PipelineState::default()，self_state_text 恒为空，
-        // 导致桌宠被用户忽略时回复仍如常，不体现被冷落。
+        // 注入当前自我状态与安静模式。未回应只作为调度退避信息，
+        // 不得被解释成关系冲突或受伤情绪。
         state.self_state_text = self_state_text.to_string();
 
         let mut parts = step.build_parts(&state, None);
@@ -381,8 +380,7 @@ impl BehaviorDecider {
             suffix.push_str(&format!("\n\n{}", desktop_pet_constraint(lang_norm)));
         }
 
-        // 被冷落指令：依据连续未回应轮次，给 LLM 一条明确的"体现被冷落"指令，
-        // 让主动回复在用户不回话时收住 / 带委屈 / 赌气，而不是如常继续。
+        // 未回应只影响本次是否适合再次开口；不要把沉默演成被冷落或关系冲突。
         if ignored_rounds > 0 {
             suffix.push_str(&format!("\n\n{}", ignored_directive(ignored_rounds, lang_norm)));
         }
@@ -399,8 +397,8 @@ impl BehaviorDecider {
         match trigger {
             ProactiveTrigger::HourlyGreeting => {
                 let (scene_label, time_label, recent_label, instr) = match lang_norm {
-                    "en" => ("Scene: hourly greeting", "Time", "Recent conversation (for reference only, do not force connections):", "Generate a natural hourly greeting. Just greet normally — do not reference the recent conversation unless it naturally fits.\nJSON output: {\"text\": \"greeting\", \"expression\": \"expression_tag\"}"),
-                    "ja" => ("シーン：時間ごとの挨拶", "時間", "最近の会話（参考のみ、無理に関連づけないこと）：", "自然な時間ごとの挨拶を生成して。普通に挨拶するだけ——最近の会話には、自然に合わない限り言及しないこと。\nJSON出力: {\"text\": \"挨拶\", \"expression\": \"表情タグ\"}"),
+                    "en" => ("Scene: hourly greeting", "Time", "Recent conversation (for reference only, do not force connections):", "The clock alone is not a reason to interrupt. Speak only if the time creates a concrete, context-relevant observation; otherwise choose DONT_NOTIFY. Do not force a connection to recent conversation.\nJSON output: {\"text\": \"greeting\", \"expression\": \"expression_tag\"}"),
+                    "ja" => ("シーン：時間ごとの挨拶", "時間", "最近の会話（参考のみ、無理に関連づけないこと）：", "時刻だけを理由に割り込まない。時間と文脈から具体的で自然な一言がある時だけ話し、なければ DONT_NOTIFY。最近の会話に無理に結びつけない。\nJSON出力: {\"text\": \"挨拶\", \"expression\": \"表情タグ\"}"),
                     _ => ("场景：整点问候", "时间", "最近对话（仅供参考，不要强行关联）：", "生成一条自然的整点问候。正常打招呼即可——除非自然贴合，否则不要提及最近对话。\nJSON输出: {\"text\": \"问候\", \"expression\": \"表情标签\"}"),
                 };
                 parts.push(scene_label.to_string());
@@ -518,8 +516,8 @@ impl BehaviorDecider {
             }
             ProactiveTrigger::HealthReminder => {
                 let (scene_label, time_label, sustained_label, mood_label, mood_default, recent_label, instr) = match lang_norm {
-                    "en" => ("Scene: you notice the user might need a health reminder", "Time", "Sustained active minutes:", "Current mood:", "neutral", "Recent conversation (for reference only):", "Generate a caring, non-nagging health reminder (<25 chars).\nConstraints:\n- Pick ONE of: sleep / meal / water / rest — whichever is most relevant given the time and sustained activity\n- Be warm, not preachy\n- Vary phrasing naturally\nJSON output: {\"text\": \"reminder\", \"expression\": \"expression_tag\"}"),
-                    "ja" => ("シーン：ユーザーに健康リマインダーが必要かも", "時間", "継続アクティブ時間（分）：", "今の気分：", "普通", "最近の会話（参考のみ）：", "世話焼きすぎない、優しい健康リマインダーを生成して（25字以内）。\n制約:\n- 睡眠 / 食事 / 水分 / 休息の中から一つ選ぶ——時間と継続活動に最も関連するもの\n- 温かく、説教じみてない\n- 言い回しを自然に変える\nJSON出力: {\"text\": \"リマインダー\", \"expression\": \"表情タグ\"}"),
+                    "en" => ("Scene: you notice the user might need a health reminder", "Time", "Sustained active minutes:", "Current mood:", "neutral", "Recent conversation (for reference only):", "Generate a caring, non-nagging health reminder (<25 chars).\nConstraints:\n- Use only the reminder supported by the observed time/activity; never pick one merely to fill the slot. If evidence is weak or a similar reminder was recent, choose DONT_NOTIFY\n- Be warm, specific, and non-judgmental; do not imply you know the user's body state\n- Vary phrasing naturally\nJSON output: {\"text\": \"reminder\", \"expression\": \"expression_tag\"}"),
+                    "ja" => ("シーン：ユーザーに健康リマインダーが必要かも", "時間", "継続アクティブ時間（分）：", "今の気分：", "普通", "最近の会話（参考のみ）：", "世話焼きすぎない、優しい健康リマインダーを生成して（25字以内）。\n制約:\n- 観測できる時刻/活動が裏付けるリマインダーだけを使う。枠を埋めるために選ばない。根拠が弱い、または似た通知を最近したなら DONT_NOTIFY\n- 温かく具体的に。ユーザーの身体状態を知っているように決めつけない\n- 言い回しを自然に変える\nJSON出力: {\"text\": \"リマインダー\", \"expression\": \"表情タグ\"}"),
                     _ => ("场景：你注意到用户可能需要健康提醒", "时间", "持续活跃分钟数：", "当前心情：", "中性", "最近对话（仅供参考）：", "生成一条温柔不唠叨的健康提醒（<25字）。\n约束:\n- 从睡眠 / 饭 / 喝水 / 休息中选一个——根据时间和持续活动选最相关的\n- 温暖，不要说教\n- 措辞自然变化\nJSON输出: {\"text\": \"提醒\", \"expression\": \"表情标签\"}"),
                 };
                 parts.push(scene_label.to_string());
@@ -775,34 +773,22 @@ fn theme_switch_constraint(current_theme: &Option<String>, recommended: &str, la
 ///
 /// 不含 dialogue_history / memory_hint —— 这些由主对话完整 prompt 提供。
 /// 主对话 prompt 已含人设/环境/心理/亲密度等通用上下文，此处仅附加触发器专属信息。
-/// 被冷落指令：依据连续未回应轮次（ignored_rounds）给 LLM 一条分档的"体现被冷落"指令。
+/// 连续未回应时的生成约束。
 ///
-/// 目标不是让桌宠永远闭嘴，而是让它在用户不回话时像真人一样收住 / 带点委屈 / 赌气，
-/// 而不是如常继续刷消息。轮次越高，缩回去的程度越明显；但始终留出让对方接话的余地。
+/// 沉默是“这条消息没有被接住”的调度信号，不是用户态度或关系事实。
+/// 后续只有出现新的具体素材才值得再次开口，且不能提起对方没有回复。
 fn ignored_directive(rounds: u32, lang: &str) -> String {
-    let (t1, t2, t3) = match lang {
-        "en" => (
-            "You just reached out on your own and haven't gotten a reply yet. Don't keep pushing — naturally pull back, like a real person whose greeting got no response. Keep it light, end the topic here.",
-            "You've sent several messages in a row with no reply. You clearly feel a bit ignored — you can show a little hurt or petty annoyance, but don't get heavy; still leave room for them to chime in.",
-            "Nobody has replied to you for a long stretch. You're a bit hurt and want to retreat. Your replies can get noticeably fewer and shorter, with a touch of sulking or talking to yourself; if they finally speak, you'll be a little stiff but secretly glad.",
+    let strength = if rounds >= 3 { "strong" } else { "light" };
+    match lang {
+        "en" => format!(
+            "Non-response backoff ({strength}): Do not mention, hint at, or emotionally interpret the user's silence. Do not act hurt, cold, relieved, or passive-aggressive when they return. Speak only if this trigger provides a new concrete reason; otherwise choose DONT_NOTIFY."
         ),
-        "ja" => (
-            "さっき自分から話しかけたのにまだ返事がない。無理に追わないで——返事の来なかった挨拶にそうするように、自然に引く。軽く、話題はそこで切る。",
-            "何度も続けて話しかけたのに返事がない。明らかに少し無視された感じ——ちょっと傷ついたり拗ねたりしてもいいが、重くしない；それでも拾える余地は残す。",
-            "長いこと誰も返事をくれない。少し傷ついて引きこもりたい。返事は明らかに少なく短くなり、拗ねたり独り言っぽくなっていい；ようやく口をきいてくれたら、少しつんつんするが本当は嬉しい。",
+        "ja" => format!(
+            "未応答バックオフ（{strength}）：ユーザーの沈黙に言及・示唆・感情的解釈をしない。傷ついた態度、冷たい態度、安心した態度、当てつけを見せない。今回のトリガーに新しく具体的な理由がある時だけ話し、なければ DONT_NOTIFY を選ぶ。"
         ),
-        _ => (
-            "你刚才主动说了话，对方还没回。别追着问——自然地收住，像真人打招呼没得到回应那样，话题点到为止。",
-            "你已经连着几条主动消息都没被理会了。明显感觉被冷落了——可以带一点小委屈或赌气，但别太沉重；仍然留出让对方接话的余地。",
-            "连续好一阵没人理你。你有点受伤、想缩回去了。回话可以明显变少、变短，带点赌气或自顾自的嘟囔；要是他终于开口，你会别扭一下但心里是高兴的。",
+        _ => format!(
+            "未回应退避（{strength}）：不要提及、暗示或情绪化解读用户的沉默；用户回来时也不要表现受伤、冷淡、如释重负或阴阳怪气。只有本次触发带来新的具体内容才开口，否则选择 DONT_NOTIFY。"
         ),
-    };
-    if rounds >= 5 {
-        t3.to_string()
-    } else if rounds >= 3 {
-        t2.to_string()
-    } else {
-        t1.to_string()
     }
 }
 
@@ -816,17 +802,17 @@ fn build_proactive_directive(
     let (scene, extra, constraint): (String, String, String) = match trigger {
         ProactiveTrigger::HourlyGreeting => {
             let (s, c) = match lang_norm {
-                "en" => (format!("Scene: hourly greeting. Time: {}:00.", ctx.hour), "Generate a natural hourly greeting. Just greet normally.".to_string()),
-                "ja" => (format!("シーン：時間ごとの挨拶。時間：{}:00。", ctx.hour), "自然な時間ごとの挨拶を生成して。普通に挨拶するだけ。".to_string()),
-                _ => (format!("场景：整点问候。时间：{}:00。", ctx.hour), "生成一条自然的整点问候。正常打招呼即可。".to_string()),
+                "en" => (format!("Scene: hourly greeting. Time: {}:00.", ctx.hour), "The clock alone is not a reason to interrupt. Speak only with a concrete, context-relevant observation; otherwise choose DONT_NOTIFY.".to_string()),
+                "ja" => (format!("シーン：時間ごとの挨拶。時間：{}:00。", ctx.hour), "時刻だけを理由に割り込まない。具体的で文脈に合う一言がある時だけ話し、なければ DONT_NOTIFY。".to_string()),
+                _ => (format!("场景：整点问候。时间：{}:00。", ctx.hour), "整点本身不是打扰用户的理由。只有具体且符合语境的内容才开口，否则选择 DONT_NOTIFY。".to_string()),
             };
             (s, String::new(), c)
         }
         ProactiveTrigger::IdleGreeting => {
             let (s, c) = match lang_norm {
-                "en" => ("Scene: the user hasn't talked to you for a while.".to_string(), "Generate a short greeting expressing mild missing (<20 chars). Short, not expecting a reply. Don't ask what they're doing.".to_string()),
-                "ja" => ("シーン：ユーザーがしばらく話しかけてこない。".to_string(), "少し寂しさを滲ませた短い挨拶を（20字以内）。返事を期待しない。何してるか聞かない。".to_string()),
-                _ => ("场景：用户有一会儿没和你说话了。".to_string(), "生成一条略带想念的简短问候（<20字）。不期待回复。不问对方在做什么。".to_string()),
+                "en" => ("Scene: the user hasn't talked to you for a while.".to_string(), "Do not turn elapsed time into longing or pressure. Speak only if you have a new concrete thought worth sharing (<20 chars); otherwise choose DONT_NOTIFY. Do not ask what they are doing or expect a reply.".to_string()),
+                "ja" => ("シーン：ユーザーがしばらく話しかけてこない。".to_string(), "時間が空いたことを寂しさや圧力に変えない。新しく具体的な一言がある時だけ話し（20字以内）、なければ DONT_NOTIFY。何をしているか聞かず、返事を求めない。".to_string()),
+                _ => ("场景：用户有一会儿没和你说话了。".to_string(), "不要把一段时间没说话演成想念或压力。只有新的、具体的内容值得分享时才开口（<20字），否则选择 DONT_NOTIFY；不问对方在做什么，不期待回复。".to_string()),
             };
             (s, String::new(), c)
         }
@@ -1059,9 +1045,10 @@ delivery_channel ガイド:\n\
 text 字段必须是纯文本——严禁 Markdown 语法（**粗体**、*斜体*、# 标题、- 列表、`代码`、[链接](url)、> 引用 等），也不要用 HTML 标签。\n\
 notify 字段是「此刻到底要不要开口」的显式判定：\n\
 - \"NOTIFY\"（默认）: 有话可说，正常输出 text。\n\
-- \"DONT_NOTIFY\": 此刻没有值得说的东西，主动弃权——此时 text 必须是空字符串 \"\"。\n\
+- \"DONT_NOTIFY\": 此刻没有值得说的东西、状态未变或同一结果已播报，主动弃权——此时 text 必须是空字符串 \"\"。\n\
 弃权是**合法且被鼓励**的结果：触发条件成立只说明「允许开口」，不等于「有话要说」。\n\
 凑一句没有信息量的寒暄（「在忙吗」「今天过得怎么样」「记得喝水哦」）比不说话更糟——那会让用户觉得你是个定时播报器。\n\
+后台任务仅在未汇报的实质进展、完成、失败或需要用户决定时通知；启动不等于完成，必须按真实结果措辞。用户要求安静或正在专注时，尊重其通知约定，不靠重复寒暄刷存在感。\n\
 开口前先自问：这句话里有**具体**的东西吗（真实发生过的记忆、此刻真能感知到的环境、一个真实的心情变化、一个你想问的具体问题）？没有就弃权。\n\
 这是**内容**判定，不是礼貌判定——用户明确在等你回应时（欢迎回归、刚叫过你）不要弃权。\n\
 delivery_channel 指引:\n\
@@ -1136,4 +1123,22 @@ pub fn format_recent_tool_history(ts: &ToolSystem, lang: &str) -> String {
 
     let _ = unknown_tool; // 保留备用
     lines.join("\n")
+}
+
+#[cfg(test)]
+mod non_response_prompt_tests {
+    use super::*;
+
+    #[test]
+    fn non_response_is_timing_context_not_emotional_punishment() {
+        let zh = ignored_directive(5, "zh");
+        let en = ignored_directive(5, "en");
+
+        assert!(zh.contains(PROACTIVE_DONT_NOTIFY));
+        assert!(en.contains(PROACTIVE_DONT_NOTIFY));
+        assert!(!zh.contains("委屈"));
+        assert!(!zh.contains("被冷落"));
+        assert!(!en.contains("feel ignored"));
+        assert!(!en.contains("sulking"));
+    }
 }

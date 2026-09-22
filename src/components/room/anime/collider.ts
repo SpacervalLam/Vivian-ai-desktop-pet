@@ -23,6 +23,51 @@ export interface Collider {
 }
 
 /**
+ * 从碰撞表里挑出「头顶的水平板」——**只用来做遮挡判定**，不参与行走碰撞。
+ *
+ * 用途：街面积水那块水平镜面（`store-wet-reflection`）的可见性。视锥剔除只能挡住
+ * "根本不在画面里"的情形；站在 203 室中间低头看街面时，积水确实落在视锥里，却被
+ * 3.4m 的楼板挡得一个像素都露不出来 —— 实测这种机位反射面的真实像素贡献是 0，而
+ * 那一趟"把整个场景按镜像相机再提交一遍"要 400+ 次提交、占整帧三成。
+ *
+ * 三条判据缺一不可：
+ *   1. **薄**（厚度 < maxThickness）：楼板 / 平台 / 雨棚这类"整片实心、没有洞"的
+ *      构件才满足。墙、柱、栏杆都又厚又窄，直接被排除。
+ *   2. **大**（长宽都 > minSpan）：一片板必须真的盖住视野，一小块台面挡不住什么。
+ *   3. **整体位于 `aboveY` 之上**（含 clearance 余量）。这条最容易被漏掉却最关键：
+ *      街面 `street` 的 AABB 是 y[-0.02, 0.02]，而积水镜面就在 y = 0.009 —— 镜面
+ *      正坐在它**里面**。不排除它的话，"从任何位置看积水"都会被判成被街面挡住。
+ *      物理上也很清楚：只有**位于镜面之上**的板才可能挡住镜面。
+ *
+ * 为什么不能拿"全部碰撞盒"当遮挡体（上一版踩过的坑）：`rail-z-6.3`（阳台栏杆）的
+ * AABB 是 x[-6.24,6.24] y[3.4,6.2] z[6.26,6.34] —— z 向只有 8cm 厚、却有 2.8m 高，
+ * 一整片实心盒。拿它当遮挡体，"站在阳台上看街面"会被判成看不见。这条误判实测直接
+ * 让整个方案不可用。
+ *
+ * 也不适合改成"遍历场景图自己认楼板"：`mergeByMaterial` 会把同材质的板并成大 mesh，
+ * 并完之后 AABB 跨越多层或横跨整条街（实测 `planned-street-network` 里并出 98×132m
+ * 的"薄板"），照认就会把阳台机位误剔。碰撞表是**合批之前**逐件收的，AABB 才是准的。
+ */
+export function pickOverheadSlabs(
+  colliders: Collider[],
+  aboveY: number,
+  maxThickness = 0.35,
+  minSpan = 4,
+  clearance = 0.05
+): THREE.Box3[] {
+  const out: THREE.Box3[] = [];
+  for (const c of colliders) {
+    const dy = c.max.y - c.min.y;
+    const dx = c.max.x - c.min.x;
+    const dz = c.max.z - c.min.z;
+    if (dy >= maxThickness || dx <= minSpan || dz <= minSpan) continue;
+    if (c.min.y <= aboveY + clearance) continue;
+    out.push(new THREE.Box3(c.min.clone(), c.max.clone()));
+  }
+  return out;
+}
+
+/**
  * 遍历补碰撞的「包裹体」阈值（米）：三轴中最短边超过它就不当作可碰撞实体，只可能是
  * 把整个场景罩住的幕布/天空/远景（它们半径几十米，AABB 是三轴都很厚的巨大实体块）。
  * 收进来的后果不是多一个盒，而是玩家在地图任何位置都判定撞墙、第一人称 WASD 彻底失效。

@@ -608,7 +608,7 @@ pub fn auto_expression_tick(
     // 执行自动触发tick（空闲检测+心情持续表情）
     crate::engine::auto_trigger_tick(&char_id, &manifest);
 
-    // 更新心情状态到触发器（基调 + 点缀由 MoodCue 判定后投递）
+    // 更新心情状态到触发器（MoodCue 判定出一个限时点缀，没有就是不出表情）
     let mood = instance.brain.psychology.compute_mood();
     crate::engine::update_mood_state(&char_id, &mood);
 

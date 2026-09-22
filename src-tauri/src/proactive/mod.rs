@@ -358,6 +358,13 @@ const GREETING_SUPPRESSION_AFTER_INTERACTION_SECS: f64 = 300.0;
 /// 10 分钟足以覆盖"短暂进出"，又短于一次像样的外出。
 const GREETING_SUPPRESSION_AFTER_SELF_SPEECH_SECS: f64 = 600.0;
 
+/// 两次非响应式主动发言之间的全局静默窗口（秒）。
+///
+/// 单个触发器各自有冷却，但不同触发器仍可能接力出现。统一留出 15 分钟，
+/// 让一次主动表达有呼吸空间。拖拽回应、旁观插话和室友接话属于当前事件的
+/// 即时响应，不受这条限制；工作结果另有专门的通知路径。
+const OPTIONAL_PROACTIVE_SPEECH_GAP_SECS: f64 = 900.0;
+
 static RNG_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// 生成 [0, 1) 区间伪随机浮点数
@@ -540,12 +547,12 @@ pub struct ProactiveState {
     /// 上次特殊日期问候（MM-DD）
     #[serde(default)]
     pub last_special_date: String,
-    /// 最近一次主动消息投递时间戳（Unix 秒），用于后端权威判定"被冷落"。
+    /// 最近一次主动消息投递时间戳（Unix 秒），用于后端判定“暂未回应”。
     /// 投递后若用户在场且超过 `IGNORE_TIMEOUT_SECS` 仍未回应
-    /// （`last_interaction_time` 仍早于该值），则判一次冷落（`on_ignored`）。
+    /// （`last_interaction_time` 仍早于该值），则记录一次未回应（`on_ignored`）。
     /// 用户真实交互 / 进入安静模式时清零。此前依赖前端定时器标记，
     /// 但 ref 变化不触发重渲染导致检测不可靠、ignored_count 恒为 0，
-    /// 使得"被冷落"全链路（安静模式 / 心情 / 会话关闭）完全失活。
+    /// 使得安静模式与会话关闭等防打扰链路失活。
     #[serde(default)]
     pub pending_proactive_at: f64,
     /// 上次产出内心独白的时间戳（Unix 秒），用于全局最小间隔门（B1）
@@ -652,8 +659,8 @@ pub struct ProactiveOrchestrator {
     /// 工具系统（可选，注入后主动问候 prompt 注入最近真实工具调用历史，
     /// 让 AI 只能提及真实做过的操作，禁止编造）
     tool_system: RwLock<Option<Arc<crate::tools::ToolSystem>>>,
-    /// 自我状态聚合器（可选，注入后主动回复 prompt 携带"被冷落 / 安静模式 / 孤独"等
-    /// 自我叙事，让桌宠的回复体现被忽略，而不是如常继续发消息）
+    /// 自我状态聚合器（可选，注入后主动回复 prompt 携带安静模式、疲劳、当前活动等
+    /// 自我叙事；未回应只作为退避信号，不转化为关系情绪）
     self_state: RwLock<Option<Arc<crate::self_state::SelfState>>>,
     /// 上次 Busy 知识采集完成时间戳（秒），用于采集任务级冷却（避免每次 Busy 都采集）
     last_knowledge_acquisition_ts: Arc<parking_lot::Mutex<f64>>,
@@ -976,7 +983,7 @@ impl ProactiveOrchestrator {
     }
 
     /// 注入自我状态聚合器（启用后主动回复 prompt 携带"被冷落 / 安静模式 / 孤独"等
-    /// 自我叙事，让桌宠的回复体现被忽略，而不是如常继续发消息）
+    /// 自我叙事；未回应只作为退避信号，不转化为关系情绪）
     pub fn set_self_state(&self, ss: Arc<crate::self_state::SelfState>) {
         *self.self_state.write() = Some(ss);
     }
@@ -1271,14 +1278,13 @@ impl ProactiveOrchestrator {
 
     /// 被冷落时的说话欲望增量（三段式：试探→克制→退让）。
     ///
-    /// - ignored 0：不额外增长
-    /// - ignored 1~2：试探/克制——小幅提升靠近（不被无限放大）
-    /// - ignored >=3：退让——转为负向，明显收敛主动搭话
+    /// - ignored 0：不额外调整
+    /// - ignored 1~2：保持原有节奏，不把沉默理解成“再靠近一点”
+    /// - ignored >=3：逐步降低主动意愿，尊重当前未参与信号
     fn ignored_speech_trend(ignored: u32, boost: f64) -> f64 {
         match ignored {
-            0 => 0.0,
-            1 | 2 => boost,
-            _ => -boost * 0.5,
+            0..=2 => 0.0,
+            n => -boost * (0.5 + ((n - 3).min(2) as f64 * 0.25)),
         }
     }
 
@@ -1299,15 +1305,15 @@ impl ProactiveOrchestrator {
         }
 
         // 0.5. 策略 C：说话欲望累积
-        // 每 tick 按性格参数增长，被忽略时加速（Vivian 越不理越想说话），
-        // 用户忙碌时 Nana 主动退让（衰减）。成功说话后由 push_message 归零。
+        // 每 tick 按性格参数增长；未回应不被解释成关系信号，只用于逐步降低
+        // 主动频率。用户忙碌时继续衰减，成功说话后由 push_message 归零。
         {
             let behavior = crate::character_behavior::get_behavior(&self.char_id);
             let sd_cfg = behavior.speech_desire;
             let mut desire = self.speech_desire.write();
             let ignored = self.state.read().ignored_count;
             let mut delta = sd_cfg.base_growth;
-            // 三段式：试探(1~2)小幅靠近、退让(>=3)收敛，避免越冷落越唠叨
+            // 沉默先保持原节奏，连续未参与后逐步收敛主动搭话。
             delta += Self::ignored_speech_trend(ignored, sd_cfg.ignored_boost);
             if context.idle_seconds < 60.0 {
                 delta -= sd_cfg.user_busy_decay;
@@ -3774,6 +3780,22 @@ impl ProactiveOrchestrator {
             }
         }
 
+        // 不同主动触发器共享一次发言间隔，避免“整点问候刚说完，窗口/记忆/心情
+        // 触发又接着说”的跨类型连发。直接由当前用户或室友事件引发的回应保留即时性。
+        let is_reactive = matches!(
+            trigger,
+            ProactiveTrigger::TeasingResponse
+                | ProactiveTrigger::CrossCharacterReply
+                | ProactiveTrigger::BystanderInterjection
+                | ProactiveTrigger::WorkNotice
+        );
+        if !is_reactive
+            && state.last_proactive_speech_time > 0.0
+            && now - state.last_proactive_speech_time < OPTIONAL_PROACTIVE_SPEECH_GAP_SECS
+        {
+            return false;
+        }
+
         // 策略 G：social_urge 提前触发说明
         // current_thought 每 60s 调 LLM 顺便产出 social_urge（0-1），
         // urge 很高时（>= 0.8）在 check_specific 中放宽问候的"特定条件"（整点/空闲阈值等），
@@ -4596,14 +4618,14 @@ impl ProactiveOrchestrator {
                     .as_ref()
                     .map(|ts| behavior::format_recent_tool_history(ts, &lang_clone))
                     .unwrap_or_default();
-                // 注入"当前自我状态"叙事（含被冷落 / 安静模式 / 孤独等），让主动回复体现被忽略
+                // 注入当前自我状态；未回应只提示退避，不能被解释成关系情绪
                 let self_state_text = self
                     .self_state
                     .read()
                     .as_ref()
                     .map(|s| s.snapshot().serialize_for_prompt(&lang_clone))
                     .unwrap_or_default();
-                // 连续未回应轮次：用于给 LLM 一条分档的"体现被冷落"指令
+                // 连续未回应轮次：用于要求模型保持安静且不做情绪化解读
                 let ignored_rounds = self.state.read().ignored_count;
                 // 统一构造 messages，然后流式调用 LLM
                 let messages = match trigger {
@@ -5152,59 +5174,41 @@ impl ProactiveOrchestrator {
         *msgs = combined;
     }
 
-    /// 用户互动后调用，重置忽略计数
+    /// 用户互动后调用，重置未回应计数。
     ///
-    /// 如果之前有被忽略的记录（ignored_count > 0），说明用户是在她主动搭话后回应的——
-    /// 给 intimacy 一个微小的正向反馈，让她更愿意主动。
+    /// 未回应只用于调度退避，不代表用户在拒绝角色或关系发生变化。
     pub fn on_user_interacted(&self) -> VivianResult<()> {
-        let had_ignored = {
+        {
             let mut state = self.state.write();
-            let was_ignored = state.ignored_count > 0;
             state.ignored_count = 0;
-            // 用户真实交互：退避计数归零，让角色获得"重新活跃"的资格
+            // 用户真实交互：退避计数归零，让角色恢复正常的主动节奏。
             state.consecutive_interruptions = 0;
             state.last_interaction_time = chrono::Local::now().timestamp() as f64;
-            // 用户真实交互 = 已回应：清空待判定锚点，避免下一 tick 误判冷落
+            // 清空待判定锚点，避免下一 tick 把已经开始的新对话算作未回应。
             state.pending_proactive_at = 0.0;
             *self.last_user_was_away.write() = false;
-            was_ignored
-        };
-        // 刷新「最近对话」槽位：内心独白 / MemoryRecall / 主动对话 prompt 都读它。
-        // 放在这里而不是各个消费点，是因为用户每发一条消息就更新一次，
-        // 任何时刻读取到的都至多落后一轮，且三处消费点无需各自感知对话管理器。
-        self.refresh_recent_memory_from_dialogue();
-        // 偏好学习：用户响应了上一个主动消息（正信号）
-        self.preference_learner.record_response(true);
-        if had_ignored {
-            if let Some(psy) = self.psychology.read().as_ref() {
-                // 用户终于回应：拆下被冷落的负面情绪，语气回暖
-                psy.apply_user_answered_relief();
-                if let Err(e) = psy.apply_proactive_feedback(true, &self.char_id) {
-                    tracing::warn!("[Proactive] apply_proactive_feedback(true) 失败: {}", e);
-                }
-            }
         }
+        // 刷新「最近对话」槽位：内心独白 / MemoryRecall / 主动对话 prompt 都读它。
+        self.refresh_recent_memory_from_dialogue();
+        // 用户是否响应只训练主动消息的时机偏好，不改变亲密度或角色心情。
+        self.preference_learner.record_response(true);
         self.save_to()?;
         Ok(())
     }
-
     /// 获取当前被忽略次数（供 PresenceManager 检查自动触发条件）
     pub fn get_ignored_count(&self) -> u32 {
         self.state.read().ignored_count
     }
 
-    /// 标记本次主动消息被忽略
+    /// 标记本次主动消息暂未获得回应。
     ///
-    /// 每次冷落都给 intimacy 一个微小的负向反馈，让她逐渐退缩。
-    /// 同时关闭 User↔Agent 会话（NoResponse），让 Session 状态机感知到
-    /// "主动搭话被忽略"这一事实，后续不再继续搭话直到新 Trigger。
+    /// 这只是调度信号：拉长下一次主动发言的间隔，必要时进入安静模式。
+    /// 不把沉默写成关系记忆，也不据此生成受伤、委屈或赌气情绪。
     pub fn on_ignored(&self) -> VivianResult<()> {
         let behavior = crate::character_behavior::get_behavior(&self.char_id);
         {
             let mut state = self.state.write();
             state.ignored_count += 1;
-            // 被忽略 = 一次无效打扰：同步递增退避计数，让下次打扰间隔拉长，
-            // 与 speech_desire 的热度提升互补（越不理越热情，但越少尝试）
             let max_level = self.config.read().backoff_max_level;
             state.consecutive_interruptions =
                 (state.consecutive_interruptions + 1).min(max_level + 2);
@@ -5214,41 +5218,13 @@ impl ProactiveOrchestrator {
                 state.quiet_mode_until =
                     chrono::Local::now().timestamp() as f64 + 3600.0;
                 tracing::info!(
-                    "连续被忽略 {} 次，进入 1 小时安静模式",
+                    "连续 {} 次主动消息未获回应，进入 1 小时安静模式",
                     behavior.quiet_mode_threshold
                 );
             }
         }
-        // 偏好学习：用户忽略了上一个主动消息（负信号）
+        // 仅学习“当前时机不合适”，不把它当作用户对角色的负面评价。
         self.preference_learner.record_response(false);
-        // 规则层冷落映射：按连续被忽略次数把"被冷落"写入真实情绪，
-        // 让心情（compute_mood）随冷落加深而偏向孤独/失落，即使 LLM 无增量也会变化。
-        let severity = (self.state.read().ignored_count as f64).min(3.0) / 3.0;
-        if let Some(psy) = self.psychology.read().as_ref() {
-            psy.apply_cold_shoulder(severity);
-            if let Err(e) = psy.apply_proactive_feedback(false, &self.char_id) {
-                tracing::warn!("[Proactive] apply_proactive_feedback(false) 失败: {}", e);
-            }
-        }
-
-        // 冷落过程事件入统一事件账本：每次判定（第 1/2/3... 次）都注册，
-        // 让日记 / recap / 对话 prompt / 内心独白都能看到"用户冷落我"的过程。
-        // 冷落判定本身有 45s 超时 + 退避间隔，天然限频，无需额外节流。
-        {
-            let count = self.state.read().ignored_count;
-            crate::memory::unified_event_ledger::register_world_event(
-                "user_ignored",
-                &format!("被冷落：连续第 {} 次主动搭话未获回应", count),
-                vec![
-                    "behavior".to_string(),
-                    "ignored".to_string(),
-                    format!("count:{}", count),
-                ],
-                chrono::Local::now().timestamp() as f64,
-                Some(&self.char_id),
-            );
-        }
-
         // 关闭 User↔Agent 会话（NoResponse）
         // 让 Session 状态机记录"主动搭话被忽略"，后续 proactive_tick 会据此跳过主动消息。
         crate::conversation::CONVERSATION_MANAGER.close_pair_with_reason(
@@ -5632,17 +5608,14 @@ mod ignored_speech_trend_tests {
     }
 
     #[test]
-    fn test_probe_and_restraint_stay_positive() {
-        // 试探(1)与克制(2)都小幅靠近，且不被无限放大
-        assert_eq!(trend(1), 0.1);
-        assert_eq!(trend(2), 0.1);
+    fn test_initial_non_response_does_not_increase_desire() {
+        assert_eq!(trend(1), 0.0);
+        assert_eq!(trend(2), 0.0);
     }
 
     #[test]
-    fn test_withdrawal_goes_negative() {
-        // 退让(>=3)转为负向，收敛主动搭话
+    fn test_repeated_non_response_reduces_desire() {
         assert!(trend(3) < 0.0);
-        assert!(trend(5) < 0.0);
-        assert!(trend(3) > trend(5));
+        assert!(trend(5) < trend(3));
     }
 }

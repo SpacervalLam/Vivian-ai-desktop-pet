@@ -712,6 +712,9 @@ pub async fn rebuild_memory_embeddings(
 }
 
 /// 返回内置已知嵌入模型元数据（供前端在设置表单选择模型时展示维度、自动填充 dimension）。
+///
+/// 厂商级预设在这里被**摊平**成「一行一个模型」，保持既有前端与调用方的数据形状；
+/// 需要厂商分组信息（服务商下拉）时用 `get_embedding_provider_presets`。
 #[tauri::command]
 pub fn get_embedding_models() -> Value {
     let mut models = crate::memory::embedding_registry::all_models()
@@ -731,17 +734,31 @@ pub fn get_embedding_models() -> Value {
     models.extend(
         crate::plugins::load_embedding_provider_presets()
             .into_iter()
-            .map(|p| {
-                json!({
-                    "id": p.model,
-                    "dimension": p.dimension,
-                    "source": "cloud",
-                    "display_name": format!("{} {} ({})", p.provider, p.model, p.dimension),
-                    "provider": p.provider,
-                    "endpoint": p.endpoint,
-                    "recommended_for": p.recommended_for,
+            .flat_map(|p| {
+                let provider = p.provider.clone();
+                let endpoint = p.endpoint.clone();
+                let recommended_for = p.recommended_for.clone();
+                p.models.into_iter().map(move |m| {
+                    json!({
+                        "id": m.model,
+                        "dimension": m.dimension,
+                        "source": "cloud",
+                        "display_name": format!("{} {} ({})", provider, m.model, m.dimension),
+                        "provider": provider,
+                        "endpoint": endpoint,
+                        "recommended_for": recommended_for,
+                    })
                 })
             }),
     );
     json!(models)
+}
+
+/// 返回厂商级云端嵌入预设（设置表单「服务商」下拉用）。
+///
+/// 每项含端点、可选模型（模型名 + 维度 + 单请求条数上限）、控制台入口与核对来源，
+/// 表单据此在选择服务商后自动填充端点等字段，用户只需再填 API Key 与模型名。
+#[tauri::command]
+pub fn get_embedding_provider_presets() -> Value {
+    json!(crate::plugins::load_embedding_provider_presets())
 }

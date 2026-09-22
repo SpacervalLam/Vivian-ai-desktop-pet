@@ -1,17 +1,17 @@
 //! SNS 热梗定期采集 —— 保持角色"懂梗玩梗"人设
 //!
-//! 独立于 Busy 状态的知识采集，按固定周期（默认 7 天）主动采集 B 站、抖音、
-//! 小红书、微博等 SNS 平台的最新热梗，写入 Knowledge 记忆，TTL=7 天自动刷新。
+//! 独立于 Busy 状态的知识采集，按固定周期（默认 24 小时）主动采集 B 站、抖音、
+//! 小红书、微博等 SNS 平台的最新热梗，写入 Knowledge 记忆，TTL=3 天滚动刷新。
 //!
 //! 设计：
 //! - **独立 tokio task**：在 lib.rs 启动时为每个角色 spawn 一个循环 task，
 //!   不依赖 Presence 状态（Online/Busy/Rest 均可运行，Offline 跳过）
 //! - **角色差异化**：Vivian 侧重 B 站/抖音二次元梗，Nana 侧重小红书/微博生活类热词
-//! - **LLM 全生成关键词**：每周让 LLM 基于当前日期生成当周可能的热梗候选词
+//! - **候选词辅助**：LLM 根据当前日期生成补充查询词，实时泛查询仍是主要发现入口
 //! - **平台定向搜索**：通过 query 拼接 `site:bilibili.com` / `抖音` / `小红书` 修饰
-//! - **滚动周期**：从上次采集完成时刻起算 7 天后再次触发
+//! - **滚动周期**：从上次采集完成时刻起算 24 小时后再次触发
 //! - **持久化冷却**：`characters/<char_id>/meme_acquisition_state.json` 记录上次采集时间，
-//!   重启后若距上次 ≥ 7 天则立即触发（延迟 10 分钟避免启动期争抢）
+//!   重启后若距上次 ≥ 24 小时则触发（延迟 2 分钟避免启动期争抢）
 
 use std::sync::Arc;
 
@@ -27,10 +27,10 @@ use crate::providers::ModelRouter;
 use crate::state::AppState;
 use crate::types::response::ChatMessage;
 
-/// 采集周期：7 天（秒）
-const MEME_ACQUISITION_INTERVAL_SECS: f64 = 7.0 * 24.0 * 3600.0;
+/// 采集周期：24 小时（秒）
+const MEME_ACQUISITION_INTERVAL_SECS: f64 = 24.0 * 3600.0;
 /// 启动后延迟（秒），避免启动期资源争抢
-const STARTUP_DELAY_SECS: u64 = 10 * 60;
+const STARTUP_DELAY_SECS: u64 = 2 * 60;
 /// 每个平台搜索结果上限
 const SEARCH_RESULTS_PER_PLATFORM: usize = 6;
 /// 单次采集最多覆盖的平台数
@@ -129,10 +129,10 @@ fn save_state(char_id: &str, state: &MemeAcquisitionState) {
 /// 启动热梗采集循环（每个角色一个独立 task）
 ///
 /// 在 lib.rs 启动时调用。循环流程：
-/// 1. 启动后延迟 10 分钟
-/// 2. 读取持久化状态，若距上次采集 ≥ 7 天则立即触发
+/// 1. 启动后延迟 2 分钟
+/// 2. 读取持久化状态，若距上次采集 ≥ 24 小时则立即触发
 /// 3. 否则 sleep 到下次触发时间
-/// 4. 执行采集 → 更新状态 → sleep 7 天 → 回到步骤 4
+/// 4. 执行采集 → 更新状态 → sleep 24 小时 → 回到步骤 4
 pub fn spawn_meme_acquisition_loop(
     char_id: String,
     app: AppHandle,
@@ -282,7 +282,7 @@ pub fn spawn_meme_acquisition_loop(
                 result.summary
             );
 
-            // 采集完成后 sleep 7 天进入下一轮（由循环顶部的状态检查统一处理）
+            // 采集完成后由循环顶部按 24 小时周期统一等待
             // 这里不额外 sleep，直接回到循环顶部，顶部会读取状态计算等待时间
         }
     });
@@ -296,10 +296,10 @@ struct AcquisitionResult {
 
 /// 单次热梗采集主流程
 ///
-/// 1. LLM 生成当周热梗候选关键词
+/// 1. LLM 生成补充候选词，同时保留日期化实时泛查询
 /// 2. 按角色平台配置拼接平台修饰搜索
 /// 3. LLM 总结搜索结果成知识文档
-/// 4. 写入 Knowledge 记忆（TTL=7 天，下周自动过期刷新）
+/// 4. 写入 Knowledge 记忆（TTL=3 天，按日滚动刷新）
 async fn run_meme_acquisition(
     char_id: &str,
     router: &ModelRouter,
@@ -309,48 +309,43 @@ async fn run_meme_acquisition(
 ) -> AcquisitionResult {
     let platforms = platforms_for(char_id);
 
-    // Step 1: LLM 生成当周热梗候选关键词
+    // LLM 候选词只做补充，不能作为采集入口。模型知识可能比搜索结果旧；即使
+    // 它想不出关键词，也要用日期化的泛查询发现当日真实内容。
     let keywords = match generate_meme_keywords(router, char_id, &platforms).await {
-        Ok(kw) if !kw.is_empty() => kw,
-        Ok(_) => {
-            tracing::info!("[MemeAcquisition:{}] LLM 未生成关键词，跳过本次采集", char_id);
-            return AcquisitionResult {
-                summary: "LLM 未生成关键词".to_string(),
-                acquired_count: 0,
-            };
-        }
+        Ok(kw) => kw,
         Err(e) => {
-            tracing::warn!("[MemeAcquisition:{}] 生成关键词失败: {}", char_id, e);
-            return AcquisitionResult {
-                summary: format!("生成关键词失败: {}", e),
-                acquired_count: 0,
-            };
+            tracing::warn!(
+                "[MemeAcquisition:{}] 生成候选关键词失败，继续使用实时泛查询: {}",
+                char_id,
+                e
+            );
+            Vec::new()
         }
     };
 
     tracing::info!(
-        "[MemeAcquisition:{}] LLM 生成 {} 个关键词: {:?}",
+        "[MemeAcquisition:{}] 候选关键词 {} 个（实时搜索不依赖候选词）: {:?}",
         char_id,
         keywords.len(),
         &keywords
     );
-
     let mut acquired = 0usize;
     let mut summaries: Vec<String> = Vec::new();
 
     // Step 2 + 3 + 4: 按平台搜索 + LLM 总结 + 入库
     for platform in platforms.iter().take(MAX_PLATFORMS_PER_RUN) {
-        // 拼接平台修饰 + 关键词，组合成搜索 query
-        // 每个平台用所有关键词拼成一次搜索（OR 连接），让搜索引擎返回任一关键词的结果
-        let query = if keywords.len() == 1 {
-            format!("{} {}", platform.query_modifier, keywords[0])
+        // 泛查询负责发现“模型原本不知道的新梗”，候选词只拓宽召回。年月进入
+        // query，降低旧盘点和营销搬运稿占据结果页的概率。
+        let month = chrono::Local::now().format("%Y年%m月").to_string();
+        let candidates = if keywords.is_empty() {
+            String::new()
         } else {
-            format!(
-                "{} {}",
-                platform.query_modifier,
-                keywords.join(" OR ")
-            )
+            format!(" {}", keywords.join(" OR "))
         };
+        let query = format!(
+            "{} {} 今日 最新 热梗 流行语 热门盘点{}",
+            platform.query_modifier, month, candidates
+        );
 
         tracing::info!(
             "[MemeAcquisition:{}] 搜索平台 {}: {:?}",
@@ -391,7 +386,7 @@ async fn run_meme_acquisition(
                         &content,
                         tags,
                         "meme_acquisition",
-                        Some(7), // TTL=7 天，下周采集时自动过期
+                        Some(3), // TTL=3 天，避免上周用法长期污染当前语境
                     )
                     .await
                 {
@@ -448,7 +443,7 @@ async fn run_meme_acquisition(
     }
 }
 
-/// LLM 生成当周热梗候选关键词
+/// LLM 生成近期热梗的补充候选关键词
 ///
 /// 让 LLM 基于当前日期 + 角色人设 + 平台侧重，生成适合搜索的热梗候选词。
 /// 输出格式：每行一个关键词，最多 MAX_KEYWORDS_PER_RUN 个。
@@ -557,16 +552,16 @@ async fn summarize_meme_results(
 
     let system = format!(
         "你是角色 {}。你刚才搜索了 {} 平台的热梗（关键词：{}），得到了以下搜索结果。\n\
-         现在是 {}。请把这些搜索结果整理成一份适合你以后回忆的「热梗笔记」。\n\n\
+         现在是 {}。请把搜索结果整理成一份短期有效的「近期网络语境笔记」。\n\n\
          ## 要求\n\
          - title：简洁的标题，形如「{}热梗速览（{}）」，包含平台和日期\n\
          - content：用中文写成结构化的笔记，包含：\n\
-           1. 本周热门梗/流行语/话题（列出具体的梗名和简要解释）\n\
+           1. 近期有可靠结果支持的梗/流行语/话题；没有日期或近期证据的旧内容不要收录\n\
            2. 每个梗的来源/背景（哪个视频/帖子/事件带火的）\n\
-           3. 梗的用法（怎么在对话里自然地用）\n\
-         - 笔记风格要像你自己记给自己看的，口语化、有你的语气，不要像百科词条\n\
+           3. 自然用法、语气强度、适用场景，以及哪些场景使用会尴尬或冒犯\n\
+         - 内容用于理解语境，不是台词清单；不要建议高频使用，也不要为了显得在线而硬玩梗\n\
          - 只整理真实出现在搜索结果里的内容，不要编造未提及的梗\n\
-         - 如果搜索结果质量差（全是广告/无关内容），content 可写「本周搜索结果质量不佳，未提取到有效热梗」\n\n\
+         - 如果结果缺乏近期日期、可靠来源或实际用例，content 留空，不要用旧知识补全\n\n\
          ## 输出格式\n\
          严格的 JSON：{{\"title\": \"...\", \"content\": \"...\"}}\n\
          不要任何其他内容、不要 markdown 代码块。",

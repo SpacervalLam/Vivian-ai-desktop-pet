@@ -396,11 +396,20 @@ export const MarkdownLiveEditor: React.FC<{
 
   return (
     <div className="md-live-wrap">
-      <div className="md-live-status">
-        {saving && <span className="md-live-saving"><Loader2 size={11} className="codex-spin" /> 保存中…</span>}
-        {!saving && !disabled && <span className="md-live-hint">直接编辑，markdown 语法边打边渲染</span>}
-        {disabled && disabledNote && <span className="md-live-disabled">{disabledNote}</span>}
-      </div>
+      {/* 状态条只在**有稳定理由**时才占位（目前只有 disabled）。
+          「保存中…」是毫秒级的瞬时状态（写本地文件），若也走这条占位条，
+          它一出现/消失就会把正文顶下去 ~21px，每存一次抖一下 —— 所以改成
+          不占布局的浮层（.md-live-saving-float）。 */}
+      {disabled && disabledNote && (
+        <div className="md-live-status">
+          <span className="md-live-disabled">{disabledNote}</span>
+        </div>
+      )}
+      {saving && (
+        <span className="md-live-saving md-live-saving-float">
+          <Loader2 size={11} className="codex-spin" /> 保存中…
+        </span>
+      )}
       {error && <div className="codex-src-error">{error}</div>}
       <div
         ref={hostRef}

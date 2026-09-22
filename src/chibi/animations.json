@@ -111,6 +111,68 @@
       "frames": 12,
       "loop": false,
       "durations": [70, 80, 80, 80, 85, 85, 85, 85, 85, 90, 90, 95]
+    },
+    {
+      "name": "sleep",
+      "label": "入睡",
+      "category": "state",
+      "promptable": true,
+      "sheet": "/chibi/motion/{character}/{character}-sleep-sheet.webp",
+      "cols": 4,
+      "rows": 6,
+      "frames": 24,
+      "loop": false,
+      "hold": true,
+      "durations": [120,120,130,140,150,160,170,170,160,150,150,160,170,180,180,170,160,150,140,130,130,120,120,120]
+    },
+    {
+      "name": "busy-in",
+      "label": "忙碌-掏出手机",
+      "category": "state",
+      "promptable": false,
+      "sheet": "/chibi/motion/{character}/{character}-busy-in-sheet.webp",
+      "cols": 4,
+      "rows": 3,
+      "frames": 12,
+      "loop": false,
+      "durations": [70,80,85,90,95,95,90,85,80,80,85,90]
+    },
+    {
+      "name": "busy-loop",
+      "label": "忙碌-看手机",
+      "category": "state",
+      "promptable": false,
+      "sheet": "/chibi/motion/{character}/{character}-busy-loop-sheet.webp",
+      "cols": 4,
+      "rows": 2,
+      "frames": 8,
+      "loop": true,
+      "durations": [110,110,110,110,110,110,110,110]
+    },
+    {
+      "name": "busy-out",
+      "label": "忙碌-收起手机",
+      "category": "state",
+      "promptable": false,
+      "sheet": "/chibi/motion/{character}/{character}-busy-out-sheet.webp",
+      "cols": 4,
+      "rows": 3,
+      "frames": 12,
+      "loop": false,
+      "durations": [90,85,85,80,80,85,90,95,95,90,85,80]
+    },
+    {
+      "name": "tend",
+      "label": "浇花",
+      "category": "state",
+      "promptable": true,
+      "sheet": "/chibi/motion/{character}/{character}-tend-sheet.webp",
+      "cols": 4,
+      "rows": 6,
+      "frames": 24,
+      "loop": false,
+      "hold": true,
+      "durations": [120,120,130,140,150,160,160,160,150,150,160,170,170,160,150,150,160,160,150,150,140,140,140,140]
     }
   ],
   "expression_aliases": {

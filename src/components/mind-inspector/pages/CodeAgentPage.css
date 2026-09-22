@@ -41,6 +41,17 @@
   --codex-tape-pink: rgba(236, 198, 190, 0.5);
   --codex-tape-blue: rgba(178, 211, 226, 0.5);
   --codex-tape-green: rgba(194, 219, 189, 0.5);
+  /* 便利贴（markdown 代码块专用）。比纸面暖一档的黄 —— 只用「更暖 + 更方 + 抬起」
+     三样把「贴上去的那张纸」和「底下的纸」分开，不加折角、不加胶带、不做旋转
+     （旋转会让里面的等宽文本错位、横向滚动条跟着歪，属于「复杂」那一类）。
+     极简主题在 MindInspectorThemes.css 里把这三样全部还原成平面卡片。 */
+  --codex-note-bg: #fbf0c9;
+  --codex-note-line: rgba(160, 132, 62, 0.24);
+  --codex-note-shadow: 0 2px 7px rgba(59, 52, 40, 0.13), 0 1px 2px rgba(59, 52, 40, 0.08);
+  /* 语言标签落在暖黄底上要单独给一档：原 --codex-ink-faint 在 #fffcf3 上是 3.10:1，
+     换到便利贴底会掉到 2.79:1（低于 3:1）。这个值合成后是 3.65:1 —— 过线，
+     但仍明显轻于正文的 10.78:1，保住「语言标签是次要信息」的层级。 */
+  --codex-note-ink-faint: rgba(107, 97, 88, 0.82);
   --codex-shadow-sm: 0 1px 2px rgba(59, 52, 40, 0.1), 0 1px 3px rgba(59, 52, 40, 0.06);
   --codex-shadow-md: 0 2px 8px rgba(59, 52, 40, 0.14), 0 1px 2px rgba(59, 52, 40, 0.08);
   --codex-shadow-lg: 0 10px 28px rgba(59, 52, 40, 0.18), 0 3px 8px rgba(59, 52, 40, 0.1);
@@ -50,14 +61,22 @@
   /* ---------- markdown 排版字体 ----------
      刻意不复用 --codex-font：那条链首选 'Kalam' 从未引入，回退会一路掉到
      Microsoft YaHei（黑体），与暖纸信纸风对不上（同样的坑见 .codex-group-menu）。
-     中文走本地打包的 Ma Shan Zheng（@font-face 在 index.html，3.2MB woff2，必然可用），
-     西文用它的拉丁字形，后面接衬线兜底 —— 与 design-system 的 TYPO.fontFamily 一致。 */
-  --codex-md-font: 'Ma Shan Zheng', 'Noto Serif SC', 'Source Han Serif SC', 'Songti SC', 'STSong', 'SimSun', 'EB Garamond', 'PT Serif', Georgia, 'Times New Roman', serif;
-  /* 装饰手写体（标题、表头）：西文先吃在线加载的 Caveat，中文回落 Ma Shan Zheng。
+
+     **拉丁字体必须排在 Ma Shan Zheng 前面。** CSS 的字体回退是**逐字符**的：取
+     「列表里第一个含有该字符字形的字体」。Ma Shan Zheng 自带拉丁字形，排在首位就会
+     把西文全吃掉 —— 它是毛笔行书体，写西文又斜又软，加粗还只能靠合成粗体糊出来。
+     把西文衬线提到前面：拉丁字符走 EB Garamond → PT Serif → Georgia（Windows 自带）
+     → Times New Roman，中文这些字体都没有字形，自然落到 Ma Shan Zheng。
+     后面的 Noto Serif SC / Songti SC / SimSun 是中文兜底（万一 Ma Shan Zheng 没加载）。 */
+  --codex-md-font: 'EB Garamond', 'PT Serif', Georgia, 'Times New Roman', 'Ma Shan Zheng', 'Noto Serif SC', 'Source Han Serif SC', 'Songti SC', 'STSong', 'SimSun', serif;
+  /* 装饰手写体（标题、表头）：西文先吃在线加载的 Caveat，离线时退到本地自带的
+     Segoe Print，**最后**才轮到 Ma Shan Zheng —— 同一条原则，不让毛笔体写西文。
      与 .codex-group-menu 用的是同一套栈。 */
-  --codex-md-hand: 'Caveat', 'Ma Shan Zheng', 'Dancing Script', 'Segoe Print', 'KaiTi', '楷体', cursive;
+  --codex-md-hand: 'Caveat', 'Segoe Print', 'Dancing Script', 'Ma Shan Zheng', 'KaiTi', '楷体', cursive;
   /* 手写体只有 400 一个字重，写 700 会被浏览器合成粗体（糊成一坨「加粗黑体」感），
-     所以标题字重也做成变量 —— 极简主题换回无衬线后要覆盖成 600。 */
+     所以标题字重也做成变量 —— 极简主题换回无衬线后要覆盖成 600。
+     注意 --codex-md-font 现在首选中含 Georgia 等**有真粗体**的西文衬线，所以
+     strong 里的西文会正常变粗，而中文仍是 400 + 荧光笔底。 */
   --codex-md-h-weight: 400;
 
   /* 将整个心智观察器内的 --panel-* 统一为手账暖纸，使所有子页面自动继承 */
@@ -94,8 +113,8 @@
   --panel-shadow-elevated: 0 10px 28px rgba(59, 52, 40, 0.12), 0 2px 6px rgba(59, 52, 40, 0.08);
   --panel-input-bg: #fffcf3;
   --panel-overlay: rgba(39, 33, 28, 0.35);
-  --panel-scrollbar: rgba(59, 52, 40, 0.16);
-  --panel-scrollbar-hover: rgba(59, 52, 40, 0.28);
+  --panel-scrollbar: rgba(59, 52, 40, 0.22);
+  --panel-scrollbar-hover: rgba(59, 52, 40, 0.34);
   --panel-sidebar-bg: rgba(255, 252, 243, 0.9);
   --panel-sidebar-shadow: 0 4px 16px rgba(59, 52, 40, 0.1);
   --panel-subtle-bg: rgba(59, 52, 40, 0.04);
@@ -165,6 +184,11 @@
     --codex-tape-pink: rgba(214, 151, 138, 0.22);
     --codex-tape-blue: rgba(143, 180, 204, 0.24);
     --codex-tape-green: rgba(156, 195, 161, 0.22);
+    /* 深色手账下的便利贴：靠「比纸面亮一档 + 偏黄」立起来，阴影只负责压边 */
+    --codex-note-bg: #3b3122;
+    --codex-note-line: rgba(216, 204, 180, 0.18);
+    --codex-note-shadow: 0 2px 8px rgba(0, 0, 0, 0.5), 0 1px 2px rgba(0, 0, 0, 0.4);
+    --codex-note-ink-faint: #a1958a;
     --codex-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.45), 0 1px 3px rgba(0, 0, 0, 0.35);
     --codex-shadow-md: 0 2px 8px rgba(0, 0, 0, 0.5), 0 1px 2px rgba(0, 0, 0, 0.4);
     --codex-shadow-lg: 0 10px 28px rgba(0, 0, 0, 0.55), 0 3px 8px rgba(0, 0, 0, 0.45);
@@ -202,8 +226,8 @@
     --panel-shadow-elevated: 0 8px 24px rgba(0, 0, 0, 0.5), 0 2px 6px rgba(0, 0, 0, 0.4);
     --panel-input-bg: #2b241e;
     --panel-overlay: rgba(0, 0, 0, 0.55);
-    --panel-scrollbar: rgba(232, 224, 210, 0.16);
-    --panel-scrollbar-hover: rgba(232, 224, 210, 0.28);
+    --panel-scrollbar: rgba(232, 224, 210, 0.22);
+    --panel-scrollbar-hover: rgba(232, 224, 210, 0.34);
     --panel-sidebar-bg: rgba(43, 36, 30, 0.9);
     --panel-sidebar-shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
     --panel-subtle-bg: rgba(232, 224, 210, 0.05);
@@ -244,6 +268,11 @@
   --codex-tape-pink: rgba(214, 151, 138, 0.22);
   --codex-tape-blue: rgba(143, 180, 204, 0.24);
   --codex-tape-green: rgba(156, 195, 161, 0.22);
+  /* 深色手账下的便利贴：同 @media 那块，两处必须一致 */
+  --codex-note-bg: #3b3122;
+  --codex-note-line: rgba(216, 204, 180, 0.18);
+  --codex-note-shadow: 0 2px 8px rgba(0, 0, 0, 0.5), 0 1px 2px rgba(0, 0, 0, 0.4);
+  --codex-note-ink-faint: #a1958a;
   --codex-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.45), 0 1px 3px rgba(0, 0, 0, 0.35);
   --codex-shadow-md: 0 2px 8px rgba(0, 0, 0, 0.5), 0 1px 2px rgba(0, 0, 0, 0.4);
   --codex-shadow-lg: 0 10px 28px rgba(0, 0, 0, 0.55), 0 3px 8px rgba(0, 0, 0, 0.45);
@@ -281,8 +310,8 @@
   --panel-shadow-elevated: 0 8px 24px rgba(0, 0, 0, 0.5), 0 2px 6px rgba(0, 0, 0, 0.4);
   --panel-input-bg: #2b241e;
   --panel-overlay: rgba(0, 0, 0, 0.55);
-  --panel-scrollbar: rgba(232, 224, 210, 0.16);
-  --panel-scrollbar-hover: rgba(232, 224, 210, 0.28);
+  --panel-scrollbar: rgba(232, 224, 210, 0.22);
+  --panel-scrollbar-hover: rgba(232, 224, 210, 0.34);
   --panel-sidebar-bg: rgba(43, 36, 30, 0.9);
   --panel-sidebar-shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
   --panel-subtle-bg: rgba(232, 224, 210, 0.05);
@@ -297,35 +326,79 @@
   --panel-blue-450: rgb(143, 180, 204);
 }
 
-/* 滚动条：暖纸手账风格——细滑轨 + 圆角滑块，滚动时稍显、悬停加深 */
-.codex-theme {
-  scrollbar-width: thin;
-  scrollbar-color: rgba(59, 52, 40, 0.22) transparent;
+/* ==========================================================================
+   滚动条：全主题共用一套 —— 胶囊滑块、无轨道、无箭头
+   --------------------------------------------------------------------------
+   **这里绝不能声明 `scrollbar-width` / `scrollbar-color`。**
+   一旦声明，Chromium 就改用原生滚动条渲染，下面 `::-webkit-scrollbar` 那一整套
+   样式**全部变成死代码**。这里原先正是这么写的（`scrollbar-width: thin` +
+   `scrollbar-color: rgba(59,52,40,.22)`），于是真正画出来的其实是 Windows 原生
+   滚动条：**宽 15px、顶上带一个箭头按钮**、滑块颜色写死暖棕（极简模式下也不跟
+   主题走）。实测：声明在 → 15px，顶部多出 `rgb(205,197,184)` 的箭头像素；
+   把声明去掉 → 12px，箭头消失、下面的样式才真正生效。
+   想给 Firefox 兜底就放进 `@supports not selector(::-webkit-scrollbar)`：
+   Chromium 认这个选择器（实测 `CSS.supports('selector(::-webkit-scrollbar)')`
+   = true），块会被整段跳过，不会反过来把自定义样式顶掉。
+   -------------------------------------------------------------------------- */
+
+.codex-theme ::-webkit-scrollbar {
+  width: 12px;
+  height: 12px;
 }
 
-.codex-theme ::-webkit-scrollbar { width: 10px; height: 10px; }
 .codex-theme ::-webkit-scrollbar-track {
   background: transparent;
-  border-radius: 6px;
 }
+
+/* 原生箭头按钮：Chromium 默认会在两端画小三角，这是「不好看」的主要来源。
+   滚动靠滚轮 / 触控板 / 键盘就够了，显式关掉。 */
+.codex-theme ::-webkit-scrollbar-button {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
 .codex-theme ::-webkit-scrollbar-thumb {
-  background: rgba(59, 52, 40, 0.18);
-  border: 2px solid transparent;
+  /* 3px 透明边框 + `background-clip: padding-box`：滑块本体只有 6px 宽，
+     两侧各留 3px 呼吸位，不再贴死在窗口边缘。圆角取 999px（胶囊），
+     与主题里其它圆角元素同一套语言。 */
+  border: 3px solid transparent;
+  border-radius: 999px;
+  background: var(--panel-scrollbar, rgba(59, 52, 40, 0.22));
   background-clip: padding-box;
-  border-radius: 7px;
-  min-height: 32px;
+  /* 内容很长时滑块别缩成一个小点：至少要看得清、抓得住 */
+  min-height: 40px;
+  min-width: 40px;
 }
+
+/* `background:` 是**简写**，会把 `background-clip` 重置回 `border-box` ——
+   所以悬停 / 按下这两条必须把 `border` 与 `background-clip` 一并重写，
+   否则一悬停滑块就变回 12px 满宽、把刚才那 3px 呼吸位吃掉。 */
 .codex-theme ::-webkit-scrollbar-thumb:hover {
-  background: rgba(59, 52, 40, 0.3);
-  border: 2px solid transparent;
+  border: 3px solid transparent;
+  border-radius: 999px;
+  background: var(--panel-scrollbar-hover, rgba(59, 52, 40, 0.34));
   background-clip: padding-box;
 }
+
 .codex-theme ::-webkit-scrollbar-thumb:active {
-  background: rgba(59, 52, 40, 0.4);
-  border: 2px solid transparent;
+  border: 3px solid transparent;
+  border-radius: 999px;
+  background: var(--panel-scrollbar-hover, rgba(59, 52, 40, 0.34));
   background-clip: padding-box;
 }
-.codex-theme ::-webkit-scrollbar-corner { background: transparent; }
+
+.codex-theme ::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* Firefox 兜底。Chromium 会整段跳过（见上），所以不影响自定义样式。 */
+@supports not selector(::-webkit-scrollbar) {
+  .codex-theme {
+    scrollbar-width: thin;
+    scrollbar-color: var(--panel-scrollbar, rgba(59, 52, 40, 0.22)) transparent;
+  }
+}
 
 .codex-theme button {
   font-family: inherit;
@@ -969,12 +1042,16 @@
   padding: 6px 8px;
   border-radius: 7px;
   font-size: 12px;
-  /* 手写体（项目已加载的 Caveat 拉丁 + 本地 Ma Shan Zheng 中文）。
-     两处继承是这里必须写死的原因：
-     1) reset 里 button 是 font: inherit，字重会从 .codex-session-group-title 拿到 700；
-     2) --codex-font 首选 'Kalam' 从未引入，回退链一路掉到 Microsoft YaHei（黑体）。
-     合起来就是这个菜单项看上去「加粗黑体」的原因。 */
-  font-family: 'Caveat', 'Ma Shan Zheng', 'Dancing Script', 'Segoe Print', 'KaiTi', '楷体', cursive;
+  /* 走 --codex-md-hand，**不写死字体栈** —— 手账主题下它是
+     'Caveat' → 'Segoe Print' → 'Dancing Script' → 'Ma Shan Zheng'（与之前写死的那串
+     等效：拉丁吃 Caveat，中文没有拉丁字形、继续往后落到马善政），
+     极简主题下它已被覆写成无衬线。写死的话极简模式的菜单还是手写体。
+     这里原本写死有两个原因，现在都不成立了：
+     1) reset 里 button 是 font: inherit，字重会从 .codex-session-group-title 拿到 700
+        —— 由下面这行显式 font-weight: 400 解决，与字体栈无关；
+     2) --codex-font 首选 'Kalam' 从未引入，回退链一路掉到 Microsoft YaHei（黑体）
+        —— --codex-md-hand 是另一条链，没这个问题。 */
+  font-family: var(--codex-md-hand);
   font-weight: 400;
   color: var(--codex-ink-soft);
   cursor: pointer;
@@ -1103,26 +1180,30 @@
 .codex-session-unread-dot { width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; background: var(--codex-accent); box-shadow: 0 0 0 3px var(--codex-accent-soft); }
 .codex-session-status-spinner { flex: 0 0 auto; color: var(--codex-accent); }
 .codex-session-status-question { flex: 0 0 auto; color: var(--codex-warm); }
-.codex-session-context-menu { position: fixed; z-index: 1000; display: flex; flex-direction: column; min-width: 150px; padding: 5px; border: 1px solid var(--codex-line, #d9dde3); border-radius: 10px; background-color: var(--codex-paper-card, #ffffff) !important; box-shadow: var(--codex-shadow-lg, 0 12px 32px rgba(20, 24, 28, 0.2)); }
-.codex-session-context-menu button { border: 0; border-radius: 6px; padding: 7px 10px; color: var(--codex-ink, #252a30); background: transparent; text-align: left; cursor: pointer; font-size: 12px; font-family: 'Caveat', 'Ma Shan Zheng', 'Dancing Script', 'Segoe Print', 'KaiTi', '楷体', cursive; font-weight: 400; }
+.codex-session-context-menu { position: fixed; z-index: 1000; display: flex; flex-direction: column; min-width: 150px; padding: 5px; border: 1px solid var(--codex-line, #d9dde3); border-radius: 10px; background: var(--codex-paper-card, #ffffff) !important; box-shadow: var(--codex-shadow-lg, 0 12px 32px rgba(20, 24, 28, 0.2)); }
+.codex-session-context-menu button { border: 0; border-radius: 6px; padding: 7px 10px; color: var(--codex-ink, #252a30); background: transparent; text-align: left; cursor: pointer; font-size: 12px; font-family: var(--codex-md-hand); font-weight: 400; }
 .codex-session-context-menu button:hover { background: var(--codex-accent-soft); }
 .codex-session-context-menu button.danger { color: var(--codex-danger); }
-.codex-session-context-menu.scrapbook { background: #fffaf2 !important; border-color: #e7d8c4; color: #403a34; }
-.codex-session-context-menu.minimal { background: #ffffff !important; border-color: #d9dde3; color: #252a30; }
 .codex-session-context-menu button.danger { color: #b42318 !important; }
 
-/* 通用右键菜单卡（页签右键等复用；与会话菜单同一套视觉） */
-.codex-context-menu { position: fixed; z-index: 1000; display: flex; flex-direction: column; min-width: 150px; padding: 5px; border: 1px solid var(--codex-line, #d9dde3); border-radius: 10px; background-color: var(--codex-paper-card, #ffffff) !important; box-shadow: var(--codex-shadow-lg, 0 12px 32px rgba(20, 24, 28, 0.2)); }
-.codex-context-menu button { border: 0; border-radius: 6px; padding: 7px 10px; color: var(--codex-ink, #252a30); background: transparent; text-align: left; cursor: pointer; font-size: 12px; font-family: 'Caveat', 'Ma Shan Zheng', 'Dancing Script', 'Segoe Print', 'KaiTi', '楷体', cursive; font-weight: 400; }
+/* 通用右键菜单卡（页签右键等复用；与会话菜单同一套视觉）。
+   两个菜单都是 **portal 到 document.body** 的弹层，逃出了 .mind-main，
+   主题标记靠 MindInspector 镜像到 <body> 的 data-ui-style 传进来
+   （见 MindInspector.tsx 那段注释 + MindInspectorThemes.css 的调色板作用域）。
+
+   所以这里**一律不许写死颜色与字体** —— 早先那套 `.scrapbook` / `.minimal`
+   修饰类从来没被挂上过（没有任何代码给这两个菜单加类），是条死路，已删除；
+   字体也不再写死手写体栈，改走 --codex-md-hand（手账 = Caveat 起头的手写体，
+   极简已被覆写成无衬线），否则极简模式下菜单还是手写体。 */
+.codex-context-menu { position: fixed; z-index: 1000; display: flex; flex-direction: column; min-width: 150px; padding: 5px; border: 1px solid var(--codex-line, #d9dde3); border-radius: 10px; background: var(--codex-paper-card, #ffffff) !important; box-shadow: var(--codex-shadow-lg, 0 12px 32px rgba(20, 24, 28, 0.2)); }
+.codex-context-menu button { border: 0; border-radius: 6px; padding: 7px 10px; color: var(--codex-ink, #252a30); background: transparent; text-align: left; cursor: pointer; font-size: 12px; font-family: var(--codex-md-hand); font-weight: 400; }
 .codex-context-menu button:hover { background: var(--codex-accent-soft); }
 .codex-context-menu button.danger { color: #b42318 !important; }
-.codex-context-menu.scrapbook { background: #fffaf2 !important; border-color: #e7d8c4; color: #403a34; }
-.codex-context-menu.minimal { background: #ffffff !important; border-color: #d9dde3; color: #252a30; }
 
 /* 菜单正对着的那个页签：保持高亮，明确菜单作用对象 */
 .codex-preview-tab.menu-open { background: var(--codex-accent-soft); border-color: var(--codex-line); color: var(--codex-ink); }
 .codex-session-modal-backdrop { position: fixed; inset: 0; z-index: 1100; display: grid; place-items: center; background: rgba(20, 24, 28, 0.28); }
-.codex-session-modal { width: min(360px, calc(100vw - 32px)); padding: 18px; border: 1px solid var(--codex-line, #d9dde3); border-radius: 14px; background-color: var(--codex-paper-card, #ffffff) !important; box-shadow: var(--codex-shadow-lg, 0 12px 32px rgba(20, 24, 28, 0.2)); color: var(--codex-ink, #252a30); }
+.codex-session-modal { width: min(360px, calc(100vw - 32px)); padding: 18px; border: 1px solid var(--codex-line, #d9dde3); border-radius: 14px; background: var(--codex-paper-card, #ffffff) !important; box-shadow: var(--codex-shadow-lg, 0 12px 32px rgba(20, 24, 28, 0.2)); color: var(--codex-ink, #252a30); }
 .codex-session-modal h3 { margin: 0 0 12px; font-size: 15px; }
 .codex-session-modal p { margin: 0 0 14px; color: var(--codex-ink-soft); font-size: 13px; }
 .codex-session-modal input { width: 100%; height: 30px; box-sizing: border-box; padding: 0 9px; border: 1px solid var(--codex-line); border-radius: 7px; background: var(--codex-paper); color: var(--codex-ink); outline: none; font-size: 12px; line-height: 28px; }
@@ -1377,23 +1458,49 @@
   font-size: 12px;
 }
 
-/* 文档 / 表格共用的滚动容器：撑满预览区，内容自己滚 */
+/* 文档 / 表格共用的滚动容器：撑满预览区，内容自己滚。
+   留白是「桌面」——Word 那张纸浮在它上面，所以四周给得比表格宽松些。 */
 .codex-office-scroll {
   flex: 1;
   min-width: 0;
   min-height: 0;
   overflow: auto;
-  padding: 14px 16px;
+  padding: 20px 18px 26px;
 }
 
-/* ---- Word：mammoth 产出的结构化 HTML ---- */
+/* ---- Word：mammoth 产出的结构化 HTML ----
+   渲染成**一页文档**：一张浮在桌面上的纸，而不是直接铺在面板底上的散文字。
+   这一层比任何字体调整都重要 —— 之前正文透明、贴边、也没有测度上限，
+   面板一宽正文就被拉成一行六七十个字，既不像文档也读不下去。
 
+   字体走 --codex-md-font / --codex-md-hand，与旁边的 markdown 渲染共用同一批变量：
+   手账主题下是衬线正文 + 手写标题，极简主题下这两个变量已被覆写成无衬线，
+   于是不必另写一份极简规则就能跟着主题走（同 --codex-md-* 的一贯做法）。 */
 .codex-office-doc {
+  /* 测度与 markdown 正文对齐（--md-measure 是 680px）：中文一行 40 字上下最好读，
+     原来没有上限，宽面板下会被拉成一行六七十个字 */
+  max-width: 680px;
+  /* 短文档也要看得出「一页纸」。min() 是为了别在矮面板里硬撑出滚动条。 */
+  min-height: min(420px, 100%);
+  margin: 0 auto;
+  /* 左右内边距跟着容器走：右栏窄（约 480）时固定 44px 会吃掉近两成宽度，
+     宽面板下又不该超过 46px。上下留白固定，那是「纸的天头地脚」。 */
+  padding: 38px clamp(22px, 7%, 46px) 48px;
+  background: var(--codex-paper-card);
+  border: 1px solid var(--codex-line-light);
+  /* 纸片是方角不是药丸 —— 与便利贴代码块同一条原则 */
+  border-radius: 2px;
+  box-shadow: var(--codex-shadow-md);
   color: var(--codex-ink);
-  font-size: 13px;
-  line-height: 1.75;
+  font-family: var(--codex-md-font);
+  font-size: 13.5px;
+  line-height: 1.85;
   word-break: break-word;
 }
+
+/* 纸自己的 padding 已经给了首尾留白，首/末元素别再叠一层 margin */
+.codex-office-doc > *:first-child { margin-top: 0; }
+.codex-office-doc > *:last-child { margin-bottom: 0; }
 
 .codex-office-doc h1,
 .codex-office-doc h2,
@@ -1401,58 +1508,91 @@
 .codex-office-doc h4,
 .codex-office-doc h5,
 .codex-office-doc h6 {
-  margin: 16px 0 8px;
-  line-height: 1.35;
-  font-weight: 600;
+  /* 标题走装饰手写体，与 markdown 标题同一条链；字重交给变量 ——
+     手写体只有 400，写 600 会被浏览器合成粗体糊掉（见 --codex-md-h-weight 注释） */
+  font-family: var(--codex-md-hand);
+  font-weight: var(--codex-md-h-weight);
+  line-height: 1.4;
   color: var(--codex-ink);
 }
 
-.codex-office-doc h1 { font-size: 19px; }
-.codex-office-doc h2 { font-size: 17px; }
-.codex-office-doc h3 { font-size: 15px; }
+/* 标题的间距写进各自的简写里：原来共用的 `margin: 16px 0 8px` 会让 h1 顶在
+   纸的上沿、又和 h2 挤在一起，层级看不出来 */
+.codex-office-doc h1 { font-size: 21px; margin: 0 0 18px; }
+.codex-office-doc h2 { font-size: 17.5px; margin: 26px 0 10px; }
+.codex-office-doc h3 { font-size: 15.5px; margin: 20px 0 8px; }
+/* 四~六级与正文同字号、字重也压回 400，改用强调色区分（与 markdown 同一条取舍） */
 .codex-office-doc h4,
 .codex-office-doc h5,
-.codex-office-doc h6 { font-size: 13.5px; }
-
-.codex-office-doc p { margin: 0 0 9px; }
-.codex-office-doc ul,
-.codex-office-doc ol { margin: 0 0 9px; padding-left: 22px; }
-.codex-office-doc li { margin: 2px 0; }
-.codex-office-doc strong { font-weight: 600; }
-.codex-office-doc em { font-style: italic; }
-.codex-office-doc a { color: var(--codex-accent); }
-
-.codex-office-doc img {
-  max-width: 100%;
-  height: auto;
-  border-radius: 6px;
+.codex-office-doc h6 {
+  font-size: 13.5px;
+  margin: 16px 0 6px;
+  color: var(--codex-accent-deep);
 }
 
+.codex-office-doc p { margin: 0 0 11px; }
+.codex-office-doc ul,
+.codex-office-doc ol { margin: 0 0 11px; padding-left: 24px; }
+.codex-office-doc li { margin: 3px 0; }
+.codex-office-doc strong { font-weight: 600; }
+.codex-office-doc em { font-style: italic; }
+.codex-office-doc a { color: var(--codex-accent-deep); }
+
+/* 图：居中 + 一点纸边。默认的 inline 图会贴着正文左缘，长文档里显得散 */
+.codex-office-doc img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 14px auto;
+  border-radius: 3px;
+  box-shadow: var(--codex-shadow-sm);
+}
+
+/* 引用：与 markdown 的引用块共用「和纸胶带便签」观感（左侧强调条 + 非对称圆角） */
 .codex-office-doc blockquote {
-  margin: 0 0 9px;
-  padding: 2px 0 2px 11px;
-  border-left: 3px solid var(--codex-line);
+  margin: 0 0 12px;
+  padding: 8px 14px;
+  border-left: 3px solid var(--codex-accent);
+  border-radius: 4px 10px 10px 4px;
+  background: var(--codex-tape-blue);
   color: var(--codex-ink-soft);
 }
 
-.codex-office-doc table {
-  width: 100%;
-  margin: 0 0 12px;
-  border-collapse: collapse;
-  font-size: 12px;
+.codex-office-doc hr {
+  margin: 20px 0;
+  border: 0;
+  border-top: 1px dashed var(--codex-line);
 }
 
-.codex-office-doc th,
+/* 表格。**mammoth 不产出 <thead>/<th>** —— 首行也是 <td>，所以表头样式必须挂在
+   `tr:first-child td` 上。原来写在 `th` 上的那两条从来就没生效过：表头一直只有
+   加粗、没有底色（截图里那张表能看出来）。 */
+.codex-office-doc table {
+  width: 100%;
+  margin: 0 0 14px;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+
 .codex-office-doc td {
-  padding: 5px 8px;
+  padding: 7px 10px;
   border: 1px solid var(--codex-line-light);
   text-align: left;
   vertical-align: top;
 }
 
-.codex-office-doc th {
-  background: var(--codex-paper);
+.codex-office-doc tr:first-child td {
+  /* 走 --codex-tape-yellow 而不是写死色值：这是本仓库约定的「主题钩子」之一 ——
+     手账浅色是暖黄、手账深色是暗琥珀、极简浅色是 #f4f4f5、极简深色是 #29292d，
+     四套组合一次覆盖，与 markdown 标题荧光笔用的是同一支色 */
+  background: var(--codex-tape-yellow);
   font-weight: 600;
+  color: var(--codex-ink);
+}
+
+/* 隔行浅底防串行（与 markdown 表格同一条、同一个变量；首行是 odd，不会打架） */
+.codex-office-doc tr:nth-child(even) td {
+  background: var(--panel-bg-surface);
 }
 
 /* ---- Excel：工作表切换 + 网格 ---- */
@@ -1505,14 +1645,14 @@
 
 .codex-office-table {
   border-collapse: collapse;
-  font-size: 11.5px;
+  font-size: 12px;
   font-family: var(--codex-mono);
   color: var(--codex-ink);
 }
 
 .codex-office-table td {
   max-width: 260px;
-  padding: 3px 8px;
+  padding: 5px 10px;
   border: 1px solid var(--codex-line-light);
   white-space: nowrap;
   overflow: hidden;
@@ -1520,11 +1660,19 @@
   vertical-align: top;
 }
 
+/* 首行是表头。原来铺的是 --codex-paper —— 和面板底色**一模一样**，等于没有底色，
+   整张表看上去就是一片网格。换成 --panel-bg-active（四套主题都定义过，且比
+   --panel-bg-surface 深一档），表头才立得起来。 */
 .codex-office-table tr:first-child td {
-  background: var(--codex-paper);
+  background: var(--panel-bg-active);
   font-weight: 600;
   position: sticky;
   top: 0;
+}
+
+/* 隔行浅底：数字表格最容易串行 */
+.codex-office-table tr:nth-child(even) td {
+  background: var(--panel-bg-surface);
 }
 
 .codex-office-truncated {
@@ -1629,6 +1777,9 @@
   min-height: 0;
   display: flex;
   flex-direction: column;
+  /* .md-live-saving-float 要贴在这个容器右上角（它不能进 .md-live —— 那是滚动容器，
+     跟着内容滚走就白做了） */
+  position: relative;
 }
 
 .md-live-status {
@@ -1647,6 +1798,25 @@
   align-items: center;
   gap: 4px;
   color: var(--codex-accent-deep);
+}
+
+/* 「保存中…」做成**不占布局**的浮层。
+   它是个毫秒级的瞬时状态（写本地文件），若走 .md-live-status 那条占位条，
+   一出现/消失就把正文顶下去 ~21px，每存一次抖一下。
+   pointer-events: none 是必须的 —— 它浮在正文右上角，别把点击吃掉。 */
+.md-live-saving-float {
+  position: absolute;
+  top: 6px;
+  right: 14px;
+  z-index: 2;
+  padding: 1px 7px;
+  border-radius: 9px;
+  /* 用**不透明**的 --panel-surface 而不是半透明的 --panel-bg-surface：
+     它浮在正文上方，半透明底会让下面的字透出来糊成一团。
+     --panel-surface 在两套主题 × 明暗四组合下都有定义（纸感 #fffcf3 / #2b241e，
+     极简 #fafafa / #202020）。 */
+  background: var(--panel-surface);
+  pointer-events: none;
 }
 
 .md-live-disabled { color: var(--codex-warm); }
@@ -1722,6 +1892,12 @@
   flex-direction: column;
   align-items: center;
   gap: 4px;
+  /* 必须清掉 .codex-theme 自带的「窗口纸面」（--codex-paper 底色 + 22px 稿纸网格背景图）。
+     本元素是 fixed + translateX(-50%)，宽度由内容撑开，于是它是一个**贴合药丸尺寸的矩形**；
+     而内层药丸是 border-radius: 999px 的圆角胶囊。两者形状不一致，那张矩形纸面就会从
+     **四个角**露出来（用户报的「四个角落有半透明的底色」就是它）。
+     弹层是浮在界面上的东西，不是窗口纸面 —— 这里只用 none，胶囊自己的底色照旧。 */
+  background: none;
 }
 
 .codex-selbubble-pill {
@@ -1817,6 +1993,9 @@
   max-height: calc(100vh - 24px);
   transform: translateX(-50%);
   pointer-events: auto;
+  /* 同 .codex-selbubble：外层矩形不能继承 .codex-theme 的窗口纸面，
+     否则内层 .codex-editcard 的 10px 圆角之外、四个角会露出纸色 + 稿纸网格。 */
+  background: none;
 }
 
 .codex-editcard-overlay.is-above {
@@ -2359,6 +2538,62 @@
   background: transparent;
 }
 
+/* --------------------------------------------------------------------------
+   输入卡片太窄就收起来。**只收输入卡片，消息区照常显示** —— 对话还能读、还能滚、
+   还能选中复制，只是暂时没法发新消息。被右侧栏挤窄时用户最想保住的是「刚才那段
+   回复」，不是输入框。界面上不加任何提示文字。
+
+   ## 为什么是容器查询，而不是一个中栏宽度阈值
+
+   上一版在 TSX 里拿 `.codex-main-body` 的宽度跟一个常量（480）比。问题是：
+   **同一个中栏宽度下，卡片能拿到多少宽度取决于它在哪。**
+
+     消息视图：卡片长在 `.codex-composer-wrap` 里，只吃 16px×2 内边距
+     空状态：  卡片长在 `.codex-chat` → `.codex-empty` 里，多吃两层
+               （`--codex-chat-pad-x` + `.codex-empty` 的 20px，实测共约 119px）
+
+   实测：消息视图 445px 中栏就不折行了，空状态要 **540px** —— 差 95px。
+   所以拿中栏宽度做判据必然顾此失彼：按 480 收，空状态在 480~540 之间还露着一张
+   折行的卡片（用户报的就是这个）。而**折行边界是卡片自己的属性**
+   （卡片可用宽 ≥ 410px 就不折行），那就该量卡片自己的可用宽度。
+
+   `container-type: inline-size` 把输入槽变成「尺寸容器」，`@container` 查询量的
+   是它的**内容盒宽度** = 卡片实际能用的宽度。于是消息视图与空状态各按各的算，
+   阈值只有一个、语义还更准。
+
+   ## 阈值 448 怎么来的（实测）
+
+   `.workbuddy-ai/tmp/scan-empty-composer.mjs` 直接设槽宽、量工具条里那个 `<span>`
+   的高度（单行 16px / 折行 32px，药丸有固定高度所以看药丸本身看不出来）：
+
+     | 模型名 | 字符数 | 最小不折行槽宽 |
+     |---|---|---|
+     | `claude-sonnet-4-5-20250929` | 25 | 410px |
+     | `gemini-3.0-pro-preview-11-2026` | 29 | 430px |
+     | `deepseek-v4-reasoning-preview-2026-09` | 38 | 480px |
+
+   取 **448** = 默认名字的 410 + 38px 余量（约合再长 7~8 个字符的模型名）。
+   仓库里真实在用的模型 id 最长 22 字符（`qwen3-max-thinking`），所以 448 覆盖得住。
+   **注意这个边界会随模型名变长右移**：名字到 36 字符以上就该往上调。
+
+   ## 为什么能安心用 `display: none`
+
+   `container-type: inline-size` 蕴含 `contain: inline-size` —— 容器自身的行内尺寸
+   **与内容无关**。所以收起卡片不可能反过来改变容器的宽度，**结构上就不存在**
+   「收起 → 量到更宽 → 判定不窄 → 又展开」的反馈回路。上一版隐藏的是
+   `.codex-main-body` 自己，那才必须用 `visibility` 保住宽度。
+
+   收的是卡片本体 `.codex-composer`，不是外层的 `.codex-composer-wrap` ——
+   wrap 里还并排挂着预算横幅、子代理条、**提问卡（WorkQuestionCard）**，
+   连 wrap 一起收掉的话，Agent 抛问题让用户选的时候卡片会跟着消失，
+   那是功能故障、不只是不好看。
+   -------------------------------------------------------------------------- */
+@container (max-width: 447px) {
+  .codex-composer {
+    display: none;
+  }
+}
+
 /* 顶栏以下的那条横向带。置顶摘要绝对定位贴在 `.codex-main-col` 右边缘，
    不参与这里的 flex 分配（只留一个 `.codex-main-col` 撑满），
    所以它必须靠 `--codex-pinned-reserve` 让位而不是靠 flex 挤压。 */
@@ -2386,7 +2621,7 @@
   --codex-pinned-w: 0px;
   --codex-pinned-w-expanded: 250px;
   --codex-pinned-reserve: 0px;
-  --codex-sb-w: 10px;
+  --codex-sb-w: 12px;
 
   flex: 1;
   min-width: 0;
@@ -2713,9 +2948,15 @@
   padding: 0 var(--codex-composer-pad-x) 10px;
 }
 
+/* 输入槽。**消息视图与空状态共用这一个类** —— 空状态里它就是 hero 下面那个槽
+   （见 `CodeAgentPageNew.tsx` 的两处 `.codex-composer-inner`）。
+   它同时是「太窄就收起输入卡片」那条容器查询的**尺寸容器**：
+   `container-type: inline-size` 让 `@container` 查询量到它的内容盒宽度，
+   也就是输入卡片实际能用的宽度。详见上面 `@container (max-width: 447px)` 那段注释。 */
 .codex-composer-inner {
   max-width: 780px;
   margin: 0 auto;
+  container-type: inline-size;
 }
 
 .codex-composer {
@@ -3282,6 +3523,20 @@
   letter-spacing: 0.012em;
   color: var(--codex-ink);
   word-break: break-word;
+  /* 关掉「合成粗体」（synthetic bold）。
+     Ma Shan Zheng 在 @font-face 里只声明了 font-weight: 400，所以 strong / 表头
+     写 700 时浏览器会**自己把笔画描粗**：中文勉强能看，拉丁字母会糊成一坨、
+     粗细还忽轻忽重（字母越窄越明显，因为描边宽度是固定的）。
+     这道开关现在**主要保中文**：中文栈里所有族都只有 400，强调改由 strong 的
+     荧光笔底承担 —— 与一二级标题同一套手法，风格一致。
+     西文不受影响，它前移到 Georgia / Times New Roman（自带 700）之后本来就
+     匹配得到真字面，压根轮不到合成 —— 所以 strong 里的英文仍然是真粗体，
+     别把这条当成「把加粗关掉了」。
+     只关 weight 不关 style：em 的斜体同样没有真字形，但合成斜体在 handwriting 上
+     观感尚可，一并关掉会让 *斜* 彻底失去标记，那比轻微失真更糟。
+     极简主题换回无衬线（Segoe UI / PingFang SC / Microsoft YaHei 都有真粗体），
+     不存在合成，这条对它无影响 —— 那边该粗还是真粗。 */
+  font-synthesis-weight: none;
 }
 
 .codex-md > *:first-child { margin-top: 0; }
@@ -3419,12 +3674,17 @@
   color: var(--codex-accent-deep);
 }
 
+/* 便利贴：手账主题下代码块做成「贴在纸上的一张便签」。
+   只动三件事 —— 底色换成暖黄、圆角收方（便签是纸片不是药丸）、抬起一点阴影。
+   头部那条灰带也一并去掉（见下），否则它看着像「带工具栏的窗口」而不是一张纸。
+   极简主题在 MindInspectorThemes.css 里把这几样全部还原。 */
 .codex-md-codeblock {
-  margin: 10px 0 12px;
-  border: 1px solid var(--codex-line);
-  border-radius: 14px;
+  margin: 10px 0 14px;
+  border: 1px solid var(--codex-note-line);
+  border-radius: 3px;
   overflow: hidden;
-  background: var(--codex-paper-card);
+  background: var(--codex-note-bg);
+  box-shadow: var(--codex-note-shadow);
 }
 .codex-md-codeblock-head {
   display: flex;
@@ -3432,15 +3692,19 @@
   justify-content: space-between;
   gap: 8px;
   padding: 3px 6px 3px 12px;
-  background: var(--panel-bg-surface);
-  border-bottom: 1px solid var(--codex-line-light);
+  /* 便签是**一张纸**：头部不铺底色，只留一道暖色细线把语言标签和代码分开。
+     原先的 --panel-bg-surface 灰带会把这张纸切成「工具栏 + 内容」两截，
+     「一张便签」的错觉就没了。复制按钮靠 :hover 自带底色，不需要常驻的带子。 */
+  background: transparent;
+  border-bottom: 1px solid var(--codex-note-line);
 }
 .codex-md-codeblock-lang {
   font-family: var(--codex-mono);
   font-size: 10.5px;
   letter-spacing: 0.6px;
   text-transform: uppercase;
-  color: var(--codex-ink-faint);
+  /* 走便利贴专用的一档（见调色板注释）：直接沿用 --codex-ink-faint 会在暖黄底上掉到 3:1 以下 */
+  color: var(--codex-note-ink-faint);
 }
 .codex-md-codeblock-copy {
   border: none;
@@ -3585,9 +3849,16 @@
 }
 
 .codex-md strong {
+  /* 字重分两路，别把它当成「纸感主题里这条没用」：
+     西文落在 Georgia / Times New Roman，**有真 700 字面**，这条真变粗；
+     中文落在 Ma Shan Zheng，只有 400，且 .codex-md 已关掉合成粗体，这条
+     老实解析到 400 —— 中文的强调全靠下面那道荧光笔底。
+     保留 700 是为了语义正确 + 极简主题（无衬线、有真粗体）该粗就粗。 */
   font-weight: 700;
-  /* 手写体没有粗体字重，浏览器只能合成粗体，笔画会糊；补一道荧光笔底，
-     强调才立得住。极简主题里 tape-yellow 是浅灰，那里就只是一道很淡的底，不突兀。 */
+  /* 纸感主题里**中文的强调全靠这道荧光笔底**：没有字重可用，就把要强调的一段
+     「划」出来 —— 手账里最常见的强调法，和一二级标题的底、便签、胶带是一路的。
+     西文侧真变粗，这道底只是顺带同色（两路共用一条规则，观感一致）。
+     极简主题里 tape-yellow 是浅灰，那里还有真粗体顶着，这道底只是很淡的一层。 */
   background-image: linear-gradient(transparent 58%, var(--codex-tape-yellow) 58%);
   padding: 0 1px;
   border-radius: 2px;
@@ -4355,6 +4626,18 @@
   background: transparent;
   white-space: nowrap;
   flex-shrink: 0;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+/* 未选中页签的悬浮高亮。原先**整条规则都不存在** —— 五个页签在两套主题下
+   悬浮时计算样式一个像素都不变（用户报的「五个 tab 在两种主题下都缺少高亮」）。
+   颜色与紧邻的会话列表行 / 文件树节点同一支纸蓝，层级也一致：比静止态亮、
+   比选中的那一档（实底 `--codex-paper` + 虚线框）轻。
+   `:not(.active)` 是刻意的：选中页签已经有实底 + 虚线框，再叠一层悬浮色会
+   让「当前在哪一页」变得含糊，也会盖掉它与下方内容区连成一片的那道缝。 */
+.codex-inspector-tab:hover:not(.active) {
+  background: rgba(83, 125, 150, 0.07);
+  color: var(--codex-ink-soft);
 }
 
 .codex-inspector-tab.active {
@@ -5332,9 +5615,11 @@
   display: flex;
   flex-direction: column;
   gap: 1px;
-  /* 列表滚动条显式化：默认主题的滑块太淡，容易让人以为这里不能滚 */
-  scrollbar-width: thin;
-  scrollbar-color: var(--panel-scrollbar-hover, rgba(128, 128, 128, 0.4)) transparent;
+  /* 这里原先为了「让滑块显眼一点」声明了 `scrollbar-width: thin` +
+     `scrollbar-color: var(--panel-scrollbar-hover)` —— 但那两行恰恰是滑块太淡的
+     **原因**：声明了标准属性，Chromium 就改用原生滚动条、把本文件里那套
+     `::-webkit-scrollbar` 样式全废掉。现在统一走 `.codex-theme ::-webkit-scrollbar`
+     （12px 胶囊 + `--panel-scrollbar`，比原生细、比原来那版显眼），这里什么都不用写。 */
   border: 1px solid var(--codex-line-light);
   border-radius: 10px;
   background: var(--codex-paper);
@@ -5626,25 +5911,9 @@
   outline-offset: 1px;
 }
 
-.codex-trajectory-table::-webkit-scrollbar {
-  width: 8px;
-}
-
-.codex-trajectory-table::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-.codex-trajectory-table::-webkit-scrollbar-thumb {
-  border: 2px solid transparent;
-  border-radius: 7px;
-  background: var(--panel-scrollbar-hover, rgba(128, 128, 128, 0.4));
-  background-clip: padding-box;
-}
-
-.codex-trajectory-table::-webkit-scrollbar-thumb:hover {
-  background: rgba(128, 128, 128, 0.6);
-  background-clip: padding-box;
-}
+/* 这张表的滚动条不再单开一套：走 `.codex-theme ::-webkit-scrollbar` 的统一样式
+   （原来这里是 8px + `--panel-scrollbar-hover` 当底色，比别处粗一档、颜色也更重，
+   在同一个面板里两种滚动条并排出现，看着像没做完）。 */
 
 .codex-trajectory-vrow {
   position: absolute;
@@ -6519,7 +6788,7 @@
 .codex-pinned {
   position: absolute;
   top: 0;
-  right: var(--codex-sb-w, 10px);
+  right: var(--codex-sb-w, 12px);
   bottom: 0;
   /* 宽度只认祖先的变量（React 写在 `.codex-main-col` 上），收起时它是 0 */
   width: var(--codex-pinned-w, 250px);
@@ -6565,16 +6834,8 @@
   overflow-y: auto;
   overflow-x: hidden;
 }
-.codex-pinned-inner::-webkit-scrollbar {
-  width: 6px;
-}
-.codex-pinned-inner::-webkit-scrollbar-thumb {
-  background: var(--panel-scrollbar);
-  border-radius: 3px;
-}
-.codex-pinned-inner::-webkit-scrollbar-thumb:hover {
-  background: var(--panel-scrollbar-hover);
-}
+/* 置顶摘要内层也不单开滚动条：它只有 250px 宽，原先是 6px / 圆角 3px 的细条，
+   和旁边对话区那套完全不是一个形状。统一走 `.codex-theme ::-webkit-scrollbar`。 */
 
 /* 拖拽调宽期间关掉过渡：主工作区宽度每帧都在变，面板宽度与四处留白也跟着重算，
    不关的话全被缓动拖住，和两侧边栏一样变成「橡皮筋追鼠标」。 */

@@ -177,6 +177,43 @@ const ROUTING_TASKS: { labelKey: string; taskType: string; helpKey: string }[] =
   { labelKey: 'config.routing_asr_polish', taskType: 'asr_polish', helpKey: 'config.routing_asr_polish_help' },
 ];
 
+/** 厂商下的一个嵌入模型（插件 llm-providers 的 embedding-providers.json） */
+interface EmbeddingProviderModelPreset {
+  model: string;
+  /** 默认输出维度，选中模型时自动填入 */
+  dimension: number;
+  /** 单请求 input 数组条数上限（适配器据此分块） */
+  maxBatch?: number;
+  /** 可切换的维度取值，仅作提示 */
+  dimensions?: number[];
+  note?: string;
+}
+
+/** 云端嵌入厂商预设（厂商级：选厂商 → 自动填充端点，模型仍由用户选定） */
+interface EmbeddingProviderPreset {
+  id: string;
+  provider: string;
+  endpoint: string;
+  models: EmbeddingProviderModelPreset[];
+  region?: string;
+  consoleUrl?: string;
+  /** 请求体里下发维度的参数名；缺省表示不下发（服务端维度固定） */
+  dimensionParam?: string;
+  /** 本地服务填任意占位 Key 即可 */
+  needsApiKey?: boolean;
+  recommendedFor?: string;
+  verifiedAt?: string;
+  verifiedSource?: string;
+}
+
+/**
+ * 端点归一化：仅用于「当前配置命中哪个厂商预设」的反查。
+ * 用户可能把 `/embeddings` 后缀一起写进端点（适配器两种写法都接受），比较时要去掉，
+ * 否则明明填的是智谱官方端点却显示成「自定义」。
+ */
+const normalizeEmbeddingEndpoint = (v: string): string =>
+  (v || '').trim().replace(/\/+$/, '').replace(/\/embeddings$/i, '');
+
 /**
  * 服务商预设 - 选中后自动填充 provider_type / endpoint / 默认 model
  *
@@ -2128,7 +2165,7 @@ const AuxRefAudiosDrawer: React.FC<{
   );
 };
 
-/// 快捷键配置抽屉 — 收纳通用页的 6 个快捷键录制器，折叠时只显示标题与已配置数量徽章
+/// 快捷键配置抽屉 — 收纳通用页的 7 个快捷键录制器，折叠时只显示标题与已配置数量徽章
 const ShortcutsDrawer: React.FC<{
   label: string;
   expanded: boolean;
@@ -2244,6 +2281,8 @@ const ConfigWindow: React.FC = () => {
       recommended_for?: string | null;
     }[]
   >([]);
+  // 厂商级云端嵌入预设（插件 llm-providers 贡献）：服务商下拉 + 选中后自动填充端点
+  const [embeddingPresets, setEmbeddingPresets] = useState<EmbeddingProviderPreset[]>([]);
   // Whisper 本地 ASR 服务状态(一键启动/停止 faster-whisper-server)
   const [whisperService, setWhisperService] = useState<WhisperServiceState | null>(null);
   const [whisperServiceBusy, setWhisperServiceBusy] = useState(false);
@@ -2812,6 +2851,12 @@ const ConfigWindow: React.FC = () => {
       setEmbeddingModels(Array.isArray(models) ? models : []);
     } catch (e) {
       console.warn('查询嵌入模型注册表失败:', e);
+    }
+    try {
+      const presets = await invoke<EmbeddingProviderPreset[]>('get_embedding_provider_presets');
+      setEmbeddingPresets(Array.isArray(presets) ? presets : []);
+    } catch (e) {
+      console.warn('查询嵌入厂商预设失败:', e);
     }
   }, []);
 
@@ -3643,6 +3688,33 @@ const ConfigWindow: React.FC = () => {
     }
   }, [t]);
 
+  /** 公寓快捷键变化处理 */
+  const handleRoomShortcutChange = useCallback(async (shortcut: string): Promise<ConflictResult> => {
+    setNested('base.shortcut_room', shortcut);
+    try {
+      await invoke('set_config', { key: 'base.shortcut_room', value: shortcut });
+      await invoke('save_config');
+      await invoke('update_text_shortcuts');
+      void emit('toast:show', {
+        message: shortcut
+          ? t('toast.shortcut_applied', { shortcut: formatForDisplay(shortcut) })
+          : t('config.shortcut_recorder_idle'),
+        type: 'success',
+        duration: 4000,
+        key: Date.now(),
+      });
+      return { ok: true };
+    } catch (e) {
+      void emit('toast:show', {
+        message: t('toast.shortcut_register_failed', { shortcut: formatForDisplay(shortcut) }),
+        type: 'error',
+        duration: 4000,
+        key: Date.now(),
+      });
+      return { ok: false, reason: 'conflict' };
+    }
+  }, [t]);
+
   // 网络检测 —— 把当前 UI 中（可能尚未保存）的网络设置同步到后端内存配置，
   // 保证检测的就是用户眼前这份配置。真实诊断逻辑在后端 `network::diagnose`，
   // 结果由 NetworkDiagnosisDialog 呈现。
@@ -4030,7 +4102,20 @@ const ConfigWindow: React.FC = () => {
     }
   };
 
-  const tabContent = useMemo(() => {
+  // 页签内容在渲染期直接求值，**不要**再把它包回 useMemo。
+  //
+  // 这一段是个 switch，每个 case 里都会读到组件自己的局部状态——折叠开关
+  // （shortcutsExpanded / *AdvancedOpen）、工具页侧栏（toolSideTab）、各服务的
+  // 轮询结果（whisperService / ollamaModels / fishSpeechService）……而 useMemo
+  // 的依赖数组是手工维护的，谁漏写谁就退化成「点了没反应」「状态不刷新」，
+  // 而且不报错、只在运行时表现为死交互。此前已经靠逐条补依赖救过几次
+  // （见下面的工具页注释），属于必然复发的结构性问题。
+  //
+  // 代价核算：memo 省下的只是「每帧重建这棵元素树」的对象分配开销；真正的成本
+  // 在 React 的 diff 与 DOM 提交，那部分无论有没有 memo 都照样发生，且未变化的
+  // 子树本来就会被 React 自己跳过。所以这里去掉 memo 几乎没有可测的性能损失，
+  // 却能把「漏依赖」这一整类 bug 从根上消掉。
+  const renderTabContent = () => {
     switch (activeTab) {
       case 'general':
         return (
@@ -4085,6 +4170,7 @@ const ConfigWindow: React.FC = () => {
                 get<string>('base.shortcut_chat', ''),
                 get<string>('base.shortcut_settings', ''),
                 get<string>('base.shortcut_memory', ''),
+                get<string>('base.shortcut_room', ''),
               ].filter((v) => !!v).length}
             >
               <ShortcutRecorder
@@ -4126,6 +4212,13 @@ const ConfigWindow: React.FC = () => {
                 onChange={handleMemoryShortcutChange}
                 labelKey="config.field_shortcut_memory"
                 helpKey="config.shortcut_memory_help"
+              />
+              <ShortcutRecorder
+                value={get<string>('base.shortcut_room', 'CommandOrControl+Shift+R')}
+                defaultValue="CommandOrControl+Shift+R"
+                onChange={handleRoomShortcutChange}
+                labelKey="config.field_shortcut_room"
+                helpKey="config.shortcut_room_help"
               />
             </ShortcutsDrawer>
 
@@ -5316,54 +5409,119 @@ const ConfigWindow: React.FC = () => {
             />
 
             {get('memory.embedding.source', 'cloud') === 'cloud' ? (
-              <>
-                <TextField
-                  label={t('config.field_embedding_endpoint')}
-                  value={get('memory.embedding.endpoint', '')}
-                  onChange={(v) => setNested('memory.embedding.endpoint', v)}
-                  placeholder={t('config.ph_embedding_endpoint')}
-                />
-                <TextField
-                  label={t('config.field_api_key')}
-                  type="password"
-                  value={get('memory.embedding.api_key', '')}
-                  onChange={(v) => setNested('memory.embedding.api_key', v)}
-                  placeholder={t('config.ph_api_key')}
-                />
-                <TextField
-                  label={t('config.field_embedding_model')}
-                  value={get('memory.embedding.model', '')}
-                  onChange={(v) => {
-                    setNested('memory.embedding.model', v);
-                    // 命中插件贡献的云端预设时同步填充端点和维度
-                    const known = embeddingModels.find(
-                      (m) => m.source === 'cloud' && m.id === v,
-                    );
-                    if (known) {
-                      setNested('memory.embedding.dimension', known.dimension);
-                      if (known.endpoint) setNested('memory.embedding.endpoint', known.endpoint);
-                    }
-                  }}
-                  placeholder={t('config.ph_embedding_model')}
-                  list="embedding-cloud-models"
-                />
-                <datalist id="embedding-cloud-models">
-                  {embeddingModels
-                    .filter((m) => m.source === 'cloud')
-                    .map((m) => (
-                      <option key={m.id} value={m.id}>
-                        {m.display_name}
-                      </option>
-                    ))}
-                </datalist>
-                <NumberField
-                  label={t('config.field_embedding_dim')}
-                  value={get('memory.embedding.dimension', 1024)}
-                  onChange={(v) => setNested('memory.embedding.dimension', v)}
-                  min={64}
-                  step={64}
-                />
-              </>
+              (() => {
+                const endpoint = get<string>('memory.embedding.endpoint', '');
+                const activePreset = embeddingPresets.find(
+                  (p) =>
+                    normalizeEmbeddingEndpoint(p.endpoint) ===
+                    normalizeEmbeddingEndpoint(endpoint),
+                );
+                // 选中厂商时只列该厂商的模型；「自定义」回退到全部云端模型
+                const modelOptions = activePreset
+                  ? activePreset.models.map((m) => ({
+                      id: m.model,
+                      dimension: m.dimension,
+                      label: m.note ? `${m.model} · ${m.note}` : m.model,
+                    }))
+                  : embeddingModels
+                      .filter((m) => m.source === 'cloud')
+                      .map((m) => ({ id: m.id, dimension: m.dimension, label: m.display_name }));
+                return (
+                  <>
+                    <SelectField
+                      label={t('config.field_embedding_provider')}
+                      value={activePreset?.id ?? 'custom'}
+                      onChange={(v) => {
+                        const picked = embeddingPresets.find((p) => p.id === v);
+                        // 只填端点：模型名与 API Key 由用户决定，维度在选中模型时自动带出
+                        if (picked) setNested('memory.embedding.endpoint', picked.endpoint);
+                      }}
+                      options={[
+                        ...embeddingPresets.map((p) => ({
+                          value: p.id,
+                          label: p.region ? `${p.provider} · ${p.region}` : p.provider,
+                        })),
+                        { value: 'custom', label: t('config.opt_embedding_provider_custom') },
+                      ]}
+                    />
+                    {activePreset && (
+                      <div
+                        style={{
+                          fontSize: 12,
+                          color: 'var(--panel-text-tertiary)',
+                          margin: '-6px 0 14px',
+                          lineHeight: 1.6,
+                        }}
+                      >
+                        {activePreset.recommendedFor}
+                        {activePreset.recommendedFor ? ' · ' : ''}
+                        {activePreset.needsApiKey === false
+                          ? t('config.embedding_provider_no_key')
+                          : t('config.embedding_provider_needs_key')}
+                        {activePreset.models.length > 0 && (
+                          <>
+                            {' · '}
+                            {t('config.embedding_provider_models')}：
+                            {activePreset.models.map((m) => `${m.model}(${m.dimension})`).join('、')}
+                          </>
+                        )}
+                        {activePreset.consoleUrl && (
+                          <>
+                            {' · '}
+                            <a
+                              href={activePreset.consoleUrl}
+                              target="_blank"
+                              rel="noreferrer"
+                              style={{ color: 'var(--panel-accent)' }}
+                            >
+                              {t('config.embedding_provider_console')}
+                            </a>
+                          </>
+                        )}
+                      </div>
+                    )}
+                    <TextField
+                      label={t('config.field_embedding_endpoint')}
+                      value={get('memory.embedding.endpoint', '')}
+                      onChange={(v) => setNested('memory.embedding.endpoint', v)}
+                      placeholder={t('config.ph_embedding_endpoint')}
+                    />
+                    <TextField
+                      label={t('config.field_api_key')}
+                      type="password"
+                      value={get('memory.embedding.api_key', '')}
+                      onChange={(v) => setNested('memory.embedding.api_key', v)}
+                      placeholder={t('config.ph_api_key')}
+                    />
+                    <TextField
+                      label={t('config.field_embedding_model')}
+                      value={get('memory.embedding.model', '')}
+                      onChange={(v) => {
+                        setNested('memory.embedding.model', v);
+                        // 命中预设模型时自动带出维度（维度填错会导致整批请求失败）
+                        const known = modelOptions.find((m) => m.id === v);
+                        if (known) setNested('memory.embedding.dimension', known.dimension);
+                      }}
+                      placeholder={t('config.ph_embedding_model')}
+                      list="embedding-cloud-models"
+                    />
+                    <datalist id="embedding-cloud-models">
+                      {modelOptions.map((m) => (
+                        <option key={m.id} value={m.id}>
+                          {m.label}
+                        </option>
+                      ))}
+                    </datalist>
+                    <NumberField
+                      label={t('config.field_embedding_dim')}
+                      value={get('memory.embedding.dimension', 1024)}
+                      onChange={(v) => setNested('memory.embedding.dimension', v)}
+                      min={64}
+                      step={64}
+                    />
+                  </>
+                );
+              })()
             ) : (
               <>
                 <BrowseTextField
@@ -8096,29 +8254,7 @@ const ConfigWindow: React.FC = () => {
       case 'connections':
         return <ConnectionsPanel />;
     }
-  }, [
-    activeTab,
-    config,
-    ttsConfig,
-    diaryConfig,
-    diaryLoading,
-    saving,
-    saveError,
-    t,
-    handleShortcutChange,
-    detectingLocation,
-    appVersion,
-    osInfo,
-    gptsovitsService,
-    gptsovitsServiceBusy,
-    gptSovitsModels,
-    llmTesting,
-    llmTestResults,
-    // 工具页搜索与清单：搜索词/清单变化需重算工具开关卡片区
-    toolSearch,
-    toolList,
-    workModels,
-  ]);
+  };
 
   return (
     <div
@@ -8330,7 +8466,7 @@ const ConfigWindow: React.FC = () => {
             animation: 'cfg-fade 0.3s cubic-bezier(0.22,0.9,0.28,1)',
           }}
         >
-          {tabContent}
+          {renderTabContent()}
         </div>
       </div>
 

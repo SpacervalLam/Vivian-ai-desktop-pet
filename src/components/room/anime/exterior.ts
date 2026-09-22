@@ -1,54 +1,47 @@
+import { buildApartmentPodium, type PodiumAutoDoor } from './apartmentPodium';
+import { rebuildApartmentArchitecture } from './apartmentArchitecture';
 /**
- * 室外世界层。
+ * 室外世界层（B+ 架构，按到房间的距离分层）。
  *
- * 房间不再是摆在展示底座上的微缩模型，而是站在雨夜街区里——
- * 窗外看到的是真实存在的 3D 世界，不是贴在窗口的一张画。
- *
- * 分层（B+ 架构，按到房间的距离分）：
- *   世界地面  一整张湿沥青，所有层的承载者（本文件 Stage 1）
+ * 分层：
+ *   世界地面  一整张湿沥青，所有层的承载者（Stage 1）
  *   近景街道  真 3D：对面楼 / 路灯 / 湿地反光（Stage 2）
- *   公寓本体  203 所在的这栋四层集合住宅，本文件最大的一块（Stage 2）
- *             单侧开放式外廊 + 东端共用外置折返楼梯的公共交通系统
- *   便利店    街对过的近景主体（Stage 2b）
+ *   公寓本体  四层集合住宅（Stage 2，单侧外廊 + 东端折返楼梯）
+ *   便利店    街对过近景主体（Stage 2b）
  *   中景环带  低模楼群，吃雾（Stage 2）
  *   天空      由 postfx.background 纯色兜底
  *
- * 美术方向（本次整体重做的依据）：
- *   冷蓝灰环境 + 暖黄窗光。建筑一律低饱和冷灰：浅冷灰 / 蓝灰 / 灰褐 /
- *   石墨灰 / 深灰蓝，**不使用大面积米白、象牙白或暖米白**。
- *   墙体是有厚度的混凝土，窗是"墙上的洞"（有窗洞深度、窗框、玻璃、窗台、
- *   中梃、窗帘），不是贴在墙面上的一片色块；阳台是真正挑出墙外的结构
- *   （板 + 戸境板 + 栏杆竖栅 + 排水口 + 竖雨水管），不是画在墙上的线。
- *   树是有层次的简化枝叶，不是圆球低模。
+ * 美术方向：冷蓝灰环境 + 暖黄窗光。建筑一律低饱和冷灰，
+ * 不使用大面积米白 / 象牙白 / 暖米白。墙是有厚度的混凝土；窗是"墙上的洞"
+ * （窗洞深度 + 窗框 + 玻璃 + 窗台 + 中梃 + 窗帘）；阳台是真正挑出墙外的结构；
+ * 树是有层次的简化枝叶，不是圆球低模。
  *
  * 性能约定：整层合批 + 冻结；小件共享几何实例（见 gbox）；
- * 除窗玻璃外不新增透明材质。
+ * 便利店湿地反射使用独立低分辨率逐帧通道；装饰按材质合批。
  */
 
 import * as THREE from 'three';
 import {
   toon, emissive, makeRng, makeCanvas, toTexture,
-  asphaltTexture, sidewalkTexture, plazaStoneTexture, drainGrateTexture, puddlePatchTexture,
-  curbTexture, manholeTexture, nightHorizonTexture,
-  rainGlassTexture, curtainTexture,
+  asphaltTexture, curbTexture, puddlePatchTexture,
+  rainGlassTexture, curtainTexture, doorGrainMap,
 } from './toon';
-import { scaleUV, outlineProp, buildStreetLamp, buildWetGround, buildPuddleRipples, buildEaveDrips, type PoolSpec, type DripEdge } from './props';
+import { scaleUV, outlineProp, buildStreetLamp, buildWetGround, buildPuddleRipples, buildEaveDrips, UNIT_DOOR_TONES, type PoolSpec, type DripEdge } from './props';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
-import type { BoxColliderSpec } from './collider';
+import type { BoxColliderSpec, Collider } from './collider';
+import { dressConvenienceStore } from './storeDetails';
 
 /* ============================================================================
  * 色板：冷灰蓝城市住宅
  * ========================================================================== */
 
 /**
- * 整栋楼不许出现大面积米白 / 象牙白 / 暖黄。
+ * 整栋楼不许出现大面积米白 / 象牙白 / 暖黄；建筑一律低饱和冷灰
+ * （浅冷灰 / 蓝灰 / 灰褐 / 石墨灰 / 深灰蓝），明度压在中低区——
+ * 暖黄窗光、入口照明、便利店、路灯才是画面里唯一的高光，颜色靠明度分层而非色相。
  *
- * 墙体读作"被夜雨打湿的混凝土"：冷灰、蓝灰、灰褐、石墨灰、深灰蓝，
- * 全部低饱和，明度压在中低区——暖黄窗光、入口照明、便利店、路灯才是
- * 画面里唯一的高光。颜色之间靠明度分层，不靠色相（色相一多就花）。
- *
- * 七层以上不同但协调的材质：墙体 / 阳台板 / 栏杆 / 窗框 / 玻璃 / 木材 /
- * 金属 / 植物 / 织物。同层之内也刻意不共用一色（主墙与山墙差一档）。
+ * 不同部位用不同但协调的材质：墙体 / 阳台板 / 栏杆 / 窗框 / 玻璃 / 木材 /
+ * 金属 / 植物 / 织物；同层之内也不共用一色（主墙与山墙差一档）。
  */
 const EXT = {
   /* —— 墙 —— */
@@ -122,7 +115,7 @@ export function buildExteriorGround(): THREE.Group {
   const g = new THREE.Group();
   g.name = 'exterior-ground';
 
-  const SIZE = 170;
+  const SIZE = 360;
   const HX = SIZE / 2;
   // 世界地面：一张大平面，但在地铁竖井口处挖洞——否则这层均匀沥青会把井口封死。
   const shape = new THREE.Shape();
@@ -264,119 +257,8 @@ function buildShrub(
 }
 
 /* ============================================================================
- * Stage 2 — 近景街道层（环带楼群 + 路灯 + 湿地）
+ * Stage 2 — 近景街道层（路灯 + 湿地）
  * ========================================================================== */
-
-/**
- * 布点依据（世界坐标，房间 x -6.2..6.2 / z -5.9..6.3，阳台在南 z4.7..6.3）：
- * 楼群在 25~45m 环带上——它们是城市背景剪影，不是邻居。近景是公寓楼
- * 本体（buildApartmentShell）和街角便利店（Stage 2b）。环带楼高 10~21m，
- * 吃 25%~45% 的雾（fog near14/far70），正好是"隔着雨看城市"的褪色感。
- * 窗灯只铺朝房间的那一面，其余三面画了也永远看不到。
- *
- * face 是"朝房间立面"的法线方向：楼在房间的哪一侧，face 就指向反方向。
- */
-type BuildingSpec = {
-  /** 底面中心 [x, z]（世界坐标） */
-  center: [number, number];
-  /** [宽 w, 高 h, 深 d]，高从地面算起 */
-  size: [number, number, number];
-  color: string;
-  face: 'north' | 'south' | 'east' | 'west';
-  /** 亮灯窗比例，0..1 */
-  lit: number;
-};
-
-/**
- * 环带楼群全部压在冷蓝灰区间内：越远越浅越蓝（空气透视），
- * 近的一档偏石墨灰。它们唯一的职责是给窗外的暖光一个冷色背景。
- */
-const BUILDINGS: BuildingSpec[] = [
-  // 南 —— 远背景剪影（z≥45，退到中景楼后方做纯背景）
-  { center: [-14, 48], size: [9, 18, 7], color: '#26303f', face: 'north', lit: 0.34 },
-  { center: [6, 53], size: [10, 22, 8], color: '#212a3a', face: 'north', lit: 0.3 },
-  { center: [27, 47], size: [8, 15, 7], color: '#2a3346', face: 'north', lit: 0.36 },  // 东移让开中景食堂（18,38）
-  // 东
-  { center: [42, -6], size: [6, 15, 7], color: '#242d40', face: 'west', lit: 0.3 },   // 东移 2m，给共用外楼梯让位
-  { center: [43, 6], size: [5, 11, 6], color: '#28324a', face: 'west', lit: 0.26 },
-  // 西
-  { center: [-40, -4], size: [6, 14, 7], color: '#222b3e', face: 'east', lit: 0.34 },
-  { center: [-43, 7], size: [5, 10, 6], color: '#273045', face: 'east', lit: 0.26 },
-  // 北
-  { center: [-4, -28], size: [8, 17, 6], color: '#252e42', face: 'south', lit: 0.38 },
-  { center: [7, -30], size: [7, 12, 6], color: '#202938', face: 'south', lit: 0.3 },
-];
-
-/** 楼体在哪个轴上面对房间、立面宽度取 w 还是 d、立面外偏距离。 */
-function faceFrame(b: BuildingSpec): { axis: 'x' | 'z'; sign: 1 | -1; width: number; offset: number } {
-  const [w, , d] = b.size;
-  switch (b.face) {
-    case 'north': return { axis: 'z', sign: -1, width: w, offset: d / 2 }; // 面朝 -z
-    case 'south': return { axis: 'z', sign: 1, width: w, offset: d / 2 };  // 面朝 +z
-    case 'east':  return { axis: 'x', sign: 1, width: d, offset: w / 2 };  // 面朝 +x
-    case 'west':  return { axis: 'x', sign: -1, width: d, offset: w / 2 }; // 面朝 -x
-  }
-}
-
-/** 窗灯平面共享一份几何（合批时会各自 clone，这里省的是创建成本）。 */
-const WIN_GEO = new THREE.PlaneGeometry(0.55, 0.8);
-
-function buildBuilding(b: BuildingSpec, rnd: () => number): THREE.Group {
-  const g = new THREE.Group();
-  const [cx, cz] = b.center;
-  const [w, h, d] = b.size;
-
-  // 主体 + 顶部女儿墙（parapet）：matte 默认描边 weight 2（主结构全厚）。
-  // 不投影不收影——阴影相机只罩房间，楼在视锥外，开了也是白算。
-  const bodyMat = toon(b.color);
-  const body = new THREE.Mesh(gbox(w, h, d), bodyMat);
-  body.position.set(cx, h / 2, cz);
-  g.add(body);
-  const parapet = new THREE.Mesh(gbox(w + 0.24, 0.32, d + 0.24), bodyMat);
-  parapet.position.set(cx, h + 0.16, cz);
-  g.add(parapet);
-
-  // 楼顶水箱 / 空调外机：metal 自动 weight 1（次结构细线）。
-  // 观察者俯视时楼顶不能是一片光板，这两个盒子就是俯视剪影的全部内容。
-  const metalMat = toon('#39415a', { finish: 'metal' });
-  const tank = new THREE.Mesh(gbox(1.3, 1.1, 1.3), metalMat);
-  tank.position.set(cx + (rnd() - 0.5) * w * 0.4, h + 0.32 + 0.55, cz + (rnd() - 0.5) * d * 0.4);
-  g.add(tank);
-  const ac = new THREE.Mesh(gbox(0.9, 0.55, 0.7), metalMat);
-  ac.position.set(cx + (rnd() - 0.5) * w * 0.5, h + 0.32 + 0.28, cz + (rnd() - 0.5) * d * 0.5);
-  g.add(ac);
-
-  // 高层的航空障碍灯：夜里城市天际线上最容易被记住的一点点红
-  if (h > 15) {
-    const beacon = new THREE.Mesh(new THREE.SphereGeometry(0.07, 6, 5), emissive('#c9564a'));
-    beacon.position.set(cx, h + 0.32 + 1.18, cz);
-    g.add(beacon);
-  }
-
-  // 窗灯：emissive 默认 weight 0 不描边（黑壳会闷死 bloom），亮度过 bloom
-  // threshold 0.86 自然起光晕。冷暖两种色温混排，熄灯的窗不画——夜里
-  // 暗窗本来就是隐形的，画出来反而糊立面。
-  const ff = faceFrame(b);
-  const warm = emissive('#ffcf96');
-  const cool = emissive('#c9d9f2');
-  const floors = Math.max(1, Math.floor((h - 1.8) / 2.9));
-  const cols = Math.max(1, Math.floor((ff.width - 1.2) / 1.35));
-  const rotY = ff.axis === 'z' ? (ff.sign === 1 ? 0 : Math.PI) : (ff.sign === 1 ? Math.PI / 2 : -Math.PI / 2);
-  for (let f = 0; f < floors; f++) {
-    for (let c = 0; c < cols; c++) {
-      if (rnd() > b.lit) continue;
-      const win = new THREE.Mesh(WIN_GEO, rnd() < 0.78 ? warm : cool);
-      const u = cols === 1 ? 0 : (c / (cols - 1) - 0.5) * (ff.width - 1.6);
-      const y = 1.9 + f * 2.9;
-      if (ff.axis === 'z') win.position.set(cx + u, y, cz + ff.sign * (ff.offset + 0.012));
-      else win.position.set(cx + ff.sign * (ff.offset + 0.012), y, cz + u);
-      win.rotation.y = rotY;
-      g.add(win);
-    }
-  }
-
-  return g;
-}
 
 /**
  * 近景街道层：对面楼群 + 路灯 + 街道湿地反光。
@@ -390,7 +272,8 @@ function buildBuilding(b: BuildingSpec, rnd: () => number): THREE.Group {
  * threshold 自然起晕；灯下湿地光斑走 buildWetGround 那套现成画法。
  */
 /* ============================================================================
- * 街道断面：建筑 → 人行道 → 路缘 → 车行道 → 排水篦 → 便利店侧人行道
+ * 街道断面常量：建筑 → 人行道 → 路缘 → 车行道 → 排水篦 → 便利店侧人行道
+ * 断面几何已由程序化街区（urbanStreets）铺出；这里只保留本模块共用的边界值。
  * ========================================================================== */
 
 /**
@@ -409,97 +292,6 @@ const SIDE_B_Z1 = 14.0;        // 便利店侧人行道外缘（前厅从 14.0 �
 const CURB_H = 0.14;
 const SURF_Y = -0.008;          // 略高于远处地面(-0.012)，压住它
 
-/**
- * 街道断面几何。整组标 sceneCollideSkip：玩家到不了街道（阳台栏杆拦着），
- * 且合批前收集碰撞时整组跳过，避免把街道变成一片挡人地板。
- * 全部按上面的常量落到世界坐标，公寓 / 便利店 / 相机 / 灯光一律不动。
- */
-function buildStreetSurface(): THREE.Group {
-  const g = new THREE.Group();
-  g.name = 'street-surface';
-  g.userData.sceneCollideSkip = true;
-
-  const roadMat = toon('#ffffff', { map: asphaltTexture(), finish: 'wet' });
-  // 人行道：城市广场石砖（赛璐璐硬边铺装），读起来是人行广场而非光混凝土
-  const walkMat = toon('#ffffff', { map: plazaStoneTexture(), finish: 'wet' });
-  const curbMat = toon('#ffffff', { map: curbTexture(), finish: 'wet' });
-  const grateMat = toon('#2a2f37', { map: drainGrateTexture() });
-  const lineMat = toon('#aeb6bf');
-  const manholeMat = toon('#ffffff', { map: manholeTexture(), finish: 'metal' });
-
-  const cx = (STREET_X0 + STREET_X1) / 2;
-  const w = STREET_X1 - STREET_X0;
-
-  const flat = (ww: number, dd: number, mat: THREE.Material, x: number, z: number, y = SURF_Y) => {
-    const geo = new THREE.PlaneGeometry(ww, dd);
-    geo.rotateX(-Math.PI / 2);
-    scaleUV(geo, ww / 6, dd / 6);
-    const mesh = new THREE.Mesh(geo, mat);
-    mesh.position.set(x, y, z);
-    mesh.receiveShadow = true;
-    g.add(mesh);
-    return mesh;
-  };
-  const add = (geo: THREE.BufferGeometry, mat: THREE.Material, x: number, y: number, z: number, shadow: 'both' | 'cast' | 'receive' | 'none' = 'both') => {
-    const mesh = new THREE.Mesh(geo, mat);
-    mesh.position.set(x, y, z);
-    mesh.castShadow = shadow === 'both' || shadow === 'cast';
-    mesh.receiveShadow = shadow === 'both' || shadow === 'receive';
-    g.add(mesh);
-    return mesh;
-  };
-  const flatAt = (ww: number, dd: number, mat: THREE.Material, x: number, z: number, y: number) => {
-    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(ww, dd), mat);
-    mesh.rotation.x = -Math.PI / 2;
-    mesh.position.set(x, y, z);
-    g.add(mesh);
-    return mesh;
-  };
-
-  // 两侧人行道
-  flat(w, ROAD_Z0 - APT_ZB, walkMat, cx, (APT_ZB + ROAD_Z0) / 2);
-  flat(w, SIDE_B_Z1 - ROAD_Z1, walkMat, cx, (ROAD_Z1 + SIDE_B_Z1) / 2);
-  // 车行道
-  flat(w, ROAD_Z1 - ROAD_Z0, roadMat, cx, (ROAD_Z0 + ROAD_Z1) / 2);
-
-  // 路缘石：两侧人行道内缘 + 车行道两条边
-  for (const z of [(APT_ZB + ROAD_Z0) / 2, (ROAD_Z1 + SIDE_B_Z1) / 2, ROAD_Z0 + 0.06, ROAD_Z1 - 0.06]) {
-    add(gbox(w, CURB_H, 0.18), curbMat, cx, CURB_H / 2 - 0.01, z, 'both');
-  }
-
-  // 中央虚线（沿 z 横跨车行道）
-  for (let z = ROAD_Z0 + 0.6; z < ROAD_Z1; z += 1.4) {
-    flatAt(0.12, 0.7, lineMat, cx, z, SURF_Y + 0.002);
-  }
-
-  // 排水沟：凹槽 + 格栅（有深度的线性排水系统）
-  const drainMat = toon('#222830');
-  for (const z of [ROAD_Z0 + 0.25, ROAD_Z1 - 0.25]) {
-    // 凹槽底板（下沉 4cm）
-    flatAt(0.40, w, drainMat, cx, z, SURF_Y - 0.04);
-    // 凹槽两壁
-    add(gbox(0.04, 0.045, w), curbMat, cx - 0.22, SURF_Y - 0.018, z, 'none');
-    add(gbox(0.04, 0.045, w), curbMat, cx + 0.22, SURF_Y - 0.018, z, 'none');
-    // 格栅盖板（半透明暗示深度）
-    flatAt(0.40, w, grateMat, cx, z, SURF_Y + 0.002);
-  }
-  // 井盖（带凸起金属边框）
-  const mhRimMat = toon('#3a4149', { finish: 'metal' });
-  for (const [px, pz] of [[-5, 9.5], [6, 11], [0, 8.2]] as Array<[number, number]>) {
-    // 井盖面
-    const mh = new THREE.Mesh(new THREE.CircleGeometry(0.30, 24), manholeMat);
-    mh.rotation.x = -Math.PI / 2;
-    mh.position.set(px, SURF_Y + 0.005, pz);
-    g.add(mh);
-    // 金属边框环
-    const rim = new THREE.Mesh(new THREE.RingGeometry(0.30, 0.36, 24), mhRimMat);
-    rim.rotation.x = -Math.PI / 2;
-    rim.position.set(px, SURF_Y + 0.004, pz);
-    g.add(rim);
-  }
-
-  return g;
-}
 
 /**
  * 局部浅水：只铺在低洼 / 路缘旁 / 排水口附近，不规则、极低不透明度、正常混合
@@ -553,8 +345,8 @@ function buildStreetPuddles(): THREE.Group {
  *                      竖招牌（x≈-5.45..-4.75），地界要让它挑得出去。
  *   z   14.0 .. 25.6   北接便利店侧人行道外缘（SIDE_B_Z1 = 14.0）
  *   出入口  北侧西端 x∈[-19.0,-16.0]。人行道和车行道都只铺到 x=STREET_X0(-16)，
- *           所以口子开在这里不必去动 buildStreetSurface 那几道路缘石——
- *           它们一律只铺 x≥-16，西侧本来就是空地。
+ *           所以口子开在这里不必去动那几道路缘石——它们一律只铺 x≥-16，
+ *           西侧本来就是空地。
  */
 const LOT = {
   x0: -19.0, x1: -5.6,
@@ -870,38 +662,6 @@ export function buildStreetscape(): THREE.Group {
   const g = new THREE.Group();
   g.name = 'exterior-streetscape';
 
-  // 远景改为一整圈环状贴图：不再用四面平面拼接，旋转到四个角落时不会出现
-  // 贴图边缘错位。CylinderGeometry 的 UV 沿圆周连续展开，贴图自身横向可重复，
-  // 场景任意方向都能读到同一套远处城市；它仍不承担碰撞，也不受 fog far 吞掉。
-  const horizonMat = new THREE.MeshBasicMaterial({
-    map: nightHorizonTexture(), transparent: true, opacity: 0.86,
-    depthWrite: false, side: THREE.DoubleSide, fog: false,
-  });
-  const horizon = new THREE.Mesh(
-    new THREE.CylinderGeometry(78, 78, 42, 128, 1, true),
-    horizonMat,
-  );
-  horizon.name = 'night-horizon-ring';
-  // 必须显式标 noCollide：它是半径 78m 的整圈幕布，AABB 是 156×42×156 的实体块。
-  // 场景遍历补碰撞（buildSceneColliders）只看标记和透明度，而它 opacity=0.86 不算
-  // 半透明、又不带任何跳过标记 → 会被收成一个包住整张地图的巨型盒，玩家在任何位置
-  // 都判定撞墙，第一人称 WASD 全失效。
-  horizon.userData.noCollide = true;
-  horizon.position.set(0, 16, 0);
-  horizon.renderOrder = -5;
-  g.add(horizon);
-
-  const rnd = makeRng(20260902);
-  BUILDINGS.forEach((b, i) => {
-    const bg = buildBuilding(b, rnd);
-    // 命名：外景自检要逐栋判相交，组整体 AABB 必然互相包含，判不出东西
-    bg.name = `bldg-${b.face}${i}`;
-    // 远景楼群是窗外景观、玩家到不了；且合批前收集碰撞时，整组标 skip 让遍历跳过
-    // （遍历只收路灯这类该挡人的实体，不放行进景楼群）。
-    bg.userData.sceneCollideSkip = true;
-    g.add(bg);
-  });
-
   // 路灯：公寓侧（z7.4，阳台栏杆 z6.3 外 1.1m）+ 便利店侧（z12.9）两排，
   // 沿整条路每隔 ~7m 一盏；挑臂分别指向 +Z / -Z 悬到车行道上方，灯泡在挑臂
   // 末端 armLen=0.30 处，湿地光斑就铺在它正下方。
@@ -974,9 +734,9 @@ export function buildStreetscape(): THREE.Group {
     { pos: [-12.3, 20.0], size: 6.2, color: '#9fb0c6', opacity: 0.075, rot: -0.08 }
   );
 
-  // 街道断面（人行道 / 路缘 / 车行道 / 排水篦 / 井盖）+ 局部浅水：压在远处蓝地面之上，
-  // 把"一块均匀蓝地板"变成"能读出剖面层次的雨夜街道"。整组已标 sceneCollideSkip。
-  g.add(buildStreetSurface());
+  // 局部浅水：压在远处蓝地面之上，把"一块均匀蓝地板"变成"能读出水面层次的雨夜街道"。
+  // （街道断面本身已由程序化街区 urbanStreets 铺出，这里只补低洼处的积水。）
+  // 整组已标 sceneCollideSkip。
   g.add(buildStreetPuddles());
 
   // 便利店西侧空地 → 露天停车场（5 台位的 コインパーキング）
@@ -1513,6 +1273,12 @@ function rotBoxSpec(
 export type ApartmentShellHandle = {
   group: THREE.Group;
   boxes: BoxColliderSpec[];
+  /**
+   * 南侧入口的自动感应门。它挂在 `group` 之外——这一整棵树会被合批 + 冻结，
+   * 门扇进去就被焊死了。调用方单独 add、单独驱动，且不要描边（与门厅其他
+   * 构件同属 noOutline 的一套）。
+   */
+  autoDoor: PodiumAutoDoor;
 };
 
 export function buildApartmentShell(): ApartmentShellHandle {
@@ -1532,7 +1298,7 @@ export function buildApartmentShell(): ApartmentShellHandle {
     slabDark: toon(EXT.slabDark),                          // 戸境板 / 窗台
     railing: toon(EXT.railing, { finish: 'metal' }),       // 栏杆竖栅：炭灰半哑光金属
     railTop: toon(EXT.railTop, { finish: 'metal' }),       // 扶手
-    frame: toon(EXT.frame),                                // 窗框
+    frame: new THREE.MeshStandardMaterial({color: '#8b897e', roughness: .42, metalness: .3}),                                // 窗框
     glass: toon('#ffffff', { map: glassTexture(), finish: 'glass' }),
     /* 能看进屋里的窗玻璃：finish:'glass' 只给反光和描边权重，真透明得靠
      * transparent + 低 opacity + 关 depthWrite——不关 depthWrite 的话，
@@ -1555,9 +1321,16 @@ export function buildApartmentShell(): ApartmentShellHandle {
     walkFloor: toon('#9aa1a9', { finish: 'wet' }),      // 外廊 / 平台地面：中浅灰防滑、微湿
     gutter: toon('#2c333d'),                            // 排水沟 / 集水口
     trunkWall: toon('#59626e'),                         // 楼梯间储物墙体：深灰混凝土
-    /* —— 住户门的三档差异（同一建筑语言内的"每户不一样"） —— */
-    doorB: toon('#74604a'),                             // 深一档的木门
-    doorC: toon('#515d6b'),                             // 蓝灰门
+    /* —— 住户门的三档（同一建筑语言内的"每户不一样"） ——
+     * 色值取自 props.ts 的 UNIT_DOOR_TONES：三档都压到低明度、彼此拉开色相。
+     * 原先用的是 woodDeep / doorB 两个几乎同色的木棕，暖光把墙（wallAlt 蓝灰）
+     * 也染暖之后，门和墙、门和门之间全糊在一起，一排看过去像同一块板。
+     * 纹理走 doorGrainMap()（白底细纹），三档共用一张图、靠 color 相乘上色。 */
+    doorA: toon(UNIT_DOOR_TONES[0], { map: doorGrainMap() }),  // 胡桃棕
+    doorB: toon(UNIT_DOOR_TONES[1], { map: doorGrainMap() }),  // 炭
+    doorC: toon(UNIT_DOOR_TONES[2], { map: doorGrainMap() }),  // 灰橄榄
+    doorJamb: toon('#39414c'),                          // 户门门套：比窗框再深一档，压在三种门色上都不糊
+    doorTrim: toon('#6b7a86'),                          // 门面压条：三种深色门上都读得出来的中蓝灰
     leaf: toon(EXT.plant),
     leafDeep: toon(EXT.plantDeep),
     leafWarm: toon(EXT.plantWarm),
@@ -1877,7 +1650,7 @@ export function buildApartmentShell(): ApartmentShellHandle {
 
     // 3) 窗框：外框四根 + 一根中竖梃（引違い窗的两扇交界）。
     //    窗框要凸出墙面 2cm，否则从斜角看窗是"陷进去的一个洞"。
-    const fw = 0.05;
+    const fw = 0.036;
     // 已有覆板窗套的洞口（unitFace trim）走 noFrame：外框四根只贴玻璃画，
     // 窗套已在洞口外圈框了一整圈——两圈同色矩形叠着就是那条"多余的框"。
     if (!o.noFrame) {
@@ -1891,7 +1664,7 @@ export function buildApartmentShell(): ApartmentShellHandle {
     }
     // 中竖梃：玻璃窗扇的分界（引違い窗两扇相叠处），不随外框开关——分扇的
     // 暗示在两圈框之争里是干净的，203 自家窗透过玻璃也能看到同款中梃。
-    put(gbox(0.04, h, 0.035), M.frame, x, y, z + dir * 0.01 - dir * 0.008);
+    put(gbox(0.025, h, 0.035), M.frame, x + w * 0.12, y, z + dir * 0.01 - dir * 0.008);
 
     // 4) 窗台：外挑 6cm 的混凝土台 + 下沿一道滴水（水切り）
     if (o.sill !== false) {
@@ -1920,6 +1693,18 @@ export function buildApartmentShell(): ApartmentShellHandle {
    * ======================================================================== */
 
   /** 带洞口的立面覆板：把 x0..x1 × y0..y1 这块墙按洞切成条带（详见 203 段用法） */
+  /**
+   * 覆板切口相对洞口外放的值（米）。
+   *
+   * 覆板不是"一块带洞的板"，是被洞口切成若干实心块拼出来的——每块的**边缘面**
+   * 原本正好落在洞口边界（x=h.a/h.b、y=h.y0/h.y1）上。而房间外壳在同一个位置
+   * 还有一层洞口断面（reveal），两个面**同向、共面**，于是洞口侧壁会 z-fighting：
+   * 203 北窗最明显（那边 `noFrame`，没有窗框挡着断面）。
+   *
+   * 让切口比洞口外放 3mm，覆板洞壁就退到断面外侧、把它整个盖住——洞口的侧壁
+   * 改由覆板呈现，断面只在缝里露 3mm。洞口大 6mm，肉眼无感。
+   */
+  const HOLE_CLEAR = 0.003;
   const facadePanel = (
     x0: number, x1: number, y0: number, y1: number, z: number, thick: number,
     mat: THREE.Material, holes: Array<{ a: number; b: number; y0: number; y1: number }>
@@ -1927,10 +1712,12 @@ export function buildApartmentShell(): ApartmentShellHandle {
     const cuts = [...holes].sort((p, q) => p.a - q.a);
     let cx = x0;
     for (const h of cuts) {
-      if (h.a > cx) put(gbox(h.a - cx, y1 - y0, thick), mat, (cx + h.a) / 2, (y0 + y1) / 2, z);
-      if (h.y0 > y0) put(gbox(h.b - h.a, h.y0 - y0, thick), mat, (h.a + h.b) / 2, (y0 + h.y0) / 2, z);
-      if (y1 > h.y1) put(gbox(h.b - h.a, y1 - h.y1, thick), mat, (h.a + h.b) / 2, (h.y1 + y1) / 2, z);
-      cx = Math.max(cx, h.b);
+      const a = h.a - HOLE_CLEAR, b = h.b + HOLE_CLEAR;
+      const hy0 = h.y0 - HOLE_CLEAR, hy1 = h.y1 + HOLE_CLEAR;
+      if (a > cx) put(gbox(a - cx, y1 - y0, thick), mat, (cx + a) / 2, (y0 + y1) / 2, z);
+      if (hy0 > y0) put(gbox(b - a, hy0 - y0, thick), mat, (a + b) / 2, (y0 + hy0) / 2, z);
+      if (y1 > hy1) put(gbox(b - a, y1 - hy1, thick), mat, (a + b) / 2, (hy1 + y1) / 2, z);
+      cx = Math.max(cx, b);
     }
     if (x1 > cx) put(gbox(x1 - cx, y1 - y0, thick), mat, (cx + x1) / 2, (y0 + y1) / 2, z);
   };
@@ -1962,7 +1749,7 @@ export function buildApartmentShell(): ApartmentShellHandle {
     const tz = z + 0.06;
     for (const h of holes) {
       const hy0 = Math.max(h.y0, y0), hy1 = Math.min(h.y1, y1);
-      const fw = 0.05;
+      const fw = 0.036;
       put(gbox(h.b - h.a + fw * 2, fw, 0.05), M.frame, (h.a + h.b) / 2, hy1 + fw / 2, tz);
       put(gbox(h.b - h.a + fw * 2, fw, 0.05), M.frame, (h.a + h.b) / 2, hy0 - fw / 2, tz);
       put(gbox(fw, hy1 - hy0, 0.05), M.frame, h.a - fw / 2, (hy0 + hy1) / 2, tz);
@@ -2186,7 +1973,9 @@ export function buildApartmentShell(): ApartmentShellHandle {
     // 3) 分户隔板：只画西侧那一道，东侧由邻户自己画（避免同一位置叠两片）；
     //    最西端 ux0 === X0 处是山墙，不用补。西侧隔板紧邻卧室，用卧室档。
     if (ux0 !== X0) {
-      put(gbox(0.06, H - GAP * 2, ROOM_D), mBed.wall, ux0 + 0.03, F + H / 2, zMid);
+      // 204 的西侧隔板不能与 203 独立东墙 x=6.2 共面；南北窗后空腔都退开 4cm。
+      const room203Gap = Math.abs(F - F2) < 0.001 && Math.abs(ux0 - 6.2) < 0.001 ? GAP : 0;
+      put(gbox(0.06, H - GAP * 2, ROOM_D), mBed.wall, ux0 + 0.03 + room203Gap, F + H / 2, zMid);
     }
 
     // 4) 家具：中心略偏北，给玻璃面留出身位
@@ -2313,7 +2102,9 @@ export function buildApartmentShell(): ApartmentShellHandle {
 
     // 3) 分户隔板：只画西侧那一道，东侧由邻户自己画；最西端 ux0 === X0 是山墙
     if (ux0 !== X0) {
-      put(gbox(0.06, H - GAP * 2, ROOM_D), mBed.wall, ux0 + 0.03, F + H / 2, zMid);
+      // 204 的西侧隔板不能与 203 独立东墙 x=6.2 共面；南北窗后空腔都退开 4cm。
+      const room203Gap = Math.abs(F - F2) < 0.001 && Math.abs(ux0 - 6.2) < 0.001 ? GAP : 0;
+      put(gbox(0.06, H - GAP * 2, ROOM_D), mBed.wall, ux0 + 0.03 + room203Gap, F + H / 2, zMid);
     }
 
     // 4) 家具：贴后壁摆（底面抬 GAP，与南面同套空气缝，避开与楼板的共面闪面）
@@ -2334,6 +2125,12 @@ export function buildApartmentShell(): ApartmentShellHandle {
    * 立柱 0.055m、竖栅 0.018m / 间距 0.115m。整层楼的阳台从街上看是
    * 同一道密栅栏，而不是 203 一段 + 邻居一段两种节奏——那正是用户截图里
    * 「明显差异」的主因。
+   *
+   * **注意：这里的几何最终会被丢掉。** `apartmentArchitecture.rebuildApartmentArchitecture`
+   * 会遍历所有 `railing-*` 组，用 `Box3.setFromObject` 量出它的位置和尺寸，
+   * 然后 `child.clear()` 清空、按量出来的尺寸用木格栅重建一遍。所以这里建出来的
+   * 竖栅只用于**定义包围盒**，一个三角形都不会进最终场景——想省三角形得改
+   * apartmentArchitecture.ts 那边（见 `cedar-balustrade` 的注释），改这里没用。
    */
   const railing = (x0: number, x1: number, F: number, z: number) => {
     const rg = new THREE.Group();
@@ -2356,7 +2153,7 @@ export function buildApartmentShell(): ApartmentShellHandle {
       add(gbox(0.055, RH, 0.055), M.railing, px, F + RH / 2, z);
     }
     // 竖栅：与 203 完全同规格（间距 0.115 / 杆径 0.018 / 杆高 RH-0.1），
-    // 共享几何一次创建、整层楼几百根复用——合批后仍然是一个 draw call。
+    // 共享几何一次创建、整层楼几百根复用。
     for (let px = x0 + 0.14; px < x1 - 0.05; px += 0.115) {
       add(gbox(0.018, RH - 0.1, 0.018), M.railing, px, F + 0.06 + (RH - 0.1) / 2, z);
     }
@@ -2676,7 +2473,7 @@ export function buildApartmentShell(): ApartmentShellHandle {
   // 外轮廓由下面的结构板补回 z=ZF，楼的体量与碰撞盒都不跟着动。
   // 北端也退 ROOM_D：1F 北面是一排小店店面（电玩/面包/拉面/书店/干洗），
   // 退出来的腔由「带洞结构板 + 店内衬 + 低模陈列」填回，与 2~4F 同一套做法。
-  put(gbox(W, F2 - GAP, DEPTHB2), M.wallBase, 0, (F2 - GAP) / 2, CZB2).name = 'apt-ground';
+  // Ground floor is an open lobby; no solid apartment-core infill.
 
   // 2 层：203 居中（外皮归 203 自己的 shell），东西各两户是实心体量。
   // 底/顶离开 F2/F3，内侧面离开 203 山墙（x±6.2）——三处共用标高都是闪面。
@@ -2698,7 +2495,7 @@ export function buildApartmentShell(): ApartmentShellHandle {
    */
   for (const [wx, sx] of [[X0, -1], [X1, 1]] as Array<[number, number]>) {
     // 妻壁（山墙）压深一档：只包 2F~4F（1F 是基座色），顶部微凸出屋面读作压顶
-    put(gbox(0.08, RF - F2 + 0.12, DEPTH), M.wallAlt, wx + sx * 0.04, (F2 + RF + 0.1) / 2, CZ);
+    put(gbox(0.08, RF - F2 + 0.12, DEPTH), M.wallAlt, wx + sx * 0.04, (F2 + RF + 0.1) / 2, CZ).name = 'apt-old-gable-' + sx;
   }
   for (const f of FLOORS) {
     // 各层腰线（幕板）：一条浅色混凝土带，把楼层从立面上读出来
@@ -2708,9 +2505,9 @@ export function buildApartmentShell(): ApartmentShellHandle {
 
   // 屋顶：女儿墙 + 水箱 + 室外机 + 天线
   put(gbox(W + 0.3, 0.45, DEPTH + 0.3), M.slabDry, 0, RF + 0.225, CZ).name = 'apt-roof';
-  put(gbox(1.7, 1.25, 1.7), M.metal, -6.5, RF + 0.45 + 0.62, -0.5);
-  put(gbox(0.9, 0.55, 0.7), M.metal, 4.0, RF + 0.45 + 0.28, 1.2);
-  put(gbox(0.9, 0.55, 0.7), M.metal, 5.1, RF + 0.45 + 0.28, 1.2);
+  put(gbox(1.7, 1.25, 1.7), M.metal, -6.5, RF + 0.45 + 0.62, -0.5).name='apt-old-roof-tank';
+  put(gbox(0.9, 0.55, 0.7), M.metal, 4.0, RF + 0.45 + 0.28, 1.2).name='apt-old-roof-ac1';
+  put(gbox(0.9, 0.55, 0.7), M.metal, 5.1, RF + 0.45 + 0.28, 1.2).name='apt-old-roof-ac2';
   put(new THREE.CylinderGeometry(0.02, 0.03, 1.8, 6), M.metal, 8.5, RF + 1.35, -1.0);
 
   /* ---- 西端外廊尽端：封头栏杆 ----
@@ -2740,14 +2537,14 @@ export function buildApartmentShell(): ApartmentShellHandle {
        * 收到 0.12：木地板 plane 已经占着 y=F 这一层，板顶停在 F-0.01 避开
        * 共面闪面；板底 F-0.13 与邻户的 F-0.14 只差 1cm，仰视读不出台阶。 */
       if (fi === 0 && ui === 2) {
-        put(gbox(uw, 0.12, ZB - ZF), M.slab, ucx, F - 0.07, (ZF + ZB) / 2);
+        put(gbox(uw - GAP * 2, 0.12, ZB - ZF), M.slab, ucx, F - 0.07, (ZF + ZB) / 2);
         put(gbox(0.16, 0.03, 0.16), M.dark, ux1 - 0.35, F - 0.005, ZB - 0.35);
         continue;
       }
 
       /* —— 阳台结构 —— */
       // 板：顶面 = 户内地板标高 F，挑出 1.6m。
-      put(gbox(uw, 0.14, ZB - ZF), M.slab, ucx, F - 0.07, (ZF + ZB) / 2);
+      put(gbox(uw - GAP * 2, 0.14, ZB - ZF), M.slab, ucx, F - 0.07, (ZF + ZB) / 2);
       // 排水口：角落一个深色小盒 + 一小截落水管头
       put(gbox(0.16, 0.03, 0.16), M.dark, ux1 - 0.35, F - 0.005, ZB - 0.35);
       // 栏杆
@@ -2759,16 +2556,20 @@ export function buildApartmentShell(): ApartmentShellHandle {
        * 混凝土覆板 + 窗套 + 窗台（unitFace）洞里嵌真窗。 —— */
       const O = (dx: number) => ucx + dx;  // 以 203 洞口坐标为基准、按户中心平移
       // 卧室窗（西腰窓）独立于客厅滑門判定：亮暗、是否拉帘都各算各的。
+      // 亮灯档（lit + lamp，能看进屋）从 40% 提到 62%：窗后的低模家具和暖色内衬
+      // 本来就是为"从外面看进去"做的，压在 30% 的亮灯率下等于白做。磨砂 / 拉帘
+      // 仍然保留四分之一——整栋楼不许出现「每户都一样的亮窗」，那是最假的一种假。
       const pickState = (): WinState => {
         const r = rnd();
-        return r < 0.22 ? 'dark' : r < 0.52 ? 'lit' : r < 0.62 ? 'lamp' :
-               r < 0.84 ? 'curtain' : r < 0.95 ? 'frost' : 'ajar';
+        return r < 0.14 ? 'dark' : r < 0.66 ? 'lit' : r < 0.76 ? 'lamp' :
+               r < 0.90 ? 'curtain' : r < 0.96 ? 'frost' : 'ajar';
       };
       const winState = pickState();        // 卧室窗
       const winState2 = pickState();       // 右腰窓（餐厨）
+      // 高窓（窗台高、只看得到上半截）：亮灯档同样提到 56%
       const highState: WinState = (() => {
         const r = rnd();
-        return r < 0.5 ? 'dark' : r < 0.88 ? 'lit' : 'frost';
+        return r < 0.30 ? 'dark' : r < 0.86 ? 'lit' : 'frost';
       })();
       const doorState = pickState();       // 玻璃滑門（客厅主窗）
       const holes = [
@@ -2886,6 +2687,23 @@ export function buildApartmentShell(): ApartmentShellHandle {
     const F = FLOORS[fi];
     // 廊下结构板 + 栏杆（0.75 高的混凝土腰壁 + 上部竖栅）
     put(gbox(CW, 0.14, 1.25), M.slabDry, CX, F - 0.07, ZN - 0.625);
+    /* 4F 外廊顶板 —— 补上顶层外廊缺的天花板。
+     *
+     * 2F/3F 外廊的天花不是单独做的，就是**上一层这块廊板**（板底 F+LVL-0.14）。
+     * 顶层上面没有楼层了，而屋顶亭子的板（`apartmentArchitecture.ts` 的
+     * `roof-slab`，z ∈ [-6.05, 4.85]）只盖到主体量 ZF=4.7 外一点点 —— 外廊
+     * z −7.15..−5.9 里只有最南 0.15m 有遮挡，其余 1.1m 露天。
+     * 实测（`tmp/_probe-balcony-ceiling.mjs`，向北撒竖直射线）4F 五户 **0/7 命中**，
+     * 而 2F/3F 是 7/7。
+     *
+     * 规格照抄各层廊板：CW × 0.14 × 1.25，z 中心 ZN−0.625。标高取 4F + 层高
+     * = 11.8 —— 顶面正好压在 roof-slab 的底面上（两者法线相反、各自背面剔除，
+     * 不构成共面），板底 11.66 ⇒ 4F 外廊净高 2.66m，与 2F/3F 完全同构。
+     * 与南侧阳台顶板（`balcony-top-slab`，顶面同样取 11.8）是同一套标高口径。
+     * 外缘压边见 `apartmentArchitecture.ts` 里新增的 11.8 那道 `rear-corridor-fascia`。 */
+    if (fi === FLOORS.length - 1) {
+      put(gbox(CW, 0.14, 1.25), M.slabDry, CX, F + LVL - 0.07, ZN - 0.625);
+    }
     // 外廊腰壁：0.75 高的混凝土实体 + 上部竖栅，临空边的实体屏障
     put(gbox(CW, 0.75, 0.08), M.slabDark, CX, F + 0.375, ZN - 1.25);
     put(gbox(CW, 0.05, 0.11), M.railTop, CX, F + 1.15, ZN - 1.25);
@@ -2896,7 +2714,7 @@ export function buildApartmentShell(): ApartmentShellHandle {
     // 腰壁 + 竖栅 + 扶手整段一个盒：从廊面 F 到顶扶手上沿 F+1.175，厚 0.11（腰壁 0.08）
     boxes.push(boxSpec(`corridor-rail-${F.toFixed(1)}`, X0 - 0.03, STRS.lx0 + 0.03, F, F + 1.2, ZN - 1.31, ZN - 1.19));
     // 西端封头栏杆：外廊到头了（原"假楼梯间"拆除后补的收头）
-    railRun(X0 + 0.04, F, ZN - 1.22, X0 + 0.04, F, ZN + 0.02);
+    // West corridor end is open to the new lift tower.
 
     // 地面铺装：中浅灰防滑层（微湿）+ 贴墙通长排水沟 + 集水口
     put(gbox(CW - 0.1, PLATE, 1.18), M.walkFloor, CX, F + PLATE / 2, ZN - 0.64);
@@ -2957,6 +2775,18 @@ export function buildApartmentShell(): ApartmentShellHandle {
         windowUnit({ x: -4.7, y: F + 1.625, z: ZN, dir: -1, w: 1.2,  h: 1.45, seeThrough: true, noFrame: true, paneZ: ZN - 0.01, state: 'dark', curtain: false, kind: 2 });
         windowUnit({ x: -0.1, y: F + 1.975, z: ZN, dir: -1, w: 0.8,  h: 0.75, seeThrough: true, noFrame: true, paneZ: ZN - 0.01, state: 'dark', curtain: false, kind: 3 });
         windowUnit({ x: 2.2,  y: F + 1.975, z: ZN, dir: -1, w: 0.8,  h: 0.75, seeThrough: true, noFrame: true, paneZ: ZN - 0.01, state: 'dark', curtain: false, kind: 1 });
+        /* 门扇与门套由房间自己的 buildEntryDoor 画（props.ts），但门旁这一圈配件
+         * 属于外廊的公共视觉语言——这里补齐。少了它，整排 15 扇门看过去只有 203
+         * 这户没有对讲机 / 雨庇 / 门垫，一眼就认出是"没做完的玩家户"。 */
+        {
+          const D203 = 4.95, FACE203 = ZN - 0.155;   // 与邻户同一套坐标口径
+          put(gbox(0.11, 0.17, 0.022), M.tread, D203 + 0.62, F + 1.30, FACE203 + 0.005);   // 对讲机面板
+          put(gbox(0.075, 0.05, 0.008), M.dark, D203 + 0.62, F + 1.355, FACE203 - 0.008);  // 屏幕
+          put(gbox(0.05, 0.016, 0.008), M.frame, D203 + 0.62, F + 1.255, FACE203 - 0.008); // 按键
+          put(gbox(0.98, 0.05, 0.34), M.frame, D203, F + 2.30, FACE203 - 0.175);           // 门楣雨庇
+          put(gbox(0.72, 0.016, 0.4), toon('#3a4250'), D203, F + 0.018, ZN - 0.44);        // 门垫
+          if (rnd() < 0.55) potted(D203 - 0.64, F + PLATE, ZN - 0.42, 500 + fi * 9 + ui);  // 门口盆栽
+        }
         continue; // 正门扇/热水器/户号牌由房间自己的 buildEntryDoor 等负责，跳过邻户那套
       }
 
@@ -2981,20 +2811,62 @@ export function buildApartmentShell(): ApartmentShellHandle {
        * 5 户从东（最靠近东侧楼梯）到西顺序编号 X01..X05：ui=4(东)→01，ui=3→02，
        * ui=2(中)→03，ui=1→04，ui=0(西)→05。2F 中户(ui=2)是玩家自己的 203，
        * 正门/窗由房间自身绘制、此处跳过，故 2F 中户无邻户牌（3F/4F 照常显示 303/403）。 */
-      const doorTones = [M.woodDeep, M.doorB, M.doorC];
+      const doorTones = [M.doorA, M.doorB, M.doorC];
       const unitNum = ['05', '04', '03', '02', '01'][ui];
-      // 门扇 / 门框按新门洞（宽 0.9、高 2.2）给尺寸，门牌挂到门东侧那片墙上
-      put(gbox(0.86, 2.16, 0.06), doorTones[(ui + fi * 2) % 3], doorX, F + 1.08, ZN - 0.03);
-      put(gbox(0.98, 2.24, 0.04), M.frame, doorX, F + 1.12, ZN - 0.005);
-      panel(0.16, 0.09, M.warmPale, doorX + 0.60, F + 2.30, ZN - 0.03, -1);  // 门牌灯
+      /* —— 玄関ドア ——
+       * 覆板厚 0.13、外表面在 ZN-0.155，门洞 0.9×2.2 就开在这块板里。旧做法是
+       * 往洞底贴一块 0.86×2.16 的素板、再垫一块更大的板当"门框"——可那块门框
+       * 落在覆板**内侧**，从外廊根本看不见，于是整扇门读起来就是"墙上开了个洞、
+       * 洞底贴了张纸"：没有门套进深、没有五金、门牌灯还被 13cm 的板埋了。
+       * 这里补成三段结构：
+       *   ① 门套：两侧立梃 + 上槛，外表面比墙面凸 8mm、内表面比覆板内表面再深
+       *      7mm，把洞口侧壁整个包住，给洞口一道看得见的收口；
+       *   ② 门扇：比净开口小 1.2cm 嵌在门套里，门面上加两道竖向压条分成三块
+       *      （玄関ドア的典型分格），再补猫眼与杠杆把手；
+       *   ③ 门旁对讲机 + 门楣雨庇：日式集合住宅的识别性细节，把"这是一户人家"
+       *      和"这是一排预制板"区分开。
+       * 所有贴面件的 z 都按"覆板外表面"起算——忘了这条就会被板埋掉。 */
+      const HOLE_W = 0.9, HOLE_H = 2.2;      // 与 unitFace 的洞口一致
+      const JAMB = 0.055;                    // 门套立梃宽
+      const WALL_FACE = ZN - 0.155;          // 覆板外表面（板厚 0.13、中心 ZN-0.09）
+      const TRIM_FACE = WALL_FACE - 0.008;   // 门套外表面：比墙面凸 8mm，免与覆板共面
+      const SET_IN = 0.145;                  // 门套进深：比覆板厚 1.5cm，洞壁整个盖住
+      const jambHalf = HOLE_W / 2 - JAMB / 2 + 0.005;   // 立梃中心到门心
+      const leafW = HOLE_W - JAMB * 2 + 0.005 - 0.012;  // 门扇宽：净开口再留 1.2cm 缝
+      const leafMat = doorTones[(ui + fi * 2) % 3];
+      const leafZ = WALL_FACE + 0.125;       // 门扇外表面：凹进门套 13.3cm
+      const leafTop = HOLE_H - 0.06;
+      // ① 门套：两侧立梃 + 上槛
+      for (const s of [-1, 1]) {
+        put(gbox(JAMB, HOLE_H + 0.06, SET_IN), M.doorJamb,
+          doorX + s * jambHalf, F + (HOLE_H + 0.06) / 2, TRIM_FACE + SET_IN / 2);
+      }
+      put(gbox(HOLE_W + 0.02, JAMB, SET_IN), M.doorJamb,
+        doorX, F + HOLE_H - JAMB / 2, TRIM_FACE + SET_IN / 2);
+      // ② 门扇本体 + 门面分格 + 五金
+      put(gbox(leafW, leafTop, 0.06), leafMat, doorX, F + leafTop / 2, leafZ + 0.03);
+      for (const s of [-1, 1]) {
+        put(gbox(0.02, leafTop - 0.24, 0.012), M.doorTrim, doorX + s * leafW / 5, F + leafTop / 2, leafZ - 0.004);
+      }
+      put(gbox(0.05, 0.05, 0.018), M.metal, doorX, F + 1.62, leafZ - 0.010);              // 猫眼
+      put(gbox(0.048, 0.15, 0.022), M.metal, doorX + leafW / 2 - 0.055, F + 1.02, leafZ - 0.012);  // 把手底座
+      put(gbox(0.145, 0.032, 0.028), M.metal, doorX + leafW / 2 - 0.145, F + 1.02, leafZ - 0.026); // 杠杆把手
+      // ③ 对讲机 + 雨庇
+      put(gbox(0.11, 0.17, 0.022), M.tread, doorX + 0.62, F + 1.30, WALL_FACE + 0.005);
+      put(gbox(0.075, 0.05, 0.008), M.dark, doorX + 0.62, F + 1.355, WALL_FACE - 0.008);
+      put(gbox(0.05, 0.016, 0.008), M.frame, doorX + 0.62, F + 1.255, WALL_FACE - 0.008);
+      put(gbox(0.98, 0.05, 0.34), M.frame, doorX, F + 2.30, WALL_FACE - 0.175);
+      // 门牌灯 / 户号牌 / 户主牌：一律贴到覆板外表面之外（旧代码把门牌灯放在
+      // ZN-0.03，正好埋在 13cm 厚的板里，外廊上从来就没亮过）
+      panel(0.16, 0.09, M.warmPale, doorX + 0.60, F + 2.30, WALL_FACE - 0.006, -1);  // 门牌灯
       panel(0.19, 0.14, emissive('#d9cfbc', { map: numberPlateTexture(`${fi + 2}${unitNum}`) }),
-        doorX + 0.60, F + 1.88, ZN - 0.165, -1);                              // 户号牌（微背光）
+        doorX + 0.60, F + 1.88, WALL_FACE - 0.012, -1);                              // 户号牌（微背光）
       // 户主牌（表札）：写住户名字——203 是主角 Vivian Nana，其余用常见大模型填充。
       // 贴在户号牌右侧的墙上（dir=-1 朝外廊），与冷灰门牌形成冷暖对比。
       const resident = RESIDENTS[`${fi + 2}${unitNum}`];
       if (resident) {
         panel(0.30, 0.12, emissive('#fff6ea', { map: namePlateTexture(resident) }),
-          doorX + 0.94, F + 1.88, ZN - 0.165, -1);                           // 户主牌（亚克力表札）
+          doorX + 0.94, F + 1.88, WALL_FACE - 0.012, -1);                           // 户主牌（亚克力表札）
       }
       const matTones = ['#3a4250', '#463f37', '#33413b', '#514639'];
       put(gbox(0.72, 0.016, 0.4), toon(matTones[(ui + fi) % 4]), doorX, F + 0.018, ZN - 0.44);  // 门垫
@@ -3004,13 +2876,16 @@ export function buildApartmentShell(): ApartmentShellHandle {
        * 亮不亮由室内材质自己说话，不再贴发光剪影。
        * 三扇状态各自独立随机：整栋楼不许出现「每户都一样的亮窗」，那是最假的
        * 一种假。磨砂档给浴室（走廊侧的私密），半开档只给少数几户。 */
+      /* 北面窗的状态分布。北面是**外廊侧**——玩家每天从这条廊进出，窗里有没有人
+       * 是全楼唯一能被看清的"住人感"来源，所以亮灯档给得比南面还重：lit ≈ 56%。
+       * 剩下的暗 / 磨砂 / 拉帘合计四成多，留出"整栋楼不是复印出来的"那点参差。 */
       const pickNorth = (allowAjar: boolean): WinState => {
         const v = rnd();
         if (allowAjar) {
-          return v < 0.30 ? 'dark' : v < 0.62 ? 'lit' : v < 0.80 ? 'frost' :
-                 v < 0.92 ? 'curtain' : 'ajar';
+          return v < 0.16 ? 'dark' : v < 0.72 ? 'lit' : v < 0.86 ? 'frost' :
+                 v < 0.96 ? 'curtain' : 'ajar';
         }
-        return v < 0.34 ? 'dark' : v < 0.66 ? 'lit' : v < 0.86 ? 'frost' : 'curtain';
+        return v < 0.18 ? 'dark' : v < 0.74 ? 'lit' : v < 0.90 ? 'frost' : 'curtain';
       };
       const bedState = pickNorth(true);    // 卧室大窗：窗台低，是唯一能看进屋的一扇
       const washState = pickNorth(false);  // 洗面所小高窗
@@ -3239,14 +3114,18 @@ export function buildApartmentShell(): ApartmentShellHandle {
     put(gbox(0.82, 2.02, 0.05), M.metal, 31.85, 1.01, za0 + 0.03);        // 深灰钢门
     put(gbox(0.92, 2.12, 0.03), M.dark, 31.85, 1.06, za0 + 0.075);        // 门框
     put(gbox(0.14, 0.03, 0.1), M.warmSoft, 31.85, 2.24, za0 + 0.09);      // 门楣小灯
+    // 配电室北墙碰撞：三段墙 + 闭着的钢门（无开门机制）整面收成一道实墙，禁止穿墙进配电室
+    boxes.push(boxSpec('stair-store-north', 31.12, 32.44, 0, TW, za0 + 0.03 - 0.04, za0 + 0.03 + 0.04));
     // 南墙（带两个通风格栅）
     put(gbox(1.32, TW, 0.08), M.trunkWall, 31.78, TW / 2, zb1 + 0.04);
     for (const vx of [31.52, 32.06]) {
       put(gbox(0.28, 0.2, 0.02), M.dark, vx, 2.1, zb1 + 0.005);
       for (let s = 0; s < 3; s++) put(gbox(0.24, 0.018, 0.03), M.metal, vx, 2.04 + s * 0.06, zb1 - 0.005);
     }
+    boxes.push(boxSpec('stair-store-south', 31.12, 32.44, 0, TW, zb1 + 0.04 - 0.04, zb1 + 0.04 + 0.04));
     // 东墙（设备墙：燃气表一排 + 分电盘）
     put(gbox(0.08, TW, zb1 - za0 - 0.06), M.trunkWall, 32.42, TW / 2, (za0 + zb1) / 2);
+    boxes.push(boxSpec('stair-store-east', 32.42 - 0.04, 32.42 + 0.04, 0, TW, za0 + 0.03, zb1 - 0.03));
     for (let i = 0; i < 4; i++) {
       put(gbox(0.26, 0.36, 0.16), M.metal, 32.53, 1.32, -6.26 + i * 0.32);   // 燃气表
       put(gbox(0.2, 0.1, 0.03), M.dark, 32.62, 1.32, -6.26 + i * 0.32);      // 表盘
@@ -3317,7 +3196,7 @@ export function buildApartmentShell(): ApartmentShellHandle {
 
   // 南面：四樘洞口（世界标高 = 室内 y + UNIT_LIFT 3.4）。这些数必须与
   // dormLayout.json 的 south 墙 openings 一一对应，误差走房间布局，不写死猜值。
-  const SOUTH_Z = ZF + 0.155;          // 4.855：覆板外表面与 203 南墙外表面齐平（4.8 + 0.12 - 0.065）
+  const SOUTH_Z = ZF + 0.180;          // 外表面 4.945，比房间外墙 4.92 向外错开 25mm，避免共面
   const TRIM_Z = SOUTH_Z + 0.06;       // 窗套贴在覆板表面外
   const SILL_Z = SOUTH_Z + 0.11;       // 窗台比窗套再外挑 5cm
   const CLAD_T = 0.13;
@@ -3337,7 +3216,7 @@ export function buildApartmentShell(): ApartmentShellHandle {
     { a:  2.00, b:  3.20, y0: 3.85, y1: 5.75 },
     { a:  4.30, b:  5.30, y0: 4.25, y1: 5.75 },
   ]) {
-    const fw = 0.05;
+    const fw = 0.036;
     put(gbox(h.b - h.a + fw * 2, fw, 0.05), M.frame, (h.a + h.b) / 2, h.y1 + fw / 2, TRIM_Z);
     put(gbox(h.b - h.a + fw * 2, fw, 0.05), M.frame, (h.a + h.b) / 2, h.y0 - fw / 2, TRIM_Z);
     put(gbox(fw, h.y1 - h.y0, 0.05), M.frame, h.a - fw / 2, (h.y0 + h.y1) / 2, TRIM_Z);
@@ -3353,495 +3232,24 @@ export function buildApartmentShell(): ApartmentShellHandle {
   // 会与它 z-fighting，而且洞口一旦不是同一套坐标就把窗糊死。本段只管外廊侧的
   // 门牌这类挂件。
   // 户号牌：主角单元是 203，门楣挂 "203"（与邻户牌同款微背光，dir=-1 朝外廊）
-  panel(0.19, 0.14, emissive('#d9cfbc', { map: numberPlateTexture('203') }), 5.41, F2 + 1.78, ZN - 0.165, -1);
+  // 位置对齐邻户那一套（门心 +0.60 / +0.94、高度 +1.88）：203 的门在 x=4.95，
+  // 于是落在 5.55 / 5.89。旧值 5.41 / 5.75 是照老门洞写的，外廊上一排看过去会错位。
+  panel(0.19, 0.14, emissive('#d9cfbc', { map: numberPlateTexture('203') }), 5.55, F2 + 1.88, ZN - 0.165, -1);
   // 户主牌（表札）：203 是主角 Vivian Nana（与邻户牌同款、dir=-1 朝外廊，贴门牌右侧）
-  panel(0.30, 0.12, emissive('#fff6ea', { map: namePlateTexture(RESIDENTS['203']) }), 5.75, F2 + 1.78, ZN - 0.165, -1);
+  panel(0.30, 0.12, emissive('#fff6ea', { map: namePlateTexture(RESIDENTS['203']) }), 5.89, F2 + 1.88, ZN - 0.165, -1);
+  // 门牌灯：邻户户门上方都有这一盏，203 之前漏了
+  panel(0.16, 0.09, M.warmPale, 5.55, F2 + 2.30, ZN - 0.161, -1);
 
-  /* ================= 底层：入口 + 生活设施 =================
-   *
-   * 入口退进到 z4.7 的立面（与上层阳台内缘同一条线），上面就是 2 层的
-   * 阳台板——这是日式公寓最常见的"エントランス在上层阳台的荫里"。
-   * 信箱 / 快递柜 / 表箱 / 消火栓 / 监控全在入口两侧——日式公寓一楼的
-   * "生活前台"全集中在这 12m 里。
-   */
-  // 雨棚 + 檐下暖光灯带（朝下）+ 入口上方的楼层标牌
-  put(gbox(5.6, 0.14, 1.55), M.slabDry, 0, 2.74, ZF + 0.775);
-  flatDown(4.8, 0.34, M.hall, 0, 2.64, ZF + 0.62);
-  put(gbox(5.6, 0.05, 0.05), M.dark, 0, 2.63, ZF + 1.53);   // 雨棚滴水线
-  panel(1.5, 0.26, M.wallDeep, 0, 3.05, ZF + 0.02, 1);      // 楼栋名标牌底
-  panel(1.2, 0.16, M.warmPale, 0, 3.05, ZF + 0.04, 1);      // 标牌（柔光）
-
-  // 自动玻璃双开门 + 门框 + 门禁面板
-  panel(1.8, 2.2, toon('#cfe0ee', { finish: 'glass', transparent: true, opacity: 0.22, depthWrite: false }),
-    0, 1.12, ZF + 0.03, 1);
-  for (const dx of [-0.95, 0.95]) put(gbox(0.09, 2.34, 0.09), M.frame, dx, 1.17, ZF + 0.04);
-  put(gbox(2.08, 0.12, 0.12), M.frame, 0, 2.36, ZF + 0.04);
-  put(gbox(0.16, 0.24, 0.06), M.metal, 1.2, 1.35, ZF + 0.05);
-  panel(0.1, 0.14, M.cool, 1.2, 1.4, ZF + 0.09, 1);
-  // 监控摄像头（雨棚下，朝街）
-  put(gbox(0.12, 0.08, 0.2), toon('#8f97a2'), 2.2, 2.52, ZF + 1.1);
-  put(gbox(0.05, 0.05, 0.03), M.dark, 2.2, 2.5, ZF + 1.2);
-
-  // 信箱柜：一整排格口（入口左）
-  put(gbox(2.8, 1.5, 0.4), toon('#7c8794'), -4.6, 0.85, ZF + 0.22);
-  boxes.push(boxSpec('entrance-mailbox', -6.0, -3.2, 0.10, 1.60, ZF + 0.02, ZF + 0.42));   // 柜体碰撞
-  for (let r = 0; r < 4; r++) {
-    for (let c = 0; c < 6; c++) {
-      panel(0.38, 0.28, toon('#9aa5b1'), -5.75 + c * 0.46, 0.35 + r * 0.34, ZF + 0.43, 1);
-    }
-  }
-  // 快递柜（入口右）：更大的格口 + 操作屏
-  put(gbox(2.2, 1.8, 0.5), toon('#5f6b7d'), 4.6, 0.95, ZF + 0.27);
-  boxes.push(boxSpec('entrance-parcel', 3.5, 5.7, 0.05, 1.85, ZF + 0.02, ZF + 0.52));       // 柜体碰撞
-  for (let r = 0; r < 3; r++) {
-    for (let c = 0; c < 4; c++) {
-      panel(0.42, 0.42, toon('#7d8998'), 3.95 + c * 0.48, 0.45 + r * 0.52, ZF + 0.53, 1);
-    }
-  }
-  panel(0.3, 0.22, M.cool, 5.35, 1.55, ZF + 0.53, 1);
-  // 公告栏（信箱旁）+ 消火栓箱
-  put(gbox(1.0, 1.15, 0.08), M.woodDeep, -6.9, 1.15, ZF + 0.04);
-  boxes.push(boxSpec('entrance-bulletin', -7.4, -6.4, 0.575, 1.725, ZF, ZF + 0.08));  // 公告栏（薄板）
-  for (let i = 0; i < 3; i++) panel(0.24, 0.32, toon('#c3c8ce'), -7.18 + i * 0.28, 1.18, ZF + 0.09, 1);
-  put(gbox(0.5, 0.65, 0.2), toon('#9c5040'), 6.6, 0.55, ZF + 0.12);
-  boxes.push(boxSpec('entrance-hydrant', 6.35, 6.85, 0.225, 0.875, ZF + 0.02, ZF + 0.22));    // 消火栓箱
-  // 电表箱 / 燃气表箱：靠入口的一小排金属箱
-  put(gbox(0.5, 0.6, 0.16), M.metal, -2.6, 1.5, ZF + 0.08);
-  boxes.push(boxSpec('entrance-meter-1', -2.85, -2.35, 1.2, 1.8, ZF, ZF + 0.16));
-  put(gbox(0.42, 0.5, 0.16), M.metal, -2.05, 1.45, ZF + 0.08);
-  boxes.push(boxSpec('entrance-meter-2', -2.26, -1.84, 1.2, 1.7, ZF, ZF + 0.16));
-
-  /* ---- 1F 立面：四户窗 + 入口门厅，窗后都是能看进去的屋子 ----
-   * 1F 的实心体量南端同样退了 ROOM_D（与 2~4F 同一套做法），这里把外皮
-   * 补回 z=ZF 并封成房间：四户各一扇低窗台窗（一半带防盗格栅），中间入口
-   * 段是门厅。玻璃走透明档——从街上能看进屋，"白模 + 一片死玻璃"的观感
-   * 就是从这里来的。这些区域不可到达，一件都不产生碰撞盒。 */
-  const GF = 0;          // 1F 地面标高
-  const GH = F2 - GAP;   // 1F 净高 3.36（比标准层 2.8 高一档）
-  for (let ui = 0; ui < UNITS.length; ui++) {
-    if (ui === 2) continue;              // 中户是入口门厅，下面单独建
-    const [ux0, ux1] = UNITS[ui];
-    const wx = (ux0 + ux1) / 2;          // 窗落在户中心
-    const gState: WinState = (() => {
-      const r = rnd();
-      return r < 0.22 ? 'curtain' : r < 0.55 ? 'lit' : r < 0.8 ? 'dark' : 'lamp';
-    })();
-    unitInterior({
-      ux0, ux1, F: GF, h: GH,
-      holes: [{ a: wx - 0.575, b: wx + 0.575, y0: 0.53, y1: 2.03 }],
-      lit: gState === 'lit',
-      livFurnish: gState !== 'curtain',
-      cloth: rnd() < 0.5 ? M.rmClothLit : M.rmClothAlt,
-      seed: 7700 + ui,
-      facade: M.wallBase,                // 1F 结构板跟基座同色，读作底层
-      furnish: furnishGroundUnit,        // 1F 只摆窗后那一段
-    });
-    windowUnit({
-      x: wx, y: 1.28, z: ZF, dir: 1, w: 1.15, h: 1.5,
-      state: gState,
-      seeThrough: true, curtain: true,
-    });
-    // 防盗格栅：一半的户有（1 层住户的痕迹），凸出墙面 16cm
-    if (ui % 2 === 0) {
-      for (let b = 0; b < 4; b++) put(gbox(0.03, 1.52, 0.03), M.metal, wx - 0.42 + b * 0.28, 1.28, ZF + 0.16);
-      put(gbox(1.2, 0.03, 0.03), M.metal, wx, 2.0, ZF + 0.16);
-    }
-  }
-
-  /* ---- 入口门厅：整栋楼唯一一处能看进去的公共空间 ----
-   * 自动双开门是透明玻璃（opacity 0.22），后面如果是一整片素墙，从街上
-   * 看就是"门上糊了一块底色"。这里封成一间真的门厅：瓷砖地 + 电梯 +
-   * 楼梯口 + 常明灯 + 消火栓，进出楼的动作才有落点。
-   * 净深只有 0.88m，够放电梯门和一段暗示性的楼梯起步，不需要真楼梯。 */
-  {
-    const ex0 = -6.2, ex1 = 6.2;
-    const ew = ex1 - ex0;
-    const zBack = ZF - ROOM_D, zMid = ZF - ROOM_D / 2;
-    const HM = RM.lit;                   // 门厅恒亮：公共空间不该是黑屋
-    // 门厅地面直接复用外廊那档防滑层：公共空间同一种铺装，雨夜带水的鞋底
-    // 踩上去本来就该是同一块微湿的浅灰（顺带省下一个材质 / 一次 draw call）。
-    const tile = M.walkFloor;
-    // 结构板：外皮补回 z=ZF，中间留自动门的洞（x∈[-1,1]，高 2.22）
-    facadePanel(ex0 + 0.04, ex1 - 0.04, GF + GAP, GH - GAP, ZF - 0.06, 0.12, M.wallBase,
-      [{ a: -1.0, b: 1.0, y0: GF + GAP, y1: 2.22 }]);
-    // 内衬：后壁 / 顶 / 地 / 西侧隔板（东侧那道由 ui=3 的 unitInterior 补）
-    put(gbox(ew - 0.08, GH - GAP * 2, 0.06), HM.wall, 0, GH / 2, zBack + 0.03);
-    put(gbox(ew - 0.08, 0.06, ROOM_D), HM.wall, 0, GH - GAP - 0.03, zMid);
-    put(gbox(ew - 0.08, 0.06, ROOM_D), tile, 0, GF + GAP + 0.03, zMid);
-    put(gbox(0.06, GH - GAP * 2, ROOM_D), HM.wall, ex0 + 0.03, GH / 2, zMid);
-
-    // 电梯：不锈钢双开门 + 门套 + 呼叫面板 + 门上楼层指示灯
-    put(gbox(1.9, 2.5, 0.05), M.frame, -3.0, 1.25, zBack + 0.06);
-    put(gbox(1.6, 2.2, 0.04), M.metal, -3.0, 1.12, zBack + 0.09);
-    put(gbox(0.02, 2.2, 0.02), M.dark, -3.0, 1.12, zBack + 0.115);      // 中缝
-    put(gbox(0.11, 0.26, 0.03), M.metal, -2.0, 1.4, zBack + 0.115);     // 呼叫面板
-    panel(0.26, 0.09, M.cool, -3.0, 2.52, zBack + 0.12, 1);             // 楼层指示灯
-
-    // 楼梯口：四级起步台阶从门口（南，低）往后壁（北，高）抬起 + 单侧扶手。
-    // 净深只有 0.88m，够暗示"上楼的起步"就够了，不做真梯。
-    for (let s = 0; s < 4; s++) {
-      put(gbox(1.5, 0.18, 0.2), tile, 3.4, 0.19 + s * 0.18, zBack + 0.75 - s * 0.2);
-    }
-    put(gbox(1.5, 0.06, 0.18), tile, 3.4, 0.79, zBack + 0.11);          // 接住第四级的休息平台
-    {
-      const rise = 0.72, run = 0.6;                                     // 四级总起高 / 总进深
-      const hand = new THREE.Mesh(gbox(0.045, 0.045, Math.hypot(rise, run)), M.metal);
-      hand.position.set(2.62, 1.45, zBack + 0.45);
-      hand.rotation.x = Math.atan2(rise, run);                          // +z 端（靠门）低
-      g.add(hand);
-      put(gbox(0.05, 1.18, 0.05), M.metal, 2.62, 0.59, zBack + 0.75);   // 南立柱
-      put(gbox(0.05, 1.72, 0.05), M.metal, 2.62, 0.86, zBack + 0.15);   // 北立柱
-    }
-
-    // 常明吸顶灯两盏 + 门内地垫：公共空间永远有人管
-    put(gbox(0.5, 0.06, 0.24), M.warmPale, -1.6, GH - 0.35, zMid + 0.1);
-    put(gbox(0.5, 0.06, 0.24), M.warmPale, 2.2, GH - 0.35, zMid + 0.1);
-    put(gbox(2.0, 0.02, 0.6), M.dark, 0, GAP + 0.07, ZF - 0.7);         // 门内地垫
-    // 门厅消火栓 + 一块通告牌：日式公寓一进门那点"管理感"
-    put(gbox(0.5, 0.65, 0.2), toon('#9c5040'), -5.4, 0.36, zBack + 0.14);
-    put(gbox(0.7, 0.5, 0.03), M.slabDry, 5.2, 1.6, zBack + 0.12);
-  }
-  // 102/104 两户的小庭院：低围栏 + 半开小门，把 1F 与楼上的阳台区分开
-  for (const fcx of [-12.4, 12.4]) {
-    const fz = ZF + 1.25;
-    for (let fx = fcx - 1.15; fx <= fcx + 1.15; fx += 0.575) {
-      if (Math.abs(fx - fcx) < 0.5) continue;   // 门位
-      put(gbox(0.045, 0.55, 0.045), M.stairSteel, fx, 0.275, fz);
-    }
-    put(gbox(2.3, 0.04, 0.04), M.railTop, fcx, 0.5, fz);
-    put(gbox(2.3, 0.04, 0.04), M.railTop, fcx, 0.27, fz);
-    // 半开的庭院小门
-    const ygate = new THREE.Group();
-    for (const gy of [0.06, 0.28, 0.5]) {
-      const bar = new THREE.Mesh(gbox(0.04, 0.04, 0.85), M.stairSteel);
-      bar.position.set(0, gy, 0.42);
-      ygate.add(bar);
-    }
-    const ybar = new THREE.Mesh(gbox(0.04, 0.55, 0.04), M.stairSteel);
-    ybar.position.set(0, 0.28, 0.82);
-    ygate.add(ybar);
-    ygate.position.set(fcx - 0.45, 0, fz);
-    ygate.rotation.y = -0.7;
-    g.add(ygate);
-  }
-
-  /* ================= 1F 北面：一排小店店面（10 间） =================
-   *
-   * 日本公寓楼下沿街一面常是一排小店——每户 12.4m 切成东西两间、各约 6.2m 宽，
-   * 全楼 5 户 = 10 间店面。夜里雨夜从街上走过，橱窗透出来的暖光和招牌是街景
-   * 里最有人气的那一层。1F 体量北端已退 ROOM_D，这里把外皮补回 z=ZN 并封成
-   * 店面：每间一樘大橱窗 + 一扇店门，里头是低模陈列。
-   *
-   * 招牌走 atlas（1 张贴图 10 行），每间用 UV offset 选自己的那行 → 只占 1 个桶。 */
-  const HALF_W = (UNITS[0][1] - UNITS[0][0]) / 2;   // 6.2m：每户半宽 = 一间店面
-  const SHOPS: Array<{
-    kind: number; cx: number; uw: number;
-    winW: number; winY0: number; winY1: number;
-    doorW: number; doorH: number;
-    lit: boolean; cloth: THREE.Material; seed: number;
-  }> = (() => {
-    const arr: Array<typeof SHOPS[number]> = [];
-    // 10 间店面沿 x 均匀排列，店类交错排布让相邻店视觉差异最大化
-    const KINDS = [0, 5, 1, 6, 2, 7, 3, 8, 4, 9];  // 电玩→蜜雪→面包→居酒→拉面→花屋→书店→薬局→干洗→便利
-    const LIT    = [true, true, true, true, true, false, false, true, true, true];
-    const CLOTHS = [M.rmClothLit, M.rmClothAlt, M.rmClothLit, M.rmClothAlt, M.rmClothLit,
-                    M.rmClothAlt, M.rmClothLit, M.rmClothAlt, M.rmClothLit, M.rmClothAlt];
-    let si = 0;
-    for (let ui = 0; ui < UNITS.length; ui++) {
-      const [ux0, ux1] = UNITS[ui];
-      for (const half of [0, 1]) {
-        const cx = half === 0 ? (ux0 + ux0 + HALF_W) / 2 : (ux0 + HALF_W + ux1) / 2;
-        arr.push({
-          kind: KINDS[si], cx,
-          uw: HALF_W - 1.20,   // 店面缩进，每侧留 0.60m 做柱/墙缝（日本小店节奏：~5m 店 + ~1.2m 间距）
-          winW: HALF_W - 2.60,   // 橱窗 = 店面宽 - 门宽 - 边距
-          winY0: 0.45, winY1: 2.40,
-          doorW: 0.9, doorH: 2.30,
-          lit: LIT[si], cloth: CLOTHS[si], seed: 10000 + si * 37,
-        });
-        si++;
-      }
-    }
-    return arr;
-  })();
-  const SIGN_H = 0.36;
-  const SIGN_Y = GH - SIGN_H / 2 - 0.04;
-  const AWN_Y = GH - 0.06;
-  const zBack = ZN + ROOM_D;
-  const zMidN = ZN + ROOM_D / 2;
-  const zCfN = ZN + ROOM_D / 2 + 0.008;   // 店面天花板/地板微量前移，避免与结构板共面
-  const shopMats = M;
-
-  for (const s of SHOPS) {
-    const cx = s.cx;
-    const uw = s.uw;
-    const r = makeRng(s.seed);
-    const HM = s.lit ? RM.lit : RM.dark;
-    // 橱窗居中偏左、门在右
-    const winCx = cx - (s.winW + s.doorW) / 2 + s.winW / 2;
-    const doorCx = cx + (s.winW + s.doorW) / 2 - s.doorW / 2;
-    const ux0 = cx - uw / 2, ux1 = cx + uw / 2;
-    const holes = [
-      { a: winCx - s.winW / 2, b: winCx + s.winW / 2, y0: s.winY0, y1: s.winY1 },
-      { a: doorCx - s.doorW / 2, b: doorCx + s.doorW / 2, y0: 0, y1: s.doorH },
-    ];
-    // 1) 结构板
-    facadePanel(ux0 + 0.04, ux1 - 0.04, GF + GAP, GH - GAP, ZN + 0.06, 0.12, M.wallBase, holes);
-    // 2) 内衬
-    put(gbox(uw - 0.08, GH - GAP * 2, 0.06), HM.wall, cx, GF + GH / 2, zBack - 0.03);
-    put(gbox(uw - 0.08, 0.06, ROOM_D), HM.wall, cx, GF + GH - GAP - 0.03, zCfN);
-    put(gbox(uw - 0.08, 0.06, ROOM_D), HM.floor, cx, GF + GAP + 0.03, zCfN);
-    // 3) 分户隔板（最西端是山墙不画）
-    if (ux0 !== X0) {
-      put(gbox(0.06, GH - GAP * 2, ROOM_D), HM.wall, ux0 + 0.03, GF + GH / 2, zCfN);
-    }
-    // 4) 店内陈列：10 种店各有特色，全复用 M.* 现有桶
-    const atN = (dx: number, dy: number, dz: number) => [cx + dx, GF + dy, zBack - 0.09 - dz] as const;
-    if (s.kind === 0) {
-      // 电玩店：两台街机 + 投币台
-      for (const ax of [-0.8, 0.8]) {
-        put(gbox(0.46, 1.50, 0.56), shopMats.dark, ...atN(ax, 0.75, 0.10));
-        panel(0.32, 0.24, shopMats.cool, cx + ax, GF + 1.50, zBack - 0.10, -1);
-      }
-      put(gbox(1.0, 0.36, 0.44), shopMats.metal, ...atN(0, 0.18, 0.30));
-    } else if (s.kind === 1) {
-      // 面包店：展示柜 + 面包 + 货架
-      put(gbox(s.winW - 0.6, 0.80, 0.46), shopMats.wood, ...atN(-0.3, 0.40, 0.12));
-      put(gbox(s.winW - 0.6, 0.06, 0.48), shopMats.warmPale, ...atN(-0.3, 0.83, 0.12));
-      for (let i = 0; i < 3; i++) put(gbox(0.26, 0.07, 0.20), shopMats.warmPale, ...atN(-0.8 + i * 0.5, 0.86, 0.18));
-      put(gbox(1.2, 1.6, 0.38), shopMats.wood, ...atN(1.6, 0.80, 0.08));
-    } else if (s.kind === 2) {
-      // 拉面店：吧台 + 吧凳 + 食券机 + 暖帘
-      put(gbox(3.0, 0.85, 0.46), shopMats.wood, ...atN(-0.3, 0.43, 0.12));
-      put(gbox(3.0, 0.06, 0.48), shopMats.warmPale, ...atN(-0.3, 0.88, 0.12));
-      for (let i = 0; i < 3; i++) put(gbox(0.34, 0.42, 0.34), shopMats.wood, ...atN(-1.0 + i * 0.7, 0.21, 0.36));
-      put(gbox(0.44, 1.40, 0.28), shopMats.metal, ...atN(1.5, 0.70, 0.08));
-      for (let i = 0; i < 2; i++) put(gbox(0.50, 0.50, 0.03), s.lit ? s.cloth : shopMats.dark, cx - 0.5 + i * 0.55, GF + s.winY0 + 0.28, ZN + 0.10);
-    } else if (s.kind === 3) {
-      // 书店：书架 + 书脊 + 阅读桌
-      put(gbox(2.0, 1.6, 0.32), shopMats.wood, ...atN(-0.3, 0.80, 0.08));
-      const bookMats = [shopMats.rmClothLit, shopMats.rmClothAlt, shopMats.wood, shopMats.woodDeep, shopMats.dark];
-      for (let row = 0; row < 3; row++) for (let col = 0; col < 4; col++)
-        put(gbox(0.32, 0.04, 0.26), bookMats[(row*4+col)%5], ...atN(-1.2 + col*0.45, 0.28 + row*0.45, 0.14));
-      put(gbox(0.8, 0.68, 0.54), shopMats.wood, ...atN(1.6, 0.34, 0.20));
-    } else if (s.kind === 4) {
-      // 干洗店：旋筒 + 挂衣 + 柜台
-      put(gbox(0.06, 1.6, 1.6), shopMats.metal, ...atN(-0.3, 0.80, 0.08));
-      for (let i = 0; i < 4; i++) put(gbox(0.04, 0.02, 0.36), shopMats.metal, ...atN(-0.3 + (i-1.5)*0.20, 1.55, 0.08));
-      put(gbox(0.8, 0.80, 0.46), shopMats.wood, ...atN(1.6, 0.40, 0.12));
-      for (let i = 0; i < 3; i++) put(gbox(0.24, 0.50, 0.04), s.lit ? s.cloth : shopMats.dark, ...atN(-0.3 + (i-1)*0.20, 1.25, 0.15));
-    } else if (s.kind === 5) {
-      // 蜜雪冰城：制冰机 + 操作台 + 菜单灯箱 + 桌椅
-      put(gbox(0.70, 1.20, 0.50), shopMats.metal, ...atN(-1.2, 0.60, 0.10));    // 制冰机
-      put(gbox(1.6, 0.85, 0.46), shopMats.wood, ...atN(0.2, 0.43, 0.12));        // 操作台
-      put(gbox(1.6, 0.06, 0.48), shopMats.warmPale, ...atN(0.2, 0.88, 0.12));
-      panel(0.80, 0.50, shopMats.warmSoft, cx + 1.5, GF + 1.70, ZN + 0.12, -1); // 菜单灯箱
-      // 两张小桌 + 椅
-      for (const tx of [-0.5, 0.8]) { put(gbox(0.50, 0.68, 0.46), shopMats.wood, ...atN(tx, 0.34, 0.32)); put(gbox(0.30, 0.40, 0.30), shopMats.wood, ...atN(tx, 0.20, 0.52)); }
-    } else if (s.kind === 6) {
-      // 居酒屋：吧台 + 酒瓶架 + 红灯笼 + 暖帘
-      put(gbox(2.8, 0.85, 0.46), shopMats.wood, ...atN(-0.2, 0.43, 0.12));
-      put(gbox(2.8, 0.06, 0.48), shopMats.warmPale, ...atN(-0.2, 0.88, 0.12));
-      for (let i = 0; i < 5; i++) put(gbox(0.10, 0.30, 0.10), [shopMats.dark, shopMats.woodDeep, shopMats.rmClothAlt][i%3], ...atN(-1.0 + i*0.45, 1.30, 0.06)); // 酒瓶
-      // 红灯笼
-      put(gbox(0.16, 0.22, 0.16), shopMats.warmSoft, cx - 1.5, GF + 2.00, ZN + 0.14);
-      put(gbox(0.16, 0.22, 0.16), shopMats.warmSoft, cx + 1.5, GF + 2.00, ZN + 0.14);
-      // 暖帘
-      for (let i = 0; i < 2; i++) put(gbox(0.80, 0.60, 0.03), s.lit ? s.cloth : shopMats.dark, cx - 0.4 + i * 0.84, GF + s.winY0 + 0.32, ZN + 0.10);
-    } else if (s.kind === 7) {
-      // 花屋：花桶 + 货架 + 鲜花
-      for (let i = 0; i < 4; i++) {
-        put(gbox(0.22, 0.50, 0.22), shopMats.wood, ...atN(-1.2 + i * 0.55, 0.25, 0.18));
-        put(gbox(0.18, 0.30, 0.18), [shopMats.rmClothLit, shopMats.rmClothAlt, shopMats.leaf, shopMats.leafWarm][i%4], ...atN(-1.2 + i * 0.55, 0.58, 0.18));
-      }
-      put(gbox(1.2, 1.0, 0.36), shopMats.wood, ...atN(1.4, 0.50, 0.08));
-      for (let i = 0; i < 3; i++) put(gbox(0.20, 0.20, 0.20), [shopMats.leaf, shopMats.leafDeep, shopMats.leafWarm][i], ...atN(1.0 + i*0.3, 1.10, 0.10));
-    } else if (s.kind === 8) {
-      // 薬局：药品架 + 柜台 + 绿十字灯
-      put(gbox(2.0, 1.8, 0.32), shopMats.wood, ...atN(-0.2, 0.90, 0.08));
-      for (let row = 0; row < 3; row++) for (let col = 0; col < 4; col++)
-        put(gbox(0.28, 0.08, 0.24), shopMats.warmPale, ...atN(-1.0 + col*0.45, 0.30 + row*0.50, 0.12));
-      put(gbox(0.9, 0.80, 0.46), shopMats.wood, ...atN(1.6, 0.40, 0.12));
-      panel(0.20, 0.20, shopMats.cool, cx + 1.5, GF + 2.10, ZN + 0.12, -1);    // 绿十字灯
-    } else {
-      // コンビニ：货架 + 冷柜 + 收银台
-      put(gbox(1.6, 1.8, 0.36), shopMats.wood, ...atN(-0.6, 0.90, 0.08));      // 货架
-      put(gbox(0.70, 1.6, 0.50), shopMats.metal, ...atN(0.8, 0.80, 0.08));     // 冷柜
-      put(gbox(0.80, 0.85, 0.46), shopMats.wood, ...atN(1.8, 0.43, 0.12));     // 收银台
-      put(gbox(0.26, 0.36, 0.26), shopMats.warmPale, ...atN(-0.6, 0.36, 0.32)); // 杂货堆
-    }
-    // 店内吸顶灯
-    if (s.lit) {
-      put(gbox(0.36, 0.06, 0.36), shopMats.warmPale, cx, GF + GH - GAP - 0.08, zMidN);
-      if (r() < 0.5) put(gbox(0.22, 0.06, 0.22), shopMats.warmPale, cx - 1.0, GF + GH - GAP - 0.08, zMidN);
-    }
-
-    // 5) 招牌：atlas 贴图 + UV offset 选第 kind 行
-    {
-      const signGeo = new THREE.PlaneGeometry(uw - 0.16, SIGN_H);
-      shopSignUV(signGeo, s.kind);
-      const sign = new THREE.Mesh(signGeo, shopMats.shopSign);
-      sign.position.set(cx, SIGN_Y, ZN - 0.02);
-      sign.rotation.y = Math.PI;   // 朝 -Z（外廊 / 街面）
-      g.add(sign);
-    }
-    // 6) 雨棚
-    {
-      const awn = new THREE.Mesh(gbox(uw - 0.08, 0.05, 0.70), shopMats.slabDark);
-      awn.position.set(cx, AWN_Y, ZN - 0.34);
-      awn.rotation.x = 0.06;
-      g.add(awn);
-      flatDown(uw - 0.16, 0.20, shopMats.hall, cx, AWN_Y - 0.02, ZN - 0.60);
-    }
-    // 7) 橱窗玻璃
-    windowUnit({
-      x: winCx, y: (s.winY0 + s.winY1) / 2, z: ZN, dir: -1,
-      w: s.winW, h: s.winY1 - s.winY0,
-      seeThrough: true, curtain: false, noFrame: false,
-      paneZ: ZN - 0.01, state: s.lit ? 'lit' : 'dark', kind: s.kind,
-    });
-    // 8) 店门
-    put(gbox(s.doorW - 0.04, s.doorH - 0.04, 0.05), shopMats.woodDeep, doorCx, GF + s.doorH / 2, ZN - 0.02);
-    put(gbox(s.doorW + 0.04, 0.06, 0.06), shopMats.frame, doorCx, GF + s.doorH, ZN - 0.02);
-    for (const dx of [-s.doorW / 2 - 0.03, s.doorW / 2 + 0.03]) {
-      put(gbox(0.06, s.doorH, 0.06), shopMats.frame, doorCx + dx, GF + s.doorH / 2, ZN - 0.02);
-    }
-    put(gbox(0.04, 0.04, 0.03), shopMats.metal, doorCx + s.doorW / 2 - 0.10, GF + 1.05, ZN - 0.04);
-    if (s.lit) panel(0.10, 0.10, shopMats.warmSoft, doorCx, GF + s.doorH + 0.10, ZN - 0.03, -1);
-  }
-
-  /* ---------------- 自行车棚（入口西侧） ----------------
-   * 平顶棚 + 立柱 + 车轮锁。自行车"整齐但不完全对齐"——每辆的位置、
-   * 朝向、有没有车筐都带一点随机，是住户口味的痕迹。
-   */
-  put(gbox(7.0, 0.08, 2.0), toon('#79828e'), -12.5, 2.0, 7.1);
-  put(gbox(7.1, 0.06, 0.06), M.dark, -12.5, 1.95, 6.12);   // 棚口滴水线
-  for (const px of [-15.8, -12.5, -9.2]) {
-    put(gbox(0.08, 2.0, 0.08), M.metal, px, 1.0, 6.35);
-    put(gbox(0.08, 2.0, 0.08), M.metal, px, 1.0, 7.85);
-  }
-  for (let i = 0; i < 5; i++) {
-    const bxp = -15.0 + i * 1.3 + (makeRng(9100 + i)() - 0.5) * 0.22;
-    const rot = (makeRng(9200 + i)() - 0.5) * 0.24 + (i % 2 === 0 ? 0.04 : -0.05);
-    bike(bxp, 7.06 + (makeRng(9300 + i)() - 0.5) * 0.14, rot, 9400 + i, i % 3 === 0);
-    put(gbox(0.1, 0.05, 0.36), M.pipe, bxp - 0.1, 0.02, 7.32);   // 地面轮挡（锁位）
-  }
-  // 车棚下的监控（朝东看着车）+ 少量积水
-  put(gbox(0.1, 0.07, 0.18), toon('#8f97a2'), -15.6, 1.82, 6.5, Math.PI / 2);
-  put(gbox(0.045, 0.045, 0.03), M.dark, -15.69, 1.82, 6.5, Math.PI / 2);
-  puddle(-13.9, 7.05, 0.75);
-  puddle(-11.1, 7.35, 0.5);
-  puddle(-14.6, 7.5, 0.45);
-
-  /* ---------------- 垃圾分类区（入口东侧：顶棚 + 金属网罩 + 分类桶） ----------------
-   * 体量刻意小、不正对入口：四根钢柱撑一片向内微倾的暗色顶棚，三面
-   * 金属网（细杆读作网），南面敞开做人行。桶按可燃/不可燃/资源分类。
-   */
-  {
-    const gx0 = 10.3, gx1 = 12.9, gz0 = 6.5, gz1 = 8.05;
-    flatUp(gx1 - gx0 + 0.3, gz1 - gz0 + 0.3, toon('#79828e', { finish: 'wet' }), (gx0 + gx1) / 2, 0.006, (gz0 + gz1) / 2);
-    for (const [px, pz] of [[gx0, gz0], [gx1, gz0], [gx0, gz1], [gx1, gz1]] as Array<[number, number]>) {
-      put(gbox(0.09, 2.1, 0.09), M.stairSteel, px, 1.05, pz);
-    }
-    // 顶棚：向内（北）微倾，雨水排进楼侧而不是人行道
-    const roof = new THREE.Mesh(gbox(gx1 - gx0 + 0.5, 0.05, gz1 - gz0 + 0.45), M.slabDark);
-    roof.position.set((gx0 + gx1) / 2, 2.18, (gz0 + gz1) / 2);
-    roof.rotation.x = -0.08;
-    g.add(roof);
-    put(gbox(gx1 - gx0 + 0.5, 0.05, 0.05), M.dark, (gx0 + gx1) / 2, 2.13, gz1 + 0.2);   // 棚口滴水线
-    // 北面（背面）：混凝土矮墙 + 上部金属网
-    put(gbox(gx1 - gx0, 1.05, 0.08), M.trunkWall, (gx0 + gx1) / 2, 0.525, gz0);
-    for (let bx = gx0 + 0.1; bx <= gx1 - 0.1; bx += 0.17) {
-      put(gbox(0.016, 1.0, 0.016), M.stairSteel, bx, 1.6, gz0);
-    }
-    put(gbox(gx1 - gx0, 0.035, 0.035), M.stairSteel, (gx0 + gx1) / 2, 2.08, gz0);
-    put(gbox(gx1 - gx0, 0.035, 0.035), M.stairSteel, (gx0 + gx1) / 2, 1.12, gz0);
-    // 东西两面金属网
-    for (const px of [gx0, gx1]) {
-      for (let bz = gz0 + 0.17; bz <= gz1 - 0.1; bz += 0.17) {
-        put(gbox(0.016, 2.05, 0.016), M.stairSteel, px, 1.025, bz);
-      }
-      put(gbox(0.035, 0.035, gz1 - gz0), M.stairSteel, px, 2.0, (gz0 + gz1) / 2);
-      put(gbox(0.035, 0.035, gz1 - gz0), M.stairSteel, px, 0.35, (gz0 + gz1) / 2);
-    }
-    // 分类桶：可燃 / 不可燃 / 资源——颜色压暗，与整体低饱和一致
-    const binTones = ['#41505f', '#465446', '#4a4a52'];
-    for (let i = 0; i < 3; i++) {
-      const bx = 10.78 + i * 0.68;
-      put(gbox(0.56, 0.8, 0.55), toon(binTones[i]), bx, 0.4, 6.98);
-      put(gbox(0.58, 0.1, 0.57), toon('#5d6570'), bx, 0.85, 6.98);   // 桶盖
-      put(gbox(0.3, 0.05, 0.06), M.dark, bx, 0.92, 6.72);           // 盖把手
-    }
-    // 资源回收筐（开口网筐）+ 两袋收好的垃圾 + 立牌
-    put(gbox(0.52, 0.34, 0.42), toon('#79828c'), 12.5, 0.17, 7.5);
-    put(gbox(0.5, 0.06, 0.4), M.metal, 12.5, 0.4, 7.5);
-    for (const [bxp, c] of [[11.0, '#b9bcc0'], [11.7, '#a8aba6']] as Array<[number, string]>) {
-      const bag = new THREE.Mesh(new THREE.SphereGeometry(0.28, 8, 6), toon(c));
-      bag.scale.set(1, 0.82, 1);
-      bag.position.set(bxp, 0.22, 7.55);
-      g.add(bag);
-    }
-    put(gbox(0.06, 1.1, 0.06), M.metal, 12.75, 0.55, 6.7);
-    put(gbox(0.5, 0.36, 0.03), M.woodDeep, 12.75, 1.0, 6.72);
-    panel(0.36, 0.24, toon('#c3c8ce'), 12.75, 1.02, 6.745, 1);   // 告示纸
-    puddle(11.6, 7.75, 0.5);
-    // 垃圾分类区碰撞：背面矮墙 + 三分类桶（含盖）+ 资源回收筐 + 立牌，各收一个盒
-    boxes.push(boxSpec('trash-backwall', 10.3, 12.9, 0, 1.05, 6.42, 6.58));
-    boxes.push(boxSpec('trash-bins', 10.49, 12.43, 0, 0.95, 6.70, 7.27));
-    boxes.push(boxSpec('trash-basket', 12.24, 12.76, 0, 0.46, 7.29, 7.71));
-    boxes.push(boxSpec('trash-sign', 12.72, 13.0, 0, 1.18, 6.67, 6.74));
-    // 东 / 西两侧 mesh 栅栏：竖杆 + 顶轨，南北向两道，之前漏了碰撞盒
-    boxes.push(boxSpec('trash-fence-w', 10.3 - 0.04, 10.3 + 0.04, 0, 2.1, 6.5, 8.05));
-    boxes.push(boxSpec('trash-fence-e', 12.9 - 0.04, 12.9 + 0.04, 0, 2.1, 6.5, 8.05));
-  }
-
-  /* ---------------- 绿化 ----------------
-   * 全是低饱和的深绿，且刻意不亮：夜里的植物是被路灯和窗光打亮的暗绿块，
-   * 鲜绿会把整个夜景的色温拽跑。
-   */
-  for (const hx of [-7.8, -4.0, 4.0, 7.8]) {
-    g.add(buildShrub(hx, ZB + 0.55, 1.0, 0.62, 0.8, 900 + hx, M));
-  }
-  // 沿 1 层墙面的花壇：一条窄绿化带 + 三丛矮灌木
-  flatUp(9.0, 0.9, toon('#414f3c'), -13.0, 0.006, ZF + 0.55);
-  flatUp(9.0, 0.9, toon('#414f3c'), 13.0, 0.006, ZF + 0.55);
-  for (const hx of [-15.4, -12.6, -10.2]) g.add(buildShrub(hx, ZF + 0.5, 0.7, 0.5, 0.6, 1300 + hx, M));
-  for (const hx of [11.0, 13.2, 15.0]) g.add(buildShrub(hx, ZF + 0.5, 0.7, 0.5, 0.6, 1700 + hx, M));
-  // 两棵小乔木：一棵在自行车棚东，一棵在垃圾区西
-  g.add(buildTree(-8.6, 7.0, 2.9, 4111, M));
-  g.add(buildTree(9.0, 7.3, 2.4, 4222, M));
-  g.add(buildTree(-16.6, 7.2, 2.2, 4333, M));
-  // 楼东侧（山墙与楼梯之间的窄带）：两丛灌木，别让地基直接裸着
-  g.add(buildShrub(31.75, 1.4, 0.8, 0.55, 0.7, 4501, M));
-  g.add(buildShrub(31.7, 3.9, 0.7, 0.5, 0.6, 4502, M));
-  // 草坪条
-  flatUp(3.0, 1.1, toon('#3f5039'), -6.0, 0.006, ZB + 0.5);
-  flatUp(3.0, 1.1, toon('#3f5039'), 6.0, 0.006, ZB + 0.5);
-
-  /* ---------------- 电线杆 + 跨街电线 ----------------
-   * 日式街区最便宜也最有效的标志物。电线用二次贝塞尔下垂，
-   * TubeGeometry 半径 12mm，远看是一道细剪影。
-   */
-  const poleMat = toon('#2c3446');
-  put(new THREE.CylinderGeometry(0.09, 0.12, 7.2, 8), poleMat, -8.2, 3.6, 7.1);
-  put(gbox(1.6, 0.09, 0.09), poleMat, -8.2, 6.6, 7.1); // 横担
-  put(gbox(1.1, 0.08, 0.08), poleMat, -8.2, 6.1, 7.1); // 第二层横担
-  const wireMat = toon('#151a26');
-  const wire = (a: [number, number, number], b: [number, number, number], sag: number) => {
-    const mid = new THREE.Vector3((a[0] + b[0]) / 2, Math.min(a[1], b[1]) - sag, (a[2] + b[2]) / 2);
-    const curve = new THREE.QuadraticBezierCurve3(new THREE.Vector3(...a), mid, new THREE.Vector3(...b));
-    g.add(new THREE.Mesh(new THREE.TubeGeometry(curve, 14, 0.012, 4), wireMat));
-  };
-  // 电线杆 → 公寓山墙两根（入户线）；沿街向西一根，走出画外交代街道纵深。
-  wire([-8.9, 6.6, 7.1], [X0 + 0.1, 6.9, 2.0], 0.5);
-  wire([-7.5, 6.6, 7.1], [X0 + 0.1, 6.5, -2.5], 0.6);
-  wire([-8.2, 6.9, 7.1], [-21.0, 6.2, 7.4], 0.9);
-  wire([-8.2, 6.1, 7.1], [-21.0, 5.6, 7.6], 1.0);
+  // Replace the entire ground-floor frontage and its clutter with a residential podium.
+  const podium = buildApartmentPodium();
+  g.add(podium.group);
+  boxes.push(...podium.boxes);
 
   // 窗玻璃收尾合并：所有 pane 到这里才落进 group（见上方 paneBuf 的说明）
   flushPanes();
 
-  return { group: g, boxes };
+  rebuildApartmentArchitecture(g);
+  return { group: g, boxes, autoDoor: podium.autoDoor };
 }
 
 /* ============================================================================
@@ -3921,19 +3329,19 @@ function goodsStripTexture(seed: number): THREE.Texture {
 let _sign: THREE.Texture | null = null;
 function signTexture(): THREE.Texture {
   if (_sign) return _sign;
-  const { canvas, ctx } = makeCanvas(768, 64);
-  ctx.fillStyle = '#2f7f6b';
-  ctx.fillRect(0, 0, 768, 64);
-  ctx.fillStyle = '#eaf3ef';
-  ctx.fillRect(0, 0, 768, 5);
-  ctx.fillRect(0, 59, 768, 5);
-  ctx.font = 'bold 40px system-ui, "Segoe UI", sans-serif';
-  ctx.textBaseline = 'middle';
-  ctx.fillStyle = '#eef5f2';
-  ctx.fillText('CITY MART', 26, 32);
-  ctx.font = '18px system-ui, "Segoe UI", sans-serif';
-  ctx.fillStyle = '#a9d3c4';
-  ctx.fillText('24h', 660, 32);
+  const { canvas, ctx } = makeCanvas(1536, 128);
+  ctx.fillStyle = '#f1e9d3'; ctx.fillRect(0, 0, 1536, 128);
+  ctx.fillStyle = '#79b3a1'; ctx.fillRect(0, 0, 1536, 10);
+  ctx.fillStyle = '#be8e96'; ctx.fillRect(0, 120, 1536, 8);
+  ctx.strokeStyle = '#426f62'; ctx.lineWidth = 4;
+  ctx.beginPath(); ctx.arc(78, 63, 32, 0, Math.PI * 2); ctx.stroke();
+  ctx.beginPath(); ctx.ellipse(76, 61, 12, 22, -0.5, 0, Math.PI * 2); ctx.stroke();
+  ctx.fillStyle = '#34584f'; ctx.textBaseline = 'middle';
+  ctx.font = 'bold 66px system-ui, sans-serif'; ctx.fillText('CITY MART', 150, 58);
+  ctx.font = '16px system-ui, sans-serif'; ctx.fillText('FRESH FOOD  ·  COFFEE  ·  EVERY DAY', 155, 101);
+  ctx.font = '27px "Yu Gothic", "Meiryo", sans-serif'; ctx.fillText('街角の、ひと休み。', 795, 66);
+  ctx.fillStyle = '#4f8374'; ctx.fillRect(1328, 25, 158, 77);
+  ctx.fillStyle = '#fff4dd'; ctx.font = 'bold 48px system-ui, sans-serif'; ctx.fillText('24h', 1356, 64);
   _sign = toTexture(canvas);
   return _sign;
 }
@@ -3965,9 +3373,9 @@ export const APT_WALL_BOXES: BoxColliderSpec[] = [
   /* —— 南立面 —— */
   // 1F：主体量南墙在 z=4.7。1F 没有阳台（z=6.3 那条线在 1F 是入口前的人行道），
   // 所以这道墙建在真实墙面 APT_ZF，而不是阳台外缘。入口自动玻璃双开门
-  // x∈[-1.0, 1.0]（门扇 1.8m 宽、门框立柱在 ±0.95）处留洞，否则进不了楼。
-  boxSpec('apt-south-1f-w', APT_X0 - SHELL_T, -1.0, 0, FLOORS[0], APT_ZF - SHELL_T, APT_ZF + SHELL_T),
-  boxSpec('apt-south-1f-e', 1.0, APT_X1 + SHELL_T, 0, FLOORS[0], APT_ZF - SHELL_T, APT_ZF + SHELL_T),
+  // 新首层中央 x∈[-1.2, 1.2] 留出 2.4m 入口，门扇停放在两侧。
+  boxSpec('apt-south-1f-w', APT_X0 - SHELL_T, -1.2, 0, FLOORS[0], APT_ZF - SHELL_T, APT_ZF + SHELL_T),
+  boxSpec('apt-south-1f-e', 1.2, APT_X1 + SHELL_T, 0, FLOORS[0], APT_ZF - SHELL_T, APT_ZF + SHELL_T),
   // 2F~4F：阳台外缘屏障在 z=6.3（栏杆线），挡住从阳台走出掉楼。
   // 只从 2F 楼面 FLOORS[0] 起——1F 无阳台，这道屏障不该压到 1F。
   boxSpec('apt-south-up', APT_X0 - SHELL_T, APT_X1 + SHELL_T, FLOORS[0], SHELL_RF, APT_ZB - SHELL_T, APT_ZB + SHELL_T),
@@ -3983,23 +3391,7 @@ export const APT_WALL_BOXES: BoxColliderSpec[] = [
   boxSpec('apt-room-south-2f-e', 6.2 - SHELL_T, APT_X1 + SHELL_T, FLOORS[0], FLOORS[1], APT_ZF - SHELL_T, APT_ZF + SHELL_T),
   boxSpec('apt-room-south-up', APT_X0 - SHELL_T, APT_X1 + SHELL_T, FLOORS[1], SHELL_RF, APT_ZF - SHELL_T, APT_ZF + SHELL_T),
 
-  /* —— 1F 入口门厅：能从自动门进去，但只是个 0.88m 深的浅门厅 ——
-   * 后壁（空腔北界）挡住往里走，两端挡住往邻居家横向走。
-   * 电梯 / 楼梯起步 / 消火栓都是低模陈设，一件都不该能被穿过。 */
-  boxSpec('apt-entry-back', -6.2 + SHELL_T, 6.2 - SHELL_T, 0, FLOORS[0],
-    APT_ZF - APT_ROOM_D - SHELL_T, APT_ZF - APT_ROOM_D + SHELL_T),
-  boxSpec('apt-entry-w', -6.2 - SHELL_T, -6.2 + SHELL_T, 0, FLOORS[0],
-    APT_ZF - APT_ROOM_D - SHELL_T, APT_ZF + SHELL_T),
-  boxSpec('apt-entry-e', 6.2 - SHELL_T, 6.2 + SHELL_T, 0, FLOORS[0],
-    APT_ZF - APT_ROOM_D - SHELL_T, APT_ZF + SHELL_T),
-  // 门厅里玩家真能走到跟前的三件，得挡得住；其余（地垫 / 通告牌 / 扶手立柱）
-  // 一律不进碰撞——它们要么贴地要么细过 5cm，撞上去的观感损失远小于多加的盒。
-  boxSpec('apt-entry-elevator', -3.95, -2.05, 0, 2.5,
-    APT_ZF - APT_ROOM_D, APT_ZF - APT_ROOM_D + 0.14),
-  boxSpec('apt-entry-stair', 2.65, 4.15, 0, 0.85,
-    APT_ZF - APT_ROOM_D + 0.05, APT_ZF - APT_ROOM_D + 0.85),
-  boxSpec('apt-entry-hydrant', -5.65, -5.15, 0, 0.68,
-    APT_ZF - APT_ROOM_D + 0.04, APT_ZF - APT_ROOM_D + 0.24),
+  // Ground-floor lobby walls and furniture are supplied by buildApartmentPodium.
 
   /* —— 北立面 z=-5.9（外廊侧楼背）：挡住从外廊朝楼内走、掉进单元空腔 —— */
   // 203 主门 x∈[4.6, 5.5]（shell.walls.north 的 door 开口）处留洞，整面实心会把主门堵死。
@@ -4015,7 +3407,7 @@ export const APT_WALL_BOXES: BoxColliderSpec[] = [
    *   南端就是 z=4.7，再往南是入口前人行道/空地，不该有墙）；2F~4F 段含阳台进深，
    *   延伸到 APT_ZB（阳台东/西端收头，挡住从阳台东端走出掉楼）。
    *   旧版整段压到 6.3，导致 1F 东南/西南角多出一截空气墙。 —— */
-  boxSpec('apt-west-1f', APT_X0 - SHELL_T, APT_X0 + SHELL_T, 0, FLOORS[0], APT_ZN - SHELL_T, APT_ZF + SHELL_T),
+  // Ground-floor west wall opens into the added lift hall.
   boxSpec('apt-west-up',  APT_X0 - SHELL_T, APT_X0 + SHELL_T, FLOORS[0], SHELL_RF, APT_ZN - SHELL_T, APT_ZB + SHELL_T),
   boxSpec('apt-east-1f',  APT_X1 - SHELL_T, APT_X1 + SHELL_T, 0, FLOORS[0], APT_ZN - SHELL_T, APT_ZF + SHELL_T),
   boxSpec('apt-east-up',  APT_X1 - SHELL_T, APT_X1 + SHELL_T, FLOORS[0], SHELL_RF, APT_ZN - SHELL_T, APT_ZB + SHELL_T),
@@ -4026,8 +3418,29 @@ export type StoreHandle = {
   group: THREE.Group;
   /** 动效部分：已各自描边，add 即可。绝不能冻结——门要滑、灯要闪 */
   dynamic: THREE.Group;
-  /** 每帧更新，t 是从开局累计的秒数（与浮尘同一时基） */
-  update: (t: number) => void;
+  /** 门扇的动态碰撞盒（每扇一个，随门滑动实时更新 min/max）。
+   *  门扇的金属杆件在几何上标了 `userData.noCollide`，`buildSceneColliders` 会跳过它们，
+   *  所以**调用方必须把这个数组 concat 进碰撞表** —— 否则门洞一点碰撞都没有，
+   *  门关着玩家也能直接穿过去。 */
+  doorColliders: Collider[];
+  /** 店面的**声明式**碰撞盒：橱窗玻璃那一整面，门洞处断开。
+   *
+   *  为什么必须声明而不能靠遍历：玻璃是 opacity 0.075 的透明材质，
+   *  `buildSceneColliders` 的「透明跳过」规则会把两片橱窗（共 7.4m 宽）整片放过，
+   *  玩家能从街上直接穿玻璃进店；而玻璃又不能改成不透明材质。
+   *  调用方 `buildBoxColliders(store.boxes)` 接进碰撞表。 */
+  boxes: BoxColliderSpec[];
+  /** 每帧更新，t 是从开局累计的秒数（与浮尘同一时基）。
+   *  playerPos 是玩家（第一人称）或观察者相机的世界坐标，用来驱动感应门；
+   *  不传时按「没人」处理，门保持关闭。 */
+  update: (t: number, wet: boolean, playerPos?: THREE.Vector3) => void;
+  /** 回填碰撞表给街面积水反射面做**遮挡**剔除（见 storeDetails 的 setOccluders）。
+   *
+   *  必须在装配末尾、`fpsColliders` 定稿之后调用：它靠的是**合批之前**逐件收的
+   *  AABB —— 并完之后楼板的 AABB 会跨多层或横跨整条街，认不出"薄板"，判据就废了。
+   *  不调用只是少一层优化（室内看街面时白跑一趟反射），不影响正确性。 */
+  setWetOccluders: (colliders: Collider[]) => void;
+  dispose: () => void;
 };
 
 /* ============================================================================
@@ -4475,10 +3888,10 @@ export function buildConvenienceStore(): StoreHandle {
   const woodTrim = toon(EXT.woodDeep);     // 木质装饰（门框侧板 / 长凳）
   const metal = toon('#3b424e', { finish: 'metal' });   // 框/栏/机壳 → weight 1
   const glassMat = toon('#cfe0ee', {       // 橱窗玻璃：finish glass → weight 0
-    finish: 'glass', transparent: true, opacity: 0.14, depthWrite: false,
+    finish: 'glass', transparent: true, opacity: 0.075, depthWrite: false,
   });
   const glassCold = toon('#dce9f2', {      // 冷饮柜玻璃门
-    finish: 'glass', transparent: true, opacity: 0.2, depthWrite: false,
+    finish: 'glass', transparent: true, opacity: 0.10, depthWrite: false,
   });
   const floorTile = toon('#b6bbc1', { finish: 'soft' });
   const ceilMat = toon('#dfe3e7');
@@ -4539,7 +3952,14 @@ export function buildConvenienceStore(): StoreHandle {
   // 侧面看得出"玻璃盒子嵌在楼里"的层次。
   const FH = ST.zSolid - ST.zFront; // 2.4
   const FZ = (ST.zFront + ST.zSolid) / 2; // 15.2
-  put(bx(ST_W, 0.1, FH), floorTile, ST_CX, 0.05, FZ);
+  /* 地板 / 吊顶比店宽窄 0.28（= 两侧 0.14 侧墙的厚度），正好落在两墙内表面之间。
+   *
+   * 不能做满 ST_W：两侧墙的外表面就在 x0 / x1 上，地板做满宽的话它的 x0 端面与
+   * 西侧墙的外表面**精确共面**，在店面西立面上叠出一条 0.083×2.37 的共面区
+   * （东侧被东山墙的 0.08 厚压边盖住，探针判为不可见，所以只有西侧暴露）。
+   * 收进侧墙厚度之后，地板端面与侧墙内表面背靠背（法线相反），是贴合面不是暴露面。
+   * 吊顶不做同样处理：它 y 2.9..3.0，与侧墙（y 0..2.9）在 y 上刚好相接、没有重叠。 */
+  put(bx(ST_W - 0.28, 0.1, FH), floorTile, ST_CX, 0.05, FZ);
   put(bx(ST_W, 0.1, FH), ceilMat, ST_CX, ST.ceil + 0.05, FZ);
   put(bx(0.14, ST.ceil, FH), wallDark, ST.x0 + 0.07, ST.ceil / 2, FZ);
   put(bx(0.14, ST.ceil, FH), wallDark, ST.x1 - 0.07, ST.ceil / 2, FZ);
@@ -4657,19 +4077,42 @@ export function buildConvenienceStore(): StoreHandle {
   // 贴到 0.015 会整条埋进地板里。
   for (let i = 0; i < 5; i++) flat(0.12, 0.34, guideLine, -0.6, 0.105, 14.5 + i * 0.5);
 
-  // 玻璃内侧海报两张（贴在玻璃后面，朝外）
-  faceS(0.6, 0.85, posterMat, -2.9, 1.75, 14.06);
-  faceS(0.6, 0.85, posterMat, 4.9, 1.75, 14.06);
+  /* 玻璃内侧海报两张（贴在玻璃后面，朝外）。
+   *
+   * **每张都要标 sceneCollideSkip。** 海报是零厚度平板，本身不该挡人，但
+   * `buildSceneColliders` 只认 AABB、不认厚度：一张 0.6×0.85 的海报会生成一个
+   * 加了 0.04 余量的实心盒。玻璃没有碰撞的时候它们还看不出问题（正好堵着玻璃），
+   * 一旦玻璃的碰撞由下面 boxes 显式声明，这些盒就纯属多余；而门洞正中那张
+   * （见「店内玻璃后面的补充海报」）更是直接变成一堵看不见的墙——门开着也进不去。 */
+  const posterW1 = faceS(0.6, 0.85, posterMat, -2.9, 1.75, 14.06);
+  posterW1.name = 'store-poster-w1';
+  posterW1.userData.sceneCollideSkip = true;
+  /* x 从 4.9 挪到 4.55：原来与右侧那张（5.4，占 5.125..5.675）在 5.125..5.2 上
+   * 叠了 7.5cm —— 两张同材质、同在 z=14.06 的共面平板，重叠区是 0.056 m² 的共面区。
+   * 挪开后 4.25..4.85 与 5.125..5.675 之间留 27.5cm。 */
+  const posterE1 = faceS(0.6, 0.85, posterMat, 4.55, 1.75, 14.06);
+  posterE1.name = 'store-poster-e1';
+  posterE1.userData.sceneCollideSkip = true;
 
   /* ================= 正面：玻璃 / 雨棚 / 招牌 ================= */
 
   // 橱窗玻璃：门在 x0..1.6，左右两片。
   // 用薄板不用 box：玻璃在 8m 外，厚度读不出来，但平面省一半顶点。
-  faceS(3.4, 2.19, glassMat, -1.85, 1.445, ST.zFront - 0.01);
-  faceS(4.0, 2.19, glassMat, 3.7, 1.445, ST.zFront - 0.01);
+  faceS(3.4, 2.19, glassMat, -1.85, 1.445, ST.zFront - 0.01).name = 'store-glass-w';
+  faceS(4.0, 2.19, glassMat, 3.7, 1.445, ST.zFront - 0.01).name = 'store-glass-e';
+  /* 两端再各补一片。分格竖框只到 −3.55 / 5.7，再往外到角柱（−4.38 / 6.58）
+   * 之间原本是 0.85 / 0.90 宽的**空档**——没玻璃也没墙，从街上斜看能直接看进
+   * 前厅，人也能走进去。补上之后正面才是一层完整的皮，
+   * 下面那两个声明式碰撞盒（store-front-w/e）也才有对应的实体可挡，不至于是空气墙。 */
+  faceS(0.85, 2.19, glassMat, -3.975, 1.445, ST.zFront - 0.01).name = 'store-glass-w-end';
+  faceS(0.9, 2.19, glassMat, 6.15, 1.445, ST.zFront - 0.01).name = 'store-glass-e-end';
   // 竖向分格 + 下墙裙（墙裙用深灰蓝，和上面的冷灰墙拉开明度）
   for (const x of [-3.55, -0.15, 1.7, 5.7]) put(bx(0.08, 2.19, 0.08), metal, x, 1.445, ST.zFront - 0.04);
-  put(bx(ST_W, 0.35, 0.12), wallDeep, ST_CX, 0.175, ST.zFront - 0.03);
+  /* 墙裙**在门洞处断开**：门洞净宽 1.77（x −0.11..1.66），横贯整面的话会在门口横一道
+   * 0.35m 高的墙，门扇下半截埋在里面、玩家进门还要跨过去。左右两段各自伸进竖框 1cm
+   * 收头（端面退到 −0.20 / 1.75，避开竖框的 −0.19 / 1.74 两个面，免得端面共面闪）。 */
+  put(bx(-0.20 - ST.x0, 0.35, 0.12), wallDeep, (ST.x0 - 0.20) / 2, 0.175, ST.zFront - 0.03);
+  put(bx(ST.x1 - 1.75, 0.35, 0.12), wallDeep, (1.75 + ST.x1) / 2, 0.175, ST.zFront - 0.03);
   // 立柱（左右角柱，撑起雨棚）
   put(bx(0.22, ST.eave, 0.22), metal, ST.x0 + 0.02, ST.eave / 2, ST.zFront - 0.06);
   put(bx(0.22, ST.eave, 0.22), metal, ST.x1 - 0.02, ST.eave / 2, ST.zFront - 0.06);
@@ -4691,15 +4134,31 @@ export function buildConvenienceStore(): StoreHandle {
 
   // 自动贩卖机（店西侧人行道）：街角最容易被读出来的标志物。
   // 两台并排，色温岔开；机身是深灰蓝，不是高饱和的霓虹箱。
-  const vending = (x: number, panel: string, strip: string) => {
+  //
+  /* 2026-09-22：这两台**原来一个碰撞盒都没有** —— 1.9m 高的实心柜，玩家直接穿过去
+   * （与居酒屋北侧 / 停车场北侧那两台同一个坑：`buildConvenienceStore` 走的是
+   * 声明式 `boxes`，而这台的登记一直没人写）。
+   *
+   * 盒取「机身 ∪ 顶盖」的并集，两处数字都由下面这组常量派生，不另抄一遍：
+   *   机身 bx(1.05, 1.9, 0.72) @ (x, 0.95, 13.3) ⇒ x±0.525 / y 0..1.9   / z 12.94..13.66
+   *   顶盖 bx(1.09, 0.09, 0.76) @ (x, 1.94, 13.3) ⇒ x±0.545 / y 1.895..1.985 / z 12.92..13.68
+   * 投币口 bx(0.16,0.2,0.06) @ (x+0.36, 1.0, 12.95) 前探 2cm，落在并集之内，不必单列。
+   * 逐顶点扫过柜体盒（`tmp/_probe-furniture-spot.mjs`）：里面只有它自己的机身/顶盖/
+   * 投币口和贴面的发光屏，没有别的构件。 */
+  const VEND_HX = 0.545, VEND_TOP = 1.99, VEND_Z0 = 12.92, VEND_Z1 = 13.68;
+  let vendN = 0;
+  const vending = (x: number, panel: string, strip: string): BoxColliderSpec => {
     put(bx(1.05, 1.9, 0.72), toon('#2c3a4e'), x, 0.95, 13.3);
     put(bx(1.09, 0.09, 0.76), toon('#1f2a38'), x, 1.94, 13.3);   // 顶盖阴影缝
     faceS(0.88, 1.06, emissive(panel), x, 1.28, 12.93);
     faceS(0.88, 0.3, emissive(strip), x, 0.5, 12.93);
     put(bx(0.16, 0.2, 0.06), metal, x + 0.36, 1.0, 12.95);       // 投币口 / 操作板
+    return boxSpec(`store-vending-${++vendN}`, x - VEND_HX, x + VEND_HX, 0, VEND_TOP, VEND_Z0, VEND_Z1);
   };
-  vending(-5.75, '#d2dfeb', '#dd9a63');
-  vending(-4.6, '#dde8f1', '#5fae9f');
+  const vendingBoxes: BoxColliderSpec[] = [
+    vending(-5.75, '#d2dfeb', '#dd9a63'),
+    vending(-4.6, '#dde8f1', '#5fae9f'),
+  ];
 
   // 垃圾桶（带盖的圆柱）+ 雨伞架 + 自行车
   put(new THREE.CylinderGeometry(0.28, 0.25, 0.82, 10), toon('#454e5b'), -3.35, 0.41, 13.2);
@@ -4795,10 +4254,15 @@ export function buildConvenienceStore(): StoreHandle {
     g.add(new THREE.Mesh(new THREE.TubeGeometry(curve, 10, 0.012, 4), wireMat));
   };
   // 两根电线：起点居酒屋檐口 3.3（居酒屋比便利店矮，eave 3.5 那套用不上），
-  // 终点改挂书店西墙（x=12.7），y 收到 4.2/4.0 避开书店二层窗（y≈3.4 顶）。
-  // z 仍取 15.0/15.8：落在居酒屋东山墙的 z 范围 [14.02,16.11] 内。
-  awire([IZ.x1, 3.3, 15.0], [12.7, 4.2, 15.0], 0.14);
-  awire([IZ.x1, 3.3, 15.8], [12.7, 4.0, 15.8], 0.16);
+  // 终点挂书店西墙。**书店 2026-09 扩建后（北墙 18.0 → 15.0、西墙 z 15..26.1）
+  // 这两根线才真的挂上墙** —— 扩建前书店西墙从 z=18 才起，端点是悬空的。
+  //   端点 x 收 1cm（12.7 → 12.67）：TubeGeometry 管壁半径 0.012，写 12.7 会让
+  //   管头扎进墙面 0.002，逐顶点侵入检测会报一条。
+  //   z 从 15.0/15.8 挪到 15.6/16.4：15.0 正好落在书店西北角棱上，往南挪 0.6m
+  //   才读成「挂在墙上」；两处都在居酒屋东山墙（z 14.0..17.8）范围内。
+  //   y 收到 4.2/4.0：书店二层窗从 y 3.4 起（1F 层高 3.4），窗外沿 4.35，够不着。
+  awire([IZ.x1, 3.3, 15.6], [12.67, 4.2, 15.6], 0.14);
+  awire([IZ.x1, 3.3, 16.4], [12.67, 4.0, 16.4], 0.16);
 
   // 便利店这一侧的路灯整排已上移到 buildStreetscape（STORE_LAMP_X，z12.9，
   // 挑臂 -Z 伸到车行道上方），与公寓侧两排一起沿整条路串亮，这里不再单独放。
@@ -4919,7 +4383,7 @@ export function buildConvenienceStore(): StoreHandle {
     ogInner.rotation.y = Math.PI;
     g.add(ogInner);
     // 玻璃门（覆盖一层）
-    const ogGlass = new THREE.Mesh(new THREE.PlaneGeometry(OG_W - 0.06, 0.62), toon('#dce9f2', { finish: 'glass', transparent: true, opacity: 0.2, depthWrite: false }));
+    const ogGlass = new THREE.Mesh(new THREE.PlaneGeometry(OG_W - 0.06, 0.62), toon('#dce9f2', { finish: 'glass', transparent: true, opacity: 0.10, depthWrite: false }));
     ogGlass.position.set(OG_X0 + OG_W / 2, 0.65, OG_Z0 + 0.01);
     ogGlass.rotation.y = Math.PI;
     g.add(ogGlass);
@@ -4981,10 +4445,21 @@ export function buildConvenienceStore(): StoreHandle {
     }
 
     /* ---------- 店内玻璃后面的补充海报（再贴两张，错落）---------- */
-    // 玻璃后面再贴一张「ポイント 5倍」（暖红，比现有的米白更有存在感）。
-    faceS(0.7, 1.0, toon('#ffffff', { map: posterBTexture() }), 0.6, 1.55, 14.06);
-    faceS(0.55, 0.75, posterMat, -3.9, 1.85, 14.06);
-    faceS(0.55, 0.75, posterMat, 5.4, 1.7, 14.06);
+    /* 玻璃后面再贴一张「ポイント 5倍」（暖红，比现有的米白更有存在感）。
+     *
+     * **x 原本是 0.6，正好落在门洞正中**（门洞 −0.11..1.66，中心 0.775）：
+     * 视觉上是悬在门口半空的一块板，碰撞上是把门洞从 1.77 堵到只剩 0.63。
+     * 感应门装好之后，"门明明开了却还是走不进去"就是这个原因。
+     * 挪到门西侧第一格橱窗（−1.55..−0.85，与 −2.9 那张不重叠）。 */
+    const posterW0 = faceS(0.7, 1.0, toon('#ffffff', { map: posterBTexture() }), -1.2, 1.55, 14.06);
+    posterW0.name = 'store-poster-w0';
+    posterW0.userData.sceneCollideSkip = true;
+    const posterW2 = faceS(0.55, 0.75, posterMat, -3.9, 1.85, 14.06);
+    posterW2.name = 'store-poster-w2';
+    posterW2.userData.sceneCollideSkip = true;
+    const posterE2 = faceS(0.55, 0.75, posterMat, 5.4, 1.7, 14.06);
+    posterE2.name = 'store-poster-e2';
+    posterE2.userData.sceneCollideSkip = true;
   }
 
   /* ================= 动效件 =================
@@ -5003,22 +4478,55 @@ export function buildConvenienceStore(): StoreHandle {
   sign.name = 'store-sign';
   dyn.add(sign);
 
-  // 2) 自动门：两扇玻璃推拉门 + 门头灯箱
-  const DOOR_LX = 0.4, DOOR_RX = 1.2, DOOR_OPEN = 0.74;
-  const leafMat = toon('#d7e5ef', { finish: 'glass', transparent: true, opacity: 0.22, depthWrite: false });
+  /* 2) 感应门：两扇玻璃推拉门 + 门头灯箱
+   *
+   * 门洞净宽 = 玻璃竖框内边之间 = 1.66 − (−0.11) = 1.77，两扇各 0.88、中缝 10mm。
+   * 门扇比早先宽（0.76 → 0.88）：原来的 0.76 是按那对多余门柱的间距（1.63）配的，
+   * 门柱删掉之后沿用 0.76 会在门洞两边各留 8~13cm 的缝，直接看见洞口侧壁。
+   * DOOR_OPEN 同步加大到 0.90，保证全开时门扇内缘退到竖框之外、完全让开门洞。 */
+  const DOOR_SPAN = 1.77, DOOR_CX = 0.775;      // 门洞净宽 / 门洞中心
+  const DOOR_W = 0.88, DOOR_HALF = 0.44;        // 单扇宽 / 门扇半宽（竖杆位置）
+  const DOOR_LX = DOOR_CX - DOOR_W / 2 - 0.005, DOOR_RX = DOOR_CX + DOOR_W / 2 + 0.005;
+  const DOOR_OPEN = 0.90;
+  /* 门洞两侧的橱窗玻璃碰撞（声明式，见 StoreHandle.boxes）。
+   *
+   * 玻璃是透明材质，`buildSceneColliders` 会整片跳过 —— 从街上往店里走，
+   * 除了门洞那一格，其余 7.4m 宽的橱窗原来一点碰撞都没有，直接穿玻璃进屋。
+   * 这里把「除门洞外的整面」封成两段：左段 ST.x0..门洞西边、右段 门洞东边..ST.x1。
+   * 门洞两侧的竖框自己还有碰撞盒（x −0.19..−0.11 / 1.66..1.74），正好接上。
+   *
+   * y 取 0.35..2.54：0.35 以下是与玻璃同层的墙裙（0.35 高，属于「可跨矮台」、
+   * collidesAt 本来就不拦），2.54 是玻璃顶边。
+   * z 取 13.95..14.03：玻璃面在 13.99，盒体跨在玻璃两侧 4cm，玩家（半径 0.15）
+   * 被挡在 z≈13.80，刚好贴在玻璃外面，不会隔着 10cm 就被拦住。 */
+  const DOOR_X0 = DOOR_CX - DOOR_SPAN / 2, DOOR_X1 = DOOR_CX + DOOR_SPAN / 2;
+  const boxes: BoxColliderSpec[] = [
+    boxSpec('store-front-w', ST.x0, DOOR_X0, 0.35, 2.54, 13.95, 14.03),
+    boxSpec('store-front-e', DOOR_X1, ST.x1, 0.35, 2.54, 13.95, 14.03),
+    /* 店西侧人行道那两台自动售货机（见上面 `vending()` 的注释）：机身 ∪ 顶盖，
+     * x±0.545 / y 0..1.99 / z 12.92..13.68，由函数自己返回、这里只摊平。 */
+    ...vendingBoxes,
+  ];
+  const leafMat = toon('#d7e5ef', { finish: 'glass', transparent: true, opacity: 0.10, depthWrite: false });
   const mkLeaf = (cx: number) => {
     const leaf = new THREE.Group();
     leaf.name = 'store-door-leaf';
-    const glass = new THREE.Mesh(new THREE.PlaneGeometry(0.76, 2.18), leafMat);
+    const glass = new THREE.Mesh(new THREE.PlaneGeometry(DOOR_W, 2.18), leafMat);
     glass.rotation.y = Math.PI;
     leaf.add(glass);
-    for (const dx of [-0.38, 0.38]) {
+    /* 门扇的金属杆件**必须标 noCollide**：`buildSceneColliders` 只跳过 opacity<0.5 的
+     * 材质，玻璃门扇会被跳过、但这些不透明的杆子不会 —— 每扇 3 根杆会变成 3 个静态
+     * 碰撞盒杵在门洞里（RoomScene 那句「透明玻璃门扇也自然跳过」的注释就是这么失效的）。
+     * 门扇的碰撞由下面每扇一个、随门滑动的动态盒承担。 */
+    for (const dx of [-DOOR_HALF, DOOR_HALF]) {
       const bar = new THREE.Mesh(bx(0.05, 2.2, 0.05), metal);
       bar.position.set(dx, 0, 0.02);
+      bar.userData.noCollide = true;
       leaf.add(bar);
     }
-    const rail = new THREE.Mesh(bx(0.78, 0.06, 0.06), metal);
+    const rail = new THREE.Mesh(bx(DOOR_W + 0.02, 0.06, 0.06), metal);
     rail.position.set(0, 1.09, 0.02);
+    rail.userData.noCollide = true;
     leaf.add(rail);
     leaf.position.set(cx, 1.15, ST.zFront - 0.05);
     return leaf;
@@ -5031,18 +4539,47 @@ export function buildConvenienceStore(): StoreHandle {
   outlineProp(leafR);
   dyn.add(leafL, leafR);
 
-  // 门框 + 门头灯箱（门楣那一道亮边，把入口从玻璃面里拎出来）
+  /* 门扇的碰撞盒：每扇一个，**随门滑动**。
+   *
+   * 不能靠 buildSceneColliders 自动收：那是一次性静态遍历，门滑开后盒子还杵在门洞里 ——
+   * 实测门 position.x 已经到 −0.34 / 1.94，自动收出来的盒子 min.x 仍停在 −0.045 / 0.715
+   * 那一组全关位置，玩家会撞空气。所以这里自己建两个盒，交给调用方 concat 进碰撞表
+   * （见 StoreHandle.doorColliders），update 里逐帧同步。
+   * 高度取门扇实际范围：贴地到 2.26。 */
+  const DOOR_BASE_Y = 0, DOOR_TOP_Y = 2.26;
+  const doorColliders: Collider[] = [leafL, leafR].map((leaf, i) => ({
+    min: new THREE.Vector3(leaf.position.x - DOOR_HALF, DOOR_BASE_Y, ST.zFront - 0.075),
+    max: new THREE.Vector3(leaf.position.x + DOOR_HALF, DOOR_TOP_Y, ST.zFront - 0.025),
+    source: i === 0 ? 'store-door-leaf-w' : 'store-door-leaf-e',
+  }));
+  const syncDoorColliders = () => {
+    for (let i = 0; i < 2; i++) {
+      const cx = (i === 0 ? leafL : leafR).position.x;
+      doorColliders[i].min.x = cx - DOOR_HALF;
+      doorColliders[i].max.x = cx + DOOR_HALF;
+    }
+  };
+  syncDoorColliders();
+
+  /* 感应门的三个状态量。唯一真状态是 doorOpenAmt（0..1），纯插值推进 ——
+   * 暂停再恢复不会卡在半开。doorHold 是「人已离开、门还没关」的余量，防阈值抖动。 */
+  let doorOpenAmt = 0, doorHold = 0, doorLastT = 0;
+  const DOOR_SENSE = 1.8;   // 感应半径（米）：门中心到玩家的水平距离
+
+  /* 门头灯箱（门楣那一道亮边，把入口从玻璃面里拎出来）。
+   *
+   * **不要再加一对门柱。** 门洞两侧本来就有橱窗分格的竖框（x=−0.15 / 1.7，见上面
+   * `for (const x of [-3.55, -0.15, 1.7, 5.7])`），它们就是门洞的边框。早先这里又补了
+   * 一对 0.09 宽的门柱（x=−0.06 / 1.66）：左侧和竖框并排、只差 5mm，右侧直接和竖框
+   * 叠了 45mm，而且两者高度还不一样（竖框 0.31..2.58、门柱 −0.04..2.46）——从街上看，
+   * 门洞两边各立着两根高低不齐的柱子，读作「双重的门」。删掉门柱、把灯箱宽度对齐
+   * 竖框内边即可，门洞边框由竖框单独承担。 */
   const entryMat = emissive('#fff1dc');
   const ENTRY_BASE = entryMat.color.clone();
   const doorFrame = new THREE.Group();
   doorFrame.name = 'store-door-frame';
-  for (const dx of [-0.06, 1.66]) {
-    const jamb = new THREE.Mesh(bx(0.09, 2.42, 0.09), metal);
-    jamb.position.set(dx, 1.21, ST.zFront - 0.04);
-    doorFrame.add(jamb);
-  }
-  const head = new THREE.Mesh(new THREE.PlaneGeometry(1.72, 0.2), entryMat);
-  head.position.set(0.8, 2.36, ST.zFront - 0.06);
+  const head = new THREE.Mesh(new THREE.PlaneGeometry(DOOR_SPAN, 0.2), entryMat);
+  head.position.set(DOOR_CX, 2.36, ST.zFront - 0.06);
   head.rotation.y = Math.PI;
   doorFrame.add(head);
   dyn.add(doorFrame);
@@ -5087,7 +4624,7 @@ export function buildConvenienceStore(): StoreHandle {
   // 4) 玻璃上的雨水（UV 慢速往下滚 + 偶发水痕）。复用 toon.ts 的 rainGlassTexture()。
   //    两片玻璃各一片，独立滚 UV 让接缝不齐。
   const rainMats = [-1, 1].map((i) => {
-    const mat = emissive('#dfeaf2', { map: rainGlassTexture(), transparent: true, opacity: 0.22, side: THREE.DoubleSide });
+    const mat = emissive('#dfeaf2', { map: rainGlassTexture(), transparent: true, opacity: 0.075, side: THREE.DoubleSide });
     mat.map!.wrapS = mat.map!.wrapT = THREE.RepeatWrapping;
     mat.map!.repeat.set(1, 1.05);
     mat.map!.offset.set(0, i * 0.5);
@@ -5159,7 +4696,7 @@ export function buildConvenienceStore(): StoreHandle {
    * 湿地面上形成积水反光，并给招牌叠一层柔光晕。全部进 dyn（不合并 /
    * 不冻结，点光不投阴影所以很便宜）。
    */
-  const inLight = new THREE.PointLight(0xffd6a0, 10, 16, 2);
+  const inLight = new THREE.PointLight(0xffe2b8, 14, 16, 2);
   inLight.position.set(ST_CX, 2.5, 15.1);
   dyn.add(inLight);
   const inLight2 = new THREE.PointLight(0xffe2b4, 6, 11, 2);
@@ -5171,18 +4708,22 @@ export function buildConvenienceStore(): StoreHandle {
 
   // 暖光外溢到湿地面：门口正前方的暖色光池（积水反光）。加法混合的径向
   // 渐变，贴地、不投阴影、不吃碰撞。颜色与店内一致，远处看像店里的光淌到路上。
-  const poolMat = emissive('#ffe6bf', { map: radial('#ffe9c2', 'rgba(255,210,150,0)'), transparent: true, opacity: 0.55, side: THREE.DoubleSide });
+  const poolMat = emissive('#ffe6bf', { map: radial('#ffe9c2', 'rgba(255,210,150,0)'), transparent: true, opacity: 0.24, side: THREE.DoubleSide });
   poolMat.blending = THREE.AdditiveBlending;
   poolMat.depthWrite = false;
   const pool = new THREE.Mesh(new THREE.PlaneGeometry(9.5, 4.2), poolMat);
   pool.geometry.rotateX(-Math.PI / 2);
-  pool.position.set(ST_CX, 0.014, 13.2);
+  // y 必须压在铺装面之上：程序化街区的人行道面在 0.028、盲道条在 0.035。
+  // 光池是贴地的加法平面，深度测试照常生效——低过铺装就会被自己的地面吃掉一半
+  // （旧值 0.014 时，z∈[12.6,15] 那段整块看不见）。
+  pool.position.set(ST_CX, 0.036, 13.2);
   pool.renderOrder = 2;
+  pool.name = 'store-light-pool';
   pool.userData.sceneCollideSkip = true;
   dyn.add(pool);
 
   // 招牌暖晕：横招牌前方叠一层柔光，雨夜里像灯箱在发烫的辉光。
-  const haloMat = emissive('#ffd9a0', { map: radial('rgba(255,225,180,0.9)', 'rgba(255,200,150,0)'), transparent: true, opacity: 0.5, side: THREE.DoubleSide });
+  const haloMat = emissive('#ffd9a0', { map: radial('rgba(255,225,180,0.9)', 'rgba(255,200,150,0)'), transparent: true, opacity: 0.20, side: THREE.DoubleSide });
   haloMat.blending = THREE.AdditiveBlending;
   haloMat.depthWrite = false;
   const halo = new THREE.Mesh(new THREE.PlaneGeometry(11.6, 1.7), haloMat);
@@ -5192,7 +4733,12 @@ export function buildConvenienceStore(): StoreHandle {
   dyn.add(halo);
 
   /* ---------------- 每帧更新 ---------------- */
-  const update = (t: number) => {
+  const dressing = dressConvenienceStore(g, dyn);
+  const update = (t: number, wet: boolean, playerPos?: THREE.Vector3) => {
+    dressing.update(t, wet);
+    dripGroup.visible = wet;
+    pool.visible = wet;
+    for (const glassRain of rainMeshes) glassRain.visible = wet;
     // 招牌：0.955~1.0 慢呼吸 + 每 11.3s 一次 0.28s 的启辉抖动。
     // 抖动的频率（61rad/s）故意远离呼吸频率，两者不共振才像真的老灯管。
     const breathe = 0.955 + 0.045 * Math.sin(t * 1.7);
@@ -5200,15 +4746,29 @@ export function buildConvenienceStore(): StoreHandle {
     signMat.color.copy(SIGN_BASE).multiplyScalar(breathe * glitch);
     entryMat.color.copy(ENTRY_BASE).multiplyScalar(0.94 + 0.06 * Math.sin(t * 2.3 + 1.1));
 
-    // 自动门：21s 一轮，进 0.9s / 保持 2.3s / 退 0.9s。
-    // 纯相位驱动、不存状态——暂停再恢复也不会卡在半开。
-    const ph = t % 21;
-    let open = 0;
-    if (ph < 0.9) open = smoothstep(ph / 0.9);
-    else if (ph < 3.2) open = 1;
-    else if (ph < 4.1) open = 1 - smoothstep((ph - 3.2) / 0.9);
-    leafL.position.x = DOOR_LX - open * DOOR_OPEN;
-    leafR.position.x = DOOR_RX + open * DOOR_OPEN;
+    /* 感应门：玩家（或观察者相机）走到门口一定范围内就开，走开后延时关闭。
+     *
+     * 原来这里是纯时间驱动（21s 一轮无条件开合）：站在门口它照样关、人走开了它照样开，
+     * 跟玩家没有任何关系，读起来不像感应门。改成距离触发 —— 开门即时、关门滞后
+     * （doorHold 余量），开合本身走插值，不会瞬间跳。 */
+    /* dt 夹到 0.25（4fps）而不是更小：夹太紧的话低帧率下门会开得极慢
+     * （headless 下 rAF 被节流到 ~1fps，夹 0.1 时 0.55s 的行程要 5.5 帧 = 5.5 秒）。
+     * 上界仍然必要 —— 标签页切回来时 t 会跳一大截，不夹就会瞬间弹开。 */
+    const dt = Math.min(0.25, Math.max(0, t - doorLastT));
+    doorLastT = t;
+    const pdx = playerPos ? playerPos.x - DOOR_CX : 1e3;
+    const pdz = playerPos ? playerPos.z - (ST.zFront - 0.05) : 1e3;
+    const nearDoor = pdx * pdx + pdz * pdz < DOOR_SENSE * DOOR_SENSE;
+    doorHold = nearDoor ? 1.2 : Math.max(0, doorHold - dt);
+    const wantOpen = nearDoor || doorHold > 0 ? 1 : 0;
+    /* 开 0.55s、关 0.85s 全行程：感应门开得快、关得慢一点，像还在等传感器 */
+    const dStep = dt / (wantOpen ? 0.55 : 0.85);
+    const dDiff = wantOpen - doorOpenAmt;
+    if (Math.abs(dDiff) <= dStep) doorOpenAmt = wantOpen;
+    else doorOpenAmt += Math.sign(dDiff) * dStep;
+    leafL.position.x = DOOR_LX - doorOpenAmt * DOOR_OPEN;
+    leafR.position.x = DOOR_RX + doorOpenAmt * DOOR_OPEN;
+    syncDoorColliders();
 
     // 红绿灯：红 11s → 绿 9s → 黄 2s → 黄 1s（23s 一轮）
     const sp = t % 23;
@@ -5236,12 +4796,12 @@ export function buildConvenienceStore(): StoreHandle {
     // 让隔着玻璃看进去的"店里开着灯"不是死亮，而是有生命的小幅明灭。
     const inB = 0.94 + 0.06 * Math.sin(t * 1.3 + 0.4);
     const inG = t % 7.3 < 0.4 ? 0.82 + 0.12 * Math.sin(t * 45) : 1;
-    inLight.intensity = 10 * inB * inG;
+    inLight.intensity = 14 * inB * inG;
     inLight2.intensity = 6 * (0.96 + 0.04 * Math.sin(t * 1.1 + 2.0));
     inCool.intensity = 4 * (0.95 + 0.05 * Math.sin(t * 0.9 + 1.3));
   };
 
-  return { group: g, dynamic: dyn, update };
+  return { group: g, dynamic: dyn, doorColliders, boxes, update, setWetOccluders: dressing.setOccluders, dispose: dressing.dispose };
 }
 
 /* ============================================================================
@@ -5566,6 +5126,33 @@ export function buildSubwayEntrance(): THREE.Group {
   put(gbox(0.40, 0.62, 0.40), LM.slabDark, CX - cw / 2 - 1.6, 0.31, ENTRY_Z + 2.9);
   put(gbox(0.44, 0.05, 0.44), LM.metal, CX - cw / 2 - 1.6, 0.64, ENTRY_Z + 2.9);
 
+  // ---- 12) 出口光池：站厅的暖光从楼梯口淌到湿人行道上 ----
+  // 这是全街区唯一一处「光从地底下冒出来」的地方，此前完全没有地面响应，
+  // 雨夜看过去只剩一个黑洞口。两片叠加：宽的一片是雨棚下的漫射，窄的一条
+  // 是楼梯间正对洞口的那道集中亮带（口朝 -z，所以整片铺在 ENTRY_Z 以北）。
+  // y=0.036 压住人行道面(0.028)与盲道条(0.035)。
+  const spillMat = emissive('#ffe4b5', {
+    map: radial('#ffe7bd', 'rgba(255,215,160,0)'),
+    transparent: true, opacity: 0.28, side: THREE.DoubleSide,
+  });
+  spillMat.blending = THREE.AdditiveBlending;
+  spillMat.depthWrite = false;
+  const spill = flatDown(9.6, 3.4, spillMat, CX, 0.036, 13.1);
+  spill.name = 'subway-light-spill';
+  spill.renderOrder = 2;
+  spill.userData.sceneCollideSkip = true;
+
+  const throatMat = emissive('#fff0d4', {
+    map: radial('rgba(255,240,212,0.9)', 'rgba(255,220,170,0)'),
+    transparent: true, opacity: 0.32, side: THREE.DoubleSide,
+  });
+  throatMat.blending = THREE.AdditiveBlending;
+  throatMat.depthWrite = false;
+  const throat = flatDown(7.2, 1.5, throatMat, CX, 0.038, 13.7);
+  throat.name = 'subway-light-throat';
+  throat.renderOrder = 3;
+  throat.userData.sceneCollideSkip = true;
+
   g.userData.sceneCollideSkip = true;
   return g;
 }
@@ -5576,7 +5163,16 @@ export function buildSubwayEntrance(): THREE.Group {
  * 位置：便利店正东侧（x 7.5..11.7, z 14.0..17.8），与便利店并排在同一条街沿线上，
  *   门面朝北对着马路/公寓；东侧入口 recess 开向便利店东边的小巷（见 IZ / ALLEY）。
  */
-export function buildIzakaya(): THREE.Group {
+export function buildIzakaya(): {
+  group: THREE.Group;
+  /** 感应门扇所在的动效组：每帧滑，不合批、不冻结 */
+  dynamic: THREE.Group;
+  boxes: BoxColliderSpec[];
+  /** 门扇的动态碰撞盒（随门滑动，调用方必须 concat 进 fpsColliders） */
+  doorColliders: Collider[];
+  /** 每帧调一次：按玩家位置驱动门的开合，并同步门扇碰撞盒 */
+  update: (t: number, playerPos?: THREE.Vector3) => void;
+} {
   const g = new THREE.Group();
   g.name = 'izakaya';
   const r = makeRng(41000);
@@ -5625,38 +5221,186 @@ export function buildIzakaya(): THREE.Group {
     redLamp: emissive('#ff7a3c'),
   };
 
+  /* ---- 0) 碰撞：**声明式**盒子（跟便利店 / 书店同一条路） ----
+   *
+   * 整组在末尾标了 `sceneCollideSkip`，所以 `buildSceneColliders` 的遍历一个盒都
+   * 不收；就算不标，`districtArt.prepare` + `mergeByMaterial` 之后 mesh 已经并成
+   * 「跨整店的同材质巨块」、名字也没了，按 AABB 收集只会得到一堆废盒。所以这里的
+   * 碰撞必须**与几何同一处声明**，由调用方 `buildBoxColliders(boxes)` 转成世界盒。
+   *
+   * 两条硬约束（踩过坑，见便利店）：
+   *   1. 零厚度面板（暖帘 / 短冊 / 招牌 / 光池）**绝不能**按 mesh 登记 —— 一张海报
+   *      会变成加了 0.04 余量的实心盒，正好把门洞堵死。这里一律不登记它们。
+   *   2. 玻璃门是 opacity 0.45 的透明材质，按「透明即跳过」的规矩它自己不会挡人，
+   *      但**这扇门是关着的**（实测 z=14.005 一整片），所以门洞由下面第 1 条
+   *      「北立面」整体封住，不另开门扇盒。
+   *
+   * 登记规则：一个「玩家会撞到的东西」一个盒，写世界区间（boxSpec）而不是中心+
+   * 尺寸 —— 区间可以直接跟几何对照，中心+尺寸要心算。区间取该物的 AABB 并集。
+   * 矮件（空调外机 0.42 / 饮料箱 0.20 / 植木鉢 0.33 / 傘立て 0.42）照样登记，
+   * 让 fpsControls 的 STEP_UP=0.45 去决定"迈得过去" —— 门槛写在引擎里一处就够。
+   */
+  const boxes: BoxColliderSpec[] = [];
+  /** 声明一个碰撞盒（世界区间 x0..x1 / y0..y1 / z0..z1） */
+  const solid = (id: string, x0: number, x1: number, y0: number, y1: number, z0: number, z1: number) =>
+    boxes.push(boxSpec(id, x0, x1, y0, y1, z0, z1));
+  /** 单块实体：建几何 + 同参数登记碰撞盒（不给两处各写一份数字的机会） */
+  const mass = (id: string, x: number, y: number, z: number,
+                sx: number, sy: number, sz: number, mat: THREE.Material) => {
+    put(gbox(sx, sy, sz), mat, x, y, z);
+    solid(id, x - sx / 2, x + sx / 2, y - sy / 2, y + sy / 2, z - sz / 2, z + sz / 2);
+  };
+
   // 便利店正东侧（IZ.x0..IZ.x1），朝北面向马路与公寓。
   // 北墙 CZ-D/2=14.0 与便利店店门线 ST.zFront=14.0 齐平，两店成同一排街沿。
   const CX = (IZ.x0 + IZ.x1) / 2, CZ = 14.0 + 3.8 / 2;  // 9.6, 15.9
   const W = 4.2, D = 3.8, H = 3.2;  // 店面尺寸
+  /* 三面墙的**顶面比天花板低 3cm**。
+   * 天花板 `gbox(W,0.08,D)` 中心 H-0.04 ⇒ 顶面正好 y=H=3.2；三面墙原来也顶到 H，
+   * 于是南墙顶、东西墙顶、天花板顶**四个面在 y=3.2 同轴同向共面**。共面扫描实测：
+   * 南墙×天花板 0.150 m² ×2 + 东西墙×天花板 0.107 m² ×2 = **0.51 m² 显著共面**，
+   * 从公寓 4F 阳台俯看居酒屋屋顶会整片闪。
+   * 压低 3cm 后墙顶（3.17）埋进天花板（3.12..3.20）里，可见性探针判为「不可见」，
+   * 屋顶只剩天花板一块干净平板。墙高只影响自身碰撞盒顶，玩家头顶 1.7 碰不到。 */
+  const WH = H - 0.03;              // 墙高（顶面 3.17，埋在天花板板厚之内）
 
-  // ---- 1) 结构：三面墙（西/南/东）+ 北面敞开（朝向公寓） ----
+  // ---- 1) 结构：三面墙（西/南/东）+ 北面（格栅 + 玻璃门） ----
   // 后壁（南侧）
-  put(gbox(W, H, 0.12), IM.wood, CX, H / 2, CZ + D / 2);
+  mass('izakaya-wall-south', CX, WH / 2, CZ + D / 2, W, WH, 0.12, IM.wood);
   // 左侧壁（西侧）
-  put(gbox(0.10, H, D), IM.woodDeep, CX - W / 2, H / 2, CZ);
-  // 右侧壁（东侧，缩进做入口）
-  put(gbox(0.10, H, D * 0.55), IM.woodDeep, CX + W / 2, H / 2, CZ - D * 0.22);
-  // 天花板
+  mass('izakaya-wall-west', CX - W / 2, WH / 2, CZ, 0.10, WH, D, IM.woodDeep);
+  /* 右侧壁（东侧）：**必须是整进深**。
+   * 原来这里只有 `D * 0.55`（z 14.02..16.11），南边 1.69m 是敞的 —— 水平射线实测
+   * 从巷子 (13.6, 1.5, 17.0) 朝西打能一路穿到店内西墙 x=7.55，也就是玩家可以从
+   * 巷子直接走进店里；而 9-6 的厨房调理台（x 11.10..11.64）正是贴着这面墙摆的，
+   * 厨房对公众巷子敞开显然不是设计意图。补满到整进深。 */
+  mass('izakaya-wall-east', CX + W / 2, WH / 2, CZ, 0.10, WH, D, IM.woodDeep);
+  // 天花板（在头顶之上，不登记）
   put(gbox(W, 0.08, D), IM.wood, CX, H - 0.04, CZ);
-  // 地板
+  // 地板（顶面 0.06，低于脚踝门槛 footY+0.12，登记了也会被跳过 —— 干脆不登记）
   put(gbox(W, 0.06, D), IM.floor, CX, 0.03, CZ);
 
+  /* 北立面**分三段**登记，中间给门洞让路。
+   *
+   * 这里不是墙而是 8 根木格栅（x = 7.65 + 0.48i，宽 0.04）+ 右端一扇门：
+   *   ・格栅之间是 0.44m 的缝，玩家直径 0.30 < 0.44 —— 侧着身能挤进店里。
+   *     实测：从 z=12.80 朝 +Z 打，x=8.4 / 10.3 那两枪直接穿到南墙 z=17.74。
+   *   ・所以除门洞外的整面必须封死（连 0.44m 的缝一起）。
+   *
+   * 原来这里是**一整面**（连门洞一起封），结果玻璃门永远打不开、玩家永远进不去
+   * —— 2026-09-21 用户报「居酒屋没有门无法进入」。现在拆成「门洞西 / 门洞东 /
+   * 门楣」三条，门洞 x 10.60..11.60 净空（玩家半径 0.15 ⇒ 有 0.70m 可通行宽度）。
+   *
+   * z 取 13.96..14.08：盖住最靠外的门框外皮(13.965)与最靠里的暖帘背面(14.075)。 */
+  const doorW = 1.0, doorH = 2.2;
+  const doorCx = CX + W / 2 - 0.6;                  // 11.10
+  const DOOR_X0 = doorCx - doorW / 2;               // 10.60
+  const DOOR_X1 = doorCx + doorW / 2;               // 11.60
+  const FN_Z0 = CZ - D / 2 - 0.04, FN_Z1 = CZ - D / 2 + 0.08;   // 13.96..14.08
+  solid('izakaya-facade-north-w', CX - W / 2 - 0.05, DOOR_X0, 0, H, FN_Z0, FN_Z1);
+  solid('izakaya-facade-north-e', DOOR_X1, CX + W / 2 + 0.05, 0, H, FN_Z0, FN_Z1);
+  // 门楣：门洞上方照旧封住（玩家头顶 1.7 < doorH 2.2，不影响通行）
+  solid('izakaya-facade-north-head', DOOR_X0, DOOR_X1, doorH, H, FN_Z0, FN_Z1);
+
   // ---- 2) 木格栅门面（北面，朝公寓方向） ----
+  // 门洞那一格要跳过：i=7 落在 x=11.01，正好杵在门洞正中（原来是一堵墙看不出来，
+  // 现在门洞开了，那根木条会变成门中间的一根柱子）。
   for (let i = 0; i < 8; i++) {
-    put(gbox(0.04, H * 0.75, 0.04), IM.woodDeep,
-      CX - W / 2 + 0.15 + i * 0.48, H * 0.42, CZ - D / 2 + 0.02);
+    const bx = CX - W / 2 + 0.15 + i * 0.48;
+    if (bx > DOOR_X0 - 0.06 && bx < DOOR_X1 + 0.06) continue;
+    put(gbox(0.04, H * 0.75, 0.04), IM.woodDeep, bx, H * 0.42, CZ - D / 2 + 0.02);
   }
 
-  // ---- 3) 玻璃门（右侧开口处） ----
-  const doorW = 1.0, doorH = 2.2;
-  const doorCx = CX + W / 2 - 0.6;
-  put(gbox(doorW - 0.04, doorH - 0.04, 0.03), IM.glass, doorCx, doorH / 2, CZ - D / 2 + 0.02);
-  // 门框
+  /* ---- 3) 感应推拉门（门扇走**外轨**）----
+   *
+   * 门扇滑轨放在 z 13.92（格栅外皮 14.00 之外 8cm）。为什么不走内轨：门扇要向西
+   * 滑 1.06m 让开门洞，而内轨上依次横着格栅（z 14.00..14.04）与暖帘（z 14.045..
+   * 14.075），滑过去必然穿模；外轨前面是空的。
+   *
+   * **原来的静态玻璃片删掉了**：留着就是「双重的门」（便利店那次踩过同样的坑）。
+   * 现在门洞只有这一扇会动的门扇，由调用方 `izakaya.update()` 按玩家距离驱动。
+   *
+   * 门扇上的不透明杆件一律标 `noCollide`：`buildSceneColliders` 只跳过 opacity<0.5
+   * 的材质，玻璃会跳过但这些框条不会 —— 每根框条会变成一根杵在门洞里的静态盒。
+   * 门扇的碰撞由随门滑动的动态盒（doorColliders）承担。
+   */
+  const dyn = new THREE.Group();
+  dyn.name = 'izakaya-dynamic';
+  const doorLeaf = new THREE.Group();
+  doorLeaf.name = 'izakaya-door-leaf';
+  const LEAF_W = 1.04, LEAF_Z = CZ - D / 2 - 0.08;   // 13.92
+  {
+    const glass = new THREE.Mesh(gbox(LEAF_W - 0.10, doorH - 0.14, 0.02), IM.glass);
+    glass.position.set(0, doorH / 2, 0);
+    doorLeaf.add(glass);
+    for (const dx of [-LEAF_W / 2 + 0.03, LEAF_W / 2 - 0.03]) {
+      const bar = new THREE.Mesh(gbox(0.05, doorH, 0.05), IM.frame);
+      bar.position.set(dx, doorH / 2, 0);
+      bar.userData.noCollide = true;
+      doorLeaf.add(bar);
+    }
+    for (const dy of [0.05, doorH - 0.05]) {
+      const rail = new THREE.Mesh(gbox(LEAF_W, 0.06, 0.05), IM.frame);
+      rail.position.set(0, dy, 0);
+      rail.userData.noCollide = true;
+      doorLeaf.add(rail);
+    }
+    const handle = new THREE.Mesh(gbox(0.04, 0.5, 0.04), IM.metal);
+    handle.position.set(LEAF_W / 2 - 0.14, 1.05, -0.045);
+    handle.userData.noCollide = true;
+    doorLeaf.add(handle);
+  }
+  doorLeaf.position.set(doorCx, 0, LEAF_Z);
+  /* 门扇自己当一次描边的 root：它挂在 dyn 上、不参与合批，挂在门框组下会被
+   * 烘焙成固定几何，门一滑开描边留在原地（便利店那两个 leaf 就是这么处理的）。 */
+  outlineProp(doorLeaf);
+  dyn.add(doorLeaf);
+
+  // 门框（门楣 + 西侧门樘；东侧由东墙内表面充当门樘）
   put(gbox(doorW + 0.06, 0.06, 0.05), IM.frame, doorCx, doorH, CZ - D / 2 - 0.01);
   put(gbox(0.05, doorH, 0.05), IM.frame, doorCx - doorW / 2 - 0.02, doorH / 2, CZ - D / 2 - 0.01);
-  // 门把手
-  put(gbox(0.04, 0.04, 0.03), IM.metal, doorCx + doorW / 2 - 0.12, 1.0, CZ - D / 2);
+
+  /* 门扇的动态碰撞盒：随门滑动，必须由调用方 concat 进 fpsColliders。
+   * y 取 0..doorH（贴地到门扇顶），z 取轨面 ±3.5cm。 */
+  const doorColliders: Collider[] = [{
+    min: new THREE.Vector3(doorCx - LEAF_W / 2, 0, LEAF_Z - 0.035),
+    max: new THREE.Vector3(doorCx + LEAF_W / 2, doorH, LEAF_Z + 0.035),
+    kind: 'wall',
+    source: 'izakaya-door-leaf',
+  }];
+
+  /* 感应门状态量。唯一真状态是 doorOpenAmt（0..1），纯插值推进 —— 暂停再恢复不会
+   * 卡在半开；doorHold 是「人已离开、门还没关」的余量，防阈值抖动。
+   * 四条与便利店同源：①位置驱动 ②关门滞后 ③dt 夹 0.25 ④动态盒每帧同步。 */
+  let doorOpenAmt = 0, doorHold = 0, doorLastT = 0;
+  const DOOR_SENSE = 1.8;    // 感应半径（米）：门中心到玩家的水平距离
+  const DOOR_SLIDE = 1.06;   // 全开时的西移量（门洞净宽 1.0 + 6cm 重叠）
+  const syncDoorCollider = () => {
+    const cx = doorLeaf.position.x;
+    doorColliders[0].min.x = cx - LEAF_W / 2;
+    doorColliders[0].max.x = cx + LEAF_W / 2;
+  };
+  syncDoorCollider();
+
+  const update = (t: number, playerPos?: THREE.Vector3) => {
+    /* dt 夹到 0.25（4fps）而不是更小：夹太紧的话低帧率下门会开得极慢
+     * （headless 下 rAF 被节流到 ~1fps）。上界仍然必要 —— 标签页切回来时 t 会跳
+     * 一大截，不夹就会瞬间弹开。 */
+    const dt = Math.min(0.25, Math.max(0, t - doorLastT));
+    doorLastT = t;
+    const pdx = playerPos ? playerPos.x - doorCx : 1e3;
+    const pdz = playerPos ? playerPos.z - LEAF_Z : 1e3;
+    const nearDoor = pdx * pdx + pdz * pdz < DOOR_SENSE * DOOR_SENSE;
+    doorHold = nearDoor ? 1.2 : Math.max(0, doorHold - dt);
+    const wantOpen = nearDoor || doorHold > 0 ? 1 : 0;
+    // 开 0.55s、关 0.85s 全行程：开得快、关得慢，像还在等传感器
+    const dStep = dt / (wantOpen ? 0.55 : 0.85);
+    const dDiff = wantOpen - doorOpenAmt;
+    if (Math.abs(dDiff) <= dStep) doorOpenAmt = wantOpen;
+    else doorOpenAmt += Math.sign(dDiff) * dStep;
+    doorLeaf.position.x = doorCx - doorOpenAmt * DOOR_SLIDE;
+    syncDoorCollider();
+  };
 
   // ---- 4) 暖帘（noren，挂在北面门口）----
   // 下沿抬到 1.43（原来只有 0.89）：暖帘下面让出完整一条"吧台视窗"，
@@ -5703,8 +5447,13 @@ export function buildIzakaya(): THREE.Group {
   })();
   const izSignMat = emissive('#ffcc44', { map: izakayaSign });
   const izSign = new THREE.Mesh(new THREE.PlaneGeometry(1.6, 0.45), izSignMat);
-  izSign.position.set(CX, H + 0.25, CZ - D / 2 + 0.02);
-  // 不旋转：法线默认 +Z，朝北面向公寓
+  izSign.position.set(CX, H + 0.25, CZ - D / 2 - 0.03);
+  /* 牌面必须朝 **-Z**（朝街、朝公寓方向）。
+   * 原来这里没旋转，注释还写着「法线默认 +Z，朝北面向公寓」—— 但本项目 +Z 是**南**
+   * （见公寓剖面注释「+Z 北→南」），所以那块牌实际朝店内；而 `emissive()` 默认
+   * `FrontSide` ⇒ 从街上根本看不见（背面剔除），只有绕到南侧巷子里才读得到字。
+   * 2026-09-21 用户报「居酒屋的牌匾的南北朝向反了」。 */
+  izSign.rotation.y = Math.PI;
   g.add(izSign);
 
   // ---- 7) 雨棚 ----
@@ -5727,6 +5476,10 @@ export function buildIzakaya(): THREE.Group {
     g.add(board);
     // 支架
     put(gbox(0.03, boardH, 0.03), IM.wood, CX + W / 2 + 0.4, boardH / 2, CZ + D / 2 - 0.8);
+    /* 立式菜单牌：板 0.45×0.85 绕 Y 转 -0.2π，水平投影 0.364×0.264，
+     * 中心 (12.30, 17.00) → x 12.118..12.482 / z 16.868..17.132；支架在
+     * (12.10, 17.00)±0.015。取并集 x 12.08..12.49 / z 16.86..17.14。 */
+    solid('izakaya-menu-board', 12.08, 12.49, 0, boardH + 0.02, 16.86, 17.14);
   }
 
   /* ---- 9) 店内陈列（透过玻璃/格栅可见）----
@@ -5754,17 +5507,20 @@ export function buildIzakaya(): THREE.Group {
   put(cyl(0.085, 0.09, 0.42, 10), IM.slabDark, 11.44, 0.27, FZ + 0.30);
   put(cyl(0.017, 0.017, 0.60, 5), IM.dark, 11.39, 0.60, FZ + 0.30);
   put(cyl(0.017, 0.017, 0.56, 5), IM.woodDeep, 11.49, 0.58, FZ + 0.32);
+  // 傘立て（0.42 高，登记真高 —— 迈不迈得过去交给 STEP_UP=0.45 判）
+  solid('izakaya-umbrella-stand', 11.44 - 0.09, 11.44 + 0.09, 0.06, 0.48,
+    FZ + 0.30 - 0.09, FZ + 0.30 + 0.09);
 
   // 9-2 客席吧台（L 型：正面一段 + 西端往里折一段）
   const CT_Z = FZ + 1.15;         // 15.15
   const CT_TOP = FL + 0.95;       // 1.01 天板中心
-  put(gbox(2.30, 0.92, 0.55), IM.wood, 8.90, FL + 0.46, CT_Z);
-  put(gbox(2.46, 0.05, 0.70), IM.warmPale, 8.90, CT_TOP, CT_Z);
+  mass('izakaya-counter-front', 8.90, FL + 0.46, CT_Z, 2.30, 0.92, 0.55, IM.wood);
+  mass('izakaya-counter-front-top', 8.90, CT_TOP, CT_Z, 2.46, 0.05, 0.70, IM.warmPale);
   for (let i = 0; i < 9; i++) {   // 台面下的竖木条腰板
     put(gbox(0.025, 0.80, 0.02), IM.woodDeep, 7.80 + i * 0.275, FL + 0.43, CT_Z - 0.29);
   }
-  put(gbox(0.55, 0.92, 0.92), IM.wood, 7.85, FL + 0.46, CT_Z + 0.71);
-  put(gbox(0.72, 0.05, 1.00), IM.warmPale, 7.85, CT_TOP + 0.02, CT_Z + 0.73);
+  mass('izakaya-counter-west', 7.85, FL + 0.46, CT_Z + 0.71, 0.55, 0.92, 0.92, IM.wood);
+  mass('izakaya-counter-west-top', 7.85, CT_TOP + 0.02, CT_Z + 0.73, 0.72, 0.05, 1.00, IM.warmPale);
 
   // 9-3 吧凳 × 3（座面 + 支柱 + 底盘 + 脚踏圈）
   for (let i = 0; i < 3; i++) {
@@ -5773,6 +5529,8 @@ export function buildIzakaya(): THREE.Group {
     put(cyl(0.028, 0.032, 0.58, 6), IM.metal, sx, 0.35, sz);
     put(cyl(0.13, 0.14, 0.03, 10), IM.metal, sx, 0.10, sz);
     put(cyl(0.115, 0.115, 0.018, 10), IM.metal, sx, 0.24, sz);
+    // 座面 φ0.32 / 底盘 φ0.28 / 支柱 —— 一件一个外接盒（y 0.085..0.66，0.575 > STEP_UP，挡人）
+    solid(`izakaya-stool-${i + 1}`, sx - 0.16, sx + 0.16, 0.085, 0.66, sz - 0.16, sz + 0.16);
   }
 
   // 9-4 台面上的一桌份：小皿 / 湯呑 / 徳利 / 箸置き+箸（中间那份加个啤酒杯）
@@ -5799,8 +5557,8 @@ export function buildIzakaya(): THREE.Group {
   // 9-6 厨房（东侧里间）：调理台 + シンク + コンロ + 鍋/やかん + 換気扇 + 吊り棚
   {
     const KZ = 16.35;
-    put(gbox(0.52, 0.85, 1.90), IM.wood, 11.36, FL + 0.425, KZ);
-    put(gbox(0.56, 0.04, 1.94), IM.metal, 11.36, FL + 0.87, KZ);
+    mass('izakaya-kitchen-counter', 11.36, FL + 0.425, KZ, 0.52, 0.85, 1.90, IM.wood);
+    mass('izakaya-kitchen-counter-top', 11.36, FL + 0.87, KZ, 0.56, 0.04, 1.94, IM.metal);
     put(gbox(0.40, 0.10, 0.44), IM.metal, 11.34, FL + 0.83, KZ - 0.60);   // シンク
     put(gbox(0.34, 0.03, 0.34), IM.dark, 11.34, FL + 0.87, KZ + 0.28);    // コンロ
     put(cyl(0.075, 0.075, 0.015, 10), IM.dark, 11.34, FL + 0.90, KZ + 0.28);
@@ -5817,8 +5575,9 @@ export function buildIzakaya(): THREE.Group {
   // 9-7 南墙酒棚：地柜 + 两层瓶架 + 一升瓶 + 小瓶（俯视时是正对镜头的背景墙）
   {
     const BB_Z = BZ - 0.16;       // 17.58
-    put(gbox(2.90, 0.85, 0.34), IM.wood, 9.80, FL + 0.425, BB_Z);
-    put(gbox(3.00, 0.04, 0.40), IM.warmPale, 9.80, FL + 0.87, BB_Z);
+    mass('izakaya-liquor-cabinet', 9.80, FL + 0.425, BB_Z, 2.90, 0.85, 0.34, IM.wood);
+    mass('izakaya-liquor-cabinet-top', 9.80, FL + 0.87, BB_Z, 3.00, 0.04, 0.40, IM.warmPale);
+    // 上面两层瓶架（y 1.42 / 1.86）在头高，但地柜把玩家挡在 z≤17.23，够不到 —— 不登记
     put(gbox(2.90, 0.03, 0.20), IM.wood, 9.80, 1.42, BZ - 0.10);
     put(gbox(2.90, 0.03, 0.20), IM.wood, 9.80, 1.86, BZ - 0.10);
     const BB = BZ - 0.14;         // 17.60 瓶子所在的 z
@@ -5836,15 +5595,20 @@ export function buildIzakaya(): THREE.Group {
   panel(0.46, 0.32, IM.cool, 11.02, 2.42, BZ - 0.02, -1);
 
   // 9-9 冷蔵庫 + 酒樽 + ビールケース（西南角，俯视时压住画面左下）
-  put(gbox(0.50, 1.50, 0.52), IM.frame, 7.88, 0.81, 17.40);
-  put(gbox(0.42, 1.38, 0.02), IM.metal, 7.88, 0.81, 17.13);        // 扉
-  put(gbox(0.03, 0.24, 0.03), IM.metal, 8.06, 0.86, 17.11);        // 把手
-  put(cyl(0.22, 0.22, 0.50, 12), IM.wood, 8.60, 0.37, 16.80);      // 酒樽
+  mass('izakaya-fridge', 7.88, 0.81, 17.40, 0.50, 1.50, 0.52, IM.frame);
+  mass('izakaya-fridge-door', 7.88, 0.81, 17.13, 0.42, 1.38, 0.02, IM.metal);  // 扉
+  put(gbox(0.03, 0.24, 0.03), IM.metal, 8.06, 0.86, 17.11);        // 把手（3cm，在门的盒内）
+  // 酒樽：樽身 φ0.44（y 0.12..0.62）+ 上下两道箍 φ0.452 —— 一件一个外接盒
+  put(cyl(0.22, 0.22, 0.50, 12), IM.wood, 8.60, 0.37, 16.80);
   put(cyl(0.226, 0.226, 0.04, 12), IM.woodDeep, 8.60, 0.20, 16.80);
   put(cyl(0.226, 0.226, 0.04, 12), IM.woodDeep, 8.60, 0.56, 16.80);
+  solid('izakaya-barrel-indoor', 8.60 - 0.226, 8.60 + 0.226, 0.12, 0.62,
+    16.80 - 0.226, 16.80 + 0.226);
   for (let i = 0; i < 2; i++) {                                     // ビールケース
     put(gbox(0.34, 0.24, 0.26), IM.red, 10.55, 0.18 + i * 0.26, 16.85);
   }
+  // 两层叠起来 y 0.06..0.56（0.50 > STEP_UP，挡人）
+  solid('izakaya-beer-cases', 10.55 - 0.17, 10.55 + 0.17, 0.06, 0.56, 16.85 - 0.13, 16.85 + 0.13);
 
   // 9-10 天井：木梁两道 + 吧台上方的吊提灯 + 吊り短冊菜单
   put(gbox(W - 0.1, 0.07, 0.09), IM.woodDeep, CX, 3.08, FZ + 1.35);
@@ -5865,20 +5629,26 @@ export function buildIzakaya(): THREE.Group {
   }
 
   // ---- 10) 外部细节 ----
-  // 空调外机
-  put(gbox(0.60, 0.42, 0.48), IM.slabDark, CX - W / 2 - 0.35, 0.21, CZ - D / 2 + 0.8);
-  // 饮料箱
+  // 空调外机（0.42 高：登记真高，迈得过去）
+  mass('izakaya-ac-unit', CX - W / 2 - 0.35, 0.21, CZ - D / 2 + 0.8, 0.60, 0.42, 0.48, IM.slabDark);
+  // 饮料箱（0.20 高，两个沿 z 排）
   for (let i = 0; i < 2; i++) {
     put(gbox(0.28, 0.20, 0.22), IM.cool, CX + W / 2 + 0.25, 0.10, CZ + 0.5 + i * 0.30);
   }
-  // 垃圾桶
-  put(gbox(0.30, 0.50, 0.30), IM.slabDark, CX + W / 2 + 0.5, 0.25, CZ + D / 2 - 0.6);
+  solid('izakaya-drink-crates', CX + W / 2 + 0.11, CX + W / 2 + 0.39, 0, 0.20, CZ + 0.39, CZ + 0.91);
+  // 垃圾桶（0.50 > STEP_UP，挡人）
+  mass('izakaya-trash-bin', CX + W / 2 + 0.5, 0.25, CZ + D / 2 - 0.6, 0.30, 0.50, 0.30, IM.slabDark);
   // 店先の酒樽 + 植木鉢（居酒屋的门面记号）
   put(cyl(0.20, 0.20, 0.50, 12), IM.wood, 8.35, 0.31, FZ - 0.42);
   put(cyl(0.206, 0.206, 0.05, 12), IM.woodDeep, 8.35, 0.20, FZ - 0.42);
   put(cyl(0.206, 0.206, 0.05, 12), IM.woodDeep, 8.35, 0.46, FZ - 0.42);
+  // 樽身 φ0.40（y 0.06..0.56）+ 两道箍 φ0.412 —— 0.50 > STEP_UP，挡人
+  solid('izakaya-barrel-front', 8.35 - 0.206, 8.35 + 0.206, 0.06, 0.56,
+    FZ - 0.42 - 0.206, FZ - 0.42 + 0.206);
   put(cyl(0.13, 0.16, 0.24, 8), IM.woodDeep, 7.70, 0.12, FZ - 0.30);
   put(cyl(0.20, 0.20, 0.06, 8), IM.green, 7.70, 0.30, FZ - 0.30);
+  // 植木鉢：鉢 φ0.32 + 植栽盘 φ0.40 → 外接盒 r 0.20 / y 0..0.33（0.33 ≤ STEP_UP，迈得过去）
+  solid('izakaya-planter', 7.70 - 0.20, 7.70 + 0.20, 0, 0.33, FZ - 0.30 - 0.20, FZ - 0.30 + 0.20);
 
   /* ---- 11) 店内补光 + 暖光外溢 ----
    * 跟便利店同一套做法：店内两盏暖点光（不投阴影，很便宜），把吧台/酒棚
@@ -5900,8 +5670,10 @@ export function buildIzakaya(): THREE.Group {
   izPoolMat.depthWrite = false;
   const izPool = new THREE.Mesh(new THREE.PlaneGeometry(5.4, 2.6), izPoolMat);
   izPool.geometry.rotateX(-Math.PI / 2);
-  izPool.position.set(CX, 0.014, FZ - 1.5);
+  // 同便利店：抬到 0.036 压住人行道面(0.028)与盲道条(0.035)，否则一半埋在路面下
+  izPool.position.set(CX, 0.036, FZ - 1.5);
   izPool.renderOrder = 2;
+  izPool.name = 'izakaya-light-pool';
   izPool.userData.sceneCollideSkip = true;
   g.add(izPool);
 
@@ -5917,17 +5689,172 @@ export function buildIzakaya(): THREE.Group {
   izHalo.userData.sceneCollideSkip = true;
   g.add(izHalo);
 
+  /* 整组仍标 sceneCollideSkip：碰撞是**声明式**的（见函数开头的 boxes），遍历本来
+   * 就一个盒都不该收 —— 暖帘 / 短冊 / 招牌 / 光池都是零厚度平板，按 mesh 收进来会
+   * 生成加余量的实心盒，正好把门洞堵死。与书店（buildStreetBookStore）同一套做法。 */
   g.userData.sceneCollideSkip = true;
-  return g;
+  /* dynamic：感应门扇。每帧滑，所以**不能**合批（会被烘焙成固定几何）也不能冻结。
+   * doorColliders：门扇的动态盒，随门滑动，调用方必须 concat 进 fpsColliders
+   * 并每帧调 update()，否则门开了玩家还是撞空气（便利店那条路一模一样）。 */
+  return { group: g, dynamic: dyn, boxes, doorColliders, update };
+}
+
+/* ============================================================================
+ * 书店内饰用的两张贴图（书脊带 / 海报）
+ * ========================================================================== */
+
+/**
+ * 书脊带：一格一格是密排的竖书脊。
+ *
+ * 和便利店 goodsStripTexture 同一个道理——隔着玻璃看，逐本建模和一条纹理
+ * 肉眼无差，顶点数差两个量级。但书的排布规律和商品**相反**：商品是宽窄不一、
+ * 高低不齐的包装块；书脊是**等宽等高**的密排竖条，只有少量横放的平装本打破
+ * 节奏。照商品那样画，出来是一排货架、不是一架子书。
+ *
+ * **为什么拼成图集**：书架一共 20 条书脊带。一条一个 256×32 纹理就是 20 个
+ * 材质、20 次 draw call，而且 mergeByMaterial 是按**材质引用**分桶的——材质
+ * 各不相同，20 条一条都合不了。全部画进同一张 256×768 之后 20 条共享一个
+ * 材质，合批直接收成 1 个 mesh。像素总量不变（20×256×32 = 256×640），代价
+ * 只是 UV 里多一次换算。
+ */
+const BOOK_SPINE_ROW_PX = 32;
+/**
+ * 图集行数。当前用到 20 行（两排双向书架各 8 条 + 后墙一排 4 条），留 4 行余量。
+ * 真超了按行号取模复用：多出来的书架跟别人共用一条书脊花纹，隔着玻璃看不出来，
+ * 总好过整个书店渲染不出来。
+ */
+const BOOK_SPINE_ROWS = 24;
+
+let bookSpineTex: THREE.CanvasTexture | null = null;
+let bookSpineCtx: CanvasRenderingContext2D | null = null;
+const bookSpineRowOf = new Map<number, number>();
+
+function bookSpineAtlas(): THREE.CanvasTexture {
+  if (!bookSpineTex || !bookSpineCtx) {
+    const { canvas, ctx } = makeCanvas(256, BOOK_SPINE_ROW_PX * BOOK_SPINE_ROWS);
+    bookSpineCtx = ctx;
+    bookSpineTex = toTexture(canvas);
+  }
+  return bookSpineTex;
+}
+
+/** 把第 row 行的书脊带画进图集（内部按 0..32 的局部坐标画，靠 translate 落行）。 */
+function drawBookSpineRow(ctx: CanvasRenderingContext2D, row: number, seed: number) {
+  const rnd = makeRng(seed);
+  ctx.save();
+  ctx.translate(0, row * BOOK_SPINE_ROW_PX);
+  ctx.fillStyle = '#241f1b';                    // 架内阴影：近黑，书脊才跳得出来
+  ctx.fillRect(0, 0, 256, BOOK_SPINE_ROW_PX);
+  // 旧书：低饱和，但比便利店包装亮一档（书脊是纸与布，不是塑料）
+  const palette = ['#b8a98e', '#8f7f6a', '#a8998a', '#7d8b96', '#9c8f7e', '#b0a392',
+    '#6f7d84', '#a3937c', '#8a8f7a', '#c2b6a0', '#7a6f66', '#93a0a6'];
+  let x = 1;
+  while (x < 255) {
+    const w = 3 + Math.floor(rnd() * 4);        // 3~6px：等宽书脊
+    const h = 26 + Math.floor(rnd() * 4);       // 高度基本齐平
+    ctx.fillStyle = palette[Math.floor(rnd() * palette.length)];
+    ctx.fillRect(x, 32 - h, w, h);
+    if (rnd() > 0.4) {                          // 书脊上的烫印 / 书名带
+      ctx.fillStyle = 'rgba(255,255,255,0.28)';
+      ctx.fillRect(x, 32 - h + 5 + Math.floor(rnd() * 4), w, 1);
+    }
+    x += w + 1;
+  }
+  for (let n = 0; n < 3; n++) {                 // 几本横放的平装本
+    const w = 14 + Math.floor(rnd() * 10);
+    ctx.fillStyle = palette[Math.floor(rnd() * palette.length)];
+    ctx.fillRect(Math.floor(rnd() * (250 - w)), 30, w, 2);
+  }
+  ctx.restore();
+}
+
+/** 取（必要时新建）某条 seed 的书脊在图集里的行号，并把这一行画出来。 */
+function bookSpineRow(seed: number): number {
+  const hit = bookSpineRowOf.get(seed);
+  if (hit !== undefined) return hit;
+  const atlas = bookSpineAtlas();
+  const row = bookSpineRowOf.size % BOOK_SPINE_ROWS;
+  drawBookSpineRow(bookSpineCtx!, row, seed);
+  // 整本书店在首帧之前就画完，这一次标记足够；重复标记也无害。
+  atlas.needsUpdate = true;
+  bookSpineRowOf.set(seed, row);
+  return row;
+}
+
+/** 书脊材质：整本书店只有一份，20 条书脊带共用 → 合批成 1 个 mesh。 */
+let bookSpineMat: THREE.MeshToonMaterial | null = null;
+function bookSpineMaterial(): THREE.MeshToonMaterial {
+  if (!bookSpineMat) {
+    bookSpineMat = toon('#ffffff', {
+      map: bookSpineAtlas(),
+      emissive: '#5a4a3a', emissiveIntensity: 0.45,   // 顶灯下的纸面，别让层板间死黑
+    });
+  }
+  return bookSpineMat;
 }
 
 /**
- * 二层书店——近景高模临街铺，就位在居酒屋东侧的巷位（中景楼后撤后，
+ * 一条书脊带的平面：UV 的 v 轴压到图集的第 row 行。
+ *
+ * 材质是共享的，行信息只能烘进几何——一条就 4 个顶点，代价可以忽略。
+ * 每次都新建（不缓存）：合批收尾会 dispose 掉源几何，缓存下来会留一批
+ * 已经释放的实例给下一次重建。
+ */
+function bookStripGeometry(row: number): THREE.BufferGeometry {
+  const geo = new THREE.PlaneGeometry(1, 1);
+  const uv = geo.attributes.uv as THREE.BufferAttribute;
+  // toTexture 出来的贴图 flipY=true：canvas 顶行 → v=1。第 row 行占
+  // v ∈ [(rows-1-row)/rows, (rows-row)/rows]，所以局部 v=0 是这行的**底**边。
+  for (let i = 0; i < uv.count; i++) {
+    uv.setY(i, (BOOK_SPINE_ROWS - 1 - row + uv.getY(i)) / BOOK_SPINE_ROWS);
+  }
+  uv.needsUpdate = true;
+  return geo;
+}
+
+/**
+ * 店内海报：米白纸 + 朱色标题条 + 几行细字。
+ * 细字只用短横线示意——隔着 8m 街 + 雨幕，有字和没字才是差别。
+ */
+const posterCache = new Map<string, THREE.Texture>();
+function bookPosterTexture(title: string, seed: number): THREE.Texture {
+  const hit = posterCache.get(title);
+  if (hit) return hit;
+  const { canvas, ctx } = makeCanvas(96, 132);
+  const rnd = makeRng(seed);
+  ctx.fillStyle = '#efe8d8';
+  ctx.fillRect(0, 0, 96, 132);
+  ctx.fillStyle = '#7a2f28';                    // 朱色标题条
+  ctx.fillRect(0, 0, 96, 34);
+  ctx.fillStyle = '#f2ede2';
+  ctx.font = 'bold 22px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText(title, 48, 25);
+  ctx.fillStyle = 'rgba(70,60,50,0.55)';
+  for (let i = 0; i < 7; i++) {
+    ctx.fillRect(12, 48 + i * 11, 30 + Math.floor(rnd() * 42), 3);
+  }
+  ctx.fillStyle = '#3a4a5a';
+  ctx.fillRect(12, 118, 72, 2);
+  const tex = toTexture(canvas);
+  posterCache.set(title, tex);
+  return tex;
+}
+
+/**
+ * 四层书店「書泉堂書店」——近景高模临街铺，就位在居酒屋东侧的巷位（中景楼后撤后，
  * 东区最西一栋原让出的位置正好由它接上，居酒屋往东第一家就是它）。
  * 学园都市（原型多摩市）式学生街一层店面：大玻璃橱窗 + 遮阳篷 + 发光店招，
- * 二层是宿舍感的亮窗。与地铁站/便利店/居酒屋一起构成公寓这条街的高模临街排面。
+ * 上部三层是宿舍感的亮窗。与地铁站/便利店/居酒屋一起构成公寓这条街的高模临街排面。
+ *
+ * 1F 是**可进入的**真营业厅（书架/陈列台/柜台/敞开的大门），碰撞盒随几何一并
+ * 交出（声明式，见函数内的 boxes）——玩家能从街面走进来。
+ *
+ * 体量：7.0（面宽）× 11.1（进深）× 12.4m（4 层）。四面退让依据写在
+ * 「位置与体量」那段注释里（北推人行道南缘、南推到路缘石前、东被东邻卡死 0.32m、
+ * 西让居酒屋 1.0m 巷）。**改这里任何一个数之前先读那段注释。**
  */
-export function buildStreetBookStore(): THREE.Group {
+export function buildStreetBookStore(): { group: THREE.Group; boxes: BoxColliderSpec[] } {
   const g = new THREE.Group();
   g.name = 'street-bookstore';
   const r = makeRng(43000);
@@ -5945,74 +5872,360 @@ export function buildStreetBookStore(): THREE.Group {
     dark: toon('#2a2f38'),
     frame: toon('#4a4640'),                      // 橱窗框
     glass: toon('#ffffff', { map: glassTexture(), transparent: true, opacity: 0.5 }),  // 基色白：夜里透出店内暖光板，不发灰
+    /**
+     * 橱窗玻璃：近全透明（便利店橱窗同款 0.085 + depthWrite false）。
+     * 通用 glassTexture 是深蓝渐变，当年配「玻璃后面一块假暖光板」正好；
+     * 现在后面是真书架，同一层幕会把书脊压成一团灰。
+     */
+    shopGlass: toon('#cfe0ee', { finish: 'glass', transparent: true, opacity: 0.085, depthWrite: false }),
     cool: emissive('#dceaf5'),
     warm: emissive('#ffe4b5'),                   // 店内暖光
   };
+  /** 封面 / 书脊的几种布面与纸面颜色（低饱和，别把夜景色温拽跑）。 */
+  const COVER = ['#8f3b34', '#2f4f6d', '#4a6b4a', '#a8763a', '#6b4a6d', '#3f5f66', '#8a7a4e', '#b0a08c'];
 
-  // 位置与体量：面宽 7m、进深 6m、两层 6.6m；北面（-z）临街。
-  // (16.2,21)：西缘 x=12.7 与居酒屋菜单牌(12.3)留 0.4m，雨篷北挑 z≈16.95 不碰路灯(13,16)
-  const CX = 16.2, CZ = 21.0, W = 7.0, D = 6.0, H1 = 3.2, H2 = 3.4;
-  const zN = CZ - D / 2;   // 临街面
+  /* ================= 位置与体量（2026-09 扩建）=================
+   *
+   * 旧值：面宽 7.0 / 进深 6.0 / 两层 6.6m，北墙 z=18.0。四个面都量过之后
+   * 改成 **7.0 × 11.1 / 四层 12.4m**，北墙 z=15.0。每一面的依据：
+   *
+   *   北 z=15.0   人行道（pavement 12.6..15.0）的南边线。旧值 18.0 把 3m 的人行
+   *               道前场空着、店面缩在街后 4m —— 从街上一眼就读成"夹在缝里的小屋"。
+   *               北面 2.1m 外是路灯 (14, 12.9)（STORE_LAMP_X 那排），雨篷北挑到
+   *               z=13.95 也够不着它。
+   *   南 z=26.1   路缘石（planned-street-network，z=26.62）以北 0.52m。旧值 24.0
+   *               白扔 2.5m 进深。
+   *   西 x=12.7   居酒屋东墙 IZ.x1=11.7，留 1.0m 巷子。扩建后巷子只剩 z 14..15
+   *               的一个 1.0×1.0 凹口 —— 两栋楼由此读作"贴建"，是密集商业街常态。
+   *   东 x=19.7   东邻 parcel-23.5-19.6（city-block-41）西墙在 x=20.02..20.10，
+   *               只有 0.32m。**东向不可扩**（逐顶点侵入量过）。
+   *   高 12.4m    1F 营业厅 3.4（吊顶 3.0）+ 3×3.0。旧值 2 层 6.6m 比同排的
+   *               4 层 11.2m / 5 层 14.0m 矮一大截，这才是"太小"的主因；
+   *               向上 40m 内零遮挡（量过），加层是零风险方向。
+   *
+   * 占地 42.0 → 77.7 m²（+85%），营业厅 29.6 → 60.5 m²（×2.0）。
+   *
+   * 顺带修掉两件旧账：
+   *   1. 旧北墙 z=18.0 正好压在人行道（12.6..15.0）与车道（7.6..12.6）的分界线上，
+   *      本身就是个 bug；现在落在人行道南缘。
+   *   2. 便利店拉过巷子的两根电线（exterior.ts awire，终点写死 x=12.7）在旧体量下
+   *      其实是**悬空**的（旧西墙从 z=18 才起）。现在西墙 z 15..26.1，电线真挂上了。
+   */
+  const CX = 16.2, W = 7.0;
+  const zN = 15.0;                    // 临街面（北）
+  const D = 11.1;                     // 进深 → z 15.0..26.1
+  const CZ = zN + D / 2;              // 20.55
+  const FLOORS = 4;                   // 层数（含 1F）
+  const H1 = 3.4;                     // 1F 营业厅
+  const HF = 3.0;                     // 标准层高
+  const H2 = HF * (FLOORS - 1);       // 上部总高 9.0
+  const HT = H1 + H2;                 // 12.4
 
-  // 结构：主身体 + 楼层缝 + 平屋顶
-  put(gbox(W, H1, D), BM.wall, CX, H1 / 2, CZ);
+  // 结构：每层腰线 + 平屋顶（1F 不再是实心盒，见下）
   put(gbox(W, H2, D), BM.wall, CX, H1 + H2 / 2, CZ);
-  put(gbox(W + 0.06, 0.10, D + 0.06), BM.trim, CX, H1 + 0.05, CZ);     // 楼层腰线
-  put(gbox(W + 0.4, 0.22, D + 0.4), BM.trim, CX, H1 + H2 + 0.11, CZ);  // 屋檐
-  put(gbox(W - 0.3, 0.55, D - 0.3), BM.dark, CX, H1 + H2 + 0.28 + 0.27, CZ); // 屋顶压顶围墙
-
-  // 1F 临街：大玻璃橱窗（左 2/3）+ 门（右）。
-  // 剖面由外到内：框(0.10) → 玻璃(0.08) → 暖光板(0.04) → 墙面(0)——
-  // 暖光板必须嵌在玻璃与墙之间，塞进楼体盒内部会被实心墙整个埋掉。
-  put(gbox(W * 0.55, 2.3, 0.06), BM.glass, CX - W * 0.18, 1.55, zN - 0.08);
-  for (const dx of [-W * 0.18 - W * 0.275, -W * 0.18 + W * 0.275]) {
-    put(gbox(0.09, 2.3, 0.10), BM.frame, CX + dx, 1.55, zN - 0.10);
+  for (let f = 1; f < FLOORS; f++) {
+    put(gbox(W + 0.06, 0.10, D + 0.06), BM.trim, CX, H1 + (f - 1) * HF + 0.05, CZ);
   }
-  put(gbox(0.85, 2.1, 0.08), BM.frame, CX + W * 0.30, 1.35, zN - 0.06);   // 门
-  put(gbox(0.70, 0.10, 0.10), BM.cool, CX + W * 0.30, 2.45, zN - 0.04);   // 门楣灯
+  put(gbox(W + 0.4, 0.22, D + 0.4), BM.trim, CX, HT + 0.11, CZ);        // 屋檐
+  put(gbox(W - 0.3, 0.55, D - 0.3), BM.dark, CX, HT + 0.28 + 0.27, CZ); // 屋顶压顶围墙
 
-  // 店内暖光透出（橱窗后面一块亮板，读作书架灯）
-  put(gbox(W * 0.5, 1.9, 0.04), BM.warm, CX - W * 0.18, 1.55, zN - 0.04);
+  /* 屋顶设备：12.4m 的顶若只剩一块 7×11 的死板，从街上一眼看出是"纸盒"。
+   * 楼梯间出屋面 + 两台冷凝器 + 一根排气管，只改轮廓线，不碰任何邻居
+   * （屋顶压顶顶面 13.23，往上 40m 量过是空的）。 */
+  const roofY = HT + 0.28 + 0.55;                                       // 13.23
+  put(gbox(2.2, 1.5, 2.0), BM.wall, CX - W * 0.22, roofY + 0.75, CZ + D * 0.20);
+  put(gbox(2.34, 0.12, 2.14), BM.trim, CX - W * 0.22, roofY + 1.56, CZ + D * 0.20);
+  for (const dz of [-D * 0.26, -D * 0.10]) {
+    put(gbox(0.9, 0.7, 0.5), BM.dark, CX + W * 0.26, roofY + 0.35, CZ + dz);
+  }
+  put(new THREE.CylinderGeometry(0.12, 0.12, 0.9, 8), BM.dark, CX + W * 0.04, roofY + 0.45, CZ + D * 0.32);
 
-  // 遮阳篷（临街，米色，微斜）+ 支架
+  /* ================= 1F 剖面：临街面 → 营业厅 → 后段实心 =================
+   *
+   * 旧版 1F 是**整块实心体量**（`gbox(W,H1,D)`），玻璃后面贴一块暖光板冒充店内。
+   * 玩家能从街上走到这里（外置钢梯下到街面，街面是一整张 floor 碰撞盒），所以
+   * 这里挖成真营业厅：地板 / 吊顶 / 两侧内墙 / 前墙三段墙垛，中间 4.4m 进深摆
+   * 书架、陈列台、柜台。只做「看得见的那一面」的话，一进门就是穿帮。
+   *
+   * 前墙不另起一层皮：三段墙垛 + 窗楣 + 门楣正好把立面补满，窗与门两个洞留在
+   * 原位（沿用旧值 zF = zN - 0.08，橱窗本来就是微微挑出楼线的）。
+   *
+   * 碰撞走**声明式盒子**（与几何同一行同步登记，两边不许各写一份数字），不走
+   * buildSceneColliders 遍历：橱窗玻璃是 0.085 透明度的近全透明材质，遍历会按
+   * 「transparent && opacity < 0.5」整块跳过，橱窗就挡不住人了。
+   */
+  const ID = 9.0;                   // 营业厅进深（z 15.0 → 24.0，占掉 11.1m 里的 9.0）
+  const IH = 3.0;                   // 吊顶高（H1=3.4，顶上 0.4 是 2F 楼板）
+  const FW = 0.14;                  // 内墙厚
+  const FP = 0.12;                  // 临街前墙厚
+  const zB = zN + ID;               // 店内后墙 24.0
+  // 前墙中心与 2F 楼体齐平（zN）。玻璃 / 门窗框另给一个 zG：嵌在墙厚之内、
+  // 比墙外表面凹 5cm——窗框和门框再各自往外挑一点，立面才有层次。
+  const zW = zN;
+  const zG = zN - 0.01;
+  const WX0 = CX - W / 2, WX1 = CX + W / 2;      // 12.7 / 19.7
+  // 洞口不再按 W 的百分比推：7m 面宽下百分比会把西端垛压到 0.315m（太薄，
+  // 从街上读不出"柱"），改直接写死，三段墙垛 0.45 / 0.85 / 0.90 更匀。
+  const GX0 = 13.15, GX1 = 17.05;   // 橱窗洞口 3.90m
+  const DX0 = 17.90, DX1 = 18.80;   // 门洞 0.90m
+  const GY1 = 2.90, DY1 = 2.45;     // 窗顶 / 门顶（1F 加高到 3.4，门窗跟着抬高）
+  const boxes: BoxColliderSpec[] = [];
+  const solid = (id: string, x: number, y: number, z: number, sx: number, sy: number, sz: number) =>
+    boxes.push({ id, pos: [x, y, z], size: [sx, sy, sz] });
+  /** 实体块：建几何 + 同步登记碰撞盒。 */
+  const mass = (id: string, x: number, y: number, z: number, sx: number, sy: number, sz: number, mat: THREE.Material) => {
+    put(gbox(sx, sy, sz), mat, x, y, z);
+    solid(id, x, y, z, sx, sy, sz);
+  };
+
+  const IM = {
+    wall: toon('#cfc7b6'),                        // 店内墙：比外墙暖一档的米白
+    ceil: toon('#c6bdac'),
+    floor: toon('#8a6f52', { finish: 'soft' }),   // 木地板
+    wood: toon('#7d6247'),                        // 书架木作
+    woodDark: toon('#5b4634'),
+    board: toon('#6b543d'),
+    metal: toon('#7a828c', { finish: 'metal' }),
+    dark: toon('#2f2a26'),
+    ceilLight: emissive('#fff2d8', { side: THREE.DoubleSide }),   // 吊顶灯带（DoubleSide：横放的平面要能两面读）
+  };
+
+  // 后段实心体量：撑住 2F，同时就是店内的后墙
+  mass('bookstore-back-mass', CX, H1 / 2, (zB + CZ + D / 2) / 2, W, H1, CZ + D / 2 - zB, BM.wall);
+  /* 吊顶（= 2F 楼板底面）与两侧内墙的 z 从**前墙内表面**（zIn = zN + FP/2）起，
+   * 不从前墙中心起。旧版取 `zN + ID/2 - 0.04`（z 14.92..24.0），于是西内墙的外皮、
+   * 吊顶的外皮与前墙垛的外皮**都在 x=12.70、法线同向**，重叠 0.272 m² —— 从巷子里
+   * 看西墙会闪（东墙同理，x=19.70）。改成与前墙垛对接（butt joint），共面面积归零。 */
+  const zIn = zN + FP / 2;          // 前墙内表面 15.06
+  put(gbox(W, H1 - IH, zB - zIn), IM.ceil, CX, IH + (H1 - IH) / 2, (zIn + zB) / 2);
+  mass('bookstore-wall-w', WX0 + FW / 2, IH / 2, (zIn + zB) / 2, FW, IH, zB - zIn, IM.wall);
+  mass('bookstore-wall-e', WX1 - FW / 2, IH / 2, (zIn + zB) / 2, FW, IH, zB - zIn, IM.wall);
+  // 临街前墙：三段墙垛（窗与门之间那块是墙，不是玻璃）
+  mass('bookstore-pier-w', (WX0 + GX0) / 2, H1 / 2, zW, GX0 - WX0, H1, FP, BM.wall);
+  mass('bookstore-pier-m', (GX1 + DX0) / 2, H1 / 2, zW, DX0 - GX1, H1, FP, BM.wall);
+  mass('bookstore-pier-e', (DX1 + WX1) / 2, H1 / 2, zW, WX1 - DX1, H1, FP, BM.wall);
+  put(gbox(GX1 - GX0, H1 - GY1, FP), BM.wall, (GX0 + GX1) / 2, (GY1 + H1) / 2, zW);  // 窗楣
+  put(gbox(DX1 - DX0, H1 - DY1, FP), BM.wall, (DX0 + DX1) / 2, (DY1 + H1) / 2, zW);  // 门楣
+  // 地板：贴地薄**面**而不是厚盒。厚盒会生成一个 0.13m 高的碰撞盒，而玩家的落脚面
+  // 仍在街道 floor(y=0) 上——进店就陷进地板 12cm；平面的 AABB 高度为 0，
+  // collidesAt 按「脚踝以下」整块跳过，脚与地面齐平。
+  const floorGeo = new THREE.PlaneGeometry(W - FW * 2, ID + 0.08);
+  floorGeo.rotateX(-Math.PI / 2);
+  const shopFloor = new THREE.Mesh(floorGeo, IM.floor);
+  shopFloor.position.set(CX, 0.02, zN + ID / 2 - 0.04);
+  shopFloor.receiveShadow = true;
+  g.add(shopFloor);
+
+  /* ---- 橱窗（左 2/3）+ 敞开的门（右）---- */
+  // 玻璃跟便利店橱窗同一档：finish glass + 低透明度 + depthWrite false，
+  // 隔着它看店内几乎无衰减（深蓝的通用玻璃贴图是给「假内饰」用的，会把书架压成灰）。
+  put(gbox(GX1 - GX0, GY1 - 0.4, 0.06), BM.shopGlass, (GX0 + GX1) / 2, (0.4 + GY1) / 2, zG);
+  put(gbox(GX1 - GX0, 0.4, 0.14), BM.wall, (GX0 + GX1) / 2, 0.2, zG);            // 窗下矮墙
+  put(gbox(GX1 - GX0, 0.09, 0.12), BM.frame, (GX0 + GX1) / 2, GY1 - 0.045, zG);  // 窗顶横档
+  for (const mx of [GX0, CX - W * 0.18, GX1]) {                                  // 两根边梃 + 一根中梃
+    put(gbox(0.09, GY1, 0.10), BM.frame, mx, GY1 / 2, zG - 0.03);
+  }
+  solid('bookstore-shopfront', (GX0 + GX1) / 2, (0.4 + GY1) / 2, zG, GX1 - GX0, GY1 - 0.4, 0.24);
+  // 门框 + 门楣灯 + 敞开的那扇
+  /* 三根 BM.frame 的收口关系（旧版三根都顶到 DY1、门槛也整宽，四组共面）：
+   *   ① 竖梃**缩到门楣下沿 2.37**、门楣横贯整个门洞 17.90..18.80 压在竖梃上。
+   *      旧版竖梃外侧面（x=17.90/18.80）与门楣端面同在 17.90/18.80 且法线同向，
+   *      共面 0.061×2.05 ×2 组；竖梃顶面 y=2.45 又与门楣顶面同轴同向，再叠
+   *      0.06×0.12 ×2 组。现在门楣底面与竖梃顶面只是 butt joint（法线相反）。
+   *   ② 门槛铜条**缩到两竖梃内侧**（17.97..18.73）。旧版整宽 17.90..18.80，
+   *      端面又与竖梃外侧面共面 0.04×0.14 ×2 组。
+   * 改完共面面积归零。 */
+  put(gbox(0.07, DY1 - 0.08, 0.14), BM.frame, DX0 + 0.035, (DY1 - 0.08) / 2, zG);
+  put(gbox(0.07, DY1 - 0.08, 0.14), BM.frame, DX1 - 0.035, (DY1 - 0.08) / 2, zG);
+  put(gbox(DX1 - DX0, 0.08, 0.14), BM.frame, (DX0 + DX1) / 2, DY1 - 0.04, zG);
+  put(gbox(0.90, 0.09, 0.08), BM.cool, (DX0 + DX1) / 2, DY1 + 0.09, zW - FP / 2 - 0.05);
+  // 门扇转 180° 贴到门洞西侧中垛的店内面（比前墙内表面再进 3cm）。
+  // 不转开的话，斜着门扇的 AABB 会切进洞口，0.85m 的洞只剩 ~0.4m 能过。
+  put(gbox(0.80, DY1 - 0.08, 0.045), BM.shopGlass, DX0 - 0.42, (DY1 - 0.08) / 2, zW + FP / 2 + 0.03, Math.PI);
+  put(gbox(0.03, 0.42, 0.03), IM.metal, DX0 - 0.10, 1.02, zW + FP / 2 - 0.01);   // 门把手
+  put(gbox(DX1 - DX0 - 0.14, 0.04, 0.16), BM.trim, (DX0 + DX1) / 2, 0.02, zG);   // 门槛铜条
+
+  /* ================= 店内陈设 ================= */
+
+  const bookStripMat = bookSpineMaterial();
+  /**
+   * 书架：木框 + 四层层板，每层贴一条书脊带。
+   *
+   * `faces` 给书脊贴哪几面（-1 = 朝街 / +1 = 朝店内）。中间两排双向都贴，
+   * 后墙那排只贴朝街的一面——朝墙那面贴了没人看得见，白加顶点。
+   */
+  const shelf = (id: string, x: number, z: number, len: number, dep: number, hgt: number, seed: number, faces: number[]) => {
+    const rows = 4;
+    put(gbox(len, 0.07, dep), IM.wood, x, hgt - 0.035, z);                     // 顶板
+    put(gbox(len, 0.09, dep), IM.woodDark, x, 0.045, z);                       // 踢脚
+    /* 两侧立板**外皮缩 4mm、顶面降 1cm**：旧版立板外皮与顶板外皮同在 ±len/2、
+     * 顶面与顶板顶面同在 y=hgt —— 两处共面且**法线同向**，木色 #7d6247 与深木
+     * #5b4634 会闪（共面扫描实测 x 向 0.034 m² + y 向 0.029 m²，各 6 组）。
+     * 缩 4mm 而不是 1mm：扫描器的「靠太近」带是 0.5~2mm，1mm 会被收进那条
+     * 噪声表里；4mm 既在安全距离外，又让顶板天然成为一圈 4mm 的压边。 */
+    put(gbox(0.06, hgt - 0.01, dep), IM.woodDark, x - len / 2 + 0.034, (hgt - 0.01) / 2, z);
+    put(gbox(0.06, hgt - 0.01, dep), IM.woodDark, x + len / 2 - 0.034, (hgt - 0.01) / 2, z);
+    for (let i = 1; i <= rows; i++) {
+      const y = (hgt / (rows + 1)) * i;
+      put(gbox(len - 0.14, 0.045, dep - 0.03), IM.board, x, y, z);
+      const bh = (hgt / (rows + 1)) * 0.74;
+      for (const s of faces) {
+        const stripSeed = seed * 37 + i * 11 + (s > 0 ? 0 : 5);
+        const strip = new THREE.Mesh(bookStripGeometry(bookSpineRow(stripSeed)), bookStripMat);
+        strip.scale.set(len - 0.2, bh, 1);
+        strip.position.set(x, y + 0.023 + bh / 2, z + s * (dep / 2 - 0.012));
+        if (s < 0) strip.rotation.y = Math.PI;              // 平面法线朝 +z，朝街那面要翻过来
+        g.add(strip);
+      }
+    }
+    solid(id, x, hgt / 2, z, len, hgt, dep);
+  };
+
+  /** 一摞平放的书：3~5 本，每本略转一点角度。 */
+  const pile = (x: number, z: number, n: number, w: number, d: number, seed: number) => {
+    const rnd = makeRng(seed);
+    let y = 0.02;
+    for (let i = 0; i < n; i++) {
+      const h = 0.026 + rnd() * 0.02;
+      put(gbox(w * (0.88 + rnd() * 0.24), h, d * (0.88 + rnd() * 0.24)),
+        toon(COVER[i % COVER.length]), x, y + h / 2, z, (rnd() - 0.5) * 0.42);
+      y += h;
+    }
+  };
+
+  /* 陈设按新的 6.72 × 9.0 营业厅重排（旧版是 6.72 × 4.4，三排书架就塞满了）。
+   * 动线：门在西偏东（x 17.90..18.80）→ 进店就是东侧主走道（x 17.90..19.56，
+   * 宽 1.66m，一直通到后墙柜台）→ 想看书往西拐进三条横走道。
+   * 书架一律靠西端顶死（西端 x=12.90，内墙面 12.84），把宽度让给主走道。 */
+
+  // 三排双向书架：长边平行橱窗，从街上望进去就是一排排正对的书脊
+  shelf('bookstore-shelf-a', 15.40, 17.90, 5.00, 0.48, 1.85, 5, [-1, 1]);
+  shelf('bookstore-shelf-b', 15.40, 19.30, 5.00, 0.48, 1.85, 7, [-1, 1]);
+  shelf('bookstore-shelf-c', 15.40, 20.70, 5.00, 0.48, 1.85, 13, [-1, 1]);
+  // 后墙一排（员工门以西，朝街），把后墙从一块平板变成书架
+  shelf('bookstore-shelf-back', 14.55, 23.70, 3.30, 0.42, 2.10, 11, [-1]);
+
+  // 陈列台：正对橱窗，从街上第一眼看到的就是它——平摊的新刊
+  put(gbox(1.70, 0.06, 0.74), IM.wood, 15.75, 0.74, 16.15);
+  put(gbox(1.44, 0.68, 0.48), IM.woodDark, 15.75, 0.34, 16.15);
+  solid('bookstore-table', 15.75, 0.37, 16.15, 1.70, 0.74, 0.74);
+  for (let i = 0; i < 4; i++) pile(15.05 + i * 0.42, 16.15, 2 + (i % 2), 0.34, 0.26, 900 + i);
+
+  // 杂志架：斜面矮柜，封面朝上斜着摆（橱窗西端，街上看得见）
+  put(gbox(1.15, 0.72, 0.42), IM.wood, 13.60, 0.36, 15.85);
+  put(gbox(1.15, 0.05, 0.50), IM.woodDark, 13.60, 0.755, 15.82).rotateX(-0.22);
+  solid('bookstore-rack', 13.60, 0.39, 15.85, 1.15, 0.78, 0.50);
+  for (let i = 0; i < 3; i++) {
+    put(gbox(0.30, 0.02, 0.40), toon(COVER[(i * 3) % COVER.length]), 13.06 + i * 0.36, 0.80, 15.80).rotateX(-0.22);
+  }
+
+  // 柜台：后墙东段（东侧主走道尽头），收银 + 一摞待上架的书
+  put(gbox(1.30, 0.92, 0.45), IM.wood, 18.55, 0.46, 23.70);
+  put(gbox(1.40, 0.07, 0.52), IM.woodDark, 18.55, 0.955, 23.70);
+  solid('bookstore-counter', 18.55, 0.49, 23.70, 1.40, 0.99, 0.52);
+  put(gbox(0.40, 0.28, 0.32), IM.dark, 18.95, 1.13, 23.70);        // 收银机
+  put(gbox(0.42, 0.02, 0.34), BM.cool, 18.95, 1.28, 23.70);
+  pile(17.95, 23.68, 4, 0.32, 0.24, 7711);
+
+  // 后墙：员工门（关着——楼上仓库的入口，夹在后墙书架与柜台之间）
+  /* 门板 z 中心 zB-0.04（前皮 23.925），两侧金属门套必须**比门板再凸出 5mm**：
+   * 旧版门套 z 中心 zB-0.05（前皮也是 23.925），与门板前皮同轴同向共面，
+   * 共面扫描实测两组 0.03×2.05 = 0.0615 m² —— 门套横条会在门板上闪。 */
+  put(gbox(0.85, 2.05, 0.07), IM.woodDark, 17.00, 1.025, zB - 0.04);
+  for (const jx of [16.575, 17.425]) put(gbox(0.06, 2.05, 0.05), IM.metal, jx, 1.025, zB - 0.055);
+  put(gbox(0.03, 0.42, 0.03), IM.metal, 16.66, 1.02, zB - 0.08);   // 门把手
+  put(gbox(0.70, 0.20, 0.03), BM.cool, 17.00, 2.32, zB - 0.06);    // 「従業員口」灯牌
+
+  /* 两幅海报 + 一个空框：**挂东内墙**，不挂后墙。
+   * 旧版挂后墙是因为旧营业厅只有 4.4m 深、东墙只有 4.4m 长，一眼看完；
+   * 现在东墙 9.0m 长且正对主走道，是店里最大的一块空白墙面。
+   * 后墙则被 2.10m 高的书架和柜台占满了，挂上去全被挡住。 */
+  for (const [pz, label, sd] of [[18.20, '新刊', 91], [19.60, '文庫', 92]] as [number, string, number][]) {
+    const poster = new THREE.Mesh(new THREE.PlaneGeometry(0.62, 0.86), toon('#ffffff', { map: bookPosterTexture(label, sd) }));
+    poster.position.set(WX1 - FW - 0.02, 2.10, pz);
+    poster.rotation.y = -Math.PI / 2;                               // 牌面朝店内（-x 方向）
+    g.add(poster);
+  }
+  put(gbox(0.03, 0.86, 0.62), IM.woodDark, WX1 - FW - 0.015, 2.10, 21.00); // 东墙空框
+
+  // 吊顶灯带：五条暖白长条，是「店里亮着」的全部来源（9m 进深，三条盖不住）
+  const ceilStripGeo = new THREE.PlaneGeometry(6.2, 0.32);
+  ceilStripGeo.rotateX(-Math.PI / 2);
+  for (const z of [16.60, 18.40, 20.20, 22.00, 23.50]) {
+    const strip = new THREE.Mesh(ceilStripGeo, IM.ceilLight);
+    strip.position.set(16.20, IH - 0.02, z);
+    g.add(strip);
+  }
+  // 两盏暖色点光做真实填充：雨夜方向光进不来，只靠自发光面的话书架全是死的。
+  // 不投阴影，很便宜（便利店前厅同款做法）。9m 进深一盏照不到两头。
+  for (const z of [18.00, 22.00]) {
+    const inLight = new THREE.PointLight(0xffe6c0, 10, 13, 2);
+    inLight.position.set(16.20, IH - 0.35, z);
+    g.add(inLight);
+  }
+
+  // 角落的几摞书（不上架的新刊/退货）
+  pile(13.10, 22.40, 5, 0.36, 0.28, 9101);
+  pile(19.05, 22.30, 3, 0.32, 0.24, 9102);
+  pile(13.10, 17.20, 4, 0.30, 0.24, 9103);
+
+  // 遮阳篷（临街，米色，微斜）+ 支架。1F 加高到 3.4 后篷底抬到 3.22，北挑
+  // 1.1m 落在 z 13.95..15.05 —— 北面 1.05m 外就是路灯 (14, 12.9)，够不着。
   put(gbox(W * 0.8, 0.06, 1.1), BM.trim, CX, H1 - 0.18, zN - 0.5).rotateX(0.10);
   for (const dx of [-W * 0.36, W * 0.36]) {
     put(gbox(0.05, 0.55, 0.05), BM.dark, CX + dx, H1 - 0.45, zN - 0.06);
   }
 
-  // 店招（发光面板 + 深色底板，挂二层檐下）
+  // 门侧海报框（中間柱 x 17.05..17.90，0.85m 宽）：临街面唯一能贴纸的地方——
+  // 西边整片是玻璃、东边是门洞，中间这根垛不挂点东西就只剩一条白墙。
+  put(gbox(0.68, 0.92, 0.05), BM.frame, (GX1 + DX0) / 2, 1.72, zN - 0.08);
+  const doorPoster = new THREE.Mesh(new THREE.PlaneGeometry(0.58, 0.82),
+    toon('#ffffff', { map: bookPosterTexture('話題', 97) }));
+  doorPoster.position.set((GX1 + DX0) / 2, 1.72, zN - 0.11);
+  doorPoster.rotation.y = Math.PI;   // 牌面朝 -z（临街）
+  g.add(doorPoster);
+
+  // 店招（发光面板 + 深色底板，挂 1F 腰线上方）。
+  // 楼体从 6.6m 长到 12.4m，2.6m 的牌子在立面上会缩成一条，放到 3.2m。
   const signCanvas = (() => {
-    const { canvas, ctx } = makeCanvas(192, 48);
+    const { canvas, ctx } = makeCanvas(256, 64);
     ctx.fillStyle = '#233240';
-    ctx.fillRect(0, 0, 192, 48);
+    ctx.fillRect(0, 0, 256, 64);
     ctx.fillStyle = '#f2ede2';
-    ctx.font = 'bold 26px sans-serif';
+    ctx.font = 'bold 34px sans-serif';
     ctx.textAlign = 'center';
-    ctx.fillText('書泉堂書店', 96, 34);
+    ctx.fillText('書泉堂書店', 128, 45);
     return toTexture(canvas);
   })();
   const signMat = emissive('#ffffff', { map: signCanvas });   // 基色走白，颜色全在贴图（基色会乘进贴图，深底色会压暗字）
-  const sign = new THREE.Mesh(new THREE.PlaneGeometry(2.6, 0.65), signMat);
-  sign.position.set(CX, H1 + 0.55, zN - 0.10);
+  /* 店招中心 y = H1 + 0.50（3.90）：底板高 0.90 ⇒ 顶边正好 4.35，**等于 2F 窗洞下沿**
+   * （窗心 fy+1.70=5.10，高 1.5 ⇒ 4.35..5.85）。旧版取 H1+0.62（4.02）顶边 4.47，
+   * 与窗洞下沿重叠 0.12m —— 底板与窗玻璃同在 z 14.95..15.01，正面共面 0.138 m²，
+   * 从街上正视立面时会闪。顶边对齐后两者只是对接（法线相反），共面面积归零。 */
+  const sign = new THREE.Mesh(new THREE.PlaneGeometry(3.2, 0.80), signMat);
+  sign.position.set(CX, H1 + 0.50, zN - 0.10);
   sign.rotation.y = Math.PI;   // 牌面朝 -z（临街），默认 +z 会转向楼内只剩背板
   g.add(sign);
-  put(gbox(2.75, 0.75, 0.06), BM.frame, CX, H1 + 0.55, zN - 0.02);
+  put(gbox(3.35, 0.90, 0.06), BM.frame, CX, H1 + 0.50, zN - 0.02);
 
-  // 2F 窗：临街三扇（两亮一暗）+ 侧墙各一扇
-  for (let i = 0; i < 3; i++) {
-    const lit = i !== 1;
-    put(gbox(1.15, 1.5, 0.06), lit ? BM.warm : BM.glass,
-      CX - W * 0.3 + i * W * 0.3, H1 + 1.7, zN - 0.02);
-    put(gbox(1.25, 1.6, 0.05), BM.frame, CX - W * 0.3 + i * W * 0.3, H1 + 1.7, zN - 0.015);
-  }
-  for (const s of [-1, 1] as number[]) {
-    put(gbox(0.05, 1.3, 1.1), r() > 0.5 ? BM.warm : BM.glass,
-      CX + s * (W / 2 + 0.01), H1 + 1.7, CZ + s * 0.8);
+  // 上部三层窗：临街每层三扇 + 两侧山墙各一扇（侧窗逐层错位，不然是一条竖井）
+  for (let f = 1; f < FLOORS; f++) {
+    const fy = H1 + (f - 1) * HF;
+    for (let i = 0; i < 3; i++) {
+      const lit = (i + f) % 3 !== 1;   // 每层暗一扇，且暗的位置逐层挪
+      const wx = CX - W * 0.3 + i * W * 0.3;
+      put(gbox(1.15, 1.5, 0.06), lit ? BM.warm : BM.glass, wx, fy + 1.70, zN - 0.02);
+      put(gbox(1.25, 1.6, 0.05), BM.frame, wx, fy + 1.70, zN - 0.015);
+    }
+    for (const s of [-1, 1] as number[]) {
+      put(gbox(0.05, 1.3, 1.1), r() > 0.5 ? BM.warm : BM.glass,
+        CX + s * (W / 2 + 0.01), fy + 1.70, CZ + s * (0.6 + (f - 1) * 1.4));
+    }
   }
 
-  // 空调外机 + 落水管
-  put(gbox(0.6, 0.4, 0.3), BM.dark, CX - W / 2 - 0.2, H1 + 1.2, CZ + 1.6);
-  put(gbox(0.07, H1 + H2, 0.07), BM.dark, CX + W / 2 + 0.06, (H1 + H2) / 2, zN + 0.15);
+  // 空调外机（二层临街西端，避开窗与店招）+ 落水管（东山墙，通到新檐口 12.4m）
+  put(gbox(0.6, 0.4, 0.3), BM.dark, CX - W / 2 + 0.45, H1 + 0.50, zN - 0.22);
+  put(gbox(0.07, HT, 0.07), BM.dark, CX + W / 2 + 0.06, HT / 2, zN + 0.15);
 
   // 门口台阶 + 单车（单车放东侧，西侧贴居酒屋菜单牌/饮料箱）
   put(gbox(1.1, 0.12, 0.8), BM.trim, CX + W * 0.30, 0.06, zN - 0.4);
@@ -6040,12 +6253,35 @@ export function buildStreetBookStore(): THREE.Group {
   g.add(sideSign);
   put(gbox(0.05, 1.75, 0.62), BM.frame, CX - W / 2 - 0.045, H1 - 1.15, zN + 0.35); // 背板
 
-  // 西墙一层贴报栏（西侧不是全 blank 的山墙）
+  // 西墙一层贴报栏（西侧不是全 blank 的山墙；这段墙朝西对着居酒屋与便利店
+  // 之间的空地，203 阳台斜看得到）
   put(gbox(0.06, 1.1, 0.8), BM.frame, CX - W / 2 - 0.02, 1.75, CZ + 1.2);
   put(gbox(0.04, 0.9, 0.6), BM.cool, CX - W / 2 - 0.05, 1.75, CZ + 1.2);
 
+  // 橱窗暖光洒到湿人行道上。书店是这一排里唯一「橱窗比门大」的店——
+  // 暖光板 BM.warm 铺了 W*0.55 宽，但地面此前毫无回应，夜里橱窗像悬空的灯箱。
+  // 口朝 -z（zN 是临街面），所以光池铺在 zN 以北；y=0.036 压住铺装面。
+  const bookPoolMat = emissive('#ffe4b5', {
+    map: radial('#ffe8c0', 'rgba(255,215,165,0)'),
+    transparent: true, opacity: 0.26, side: THREE.DoubleSide,
+  });
+  bookPoolMat.blending = THREE.AdditiveBlending;
+  bookPoolMat.depthWrite = false;
+  // 进深 2.4m：北墙落到人行道南缘（15.0）之后，光池正好铺满 12.6..15.0 整条带，
+  // 再深就洒到车行道上了（旧值 2.8 / zN-1.4 是配旧北墙 18.0 的）。
+  const bookPool = new THREE.Mesh(new THREE.PlaneGeometry(8.0, 2.4), bookPoolMat);
+  bookPool.geometry.rotateX(-Math.PI / 2);
+  bookPool.position.set(CX, 0.036, zN - 1.2);
+  bookPool.renderOrder = 2;
+  bookPool.name = 'bookstore-light-pool';
+  bookPool.userData.sceneCollideSkip = true;
+  g.add(bookPool);
+
+  // 整组仍标 sceneCollideSkip：书店的碰撞是**声明式**的（见函数开头的 boxes），
+  // 不走 buildSceneColliders 遍历——橱窗玻璃近全透明，遍历会整块跳过它，
+  // 玩家就能从橱窗穿进店里。
   g.userData.sceneCollideSkip = true;
-  return g;
+  return { group: g, boxes };
 }
 
 /**
@@ -6089,9 +6325,19 @@ export function buildSmallPark(): THREE.Group {
     metal: toon('#8a9099', { finish: 'metal' }),
   };
 
-  // 公园位置：公寓西侧（x=-24~-16, z=2~7），与街道有矮围栏分隔
-  const PX0 = -24.5, PX1 = -15.5;   // 公园 x 范围
-  const PZ0 = 1.5, PZ1 = 7.5;       // 公园 z 范围
+  /*
+   * 公园位置：公寓西侧外廊之外（x -40.4~-31.4，z -13.3~-7.3）。
+   *
+   * 旧版写的是 x -24.5~-15.5 / z 1.5~7.5，那个位置**根本不存在**：公寓一层南墙
+   * 在 z=4.7，路缘在 7.6，中间只有 2.9m，而公园进深 6m。结果 13 个构件里 10 个
+   * 埋进公寓一层实心体量（实测最深 2.52m，树在 z=3.0、长椅在 z=2.5，都在楼里）。
+   * check-urban-plan.mjs 抓不到——它只校验程序化平面，手工件不在它的视野内。
+   *
+   * 现在整块落在公寓外壳（x≥-31.38）以西：x 上完全没有交集，z 也就无所谓了。
+   * 这是这一带唯一一块真正空着、又能被 203 的西侧视线看到的场地。
+   */
+  const PX0 = -40.4, PX1 = -31.4;   // 公园 x 范围（东边界卡在公寓西皮之外）
+  const PZ0 = -13.3, PZ1 = -7.3;    // 公园 z 范围（PZ1 那侧贴公寓电梯井，见下）
   const PCX = (PX0 + PX1) / 2;      // 公园中心 x
   const PCZ = (PZ0 + PZ1) / 2;      // 公园中心 z
   const PW = PX1 - PX0, PD = PZ1 - PZ0;
@@ -6107,8 +6353,11 @@ export function buildSmallPark(): THREE.Group {
   g.add(parkGround);
 
   // ---- 2) 低矮围栏（公园边界）----
+  /* ⚠️ 这里两个方向的注释早先写反了：本项目 **+Z 是南**（见公寓剖面注释「+Z 北→南」），
+   * 所以 z 更大的 PZ1(-7.3) 是**南**边（贴公寓电梯井那侧）、PZ0(-13.3) 是**北**边。
+   * 下面按实际方位写。 */
   const fenceH = 0.45, fenceSeg = 0.6;
-  // 北边（z=PZ1）
+  // 南边（z=PZ1，这一排贴着公寓电梯井北皮 z=-7.34）
   for (let fx = PX0; fx < PX1; fx += fenceSeg) {
     const sw = Math.min(fenceSeg, PX1 - fx);
     if (sw > 0.1) put(gbox(sw, fenceH, 0.04), PM.wood, fx + sw / 2, fenceH / 2, PZ1);
@@ -6118,7 +6367,7 @@ export function buildSmallPark(): THREE.Group {
     const sd = Math.min(fenceSeg, PZ1 - fz);
     if (sd > 0.1) put(gbox(0.04, fenceH, sd), PM.wood, PX0, fenceH / 2, fz + sd / 2);
   }
-  // 围栏入口（南边中间留 2m 口子）
+  // 围栏入口（北边中间留 2m 口子）
   const gateW = 2.0, gateCx = PCX;
   for (let fx = PX0; fx < gateCx - gateW / 2; fx += fenceSeg) {
     const sw = Math.min(fenceSeg, gateCx - gateW / 2 - fx);
@@ -6130,10 +6379,26 @@ export function buildSmallPark(): THREE.Group {
   }
 
   // ---- 3) 树木（3 棵，复用 buildTree）----
+  // 第 2 棵从 PCX+3 收到 PCX+1.6：树冠半径约 2m，站在 x=-32.9 时树冠东缘到 -30.92，
+  // 而公寓西皮在 -31.38 —— 会穿墙 0.46m（check-district-overlaps 报
+  // apartment-shell ∩ small-park）。西侧那两棵冠幅探出围栏是正常的（外面是空地），
+  // 东侧不行：那边是公寓实体。
+  //
+  /* 2026-09-21 用户报「小公园的树穿模进公寓，将树北移少许」。
+   * 实测（`tmp/_probe-park-trees.mjs`，顶点云按树心聚类）真正的元凶是**公寓电梯井**：
+   * `apartment-lift-tower` 的世界 AABB 是 x[-36.87,-30.9] / z[-7.34,4.84] —— 它比
+   * 公寓外壳（APT_X0=-31）还往西探 5.9m，所以「公园在 x 上完全避开公寓外壳」这条
+   * 早先的论证对电梯井并不成立。三棵树的世界 AABB：
+   *   树1 (-39.9,-11.8) x[-41.96,-38.04] z[-13.45,-10.15]  → x 上离电梯井还差 1.17m，安全
+   *   树2 (-34.3, -8.3) x[-35.72,-32.32] z[ -9.95, -6.79]  → 树冠南缘 -6.79 越过井北皮
+   *                                                            -7.34 达 **0.551m**，实打实穿模
+   *   树3 (-36.9, -9.3) x[-39.04,-35.11] z[-12.24, -7.63]  → 只剩 0.292m 余量，太薄
+   * 北移 = z 减小（本项目 +Z 由北向南，见上方公寓剖面注释）。树2 北移 0.9 ⇒ 南缘
+   * -7.69（余 0.35m）；树3 北移 0.4 ⇒ 南缘 -8.03（余 0.69m）。树1 不动。 */
   const treePositions: Array<[number, number]> = [
     [PCX - 4, PCZ - 1.5],
-    [PCX + 3, PCZ + 2],
-    [PCX - 1, PCZ + 1],
+    [PCX + 1.6, PCZ + 1.1],     // 原 PCZ+2，北移 0.9
+    [PCX - 1, PCZ + 0.6],       // 原 PCZ+1，北移 0.4
   ];
   for (const [tx, tz] of treePositions) {
     const tree = buildTree(tx, tz, 4.5 + r() * 1.5, r() * 10000 | 0, { trunk: PM.woodDeep, leaf: PM.leaf, leafDeep: PM.leafDeep, leafWarm: PM.leafWarm });
@@ -6210,487 +6475,14 @@ export function buildSmallPark(): THREE.Group {
   }
 
   // ---- 9) 自动饮水机 ----
-  put(gbox(0.30, 0.95, 0.28), PM.metal, PCX - 5, 0.48, PZ0 + 0.8);
+  // 取 ±4.2 而不是 ±5：公园半宽只有 4.5，±5 会伸到围栏外面去（旧版场地宽 9m
+  // 时就已经越界 0.5m，只是没人量过）。现在公园贴着公寓西皮，越界就等于穿墙。
+  put(gbox(0.30, 0.95, 0.28), PM.metal, PCX - 4.2, 0.48, PZ0 + 0.8);
   // 饮水机按钮/出水口暗示
-  put(gbox(0.06, 0.06, 0.03), PM.cool, PCX - 5, 0.75, PZ0 + 0.68);
+  put(gbox(0.06, 0.06, 0.03), PM.cool, PCX - 4.2, 0.75, PZ0 + 0.68);
 
   // ---- 10) 垃圾桶 ----
-  put(gbox(0.32, 0.48, 0.32), PM.slabDark, PCX + 5, 0.24, PZ1 - 0.8);
-
-  g.userData.sceneCollideSkip = true;
-  return g;
-}
-
-/* ============================================================================
- * 中景城市肌理：商住混合街区（4-6 层）
- * ============================================================================ */
-
-/**
- * 中景商住混合建筑群——5~6 栋 4~6 层商住楼，填补公寓与远景之间的中景层次。
- * 一楼商铺（咖啡/餐馆/药店/理发/便利店），二楼以上住宅。
- * 高密度小间距，形成日式住宅区 × 上海里弄密度的城市肌理。
- * 控制 draw call：全楼共享材质桶，合批后 ≤25 call。
- */
-export function buildMidRiseBlock(): THREE.Group {
-  const g = new THREE.Group();
-  g.name = 'mid-rise-block';
-  const r = makeRng(52000);
-
-  // ---- 局部工具与共享材质桶 ----
-  const put = (geo: THREE.BufferGeometry, mat: THREE.Material, x: number, y: number, z: number, ry = 0) => {
-    const m = new THREE.Mesh(geo, mat);
-    m.position.set(x, y, z);
-    if (ry) m.rotation.y = ry;
-    g.add(m);
-    return m;
-  };
-  // 扁平盒子
-  const flat = (w: number, h: number, d: number, mat: THREE.Material) => new THREE.Mesh(
-    gbox(w, h, d), mat,
-  );
-  const MM = {
-    wall:    toon('#c8c4bc'),   // 主墙：暖灰白
-    wall2:   toon('#b8b0a8'),   // 次墙：稍深灰
-    dark:    toon('#4a4a4a'),   // 深色构件
-    accent:  toon('#9ebfcf'),   // 点缀：淡蓝灰（一栋用）
-    brick:   toon('#c49178'),   // 砖红（一栋用）
-    glass:   toon('#2a3444', { transparent: true, opacity: 0.6 }),
-    glassLit: emissive('#ffddaa'), // 亮窗
-    roof:    toon('#5a5858'),   // 屋顶深灰
-    awning:  toon('#e8dfd3'),  // 遮阳篷米色
-    shopFront: toon('#3d3530'),// 店面深色框
-  };
-
-  // ---- 建筑定义数组 ----
-  interface BldgDef {
-    cx: number;      // 中心 X
-    cz: number;      // 中心 Z
-    w: number;       // 宽度 X
-    d: number;       // 深度 Z
-    floors: number;  // 楼层数
-    floorH: number;  // 层高（默认 3.0）
-    matWall: THREE.Material; // 墙材质（可覆盖）
-    shopName: string; // 一楼店名
-    hasAwning: boolean;
-    accentColor?: string; // 特殊点缀色
-  }
-
-  const bldgs: BldgDef[] = [
-    // 两条硬约束：
-    //  A. 203 阳台（约 x0,z5.5）看向地铁口是一条西南向视线走廊，两侧各留 6m 净空，
-    //     所以商住楼只落东区（x>10）和南区（z≥24，在地铁口身后）。
-    //  B. 居酒屋占 x7.5~11.7 / z14~17.8，东区最西一栋必须让开，中间留巷子。
-    // 层次约定（学园都市/多模参考）：公寓这条街（z≤30）是高模街区（便利店/居酒屋/
-    // 地铁口/书店/公交站），低模商住楼整体退到 z≥29 的中景带，临街近景不留低模。
-
-    // ① 东区 A 栋：6F 最宽，小餐馆（西缘 x=14，与居酒屋隔 2.3m 巷）
-    { cx: 18, cz: 38, w: 8, d: 10, floors: 6, floorH: 3.0,
-      matWall: MM.brick, shopName: '食堂', hasAwning: true },
-    // ② 东区 B 栋：5F，便利店（① 东侧，隔 2.25m 小巷）
-    { cx: 27, cz: 36, w: 5.5, d: 8, floors: 5, floorH: 3.0,
-      matWall: MM.wall, shopName: 'STORE', hasAwning: true },
-    // ③ 东区 C 栋：5F，小型办公室（最东端，隔 2m 小巷）
-    { cx: 35, cz: 33, w: 6.5, d: 7.5, floors: 5, floorH: 2.95,
-      matWall: MM.wall2, shopName: 'OFFICE', hasAwning: false },
-    // ④ 南区 A 栋：4F 小型，理发店（南区最东，与东区隔路口）
-    { cx: 8, cz: 39, w: 5, d: 7, floors: 4, floorH: 2.85,
-      matWall: MM.accent, shopName: 'BARBER', hasAwning: true },
-    // ⑤ 南区 B 栋：5F 窄长，咖啡店
-    { cx: -14, cz: 38, w: 5.5, d: 9, floors: 5, floorH: 3.0,
-      matWall: MM.wall, shopName: 'COFFEE', hasAwning: true },
-    // ⑥ 南区 C 栋：4F 方正，药店（南区最西，再往西就空着）
-    { cx: -24, cz: 37, w: 6, d: 8, floors: 4, floorH: 3.0,
-      matWall: MM.wall2, shopName: '薬局', hasAwning: false },
-  ];
-
-  // ---- 逐栋建造 ----
-  for (let bi = 0; bi < bldgs.length; bi++) {
-    const b = bldgs[bi];
-    const totalH = b.floors * b.floorH;
-    const baseY = 0;
-
-    // === 主体墙体（整栋一个 box，后面挖窗） ===
-    const mainBody = new THREE.Mesh(
-      gbox(b.w, totalH, b.d),
-      b.matWall,
-    );
-    mainBody.position.set(b.cx, baseY + totalH / 2, b.cz);
-    g.add(mainBody);
-
-    // === 屋顶（稍微出檐） ===
-    put(gbox(b.w + 0.3, 0.25, b.d + 0.3), MM.roof, b.cx, totalH + 0.125, b.cz);
-
-    // === 一楼店面处理 ===
-    // 店面朝向：中景楼群在主街南侧，街和 203 视点都在它们的北边——
-    // 店面玻璃/门/雨棚/店招/满排窗必须朝 -z（北）才读得出"临街商铺"，
-    // 朝 +z 就是全街区背对着观众。F=-1 为临街面。
-    const shopH = b.floorH;
-    const shopY = baseY + shopH / 2;
-    const F = -1;
-
-    // 店面大玻璃（临街面 + 背面各一扇）
-    const frontGlassW = b.w * 0.65;
-    const frontGlassH = shopH * 0.55;
-    put(gbox(frontGlassW, frontGlassH, 0.05), MM.glass, b.cx, shopY + 0.15, b.cz + F * (b.d / 2 + 0.01));
-    put(gbox(frontGlassW * 0.7, frontGlassH * 0.85, 0.05), MM.glass, b.cx, shopY + 0.1, b.cz - F * (b.d / 2 + 0.01));
-
-    // 店面门（偏右）
-    const doorW = 0.85;
-    const doorH = shopH * 0.75;
-    put(gbox(doorW, doorH, 0.08), MM.dark, b.cx + b.w * 0.25, shopY + doorH / 2 - 0.15, b.cz + F * (b.d / 2 + 0.02));
-
-    // 遮阳篷
-    if (b.hasAwning) {
-      put(gbox(b.w + 0.4, 0.06, 1.2), MM.awning, b.cx, shopH + 0.03, b.cz + F * (b.d / 2 + 0.55));
-      // 篷支架
-      put(gbox(0.06, shopH * 0.35, 0.06), MM.dark, b.cx - b.w * 0.35, shopH + 0.2, b.cz + F * (b.d / 2 + 0.1));
-      put(gbox(0.06, shopH * 0.35, 0.06), MM.dark, b.cx + b.w * 0.35, shopH + 0.2, b.cz + F * (b.d / 2 + 0.1));
-    }
-
-    // 店招（小牌子）
-    const signW = Math.min(b.w * 0.7, 2.5);
-    put(gbox(signW, 0.45, 0.08), MM.shopFront, b.cx, totalH * 0.55, b.cz + F * (b.d / 2 + 0.08));
-
-    // === 二楼以上窗户 ===
-    const winCols = Math.max(2, Math.floor(b.w / 2.2));  // 每排窗数
-    const winRows = b.floors - 1;                         // 二楼起
-    const winW = 0.85;
-    const winH = 1.3;
-    const winSpacingX = b.w / (winCols + 0.5);
-    const winStartX = b.cx - b.w / 2 + winSpacingX * 0.7;
-
-    for (let row = 0; row < winRows; row++) {
-      const floorY = baseY + b.floorH + row * b.floorH + b.floorH / 2;
-      for (let col = 0; col < winCols; col++) {
-        const wx = winStartX + col * winSpacingX;
-        // 随机决定这扇窗是否亮着（基于建筑索引+行列的伪随机）
-        const seedVal = r() ?? 0.5;
-        const isLit = seedVal > 0.55;
-        const winMat = isLit ? MM.glassLit : MM.glass;
-
-        // 临街面窗（满排）
-        put(gbox(winW, winH, 0.05), winMat, wx, floorY, b.cz + F * (b.d / 2 + 0.01));
-        // 背面窗（少一些）
-        if (col % 2 === 0) {
-          put(gbox(winW * 0.8, winH * 0.85, 0.05), winMat, wx, floorY, b.cz - F * (b.d / 2 + 0.01));
-        }
-      }
-      // 侧面窗（仅宽建筑）
-      if (b.w > 6) {
-        const sideWinX = (bi % 2 === 0) ? b.cx + b.w / 2 + 0.01 : b.cx - b.w / 2 - 0.01;
-        if ((row + bi) % 3 !== 0) {  // 不是每层都画侧窗
-          const sideLit = (r() ?? 0.5) > 0.6;
-          put(gbox(0.05, winH, winW * 0.75), sideLit ? MM.glassLit : MM.glass,
-              sideWinX, floorY, b.cz);
-        }
-      }
-    }
-
-    // === 空调外机（随机出现在某些楼层外墙上） ===
-    for (let fl = 1; fl < b.floors; fl++) {
-      if ((r() ?? 0.5) > 0.6) {
-        const acy = baseY + (fl + 0.5) * b.floorH;
-        const acSide = (bi + fl) % 2 === 0 ? 1 : -1;
-        const acx = b.cx + acSide * (b.w / 2 + 0.18);
-        put(gbox(0.55, 0.35, 0.4), MM.dark, acx, acy, b.cz + (r() ?? 0.5) * b.d * 0.3 - b.d * 0.15);
-      }
-    }
-
-    // === 阳台栏杆（部分楼层） ===
-    for (let fl = 1; fl < b.floors; fl++) {
-      if ((r() ?? 0.5) > 0.5 && b.floors >= 5) {
-        const by = baseY + fl * b.floorH;
-        // 临街面栏杆段
-        const railLen = b.w * 0.5;
-        const railX = b.cx + (bi % 2 === 0 ? -1 : 1) * b.w * 0.15;
-        put(gbox(railLen, 0.9, 0.06), MM.dark, railX, by + 0.45, b.cz + F * (b.d / 2 + 0.08));
-        // 栏杆竖条
-        for (let ri = 0; ri < 3; ri++) {
-          const rx = railX + (ri - 1) * (railLen / 3.5);
-          put(gbox(0.04, 0.9, 0.04), MM.dark, rx, by + 0.45, b.cz + F * (b.d / 2 + 0.08));
-        }
-      }
-    }
-  }
-
-  // ---- 建筑之间的小巷元素 ----
-  // 路灯（几盏散布在建筑间隙）
-  // 灯位贴街沿与巷口；(-25,21) 那盏是地铁口的引导灯，排在视线走廊南侧让开净空
-  const lampPos: Array<[number, number]> = [
-    [13, 16], [20, 20], [28, 21], [2, 22], [-19, 24], [-25, 21],
-  ];
-  for (const [lx, lz] of lampPos) {
-    // 灯杆
-    put(gbox(0.07, 3.5, 0.07), MM.dark, lx, 1.75, lz);
-    // 灯头
-    const lampHead = new THREE.Mesh(
-      new THREE.SphereGeometry(0.18, 6, 6),
-      emissive('#ffeecc', {}),
-    );
-    lampHead.position.set(lx, 3.55, lz);
-    g.add(lampHead);
-  }
-
-  // 电线杆 / 配电箱（增加城市细节）
-  put(gbox(0.25, 2.2, 0.25), MM.dark, -10.5, 1.1, 27);  // 电线杆
-  put(gbox(0.6, 0.7, 0.4), MM.dark, -10.5, 0.35, 27.2);  // 配电箱
-
-  g.userData.sceneCollideSkip = true;
-  return g;
-}
-
-/* ============================================================================
- * 远景城市骨架：高架道路 + 商业综合体
- * ========================================================================== */
-
-/**
- * 远景高架桥——一条从城市深处斜穿而过的城市快速路。
- * 极低模：桥面 + 桥墩 + 护栏 + 路灯 + 车灯光。
- * 桥体沿直线两端延伸出雾距（fog far=115）之外，两端隐入雾色；
- * 灯光只布在可见段，桥灯是 emissive 仍能透出雾，是"远处那条光带"。
- */
-// 高架线参数（模块级）：远处电杆排沿这条线平行走位，读作"电线随高架铺设"
-const VD_X0 = -126, VD_Z0 = 47.2, VD_X1 = 106.3, VD_Z1 = 82.6;
-
-export function buildViaduct(): THREE.Group {
-  const g = new THREE.Group();
-  g.name = 'viaduct';
-  const r = makeRng(50000);
-
-  // 局部工具与材质
-  const put = (geo: THREE.BufferGeometry, mat: THREE.Material, x: number, y: number, z: number, ry = 0) => {
-    const m = new THREE.Mesh(geo, mat);
-    m.position.set(x, y, z);
-    if (ry) m.rotation.y = ry;
-    g.add(m);
-    return m;
-  };
-  const VM = {
-    slabDark: toon('#3a3f48'),
-    wallBase: toon('#6b7481'),
-    dark: toon('#2a2f38'),
-    cool: emissive('#dceaf5'),
-  };
-
-  // 高架走向：从左前（西北）向右后（东南），斜穿画面。
-  // 两端沿同一直线延伸到雾距（fog far=115）之外——距原点约 135m，
-  // 桥体两端隐入雾色，读作"快速路一头扎进城市深处"，而不是断在半空的半截桥。
-  // 中段 z≈60~74 仍须落在环带楼（z≤57）之后，否则桥面 y=14 会扎进 15~22m 高的楼体。
-  const V_Z0 = VD_Z0, V_Z1 = VD_Z1;
-  const V_X0 = VD_X0, V_X1 = VD_X1;
-  const V_Y = 14;           // 高架高度（中远景层次）
-  const V_W = 10;            // 桥面宽
-
-  // ---- 1) 桥面（长条 box）----
-  const vLen = Math.sqrt((V_X1 - V_X0) ** 2 + (V_Z1 - V_Z0) ** 2);
-  const vAngle = Math.atan2(V_Z1 - V_Z0, V_X1 - V_X0);
-  const deck = new THREE.Mesh(
-    gbox(V_W, 0.4, vLen),
-    VM.slabDark,
-  );
-  deck.position.set((V_X0 + V_X1) / 2, V_Y, (V_Z0 + V_Z1) / 2);
-  deck.rotation.y = -vAngle;
-  g.add(deck);
-
-  // ---- 2) 桥墩（沿线每 20m 一根，H 型双柱）----
-  const vdx = (V_X1 - V_X0) / vLen, vdz = (V_Z1 - V_Z0) / vLen;   // 沿线单位向量
-  for (let d = 0; d <= vLen; d += 20) {
-    const px = V_X0 + vdx * d;
-    const pz = V_Z0 + vdz * d;
-    // 双柱
-    put(gbox(1.2, V_Y - 1, 0.8), VM.wallBase, px - 2.5, (V_Y - 1) / 2, pz);
-    put(gbox(1.2, V_Y - 1, 0.8), VM.wallBase, px + 2.5, (V_Y - 1) / 2, pz);
-    // 横梁
-    put(gbox(6.5, 0.8, 0.6), VM.wallBase, px, V_Y - 0.6, pz);
-  }
-
-  // ---- 3) 护栏（两侧矮墙）----
-  for (const side of [-1, 1] as number[]) {
-    const rail = new THREE.Mesh(
-      gbox(0.15, 0.9, vLen),
-      VM.dark,
-    );
-    rail.position.set((V_X0 + V_X1) / 2 + side * (V_W / 2 - 0.2), V_Y + 0.45, (V_Z0 + V_Z1) / 2);
-    rail.rotation.y = -vAngle;
-    g.add(rail);
-    // 护栏反光条（每 3m 一段）
-    for (let i = 0; i < Math.floor(vLen / 3); i++) {
-      const rt = i / Math.floor(vLen / 3);
-      const rx = V_X0 + rt * (V_X1 - V_X0) + side * (V_W / 2 - 0.2);
-      const rz = V_Z0 + rt * (V_Z1 - V_Z0);
-      put(gbox(0.08, 0.12, 0.4), VM.cool, rx, V_Y + 0.35, rz);
-    }
-  }
-
-  // ---- 4) 路灯（按沿线距离布点，只落在可见段，雾外不浪费）----
-  for (const d of [30, 75, 120, 165]) {
-    const lx = V_X0 + vdx * d;
-    const lz = V_Z0 + vdz * d;
-    // 灯杆（短，贴护栏）
-    put(gbox(0.06, 1.8, 0.06), VM.dark, lx + V_W / 2 - 0.5, V_Y + 0.9, lz);
-    // 灯头（暖白）
-    const vlamp = new THREE.Mesh(
-      new THREE.SphereGeometry(0.2, 6, 6),
-      emissive('#ffeecc', {}),
-    );
-    vlamp.position.set(lx + V_W / 2 - 0.5, V_Y + 1.85, lz);
-    g.add(vlamp);
-  }
-
-  // ---- 5) 车灯光（几团静态暖光点，按"沿线距离 + 横向车道偏移"落在桥面上）----
-  const carLights: Array<[number, number]> = [
-    [45, 3.2], [80, -3.2], [115, 3.2], [150, -3.2], [185, 0],
-  ];
-  for (const [d, off] of carLights) {
-    const clx = V_X0 + vdx * d - vdz * off;
-    const clz = V_Z0 + vdz * d + vdx * off;
-    const cly = V_Y + 0.25;
-    // 前灯（白/微黄）
-    const headLight = new THREE.Mesh(
-      new THREE.SphereGeometry(0.12, 6, 6),
-      emissive('#ffffee', {}),
-    );
-    headLight.position.set(clx, cly, clz);
-    g.add(headLight);
-    // 尾灯（红）
-    const tailLight = new THREE.Mesh(
-      new THREE.SphereGeometry(0.08, 6, 6),
-      emissive('#ff3322', {}),
-    );
-    tailLight.position.set(clx - 2.5, cly, clz + 1.5);
-    g.add(tailLight);
-  }
-
-  // （原东端匝道已随两端延长进雾而移除——桥体两端都隐入雾色，
-  //   匝道落在 |p|≈127 的全雾区里永远不可见，纯浪费几何。）
-
-  g.userData.sceneCollideSkip = true;
-  return g;
-}
-
-/**
- * 远景商业综合体——8-12 层玻璃幕墙商场。
- * 极低模：大轮廓 + 玻璃幕墙 + 大型发光招牌 + 屋顶设备。
- * 在雾气中呈现为远处一个"亮起来的城市节点"。
- */
-export function buildShoppingMall(): THREE.Group {
-  const g = new THREE.Group();
-  g.name = 'shopping-mall';
-  const r = makeRng(51000);
-
-  // 局部工具与材质
-  const put = (geo: THREE.BufferGeometry, mat: THREE.Material, x: number, y: number, z: number, ry = 0) => {
-    const m = new THREE.Mesh(geo, mat);
-    m.position.set(x, y, z);
-    if (ry) m.rotation.y = ry;
-    g.add(m);
-    return m;
-  };
-  const MM = {
-    dark: toon('#2a2f38'),
-  };
-
-  // 商场位置：远景右侧（x=50~70, z=100~130）
-  // 东侧中远景（x=55, z=38）：从203阳台往东南看，越过中景楼东侧边缘可见
-  // 不被中景楼群(z=18~33)遮挡，在雾内(far=115)
-  const MX = 55, MZ = 38;
-  const MW = 28, MD = 18, MH = 42;   // 主体尺寸
-
-  // ---- 1) 主体量（玻璃幕墙感：深色底 + 窗格线）----
-  const body = new THREE.Mesh(
-    gbox(MW, MH, MD),
-    toon('#1a2030', { unique: true }),
-  );
-  body.position.set(MX, MH / 2, MZ);
-  g.add(body);
-
-  // ---- 2) 窗格线（横竖线条，模拟幕墙分格）----
-  const gridMat = toon('#2a3545', { unique: true });
-  // 水平线（每 3.5m 一层）
-  for (let floor = 1; floor < MH / 3.5; floor++) {
-    const fy = floor * 3.5;
-    const hLine = new THREE.Mesh(gbox(MW + 0.02, 0.08, MD + 0.02), gridMat);
-    hLine.position.set(MX, fy, MZ);
-    g.add(hLine);
-  }
-  // 垂直线（每 4m 一列）
-  for (let col = -3; col <= 3; col++) {
-    const vx = MX + col * 4;
-    if (vx > MX - MW/2 && vx < MX + MW/2) {
-      const vLine = new THREE.Mesh(gbox(0.06, MH, MD + 0.02), gridMat);
-      vLine.position.set(vx, MH / 2, MZ);
-      g.add(vLine);
-    }
-  }
-
-  // ---- 3) 大型发光招牌（立面中部）----
-  const mallSignCanvas = (() => {
-    const { canvas, ctx } = makeCanvas(256, 96);
-    ctx.fillStyle = '#0a1628';
-    ctx.fillRect(0, 0, 256, 96);
-    // 发光字
-    ctx.fillStyle = '#44aaff';
-    ctx.font = 'bold 36px sans-serif';
-    ctx.textAlign = 'center';
-    ctx.fillText('CITY PLAZA', 128, 55);
-    ctx.font = '16px sans-serif';
-    ctx.fillStyle = '#88ccff';
-    ctx.fillText('Shopping & Dining', 128, 78);
-    return toTexture(canvas);
-  })();
-  const mallSignMat = emissive('#4488ff', { map: mallSignCanvas });
-  const mallSign = new THREE.Mesh(new THREE.PlaneGeometry(8, 3), mallSignMat);
-  mallSign.position.set(MX, MH * 0.6, MZ - MD / 2 - 0.05);
-  mallSign.rotation.y = Math.PI;
-  g.add(mallSign);
-
-  // ---- 4) 顶部发光结构 ----
-  // 屋顶设备间轮廓
-  put(gbox(8, 4, 6), MM.dark, MX + 5, MH + 2, MZ - 2);
-  put(gbox(6, 3, 4), MM.dark, MX - 6, MH + 1.5, MZ + 3);
-  // 屋顶发光标识（红色航空障碍灯）
-  const obsLight = new THREE.Mesh(
-    new THREE.SphereGeometry(0.4, 8, 8),
-    emissive('#ff3333', {}),
-  );
-  obsLight.position.set(MX, MH + 4.5, MZ);
-  g.add(obsLight);
-
-  // ---- 5) 入口灯光 ----
-  // 底部入口区域亮起来
-  const entranceGlow = new THREE.Mesh(
-    new THREE.PlaneGeometry(10, 6),
-    emissive('#ffddaa', { opacity: 0.4, transparent: true }),
-  );
-  entranceGlow.position.set(MX, 3, MZ - MD / 2 - 0.1);
-  entranceGlow.rotation.y = Math.PI;
-  g.add(entranceGlow);
-
-  // ---- 6) 随机窗光（少量亮着的窗户）----
-  const winMat = emissive('#ffffcc', {});
-  for (let i = 0; i < 20; i++) {
-    if (r() > 0.4) continue;  // 只亮 ~40%
-    const wx = MX + (r() - 0.5) * (MW - 2);
-    const wy = 2 + r() * (MH - 4);
-    const wz = MZ + (r() - 0.5) * (MD - 0.5);
-    const win = new THREE.Mesh(new THREE.PlaneGeometry(1.2, 1.8), winMat);
-    win.position.set(wx, wy, wz);
-    // 随机朝向四个立面之一
-    const face = Math.floor(r() * 4);
-    if (face === 0) { win.rotation.y = Math.PI; win.position.z = MZ - MD / 2 - 0.01; }
-    else if (face === 1) { win.rotation.y = 0; win.position.z = MZ + MD / 2 + 0.01; }
-    else if (face === 2) { win.rotation.y = Math.PI / 2; win.position.x = MX + MW / 2 + 0.01; }
-    else { win.rotation.y = -Math.PI / 2; win.position.x = MX - MW / 2 - 0.01; }
-    g.add(win);
-  }
-
-  // ---- 7) 周围低层商业裙房 ----
-  const podium = new THREE.Mesh(
-    gbox(MW + 8, 8, MD + 6),
-    toon('#252e3d', { unique: true }),
-  );
-  podium.position.set(MX, 4, MZ);
-  g.add(podium);
+  put(gbox(0.32, 0.48, 0.32), PM.slabDark, PCX + 4.2, 0.24, PZ1 - 0.8);
 
   g.userData.sceneCollideSkip = true;
   return g;
@@ -6736,8 +6528,9 @@ export function buildUtilityPoles(): THREE.Group {
   };
 
   // 杆位：近景街道只留西段两根（地铁口 / 停车场一带）。
-  // 远处列改两支：①西侧空地一条南北向短列（x=-33，地铁口/停车场/小公园以西）；
-  // ②沿高架平行的斜列——电线随高架铺（多摩式动线），立在中景楼群与环带楼身后。
+  // 远处列只留西侧空地一条南北向短列（x=-33，地铁口/停车场/小公园以西）。
+  // 原「沿高架平行的斜列」已删：那座高架从未接线（导出已删），那条斜线本身穿过 z=73
+  // 一排楼——1 根杆埋进 11 层楼体内、跨距电线从楼中穿过，且 4 根杆全在 74~103m 重雾带。
   // 中景低模楼已退到 z 33~44，原 z=39 的东西向直列会穿楼，故取消。
   const ROW_A_Z = 13.3;              // 商铺侧人行道（近景仅存 2 根）
   const FAR_WEST_X = -33.0;          // 远处南北列
@@ -6745,17 +6538,6 @@ export function buildUtilityPoles(): THREE.Group {
   const F2_Z = [10, 18, 26, 34];                          // 远处南北列
   for (const x of A_X) pole(x, ROW_A_Z, x === -26);
   for (const z of F2_Z) pole(FAR_WEST_X, z, z === 18);
-
-  // 高架平行斜列：沿线参数取可见段（|p|≲105），横向偏 8m 落在高架南侧
-  const vdxAll = VD_X1 - VD_X0, vdzAll = VD_Z1 - VD_Z0;
-  const vLenAll = Math.hypot(vdxAll, vdzAll);
-  const udx = vdxAll / vLenAll, udz = vdzAll / vLenAll;
-  const pdx = -udz, pdz = udx;             // 南侧法向（+z 分量为正）
-  const F1_D = [70, 110, 150, 190];
-  const F1: Array<[number, number]> = F1_D.map(
-    (d) => [VD_X0 + udx * d + pdx * 8, VD_Z0 + udz * d + pdz * 8] as [number, number],
-  );
-  for (let i = 0; i < F1.length; i++) pole(F1[i][0], F1[i][1], i === 1);
 
   // 电线：所有下垂跨距合进一条 LineSegments（1 draw call，不吃不透明合批）
   const PH = 6.3;
@@ -6783,11 +6565,6 @@ export function buildUtilityPoles(): THREE.Group {
   span(-26, ROW_A_Z, -24, 15.5, PH, 3.5);
   span(-16, ROW_A_Z, -17.7, 16.2, PH, 4.6);
   span(-16, ROW_A_Z, FAR_WEST_X, F2_Z[0]);
-  // 高架平行斜列：双线（主干 + 附属线）
-  for (let i = 0; i < F1.length - 1; i++) {
-    span(F1[i][0], F1[i][1], F1[i + 1][0], F1[i + 1][1]);
-    span(F1[i][0], F1[i][1], F1[i + 1][0], F1[i + 1][1], PH - 0.45, PH - 0.45);
-  }
   // 远处南北列：双线（主干 + 附属线），雾中读出"一排杆一束线"
   for (let i = 0; i < F2_Z.length - 1; i++) {
     span(FAR_WEST_X, F2_Z[i], FAR_WEST_X, F2_Z[i + 1]);
@@ -6809,11 +6586,34 @@ export function buildUtilityPoles(): THREE.Group {
  *
  * 机柜、灯杆、招牌柱共用一个金属桶；所有发光显示面（售货机商品窗、取货口、
  * 快递柜屏、路牌牌面）共用一个冷白发光桶——合批后仅占 2 个 draw call。
- * 全部 sceneCollideSkip（纯视觉，不参与 FPS 碰撞）。
+ *
+ * 整组仍标 `sceneCollideSkip`（`districtArt.prepare` + `mergeByMaterial` 之后
+ * mesh 已并成同材质巨块、名字也没了，`buildSceneColliders` 的 AABB 遍历收不到
+ * 有用的东西），**但柜体必须自己声明碰撞盒**：`{ group, boxes }` 由调用方
+ * `buildBoxColliders(boxes)` 转成世界 AABB，跟便利店 / 书店 / 居酒屋同一条路。
+ *
+ * 2026-09-21：用户报「居酒屋北侧和停车场北侧各有一台相同的自动售货机缺碰撞箱」
+ * ——原来整组一个盒都没有，2m 高的柜子能直接穿过去。现在 2 台售货机 + 2 台快递柜
+ * （都是 2.0m 高的实心柜）登记碰撞盒。
+ *
+ * **细杆件（路牌柱 / 公交站牌柱）与条凳刻意不登记**：
+ *   - 杆件直径 0.07~0.08m，跟 `buildUtilityPoles` 的电线杆（0.20m）一样，本项目
+ *     的既有约定是"杆不挡人"——只在人行道中间插一根 0.15m 半径的圆柱，比穿模更烦人。
+ *   - 条凳面在 y=0.42~0.48（浮在 0.42 之上的 6cm 厚板），`STEP_UP=0.45` 会判它
+ *     "迈不过去"而变成一道 6cm 高的隐形墙，比让它可跨更怪。
+ *   要改这两条先跟用户确认。
  */
-export function buildStreetFurniture(): THREE.Group {
+export function buildStreetFurniture(): { group: THREE.Group; boxes: BoxColliderSpec[] } {
   const g = new THREE.Group();
   g.name = 'street-furniture';
+
+  const boxes: BoxColliderSpec[] = [];
+  /** 单块实体：建几何 + 同参数登记碰撞盒（不给两处各写一份数字的机会） */
+  const mass = (id: string, x: number, y: number, z: number,
+                sx: number, sy: number, sz: number, mat: THREE.Material) => {
+    put(gbox(sx, sy, sz), mat, x, y, z);
+    boxes.push(boxSpec(id, x - sx / 2, x + sx / 2, y - sy / 2, y + sy / 2, z - sz / 2, z + sz / 2));
+  };
 
   const SF = {
     metal: toon('#7c828b', { finish: 'metal' }),
@@ -6829,23 +6629,46 @@ export function buildStreetFurniture(): THREE.Group {
   };
 
   // 自动售货机：柜体 + 商品展示发光面 + 取货口 + 操作屏（正面朝 -z 对街道/相机）
+  let vendingN = 0;
   const vending = (x: number, z: number) => {
-    put(gbox(1.1, 2.0, 0.7), SF.metal, x, 1.0, z);
+    // 柜体走 mass()：2.0m 高实心柜，玩家不该穿过去。三块发光面是 0.05m 薄贴片、
+    // 贴在柜体正面之外，本身不构成阻挡（柜体盒已覆盖），故仍用 put()。
+    mass(`streetfurn-vending-${++vendingN}`, x, 1.0, z, 1.1, 2.0, 0.7, SF.metal);
     put(gbox(0.92, 1.35, 0.05), SF.panel, x, 1.35, z - 0.36);
     put(gbox(0.5, 0.35, 0.05), SF.panel, x + 0.25, 0.45, z - 0.36);
     put(gbox(0.18, 0.5, 0.05), SF.panel, x - 0.35, 0.55, z - 0.36);
   };
-  vending(-13.5, 13.0);
-  vending(11.5, 13.0);
+  /* 停车场北侧这台原来在 x=-13.5 —— 而便利店侧路灯列 `STORE_LAMP_X` 里有一根正好
+   * 立在 x=-14 / z=12.9：机柜 x −14.05..−12.95 把 0.112m 粗的灯柱和它 0.28m 的
+   * 底座整个吞进去 0.106 / 0.19m，灯柱从柜子里长出来、灯头还高出柜顶 0.5m。
+   * 2026-09-22 实测（`tmp/_probe-furniture-spot.mjs`：逐顶点扫柜体盒，报肇事 mesh）：
+   * 侵入的全是 `exterior-streetscape` 的圆柱（灯柱 + 底座），没有别的。
+   * 修法取**挪柜不挪灯**：灯列 −21/−14/0/7/14/21 是 7m 等距的节奏，抽掉 −14 会让
+   * −21 到 0 之间空出 21m 的黑段；柜子西移到 −15.3（机柜 x −15.85..−14.75）后，
+   * 离灯柱 0.694m、离底座 0.61m，且该处逐顶点扫描 0 侵入。 */
+  vending(-15.3, 13.0);   // 停车场北侧（LOT 地块内，面朝人行道）
+  /* 居酒屋北侧那台原来在 x=11.5 —— 而居酒屋的感应门门洞是 x 10.60..11.60
+   * （doorCx = CX + W/2 - 0.6 = 11.10），机柜 x 10.95..12.05 正好堵住门洞东侧
+   * 0.65m，玩家只剩 x∈[10.75,10.80] 这 5cm 的一条缝能挤进门。
+   * 2026-09-21 给居酒屋开门时实测到（`tmp/_verify-izakaya-door.mjs` 推进到
+   * z=12.65 被 streetfurn-vending-2 拦住），西移到 x=8.4 让开门洞：
+   * 机柜 x 7.85..8.95，离门洞西缘 1.65m，与 (10,13) 的路牌柱也留出 1.0m。
+   * 仍在同一段人行道、同一排街沿上，只是挪到店面前窗前面。 */
+  vending(8.4, 13.0);     // 居酒屋北侧
 
   // 快递柜：多格机柜 + 操作屏
+  let parcelN = 0;
   const parcel = (x: number, z: number) => {
-    put(gbox(1.7, 2.0, 0.6), SF.metal, x, 1.0, z);
+    mass(`streetfurn-parcel-${++parcelN}`, x, 1.0, z, 1.7, 2.0, 0.6, SF.metal);
     for (const dy of [-0.6, -0.2, 0.2, 0.6]) put(gbox(1.5, 0.04, 0.04), SF.metal, x, 1.0 + dy, z - 0.30);
     put(gbox(0.35, 0.5, 0.05), SF.panel, x - 0.5, 1.2, z - 0.31);
   };
   parcel(-18.0, 14.5);
-  parcel(16.5, 14.0);
+  // 书店那台从 (16.5, 14.0) 挪到 (21.0, 14.0)：书店 2026-09 扩建把北墙从 z=18.0
+  // 推到人行道南缘 z=15.0，这台 2.0m 高的柜子就正好杵在橱窗（x 13.15..17.05）
+  // 前面 0.7m 处，把橱窗东半截挡死。挪到东邻 parcel-23.5-19.6 门前的人行道上
+  // （已量：该处 z 13.6..14.4 内 0 顶点侵入，且落在 sidewalk 条带 12.6..15.0 上）。
+  parcel(21.0, 14.0);
 
   // 路牌 / 指引牌：柱 + 发光牌面
   const signpost = (x: number, z: number, w: number, h: number, ry = 0) => {
@@ -6875,16 +6698,28 @@ export function buildStreetFurniture(): THREE.Group {
     return toTexture(canvas);
   })();
   const busMat = emissive('#eef2f6', { map: busCanvas });
-  put(gbox(0.07, 2.5, 0.07), SF.metal, -6.5, 1.25, 13.0);                 // 立柱
+  /* 整簇（柱 / 牌面 / 背板 / 条凳）原来都在 x=-6.5，而便利店自己的两台自动售货机
+   * 摆在 x=-5.75 / -4.6 —— 1 号机柜 x −6.295..−5.205 把**条凳东端**（x −7.2..−5.8）
+   * 吞掉 0.475m、把**灯箱背板东端**（x −6.95..−6.05）吞掉 0.225m，条凳看起来
+   * 是一截插进售货机里断掉的。
+   * 2026-09-22 逐顶点扫（`tmp/_probe-furniture-spot.mjs`）确认这是第三个穿模，
+   * 且两簇的中心距只有 0.75m，而「条凳半宽 0.7 + 机柜半宽 0.545 = 1.245m」
+   * ⇒ 必须拉开 1.245m 以上。柜子东移会撞上垃圾桶（x=-3.35）和店面，故**把公交站
+   * 整簇西移 1.3m 到 x=-7.8**（两簇中心距 2.05m，留 0.8m 余量）。
+   * 新位置 x −8.55..−7.05 / z 12.90..13.70 逐顶点扫描 **0 侵入**。 */
+  const busX = -7.8;
+  put(gbox(0.07, 2.5, 0.07), SF.metal, busX, 1.25, 13.0);                 // 立柱
   const busSign = new THREE.Mesh(new THREE.PlaneGeometry(0.85, 0.5), busMat);
-  busSign.position.set(-6.5, 2.1, 12.96);
+  busSign.position.set(busX, 2.1, 12.96);
   busSign.rotation.y = Math.PI;   // 牌面朝 -z 对人行道来向，默认 +z 只见背板
   g.add(busSign);
-  put(gbox(0.9, 0.55, 0.04), SF.metal, -6.5, 2.1, 13.0);                  // 牌背板
-  put(gbox(1.4, 0.06, 0.45), SF.metal, -6.5, 0.45, 13.35);                // 条凳
+  put(gbox(0.9, 0.55, 0.04), SF.metal, busX, 2.1, 13.0);                  // 牌背板
+  put(gbox(1.4, 0.06, 0.45), SF.metal, busX, 0.45, 13.35);                // 条凳
 
+  // 整组仍标 sceneCollideSkip：柜体的碰撞是**声明式**的（见函数开头的 boxes），
+  // 遍历本来也收不到有用的 AABB。调用方必须 buildBoxColliders(streetFurniture.boxes)。
   g.userData.sceneCollideSkip = true;
-  return g;
+  return { group: g, boxes };
 }
 
 /* ============================================================================

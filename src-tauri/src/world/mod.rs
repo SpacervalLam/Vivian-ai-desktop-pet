@@ -44,6 +44,7 @@ use crate::config::WorldConfig;
 
 pub use events::{WorldEvent, WorldEventDetector, WorldEventKind};
 pub use foreground_window::{get_foreground_window, subscribe_foreground_events, ForegroundWindowSnapshot};
+pub use foreground_window::foreground_hook_needs_install;
 pub use music::{MusicSnapshot, MusicSource, PlaybackAction, PlaybackStatus};
 pub use network_status::{get_network_status, NetworkStatusSnapshot};
 pub use network_watch::subscribe_network_events;
@@ -607,7 +608,19 @@ impl WorldStateProvider {
         });
     }
 
-    /// 启动前台窗口事件监听循环（SetWinEventHook + 10s 兜底）。
+    /// 启动前台窗口事件监听循环（SetWinEventHook 常驻 + 10s 兜底刷新）。
+    ///
+    /// **钩子全生命周期只装一次**。两个约束必须同时满足：
+    ///
+    /// 1. `win_event_proc` 是裸 `extern "system"` 回调，无法携带 user-data，
+    ///    只能经 `FOREGROUND_NOTIFY` 全局单例桥接，而 `get_or_init` **只在第一次生效**。
+    ///    所以 `notify` 必须在**循环外**创建并复用——若每轮新建，
+    ///    第 2 轮起 `select!` 等的是一个永远不会被通知的新 notify，事件分支永久失效
+    ///    （退化成 10s 轮询，且 `SetWinEventHook` 的能力被完全浪费）。
+    /// 2. guard 必须持有到退出为止。每轮重建会 `UnhookWinEvent` → `SetWinEventHook`，
+    ///    **间隙内的前台切换事件全部丢失**。
+    ///
+    /// 10s 超时只做**兜底刷新**（重读前台窗口），不再重建钩子。
     pub fn start_foreground_events(self: &Arc<Self>) {
         let provider = Arc::clone(self);
         tauri::async_runtime::spawn(async move {
@@ -617,28 +630,38 @@ impl WorldStateProvider {
             provider.update_foreground(fw);
 
             let cancel = crate::utils::cancel_token::cancel_token();
+            // notify 只建一次：必须是 FOREGROUND_NOTIFY 单例里存的那一个
+            let notify = std::sync::Arc::new(tokio::sync::Notify::new());
+            // 钩子 guard 持有到函数退出，Drop 时自动卸载
+            let mut guard = None;
+
             loop {
                 if cancel.is_cancelled() {
                     tracing::info!("[ForegroundWatch] 收到取消信号，退出");
                     return;
                 }
-                let notify = std::sync::Arc::new(tokio::sync::Notify::new());
-                let guard = tokio::task::spawn_blocking({
-                    let n = notify.clone();
-                    move || subscribe_foreground_events(n)
-                })
-                .await
-                .unwrap_or(None);
+
+                // 仅当钩子缺失、或钩子线程已退出时才（重）装
+                if foreground_hook_needs_install(&guard) {
+                    guard = tokio::task::spawn_blocking({
+                        let n = notify.clone();
+                        move || subscribe_foreground_events(n)
+                    })
+                    .await
+                    .unwrap_or(None);
+                }
 
                 if guard.is_some() {
                     tokio::select! {
                         _ = notify.notified() => {
                             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                         }
+                        // 兜底刷新：只重读前台窗口，不重建钩子
                         _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => {}
                         _ = cancel.cancelled() => return,
                     }
                 } else {
+                    // 钩子装不上（如 SetWinEventHook 失败），退避重试
                     tokio::select! {
                         _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {}
                         _ = cancel.cancelled() => return,

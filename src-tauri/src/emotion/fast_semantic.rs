@@ -1439,9 +1439,9 @@ fn generate_guidance(
         }
         "angry" => {
             parts.push(match lang {
-                "en" => "User is angry, stay patient, validate emotions before discussing issues",
-                "ja" => "ユーザーが怒っている、辛抱強く、まず感情を受け止めてから問題を話す",
-                _ => "用户在生气，保持耐心，先认同情绪再讨论问题",
+                "en" => "User is angry: respond to the concrete thing they are angry about. Do not perform a validation script or explain their feelings back to them",
+                "ja" => "ユーザーは怒っている。怒りの対象になっている具体的なことへ返す。感情受容の定型文や気持ちの説明返しはしない",
+                _ => "用户在生气，直接接住让他生气的具体事情；不要套用情绪认同话术，也不要把他的感受解释给他听",
             }.to_string());
         }
         "anxious" => {
@@ -1472,9 +1472,9 @@ fn generate_guidance(
     match intent.label.as_str() {
         "sharing" => {
             parts.push(match lang {
-                "en" => "User is sharing something, listen attentively and give positive feedback",
-                "ja" => "ユーザーが共有している、しっかり聞いてポジティブなフィードバックを",
-                _ => "用户在分享，认真倾听并给予积极反馈",
+                "en" => "User is sharing something: pick one concrete detail and react to it. Generic praise or a summary is unnecessary",
+                "ja" => "ユーザーが何かを共有している。具体的な一点を拾って反応し、一般的な称賛や要約は足さない",
+                _ => "用户在分享，挑一个具体细节接话；不需要泛泛夸奖，也不要复述总结",
             }.to_string());
         }
         "complaint" => {
@@ -1500,9 +1500,9 @@ fn generate_guidance(
         }
         "question" => {
             parts.push(match lang {
-                "en" => "User is asking a question, give a clear and accurate answer",
-                "ja" => "ユーザーが質問している、分かりやすく正確な回答をする",
-                _ => "用户在提问，给出清晰准确的回答",
+                "en" => "User is asking a question: answer first. Explain only to the depth requested or needed to avoid a misleading answer",
+                "ja" => "ユーザーの質問には先に答える。説明は求められた深さ、または誤解を防ぐのに必要な分だけ",
+                _ => "用户在提问，先直接回答；只解释到用户要求的深度，或避免误导所必需的程度",
             }.to_string());
         }
         _ => {}
@@ -1513,16 +1513,16 @@ fn generate_guidance(
         match first_topic.label.as_str() {
             "life_event" => {
                 parts.push(match lang {
-                    "en" => "This is a significant life event for the user, show that you care and consider remembering this moment",
-                    "ja" => "ユーザーの重要なライフイベント、重視する姿勢を示し、この瞬間を記憶することを検討する",
-                    _ => "这是用户的重要人生事件，应表现出重视，考虑记住这个时刻",
+                    "en" => "This may matter to the user. React to the concrete event without ceremonially announcing that it is important; remember it only if it will matter later",
+                    "ja" => "ユーザーにとって大事かもしれない出来事。重要さを儀式的に宣言せず具体的な出来事へ反応し、後で役立つ時だけ記憶を検討する",
+                    _ => "这件事可能对用户重要，直接回应具体事件，不要郑重表演“我很重视”；只有以后确实有用时才考虑记住",
                 }.to_string());
             }
             "health" => {
                 parts.push(match lang {
-                    "en" => "User mentioned a health-related topic, express care",
-                    "ja" => "ユーザーが健康関連の話題に触れた、気遣いを示す",
-                    _ => "用户提到健康相关话题，表达关心",
+                    "en" => "User mentioned health: follow the actual intent. Do not automatically add concern, reminders, or advice",
+                    "ja" => "健康の話題では実際の意図に答える。自動的に心配、注意、助言を付け足さない",
+                    _ => "用户提到健康话题，按实际意图回应；不要自动追加关心、提醒或建议",
                 }.to_string());
             }
             "relationship" => {

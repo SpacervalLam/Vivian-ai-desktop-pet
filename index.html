@@ -19,8 +19,8 @@
       // 其余手写字体（Caveat / Dancing Script / Hachi Maru Pop）仍在线加载：
       // 初始源用可达的中国镜像，失败再依次回退。
       (function () {
-        var fontCss = 'https://fonts.googleapis.cn/css2?family=Dancing+Script:wght@400;500;600;700&family=Hachi+Maru+Pop&family=Caveat:wght@400;500;600;700&display=swap';
-        var fallbackCss = 'https://fonts.loli.net/css2?family=Dancing+Script:wght@400;500;600;700&family=Hachi+Maru+Pop&family=Caveat:wght@400;500;600;700&display=swap';
+        var fontCss = 'https://fonts.googleapis.cn/css2?family=Dancing+Script:wght@400;500;600;700&family=Hachi+Maru+Pop&family=Caveat:wght@400;500;600;700&family=Orbitron:wght@500;700&display=swap';
+        var fallbackCss = 'https://fonts.loli.net/css2?family=Dancing+Script:wght@400;500;600;700&family=Hachi+Maru+Pop&family=Caveat:wght@400;500;600;700&family=Orbitron:wght@500;700&display=swap';
         var link = document.createElement('link');
         link.rel = 'stylesheet';
         link.href = fontCss;
@@ -53,6 +53,8 @@
       // 其余子窗口（config/diary）保持不透明深色背景，避免渲染前白屏闪烁。
       (function () {
         try {
+          // 启动时间线的第一个点：到这一刻 HTML/CSS 已经可以画了。
+          window.__BOOT__ = [{ name: 'html', t: Math.round(performance.now()), dt: 0 }];
           var view = new URLSearchParams(window.location.search).get('view');
           if (
             view === null ||
@@ -64,16 +66,98 @@
           ) {
             document.documentElement.classList.add('is-transparent');
           }
+          // 公寓窗口的首屏 loading 层（见下方 #boot-loader）：必须在**任何 JS
+          // 之前**就显示出来。公寓窗口是「点一下 → 好几秒空白」的重灾区，而这段
+          // 空白全部发生在 React 挂载之前，只有在 HTML 里静态画出来才盖得住。
+          if (view === 'room') {
+            document.documentElement.classList.add('is-room');
+          }
         } catch (e) {}
       })();
     </script>
     <style>
       html, body { background: #1e1e28; }
       html.is-transparent, html.is-transparent body { background: transparent; }
+
+      /* ---------------- 公寓窗口首屏 loading 层 ----------------
+       *
+       * 只对 ?view=room 生效，盖住的是「主 chunk 求值 → 动态 import 房间 chunk
+       * （three.js 约 1MB）→ 场景同步装配 → 首帧」这整段：这期间 canvas 一个
+       * 像素都还没有，不盖就是一块空背景。
+       *
+       * 两个关键点：
+       *  - 默认就渲染，靠 `html.is-room` 关掉。不要反过来写成 `display:none`
+       *    再由 JS 打开——那样又要等脚本，等于把要盖住的时间又还回去一截。
+       *  - 动画只用 transform/opacity，并显式 will-change 提升为合成层。场景装配
+       *    是一整段同步阻塞主线程的代码，JS 驱动的动画在那期间会冻住；合成线程上的
+       *    CSS 动画不受影响。「转着的圈」和「卡死的圈」是完全不同的观感，后者会让
+       *    人以为程序挂了。
+       */
+      #boot-loader {
+        display: none;
+        position: fixed;
+        inset: 0;
+        z-index: 2147483000;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 20px;
+        background: #1e1e28;
+        opacity: 1;
+        transition: opacity 360ms ease;
+      }
+      html.is-room #boot-loader { display: flex; }
+      #boot-loader.bl-out { opacity: 0; }
+      #boot-loader .bl-ring {
+        width: 42px;
+        height: 42px;
+        border: 3px solid rgba(201, 169, 97, 0.16);
+        border-top-color: #c9a961;
+        border-radius: 50%;
+        will-change: transform;
+        animation: bl-spin 900ms linear infinite;
+      }
+      #boot-loader .bl-text {
+        font: 400 13px/1.6 -apple-system, "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+        color: rgba(255, 255, 255, 0.5);
+        letter-spacing: 0.12em;
+      }
+      @keyframes bl-spin {
+        to { transform: rotate(360deg); }
+      }
+      /* 尊重系统「减少动态效果」：转圈换成静态环 + 文字呼吸 */
+      @media (prefers-reduced-motion: reduce) {
+        #boot-loader .bl-ring { animation: none; border-top-color: rgba(201, 169, 97, 0.16); }
+        #boot-loader .bl-text { animation: bl-pulse 1.6s ease-in-out infinite; }
+      }
+      @keyframes bl-pulse { 50% { opacity: 0.35; } }
     </style>
     <script type="module" src="/src/main.tsx"></script>
   </head>
   <body>
     <div id="root"></div>
+    <!-- 公寓窗口首屏 loading 层。放在 #root 之外，因为 React 首次渲染会清空
+         #root 的子节点；由「首帧真的画出来了」显式移除（src/utils/roomBoot.ts）。
+         data-t 记录它出现的时刻，用于保证最短显示时长、避免闪一下。
+         其余窗口靠 html.is-room 保持 display:none。 -->
+    <div id="boot-loader" role="status" aria-live="polite" aria-label="loading">
+      <div class="bl-ring"></div>
+      <!-- 文案刻意不做 i18n：这一层在任何 JS 之前就要画出来，i18n 还没初始化，
+           三语统一用 "loading…"。 -->
+      <div class="bl-text">loading…</div>
+    </div>
+    <script>
+      // 兜底：万一场景装配抛异常、而错误分支又没走到，loading 层不能永久糊在
+      // 屏幕上把整个窗口变成一块死背景。正常路径下它早就被移除，这里不会触发。
+      (function () {
+        var el = document.getElementById('boot-loader');
+        if (!el) return;
+        el.dataset.t = String(performance.now());
+        if (document.documentElement.classList.contains('is-room')) {
+          setTimeout(function () { el.remove(); }, 20000);
+        }
+      })();
+    </script>
+    <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

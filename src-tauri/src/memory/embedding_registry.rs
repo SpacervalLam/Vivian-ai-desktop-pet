@@ -144,10 +144,13 @@ pub fn lookup(id: &str) -> Option<&'static EmbeddingModelSpec> {
 /// 解析某模型的真实维度；未知模型返回 `None`（由调用方回退到配置值）
 pub fn resolve_dimension(id: &str) -> Option<usize> {
     lookup(id).map(|s| s.dimension).or_else(|| {
-        crate::plugins::load_embedding_provider_presets()
-            .into_iter()
-            .find(|p| p.model == id.trim())
-            .map(|p| p.dimension)
+        let trimmed = id.trim();
+        crate::plugins::find_embedding_preset_by_model(trimmed).and_then(|p| {
+            p.models
+                .into_iter()
+                .find(|m| m.model.trim() == trimmed)
+                .map(|m| m.dimension)
+        })
     })
 }
 

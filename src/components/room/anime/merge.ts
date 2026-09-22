@@ -37,6 +37,33 @@ function attributesSignature(geo: THREE.BufferGeometry): string {
   return Object.keys(geo.attributes).sort().join(',');
 }
 
+/** 合并结果的名字里带上材质色号——审计脚本按名字分类时最可靠的判据。 */
+function materialHex(mat: THREE.Material | THREE.Material[]): string {
+  const m0 = Array.isArray(mat) ? mat[0] : mat;
+  const color = (m0 as THREE.Material & { color?: THREE.Color } | undefined)?.color;
+  return color && typeof color.getHexString === 'function' ? color.getHexString() : 'multi';
+}
+
+/**
+ * 合并结果的可读名字：优先沿用桶内出现最多的「最近具名祖先」，退回材质色号。
+ *
+ * 为什么必须给名字：合批会 `mesh.parent?.remove(mesh)`，源 mesh 连同它们的名字
+ * 一起消失，而合并出来的 mesh 自身无名 —— 于是**任何按 name 分类的工具都会失
+ * 效**（实测全场景 1084 个 mesh 只剩 290 个具名，按名字找 city-block-* 全部落空）。
+ * 名字是留给审计/调试的接口，不是装饰。
+ */
+function mergedLabel(root: THREE.Object3D, meshes: THREE.Mesh[]): string {
+  const tally = new Map<string, number>();
+  for (const mesh of meshes) {
+    let n: THREE.Object3D | null = mesh.parent;
+    while (n && n !== root && !n.name) n = n.parent;
+    if (n && n !== root && n.name) tally.set(n.name, (tally.get(n.name) ?? 0) + 1);
+  }
+  let best = '', bestCount = 0;
+  for (const [name, count] of tally) if (count > bestCount) { best = name; bestCount = count; }
+  return best || `mat-${materialHex(meshes[0].material as THREE.Material)}`;
+}
+
 /**
  * mergeGeometries 对输入很挑剔：属性集合必须完全一致，且要么全是索引几何、
  * 要么全不是。不满足就返回 null。这里先自查一遍，不满足就不合。
@@ -116,6 +143,10 @@ export function mergeByMaterial(root: THREE.Object3D): { before: number; after: 
 
   const rel = new THREE.Matrix4();
   const mergedMeshes: THREE.Mesh[] = [];
+  // 合批会把 mesh 从父级摘走，但**空掉的组会留在场景图里**。实测街区那 36 个
+  // city-block-* 合批后全是空壳，每帧仍被 traverse 到，按名字查又能查到（骗过
+  // 审计脚本）。这里记下所有掉过 mesh 的父级，收尾时把彻底空掉的自底向上摘掉。
+  const emptiedParents = new Set<THREE.Object3D>();
 
   for (const b of buckets) {
     if (b.meshes.length < 2) continue;
@@ -151,6 +182,8 @@ export function mergeByMaterial(root: THREE.Object3D): { before: number; after: 
     if (!combined) continue; // 合并失败：原件留在原地，什么都不动
 
     const out = new THREE.Mesh(combined, b.material);
+    out.name = `merged:${mergedLabel(root, b.meshes)}:${materialHex(b.material)}`;
+    out.userData.mergedCount = b.meshes.length;
     out.castShadow = b.castShadow;
     out.receiveShadow = b.receiveShadow;
     out.renderOrder = b.renderOrder;
@@ -159,7 +192,9 @@ export function mergeByMaterial(root: THREE.Object3D): { before: number; after: 
     if (b.meshes.some((mm) => mm.userData?.noOutline)) out.userData.noOutline = true;
 
     for (const mesh of b.meshes) {
-      mesh.parent?.remove(mesh);
+      const parent = mesh.parent;
+      if (parent && parent !== root) emptiedParents.add(parent);
+      parent?.remove(mesh);
       // 只放几何。材质走的是共享缓存，在这里 dispose 会把别的道具一起弄坏。
       release(mesh.geometry);
     }
@@ -168,12 +203,124 @@ export function mergeByMaterial(root: THREE.Object3D): { before: number; after: 
 
   for (const mesh of mergedMeshes) root.add(mesh);
 
+  // 自底向上摘掉彻底空掉的中间组。只处理本轮掉过 mesh 的父级，且只在它真的
+  // 一个子节点都不剩时才摘——仍然挂着透明子件（玻璃、光晕）的组原样保留。
+  for (const parent of emptiedParents) {
+    let node: THREE.Object3D | null = parent;
+    while (node && node !== root && node.children.length === 0) {
+      const up: THREE.Object3D | null = node.parent;
+      up?.remove(node);
+      node = up;
+    }
+  }
+
   let after = 0;
   root.traverse((o) => {
     const mesh = o as THREE.Mesh;
     if (mesh.isMesh && mesh.name !== '__outline') after++;
   });
   return { before, after };
+}
+
+/**
+ * 几何体去重：把**内容逐字节相同**的 BufferGeometry 收成一份。
+ *
+ * 判据必须是内容，不能是属性计数。实测全场景 1089 个几何里有 804 个的
+ * 「属性数 + 索引数」指纹完全相同，但逐字节比对下来只有 **301 个**真的重复
+ * ——按计数去重会把不同的几何体当成同一个，直接画错东西。这 301 个合计
+ * 约 5.4 MB 顶点数据，CPU 与 GPU 各一份。
+ *
+ * 为什么先按计数分桶、桶内才逐字节哈希：内容相同 ⇒ 计数必然相同，所以计数是
+ * 安全的**预筛**（只会漏掉零个、不会误合并）。全场景 78 MB 顶点数据逐字节跑
+ * FNV-1a 要几百毫秒，先筛掉四分之三之后只剩十几 MB，代价降到可以忽略。
+ *
+ * 只改 `mesh.geometry` 的指向，一个顶点都不动；重复项要等指向它的 mesh 全部
+ * 改指之后才 dispose，否则会把还在用的那份释放掉。
+ *
+ * 返回 { groups, removed, bytes }，给自检脚本用。
+ */
+export function dedupeGeometries(root: THREE.Object3D): { groups: number; removed: number; bytes: number } {
+  const byGeo = new Map<THREE.BufferGeometry, THREE.Mesh[]>();
+  root.traverse((o) => {
+    const mesh = o as THREE.Mesh;
+    if (!mesh.isMesh || !mesh.geometry) return;
+    const list = byGeo.get(mesh.geometry);
+    if (list) list.push(mesh);
+    else byGeo.set(mesh.geometry, [mesh]);
+  });
+  if (byGeo.size < 2) return { groups: 0, removed: 0, bytes: 0 };
+
+  /** 便宜的预筛键：属性名/尺寸/个数 + 索引个数 + 有没有形变属性。 */
+  const shapeKey = (g: THREE.BufferGeometry): string => {
+    const parts: string[] = [];
+    for (const k of Object.keys(g.attributes).sort()) {
+      const a = g.attributes[k];
+      parts.push(`${k}:${a.itemSize}:${a.count}:${a.normalized ? 1 : 0}`);
+    }
+    const morph = g.morphAttributes ? Object.keys(g.morphAttributes).length : 0;
+    return `${parts.join('|')}#${g.index ? g.index.count : 'x'}#${morph}`;
+  };
+
+  /** 内容指纹：FNV-1a over 所有属性与索引的原始字节。 */
+  const contentHash = (g: THREE.BufferGeometry): number => {
+    let h = 2166136261 >>> 0;
+    const mix = (arr: ArrayLike<number>) => {
+      if (!ArrayBuffer.isView(arr)) return;
+      const u8 = new Uint8Array((arr as unknown as ArrayBufferView).buffer, (arr as unknown as ArrayBufferView).byteOffset, (arr as unknown as ArrayBufferView).byteLength);
+      for (let i = 0; i < u8.length; i++) { h ^= u8[i]; h = Math.imul(h, 16777619) >>> 0; }
+    };
+    for (const k of Object.keys(g.attributes).sort()) {
+      const a = g.attributes[k];
+      if (a?.array) mix(a.array as unknown as ArrayLike<number>);
+    }
+    if (g.index?.array) mix(g.index.array as unknown as ArrayLike<number>);
+    return h >>> 0;
+  };
+
+  const byteSize = (g: THREE.BufferGeometry): number => {
+    let n = 0;
+    for (const k of Object.keys(g.attributes)) {
+      const a = g.attributes[k];
+      const arr = a?.array as unknown as ArrayBufferView | undefined;
+      if (arr) n += arr.byteLength;
+    }
+    const ia = g.index?.array as unknown as ArrayBufferView | undefined;
+    if (ia) n += ia.byteLength;
+    return n;
+  };
+
+  const buckets = new Map<string, THREE.BufferGeometry[]>();
+  for (const g of byGeo.keys()) {
+    const k = shapeKey(g);
+    const b = buckets.get(k);
+    if (b) b.push(g);
+    else buckets.set(k, [g]);
+  }
+
+  let groups = 0, removed = 0, bytes = 0;
+  for (const bucket of buckets.values()) {
+    if (bucket.length < 2) continue;
+    const canonical = new Map<number, THREE.BufferGeometry>();
+    let merged = 0;
+    for (const g of bucket) {
+      const h = contentHash(g);
+      const keep = canonical.get(h);
+      if (!keep) { canonical.set(h, g); continue; }
+      // 先把指向 g 的 mesh 全部改指 keep，再释放 g——顺序反了会留下悬空引用
+      const meshes = byGeo.get(g);
+      if (meshes) {
+        for (const mesh of meshes) mesh.geometry = keep;
+        const kept = byGeo.get(keep);
+        if (kept) kept.push(...meshes);
+        byGeo.delete(g);
+      }
+      bytes += byteSize(g);
+      g.dispose();
+      removed++; merged++;
+    }
+    if (merged > 0) groups++;
+  }
+  return { groups, removed, bytes };
 }
 
 /**

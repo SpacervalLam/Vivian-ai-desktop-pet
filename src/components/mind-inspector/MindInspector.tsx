@@ -25,6 +25,7 @@ import OverviewPage from './pages/OverviewPage';
 import JournalPage from './pages/JournalPage';
 import CodeAgentPage from './pages/CodeAgentPageNew';
 import { invalidatePastelCache } from './pages/GraphPage';
+import PageErrorBoundary from './PageErrorBoundary';
 import './MindInspector.css';
 import './MindInspectorThemes.css';
 
@@ -82,6 +83,22 @@ const MindInspector: React.FC = () => {
   const [pageParams, setPageParams] = useState<PageParams>({});
   const [uiStyle, setUiStyle] = useState<InspectorUiStyle>(readUiStyle);
 
+  /* 「开关偏好」与「生效主题」是两个值，必须分开 —— 这是产品约束，不是样式细节：
+     **极简只在工作页生效，其他页永远是手账。**
+
+     理由：极简是给「工作」那一页的密集信息界面（代码 / 轨迹 / 对话）准备的，
+     记忆 / 世界 / 画像三页是浏览型页面，保持手账本的手写纸感。
+
+       · `uiStyle`          —— 用户的**偏好**。要持久化、要驱动开关自己的高亮、
+                               在非工作页也不能被改写（否则切走一次偏好就没了）。
+       · `effectiveUiStyle` —— 当下**真正渲染**的主题。只喂给三处 `data-ui-style` 标记
+                               （窗口根 / `.mind-main` / `<body>`），别的地方一律不用它。
+
+     所以「在记忆页看到的是手账」并不代表开关被改成了手账 —— 回到工作页，开关仍然是
+     用户上次选的那一档。 */
+  const isWorkPage = activeNav === 'code';
+  const effectiveUiStyle: InspectorUiStyle = isWorkPage ? uiStyle : 'scrapbook';
+
   useEffect(() => {
     try {
       localStorage.setItem(UI_STYLE_STORAGE_KEY, uiStyle);
@@ -89,6 +106,28 @@ const MindInspector: React.FC = () => {
       /* localStorage may be unavailable in hardened webviews */
     }
   }, [uiStyle]);
+
+  /* 把主题标记镜像到 <body> 上。
+     原因：本模块里有一批弹层是 **portal 到 document.body** 的（选区浮卡、就地改写卡、
+     输入框气泡、页签右键菜单、会话右键菜单 / 弹窗），它们逃出了 .mind-main ——
+     而主题标记 data-ui-style 只挂在 .mind-main 上。结果这些弹层在极简模式下拿到的
+     仍是 .codex-theme 的默认调色板（手账暖纸），表现为「页面是灰白的、浮卡却是奶油纸」。
+     body 是内联内容与 portal 的唯一共同祖先，所以标记只能挂这里；
+     MindInspectorThemes.css 里对应的选择器写成 body[data-ui-style="minimal"] :is(...)。
+
+     仍然由**一处**状态驱动（下面三处标记全部读 effectiveUiStyle），不会漂移；
+     卸载时清掉，避免属性泄漏到别的窗口（MemoryWindow 也是 .codex-theme，
+     不该吃到心智观察器的主题）。
+
+     注意这里要跟着 `effectiveUiStyle` 走而不是 `uiStyle`：这批 portal 弹层
+     （选区浮卡 / 就地改写卡 / 输入气泡 / 页签右键菜单 / 会话菜单）全都长在工作页上，
+     工作页之外它们根本不会挂载，所以两者的实际取值一致；但写成 effectiveUiStyle
+     才能保证「body 上的标记 = 页面上的标记」这条不变量**永远**成立 —— 否则哪天有
+     弹层挪到别的页，它就会单独穿成极简。 */
+  useEffect(() => {
+    document.body.setAttribute('data-ui-style', effectiveUiStyle);
+    return () => document.body.removeAttribute('data-ui-style');
+  }, [effectiveUiStyle]);
 
   // 切换页面时刷新动画 key
   const [animKey, setAnimKey] = useState(0);
@@ -204,9 +243,17 @@ const MindInspector: React.FC = () => {
   }, []);
 
   // 3D 公寓入口：独立全屏窗口，与主窗口快捷键走同一入口、复用同一实例。
-  // 打开后由 Rust 端统一隐藏角色窗口与本窗口，关闭时一并恢复。
+  //
+  // 心智观察器是全屏置顶窗口，房间窗口不是——它只要还在屏上，房间就会被整个
+  // 压在下面，首屏 loading 层一帧都露不出来。所以这里不是隐藏而是直接关掉本
+  // 窗口，退出公寓后也不再恢复。
+  //
+  // openRoomWindow 内部保证「关闭自己是最后一步」：本窗口销毁后，这个 JS 上下文
+  // 里未返回的 IPC 会全部丢失，顺序反了房间窗口就再也 show 不出来。
   const openApartment = useCallback(() => {
-    void openRoomWindow(t('room.title', { defaultValue: '公寓' }));
+    void openRoomWindow(t('room.title', { defaultValue: '公寓' }), {
+      closeInspector: true,
+    });
   }, [t]);
 
   // 页面可注入共享标题行工具栏（切换页面时自动清空）
@@ -251,8 +298,19 @@ const MindInspector: React.FC = () => {
 
   return (
     <NavigationProvider value={navContext}>
+      {/* 主题标记挂**两处**：窗口根（下面这个 data-ui-style）与 .mind-main（再往下几行）。
+          根上这一处是给「窗口外壳」用的 —— 封面条、贴纸导航卡、页内 Tab 栏都长在
+          .mind-main **外面**（前两个甚至是它的**祖先**），而 CSS 的后代选择器只能向下
+          找，够不着祖先。所以外壳的极简样式只能靠挂在根上的标记来选，
+          见 MindInspectorThemes.css 的「极简主题：窗口外壳」一节。
+          两处同源同值（都来自 effectiveUiStyle），不会漂移。
+
+          注意喂进去的是 **effectiveUiStyle** 而不是 uiStyle：极简只在工作页生效，
+          其他页这三处标记一律写回 "scrapbook"（含 `<body>` 那处，共三处标记），
+          于是整窗（外壳 + 内容 + 弹层）一起回到手账，不存在「一半极简一半手账」。 */}
       <div
-        className={`codex-theme mind-inspector-root mind-scrapbook-window${activeNav === 'code' ? ' is-work-page' : ''}`}
+        className={`codex-theme mind-inspector-root mind-scrapbook-window${isWorkPage ? ' is-work-page' : ''}`}
+        data-ui-style={effectiveUiStyle}
         data-nav-revealed={navRevealed ? 'true' : 'false'}
       >
         {/* 手账本封面条（全局标题 + 窗口拖拽区 + 最小化/关闭按钮） */}
@@ -265,7 +323,11 @@ const MindInspector: React.FC = () => {
           </div>
           <div className="mind-sb-cover-extra">
             {headerExtra}
-            {activeNav === 'code' && (
+            {/* 主题开关本身也只在工作页出现 —— 与「极简只在工作页生效」是同一条约束的两面：
+                开关就是「这一页的显示方式」，放在别的页上既没用又会让人以为切换失灵。
+                高亮读的是 **uiStyle**（偏好），不是 effectiveUiStyle：开关只在工作页存在，
+                而工作页上两者恒等；读偏好能保证「切走再切回来」时开关状态不丢。 */}
+            {isWorkPage && (
               <div
                 className="mind-ui-style-switch"
                 role="group"
@@ -369,16 +431,20 @@ const MindInspector: React.FC = () => {
 
           {/* 右侧内容区 */}
           <main
-            className={`mind-main${activeNav === 'code' ? ' is-work-page' : ''}`}
-            data-ui-style={uiStyle}
+            className={`mind-main${isWorkPage ? ' is-work-page' : ''}`}
+            data-ui-style={effectiveUiStyle}
           >
-            <div
-              key={animKey}
-              className="mind-page-content"
-              style={{ animation: `mind-inspector-page-enter ${DURATION.slow}s ${EASE.ios}` }}
-            >
-              {renderPage()}
-            </div>
+              <div
+                key={animKey}
+                className="mind-page-content"
+                style={{ animation: `mind-inspector-page-enter ${DURATION.slow}s ${EASE.ios}` }}
+              >
+                {/* 页面级错误边界：单页渲染崩溃时只显示兜底，不让整窗透明空白
+                    （见 PageErrorBoundary）。key 随主导航变化，切页即重置崩溃态。 */}
+                <PageErrorBoundary key={activeNav}>
+                  {renderPage()}
+                </PageErrorBoundary>
+              </div>
           </main>
         </div>
 

@@ -30,13 +30,14 @@ import { useHiding } from './hooks/useHiding';
 import type { Corner, HideReason } from './hooks/useHiding';
 import { useSmartPositioning } from './hooks/useSmartPositioning';
 import { positioningCoordinator } from './hooks/positioningCoordinator';
+import { FLEE_TAKEOVER_HOLD_MS } from './chibi/fleeTrack';
 import { changeLanguage } from './i18n';
 import type { BubblePosition } from './components/MessageBubble';
 import { getCharacterId } from './characterContext';
 import { stripActions } from './utils/ActionText';
 import { raiseWindow, isWindowOnScreen, RAISE_UNLISTEN } from './utils/windowRaiser';
 import { openRoomWindow } from './utils/roomWindow';
-import { buildPetRectQuery, emitPetReveal, type PetRect } from './utils/petReveal';
+import { buildPetRectQuery, buildPrewarmQuery, emitPetReveal, PET_PREWARM_READY_EVENT, type PetPrewarmReady, type PetRect } from './utils/petReveal';
 import HoldProgressRing from './components/HoldProgressRing';
 
 const ENVIRONMENT_UPDATE_INTERVAL_MS = 30_000;
@@ -77,6 +78,17 @@ const HOLD_RING_DELAY_MS = 200;
 const HOLD_OPEN_TOTAL_MS = 1000;
 /** 长按期间允许的窗口位移容差（物理像素），超过判定为拖拽并取消 */
 const HOLD_MOVE_TOLERANCE_PX = 10;
+/** 长按开始多久后提前去加载心智观察器窗口（毫秒）。
+ *
+ *  窗口的加载（WebView 冷启 + React 挂载 + 首屏数据）是这条链上最慢的一环，
+ *  而长按判定本身要 1s。等到长按成立才去建窗口，用户松手后还得再等一截才看到
+ *  界面；提前起步能把这截等待基本吃干净。0.1s 是个折中：比进度环（0.2s）更早，
+ *  又不至于让「点一下 / 拖走」这类根本不会成立的手势白建窗口。 */
+const HOLD_PREWARM_DELAY_MS = 100;
+/** 预热就绪回执的等待上限（毫秒）：超时就直接按常规路径打开。
+ *  回执本身只是一条事件，丢了（IPC 异常 / 监听未挂上）不该让长按毫无反应——
+ *  宁可少一段入场动画，也不能不打开。 */
+const PREWARM_READY_WAIT_MS = 1200;
 /** 后端 drag:dizzy 事件未带时长时的兜底晕眩时长（毫秒） */
 const DIZZY_FALLBACK_MS = 1500;
 
@@ -307,10 +319,115 @@ function armSelfRevealFallback(win: WebviewWindow): void {
   }, SELF_REVEAL_FALLBACK_MS);
 }
 
+/** 创建中的窗口：label → 创建落地（`tauri://created` / `tauri://error`）的 promise。
+ *
+ *  Tauri 的窗口创建是异步的：`new WebviewWindow()` 返回时 label 还没进 Rust 侧的
+ *  窗口注册表，这段时间里 `getByLabel` 查不到它、`CHILD_WINDOWS` 里却已经有引用。
+ *  若第二个调用者在这段窗口期走到「查注册表」那一步，就会用同一个 label 再建一次，
+ *  必然报 label 冲突，对外表现是「点了毫无反应」。
+ *
+ *  预热正好把这段窗口期放大了：窗口在长按 0.1s 时开始建，长按 1s 成立时才去打开，
+ *  两个动作分处不同的调用栈，靠「碰巧建完了」是不可靠的。所以这里显式等它落地。 */
+const WINDOW_CREATION = new Map<string, Promise<void>>();
+
+/** 等创建落地的最长时间（毫秒）：创建卡死时不能把后续调用一起拖住 */
+const WINDOW_CREATION_TIMEOUT_MS = 3000;
+
+/** 桌宠窗口当前的矩形（物理像素）；取不到返回 null（调用方退化为无入场动画） */
+async function readPetRect(): Promise<PetRect | null> {
+  try {
+    const petWin = getCurrentWindow();
+    const [pos, size] = await Promise.all([petWin.outerPosition(), petWin.outerSize()]);
+    return { x: pos.x, y: pos.y, w: size.width, h: size.height };
+  } catch {
+    return null;
+  }
+}
+
+/** 销毁一个「预热出来但没派上用场」的窗口。
+ *
+ *  长按中止（松手 / 拖动超容差）时调用：这个窗口是那次长按的私产，长按没成立就
+ *  不该留下任何东西——既不能显示，也不该在后台常驻（心智观察器是整页应用，
+ *  白留一份 webview 的内存不划算）。下一次长按会重新预热，成本已经被 0.9s 的
+ *  提前量吸收掉了。
+ *
+ *  一道保险：窗口若已经被别的入口摆上屏（长按期间用户又从托盘点了一次），
+ *  就不再销毁——那已经是用户要看的东西，不能替他关掉。
+ *
+ *  调用前提：句柄来自「预热时 getByLabel 查不到、于是新建」的那条路，所以关掉的
+ *  一定是本次预热自己建的窗口。已存在（被最小化 / hide）的窗口走的是认领分支，
+ *  压根不会拿到这里来销毁——那种窗口里有用户可能没保存的输入。 */
+async function destroyPrewarmedWindow(win: WebviewWindow): Promise<void> {
+  try {
+    if (await isWindowOnScreen(win)) return;
+    await win.close();
+  } catch {
+    /* 已销毁 / IPC 失败：无需处理 */
+  }
+}
+
+/** 一次长按预热会话。
+ *
+ *  生命周期：长按 0.1s 时开一个会话（建窗口 / 认领已有窗口），长按 1s 成立时
+ *  「放行」（走常规打开路径让它显形），中途松手则「作废」（销毁自己建的窗口）。
+ *  会话号随 URL 带给子窗口、再随就绪回执带回来，用于把回执对上号
+ *  （memory 是共享窗口，两个角色桌宠可能各有一场预热，回执只该被发起者认领）。 */
+interface MemoryPrewarmSession {
+  session: number;
+  /** 预热链（建窗口 / 认领已有窗口）；放行前先等它落地，避免与创建抢跑 */
+  chain: Promise<void>;
+  /** 本次会话新建出来的窗口句柄，创建完成后回填。
+   *  为 null 有两种含义：还没回填，或这次是「认领已有窗口」（本来就没有要销毁的东西）。 */
+  win: WebviewWindow | null;
+  /** 子窗口已挂好 `pet:reveal` 监听（或内容早已加载完）——此时发显形事件才不会丢 */
+  childReady: boolean;
+  /** 长按已成立，在等子窗口就绪 */
+  committed: boolean;
+  /** 会话已作废（长按中止） */
+  aborted: boolean;
+  /** 等就绪回执的兜底定时器（回执丢了也得能打开） */
+  readyTimer: number | null;
+}
+
+/** 作废一场预热会话。
+ *
+ *  `session.win` 还没回填（窗口正在创建）时不在这里销毁——预热链 await 到句柄后
+ *  会看到 `aborted` 并就地销毁，那里才不会和创建抢跑。 */
+function abortPrewarmSession(session: MemoryPrewarmSession): void {
+  session.aborted = true;
+  if (session.readyTimer !== null) {
+    window.clearTimeout(session.readyTimer);
+    session.readyTimer = null;
+  }
+  if (session.win) void destroyPrewarmedWindow(session.win);
+}
+
+/** 放掉一场预热会话：腾出会话位、清等待定时器、执行长按动作（真正打开/收起窗口）。
+ *
+ *  抽成模块函数是为了让「长按成立」与「子窗口回执」两条路径共用同一套收尾——
+ *  它们分处不同的回调与 effect，写成组件内闭包会互相看不见对方。
+ *  会话位已经不是它了（被新长按顶掉 / 已作废）就什么都不做。 */
+function finishPrewarm(
+  slot: { current: MemoryPrewarmSession | null },
+  session: MemoryPrewarmSession,
+  action: () => void,
+): void {
+  if (slot.current !== session) return;
+  slot.current = null;
+  if (session.readyTimer !== null) {
+    window.clearTimeout(session.readyTimer);
+    session.readyTimer = null;
+  }
+  action();
+}
+
 /** 创建或聚焦独立窗口。
  *  复用判定：`isVisible()` 抛异常才说明引用已失效（窗口已销毁），此时丢弃引用重新创建；
  *  它返回 false 只说明窗口被 hide 过，仍然复用——raiseWindow 负责把它 show 回来。
- *  窗口已存在却去重建是走不通的（label 冲突），所以「存在即复用」是唯一安全的规则。 */
+ *  窗口已存在却去重建是走不通的（label 冲突），所以「存在即复用」是唯一安全的规则。
+ *
+ *  返回值：最终落到这个 label 上的窗口（新建或复用），创建失败时为 null。
+ *  绝大多数调用方只关心副作用，忽略即可；预热需要它来在会话作废时销毁自己建的那个。 */
 async function openWindow(
   label: string,
   view: string,
@@ -341,6 +458,15 @@ async function openWindow(
      */
     selfReveal?: boolean;
     /**
+     * 预热模式：窗口建出来加载，但**连兜底显形都不挂**。
+     *
+     *  与 selfReveal 的区别就在那个兜底：兜底的前提是「这个窗口本来就该出现，
+     *  只是显形链慢/断了」；而预热窗口该不该出现取决于长按成不成立，此刻还没有
+     *  答案——挂上兜底就成了「长按没成立，窗口自己冒出来」。所以预热期间一律
+     *  不上屏，显形改由调用方在长按成立后驱动（那时走的是复用路径，兜底照常挂）。
+     */
+    prewarm?: boolean;
+    /**
      * 窗口已经打开且可见时的回调——取代「只聚焦就返回」的默认行为。
      *
      * 不传则维持原样（提升 Z 序 + 聚焦）。需要重播入场动画的窗口传它：
@@ -350,9 +476,18 @@ async function openWindow(
     onExisting?: (win: WebviewWindow) => void;
   } = {},
   t?: (key: string) => string,
-) {
+): Promise<WebviewWindow | null> {
   // 按角色区分 label，避免多角色窗口的子窗口冲突
   const fullLabel = charScopedLabel(label);
+
+  // 有同 label 的窗口正在创建 → 先等它落地（否则下面的注册表查询查不到它，
+  // 会走到重名重建那条死路，详见 WINDOW_CREATION 的说明）
+  const inFlight = WINDOW_CREATION.get(fullLabel);
+  if (inFlight) await inFlight;
+
+  // 预热窗口的显形完全由调用方驱动，兜底显形一律不挂
+  const selfReveal = options.selfReveal ?? false;
+  const armRevealFallback = selfReveal && !options.prewarm;
 
   // 复用分支的判定与动作必须分开：
   // - 活性探测（`isVisible()`）只认「抛异常」＝窗口真的被销毁了。返回 false 不代表窗口没了，
@@ -381,10 +516,10 @@ async function openWindow(
       alive = false;
     }
     if (alive) {
-      await raiseWindow(tracked, label, options.selfReveal).catch(() => {});
+      await raiseWindow(tracked, label, selfReveal).catch(() => {});
       options.onExisting?.(tracked);
-      if (options.selfReveal) armSelfRevealFallback(tracked);
-      return;
+      if (armRevealFallback) armSelfRevealFallback(tracked);
+      return tracked;
     }
     CHILD_WINDOWS.delete(fullLabel);
   }
@@ -413,10 +548,10 @@ async function openWindow(
             if (u) { u(); RAISE_UNLISTEN.delete(label); }
           });
         }
-        await raiseWindow(existing, label, options.selfReveal).catch(() => {});
+        await raiseWindow(existing, label, selfReveal).catch(() => {});
         options.onExisting?.(existing);
-        if (options.selfReveal) armSelfRevealFallback(existing);
-        return;
+        if (armRevealFallback) armSelfRevealFallback(existing);
+        return existing;
       }
     }
   } catch {
@@ -463,9 +598,9 @@ async function openWindow(
       if (u) { u(); RAISE_UNLISTEN.delete(label); }
     });
     // 5. 窗口创建后显示（visible:false 创建，webview 就绪后 show）
-    if (options.selfReveal) {
+    if (selfReveal) {
       // 显形交给子窗口（入场动画需要先把首帧摆成桌宠大小再 show）
-      armSelfRevealFallback(win);
+      if (armRevealFallback) armSelfRevealFallback(win);
     } else {
       win.once('tauri://created', () => {
         void win.show().catch(() => {});
@@ -474,8 +609,28 @@ async function openWindow(
     win.once('tauri://error', (e) => {
       console.error(`[openWindow] 窗口 "${fullLabel}" 创建失败:`, e);
     });
+
+    // 6. 登记「创建中」：任一落地信号（含超时）都会解开等待者
+    let settleCreation: () => void = () => {};
+    const creation = new Promise<void>((resolve) => { settleCreation = resolve; });
+    WINDOW_CREATION.set(fullLabel, creation);
+    let creationTimer: number | undefined;
+    const settleOnce = () => {
+      if (creationTimer !== undefined) {
+        window.clearTimeout(creationTimer);
+        creationTimer = undefined;
+      }
+      if (WINDOW_CREATION.get(fullLabel) === creation) WINDOW_CREATION.delete(fullLabel);
+      settleCreation();
+    };
+    win.once('tauri://created', settleOnce);
+    win.once('tauri://error', settleOnce);
+    creationTimer = window.setTimeout(settleOnce, WINDOW_CREATION_TIMEOUT_MS);
+
+    return win;
   } catch (err) {
     console.error(`[openWindow] 创建窗口 "${fullLabel}" 失败:`, err);
+    return null;
   }
 }
 
@@ -629,6 +784,10 @@ export default function App() {
   // 拖拽表情联动：标记当前是否处于用户拖拽会话，以及拖拽表情是否已应用
   const dragSessionRef = useRef<boolean>(false);
   const dragExpressionAppliedRef = useRef<boolean>(false);
+  // 逃离途中延后开启拖动的定时器句柄（见 handleBackgroundMouseDown）
+  const dragDeferTimerRef = useRef<number | null>(null);
+  // 左键此刻是否按着（前端视角）：延后开拖的定时器据此判断「人还按着吗」
+  const dragPressAliveRef = useRef<boolean>(false);
   // 晕乎乎临时表情的回落定时器句柄（快速拖动 / 甩飞撞边共用）
   const dizzyTimerRef = useRef<number | null>(null);
   // 长按打开心智观察器：会话是否进行中 / 延迟计时器句柄 / 起始窗口位置（位移判拖拽用）
@@ -641,6 +800,13 @@ export default function App() {
   const [holdRingPos, setHoldRingPos] = useState<{ x: number; y: number } | null>(null);
   // 长按触发的动作（打开心智观察器），由下方 openMemory 定义后回填
   const holdActionRef = useRef<() => void>(() => {});
+  // 长按提前加载心智观察器（预热）：当前会话 / 起跑计时器 / 会话号序列。
+  // 预热动作也走 ref 回填（同 holdActionRef）——startHold 定义在 prewarmMemory 之前，
+  // 直接用会撞上暂时性死区，而这个回调又几乎不换身份，没必要进依赖表。
+  const prewarmRef = useRef<MemoryPrewarmSession | null>(null);
+  const prewarmTimerRef = useRef<number | undefined>(undefined);
+  const prewarmActionRef = useRef<() => void>(() => {});
+  const prewarmSeqRef = useRef(0);
 
   // 气泡子窗口管理：currentBubble 变化时创建/更新/隐藏气泡窗口
   // currentBubble 是单一数据源（涵盖普通气泡、流式气泡、追加气泡）
@@ -2473,11 +2639,9 @@ export default function App() {
         const { kind, target, params } = act;
         switch (kind) {
           case 'expression':
+            // 后端规则表驱动的限时表情。图集格位（如 dizzy）靠这个 duration_ms 限时，
+            // 到点由画布自己回落到 idle——没有它那张脸会一直挂着。
             handle?.setExpression(target, (params.duration_ms as number) || 0);
-            break;
-          case 'mood_tone':
-            // 心情基调格位：只改回落目标，不打断正在播的一次性动作
-            handle?.setMoodTone(target);
             break;
           case 'motion':
           case 'animation':
@@ -2782,8 +2946,8 @@ export default function App() {
   }, []);
 
   // 在场状态监听：驱动 桌宠行为（表情/闭眼/鼠标跟随/隐藏）
-  // Rest 状态 = 休息：sleepy 表情 + 闭眼 + 隐藏到角落（露出 48px）
-  // Busy 状态 = 后台任务：dark_face 表情 + 隐藏到角落（与 Rest 共用 hideForSleep 路径）
+  // Rest 状态 = 休息：回落到 idle + 闭眼 + 隐藏到角落（露出 48px）
+  // Busy 状态 = 后台任务：掏出手机 → 常驻「看手机」循环（留在原位，见下方姿态效应）
   // Offline 状态 = 离线：真正 hide_window，只能通过托盘/快捷键唤回
   useEffect(() => {
     let cancelled = false;
@@ -2795,7 +2959,10 @@ export default function App() {
           setPresenceState(info?.state ?? null);
           useAppStore.getState().setPresenceState(info?.state ?? null);
           // 启动时按状态分发隐藏策略
-          if (info?.state === 'rest' || info?.state === 'busy') {
+          // Busy 不在其列：忙碌是一段**看得见**的表演（掏出手机、看手机），退到角落只剩
+          // 48px 时就什么都看不到了，等于白做。忙碌时留在原位，「不主动打扰」由它自己
+          // 那套姿态负责，而不是靠把窗口挪走。
+          if (info?.state === 'rest') {
             hideForSleepRef.current?.();
           } else if (info?.state === 'offline') {
             void hideForOfflineRef.current?.();
@@ -2814,12 +2981,12 @@ export default function App() {
           useAppStore.getState().setPresenceState(to);
 
           const applyPresenceChange = () => {
-            // Rest/Busy：退到角落；Offline：真正 hide_window
-            if (to === 'rest' || to === 'busy') {
+            // Rest：退到角落；Offline：真正 hide_window；Busy：留在原位播忙碌表演
+            if (to === 'rest') {
               hideForSleepRef.current?.();
             } else if (to === 'offline') {
               void hideForOfflineRef.current?.();
-            } else if (from === 'rest' || from === 'busy') {
+            } else if (from === 'rest') {
               restoreFromSleepRef.current?.();
             } else if (from === 'offline') {
               void restoreFromOfflineRef.current?.();
@@ -2856,21 +3023,34 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // presence 状态驱动的桌宠姿态（直接用 Q 版词表里的图集格位名）：
-  // - busy：严肃专注 → drag
-  // - rest：困倦 → dizzy
+  // presence 状态驱动的桌宠姿态：
+  // - busy：掏出手机 → 常驻「看手机」循环，退出时倒放收起手机（见 ChibiPetCanvas 的
+  //   startBusy / stopBusy）。它是一段**帧序列**而非单个格位，进场与退出各有前摇收尾，
+  //   所以不能像格位那样一句 setExpression 了事。
+  // - rest：休息 = 平静待机 → 回落到 idle，**不再挂 dizzy**
+  //   rest 期间窗口本就隐藏，强制 dizzy 只在唤醒瞬间闪一下，看着像出 bug；
+  //   且「休息」语义是安睡/发呆，不是持续旋转的晕眩脸（dizzy 应留给真正的头晕/疲惫）。
   // - online/其他：恢复默认姿态
+  //
+  // 退出忙碌必须单独走 stopBusy：它要先把「收起手机」倒放完，而不是一刀切回 idle。
+  // 因此这里记一份「上一轮是不是忙碌」，否则 enter 与 exit 会被同一个 else 分支吞掉。
+  const busyStageRef = useRef(false);
   useEffect(() => {
     if (!modelReady) return;
     const handle = petRef.current;
     if (!handle) return;
     if (presenceState === 'busy') {
-      handle.setExpression('drag');
-    } else if (presenceState === 'rest') {
-      handle.setExpression('dizzy');
-    } else {
-      handle.resetExpression();
+      busyStageRef.current = true;
+      handle.startBusy();
+      return;
     }
+    if (busyStageRef.current) {
+      busyStageRef.current = false;
+      handle.stopBusy();
+      return;
+    }
+    // rest / online / 其他：统一回落到 idle，不再把 rest 当成 dizzy
+    handle.resetExpression();
   }, [presenceState, modelReady]);
 
   // 监听 direct 渠道被拦截：后端 emit chat:presence_blocked → toast 提示用户改用微信
@@ -3033,12 +3213,57 @@ export default function App() {
   // 左键按住（不拖动）满 HOLD_OPEN_TOTAL_MS（1s）后打开心智观察器；
   // 超过 HOLD_RING_DELAY_MS（0.2s）后在按住位置显示顺时针填充的环形进度槽，
   // 同时起播施法逐帧动画。
+  /**
+   * 放行一次已经成立的长按：让（预热好的）心智观察器显形。
+   *
+   *  预热把「建窗口」提前到了长按成立之前，但「建好」不等于「子窗口接得住显形事件」
+   *  ——两者之间隔着一整个页面冷启。所以这里分三种情况：
+   *  - 没有预热会话（长按快得没跑到 0.1s；或预热链自己放弃了）：直接走常规打开；
+   *  - 子窗口已回执就绪：立刻放行，这一下就是「松手即见」；
+   *  - 还没回执：挂起等回执（见 pet:prewarm_ready 监听），另配超时兜底——回执只是
+   *    一条事件，丢了不该让长按毫无反应。
+   *
+   *  这里**不**提前腾会话位：挂起期间回执还要靠它认领这次长按。
+   */
+  const releasePrewarm = useCallback(() => {
+    const session = prewarmRef.current;
+    if (!session) {
+      holdActionRef.current();
+      return;
+    }
+    session.committed = true;
+    void (async () => {
+      // 等预热链落地：窗口得先真的建出来，常规打开路径的复用判定才认得它
+      await session.chain;
+      if (prewarmRef.current !== session) return;
+      if (session.childReady) {
+        finishPrewarm(prewarmRef, session, () => holdActionRef.current());
+        return;
+      }
+      session.readyTimer = window.setTimeout(() => {
+        session.readyTimer = null;
+        finishPrewarm(prewarmRef, session, () => holdActionRef.current());
+      }, PREWARM_READY_WAIT_MS);
+    })();
+  }, []);
+
   const cancelHold = useCallback(() => {
     if (!holdActiveRef.current) return;
     holdActiveRef.current = false;
     if (holdTimerRef.current !== undefined) {
       window.clearTimeout(holdTimerRef.current);
       holdTimerRef.current = undefined;
+    }
+    if (prewarmTimerRef.current !== undefined) {
+      window.clearTimeout(prewarmTimerRef.current);
+      prewarmTimerRef.current = undefined;
+    }
+    // 中止预热：这次长按没成立，提前建出来的窗口不该留下（详见 abortPrewarmSession）。
+    // 加载没跑完的也在这一下被打断——窗口正在建的话由预热链自己收尾销毁。
+    const session = prewarmRef.current;
+    if (session) {
+      prewarmRef.current = null;
+      abortPrewarmSession(session);
     }
     setHoldRingPos(null);
     // 施法动画从当前帧倒放回初始帧（进度环未出现/已播完时无会话，no-op）
@@ -3055,10 +3280,13 @@ export default function App() {
     void invoke('stop_window_drag').catch(() => {});
     // 施法动画与进度环同步播放，此时应已自然播完；兜底立即归位（不倒放）
     petRef.current?.stopCast();
-    holdActionRef.current();
+    // 预热会话若已就绪，这一下就让它显形；还没就绪则挂起，等子窗口回执或超时
+    // （详见 releasePrewarm）。没有预热会话（没跑到 0.1s / 预热链放弃了）时，
+    // releasePrewarm 会直接走常规打开路径。
+    releasePrewarm();
     // 长按本身也是一次用户动作：记进事件账本，并让桌宠随口反应一句
     requestPetReaction('long_press');
-  }, [requestPetReaction]);
+  }, [requestPetReaction, releasePrewarm]);
 
   const startHold = useCallback((clientX: number, clientY: number) => {
     // 新长按会话：上一段施法（含取消倒放）直接归位，避免与本次叠加
@@ -3074,6 +3302,13 @@ export default function App() {
         if (holdActiveRef.current) holdStartWinPosRef.current = { x: pos.x, y: pos.y };
       })
       .catch(() => {});
+    // 提前加载：0.1s 就开始建心智观察器窗口（预热期间一律不上屏）。
+    // 比进度环（0.2s）更早，把「窗口加载」这段最慢的活儿挪到长按判定期间干。
+    prewarmTimerRef.current = window.setTimeout(() => {
+      prewarmTimerRef.current = undefined;
+      if (!holdActiveRef.current) return;
+      prewarmActionRef.current();
+    }, HOLD_PREWARM_DELAY_MS);
     holdTimerRef.current = window.setTimeout(() => {
       holdTimerRef.current = undefined;
       if (!holdActiveRef.current) return;
@@ -3112,20 +3347,60 @@ export default function App() {
       safeUnlisten(unlistenDragCancelled);
       safeUnlisten(unlistenMoved);
       cancelHold();
+      // 卸载时预热会话也一并作废：窗口不该留在这个已经没人管的界面上
+      const session = prewarmRef.current;
+      if (session) {
+        prewarmRef.current = null;
+        abortPrewarmSession(session);
+      }
     };
   }, [cancelHold]);
 
-  // 背景层窗口拖拽
-  const handleBackgroundMouseDown = useCallback(async (e: React.MouseEvent) => {
-    console.log(`[DIAG] mousedown (drag), char=${getCharacterId()}, button=${e.button}, x=${e.clientX}, y=${e.clientY}`);
-    if (e.button !== 0) return;
-    // 标记进入用户拖拽会话：后续 onMoved 事件将触发收伞表情
-    dragSessionRef.current = true;
-    // 左键按住期间启动长按检测：不松手、不拖动满 1s 打开心智观察器
-    startHold(e.clientX, e.clientY);
-    // 自定义拖动：绕过 Windows 工作区限制（startDragging 会把超出屏幕顶部的窗口弹回）
-    // 通过 invoke('get_cursor_position') 获取屏幕坐标，传给后端 start_window_drag
-    // cursor tracking 线程会用 SetWindowPos 移动窗口，不受工作区限制
+  // 预热就绪回执：子窗口挂好 `pet:reveal` 监听后广播一次。
+  //
+  // 这是「提前加载」这条链的最后一环。预热把建窗口提前了，但建好 ≠ 加载完，
+  // 两者之间隔着一整个页面冷启；长按成立时若子窗口还没接住监听，显形事件就丢了，
+  // 窗口只能靠兜底定时器迟到显形——那正好抵消掉预热的意义。
+  //
+  // 两种到达时机都要处理：
+  // - 长按还没成立：只记下「就绪」，等长按成立时立刻放行；
+  // - 长按已经成立（放行时在等它）：当场放行，这就是「松手即见」那一刻。
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    void (async () => {
+      try {
+        unlisten = await listen<PetPrewarmReady>(PET_PREWARM_READY_EVENT, (e) => {
+          const session = prewarmRef.current;
+          // 不是本会话的回执（多角色桌宠各有一场预热）→ 丢弃
+          if (!session || e.payload?.session !== session.session) return;
+          session.childReady = true;
+          if (session.committed) {
+            finishPrewarm(prewarmRef, session, () => holdActionRef.current());
+          }
+        });
+        if (cancelled) { safeUnlisten(unlisten); unlisten = undefined; }
+      } catch {
+        /* listen 不可用：放行时的超时兜底会接管，长按照常打开 */
+      }
+    })();
+    return () => { cancelled = true; safeUnlisten(unlisten); unlisten = undefined; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /**
+   * 开始自定义窗口拖动。
+   *
+   * 绕过 Windows 工作区限制（`startDragging` 会把超出屏幕顶部的窗口弹回）：取光标的
+   * 屏幕坐标交给后端，cursor tracking 线程随后用 `SetWindowPos` 追着光标移动窗口。
+   *
+   * 后端记下的是**调用那一刻**的光标相对窗口左上角的偏移，之后每 60ms 用它钉一次窗口
+   * ——所以「什么时候调用」很关键：窗口被别的东西挪走之后再调用，这个偏移就是陈的，
+   * 追踪线程会把窗口一路拽回调用时的位置（见 handleBackgroundMouseDown 里的逃离分支）。
+   */
+  const beginWindowDrag = useCallback(async () => {
+    // 窗口归用户了：逃离（若正在跑）据此让位，别和人抢窗口
+    positioningCoordinator.dragInFlight = true;
     try {
       const cursor = await invoke<{ x: number; y: number }>('get_cursor_position');
       await invoke('start_window_drag', { cursorX: cursor.x, cursorY: cursor.y });
@@ -3133,7 +3408,38 @@ export default function App() {
       // 后端命令失败时回退到原生 startDragging
       void getCurrentWindow().startDragging();
     }
-  }, [startHold]);
+  }, []);
+
+  // 背景层窗口拖拽
+  const handleBackgroundMouseDown = useCallback(async (e: React.MouseEvent) => {
+    console.log(`[DIAG] mousedown (drag), char=${getCharacterId()}, button=${e.button}, x=${e.clientX}, y=${e.clientY}`);
+    if (e.button !== 0) return;
+    // 左键按住期间启动长按检测：不松手、不拖动满 1s 打开心智观察器
+    startHold(e.clientX, e.clientY);
+    dragPressAliveRef.current = true;
+
+    // 逃离途中先压住拖动，等按住够久（人真的想抓住它）再补上这一拖。
+    //
+    // 不能一按下就开拖：拖动是「窗口跟着光标走」，而追踪线程的偏移是**按下那一刻**采的
+    // ——那时位移还没开始，于是每按一下窗口就被钉回按下时的位置，刚滑出去的距离整段作废。
+    // 连点的时候每一按都拽一次，位移看起来就是「原地不动」。按下时长是这里唯一的判据：
+    // 点一下是逗它，按住才是抓它（与画布那边 `isHoldingPet` 共用同一个阈值）。
+    if (positioningCoordinator.fleeInFlight) {
+      if (dragDeferTimerRef.current !== null) window.clearTimeout(dragDeferTimerRef.current);
+      dragDeferTimerRef.current = window.setTimeout(() => {
+        dragDeferTimerRef.current = null;
+        // 到点时人已经松手 → 这一按就是个普通点击，不该在松手后凭空开一次拖动
+        if (!dragPressAliveRef.current) return;
+        dragSessionRef.current = true;
+        void beginWindowDrag();
+      }, FLEE_TAKEOVER_HOLD_MS);
+      return;
+    }
+
+    // 标记进入用户拖拽会话：后续 onMoved 事件将触发收伞表情
+    dragSessionRef.current = true;
+    void beginWindowDrag();
+  }, [beginWindowDrag, startHold]);
 
   // 拖拽表情联动：窗口实际移动时切到 drag 格位（被拎起），松手时重置。
   // 另外接管后端 `drag:dizzy` 事件——拖动过快或甩飞撞到屏幕边缘时，
@@ -3156,7 +3462,7 @@ export default function App() {
       dizzyTimerRef.current = window.setTimeout(() => {
         dizzyTimerRef.current = null;
         // 晕眩结束时人还拎着它（本次会话确实拖动过）→ 回到「被拎起」；
-        // 否则交给画布自行回落到心情基调，不要硬切姿态。
+        // 否则交给画布自行回落 idle，不要硬切姿态。
         if (dragSessionRef.current && dragExpressionAppliedRef.current) {
           petRef.current?.setExpression('drag');
         }
@@ -3164,6 +3470,13 @@ export default function App() {
     };
 
     const resetDragExpression = () => {
+      // 松手了：延后开拖的那一按作废（否则松手后还会凭空补一次拖动）
+      dragPressAliveRef.current = false;
+      positioningCoordinator.dragInFlight = false;
+      if (dragDeferTimerRef.current !== null) {
+        window.clearTimeout(dragDeferTimerRef.current);
+        dragDeferTimerRef.current = null;
+      }
       if (dizzyTimerRef.current !== null) {
         window.clearTimeout(dizzyTimerRef.current);
         dizzyTimerRef.current = null;
@@ -3233,6 +3546,10 @@ export default function App() {
       safeUnlisten(unlistenDragCancelled);
       safeUnlisten(unlistenDizzy);
       window.removeEventListener('mouseup', resetDragExpression);
+      if (dragDeferTimerRef.current !== null) {
+        window.clearTimeout(dragDeferTimerRef.current);
+        dragDeferTimerRef.current = null;
+      }
       if (dizzyTimerRef.current !== null) {
         window.clearTimeout(dizzyTimerRef.current);
         dizzyTimerRef.current = null;
@@ -3358,46 +3675,61 @@ export default function App() {
     });
   }, [t]);
 
+  /**
+   * 打开（或预热）心智观察器窗口——常规打开与长按预热共用同一条入口。
+   *
+   *  入场动画：窗口从桌宠当前矩形「长」到全屏。两条路径共用同一个矩形：
+   *  - 新建：把桌宠的物理矩形随 URL 带过去，由子窗口自己折算成 CSS px 并播放；
+   *  - 已存在：不能再 navigate（会整页 reload），改由事件通知子窗口自己再播一遍。
+   *  取不到位置就退化为普通显示（没有动画），不阻塞打开。
+   *
+   *  两条路径的「显形」都由子窗口负责（`selfReveal`）：它得先把首帧摆成桌宠大小
+   *  再让窗口出现。尤其是被最小化的时候——若这里先把窗口还原出来，用户会先看到
+   *  整屏复位一次、再看到它缩回桌宠长出来，等于呼出了两回。
+   *
+   *  `prewarmSession` 有值即预热：窗口建出来加载，但不上屏、也不挂兜底显形
+   *  （见 `openWindow` 的 `prewarm`），显形等长按成立后由 `pet:reveal` 驱动。
+   *  返回窗口句柄，预热会话作废时要靠它把自己建的那个销毁掉。
+   */
+  const openMemoryWindow = useCallback(
+    (prewarmSession?: number): Promise<WebviewWindow | null> => {
+      // 心智观察器默认全屏大小（CSS 逻辑像素，Tauri 窗口尺寸同单位）
+      const fullW = window.screen.width;
+      const fullH = window.screen.height;
+      return (async () => {
+        const rect = await readPetRect();
+        return openWindow('memory', 'memory', t('memory.title'), fullW, fullH, {
+          decorations: false,
+          resizable: false,
+          // 入场动画缩放期间，卡片之外必须透出桌面，故用透明窗口 + 去阴影；
+          // 静止态由 .codex-theme 的纸面背景铺满整窗，与不透明窗口视觉一致。
+          transparent: true,
+          shadow: false,
+          selfReveal: true,
+          minWidth: 1260,
+          minHeight: 896,
+          prewarm: prewarmSession !== undefined,
+          extraQuery:
+            prewarmSession !== undefined
+              ? buildPrewarmQuery(rect, prewarmSession)
+              : rect
+                ? buildPetRectQuery(rect)
+                : undefined,
+          // 已打开时：提到前台后再从桌宠位置重播一次入场，观感与首开一致。
+          // 预热不传：此刻显形与否还没定，通知子窗口播入场等于让它上屏。
+          onExisting:
+            prewarmSession === undefined && rect
+              ? () => { void emitPetReveal('memory', rect); }
+              : undefined,
+        });
+      })();
+    },
+    [t],
+  );
+
   const openMemory = useCallback(() => {
-    // 心智观察器默认全屏大小（CSS 逻辑像素，Tauri 窗口尺寸同单位）
-    const fullW = window.screen.width;
-    const fullH = window.screen.height;
-    // 入场动画：窗口从桌宠当前矩形「长」到全屏。两条路径共用同一个矩形：
-    // - 新建：把桌宠的物理矩形随 URL 带过去，由子窗口自己折算成 CSS px 并播放；
-    // - 已存在：不能再 navigate（会整页 reload），改由事件通知子窗口自己再播一遍。
-    // 取不到位置就退化为普通显示（没有动画），不阻塞打开。
-    //
-    // 两条路径的「显形」都由子窗口负责（`selfReveal`）：它得先把首帧摆成桌宠大小
-    // 再让窗口出现。尤其是被最小化的时候——若这里先把窗口还原出来，用户会先看到
-    // 整屏复位一次、再看到它缩回桌宠长出来，等于呼出了两回。
-    void (async () => {
-      let petRect: PetRect | null = null;
-      try {
-        const petWin = getCurrentWindow();
-        const [pos, size] = await Promise.all([petWin.outerPosition(), petWin.outerSize()]);
-        petRect = { x: pos.x, y: pos.y, w: size.width, h: size.height };
-      } catch {
-        petRect = null;
-      }
-      // 收窄成局部 const：闭包里捕获 let 会丢掉类型收窄，这里显式固一份
-      const rect = petRect;
-      const onExisting = rect ? () => { void emitPetReveal('memory', rect); } : undefined;
-      void openWindow('memory', 'memory', t('memory.title'), fullW, fullH, {
-        decorations: false,
-        resizable: false,
-        // 入场动画缩放期间，卡片之外必须透出桌面，故用透明窗口 + 去阴影；
-        // 静止态由 .codex-theme 的纸面背景铺满整窗，与不透明窗口视觉一致。
-        transparent: true,
-        shadow: false,
-        selfReveal: true,
-        minWidth: 1260,
-        minHeight: 896,
-        extraQuery: rect ? buildPetRectQuery(rect) : undefined,
-        // 已打开时：提到前台后再从桌宠位置重播一次入场，观感与首开一致
-        onExisting,
-      });
-    })();
-  }, [t]);
+    void openMemoryWindow();
+  }, [openMemoryWindow]);
 
   /** 长按桌宠触发的动作：心智观察器的**开关**。
    *
@@ -3428,25 +3760,77 @@ export default function App() {
   // 长按桌宠触发的动作：开关心智观察器（与托盘菜单、快捷键共用 openMemory）
   holdActionRef.current = toggleMemory;
 
+  /**
+   * 长按预热：长按 0.1s 时开一场会话，把心智观察器窗口提前建出来加载。
+   *
+   *  窗口加载（WebView 冷启 + React 挂载 + 首屏数据）是这条链上最慢的一环，而长按
+   *  判定要整整 1s。提前起步，绝大多数情况下窗口在长按成立时已经就绪，松手即见。
+   *
+   *  三条铁律，缺一都会让「预热」变成「误开」：
+   *  1. 预热期间窗口一律不上屏：URL 带 `hidden=1` 关掉 main.tsx 的兜底 show，
+   *     子窗口收到预热参数后也只藏不播，兜底显形更是不挂（见 openWindow 的 prewarm）。
+   *  2. 长按成立才放行：显形由 `pet:reveal` 驱动，且要等子窗口回执就绪再发
+   *     （见 releasePrewarm），否则事件打在空处、窗口迟到。
+   *  3. 长按中止就销毁：见 cancelHold → abortPrewarmSession。加载没跑完的也一并打断。
+   *
+   *  两种情况不预热：窗口已经开在屏上（长按是「收起」，没有加载可提前）、
+   *  窗口已存在但被最小化/hide（内容早就加载完了，预热无事可做）。
+   */
+  const prewarmMemory = useCallback(() => {
+    // 会话号加随机基数：memory 是共享窗口，两个角色桌宠各有一场预热时，
+    // 纯自增会让两边的首个会话号撞车，回执就分不清是谁的。
+    if (prewarmSeqRef.current === 0) prewarmSeqRef.current = Math.floor(Math.random() * 1e6);
+    const session: MemoryPrewarmSession = {
+      session: ++prewarmSeqRef.current,
+      chain: Promise.resolve(),
+      win: null,
+      childReady: false,
+      committed: false,
+      aborted: false,
+      readyTimer: null,
+    };
+    prewarmRef.current = session;
+
+    session.chain = (async () => {
+      // 已有实例？在屏上 → 长按是「收起」；不在屏上 → 内容早已加载完。
+      // 两种都没有「加载」可提前，但后者要记下就绪，好让放行时的显形事件必被接住。
+      let existing: WebviewWindow | null = null;
+      try {
+        existing = await WebviewWindow.getByLabel(charScopedLabel('memory'));
+      } catch {
+        existing = null;
+      }
+      if (session.aborted) return;
+      if (existing) {
+        if (await isWindowOnScreen(existing)) {
+          // 长按会把它收起来，没有可预热的东西 → 撤掉会话，让放行走常规开关路径
+          if (prewarmRef.current === session) prewarmRef.current = null;
+          return;
+        }
+        session.childReady = true;
+        return;
+      }
+      // 还没有这个窗口 → 建一个隐藏的。句柄回填到会话上，作废时要靠它销毁。
+      const win = await openMemoryWindow(session.session);
+      if (session.aborted) {
+        // 长按在创建期间就中止了：这一下不销毁的话，窗口会永远留在后台
+        if (win) await destroyPrewarmedWindow(win);
+        return;
+      }
+      session.win = win;
+    })();
+  }, [openMemoryWindow]);
+
+  // 长按 0.1s 触发的动作：提前加载心智观察器（见 startHold 的预热定时器）
+  prewarmActionRef.current = prewarmMemory;
+
   // 3D 公寓窗口：固定屏幕尺寸 + 无边框 + 透明背景。
   // 与心智观察器共用 utils/roomWindow 的入口，保证两处打开的是同一个实例。
+  // 触发来源：Rust 侧全局快捷键（base.shortcut_room，默认 Ctrl+Shift+R）emit
+  // "window:shortcut" 的 room 分支，以及心智观察器的「进入公寓」按钮。
   const openRoom = useCallback(() => {
     void openRoomWindow(t('room.title', { defaultValue: '公寓' }));
   }, [t]);
-
-  // 开发期触发入口：Ctrl+Shift+R 直接开房间窗口。
-  // 正式的全局快捷键（Rust 侧 global-shortcut）与托盘菜单入口待接，
-  // 这里只作为跑通验证用的临时入口，不需要重编 Rust。
-  useEffect(() => {
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.ctrlKey && e.shiftKey && (e.key === 'R' || e.key === 'r')) {
-        e.preventDefault();
-        openRoom();
-      }
-    };
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [openRoom]);
 
   // 窗口快捷键：后端 emit "window:shortcut" 事件，前端根据 action 打开对应窗口
   useEffect(() => {

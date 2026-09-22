@@ -1,6 +1,6 @@
 {
   "name": "llm-providers",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "AI 供应商预设插件：LLM 厂商卡片与云端嵌入服务预设，以及联网核对官方 API 文档技能。",
   "skills": ["skills/*.md"],
   "providers": "providers.json",

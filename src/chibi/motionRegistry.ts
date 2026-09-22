@@ -40,6 +40,8 @@ export interface ChibiAnimationSpec {
   rows: number;
   frames: number;
   loop: boolean;
+  /** 播完停在最后一帧，不自动回到 idle（如睡觉：躺平后保持入睡姿态）。 */
+  hold?: boolean;
   durations: number[];
 }
 
@@ -69,6 +71,7 @@ const ANIMATION_SPECS: ChibiAnimationSpec[] = vocab.animations.map((animation) =
   rows: animation.rows,
   frames: animation.frames,
   loop: animation.loop,
+  hold: animation.hold,
   durations: [...animation.durations],
 }));
 
@@ -106,7 +109,10 @@ function fuzzyResolve(raw: string): ChibiMotionSpec {
   if (/smug|proud|scheming|得意|傲娇|叉腰/.test(value)) return BY_NAME.get('smug')!;
   if (/think|ponder|confus|wonder|思考|托腮|疑惑/.test(value)) return BY_NAME.get('think')!;
   if (/happy|joy|love|star|smile|开心|高兴/.test(value)) return BY_NAME.get('happy')!;
-  if (/dizzy|sweat|blank|tear|sad|cry|sleep|晕|困/.test(value)) return BY_NAME.get('dizzy')!;
+  // 只把「明确在晕」的信号归到 dizzy：dizzy/晕/blank(翻白眼)/tear(泪)/cry(哭)/sweat(冷汗)。
+  // 早期这里还收了 sad/sleep/困，但这些词太常见（"困了""想睡""有点难过"常出现在心情文本里），
+  // 一旦被自由文本命中就误挂晕眩脸——它们应回落到 idle 或走专门的情绪分支，不该统一当成眩晕。
+  if (/dizzy|晕|blank|tear|cry|sweat/.test(value)) return BY_NAME.get('dizzy')!;
   if (/drag|dark|reach|grab|拎/.test(value)) return BY_NAME.get('drag')!;
   if (/talk|speak|mouth|说/.test(value)) return BY_NAME.get('talk')!;
   if (/listen|focus|look|听/.test(value)) return BY_NAME.get('listen')!;
@@ -158,6 +164,27 @@ export function isDirectional(spec: ChibiMotionSpec): spec is ChibiAnimationSpec
 
 export function totalDurationMs(spec: ChibiAnimationSpec): number {
   return spec.durations.reduce((total, duration) => total + duration, 0);
+}
+
+/** 一段可播放的帧序列：帧序号与逐帧时长一一对应。 */
+export interface ChibiPlayback {
+  frames: number[];
+  durations: number[];
+}
+
+/**
+ * 倒放一段帧序列。
+ *
+ * 收场动作通常就是入场动作的倒放——图集里没有第二份「收起」素材，也不需要：
+ * 倒着播天然从当前定格回到起始姿态，不会多出一份对不上的图。
+ * 帧与帧时长**一起**倒序，得到的是原节奏的镜像；只倒帧不倒时长，会让慢帧配上快拍，
+ * 看着像卡顿而不再像倒放。
+ */
+export function reversePlayback(spec: ChibiAnimationSpec): ChibiPlayback {
+  return {
+    frames: Array.from({ length: spec.frames }, (_, index) => index).reverse(),
+    durations: [...spec.durations].reverse(),
+  };
 }
 
 export function frameDurationMs(spec: ChibiAnimationSpec, index: number): number {

@@ -26,9 +26,6 @@ use crate::memory::vector_search::cosine_similarity;
 /// 场景命中阈值：cosine similarity >= 此值才触发 embedding 匹配注入
 const SCENE_MATCH_THRESHOLD: f64 = 0.72;
 
-/// 上下文窗口：匹配时考虑最近 N 轮对话（含用户输入）
-const CONTEXT_WINDOW_TURNS: usize = 3;
-
 /// 场景条目
 #[derive(Debug, Clone)]
 struct SceneEntry {
@@ -118,7 +115,6 @@ impl ToneInjector {
     pub fn build_tone_injection(
         &self,
         user_input: &str,
-        recent_messages: &[String],
         lang: &str,
     ) -> Option<String> {
         if user_input.trim().is_empty() {
@@ -127,17 +123,18 @@ impl ToneInjector {
 
         self.ensure_initialized();
 
-        // 构造匹配文本：用户输入 + 最近 N 轮上下文
-        let match_text = build_match_text(user_input, recent_messages);
+        // 两种匹配都只看当前发言。历史场景不能在换话题后继续施加语气。
+        let match_text = user_input.trim();
         let scenes = self.scenes.read();
 
-        // 1. 关键词匹配（primary）
+        // 1. 关键词匹配（primary）只看当前用户输入。旧实现把最近三轮也用于硬匹配，
+        // 一个场景会在用户换话题后继续注入，模型因而反复表演同一种语气。
         for scene in scenes.iter() {
             for sample in &scene.samples {
                 if sample.is_empty() {
                     continue;
                 }
-                if match_text.contains(sample.as_str()) {
+                if user_input.contains(sample.as_str()) {
                     return Some(format_injection(scene, 1.0, "keyword", lang));
                 }
             }
@@ -145,7 +142,7 @@ impl ToneInjector {
 
         // 2. embedding 匹配（secondary，仅远程 embedding 时启用）
         if self.embedding.is_remote() {
-            if let Ok(query_emb) = self.embedding.embed(&match_text) {
+            if let Ok(query_emb) = self.embedding.embed(match_text) {
                 let mut best: Option<(&SceneEntry, f64)> = None;
                 for scene in scenes.iter() {
                     for sample_emb in &scene.sample_embeddings {
@@ -172,24 +169,12 @@ impl ToneInjector {
     }
 }
 
-/// 构造匹配文本：用户输入 + 最近 N 轮上下文
-fn build_match_text(user_input: &str, recent_messages: &[String]) -> String {
-    let mut parts: Vec<&str> = Vec::new();
-    let ctx_start = recent_messages.len().saturating_sub(CONTEXT_WINDOW_TURNS);
-    for msg in &recent_messages[ctx_start..] {
-        if !msg.trim().is_empty() {
-            parts.push(msg.as_str());
-        }
-    }
-    parts.push(user_input);
-    parts.join(" ")
-}
-
 /// 格式化注入文本
 fn format_injection(scene: &SceneEntry, score: f64, match_type: &str, lang: &str) -> String {
     let quotes_text = scene
         .quotes
         .iter()
+        .take(2)
         .map(|q| format!("- {}", q))
         .collect::<Vec<_>>()
         .join("\n");
@@ -198,11 +183,11 @@ fn format_injection(scene: &SceneEntry, score: f64, match_type: &str, lang: &str
     let header = crate::pipeline::prompt_modules::section_heading("scene_tone", lang);
     let (match_label, sim_label, intro) = match lang_norm {
         "en" => ("match", "similarity",
-            "Here are things you'd say in this scene. Internalize the rhythm and tone — don't repeat verbatim:"),
+            "These are at most two optional cadence references, not lines to perform. The user's current register wins; use none if they do not fit, and never reuse a distinctive phrase verbatim:"),
         "ja" => ("マッチ", "類似度",
-            "このシーンであなたが言いそうなこと。リズムとトーンを内面化し、原文をそのまま繰り返さない："),
+            "最大二つの任意のテンポ参考であり、演じる台詞ではない。今のユーザーの言葉遣いを優先し、合わなければ使わず、特徴的な原文をそのまま繰り返さない："),
         _ => ("命中", "相似度",
-            "以下是你在该场景下会说的话，内化语气节奏，不要直接复述原文："),
+            "以下最多两句只是可选的节奏参考，不是待完成的台词。当前用户语气优先；不自然就完全不用，也不要复述有辨识度的原句："),
     };
 
     format!(
@@ -330,7 +315,7 @@ mod tests {
     #[test]
     fn keyword_match_greeting() {
         let injector = ToneInjector::new("vivian");
-        let result = injector.build_tone_injection("早安", &[], "zh");
+        let result = injector.build_tone_injection("早安", "zh");
         assert!(result.is_some(), "早安应通过关键词命中 greeting 场景");
         let text = result.unwrap();
         assert!(text.contains("greeting"));
@@ -340,30 +325,27 @@ mod tests {
     #[test]
     fn keyword_match_comfort() {
         let injector = ToneInjector::new("vivian");
-        let result = injector.build_tone_injection("今天好累啊", &[], "zh");
+        let result = injector.build_tone_injection("今天好累啊", "zh");
         assert!(result.is_some(), "好累应通过关键词命中 comfort 或 tired 场景");
     }
 
     #[test]
     fn no_match_for_empty_input() {
         let injector = ToneInjector::new("vivian");
-        let result = injector.build_tone_injection("", &[], "zh");
+        let result = injector.build_tone_injection("", "zh");
         assert!(result.is_none(), "空输入不应命中任何场景");
     }
 
     #[test]
-    fn context_aware_matching() {
+    fn unrelated_current_turn_has_no_scene() {
         let injector = ToneInjector::new("vivian");
-        // 上下文中包含关键词也应触发匹配
-        let recent = vec!["我回来了".to_string()];
-        let result = injector.build_tone_injection("你在吗", &recent, "zh");
-        assert!(result.is_some(), "上下文中的关键词应触发匹配");
+        let result = injector.build_tone_injection("quartz_fennec_917", "zh");
+        assert!(result.is_none(), "无关的当前发言不应命中场景语气");
     }
-
     #[test]
     fn nana_tone_injector_works() {
         let injector = ToneInjector::new("nana");
-        let result = injector.build_tone_injection("晚安", &[], "zh");
+        let result = injector.build_tone_injection("晚安", "zh");
         assert!(result.is_some(), "晚安应命中 farewell 场景");
     }
 }

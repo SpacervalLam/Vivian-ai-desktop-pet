@@ -1,52 +1,35 @@
 {
-  "_comment": [
-    "东京都内 · 合租公寓 203 室 · 洋室 2LDK（Vivian / Nana）· 《你的名字》泷的日常公寓版本",
-    "矩形轮廓 12.4m × 12.2m（含南阳台），中心 (0,0,0)。X 向右，+Z 朝南（阳台/夜景侧），-Z 朝北（公共走廊/玄关侧）。",
-    "夜里下着雨，窗外是东京的霓虹与湿沥青倒影；室内是暖木地板 + 灰蓝布艺 + 冷灰金属的日常质感。",
-    "",
-    "【动线】北玄关(genkan) → 走廊(hall) → LDK（客厅/餐厅/厨房一体开放）→ 南阳台；水回り（浴室/洗面/トイレ）与两间卧室挂在走廊两侧。",
-    "  北条带 z[-5.9,-2.6]：Nana 房(西) / 収納+トイレ(中) / 洗面所 / 浴室 / 玄关(东)。トイレ 与浴室分离。",
-    "  走廊 z[-2.6,-1.4]：横贯东西的脊柱，不放 >0.2m 实体家具。",
-    "  南条带 z[-1.4,4.8]：Vivian 主卧(西) / 客厅 / 餐厅 / 厨房(东)，LDK 开放，仅地板材质分界。",
-    "  阳台 z[4.8,6.3]：全宽，客厅落地玻璃门进出。",
-    "",
-    "【两间卧室】Vivian 南主卧：床 + 窗边书桌 + 单人休闲椅 + 落地灯，朝落地窗看夜雨。Nana 北次卧：床 + 书桌 + 衣柜，偏工作角。",
-    "",
-    "【防穿模约定】家具 AABB 膨胀 0.18 后剩余通道 >0.36m；走廊不放实体家具；门洞落在两侧房间都可达处；改完必须跑 npm run check:room。"
-  ],
+  "_comment": ["203 室内重制：浅橡木、暖白灰泥、鼠尾草绿与亚麻。", "外部门窗与公寓结构保持对齐；主卧扩至 x=-1.8；客厅南北向布局，北侧厨房、南窗餐区。", "家具位置、角色热点和导航同步；地面区域不重叠，地毯采用有厚度几何。"],
   "room": {
-    "bounds": {
-      "x0": -6.2,
-      "x1": 6.2,
-      "z0": -5.9,
-      "z1": 6.3
-    },
+    "bounds": { "x0": -6.2, "x1": 6.2, "z0": -5.9, "z1": 6.3 },
     "height": 2.8
   },
-  "camera": {
-    "fov": 40,
-    "position": [13.0, 19.0, 30.0],
-    "target": [0.0, 1.5, 6.0]
-  },
+  "camera": { "fov": 40, "position": [13, 19, 30], "target": [0, 1.5, 6] },
   "shell": {
     "wallThickness": 0.12,
     "rooms": [
       { "id": "nana", "x0": -6.2, "x1": -2.7, "z0": -5.9, "z1": -2.6, "floor": "jpwood", "ceiling": true },
-      { "id": "closet", "x0": -2.7, "x1": -1.5, "z0": -5.9, "z1": -4.4, "floor": "jpwood", "ceiling": true },
-      { "id": "toilet", "x0": -2.7, "x1": -1.5, "z0": -4.4, "z1": -2.6, "floor": "jptile", "ceiling": true },
-      { "id": "washroom", "x0": -1.5, "x1": 1.0, "z0": -5.9, "z1": -2.6, "floor": "jptile", "ceiling": true },
-      { "id": "bath", "x0": 1.0, "x1": 3.2, "z0": -5.9, "z1": -2.6, "floor": "jptile", "ceiling": true },
+      { "id": "closet", "x0": -2.7, "x1": -1.5, "z0": -5.9, "z1": -4.2, "floor": "jpwood", "ceiling": true },
+      { "id": "toilet", "x0": -2.7, "x1": -1.5, "z0": -4.2, "z1": -2.6, "floor": "jptile", "ceiling": true },
+      { "id": "washroom", "x0": -1.5, "x1": 1, "z0": -5.9, "z1": -2.6, "floor": "jptile", "ceiling": true },
+      { "id": "bath", "x0": 1, "x1": 3.2, "z0": -5.9, "z1": -2.6, "floor": "jptile", "ceiling": true },
       { "id": "genkan", "x0": 3.2, "x1": 6.2, "z0": -5.9, "z1": -2.6, "floor": "jptile", "ceiling": true },
       { "id": "hall", "x0": -6.2, "x1": 6.2, "z0": -2.6, "z1": -1.4, "floor": "jpwood", "ceiling": true },
-      { "id": "master", "x0": -6.2, "x1": -2.7, "z0": -1.4, "z1": 4.8, "floor": "jpwood", "ceiling": true },
-      { "id": "living", "x0": -2.7, "x1": 1.6, "z0": -1.4, "z1": 4.8, "floor": "jpwood", "ceiling": true },
-      { "id": "dining", "x0": 1.6, "x1": 3.7, "z0": -1.4, "z1": 4.8, "floor": "jpwood", "ceiling": true },
-      { "id": "kitchen", "x0": 3.7, "x1": 6.2, "z0": -1.4, "z1": 4.8, "floor": "jptile", "ceiling": true },
+      { "id": "master", "x0": -6.2, "x1": -1.8, "z0": -1.4, "z1": 4.8, "floor": "jpwood", "ceiling": true },
+      { "id": "living", "x0": -1.8, "x1": 1.65, "z0": -1.4, "z1": 4.8, "floor": "jpwood", "ceiling": true },
+      { "id": "dining", "x0": 1.65, "x1": 6.2, "z0": 1.5, "z1": 4.8, "floor": "jpwood", "ceiling": true },
+      { "id": "kitchen", "x0": 1.65, "x1": 6.2, "z0": -1.4, "z1": 1.5, "floor": "jptile", "ceiling": true },
       { "id": "balcony", "x0": -6.2, "x1": 6.2, "z0": 4.8, "z1": 6.3, "floor": "jpdeck", "ceiling": false }
     ],
     "walls": [
       {
-        "id": "north", "axis": "z", "at": -5.9, "from": -6.2, "to": 6.2, "dir": 1, "exterior": true,
+        "id": "north",
+        "axis": "z",
+        "at": -5.9,
+        "from": -6.2,
+        "to": 6.2,
+        "dir": 1,
+        "exterior": true,
         "openings": [
           { "kind": "window", "a": -5.3, "b": -4.1, "y0": 0.9, "y1": 2.35 },
           { "kind": "window", "a": -0.5, "b": 0.3, "y0": 1.6, "y1": 2.35 },
@@ -57,16 +40,27 @@
       { "id": "west", "axis": "x", "at": -6.2, "from": -5.9, "to": 4.8, "dir": 1, "exterior": true, "openings": [] },
       { "id": "east", "axis": "x", "at": 6.2, "from": -5.9, "to": 4.8, "dir": -1, "exterior": true, "openings": [] },
       {
-        "id": "south", "axis": "z", "at": 4.8, "from": -6.2, "to": 6.2, "dir": -1, "exterior": true,
+        "id": "south",
+        "axis": "z",
+        "at": 4.8,
+        "from": -6.2,
+        "to": 6.2,
+        "dir": -1,
+        "exterior": true,
         "openings": [
-          { "kind": "window", "a": -5.4, "b": -4.0, "y0": 0.45, "y1": 2.35 },
+          { "kind": "window", "a": -5.4, "b": -4, "y0": 0.45, "y1": 2.35 },
           { "kind": "glass", "a": -1.2, "b": 1.2, "y0": 0.05, "y1": 2.4, "navCut": "west" },
-          { "kind": "window", "a": 2.0, "b": 3.2, "y0": 0.45, "y1": 2.35 },
+          { "kind": "window", "a": 2, "b": 3.2, "y0": 0.45, "y1": 2.35 },
           { "kind": "window", "a": 4.3, "b": 5.3, "y0": 0.85, "y1": 2.35 }
         ]
       },
       {
-        "id": "iz-n", "axis": "z", "at": -2.6, "from": -6.2, "to": 6.2, "exterior": false,
+        "id": "iz-n",
+        "axis": "z",
+        "at": -2.6,
+        "from": -6.2,
+        "to": 6.2,
+        "exterior": false,
         "openings": [
           { "kind": "door", "a": -5.3, "b": -4.5, "y0": 0, "y1": 2.1 },
           { "kind": "door", "a": -2.46, "b": -1.74, "y0": 0, "y1": 2.1 },
@@ -76,22 +70,34 @@
         ]
       },
       {
-        "id": "iz-s", "axis": "z", "at": -1.4, "from": -6.2, "to": -2.7, "exterior": false,
+        "id": "iz-s",
+        "axis": "z",
+        "at": -1.4,
+        "from": -6.2,
+        "to": -1.8,
+        "exterior": false,
         "openings": [
-          { "kind": "door", "a": -4.7, "b": -3.9, "y0": 0, "y1": 2.1 }
+          { "kind": "door", "a": -3.9, "b": -2.9, "y0": 0, "y1": 2.1 }
         ]
       },
-      { "id": "ix-mw", "axis": "x", "at": -2.7, "from": -1.4, "to": 4.8, "exterior": false },
+      { "id": "ix-mw", "axis": "x", "at": -1.8, "from": -1.4, "to": 4.8, "exterior": false },
       {
-        "id": "ix-nw", "axis": "x", "at": -2.7, "from": -5.9, "to": -2.6, "exterior": false,
+        "id": "ix-nw",
+        "axis": "x",
+        "at": -2.7,
+        "from": -5.9,
+        "to": -2.6,
+        "exterior": false,
         "openings": [
-          { "kind": "door", "a": -5.4, "b": -4.6, "y0": 0, "y1": 2.1 }
+          { "kind": "door", "a": -5.15, "b": -4.35, "y0": 0, "y1": 2.1 }
         ]
       },
-      { "id": "ix-tc", "axis": "z", "at": -4.4, "from": -2.7, "to": -1.5, "exterior": false },
+      { "id": "ix-tc", "axis": "z", "at": -4.2, "from": -2.7, "to": -1.5, "exterior": false },
       { "id": "ix-cw", "axis": "x", "at": -1.5, "from": -5.9, "to": -2.6, "exterior": false },
-      { "id": "ix-bw", "axis": "x", "at": 1.0, "from": -5.9, "to": -2.6, "exterior": false },
-      { "id": "ix-gb", "axis": "x", "at": 3.2, "from": -5.9, "to": -2.6, "exterior": false }
+      { "id": "ix-bw", "axis": "x", "at": 1, "from": -5.9, "to": -2.6, "exterior": false },
+      { "id": "ix-gb", "axis": "x", "at": 3.2, "from": -5.9, "to": -2.6, "exterior": false },
+      { "id": "kitchen-back", "axis": "z", "at": -1.4, "from": 1.65, "to": 5.05, "exterior": false },
+      { "id": "media-back", "axis": "z", "at": -1.4, "from": -1.8, "to": 1.65, "exterior": false }
     ],
     "railing": [
       { "axis": "z", "at": 6.3, "from": -6.2, "to": 6.2 },
@@ -102,65 +108,46 @@
   "lighting": {
     "ambient": { "intensity": 0.46, "color": "#9FB4D2" },
     "hemi": { "sky": "#93AACE", "ground": "#262A33", "intensity": 0.52 },
-    "key": { "position": [-3.0, 6.5, 9.0], "intensity": 0.9, "color": "#FFDCA8" },
-    "fill": { "position": [-9.5, 2.6, -4.0], "intensity": 0.4, "color": "#93ACD6" },
-    "rim": { "position": [5.0, 3.5, -8.0], "intensity": 0.46, "color": "#AEC4E8" }
+    "key": { "position": [-3, 6.5, 9], "intensity": 0.9, "color": "#FFDCA8" },
+    "fill": { "position": [-9.5, 2.6, -4], "intensity": 0.4, "color": "#93ACD6" },
+    "rim": { "position": [5, 3.5, -8], "intensity": 0.46, "color": "#AEC4E8" }
   },
-  "style": {
-    "outlineColor": "#28303B",
-    "outlineWidth": 0.0032,
-    "moteCount": 150
-  },
+  "style": { "outlineColor": "#28303B", "outlineWidth": 0.0032, "moteCount": 150 },
   "postfx": {
     "_note": "雨夜东京：底色/雾同族冷蓝，暖色 key 灯打室内。toneMapping 可选 none|linear|aces|agx|neutral。",
     "background": "#0F1725",
     "toneMapping": "neutral",
     "exposure": 1.02,
     "bloom": { "strength": 0.3, "radius": 0.6, "threshold": 0.9 },
-    "fog": { "color": "#131E2C", "near": 18.0, "far": 115.0 }
+    "fog": { "color": "#131E2C", "near": 18, "far": 115 }
   },
   "weather": {
     "_note": "雨 + 湿地。雨区跟随焦点（第一人称=玩家，观察者=注视点），radius 是焦点四周的水平半径，不必铺满整个街区；相机走进有顶房间时整场雨收起并停更。落雨禁区由户型自动算：有顶室内不落，阳台(ceiling:false)会落。layers=3 把雨按 z 切近/中/远三档。",
-    "rain": {
-      "count": 2400,
-      "speed": 6.0,
-      "wind": 1.5,
-      "streakLen": 0.13,
-      "streakWidth": 0.014,
-      "size": 0.13,
-      "opacity": 0.28,
-      "farSize": 0.4,
-      "farOpacity": 0.3,
-      "layers": 3,
-      "follow": true,
-      "radius": 15.0,
-      "top": 14.0
-    },
+    "rain": { "count": 2400, "speed": 6, "wind": 1.5, "streakLen": 0.13, "streakWidth": 0.014, "size": 0.13, "opacity": 0.28, "farSize": 0.4, "farOpacity": 0.3, "layers": 3, "follow": true, "radius": 15, "top": 14 },
     "wetPools": [
       { "pos": [-4.5, 5.3], "size": 2.8, "color": "#ffd9a0", "opacity": 0.15, "rot": 0.25 },
       { "pos": [0.2, 5.9], "size": 3.4, "color": "#ffe2b0", "opacity": 0.13, "rot": -0.2 },
       { "pos": [4.6, 5.3], "size": 2.6, "color": "#ffd9a0", "opacity": 0.14, "rot": 0.4 }
     ],
-    "sparkle": { "count": 90, "area": 5.2, "center": [0.0, 5.5] }
+    "sparkle": { "count": 90, "area": 5.2, "center": [0, 5.5] }
   },
   "palette": {
-    "ceiling": "#F2EFE8",
-    "trim": "#E9E4DA",
-    "reveal": "#E7DFD1",
+    "ceiling": "#f1eee5",
+    "trim": "#c6baa5",
+    "reveal": "#e8e1d3",
     "metal": "#9BA3AC",
     "brass": "#9BA3AC",
     "dark": "#3F434A",
     "accent": "#7E93A6",
-    "sofa": "#8E9BA6",
-    "door": "#E6E0D5",
-    "entryDoor": "#6C7986",
-    "windowFrame": "#A6AFB8",
+    "sofa": "#9bada0",
+    "door": "#c8b18d",
+    "windowFrame": "#65736c",
     "windowSill": "#BCC3CA",
     "deskLeg": "#B49B78",
     "deskPanel": "#C6B192",
     "shelfBack": "#B2A795",
     "mattress": "#F2EEE5",
-    "blanket": "#93A6B8",
+    "blanket": "#718d87",
     "pillow": "#F5F2EB",
     "fridge": "#E7E4DD",
     "fridgeDoor": "#DAD6CD",
@@ -170,23 +157,23 @@
     "marble": "#ECEAE4",
     "terracotta": "#A87E6A",
     "deck": "#8C7B62",
-    "floorTintNight": "#F6EDDE",
-    "wallTintNight": "#F0E8DB",
-    "jpOak": "#C8A87C",
-    "jpOakDark": "#9A7B52",
-    "jpFloorOak": "#D8BC93",
-    "jpIndigo": "#3E5C76",
-    "jpIndigoDeep": "#2C4257",
-    "jpCream": "#F0E9DC",
-    "jpGrayWarm": "#B9B2A6",
+    "floorTintNight": "#e1cfaf",
+    "wallTintNight": "#efe9de",
+    "jpOak": "#b9976d",
+    "jpOakDark": "#75634e",
+    "jpFloorOak": "#d2b38b",
+    "jpIndigo": "#78968c",
+    "jpIndigoDeep": "#455e58",
+    "jpCream": "#eee8db",
+    "jpGrayWarm": "#c3baaa",
     "jpCeramicWhite": "#EDE8E0",
     "jpCeramicBlue": "#7C99AC",
     "jpMetalGray": "#A9ADB3",
     "jpBlack": "#2B2E33",
     "jpPlantGreen": "#6E8B5E",
     "jpTerra": "#B5715A",
-    "jpTileWarm": "#CFC7B8",
-    "jpCounterTop": "#E4DED2",
+    "jpTileWarm": "#d7d1c2",
+    "jpCounterTop": "#e7dfcf",
     "jpDeckWood": "#9A8869",
     "jpFixtureWhite": "#EEF0EE",
     "jpBathGrout": "#C3C8C6"
@@ -196,91 +183,82 @@
     { "id": "win-wash-n", "kind": "window", "nav": false, "wall": "north", "pos": [-0.1, 0, -5.9], "size": [0.8, 1.6, 2.35], "rot": 0 },
     { "id": "win-bath-n", "kind": "window", "nav": false, "wall": "north", "pos": [2.2, 0, -5.9], "size": [0.8, 1.6, 2.35], "rot": 0 },
     { "id": "door-entry", "kind": "entryDoor", "nav": false, "wall": "north", "pos": [4.95, 0, -5.9], "size": [0.9, 2.2, 0], "rot": 0 },
-
     { "id": "win-master-s", "kind": "window", "nav": false, "wall": "south", "pos": [-4.7, 0, 4.8], "size": [1.4, 0.45, 2.35], "rot": 3.14159 },
     { "id": "glass-living", "kind": "glassDoor", "nav": false, "wall": "south", "wallId": "south", "pos": [0, 0, 4.8], "size": [2.4, 2.4, 0], "rot": 3.14159 },
     { "id": "win-dining-s", "kind": "window", "nav": false, "wall": "south", "pos": [2.6, 0, 4.8], "size": [1.2, 0.45, 2.35], "rot": 3.14159 },
-    { "id": "win-kitchen-s", "kind": "window", "nav": false, "wall": "south", "pos": [4.8, 0, 4.8], "size": [1.0, 0.85, 2.35], "rot": 3.14159 },
-
+    { "id": "win-kitchen-s", "kind": "window", "nav": false, "wall": "south", "pos": [4.8, 0, 4.8], "size": [1, 0.85, 2.35], "rot": 3.14159 },
     { "id": "door-nana", "kind": "door", "nav": false, "wall": "iz-n", "pos": [-4.9, 0, -2.6], "size": [0.8, 2.1, 0], "rot": 0, "variant": "bedroom" },
     { "id": "door-toilet", "kind": "door", "nav": false, "wall": "iz-n", "pos": [-2.1, 0, -2.6], "size": [0.72, 2.1, 0], "rot": 0, "variant": "toilet" },
     { "id": "door-washroom", "kind": "door", "nav": false, "wall": "iz-n", "pos": [0, 0, -2.6], "size": [0.8, 2.1, 0], "rot": 0, "variant": "wash" },
     { "id": "door-bath", "kind": "door", "nav": false, "wall": "iz-n", "pos": [2.1, 0, -2.6], "size": [0.8, 2.1, 0], "rot": 0, "variant": "bath" },
-    { "id": "door-master", "kind": "door", "nav": false, "wall": "iz-s", "pos": [-4.3, 0, -1.4], "size": [0.8, 2.1, 0], "rot": 0, "variant": "bedroom" },
-    { "id": "door-closet", "kind": "door", "nav": false, "wall": "ix-nw", "pos": [-2.7, 0, -5.0], "size": [0.8, 2.1, 0], "rot": 1.5708, "variant": "closet" },
-
-    { "id": "entry-shoes", "kind": "jpShoeCabinet", "pos": [5.95, 0, -4.4], "size": [1.0, 1.0, 0.45], "rot": -1.5708 },
-    { "id": "entry-bench", "kind": "jpBench", "pos": [3.95, 0, -5.55], "size": [1.0, 0.42, 0.4], "rot": 0 },
+    { "id": "door-master", "kind": "door", "nav": false, "wall": "iz-s", "pos": [-3.4, 0, -1.4], "size": [1, 2.1, 0], "rot": 0, "variant": "bedroom" },
+    { "id": "door-closet", "kind": "door", "nav": false, "wall": "ix-nw", "pos": [-2.7, 0, -4.75], "size": [0.8, 2.1, 0], "rot": 1.5707963267948966, "variant": "closet" },
+    { "id": "entry-shoes", "kind": "jpShoeCabinet", "pos": [5.92, 0, -4.5], "size": [1, 1, 0.45], "rot": -1.5707963267948966 },
+    { "id": "entry-bench", "kind": "jpBench", "pos": [3.8, 0, -5.55], "size": [1, 0.42, 0.4], "rot": 0 },
     { "id": "entry-mirror", "kind": "jpMirror", "pos": [6.14, 0, -3.2], "size": [0.06, 1.6, 0.5], "rot": 3.14159 },
-    { "id": "entry-rug", "kind": "jpRug", "nav": false, "pos": [4.7, 0, -3.7], "size": [1.5, 0.02, 1.0] },
-
-    { "id": "hall-rug", "kind": "jpRug", "nav": false, "pos": [0, 0, -2.0], "size": [9.5, 0.02, 0.7] },
-
-    { "id": "nana-bed", "kind": "jpBed", "pos": [-5.1, 0, -5.2], "size": [2.0, 0.45, 1.3], "rot": 0 },
-    { "id": "nana-desk", "kind": "jpDesk", "pos": [-5.9, 0, -3.6], "size": [1.2, 0.74, 0.5], "rot": 1.5708 },
-    { "id": "nana-chair", "kind": "jpDeskChair", "pos": [-5.3, 0, -3.6], "size": [0.5, 0.9, 0.5], "rot": -1.5708 },
-    { "id": "nana-wardrobe", "kind": "jpWardrobe", "pos": [-3.035, 0, -3.6], "size": [1.6, 2.3, 0.55], "rot": -1.5708 },
-    { "id": "nana-rug", "kind": "jpRug", "nav": false, "pos": [-4.3, 0, -3.6], "size": [1.6, 0.02, 1.2] },
-    { "id": "nana-lamp", "kind": "jpFloorLamp", "nav": false, "pos": [-6.0, 0, -2.80], "size": [0.3, 1.6, 0.3] },
-    { "id": "nana-plant", "kind": "jpPlant", "nav": false, "pos": [-4.3, 0, -4.3], "size": [0.3, 0.6, 0.3] },
-
-    { "id": "closet-shelf", "kind": "jpClosetShelf", "pos": [-2.1, 0, -5.6], "size": [1.0, 2.0, 0.4], "rot": 0 },
-
+    { "id": "entry-rug", "kind": "jpRug", "nav": false, "pos": [4.75, 0, -3.65], "size": [1.5, 0.02, 1] },
+    { "id": "hall-rug", "kind": "jpRug", "nav": false, "pos": [-0.1, 0, -2], "size": [8, 0.025, 0.62] },
+    { "id": "nana-bed", "kind": "jpBed", "pos": [-5.35, 0, -4.65], "size": [2, 0.45, 1.3], "rot": 1.5707963267948966 },
+    { "id": "nana-desk", "kind": "jpDesk", "pos": [-3.08, 0, -3.5], "size": [1.2, 0.74, 0.5], "rot": -1.5707963267948966 },
+    { "id": "nana-chair", "kind": "jpDeskChair", "pos": [-3.72, 0, -3.5], "size": [0.5, 0.9, 0.5], "rot": 1.5707963267948966 },
+    { "id": "nana-wardrobe", "kind": "jpWardrobe", "pos": [-3.65, 0, -5.56], "size": [1.6, 2.3, 0.55], "rot": 0 },
+    { "id": "nana-rug", "kind": "jpRug", "nav": false, "pos": [-4.1, 0, -4.1], "size": [1.55, 0.025, 1.8] },
+    { "id": "nana-lamp", "kind": "jpFloorLamp", "nav": false, "pos": [-5.9, 0, -2.95], "size": [0.3, 1.6, 0.3] },
+    { "id": "nana-plant", "kind": "jpPlant", "nav": false, "pos": [-4.6, 0, -5.6], "size": [0.3, 0.6, 0.3] },
+    { "id": "closet-shelf", "kind": "jpClosetShelf", "pos": [-2.1, 0, -5.6], "size": [1, 2, 0.4], "rot": 0 },
     { "id": "toilet-suite", "kind": "jpToilet", "nav": false, "pos": [-2.1, 0, -3.9], "size": [0.9, 0.8, 0.7], "rot": 0 },
-
     { "id": "wash-vanity", "kind": "jpVanity", "pos": [-0.35, 0, -5.6], "size": [1.1, 0.85, 0.55], "rot": 0 },
     { "id": "wash-washer", "kind": "jpWasher", "pos": [0.62, 0, -5.5], "size": [0.6, 0.85, 0.6], "rot": 0 },
-    { "id": "wash-linen", "kind": "jpWardrobe", "pos": [-1.19, 0, -3.4], "size": [1.2, 2.0, 0.5], "rot": 1.5708 },
-
-    { "id": "bath-suite", "kind": "jpBath", "nav": false, "pos": [2.1, 0, -4.4], "size": [2.0, 0, 3.0], "rot": 0 },
-
-    { "id": "master-bed", "kind": "jpBed", "pos": [-5.175, 0, 0.4], "size": [1.95, 0.45, 1.4], "rot": 0 },
-    { "id": "master-stand", "kind": "jpNightstand", "pos": [-5.7, 0, -0.75], "size": [0.45, 0.45, 0.45], "rot": 0 },
-    { "id": "master-wardrobe", "kind": "jpWardrobe", "pos": [-3.035, 0, 0.5], "size": [1.1, 2.3, 0.55], "rot": -1.5708 },
-    { "id": "master-desk", "kind": "jpDesk", "pos": [-4.7, 0, 4.49], "size": [1.3, 0.74, 0.5], "rot": 3.14159 },
-    { "id": "master-desk-chair", "kind": "jpDeskChair", "pos": [-4.7, 0, 3.85], "size": [0.5, 0.9, 0.5], "rot": 0 },
-    { "id": "master-rug", "kind": "jpRug", "nav": false, "pos": [-4.6, 0, 2.0], "size": [2.4, 0.02, 1.6] },
-    { "id": "master-lounge", "kind": "jpLoungeChair", "pos": [-3.1, 0, 3.6], "size": [0.62, 0.78, 0.68], "rot": -1.5708 },
-    { "id": "master-plant", "kind": "jpPlant", "nav": false, "pos": [-6.0, 0, 4.4], "size": [0.3, 0.6, 0.3] },
-    { "id": "master-lamp", "kind": "jpFloorLamp", "nav": false, "pos": [-3.0, 0, 2.6], "size": [0.3, 1.6, 0.3] },
-    { "id": "master-mirror", "kind": "jpMirror", "pos": [-6.14, 0, 2.6], "size": [0.06, 1.6, 0.5], "rot": 0 },
-
-    { "id": "jp-bookrack", "kind": "jpBookRack", "pos": [-2.38, 0, -0.4], "size": [0.5, 1.75, 1.1], "rot": 0 },
-    { "id": "jp-slatwall", "kind": "jpSlatWall", "nav": false, "wall": "ix-mw", "pos": [-2.61, 0, 1.7], "size": [0.06, 2.2, 2.0], "rot": 0 },
-    { "id": "jp-tvboard", "kind": "jpTvBoard", "pos": [-2.43, 0, 1.7], "size": [0.42, 0.42, 1.7], "rot": 0 },
-    { "id": "jp-rug", "kind": "jpRug", "nav": false, "pos": [-0.7, 0, 1.75], "size": [2.7, 0.02, 2.3] },
-    { "id": "jp-lowsofa", "kind": "jpLowSofa", "pos": [0.35, 0, 1.75], "size": [0.85, 0.62, 1.9], "rot": 3.14159 },
-    { "id": "jp-centertable", "kind": "jpCenterTable", "pos": [-0.9, 0, 1.75], "size": [0.95, 0.34, 0.6], "rot": 0 },
-    { "id": "jp-zabuton-n", "kind": "jpZabuton", "nav": false, "pos": [-0.9, 0, 1.05], "size": [0.5, 0.08, 0.5] },
-    { "id": "jp-zabuton-s", "kind": "jpZabuton", "nav": false, "pos": [-0.9, 0, 2.45], "size": [0.5, 0.08, 0.5] },
-    { "id": "jp-floorlamp", "kind": "jpFloorLamp", "nav": false, "pos": [-2.35, 0, 3.7], "size": [0.3, 1.6, 0.3] },
-    { "id": "jp-plant", "kind": "jpPlant", "nav": false, "pos": [1.25, 0, 4.2], "size": [0.3, 0.6, 0.3] },
-    { "id": "jp-floorclutter", "kind": "jpFloorClutter", "nav": false, "pos": [-0.1, 0, 2.95], "size": [0.5, 0.3, 0.4] },
-
-    { "id": "jp-diningtable", "kind": "jpDiningTable", "pos": [2.6, 0, 1.5], "size": [1.25, 0.72, 0.8], "rot": 0 },
-    { "id": "jp-diningchair-n", "kind": "jpDiningChair", "pos": [2.6, 0, 0.7], "size": [0.45, 0.78, 0.45], "rot": 0 },
-    { "id": "jp-diningchair-s", "kind": "jpDiningChair", "pos": [2.6, 0, 2.3], "size": [0.45, 0.78, 0.45], "rot": 3.14159 },
-    { "id": "jp-diningrug", "kind": "jpDiningRug", "nav": false, "pos": [2.6, 0, 1.5], "size": [1.8, 0.02, 1.5] },
-    { "id": "jp-dining-pendant", "kind": "jpPendant", "nav": false, "pos": [2.6, 0, 1.5], "size": [0.4, 1.2, 0.4] },
-
-    { "id": "jp-counter", "kind": "jpKitchenCounter", "pos": [5.86, 0, 0.9], "size": [0.66, 0.9, 3.0], "rot": 0 },
-    { "id": "jp-kitchenshelf", "kind": "jpKitchenShelf", "nav": false, "pos": [6.0, 0, 0.9], "size": [0.3, 0.7, 2.4] },
-    { "id": "jp-fridge", "kind": "jpFridge", "pos": [5.85, 0, 3.4], "size": [0.68, 1.75, 0.7], "rot": 0 },
-    { "id": "jp-kitchen-pendant", "kind": "jpPendant", "nav": false, "pos": [4.8, 0, 0.9], "size": [0.4, 1.2, 0.4] },
-
-    { "id": "balcony-table", "kind": "jpBalconyTable", "pos": [2.8, 0, 5.6], "size": [0.5, 0.4, 0.5], "rot": 0 },
-    { "id": "balcony-chair1", "kind": "jpBalconyChair", "pos": [2.0, 0, 5.6], "size": [0.45, 0.9, 0.45], "rot": 1.5708 },
-    { "id": "balcony-chair2", "kind": "jpBalconyChair", "pos": [3.6, 0, 5.6], "size": [0.45, 0.9, 0.45], "rot": -1.5708 },
+    { "id": "wash-linen", "kind": "jpWardrobe", "pos": [-1.19, 0, -3.4], "size": [1.2, 2, 0.5], "rot": 1.5708 },
+    { "id": "bath-suite", "kind": "jpBath", "nav": false, "pos": [2.1, 0, -4.4], "size": [2, 0, 3], "rot": 0 },
+    { "id": "master-bed", "kind": "jpBed", "pos": [-4.95, 0, 0.4], "size": [1.95, 0.45, 1.4], "rot": 1.5707963267948966 },
+    { "id": "master-stand", "kind": "jpNightstand", "pos": [-5.8, 0, 1.6], "size": [0.45, 0.45, 0.45], "rot": 0 },
+    { "id": "master-wardrobe", "kind": "jpWardrobe", "pos": [-2.18, 0, 0.45], "size": [1.1, 2.3, 0.55], "rot": -1.5707963267948966 },
+    { "id": "master-desk", "kind": "jpDesk", "pos": [-5.86, 0, 2.8], "size": [1.3, 0.74, 0.5], "rot": 1.5707963267948966 },
+    { "id": "master-desk-chair", "kind": "jpDeskChair", "pos": [-5.16, 0, 2.8], "size": [0.5, 0.9, 0.5], "rot": -1.5707963267948966 },
+    { "id": "master-rug", "kind": "jpRug", "nav": false, "pos": [-3.85, 0, 2.1], "size": [2.75, 0.025, 2.3] },
+    { "id": "master-lounge", "kind": "jpLoungeChair", "pos": [-2.5, 0, 3.75], "size": [0.62, 0.78, 0.68], "rot": -1.5707963267948966 },
+    { "id": "master-plant", "kind": "jpPlant", "nav": false, "pos": [-5.9, 0, 4.35], "size": [0.3, 0.6, 0.3] },
+    { "id": "master-lamp", "kind": "jpFloorLamp", "nav": false, "pos": [-2.12, 0, 2.65], "size": [0.3, 1.6, 0.3] },
+    { "id": "master-mirror", "kind": "jpMirror", "pos": [-1.92, 0, 1.8], "size": [0.06, 1.6, 0.5], "rot": 3.141592653589793 },
+    { "id": "jp-bookrack", "kind": "jpBookRack", "pos": [-1.43, 0, 0.1], "size": [0.5, 1.75, 1.1], "rot": 0 },
+    { "id": "jp-slatwall", "kind": "jpSlatWall", "nav": false, "wall": "media-back", "pos": [0.15, 0, -1.28], "size": [0.06, 2.2, 2], "rot": -1.5707963267948966 },
+    { "id": "jp-tvboard", "kind": "jpTvBoard", "pos": [0.15, 0, -0.85], "size": [0.42, 0.42, 1.7], "rot": -1.5707963267948966 },
+    { "id": "jp-rug", "kind": "jpRug", "nav": false, "pos": [0.1, 0, 1.9], "size": [2.75, 0.025, 2.8] },
+    { "id": "jp-lowsofa", "kind": "jpLowSofa", "pos": [0.1, 0, 2.75], "size": [0.85, 0.62, 1.9], "rot": 1.5707963267948966 },
+    { "id": "jp-centertable", "kind": "jpCenterTable", "pos": [0.1, 0, 1.4], "size": [0.95, 0.34, 0.6], "rot": 0 },
+    { "id": "jp-zabuton-n", "kind": "jpZabuton", "nav": false, "pos": [-1.1, 0, 1.35], "size": [0.5, 0.08, 0.5] },
+    { "id": "jp-zabuton-s", "kind": "jpZabuton", "nav": false, "pos": [1.25, 0, 1.35], "size": [0.5, 0.08, 0.5] },
+    { "id": "jp-floorlamp", "kind": "jpFloorLamp", "nav": false, "pos": [-1.4, 0, 3.6], "size": [0.3, 1.6, 0.3] },
+    { "id": "jp-plant", "kind": "jpPlant", "nav": false, "pos": [1.35, 0, 4.25], "size": [0.3, 0.6, 0.3] },
+    { "id": "jp-floorclutter", "kind": "jpFloorClutter", "nav": false, "pos": [1.3, 0, 3.55], "size": [0.5, 0.3, 0.4] },
+    { "id": "jp-diningtable", "kind": "jpDiningTable", "pos": [3.65, 0, 3], "size": [1.25, 0.72, 0.8], "rot": 0 },
+    { "id": "jp-diningchair-n", "kind": "jpDiningChair", "pos": [3.65, 0, 2.2], "size": [0.45, 0.78, 0.45], "rot": 0 },
+    { "id": "jp-diningchair-s", "kind": "jpDiningChair", "pos": [3.65, 0, 3.8], "size": [0.45, 0.78, 0.45], "rot": 3.141592653589793 },
+    { "id": "jp-diningrug", "kind": "jpDiningRug", "nav": false, "pos": [3.65, 0, 3], "size": [2.05, 0.025, 2.25] },
+    { "id": "jp-dining-pendant", "kind": "jpPendant", "nav": false, "pos": [3.65, 0, 3], "size": [0.4, 1.2, 0.4] },
+    { "id": "jp-counter", "kind": "jpKitchenCounter", "pos": [3.45, 0, -0.93], "size": [0.66, 0.9, 3], "rot": 1.5707963267948966 },
+    { "id": "jp-kitchenshelf", "kind": "jpKitchenShelf", "nav": false, "pos": [3.45, 0, -1.16], "size": [0.3, 0.7, 2.4], "rot": 1.5707963267948966 },
+    { "id": "jp-fridge", "kind": "jpFridge", "pos": [5.82, 0, 3.65], "size": [0.68, 1.75, 0.7], "rot": 0 },
+    { "id": "jp-kitchen-pendant", "kind": "jpPendant", "nav": false, "pos": [3.45, 0, 0.65], "size": [0.4, 1.2, 0.4] },
+    { "id": "balcony-table", "kind": "jpBalconyTable", "pos": [3.9, 0, 5.55], "size": [0.5, 0.4, 0.5], "rot": 0 },
+    { "id": "balcony-chair1", "kind": "jpBalconyChair", "pos": [3.1, 0, 5.55], "size": [0.45, 0.9, 0.45], "rot": 1.5707963267948966 },
+    { "id": "balcony-chair2", "kind": "jpBalconyChair", "pos": [4.7, 0, 5.55], "size": [0.45, 0.9, 0.45], "rot": -1.5707963267948966 },
     { "id": "balcony-plant1", "kind": "jpPlanter", "nav": false, "pos": [-5.8, 0, 5.5], "size": [0.9, 0.4, 0.4] },
     { "id": "balcony-plant2", "kind": "jpPlanter", "nav": false, "pos": [5.8, 0, 5.5], "size": [0.9, 0.4, 0.4] },
-
     {
-      "id": "lifestyle-details", "kind": "jpLifestyle", "nav": false, "pos": [0, 0, 0],
-      "slippers": [[4.55, -3.5, -0.2], [4.3, -3.42, 0.14]],
+      "id": "lifestyle-details",
+      "kind": "jpLifestyle",
+      "nav": false,
+      "pos": [0, 0, 0],
+      "slippers": [
+        [4.55, -3.5, -0.2],
+        [4.3, -3.42, 0.14]
+      ],
       "umbrella": [3.45, -5.3],
-      "bag": [-1.5, 3.3, -0.18],
-      "parcels": [5.6, -3.0],
-      "bin": [-3.4, -5.5],
+      "bag": [-1.25, 3.9, -0.18],
+      "parcels": [5.6, -3],
+      "bin": [-3.1, -4.55],
       "cards": [
         [-6.13, 1.62, 2.2, 1.5708, "#e6dad4"],
         [-6.13, 1.38, 2.5, 1.5708, "#c8d4da"],
@@ -290,41 +268,71 @@
   ],
   "props": {
     "ceilLamps": [
-      { "pos": [-4.6, 0, -4.0] },
-      { "pos": [-2.1, 0, -5.0] },
+      { "pos": [-4.6, 0, -4] },
+      { "pos": [-2.1, 0, -5] },
       { "pos": [-2.1, 0, -3.5] },
-      { "pos": [-0.25, 0, -4.0] },
-      { "pos": [2.1, 0, -4.0] },
-      { "pos": [4.7, 0, -4.0] },
-      { "pos": [-3.0, 0, -2.0] },
-      { "pos": [3.0, 0, -2.0] },
-      { "pos": [-4.6, 0, 1.6] }
+      { "pos": [-0.25, 0, -4] },
+      { "pos": [2.1, 0, -4] },
+      { "pos": [4.7, 0, -4] },
+      { "pos": [-3, 0, -2] },
+      { "pos": [3, 0, -2] },
+      { "pos": [-3.8, 0, 1.4] }
     ],
     "clock": { "pos": [6.14, 1.5, 2.7], "wall": "east" },
-    "poster": { "pos": [-6.12, 1.5, 2.0], "size": [0.55, 0.8], "wall": "west" },
+    "poster": { "pos": [-6.12, 1.5, 2], "size": [0.55, 0.8], "wall": "west" },
     "sunbeams": [
       { "wall": "south", "x0": -1.2, "x1": 1.2, "y0": 0.05, "y1": 2.4, "z": 4.8, "dir": [0.425, -0.46, -0.779], "sheets": 3, "opacity": 0.1 },
-      { "wall": "south", "x0": -5.4, "x1": -4.0, "y0": 0.45, "y1": 2.35, "z": 4.8, "dir": [0.425, -0.46, -0.779], "sheets": 2, "opacity": 0.05 }
+      { "wall": "south", "x0": -5.4, "x1": -4, "y0": 0.45, "y1": 2.35, "z": 4.8, "dir": [0.425, -0.46, -0.779], "sheets": 2, "opacity": 0.05 }
     ],
-    "motes": { "count": 150, "bounds": { "x": [-6.0, 6.0], "y": [0.1, 2.7], "z": [-5.7, 6.2] } },
+    "motes": {
+      "count": 150,
+      "bounds": { "x": [-6, 6], "y": [0.1, 2.7], "z": [-5.7, 6.2] }
+    },
     "cushions": []
   },
   "characters": {
-    "Vivian": { "model": "/room/vivian_qver.glb", "height": 1.45, "startPos": [-0.9, 0, 3.2], "startFacing": 3.14 },
-    "Nana": { "model": "/room/nana_qver.glb", "height": 1.45, "startPos": [-4.4, 0, -3.3], "startFacing": 0 }
+    "_height_note": "1.30 不是拍脑袋取的：角色过门时窄的是「身厚」方向——1.45m 时身厚 0.70，而最窄门洞只有 0.72，只剩 2cm（必然擦门框）；缩到 1.30 后身厚 0.63（余量 9cm）、臂展 0.82（1.2m 走廊够用）。再往下收益递减且比例失真。改这个值必须同步改各坐点抬升量，哨兵会拦。",
+    "Vivian": { "model": "/room/vivian_qver.glb", "height": 1.30, "yaw": -1.5707963267948966, "startPos": [-0.6, 0, 0.3], "startFacing": 0 },
+    "Nana": { "model": "/room/nana_qver.glb", "height": 1.30, "yaw": -1.5707963267948966, "startPos": [-4.3, 0, -4.35], "startFacing": 0 }
   },
+  "_hotspots_note": ["pos = 站立落点，必须落在可走格上（A* 目标）。animation:'sit' 的热点另有 seat = 坐定落点：沙发/床/椅子都是导航障碍，坐点在家具里、A* 到不了，所以必须先走到 pos 再 mount 上去。", "seat.pos[1] 是抬升量 = 家具坐面高度 − 坐姿 clip 自带坐高。clip 坐高随身高线性缩放：基准 1.45m 时 0.29（两角色分别量得髋高 0.361/0.398）⇒ 当前 1.30m 时为 0.26。沙发 0.43(0.30 座面+0.13 坐垫)⇒0.17；床垫顶 0.35(0.19 平台+0.16 布団)⇒0.09；餐椅坐垫顶 0.49(0.42 座面+0.045+0.05 垫)⇒0.23。", "facing：0=+Z、π=−Z、+π/2=+X。沙发靠背在世界 +Z 侧（rot=π/2 把 local −X 靠背翻到 +Z），所以坐向 π 才是面朝电视，站在沙发前（−Z 侧）时朝向 0 = 面朝沙发。"],
   "hotspots": [
-    { "id": "nana", "pos": [-4.4, 0, -3.3], "facing": 0 },
-    { "id": "closet", "pos": [-2.1, 0, -4.9], "facing": -1.5708 },
+    { "id": "nana", "pos": [-4.3, 0, -4.35], "facing": 0 },
+    { "id": "closet", "pos": [-2.1, 0, -4.75], "facing": 3.14159 },
     { "id": "toilet", "pos": [-2.1, 0, -3.1], "facing": 3.14159 },
     { "id": "washroom", "pos": [-0.2, 0, -3.4], "facing": 3.14159 },
-    { "id": "bath", "pos": [2.1, 0, -3.0], "facing": 3.14159 },
+    { "id": "bath", "pos": [2.1, 0, -3], "facing": 3.14159 },
     { "id": "genkan", "pos": [4.7, 0, -3.3], "facing": 1.5708 },
-    { "id": "hall", "pos": [0, 0, -2.0], "facing": 0 },
-    { "id": "master-bed", "pos": [-4.3, 0, 2.4], "facing": 3.14159 },
-    { "id": "living-sofa", "pos": [-0.9, 0, 3.4], "facing": 3.14159 },
-    { "id": "dining", "pos": [2.6, 0, 0.0], "facing": 0 },
-    { "id": "kitchen", "pos": [4.6, 0, 1.0], "facing": 1.5708 },
+    { "id": "hall", "pos": [0, 0, -2], "facing": 0 },
+    {
+      "id": "master-bed",
+      "animation": "sit",
+      "pos": [-3.85, 0, 0.4],
+      "facing": -1.5708,
+      "seat": { "on": "master-bed", "pos": [-4.45, 0.09, 0.4], "facing": 1.5708, "surfaceY": 0.35 }
+    },
+    {
+      "id": "living-sofa-w",
+      "animation": "sit",
+      "pos": [-0.95, 0, 2.0],
+      "facing": 0,
+      "seat": { "on": "jp-lowsofa", "pos": [-0.4, 0.17, 2.7], "facing": 3.14159, "surfaceY": 0.43 }
+    },
+    {
+      "id": "living-sofa-e",
+      "animation": "sit",
+      "pos": [1.0, 0, 2.0],
+      "facing": 0,
+      "seat": { "on": "jp-lowsofa", "pos": [0.5, 0.17, 2.7], "facing": 3.14159, "surfaceY": 0.43 }
+    },
+    {
+      "id": "dining",
+      "animation": "sit",
+      "pos": [3.65, 0, 1.65],
+      "facing": 0,
+      "seat": { "on": "jp-diningchair-n", "pos": [3.65, 0.23, 2.2], "facing": 0, "surfaceY": 0.49 }
+    },
+    { "id": "kitchen", "pos": [3.5, 0, 0.4], "facing": 3.14159 },
     { "id": "balcony", "pos": [-2.5, 0, 5.5], "facing": 0 }
   ]
 }

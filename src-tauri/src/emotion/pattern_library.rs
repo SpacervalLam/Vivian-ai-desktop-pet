@@ -27,7 +27,7 @@ const PATTERN_EDIT_MIN_INTERVAL_SECS: f64 = 3600.0;
 /// 句式库条目总数上限（既防无限膨胀，也保证 prompt 不会过度膨胀）。
 const MAX_PATTERNS: usize = 30;
 /// 单轮注入 prompt 的句式条目上限。
-const RENDER_MAX: usize = 2;
+const RENDER_MAX: usize = 1;
 
 /// 单条句子模式的"命中条件"
 ///
@@ -321,9 +321,9 @@ pub fn render_guidance(lib: &PatternLibraryFile, fp: &FastPerceptionResult) -> O
 
     let lang = normalize_lang(&crate::i18n::get_language());
     let heading = match lang {
-        "en" => "Suggested way to say it (reply pattern):",
-        "ja" => "返し方の提案（話し方パターン）：",
-        _ => "建议句式：",
+        "en" => "One optional reply cue (delivery only, not required content):",
+        "ja" => "任意の返し方ヒント（テンポだけ、必須内容ではない）：",
+        _ => "一个可选的接话提示（只管节奏，不是必须说的内容）：",
     };
     let body = directives.join("\n");
     Some(format!("{}\n{}", heading, body))

@@ -165,6 +165,7 @@ fn subagent_system_prompt(
         "- 工作目录：未选择（文件操作使用绝对路径）".to_string()
     };
     let env = format!("{env}{scope}");
+    let execution_contract = include_str!("../../prompts/work/execution.md");
     // 与主智能体一致：有工作目录走相对路径，没有才退回绝对路径
     let link_protocol = if has_wd {
         "提到主工作目录内的本地文件时使用可点击 Markdown 链接 \
@@ -180,7 +181,7 @@ fn subagent_system_prompt(
          - 你看不到上层会话的任何历史，只有下面「任务」与「背景」里的信息。缺什么就自己用工具查，不要凭猜测。\n\
          - 你的**最终回复文本**会作为返回值交给上层，中间过程不会进入上层的上下文。\
          所以要写得自包含：结论、关键发现、改了哪些文件、还有什么没做。\n\
-         - 你**不能向用户提问**（没有人在等你回答）。遇到方向分叉就自行选最合理的路，\
+         - 你**不能向用户提问**（没有人在等你回答）。常规实现选择可自行决定；缺少授权或关键需求时停止依赖该决定的工作并向上层报告，不替用户批准。做出常规选择后，\
          并在最终回复里写明「我选了 A 而不选 B，原因是…」，上层据此决定是否重新派发。\n\n\
          # 边界\n\
          - 只做被派发的事：不要顺手重构、不要扩大范围、不要改无关文件。\n\
@@ -189,6 +190,7 @@ fn subagent_system_prompt(
          - 操作系统：Windows（命令用 PowerShell 语法）\n\
          {env}\n\
          - 轮次预算：{max_rounds} 轮工具调用\n\n\
+         {execution_contract}\n\n\
          # 收尾\n\
          不需要再调用工具时，直接用自然语言给出最终结果。\
          {link_protocol}\

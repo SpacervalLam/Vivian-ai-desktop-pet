@@ -26,6 +26,7 @@ import {
   rugTexture,
   rainStreakTexture,
   rainBlobTexture,
+  doorGrainMap,
   rainGlassTexture,
   puddleRippleTexture,
   dripTexture,
@@ -55,6 +56,25 @@ import {
   jpClockFaceTexture,
   jpBathTileTexture,
 } from './toon';
+
+/**
+ * 住户入户门的三档轮换色（**外廊侧**）。
+ *
+ * 三档都压到低明度、彼此拉开色相。原先的门色里有两档几乎同色（woodDeep 与 doorB
+ * 都是中明度暖棕），暖光再把墙（#8b96a5 蓝灰）染暖之后，门和墙、门和门之间全糊在
+ * 一起，一排看过去像同一块板。整栋楼的门共用这一套：`exterior.ts` 的 M.doorA/B/C
+ * 与这里的 buildEntryDoor 都从这里取，别再各写一份。
+ *
+ * 轮换规则是 `(ui + fi * 2) % 3`——203 是 2F 中户（ui=2、fi=0），落在第 3 档。
+ *
+ * 三档的色相都收在中性区（棕 25° / 无彩 / 橄榄 78°），明度也都在 18~27%：
+ * 外廊是公共面，一排门要读成"同一套门的不同批次"，而不是三个彩色样板。
+ * 第 3 档尤其别往"绿"走——它在暖棕的廊道里最容易被衬出来。
+ */
+export const UNIT_DOOR_TONES = ['#4a3a2c', '#2a2d30', '#3f4238'] as const;
+
+/** 203 在轮换表里的档位（2F 中户：(2 + 0 * 2) % 3 = 2）。 */
+const OWN_UNIT_TONE = 2;
 
 /* ============================================================================
  * 模块级风格状态
@@ -125,12 +145,11 @@ const sph = (r: number, w = 12, h = 10) => new THREE.SphereGeometry(r, w, h);
 /**
  * 把几何的 UV 按世界尺寸缩放，让贴图的物理尺度脱离物体大小。
  *
- * 背景：贴图 repeat 是"每个几何平铺几次"，写死成常量后，同一张木地板铺在
- * 4.8m 宽的主卧和 10.2m 长的走廊上，板条实际尺寸会差好几倍，而且长宽比被
- * 非等比拉歪。改成 repeat 恒为 1、由 UV 承载尺寸：uv *= 尺寸 / 贴图代表的米数，
- * 全屋木纹、瓷砖、墙纸的图案尺度就锁死了。
+ * 贴图 repeat 写死成常量时，同一张木地板铺在 4.8m 主卧与 10.2m 走廊上板条尺寸差好几倍，
+ * 且长宽比被非等比拉歪。改为 repeat 恒为 1、由 UV 承载尺寸（uv *= 尺寸 / 贴图代表的米数），
+ * 全屋木纹 / 瓷砖 / 墙纸的图案尺度即锁死。
  *
- * 附带好处：UV 不同的地板可以共用同一个材质实例，同材质的地板就能合批。
+ * 附带好处：UV 不同的地板可共用同一材质实例，同材质地板即可合批。
  */
 export function scaleUV(geo: THREE.BufferGeometry, sx: number, sy: number): THREE.BufferGeometry {
   const uv = geo.getAttribute('uv') as THREE.BufferAttribute | undefined;
@@ -340,6 +359,8 @@ export function buildRoomShell(layout: ShellConfig): ShellResult {
     const fgeo = scaleUV(new THREE.PlaneGeometry(w, d), w / tx, d / tz);
     const fl = m(fgeo, floorMats[r.floor], [cx, 0, cz], 'receive');
     fl.rotation.x = -Math.PI / 2;
+    fl.name = 'floor-' + r.id;
+    fl.userData.floorType = r.floor;
     g.add(fl);
     if (r.ceiling !== false) {
       const ce = m(new THREE.PlaneGeometry(w, d), ceilMat, [cx, H, cz], 'both');
@@ -498,14 +519,15 @@ export function buildRoomShell(layout: ShellConfig): ShellResult {
     // 早先它是米白（#f4f0e8 / #e8e2d6），在冷灰立面中间断成两截亮白，
     // 是"立面被切成两种材质"的直接来源。这里跟 exterior.ts 的 EXT.railing
     // 取同一组炭灰金属色，palette 里可用 railing / railTop 覆盖。
-    const railMat = toon(C('railing', '#3f4650'), { finish: 'metal' });
-    const postMat = toon(C('railTop', '#4b525c'), { finish: 'metal' });
+    const railMat = toon('#354b48', { finish: 'metal' });
+    const slatMat = toon('#9c7954');
+    const postMat = toon('#354b48', { finish: 'metal' });
     const rh = 1.05; // 栏杆高度
     for (const r of layout.shell.railing) {
       const len = r.to - r.from;
       const c = (r.from + r.to) / 2;
       // 立柱间距 ~0.55m
-      const n = Math.max(2, Math.round(len / 0.55) + 1);
+      const n = Math.max(2, Math.ceil(len / 2.05) + 1);
       for (let i = 0; i < n; i++) {
         const p = r.from + (len * i) / (n - 1);
         const post = m(box(0.055, rh, 0.055), postMat,
@@ -518,8 +540,8 @@ export function buildRoomShell(layout: ShellConfig): ShellResult {
       g.add(rail);
       g.add(m(box(r.axis === 'z' ? len : 0.05, 0.04, r.axis === 'z' ? 0.05 : len), postMat,
         r.axis === 'z' ? [c, 0.08, r.at] : [r.at, 0.08, c], 'none'));
-      for (let p = r.from + 0.14; p < r.to - 0.05; p += 0.115) {
-        g.add(m(box(r.axis === 'z' ? 0.018 : 0.03, rh - 0.1, r.axis === 'z' ? 0.03 : 0.018), postMat,
+      for (let p = r.from + 0.14; p < r.to - 0.05; p += 0.14) {
+        g.add(m(box(r.axis === 'z' ? 0.068 : 0.046, rh - 0.2, r.axis === 'z' ? 0.046 : 0.068), slatMat,
           r.axis === 'z' ? [p, (rh - 0.1) / 2 + 0.06, r.at] : [r.at, (rh - 0.1) / 2 + 0.06, p], 'none'));
       }
     }
@@ -980,6 +1002,178 @@ export function buildWetGround(
 }
 
 /* ============================================================================
+ * 公告板实例集（billboard instance set）
+ * ========================================================================== */
+
+/**
+ * 一堆「各自要独立尺寸 / 独立透明度、且永远正对相机的小四边形」收成**一次提交**。
+ *
+ * 为什么不能继续用 Sprite：`SpriteMaterial.opacity` 是**材质级**的。要让 N 个
+ * Sprite 各自淡入淡出，就必须给它们各建一份材质 —— 于是 N 个 Sprite 换来
+ * N 次 draw call、N 次材质切换、N 个透明队列条目。实测全场景 309 个 Sprite
+ * 全是这个来源（屋檐滴水 294 + 涟漪 7 + 店面滴水 8），是「对象数远多于
+ * 三角形数」的典型：这 309 次提交一共只画 0 个三角形。
+ *
+ * 为什么不用 Points：`gl_PointSize` 有驱动上限（部分实现只到 64px），近景一滴
+ * 水就能顶到上限被裁成方块；而且 Points 只能是正方形，做不出"细长水线"。
+ *
+ * 做法：一个手写的单位四边形装进 `InstancedBufferGeometry`，每实例三个属性：
+ *   iPos   vec3   位置（组内局部坐标，随组变换）
+ *   iSize  vec2   世界尺寸（宽, 高）
+ *   iAlpha float  0..1 透明度
+ * 顶点着色器在**视图空间**里把四边形摆开 —— 所以永远正对相机、纵轴对齐屏幕上方，
+ * 与 Sprite 的朝向完全一致，但只占 1 次提交。
+ *
+ * 颜色/雾/色调映射与 `SpriteMaterial` 对齐：纹理乘 `uColor` 乘 `iAlpha`，再依次过
+ * `<tonemapping_fragment>` / `<colorspace_fragment>` / `<fog_fragment>`——顺序与
+ * three 的 sprite_frag 一致，所以换过来之后逐像素不变。
+ *
+ * **必须 `sceneCollideSkip`**：合批后的 mesh 横跨整栋楼，遍历收碰撞会收出一个
+ * 罩住半条街的隐形墙。描边也不参与（材质 `transparent` 直接被 addOutline 跳过）。
+ */
+type BillboardSet = {
+  mesh: THREE.Mesh;
+  /** 写第 i 个实例的位置与尺寸（世界尺寸，米）。 */
+  set(i: number, x: number, y: number, z: number, w: number, h: number): void;
+  /** 只改尺寸（位置不变时用这个，省掉每帧重传位置缓冲）。 */
+  setSize(i: number, w: number, h: number): void;
+  /** 写第 i 个实例的透明度。 */
+  setAlpha(i: number, a: number): void;
+  /** 把改动过的实例属性缓冲标记为脏 —— 每帧改完调一次。 */
+  flush(): void;
+  /** 实例都摆好之后收一次包围球，让视锥剔除继续有效。 */
+  finish(): void;
+  dispose(): void;
+};
+
+function makeBillboardSet(
+  count: number,
+  map: THREE.Texture,
+  color: THREE.ColorRepresentation,
+  renderOrder: number
+): BillboardSet {
+  const geo = new THREE.InstancedBufferGeometry();
+  /* 手写四边形而不是复用 PlaneGeometry：后者是带索引的 4 顶点网格，直接搬属性会
+     和它的 dispose 语义纠缠（搬走属性后 dispose 会释放还在用的那份）。 */
+  geo.setAttribute('position', new THREE.Float32BufferAttribute([
+    -0.5, -0.5, 0, 0.5, -0.5, 0, 0.5, 0.5, 0, -0.5, 0.5, 0,
+  ], 3));
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute([0, 0, 1, 0, 1, 1, 0, 1], 2));
+  geo.setIndex([0, 1, 2, 0, 2, 3]);
+
+  const iPos = new THREE.InstancedBufferAttribute(new Float32Array(count * 3), 3);
+  const iSize = new THREE.InstancedBufferAttribute(new Float32Array(count * 2), 2);
+  const iAlpha = new THREE.InstancedBufferAttribute(new Float32Array(count), 1);
+  iPos.setUsage(THREE.DynamicDrawUsage);
+  iSize.setUsage(THREE.DynamicDrawUsage);
+  iAlpha.setUsage(THREE.DynamicDrawUsage);
+  geo.setAttribute('iPos', iPos);
+  geo.setAttribute('iSize', iSize);
+  geo.setAttribute('iAlpha', iAlpha);
+  geo.instanceCount = count;
+
+  const mat = new THREE.ShaderMaterial({
+    uniforms: {
+      uMap: { value: map },
+      uColor: { value: new THREE.Color(color) },
+      // fog 相关的 uniform 由 three 的 refreshFogUniforms 每帧写；这里只需占位，
+      // 否则 material.fog === true 时 setProgram 找不到 uniform 会报错
+      fogColor: { value: new THREE.Color(0xffffff) },
+      fogNear: { value: 1 },
+      fogFar: { value: 100 },
+    },
+    vertexShader: /* glsl */`
+      attribute vec3 iPos;
+      attribute vec2 iSize;
+      attribute float iAlpha;
+      varying vec2 vUv;
+      varying float vAlpha;
+      #include <common>
+      #include <fog_pars_vertex>
+      void main() {
+        vUv = uv;
+        vAlpha = iAlpha;
+        // 视图空间里直接铺开：mv.xy 就是屏幕右/上两个方向，纵轴天然朝上
+        vec4 mv = modelViewMatrix * vec4(iPos, 1.0);
+        mv.xy += position.xy * iSize;
+        vec4 mvPosition = mv;
+        gl_Position = projectionMatrix * mvPosition;
+        #include <fog_vertex>
+      }
+    `,
+    fragmentShader: /* glsl */`
+      uniform sampler2D uMap;
+      uniform vec3 uColor;
+      varying vec2 vUv;
+      varying float vAlpha;
+      #include <common>
+      #include <fog_pars_fragment>
+      void main() {
+        vec4 tex = texture2D(uMap, vUv);
+        gl_FragColor = vec4(uColor * tex.rgb, tex.a * vAlpha);
+        // 全透明片元直接丢：省掉无谓的混合，也免得在深度预剔除之后还写一遍
+        if (gl_FragColor.a < 0.004) discard;
+        #include <tonemapping_fragment>
+        #include <colorspace_fragment>
+        #include <fog_fragment>
+      }
+    `,
+    transparent: true,
+    depthWrite: false,
+    depthTest: true,
+    blending: THREE.NormalBlending,
+    fog: true,
+  });
+  mat.userData.outlineWeight = 0;
+
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.name = '__billboards';
+  mesh.renderOrder = renderOrder;
+  mesh.castShadow = false;
+  mesh.receiveShadow = false;
+  // 合批后横跨整栋楼，绝不能进碰撞表
+  mesh.userData.sceneCollideSkip = true;
+  mesh.userData.noMerge = true;
+  // 视锥剔除不能靠 three 自己算：InstancedBufferGeometry 的 computeBoundingSphere
+  // 只看基础四边形（半径 0.7），会把整批在屏幕外时误剔掉。finish() 里手工收球。
+  mesh.frustumCulled = true;
+
+  let posDirty = false, sizeDirty = false, alphaDirty = false;
+  return {
+    mesh,
+    set(i, x, y, z, w, h) {
+      iPos.setXYZ(i, x, y, z);
+      iSize.setXY(i, w, h);
+      posDirty = sizeDirty = true;
+    },
+    setSize(i, w, h) { iSize.setXY(i, w, h); sizeDirty = true; },
+    setAlpha(i, a) { iAlpha.setX(i, a); alphaDirty = true; },
+    flush() {
+      if (posDirty) { iPos.needsUpdate = true; posDirty = false; }
+      if (sizeDirty) { iSize.needsUpdate = true; sizeDirty = false; }
+      if (alphaDirty) { iAlpha.needsUpdate = true; alphaDirty = false; }
+    },
+    finish() {
+      iPos.needsUpdate = true; iSize.needsUpdate = true; iAlpha.needsUpdate = true;
+      posDirty = sizeDirty = alphaDirty = false;
+      /* 包围球：中心取位置均值，半径取「最远位置到中心 + 最大半尺寸」。
+         偏保守没关系——多提交一次远好过在屏幕边缘把整批剔掉。 */
+      const c = new THREE.Vector3();
+      for (let i = 0; i < count; i++) c.x += iPos.getX(i), c.y += iPos.getY(i), c.z += iPos.getZ(i);
+      c.divideScalar(Math.max(1, count));
+      let r2 = 0, maxHalf = 0;
+      for (let i = 0; i < count; i++) {
+        const dx = iPos.getX(i) - c.x, dy = iPos.getY(i) - c.y, dz = iPos.getZ(i) - c.z;
+        r2 = Math.max(r2, dx * dx + dy * dy + dz * dz);
+        maxHalf = Math.max(maxHalf, iSize.getX(i), iSize.getY(i));
+      }
+      geo.boundingSphere = new THREE.Sphere(c, Math.sqrt(r2) + maxHalf * 0.5);
+    },
+    dispose() { geo.dispose(); mat.dispose(); },
+  };
+}
+
+/* ============================================================================
  * 湿地涟漪（雨打积水）
  * ========================================================================== */
 
@@ -1005,13 +1199,13 @@ export type PuddleRippleOpts = {
  * 向外扩张、同时淡出，然后再从别处冒出。正是这点连续的运动，让"地面是湿的、
  * 且雨还在下"这件事被读出来（静态光斑只能说明"曾经湿"）。
  *
- * 每个涟漪一个 Sprite + 独立材质（Sprite 的 opacity 是材质级的，必须各占一份
- * 才能各自淡入淡出）。数量几十个，透明件走 additive 之外的 NormalBlending，
- * 叠在湿地光斑之上只是"添一层冷色"，不会烧白。
+ * 逐圈独立淡入淡出，所以每个涟漪要有**自己的透明度**——这正是过去必须「一个
+ * Sprite 一份 SpriteMaterial」的原因，几十个涟漪就是几十次提交。现在改走
+ * makeBillboardSet：透明度是逐实例属性，整片只占 1 次提交，视觉逐像素不变。
  *
- * 注意：返回对象必须加进**未冻结**的组（见 exterior.ts 的 buildStreetscapeRipples），
- * 否则 freezeStatic 把 matrixAutoUpdate 关掉后，每帧改 scale 不会重算世界矩阵，
- * 涟漪就定格不动了。
+ * 注意：返回对象必须加进**未冻结**的组（见 exterior.ts 的 buildStreetscapeRipples）。
+ * 虽然现在改的是实例属性而不是矩阵、冻结了也不会定格，但保持这个约定——
+ * 将来有人再往这里加"真的在动"的零件时不会踩坑。
  */
 export function buildPuddleRipples(opts: PuddleRippleOpts = {}): { object: THREE.Group; update: (t: number) => void } {
   const area = opts.area ?? 5.2;
@@ -1019,52 +1213,49 @@ export function buildPuddleRipples(opts: PuddleRippleOpts = {}): { object: THREE
   const count = opts.count ?? 28;
   const y = opts.y ?? 0.014;
   const seed = opts.seed ?? 98831;
-  const color = new THREE.Color(opts.color ?? '#a9c2e6');
   const tex = puddleRippleTexture();
 
   const g = new THREE.Group();
   g.name = 'puddle-ripples';
   const rnd = makeRng(seed);
 
-  type Ripple = { sprite: THREE.Sprite; base: number; phase: number; period: number };
+  /* 先按原来的随机数调用顺序把参数抽完，再建实例缓冲——顺序一乱，涟漪位置就整体变样 */
+  type Ripple = { x: number; z: number; base: number; phase: number; period: number };
   const ripples: Ripple[] = [];
-
   for (let i = 0; i < count; i++) {
     const x = cx + (rnd() - 0.5) * area * 2;
     const z = cz + (rnd() - 0.5) * area * 2;
     const base = 0.42 + rnd() * 0.55; // 最终直径（米）
-    const mat = new THREE.SpriteMaterial({
-      map: tex,
-      color,
-      transparent: true,
-      opacity: 0.5,
-      depthWrite: false,
-      blending: THREE.NormalBlending,
-    });
-    const s = new THREE.Sprite(mat);
-    s.position.set(x, y, z);
-    s.scale.set(base * 0.5, base * 0.5, 1);
-    s.renderOrder = 3;
-    g.add(s);
     ripples.push({
-      sprite: s,
-      base,
+      x, z, base,
       phase: rnd(),                 // 错开起始相位
       period: 1.8 + rnd() * 2.4,    // 每圈 1.8~4.2s 一个生命周期
     });
   }
 
+  const set = makeBillboardSet(count, tex, opts.color ?? '#a9c2e6', 3);
+  for (let i = 0; i < count; i++) {
+    const r = ripples[i];
+    // 起始尺寸按 update 在 p=0 时的取值填，避免首帧闪一下
+    set.set(i, r.x, y, r.z, r.base * 0.5, r.base * 0.5);
+    set.setAlpha(i, 0);
+  }
+  set.finish();
+  g.add(set.mesh);
+
   const update = (t: number) => {
-    for (const r of ripples) {
+    for (let i = 0; i < ripples.length; i++) {
+      const r = ripples[i];
       // 生命周期进度 [0,1)，到头即重生（相位错开，不会整片同步冒）
       const p = (t / r.period + r.phase) % 1;
       // 扩张：从 0.5 倍长到 1.0 倍
       const grow = 0.5 + p * 0.5;
       const sc = r.base * grow;
-      r.sprite.scale.set(sc, sc, 1);
+      set.setSize(i, sc, sc);
       // 淡入淡出：中段最亮，首尾几乎不可见——像一圈圈水波涌起又平复
-      r.sprite.material.opacity = Math.sin(p * Math.PI) * 0.5;
+      set.setAlpha(i, Math.sin(p * Math.PI) * 0.5);
     }
+    set.flush();
   };
 
   return { object: g, update };
@@ -1091,20 +1282,28 @@ export type DripEdge = {
  *
  * 屋檐滴水是雨夜最容易被忽略、缺了却不对劲的细节：没有它，阳台栏杆下沿是
  * 干的，整栋楼少了"雨刚顺着檐口淌下去"的那一下。这里把 dripTexture 贴到一排
- * 竖直 Sprite 上，垂在阳台外缘正下方，并让它们轻微地伸缩/明暗起伏，
+ * 竖直四边形上，垂在阳台外缘正下方，并让它们轻微地伸缩/明暗起伏，
  * 像水珠在汇聚、欲滴未滴。
  *
- * Sprite 的纵向轴天然对齐屏幕上方，所以无论相机怎么绕，水线都读成"竖直下垂"，
- * 比 plane 单面billboard 更稳。同样走 NormalBlending + 低透明度，冷蓝不烧白。
+ * 四边形在视图空间里铺开，纵轴天然对齐屏幕上方，所以无论相机怎么绕，水线都
+ * 读成"竖直下垂"——与 Sprite 的朝向一致。同样走 NormalBlending + 低透明度，
+ * 冷蓝不烧白。
+ *
+ * **这一处曾经是全场景提交量最大的单项之一。** 原先一滴水一个 Sprite，而
+ * SpriteMaterial 的 opacity 是材质级的，要各自明暗起伏就只能各建一份材质：
+ * 整栋楼 294 滴 = 294 次 draw call + 294 次材质切换 + 294 个透明队列条目，
+ * 而它们合计只画 0 个三角形。改走 makeBillboardSet 之后整批 1 次提交，
+ * 透明度走逐实例属性 —— 画面逐像素不变（颜色/雾/色调映射链与 sprite_frag 同序）。
  */
 export function buildEaveDrips(edges: DripEdge[]): { object: THREE.Group; update: (t: number) => void } {
   const g = new THREE.Group();
   g.name = 'eave-drips';
   const tex = dripTexture();
   const rnd = makeRng(70711);
-  const color = new THREE.Color('#bcd2ee');
 
-  type Drip = { sprite: THREE.Sprite; baseW: number; baseH: number; phase: number; freq: number };
+  /* 先按原来的随机数调用顺序把每一滴的参数抽完（顺序一乱，整排滴水就换位置），
+     再按最终数量建实例缓冲。 */
+  type Drip = { x: number; y: number; z: number; baseW: number; baseH: number; phase: number; freq: number };
   const drips: Drip[] = [];
 
   for (const e of edges) {
@@ -1113,37 +1312,35 @@ export function buildEaveDrips(edges: DripEdge[]): { object: THREE.Group; update
       const x = e.x0 + (i + 0.5 + (rnd() - 0.5) * 0.3) * (e.x1 - e.x0) / n;
       const w = 0.05 + rnd() * 0.04;
       const h = 0.18 + rnd() * 0.16;
-      const mat = new THREE.SpriteMaterial({
-        map: tex,
-        color,
-        transparent: true,
-        opacity: 0.5,
-        depthWrite: false,
-        blending: THREE.NormalBlending,
-      });
-      const s = new THREE.Sprite(mat);
-      // 顶点落在檐口底（e.y），整条 Sprite 往下挂
-      s.position.set(x, e.y - h * 0.4, e.z);
-      s.scale.set(w, h, 1);
-      s.renderOrder = 4;
-      g.add(s);
       drips.push({
-        sprite: s,
-        baseW: w,
-        baseH: h,
+        // 顶点落在檐口底（e.y），整条往下挂
+        x, y: e.y - h * 0.4, z: e.z,
+        baseW: w, baseH: h,
         phase: rnd() * Math.PI * 2,
         freq: 0.6 + rnd() * 0.8,
       });
     }
   }
 
+  const set = makeBillboardSet(drips.length, tex, '#bcd2ee', 4);
+  for (let i = 0; i < drips.length; i++) {
+    const d = drips[i];
+    // 起始尺寸/透明度取 update 在 k 中位时的值，避免首帧闪一下
+    set.set(i, d.x, d.y, d.z, d.baseW, d.baseH);
+    set.setAlpha(i, 0.49);
+  }
+  set.finish();
+  g.add(set.mesh);
+
   const update = (t: number) => {
-    for (const d of drips) {
+    for (let i = 0; i < drips.length; i++) {
+      const d = drips[i];
       const k = 0.5 + 0.5 * Math.sin(t * d.freq + d.phase);
       // 水珠汇聚时略伸长、变亮；将滴未滴时缩回、变淡
-      d.sprite.scale.set(d.baseW, d.baseH * (0.8 + 0.5 * k), 1);
-      d.sprite.material.opacity = 0.34 + 0.3 * k;
+      set.setSize(i, d.baseW, d.baseH * (0.8 + 0.5 * k));
+      set.setAlpha(i, 0.34 + 0.3 * k);
     }
+    set.flush();
   };
 
   return { object: g, update };
@@ -1223,121 +1420,64 @@ export function buildWindow(
   spec: { pos: [number, number, number]; size: [number, number, number] }
 ): THREE.Group {
   const g = new THREE.Group();
-  // 拆两组：贴墙部分跟随墙隐，凸入室内的永远可见
-  const wallSurface = new THREE.Group();   wallSurface.name = 'window-wall';
-  const roomSide = new THREE.Group();       roomSide.name = 'room-side';
-  g.add(wallSurface);
-  g.add(roomSide);
-  const halfW = spec.size[0] / 2;
-  const y0 = spec.size[1];      // 窗台高（世界 Y）
-  const y1 = spec.size[2];      // 窗顶高（世界 Y）
-  const cy = (y0 + y1) / 2;
-  const h = y1 - y0;
-
-  // 窗框的 rot 已经把本地 +z 轴对齐到室内侧（west rot=π/2、east rot=−π/2、
-  // north rot=0、south rot=π，本地 +z 旋转后始终指向室内）。所以"贴墙件"的 z 偏移
-  // 固定朝本地 +z 即可：窗框 box 中心贴在墙的室内侧（+0.06），水痕层挂在室外
-  // 侧（-0.20），窗台/窗帘等凸入室内的件朝 +0.09。之前偏移写死在室外侧（z 恒为负），
-  // 导致室内看不到窗框、observer 转到室外又只看到窗框背面——表现就是"窗框法线错"。
-  // 窗框填充件厚度 0.12、中心在 frameZ，故背面落在局部 z = frameZ - 0.06。
-  // 窗组原点就钉在墙平面上，frameZ=0.06 时背面 z=0 与墙精确共面 → 外景观察视角下沿包边条闪烁。
-  // 抬到 0.09 让背面离墙 3cm，消除共面（薄前框 frameZ+0.06+0.01 同步外移，无碍）。
-  const frameZ = 0.09;
-  const skyZ = -0.20;
-  const innerZ = 0.09;
-
-  const frameMat = toon(C('windowFrame', '#fdfaf5'));
-  const sillMat = toon(C('windowSill', '#f3e7d3'));
-  const rodMat = toon(C('metal', '#b9bcc4'), { finish: 'metal' });
-
-  // 窗口不再有贴图：室外层 Stage 2 起，窗外是真 3D 街区（exterior.ts），
-  // 原来那张 emissive 平面画已拆除。nightCityTexture 留给远景幕布（Stage 3）。
-  // 玻璃上的雨水贴图层已去掉：隔着 8m 街道 + 真实雨丝 + 雾，玻璃水痕贴上去
-  // 反而糊一档亮度，看不清店里/邻户的剪影。雨夜玻璃的湿润感交给玻璃自身的
-  // finish:'glass' 边缘亮 + 街道湿地反光的反射斑来传达。
-
-  // 窗框（贴墙室内侧 frameZ）。
-  // 窗框有 0.12 厚度，若整框送 Inverted Hull 描边，厚度侧面会被一起外扩，
-  // 斜视窗外侧时露出一根与窗平面垂直的突兀短条（即报的「窗最外边错误条」）。
-  // 拆两层：厚度填充件（实体、noOutline+noMerge，有厚度感但不描边）+
-  // 正面薄框（朝室内、参与描边，只给窗框正面清晰轮廓，不再有侧面短条）。
-  const fw = 0.085;
-  const addFrameBar = (w: number, hh: number, x: number, y: number) => {
-    const fill = m(box(w, hh, 0.12), frameMat, [x, y, frameZ], 'cast');
-    fill.userData.noOutline = true;
-    fill.userData.noMerge = true;
-    wallSurface.add(fill);
-    wallSurface.add(m(box(w, hh, 0.018), frameMat, [x, y, frameZ + 0.06 + 0.01], 'cast'));
+  const wallSurface = new THREE.Group(); wallSurface.name = 'window-wall';
+  const roomSide = new THREE.Group(); roomSide.name = 'room-side';
+  g.add(wallSurface, roomSide);
+  const [w, y0, y1] = spec.size, h = y1-y0, cy = (y0+y1)/2;
+  // Local +Z faces indoors. The trim starts 12 mm ahead of the wall;
+  // glass, sash and fabric occupy separate depths, including their folds.
+  const frame = new THREE.MeshStandardMaterial({color:'#8b897e',roughness:.42,metalness:.3});
+  const seal = new THREE.MeshStandardMaterial({color:'#494d48',roughness:.85});
+  const sill = new THREE.MeshStandardMaterial({color:'#c9b596',roughness:.7});
+  const cloth = new THREE.MeshStandardMaterial({color:'#faf5e9',map:curtainTexture(),roughness:1,side:THREE.DoubleSide});
+  const glass = new THREE.MeshStandardMaterial({color:'#b9d7d8',roughness:.14,metalness:.12,transparent:true,opacity:.085,depthWrite:false,side:THREE.DoubleSide});
+  for (const material of [frame,seal,sill,cloth,glass]) { material.name='203-window'; material.userData.outlineWeight=0; }
+  const bar=(ww:number,hh:number,dd:number,x:number,y:number,z:number,mat:THREE.Material=frame,parent=wallSurface)=>{
+    const mesh=m(box(ww,hh,dd),mat,[x,y,z],'both');mesh.userData.noOutline=true;parent.add(mesh);return mesh;
   };
-  addFrameBar(halfW * 2 + fw * 2, fw, 0, y1 + fw / 2);   // 上横框
-  addFrameBar(halfW * 2 + fw * 2, fw, 0, y0 - fw / 2);   // 下横框
-  addFrameBar(fw, h + fw, -halfW - fw / 2, cy);          // 左竖框
-  addFrameBar(fw, h + fw, halfW + fw / 2, cy);           // 右竖框
-  // 中竖梃（窗中央唯一的竖直分隔条；去掉横向的 midH，避免窗中央出现水平白条）。
-  // 同样拆两层，避免其厚度侧面被描边外扩出短条。
-  const midFill = m(box(0.045, h, 0.07), frameMat, [0, cy, frameZ], 'cast');
-  midFill.userData.noOutline = true;
-  midFill.userData.noMerge = true;
-  wallSurface.add(midFill);
-  wallSurface.add(m(box(0.045, h, 0.018), frameMat, [0, cy, frameZ + 0.035 + 0.01], 'cast'));
-
-  // 窗台（贴墙侧，跟随墙一起隐藏；之前放 room-side 永远可见，observer 转墙时
-  // 窗框隐了它还在，留一条水平白条突兀横着。移入 window-wall 组随墙隐。）
-  wallSurface.add(m(box(halfW * 2 + 0.24, 0.07, 0.22), sillMat, [0, y0 - 0.02, innerZ], 'both'));
-
-  // 窗帘杆 + 杆头
-  const rod = m(cyl(0.016, 0.016, halfW * 2 + 0.5, 10), rodMat, [0, y1 + 0.20, innerZ], 'cast');
-  rod.rotation.z = Math.PI / 2;
-  roomSide.add(rod);
-  for (const s of [-1, 1]) {
-    roomSide.add(m(sph(0.028, 10, 8), rodMat, [s * (halfW + 0.25), y1 + 0.20, innerZ], 'cast'));
+  // Slim perimeter: horizontal pieces meet verticals without intersecting.
+  const fw=.036;
+  for(const sign of [-1,1]) {
+    bar(w+fw*2,fw,.065,0,sign<0?y0-fw/2:y1+fw/2,.0445);
+    bar(fw,h,.065,sign*(w/2+fw/2),cy,.0445);
+    bar(.012,h-.024,.023,sign*(w/2-.006),cy,.017,seal);
   }
-
-  // 两幅窗帘：给平面加正弦起伏做褶子。上沿挂在杆上，下沿垂到窗台以下一点
-  const curtainMat = toon('#ffffff', { map: curtainTexture(), side: THREE.DoubleSide });
-  const drapeTop = y1 + 0.18;
-  const drapeBottom = y0 - 0.13;
-  const drapeH = drapeTop - drapeBottom;
-  for (const s of [-1, 1]) {
-    const geo = new THREE.PlaneGeometry(0.66, drapeH, 12, 1);
-    const p = geo.getAttribute('position') as THREE.BufferAttribute;
-    for (let i = 0; i < p.count; i++) {
-      const u = p.getX(i) / 0.66 + 0.5;
-      p.setZ(i, Math.sin(u * Math.PI * 5) * 0.05);
+  for(const yy of [y0+.006,y1-.006])bar(w,.012,.023,0,yy,.017,seal);
+  const split = w*.12;
+  bar(.025,h-.024,.043,split,cy,.048);
+  // A fixed picture pane and a narrower operable sash; clear view at eye level.
+  for(const [left,right] of [[-w/2+.012,split-.014],[split+.014,w/2-.012]]){
+    const pane=m(new THREE.PlaneGeometry(right-left,h-.026),glass,[(left+right)/2,cy,-.009],'none');
+    pane.userData.noOutline=true;wallSurface.add(pane);
+  }
+  bar(.009,.105,.025,split+.035,cy-.1,.091,seal);
+  bar(w+.14,.038,.225,0,y0-.06,.082,sill);
+  const top=y1+.145;
+  const roller=y0>=.8;
+  if(roller){
+    bar(w+.10,.047,.055,0,top,.165,sill,roomSide);
+    const drop=y0>1.4?.21:.14;
+    bar(w-.02,drop,.009,0,top-.035-drop/2,.169,cloth,roomSide);
+    bar(w-.012,.015,.017,0,top-.043-drop,.17,frame,roomSide);
+  }else{
+    bar(w+.46,.035,.055,0,top+.018,.235,sill,roomSide);
+    const bottom=Math.max(.17,y0-.16),height=top-bottom;
+    for(const sign of [-1,1]){
+      const width=.29;
+      const geo=new THREE.PlaneGeometry(width,height,24,16);
+      const p=geo.getAttribute('position') as THREE.BufferAttribute;
+      for(let i=0;i<p.count;i++){
+        const u=p.getX(i)/width+.5,v=(p.getY(i)+height/2)/height;
+        // Soft tapered pleats, with a gently relaxed hem.
+        p.setX(i,p.getX(i)*(1+.12*(1-v)));
+        p.setZ(i,Math.sin(u*Math.PI*8)*(.018+.009*(1-v)));
+        p.setY(i,p.getY(i)+Math.cos(u*Math.PI*8)*.007*(1-v));
+      }
+      geo.computeVertexNormals();
+      const drape=m(geo,cloth,[sign*(w/2+.035),(top+bottom)/2,.23],'both');
+      drape.userData.noOutline=true;roomSide.add(drape);
     }
-    geo.computeVertexNormals();
-    const drape = m(geo, curtainMat, [s * (halfW - 0.14), (drapeTop + drapeBottom) / 2, innerZ], 'cast');
-    // 双面的褶皱片描边会互相糊成一团黑，别描
-    drape.userData.noOutline = true;
-    roomSide.add(drape);
   }
-
-  // 窗台上的小盆栽
-  const plant = buildPlant(0.85);
-  plant.position.set(-halfW + 0.28, y0 + 0.03, innerZ);
-  roomSide.add(plant);
-
-  // 窗台边摞着的几本书
-  const stack = new THREE.Group();
-  const rnd = makeRng(808);
-  let y = 0;
-  for (let i = 0; i < 3; i++) {
-    const th = 0.035 + rnd() * 0.02;
-    const col = ['#a86b5c', '#5c7488', '#b98f63'][i];
-    stack.add(m(box(0.20, th, 0.15), toon(col), [(rnd() - 0.5) * 0.02, y + th / 2, (rnd() - 0.5) * 0.02], 'cast'));
-    y += th;
-  }
-  stack.position.set(halfW - 0.30, y0 + 0.03, innerZ);
-  roomSide.add(stack);
-
-  // 风铃
-  const chime = new THREE.Group();
-  chime.add(m(cyl(0.003, 0.003, 0.20, 6), toon('#e8dcc4'), [0, -0.10, 0], 'none'));
-  chime.add(m(sph(0.042, 12, 10), toon('#e0e8e6', { transparent: true, opacity: 0.75 }), [0, -0.23, 0], 'cast'));
-  chime.add(m(new THREE.PlaneGeometry(0.03, 0.13), toon('#fdf6ea', { side: THREE.DoubleSide }), [0, -0.33, 0.005], 'none'));
-  chime.position.set(halfW - 0.62, y1 + 0.20, innerZ);
-  roomSide.add(chime);
-
   return g;
 }
 
@@ -2378,28 +2518,54 @@ export function buildEntryDoor(spec: { pos: [number, number, number]; size: [num
   const g = new THREE.Group();
   const W = spec.size[0], H = spec.size[1];
 
-  const doorMat = toon(C('entryDoor', '#7a8794'));
-  const frameMat = toon('#4a5460');
+  // 门色：与邻户共用同一套轮换色（203 是 2F 中户，落在第 3 档）。
+  // 外廊是公共面，整排门必须是一套语言；内外两侧同一个色——主角户的区分交给
+  // 门牌 / 表札那一套挂件，不再做在门扇上。
+  const doorMat = toon(UNIT_DOOR_TONES[OWN_UNIT_TONE], { map: doorGrainMap() });
+  const frameMat = toon('#39414c');   // 与邻户户门套同色：整排看过去是一套门的语言
   const metalMat = toon(C('metal', '#b9bcc4'), { finish: 'metal' });
+  const grooveMat = toon('#6b7a86');  // 门面压条：与邻户同一支中蓝灰，压在深门上读得出来
 
   // 门框：两侧梃 + 上槛。包进 door-frame 组，供 RoomScene 单独描边（静态）
+  // 进深 0.24 且整体向室外侧偏 0.05：外墙面那块覆板厚 0.13、外表面在 ZN-0.155，
+  // 门框必须一路伸到墙面外（外表面落到 -5.9-0.17），否则洞壁露的是覆板断面、
+  // 洞口没有收口。室内侧维持原来的 0.07，不动房间那面墙。
+  //
+  // 高度上刻意让开洞口上沿（洞顶在 H，门框顶落在 H+0.06 / 上槛落在 H+0.03±0.025）：
+  // 覆板被洞口切开后，上面那块板的**底面**和房间外壳的洞顶断面都正好在 y=H，
+  // 三者都是朝下的面——门框若也从 H 起，就是三层同向共面在一起闪。上槛底面压到
+  // H+0.005、顶面 H+0.055，立梃顶 H+0.06，谁都不与它们同面。
   const frame = new THREE.Group();
   frame.name = 'door-frame';
   for (const s of [-1, 1]) {
-    frame.add(m(box(0.05, H + 0.08, 0.14), frameMat, [s * (W / 2 + 0.02), (H + 0.08) / 2, 0], 'cast'));
+    frame.add(m(box(0.05, H + 0.06, 0.24), frameMat, [s * (W / 2 + 0.02), (H + 0.06) / 2, -0.05], 'cast'));
   }
-  frame.add(m(box(W + 0.14, 0.08, 0.14), frameMat, [0, H + 0.04, 0], 'cast'));
+  frame.add(m(box(W + 0.14, 0.05, 0.24), frameMat, [0, H + 0.03, -0.05], 'cast'));
   g.add(frame);
 
   // 门扇：铰链在 -X 端，挂在独立 pivot（door-leaf）上，开关动画由 RoomScene 按距离驱动
   const leaf = new THREE.Group();
   leaf.name = 'door-leaf';
-  leaf.add(m(box(W, H, 0.06), doorMat, [W / 2, H / 2, 0], 'both'));
-  // 门上的两道凹槽线 + 猫眼 + 圆把手（全部随门扇旋转）
-  leaf.add(m(box(W - 0.16, 0.012, 0.012), toon('#5d6873'), [W / 2, H * 0.62, 0.032], 'none'));
-  leaf.add(m(box(W - 0.16, 0.012, 0.012), toon('#5d6873'), [W / 2, H * 0.40, 0.032], 'none'));
-  leaf.add(m(cyl(0.022, 0.022, 0.015, 10), metalMat, [W / 2 - W * 0.22, H * 0.76, 0.035], 'none').rotateX(Math.PI / 2));
-  leaf.add(m(sph(0.035, 10, 8), metalMat, [W / 2 - W * 0.30, H * 0.48, 0.06], 'cast'));
+  // 门扇比洞口小一圈（每侧 7mm）：spec.size 给的是**洞口**尺寸，门扇照抄的话四个
+  // 侧面会与洞口断面完全共面（断面就贴在 x=±W/2、y=H 上）。留出的这一圈同时也是
+  // 真实门缝，门扇底仍贴地，只缩顶边和两侧。
+  const leafW = W - 0.014, leafH = H - 0.014;
+  leaf.add(m(box(leafW, leafH, 0.06), doorMat, [W / 2, leafH / 2, 0], 'both'));
+  /* 门面分格：两道竖压条，内外各一套。
+   * 门是双面构件——室内外两侧都要，只做 +z 那面的话从外廊看就是一整块素板
+   * （旧版正是如此：凹槽/猫眼/圆把手全在 +z 侧，背对外廊）。 */
+  for (const s of [-1, 1]) {
+    for (const zz of [-0.034, 0.034]) {
+      leaf.add(m(box(0.018, H - 0.26, 0.012), grooveMat, [W / 2 + s * W * 0.2, H * 0.52, zz], 'none'));
+    }
+  }
+  // 猫眼只在外侧（-z 朝外廊）：它是从里往外看的
+  leaf.add(m(cyl(0.022, 0.022, 0.015, 10), metalMat, [W / 2, H * 0.74, -0.036], 'none').rotateX(Math.PI / 2));
+  // 杠杆把手：内外各一套，z 完全对称。旧版是个圆球，和邻户的杠杆把手对不上
+  for (const s of [-1, 1]) {
+    leaf.add(m(box(0.048, 0.15, 0.022), metalMat, [W * 0.86, H * 0.46, s * 0.040], 'cast'));
+    leaf.add(m(box(0.145, 0.032, 0.028), metalMat, [W * 0.86 - 0.085, H * 0.46, s * 0.054], 'cast'));
+  }
   leaf.position.set(-W / 2, 0, 0);
   leaf.rotation.y = 0; // 默认关闭
   g.add(leaf);

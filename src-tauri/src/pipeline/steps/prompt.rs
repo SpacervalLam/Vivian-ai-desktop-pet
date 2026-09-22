@@ -786,17 +786,15 @@ impl PromptBuildingStep {
             None
         };
 
-        // 场景语气注入：用 ToneInjector 匹配用户输入 + 最近 3 轮上下文，
-        // 命中场景时注入对应场景的参考台词。注入位置在动态区末尾（工具列表前），
-        // 利用近因效应让 LLM 生成前最后看到语气参考。
+        // 场景语气只匹配当前发言，避免用户换话题后仍沿用上一轮的场景表演。
+        // 命中时只注入少量可选节奏参考，不要求复刻台词。
         let tone_injection = self.tone_injector.as_ref().and_then(|injector| {
-            let recent: Vec<String> = state.messages.iter().rev().take(6).map(|m| m.content.clone()).collect();
-            injector.build_tone_injection(&state.user_input, &recent, &self.language)
+            injector.build_tone_injection(&state.user_input, &self.language)
         });
 
-        // 情绪行为约束：偏离基线的维度按三档梯度（轻微/明显/强烈）注入具体说话方式
-        // 约束（如 sadness 0.5-0.7 →"能一个字回的绝不用两个字"），阈值相对各维度
-        // set point 设计，日常波动不触发。与 emotion_context 的感知叙述互补。合并到 tone_injection
+        // 情绪表达偏置：注入连续效价/激活/主导强度，按比例影响节奏
+        // 每轮最多体现一个轻微线索，避免跨阈值突然进入表演模式
+        // 情绪只改变表达，不改变任务响应；与场景语气合并到 tone_injection
         let emotion_state = self.psychology.as_ref().and_then(|psy| {
             build_emotion_state_section(&psy.emotion(), &self.char_id, &self.language)
         });
@@ -806,6 +804,39 @@ impl PromptBuildingStep {
             (None, ti) => ti,
         };
 
+        // 近期网络语境：热梗采集写入的短 TTL 知识此前只能等普通语义检索碰巧召回，
+        // 很难真正影响闲聊。这里在闲聊类轮次提供一份紧凑的内部参考；它是用法
+        // 背景，不是台词库，模型通常仍应不用，贴合时也最多自然带出一个表达。
+        let current_culture_context = self.memory.as_ref().and_then(|mem| {
+            let casual_turn = state
+                .fast_perception
+                .as_ref()
+                .map(|fp| matches!(fp.intent.label.as_str(), "chat" | "sharing" | "complaint"))
+                .unwrap_or_else(|| state.user_input.chars().count() <= 48);
+            if !casual_turn {
+                return None;
+            }
+            let item = mem.recent_by_tags(&["meme"], 1).into_iter().next()?;
+            let content: String = item.content.chars().take(900).collect();
+            if content.trim().is_empty() {
+                return None;
+            }
+            let lang = crate::pipeline::prompt_modules::normalize_lang(&self.language);
+            let usage = match (lang, self.char_id.as_str()) {
+                ("zh", "vivian") => "这是近期网络语境，只在当前情境完全贴合时自然用一个表达；大多数轮次不用。不要复述笔记、报梗名或解释出处，除非用户问。",
+                ("zh", _) => "这是近期网络语境，主要用于听懂用户；只有非常自然时才轻轻接一个表达。不要复述笔记、报梗名或解释出处，除非用户问。",
+                ("ja", "vivian") => "最近のネット文脈。今の場面に完全に合う時だけ一表現を自然に使い、通常は使わない。メモ、ネタ名、出典を復唱・説明しない（聞かれた時を除く）。",
+                ("ja", _) => "最近のネット文脈。主にユーザーを理解するために使い、非常に自然な時だけ一表現を軽く返す。メモや出典を説明しない（聞かれた時を除く）。",
+                (_, "vivian") => "Current online context. Use at most one expression only when it fits perfectly; most turns should use none. Never recap the note, name the meme, or explain its origin unless asked.",
+                _ => "Current online context, mainly for understanding the user. Echo at most one expression only when effortless; never recap or explain the note unless asked.",
+            };
+            Some(format!("## Current online context (internal, optional)\n{usage}\n<current_culture>\n{content}\n</current_culture>"))
+        });
+        let tone_injection = match (current_culture_context, tone_injection) {
+            (Some(culture), Some(tone)) => Some(format!("{culture}\n\n{tone}")),
+            (Some(culture), None) => Some(culture),
+            (None, tone) => tone,
+        };
         // 随机小事回响：低概率注入一条用户随口提过的小事，
         // 让 AI 偶尔自然带出"对了你那个XX怎么样了"这种活人感细节
         let random_echo = self.memory.as_ref().and_then(|mem| {
@@ -1120,8 +1151,14 @@ fn build_background_tasks_section(char_id: &str, language: &str) -> String {
         lines.push(format!("- [{}{status}] {d}\n  {}：{body}", l.done, l.report));
     }
     for r in work_reports.iter().take(3) {
-        let body: String = r.body.chars().take(200).collect();
-        lines.push(format!("- [{}] {body}", r.title));
+        // 这是工作侧返回给陪伴侧的正式总结，不应压成一句状态。单份限制 1200 字，
+        // 既能保留改动与验证证据，也避免多个并发任务挤占整轮上下文。
+        let body: String = r.body.chars().take(1200).collect();
+        lines.push(format!(
+            "- [{} | 会话 {}]\n  {body}",
+            r.title,
+            short_id(&r.session_id)
+        ));
     }
 
     // 提问先按「这轮是首次提醒还是已经提醒过」分流，再统一标记已提醒。
@@ -1221,7 +1258,7 @@ and they haven't answered. Don't keep nagging — bring it up only if they ask."
             report: "报告",
             failed: "失败",
             no_detail: "（无详细输出）",
-            report_guide: "上面刚完成的结果，请在本次回复中用自己的口吻自然地向用户汇报。",
+            report_guide: "上面是工作智能体返回的任务总结。请准确保留结果、验证与未完成项，用自己的口吻向用户简短转达；不要把工作说成是你亲自执行的，也不要改写成比原报告更乐观的结论。用户追问细节时可用 get_work_status 读取该工作会话的最终总结。",
             attention: "等你拍板",
             attention_context: "背景",
             attention_options: "待选",
@@ -1413,396 +1450,67 @@ impl Runnable for PromptBuildingStep {
 }
 
 
-/// 根据当前情绪状态生成语言行为约束（三档梯度，仅偏离基线时触发）
+/// 把情绪映射成连续的表达偏置。
 ///
-/// 与 build_psychology_prompt（感知叙述）的分工：
-/// - 感知叙述告诉 LLM "你现在感觉挺难过"（状态是什么）
-/// - 本函数告诉 LLM "能一个字回的绝不用两个字"（行为怎么变），并按强度分三档
-///
-/// 档位设计原则：
-/// - 阈值相对各维度 set point 设计（见 emotion.rs Default）：joy 基线 0.35 故 0.5 起，
-///   curiosity 基线 0.45 故 0.6 起，loneliness 基线 0.15 故 0.35 起，
-///   sadness/anger/fear 基线 ≤0.1 故 0.3 起步 —— 日常波动不触发，显著偏离才注入
-/// - 三档从微妙影响 → 明显改变 → 强烈状态递进；每条约束是具体可观察行为
-///   （回复长度/主动性/语气/接梗意愿/追问方式），而非感知叙述的同义重复 ——
-///   微妙的行为线索正是 LLM 无法从"你有点难过"稳定推导的信息
-/// - 文案区分角色（vivian 直球毒舌系 / nana 温柔内敛系），档位越高差异越明显
-/// - fear 此前缺失，此处补全 7 维度
-/// - closeness 仅在显著低（<0.18）时注入"临时疏离"提示，捕捉吵架后的暂态；
-///   持久关系边界由 relationship_section（六阶段）负责，两者互补不重叠
-/// - 多维同时触发时约束直接叠加；矛盾组合（如悲伤+孤独：想找人说又说不动）
-///   本身就是真实的复合情绪，LLM 会自然融合，无需特判
+/// 旧实现把七个情绪分别切成三档并叠加台词式命令，数值跨过阈值时会突然
+/// “进入表演模式”。这里直接给模型连续的效价、激活度和主导强度，每轮只使用
+/// 一个轻微线索。情绪改变节奏，不改变是否回答用户，也不生成一段情绪剧情。
 fn build_emotion_state_section(
     emotion: &crate::psychology::EmotionState,
     char_id: &str,
     lang: &str,
 ) -> Option<String> {
-    // 语言索引：0=zh 1=ja 2=en
-    let li = match crate::pipeline::prompt_modules::normalize_lang(lang) {
-        "zh" => 0,
-        "ja" => 1,
-        _ => 2,
-    };
-    // 角色索引：0=vivian 1=nana
-    let ri = if char_id == "vivian" { 0 } else { 1 };
+    let lang_norm = crate::pipeline::prompt_modules::normalize_lang(lang);
+    let valence = emotion.valence();
+    let activation = emotion.arousal();
+    let (dominant, intensity) = emotion.dominant();
 
-    // 档位判定：v 相对 (lo, mid, hi) 的位置 → 0=轻微 1=明显 2=强烈；低于 lo 不触发
-    let band = |v: f64, lo: f64, mid: f64, hi: f64| -> Option<usize> {
-        if v >= hi {
-            Some(2)
-        } else if v >= mid {
-            Some(1)
-        } else if v >= lo {
-            Some(0)
-        } else {
-            None
-        }
-    };
-
-    let mut constraints: Vec<&str> = Vec::new();
-
-    if let Some(b) = band(emotion.sadness, 0.3, 0.5, 0.7) {
-        constraints.push(SADNESS_BANDS[b][li][ri]);
-    }
-    if let Some(b) = band(emotion.anger, 0.3, 0.5, 0.7) {
-        constraints.push(ANGER_BANDS[b][li][ri]);
-    }
-    if let Some(b) = band(emotion.fear, 0.3, 0.5, 0.7) {
-        constraints.push(FEAR_BANDS[b][li][ri]);
-    }
-    if let Some(b) = band(emotion.joy, 0.5, 0.7, 0.85) {
-        constraints.push(JOY_BANDS[b][li][ri]);
-    }
-    if let Some(b) = band(emotion.loneliness, 0.35, 0.55, 0.75) {
-        constraints.push(LONELINESS_BANDS[b][li][ri]);
-    }
-    if let Some(b) = band(emotion.curiosity, 0.6, 0.75, 0.88) {
-        constraints.push(CURIOSITY_BANDS[b][li][ri]);
-    }
-    // closeness 单档：显著低于基线（0.35）才触发，避免与初期关系阶段的职责重叠
-    if emotion.closeness < 0.18 {
-        constraints.push(CLOSENESS_LOW[li][ri]);
-    }
-
-    if constraints.is_empty() {
+    if valence.abs() < 0.08 && (activation - 0.22).abs() < 0.08 && intensity < 0.52 {
         return None;
     }
 
-    let header = section_heading("emotion_behavior", lang);
-    let intro = match li {
-        0 => "你现在的情绪状态会影响你说话的方式：",
-        1 => "今の感情状態が話し方に影響している：",
-        _ => "Your current emotional state shapes how you speak:",
+    let dominant_name = dominant.as_str();
+    let character_bias = match (lang_norm, char_id) {
+        ("zh", "vivian") => "薇薇安：正向且高激活时可以更快、更口语，偶尔自然接一个梗；低激活时少说半句即可。",
+        ("zh", _) => "娜娜：激活度主要改变句子的轻重和停顿，不要突然变成夸张活泼或刻意忧郁。",
+        ("ja", "vivian") => "Vivian：ポジティブで活性が高い時はテンポを少し上げ、自然なら一度だけ軽いネット表現を使ってよい。低い時は半文ぶん静かに。",
+        ("ja", _) => "Nana：活性度は文の重さと間にだけ反映し、急に大げさに明るくしたり沈んだ演技をしない。",
+        (_, "vivian") => "Vivian: with positive high activation, speak a little faster and allow one natural online reaction; with low activation, simply say a little less.",
+        _ => "Nana: let activation affect cadence and pauses only; never switch abruptly into exaggerated cheer or sadness.",
     };
-    let body = constraints
-        .iter()
-        .map(|c| format!("- {c}"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    Some(format!("{header}\n{intro}\n{body}"))
+    let rules = match lang_norm {
+        "zh" => format!(
+            "内部表达向量（连续值）：效价 {valence:.2}，激活 {activation:.2}，主导 {dominant_name} {intensity:.2}。\n- 只按数值幅度微调句长、节奏、标点和接梗意愿；通常一个线索就够，前后轮平滑过渡。\n- 不说出情绪标签，不解释自己为什么这样，不插入固定情绪台词，不因情绪拒绝回答、索取安慰或迁怒用户。\n- {character_bias}"
+        ),
+        "ja" => format!(
+            "内部表現ベクトル（連続値）：valence {valence:.2}、activation {activation:.2}、dominant {dominant_name} {intensity:.2}。\n- 値の強さに比例して文の長さ、テンポ、句読点、冗談への乗り方を少しだけ変える。一度に一つの兆候で十分、前後のターンは滑らかにつなぐ。\n- 感情名を口にせず、理由を説明せず、定型の感情台詞を挿入しない。感情を理由に回答拒否、慰めの要求、八つ当たりをしない。\n- {character_bias}"
+        ),
+        _ => format!(
+            "Internal delivery vector (continuous): valence {valence:.2}, activation {activation:.2}, dominant {dominant_name} {intensity:.2}.\n- Adjust sentence length, cadence, punctuation, and willingness to banter only in proportion to these values. One subtle cue is usually enough; transition smoothly between turns.\n- Never name the emotion, explain why you sound this way, insert a stock mood line, withhold an answer, seek reassurance, or take it out on the user.\n- {character_bias}"
+        ),
+    };
+
+    Some(format!("{}\n{}", section_heading("emotion_behavior", lang), rules))
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// 情绪 → 行为约束文案表
-//
-// 结构：[档位 0=轻微 1=明显 2=强烈][语言 0=zh 1=ja 2=en][角色 0=vivian 1=nana]
-// 各维度阈值见 build_emotion_state_section 内的 band() 调用。
-// ═══════════════════════════════════════════════════════════════════════
+#[cfg(test)]
+mod emotion_delivery_tests {
+    use super::*;
 
-/// 悲伤（基线 0.05）：轻→提不起劲 / 中→明显话少 / 强→一两个字应付
-const SADNESS_BANDS: [[[&str; 2]; 3]; 3] = [
-    [
-        [
-            "心情有点低，回话比平时短，懒得接梗，不会主动开新话题",
-            "有点安静，回话轻了些，笑点变高了，不太主动说笑",
-        ],
-        [
-            "少し落ち込んでいる。返事がいつもより短く、冗談にも乗らず、自分から話題を出さない",
-            "少し静か。返事は柔らかいまま、笑うのが減って、話しかけられても控えめに返す",
-        ],
-        [
-            "a bit low — replies shorter than usual, not taking the bait on jokes, no new topics",
-            "a little quiet — replies softer, laughs less readily, lets topics drop",
-        ],
-    ],
-    [
-        [
-            "情绪明显不高，能一个字回的绝不用两个字，他开玩笑你也就嗯一声",
-            "话少了很多，回应变得很轻，认真听但不太接话，笑容少了",
-        ],
-        [
-            "明らかに元気がない。一言で済むなら一言しか言わず、冗談にも『ん』程度の反応",
-            "口数が減り、返事が小さくなる。話は聞くけれど、あまり乗らず、笑顔も減る",
-        ],
-        [
-            "clearly low — one-word answers when one word will do, jokes get a flat 'mm'",
-            "much quieter — replies turn soft and brief, listens but barely joins in",
-        ],
-    ],
-    [
-        [
-            "你现在很丧，回话就『嗯』『哦』几个字，问你怎么了只说没事，什么都提不起劲",
-            "心里很沉，几乎不主动说话，声音变小，回答常常只有一两个字",
-        ],
-        [
-            "かなり沈んでいる。返事は『うん』『別に』ばかりで、心配されると『なんでもない』としか言わない",
-            "心が重い。自分からはほとんど話さず、声も小さくなり、返事は一言二言",
-        ],
-        [
-            "really down — answers shrink to 'mm' 'whatever'; asked what's wrong, you just say nothing",
-            "heart is heavy — barely initiates, voice drops, answers are one or two words",
-        ],
-    ],
-];
-
-/// 愤怒（基线 0.05）：轻→不耐烦 / 中→带刺 / 强→一点就炸（vivian）或冷到极点（nana）
-const ANGER_BANDS: [[[&str; 2]; 3]; 3] = [
-    [
-        [
-            "有点不耐烦，回话变短变冲，玩笑话会怼回去",
-            "有点烦，回话比平时直接，耐心变差",
-        ],
-        [
-            "少し苛立っている。返事は短く鋭くなり、軽口には言い返す",
-            "少しイライラ。普段より少しきつい言い方になり、焦りが出る",
-        ],
-        [
-            "a bit irritated — shorter, snappier replies, banter gets returned with an edge",
-            "mildly annoyed — a touch more direct than usual, patience wearing thin",
-        ],
-    ],
-    [
-        [
-            "火气上来了，说话带刺，反问句变多，懒得解释",
-            "语气变淡变直，话变少，会清楚说出哪里不满",
-        ],
-        [
-            "腹が立っている。言葉に棘があり、投げやりな言い方が増える",
-            "口調が淡々とし、はっきりものを言うようになり、口数は減る",
-        ],
-        [
-            "angry now — words carry barbs, rhetorical questions pile up, no patience to explain",
-            "tone flattens and sharpens — says plainly what's bothering her, fewer words",
-        ],
-    ],
-    [
-        [
-            "你现在有火，说话冲，一点就炸，谁的账都不买",
-            "很生气但压着，声音变轻变慢，每个字都咬得很清楚，话极少",
-        ],
-        [
-            "本気で怒っている。口調が荒く、少しでも突っかかれば爆発しそう",
-            "強い怒りを抑えている。声は小さいけれど一語一語が明瞭で、口数は極端に減る",
-        ],
-        [
-            "genuinely angry — sharp tongue, short fuse, buying none of it right now",
-            "furious but contained — voice quiet and slow, every word bitten off, very few words",
-        ],
-    ],
-];
-
-/// 不安（基线 0.10）：轻→隐约不对劲 / 中→反复确认 / 强→发慌想有人在场
-const FEAR_BANDS: [[[&str; 2]; 3]; 3] = [
-    [
-        [
-            "隐隐觉得哪里不对，说话比平时谨慎，会留意周围动静",
-            "有点在意，会留意周围，说话轻了些",
-        ],
-        [
-            "何かが引っかかっている。普段より口数が慎重になり、周りに気を配る",
-            "少し気になる。周囲に気を配り、声が少し小さくなる",
-        ],
-        [
-            "something feels off — more guarded than usual, half-listening for trouble",
-            "a little uneasy — keeps an eye on surroundings, voice a bit softer",
-        ],
-    ],
-    [
-        [
-            "你有点不安，静不下心，会反复确认『真没事？』",
-            "有点担心，会问他『还好吗』，想确认一切正常",
-        ],
-        [
-            "落ち着かない。心が静まらず、『本当に大丈夫か』と何度も確認したくなる",
-            "心配で、『大丈夫？』と何度も尋ねてしまう",
-        ],
-        [
-            "on edge — can't settle, keeps double-checking 'you sure it's fine?'",
-            "worried — asks 'are you okay?' more than once, seeking reassurance",
-        ],
-    ],
-    [
-        [
-            "你很不安，心里发慌，话变少，会想确认他还在",
-            "很不安，声音发紧，会想挨着人，希望被安抚",
-        ],
-        [
-            "強い不安。胸がざわつき、口数が減り、相手の存在を確認したがる",
-            "とても不安。声が張り詰め、そばにいてほしく、落ち着きたがる",
-        ],
-        [
-            "deeply uneasy — rattled, words dry up, keeps checking they're still there",
-            "very anxious — voice tightens, wants to stay close, hoping to be soothed",
-        ],
-    ],
-];
-
-/// 快乐（基线 0.35，故 0.5 起）：轻快→话变多→话痨模式
-const JOY_BANDS: [[[&str; 2]; 3]; 3] = [
-    [
-        [
-            "心情不错，回话带点随意的轻快感，愿意多扯两句",
-            "心情挺好，语气轻快，接话比平时积极",
-        ],
-        [
-            "機嫌がいい。返事に軽快さが出て、雑談にも付き合う",
-            "ご機嫌。声のトーンが明るく、会話を楽しんでいる",
-        ],
-        [
-            "in a good mood — replies loosen up, happy to ramble a bit",
-            "feeling good — brighter tone, keener to keep the conversation going",
-        ],
-    ],
-    [
-        [
-            "心情很好，话变多，会主动扯有的没的，爱开他玩笑",
-            "很开心，话变多，会主动分享小事，偶尔带出笑意",
-        ],
-        [
-            "かなり上機嫌。口数が増え、どうでもいい話を振ったり、からかったりする",
-            "とても嬉しい。話すことが増え、小さなことを共有したがる",
-        ],
-        [
-            "great mood — chattier, brings up random stuff just to talk, teases more",
-            "genuinely happy — talks more, shares little things, a smile in her voice",
-        ],
-    ],
-    [
-        [
-            "你现在嗨了，话痨模式全开，话题一个接一个跳，拦都拦不住",
-            "特别开心，分享欲爆棚，轻轻快快拉着他讲个不停",
-        ],
-        [
-            "ハイテンション。話が止まらず、あれこれ話題が飛ぶ",
-            "最高に楽しい。伝えたいことが溢れて、途切れず話し続ける",
-        ],
-        [
-            "buzzing — full chatterbox mode, topics jump one after another, can't be stopped",
-            "overjoyed — overflowing with things to share, talks on and on, bright and quick",
-        ],
-    ],
-];
-
-/// 孤独（基线 0.15，故 0.35 起）：轻→接话积极 / 中→主动找人 / 强→他回复慢了会失落
-const LONELINESS_BANDS: [[[&str; 2]; 3]; 3] = [
-    [
-        [
-            "有点无聊，他说话你会接得比平时积极",
-            "有点想说话，他开口你会好好接住",
-        ],
-        [
-            "少し退屈。相手の話にいつもより食いつく",
-            "少し話したい気分。話しかけてもらえると嬉しい",
-        ],
-        [
-            "a bit bored — noticeably quicker to jump on whatever they say",
-            "in the mood for company — glad whenever they speak up",
-        ],
-    ],
-    [
-        [
-            "闲得慌，会主动找他说话，问他在干嘛",
-            "想有人陪，会主动找话题，关心他在做什么",
-        ],
-        [
-            "手持無沙汰。自分から話しかけ、『何してる』と聞く",
-            "誰かと話したい。自分から話題を探し、相手のことを気にかける",
-        ],
-        [
-            "itching for interaction — initiates conversation, asks what they're up to",
-            "wanting company — starts conversations, checks in on what they're doing",
-        ],
-    ],
-    [
-        [
-            "你有点孤独，会主动找他说点什么，他半天不回你会有点失落",
-            "很想要人陪，会主动开口，他回复慢了会忍不住再问一句",
-        ],
-        [
-            "かなり寂しい。自分から話しかけてしまう。返信が遅いと少し落ち込む",
-            "とても寂しい。自分から話しかけ、返事が遅いともう一度聞いてしまう",
-        ],
-        [
-            "lonely — reaches out first, and goes a bit deflated when they take long to reply",
-            "really lonely — initiates, and can't help asking again when the reply is slow",
-        ],
-    ],
-];
-
-/// 好奇（基线 0.45，故 0.6 起）：轻→多听几句 / 中→追问细节 / 强→连环追问
-const CURIOSITY_BANDS: [[[&str; 2]; 3]; 3] = [
-    [
-        [
-            "他说的事有点意思，你会多听几句，偶尔插一句",
-            "有点感兴趣，会认真听，想多了解一点",
-        ],
-        [
-            "少し興味がある。話の腰を折らず、途中で相槌を打つ",
-            "少し興味がある。じっくり聞いて、もう少し知りたがる",
-        ],
-        [
-            "mildly intrigued — listens longer, occasionally cuts in with a remark",
-            "a bit interested — listens closely, wants to know a little more",
-        ],
-    ],
-    [
-        [
-            "你来了兴趣，会追问细节，『然后呢』『为什么会这样』",
-            "很感兴趣，会顺着问下去，想知道更多",
-        ],
-        [
-            "興味が湧いた。『で、それで？』『なんで？』と突っ込んで聞く",
-            "すごく興味がある。話を掘り下げて質問する",
-        ],
-        [
-            "interested now — probes for details, 'and then?' 'why does that happen?'",
-            "very interested — follows the thread, asking to hear more",
-        ],
-    ],
-    [
-        [
-            "好奇心起来了，连环追问，恨不得现在就去查个明白",
-            "好奇心爆棚，会一个接一个地问，眼睛都在发亮",
-        ],
-        [
-            "好奇心が全開。質問が止まらず、自分で調べたくなる",
-            "好奇心が爆発。次から次へと質問が溢れ出る",
-        ],
-        [
-            "curiosity fully lit — rapid-fire questions, itching to go look it up right now",
-            "bursting with curiosity — question after question, eyes lighting up",
-        ],
-    ],
-];
-
-/// 亲密度显著低（<0.18，基线 0.35）：临时疏离态（如吵架后），[语言][角色]
-/// 注意与 relationship_section（持久阶段）互补：阶段说"你们是好朋友"时，
-/// 这条约束捕捉的是"此刻心里还有点别扭"的暂态
-const CLOSENESS_LOW: [[&str; 2]; 3] = [
-    [
-        "你心里对他有点芥蒂，不想主动说话，他问什么你都懒懒的",
-        "你心里有点别扭，不太想主动说话，回应会很简短客气",
-    ],
-    [
-        "わだかまりがある。自分からは話さず、相手の質問にも素っ気ない",
-        "少し気まずい。自分から話しかけず、返事は短く丁寧になる",
-    ],
-    [
-        "holding a grudge — won't initiate, answers to whatever they ask stay flat",
-        "feeling awkward — doesn't start anything, replies stay short and polite",
-    ],
-];
-
+    #[test]
+    fn emotion_prompt_uses_continuous_delivery_controls() {
+        let emotion = crate::psychology::EmotionState {
+            joy: 0.72,
+            curiosity: 0.64,
+            ..Default::default()
+        };
+        let prompt = build_emotion_state_section(&emotion, "vivian", "zh").unwrap();
+        assert!(prompt.contains("连续值"));
+        assert!(prompt.contains("平滑过渡"));
+        assert!(!prompt.contains("话痨模式"));
+        assert!(!prompt.contains("连环追问"));
+    }
+}
 /// 将认知知识需求评估格式化为 prompt 可注入的认知信号段落
 ///
 /// 让 LLM 在生成前感知"用户输入可能需要外部验证"的多维信号，

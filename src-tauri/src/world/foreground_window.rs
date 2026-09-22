@@ -139,6 +139,34 @@ impl Drop for ForegroundEventGuard {
 }
 
 #[cfg(windows)]
+impl ForegroundEventGuard {
+    /// 钩子线程是否仍在运行（`GetMessageW` 循环尚未退出）。
+    fn is_alive(&self) -> bool {
+        self.thread.as_ref().is_some_and(|t| !t.is_finished())
+    }
+}
+
+/// 判断前台钩子是否需要（重）安装。
+///
+/// 钩子健康时应长期持有同一个 guard，**不要周期性卸载重装**——重装间隙
+/// （`UnhookWinEvent` → `SetWinEventHook`）会丢掉期间的前台切换事件。
+///
+/// 返回 `true` 表示「需要重装」：guard 缺失，或钩子线程已退出。
+/// 非 Windows 平台不安装钩子，恒返回 `true`（调用方走退避重试分支）。
+#[cfg(windows)]
+pub fn foreground_hook_needs_install(guard: &Option<ForegroundEventGuard>) -> bool {
+    match guard {
+        Some(g) => !g.is_alive(),
+        None => true,
+    }
+}
+
+#[cfg(not(windows))]
+pub fn foreground_hook_needs_install(_guard: &Option<()>) -> bool {
+    true
+}
+
+#[cfg(windows)]
 static FOREGROUND_NOTIFY: std::sync::OnceLock<Arc<tokio::sync::Notify>> = std::sync::OnceLock::new();
 
 #[cfg(windows)]

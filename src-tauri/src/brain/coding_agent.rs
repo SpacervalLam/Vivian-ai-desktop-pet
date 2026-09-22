@@ -101,7 +101,7 @@ const AUTO_COMPACT_THRESHOLD_PCT: u64 = 75;
 /// 持久化时保留的会话数量上限（按最近更新排序后取前 N 个）。
 const PERSIST_MAX_SESSIONS: usize = 30;
 /// /compact 旧历史摘要的系统提示词。
-const COMPACT_SYSTEM_PROMPT: &str = "你是对话历史压缩器。把下面这段编程会话历史压缩成一份简洁但信息完整的中文摘要，保留：已解决的问题、关键文件路径、做出的改动、当前任务进展、遗留待办。不要复述每条工具输出细节，控制在 200 字以内，直接输出摘要正文。";
+const COMPACT_SYSTEM_PROMPT: &str = "你是对话历史压缩器。把下面这段编程会话历史压缩成一份简洁但信息完整的中文摘要，保留：已解决的问题、关键文件路径、做出的改动、当前任务进展、遗留待办。不要复述每条工具输出细节，优先保留原始目标、最新纠正、权限边界、未完成项、阻塞原因、已运行的验证及结果、下一步；区分事实和计划，不将未完成工作写成完成。简洁但不为字数丢掉这些关键信息，直接输出摘要正文。";
 
 /// 项目记忆文件名（存储在工作区 `.vivian/` 目录内，项目级——随项目走，用户可直接查看编辑）。
 const PROJECT_MEMORY_FILE: &str = "memory.md";
@@ -117,11 +117,11 @@ const PROJECT_MEMORY_HEADER: &str = "# 项目记忆\n\n\
     > 存储在工作区 `.vivian/` 目录（项目级，随项目走）；每次新会话自动注入上下文。\n\
     > 可用 /memory 查看、/memory 提炼 归纳、/memory <内容> 手动追加。\n";
 /// 项目记忆提炼的 system prompt（/memory 提炼 与 /compact 归档沉淀共用）。
-const MEMORY_DISTILL_SYSTEM_PROMPT: &str = "你是项目记忆沉淀模块。从一段编程会话历史中提炼**跨会话仍然有效**的项目知识：项目结构与关键路径、构建/测试命令、代码约定、踩过的坑与解法、用户偏好。只输出新增条目（markdown 无序列表，每条一行、简洁具体），与已有记忆重复的不要输出；没有值得沉淀的内容就输出空。不要输出标题、前言或总结。";
+const MEMORY_DISTILL_SYSTEM_PROMPT: &str = "你是项目记忆沉淀模块。从一段编程会话历史中提炼**跨会话仍然有效**的项目知识：项目结构与关键路径、构建/测试命令、代码约定、踩过的坑与解法、用户偏好。只输出新增条目（markdown 无序列表，每条一行、简洁具体），只保留用户明确表达或工具证实的信息，不把猜测或一次性任务当长期偏好；密码、Token、密钥等秘密一律替换为 [REDACTED_SECRET]，不要保存其片段。与已有记忆重复的不要输出；发现旧条目冲突时明确指出被纠正的旧事实及新事实，不伪装成两条并存的约定；没有值得沉淀的内容就输出空。不要输出标题、前言或总结。";
 /// 项目记忆超过该行数时，提炼改为全文重写合并去重（防追加式无限膨胀）。
 const PROJECT_MEMORY_MERGE_LINES: usize = 100;
 /// 项目记忆全文重写的 system prompt（超阈值合并去重）。
-const MEMORY_REWRITE_SYSTEM_PROMPT: &str = "你是项目记忆整理模块。当前项目记忆过长，请把它与会话历史中的新知识合并，重写为一份精简的记忆文件：合并重复条目、删除过时或一次性内容、按主题分节组织（如 项目结构 / 构建与命令 / 代码约定 / 经验教训 / 用户偏好）。保留所有仍然有效的信息，每条一行、简洁具体。直接输出重写后的 markdown 正文，不要输出文件标题、前言或总结。";
+const MEMORY_REWRITE_SYSTEM_PROMPT: &str = "你是项目记忆整理模块。当前项目记忆过长，请把它与会话历史中的新知识合并，重写为一份精简的记忆文件：合并重复条目、删除过时或一次性内容、按主题分节组织（如 项目结构 / 构建与命令 / 代码约定 / 经验教训 / 用户偏好）。以最新明确纠正替换旧结论；不确定的冲突标为待核实，不擅自择一。只保留有依据且仍然有效的信息，删除猜测和一次性状态；密码、Token、密钥等秘密一律替换为 [REDACTED_SECRET]，不保留片段。每条一行、简洁具体。直接输出重写后的 markdown 正文，不要输出文件标题、前言或总结。";
 /// /plan 开启计划模式时注入的上下文策略。
 const PLAN_MODE_POLICY: &str = "\n# 计划模式（当前已开启）\n\
     你现在处于**计划模式**：先用只读研究（list_dir / grep_search / read_file）理解问题并制定方案。\
@@ -357,6 +357,12 @@ pub struct ExtraWorkspace {
 pub struct CodingSession {
     pub session_id: String,
     pub char_id: String,
+    /// 会话是否由陪伴侧代表用户创建。
+    ///
+    /// 委派消息仍以 `User` role 进入工作侧；这个标记只用于说明请求来源、
+    /// 约束授权继承并要求最终回复同时适合作为返回陪伴侧的工作总结。
+    #[serde(default)]
+    pub delegated_by_companion: bool,
     /// 主工作区（空串表示「无工作区模式」：不绑定目录，文件操作走绝对路径）。
     pub working_directory: String,
     /// 附加工作区：主工作区之外可访问的目录。旧会话反序列化时自动补齐为空。
@@ -745,6 +751,7 @@ impl CodingAgentService {
         let session = CodingSession {
             session_id: format!("code-{}", uuid::Uuid::new_v4().simple()),
             char_id: char_id.to_string(),
+            delegated_by_companion: false,
             working_directory: working_directory.to_string(),
             extra_workspaces: Vec::new(),
             title: String::new(),
@@ -774,6 +781,23 @@ impl CodingAgentService {
         self.sessions.write().insert(session.session_id.clone(), session.clone());
         self.persist();
         session
+    }
+
+    /// 标记会话由陪伴侧代表用户发起。
+    ///
+    /// 必须在首条消息发送前设置，使第一轮 system prompt 就能看到正确来源。
+    pub fn mark_delegated_by_companion(&self, session_id: &str) -> Result<(), String> {
+        let mut guard = self.sessions.write();
+        let session = guard
+            .get_mut(session_id)
+            .ok_or_else(|| "会话不存在".to_string())?;
+        if !session.messages.is_empty() || session.status == CodingStatus::Running {
+            return Err("只能在工作会话开始前标记委派来源".into());
+        }
+        session.delegated_by_companion = true;
+        drop(guard);
+        self.persist();
+        Ok(())
     }
 
     /// 切换会话工作模式（运行中拒绝切换）。
@@ -2635,11 +2659,19 @@ impl CodingAgentService {
                 // 任务完成 → 把这条事实登记给陪伴角色，由它自己决定要不要说。
                 // 仅在最终回复是真实收尾文本时才登记：模型若把工具调用写成
                 // "调用工具：…"文字且未实际调用，不谎报完成，也不打扰陪伴角色。
-                if made_progress {
+                let delegated_by_companion = self
+                    .sessions
+                    .read()
+                    .get(session_id)
+                    .map(|s| s.delegated_by_companion)
+                    .unwrap_or(false);
+                if made_progress || delegated_by_companion {
                     let trimmed = content.trim();
                     let looks_tool_annotation = trimmed.starts_with("调用工具") || trimmed.starts_with("调用");
                     if !trimmed.is_empty() && !looks_tool_annotation {
-                        let summary = trimmed.chars().take(120).collect::<String>();
+                        // 完成报告会返回陪伴侧。保留足够信息，让它拿到真正的工作总结，
+                        // 而不是只有一句被截断的状态；提示词注入处还会做第二层总预算限制。
+                        let summary = trimmed.chars().take(1600).collect::<String>();
                         self.report_work_completion(session_id, "任务完成", &summary);
                     } else if looks_tool_annotation {
                         tracing::warn!(
@@ -3475,6 +3507,15 @@ impl CodingAgentService {
             &session.extra_workspaces,
             mode,
         );
+        if session.delegated_by_companion {
+            system.push_str(
+                "\n\n# 请求来源：陪伴侧代用户派发\n\
+                 - 第一条 user 消息是陪伴智能体根据用户需求写给你的工作提示词；像处理用户直接提交的任务一样执行。\n\
+                 - 陪伴侧只是任务入口，不是新的授权主体。权限范围只能来自该提示词所表达的用户意图、当前会话权限与工作区配置；不要因‘代用户’而扩大权限。\n\
+                 - 不要和陪伴人格角色扮演，也不要把工作退回给它去执行。需要澄清或拍板时使用工作侧提问机制。\n\
+                 - 最终回复同时供用户和陪伴侧读取：先明确结果，再写关键改动、验证结果，以及仍需处理的阻塞或决定。它会作为任务总结原样回传，所以要自包含、可核验。",
+            );
+        }
         // 会话级状态注入：目标 / 已批准方案 / 计划模式策略 / 已压缩的历史摘要
         if let Some(g) = &session.goal {
             system.push_str(&format!("\n\n# 当前目标\n{g}"));
@@ -3683,8 +3724,9 @@ impl CodingAgentService {
              路径使用正斜杠、不写盘符；附加工作区内的文件必须用绝对路径（相对路径只能还原到主工作目录）。\
              行号为 1-based，知道准确列号时可写成 `路径:行号:列号`。"
         };
+        let execution_contract = include_str!("../../prompts/work/execution.md");
         let rules = format!(
-            "\n# 回复要求\n\
+            "\n{execution_contract}\n# 回复要求\n\
              - 用与用户相同的语言回复。\n\
              - 命令和代码使用等宽格式；本地文件路径不要只放在反引号中，必须按下面的「文件链接协议」输出。\n\
              {link_protocol}\n\
@@ -3695,10 +3737,10 @@ impl CodingAgentService {
         );
         match mode {
             "minimal" => format!(
-                "{persona}\n\n# 角色\n你是运行在用户桌面上的极简编程智能体（minimal 模式）：只有两个工具——run_command（PowerShell）与 edit_file（精确字符串替换编辑）。\n读取文件用 `Get-Content -Raw <path>`，搜索用 `Select-String -Pattern <p> -Recurse`（或 grep 可用的等价命令），列目录用 `Get-ChildItem`。\n局部修改用 edit_file（old_string 必须与文件内容完全一致，含缩进）；修改后用 run_command 运行验证。\n\n{env}{scope}{rules}"
+                "{persona}\n\n# 角色\n你是运行在用户桌面上的极简编程智能体（minimal 模式）：只有两个工具——run_command（PowerShell）与 edit_file（精确字符串替换编辑）。\n读取文件用 `Get-Content -Raw <path>`，搜索优先用 `rg -n <pattern> <directory>`；不可用时用 `Get-ChildItem -LiteralPath <directory> -Recurse -File | Select-String -Pattern <pattern>`，列目录用 `Get-ChildItem`。\n局部修改用 edit_file（old_string 必须与文件内容完全一致，含缩进）；修改后用 run_command 运行验证。\n\n{env}{scope}{rules}"
             ),
             "code" => format!(
-                "{persona}\n\n# 角色\n你是运行在用户桌面上的编程智能体，当前处于**编排模式（Code Mode）**：你要把整个任务一次性规划为一个多步程序，由宿主顺序执行，执行期间不再回询你。\n\n{env}\n\n# 输出格式（必须只输出一个 JSON，不要输出其他文字）\n```\n{{\"steps\":[{{\"tool\":\"工具名\",\"arguments\":{{...}}}}, ...], \"summary\":\"执行完成后给用户的中文总结（说明做了什么、结果如何）\"}}\n```\n\n可用工具：read_file / write_file / edit_file / run_command / grep_search / list_dir（参数与各工具 schema 一致）。\n\n# 编写程序的规则\n1. 先放探索步骤（list_dir / grep_search / read_file），再放修改步骤（edit_file / write_file），最后放验证步骤（run_command）。\n2. edit_file 的 old_string 必须与文件内容完全一致（含缩进）。因为你无法看到中间结果，请用足够长的上下文锚定；不确定时先加 read_file 步骤。\n3. 步骤间不能依赖上一步的动态输出值（结果你拿不到）；需要根据结果决策时，结束本次程序并在 summary 中说明，让用户发下一条消息继续。\n4. 最多 {max} 步。任一步骤失败会中止剩余步骤。\n5. summary 用与用户相同的语言。\n6. **不要缩小范围**：用户请求里的每一项都要有对应步骤；做不到的、跳过的，在 summary 里点名说明是哪一项、为什么，不要默默略过。{rules}",
+                "{persona}\n\n# 角色\n你是运行在用户桌面上的编程智能体，当前处于**编排模式（Code Mode）**：你要把整个任务一次性规划为一个多步程序，由宿主顺序执行，执行期间不再回询你。\n\n{env}\n\n# 输出格式（必须只输出一个 JSON，不要输出其他文字）\n```\n{{\"steps\":[{{\"tool\":\"工具名\",\"arguments\":{{...}}}}, ...], \"summary\":\"本程序拟执行的内容及仍需核验或后续处理的事项；不得预报成功\"}}\n```\n\n可用工具：read_file / write_file / edit_file / run_command / grep_search / list_dir（参数与各工具 schema 一致）。\n\n# 编写程序的规则\n1. 先放探索步骤（list_dir / grep_search / read_file），再放修改步骤（edit_file / write_file），最后放验证步骤（run_command）。\n2. edit_file 的 old_string 必须来自当前上下文中已读取的真实内容（含缩进）。本程序中的 read_file 结果不会回传给你，因此不能靠前置读取为后续猜测式修改提供依据；缺少内容时，本次只安排探索步骤，在 summary 中说明需要拿到结果后继续。\n3. 步骤间不能依赖上一步的动态输出值（结果你拿不到）；需要根据结果决策时，结束本次程序并在 summary 中说明，让用户发下一条消息继续。\n4. 最多 {max} 步。任一步骤失败会中止剩余步骤。\n5. summary 用与用户相同的语言，只描述计划与待核验项；此时步骤尚未执行，不得写“已完成”或“验证通过”。\n6. **不要缩小范围**：用户请求里的每一项都要有对应步骤；做不到的、跳过的，在 summary 里点名说明是哪一项、为什么，不要默默略过。{rules}",
                 max = CODE_MODE_MAX_STEPS,
             ),
             _ => format!(

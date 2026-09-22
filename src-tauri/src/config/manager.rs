@@ -534,6 +534,9 @@ pub struct BaseConfig {
     /// 打开笔记本快捷键
     #[serde(default = "default_shortcut_memory")]
     pub shortcut_memory: String,
+    /// 打开 3D 公寓窗口快捷键
+    #[serde(default = "default_shortcut_room")]
+    pub shortcut_room: String,
     /// 开机自动启动（写入当前用户 Windows 启动项）
     #[serde(default = "default_false")]
     pub auto_start: bool,
@@ -569,6 +572,10 @@ fn default_shortcut_settings() -> String {
 
 fn default_shortcut_memory() -> String {
     "CommandOrControl+Shift+N".to_string()
+}
+
+fn default_shortcut_room() -> String {
+    "CommandOrControl+Shift+R".to_string()
 }
 
 fn default_character_model_dir() -> String {
@@ -1577,6 +1584,7 @@ impl Default for AppConfig {
                 shortcut_chat: default_shortcut_chat(),
                 shortcut_settings: default_shortcut_settings(),
                 shortcut_memory: default_shortcut_memory(),
+                shortcut_room: default_shortcut_room(),
                 auto_start: false,
                 user_avatar_path: None,
             },

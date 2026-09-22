@@ -1977,51 +1977,15 @@ export function puddlePatchTexture(): THREE.Texture {
 let _curtain: THREE.Texture | null = null;
 export function curtainTexture(): THREE.Texture {
   if (_curtain) return _curtain;
-  const { canvas, ctx } = makeCanvas(128, 256);
-
-  const g = ctx.createLinearGradient(0, 0, 128, 0);
-  g.addColorStop(0.0, '#cfc7b8');
-  g.addColorStop(0.35, '#f6f2e9');
-  g.addColorStop(0.5, '#ebe5d8');
-  g.addColorStop(0.68, '#f6f2e9');
-  g.addColorStop(1.0, '#cfc7b8');
-  ctx.fillStyle = g;
-  ctx.fillRect(0, 0, 128, 256);
-
-  // 褶皱的竖向明暗
-  ctx.globalAlpha = 0.35;
-  for (let x = 0; x < 128; x += 16) {
-    ctx.fillStyle = 'rgba(150,140,124,0.6)';
-    ctx.fillRect(x, 0, 2, 256);
+  const { canvas, ctx } = makeCanvas(256, 256);
+  ctx.fillStyle='#eee9df';ctx.fillRect(0,0,256,256);
+  // Fine low-contrast linen only: geometric folds supply the shading.
+  const rnd=makeRng(77);
+  for(let i=0;i<256;i+=2){
+    ctx.strokeStyle='rgba(135,124,106,'+(.025+rnd()*.04)+')';ctx.lineWidth=.5;
+    ctx.beginPath();ctx.moveTo(i,0);ctx.lineTo(i,256);ctx.moveTo(0,i);ctx.lineTo(256,i);ctx.stroke();
   }
-  ctx.globalAlpha = 1;
-
-  // 上下压暗，让窗帘有垂坠体积
-  const v = ctx.createLinearGradient(0, 0, 0, 256);
-  v.addColorStop(0, 'rgba(120,110,96,0.35)');
-  v.addColorStop(0.3, 'rgba(120,110,96,0)');
-  v.addColorStop(1, 'rgba(120,110,96,0.28)');
-  ctx.fillStyle = v;
-  ctx.fillRect(0, 0, 128, 256);
-
-  // 亚麻的织纹：横竖交错的细线，替代原先的小碎花。
-  // 碎花会把窗帘变成"图案"，而这里需要的是"材质"。
-  const rnd = makeRng(77);
-  ctx.globalAlpha = 0.16;
-  ctx.strokeStyle = '#a89e8c';
-  ctx.lineWidth = 1;
-  for (let i = 0; i < 42; i++) {
-    const y = rnd() * 256;
-    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(128, y); ctx.stroke();
-  }
-  for (let i = 0; i < 26; i++) {
-    const x = rnd() * 128;
-    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, 256); ctx.stroke();
-  }
-  ctx.globalAlpha = 1;
-
-  _curtain = toTexture(canvas, [1, 1]);
-  return _curtain;
+  _curtain=toTexture(canvas,[1,1]);return _curtain;
 }
 
 /* ---------------- 墙上装饰画：低饱和抽象风景 ---------------- */
@@ -2990,4 +2954,49 @@ export function jpBathTileTexture(): THREE.Texture {
   ctx.putImageData(img, 0, 0);
   _jpBathTile = toTexture(canvas, [2, 2]);
   return _jpBathTile;
+}
+
+let _doorGrain: THREE.Texture | null = null;
+
+/**
+ * 门面竖向细纹（程序化，白底）。
+ *
+ * 门是整栋楼里最大的一块"平色立面"（0.9×2.2）。纯色 toon 材质在暖光下读起来
+ * 就是一张纸——看不出它是金属/木质门扇，门与墙还会因为明度接近而糊成一片。
+ *
+ * 关键在**白底**：纹理靠材质自身的 color 相乘上色，白底保证门色不被整体拉暗，
+ * 只有纹理线参与调制，于是同一张图能喂给三档门色而不必各画一张。
+ * 纹路是竖直的走丝 + 细颗粒，不是木纹照片——日式动画背景本来就偏手绘平涂，
+ * 照片级木纹反而会跳出风格。
+ *
+ * 128×256 对应门扇 1:2 的比例，一个面铺一次、不重复，避免"贴瓷砖"的观感。
+ */
+export function doorGrainMap(): THREE.Texture {
+  if (_doorGrain) return _doorGrain;
+  const W = 128, H = 256;
+  const canvas = document.createElement('canvas');
+  canvas.width = W; canvas.height = H;
+  const ctx = canvas.getContext('2d')!;
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, W, H);
+  let seed = 0x9e3779b9;
+  const rng = () => { seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; return seed / 4294967296; };
+  // 竖向走丝：粗细不等的暗线。alpha 全部压在 0.06 以下——纹理是"近看有质感、
+  // 远看仍是整块色"的东西，对比一高，外廊上一排门就会读成一块块花板。
+  for (let i = 0; i < 110; i++) {
+    ctx.fillStyle = `rgba(34,28,22,${(0.015 + rng() * 0.045).toFixed(3)})`;
+    ctx.fillRect(rng() * W, 0, 0.5 + rng() * 2.0, H);
+  }
+  // 亮线：让纹理不是单向压暗，带一点"被灯扫过"的层次
+  for (let i = 0; i < 30; i++) {
+    ctx.fillStyle = `rgba(255,255,255,${(0.05 + rng() * 0.07).toFixed(3)})`;
+    ctx.fillRect(rng() * W, 0, 0.5 + rng() * 1.2, H);
+  }
+  // 细颗粒：消掉平色的塑料感
+  for (let i = 0; i < 1500; i++) {
+    ctx.fillStyle = `rgba(46,38,30,${(0.015 + rng() * 0.03).toFixed(3)})`;
+    ctx.fillRect(rng() * W, rng() * H, 1, 1 + rng() * 2);
+  }
+  _doorGrain = toTexture(canvas, [1, 1]);
+  return _doorGrain;
 }

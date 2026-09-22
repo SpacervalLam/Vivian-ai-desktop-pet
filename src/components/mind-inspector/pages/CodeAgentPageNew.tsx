@@ -58,6 +58,22 @@ function resolveWorkspacePath(path: string, cwd?: string): string {
 /** 拖拽手柄宽度，与 `.codex-resize-handle` 的 width 保持一致（算右侧栏拖动上限用） */
 const RESIZE_HANDLE_W = 6;
 
+/** 左侧边栏的默认（初始）宽度。改这里会同时影响两处：侧栏的初始值、
+ *  以及右侧栏的拖动上限（见 `WORKSPACE_MIN_W`）—— 所以只定义一次。 */
+const LEFT_DEFAULT_W = 268;
+
+/**
+ * 中央工作区的**最小宽度**，右侧栏拖到多宽都不能把它压得比这个更窄。
+ *
+ * 取值即左侧栏默认宽度（268）：主区域至少要有同样多的地方放得下对话，
+ * 比这更窄就「主区域被挤没了」而非「侧栏占地方」。
+ *
+ * 布局账（`.workbench-root` 是一行 flex）：
+ *   root = 左栏 + 手柄 + 主区域 + 手柄 + 右栏
+ * 所以右栏上限 = root − (左栏 + 手柄×2) − WORKSPACE_MIN_W。
+ */
+const WORKSPACE_MIN_W = LEFT_DEFAULT_W;
+
 /**
  * 消息角色。
  *
@@ -254,6 +270,20 @@ const CHAT_MIN_W = 430;
  * 面板收起时整条留白一起归零，正文立刻回到左右对称的内边距。
  */
 const PINNED_GAP_W = 18;
+
+/**
+ * 输入卡片「太窄就收起来」的阈值 —— 这是一条 CSS 容器查询，
+ * 见 `CodeAgentPage.css` 的 `.codex-composer-inner { container-type: inline-size }`
+ * 与 `@container (max-width: 447px)`。
+ *
+ * 折行边界是卡片自己的属性（实测可用宽 ≥ 410px 才不折行），所以应量卡片自己的可用宽度。
+ * 容器查询量的正是容器内容盒宽度，且结构上不可能有反馈回路：
+ * `container-type: inline-size` 蕴含 `contain: inline-size`，容器行内尺寸与内容无关，
+ * 收起卡片不会反过来改变它的宽度。
+ *
+ * （此前用 JS 阈值判定：同一中栏宽度下消息视图与空状态卡片可用宽差约 60px / 119px，
+ * 单一中栏阈值必然顾此失彼——空状态在 480~540px 间仍露着折行卡片。）
+ */
 
 const MODES: Array<{ key: 'standard' | 'code' | 'minimal'; label: string; hint: string }> = [
   { key: 'standard', label: '标准模式', hint: '功能完整的编码 Agent，支持文件编辑、Shell、文件与网页检索、Skills、计划、目标、子代理和工作流。' },
@@ -3684,7 +3714,7 @@ const CodeAgentPage: React.FC = () => {
   // 左右侧边栏收纳与宽度
   const [leftCollapsed, setLeftCollapsed] = useState(false);
   const [rightCollapsed, setRightCollapsed] = useState(false);
-  const [leftWidth, setLeftWidth] = useState(268);
+  const [leftWidth, setLeftWidth] = useState(LEFT_DEFAULT_W);
   const [rightWidth, setRightWidth] = useState(360);
   /** 工作区根节点：右侧栏拖动上限要按它的实际宽度算（窗口尺寸可变，不能写死） */
   const rootRef = useRef<HTMLDivElement | null>(null);
@@ -3740,8 +3770,9 @@ const CodeAgentPage: React.FC = () => {
    *
    * 滚动条长在 `.codex-chat` 的右边缘，而置顶摘要要贴在它**左边**（用户要求
    * 「滑动条在卡片右侧」），所以面板的 `right` 必须正好等于这条滚动条的宽度。
-   * 不写死数值：主题里同时有 `scrollbar-width: thin` 与 `::-webkit-scrollbar{width:10px}`，
-   * 实际取值由 Chromium 决定，还会随 DPI / 系统设置变。配合 `.codex-chat` 的
+   * 不写死数值：宽度由 `::-webkit-scrollbar { width: 12px }` 决定，但**只有
+   * 不声明 `scrollbar-width` 时才生效**（一声明 Chromium 就改用原生滚动条，
+   * 宽度会跳到 15px 左右），还会随 DPI / 系统设置变。配合 `.codex-chat` 的
    * `scrollbar-gutter: stable`（无论有没有溢出都预留），这个差值恒等于滚动条宽度。
    */
   const [scrollbarW, setScrollbarW] = useState(0);
@@ -3769,6 +3800,13 @@ const CodeAgentPage: React.FC = () => {
     const spare = mainBodyW - CHAT_MIN_W;
     return Math.max(PINNED_W_MIN, Math.min(PINNED_W_IDEAL, spare));
   }, [mainBodyW]);
+
+  /**
+   * 「输入卡片过窄就收起来」的判据不在这里，在 CSS —— 见文件顶部那段注释，
+   * 以及 `CodeAgentPage.css` 的 `@container (max-width: 447px)`。
+   * 这里不需要任何状态：容器查询量的是输入槽自己的可用宽度，消息视图与空状态
+   * 各按各的算，天然正确。
+   */
 
   // 会话列表视图
   const [sessionView, setSessionView] = useState<'workspace' | 'flat'>('workspace');
@@ -3952,15 +3990,20 @@ const CodeAgentPage: React.FC = () => {
   /**
    * 右侧检查器的拖动上限。
    *
-   * 不设固定像素上限 —— 用户可以一路拉到把中央对话区挤没，也就是「全屏」。
-   * 唯一的硬边界是工作区自身宽度减去左侧栏与两条 6px 手柄：再往右拖，aside 只会
-   * 溢出被 `.workbench-root` 的 overflow:hidden 裁掉，观感上像卡住了，不如提前夹住。
+   * 有**两个**边界，取小的那个：
+   *   1. 工作区自身宽度减去左侧栏与两条 6px 手柄 —— 再往右拖，aside 只会溢出被
+   *      `.workbench-root` 的 overflow:hidden 裁掉，观感上像卡住了，不如提前夹住。
+   *   2. 再给中央工作区留出 `WORKSPACE_MIN_W` —— 右栏不能把主区域压得比
+   *      「一个默认宽度的左侧栏」还窄（见该常量的说明）。
+   *
+   * 外层的 `Math.max(260, …)` 是窗口实在太窄时的兜底：那时两条约束都满足不了，
+   * 至少保住右栏自己的最小可用宽度（与 `onMove` 里的下限同一个数）。
    */
   const maxRightWidth = useCallback(() => {
     const root = rootRef.current;
     if (!root) return Number.MAX_SAFE_INTEGER;
     const leftOccupied = (leftCollapsed ? 54 : leftWidth) + RESIZE_HANDLE_W * 2;
-    return Math.max(260, root.clientWidth - leftOccupied);
+    return Math.max(260, root.clientWidth - leftOccupied - WORKSPACE_MIN_W);
   }, [leftCollapsed, leftWidth]);
 
   const startResize = useCallback((e: React.MouseEvent, side: 'left' | 'right') => {
@@ -3999,11 +4042,23 @@ const CodeAgentPage: React.FC = () => {
     };
   }, []);
 
-  // 窗口变小后，之前拉出来的宽度可能已经超过工作区：收回来，否则 aside 会被裁掉一截
+  /**
+   * 约束一变，就把已经拉出来的宽度收回去。
+   *
+   * 光在拖动那一刻夹住还不够 —— `rightWidth` 是存下来的状态，之后有三种情况会让
+   * 它变得不合法：窗口变小、**左侧栏被拖宽**、左侧栏展开 / 收起。
+   * 尤其第二条：右栏先拉到上限、再把左栏拖宽，主区域照样会被压过
+   * `WORKSPACE_MIN_W` —— 那就等于「保证」没兑现。
+   *
+   * 依赖 `maxRightWidth` 本身（它只在 `leftCollapsed` / `leftWidth` 变时才换新），
+   * 于是这几件事都会触发重新夹一次，不必逐个列依赖。
+   * 夹完若值没变，`setState` 会 bail out，不会多渲染一轮。
+   */
   useEffect(() => {
-    const onResize = () => setRightWidth((w) => Math.min(w, maxRightWidth()));
-    window.addEventListener('resize', onResize);
-    return () => window.removeEventListener('resize', onResize);
+    const clamp = () => setRightWidth((w) => Math.min(w, maxRightWidth()));
+    clamp();
+    window.addEventListener('resize', clamp);
+    return () => window.removeEventListener('resize', clamp);
   }, [maxRightWidth]);
 
   const handleAddTermTab = useCallback(() => {
@@ -5947,7 +6002,16 @@ const CodeAgentPage: React.FC = () => {
                         {defaultWorkspace ? t('mind_inspector.code_hero_sub_default') : t('mind_inspector.code_hero_sub')}
                       </div>
                     </div>
-                    <div style={{ width: '100%', maxWidth: 780 }}>{composer}</div>
+                    {/* 空状态里的输入卡片长在 `.codex-chat` → `.codex-empty` 里面，
+                        比消息视图那张卡**多吃两层左右内边距**（`--codex-chat-pad-x`
+                        + `.codex-empty` 的 20px，实测共约 119px）。同一个中栏宽度下它更窄、
+                        折行得更早 —— 所以隐藏阈值必须挂在「卡片自己能拿到多少宽度」上，
+                        也就是这个槽的宽度。这里复用 `.codex-composer-inner`：它既是消息视图
+                        里的同一个「输入槽」，也带着 `container-type: inline-size` 与
+                        `max-width: 780px`，于是隐藏规则和测度上限都自动跟上。
+                        `width: 100%` 必须留着 —— `.codex-empty` 是 `align-items: center`
+                        的纵向 flex，不给宽度的话子项会收缩成内容宽。 */}
+                    <div className="codex-composer-inner" style={{ width: '100%' }}>{composer}</div>
                   </div>
                 ) : messages.length === 0 ? (
                   <div className="codex-empty">
@@ -5960,7 +6024,9 @@ const CodeAgentPage: React.FC = () => {
                         {activeSession.working_directory || t('mind_inspector.code_no_workspace')}
                       </div>
                     </div>
-                    <div style={{ width: '100%', maxWidth: 780 }}>{composer}</div>
+                    {/* 同上：空会话（hero）这一支的输入槽也走 `.codex-composer-inner`，
+                        过窄时一起被收起来。 */}
+                    <div className="codex-composer-inner" style={{ width: '100%' }}>{composer}</div>
                   </div>
                 ) : (
                   <>
@@ -6138,6 +6204,10 @@ const CodeAgentPage: React.FC = () => {
             />
           </div>
         </div>
+
+        {/* 这里原本有一个「窗口太窄」的提示块，按用户要求去掉了 ——
+            中栏过窄时只把输入卡片收起来（见 `.codex-composer-inner` 的容器查询），
+            界面上不加任何说明文字。 */}
       </main>
 
       <div

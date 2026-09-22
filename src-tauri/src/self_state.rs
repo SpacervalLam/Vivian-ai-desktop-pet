@@ -96,7 +96,7 @@ pub struct SelfStateSnapshot {
     pub current_activity: CurrentActivity,
     /// 今日主动发起次数
     pub proactive_initiated_today: u32,
-    /// 连续被忽略次数
+    /// 连续主动消息未获回应次数（仅用于调度退避）
     pub ignored_count: u32,
     /// 是否处于安静模式
     pub quiet_mode: bool,
@@ -123,7 +123,7 @@ impl SelfStateSnapshot {
     /// 触发条件：
     /// - 安静模式中
     /// - 今日主动次数 ≥ 角色阈值（默认 8 次）
-    /// - 被忽略次数已达安静模式阈值的 80%
+    /// - 主动消息未获回应次数已达安静模式阈值的 80%
     /// - 在场状态为 Rest / Offline
     pub fn should_lay_low(&self) -> bool {
         if self.quiet_mode {
@@ -138,7 +138,7 @@ impl SelfStateSnapshot {
         if self.proactive_initiated_today >= proactive_cap {
             return true;
         }
-        // 被忽略次数接近阈值（80%）
+        // 未回应次数接近阈值（80%）
         let ignored_near_threshold =
             self.ignored_count as f64 >= self.behavior_quiet_mode_threshold as f64 * 0.8;
         if ignored_near_threshold {
@@ -285,9 +285,9 @@ impl SelfStateSnapshot {
         if self.social_satisfaction < 0.3 {
             lines.push(
                 match lang {
-                    "zh" => "今天没怎么聊天——有人陪就好了。",
-                    "ja" => "今日はあまり話していない——誰かと話したい気分。",
-                    _ => "Haven't chatted much today — wouldn't mind some company.",
+                    "zh" => "今天对话不多。安静待着也可以，不必仅因此找话题。",
+                    "ja" => "今日は会話が少ない。静かに過ごしてもよく、それだけで話題を作る必要はない。",
+                    _ => "Conversation has been sparse today. Quiet company is fine; don't start a topic for that reason alone.",
                 }
                 .to_string(),
             );
@@ -304,9 +304,9 @@ impl SelfStateSnapshot {
         if self.social_urge > 0.7 {
             lines.push(
                 match lang {
-                    "zh" => "有点想说点什么。",
-                    "ja" => "何か言いたい気分。",
-                    _ => "Kind of feel like saying something.",
+                    "zh" => "有开口的冲动，但只有出现具体内容时才说。",
+                    "ja" => "話したい気分だが、具体的な内容がある時だけ話す。",
+                    _ => "You feel like speaking, but should do so only when there is something concrete to say.",
                 }
                 .to_string(),
             );
@@ -324,27 +324,17 @@ impl SelfStateSnapshot {
             );
         }
 
-        // Recently ignored — naturally affects willingness
-        if self.ignored_count >= 3 {
+        // Non-response is operational context, never a relationship or emotion claim.
+        if self.ignored_count >= 1 {
             lines.push(
                 match lang {
-                    "zh" => "你连续几次主动搭话都没得到回应，感到受伤和失落。可以停下来安静一会儿，或淡淡表达一下自己的心情。",
-                    "ja" => "何度か話しかけても返事がなく、傷ついて少し寂しい。静かになるか、おとなしく気持ちを伝えよう。",
-                    _ => "Your last few attempts to reach out got no reply. It hurts and you feel lonely. Stop pushing and go quiet for a while, or gently let your feelings show.",
-                }
-                .to_string(),
-            );
-        } else if self.ignored_count >= 1 {
-            lines.push(
-                match lang {
-                    "zh" => "你最后几条消息没被回复，有点被冷落的感觉。可以试探着问一句，但不必一直催。",
-                    "ja" => "最後の数メッセージが返信されず、少し無視された気分。軽く一言試す程度にして、しつこくしないで。",
-                    _ => "Your last couple of messages went unanswered and it stings a little. You can tentatively ask once, but don't keep pushing.",
+                    "zh" => "最近的主动消息没有被接话。把它当作当前时机不合适：不要提起这件事，不要表现委屈或冷淡；没有新的具体内容就保持安静。",
+                    "ja" => "最近の自発メッセージには返事がなかった。今はタイミングが合わないという運用上の信号として扱い、言及せず、傷ついた態度や冷たさを見せない。新しい具体的な内容がなければ静かにする。",
+                    _ => "Recent proactive messages were not engaged with. Treat this only as a timing signal: do not mention it or act hurt or cold; stay quiet unless there is new concrete content.",
                 }
                 .to_string(),
             );
         }
-
         if lines.is_empty() {
             return match lang {
                 "zh" => "## 当下状态\n你在，做着自己的事。".to_string(),

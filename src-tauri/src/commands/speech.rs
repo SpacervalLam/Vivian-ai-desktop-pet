@@ -187,11 +187,11 @@ pub fn parse_polished_text(raw: &str) -> String {
     result.trim().to_string()
 }
 
-/// 注册文字输入快捷键（Vivian/Nana 私聊 + 群发总框）和窗口快捷键（微信/设置/笔记本）
+/// 注册文字输入快捷键（Vivian/Nana 私聊 + 群发总框）和窗口快捷键（微信/设置/笔记本/公寓）
 ///
 /// 在 app setup 时调用一次。文字快捷键通过 AppState.text_shortcuts 跟踪，
 /// 窗口快捷键通过 AppState.window_shortcuts 跟踪，
-/// key 为标识（"vivian"/"nana"/"broadcast" 或 "chat"/"settings"/"memory"），value 为快捷键字符串。
+/// key 为标识（"vivian"/"nana"/"broadcast" 或 "chat"/"settings"/"memory"/"room"），value 为快捷键字符串。
 pub fn register_text_shortcuts(app: AppHandle, state: &Arc<AppState>) {
     let base = state.config.read().get_all().base.clone();
 
@@ -216,10 +216,11 @@ pub fn register_text_shortcuts(app: AppHandle, state: &Arc<AppState>) {
     drop(text_map);
 
     // 窗口快捷键
-    let win_entries: [(&str, &str); 3] = [
+    let win_entries: [(&str, &str); 4] = [
         ("chat", &base.shortcut_chat),
         ("settings", &base.shortcut_settings),
         ("memory", &base.shortcut_memory),
+        ("room", &base.shortcut_room),
     ];
     let mut win_map = state.window_shortcuts.lock();
     for (action, sc) in win_entries {
@@ -276,10 +277,11 @@ pub fn update_text_shortcuts(
     *state.text_shortcuts.lock() = new_text;
 
     // 窗口快捷键
-    let win_entries: [(&str, &str); 3] = [
+    let win_entries: [(&str, &str); 4] = [
         ("chat", &base.shortcut_chat),
         ("settings", &base.shortcut_settings),
         ("memory", &base.shortcut_memory),
+        ("room", &base.shortcut_room),
     ];
     let mut new_win = std::collections::HashMap::new();
     for (action, sc) in win_entries {

@@ -30,6 +30,15 @@ const WS_URL: &str = "wss://openspeech.bytedance.com/api/v3/realtime/dialogue";
 const RESOURCE_ID: &str = "volc.speech.dialog";
 const APP_KEY: &str = "PlgvMymc7f3tQnJ6";
 
+/// 上行音频写队列容量（帧）。
+///
+/// 麦克风以 ~20ms/帧（约 640 字节）恒定速率生产，消费端是 WS 写。
+/// **必须是有界通道**：网络抖动时 `ws_write.send().await` 会阻塞，
+/// 无界队列会以约 32KB/s 无限累积（长时间通话可达百 MB）。
+/// 64 帧 ≈ 1.28s 音频，够吸收抖动；溢出时丢帧而非阻塞采集线程
+/// —— 实时语音丢帧可接受，累积和阻塞都不可接受。
+const AUDIO_WRITER_QUEUE_CAP: usize = 64;
+
 /// 实时通话状态
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -86,7 +95,7 @@ pub struct RealtimeVoiceManager {
     mic_thread: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
     speaker_stop_flag: Arc<AtomicBool>,
     speaker_thread: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
-    ws_writer_tx: Arc<Mutex<Option<mpsc::UnboundedSender<Vec<u8>>>>>,
+    ws_writer_tx: Arc<Mutex<Option<mpsc::Sender<Vec<u8>>>>>,
     audio_out_buffer: Arc<RwLock<VecDeque<f32>>>,
     session_id: Arc<RwLock<String>>,
     dialog_id: Arc<RwLock<String>>,
@@ -352,7 +361,8 @@ impl RealtimeVoiceManager {
         }
 
         // 启动音频采集 + WS 写入循环 + WS 读取循环
-        let (writer_tx, mut writer_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        // 有界通道：满时由生产端 try_send 丢帧，避免网络抖动时无界累积（见常量注释）
+        let (writer_tx, mut writer_rx) = mpsc::channel::<Vec<u8>>(AUDIO_WRITER_QUEUE_CAP);
         let writer_tx_for_capture = writer_tx.clone();
         *self.ws_writer_tx.lock() = Some(writer_tx);
 
@@ -432,7 +442,8 @@ impl RealtimeVoiceManager {
                                                         ClientEvent::ChatRagText,
                                                         serde_json::from_str(&leftover).unwrap_or(serde_json::Value::Null),
                                                     );
-                                                    let _ = tx.send(frame);
+                                                    // 有界通道：满时丢帧，不阻塞 WS 读取循环
+                                                    let _ = tx.try_send(frame);
                                                 }
                                             }
                                         }
@@ -461,7 +472,8 @@ impl RealtimeVoiceManager {
                                                                 ClientEvent::ChatRagText,
                                                                 serde_json::from_str(&rag_payload).unwrap_or(serde_json::Value::Null),
                                                             );
-                                                            let _ = tx.send(frame);
+                                                            // 有界通道：满时丢帧，不阻塞 WS 读取循环
+                                                            let _ = tx.try_send(frame);
                                                         }
                                                     }
                                                     // 本轮已发送，清空上一轮遗留（不再需要）
@@ -564,7 +576,7 @@ impl RealtimeVoiceManager {
         self.speaker_stop_flag.store(true, Ordering::SeqCst);
         *self.last_ai_audio_at.lock() = None;
         if let Some(tx) = self.ws_writer_tx.lock().take() {
-            let _ = tx.send(vec![]); // 唤醒 writer
+            let _ = tx.try_send(vec![]); // 唤醒 writer（队列满时忽略，writer 本就在跑）
         }
         if let Some(handle) = self.mic_thread.lock().take() {
             let _ = handle.join();
@@ -600,7 +612,12 @@ impl RealtimeVoiceManager {
             serde_json::json!({ "content": text }),
         );
         if let Some(tx) = self.ws_writer_tx.lock().as_ref() {
-            tx.send(frame).map_err(|_| VivianError::Speech("WS 写入失败".to_string()))?;
+            tx.try_send(frame).map_err(|e| {
+                VivianError::Speech(match e {
+                    mpsc::error::TrySendError::Full(_) => "WS 写入队列已满".to_string(),
+                    mpsc::error::TrySendError::Closed(_) => "WS 写入通道已关闭".to_string(),
+                })
+            })?;
         }
         Ok(())
     }
@@ -609,7 +626,7 @@ impl RealtimeVoiceManager {
     fn start_mic_capture(
         &self,
         session_id: String,
-        writer_tx: mpsc::UnboundedSender<Vec<u8>>,
+        writer_tx: mpsc::Sender<Vec<u8>>,
     ) -> VivianResult<()> {
         use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
         use cpal::{SampleFormat, SampleRate, StreamConfig};
@@ -691,7 +708,8 @@ impl RealtimeVoiceManager {
                                 bytes.extend_from_slice(&s.to_le_bytes());
                             }
                             let frame = build_audio_frame(&session_id, &bytes);
-                            let _ = writer_tx.send(frame);
+                            // try_send：队列满（网络跟不上）时丢帧，绝不阻塞采集线程
+                            let _ = writer_tx.try_send(frame);
                         }
                     },
                     err_fn,
@@ -723,7 +741,8 @@ impl RealtimeVoiceManager {
                                 bytes.extend_from_slice(&s.to_le_bytes());
                             }
                             let frame = build_audio_frame(&session_id, &bytes);
-                            let _ = writer_tx.send(frame);
+                            // try_send：队列满（网络跟不上）时丢帧，绝不阻塞采集线程
+                            let _ = writer_tx.try_send(frame);
                         }
                     },
                     err_fn,
@@ -755,7 +774,8 @@ impl RealtimeVoiceManager {
                                 bytes.extend_from_slice(&s.to_le_bytes());
                             }
                             let frame = build_audio_frame(&session_id, &bytes);
-                            let _ = writer_tx.send(frame);
+                            // try_send：队列满（网络跟不上）时丢帧，绝不阻塞采集线程
+                            let _ = writer_tx.try_send(frame);
                         }
                     },
                     err_fn,

@@ -20,16 +20,42 @@ import {
   pose,
   prefetchUrls,
   resolveMotion,
+  reversePlayback,
   sheetUrl,
   totalDurationMs,
   type ChibiAnimationSpec,
   type ChibiDirection,
+  type ChibiMotionSpec,
 } from '../chibi/motionRegistry';
 import { planAmbientWalk } from '../chibi/walkPlan';
 import { runSlide } from '../chibi/slideTrack';
+import { runFlee, FLEE_TAKEOVER_HOLD_MS, type FleeEnv } from '../chibi/fleeTrack';
+import type { FleeGeometry } from '../chibi/fleePlan';
+import { TapAngerLedger } from '../chibi/tapAnger';
 import './ChibiPetCanvas.css';
 
 export type ChibiInteraction = 'single_click' | 'double_click' | 'rough_click';
+
+declare global {
+  interface Window {
+    /**
+     * 浏览器验收路由上的逃离位移轨迹（只有 `previewMode` 会写）。
+     *
+     * 预览页没有窗口可移：滑动的时间轴照跑，但采样点不下发给 Tauri 而是记在这里，
+     * 验收脚本据此断言「真的从起点滑到了 `planFlee` 抽出的那个落点」——否则「逃离」
+     * 这件事在浏览器里完全没有可观测面，只能靠姿态反推。
+     */
+    __chibiFleeTrace__?: Array<{ x: number; y: number; t: number }>;
+    /**
+     * 这一趟逃离的**计划落点**（只有 `previewMode` 会写）。
+     *
+     * 仅靠轨迹「有没有动」不够：位移被半路掐死时 `easeInOutCubic` 前段跑得快，采样点照样
+     * 盖住大半距离，弱断言（「至少跑了 320px」）也会绿。记录计划落点，验收才能断言
+     * 「最后一个采样点就是那个落点」——掐死与跑完是两回事。
+     */
+    __chibiFleePlan__?: { fromX: number; fromY: number; toX: number; toY: number; durationMs: number };
+  }
+}
 
 /** 词表里声明过的动作名；pose 状态即动作名，不再单独维护一份枚举。 */
 type ChibiPose = string;
@@ -38,17 +64,32 @@ const WALK_SPEC = animation('walk');
 const TURN_SPEC = animation('turn');
 const BLINK_SPEC = animation('blink');
 const CAST_SPEC = animation('cast');
+const BUSY_IN_SPEC = animation('busy-in');
+const BUSY_LOOP_SPEC = animation('busy-loop');
+const BUSY_IN_FRAMES = Array.from({ length: BUSY_IN_SPEC.frames }, (_, i) => i);
+/** 退场 = 进场倒放：图集里没有单独的「收起手机」素材，倒着播就是收起。 */
+const BUSY_OUT = reversePlayback(BUSY_IN_SPEC);
 const IDLE_SPEC = pose('idle');
 const IDLE_SLOT = IDLE_SPEC.slot;
 
 /**
- * 自主漫步的静息间隔（ms）：一趟走完至少歇这么久再起步。
+ * 是否是忙碌阶段占着舞台的那两个动作（掏出手机 / 看手机）。
  *
- * 上一版是固定 [7s, 12s)、平均每 9.5s 起步一次——间隔只由常数决定、与上下文无关，
- * 于是它既不是对「安静待着」的表达，也不是对「该有动静」的回应，只是节拍器。
- * 现在换成一段足够长的静息期；长距离漫步本身占用更久（时长由距离推），
- * 一趟远路自然把下一次推得更后。
+ * 忙碌在画布上是一段帧序列，但它表达的是 presence 级的**常驻状态**，而不是一次性的表演。
+ * 这个区别在好几处都要用到：按住它不该把表演掐掉、插播的一次性动作播完该回落到它、
+ * 循环推进器也要认识它。集中在一处判断，免得三处各写一份名字比较。
  */
+function isBusyStage(spec: ChibiMotionSpec | null): boolean {
+  return spec?.kind === 'animation'
+    && (spec.name === BUSY_IN_SPEC.name || spec.name === BUSY_LOOP_SPEC.name);
+}
+
+    /**
+     * 自主漫步的静息间隔（ms）：一趟走完至少歇这么久再起步。
+     *
+     * 静息期足够长，且长距离漫步本身占用更久（时长由距离推），一趟远路自然把下一次推得更后，
+     * 避免出现「刚走完又立刻走」的节拍器感。
+     */
 const WALK_REST_MIN_MS = 48_000;
 const WALK_REST_RANGE_MS = 72_000;
 
@@ -65,15 +106,12 @@ const WALK_BLOCKED_RETRY_RANGE_MS = 6_000;
 const WALK_STARTUP_MIN_MS = 10_000;
 const WALK_STARTUP_RANGE_MS = 15_000;
 
-/**
- * 单次漫步的距离区间（px）。
- *
- * 上一版是 [58, 122) 的均匀分布：区间本来就窄，落在屏幕上不管抽到哪一头都像"同一小步"；
- * 而且时长是另一根独立的随机数（[2400, 3300) ms），于是"走 58px"和"走 120px"花一样
- * 的时间——位移与时长脱钩，速度纯随机。现在时长不再是独立随机数，由 walkPlan 按图集
- * 原生步速从距离反推（走多远就花多久），距离本身则在对数尺度上取样（见 walkOnce）：
- * 多数是几步的短挪动，偶尔来一趟横跨半屏的长溜达，不存在"档位"台阶。
- */
+    /**
+     * 单次漫步的距离区间（px），在对数尺度上取样。
+     *
+     * 多数为几步的短挪动，偶尔来一趟横跨半屏的长溜达，不存在「档位」台阶。
+     * 时长由 walkPlan 按图集原生步速从距离反推（走多远就花多久），位移与时长不再脱钩。
+     */
 const WALK_DISTANCE_MIN_PX = 140;
 const WALK_DISTANCE_MAX_PX = 900;
 
@@ -81,24 +119,21 @@ const WALK_DISTANCE_MAX_PX = 900;
 const EDGE_MARGIN_PX = 8;
 
 const TURN_IN_FRAMES = Array.from({ length: TURN_SPEC.frames }, (_, index) => index);
-const TURN_OUT_FRAMES = [...TURN_IN_FRAMES].reverse();
+/** 回身 = 转身倒放（帧与节奏一起倒序）。 */
+const { frames: TURN_OUT_FRAMES, durations: TURN_OUT_DURATIONS } = reversePlayback(TURN_SPEC);
 const BLINK_FRAMES = Array.from({ length: BLINK_SPEC.frames }, (_, index) => index);
-const TURN_OUT_DURATIONS = [...TURN_SPEC.durations].reverse();
 
 const BLINK_MIN_DELAY_MS = 3_200;
 const BLINK_DELAY_RANGE_MS = 4_300;
 /** 双击/单击等交互让动作停留的默认时长。 */
 const POSE_HOLD_MS = 900;
 
-/**
- * 单击（摸头）的反应池：`[动作名, 权重]`，空串代表「这一下不播表情」。
- *
- * 早先是写死的 `happy`——戳十次看十张一样的脸，反馈就退化成按钮了。现在变成一排
- * 「被戳一下」可能有的态度：被摸高兴了、得意、琢磨这是什么、或者懒得理你。权重不等
- * 是刻意的：`happy` 不再是必然，但仍是被摸头最自然的那一个；`smug` 稍多给一点，
- * 因为随机池里最需要的是「和上一次不一样」。空串要占够比例，否则池子退化成
- * 「每次都有表情」——那只是把单调从一张脸换成了四张脸。
- */
+    /**
+     * 单击（摸头）的反应池：`[动作名, 权重]`，空串代表「这一下不播表情」。
+     *
+     * 权重不等是刻意的：`happy` 仍是被摸头最自然的那一个，但不再是必然；`smug` 稍多给一点，
+     * 因为随机池最需要「和上一次不一样」。空串要占够比例，否则池子退化成「每次都有表情」。
+     */
 const TAP_REACTIONS: ReadonlyArray<readonly [string, number]> = [
   ['smug', 4],
   ['think', 3],
@@ -107,20 +142,40 @@ const TAP_REACTIONS: ReadonlyArray<readonly [string, number]> = [
 ];
 
 /**
- * 戳烦了的判定。
+ * 逃离的落点区间（px）。
  *
- * 点击本身不携带力度，能测的只有次数和时间——所以「太频繁」和「太粗暴」不是两套
- * 规则，而是同一个账本上的两种计法：每戳一下记一笔，与上一戳贴得极近（猛戳）再记一笔。
- * 只统计最近 {@link TAP_ANNOY_WINDOW_MS} 内的账，于是慢慢戳永远攒不满，停手就自动清账。
+ * 下限决定「多远才算跑开」：低于它只是原地蹭一下，用户读成「没反应」。
+ * 上限决定「一趟跑多远」：逃离是一口气的冲刺，横跨整个桌面会显得像被瞬移。
  *
- * 攒够 {@link TAP_ANNOY_THRESHOLD} 就生气：清空账本、进入气头上，这期间怎么戳都是生气
- * （每戳一次把气头续期），停手满 {@link TAP_ANNOY_HOLD_MS} 才消气、从零重新攒。
+ * 「多久到位」不在这里——那是 `chibi/fleeTrack` 的 `FLEE_SPEED_PX_PER_MS`：这两条
+ * 讲的是**跑多远**（场地问题），速度讲的是**跑多快**（手感问题），混在一起改起来会打架。
  */
-const TAP_ANNOY_WINDOW_MS = 5_000;
-/** 两戳间隔短于此值即视为「猛戳」，额外记一笔。 */
-const TAP_ROUGH_INTERVAL_MS = 350;
-const TAP_ANNOY_THRESHOLD = 7;
-const TAP_ANNOY_HOLD_MS = 2_500;
+const FLEE_MIN_DISTANCE_PX = 320;
+const FLEE_MAX_DISTANCE_PX = 900;
+
+/**
+ * 生气脸先亮多久再起步（ms）。
+ *
+ * 这不是延迟——生气脸是**当场**切上去的，这一拍只是让它被看见：窗口一动起来，视线就
+ * 跟到位移上去了。先瞪你一眼再窜出去，读起来是「有情绪」而不是「被弹开」。
+ * 400ms ≈ angry 图集的前 4~5 帧，够看清「它生气了」，又不至于让逃离显得拖沓。
+ */
+const FLEE_ANGER_BEAT_MS = 400;
+
+/**
+ * 浏览器 QA 路由（`?view=rig_preview`）里的合成舞台几何。
+ *
+ * 预览页没有窗口也没有显示器，几何读不出来；给一组固定值，落点抽签与滑动时间轴就能在
+ * 浏览器里照常跑完，验收脚本据此断言落点区间与时长。真机不会走到这里。
+ */
+const PREVIEW_FLEE_GEOMETRY: FleeGeometry = {
+  fromX: 120,
+  fromY: 60,
+  windowWidth: 213,
+  monitorX: 0,
+  monitorWidth: 1_280,
+  marginPx: EDGE_MARGIN_PX,
+};
 
 /**
  * 从反应池里按权重抽一个动作名，空串表示这次不播表情。
@@ -143,15 +198,32 @@ const wait = (durationMs: number) => new Promise<void>((resolve) => {
 });
 
 export interface ChibiPetCanvasHandle {
+  /**
+   * 播一个表情/动作多久。
+   *
+   * 图集格位（如 `dizzy`）**必须**给时长：格位自己不会计时，`durationMs` 为 0 或省略
+   * 时它会一直挂着。帧序列自带节奏，时长被忽略。
+   */
   setExpression: (name: string, durationMs?: number) => void;
-  /** 设置心情基调格位：一次性动作播完回落到它，而非回到 idle。只有图集格位能当基调。 */
-  setMoodTone: (name: string) => void;
   playMotion: (group: string, index?: number) => void;
   focus: (x: number, y: number) => void;
   setScale: (scale: number) => void;
   getScale: () => number;
   refitModel: () => void;
   resetExpression: () => void;
+  /**
+   * 进入忙碌（presence = busy）：掏出手机，接上「看手机」循环并一直停在循环里。
+   *
+   * 忙碌没有时长参数——它是一段状态，持续多久由状态源决定，退出走 {@link stopBusy}。
+   * 已在忙碌中重复调用无副作用。
+   */
+  startBusy: () => void;
+  /**
+   * 退出忙碌：倒放「掏出手机」把手收回去，播完回落到 idle。非忙碌时无操作。
+   *
+   * 若进场还没演完就退出，从当前那一格往回倒，而不是跳到最后再整段收一遍。
+   */
+  stopBusy: () => void;
   previewWalk: (direction: 'left' | 'right') => void;
   previewTurn: (direction: 'left' | 'right') => void;
   previewBlink: () => void;
@@ -164,7 +236,7 @@ export interface ChibiPetCanvasHandle {
    */
   playTurn: (direction: 'left' | 'right') => Promise<boolean>;
   /**
-   * 智能避让收尾：从侧身反向转回正面，随后回落到心情基调。false 表示被打断。
+   * 智能避让收尾：从侧身反向转回正面，随后回落到 idle。false 表示被打断。
    *
    * 与 `playTurn` 配对，构成位移前后的转身过渡；走动未播（纵向位移）时不必调用。
    */
@@ -241,18 +313,35 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
     const walkTargetFramesRef = useRef<number | null>(null);
     const [pressed, setPressed] = useState(false);
     const pressedRef = useRef(false);
+    /**
+     * 左键此刻是否按着（不分姿态）。
+     *
+     * 与 `pressedRef` 是两件事：`pressedRef` 表达「按在一张**可持续的姿态**上，所以打断它」，
+     * 播帧序列时按下并不会置真（否则每一按都会把正在播的动画掐掉）。而「有没有人按着」
+     * 是逃离要问的问题，与当前播的是格位还是帧序列无关，所以单独记一份。
+     */
+    const pressAliveRef = useRef(false);
+    /** 这一次按下的时刻。逃离要知道的是「按了多久」，不只是「按没按」。 */
+    const pressStartedAtRef = useRef(0);
     const sequenceTokenRef = useRef(0);
     const poseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const clickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-    /** 戳烦了账本：最近这几次点击的时刻（只保留 TAP_ANNOY_WINDOW_MS 内的）。 */
-    const tapLogRef = useRef<number[]>([]);
-    /** 气头上到什么时候；早于此值前的点击都算「还没消气」。 */
-    const annoyedUntilRef = useRef(0);
+    /** 戳烦了账本（判定规则见 chibi/tapAnger）。 */
+    const tapLedgerRef = useRef(new TapAngerLedger());
+    /** 一趟逃离是否还在跑：期间点击一律不改动作，免得把正在跑的位移打断在半路。 */
+    const fleeingRef = useRef(false);
     const scaleRef = useRef(1);
     const suppressClickUntilRef = useRef(0);
-    /** 心情基调格位：一次性动作播完回落到它，而不是硬编码 idle。由后端 mood_tone 下发。 */
-    const moodToneRef = useRef<ChibiPose>('idle');
-    const moodToneSlotRef = useRef<number>(IDLE_SLOT);
+    /**
+     * 忙碌走到哪一步了。
+     *
+     * 忙碌是**常驻状态**而非定时动作：角色在忙自己的事，持续多久由 presence 决定
+     * （几秒也可能几分钟），所以这里只记「正在进 / 正在循环 / 正在退」，不设超时。
+     * 到点自动收场会让还在忙的角色突然收起手机，与状态本身矛盾。
+     */
+    const busyPhaseRef = useRef<'idle' | 'in' | 'loop' | 'out'>('idle');
+    /** 进场动画播到第几帧。半路退出时据此决定倒放起点。 */
+    const busyInFrameRef = useRef(0);
     const onReadyRef = useRef(onReady);
 
     useEffect(() => {
@@ -272,28 +361,49 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
     }, []);
 
     /**
-     * 是否停在基准姿态上（idle 或当前心情基调）。
+     * 是否停在基准姿态上（`idle`）。
      *
-     * 基调非 idle 时（如累到挂着 dizzy）也算静止，否则环境眨眼会把"静止的疲惫脸"
-     * 误判成"正在播动作"而整个停掉，桌宠看起来像卡死。
+     * 基准姿态就是 `idle`，没有别的：曾经还有一条"心情基调"通道能把 `dizzy` 之类的
+     * 格位长期挂成底色，那条通道连同后端的心情基调一起撤掉了（挂着不动的脸会一直
+     * 骗人，还会因为姿态不是 `idle` 把自主漫步冻住）。现在所有表情都是限时的，
+     * 播完必然回到这里。
      */
-    const isAtRest = useCallback(
-      () => poseNameRef.current === 'idle' || poseNameRef.current === moodToneRef.current,
-      [],
-    );
+    const isAtRest = useCallback(() => poseNameRef.current === 'idle', []);
 
-    /** 回到基准姿态（当前心情基调，默认 idle），并清理走动相关的调度参数。 */
+    /**
+     * 回到基准姿态：忙碌中回到「看手机」循环，否则回 `idle`。
+     *
+     * 忙碌是 presence 级的常驻状态，优先级高于基准姿态：插播的一次性动作（说话、表情、
+     * 触摸反应）播完必须回落到循环里。否则角色只要在忙碌期间说一句话，那个循环就被
+     * 「回到基准」永久抹掉了——状态还在忙，人却已经站直了。
+     */
     const returnToTone = useCallback((token?: number) => {
       if (token !== undefined && sequenceTokenRef.current !== token) return;
       poseTimerRef.current = null;
       walkFrameDelayMsRef.current = null;
       walkTargetFramesRef.current = null;
-      setActivePose(moodToneRef.current);
-      setFrame(moodToneSlotRef.current);
+      if (busyPhaseRef.current === 'in' || busyPhaseRef.current === 'loop') {
+        // 进场被打断（按住、或被插播动作顶掉）也落进循环：停在进场半路的一格上
+        // 没有任何含义，看起来就是卡住了。
+        busyPhaseRef.current = 'loop';
+        const alreadyLooping = poseNameRef.current === BUSY_LOOP_SPEC.name;
+        setActivePose(BUSY_LOOP_SPEC.name);
+        // 已经在循环里就别再置 0：循环推进器按自己的节拍走，重复置帧会和它打架。
+        if (!alreadyLooping) setFrame(0);
+        onExpressionEnd?.();
+        return;
+      }
+      setActivePose('idle');
+      setFrame(IDLE_SLOT);
       onExpressionEnd?.();
     }, [onExpressionEnd, setActivePose]);
 
-    /** 逐帧播放一段序列；返回 false 表示被新的动作或用户按压打断。 */
+    /**
+     * 逐帧播放一段序列；返回 false 表示被新的动作或用户按压打断。
+     *
+     * `onFrame` 让调用方跟住播放进度（忙碌进场用它记下「演到第几格」，半路退出就能
+     * 从那一格往回倒）。它只在真正换帧时回调，不在被打断时补一次。
+     */
     const playFrames = useCallback(async (
       spec: ChibiAnimationSpec,
       frames: number[],
@@ -301,16 +411,78 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
       token: number,
       poseLabel: string,
       direction?: ChibiDirection,
+      onFrame?: (index: number) => void,
     ): Promise<boolean> => {
       setActivePose(poseLabel);
       if (direction) setWalkDirection(direction);
       for (let index = 0; index < frames.length; index += 1) {
         if (sequenceTokenRef.current !== token || pressedRef.current) return false;
+        onFrame?.(index);
         setFrame(frames[index]);
         await wait(durations[index] ?? durations[durations.length - 1] ?? frameDurationMs(spec, index));
       }
       return sequenceTokenRef.current === token && !pressedRef.current;
     }, [setActivePose]);
+
+    /**
+     * 进入忙碌：掏出手机，接上「看手机」循环，此后一直停在循环里。
+     *
+     * 循环自身的帧推进不在这里——`busy-loop` 是循环型帧序列，推进由循环推进器接管，
+     * 这里只负责把姿态切过去。
+     */
+    const startBusy = useCallback(() => {
+      const phase = busyPhaseRef.current;
+      // 已经在忙碌里（进场中或循环中）就不重播：presence 可能把同一个状态重复下发。
+      if (phase === 'in' || phase === 'loop') return;
+      clearPoseTimer();
+      // 若正走到退场半路，这一下把退场掐掉——状态又回到忙碌，收手机的动作不该继续演。
+      const token = ++sequenceTokenRef.current;
+      walkFrameDelayMsRef.current = null;
+      walkTargetFramesRef.current = null;
+      busyPhaseRef.current = 'in';
+      busyInFrameRef.current = 0;
+      void (async () => {
+        await playFrames(
+          BUSY_IN_SPEC,
+          BUSY_IN_FRAMES,
+          BUSY_IN_SPEC.durations,
+          token,
+          BUSY_IN_SPEC.name,
+          undefined,
+          (index) => { busyInFrameRef.current = index; },
+        );
+        // 被打断：姿态交给打断方；它若回落（returnToTone），自会落进循环。
+        if (sequenceTokenRef.current !== token) return;
+        busyPhaseRef.current = 'loop';
+        setActivePose(BUSY_LOOP_SPEC.name);
+      })();
+    }, [clearPoseTimer, playFrames, setActivePose]);
+
+    /** 退出忙碌：倒放「掏出手机」把手收回去，播完回落到基准姿态。 */
+    const stopBusy = useCallback(() => {
+      const phase = busyPhaseRef.current;
+      if (phase === 'idle' || phase === 'out') return;
+      busyPhaseRef.current = 'out';
+      clearPoseTimer();
+      const token = ++sequenceTokenRef.current;
+      walkFrameDelayMsRef.current = null;
+      walkTargetFramesRef.current = null;
+      // 进场还没演完就退场：从当前那一格往回倒，而不是先跳到最后一格再整段收一遍。
+      const from = phase === 'in' ? busyInFrameRef.current - 1 : BUSY_IN_SPEC.frames - 1;
+      const offset = Math.max(0, BUSY_IN_SPEC.frames - 1 - from);
+      void (async () => {
+        await playFrames(
+          BUSY_IN_SPEC,
+          BUSY_OUT.frames.slice(offset),
+          BUSY_OUT.durations.slice(offset),
+          token,
+          BUSY_IN_SPEC.name,
+        );
+        if (sequenceTokenRef.current !== token) return;
+        busyPhaseRef.current = 'idle';
+        returnToTone(token);
+      })();
+    }, [clearPoseTimer, playFrames, returnToTone]);
 
     /**
      * 应用一个动作名。
@@ -322,6 +494,15 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
     const applyMotion = useCallback((raw: string, durationMs?: number) => {
       clearPoseTimer();
       const token = ++sequenceTokenRef.current;
+      if (raw.trim().toLowerCase() === 'busy') {
+        startBusy();
+        // 忙碌的权威是 presence：这里不传时长就一直忙到 stopBusy。时长只是留给
+        // 「主动指定一段忙碌」的调用方——和格位一样，给多久就持续多久。
+        if (durationMs && durationMs > 0) {
+          poseTimerRef.current = setTimeout(() => stopBusy(), durationMs);
+        }
+        return;
+      }
       const spec = resolveMotion(raw);
       if (spec.kind === 'pose') {
         setActivePose(spec.name);
@@ -342,9 +523,10 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
       const frames = Array.from({ length: spec.frames }, (_, index) => index);
       void (async () => {
         const completed = await playFrames(spec, frames, spec.durations, token, spec.name);
-        if (completed) returnToTone(token);
+        // hold 动作（如睡觉）播完停在末帧，不回基调。
+        if (completed && !spec.hold) returnToTone(token);
       })();
-    }, [clearPoseTimer, playFrames, returnToTone, setActivePose]);
+    }, [clearPoseTimer, playFrames, returnToTone, setActivePose, startBusy, stopBusy]);
 
     /** 原地演示转身（不移动窗口）。 */
     const previewTurn = useCallback((direction: ChibiDirection) => {
@@ -409,7 +591,7 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
       );
     }, [clearPoseTimer, playFrames]);
 
-    /** 智能避让收尾回身：末帧起步倒放回正面，播完回落到心情基调。 */
+    /** 智能避让收尾回身：末帧起步倒放回正面，播完回落到 idle。 */
     const playTurnBack = useCallback(async (): Promise<boolean> => {
       clearPoseTimer();
       const token = ++sequenceTokenRef.current;
@@ -429,7 +611,7 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
      * 起步走动：写好推进参数并切到走动姿态，返回本次走动的会话代号与「播完」的承诺。
      *
      * 帧数与帧间隔都由调用方按 walkPlan 算好（frames × frameDelayMs 即窗口滑动时长），
-     * 这里只负责推进——于是腿和窗口收尾同时发生。
+     * 这里只负责推进，腿和窗口收尾同时发生。
      *
      * 会话代号要露出来，是因为自主漫步得和窗口滑动**并行**跑：它必须自己判断这次走动
      * 有没有被别的动作（说话/表情/用户按压）接过——token 变了就该当帧停下窗口。
@@ -466,7 +648,7 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
     const stopCast = useCallback(() => {
       if (!castSessionRef.current) return;
       castSessionRef.current = null;
-      // 停掉仍在进行的正向/倒放循环并回落到心情基调（自然播完时姿态已是基调，此处兜底）
+      // 停掉仍在进行的正向/倒放循环并回落到 idle（自然播完时姿态已是 idle，此处兜底）
       sequenceTokenRef.current += 1;
       returnToTone();
     }, [returnToTone]);
@@ -521,19 +703,6 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
         if (spec.name === 'drag') suppressClickUntilRef.current = Date.now() + 500;
         applyMotion(name, durationMs);
       },
-      setMoodTone: (name) => {
-        const spec = resolveMotion(name);
-        // 只有可持续的图集格位能当基调；帧序列（如 happy）会让位，不能拿来做基调。
-        if (spec.kind !== 'pose') return;
-        const previous = moodToneRef.current;
-        moodToneRef.current = spec.name;
-        moodToneSlotRef.current = spec.slot;
-        // 正停在旧基调上才立刻换脸；正在播一次性动作时不打断，播完自然落到新基调。
-        if (poseNameRef.current === previous || poseNameRef.current === 'idle') {
-          setActivePose(spec.name);
-          setFrame(spec.slot);
-        }
-      },
       playMotion: (group) => {
         const spec = resolveMotion(group);
         if (spec.kind === 'animation' && spec.directions) {
@@ -556,13 +725,14 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
         scaleRef.current = 1;
       },
       resetExpression: () => {
-        // 打断当前动作并回落到心情基调（默认 idle）。基调是「回落目标」，
-        // 硬切 idle 会把它抹掉——智能避让或拖拽结束后，挂着疲惫基调的角色
-        // 不该突然换成一张无表情的默认脸。
+        // 打断当前动作并回落到 idle。基准姿态就是 idle（曾经还有一层"心情基调"
+        // 能把它换成别的格位，那条通道已随持续基调一起撤掉），所以直接回落即可。
         clearPoseTimer();
         sequenceTokenRef.current += 1;
         returnToTone();
       },
+      startBusy,
+      stopBusy,
       previewWalk,
       previewTurn,
       previewBlink,
@@ -572,7 +742,7 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
       startCast,
       cancelCast,
       stopCast,
-    }), [applyMotion, cancelCast, clearPoseTimer, onScaleChange, previewBlink, previewTurn, previewWalk, returnToTone, startCast, stopCast, playTurn, playTurnBack, playWalk]);
+    }), [applyMotion, cancelCast, clearPoseTimer, onScaleChange, previewBlink, previewTurn, previewWalk, returnToTone, startBusy, startCast, stopBusy, stopCast, playTurn, playTurnBack, playWalk]);
 
     // 动作图集在首次真正播放前预取：切换到走动/表情时不必等图集下载。
     //
@@ -786,10 +956,13 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
       };
 
       const walkOnce = async () => {
+        // fleeInFlight 也在列：生气脸一播完桌宠就回到 idle，而逃离的位移可能还在跑
+        // （逃离不播舞台动作，所以「姿态不是 idle」不再能替我们挡住这一趟）。
         if (
           cancelled || pressedRef.current || poseNameRef.current !== 'idle' ||
           positioningCoordinator.fullscreenHidden || positioningCoordinator.fullscreenInFlight ||
-          positioningCoordinator.smartPositioningInFlight || positioningCoordinator.ambientMoveInFlight
+          positioningCoordinator.smartPositioningInFlight || positioningCoordinator.ambientMoveInFlight ||
+          positioningCoordinator.fleeInFlight
         ) {
           scheduleRetry();
           return;
@@ -887,58 +1060,191 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
     useEffect(() => () => {
       clearPoseTimer();
       if (clickTimerRef.current) clearTimeout(clickTimerRef.current);
+      // 卸载即作废「逃离占着舞台」这件事，否则智能避让会被一条永远不会清的标志永久拦住
+      positioningCoordinator.fleeInFlight = false;
     }, [clearPoseTimer]);
 
     /**
-     * 记一笔点击，返回「这一下是否算戳烦了」。
+     * 取走并清掉待判定的单击定时器。
      *
-     * 记账口径见 {@link TAP_ANNOY_WINDOW_MS} 一带的注释。双击的两次点击同样入账——
-     * 双击只是同时还另有用途（开快捷聊天），不代表这两下不算戳。
+     * 返回值就是「这一下本来在等第二下」——即这是一次双击。点击处理里三处都要问
+     * 同一件事（要不要开快捷聊天、要不要按双击上报），所以只留一个取用口。
      */
-    const noteTap = useCallback((now: number): boolean => {
-      // 气头上：照旧算生气，并把气头往后续（只要还在戳就不消气）
-      if (now < annoyedUntilRef.current) {
-        annoyedUntilRef.current = now + TAP_ANNOY_HOLD_MS;
-        return true;
-      }
-
-      const recent = tapLogRef.current.filter((at) => now - at < TAP_ANNOY_WINDOW_MS);
-      recent.push(now);
-      // 基准分=窗口中戳了几下；猛戳额外记一笔——「又戳一次」和「连着猛戳」不是一回事
-      let score = recent.length;
-      for (let index = 1; index < recent.length; index += 1) {
-        if (recent[index] - recent[index - 1] < TAP_ROUGH_INTERVAL_MS) score += 1;
-      }
-      if (score < TAP_ANNOY_THRESHOLD) {
-        tapLogRef.current = recent;
-        return false;
-      }
-      // 攒够了：清账再生气，退出气头后从零重新攒，不会因为一笔旧账一直气下去
-      tapLogRef.current = [];
-      annoyedUntilRef.current = now + TAP_ANNOY_HOLD_MS;
+    const takePendingClick = useCallback((): boolean => {
+      if (!clickTimerRef.current) return false;
+      clearTimeout(clickTimerRef.current);
+      clickTimerRef.current = null;
       return true;
     }, []);
 
+    /**
+     * 用户是不是**抓住了**桌宠（而不是在连点）。
+     *
+     * 逃离的中止条件不能只看「手在不在上面」：连点的时候每一下都把手按上去，而滑动
+     * 每 32ms 问一次，真手按一下 60~120ms——于是几乎每一帧都问到「有人按着」，整段
+     * 位移在第一帧就被掐死（真机症状：生气脸照播、窗口一动不动）。点一下是逗它，
+     * 按住才是抓它：只有持续按过 `FLEE_TAKEOVER_HOLD_MS` 才算把窗口抢回去。
+     */
+    const isHoldingPet = useCallback(
+      () => pressAliveRef.current && Date.now() - pressStartedAtRef.current >= FLEE_TAKEOVER_HOLD_MS,
+      [],
+    );
+
+    /**
+     * 窗口是不是已经归用户了 —— 逃离据此让位。
+     *
+     * 两个信号缺一不可：
+     * - `isHoldingPet`：手指按在**桌宠身上**够久。这是画布看得见的那一半。
+     * - `dragInFlight`：App 已经把窗口拖起来了。窗口一旦滑开，光标就落到桌宠旁边的
+     *   透明区上，再按下去 mousedown 走的是**背景层**、画布根本收不到——所以按住
+     *   背景把人挤走这一半只能由 App 记在协调器上。少了它，位移会一边被拖动钉回
+     *   原地、一边继续往前写，桌宠来回抖。
+     */
+    const userTookWindow = useCallback(
+      () => isHoldingPet() || positioningCoordinator.dragInFlight,
+      [isHoldingPet],
+    );
+
+    /**
+     * 戳烦了的「逃离」：把窗口挪到远处一个随机落点。
+     *
+     * **只动窗口，不播任何舞台动作**（不转身、不迈步、不回身）——舞台上那套会盖掉
+     * 生气脸，用户戳了四下想看的是「它生气了」，不该只看到一个背影。详见 `chibi/fleeTrack`。
+     *
+     * 编排本身在 `chibi/fleeTrack`（可单测），这里只负责三件事：占地（宣告窗口归我）、
+     * 把真实环境接上、收尾时把地还回去。
+     */
+    const fleeFromTaps = useCallback(async () => {
+      if (fleeingRef.current) return; // 一趟还没跑完，不叠第二趟
+      // 全屏隐藏/正在隐藏时桌宠已经退到角落，再挪它会和隐藏动画抢窗口
+      if (positioningCoordinator.fullscreenHidden || positioningCoordinator.fullscreenInFlight) {
+        return;
+      }
+      fleeingRef.current = true;
+      positioningCoordinator.fleeInFlight = true;
+      // 避让可能正把窗口拖向别处：逃离要独占窗口，先把它按停，免得两个写手互相盖
+      positioningCoordinator.abortSmartMove?.();
+
+      const env: FleeEnv = {
+        readGeometry: async () => {
+          if (previewMode) return PREVIEW_FLEE_GEOMETRY;
+          const handle = getCurrentWindow();
+          const [position, size, monitor] = await Promise.all([
+            handle.outerPosition(),
+            handle.outerSize(),
+            currentMonitor(),
+          ]);
+          if (!monitor) return null;
+          return {
+            fromX: position.x,
+            fromY: position.y,
+            windowWidth: size.width,
+            monitorX: monitor.position.x,
+            monitorWidth: monitor.size.width,
+            marginPx: EDGE_MARGIN_PX,
+          };
+        },
+        // 预览页没有窗口可移：时间轴照跑，但采样点记进 `window.__chibiFleeTrace__`、
+        // 计划落点记进 `window.__chibiFleePlan__` 而不是下发给 Tauri —— 验收脚本据此
+        // 断言「最后一个采样点就是 planFlee 抽出的那个落点」（掐死与跑完在这里是两回事）。
+        //
+        // **中止条件里刻意没有会话代号**（曾经有过，是错的）。真手点击会带几像素抖动：
+        // mousedown 一按下后端拖动会话就启动，窗口随之动一点 → App 的 onMoved 给桌宠切
+        // 上 `drag` 格位 → `applyMotion` 推进会话代号。拿代号当中止条件，等于**每次真实
+        // 点击都把位移掐死在第一帧**（真机实测：带 3px 抖动的连点，窗口只跟手挪了 10px、
+        // 一步没逃；去掉抖动则正常滑出 343px）。代号表达的是「姿态换了一张脸」，而不是
+        // 「有人来抢窗口」——聊天反应切 `talk` 同理，都不该打断逃离。
+        //
+        // 中止条件只有 `userTookWindow`（按住够久 / 拖动会话已经开起来）与组件卸载。真正的
+        // 「两个写手」由 `positioningCoordinator.fleeInFlight` 拦住：智能避让与自主漫步
+        // 都得让路，App 那边也据此延后开启窗口拖动（见 handleBackgroundMouseDown）。
+        slide: (from, to, durationMs, shouldAbort) => {
+          if (previewMode) {
+            window.__chibiFleePlan__ = {
+              fromX: from.x, fromY: from.y, toX: to.x, toY: to.y, durationMs,
+            };
+          }
+          return runSlide({
+            fromX: from.x,
+            fromY: from.y,
+            toX: to.x,
+            toY: to.y,
+            durationMs,
+            apply: previewMode
+              ? (x, y) => {
+                  (window.__chibiFleeTrace__ ??= []).push({ x, y, t: Math.round(performance.now()) });
+                }
+              : (x, y) => {
+                  void invoke('set_window_position', { x, y }).catch(() => {});
+                },
+            shouldAbort,
+          });
+        },
+        wait,
+      };
+
+      try {
+        await runFlee(env, {
+          minDistancePx: FLEE_MIN_DISTANCE_PX,
+          maxDistancePx: FLEE_MAX_DISTANCE_PX,
+          angerBeatMs: FLEE_ANGER_BEAT_MS,
+          shouldAbort: userTookWindow,
+        });
+      } catch {
+        // 逃离只是舞台调度：出错就安静收场，姿态交给下一个动作（同自主漫步）
+      } finally {
+        positioningCoordinator.fleeInFlight = false;
+        fleeingRef.current = false;
+      }
+    }, [previewMode, userTookWindow]);
+
+    /**
+     * 一次点击。
+     *
+     * 四种结果按优先级排：气头刚点着（onset）→ 逃跑途中 → 双击 → 单击。
+     *
+     * onset 必须**在点击当场**出手（生气脸 + 逃离），不能等 230ms 的双击判定窗口：
+     * 连点的时候每一下都落在 230ms 内，于是每一下都走进「等第二下」的分支、每一下都
+     * 从第 0 帧重播生气脸——脸于是永远停在第 0 帧，看起来就是「等用户停手才开始播」。
+     */
     const handleClick = () => {
       // 窗口发生过实际拖动时，mouseup 后浏览器仍可能补发 click；该 click 不应触发台词。
       if (Date.now() < suppressClickUntilRef.current) return;
-      const annoyed = noteTap(Date.now());
-      if (clickTimerRef.current) {
-        clearTimeout(clickTimerRef.current);
-        clickTimerRef.current = null;
-        // 被戳毛了的时候双击照样开聊天，但脸上的态度不再是配合
-        applyMotion(annoyed ? 'angry' : 'talk', annoyed ? undefined : 700);
+      const { annoyed, onset } = tapLedgerRef.current.note(Date.now());
+      const doubleClick = takePendingClick();
+
+      // 逃跑途中不改动作：改动作会打断正在跑的位移，把桌宠扔在半路。语气照旧。
+      if (fleeingRef.current) {
+        onInteraction?.('rough_click');
+        if (doubleClick) onOpenQuickChat?.();
+        return;
+      }
+
+      // 气头刚点着：立刻给脸、立刻跑。双击语义照旧保留（这一下可能正是某一对里的第二下）
+      if (onset) {
+        applyMotion('angry');
+        onInteraction?.('rough_click');
+        if (doubleClick) onOpenQuickChat?.();
+        void fleeFromTaps();
+        return;
+      }
+
+      if (doubleClick) {
+        // 生气脸正播着就不重播：同一口气上被反复打断在第 0 帧会看起来像卡住。
+        // 被戳毛了的时候双击照样开聊天，但脸上的态度不再是配合。
+        if (!(annoyed && poseNameRef.current === 'angry')) {
+          applyMotion(annoyed ? 'angry' : 'talk', annoyed ? undefined : 700);
+        }
         onInteraction?.(annoyed ? 'rough_click' : 'double_click');
         onOpenQuickChat?.();
         return;
       }
+
       clickTimerRef.current = setTimeout(() => {
         clickTimerRef.current = null;
         const reaction = annoyed ? 'angry' : pickTapReaction();
         // 空串 = 这一下不播表情：什么都不做，待机与自然眨眼照常继续。
-        // 这张生气脸正播着就不重播——同一口气上被反复打断在第 0 帧会看起来像卡住。
-        // （鼠标点击其实轮不到这里：mousedown 早已把动画切回基调了，拦住的是
-        //   键盘回车/空格这条不经过 mousedown 的路径。）
+        // 生气脸正播着同样不重播（理由同上，这条同时兜住键盘回车/空格那条路径）。
         const alreadyAngry = annoyed && poseNameRef.current === 'angry';
         if (reaction && !alreadyAngry) applyMotion(reaction);
         onInteraction?.(annoyed ? 'rough_click' : 'single_click');
@@ -957,7 +1263,7 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
     /**
      * 精灵的最终样式。
      *
-     * 帧序列图集可用时按帧序列取格；不可用时退回主图集的当前基调格位——帧序列的
+     * 帧序列图集可用时按帧序列取格；不可用时退回主图集的 `idle` 格位——帧序列的
      * `frame` 序号在主图集里没有意义，拿它去定位只会取到无关的一格。
      */
     const activeSpec = resolveMotion(poseName);
@@ -967,12 +1273,7 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
         : null;
     const spriteFrameStyle =
       activeSheet !== null && failedSheets.has(activeSheet)
-        ? frameStyle(
-            getMotion(moodToneRef.current) ?? IDLE_SPEC,
-            moodToneSlotRef.current,
-            characterId,
-            walkDirection,
-          )
+        ? frameStyle(IDLE_SPEC, IDLE_SLOT, characterId, walkDirection)
         : frameStyle(activeSpec, frame, characterId, walkDirection);
 
     return (
@@ -992,20 +1293,44 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
             role="button"
             tabIndex={0}
             onMouseDown={() => {
-              sequenceTokenRef.current += 1;
+              // 按下这件事先记下来，再谈它要不要打断当前姿态：逃离问的是「按了多久」，
+              // 与这一按落在格位上还是帧序列上无关（见 pressAliveRef 的说明）。
+              pressAliveRef.current = true;
+              pressStartedAtRef.current = Date.now();
               const spec = getMotion(poseNameRef.current);
-              if (spec?.kind === 'animation') {
+              // 忙碌阶段（掏出手机 / 看手机）虽然也是帧序列，但它表达的是常驻**状态**而不是
+              // 一次性的表演：按住它不该把表演掐掉，可这一按仍要算一次正常点击——忙碌中的
+              // 单击唤醒正是由 onModelClick 发起的。若把它并进下面「按住就打断帧序列」那条
+              // 路，onModelClick 永远不会被调用，忙起来的桌宠就再也叫不醒了。
+              const busyStage = isBusyStage(spec);
+              if (spec?.kind === 'animation' && !busyStage) {
+                // 气头上的生气脸不许抹掉：逃离途中桌上唯一会播的就是这张脸，抹掉它
+                // 这次「戳毛了」就只剩一次没有表情的位移了。
+                //
+                // mousedown 早于 click，连点的时候每一下都先把帧序列清回待机，再由
+                // click 从头重播——「等用户停手才开始播」的另一半原因就在这里。
+                // 气头上一共也就 2.5s，这段时间里「按住就打断」的交互让位给「它正在气头上」。
+                if (spec.name === 'angry' && tapLedgerRef.current.isAnnoyed(Date.now())) {
+                  return;
+                }
+                sequenceTokenRef.current += 1;
                 returnToTone();
+                return;
               }
+              // 忙碌阶段的帧序列不由点击作废：它归 presence 管。作废了 token 却没有任何一方
+              // 接手，进场就会停在半路那一格上（循环推进器不认识 busy-in，不会来接）。
+              if (!busyStage) sequenceTokenRef.current += 1;
               pressedRef.current = true;
               setPressed(true);
               onModelClick?.();
             }}
             onMouseUp={() => {
+              pressAliveRef.current = false;
               pressedRef.current = false;
               setPressed(false);
             }}
             onMouseLeave={() => {
+              pressAliveRef.current = false;
               pressedRef.current = false;
               setPressed(false);
             }}

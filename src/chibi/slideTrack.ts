@@ -5,8 +5,7 @@
  * 采样间隔固定、步数随时长增长，于是最短的挪动也至少有 MIN_POSITION_STEPS 次定位，
  * 长距离靠更多采样点覆盖，而不是把单步拉粗。
  *
- * 智能避让与自主漫步共用这一条时间轴。此前两处各写了一份采样循环（一份 32ms 采样、
- * 一份写死 48 步），步长与缓动曲线都不一致，同样的位移在两处会呈现不同的加速度。
+ * 智能避让与自主漫步共用这一条时间轴。
  */
 
 /** 采样间隔（ms）：只决定窗口定位的密度。 */
@@ -38,7 +37,7 @@ export interface SlideTrackOptions {
 
 /**
  * 按时间轴滑动窗口。返回是否走完全程——被中止时窗口停在半途，
- * 由调用方决定怎么收尾（避让会回落到基调姿态，漫步交给接管者）。
+ * 由调用方决定怎么收尾（避让会回落到 idle，漫步交给接管者）。
  */
 export async function runSlide(options: SlideTrackOptions): Promise<boolean> {
   const { fromX, fromY, toX, toY, durationMs, apply, shouldAbort } = options;

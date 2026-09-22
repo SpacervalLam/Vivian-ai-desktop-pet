@@ -38,6 +38,11 @@ export default function RoomWindow() {
 
   useEffect(() => {
     // 进入房间：隐藏并冻结桌面桌宠与心智观察器；启动 ESC 看护
+    //
+    // 让位其实在 utils/roomWindow 里、窗口显形那一刻就做过了（那是用户真正
+    // 看见首屏 loading 层的前提）。这里留着是兜底：从别处直接导航到 ?view=room
+    // （开发调试、或将来别的入口）时没人替它调。命令幂等，重复调用不会把
+    // 记档覆盖成 false。
     void invoke('set_room_mode', { active: true }).catch((e) =>
       console.warn('[room] set_room_mode(true) 失败', e)
     );
@@ -64,6 +69,8 @@ export default function RoomWindow() {
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.code !== 'Escape') return;
+      // 命令面板打开时 ESC 由面板自己收（关闭面板而不是关掉整个房间窗口）
+      if ((window as any).__ROOM__?.cmdPanelOpen) return;
       e.preventDefault();
       closeRoom();
     };

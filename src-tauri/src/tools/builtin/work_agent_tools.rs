@@ -13,6 +13,7 @@ use parking_lot::RwLock;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Manager};
 
+use crate::brain::coding_agent::{CodingRole, CodingSession};
 use crate::commands::coding_agent::CODING_AGENT;
 use crate::state::AppState;
 use crate::tools::types::{
@@ -35,6 +36,21 @@ fn status_text(s: crate::brain::coding_agent::CodingStatus) -> &'static str {
         CodingStatus::Running => "运行中",
         CodingStatus::Canceled => "已取消",
     }
+}
+
+/// 取工作会话最后一条可见的助手总结。
+///
+/// 工具调用意图与结果使用独立 role；这里只返回工作智能体真正交付给用户的
+/// assistant 文本。限制长度是为了避免状态查询把整个陪伴侧上下文挤满。
+fn latest_work_summary(session: &CodingSession) -> Option<String> {
+    session
+        .messages
+        .iter()
+        .rev()
+        .find(|message| {
+            message.role == CodingRole::Assistant && !message.content.trim().is_empty()
+        })
+        .map(|message| message.content.trim().chars().take(4000).collect())
 }
 
 // ===== delegate_to_work_agent =====
@@ -61,12 +77,12 @@ impl Tool for DelegateToWorkAgentTool {
     }
 
     fn description(&self) -> &str {
-        "Delegate a work task to the work agent (a separate coding/execution agent) on behalf of the user. Use when the user mentions work that needs doing — coding, file processing, running commands, multi-step execution — while you keep chatting as the companion. The task runs in the background in its own session; you get a session_id immediately and can check progress with get_work_status. The work agent summarizes its results into memory when done, so you can naturally mention them later."
+        "Use the work agent as an execution tool shared by the user and companion. Write a self-contained task prompt on the user's behalf, preserving the user's objective, constraints, expected deliverable, and known context without inventing authority. The work runs in a separate background session. You receive a session_id immediately; get_work_status returns progress and the final work summary. After delegation, do not duplicate the same execution yourself."
     }
 
     fn description_in(&self, lang: &str) -> &str {
         match lang {
-            "zh" => "以用户身份把工作任务派发给工作智能体（独立的编程/执行智能体）。当用户提到需要完成的工作——写代码、处理文件、跑命令、多步执行——而你继续以陪伴身份聊天时使用。任务在其独立会话中后台执行；立即返回 session_id，之后可用 get_work_status 查进度。工作智能体完成后会把结果摘要写入记忆，你可以自然地向用户提及。",
+            "zh" => "把工作智能体当作用户和陪伴侧共同使用的执行工具。你要以用户身份写一份自包含的任务提示词，完整保留用户目标、约束、期望交付物和已知上下文，不添加用户没有给出的授权。任务在独立会话后台执行，立即返回 session_id；get_work_status 可读取进度和最终工作总结。派发后不要自己重复执行同一项工作。",
             "ja" => "ユーザーの代理として作業エージェント（独立したコーディング/実行エージェント）にタスクを委任する。コーディング、ファイル処理、コマンド実行、多段階実行などユーザーが作業を必要としていることに会話中に気づいた際、あなたはコンパニオンとして話し続けながら使用する。タスクは独立セッションでバックグラウンド実行され、即座に session_id が返る。進捗は get_work_status で確認できる。作業エージェントは完了時に結果サマリをメモリに書き込むので、後で自然に言及できる。",
             _ => self.description(),
         }
@@ -85,7 +101,7 @@ impl Tool for DelegateToWorkAgentTool {
         json!({
             "type": "object",
             "properties": {
-                "task": {"type": "string", "description": "Complete task instruction for the work agent, written as if from the user"},
+                "task": {"type": "string", "description": "Self-contained task prompt written on the user's behalf. Include objective, constraints, relevant context, expected deliverable, and verification criteria; do not invent authorization."},
                 "working_directory": {"type": "string", "description": "Optional working directory for the task. Omit to reuse the most recent work session's directory."},
                 "mode": {"type": "string", "enum": ["standard", "code", "minimal"], "description": "Work agent mode (default standard)"}
             },
@@ -98,7 +114,7 @@ impl Tool for DelegateToWorkAgentTool {
             "zh" => json!({
                 "type": "object",
                 "properties": {
-                    "task": {"type": "string", "description": "给工作智能体的完整任务说明（以用户口吻书写）"},
+                    "task": {"type": "string", "description": "以用户身份写给工作智能体的自包含提示词：包含目标、约束、相关上下文、预期交付物和验证标准，不得虚构授权。"},
                     "working_directory": {"type": "string", "description": "可选的工作目录。省略则复用最近一次工作会话的目录。"},
                     "mode": {"type": "string", "enum": ["standard", "code", "minimal"], "description": "工作智能体模式（默认 standard）"}
                 },
@@ -119,7 +135,7 @@ impl Tool for DelegateToWorkAgentTool {
 
     async fn validate_input(&self, input: &Value, _ctx: &ToolUseContext) -> ValidationResult {
         match input.get("task").and_then(|v| v.as_str()) {
-            Some(t) if !t.is_empty() => ValidationResult::success(Some(input.clone())),
+            Some(t) if !t.trim().is_empty() => ValidationResult::success(Some(input.clone())),
             _ => ValidationResult::failure("task 是必填项且不能为空", 2),
         }
     }
@@ -151,6 +167,7 @@ impl Tool for DelegateToWorkAgentTool {
                 let sessions = CODING_AGENT.list_sessions();
                 sessions
                     .iter()
+                    .filter(|s| s.char_id == context.char_id)
                     .max_by_key(|s| s.updated_at)
                     .map(|s| s.working_directory.clone())
                     .unwrap_or_default()
@@ -175,6 +192,14 @@ impl Tool for DelegateToWorkAgentTool {
         // 创建工作会话并以用户身份发送任务（异步后台执行）
         let session = CODING_AGENT.create_session(&context.char_id, &working_directory, &mode);
         let session_id = session.session_id.clone();
+        if let Err(e) = CODING_AGENT.mark_delegated_by_companion(&session_id) {
+            CODING_AGENT.delete_session(&session_id);
+            return ToolResult::standard_error(
+                &format!("派发失败：无法标记任务来源：{e}"),
+                Some("DelegateSourceFailed"),
+                None,
+            );
+        }
         match CODING_AGENT.send_message(app.clone(), session_id.clone(), router, tool_system, task, Vec::new(), Vec::new(), max_rounds, false, false) {
             Ok(()) => {
                 // 广播给前端（工作面板可感知新任务）
@@ -186,6 +211,7 @@ impl Tool for DelegateToWorkAgentTool {
                         "char_id": context.char_id,
                         "working_directory": session.working_directory,
                         "mode": session.mode,
+                        "delegated_by_companion": true,
                     }),
                 );
                 ToolResult::standard_success(
@@ -194,10 +220,19 @@ impl Tool for DelegateToWorkAgentTool {
                         "session_id": session_id,
                         "working_directory": session.working_directory,
                         "mode": session.mode,
+                        "delegated_by_companion": true,
                     })),
                 )
             }
-            Err(e) => ToolResult::standard_error(&format!("派发失败：{e}"), Some("DelegateFailed"), None),
+            Err(e) => {
+                // 首条消息都没能启动时不留下一个看似可继续的空会话。
+                CODING_AGENT.delete_session(&session_id);
+                ToolResult::standard_error(
+                    &format!("派发失败：{e}"),
+                    Some("DelegateFailed"),
+                    None,
+                )
+            }
         }
     }
 
@@ -246,12 +281,12 @@ impl Tool for GetWorkStatusTool {
     }
 
     fn description(&self) -> &str {
-        "Check the status of work agent sessions. Optional session_id for one session; omit to list recent sessions (returns id, title, status, working directory, last update). Use after delegating a task to report progress to the user."
+        "Check work-agent sessions. With session_id, returns status plus the latest final assistant summary when available; omit it to list recent sessions. Use the returned summary as the work agent's report: preserve its outcome, verification, and blockers when relaying it to the user."
     }
 
     fn description_in(&self, lang: &str) -> &str {
         match lang {
-            "zh" => "查询工作智能体会话状态。可选 session_id 查单个会话；省略则列出最近会话（id、标题、状态、工作目录、最近更新）。派发任务后用它向用户汇报进度。",
+            "zh" => "查询工作智能体会话。传 session_id 时会返回状态，以及可用时工作智能体最后一条完整总结；省略则列出最近会话。向用户转达时要保留总结里的结果、验证和阻塞，不要擅自美化。",
             "ja" => "作業エージェントのセッション状態を確認する。任意の session_id で1件取得、省略時は最近のセッション一覧（id、タイトル、状態、作業ディレクトリ、最終更新）。タスク委任後にユーザーへ進捗を報告するために使用。",
             _ => self.description(),
         }
@@ -301,22 +336,42 @@ impl Tool for GetWorkStatusTool {
         PermissionResult::allow()
     }
 
-    async fn call(&self, args: Value, _ctx: &ToolUseContext) -> ToolResult {
-        let sessions = CODING_AGENT.list_sessions();
+    async fn call(&self, args: Value, context: &ToolUseContext) -> ToolResult {
+        let mut sessions = CODING_AGENT.list_sessions();
+        // 陪伴侧只读取绑定到自身角色的工作会话，避免跨角色串任务或拿错总结。
+        sessions.retain(|session| session.char_id == context.char_id);
         if let Some(sid) = args.get("session_id").and_then(|v| v.as_str()) {
             match sessions.iter().find(|s| s.session_id == sid) {
-                Some(s) => ToolResult::standard_success(
-                    &format!("会话「{}」状态：{}", s.title, status_text(s.status)),
-                    Some(json!({
-                        "session_id": s.session_id,
-                        "title": s.title,
-                        "status": status_text(s.status),
-                        "mode": s.mode,
-                        "working_directory": s.working_directory,
-                        "updated_at": s.updated_at,
-                        "message_count": s.messages.len(),
-                    })),
-                ),
+                Some(s) => {
+                    let final_summary = latest_work_summary(s);
+                    let message = match &final_summary {
+                        Some(summary) => format!(
+                            "会话「{}」状态：{}\n\n工作智能体总结：\n{}",
+                            s.title,
+                            status_text(s.status),
+                            summary
+                        ),
+                        None => format!(
+                            "会话「{}」状态：{}，尚无可返回的工作总结。",
+                            s.title,
+                            status_text(s.status)
+                        ),
+                    };
+                    ToolResult::standard_success(
+                        &message,
+                        Some(json!({
+                            "session_id": s.session_id,
+                            "title": s.title,
+                            "status": status_text(s.status),
+                            "mode": s.mode,
+                            "working_directory": s.working_directory,
+                            "updated_at": s.updated_at,
+                            "message_count": s.messages.len(),
+                            "delegated_by_companion": s.delegated_by_companion,
+                            "final_summary": final_summary,
+                        })),
+                    )
+                }
                 None => ToolResult::standard_error("会话不存在", Some(&format!("未找到 {sid}")), None),
             }
         } else {
@@ -332,6 +387,8 @@ impl Tool for GetWorkStatusTool {
                         "status": status_text(s.status),
                         "working_directory": s.working_directory,
                         "updated_at": s.updated_at,
+                        "delegated_by_companion": s.delegated_by_companion,
+                        "has_final_summary": latest_work_summary(s).is_some(),
                     })
                 })
                 .collect();

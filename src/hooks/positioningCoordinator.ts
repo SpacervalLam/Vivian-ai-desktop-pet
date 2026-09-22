@@ -25,6 +25,30 @@ export interface PositioningCoordinator {
   /** 智能避让正在平滑移动窗口；自主走路必须等它完成。 */
   smartPositioningInFlight: boolean;
   /**
+   * 桌宠正在执行「戳烦了逃离」的位移；此时智能避让与自主漫步都必须让路。
+   *
+   * 与 ambientMoveInFlight 分开记，是因为两者的优先级不同：自主漫步是可选调度，
+   * 可以让给避让；而逃离是用户戳出来的当场反应，一旦起步就该独占窗口——所以它
+   * 不仅拦住后来者，还会主动按停正在进行的避让（见 abortSmartMove）。
+   */
+  fleeInFlight: boolean;
+  /**
+   * 用户已经**把窗口拖起来了**（后端拖动会话进行中，窗口在跟着光标走）。
+   *
+   * 逃离要问的是「窗口归谁」：一旦人真的抓住了它，位移就该当场让位，否则两个写手
+   * 同时往 `set_window_position` 里塞坐标，桌宠来回抖。光看「手指按在桌宠身上多久」
+   * 不够——窗口一旦滑开，光标就落到桌宠旁边的透明区上，按在那里画布是看不见的
+   * （mousedown 走的是背景层），所以由 App 在真正开拖时把这件事记在这里。
+   */
+  dragInFlight: boolean;
+  /**
+   * 中止正在进行的智能避让滑动（useSmartPositioning 注册）。
+   *
+   * 逃离起步时调用：避让的滑动循环每一帧都会重读会话代号，自增即当帧退出，
+   * 否则两个写手会同时往 set_window_position 里塞坐标，桌宠来回抖。
+   */
+  abortSmartMove: (() => void) | null;
+  /**
    * useSmartPositioning 启动时注册的强制检查回调。
    * restore 完成后调用，立即触发一次跳过 unchanged 优化的屏幕捕获，
    * 将桌宠移动到当前屏幕最纯色位置。
@@ -37,5 +61,8 @@ export const positioningCoordinator: PositioningCoordinator = {
   fullscreenInFlight: false,
   ambientMoveInFlight: false,
   smartPositioningInFlight: false,
+  fleeInFlight: false,
+  dragInFlight: false,
+  abortSmartMove: null,
   triggerSmartCheck: null,
 };

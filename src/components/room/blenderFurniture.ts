@@ -9,7 +9,7 @@ export type FurnitureSlot = {
 };
 
 /** The procedural furniture remains usable until a complete asset has loaded. */
-export function loadBlenderFurniture(slots: FurnitureSlot[], onLoaded: () => void): () => void {
+export function loadBlenderFurniture(slots: FurnitureSlot[], onLoaded: () => void, prepareAsset?: (asset: THREE.Object3D, id: string) => void): () => void {
   let disposed = false;
   const textures = new Set<THREE.Texture>();
   const ownedGeometries = new Set<THREE.BufferGeometry>();
@@ -66,6 +66,7 @@ export function loadBlenderFurniture(slots: FurnitureSlot[], onLoaded: () => voi
       asset.position.set(0, 0, 0);
       asset.quaternion.identity();
       asset.scale.set(1, 1, 1);
+      prepareAsset?.(asset, spec.id);
       root.add(asset);
       asset.updateMatrixWorld(true);
       asset.traverse((o) => { o.updateMatrix(); o.matrixAutoUpdate = false; });

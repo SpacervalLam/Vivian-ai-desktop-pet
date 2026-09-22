@@ -23,7 +23,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
-use crate::plugins::{EmbeddingProviderPresetData, ProviderPresetData};
+use crate::plugins::{EmbeddingModelPresetData, EmbeddingProviderPresetData, ProviderPresetData};
 use crate::skills::SkillService;
 use crate::tools::custom_tools::CustomToolDef;
 use crate::tools::mcp::McpServerConfig;
@@ -313,21 +313,68 @@ fn parse_providers(input: &Value) -> Result<Vec<ProviderPresetData>, String> {
         .collect()
 }
 
+/// 解析厂商级云端嵌入预设（与 `embedding-providers.json` 同构）
 fn parse_embeddings(input: &Value) -> Result<Vec<EmbeddingProviderPresetData>, String> {
     let Some(arr) = input.get("embeddings").and_then(Value::as_array) else {
         return Ok(Vec::new());
     };
     arr.iter()
         .map(|p| {
+            let str_of = |key: &str| {
+                p.get(key)
+                    .and_then(Value::as_str)
+                    .map(|v| v.trim().to_string())
+            };
             Ok(EmbeddingProviderPresetData {
-                id: p.get("id").and_then(Value::as_str).unwrap_or("").trim().to_string(),
-                provider: p.get("provider").and_then(Value::as_str).unwrap_or("").trim().to_string(),
-                endpoint: p.get("endpoint").and_then(Value::as_str).unwrap_or("").trim().to_string(),
-                model: p.get("model").and_then(Value::as_str).unwrap_or("").trim().to_string(),
-                dimension: p.get("dimension").and_then(Value::as_u64).unwrap_or(0) as usize,
-                recommended_for: p.get("recommendedFor").and_then(Value::as_str).map(str::to_string),
+                id: str_of("id").unwrap_or_default(),
+                provider: str_of("provider").unwrap_or_default(),
+                endpoint: str_of("endpoint").unwrap_or_default(),
+                models: p
+                    .get("models")
+                    .and_then(Value::as_array)
+                    .map(|rows| {
+                        rows.iter()
+                            .map(|m| EmbeddingModelPresetData {
+                                model: m
+                                    .get("model")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("")
+                                    .trim()
+                                    .to_string(),
+                                dimension: m
+                                    .get("dimension")
+                                    .and_then(Value::as_u64)
+                                    .unwrap_or(0) as usize,
+                                max_batch: m
+                                    .get("maxBatch")
+                                    .and_then(Value::as_u64)
+                                    .map(|v| v as usize),
+                                dimensions: m.get("dimensions").and_then(Value::as_array).map(
+                                    |xs| {
+                                        xs.iter()
+                                            .filter_map(Value::as_u64)
+                                            .map(|v| v as usize)
+                                            .collect()
+                                    },
+                                ),
+                                note: m
+                                    .get("note")
+                                    .and_then(Value::as_str)
+                                    .map(str::to_string),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                region: str_of("region"),
+                console_url: str_of("consoleUrl"),
+                dimension_param: str_of("dimensionParam"),
+                needs_api_key: p
+                    .get("needsApiKey")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true),
+                recommended_for: str_of("recommendedFor"),
                 verified_at: None,
-                verified_source: p.get("verifiedSource").and_then(Value::as_str).map(str::to_string),
+                verified_source: str_of("verifiedSource"),
             })
         })
         .collect()
@@ -454,7 +501,7 @@ impl Tool for CreatePluginTool {
                 },
                 "embeddings": {
                     "type": "array",
-                    "description": "Cloud embedding provider presets: complete camelCase rows with id/provider/endpoint/model/dimension and optional recommendedFor/verifiedSource",
+                    "description": "Cloud embedding provider presets (provider-level): {id, provider, endpoint, models:[{model, dimension, maxBatch?, dimensions?, note?}], region?, consoleUrl?, dimensionParam? ('dimensions'|'output_dimension'), needsApiKey?, recommendedFor?, verifiedSource?}",
                     "items": { "type": "object" }
                 }
             },

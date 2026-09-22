@@ -43,6 +43,11 @@ export function useSmartPositioning(
   const enabledRef = useRef(enabled);
   const currentIntervalRef = useRef(POLL_INTERVAL_BASE_MS);
   const timerRef = useRef<number | null>(null);
+  /**
+   * 桌宠窗口上一次检测时的可见性。用于识别「隐藏 → 恢复显示」的边界：
+   * 恢复那一刻做一次强制检测，让桌宠尽快重新锚定到纯色位置。
+   */
+  const wasVisibleRef = useRef(true);
   const focusCheckTimerRef = useRef<number | null>(null);
   const lastForegroundSwitchRef = useRef(0);
   const focusedRef = useRef(false);
@@ -148,7 +153,7 @@ export function useSmartPositioning(
       /**
        * 打断时把角色送回基准姿态。
        *
-       * 用户按下时由精灵自身的 mousedown 收尾（它会把动作切回基调），这里不抢——
+       * 用户按下时由精灵自身的 mousedown 收尾（它会把动作切回 idle），这里不抢——
        * 否则会盖掉随后下发的「被拎起」姿态。其余打断（获得焦点、卸载）如果不收尾，
        * 角色会定格在侧身或抬腿的格子上。
        */
@@ -185,7 +190,7 @@ export function useSmartPositioning(
       if (!completed) return abortToRest();
 
       // 走动与滑动共用同一段时间轴，等走动收尾再回身：否则角色会停在抬腿到一半的
-      // 格子上，或者腿还在摆就被硬切回待机。回身是位移的退场过渡，转回正面后才回落基调。
+      // 格子上，或者腿还在摆就被硬切回待机。回身是位移的退场过渡，转回正面后才回落 idle。
       // 走动若被别的动作（说话/表情）抢走，那是新动作的舞台，不再插手去盖它。
       if (walkDone) {
         const walked = await walkDone;
@@ -197,12 +202,29 @@ export function useSmartPositioning(
     const runCheck = async (force = false) => {
       if (inFlightRef.current) return;
       if (cancelled || !enabledRef.current || !modelReadyRef.current) return;
+      // 桌宠整体不可见（离线藏入托盘、进入公寓被 Rust 隐藏、WebView 冻结失败等）
+      // 时，屏幕捕获与纯色分析毫无意义：跳过本次检测，定时截图随之停止。
+      // isVisible 是轻量 IPC，隐藏期间把它当作低频心跳即可。
+      const win = getCurrentWindow();
+      const visible = await win.isVisible().catch(() => true);
+      if (!visible) {
+        currentIntervalRef.current = POLL_INTERVAL_MAX_MS;
+        wasVisibleRef.current = false;
+        return;
+      }
+      if (!wasVisibleRef.current) {
+        // 从隐藏恢复显示：立即做一次强制检测重新锚定，不等常规轮询慢慢回升
+        wasVisibleRef.current = true;
+        force = true;
+      }
       if (focusedRef.current) return;
       // 用户正在按住/拖动桌宠：整体跳过。仅靠 focusedRef 不够——mousedown
       // 早于焦点事件，且长按期间窗口无位移、焦点也可能尚未落到桌宠窗口。
       if (userInteractingRef.current) return;
+      // 逃离（戳烦了）与自主漫步都在用窗口：前者是用户戳出来的当场反应，谁都不许跟它抢。
       if (
         positioningCoordinator.ambientMoveInFlight ||
+        positioningCoordinator.fleeInFlight ||
         (!force &&
           (positioningCoordinator.fullscreenInFlight ||
             positioningCoordinator.fullscreenHidden))
@@ -215,7 +237,6 @@ export function useSmartPositioning(
       // 本次滑动的会话代号：交互/失焦打断时自增，滑动循环据此当帧退出
       const token = ++moveTokenRef.current;
       try {
-        const win = getCurrentWindow();
         const [pos, size] = await Promise.all([win.outerPosition(), win.outerSize()]);
         if (cancelled) return;
         // 截图/规划期间用户可能已经按下桌宠，重新确认再继续
@@ -314,6 +335,8 @@ export function useSmartPositioning(
     positioningCoordinator.triggerSmartCheck = () => {
       void runCheck(true);
     };
+    // 让逃离能按停正在进行的避让滑动（自增会话代号，滑动的下一帧即退出）
+    positioningCoordinator.abortSmartMove = abortMove;
 
     const startupDelay = charOffset + Math.floor(Math.random() * STARTUP_JITTER_MAX_MS);
     timerRef.current = window.setTimeout(() => {
@@ -336,6 +359,7 @@ export function useSmartPositioning(
       unlistenFocus?.();
       positioningCoordinator.smartPositioningInFlight = false;
       positioningCoordinator.triggerSmartCheck = null;
+      positioningCoordinator.abortSmartMove = null;
     };
   }, [enabled]);
 }

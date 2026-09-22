@@ -1,66 +1,228 @@
 [
   {
-    "id": "alibaba-qwen37",
-    "provider": "Alibaba Cloud Model Studio",
-    "endpoint": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-    "model": "qwen3.7-text-embedding",
-    "dimension": 1024,
-    "recommendedFor": "中国大陆、中文、多语和代码检索"
-  },
-  {
-    "id": "alibaba-qwen37-flash",
-    "provider": "Alibaba Cloud Model Studio",
-    "endpoint": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-    "model": "qwen3.7-text-embedding-flash",
-    "dimension": 1024,
-    "recommendedFor": "中国大陆低成本、低延迟检索"
-  },
-  {
-    "id": "alibaba-embedding-v4",
-    "provider": "Alibaba Cloud Model Studio",
-    "endpoint": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-    "model": "text-embedding-v4",
-    "dimension": 1024,
-    "recommendedFor": "中文通用检索"
-  },
-  {
-    "id": "voyage-4-large",
-    "provider": "Voyage AI",
-    "endpoint": "https://api.voyageai.com/v1",
-    "model": "voyage-4-large",
-    "dimension": 1024,
-    "recommendedFor": "国际服务、质量优先"
-  },
-  {
-    "id": "voyage-4",
-    "provider": "Voyage AI",
-    "endpoint": "https://api.voyageai.com/v1",
-    "model": "voyage-4",
-    "dimension": 1024,
-    "recommendedFor": "国际服务、质量和价格平衡"
-  },
-  {
-    "id": "voyage-4-lite",
-    "provider": "Voyage AI",
-    "endpoint": "https://api.voyageai.com/v1",
-    "model": "voyage-4-lite",
-    "dimension": 1024,
-    "recommendedFor": "国际服务、成本和延迟优先"
-  },
-  {
-    "id": "openai-embedding-3-small",
+    "id": "openai",
     "provider": "OpenAI",
     "endpoint": "https://api.openai.com/v1",
-    "model": "text-embedding-3-small",
-    "dimension": 1536,
-    "recommendedFor": "OpenAI 生态兼容"
+    "region": "国际",
+    "consoleUrl": "https://platform.openai.com/api-keys",
+    "dimensionParam": "dimensions",
+    "recommendedFor": "OpenAI 生态；英文/多语检索，维度可调",
+    "models": [
+      {
+        "model": "text-embedding-3-small",
+        "dimension": 1536,
+        "dimensions": [1536, 1024, 512],
+        "note": "性价比首选"
+      },
+      {
+        "model": "text-embedding-3-large",
+        "dimension": 3072,
+        "dimensions": [3072, 1536, 1024, 512],
+        "note": "质量优先，向量更大"
+      }
+    ],
+    "verifiedAt": "2026-09-21",
+    "verifiedSource": "https://platform.openai.com/docs/api-reference/embeddings"
   },
   {
-    "id": "openai-embedding-3-large",
-    "provider": "OpenAI",
-    "endpoint": "https://api.openai.com/v1",
-    "model": "text-embedding-3-large",
-    "dimension": 3072,
-    "recommendedFor": "OpenAI 生态、质量优先"
+    "id": "gemini",
+    "provider": "Google Gemini",
+    "endpoint": "https://generativelanguage.googleapis.com/v1beta/openai",
+    "region": "国际",
+    "consoleUrl": "https://aistudio.google.com/apikey",
+    "recommendedFor": "Google 生态；多语检索，兼容层为 Beta",
+    "models": [
+      {
+        "model": "gemini-embedding-001",
+        "dimension": 3072,
+        "note": "纯文本；默认 3072 维，如报维度不匹配请按实际返回调整"
+      },
+      {
+        "model": "gemini-embedding-2-preview",
+        "dimension": 3072,
+        "note": "多模态嵌入（预览版）"
+      }
+    ],
+    "verifiedAt": "2026-09-21",
+    "verifiedSource": "https://ai.google.dev/gemini-api/docs/openai"
+  },
+  {
+    "id": "voyage",
+    "provider": "Voyage AI",
+    "endpoint": "https://api.voyageai.com/v1",
+    "region": "国际",
+    "consoleUrl": "https://dashboard.voyageai.com/organization/api-keys",
+    "dimensionParam": "output_dimension",
+    "recommendedFor": "国际服务；检索质量优先，维度参数名与 OpenAI 不同",
+    "models": [
+      { "model": "voyage-4-large", "dimension": 1024, "dimensions": [2048, 1024, 512, 256], "note": "质量优先" },
+      { "model": "voyage-4", "dimension": 1024, "dimensions": [2048, 1024, 512, 256], "note": "质量与成本平衡" },
+      { "model": "voyage-4-lite", "dimension": 1024, "dimensions": [2048, 1024, 512, 256], "note": "成本与延迟优先" }
+    ],
+    "verifiedAt": "2026-09-21",
+    "verifiedSource": "https://docs.voyageai.com/docs/embeddings"
+  },
+  {
+    "id": "cohere",
+    "provider": "Cohere",
+    "endpoint": "https://api.cohere.ai/compatibility/v1",
+    "region": "国际",
+    "consoleUrl": "https://dashboard.cohere.com/api-keys",
+    "recommendedFor": "多语检索；兼容层不支持 dimensions，维度固定",
+    "models": [
+      {
+        "model": "embed-v4.0",
+        "dimension": 1024,
+        "note": "兼容层不支持 dimensions/input_type，按默认 1024 维输出"
+      }
+    ],
+    "verifiedAt": "2026-09-21",
+    "verifiedSource": "https://docs.cohere.com/docs/compatibility-api"
+  },
+  {
+    "id": "mistral",
+    "provider": "Mistral AI",
+    "endpoint": "https://api.mistral.ai/v1",
+    "region": "国际",
+    "consoleUrl": "https://console.mistral.ai/api-keys",
+    "recommendedFor": "欧洲区服务；维度固定 1024",
+    "models": [
+      { "model": "mistral-embed", "dimension": 1024, "note": "维度固定，不支持 dimensions" }
+    ],
+    "verifiedAt": "2026-09-21",
+    "verifiedSource": "https://docs.mistral.ai/api/#tag/embeddings"
+  },
+  {
+    "id": "jina",
+    "provider": "Jina AI",
+    "endpoint": "https://api.jina.ai/v1",
+    "region": "国际",
+    "consoleUrl": "https://jina.ai/embeddings/",
+    "recommendedFor": "多语/多模态检索；v4 为多模态模型",
+    "models": [
+      { "model": "jina-embeddings-v4", "dimension": 2048, "note": "多模态，默认 2048 维" },
+      { "model": "jina-embeddings-v3", "dimension": 1024, "note": "纯文本，默认 1024 维" }
+    ],
+    "verifiedAt": "2026-09-21",
+    "verifiedSource": "https://jina.ai/embeddings/"
+  },
+  {
+    "id": "glm",
+    "provider": "智谱 AI (BigModel)",
+    "endpoint": "https://open.bigmodel.cn/api/paas/v4",
+    "region": "中国大陆",
+    "consoleUrl": "https://open.bigmodel.cn/apikey/platform",
+    "dimensionParam": "dimensions",
+    "recommendedFor": "中国大陆、中文检索首选",
+    "models": [
+      {
+        "model": "embedding-3",
+        "dimension": 1024,
+        "maxBatch": 64,
+        "dimensions": [2048, 1024, 512, 256],
+        "note": "服务端默认 2048 维；适配器按配置维度下发 dimensions，故填 1024 即得 1024 维"
+      },
+      {
+        "model": "embedding-2",
+        "dimension": 1024,
+        "maxBatch": 64,
+        "note": "维度固定 1024；单条上限 512 tokens，长文本需先切分"
+      }
+    ],
+    "verifiedAt": "2026-09-21",
+    "verifiedSource": "https://docs.bigmodel.cn/api-reference/%E6%A8%A1%E5%9E%8B-api/%E6%96%87%E6%9C%AC%E5%B5%8C%E5%85%A5"
+  },
+  {
+    "id": "qwen",
+    "provider": "阿里云百炼 (DashScope)",
+    "endpoint": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "region": "中国大陆",
+    "consoleUrl": "https://bailian.console.aliyun.com/?apiKey=1",
+    "dimensionParam": "dimensions",
+    "recommendedFor": "中国大陆、中文/多语检索；注意各模型批次上限极小",
+    "models": [
+      {
+        "model": "qwen3.7-text-embedding",
+        "dimension": 1024,
+        "maxBatch": 20,
+        "dimensions": [2560, 2048, 1536, 1024, 768, 512, 256],
+        "note": "单请求最多 20 条"
+      },
+      {
+        "model": "text-embedding-v4",
+        "dimension": 1024,
+        "maxBatch": 10,
+        "dimensions": [2048, 1536, 1024, 768, 512, 256, 128, 64],
+        "note": "单请求最多 10 条，适配器会自动分块"
+      },
+      {
+        "model": "text-embedding-v3",
+        "dimension": 1024,
+        "maxBatch": 10,
+        "dimensions": [1024, 768, 512, 256, 128, 64],
+        "note": "上一代模型，批次上限按 10 保守取值"
+      }
+    ],
+    "verifiedAt": "2026-09-21",
+    "verifiedSource": "https://help.aliyun.com/zh/model-studio/embedding"
+  },
+  {
+    "id": "siliconflow",
+    "provider": "硅基流动 (SiliconFlow)",
+    "endpoint": "https://api.siliconflow.cn/v1",
+    "region": "中国大陆",
+    "consoleUrl": "https://cloud.siliconflow.cn/account/ak",
+    "recommendedFor": "中国大陆；开源嵌入模型托管，Qwen3-Embedding 系列维度可到 4096",
+    "models": [
+      { "model": "Qwen/Qwen3-Embedding-0.6B", "dimension": 1024, "note": "轻量，默认 1024 维" },
+      { "model": "Qwen/Qwen3-Embedding-4B", "dimension": 2560, "note": "默认 2560 维" },
+      { "model": "Qwen/Qwen3-Embedding-8B", "dimension": 4096, "note": "默认 4096 维，向量最大" },
+      { "model": "BAAI/bge-m3", "dimension": 1024, "note": "中文/多语经典模型" }
+    ],
+    "verifiedAt": "2026-09-21",
+    "verifiedSource": "https://www.siliconflow.com/zh-tw/models/embedding"
+  },
+  {
+    "id": "ollama",
+    "provider": "Ollama（本地）",
+    "endpoint": "http://127.0.0.1:11434/v1",
+    "region": "本地",
+    "consoleUrl": "https://ollama.com/library",
+    "needsApiKey": false,
+    "recommendedFor": "本地离线、零成本；走 /api/embed，端点免鉴权",
+    "models": [
+      { "model": "bge-m3", "dimension": 1024, "note": "推荐；中英多语" },
+      { "model": "nomic-embed-text", "dimension": 768, "note": "英文为主" }
+    ],
+    "verifiedAt": "2026-09-21",
+    "verifiedSource": "https://github.com/ollama/ollama/blob/main/docs/api.md"
+  },
+  {
+    "id": "lmstudio",
+    "provider": "LM Studio（本地）",
+    "endpoint": "http://127.0.0.1:1234/v1",
+    "region": "本地",
+    "consoleUrl": "https://lmstudio.ai/docs/local-server",
+    "needsApiKey": false,
+    "recommendedFor": "本地离线；模型名以 LM Studio 里加载的名字为准",
+    "models": [
+      { "model": "text-embedding-bge-m3", "dimension": 1024, "note": "模型名随所加载的 GGUF 而变，可直接改写" }
+    ],
+    "verifiedAt": "2026-09-21",
+    "verifiedSource": "https://lmstudio.ai/docs/app/api/endpoints/openai"
+  },
+  {
+    "id": "vllm",
+    "provider": "vLLM / Xinference（本地）",
+    "endpoint": "http://127.0.0.1:8000/v1",
+    "region": "本地",
+    "consoleUrl": "https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html",
+    "needsApiKey": false,
+    "recommendedFor": "自建 OpenAI 兼容服务；Xinference 默认端口 9997",
+    "models": [
+      { "model": "BAAI/bge-m3", "dimension": 1024, "note": "模型名与启动时 --model 一致" }
+    ],
+    "verifiedAt": "2026-09-21",
+    "verifiedSource": "https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html"
   }
 ]

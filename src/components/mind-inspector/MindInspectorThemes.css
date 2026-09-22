@@ -63,6 +63,17 @@
   border-left: 1px solid var(--codex-line-light);
 }
 
+/* 收起态要把这条边框收掉 —— 但**基类那条 `.codex-inspector.collapsed
+   { border-left-width: 0 }` 压不住它**：上面这条选择器是 (0,3,0)，
+   基类只有 (0,2,0)，而且用的是 `border-left` **简写**（会把 width 一起写回 1px）。
+   于是右栏收起后仍占 1px、右缘留一条竖线。
+   修法是在**同一个作用域**里把收起态也写出来（(0,4,0) 稳赢），而不是去基类上加
+   `!important` —— 谁设的边框谁负责清，出问题就在这两行旁边能看到。 */
+.mind-main[data-ui-style="scrapbook"] .codex-inspector.collapsed,
+.mind-main[data-ui-style="minimal"] .codex-inspector.collapsed {
+  border-left-width: 0;
+}
+
 .mind-main[data-ui-style="scrapbook"] .codex-topbar {
   border-bottom: 1px solid var(--codex-line-light);
 }
@@ -77,12 +88,32 @@
 
 /* ========================== Minimal / Codex style ======================== */
 
+/* 调色板有**三个**作用域，缺一不可：
+     ① .mind-main / .workbench-root —— 内联内容（正常渲染在主题根里）；
+     ② .mind-inspector-root —— 窗口外壳（封面条 / 贴纸导航卡 / 页内 Tab 栏）。
+        它们是 .mind-main 的祖先或兄弟，后代选择器够不着，只能把标记也打在窗口根上
+        （见 MindInspector.tsx 里那段注释）。变量设在根上会向下继承，
+        所以内容区照旧拿得到同一套值。
+     ③ body[data-ui-style] :is(<portal 弹层>) —— 弹层挂在 document.body 上，
+        逃出了 .mind-main，只能靠镜像到 body 的标记取调色板
+        （见 MindInspector.tsx 里 setAttribute('data-ui-style') 那段注释）。
+   弹层清单：选区浮卡 / 就地改写卡 / 输入框气泡 / 页签右键菜单 / 会话右键菜单 / 会话弹窗。
+   新增 portal 弹层时记得把类名加进下面这个 :is() 列表，否则它在极简模式下会穿手账的衣服。 */
+
 .mind-main[data-ui-style="minimal"],
-.mind-main[data-ui-style="minimal"] .workbench-root {
+.mind-inspector-root[data-ui-style="minimal"],
+.mind-main[data-ui-style="minimal"] .workbench-root,
+body[data-ui-style="minimal"] :is(.codex-selbubble, .codex-editcard-overlay, .codex-composer-bubble, .codex-context-menu, .codex-session-context-menu, .codex-session-modal) {
   --codex-paper: #fff;
   --codex-paper-deep: #f4f4f5;
   --codex-paper-card: #fafafa;
   --codex-paper-grid: transparent;
+  /* 滚动条滑块色。`.codex-theme` 的调色板里这支是手账的暖棕
+     `rgba(59, 52, 40, .22)`，而自定义属性只在**声明它的元素**上求值、子元素只继承
+     值不重算 —— 不在这里覆盖，极简模式下滚动条会一直是暖棕（原先就是这样）。
+     深浅两套都要写，漏一处那条路径上就退回暖棕。 */
+  --panel-scrollbar: rgba(0, 0, 0, .22);
+  --panel-scrollbar-hover: rgba(0, 0, 0, .34);
   --codex-ink: #18181b;
   --codex-ink-soft: #52525b;
   --codex-ink-faint: #71717a;
@@ -95,6 +126,14 @@
   --codex-tape-pink: #f4f4f5;
   --codex-tape-blue: #eeeef0;
   --codex-tape-green: #ecf6ef;
+  /* 便利贴变量在极简主题下等于「退回平面卡片」：没有暖黄、没有抬起阴影，描边沿用
+     --codex-line。刻意用 var() 引用而不是写死色值 —— 深色极简块只覆盖颜色，
+     这两条自定义属性会在求值时跟着解析成深色的值，不必两处同步。
+     底部的 border-radius: 7px 规则会另外把圆角从手账的 3px 拉回 7px。 */
+  --codex-note-bg: var(--codex-paper-card);
+  --codex-note-line: var(--codex-line);
+  --codex-note-shadow: none;
+  --codex-note-ink-faint: var(--codex-ink-faint);
   /* 置顶摘要的卡片底色。极简主题要求纯白：手账那张奶油纸（--codex-paper-card
      是 #fafafa，更早甚至是 rgba(255,252,243)）在极简的灰白界面里明显发黄。 */
   --codex-pinned-bg: #fff;
@@ -140,6 +179,23 @@
   --panel-menu: #fff;
   --panel-tip: #f7f7f8;
   --panel-sidebar-fill: #f7f7f8;
+}
+
+/* 「窗口纸面」铺在**内联内容**与**窗口根**上，绝不能套给 portal 弹层。
+   窗口根（.mind-inspector-root）是这条规则存在的关键：它带着 .codex-theme，
+   于是整个窗口底上铺的是手账的 --codex-paper（#f6efe1）+ 22px 点阵网格；
+   而 .mind-main 只盖住右侧内容区，封面条的四周留白、主体左缘那条 16px 让位带
+   都还露着窗口根 —— 极简模式下就成了「灰白内容区浮在一块奶油纸上」。
+   这里用 background **简写**一并清掉 background-image 与 background-size（22px），
+   否则点阵网格照样画在极简的纯白/深灰底上。
+
+   弹层要的只是上面那批变量；底色/描边由各弹层自己的规则声明（.codex-selbubble、
+   .codex-context-menu…）。这里若把 background 也套给弹层，弹层根节点那个矩形就会
+   重新铺上一层纸色 —— 正是「浮卡四个角露出底色」这个 bug 本身
+   （手账下是 --codex-paper 的米白，极简下是纯白）。 */
+.mind-main[data-ui-style="minimal"],
+.mind-inspector-root[data-ui-style="minimal"],
+.mind-main[data-ui-style="minimal"] .workbench-root {
   background: var(--codex-paper);
   background-image: none;
   color: var(--codex-ink);
@@ -148,10 +204,20 @@
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) .mind-main[data-ui-style="minimal"],
-  :root:not([data-theme="light"]) .mind-main[data-ui-style="minimal"] .workbench-root {
+  :root:not([data-theme="light"]) .mind-inspector-root[data-ui-style="minimal"],
+  :root:not([data-theme="light"]) .mind-main[data-ui-style="minimal"] .workbench-root,
+  :root:not([data-theme="light"]) body[data-ui-style="minimal"] :is(.codex-selbubble, .codex-editcard-overlay, .codex-composer-bubble, .codex-context-menu, .codex-session-context-menu, .codex-session-modal) {
     --codex-paper: #181818;
     --codex-paper-deep: #111;
     --codex-paper-card: #202020;
+    /* 浅色块里已经写了 `--codex-paper-grid: transparent`（极简没有点阵纸），
+       深色块漏了它 —— 而深色手账的 `:root[data-theme="dark"] .codex-theme` 同样是
+       (0,4,0) 且声明了这一支，窗口根（不再是 .mind-main 那种靠 `background-image: none`
+       兜底的地方）就会把深色手账的 22px 点阵画出来。补上，让「极简无点阵」这条
+       在深浅两套里都由变量本身保证。 */
+    --codex-paper-grid: transparent;
+    --panel-scrollbar: rgba(255, 255, 255, .22);
+    --panel-scrollbar-hover: rgba(255, 255, 255, .34);
     --codex-ink: #f4f4f5;
     --codex-ink-soft: #c4c4ca;
     --codex-ink-faint: #93939c;
@@ -198,10 +264,18 @@
 }
 
 :root[data-theme="dark"] .mind-main[data-ui-style="minimal"],
-:root[data-theme="dark"] .mind-main[data-ui-style="minimal"] .workbench-root {
+:root[data-theme="dark"] .mind-inspector-root[data-ui-style="minimal"],
+:root[data-theme="dark"] .mind-main[data-ui-style="minimal"] .workbench-root,
+:root[data-theme="dark"] body[data-ui-style="minimal"] :is(.codex-selbubble, .codex-editcard-overlay, .codex-composer-bubble, .codex-context-menu, .codex-session-context-menu, .codex-session-modal) {
   --codex-paper: #181818;
   --codex-paper-deep: #111;
   --codex-paper-card: #202020;
+  /* 同上面的深色块：极简没有点阵纸，浅色块里已经写了这一支，深色两套都得跟上 ——
+     否则窗口根会把深色手账的 22px 点阵画出来（.mind-main 那边有
+     `background-image: none`      兜底，窗口根没有）。 */
+  --codex-paper-grid: transparent;
+  --panel-scrollbar: rgba(255, 255, 255, .22);
+  --panel-scrollbar-hover: rgba(255, 255, 255, .34);
   --codex-ink: #f4f4f5;
   --codex-ink-soft: #c4c4ca;
   --codex-ink-faint: #93939c;
@@ -242,6 +316,146 @@
   --panel-sidebar-fill: #141414;
   /* 深色极简下的置顶摘要卡片：比页面(#181818)略亮一档，读起来才像卡片 */
   --codex-pinned-bg: #242424;
+}
+
+/* ===================== 极简主题：窗口外壳的**配色** =====================
+
+   这一节只管「心智观察器这个窗口」的**颜色**，不碰任何形状 ——
+   异形圆角、顶部那道纸感渐变、浮起阴影的位移与模糊、导航卡的毛玻璃、
+   Tab 栏上的纸胶带、旋转 2° 的日期印章、悬停上浮 1px，全部照旧，只是换成极简的色。
+
+   为什么必须单独写一节：窗口外壳的元素**都不在 `.mind-main` 里面**
+   （封面条与导航卡甚至是它的祖先），所以上面那一百多条
+   `.mind-main[data-ui-style="minimal"] …` 一条都够不着它们。补这一节之前的表现是：
+   极简模式下右侧内容区已经是灰白的，窗口底上却还铺着手账的奶油纸 + 点阵网格
+   （纸面那一块由上面的「窗口纸面」规则修掉），封面条是奶油卡片 + 暖金描边按钮，
+   导航卡与页内 Tab 的激活态还是蓝色贴纸。
+
+   作用域挂在窗口根 `.mind-inspector-root[data-ui-style="minimal"]` 上（标记由
+   MindInspector.tsx 打在根节点，与 `.mind-main` 上那个同源同值）。
+   绝大多数颜色走 `var(--codex-*)`，标记一挂上去就自动跟着换 —— 这一节写的都是
+   **不跟主题走**的那几处：两支全局贴纸色、三处写死的手账蓝辉光、
+   一圈写死的暖金描边、深色手账那三条写死的深棕，以及下面第 6 条那批
+   「藏在调色板变量里、却带着非颜色内容」的值。 */
+
+/* --- 1. 贴纸色（--sticker-sky / --sticker-sky-soft）---
+   这两支定义在 global.css 的 :root 上，**不随主题变**。窗口外壳里用到它们的地方：
+   日期印章的底与虚线描边、导航按钮与页内 Tab 的悬停底 / 激活底、「进入公寓」的悬停底。
+   换掉变量本身就全跟着变，一个元素都不用单独写。
+
+   作用域**只给外壳这三块容器**，不是整个窗口根 —— 内容页（JournalPage /
+   OverviewPage / shared-components）也在用 --sticker-sky-soft 做强调底，那属于内容区，
+   不在「窗口配色」的范围里。写在容器上、由子元素继承：印章在封面条里、
+   导航按钮在导航卡里、页内 Tab 在 Tab 栏里，所以三条就覆盖了全部用点。
+
+   下面第 6 条（字体 / 阴影几何）也挂同一批选择器上，理由相同：外壳三块容器就是
+   「窗口外壳」这个视觉单元的全部，写在这三块上等于把整个外壳一次圈进来。 */
+.mind-inspector-root[data-ui-style="minimal"] .mind-sb-cover,
+.mind-inspector-root[data-ui-style="minimal"] .mind-nav-card,
+.mind-inspector-root[data-ui-style="minimal"] .mind-tabs {
+  --sticker-sky: #e4e4e7;
+  --sticker-sky-soft: rgba(24, 24, 27, .06);
+
+  /* --- 6. 调色板变量里藏着的「非颜色」---
+     上面那批 `--codex-*` 里有两支**不只是颜色**，直接跟着极简调色板走会把外壳的
+     外观改掉 —— 而用户要的是「切主题时外壳外观不动，只换色」：
+
+       ① `--codex-font`：手账是 Kalam 手写体链，极简是 Segoe UI 无衬线链。
+          换掉之后封面条标题、日期印章、导航标签、页内 Tab 全变无衬线，连字宽都变了
+          （标题 181.4px → 176.0px，导航卡高度 235px → 202px，全是字体派生出来的）。
+       ② `--codex-shadow-sm/md/lg`：不只颜色不同，**几何也不同** ——
+          手账 sm 是两层（`0 1px 2px, 0 1px 3px`）、极简 sm 只有一层；
+          手账 md 是 `0 2px 8px, 0 1px 2px`、极简 md 是 `0 8px 24px`。
+          换掉之后封面条、导航卡、Tab 栏、那圈窗口按钮的浮起感全变了。
+
+     修法是「按手账的值钉回**几何**，只把**颜色**换成极简的中性色」：
+     字体链原样照抄 CodeAgentPage.css 里 `--codex-font` 的手账值（下面这段
+     字面量与那一行必须一致，`check-mind-shell-theme.mjs` 会逐字比对，改一处漏一处就红）；
+     阴影三级都保持手账的位移 / 模糊 / 层数，色值换成 --codex-ink（浅色 #18181b）。
+
+     为什么要写在容器上而不是「不给窗口根覆盖 --codex-font」：
+     自定义属性在**声明它的元素**上求值，`.mind-inspector-root` 同时是外壳的祖先与
+     内容区的祖先，拆开声明就得把那 70 行调色板按「外壳 / 内容」劈成两半，
+     而深色那两套块也要跟着劈 —— 改动面大得多。写在三块容器上只多 4 行，
+     且内容区（`.mind-main` 子树）照旧拿到极简的无衬线字体与轻阴影。 */
+  font-family: 'Kalam', 'Segoe Print', 'STKaiti', 'KaiTi', '楷体', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  --codex-shadow-sm: 0 1px 2px rgba(24, 24, 27, .1), 0 1px 3px rgba(24, 24, 27, .06);
+  --codex-shadow-md: 0 2px 8px rgba(24, 24, 27, .14), 0 1px 2px rgba(24, 24, 27, .08);
+  --codex-shadow-lg: 0 10px 28px rgba(24, 24, 27, .18), 0 3px 8px rgba(24, 24, 27, .1);
+}
+
+/* --- 2. 激活态的字色 ---
+   导航按钮与页内 Tab 的激活态除了贴纸底，还把字色写死成 #1F2A31（深墨）。
+   底色换成中性灰之后，深色环境下「深字压深灰」会读不出来，所以字色也得跟着换 ——
+   `var(--codex-ink)` 在浅色下是近黑、深色下是近白，两套环境都对。 */
+.mind-inspector-root[data-ui-style="minimal"] .mind-nav-btn.active,
+.mind-inspector-root[data-ui-style="minimal"] .mind-tab.active {
+  color: var(--codex-ink);
+}
+
+/* --- 3. 三处写死的「手账蓝辉光」---
+   `rgba(83, 125, 150, ·)` 就是手账的 --codex-accent（#537d96），被硬编码进了三个
+   box-shadow 里。**只换颜色、保留几何**：同样的位移 / 模糊 / 扩散，换成中性黑。 */
+.mind-inspector-root[data-ui-style="minimal"] .mind-nav-btn:hover {
+  box-shadow: 0 4px 14px rgba(0, 0, 0, .1);
+}
+
+.mind-inspector-root[data-ui-style="minimal"] .mind-nav-btn .mind-nav-active-bar {
+  box-shadow: 0 0 8px rgba(0, 0, 0, .18);
+}
+
+.mind-inspector-root[data-ui-style="minimal"] .mind-tab:hover {
+  box-shadow: 0 3px 12px rgba(0, 0, 0, .08);
+}
+
+/* --- 4. 窗口控制按钮那圈暖金描边 ---
+   `.mind-sb-cover-btn` 的 border 里写死了 rgba(178, 130, 42, .2)（手账的暖金），
+   换成主题的描边色。 */
+.mind-inspector-root[data-ui-style="minimal"] .mind-sb-cover-btn {
+  border-color: var(--codex-line-light);
+}
+
+/* 关闭键悬停：手账用 --codex-warm（暖陶红），极简改用 --codex-danger（正红）。 */
+.mind-inspector-root[data-ui-style="minimal"] .mind-sb-cover-btn.close:hover {
+  background: var(--codex-danger);
+}
+
+/* --- 5. 深色手账那三条写死的深棕 ---
+   MindInspector.css 里有三条深色规则把封面条 / 导航卡 / Tab 栏的底色写死成
+   `rgba(43, 36, 30, ·)`（= 深色手账的 --codex-paper-card #2b241e 带一点透明度，
+   好让纸面点阵透出来）。它们带 (0,4,0)，比上面那些 (0,3,0) 高 —— 不补这两块的话，
+   深色极简下这三块会退回深棕。不去改那三条：它们对手账是对的，这里只是把极简的
+   答案写到 (0,5,0)。
+   底色与上面第 1 条的贴纸色同选择器，合成一个块写。
+   用 background **简写**是为了与那三条保持同样的行为 —— 它们同样会重置
+   background-image（深色手账下封面条本来就没有那道渐变）。 */
+:root[data-theme="dark"] .mind-inspector-root[data-ui-style="minimal"] .mind-sb-cover,
+:root[data-theme="dark"] .mind-inspector-root[data-ui-style="minimal"] .mind-nav-card,
+:root[data-theme="dark"] .mind-inspector-root[data-ui-style="minimal"] .mind-tabs {
+  --sticker-sky: #3f3f46;
+  --sticker-sky-soft: rgba(255, 255, 255, .07);
+  background: var(--codex-paper-card);
+  /* 第 6 条那三级阴影：几何照旧（手账深色与浅色用的是同一组位移 / 模糊 / 层数），
+     颜色本来就是纯黑，所以这里直接照抄深色手账那三条 —— 深色环境下外壳的浮起感
+     在换主题前后逐字节一致。不写的话会继承上面浅色块里那三条 `rgba(24,24,27,·)`，
+     在深色纸面上几乎看不见（这正是修之前的表现）。 */
+  --codex-shadow-sm: 0 1px 2px rgba(0, 0, 0, .45), 0 1px 3px rgba(0, 0, 0, .35);
+  --codex-shadow-md: 0 2px 8px rgba(0, 0, 0, .5), 0 1px 2px rgba(0, 0, 0, .4);
+  --codex-shadow-lg: 0 10px 28px rgba(0, 0, 0, .55), 0 3px 8px rgba(0, 0, 0, .45);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .mind-inspector-root[data-ui-style="minimal"] .mind-sb-cover,
+  :root:not([data-theme="light"]) .mind-inspector-root[data-ui-style="minimal"] .mind-nav-card,
+  :root:not([data-theme="light"]) .mind-inspector-root[data-ui-style="minimal"] .mind-tabs {
+    --sticker-sky: #3f3f46;
+    --sticker-sky-soft: rgba(255, 255, 255, .07);
+    background: var(--codex-paper-card);
+    /* 同上：两套深色路径必须一致 */
+    --codex-shadow-sm: 0 1px 2px rgba(0, 0, 0, .45), 0 1px 3px rgba(0, 0, 0, .35);
+    --codex-shadow-md: 0 2px 8px rgba(0, 0, 0, .5), 0 1px 2px rgba(0, 0, 0, .4);
+    --codex-shadow-lg: 0 10px 28px rgba(0, 0, 0, .55), 0 3px 8px rgba(0, 0, 0, .45);
+  }
 }
 
 .mind-main[data-ui-style="minimal"].is-work-page .mind-page-content {
@@ -302,9 +516,26 @@
   color: var(--codex-ink);
 }
 
-.mind-main[data-ui-style="minimal"] .codex-new-btn {
+/* 「新建任务」是**一行里的两个按钮**：主按钮 `.codex-new-btn` + 下拉箭头
+   `.codex-new-caret`（`aria-label` = 「新建任务选项」）。两者必须一起适配 ——
+   原先只写了主按钮，箭头在极简下把**整套手账外观**原样留着，四样一起露馅：
+
+     ① `border: 1.5px dashed`（手绘虚线框）vs 主按钮的 `1px solid`
+     ② `border-radius: 10px 12px 10px 12px`（异形圆角）vs 主按钮的 `7px`
+     ③ `background: var(--codex-paper)`（纯白 #fff）vs 主按钮的 `--codex-paper-card`（#fafafa）
+     ④ `box-shadow: var(--codex-shadow-sm)` vs 主按钮的 `none`
+
+   还有第 ⑤ 条更隐蔽：`.codex-new-row` 是 `align-items: stretch`，而极简给主按钮加了
+   `margin-bottom: 8px` —— 箭头没有，于是被**一路撑到 44px**（= 主按钮 36 + 它的 8px
+   外边距），比主按钮整整高出一截、还多探出 8px。实测箭头 30×44 vs 主按钮 184×36。
+
+   第 ⑥ 条是悬浮态：箭头在极简下悬浮走的是**基类**那条
+   `.codex-new-caret:hover { border-color: var(--codex-accent); background: #fbf4e6 }`
+   —— 也就是**在手账的暖奶油底上亮起来**（实测 `rgb(255,255,255) → rgb(251,244,230)`），
+   在灰白界面里格外扎眼。`.open`（下拉展开）同样。 */
+.mind-main[data-ui-style="minimal"] .codex-new-btn,
+.mind-main[data-ui-style="minimal"] .codex-new-caret {
   height: 36px;
-  margin: 0 10px 8px;
   border: 1px solid var(--codex-line);
   border-radius: 7px;
   background: var(--codex-paper-card);
@@ -312,9 +543,46 @@
   font-size: 13px;
 }
 
-.mind-main[data-ui-style="minimal"] .codex-new-btn:hover {
+/* 行内两侧各留 10px（`.codex-new-row` 自己还有 12px），两个按钮左右对称。
+   箭头**必须**跟着写 bottom 8px —— 见上面第 ⑤ 条。 */
+.mind-main[data-ui-style="minimal"] .codex-new-btn { margin: 0 10px 8px; }
+.mind-main[data-ui-style="minimal"] .codex-new-caret { margin: 0 10px 8px 0; }
+
+.mind-main[data-ui-style="minimal"] .codex-new-btn:hover,
+.mind-main[data-ui-style="minimal"] .codex-new-caret:hover,
+.mind-main[data-ui-style="minimal"] .codex-new-caret.open {
   transform: none;
   border-color: var(--codex-line);
+  background: var(--panel-bg-hover);
+}
+
+/* **深色下这三条 hover 会被压掉**，必须单独补一次 —— 同 `.codex-inspector.collapsed` 那类问题，
+   但这次不是「静止态压 hover」，而是**两条 hover 互相压**：
+
+     `.mind-main[data-ui-style="minimal"] .codex-new-btn:hover`            → (0,4,0)  极简自己的
+     `:root:not([data-theme="light"]) .workbench-root .codex-new-btn:hover` → (0,5,0)  深色手账的修正
+
+   CodeAgentPage.css 尾部那组「深色模式局部修正」是给**手账**写的：手账的静止态不是
+   `--codex-paper-card`，所以 hover 抬到纸卡色能看出变化。可极简的静止态**本来就是**
+   `var(--codex-paper-card)`（见上面那条静止态规则），于是 (0,5,0) 那支把它盖成同一个颜色 ——
+   **深色极简下「新建任务」与它的下拉箭头悬浮都毫无反馈**（浅色没有这个问题：那组
+   workbench 修正只在 `prefers-color-scheme: dark` / `[data-theme="dark"]` 里）。
+   实测（主按钮）：静止 `rgb(32,32,32)`，悬浮 `rgb(32,32,32)`，逐像素无差。
+
+   修法沿用本文件既有的「深色极简要盖过深色手账」写法（见 206 行 / 266 行那两组），
+   把特异性抬到 (0,6,0)。两支都要写，漏一支那条路径上就退回「悬浮无反馈」。
+   `.codex-new-caret.open` 也要一起列 —— 深色手账那组同样声明了它。 */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .mind-main[data-ui-style="minimal"] .codex-new-btn:hover,
+  :root:not([data-theme="light"]) .mind-main[data-ui-style="minimal"] .codex-new-caret:hover,
+  :root:not([data-theme="light"]) .mind-main[data-ui-style="minimal"] .codex-new-caret.open {
+    background: var(--panel-bg-hover);
+  }
+}
+
+:root[data-theme="dark"] .mind-main[data-ui-style="minimal"] .codex-new-btn:hover,
+:root[data-theme="dark"] .mind-main[data-ui-style="minimal"] .codex-new-caret:hover,
+:root[data-theme="dark"] .mind-main[data-ui-style="minimal"] .codex-new-caret.open {
   background: var(--panel-bg-hover);
 }
 
@@ -337,6 +605,37 @@
   border-radius: 6px;
   background: transparent;
   box-shadow: none;
+}
+
+/* 上面那条把三者的 `background` 写成了 `transparent`，特异性 (0,3,0) ——
+   **它顺带把基类的 `:hover` 高亮压死了。**
+   基类的 `.codex-session-item:hover` / `.codex-tree-node:hover` / `.codex-workspace-chip:hover`
+   都只有 (0,2,0)：伪类算在 class 那一档，`[data-ui-style="minimal"]` 那一节多出的
+   属性选择器 + 类名让它稳输。于是极简模式下**会话列表行、文件树节点、工作区标签
+   悬浮时完全没有反馈**（手账下分别是纸蓝底 `rgba(83,125,150,.06)` / `.07` / 暖白 `#fffcf3`），
+   而这三个恰好是工作页里最常悬停的内容。
+
+   修法同本文件里 `.codex-inspector.collapsed` 那条：**在同一个作用域里把 `:hover`
+   也写出来**，而不是去基类上加 `!important` —— 谁把 background 设成 transparent 的，
+   谁负责把 hover 补回来，出问题就在这两块旁边能看到。
+
+   颜色用极简节既有的 `--panel-bg-hover`（`rgba(24,24,27,.055)` / 深色
+   `rgba(255,255,255,.06)`）—— 与 `.codex-worktodo-row:hover`、`.codex-icon-btn:hover`、
+   `.codex-lsp-loc:hover` 同一支，不再带蓝调。
+
+   `:not(.active)` 是为了对齐手账的行为：基类里 `.codex-session-item.active` 排在
+   `:hover` **之后**（同特异性、靠源序取胜），所以手账下当前选中的那一行悬浮时也不变色；
+   这里保持一致，免得选中的那行一悬浮反而变浅。 */
+.mind-main[data-ui-style="minimal"] .codex-session-item:not(.active):hover,
+.mind-main[data-ui-style="minimal"] .codex-tree-node:hover {
+  background: var(--panel-bg-hover);
+}
+
+/* 工作区标签在手账下悬浮是「描边加深 + 暖白底」，极简的静止态是**无描边**（被上面那条
+   写成 transparent），所以 hover 要把描边一起还回来 —— 同 `.codex-new-btn:hover` 的做法。 */
+.mind-main[data-ui-style="minimal"] .codex-workspace-chip:hover {
+  border-color: var(--codex-line);
+  background: var(--panel-bg-hover);
 }
 
 .mind-main[data-ui-style="minimal"] .codex-session-item.active {
@@ -473,6 +772,15 @@
   box-shadow: none;
 }
 
+/* 同上一处：`background: var(--panel-bg-surface)` 是 (0,3,0)，压掉了基类
+   `.codex-dropdown-trigger:hover`（(0,2,0)）的暖白底与 `--codex-line` 描边 ——
+   极简下这个「模型 / 模式选择器」悬浮时毫无反馈。补同作用域的 :hover。
+   注意 `.codex-fileref-chip` 只是共用这条静止态规则，它在基类里**没有** hover，不补。 */
+.mind-main[data-ui-style="minimal"] .codex-dropdown-trigger:hover {
+  border-color: var(--codex-line);
+  background: var(--panel-bg-hover);
+}
+
 .mind-main[data-ui-style="minimal"] .codex-inspector {
   background: var(--codex-paper-card);
   border-left: 1px solid var(--codex-line-light);
@@ -491,6 +799,17 @@
   border-radius: 6px 6px 0 0;
   font-size: 12px;
   font-weight: 500;
+}
+
+/* 极简的悬浮高亮。基类那条是手账的纸蓝 `rgba(83,125,150,.07)`，在灰白界面里
+   是一块**偏蓝**的底 —— 与极简「全中性灰」的调色板不搭。换成极简节既有的
+   `--panel-bg-hover`（浅色 `rgba(24,24,27,.055)` / 深色 `rgba(255,255,255,.06)`），
+   与 `.codex-worktodo-row:hover` / `.codex-icon-btn:hover` / `.codex-session-item:hover`
+   同一支。特异性 (0,5,0) 稳赢基类的 (0,3,0)，深色那两条 workbench 修正也只到
+   (0,5,0) 且不涉及页签，不必再补一层。 */
+.mind-main[data-ui-style="minimal"] .codex-inspector-tab:hover:not(.active) {
+  background: var(--panel-bg-hover);
+  color: var(--codex-ink);
 }
 
 .mind-main[data-ui-style="minimal"] .codex-inspector-tab.active {
@@ -681,6 +1000,23 @@
   box-shadow: none;
 }
 
+/* Office 预览（Word）：手账主题把文档渲染成**浮在桌面上的一页纸**
+   （--codex-paper-card 底色 + 2px 方角 + 抬起阴影 + 38/44 内边距）。
+   极简主题的立意是「去纸感」，所以这里把那张纸整个撤掉 —— 排版改进
+   （测度上限、标题层级、表格、引用）全部保留，只是不再有纸。
+   注意 --codex-paper-card 在极简下是 #fafafa、比页面（#fff）**更暗**，
+   不撤掉的话文档会变成灰白面板里的一块脏灰。
+   正文/标题字体不必覆盖：它们走 --codex-md-font / --codex-md-hand，
+   本文件已把这两个变量压回无衬线，跟着走就对了。 */
+.mind-main[data-ui-style="minimal"] .codex-office-doc {
+  padding: 2px 0 10px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  min-height: 0;
+}
+
 .mind-main[data-ui-style="minimal"] .codex-md-codeblock-head,
 .mind-main[data-ui-style="minimal"] .codex-src-toolbar {
   background: var(--panel-code-banner);
@@ -832,22 +1168,18 @@
   }
 }
 
-.mind-main[data-ui-style="minimal"] {
-  scrollbar-width: thin;
-  scrollbar-color: var(--panel-scrollbar, rgba(128, 128, 128, .25)) transparent;
-}
-
-.mind-main[data-ui-style="minimal"] ::-webkit-scrollbar {
-  width: 7px;
-  height: 7px;
-}
-
-.mind-main[data-ui-style="minimal"] ::-webkit-scrollbar-thumb {
-  border: 2px solid transparent;
-  border-radius: 999px;
-  background: rgba(128, 128, 128, .32);
-  background-clip: padding-box;
-}
+/* 极简模式**不再单开一套滚动条样式**。
+   --------------------------------------------------------------------------
+   原先这里写着 `scrollbar-width: thin` + `scrollbar-color: …` + 一套 7px / 999px 的
+   `::-webkit-scrollbar`。两处都不对：
+     ① 那两行标准属性会让 Chromium 改用原生滚动条，把同一段里那套 `::-webkit-scrollbar`
+        全废掉 —— 于是极简下画出来的是宽 15px、带箭头按钮的 Windows 原生滚动条，
+        而那 7px 的宽度声明从来没生效过；
+     ② 就算生效，7px 的槽 + 2px 透明边框只剩 3px 可见滑块，比手账那套细一半，
+        两套主题的滚动条形状对不上。
+   现在几何统一由 `.codex-theme ::-webkit-scrollbar`（CodeAgentPage.css）定义，
+   极简只需要在三个调色板块里换掉 `--panel-scrollbar` / `--panel-scrollbar-hover`
+   这两个颜色变量（见上面的调色板块），形状一个像素都不用重写。 */
 
 /* Keep the conversation usable between two resizable sidebars. */
 @media (max-width: 1180px) {

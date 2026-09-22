@@ -403,7 +403,9 @@ impl Runnable for MemoryRetrievalStep {
                     .unwrap_or(std::cmp::Ordering::Equal)
             });
         }
-        filtered_items.truncate(9);
+        // Keep the final prompt focused: graph expansion may discover useful context, but a
+        // companion should not parade many old facts into one ordinary turn.
+        filtered_items.truncate(5);
 
         // ── 检索后验证（verifier）──
         // 若注入了 router，用小模型过滤掉与用户问题无关的检索结果，减少幻觉噪声。

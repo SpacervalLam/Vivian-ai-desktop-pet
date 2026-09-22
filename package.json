@@ -10,7 +10,11 @@
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
-    "test:toast-dedup": "node scripts/toast-dedup.test.ts"
+    "test:toast-dedup": "node scripts/toast-dedup.test.ts",
+    "test:flee-plan": "node scripts/flee-plan.test.ts",
+    "check:tap-anger": "node scripts/check-tap-anger.mjs",
+    "check:agent-track": "esbuild scripts/room/check-agent-track.ts --bundle --platform=node --format=esm --outfile=tmp/check-agent-track.mjs --log-level=warning && node tmp/check-agent-track.mjs",
+    "check:world-route": "node scripts/room/check-world-route.mjs"
   },
   "dependencies": {
     "@tanstack/react-virtual": "^3.14.6",

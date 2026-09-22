@@ -333,8 +333,17 @@ const NotebookPage: React.FC = () => {
     }
   }, [html]);
 
+  // 供事件回调读取「当前选中的笔记 id」。
+  // 不把它放进订阅依赖：否则每次点选笔记都会 cleanup + 重订阅，
+  // 而重订阅存在「cleanup 早于 listen resolve」的竞态窗口，会漏掉解绑。
+  const selectedIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    selectedIdRef.current = selectedId;
+  }, [selectedId]);
+
   // 监听笔记事件自动刷新
   useEffect(() => {
+    let cancelled = false;
     const unlistens: (() => void)[] = [];
     const refresh = (charId?: string) => {
       if (!charId || charId === character) {
@@ -346,22 +355,35 @@ const NotebookPage: React.FC = () => {
       const u1 = await listen<{ char_id: string }>('notebook:created', (e) => refresh(e.payload?.char_id));
       const u2 = await listen<{ char_id: string }>('notebook:updated', (e) => {
         refresh(e.payload?.char_id);
-        if (e.payload?.char_id === character && selectedId) {
-          void loadNoteHtml(character, selectedId);
+        const sid = selectedIdRef.current;
+        if (e.payload?.char_id === character && sid) {
+          void loadNoteHtml(character, sid);
         }
       });
       const u3 = await listen<{ char_id: string; note_id: string }>('notebook:deleted', (e) => {
         refresh(e.payload?.char_id);
-        if (e.payload?.note_id === selectedId) {
+        if (e.payload?.note_id === selectedIdRef.current) {
           setSelectedId(null);
           setHtml('');
         }
       });
+      // cleanup 可能已在本轮 await 期间跑过（StrictMode 双挂载 / character 切换）：
+      // 此时 unlistens 数组已无人读取，必须立即解绑，否则这 3 个订阅永久泄漏，
+      // 残留的 notebook:updated 会反复触发 loadNotes/loadNoteHtml，形成 N 倍 IPC。
+      if (cancelled) {
+        u1();
+        u2();
+        u3();
+        return;
+      }
       unlistens.push(u1, u2, u3);
     })();
 
-    return () => unlistens.forEach((u) => u());
-  }, [character, selectedId, loadNotes, loadNoteHtml]);
+    return () => {
+      cancelled = true;
+      unlistens.forEach((u) => u());
+    };
+  }, [character, loadNotes, loadNoteHtml]);
 
   // 删除笔记
   const handleDelete = useCallback(

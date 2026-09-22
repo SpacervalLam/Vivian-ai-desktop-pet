@@ -281,6 +281,11 @@ fn restore_window_for_room(app: &AppHandle, label: &str, was_visible: bool, free
 /// 当前有效的看护线程代号；每次启动或停止都 +1
 static ROOM_ESC_GEN: AtomicU32 = AtomicU32::new(0);
 
+/// 命令面板打开期间是否抑制硬件 ESC 看护。
+/// 前端 Minecraft 风格命令面板输入时，ESC 要由 keydown 关面板而不是关窗口；
+/// 硬件轮询不知道 DOM 状态，只能由前端显式开/关这个开关。
+static ROOM_ESC_SUPPRESSED: AtomicBool = AtomicBool::new(false);
+
 /// 窗口暂时查不到时的宽限时长：命令可能比窗口注册早到一瞬间
 const ROOM_ESC_MISSING_GRACE: Duration = Duration::from_secs(3);
 
@@ -289,11 +294,15 @@ const ROOM_ESC_MISSING_GRACE: Duration = Duration::from_secs(3);
 pub fn watch_room_escape(app: AppHandle) {
     // 领号即让上一代看护失效，无需再判断它是否还在跑
     let gen = ROOM_ESC_GEN.fetch_add(1, Ordering::SeqCst).wrapping_add(1);
+    // 新看护从非抑制态起步：上次会话面板没关干净留下的残留抑制不能带进来
+    ROOM_ESC_SUPPRESSED.store(false, Ordering::SeqCst);
 
     thread::spawn(move || {
         // 开局就按着 ESC（例如按着 ESC 点开房间）不算一次按下
         let mut esc_prev = is_escape_down();
         let mut missing_since: Option<Instant> = None;
+        // 上一轮是否处于抑制态。用于检测「抑制 → 恢复」沿，见下方对 esc_prev 的消耗。
+        let mut suppressed_prev = ROOM_ESC_SUPPRESSED.load(Ordering::SeqCst);
 
         loop {
             // 主应用退出（APP_EXITING）或本看护被更新的代号取代/stop 时立刻退出
@@ -316,6 +325,24 @@ pub fn watch_room_escape(app: AppHandle) {
             missing_since = None;
 
             let esc_now = is_escape_down();
+            let suppressed = ROOM_ESC_SUPPRESSED.load(Ordering::SeqCst);
+            if suppressed {
+                // 命令面板打开：硬件 ESC 看护暂停，前端 keydown 负责关面板。
+                // 抑制期每次把 esc_prev 同步成现状——否则恢复后无法重建基线。
+                esc_prev = esc_now;
+                suppressed_prev = true;
+                thread::sleep(Duration::from_millis(20));
+                continue;
+            }
+            if suppressed_prev {
+                // 抑制刚解除（面板刚收掉）。关键竞态：关面板的那一次 ESC 此刻可能
+                // 还物理按着，而抑制期间的第一拍往往在「按下之前」就已把 esc_prev
+                // 同步为 false —— 若此时立即建档，会把同一次按键误判成新的下降沿
+                // 关掉整个窗口。所以恢复时先把当前 ESC 状态消费掉：必须松开再按，
+                // 才构成一次真正的关闭。
+                esc_prev = esc_now;
+                suppressed_prev = false;
+            }
             if esc_now && !esc_prev && is_window_foreground(&win) {
                 // 下降沿 + 前台窗口：直接关闭。close 触发 CloseRequested，
                 // 由 lib.rs 的 on_window_event 兜底恢复角色窗口与心智观察器。
@@ -329,6 +356,13 @@ pub fn watch_room_escape(app: AppHandle) {
         }
         tracing::info!("[room_escape] 看护线程已退出 (gen={gen})");
     });
+}
+
+/// 命令面板开合时由前端调用：suppressed=true 期间硬件 ESC 看护暂停
+/// （ESC 只关面板不关窗口），面板收起后置回 false 恢复看护。
+#[tauri::command]
+pub fn set_room_escape_suppressed(suppressed: bool) {
+    ROOM_ESC_SUPPRESSED.store(suppressed, Ordering::SeqCst);
 }
 
 /// 停止 room 窗口的 ESC 看护线程（前端 RoomWindow 卸载时调用）

@@ -12,7 +12,11 @@ description: 联网核对 LLM 与云端嵌入供应商官方 API 文档，并用
 写入规则：
 
 - `action=upsert, kind=llm`：提交完整 LLM 行；兼容旧流程的 `update_provider_preset` 仍可使用。
-- `action=upsert, kind=embedding`：提交完整的 id/provider/endpoint/model/dimension，并附 `verifiedSource`。
+- `action=upsert, kind=embedding`：提交 `id/provider/endpoint/model/dimension`，并附 `verifiedSource`。
+  这是**厂商级的单模型写入**：`id` 是厂商 id（如 `glm`/`openai`），厂商行已存在时只合并
+  这一个模型，不会覆盖同厂商的其他模型。可选字段：`region`（地域）、`consoleUrl`、
+  `dimensionParam`（`dimensions` / `output_dimension`，缺省=不下发维度）、
+  `maxBatch`（单请求 input 条数上限）、`dimensions`（可调维度）、`needsApiKey`（本地服务传 false）、`note`。
 - `action=delete`：仅在官方确认服务或模型已经退役、且当前 id 确实存在时使用；删除预设不会删除 API Key，也不会切换当前运行配置。
 - 新服务使用新稳定 id；已有 id 不改名。
 LLM 厂商迭代极快：模型名退役、上下文窗口翻倍、端点迁移、新协议上线，预设数据随时会过期。
@@ -55,6 +59,21 @@ LLM 厂商迭代极快：模型名退役、上下文窗口翻倍、端点迁移�
 | `suggestedMaxTokens`       | 建议单次输出上限；保守取值，宁小勿大（超限被 400 拒绝）                                                                                           | 与官方新输出上限脱节（如 8K 硬上限已移除）                        |
 | `consoleUrl`               | 「获取 API Key」跳转页是否仍有效                                                                                                     | 控制台改版后 404                                     |
 | `needsSecret`/`needsAppId` | 鉴权方式是否变化（OAuth/HMAC 型厂商）                                                                                                 | —                                              |
+
+## 嵌入预设字段核对清单（`embedding-providers.json`，厂商级）
+
+| 字段              | 核对要点                                                                                     | 常见过期形态                                        |
+| --------------- | ---------------------------------------------------------------------------------------- | --------------------------------------------- |
+| `endpoint`      | 官方「OpenAI 兼容」base\_url 原文，**不带** `/embeddings`（适配器会补；带上也能识别，但表单反查厂商预设时会归一化比较）               | 兼容层迁移（如百炼新增 WorkspaceId 域名）、国内/国际站分拆            |
+| `models[].model` | 官方模型 ID 原文（大小写、分隔符一致）；已退役的必须移除                                                           | 老代际模型下架后仍留在预设里                                |
+| `models[].dimension` | **默认输出维度**（不是最大值）。服务端默认维度常与"可调范围"混淆，填错会让每次嵌入都在维度校验处失败                                    | 智谱 `embedding-3` 默认 2048（易被当成 1024）、Gemini 默认 3072 |
+| `dimensionParam` | 该厂商**能否**在请求体里下发维度，参数名叫什么。已知：OpenAI/DashScope/智谱=`dimensions`；Voyage=`output_dimension`；Cohere 兼容层明确 unsupported；Ollama 无 | 把 `dimensions` 发给只认 `output_dimension` 的厂商   |
+| `models[].maxBatch` | 单请求 `input` 数组条数上限。差异极大（OpenAI 2048、智谱 64、百炼 v4 仅 10），**宁小勿大**——估大整批 400 | 按 OpenAI 的 2048 给百炼设值                          |
+| `needsApiKey`   | 本地服务（Ollama/LM Studio/vLLM）传 `false`，表单会提示"填任意占位值"                                        | 本地预设要求真实 Key，用户被卡在保存校验上                        |
+| `verifiedSource`/`verifiedAt` | 官方文档 URL；`verifiedAt` 由工具自动写入，**不要手填**                                                  | —                                             |
+
+注：适配器按**模型**反查预设（`find_embedding_preset_by_model`），预设未覆盖的模型回退到
+域名/模型名启发式；因此厂商行里的 `dimensionParam` 只作用于该厂商预设中列出的模型。
 
 ## 流程
 

@@ -178,22 +178,74 @@ pub struct ProviderPresetData {
     pub verified_source: Option<String>,
 }
 
-/// 云端嵌入服务预设。运行时仍复用统一的 OpenAI-compatible 嵌入适配器，
-/// 插件只贡献可热更新的厂商端点、模型与维度元数据。
+/// 云端嵌入服务预设（**厂商级**）。
+///
+/// 运行时仍复用统一的 OpenAI-compatible 嵌入适配器；插件贡献的是「选哪家厂商 →
+/// 端点、可用模型、维度与请求能力」这层元数据，供设置表单在选择服务商后
+/// 自动填充端点等字段，并让适配器按厂商能力拼请求体。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EmbeddingProviderPresetData {
+    /// 厂商稳定 id（与 LLM 预设 id 尽量一致，便于复用显示名与图标）
     pub id: String,
+    /// 厂商展示名
     pub provider: String,
+    /// OpenAI 兼容端点（base_url，不含 `/embeddings`）
     pub endpoint: String,
-    pub model: String,
-    pub dimension: usize,
+    /// 该厂商可用的嵌入模型（至少一条）
+    pub models: Vec<EmbeddingModelPresetData>,
+    /// 地域说明（如「中国大陆」「国际」）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
+    /// 控制台 / API Key 页面
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub console_url: Option<String>,
+    /// 请求体里下发维度的参数名（`dimensions` / `output_dimension`）。
+    /// 缺省表示**不下发**：服务端维度固定，或兼容层明确不支持该参数
+    /// （如 Cohere Compatibility API 把 `dimensions` 列为 unsupported）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dimension_param: Option<String>,
+    /// 是否需要真实 API Key；本地服务（LM Studio / vLLM / Ollama）填任意占位值即可
+    #[serde(default = "default_embedding_needs_api_key")]
+    pub needs_api_key: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recommended_for: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verified_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verified_source: Option<String>,
+}
+
+/// 厂商下的一个嵌入模型
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmbeddingModelPresetData {
+    /// 模型 ID 原文（大小写、分隔符与官方一致）
+    pub model: String,
+    /// 默认输出维度
+    pub dimension: usize,
+    /// 单请求 `input` 数组条数上限。服务商差异极大（OpenAI 2048、智谱 64、百炼 10），
+    /// 适配器按此值分块，缺省回退到内置兜底值。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_batch: Option<usize>,
+    /// 可切换的维度取值（仅用于表单提示，不参与请求）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dimensions: Option<Vec<usize>>,
+    /// 备注（推荐场景等）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+fn default_embedding_needs_api_key() -> bool {
+    true
+}
+
+/// 按模型 ID 反查厂商预设（运行时能力查询用；同模型多处出现时取第一条）
+pub fn find_embedding_preset_by_model(model: &str) -> Option<EmbeddingProviderPresetData> {
+    let model = model.trim();
+    load_embedding_provider_presets().into_iter().find(|p| {
+        p.models.iter().any(|m| m.model.trim() == model)
+    })
 }
 
 /// 插件清单条目（设置窗口「插件」页只读盘点用）
@@ -998,24 +1050,26 @@ fn read_embedding_provider_presets(
         return Vec::new();
     };
     match serde_json::from_str::<Vec<EmbeddingProviderPresetData>>(&content) {
-        Ok(rows) => rows
-            .into_iter()
-            .filter(|p| {
-                !p.id.trim().is_empty()
-                    && p.id
-                        .chars()
-                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-                    && !p.provider.trim().is_empty()
-                    && !p.endpoint.trim().is_empty()
-                    && !p.model.trim().is_empty()
-                    && p.dimension > 0
-            })
-            .collect(),
+        Ok(rows) => rows.into_iter().filter(is_valid_embedding_preset).collect(),
         Err(e) => {
             tracing::warn!("[Plugins] 嵌入预设文件解析失败 {}: {e}", path.display());
             Vec::new()
         }
     }
+}
+
+/// 单条厂商级嵌入预设是否可用（解析后过滤脏数据，非法行整条丢弃）
+fn is_valid_embedding_preset(p: &EmbeddingProviderPresetData) -> bool {
+    !p.id.trim().is_empty()
+        && p.id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        && !p.provider.trim().is_empty()
+        && !p.endpoint.trim().is_empty()
+        && !p.models.is_empty()
+        && p.models
+            .iter()
+            .all(|m| !m.model.trim().is_empty() && m.dimension > 0)
 }
 
 /// 加载所有受信任插件贡献的云端嵌入预设；同 id 先到保留，内置 id 不可覆盖。
@@ -1224,13 +1278,81 @@ fn validate_embedding_preset(p: &EmbeddingProviderPresetData) -> Result<(), Stri
     {
         return Err("嵌入预设 id 非法（仅允许字母/数字/-/_）".into());
     }
-    if p.provider.trim().is_empty() || p.endpoint.trim().is_empty() || p.model.trim().is_empty() {
-        return Err("嵌入预设 provider、endpoint、model 均不能为空".into());
+    if p.provider.trim().is_empty() || p.endpoint.trim().is_empty() {
+        return Err("嵌入预设 provider、endpoint 均不能为空".into());
     }
-    if p.dimension == 0 {
-        return Err("嵌入预设 dimension 必须大于 0".into());
+    if p.models.is_empty() {
+        return Err("嵌入预设至少需要一个模型".into());
+    }
+    for m in &p.models {
+        if m.model.trim().is_empty() {
+            return Err("嵌入预设的模型名不能为空".into());
+        }
+        if m.dimension == 0 {
+            return Err(format!("嵌入模型 {} 的 dimension 必须大于 0", m.model));
+        }
+    }
+    if let Some(param) = p.dimension_param.as_deref() {
+        // 只允许已知的两种参数名，避免把任意字段名塞进请求体
+        if param != "dimensions" && param != "output_dimension" {
+            return Err("dimensionParam 仅支持 dimensions 或 output_dimension".into());
+        }
     }
     Ok(())
+}
+
+/// 新增/更新「某厂商的某个嵌入模型」：厂商行不存在则创建，存在则只动这一个模型。
+///
+/// 与 [`upsert_embedding_provider_preset`] 的整行替换语义不同：这里做合并，
+/// 让 `manage_provider_preset` 工具可以在不改动同厂商其他模型的前提下增删改单条模型。
+pub fn upsert_embedding_model_preset(
+    mut preset: EmbeddingProviderPresetData,
+) -> Result<(EmbeddingProviderPresetData, String, bool), String> {
+    ensure_builtin_plugins();
+    validate_embedding_preset(&preset)?;
+    let dir = plugins_dir().join(BUILTIN_PLUGIN_DIR);
+    let path = dir.join("embedding-providers.json");
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| format!("读取 embedding-providers.json 失败: {e}"))?;
+    let mut rows: Vec<EmbeddingProviderPresetData> = serde_json::from_str(&content)
+        .map_err(|e| format!("解析 embedding-providers.json 失败: {e}"))?;
+    preset.verified_at = Some(chrono::Local::now().format("%Y-%m-%d").to_string());
+    let (merged, is_new) = match rows.iter().position(|p| p.id == preset.id) {
+        Some(i) => {
+            let existing = &mut rows[i];
+            existing.provider = preset.provider.clone();
+            existing.endpoint = preset.endpoint.clone();
+            existing.dimension_param = preset.dimension_param.clone();
+            existing.needs_api_key = preset.needs_api_key;
+            existing.region = preset.region.clone();
+            existing.console_url = preset.console_url.clone();
+            existing.recommended_for = preset.recommended_for.clone();
+            existing.verified_at = preset.verified_at.clone();
+            existing.verified_source = preset.verified_source.clone();
+            for incoming in &preset.models {
+                match existing
+                    .models
+                    .iter()
+                    .position(|m| m.model == incoming.model)
+                {
+                    Some(j) => existing.models[j] = incoming.clone(),
+                    None => existing.models.push(incoming.clone()),
+                }
+            }
+            (existing.clone(), false)
+        }
+        None => {
+            rows.push(preset.clone());
+            (preset.clone(), true)
+        }
+    };
+    let body = serde_json::to_string_pretty(&rows)
+        .map_err(|e| format!("序列化 embedding-providers.json 失败: {e}"))?;
+    crate::utils::fs::write_atomic(&path, &body)
+        .map_err(|e| format!("写入 embedding-providers.json 失败: {e}"))?;
+    let version = bump_plugin_version(&dir.join("plugin.json"))?;
+    invalidate_fingerprint_cache();
+    Ok((merged, version, is_new))
 }
 
 /// 从内置供应商插件删除一条 LLM 或嵌入预设；删除的是预设元数据，不触碰凭据。
@@ -2411,13 +2533,63 @@ mod tests {
             serde_json::from_str(BUILTIN_PLUGIN_EMBEDDINGS)
                 .expect("内置 embedding-providers.json 应可解析");
         assert!(!rows.is_empty());
-        assert!(rows.iter().all(|p| {
-            !p.id.is_empty()
-                && !p.provider.is_empty()
-                && !p.endpoint.is_empty()
-                && !p.model.is_empty()
-                && p.dimension > 0
-        }));
+        // 内置数据必须逐条通过运行时校验，否则会被静默丢弃
+        for p in &rows {
+            assert!(
+                is_valid_embedding_preset(p),
+                "内置嵌入预设 {} 未通过校验",
+                p.id
+            );
+            validate_embedding_preset(p).unwrap_or_else(|e| panic!("预设 {} 非法: {e}", p.id));
+        }
+        // id 不可重复：前端按下拉选中项反查厂商，重复会让选择结果不确定
+        let mut ids: Vec<&str> = rows.iter().map(|p| p.id.as_str()).collect();
+        ids.sort_unstable();
+        let before = ids.len();
+        ids.dedup();
+        assert_eq!(before, ids.len(), "内置嵌入预设 id 必须唯一");
+        // 每个厂商至少一个模型，且模型名在厂商内唯一
+        for p in &rows {
+            assert!(!p.models.is_empty(), "预设 {} 没有模型", p.id);
+            let mut models: Vec<&str> = p.models.iter().map(|m| m.model.as_str()).collect();
+            models.sort_unstable();
+            let before = models.len();
+            models.dedup();
+            assert_eq!(before, models.len(), "预设 {} 的模型名重复", p.id);
+        }
+    }
+
+    /// 能力字段的落盘/读取必须闭环：dimensionParam 是适配器拼请求体的依据，
+    /// 写错（比如把 Voyage 的 output_dimension 写成 dimensions）会直接 400。
+    #[test]
+    fn embedding_preset_capabilities_roundtrip() {
+        let row: EmbeddingProviderPresetData = serde_json::from_str(
+            r#"{
+                "id": "vendor",
+                "provider": "Vendor",
+                "endpoint": "https://api.vendor.com/v1",
+                "dimensionParam": "output_dimension",
+                "needsApiKey": false,
+                "models": [{ "model": "embed-v2", "dimension": 1024, "maxBatch": 16 }]
+            }"#,
+        )
+        .expect("厂商级预设应可解析");
+        assert_eq!(row.dimension_param.as_deref(), Some("output_dimension"));
+        assert!(!row.needs_api_key);
+        assert_eq!(row.models[0].max_batch, Some(16));
+
+        // 缺省：不下发维度参数、需要 Key（旧数据无这两个字段时的兜底语义）
+        let legacy: EmbeddingProviderPresetData = serde_json::from_str(
+            r#"{"id":"v","provider":"V","endpoint":"https://x/v1","models":[{"model":"m","dimension":8}]}"#,
+        )
+        .expect("缺省字段应可解析");
+        assert!(legacy.dimension_param.is_none());
+        assert!(legacy.needs_api_key);
+
+        // 非法参数名必须被拒（防止把任意字段塞进请求体）
+        let mut bad = legacy.clone();
+        bad.dimension_param = Some("dims".into());
+        assert!(validate_embedding_preset(&bad).is_err());
     }
 
     #[test]

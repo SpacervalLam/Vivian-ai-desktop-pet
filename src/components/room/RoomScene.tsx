@@ -1,39 +1,50 @@
+import { createCharacterAnimation } from './characterAnimation';
+import { createApartmentLift } from './anime/apartmentLift';
+import { createInteriorDesign } from './anime/interiorDesign';
+import { createDistrictArt } from './anime/districtArt';
 /**
- * 房间 3D 场景——日式动漫风（赛璐璐着色 + 描边）。
+ * 房间 3D 场景——日式公寓：Blender PBR 家具 + 赛璐璐建筑与角色。
  *
  * 视觉管线：
  *   程序化贴图 → MeshToonMaterial（4 级色阶）→ 反面外扩描边 → 三点布光 + 软阴影
  *   → 窗口光束 / 浮尘 / 自发光小物件（屏幕、灯泡、串灯）
  *   → 场景雾 → 后处理链（线性 HDR 泛光 → 色调映射 → sRGB）
  *
- *   雾和泛光的参数都在 dormLayout.json 的 postfx 里，改 JSON 就能调，不用重建。
- *   按 P 可以整段关掉雾 + 泛光 + 色调映射做 A/B 对照。
+ * 雾和泛光的参数都在 dormLayout.json 的 postfx 里，改 JSON 就能调，不用重建。
+ * 按 P 可以整段关掉雾 + 泛光 + 色调映射做 A/B 对照。
  *
- *   家具 / 道具走描边；角色（GLB 的 Q 版）不描边，避免写实模型被框出一道卡通线。
- *
- * 逻辑部分（PetAgent 状态机 + A* 寻路 + 20Hz 定步长）和之前一样，没动。
+ * 程序化道具走描边；Blender 家具保留 PBR / 顶点 AO，角色不描边。
  * 窗口隐藏时整条管线暂停。
- *
- * 不在本次范围：角色骨骼动画、昼夜变化、热点点击交互。
  */
 
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { invoke } from '@tauri-apps/api/core';
+import { bootMark, logBootTimeline, dismissBootLoader } from '../../utils/roomBoot';
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
-import { FPSControls, Collider } from './anime/fpsControls';
-import { buildFurnitureColliders, buildWallColliders, buildSceneColliders, buildBoxColliders } from './anime/collider';
+import { FPSControls, Collider, FPS_NEAR_MIN, FPS_NEAR_MAX } from './anime/fpsControls';
+import { buildFurnitureColliders, buildWallColliders, buildSceneColliders, buildBoxColliders, pickOverheadSlabs } from './anime/collider';
 import { PetAgent } from './agents/usePetAgent';
+import { buildNavWorld } from './agents/navWorld';
+import { buildObstacles } from './agents/navGrid';
 import layoutData from './dormLayout.json';
 import { blenderFurnitureIds, loadBlenderFurniture, type FurnitureSlot } from './blenderFurniture';
 
+import {
+  describeEnvironment, environmentFromLocalClock, resolveEnvironment,
+  PERIOD_LABELS, WEATHER_LABELS,
+  type DayPeriod, type EnvironmentInput, type WeatherKind,
+} from './worldEnvironment';
+import type { WorldSnapshotResponse } from '../../types';
 import { setOutlineDistanceScale, setToonKeyLight, toonGradient, makeRng } from './anime/toon';
-import { mergeByMaterial, freezeStatic } from './anime/merge';
-import { buildExteriorGround, buildStreetscape, buildApartmentShell, buildConvenienceStore, buildStreetscapeRipples, buildApartmentEaveDrips, buildSubwayEntrance, buildIzakaya, buildSmallPark, buildMidRiseBlock, buildViaduct, buildShoppingMall, buildUtilityPoles, buildStreetFurniture, buildStreetBookStore, STRS, FLOORS, APT_X0, APT_X1, APT_ZN, APT_ZB, APT_WALL_BOXES, APT_CORRIDOR_N } from './anime/exterior';
+import { mergeByMaterial, freezeStatic, dedupeGeometries } from './anime/merge';
+import { buildExteriorGround, buildStreetscape, buildApartmentShell, buildConvenienceStore, buildStreetscapeRipples, buildApartmentEaveDrips, buildSubwayEntrance, buildIzakaya, buildSmallPark, buildUtilityPoles, buildStreetFurniture, buildStreetBookStore, STRS, FLOORS, APT_X0, APT_X1, APT_ZN, APT_ZB, APT_WALL_BOXES, APT_CORRIDOR_N } from './anime/exterior';
 import {
   setArtStyle,
   outlineProp,
@@ -144,15 +155,6 @@ const TICK_DT = 0.05; // 20Hz 逻辑
 type SavedFps = { x: number; y: number; z: number; yaw: number; pitch: number };
 let savedFpsState: SavedFps | null = null;
 
-type DayPeriod = 'morning' | 'noon' | 'dusk' | 'night';
-type WeatherKind = 'clear' | 'drizzle' | 'storm' | 'snow';
-
-const PERIOD_LABELS: Record<DayPeriod, string> = {
-  morning: '早晨', noon: '正午', dusk: '黄昏', night: '深夜',
-};
-const WEATHER_LABELS: Record<WeatherKind, string> = {
-  clear: '晴', drizzle: '小雨', storm: '暴雨', snow: '雪',
-};
 
 type FurnitureSpec = {
   id: string;
@@ -267,6 +269,49 @@ const FURNITURE_BUILDERS: Record<string, (spec: FurnitureSpec) => THREE.Object3D
 };
 
 /**
+ * 角色贴图的边长上限。
+ *
+ * 两个角色的 GLB 各自内嵌一张 **2048²** 的贴图（`texture_20250901`，PNG 4MB），
+ * 上传成 21.33 MB 显存（含 mip 链）——两张就是 **42.7 MB**，占全场景贴图预算
+ * （77 MB）的 55%，是最大的一笔单项显存。
+ *
+ * 而 Q 版角色在画面里通常只有一两百像素高，2048² 是几十倍的过采样。缩到 1024²
+ * 之后仍是 8 倍过采样（角色 1.2m 高 → 853 texel/m，屏幕在 1m 距离约 540 px/m），
+ * 肉眼无差，直接省下 32 MB；顺带把首次上传的 16 MB 搬运和 2048² 的 mip 生成
+ * 一起砍掉，加载也更顺。
+ */
+const MODEL_MAP_MAX = 1024;
+
+/**
+ * 把超过 max 的贴图缩到 max——**就地**换掉 `texture.image`。
+ *
+ * 就地改而不是新建 Texture：`sink` 里登记的是这个对象，换掉会让卸载时的
+ * dispose 落空，那 21 MB 就永远收不回来了。
+ *
+ * 用 canvas 而不是 ImageBitmap：GLTFLoader 在支持的浏览器上给的是 ImageBitmap，
+ * canvas 的 drawImage 对两者都收，而且 canvas 本身就能被 three 当 image 直接上传。
+ */
+function shrinkTexture(tex: THREE.Texture, max: number): void {
+  const img = tex.image as (CanvasImageSource & { width?: number; height?: number }) | null;
+  const w = img?.width ?? 0, h = img?.height ?? 0;
+  if (!img || w <= max || h <= max) return;
+  const scale = max / Math.max(w, h);
+  const tw = Math.max(1, Math.round(w * scale));
+  const th = Math.max(1, Math.round(h * scale));
+  const canvas = document.createElement('canvas');
+  canvas.width = tw;
+  canvas.height = th;
+  const ctx = canvas.getContext('2d');
+  // 拿不到 2d 上下文就原样留着：宁可多占显存，也不能把角色贴图弄丢
+  if (!ctx) return;
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(img, 0, 0, tw, th);
+  tex.image = canvas;
+  tex.needsUpdate = true;
+}
+
+/**
  * 把 GLB 里的 PBR 材质换成卡通材质。
  * 扫描出来的 Q 版模型带的金属度/粗糙度在赛璐璐风格下全是噪音，
  * 但 color / map / emissive 要原样保留，否则角色会变成一坨白。
@@ -313,11 +358,120 @@ function toonifyModel(root: THREE.Object3D, sink: THREE.Texture[]): void {
       return next;
     };
 
-    mesh.material = Array.isArray(src) ? src.map(convert) : convert(src);
+    const out = Array.isArray(src) ? src.map(convert) : convert(src);
+    mesh.material = out;
+    // 角色 GLB 的贴图是 2048² 的，缩到 MODEL_MAP_MAX 再上传（见该常量的注释）。
+    // 放在材质换完之后：转换会丢掉一部分贴图槽位，只缩真正留下来会进显存的那张。
+    for (const m of Array.isArray(out) ? out : [out]) {
+      const map = (m as THREE.MeshToonMaterial).map;
+      if (map) shrinkTexture(map, MODEL_MAP_MAX);
+    }
     mesh.castShadow = true;
     mesh.receiveShadow = true;
   });
 }
+
+/**
+ * 每帧的点光预算。
+ *
+ * three **不做逐物体剔除**：每盏点光都会进片元着色器的光照循环
+ * （`NUM_POINT_LIGHTS` 是编译期常量，循环被展开），场景里 34 盏就是每个受光
+ * 片元跑 34 遍。实测把 34 盏**全部**关掉，观察者机位下也只有 2.7% 的像素发生
+ * 变化——绝大多数灯在当前视角里根本没照到东西，白算。
+ *
+ * 所以每帧只让"最可能影响画面"的 BUDGET 盏亮着，排序分两级：
+ *   1. 光球（半径 = 灯的 distance，也就是它的有效作用半径）与相机视锥相交的
+ *      优先——只有它们可能照到屏幕上的东西；
+ *   2. 同组内按 `intensity / d²` 降序（d = 到相机距离，下限 1m）。这是"看起来
+ *      有多亮"的代理量：远处全场入画时所有 d 相近，退化成按 intensity 排，
+ *      挑出真正亮的那几盏；第一人称贴着店面时近处的灯 d 小、分数暴涨，挑出的
+ *      就是身边这几盏。
+ *
+ *      **不能用纯距离排**。观察者机位离场景 40m，全部灯都在视锥里，按距离排
+ *      只会把镜头这一侧的灯全留下、把街对面那排店面（美术真正要的）全砍掉。
+ *
+ * **可见数量必须恒定**。three 的着色器程序按 `lights.point.length` 进缓存键
+ * （three.cjs:20845 取值、20976 进 key），数量一变就要重编译全部材质——实测
+ * 一次几百毫秒的卡顿，比省下来的光照还贵。所以永远留满 BUDGET 盏、只换是哪
+ * 几盏：光源 uniform 每帧重传（几十个 float，可忽略），程序不重编。
+ *
+ * 留 16 盏的依据（逐档扫描，每档都跟"全开 34 盏"比，用同一会话同一机位，
+ * 并取"该状态自身帧间抖动"当噪声底）：
+ *
+ *   机位              留 8          留 12         留 16         留 20
+ *   观察者 px>24      121           103           74            37
+ *   观察者 Δ          0.261         0.255         0.132         0.091
+ *   （该机位噪声底 0.073~0.239）
+ *   第一人称 px>24    ~55           ~58           ~57           ~55
+ *   第一人称 Δ        0.016         0.136         0.019         0.016
+ *
+ * 第一人称对预算几乎完全不敏感——各档 px>24 都卡在 55 上下（那 55 个像素是
+ * 固定差异，不是光照），Δ 全在噪声里。真正的约束来自观察者机位：12 盏时
+ * Δ 0.255 是该机位噪声底 0.073 的 3.5 倍，已经算"看得出一点点"；16 盏时
+ * Δ 0.132 落在噪声底（0.174）之下，三个机位全部报"看不出来"。
+ * 所以取 16：这是**每个机位都测不出差异**的最小档，相对 34 盏把每个受光片元
+ * 的光照循环砍掉一半以上。
+ */
+const POINT_LIGHT_BUDGET = 16;
+const _ltFrustum = new THREE.Frustum();
+const _ltProjScreen = new THREE.Matrix4();
+const _ltSphere = new THREE.Sphere();
+const _ltWorld = new THREE.Vector3();
+
+/** 把池子里的点光收进预算：前 BUDGET 盏 `visible = true`，其余关掉。 */
+function budgetPointLights(camera: THREE.Camera, pool: THREE.PointLight[], budget: number): void {
+  if (pool.length <= budget) {
+    for (const l of pool) l.visible = true;
+    return;
+  }
+  camera.updateMatrixWorld();
+  _ltProjScreen.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+  _ltFrustum.setFromProjectionMatrix(_ltProjScreen);
+
+  const scored: Array<{ l: THREE.PointLight; rank: number; score: number }> = [];
+  for (const l of pool) {
+    l.getWorldPosition(_ltWorld);
+    _ltSphere.center.copy(_ltWorld);
+    // distance = 0 在 three 里表示"不衰减"，那种灯没有作用半径，给个大球让它
+    // 永远落进第一组——它一定是要紧的。
+    _ltSphere.radius = l.distance > 0 ? l.distance : 1e3;
+    const d = Math.max(camera.position.distanceTo(_ltWorld), 1);
+    scored.push({
+      l,
+      rank: _ltFrustum.intersectsSphere(_ltSphere) ? 0 : 1,
+      score: l.intensity / (d * d),
+    });
+  }
+  scored.sort((a, b) => (a.rank !== b.rank ? a.rank - b.rank : b.score - a.score));
+  for (let i = 0; i < scored.length; i++) scored[i].l.visible = i < budget;
+}
+
+/** 帮助面板的命令条目（/help 呼出）。group 决定归属分区：时间 / 天气 / 系统。 */
+type CmdEntry = { cmd: string; desc: string; group: 'time' | 'weather' | 'other' };
+
+const HELP_ENTRIES: CmdEntry[] = [
+  { cmd: '/day', desc: '白天（正午日光）', group: 'time' },
+  { cmd: '/morning', desc: '早晨', group: 'time' },
+  { cmd: '/noon', desc: '正午', group: 'time' },
+  { cmd: '/dusk', desc: '黄昏', group: 'time' },
+  { cmd: '/night', desc: '深夜', group: 'time' },
+  { cmd: '/clear', desc: '晴天', group: 'weather' },
+  { cmd: '/rain', desc: '小雨', group: 'weather' },
+  { cmd: '/storm', desc: '暴雨', group: 'weather' },
+  { cmd: '/snow', desc: '降雪', group: 'weather' },
+  { cmd: '/reset', desc: '恢复真实世界时段与天气', group: 'other' },
+  { cmd: '/help', desc: '显示本帮助', group: 'other' },
+];
+
+/** 帮助面板的分区顺序与标签（赛博朋克双语：英文走 Orbitron）。 */
+const CMD_GROUPS: { key: CmdEntry['group']; label: string }[] = [
+  { key: 'time', label: 'TIME // 时间' },
+  { key: 'weather', label: 'WEATHER // 天气' },
+  { key: 'other', label: 'SYSTEM // 系统' },
+];
+
+/** 去掉命令前导斜杠，联想/执行都拿"纯字母名"做前缀匹配。 */
+const normCmdName = (c: string) => (c.startsWith('/') ? c.slice(1) : c);
 
 export function RoomScene() {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -327,17 +481,211 @@ export function RoomScene() {
   const hudModeRef = useRef<HTMLDivElement>(null);
   const hudCrosshairRef = useRef<HTMLDivElement>(null);
   const hudDoorPromptRef = useRef<HTMLDivElement>(null);
-  const environmentToggleRef = useRef<((period: DayPeriod, weather: WeatherKind) => void) | null>(null);
-  const environmentRef = useRef<{ period: DayPeriod; weather: WeatherKind }>({ period: 'night', weather: 'drizzle' });
+  const hudSpeedRef = useRef<HTMLDivElement>(null);
+  const hudEnvRef = useRef<HTMLDivElement>(null);
+  // 环境应用器。真实世界感知在正常运行时是唯一调用方，但它必须能被 polling effect
+  // 和 __ROOM__ 测试注入口够到，所以经 ref 传出 scene effect 的作用域。
+  const environmentApplyRef = useRef<((period: DayPeriod, weather: WeatherKind) => void) | null>(null);
+  /**
+   * 当前环境。初值直接按本地时钟推导，而不是写死 night/drizzle ——
+   * 否则真实感知首次回调到达前，房间会先闪一帧错的时段。
+   */
+  const environmentRef = useRef<{ period: DayPeriod; weather: WeatherKind }>(
+    resolveEnvironment(environmentFromLocalClock())
+  );
+  /** 当前环境来源，只给 HUD 摘要用（"Open-Meteo" / "本地时钟" / "测试注入"）。 */
+  const environmentSourceRef = useRef<string>('本地时钟');
+  /** 测试注入用的环境源覆盖；null = 跟随真实世界感知。 */
+  const environmentOverrideRef = useRef<Partial<EnvironmentInput> | null>(null);
+  /** 让 __ROOM__.setEnvironmentSource 触发一次即时重算，不必等下一个轮询周期。 */
+  const environmentTickRef = useRef<(() => void) | null>(null);
+
+  /* ---------------- 命令面板（/ 呼出，Minecraft 风格） ---------------- */
+  const [cmdOpen, setCmdOpen] = useState(false);
+  const cmdOpenRef = useRef(false);
+  const cmdInputRef = useRef<HTMLInputElement>(null);
+  /** 命令输入框当前内容（受控，纯字母）。联想卡片按它过滤。 */
+  const [cmdInput, setCmdInput] = useState('');
+  /** 联想卡片当前高亮行索引（↑↓ 导航用），-1 = 无高亮。 */
+  const [cmdActiveIdx, setCmdActiveIdx] = useState(-1);
+  /** 帮助面板（/help 呼出）：与命令输入面板互斥，ESC 优先关它。 */
+  const [cmdHelpOpen, setCmdHelpOpen] = useState(false);
+  const cmdHelpRef = useRef(false);
+  /** 帮助面板容器引用：外部点击关闭用它判定「点在面板外」。 */
+  const cmdHelpPanelRef = useRef<HTMLDivElement>(null);
+  /** 命令执行结果 toast（null = 不显示）。错误保留面板让玩家改，成功才收起。 */
+  const [cmdFeedback, setCmdFeedbackState] = useState<{ text: string; ok: boolean } | null>(null);
+  const cmdFeedbackTimerRef = useRef<number>(0);
+  /** 命令手动覆盖的环境（null = 跟随真实世界感知）。比 environmentOverrideRef 更直接：
+   * 它存的是最终的 period/weather，而不是感知层 input —— 命令无需回推一个能映射出
+   * 目标时段的小时数。 */
+  const manualEnvironmentRef = useRef<{ period: DayPeriod; weather: WeatherKind } | null>(null);
+
+  /** 同步「命令浮层整体是否开着」到 Rust 硬件 ESC 看护与 RoomWindow：
+   * 任一浮层（输入面板/帮助面板）打开时，ESC 归前端收浮层，不让看护关窗口。 */
+  const syncCmdOverlay = useCallback(() => {
+    const open = cmdOpenRef.current || cmdHelpRef.current;
+    void invoke('set_room_escape_suppressed', { suppressed: open }).catch((e) =>
+      console.warn('[room] set_room_escape_suppressed 失败', e)
+    );
+    const room = (window as any).__ROOM__;
+    if (room) room.cmdPanelOpen = open;
+  }, []);
+
+  const setCmdOpenState = useCallback((open: boolean) => {
+    cmdOpenRef.current = open;
+    setCmdOpen(open);
+    syncCmdOverlay();
+    if (!open) {
+      // 收面板时清空输入与联想高亮，下次呼出是干净的。
+      setCmdInput('');
+      setCmdActiveIdx(-1);
+    }
+    const room = (window as any).__ROOM__;
+    if (open) {
+      // 第一人称下呼出：先退出指针锁定，否则焦点进不了输入框（也没法打字）。
+      if (room?.fps?.locked) {
+        try { document.exitPointerLock(); } catch { /* ignore */ }
+      }
+      requestAnimationFrame(() => cmdInputRef.current?.focus());
+    }
+  }, [syncCmdOverlay]);
+
+  const setCmdHelpState = useCallback((open: boolean) => {
+    cmdHelpRef.current = open;
+    setCmdHelpOpen(open);
+    syncCmdOverlay();
+    if (open) {
+      // 帮助面板是纯展示，无需持锁状态：第一人称下呼出同样先退出指针锁定。
+      const room = (window as any).__ROOM__;
+      if (room?.fps?.locked) {
+        try { document.exitPointerLock(); } catch { /* ignore */ }
+      }
+    }
+  }, [syncCmdOverlay]);
+
+  /** 联想匹配：空输入不联想；精确 > 前缀 > 包含，最多 6 条（搜索引擎式排序）。 */
+  const cmdMatches = useMemo<{ cmd: string; desc: string }[]>(() => {
+    const q = cmdInput.trim().toLowerCase();
+    if (!q) return [];
+    const exact: { cmd: string; desc: string }[] = [];
+    const prefix: { cmd: string; desc: string }[] = [];
+    const contains: { cmd: string; desc: string }[] = [];
+    for (const it of HELP_ENTRIES) {
+      const n = normCmdName(it.cmd).toLowerCase();
+      if (n === q) { exact.push(it); continue; }
+      if (n.startsWith(q)) { prefix.push(it); continue; }
+      if (n.includes(q)) contains.push(it);
+    }
+    return [...exact, ...prefix, ...contains].slice(0, 6);
+  }, [cmdInput]);
+
+  /** 联想行内的 cmd 高亮：命中段提亮 + 辉光，其余部分正常描。 */
+  const renderCmdName = useCallback((cmd: string) => {
+    const n = normCmdName(cmd);
+    const q = cmdInput.trim().toLowerCase();
+    if (!q) return <span>{cmd}</span>;
+    const qi = n.toLowerCase().indexOf(q);
+    if (qi < 0) return <span>{cmd}</span>;
+    const pre = n.slice(0, qi);
+    const hit = n.slice(qi, qi + q.length);
+    const post = n.slice(qi + q.length);
+    // 命中的字母提绿 + 辉光，未命中保持白色（与原语义相反的颜色处理：绿=命中）。
+    const white = { color: 'rgba(236, 246, 255, 0.92)' } as const;
+    return (
+      <span>
+        <span style={white}>{'/'}{pre}</span>
+        <span style={{ color: '#7cf2a8', textShadow: '0 0 9px rgba(124,242,168,0.95)' }}>{hit}</span>
+        <span style={white}>{post}</span>
+      </span>
+    );
+  }, [cmdInput]);
+
+  const showCmdFeedback = useCallback((text: string, ok: boolean) => {
+    setCmdFeedbackState({ text, ok });
+    window.clearTimeout(cmdFeedbackTimerRef.current);
+    cmdFeedbackTimerRef.current = window.setTimeout(() => setCmdFeedbackState(null), 3500);
+  }, []);
+
+  /** 解析并执行命令。返回成功与否：成功收起面板，失败/帮助保留面板方便玩家改。 */
+  const executeCommand = useCallback((raw: string) => {
+    const line = raw.replace(/^\/+/, '').trim();
+    if (!line) return;
+    const parts = line.split(/\s+/);
+    const [c0, c1, c2] = parts;
+    const c = (c0 ?? '').toLowerCase();
+    const arg = (c1 ?? '').toLowerCase();
+
+    const periodAliases: Record<string, DayPeriod> = {
+      day: 'noon', morning: 'morning', noon: 'noon', dusk: 'dusk', night: 'night',
+    };
+    const weatherAliases: Record<string, WeatherKind> = {
+      clear: 'clear', sunny: 'clear', rain: 'drizzle', drizzle: 'drizzle',
+      storm: 'storm', thunder: 'storm', thunderstorm: 'storm', snow: 'snow',
+    };
+
+    if (c === 'help' || c === '?') {
+      // 帮助走独立面板（赛博朋克风格），收起输入面板再弹帮助；ESC / × 关闭。
+      setCmdOpenState(false);
+      setCmdHelpState(true);
+      return;
+    }
+    if (c === 'reset' || c === 'realtime' || c === 'auto') {
+      manualEnvironmentRef.current = null;
+      environmentTickRef.current?.();
+      showCmdFeedback('已恢复跟随真实世界时段/天气', true);
+      setCmdOpenState(false);
+      return;
+    }
+
+    let targetPeriod: DayPeriod | null = null;
+    let targetWeather: WeatherKind | null = null;
+    if (periodAliases[c]) {
+      targetPeriod = periodAliases[c];
+    } else if (c === 'time') {
+      // 兼容 Minecraft 风格：/time set day、/time day
+      const t = (c1 === 'set' ? (c2 ?? '') : (c1 ?? '')).toLowerCase();
+      targetPeriod = periodAliases[t] ?? null;
+    }
+    if (weatherAliases[c]) {
+      targetWeather = weatherAliases[c];
+    } else if (c === 'weather') {
+      // 兼容 Minecraft 风格：/weather rain
+      targetWeather = weatherAliases[arg] ?? null;
+    }
+
+    if (!targetPeriod && !targetWeather) {
+      showCmdFeedback(`未知命令：/${line}（输入 /help 查看可用命令）`, false);
+      return;
+    }
+
+    const cur = manualEnvironmentRef.current ?? environmentRef.current;
+    const next: { period: DayPeriod; weather: WeatherKind } = {
+      period: targetPeriod ?? cur.period,
+      weather: targetWeather ?? cur.weather,
+    };
+    manualEnvironmentRef.current = next;
+    environmentTickRef.current?.();
+    showCmdFeedback(
+      targetPeriod
+        ? `已设置时间为${PERIOD_LABELS[targetPeriod]}`
+        : `已设置天气为${WEATHER_LABELS[targetWeather as WeatherKind]}`,
+      true
+    );
+    setCmdOpenState(false);
+  }, [showCmdFeedback, setCmdOpenState, setCmdHelpState]);
   const [hudVisible, setHudVisible] = useState(false);
-  const [period, setPeriod] = useState<DayPeriod>('night');
-  const [weather, setWeather] = useState<WeatherKind>('drizzle');
   // 观察者模式（默认：OrbitControls 自由视角 + 单向透视墙）↔ 第一人称（PointerLock）
   const [mode, setMode] = useState<'observe' | 'firstPerson'>('observe');
 
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
+
+    // 场景装配开始。它与 'room:chunk-done' 之间的差值就是 React 挂载 + 本函数
+    // 之前那段的开销；从这里到 'scene:built' 则是**一整段同步阻塞主线程**的装配
+    // 时间——首屏 loading 层的 CSS 动画必须能在这一段里继续转，否则会看起来卡死。
+    bootMark('scene:build-start');
 
     const layout = layoutData as any;
     setArtStyle(layout.palette, layout.style);
@@ -425,7 +773,7 @@ export function RoomScene() {
     const UNIT_LIFT = 3.4;
     // far 平面要罩住世界地面的最远角：地面 ±85m，相机最远拉到 ~25m，
     // 角上相距可达 ~140m——裁掉的话被雾吞掉的地面边缘会露出背景色的"世界裂缝"
-    const camera = new THREE.PerspectiveCamera(cam.fov, 1, 0.1, 220);
+    const camera = new THREE.PerspectiveCamera(cam.fov, 1, 0.1, 420);
     camera.position.set(cam.position[0], cam.position[1] + UNIT_LIFT, cam.position[2]);
     camera.lookAt(cam.target[0], cam.target[1] + UNIT_LIFT, cam.target[2]);
 
@@ -436,13 +784,15 @@ export function RoomScene() {
      */
     let isFirstPerson = false; // 提前声明，供 applyProjection 按模式选视野
     const BASE_FOV = cam.fov;  // 观察者模式视野（偏窄，构图用）
-    const FPS_FOV = 52;        // 第一人称视野（广角沉浸，相对观察者 34° 多出的量已减半：70→52）
+    const FPS_FOV = 60;        // 稳定纵向视野，室内兼顾周边视野与透视比例
     const BASE_ASPECT = 1.78;
     const applyProjection = (w: number, h: number) => {
-      const aspect = w / Math.max(1, h);
+      const aspect = Math.max(1, w) / Math.max(1, h);
       camera.aspect = aspect;
-      const refFov = isFirstPerson ? FPS_FOV : BASE_FOV;
-      const halfH = Math.tan(THREE.MathUtils.degToRad(refFov) / 2) * Math.max(1, BASE_ASPECT / aspect);
+      const halfH = isFirstPerson
+        // 第一人称不套用全景构图补偿；超宽屏水平视野封顶 100°。
+        ? Math.min(Math.tan(THREE.MathUtils.degToRad(FPS_FOV) / 2), Math.tan(THREE.MathUtils.degToRad(100) / 2) / aspect)
+        : Math.tan(THREE.MathUtils.degToRad(BASE_FOV) / 2) * Math.max(1, BASE_ASPECT / aspect);
       camera.fov = THREE.MathUtils.radToDeg(2 * Math.atan(halfH));
       camera.updateProjectionMatrix();
     };
@@ -456,12 +806,24 @@ export function RoomScene() {
       powerPreference: 'high-performance',
     });
     // [TEMP-DEBUG] 几何排查用，验证完即删
-    (window as any).__ROOM__ = { scene, camera, renderer, THREE };
+    (window as any).__ROOM__ = { scene, camera, renderer, THREE, cmdPanelOpen: false };
     renderer.setSize(container.clientWidth, Math.max(1, container.clientHeight));
     // 全屏渲染负载高：像素比封顶 1.5，避免 2x 的 4 倍像素把 GPU/显存逼到崩溃
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    // One prefiltered environment supplies broad, soft highlights to the Blender PBR assets.
+    // Generated once, without a network HDRI or additional per-frame lighting passes.
+    const studio = new RoomEnvironment();
+    const pmrem = new THREE.PMREMGenerator(renderer);
+    const furnitureEnvironment = pmrem.fromScene(studio, 0.06);
+    scene.environment = furnitureEnvironment.texture;
+    scene.environmentIntensity = 0.24;
+    studio.dispose();
+    pmrem.dispose();
+    // PMREM（IBL 预滤波）是装配期里少数几处**纯 GPU** 开销，单独打点：它在集显上
+    // 可能是装配段的大头，而它只影响 PBR 家具的反射，理论上可以推迟到首帧之后再算。
+    bootMark('scene:pmrem');
     /**
      * 色调映射。
      *
@@ -523,6 +885,88 @@ export function RoomScene() {
     composer.addPass(bloomPass);
     composer.addPass(new OutputPass());
 
+    /* ---------------- 泛光降分辨率 ----------------
+     *
+     * UnrealBloomPass 自己先把 mip0 取半（w/2 × h/2），再逐级降到 1/32；一轮
+     * 是 5 级 mip × 2 次分离模糊 + 高通 + 合成，像素量约等于整屏的 1/3。
+     * 而泛光本来就是低频信息——再降一半（mip0 = 屏幕 1/4）肉眼几乎看不出，
+     * 代价却直接少 4×。这是引擎里的常规做法（1/4 或 1/8 分辨率泛光）。
+     *
+     * 实现上包装 bloomPass.setSize 而不是在调用点手算：composer.setSize 会把
+     * **有效像素尺寸**转发给每个 pass，包装住它，初始化 / 切倍率 / 首帧补尺寸 /
+     * 窗口 resize 四条路径就都自动生效，将来新增调用点也不会漏。
+     */
+    let bloomScale = 0.5;
+    const bloomSetSize = bloomPass.setSize.bind(bloomPass);
+    bloomPass.setSize = (w: number, h: number): void => {
+      bloomSetSize(
+        Math.max(1, Math.floor(w * bloomScale)),
+        Math.max(1, Math.floor(h * bloomScale))
+      );
+    };
+    // 上面的包装晚于首帧那次 composer.setSize，按当前尺寸补一次
+    composer.setSize(container.clientWidth, Math.max(1, container.clientHeight));
+    // 调试/验证用：A/B 对照泛光分辨率（1 = 关掉这项优化）
+    (window as any).__ROOM__.setBloomScale = (v: number): void => {
+      bloomScale = Math.max(0.25, Math.min(1, v));
+      composer.setSize(container.clientWidth, Math.max(1, container.clientHeight));
+    };
+    (window as any).__ROOM__.getBloomScale = () => ({
+      scale: bloomScale,
+      // 泛光 mip0 的 RT 尺寸——自检用：应恒为 composer RT 的 bloomScale 倍
+      bloomRT: [bloomPass.renderTargetsHorizontal[0].width, bloomPass.renderTargetsHorizontal[0].height],
+    });
+
+    /* ---------------- 自适应渲染倍率（动态分辨率） ----------------
+     *
+     * 这个场景是「全屏填充 + 全屏后处理」型：主 pass 之后还有泛光的 5 级 mip、
+     * MSAA 4× 的解析、OutputPass，而 MSAA RT 本身是 HalfFloat——**像素数几乎
+     * 直接决定帧时**。集显上真正的瓶颈就在这里，不在 draw call（实测第一人称
+     * 664 个，比观察者模式还少）。
+     *
+     * 所以按实测帧时自动升降渲染倍率：跑得动就一直是满倍率，跑不动才逐级降，
+     * 有余量了再升回来。降的是渲染分辨率、不是 CSS 尺寸，所以构图 / 视野 /
+     * 鼠标手感 / 交互都不变，只是画面软一点。最低 0.7×——再低就明显糊了。
+     *
+     * 两个防抖措施，缺一不可：
+     *  - 升档要求「连续 8 个采样窗都很快」+「距上次降档 ≥20s」，否则帧时刚好
+     *    卡在阈值附近时会来回抖，比一直低一档更难受；
+     *  - 帧时 ≥120ms 时**不做任何判断**：那是切后台、断点、或软件光栅，不是
+     *    持续负载，跟着降档只会把画质白白降下去（headless 验证时也正是靠这条
+     *    保证探针不会把倍率降下去）。
+     */
+    const SCALE_STEPS = [1, 0.9, 0.8, 0.7];
+    let scaleIdx = 0;
+    let scaleHold = 0;      // 切档后的冷却秒数
+    let slowStreak = 0;
+    let fastStreak = 0;
+    let lastDownAt = -1e9;
+
+    const applyRenderScale = (idx: number): void => {
+      if (idx === scaleIdx) return;
+      scaleIdx = idx;
+      const next = dpr * SCALE_STEPS[idx];
+      const w = container.clientWidth;
+      const h = Math.max(1, container.clientHeight);
+      renderer.setPixelRatio(next);
+      renderer.setSize(w, h);
+      // composer 自己持有一套 RT（含传进去的 MSAA target），必须同步重设——
+      // 否则后处理仍按旧分辨率画，画面会糊成一块
+      composer.setPixelRatio(next);
+      composer.setSize(w, h);
+      console.info(`[room] 渲染倍率 → ${SCALE_STEPS[idx]}×（dpr ${next.toFixed(2)}）`);
+    };
+    // 调试用：手工切档，验证重设尺寸不会破坏渲染
+    (window as any).__ROOM__.setRenderScale = (idx: number) =>
+      applyRenderScale(Math.max(0, Math.min(SCALE_STEPS.length - 1, Math.floor(idx))));
+    (window as any).__ROOM__.getRenderScale = () => ({
+      idx: scaleIdx, factor: SCALE_STEPS[scaleIdx], dpr: renderer.getPixelRatio(),
+      canvas: [renderer.domElement.width, renderer.domElement.height],
+      // composer 的 RT（就是传进去的 fxTarget）必须跟着变，否则后处理仍按旧
+      // 分辨率画——这个字段就是给自检用的
+      composerRT: [composer.renderTarget1.width, composer.renderTarget1.height],
+    });
+
     // A/B 对照开关：按 P 在"整条后处理链"和"直出"之间切，用来判断这一步到底
     // 带来了多少变化，不用改代码重启。
     let fxOn = true;
@@ -554,7 +998,7 @@ export function RoomScene() {
     // 拉远上限按"整栋楼进画"定，不按房间尺度：默认构图是 30~45° 俯视的
     // 微缩全景（相机离目标约 38m），sceneRadius*2.8 只有 24m，会把默认机位
     // 一进场就夹回来，整栋楼被切成一半。
-    controls.maxDistance = sceneRadius * 5.5;
+    controls.maxDistance = 180;
     controls.minPolarAngle = THREE.MathUtils.degToRad(20);
     controls.maxPolarAngle = THREE.MathUtils.degToRad(82);
     // 视线目标同样要能抬到楼层中部（默认看向 y≈5.5 世界标高，约二层半），
@@ -588,6 +1032,9 @@ export function RoomScene() {
     fps.setPosition(spawnPos[0], UNIT_LIFT + 1.8, spawnPos[2]);
     // 初始朝向：朝南（朝向房间深处）
     fps.setRotation(0, 0);
+    camera.position.set(24, 20, 34);
+    controls.target.set(0, 5, 7);
+    controls.update();
 
     let colliders: Collider[] = [];
 
@@ -598,8 +1045,8 @@ export function RoomScene() {
     // 飞行时 OrbitControls.target 允许活动的整座微缩场景范围（留余量）。
     // 公寓外壳 AABB ≈ [-31.15,-0.47,-8]~[38.25,14.05,8.28]，便利店到 z≈27；
     // 放宽到下面这个范围，既能飞到街区/便利店自由探索，又不会把模型拖丢。
-    const OBS_TGT_MIN = new THREE.Vector3(-40, 0.2, -15);
-    const OBS_TGT_MAX = new THREE.Vector3(45, 14, 32);
+    const OBS_TGT_MIN = new THREE.Vector3(-78, 0.2, -76);
+    const OBS_TGT_MAX = new THREE.Vector3(78, 35, 81);
 
     // 门洞列表：决定 buildWallColliders 在哪些墙段挖开口。
     // 必须与观察者模式的 nav 栅格（navGrid.wallAABBs）保持同一套「可走洞口」口径——
@@ -661,6 +1108,9 @@ export function RoomScene() {
       alongX: boolean;
       width: number;
       height: number;
+      /** 门洞净高的上下沿（世界 y）。用于判定"人和门是不是同一层"—— */
+      y0: number;
+      y1: number;
       openAngle: number;
       current: number;
       slide: boolean;
@@ -677,7 +1127,19 @@ export function RoomScene() {
 
     // 第一人称门碰撞缓冲：渲染循环里复用，避免每帧 new 数组（GC 压力）
     const blockerBuf: Collider[] = [];
-    let nightHorizonRing: THREE.Object3D | null = null;
+
+    /* 公寓南侧入口的自动感应门：开度 0（合拢）..1（全开）。
+     * 与 doors 分开驱动——那道门没有可手动推的门扇（所以也没有 "F 打开" 提示），
+     * 也不来自 layout，唯一的输入就是"门口有没有人"。 */
+    let aptDoorOpen = 0;
+    /** 两个门扇的碰撞盒：每帧随开度重写，预分配复用避免 GC */
+    const aptDoorBlockers: Collider[] = [
+      { min: new THREE.Vector3(), max: new THREE.Vector3() },
+      { min: new THREE.Vector3(), max: new THREE.Vector3() },
+    ];
+    /** 门扇半宽 / 碰撞盒半厚：与 apartmentPodium 里 1.22 宽的门扇对应 */
+    const APT_DOOR_HALF_W = 0.61;
+    const APT_DOOR_HALF_T = 0.06;
 
     // 第一人称下，当前最近、且处于触发范围内的门（供 F 键开门 + "F 打开" 提示显示）。
     // 观察者模式下恒为 null。
@@ -695,6 +1157,7 @@ export function RoomScene() {
       scene.background = new THREE.Color(profile.background).lerp(tint, tuning.tintAmount * 0.38);
       scene.fog = new THREE.Fog(new THREE.Color(profile.fog).lerp(tint, tuning.tintAmount * 0.5), FX.fog?.near ?? sceneRadius * 2.0, FX.fog?.far ?? sceneRadius * 6.5);
       renderer.toneMappingExposure = profile.exposure * tuning.exposure;
+      scene.environmentIntensity = (nextPeriod === 'night' ? 0.20 : nextPeriod === 'dusk' ? 0.28 : 0.36) * tuning.exposure;
       ambient.color.copy(mixColor(profile.ambient));
       hemi.color.copy(mixColor(profile.hemiSky));
       hemi.groundColor.copy(mixColor(profile.hemiGround));
@@ -711,14 +1174,24 @@ export function RoomScene() {
       if (rainObj) rainObj.scale.setScalar(storm ? 1.18 : 0.78);
       if (rainObj) rainObj.userData.weatherIntensity = storm ? '暴雨' : '小雨';
       if (snowObj) snowObj.userData.weatherIntensity = nextWeather === 'snow' ? '降雪' : '隐藏';
-      // 远景贴图只用于晴天；雨天/雪天恢复纯色背景 + 原场景雾距，避免贴图被雨雪空气感抢戏。
-      if (nightHorizonRing) nightHorizonRing.visible = nextWeather === 'clear';
-      setPeriod(nextPeriod);
-      setWeather(nextWeather);
+      districtArt.setEnvironment(nextPeriod, nextWeather);
+      // HUD 摘要走 ref 直接改 DOM：环境每变一次才动一次，没必要为此重渲染整棵子树。
+      if (hudEnvRef.current) {
+        hudEnvRef.current.textContent = describeEnvironment(environmentRef.current, environmentSourceRef.current);
+      }
     };
-    environmentToggleRef.current = setEnvironment;
-    (window as any).__ROOM__.setEnvironment = setEnvironment;
-    (window as any).__ROOM__.setWeather = (kind: WeatherKind) => setEnvironment(environmentRef.current.period, kind);
+    environmentApplyRef.current = setEnvironment;
+    /**
+     * 测试注入口。传 input 片段（如 { hour: 12, weatherCode: 95 }）即切换环境，
+     * 传 null 恢复跟随真实世界感知。
+     *
+     * 这里给的是感知层的 input 而不是最终的 period/weather —— 让无头验证脚本
+     * 和真实运行走同一条映射路径，映射本身才被测得到。
+     */
+    (window as any).__ROOM__.setEnvironmentSource = (src: Partial<EnvironmentInput> | null) => {
+      environmentOverrideRef.current = src;
+      environmentTickRef.current?.();
+    };
 
     // 构建碰撞体列表（墙体 + 栏杆 + nav 家具），全部由 dormLayout.json 驱动。
     // 与 navGrid 同源：nav 走得过去的地方，第一人称也必须走得过去。
@@ -759,7 +1232,7 @@ export function RoomScene() {
       });
     };
     // 街道 / 便利店地面（一层，世界 y=0）——也作为「掉出楼板后的兜底落点」
-    addFloor(-40, 45, -15, 32, 0, 'street');
+    addFloor(-80, 80, -78, 83, 0, 'street');
     // 公寓一楼（地面层）主体楼板：楼体 footprint 正下方的正式地板，堵死
     // 「穿透二楼后落到 street 板、又被公寓外壳围墙关在一楼盒子里」的陷阱。
     addFloor(APT_X0, APT_X1, APT_ZN, APT_ZB, 0, 'apt-floor-0');
@@ -825,6 +1298,11 @@ export function RoomScene() {
     fps.onLock = () => {
       if (!alive) return;
       isFirstPerson = true;
+      /* 近裁面先复位到区间下限：第一帧还没跑过 fps.update，用观察者的 0.1 会
+       * 在出生点贴墙的情况下切一帧。之后由 FPSControls 每帧自适应放大。
+       * 刻意不放进 applyProjection —— 那样窗口 resize 也会把 near 打回下限，
+       * 明明是站在空地上却要白丢一段深度精度。 */
+      camera.near = FPS_NEAR_MIN;
       applyProjection(container.clientWidth, container.clientHeight); // 第一人称切广角
       controls.enabled = false;
       // 吸附到脚下最近合法楼层；存档只在脚下有二楼层支撑时才恢复，否则回落出生点。
@@ -832,7 +1310,7 @@ export function RoomScene() {
       let placed = false;
       if (savedFpsState) {
         const g = snapAt(savedFpsState.x, savedFpsState.z, savedFpsState.y - eye);
-        if (g != null && g >= UNIT_LIFT - 0.1) {
+        if (g != null && g >= -0.1) {
           fps.setPosition(savedFpsState.x, g + eye, savedFpsState.z);
           fps.setRotation(savedFpsState.yaw, savedFpsState.pitch);
           placed = true;
@@ -845,6 +1323,7 @@ export function RoomScene() {
         const floorY = g == null ? UNIT_LIFT : Math.max(g, UNIT_LIFT);
         fps.setPosition(spawnPos[0], floorY + eye, spawnPos[2]);
         fps.setRotation(0, 0);
+
       }
       setMode('firstPerson');
       // ESC 一律关闭公寓窗口（看护线程在指针锁定下也能收到），不只是退出第一人称
@@ -860,6 +1339,7 @@ export function RoomScene() {
       // 意外解锁（ESC 退出锁定 / Alt+Tab / 锁定请求失败）→ 回到观察者模式，
       // 并复位到观察者初始构图（全景概览），避免停在第一人称的房间内部角度。
       isFirstPerson = false;
+      camera.near = FPS_NEAR_MAX; // 观察者模式距离目标 ≥3.5m，恢复常规近裁面
       applyProjection(container.clientWidth, container.clientHeight); // 观察者退回原视野
       controls.enabled = true;
       // 退出第一人称时清掉飞行按键状态，避免观察者在 FPS 期间按住的键"卡住"继续飞
@@ -875,6 +1355,12 @@ export function RoomScene() {
     // Enter 键：观察者模式下进入第一人称
     const onEnterKey = (e: KeyboardEvent) => {
       if (e.key !== 'Enter' || isFirstPerson) return;
+      // 命令面板输入框里的回车是执行命令，不是进入第一人称。
+      // 除了 ref 判定还要看事件源：命令成功会同步关面板、cmdOpenRef 提前翻 false，
+      // 这条 keydown 冒泡到 window 时 ref 已不可信，按 DOM 源最稳。
+      const t = e.target as HTMLElement | null;
+      if (t && t.tagName === 'INPUT') return;
+      if (cmdOpenRef.current) return; // 命令面板打开时 Enter 是执行命令，不进第一人称
       e.preventDefault();
       fps.requestLock();
     };
@@ -884,6 +1370,7 @@ export function RoomScene() {
     // 仅非第一人称时响应——第一人称下这些键交给 FPSControls 处理，互不冲突。
     const onObsKeyDown = (e: KeyboardEvent) => {
       if (isFirstPerson) return;
+      if (cmdOpenRef.current) return; // 命令面板输入时这些键是打字，不触发飞行
       const k = e.key.toLowerCase();
       if (k === 'w' || k === 'a' || k === 's' || k === 'd' ||
           k === 'arrowup' || k === 'arrowdown' || k === 'arrowleft' || k === 'arrowright' ||
@@ -909,14 +1396,14 @@ export function RoomScene() {
     scene.add(hemi);
 
     const key = new THREE.DirectionalLight(new THREE.Color(L.key.color), L.key.intensity);
-    key.position.set(L.key.position[0], L.key.position[1], L.key.position[2]);
+    key.position.set(-18, 32, 16);
     key.castShadow = true;
     // 软阴影下 1024 对十几米的场景已够（~1cm/texel），2048 显存和阴影 pass 都翻倍
-    key.shadow.mapSize.set(1024, 1024);
+    key.shadow.mapSize.set(2048, 2048);
     // 正交阴影相机罩住套房的包围球（留 5% 余量），户型再怎么扩建都不会漏
-    const shadowR = sceneRadius * 1.05 + 0.4;
+    const shadowR = 34;
     key.shadow.camera.near = 0.5;
-    key.shadow.camera.far = 12 + sceneRadius * 2.6;
+    key.shadow.camera.far = 110;
     key.shadow.camera.left = -shadowR;
     key.shadow.camera.right = shadowR;
     key.shadow.camera.top = shadowR;
@@ -951,25 +1438,36 @@ export function RoomScene() {
      * 地面只有一张（湿沥青，170m 见方，边缘被雾吞掉），居中跟着房间
      * 包围盒走——户型一旦扩建，地面不会一侧贴墙、另一侧空出一块。
      */
+    const districtArt = createDistrictArt(scene);
+    fpsColliders = fpsColliders.concat(districtArt.colliders);
+    /* 近景那一排（公寓正对面）单独挂描边并冻结。
+     *
+     * 街区整体是刻意不描边的（远景描边会在雾里变成网格，且 48 栋的壳太贵），
+     * 但只描最近这 4 栋就能把"隔着一条街的楼是纯色块、身后公寓有清晰线稿"
+     * 这个质感断点接上。必须在 createDistrictArt 内部合批之后做——描边要从
+     * 合并后的少数几个 mesh 上长出来，逐 mesh 描会退化成几千个壳。
+     */
+    outlineProp(districtArt.frontage);
+    freezeStatic(districtArt.frontage);
     const exteriorGround = buildExteriorGround();
+    districtArt.prepare(exteriorGround);
     exteriorGround.position.set((B.x0 + B.x1) / 2, 0, (B.z0 + B.z1) / 2);
     scene.add(exteriorGround);
     freezeStatic(exteriorGround);
 
     /* ---------------- 近景街道层（室外层 Stage 2） ----------------
      *
-     * 对面楼群 + 路灯 + 街道湿地。楼体用世界绝对坐标，不跟房间包围盒
-     * 居中——户型扩建时楼不该跟着挪。整层走标准装配：合批 → 描边 →
-     * add → 冻结；不进 FPS 碰撞（阳台栏杆拦着，玩家出不去）。
+     * 路灯 + 街道湿地 + 停车场。全部用世界绝对坐标，不跟房间包围盒居中
+     * ——户型扩建时街道不该跟着挪。整层走标准装配：合批 → 描边 → add →
+     * 冻结；不进 FPS 碰撞（阳台栏杆拦着，玩家出不去）。
      */
     const streetscape = buildStreetscape();
-    nightHorizonRing = streetscape.getObjectByName('night-horizon-ring') ?? null;
-    // 初始化默认状态：夜间小雨不显示远景贴图，保留原有雾距模式。
-    if (nightHorizonRing) nightHorizonRing.visible = false;
-    // 合批前收集碰撞：合批会把 bldg-* 子组合并进大 mesh、丢掉其 sceneCollideSkip 标记，
-    // 且合并出的大 mesh 直接挂根下会被收成横跨整片楼群的巨型盒。这里先收，只对路灯这类
-    // 该挡人的实体生成碰撞盒（楼群 bldg-* 整组标了 skip）。
+
+    // 合批前收集碰撞：合批会把子组合并进大 mesh、丢掉其 sceneCollideSkip 标记，
+    // 且合并出的大 mesh 直接挂根下会被收成横跨整条街的巨型盒。这里先收，只对路灯
+    // 这类该挡人的实体生成碰撞盒。
     const streetSceneColliders = buildSceneColliders(streetscape);
+    districtArt.prepare(streetscape);
     mergeByMaterial(streetscape);
     outlineProp(streetscape);
     scene.add(streetscape);
@@ -990,10 +1488,25 @@ export function RoomScene() {
     fpsColliders = fpsColliders.concat(
       buildBoxColliders([...APT_WALL_BOXES, ...apartmentShell.boxes])
     );
+    districtArt.prepare(apartmentShell.group);
     mergeByMaterial(apartmentShell.group);
     outlineProp(apartmentShell.group);
     scene.add(apartmentShell.group);
     freezeStatic(apartmentShell.group);
+    /* 南侧入口的自动感应门。挂在 shell 树之外是必须的：外壳整体走
+     * mergeByMaterial + freezeStatic，门扇进去就被合批焊死、矩阵也不再更新。
+     * 这里只 add，不描边（门厅其他构件一律 noOutline，保持一致）。 */
+    const aptAutoDoor = apartmentShell.autoDoor;
+    scene.add(aptAutoDoor.group);
+    const apartmentLift=createApartmentLift(container,camera,fps);
+    fpsColliders=fpsColliders.concat(apartmentLift.colliders);
+    districtArt.prepare(apartmentLift.group);
+    mergeByMaterial(apartmentLift.group);
+    scene.add(apartmentLift.group,apartmentLift.dynamic);
+    freezeStatic(apartmentLift.group);
+    (window as any).__ROOM__.lift=apartmentLift;
+    (window as any).__ROOM__.fps=fps;
+
 
     /* ---------------- 湿地涟漪 + 屋檐滴水（动效层，不得冻结） ----------------
      *
@@ -1017,9 +1530,20 @@ export function RoomScene() {
      * scene 下，不能合批（材质每帧改）也不能冻结（门每帧滑）。
      */
     const store = buildConvenienceStore();
-    // 合批前收集碰撞：货架/吧台/冷饮柜这类该挡人的实体生成碰撞盒（store-mass 主体体量
-    // 标了 skip，不把店门堵死；自动门玻璃门扇透明，遍历里也自然跳过）。
-    const storeSceneColliders = buildSceneColliders(store.group).concat(buildSceneColliders(store.dynamic));
+    /* 碰撞表三路拼：
+     *   1) 遍历 store.group —— 合批前收，货架/吧台/冷饮柜/墙裙/竖框/角柱这类实体各自
+     *      还是独立小 mesh（合批之后就并成跨整店的巨盒了，必须赶在这之前）。
+     *      ⚠️ 「自动门玻璃门扇透明，遍历里也自然跳过」这句只对玻璃成立：门扇上的
+     *      金属竖杆/横杆是不透明的，遍历会照样收，所以它们各自标了 noCollide
+     *      （见 mkLeaf），门扇的碰撞一律由第 3 路给。
+     *   2) 遍历 store.dynamic —— 动效件（招牌灯箱 / 门头灯箱 / 红绿灯）的实体盒。
+     *   3) 显式声明 + 门扇动态盒 —— 橱窗玻璃是 opacity 0.075 的透明材质，遍历整片放过，
+     *      必须由 store.boxes 声明；门扇盒随门滑动，必须每帧更新，两者都不能靠遍历。 */
+    const storeSceneColliders = buildSceneColliders(store.group)
+      .concat(buildSceneColliders(store.dynamic))
+      .concat(buildBoxColliders(store.boxes))
+      .concat(store.doorColliders);
+    districtArt.prepare(store.group);
     mergeByMaterial(store.group);
     outlineProp(store.group);
     scene.add(store.group);
@@ -1028,58 +1552,71 @@ export function RoomScene() {
 
     /* ---------------- 近景城市节点（地铁 / 居酒屋 / 小公园） ---------------- */
     const subwayEntrance = buildSubwayEntrance();
+    districtArt.prepare(subwayEntrance);
     mergeByMaterial(subwayEntrance);
     outlineProp(subwayEntrance);
     scene.add(subwayEntrance);
     freezeStatic(subwayEntrance);
 
+    /* 居酒屋：碰撞随几何一并交出（声明式，与便利店 / 书店同一条路）。
+     * 整组标了 sceneCollideSkip，遍历一个盒都不收；而且北立面是「木格栅 + 门」，
+     * 格栅缝 0.44m 比玩家直径 0.30 宽，靠遍历也挡不住 —— 必须由 izakaya.boxes 声明。
+     * 北立面已按门洞拆成「西 / 东 / 门楣」三条，门洞净空可进（原来整面封死，
+     * 用户报「居酒屋没有门无法进入」）。
+     * 第 3 路 doorColliders：门扇的动态盒，随门滑动，必须每帧由 izakaya.update() 同步。 */
     const izakaya = buildIzakaya();
-    mergeByMaterial(izakaya);
-    outlineProp(izakaya);
-    scene.add(izakaya);
-    freezeStatic(izakaya);
+    fpsColliders = fpsColliders.concat(buildBoxColliders(izakaya.boxes))
+                              .concat(izakaya.doorColliders);
+    districtArt.prepare(izakaya.group);
+    mergeByMaterial(izakaya.group);
+    outlineProp(izakaya.group);
+    scene.add(izakaya.group);
+    freezeStatic(izakaya.group);
+    // 感应门扇：每帧滑，既不合批也不冻结，单独挂
+    scene.add(izakaya.dynamic);
 
     const smallPark = buildSmallPark();
+    districtArt.prepare(smallPark);
     mergeByMaterial(smallPark);
     outlineProp(smallPark);
     scene.add(smallPark);
     freezeStatic(smallPark);
 
-    /* ---------------- 近景高模临街书店（学园都市式学生街排面） ---------------- */
+    /* ---------------- 近景高模临街书店（学园都市式学生街排面） ----------------
+     *
+     * 1F 是可进入的真营业厅，碰撞盒随几何一并交出（声明式，与公寓楼同一条路）。
+     * 不能走 buildSceneColliders 遍历：橱窗那片玻璃是 0.085 透明度的近全透明
+     * 材质，遍历按「transparent && opacity < 0.5」整块跳过，玩家就能从橱窗穿进去。
+     */
     const bookStore = buildStreetBookStore();
-    mergeByMaterial(bookStore);
-    outlineProp(bookStore);
-    scene.add(bookStore);
-    freezeStatic(bookStore);
+    fpsColliders = fpsColliders.concat(buildBoxColliders(bookStore.boxes));
+    districtArt.prepare(bookStore.group);
+    mergeByMaterial(bookStore.group);
+    outlineProp(bookStore.group);
+    scene.add(bookStore.group);
+    freezeStatic(bookStore.group);
 
     /* ---------------- 中景商住混合街区 ---------------- */
-    const midRise = buildMidRiseBlock();
-    mergeByMaterial(midRise);
-    outlineProp(midRise);
-    scene.add(midRise);
-    freezeStatic(midRise);
-
-    /* ---------------- 远景城市骨架（高架 / 商场） ---------------- */
-    const viaduct = buildViaduct();
-    mergeByMaterial(viaduct);
-    scene.add(viaduct);
-    freezeStatic(viaduct);
-
-    const shoppingMall = buildShoppingMall();
-    mergeByMaterial(shoppingMall);
-    scene.add(shoppingMall);
-    freezeStatic(shoppingMall);
+    // The authored district replaces the old repeated mid-rise, mall and viaduct masses.
 
     // 城市基础设施：电线杆+架空电线 / 街道设施（售货机·快递柜·路牌）
     const utilityPoles = buildUtilityPoles();
+    districtArt.prepare(utilityPoles);
     mergeByMaterial(utilityPoles);
     scene.add(utilityPoles);
     freezeStatic(utilityPoles);
 
+    /* 街道设施（售货机 / 快递柜 / 路牌）：柜体的碰撞随几何一并交出（声明式，
+     * 与便利店 / 书店 / 居酒屋同一条路）。整组标了 sceneCollideSkip，遍历一个盒
+     * 都不收，2.0m 高的售货机与快递柜原来能直接穿过去。
+     * 路牌柱 / 公交牌柱 / 条凳**刻意不在 boxes 里**（细杆与可跨条凳，见 exterior.ts
+     * buildStreetFurniture 的注释）。 */
     const streetFurniture = buildStreetFurniture();
-    mergeByMaterial(streetFurniture);
-    scene.add(streetFurniture);
-    freezeStatic(streetFurniture);
+    fpsColliders = fpsColliders.concat(buildBoxColliders(streetFurniture.boxes));
+    districtArt.prepare(streetFurniture.group);
+    mergeByMaterial(streetFurniture.group);
+    scene.add(streetFurniture.group);
+    freezeStatic(streetFurniture.group);
 
     /* ---------------- 单元组（203 室，整户抬高到二楼） ----------------
      *
@@ -1102,6 +1639,7 @@ export function RoomScene() {
      * 相机绕到那一侧的墙外时，挂在该墙上的厚装饰（窗框窗帘、门扇、玻璃滑门框）
      * 跟着墙一起让开——墙平面本身靠 FrontSide 背面剔除自动消失。
      */
+    const interiorDesign = createInteriorDesign();
     const shell = buildRoomShell(layout);
     console.log('[room] shell 构建完成, wallSides:', shell.wallSides.length, 'wallMeshes:', shell.wallMeshes.length, 'ceilingMeshes:', shell.ceilingMeshes.length);
     /** 观察者模式：墙板/天花板/墙装饰 视线剔除 */
@@ -1122,6 +1660,8 @@ export function RoomScene() {
       ws.reveals.userData.noMerge = true;
     }
     shell.interiorReveals.userData.noMerge = true;
+    districtArt.prepare(shell.group);
+    interiorDesign.prepareShell(shell);
     mergeByMaterial(shell.group);
     // noMerge 只对"父级发起的合批"生效，拿它当 root 单独调仍然照常合并
     for (const ws of shell.wallSides) mergeByMaterial(ws.reveals);
@@ -1157,8 +1697,10 @@ export function RoomScene() {
         console.warn(`[room] 未知道具类型 kind=${it.kind}（id=${it.id}），跳过`);
         continue;
       }
-      const obj = build(it);
-      if (blenderFurnitureIds.has(it.id)) blenderSlots.push({ root: obj, spec: it });
+      const obj = ['jpRug', 'jpDiningRug'].includes(it.kind) ? interiorDesign.buildRug(it.size) : build(it);
+      interiorDesign.prepareFurniture(obj, it.id);
+      obj.userData.roomFurnitureId = it.id;
+      if (blenderFurnitureIds.has(it.id) && !['jpRug', 'jpDiningRug'].includes(it.kind)) blenderSlots.push({ root: obj, spec: it });
       // 标 furnitureRoot 的家具组在 buildSceneColliders 遍历里被跳过（碰撞已由 layout 尺寸盒覆盖）。
       // 仅「有尺寸的 nav 家具 + 门/窗/地毯/浴室」标 true；lifestyle/落地灯等无尺寸摆件留 false，
       // 让遍历给它们补实体碰撞。
@@ -1229,6 +1771,8 @@ export function RoomScene() {
             alongX,
             width: w,
             height: h,
+            y0,
+            y1,
             openAngle: -1.82,
             current: 0,
             slide,
@@ -1439,8 +1983,9 @@ export function RoomScene() {
       const yLo = UNIT_LIFT - 0.2;
       const yHi = UNIT_LIFT + layout.room.height + 0.1;
       rainIndoors = (x, y, z) =>
-        y > yLo && y < yHi &&
-        roofed.some((r) => x > r.x0 && x < r.x1 && z > r.z0 && z < r.z1);
+        (x > -31 && x < 31 && z > -5.9 && z < 4.7 && y > 0 && y < 3.3) ||
+        (x > -36.8 && x < -31 && z > -7.2 && z < 4.7 && y > 0 && y < 12.2) ||
+        (y > yLo && y < yHi && roofed.some((r) => x > r.x0 && x < r.x1 && z > r.z0 && z < r.z1));
       const rain = buildRain({
         count: R.count,
         area,
@@ -1527,6 +2072,19 @@ export function RoomScene() {
     // 否则 decor 组里的家具会拿到还没算过的父级矩阵。
     freezeStatic(shell.group);
 
+    /* ---------------- 几何体去重（放在全部合批之后） ----------------
+     * 合批会把同材质的零件并成少数几个几何体，但**合不动的**那些还留着：
+     * 透明件（玻璃、光晕）、noMerge 子树、单件即独占一个材质的构件。它们里面
+     * 有 301 个几何体是逐字节重复的（合计约 5.4 MB 顶点数据，CPU 与 GPU 各一份），
+     * 全部来自「循环里 new 出来的同尺寸几何」——构建期各 new 各的，缓存没覆盖到。
+     *
+     * 必须放在所有 mergeByMaterial 之后：合批会 dispose 源几何，先去重等于白干。
+     */
+    const dedup = dedupeGeometries(scene);
+    if (dedup.removed) {
+      console.info(`[room] 几何去重：${dedup.groups} 组、收掉 ${dedup.removed} 个重复几何体，省 ${(dedup.bytes / 1048576).toFixed(2)} MB`);
+    }
+
     /* ---- 场景遍历全量补碰撞 ----
      * 给所有未被 layout 驱动碰撞（家具尺寸盒/墙体门洞盒/栏杆/floor/ramp）覆盖的实体几何
      * 补碰撞盒：室内落地灯/lifestyle 摆件（拖鞋/伞/快递箱）/阳台件/吊灯，室外路灯/便利店
@@ -1538,7 +2096,12 @@ export function RoomScene() {
      * 室外（街道楼群/便利店）的碰撞在「合批前」收集：合批会把 bldg-* 与 store-mass 子组合并
      * 进大 mesh、丢掉其 sceneCollideSkip 标记，合并出的大 mesh 直接挂根下会被收成横跨整片
      * 楼群的巨型盒；合批前收集则每根路灯/每个货架还是独立小 mesh，只标了 skip 的楼群主体/
-     * 便利店主体被跳过，门洞（透明玻璃门扇）也自然跳过，不会把入户门/店门重新堵死。
+     * 便利店主体被跳过，不会把入户门/店门重新堵死。
+     * ⚠️ 「透明 = 自然跳过」只对纯玻璃板成立，别拿它当"门洞一定通"的保证：
+     *    - 便利店门扇上的金属竖杆/横杆是不透明的，遍历会照样收成盒杵在门洞里 → 标 noCollide；
+     *    - 橱窗玻璃整片透明 → 遍历完全不收，等于没有碰撞 → 声明式盒（store.boxes）补上；
+     *    - 海报/贴纸这类零厚度装饰板 → 遍历按 AABB 生成实心盒（门洞正中那张就是隐形墙）
+     *      → 标 sceneCollideSkip。
      * 公寓外壳（203 所在楼体）整体不进遍历——它的主体是实心整块、门洞只在 layout 层挖，
      * 遍历会重新把入户门堵死；楼体与栏杆/自行车走声明式盒（见 buildBoxColliders），
      * 各层落脚面由 worldColliders 的 floor / ramp 盒接管。 */
@@ -1547,8 +2110,67 @@ export function RoomScene() {
       streetSceneColliders,
       storeSceneColliders
     );
+    // 自检钩子：把第一人称碰撞体挂到调试面。门外景那些「能不能走进去 / 会不会
+    // 被空气墙挡住」的问题，只看源码是判不出来的——必须拿真实的盒表去跑
+    // collidesAt 那一套规则（scripts/room/verify-bookstore.mjs 就是这么做的）。
+    (window as any).__ROOM__.colliders = fpsColliders;
+
+    /**
+     * 跨场景导航：把定稿的碰撞表派生成「多层栅格 + 层间门户」。
+     *
+     * 位置必须在 fpsColliders 定稿之后——它吃的是同一份盒表（导航与碰撞同源）。
+     * 分层的理由见 navWorld.ts：室内要 0.15m 精度，街区 ±80m 用同样精度就是上百万格。
+     */
+    const navWorld = buildNavWorld(fpsColliders, {
+      // 2F 那层横跨整栋楼、楼板是一整片：只放开「北外廊 + 电梯厅 + 东端楼梯平台」，
+      // 其余（邻居户室内）一律不可走。坐标全部取自 exterior.ts 的常量，不在这里写第二份。
+      allow: {
+        apt2out: [
+          { x0: APT_X0, x1: STRS.lx0, z0: APT_CORRIDOR_N, z1: APT_ZN },                 // 北侧外廊
+          { x0: -36.8, x1: APT_X0, z0: -7.18, z1: 4.68 },                              // 2F 电梯厅
+          { x0: STRS.lx0, x1: STRS.ex1, z0: STRS.za0, z1: STRS.zb1 },                   // 东端楼梯平台
+        ],
+      },
+      // 203 室内用 dormLayout 的标称尺寸当障碍（导航口径），不吃渲染侧那份为
+      // 「第一人称不穿模」而建的精细碰撞盒——否则客厅连沙发前都站不下人。
+      extraObstacles: { apt2: buildObstacles(layout as never) },
+    });
+    (window as any).__ROOM__.navWorld = navWorld;
+    /**
+     * 街面积水反射面的**遮挡**剔除：把"头顶的水平板"回填给它（见 pickOverheadSlabs）。
+     *
+     * 位置很讲究：必须在 fpsColliders 定稿之后。它靠的是**合批之前**逐件收的 AABB，
+     * 而 mergeByMaterial 早在上面的 store.group 装配时就跑过了 —— 所以只能拿这里这份
+     * 定稿表，不能让它自己遍历场景去认楼板（并完的板 AABB 跨多层/横跨整条街，认不准）。
+     * 反射面自己知道镜面高度，筛板的三条判据都在 pickOverheadSlabs 里。
+     */
+    store.setWetOccluders(fpsColliders);
+    /** 调试钩子：传空表即关掉那层遮挡剔除。
+     *
+     *  它是可证回归的唯一入口 —— 「剔除开 / 关」两帧必须**逐像素相同**（剔除只在
+     *  积水一个像素都露不出来的机位触发；真触发了不该触发的机位，两帧就会分叉）。
+     *  见 scripts/room/verify-wet-reflection.mjs。 */
+    (window as any).__ROOM__.setWetOccluders = (c: Collider[]) => store.setWetOccluders(c);
+    // 门表也挂上（只取纯数据）。排查「某处莫名弹出 F 提示」时，直接拿相机高度
+    // 和每道门的净高区间对照，比顺着源码猜快得多——门口弹提示的根因就在这两
+    // 个数是否同层。THREE 对象不入表，避免调试面里出现无法序列化的引用。
+    (window as any).__ROOM__.doors = doors.map((d) => ({
+      x: d.x, z: d.z, y0: d.y0, y1: d.y1, width: d.width, slide: d.slide,
+    }));
 
     console.log('[room] 初始化完成, 进入渲染循环');
+
+    /**
+     * 第一人称碰撞体缓冲。
+     *
+     * fps.update 每帧要拿到「静态碰撞体 + 当前门扇碰撞盒」。静态那 700+ 个盒
+     * 装配完就再也不会变（fpsColliders 的全部赋值都在本行之前），门扇盒只有
+     * 个位数、每帧变。之前每帧 `fpsColliders.concat(blockerBuf)` 会新造一个
+     * 700+ 元素的数组——这是渲染循环里唯一一处稳定的每帧垃圾，而第一人称恰好
+     * 是最需要稳帧的时候。改成预分配缓冲：静态部分拷一次，之后每帧只重写尾部。
+     */
+    const fpsColliderBuf: Collider[] = fpsColliders.slice();
+    const FPS_STATIC_COLLIDER_N = fpsColliderBuf.length;
 
     /* ---------------- Characters ---------------- */
 
@@ -1557,17 +2179,35 @@ export function RoomScene() {
      * GLB 是异步加载的，角色落进场景时也置一次，否则要等它走一步才有影子。
      */
     let shadowPending = true;
-    const disposeBlenderFurniture = loadBlenderFurniture(blenderSlots, () => { shadowPending = true; });
+    /**
+     * 阴影贴图重画的最小间隔（秒），以及距离上次重画的计时。
+     * 见渲染循环里的「阴影节流」说明。
+     */
+    const SHADOW_MIN_INTERVAL = 0.12;
+    let shadowCooldown = 0;
+    /** 点光池（每帧按视角收进预算，见 budgetPointLights）。 */
+    let pointPool: THREE.PointLight[] | null = null;
+    const disposeBlenderFurniture = loadBlenderFurniture(blenderSlots, () => {
+      shadowPending = true;
+      // 家具 GLB 是异步落进场景的，上面那次去重跑在它之前——补跑一次。
+      // 函数本身幂等：没有新的重复项就什么都不做。
+      dedupeGeometries(scene);
+    }, interiorDesign.prepareFurniture);
 
     const loader = new GLTFLoader();
     const agents: PetAgent[] = [];
     const bodies: THREE.Object3D[] = [];
+    const characterAnimations: Array<ReturnType<typeof createCharacterAnimation>> = [];
     // GLB 自带贴图的登记表：卸载时精确 dispose，不碰程序化贴图单例
     const gltfTextures: THREE.Texture[] = [];
 
+    // characters 里混着 _height_note 之类的说明字段，按「有没有 startPos」挑真人——
+    // 直接把说明字段当角色解析会在 placeholder.position.set(undefined[0]…) 上炸掉整个场景装配。
     const charEntries = Object.entries(
-      layout.characters as Record<string, { model: string; height: number; startPos: [number, number, number]; startFacing: number }>
-    );
+      layout.characters as Record<string, { model: string; height: number; startPos: [number, number, number]; startFacing: number; yaw?: number }>
+    ).filter(([, cfg]) => Array.isArray(cfg?.startPos));
+    // 角色占用的热点表是静态的，跨场景挂载存活；重建前先清，否则新场景会继承旧占用。
+    PetAgent.resetClaims();
 
     charEntries.forEach(([id, cfg], idx) => {
       // placeholder 管位移和朝向，body 管上下浮动和走路时的左右晃
@@ -1575,9 +2215,14 @@ export function RoomScene() {
       placeholder.position.set(cfg.startPos[0], 0, cfg.startPos[2]);
       const body = new THREE.Object3D();
       placeholder.add(body);
-      unitGroup.add(placeholder);
+      // 角色挂 scene（世界坐标）而不是 unitGroup（那一组把 203 整体抬高 3.4）。
+      // 现在角色会走出 203 去外廊/街区，跨场景的坐标必须统一到世界系：
+      // 挂在一个被抬高的组下面，navWorld 给的世界标高会整体多抬 3.4m。
+      scene.add(placeholder);
       bodies[idx] = body;
       agents[idx] = new PetAgent(id, cfg.startPos, cfg.startFacing);
+      // 203 在 2F：初始层与世界标高都按导航层的定义来（startPos 是相对楼板的）
+      agents[idx].setLayer('apt2');
 
       loader.load(
         cfg.model,
@@ -1601,10 +2246,16 @@ export function RoomScene() {
           if (nativeHeight > 0) {
             model.scale.setScalar(cfg.height / nativeHeight);
           }
+          // 模型自带朝向与房间约定不符时，给一个基准偏航角（绕 Y，俯视顺时针为负）。
+          // 只动模型自身，不进 facing —— facing 由 agents 驱动导航，二者在 world 里叠加。
+          model.rotation.y = cfg.yaw ?? 0;
           toonifyModel(model, gltfTextures);
           // 角色不加描边：卡通描边线在偏写实的 Q 版角色身上反而像描边画报，
           // 与三渲二家具的风格拼不到一起。让角色只靠色阶和软阴影"立"起来。
           body.add(model);
+          const animation=createCharacterAnimation(model,gltf.animations);
+          characterAnimations[idx]=animation;
+          if(animation)agents[idx].sitDuration=animation.sitDuration;
           // 模型是异步落进场景的，此时它的影子还没进过 shadow map
           shadowPending = true;
         },
@@ -1612,6 +2263,16 @@ export function RoomScene() {
         (err) => console.error('[room] GLB load failed for', id, err)
       );
     });
+
+    // 互绑同伴：查路绕人 + 头对头让行都挂在它上面，漏绑这一场景就等于没有避让。
+    PetAgent.bindPeers(agents);
+    // 跨场景导航世界：角色靠它走外廊/楼梯/街区；不注入就退回只走 203 那张单层栅格
+    PetAgent.bindWorld(navWorld);
+
+    // agents 建完后补挂到 __ROOM__：验收脚本要读角色坐标/状态/当前热点，
+    // 只有 scene 的话就只能靠肉眼看截图，改一次布局就得人工盯一次。
+    const roomDbg = (window as any).__ROOM__;
+    if (roomDbg) { roomDbg.agents = agents; roomDbg.navGrid = PetAgent.navGrid; }
 
     /* ---------------- Resize / Visibility ---------------- */
 
@@ -1643,6 +2304,7 @@ export function RoomScene() {
      */
     const onFxKey = (e: KeyboardEvent) => {
       if (e.key !== 'p' && e.key !== 'P') return;
+      if (cmdOpenRef.current) return; // 命令面板输入时 p 是打字，不切调试开关
       fxOn = !fxOn;
       scene.fog = fxOn ? roomFog : null;
       renderer.toneMapping = fxOn ? baseToneMapping : THREE.NoToneMapping;
@@ -1653,6 +2315,7 @@ export function RoomScene() {
     // 指向触发范围内最近的一道门；观察者模式下 nearDoor 恒为 null，此处理器直接返回。
     const onDoorKey = (e: KeyboardEvent) => {
       if (!isFirstPerson || !nearDoor) return;
+      if (cmdOpenRef.current) return; // 命令面板输入时 f 是打字，不开门
       if (e.key === 'f' || e.key === 'F') {
         nearDoor.manualOpen = !nearDoor.manualOpen;
       }
@@ -1664,6 +2327,9 @@ export function RoomScene() {
     let lastT = performance.now();
     let frameCount = 0;
     let fpsT = lastT;
+    /** 首帧是否已经真的画出来了——首屏 loading 层只撤一次，靠它去重。 */
+    let firstFrameDone = false;
+    setEnvironment(environmentRef.current.period, environmentRef.current.weather);
     let clockT = 0;
     let raf = 0;
 
@@ -1673,6 +2339,9 @@ export function RoomScene() {
 
     // 上一帧相机位置（第一人称下用作玩家移动方向，判定是否正在穿门）
     const prevCamPos = { x: camera.position.x, z: camera.position.z };
+
+    // 上一帧显示的速度挡位：挡位标签只在变化时写 DOM，不必每帧重写样式
+    let lastSpeedTier = 'walk';
 
     /**
      * 判断一段折线（角色 A* 路径 / 第一人称移动前瞻）是否穿过某道门洞，
@@ -1743,6 +2412,7 @@ export function RoomScene() {
       const elapsed = Math.min((now - lastT) / 1000, 0.25);
       lastT = now;
       clockT += elapsed;
+      districtArt.update(camera);
       renderer.info.reset();
 
       // 逻辑 tick（20Hz 固定步长）
@@ -1750,6 +2420,8 @@ export function RoomScene() {
       while (acc > 0) {
         const step = Math.min(acc, TICK_DT);
         for (const a of agents) a.tick(step);
+        // 每步之后解一次角色间的分离约束：让行是「尽量不错身」，它才是「绝不互相插入」
+        PetAgent.separate(agents);
         acc -= step;
       }
 
@@ -1759,14 +2431,23 @@ export function RoomScene() {
         if (!body || !a) continue;
         const parent = body.parent!;
         parent.position.x = a.pos.x;
+        // 坐在沙发/椅子上时根节点抬到坐面高度：坐姿 clip 的 Root 位移恒为 0，
+        // 不抬的话人是「站在地板上做坐姿」，屁股埋在坐垫里、腿从坐面里穿出来。
+        parent.position.y = a.pos.y;
         parent.position.z = a.pos.z;
         parent.rotation.y = a.facing;
 
-        // 走路：踏步幅度更大 + 左右轻晃；站定：只剩呼吸
-        const walking = a.state === 'walk';
-        const phase = clockT * (walking ? 9 : 1.6) + i * 1.7;
-        body.position.y = Math.abs(Math.sin(phase)) * (walking ? 0.032 : 0.011);
-        body.rotation.z = walking ? Math.sin(phase) * 0.045 : 0;
+        const animation=characterAnimations[i];
+        if(animation){
+          body.position.y=0;body.rotation.z=0;
+          animation.update(elapsed,a.state,a.currentHotspotId,a.walkSpeed);
+        }else{
+          // Models without embedded clips retain the existing procedural fallback.
+          const walking=a.state==='walk';
+          const phase=clockT*(walking?9:1.6)+i*1.7;
+          body.position.y=Math.abs(Math.sin(phase))*(walking?.032:.011);
+          body.rotation.z=walking?Math.sin(phase)*.045:0;
+        }
       }
 
       motes.update(clockT);
@@ -1790,9 +2471,15 @@ export function RoomScene() {
       }
       // 湿地涟漪 / 屋檐滴水：与浮尘同时间基（clockT），错开相位各自循环
       for (const fx of sceneFx) fx(clockT);
-      // 街角动效：招牌呼吸 / 自动门开合 / 红绿灯换色。全靠绝对时间算相位，
-      // 标签页切回来时不会卡在半开的门上。
-      store.update(clockT);
+      // 街角动效：招牌呼吸 / 感应门开合 / 红绿灯换色。门的开合由**玩家位置**驱动
+      // （camera 在第一人称下就是玩家、观察者模式下就是观察点），不再是定时开合。
+      store.update(
+        clockT,
+        environmentRef.current.weather === 'drizzle' || environmentRef.current.weather === 'storm',
+        camera.position
+      );
+      // 居酒屋感应推拉门：同一条路（位置驱动 + doorHold 滞后 + dt 夹 0.25 + 动态盒同步）
+      izakaya.update(clockT, camera.position);
 
       // 只有角色挪动了才重画阴影（首帧的 needsUpdate 已在装配时置好）
       let shadowDirty = false;
@@ -1806,8 +2493,9 @@ export function RoomScene() {
           shadowDirty = true;
         }
       }
-      key.shadow.needsUpdate = shadowDirty || shadowPending;
-      shadowPending = false;
+      // 注意：这里只记「想不想重画」，真正决定这一帧画不画在门扇逻辑之后（要合并
+      // 门扇的请求），并且要过一道节流——见下方「阴影节流」。
+      let shadowWanted = shadowDirty || shadowPending;
 
       // 门开关动画：由「角色路径需要穿过门洞」驱动，但必须「靠近门洞」才开——
       // 有经过意图也不能提前开（满足"不要在角色靠近/远离时就自动开/关"：仅靠近不够，
@@ -1816,6 +2504,30 @@ export function RoomScene() {
       // - 第一人称：相机即角色、没有规划路径，用「移动方向是否穿过门洞」判定，
       //   且同样要已靠近；站着不动即使贴着门也不开（除非已站在门洞里）。
       let doorMoved = false;
+      /* ---- 公寓南侧入口：自动感应门 ----
+       * 触发判据只有两条：门口有没有人（水平距离）、人在不在门洞那一层。
+       * 高度那一条不能省——二楼阳台在 xz 上正压着门洞，只看水平距离的话，
+       * 站在阳台上会把一楼的门打开。
+       * 快开慢关，与真实感应门的观感一致。 */
+      {
+        const pd = aptAutoDoor;
+        const near =
+          camera.position.y < pd.y1 + 1.1 &&
+          Math.hypot(camera.position.x - pd.x, camera.position.z - pd.z) < pd.senseRadius;
+        const target = near ? 1 : 0;
+        const diff = target - aptDoorOpen;
+        if (Math.abs(diff) > 1e-4) {
+          const step = (diff > 0 ? 2.6 : 1.4) * elapsed;
+          aptDoorOpen = diff > 0
+            ? Math.min(target, aptDoorOpen + step)
+            : Math.max(target, aptDoorOpen - step);
+          for (let i = 0; i < 2; i++) {
+            const leaf = pd.leaves[i];
+            leaf.position.x = pd.closeX[i] + (pd.openX[i] - pd.closeX[i]) * aptDoorOpen;
+          }
+          pd.indicator.emissiveIntensity = 0.35 + 1.6 * aptDoorOpen;
+        }
+      }
       const DOOR_NEAR = 1.3;  // 角色到门洞中心的最近距离阈值：超过此距离即使有穿过意图也不开
       const PATH_LOOKAHEAD = 0.9; // 观察者模式只前瞻路径前方这么远——远处路过的门不会提前开
       const DOOR_HOLD = 1.4;  // 门保持开启的宽限秒数：玩家穿过/走远后避免猛关
@@ -1824,6 +2536,10 @@ export function RoomScene() {
       if (isFirstPerson) {
         let bestD = Infinity;
         for (const d of doors) {
+          // 高度过滤：门洞必须落在相机身边这一层，人在门洞净高之内才算"够得着"。
+          // 少了这一条，站在公寓一楼南侧入口（水平投影正对楼上 203 的阳台滑门，
+          // 两者 xz 几乎重合）也会弹「F 打开」——那扇门在头顶 3.4m 处，是楼上的门。
+          if (camera.position.y < d.y0 + 0.35 || camera.position.y > d.y1 + 1.2) continue;
           const dc = Math.hypot(camera.position.x - d.x, camera.position.z - d.z);
           if (dc < DOOR_NEAR && dc < bestD) { bestD = dc; nearDoor = d; }
         }
@@ -1926,10 +2642,42 @@ export function RoomScene() {
           }
         }
       }
-      // 门扇动了就重渲阴影（静态阴影 autoUpdate 关着，门扇投影要跟着门转）
-      if (doorMoved) key.shadow.needsUpdate = true;
+      // 门扇动了也要重渲阴影（静态阴影 autoUpdate 关着，门扇投影要跟着门转）
+      if (doorMoved) shadowWanted = true;
+
+      /**
+       * 阴影贴图节流。
+       *
+       * 静态阴影（autoUpdate=false）本来是"有东西动了才重画"，但角色几乎一直在走、
+       * 门开合时更是连续动，于是这个 pass 实际上每帧都在跑。它的代价不小：
+       * 2048² 的贴图，要把全场投影体重新提交一遍——实测一次阴影更新是
+       * **+463 draw call（第一人称）/ +1257（观察者视角）**，比主 pass 本体
+       * （第一人称 684 / 观察者约 99）还多。原注释里的"484 calls / 34 万三角形"
+       * 是更早一版的数，已按当前场景重量。
+       *
+       * 角色和门扇在画面里都很小，影子晚 0.12 秒跟上肉眼看不出来，但省掉的是
+       * 接近一半的每帧提交量。装配完成 / GLB 落位走 shadowPending，不受节流影响，
+       * 保证首帧和角色入场那一帧一定画出影子。
+       *
+       * **不要再想"把 2048² 降到 1024²"**：省的是 12.6 MB 显存与一次 4.2M 片元的
+       * 深度填充（现代 GPU 上不到 1ms），而 463~1257 次提交一个都不会少（提交量
+       * 才是这个 pass 的大头）；代价却是主光的 6cm/texel 采样密度，桌面/椅子的
+       * 投影会开始出阶梯。收益与代价不成比例。
+       */
+      shadowCooldown -= elapsed;
+      if (shadowPending || (shadowWanted && shadowCooldown <= 0)) {
+        key.shadow.needsUpdate = true;
+        shadowPending = false;
+        shadowCooldown = SHADOW_MIN_INTERVAL;
+      } else {
+        key.shadow.needsUpdate = false;
+      }
       prevCamPos.x = camera.position.x;
       prevCamPos.z = camera.position.z;
+
+      // 电梯每帧只更新一次，且必须早于碰撞盒装配——门扇盒由这次更新产生。
+      // 返回 true 表示它正在跑，这一帧由它接管玩家（见下方 fps.update 的跳过）。
+      const liftBusy = apartmentLift.update(now, isFirstPerson);
 
       if (isFirstPerson) {
         // 第一人称：WASD 移动 + 碰撞检测。关着的门（> -0.5 rad ≈ 28°）挡路。
@@ -1959,7 +2707,25 @@ export function RoomScene() {
             if (Math.abs(d.current) < blockThresh) blockerBuf.push(d.collider);
           }
         }
-        fps.update(elapsed, blockerBuf.length ? fpsColliders.concat(blockerBuf) : fpsColliders);
+        /* 感应门：门扇还没让开时才挡路。开度过 40%（洞口已让出约 0.85m）就放行，
+         * 免得门正在开、人已经走到门面上时被夹住——感应门的存在感来自"它会开"，
+         * 不是来自"它会挡"。 */
+        if (aptDoorOpen < 0.4) {
+          for (let i = 0; i < 2; i++) {
+            const c = aptDoorBlockers[i];
+            const cx = aptAutoDoor.leaves[i].position.x;
+            c.min.set(cx - APT_DOOR_HALF_W, aptAutoDoor.y0, aptAutoDoor.z - APT_DOOR_HALF_T);
+            c.max.set(cx + APT_DOOR_HALF_W, aptAutoDoor.y1, aptAutoDoor.z + APT_DOOR_HALF_T);
+            blockerBuf.push(c);
+          }
+        }
+        /* 电梯门：常驻闭合，只在合拢到位时挡人（盒由 apartmentLift.update 每帧重写） */
+        for (const c of apartmentLift.doorBlockers) blockerBuf.push(c);
+        // 静态碰撞体拷一次就够（装配完不再变），每帧只重写尾部那几个门扇盒——
+        // 不再每帧 concat 出一个 700+ 元素的新数组。见 fpsColliderBuf 的说明。
+        fpsColliderBuf.length = FPS_STATIC_COLLIDER_N;
+        for (let i = 0; i < blockerBuf.length; i++) fpsColliderBuf.push(blockerBuf[i]);
+        if (!liftBusy) fps.update(elapsed, fpsColliderBuf);
         setOutlineDistanceScale(0); // 第一人称描边距离固定
         // 第一人称下墙/顶/墙装饰全部可见
         for (let i = 0; i < wallMeshes.length; i++) wallMeshes[i].visible = true;
@@ -2047,8 +2813,55 @@ export function RoomScene() {
           ws.reveals.visible = true;
         }
       }
+      // 点光预算（判据见 budgetPointLights 的注释）。池子只在装配完成后收一次；
+      // 之后没有任何路径会新增点光（角色与家具的 GLB 都刻意不带灯），所以只有
+      // 发现灯被摘走（父级没了）才重收。
+      if (!pointPool || pointPool.some((l) => !l.parent)) {
+        pointPool = [];
+        scene.traverse((o) => {
+          if ((o as THREE.PointLight).isPointLight) pointPool!.push(o as THREE.PointLight);
+        });
+      }
+      budgetPointLights(camera, pointPool, POINT_LIGHT_BUDGET);
+
       if (fxOn) composer.render();
       else renderer.render(scene, camera);
+
+      // 首帧真的画出来了：撤掉首屏 loading 层，并打印一次启动时间线。
+      // 挂在「渲染完成之后」而不是 React 挂载处——挂载时 canvas 还是空的，
+      // 那时撤掉 loading 层只是把空白从「有 loading 转圈」换成「没 loading 的黑屏」，
+      // 观感反而更差。
+      if (!firstFrameDone) {
+        firstFrameDone = true;
+        bootMark('scene:first-frame');
+        dismissBootLoader();
+        logBootTimeline();
+      }
+
+      /* 速度挡位标签：只在挡位变化时写 DOM——每帧写会白白触发样式重算。
+       * 走路是默认态，不挂标签；只有跑 / 冲刺才显示，否则常驻一个字反而没信息量。
+       * 挡位取值直接来自 fps.getSpeedTier()，与 update 里选 maxSpeed 的那套分支同源，
+       * 不会出现"显示冲刺、实际按跑步速度走"这种漂移。 */
+      {
+        const tier = isFirstPerson ? fps.getSpeedTier() : 'walk';
+        if (tier !== lastSpeedTier) {
+          lastSpeedTier = tier;
+          const el = hudSpeedRef.current;
+          if (el) {
+            if (tier === 'boost') {
+              el.textContent = '冲刺';
+              el.style.color = '#ffd9a0';
+              el.style.opacity = '1';
+            } else if (tier === 'sprint') {
+              el.textContent = '跑';
+              el.style.color = '#cfe6c4';
+              el.style.opacity = '1';
+            } else {
+              el.style.opacity = '0';
+            }
+          }
+        }
+      }
 
       frameCount++;
       if (now - fpsT > 250) {
@@ -2057,8 +2870,10 @@ export function RoomScene() {
         // 直接写 DOM，不走 React state：HUD 每 250ms 刷新一次，
         // 用 setState 会把整个组件（连带这个 effect 的闭包）每 250ms 重建一遍。
         if (hudStatsRef.current) {
+          // 降过倍率就在读数后面标出来，否则"画质变软了"会被当成 bug
+          const scaleTag = scaleIdx > 0 ? ` · ×${SCALE_STEPS[scaleIdx]}` : '';
           hudStatsRef.current.textContent =
-            `${fpsVal} fps · ${info.calls} draw · ${Math.round(info.triangles / 1000)}k tri`;
+            `${fpsVal} fps · ${info.calls} draw · ${Math.round(info.triangles / 1000)}k tri${scaleTag}`;
         }
         if (hudAgentsRef.current) {
           hudAgentsRef.current.textContent = agents
@@ -2080,17 +2895,49 @@ export function RoomScene() {
             hudDoorPromptRef.current.style.opacity = '0';
           }
         }
+        // ---- 自适应渲染倍率：用刚结束的这个 250ms 统计窗的平均帧时判断 ----
+        {
+          const avgMs = (now - fpsT) / Math.max(1, frameCount);
+          if (scaleHold > 0) scaleHold -= (now - fpsT) / 1000;
+          // ≥120ms 一律不判：切后台 / 断点 / 软件光栅，不是持续负载
+          if (scaleHold <= 0 && avgMs < 120) {
+            if (avgMs > 33) { slowStreak++; fastStreak = 0; }
+            else if (avgMs < 13) { fastStreak++; slowStreak = 0; }
+            else { slowStreak = 0; fastStreak = 0; }
+            if (slowStreak >= 4 && scaleIdx < SCALE_STEPS.length - 1) {
+              applyRenderScale(scaleIdx + 1);
+              lastDownAt = now;
+              slowStreak = 0;
+              scaleHold = 1.5;
+            } else if (fastStreak >= 8 && scaleIdx > 0 && now - lastDownAt > 20000) {
+              applyRenderScale(scaleIdx - 1);
+              fastStreak = 0;
+              scaleHold = 2.5;
+            }
+          }
+        }
         frameCount = 0;
         fpsT = now;
       }
     };
+    // 装配结束、循环即将启动。到这一刻为止主线程一直被占着，首屏 loading 层
+    // 是屏幕上唯一动过的东西。'scene:built' → 'scene:first-frame' 之间是首帧
+    // 渲染（含全部着色器变体的首次编译），通常是整条链里最尖的一根刺。
+    bootMark('scene:built');
     render();
 
     /* ---------------- Cleanup ---------------- */
 
     return () => {
       alive = false;
+      characterAnimations.forEach(animation=>animation?.dispose());
       disposeBlenderFurniture();
+      apartmentLift.dispose();
+      store.dispose();
+      districtArt.dispose();
+      interiorDesign.dispose();
+      scene.environment = null;
+      furnitureEnvironment.dispose();
       cancelAnimationFrame(raf);
       controls.dispose();
       fps.dispose();
@@ -2138,9 +2985,90 @@ export function RoomScene() {
       }
       // 注意：程序化贴图是模块级单例，这里刻意不 dispose ——
       // StrictMode 会挂载两次，第一次卸载时销毁贴图，第二次就拿到废图了。
-      environmentToggleRef.current = null;
-      (window as any).__ROOM__.setEnvironment = undefined;
-      (window as any).__ROOM__.setWeather = undefined;
+      environmentApplyRef.current = null;
+      (window as any).__ROOM__.setEnvironmentSource = undefined;
+    };
+  }, []);
+
+  /* ---------------- 真实世界感知 → 房间环境 ---------------- */
+
+  useEffect(() => {
+    let cancelled = false;
+    let timer = 0;
+    // 只有推导结果与上一次不同才真正搬到场景上。这个 command 每次会整包回传
+    // research / behaviors / beliefs，所以轮询要够省；而房间按时挂满几小时是
+    // 常态，间隔又要够密才能让跨时段（尤其 dusk）及时跟上。
+    let lastKey = `${environmentRef.current.period}|${environmentRef.current.weather}`;
+
+    const tick = async () => {
+      // 命令面板设置的手动环境优先于真实感知与测试注入，且每次轮询都保持。
+      const manual = manualEnvironmentRef.current;
+      if (manual) {
+        environmentSourceRef.current = '命令';
+        const key = `${manual.period}|${manual.weather}`;
+        if (key !== lastKey) {
+          lastKey = key;
+          environmentApplyRef.current?.(manual.period, manual.weather);
+        }
+        // HUD 节点只在打开后才存在，故像常规路径一样无条件重刷文本。
+        if (hudEnvRef.current) {
+          hudEnvRef.current.textContent = describeEnvironment(manual, '命令');
+        }
+        return;
+      }
+      const override = environmentOverrideRef.current;
+      let input: EnvironmentInput;
+      let source: string;
+
+      if (override) {
+        // 测试注入优先，且拿不到网络也不该被覆盖。
+        input = { ...environmentFromLocalClock(), ...override };
+        source = '测试注入';
+      } else {
+        try {
+          const res = await invoke<WorldSnapshotResponse>('get_world_snapshot');
+          if (cancelled) return;
+          const s = res?.snapshot;
+          input = s
+            ? {
+                hour: s.hour,
+                // 后端优先用天气 API 的日字段，缺两份都空时映射层会退到固定日照。
+                sunriseHour: s.sunrise_sunset?.sunrise_hour ?? s.weather?.sunrise_hour ?? null,
+                sunsetHour: s.sunrise_sunset?.sunset_hour ?? s.weather?.sunset_hour ?? null,
+                weatherCode: s.weather?.weather_code ?? null,
+              }
+            : environmentFromLocalClock();
+          source = s?.weather ? 'Open-Meteo' : '本地时钟';
+        } catch {
+          // 无 Tauri 上下文（room-preview.html）：没有后台可用，退到本地时钟。
+          if (cancelled) return;
+          input = environmentFromLocalClock();
+          source = '本地时钟';
+        }
+      }
+
+      environmentSourceRef.current = source;
+
+      const env = resolveEnvironment(input);
+      const key = `${env.period}|${env.weather}`;
+      if (key !== lastKey) {
+        lastKey = key;
+        environmentApplyRef.current?.(env.period, env.weather);
+      }
+      // HUD 节点只在 HUD 打开后才存在（挂在 {hudVisible && ...} 里），所以每次
+      // 都无条件重刷文本 —— 环境没变时只是重写同一个字符串，成本可忽略。
+      if (hudEnvRef.current) {
+        hudEnvRef.current.textContent = describeEnvironment(env, source);
+      }
+    };
+
+    environmentTickRef.current = () => void tick();
+    void tick();
+    timer = window.setInterval(() => void tick(), 120_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+      environmentTickRef.current = null;
     };
   }, []);
 
@@ -2148,40 +3076,80 @@ export function RoomScene() {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'h' || e.key === 'H') setHudVisible((v) => !v);
+      if (e.key === 'h' || e.key === 'H') {
+        if (cmdOpenRef.current) return; // 命令面板输入时 h 是打字，不切 HUD
+        setHudVisible((v) => !v);
+        // 摘要节点随 HUD 才挂载，打开时补一次，否则第一帧是空行。
+        environmentTickRef.current?.();
+      }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, []);
 
+  /* ---------------- 命令面板：/ 呼出，ESC 关闭 ---------------- */
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement | null;
+      const inInput = !!t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable);
+
+      if (e.key === '/') {
+        // 正在输入框里打字时不抢键；输入面板已开也不重复呼出。
+        if (inInput || cmdOpenRef.current) return;
+        e.preventDefault();
+        // 帮助面板开着时按 /：关掉帮助、直接换到命令输入。
+        if (cmdHelpRef.current) setCmdHelpState(false);
+        setCmdOpenState(true);
+        return;
+      }
+      if (e.key === 'Escape') {
+        // 浮层开着时 ESC 只收浮层：先帮助面板、再输入面板，都不会关窗口。
+        if (cmdHelpRef.current) {
+          e.preventDefault();
+          setCmdHelpState(false);
+          return;
+        }
+        if (cmdOpenRef.current) {
+          e.preventDefault();
+          setCmdOpenState(false);
+        }
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      window.clearTimeout(cmdFeedbackTimerRef.current);
+      // 组件卸载兜底：面板可能正开着就卸载（StrictMode 双挂载 / 切走），
+      // 残留的抑制会让下一次进房间 ESC 失效；watch_room_escape 起步也会复位，
+      // 这里再补一次，保证两处都干净。
+      void invoke('set_room_escape_suppressed', { suppressed: false }).catch(() => {});
+    };
+  }, [setCmdOpenState, setCmdHelpState]);
+
+  /* ---------------- 帮助面板：外部点击关闭 ---------------- */
+
+  useEffect(() => {
+    if (!cmdHelpOpen) return;
+    const onMouseDown = (e: MouseEvent) => {
+      const t = e.target as Node | null;
+      const el = cmdHelpPanelRef.current;
+      if (el && t && !el.contains(t)) setCmdHelpState(false);
+    };
+    // 延迟一帧再挂监听：若这次打开是由「点击联想行执行 /help」触发的，这一记点击的
+    // 事件流尚未结束，立即挂上会把同一个点击误判成「面板外点击」而秒关。rAF 后挂可避。
+    const raf = requestAnimationFrame(() => window.addEventListener('mousedown', onMouseDown));
+    return () => {
+      cancelAnimationFrame(raf);
+      window.removeEventListener('mousedown', onMouseDown);
+    };
+  }, [cmdHelpOpen, setCmdHelpState]);
+
   return (
     <div style={{ position: 'absolute', inset: 0, background: '#e7d8c4' }}>
       <div ref={containerRef} style={{ position: 'absolute', inset: 0 }} />
 
-      <div style={{
-        position: 'absolute', top: 14, left: 14, display: 'flex', alignItems: 'center', gap: 8,
-        padding: '7px 9px', borderRadius: 14, background: 'rgba(20, 28, 42, 0.82)',
-        border: '1px solid rgba(255,255,255,0.18)', boxShadow: '0 4px 14px rgba(0,0,0,0.2)',
-        zIndex: 20, color: '#fff', fontSize: 11, fontWeight: 700,
-      }}>
-        <span style={{ opacity: 0.72 }}>时间</span>
-        {(['morning', 'noon', 'dusk', 'night'] as DayPeriod[]).map((item) => (
-          <button key={item} type="button" onClick={() => environmentToggleRef.current?.(item, weather)}
-            aria-pressed={period === item}
-            style={{ border: 0, borderRadius: 8, padding: '6px 8px', cursor: 'pointer', color: period === item ? '#3c4b55' : 'rgba(255,255,255,0.72)', background: period === item ? '#f5d98b' : 'transparent', fontSize: 11, fontWeight: 700 }}>
-            {PERIOD_LABELS[item]}
-          </button>
-        ))}
-        <span style={{ width: 1, height: 20, background: 'rgba(255,255,255,0.2)', margin: '0 2px' }} />
-        <span style={{ opacity: 0.72 }}>天气</span>
-        {(['clear', 'drizzle', 'storm', 'snow'] as WeatherKind[]).map((item) => (
-          <button key={item} type="button" onClick={() => environmentToggleRef.current?.(period, item)}
-            aria-pressed={weather === item}
-            style={{ border: 0, borderRadius: 8, padding: '6px 8px', cursor: 'pointer', color: weather === item ? '#3c4b55' : 'rgba(255,255,255,0.72)', background: weather === item ? '#b9d9f2' : 'transparent', fontSize: 11, fontWeight: 700 }}>
-            {WEATHER_LABELS[item]}
-          </button>
-        ))}
-      </div>
+      {/* 时段/天气默认跟随真实世界感知；按 / 打开命令面板可手动切换（/day /rain 等） */}
 
       {hudVisible && (
         <div
@@ -2199,6 +3167,7 @@ export function RoomScene() {
           <div ref={hudAgentsRef} style={{ whiteSpace: 'pre-line' }} />
           <div ref={fpsDebugRef} style={{ marginTop: 6, color: '#7fd1ff', fontFamily: 'ui-monospace, monospace' }} />
           <div ref={hudModeRef} style={{ marginTop: 6, color: '#C9A961', fontWeight: 600 }}>观察者模式 · Enter 进入</div>
+          <div ref={hudEnvRef} style={{ marginTop: 4, color: '#8fa5c4', fontWeight: 600 }} />
           <div ref={hudCrosshairRef} style={{
             position: 'fixed', top: '50%', left: '50%',
             transform: 'translate(-50%, -50%)',
@@ -2217,9 +3186,9 @@ export function RoomScene() {
             </svg>
           </div>
           <div style={{ marginTop: 6, opacity: 0.55, fontSize: 11 }}>
-            WASD 移动 · 鼠标视角 · Shift/右键 跑 · Space 跳 · Ctrl 蹲
+            WASD 移动 · 鼠标视角 · Ctrl/右键 跑 · 双击右键按住 冲刺
           </div>
-          <div style={{ marginTop: 6, opacity: 0.55, fontSize: 11 }}>ESC 退出公寓 · 按 H 隐藏</div>
+          <div style={{ marginTop: 6, opacity: 0.55, fontSize: 11 }}>Space 跳 · Shift 蹲 · ESC 退出公寓 · 按 H 隐藏</div>
         </div>
       )}
 
@@ -2242,27 +3211,311 @@ export function RoomScene() {
         F 打开
       </div>
 
+      {/* 速度挡位标签。走路是默认态、不挂标签，只有跑 / 冲刺时由渲染循环点亮。
+          没有它的话，双击右键这个手势是"隐形"的——玩家分不出自己到底进没进冲刺挡。 */}
+      <div
+        ref={hudSpeedRef}
+        style={{
+          position: 'fixed', right: 24, bottom: 96,
+          padding: '5px 12px',
+          background: 'rgba(40, 30, 28, 0.6)',
+          color: '#ffd9a0',
+          borderRadius: 8,
+          fontSize: 12, fontWeight: 700, letterSpacing: 1.5,
+          pointerEvents: 'none', userSelect: 'none',
+          zIndex: 16, whiteSpace: 'nowrap',
+          opacity: 0, transition: 'opacity 0.12s ease',
+        }}
+      />
+
+      {/* 观察者模式右下角提示：复用速度挡位标签的同款样式，提示按 Enter 进入第一人称。
+          第一人称下它不渲染，让位给渲染循环点亮的 跑 / 冲刺 标签（同一位置、互不重叠）。 */}
       {mode === 'observe' && (
         <div
           style={{
-            position: 'absolute', left: '50%', bottom: 28,
-            transform: 'translateX(-50%)',
-            padding: '8px 18px',
-            background: 'rgba(255, 252, 246, 0.82)',
-            color: '#6b4f5e',
-            borderRadius: 999,
-            border: '1px solid rgba(107, 79, 94, 0.22)',
-            boxShadow: '0 4px 16px rgba(60, 45, 40, 0.18)',
-            fontSize: 13,
-            fontWeight: 600,
-            letterSpacing: 0.5,
-            pointerEvents: 'none',
-            userSelect: 'none',
-            zIndex: 15,
-            whiteSpace: 'nowrap',
+            position: 'fixed', right: 24, bottom: 96,
+            padding: '5px 12px',
+            background: 'rgba(40, 30, 28, 0.6)',
+            color: '#ffd9a0',
+            borderRadius: 8,
+            fontSize: 12, fontWeight: 700, letterSpacing: 1.5,
+            pointerEvents: 'none', userSelect: 'none',
+            zIndex: 16, whiteSpace: 'nowrap',
           }}
         >
-          观察者模式 · WASD飞行 / Space升 Shift降 / 拖动旋转 / 滚轮缩放 · Enter进入第一人称
+          ENTER键进入第一人称
+        </div>
+      )}
+
+      {/* 命令执行结果 toast（终端风格，成功/失败都会弹，几秒后自动消失） */}
+      {cmdFeedback && (
+        <div
+          style={{
+            position: 'fixed', top: 16, left: '50%', transform: 'translateX(-50%)',
+            padding: '8px 16px',
+            background: 'rgba(8, 8, 12, 0.9)',
+            color: cmdFeedback.ok ? '#7cf2a8' : '#ff8f7a',
+            border: `1px solid ${cmdFeedback.ok ? 'rgba(124,242,168,0.5)' : 'rgba(255,143,122,0.5)'}`,
+            borderRadius: 4,
+            fontSize: 13,
+            fontWeight: 600,
+            letterSpacing: 1,
+            fontFamily: "'Orbitron', 'Microsoft YaHei', 'Segoe UI', sans-serif",
+            textShadow: cmdFeedback.ok
+              ? '0 0 8px rgba(124,242,168,0.6)'
+              : '0 0 8px rgba(255,143,122,0.6)',
+            boxShadow: '0 0 12px rgba(0,0,0,0.4)',
+            pointerEvents: 'none', userSelect: 'none',
+            zIndex: 21, whiteSpace: 'nowrap',
+            maxWidth: '80vw', overflow: 'hidden', textOverflow: 'ellipsis',
+          }}
+        >
+          {cmdFeedback.text}
+        </div>
+      )}
+
+      {/* /help 帮助面板：赛博朋克终端风格。/ 或 ESC 或点击面板外部关闭。
+          与输入面板互斥；开着时同样抑制硬件 ESC，不会关掉房间窗口。 */}
+      {cmdHelpOpen && (
+        <div
+          ref={cmdHelpPanelRef}
+          style={{
+            position: 'fixed', left: '50%', top: '10%', transform: 'translateX(-50%)',
+            width: 420, maxWidth: 'calc(100vw - 48px)',
+            maxHeight: '78vh', overflowY: 'auto',
+            padding: '16px 18px 12px',
+            background:
+              'repeating-linear-gradient(0deg, rgba(124,242,168,0.035) 0 1px, transparent 1px 3px), rgba(8, 10, 14, 0.94)',
+            border: '1px solid rgba(124, 242, 168, 0.45)',
+            boxShadow: '0 0 24px rgba(124,242,168,0.22), inset 0 0 18px rgba(124,242,168,0.06)',
+            borderRadius: 4,
+            color: '#b8ffd9',
+            fontFamily: "'Orbitron', 'Microsoft YaHei', 'Segoe UI', sans-serif",
+            userSelect: 'none',
+            zIndex: 22,
+          }}
+        >
+          {/* 顶栏：标题 + 右侧装饰短线（无关闭按钮，靠外部点击 / ESC / / 关闭） */}
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 12 }}>
+            <div style={{ fontSize: 16, fontWeight: 700, letterSpacing: 3, color: '#7cf2a8',
+              textShadow: '0 0 10px rgba(124,242,168,0.85)' }}>
+              COMMAND&nbsp;//&nbsp;HELP
+            </div>
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: 3, opacity: 0.7,
+              fontSize: 10, letterSpacing: 1.5, color: 'rgba(124,242,168,0.9)',
+            }}>
+              <span style={{ width: 14, height: 1, background: 'rgba(124,242,168,0.5)', boxShadow: '0 0 6px rgba(124,242,168,0.8)' }} />
+              <span style={{ width: 6, height: 1, background: 'rgba(124,242,168,0.35)' }} />
+              <span style={{ width: 3, height: 1, background: 'rgba(124,242,168,0.2)' }} />
+            </div>
+          </div>
+
+          {/* 命令列表：按 时间/天气/系统 分区展示，组与组之间用霓虹分隔线隔开 */}
+          {CMD_GROUPS.map((g, gi) => {
+            const items = HELP_ENTRIES.filter((it) => it.group === g.key);
+            if (items.length === 0) return null;
+            return (
+              <div key={g.key}>
+                {/* 分区标题：短亮条 + 标签 + 通栏细线 */}
+                <div style={{
+                  display: 'flex', alignItems: 'center', gap: 8,
+                  marginTop: gi === 0 ? 2 : 14, marginBottom: 3,
+                }}>
+                  <span style={{
+                    width: 12, height: 1,
+                    background: 'rgba(124,242,168,0.55)',
+                    boxShadow: '0 0 6px rgba(124,242,168,0.8)',
+                  }} />
+                  <span style={{
+                    fontSize: 10, letterSpacing: 2.5, fontWeight: 700,
+                    color: 'rgba(124,242,168,0.95)',
+                    textShadow: '0 0 6px rgba(124,242,168,0.5)',
+                  }}>
+                    {g.label}
+                  </span>
+                  <span style={{ flex: 1, height: 1, background: 'rgba(124,242,168,0.16)' }} />
+                </div>
+                {items.map((it) => (
+                  <div
+                    key={it.cmd}
+                    style={{
+                      display: 'flex', alignItems: 'baseline', justifyContent: 'space-between',
+                      gap: 12, padding: '5px 2px',
+                      borderBottom: '1px solid rgba(124,242,168,0.08)',
+                    }}
+                  >
+                    <span style={{ fontWeight: 700, letterSpacing: 1.5, fontSize: 13,
+                      color: '#7cf2a8', textShadow: '0 0 7px rgba(124,242,168,0.6)', whiteSpace: 'nowrap' }}>
+                      {it.cmd}
+                    </span>
+                    <span style={{ fontSize: 12, opacity: 0.72, textAlign: 'right' }}>{it.desc}</span>
+                  </div>
+                ))}
+              </div>
+            );
+          })}
+
+          {/* 底部提示 */}
+          <div style={{ marginTop: 10, fontSize: 10.5, letterSpacing: 1.5, opacity: 0.5,
+            textAlign: 'right' }}>
+            点击面板外部 / ESC 关闭&nbsp;&nbsp;·&nbsp;&nbsp;按 / 重新呼出
+          </div>
+        </div>
+      )}
+
+      {/* Minecraft 风格命令面板：左下角小黑框，/ 呼出，Enter 执行，ESC 关闭。
+          输入框无自动前缀、无提示文本；字母走赛博朋克字形。上方上拉联想卡片
+          随输入实时过滤命令，↑↓ 选择、ENTER 执行选中项。 */}
+      {cmdOpen && (
+        <div style={{ position: 'fixed', left: 24, bottom: 28, zIndex: 20 }}>
+          {/* 上拉联想卡片（搜索引擎式）：有匹配才出现，置于输入框正上方 */}
+          {cmdMatches.length > 0 && (
+            <div
+              style={{
+                position: 'absolute', left: 0, bottom: '100%', marginBottom: 8,
+                width: 340, maxWidth: 'calc(100vw - 48px)',
+                background:
+                  'repeating-linear-gradient(0deg, rgba(124,242,168,0.03) 0 1px, transparent 1px 3px), rgba(8,10,14,0.95)',
+                border: '1px solid rgba(124,242,168,0.4)',
+                boxShadow: '0 0 18px rgba(124,242,168,0.18)',
+                borderRadius: 4,
+                overflow: 'hidden',
+                fontFamily: "'Orbitron', 'Microsoft YaHei', 'Segoe UI', sans-serif",
+                userSelect: 'none',
+              }}
+            >
+              <div style={{ padding: '5px 10px', fontSize: 10, letterSpacing: 2, opacity: 0.5,
+                borderBottom: '1px solid rgba(124,242,168,0.15)' }}>
+                MATCH&nbsp;//&nbsp;命令联想
+              </div>
+              {cmdMatches.map((it, i) => (
+                <div
+                  key={it.cmd}
+                  onMouseEnter={() => { setCmdActiveIdx(i); }}
+                  onClick={() => { executeCommand(it.cmd); }}
+                  style={{
+                    display: 'flex', alignItems: 'baseline', justifyContent: 'space-between',
+                    gap: 12, padding: '7px 10px', cursor: 'pointer',
+                    borderLeft: `3px solid ${i === cmdActiveIdx ? '#7cf2a8' : 'transparent'}`,
+                    background: i === cmdActiveIdx ? 'rgba(124,242,168,0.12)' : 'transparent',
+                    transition: 'background 0.08s ease',
+                  }}
+                >
+                  <span style={{ fontWeight: 700, letterSpacing: 1.5, fontSize: 13,
+                    color: 'rgba(236, 246, 255, 0.92)', whiteSpace: 'nowrap' }}>
+                    {renderCmdName(it.cmd)}
+                  </span>
+                  <span style={{ fontSize: 11, opacity: 0.65, textAlign: 'right', whiteSpace: 'nowrap' }}>
+                    {it.desc}
+                  </span>
+                </div>
+              ))}
+              <div style={{ padding: '4px 10px', fontSize: 9.5, letterSpacing: 1, opacity: 0.4,
+                borderTop: '1px solid rgba(124,242,168,0.12)' }}>
+                ↑↓ 选择&nbsp;&nbsp;·&nbsp;&nbsp;ENTER 执行选中&nbsp;&nbsp;·&nbsp;&nbsp;ESC 关闭
+              </div>
+            </div>
+          )}
+
+          {/* 输入小黑框本体 */}
+          <div
+            style={{
+              width: 340, maxWidth: 'calc(100vw - 48px)',
+              padding: '10px 12px',
+              background: 'rgba(8, 8, 12, 0.92)',
+              border: '1px solid rgba(120, 240, 160, 0.35)',
+              boxShadow: '0 0 14px rgba(120, 240, 160, 0.18), inset 0 0 10px rgba(120, 240, 160, 0.05)',
+              borderRadius: 4,
+              fontFamily: "'Orbitron', 'Share Tech Mono', 'Consolas', monospace",
+              color: '#b8ffd9',
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={{ color: '#5cf2a6', fontWeight: 700, fontSize: 14, textShadow: '0 0 6px rgba(92,242,166,0.8)' }}>&gt;</span>
+              {/* 区块光标层：输入框本身文字/原生光标设为透明，由这层幽灵文本 + 块状光标
+                  代绘（Minecraft 终端风格）。字体样式与下层 input 完全一致才能对齐。 */}
+              <div style={{ position: 'relative', flex: 1, minWidth: 0, height: 20 }}>
+                <div style={{
+                  position: 'absolute', left: 0, right: 0, top: 0, bottom: 0,
+                  display: 'flex', alignItems: 'center',
+                  fontFamily: 'inherit', fontSize: 14, fontWeight: 700, letterSpacing: 2,
+                  color: '#b8ffd9', textShadow: '0 0 8px rgba(120,240,160,0.7)',
+                  overflow: 'hidden', whiteSpace: 'nowrap', pointerEvents: 'none',
+                }}>
+                  <span>{cmdInput}</span>
+                  <span style={{
+                    color: '#7cf2a8',
+                    textShadow: '0 0 9px rgba(92,242,166,0.95)',
+                    animation: 'cmdBlockCursor 1s steps(2, start) infinite',
+                    marginLeft: 1,
+                  }}>▮</span>
+                </div>
+                <input
+                  ref={cmdInputRef}
+                  autoFocus
+                  value={cmdInput}
+                  spellCheck={false}
+                  autoComplete="off"
+                  maxLength={20}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      // 有联想且已高亮 → 执行高亮项；否则执行原样输入。
+                      const exec = cmdMatches.length > 0 && cmdActiveIdx >= 0
+                        ? cmdMatches[cmdActiveIdx].cmd
+                        : cmdInput;
+                      // 必须同时 stopPropagation：这条 keydown 还要继续冒泡到 window
+                      // 上的 onEnterKey（进入第一人称）。命令成功会同步收起面板、把
+                      // cmdOpenRef 翻成 false，没挡住的话同一记回车就顺手锁了指针。
+                      e.preventDefault();
+                      e.stopPropagation();
+                      executeCommand(exec);
+                      return;
+                    }
+                    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+                      if (cmdMatches.length === 0) return;
+                      e.preventDefault();
+                      setCmdActiveIdx((i) => {
+                        const last = cmdMatches.length - 1;
+                        if (e.key === 'ArrowDown') return i >= last ? 0 : i + 1;
+                        return i <= 0 ? last : i - 1;
+                      });
+                      return;
+                    }
+                    // 严格白名单：单字符按键只放行 26 个英文字母（含大小写）。
+                    // 其余字符（含 /、空格、数字、符号）一律屏蔽；方向键/退格/
+                    // 删除等编辑键（e.key.length>1）放行。
+                    if (e.key.length === 1 && !/[a-zA-Z]/.test(e.key)) {
+                      e.preventDefault();
+                    }
+                  }}
+                  onBeforeInput={(e) => {
+                    // 兜底：IME 组词、拖拽插入会绕过 keydown，直接挡掉非字母的插入内容
+                    const data = (e.nativeEvent as InputEvent).data;
+                    if (typeof data === 'string' && data !== '' && /[^a-zA-Z]/.test(data)) {
+                      e.preventDefault();
+                    }
+                  }}
+                  onChange={(e) => {
+                    // 兜底第二层：粘贴可能整段进来，这里把非字母再滤一遍（纯字母输入）。
+                    // 受控输入，清理后立即驱动联想重算；输入变化时清掉旧高亮。
+                    const clean = e.target.value.replace(/[^a-zA-Z]/g, '');
+                    setCmdInput(clean);
+                    setCmdActiveIdx(-1);
+                  }}
+                  style={{
+                    position: 'absolute', left: 0, right: 0, top: 0, bottom: 0, width: '100%',
+                    background: 'transparent', border: 'none', outline: 'none',
+                    // 文字与本机光标都藏掉，由幽灵层代绘；font 与幽灵层同款
+                    color: 'transparent', caretColor: 'transparent',
+                    fontFamily: 'inherit', fontSize: 14, fontWeight: 700, letterSpacing: 2,
+                  }}
+                />
+              </div>
+            </div>
+            {/* 区块光标闪烁动画 + 联想卡片同上（面板内联注入，面板关掉即失效） */}
+            <style>{`@keyframes cmdBlockCursor { 0%,49% { opacity: 1 } 50%,100% { opacity: 0 } }`}</style>
+          </div>
         </div>
       )}
     </div>

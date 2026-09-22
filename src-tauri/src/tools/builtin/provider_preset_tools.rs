@@ -15,7 +15,9 @@
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
-use crate::plugins::{EmbeddingProviderPresetData, ProviderPresetData, ProviderProtocolData};
+use crate::plugins::{
+    EmbeddingModelPresetData, EmbeddingProviderPresetData, ProviderPresetData, ProviderProtocolData,
+};
 use crate::tools::types::{
     PermissionResult, Tool, ToolCategory, ToolResult, ToolRiskTier, ToolUseContext, ValidationResult,
 };
@@ -392,21 +394,51 @@ impl ManageProviderPresetTool {
     pub fn new() -> Self { Self }
 }
 
+/// 把工具入参解析成**厂商级**嵌入预设（`models` 只含本次要写的那一个模型）。
+///
+/// 工具语义是「新增/更新某厂商的某个嵌入模型」：厂商行已存在时由
+/// `upsert_embedding_model_preset` 合并，不会覆盖同厂商的其他模型。
 fn parse_embedding_preset(input: &Value) -> Result<EmbeddingProviderPresetData, String> {
     let get = |name: &str| input.get(name).and_then(Value::as_str).unwrap_or("").trim().to_string();
+    let model = get("model");
+    let dimension = input.get("dimension").and_then(Value::as_u64).unwrap_or(0) as usize;
+    if model.is_empty() || dimension == 0 {
+        return Err("embedding upsert 需要完整的 model/dimension".into());
+    }
     let preset = EmbeddingProviderPresetData {
         id: get("id"),
         provider: get("provider"),
         endpoint: get("endpoint"),
-        model: get("model"),
-        dimension: input.get("dimension").and_then(Value::as_u64).unwrap_or(0) as usize,
+        models: vec![EmbeddingModelPresetData {
+            model,
+            dimension,
+            max_batch: input
+                .get("maxBatch")
+                .and_then(Value::as_u64)
+                .map(|v| v as usize),
+            dimensions: input.get("dimensions").and_then(Value::as_array).map(|rows| {
+                rows.iter()
+                    .filter_map(Value::as_u64)
+                    .map(|v| v as usize)
+                    .collect()
+            }),
+            note: input.get("note").and_then(Value::as_str).map(str::to_string),
+        }],
+        region: input.get("region").and_then(Value::as_str).map(str::to_string),
+        console_url: input.get("consoleUrl").and_then(Value::as_str).map(str::to_string),
+        dimension_param: input
+            .get("dimensionParam")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        needs_api_key: input
+            .get("needsApiKey")
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
         recommended_for: input.get("recommendedFor").and_then(Value::as_str).map(str::to_string),
         verified_at: None,
         verified_source: input.get("verifiedSource").and_then(Value::as_str).map(str::to_string),
     };
-    if preset.id.is_empty() || preset.provider.is_empty() || preset.endpoint.is_empty()
-        || preset.model.is_empty() || preset.dimension == 0
-    {
+    if preset.id.is_empty() || preset.provider.is_empty() || preset.endpoint.is_empty() {
         return Err("embedding upsert 需要完整的 id/provider/endpoint/model/dimension".into());
     }
     Ok(preset)
@@ -436,6 +468,12 @@ impl Tool for ManageProviderPresetTool {
                 "consoleUrl":{"type":"string"}, "protocols":{"type":"array","items":{"type":"object"}},
                 "provider":{"type":"string"}, "model":{"type":"string"},
                 "dimension":{"type":"integer","minimum":1}, "recommendedFor":{"type":"string"},
+                "region":{"type":"string","description":"地域说明，如 中国大陆 / 国际"},
+                "dimensionParam":{"type":"string","enum":["dimensions","output_dimension"],"description":"请求体里下发维度的参数名；服务端维度固定或兼容层不支持时留空"},
+                "maxBatch":{"type":"integer","minimum":1,"description":"单请求 input 数组条数上限"},
+                "dimensions":{"type":"array","items":{"type":"integer"},"description":"可切换的维度取值"},
+                "needsApiKey":{"type":"boolean","description":"本地服务可填任意占位 Key 时传 false"},
+                "note":{"type":"string"},
                 "verifiedSource":{"type":"string","description":"Official documentation URL used for verification"}
             },
             "required":["action","kind","id"],
@@ -487,9 +525,14 @@ impl Tool for ManageProviderPresetTool {
                 Err(e) => ToolResult::standard_error("更新 LLM 供应商预设失败", Some(&e), None),
             }
         } else {
-            match parse_embedding_preset(&args).and_then(crate::plugins::upsert_embedding_provider_preset) {
+            match parse_embedding_preset(&args).and_then(crate::plugins::upsert_embedding_model_preset) {
                 Ok((row, version, is_new)) => ToolResult::standard_success(
-                    &format!("嵌入预设 {} 已{}（插件版本 {version}）", row.id, if is_new {"新增"} else {"更新"}),
+                    &format!(
+                        "嵌入预设 {}/{} 已{}（插件版本 {version}）",
+                        row.id,
+                        row.models.first().map(|m| m.model.as_str()).unwrap_or(""),
+                        if is_new { "新增" } else { "更新" }
+                    ),
                     Some(json!({"action":"upsert","kind":"embedding","id":row.id,"isNew":is_new,"version":version})),
                 ),
                 Err(e) => ToolResult::standard_error("更新嵌入供应商预设失败", Some(&e), None),
@@ -510,17 +553,27 @@ mod tests {
     #[test]
     fn parses_complete_embedding_preset() {
         let p = parse_embedding_preset(&json!({
-            "id": "vendor-model",
+            "id": "vendor",
             "provider": "Vendor",
             "endpoint": "https://api.example.com/v1",
             "model": "embed-v2",
             "dimension": 1024,
+            "maxBatch": 32,
+            "dimensions": [512, 1024],
+            "dimensionParam": "dimensions",
+            "region": "国际",
             "recommendedFor": "multilingual",
             "verifiedSource": "https://docs.example.com/embeddings"
         }))
         .expect("完整嵌入预设应可解析");
-        assert_eq!(p.dimension, 1024);
-        assert_eq!(p.model, "embed-v2");
+        // 工具只写一个模型，厂商行由 upsert_embedding_model_preset 合并
+        assert_eq!(p.models.len(), 1);
+        assert_eq!(p.models[0].model, "embed-v2");
+        assert_eq!(p.models[0].dimension, 1024);
+        assert_eq!(p.models[0].max_batch, Some(32));
+        assert_eq!(p.models[0].dimensions, Some(vec![512, 1024]));
+        assert_eq!(p.dimension_param.as_deref(), Some("dimensions"));
+        assert_eq!(p.region.as_deref(), Some("国际"));
         assert!(p.verified_at.is_none());
     }
 
@@ -530,6 +583,14 @@ mod tests {
             "id": "vendor-model",
             "provider": "Vendor",
             "endpoint": "https://api.example.com/v1"
+        }))
+        .is_err());
+        // 只有 model 没有 dimension 同样不合格
+        assert!(parse_embedding_preset(&json!({
+            "id": "vendor-model",
+            "provider": "Vendor",
+            "endpoint": "https://api.example.com/v1",
+            "model": "embed-v2"
         }))
         .is_err());
     }

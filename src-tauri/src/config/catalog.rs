@@ -121,6 +121,15 @@ pub fn build_catalog() -> Vec<SettingEntry> {
             default_value: serde_json::json!("Ctrl+Shift+N"),
         },
         SettingEntry {
+            key: "base.shortcut_room".into(),
+            label: "公寓快捷键".into(),
+            description: "打开 3D 公寓窗口的全局热键".into(),
+            layer: SettingLayer::Basic,
+            group: "基础".into(),
+            control: SettingControl::String,
+            default_value: serde_json::json!("Ctrl+Shift+R"),
+        },
+        SettingEntry {
             key: "base.auto_start".into(),
             label: "开机自动启动".into(),
             description: "登录 Windows 后自动启动智能体（写入当前用户启动项）".into(),

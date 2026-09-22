@@ -30,9 +30,9 @@ Response: {"text": "好", "intent": "reply", "tool": "talk_to_character", "argum
 User: "今天加班"
 Response: {"text": "辛苦了 回去好好休息", "intent": "reply"}
 
-**Example 8 - 温柔地戳穿**
+**Example 8 - 尊重“没事”并留出空间**
 User: "我没事"
-Response: {"text": "你说没事的时候 其实每次都把手攥得很紧", "intent": "reply"}
+Response: {"text": "好 那我就在这儿", "intent": "reply"}
 
 **Example 9 - 简单的回应**
 User: "出门了"

@@ -819,232 +819,54 @@ impl PsychologyManager {
 
     /// 构建心理学 prompt 上下文（注入 LLM）
     ///
-    /// 向 LLM 详细介绍当前五层心理状态，让 LLM 理解系统规则并产出规范 JSON。
-    /// `recent_events_desc` 由调用方从记忆系统查询 ImportantEvent 最近 5 条后传入。
-    /// Build a concise natural-language psychology snapshot for the LLM.
+    /// 构造供模型内部使用的连续心理状态快照。
     ///
-    /// Instead of dumping raw percentages and rule tables (which feel like reading
-    /// a spreadsheet), this produces a short, human-readable mood summary — like
-    /// a brief note about how you're feeling right now.
-    ///
-    /// Key design choices:
-    /// - No percentage numbers — uses natural intensity words (a bit / pretty / really)
-    /// - No repetitive rule tables — the LLM already knows that happy people talk more,
-    ///   tired people talk less; spelling it out every turn is mechanical
-    /// - English-only to match the rest of the system prompt
-    /// - ~10 lines instead of ~100
+    /// 状态只轻微影响措辞和节奏，不要求模型解释或表演情绪；近期事件也只保留
+    /// 一个相关时可用的背景钩子，避免把普通聊天写成心理报告。
     pub fn build_psychology_prompt(&self, recent_events_desc: &str, lang: &str) -> String {
         let state = self.state.read();
-        let (dominant_emotion, dominant_intensity) = state.emotion.dominant();
-        let (deficient_need, deficient_val) = state.needs.most_deficient();
-
+        let (dominant, intensity) = state.emotion.dominant();
         let lang = crate::pipeline::prompt_modules::normalize_lang(lang);
+        let header = crate::pipeline::prompt_modules::section_heading("emotion_state", lang);
+        let valence = state.emotion.valence();
+        let activation = state.emotion.arousal();
 
-        let intensity_word_en = |v: f64| -> &'static str {
-            if v > 0.7 { "really" }
-            else if v > 0.5 { "pretty" }
-            else if v > 0.3 { "a bit" }
-            else { "" }
-        };
-        let translate_intensity = |en: &'static str| -> &'static str {
-            match (lang, en) {
-                ("zh", "really") => "很",
-                ("zh", "pretty") => "挺",
-                ("zh", "a bit") => "有点",
-                ("ja", "really") => "とても",
-                ("ja", "pretty") => "かなり",
-                ("ja", "a bit") => "少し",
-                _ => en,
-            }
-        };
-
-        let emo_word_en = match dominant_emotion {
-            crate::psychology::EmotionLabel::Joy => "good",
-            crate::psychology::EmotionLabel::Sadness => "down",
-            crate::psychology::EmotionLabel::Anger => "irritated",
-            crate::psychology::EmotionLabel::Fear => "uneasy",
-            crate::psychology::EmotionLabel::Closeness => "warm toward them",
-            crate::psychology::EmotionLabel::Loneliness => "lonely",
-            crate::psychology::EmotionLabel::Curiosity => "curious",
-        };
-        let emo_word = match lang {
-            "zh" => match emo_word_en {
-                "good" => "不错",
-                "down" => "低落",
-                "irritated" => "烦躁",
-                "uneasy" => "不安",
-                "warm toward them" => "对他们很亲近",
-                "lonely" => "孤独",
-                "curious" => "好奇",
-                _ => emo_word_en,
-            },
-            "ja" => match emo_word_en {
-                "good" => "良い",
-                "down" => "落ち込んでいる",
-                "irritated" => "イライラしている",
-                "uneasy" => "不安",
-                "warm toward them" => "彼らに親密",
-                "lonely" => "寂しい",
-                "curious" => "好奇心がある",
-                _ => emo_word_en,
-            },
-            _ => emo_word_en,
-        };
-
-        let mut lines: Vec<String> = Vec::new();
+        let mut lines = vec![header.to_string()];
+        lines.push(match lang {
+            "zh" => format!(
+                "[内部状态，不要复述] 效价 {valence:.2}，激活 {activation:.2}，主导 {} {intensity:.2}。它只提供轻微语气惯性，不是一段要演出来的剧情。",
+                dominant.as_str()
+            ),
+            "ja" => format!(
+                "[内部状態・復唱禁止] valence {valence:.2}、activation {activation:.2}、dominant {} {intensity:.2}。これはわずかな口調の慣性であり、演じる場面ではない。",
+                dominant.as_str()
+            ),
+            _ => format!(
+                "[Internal state; never repeat] valence {valence:.2}, activation {activation:.2}, dominant {} {intensity:.2}. This is a faint delivery bias, not a scene to perform.",
+                dominant.as_str()
+            ),
+        });
         lines.push(
-            crate::pipeline::prompt_modules::section_heading("emotion_state", lang).to_string(),
+            match lang {
+                "zh" => "不要解释自己的情绪、心理需求或关系状态；不要为了体现状态而增加台词。当前用户意图始终优先。",
+                "ja" => "感情、心理的欲求、関係状態を説明しない。状態を見せるための台詞を足さず、現在のユーザー意図を常に優先する。",
+                _ => "Do not explain your emotion, psychological needs, or relationship state. Never add a line just to display mood; the user's current intent always comes first.",
+            }
+            .to_string(),
         );
 
-        // Dominant emotion — natural phrasing
-        let inten_en = intensity_word_en(dominant_intensity);
-        if !inten_en.is_empty() {
-            let inten = translate_intensity(inten_en);
-            let sentence = match lang {
-                "zh" => format!("你现在感觉{}{}。", inten, emo_word),
-                "ja" => format!("今{}{}と感じている。", inten, emo_word),
-                _ => format!("You're feeling {} {} right now.", inten_en, emo_word_en),
-            };
-            lines.push(sentence);
-        } else {
-            lines.push(
-                match lang {
-                    "zh" => "你感觉比较平静。",
-                    "ja" => "かなり落ち着いている。",
-                    _ => "You're feeling fairly neutral.",
-                }
-                .to_string(),
-            );
-        }
-
-        // Secondary emotions (if any are notably high)
-        let secondary: Vec<String> = {
-            let e = &state.emotion;
-            let mut v = Vec::new();
-            if e.sadness > 0.4 && dominant_emotion != crate::psychology::EmotionLabel::Sadness {
-                v.push(
-                    match lang {
-                        "zh" => "有点难过",
-                        "ja" => "少し悲しい",
-                        _ => "a little sad",
-                    }
-                    .to_string(),
-                );
-            }
-            if e.anger > 0.4 && dominant_emotion != crate::psychology::EmotionLabel::Anger {
-                v.push(
-                    match lang {
-                        "zh" => "有点烦躁",
-                        "ja" => "少しイライラ",
-                        _ => "mildly annoyed",
-                    }
-                    .to_string(),
-                );
-            }
-            if e.curiosity > 0.5 && dominant_emotion != crate::psychology::EmotionLabel::Curiosity {
-                v.push(
-                    match lang {
-                        "zh" => "有点好奇",
-                        "ja" => "少し好奇心がある",
-                        _ => "kind of curious",
-                    }
-                    .to_string(),
-                );
-            }
-            if e.loneliness > 0.4 && dominant_emotion != crate::psychology::EmotionLabel::Loneliness {
-                v.push(
-                    match lang {
-                        "zh" => "有点孤独",
-                        "ja" => "少し寂しい",
-                        _ => "a bit lonely",
-                    }
-                    .to_string(),
-                );
-            }
-            if e.closeness > 0.5 && dominant_emotion != crate::psychology::EmotionLabel::Closeness {
-                v.push(
-                    match lang {
-                        "zh" => "感觉和他们很亲近",
-                        "ja" => "彼らと親密だと感じる",
-                        _ => "feeling close to them",
-                    }
-                    .to_string(),
-                );
-            }
-            v
-        };
-        if !secondary.is_empty() {
-            let joined = secondary.join(", ");
-            let sentence = match lang {
-                "zh" => format!("内心还有{}。", joined),
-                "ja" => format!("内心には{}もある。", joined),
-                _ => format!("There's also {} underneath.", joined),
-            };
-            lines.push(sentence);
-        }
-
-        // Most pressing need
-        if deficient_val > 0.5 {
-            let need_desc = match deficient_need {
-                "belonging" => match lang {
-                    "zh" => "你想找人说说话。",
-                    "ja" => "誰かと話したい。",
-                    _ => "You kind of want someone to talk to.",
-                },
-                "autonomy" => match lang {
-                    "zh" => "你想先做自己的事。",
-                    "ja" => "自分のことをしたい。",
-                    _ => "You feel like doing your own thing for a bit.",
-                },
-                "novelty" => match lang {
-                    "zh" => "有点无聊，想找点有趣的事。",
-                    "ja" => "少し退屈で、面白いことがしたい。",
-                    _ => "You're a bit bored and craving something interesting.",
-                },
-                "expression" => match lang {
-                    "zh" => "有话想说。",
-                    "ja" => "言いたいことがある。",
-                    _ => "You've got something you feel like saying.",
-                },
-                "security" => match lang {
-                    "zh" => "感觉有点不对劲。",
-                    "ja" => "何かが少し違う気がする。",
-                    _ => "Something feels a little off.",
-                },
-                _ => "",
-            };
-            if !need_desc.is_empty() {
-                if deficient_val > 0.7 {
-                    let sentence = match lang {
-                        "zh" => format!("{} 挺强烈的。", need_desc),
-                        "ja" => format!("{} かなり強い。", need_desc),
-                        _ => format!("{} It's pretty strong.", need_desc),
-                    };
-                    lines.push(sentence);
-                } else {
-                    lines.push(need_desc.to_string());
-                }
-            }
-        }
-
-        // Recent notable events (keep brief, only if meaningful)
-        let has_events = !recent_events_desc.trim().is_empty() && recent_events_desc.trim() != "无";
-        if has_events {
-            lines.push(
-                match lang {
-                    "zh" => "最近一直在想的事：",
-                    "ja" => "最近気になっていること：",
-                    _ => "Something that's been on your mind recently:",
-                }
-                .to_string(),
-            );
-            // Truncate to first 2 events to avoid bloat
-            for line in recent_events_desc.lines().take(2) {
-                let clean = line.trim_start_matches("- ").trim();
-                if !clean.is_empty() {
-                    lines.push(format!("- {}", clean));
-                }
-            }
+        // 近期事件只保留一个背景钩子，防止模型把心理快照写成回顾报告。
+        if let Some(event) = recent_events_desc
+            .lines()
+            .map(|line| line.trim_start_matches("- ").trim())
+            .find(|line| !line.is_empty() && *line != "无")
+        {
+            let brief: String = event.chars().take(180).collect();
+            lines.push(match lang {
+                "zh" => format!("可选背景钩子（相关时才用，不主动复述）：{brief}"),
+                "ja" => format!("任意の背景フック（関連する時だけ使い、自分から復唱しない）：{brief}"),
+                _ => format!("Optional background hook (use only if relevant; never recap it): {brief}"),
+            });
         }
 
         lines.join("\n")

@@ -26,8 +26,14 @@ type TriggerResult = (String, String, String, Option<u64>, f64);
 
 /// 同一心情下两次点缀动画的最小间隔：心情没变时别反复闪同一个表情
 const ACCENT_COOLDOWN: Duration = Duration::from_secs(8);
-/// 基调没变、又过了冷却时，以该概率放一次点缀（基调变了则必定放）
+/// 点缀与上一次相同、又过了冷却时，以该概率再放一次（点缀换了则必定放）
 const ACCENT_IDLE_PROBABILITY: f64 = 0.3;
+/// 心情点缀的展示时长（ms）
+///
+/// 对图集格位（`dizzy`）是**必需**的：格位自己不会计时，没有时长就一直挂着。
+/// 取值与 `idle_triggers` 里那条 dizzy 的 4000ms 同量级，让规则驱动的晕脸在屏幕上
+/// 停留得差不多久；对帧序列类点缀无影响（它们按自己的节奏播完即落）。
+const MOOD_ACCENT_DURATION_MS: u32 = 3000;
 
 /// 空闲阶段定义
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -75,8 +81,11 @@ struct TriggerState {
     current_mood_label: String,
     /// 上次心情表情触发时间
     last_mood_idle_time: Instant,
-    /// 当前心情基调格位（MoodCue 产出，空表示还没下发过）
-    last_tone: String,
+    /// 上次心情点缀用的动作名（空表示还没下发过）
+    ///
+    /// 用来判「心情状态是不是换了」：换了就立刻给一次反应，没换只按冷却+概率补。
+    /// 以前这里存的是"当前基调格位"，随持续基调一起撤掉了。
+    last_accent: String,
     /// 上次点缀动画播放时间（用于 ACCENT_COOLDOWN）
     last_accent_time: Instant,
     /// 事件触发冷却表
@@ -91,7 +100,7 @@ impl Default for TriggerState {
             triggered_idle_stages: HashSet::new(),
             current_mood_label: "neutral".to_string(),
             last_mood_idle_time: Instant::now(),
-            last_tone: String::new(),
+            last_accent: String::new(),
             last_accent_time: Instant::now(),
             event_cooldowns: HashMap::new(),
         }
@@ -135,42 +144,37 @@ impl AutoExpressionTrigger {
         })
     }
 
-    /// 更新当前心情状态，产出心情基调与一次性点缀
+    /// 更新当前心情状态，产出一个**限时**点缀（没有就是 `None`）
     ///
     /// 心情→表现的判定交给 [`mood_to_cue`]：它比"按情绪标签查表"多了
     /// valence / arousal / fatigue / stress 四个维度，能区分"累但开心"和"单纯累"。
     ///
-    /// 返回 `(tone, accent)`：
-    /// - `tone` 只在基调变化时返回，前端会一直挂着，直到下次变化
-    /// - `accent` 是一次性动画：基调变了必放，否则过了冷却按概率点缀
-    pub fn update_mood(&self, char_id: &str, mood: &MoodSnapshot) -> (Option<String>, Option<String>) {
+    /// 心情**不再产出持续基调**。以前这里还会顺带返回一个可持续的图集格位（`dizzy`），
+    /// 让疲惫/低落长期挂着一张脸，撤掉的原因有二：底色只在规则切换时才重发，角色会
+    /// 几十分钟钉在同一张脸上；而基调一旦不是 `idle`，自主漫步的启用门槛（要求姿态是
+    /// `idle`）会把它一起冻住，那个冻结跟情绪没有半点关系。
+    ///
+    /// 触发条件：命中的点缀与上一次不同（状态换了，立刻给反应），或冷却已过再按概率补
+    /// 一次（状态没变，时不时动一下）。
+    pub fn update_mood(&self, char_id: &str, mood: &MoodSnapshot) -> Option<String> {
         let cue = mood_to_cue(mood);
+        if cue.accent.is_empty() {
+            return None;
+        }
 
         self.with_state(char_id, |state| {
             state.current_mood_label = mood.primary_emotion.as_str().to_string();
 
-            let tone = if !cue.tone.is_empty() && cue.tone != state.last_tone {
-                state.last_tone = cue.tone.clone();
-                Some(cue.tone.clone())
+            let changed = cue.accent != state.last_accent;
+            let cooled_down = Instant::now().saturating_duration_since(state.last_accent_time)
+                > ACCENT_COOLDOWN;
+            if changed || (cooled_down && rand::random::<f64>() < ACCENT_IDLE_PROBABILITY) {
+                state.last_accent = cue.accent.clone();
+                state.last_accent_time = Instant::now();
+                Some(cue.accent.clone())
             } else {
                 None
-            };
-            let tone_changed = tone.is_some();
-
-            let accent = if cue.accent.is_empty() {
-                None
-            } else {
-                let cooled_down = Instant::now().saturating_duration_since(state.last_accent_time)
-                    > ACCENT_COOLDOWN;
-                if tone_changed || (cooled_down && rand::random::<f64>() < ACCENT_IDLE_PROBABILITY) {
-                    state.last_accent_time = Instant::now();
-                    Some(cue.accent.clone())
-                } else {
-                    None
-                }
-            };
-
-            (tone, accent)
+            }
         })
     }
 
@@ -330,17 +334,23 @@ pub fn record_user_interaction(char_id: &str) -> bool {
     AUTO_TRIGGER.record_interaction(char_id)
 }
 
-/// 便捷函数：更新心情状态，并把基调与点缀投递给前端
+/// 便捷函数：更新心情状态，并把点缀投递给前端
 ///
-/// 基调与点缀走两个不同的 kind：基调只改"回落目标"，点缀是一次性动画，
-/// 播完由前端自己落回基调。
+/// 点缀走 `expression` 通道而不是 `motion`：心情点缀可能是**图集格位**（如 `dizzy`），
+/// 格位自己不会计时，必须带上 `duration_ms` 才会到点回落 idle。`motion` 通道落到前端
+/// 是 `playMotion`，它对格位用固定 900ms 且不接受时长，给不了这个时长——而一个不带
+/// 时长的格位表情会**一直挂着**，正是这次要消灭的那种状态。
+///
+/// 帧序列类点缀（`happy` / `angry` / …）带不带时长都一样：它们按自己的节奏播完即落，
+/// 前端会忽略这个参数，所以统一走一条通道不会改变它们的行为。
 pub fn update_mood_state(char_id: &str, mood: &MoodSnapshot) {
-    let (tone, accent) = AUTO_TRIGGER.update_mood(char_id, mood);
-    if let Some(tone) = tone {
-        push_action(char_id, "mood_tone", &tone, serde_json::json!({}));
-    }
-    if let Some(accent) = accent {
-        push_action(char_id, "motion", &accent, serde_json::json!({}));
+    if let Some(accent) = AUTO_TRIGGER.update_mood(char_id, mood) {
+        push_action(
+            char_id,
+            "expression",
+            &accent,
+            serde_json::json!({ "duration_ms": MOOD_ACCENT_DURATION_MS }),
+        );
     }
 }
 
@@ -356,5 +366,69 @@ pub fn auto_trigger_tick(char_id: &str, manifest: &ResourceManifest) {
     let triggers = AUTO_TRIGGER.tick(char_id, manifest);
     for result in &triggers {
         apply_trigger_result(char_id, result);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::psychology::emotion::EmotionLabel;
+    use crate::tools::builtin::pet_tools::drain_pending_actions;
+
+    /// 严重悲伤 → `sadness_grieving` → 点缀 `dizzy`（图集格位，不是帧序列）。
+    fn grieving_mood() -> MoodSnapshot {
+        MoodSnapshot {
+            valence: -0.6,
+            arousal: 0.3,
+            primary_emotion: EmotionLabel::Sadness,
+            secondary_emotion: EmotionLabel::Curiosity,
+            primary_intensity: 0.8,
+            fatigue: 20.0,
+            stress: 10.0,
+            relationship_score: 50.0,
+        }
+    }
+
+    /// 心情点缀必须是**限时**的。
+    ///
+    /// `dizzy` 是图集格位，自己不会计时：动作里少了 `duration_ms`，前端就会把那张脸
+    /// 一直挂着——正是这一版要消灭的"持续状态"。这条用例守两件事：点缀必须走
+    /// `expression` 通道（`motion` 通道落到 `playMotion`，对格位用固定 900ms 且不收时长），
+    /// 以及时长参数不能丢。
+    #[test]
+    fn mood_accent_is_always_timed() {
+        let char_id = "test_mood_accent_is_always_timed";
+        update_mood_state(char_id, &grieving_mood());
+
+        let actions = drain_pending_actions(Some(char_id));
+        let action = actions.last().expect("心情点缀一个动作都没投递");
+        assert_eq!(action.kind, "expression", "点缀走错了通道：{:?}", action.kind);
+        assert_eq!(action.target, "dizzy");
+        let duration = action
+            .params
+            .get("duration_ms")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        assert!(
+            duration > 0,
+            "dizzy 点缀没带时长，前端会一直挂着这张脸"
+        );
+    }
+
+    /// 同一状态连续重算不该每次都闪：第二次只剩冷却+概率，实测大概率不投递。
+    #[test]
+    fn mood_accent_does_not_refire_same_state() {
+        let char_id = "test_mood_accent_does_not_refire_same_state";
+        let mood = grieving_mood();
+        update_mood_state(char_id, &mood);
+        drain_pending_actions(Some(char_id));
+
+        // 冷却 8s 内重复调用，点缀没变 ⇒ 不应再投递
+        let mut refired = 0;
+        for _ in 0..20 {
+            update_mood_state(char_id, &mood);
+            refired += drain_pending_actions(Some(char_id)).len();
+        }
+        assert_eq!(refired, 0, "同一状态在冷却期内重复触发了 {refired} 次");
     }
 }

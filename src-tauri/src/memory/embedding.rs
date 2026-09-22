@@ -30,6 +30,13 @@ const REMOTE_EMBEDDING_MAX_CONCURRENCY: usize = 4;
 /// 原值 2000 会额外常驻 8MB，性价比很低。
 const EMBEDDING_CACHE_CAP: usize = 512;
 
+/// 单请求 `input` 数组条数上限的**兜底值**
+///
+/// 各服务商差异极大（OpenAI 2048、智谱 64、百炼 text-embedding-v4 仅 10），
+/// 调用方按自己的语料规模设 chunk（情绪语料 168、工具描述 100），无法兼顾所有服务商。
+/// 优先用插件预设里按模型声明的 `maxBatch`，无预设时按域名回退，最后才用这个兜底值。
+const MAX_BATCH_INPUTS: usize = 64;
+
 /// 缓存键：(文本哈希, 文本字节长度, 模型名, 维度)
 ///
 /// 存哈希而不是完整文本：记忆正文动辄数百到数千字节，原实现把整段文本
@@ -228,6 +235,15 @@ fn is_cjk_char(c: char) -> bool {
         || ('\u{F900}'..='\u{FAFF}').contains(&c)
 }
 
+/// 把一次批量嵌入拆成若干不超过 `cap` 条的下标区间
+fn batch_chunk_ranges(len: usize, cap: usize) -> Vec<std::ops::Range<usize>> {
+    let cap = cap.max(1);
+    (0..len)
+        .step_by(cap)
+        .map(|start| start..(start + cap).min(len))
+        .collect()
+}
+
 /// OpenAI 兼容嵌入服务 - 通过 reqwest 调用 `/v1/embeddings`
 pub struct OpenAIEmbedding {
     client: reqwest::Client,
@@ -235,6 +251,10 @@ pub struct OpenAIEmbedding {
     base_url: String,
     model: String,
     dimension: usize,
+    /// 插件预设显式声明的维度参数名（优先于域名/模型启发式）
+    dimension_param_override: Option<String>,
+    /// 插件预设显式声明的单请求条数上限（0 = 未声明，走启发式）
+    max_batch_override: usize,
 }
 
 impl OpenAIEmbedding {
@@ -261,11 +281,24 @@ impl OpenAIEmbedding {
             base_url,
             model: model.unwrap_or_else(|| "text-embedding-3-small".to_string()),
             dimension: 1024,
+            dimension_param_override: None,
+            max_batch_override: 0,
         }
     }
 
     pub fn with_dimension(mut self, dim: usize) -> Self {
         self.dimension = dim;
+        self
+    }
+
+    /// 应用插件预设声明的请求能力（维度参数名、单请求条数上限）
+    pub fn with_capabilities(
+        mut self,
+        dimension_param: Option<String>,
+        max_batch: usize,
+    ) -> Self {
+        self.dimension_param_override = dimension_param;
+        self.max_batch_override = max_batch;
         self
     }
 
@@ -287,11 +320,74 @@ impl OpenAIEmbedding {
         }
     }
 
-    async fn post_embeddings(&self, inputs: serde_json::Value) -> VivianResult<serde_json::Value> {
+    /// 请求体里下发向量维度的参数名；不支持的服务商/模型返回 `None`（不下发）
+    ///
+    /// 维度参数是**模型级**能力，不是厂商级能力：同一厂商的老模型往往固定维度，
+    /// 硬发 `dimensions` 会被服务端判为非法参数直接 400。所以这里同时看 host 和 model，
+    /// 只在明确支持时下发；未知/自建端点保持"不下发"的旧行为。
+    /// - 插件预设显式声明的 `dimensionParam` 优先（Cohere 兼容层、Voyage 等以预设为准）
+    /// - Ollama `/api/embed` 没有维度参数
+    fn dimension_param(&self) -> Option<&str> {
+        if let Some(param) = self.dimension_param_override.as_deref() {
+            return Some(param);
+        }
+        if self.is_ollama() {
+            return None;
+        }
+        let host = self.base_url.to_lowercase();
+        let model = self.model.to_lowercase();
+        // OpenAI：仅 text-embedding-3-* 可调维度，ada-002 固定 1536
+        if host.contains("api.openai.com") {
+            return model.starts_with("text-embedding-3").then_some("dimensions");
+        }
+        // 智谱 GLM：embedding-3 支持 256/512/1024/2048，embedding-2 固定 1024
+        if host.contains("bigmodel.cn") {
+            return model.starts_with("embedding-3").then_some("dimensions");
+        }
+        // 阿里百炼：text-embedding-v3/v4 可调维度，v1/v2 固定
+        if host.contains("dashscope.aliyuncs.com") {
+            return (model.contains("v3") || model.contains("v4")).then_some("dimensions");
+        }
+        None
+    }
+
+    /// 单请求 `input` 数组条数上限
+    ///
+    /// 预设显式声明优先；无预设时按域名保守回退——百炼各模型的批次上限最小
+    /// （text-embedding-v4 仅 10 条），估大了会被服务端直接 400 拒绝整批。
+    fn max_batch_inputs(&self) -> usize {
+        if self.max_batch_override > 0 {
+            return self.max_batch_override;
+        }
+        let host = self.base_url.to_lowercase();
+        if host.contains("dashscope.aliyuncs.com") {
+            return 10;
+        }
+        if self.is_ollama() {
+            return 2048;
+        }
+        MAX_BATCH_INPUTS
+    }
+
+    /// 组装请求体
+    ///
+    /// 基准形态是 `{"model": <model>, "input": <string|string[]>}`。额外两处：
+    /// - 服务商支持时显式下发维度。**不下发会踩坑**：服务端默认维度常与配置不一致
+    ///   （智谱 `embedding-3` 默认 2048，而配置多为 1024），响应回来会在
+    ///   [`Self::parse_embedding`] 的维度校验处整批失败。
+    /// - Ollama 追加 `keep_alive`，避免模型被卸载后每次都要重新加载。
+    fn build_body(&self, inputs: serde_json::Value) -> serde_json::Value {
         let mut body = serde_json::json!({ "model": self.model, "input": inputs });
         if self.is_ollama() {
             body["keep_alive"] = serde_json::Value::String("30m".to_string());
+        } else if let Some(param) = self.dimension_param() {
+            body[param] = serde_json::json!(self.dimension);
         }
+        body
+    }
+
+    async fn post_embeddings(&self, inputs: serde_json::Value) -> VivianResult<serde_json::Value> {
+        let body = self.build_body(inputs);
         let url = self.embeddings_url();
         for attempt in 1..=3 {
             let response = self
@@ -362,6 +458,38 @@ impl OpenAIEmbedding {
         }
         Ok(vector)
     }
+
+    /// 单次 HTTP 批量嵌入（入参条数须 ≤ [`MAX_BATCH_INPUTS`]），返回顺序与入参一致
+    async fn post_batch_chunk(&self, texts: &[String]) -> VivianResult<Vec<Vec<f32>>> {
+        let resp = self.post_embeddings(serde_json::json!(texts)).await?;
+        let data = if self.is_ollama() {
+            resp["embeddings"].as_array()
+        } else {
+            resp["data"].as_array()
+        }
+        .ok_or_else(|| VivianError::Provider("embedding 响应缺少向量数组".into()))?;
+        let mut out: Vec<Option<Vec<f32>>> = (0..texts.len()).map(|_| None).collect();
+        for (position, item) in data.iter().enumerate() {
+            let response_index = if self.is_ollama() {
+                position
+            } else {
+                item.get("index")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as usize)
+                    .unwrap_or(position)
+            };
+            let raw = if self.is_ollama() { item } else { &item["embedding"] };
+            let emb = self.parse_embedding(raw)?;
+            let slot = out.get_mut(response_index).ok_or_else(|| {
+                VivianError::Other("embedding 响应条数与请求不匹配".into())
+            })?;
+            *slot = Some(emb);
+        }
+        if out.iter().any(|o| o.is_none()) {
+            return Err(VivianError::Other("embedding 部分结果缺失".into()));
+        }
+        Ok(out.into_iter().flatten().collect())
+    }
 }
 
 #[async_trait]
@@ -416,43 +544,29 @@ impl EmbeddingService for OpenAIEmbedding {
             }
         }
         if miss_texts.is_empty() {
-            return Ok(results.into_iter().map(|o| o.unwrap()).collect());
+            return Ok(results.into_iter().flatten().collect());
         }
-        let resp = self.post_embeddings(serde_json::json!(miss_texts)).await?;
-        let data = if self.is_ollama() {
-            resp["embeddings"].as_array()
-        } else {
-            resp["data"].as_array()
-        }
-        .ok_or_else(|| VivianError::Provider("embedding 响应缺少向量数组".into()))?;
-        for (position, item) in data.iter().enumerate() {
-            let response_index = if self.is_ollama() {
-                position
-            } else {
-                item.get("index")
-                    .and_then(|v| v.as_u64())
-                    .map(|v| v as usize)
-                    .unwrap_or(position)
-            };
-            let raw = if self.is_ollama() { item } else { &item["embedding"] };
-            let emb = self.parse_embedding(raw)?;
-            let miss_idx = *miss_indices.get(response_index).ok_or_else(|| {
-                VivianError::Other("embedding 响应条数与请求不匹配".into())
-            })?;
-            let miss_text = &miss_texts[response_index];
-            embedding_cache_put(
-                miss_text,
-                self.cache_provider_id(),
-                &self.model,
-                self.dimension,
-                emb.clone(),
-            );
-            results[miss_idx] = Some(emb);
+        // 适配器级分块：调用方按自己的语料规模设 chunk（情绪语料 168、工具描述 100），
+        // 可能远超服务商上限（智谱 64、百炼 10），这里按服务商能力统一兜底。
+        let cap = self.max_batch_inputs();
+        for range in batch_chunk_ranges(miss_texts.len(), cap) {
+            let embeddings = self.post_batch_chunk(&miss_texts[range.clone()]).await?;
+            for (offset, emb) in embeddings.into_iter().enumerate() {
+                let miss_idx = miss_indices[range.start + offset];
+                embedding_cache_put(
+                    &miss_texts[range.start + offset],
+                    self.cache_provider_id(),
+                    &self.model,
+                    self.dimension,
+                    emb.clone(),
+                );
+                results[miss_idx] = Some(emb);
+            }
         }
         if results.iter().any(|o| o.is_none()) {
             return Err(VivianError::Other("embedding 部分结果缺失".into()));
         }
-        Ok(results.into_iter().map(|o| o.unwrap()).collect())
+        Ok(results.into_iter().flatten().collect())
     }
 }
 
@@ -497,6 +611,12 @@ pub struct RemoteMemoryEmbedding {
     api_key: String,
     base_url: String,
     model: String,
+    /// 插件预设声明的维度参数名（透传给内层适配器）
+    dimension_param: Option<String>,
+    /// 插件预设声明的单请求条数上限（0 = 未声明）
+    max_batch: usize,
+    /// 向量维度（重建内层适配器时需要）
+    dimension: usize,
     /// 并发上限信号量：限制 `block_in_place` 同时阻塞的 worker 线程数
     concurrency: Arc<Semaphore>,
 }
@@ -517,25 +637,40 @@ impl RemoteMemoryEmbedding {
             api_key,
             base_url,
             model,
+            dimension_param: None,
+            max_batch: 0,
+            dimension: 1024,
             concurrency: Arc::new(Semaphore::new(REMOTE_EMBEDDING_MAX_CONCURRENCY)),
         }
     }
 
-    pub fn with_dimension(self, dim: usize) -> Self {
-        let emb = OpenAIEmbedding::new(
+    /// 应用插件预设声明的请求能力（维度参数名、单请求条数上限）
+    pub fn with_capabilities(
+        mut self,
+        dimension_param: Option<String>,
+        max_batch: usize,
+    ) -> Self {
+        self.dimension_param = dimension_param;
+        self.max_batch = max_batch;
+        self.inner = Arc::new(self.rebuild_inner());
+        self
+    }
+
+    pub fn with_dimension(mut self, dim: usize) -> Self {
+        self.dimension = dim;
+        self.inner = Arc::new(self.rebuild_inner());
+        self
+    }
+
+    /// 按当前字段重建内层适配器（维度/能力变更后调用）
+    fn rebuild_inner(&self) -> OpenAIEmbedding {
+        OpenAIEmbedding::new(
             self.api_key.clone(),
             Some(self.base_url.clone()),
             Some(self.model.clone()),
         )
-        .with_dimension(dim);
-        Self {
-            inner: Arc::new(emb),
-            api_key: self.api_key,
-            base_url: self.base_url,
-            model: self.model,
-            // 复用原实例的信号量，保持全局限流语义
-            concurrency: self.concurrency,
-        }
+        .with_dimension(self.dimension)
+        .with_capabilities(self.dimension_param.clone(), self.max_batch)
     }
 
     pub fn model_name(&self) -> &str {
@@ -655,6 +790,24 @@ fn probe_ollama_embedding_model() -> Option<String> {
     })
 }
 
+/// 从插件预设里取出某模型的请求能力（维度参数名、单请求条数上限）
+///
+/// 预设是能力的**主数据源**：端点、模型可调维度、数组条数上限都随厂商迭代变化，
+/// 放在可热更新的插件数据里比硬编码在代码里更不容易过期。预设缺失时返回
+/// `(None, 0)`，由适配器的域名启发式兜底。
+fn preset_capabilities(model: &str) -> (Option<String>, usize) {
+    let Some(preset) = crate::plugins::find_embedding_preset_by_model(model) else {
+        return (None, 0);
+    };
+    let max_batch = preset
+        .models
+        .iter()
+        .find(|m| m.model.trim() == model.trim())
+        .and_then(|m| m.max_batch)
+        .unwrap_or(0);
+    (preset.dimension_param, max_batch)
+}
+
 /// 嵌入服务工厂：根据 `MemoryConfig.embedding` 选择远程或哈希
 ///
 /// 选择规则（统一优先使用用户配置的嵌入模型，未配置才回退到哈希）：
@@ -699,16 +852,24 @@ pub fn build_embedding(config: &AppConfig) -> Arc<dyn MemoryEmbeddingProvider> {
     let endpoint = emb.endpoint.trim();
     if !api_key.is_empty() && !endpoint.is_empty() {
         let dim = super::embedding_registry::normalize_dimension(&emb.model, emb.dimension);
+        let (dimension_param, max_batch) = preset_capabilities(&emb.model);
         let provider = RemoteMemoryEmbedding::new(
             api_key.to_string(),
             Some(endpoint.to_string()),
             Some(emb.model.clone()),
         )
-        .with_dimension(dim);
+        .with_dimension(dim)
+        .with_capabilities(dimension_param.clone(), max_batch);
         tracing::info!(
-            "[MemoryEmbedding] 启用远程嵌入: model={}, dim={}",
+            "[MemoryEmbedding] 启用远程嵌入: model={}, dim={}, dimensionParam={}, maxBatch={}",
             provider.model_name(),
-            provider.dim()
+            provider.dim(),
+            dimension_param.as_deref().unwrap_or("none"),
+            if max_batch == 0 {
+                "auto".to_string()
+            } else {
+                max_batch.to_string()
+            }
         );
         return Arc::new(provider);
     }
@@ -823,6 +984,141 @@ mod tests {
             Some("bge-m3".into()),
         );
         assert_eq!(ollama.embeddings_url(), "http://127.0.0.1:11434/api/embed");
+    }
+
+    #[test]
+    fn embedding_body_sends_dimension_only_for_supporting_hosts() {
+        let zhipu = OpenAIEmbedding::new(
+            "key".into(),
+            Some("https://open.bigmodel.cn/api/paas/v4/embeddings".into()),
+            Some("embedding-3".into()),
+        )
+        .with_dimension(1024);
+        let body = zhipu.build_body(serde_json::json!("你好"));
+        assert_eq!(body["model"].as_str(), Some("embedding-3"));
+        assert_eq!(body["input"].as_str(), Some("你好"));
+        assert_eq!(
+            body["dimensions"].as_u64(),
+            Some(1024),
+            "智谱支持 dimensions，不下发就会拿到默认的 2048 维"
+        );
+
+        let openai = OpenAIEmbedding::new("key".into(), None, Some("text-embedding-3-small".into()))
+            .with_dimension(1536);
+        assert_eq!(openai.build_body(serde_json::json!("hi"))["dimensions"].as_u64(), Some(1536));
+
+        // 未知/自建端点：不下发，避免把不认识的字段塞给别人的接口
+        let custom = OpenAIEmbedding::new(
+            "key".into(),
+            Some("https://api.example.com/v1".into()),
+            Some("my-model".into()),
+        )
+        .with_dimension(1024);
+        assert!(custom.build_body(serde_json::json!("hi")).get("dimensions").is_none());
+
+        // 维度参数是模型级能力：同厂商的老模型固定维度，发了会被判非法参数
+        let ada = OpenAIEmbedding::new(
+            "key".into(),
+            Some("https://api.openai.com/v1".into()),
+            Some("text-embedding-ada-002".into()),
+        )
+        .with_dimension(1536);
+        assert!(ada.build_body(serde_json::json!("hi")).get("dimensions").is_none());
+
+        let glm2 = OpenAIEmbedding::new(
+            "key".into(),
+            Some("https://open.bigmodel.cn/api/paas/v4".into()),
+            Some("embedding-2".into()),
+        )
+        .with_dimension(1024);
+        assert!(glm2.build_body(serde_json::json!("hi")).get("dimensions").is_none());
+
+        // Voyage 的字段名是 output_dimension，发 dimensions 是错的
+        let voyage = OpenAIEmbedding::new(
+            "key".into(),
+            Some("https://api.voyageai.com/v1".into()),
+            Some("voyage-4".into()),
+        )
+        .with_dimension(1024);
+        assert!(voyage.build_body(serde_json::json!("hi")).get("dimensions").is_none());
+    }
+
+    #[test]
+    fn embedding_body_keeps_ollama_keep_alive_without_dimension() {
+        let ollama = OpenAIEmbedding::new(
+            "ollama".into(),
+            Some("http://127.0.0.1:11434/v1".into()),
+            Some("bge-m3".into()),
+        )
+        .with_dimension(1024);
+        let body = ollama.build_body(serde_json::json!(["a", "b"]));
+        assert_eq!(body["keep_alive"].as_str(), Some("30m"));
+        assert!(
+            body.get("dimensions").is_none(),
+            "Ollama /api/embed 没有维度参数"
+        );
+    }
+
+    #[test]
+    fn batch_chunk_ranges_caps_every_request_at_64() {
+        assert!(batch_chunk_ranges(0, MAX_BATCH_INPUTS).is_empty());
+        assert_eq!(batch_chunk_ranges(1, MAX_BATCH_INPUTS), vec![0..1]);
+        assert_eq!(
+            batch_chunk_ranges(MAX_BATCH_INPUTS, MAX_BATCH_INPUTS),
+            vec![0..MAX_BATCH_INPUTS]
+        );
+        // 夹具必须真的越线，否则这条用例什么也没测
+        assert!(168 > MAX_BATCH_INPUTS, "夹具本身必须超过上限");
+        // 情绪语料 168 条 → 3 次请求；工具描述 100 条 → 2 次请求
+        assert_eq!(
+            batch_chunk_ranges(168, MAX_BATCH_INPUTS),
+            vec![0..64, 64..128, 128..168]
+        );
+        assert_eq!(batch_chunk_ranges(100, MAX_BATCH_INPUTS), vec![0..64, 64..100]);
+    }
+
+    /// 百炼 text-embedding-v4 的批次上限只有 10 条：按 64 条切会整批 400
+    #[test]
+    fn batch_chunk_ranges_honours_tight_provider_cap() {
+        let ranges = batch_chunk_ranges(25, 10);
+        assert_eq!(ranges, vec![0..10, 10..20, 20..25]);
+        assert!(ranges.iter().all(|r| r.len() <= 10));
+        // 上限为 0 时不能 panic、也不能退化成"整批发一条"
+        assert_eq!(batch_chunk_ranges(3, 0), vec![0..1, 1..2, 2..3]);
+    }
+
+    /// 预设声明的能力优先于域名启发式，未声明时才走启发式
+    #[test]
+    fn provider_capabilities_override_heuristics() {
+        let zhipu = OpenAIEmbedding::new(
+            "key".into(),
+            Some("https://open.bigmodel.cn/api/paas/v4".into()),
+            Some("embedding-3".into()),
+        );
+        assert_eq!(zhipu.dimension_param(), Some("dimensions"));
+        assert_eq!(zhipu.max_batch_inputs(), MAX_BATCH_INPUTS);
+
+        // 预设显式声明：Voyage 的字段名是 output_dimension，且批次上限 128
+        let voyage = OpenAIEmbedding::new(
+            "key".into(),
+            Some("https://api.voyageai.com/v1".into()),
+            Some("voyage-4".into()),
+        )
+        .with_capabilities(Some("output_dimension".into()), 128);
+        assert_eq!(voyage.dimension_param(), Some("output_dimension"));
+        assert_eq!(voyage.max_batch_inputs(), 128);
+        assert_eq!(
+            voyage.build_body(serde_json::json!("hi"))["output_dimension"].as_u64(),
+            Some(1024)
+        );
+
+        // 无预设时按域名保守回退：百炼批次上限最小
+        let dashscope = OpenAIEmbedding::new(
+            "key".into(),
+            Some("https://dashscope.aliyuncs.com/compatible-mode/v1".into()),
+            Some("text-embedding-v4".into()),
+        );
+        assert_eq!(dashscope.max_batch_inputs(), 10);
     }
 
     #[test]
