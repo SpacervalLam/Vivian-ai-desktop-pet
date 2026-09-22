@@ -279,6 +279,15 @@ export default function SideChatPanel() {
     setAutoStartVoice(false);
   }, []);
 
+  // side_chat 在未输入时会启用原生鼠标穿透，方便继续操作桌面；因此不能只依赖
+  // React 的双击手势作为收起方式。输入态保留一个明确的关闭按钮，直接调用后端
+  // 收起窗口并同步复位锁定/输入状态。
+  const handleCollapse = useCallback(() => {
+    void invoke('collapse_side_chat', { label: 'side_chat' }).catch(() => {});
+    setInputVisible(false);
+    setAutoStartVoice(false);
+  }, []);
+
   // ESC 关闭输入框时：若窗口处于锁定状态，同时解锁（光标离开即可自动隐藏）
   const handleEscape = useCallback(() => {
     if (lockedRef.current) {
@@ -311,6 +320,24 @@ export default function SideChatPanel() {
       }}
     >
       <style>{`@keyframes sidechat-enter { 0% { opacity: 0; transform: translateY(10px) scale(0.95); } 60% { opacity: 1; transform: translateY(0) scale(1.025); } 100% { opacity: 1; transform: translateY(0) scale(1); } } .sidechat-scroll::-webkit-scrollbar { display: none; }`}</style>
+      {inputVisible && (
+        <button
+          type="button"
+          aria-label="收起侧边栏"
+          title="收起侧边栏"
+          onMouseDown={(e) => e.stopPropagation()}
+          onClick={handleCollapse}
+          style={{
+            position: 'absolute', top: 8, right: 8, zIndex: 2, width: 26, height: 26,
+            border: '1px solid rgba(255, 255, 255, 0.2)', borderRadius: '50%',
+            background: 'rgba(30, 30, 40, 0.72)', color: 'rgba(255, 255, 255, 0.82)',
+            fontSize: 18, lineHeight: 1, cursor: 'pointer',
+          }}
+        >
+          ×
+        </button>
+      )}
+
       <div
         ref={scrollRef}
         className="sidechat-scroll"

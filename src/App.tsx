@@ -3951,7 +3951,10 @@ export default function App() {
         overflow: 'hidden',
         background: 'transparent',
       }}
-      onMouseDown={handleBackgroundMouseDown}
+      // 拖拽必须在捕获阶段开始：对话期间画布会切换动作层，个别动作格/覆盖层会
+      // 消费冒泡阶段的鼠标事件。若仍只在 onMouseDown（冒泡）绑定，桌宠说过话后就会
+      // 偶发无法再拖动。捕获阶段保证窗口拖拽不依赖子组件是否 stopPropagation。
+      onMouseDownCapture={handleBackgroundMouseDown}
       onContextMenu={handleContextMenu}
     >
       {/* 文件拖放文字提示（简化：仅文字，无蓝色遮罩） */}
