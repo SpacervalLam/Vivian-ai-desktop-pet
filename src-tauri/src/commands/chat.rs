@@ -307,11 +307,21 @@ pub async fn send_message_stream(
     };
     let brain = instance.brain.clone();
 
-    // 渠道限制：direct（面对面）在 Offline 状态拒绝；Busy 正常发送但注入忙碌语境
+    // 广播渠道（broadcast）：用户只说了一遍、当众对在场所有人说的。
+    // 它与 direct 共享"说出口的话"的全部行为（口语化回复、剥离括号动作、在场门禁），
+    // 但语义上多了一层"公开"——这一点在下面多处按渠道分流：
+    //   - 不触发第三者旁观/偷听（那段逻辑只认 direct，见下方旁观记忆块）
+    //   - 用户发言与自己的回复都以 listener="all" + knowledge_source="broadcast" 落账
+    // 这样每个角色记住的都是"他当众说了一次"，而不是"他单独跟我说了一遍"。
+    let is_broadcast = channel_str == "broadcast";
+    // 说出口的渠道：面对面 与 广播 都算（广播是"当着所有人的面说出口"）
+    let is_spoken_channel = channel_str == "direct" || is_broadcast;
+
+    // 渠道限制：direct/broadcast（说出口）在 Offline 状态拒绝；Busy 正常发送但注入忙碌语境
     let current_presence = brain.presence.current();
     let is_busy = current_presence == crate::presence::PresenceState::Busy;
 
-    if channel_str == "direct" && !brain.presence.can_direct() {
+    if is_spoken_channel && !brain.presence.can_direct() {
         let hint = match current_presence {
             crate::presence::PresenceState::Offline => "对方不在，发微信留言",
             _ => "对方不在场，发微信吧",
@@ -449,7 +459,8 @@ pub async fn send_message_stream(
     let cid_for_emitter = char_id.clone();
     let channel_for_emitter = channel_str.clone();
 
-    let is_direct_channel = channel_str == "direct";
+    // 括号动作剥离 / 内联表情扫描：广播也是"说出口"的话，走与 direct 相同的文本处理
+    let is_direct_channel = is_spoken_channel;
 
     // 内联表情/动作标签扫描器：当 inline_expression 启用时，
     // 拦截流式文本 chunk，剥离 <e>/<m>/<s> 标签并 emit chat:inline_meta 事件，
@@ -586,7 +597,7 @@ pub async fn send_message_stream(
     // 获取焦点租约：流式 think 期间屏蔽其他角色的主动打断
     let _focus_lease = crate::commands::proactive::FocusLeaseGuard::acquire(&char_id);
     // Busy 状态下 direct 渠道：注入忙碌被呼唤的语境
-    let think_input = if is_busy && channel_str == "direct" {
+    let think_input = if is_busy && is_spoken_channel {
         format!("（你从忙碌状态下被用户呼唤）\n{}", message)
     } else {
         message.clone()
@@ -873,7 +884,10 @@ pub async fn send_message_stream(
             // 悄悄话模式（is_whisper=true）跳过旁观记忆，其他在线角色不会听到此对话
             // 群聊渠道（wechat_group）跳过旁观记忆，每个角色已通过各自的 send_message_stream 直接记录
             // 微信私聊（wechat）是角色私有对话，其他角色不应旁观
-            // 仅 direct（桌宠直接对话）才被其他在线角色旁观
+            // 广播渠道（broadcast）必须跳过：广播里没有"偷听者"，所有人都是被搭话的听众。
+            // 若在这里为其他角色写旁观记忆，会生成"[User says to Vivian] X"这类条目，
+            // 让每个角色都以为"用户把同一句话分别跟两个人各说了一遍"——这正是广播的语义 bug。
+            // 仅 direct（桌宠一对一面谈）才被其他在线角色旁观
             if !is_whisper && channel_str == "direct" {
                 let speaker_id = char_id.clone();
                 let user_msg_full = message.trim().to_string();

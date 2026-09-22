@@ -232,6 +232,12 @@ pub enum SubmitResult {
     Played,
     /// 被丢弃(Background 让路 / 被高优先级抢占后取消)
     Dropped,
+    /// 目标角色的 TTS 未启用,未播放
+    ///
+    /// 与 `Dropped`(让路/被抢占)区分开:这是"配置层面没开",不是调度冲突。
+    /// 正常路径下不应出现——调用方在提交前已检查过 `is_enabled()`;
+    /// 若出现,通常意味着 Planner 持有的 TtsManager 实例与调用方不一致。
+    Disabled,
     /// 播放失败
     Failed(String),
 }
@@ -305,11 +311,70 @@ impl SpeechPlanner {
         }
     }
 
-    /// 注册角色的 TtsManager
+    /// 注册角色的 TtsManager(幂等)
+    ///
+    /// 同一 `Arc` 重复注册为无操作,不产生日志噪声;若同一 speaker_id 换成了
+    /// **另一个** `Arc<TtsManager>` 实例(例如 `reinitialize` 重建了角色),
+    /// 则替换并打 INFO 日志。
+    ///
+    /// 为什么要替换而不是忽略:角色重建会生成全新的 Brain / TtsManager,
+    /// 新实例的配置来自磁盘,而旧实例仍持有进程启动时的内存配置。若 Planner
+    /// 一直用旧实例做判定,就会出现"设置里已启用 TTS,但朗读意图被静默丢弃"
+    /// ——旧实例的 `enabled` 还是 false。
     pub async fn register(&self, speaker_id: &str, tts: Arc<TtsManager>) {
         let mut map = self.managers.lock().await;
-        map.insert(speaker_id.to_string(), tts);
-        tracing::debug!("[SpeechPlanner] 注册角色 TTS: {}", speaker_id);
+        match map.get(speaker_id) {
+            // 同一实例:幂等,静默
+            Some(existing) if Arc::ptr_eq(existing, &tts) => {}
+            // 换了实例:旧实例已失效,替换并提示
+            Some(_) => {
+                tracing::info!(
+                    "[SpeechPlanner] 替换角色 TTS 实例(旧实例已失效): {}",
+                    speaker_id
+                );
+                map.insert(speaker_id.to_string(), tts);
+            }
+            None => {
+                map.insert(speaker_id.to_string(), tts);
+                tracing::debug!("[SpeechPlanner] 注册角色 TTS: {}", speaker_id);
+            }
+        }
+    }
+
+    /// 批量注册 — 角色表整体重建后调用(见 `AppState::sync_tts_managers`)
+    ///
+    /// 逐个委托给 [`Self::register`],因此同样具备幂等与实例替换语义。
+    pub async fn register_all<I>(&self, items: I)
+    where
+        I: IntoIterator<Item = (String, Arc<TtsManager>)>,
+    {
+        for (speaker_id, tts) in items {
+            self.register(&speaker_id, tts).await;
+        }
+    }
+
+    /// 自愈:确保 Planner 中该角色使用的正是调用方当前持有的实例
+    ///
+    /// 调用方(命令层 / Brain)在 `submit` 之前调用,即可保证
+    /// "检查 `is_enabled()` 的实例" 与 "实际播放的实例" 永远是同一个,
+    /// 从根本上消除实例错配导致的静默丢弃。实例一致时开销仅一次
+    /// `Arc::ptr_eq`,不产生日志。
+    pub async fn ensure_registered(&self, speaker_id: &str, tts: Arc<TtsManager>) {
+        let stale = {
+            let map = self.managers.lock().await;
+            match map.get(speaker_id) {
+                Some(current) => !Arc::ptr_eq(current, &tts),
+                None => true,
+            }
+        };
+        if stale {
+            self.register(speaker_id, tts).await;
+        }
+    }
+
+    /// 该角色是否已在 Planner 注册(诊断用)
+    pub async fn has_manager(&self, speaker_id: &str) -> bool {
+        self.managers.lock().await.contains_key(speaker_id)
     }
 
     /// 提交说话意图
@@ -752,8 +817,15 @@ impl SpeechPlanner {
         };
 
         if !tts.is_enabled() {
-            tracing::debug!("[SpeechPlanner] TTS 未启用,跳过");
-            let _ = done_tx.send(SubmitResult::Dropped);
+            // 正常路径不该走到这里:调用方在 submit 前已用同一实例检查过 is_enabled()。
+            // 命中说明 Planner 持有的实例与调用方不一致(实例过期),或播放途中被关掉。
+            tracing::warn!(
+                "[SpeechPlanner] 角色 {} 的 TTS 未启用,丢弃 intent(text_len={})。\
+                 若设置中已启用 TTS,则 Planner 持有的 TtsManager 实例已过期,需重新注册",
+                speaker_id,
+                text.chars().count()
+            );
+            let _ = done_tx.send(SubmitResult::Disabled);
             self.pump_notify.notify_one();
             return;
         }

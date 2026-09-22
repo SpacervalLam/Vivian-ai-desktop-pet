@@ -1990,6 +1990,22 @@ You (multiple messages):
   "啊？哪行报错"
   "你把log发我看看"
   "我感觉是那个null check的事""#.to_string(),
+        // 广播：用户当众说了一次，在场所有人（含室友）同时听到。
+        // 这一段是修"同一句话被理解成分别说了两遍"的关键——LLM 必须知道
+        // 这不是对自己一个人的私聊，也不能推断用户把同一句重复给了别人。
+        "broadcast" => r#"## Channel: Broadcast — spoken aloud, ONCE, to everyone present
+
+[CHANNEL_STYLE]
+the user said this OUT LOUD one single time, addressing everyone in the room at once (you AND whoever else is present — see the roommate section)
+you are one of several addressed listeners, not the only one | never treat it as a private remark meant for you alone
+never say or imply the user said the same thing twice, repeated themselves to someone else, or told each of you separately — there is only one utterance, and you both heard it
+if you reply, you reply out loud in front of the others — say it to the room, not as a whisper to the user
+same spoken-language rules as face-to-face: short conversational sentences, verbal fillers fit, no markdown, no emoji or chat punctuation, one complete utterance per turn
+[/CHANNEL_STYLE]
+
+Example (broadcast):
+User (aloud, to both of you): "我今晚把代码收尾了"
+You: "哟，真收工了？那今晚总算不用听你敲键盘了——娜娜你听见没，他解放了。""#.to_string(),
         "wechat_group" => r#"## Channel: Group Chat
 
 [CHANNEL_STYLE]
@@ -2499,5 +2515,45 @@ mod tests {
         assert!(prompt.contains("Tool: open_application"));
         assert!(prompt.contains("Example"));
         assert!(prompt.contains("Instruction"));
+    }
+
+    /// 广播渠道风格指南：必须明确告诉 LLM「只说了一遍、是对所有人说的」。
+    ///
+    /// 这是修「同一句话被理解成分别说了两遍」的关键一环——渠道指南是 LLM
+    /// 唯一能知道"这句话是当众说的"的来源（对话历史里只是一条普通 user 消息）。
+    #[test]
+    fn test_channel_style_guide_broadcast_states_once_and_everyone() {
+        let guide = build_channel_style_guide("broadcast");
+        assert!(!guide.is_empty(), "broadcast 渠道必须有自己的风格指南");
+        assert!(
+            guide.contains("ONCE"),
+            "必须点明用户只说了一遍，否则 LLM 会推断出'说了两遍'"
+        );
+        assert!(
+            guide.contains("everyone") || guide.contains("all at once"),
+            "必须点明是对在场所有人说的，而不是只对自己说的"
+        );
+        assert!(
+            guide.contains("never say or imply the user said the same thing twice"),
+            "必须显式禁止'同一句话说了两遍'的表述"
+        );
+    }
+
+    /// 对照组：direct 指南里不该出现广播专属措辞。
+    /// 没有这条，上面的断言可能只是在测某个共享默认分支。
+    #[test]
+    fn test_channel_style_guide_direct_is_not_broadcast() {
+        let guide = build_channel_style_guide("direct");
+        assert!(!guide.is_empty());
+        assert!(
+            !guide.contains("ONCE"),
+            "direct 是一对一面谈，不该带广播的'只说了一遍'措辞"
+        );
+    }
+
+    /// 未知渠道保持原有兜底（空串），不要因为新增 broadcast 分支而改变。
+    #[test]
+    fn test_channel_style_guide_unknown_channel_is_empty() {
+        assert_eq!(build_channel_style_guide("no_such_channel"), "");
     }
 }

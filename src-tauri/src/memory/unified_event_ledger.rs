@@ -989,6 +989,10 @@ pub fn register_event_from_dialogue(
         .unwrap_or("direct")
         .to_string();
 
+    // 广播（broadcast）与跨角色对话一样是"公开发生的事"：用户当众说了一句，
+    // 在场所有人都听见了，因此对每个角色都可见（listener 记的是 "all"）。
+    // 事件账本会把它渲染成 "user → 广播: …"（见 build_prompt_section 的 broadcast_label），
+    // 这正是广播该有的读法——而不是"我偷听到用户对某个人说了什么"。
     let visibility = if perspective == "observer" {
         let observer_id = metadata
             .get("observer_id")
@@ -996,7 +1000,7 @@ pub fn register_event_from_dialogue(
             .unwrap_or(char_id)
             .to_string();
         EventVisibility::Private(observer_id)
-    } else if channel == "cross_character" {
+    } else if channel == "cross_character" || channel == "broadcast" {
         EventVisibility::Public
     } else {
         EventVisibility::Participants

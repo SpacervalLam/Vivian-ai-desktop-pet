@@ -1394,16 +1394,24 @@ Choose the appropriate expression and motion. Leave empty if nothing fits.",
             // 解析 [X 对你说] 前缀：剥离前缀存原文，用 speaker/listener 元数据标注来源
             let (raw_input, speaker, listener) = self.parse_speaker_prefix(user_input);
             let is_cross_character_input = speaker != "user";
+            // 广播渠道：用户只说了一遍、当众对在场所有人说的。
+            // listener 必须记 "all"（而不是当前角色），否则每个角色都会把这句话记成
+            // "他单独对我说了一遍"——两个角色各记一份，就变成了"同一句话说了两遍"。
+            // 记 "all" 后：对话历史落 listener=all，记忆前缀落 "[User says to everyone] …"，
+            // 事件账本落 receiver=all（渲染为"广播"）。
+            let is_broadcast = channel == "broadcast";
             // 用户消息元数据：完整标注 channel/speaker/listener/perspective/knowledge_source
             let knowledge_source = if is_cross_character_input {
                 "heard"
+            } else if is_broadcast {
+                "broadcast"
             } else {
                 "direct"
             };
             let user_metadata = serde_json::json!({
                 "channel": channel,
                 "speaker": speaker,
-                "listener": listener,
+                "listener": if is_broadcast { "all" } else { listener.as_str() },
                 "perspective": "speaker",
                 "knowledge_source": knowledge_source,
             });
@@ -1411,13 +1419,14 @@ Choose the appropriate expression and motion. Leave empty if nothing fits.",
             user_msg.meta = Some(
                 crate::messages::MessageMeta::user().with_channel(&channel),
             );
-            // AI 回复元数据：与用户消息对称标注
+            // AI 回复元数据：与用户消息对称标注。
+            // 广播时自己的回复同样是当众说的（同屋的人听得见），listener 也记 "all"。
             let ai_metadata = serde_json::json!({
                 "channel": channel,
                 "speaker": listener,
-                "listener": speaker,
+                "listener": if is_broadcast { "all" } else { speaker.as_str() },
                 "perspective": "speaker",
-                "knowledge_source": if is_cross_character_input { "heard" } else { "direct" },
+                "knowledge_source": if is_cross_character_input { "heard" } else if is_broadcast { "broadcast" } else { "direct" },
             });
             let mut ai_msg = ChatMessage::assistant(&clean_ai);
             ai_msg.meta = Some(

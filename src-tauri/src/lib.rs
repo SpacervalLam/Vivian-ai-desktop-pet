@@ -871,18 +871,12 @@ pub fn run() {
 
                             // 注册所有角色的 TtsManager 到全局 SpeechPlanner,并启动 pump 循环
                             {
-                                // 先 clone 出 (id, tts) 对,释放 read guard 后再 async 注册
-                                let tts_list: Vec<_> = state
-                                    .characters
-                                    .read()
-                                    .iter()
-                                    .map(|(id, inst)| (id.clone(), inst.brain.tts.clone()))
-                                    .collect();
+                                // 角色实例的注册统一由 AppState::sync_tts_managers 负责
+                                // （state.initialize() 末尾已调用一次，此处再调一次是幂等的），
+                                // 避免"启动注册一次、reinitialize 后不再注册"的实例过期问题。
+                                state.sync_tts_managers().await;
 
                                 let planner = crate::speech::get_planner().await;
-                                for (id, tts) in tts_list {
-                                    planner.register(&id, tts).await;
-                                }
 
                                 // 设置 Planner 事件回调:将 PlannerEvent 转成 tauri 事件发射给前端
                                 // presentation:start / presentation:stop 统一表情/动作/气泡/视线时序

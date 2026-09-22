@@ -62,6 +62,9 @@ pub fn display_name(id: &str) -> String {
 /// - char_id: 当前角色 ID（当 speaker_id == char_id 时用 "I"，当 listener_id == char_id 时用 "me"）
 ///
 /// 返回形如 "[User says to me]" / "[Vivian says to User]" / "[I say to Nana]" 的前缀。
+///
+/// 广播（listener = "all"）渲染为 "[User says to everyone]"——语义是"当众说了一次"，
+/// 而非"单独对某个人说"。这是广播与一对一面谈在记忆里的分水岭。
 pub fn build_speaker_prefix(speaker_id: &str, listener_id: &str, char_id: &str) -> String {
     let speaker_is_self = speaker_id == char_id || speaker_id == "i" || speaker_id == "I";
     let listener_is_self = listener_id == char_id || listener_id == "me";
@@ -71,8 +74,13 @@ pub fn build_speaker_prefix(speaker_id: &str, listener_id: &str, char_id: &str) 
     } else {
         display_name(speaker_id)
     };
+    // "all" 是广播的受众标记（与 unified_event_ledger 里 receiver=="all" → "广播" 一致）。
+    // 不映射的话 display_name("all") 会渲染成 "[User says to All]"，
+    // 角色会把它读成"他对一个叫 All 的人说"。
     let listener_name = if listener_is_self {
         "me".to_string()
+    } else if listener_id == "all" || listener_id == "everyone" {
+        "everyone".to_string()
     } else {
         display_name(listener_id)
     };
@@ -1523,4 +1531,47 @@ fn strip_code_fence(s: &str) -> String {
         }
     }
     s.to_string()
+}
+
+#[cfg(test)]
+mod speaker_prefix_tests {
+    use super::*;
+
+    #[test]
+    fn test_broadcast_prefix_says_everyone() {
+        // 广播：listener 记为 "all"，前缀必须渲染成 "to everyone"。
+        // 若漏了这层映射，display_name("all") 会产出 "[User says to All]"，
+        // 角色会把它读成"他对一个叫 All 的人说"——广播语义又丢了一半。
+        assert_eq!(
+            build_speaker_prefix("user", "all", "vivian"),
+            "[User says to everyone]"
+        );
+        assert_eq!(
+            build_speaker_prefix("vivian", "all", "vivian"),
+            "[I say to everyone]"
+        );
+    }
+
+    #[test]
+    fn test_broadcast_prefix_roundtrips_through_parser() {
+        // 前缀要能被解析器原样吃回来（记忆写入后再次读取的路径）
+        let (rest, speaker, listener) =
+            parse_any_speaker_prefix("[User says to everyone] 我今晚把代码收尾了");
+        assert_eq!(rest, "我今晚把代码收尾了");
+        assert_eq!(speaker.as_deref(), Some("user"));
+        assert_eq!(listener.as_deref(), Some("everyone"));
+    }
+
+    #[test]
+    fn test_private_prefix_unchanged() {
+        // 对照组：一对一面谈的前缀不能被这次改动带偏
+        assert_eq!(
+            build_speaker_prefix("user", "vivian", "vivian"),
+            "[User says to me]"
+        );
+        assert_eq!(
+            build_speaker_prefix("user", "nana", "vivian"),
+            "[User says to Nana]"
+        );
+    }
 }

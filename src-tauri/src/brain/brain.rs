@@ -827,10 +827,18 @@ impl Brain {
             .build();
 
         let planner = crate::speech::get_planner().await;
+        // 自愈:保证 Planner 用的是当前这个 Brain 持有的 TtsManager。
+        // reinitialize 会重建 Brain/TtsManager,若 Planner 仍持有旧实例,
+        // 这里已通过 is_enabled() 的 intent 会在 Planner 侧被二次判定并丢弃。
+        planner
+            .ensure_registered(&self.char_id, self.tts.clone())
+            .await;
         let handle = planner.submit(intent).await?;
         match handle.done().await {
             crate::speech::SubmitResult::Played => Ok(()),
             crate::speech::SubmitResult::Dropped => Ok(()),
+            // 与 Dropped 一样属于"正常不发声",不向上抛错打断对话流程
+            crate::speech::SubmitResult::Disabled => Ok(()),
             crate::speech::SubmitResult::Failed(msg) => {
                 Err(crate::error::VivianError::Speech(msg))
             }

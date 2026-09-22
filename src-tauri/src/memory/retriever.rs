@@ -632,12 +632,15 @@ fn semantic_type_boost(semantic_type: &super::types::SemanticType) -> f64 {
 ///
 /// 用户直接对话（direct）权重 > 跨角色听闻（heard）权重 > 旁观（observed）权重。
 /// 确保用户记忆优先于室友记忆被检索到，避免"把用户话记成室友说的"这类认知混乱。
+///
+/// 广播（broadcast）与 direct 同权：用户确实是当面对你说的，只是同时也在对别人说，
+/// 不能因为"不是只对你说的"就被降权，否则广播过的内容会想不起来。
 fn knowledge_source_boost(metadata: &serde_json::Value) -> f64 {
     metadata
         .get("knowledge_source")
         .and_then(|v| v.as_str())
         .map(|s| match s {
-            "direct" => 1.20,
+            "direct" | "broadcast" => 1.20,
             "heard" => 0.90,
             "observed" => 0.50,
             _ => 1.00,

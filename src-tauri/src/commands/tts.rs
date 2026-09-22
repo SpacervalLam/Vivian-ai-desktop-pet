@@ -213,9 +213,17 @@ pub async fn speak_text(
     let intent = builder.build();
 
     let planner = get_planner().await;
+    // 自愈:确保 Planner 使用的正是上面刚检查过 enabled 的那个 TtsManager 实例。
+    // reinitialize 重建角色后 Planner 可能仍持有旧实例(旧实例 enabled 可能是 false),
+    // 若不校正,这里提交的 intent 会在 Planner 侧被判为"未启用"而静默丢弃。
+    planner.ensure_registered(&speaker_id, tts.clone()).await;
     let handle = planner.submit(intent).await.map_err(|e| e.to_string())?;
     let result = match handle.done().await {
         crate::speech::SubmitResult::Played => Ok(()),
+        crate::speech::SubmitResult::Disabled => {
+            tracing::info!("[TTS] 角色 {} 的 TTS 未启用,跳过朗读", speaker_id);
+            Ok(())
+        }
         crate::speech::SubmitResult::Dropped => {
             tracing::info!("[TTS] intent 被丢弃(让路或被抢占)");
             Ok(())
@@ -240,8 +248,11 @@ pub async fn stop_speaking(
 ) -> Result<(), String> {
     let character = state.get_character(character_id.as_deref())?;
     let speaker_id = character.id.clone();
+    let tts = character.brain.tts.clone();
 
     let planner = get_planner().await;
+    // 自愈:确保停止的是当前角色真正在用的后端实例(而非重建前的旧实例)
+    planner.ensure_registered(&speaker_id, tts).await;
     planner
         .stop_speaker(&speaker_id)
         .await

@@ -150,23 +150,28 @@ fn stage_allows(stage: usize, m: &MemoryItem, criteria: &PrecisionFilterCriteria
 
 /// 判断记忆是否匹配实体-实体检索范围
 ///
-/// - `WithUser`：记忆元数据中 `knowledge_source == "direct"`
-/// - `WithAgent(char_id)`：记忆元数据中 `speaker == char_id` 或 `listener == char_id`
+/// - `WithUser`：记忆元数据中 `knowledge_source == "direct"` 或 `"broadcast"`
+/// - `WithAgent(char_id)`：记忆元数据中 `speaker == char_id` 或 `listener == char_id`，
+///   或 `knowledge_source == "broadcast"`
 /// - `All`：始终匹配
+///
+/// 广播（knowledge_source == "broadcast"，listener 记为 "all"）对两种范围都算命中：
+/// 它既是"用户对我说的话"，也是"我参与其中的对话"——只是同时也在对别人说。
+/// 不做这个豁免的话，广播过的记忆会因为 listener 不是具体角色而被整体过滤掉。
 fn matches_entity_scope(m: &MemoryItem, scope: &EntityScope) -> bool {
+    let knowledge_source = m
+        .metadata
+        .get("knowledge_source")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let is_broadcast = knowledge_source == "broadcast";
     match scope {
         EntityScope::All => true,
-        EntityScope::WithUser => {
-            m.metadata
-                .get("knowledge_source")
-                .and_then(|v| v.as_str())
-                .map(|s| s == "direct")
-                .unwrap_or(false)
-        }
+        EntityScope::WithUser => knowledge_source == "direct" || is_broadcast,
         EntityScope::WithAgent(char_id) => {
             let speaker = m.metadata.get("speaker").and_then(|v| v.as_str()).unwrap_or("");
             let listener = m.metadata.get("listener").and_then(|v| v.as_str()).unwrap_or("");
-            speaker == char_id || listener == char_id
+            speaker == char_id || listener == char_id || is_broadcast
         }
     }
 }
@@ -176,12 +181,17 @@ fn matches_entity_scope(m: &MemoryItem, scope: &EntityScope) -> bool {
 /// 相关性定义（满足任一即相关）：
 /// - 无 metadata 的记忆（普通 ShortTerm/LongTerm）：视为相关
 /// - `knowledge_source == "direct"`：用户直接对话，相关
+/// - `knowledge_source == "broadcast"`：用户当众说的，自己是被搭话的听众之一，相关
 /// - `speaker == char_id || listener == char_id`：自己参与的跨角色对话，相关
 /// - `observer_id == char_id`：自己旁观到的，相关
 /// - 其他情况（如另一对角色之间的对话）：不相关，过滤掉
 ///
 /// 修复 M6：主对话路径未应用 EntityScope 过滤，可能检索到其他角色之间的对话记忆，
 /// 导致 LLM 认知混乱（把"室友对用户说的话"误记为"用户对我说的话"）。
+///
+/// 注意广播必须显式豁免：它的 listener 记的是 "all"（见 build_speaker_prefix），
+/// speaker 是 "user"，两个 ID 都不等于 char_id。漏掉这一条会让广播内容被当成
+/// "与我无关的别人的对话"整体过滤掉——修好了语义却想不起来，等于没修。
 pub fn is_relevant_to_entity(m: &MemoryItem, char_id: &str) -> bool {
     // 无 metadata 或非对象：视为普通记忆，保留
     let obj = match m.metadata.as_object() {
@@ -198,11 +208,11 @@ pub fn is_relevant_to_entity(m: &MemoryItem, char_id: &str) -> bool {
         return true;
     }
 
-    // knowledge_source == "direct"：用户直接对话，相关
+    // knowledge_source == "direct"（用户直接对话）或 "broadcast"（用户当众对所有人说）：相关
     if obj
         .get("knowledge_source")
         .and_then(|v| v.as_str())
-        .map(|s| s == "direct")
+        .map(|s| s == "direct" || s == "broadcast")
         .unwrap_or(false)
     {
         return true;
@@ -479,5 +489,99 @@ mod tests {
         let result = exclude_visible_context(vec![m1, m2, m3], &visible);
         assert_eq!(result.len(), 2);
         assert!(result.iter().all(|m| m.id != "m1"));
+    }
+
+    // ── 广播渠道（broadcast）的记忆相关性 ──
+    //
+    // 广播的 metadata 是 listener="all" + knowledge_source="broadcast"：
+    // speaker("user") 和 listener("all") 都不等于任何 char_id。
+    // 如果不显式豁免，广播内容会被判成"与我无关的别人的对话"整体过滤掉——
+    // 语义修对了却想不起来，等于没修。
+
+    /// 广播记忆：用户当众说的一句
+    fn make_broadcast_item() -> MemoryItem {
+        let mut m = make_item(
+            "b1",
+            "[User says to everyone] 我今晚把代码收尾了",
+            0.6,
+        );
+        m.metadata = serde_json::json!({
+            "channel": "broadcast",
+            "speaker": "user",
+            "listener": "all",
+            "perspective": "speaker",
+            "knowledge_source": "broadcast",
+        });
+        m
+    }
+
+    #[test]
+    fn test_broadcast_memory_relevant_to_every_character() {
+        let m = make_broadcast_item();
+        // 在场每个人都是被搭话的听众，两个角色都必须能检索到这条
+        assert!(
+            is_relevant_to_entity(&m, "vivian"),
+            "广播记忆对 vivian 必须相关"
+        );
+        assert!(
+            is_relevant_to_entity(&m, "nana"),
+            "广播记忆对 nana 必须相关"
+        );
+    }
+
+    #[test]
+    fn test_broadcast_memory_matches_both_entity_scopes() {
+        let m = make_broadcast_item();
+        assert!(
+            matches_entity_scope(&m, &EntityScope::WithUser),
+            "广播是用户对我说的话，WithUser 范围必须命中"
+        );
+        assert!(
+            matches_entity_scope(&m, &EntityScope::WithAgent("nana".to_string())),
+            "广播我也在场，WithAgent 范围必须命中"
+        );
+    }
+
+    /// 反证：`listener == "all"` 本身**不构成**相关性。
+    ///
+    /// 若广播的 knowledge_source 写成别的值（如 "heard"），这条记忆会被整体丢弃——
+    /// 说明 `is_relevant_to_entity` 里的 broadcast 豁免是**必需的**，不是装饰。
+    /// 没有这条，把豁免写成 `return true` 也无人察觉。
+    #[test]
+    fn test_all_listener_without_broadcast_source_is_dropped() {
+        let mut m = make_item("x1", "[Vivian says to everyone] 我今晚把代码收尾了", 0.5);
+        m.metadata = serde_json::json!({
+            "channel": "broadcast",
+            "speaker": "vivian",
+            "listener": "all",
+            "perspective": "speaker",
+            "knowledge_source": "heard",
+        });
+        assert!(
+            !is_relevant_to_entity(&m, "nana"),
+            "listener=all 且来源不是 broadcast 时必须被过滤，否则豁免逻辑是空转"
+        );
+    }
+
+    /// 既有行为不能被这次改动带偏：`knowledge_source == "direct"` 是短路判定。
+    ///
+    /// 记忆库是**每角色独立**的，所以 direct 记忆落在谁的库里就是"用户跟谁说的"，
+    /// listener 校验对它是冗余的。这里把它钉住，避免有人"顺手"收紧成
+    /// `knowledge_source == "direct" && listener == char_id` 而误伤所有私聊记忆。
+    #[test]
+    fn test_direct_source_short_circuits_listener_check() {
+        let mut m = make_item("d1", "[User says to me] 只跟薇薇安说的话", 0.6);
+        m.metadata = serde_json::json!({
+            "channel": "direct",
+            "speaker": "user",
+            "listener": "vivian",
+            "perspective": "speaker",
+            "knowledge_source": "direct",
+        });
+        assert!(is_relevant_to_entity(&m, "vivian"));
+        assert!(
+            is_relevant_to_entity(&m, "nana"),
+            "direct 是短路判定，listener 不参与——这是既有约定，改动前请先确认原因"
+        );
     }
 }

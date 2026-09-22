@@ -890,19 +890,23 @@ impl Runnable for UserMemorySavingRunnable {
             } else {
                 state.current_channel.as_str()
             };
+            // 广播：listener 记 "all"，落成 "[User says to everyone] …"。
+            // 若沿用 listener=char_id，每个角色都会把这句话存成"他单独对我说了一遍"，
+            // 而广播的真实语义是"他当众说了一次，我们都在场"。
+            let is_broadcast = channel == "broadcast";
             let user_meta = serde_json::json!({
                 "channel": channel,
                 "speaker": "user",
-                "listener": char_id,
+                "listener": if is_broadcast { "all" } else { char_id.as_str() },
                 "perspective": "speaker",
-                "knowledge_source": "direct",
+                "knowledge_source": if is_broadcast { "broadcast" } else { "direct" },
             });
             let ai_meta = serde_json::json!({
                 "channel": channel,
                 "speaker": char_id,
-                "listener": "user",
+                "listener": if is_broadcast { "all" } else { "user" },
                 "perspective": "speaker",
-                "knowledge_source": "direct",
+                "knowledge_source": if is_broadcast { "broadcast" } else { "direct" },
             });
             if let Err(e) = memory_manager
                 .save_context_with_metadata(
@@ -1080,19 +1084,23 @@ impl Runnable for MemorySavingRunnable {
                 } else {
                     state.current_channel.as_str()
                 };
+                // 广播：用户当众说、自己也当众回，两边 listener 都记 "all"，
+                // 落成 "[User says to everyone] …" / "[I say to everyone] …"。
+                // 避免每个角色把这句话存成"他单独对我说了一遍"。
+                let is_broadcast = channel == "broadcast";
                 let um = serde_json::json!({
                     "channel": channel,
                     "speaker": "user",
-                    "listener": char_id,
+                    "listener": if is_broadcast { "all" } else { char_id.as_str() },
                     "perspective": "speaker",
-                    "knowledge_source": "direct",
+                    "knowledge_source": if is_broadcast { "broadcast" } else { "direct" },
                 });
                 let am = serde_json::json!({
                     "channel": channel,
                     "speaker": char_id,
-                    "listener": "user",
+                    "listener": if is_broadcast { "all" } else { "user" },
                     "perspective": "speaker",
-                    "knowledge_source": "direct",
+                    "knowledge_source": if is_broadcast { "broadcast" } else { "direct" },
                 });
                 (Some(um), Some(am))
             };
@@ -1117,12 +1125,15 @@ impl Runnable for MemorySavingRunnable {
                 }
                 None
             };
+            // 用户显式要求记住的长期事实：广播场景下同样以"当众说"落账，
+            // 否则这条事实会带着"[User says to me]"的前缀，把广播重新写成私聊。
+            let ltm_is_broadcast = state.current_channel == "broadcast";
             let ltm_meta = verified_ltm.map(|_| {
                 serde_json::json!({
                     "channel": state.current_channel,
                     "speaker": "user",
-                    "listener": char_id,
-                    "knowledge_source": "direct",
+                    "listener": if ltm_is_broadcast { "all" } else { char_id.as_str() },
+                    "knowledge_source": if ltm_is_broadcast { "broadcast" } else { "direct" },
                     "source": "user_explicit",
                     "source_quote": source_quote,
                 })

@@ -575,11 +575,42 @@ impl AppState {
         *self.characters.write() = new_characters;
         *self.active_character_id.write() = active_id;
 
+        // 角色表整体重建后，把全新的 TtsManager 实例同步给全局 SpeechPlanner。
+        // 必须在此处（initialize 内）完成，而不是只在启动 setup 里做一次：
+        // reinitialize（设置面板保存后热重载）也会走 initialize，若不同步，
+        // Planner 会继续持有上一次的旧 TtsManager —— 旧实例的内存配置可能是
+        // enabled=false，于是每条朗读意图都被判为"未启用"而静默丢弃，
+        // 表现为"设置里启用了 TTS，但桌宠就是不说话"。
+        self.sync_tts_managers().await;
+
         // 全部角色初始化完成且预加载流程（种子记忆注入、情绪/语义语料嵌入）已执行，
         // 此时才允许开放智能体 API 请求。
         self.initialized.store(true, Ordering::SeqCst);
 
         Ok(())
+    }
+
+    /// 把当前所有角色的 `TtsManager` 同步注册到全局 SpeechPlanner
+    ///
+    /// - 幂等：实例未变时不产生任何日志与副作用
+    /// - 替换：实例已变（角色重建）时用新实例覆盖旧实例
+    ///
+    /// 调用时机：`initialize()` 末尾。任何重建角色的路径都必须经过它，
+    /// 因此无需在各调用点重复注册。
+    pub async fn sync_tts_managers(&self) {
+        let tts_list: Vec<(String, Arc<crate::speech::TtsManager>)> = self
+            .characters
+            .read()
+            .iter()
+            .map(|(id, instance)| (id.clone(), instance.brain.tts.clone()))
+            .collect();
+
+        if tts_list.is_empty() {
+            return;
+        }
+
+        let planner = crate::speech::get_planner().await;
+        planner.register_all(tts_list).await;
     }
 
     pub fn is_initialized(&self) -> bool {

@@ -51,6 +51,8 @@ interface StreamSession {
   settledUpTo: number;
   /** Layer 2 即时反应是否已触发（避免重复触发） */
   instantReactLayer2Fired: boolean;
+  /** 当前会话是否已实际创建流式气泡（避免误用上一条回复的气泡） */
+  bubbleStarted: boolean;
 }
 
 /** 生成 stream_id（优先用 crypto.randomUUID，降级到时间戳+随机数） */
@@ -143,6 +145,7 @@ class ChatControllerClass {
           const currentSegment = session.text.slice(session.settledUpTo);
           BubbleController.showStreamingBubble(currentSegment);
         }
+        session.bubbleStarted = BubbleController.hasActiveBubble;
         // 流式切片送 TTS 队列（后端串行化保证同一时刻只有一个流产 chunk）
         TtsStreamQueue.feed(chunk);
         this.handlers.onChunk?.(chunk, session.text, sid);
@@ -212,12 +215,34 @@ class ChatControllerClass {
         this.finishSessionCancelled(sid);
       }),
     );
-    // 广播消息：由广播窗口发出，各角色窗口各自通过 sendMessage 走完整流程（session + TTS + 气泡）
+    // 广播消息：由广播窗口发出，各角色窗口各自通过 sendMessage 走完整流程（session + TTS + 气泡）。
+    //
+    // 渠道必须是 'broadcast' 而不是 'direct'：
+    // 广播的语义是「用户只说了一遍、当众对所有人说的」，每个角色是同时被搭话的听众之一。
+    // 若复用 'direct'，后端会把这句话当成对该角色的当面私聊，并因为 channel=='direct'
+    // 触发第三者旁观路径——其他角色会收到「你刚听到用户和 X 的对话」，于是两个角色
+    // 各自都认定"用户把同一句话分别跟我说了一遍"。'broadcast' 渠道专治这个误判。
     this.unlisteners.push(
       await listen<{ text: string }>('broadcast:send_message', (event) => {
         const text = event.payload.text;
         if (!text) return;
-        void this.sendMessage(text, undefined, 'direct');
+        void this.sendMessage(text, undefined, 'broadcast');
+      }),
+    );
+    // 广播图片：与文本广播同源（InputDialog 群发模式发出）。
+    // 必须显式传本窗口的角色 id —— send_image_message 在 characterId 为空时回退到
+    // 全局 active_character_id，那会让所有角色窗口都往同一个角色身上发。
+    this.unlisteners.push(
+      await listen<{ sourcePath: string }>('broadcast:image_message', (event) => {
+        const sourcePath = event.payload?.sourcePath;
+        if (!sourcePath) return;
+        void invoke('send_image_message', {
+          sourcePath,
+          characterId: getCharacterId() ?? undefined,
+          channel: 'broadcast',
+        }).catch((err) => {
+          console.warn('[ChatController] 广播图片发送失败:', err);
+        });
       }),
     );
   }
@@ -242,7 +267,7 @@ class ChatControllerClass {
    *
    * @param message 用户输入文本
    * @param characterId 显式指定目标角色 ID（群发场景使用）；不传则用当前窗口角色身份
-   * @param channel 消息渠道（"wechat" 聊天面板可见 / "direct" 仅写入记忆不显示）
+   * @param channel 消息渠道（"wechat" 聊天面板可见 / "direct" 面对面 / "broadcast" 当众广播）
    * @returns 完整响应（流式结束后 resolve）
    */
   async sendMessage(message: string, characterId?: string, channel?: string, whisper?: boolean, fileMetadata?: Record<string, unknown>): Promise<AiResponse> {
@@ -280,6 +305,7 @@ class ChatControllerClass {
         channel: ch,
         settledUpTo: 0,
         instantReactLayer2Fired: false,
+        bubbleStarted: false,
       };
       this.sessions.set(streamId, session);
 
@@ -327,6 +353,7 @@ class ChatControllerClass {
         channel: ch,
         settledUpTo: 0,
         instantReactLayer2Fired: false,
+        bubbleStarted: false,
       };
       this.sessions.set(streamId, session);
 
@@ -364,8 +391,15 @@ class ChatControllerClass {
       character_id: getCharacterId() ?? undefined,
       channel: ch,
     });
-    // 启动气泡自动关闭：根据文本长度动态计算
-    BubbleController.startAutoClose(computeDuration(finalText));
+    // 正常情况下 chunk 已创建流式气泡，这里只需结算并启动自动关闭。
+    // 但某些模型会只回传 chat:done，或首个 chunk 在子窗口初始化期间丢失；此前
+    // 这种回复仍会进入 side_chat，却没有任何 currentBubble 可供结算，因而桌宠沉默。
+    // 用最终文本补建气泡，保证 done 是气泡展示的可靠兜底。
+    if (session.bubbleStarted) {
+      BubbleController.startAutoClose(computeDuration(finalText));
+    } else {
+      BubbleController.showBubble(finalText, computeDuration(finalText));
+    }
     this.handlers.onResponseReceived?.(response, sid);
     session.resolve(response);
   }

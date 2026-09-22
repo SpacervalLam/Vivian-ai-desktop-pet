@@ -888,6 +888,33 @@ pub fn evaluate_epistemic_state(
         reasons.push(format!("多个专有名词组合: {}", proper_noun_hits.join("+")));
     }
 
+    // 5. 陌生拉丁命名实体 + 外部动态断言（如「Tibo 发推说提前」）。
+    // 固定词表无法覆盖新出现的人名、产品名和账号名；当它们直接决定当前谈论的
+    // 外部事实时，宁可预搜索，也不要把「我不认识」当成足以结束该轮的回答。
+    let unfamiliar_named_entities: Vec<&str> = trimmed
+        .split(|c: char| !c.is_ascii_alphabetic())
+        .filter(|token| {
+            token.len() >= 3
+                && token
+                    .chars()
+                    .next()
+                    .is_some_and(|first| first.is_ascii_uppercase())
+        })
+        .collect();
+    let external_claim_markers = [
+        "发推", "推文", "tweet", "宣布", "官宣", "发布", "上线", "更新", "提前", "额度",
+    ];
+    if !unfamiliar_named_entities.is_empty()
+        && external_claim_markers.iter().any(|marker| trimmed.contains(marker))
+    {
+        clarity = (clarity - 0.10).max(0.0);
+        factual = (factual + 0.55).min(1.0);
+        temporal = (temporal + 0.35).min(1.0);
+        risk = (risk + 0.10).min(1.0);
+        gap = (gap + 0.55).min(1.0);
+        reasons.push(format!("陌生命名实体关联外部动态: {}", unfamiliar_named_entities.join("+")));
+    }
+
     // 5. 复用 FastPerceptionResult 的意图置信度
     if let Some(fp) = perception {
         if fp.intent.label == "question" && fp.intent.confidence < 0.5 {
