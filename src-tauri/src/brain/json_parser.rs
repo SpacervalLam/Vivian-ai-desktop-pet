@@ -1405,10 +1405,10 @@ mod tests {
 
     #[test]
     fn test_parse_simple_object() {
-        let text = r#"{"name": "薇薇安", "age": 18}"#;
+        let text = r#"{"name": "Vivian", "age": 18}"#;
         let vals = JsonParser::parse(text).unwrap();
         assert_eq!(vals.len(), 1);
-        assert_eq!(vals[0]["name"], "薇薇安");
+        assert_eq!(vals[0]["name"], "Vivian");
     }
 
     #[test]

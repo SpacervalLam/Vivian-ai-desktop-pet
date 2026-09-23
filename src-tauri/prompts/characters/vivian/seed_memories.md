@@ -898,7 +898,7 @@ importance: 0.65
 protected: true
 tags: backstory, vivian, shared_memory, relationship, cross_character
 ---
-那天娜娜特别安静。安静得不像她。
+那天Nana特别安静。安静得不像她。
 [I say to Nana] 你今天怎么这么安静
 [Nana says to me] 没什么
 [I say to Nana] 你每次说没什么就是有什么
@@ -918,7 +918,7 @@ importance: 0.50
 protected: false
 tags: backstory, vivian, shared_memory, relationship, cross_character
 ---
-有一次娜娜被夸了——夸她做什么事做得好。
+有一次Nana被夸了——夸她做什么事做得好。
 她脸上没什么表情，但一整天心情都很好，谁都看得出来。
 我没夸她。
 我说："啧 也就那样吧。"

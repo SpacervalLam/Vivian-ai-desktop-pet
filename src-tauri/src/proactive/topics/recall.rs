@@ -67,20 +67,11 @@ impl MemoryRecall {
             return None;
         }
         let lines_str = lines.join("\n");
-        // 话题片段：取最后一句有意义片段（≤15 字）
-        let topic: String = memory
-            .replace('。', ".")
-            .split('.')
-            .map(|s| s.trim())
-            .filter(|s| s.len() > 4)
-            .last()
-            .map(|s| {
-                strip_speaker_prefix(s)
-                    .chars()
-                    .take(15)
-                    .collect::<String>()
-            })
-            .unwrap_or_else(|| memory.chars().take(15).collect());
+        // 只从真实用户发言取话题；助手的回复与生成的 hook 不代表用户近况。
+        let topic: String = memory.lines().rev()
+            .find_map(|line| line.trim().strip_prefix("user:"))
+            .map(|line| line.trim().chars().take(40).collect())
+            .unwrap_or_default();
         if topic.is_empty() {
             return None;
         }
@@ -89,12 +80,12 @@ impl MemoryRecall {
         let elapsed_str = crate::proactive::format_elapsed_lang(idle_seconds, lang_norm);
         let sys = if system_prompt.trim().is_empty() {
             match (lang_norm, char_id) {
-                ("en", "nana" | "娜娜") => "You are Nana, a desktop pet AI. Personality: gentle, composed, warm, like a caring older sister. Keep replies short and natural. No customer-service speech. Never address the user as 'User'.".to_string(),
+                ("en", "nana" | "Nana") => "You are Nana, a desktop pet AI. Personality: gentle, composed, warm, like a caring older sister. Keep replies short and natural. No customer-service speech. Never address the user as 'User'.".to_string(),
                 ("en", _) => "You are Vivian, a desktop pet AI. Personality: lively, tsundere, warm. Keep replies short and natural. No customer-service speech. Never address the user as 'User'.".to_string(),
-                ("ja", "nana" | "娜娜") => "あなたはナナ、デスクトップペットAI。性格：優しく落ち着いている、温かい、お姉さんみたい。返信は短く自然に。接客言葉禁止。ユーザーを「ユーザー」と呼ばないこと。".to_string(),
-                ("ja", _) => "あなたはヴィヴィアン、デスクトップペットAI。性格：活発、ツンデレ、温かい。返信は短く自然に。接客言葉禁止。ユーザーを「ユーザー」と呼ばないこと。".to_string(),
-                (_, "nana" | "娜娜") => "你是娜娜，一个桌面宠物 AI。性格：温柔、从容、温暖，像姐姐一样。回复简短自然。禁止客服腔。永远不要用「用户」称呼对方。".to_string(),
-                _ => "你是薇薇安，一个桌面宠物 AI。性格：活泼、傲娇、温暖。回复简短自然。禁止客服腔。永远不要用「用户」称呼对方。".to_string(),
+                ("ja", "nana" | "Nana") => "あなたはNana、デスクトップペットAI。性格：優しく落ち着いている、温かい、お姉さんみたい。返信は短く自然に。接客言葉禁止。ユーザーを「ユーザー」と呼ばないこと。".to_string(),
+                ("ja", _) => "あなたはVivian、デスクトップペットAI。性格：活発、ツンデレ、温かい。返信は短く自然に。接客言葉禁止。ユーザーを「ユーザー」と呼ばないこと。".to_string(),
+                (_, "nana" | "Nana") => "你是Nana，一个桌面宠物 AI。性格：温柔、从容、温暖，像姐姐一样。回复简短自然。禁止客服腔。永远不要用「用户」称呼对方。".to_string(),
+                _ => "你是Vivian，一个桌面宠物 AI。性格：活泼、傲娇、温暖。回复简短自然。禁止客服腔。永远不要用「用户」称呼对方。".to_string(),
             }
         } else {
             system_prompt.to_string()
@@ -103,27 +94,27 @@ impl MemoryRecall {
         let prompt = match lang_norm {
             "en" => format!(
                 "Time since last talk: {elapsed_str}. This is real — calibrate the recall accordingly (a 5-minute gap means 'just now', a 2-hour gap means it's fine to bring up something from earlier).\n\
-                 Based on the recent conversation, generate a natural recall-style question that mentions something you previously talked about.\n\
-                 Requirements: short (<30 chars), natural, not contrived. Don't ask 'remember when?'. Don't repeat the recent conversation verbatim.\n\n\
+                 Only if the user's own words contain an unfinished matter worth following up, write one low-pressure line. A comment is fine; do not force a question. With no real opening, return an empty text.\n\
+                 Requirements: short (<30 chars), specific, no invented outcome or promise, no repeated greeting.\n\n\
                  Recent conversation:\n{lines_str}\n\n\
                  Mentionable topic: {topic}\n\
-                 JSON output: {{\"text\": \"question\"}}"
+                 JSON output: {{\"text\": \"line or empty string\"}}"
             ),
             "ja" => format!(
                 "最後の会話から: {elapsed_str}。この経過時間は事実——回想の重みをそれに合わせて（5分なら「さっき」、2時間なら以前のことを持ち出しても自然）。\n\
-                 最近の会話に基づいて、以前話したことに触れる自然な回想風の質問を生成して。\n\
-                 要件: 短く（30字以内）、自然、不自然じゃない。「覚えてる？」は聞かない。最近の会話をそのまま繰り返さない。\n\n\
+                 ユーザー自身の発言に未完了の話題がある場合だけ、負担にならない短い一言を作って。質問を強制しない。自然なきっかけがなければ text を空にする。\n\
+                 要件: 30字以内、結果や約束を創作しない、挨拶を繰り返さない。\n\n\
                  最近の会話:\n{lines_str}\n\n\
                  触れられる話題: {topic}\n\
-                 JSON出力: {{\"text\": \"質問\"}}"
+                 JSON出力: {{\"text\": \"一言または空文字\"}}"
             ),
             _ => format!(
                 "距上次对话已过: {elapsed_str}。这个时长是真实的——请据此校准回忆的语气（5分钟是「刚才」的事，2小时就可以自然提起之前聊过的内容）。\n\
-                 基于最近对话，生成一个自然的回忆式提问，提到你们之前聊过的某件事。\n\
-                 要求：简短（<30字）、自然、不造作。不要问「还记得吗」。不要逐字复述最近对话。\n\n\
+                 只有用户自己提过尚未结束、值得关心的事情时，才写一句轻松的接话。可以是陈述，不必强行提问；没有自然切口就让 text 为空。\n\
+                 要求：简短（<30字）、具体、不脑补结果或承诺、不重复问候。\n\n\
                  最近对话:\n{lines_str}\n\n\
                  可提及的话题: {topic}\n\
-                 JSON输出: {{\"text\": \"提问\"}}"
+                 JSON输出: {{\"text\": \"接话或空字符串\"}}"
             ),
         };
         Some(vec![
@@ -151,37 +142,13 @@ impl MemoryRecall {
     }
 }
 
-/// 去掉 `user: ` / `assistant: ` 这类说话人前缀。
-///
-/// `recent_memory` 由 `ProactiveOrchestrator::refresh_recent_memory_from_dialogue`
-/// 按 `role: content` 逐行填充；直接取末句会把说话人带进"可提及的话题"里
-/// （"assistant: 那你早点睡"），既占字数又干扰模型判断话题归属。
-fn strip_speaker_prefix(line: &str) -> &str {
-    for role in ["user", "assistant", "system", "tool"] {
-        if let Some(rest) = line.strip_prefix(role) {
-            if let Some(rest) = rest.strip_prefix(':') {
-                return rest.trim_start();
-            }
-        }
-    }
-    line
-}
-
 #[cfg(test)]
 mod tests {
-    use super::strip_speaker_prefix;
+    use super::MemoryRecall;
 
     #[test]
-    fn strips_known_role_prefixes() {
-        assert_eq!(strip_speaker_prefix("assistant: 那你早点睡"), "那你早点睡");
-        assert_eq!(strip_speaker_prefix("user:今天面试砸了"), "今天面试砸了");
-        assert_eq!(strip_speaker_prefix("  user: x"), "  user: x");
-    }
-
-    #[test]
-    fn keeps_unrelated_text() {
-        // 前缀不完整（没有冒号）时不能误伤，例如 "username: foo"
-        assert_eq!(strip_speaker_prefix("username: foo"), "username: foo");
-        assert_eq!(strip_speaker_prefix("今天天气不错"), "今天天气不错");
+    fn recall_requires_a_real_user_anchor() {
+        assert!(MemoryRecall::build_messages("assistant: 晚安", "", "zh", "vivian", 300.0).is_none());
+        assert!(MemoryRecall::build_messages("user: 明天要面试\nassistant: 祝你顺利", "", "zh", "vivian", 300.0).is_some());
     }
 }

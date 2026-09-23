@@ -25,7 +25,6 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{VivianError, VivianResult};
-use crate::utils::path::get_user_data_dir;
 
 /// 世界事实保留上限（FIFO 淘汰最早条目）
 const MAX_FACTS: usize = 100;
@@ -100,7 +99,7 @@ static WORLD_KNOWLEDGE_ENGINE: Lazy<Arc<WorldKnowledgeEngine>> = Lazy::new(|| {
 
 impl WorldKnowledgeEngine {
     fn new() -> VivianResult<Self> {
-        let dir = get_user_data_dir().join("memory");
+        let dir = crate::utils::path::get_companion_shared_dir().join("memory");
         std::fs::create_dir_all(&dir)?;
         let path = dir.join("world_knowledge.json");
         let mut engine = Self {

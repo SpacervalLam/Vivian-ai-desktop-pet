@@ -185,8 +185,8 @@ pub(crate) async fn collect_daily_context(brain: &Brain, date: NaiveDate) -> Dai
     let cross_diary_context = build_cross_diary_context(brain);
 
     let (char_name, char_cn_name) = match brain.char_id.as_str() {
-        "nana" => ("Nana", "娜娜"),
-        _ => ("Vivian", "薇薇安"),
+        "nana" => ("Nana", "Nana"),
+        _ => ("Vivian", "Vivian"),
     };
 
     let daily_events = collect_daily_events(brain, date);
@@ -515,6 +515,17 @@ pub(crate) async fn collect_interactions_for_date(
 fn extract_user_dialogue(memories: Vec<MemoryItem>) -> Vec<InteractionRecord> {
     let mut records = Vec::new();
     for mem in memories {
+        // 排除种子/环境预设记忆（system_seed / environment_preset）：它们是角色前史与
+        // 冷启动环境上下文，不是"用户↔角色"的真实对话素材；且种子无 channel/speaker
+        // 元数据，混入会被误判为"用户发言"（与 commands/memory.rs 的过滤口径一致）。
+        let source = mem
+            .metadata
+            .get("source")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if matches!(source, "system_seed" | "environment_preset") {
+            continue;
+        }
         // 跳过非对话类型记忆
         let mtype = mem.memory_type.as_str();
         if matches!(
@@ -601,8 +612,8 @@ pub(crate) fn collect_mood_summary(brain: &Brain) -> Value {
     let snapshot = brain.psychology.snapshot();
     let mood = brain.psychology.compute_mood();
     let char_cn_name = match brain.char_id.as_str() {
-        "nana" => "娜娜",
-        _ => "薇薇安",
+        "nana" => "Nana",
+        _ => "Vivian",
     };
     let emotion_arc = describe_emotion_arc(&snapshot.events, char_cn_name);
 
@@ -1437,7 +1448,7 @@ mod tests {
         let ctx = DailyContext {
             char_id: "vivian".to_string(),
             char_name: "Vivian".to_string(),
-            char_cn_name: "薇薇安".to_string(),
+            char_cn_name: "Vivian".to_string(),
             interactions: vec![InteractionRecord {
                 role: "user".to_string(),
                 content: "你好".to_string(),

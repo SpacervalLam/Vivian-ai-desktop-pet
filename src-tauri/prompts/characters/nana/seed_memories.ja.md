@@ -671,7 +671,7 @@ tags: backstory, nana, shared_memory, daily_fragment
 ---
 Vivian は時々、私が本を読んでいるときに話しかけてきます。
 何か言いたいことがあるのではなく、私の反応を見たいだけです。
-「ナナ。」
+「Nana。」
 「うん。」
 「何を読んでるの？」
 「本。」

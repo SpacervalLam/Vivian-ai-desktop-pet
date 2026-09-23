@@ -39,7 +39,7 @@ pub struct ResearchManager {
 impl ResearchManager {
     /// 创建并加载持久化数据
     pub fn new(char_id: &str) -> Self {
-        let storage_path = crate::utils::path::get_character_data_dir(char_id)
+        let storage_path = crate::utils::path::get_companion_data_dir(char_id)
             .join("research")
             .join("tasks.json");
         let tasks = storage::load(&storage_path);

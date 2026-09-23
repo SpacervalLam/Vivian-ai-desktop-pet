@@ -75,7 +75,6 @@ use crate::world::SystemMetrics;
 use crate::tools::builtin::system_ops::{capture_screen_png_bytes, describe_screen_bytes};
 use crate::tools::confirmation::{ConfirmationResponse, ConfirmationRisk};
 use crate::tools::executor::{is_session_allowed_tool, session_allow_tool};
-use crate::utils::path::get_character_data_dir;
 
 // ============ AppHandle 注入（日出/日落 toast 推送用） ============
 
@@ -800,7 +799,7 @@ pub struct OnlineCompanion {
 
 impl ProactiveOrchestrator {
     pub fn new(char_id: &str) -> VivianResult<Self> {
-        let proactive_dir = get_character_data_dir(char_id).join("proactive");
+        let proactive_dir = crate::utils::path::get_companion_data_dir(char_id).join("proactive");
         std::fs::create_dir_all(&proactive_dir)
             .map_err(|e| VivianError::Memory(format!("创建主动对话目录失败: {e}")))?;
 
@@ -1563,7 +1562,7 @@ impl ProactiveOrchestrator {
                 }
             } else if trigger_kind == "want_to_share_knowledge" {
                 // 对用户分享刚学到的知识：要求 leader 身份 + 用户在场
-                // 走 ChatWindow 渠道 + Share 内容类型，由命令层识别 share 路径派发到 wechat 渠道
+                // 标记 Share 内容类型，命令层在触发与生成后依据场景选择渠道。
                 // 分享冷却：30 分钟内已分享过则跳过，避免频繁推送链接给用户
                 if !context.lay_low && context.is_speaking_leader && context.user_present
                     && !self.is_knowledge_share_in_cooldown()
@@ -1578,7 +1577,6 @@ impl ProactiveOrchestrator {
                             content,
                             context.now,
                         );
-                        action.delivery_channel = DeliveryChannel::ChatWindow;
                         action.content_type = ContentType::Share;
                         action.value_score = Some(value_score);
                         self.push_action(action, ProactiveTrigger::Spontaneous);
@@ -1653,7 +1651,7 @@ impl ProactiveOrchestrator {
     /// 评估触发条件并生成主动消息（从 tick() 提取的子步骤）
     ///
     /// - `already_produced`: 特殊日期问候已产出时跳过触发器评估
-    /// - 单次 tick 最多产生 `MAX_TICK_MESSAGES`(2) 条消息，防止刷屏
+    /// - 单次 tick 最多产生一条面向用户的消息
     /// - 返回本步骤是否产出了新消息
     fn evaluate_and_fire_triggers(
         &self,
@@ -1664,7 +1662,7 @@ impl ProactiveOrchestrator {
         minute: u32,
         now: f64,
     ) -> bool {
-        const MAX_TICK_MESSAGES: u32 = 2;
+        const MAX_TICK_MESSAGES: u32 = 1;
 
         // 阶梯退避惰性衰减：很久没打扰则计数减半回落（在触发器检查前统一执行）
         self.decay_backoff(now);
@@ -1699,6 +1697,11 @@ impl ProactiveOrchestrator {
                     let action = behavior.into_action(trigger, now);
                     self.push_action(action, trigger);
                     self.update_trigger_time(trigger, now, hour, minute, true);
+                    if trigger == ProactiveTrigger::Spontaneous {
+                        if let Some(mind) = self.mind.read().as_ref() {
+                            mind.mark_opportunity_spoken();
+                        }
+                    }
                     tick_msg_count += 1;
                 }
             }
@@ -2925,27 +2928,8 @@ impl ProactiveOrchestrator {
                             output.emotion_delta.loneliness,
                             output.emotion_delta.curiosity,
                         );
-                        let tags = vec![
-                            "short_term".to_string(),
-                            "inner_os".to_string(),
-                            "inner_monologue".to_string(),
-                            "autonomous".to_string(),
-                            "assistant".to_string(),
-                        ];
-                        let formatted = format!("内心OS：（{}）", output.text.trim());
-                        let meta = serde_json::json!({
-                            "channel": "inner",
-                            "speaker": char_id,
-                            "listener": char_id,
-                            "perspective": "speaker",
-                            "thought_key": thought_key,
-                        });
-                        if let Err(e) = memory
-                            .add_memory_with_metadata(&formatted, MemoryType::InnerMonologue, 0.4, tags, meta)
-                            .await
-                        {
-                            tracing::warn!("[inner_monologue] 写入记忆失败: {}", e);
-                        }
+                        // 内心 OS 是当下主观活动，不是发生过的用户事件。
+                        // Mind/情绪系统持有它的短暂影响，不再写入可检索记忆。
 
                         // interest_context 仅作为内心独白的素材（不分享、不入池）
                         // 分享类链接由知识采集（Busy 状态）直接通过微信面板发送，
@@ -3774,6 +3758,9 @@ impl ProactiveOrchestrator {
                 | ProactiveTrigger::Icebreaker
         );
         if is_greeting {
+            if ctx.is_user_chatting {
+                return false;
+            }
             let desire = *self.speech_desire.read();
             if desire < behavior.speech_desire.threshold {
                 return false;
@@ -3894,7 +3881,16 @@ impl ProactiveOrchestrator {
             hour,
             &behavior.timing_weights,
         );
-        let effective_threshold = throttle.threshold * mods.threshold_mult;
+        let thought_opportunity = trigger == ProactiveTrigger::Spontaneous
+            && cfg.enable_social_urge_gating
+            && ctx.user_present && !ctx.is_user_chatting
+            && (90.0..=240.0).contains(&ctx.idle_seconds)
+            && self.mind.read().as_ref().is_some_and(|mind| {
+                mind.social_urge_snapshot() >= 0.8
+                    && mind.fresh_conversation_opportunity(now).is_some()
+            });
+        let effective_threshold = if thought_opportunity { 0.4 } else { throttle.threshold }
+            * mods.threshold_mult;
         if timing_score < effective_threshold {
             return false;
         }
@@ -3909,7 +3905,7 @@ impl ProactiveOrchestrator {
         // 策略 F：乘以触发类型亲和度（主攻类型 >1.0，非主攻 <1.0）
         let learned_mult = self.preference_learner.get_probability_multiplier(trigger);
         let affinity = behavior.trigger_affinity.get(trigger);
-        let scaled_probability = throttle.probability
+        let scaled_probability = (if thought_opportunity { 0.5 } else { throttle.probability })
             * cfg.proactivity.clamp(0.0, 1.0)
             * learned_mult
             * mods.probability_mult
@@ -3941,7 +3937,7 @@ impl ProactiveOrchestrator {
         minute: u32,
         orchestrator: &Self,
     ) -> bool {
-        // 策略 G：social_urge 双向门控
+        // 当前想法仅为具体话题提供提前搭话候选；不再凭抽象社交冲动提前问候。
         // current_thought 每 60s 调 LLM 顺便产出 social_urge（0-1），
         // 表示角色"现在想主动搭话"的冲动强度。
         //   urge >= 0.8 → 提前触发（跳过整点/空闲阈值等特定条件）
@@ -3959,23 +3955,13 @@ impl ProactiveOrchestrator {
                     | ProactiveTrigger::Icebreaker
             )
         {
-            const URGE_HIGH: f32 = 0.8;
             const URGE_LOW: f32 = 0.3;
             let urge = orchestrator
                 .mind
                 .read()
                 .as_ref()
-                .map(|m| m.social_urge_snapshot())
+                .and_then(|m| m.fresh_social_urge_snapshot(ctx.now))
                 .unwrap_or(0.5);
-            if urge >= URGE_HIGH {
-                tracing::debug!(
-                    "[check_specific] {} 提前触发：social_urge={:.2} >= {:.2}",
-                    trigger.as_str(),
-                    urge,
-                    URGE_HIGH
-                );
-                return true;
-            }
             if urge < URGE_LOW {
                 tracing::debug!(
                     "[check_specific] {} 推迟：social_urge={:.2} < {:.2}",
@@ -4007,6 +3993,19 @@ impl ProactiveOrchestrator {
                 level != IceBreakerLevel::None
             }
             ProactiveTrigger::Spontaneous => {
+                if ctx.is_user_chatting {
+                    return false;
+                }
+                if orchestrator.config.read().enable_social_urge_gating
+                    && ctx.user_present
+                    && (90.0..=240.0).contains(&ctx.idle_seconds)
+                    && orchestrator.mind.read().as_ref().is_some_and(|mind| {
+                        mind.social_urge_snapshot() >= 0.8
+                            && mind.fresh_conversation_opportunity(ctx.now).is_some()
+                    })
+                {
+                    return true;
+                }
                 let min_idle = throttle
                     .min_idle_seconds
                     .max(orchestrator.config.read().idle_threshold);
@@ -4033,7 +4032,12 @@ impl ProactiveOrchestrator {
             }
             ProactiveTrigger::TopicExtension => !ctx.is_user_chatting && ctx.idle_seconds < 300.0,
             ProactiveTrigger::MemoryRecall => {
-                ctx.has_relevant_memory || !orchestrator.recent_memory.read().is_empty()
+                // 回忆式搭话必须有真实对话锚点，并给用户一段不被追问的安静时间。
+                let since_talk = ctx.now - state.last_interaction_time;
+                !ctx.is_user_chatting
+                    && (120.0..=4.0 * 3600.0).contains(&since_talk)
+                    && (ctx.has_relevant_memory
+                        || orchestrator.recent_memory.read().lines().any(|l| l.starts_with("user:")))
             }
             ProactiveTrigger::TeasingResponse => ctx.drag_distance >= throttle.min_drag_distance,
             ProactiveTrigger::MoodDriven => {
@@ -4406,6 +4410,12 @@ impl ProactiveOrchestrator {
 
         // 预先读取字段，避免在异步块中持有锁
         let mut mem = self.recent_memory.read().clone();
+        if trigger == ProactiveTrigger::Spontaneous && self.config.read().enable_social_urge_gating {
+            if let Some(candidate) = self.mind.read().as_ref()
+                .and_then(|mind| mind.fresh_conversation_opportunity(ctx.now)) {
+                mem.push_str(&format!("\n[当前有价值的话题] {}。依据：{}。只在自然且不重复时提起；无话可说则保持沉默。", candidate.topic, candidate.evidence));
+            }
+        }
         let mind_state = self.get_mind_state().as_str().to_string();
         let prompt_step_opt = self.prompt_step.read().clone();
         let tool_system_opt = self.tool_system.read().clone();
@@ -4590,20 +4600,22 @@ impl ProactiveOrchestrator {
                         .search_memories(
                             "最近 用户 兴趣 话题 知识",
                             crate::memory::types::RetrievalStrategy::Hybrid,
-                            8,
+                            24,
                         )
                         .await
                     {
                         Ok(items) if !items.is_empty() => {
+                            let items = crate::memory::companion_policy::dedup_recall(
+                                items, crate::memory::types::current_timestamp(), 3,
+                            );
                             let lang_norm_mem =
                                 crate::pipeline::prompt_modules::normalize_lang(&lang_clone);
                             items
                                 .iter()
                                 .map(|m| {
-                                    let imp = (m.importance * 100.0) as u32;
                                     let rel_time =
                                         format_relative_time_lang(m.timestamp, lang_norm_mem);
-                                    format!("- {}（{}，重要性:{}%）", m.content, rel_time, imp)
+                                    format!("- {}（{}）", crate::utils::truncate_chars(&m.content, 120), rel_time)
                                 })
                                 .collect::<Vec<_>>()
                                 .join("\n")
@@ -4813,25 +4825,33 @@ impl ProactiveOrchestrator {
         }
         user_parts.push(judge_instr.to_string());
 
-        let messages = vec![
-            crate::types::response::ChatMessage::system(system_prompt),
-            crate::types::response::ChatMessage::user(user_parts.join("\n\n")),
-        ];
-
-        let response = match router
-            .generate(LLMRequest::new("bystander_judge", messages)
-                .with_character_id(self.char_id.clone()))
-            .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::debug!(
-                    "[Proactive:{}] 主动旁观插话 LLM 调用失败: {}",
-                    self.char_id,
-                    e
-                );
-                return None;
-            }
+        let decision_context = user_parts.join("\n\n");
+        let simple_decision = router.choose_simple(
+            serde_json::json!({"persona": system_prompt, "scene": decision_context}),
+            "Would this character naturally interject to the user now? Usually stay silent; interject only with a genuine personal motive and a relevant, distinct take.",
+            &[("interject", "A natural, timely reason to add something"),
+              ("stay_silent", "No strong personal reason to interrupt")],
+            &self.char_id,
+        ).await;
+        let should_interject = if let Some(choice) = simple_decision {
+            choice == "interject"
+        } else {
+            let messages = vec![
+                crate::types::response::ChatMessage::system(system_prompt),
+                crate::types::response::ChatMessage::user(decision_context),
+            ];
+            let response = match router
+                .generate(LLMRequest::new("bystander_judge", messages)
+                    .with_character_id(self.char_id.clone()))
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::debug!("[Proactive:{}] 主动旁观插话 LLM 调用失败: {}", self.char_id, e);
+                    return None;
+                }
+            };
+            Self::parse_interjection_judgment(&response)
         };
 
         // 更新冷却时间（无论是否插话，都记录本次评估，避免每条消息都调 LLM）
@@ -4843,8 +4863,6 @@ impl ProactiveOrchestrator {
         }
 
         // 解析判断结果：只提取 should_interject 字段
-        let should_interject = Self::parse_interjection_judgment(&response);
-
         if should_interject {
             tracing::info!(
                 "[Proactive:{}] 主动旁观插话评估：决定插话",

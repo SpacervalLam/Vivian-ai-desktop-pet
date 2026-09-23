@@ -25,12 +25,12 @@ pub fn interest_search_queries(char_id: &str) -> Vec<String> {
 fn fallback_queries(char_id: &str) -> Vec<String> {
     match char_id {
         // Vivian：二次元 / 网络热梗 / 可爱事物 / 生活小趣事 —— 混合话题不局限于动漫
-        "vivian" | "薇薇安" => vec![
+        "vivian" | "Vivian" => vec![
             "今日有趣的小事 可爱新闻 生活趣事".to_string(),
             "最近好看的动漫 新番推荐 网络热梗".to_string(),
         ],
         // Nana：书籍 / 茶 / 花 / 生活美学
-        "nana" | "娜娜" => vec![
+        "nana" | "Nana" => vec![
             "生活美学 安静的小事 治愈瞬间".to_string(),
             "好书推荐 茶文化 花艺 近期资讯".to_string(),
         ],

@@ -52,7 +52,7 @@ impl InterestProfile {
         if self.seeded {
             return;
         }
-        let facts_path = get_character_data_dir(char_id).join("user_facts.json");
+        let facts_path = crate::utils::path::get_companion_data_dir(char_id).join("user_facts.json");
         let Ok(raw) = std::fs::read_to_string(&facts_path) else {
             self.seeded = true;
             return;

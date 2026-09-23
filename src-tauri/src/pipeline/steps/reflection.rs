@@ -152,10 +152,6 @@ text 已在主对话生成，此处不需要再产出 text。
   "appraisal": null,
   "emotion_update": null,
   "behavior_drive": null,
-  "event_summary": "",
-  "long_term_memory": "",
-  "long_term_memory_source_quote": "",
-  "memory_note": "",
   "world_update": null,
   "goal_updates": [],
   "evolution": null
@@ -195,10 +191,6 @@ text 已在主对话生成，此处不需要再产出 text。
     {"joy": 0.0, "sadness": 0.0, "anger": 0.0, "fear": 0.0, "loneliness": 0.0, "curiosity": 0.0}
 - behavior_drive: 行为驱动（可选，null 表示无特殊驱动）
     {"approach": 0.0, "avoid": 0.0, "social": 0.0, "explore": 0.0, "rest": 0.0}
-- event_summary: 事件摘要（≤30 字，仅在发生显著事件时填写，如"用户考试失败情绪低落"；无事件留空 ""）
-- long_term_memory: 仅记录用户本轮明确说出的事实、偏好、承诺或计划；不得根据角色回复或暗示推断；无则留空 ""
-- long_term_memory_source_quote: long_term_memory 非空时必填，逐字复制本轮用户输入中直接支持该事实的最短原话；否则留空 ""
-- memory_note: 写入你自己的长期记忆笔记（memory.md，其当前内容已注入在 system prompt 里）的一条内容——**只记四类**：与这个用户的相处约定、你许下的承诺、相处中的教训、只有你们懂的梗。用你自己的口吻、第一人称、一条或几条短句；与笔记里已有的条目重复的不要写；用户的事实和偏好不要写在这里（long_term_memory 已管）。system prompt 里有"你的长期记忆笔记"段落时可参照其格式。本轮没有值得记的就留空 ""
 
 [世界状态更新]
 - world_update: 世界状态变更建议（可选，null 表示无需更新）
@@ -256,7 +248,6 @@ text 已在主对话生成，此处不需要再产出 text。
 - expression 和 motion 必须来自提供的可用列表，不要发明新名称
 - expression 积极选择：回复有情绪色调时务必选择对应表情，仅纯中性/信息性回复才留空 ""
 - appraisal / emotion_update / behavior_drive 在对话平淡时留 null
-- event_summary 在无显著事件时留空 ""
 - world_update 在用户未进入明显持续状态时留 null，不要强行猜测
 - goal_updates 在用户未透露长期目标时输出空数组 []，不要凭空创造目标
 
@@ -365,34 +356,6 @@ impl ReflectionRunnable {
             label,
             confidence
         );
-    }
-
-    /// 解析 memory_note 并追加到角色的长期记忆笔记（memory.md）
-    ///
-    /// 沉淀发生在回复完成后的反思步——对话中零工具调用（不打断沉浸感），
-    /// 且反思复用主对话 system_prompt（人设 + 笔记当前全文都在场），
-    /// 天然具备亲笔口吻与对已有条目的去重视野。
-    /// 追加侧自带字符预算驱逐（最旧日期分节先出局），失败仅记日志不影响主管线。
-    fn apply_memory_note(&self, json: &Value) {
-        let Some(note) = json.get("memory_note").and_then(|v| v.as_str()) else {
-            return;
-        };
-        let note = note.trim();
-        if note.is_empty() {
-            return;
-        }
-        match crate::memory::memory_md::append_memory_md(&self.char_id, note) {
-            Ok(()) => {
-                tracing::info!(
-                    "[Reflection:{}] 长期记忆笔记已沉淀: {}",
-                    self.char_id,
-                    crate::utils::truncate_chars(note, 60)
-                );
-            }
-            Err(e) => {
-                tracing::warn!("[Reflection:{}] 长期记忆笔记写入失败: {}", self.char_id, e);
-            }
-        }
     }
 
     /// 解析 goal_updates 数组并写入用户长期目标账本
@@ -516,8 +479,8 @@ impl ReflectionRunnable {
 
     fn char_cn_name(&self) -> &str {
         match self.char_id.as_str() {
-            "nana" => "娜娜",
-            _ => "薇薇安",
+            "nana" => "Nana",
+            _ => "Vivian",
         }
     }
 
@@ -746,7 +709,6 @@ impl Runnable for ReflectionRunnable {
                 self.apply_world_update(&json);
                 self.apply_goal_updates(&json);
                 self.apply_evolution(&json);
-                self.apply_memory_note(&json);
                 self.record_expression_learning(&state);
             }
             Ok(None) => {
@@ -827,7 +789,6 @@ impl ReflectionRunnable {
                 self.apply_world_update(&json);
                 self.apply_goal_updates(&json);
                 self.apply_evolution(&json);
-                self.apply_memory_note(&json);
             }
             Ok(None) => {
                 tracing::debug!("[Reflection:{}] 内联模式无 LLM 输出", self.char_id);

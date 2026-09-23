@@ -137,7 +137,7 @@ impl ConsolidationPipeline {
 
     /// 绑定角色 ID，启用 Stage 1 断点续跑（由 BrainChatChain 构造后调用）
     pub fn set_progress_char_id(&self, char_id: &str) {
-        let path = crate::utils::path::get_user_data_dir()
+        let path = crate::utils::path::get_companion_shared_dir()
             .join(format!("consolidation_progress_{char_id}.json"));
         *self.progress.write() = Some(ProgressCtx {
             char_id: char_id.to_string(),
@@ -330,8 +330,7 @@ impl ConsolidationPipeline {
 
     /// 执行完整的巩固检查（每轮对话后或 proactive tick 调用）。
     ///
-    /// 按顺序检查 Stage 1 → Stage 2 → Stage 3 触发条件，满足则执行。
-    /// 所有 LLM 调用均使用 `reflection` 路由。
+    /// 只执行 Stage 1 的主题摘要。长期事实由原话提取器负责。
     ///
     /// 运行锁：try_lock 失败时说明另一条路径（对话/tick）正在执行，直接跳过本次。
     /// 不阻塞等待，避免 proactive tick 被长 LLM 调用卡住；下一个 tick 会重试。
@@ -357,26 +356,10 @@ impl ConsolidationPipeline {
             report.stage1_summaries = count;
         }
 
-        // Stage 2: MidTerm → LongTerm (画像/事实抽取 + 语义级行为画像 + 关系信号 + L1近期状态)
-        let stage2_result = self.stage2_reflect(memory).await?;
-        if let Some((count, behaviors, signals, recent_state)) = stage2_result {
-            report.stage2_facts = count;
-            report.stage2_acquired_behaviors = behaviors;
-            report.stage2_relationship_signals = signals;
-            report.stage2_recent_state = recent_state;
-        }
+        // 长期事实只由 AutoExtractor 从原始对话提取。摘要不再反复提取事实或
+        // 生成画像/洞察；否则同一用户表述会在不同层级中被重复保存和召回。
 
-        // Stage 3: LongTerm → Insight (聚类洞察)
-        if let Some((count, insights)) = self.stage3_insight(memory).await? {
-            report.stage3_insights = count;
-            // Stage 3.5: Insight → 概念归并（UserModel + 图谱），把洞察沉淀为概念层
-            if let Some(n) = self.stage3_concept(memory, &insights).await? {
-                report.stage3_concepts = n;
-            }
-        }
-
-        // 索引漂移检测：长期增删后向量索引可能与记忆条目脱节，必要时全量重建
-        // 在巩固流水线末尾执行，避免与 Stage 1-3 的向量写入冲突
+        // 索引漂移检测：长期增删后向量索引可能与记忆条目脱节，必要时全量重建。
         if let Some(n) = memory.check_index_drift_and_rebuild() {
             tracing::info!(
                 "[ConsolidationPipeline] 索引漂移检测触发全量重建，重新嵌入 {} 条向量",
@@ -407,7 +390,7 @@ impl ConsolidationPipeline {
         // 筛选 ShortTerm 记忆（排除 InnerMonologue / ObservationNote，避免与对话事实混合摘要）
         // - InnerMonologue 是角色主观内心独白，与对话事实语义性质不同，混合摘要会失真
         // - ObservationNote 是旁观记忆，不含原文，不应参与对话摘要
-        let short_term: Vec<&MemoryItem> = all
+        let mut short_term: Vec<&MemoryItem> = all
             .iter()
             .filter(|m| {
                 let is_short_term = m.tags.iter().any(|t| t == "short_term")
@@ -416,7 +399,8 @@ impl ConsolidationPipeline {
                         .and_then(|v| v.as_str())
                         .map(|s| s == "short_term")
                         .unwrap_or(false);
-                if !is_short_term {
+                if m.consolidated || !is_short_term || m.tags.iter().any(|t| t == "topic_signal")
+                    || m.metadata.get("topic_signal").and_then(|v| v.as_bool()).unwrap_or(false) {
                     return false;
                 }
                 // 排除内心独白（带 inner_monologue tag 或 memory_type=inner_monologue）
@@ -444,6 +428,8 @@ impl ConsolidationPipeline {
                 !is_observation
             })
             .collect();
+        short_term.sort_by(|a, b| a.timestamp.total_cmp(&b.timestamp));
+        short_term.truncate(40);
 
         if short_term.is_empty() {
             return Ok(None);
@@ -493,22 +479,14 @@ impl ConsolidationPipeline {
                     .time_of_day()
                     .map(|t| format!(" [时段: {}]", t))
                     .unwrap_or_default();
-                format!("[{}]{}{}{} {}", m.id, date_line, tod_line, mood_line, m.content)
+                format!("[{}]{}{}{} {}", m.id, date_line, tod_line, mood_line,
+                    crate::memory::companion_policy::compact_excerpt(&m.content, 240))
             })
             .collect::<Vec<_>>()
             .join("\n");
 
-        // 注入 persona（locked_core）让模型以角色身份整理记忆
-        let locked_core = self.get_locked_core();
-        let persona_section = if locked_core.is_empty() {
-            String::new()
-        } else {
-            format!(
-                "\n[角色身份]\n下面是你此刻的角色身份；整理记忆时就按这个身份记。\n\
-                 角色设定只决定你的记忆口吻、在意点和情感余温，不是这段对话发生过的事实。\n{}\n\n",
-                locked_core
-            )
-        };
+        // 摘要是事实索引，不由人设补全场景或情绪；角色口吻留给回复阶段。
+        let persona_section = "";
 
         // 注入前次阶段摘要作为参考（防幻觉连续性约束）
         let recent_summaries_for_ref = self.get_recent_session_summaries(memory, &all).await;
@@ -516,7 +494,7 @@ impl ConsolidationPipeline {
             String::new()
         } else {
             let ref_text = recent_summaries_for_ref
-                .iter()
+                .iter().take(3)
                 .map(|m| {
                     let mood = m.mood_tags();
                     let mood_line = if mood.is_empty() {
@@ -524,7 +502,7 @@ impl ConsolidationPipeline {
                     } else {
                         format!(" [情绪余温: {}]", mood.join(","))
                     };
-                    format!("- {}{}", m.content, mood_line)
+                    format!("- {}{}", crate::utils::truncate_chars(&m.content, 160), mood_line)
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
@@ -538,9 +516,10 @@ impl ConsolidationPipeline {
 
         let prompt = format!(
             "{persona_section}\
-             请将以下多条短期记忆摘要为1-3条主题级会话摘要。每条摘要应保留关键事实、情感和关系信息，去除冗余细节。\n\
+             请将以下多条真实对话压缩为0-3条主题级会话摘要。只保留用户明确表达的事实、正在进行的事、双方明确作出的约定和有后续价值的情绪背景。\n\
+             不要把角色自己的客套回复、猜测、内心感受或人设写成用户事实；不要推断亲密度变化。没有可延续信息就输出 {{\"items\":[]}}。每条只写一个主题，标明是谁说的；避免重复已有摘要。\n\
              {reference_section}\
-             输出JSON数组，每项含：\n\
+             输出JSON对象，字段 items 为数组，每项含：\n\
              - \"summary\"(string)：会话摘要\n\
              - \"importance\"(0.0-1.0)，评分标准（统一适用）：\n\
                - 0.9-1.0：硬性约束、核心身份属性、健康/过敏信息、重大关系里程碑\n\
@@ -565,8 +544,23 @@ impl ConsolidationPipeline {
         let summaries = parse_summaries(&response);
 
         if summaries.is_empty() {
-            tracing::warn!("[ConsolidationPipeline] Stage 1 LLM 返回空摘要，跳过");
-            return Ok(None);
+            let valid_empty = serde_json::from_str::<serde_json::Value>(&extract_json_from_response(&response))
+                .ok()
+                .map(|value| value.as_array().is_some_and(Vec::is_empty)
+                    || value.get("items").and_then(|items| items.as_array()).is_some_and(Vec::is_empty))
+                .unwrap_or(false);
+            if !valid_empty {
+                tracing::warn!("[ConsolidationPipeline] Stage 1 摘要解析失败，保留原话稍后重试");
+                return Ok(None);
+            }
+            // 空摘要是有效的「没有值得沉淀的内容」判定；消费原始片段，
+            // 否则每次后台巩固都会为同一段寒暄重新付费。
+            for item in &short_term {
+                memory.mark_summarized(&item.id)?;
+            }
+            self.last_stage1_at.store(now as u64, std::sync::atomic::Ordering::Relaxed);
+            tracing::debug!("[ConsolidationPipeline] Stage 1 无可沉淀信息，已消费 {} 条原话", short_term.len());
+            return Ok(Some(0));
         }
 
         // 写入 SessionSummary，设置 promoted_from 元数据
@@ -761,12 +755,12 @@ impl ConsolidationPipeline {
         let mut summaries: Vec<MemoryItem> = all
             .iter()
             .filter(|m| {
-                m.tags.iter().any(|t| t == "session_summary")
+                !m.consolidated && (m.tags.iter().any(|t| t == "session_summary")
                     || m.metadata
                         .get("memory_type")
                         .and_then(|v| v.as_str())
                         .map(|s| s == "session_summary")
-                        .unwrap_or(false)
+                        .unwrap_or(false))
             })
             .cloned()
             .collect();
@@ -1136,7 +1130,7 @@ impl ConsolidationPipeline {
         let now = current_timestamp();
 
         // 筛选 SessionSummary 并计算热度
-        let hot_summaries: Vec<&MemoryItem> = all
+        let mut hot_summaries: Vec<&MemoryItem> = all
             .iter()
             .filter(|m| {
                 let is_session_summary = m.tags.iter().any(|t| t == "session_summary")
@@ -1145,7 +1139,7 @@ impl ConsolidationPipeline {
                         .and_then(|v| v.as_str())
                         .map(|s| s == "session_summary")
                         .unwrap_or(false);
-                if !is_session_summary {
+                if m.consolidated || !is_session_summary {
                     return false;
                 }
                 // 热度计算：H = α·visit_count + β·interaction_len + γ·R_recency
@@ -1164,6 +1158,8 @@ impl ConsolidationPipeline {
                 m.visit_count == 0 && age_hours >= STAGE2_FALLBACK_AGE_HOURS
             })
             .collect();
+        hot_summaries.sort_by(|a, b| a.timestamp.total_cmp(&b.timestamp));
+        hot_summaries.truncate(8);
 
         if hot_summaries.is_empty() {
             return Ok(None);
@@ -1183,7 +1179,7 @@ impl ConsolidationPipeline {
 
         let content_text = hot_summaries
             .iter()
-            .map(|m| format!("[{}] {}", m.id, m.content))
+            .map(|m| format!("[{}] {}", m.id, crate::memory::companion_policy::compact_excerpt(&m.content, 300)))
             .collect::<Vec<_>>()
             .join("\n");
 
@@ -1247,8 +1243,19 @@ impl ConsolidationPipeline {
         }
 
         let mut created = 0usize;
+        let mut seen_facts: std::collections::HashSet<String> = all.iter()
+            .filter(|m| crate::memory::companion_policy::is_durable_fact(m))
+            .map(|m| m.content.chars().filter(|c| !c.is_whitespace() && !c.is_ascii_punctuation())
+                .flat_map(char::to_lowercase).collect())
+            .collect();
 
         for f in &facts {
+            let fact_key: String = f.fact.chars()
+                .filter(|c| !c.is_whitespace() && !c.is_ascii_punctuation())
+                .flat_map(char::to_lowercase).collect();
+            if fact_key.is_empty() || !seen_facts.insert(fact_key) {
+                continue;
+            }
             let mem_type = match f.fact_type.as_str() {
                 "user" => MemoryType::User,
                 "preference" => MemoryType::Preference,
@@ -1372,7 +1379,7 @@ impl ConsolidationPipeline {
             "请从以下会话摘要中抽取用户的身份事实和偏好。\n\n\
              关注：姓名、年龄、职业、所在地、技能、喜好（食物/音乐/活动等）、\n\
              持续性偏好（非一次性提及）。\n\n\
-             输出JSON数组，每项含：\n\
+             输出JSON对象，items 数组的每项含：\n\
              - \"fact\"(string): 一条简洁事实陈述\n\
              - \"type\"(string): \"user\" 或 \"preference\"\n\
              - \"importance\"(0.0-1.0)，评分标准：\n\
@@ -1394,10 +1401,9 @@ impl ConsolidationPipeline {
     /// Stage 2 路径 2：关系事件抽取（里程碑 + 情感变化）
     async fn stage2_extract_relationships(&self, content_text: &str) -> VivianResult<Vec<FactItem>> {
         let prompt = format!(
-            "请从以下会话摘要中抽取用户与 Vivian 之间的关系事件和情感变化。\n\n\
-             关注：约定/承诺、共同经历、关系里程碑、情感转折点、冲突与和解、\n\
-             信任变化、亲密度变化。\n\n\
-             输出JSON数组，每项含：\n\
+            "请从以下会话摘要中抽取双方明确说出或真实发生、以后值得回忆的关系事件。\n\n\
+             关注：明确约定、共同经历、明确表达的冲突与和解。只有单方客套、一次情绪、模型推测的信任或亲密度变化时输出空数组。\n\n\
+             输出JSON对象，items 数组的每项含：\n\
              - \"fact\"(string): 一条简洁关系事实陈述\n\
              - \"type\"(string): \"relationship\"\n\
              - \"importance\"(0.0-1.0)，评分标准：\n\
@@ -1425,7 +1431,7 @@ impl ConsolidationPipeline {
                 将相关片段归并为主题级事实，避免碎片化重复。\n\
              2. 抽取用户对 Vivian 的反馈（喜欢/不喜欢的回复方式、话题偏好）。\n\
              3. 抽取用户的行为习惯（作息、工作模式、互动节奏）。\n\n\
-             输出JSON数组，每项含：\n\
+             输出JSON对象，items 数组的每项含：\n\
              - \"fact\"(string): 一条简洁事实陈述（已归并的主题用一句话概括）\n\
              - \"type\"(string): \"feedback\"\n\
              - \"importance\"(0.0-1.0)，评分标准：\n\
@@ -1486,7 +1492,7 @@ impl ConsolidationPipeline {
              - 每类最多抽取 2 条，避免噪音{}\n\
              \
              ## 输出格式\n\
-             JSON 数组，每项含：\n\
+             JSON 对象，items 数组的每项含：\n\
              - \"category\"(string): \"language_style\" / \"behavior\" / \"interaction\" / \"skill\"\n\
              - \"description\"(string): 一句话描述\n\
              - \"confidence\"(0.0-1.0): 置信度（多次出现≥0.7，单次明确≥0.5）\n\
@@ -1515,26 +1521,25 @@ impl ConsolidationPipeline {
         content_text: &str,
     ) -> VivianResult<Vec<RelationshipSignalItem>> {
         let prompt = format!(
-            "请从以下会话摘要中识别用户与 Vivian 互动时的关系信号和情绪状态。\n\n\
+            "请从以下会话摘要中识别用户与当前角色互动时明确表达的情绪和回应偏好。\n\n\
              ## 任务\n\
              为摘要中每个可识别的互动片段抽取一组关系信号：\n\
              1. **user_mood**(string): 用户当时的情绪状态\n\
                 如「疲惫」「焦虑」「低落」「开心」「平静」「烦躁」「兴奋」「失落」\n\
-             2. **relationship_signal**(string): 用户对 Vivian 的态度信号\n\
-                如「亲近」「疏远」「信任」「试探」「依赖」「敷衍」「真诚」「回避」\n\
+             2. **relationship_signal**(string): 用户直接表达的态度；没有明说则留空，不从礼貌或短暂情绪推断信任、依赖或疏远\n\
              3. **important_moment**(string, 可选): 值得记住的关系瞬间\n\
                 如里程碑、第一次某行为、情感转折点；无则留空\n\
              4. **next_care_cue**(string): 基于 Vivian 的视角，下次该如何回应\n\
                 如「用户疲惫时少打扰」「主动关心项目进度」「避免追问」\n\
              \
              ## 抽取原则\n\
-             - 基于用户在对话中表现出的情绪和态度，不臆测\n\
+             - 只基于摘要里可追溯的用户原话；一次情绪不代表稳定关系变化\n\
              - next_care_cue 要具体可操作，避免空泛（如「对用户好」过于空泛）\n\
              - 每个摘要最多抽取 2 组信号，避免噪音\n\
-             - 没有明确信号时返回空数组\n\
+             - 没有明确信号时返回 {{\"items\":[]}}\n\
              \
              ## 输出格式\n\
-             JSON 数组，每项含上述四个字段。仅输出 JSON，无其他文本。\n\n\
+             JSON 对象，items 数组的每项含上述四个字段。仅输出 JSON，无其他文本。\n\n\
              会话摘要：\n{}",
             content_text
         );
@@ -1660,7 +1665,7 @@ impl ConsolidationPipeline {
         let prompt = format!(
             "请从以下长期记忆中发现模式、规律或高层洞察。生成1-3条洞察。\n\
              洞察应是超越单条事实的抽象结论，如行为模式、关系变化趋势、深层偏好等。\n\
-             输出JSON数组，每项含：\n\
+             输出JSON对象，items 数组的每项含：\n\
              - \"insight\"(string): 一条洞察陈述\n\
              - \"importance\"(0.0-1.0)，评分标准：\n\
                0.9-1.0 核心性格洞察/重大关系趋势；0.6-0.8 重要行为模式/偏好规律；\n\
@@ -1831,7 +1836,7 @@ impl ConsolidationPipeline {
              {}\n\n\
              ## 新洞察\n\
              {}\n\n\
-             输出JSON数组，仅输出JSON，无其他文本。",
+             输出含 items 数组的JSON对象，仅输出JSON，无其他文本。",
             existing_section, insight_text
         );
 
@@ -2256,12 +2261,22 @@ fn parse_acquired_behaviors(response: &str) -> Vec<AcquiredBehavior> {
 }
 
 fn parse_json_array<T: serde::de::DeserializeOwned>(response: &str) -> Vec<T> {
-    // 尝试从 markdown 代码块中提取 JSON
     let json_str = extract_json_from_response(response);
-    match serde_json::from_str::<Vec<T>>(&json_str) {
-        Ok(items) => items,
-        Err(e) => {
-            tracing::warn!("[ConsolidationPipeline] JSON 解析失败: {}, 原始响应: {}", e, &json_str[..json_str.len().min(200)]);
+    // schema 返回 {"items":[...]}；旧模型仍可能返回裸数组。
+    let value = serde_json::from_str::<serde_json::Value>(&json_str).ok().or_else(|| {
+        let start = json_str.find('[')?;
+        let end = json_str.rfind(']')?;
+        serde_json::from_str::<serde_json::Value>(&json_str[start..=end]).ok()
+    });
+    let items = match value {
+        Some(serde_json::Value::Array(items)) => Some(items),
+        Some(serde_json::Value::Object(mut object)) => object.remove("items").and_then(|v| v.as_array().cloned()),
+        _ => None,
+    };
+    match items.and_then(|items| serde_json::from_value::<Vec<T>>(serde_json::Value::Array(items)).ok()) {
+        Some(items) => items,
+        None => {
+            tracing::warn!("[ConsolidationPipeline] JSON 数组解析失败，响应前缀: {}", &json_str[..json_str.len().min(200)]);
             Vec::new()
         }
     }
@@ -2281,12 +2296,6 @@ fn extract_json_from_response(response: &str) -> String {
         let after_start = &trimmed[start + 3..];
         if let Some(end) = after_start.find("```") {
             return after_start[..end].trim().to_string();
-        }
-    }
-    // 尝试提取 [...] 数组
-    if let Some(start) = trimmed.find('[') {
-        if let Some(end) = trimmed.rfind(']') {
-            return trimmed[start..=end].to_string();
         }
     }
     trimmed.to_string()
@@ -2348,4 +2357,18 @@ fn is_content_redundant(existing: &str, new_summary: &str) -> bool {
         .count();
 
     (contained_count as f64) / (sentences.len() as f64) > 0.7
+}
+
+#[cfg(test)]
+mod companion_memory_tests {
+    use super::*;
+
+    #[test]
+    fn schema_wrapped_summaries_keep_nested_arrays() {
+        let response = r#"{"items":[{"summary":"用户明天面试","importance":0.7,"mood_tags":["worried"],"date_labels":[],"time_of_days":[]}]}"#;
+        let items = parse_summaries(response);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].mood_tags, vec!["worried"]);
+        assert!(parse_summaries(r#"{"items":[]}"#).is_empty());
+    }
 }

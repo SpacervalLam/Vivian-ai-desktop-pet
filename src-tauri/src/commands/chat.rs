@@ -365,7 +365,7 @@ pub async fn send_message_stream(
     // ── 群聊让位协议 ──
     // 消息点名了其他在线角色（名字或 ID 出现在消息中）且未点名当前角色时，
     // 当前角色让位：不生成回复、不唤醒、不写对话历史，仅以旁观视角记录消息后静默结束。
-    // 用户 @ 提及的路由由前端完成，这里补足"裸名点名"（如"娜娜你觉得呢"）的场景。
+    // 用户 @ 提及的路由由前端完成，这里补足"裸名点名"（如"Nana你觉得呢"）的场景。
     if channel_str == "wechat_group" {
         let (self_named, other_named) = scan_group_addressing(state.inner(), &char_id, &message);
         if other_named && !self_named {

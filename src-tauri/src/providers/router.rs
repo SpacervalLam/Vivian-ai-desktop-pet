@@ -47,6 +47,8 @@ pub struct ModelRouter {
     main_endpoint: String,
     /// 任务专属 provider —— 每个任务独立配置的模型实例
     task_providers: Arc<HashMap<String, Box<dyn BaseProvider>>>,
+    /// Native decision endpoint; Jev does not implement chat completions.
+    jev_decision: Option<Arc<crate::providers::jev::JevClient>>,
     /// 任务类型 → 该任务绑定的 provider endpoint。查不到的任务回退 `main_endpoint`
     /// （路由矩阵关闭或任务未配置时全部走主 API）。
     task_endpoints: Arc<HashMap<String, String>>,
@@ -167,6 +169,7 @@ fn semaphore_for_task(task_type: &str) -> (&'static str, usize) {
         | "knowledge_acquisition"
         | "translation"
         | "bystander_judge"
+        | "simple_judge"
         | "intent_judge"
         | "asr_polish"
         | "text_rewrite" => ("auxiliary", SEMAPHORE_GROUP_AUXILIARY),
@@ -249,6 +252,7 @@ impl ModelRouter {
         // 2. 任务专属 provider（来自 routing_matrix）
         //    仅在 enable_routing_matrix=true 时构建；关闭时跳过，所有任务回退到主 API
         let mut task_providers: HashMap<String, Box<dyn BaseProvider>> = HashMap::new();
+        let mut jev_decision = None;
         let mut task_reasoning = HashMap::new();
         // 任务 → endpoint 映射：错误 toast 用它引导用户前往对应厂商控制台
         let mut task_endpoints: HashMap<String, String> = HashMap::new();
@@ -260,6 +264,17 @@ impl ModelRouter {
                         "[ModelRouter] 任务 {} 未配置完整，回退到主 LLM API",
                         task_type
                     );
+                    continue;
+                }
+                if task_type == "simple_judge" && task_config.provider_type == "jev" {
+                    match crate::providers::jev::JevClient::new(task_config) {
+                        Ok(client) => jev_decision = Some(Arc::new(client)),
+                        Err(e) => tracing::warn!("[ModelRouter] Jev route invalid: {e}"),
+                    }
+                    continue;
+                }
+                if task_config.provider_type == "jev" {
+                    tracing::warn!("[ModelRouter] Jev only supports simple_judge, skipping {task_type}");
                     continue;
                 }
                 // reasoning（编程 / 深度推理）未显式配置 max_tokens 时按服务商分级默认，
@@ -317,6 +332,7 @@ impl ModelRouter {
             main_provider: Arc::new(main_provider),
             main_endpoint: config.ai.endpoint.as_deref().unwrap_or("").trim().to_string(),
             task_providers: Arc::new(task_providers),
+            jev_decision,
             task_endpoints: Arc::new(task_endpoints),
             reasoning_override: Arc::new(RwLock::new(reasoning_override)),
             enable_routing_matrix: config.enable_routing_matrix,
@@ -1050,6 +1066,61 @@ impl ModelRouter {
     ///
     /// 根据 `request.stream` 转调 `query_with_fallback` 或 `query_stream`。
     /// 所有请求参数通过 task-local 作用域传递，并发调用之间互不污染。
+    /// Optional small decision route. No configured route means callers use their
+    /// existing rule or task-specific LLM path; we do not spend a main-chat call.
+    pub async fn choose_simple(
+        &self,
+        state: serde_json::Value,
+        instructions: &str,
+        choices: &[(&str, &str)],
+        character_id: &str,
+    ) -> Option<String> {
+        if let Some(jev) = &self.jev_decision {
+            match jev.choose(state, instructions, choices).await {
+                Ok(choice) => {
+                    self.emit_route_status("simple_judge", "ok");
+                    tracing::debug!(
+                        "[simple_judge] Jev choice={} confidence={:.3}",
+                        choice.choice, choice.confidence,
+                    );
+                    return Some(choice.choice);
+                }
+                Err(e) => {
+                    tracing::warn!("[simple_judge] Jev failed: {e}");
+                    self.emit_route_status("simple_judge", "error");
+                    return None;
+                }
+            }
+        }
+        if !self.enable_routing_matrix || !self.task_providers.contains_key("simple_judge") {
+            return None;
+        }
+        let options: serde_json::Map<String, serde_json::Value> = choices.iter()
+            .map(|(name, description)| ((*name).to_owned(), json!(description)))
+            .collect();
+        let messages = vec![
+            ChatMessage::system("You make one small decision. Return only JSON with one key, choice. The choice must exactly match an option key."),
+            ChatMessage::user(format!("Instructions: {instructions}\nOptions: {}\nState: {state}", json!(options))),
+        ];
+        match self.generate(LLMRequest::new("simple_judge", messages)
+            .with_character_id(character_id.to_owned())
+            .with_temperature(0.0)
+            .with_max_tokens(64)).await {
+            Ok(reply) => {
+                let value = reply.find('{').and_then(|start| reply.rfind('}')
+                    .filter(|end| *end >= start)
+                    .and_then(|end| serde_json::from_str::<serde_json::Value>(&reply[start..=end]).ok()));
+                let choice = value.as_ref().and_then(|v| v.get("choice"))
+                    .and_then(|v| v.as_str())?;
+                choices.iter().any(|(name, _)| *name == choice).then(|| choice.to_owned())
+            }
+            Err(e) => {
+                tracing::warn!("[simple_judge] LLM failed: {e}");
+                None
+            }
+        }
+    }
+
     pub async fn generate(&self, mut request: LLMRequest) -> VivianResult<String> {
         loop {
             let options = self.call_options(&request);

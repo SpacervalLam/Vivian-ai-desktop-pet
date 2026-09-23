@@ -89,17 +89,12 @@ impl Default for BehaviorContent {
 }
 
 impl BehaviorContent {
-    /// 从已解析的 JSON Value 提取扩展字段（delivery_channel/content_type/importance/value_score）
+    /// 从已解析的 JSON Value 提取内容字段；渠道在投递前另行选择。
     /// 缺失字段使用默认值，保证向后兼容旧 LLM 输出
     pub fn parse_extra_fields(data: &serde_json::Value) -> (DeliveryChannel, ContentType, f32, Option<f32>) {
-        let delivery_channel = data
-            .get("delivery_channel")
-            .and_then(|v| v.as_str())
-            .map(|s| match s {
-                "chat_window" | "wechat" => DeliveryChannel::ChatWindow,
-                _ => DeliveryChannel::Bubble,
-            })
-            .unwrap_or_default();
+        // Content generation does not decide delivery. The command layer routes
+        // after the shared trigger and content decision have completed.
+        let delivery_channel = DeliveryChannel::Bubble;
         let content_type = data
             .get("content_type")
             .and_then(|v| v.as_str())
@@ -142,61 +137,24 @@ impl BehaviorContent {
 fn default_persona_prompt(lang: &str, char_id: &str) -> &'static str {
     let lang_norm = crate::pipeline::prompt_modules::normalize_lang(lang);
     match (lang_norm, char_id) {
-        ("en", "nana" | "娜娜") => "You are Nana, a gentle, composed older-sister type — warm, grounded, speaks softly but with quiet strength. Keep replies short and natural. No customer-service speech.",
+        ("en", "nana" | "Nana") => "You are Nana, a gentle, composed older-sister type — warm, grounded, speaks softly but with quiet strength. Keep replies short and natural. No customer-service speech.",
         ("en", _) => "You are Vivian, a weeb netizen who lives online — fluent in anime culture and internet surfing. Personality: lively, genuine, uses anime-style expressions and internet memes naturally. Keep replies short and natural. No customer-service speech.",
-        ("ja", "nana" | "娜娜") => "あなたはナナ、優しく落ち着いたお姉さんタイプ——温かくて地に足がついていて、穏やかに話すが芯がある。返信は短く自然に。接客言葉は禁止。",
-        ("ja", _) => "あなたはヴィヴィアン、ネットに生きるオタク少女——アニメ文化とネットサーフィンに精通している。性格：活発、素直、アニメ風の表現やネットミームを自然に使う。返信は短く自然に。接客言葉は禁止。",
-        (_, "nana" | "娜娜") => "你是娜娜，一个温柔从容的姐姐——温暖、踏实，说话轻声细语但有力量。回复简短自然。禁止客服腔。",
-        _ => "你是薇薇安，一个生活在网络上的二次元少女——精通动漫文化和网络冲浪。性格：活泼、真诚，自然地使用动漫式表达和网络梗。回复简短自然。禁止客服腔。",
+        ("ja", "nana" | "Nana") => "あなたはNana、優しく落ち着いたお姉さんタイプ——温かくて地に足がついていて、穏やかに話すが芯がある。返信は短く自然に。接客言葉は禁止。",
+        ("ja", _) => "あなたはVivian、ネットに生きるオタク少女——アニメ文化とネットサーフィンに精通している。性格：活発、素直、アニメ風の表現やネットミームを自然に使う。返信は短く自然に。接客言葉は禁止。",
+        (_, "nana" | "Nana") => "你是Nana，一个温柔从容的姐姐——温暖、踏实，说话轻声细语但有力量。回复简短自然。禁止客服腔。",
+        _ => "你是Vivian，一个生活在网络上的二次元少女——精通动漫文化和网络冲浪。性格：活泼、真诚，自然地使用动漫式表达和网络梗。回复简短自然。禁止客服腔。",
     }
 }
 
-/// 扩展字段（delivery_channel/content_type/value_score）的输出引导
+/// 分享内容字段（content_type/value_score）的输出引导
 ///
 /// 仅在允许分享类输出的触发器（Spontaneous / MoodDriven）后追加。
-/// 其他触发器（问候/欢迎/健康提醒等）保持原 JSON 格式，默认走 Bubble/Greeting。
+/// 其他触发器（问候/欢迎/健康提醒等）保持原 JSON 格式。
 fn build_share_extension_instruction(lang: &str) -> &'static str {
-    let lang_norm = crate::pipeline::prompt_modules::normalize_lang(lang);
-    match lang_norm {
-        "en" => "Optional extension fields (only when you actually want to share something valuable you just thought of — otherwise omit and default to bubble/greeting):\n\
-- delivery_channel: \"chat_window\" (send to chat window like WeChat) or \"bubble\" (default, desktop bubble)\n\
-- content_type: \"share\" (sharing interesting content) / \"greeting\" / \"info\" / \"reminder\"\n\
-- value_score: 0.0-1.0 (only required when content_type=share — how valuable is this to the user right now? consider novelty + relevance + timeliness)\n\
-\
-Decision guide:\n\
-- Default: just text + expression (self-talk, mood, casual greeting) → bubble channel\n\
-- Only when you genuinely have something to share (a thought that surfaced, an interesting topic from memory) AND it feels worth telling the user: pick chat_window + content_type=share + value_score\n\
-- Don't force shares — if nothing fits, keep it as self-talk on bubble\n\
-- Never fabricate content you didn't actually see/think of — only share from the memory/context provided\n\
-\
-Extended JSON example: {\"text\": \"...\", \"expression\": \"...\", \"delivery_channel\": \"chat_window\", \"content_type\": \"share\", \"value_score\": 0.82}\n\
-Plain JSON example (default): {\"text\": \"...\", \"expression\": \"...\"}",
-        "ja" => "拡張フィールド（何か価値あるものを共有したい時だけ出力、それ以外は省略してデフォルトの bubble/greeting に）:\n\
-- delivery_channel: \"chat_window\"（WeChat のようなチャット窓へ送信）または \"bubble\"（デフォルト、デスクトップバブル）\n\
-- content_type: \"share\"（興味深いコンテンツの共有）/ \"greeting\" / \"info\" / \"reminder\"\n\
-- value_score: 0.0-1.0（content_type=share のみ必須——今ユーザーにとってどれくらい価値がある？新規性+関連性+適時性で判断）\n\
-\
-判断ガイド:\n\
-- デフォルト: text + expression のみ（独り言、気分、軽い挨拶）→ bubble チャンネル\n\
-- 本当に共有したいものがある時だけ（記憶から浮かんだ考え、興味深い話題）かつユーザーに伝える価値があると感じる時: chat_window + content_type=share + value_score を選ぶ\n\
-- 無理に共有しない——何も合わなければ独り言として bubble に残す\n\
-- 実際に見て/思っていない内容をでっち上げない——提供された記憶/コンテキストからだけ共有する\n\
-\
-拡張JSON例: {\"text\": \"...\", \"expression\": \"...\", \"delivery_channel\": \"chat_window\", \"content_type\": \"share\", \"value_score\": 0.82}\n\
-通常JSON例（デフォルト）: {\"text\": \"...\", \"expression\": \"...\"}",
-        _ => "扩展字段（仅在你确实想分享刚才想到的有价值内容时输出，否则省略走默认 bubble/greeting）:\n\
-- delivery_channel: \"chat_window\"（发到聊天窗口，像微信那样）或 \"bubble\"（默认，桌宠气泡）\n\
-- content_type: \"share\"（分享有趣内容）/ \"greeting\" / \"info\" / \"reminder\"\n\
-- value_score: 0.0-1.0（仅 content_type=share 时必填——对用户现在的价值多大？考虑新颖性+相关性+时效性）\n\
-\
-决策指引:\n\
-- 默认：只输出 text + expression（自言自语、心情、随意问候）→ bubble 渠道\n\
-- 只有当你确实有东西想分享（记忆里浮现的想法、有趣的话题）且觉得值得告诉用户时：选 chat_window + content_type=share + value_score\n\
-- 不要强行分享——没什么合适的就保持自言自语走 bubble\n\
-- 禁止编造你没真正看到/想到的内容——只能从提供的记忆/上下文里分享\n\
-\
-扩展JSON示例: {\"text\": \"...\", \"expression\": \"...\", \"delivery_channel\": \"chat_window\", \"content_type\": \"share\", \"value_score\": 0.82}\n\
-普通JSON示例（默认）: {\"text\": \"...\", \"expression\": \"...\"}",
+    match crate::pipeline::prompt_modules::normalize_lang(lang) {
+        "en" => "Optional content fields: content_type (share/greeting/info/reminder) and value_score (0.0-1.0, required for share). Only mark something as share when a specific memory or real observation makes it timely and valuable. Otherwise keep a brief natural remark. Never invent observations. Do not choose a delivery channel; the app decides after this message is generated.",
+        "ja" => "任意の内容フィールド: content_type (share/greeting/info/reminder)、value_score (0.0-1.0、share の場合は必須)。具体的な記憶や実際の観察に基づき、今伝える価値がある場合だけ share を選ぶ。それ以外は短く自然な一言にする。見ていないことを捏造しない。送信先は決めない。アプリが生成後に判断する。",
+        _ => "可选内容字段：content_type（share/greeting/info/reminder）和 value_score（0.0-1.0，仅 share 必填）。只有具体记忆或真实观察让这条消息此刻对用户有价值，才标为 share；否则保持简短自然。不要编造未见过的事情。不要选择发送渠道，应用会在内容生成后根据场景判断。",
     }
 }
 
@@ -1013,49 +971,9 @@ fn build_proactive_directive(
 /// 主动问候专属 JSON 输出格式
 fn proactive_output_format(lang_norm: &str) -> &'static str {
     match lang_norm {
-        "en" => "Output format (JSON): {\"notify\": \"NOTIFY\"|\"DONT_NOTIFY\", \"text\": \"...\", \"expression\": \"expression_tag\", \"delivery_channel\": \"bubble\"|\"chat_window\"}\n\
-The text field must be plain text only — no Markdown (no **bold**, *italic*, # heading, - list, `code`, [link](url), > quote) and no HTML tags.\n\
-The notify field is the explicit \"do I speak at all\" decision:\n\
-- \"NOTIFY\" (default): you have something to say — output text normally.\n\
-- \"DONT_NOTIFY\": nothing worth saying right now, so you decline — text must be the empty string \"\".\n\
-Declining is a legal and encouraged outcome: a trigger firing only means you are ALLOWED to speak, not that you HAVE something to say.\n\
-A filler line carrying no information (\"Are you busy?\", \"How is your day going?\", \"Remember to drink water\") is worse than silence — it makes you feel like a scheduled broadcaster.\n\
-Before speaking, ask: is there anything CONCRETE here (a real memory, something you can actually perceive right now, a genuine shift in your mood, a specific question you want answered)? If not, decline.\n\
-This is a CONTENT judgement, not a politeness one — do not decline when the user is plainly waiting on you (welcome-back, they just called on you).\n\
-delivery_channel guide:\n\
-- \"bubble\" (default): desktop pet bubble — for self-talk, mood, casual remarks not expecting a reply\n\
-- \"chat_window\": send to the WeChat-style chat window — use when you actually want to start a conversation, share something, or say something that deserves the user's attention (greeting, question, welcome-back, share)\n\
-\
-Optional fields (only when sharing valuable content): content_type (\"share\"|\"greeting\"), value_score (0.0-1.0)",
-        "ja" => "出力形式（JSON）: {\"notify\": \"NOTIFY\"|\"DONT_NOTIFY\", \"text\": \"...\", \"expression\": \"表情タグ\", \"delivery_channel\": \"bubble\"|\"chat_window\"}\n\
-text フィールドは純粋なテキストのみ——Markdown 厳禁（**太字**、*斜体*、# 見出し、- リスト、`コード`、[リンク](url)、> 引用 など）。HTML タグも禁止。\n\
-notify フィールドは「そもそも口を開くか」の明示的な判定：\n\
-- \"NOTIFY\"（デフォルト）: 言いたいことがある——通常どおり text を出力。\n\
-- \"DONT_NOTIFY\": 今は言う価値のあることがない、自分から棄権する——この時 text は空文字列 \"\" にすること。\n\
-棄権は**合法で、むしろ推奨される**結果：トリガー成立は「口を開いてよい」というだけで、「言うことがある」という意味ではない。\n\
-情報量のない埋め草（「忙しい？」「今日はどうだった？」「水を飲んでね」）は無言より悪い——ユーザーには君が定期アナウンス装置に見えてしまう。\n\
-話す前に自問：この一言に**具体的**なものはあるか（実際に起きた記憶、今この瞬間に知覚できること、本当の気分の変化、具体的に聞きたい質問）？無ければ棄権。\n\
-これは**内容**の判定であって礼儀の判定ではない——ユーザーが明らかに君の返事を待っている時（おかえり、名指しで呼ばれた）は棄権しないこと。\n\
-delivery_channel ガイド:\n\
-- \"bubble\"（デフォルト）: デスクトップペットのバブル——独り言、気分、返事を期待しない軽い発言に\n\
-- \"chat_window\": WeChat風チャット窓へ送信——会話を始めたい、何か共有したい、ユーザーの注意を引く価値がある発言（挨拶、質問、おかえり、共有）に\n\
-\
-任意フィールド（価値あるコンテンツを共有する時だけ）: content_type (\"share\"|\"greeting\"), value_score (0.0-1.0)",
-        _ => "输出格式（JSON）: {\"notify\": \"NOTIFY\"|\"DONT_NOTIFY\", \"text\": \"...\", \"expression\": \"表情标签\", \"delivery_channel\": \"bubble\"|\"chat_window\"}\n\
-text 字段必须是纯文本——严禁 Markdown 语法（**粗体**、*斜体*、# 标题、- 列表、`代码`、[链接](url)、> 引用 等），也不要用 HTML 标签。\n\
-notify 字段是「此刻到底要不要开口」的显式判定：\n\
-- \"NOTIFY\"（默认）: 有话可说，正常输出 text。\n\
-- \"DONT_NOTIFY\": 此刻没有值得说的东西、状态未变或同一结果已播报，主动弃权——此时 text 必须是空字符串 \"\"。\n\
-弃权是**合法且被鼓励**的结果：触发条件成立只说明「允许开口」，不等于「有话要说」。\n\
-凑一句没有信息量的寒暄（「在忙吗」「今天过得怎么样」「记得喝水哦」）比不说话更糟——那会让用户觉得你是个定时播报器。\n\
-后台任务仅在未汇报的实质进展、完成、失败或需要用户决定时通知；启动不等于完成，必须按真实结果措辞。用户要求安静或正在专注时，尊重其通知约定，不靠重复寒暄刷存在感。\n\
-开口前先自问：这句话里有**具体**的东西吗（真实发生过的记忆、此刻真能感知到的环境、一个真实的心情变化、一个你想问的具体问题）？没有就弃权。\n\
-这是**内容**判定，不是礼貌判定——用户明确在等你回应时（欢迎回归、刚叫过你）不要弃权。\n\
-delivery_channel 指引:\n\
-- \"bubble\"（默认）: 桌宠气泡——用于自言自语、心情、不期待回复的随口发言\n\
-- \"chat_window\": 发到微信风格聊天窗口——当你确实想发起对话、分享东西、或说的话值得用户注意时使用（问候、提问、欢迎回归、分享）\n\
-\
-可选字段（仅在分享有价值内容时）: content_type (\"share\"|\"greeting\"), value_score (0.0-1.0)",
+        "en" => r#"Output JSON: {"notify":"NOTIFY"|"DONT_NOTIFY","text":"...","expression":"..."}. Optional content_type (share/greeting/info/reminder) and value_score (0.0-1.0 for share). Plain text only, no Markdown or HTML. Decide whether there is something concrete worth saying: a real memory, observation, mood change, or specific question. If not, choose DONT_NOTIFY with empty text. A trigger grants permission to speak; it does not require speech. Respect the user's focus and quiet preferences. Do not choose a delivery channel; the app does so after generating this content."#,
+        "ja" => r#"JSON を出力: {"notify":"NOTIFY"|"DONT_NOTIFY","text":"...","expression":"..."}。任意: content_type (share/greeting/info/reminder)、share の value_score (0.0-1.0)。text はプレーンテキストのみ。実際の記憶、観察、気分の変化、具体的な質問など、今言う価値がある場合だけ NOTIFY。なければ DONT_NOTIFY、text は空にする。トリガーは発言の許可であり義務ではない。ユーザーの集中と静かにしてほしい意向を尊重する。送信先は決めず、生成後にアプリが判断する。"#,
+        _ => r#"输出 JSON：{"notify":"NOTIFY"|"DONT_NOTIFY","text":"...","expression":"..."}。可选 content_type（share/greeting/info/reminder）及 share 的 value_score（0.0-1.0）。text 只能是纯文本，不含 Markdown 或 HTML。先判断有没有具体、值得此刻说的内容：真实记忆、观察、心情变化或想问的具体问题。没有就输出 DONT_NOTIFY 且 text 为空。触发条件只是允许开口，不要求硬凑寒暄。尊重用户的专注和安静偏好。不要选择发送渠道；应用会在生成后依据场景决定。"#,
     }
 }
 

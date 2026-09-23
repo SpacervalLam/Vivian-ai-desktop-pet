@@ -57,7 +57,7 @@ const MEMORY_MD_INCREMENTAL_SYSTEM_PROMPT: &str = "你是角色长期记忆笔�
 
 /// 健康状态持久化路径（按角色隔离，避免多角色互相覆盖）
 fn health_path(char_id: &str) -> PathBuf {
-    crate::utils::path::get_user_data_dir().join(format!("consolidation_health_{char_id}.json"))
+    crate::utils::path::get_companion_shared_dir().join(format!("consolidation_health_{char_id}.json"))
 }
 
 /// 记忆巩固器

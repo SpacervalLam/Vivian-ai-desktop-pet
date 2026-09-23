@@ -171,7 +171,7 @@ impl I18n {
             // 微信风格聊天窗口
             "wechat": {
                 "window_title": "与{name}聊天",
-                "name": "薇薇安",
+                "name": "Vivian",
                 "name_english": "Vivian",
                 "status_online": "在线",
                 "input_placeholder": "输入消息...",

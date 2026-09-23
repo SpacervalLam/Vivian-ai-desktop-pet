@@ -68,7 +68,7 @@ pub use temporal_context::{build_temporal_facts, serialize_temporal_facts, Tempo
 pub use working_memory::{WorkingMemory, WorkingMemoryEntry, WorkingMemorySource};
 
 /// 已知角色 ID 列表（用于从文本中识别角色实体并 boost 注意力）
-pub const KNOWN_CHAR_IDS: &[&str] = &["vivian", "nana", "薇薇安", "娜娜"];
+pub const KNOWN_CHAR_IDS: &[&str] = &["vivian", "nana", "Vivian", "Nana"];
 
 /// 从用户输入提取注意力焦点实体并 boost 到 Mind。
 ///

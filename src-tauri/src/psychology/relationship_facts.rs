@@ -20,7 +20,6 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{VivianError, VivianResult};
-use crate::utils::path::get_user_data_dir;
 
 /// 每对 (owner_agent, target_agent) 保留上限
 const MAX_FACTS_PER_PAIR: usize = 30;
@@ -96,7 +95,7 @@ static RELATIONSHIP_FACTS_ENGINE: Lazy<Arc<RelationshipFactsEngine>> = Lazy::new
 
 impl RelationshipFactsEngine {
     fn new() -> VivianResult<Self> {
-        let dir = get_user_data_dir().join("psychology");
+        let dir = crate::utils::path::get_companion_shared_dir().join("psychology");
         std::fs::create_dir_all(&dir)?;
         let path = dir.join("relationship_facts.json");
         let mut engine = Self {

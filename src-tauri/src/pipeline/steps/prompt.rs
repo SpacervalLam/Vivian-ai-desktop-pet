@@ -32,8 +32,8 @@ use crate::utils::EnvironmentManager;
 fn fallback_identity_block(char_id: &str, lang: &str) -> String {
     let lang_norm = crate::pipeline::prompt_modules::normalize_lang(lang);
     let (name, persona_zh) = match char_id {
-        "nana" => ("娜娜", "一个温柔但有力量的人，同时也是一只桌面宠物。你说话轻声细语但很稳。"),
-        _ => ("薇薇安", "一个温柔、活泼、有点小傲娇的桌面宠物。你生活在用户的桌面上，陪伴用户工作和生活。"),
+        "nana" => ("Nana", "一个温柔但有力量的人，同时也是一只桌面宠物。你说话轻声细语但很稳。"),
+        _ => ("Vivian", "一个温柔、活泼、有点小傲娇的桌面宠物。你生活在用户的桌面上，陪伴用户工作和生活。"),
     };
     match lang_norm {
         "en" => match char_id {
@@ -1471,8 +1471,8 @@ fn build_emotion_state_section(
 
     let dominant_name = dominant.as_str();
     let character_bias = match (lang_norm, char_id) {
-        ("zh", "vivian") => "薇薇安：正向且高激活时可以更快、更口语，偶尔自然接一个梗；低激活时少说半句即可。",
-        ("zh", _) => "娜娜：激活度主要改变句子的轻重和停顿，不要突然变成夸张活泼或刻意忧郁。",
+        ("zh", "vivian") => "Vivian：正向且高激活时可以更快、更口语，偶尔自然接一个梗；低激活时少说半句即可。",
+        ("zh", _) => "Nana：激活度主要改变句子的轻重和停顿，不要突然变成夸张活泼或刻意忧郁。",
         ("ja", "vivian") => "Vivian：ポジティブで活性が高い時はテンポを少し上げ、自然なら一度だけ軽いネット表現を使ってよい。低い時は半文ぶん静かに。",
         ("ja", _) => "Nana：活性度は文の重さと間にだけ反映し、急に大げさに明るくしたり沈んだ演技をしない。",
         (_, "vivian") => "Vivian: with positive high activation, speak a little faster and allow one natural online reaction; with low activation, simply say a little less.",

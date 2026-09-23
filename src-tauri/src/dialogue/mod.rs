@@ -23,7 +23,6 @@ use tauri::{AppHandle, Emitter};
 
 use crate::error::{VivianError, VivianResult};
 use crate::types::response::ChatMessage;
-use crate::utils::path::get_character_data_dir;
 
 use self::history::ChatMessageHistory;
 
@@ -515,7 +514,7 @@ impl DialogueManager {
     }
 
     fn history_dir(&self) -> PathBuf {
-        let dir = get_character_data_dir(&self.char_id).join("history");
+        let dir = crate::utils::path::get_companion_data_dir(&self.char_id).join("history");
         let _ = fs::create_dir_all(&dir);
         dir
     }

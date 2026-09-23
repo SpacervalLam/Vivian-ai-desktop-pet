@@ -915,7 +915,7 @@ pub fn evaluate_epistemic_state(
         reasons.push(format!("陌生命名实体关联外部动态: {}", unfamiliar_named_entities.join("+")));
     }
 
-    // 5. 复用 FastPerceptionResult 的意图置信度
+    // 6. 复用 FastPerceptionResult 的意图置信度
     if let Some(fp) = perception {
         if fp.intent.label == "question" && fp.intent.confidence < 0.5 {
             clarity = (clarity - 0.15).max(0.0);
@@ -928,7 +928,7 @@ pub fn evaluate_epistemic_state(
         }
     }
 
-    // 6. 时效性内容检测 → 提高时效敏感性
+    // 7. 时效性内容检测 → 提高时效敏感性
     let recency_markers = ["最近", "今天", "刚刚", "昨天", "这周", "本周", "今年", "去年"];
     let greeting_patterns = ["你好", "早上好", "晚上好", "晚安", "嗨", "hello", "hi"];
     let has_recency = recency_markers.iter().any(|m| trimmed.contains(m));
@@ -939,14 +939,14 @@ pub fn evaluate_epistemic_state(
         reasons.push("时效性内容可能需要验证".to_string());
     }
 
-    // 7. 复杂问句 + 较长 → 提高知识缺口
+    // 8. 复杂问句 + 较长 → 提高知识缺口
     if (trimmed.contains('？') || trimmed.contains('?')) && input_len > 15 {
         factual = (factual + 0.10).min(1.0);
         gap = (gap + 0.10).min(1.0);
         reasons.push("复杂问句".to_string());
     }
 
-    // 8. 实体/名词组合 + 问号 → 强搜索信号（如"英伟达现在市值多少"）
+    // 9. 实体/名词组合 + 问号 → 强搜索信号（如"英伟达现在市值多少"）
     if proper_noun_hits.len() >= 1 && (trimmed.contains('？') || trimmed.contains('?')) {
         temporal = (temporal + 0.15).min(1.0);
         factual = (factual + 0.25).min(1.0);
@@ -1754,5 +1754,16 @@ mod tests {
         assert!(modules.contains(&"tools".to_string()));
         assert!(modules.contains(&"celebration".to_string()));
         assert!(modules.contains(&"relationship".to_string()));
+    }
+
+    #[test]
+    fn unknown_named_entity_with_external_claim_prefers_search() {
+        let assessment = evaluate_epistemic_state(
+            "倒也不是不可能提前，Tibo发个推说提前就提前了",
+            "zh",
+            None,
+        );
+        assert!(matches!(assessment.decision, KnowledgeDecision::SearchPreferred | KnowledgeDecision::SearchRequired));
+        assert!(assessment.search_query.as_deref().is_some_and(|query| query.contains("Tibo")));
     }
 }

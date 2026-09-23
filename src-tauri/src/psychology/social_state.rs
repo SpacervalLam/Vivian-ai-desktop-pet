@@ -23,7 +23,6 @@ use crate::error::{VivianError, VivianResult};
 use crate::psychology::relationship::{
     RelationshipDeltas, RelationshipStage, RelationshipState,
 };
-use crate::utils::path::get_user_data_dir;
 
 /// 三方社交状态快照
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -62,7 +61,7 @@ fn pair_key(a: &str, b: &str) -> String {
 
 impl SocialStateEngine {
     fn new() -> VivianResult<Self> {
-        let dir = get_user_data_dir().join("psychology");
+        let dir = crate::utils::path::get_companion_shared_dir().join("psychology");
         std::fs::create_dir_all(&dir)?;
         let path = dir.join("social_state.json");
         let mut engine = Self {

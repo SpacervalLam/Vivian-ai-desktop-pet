@@ -106,7 +106,7 @@ function audioCacheSet(key: string, value: string): void {
   }
 }
 
-/** 联动卡片消息：薇薇安推送的待办/定时任务提醒 */
+/** 联动卡片消息：Vivian推送的待办/定时任务提醒 */
 interface CardMessage {
   id: string;
   cardType: 'todo' | 'scheduler';
@@ -750,6 +750,7 @@ const Bubble = React.memo(function Bubble({ message, onOpenImage, senderName, ch
           const existing = await WebviewWindow.getByLabel('memory');
           if (existing) {
             await emit('memory:navigate', { page: 'notebook', notebookId: noteId, notebookCharacter: charId });
+            await existing.setAlwaysOnTop(false);
             await existing.setFocus();
             return;
           }
@@ -761,6 +762,7 @@ const Bubble = React.memo(function Bubble({ message, onOpenImage, senderName, ch
             resizable: true,
             decorations: false,
             transparent: false,
+            alwaysOnTop: false,
             shadow: true,
             minWidth: 1260,
             minHeight: 896,
@@ -1017,6 +1019,7 @@ const LinkageCard: React.FC<{ card: CardMessage; t: (k: string) => string; chara
         try {
           if (await existing.isVisible()) {
             await emit('memory:navigate', { page });
+            await existing.setAlwaysOnTop(false);
             await existing.setFocus();
             return;
           }
@@ -1026,6 +1029,7 @@ const LinkageCard: React.FC<{ card: CardMessage; t: (k: string) => string; chara
         url: `/?view=memory&nav=${page}`,
         title: i18n.t('memory.title'),
         width: window.screen.width, height: window.screen.height, resizable: true, decorations: false, transparent: false, shadow: true,
+        alwaysOnTop: false,
         minWidth: 1260, minHeight: 896,
         visible: false,
         dragDropEnabled: true,

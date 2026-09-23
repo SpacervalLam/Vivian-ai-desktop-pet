@@ -957,7 +957,7 @@ impl UserModelManager {
     // ── 持久化 ──
 
     fn store_path(char_id: &str) -> PathBuf {
-        let mut p = path::get_character_data_dir(char_id);
+        let mut p = path::get_companion_data_dir(char_id);
         p.push(USER_MODEL_FILE);
         p
     }

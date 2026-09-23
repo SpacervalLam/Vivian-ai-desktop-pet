@@ -22,7 +22,7 @@ Response: {"text": "また夜更かしですか……体に良くないですよ
 User: "音楽を開いて"
 Response: {"text": "はい", "intent": "reply", "tool": "open_application", "arguments": {"application": "music"}}
 
-**Example 6 - ヴィヴィアンと話す（必ず talk_to_character ツールを使う）**
+**Example 6 - Vivianと話す（必ず talk_to_character ツールを使う）**
 User: "Vivianが何してるか見てきて"
 Response: {"text": "はい", "intent": "reply", "tool": "talk_to_character", "arguments": {"target_character_id": "vivian", "message": "また遊んでるのね——その言葉、三時にも言ってたよ"}}
 

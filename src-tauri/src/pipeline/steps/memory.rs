@@ -209,8 +209,8 @@ impl Runnable for MemoryRetrievalStep {
 
         let strategy = self.strategy.unwrap_or(RetrievalStrategy::Auto);
         let strategy_name = format!("{:?}", strategy);
-        // 检索上限放大至 16，再由 MemoryFilter 按权重截断到 5
-        let limit = 16;
+        // 兼容旧库：原先的 OS/话题/工具记录可能占据候选位，先多取再按陪伴记忆边界过滤。
+        let limit = 24;
         let items = self
             .memory
             .search_memories(&retrieval_query, strategy, limit)
@@ -237,8 +237,10 @@ impl Runnable for MemoryRetrievalStep {
         let char_id = self.memory.char_id().to_string();
         let items: Vec<_> = items
             .into_iter()
-            .filter(|m| crate::memory::precision_filter::is_relevant_to_entity(m, &char_id))
+            .filter(|m| crate::memory::precision_filter::is_relevant_to_entity(m, &char_id)
+                && crate::memory::companion_policy::is_recallable(m, current_timestamp()))
             .collect();
+        let items = crate::memory::companion_policy::dedup_recall(items, current_timestamp(), limit);
 
         // 应用 MemoryFilter：跨会话过滤临时话题、保留长期偏好
         let (mut filtered_items, session_id, new_session) = if let Some(filter_arc) = &self.memory_filter {
@@ -388,6 +390,9 @@ impl Runnable for MemoryRetrievalStep {
             if !crate::memory::precision_filter::is_relevant_to_entity(m, &char_id) {
                 return false;
             }
+            if !crate::memory::companion_policy::is_recallable(m, current_timestamp()) {
+                return false;
+            }
             let stripped = parse_any_speaker_prefix(&m.content).0;
             let trimmed = stripped.trim();
             trimmed != state.user_input.trim()
@@ -403,9 +408,10 @@ impl Runnable for MemoryRetrievalStep {
                     .unwrap_or(std::cmp::Ordering::Equal)
             });
         }
-        // Keep the final prompt focused: graph expansion may discover useful context, but a
-        // companion should not parade many old facts into one ordinary turn.
-        filtered_items.truncate(5);
+        // 融合路径可能返回同一事实的原话、摘要和重复副本；运行时想法不能成为对话证据。
+        filtered_items = crate::memory::companion_policy::dedup_recall(
+            filtered_items, current_timestamp(), 5,
+        );
 
         // ── 检索后验证（verifier）──
         // 若注入了 router，用小模型过滤掉与用户问题无关的检索结果，减少幻觉噪声。
@@ -476,9 +482,9 @@ impl Runnable for MemoryRetrievalStep {
         let mut memory_parts: Vec<String> = Vec::new();
         let mut memory_details: Vec<serde_json::Value> = Vec::new();
         for mem in &filtered_items {
-            let content = &mem.content;
+            let content = crate::utils::truncate_chars(&mem.content, 180);
             // 如果内容已有 [X says to Y] 说话者前缀，则不再额外添加 "User: "/"AI: " 标签
-            let (_, has_spk_prefix, _) = parse_any_speaker_prefix(content);
+            let (_, has_spk_prefix, _) = parse_any_speaker_prefix(&content);
             let has_speaker_prefix = has_spk_prefix.is_some();
             // 遍历 tags 查找角色归属（兼容 LongTerm 的 [mem_type, subject] 与 ShortTerm 的 [short_term, user/assistant, emo]）
             let role_prefix = if !has_speaker_prefix
@@ -1105,50 +1111,17 @@ impl Runnable for MemorySavingRunnable {
                 (Some(um), Some(am))
             };
 
-            let ltm = state.long_term_memory.trim();
-            let source_quote = state
-                .metadata
-                .get("long_term_memory_source_quote")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .trim();
-            let verified_ltm = if !ltm.is_empty()
-                && !source_quote.is_empty()
-                && state.user_input.contains(source_quote)
-            {
-                Some(ltm)
-            } else {
-                if !ltm.is_empty() {
-                    tracing::warn!(
-                        "[MemorySaving] 丢弃缺少可核验本轮用户原话的 long_term_memory"
-                    );
-                }
-                None
-            };
-            // 用户显式要求记住的长期事实：广播场景下同样以"当众说"落账，
-            // 否则这条事实会带着"[User says to me]"的前缀，把广播重新写成私聊。
-            let ltm_is_broadcast = state.current_channel == "broadcast";
-            let ltm_meta = verified_ltm.map(|_| {
-                serde_json::json!({
-                    "channel": state.current_channel,
-                    "speaker": "user",
-                    "listener": if ltm_is_broadcast { "all" } else { char_id.as_str() },
-                    "knowledge_source": if ltm_is_broadcast { "broadcast" } else { "direct" },
-                    "source": "user_explicit",
-                    "source_quote": source_quote,
-                })
-            });
             let save_fut = memory_manager.save_context_with_metadata(
                 None,
                 &clean_responses,
-                verified_ltm,
+                None,
                 "neutral",
                 Some(ai_emotion_label),
                 state.importance_user,
                 state.importance_ai,
                 user_meta,
                 ai_meta,
-                ltm_meta,
+                None,
             );
             // 2 秒超时：save_context_with_metadata 已不再触发 LLM enrich
             // （LTM 走 add_memory_with_metadata 路径，主调 LLM 已完成语义抽取），

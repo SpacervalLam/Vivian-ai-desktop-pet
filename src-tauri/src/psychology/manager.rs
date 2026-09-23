@@ -1183,7 +1183,7 @@ impl PsychologyManager {
 
 /// 持久化到文件的路径辅助
 pub fn default_psychology_path(data_dir: &std::path::Path) -> std::path::PathBuf {
-    data_dir.join("psychology.json")
+    data_dir.join("companion-v2").join("psychology.json")
 }
 
 #[cfg(test)]

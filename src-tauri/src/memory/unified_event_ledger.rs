@@ -32,7 +32,6 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 
 use crate::error::{VivianError, VivianResult};
-use crate::utils::path::get_user_data_dir;
 
 /// 事件内容预览的最大字符数
 const CONTENT_PREVIEW_MAX_CHARS: usize = 80;
@@ -192,7 +191,7 @@ static UNIFIED_EVENT_LEDGER: Lazy<Arc<UnifiedEventLedger>> = Lazy::new(|| {
 
 impl UnifiedEventLedger {
     fn new() -> VivianResult<Self> {
-        let dir = get_user_data_dir().join("memory");
+        let dir = crate::utils::path::get_companion_shared_dir().join("memory");
         std::fs::create_dir_all(&dir)?;
         let path = dir.join("unified_event_ledger.json");
         let mut engine = Self {

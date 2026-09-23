@@ -5,7 +5,7 @@ const resources = {
   'zh-CN': {
     translation: {
       // ===== 保留原有扁平键（供 App.tsx / ContextMenu / SystemTray 使用） =====
-      say_something: '想和薇薇安说点什么吗？',
+      say_something: '想和Vivian说点什么吗？',
       settings: '设置',
       memory_management: '笔记本',
       diary: '日记本',
@@ -25,7 +25,7 @@ const resources = {
       edit: '编辑',
       search: '搜索',
       loading: '加载中…',
-      thinking: '薇薇安思考中…',
+      thinking: 'Vivian思考中…',
       listening: '正在聆听…',
       memory_count: '共 {{count}} 条记忆',
       no_memory: '暂无记忆',
@@ -103,8 +103,8 @@ const resources = {
         none: '无',
         coming_soon: '敬请期待',
         user: '用户',
-        vivian: '薇薇安',
-        nana: '娜娜',
+        vivian: 'Vivian',
+        nana: 'Nana',
       },
 
       // ===== ConfigWindow =====
@@ -226,7 +226,7 @@ const resources = {
         section_world_consolidation: '记忆巩固',
         field_world_enable: '启用真实世界感知',
         field_world_inject_prompt: '注入世界快照到对话',
-        world_inject_prompt_help: '让薇薇安在对话时知道外面在下雨/今天是中秋等真实世界信息',
+        world_inject_prompt_help: '让Vivian在对话时知道外面在下雨/今天是中秋等真实世界信息',
         field_world_weather: '启用天气感知',
         field_world_weather_ttl: '天气缓存有效期（秒）',
         world_weather_ttl_help: '默认 3600 秒（1 小时），缓存期间不重复请求',
@@ -718,6 +718,7 @@ const resources = {
         preset_together: 'Together AI',
         preset_wenxin: 'Baidu',
         preset_hunyuan: 'Hunyuan',
+        preset_jev: 'Jev / TypeSafe',
         preset_custom: 'Custom',
         // Options - retrieval
         opt_auto: '自动',
@@ -1156,6 +1157,7 @@ const resources = {
         routing_knowledge_acquisition: '知识采集',
         routing_translation: '翻译服务',
         routing_bystander_judge: '旁观插话判断',
+        routing_simple_judge: '简单判断',
         routing_intent_judge: '会话关闭意图判断 / 桌宠反应',
         routing_asr_polish: '语音识别整理',
         routing_reflection: '异步反思',
@@ -1171,6 +1173,7 @@ const resources = {
         routing_knowledge_acquisition_help: '检测到知识缺口时后台搜索并学习新知识入库。低频后台任务，需要基本的信息总结能力',
         routing_translation_help: '跨语言 TTS 时将文本从显示语言翻译为 TTS 语言。仅在翻译服务选择 LLM 时使用此路由，简单翻译任务，便宜模型即可',
         routing_bystander_judge_help: '用户与某角色对话时，轻量 LLM 判断在线旁观者是否有动机插话。仅返回布尔判断，不生成内容。高频轻量任务，建议便宜快速模型',
+        routing_simple_judge_help: '选择主动问候的发送渠道、判断旁观者是否插话等简短决策。可配置 Jev（专用判断接口）或普通聊天模型；未配置时沿用规则与原任务回退。',
         routing_intent_judge_help: '每轮对话后判断会话是否应关闭及关闭原因（晚安/再见/被打断/冲突/切换话题等）；也用于用户摸头/双击/长按/拖拽/甩飞桌宠时，生成一句符合人设的短反应。高频轻量任务，建议便宜快速模型',
         routing_asr_polish_help: '语音识别结束后用 LLM 整理重写输入框中的识别文本：修正同音字错误、去除口头语气词、补全标点。短文本整理任务，建议便宜快速模型',
         // Routing
@@ -2512,8 +2515,8 @@ const resources = {
         // Diary 页
         diary: {
           loading: '加载日记…',
-          no_diary_vivian: '还没有日记，和薇薇安聊聊天吧 ☕',
-          no_diary_nana: '还没有日记，和娜娜聊聊天吧 ☕',
+          no_diary_vivian: '还没有日记，和Vivian聊聊天吧 ☕',
+          no_diary_nana: '还没有日记，和Nana聊聊天吧 ☕',
           list_title: '日记列表 · {{shown}} / {{total}}',
           select_hint: '从左侧列表选择一篇日记查看详情',
           word_count_suffix: '{{n}} 字',
@@ -2643,8 +2646,8 @@ const resources = {
         list_all: '全部记录',
         list_clear_filter: '清除筛选',
         empty_loading: '加载中…',
-        empty_no_diary: '还没有日记，和薇薇安聊聊天吧 ☕',
-        empty_no_diary_nana: '还没有日记，和娜娜聊聊天吧 ☕',
+        empty_no_diary: '还没有日记，和Vivian聊聊天吧 ☕',
+        empty_no_diary_nana: '还没有日记，和Nana聊聊天吧 ☕',
         empty_no_match: '无匹配日记',
         empty_diary: '（空日记）',
         // Detail
@@ -2759,7 +2762,7 @@ const resources = {
         voice_asr_failed: '语音识别启动失败，仅保存语音消息',
         drag_file_hint: '松开以发送文件',
         drag_file_home_hint: '请先进入对话再发送文件',
-        title: '薇薇安',
+        title: 'Vivian',
         status_typing: '正在输入…',
         status_online: '在线',
         status_busy: '忙碌',
@@ -3001,7 +3004,7 @@ const resources = {
 
       // ===== RealtimeCallWindow =====
       realtime: {
-        contact_name: '薇薇安',
+        contact_name: 'Vivian',
         avatar_emoji: '🎤',
         you: '你',
         status_idle: '未通话',
@@ -3722,6 +3725,7 @@ const resources = {
         preset_together: 'Together AI',
         preset_wenxin: 'Baidu',
         preset_hunyuan: 'Hunyuan',
+        preset_jev: 'Jev / TypeSafe',
         preset_custom: 'Custom',
         opt_auto: 'Auto',
         opt_keyword: 'Keyword',
@@ -4152,6 +4156,7 @@ const resources = {
         routing_knowledge_acquisition: 'Knowledge Acquisition',
         routing_translation: 'Translation',
         routing_bystander_judge: 'Bystander Interjection Judge',
+        routing_simple_judge: 'Simple Decisions',
         routing_intent_judge: 'Session Close Intent Judge / Pet Reaction',
         routing_asr_polish: 'ASR Text Polish',
         routing_reflection: 'Async Reflection',
@@ -4167,6 +4172,7 @@ const resources = {
         routing_knowledge_acquisition_help: 'Background search and knowledge acquisition when knowledge gaps are detected. Low-frequency background task; basic summarization ability needed',
         routing_translation_help: 'Translates text from display language to TTS language for cross-language TTS. Only used when translation provider is set to LLM. Simple task, cheap model is sufficient',
         routing_bystander_judge_help: 'When user talks to a character, a lightweight LLM judges whether an online bystander has motive to interject. Returns only a boolean judgment, no content. High-frequency lightweight task; cheap fast model recommended',
+        routing_simple_judge_help: 'Small choices such as proactive greeting channel and bystander interjection. Supports Jev decision API or a chat model; without a route, rules and the existing task fallback apply.',
         routing_intent_judge_help: 'After each turn, judges whether the session should close and why (goodnight/goodbye/interrupted/conflict/switch_topic); also generates a one-line in-character reaction when the user taps, double-clicks, long-presses, drags or flings the desktop pet. High-frequency lightweight task; cheap fast model recommended',
         routing_asr_polish_help: 'After speech recognition finishes, an LLM tidies up and rewrites the recognized text in the input box: fixes homophone errors, removes filler words, adds punctuation. Short-text cleanup task; cheap fast model recommended',
         // Routing
@@ -5987,7 +5993,7 @@ const resources = {
   ja: {
     translation: {
       // ===== 既存のフラットキー（App.tsx / ContextMenu / SystemTray 用） =====
-      say_something: '薇薇安に話しかけますか？',
+      say_something: 'Vivianに話しかけますか？',
       settings: '設定',
       memory_management: 'ノート',
       diary: '日記',
@@ -6007,7 +6013,7 @@ const resources = {
       edit: '編集',
       search: '検索',
       loading: '読み込み中…',
-      thinking: '薇薇安が考え中…',
+      thinking: 'Vivianが考え中…',
       listening: '聞いています…',
       memory_count: '{{count}} 件の記憶',
       no_memory: '記憶がありません',
@@ -6084,8 +6090,8 @@ const resources = {
         none: 'なし',
         coming_soon: '近日対応',
         user: 'ユーザー',
-        vivian: '薇薇安',
-        nana: '娜娜',
+        vivian: 'Vivian',
+        nana: 'Nana',
       },
 
       config: {
@@ -6204,7 +6210,7 @@ const resources = {
         section_world_consolidation: '記憶統合',
         field_world_enable: 'リアルワールド知覚を有効化',
         field_world_inject_prompt: '世界スナップショットを会話に注入',
-        world_inject_prompt_help: '会話中にビビアンが外が雨/今日は中秋の月見などリアルワールド情報を知覚',
+        world_inject_prompt_help: '会話中にVivianが外が雨/今日は中秋の月見などリアルワールド情報を知覚',
         field_world_weather: '天気知覚を有効化',
         field_world_weather_ttl: '天気キャッシュ有効期間（秒）',
         world_weather_ttl_help: 'デフォルト 3600 秒（1時間）、キャッシュ有効期間内は再リクエストなし',
@@ -6685,6 +6691,7 @@ const resources = {
         preset_together: 'Together AI',
         preset_wenxin: 'Baidu',
         preset_hunyuan: 'Hunyuan',
+        preset_jev: 'Jev / TypeSafe',
         preset_custom: 'Custom',
         opt_auto: '自動',
         opt_keyword: 'キーワード',
@@ -7115,6 +7122,7 @@ const resources = {
         routing_knowledge_acquisition: '知識獲得',
         routing_translation: '翻訳サービス',
         routing_bystander_judge: '傍観者割込判定',
+        routing_simple_judge: '簡単な判断',
         routing_intent_judge: 'セッション終了意図判定 / ペットのリアクション',
         routing_asr_polish: '音声認識テキスト整理',
         routing_reflection: '非同期反思',
@@ -7130,6 +7138,7 @@ const resources = {
         routing_knowledge_acquisition_help: '知識ギャップ検出時にバックグラウンドで検索し新知識を学習。低頻度バックグラウンドタスク。基本的な要約力があれば十分',
         routing_translation_help: 'クロス言語 TTS 時にテキストを表示言語から TTS 言語に翻訳。翻訳サービスで LLM 選択時のみ使用。単純な翻訳タスク、安価なモデルで十分',
         routing_bystander_judge_help: 'ユーザーがキャラクターと会話中、軽量 LLM がオンライン傍観者の割込動機を判定。真偽値のみ返し内容は生成しない。高頻度軽量タスク、安価な高速モデル推奨',
+        routing_simple_judge_help: '積極的な声かけの送信先や傍観者の割込などの小さな判断。Jev の判断 API または通常のチャットモデルを設定可能。未設定ならルールと既存タスクに戻る。',
         routing_intent_judge_help: '各ターン後にセッションを終了すべきかとその理由（おやすみ/さよなら/中断/衝突/話題切替）を判定。ユーザーがペットを撫でる・ダブルクリック・長押し・ドラッグ・投げ飛ばした際に、キャラクター設定に沿った一言リアクションを生成するのにも使用。高頻度軽量タスク、安価な高速モデル推奨',
         routing_asr_polish_help: '音声認識終了後、LLM が入力欄の認識テキストを整理・書き直し：同音字の誤り修正、口癖除去、句読点の補完。短文整理タスクのため安価な高速モデル推奨',
         // Routing
@@ -7852,7 +7861,7 @@ const resources = {
           char_count: '{{n}} 文字',
           filter_all: 'すべて',
           char_vivian: 'Vivian',
-          char_nana: 'なな',
+          char_nana: 'Nana',
           copied: 'コピーしました',
           copy: 'コピー',
           duration_seconds: '{{n}} 秒',
@@ -8443,8 +8452,8 @@ const resources = {
         // Diary ページ
         diary: {
           loading: '日記を読み込み中…',
-          no_diary_vivian: 'まだ日記がありません。薇薇安とお話ししましょう ☕',
-          no_diary_nana: 'まだ日記がありません。娜娜とお話ししましょう ☕',
+          no_diary_vivian: 'まだ日記がありません。Vivianとお話ししましょう ☕',
+          no_diary_nana: 'まだ日記がありません。Nanaとお話ししましょう ☕',
           list_title: '日記リスト · {{shown}} / {{total}}',
           select_hint: '左のリストから日記を選んで詳細を表示',
           word_count_suffix: '{{n}} 文字',
@@ -8570,8 +8579,8 @@ const resources = {
         list_all: '全ての記録',
         list_clear_filter: 'フィルター解除',
         empty_loading: '読み込み中…',
-        empty_no_diary: 'まだ日記がありません。薇薇安とお話ししましょう ☕',
-        empty_no_diary_nana: 'まだ日記がありません。娜娜とお話ししましょう ☕',
+        empty_no_diary: 'まだ日記がありません。Vivianとお話ししましょう ☕',
+        empty_no_diary_nana: 'まだ日記がありません。Nanaとお話ししましょう ☕',
         empty_no_match: '一致する日記がありません',
         empty_diary: '（空の日記）',
         detail_empty_title: '日記を選択',
@@ -8683,7 +8692,7 @@ const resources = {
         voice_asr_failed: '音声認識を開始できませんでした。音声メッセージのみ保存します',
         drag_file_hint: 'ドロップしてファイルを送信',
         drag_file_home_hint: '先に会話を開いてからファイルを送信してください',
-        title: '薇薇安',
+        title: 'Vivian',
         status_typing: '入力中…',
         status_online: 'オンライン',
         status_busy: 'ビジー',
@@ -8925,7 +8934,7 @@ const resources = {
 
       // ===== RealtimeCallWindow =====
       realtime: {
-        contact_name: '薇薇安',
+        contact_name: 'Vivian',
         avatar_emoji: '🎤',
         you: 'あなた',
         status_idle: '通話なし',

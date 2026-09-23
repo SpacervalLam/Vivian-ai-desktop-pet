@@ -271,14 +271,11 @@ const FURNITURE_BUILDERS: Record<string, (spec: FurnitureSpec) => THREE.Object3D
 /**
  * 角色贴图的边长上限。
  *
- * 两个角色的 GLB 各自内嵌一张 **2048²** 的贴图（`texture_20250901`，PNG 4MB），
- * 上传成 21.33 MB 显存（含 mip 链）——两张就是 **42.7 MB**，占全场景贴图预算
- * （77 MB）的 55%，是最大的一笔单项显存。
- *
- * 而 Q 版角色在画面里通常只有一两百像素高，2048² 是几十倍的过采样。缩到 1024²
- * 之后仍是 8 倍过采样（角色 1.2m 高 → 853 texel/m，屏幕在 1m 距离约 540 px/m），
- * 肉眼无差，直接省下 32 MB；顺带把首次上传的 16 MB 搬运和 2048² 的 mip 生成
- * 一起砍掉，加载也更顺。
+ * 角色 GLB 已由 scripts/room/repack_character_textures.py 原地重打包为
+ * **1024² JPEG** 内嵌贴图（原 Tripo 导出的 4096² 在部分 WebView2/显卡环境下
+ * createImageBitmap 解码失败,GLTFLoader 容忍式加载会把角色渲染成白模）。
+ * 现在贴图尺寸已 ≤ 上限,shrinkTexture 恒为 no-op,此上限保留作为防线:
+ * 将来若再换大贴图,自动缩到 1024² 兜底,避免显存与解码风险回潮。
  */
 const MODEL_MAP_MAX = 1024;
 
@@ -360,7 +357,7 @@ function toonifyModel(root: THREE.Object3D, sink: THREE.Texture[]): void {
 
     const out = Array.isArray(src) ? src.map(convert) : convert(src);
     mesh.material = out;
-    // 角色 GLB 的贴图是 2048² 的，缩到 MODEL_MAP_MAX 再上传（见该常量的注释）。
+    // GLB 内嵌贴图通常已由资源脚本压到 1024²；若将来资源变大，再缩到上限。
     // 放在材质换完之后：转换会丢掉一部分贴图槽位，只缩真正留下来会进显存的那张。
     for (const m of Array.isArray(out) ? out : [out]) {
       const map = (m as THREE.MeshToonMaterial).map;
@@ -2195,6 +2192,17 @@ export function RoomScene() {
     }, interiorDesign.prepareFurniture);
 
     const loader = new GLTFLoader();
+    // WebView2 may resolve an embedded image through createImageBitmap without rejecting
+    // the GLB load, leaving a valid mesh with a null map. Use the browser's image decoder
+    // for these small embedded character textures so texture failures don't silently turn
+    // the characters into white models.
+    loader.register((parser) => {
+      const textureLoader = new THREE.TextureLoader(parser.options.manager);
+      textureLoader.setCrossOrigin(parser.options.crossOrigin);
+      textureLoader.setRequestHeader(parser.options.requestHeader);
+      parser.textureLoader = textureLoader;
+      return { name: 'room-character-texture-loader' };
+    });
     const agents: PetAgent[] = [];
     const bodies: THREE.Object3D[] = [];
     const characterAnimations: Array<ReturnType<typeof createCharacterAnimation>> = [];

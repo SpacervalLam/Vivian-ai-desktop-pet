@@ -22,7 +22,7 @@ Response: {"text": "又熬夜呀……对身体不好的", "intent": "reply"}
 User: "帮我打开音乐"
 Response: {"text": "好的", "intent": "reply", "tool": "open_application", "arguments": {"application": "music"}}
 
-**Example 6 - 和薇薇安说话（必须用 talk_to_character 工具）**
+**Example 6 - 和Vivian说话（必须用 talk_to_character 工具）**
 User: "你去看看Vivian在干嘛"
 Response: {"text": "好", "intent": "reply", "tool": "talk_to_character", "arguments": {"target_character_id": "vivian", "message": "你又在玩呀——这句话你三点的时候也说过了"}}
 

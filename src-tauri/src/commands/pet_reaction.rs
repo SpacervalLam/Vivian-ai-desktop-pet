@@ -108,7 +108,7 @@ fn throttle_pass(char_id: &str, action: &str, now: f64) -> bool {
 
 /// 用户动作的「角色视角」描述 —— 喂给 LLM，让桌宠知道刚刚被怎么对待了。
 ///
-/// `name` 是角色名（薇薇安 / 娜娜 / Vivian / Nana），用于第三人称动作里指代自己。
+/// `name` 是角色名（Vivian / Nana / Vivian / Nana），用于第三人称动作里指代自己。
 fn action_prompt_line(name: &str, action: &str, impact: Option<f64>) -> String {
     match action {
         ACTION_SINGLE_CLICK => "用户用鼠标轻轻戳了戳你的脑袋，像是在摸头。".to_string(),
@@ -466,23 +466,23 @@ mod tests {
 
     #[test]
     fn ledger_text_is_meaningful_for_dizzy_cases() {
-        let fast = action_ledger_text("薇薇安", ACTION_FAST_DRAG, None).unwrap();
-        assert!(fast.contains("薇薇安"));
+        let fast = action_ledger_text("Vivian", ACTION_FAST_DRAG, None).unwrap();
+        assert!(fast.contains("Vivian"));
         assert!(fast.contains("甩"));
 
-        let hard = action_ledger_text("薇薇安", ACTION_EDGE_BOUNCE, Some(3.0)).unwrap();
-        let soft = action_ledger_text("薇薇安", ACTION_EDGE_BOUNCE, Some(0.5)).unwrap();
+        let hard = action_ledger_text("Vivian", ACTION_EDGE_BOUNCE, Some(3.0)).unwrap();
+        let soft = action_ledger_text("Vivian", ACTION_EDGE_BOUNCE, Some(0.5)).unwrap();
         assert_ne!(hard, soft);
     }
 
     #[test]
     fn rough_click_is_distinct_from_single_click() {
-        let rough = action_ledger_text("娜娜", ACTION_ROUGH_CLICK, None).unwrap();
-        let tap = action_ledger_text("娜娜", ACTION_SINGLE_CLICK, None).unwrap();
+        let rough = action_ledger_text("Nana", ACTION_ROUGH_CLICK, None).unwrap();
+        let tap = action_ledger_text("Nana", ACTION_SINGLE_CLICK, None).unwrap();
         assert_ne!(rough, tap);
-        assert!(rough.contains("娜娜"));
+        assert!(rough.contains("Nana"));
         // 动作语与账本文案都要认得出这个动作，不能落到 `_` 兜底上
-        assert!(action_prompt_line("娜娜", ACTION_ROUGH_CLICK, None).contains("惹毛"));
+        assert!(action_prompt_line("Nana", ACTION_ROUGH_CLICK, None).contains("惹毛"));
         assert_eq!(action_tag(ACTION_ROUGH_CLICK), "pet_rough_click");
         // 狂戳时不该跟着每次点击烧一次 token
         assert!(throttle_secs(ACTION_ROUGH_CLICK) > throttle_secs(ACTION_SINGLE_CLICK));

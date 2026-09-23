@@ -20,7 +20,7 @@ fn item_to_value(item: &crate::memory::types::MemoryItem) -> Value {
 
 /// 获取所有记忆（记忆管理窗口使用）
 ///
-/// 过滤掉 `metadata.source == "system_seed"` 的 seed 记忆 —— 这些是身份锚点与
+/// 过滤配置预设与系统 seed 记忆 —— 这些是身份锚点与
 /// 首次启动里程碑，属于系统内置恒久记忆，不应在 UI 中展示或被用户误删。
 ///
 /// `character_id` 由前端按当前窗口角色传入（None 时回退到活跃角色），
@@ -34,14 +34,17 @@ pub async fn get_memories(
     let memory = &character.brain.memory;
     let items = memory.get_all_memories().await.map_err(err_str)?;
     Ok(items
-        .iter()
+        .into_iter()
         .filter(|m| {
             m.metadata
                 .get("source")
                 .and_then(|v| v.as_str())
-                .map_or(true, |s| s != "system_seed")
+                .map_or(true, |s| s != "system_seed" && s != "environment_preset")
         })
-        .map(item_to_value)
+        .map(|mut m| {
+            m.embedding = None;
+            item_to_value(&m)
+        })
         .collect())
 }
 

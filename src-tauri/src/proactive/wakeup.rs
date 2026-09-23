@@ -49,7 +49,7 @@ pub struct WakeupScheduler {
 
 impl WakeupScheduler {
     fn new(char_id: &str) -> Self {
-        let dir = crate::utils::path::get_character_data_dir(char_id)
+        let dir = crate::utils::path::get_companion_data_dir(char_id)
             .join("proactive");
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("wakeups.json");

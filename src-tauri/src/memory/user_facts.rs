@@ -248,7 +248,7 @@ struct UserFactStoreInner {
 impl UserFactStore {
     /// 创建或加载用户事实存储（按角色隔离，避免人设泄露）
     pub fn new(llm: Option<Arc<dyn FactLlmClient>>, char_id: &str) -> VivianResult<Self> {
-        let store_path = path::get_character_data_dir(char_id).join("user_facts.json");
+        let store_path = path::get_companion_data_dir(char_id).join("user_facts.json");
 
         let mut inner = UserFactStoreInner {
             store_path,

@@ -33,6 +33,10 @@ pub struct ThoughtSynthesisOutput {
     pub thought: String,
     #[serde(default = "default_social_urge")]
     pub social_urge: f32,
+    #[serde(default)]
+    pub conversation_topic: String,
+    #[serde(default)]
+    pub conversation_evidence: String,
 }
 
 fn default_social_urge() -> f32 {
@@ -52,10 +56,12 @@ fn thought_output_schema() -> serde_json::Value {
                 "type": "number",
                 "minimum": 0.0,
                 "maximum": 1.0,
-                "description": "How strongly you want to initiate conversation with the user right now. 0.0=no urge, 1.0=very strong urge. Consider: mood, how long since last interaction, whether you have something worth saying, whether the user seems busy."
-            }
+                "description": "Raise above 0.8 only for a concrete timely topic supported by a recent user message. Generic mood or time passing is insufficient."
+            },
+            "conversation_topic": { "type": "string", "description": "A specific topic worth sharing now, or empty string" },
+            "conversation_evidence": { "type": "string", "description": "Exact short quote from the provided context supporting the topic, or empty string" }
         },
-        "required": ["thought", "social_urge"],
+        "required": ["thought", "social_urge", "conversation_topic", "conversation_evidence"],
         "additionalProperties": false
     })
 }
@@ -393,9 +399,9 @@ pub async fn synthesize_with_llm(
     );
 
     let system_prompt = match language {
-        "en" => "You are a virtual character. Summarize in ONE short first-person sentence (~60 chars) what you're thinking/feeling right now. Be natural and in-character.\n\nAlso output `social_urge` (0.0-1.0): how strongly you want to initiate conversation with the user right now. Consider: current mood, time since last interaction, whether you have something worth saying, whether the user seems busy/focused. High urge = you genuinely want to talk; low urge = you're content being quiet.\n\n[Hard rule] Only describe what you're actually experiencing right now — current mood, current environment (time/weather), and what's observable from the context below. Never fabricate specific events, actions, or experiences (e.g., eating, going out, watching a movie) unless they actually appear in the provided context. You live on the user's desktop — you don't have a body, meals, or offline life.\n\nOutput JSON: {\"thought\": \"...\", \"social_urge\": 0.0}",
-        "ja" => "あなたはバーチャルキャラクターです。今何を考えているか/感じているかを、一人称の短い一文（30字以内）でまとめてください。自然にキャラクターらしく。\n\n同時に `social_urge`（0.0-1.0）を出力してください：今どれくらいユーザーに話しかけたいか。現在の気分、最後の会話からの経過時間、話したいことがあるか、ユーザーが忙しそうかを考慮してください。値が高い＝本当に話したい、低い＝静かにしていたい。\n\n【厳守ルール】今実際に経験していること——今の気分、今の環境（時間・天気）、以下の文脈から観察できること——だけを描写してください。食事、外出、映画鑑賞など、具体的な出来事や行動、経験は、提供された文脈に実際に存在しない限り絶対にでっち上げないで。あなたはユーザーのデスクトップに住んでいて、肉体や食事やオフラインの生活はありません。\n\nJSON出力: {\"thought\": \"...\", \"social_urge\": 0.0}",
-        _ => "你是一个虚拟角色。用第一人称写一句简短的话（≤30字），描述你现在正在想什么/感受什么。要自然、有角色感。\n\n同时输出 `social_urge`（0.0-1.0）：你现在有多想主动和用户搭话。请综合考虑：当前心情、距上次对话多久、是否有值得说的话、用户是否看起来在忙。值高=确实想说话，值低=安静待着就好。\n\n【硬性规则】只能描述你当下真实正在经历的事——当前心情、当前环境（时间/天气）、以及下方文脉中可观察到的状态。绝对不要编造具体事件、动作或经历（比如吃饭、出门、看电影），除非它们真的出现在提供的文脉里。你生活在用户的桌面上，没有身体、没有饭局、没有线下的生活轨迹。\n\nJSON输出: {\"thought\": \"...\", \"social_urge\": 0.0}",
+        "en" => "Write one short, natural first-person current thought. The character lives on the desktop; do not invent an offline life. Separately judge whether there is a specific, useful thing to say to the user now. Give social_urge >= 0.8 only for a concrete timely reason, not loneliness, a generic greeting, weather, or the mere passage of time. If so, set conversation_topic and copy an exact short quote from a recent User message into conversation_evidence. Otherwise both strings are empty. Never turn your own earlier speculation into a fact. Output JSON only: {\"thought\":\"...\",\"social_urge\":0.0,\"conversation_topic\":\"\",\"conversation_evidence\":\"\"}.",
+        "ja" => "一人称で短く自然な現在の考えを書く。デスクトップの住人として、実在しない外出や体験を作らない。ユーザーに今伝える具体的で有益な話題がある場合だけ social_urge を 0.8 以上にし、conversation_topic に話題、conversation_evidence に最近のユーザーの発言から短い原文をそのまま写す。寂しさ、時刻、天気、定型挨拶だけでは空欄にする。自分の推測を事実にしない。JSON のみを返す: {\"thought\":\"...\",\"social_urge\":0.0,\"conversation_topic\":\"\",\"conversation_evidence\":\"\"}。",
+        _ => "用第一人称写一句简短自然的当前想法。你住在桌面上，不要编造线下经历。另判断此刻是否有具体且对用户有价值的话题：只有存在明确的新进展、可跟进的约定或近期对话留下的具体问题时，social_urge 才可达到 0.8；孤独感、时间流逝、天气和泛泛问候都不算。若有，把话题写入 conversation_topic，并从近期用户原话中逐字摘取最短依据放入 conversation_evidence；否则两者都留空。不得把自己的猜测当用户事实。只输出 JSON：{\"thought\":\"...\",\"social_urge\":0.0,\"conversation_topic\":\"\",\"conversation_evidence\":\"\"}。",
     };
 
     let messages = vec![
@@ -432,6 +438,8 @@ fn parse_thought_output(raw: &str, max_len: usize) -> VivianResult<ThoughtSynthe
                 return Ok(ThoughtSynthesisOutput {
                     thought,
                     social_urge: parsed.social_urge.clamp(0.0, 1.0),
+                    conversation_topic: parsed.conversation_topic.chars().take(48).collect(),
+                    conversation_evidence: parsed.conversation_evidence.chars().take(100).collect(),
                 });
             }
         }
@@ -450,6 +458,8 @@ fn parse_thought_output(raw: &str, max_len: usize) -> VivianResult<ThoughtSynthe
     Ok(ThoughtSynthesisOutput {
         thought: final_text,
         social_urge: default_social_urge(),
+        conversation_topic: String::new(),
+        conversation_evidence: String::new(),
     })
 }
 
@@ -537,17 +547,17 @@ pub async fn refresh_current_thought(
     world_provider: &Arc<WorldStateProvider>,
     language: &str,
 ) {
-    let top_entries: Vec<(WorkingMemorySource, String)> = {
+    let top_entries: Vec<(WorkingMemorySource, String, i64)> = {
         let wm = mind.working_memory.read();
         wm.top_n(3)
             .into_iter()
-            .map(|e| (e.source, e.content.clone()))
+            .map(|e| (e.source, e.content.clone(), e.created_at))
             .collect()
     };
 
     let top_refs: Vec<(WorkingMemorySource, &str)> = top_entries
         .iter()
-        .map(|(s, c)| (*s, c.as_str()))
+        .map(|(s, c, _)| (*s, c.as_str()))
         .collect();
 
     let emotion = mind.psychology.emotion();
@@ -571,10 +581,47 @@ pub async fn refresh_current_thought(
 
     match synthesize_with_llm(router, &ctx, language).await {
         Ok(output) => {
-            mind.set_current_thought(output.thought, output.social_urge);
+            let opportunity = validated_conversation_opportunity(&output, &top_entries);
+            mind.set_current_thought(output.thought, output.social_urge, opportunity);
         }
         Err(e) => {
             tracing::debug!("[thought_synthesis] LLM 合成失败: {}", e);
         }
+    }
+}
+
+fn validated_conversation_opportunity(
+    output: &ThoughtSynthesisOutput,
+    entries: &[(WorkingMemorySource, String, i64)],
+) -> Option<(String, String)> {
+    if output.social_urge < 0.8 || output.conversation_topic.trim().is_empty()
+        || output.conversation_evidence.trim().chars().count() < 3 {
+        return None;
+    }
+    let now = chrono::Utc::now().timestamp();
+    entries.iter().any(|(source, text, created_at)| {
+        matches!(source, WorkingMemorySource::UserMessage)
+            && (0..=600).contains(&(now - *created_at))
+            && text.contains(&output.conversation_evidence)
+    }).then(|| (output.conversation_topic.clone(), output.conversation_evidence.clone()))
+}
+
+#[cfg(test)]
+mod opportunity_tests {
+    use super::*;
+
+    #[test]
+    fn thought_candidate_requires_observed_evidence() {
+        let output = ThoughtSynthesisOutput {
+            thought: "想问问进展".into(), social_urge: 0.9,
+            conversation_topic: "考试进展".into(), conversation_evidence: "明天考试".into(),
+        };
+        let now = chrono::Utc::now().timestamp();
+        let user = vec![(WorkingMemorySource::UserMessage, "我明天考试".into(), now)];
+        assert!(validated_conversation_opportunity(&output, &user).is_some());
+        let self_guess = vec![(WorkingMemorySource::InnerMonologue, "猜他明天考试".into(), now)];
+        assert!(validated_conversation_opportunity(&output, &self_guess).is_none());
+        let old_user = vec![(WorkingMemorySource::UserMessage, "我明天考试".into(), now - 601)];
+        assert!(validated_conversation_opportunity(&output, &old_user).is_none());
     }
 }

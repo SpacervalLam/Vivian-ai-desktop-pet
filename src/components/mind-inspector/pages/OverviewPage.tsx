@@ -26,7 +26,7 @@ import {
 import { useNavigation } from '../NavigationContext';
 import MindPage from './MindPage';
 import WorldPage from './WorldPage';
-import GraphPage from './GraphPage';
+import MemoryPage from './MemoryPage';
 import UserProfilePage from './UserProfilePage';
 
 type OverviewTab = 'mind' | 'world' | 'graph' | 'profile';
@@ -69,7 +69,7 @@ const OverviewPage: React.FC = () => {
       case 'world':
         return <WorldPage />;
       case 'graph':
-        return <GraphPage />;
+        return <MemoryPage />;
       case 'profile':
         return <UserProfilePage />;
     }

@@ -14,6 +14,43 @@ use crate::proactive::{OnlineCompanion, TickContext};
 use crate::state::AppState;
 use crate::types::response::ChatMessage;
 
+/// Triggering a greeting and selecting its transport are separate decisions.
+/// The decision route is optional; hard context and a deterministic fallback
+/// keep delivery stable when the route is unconfigured or unavailable.
+async fn choose_proactive_channel(
+    action: &crate::proactive::ProactiveAction,
+    ctx: &TickContext,
+    chat_visible: bool,
+    router: &crate::providers::router::ModelRouter,
+    char_id: &str,
+) -> crate::proactive::DeliveryChannel {
+    use crate::proactive::{ContentType, DeliveryChannel};
+    if !ctx.user_present || chat_visible || matches!(action.content_type, ContentType::Share | ContentType::Info | ContentType::Reminder) {
+        return DeliveryChannel::ChatWindow;
+    }
+    let choice = router.choose_simple(
+        json!({
+            "trigger": action.trigger,
+            "message": action.content,
+            "user_present": ctx.user_present,
+            "idle_seconds": ctx.idle_seconds,
+            "active_window": ctx.active_window,
+            "is_user_chatting": ctx.is_user_chatting,
+            "chat_visible": chat_visible,
+        }),
+        "Choose the natural channel after the character has decided to speak. direct means a nearby, brief desktop remark. wechat means a message meant to start a conversation or await a reply. Favor direct when the user is at the desktop and the remark is casual; avoid forcing every greeting into chat.",
+        &[("direct", "Brief spoken desktop pet bubble while the user is here"),
+          ("wechat", "Private chat message needing attention or a reply")],
+        char_id,
+    ).await;
+    match choice.as_deref() {
+        Some("wechat") => DeliveryChannel::ChatWindow,
+        Some("direct") => DeliveryChannel::Bubble,
+        _ if action.content.contains('?') || action.content.contains('？') => DeliveryChannel::ChatWindow,
+        _ => DeliveryChannel::Bubble,
+    }
+}
+
 /// 跨角色发言协调：记录每个角色最近一次主动发言的时间戳。
 /// proactive_tick 触发前检查是否有其他角色在冷却窗口内发言过，
 /// 若有则跳过本次，避免两个角色同时发言。
@@ -1285,13 +1322,13 @@ pub async fn proactive_tick(
             "reason": "tts_playing",
         }));
     }
-    // 用户不在场时，主动消息全部强制走 ChatWindow（微信面板），
-    // 避免桌宠气泡无人看到。覆盖写入 user_messages 让下游投递、记忆、旁观过滤、
-    // 返回前端字段统一使用生效渠道。
-    if !ctx.user_present {
-        for action in &mut user_messages {
-            action.delivery_channel = crate::proactive::DeliveryChannel::ChatWindow;
-        }
+    // 触发与内容生成已经完成；现在根据实际场景统一选择投递渠道。
+    let chat_visible = app.get_webview_window("chat")
+        .and_then(|win| win.is_visible().ok()).unwrap_or(false);
+    for action in &mut user_messages {
+        action.delivery_channel = choose_proactive_channel(
+            action, &ctx, chat_visible, &brain.router, &char_id,
+        ).await;
     }
 
     for action in &user_messages {
@@ -1604,10 +1641,24 @@ async fn deliver_cross_character_messages(
 #[tauri::command]
 pub async fn drain_proactive_messages(
     character_id: Option<String>,
+    app: tauri::AppHandle,
     state: State<'_, Arc<AppState>>,
 ) -> Result<Value, String> {
     let brain = state.get_character(character_id.as_deref())?.brain;
-    let messages = brain.drain_proactive_messages();
+    let mut messages = brain.drain_proactive_messages();
+    let idle_seconds = crate::utils::get_system_idle_seconds().unwrap_or(0.0);
+    let ctx = TickContext {
+        idle_seconds,
+        user_present: idle_seconds < 300.0,
+        ..TickContext::default()
+    };
+    let chat_visible = app.get_webview_window("chat")
+        .and_then(|win| win.is_visible().ok()).unwrap_or(false);
+    for action in &mut messages {
+        action.delivery_channel = choose_proactive_channel(
+            action, &ctx, chat_visible, &brain.router, &brain.char_id,
+        ).await;
+    }
 
     // 按 delivery_channel 写入对话历史
     // - Bubble → channel="proactive"（被 wechat 过滤排除，桌宠气泡路径）

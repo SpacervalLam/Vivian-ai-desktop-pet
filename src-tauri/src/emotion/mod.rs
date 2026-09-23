@@ -217,7 +217,7 @@ impl EmotionAnalyzer {
         apply_bias_to_result(result, &bias)
     }
 
-    /// 薇薇安视角提示词
+    /// Vivian视角提示词
     pub fn get_vivian_aware_prompt(&self, result: &EmotionResult) -> String {
         vivian_aware_prompt(&result.emotion, result.intensity)
     }
@@ -287,34 +287,34 @@ fn apply_bias_to_result(result: EmotionResult, bias: &HashMap<String, f64>) -> E
     }
 }
 
-/// 生成薇薇安视角的情绪提示词
+/// 生成Vivian视角的情绪提示词
 fn vivian_aware_prompt(emotion: &str, intensity: f64) -> String {
     match emotion {
         "happy" | "excited" | "grateful" => {
-            format!("薇薇安感受到用户很开心（强度{:.2}），可以一起庆祝", intensity)
+            format!("Vivian感受到用户很开心（强度{:.2}），可以一起庆祝", intensity)
         }
         "sad" | "disappointed" => {
-            format!("薇薇安感受到用户有些难过（强度{:.2}），需要温柔陪伴", intensity)
+            format!("Vivian感受到用户有些难过（强度{:.2}），需要温柔陪伴", intensity)
         }
         "angry" | "frustrated" => {
-            format!("薇薇安感受到用户有些生气（强度{:.2}），需要耐心倾听", intensity)
+            format!("Vivian感受到用户有些生气（强度{:.2}），需要耐心倾听", intensity)
         }
         "anxious" => {
-            format!("薇薇安感受到用户有些焦虑（强度{:.2}），可以安抚鼓励", intensity)
+            format!("Vivian感受到用户有些焦虑（强度{:.2}），可以安抚鼓励", intensity)
         }
         "tired" | "bored" => {
-            format!("薇薇安感受到用户有些疲惫（强度{:.2}），建议休息一下", intensity)
+            format!("Vivian感受到用户有些疲惫（强度{:.2}），建议休息一下", intensity)
         }
         "surprised" => {
-            format!("薇薇安感受到用户很惊讶（强度{:.2}），可以一起感叹", intensity)
+            format!("Vivian感受到用户很惊讶（强度{:.2}），可以一起感叹", intensity)
         }
         "curious" => {
-            format!("薇薇安感受到用户很好奇（强度{:.2}），可以一起探索", intensity)
+            format!("Vivian感受到用户很好奇（强度{:.2}），可以一起探索", intensity)
         }
         "confused" => {
-            format!("薇薇安感受到用户有些困惑（强度{:.2}），可以耐心解释", intensity)
+            format!("Vivian感受到用户有些困惑（强度{:.2}），可以耐心解释", intensity)
         }
-        _ => format!("薇薇安感受到用户情绪平静（强度{:.2}）", intensity),
+        _ => format!("Vivian感受到用户情绪平静（强度{:.2}）", intensity),
     }
 }
 

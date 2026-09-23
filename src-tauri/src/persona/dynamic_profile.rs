@@ -29,7 +29,6 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{VivianError, VivianResult};
-use crate::utils::path::get_user_data_dir;
 
 /// 滚动窗口最大轮次数
 const MAX_TURNS: usize = 20;
@@ -154,7 +153,7 @@ pub struct DynamicBehaviorProfile {
 impl DynamicBehaviorProfile {
     /// 加载或创建新的动态行为画像
     pub fn new() -> VivianResult<Self> {
-        let dir = get_user_data_dir().join("persona");
+        let dir = crate::utils::path::get_companion_shared_dir().join("persona");
         std::fs::create_dir_all(&dir)
             .map_err(|e| VivianError::Memory(format!("创建动态画像目录失败: {e}")))?;
         let path = dir.join("dynamic_profile.json");
@@ -257,7 +256,7 @@ impl DynamicBehaviorProfile {
 
             sections.push(format!("最近话题：{}", if topics.is_empty() { "（暂无）".to_string() } else { topics.join("、") }));
             sections.push(format!("近期用户情绪：{}", if user_emotions.is_empty() { "（暂无）".to_string() } else { user_emotions.join("、") }));
-            sections.push(format!("近期薇薇安情绪：{}", if ai_emotions.is_empty() { "（暂无）".to_string() } else { ai_emotions.join("、") }));
+            sections.push(format!("近期Vivian情绪：{}", if ai_emotions.is_empty() { "（暂无）".to_string() } else { ai_emotions.join("、") }));
         }
 
         // 语义层（LLM 抽取的稳定行为模式）
@@ -269,7 +268,7 @@ impl DynamicBehaviorProfile {
             }
         }
 
-        format!("【薇薇安近期行为画像】\n{}", sections.join("\n"))
+        format!("【Vivian近期行为画像】\n{}", sections.join("\n"))
     }
 
     /// 合并 Stage 2 抽取的语义级行为画像（写路径，由 BrainChatChain 调用）
@@ -485,7 +484,7 @@ mod tests {
             );
         }
         let formatted = profile.format_for_prompt();
-        assert!(formatted.contains("薇薇安近期行为画像"));
+        assert!(formatted.contains("Vivian近期行为画像"));
         assert!(formatted.contains("互动轮次：5"));
     }
 

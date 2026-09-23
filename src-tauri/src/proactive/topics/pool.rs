@@ -15,7 +15,6 @@ use serde::{Deserialize, Serialize};
 use super::super::random_index;
 use super::tree::{TopicNode, TopicTree};
 use crate::error::{VivianError, VivianResult};
-use crate::utils::path::get_user_data_dir;
 
 // ============ 时段话题池 ============
 
@@ -274,7 +273,7 @@ pub struct TopicPool {
 
 impl TopicPool {
     pub fn new() -> VivianResult<Self> {
-        let dir = get_user_data_dir().join("proactive");
+        let dir = crate::utils::path::get_companion_shared_dir().join("proactive");
         std::fs::create_dir_all(&dir)
             .map_err(|e| VivianError::Memory(format!("创建主动对话目录失败: {e}")))?;
         let path = dir.join("topics.json");

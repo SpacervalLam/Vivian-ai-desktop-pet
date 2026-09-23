@@ -15,7 +15,6 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{VivianError, VivianResult};
-use crate::utils::path::get_user_data_dir;
 
 /// 单轮关系日志条目
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -106,7 +105,7 @@ static RELATIONSHIP_LOG_ENGINE: Lazy<Arc<RelationshipLogEngine>> = Lazy::new(|| 
 
 impl RelationshipLogEngine {
     fn new() -> VivianResult<Self> {
-        let dir = get_user_data_dir().join("psychology");
+        let dir = crate::utils::path::get_companion_shared_dir().join("psychology");
         std::fs::create_dir_all(&dir)?;
         let path = dir.join("relationship_log.json");
         let mut engine = Self {

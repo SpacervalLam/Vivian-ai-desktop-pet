@@ -274,6 +274,8 @@ const ComposerEditor = React.forwardRef<ComposerEditorHandle, ComposerEditorProp
     const blocksRef = useRef<EditorBlock[]>([]);
     /** 内部最近一次 emit 出去的 markdown：value 与它不同 = 外部写入 */
     const lastEmittedRef = useRef<string>('');
+    /** 输入法组合中：组合文本是「内容但未提交」，期间不闪占位符 */
+    const composingRef = useRef(false);
     const [blocks, setBlocks] = useState<EditorBlock[]>([]);
     const [bubble, setBubble] = useState<{ x: number; y: number; blockId: string } | null>(null);
     const [menuOpen, setMenuOpen] = useState(false);
@@ -306,11 +308,25 @@ const ComposerEditor = React.forwardRef<ComposerEditorHandle, ComposerEditorProp
       return blocksToMarkdown(next);
     }, []);
 
+    /**
+     * 占位符的显隐必须由「真实 DOM 内容」决定，而不是 React 的 value 状态：
+     * 打字（尤其输入法组合中）时 DOM 立刻有内容，但 value 是 emit → onChange →
+     * setState → 重渲染之后才变，中间这段时间占位符会叠在实际文字上。
+     * 直接同步 dataset，不触发渲染，光标不会被打断。
+     */
+    const syncPlaceholder = useCallback(() => {
+      const el = rootRef.current;
+      if (!el) return;
+      const empty = !composingRef.current && readMarkdown().trim() === '';
+      el.dataset.empty = empty ? 'true' : 'false';
+    }, [readMarkdown]);
+
     const emit = useCallback(() => {
       const md = readMarkdown();
       lastEmittedRef.current = md;
+      syncPlaceholder();
       onChange(md);
-    }, [readMarkdown, onChange]);
+    }, [readMarkdown, syncPlaceholder, onChange]);
 
     // 外部写入：value 与内部最近一次 emit 不一致 → 整篇重解析
     useEffect(() => {
@@ -330,6 +346,13 @@ const ComposerEditor = React.forwardRef<ComposerEditorHandle, ComposerEditorProp
       lastEmittedRef.current = value;
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
+
+    // 块有任何变化（挂载 / 外部写入 / 粘贴 / 切块）后，DOM 已与 blocks 对齐，
+    // 此时再按真实内容刷新占位符显隐——不能提前 syncPlaceholder，否则读到的
+    // 还是旧 DOM（内容已存在却误判为空，占位符盖住正文）。
+    useLayoutEffect(() => {
+      syncPlaceholder();
+    }, [blocks, syncPlaceholder]);
 
     // 选区 → 浮卡
     useEffect(() => {
@@ -480,11 +503,22 @@ const ComposerEditor = React.forwardRef<ComposerEditorHandle, ComposerEditorProp
         role="textbox"
         aria-multiline="true"
         suppressContentEditableWarning
-        data-empty={value.trim() === '' ? 'true' : 'false'}
+        /* data-empty 完全由 syncPlaceholder 直接写 dataset（见 syncPlaceholder 注释），
+           这里不能交给 React：父组件一重渲染就会拿滞后的 value 覆盖掉，
+           打字/输入法组合中的真实内容会被占位符叠住。首帧由挂载 layout effect 补齐。 */
         data-placeholder={placeholder ?? ''}
         onKeyDown={onKeyDown}
         onPaste={onPaste}
         onInput={emit}
+        onCompositionStart={() => {
+          composingRef.current = true;
+          if (rootRef.current) rootRef.current.dataset.empty = 'false';
+        }}
+        onCompositionEnd={() => {
+          composingRef.current = false;
+          // 组合提交后 DOM 才是最终内容，立即同步占位符与 value
+          emit();
+        }}
       >
         {blocks.map((b) => (
           <BlockNode key={b.id} block={b} />

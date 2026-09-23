@@ -1393,7 +1393,7 @@ fn default_realtime_provider() -> String {
 }
 
 fn default_character_manifest() -> String {
-    "你是薇薇安，一个温柔体贴的 AI 伙伴。".to_string()
+    "你是Vivian，一个温柔体贴的 AI 伙伴。".to_string()
 }
 
 fn default_realtime_speaker() -> String {
@@ -1638,6 +1638,7 @@ impl Default for AppConfig {
                     "knowledge_acquisition",
                     "translation",
                     "bystander_judge",
+                    "simple_judge",
                     "intent_judge",
                     "asr_polish",
                 ] {

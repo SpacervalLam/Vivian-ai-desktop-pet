@@ -19,6 +19,7 @@ pub mod zhipu;
 // 声明式协议引擎 + JS 插件宿主（provider 全链路插件化的核心）
 pub mod declarative;
 pub mod js_runtime;
+pub mod jev;
 pub mod message_format;
 pub mod protocol_registry;
 pub mod spec;

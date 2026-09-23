@@ -211,7 +211,7 @@ fn build_context_prefix(item: &MemoryItem) -> String {
 
 impl MemoryManager {
     pub fn new(config: &AppConfig, char_id: &str) -> VivianResult<Self> {
-        let memory_dir = path::get_character_data_dir(char_id).join("memory");
+        let memory_dir = path::get_companion_data_dir(char_id).join("memory");
         path::ensure_dir(&memory_dir)?;
 
         let store_path = memory_dir.join("unified_memory.json");
@@ -358,7 +358,7 @@ impl MemoryManager {
 
     /// 持久化 pending conflicts 队列到磁盘（fire-and-forget）
     fn save_pending_conflicts(&self) -> VivianResult<()> {
-        let dir = path::get_character_data_dir(&self.char_id).join("memory");
+        let dir = path::get_companion_data_dir(&self.char_id).join("memory");
         let path = dir.join("pending_conflicts.json");
         let queue = self.pending_conflicts.lock();
         let s = serde_json::to_string_pretty(&*queue)?;

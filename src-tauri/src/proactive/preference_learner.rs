@@ -24,7 +24,6 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
 use super::triggers::ProactiveTrigger;
-use crate::utils::path::get_user_data_dir;
 
 /// 学习速率（EWMA 的 α 参数）
 const LEARNING_RATE: f64 = 0.3;
@@ -74,7 +73,7 @@ pub struct TriggerPreferenceLearner {
 
 impl TriggerPreferenceLearner {
     pub fn new() -> Self {
-        let proactive_dir = get_user_data_dir().join("proactive");
+        let proactive_dir = crate::utils::path::get_companion_shared_dir().join("proactive");
         let _ = std::fs::create_dir_all(&proactive_dir);
         let persistence_path = proactive_dir.join("trigger_preferences.json");
         let learner = Self {

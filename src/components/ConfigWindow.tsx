@@ -142,7 +142,7 @@ interface ConfigObject {
 }
 
 /**
- * 路由矩阵任务定义 - 14 个真实启用的任务，每个任务独立配置完整模型
+ * 路由矩阵任务定义 - 各任务可独立配置模型或判断接口
  *
  * 任务职责说明：
  * - chat:                日常对话与问答（高频，人格核心，可用便宜模型）
@@ -157,6 +157,7 @@ interface ConfigObject {
  * - knowledge_acquisition: 空闲时知识搜索学习（后台低频，建议便宜模型）
  * - translation:         跨语言 TTS 文本翻译（仅翻译服务选 LLM 时使用，简单任务，便宜模型即可）
  * - bystander_judge:     旁观插话判断（用户对话时轻量判断旁观者是否插话，建议便宜快速模型）
+ * - simple_judge:        选择渠道、旁观插话、会话结束原因等结构化简短判断（可使用 Jev）
  * - intent_judge:        会话关闭意图判断 + 桌宠反应（每轮对话后判断是否应关闭及关闭原因；用户摸头/双击/长按/拖拽/甩飞桌宠时生成一句短反应。极高频，建议最便宜的快速模型）
  * - asr_polish:          语音识别结果整理（识别结束后修正同音字/语气词/标点，建议便宜快速模型）
  */
@@ -173,6 +174,7 @@ const ROUTING_TASKS: { labelKey: string; taskType: string; helpKey: string }[] =
   { labelKey: 'config.routing_knowledge_acquisition', taskType: 'knowledge_acquisition', helpKey: 'config.routing_knowledge_acquisition_help' },
   { labelKey: 'config.routing_translation', taskType: 'translation', helpKey: 'config.routing_translation_help' },
   { labelKey: 'config.routing_bystander_judge', taskType: 'bystander_judge', helpKey: 'config.routing_bystander_judge_help' },
+  { labelKey: 'config.routing_simple_judge', taskType: 'simple_judge', helpKey: 'config.routing_simple_judge_help' },
   { labelKey: 'config.routing_intent_judge', taskType: 'intent_judge', helpKey: 'config.routing_intent_judge_help' },
   { labelKey: 'config.routing_asr_polish', taskType: 'asr_polish', helpKey: 'config.routing_asr_polish_help' },
 ];
@@ -343,6 +345,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
   { id: 'together', labelKey: 'config.preset_together', providerType: 'chat_completions', endpoint: 'https://api.together.xyz/v1', defaultModel: 'meta-llama/Llama-3.3-70B-Instruct-Turbo', mainModels: ['meta-llama/Llama-3.3-70B-Instruct-Turbo', 'deepseek-ai/DeepSeek-V3'], contextWindow: 131_072, suggestedMaxTokens: 8192, consoleUrl: 'https://api.together.ai/settings/api-keys' },
   { id: 'wenxin', labelKey: 'config.preset_wenxin', providerType: 'wenxin', endpoint: 'https://aip.baidubce.com', defaultModel: 'ernie-4.5-8k-latest', mainModels: ['ernie-4.5-8k-latest', 'ernie-4.5-turbo-8k', 'ernie-4.0-8k-latest'], contextWindow: 8192, suggestedMaxTokens: 4096, needsSecret: true, consoleUrl: 'https://console.bce.baidu.com/iam/#/iam/apikey/list' },
   { id: 'hunyuan', labelKey: 'config.preset_hunyuan', providerType: 'chat_completions', endpoint: 'https://api.hunyuan.cloud.tencent.com/v1', defaultModel: 'hunyuan-turbos-latest', mainModels: ['hunyuan-turbos-latest', 'hunyuan-t1-latest', 'hunyuan-pro', 'hunyuan-standard', 'hunyuan-lite'], contextWindow: 32_000, suggestedMaxTokens: 16384, consoleUrl: 'https://console.cloud.tencent.com/tokenhub/apikey' },
+  { id: 'jev', labelKey: 'config.preset_jev', providerType: 'jev', endpoint: 'https://api.typesafe.ai/v1/systemone', defaultModel: 'jev-latest', mainModels: ['jev-latest'], consoleUrl: 'https://console.typesafe.ai/' },
   { id: 'custom', labelKey: 'config.preset_custom', providerType: 'chat_completions', endpoint: '', defaultModel: '', mainModels: [] },
 ];
 
@@ -731,7 +734,8 @@ const ProviderSelector: React.FC<{
 }> = ({ pathPrefix, get, setNested, t }) => {
   const isMain = pathPrefix === 'ai';
   // 供应商预设：内置兜底 + llm-providers 插件贡献（providers.json）合并
-  const presets = useProviderPresets();
+  const allPresets = useProviderPresets();
+  const presets = allPresets.filter((p) => pathPrefix === 'routing_matrix.simple_judge' || p.providerType !== 'jev');
   const providerTypePath = isMain ? 'ai.provider' : `${pathPrefix}.provider_type`;
   const endpointPath = `${pathPrefix}.endpoint`;
   const modelPath = `${pathPrefix}.model`;
@@ -928,7 +932,7 @@ const WorkModelProviderSelector: React.FC<{
   t: (key: string) => string;
 }> = ({ model, onPatch, get, setNested, t }) => {
   // 供应商预设：与主配置共用（内置兜底 + llm-providers 插件贡献合并）
-  const presets = useProviderPresets();
+  const presets = useProviderPresets().filter((p) => p.providerType !== 'jev');
   const currentType = model.provider_type || 'openai';
   const currentEndpoint = model.endpoint || '';
   const matchingPreset = presets.find((p) => presetMatches(p, currentType, currentEndpoint));

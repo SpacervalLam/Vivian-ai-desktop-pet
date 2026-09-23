@@ -578,7 +578,7 @@ async fn catch_up_one_day(brain: &Brain, date: chrono::NaiveDate) -> VivianResul
 /// 关键事件用列表，正文随后。
 pub fn export_to_markdown(char_id: &str, file_path: &str) -> VivianResult<bool> {
     let entries = get_entries(char_id, None)?;
-    let mut md = String::from("# 薇薇安的日记\n\n---\n\n");
+    let mut md = String::from("# Vivian的日记\n\n---\n\n");
 
     for entry in &entries {
         let mood_emoji = match entry.mood_tag.as_str() {

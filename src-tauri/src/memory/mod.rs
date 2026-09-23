@@ -8,6 +8,7 @@ pub mod auto_extractor;
 pub mod conflict;
 pub mod consolidation;
 pub mod conversation_archive;
+pub mod companion_policy;
 pub mod embedding;
 pub mod embedding_registry;
 pub mod entity_extract;

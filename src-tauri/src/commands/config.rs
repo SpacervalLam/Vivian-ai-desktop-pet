@@ -174,6 +174,26 @@ pub async fn test_llm_route(
         config.get_all()
     };
 
+    if route.provider_type == "jev" {
+        let client = crate::providers::jev::JevClient::new(&route).map_err(err_str)?;
+        let start = std::time::Instant::now();
+        let result = client.choose(
+            serde_json::json!({"message": "The user said hello."}),
+            "Select whether this message is a greeting.",
+            &[("greeting", "It is a greeting"), ("other", "It is not a greeting")],
+        ).await;
+        return Ok(match result {
+            Ok(choice) => LlmRouteTestResult {
+                success: true, elapsed_ms: start.elapsed().as_millis() as u64,
+                error: None, reply: Some(format!("{} ({:.0}%)", choice.choice, choice.confidence * 100.0)),
+            },
+            Err(e) => LlmRouteTestResult {
+                success: false, elapsed_ms: start.elapsed().as_millis() as u64,
+                error: Some(e.to_string()), reply: None,
+            },
+        });
+    }
+
     // 探测用独立客户端缓存（命令即用即弃，不与运行时路由共享连接池）
     let provider = create_probe_provider(&route, &app_config, &ClientCache::default())
         .map_err(err_str)?;

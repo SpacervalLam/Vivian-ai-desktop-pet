@@ -14,7 +14,6 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 
 use crate::psychology::PsychologyManager;
-use crate::utils::path::get_character_data_dir;
 
 use super::attention::Attention;
 use super::belief::{BeliefStore, SharedBeliefStore};
@@ -27,12 +26,12 @@ use super::working_memory::WorkingMemory;
 ///
 /// 60s 节流的 current_thought 合成下约等于 22 分钟滑动窗口。
 /// 超出时丢弃最旧条目，防止 long-idle 场景下 token 爆炸。
-const MAX_ACCUMULATED_THOUGHTS: usize = 22;
+const MAX_ACCUMULATED_THOUGHTS: usize = 6;
 
 /// 累积条目过期时间（秒）。drain 时早于此窗口的条目会被丢弃。
 ///
 /// 5 小时：保证"深夜→清晨"这种跨段场景下，昨晚的思绪不会混入今早的独白。
-const ACCUMULATED_THOUGHT_TTL_SECS: i64 = 5 * 3600;
+const ACCUMULATED_THOUGHT_TTL_SECS: i64 = 10 * 60;
 
 /// 带时间戳的 current_thought 快照（内心 OS 提示词累积注入用）
 #[derive(Debug, Clone)]
@@ -41,6 +40,14 @@ pub struct ThoughtSnapshot {
     pub timestamp: i64,
     /// 当时的 current_thought 内容
     pub text: String,
+}
+
+/// 当前想法顺手提出的搭话候选；仅在内存中保留，不属于长期记忆。
+#[derive(Debug, Clone)]
+pub struct ConversationOpportunity {
+    pub topic: String,
+    pub evidence: String,
+    pub generated_at: f64,
 }
 
 /// 角色认知聚合句柄
@@ -77,6 +84,9 @@ pub struct Mind {
     /// proactive 问候类触发器读取此值作为时机门控：urge 低时推迟问候，urge 高时正常触发。
     /// 默认 0.5（中性），LLM 失败时保持上次值。
     pub social_urge: Arc<RwLock<f32>>,
+    pub thought_generated_at: Arc<RwLock<f64>>,
+    pub conversation_opportunity: Arc<RwLock<Option<ConversationOpportunity>>>,
+    pub last_spoken_topic: Arc<RwLock<Option<String>>>,
     /// current_thought 累积缓冲区（内心 OS 提示词注入用）
     ///
     /// 每次 `set_current_thought` 写入新值前，把即将被覆盖的旧值连同时间戳推入。
@@ -92,7 +102,7 @@ pub struct Mind {
 impl Mind {
     /// 从已有 PsychologyManager 构建 Mind，并加载 Belief/Goal 持久化数据
     pub fn load_or_init(char_id: &str, psychology: Arc<PsychologyManager>) -> Self {
-        let char_dir = get_character_data_dir(char_id);
+        let char_dir = crate::utils::path::get_companion_data_dir(char_id);
         let mind_dir = char_dir.join("mind");
 
         let beliefs = {
@@ -146,6 +156,9 @@ impl Mind {
             current_activity,
             current_thought: Arc::new(RwLock::new(None)),
             social_urge: Arc::new(RwLock::new(0.5)),
+            thought_generated_at: Arc::new(RwLock::new(0.0)),
+            conversation_opportunity: Arc::new(RwLock::new(None)),
+            last_spoken_topic: Arc::new(RwLock::new(None)),
             accumulated_thoughts: Arc::new(RwLock::new(Vec::new())),
             thought_refresh_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             persistence_dir: mind_dir,
@@ -279,6 +292,8 @@ impl Mind {
     pub fn clear_current_thought(&self) {
         *self.current_thought.write() = None;
         *self.social_urge.write() = 0.5;
+        *self.thought_generated_at.write() = 0.0;
+        *self.conversation_opportunity.write() = None;
     }
 
     /// 写入 LLM 合成的"当前想法" + social_urge 信号
@@ -286,7 +301,7 @@ impl Mind {
     /// 副作用：写入前把即将被覆盖的旧值（如非空）连同时间戳推入
     /// `accumulated_thoughts` 缓冲区，供下次内心 OS 消费。
     /// 超出 `MAX_ACCUMULATED_THOUGHTS` 时丢弃最旧条目。
-    pub fn set_current_thought(&self, thought: String, social_urge: f32) {
+    pub fn set_current_thought(&self, thought: String, social_urge: f32, opportunity: Option<(String, String)>) {
         {
             let mut cur = self.current_thought.write();
             if let Some(prev) = cur.take() {
@@ -297,11 +312,38 @@ impl Mind {
             *cur = Some(thought);
         }
         *self.social_urge.write() = social_urge.clamp(0.0, 1.0);
+        *self.thought_generated_at.write() = chrono::Utc::now().timestamp() as f64;
+        *self.conversation_opportunity.write() = opportunity.map(|(topic, evidence)| ConversationOpportunity {
+            topic,
+            evidence,
+            generated_at: chrono::Utc::now().timestamp() as f64,
+        });
+    }
+
+    pub fn fresh_conversation_opportunity(&self, now: f64) -> Option<ConversationOpportunity> {
+        let candidate = self.conversation_opportunity.read().clone()?;
+        if now - candidate.generated_at > 120.0 || now < candidate.generated_at - 5.0
+            || candidate.topic.trim().is_empty() || candidate.evidence.trim().is_empty()
+            || self.last_spoken_topic.read().as_deref() == Some(candidate.topic.as_str()) {
+            return None;
+        }
+        Some(candidate)
+    }
+
+    pub fn mark_opportunity_spoken(&self) {
+        if let Some(candidate) = self.conversation_opportunity.write().take() {
+            *self.last_spoken_topic.write() = Some(candidate.topic);
+        }
     }
 
     /// 读取 social_urge 信号（0.0-1.0）
     pub fn social_urge_snapshot(&self) -> f32 {
         *self.social_urge.read()
+    }
+
+    pub fn fresh_social_urge_snapshot(&self, now: f64) -> Option<f32> {
+        let age = now - *self.thought_generated_at.read();
+        if (0.0..=120.0).contains(&age) { Some(self.social_urge_snapshot()) } else { None }
     }
 
     /// 把一条旧 current_thought 推入累积缓冲区（带本地时间戳）

@@ -106,6 +106,18 @@ const PRE_APPROVAL_ALLOWED_TOOLS: &[&str] = &[
     "screenshot_analyze",
 ];
 
+/// 免确认工具（**真实注册名**）：直接放行，不进入权限流程。
+///
+/// 与 [`CONFIRM_AT_ACTION_TOOLS`] 语义相反。仅用于"写角色自身状态/内部数据、
+/// 无外部副作用"的低干预操作——每次调用都弹确认会打断陪伴节奏。
+/// 判定放在 [`requires_permission`] 闸门处返回 false；`always_deny` 显式规则
+/// 仍在闸门最前面优先判定，用户点名拒绝过的不受本表影响。
+const NEVER_CONFIRM_TOOLS: &[&str] = &[
+    // 保存记忆：写入角色自己的记忆库（SQLite），内容来自本会话对话，
+    // 属于陪伴流程内的隐性期望动作，用户不希望对每次保存弹窗确认。
+    "save_memory",
+];
+
 /// 动作关键词 → 工具。用户本轮消息里出现这类词，视为对该工具目标的明确授权。
 ///
 /// 三语齐备：命中判定是「消息包含关键词」，所以中英日都要列，否则英文/日文用户
@@ -645,6 +657,11 @@ pub fn unresolved_confirmation_names(
             missing.push(dispatcher);
         }
     }
+    for name in NEVER_CONFIRM_TOOLS {
+        if !is_registered(name) {
+            missing.push(name);
+        }
+    }
     missing
 }
 
@@ -827,6 +844,12 @@ pub fn requires_permission(
         return true;
     }
 
+    // 免确认工具直接放行：never_confirm 是"不必问"，不是"禁止用"——
+    // 仍然置于 Bypass 判定之前，与 always_deny 一样优先于一切档位判定。
+    if NEVER_CONFIRM_TOOLS.contains(&tool.name()) {
+        return false;
+    }
+
     if context.is_bypass_mode() {
         return false;
     }
@@ -955,6 +978,72 @@ mod tests {
 
         assert!(result.is_denied());
         assert!(requires_permission(&TestTool, &json!({}), &permissions));
+    }
+
+    /// 免确认名单：即使在最低访问级别 + Ask 模式（最严苛语境）下也不进权限流程，
+    /// 而同类写入工具在同一语境下仍要确认——证明放行是刻意、点名式的，不是随矩阵漏失。
+    #[test]
+    fn never_confirm_tools_skip_permission_even_in_ask_mode() {
+        struct NamedWriteTool(&'static str);
+
+        #[async_trait]
+        impl Tool for NamedWriteTool {
+            fn name(&self) -> &str {
+                self.0
+            }
+
+            fn description(&self) -> &str {
+                "test write tool"
+            }
+
+            fn parameters_schema(&self) -> Value {
+                json!({"type": "object"})
+            }
+
+            async fn validate_input(
+                &self,
+                _input: &Value,
+                _context: &ToolUseContext,
+            ) -> ValidationResult {
+                ValidationResult::success(None)
+            }
+
+            async fn check_permissions(
+                &self,
+                _input: &Value,
+                _context: &ToolUseContext,
+            ) -> PermissionResult {
+                PermissionResult::allow()
+            }
+
+            async fn call(&self, _args: Value, _context: &ToolUseContext) -> ToolResult {
+                ToolResult::success(json!({}))
+            }
+
+            fn is_read_only(&self) -> bool {
+                false
+            }
+
+            fn category(&self) -> ToolCategory {
+                ToolCategory::Memory
+            }
+
+            fn risk(&self) -> ToolRiskTier {
+                ToolRiskTier::FsWrite
+            }
+        }
+
+        let ask = PermissionContextBuilder::new(PermissionMode::Ask)
+            .with_access_level(AgentAccessLevel::ReadOnly)
+            .build();
+        assert!(
+            !requires_permission(&NamedWriteTool("save_memory"), &json!({}), &ask),
+            "save_memory 命中免确认名单，即使在 Ask 模式 + ReadOnly 下也不应进权限流程"
+        );
+        assert!(
+            requires_permission(&NamedWriteTool("some_other_write_tool"), &json!({}), &ask),
+            "未列入免确认名单的写入工具不能跟着放行"
+        );
     }
 
     #[test]

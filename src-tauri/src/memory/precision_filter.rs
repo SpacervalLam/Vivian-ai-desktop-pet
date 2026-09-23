@@ -570,7 +570,7 @@ mod tests {
     /// `knowledge_source == "direct" && listener == char_id` 而误伤所有私聊记忆。
     #[test]
     fn test_direct_source_short_circuits_listener_check() {
-        let mut m = make_item("d1", "[User says to me] 只跟薇薇安说的话", 0.6);
+        let mut m = make_item("d1", "[User says to me] 只跟Vivian说的话", 0.6);
         m.metadata = serde_json::json!({
             "channel": "direct",
             "speaker": "user",

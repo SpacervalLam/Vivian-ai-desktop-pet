@@ -2,7 +2,7 @@
 //!
 //! - **MemoryFilter**：检索阶段跨会话过滤临时话题、保留长期偏好
 //! - **UserMemorySavingRunnable**：用户消息早期保存（生成前）
-//! - **MemorySavingRunnable**：AI 回复 + 长期记忆保存（生成后）
+//! - **MemorySavingRunnable**：AI 回复原话保存（生成后）
 //! - **TimeStampedMemory**：40 阈值摘要容器，保留最近 8 条
 //! - **AutoExtractor**：对话后 LLM 自动抽取 ADD/UPDATE/DELETE 记忆
 //! - **MemoryRetentionGuard**：定期过期清理（casual 24h/100、temporary 6h/50、long_term 720h+imp<0.3）
@@ -25,7 +25,7 @@ use crate::memory::retention::MemoryRetentionGuard;
 use crate::memory::filter::MemoryFilter;
 use crate::memory::llm_enricher::{EnricherLlmClient, MemoryEnricher};
 use crate::memory::time_stamped::TimeStampedMemory;
-use crate::memory::types::{MemoryType, RetrievalStrategy};
+use crate::memory::types::RetrievalStrategy;
 use crate::memory::user_facts::{FactLlmClient, UserFactStore};
 use crate::memory::user_model::UserModelManager;
 use crate::memory::MemoryManager;
@@ -1131,31 +1131,9 @@ Choose the appropriate expression and motion. Leave empty if nothing fits.",
 
                 self.topic_signal_buffer
                     .record_topics(&self.char_id, topic_labels.clone());
-                if let Some(topics_to_flush) = self.topic_signal_buffer.should_flush(&self.char_id) {
-                    let memory = self.memory.clone();
-                    let char_id = self.char_id.clone();
-                    tokio::spawn(async move {
-                        let text = format!("近期话题：{}", topics_to_flush.join("、"));
-                        let meta = serde_json::json!({
-                            "topic_signal": true,
-                            "topics": topics_to_flush,
-                        });
-                        let _ = memory
-                            .add_memory_with_metadata(
-                                &text,
-                                crate::memory::types::MemoryType::ShortTerm,
-                                0.3,
-                                vec!["topic_signal".to_string()],
-                                meta,
-                            )
-                            .await;
-                        tracing::debug!(
-                            "[TopicSignal:{}] 话题信号慢存储写入：{}",
-                            char_id,
-                            text
-                        );
-                    });
-                }
+                // 话题信号只用于当前认知模型与话题变化检测；不是一段真实对话，
+                // 不再伪装成 ShortTerm 进入会话摘要和检索。
+                let _ = self.topic_signal_buffer.should_flush(&self.char_id);
             }
         }
 
@@ -1210,92 +1188,7 @@ Choose the appropriate expression and motion. Leave empty if nothing fits.",
             self.psychology
                 .apply_turn_boundary(&psy_output, sentiment, intensity);
 
-            // LLM 自判事件摘要：非空时写入记忆系统 ImportantEvent（持久化、可被检索/巩固）
-            // event_summary 由 LLM 在主调用 JSON 中产出，避免每轮都记录低信息事件
-            let event_summary = final_state.event_summary.trim();
-            if !event_summary.is_empty() {
-                let significance = final_state
-                    .appraisal
-                    .as_ref()
-                    .map(|a| a.significance)
-                    .unwrap_or(0.5);
-                let user_emo_tag = format!("user_emotion:{}", final_state.user_emotion);
-                let tags = vec![
-                    "important_event".to_string(),
-                    "interaction".to_string(),
-                    user_emo_tag,
-                    "assistant".to_string(),
-                ];
-                let memory = self.memory.clone();
-                let summary_owned = event_summary.to_string();
-                let router_for_router = self.router.clone();
-                let char_id_for_router = self.char_id.clone();
-                let user_emotion_for_router = final_state.user_emotion.clone();
-                let channel_for_router = self.dialogue.get_channel();
-                tokio::spawn(async move {
-                    // 为 ImportantEvent 补全跨角色上下文 metadata，确保事件账本注册字段正确
-                    let event_metadata = serde_json::json!({
-                        "channel": channel_for_router,
-                        "speaker": "user",
-                        "listener": char_id_for_router,
-                        "perspective": "speaker",
-                        "knowledge_source": "direct",
-                    });
-                    if let Err(e) = memory
-                        .add_memory_enriched_with_metadata(
-                            &summary_owned,
-                            MemoryType::ImportantEvent,
-                            significance,
-                            tags,
-                            Some(event_metadata),
-                            None,
-                        )
-                        .await
-                    {
-                        tracing::warn!("[BrainChatChain] ImportantEvent 写入失败: {}", e);
-                    }
-
-                    // Memory Router LLM 仲裁：对候选条目二次判定是否应升级到共享世界层
-                    // 同步路由已由 manager.rs 内部的 route_to_shared_world 处理，
-                    // 此处补 LLM 仲裁覆盖同步规则漏判的边界场景（如"用户提到家规但没用持久性词"）。
-                    use crate::memory::memory_router::{
-                        route_with_llm, MemoryDestination, RouteContext,
-                    };
-                    let ctx = RouteContext {
-                        content: &summary_owned,
-                        importance: significance,
-                        channel: &channel_for_router,
-                        speaker: "user",
-                        listener: &char_id_for_router,
-                        perspective: "speaker",
-                        char_id: &char_id_for_router,
-                    };
-                    let dest = route_with_llm(&ctx, router_for_router.as_ref()).await;
-                    if dest == MemoryDestination::SharedWorld {
-                        use crate::memory::world_knowledge::{world_knowledge, WorldFact};
-                        let engine = world_knowledge();
-                        let now = chrono::Utc::now().timestamp() as f64;
-                        let category = crate::memory::manager::infer_world_fact_category(&summary_owned);
-                        if engine.find_similar(&summary_owned, category).is_none() {
-                            let fact = WorldFact {
-                                id: format!("wf-llm-{}-{}", now as u64, rand::random::<u32>()),
-                                fact_text: summary_owned.clone(),
-                                category,
-                                importance: significance,
-                                contributors: vec![char_id_for_router.clone()],
-                                source_event_ids: vec![format!("llm-router-{}", now as u64)],
-                                created_at: now,
-                                last_reinforced_at: now,
-                                reinforcement_count: 0,
-                            };
-                            if let Err(e) = engine.append_fact(fact) {
-                                tracing::debug!("[MemoryRouter] LLM 仲裁写入共享世界失败: {}", e);
-                            }
-                        }
-                    }
-                    let _ = user_emotion_for_router;
-                });
-            }
+            // 事件由 AutoExtractor 依据用户原话统一提取，避免主回复重复写入。
         }
 
         // ── 后处理：桌宠自控动作（control_actions）──
@@ -1361,30 +1254,8 @@ Choose the appropriate expression and motion. Leave empty if nothing fits.",
             });
         }
 
-        // ── 后处理：工具调用与记忆联动 ──
-        // 将执行过的工具调用记录为记忆，
-        // 让 Vivian 能在后续对话中回忆"我曾为你做过什么"。
-        if !final_state.is_command
-            && final_state.tool_call_executed
-            && !final_state.tool_calls.is_empty()
-        {
-            let memory = self.memory.clone();
-            let tool_calls = final_state.tool_calls.clone();
-            // 工具执行时刻在生成步骤中捕获；用该时刻回写工具记忆时间戳，
-            // 保证时间线上"执行工具"排在"回复"之前（与实际发生顺序一致）
-            let tool_executed_at = final_state
-                .metadata
-                .get("tool_executed_at")
-                .and_then(|v| v.as_f64());
-            tokio::spawn(async move {
-                Self::record_tool_memories_async(
-                    memory,
-                    &tool_calls,
-                    tool_executed_at,
-                )
-                .await;
-            });
-        }
+        // 工具调用日志保留在工具历史；完成的结果已在角色回复与会话摘要中。
+        // 不再为每次工具调用额外生成一条 General 记忆和一次 LLM enrich。
 
         // ── 后处理：将当前轮次写入对话管理器，确保下一次调用时历史会累积。
         // skip_dialogue_write 时跳过：插话等内部指令不应作为用户消息出现在对话历史和记忆图谱中。
@@ -1623,27 +1494,8 @@ Choose the appropriate expression and motion. Leave empty if nothing fits.",
             );
         }
 
-        // 2.5 用户事实画像：从对话中提取 L0 身份 + L0.5 偏好 + L2 自由事实
-        // 走 memory 路由（高频低复杂度），智能合并（旧值优先，冲突时 LLM 仲裁）
-        // 此路径尚未绑定具体 MemoryItem，但仍生成稳定的 turn 来源引用，避免
-        // 事实只剩时间戳而完全不可追溯。
+        // 自动事实只由 AutoExtractor 写入长期记忆；用户事实卡保留手工编辑。
         let clean_ai_text = MemorySavingRunnable::strip_json_if_any(&response.text);
-        let fact_source_id = format!("turn:{}", uuid::Uuid::new_v4());
-        match user_facts
-            .extract_and_upsert(user_input, &clean_ai_text, Some(&fact_source_id))
-            .await
-        {
-            Ok(facts) if !facts.is_empty() => {
-                tracing::info!(
-                    "[BrainChatChain] UserFactStore 提取并更新 {} 条用户事实",
-                    facts.len()
-                );
-            }
-            Ok(_) => {}
-            Err(e) => {
-                tracing::warn!("[BrainChatChain] UserFactStore 提取失败: {}", e);
-            }
-        }
 
         // 2.5.5 用户认知模型：强证据检测与弱证据积累
         // 在非跨角色对话时，从用户输入中检测偏好/工作方式/兴趣/目标等信号
@@ -1695,7 +1547,7 @@ Choose the appropriate expression and motion. Leave empty if nothing fits.",
 
         // 2.6 Open Hooks 闭环判定：用本轮对话检查所有未闭环钩子
         // 走 memory 路由，LLM 判断是否满足闭环条件；失败仅 warn 不阻塞
-        let recent_dialog = format!("用户：{}\n薇薇安：{}", user_input, clean_ai_text);
+        let recent_dialog = format!("用户：{}\nVivian：{}", user_input, clean_ai_text);
         match hook_judge.judge_and_close(&memory, &recent_dialog).await {
             Ok(closed) if closed > 0 => {
                 tracing::info!(
@@ -1743,8 +1595,7 @@ Choose the appropriate expression and motion. Leave empty if nothing fits.",
             }
         }
 
-        // 4. 巩固流水线：ShortTerm → MidTerm SessionSummary → LongTerm → Insight
-        // 三阶段触发器，所有 LLM 调用走 reflection 路由
+        // 4. 巩固流水线只压缩原话为 SessionSummary；长期事实由 AutoExtractor 统一写入。
         match pipeline.run(&memory).await {
             Ok(report) => {
                 if report.stage1_summaries > 0
@@ -1844,85 +1695,4 @@ Choose the appropriate expression and motion. Leave empty if nothing fits.",
         }
     }
 
-    /// 将工具调用记录为记忆。
-    ///
-    /// 每个执行过的工具调用会生成一条 `General` 记忆，内容包含工具名、
-    /// 简要参数。这让 Vivian 在后续对话中能回忆起"我曾为你做过什么"。
-    async fn record_tool_memories_async(
-        memory: Arc<MemoryManager>,
-        tool_calls: &[serde_json::Value],
-        tool_executed_at: Option<f64>,
-    ) {
-        for tc in tool_calls {
-            let tool_name = tc
-                .get("tool")
-                .or_else(|| tc.get("name"))
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("unknown");
-
-            // 跳过元工具（tool_list 只是列出可用工具，无实际语义）
-            if tool_name == "tool_list" {
-                continue;
-            }
-
-            let args = tc
-                .get("arguments")
-                .or_else(|| tc.get("args"))
-                .cloned()
-                .unwrap_or(serde_json::Value::Null);
-
-            let brief_args = summarize_tool_args(&args);
-            let content = if brief_args.is_empty() {
-                format!("执行工具「{}」", tool_name)
-            } else {
-                format!("执行工具「{}」（{}）", tool_name, brief_args)
-            };
-
-            let tags = vec![
-                "tool_call".to_string(),
-                tool_name.to_string(),
-            ];
-
-            // 为工具调用记忆补全 metadata，确保事件账本注册字段正确
-            let tool_metadata = serde_json::json!({
-                "channel": "direct",
-                "speaker": memory.char_id(),
-                "listener": "user",
-                "perspective": "speaker",
-                "knowledge_source": "direct",
-            });
-            if let Err(e) = memory
-                .add_memory_enriched_with_metadata(
-                    &content,
-                    MemoryType::General,
-                    0.4,
-                    tags,
-                    Some(tool_metadata),
-                    tool_executed_at,
-                )
-                .await
-            {
-                tracing::warn!("[BrainChatChain] 工具记忆写入失败: {}", e);
-            }
-        }
-    }
-}
-
-/// 简要汇总工具参数（最多 3 个键值对，每个值截断 50 字符）
-fn summarize_tool_args(args: &serde_json::Value) -> String {
-    match args {
-        serde_json::Value::Object(map) => {
-            let mut parts = Vec::new();
-            for (k, v) in map.iter().take(3) {
-                let v_str = match v {
-                    serde_json::Value::String(s) => s.clone(),
-                    _ => v.to_string(),
-                };
-                let v_short: String = truncate_chars(&v_str, 50);
-                parts.push(format!("{}={}", k, v_short));
-            }
-            parts.join(", ")
-        }
-        _ => String::new(),
-    }
 }

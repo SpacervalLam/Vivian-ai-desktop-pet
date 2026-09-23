@@ -616,7 +616,7 @@ impl AugmentReplyService {
         match lang_norm {
             "en" => {
                 let (name, persona) = match char_id {
-                    "nana" | "娜娜" => ("Nana", "a gentle, composed older-sister type — warm, grounded, speaks softly but with quiet strength"),
+                    "nana" | "Nana" => ("Nana", "a gentle, composed older-sister type — warm, grounded, speaks softly but with quiet strength"),
                     _ => ("Vivian", "a warm-hearted weeb netizen — fluent in anime culture and internet surfing, lively and genuine"),
                 };
                 format!(
@@ -627,8 +627,8 @@ impl AugmentReplyService {
             }
             "ja" => {
                 let (name, persona) = match char_id {
-                    "nana" | "娜娜" => ("ナナ", "優しく落ち着いたお姉さんタイプ——温かくて地に足がついていて、穏やかに話すが芯がある"),
-                    _ => ("ヴィヴィアン", "ネットに生きる心温かいオタク少女——アニメ文化とネットサーフィンに精通、活発で素直"),
+                    "nana" | "Nana" => ("Nana", "優しく落ち着いたお姉さんタイプ——温かくて地に足がついていて、穏やかに話すが芯がある"),
+                    _ => ("Vivian", "ネットに生きる心温かいオタク少女——アニメ文化とネットサーフィンに精通、活発で素直"),
                 };
                 format!(
                     "あなたは{}、{}。\
@@ -638,8 +638,8 @@ impl AugmentReplyService {
             }
             _ => {
                 let (name, persona) = match char_id {
-                    "nana" | "娜娜" => ("娜娜", "温柔从容的姐姐——温暖、踏实，说话轻声细语但有力量"),
-                    _ => ("薇薇安", "生活在网络上的暖心二次元少女——精通动漫文化和网络冲浪，活泼真诚"),
+                    "nana" | "Nana" => ("Nana", "温柔从容的姐姐——温暖、踏实，说话轻声细语但有力量"),
+                    _ => ("Vivian", "生活在网络上的暖心二次元少女——精通动漫文化和网络冲浪，活泼真诚"),
                 };
                 format!(
                     "你是{}，{}。\

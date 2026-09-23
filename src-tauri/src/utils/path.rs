@@ -39,6 +39,20 @@ pub fn get_character_data_dir(char_id: &str) -> PathBuf {
     dir
 }
 
+/// 新陪伴记忆架构的独立数据空间。角色设定、日记和配置仍使用原目录。
+pub fn get_companion_data_dir(char_id: &str) -> PathBuf {
+    let dir = get_character_data_dir(char_id).join("companion-v2");
+    let _ = ensure_dir(&dir);
+    dir
+}
+
+/// 跨角色的陪伴记忆索引与关系状态。
+pub fn get_companion_shared_dir() -> PathBuf {
+    let dir = get_user_data_dir().join("companion-v2");
+    let _ = ensure_dir(&dir);
+    dir
+}
+
 /// 获取共享数据目录（跨角色共享的数据，如世界知识、统一事件账本）
 ///
 /// 路径：`<user_data_dir>/shared/`
@@ -53,7 +67,7 @@ pub fn get_shared_data_dir() -> PathBuf {
 ///
 /// 路径：`<user_data_dir>/common/memory/`
 pub fn get_common_memory_dir() -> PathBuf {
-    let dir = get_user_data_dir().join("common").join("memory");
+    let dir = get_companion_shared_dir().join("common").join("memory");
     let _ = ensure_dir(&dir);
     dir
 }

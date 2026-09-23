@@ -577,7 +577,7 @@ impl ThoughtTriggerEvaluator {
             && self.check_cooldown("own_desire", now, 1800.0)
         {
             let (desire_desc, desire_hint) = match char_id {
-                "nana" | "娜娜" => (
+                "nana" | "Nana" => (
                     "想找个安静的事做做",
                     "你有点想做点自己喜欢的事——比如听听音乐，或者看会儿书。可以问问用户要不要陪你一起",
                 ),

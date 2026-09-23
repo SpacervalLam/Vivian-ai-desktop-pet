@@ -1,16 +1,14 @@
 /**
  * 子窗口 Z-order 提升工具（App.tsx 与桌宠三击等入口共用）
  *
- * 桌宠本体窗口始终 topmost，普通层级子窗口（config/memory）默认在桌宠之下。
- * 需要将某个子窗口"置于屏幕顶端"时调用 raiseWindow：
- *  - 临时设 topmost 突破桌宠遮挡、unminimize + show + focus；
- *  - 普通层级窗口失焦时自动降回 non-topmost（恢复普通应用窗口层级行为）。
+ * 桌宠本体窗口始终 topmost；心智观察器始终在桌宠之下。
+ * raiseWindow 恢复窗口并聚焦；config 可临时置顶，memory 始终保持普通层级。
  */
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
 
 /** 普通层级子窗口：聚焦时临时 topmost（突破桌宠遮挡），失焦自动降回普通层级。
  *  与始终 topmost 的桌宠/气泡/输入框不同，这些窗口的 Z-order 行为与普通应用窗口一致。 */
-export const NORMAL_TIER_WINDOWS = new Set(['config', 'memory']);
+export const NORMAL_TIER_WINDOWS = new Set(['config']);
 
 /** 追踪 raiseWindow 注册的 onFocusChanged 监听器的卸载函数，防止累积 */
 export const RAISE_UNLISTEN = new Map<string, () => void>();
@@ -41,12 +39,10 @@ export async function isWindowOnScreen(win: VisibilityProbe): Promise<boolean> {
 
 /** 将已存在的子窗口提升到 Z-order 顶层。
  *
- *  普通层级窗口（config/memory）：临时设 topmost 突破桌宠遮挡，
- *  失焦时自动降回 non-topmost，实现与普通应用窗口一致的层级行为：
+ *  config 临时设 topmost，失焦时自动降回 non-topmost：
  *  Alt+Tab 切换、点击外部失焦、不永久置顶。
  *
- *  始终 topmost 的窗口（chat/bubble/toast/input 等）：保持 topmost
- *  直到关闭，确保不被桌宠覆盖。
+ *  memory 始终 non-topmost，保持在桌宠下方。其他窗口保持 topmost。
  *
  *  `selfReveal`：显形时机归窗口自己（它要用「先摆好首帧再出现」的入场动画）。
  *  此时这里只做 Z 序与焦点，碰可见性会替它先把窗口摆上屏——最小化时尤其明显：
@@ -86,9 +82,9 @@ export async function raiseWindow(
     }
   }
 
-  // 置顶与聚焦两条不论显形归谁都要做：窗口后面会以 topmost 出现在桌宠之上并拿到焦点
-  // （最小化时 setFocus 会被 tao 跳过，随后入场动画的还原/显形本身就会激活窗口）。
-  await win.setAlwaysOnTop(true);
+  // 心智观察器是全屏窗口，但桌宠必须始终绘制在它上面。
+  // 最小化时 setFocus 可能被 tao 跳过，入场动画的显形会继续激活窗口。
+  await win.setAlwaysOnTop(label !== 'memory');
   await win.setFocus();
 
   // 普通层级窗口：失焦时自动降回 non-topmost

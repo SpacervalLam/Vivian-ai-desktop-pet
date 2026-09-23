@@ -61,7 +61,7 @@ pub struct ConversationArchive {
 impl ConversationArchive {
     /// 按角色初始化：`characters/<char_id>/memory/conversation_archive.jsonl`
     pub fn new(char_id: &str) -> Self {
-        let memory_dir = crate::utils::path::get_character_data_dir(char_id).join("memory");
+        let memory_dir = crate::utils::path::get_companion_data_dir(char_id).join("memory");
         let _ = std::fs::create_dir_all(&memory_dir);
         let index_path = memory_dir.join("conversation_archive.jsonl");
         let plain_dir = memory_dir.join("archive_plain");

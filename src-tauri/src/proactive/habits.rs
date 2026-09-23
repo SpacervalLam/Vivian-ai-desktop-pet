@@ -14,7 +14,6 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{VivianError, VivianResult};
-use crate::utils::path::get_user_data_dir;
 
 /// 习惯数据保留天数（滚动窗口，超过 90 天的条目自动清理）
 const HABIT_RETENTION_DAYS: i64 = 90;
@@ -112,7 +111,7 @@ pub struct HabitTracker {
 
 impl HabitTracker {
     pub fn new() -> VivianResult<Self> {
-        let dir = get_user_data_dir().join("proactive");
+        let dir = crate::utils::path::get_companion_shared_dir().join("proactive");
         std::fs::create_dir_all(&dir)
             .map_err(|e| VivianError::Memory(format!("创建习惯目录失败: {e}")))?;
         let path = dir.join("habits.json");

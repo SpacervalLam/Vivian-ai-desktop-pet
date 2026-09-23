@@ -53,10 +53,8 @@ let pending = false;
  * 1. React 的 effect 是「子先于父」：`RoomWindow` 的 effect 排在 `RoomScene`
  *    那个大 effect 之后，而后者是**一整段同步阻塞主线程**的场景装配。交给它，
  *    让位就会晚整整一个装配周期——对首开来说就是几秒。
- * 2. 心智观察器是全屏**置顶**窗口（raiseWindow 给它 setAlwaysOnTop(true)，
- *    失焦才降回）。它不让开，房间窗口就算已经 show 了也整个压在下面，用户
- *    看到的就是「心智观察器继续杵着 → 几秒后公寓直接出现」，首屏 loading
- *    层一帧都露不出来。
+ * 2. 心智观察器占满屏幕。它不让开，房间窗口就算已经 show 了也可能被遮住，
+ *    首屏 loading 层无法立即露出来。
  *
  * Rust 侧命令幂等（ROOM_MODE_ACTIVE 只在真翻转时执行一次），所以房间页面
  * 挂载后再调一次 true 不会重复记档，这里是安全的提前量。

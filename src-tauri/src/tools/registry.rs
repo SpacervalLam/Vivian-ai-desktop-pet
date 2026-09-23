@@ -39,7 +39,7 @@ pub fn is_work_agent_only(name: &str) -> bool {
 /// 用于工具禁用状态的**分侧隔离**：同一工具在一侧被禁用不影响另一侧。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AgentSide {
-    /// 陪伴侧（agent_kind != "work"：vivian / nana / 薇薇安）
+    /// 陪伴侧（agent_kind != "work"：vivian / nana / Vivian）
     Companion,
     /// 工作侧（agent_kind == "work"：编程智能体）
     Work,

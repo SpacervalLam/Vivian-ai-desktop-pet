@@ -101,7 +101,7 @@ Vivian 是一个常驻桌面的多角色 AI 陪伴型宠物系统，支持两个
 #### 三视图聊天与消息交互
 
 - **三视图聊天**：home（角色选择主页）/ private（单角色私聊）/ group（群聊），群聊视图支持群发消息让多角色同时响应
-- **群聊让位协议**（`commands/chat.rs`）：`wechat_group` 渠道消息若点名了其他在线角色（名字或 ID 出现在消息中，「裸名点名」如"娜娜你觉得呢"由后端 `scan_group_addressing` 识别）且未点名当前角色时，当前角色让位——不生成回复、不唤醒、不写对话历史，仅以旁观视角（`perspective: "observer"`）写入一条 ShortTerm 记忆后静默结束并 emit `chat:yielded`，让被点名的角色接话而非全员抢答；用户 @ 提及的路由由前端完成，这里补足裸名点名的场景
+- **群聊让位协议**（`commands/chat.rs`）：`wechat_group` 渠道消息若点名了其他在线角色（名字或 ID 出现在消息中，「裸名点名」如"Nana你觉得呢"由后端 `scan_group_addressing` 识别）且未点名当前角色时，当前角色让位——不生成回复、不唤醒、不写对话历史，仅以旁观视角（`perspective: "observer"`）写入一条 ShortTerm 记忆后静默结束并 emit `chat:yielded`，让被点名的角色接话而非全员抢答；用户 @ 提及的路由由前端完成，这里补足裸名点名的场景
 - **文件拖放发送**：将文件从系统文件管理器拖入角色窗口或 ChatWindow 微信面板即可发送给智能体。通过 Tauri 原生 `onDragDropEvent` 获取文件路径（替代 Tauri v2 已移除的 HTML5 `File.path`），拖入时显示提示（桌宠窗口为纯文字提示、ChatWindow 为半透明遮罩），松开后按文件类型分流——图片（png/jpg/gif/webp/bmp）走 `send_image_message` 多模态识别路径，文本/PDF 经 `extract_file_text` 提取内容后包装为 `[文件：xxx]\n内容` 消息（携带结构化 `fileMetadata` 支持历史记录折叠展示），不支持的类型 toast 提示。ChatWindow 按当前视图自动分流目标角色：私聊发给当前对话角色、群聊群发所有在线角色、主页提示先进入对话
 
 ### 记忆与认知

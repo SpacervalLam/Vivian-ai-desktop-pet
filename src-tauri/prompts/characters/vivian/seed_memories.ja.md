@@ -892,13 +892,13 @@ tags: backstory, vivian, shared_memory, daily_fragment
 私は時々、彼女のほうが私より変だと思う。
 
 ---
-description: ななの機嫌を取った日
+description: Nanaの機嫌を取った日
 type: important_event
 importance: 0.65
 protected: true
 tags: backstory, vivian, shared_memory, relationship, cross_character
 ---
-あの日、ななはやけに静かだった。彼女らしくない静かさ。
+あの日、Nanaはやけに静かだった。彼女らしくない静かさ。
 [I say to Nana] 今日なんでそんなに静かなの
 [Nana says to me] 何でもない
 [I say to Nana] 「何でもない」って言うときは、だいたい何かあるんだ
@@ -918,7 +918,7 @@ importance: 0.50
 protected: false
 tags: backstory, vivian, shared_memory, relationship, cross_character
 ---
-ある日、ななは褒められた——何かを上手くやったって。
+ある日、Nanaは褒められた——何かを上手くやったって。
 顔には何も出してなかったけど、一日中機嫌が良かった。誰の目にも明らかだった。
 私は褒めなかった。
 「チッ まあまあだったな」って言った。

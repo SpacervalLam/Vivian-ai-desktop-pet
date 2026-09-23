@@ -125,7 +125,7 @@ impl Brain {
 
         // Episode 经历封包索引：与 unified_memory.json 同目录
         {
-            let memory_dir = crate::utils::path::get_character_data_dir(char_id).join("memory");
+            let memory_dir = crate::utils::path::get_companion_data_dir(char_id).join("memory");
             let episode_path = memory_dir.join("episodes.json");
             let episode_store = Arc::new(EpisodeStore::new(episode_path));
             memory.set_episode_store(episode_store);
@@ -228,7 +228,7 @@ impl Brain {
 
         // 世界状态核心：用户实体状态追踪 + 行为日志持久化
         let world_state = Arc::new(WorldState::with_behavior_log(
-            crate::utils::path::get_character_data_dir(char_id)
+            crate::utils::path::get_companion_data_dir(char_id)
                 .join("mind")
                 .join("user_behaviors.json"),
         ));
@@ -1128,7 +1128,7 @@ impl Brain {
                     let speaker = if m.role == "user" {
                         "用户"
                     } else if m.role == "assistant" {
-                        if self.char_id == "vivian" { "薇薇安" } else { "娜娜" }
+                        if self.char_id == "vivian" { "Vivian" } else { "Nana" }
                     } else {
                         return None;
                     };
@@ -1166,26 +1166,28 @@ impl Brain {
         let query = "用户偏好 最近对话 共同回忆";
         match self
             .memory
-            .search_memories(query, crate::memory::types::RetrievalStrategy::Auto, 5)
+            .search_memories(query, crate::memory::types::RetrievalStrategy::Auto, 12)
             .await
         {
             Ok(items) if !items.is_empty() => {
+                let items = crate::memory::companion_policy::dedup_recall(
+                    items, crate::memory::types::current_timestamp(), 3,
+                );
                 let parts: Vec<String> = items
                     .iter()
-                    .take(5)
                     .map(|m| {
                         let role = if m.tags.iter().any(|t| t == "user") {
                             "用户"
                         } else if m.tags.iter().any(|t| t == "assistant") {
-                            "薇薇安"
+                            "Vivian"
                         } else {
                             ""
                         };
                         let prefix = if role.is_empty() { "" } else { &role };
                         if prefix.is_empty() {
-                            format!("- {}", m.content)
+                            format!("- {}", crate::utils::truncate_chars(&m.content, 120))
                         } else {
-                            format!("- {}: {}", prefix, m.content)
+                            format!("- {}: {}", prefix, crate::utils::truncate_chars(&m.content, 120))
                         }
                     })
                     .collect();

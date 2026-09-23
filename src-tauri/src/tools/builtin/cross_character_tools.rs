@@ -70,7 +70,7 @@ impl Tool for TalkToCharacterTool {
 
     fn usage_corpus(&self, lang: &str) -> &'static str {
         match lang {
-            "zh" => "去问问薇薇安\n跟娜娜说一下\n帮我转告她\n让她也说两句",
+            "zh" => "去问问Vivian\n跟Nana说一下\n帮我转告她\n让她也说两句",
             "en" => "go ask the other one\ntell her for me\nlet her weigh in",
             "ja" => "もう一人に聞いて\n彼女に伝えて\nあの子にも言って",
             _ => "",

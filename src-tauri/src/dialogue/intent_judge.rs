@@ -301,6 +301,28 @@ impl IntentJudge {
 
         let router = self.router.as_ref()?;
         let history_text = Self::build_history_text(history);
+        let simple_choice = tokio::time::timeout(
+            Duration::from_secs(JUDGE_TIMEOUT_SECS),
+            router.choose_simple(
+                serde_json::json!({"latest_message": text, "recent_conversation": history_text}),
+                "Does the latest message end or interrupt the current conversation? Select none for an ordinary reply; only select a close reason when the context supports it.",
+                &[
+                    ("none", "The conversation continues normally"),
+                    ("good_night", "Speaker is going to sleep"),
+                    ("good_bye", "Speaker is leaving or ending the chat"),
+                    ("interrupted", "Speaker steps away temporarily"),
+                    ("conflict", "Conversation ends after a conflict"),
+                    ("switch_topic", "Speaker clearly begins a new topic"),
+                    ("no_response", "Other side has stopped replying"),
+                    ("timeout", "Long silence without engagement"),
+                    ("natural", "Topic has reached a natural conclusion"),
+                ],
+                "",
+            ),
+        ).await.ok().flatten();
+        if let Some(choice) = simple_choice {
+            return Self::parse_close_reason(&choice);
+        }
         let prompt = Self::build_prompt(text, &history_text);
         let messages = vec![ChatMessage::user(prompt)];
 

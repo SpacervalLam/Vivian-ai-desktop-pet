@@ -93,7 +93,7 @@ pub struct MemoryMdRegions {
 
 /// 角色长期记忆笔记文件路径：`<角色数据目录>/memory/memory.md`。
 pub fn memory_md_path(char_id: &str) -> std::path::PathBuf {
-    crate::utils::path::get_character_data_dir(char_id)
+    crate::utils::path::get_companion_data_dir(char_id)
         .join("memory")
         .join("memory.md")
 }

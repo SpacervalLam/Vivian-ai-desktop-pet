@@ -606,7 +606,7 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("psychology.json");
+        let path = dir.join("companion-v2").join("psychology.json");
         Arc::new(PsychologyManager::load_or_init(path))
     }
 
