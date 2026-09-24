@@ -26,6 +26,10 @@ use crate::types::response::ChatMessage;
 #[async_trait]
 pub trait HookJudgeLlmClient: Send + Sync {
     async fn complete(&self, prompt: &str) -> VivianResult<String>;
+
+    async fn judge_closed(&self, _memory: &str, _hook_type: &str, _condition: &str, _dialogue: &str) -> Option<bool> {
+        None
+    }
 }
 
 /// 为 ModelRouter 实现
@@ -39,6 +43,18 @@ impl HookJudgeLlmClient for crate::providers::ModelRouter {
         };
         self.generate(crate::providers::base::LLMRequest::new("memory", messages).with_json_schema(schema))
             .await
+    }
+
+    async fn judge_closed(&self, memory: &str, hook_type: &str, condition: &str, dialogue: &str) -> Option<bool> {
+        self.judge_noul_batch(
+            serde_json::json!({
+                "memory": memory, "hook_type": hook_type,
+                "closure_condition": condition, "recent_dialogue": dialogue,
+            }),
+            &[("closed", "Has the recent dialogue clearly satisfied this open hook's closure condition?",
+                "The condition is explicitly fulfilled", "The condition is not clearly fulfilled")],
+            "",
+        ).await?.get("closed").map(|p| *p >= 0.70)
     }
 }
 
@@ -158,6 +174,9 @@ impl HookJudge {
         recent_dialog: &str,
         llm: &Arc<dyn HookJudgeLlmClient>,
     ) -> VivianResult<bool> {
+        if let Some(closed) = llm.judge_closed(memory_content, &hook.hook_type, &hook.condition, recent_dialog).await {
+            return Ok(closed);
+        }
         let prompt = build_judge_prompt(memory_content, &hook.hook_type, &hook.condition, recent_dialog);
         let resp = llm.complete(&prompt).await?;
         let cleaned = strip_code_fence(&resp);

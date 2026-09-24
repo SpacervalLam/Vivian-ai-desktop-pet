@@ -485,6 +485,31 @@ impl ActionExecutor {
             }
         };
 
+        let state = serde_json::json!({
+            "character": self.char_id,
+            "user_emotion": context.user_emotion,
+            "idle_seconds": context.idle_seconds,
+            "user_present": context.user_present,
+            "actions": actions.iter().enumerate().map(|(index, action)| serde_json::json!({
+                "index": index, "id": action.id, "tool": action.tool_name,
+                "rationale": action.rationale,
+            })).collect::<Vec<_>>(),
+        });
+        let keys: Vec<String> = (0..actions.len()).map(|index| format!("action_{index}")).collect();
+        let instructions: Vec<String> = actions.iter().enumerate()
+            .map(|(index, action)| format!("Should action {index} ({}) be executed now?", action.id))
+            .collect();
+        let questions: Vec<(&str, &str, &str, &str)> = keys.iter().zip(&instructions)
+            .map(|(key, instruction)| (key.as_str(), instruction.as_str(), "Execute now", "Do not execute now"))
+            .collect();
+        if let Some(answers) = router.judge_noul_batch(state, &questions, &self.char_id).await {
+            let decisions: Vec<bool> = keys.iter().map(|key| answers.get(key).copied().unwrap_or(0.0) >= 0.5).collect();
+            for (action, decision) in actions.iter().zip(&decisions) {
+                llm_judge_cache_put(&self.char_id, ctx_hash, &action.id, *decision, now);
+            }
+            return decisions;
+        }
+
         let char_id = self.char_id.clone();
         let mut futures = Vec::with_capacity(actions.len());
         for action in actions {
@@ -530,6 +555,20 @@ impl ActionExecutor {
         idle_seconds: f64,
         user_present: bool,
     ) -> VivianResult<bool> {
+        let context = format!(
+            "角色: {char_id}\n动作ID: {action_id}\n工具: {tool_name}\n依据: {rationale}\n用户情绪: {user_emotion}\n用户空闲: {idle_seconds:.0}s\n用户在场: {user_present}"
+        );
+        if let Some(choice) = router
+            .choose_simple(
+                serde_json::json!({"context": context}),
+                "判断当前是否应该执行这个动作，只按给定上下文判断。",
+                &[("yes", "应该执行"), ("no", "不应该执行")],
+                char_id,
+            )
+            .await
+        {
+            return Ok(choice == "yes");
+        }
         let system = ChatMessageLike::system("你是一个动作执行决策助手。只回答 yes 或 no。");
         let user = ChatMessageLike::user(format!(
             "角色 {} 当前是否应该执行以下动作？\n动作ID: {}\n工具: {}\n依据: {}\n用户情绪: {}\n用户空闲: {:.0}s\n用户在场: {}\n请只回答 yes 或 no。",

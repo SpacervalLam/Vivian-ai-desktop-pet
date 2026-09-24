@@ -2593,6 +2593,7 @@ impl ProactiveOrchestrator {
                         fatigue: 0.0,
                         stress: 0.0,
                         relationship_score: 0.0,
+                        ..MoodSnapshot::default()
                     },
                     inner_monologue::MoodBrief {
                         primary_emotion: "未知".to_string(),

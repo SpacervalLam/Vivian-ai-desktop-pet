@@ -208,8 +208,16 @@ impl ConversationManager {
         conv.energy = (conv.energy + energy_delta).clamp(0.0, 1.0);
         conv.novelty = new_novelty;
 
-        // 计算 Continuation Score
-        conv.continuation_score = evaluator::compute_continuation_score(conv);
+        let explicit_goodbye = evaluator::has_clear_closing_cue(user_input)
+            || reply_text.map(evaluator::has_clear_closing_cue).unwrap_or(false);
+        let is_closing_turn = response_mode == ResponseMode::Ignore || explicit_goodbye;
+
+        // 计算 Continuation Score；明确结束的轮次不应留成未完成话题信号。
+        conv.continuation_score = if is_closing_turn {
+            0.0
+        } else {
+            evaluator::compute_continuation_score(conv)
+        };
         // 记录到历史（保留最近 5 轮，用于 Open Loop 检测）
         conv.record_continuation_score(conv.continuation_score);
 
@@ -217,8 +225,8 @@ impl ConversationManager {
         let force_end = conv.rounds >= Conversation::MAX_ROUNDS;
 
         // 根据得分决定状态转换
-        if response_mode == ResponseMode::Ignore {
-            // Ignore 直接进入 Cooling
+        if is_closing_turn {
+            // 忽略回应或出现明确告别时立即进入 Cooling，不再由 Novelty 把话题强行续上
             conv.state = ConversationState::Cooling;
             conv.cooling_since = Some(now);
         } else if force_end {

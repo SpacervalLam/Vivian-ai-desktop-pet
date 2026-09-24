@@ -508,7 +508,7 @@ fn extract_section_content(id: &str, parts: &PromptParts, lang: &str) -> String 
             if parts.enable_instructions {
                 String::new()
             } else {
-                let mut framework_parts = vec![
+                let framework_parts = vec![
                     safety_rules().to_string(),
                     session_rules().to_string(),
                     address_rules().to_string(),
@@ -516,11 +516,6 @@ fn extract_section_content(id: &str, parts: &PromptParts, lang: &str) -> String 
                     speaker_prefix().to_string(),
                     chat_style_framework().to_string(),
                 ];
-                if let Some(preset) = parts.style_preset_block.as_deref() {
-                    if !preset.trim().is_empty() {
-                        framework_parts.push(preset.to_string());
-                    }
-                }
                 format!(
                     "[FRAMEWORK - DO NOT EMBODY, JUST FOLLOW]\n{}\n[END FRAMEWORK]",
                     framework_parts.join("\n\n")
@@ -546,7 +541,14 @@ fn extract_section_content(id: &str, parts: &PromptParts, lang: &str) -> String 
             .as_deref()
             .unwrap_or("")
             .to_string(),
-        "style" => parts.style_block.as_deref().unwrap_or("").to_string(),
+        "style" => [
+            parts.style_block.as_deref().unwrap_or(""),
+            parts.style_preset_block.as_deref().unwrap_or(""),
+        ]
+        .into_iter()
+        .filter(|part| !part.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n"),
         "relationship" => parts
             .relationship_section
             .as_deref()

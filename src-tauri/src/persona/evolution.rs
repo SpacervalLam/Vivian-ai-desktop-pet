@@ -32,6 +32,8 @@ const RENDER_RECENT: usize = 6;
 const REQUIRED_SUPPORT: u32 = 2;
 /// 候选调整条数上限（未达门槛的草稿，防止无限堆积）
 const MAX_CANDIDATES: usize = 12;
+const MAX_EVOLUTION_TEXT_CHARS: usize = 180;
+const MAX_EVOLUTION_REASON_CHARS: usize = 160;
 
 /// 单条自我成长记录
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -108,19 +110,24 @@ impl PersonaEvolution {
     /// 独立反思重复提出（≥ `REQUIRED_SUPPORT` 次）后才晋升，防止单次噪音被
     /// 固化为长期人格改变。候选累积不受最小间隔限制，晋升才受其约束。
     pub fn try_add(&mut self, kind: &str, text: &str, reason: &str, now: f64) -> bool {
-        let text = text.trim();
+        let kind = kind.trim().to_lowercase();
+        if !matches!(kind.as_str(), "tone" | "personality") {
+            return false;
+        }
+        let text = truncate_chars(&text.split_whitespace().collect::<Vec<_>>().join(" "), MAX_EVOLUTION_TEXT_CHARS);
         if text.is_empty() {
             return false;
         }
+        let reason = truncate_chars(&reason.split_whitespace().collect::<Vec<_>>().join(" "), MAX_EVOLUTION_REASON_CHARS);
         // 已是正式调整：不重复记录
-        if self.entries.iter().any(|e| e.text == text) {
+        if self.entries.iter().any(|e| e.kind == kind && e.text == text) {
             return false;
         }
         // 已存在候选：累积支持次数
-        if let Some(c) = self.candidates.iter_mut().find(|c| c.text == text) {
+        if let Some(c) = self.candidates.iter_mut().find(|c| c.kind == kind && c.text == text) {
             c.support += 1;
-            if !reason.trim().is_empty() {
-                c.reason = reason.trim().to_string();
+            if !reason.is_empty() {
+                c.reason = reason.clone();
             }
             if c.support < REQUIRED_SUPPORT {
                 return false;
@@ -132,14 +139,14 @@ impl PersonaEvolution {
             if !interval_ok {
                 return false;
             }
-            self.promote_candidate(text, kind, now);
+            self.promote_candidate(&text, &kind, now);
             return true;
         }
         // 第一次被提出：作为候选记录
         self.candidates.push(EvolutionCandidate {
-            kind: kind.to_string(),
-            text: text.to_string(),
-            reason: reason.trim().to_string(),
+            kind,
+            text,
+            reason,
             first_seen: now,
             support: 1,
         });
@@ -210,19 +217,19 @@ impl PersonaEvolution {
                 "## Self-Growth (recent adjustments)",
                 "tone",
                 "personality",
-                "These are adjustments you recently made to yourself. Keep them, but never lose your core persona.",
+                "Apply these tendencies only when relevant. They never override your core persona, current instructions, or the user's boundaries.",
             ),
             "ja" => (
                 "## 自己成長（最近の調整）",
                 "話し方",
                 "性格",
-                "これらはあなたが最近自分に施した調整です。維持しつつ、核心の人格は失わないこと。",
+                "状況に合う場合だけ参考にすること。核心の人格、現在の指示、ユーザーの境界を上書きしない。",
             ),
             _ => (
                 "## 自我成长（近期调整）",
                 "语气",
                 "性格",
-                "这些是你最近对自己做出的调整，保持它们，但不要失去核心人设。",
+                "仅在符合当前情境时参考，不得覆盖核心人设、当前指令或用户边界。",
             ),
         };
 
@@ -232,11 +239,20 @@ impl PersonaEvolution {
             let chr = chrono::DateTime::from_timestamp(e.timestamp as i64, 0)
                 .map(|dt| dt.format("%m-%d").to_string())
                 .unwrap_or_default();
-            lines.push(format!("- [{}{}] {}：{}", label, chr, e.text, e.reason));
+            lines.push(format!("- [{}{}] {}", label, chr, e.text));
         }
 
-        Some(format!("{}\n{}\n\n{}", heading, lines.join("\n"), closing))
+        Some(format!(
+            "{}\n{}\n\n{}",
+            heading,
+            lines.join("\n"),
+            closing
+        ))
     }
+}
+
+fn truncate_chars(text: &str, max_chars: usize) -> String {
+    text.chars().take(max_chars).collect()
 }
 
 /// 自我进化覆盖层存储：加载/保存/重置

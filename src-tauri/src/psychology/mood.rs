@@ -1,8 +1,8 @@
-//! Mood 层 — 仅 UI 展示，不参与决策。
+//! Mood 层 — 从心理状态派生的统一快照，供 UI 展示和轻量行为决策使用。
 //!
 //! Mood 不存储，由 PsychologyManager.compute_mood() 实时计算。
-//! 真正决定行为的是 Needs 和 Behavior Drive，不是 Mood。
-//! Mood 只负责把内部心理状态翻译成前端可展示的效价/唤醒度/情绪标签。
+//! Emotion、Needs 和 Relationship 是状态真源；Mood 负责生成一致的展示/决策指标，
+//! 不允许调用方各自用不同公式推导专注、精力、情感效价或关系指标。
 
 use serde::{Deserialize, Serialize};
 
@@ -29,6 +29,18 @@ pub struct MoodSnapshot {
     pub stress: f64,
     /// 关系综合分（0-100，供前端展示）
     pub relationship_score: f64,
+    /// 关系信任（0-100）
+    pub trust: f64,
+    /// 关系亲密度（0-100）
+    pub intimacy: f64,
+    /// 正向情感强度（0-100），由快乐/亲近/好奇构成
+    pub positive_affect: f64,
+    /// 负向情感强度（0-100），由悲伤/愤怒/恐惧/孤独构成
+    pub negative_affect: f64,
+    /// 行为专注度（0-100），由好奇/正向投入与负面干扰共同推导
+    pub focus: f64,
+    /// 精力（0-100），疲劳的反向映射
+    pub energy: f64,
 }
 
 impl Default for MoodSnapshot {
@@ -42,6 +54,12 @@ impl Default for MoodSnapshot {
             fatigue: 20.0,
             stress: 10.0,
             relationship_score: 20.0,
+            trust: 20.0,
+            intimacy: 20.0,
+            positive_affect: 50.0,
+            negative_affect: 10.0,
+            focus: 50.0,
+            energy: 80.0,
         }
     }
 }
@@ -73,9 +91,11 @@ pub fn compute_mood(
     let (primary_emotion, primary_intensity) = emotions[0];
     let secondary_emotion = emotions[1].0;
 
-    // 疲劳：距上次互动越久 + 需求未满足越多 → 越疲劳
+    // 疲劳：未满足需求构成基线负荷；长时间无互动增加有限的静息/低活动负荷。
+    // 指数饱和避免线性公式在数小时后就把疲劳永久推满。
     let need_burden = (needs.belonging + needs.security + needs.expression) / 3.0;
-    let fatigue = (last_interaction_secs / 60.0 * 0.5 + need_burden * 40.0).clamp(0.0, 100.0);
+    let idle_load = 45.0 * (1.0 - (-last_interaction_secs.max(0.0) / 14_400.0).exp());
+    let fatigue = (need_burden * 35.0 + idle_load).clamp(0.0, 100.0);
 
     // 压力：负面情绪 + 安全需求
     let stress = ((emotion.fear + emotion.anger + emotion.sadness) / 3.0 * 60.0
@@ -89,6 +109,20 @@ pub fn compute_mood(
             + relationship.dependency * 10.0)
         .clamp(0.0, 100.0);
 
+    let positive_affect =
+        (emotion.joy * 0.45 + emotion.closeness * 0.30 + emotion.curiosity * 0.25) * 100.0;
+    let negative_affect = (emotion.sadness * 0.30
+        + emotion.anger * 0.30
+        + emotion.fear * 0.20
+        + emotion.loneliness * 0.20)
+        * 100.0;
+    let focus = (emotion.curiosity * 0.55
+        + emotion.joy * 0.25
+        + emotion.closeness * 0.20)
+        * (1.0 - emotion.fear * 0.35 - emotion.anger * 0.35)
+        * 100.0;
+    let energy = 100.0 - fatigue;
+
     MoodSnapshot {
         valence,
         arousal,
@@ -98,6 +132,12 @@ pub fn compute_mood(
         fatigue,
         stress,
         relationship_score,
+        trust: relationship.trust * 100.0,
+        intimacy: relationship.intimacy * 100.0,
+        positive_affect: positive_affect.clamp(0.0, 100.0),
+        negative_affect: negative_affect.clamp(0.0, 100.0),
+        focus: focus.clamp(0.0, 100.0),
+        energy: energy.clamp(0.0, 100.0),
     }
 }
 

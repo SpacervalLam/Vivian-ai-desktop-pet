@@ -21,6 +21,10 @@ use super::types::MemoryItem;
 #[async_trait]
 pub trait VerifierLlmClient: Send + Sync {
     async fn verify(&self, prompt: &str) -> VivianResult<String>;
+
+    async fn judge_relevance(&self, _memories: &[MemoryItem], _query: &str) -> Option<Vec<usize>> {
+        None
+    }
 }
 
 /// 为 `ModelRouter` 实现 verifier 客户端。
@@ -30,6 +34,32 @@ impl VerifierLlmClient for crate::providers::ModelRouter {
         let messages = vec![ChatMessage::user(prompt.to_string())];
         self.generate(crate::providers::base::LLMRequest::new("memory", messages))
             .await
+    }
+
+    async fn judge_relevance(&self, memories: &[MemoryItem], query: &str) -> Option<Vec<usize>> {
+        let candidates: Vec<_> = memories.iter().enumerate().map(|(index, memory)| {
+            serde_json::json!({
+                "index": index,
+                "content": memory.content.chars().take(400).collect::<String>(),
+                "description": memory.description,
+            })
+        }).collect();
+        let definitions: Vec<_> = memories.iter().enumerate().map(|(index, _)| (
+            format!("m{index}"),
+            format!("Is candidate memory {index} directly useful for answering the user's query?"),
+            "It contains evidence relevant to the query".to_string(),
+            "It does not help answer the query".to_string(),
+        )).collect();
+        let questions: Vec<_> = definitions.iter().map(|(k, q, yes, no)|
+            (k.as_str(), q.as_str(), yes.as_str(), no.as_str())).collect();
+        let answers = self.judge_noul_batch(
+            serde_json::json!({"query": query, "candidates": candidates}),
+            &questions,
+            "",
+        ).await?;
+        Some((0..memories.len()).filter(|index|
+            answers.get(&format!("m{index}")).copied().unwrap_or(0.0) >= 0.55
+        ).collect())
     }
 }
 
@@ -75,6 +105,10 @@ pub async fn verify_retrieval(
             skipped: true,
         };
     };
+
+    if let Some(indices) = llm.judge_relevance(memories, query).await {
+        return VerificationResult { verified_indices: indices, skipped: false };
+    }
 
     let prompt = build_verify_prompt(memories, query);
 

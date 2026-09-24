@@ -29,16 +29,13 @@ pub fn get_current_mood(
         let mut result = serde_json::to_value(&mood).map_err(|e| e.to_string())?;
         if let Some(obj) = result.as_object_mut() {
             // 添加前端 MoodState 期望的兼容字段
-            // energy = 100 - fatigue（疲劳度的反向映射）
-            let energy = (100.0 - mood.fatigue).max(0.0).min(100.0);
-            obj.insert("energy".to_string(), Value::from(energy));
-            // focus（专注力）= 唤醒度映射：高唤醒=警觉专注，低唤醒=疲惫走神
-            let focus = (mood.arousal * 100.0).max(0.0).min(100.0);
-            obj.insert("focus".to_string(), Value::from(focus));
-            obj.insert("intimacy".to_string(), Value::from(mood.relationship_score));
-            obj.insert("trust".to_string(), Value::from(mood.relationship_score));
-            obj.insert("positive_affect".to_string(), Value::from(((mood.valence + 1.0) * 50.0).max(0.0).min(100.0)));
-            obj.insert("negative_affect".to_string(), Value::from(((1.0 - mood.valence) * 50.0).max(0.0).min(100.0)));
+            // UI 兼容字段统一从 MoodSnapshot 读取，避免命令层另造计算口径。
+            obj.insert("energy".to_string(), Value::from(mood.energy));
+            obj.insert("focus".to_string(), Value::from(mood.focus));
+            obj.insert("intimacy".to_string(), Value::from(mood.intimacy));
+            obj.insert("trust".to_string(), Value::from(mood.trust));
+            obj.insert("positive_affect".to_string(), Value::from(mood.positive_affect));
+            obj.insert("negative_affect".to_string(), Value::from(mood.negative_affect));
             obj.insert("mood_label".to_string(), Value::String(mood.primary_emotion.display_zh().to_string()));
             obj.insert("mood_score".to_string(), Value::from(((mood.valence + 1.0) * 50.0).max(0.0).min(100.0)));
             obj.insert("mood_emotion".to_string(), Value::String(mood.primary_emotion.as_str().to_string()));
@@ -63,13 +60,13 @@ pub fn get_current_mood(
             "mood_secondary": "neutral",
             "fatigue": 20.0,
             "stress": 10.0,
-            "energy": 80.0,
-            "focus": 50.0,
+            "energy": 88.0,
+            "focus": 37.0,
             "intimacy": 20.0,
             "trust": 20.0,
             "relationship_score": 20.0,
-            "positive_affect": 65.0,
-            "negative_affect": 35.0,
+            "positive_affect": 38.0,
+            "negative_affect": 8.0,
         }))
     }
 }

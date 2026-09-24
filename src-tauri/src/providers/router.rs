@@ -1121,6 +1121,77 @@ impl ModelRouter {
         }
     }
 
+    /// Batch independent yes/no judgments. Values are probabilities of `true`.
+    /// Returns None when the route is unconfigured or the response is invalid.
+    pub async fn judge_noul_batch(
+        &self,
+        state: serde_json::Value,
+        questions: &[(&str, &str, &str, &str)],
+        character_id: &str,
+    ) -> Option<HashMap<String, f64>> {
+        if questions.is_empty() {
+            return Some(HashMap::new());
+        }
+        if let Some(jev) = &self.jev_decision {
+            return match jev.noul_batch(state, questions).await {
+                Ok(answers) => {
+                    self.emit_route_status("simple_judge", "ok");
+                    Some(answers)
+                }
+                Err(e) => {
+                    tracing::warn!("[simple_judge] Jev batch failed: {e}");
+                    self.emit_route_status("simple_judge", "error");
+                    None
+                }
+            };
+        }
+        if !self.enable_routing_matrix || !self.task_providers.contains_key("simple_judge") {
+            return None;
+        }
+        let definitions: serde_json::Map<String, serde_json::Value> = questions.iter()
+            .map(|(key, instruction, yes, no)| ((*key).to_owned(), json!({
+                "question": instruction, "true": yes, "false": no
+            })))
+            .collect();
+        let messages = vec![
+            ChatMessage::system("Answer independent yes/no questions. Return only a JSON object mapping every question key to the probability (0 to 1) that its true criterion holds. No prose."),
+            ChatMessage::user(format!("Questions: {}\nState: {state}", json!(definitions))),
+        ];
+        let reply = self.generate(LLMRequest::new("simple_judge", messages)
+            .with_character_id(character_id.to_owned())
+            .with_temperature(0.0)
+            .with_max_tokens((questions.len() as u32 * 12 + 32).min(512))).await.ok()?;
+        let start = reply.find('{')?;
+        let end = reply.rfind('}')?;
+        let values: serde_json::Value = serde_json::from_str(reply.get(start..=end)?).ok()?;
+        let mut answers = HashMap::new();
+        for (key, _, _, _) in questions {
+            let probability = values.get(*key)?.as_f64()?;
+            if !probability.is_finite() || !(0.0..=1.0).contains(&probability) {
+                return None;
+            }
+            answers.insert((*key).to_owned(), probability);
+        }
+        Some(answers)
+    }
+
+    /// Mixed Choice + Score route for emotion classification. A normal chat
+    /// provider keeps using the existing emotion_analysis prompt as fallback.
+    pub async fn classify_emotion_simple(&self, text: &str, labels: &[&str]) -> Option<(String, f64)> {
+        let jev = self.jev_decision.as_ref()?;
+        match jev.classify_emotion(text, labels).await {
+            Ok(result) => {
+                self.emit_route_status("simple_judge", "ok");
+                Some(result)
+            }
+            Err(e) => {
+                tracing::warn!("[simple_judge] Jev emotion classification failed: {e}");
+                self.emit_route_status("simple_judge", "error");
+                None
+            }
+        }
+    }
+
     pub async fn generate(&self, mut request: LLMRequest) -> VivianResult<String> {
         loop {
             let options = self.call_options(&request);

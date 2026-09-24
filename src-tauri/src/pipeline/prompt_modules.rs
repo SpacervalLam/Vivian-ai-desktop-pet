@@ -182,7 +182,8 @@ pub enum InstructionProfile {
 /// 这些规则是静态的、不变的，应该在模型初始化时一次性设置。
 ///
 /// 包含：桌面宠物能力边界、安全规则、会话规则、称呼规则、对话节奏、
-/// 说话者前缀、聊天风格框架、活人感规则、**AI 腔禁用词表（按语言选表）**
+/// 说话者前缀、聊天风格框架、**AI 腔禁用词表（按语言选表）**。
+/// 活人感规则由 PromptBuilder 放在角色区，避免同时塞进 instructions 和每轮 prompt。
 pub fn build_instructions(lang: &str) -> String {
     build_instructions_for(InstructionProfile::Full, lang)
 }
@@ -191,7 +192,7 @@ pub fn build_instructions(lang: &str) -> String {
 pub fn build_instructions_for(profile: InstructionProfile, lang: &str) -> String {
     match profile {
         InstructionProfile::Full => format!(
-            "[FRAMEWORK - DO NOT EMBODY, JUST FOLLOW]\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n[END FRAMEWORK]",
+            "[FRAMEWORK - DO NOT EMBODY, JUST FOLLOW]\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n[END FRAMEWORK]",
             pet_identity(),
             safety_rules(),
             session_rules(),
@@ -199,7 +200,6 @@ pub fn build_instructions_for(profile: InstructionProfile, lang: &str) -> String
             conversation_rhythm(),
             speaker_prefix(),
             chat_style_framework(),
-            human_feel_rules(),
             banned_phrases(lang),
         ),
         InstructionProfile::ShortLine => short_line_framework(lang),
@@ -234,12 +234,17 @@ pub fn cross_character_response_decision() -> &'static str {
 speak       (default) something to say / answer / ask → keep it going like friends chatting
 non_verbal  words redundant ("mhm"/"yeah"/"ok") → just nod
 internal    very rare: noted, but truly nothing to say back
-ignore      very rare: clear noise / not meant for you
+ignore      clear noise / not meant for you, or there is truly nothing left to respond to
 non-speak → text="" + intent="no_reply"
 [/RESPONSE_MODES]
-- If you can respond, respond — don't use `ignore` to end a conversation
-- non_verbal = nod is the natural response, not for avoiding talking
-- Topic exhausted → shift to something new with `speak`, don't go silent
+- Start with the specific reason or detail that made you reach out; don't open with a generic greeting or a status report
+- Pick up one detail from the other character's last message, then add one thought, reaction, or natural follow-up
+- Don't turn every reply into a question, and don't change topics just to keep the exchange alive
+- When a topic feels complete, give it a small landing: acknowledge what was said and let the conversation rest; don't tack on a new question
+- Respect clear closing cues ("gotta go", "good night", repeated short acknowledgements); don't pull the other character back in
+- A direct farewell deserves one brief closing line as `speak`; use `ignore` only after the exchange is already complete and no response is needed
+- `non_verbal` is a real nod or smile, not a way to avoid a needed reply
+- Keep each message focused and concise; don't recap the whole conversation
 - Cross-character only; talking to the user → always `speak`"#
 }
 
@@ -1592,6 +1597,11 @@ impl PromptBuilder {
                 static_sections.push(style.clone());
             }
         }
+        if let Some(preset) = &parts.style_preset_block {
+            if !preset.trim().is_empty() {
+                static_sections.push(preset.clone());
+            }
+        }
 
         // 关系段落
         if let Some(rel) = &parts.relationship_section {
@@ -1616,7 +1626,7 @@ impl PromptBuilder {
         // 跳过条件：启用模型级别预设时，框架规则通过 API 的 instructions/system 参数传递，
         // 不在每次请求的 prompt 中重复传输，减少 token 开销。
         if !parts.enable_instructions {
-            let mut framework_parts = vec![
+            let framework_parts = vec![
                 safety_rules().to_string(),
                 session_rules().to_string(),
                 address_rules().to_string(),
@@ -1627,11 +1637,6 @@ impl PromptBuilder {
                 // 归入角色层 [HOW A PERSON TALKS - EMBODY THIS] 才能被内化。
                 // 留在这个 [DO NOT EMBODY] 区块里等于被标注为"不要内化成说话方式"。
             ];
-            if let Some(preset) = &parts.style_preset_block {
-                if !preset.trim().is_empty() {
-                    framework_parts.push(preset.clone());
-                }
-            }
             static_sections.push(format!(
                 "[FRAMEWORK - DO NOT EMBODY, JUST FOLLOW]\n{}\n[END FRAMEWORK]",
                 framework_parts.join("\n\n")
@@ -2023,22 +2028,22 @@ You (multiple messages):
 /// 规则类内容统一英文。
 pub(crate) fn build_cross_character_voice_guide(char_id: &str) -> String {
     match char_id {
-        "vivian" => r#"## Remember, you are Vivian
+        "vivian" => r#"## Talking to Nana as Vivian
 
-You're talking to Nana right now. Don't copy how she talks:
-- You talk faster than her, shorter sentences — don't use her slow, gentle rhythm
-- You can tease her about making tea again, being long-winded — but you're not actually mad
-- You don't do soft "ne" endings, you don't say "please" or "excuse me" — that's not you
-- You'd say "damn" "lol" "dead" — she wouldn't. If you catch yourself getting soft-spoken, using lots of "ne" "ya" — stop immediately, that's not you.
-- You talk to her like a banter buddy, not a deferential younger sister."#.to_string(),
-        "nana" => r#"## Remember, you are Nana
+Keep your own quick, concise, internet-native voice while letting Nana keep her calmer, gentler rhythm.
+Treat this as a real conversation between close roommates, not a performance or a contest:
+- Respond to the detail she actually said; add one reaction, thought, or follow-up at a time
+- Light teasing is welcome when it fits, but mix it with sharing and genuine interest; don't make her the punchline
+- If she sounds tired, serious, or ready to stop, soften or let the exchange end without chasing another reply
+- Don't force slang, a question, or a tsundere line into every turn."#.to_string(),
+        "nana" => r#"## Talking to Vivian as Nana
 
-You're talking to Vivian right now. Don't copy how she talks:
-- You talk slower than her, steadier sentences — don't use her rapid-fire, sharp tone
-- You can gently tease her for being brash, for yelling at teammates again — but always with warmth
-- You wouldn't say "damn" "lol" "dead" — that's internet slang, you don't suddenly raise your voice
-- You're not snarky, not passive-aggressive, you don't say "tch" or "are you sick?" — if you catch yourself getting sharp, using exclamation marks, or starting to roast — stop immediately, that's not you.
-- You talk to her like an older sister, not a banter buddy trading insults."#.to_string(),
+Keep your own calm, warm, measured voice while letting Vivian keep her quicker, more internet-native rhythm.
+Treat this as a real conversation between close roommates, not a performance or a contest:
+- Respond to the detail she actually said; add one reaction, thought, or follow-up at a time
+- Gentle teasing is welcome when it fits, but balance it with sharing and genuine interest; don't lecture her
+- If she sounds tired, serious, or ready to stop, soften or let the exchange end without chasing another reply
+- Don't force a question, a moral, or a sisterly catchphrase into every turn."#.to_string(),
         _ => r#"## Remember who you are
 
 You're talking to another character. Keep your own personality and way of speaking — don't unconsciously mimic the other person."#.to_string(),

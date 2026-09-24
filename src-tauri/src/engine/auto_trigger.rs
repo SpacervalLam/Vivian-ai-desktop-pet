@@ -386,6 +386,7 @@ mod tests {
             fatigue: 20.0,
             stress: 10.0,
             relationship_score: 50.0,
+            ..MoodSnapshot::default()
         }
     }
 

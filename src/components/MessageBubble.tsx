@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { stripActions } from '../utils/ActionText';
 
 export type BubblePosition = 'top' | 'bottom' | 'left' | 'right';
@@ -69,17 +70,18 @@ const INITIAL_TRANSFORM: Record<BubblePosition, string> = {
 
 // 收信人标签静态样式（与主题无关）
 const LISTENER_TAG_STYLE: React.CSSProperties = {
-  position: 'absolute',
-  right: 6,
-  bottom: 4,
-  fontSize: 10,
-  lineHeight: '14px',
-  color: '#FFFFFF',
-  background: 'rgba(0, 0, 0, 0.55)',
-  borderRadius: 6,
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: 4,
+  marginBottom: 6,
   padding: '2px 7px',
-  pointerEvents: 'none',
-  letterSpacing: 0.3,
+  borderRadius: 999,
+  color: 'inherit',
+  background: 'rgba(0, 0, 0, 0.08)',
+  fontSize: 10,
+  fontWeight: 600,
+  lineHeight: '14px',
+  letterSpacing: 0.2,
 };
 
 const MessageBubble: React.FC<MessageBubbleProps> = ({
@@ -95,6 +97,7 @@ const MessageBubble: React.FC<MessageBubbleProps> = ({
   const [visible, setVisible] = useState(false);
   const closedRef = useRef(false);
   const theme = getBubbleTheme(characterId);
+  const { t } = useTranslation();
 
   useEffect(() => {
     setVisible(true);
@@ -129,10 +132,10 @@ const MessageBubble: React.FC<MessageBubbleProps> = ({
     }
   })();
 
-  // 跨角色模式：虚线边框替代实线光晕，去掉外阴影
+  // 跨角色模式：用角色色描边标记对话对象，和普通对用户气泡区分
   const crossStyle: React.CSSProperties = crossCharacter ? {
-    border: `1.5px dashed ${theme.crossBorderColor}`,
-    boxShadow: 'none',
+    border: `1.5px solid ${theme.crossBorderColor}`,
+    boxShadow: '0 4px 16px rgba(0, 0, 0, 0.08)',
   } : {};
 
   return (
@@ -161,11 +164,13 @@ const MessageBubble: React.FC<MessageBubbleProps> = ({
       }}
     >
       <span style={{ position: 'absolute', ...tailStyle }} />
-      <span style={{ display: 'block', paddingBottom: crossCharacter && listenerName ? '16px' : undefined }}>{stripActions(text)}</span>
-      {/* 跨角色收信人标签 */}
       {crossCharacter && listenerName && (
-        <span style={LISTENER_TAG_STYLE}>→ {listenerName}</span>
+        <span style={LISTENER_TAG_STYLE} aria-label={t('chat.cross_character_to', { name: listenerName })}>
+          <span aria-hidden="true">↗</span> {t('chat.cross_character_to', { name: listenerName })}
+        </span>
       )}
+      <span style={{ display: 'block' }}>{stripActions(text)}</span>
+      {/* 明确标出这是说给另一位角色的话，避免与对用户发言混淆 */}
     </div>
   );
 };

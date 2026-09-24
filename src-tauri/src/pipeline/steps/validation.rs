@@ -126,6 +126,21 @@ impl ValidationRunnable {
         reply_text: &str,
         dialogue_history: &str,
     ) -> Result<Option<String>, String> {
+        let judgment = router.judge_noul_batch(
+            json!({
+                "memory": memory_text,
+                "recent_dialogue": dialogue_history,
+                "assistant_reply": reply_text,
+            }),
+            &[("unsupported", "Does the assistant reply clearly contradict the memory or invent a factual claim absent from the supplied context?",
+                "A clear contradiction or invented factual claim exists",
+                "The reply is consistent with the supplied context, or uncertainty remains")],
+            "",
+        );
+        if let Ok(Some(answers)) = tokio::time::timeout(HALLUCINATION_CHECK_TIMEOUT, judgment).await {
+            return Ok((answers.get("unsupported").copied().unwrap_or(0.0) >= 0.80)
+                .then(|| "ISSUE: reply contains a likely unsupported or contradictory factual claim".to_string()));
+        }
         let lang_norm =
             crate::pipeline::prompt_modules::normalize_lang(&crate::i18n::get_language());
         let (system, user) = match lang_norm {

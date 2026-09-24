@@ -86,6 +86,19 @@ fn is_stopword(word: &str) -> bool {
     )
 }
 
+/// Explicit conversational farewells should finish the current exchange promptly,
+/// even when the closing sentence is long enough to score as novel.
+pub fn has_clear_closing_cue(text: &str) -> bool {
+    let normalized = text.trim().to_lowercase();
+    [
+        "晚安", "拜拜", "再见", "下次聊", "下次再聊", "改天聊", "先聊到这", "先不聊了", "我先走了", "我去忙了", "不打扰了",
+        "good night", "goodbye", "talk later", "gotta go", "i have to go", "i'll go now", "bye for now",
+        "おやすみ", "またね", "また今度", "じゃあね", "失礼するね", "そろそろ行くね",
+    ]
+    .iter()
+    .any(|cue| normalized.contains(cue))
+}
+
 /// 计算 Energy 增量
 ///
 /// - Speak + Novelty 上升 → Energy 上升

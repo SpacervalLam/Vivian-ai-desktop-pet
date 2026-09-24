@@ -629,8 +629,8 @@ pub mod templates {
 /// 默认中文模板（与 i18n 模块协作时可作为 fallback）
 pub fn default_template(key: &str) -> Option<&'static str> {
     match key {
-        templates::STARTUP_GREETING_FIRST => Some("你好呀~我是 Vivian，很高兴认识你！"),
-        templates::STARTUP_GREETING_RETURN => Some("欢迎回来~今天过得怎么样？"),
+        templates::STARTUP_GREETING_FIRST => Some("你好呀，先跟你打声招呼。"),
+        templates::STARTUP_GREETING_RETURN => Some("我在呢，想聊什么都行。"),
         templates::ERROR_GENERIC => Some("出错了：{error}"),
         templates::ERROR_NETWORK => Some("网络连接异常，请稍后再试。{detail}"),
         templates::ERROR_LLM => Some("AI 思考时遇到问题：{detail}"),

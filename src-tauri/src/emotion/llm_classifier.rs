@@ -29,6 +29,10 @@ use super::EmotionResult;
 pub trait EmotionLlmClient: Send + Sync {
     /// 完成 prompt 调用，返回 LLM 文本响应
     async fn complete(&self, prompt: &str) -> VivianResult<String>;
+
+    async fn classify_structured(&self, _text: &str) -> Option<EmotionResult> {
+        None
+    }
 }
 
 /// 适配器：将任意 `BaseProvider` 包装为 `EmotionLlmClient`
@@ -69,6 +73,16 @@ impl EmotionLlmClient for crate::providers::ModelRouter {
             messages,
         ))
         .await
+    }
+
+    async fn classify_structured(&self, text: &str) -> Option<EmotionResult> {
+        let (emotion, intensity) = self.classify_emotion_simple(text, LLM_EMOTION_LABELS).await?;
+        let (valence, arousal) = llm_emotion_valence_arousal(&emotion);
+        Some(EmotionResult {
+            emotion, intensity, valence, arousal,
+            source: "llm".to_string(),
+            ..Default::default()
+        })
     }
 }
 
@@ -130,6 +144,11 @@ impl LlmEmotionClassifier {
                 return neutral_fallback(0.3, "no_llm");
             }
         };
+
+        let truncated: String = text.chars().take(self.max_text_len).collect();
+        if let Some(result) = client.classify_structured(&truncated).await {
+            return result;
+        }
 
         let prompt = self.build_prompt(text);
         match client.complete(&prompt).await {

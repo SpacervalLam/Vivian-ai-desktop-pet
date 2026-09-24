@@ -278,9 +278,9 @@ impl BrainChatChain {
         let hook_judge = Arc::new(HookJudge::from_router(router.clone()));
 
         // 智能体动态行为画像：跟踪近期交互模式（话题/情绪/消息长度），注入 prompt 动态段
-        let dynamic_profile = Arc::new(DynamicBehaviorProfile::new().unwrap_or_else(|e| {
+        let dynamic_profile = Arc::new(DynamicBehaviorProfile::new(char_id).unwrap_or_else(|e| {
             tracing::warn!("[BrainChatChain] DynamicBehaviorProfile 初始化失败，动态行为画像将不可用: {}", e);
-            DynamicBehaviorProfile::fallback()
+            DynamicBehaviorProfile::fallback_for(char_id)
         }));
 
         // 从配置读取检索策略与过期清理开关

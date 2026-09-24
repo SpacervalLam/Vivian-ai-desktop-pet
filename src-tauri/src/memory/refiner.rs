@@ -72,6 +72,30 @@ pub async fn llm_refine(
         return Ok(candidates.to_vec());
     }
 
+    let definitions: Vec<_> = candidates.iter().enumerate().map(|(index, _)| (
+        format!("m{index}"),
+        format!("Is memory {index} useful for answering this query?"),
+        "Directly relevant evidence".to_string(),
+        "Unrelated or only superficially similar".to_string(),
+    )).collect();
+    let questions: Vec<_> = definitions.iter().map(|(key, question, yes, no)|
+        (key.as_str(), question.as_str(), yes.as_str(), no.as_str())).collect();
+    let state = serde_json::json!({
+        "character_id": char_id,
+        "query": query,
+        "candidates": candidates.iter().enumerate().map(|(index, memory)|
+            serde_json::json!({"index": index, "content": memory.content.chars().take(300).collect::<String>()})
+        ).collect::<Vec<_>>(),
+    });
+    if let Some(scores) = router.judge_noul_batch(state, &questions, char_id).await {
+        let mut ranked: Vec<usize> = (0..candidates.len()).collect();
+        ranked.sort_by(|a, b| scores.get(&format!("m{b}")).unwrap_or(&0.0)
+            .partial_cmp(scores.get(&format!("m{a}")).unwrap_or(&0.0))
+            .unwrap_or(std::cmp::Ordering::Equal));
+        return Ok(ranked.into_iter().take(target_n)
+            .map(|index| candidates[index].clone()).collect());
+    }
+
     let system = ChatMessage::system(
         "你是记忆筛选助手。从候选记忆中挑选与用户查询最相关的若干条。只输出 JSON。",
     );

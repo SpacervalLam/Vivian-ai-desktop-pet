@@ -505,6 +505,7 @@ mod tests {
             fatigue,
             stress,
             relationship_score: 50.0,
+            ..MoodSnapshot::default()
         }
     }
 
@@ -525,6 +526,7 @@ mod tests {
             fatigue,
             stress,
             relationship_score: 50.0,
+            ..MoodSnapshot::default()
         }
     }
 

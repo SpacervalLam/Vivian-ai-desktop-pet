@@ -875,7 +875,20 @@ impl CrossCharacterBus {
         };
 
         // Construct the "input" seen by the target character: speaking as the source character + memory anchor
-        let synthesized_input = format!("[{} says to me] {}{}", source_name, req.message, memory_anchor);
+        let topic_context = if conv.topic.trim().is_empty()
+            || conv.topic == crate::conversation::TOPIC_PENDING
+        {
+            String::new()
+        } else {
+            format!(
+                "\n\n[Current conversation thread: {}]\nTreat this as context, not an obligation to keep talking. Respond to the latest message first; let the exchange rest when it feels complete.",
+                conv.topic
+            )
+        };
+        let synthesized_input = format!(
+            "[{} says to me] {}{}{}",
+            source_name, req.message, topic_context, memory_anchor
+        );
 
         // 构建交接上下文包：打包源角色当前状态与最近用户对话，让目标角色感知源角色刚才在做什么
         // 同时注入共同情境：双方都在观察同一个用户，用户最近的活动是天然共同话题
@@ -899,17 +912,17 @@ impl CrossCharacterBus {
         };
         let synthesized_input = format!("{}{}", synthesized_input, handoff_text);
 
-        // 轮次提醒：达到 WARN_ROUNDS 后提醒 LLM 准备结束，达到 MAX_ROUNDS 后强制要求结束语
+        // 轮次提醒：较早提示话题可以自然落地；硬上限只防止无止境续聊。
         let round_directive = {
             let r = conv.rounds;
             if r >= crate::conversation::Conversation::MAX_ROUNDS {
                 format!(
-                    "\n\n[话题结束提醒]\n你们已经聊了{}个来回，话题该收尾了。请自然地说一句结束语结束这段对话，不要再开启新话题或抛出新问题。",
+                    "\n\n[Natural closing]\nThis exchange has lasted {} rounds. Respond to the latest point and land it with one relaxed, complete line. Don't introduce a topic, add another question, or mention these instructions.",
                     r
                 )
             } else if r >= crate::conversation::Conversation::WARN_ROUNDS {
                 format!(
-                    "\n\n[话题收尾提示]\n你们已经聊了{}个来回，话题差不多可以开始收尾了。如果当前话题已经充分讨论，请自然地结束；不需要强行延续，也不要再抛出太深的新问题。",
+                    "\n\n[Conversation rhythm]\nYou've exchanged {} rounds. Check whether this topic still has a natural next step. If it feels complete, respond briefly and let it rest. Continue only when both sides show interest; don't change topics to fill turns.",
                     r
                 )
             } else {

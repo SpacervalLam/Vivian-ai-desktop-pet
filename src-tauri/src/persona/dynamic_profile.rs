@@ -20,7 +20,7 @@
 //! - 写路径：`record_turn` 追加统计层；`merge_acquired_behaviors` 合并语义层
 //! - 语义层由 ConsolidationPipeline Stage 2 抽取，BrainChatChain 调用 merge 写入
 //!
-//! 持久化：`%APPDATA%\Vivian\persona\dynamic_profile.json`
+//! 持久化：`%APPDATA%\Vivian\characters\<char_id>\persona\dynamic_profile.json`
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -38,6 +38,9 @@ const MAX_MSG_CHARS: usize = 100;
 
 /// 语义层 acquired_behaviors 最大保留条数（FIFO 淘汰）
 const MAX_ACQUIRED_BEHAVIORS: usize = 30;
+/// 动态画像只有达到此置信度的语义归纳才会注入提示词。
+const PROMPT_BEHAVIOR_MIN_CONFIDENCE: f64 = 0.7;
+const MAX_PROMPT_BEHAVIOR_CHARS: usize = 120;
 
 /// 语义级行为去重的描述相似度阈值（Jaccard，jieba 分词）
 const ACQUIRED_BEHAVIOR_DEDUP_THRESHOLD: f64 = 0.7;
@@ -148,12 +151,15 @@ struct ProfileData {
 pub struct DynamicBehaviorProfile {
     inner: RwLock<ProfileData>,
     persistence_path: PathBuf,
+    character_id: String,
 }
 
 impl DynamicBehaviorProfile {
     /// 加载或创建新的动态行为画像
-    pub fn new() -> VivianResult<Self> {
-        let dir = crate::utils::path::get_companion_shared_dir().join("persona");
+    pub fn new(char_id: &str) -> VivianResult<Self> {
+        // 历史版本把 Vivian / Nana 混写在 shared 画像中，无法可靠归属；不自动迁移，
+        // 避免继续把一方的习惯注入另一方。旧文件保留，角色从独立画像重新积累。
+        let dir = crate::utils::path::get_character_data_dir(char_id).join("persona");
         std::fs::create_dir_all(&dir)
             .map_err(|e| VivianError::Memory(format!("创建动态画像目录失败: {e}")))?;
         let path = dir.join("dynamic_profile.json");
@@ -165,6 +171,7 @@ impl DynamicBehaviorProfile {
         Ok(Self {
             inner: RwLock::new(data),
             persistence_path: path,
+            character_id: char_id.to_lowercase(),
         })
     }
 
@@ -173,6 +180,16 @@ impl DynamicBehaviorProfile {
         Self {
             inner: RwLock::new(ProfileData::default()),
             persistence_path: PathBuf::new(),
+            character_id: "vivian".to_string(),
+        }
+    }
+
+    /// 降级构造：保留当前角色身份，但不持久化。
+    pub fn fallback_for(char_id: &str) -> Self {
+        Self {
+            inner: RwLock::new(ProfileData::default()),
+            persistence_path: PathBuf::new(),
+            character_id: char_id.to_lowercase(),
         }
     }
 
@@ -236,7 +253,10 @@ impl DynamicBehaviorProfile {
     pub fn format_for_prompt(&self) -> String {
         let data = self.inner.read();
         let has_stats = data.turns.len() >= 3;
-        let has_semantic = !data.acquired_behaviors.is_empty();
+        let has_semantic = data.acquired_behaviors.iter().any(|b| {
+            b.confidence >= PROMPT_BEHAVIOR_MIN_CONFIDENCE
+                && !b.description.trim().is_empty()
+        });
         if !has_stats && !has_semantic {
             return String::new();
         }
@@ -256,7 +276,7 @@ impl DynamicBehaviorProfile {
 
             sections.push(format!("最近话题：{}", if topics.is_empty() { "（暂无）".to_string() } else { topics.join("、") }));
             sections.push(format!("近期用户情绪：{}", if user_emotions.is_empty() { "（暂无）".to_string() } else { user_emotions.join("、") }));
-            sections.push(format!("近期Vivian情绪：{}", if ai_emotions.is_empty() { "（暂无）".to_string() } else { ai_emotions.join("、") }));
+            sections.push(format!("近期角色情绪：{}", if ai_emotions.is_empty() { "（暂无）".to_string() } else { ai_emotions.join("、") }));
         }
 
         // 语义层（LLM 抽取的稳定行为模式）
@@ -268,7 +288,14 @@ impl DynamicBehaviorProfile {
             }
         }
 
-        format!("【Vivian近期行为画像】\n{}", sections.join("\n"))
+        let name = match self.character_id.as_str() {
+            "nana" => "Nana",
+            _ => "Vivian",
+        };
+        format!(
+            "【{name}近期行为画像｜仅作有证据的参考倾向，不覆盖固定人设或当前情境】\n{}",
+            sections.join("\n")
+        )
     }
 
     /// 合并 Stage 2 抽取的语义级行为画像（写路径，由 BrainChatChain 调用）
@@ -346,7 +373,9 @@ fn format_acquired_behaviors_for_prompt(behaviors: &[AcquiredBehavior]) -> Strin
     }
     // 按类别分组
     let mut by_category: HashMap<AcquiredBehaviorCategory, Vec<&AcquiredBehavior>> = HashMap::new();
-    for b in behaviors {
+    for b in behaviors.iter().filter(|b| {
+        b.confidence >= PROMPT_BEHAVIOR_MIN_CONFIDENCE && !b.description.trim().is_empty()
+    }) {
         by_category.entry(b.category.clone()).or_default().push(b);
     }
     // 每类按置信度降序取 top 3
@@ -366,7 +395,16 @@ fn format_acquired_behaviors_for_prompt(behaviors: &[AcquiredBehavior]) -> Strin
             });
             let top: Vec<&AcquiredBehavior> = sorted.into_iter().take(3).collect();
             for b in top {
-                lines.push(b.to_prompt_line());
+                let description = truncate_chars(
+                    &b.description
+                        .chars()
+                        .map(|c| if c.is_control() { ' ' } else { c })
+                        .collect::<String>(),
+                    MAX_PROMPT_BEHAVIOR_CHARS,
+                );
+                if !description.trim().is_empty() {
+                    lines.push(format!("- [{}] {}", category.display_zh(), description.trim()));
+                }
             }
         }
     }

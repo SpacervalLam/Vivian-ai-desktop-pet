@@ -2239,6 +2239,8 @@ export default function App() {
     let cancelled = false;
     const unlisteners: (() => void)[] = [];
     const crossStreamTextRef = { current: '' };
+    const crossStreamIdRef = { current: '' };
+    const crossStreamRoleRef = { current: '' as 'source' | 'target' | '' };
     let crossSyncStarted = false;
     const crossListenerNameRef = { current: '' };
     void (async () => {
@@ -2249,6 +2251,8 @@ export default function App() {
           speaker_name: string; listener_name: string; message: string;
         }>('cross:start', (event) => {
           if (event.payload.speaker_id !== getCharacterId()) return;
+          crossStreamIdRef.current = event.payload.stream_id;
+          crossStreamRoleRef.current = 'source';
           crossStreamTextRef.current = '';
           crossSyncStarted = false;
           crossListenerNameRef.current = event.payload.listener_name;
@@ -2281,6 +2285,17 @@ export default function App() {
           text: string; stream_id: string; speaker_id: string; listener_id: string; listener_name?: string;
         }>('cross:chunk', (event) => {
           if (event.payload.speaker_id !== getCharacterId()) return;
+          if (crossStreamRoleRef.current === 'target'
+            && crossStreamIdRef.current
+            && crossStreamIdRef.current !== event.payload.stream_id) return;
+          if (crossStreamRoleRef.current !== 'target') {
+            crossStreamTextRef.current = '';
+            crossListenerNameRef.current = '';
+            crossSyncStarted = false;
+            TtsStreamQueue.resetBuffer();
+          }
+          crossStreamIdRef.current = event.payload.stream_id;
+          crossStreamRoleRef.current = 'target';
           crossStreamTextRef.current += event.payload.text;
           if (!crossListenerNameRef.current) {
             crossListenerNameRef.current = event.payload.listener_name || event.payload.listener_id;
@@ -2311,6 +2326,11 @@ export default function App() {
           expression: string; motion: string; response_mode: string;
         }>('cross:done', (event) => {
           if (event.payload.speaker_id !== getCharacterId()) return;
+          if (crossStreamRoleRef.current === 'target'
+            && crossStreamIdRef.current
+            && crossStreamIdRef.current !== event.payload.stream_id) return;
+          crossStreamRoleRef.current = 'target';
+          crossStreamIdRef.current = event.payload.stream_id;
           const rawText = event.payload.text || crossStreamTextRef.current;
           const finalText = stripActions(rawText);
           const listenerName = crossListenerNameRef.current || event.payload.listener_name || event.payload.listener_id;
@@ -2333,11 +2353,42 @@ export default function App() {
               });
             }
             crossStreamTextRef.current = '';
+            crossStreamIdRef.current = '';
+            crossStreamRoleRef.current = '';
             crossSyncStarted = false;
             crossListenerNameRef.current = '';
           })();
         });
         unlisteners.push(unDone);
+
+        // 连接失败时清掉可能停住的半截流式气泡，并只在发起方显示简短状态提示。
+        const unError = await listen<{
+          source_id: string; target_id: string; stream_id: string;
+        }>('cross:error', (event) => {
+          const characterId = getCharacterId();
+          if (!characterId || (characterId !== event.payload.source_id && characterId !== event.payload.target_id)) return;
+          if (crossStreamRoleRef.current === 'target'
+            && characterId === event.payload.target_id
+            && crossStreamIdRef.current
+            && crossStreamIdRef.current !== event.payload.stream_id) return;
+          if (crossStreamRoleRef.current === 'source'
+            && characterId === event.payload.source_id
+            && crossStreamIdRef.current
+            && crossStreamIdRef.current !== event.payload.stream_id) return;
+          if (characterId === event.payload.target_id) {
+            TtsStreamQueue.resetBuffer();
+            BubbleController.hideBubble();
+            crossStreamTextRef.current = '';
+            crossStreamIdRef.current = '';
+            crossStreamRoleRef.current = '';
+            crossListenerNameRef.current = '';
+            crossSyncStarted = false;
+            return;
+          }
+          const targetName = event.payload.target_id === 'nana' ? 'Nana' : 'Vivian';
+          BubbleController.showBubble(t('chat.cross_character_unavailable', { name: targetName }), 3800);
+        });
+        unlisteners.push(unError);
 
         if (cancelled) {
           unlisteners.forEach(u => u());
@@ -2350,7 +2401,7 @@ export default function App() {
       cancelled = true;
       unlisteners.forEach(u => { try { u(); } catch { /* ignore */ } });
     };
-  }, []);
+  }, [t]);
 
   // 跨角色发言通知监听：其他角色发言后广播 proactive:spoken 事件，
   // 本角色记录时间戳，在下次 tick 时延迟执行，避免同时或连续发言

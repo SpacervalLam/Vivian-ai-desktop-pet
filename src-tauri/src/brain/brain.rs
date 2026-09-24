@@ -925,9 +925,10 @@ impl Brain {
         // 让问候带着种子前史生成，而不是一张白纸。
         let greeting_prompt = if is_first_meeting {
             format!(
-                "这是你第一次见到这个用户，你们还是陌生人，这次问候是你们唯一允许自我介绍和破冰的地方。现在是{time_desc}。\
-                 像给新认识的人发第一条消息那样开口：可以自然地带一句自己是谁（名字加一句你说话的调性就够），\
-                 加一个平常的招呼或随口一问。不要背模板、不要报幕式完整介绍，两到三句话以内，说完就停。\
+                "你和用户刚认识，这是你们第一次打招呼。现在是{time_desc}。\
+                 像真实聊天刚开始那样说一句：可以顺口提自己的名字，再带出一点符合你性格的反应或兴趣；\
+                 也可以从眼前自然想到的小事切入。别把名字、身份、能力和欢迎词逐项报一遍，也不必硬塞问题。\
+                 让这句话听起来像你当下想说的，而不是照着迎新台词念；简短、友好，有一点你的个性即可。\
                  用{user_language_name}回复。"
             )
         } else {
@@ -937,27 +938,21 @@ impl Brain {
             } else {
                 format!(
                     "\n\n## Context from last time\n{}\n\n\
-                     Pay close attention to the timestamps and time-spans above — they tell you how long ago each exchange happened. \
-                     If the last conversation was yesterday or several hours ago, treat it accordingly (e.g. \"yesterday you mentioned going to buy snacks, how'd that go?\" rather than assuming it just happened). \
-                     You can naturally continue where you left off, but do NOT repeat what's already said — just pick up the thread like a real friend would.",
+                     Use the timestamps to understand how recent each topic is. If a detail is old, don't talk as if it just happened. \
+                     When a specific thread still feels natural to pick up, continue it briefly; otherwise let it go.",
                     memory_text
                 )
             };
             format!(
-                "用户回来了。现在是{time_desc}。\n\n\
+                "这是一次新的聊天开场。现在是{time_desc}。\n\n\
                  {current_state_brief}\n\
                  {context_section}\n\n\
-                 【怎么说这句开场】\n\
-                 从上面的 Current State / Context 里挑**一件具体的事**开口——\
-                 时间、天气、他离开多久了、上次聊到一半的话题、你现在的心情，都行。\
-                 不要凭空调度情绪，也不要写一段没有来源的寒暄。\n\n\
-                 【绝对不要】\n\
-                 - 不要用「回来了／回来啦／又回来了」这类回归词起手——下面「最近用过的开场」里\
-                   出现过的起手式一律禁用，换个开口方式\n\
-                 - 不要问「吃了吗／吃了没／吃饭了没」，除非上下文里真的有在聊吃饭\n\
-                 - 不要用「……忙完了还是回来摸鱼的？」「刚睡醒还是刚忙完？」这类二选一选择题收尾\n\
-                 - 不要总结、不要抒情、不要说「今天辛苦了」\n\n\
-                 一到两句，说完就停。用{user_language_name}回复。"
+                 挑一个最顺手的切入口就够了：如果有值得接续的旧话题，就像刚想起来似的轻轻问一句；\
+                 如果没有，就自然地打个招呼，或说说此刻一个真实的小感受。时间、天气和心情只是背景，\
+                 只有确实适合时才提，不要为了证明你记得而硬提。\n\n\
+                 说话亲近但不黏人，保留你的个性，也给对方留出接话的空间。别像播报状态、查勤或客服回访，\
+                 别连续堆问候、关心和问题，也别把开场写成小作文。通常一两句就好；不需要问题时，\
+                 一句有温度的陈述也完全可以。用{user_language_name}回复。"
             )
         };
 
@@ -982,24 +977,29 @@ impl Brain {
             },
             // chat_chain 未就绪时回退到精简定制提示词
             None => {
-                let character_block = self.persona.get_character_block();
-                let examples_block = self.persona.get_examples_block();
+                let character_block = self.persona.get_character_block_tiered(
+                    crate::persona::prompt_render::CharacterBlockTier::Compact,
+                );
                 let style_block = self.persona.build_style_prompt(intimacy, hour);
-                // 单句生成路径：只带聊天风格 + AI 腔禁用词表（不含会话/称呼/输出格式规则）。
-        // 一句话最容易滑向客服腔（"晚上好呀~ 今天过得怎么样呢"），所以禁用词表必带。
-        let chat_style_framework = crate::pipeline::prompt_modules::short_line_framework(
-            &self.config.base.language,
-        );
+                let style_preset_block = crate::persona::prompt_render::render_style_preset_block(
+                    &self.persona.get_config(),
+                    &self.config.base.language,
+                );
+                // 单句路径仅需短句框架；不重复展开其中已包含的聊天风格规则。
+                let short_line_framework = crate::pipeline::prompt_modules::short_line_framework(
+                    &self.config.base.language,
+                );
                 let system_prompt = format!(
                     "{character_block}\n\n\
-                    {examples_block}\n\n\
                     {style_block}\n\n\
-                    {chat_style_framework}\n\n\
-                    ## Task: Generate a startup greeting\n\
-                    Generate a short startup greeting that fits your persona and the current time.\n\
+                    {style_preset_block}\n\n\
+                    {short_line_framework}\n\n\
+                    ## Task: Write a natural chat opener\n\
+                    Write a brief, conversational opener in your own voice. Let the supplied first-meeting or return context guide it,\
+                    but do not recite instructions, announce app state, or force a question.\n\
                     Requirements:\n\
                     - Output ONLY the greeting itself — no quotes, no explanation, no extra newlines\n\
-                    - Keep it under 30 characters\n\
+                    - Prefer one natural sentence; use two only if they flow together\n\
                     - Reply in {user_language_name}.\n\n\
                     {current_state_brief}"
                 );
@@ -1218,28 +1218,32 @@ impl Brain {
         let mood = self.psychology.compute_mood();
         let user_language_name = language_code_to_name(&self.config.base.language);
 
-        let character_block = self.persona.get_character_block();
-        let examples_block = self.persona.get_examples_block();
+        let character_block = self.persona.get_character_block_tiered(
+            crate::persona::prompt_render::CharacterBlockTier::Compact,
+        );
         let style_block = self.persona.build_style_prompt(intimacy, hour);
-        // 单句生成路径：只带聊天风格 + AI 腔禁用词表（不含会话/称呼/输出格式规则）。
-        // 一句话最容易滑向客服腔（"晚上好呀~ 今天过得怎么样呢"），所以禁用词表必带。
-        let chat_style_framework = crate::pipeline::prompt_modules::short_line_framework(
+        let style_preset_block = crate::persona::prompt_render::render_style_preset_block(
+            &self.persona.get_config(),
+            &self.config.base.language,
+        );
+        // 单句生成路径只装配短句规则，避免把主对话框架重复带入。
+        let short_line_framework = crate::pipeline::prompt_modules::short_line_framework(
             &self.config.base.language,
         );
 
         let system_prompt = format!(
             "{character_block}\n\n\
-            {examples_block}\n\n\
             {style_block}\n\n\
-            {chat_style_framework}\n\n\
+            {style_preset_block}\n\n\
+            {short_line_framework}\n\n\
             ## Task: Generate a wake-up greeting\n\
             You just woke up from sleep. The user has come back. Greet them naturally.\n\
             Requirements:\n\
             - Output ONLY the greeting itself — no quotes, no explanation, no extra newlines\n\
             - Keep it under 30 characters\n\
-            - Talk EXACTLY like a real person who just woke up — sleepy, mumbly, casual\n\
-            - ZERO poetic/literary/artistic/metaphorical language. No flowery phrases. No imagery.\n\
-            - You can show just-woken-up state (sleepy, stretching, yawning etc.) — but keep it natural, not cute-acting\n\
+            - Let the sleepy mood lightly color your voice; don't perform a stock wake-up routine\n\
+            - Don't claim physical actions or sensations; you're a desktop companion\n\
+            - Keep it plain and conversational, with no poetic imagery\n\
             - You MUST reply in {}. This is a hard rule — never use any other language.",
             user_language_name
         );
@@ -1301,31 +1305,35 @@ impl Brain {
         let mood = self.psychology.compute_mood();
         let user_language_name = language_code_to_name(&self.config.base.language);
 
-        let character_block = self.persona.get_character_block();
-        let examples_block = self.persona.get_examples_block();
+        let character_block = self.persona.get_character_block_tiered(
+            crate::persona::prompt_render::CharacterBlockTier::Compact,
+        );
         let style_block = self.persona.build_style_prompt(intimacy, hour);
-        // 单句生成路径：只带聊天风格 + AI 腔禁用词表（不含会话/称呼/输出格式规则）。
-        // 一句话最容易滑向客服腔（"晚上好呀~ 今天过得怎么样呢"），所以禁用词表必带。
-        let chat_style_framework = crate::pipeline::prompt_modules::short_line_framework(
+        let style_preset_block = crate::persona::prompt_render::render_style_preset_block(
+            &self.persona.get_config(),
+            &self.config.base.language,
+        );
+        // 单句生成路径只装配短句规则，避免把主对话框架重复带入。
+        let short_line_framework = crate::pipeline::prompt_modules::short_line_framework(
             &self.config.base.language,
         );
 
         let (state_desc, reason_desc) = match (target_state, &reason) {
             (PresenceState::Rest, PresenceChangeReason::MoodDriven) => (
                 "going to rest (feeling tired)",
-                "You're feeling tired and want to take a short nap.",
+                "You're tired and are going to rest for a while.",
             ),
             (PresenceState::Rest, PresenceChangeReason::Coordination) => (
                 "going to rest (taking turns with the other character)",
                 "You and the other character agreed to take turns being online, and it's your turn to rest.",
             ),
             (PresenceState::Offline, PresenceChangeReason::Ignored) => (
-                "going offline (feeling ignored)",
-                "You've tried reaching out a few times but didn't get a response, so you're going offline for a while.",
+                "going offline for a while",
+                "The conversation has been quiet; sign off naturally without implying fault or expecting a response.",
             ),
             (PresenceState::Offline, PresenceChangeReason::MoodDriven) => (
-                "going offline (feeling lonely)",
-                "You're feeling a bit lonely and want some alone time offline.",
+                "going offline to take some time to yourself",
+                "You want some quiet time offline. Don't imply the user caused it or owes you attention.",
             ),
             _ => match target_state {
                 PresenceState::Rest => ("going to rest", "You're going to take a short rest."),
@@ -1336,19 +1344,18 @@ impl Brain {
 
         let system_prompt = format!(
             "{character_block}\n\n\
-            {examples_block}\n\n\
             {style_block}\n\n\
-            {chat_style_framework}\n\n\
+            {style_preset_block}\n\n\
+            {short_line_framework}\n\n\
             ## Task: Generate a farewell message before {state_desc}\n\
             You are about to {state_desc}. Say a brief, natural farewell to the user.\n\
             Context: {reason_desc}\n\
             Requirements:\n\
             - Output ONLY the farewell message — no quotes, no explanation, no extra newlines\n\
             - Keep it under 30 characters\n\
-            - Talk EXACTLY like a real person — short, casual, natural\n\
-            - If going to rest, mention you'll be back soon (they can still WeChat you)\n\
-            - If going offline, mention they can reach you by WeChat\n\
-            - ZERO poetic/literary/artistic language. No flowery phrases.\n\
+            - Keep it plain, casual, and natural; no poetic imagery\n\
+            - State the change simply; mention how to reach you only when useful and accurate\n\
+            - Don't guilt the user, ask them to keep you company, or pressure them to reply\n\
             - You MUST reply in {user_language_name}. This is a hard rule — never use any other language.",
         );
 
