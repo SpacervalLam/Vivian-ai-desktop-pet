@@ -163,6 +163,9 @@ impl ConversationState {
 /// 跨角色会话对象
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Conversation {
+    /// Transport remains fixed until the topic ends or the user changes channels.
+    #[serde(default)]
+    pub channel: Option<String>,
     /// 会话 ID
     pub id: String,
     /// 当前话题（从首条消息提取，最长 20 字）
@@ -317,6 +320,7 @@ impl Conversation {
         let now = chrono::Local::now().timestamp() as f64;
         Self {
             id,
+            channel: None,
             topic: topic.to_string(),
             owner: owner.to_string(),
             participants: vec![owner.to_string(), participant.to_string()],

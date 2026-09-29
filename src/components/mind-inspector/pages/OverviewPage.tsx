@@ -1,7 +1,7 @@
 /**
  * Overview 页 — 综合视图（子 tab 切换四个原页面）
  *
- * 合并 心智(MindPage) / 世界(WorldPage) / 记忆(GraphPage) / 用户画像(UserProfilePage)
+ * 合并 心智(MindPage) / 世界(WorldPage) / 记忆(MemoryPage，含用户画像)
  * 为一个侧边栏入口，页内用顶部胶囊子 tab 切换。子 tab 可被内部跳转覆盖：
  * 例如 GraphPage → navigateTo('graph') 会通过 MindInspector 映射为 sub='graph'，
  * 本组件收到后自动切到对应子视图。
@@ -13,7 +13,6 @@ import {
   Brain,
   Globe,
   Network,
-  UserCircle,
 } from 'lucide-react';
 import {
   COLORS,
@@ -27,19 +26,17 @@ import { useNavigation } from '../NavigationContext';
 import MindPage from './MindPage';
 import WorldPage from './WorldPage';
 import MemoryPage from './MemoryPage';
-import UserProfilePage from './UserProfilePage';
 
-type OverviewTab = 'mind' | 'world' | 'graph' | 'profile';
+type OverviewTab = 'mind' | 'world' | 'graph';
 
 const TABS: Array<{ key: OverviewTab; labelKey: string; icon: React.ElementType; order: number }> = [
   { key: 'mind', labelKey: 'mind_inspector.nav_mind', icon: Brain, order: 0 },
   { key: 'world', labelKey: 'mind_inspector.nav_world', icon: Globe, order: 1 },
   { key: 'graph', labelKey: 'mind_inspector.nav_graph', icon: Network, order: 2 },
-  { key: 'profile', labelKey: 'mind_inspector.nav_profile', icon: UserCircle, order: 3 },
 ];
 
 const isTab = (v: string | undefined): v is OverviewTab =>
-  v === 'mind' || v === 'world' || v === 'graph' || v === 'profile';
+  v === 'mind' || v === 'world' || v === 'graph';
 
 /** 重挂后仍记住上次子 tab（避免切出再切回时丢失） */
 let cachedTab: OverviewTab | null = null;
@@ -47,7 +44,8 @@ let cachedTab: OverviewTab | null = null;
 const OverviewPage: React.FC = () => {
   const { t } = useTranslation();
   const nav = useNavigation();
-  const sub = nav?.pageParams?.sub;
+  const rawSub = nav?.pageParams?.sub;
+  const sub = rawSub === 'profile' ? 'graph' : rawSub;
   const initial: OverviewTab = (cachedTab ?? (isTab(sub as string) ? (sub as OverviewTab) : 'mind'));
   const [tab, setTab] = useState<OverviewTab>(initial);
 
@@ -69,9 +67,7 @@ const OverviewPage: React.FC = () => {
       case 'world':
         return <WorldPage />;
       case 'graph':
-        return <MemoryPage />;
-      case 'profile':
-        return <UserProfilePage />;
+        return <MemoryPage initialLayer={rawSub === 'profile' ? 'profile' : undefined} />;
     }
   };
 
@@ -110,7 +106,7 @@ const OverviewPage: React.FC = () => {
             borderRadius: 999,
           }}
         >
-          {t(tab === 'graph' ? 'mind_inspector.nav_graph' : tab === 'profile' ? 'mind_inspector.nav_profile' : tab === 'world' ? 'mind_inspector.nav_world' : 'mind_inspector.nav_mind')}
+          {t(tab === 'graph' ? 'mind_inspector.nav_graph' : tab === 'world' ? 'mind_inspector.nav_world' : 'mind_inspector.nav_mind')}
         </span>
       </div>
 

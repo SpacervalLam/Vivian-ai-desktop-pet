@@ -650,13 +650,16 @@ pub fn render_persona_flags_block(config: &PersonaConfig, lang: &str) -> String 
         "ja" => "LANG_JA_JP_ONLY",
         _ => "LANG_ZH_CN_ONLY",
     };
-    let mut lines = Vec::with_capacity(flags.len() + 1);
-    lines.push(lang_flag);
-    lines.extend(flags.iter().copied());
-    format!(
-        "[PERSONA_LOAD - EMBODY AS HARD RULES]\n{}\n[END PERSONA_LOAD]",
-        lines.join("\n")
-    )
+    let mut core = vec![lang_flag];
+    let mut seeds = vec![];
+    for flag in flags {
+        if flag.starts_with("IDENTITY_") || flag.starts_with("SELF_CLAIM_")
+            || flag.starts_with("ROLE_") || flag.starts_with("REFUSE_") || *flag == "DIRECT_NOT_DISRESPECTFUL" {
+            core.push(*flag);
+        } else { seeds.push(*flag); }
+    }
+    format!("[PERSONA_LOAD]\n[CORE_IDENTITY_AND_BOUNDARIES]\n{}\n[INITIAL_TEMPERAMENT_AND_STYLE - TENDENCIES, NOT QUOTAS]\n{}\n[END PERSONA_LOAD]",
+        core.join("\n"), seeds.join("\n"))
 }
 
 // ============================================================================
@@ -836,10 +839,20 @@ pub fn render_character_block_tiered(
     lang: &str,
     tier: CharacterBlockTier,
 ) -> String {
+    render_character_block_growing(config, lang, tier, &[])
+}
+
+/// Remove only factory scene examples whose scope has acquired a supported interpretation.
+/// Explicit user overrides are preserved; unrelated seed scenes and stable temperament stay.
+pub fn render_character_block_growing(
+    config: &PersonaConfig, lang: &str, tier: CharacterBlockTier,
+    entries: &[super::evolution::EvolutionEntry],
+) -> String {
+    let scopes: Vec<&str> = entries.iter().filter(|e| e.active()).map(|e| e.scope.as_str()).collect();
     let flags = render_persona_flags_block(config, lang);
     let protocol = render_persona_protocol_block();
-    let persona_config = render_persona_config_block(config);
-    let sections = match tier {
+    let persona_config = filter_seed_config(&render_persona_config_block(config), &scopes);
+    let mut sections = match tier {
         CharacterBlockTier::Full => vec![
             resolve_section(config, CharacterSection::Identity, lang),
             resolve_section(config, CharacterSection::Personality, lang),
@@ -859,6 +872,10 @@ pub fn render_character_block_tiered(
         ],
     };
 
+    // Both tiers place personality immediately after identity.
+    if config.personality_definition.trim().is_empty() {
+        sections[1] = filter_seed_scenes(&sections[1], &scopes);
+    }
     let mut head: Vec<String> = vec![flags];
     if !protocol.trim().is_empty() {
         head.push(protocol);
@@ -876,9 +893,74 @@ pub fn render_character_block_tiered(
     format!("{}\n\n{}", head.join("\n\n"), sections.join("\n\n---\n\n"))
 }
 
+/// Scene tags live on headings, so a future translation can reorder sections safely.
+fn filter_seed_scenes(text: &str, scopes: &[&str]) -> String {
+    let mut skip = false;
+    let mut lines = vec![];
+    for line in text.lines() {
+        if line.starts_with("## ") {
+            skip = scopes.iter().any(|scope| line.contains(&format!("<!-- growth:{scope} -->")));
+        }
+        if !skip {
+            lines.push(line.split(" <!-- growth:").next().unwrap_or(line));
+        }
+    }
+    lines.join("\n")
+}
+
+fn filter_seed_config(text: &str, scopes: &[&str]) -> String {
+    text.lines().filter(|line| {
+        let l = line.trim();
+        !scopes.iter().any(|scope| match *scope {
+            "comfort" => l.starts_with("WHEN_USER_PRETENDING_OK=") || l.starts_with("WHEN_USER_SAD=") || l.starts_with("WHEN_FRIGHTENED_CANNOT_COMFORT=") || l.starts_with("- 他难过时："),
+            "care" => l.starts_with("WHEN_USER_OVERTIRED=") || l.starts_with("- 他熬夜/不吃饭："),
+            "praise" => l.starts_with("WHEN_USER_PRAISES=") || l.starts_with("- 用户夸你："),
+            "humor" => l.starts_with("WHEN_USER_BAD_JOKE="),
+            "disagreement" => l.starts_with("WHEN_ANGRY="),
+            _ => false,
+        })
+    }).collect::<Vec<_>>().join("\n")
+}
+
 /// 获取 Few-shot examples 文本（用于 PromptBuilder 中的 EXAMPLES 块）
 pub fn render_examples_block(config: &PersonaConfig, lang: &str) -> String {
     resolve_section(config, CharacterSection::Examples, lang)
+}
+
+/// Familiar relationships have actual shared history. Keep the seed examples
+/// that teach short replies, silence and care, while leaving user-authored
+/// examples intact. The full factory examples remain for early encounters.
+pub fn render_examples_block_tiered(config: &PersonaConfig, lang: &str, tier: CharacterBlockTier) -> String {
+    let full = render_examples_block(config, lang);
+    if tier == CharacterBlockTier::Full || !config.few_shot_examples.examples.is_empty() {
+        return full;
+    }
+    full.find("**Example 5 - ")
+        .map(|end| full[..end].trim_end().to_string())
+        .unwrap_or(full)
+}
+
+#[cfg(test)]
+mod example_budget_tests {
+    use super::*;
+    use crate::persona::schemas::default_persona_for;
+
+    #[test]
+    fn familiar_character_keeps_core_examples_and_custom_overrides() {
+        let mut config = default_persona_for("nana");
+        let full = render_examples_block_tiered(&config, "zh", CharacterBlockTier::Full);
+        let compact = render_examples_block_tiered(&config, "zh", CharacterBlockTier::Compact);
+        assert!(compact.len() < full.len());
+        assert!(compact.contains("no_reply"));
+        assert!(compact.contains("**Example 4"));
+        assert!(!compact.contains("**Example 5"));
+        config.few_shot_examples.examples.push(crate::persona::schemas::FewShotExample {
+            scenario: "custom".into(), user_input: "hello".into(), response_text: "hi".into(),
+            intent: Default::default(), tool: None, arguments: None,
+        });
+        assert_eq!(render_examples_block_tiered(&config, "zh", CharacterBlockTier::Compact),
+                   render_examples_block_tiered(&config, "zh", CharacterBlockTier::Full));
+    }
 }
 
 /// 渲染风格约束块：场景模式 + 场景指令 + 禁忌 + 风格预设
@@ -967,6 +1049,42 @@ pub fn render_short_style_block(config: &PersonaConfig, scene_mode: SceneMode, l
 mod tests {
     use super::*;
     use crate::persona::schemas::default_persona_for;
+
+    #[test]
+    fn scoped_growth_replaces_translated_seed_without_erasing_identity() {
+        for character in ["vivian", "nana"] {
+            for lang in ["zh", "en", "ja"] {
+                let config = default_persona_for(character);
+                let seed = resolve_section(&config, CharacterSection::Personality, lang);
+                let filtered = filter_seed_scenes(&seed, &["comfort"]);
+                let comfort_header = seed.lines().find(|l| l.contains("growth:comfort")).unwrap();
+                let plain = comfort_header.split(" <!--").next().unwrap();
+                assert!(!filtered.contains(plain));
+                assert!(filtered.contains(seed.lines().next().unwrap()));
+                assert!(!filtered.contains("<!-- growth:"));
+                assert!(filter_seed_scenes(&seed, &[]).contains(plain));
+                let entry = super::super::evolution::EvolutionEntry {
+                    timestamp: 1.0, kind: "tone".into(), scope: "comfort".into(),
+                    text: "Listen before offering solutions".into(), reason: "explicit feedback".into(),
+                    support: 1, explicit_feedback: true,
+                    evidence: vec![super::super::evolution::GrowthEvidence {
+                        memory_id: "m1".into(), quote: "listen first".into(),
+                        timestamp: 1.0, fingerprint: "source".into(),
+                    }],
+                };
+                let grown = render_character_block_growing(&config, lang, CharacterBlockTier::Full, &[entry.clone()]);
+                assert!(!grown.contains(plain));
+                assert!(!grown.contains("WHEN_USER_SAD="));
+                assert!(grown.contains("[CORE_IDENTITY_AND_BOUNDARIES]"));
+                let restored = render_character_block_growing(&config, lang, CharacterBlockTier::Full, &[]);
+                assert!(restored.contains(plain));
+                let mut custom = config;
+                custom.personality_definition = "My explicitly edited personality".into();
+                assert!(render_character_block_growing(&custom, lang, CharacterBlockTier::Full, &[entry])
+                    .contains("My explicitly edited personality"));
+            }
+        }
+    }
 
     #[test]
     fn test_render_persona_flags_block_per_character() {

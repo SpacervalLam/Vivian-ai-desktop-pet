@@ -1,15 +1,15 @@
 //! 工具调用死循环检测（Doom Loop Detection）
 //!
 //! 在原生 function calling 循环中，LLM 可能反复调用相同工具并使用相同参数，
-//! 陷入无进展的死循环直到 `max_rounds` 耗尽。本模块追踪每轮的 (tool_name, args)
-//! 签名，当同一签名连续出现 ≥ 阈值次时判定为死循环，并生成注入消息打断循环。
+//! 陷入无进展的死循环直到 `max_rounds` 耗尽。本模块比较近期调用的参数与实际结果，
+//! 只有连续重复的调用序列才触发干预；读取新状态、修复后重跑测试不应被误判。
 //!
 //! 与现有 `LoopDetectionAdvisor` 的关系：
 //! - `LoopDetectionAdvisor` 检测**文本输出**重复（order=100 Advisor）
 //! - `DoomLoopTracker` 检测**工具调用**重复（嵌入 FC 循环内部）
 //! 两者互补，不重叠。
 
-use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::hash::{Hash, Hasher};
 
 use serde_json::Value;
@@ -32,10 +32,11 @@ impl ToolCallSignature {
         }
     }
 
-    fn hash_key(&self) -> u64 {
+    fn hash_key(&self, outcome: Option<(bool, &str)>) -> u64 {
         let mut hasher = std::hash::DefaultHasher::new();
         self.tool_name.hash(&mut hasher);
         self.canonical_args.hash(&mut hasher);
+        outcome.hash(&mut hasher);
         hasher.finish()
     }
 }
@@ -47,7 +48,12 @@ fn canonical_json(value: &Value) -> String {
             // BTreeMap 自动按键排序
             let sorted: std::collections::BTreeMap<String, Value> = map
                 .iter()
-                .map(|(k, v)| (k.clone(), serde_json::from_str(&canonical_json(v)).unwrap_or(v.clone())))
+                .map(|(k, v)| {
+                    (
+                        k.clone(),
+                        serde_json::from_str(&canonical_json(v)).unwrap_or(v.clone()),
+                    )
+                })
                 .collect();
             serde_json::to_string(&sorted).unwrap_or_default()
         }
@@ -64,24 +70,23 @@ fn canonical_json(value: &Value) -> String {
 pub enum LoopStatus {
     /// 正常：未达到阈值
     Normal,
-    /// 死循环：同一签名连续出现 ≥ 阈值次
+    /// 死循环：同一调用序列（含结果）连续出现 ≥ 阈值次
     Doomed {
         /// 重复调用的工具名
         tool: String,
-        /// 已调用次数
+        /// 模式重复次数
         count: u32,
     },
 }
 
 /// 工具调用死循环追踪器
 ///
-/// 在原生 FC 循环的每一轮中，记录所有工具调用的签名。
-/// 当同一签名累计达到阈值时返回 `Doomed`。
+/// 检测 A-A-A 以及 A-B-A-B-A-B 等长度不超过 8 的重复模式。
+/// 只保存最近 64 个指纹，长期运行也不会累计无限签名或把很早的调用算进来。
 ///
 /// 每个 FC 循环开始时调用 `reset()`，跨循环不累计。
 pub struct DoomLoopTracker {
-    /// 签名哈希 → 出现次数
-    signatures: HashMap<u64, (String, u32)>, // hash → (tool_name, count)
+    history: VecDeque<u64>,
     /// 触发阈值（默认 3）
     threshold: u32,
 }
@@ -90,8 +95,12 @@ impl DoomLoopTracker {
     /// 创建追踪器，`threshold` 为触发死循环的最小重复次数
     pub fn new(threshold: u32) -> Self {
         Self {
-            signatures: HashMap::new(),
-            threshold: threshold.max(2), // 至少需要 2 次才能判定重复
+            history: VecDeque::new(),
+            threshold: if threshold == 0 {
+                0
+            } else {
+                threshold.clamp(2, 64)
+            },
         }
     }
 
@@ -102,40 +111,68 @@ impl DoomLoopTracker {
     ///
     /// 返回 `LoopStatus::Doomed` 表示检测到死循环
     pub fn record(&mut self, tool_name: &str, arguments: &Value) -> LoopStatus {
+        self.record_observation(tool_name, arguments, None)
+    }
+
+    /// 完成执行后记录实际结果；成功与失败、结果内容变化均构成不同观察。
+    pub fn record_result(
+        &mut self,
+        tool_name: &str,
+        arguments: &Value,
+        success: bool,
+        output: &str,
+    ) -> LoopStatus {
+        self.record_observation(tool_name, arguments, Some((success, output)))
+    }
+
+    fn record_observation(
+        &mut self,
+        tool_name: &str,
+        arguments: &Value,
+        outcome: Option<(bool, &str)>,
+    ) -> LoopStatus {
         if self.threshold == 0 {
             return LoopStatus::Normal;
         }
 
         let sig = ToolCallSignature::new(tool_name, arguments);
-        let key = sig.hash_key();
-
-        let entry = self.signatures.entry(key).or_insert_with(|| (tool_name.to_string(), 0));
-        entry.1 += 1;
-
-        if entry.1 >= self.threshold {
-            LoopStatus::Doomed {
-                tool: entry.0.clone(),
-                count: entry.1,
-            }
-        } else {
-            LoopStatus::Normal
+        self.history.push_back(sig.hash_key(outcome));
+        if self.history.len() > 64 {
+            self.history.pop_front();
         }
-    }
-
-    /// 批量记录一轮中的所有工具调用，返回首个 Doomed 状态（如果有）
-    pub fn record_round(&mut self, calls: &[(String, Value)]) -> LoopStatus {
-        for (name, args) in calls {
-            let status = self.record(name, args);
-            if let LoopStatus::Doomed { .. } = &status {
-                return status;
+        let len = self.history.len();
+        for period in 1..=8.min(len / self.threshold as usize) {
+            let mut repeats = 1;
+            while (repeats + 1) * period <= len
+                && (0..period).all(|offset| {
+                    self.history[len - 1 - offset]
+                        == self.history[len - 1 - repeats * period - offset]
+                })
+            {
+                repeats += 1;
+            }
+            if repeats >= self.threshold as usize {
+                return LoopStatus::Doomed {
+                    tool: tool_name.to_string(),
+                    count: repeats as u32,
+                };
             }
         }
         LoopStatus::Normal
     }
 
+    /// 批量记录整轮，按最后的观察判定；后续新动作可以打断前面的重复。
+    pub fn record_round(&mut self, calls: &[(String, Value)]) -> LoopStatus {
+        let mut status = LoopStatus::Normal;
+        for (name, args) in calls {
+            status = self.record(name, args);
+        }
+        status
+    }
+
     /// 重置追踪器（新 FC 循环开始时调用）
     pub fn reset(&mut self) {
-        self.signatures.clear();
+        self.history.clear();
     }
 
     /// 生成打断注入消息
@@ -146,8 +183,8 @@ impl DoomLoopTracker {
         match status {
             LoopStatus::Normal => None,
             LoopStatus::Doomed { tool, count } => Some(format!(
-                "[System] 你已连续 {count} 次调用 `{tool}` 并使用相同参数，\
-                 这没有取得进展。请尝试不同的方法、调整参数，\
+                "[System] 最近包含 `{tool}` 的工具调用序列已重复 {count} 次，\
+                 参数和观察结果没有变化。请尝试不同的方法、调整参数，\
                  或告诉用户当前遇到了什么障碍。"
             )),
         }
@@ -202,15 +239,15 @@ mod tests {
     }
 
     #[test]
-    fn different_tools_separate_tracking() {
+    fn intervening_different_call_breaks_single_call_streak() {
         let mut tracker = DoomLoopTracker::new(3);
         let args = json!({"file": "test.txt"});
         tracker.record("read_file", &args);
         tracker.record("write_file", &args);
         tracker.record("read_file", &args);
         let status = tracker.record("read_file", &args);
-        // read_file 出现 3 次
-        assert!(matches!(status, LoopStatus::Doomed { .. }));
+        // 累计 3 次不等于连续 3 次：中间的写入可能改变了读取状态。
+        assert_eq!(status, LoopStatus::Normal);
     }
 
     #[test]
@@ -248,7 +285,7 @@ mod tests {
     }
 
     #[test]
-    fn record_round_returns_first_doomed() {
+    fn later_progress_in_same_round_prevents_premature_stop() {
         let mut tracker = DoomLoopTracker::new(2);
         // 先记录一次，让 count=1
         tracker.record("read_file", &json!({"f": "x"}));
@@ -259,6 +296,68 @@ mod tests {
             ("write_file".to_string(), json!({"f": "y"})),
         ];
         let status = tracker.record_round(&calls);
-        assert!(matches!(status, LoopStatus::Doomed { .. }));
+        assert_eq!(status, LoopStatus::Normal);
+        // 即使首个调用命中，也要记录剩余调用，免得下一轮忽略已有进展。
+        assert_eq!(
+            tracker.record("read_file", &json!({"f": "x"})),
+            LoopStatus::Normal
+        );
+    }
+
+    #[test]
+    fn changing_results_do_not_trigger_doom_loop() {
+        let mut tracker = DoomLoopTracker::default();
+        for output in ["pending", "running", "done", "new result"] {
+            assert_eq!(
+                tracker.record_result("work_job", &json!({"id": "job"}), true, output),
+                LoopStatus::Normal
+            );
+        }
+    }
+
+    #[test]
+    fn unchanged_result_cycle_is_detected() {
+        let mut tracker = DoomLoopTracker::default();
+        for _ in 0..2 {
+            assert_eq!(
+                tracker.record_result("read_file", &json!({}), true, "same file"),
+                LoopStatus::Normal
+            );
+            assert_eq!(
+                tracker.record_result("run_command", &json!({}), false, "same error"),
+                LoopStatus::Normal
+            );
+        }
+        tracker.record_result("read_file", &json!({}), true, "same file");
+        assert!(matches!(
+            tracker.record_result("run_command", &json!({}), false, "same error"),
+            LoopStatus::Doomed { count: 3, .. }
+        ));
+    }
+
+    #[test]
+    fn success_after_failures_is_a_new_observation() {
+        let mut tracker = DoomLoopTracker::default();
+        tracker.record_result("run_command", &json!({}), false, "output");
+        tracker.record_result("run_command", &json!({}), false, "output");
+        assert_eq!(
+            tracker.record_result("run_command", &json!({}), true, "output"),
+            LoopStatus::Normal
+        );
+    }
+
+    #[test]
+    fn history_is_bounded_and_zero_disables_detection() {
+        let mut tracker = DoomLoopTracker::default();
+        let mut disabled = DoomLoopTracker::new(0);
+        for i in 0..1000 {
+            assert_eq!(
+                tracker.record_result("read_file", &json!({"page": i}), true, "data"),
+                LoopStatus::Normal
+            );
+            assert_eq!(disabled.record("read_file", &json!({})), LoopStatus::Normal);
+        }
+        assert_eq!(tracker.history.len(), 64);
+        assert!(disabled.history.is_empty());
     }
 }

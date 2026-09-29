@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import manifest from './blenderFurnitureManifest.json';
+import { apartmentAssetUrl } from './apartmentAssets';
 
 export const blenderFurnitureIds = new Set(manifest.map((item) => item.id));
 export type FurnitureSlot = {
@@ -20,7 +21,7 @@ export function loadBlenderFurniture(slots: FurnitureSlot[], onLoaded: () => voi
     textures.forEach((t) => t.dispose());
     ownedGeometries.clear(); ownedMaterials.clear(); textures.clear();
   };
-  new GLTFLoader().load(`${import.meta.env.BASE_URL}room/models/vivian-furniture.glb`, (gltf) => {
+  new GLTFLoader().load(apartmentAssetUrl('models/vivian-furniture.glb'), (gltf) => {
     gltf.scene.traverse((o) => {
       if (!(o instanceof THREE.Mesh)) return;
       ownedGeometries.add(o.geometry);
@@ -80,4 +81,3 @@ export function loadBlenderFurniture(slots: FurnitureSlot[], onLoaded: () => voi
   });
   return () => { disposed = true; release(); };
 }
-

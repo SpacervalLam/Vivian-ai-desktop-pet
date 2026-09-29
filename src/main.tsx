@@ -2,7 +2,7 @@ import { StrictMode } from 'react';
 import type { ReactElement } from 'react';
 import { createRoot } from 'react-dom/client';
 import { getCurrentWindow, LogicalPosition } from '@tauri-apps/api/window';
-import { invoke } from '@tauri-apps/api/core';
+import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import { setCharacterId } from './characterContext';
 import { bootMark, dismissBootLoader } from './utils/roomBoot';
 
@@ -123,16 +123,38 @@ if (!isTauri && initialParams.get('view') === 'rig_preview') {
           break;
         }
         case 'room': {
-          // 3D 宿舍房间窗口。不用 cubism，但用同样的 dynamic import 模式
-          // 避开 StrictMode 下的双执行副作用。
-          // 这一段动态 import 是房间 chunk（three.js 全量，约 1.1MB）。实测生产
-          // 构建里只占 ~120ms——真正的大头是后面的场景同步装配与首帧着色器编译，
-          // 所以别看到这个 1MB 就去拆包，收益很小。单独打点只是为了留证据。
+          const status = await invoke<{ installed: boolean; enabled: boolean; asset_root: string | null; plugin_root: string | null }>('apartment_plugin_status');
+          if (!status.enabled) throw new Error('3D 公寓插件未安装或已禁用');
           bootMark('room:chunk-start');
-          const RoomWindow = (await import('./components/room/RoomWindow')).default;
+          if (import.meta.env.DEV) {
+            // Vite 开发服务器直接提供源码；vite-ignore 保证生产主包不收录场景代码。
+            const devRoomUrl = '/src/components/room/RoomWindow.tsx';
+            const devAssetsUrl = '/src/components/room/apartmentAssets.ts';
+            const { configureApartmentAssets } = await import(/* @vite-ignore */ devAssetsUrl);
+            configureApartmentAssets(status.asset_root);
+            const RoomWindow = (await import(/* @vite-ignore */ devRoomUrl)).default;
+            bootMark('room:chunk-done');
+            element = <RoomWindow />;
+            break;
+          }
+
+          if (!status.plugin_root || !status.asset_root) throw new Error('3D 公寓插件文件不完整');
+          const win = getCurrentWindow();
+          await win.setPosition(new LogicalPosition(0, 0)).catch(() => {});
+          await win.show().catch(() => {});
+          await win.setFocus().catch(() => {});
+          await invoke('set_room_mode', { active: true });
+          const script = document.createElement('script');
+          script.src = convertFileSrc(`${status.plugin_root}\\ui\\room.js`);
+          await new Promise<void>((resolve, reject) => {
+            script.onload = () => resolve();
+            script.onerror = () => reject(new Error('加载 3D 公寓插件脚本失败'));
+            document.head.appendChild(script);
+          });
+          if (!window.VivianApartment) throw new Error('3D 公寓插件入口未注册');
           bootMark('room:chunk-done');
-          element = <RoomWindow />;
-          break;
+          window.VivianApartment.mount(container, status.asset_root);
+          return;
         }
         default: {
           // 仅主窗口（无 view 参数）加载桌宠应用。
@@ -185,6 +207,7 @@ if (!isTauri && initialParams.get('view') === 'rig_preview') {
         setTimeout(showWindow, 2000);
       }
     } catch (e) {
+      if (view === 'room') void invoke('set_room_mode', { active: false }).catch(() => {});
       showError(String(e instanceof Error ? e.message : e));
     }
   })();

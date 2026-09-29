@@ -17,6 +17,7 @@ import ImageViewer from './ImageViewer';
 import { useAppStore } from '../stores/useAppStore';
 import { useExtractFileText, type FileTextResult } from '../hooks/useTauriCommands';
 import { stripActions } from '../utils/ActionText';
+import { routeAssistantMessage } from '../utils/chatMessageRouting';
 import type { AiResponse } from '../types';
 
 type Role = 'user' | 'assistant';
@@ -2327,46 +2328,24 @@ const ChatWindow: React.FC = () => {
           if (!text) return;
           const ts = event.payload.timestamp ? normalizeTimestamp(event.payload.timestamp) : Date.now();
 
-          if (viewRef.current === 'group') {
-            // 群聊模式：追加到群聊消息列表
-            if (ch && ch !== 'wechat_group') return;
+          const route = routeAssistantMessage(viewRef.current, privateCharIdRef.current, cid, ch);
+          if (route.append === 'group') {
             setGroupMessages((prev) => [...prev, {
-              id: nextId(),
-              role: 'assistant',
-              content: text,
-              timestamp: ts,
-              character_id: cid,
+              id: nextId(), role: 'assistant', content: text, timestamp: ts, character_id: cid,
             }]);
-            return;
+          } else if (route.append === 'private') {
+            setMessages((prev) => [...prev, {
+              id: nextId(), role: 'assistant', content: text, timestamp: ts,
+            }]);
           }
-          // 群聊频道消息但用户不在群聊视图：增加群聊未读计数
-          if (ch === 'wechat_group') {
-            setUnreadCounts((prev) => ({ ...prev, group: (prev.group ?? 0) + 1 }));
-            return;
+          // Update the correct conversation even while viewing another person or the group.
+          if (route.preview) {
+            const target = route.preview;
+            setLastPreviews((prev) => ({ ...prev, [target]: { content: text, timestamp: ts, role: 'assistant' } }));
           }
-          // 私聊视图：只处理 wechat 频道消息
-          if (ch && ch !== 'wechat') return;
-          if (viewRef.current === 'private' && cid && privateCharIdRef.current && cid !== privateCharIdRef.current) return;
-          setMessages((prev) => [...prev, {
-            id: nextId(),
-            role: 'assistant',
-            content: text,
-            timestamp: ts,
-          }]);
-          // 立即刷新主面板私聊预览（乐观更新，不等 dialogue:changed debounce）
-          if (cid) {
-            setLastPreviews((prev) => ({
-              ...prev,
-              [cid]: { content: text, timestamp: ts, role: 'assistant' },
-            }));
-          }
-          // 即时未读计数：不在对应私聊视图时，红点立即+1（不依赖 dialogue:changed debounce）
-          {
-            const convId = cid ?? '';
-            const isViewing = viewRef.current === 'private' && privateCharIdRef.current === convId;
-            if (convId && !isViewing) {
-              setUnreadCounts((prev) => ({ ...prev, [convId]: (prev[convId] ?? 0) + 1 }));
-            }
+          if (route.unread) {
+            const target = route.unread;
+            setUnreadCounts((prev) => ({ ...prev, [target]: (prev[target] ?? 0) + 1 }));
           }
         });
         if (cancelled) { unAssistantMsg(); return; }

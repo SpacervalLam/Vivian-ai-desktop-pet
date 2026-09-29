@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
 import type { BoxColliderSpec } from './collider';
+import { createLeafField } from './foliage';
 
 /**
  * Runtime handle for the south entrance's motion-sensing door.
@@ -99,12 +100,25 @@ export function buildApartmentPodium() {
     // 靠枕：软性元素是"这里能坐下来待一会儿"的第一眼信号，也是这类空间最缺的东西
     for(const s of [-1,1])box('seat-pillow',x+s*(width*.30),.605,z-dir*.19,.36,.26,.13,sage,false,true);
   }
-  const leafGeo=new THREE.SphereGeometry(1,9,7);
+  /* 花池灌木走 `foliage` 的叶簇场。原来是一串 9×7 段的球体：单看还算过得去，
+   * 连成一排就是"一串等距的绿珠子"——每颗一样大、一样圆、间距一样。叶簇面片带
+   * 叶脉、朝向随机、密铺之后才是丛生的样子。
+   * 用**自己的** PRNG：叶簇贴图生成要抽几百次样，蹭主 `random()` 会把后面
+   * 所有随机内容整体错位（文件里 oak 贴图那条注释讲的就是同一个坑）。
+   * 坐标是 **group 局部**的 —— 外层 `exterior` 会把这个 group 挂到带变换的父级
+   * 下，所以叶簇网格挂进 group 跟着父级走，不能像街景那样挂到场景根。 */
+  let shrubSeed=7907;const shrubRnd=()=>{shrubSeed=(Math.imul(shrubSeed,1664525)+1013904223)>>>0;return shrubSeed/4294967296;};
+  const shrubs=createLeafField(shrubRnd,6000);
   function planter(x:number,z:number,w:number,d=.68){
     box('planter',x,.27,z,w,.46,d,dark,true,true);
     box('gravel',x,.51,z,w-.12,.016,d-.12,soil);
-    for(let i=0;i<Math.ceil(w/.3);i++){
-      const mesh=new THREE.Mesh(leafGeo,leaves);mesh.position.set(x-w/2+.18+i*.29,.66+random()*.12,z+(random()-.5)*.12);mesh.scale.set(.24,.25+random()*.12,.22);mesh.castShadow=true;mesh.name='podium-shrub';group.add(mesh);
+    // 芯：面片没有厚度，全靠它会看穿；压到池面以下，只露出叶簇。
+    box('shrub-core',x,.62,z,w-.16,.30,d-.18,leaves);
+    const n=Math.max(2,Math.round(w/.16));
+    for(let i=0;i<n;i++){
+      const px=x-w/2+.08+(i+.5)*(w/n);
+      for(let k=0;k<3;k++)
+        shrubs.spray(px+(shrubRnd()-.5)*.15,.60+shrubRnd()*.36,z+(shrubRnd()-.5)*(d-.26),.15+shrubRnd()*.13);
     }
   }
   function sconce(x:number,z:number,back=false){
@@ -227,8 +241,12 @@ export function buildApartmentPodium() {
     for(let i=0;i<3;i++){
       const a=new THREE.Vector3(x,.52,5.44),b=new THREE.Vector3(x+(i-1)*.30,1.80+i*.13,5.44+(i%2-.5)*.28);
       const stem=new THREE.Mesh(branchGeo,wood);stem.position.copy(a).add(b).multiplyScalar(.5);stem.scale.y=a.distanceTo(b);stem.quaternion.setFromUnitVectors(new THREE.Vector3(0,1,0),b.clone().sub(a).normalize());stem.name='podium-garden-stem';group.add(stem);
-      for(let k=0;k<4;k++){
-        const crown=new THREE.Mesh(leafGeo,leaves);crown.position.set(b.x+Math.cos(k*2.4)*.26,b.y+.13+Math.sin(k*2.4)*.16,b.z+Math.sin(k*2.4)*.23);crown.scale.set(.34,.18,.30);crown.castShadow=true;crown.name='podium-garden-canopy';group.add(crown);
+      /* 冠同样是叶簇场（原来是 4 个压扁的球：`.34/.18/.30` 的椭球，一眼就是
+       * "四个绿饼"）。枝干那根细圆柱留着 —— 这种尺度下圆柱干是可读的，
+       * 真正露馅的是冠。 */
+      for(let k=0;k<7;k++){
+        const a=shrubRnd()*6.28,r=shrubRnd()*.30;
+        shrubs.spray(b.x+Math.cos(a)*r,b.y+.10+shrubRnd()*.34,b.z+Math.sin(a)*r,.16+shrubRnd()*.13);
       }
     }
   }
@@ -433,6 +451,10 @@ export function buildApartmentPodium() {
   for(let n=0;n<4;n++)box('umbrella',-6.4+n*.09,.78,3.62,.035,1.02,.035,n%2?sage:linen);
   for(const x of [-21,-12,12,21])box('hall-light',x,3.128,0,7,.018,.085,warm);
   label('←  LIFT  /  1—4',-28,2.65,4.435,2.7,.22,true);
+  /* 叶簇是 InstancedMesh，必须等所有 `planter()` 都登记完再 build。
+   * `merge.ts` 会跳过 `userData.noMerge` 的子树（`build()` 内部已设），
+   * 所以挂进 group 里也不会被外层合批烘掉。 */
+  group.add(shrubs.build('podium-shrub-leaves'));
   group.userData.podiumVersion=3;
   return {group,boxes,autoDoor};
 }

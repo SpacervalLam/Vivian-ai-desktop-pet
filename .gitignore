@@ -12,6 +12,7 @@ dist-ssr/
 
 # ===== Vite =====
 *.tsbuildinfo
+vite.config.ts.timestamp-*.mjs
 
 # ===== IDE / Editor =====
 .vscode/

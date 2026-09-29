@@ -8,6 +8,7 @@
 //! 读取策略：首次访问时从磁盘加载到内存，后续直接读缓存。
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -47,6 +48,15 @@ pub struct DayUsage {
     pub requests: u64,
     #[serde(default)]
     pub models: HashMap<String, ModelUsage>,
+    /// Actual provider-reported usage attributed to the request's purpose.
+    #[serde(default)]
+    pub tasks: HashMap<String, ModelUsage>,
+}
+
+tokio::task_local! { static CURRENT_TASK: String; }
+
+pub async fn with_task<T>(tag: &str, future: impl Future<Output = T>) -> T {
+    CURRENT_TASK.scope(tag.to_string(), future).await
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -126,13 +136,14 @@ fn schedule_flush() {
 fn apply_usage(
     day: &mut DayUsage,
     model: &str,
+    task: Option<&str>,
     input: u64,
     output: u64,
     cache_read: u64,
     cache_write: u64,
 ) {
-    let cache_read = cache_read.min(input);
-    let miss = input - cache_read;
+    // Provider parsing already removes cached input from `input` when needed.
+    let miss = input;
 
     day.input += input;
     day.output += output;
@@ -142,6 +153,14 @@ fn apply_usage(
     day.requests += 1;
 
     let entry = day.models.entry(model.to_string()).or_default();
+    entry.input += input;
+    entry.output += output;
+    entry.hit += cache_read;
+    entry.miss += miss;
+    entry.cache_creation += cache_write;
+    entry.requests += 1;
+    let task = task.filter(|t| !t.trim().is_empty()).unwrap_or("unattributed");
+    let entry = day.tasks.entry(task.to_string()).or_default();
     entry.input += input;
     entry.output += output;
     entry.hit += cache_read;
@@ -161,7 +180,20 @@ pub fn record_usage(
     cache_read_tokens: u64,
     cache_write_tokens: u64,
 ) {
-    if input_tokens == 0 && output_tokens == 0 {
+    let tag = CURRENT_TASK.try_with(Clone::clone).ok();
+    record_usage_for_task(tag.as_deref(), model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens);
+}
+
+/// Stream forwarding runs in a spawned task, so it passes the tag explicitly.
+pub fn record_usage_for_task(
+    task: Option<&str>,
+    model: &str,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_read_tokens: u64,
+    cache_write_tokens: u64,
+) {
+    if input_tokens == 0 && output_tokens == 0 && cache_read_tokens == 0 && cache_write_tokens == 0 {
         return;
     }
     let model = if model.trim().is_empty() { "未归类" } else { model.trim() };
@@ -175,6 +207,7 @@ pub fn record_usage(
         apply_usage(
             day,
             model,
+            task,
             input_tokens,
             output_tokens,
             cache_read_tokens,
@@ -229,13 +262,24 @@ pub struct DayUsageReport {
 pub struct UsageReport {
     pub days: Vec<DayUsageReport>,
     pub models: Vec<ModelUsageReport>,
+    pub tasks: Vec<TaskUsageReport>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TaskUsageReport {
+    pub task: String,
+    pub input: u64,
+    pub output: u64,
+    pub hit: u64,
+    pub cache_creation: u64,
+    pub requests: u64,
 }
 
 /// 查询近 N 天的用量报表（无数据的天填 0，模型按总 token 降序）。
 pub fn get_usage_report(days: u32) -> UsageReport {
     let days = days.clamp(1, 365);
     let Ok(mut state) = STATE.lock() else {
-        return UsageReport { days: Vec::new(), models: Vec::new() };
+        return UsageReport { days: Vec::new(), models: Vec::new(), tasks: Vec::new() };
     };
     if !state.loaded {
         state.cache = load_from_disk();
@@ -246,6 +290,7 @@ pub fn get_usage_report(days: u32) -> UsageReport {
     // 日汇总（升序）
     let mut day_reports = Vec::with_capacity(days as usize);
     let mut by_model: HashMap<String, ModelUsage> = HashMap::new();
+    let mut by_task: HashMap<String, ModelUsage> = HashMap::new();
     for i in (0..days).rev() {
         let key = day_key_offset(i as u64);
         let day = store.days.get(&key);
@@ -254,7 +299,9 @@ pub fn get_usage_report(days: u32) -> UsageReport {
             input: day.map(|d| d.input).unwrap_or(0),
             output: day.map(|d| d.output).unwrap_or(0),
             hit: day.map(|d| d.hit).unwrap_or(0),
-            miss: day.map(|d| d.miss).unwrap_or(0),
+            // Older files double-subtracted cache reads here. `input` is already
+            // uncached provider input, so derive this field instead of trusting it.
+            miss: day.map(|d| d.input).unwrap_or(0),
             cache_creation: day.map(|d| d.cache_creation).unwrap_or(0),
             requests: day.map(|d| d.requests).unwrap_or(0),
         });
@@ -264,7 +311,16 @@ pub fn get_usage_report(days: u32) -> UsageReport {
                 entry.input += usage.input;
                 entry.output += usage.output;
                 entry.hit += usage.hit;
-                entry.miss += usage.miss;
+                entry.miss += usage.input;
+                entry.cache_creation += usage.cache_creation;
+                entry.requests += usage.requests;
+            }
+            for (task, usage) in &day.tasks {
+                let entry = by_task.entry(task.clone()).or_default();
+                entry.input += usage.input;
+                entry.output += usage.output;
+                entry.hit += usage.hit;
+                entry.miss += usage.input;
                 entry.cache_creation += usage.cache_creation;
                 entry.requests += usage.requests;
             }
@@ -286,5 +342,35 @@ pub fn get_usage_report(days: u32) -> UsageReport {
         .collect();
     models.sort_by(|a, b| (b.input + b.output).cmp(&(a.input + a.output)));
 
-    UsageReport { days: day_reports, models }
+    let mut tasks: Vec<TaskUsageReport> = by_task.into_iter().map(|(task, u)| TaskUsageReport {
+        task, input: u.input, output: u.output, hit: u.hit,
+        cache_creation: u.cache_creation, requests: u.requests,
+    }).collect();
+    tasks.sort_by(|a, b| (b.input + b.output).cmp(&(a.input + a.output)));
+
+    UsageReport { days: day_reports, models, tasks }
+}
+
+#[cfg(test)]
+mod attribution_tests {
+    use super::*;
+
+    #[test]
+    fn cache_and_task_usage_are_counted_once() {
+        let mut day = DayUsage::default();
+        apply_usage(&mut day, "model", Some("proactive_channel"), 80, 12, 40, 0);
+        assert_eq!(day.input, 80);
+        assert_eq!(day.hit, 40);
+        assert_eq!(day.miss, 80);
+        assert_eq!(day.tasks["proactive_channel"].requests, 1);
+        assert_eq!(day.tasks["proactive_channel"].input, 80);
+        assert_eq!(day.models["model"].requests, 1);
+    }
+
+    #[test]
+    fn old_usage_files_deserialize_without_task_breakdown() {
+        let old = r#"{"days":{"2026-09-29":{"input":5,"output":1,"hit":0,"miss":5,"cache_creation":0,"requests":1,"models":{}}}}"#;
+        let usage: UsageStore = serde_json::from_str(old).unwrap();
+        assert!(usage.days["2026-09-29"].tasks.is_empty());
+    }
 }

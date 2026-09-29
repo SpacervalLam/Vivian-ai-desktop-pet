@@ -19,6 +19,7 @@ import SetupGuideModal from './SetupGuideModal';
 import type { FishSpeechServiceState, GptSoVitsServiceState, GptSoVitsServiceStatus, OllamaServiceState, WhisperServiceState } from '../types';
 import PluginsPanel from './plugins/PluginsPanel';
 import ConnectionsPanel from './ConnectionsPanel';
+import TokenUsagePanel from './TokenUsagePanel';
 import { Settings, Cpu, Wrench, Database, Mic, Wifi, Cable, Puzzle, Info, Trash2, Sparkles, ExternalLink, Activity } from 'lucide-react';
 
 type TabKey =
@@ -146,10 +147,11 @@ interface ConfigObject {
  *
  * 任务职责说明：
  * - chat:                日常对话与问答（高频，人格核心，可用便宜模型）
- * - reasoning:           长输入/工具调用/动作决策深度推理（自动从 chat 升级，需强模型）
+ * - reasoning:           主对话输入超过阈值或需要工具时升级使用；需可靠的长上下文理解与 function calling
+ * - work_agent:          编程/复杂工作任务（工作模型配置优先，路由矩阵作为默认与回退）
  * - vision_describe:     图片理解（用户发图时使用，必须配置支持视觉的多模态模型）
  * - diary:               智能日记内容生成
- * - memory:              写入时记忆抽取（enrich：关键词/重要性/语义类型分类，高频，建议便宜模型，并供 LLM 记忆路由/校验/用户画像复用）
+ * - memory:              写入时记忆抽取、检索改写、记忆路由/校验与用户画像复用；高频结构化任务
  * - consolidation:       离线记忆巩固与精修（三阶段流水线、相似记忆精修、冲突仲裁，低频，需深度推理模型）
  * - reflection:          异步反思（每5轮或30分钟触发，合并意识更新与活动抽取，fire-and-forget，失败静默）
  * - inner_monologue:     离线内心独白（用户不交互时自主思考，含兴趣话题联网搜索，建议廉价快速模型）
@@ -160,23 +162,26 @@ interface ConfigObject {
  * - simple_judge:        选择渠道、旁观插话、会话结束原因等结构化简短判断（可使用 Jev）
  * - intent_judge:        会话关闭意图判断 + 桌宠反应（每轮对话后判断是否应关闭及关闭原因；用户摸头/双击/长按/拖拽/甩飞桌宠时生成一句短反应。极高频，建议最便宜的快速模型）
  * - asr_polish:          语音识别结果整理（识别结束后修正同音字/语气词/标点，建议便宜快速模型）
+ * - text_rewrite:        工作区选中文本改写，按编辑要求最小幅度重写，不参与工作智能体的代码执行
  */
-const ROUTING_TASKS: { labelKey: string; taskType: string; helpKey: string }[] = [
-  { labelKey: 'config.routing_chat', taskType: 'chat', helpKey: 'config.routing_chat_help' },
-  { labelKey: 'config.routing_reasoning', taskType: 'reasoning', helpKey: 'config.routing_reasoning_help' },
-  { labelKey: 'config.routing_vision_describe', taskType: 'vision_describe', helpKey: 'config.routing_vision_describe_help' },
-  { labelKey: 'config.routing_diary', taskType: 'diary', helpKey: 'config.routing_diary_help' },
-  { labelKey: 'config.routing_memory', taskType: 'memory', helpKey: 'config.routing_memory_help' },
-  { labelKey: 'config.routing_consolidation', taskType: 'consolidation', helpKey: 'config.routing_consolidation_help' },
-  { labelKey: 'config.routing_reflection', taskType: 'reflection', helpKey: 'config.routing_reflection_help' },
-  { labelKey: 'config.routing_inner_monologue', taskType: 'inner_monologue', helpKey: 'config.routing_inner_monologue_help' },
-  { labelKey: 'config.routing_emotion_analysis', taskType: 'emotion_analysis', helpKey: 'config.routing_emotion_analysis_help' },
-  { labelKey: 'config.routing_knowledge_acquisition', taskType: 'knowledge_acquisition', helpKey: 'config.routing_knowledge_acquisition_help' },
-  { labelKey: 'config.routing_translation', taskType: 'translation', helpKey: 'config.routing_translation_help' },
-  { labelKey: 'config.routing_bystander_judge', taskType: 'bystander_judge', helpKey: 'config.routing_bystander_judge_help' },
-  { labelKey: 'config.routing_simple_judge', taskType: 'simple_judge', helpKey: 'config.routing_simple_judge_help' },
-  { labelKey: 'config.routing_intent_judge', taskType: 'intent_judge', helpKey: 'config.routing_intent_judge_help' },
-  { labelKey: 'config.routing_asr_polish', taskType: 'asr_polish', helpKey: 'config.routing_asr_polish_help' },
+const ROUTING_TASKS: { groupKey: string; labelKey: string; taskType: string; helpKey: string }[] = [
+  { groupKey: 'config.routing_group_conversation', labelKey: 'config.routing_chat', taskType: 'chat', helpKey: 'config.routing_chat_help' },
+  { groupKey: 'config.routing_group_conversation', labelKey: 'config.routing_reasoning', taskType: 'reasoning', helpKey: 'config.routing_reasoning_help' },
+  { groupKey: 'config.routing_group_conversation', labelKey: 'config.routing_vision_describe', taskType: 'vision_describe', helpKey: 'config.routing_vision_describe_help' },
+  { groupKey: 'config.routing_group_background', labelKey: 'config.routing_memory', taskType: 'memory', helpKey: 'config.routing_memory_help' },
+  { groupKey: 'config.routing_group_background', labelKey: 'config.routing_reflection', taskType: 'reflection', helpKey: 'config.routing_reflection_help' },
+  { groupKey: 'config.routing_group_background', labelKey: 'config.routing_consolidation', taskType: 'consolidation', helpKey: 'config.routing_consolidation_help' },
+  { groupKey: 'config.routing_group_background', labelKey: 'config.routing_diary', taskType: 'diary', helpKey: 'config.routing_diary_help' },
+  { groupKey: 'config.routing_group_background', labelKey: 'config.routing_inner_monologue', taskType: 'inner_monologue', helpKey: 'config.routing_inner_monologue_help' },
+  { groupKey: 'config.routing_group_background', labelKey: 'config.routing_knowledge_acquisition', taskType: 'knowledge_acquisition', helpKey: 'config.routing_knowledge_acquisition_help' },
+  { groupKey: 'config.routing_group_decisions', labelKey: 'config.routing_simple_judge', taskType: 'simple_judge', helpKey: 'config.routing_simple_judge_help' },
+  { groupKey: 'config.routing_group_decisions', labelKey: 'config.routing_bystander_judge', taskType: 'bystander_judge', helpKey: 'config.routing_bystander_judge_help' },
+  { groupKey: 'config.routing_group_decisions', labelKey: 'config.routing_intent_judge', taskType: 'intent_judge', helpKey: 'config.routing_intent_judge_help' },
+  { groupKey: 'config.routing_group_decisions', labelKey: 'config.routing_emotion_analysis', taskType: 'emotion_analysis', helpKey: 'config.routing_emotion_analysis_help' },
+  { groupKey: 'config.routing_group_decisions', labelKey: 'config.routing_asr_polish', taskType: 'asr_polish', helpKey: 'config.routing_asr_polish_help' },
+  { groupKey: 'config.routing_group_work', labelKey: 'config.routing_work_agent', taskType: 'work_agent', helpKey: 'config.routing_work_agent_help' },
+  { groupKey: 'config.routing_group_work', labelKey: 'config.routing_text_rewrite', taskType: 'text_rewrite', helpKey: 'config.routing_text_rewrite_help' },
+  { groupKey: 'config.routing_group_work', labelKey: 'config.routing_translation', taskType: 'translation', helpKey: 'config.routing_translation_help' },
 ];
 
 /** 厂商下的一个嵌入模型（插件 llm-providers 的 embedding-providers.json） */
@@ -2237,6 +2242,12 @@ const ConfigWindow: React.FC = () => {
   // 主 LLM 未配置时显示初始配置引导弹窗
   const [setupGuideOpen, setSetupGuideOpen] = useState(false);
   const [config, setConfig] = useState<ConfigObject>({});
+  const [apartmentInstalled, setApartmentInstalled] = useState(false);
+  useEffect(() => {
+    void invoke<{ installed: boolean }>('apartment_plugin_status')
+      .then((status) => setApartmentInstalled(status.installed))
+      .catch(() => setApartmentInstalled(false));
+  }, []);
   // 应用版本号（来自 tauri.conf.json 的 version）
   const [appVersion, setAppVersion] = useState<string>('');
   // 操作系统信息（platform + version + arch）
@@ -3902,6 +3913,10 @@ const ConfigWindow: React.FC = () => {
     } catch (e) {
       criticalError = `保存到磁盘失败: ${e}`;
     }
+    if (!criticalError) {
+      try { await invoke('update_text_shortcuts'); }
+      catch (e) { console.warn('更新快捷键失败:', e); }
+    }
 
     // 子配置保存（失败不阻止主流程）
     if (ttsConfig) {
@@ -4163,6 +4178,16 @@ const ConfigWindow: React.FC = () => {
               value={get('base.auto_start', false)}
               onChange={(v) => setNested('base.auto_start', v)}
             />
+            {apartmentInstalled ? (
+              <ToggleField
+                label={t('config.field_apartment_enabled')}
+                help={t('config.apartment_enabled_help')}
+                value={get('base.apartment_enabled', true)}
+                onChange={(v) => setNested('base.apartment_enabled', v)}
+              />
+            ) : (
+              <div style={{ opacity: 0.65, padding: '8px 0' }}>{t('config.apartment_not_installed')}</div>
+            )}
             <ShortcutsDrawer
               label={t('config.section_shortcuts')}
               expanded={shortcutsExpanded}
@@ -4174,7 +4199,7 @@ const ConfigWindow: React.FC = () => {
                 get<string>('base.shortcut_chat', ''),
                 get<string>('base.shortcut_settings', ''),
                 get<string>('base.shortcut_memory', ''),
-                get<string>('base.shortcut_room', ''),
+                apartmentInstalled && get('base.apartment_enabled', true) ? get<string>('base.shortcut_room', '') : '',
               ].filter((v) => !!v).length}
             >
               <ShortcutRecorder
@@ -4217,13 +4242,13 @@ const ConfigWindow: React.FC = () => {
                 labelKey="config.field_shortcut_memory"
                 helpKey="config.shortcut_memory_help"
               />
-              <ShortcutRecorder
+              {apartmentInstalled && get('base.apartment_enabled', true) && <ShortcutRecorder
                 value={get<string>('base.shortcut_room', 'CommandOrControl+Shift+R')}
                 defaultValue="CommandOrControl+Shift+R"
                 onChange={handleRoomShortcutChange}
                 labelKey="config.field_shortcut_room"
                 helpKey="config.shortcut_room_help"
-              />
+              />}
             </ShortcutsDrawer>
 
             {/* ── 真实世界感知（原独立页签合并）── */}
@@ -4733,7 +4758,7 @@ const ConfigWindow: React.FC = () => {
                 </div>
               );
             })()}
-            {ROUTING_TASKS.map((task) => {
+            {ROUTING_TASKS.map((task, index) => {
               const prefix = `routing_matrix.${task.taskType}`;
               const providerType = get(`${prefix}.provider_type`, '') as string;
               const modelVal = (get(`${prefix}.model`, '') as string).trim();
@@ -4749,8 +4774,13 @@ const ConfigWindow: React.FC = () => {
                 && (!needsSecret || !!apiSecretVal)
                 && (!needsAppId || !!appIdVal);
               return (
+              <React.Fragment key={task.taskType}>
+              {index === 0 || ROUTING_TASKS[index - 1].groupKey !== task.groupKey ? (
+                <div style={{ margin: '20px 0 8px', color: 'var(--panel-text-secondary)', fontSize: 12, fontWeight: 700, letterSpacing: 0.2 }}>
+                  {t(task.groupKey)}
+                </div>
+              ) : null}
               <CollapsibleSection
-                key={task.taskType}
                 title={t(task.labelKey)}
                 subtitle={t(task.helpKey)}
                 defaultOpen={false}
@@ -4841,6 +4871,7 @@ const ConfigWindow: React.FC = () => {
                   help={t('config.field_route_max_tokens_help')}
                 />
               </CollapsibleSection>
+              </React.Fragment>
               );
             })}
 
@@ -5016,6 +5047,7 @@ const ConfigWindow: React.FC = () => {
               onBrowse={() => void handlePickDefaultWorkspace()}
               browseLabel={t('config.default_workspace_browse')}
             />
+            <TokenUsagePanel />
           </>
         );
       case 'tools':

@@ -1,0 +1,7 @@
+{
+  "name": "3d-apartment",
+  "version": "1.1.0",
+  "description": "3D 公寓、街区探索和房间资源。安装后可在设置的通用页启用或禁用。",
+  "assets": "room/",
+  "ui": "ui/room.js"
+}

@@ -8,8 +8,22 @@ export const LIFT_CABIN = { x: -34.6, z: -2.4 };
 const DOOR_Z = -0.92;
 export const liftTravelMs = (from: number, to: number) => 1200 + Math.abs(to-from)*1500;
 
-/** Four matching landings with a timed, camera-teleport lift. World vertical axis is Y. */
-export function createApartmentLift(container: HTMLElement, camera: THREE.PerspectiveCamera, fps: FPSControls) {
+/**
+ * 电梯塔楼的**几何**（不含交互层：HUD / 键盘 / 门动画 / 碰撞表）。
+ *
+ * 拆出来是为了景观复制品：北侧孪生公寓也要有一座同款塔楼，但它不该是可乘坐的
+ * 第二部电梯（两套 keydown 监听 + 两个 HUD 会打架，`LIFT_CABIN` 又是模块常量、
+ * 没法搬）。所以几何单独一个函数，`createApartmentLift` 和景观复制品各取所需。
+ *
+ * 坐标全部是世界绝对值（塔楼贴在西山墙外侧 x≈-34.6 / z≈-2.4），所以调用方
+ * 只要把返回的 group / dynamic 挂到一个已经带偏移的父节点下，偏移就自动生效
+ * ——与 buildApartmentTwin 用 `group.position.z` 搬楼体是同一个道理。
+ *
+ * `lights:false` 省掉每层那两盏轿厢点光（共 8 盏）。景观复制品的轿厢门常闭、
+ * 内饰根本看不见，这 8 盏灯只会去挤 RoomScene 的点光池。
+ */
+export function buildLiftTower(opts: { lights?: boolean } = {}) {
+  const lights = opts.lights ?? true;
   const group=new THREE.Group();group.name='apartment-lift-tower';group.userData.sceneCollideSkip=true;
   const dynamic=new THREE.Group();dynamic.name='lift-moving-doors';dynamic.userData.sceneCollideSkip=true;
   const specs:BoxColliderSpec[]=[], floors:Collider[]=[];
@@ -293,7 +307,7 @@ export function createApartmentLift(container: HTMLElement, camera: THREE.Perspe
      * satinGlass 把高光瓣摊平了。
      * 这两盏灯进的是 RoomScene 的点光池，池子只在装配完成后收一次；玩家不在电梯
      * 附近时它们自然排不进前 16 盏，所以不会白付片元成本。 */
-    for(const x of [-35.80,-33.40]){
+    if (lights) for(const x of [-35.80,-33.40]){
       const cabLight=new THREE.PointLight('#ffe4bc',3.6,5.0,2);
       cabLight.position.set(x,F+2.50,-2.43);group.add(cabLight);
     }
@@ -348,6 +362,12 @@ export function createApartmentLift(container: HTMLElement, camera: THREE.Perspe
     box('facade-band',-33.9,F+2.97,4.815,5.60,.18,.045,metal);
     for(let n=0;n<15;n++)box('facade-fin',-36.35+n*.35,F+1.45,4.817,.07,2.55,.055,wood);
   }
+  return { group, dynamic, specs, floors, leaves };
+}
+
+/** Four matching landings with a timed, camera-teleport lift. World vertical axis is Y. */
+export function createApartmentLift(container: HTMLElement, camera: THREE.PerspectiveCamera, fps: FPSControls) {
+  const { group, dynamic, specs, floors, leaves } = buildLiftTower();
   const colliders=buildBoxColliders(specs).concat(floors);
   const hud=document.createElement('div');hud.dataset.roomLift='true';
   Object.assign(hud.style,{position:'absolute',left:'50%',bottom:'100px',transform:'translateX(-50%)',padding:'18px 24px',borderRadius:'12px',background:'rgba(24,31,30,.94)',color:'#f4ead8',fontFamily:'sans-serif',fontSize:'16px',textAlign:'center',pointerEvents:'none',display:'none',zIndex:'30',boxShadow:'0 8px 30px #0005',whiteSpace:'pre-line'});

@@ -23,12 +23,20 @@ use crate::pipeline::steps::generation::StreamEmitter;
 use crate::state::AppState;
 use crate::utils::truncate_chars;
 
-/// 剥离合成输入尾部的记忆触发锚点脚手架（`[近期你们的话题]` / `[请基于上述记忆自然地回应]`）。
+/// 剥离合成输入中仅供模型使用的话题、交接与节奏提示。
 ///
 /// 锚点由 deliver_message 拼接到合成输入尾部供 LLM 参考，
 /// 不应随真实话语流入记忆 / 对话历史 / 事件账本。
 fn strip_memory_anchor(text: &str) -> String {
-    const MARKERS: [&str; 2] = ["[近期你们的话题]", "[请基于上述记忆自然地回应]"];
+    const MARKERS: [&str; 7] = [
+        "[近期你们的话题]",
+        "[请基于上述记忆自然地回应]",
+        "[Current conversation thread:",
+        "[交接上下文：",
+        "[共同观察]",
+        "[Natural closing]",
+        "[Conversation rhythm]",
+    ];
     let mut end = text.len();
     for marker in MARKERS {
         if let Some(pos) = text[..end].find(marker) {
@@ -1549,6 +1557,14 @@ fn strip_code_fence(s: &str) -> String {
 #[cfg(test)]
 mod speaker_prefix_tests {
     use super::*;
+
+    #[test]
+    fn synthetic_context_is_not_saved_as_dialogue() {
+        let input = "[Nana says to me] 我哪查户口了\n\n[Current conversation thread: 打趣]\nTreat this as context";
+        let (body, speaker) = parse_speaker_prefix(input);
+        assert_eq!(body, "我哪查户口了");
+        assert_eq!(speaker, "nana");
+    }
 
     #[test]
     fn test_broadcast_prefix_says_everyone() {

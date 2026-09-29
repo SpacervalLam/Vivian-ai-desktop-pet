@@ -133,6 +133,7 @@ pub async fn send_message(
             crate::conversation::CONVERSATION_MANAGER.force_new_session("user", &char_id, &message)
         });
     crate::conversation::CONVERSATION_MANAGER.touch_user_message(&char_id);
+    crate::conversation::CONVERSATION_MANAGER.set_user_channel(&char_id, "wechat");
     brain.presence.record_user_interaction();
     let _session_guard = state.session_coordinator.enter_user_turn(
         &char_id,
@@ -576,6 +577,7 @@ pub async fn send_message_stream(
             crate::conversation::CONVERSATION_MANAGER.force_new_session("user", &char_id, &message)
         });
     crate::conversation::CONVERSATION_MANAGER.touch_user_message(&char_id);
+    crate::conversation::CONVERSATION_MANAGER.set_user_channel(&char_id, &channel_str);
     brain.presence.record_user_interaction();
     let _session_guard = state.session_coordinator.enter_user_turn(
         &char_id,

@@ -452,6 +452,21 @@ impl PromptBuildingStep {
     fn compute_tool_scope(&self, ts: &ToolSystem, state: &PipelineState) -> ToolScope {
         let (scene, hidden) = self.resolve_tool_scope(ts, state);
 
+        // 角色间的闲聊不应获得控制用户设备、工作流或记忆的工具；这些工具会让普通接话
+        // 变成“代理任务”，也会把几十个无关工具塞进推理上下文。跨角色回复只需说话/沉默。
+        if state.current_channel == "cross_character" {
+            let hidden = hidden
+                .into_iter()
+                .chain(ts.list_tool_names())
+                .collect();
+            return ToolScope {
+                scene,
+                hidden,
+                recalled: None,
+                recalled_order: Vec::new(),
+            };
+        }
+
         let recalled_order: Vec<String> = self
             .tool_semantic_filter
             .as_ref()
@@ -497,6 +512,7 @@ impl PromptBuildingStep {
         // Character 块按关系熟悉度分档：熟客（stage>=2）裁掉自我介绍型段落（背景/兴趣/外观）
         let (character_block, examples_block, style_block, style_preset_block) = match self.persona.as_ref() {
             Some(p) => {
+                if let Some(memory) = &self.memory { p.reconcile_evolution(memory); }
                 let hour = chrono::Local::now().format("%H").to_string().parse::<u32>().unwrap_or(12);
                 let stage = self
                     .psychology
@@ -512,7 +528,7 @@ impl PromptBuildingStep {
                 let style = p.build_style_prompt(intimacy, hour);
                 let cfg = p.get_config();
                 let preset = crate::persona::prompt_render::render_style_preset_block(&cfg, &self.language);
-                (Some(p.get_character_block_tiered(tier)), Some(p.get_examples_block()), Some(style), if preset.is_empty() { None } else { Some(preset) })
+                (Some(p.get_character_block_tiered(tier)), Some(crate::persona::prompt_render::render_examples_block_tiered(&cfg, &self.language, tier)), Some(style), if preset.is_empty() { None } else { Some(preset) })
             }
             None => (None, None, None, None),
         };
@@ -789,7 +805,9 @@ impl PromptBuildingStep {
         // 场景语气只匹配当前发言，避免用户换话题后仍沿用上一轮的场景表演。
         // 命中时只注入少量可选节奏参考，不要求复刻台词。
         let tone_injection = self.tone_injector.as_ref().and_then(|injector| {
-            injector.build_tone_injection(&state.user_input, &self.language)
+            let entries = self.persona.as_ref().map(|p| p.evolution_entries()).unwrap_or_default();
+            let learned: Vec<_> = entries.iter().filter(|e| e.active()).map(|e| e.scope.as_str()).collect();
+            injector.build_tone_injection_growing(&state.user_input, &self.language, &learned)
         });
 
         // 情绪表达偏置：注入连续效价/激活/主导强度，按比例影响节奏

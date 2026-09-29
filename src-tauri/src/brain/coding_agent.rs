@@ -94,6 +94,8 @@ pub const CODE_MODE_MAX_STEPS: usize = 16;
 
 /// /compact 压缩后保留的最近消息条数（其余部分被摘要替换进上下文）。
 const COMPACT_KEEP_MESSAGES: usize = 24;
+/// 单次摘要最多处理这么多旧消息，避免异常长的持久化历史塞进一次摘要请求。
+const COMPACT_MAX_MESSAGES: usize = 24;
 /// /compact 可压缩的最小消息条数（不足则提示无需压缩）。
 const COMPACT_MIN_MESSAGES: usize = 8;
 /// 上下文占用达到窗口上限的该百分比时，自动压缩早期历史（防止请求超窗失败）。
@@ -581,6 +583,93 @@ fn reindex_message_meta<T>(map: HashMap<usize, T>, removed: usize) -> HashMap<us
     map.into_iter()
         .filter_map(|(k, v)| k.checked_sub(removed).map(|nk| (nk, v)))
         .collect()
+}
+
+/// 调整裁剪边界，避免把一次结构化工具调用与其结果拆开。
+/// `ToolUse` 后可跟多个 `ToolResult`；落在结果中间时退回调用之前。
+fn intact_history_boundary(messages: &[CodingMessage], mut split: usize) -> usize {
+    // 用户插话、send_image 等可插入调用和结果之间，不能只看相邻 role。
+    let mut group_start = None;
+    let mut pending = std::collections::HashSet::new();
+    for (index, message) in messages.iter().enumerate().take(split) {
+        if message.role == CodingRole::ToolUse {
+            group_start = Some(index);
+            pending.clear();
+            if let Some(calls) = message.tool_arguments.as_ref().and_then(serde_json::Value::as_array) {
+                pending.extend(calls.iter().filter_map(|call| call.get("id").and_then(serde_json::Value::as_str)));
+            }
+        } else if message.role == CodingRole::ToolResult {
+            if let Some(id) = message.tool_call_id.as_deref() {
+                pending.remove(id);
+            }
+        }
+    }
+    let crosses_boundary = messages[split.min(messages.len())..].iter()
+        .take_while(|m| m.role != CodingRole::ToolUse)
+        .any(|m| m.role == CodingRole::ToolResult
+            && m.tool_call_id.as_deref().is_some_and(|id| pending.contains(id)));
+    if crosses_boundary {
+        return group_start.unwrap_or(split);
+    }
+    if split >= messages.len() || messages[split].role != CodingRole::ToolResult {
+        return split;
+    }
+    while split > 0 && messages[split - 1].role == CodingRole::ToolResult {
+        split -= 1;
+    }
+    if split > 0 && messages[split - 1].role == CodingRole::ToolUse {
+        split - 1
+    } else {
+        // 旧持久化数据可能只有孤立结果；跳过它们，不向 provider 发送无主 tool 消息。
+        let mut next = split;
+        while next < messages.len() && messages[next].role == CodingRole::ToolResult {
+            next += 1;
+        }
+        next
+    }
+}
+
+/// 只提交生成摘要时确实看到的前缀。LLM 运行期间新增的插话/工具结果必须留下。
+fn commit_compaction(
+    session: &mut CodingSession,
+    old: &[CodingMessage],
+    previous_summary: &Option<String>,
+    summary: String,
+) -> Result<(), String> {
+    let prefix_unchanged = session.messages.len() >= old.len()
+        && serde_json::to_value(&session.messages[..old.len()])
+            .and_then(|current| serde_json::to_value(old).map(|snapshot| current == snapshot))
+            .unwrap_or(false);
+    if session.compacted != *previous_summary || !prefix_unchanged {
+        return Err("压缩期间会话历史已变化，请重试".into());
+    }
+    session.compacted = Some(summary);
+    session.messages.drain(..old.len());
+    session.message_feedback = reindex_message_meta(std::mem::take(&mut session.message_feedback), old.len());
+    session.message_changes = reindex_message_meta(std::mem::take(&mut session.message_changes), old.len());
+    Ok(())
+}
+
+/// 仅用于宿主确认尚未开始的调用；与恢复旧历史时的“执行状态未知”区别开。
+fn canceled_tool_result_message(call: &MessageToolCall) -> CodingMessage {
+    CodingMessage {
+        role: CodingRole::ToolResult,
+        content: serde_json::json!({
+            "status": "not_executed",
+            "error": "canceled",
+            "message": "用户已取消本轮任务，此调用尚未开始执行。恢复时请先遵循用户最新指令。",
+        }).to_string(),
+        images: None,
+        file_refs: None,
+        widgets: None,
+        interjected: None,
+        guided: None,
+        tool_name: Some(call.name.clone()),
+        tool_arguments: Some(call.arguments.clone()),
+        tool_success: Some(false),
+        tool_call_id: Some(call.id.clone()),
+        timestamp: chrono::Utc::now().timestamp_millis(),
+    }
 }
 
 /// 从 unified diff 统计增删行数（跳过 +++ / --- 头与 @@ hunk 行）。
@@ -1890,8 +1979,8 @@ impl CodingAgentService {
         ))
     }
 
-    /// 压缩核心：把较早的历史消息交给 LLM 压缩成摘要写入会话（保留最近
-    /// [`COMPACT_KEEP_MESSAGES`] 条），并对被归档消息做项目记忆沉淀。
+    /// 压缩核心：每次最多归档 [`COMPACT_MAX_MESSAGES`] 条较早消息，且至少保留最近
+    /// [`COMPACT_KEEP_MESSAGES`] 条，并对被归档消息做项目记忆沉淀。
     /// 旧消息不足 [`COMPACT_MIN_MESSAGES`] 条时返回 `archived = 0`（无需压缩）。
     /// 手动 `/compact` 与上下文占用触发的自动压缩共用本入口。
     async fn compact_history(
@@ -1904,7 +1993,10 @@ impl CodingAgentService {
             let guard = self.sessions.read();
             let s = guard.get(session_id).ok_or("会话不存在")?;
             let total = s.messages.len();
-            let split = total.saturating_sub(COMPACT_KEEP_MESSAGES);
+            let split = intact_history_boundary(
+                &s.messages,
+                total.saturating_sub(COMPACT_KEEP_MESSAGES).min(COMPACT_MAX_MESSAGES),
+            );
             if split < COMPACT_MIN_MESSAGES {
                 return Ok(CompactOutcome {
                     archived: 0,
@@ -1924,7 +2016,7 @@ impl CodingAgentService {
             user_prompt.push_str(prev);
             user_prompt.push_str("\n\n");
         }
-        user_prompt.push_str(&build_turn_transcript(&old, &wd));
+        user_prompt.push_str(&build_turn_transcript_with_limit(&old, &wd, 60_000));
 
         let summary = router
             .generate(LLMRequest::new(
@@ -1943,16 +2035,8 @@ impl CodingAgentService {
 
         {
             let mut guard = self.sessions.write();
-            if let Some(s) = guard.get_mut(session_id) {
-                s.compacted = Some(summary);
-                // 移除已被摘要的旧消息（保留最近 COMPACT_KEEP_MESSAGES 条）
-                let split = s.messages.len().saturating_sub(COMPACT_KEEP_MESSAGES);
-                s.messages.drain(..split);
-                // 按下标索引的消息级元数据必须跟着前移，否则压缩一次之后反馈与
-                // 「修改文件」清单就会挂到错误的回复上（越靠后的消息错得越离谱）。
-                s.message_feedback = reindex_message_meta(std::mem::take(&mut s.message_feedback), split);
-                s.message_changes = reindex_message_meta(std::mem::take(&mut s.message_changes), split);
-            }
+            let s = guard.get_mut(session_id).ok_or("会话不存在")?;
+            commit_compaction(s, &old, &existing, summary)?;
         }
         self.persist();
 
@@ -2357,7 +2441,7 @@ impl CodingAgentService {
         let mut made_progress = false;
         // 待注入下一轮请求的系统提示（软预算提醒 / 停滞干预 / 续轮通知）
         let mut pending_hint: Option<String> = None;
-        // 死循环检测：相同工具 + 相同参数连续重复（阈值 3）
+        // 死循环检测：相同调用序列及实际结果连续重复（阈值 3）
         let mut doom_tracker = DoomLoopTracker::new(3);
         // 停滞检测：同一工具连续失败且错误摘要相同（阈值 3），有成功即清零
         let mut fail_counts: HashMap<u64, (String, u32)> = HashMap::new();
@@ -2699,8 +2783,19 @@ impl CodingAgentService {
             }
 
             // 逐个执行工具并回填结果（顺序模式）
-            for call in &calls {
+            let mut round_loop_status = LoopStatus::Normal;
+            for (call_index, call) in calls.iter().enumerate() {
                 if self.is_canceled(session_id) {
+                    // 调用意图已广播；把剩余未执行项逐一结算，历史和界面都不能悬空。
+                    for skipped in &calls[call_index..] {
+                        let message = canceled_tool_result_message(skipped);
+                        let summary = message.content.clone();
+                        self.push_message(session_id, message);
+                        let _ = app.emit("coding:tool_result", serde_json::json!({
+                            "session_id": session_id, "id": skipped.id, "name": skipped.name,
+                            "success": false, "result": summary, "duration_ms": 0,
+                        }));
+                    }
                     self.finish_turn(app.clone(), session_id, CodingStatus::Canceled);
                     let _ = app.emit("coding:error", serde_json::json!({
                         "session_id": session_id,
@@ -2722,7 +2817,7 @@ impl CodingAgentService {
                         .await;
                 let duration_ms = tool_start.elapsed().as_millis() as u64;
                 self.stats_tool_done(session_id, duration_ms);
-                let (ok, summary) = if result.success {
+                let (ok, summary, observation) = if result.success {
                     // write_file 的 diff 只服务界面「变更」页：内容本就是模型刚写出的，
                     // 再作为工具结果回传纯属重复计费 → 回传前摘掉（edit_file 的 diff 照旧保留）。
                     let data = match &result.data {
@@ -2738,21 +2833,17 @@ impl CodingAgentService {
                         Some(d) => serde_json::to_string(d).unwrap_or_default(),
                         None => serde_json::to_string(&serde_json::Value::Null).unwrap_or_default(),
                     };
-                    (true, summarize_result(&data))
+                    (true, summarize_result(&data), data)
                 } else {
-                    (false, result.error.clone().unwrap_or_else(|| "执行失败".into()))
+                    let error = result.error.clone().unwrap_or_else(|| "执行失败".into());
+                    (false, error.clone(), error)
                 };
 
                 // 停滞检测：
-                // - 相同工具 + 相同参数连续重复（死循环）→ 提醒 LLM 换策略
+                // - 相同参数且观察结果不变的调用序列重复 → 提醒 LLM 换策略
                 // - 同一工具连续失败且错误摘要相同 → 提醒 LLM 重新分析根因
-                if let LoopStatus::Doomed { tool, count } =
-                    doom_tracker.record(&call.name, &call.arguments)
-                {
-                    pending_hint = Some(format!(
-                        "[系统提示] 你已连续 {count} 次调用 `{tool}` 且参数相同，未取得进展。请停止重复，重新分析问题根源并更换方法，或向用户说明当前障碍。"
-                    ));
-                }
+                // 比较裁剪前的输出，避免大结果只有中间内容变化时被误判为原地重复。
+                round_loop_status = doom_tracker.record_result(&call.name, &call.arguments, ok, &observation);
                 if ok {
                     // 任何成功都是进展：清空失败停滞计数；写/改/执行类工具成功记为实质进展（用于自动续轮判定）
                     fail_counts.clear();
@@ -2813,6 +2904,10 @@ impl CodingAgentService {
                         "duration_ms": duration_ms,
                     }),
                 );
+            }
+
+            if let Some(hint) = DoomLoopTracker::build_intervention_message(&round_loop_status) {
+                pending_hint = Some(hint);
             }
 
             // 收益递减检测：连续多轮低产出且无实质进展 → 提前停机，不磨满轮数预算
@@ -2933,21 +3028,13 @@ impl CodingAgentService {
                 interjected: None,
                 guided: None,
                 tool_name: None,
-                tool_arguments: None,
+                // 一次加锁写入完整调用；不能再取 last_mut，否则并发插话会被误改。
+                tool_arguments: Some(serde_json::to_value(calls).unwrap_or_default()),
                 tool_success: None,
                 tool_call_id: None,
                 timestamp: chrono::Utc::now().timestamp_millis(),
             },
         );
-        // 原始结构化调用存入消息的附加槽：复用 tool_arguments 存整个数组
-        {
-            let mut guard = self.sessions.write();
-            if let Some(s) = guard.get_mut(session_id) {
-                if let Some(last) = s.messages.last_mut() {
-                    last.tool_arguments = Some(serde_json::to_value(calls).unwrap_or_default());
-                }
-            }
-        }
     }
 
     /// Code 模式循环：LLM 一次性输出多步程序 JSON → 宿主顺序执行 → 总结。
@@ -3548,7 +3635,10 @@ impl CodingAgentService {
         // 历史裁剪：保留最近 MAX_HISTORY_MESSAGES 条。
         // 正常路径下超限会先被 maybe_auto_compact 归档成摘要，这里不该真的裁掉东西；
         // 一旦裁了说明压缩没生效（失败或未触发），留 warning 便于定位。
-        let start = session.messages.len().saturating_sub(MAX_HISTORY_MESSAGES);
+        let start = intact_history_boundary(
+            &session.messages,
+            session.messages.len().saturating_sub(MAX_HISTORY_MESSAGES),
+        );
         if start > 0 {
             tracing::warn!(
                 "[CodingAgent] 会话历史超出 {MAX_HISTORY_MESSAGES} 条上限，兜底裁掉最早 {start} 条（未经摘要）"
@@ -3894,6 +3984,15 @@ fn tool_target(args: &serde_json::Value) -> String {
 
 /// 本轮消息 → LLM 摘要输入的文本记录。
 fn build_turn_transcript(messages: &[CodingMessage], working_directory: &str) -> String {
+    build_turn_transcript_with_limit(messages, working_directory, 6000)
+}
+
+/// 历史压缩需要比单轮摘要更完整的输入；调用方控制总长度。
+fn build_turn_transcript_with_limit(
+    messages: &[CodingMessage],
+    working_directory: &str,
+    max_chars: usize,
+) -> String {
     let wd_line = if working_directory.trim().is_empty() {
         "工作目录：未选择（无工作区模式）".to_string()
     } else {
@@ -3927,7 +4026,7 @@ fn build_turn_transcript(messages: &[CodingMessage], working_directory: &str) ->
             CodingRole::Notice => {}
         }
     }
-    truncate_chars(&lines.join("\n"), 6000)
+    truncate_chars(&lines.join("\n"), max_chars)
 }
 
 /// LLM 摘要不可用时的规则摘要兜底。
@@ -4159,4 +4258,121 @@ fn resolve_file_refs(
         out.push(resolved);
     }
     out
+}
+
+#[cfg(test)]
+mod compaction_boundary_tests {
+    use super::*;
+
+    fn message(role: CodingRole, content: &str) -> CodingMessage {
+        CodingMessage {
+            role,
+            content: content.into(),
+            images: None,
+            file_refs: None,
+            widgets: None,
+            interjected: None,
+            guided: None,
+            tool_name: None,
+            tool_arguments: None,
+            tool_success: None,
+            tool_call_id: None,
+            timestamp: 1,
+        }
+    }
+
+    #[test]
+    fn canceled_batch_closes_only_unstarted_calls() {
+        let calls = vec![
+            MessageToolCall { id: "done".into(), name: "read_file".into(), arguments: serde_json::json!({}) },
+            MessageToolCall { id: "skipped".into(), name: "write_file".into(), arguments: serde_json::json!({}) },
+        ];
+        let skipped = canceled_tool_result_message(&calls[1]);
+        assert_eq!(skipped.tool_success, Some(false));
+        assert_eq!(skipped.tool_name.as_deref(), Some("write_file"));
+        let payload: serde_json::Value = serde_json::from_str(&skipped.content).unwrap();
+        assert_eq!(payload["status"], "not_executed");
+        let mut history = vec![
+            ChatMessage::assistant_with_tool_calls("", calls),
+            ChatMessage::tool_result("read succeeded", "done"),
+            ChatMessage::tool_result(skipped.content, skipped.tool_call_id.unwrap()),
+            ChatMessage::user("continue with a different plan"),
+        ];
+        assert_eq!(crate::providers::tool_history::repair_tool_history(&mut history), Default::default());
+        assert_eq!(history[1].content, "read succeeded");
+    }
+
+    #[test]
+    fn boundary_keeps_tool_call_with_all_results() {
+        let messages = vec![
+            message(CodingRole::User, "request"),
+            message(CodingRole::ToolUse, "calls"),
+            message(CodingRole::ToolResult, "first"),
+            message(CodingRole::ToolResult, "second"),
+            message(CodingRole::Assistant, "done"),
+        ];
+        assert_eq!(intact_history_boundary(&messages, 2), 1);
+        assert_eq!(intact_history_boundary(&messages, 3), 1);
+        assert_eq!(intact_history_boundary(&messages, 4), 4);
+    }
+
+    #[test]
+    fn boundary_skips_orphaned_results() {
+        let messages = vec![
+            message(CodingRole::User, "request"),
+            message(CodingRole::ToolResult, "orphan"),
+            message(CodingRole::Assistant, "done"),
+        ];
+        assert_eq!(intact_history_boundary(&messages, 1), 2);
+    }
+
+    #[test]
+    fn boundary_keeps_structured_batch_across_user_interjection() {
+        let mut call = message(CodingRole::ToolUse, "calls");
+        call.tool_arguments = Some(serde_json::json!([
+            {"id":"a", "name":"read_file", "arguments":{}},
+            {"id":"b", "name":"read_file", "arguments":{}},
+        ]));
+        let mut first = message(CodingRole::ToolResult, "first");
+        first.tool_call_id = Some("a".into());
+        let mut second = message(CodingRole::ToolResult, "second");
+        second.tool_call_id = Some("b".into());
+        let messages = vec![message(CodingRole::User, "request"), call, first,
+            message(CodingRole::User, "correction"), second];
+        assert_eq!(intact_history_boundary(&messages, 4), 1);
+        assert_eq!(intact_history_boundary(&messages, 5), 5);
+    }
+
+    #[test]
+    fn compaction_transcript_keeps_later_messages() {
+        let mut messages = vec![message(CodingRole::Assistant, &"x".repeat(5000)); 8];
+        messages.push(message(CodingRole::User, "latest correction"));
+        assert!(!build_turn_transcript(&messages, "").contains("latest correction"));
+        assert!(build_turn_transcript_with_limit(&messages, "", 60_000)
+            .contains("latest correction"));
+    }
+
+    #[test]
+    fn compaction_preserves_messages_appended_during_summary() {
+        let mut session = CodingSession {
+            session_id: "test".into(), char_id: "vivian".into(), delegated_by_companion: false,
+            working_directory: String::new(), extra_workspaces: Vec::new(), title: String::new(),
+            mode: "standard".into(), permission: "workspace_write".into(), model_id: None,
+            reasoning_level: "low".into(), goal: None, plan_mode: false, plan: None,
+            feedback: Vec::new(), compacted: None, deliverables: Vec::new(),
+            file_changes: Vec::new(), message_feedback: HashMap::new(),
+            message_changes: HashMap::new(), messages: vec![message(CodingRole::User, "old")],
+            status: CodingStatus::Idle, updated_at: 0, stats: CodingStats::default(),
+            last_context_tokens: 0, last_context_breakdown: [0, 0, 0], context_window: 128_000,
+            work_todos: Vec::new(), turn_changed_paths: Vec::new(),
+        };
+        let snapshot = session.messages.clone();
+        session.messages.push(message(CodingRole::User, "new instruction"));
+        session.message_feedback.insert(1, "up".into());
+        commit_compaction(&mut session, &snapshot, &None, "old summary".into()).unwrap();
+        assert_eq!(session.messages.len(), 1);
+        assert_eq!(session.messages[0].content, "new instruction");
+        assert_eq!(session.message_feedback.get(&0).map(String::as_str), Some("up"));
+        assert_eq!(session.compacted.as_deref(), Some("old summary"));
+    }
 }

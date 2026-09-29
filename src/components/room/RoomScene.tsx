@@ -1,5 +1,6 @@
 import { createCharacterAnimation } from './characterAnimation';
 import { createApartmentLift } from './anime/apartmentLift';
+import { apartmentAssetUrl } from './apartmentAssets';
 import { createInteriorDesign } from './anime/interiorDesign';
 import { createDistrictArt } from './anime/districtArt';
 /**
@@ -44,7 +45,8 @@ import {
 import type { WorldSnapshotResponse } from '../../types';
 import { setOutlineDistanceScale, setToonKeyLight, toonGradient, makeRng } from './anime/toon';
 import { mergeByMaterial, freezeStatic, dedupeGeometries } from './anime/merge';
-import { buildExteriorGround, buildStreetscape, buildApartmentShell, buildConvenienceStore, buildStreetscapeRipples, buildApartmentEaveDrips, buildSubwayEntrance, buildIzakaya, buildSmallPark, buildUtilityPoles, buildStreetFurniture, buildStreetBookStore, STRS, FLOORS, APT_X0, APT_X1, APT_ZN, APT_ZB, APT_WALL_BOXES, APT_CORRIDOR_N } from './anime/exterior';
+import { buildExteriorGround, buildStreetscape, buildApartmentShell, buildApartmentTwin, buildConvenienceStore, buildStreetscapeRipples, buildApartmentEaveDrips, buildSubwayEntrance, buildIzakaya, buildSmallPark, buildUtilityPoles, buildStreetFurniture, buildStreetBookStore, STRS, FLOORS, APT_X0, APT_X1, APT_ZN, APT_ZB, APT_WALL_BOXES, APT_CORRIDOR_N } from './anime/exterior';
+import { buildRiverbank } from './anime/riverbank';
 import {
   setArtStyle,
   outlineProp,
@@ -1043,7 +1045,7 @@ export function RoomScene() {
     // 公寓外壳 AABB ≈ [-31.15,-0.47,-8]~[38.25,14.05,8.28]，便利店到 z≈27；
     // 放宽到下面这个范围，既能飞到街区/便利店自由探索，又不会把模型拖丢。
     const OBS_TGT_MIN = new THREE.Vector3(-78, 0.2, -76);
-    const OBS_TGT_MAX = new THREE.Vector3(78, 35, 81);
+    const OBS_TGT_MAX = new THREE.Vector3(148, 35, 164);
 
     // 门洞列表：决定 buildWallColliders 在哪些墙段挖开口。
     // 必须与观察者模式的 nav 栅格（navGrid.wallAABBs）保持同一套「可走洞口」口径——
@@ -1120,7 +1122,48 @@ export function RoomScene() {
       collider: Collider;
       colliderFixed?: Collider; // 推拉门固定半扇盒（恒挡门洞一侧）
       colliderSlide?: Collider; // 推拉门动半扇盒（随开度滑移，让出另一侧）
+      /**
+       * 推拉门的**开向**：`+1` 让出局部 +x 半，`-1` 让出局部 -x 半。
+       * 动扇停在这一侧的对侧：关门时动扇在 `s·w/4`、固定扇在 `-s·w/4`，
+       * 全开时动扇滑到 `-s·w/4` 与固定扇重合，于是 `s` 那一半门洞被让出来。
+       */
+      /**
+       * 开向，**连续量** `∈ [-1, +1]`，不是布尔开关。
+       *
+       * 语义：`+N` 表示"两扇整体朝局部 −x 叠、让出 +x 半"，`−N` 反之，
+       * `0` 表示两扇正停在门洞正中（换向途中的过渡态）。
+       * 关门时固定扇在 `−s·w/4`、动扇在 `+s·w/4`；全开时动扇滑到 `−s·w/4`
+       * 与固定扇重合，于是 `s` 那一半门洞空出来。
+       *
+       * 为什么不是 `1 | -1`：开向要能**在门开着的时候改**（玩家从一侧走到另一侧，
+       * 门得跟着让开那一侧）。整数取反会让两扇瞬间跳 1.2m；做成连续量之后，
+       * 换向就是"两扇叠着从一侧滑到另一侧"——这是真实的推拉门动作，也不跳。
+       */
+      slideSide: number;
+      /** 开向的**目标值**（也只取 ±1）。`slideSide` 每帧朝它推进。 */
+      wantSide: number;
+      /** 是否按相机位置自动选择开向（阳台玻璃门用；fusuma 保持固定开向）。 */
+      autoSlideDir: boolean;
     }> = [];
+
+    /**
+     * 推拉门半扇的**局部中心 x**。`which`：0 = 固定半扇，1 = 动半扇。
+     *
+     * 门扇位置写的是 `leaf.position.x`（局部），碰撞盒要折成世界坐标再写盒的
+     * x 区间 —— **两套坐标系，但必须指同一个点**。"门开了、碰撞盒没跟上"这类
+     * 症状全部来自这两处各算各的：改一处、忘一处，画面和碰撞就分家。
+     * 所以两边都只从这里取值，物理上不可能再错开。
+     *
+     *   slideSide = +1 ⇒ 让出局部 +x 半；固定半扇停在 −w/4，动半扇关门时在 +w/4
+     *   current   从 0（闭合）到 w/2（动扇滑到与固定扇重合）
+     *
+     * 注意两者都是**连续量**，换向途中 `slideSide ∈ (−1, +1)` 会给出中间位置 ——
+     * 这正是"两扇叠着滑过去"所需要的，也让碰撞盒天然跟着走。
+     */
+    const slideLeafLocalX = (d: typeof doors[number], which: 0 | 1) =>
+      which === 0
+        ? -d.slideSide * d.width / 4
+        : d.slideSide * (d.width / 4 - d.current);
 
     // 第一人称门碰撞缓冲：渲染循环里复用，避免每帧 new 数组（GC 压力）
     const blockerBuf: Collider[] = [];
@@ -1436,21 +1479,21 @@ export function RoomScene() {
      * 包围盒走——户型一旦扩建，地面不会一侧贴墙、另一侧空出一块。
      */
     const districtArt = createDistrictArt(scene);
-    fpsColliders = fpsColliders.concat(districtArt.colliders);
-    /* 近景那一排（公寓正对面）单独挂描边并冻结。
-     *
-     * 街区整体是刻意不描边的（远景描边会在雾里变成网格，且 48 栋的壳太贵），
-     * 但只描最近这 4 栋就能把"隔着一条街的楼是纯色块、身后公寓有清晰线稿"
-     * 这个质感断点接上。必须在 createDistrictArt 内部合批之后做——描边要从
-     * 合并后的少数几个 mesh 上长出来，逐 mesh 描会退化成几千个壳。
-     */
-    outlineProp(districtArt.frontage);
-    freezeStatic(districtArt.frontage);
+    // boundary 是街区边界那圈不可见围墙（见 districtArt 里的说明）。它必须在这里
+    // 就并进 fpsColliders：下面的 buildNavWorld 吃的是同一份定稿表，导航与碰撞同源。
+    fpsColliders = fpsColliders.concat(districtArt.colliders, districtArt.boundary);
     const exteriorGround = buildExteriorGround();
     districtArt.prepare(exteriorGround);
     exteriorGround.position.set((B.x0 + B.x1) / 2, 0, (B.z0 + B.z1) / 2);
     scene.add(exteriorGround);
     freezeStatic(exteriorGround);
+    /* 小河两岸的堤岸：防汛墙 / 亲水步道 / 铸铁栏杆 / 路灯 / 行道树 / 下水的台阶平台
+     * （见 riverbank.ts）。与地面同一层、同一套世界绝对坐标，但**不进 FPS 碰撞** ——
+     * 玩家最北的可站立点是 WALK_BOUNDS.z0 = -78，离南岸还有 10m，走不到这里。 */
+    const riverbank = buildRiverbank();
+    districtArt.prepare(riverbank);
+    scene.add(riverbank);
+    freezeStatic(riverbank);
 
     /* ---------------- 近景街道层（室外层 Stage 2） ----------------
      *
@@ -1458,7 +1501,7 @@ export function RoomScene() {
      * ——户型扩建时街道不该跟着挪。整层走标准装配：合批 → 描边 → add →
      * 冻结；不进 FPS 碰撞（阳台栏杆拦着，玩家出不去）。
      */
-    const streetscape = buildStreetscape();
+    const streetscape = buildStreetscape(false); // West lot is now the sakura shopping street and shrine.
 
     // 合批前收集碰撞：合批会把子组合并进大 mesh、丢掉其 sceneCollideSkip 标记，
     // 且合并出的大 mesh 直接挂根下会被收成横跨整条街的巨型盒。这里先收，只对路灯
@@ -1495,6 +1538,27 @@ export function RoomScene() {
      * 这里只 add，不描边（门厅其他构件一律 noOutline，保持一致）。 */
     const aptAutoDoor = apartmentShell.autoDoor;
     scene.add(aptAutoDoor.group);
+
+    /* ---------------- 北侧孪生公寓（纯景观楼） ----------------
+     *
+     * 隔着 z=-19 那条街、在主角这栋的正北方再立一栋外观相同的公寓。
+     * 它走的是与主楼**完全同一条装配流水线**（prepare → merge → outline →
+     * add → freeze）——偏移已经由 buildApartmentTwin 写进 group.position.z，
+     * 合批会把顶点烘到 group 局部空间，所以偏移不会丢。
+     *
+     * 三处刻意不同（见 buildApartmentTwin 的注释）：
+     *   1. 不挂 autoDoor：那对门扇是挂在 shell 树外、每帧被门厅逻辑驱动的，
+     *      景观楼不需要，也不该为它多养一组逐帧对象；
+     *   2. 碰撞只给主体量一个盒（`apartmentTwin.boxes`），不复用 APT_WALL_BOXES；
+     *   3. 不进 apartmentLift / unitGroup：它没有 203，也不参与抬高。
+     */
+    const apartmentTwin = buildApartmentTwin();
+    fpsColliders = fpsColliders.concat(buildBoxColliders(apartmentTwin.boxes));
+    districtArt.prepare(apartmentTwin.group);
+    mergeByMaterial(apartmentTwin.group);
+    outlineProp(apartmentTwin.group);
+    scene.add(apartmentTwin.group);
+    freezeStatic(apartmentTwin.group);
     const apartmentLift=createApartmentLift(container,camera,fps);
     fpsColliders=fpsColliders.concat(apartmentLift.colliders);
     districtArt.prepare(apartmentLift.group);
@@ -1790,6 +1854,12 @@ export function RoomScene() {
                 },
             colliderFixed,
             colliderSlide,
+            slideSide: 1,
+            wantSide: 1,
+            /* 阳台玻璃门按相机位置选开向；fusuma（室内隔断）保持固定开向 ——
+             * 它在墙洞里、玩家两侧都可能进，但换了开向要重新核两侧的家具间距，
+             * 这一轮不动它。 */
+            autoSlideDir: it.kind === 'glassDoor',
           });
         }
         continue;
@@ -2154,6 +2224,49 @@ export function RoomScene() {
     (window as any).__ROOM__.doors = doors.map((d) => ({
       x: d.x, z: d.z, y0: d.y0, y1: d.y1, width: d.width, slide: d.slide,
     }));
+    /** 上面那份是**一次性快照**（纯数据、可序列化），门开着的时候它是过期的。
+     *
+     *  这里再挂一个「现读」入口，专门用于核账**会变的**那几个量：
+     *  `slideSide`/`wantSide`（开向，随相机连续推进）、`current`（开度）、以及两个半扇碰撞盒的
+     *  世界 x 区间。阳台玻璃门换向那轮，画面能看到门扇换边，但「碰撞盒有没有
+     *  跟着换边」只能这样量出来——门扇和碰撞盒是两套独立计算的数，它们必须同边。
+     *  每次调用重算一遍，不要放进渲染循环（会每帧造垃圾）。
+     *  用法：`__ROOM__.doorsLive().find(d => d.autoSlideDir)`。 */
+    /** 当前是不是第一人称。开向翻转只在第一人称下发生（观察者模式不走路），
+     *  核账时先看这个值，否则「开向没变」会被误判成逻辑错。 */
+    (window as any).__ROOM__.fpsMode = () => isFirstPerson;
+    (window as any).__ROOM__.doorsLive = () => doors.map((d) => ({
+      kind: d.slide ? 'slide' : 'hinge',
+      x: d.x, z: d.z, width: d.width,
+      // cosR/sinR 是门朝向（rot）折出的投影轴：开向判断与局部→世界都靠它。
+      // 它错了的话开向会**整体反掉** —— 那比"碰撞盒没跟上"更像真实症状。
+      cosR: d.cosR, sinR: d.sinR, alongX: d.alongX,
+      slideSide: d.slideSide, wantSide: d.wantSide,
+      autoSlideDir: d.autoSlideDir,
+      current: d.current,
+      leafX: d.leaf.position.x,
+      leaf2X: d.leaf2 ? d.leaf2.position.x : null,
+      fixedBoxX: d.colliderFixed ? [d.colliderFixed.min.x, d.colliderFixed.max.x] : null,
+      slideBoxX: d.colliderSlide ? [d.colliderSlide.min.x, d.colliderSlide.max.x] : null,
+    }));
+    /**
+     * 强制指定阳台门的开向（**只用于核账**）。
+     *
+     * 真实开向的路径是「开门那一瞬按站位采样一次」（见渲染循环里的 openerX 那段），
+     * 那要求先真的进第一人称 —— 而 headless 里 pointer lock 一起来，渲染循环就
+     * 把主线程占满，CDP 读不到后续帧。
+     * `slideSide` 的推进本身**不依赖第一人称**（见 sideRate 那段），所以拨一下
+     * `wantSide` 就能在观察者模式下把"两扇滑过去"整个过程量出来。
+     * 返回 false 表示没找到按相机选开向的门。
+     */
+    (window as any).__ROOM__.setDoorSide = (dir: number) => {
+      for (const d of doors) {
+        if (!d.autoSlideDir) continue;
+        d.wantSide = dir >= 0 ? 1 : -1;
+        return true;
+      }
+      return false;
+    };
 
     console.log('[room] 初始化完成, 进入渲染循环');
 
@@ -2233,7 +2346,7 @@ export function RoomScene() {
       agents[idx].setLayer('apt2');
 
       loader.load(
-        cfg.model,
+        apartmentAssetUrl(cfg.model),
         (gltf) => {
           if (!alive) {
             gltf.scene.traverse((o: any) => { o.geometry?.dispose?.(); o.material?.dispose?.(); });
@@ -2420,7 +2533,7 @@ export function RoomScene() {
       const elapsed = Math.min((now - lastT) / 1000, 0.25);
       lastT = now;
       clockT += elapsed;
-      districtArt.update(camera);
+      districtArt.update(camera,elapsed);
       renderer.info.reset();
 
       // 逻辑 tick（20Hz 固定步长）
@@ -2567,8 +2680,14 @@ export function RoomScene() {
         // 综合最近距离（reset manualOpen 用）
         const minDist = Math.min(agentMin, playerMin);
 
+        const sideBefore = d.slideSide;
         let wantOpen = false;
         let openVal = 0; // 期望开门量（带符号：平开门含甩向，推拉门为正 openOffset）
+        /* 开向的**采样点**：触发开门的那一帧，开门的人（玩家或 PetAgent）站在哪。
+         * 玩家按 F 时用相机位置，agent 穿门时用 agent 位置 —— 两者都在世界坐标，
+         * 折到门局部靠 (cosR, sinR) 投影，而不是直接比世界 x（门朝向一变就错）。 */
+        let openerX: number | null = null;
+        let openerZ = 0;
 
         // PetAgent 自动开关门：两种模式都生效（修复"进第一人称后角色走到门前门不开"）。
         // 路径穿过门洞「且」角色已靠近才开——与观察者模式原逻辑一致。第一人称模式下这一支
@@ -2581,6 +2700,7 @@ export function RoomScene() {
             if (r.hit) {
               wantOpen = true;
               openVal = d.slide ? d.openOffset : d.openAngle;
+              openerX = a.pos.x; openerZ = a.pos.z;
               break;
             }
           }
@@ -2592,11 +2712,13 @@ export function RoomScene() {
                 if (Math.abs(a.pos.z - d.z) < 0.45 && Math.abs(a.pos.x - d.x) < half) {
                   wantOpen = true;
                   openVal = d.slide ? d.openOffset : d.openAngle;
+                  openerX = a.pos.x; openerZ = a.pos.z;
                 }
               } else {
                 if (Math.abs(a.pos.x - d.x) < 0.45 && Math.abs(a.pos.z - d.z) < half) {
                   wantOpen = true;
                   openVal = d.slide ? d.openOffset : d.openAngle;
+                  openerX = a.pos.x; openerZ = a.pos.z;
                 }
               }
             }
@@ -2608,8 +2730,38 @@ export function RoomScene() {
         if (isFirstPerson && d.manualOpen) {
           wantOpen = true;
           openVal = d.slide ? d.openOffset : d.openAngle;
+          // 按 F 那一瞬间玩家站哪边 —— 这就是开向的唯一依据
+          openerX = camera.position.x; openerZ = camera.position.z;
           if (minDist > DOOR_NEAR * 1.8) d.manualOpen = false;
         }
+
+        /* ---- 推拉门开向：**开门瞬间采样一次，之后锁死** ----
+         *
+         * 需求原文是"站东侧开门就开东侧门，只看按下 F 那瞬间的站位，后续移动不改变
+         * 门打开的位置"。所以这里只在**门从完全关闭转为开启**的那一帧采样：
+         *
+         *   `d.current < 0.05`  门基本关着（已经开着的门不再重定，否则玩家在门洞
+         *                       里来回走会把两扇门来回甩）。阈值不取 0 是因为门刚关
+         *                       到还剩几个毫米时按 F 也该算"重新开一次"
+         *   `wantOpen`          这一帧确实要开门
+         *   `openerX != null`   拿到触发者的位置（没有就不动，保持上次的开向）
+         *
+         * 投影用的是门局部轴：`局部 +x 轴的世界方向 = (cosR, 0, −sinR)`，
+         * 点乘得到"触发者在门的哪一半"。|relX| ≤ 0.05 视为站在门正中，两侧都走得通，
+         * 保持原选择即可 —— 这一条只是消掉"卡在中线上符号乱跳"的可能。
+         *
+         * 采样之后解算成 `wantSide`，再由下面的 `slideRate` 把 `slideSide` 平滑推过去：
+         * 两扇叠着从一侧滑到另一侧，约 0.45s。**不是**整数取反那种 1.2m 瞬移。 */
+        if (d.autoSlideDir && wantOpen && openerX !== null && d.current < 0.05) {
+          const relX = (openerX - d.x) * d.cosR + (openerZ - d.z) * (-d.sinR);
+          if (Math.abs(relX) > 0.05) d.wantSide = relX > 0 ? 1 : -1;
+        }
+        // 推进不依赖 isFirstPerson：退出第一人称后也要把没走完的换向走完，
+        // 否则门会卡在半路上。
+        const sideRate = 4.5;   // 单位/秒：全程 2 个单位，约 0.45s
+        if (d.slideSide < d.wantSide) d.slideSide = Math.min(d.wantSide, d.slideSide + sideRate * elapsed);
+        else if (d.slideSide > d.wantSide) d.slideSide = Math.max(d.wantSide, d.slideSide - sideRate * elapsed);
+        const sideFlipped = Math.abs(d.slideSide - sideBefore) > 1e-4;
 
         // 宽限：角色刚穿过门、wantOpen 立刻变 false 时，保持开门 DOOR_HOLD 秒，让其走远再关
         if (wantOpen) {
@@ -2627,14 +2779,17 @@ export function RoomScene() {
         } else {
           d.current = Math.min(target, d.current + rate * elapsed);
         }
-        // 只有角度/位移实际变化才刷新矩阵——门静止时跳过 updateMatrixWorld 的整棵子树重算
-        if (Math.abs(d.current - before) > 1e-4) {
+        // 只有角度/位移实际变化才刷新矩阵——门静止时跳过 updateMatrixWorld 的整棵子树重算。
+        // `sideFlipped` 也要进来：换向途中 `current` 没变，只有 `slideSide` 在动。
+        if (Math.abs(d.current - before) > 1e-4 || sideFlipped) {
           doorMoved = true;
           if (d.slide) {
-            // 推拉门（fusuma）：只把其中一扇推到与另一扇重合——左半扇固定不动，
-            // 右半扇（leaf2）沿局部 X 向左滑 width/2 与左半扇重叠，右半门洞因此打开。
-            d.leaf.position.x = -d.width / 4;            // 固定半扇：始终盖住左半门洞
-            if (d.leaf2) d.leaf2.position.x = d.width / 4 - d.current; // 动半扇：current=0 在右半，current=width/2 与左半重合
+            /* 推拉门：动扇滑到与固定扇重合，让出另一侧门洞。
+             * 由 `slideSide` 决定哪一侧被让出（+1 让 +x 半，−1 让 −x 半）：
+             *   关门  固定扇 −s·w/4、动扇 +s·w/4，两扇并拢盖满门洞
+             *   全开  动扇滑到 −s·w/4 与固定扇重合 ⇒ s 那一半空出来 */
+            d.leaf.position.x = slideLeafLocalX(d, 0);
+            if (d.leaf2) d.leaf2.position.x = slideLeafLocalX(d, 1);
             d.leaf.updateMatrix();
             d.leaf.updateMatrixWorld(true);
             if (d.leaf2) {
@@ -2695,9 +2850,24 @@ export function RoomScene() {
           if (d.slide) {
             // 推拉门：固定半扇恒挡 + 动半扇随开度滑移，二者并集即「仍被遮挡的部分」。
             // 不再用整门盒按阈值全放/全挡——否则开门时两半扇一起放行，固定半扇那侧也被穿过。
-            if (d.colliderFixed) blockerBuf.push(d.colliderFixed);
+            // 两半扇的局部中心都由 `slideSide` 定（开向会随相机连续推进），所以每帧都要重写，
+            // 不能只依赖构建时算的那个位置。
+            if (d.colliderFixed) {
+              // 局部中心与门扇同源（`slideLeafLocalX`），只差一次局部→世界投影
+              const off = slideLeafLocalX(d, 0);
+              if (d.alongX) {
+                const cx = d.x + d.cosR * off;
+                d.colliderFixed.min.x = cx - d.width / 4;
+                d.colliderFixed.max.x = cx + d.width / 4;
+              } else {
+                const cz = d.z - d.sinR * off;
+                d.colliderFixed.min.z = cz - d.width / 4;
+                d.colliderFixed.max.z = cz + d.width / 4;
+              }
+              blockerBuf.push(d.colliderFixed);
+            }
             if (d.colliderSlide) {
-              const off = d.width / 4 - d.current; // 动半扇局部中心 x：关门=+w/4（右半），全开=−w/4（与固定半扇重合）
+              const off = slideLeafLocalX(d, 1);
               if (d.alongX) {
                 const cx = d.x + d.cosR * off;
                 d.colliderSlide.min.x = cx - d.width / 4;
@@ -2729,6 +2899,7 @@ export function RoomScene() {
         }
         /* 电梯门：常驻闭合，只在合拢到位时挡人（盒由 apartmentLift.update 每帧重写） */
         for (const c of apartmentLift.doorBlockers) blockerBuf.push(c);
+        for (const c of districtArt.dynamicColliders) blockerBuf.push(c);
         // 静态碰撞体拷一次就够（装配完不再变），每帧只重写尾部那几个门扇盒——
         // 不再每帧 concat 出一个 700+ 元素的新数组。见 fpsColliderBuf 的说明。
         fpsColliderBuf.length = FPS_STATIC_COLLIDER_N;

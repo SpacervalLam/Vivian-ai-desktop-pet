@@ -324,11 +324,16 @@ pub fn get_persona_evolution(
 ) -> Result<Value, String> {
     let brain = state.get_character(character_id.as_deref())?.brain;
     let persona = &brain.persona;
+    persona.reconcile_evolution(&brain.memory);
     let entries = persona
         .evolution_entries()
         .into_iter()
-        .map(|e| serde_json::to_value(e).map_err(|e| e.to_string()))
-        .collect::<Result<Vec<_>, _>>()?;
+        .map(|e| {
+            let mut value = serde_json::to_value(&e).map_err(|e| e.to_string())?;
+            value["active"] = serde_json::json!(e.active());
+            Ok(value)
+        })
+        .collect::<Result<Vec<_>, String>>()?;
     // 候选区：未达跨轨迹支持门槛的酝酿中调整，供前端展示成长过程
     let candidates = persona
         .evolution_candidates()
@@ -337,6 +342,7 @@ pub fn get_persona_evolution(
         .collect::<Result<Vec<_>, _>>()?;
     Ok(serde_json::json!({
         "entries": entries,
+        "history": persona.evolution_history(),
         "candidates": candidates,
         "is_empty": persona.is_evolution_empty(),
         "last_update": persona.evolution_last_update(),

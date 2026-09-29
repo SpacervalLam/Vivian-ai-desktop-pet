@@ -537,6 +537,9 @@ pub struct BaseConfig {
     /// 打开 3D 公寓窗口快捷键
     #[serde(default = "default_shortcut_room")]
     pub shortcut_room: String,
+    /// 已安装 3D 公寓插件的运行时开关。
+    #[serde(default = "default_true")]
+    pub apartment_enabled: bool,
     /// 开机自动启动（写入当前用户 Windows 启动项）
     #[serde(default = "default_false")]
     pub auto_start: bool,
@@ -1585,6 +1588,7 @@ impl Default for AppConfig {
                 shortcut_settings: default_shortcut_settings(),
                 shortcut_memory: default_shortcut_memory(),
                 shortcut_room: default_shortcut_room(),
+                apartment_enabled: true,
                 auto_start: false,
                 user_avatar_path: None,
             },
@@ -1628,6 +1632,7 @@ impl Default for AppConfig {
                     // 工作智能体专属任务类型：与陪伴对话的 reasoning 分开，
                     // 让"按任务类型分流"能区分二者（见 TASK_WORK_AGENT 的说明）
                     crate::providers::base::TASK_WORK_AGENT,
+                    "text_rewrite",
                     "diary",
                     "memory",
                     "consolidation",

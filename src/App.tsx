@@ -753,6 +753,11 @@ export default function App() {
   const MOOD_FOLLOW_ENERGY_LOW = 35;
   const MOOD_FOLLOW_FOCUS_HIGH = 60;
   const MOOD_FOLLOW_FOCUS_LOW = 35;
+  /** 桌宠**开始离场**（退角落 / 离线）时要执行的钩子 —— 目前用于收起气泡。
+   *
+   *  用 ref 传给 useHiding：它的 hide 闭包在 mount 时就固定了（依赖表只有 petRef），
+   *  直接传函数会永远拿到首次渲染的旧闭包（同 requestRestoreRef 等既有惯例）。 */
+  const petHideHookRef = useRef<(() => void) | null>(null);
   const {
     hiddenCorner,
     hideReason,
@@ -761,7 +766,7 @@ export default function App() {
     restoreFromSleep,
     hideForOffline,
     restoreFromOffline,
-  } = useHiding(petRef, modelReady, smartPositioningEnabled);
+  } = useHiding(petRef, modelReady, smartPositioningEnabled, petHideHookRef);
   useSmartPositioning(petRef, modelReady, smartPositioningEnabled);
 
   // 活动追踪 refs
@@ -1293,6 +1298,13 @@ export default function App() {
       shadow: false,
       focus: false,
       visible: false,
+      // 气泡窗口是桌宠窗口的**被拥有窗口**（Windows: owner，macOS: child window，
+      // Linux: transient_for）：桌宠窗口的 label 就是 character_id。
+      // 这样气泡与桌宠处在相邻层级 —— OS 保证被拥有窗口永远紧贴在 owner 之上，
+      // 不会出现桌宠被重新聚焦后盖住气泡、或气泡漂到桌宠下面去的顺序抖动。
+      // （「桌宠隐藏时气泡也不显示」由 useHiding 的 onPetHide 钩子显式完成，见
+      //   hideBubbleWithPet —— 不依赖各平台的 owner 隐藏语义。）
+      parent: getCharacterId() ?? undefined,
     });
     // 等待 BubbleWindow 挂载并发出 bubble:ready（由 useEffect 监听）
   }, []);
@@ -1436,6 +1448,23 @@ export default function App() {
       });
     }
   }, [settledBubbles, currentBubble]);
+
+  /** 桌宠离场时气泡必须一起消失。
+   *
+   *  气泡窗口与桌宠是相邻层级（气泡窗口以桌宠窗口为 owner，见 ensureBubbleWindow），
+   *  但「气泡什么时候消失」仍由 currentBubble 上的定时器决定，而那个定时器跑在桌宠窗口
+   *  自己的 webview 里：桌宠一隐藏 / 被全屏应用遮挡，Chromium 就会给它降频甚至挂起，
+   *  计时到点也没人执行 —— 气泡窗口（独立 topmost）于是永久挂在屏幕上收不回来。
+   *  所以桌宠开始离场的这一刻主动 closeAll()：状态与窗口一起归零；桌宠回来时也不会被
+   *  残留的 currentBubble 带回来（恢复后新的气泡仍走 null → 非空的首显路径）。
+   *
+   *  只清状态、不直接 hide 窗口：窗口的显隐统一由下方 currentBubble 的 effect 负责。 */
+  const hideBubbleWithPet = useCallback(() => {
+    BubbleController.closeAll();
+  }, []);
+  useEffect(() => {
+    petHideHookRef.current = hideBubbleWithPet;
+  }, [hideBubbleWithPet]);
 
   // 主窗口移动时重新定位气泡窗口
   useEffect(() => {
@@ -2377,7 +2406,7 @@ export default function App() {
             && crossStreamIdRef.current !== event.payload.stream_id) return;
           if (characterId === event.payload.target_id) {
             TtsStreamQueue.resetBuffer();
-            BubbleController.hideBubble();
+            BubbleController.closeAll();
             crossStreamTextRef.current = '';
             crossStreamIdRef.current = '';
             crossStreamRoleRef.current = '';

@@ -173,6 +173,30 @@
       "loop": false,
       "hold": true,
       "durations": [120,120,130,140,150,160,160,160,150,150,160,170,170,160,150,150,160,160,150,150,140,140,140,140]
+    },
+    {
+      "name": "tend-out",
+      "label": "浇花-起身",
+      "category": "state",
+      "promptable": true,
+      "sheet": "/chibi/motion/{character}/{character}-tend-out-sheet.webp",
+      "cols": 4,
+      "rows": 3,
+      "frames": 12,
+      "loop": false,
+      "durations": [80,90,100,110,110,110,100,100,90,85,80,80]
+    },
+    {
+      "name": "wake",
+      "label": "睡醒起身",
+      "category": "state",
+      "promptable": true,
+      "sheet": "/chibi/motion/{character}/{character}-wake-sheet.webp",
+      "cols": 4,
+      "rows": 3,
+      "frames": 12,
+      "loop": false,
+      "durations": [80,90,100,110,110,110,100,100,90,85,80,80]
     }
   ],
   "expression_aliases": {

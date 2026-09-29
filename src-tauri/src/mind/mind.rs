@@ -24,7 +24,7 @@ use super::working_memory::WorkingMemory;
 
 /// 内心 OS 累积缓冲区上限。
 ///
-/// 60s 节流的 current_thought 合成下约等于 22 分钟滑动窗口。
+/// Event-driven current_thought synthesis keeps this buffer bounded.
 /// 超出时丢弃最旧条目，防止 long-idle 场景下 token 爆炸。
 const MAX_ACCUMULATED_THOUGHTS: usize = 6;
 
@@ -74,7 +74,7 @@ pub struct Mind {
     /// 介于 WorldSnapshot（外部）和 WorkingMemory（瞬时想法）之间的中间层，
     /// 记录活动类型 + 持续时间 + 最近相关事件，作为可持续感知的"正在做什么"上下文。
     pub current_activity: Arc<CurrentActivityTracker>,
-    /// LLM 合成的"当前想法"缓存（混合策略：60s 节流 + 事件驱动刷新）
+    /// LLM 合成的"当前想法"缓存（事件驱动刷新 + 低频兜底）
     ///
     /// None 表示尚未完成首次 LLM 合成（冷启动时由模板 fallback 填充）。
     pub current_thought: Arc<RwLock<Option<String>>>,
@@ -401,6 +401,12 @@ impl Mind {
     pub fn consume_thought_refresh(&self) -> bool {
         self.thought_refresh_requested
             .swap(false, std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Inspect without consuming: a refresh delayed by rate limiting must remain pending.
+    pub fn thought_refresh_requested(&self) -> bool {
+        self.thought_refresh_requested
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// 当前念头序列化（prompt 注入用）

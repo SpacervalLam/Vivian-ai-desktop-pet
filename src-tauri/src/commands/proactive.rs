@@ -13,42 +13,33 @@ use crate::memory::types::MemoryType;
 use crate::proactive::{OnlineCompanion, TickContext};
 use crate::state::AppState;
 use crate::types::response::ChatMessage;
+use crate::tools::builtin::send_chat_message_tool::deliver_chat_message;
 
-/// Triggering a greeting and selecting its transport are separate decisions.
-/// The decision route is optional; hard context and a deterministic fallback
-/// keep delivery stable when the route is unconfigured or unavailable.
-async fn choose_proactive_channel(
-    action: &crate::proactive::ProactiveAction,
-    ctx: &TickContext,
-    chat_visible: bool,
-    router: &crate::providers::router::ModelRouter,
-    char_id: &str,
-) -> crate::proactive::DeliveryChannel {
-    use crate::proactive::{ContentType, DeliveryChannel};
-    if !ctx.user_present || chat_visible || matches!(action.content_type, ContentType::Share | ContentType::Info | ContentType::Reminder) {
-        return DeliveryChannel::ChatWindow;
+fn retain_topic_channel(char_id: &str, messages: &mut Vec<crate::proactive::ProactiveAction>) {
+    use crate::proactive::DeliveryChannel;
+    let mut channel = crate::conversation::CONVERSATION_MANAGER.user_channel(char_id)
+        .map(|c| if c == "wechat" { DeliveryChannel::ChatWindow } else { DeliveryChannel::Bubble });
+    messages.retain(|a| {
+        let expected = channel.get_or_insert(a.delivery_channel);
+        // A user may have changed channels while generation was in flight. Drop stale prose;
+        // never deliver it in a different medium or switch the user's current topic back.
+        *expected == a.delivery_channel
+    });
+}
+
+fn remember_delivered_channel(char_id: &str, action: &crate::proactive::ProactiveAction) {
+    let manager = &crate::conversation::CONVERSATION_MANAGER;
+    if manager.is_user_session_closed(char_id) {
+        manager.force_new_session("user", char_id, &action.content);
     }
-    let choice = router.choose_simple(
-        json!({
-            "trigger": action.trigger,
-            "message": action.content,
-            "user_present": ctx.user_present,
-            "idle_seconds": ctx.idle_seconds,
-            "active_window": ctx.active_window,
-            "is_user_chatting": ctx.is_user_chatting,
-            "chat_visible": chat_visible,
-        }),
-        "Choose the natural channel after the character has decided to speak. direct means a nearby, brief desktop remark. wechat means a message meant to start a conversation or await a reply. Favor direct when the user is at the desktop and the remark is casual; avoid forcing every greeting into chat.",
-        &[("direct", "Brief spoken desktop pet bubble while the user is here"),
-          ("wechat", "Private chat message needing attention or a reply")],
-        char_id,
-    ).await;
-    match choice.as_deref() {
-        Some("wechat") => DeliveryChannel::ChatWindow,
-        Some("direct") => DeliveryChannel::Bubble,
-        _ if action.content.contains('?') || action.content.contains('？') => DeliveryChannel::ChatWindow,
-        _ => DeliveryChannel::Bubble,
-    }
+    let channel = if action.delivery_channel == crate::proactive::DeliveryChannel::ChatWindow { "wechat" } else { "direct" };
+    manager.set_user_channel(char_id, channel);
+}
+
+fn deliverable_proactive_action(action: &crate::proactive::ProactiveAction) -> bool {
+    !action.content.trim().is_empty()
+        && (!matches!(action.content_type, crate::proactive::ContentType::Share)
+            || action.value_score.unwrap_or(0.0) >= crate::proactive::SHARE_VALUE_THRESHOLD)
 }
 
 /// 跨角色发言协调：记录每个角色最近一次主动发言的时间戳。
@@ -1269,6 +1260,28 @@ pub async fn proactive_tick(
         SPEECH_RESERVATION.write().remove(&char_id);
     }
 
+    // 主动行为按 delivery_channel 派发到对应渠道
+    // - Bubble：写入 dialogue channel="proactive"（桌宠气泡路径，被 wechat 过滤排除）
+    // - ChatWindow：写入 dialogue channel="wechat" + emit chat:assistant_message（前端 ChatWindow 立即追加气泡）
+    // Keep the medium selected before generation.
+    // Share 类强制 value_score 门槛，未达标跳过发送（待分享池后续阶段实现）
+
+    user_messages.retain(deliverable_proactive_action);
+    retain_topic_channel(&char_id, &mut user_messages);
+    // Delivery verifies the topic channel; it never rewrites the chosen transport.
+
+    // Text messages do not compete with speech playback. Defer only spoken bubbles.
+    if state.playback_gate.is_playing() {
+        let mut deferred = Vec::new();
+        user_messages.retain(|action| {
+            if action.delivery_channel == crate::proactive::DeliveryChannel::Bubble {
+                deferred.push(action.clone());
+                false
+            } else { true }
+        });
+        if !deferred.is_empty() { brain.proactive.requeue_messages(deferred); }
+    }
+    produced = !user_messages.is_empty() || !cross_messages.is_empty();
     // 发言成功：更新跨角色发言时间戳，广播事件让其他角色感知
     // 跨角色对话的 LAST_SPOKEN 更新在 CROSS_CHARACTER_BUS.send 成功后单独处理
     if produced && !user_messages.is_empty() {
@@ -1300,108 +1313,15 @@ pub async fn proactive_tick(
         persist_arbitration_state();
     }
 
-    // 主动行为按 delivery_channel 派发到对应渠道
-    // - Bubble：写入 dialogue channel="proactive"（桌宠气泡路径，被 wechat 过滤排除）
-    // - ChatWindow：写入 dialogue channel="wechat" + emit chat:assistant_message（前端 ChatWindow 立即追加气泡）
-    // 用户不在场时，全部强制改为 ChatWindow（见下方覆盖逻辑），避免气泡无人看到
-    // Share 类强制 value_score 门槛，未达标跳过发送（待分享池后续阶段实现）
-
-    // 播放边界感知：TTS 正在播放时跳过本轮投递，避免音频冲突
-    // 消息已在 pending_messages 中，下个 tick 会重新 drain
-    if produced && !user_messages.is_empty() && state.playback_gate.is_playing() {
-        tracing::info!(
-            "[Proactive:{}] TTS 播放中，推迟主动消息投递（{} 条）",
-            char_id,
-            user_messages.len()
-        );
-        brain.proactive.requeue_messages(user_messages.clone());
-        return Ok(json!({
-            "produced": false,
-            "messages": [],
-            "skipped": true,
-            "reason": "tts_playing",
-        }));
-    }
-    // 触发与内容生成已经完成；现在根据实际场景统一选择投递渠道。
-    let chat_visible = app.get_webview_window("chat")
-        .and_then(|win| win.is_visible().ok()).unwrap_or(false);
-    for action in &mut user_messages {
-        action.delivery_channel = choose_proactive_channel(
-            action, &ctx, chat_visible, &brain.router, &char_id,
-        ).await;
-    }
-
     for action in &user_messages {
-        if matches!(action.content_type, crate::proactive::ContentType::Share) {
-            let score = action.value_score.unwrap_or(0.0);
-            if score < crate::proactive::SHARE_VALUE_THRESHOLD {
-                tracing::info!(
-                    "[Proactive:{}] Share 类消息 value_score={:.2} < {:.2}, 跳过发送: trigger={}",
-                    char_id,
-                    score,
-                    crate::proactive::SHARE_VALUE_THRESHOLD,
-                    action.trigger
-                );
-                continue;
-            }
-        }
-
-        if action.content.trim().is_empty() {
-            tracing::info!(
-                "[Proactive:{}] 空文本消息，跳过发送: trigger={}",
-                char_id,
-                action.trigger
-            );
-            continue;
-        }
-
+        remember_delivered_channel(&char_id, action);
         let clean_content = crate::utils::strip_markdown_syntax(&action.content);
-        let channel_str = match action.delivery_channel {
-            crate::proactive::DeliveryChannel::Bubble => "proactive",
-            crate::proactive::DeliveryChannel::ChatWindow => "wechat",
-        };
-        let mut m = ChatMessage::assistant(&clean_content);
-        m.meta = Some(MessageMeta::new(MessageSource::Assistant).with_channel(channel_str));
-        brain.dialogue.add_message(m);
-
-        // ChatWindow 渠道额外 emit chat:assistant_message，让前端 ChatWindow 立即追加气泡
-        // 复用现有事件（todo_tools.rs 已用作 Scheduler 主动推消息到 ChatWindow 的入口）
-        if matches!(action.delivery_channel, crate::proactive::DeliveryChannel::ChatWindow) {
-            let _ = app.emit(
-                "chat:assistant_message",
-                json!({
-                    "character_id": &char_id,
-                    "content": &clean_content,
-                    "channel": "wechat",
-                }),
-            );
-
-            // 若 chat 窗口（微信主界面）未可见，emit 消息横幅提示用户
-            let need_banner = match app.get_webview_window("chat") {
-                Some(win) => !win.is_visible().ok().unwrap_or(false),
-                None => true,
-            };
-            if need_banner {
-                let preview: String = clean_content.chars().take(60).collect();
-                // 走统一出口：横幅窗口空闲时被冻结，emit 前需先解冻
-                crate::commands::window::emit_message_banner(
-                    &app,
-                    json!({
-                        "character_id": &char_id,
-                        "preview": preview,
-                        "kind": "proactive",
-                        "timestamp": chrono::Local::now().timestamp() as f64,
-                    }),
-                );
-                // 同步压入远程通知队列，供手机端 toast 轮询展示
-                crate::remote::push_toast(
-                    "proactive",
-                    "智能体消息",
-                    &preview,
-                    &char_id,
-                    json!({ "kind": "proactive" }),
-                );
-            }
+        if action.delivery_channel == crate::proactive::DeliveryChannel::ChatWindow {
+            deliver_chat_message(&app, &char_id, &clean_content)?;
+        } else {
+            let mut m = ChatMessage::assistant(&clean_content);
+            m.meta = Some(MessageMeta::new(MessageSource::Assistant).with_channel("proactive"));
+            brain.dialogue.add_message(m);
         }
     }
 
@@ -1646,40 +1566,19 @@ pub async fn drain_proactive_messages(
 ) -> Result<Value, String> {
     let brain = state.get_character(character_id.as_deref())?.brain;
     let mut messages = brain.drain_proactive_messages();
-    let idle_seconds = crate::utils::get_system_idle_seconds().unwrap_or(0.0);
-    let ctx = TickContext {
-        idle_seconds,
-        user_present: idle_seconds < 300.0,
-        ..TickContext::default()
-    };
-    let chat_visible = app.get_webview_window("chat")
-        .and_then(|win| win.is_visible().ok()).unwrap_or(false);
-    for action in &mut messages {
-        action.delivery_channel = choose_proactive_channel(
-            action, &ctx, chat_visible, &brain.router, &brain.char_id,
-        ).await;
-    }
-
-    // 按 delivery_channel 写入对话历史
-    // - Bubble → channel="proactive"（被 wechat 过滤排除，桌宠气泡路径）
-    // - ChatWindow → channel="wechat"（前端 ChatWindow refreshHistory 拉取时显示）
+    messages.retain(deliverable_proactive_action);
+    retain_topic_channel(&brain.char_id, &mut messages);
+    // Alternate drain must have exactly the same realtime/private-history delivery contract.
     for action in &messages {
-        if action.content.trim().is_empty() {
-            tracing::info!(
-                "[Proactive:{}] drain 空文本消息，跳过: trigger={}",
-                brain.char_id,
-                action.trigger
-            );
-            continue;
-        }
-        let channel_str = match action.delivery_channel {
-            crate::proactive::DeliveryChannel::Bubble => "proactive",
-            crate::proactive::DeliveryChannel::ChatWindow => "wechat",
-        };
+        remember_delivered_channel(&brain.char_id, action);
         let clean_content = crate::utils::strip_markdown_syntax(&action.content);
-        let mut m = ChatMessage::assistant(&clean_content);
-        m.meta = Some(MessageMeta::new(MessageSource::Assistant).with_channel(channel_str));
-        brain.dialogue.add_message(m);
+        if action.delivery_channel == crate::proactive::DeliveryChannel::ChatWindow {
+            deliver_chat_message(&app, &brain.char_id, &clean_content)?;
+        } else {
+            let mut m = ChatMessage::assistant(&clean_content);
+            m.meta = Some(MessageMeta::new(MessageSource::Assistant).with_channel("proactive"));
+            brain.dialogue.add_message(m);
+        }
     }
 
     // 主动消息存入记忆系统
@@ -1858,4 +1757,28 @@ async fn maybe_mark_open_loop(
     brain: &crate::brain::Brain,
 ) {
     crate::conversation::maybe_mark_open_loop(conv, &brain.memory, &brain.router).await;
+}
+
+#[cfg(test)]
+mod topic_transport_tests {
+    use super::*;
+    use crate::proactive::{DeliveryChannel, ProactiveAction, ProactiveTrigger};
+    #[test]
+    fn queued_text_cannot_switch_a_spoken_topic() {
+        let id = "channel-queue-test";
+        let manager = &crate::conversation::CONVERSATION_MANAGER;
+        manager.force_new_session("user", id, "same topic");
+        manager.set_user_channel(id, "direct");
+        let spoken = ProactiveAction::from_trigger(ProactiveTrigger::Spontaneous, "spoken".into(), 0.0);
+        let mut text = spoken.clone();
+        text.delivery_channel = DeliveryChannel::ChatWindow;
+        let mut actions = vec![text.clone(), spoken];
+        retain_topic_channel(id, &mut actions);
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].delivery_channel, DeliveryChannel::Bubble);
+        manager.close_pair_with_reason("user", id, crate::conversation::CloseReason::Natural);
+        let mut new_topic = vec![text];
+        retain_topic_channel(id, &mut new_topic);
+        assert_eq!(new_topic.len(), 1);
+    }
 }

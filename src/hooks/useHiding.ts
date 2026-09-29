@@ -113,11 +113,17 @@ export interface UseHidingResult {
  * @param modelReady 模型是否就绪
  * @param fullscreenHideEnabled 智能避让总开关；为 false 时全屏应用触发角落隐藏的功能不生效
  *   （sleep/offline 隐藏独立于此开关，仍按在场状态切换）
+ * @param onPetHideRef 桌宠**开始离场**那一刻的回调（退角落 / 离线 hide_window 都会触发）。
+ *   依附于桌宠的窗口（气泡等）要在这里一起收起：它们各自的关闭计时跑在桌宠窗口自己的
+ *   webview 里，桌宠一隐藏/被遮挡就会被 Chromium 降频甚至挂起，计时到点也没人执行。
+ *   用 ref 传而不是直接传函数——本 hook 的 hide 闭包在 mount 时固定（依赖表只有 petRef），
+ *   直接传会永远拿到首次渲染的旧闭包。
  */
 export function useHiding(
   petRef: RefObject<ChibiPetCanvasHandle | null>,
   modelReady: boolean,
   fullscreenHideEnabled: boolean,
+  onPetHideRef?: RefObject<(() => void) | null>,
 ): UseHidingResult {
   /** 当前是否处于隐藏状态（任一原因） */
   const isHiddenRef = useRef(false);
@@ -210,6 +216,9 @@ export function useHiding(
       if (!modelReadyRef.current || !petRef.current) return;
       inFlightRef.current = true;
       positioningCoordinator.fullscreenInFlight = true;
+      // 桌宠要离场了：依附它的气泡一并收起（动画开始前就收，避免气泡被
+      // onMoved 的重定位逻辑一路拖到屏幕角落）
+      onPetHideRef?.current?.();
       // 取消上一个尚未完成的动画，避免位置竞争
       if (cancelPosAnim) { cancelPosAnim(); cancelPosAnim = null; }
       const win = getCurrentWindow();
@@ -356,6 +365,8 @@ export function useHiding(
       positioningCoordinator.fullscreenInFlight = true;
       // 同步置 inFlightRef，防止全屏轮询触发 doHide/doRestore 与本动画并发 set_window_position
       inFlightRef.current = true;
+      // 桌宠要离场了：依附它的气泡一并收起（下坠动画开始前就收）
+      onPetHideRef?.current?.();
       // 取消上一个尚未完成的动画，避免位置竞争
       if (cancelPosAnim) { cancelPosAnim(); cancelPosAnim = null; }
 

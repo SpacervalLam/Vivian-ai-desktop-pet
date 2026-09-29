@@ -279,15 +279,6 @@ pub fn run() {
             commands::memory::get_memories,
             commands::memory::get_graph_timeline,
             commands::memory::get_memories_range,
-            commands::memory::add_memory,
-            commands::memory::delete_memory,
-            commands::memory::hard_delete_memory,
-            commands::memory::restore_memory,
-            commands::memory::list_recycle_bin,
-            commands::memory::purge_recycle_entry,
-            commands::memory::clear_recycle_bin,
-            commands::memory::purge_expired_recycle_bin,
-            commands::memory::clear_all_memories,
             commands::memory::get_memory_summary,
             commands::memory::search_memories,
             commands::memory::get_memories_all,
@@ -465,6 +456,7 @@ pub fn run() {
             commands::tasks::get_agent_task,
             commands::tasks::cancel_agent_task,
             commands::plugins::list_plugins,
+            commands::apartment::apartment_plugin_status,
             commands::plugins::plugin_paths,
             commands::plugins::plugin_diagnostics,
             commands::plugins::list_skills,
@@ -700,6 +692,7 @@ pub fn run() {
                 crate::network::web::set_app_handle(app.handle().clone());
                 crate::tools::builtin::share_link_tool::set_app_handle(app.handle().clone());
                 crate::tools::builtin::send_image_tool::set_app_handle(app.handle().clone());
+                crate::tools::builtin::send_chat_message_tool::set_app_handle(app.handle().clone());
                 crate::tools::builtin::show_widget_tool::set_app_handle(app.handle().clone());
                 crate::tools::builtin::notebook_tools::set_app_handle(app.handle().clone());
                 crate::tools::builtin::weather_tools::set_app_handle(app.handle().clone());

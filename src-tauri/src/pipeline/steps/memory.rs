@@ -481,8 +481,9 @@ impl Runnable for MemoryRetrievalStep {
         let now = current_timestamp();
         let mut memory_parts: Vec<String> = Vec::new();
         let mut memory_details: Vec<serde_json::Value> = Vec::new();
-        for mem in &filtered_items {
-            let content = crate::utils::truncate_chars(&mem.content, 180);
+        for (index, mem) in filtered_items.iter().enumerate() {
+            // Give the strongest two episodes room for context, while retaining the total budget.
+            let content = crate::utils::truncate_chars(&mem.content, if index < 2 { 800 } else { 180 });
             // 如果内容已有 [X says to Y] 说话者前缀，则不再额外添加 "User: "/"AI: " 标签
             let (_, has_spk_prefix, _) = parse_any_speaker_prefix(&content);
             let has_speaker_prefix = has_spk_prefix.is_some();
@@ -907,29 +908,22 @@ impl Runnable for UserMemorySavingRunnable {
                 "perspective": "speaker",
                 "knowledge_source": if is_broadcast { "broadcast" } else { "direct" },
             });
-            let ai_meta = serde_json::json!({
-                "channel": channel,
-                "speaker": char_id,
-                "listener": if is_broadcast { "all" } else { "user" },
-                "perspective": "speaker",
-                "knowledge_source": if is_broadcast { "broadcast" } else { "direct" },
-            });
-            if let Err(e) = memory_manager
-                .save_context_with_metadata(
-                    Some(&storage_text),
-                    &[],
-                    None,
-                    user_emotion_label,
-                    None,
-                    state.importance_user,
-                    state.importance_ai,
-                    Some(user_meta),
-                    Some(ai_meta),
-                    None,
-                )
-                .await
-            {
-                tracing::warn!("[UserMemorySaving] 保存失败: {}", e);
+            // Keep the actual user wording for evidence; resolved references are supplementary.
+            let mut user_meta = user_meta;
+            user_meta["conversation_id"] = json!(state.conversation_id);
+            let prefix = build_speaker_prefix("user", if is_broadcast { "all" } else { &char_id }, &char_id);
+            let content = format!("{} {}", prefix, state.user_input.trim());
+            match memory_manager.add_memory_with_metadata(
+                &content, MemoryType::ShortTerm, state.importance_user,
+                vec!["short_term".into(), "user".into(), "dialogue_turn".into(), user_emotion_label.into()],
+                user_meta,
+            ).await {
+                Ok(item) => {
+                    state.metadata["growth_source_memory_id"] = json!(item.id);
+                    state.metadata["growth_source_timestamp"] = json!(item.timestamp);
+                    state.metadata["growth_source_content"] = json!(item.content);
+                }
+                Err(e) => tracing::warn!("[UserMemorySaving] 保存失败: {}", e),
             }
         }
         state.metadata["user_memory_saved"] = json!(true);

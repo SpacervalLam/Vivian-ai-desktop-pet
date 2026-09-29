@@ -197,6 +197,8 @@ pub struct LLMRequest {
     /// 任务类型(路由 key):chat / reasoning / reflection / consolidation /
     /// inner_monologue / vision_describe 等
     pub task_type: String,
+    /// Cost attribution only; never changes provider routing.
+    pub usage_tag: Option<String>,
     /// 对话消息数组(含 system / user / assistant / tool 角色)
     pub messages: Vec<ChatMessage>,
     /// 工具定义列表(空 = 不启用原生 function calling,走文本路径)
@@ -237,6 +239,7 @@ impl LLMRequest {
     pub fn new(task_type: impl Into<String>, messages: Vec<ChatMessage>) -> Self {
         Self {
             task_type: task_type.into(),
+            usage_tag: None,
             messages,
             tools: Vec::new(),
             stream: false,
@@ -255,6 +258,11 @@ impl LLMRequest {
     /// 设置工具定义(启用原生 function calling 路径)
     pub fn with_tools(mut self, tools: Vec<ToolDefinition>) -> Self {
         self.tools = tools;
+        self
+    }
+
+    pub fn with_usage_tag(mut self, tag: impl Into<String>) -> Self {
+        self.usage_tag = Some(tag.into());
         self
     }
 

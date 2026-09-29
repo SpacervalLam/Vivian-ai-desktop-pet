@@ -1,5 +1,6 @@
 import { buildApartmentPodium, type PodiumAutoDoor } from './apartmentPodium';
 import { rebuildApartmentArchitecture } from './apartmentArchitecture';
+import { buildLiftTower } from './apartmentLift';
 /**
  * 室外世界层（B+ 架构，按到房间的距离分层）。
  *
@@ -26,9 +27,11 @@ import {
   asphaltTexture, curbTexture, puddlePatchTexture,
   rainGlassTexture, curtainTexture, doorGrainMap,
 } from './toon';
+import { RIVER_Z_N, RIVER_Z_S, RIVER_CZ, RIVER_BED_Y, RIVER_SURFACE_Y, RIVER_BANK_Y } from './river';
 import { scaleUV, outlineProp, buildStreetLamp, buildWetGround, buildPuddleRipples, buildEaveDrips, UNIT_DOOR_TONES, type PoolSpec, type DripEdge } from './props';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import type { BoxColliderSpec, Collider } from './collider';
+import { createLeafField, type SprayField } from './foliage';
 import { dressConvenienceStore } from './storeDetails';
 
 /* ============================================================================
@@ -115,24 +118,55 @@ export function buildExteriorGround(): THREE.Group {
   const g = new THREE.Group();
   g.name = 'exterior-ground';
 
-  const SIZE = 360;
+  /**
+   * 世界地面的边长（米）。
+   *
+   * 原版 360（±180）。2026-09-26 扩到 1000：轨道（见 sakuraStation 的 TRACK_HALF）
+   * 要一直铺到"玩家在任何可站立点看它都在雾里"——晴天雾 far=300m，可活动范围最远的
+   * 角落是 (150,95)，所以地面至少要伸到那里再往外 300m。360 的地面边缘只有 180m，
+   * 比轨道还短：轨道还没断，地面先断了。
+   *
+   * 代价为零：地面是 ShapeGeometry（形状与 UV 都按 SIZE 归一化生成），边长翻倍只是把
+   * 同一个多边形拉大，顶点数与 draw call 都不变。
+   */
+  const SIZE = 1000;
   const HX = SIZE / 2;
-  // 世界地面：一张大平面，但在地铁竖井口处挖洞——否则这层均匀沥青会把井口封死。
-  const shape = new THREE.Shape();
-  shape.moveTo(-HX, -HX);
-  shape.lineTo(HX, -HX);
-  shape.lineTo(HX, HX);
-  shape.lineTo(-HX, HX);
-  shape.lineTo(-HX, -HX);
+  /* ---------------- 地面从这里断开给小河让位 ----------------
+   *
+   * 原版是一张整方 Shape，中间只挖了地铁竖井一个洞。加了北侧小河（river.ts）之后
+   * 就不再是一张：河道是一条横贯整个世界的东西向开口，把地面切成南、北两片。
+   *
+   * 为什么是"切两片"而不是"再加一条 hole"：Shape 的 hole 必须**完全落在轮廓内部**，
+   * 而河道两端开到 shape 的边界上——横跨全宽的洞不是合法 hole，三角化时轮廓和孔洞
+   * 会缠在一起，出来的三角形是随机的。地铁竖井那个洞四边都被沥青包着，所以它能作
+   * 为 hole；河不行。
+   *
+   * ShapeGeometry 本身接受 Shape[]，两个矩形共存于同一份 geometry：顶点数几乎不变，
+   * draw call 也仍然只有一次——和"一张整片 + 一条 hole"完全同价。
+   *
+   * shape 局部 (a,b) 经 rotateX(-90°) 映射到世界 (a, 0, -b)，故 world z = -b。
+   */
+  const slab = (bNear: number, bFar: number) => {
+    const s = new THREE.Shape();
+    s.moveTo(-HX, bNear);
+    s.lineTo(HX, bNear);
+    s.lineTo(HX, bFar);
+    s.lineTo(-HX, bFar);
+    s.lineTo(-HX, bNear);
+    return s;
+  };
+  // 南片 world z ∈ [RIVER_Z_S, HX]：整个街区、街道、地铁竖井都在南边。
+  const southSlab = slab(-HX, -RIVER_Z_S);
+  // 北片 world z ∈ [-HX, RIVER_Z_N]：隔着河的那一条。
+  const northSlab = slab(-RIVER_Z_N, HX);
   const hole = new THREE.Path();
-  // shape 局部 (a,b) 经 rotateX(-90°) 映射到世界 (a, 0, -b)，故 world z = -b
   hole.moveTo(PIT_X0, -PIT_Z0);
   hole.lineTo(PIT_X1, -PIT_Z0);
   hole.lineTo(PIT_X1, -PIT_Z1);
   hole.lineTo(PIT_X0, -PIT_Z1);
   hole.lineTo(PIT_X0, -PIT_Z0);
-  shape.holes.push(hole);
-  const geo = new THREE.ShapeGeometry(shape);
+  southSlab.holes.push(hole);
+  const geo = new THREE.ShapeGeometry([southSlab, northSlab]);
   geo.rotateX(-Math.PI / 2);
   // UV 复刻 PlaneGeometry + scaleUV(11,11)：uv = (worldX+HX)/SIZE*11, (-worldZ+HX)/SIZE*11
   {
@@ -152,6 +186,68 @@ export function buildExteriorGround(): THREE.Group {
   ground.castShadow = false;
   ground.receiveShadow = true;
   g.add(ground);
+
+  /* ---------------- 河槽本体 ----------------
+   *
+   * 梯形断面：南岸坡 + 槽底 + 北岸坡，各一张面。
+   *
+   * 刻意**不给厚度**：这个世界里视点永远在 y > 0，衬砌背面谁也看不到；做成箱体只是
+   * 把三角形翻一倍，换来一层没人看得到的混凝土。
+   *
+   * 岸坡水平投影 `BANK_RUN = 3m` 是水面宽度的直接开关：6m 的缓坡能让岸看起来天然，
+   * 但常水位处只剩 6.8m 水面；收到 3m 是 11.3m。这里选 3m —— 水面越宽，从街上平看
+   * 过去能被岸沿挡掉的那一段之后剩下的就越多（算账见 river.ts 的视线几何），
+   * 而且这种陡边坡本来就是城市河川被渠化后的样子。
+   */
+  const BANK_RUN = 3;
+  const BANK_DROP = RIVER_BANK_Y - RIVER_BED_Y;
+  const SLOPE_LEN = Math.hypot(BANK_RUN, BANK_DROP);
+  const SLOPE_ANGLE = Math.atan2(BANK_DROP, BANK_RUN);
+
+  const lining = toon('#8f8c83');
+  /**
+   * PlaneGeometry 默认躺在 XY 面、法线朝 +Z。`rotation.x = -π/2` 把法线掰到 +Y 朝上、
+   * 把高度轴（局部 +Y）掰到世界 -Z；再叠一个 ±坡度就成了一片岸坡。
+   *
+   * 符号是这样来的：坡面总是朝着**下坡**的方向。南坡往北（z 减小）降下去，所以它的
+   * 法线朝北，取 `direction = -1`；北坡往南降，法线朝南，取 `direction = +1`。
+   * 取反会把两片都变成背面朝上的空壳 —— 从岸上看就是"槽壁上有个洞，能望到地底"。
+   */
+  const slope = (centerZ: number, direction: 1 | -1) => {
+    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(SIZE, SLOPE_LEN), lining);
+    mesh.position.set(0, (RIVER_BANK_Y + RIVER_BED_Y) / 2, centerZ);
+    mesh.rotation.x = -Math.PI / 2 + direction * SLOPE_ANGLE;
+    mesh.receiveShadow = true;
+    g.add(mesh);
+    return mesh;
+  };
+  slope(RIVER_Z_S - BANK_RUN / 2, -1).name = 'river-bank-s';
+  slope(RIVER_Z_N + BANK_RUN / 2, 1).name = 'river-bank-n';
+
+  const bedWidth = (RIVER_Z_S - RIVER_Z_N) - BANK_RUN * 2;
+  const bed = new THREE.Mesh(new THREE.PlaneGeometry(SIZE, bedWidth), lining);
+  bed.position.set(0, RIVER_BED_Y, RIVER_CZ);
+  bed.rotation.x = -Math.PI / 2;
+  bed.receiveShadow = true;
+  bed.name = 'river-bed';
+  g.add(bed);
+
+  /* 水面：一张半透明面。
+   *
+   * 宽度按常水位在岸坡上的落点算，而不是直接用 RIVER_Z_S - RIVER_Z_N：岸坡是斜的，
+   * 水面只能占"两条坡线在该标高之间的那段"。写死全宽的话，多出来的那一圈水会悬在
+   * 坡面上方的空气里，从岸边低角度看过去是一道明显的穿帮。
+   * 3m 岸坡在常水位处每侧退掉 3 × (1.2/2.75) = 1.31m，故 8 + 2×1.31 = 10.62m。 */
+  const waterWidth = bedWidth + 2 * BANK_RUN * ((RIVER_SURFACE_Y - RIVER_BED_Y) / BANK_DROP);
+  const water = new THREE.Mesh(
+    new THREE.PlaneGeometry(SIZE, waterWidth),
+    toon('#4d7f96', { transparent: true, opacity: 0.74, finish: 'wet', outlineWeight: 0 }),
+  );
+  water.position.set(0, RIVER_SURFACE_Y, RIVER_CZ);
+  water.rotation.x = -Math.PI / 2;
+  water.receiveShadow = true;
+  water.name = 'river-water';
+  g.add(water);
 
   return g;
 }
@@ -173,7 +269,17 @@ function buildTree(
   z: number,
   height: number,
   seed: number,
-  mats: { trunk: THREE.Material; leaf: THREE.Material; leafDeep: THREE.Material; leafWarm: THREE.Material }
+  mats: { trunk: THREE.Material; leaf: THREE.Material; leafDeep: THREE.Material; leafWarm: THREE.Material },
+  /**
+   * 冠簇场。传了就改用 `foliage` 的叶簇（和街区行道树、公园老樱同一套素材），
+   * 不传则退回原来的"低面二十面体团"。
+   *
+   * 为什么用可选而不是直接换：叶簇是**实例网格**，同一片场地要共用一个才能只占
+   * 一次 draw call，所以场必须由调用方持有、由调用方在合批之后 `build()`。
+   * 场的坐标就是调用方 `g` 的**局部坐标** —— 这里 `x/z` 是相对 `g` 的偏移，
+   * 挂回去天然对齐，不需要去追父链上有没有 transform。
+   */
+  field?: SprayField
 ): THREE.Group {
   const g = new THREE.Group();
   const rnd = makeRng(seed);
@@ -193,6 +299,38 @@ function buildTree(
     br.rotation.z = -dx * 0.75;
     br.rotation.x = dz * 0.75;
     g.add(br);
+  }
+
+  if (field) {
+    /* 叶簇：一团冠铺十几到几十簇，沿 5 个团芯的分布撒开，外缘更疏。
+     * 团芯的 (cx, cy, cz, r) 沿用下面那组坐标 —— 冠的形状没动，只是从
+     * "5 个实心多面体"变成"5 团蓬松的叶"。 */
+    for (const [cx, cy, cz, r] of [
+      [0, trunkH + height * 0.20, 0, height * 0.30],
+      [-height * 0.17, trunkH + height * 0.13, height * 0.05, height * 0.21],
+      [height * 0.16, trunkH + height * 0.15, -height * 0.04, height * 0.22],
+      [height * 0.02, trunkH + height * 0.31, -height * 0.09, height * 0.17],
+      [-height * 0.05, trunkH + height * 0.09, -height * 0.14, height * 0.15],
+    ] as Array<[number, number, number, number]>) {
+      /* 冠幅要**对齐原来的团簇**：小公园那三棵树的落位是按"冠半径约 2.4~2.8m"
+       * 核过穿模余量的（见 `buildSmallPark` 里树2/树3 的 AABB 注释，余量只有
+       * 0.35m）。叶簇是面片，视觉半径 = 散布半径 + 簇半宽，参数按 0.95 / 0.34~0.58
+       * 取才能落在同一量级；随手放大 30% 就会重新压回电梯井上。 */
+      const n = Math.max(8, Math.round(r * 26));
+      for (let i = 0; i < n; i++) {
+        const a = rnd() * Math.PI * 2, rr = Math.sqrt(rnd()) * r * 0.95;
+        /* 场挂在**调用方**的组上，所以坐标必须带上本棵树自己的落位 (x,z) ——
+         * 下面那组 cx/cy/cz 是相对树干的，直接喂进去整片冠会塌在原点。 */
+        field.spray(
+          x + cx + Math.cos(a) * rr,
+          cy + (rnd() - 0.5) * r * 0.95,
+          z + cz + Math.sin(a) * rr,
+          r * (0.34 + rnd() * 0.24),
+        );
+      }
+    }
+    g.position.set(x, 0, z);
+    return g;
   }
 
   // 冠簇：低面二十面体，各自非等比压扁并错开，形成"一片片叶丛"
@@ -230,10 +368,36 @@ function buildShrub(
   h: number,
   d: number,
   seed: number,
-  mats: { leaf: THREE.Material; leafDeep: THREE.Material }
+  mats: { leaf: THREE.Material; leafDeep: THREE.Material },
+  /** 见 `buildTree` 的同名参数。传了就改用 `foliage` 的叶簇（含内部的保留芯）。 */
+  field?: SprayField
 ): THREE.Group {
   const g = new THREE.Group();
   const rnd = makeRng(seed);
+
+  if (field) {
+    /* 芯留着（缩到 0.78）：叶簇是 alphaTest 面片、没有厚度，纯面片近距离侧面
+     * 会看穿 —— 街道绿篱那边踩过同一个坑。芯压小一圈，让外层的叶成为主要读数。 */
+    const core = new THREE.Mesh(new THREE.IcosahedronGeometry(1, 0), mats.leafDeep);
+    core.scale.set(w / 2 * 0.78, h / 2 * 0.80, d / 2 * 0.78);
+    core.position.y = h / 2;
+    core.rotation.y = rnd() * Math.PI;
+    g.add(core);
+    /* 同样按原来的体量取参：芯是 `w/2` 的半宽，叶簇外缘压在它外面一点点
+     * （0.40 + 0.22~0.40）就够蓬松，再大就不是"一丛修剪过的灌木"而是灌木丛了。 */
+    const n = Math.max(10, Math.round(w * d * 62));
+    for (let i = 0; i < n; i++) {
+      const a = rnd() * Math.PI * 2, rr = Math.sqrt(rnd());
+      field.spray(
+        x + Math.cos(a) * rr * w * 0.40,
+        h * (0.28 + rnd() * 0.82),
+        z + Math.sin(a) * rr * d * 0.40,
+        Math.min(w, d) * (0.22 + rnd() * 0.18),
+      );
+    }
+    g.position.set(x, 0, z);
+    return g;
+  }
 
   const base = new THREE.Mesh(new THREE.IcosahedronGeometry(1, 0), mats.leaf);
   base.scale.set(w / 2, h / 2, d / 2);
@@ -637,9 +801,16 @@ function buildParkingLot(): THREE.Group {
 
   /* ---- 边角植栽：南边贴栅一小段绿篱，把水泥地的冷硬压一压 ---- */
   const leafMat = toon(EXT.plant), leafDeep = toon(EXT.plantDeep);
-  g.add(buildShrub(-18.1, 25.0, 1.5, 0.75, 0.9, 7711, { leaf: leafMat, leafDeep }));
-  g.add(buildShrub(-16.8, 25.0, 1.2, 0.62, 0.8, 7712, { leaf: leafMat, leafDeep }));
-  g.add(buildShrub(-6.4, 24.9, 1.3, 0.68, 0.85, 7713, { leaf: leafMat, leafDeep }));
+  /* 叶簇走 `foliage` 的叶簇场。自带 PRNG：叶簇贴图生成要抽几百次样，蹭本函数
+   * 的 `r()` 会把后面所有随机落位整体错位。场挂在 `g` 里（`buildShrub` 收到
+   * 的 x/z 就是 `g` 的局部坐标），所以父级有没有 transform 都不影响对位。 */
+  let ssLeafSeed = 8123;
+  const ssLeafRnd = () => { ssLeafSeed = (Math.imul(ssLeafSeed, 1664525) + 1013904223) >>> 0; return ssLeafSeed / 4294967296; };
+  const streetLeaf = createLeafField(ssLeafRnd, 900);
+  g.add(buildShrub(-18.1, 25.0, 1.5, 0.75, 0.9, 7711, { leaf: leafMat, leafDeep }, streetLeaf));
+  g.add(buildShrub(-16.8, 25.0, 1.2, 0.62, 0.8, 7712, { leaf: leafMat, leafDeep }, streetLeaf));
+  g.add(buildShrub(-6.4, 24.9, 1.3, 0.68, 0.85, 7713, { leaf: leafMat, leafDeep }, streetLeaf));
+  g.add(streetLeaf.build('streetscape-shrub-leaves'));
 
   /* ---- 积水：雨夜的湿地面要有几处反光的洼 ---- */
   const pTex = puddlePatchTexture();
@@ -658,7 +829,7 @@ function buildParkingLot(): THREE.Group {
   return g;
 }
 
-export function buildStreetscape(): THREE.Group {
+export function buildStreetscape(withParking = true): THREE.Group {
   const g = new THREE.Group();
   g.name = 'exterior-streetscape';
 
@@ -740,7 +911,7 @@ export function buildStreetscape(): THREE.Group {
   g.add(buildStreetPuddles());
 
   // 便利店西侧空地 → 露天停车场（5 台位的 コインパーキング）
-  g.add(buildParkingLot());
+  if (withParking) g.add(buildParkingLot());
 
   // 碎光点撒在街心——阳台那套 wetPools 在 JSON 里，这套是街道自己的。
   const wet = buildWetGround(pools, { sparkleCount: 70, area: 6.0, center: [0.3, 9.5] });
@@ -1281,11 +1452,27 @@ export type ApartmentShellHandle = {
   autoDoor: PodiumAutoDoor;
 };
 
-export function buildApartmentShell(): ApartmentShellHandle {
+/**
+ * 楼体外壳的构建选项。
+ *
+ * `ownUnit`：
+ *   - `'room'`（默认）——2F 中户那一跨**留空**，因为主角户 203 的房间壳
+ *     （`unitGroup`，带完整户型与家具）会占住它，这里再建就是两套几何互穿。
+ *   - `'generic'`——把 2F 中户当成**普通邻户**补满：实心体量 + 带洞覆板 +
+ *     室盒内衬 + 低模家具 + 阳台栏杆 + 窗/帘/生活件，北面也走邻户那套
+ *     （含玄関ドア，户号牌按 `${层}${户序}` 正好读出 "203"）。
+ *     北侧孪生公寓用这一档：它是景观复制品，没有 `unitGroup`，
+ *     不补的话 2F 中跨就是南立面上的一个洞 + 一个 12.4×2.8×10.6 的空腔。
+ */
+export type ApartmentShellOptions = { ownUnit?: 'room' | 'generic' };
+
+export function buildApartmentShell(opts?: ApartmentShellOptions): ApartmentShellHandle {
   const g = new THREE.Group();
   g.name = 'apartment-shell';
   /** 外壳内所有该挡人的实体：一个实体一个轴对齐盒，与家具碰撞同一套机制 */
   const boxes: BoxColliderSpec[] = [];
+  /** 2F 中户（203 那一跨）是否按普通邻户补满，见 ApartmentShellOptions。 */
+  const genericOwnUnit = opts?.ownUnit === 'generic';
 
   /* ---------------- 材质（冷灰蓝体系，见文件头 EXT） ---------------- */
   const M = {
@@ -2184,14 +2371,46 @@ export function buildApartmentShell(): ApartmentShellHandle {
     }
   };
 
-  /** 阳台盆栽：陶盆 + 一团低面叶簇（不是球） */
-  const potted = (x: number, y: number, z: number, seed: number) => {
+  /* ---------------- 阳台植栽的叶簇场 ----------------
+   *
+   * 阳台上的三样植栽（`potted` 陶盆 / `planterBox` 长花箱 / `plantStand` 花架小盆）
+   * 此前都是 `IcosahedronGeometry` 低面球 —— 单看还行，一排阳台横过去就是
+   * "每格一个二十面体"，而且 2F 那排离玩家最近（自家阳台正对的就是它）。
+   *
+   * 换成 `foliage` 的叶簇（带叶脉的 alphaTest 面片，和行道树同一套素材）。
+   * **顺带解决 draw call**：外壳合批后桶数贴着上限（见上方阳台铺装那段注释），
+   * 叶簇是一个 `InstancedMesh`，几十个叶球变成一次调用，顶点也从 12/个降到 4/个。
+   *
+   * 用独立的 PRNG：`makeRng` 的序列被每一户的窗态/帘子/家具摆位依赖，蹭它会把
+   * 后面所有户整体重排。 */
+  let balconySeed = 73013;
+  const balconyRnd = () => { balconySeed = (Math.imul(balconySeed, 1664525) + 1013904223) >>> 0; return balconySeed / 4294967296; };
+  const balconyLeaf = createLeafField(balconyRnd, 8000);
+  /**
+   * 往一丛植栽里撒叶簇。
+   *
+   * `r` 是**原来那个低面球的半径** —— 面片基准是 2×2，`scale = r` 给出的半宽
+   * 正好等于 `r`，所以按原半径传就能保住原来的体量，不会把花箱撑成灌木丛。
+   * `dense` 给 2F 用：那一层是玩家天天看的一排（`fi === 0`），同半径下多撒一簇。
+   */
+  const balconyTuft = (x: number, y: number, z: number, r: number, dense = false) => {
+    const n = dense ? 4 : 3;
+    for (let i = 0; i < n; i++) {
+      balconyLeaf.spray(
+        x + (balconyRnd() - .5) * r * .9,
+        y + (balconyRnd() - .5) * r * .7,
+        z + (balconyRnd() - .5) * r * .9,
+        r * (.78 + balconyRnd() * .40),
+      );
+    }
+  };
+
+  /** 阳台盆栽：陶盆 + 一丛叶簇。`dense` 见 `balconyTuft`。 */
+  const potted = (x: number, y: number, z: number, seed: number, dense = false) => {
     put(new THREE.CylinderGeometry(0.105, 0.085, 0.16, 8), toon('#8d7159'), x, y + 0.08, z);
-    const leaf = new THREE.Mesh(new THREE.IcosahedronGeometry(0.16, 0), M.leaf);
-    leaf.scale.set(1, 0.85, 1);
-    leaf.position.set(x, y + 0.27, z);
-    leaf.rotation.y = makeRng(seed)() * Math.PI;
-    g.add(leaf);
+    // 盆土：叶簇是面片，盆口空着会直接看穿到盆底
+    put(new THREE.CylinderGeometry(0.095, 0.095, 0.03, 8), toon('#4b3f34'), x, y + 0.155, z);
+    balconyTuft(x, y + 0.28, z, 0.16, dense);
   };
 
   /** 折叠晾衣架 + 搭在上面的衣物 */
@@ -2245,7 +2464,7 @@ export function buildApartmentShell(): ApartmentShellHandle {
    * 大的陶盆，在大阳台上根本撑不起来。花箱是补齐体量感最省的一件：一个 1m
    * 长的木箱在剪影上的分量，顶得上七八个陶盆。
    */
-  const planterBox = (x: number, y: number, z: number, len: number, seed: number) => {
+  const planterBox = (x: number, y: number, z: number, len: number, seed: number, dense = false) => {
     const r = makeRng(seed);
     put(gbox(len, 0.30, 0.34), M.wood, x, y + 0.15, z);
     put(gbox(len + 0.04, 0.045, 0.38), M.woodDeep, x, y + 0.315, z);   // 上沿压条
@@ -2253,22 +2472,20 @@ export function buildApartmentShell(): ApartmentShellHandle {
     const n = Math.max(2, Math.round(len / 0.26));
     for (let i = 0; i < n; i++) {
       const rad = 0.12 + r() * 0.06;
-      // 叶簇只取 M.leaf 一个桶：外景合批后 draw call 贴着上限，多一种叶色就多
-      // 一个桶。层次靠每丛的半径 / 扁度 / 转角错出来，不靠色相。
-      const leaf = new THREE.Mesh(new THREE.IcosahedronGeometry(rad, 0), M.leaf);
-      leaf.scale.set(1, 0.8 + r() * 0.35, 1);
-      leaf.position.set(
+      /* 一处一丛叶簇。原位置与半径照搬（`rad` 就是那个低面球的半径），
+       * 只是球换成带叶脉的面片 —— 长花箱读起来才是"栽了一排"而不是"摆了一排球"。
+       * 层次靠半径错开，不靠色相：合批后每多一种叶色就多一个桶。 */
+      balconyTuft(
         x - len / 2 + len * ((i + 0.5) / n) + (r() - 0.5) * 0.05,
         y + 0.30 + rad * 0.85,
-        z + (r() - 0.5) * 0.09
+        z + (r() - 0.5) * 0.09,
+        rad, dense,
       );
-      leaf.rotation.y = r() * Math.PI;
-      g.add(leaf);
     }
   };
 
   /** 木花架：两层，上层摆三只小盆——给阳台一点竖向层次，不然东西全摊在地上。 */
-  const plantStand = (x: number, y: number, z: number, seed: number) => {
+  const plantStand = (x: number, y: number, z: number, seed: number, dense = false) => {
     const r = makeRng(seed);
     put(gbox(0.78, 0.03, 0.30), M.wood, x, y + 0.44, z);
     put(gbox(0.78, 0.03, 0.30), M.wood, x, y + 0.16, z);
@@ -2278,10 +2495,9 @@ export function buildApartmentShell(): ApartmentShellHandle {
     for (let i = 0; i < 3; i++) {
       const lx = x - 0.25 + i * 0.25;
       put(new THREE.CylinderGeometry(0.07, 0.058, 0.12, 8), M.woodDeep, lx, y + 0.56, z);
-      const leaf = new THREE.Mesh(new THREE.IcosahedronGeometry(0.095 + r() * 0.04, 0), M.leaf);
-      leaf.position.set(lx, y + 0.66, z);
-      leaf.rotation.y = r() * Math.PI;
-      g.add(leaf);
+      put(new THREE.CylinderGeometry(0.062, 0.062, 0.02, 8), toon('#4b3f34'), lx, y + 0.615, z);  // 盆土
+      // 小盆：半径沿用原来的 0.095~0.135，叶簇多撒一簇才蓬得起来
+      balconyTuft(lx, y + 0.67, z, 0.095 + r() * 0.04, dense);
     }
   };
 
@@ -2477,10 +2693,20 @@ export function buildApartmentShell(): ApartmentShellHandle {
 
   // 2 层：203 居中（外皮归 203 自己的 shell），东西各两户是实心体量。
   // 底/顶离开 F2/F3，内侧面离开 203 山墙（x±6.2）——三处共用标高都是闪面。
-  for (const [ux0, ux1] of [[X0, -6.2 - GAP], [6.2 + GAP, X1]] as Array<[number, number]>) {
+  const neighborBays: Array<[number, number, string]> = [
+    [X0, -6.2 - GAP, 'apt-neighborw'],
+    [6.2 + GAP, X1, 'apt-neighbore'],
+  ];
+  /* 景观复制品（`ownUnit:'generic'`）没有真 203，中跨也必须补成实心体量。
+   * 不补的后果不是"少一间屋"：2F 那一跨 x -6.2..6.2、z -5.9..4.7 整块是空的，
+   * 而南立面覆板本来由 203 自己的壳出（不在这里），于是从街上一眼看穿到后墙——
+   * 就是"复制楼的 203 整个挖空"。内侧面仍离开 UNITS[2] 的边界 4cm，
+   * 与东西两户同一套空气缝，别贴到 ±6.2 上（那是共面闪面）。 */
+  if (genericOwnUnit) neighborBays.push([UNITS[2][0] + GAP, UNITS[2][1] - GAP, 'apt-neighborc']);
+  for (const [ux0, ux1, massName] of neighborBays) {
     const w = ux1 - ux0;
     put(gbox(w, LVL - GAP * 2, DEPTHB2), M.wall, (ux0 + ux1) / 2, F2 + LVL / 2, CZB2)
-      .name = ux0 < 0 ? 'apt-neighborw' : 'apt-neighbore';
+      .name = massName;
   }
 
   // 3~4 层：全宽实心（203 正上方的 303/403 也只是立面，内部不可见）
@@ -2498,9 +2724,19 @@ export function buildApartmentShell(): ApartmentShellHandle {
     put(gbox(0.08, RF - F2 + 0.12, DEPTH), M.wallAlt, wx + sx * 0.04, (F2 + RF + 0.1) / 2, CZ).name = 'apt-old-gable-' + sx;
   }
   for (const f of FLOORS) {
-    // 各层腰线（幕板）：一条浅色混凝土带，把楼层从立面上读出来
-    put(gbox(W, 0.14, 0.07), M.slabDry, 0, f - 0.07, ZF + 0.035);
-    put(gbox(W, 0.14, 0.07), M.slabDry, 0, f - 0.07, ZN - 0.035);
+    /* 各层腰线（幕板）：一条浅色混凝土带，把楼层从立面上读出来。
+     *
+     * 中心取 `f - 0.09` 而不是 `f - 0.07`：盒高 0.14，中心在 f-0.07 时**顶面正好等于
+     * f**，而 f 是该层的户内地板标高 —— 203 的室内地板（props.ts 的那张 Plane，世界
+     * 顶面 y=3.40）和邻户阳台板顶（下面 `F-0.07` 那块 0.14 厚的板，顶也是 f）都在这
+     * 个标高上，且都是朝上的面。三者在 z∈[ZF, ZF+0.07] 那条 7cm 带里重叠：
+     * 203 卧室脚下 0.87m²、邻户阳台 3.56m²（tmp/_zfight-scan.mjs 实测）。
+     *
+     * 下移 2cm 后顶面到 f-0.02：离户内地板 2cm、离阳台板顶 1cm（后者与本项目
+     * "板顶停在 F-0.01" 的既有惯例同档），都不再共面。2cm 在 36m 高的立面上读不出来，
+     * 腰线依旧贴着楼层线。两侧（南 ZF / 北 ZN）同一条理由，一起下移。 */
+    put(gbox(W, 0.14, 0.07), M.slabDry, 0, f - 0.09, ZF + 0.035);
+    put(gbox(W, 0.14, 0.07), M.slabDry, 0, f - 0.09, ZN - 0.035);
   }
 
   // 屋顶：女儿墙 + 水箱 + 室外机 + 天线
@@ -2539,7 +2775,11 @@ export function buildApartmentShell(): ApartmentShellHandle {
       if (fi === 0 && ui === 2) {
         put(gbox(uw - GAP * 2, 0.12, ZB - ZF), M.slab, ucx, F - 0.07, (ZF + ZB) / 2);
         put(gbox(0.16, 0.03, 0.16), M.dark, ux1 - 0.35, F - 0.005, ZB - 0.35);
-        continue;
+        /* 主楼（ownUnit:'room'）：203 的栏杆 / 落地窗 / 覆板 / 生活件全由它自己的
+         * 房间壳（props.ts buildRoomShell）出，这里补上那块阳台底板就够了。
+         * 景观复制品（'generic'）没有那个壳 —— 不能 continue，要照邻户那套整段
+         * 补满，否则这一跨的南立面就是一个通到后墙的洞、阳台连栏杆都没有。 */
+        if (!genericOwnUnit) continue;
       }
 
       /* —— 阳台结构 —— */
@@ -2580,12 +2820,16 @@ export function buildApartmentShell(): ApartmentShellHandle {
       ];
       unitFace({
         ux0, ux1, F, z: ZF + 0.09, mat: M.wall, trim: true,
+        // 203 那一跨（只有景观复制品会走到这里）两侧补满，与它北面那圈覆板同一口径；
+        // 邻户保留 4cm 内缩，拼起来是一道 8cm 的竖缝，读作"预制板挂上去"的分缝。
+        bleed: fi === 0 && ui === 2 ? 0.08 : undefined,
         holes,
       });
       /* 窗后的屋子：结构板把退让掉的外皮补回 z=ZF，里头是内衬 + 低模家具。
        * 卧室（西腰窓后）与客厅（滑門后）各自亮暗——卧室亮客厅黑是常态。
        * 拉上帘的分区连家具都不建：帘后透暖光就够读出"有人睡下了"。
-       * 203 那一户在上面的 continue 里就跳过了，它有自己的房间。 */
+       * 203 那一户在主楼里于上面的 continue 处跳过（它有自己的房间壳）；
+       * 景观复制品不跳过，照这一套补满。 */
       unitInterior({
         ux0, ux1, F, holes,
         lit: doorState === 'lit',
@@ -2606,7 +2850,9 @@ export function buildApartmentShell(): ApartmentShellHandle {
       /* —— 生活痕迹：每户不同，避免复制粘贴 —— */
       acUnit(ux0 + 0.55, F, ZF + 0.55, 1);
       if (rnd() < 0.55) dryingRack(ucx + (rnd() - 0.5) * uw * 0.35, F, ZF + 1.05, 7000 + fi * 10 + ui);
-      if (rnd() < 0.65) potted(ux1 - 0.5, F, ZF + 1.2, 300 + fi * 7 + ui);
+      // `fi === 0` 是 2F（FLOORS[0] = 3.4），也就是 203 自己那一层 —— 玩家从自家
+      // 阳台正对着看的就是这一排，同半径下多撒一簇。
+      if (rnd() < 0.65) potted(ux1 - 0.5, F, ZF + 1.2, 300 + fi * 7 + ui, fi === 0);
       if (rnd() < 0.35) storageBox(ux0 + 1.25, F, ZF + 0.85, rnd() < 0.5 ? '#7f8a96' : '#6f6a63');
       const hasChair = rnd() < 0.22;
       if (hasChair) balconyChair(ucx + (rnd() - 0.5) * uw * 0.4, F, ZF + 1.0);
@@ -2640,7 +2886,7 @@ export function buildApartmentShell(): ApartmentShellHandle {
       const nPlanter = near203 ? 2 : rnd() < 0.72 ? 1 : 0;
       for (let i = 0; i < nPlanter; i++) {
         const px = i === 0 ? ux0 + 1.3 + rnd() * 0.8 : ux1 - 2.3 + rnd() * 0.8;
-        planterBox(px, F, ZF + 1.0, 0.9 + rnd() * 0.5, 4100 + fi * 23 + ui * 7 + i);
+        planterBox(px, F, ZF + 1.0, 0.9 + rnd() * 0.5, 4100 + fi * 23 + ui * 7 + i, fi === 0);
       }
       if (near203 || rnd() < 0.3) washer(ux1 - 1.2, F, ZF + 0.40);
       if (near203 || rnd() < 0.45) {
@@ -2649,7 +2895,7 @@ export function buildApartmentShell(): ApartmentShellHandle {
         blindSheet(bx - bw / 2, bx + bw / 2, F, ZB - 0.05, rnd() < 0.5 ? M.rmClothLit : M.rmClothAlt);
       }
       if (rnd() < 0.55) flatUp(0.7, 0.42, M.dark, ucx, F + 0.02, ZF + 0.30);          // 滑门外地垫
-      if (rnd() < 0.35) plantStand(ux0 + 3.2 + rnd() * 0.8, F, ZF + 0.36, 5200 + fi * 13 + ui);
+      if (rnd() < 0.35) plantStand(ux0 + 3.2 + rnd() * 0.8, F, ZF + 0.36, 5200 + fi * 13 + ui, fi === 0);
       if (nPlanter > 0 && rnd() < 0.5) wateringKit(ux0 + 2.2 + rnd() * 0.6, F, ZF + 0.75);
       if (hasChair && rnd() < 0.6) balconyTable(ucx + 1.5, F, ZF + 0.95);
       if (rnd() < 0.6) balconyLamp(ucx + 1.8, F + 2.10, ZF + 0.06);
@@ -2760,7 +3006,13 @@ export function buildApartmentShell(): ApartmentShellHandle {
       // 这里是 203 北面覆板唯一的一处——洞口必须跟着房间布局走，别在别处再建
       // 一层同标高的板（同 z 双层必然 z-fighting，且第二层的洞口一旦写成邻户
       // 那套偏移坐标，就会把窗整片糊死，看着像"北墙是贴图"）。
-      if (fi === 0 && ui === 2) {
+      //
+      // 景观复制品（genericOwnUnit）不走这一段：它没有 `buildEntryDoor`，走这里
+      // 只会在 4.5..5.4 留下一个 0.9×2.2 的**门形空洞**（配件都建了、门扇没有）。
+      // 所以让 2F 中户直接落到下面的邻户分支——那一段的 `NORTH_HOLES` 用
+      // `O(dx)=ucx+dx`，ucx=0 时与上面这套洞口**逐值相同**，门扇/门套/对讲机/
+      // 雨庇/门垫/盆栽全都齐，户号牌 `${fi+2}${unitNum}` 正好读出 "203"。
+      if (fi === 0 && ui === 2 && !genericOwnUnit) {
         unitFace({
           ux0, ux1, F, z: ZN - 0.09, mat: M.wallAlt, trim: false, bleed: 0.08,
           holes: [
@@ -3218,7 +3470,15 @@ export function buildApartmentShell(): ApartmentShellHandle {
   ]) {
     const fw = 0.036;
     put(gbox(h.b - h.a + fw * 2, fw, 0.05), M.frame, (h.a + h.b) / 2, h.y1 + fw / 2, TRIM_Z);
-    put(gbox(h.b - h.a + fw * 2, fw, 0.05), M.frame, (h.a + h.b) / 2, h.y0 - fw / 2, TRIM_Z);
+    /* 下框条的顶面**不能停在 h.y0**：h.y0 = 3.45 正是玻璃滑门洞口的底标高，而洞口
+     * 那一圈断面（reveal，props.ts 的 revealMat）的朝上水平面也在这个标高上。
+     * 两者 z 又挨在一起（断面 z∈[4.80,4.92]、窗套 z∈[4.915,4.965]），于是门口
+     * 就是一条 2.4m×5mm 的共面（tmp/_zfight-scan.mjs 实测 0.012m²）——站在门框前
+     * 看是门槛上一道会闪的细线。
+     * 下压 1cm 让顶面到 h.y0-0.01：窗套与洞口底之间多出 1cm 的空气缝，在 3.6m
+     * 层高、36m 立面上读不出来，共面消失。上框条没有这个问题（它的顶面朝上是
+     * 洞口上沿之上，没有第二个面跟它抢同一个深度）。 */
+    put(gbox(h.b - h.a + fw * 2, fw, 0.05), M.frame, (h.a + h.b) / 2, h.y0 - fw / 2 - 0.01, TRIM_Z);
     put(gbox(fw, h.y1 - h.y0, 0.05), M.frame, h.a - fw / 2, (h.y0 + h.y1) / 2, TRIM_Z);
     put(gbox(fw, h.y1 - h.y0, 0.05), M.frame, h.b + fw / 2, (h.y0 + h.y1) / 2, TRIM_Z);
     // 窗台（玻璃门那樘是落地，不做窗台）
@@ -3248,8 +3508,87 @@ export function buildApartmentShell(): ApartmentShellHandle {
   // 窗玻璃收尾合并：所有 pane 到这里才落进 group（见上方 paneBuf 的说明）
   flushPanes();
 
+  /* 阳台植栽的叶簇收尾：全部 `potted / planterBox / plantStand` 登记完之后才 build。
+   * 挂在 `g` 里就够了 —— `build()` 自带 `userData.noMerge`，`RoomScene` 后面那趟
+   * `mergeByMaterial(apartmentShell.group)` 会跳过它（否则会被烘成一块几何）。
+   * **必须排在 `rebuildApartmentArchitecture` 之前**：那里面两趟 `traverse` 会按
+   * "还在用"回收几何与材质，晚挂进去的会被当成游离资源释放掉（屋顶花池那边同样）。 */
+  g.add(balconyLeaf.build('apartment-balcony-leaves'));
+
   rebuildApartmentArchitecture(g);
   return { group: g, boxes, autoDoor: podium.autoDoor };
+}
+
+/**
+ * 北侧孪生公寓（2026-09-25）。
+ *
+ * 需求原文：「在公寓北侧再盖一栋一样的公寓……不需要有专门的 203，也不用
+ * autodoor，只做简单的景观即可，保证外观相同即可。」
+ *
+ * 所以它是**外观复制品**，不是可玩的第二栋：同一套材质、同一套屋顶亭子、
+ * 同一套外廊栏杆、同一套门厅立面，但
+ *   - 不挂自动门（`autoDoor` 直接丢掉；门厅那个 2.44m 洞口就那么开着，
+ *     反正碰撞侧进不去——见下一条）；
+ *   - 不做可进入的 203（203 的房间壳本来就在 `unitGroup` 里，不在本函数内，
+ *     这里自然不会带过去）；
+ *   - 碰撞只声明**主体量一个盒**，不复用 `APT_WALL_BOXES`。那二十多个盒是按
+ *     「主角能走进门厅、能上外廊、邻居家看得见进不去」写的，整套平移过来会
+ *     在 1F 门前留下几道看不见的墙（南立面的门洞盒就在 z=4.7 上），而景观楼
+ *     本来就不该让人进去，一个主体量盒既够挡人、又不会在街面留空气墙。
+ *
+ * **偏移为什么走 `group.position.z`**：楼体里两千行坐标全是世界绝对值，逐个
+ * 加偏移必然漏改。`mergeByMaterial` 用 `invRoot`（root 世界矩阵的逆）把顶点烘
+ * 进 root 局部空间，所以只要**赶在合批之前**把 `group.position.z` 设好，偏移
+ * 就留在 group 上、几何一个顶点都不用动（见 merge.ts 里 invRoot 的说明）。
+ * 调用方必须照主楼那条流水线装配：
+ *   设偏移 → districtArt.prepare → mergeByMaterial → outlineProp → add → freeze
+ *
+ * 落位：`APT_TWIN_DZ` 让新楼整体落在 z=-19 那条街**以北**的街区里
+ * （该街区 z -40.7..-22.3，南北向净深 18.4m；实测楼体进深 14.58m，
+ * z -8.08..6.5），南面与 z=-19 街的北路缘留 1.1m —— 与主楼南面
+ * （z 6.5）到 z=10.1 街路缘（z 7.6）的那 1.1m 人行道同一条关系，
+ * 于是两栋楼隔着同一条街对望，间距 15.3m；楼北面离 z=-44 街留 2.7m。
+ */
+export const APT_TWIN_DZ = -29.9;
+
+export function buildApartmentTwin(dz: number = APT_TWIN_DZ): { group: THREE.Group; boxes: BoxColliderSpec[] } {
+  /* ownUnit:'generic' —— 把 2F 中户（203 那一跨）按普通邻户补满。
+   * 它没有 `unitGroup`，不补就是南立面上一个通到后墙的洞（用户报的"203 整个挖空"）。 */
+  const twin = buildApartmentShell({ ownUnit: 'generic' });
+  twin.group.name = 'apartment-twin-shell';
+  /**
+   * 电梯塔楼。主楼那一座由 `apartmentLift.ts` 单独建、可乘坐；孪生楼这一座是
+   * **景观复制品**：只取几何，不装 HUD / 键盘 / 门动画，轿厢点光也关掉
+   * （门常闭、内饰看不见，那 8 盏灯只会去挤 RoomScene 的点光池）。
+   *
+   * 挂进 `twin.group` 就自动跟着偏移：塔楼几何和楼体一样是世界绝对坐标，
+   * 而 `twin.group.position.z = dz` 是相对变换，子节点一律跟着走，不用另设。
+   * 名字加 `-twin` 后缀，免得 `getObjectByName('apartment-lift-tower')` 撞车。
+   */
+  const lift = buildLiftTower({ lights: false });
+  lift.group.name = 'apartment-lift-tower-twin';
+  twin.group.add(lift.group, lift.dynamic);
+  twin.group.position.z = dz;
+  // 主体量一个盒：东西山墙 / 南北立面 / 屋面全包进去。阳台（挑出到 APT_ZB）
+  // 与外廊（挑出到 APT_CORRIDOR_N）是开敞构件，不声明碰撞——玩家没有上去的路。
+  const mass = boxSpec(
+    'apt-twin-mass',
+    APT_X0 - SHELL_T, APT_X1 + SHELL_T, 0, SHELL_RF, APT_ZN - SHELL_T, APT_ZF + SHELL_T
+  );
+  /**
+   * 电梯塔楼的盒。它是贴在西山墙**外侧**的独立体量（x -36.87..-30.93），整个落在
+   * 主体量盒的西面之外 —— 不补的话玩家能从 z=-19 街绕到楼西侧、直接走进塔楼里。
+   * 外廓取自塔楼几何：西墙外皮 -36.80、屋面 -36.87..-30.93、南北墙 -7.34..4.85
+   * （含南面那圈幕墙鳍片的外挑），高到屋面顶 12.34。
+   */
+  const liftMass = boxSpec('apt-twin-lift-mass', -36.87, -30.93, 0, 12.34, -7.34, 4.85);
+  return {
+    group: twin.group,
+    boxes: [
+      { ...mass, pos: [mass.pos[0], mass.pos[1], mass.pos[2] + dz] },
+      { ...liftMass, pos: [liftMass.pos[0], liftMass.pos[1], liftMass.pos[2] + dz] },
+    ],
+  };
 }
 
 /* ============================================================================
@@ -4146,6 +4485,22 @@ export function buildConvenienceStore(): StoreHandle {
    * 逐顶点扫过柜体盒（`tmp/_probe-furniture-spot.mjs`）：里面只有它自己的机身/顶盖/
    * 投币口和贴面的发光屏，没有别的构件。 */
   const VEND_HX = 0.545, VEND_TOP = 1.99, VEND_Z0 = 12.92, VEND_Z1 = 13.68;
+  /* 商品窗的**玻璃门**（2026-09-25：用户报「两种自动售货机都缺少玻璃罩」）。
+   *
+   * 陈列层是**凸出机身**的一层——`storeDetails.ts` 把货架 / 瓶子 / 价签铺在
+   * z 12.78..12.90，最前的按钮到 z 12.771，全在机身正面 12.94 之外。所以玻璃
+   * 必须压在这层**前面**才算"罩住商品"，位置由 VEND_GLASS_Z 单点给出；门框是
+   * 4 根 0.025 的细杆，与玻璃同一层、只比玻璃再前 0.5cm，不额外占纵深。
+   *
+   * 玻璃**刻意不进碰撞盒**：柜体盒仍取「机身 ∪ 顶盖」（`tmp/_verify-vending-colliders.mjs`
+   * 的断言 A 要求 `streetfurn-*` 恰好 4 个盒、B2 要求柜面外 0.149m 才被挡），而且这台
+   * 机器凸出的陈列层本来就落在盒外——再压一层 0.6cm 的玻璃不改变这个既有事实。 */
+  const VEND_GLASS_Z = 12.76;
+  const vendGlass = new THREE.MeshStandardMaterial({
+    color: '#c2dae6', transparent: true, opacity: 0.17,
+    roughness: 0.1, metalness: 0.05, depthWrite: false,
+  });
+  vendGlass.userData.outlineWeight = 0;   // 透明面本来就不描边，写明免得以后被"修"回来
   let vendN = 0;
   const vending = (x: number, panel: string, strip: string): BoxColliderSpec => {
     put(bx(1.05, 1.9, 0.72), toon('#2c3a4e'), x, 0.95, 13.3);
@@ -4153,6 +4508,18 @@ export function buildConvenienceStore(): StoreHandle {
     faceS(0.88, 1.06, emissive(panel), x, 1.28, 12.93);
     faceS(0.88, 0.3, emissive(strip), x, 0.5, 12.93);
     put(bx(0.16, 0.2, 0.06), metal, x + 0.36, 1.0, 12.95);       // 投币口 / 操作板
+    /* 商品窗玻璃罩：正面 0.84×1.04 一整片 + 左右两片 + 顶面一片，把商品**包住**
+     * （2026-09-25 用户先要"把饮料包起来的盖子"、再去掉门框、再说"你只盖了正面，
+     * 侧面没包住"）。**不做门框**。
+     *
+     * 侧/顶板的进深只取 0.12（z 12.78..12.90），不一直顶到机身 12.94：这样既避开
+     * `storeDetails` 那层 z 12.9125..12.9275 的背板、也不与机身正面(12.94)或发光屏
+     * 平面(12.93)共面。左右板放 x±0.43（陈列层最宽 ±0.40 之外），顶板 x±0.41
+     * （避开 ±0.40 的背板），三片与既有几何**零体积相交**。 */
+    faceS(0.84, 1.04, vendGlass, x, 1.28, VEND_GLASS_Z);              // 正面
+    put(bx(0.02, 1.04, 0.12), vendGlass, x - 0.43, 1.28, 12.84);      // 左侧
+    put(bx(0.02, 1.04, 0.12), vendGlass, x + 0.43, 1.28, 12.84);      // 右侧
+    put(bx(0.82, 0.02, 0.12), vendGlass, x, 1.81, 12.84);             // 顶面
     return boxSpec(`store-vending-${++vendN}`, x - VEND_HX, x + VEND_HX, 0, VEND_TOP, VEND_Z0, VEND_Z1);
   };
   const vendingBoxes: BoxColliderSpec[] = [
@@ -4202,39 +4569,16 @@ export function buildConvenienceStore(): StoreHandle {
   flat(44, 0.24, toon('#2b3242'), 0, 0.003, 12.52);
 
   // 斑马线：正对店门（x≈1.1），从便利店横穿整个车行道到公寓楼一侧。
-  //   正确方向 = 整组旋转 90°：原版白条是"沿 Z 的细条、沿 X 排开"，俯视被读成
-  //   "沿街走"；这里把白条改为沿 X（顺街方向）的长条、沿 Z（店→公寓的过街
-  //   方向）排开。条数保持 7 条不变（只旋转、不增减）；每条 4.6m(沿X)×0.45m(沿Z)，
-  //   沿 Z 间距 0.9m 横跨整条车行道（z 7.6..12.6）。标线压浅灰蓝更贴夜景。
-  for (let i = 1; i < 6; i++) flat(4.6, 0.45, toon('#c3cad1'), 1.1, 0.004, 10.1 + (i - 3) * 0.9);
+  //   白条沿 X（顺街方向）铺长、沿 Z（店→公寓的过街方向）排开：每条
+  //   4.6m(沿X)×0.45m(沿Z)，沿 Z 间距 0.9m 横跨整条车行道（z 7.6..12.6）。
+  //   便利店门前**只保留这一组**——urbanStreets 里 x=0 那组 2.4m 的短斑马线
+  //   已删除，此前两组相位错开、互相填缝，看上去像一片糊掉的白带。
+  //   标高 0.008 的取值有两个约束：必须在黄色中线（urbanStreets 的 lane-mark，
+  //   y=0.006）**之上**，白色斑马线才能盖住黄线；又要低于店前湿反射面
+  //   （store-wet-reflection，y=0.009），反射才能继续叠在标线上面。
+  for (let i = 1; i < 6; i++) flat(4.6, 0.45, toon('#c3cad1'), 1.1, 0.008, 10.1 + (i - 3) * 0.9);
 
-  // 停车位：便利店一侧路缘的平行车位（沿 X 顺路边停，不再横在马路中间）。
-  //   车行道 z 7.6..12.6；路缘在 z=12.6。车位贴着路缘、车身朝 +X 顺街排，
-  //   占 z≈12.6..13.84 的便道，空出整条车行道。白框画成顺路边的小矩形。
-  //   放到西侧 x≈-11/-8，避开店门斑马线(x≈-0.7..2.8)与自动贩卖机(x≈-6.3..-4.0)。
-  const CZ = 13.34;                       // 车身中心 z：路缘侧(12.6)贴边，车身伸向店前
-  for (const cx of [-11.0, -8.0]) {
-    flat(3.5, 0.05, toon('#c3cad1'), cx, 0.004, 13.86);    // 近店侧线（沿 X）
-    flat(3.5, 0.05, toon('#c3cad1'), cx, 0.004, 12.58);    // 近路缘线（沿 X，贴路缘）
-    flat(0.05, 1.36, toon('#c3cad1'), cx - 1.75, 0.004, 13.22);  // 端线
-    flat(0.05, 1.36, toon('#c3cad1'), cx + 1.75, 0.004, 13.22);  // 端线
-  }
-  const carMat = toon('#6f8296');
-  const CxP = -11.0;                       // 第一格停一台车
-  put(bx(3.3, 0.66, 1.48), carMat, CxP, 0.63, CZ);         // 车身长轴沿 X（顺路边）
-  put(bx(1.9, 0.54, 1.34), carMat, CxP + 0.2, 1.18, CZ);   // 车顶（驾驶舱略偏 +X）
-  // 车轮：圆柱轴默认沿 Y，绕 X 转 90° 后轴沿 Z（=车宽方向，车身顺 X 停）
-  for (const [wx, wz] of [[CxP + 1.3, CZ - 0.74], [CxP + 1.3, CZ + 0.74], [CxP - 1.3, CZ - 0.74], [CxP - 1.3, CZ + 0.74]]) {
-    const wheel = new THREE.CylinderGeometry(0.27, 0.27, 0.17, 10);
-    wheel.rotateX(Math.PI / 2);
-    put(wheel, toon('#232936'), wx, 0.27, wz);
-  }
-  put(bx(0.06, 0.5, 1.3), toon('#2b3446'), CxP + 1.55, 1.15, CZ);  // 前挡风（车头朝 +X）
-  // 车头朝 +X：暖白前灯在 +X 端，红尾灯在 -X 端
-  put(bx(0.05, 0.08, 0.3), emissive('#ffd7a8'), CxP + 1.66, 0.66, CZ - 0.4);
-  put(bx(0.05, 0.08, 0.3), emissive('#ffd7a8'), CxP + 1.66, 0.66, CZ + 0.4);
-  put(bx(0.05, 0.07, 0.26), emissive('#d1503f'), CxP - 1.66, 0.68, CZ - 0.4);
-  put(bx(0.05, 0.07, 0.26), emissive('#d1503f'), CxP - 1.66, 0.68, CZ + 0.4);
+  // 西侧路缘留给樱花步道和神社入口，停车位与车辆已移除。
 
   /* ---------------- 小巷：居酒屋东侧 ALLEY.x0..ALLEY.x1 ----------------
    *
@@ -5842,10 +6186,50 @@ function bookPosterTexture(title: string, seed: number): THREE.Texture {
 }
 
 /**
- * 四层书店「書泉堂書店」——近景高模临街铺，就位在居酒屋东侧的巷位（中景楼后撤后，
- * 东区最西一栋原让出的位置正好由它接上，居酒屋往东第一家就是它）。
- * 学园都市（原型多摩市）式学生街一层店面：大玻璃橱窗 + 遮阳篷 + 发光店招，
- * 上部三层是宿舍感的亮窗。与地铁站/便利店/居酒屋一起构成公寓这条街的高模临街排面。
+ * 店外杂志架的封面：底色 + 顶部白刊名条 + 中间主图区 + 底部三行小字。
+ *
+ * 只给纯色方块的话，1m 外就是一排色块，"杂志架"这个身份读不出来——
+ * 而它恰恰是参考图里最先跳出来的一件。四种版式轮着用，五本一排不重样。
+ */
+const magCoverCache = new Map<number, THREE.Texture>();
+function magCoverTexture(i: number, base: string): THREE.Texture {
+  const hit = magCoverCache.get(i);
+  if (hit) return hit;
+  const { canvas, ctx } = makeCanvas(96, 128);
+  ctx.fillStyle = base;
+  ctx.fillRect(0, 0, 96, 128);
+  ctx.fillStyle = '#f6f3ea';                    // 顶部刊名条
+  ctx.fillRect(0, 0, 96, 30);
+  ctx.fillStyle = '#33302b';
+  ctx.font = 'bold 17px "Yu Gothic", "Hiragino Sans", sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(['週刊', '月刊', '別冊', '新刊'][i % 4], 48, 16);
+  ctx.fillStyle = 'rgba(255,255,255,0.88)';     // 主图区
+  ctx.fillRect(13, 40, 70, 52);
+  ctx.fillStyle = 'rgba(40,36,32,0.5)';
+  ctx.font = 'bold 16px "Yu Gothic", sans-serif';
+  ctx.fillText(['特集', '新連載', '総力', '保存版'][i % 4], 48, 66);
+  ctx.fillStyle = 'rgba(255,255,255,0.72)';     // 底部三行小字（示意）
+  for (let k = 0; k < 3; k++) ctx.fillRect(13, 100 + k * 9, 70 - k * 16, 3);
+  const tex = toTexture(canvas);
+  magCoverCache.set(i, tex);
+  return tex;
+}
+
+/**
+ * 四层书店「こもれび書店 / KOMOREBI BOOKS · since 1962」——近景高模临街铺，就位在
+ * 居酒屋东侧的巷位（中景楼后撤后，东区最西一栋原让出的位置正好由它接上，
+ * 居酒屋往东第一家就是它）。
+ *
+ * 立面按参考图（日式町屋书店）重做，自上而下四段：
+ *   ① 通面宽米色看板（0.90m）——大字「こもれび書店」+ 拉丁副标 + 左侧小枝纹；
+ *   ② 深绿书目带「本・雑誌・コミック・文庫・参考書・文具・絵本・ご注文承ります」；
+ *   ③ 白色铝框通高玻璃幕：三段墙垛 / 两道中梃 / 一道横梃（上部亮子）；
+ *   ④ 落地橱窗（窗台只 0.18m）+ 西侧敞开玻璃门。
+ * 街面道具（参考图同款）：门口东侧外摆杂志架（绿头「週刊誌・月刊誌」）、
+ * 正对中垛的 A 字立牌、窗下单车、陶盆绿植。
+ * 与地铁站/便利店/居酒屋一起构成公寓这条街的高模临街排面。
  *
  * 1F 是**可进入的**真营业厅（书架/陈列台/柜台/敞开的大门），碰撞盒随几何一并
  * 交出（声明式，见函数内的 boxes）——玩家能从街面走进来。
@@ -5870,7 +6254,14 @@ export function buildStreetBookStore(): { group: THREE.Group; boxes: BoxCollider
     wall: toon('#d8d2c6'),                       // 米灰外墙
     trim: toon('#8f8779'),                       // 檐口/压顶
     dark: toon('#2a2f38'),
-    frame: toon('#4a4640'),                      // 橱窗框
+    frame: toon('#4a4640'),                      // 深色收口料（看板侧收边 / 招牌背板）
+    /**
+     * 白色铝框：参考图里整个临街店面（墙垛 / 竖梃 / 横梃 / 亮子 / 门框）都是
+     * 同一套白铝型材。旧版用 BM.frame(#4a4640) 的深色框，立面读起来是"三块
+     * 分开的窗"；换成白铝之后三段玻璃才连成一整片玻璃幕。
+     */
+    alum: toon('#e7e5dd'),
+    alumDeep: toon('#cbc9c0'),                   // 型材阴面 / 踢脚
     glass: toon('#ffffff', { map: glassTexture(), transparent: true, opacity: 0.5 }),  // 基色白：夜里透出店内暖光板，不发灰
     /**
      * 橱窗玻璃：近全透明（便利店橱窗同款 0.085 + depthWrite false）。
@@ -5880,9 +6271,30 @@ export function buildStreetBookStore(): { group: THREE.Group; boxes: BoxCollider
     shopGlass: toon('#cfe0ee', { finish: 'glass', transparent: true, opacity: 0.085, depthWrite: false }),
     cool: emissive('#dceaf5'),
     warm: emissive('#ffe4b5'),                   // 店内暖光
+    lamp: emissive('#fff2da'),                   // 门口灯带：中性暖白（旧版用 cool 的冷白，和参考图的暖店头对不上）
+    /* —— 看板 / 书目带 / 外摆 —— */
+    signPanel: toon('#e9e2d3'),                  // 看板底色（衬在发光字面板后面，四周留一圈边）
+    signEdge: toon('#cfc5ad'),                   // 看板收边
+    bannerGreen: toon('#41543d'),                // 书目带深绿
+    magGreen: toon('#3f5a3c'),                   // 店外杂志架绿头
+    magBody: toon('#eceae2'),                    // 杂志架柜体
+    /* —— 街面小件 —— */
+    pot: toon('#b06a45'),                        // 素烧陶盆
+    soil: toon('#463829'),
+    /* 盆栽叶：薄片 + 双面。描边显式归零是**双保险** —— 书店整组会过
+     * districtArt.prepare，那里已经给每个 mesh 写了 userData.outlineWeight = 0；
+     * 但 0.016m 厚的叶片一旦哪天真吃到默认分级（outlineWeightOf 默认 2），
+     * 外扩壳会把叶子鼓成一块绿色方块，所以在材质上再钉一次。 */
+    leafA: toon('#5f8a52', { outlineWeight: 0, side: THREE.DoubleSide }),
+    leafB: toon('#4a7345', { outlineWeight: 0, side: THREE.DoubleSide }),
+    bikeBody: toon('#2c3550'),                   // 单车车架（参考图那辆深蓝城市车）
+    bikeTire: toon('#23262a'),
+    bikeMetal: toon('#8e949b'),
   };
   /** 封面 / 书脊的几种布面与纸面颜色（低饱和，别把夜景色温拽跑）。 */
   const COVER = ['#8f3b34', '#2f4f6d', '#4a6b4a', '#a8763a', '#6b4a6d', '#3f5f66', '#8a7a4e', '#b0a08c'];
+  /** 杂志封面：比书脊亮一档，外摆架上要跳出来（参考图那排花花绿绿的周刊）。 */
+  const MAG = ['#e8b13c', '#d95f4a', '#5b8fc7', '#7fb069', '#e07a9a', '#8a6fbd', '#f0d264', '#4fa8a0'];
 
   /* ================= 位置与体量（2026-09 扩建）=================
    *
@@ -5891,8 +6303,10 @@ export function buildStreetBookStore(): { group: THREE.Group; boxes: BoxCollider
    *
    *   北 z=15.0   人行道（pavement 12.6..15.0）的南边线。旧值 18.0 把 3m 的人行
    *               道前场空着、店面缩在街后 4m —— 从街上一眼就读成"夹在缝里的小屋"。
-   *               北面 2.1m 外是路灯 (14, 12.9)（STORE_LAMP_X 那排），雨篷北挑到
-   *               z=13.95 也够不着它。
+   *               北面 2.1m 外是路灯 (14, 12.9)（STORE_LAMP_X 那排）。旧版还有
+   *               一道北挑 1.1m 的遮阳篷（到 z=13.95）；2026-09 换参考图立面时
+   *               已删（看板占满 3.40..4.30，篷正好挡在前面）。现在立面最北
+   *               只到看板滴水线 z=14.855，离灯杆更远。
    *   南 z=26.1   路缘石（planned-street-network，z=26.62）以北 0.52m。旧值 24.0
    *               白扔 2.5m 进深。
    *   西 x=12.7   居酒屋东墙 IZ.x1=11.7，留 1.0m 巷子。扩建后巷子只剩 z 14..15
@@ -6000,12 +6414,14 @@ export function buildStreetBookStore(): { group: THREE.Group; boxes: BoxCollider
   put(gbox(W, H1 - IH, zB - zIn), IM.ceil, CX, IH + (H1 - IH) / 2, (zIn + zB) / 2);
   mass('bookstore-wall-w', WX0 + FW / 2, IH / 2, (zIn + zB) / 2, FW, IH, zB - zIn, IM.wall);
   mass('bookstore-wall-e', WX1 - FW / 2, IH / 2, (zIn + zB) / 2, FW, IH, zB - zIn, IM.wall);
-  // 临街前墙：三段墙垛（窗与门之间那块是墙，不是玻璃）
-  mass('bookstore-pier-w', (WX0 + GX0) / 2, H1 / 2, zW, GX0 - WX0, H1, FP, BM.wall);
-  mass('bookstore-pier-m', (GX1 + DX0) / 2, H1 / 2, zW, DX0 - GX1, H1, FP, BM.wall);
-  mass('bookstore-pier-e', (DX1 + WX1) / 2, H1 / 2, zW, WX1 - DX1, H1, FP, BM.wall);
-  put(gbox(GX1 - GX0, H1 - GY1, FP), BM.wall, (GX0 + GX1) / 2, (GY1 + H1) / 2, zW);  // 窗楣
-  put(gbox(DX1 - DX0, H1 - DY1, FP), BM.wall, (DX0 + DX1) / 2, (DY1 + H1) / 2, zW);  // 门楣
+  // 临街前墙：三段墙垛（窗与门之间那块是墙，不是玻璃）。
+  // 垛面一律白色铝型材 —— 参考图里整片店面（垛 / 梃 / 亮子）是同一套白铝，
+  // 米灰外墙只留在 1F 以上，店面本身读成一整片玻璃幕。
+  mass('bookstore-pier-w', (WX0 + GX0) / 2, H1 / 2, zW, GX0 - WX0, H1, FP, BM.alum);
+  mass('bookstore-pier-m', (GX1 + DX0) / 2, H1 / 2, zW, DX0 - GX1, H1, FP, BM.alum);
+  mass('bookstore-pier-e', (DX1 + WX1) / 2, H1 / 2, zW, WX1 - DX1, H1, FP, BM.alum);
+  put(gbox(GX1 - GX0, H1 - GY1, FP), BM.wall, (GX0 + GX1) / 2, (GY1 + H1) / 2, zW);  // 窗楣（上面压书目带）
+  put(gbox(DX1 - DX0, H1 - DY1, FP), BM.alum, (DX0 + DX1) / 2, (DY1 + H1) / 2, zW);  // 门楣
   // 地板：贴地薄**面**而不是厚盒。厚盒会生成一个 0.13m 高的碰撞盒，而玩家的落脚面
   // 仍在街道 floor(y=0) 上——进店就陷进地板 12cm；平面的 AABB 高度为 0，
   // collidesAt 按「脚踝以下」整块跳过，脚与地面齐平。
@@ -6016,16 +6432,24 @@ export function buildStreetBookStore(): { group: THREE.Group; boxes: BoxCollider
   shopFloor.receiveShadow = true;
   g.add(shopFloor);
 
-  /* ---- 橱窗（左 2/3）+ 敞开的门（右）---- */
+  /* ---- 橱窗（左 2/3）+ 敞开的门（右）----
+   *
+   * 参考图的店面是"落地玻璃 + 白铝型材"：窗台只有 0.18m（旧值 0.40 会把玻璃
+   * 压掉近半米，从街上一眼读成"柜台窗"），玻璃一路顶到 2.90 的横梃，
+   * 横梃以上再留 0.28m 亮子。三道竖梃（两端 + 一根中梃）把 3.90m 分成三格。
+   */
   // 玻璃跟便利店橱窗同一档：finish glass + 低透明度 + depthWrite false，
   // 隔着它看店内几乎无衰减（深蓝的通用玻璃贴图是给「假内饰」用的，会把书架压成灰）。
-  put(gbox(GX1 - GX0, GY1 - 0.4, 0.06), BM.shopGlass, (GX0 + GX1) / 2, (0.4 + GY1) / 2, zG);
-  put(gbox(GX1 - GX0, 0.4, 0.14), BM.wall, (GX0 + GX1) / 2, 0.2, zG);            // 窗下矮墙
-  put(gbox(GX1 - GX0, 0.09, 0.12), BM.frame, (GX0 + GX1) / 2, GY1 - 0.045, zG);  // 窗顶横档
+  const SILL = 0.18;                                                             // 窗下矮墙高（落地）
+  const TRA = GY1 - 0.28;                                                        // 横梃（上部亮子下沿）
+  put(gbox(GX1 - GX0, GY1 - SILL, 0.06), BM.shopGlass, (GX0 + GX1) / 2, (SILL + GY1) / 2, zG);
+  put(gbox(GX1 - GX0, SILL, 0.14), BM.alum, (GX0 + GX1) / 2, SILL / 2, zG);      // 窗下矮墙
+  put(gbox(GX1 - GX0, 0.09, 0.12), BM.alum, (GX0 + GX1) / 2, GY1 - 0.045, zG);   // 窗顶横档
+  put(gbox(GX1 - GX0, 0.07, 0.11), BM.alum, (GX0 + GX1) / 2, TRA, zG - 0.03);    // 横梃（亮子分格）
   for (const mx of [GX0, CX - W * 0.18, GX1]) {                                  // 两根边梃 + 一根中梃
-    put(gbox(0.09, GY1, 0.10), BM.frame, mx, GY1 / 2, zG - 0.03);
+    put(gbox(0.09, GY1, 0.10), BM.alum, mx, GY1 / 2, zG - 0.03);
   }
-  solid('bookstore-shopfront', (GX0 + GX1) / 2, (0.4 + GY1) / 2, zG, GX1 - GX0, GY1 - 0.4, 0.24);
+  solid('bookstore-shopfront', (GX0 + GX1) / 2, (SILL + GY1) / 2, zG, GX1 - GX0, GY1 - SILL, 0.24);
   // 门框 + 门楣灯 + 敞开的那扇
   /* 三根 BM.frame 的收口关系（旧版三根都顶到 DY1、门槛也整宽，四组共面）：
    *   ① 竖梃**缩到门楣下沿 2.37**、门楣横贯整个门洞 17.90..18.80 压在竖梃上。
@@ -6035,10 +6459,10 @@ export function buildStreetBookStore(): { group: THREE.Group; boxes: BoxCollider
    *   ② 门槛铜条**缩到两竖梃内侧**（17.97..18.73）。旧版整宽 17.90..18.80，
    *      端面又与竖梃外侧面共面 0.04×0.14 ×2 组。
    * 改完共面面积归零。 */
-  put(gbox(0.07, DY1 - 0.08, 0.14), BM.frame, DX0 + 0.035, (DY1 - 0.08) / 2, zG);
-  put(gbox(0.07, DY1 - 0.08, 0.14), BM.frame, DX1 - 0.035, (DY1 - 0.08) / 2, zG);
-  put(gbox(DX1 - DX0, 0.08, 0.14), BM.frame, (DX0 + DX1) / 2, DY1 - 0.04, zG);
-  put(gbox(0.90, 0.09, 0.08), BM.cool, (DX0 + DX1) / 2, DY1 + 0.09, zW - FP / 2 - 0.05);
+  put(gbox(0.07, DY1 - 0.08, 0.14), BM.alum, DX0 + 0.035, (DY1 - 0.08) / 2, zG);
+  put(gbox(0.07, DY1 - 0.08, 0.14), BM.alum, DX1 - 0.035, (DY1 - 0.08) / 2, zG);
+  put(gbox(DX1 - DX0, 0.08, 0.14), BM.alum, (DX0 + DX1) / 2, DY1 - 0.04, zG);
+  put(gbox(0.90, 0.09, 0.08), BM.lamp, (DX0 + DX1) / 2, DY1 + 0.09, zW - FP / 2 - 0.05);
   // 门扇转 180° 贴到门洞西侧中垛的店内面（比前墙内表面再进 3cm）。
   // 不转开的话，斜着门扇的 AABB 会切进洞口，0.85m 的洞只剩 ~0.4m 能过。
   put(gbox(0.80, DY1 - 0.08, 0.045), BM.shopGlass, DX0 - 0.42, (DY1 - 0.08) / 2, zW + FP / 2 + 0.03, Math.PI);
@@ -6169,53 +6593,130 @@ export function buildStreetBookStore(): { group: THREE.Group; boxes: BoxCollider
   pile(19.05, 22.30, 3, 0.32, 0.24, 9102);
   pile(13.10, 17.20, 4, 0.30, 0.24, 9103);
 
-  // 遮阳篷（临街，米色，微斜）+ 支架。1F 加高到 3.4 后篷底抬到 3.22，北挑
-  // 1.1m 落在 z 13.95..15.05 —— 北面 1.05m 外就是路灯 (14, 12.9)，够不着。
-  put(gbox(W * 0.8, 0.06, 1.1), BM.trim, CX, H1 - 0.18, zN - 0.5).rotateX(0.10);
-  for (const dx of [-W * 0.36, W * 0.36]) {
-    put(gbox(0.05, 0.55, 0.05), BM.dark, CX + dx, H1 - 0.45, zN - 0.06);
-  }
-
-  // 门侧海报框（中間柱 x 17.05..17.90，0.85m 宽）：临街面唯一能贴纸的地方——
-  // 西边整片是玻璃、东边是门洞，中间这根垛不挂点东西就只剩一条白墙。
-  put(gbox(0.68, 0.92, 0.05), BM.frame, (GX1 + DX0) / 2, 1.72, zN - 0.08);
-  const doorPoster = new THREE.Mesh(new THREE.PlaneGeometry(0.58, 0.82),
-    toon('#ffffff', { map: bookPosterTexture('話題', 97) }));
-  doorPoster.position.set((GX1 + DX0) / 2, 1.72, zN - 0.11);
-  doorPoster.rotation.y = Math.PI;   // 牌面朝 -z（临街）
-  g.add(doorPoster);
-
-  // 店招（发光面板 + 深色底板，挂 1F 腰线上方）。
-  // 楼体从 6.6m 长到 12.4m，2.6m 的牌子在立面上会缩成一条，放到 3.2m。
+  /* ================= 店头：通面宽看板 + 深绿书目带 =================
+   *
+   * 参考图的店头是两段叠起来的：
+   *   上：一块通面宽的米色看板（大字假名 + 拉丁副标 + 左侧小枝纹）
+   *   下：一条深绿书目带，白字列出经营范围
+   * 两段都做成**自发光面板**（emissive + 贴图）：贴图里已经是最终颜色，不吃
+   * 光照就不会在雨夜里被压成一团灰（旧店招同款做法）。
+   *
+   * 竖向净空是卡死的：1F 顶 3.40（H1）→ 2F 窗框下沿 4.30，中间正好 0.90m，
+   * 全给看板；书目带贴在窗楣（2.90..3.40）那段墙上，厚 0.42。
+   *
+   * 旧版的遮阳篷（H1-0.18 挑出 1.1m）**删掉**了：参考图的店头没有篷，
+   * 玻璃一路顶到书目带；留着篷正好压在书目带和看板前面，两样都看不见。
+   * 删篷同时消掉它北挑到 z 13.95 的那条投影，街面反而干净。
+   */
   const signCanvas = (() => {
-    const { canvas, ctx } = makeCanvas(256, 64);
-    ctx.fillStyle = '#233240';
-    ctx.fillRect(0, 0, 256, 64);
-    ctx.fillStyle = '#f2ede2';
-    ctx.font = 'bold 34px sans-serif';
+    const { canvas, ctx } = makeCanvas(1024, 132);
+    ctx.fillStyle = '#e9e2d3';
+    ctx.fillRect(0, 0, 1024, 132);
+    // 四周留一圈收边：参考图的看板是一块有边框的独立板，不是刷在墙上的字
+    ctx.strokeStyle = '#cfc5ad';
+    ctx.lineWidth = 5;
+    ctx.strokeRect(9, 9, 1024 - 18, 132 - 18);
+    // 左侧小枝纹：淡绿圆底 + 一枝五叶
+    ctx.fillStyle = '#dbe5cf';
+    ctx.beginPath();
+    ctx.arc(112, 62, 30, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = '#6d8f57';
+    ctx.lineWidth = 3.2;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(112, 90);
+    ctx.quadraticCurveTo(104, 62, 114, 34);
+    ctx.stroke();
+    for (const [side, step, rot] of [[-1, 0, -0.5], [1, 1, 0.5], [-1, 2, -0.55], [1, 3, 0.5], [0, 4, -0.15]] as [number, number, number][]) {
+      ctx.fillStyle = '#7d9b6a';
+      ctx.beginPath();
+      ctx.ellipse(112 + side * 11, 82 - step * 13, 12, 5.2, rot, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    // 大字走明朝体：1962 年开的老书店，配黑体太新
+    ctx.fillStyle = '#3a352e';
+    ctx.font = 'bold 62px "Yu Mincho", "Hiragino Mincho ProN", "Noto Serif JP", "MS PMincho", serif';
     ctx.textAlign = 'center';
-    ctx.fillText('書泉堂書店', 128, 45);
+    ctx.textBaseline = 'alphabetic';
+    ctx.fillText('こもれび書店', 566, 74);
+    // 拉丁副标手工加字距：canvas 的 letterSpacing 各端支持不一，逐字排最稳
+    ctx.fillStyle = '#6a6156';
+    ctx.font = '16px "Helvetica Neue", Arial, sans-serif';
+    const sub = 'KOMOREBI BOOKS ・ since 1962';
+    const widths = [...sub].map((ch) => ctx.measureText(ch).width);
+    const gap = 2.4;
+    const total = widths.reduce((s, w) => s + w + gap, -gap);
+    let pen = 566 - total / 2;
+    [...sub].forEach((ch, i) => {
+      ctx.fillText(ch, pen + widths[i] / 2, 106);
+      pen += widths[i] + gap;
+    });
     return toTexture(canvas);
   })();
-  const signMat = emissive('#ffffff', { map: signCanvas });   // 基色走白，颜色全在贴图（基色会乘进贴图，深底色会压暗字）
-  /* 店招中心 y = H1 + 0.50（3.90）：底板高 0.90 ⇒ 顶边正好 4.35，**等于 2F 窗洞下沿**
-   * （窗心 fy+1.70=5.10，高 1.5 ⇒ 4.35..5.85）。旧版取 H1+0.62（4.02）顶边 4.47，
-   * 与窗洞下沿重叠 0.12m —— 底板与窗玻璃同在 z 14.95..15.01，正面共面 0.138 m²，
-   * 从街上正视立面时会闪。顶边对齐后两者只是对接（法线相反），共面面积归零。 */
-  const sign = new THREE.Mesh(new THREE.PlaneGeometry(3.2, 0.80), signMat);
-  sign.position.set(CX, H1 + 0.50, zN - 0.10);
+  const bannerCanvas = (() => {
+    const { canvas, ctx } = makeCanvas(1024, 56);
+    ctx.fillStyle = '#41543d';
+    ctx.fillRect(0, 0, 1024, 56);
+    ctx.fillStyle = '#efe9d8';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    const text = '本・雑誌・コミック・文庫・参考書・文具・絵本・ご注文承ります';
+    let size = 30;
+    const font = (s: number) => `bold ${s}px "Yu Gothic", "Hiragino Sans", "Noto Sans JP", sans-serif`;
+    ctx.font = font(size);
+    // 逐号缩到装得下：字体回退到别的族时字宽会变，写死字号会溢出色带
+    while (ctx.measureText(text).width > 950 && size > 14) {
+      size -= 1;
+      ctx.font = font(size);
+    }
+    ctx.fillText(text, 512, 30);
+    return toTexture(canvas);
+  })();
+
+  // 书目带：贴在窗楣那段墙上。底板通面宽（比两侧垛面再挑出 4cm），
+  // 字面板再往前 1cm，避免与底板正面共面。
+  put(gbox(W - 0.04, 0.42, 0.06), BM.bannerGreen, CX, 3.16, zN - 0.075);
+  const banner = new THREE.Mesh(new THREE.PlaneGeometry(W - 0.08, 0.38),
+    emissive('#ffffff', { map: bannerCanvas }));
+  banner.position.set(CX, 3.16, zN - 0.115);
+  banner.rotation.y = Math.PI;   // 牌面朝 -z（临街）
+  g.add(banner);
+
+  /* 看板：通面宽米色板，卡在 1F 顶（3.40）与 2F 窗框下沿（4.30）之间。
+   * 底板做 0.16 厚，背面（z 15.03）埋进 2F 楼体 3cm —— 旧版底板背面正好压在
+   * z 15.00 的楼体北面上，两者共面；埋进去之后这层重合面消失。 */
+  const sign = new THREE.Mesh(new THREE.PlaneGeometry(W - 0.08, 0.84),
+    emissive('#ffffff', { map: signCanvas }));
+  sign.position.set(CX, 3.85, zN - 0.14);
   sign.rotation.y = Math.PI;   // 牌面朝 -z（临街），默认 +z 会转向楼内只剩背板
   g.add(sign);
-  put(gbox(3.35, 0.90, 0.06), BM.frame, CX, H1 + 0.50, zN - 0.02);
+  put(gbox(W - 0.04, 0.90, 0.16), BM.signPanel, CX, 3.85, zN - 0.05);
+  /* 板底滴水线：x 必须比看板底板**窄**，不能同宽。
+   * 看板底板 0.16 厚会走 districtArt.prepare 的倒角（min>0.075），倒角只削掉
+   * 侧面的上下棱、**平面仍留在 ±3.48**；滴水线 0.06 厚不倒角，同宽就与底板
+   * 的 ±x 面共面（实测 y 3.419..3.430 × z 14.889..15.011 = 13cm²，同法线必闪）。
+   * 收窄到 W-0.12 后两侧各让开 4cm。 */
+  put(gbox(W - 0.12, 0.06, 0.19), BM.signEdge, CX, 3.40, zN - 0.05);
+
+  /* 橱窗内贴的海报：参考图里左侧那块玻璃后面立着一张海报。
+   * 旧版把海报挂在中间墙垛上（临街面唯一能贴纸的地方）；现在垛面统一成白铝型材，
+   * 海报挪进玻璃内侧——从街上看是"贴在橱窗里侧"，正是参考图的样子。 */
+  const winPoster = new THREE.Mesh(new THREE.PlaneGeometry(0.62, 0.86),
+    toon('#ffffff', { map: bookPosterTexture('新刊', 97) }));
+  winPoster.position.set(14.00, 1.82, zG + 0.07);
+  winPoster.rotation.y = Math.PI;   // 牌面朝 -z（临街）
+  g.add(winPoster);
 
   // 上部三层窗：临街每层三扇 + 两侧山墙各一扇（侧窗逐层错位，不然是一条竖井）
+  // 窗框跟店面统一走白铝型材（旧版是 BM.frame 的深色，跟下面的白店面割裂）。
   for (let f = 1; f < FLOORS; f++) {
     const fy = H1 + (f - 1) * HF;
     for (let i = 0; i < 3; i++) {
       const lit = (i + f) % 3 !== 1;   // 每层暗一扇，且暗的位置逐层挪
       const wx = CX - W * 0.3 + i * W * 0.3;
       put(gbox(1.15, 1.5, 0.06), lit ? BM.warm : BM.glass, wx, fy + 1.70, zN - 0.02);
-      put(gbox(1.25, 1.6, 0.05), BM.frame, wx, fy + 1.70, zN - 0.015);
+      put(gbox(1.25, 1.6, 0.05), BM.alum, wx, fy + 1.70, zN - 0.015);
     }
     for (const s of [-1, 1] as number[]) {
       put(gbox(0.05, 1.3, 1.1), r() > 0.5 ? BM.warm : BM.glass,
@@ -6223,40 +6724,238 @@ export function buildStreetBookStore(): { group: THREE.Group; boxes: BoxCollider
     }
   }
 
-  // 空调外机（二层临街西端，避开窗与店招）+ 落水管（东山墙，通到新檐口 12.4m）
-  put(gbox(0.6, 0.4, 0.3), BM.dark, CX - W / 2 + 0.45, H1 + 0.50, zN - 0.22);
+  /* 空调外机 + 落水管（东山墙，通到檐口 12.4m）。
+   * 外机原来挂在 H1+0.50（3.90）——那是旧店招的位置；现在整条 3.40..4.30 被
+   * 通面宽看板占满，外机会直接插进看板里。挪到 3F 的层间带（2F 窗顶 5.85 与
+   * 3F 窗底 7.35 之间），x 也移到西端垛外，避开三扇窗。 */
+  put(gbox(0.6, 0.4, 0.3), BM.dark, CX - W / 2 + 0.34, H1 + 2 * HF + 0.30, zN - 0.22);
+  put(gbox(0.66, 0.05, 0.36), BM.alumDeep, CX - W / 2 + 0.34, H1 + 2 * HF + 0.07, zN - 0.22);  // 支架
   put(gbox(0.07, HT, 0.07), BM.dark, CX + W / 2 + 0.06, HT / 2, zN + 0.15);
 
-  // 门口台阶 + 单车（单车放东侧，西侧贴居酒屋菜单牌/饮料箱）
+  // 门口台阶（单车挪到西端窗下，见下面的 streetProps）
   put(gbox(1.1, 0.12, 0.8), BM.trim, CX + W * 0.30, 0.06, zN - 0.4);
-  put(gbox(0.05, 0.62, 0.05), BM.dark, CX + W * 0.40, 0.31, zN - 1.4, 0.3);
-  put(gbox(0.05, 0.62, 0.05), BM.dark, CX + W * 0.40 + 0.56, 0.31, zN - 1.35, -0.2);
-  put(gbox(0.56, 0.05, 0.05), BM.frame, CX + W * 0.40 + 0.28, 0.62, zN - 1.38, 0);
 
   // 西侧竖招牌（縦看板，正对居酒屋巷口——从居酒屋往东第一家，招牌必须朝西读得到）
   const sideCanvas = (() => {
-    const { canvas, ctx } = makeCanvas(64, 192);
+    const { canvas, ctx } = makeCanvas(64, 224);
     ctx.fillStyle = '#1d3a4a';
-    ctx.fillRect(0, 0, 64, 192);
+    ctx.fillRect(0, 0, 64, 224);
     ctx.fillStyle = '#f2ede2';
-    ctx.font = 'bold 36px sans-serif';
+    ctx.font = 'bold 34px "Yu Mincho", "Hiragino Mincho ProN", serif';
     ctx.textAlign = 'center';
-    ctx.fillText('書', 32, 54);
-    ctx.fillText('泉', 32, 112);
-    ctx.fillText('堂', 32, 170);
+    ctx.textBaseline = 'middle';
+    // 竖排「こもれび」四字：店名太长，侧面只挂字号
+    ['こ', 'も', 'れ', 'び'].forEach((ch, i) => ctx.fillText(ch, 32, 44 + i * 52));
     return toTexture(canvas);
   })();
   const sideSignMat = emissive('#ffffff', { map: sideCanvas });
-  const sideSign = new THREE.Mesh(new THREE.PlaneGeometry(0.5, 1.6), sideSignMat);
-  sideSign.position.set(CX - W / 2 - 0.06, H1 - 1.15, zN + 0.35);
+  const sideSign = new THREE.Mesh(new THREE.PlaneGeometry(0.5, 1.75), sideSignMat);
+  /* 牌面必须比背板**外皮**（12.63）再往西 1.5cm。
+   * 旧版牌面 x=12.64、背板 x 12.63..12.68 —— 牌面正好落在背板盒子里，
+   * 从巷口看过去只有一块深色板，"こもれび"四个字一个字都读不到。 */
+  sideSign.position.set(CX - W / 2 - 0.085, H1 - 1.15, zN + 0.35);
   sideSign.rotation.y = -Math.PI / 2;   // 朝 -x（居酒屋方向）
   g.add(sideSign);
-  put(gbox(0.05, 1.75, 0.62), BM.frame, CX - W / 2 - 0.045, H1 - 1.15, zN + 0.35); // 背板
+  put(gbox(0.05, 1.90, 0.62), BM.frame, CX - W / 2 - 0.045, H1 - 1.15, zN + 0.35); // 背板
 
   // 西墙一层贴报栏（西侧不是全 blank 的山墙；这段墙朝西对着居酒屋与便利店
   // 之间的空地，203 阳台斜看得到）
   put(gbox(0.06, 1.1, 0.8), BM.frame, CX - W / 2 - 0.02, 1.75, CZ + 1.2);
   put(gbox(0.04, 0.9, 0.6), BM.cool, CX - W / 2 - 0.05, 1.75, CZ + 1.2);
+
+  /* ================= 街面道具（参考图同款四件）=================
+   *
+   * 参考图店门口摆着：东侧外摆杂志架（绿头「週刊誌・月刊誌」）、正对中垛的
+   * A 字立牌、西端窗下的单车、靠墙的陶盆绿植。这四件是"书店"这个身份在
+   * 街面上最先被读到的东西——只有立面没有外摆，从街上一眼仍是"一栋有玻璃
+   * 的楼"。
+   *
+   * 三件有碰撞（架 / 牌 / 车）都走声明式盒子：整组是 sceneCollideSkip，
+   * 不登记就等着玩家从杂志架里穿过去。
+   * 门口走廊 x=18.35 的净空必须留住（verify-bookstore.mjs B7 逐点扫），
+   * 所以外摆一律避开 18.35±0.30。
+   */
+  const PZ = 13.58;                              // 外摆统一贴人行道中段（12.6..15.0）
+  /** 细杆：给定两端点拉一根方料（单车车架/支腿用）。 */
+  const rodTo = (parent: THREE.Object3D, a: number[], b: number[], r: number, mat: THREE.Material) => {
+    const dx = b[0] - a[0], dy = b[1] - a[1], dz = b[2] - a[2];
+    const len = Math.hypot(dx, dy, dz);
+    const m = new THREE.Mesh(gbox(r * 2, len, r * 2), mat);
+    m.position.set((a[0] + b[0]) / 2, (a[1] + b[1]) / 2, (a[2] + b[2]) / 2);
+    m.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), new THREE.Vector3(dx / len, dy / len, dz / len));
+    parent.add(m);
+    return m;
+  };
+
+  /* ---- ① 外摆杂志架（东端，门东侧）----
+   * 参考图里它比门还抢眼：白柜体 + 绿头，三排封面朝街斜插。
+   * 位置卡在 x 18.74..19.94 —— 西边离门口走廊 0.39m（够走），
+   * 东边离东邻 parcel-23.5-19.6 的西墙（x 20.02）还有 0.08m。 */
+  {
+    const RX = 19.34, RZ = 14.10;
+    put(gbox(1.20, 0.10, 0.40), BM.alumDeep, RX, 0.05, RZ);                 // 踢脚
+    put(gbox(1.20, 0.80, 0.40), BM.magBody, RX, 0.50, RZ);                  // 柜体
+    put(gbox(1.24, 0.28, 0.44), BM.magGreen, RX, 1.04, RZ - 0.02);          // 绿头
+    const magHead = (() => {
+      const { canvas, ctx } = makeCanvas(256, 56);
+      ctx.fillStyle = '#3f5a3c';
+      ctx.fillRect(0, 0, 256, 56);
+      ctx.fillStyle = '#efe9d8';
+      ctx.font = 'bold 26px "Yu Gothic", "Hiragino Sans", "Noto Sans JP", sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('週刊誌・月刊誌', 128, 30);
+      return toTexture(canvas);
+    })();
+    const head = new THREE.Mesh(new THREE.PlaneGeometry(1.20, 0.24), emissive('#ffffff', { map: magHead }));
+    head.position.set(RX, 1.04, RZ - 0.245);
+    head.rotation.y = Math.PI;                                             // 朝 -z（街面）
+    g.add(head);
+    // 三排杂志：封面朝街，逐本错一点角度与高度，别读成一排色块
+    for (let row = 0; row < 3; row++) {
+      for (let i = 0; i < 5; i++) {
+        const idx = row * 5 + i;
+        const my = 0.20 + row * 0.27;
+        const mx = RX - 0.44 + i * 0.22;
+        const cover = new THREE.Mesh(new THREE.PlaneGeometry(0.19, 0.23),
+          toon('#ffffff', { map: magCoverTexture(idx, MAG[idx % MAG.length]), emissive: '#5a5248', emissiveIntensity: 0.42 }));
+        cover.position.set(mx, my, RZ - 0.216);
+        // 先绕 y 翻面朝 -z（临街），再绕世界 x 后仰一点 —— Euler 默认 XYZ，
+        // 矩阵是 Rx·Ry，作用到顶点上是先 Ry 后 Rx，正好是这个顺序。
+        cover.rotation.set(0.08 + (r() - 0.5) * 0.05, Math.PI, 0);
+        g.add(cover);
+      }
+    }
+    solid('bookstore-mag-rack', RX, 0.60, RZ, 1.26, 1.20, 0.50);
+  }
+
+  /* ---- ② A 字立牌（正对中间墙垛 x 17.05..17.90）---- */
+  {
+    const AX = 17.48, AZ = 13.58;
+    const aframeCanvas = (() => {
+      const { canvas, ctx } = makeCanvas(128, 192);
+      ctx.fillStyle = '#f4f1e8';
+      ctx.fillRect(0, 0, 128, 192);
+      ctx.strokeStyle = '#d8d2c4';
+      ctx.lineWidth = 4;
+      ctx.strokeRect(7, 7, 114, 178);
+      ctx.fillStyle = '#e8a33c';
+      ctx.fillRect(16, 18, 96, 26);                       // 顶上那块橙色小标
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 17px "Yu Gothic", sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('ジャンプ', 64, 32);
+      ctx.fillStyle = '#2f2a26';
+      ctx.font = 'bold 16px "Yu Gothic", sans-serif';
+      ctx.fillText('週刊少年', 64, 72);
+      ctx.fillText('ジャンプ', 64, 94);
+      ctx.fillStyle = '#b8471f';
+      ctx.font = 'bold 22px "Yu Gothic", sans-serif';
+      ctx.fillText('12号', 64, 126);
+      ctx.fillStyle = '#4a443c';
+      ctx.font = '13px "Yu Gothic", sans-serif';
+      ctx.fillText('コミック最新刊', 64, 154);
+      ctx.fillText('入荷しました！', 64, 174);
+      return toTexture(canvas);
+    })();
+    // 两块板对靠成人字：北板（朝街那面贴海报）上沿向 +z 收，南板镜像
+    const LEAN = 0.16;
+    const face = put(gbox(0.62, 0.94, 0.035), BM.magBody, AX, 0.48, AZ - 0.078);
+    face.rotation.x = LEAN;
+    const back = put(gbox(0.62, 0.94, 0.035), BM.magBody, AX, 0.48, AZ + 0.078);
+    back.rotation.x = -LEAN;
+    put(gbox(0.62, 0.05, 0.06), BM.alumDeep, AX, 0.95, AZ);                 // 顶铰
+    const card = new THREE.Mesh(new THREE.PlaneGeometry(0.54, 0.84),
+      toon('#ffffff', { map: aframeCanvas }));
+    card.position.set(AX, 0.49, AZ - 0.101);
+    card.rotation.set(LEAN, Math.PI, 0);   // 先翻面朝 -z，再随板一起后仰
+    g.add(card);
+    solid('bookstore-aframe', AX, 0.47, AZ, 0.66, 0.94, 0.34);
+  }
+
+  /* ---- ③ 单车（西端窗下，车头朝西）----
+   * 旧版是"两根竖棍 + 一根横杆"，2m 外就露馅。改成真车：两个轮圈 +
+   * 六段车架管 + 车把 / 车座 / 前筐 / 后货架。轮用 TorusGeometry，
+   * 环面默认就在 XY 平面上（轴向 +z），正好是"沿 x 走的车轮"。 */
+  {
+    const bike = new THREE.Group();
+    bike.name = 'bookstore-bike';
+    // 抬高 25mm：轮心 0.33 + 环半径 0.33 + 胎管 0.024 = 触地 -0.024，
+    // 不抬的话整条轮胎沉进人行道 2.4cm（车架坐标就不用逐个改了）。
+    bike.position.set(13.78, 0.025, PZ);
+    bike.rotation.y = Math.PI;                       // 车头朝 -x（西），和参考图同向
+    const wheelGeo = new THREE.TorusGeometry(0.33, 0.024, 6, 20);
+    const hubGeo = new THREE.CylinderGeometry(0.045, 0.045, 0.07, 10);
+    hubGeo.rotateX(Math.PI / 2);
+    for (const wx of [0.55, -0.55]) {
+      const w = new THREE.Mesh(wheelGeo, BM.bikeTire);
+      w.position.set(wx, 0.33, 0);
+      bike.add(w);
+      const hub = new THREE.Mesh(hubGeo, BM.bikeMetal);
+      hub.position.set(wx, 0.33, 0);
+      bike.add(hub);
+    }
+    // 车架六管：五通(0,0.30) → 头管(0.42,0.62) / 座管(-0.20,0.78) / 后轴(-0.55,0.33)
+    rodTo(bike, [0.00, 0.30, 0], [0.42, 0.62, 0], 0.022, BM.bikeBody);   // 下管
+    rodTo(bike, [0.00, 0.30, 0], [-0.20, 0.78, 0], 0.022, BM.bikeBody);  // 座管
+    rodTo(bike, [0.42, 0.62, 0], [-0.18, 0.72, 0], 0.020, BM.bikeBody);  // 上管
+    rodTo(bike, [0.00, 0.30, 0], [-0.55, 0.33, 0], 0.018, BM.bikeBody);  // 后下叉
+    rodTo(bike, [-0.20, 0.78, 0], [-0.55, 0.33, 0], 0.018, BM.bikeBody); // 后上叉
+    rodTo(bike, [0.42, 0.62, 0], [0.55, 0.33, 0], 0.020, BM.bikeMetal);  // 前叉
+    rodTo(bike, [0.42, 0.66, 0], [0.46, 0.86, 0], 0.020, BM.bikeMetal);  // 立管
+    const bar = new THREE.Mesh(gbox(0.04, 0.04, 0.46), BM.bikeMetal);     // 车把（横向）
+    bar.position.set(0.46, 0.88, 0);
+    bike.add(bar);
+    const seat = new THREE.Mesh(gbox(0.24, 0.06, 0.13), BM.bikeBody);     // 车座
+    seat.position.set(-0.22, 0.84, 0);
+    bike.add(seat);
+    rodTo(bike, [-0.20, 0.76, 0], [-0.22, 0.82, 0], 0.018, BM.bikeMetal); // 座管露出段
+    const basket = new THREE.Mesh(gbox(0.30, 0.20, 0.26), BM.bikeMetal);  // 前筐
+    basket.position.set(0.62, 0.78, 0);
+    bike.add(basket);
+    const basketIn = new THREE.Mesh(gbox(0.26, 0.16, 0.22), BM.dark);     // 筐内（做出深度）
+    basketIn.position.set(0.62, 0.79, 0);
+    bike.add(basketIn);
+    const rack = new THREE.Mesh(gbox(0.34, 0.03, 0.20), BM.bikeMetal);    // 后货架
+    rack.position.set(-0.60, 0.72, 0);
+    bike.add(rack);
+    rodTo(bike, [-0.55, 0.70, 0], [-0.55, 0.33, 0], 0.014, BM.bikeMetal); // 货架撑杆
+    rodTo(bike, [0.02, 0.30, 0], [-0.08, 0.03, 0], 0.016, BM.bikeMetal);  // 支腿
+    const crank = new THREE.Mesh(gbox(0.06, 0.06, 0.22), BM.bikeMetal);   // 中轴
+    crank.position.set(0.00, 0.30, 0);
+    bike.add(crank);
+    g.add(bike);
+    solid('bookstore-bike', 13.78, 0.50, PZ, 1.34, 1.00, 0.30);
+  }
+
+  /* ---- ④ 陶盆绿植（靠墙，窗中偏西）---- */
+  {
+    const PX = 15.30, PZZ = 14.32;
+    const potGeo = new THREE.CylinderGeometry(0.155, 0.115, 0.26, 12);
+    const pot = new THREE.Mesh(potGeo, BM.pot);
+    pot.position.set(PX, 0.13, PZZ);
+    g.add(pot);
+    const rimGeo = new THREE.CylinderGeometry(0.175, 0.175, 0.05, 12);
+    const rim = new THREE.Mesh(rimGeo, BM.pot);
+    rim.position.set(PX, 0.255, PZZ);
+    g.add(rim);
+    const soil = new THREE.Mesh(new THREE.CylinderGeometry(0.155, 0.155, 0.03, 12), BM.soil);
+    soil.position.set(PX, 0.268, PZZ);
+    g.add(soil);
+    // 叶片：薄片沿各自方向斜插出来。quaternion 直接对齐"叶长轴 → 方向"，
+    // 比堆 rotation.x/y 稳（Euler 默认 XYZ，先转后转的顺序很容易搞反）。
+    const up = new THREE.Vector3(0, 1, 0);
+    for (let i = 0; i < 11; i++) {
+      const yaw = i * 2.399 + r() * 0.5;
+      const tilt = 0.42 + r() * 0.52;
+      const dir = new THREE.Vector3(Math.sin(tilt) * Math.cos(yaw), Math.cos(tilt), Math.sin(tilt) * Math.sin(yaw));
+      const leaf = new THREE.Mesh(gbox(0.085, 0.30, 0.016), i % 2 ? BM.leafA : BM.leafB);
+      leaf.position.set(PX + dir.x * 0.15, 0.28 + dir.y * 0.15, PZZ + dir.z * 0.15);
+      leaf.quaternion.setFromUnitVectors(up, dir);
+      g.add(leaf);
+    }
+  }
 
   // 橱窗暖光洒到湿人行道上。书店是这一排里唯一「橱窗比门大」的店——
   // 暖光板 BM.warm 铺了 W*0.55 宽，但地面此前毫无回应，夜里橱窗像悬空的灯箱。
@@ -6400,8 +7099,14 @@ export function buildSmallPark(): THREE.Group {
     [PCX + 1.6, PCZ + 1.1],     // 原 PCZ+2，北移 0.9
     [PCX - 1, PCZ + 0.6],       // 原 PCZ+1，北移 0.4
   ];
+  /* 公园植栽的叶簇场。自带 PRNG —— 蹭 `r()` 会把下面灌木的位置和大小整体错位。
+   * 场挂在 `g` 上：`buildTree/buildShrub` 收到的坐标就是 `g` 的局部坐标，
+   * 所以 `g` 有没有 transform 都不影响对位。 */
+  let parkLeafSeed = 51009;
+  const parkLeafRnd = () => { parkLeafSeed = (Math.imul(parkLeafSeed, 1664525) + 1013904223) >>> 0; return parkLeafSeed / 4294967296; };
+  const parkLeaf = createLeafField(parkLeafRnd, 3000);
   for (const [tx, tz] of treePositions) {
-    const tree = buildTree(tx, tz, 4.5 + r() * 1.5, r() * 10000 | 0, { trunk: PM.woodDeep, leaf: PM.leaf, leafDeep: PM.leafDeep, leafWarm: PM.leafWarm });
+    const tree = buildTree(tx, tz, 4.5 + r() * 1.5, r() * 10000 | 0, { trunk: PM.woodDeep, leaf: PM.leaf, leafDeep: PM.leafDeep, leafWarm: PM.leafWarm }, parkLeaf);
     g.add(tree);
   }
 
@@ -6412,9 +7117,12 @@ export function buildSmallPark(): THREE.Group {
     [PX0 + 0.6, PCZ], [PX1 - 0.8, PCZ - 1],
   ];
   for (const [sx, sz] of shrubSpots) {
-    const shrub = buildShrub(sx, sz, 0.5 + r() * 0.3, 0.45 + r() * 0.25, 0.5 + r() * 0.3, r() * 10000 | 0, { leaf: PM.leaf, leafDeep: PM.leafDeep });
+    const shrub = buildShrub(sx, sz, 0.5 + r() * 0.3, 0.45 + r() * 0.25, 0.5 + r() * 0.3, r() * 10000 | 0, { leaf: PM.leaf, leafDeep: PM.leafDeep }, parkLeaf);
     g.add(shrub);
   }
+  /* 三棵树 + 六丛灌木全登记完才 build。`build()` 自带 `userData.noMerge`，
+   * 这里 `RoomScene` 后面会对整组做 `mergeByMaterial`，没有那个标记会被烘掉。 */
+  g.add(parkLeaf.build('park-planting-leaves'));
 
   // ---- 5) 长椅（2 张）----
   for (const [bx, bz, by] of [[PCX - 2, PCZ + 2.5, 0], [PCX + 3.5, PCZ - 2, 0]] as Array<[number, number, number]>) {
@@ -6618,7 +7326,19 @@ export function buildStreetFurniture(): { group: THREE.Group; boxes: BoxCollider
   const SF = {
     metal: toon('#7c828b', { finish: 'metal' }),
     panel: emissive('#cfe6ff'),     // 发光显示面（无贴图，远处读作亮起的招牌/屏幕）
+    dark: toon('#293b41'),
+    display: toon('#e7dfcf'),
   };
+  const drinkMats = ['#7faaa0', '#d8b973', '#b46b70', '#7f99b1', '#dfd9cd'].map(color => toon(color));
+  /* 商品窗玻璃（2026-09-25：用户报「两种自动售货机都缺少玻璃罩」）。
+   * 与便利店那两台同一套参数（同色同透明度），保证"两种机器"看起来是一家的。
+   * 只做视觉、**不进碰撞盒**：`tmp/_verify-vending-colliders.mjs` 的断言 A 要求
+   * `streetfurn-*` 恰好 4 个盒、B2 要求柜面外 0.149m 才被挡。 */
+  const sfGlass = new THREE.MeshStandardMaterial({
+    color: '#c2dae6', transparent: true, opacity: 0.17,
+    roughness: 0.1, metalness: 0.05, depthWrite: false,
+  });
+  sfGlass.userData.outlineWeight = 0;
 
   const put = (geo: THREE.BufferGeometry, mat: THREE.Material, x: number, y: number, z: number, ry = 0) => {
     const m = new THREE.Mesh(geo, mat);
@@ -6634,9 +7354,37 @@ export function buildStreetFurniture(): { group: THREE.Group; boxes: BoxCollider
     // 柜体走 mass()：2.0m 高实心柜，玩家不该穿过去。三块发光面是 0.05m 薄贴片、
     // 贴在柜体正面之外，本身不构成阻挡（柜体盒已覆盖），故仍用 put()。
     mass(`streetfurn-vending-${++vendingN}`, x, 1.0, z, 1.1, 2.0, 0.7, SF.metal);
-    put(gbox(0.92, 1.35, 0.05), SF.panel, x, 1.35, z - 0.36);
-    put(gbox(0.5, 0.35, 0.05), SF.panel, x + 0.25, 0.45, z - 0.36);
-    put(gbox(0.18, 0.5, 0.05), SF.panel, x - 0.35, 0.55, z - 0.36);
+    put(gbox(0.92, 1.16, 0.035), SF.display, x, 1.24, z - 0.36);
+    put(gbox(0.92, 0.11, 0.035), SF.panel, x, 1.89, z - 0.36);
+    for (let row = 0; row < 3; row++) {
+      const y = .86 + row * .32;
+      put(gbox(.85, .028, .12), SF.metal, x, y - .14, z - .40);
+      for (let col = 0; col < 5; col++) {
+        const bx = x - .33 + col * .165;
+        put(new THREE.CylinderGeometry(.045, .045, .18, 8), drinkMats[col], bx, y, z - .41);
+        put(new THREE.CylinderGeometry(.027, .027, .03, 8), SF.display, bx, y + .106, z - .41);
+        put(gbox(.055, .055, .015), SF.display, bx, y, z - .459);
+        put(gbox(.058, .025, .026), SF.panel, bx, y - .164, z - .43);
+      }
+    }
+    put(gbox(.50, .19, .04), SF.dark, x + .10, .35, z - .36);
+    put(gbox(.12, .16, .04), SF.panel, x - .32, .51, z - .36);
+    put(gbox(.11, .024, .04), SF.dark, x - .32, .68, z - .36);
+    /* 商品窗玻璃罩：正面 0.94×1.20 一整片 + 左右两片 + 顶面一片，把商品**包住**
+     * （2026-09-25 用户先要"把饮料包起来的盖子"、再去掉门框、再说"你只盖了正面，
+     * 侧面没包住"）。**不做门框**。
+     *
+     * 货架/罐子/价签都凸在柜面(z-0.35)之外，最前的价签到 z-0.4665，所以正面玻璃压到
+     * z-0.475（z −0.485..−0.465）才算"罩"住商品。
+     * 侧板从正面玻璃一直包回柜面：z −0.485..−0.355（深 0.13），柜面在 −0.35，留 5mm
+     * 不贴上、避免与柜体共面。x 取 ±0.49 —— 陈列层最宽是那块 0.92 宽的发光展示面
+     * (x±0.46)，让出 0.03（与便利店那台同样的余量）。
+     * 顶板封在展示窗顶(1.82)与顶部招牌底(1.835)之间，宽 0.96 正好落在两侧板内面
+     * (±0.48)上、深 0.11 顶到柜面 —— 与既有几何**零体积相交**。 */
+    put(gbox(0.94, 1.20, 0.02), sfGlass, x, 1.24, z - 0.475);        // 正面
+    put(gbox(0.02, 1.20, 0.13), sfGlass, x - 0.49, 1.24, z - 0.42);   // 左侧
+    put(gbox(0.02, 1.20, 0.13), sfGlass, x + 0.49, 1.24, z - 0.42);   // 右侧
+    put(gbox(0.96, 0.015, 0.11), sfGlass, x, 1.8275, z - 0.41);       // 顶面
   };
   /* 停车场北侧这台原来在 x=-13.5 —— 而便利店侧路灯列 `STORE_LAMP_X` 里有一根正好
    * 立在 x=-14 / z=12.9：机柜 x −14.05..−12.95 把 0.112m 粗的灯柱和它 0.28m 的
@@ -6663,12 +7411,12 @@ export function buildStreetFurniture(): { group: THREE.Group; boxes: BoxCollider
     for (const dy of [-0.6, -0.2, 0.2, 0.6]) put(gbox(1.5, 0.04, 0.04), SF.metal, x, 1.0 + dy, z - 0.30);
     put(gbox(0.35, 0.5, 0.05), SF.panel, x - 0.5, 1.2, z - 0.31);
   };
-  parcel(-18.0, 14.5);
+  parcel(-17.0, 24.4); // Rear service court: keep the cycle shop window and entry clear.
   // 书店那台从 (16.5, 14.0) 挪到 (21.0, 14.0)：书店 2026-09 扩建把北墙从 z=18.0
   // 推到人行道南缘 z=15.0，这台 2.0m 高的柜子就正好杵在橱窗（x 13.15..17.05）
   // 前面 0.7m 处，把橱窗东半截挡死。挪到东邻 parcel-23.5-19.6 门前的人行道上
   // （已量：该处 z 13.6..14.4 内 0 顶点侵入，且落在 sidewalk 条带 12.6..15.0 上）。
-  parcel(21.0, 14.0);
+  parcel(29.3, 24.4); // Rear service court for the new low-rise shopping street.
 
   // 路牌 / 指引牌：柱 + 发光牌面
   const signpost = (x: number, z: number, w: number, h: number, ry = 0) => {

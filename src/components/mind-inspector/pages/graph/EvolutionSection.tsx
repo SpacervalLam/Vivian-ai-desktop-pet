@@ -3,7 +3,7 @@
  *
  * 数据源: invoke('get_persona_evolution', { characterId })
  * 展示人格自进化覆盖层（persona/evolution.rs）的两部分：
- * - entries:    已生效的自我调整（跨轨迹支持门槛 ≥2、最小间隔 6h 晋升）
+ * - entries:    已生效的自我调整（至少两个不同日期的原始事件、最小间隔 6h 晋升；明确边界即时局部生效）
  * - candidates: 酝酿中的候选（尚未达门槛，未注入 prompt）
  *
  * 纯展示组件：不改写任何数据；加载失败静默降级为空态。
@@ -33,6 +33,12 @@ const GPAPER = {
 const HAND =
   '"Caveat", "Ma Shan Zheng", "Dancing Script", "Hachi Maru Pop", "Kaiti SC", "KaiTi", "STKaiti", "DFKai-SB", "PingFang SC", "Microsoft YaHei", serif';
 
+interface GrowthEvidence {
+  memory_id: string;
+  quote: string;
+  timestamp: number;
+}
+
 /** 已生效的自我调整（Rust EvolutionEntry，timestamp 为秒） */
 interface EvolutionEntry {
   timestamp: number;
@@ -40,6 +46,9 @@ interface EvolutionEntry {
   text: string;
   reason: string;
   support: number;
+  scope?: string;
+  evidence?: GrowthEvidence[];
+  active?: boolean;
 }
 
 /** 酝酿中的候选调整（Rust EvolutionCandidate，first_seen 为秒） */
@@ -49,11 +58,15 @@ interface EvolutionCandidate {
   reason: string;
   first_seen: number;
   support: number;
+  scope?: string;
+  evidence?: GrowthEvidence[];
+  active?: boolean;
 }
 
 interface EvolutionPayload {
   entries: EvolutionEntry[];
   candidates: EvolutionCandidate[];
+  history?: EvolutionEntry[];
   is_empty: boolean;
   last_update: number;
 }
@@ -88,7 +101,9 @@ const GrowthRow: React.FC<{
   support: number;
   pending: boolean;
   requiredSupport: number;
-}> = ({ id, kind, text, reason, tsSec, support, pending, requiredSupport }) => {
+  scope?: string;
+  evidence?: GrowthEvidence[];
+}> = ({ id, kind, text, reason, tsSec, support, pending, requiredSupport, scope, evidence = [] }) => {
   const { t } = useTranslation();
   const kindLabel =
     kind === 'personality'
@@ -193,6 +208,15 @@ const GrowthRow: React.FC<{
           {text}
         </div>
 
+        {scope && <div style={{ fontSize: 12, color: GPAPER.inkSoft }}>
+          {t(`mind_inspector.graph.growth_scope_${scope}`, { defaultValue: scope })}
+        </div>}
+        {evidence.length > 0 && <details style={{ marginTop: 4, fontSize: 12, color: GPAPER.inkSoft }}>
+          <summary style={{ cursor: 'pointer' }}>{t('mind_inspector.graph.growth_sources')}</summary>
+          {evidence.map((e) => <blockquote key={e.memory_id} style={{ margin: '6px 0', paddingLeft: 8, borderLeft: `2px solid ${GPAPER.border}` }}>
+            <time>{dateStamp(e.timestamp)}</time> · {e.quote}
+          </blockquote>)}
+        </details>}
         {/* 调整依据 */}
         {reason && (
           <div
@@ -245,11 +269,12 @@ const EvolutionSection: React.FC<{ character: CharacterId }> = ({ character }) =
     load();
   };
 
-  const entries = data?.entries ?? [];
+  const entries = (data?.entries ?? []).filter((e) => e.active);
+  const archived = [...(data?.history ?? []), ...(data?.entries ?? []).filter((e) => !e.active)];
   const candidates = data?.candidates ?? [];
-  // 与后端 persona/evolution.rs 的 REQUIRED_SUPPORT 对齐（跨轨迹支持门槛）
+  // 普通成长至少需要两个不同的证据日期。
   const requiredSupport = 2;
-  const isEmpty = entries.length === 0 && candidates.length === 0;
+  const isEmpty = entries.length === 0 && candidates.length === 0 && archived.length === 0;
 
   return (
     <div
@@ -357,6 +382,8 @@ const EvolutionSection: React.FC<{ character: CharacterId }> = ({ character }) =
               kind={e.kind}
               text={e.text}
               reason={e.reason}
+              scope={e.scope}
+              evidence={e.evidence}
               tsSec={e.timestamp}
               support={e.support}
               pending={false}
@@ -364,6 +391,10 @@ const EvolutionSection: React.FC<{ character: CharacterId }> = ({ character }) =
             />
           ))}
 
+          {archived.length > 0 && <details style={{ fontSize: 12, color: GPAPER.inkSoft }}>
+            <summary style={{ cursor: 'pointer' }}>{t('mind_inspector.graph.growth_archived')}</summary>
+            {archived.map((e, i) => <div key={`old-${e.timestamp}-${i}`} style={{ padding: '6px 0' }}>{e.text}</div>)}
+          </details>}
           {/* 酝酿中的候选（未达跨轨迹支持门槛） */}
           {candidates.length > 0 && (
             <>
@@ -396,6 +427,8 @@ const EvolutionSection: React.FC<{ character: CharacterId }> = ({ character }) =
                   kind={c.kind}
                   text={c.text}
                   reason={c.reason}
+                  scope={c.scope}
+                  evidence={c.evidence}
                   tsSec={c.first_seen}
                   support={c.support}
                   pending

@@ -44,12 +44,16 @@
   outline-offset: 1px;
 }
 
-/* Scrapbook refinement: keep decoration, but give it a clearer hierarchy. */
+/* Scrapbook 主题正文应走马善政手写体（见 .codex-theme 的 --codex-font，已把
+   'Ma Shan Zheng' 排进中文回退链）。之前这里写死无衬线，等于把手账内容区的中文
+   整体压回黑体，导致心智观察器的外壳/工作区始终没用上马善政。改回继承主题的
+   --codex-font，让正文、按钮、输入框统一走手账字体链。极简主题不受影响
+   （它自己的 --codex-font 仍是 Segoe UI 无衬线）。 */
 .mind-main[data-ui-style="scrapbook"] .workbench-root,
 .mind-main[data-ui-style="scrapbook"] .workbench-root button,
 .mind-main[data-ui-style="scrapbook"] .workbench-root textarea,
 .mind-main[data-ui-style="scrapbook"] .workbench-root input {
-  font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-family: var(--codex-font);
 }
 
 .mind-main[data-ui-style="scrapbook"] .codex-brand-title,
@@ -360,7 +364,7 @@ body[data-ui-style="minimal"] :is(.codex-selbubble, .codex-editcard-overlay, .co
      上面那批 `--codex-*` 里有两支**不只是颜色**，直接跟着极简调色板走会把外壳的
      外观改掉 —— 而用户要的是「切主题时外壳外观不动，只换色」：
 
-       ① `--codex-font`：手账是 Kalam 手写体链，极简是 Segoe UI 无衬线链。
+       ① `--codex-font`：手账是 Kalam → Ma Shan Zheng 手写体链（中文落到马善政），极简是 Segoe UI 无衬线链。
           换掉之后封面条标题、日期印章、导航标签、页内 Tab 全变无衬线，连字宽都变了
           （标题 181.4px → 176.0px，导航卡高度 235px → 202px，全是字体派生出来的）。
        ② `--codex-shadow-sm/md/lg`：不只颜色不同，**几何也不同** ——
@@ -378,7 +382,7 @@ body[data-ui-style="minimal"] :is(.codex-selbubble, .codex-editcard-overlay, .co
      内容区的祖先，拆开声明就得把那 70 行调色板按「外壳 / 内容」劈成两半，
      而深色那两套块也要跟着劈 —— 改动面大得多。写在三块容器上只多 4 行，
      且内容区（`.mind-main` 子树）照旧拿到极简的无衬线字体与轻阴影。 */
-  font-family: 'Kalam', 'Segoe Print', 'STKaiti', 'KaiTi', '楷体', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  font-family: 'Kalam', 'Ma Shan Zheng', 'Segoe Print', 'STKaiti', 'KaiTi', '楷体', 'PingFang SC', 'Microsoft YaHei', sans-serif;
   --codex-shadow-sm: 0 1px 2px rgba(24, 24, 27, .1), 0 1px 3px rgba(24, 24, 27, .06);
   --codex-shadow-md: 0 2px 8px rgba(24, 24, 27, .14), 0 1px 2px rgba(24, 24, 27, .08);
   --codex-shadow-lg: 0 10px 28px rgba(24, 24, 27, .18), 0 3px 8px rgba(24, 24, 27, .1);

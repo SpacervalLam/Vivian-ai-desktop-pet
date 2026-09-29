@@ -12,6 +12,7 @@ pub mod router;
 pub mod schema;
 pub mod spark;
 pub mod thinking_stripper;
+pub(crate) mod tool_history;
 pub mod usage_store;
 pub mod wenxin;
 pub mod zhipu;

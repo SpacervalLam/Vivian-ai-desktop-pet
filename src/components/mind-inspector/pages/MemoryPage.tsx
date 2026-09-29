@@ -1,28 +1,19 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { BookOpen, Clock3, Heart, MessageCircle, RefreshCw, Search, Sparkles, Trash2 } from 'lucide-react';
+import { BookOpen, Clock3, Heart, MessageCircle, RefreshCw, Search, Sparkles, UserCircle } from 'lucide-react';
+import UserProfilePage from './UserProfilePage';
+import { buildRecentThreads, prepareMemory, speechLabel, splitSpeechPrefix, type Character, type MemoryRecord } from './memoryPresentation';
 import './MemoryPage.css';
 
-type Layer = 'facts' | 'episodes' | 'outreach' | 'recent';
-type Character = 'vivian' | 'nana';
-type MemoryRecord = {
-  id: string;
-  content: string;
-  memory_type: string;
-  importance: number;
-  created_at: number;
-  tags: string[];
-  metadata?: Record<string, unknown>;
-  consolidated?: boolean;
-  open_hooks?: Array<{ type?: string; condition: string; closed_at?: number | null }>;
-};
+type Layer = 'facts' | 'episodes' | 'outreach' | 'recent' | 'profile';
 
 const TABS = [
   { key: 'facts', title: '长期记忆', subtitle: '事实、偏好和约定', icon: Heart },
   { key: 'episodes', title: '共同经历', subtitle: '整理后的对话脉络', icon: BookOpen },
   { key: 'outreach', title: '主动问候', subtitle: '她主动发起的交流', icon: Sparkles },
   { key: 'recent', title: '近期对话', subtitle: '等待整理的片段', icon: MessageCircle },
+  { key: 'profile', title: '用户画像', subtitle: '关于你的了解', icon: UserCircle },
 ] as const;
 
 const isOutreach = (item: MemoryRecord) => item.memory_type === 'casual_conversation'
@@ -34,6 +25,7 @@ const layerOf = (item: MemoryRecord): Layer | null => {
   if (item.memory_type === 'long_term' || item.memory_type === 'important_event') return 'facts';
   if (item.memory_type === 'session_summary') return 'episodes';
   if (isOutreach(item)) return 'outreach';
+  if (item.metadata?.perspective === 'observer') return null;
   if (item.memory_type === 'short_term' || item.memory_type === 'casual_conversation') return 'recent';
   return null;
 };
@@ -44,8 +36,6 @@ const dateText = (value: number) => {
     ? new Date(millis).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })
     : '时间未知';
 };
-
-const displayContent = (content: string) => content.replace(/^\[(?:I say|User says|\w+ says) to everyone\]\s*/i, '').trim();
 
 const categoryName = (item: MemoryRecord) => {
   if (item.tags.includes('startup_greeting')) return '启动问候';
@@ -59,9 +49,10 @@ const categoryName = (item: MemoryRecord) => {
   return '对话片段';
 };
 
-const MemoryPage: React.FC = () => {
+const MemoryPage: React.FC<{ initialLayer?: Layer }> = ({ initialLayer = 'facts' }) => {
   const [character, setCharacter] = useState<Character>('vivian');
-  const [layer, setLayer] = useState<Layer>('facts');
+  const [layer, setLayer] = useState<Layer>(initialLayer);
+  useEffect(() => { setLayer(initialLayer); }, [initialLayer]);
   const [query, setQuery] = useState('');
   const [items, setItems] = useState<MemoryRecord[]>([]);
   const [loading, setLoading] = useState(false);
@@ -94,25 +85,17 @@ const MemoryPage: React.FC = () => {
     return () => { cancelled = true; unlisten?.(); };
   }, [character, load]);
 
+  const recentThreads = useMemo(() => buildRecentThreads(items.filter((item) => layerOf(item) === 'recent'), character), [items, character]);
   const counts = useMemo(() => items.reduce((acc, item) => {
     const key = layerOf(item);
-    if (key) acc[key]++;
+    if (key && key !== 'recent' && prepareMemory(item, character)) acc[key]++;
     return acc;
-  }, { facts: 0, episodes: 0, outreach: 0, recent: 0 }), [items]);
+  }, { facts: 0, episodes: 0, outreach: 0, recent: recentThreads.length, profile: 0 }), [items, character, recentThreads]);
 
   const visible = useMemo(() => items
-    .filter((item) => layerOf(item) === layer && `${item.content} ${item.tags.join(' ')}`.toLowerCase().includes(query.trim().toLowerCase()))
-    .sort((a, b) => b.created_at - a.created_at), [items, layer, query]);
-
-  const remove = async (item: MemoryRecord) => {
-    if (!window.confirm(`删除这条记忆？\n\n${displayContent(item.content)}`)) return;
-    try {
-      await invoke('delete_memory', { id: item.id, characterId: character });
-      setItems((current) => current.filter((entry) => entry.id !== item.id));
-    } catch (e) {
-      setError(String(e));
-    }
-  };
+    .filter((item) => layerOf(item) === layer && prepareMemory(item, character)?.body.toLowerCase().includes(query.trim().toLowerCase()))
+    .sort((a, b) => b.created_at - a.created_at), [items, layer, query, character]);
+  const visibleThreads = useMemo(() => recentThreads.filter((thread) => thread.searchText.toLowerCase().includes(query.trim().toLowerCase())), [recentThreads, query]);
 
   const activeTab = TABS.find((tab) => tab.key === layer)!;
 
@@ -135,29 +118,40 @@ const MemoryPage: React.FC = () => {
       {TABS.map((tab) => <button key={tab.key} type="button" className={`memory-layer-card ${layer === tab.key ? 'active' : ''}`} aria-pressed={layer === tab.key} onClick={() => setLayer(tab.key)}>
         <span className="memory-layer-icon"><tab.icon size={19} strokeWidth={1.7} /></span>
         <span className="memory-layer-copy"><strong>{tab.title}</strong><small>{tab.subtitle}</small></span>
-        <span className="memory-layer-count">{counts[tab.key]}</span>
+        <span className="memory-layer-count">{tab.key === 'profile' ? '↗' : counts[tab.key]}</span>
       </button>)}
     </nav>
 
-    <div className="memory-list-toolbar">
-      <div className="memory-list-heading"><activeTab.icon size={17} /><strong>{activeTab.title}</strong><span>{counts[layer]} 条</span></div>
+    {layer === 'profile' ? <div className="memory-profile-panel"><UserProfilePage characterId={character} embedded /></div> : <><div className="memory-list-toolbar">
+      <div className="memory-list-heading"><activeTab.icon size={17} /><strong>{activeTab.title}</strong><span>{counts[layer]} {layer === 'recent' ? '组' : '条'}</span></div>
       <label className="memory-search"><Search size={16} /><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索这里的记忆" aria-label="搜索记忆" /></label>
     </div>
-    {layer === 'recent' && <p className="memory-list-note">近期片段会逐渐整理成共同经历；当前想法只用于此刻，不会永久保存。</p>}
+    {layer === 'recent' && <p className="memory-list-note">按交流整理的近期片段；系统提示和重复记录已隐藏。这些片段之后会逐渐整理成共同经历。</p>}
     {layer === 'outreach' && <p className="memory-list-note">包含启动时的问候，以及从桌面或私聊主动发起的交流。</p>}
     {error && <p className="memory-error" role="alert">{error}</p>}
-    {loading ? <div className="memory-empty">正在读取记忆…</div> : visible.length === 0 ? <div className="memory-empty"><Clock3 size={24} /><strong>{query ? '没有找到匹配的记忆' : `还没有${activeTab.title}的记录`}</strong><span>{query ? '试试其他关键词' : '有新的交流时，这里会慢慢丰富起来'}</span></div> : <div className="memory-entry-grid">
+    {loading ? <div className="memory-empty">正在读取记忆…</div> : (layer === 'recent' ? visibleThreads.length === 0 : visible.length === 0) ? <div className="memory-empty"><Clock3 size={24} /><strong>{query ? '没有找到匹配的记忆' : `还没有${activeTab.title}的记录`}</strong><span>{query ? '试试其他关键词' : '有新的交流时，这里会慢慢丰富起来'}</span></div> : layer === 'recent' ? <div className="memory-thread-list">
+      {visibleThreads.map((thread) => <article className="memory-thread" key={thread.id}>
+        <div className="memory-thread-header"><span className="memory-thread-title"><MessageCircle size={15} />{thread.title}</span><span className="memory-thread-count">{thread.turns.length} 则交流</span><time>{dateText(thread.time)}</time></div>
+        <div className="memory-thread-turns">{thread.turns.map((turn, index) => <div className={`memory-thread-turn${turn.speaker ? '' : ' memory-thread-turn-plain'}`} key={`${thread.id}-${index}`}>
+          {turn.speaker && <span className="memory-thread-speaker">{turn.speaker}</span>}
+          <p>{turn.text}</p>
+        </div>)}</div>
+      </article>)}
+    </div> : <div className="memory-entry-grid">
       {visible.map((item) => {
-        const quote = typeof item.metadata?.source_quote === 'string' ? item.metadata.source_quote : '';
+        const rawQuote = typeof item.metadata?.source_quote === 'string' ? item.metadata.source_quote : '';
+        const quote = layer === 'outreach' ? '' : splitSpeechPrefix(rawQuote).body;
         const hooks = (item.open_hooks ?? []).filter((hook) => hook.closed_at == null);
+        const speech = splitSpeechPrefix(item.content);
         return <article key={item.id} className={`memory-entry memory-entry-${layer}`}>
-          <div className="memory-entry-top"><span className="memory-entry-kind">{categoryName(item)}</span><time>{dateText(item.created_at)}</time><button type="button" className="memory-entry-delete" onClick={() => void remove(item)} title="删除这条记忆" aria-label="删除这条记忆"><Trash2 size={15} /></button></div>
-          <p className="memory-entry-content">{displayContent(item.content)}</p>
-          {quote && <div className="memory-entry-evidence"><span>来自原话</span>「{quote}」</div>}
+          <div className="memory-entry-top"><span className="memory-entry-kind">{categoryName(item)}</span><time>{dateText(item.created_at)}</time></div>
+          {speech.speaker && <span className="memory-entry-speaker">{speechLabel(speech.speaker, speech.audience, character)}</span>}
+          <p className="memory-entry-content">{speech.body}</p>
+          {quote && quote !== speech.body && <div className="memory-entry-evidence"><span>来自原话</span>「{quote}」</div>}
           {hooks.map((hook, index) => <div className="memory-entry-hook" key={index}><span>待跟进</span>{hook.condition}</div>)}
         </article>;
       })}
-    </div>}
+    </div>}</>}
   </section>;
 };
 

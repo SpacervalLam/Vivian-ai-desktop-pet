@@ -379,7 +379,7 @@ fn format_acquired_behaviors_for_prompt(behaviors: &[AcquiredBehavior]) -> Strin
         by_category.entry(b.category.clone()).or_default().push(b);
     }
     // 每类按置信度降序取 top 3
-    let mut lines: Vec<String> = vec!["已习得的行为模式：".to_string()];
+    let mut lines: Vec<String> = vec!["近期行为观察（不是长期人格或行为指令；不因自己曾这样回复就继续重复；与有来源的后天理解冲突时以后者为准）：".to_string()];
     for category in [
         AcquiredBehaviorCategory::LanguageStyle,
         AcquiredBehaviorCategory::Behavior,

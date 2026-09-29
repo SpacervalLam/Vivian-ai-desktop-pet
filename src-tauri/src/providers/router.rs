@@ -866,6 +866,7 @@ impl ModelRouter {
         messages: Vec<ChatMessage>,
         json_schema: Option<serde_json::Value>,
         character_id: &str,
+        usage_tag: &str,
     ) -> VivianResult<mpsc::Receiver<StreamEvent>> {
         Self::log_llm_request(task_type, &messages, &[]);
         // permit 由返回流的转发任务持有，直到流结束或调用方丢弃 receiver。
@@ -894,6 +895,7 @@ impl ModelRouter {
                         rx,
                         permit,
                         provider.get_model().to_string(),
+                        usage_tag.to_string(),
                     ));
                 }
                 Err(e) => {
@@ -925,6 +927,7 @@ impl ModelRouter {
                             rx,
                             permit,
                             provider.get_model().to_string(),
+                            usage_tag.to_string(),
                         ));
                     }
                     Err(e) => {
@@ -954,6 +957,7 @@ impl ModelRouter {
                         rx,
                         permit,
                         provider.get_model().to_string(),
+                        usage_tag.to_string(),
                     ));
                 }
                 Err(e) => {
@@ -971,6 +975,7 @@ impl ModelRouter {
         mut source: mpsc::Receiver<StreamEvent>,
         permit: Option<tokio::sync::OwnedSemaphorePermit>,
         model: String,
+        usage_tag: String,
     ) -> mpsc::Receiver<StreamEvent> {
         let (tx, rx) = mpsc::channel(32);
         tokio::spawn(async move {
@@ -983,7 +988,8 @@ impl ModelRouter {
                     cache_write_tokens,
                 } = &event
                 {
-                    usage_store::record_usage(
+                    usage_store::record_usage_for_task(
+                        Some(&usage_tag),
                         &model,
                         *input_tokens,
                         *output_tokens,
@@ -1193,8 +1199,10 @@ impl ModelRouter {
     }
 
     pub async fn generate(&self, mut request: LLMRequest) -> VivianResult<String> {
+        Self::repair_request_history(&mut request);
         loop {
             let options = self.call_options(&request);
+            let usage_tag = request.usage_tag.clone().unwrap_or_else(|| request.task_type.clone());
             let LLMRequest {
                 task_type,
                 messages,
@@ -1217,10 +1225,10 @@ impl ModelRouter {
                 json_schema.clone()
             };
             let char_id = character_id.as_deref().unwrap_or("");
-            let result = scope_provider_call(options, async {
+            let result = usage_store::with_task(&usage_tag, scope_provider_call(options, async {
                 if stream {
                     // 流式:累积所有 chunk 返回完整文本
-                    let mut rx = self.query_stream(&task_type, messages, effective_schema, char_id).await?;
+                    let mut rx = self.query_stream(&task_type, messages, effective_schema, char_id, &usage_tag).await?;
                     let mut buf = String::new();
                     while let Some(event) = rx.recv().await {
                         match event {
@@ -1238,8 +1246,7 @@ impl ModelRouter {
                 } else {
                     self.query_with_fallback(&task_type, messages, effective_schema, char_id).await
                 }
-            })
-            .await;
+            })).await;
             // strict 拒绝检测:熔断后重试(不带 schema)
             if let Err(ref e) = result {
                 if json_schema.is_some() && self.handle_strict_failure(&task_type, e) {
@@ -1259,8 +1266,10 @@ impl ModelRouter {
         &self,
         mut request: LLMRequest,
     ) -> VivianResult<tokio::sync::mpsc::Receiver<StreamEvent>> {
+        Self::repair_request_history(&mut request);
         loop {
             let options = self.call_options(&request);
+            let usage_tag = request.usage_tag.clone().unwrap_or_else(|| request.task_type.clone());
             let LLMRequest {
                 task_type,
                 messages,
@@ -1282,7 +1291,7 @@ impl ModelRouter {
             };
             let rx = scope_provider_call(
                 options,
-                self.query_stream(&task_type, messages, effective_schema, character_id.as_deref().unwrap_or("")),
+                self.query_stream(&task_type, messages, effective_schema, character_id.as_deref().unwrap_or(""), &usage_tag),
             )
             .await;
             // strict 拒绝检测:仅在流未开始时(返回 Err)可重试;流已开始则无法重试
@@ -1305,8 +1314,10 @@ impl ModelRouter {
         &self,
         mut request: LLMRequest,
     ) -> VivianResult<ChatResponse> {
+        Self::repair_request_history(&mut request);
         loop {
             let options = self.call_options(&request);
+            let usage_tag = request.usage_tag.clone().unwrap_or_else(|| request.task_type.clone());
             let LLMRequest {
                 task_type,
                 messages,
@@ -1316,11 +1327,10 @@ impl ModelRouter {
                 character_id,
                 ..
             } = request.clone();
-            let result = scope_provider_call(
+            let result = usage_store::with_task(&usage_tag, scope_provider_call(
                 options,
                 self.query_with_tools(&task_type, messages, tools, character_id.as_deref().unwrap_or("")),
-            )
-            .await;
+            )).await;
             // strict 拒绝检测:熔断后重试(不带 schema)
             if let Err(ref e) = result {
                 if json_schema.is_some() && self.handle_strict_failure(&task_type, e) {
@@ -1340,8 +1350,10 @@ impl ModelRouter {
         &self,
         mut request: LLMRequest,
     ) -> VivianResult<tokio::sync::mpsc::Receiver<crate::providers::base::StreamEvent>> {
+        Self::repair_request_history(&mut request);
         loop {
             let options = self.call_options(&request);
+            let usage_tag = request.usage_tag.clone().unwrap_or_else(|| request.task_type.clone());
             let LLMRequest {
                 task_type,
                 messages,
@@ -1353,7 +1365,7 @@ impl ModelRouter {
             } = request.clone();
             let rx = scope_provider_call(
                 options,
-                self.query_stream_with_tools(&task_type, messages, tools, character_id.as_deref().unwrap_or("")),
+                self.query_stream_with_tools(&task_type, messages, tools, character_id.as_deref().unwrap_or(""), &usage_tag),
             )
             .await;
             // strict 拒绝检测:仅在流未开始时(返回 Err)可重试;流已开始则无法重试
@@ -1365,6 +1377,14 @@ impl ModelRouter {
                 }
             }
             return rx;
+        }
+    }
+
+    /// 四个请求入口统一治理历史，文本收尾请求也可能携带此前的工具调用。
+    fn repair_request_history(request: &mut LLMRequest) {
+        let repairs = super::tool_history::repair_tool_history(&mut request.messages);
+        if repairs != super::tool_history::RepairStats::default() {
+            tracing::warn!(task = %request.task_type, ?repairs, "已修复请求中的工具历史结构");
         }
     }
 
@@ -1718,6 +1738,7 @@ impl ModelRouter {
         messages: Vec<ChatMessage>,
         tools: Vec<ToolDefinition>,
         character_id: &str,
+        usage_tag: &str,
     ) -> VivianResult<mpsc::Receiver<StreamEvent>> {
         Self::log_llm_request(task_type, &messages, &tools);
         // 按任务分组获取并发信号量
@@ -1744,6 +1765,7 @@ impl ModelRouter {
                     &provider,
                     messages.clone(),
                     tools.clone(),
+                    usage_tag,
                 )
                 .await
                 {
@@ -1780,6 +1802,7 @@ impl ModelRouter {
                         provider,
                         messages.clone(),
                         tools.clone(),
+                        usage_tag,
                     )
                     .await
                     {
@@ -1813,7 +1836,7 @@ impl ModelRouter {
                     task_type,
                     provider.get_model()
                 );
-                match Self::stream_with_tools_provider(provider, messages, tools).await {
+                match Self::stream_with_tools_provider(provider, messages, tools, usage_tag).await {
                     Ok(rx) => {
                         self.emit_route_status(task_type, "ok");
                         return Ok(Self::hold_event_stream_permit(rx, permit));
@@ -1858,8 +1881,10 @@ impl ModelRouter {
         provider: &Box<dyn BaseProvider>,
         messages: Vec<ChatMessage>,
         tools: Vec<ToolDefinition>,
+        usage_tag: &str,
     ) -> VivianResult<mpsc::Receiver<StreamEvent>> {
         let mut rx = provider.stream_with_tools(messages, tools).await?;
+        let usage_tag = usage_tag.to_string();
         let model = provider.get_model().to_string();
         let (tx, out_rx) = mpsc::channel::<StreamEvent>(32);
         tokio::spawn(async move {
@@ -1871,7 +1896,8 @@ impl ModelRouter {
                     cache_write_tokens,
                 } = &event
                 {
-                    usage_store::record_usage(
+                    usage_store::record_usage_for_task(
+                        Some(&usage_tag),
                         &model,
                         *input_tokens,
                         *output_tokens,

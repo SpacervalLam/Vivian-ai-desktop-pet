@@ -8,6 +8,7 @@
 import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { listen } from '@tauri-apps/api/event';
+import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { BookOpen, House, LayoutGrid } from 'lucide-react';
 import { openRoomWindow } from '../../utils/roomWindow';
@@ -255,6 +256,21 @@ const MindInspector: React.FC = () => {
       closeInspector: true,
     });
   }, [t]);
+  const [apartmentEnabled, setApartmentEnabled] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    const refresh = () => {
+      void invoke<{ enabled: boolean }>('apartment_plugin_status')
+        .then((status) => { if (!cancelled) setApartmentEnabled(status.enabled); })
+        .catch(() => { if (!cancelled) setApartmentEnabled(false); });
+    };
+    refresh();
+    let unlisten: (() => void) | undefined;
+    void listen('apartment:status-changed', refresh).then((dispose) => {
+      if (cancelled) dispose(); else unlisten = dispose;
+    });
+    return () => { cancelled = true; unlisten?.(); };
+  }, []);
 
   // 页面可注入共享标题行工具栏（切换页面时自动清空）
   const [headerExtra, setHeaderExtra] = useState<React.ReactNode>(null);
@@ -355,7 +371,7 @@ const MindInspector: React.FC = () => {
                 </button>
               </div>
             )}
-            <button
+            {apartmentEnabled && <button
               type="button"
               onClick={openApartment}
               title={t('mind_inspector.action_apartment')}
@@ -363,7 +379,7 @@ const MindInspector: React.FC = () => {
             >
               <House size={14} strokeWidth={2.1} />
               <span>{t('mind_inspector.action_apartment')}</span>
-            </button>
+            </button>}
             <span className="mind-sb-cover-seal">
               {new Date().toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit' })}
             </span>

@@ -103,6 +103,8 @@ export async function openRoomWindow(
   title = '公寓',
   opts: OpenRoomOptions = {},
 ): Promise<void> {
+  const status = await invoke<{ installed: boolean; enabled: boolean }>('apartment_plugin_status');
+  if (!status.enabled) return;
   if (pending) {
     // 并发调用：等本次创建流程收尾，走缓存复用
     await new Promise((r) => setTimeout(r, 300));

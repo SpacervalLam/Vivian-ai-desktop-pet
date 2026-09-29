@@ -220,7 +220,7 @@ pub fn register_text_shortcuts(app: AppHandle, state: &Arc<AppState>) {
         ("chat", &base.shortcut_chat),
         ("settings", &base.shortcut_settings),
         ("memory", &base.shortcut_memory),
-        ("room", &base.shortcut_room),
+        ("room", if crate::commands::apartment::enabled(state) { &base.shortcut_room } else { "" }),
     ];
     let mut win_map = state.window_shortcuts.lock();
     for (action, sc) in win_entries {
@@ -281,7 +281,7 @@ pub fn update_text_shortcuts(
         ("chat", &base.shortcut_chat),
         ("settings", &base.shortcut_settings),
         ("memory", &base.shortcut_memory),
-        ("room", &base.shortcut_room),
+        ("room", if crate::commands::apartment::enabled(state.inner()) { &base.shortcut_room } else { "" }),
     ];
     let mut new_win = std::collections::HashMap::new();
     for (action, sc) in win_entries {

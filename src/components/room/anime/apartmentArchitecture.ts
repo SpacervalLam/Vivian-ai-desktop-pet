@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
+import { createLeafField } from './foliage';
 
 /** Architectural renovation. Coordinates deliberately retain the navigable floor/door contract. */
 export function rebuildApartmentArchitecture(group: THREE.Group) {
@@ -17,6 +18,9 @@ export function rebuildApartmentArchitecture(group: THREE.Group) {
   const geometry = new Map<string,THREE.BufferGeometry>();
   const newParts = new THREE.Group(); newParts.name='apartment-authored-architecture';
   newParts.userData.sceneCollideSkip=true;group.add(newParts);
+  // 屋顶花池的叶簇场。自带 PRNG：叶簇贴图生成要抽几百次样，蹭别的随机流会错位。
+  let roofSeed=3313;const roofRnd=()=>{roofSeed=(Math.imul(roofSeed,1664525)+1013904223)>>>0;return roofSeed/4294967296;};
+  const roofShrubs=createLeafField(roofRnd,1200);
   const put=(parent:THREE.Group,name:string,x:number,y:number,z:number,w:number,h:number,d:number,mat:THREE.Material,round=false)=>{
     const key=`${w}/${h}/${d}/${round}`;let geo=geometry.get(key);
     if(!geo){geo=round?new RoundedBoxGeometry(w,h,d,1,Math.min(.035,Math.min(w,h,d)*.15)):new THREE.BoxGeometry(w,h,d);geometry.set(key,geo);}
@@ -78,9 +82,13 @@ export function rebuildApartmentArchitecture(group: THREE.Group) {
     put(newParts,'roof-service-cap',x-2,12.32+plantHeight,-1.7,2.64,.08,2.24,materials.metal);
     for(let n=0;n<8;n++)put(newParts,'roof-vent',x-2,12.45+n*.075,-.63,2.1,.022,.035,materials.metal);
     put(newParts,'roof-planter',x+3.8,12.48,2.9,2.4,.4,.7,materials.clay,true);
-    for(let n=0;n<9;n++){
-      const leaf=new THREE.Mesh(new THREE.SphereGeometry(.26,8,6),materials.leaf);
-      leaf.position.set(x+2.85+n*.24,12.80+(n%3)*.06,2.9);leaf.scale.set(1,1.4,.9);newParts.add(leaf);
+    /* 屋顶花池的植栽走 `foliage` 的叶簇场。原来是 9 颗 `(0.26, 8, 6)` 的球 ——
+     * 8×6 段的球在 12m 高的屋顶上就是九个绿色多面体，而且九颗一样大。
+     * 叶簇场是**局部坐标**的（`newParts` 会被挂进带变换的父级），所以网格挂在
+     * `newParts` 里跟着走；`build()` 自带 `noMerge`，外层合批不会把它烘掉。 */
+    for(let n=0;n<26;n++){
+      const t=roofRnd();
+      roofShrubs.spray(x+2.78+t*2.04,12.74+roofRnd()*.34,2.62+roofRnd()*.56,.15+roofRnd()*.13);
     }
   }
   // Columns sit at party walls, clear of every window and the 203 entrance.
@@ -134,6 +142,10 @@ export function rebuildApartmentArchitecture(group: THREE.Group) {
      * 没有它，顶层外廊外缘会是一道光秃秃的混凝土边，而 2F/3F/4F 都有一道陶土色压边。 */
     put(newParts,'rear-corridor-fascia',x,CEIL_TOP-.10,-7.27,12.15,.16,.10,materials.clay);
   }
+  /* 全部花池登记完才 build。放在下面的 `traverse` **之前**：那两趟遍历会收集
+   * "还在用"的几何与材质，晚挂进去的会被当成游离资源释放掉。
+   * 叶簇材质是 MeshStandardMaterial，不受 toon 材质重映射影响。 */
+  newParts.add(roofShrubs.build('apartment-roof-planting'));
   // Materials are private to this instance; never modify module-level toon caches.
   const replacements=new Map<THREE.Material,THREE.Material>();
   const palette=new Map([['98a3ae',materials.plaster],['8b96a5',materials.clay],['a9b2bb',materials.coping],['8b95a0',materials.stone],['6b7481',materials.stone],['5e6878',materials.metal],['3a424c',materials.metal],['a3aab2',materials.coping],['8b929b',materials.stone],['59626e',materials.clay]]);

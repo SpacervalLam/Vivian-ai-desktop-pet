@@ -743,6 +743,41 @@ const RECENT_MEMORY_ENTRY_CHARS: usize = 60;
 /// 「最近对话」整体长度上限（字符）。超出部分由 `set_recent_memory` 截断。
 const RECENT_MEMORY_MAX_CHARS: usize = 600;
 
+/// These triggers already carry an unambiguous medium. All other new topics
+/// keep the semantic model decision; an existing conversation is checked first.
+fn obvious_channel_for_new_topic(trigger: ProactiveTrigger, user_present: bool) -> Option<&'static str> {
+    if matches!(trigger, ProactiveTrigger::CrossCharacterReply | ProactiveTrigger::BystanderInterjection) {
+        return Some("direct");
+    }
+    if !user_present {
+        return Some("wechat");
+    }
+    match trigger {
+        ProactiveTrigger::TeasingResponse
+        | ProactiveTrigger::WindowTrigger
+        | ProactiveTrigger::ScreenPeek
+        | ProactiveTrigger::MusicChanged
+        | ProactiveTrigger::Sunrise
+        | ProactiveTrigger::Sunset
+        | ProactiveTrigger::AppDuration => Some("direct"),
+        ProactiveTrigger::WorkNotice => Some("wechat"),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod channel_cost_tests {
+    use super::*;
+    #[test]
+    fn only_clear_new_topic_intents_skip_model_judgement() {
+        assert_eq!(obvious_channel_for_new_topic(ProactiveTrigger::ScreenPeek, true), Some("direct"));
+        assert_eq!(obvious_channel_for_new_topic(ProactiveTrigger::WorkNotice, true), Some("wechat"));
+        assert_eq!(obvious_channel_for_new_topic(ProactiveTrigger::MemoryRecall, true), None);
+        assert_eq!(obvious_channel_for_new_topic(ProactiveTrigger::Spontaneous, true), None);
+        assert_eq!(obvious_channel_for_new_topic(ProactiveTrigger::Spontaneous, false), Some("wechat"));
+    }
+}
+
 /// 待发送的主动行为
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProactiveAction {
@@ -1567,16 +1602,20 @@ impl ProactiveOrchestrator {
                 if !context.lay_low && context.is_speaking_leader && context.user_present
                     && !self.is_knowledge_share_in_cooldown()
                 {
+                    let share_channel = crate::conversation::CONVERSATION_MANAGER.user_channel(&self.char_id)
+                        .unwrap_or_else(|| "wechat".into());
                     if let Some((content, value_score)) = self.generate_knowledge_share_message(
                         context,
                         &thought_key,
                         &context_hint,
+                        &share_channel,
                     ) {
                         let mut action = ProactiveAction::from_trigger(
                             ProactiveTrigger::Spontaneous,
                             content,
                             context.now,
                         );
+                        action.delivery_channel = if share_channel == "wechat" { DeliveryChannel::ChatWindow } else { DeliveryChannel::Bubble };
                         action.content_type = ContentType::Share;
                         action.value_score = Some(value_score);
                         self.push_action(action, ProactiveTrigger::Spontaneous);
@@ -1908,7 +1947,7 @@ impl ProactiveOrchestrator {
             .unwrap_or(12);
         let content =
             match self.try_llm_content(ProactiveTrigger::WorkNotice, context, hour, &router, None) {
-                Some(c) if !c.text.trim().is_empty() => c.text,
+                Some(c) if !c.text.trim().is_empty() => c,
                 _ => return false,
             };
 
@@ -1918,7 +1957,7 @@ impl ProactiveOrchestrator {
                 notices.take_alert(sid);
             }
         }
-        self.push_message(ProactiveTrigger::WorkNotice, content, now);
+        self.push_action(content.into_action(ProactiveTrigger::WorkNotice, now), ProactiveTrigger::WorkNotice);
         // 完成报告（唯一没有会话归属的一类）是一次性的，不占冷却锚点——
         // 否则一条报告就能把更紧急的提醒整整压后 8 分钟。
         if session_id.is_some() {
@@ -1972,12 +2011,12 @@ impl ProactiveOrchestrator {
             .parse::<u32>()
             .unwrap_or(12);
         let content = match self.try_llm_content(trigger, context, hour, &router, None) {
-            Some(c) if !c.text.trim().is_empty() => c.text,
+            Some(c) if !c.text.trim().is_empty() => c,
             _ => return false,
         };
 
         // 推送提醒消息（气泡渠道）
-        self.push_message(trigger, content, now);
+        self.push_action(content.into_action(trigger, now), trigger);
         // 记录触发时间，纳入共享冷却
         self.update_trigger_time(trigger, now, hour, 0, true);
 
@@ -2072,11 +2111,11 @@ impl ProactiveOrchestrator {
             .parse::<u32>()
             .unwrap_or(12);
         let content = match self.try_llm_content(trigger, context, hour, &router, None) {
-            Some(c) if !c.text.trim().is_empty() => c.text,
+            Some(c) if !c.text.trim().is_empty() => c,
             _ => return false,
         };
 
-        self.push_message(trigger, content, now);
+        self.push_action(content.into_action(trigger, now), trigger);
         self.update_trigger_time(trigger, now, hour, 0, true);
 
         // 进程明细已随 system_hint 注入生成提示（try_llm_content 内按需采集），
@@ -2280,7 +2319,7 @@ impl ProactiveOrchestrator {
             //    用户确认 + 视觉理解可能耗时较久，用新鲜时间戳入队，
             //    避免消息年龄超过 PROACTIVE_MSG_TTL_SECS 被 drain 丢弃
             let fresh_now = chrono::Local::now().timestamp() as f64;
-            orchestrator.push_message(ProactiveTrigger::ScreenPeek, content.text, fresh_now);
+            orchestrator.push_action(content.into_action(ProactiveTrigger::ScreenPeek, fresh_now), ProactiveTrigger::ScreenPeek);
             tracing::info!("[proactive:{}] 主动截屏观察完成，已生成搭话", char_id);
         });
     }
@@ -2329,11 +2368,11 @@ impl ProactiveOrchestrator {
             None => return false,
         };
         let content = match self.try_llm_content(trigger, context, hour, &router, None) {
-            Some(c) if !c.text.trim().is_empty() => c.text,
+            Some(c) if !c.text.trim().is_empty() => c,
             _ => return false,
         };
 
-        self.push_message(trigger, content, now);
+        self.push_action(content.into_action(trigger, now), trigger);
         self.update_trigger_time(trigger, now, hour, 0, true);
         *self.last_late_night_date.write() = today;
 
@@ -2387,11 +2426,11 @@ impl ProactiveOrchestrator {
             .parse::<u32>()
             .unwrap_or(12);
         let content = match self.try_llm_content(trigger, context, hour, &router, None) {
-            Some(c) if !c.text.trim().is_empty() => c.text,
+            Some(c) if !c.text.trim().is_empty() => c,
             _ => return false,
         };
 
-        self.push_message(trigger, content, now);
+        self.push_action(content.into_action(trigger, now), trigger);
         self.update_trigger_time(trigger, now, hour, 0, true);
         // 重置会话计时：本次提醒后重新累计（配合冷却避免反复打扰）
         *self.app_session_start.write() = now;
@@ -2518,11 +2557,11 @@ impl ProactiveOrchestrator {
             .parse::<u32>()
             .unwrap_or(12);
         let content = match self.try_llm_content(trigger, context, hour, &router, None) {
-            Some(c) if !c.text.trim().is_empty() => c.text,
+            Some(c) if !c.text.trim().is_empty() => c,
             _ => return false,
         };
 
-        self.push_message(trigger, content, now);
+        self.push_action(content.into_action(trigger, now), trigger);
         self.update_trigger_time(trigger, now, hour, 0, true);
 
         tracing::info!("[proactive:{}] 音乐切换搭话已推送", self.char_id);
@@ -3104,7 +3143,8 @@ impl ProactiveOrchestrator {
                 ChatMessage::user(&user_msg),
             ];
             router
-                .generate(LLMRequest::new("proactive", messages)
+                // 兑现稍后回来的主动台词属于角色对话，和日常/主动开口共用 chat 路由。
+                .generate(LLMRequest::new("chat", messages)
                     .with_character_id(self.char_id.clone()))
                 .await
         });
@@ -3267,6 +3307,7 @@ impl ProactiveOrchestrator {
         _ctx: &TickContext,
         thought_key: &str,
         context_hint: &str,
+        channel: &str,
     ) -> Option<(String, f32)> {
         let router = self.model_router.read().clone()?;
         let handle = tokio::runtime::Handle::try_current().ok()?;
@@ -3328,6 +3369,7 @@ impl ProactiveOrchestrator {
                 snap.hour,
             );
             user_msg.push_str(instr);
+            user_msg.push_str(&crate::pipeline::prompt_modules::build_channel_style_guide(channel));
             user_msg.push_str(&format!("\n\n严格输出JSON：{}", json_template));
 
             let messages = vec![
@@ -4274,7 +4316,7 @@ impl ProactiveOrchestrator {
         emitter: &SharedStreamEmitter,
     ) -> Option<String> {
         let mut rx = match router
-            .generate_stream(LLMRequest::new("chat", messages).with_stream(true))
+            .generate_stream(LLMRequest::new("chat", messages).with_stream(true).with_usage_tag("proactive_message"))
             .await
         {
             Ok(rx) => rx,
@@ -4337,15 +4379,16 @@ impl ProactiveOrchestrator {
             if e >= s {
                 if let Ok(data) = serde_json::from_str::<serde_json::Value>(&text[s..=e]) {
                     if let Some(t) = data.get("text").and_then(|v| v.as_str()) {
-                        let text_owned: String = t.chars().take(60).collect();
+                        let (delivery_channel, content_type, importance, value_score) =
+                            BehaviorContent::parse_extra_fields(&data);
+                        let limit = if delivery_channel == DeliveryChannel::ChatWindow { 1200 } else { 60 };
+                        let text_owned: String = t.chars().take(limit).collect();
                         if !text_owned.trim().is_empty() {
                             let expression = data
                                 .get("expression")
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("happy")
                                 .to_string();
-                            let (delivery_channel, content_type, importance, value_score) =
-                                BehaviorContent::parse_extra_fields(&data);
                             return Some(BehaviorContent {
                                 text: text_owned,
                                 expression,
@@ -4517,7 +4560,23 @@ impl ProactiveOrchestrator {
             (sys, intimacy, history, recent_messages, lang)
         };
 
-        let llm_ctx = behavior::LlmContext {
+        let companion_recent_message = self.companions_snapshot().and_then(|companion| {
+            let spoke_recently = companion
+                .last_spoke_secs_ago
+                .is_some_and(|seconds| seconds <= 300.0);
+            if !spoke_recently {
+                return None;
+            }
+            let text = companion.last_spoke_text?.trim().to_string();
+            if text.is_empty() {
+                return None;
+            }
+            let preview: String = text.chars().take(160).collect();
+            Some(format!("{}: {}", companion.name, preview))
+        });
+
+        let mut llm_ctx = behavior::LlmContext {
+            channel: String::new(),
             hour,
             idle_seconds: ctx.idle_seconds,
             drag_distance: ctx.drag_distance,
@@ -4531,6 +4590,7 @@ impl ProactiveOrchestrator {
             sustained_active_minutes: self.state.read().sustained_active_minutes,
             minute: chrono::Local::now().format("%M").to_string().parse::<u32>().unwrap_or(0),
             online_companions: self.format_companions_for_prompt(),
+            companion_recent_message,
             // SystemPressure：注入实时系统指标摘要 + 内存占用最高的应用明细
             // （进程明细为按需采集：只在触发瞬间枚举一次，不进常规轮询）
             system_hint: if matches!(trigger, ProactiveTrigger::SystemPressure) {
@@ -4640,8 +4700,28 @@ impl ProactiveOrchestrator {
                     .unwrap_or_default();
                 // 连续未回应轮次：用于要求模型保持安静且不做情绪化解读
                 let ignored_rounds = self.state.read().ignored_count;
+                // Select the medium before writing: an alive topic always retains its channel.
+                llm_ctx.channel = if let Some(channel) = crate::conversation::CONVERSATION_MANAGER.user_channel(&self.char_id) {
+                    channel
+                } else if let Some(channel) = obvious_channel_for_new_topic(trigger, ctx.user_present) {
+                    channel.into()
+                } else {
+                    let prompt = format!(
+                        "Choose a medium BEFORE composing a new conversation. Return only direct or wechat. direct is face-to-face speech, immediate shared-scene reactions. wechat is private online texting, asynchronous invitations, follow-ups or something to keep/read later. Both can start a conversation; do not decide by punctuation or window visibility. Consider the intent, presence and history. Do not write the message. Trigger: {}\nUser present: {}\nIntent: {}\nHistory: {}\nMemory: {}",
+                        trigger.as_str(), ctx.user_present, llm_ctx.mind_state,
+                        crate::utils::truncate_chars(&llm_ctx.dialogue_history, 600),
+                        crate::utils::truncate_chars(&memory_text, 360));
+                    let prompt = format!("{}\nScene: {} {} {} {}\nIntent detail: {}", prompt,
+                        llm_ctx.screen_hint, llm_ctx.music_hint, llm_ctx.system_hint, llm_ctx.app_duration_hint, llm_ctx.memory_hint);
+                    let decision = router_clone.generate(crate::providers::base::LLMRequest::new("chat", vec![ChatMessage::user(&prompt)]).with_character_id(self.char_id.clone()).with_usage_tag("proactive_channel")).await.ok()?;
+                    match decision.trim().trim_matches('"') {
+                        "wechat" => "wechat".into(),
+                        "direct" => "direct".into(),
+                        _ => return None, // No guessed transport when planning fails.
+                    }
+                };
                 // 统一构造 messages，然后流式调用 LLM
-                let messages = match trigger {
+                let mut messages = match trigger {
                     ProactiveTrigger::HourlyGreeting
                     | ProactiveTrigger::IdleGreeting
                     | ProactiveTrigger::TeasingResponse
@@ -4695,6 +4775,10 @@ impl ProactiveOrchestrator {
                     _ => return None,
                 };
 
+                messages.push(ChatMessage::user(&format!(
+                    "The topic channel is locked to {}. {} Write for this medium; return delivery_channel={} in JSON. Do not move an ongoing conversation to another medium.",
+                    llm_ctx.channel, crate::pipeline::prompt_modules::build_channel_style_guide(&llm_ctx.channel),
+                    if llm_ctx.channel == "wechat" { "chat_window" } else { "bubble" })));
                 // 流式调用 LLM，实时推送 text 增量
                 let raw = Self::stream_query_and_parse(&router_clone, messages, &emitter).await?;
 
@@ -4718,16 +4802,12 @@ impl ProactiveOrchestrator {
                     return None;
                 }
 
-                // BystanderInterjection 走严格 JSON 解析：text 为空表示不插话
-                if matches!(trigger, ProactiveTrigger::BystanderInterjection) {
-                    if let Some(content) = Self::parse_proactive_json(&raw) {
-                        return Some(content);
-                    }
-                    return None;
-                }
-
-                // 解析完整 JSON 获取 BehaviorContent（含扩展字段）
-                Self::parse_proactive_json(&raw)
+                let mut content = Self::parse_proactive_json(&raw)?;
+                // Verification cannot silently move words written for one medium to the other.
+                let planned = if llm_ctx.channel == "wechat" { DeliveryChannel::ChatWindow } else { DeliveryChannel::Bubble };
+                if content.delivery_channel != planned { return None; }
+                content.delivery_channel = planned;
+                Some(content)
             })
         })
     }

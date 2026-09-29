@@ -21,7 +21,7 @@ interface PluginEntry {
 }
 
 /** 内置插件（播种体系所有，禁删；改内置的正确方式是复制为新插件） */
-const BUILTIN_PLUGIN_NAMES = ['llm-providers', 'plugin-authoring'];
+const BUILTIN_PLUGIN_NAMES = ['llm-providers', 'plugin-authoring', '3d-apartment'];
 
 /** 技能条目（对齐后端 commands::plugins::SkillEntryInfo） */
 interface SkillEntry {
@@ -303,7 +303,7 @@ const PluginsPanel: React.FC = () => {
                     {t('config.plugins.trust')}
                   </button>
                 )}
-                <button
+                {p.name !== '3d-apartment' && <button
                   onClick={() => onReload(p.key)}
                   style={{
                     fontSize: 11,
@@ -316,7 +316,7 @@ const PluginsPanel: React.FC = () => {
                   }}
                 >
                   {t('config.plugins.reload')}
-                </button>
+                </button>}
                 {!BUILTIN_PLUGIN_NAMES.includes(p.name) && (
                   <button
                     onClick={() => onDelete(p)}

@@ -1,446 +1,256 @@
-//! 自我进化人设覆盖层（Persona Evolution）
-//!
-//! 让智能体在反思中自行优化自己的语气/性格，但**不修改原始人设文件**。
-//! 只影响最终拼入 prompt 的内容：将成长记录追加到 Character 块末尾，让 LLM
-//! 感知"我最近对自己做了什么调整"，从而表现出持续成长、更栩栩如生。
-//!
-//! 设计要点：
-//! - 独立存储于 `characters/<char_id>/persona/evolution.json`，与出厂人设相分离
-//! - 恢复出厂：清空覆盖层即可，原始 persona.json / prompts/ 文件永不被触碰
-//! - 两次调整间有最小间隔，避免每轮对话都改（成长是渐进的，不是每话说变脸）
-//! - 去重 + 条数上限，防止覆盖层无限膨胀
-
+//! Evidence-backed, scoped growth. Factory identity is never rewritten.
+//! Legacy entries remain inspectable but cannot become active without provenance.
 use std::path::PathBuf;
-
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-
 use crate::error::{VivianError, VivianResult};
 use crate::utils::path;
 
-/// 两次自我调整的最小间隔（秒）——默认 6 小时，避免每轮对话都改
-const EVOLUTION_MIN_INTERVAL_SECS: f64 = 6.0 * 3600.0;
-/// 覆盖层总条数上限
-const MAX_TOTAL_ENTRIES: usize = 20;
-/// 渲染进 prompt 时展示的最近条数
-const RENDER_RECENT: usize = 6;
-/// 晋升为正式调整所需的最小支持次数（跨轨迹验证门槛）
-///
-/// 书中 8.2.2 强调：一次偶发成功不应立即改变长期能力。同一调整必须在多次
-/// 独立反思中被重复提出（即获得多条轨迹支持）后才真正生效，避免单次噪音
-/// 被固化为长期人格改变。
-const REQUIRED_SUPPORT: u32 = 2;
-/// 候选调整条数上限（未达门槛的草稿，防止无限堆积）
+const MIN_INTERVAL: f64 = 6.0 * 3600.0;
 const MAX_CANDIDATES: usize = 12;
-const MAX_EVOLUTION_TEXT_CHARS: usize = 180;
-const MAX_EVOLUTION_REASON_CHARS: usize = 160;
+const MAX_EVIDENCE: usize = 8;
+pub const SCOPES: &[&str] = &["comfort", "care", "praise", "humor", "daily", "disagreement"];
 
-/// 单条自我成长记录
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GrowthEvidence {
+    pub memory_id: String,
+    pub quote: String,
+    pub timestamp: f64,
+    /// Hash of original user content, not a model-generated reflection ID.
+    pub fingerprint: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EvolutionEntry {
-    /// 调整时间戳
     pub timestamp: f64,
-    /// 类别：tone（语气）/ personality（性格）
     pub kind: String,
-    /// 调整内容（第一人称行为指令，如"最近回复可以更活泼一点"）
     pub text: String,
-    /// 调整原因（源自哪段对话/体会）
     pub reason: String,
-    /// 晋升前累计的支持次数（多少条独立轨迹共同支撑该调整）
-    #[serde(default = "default_support")]
+    #[serde(default)]
     pub support: u32,
+    #[serde(default)]
+    pub scope: String,
+    #[serde(default)]
+    pub evidence: Vec<GrowthEvidence>,
+    /// Explicit user feedback can immediately change this local interaction habit.
+    #[serde(default)]
+    pub explicit_feedback: bool,
 }
 
-fn default_support() -> u32 {
-    1
-}
-
-/// 待晋升的候选调整（尚未达到跨轨迹支持门槛）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EvolutionCandidate {
-    /// 类别：tone / personality
     pub kind: String,
-    /// 调整内容
     pub text: String,
-    /// 最后一次被提出的原因
     pub reason: String,
-    /// 首次被提出的时间戳
     pub first_seen: f64,
-    /// 被独立反思提出的次数
     pub support: u32,
+    #[serde(default)]
+    pub scope: String,
+    #[serde(default)]
+    pub evidence: Vec<GrowthEvidence>,
 }
 
-/// 自我进化覆盖层
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersonaEvolution {
     #[serde(default)]
     pub entries: Vec<EvolutionEntry>,
-    /// 待晋升的候选（未达门槛，不注入 prompt）
     #[serde(default)]
     pub candidates: Vec<EvolutionCandidate>,
-    /// 最后调整时间
     #[serde(default)]
     pub updated_at: f64,
+    /// Replaced versions are inspectable, never automatically resurrected.
+    #[serde(default)]
+    pub history: Vec<EvolutionEntry>,
 }
 
+fn clean(s: &str, limit: usize) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(limit).collect()
+}
+fn independent_support(evidence: &[GrowthEvidence]) -> u32 {
+    evidence.iter().map(|e| (e.timestamp / 86400.0).floor() as i64)
+        .collect::<std::collections::HashSet<_>>().len() as u32
+}
+impl EvolutionEntry {
+    pub fn active(&self) -> bool {
+        SCOPES.contains(&self.scope.as_str()) && !self.evidence.is_empty()
+            && (self.explicit_feedback || independent_support(&self.evidence) >= 2)
+    }
+}
 impl PersonaEvolution {
     pub fn empty() -> Self {
-        Self {
-            entries: Vec::new(),
-            candidates: Vec::new(),
-            updated_at: 0.0,
-        }
+        Self { entries: vec![], candidates: vec![], history: vec![], updated_at: 0.0 }
     }
+    pub fn is_empty(&self) -> bool { !self.entries.iter().any(EvolutionEntry::active) }
+    fn touch(&mut self, now: f64) { self.updated_at = now.max(self.updated_at + 0.000001); }
 
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-
-    /// 候选调整条数
-    pub fn candidate_count(&self) -> usize {
-        self.candidates.len()
-    }
-
-    /// 尝试记录一条成长调整（跨轨迹验证门槛）。
-    ///
-    /// 返回 `true` 表示该调整已晋升为正式调整并写入覆盖层；返回 `false` 表示
-    /// 未生效（文本为空、已是正式调整、尚未达到支持门槛，或受最小间隔限制）。
-    ///
-    /// 门槛逻辑（书中 8.2.2）：同一调整先在候选区累积支持次数，只有被多次
-    /// 独立反思重复提出（≥ `REQUIRED_SUPPORT` 次）后才晋升，防止单次噪音被
-    /// 固化为长期人格改变。候选累积不受最小间隔限制，晋升才受其约束。
-    pub fn try_add(&mut self, kind: &str, text: &str, reason: &str, now: f64) -> bool {
-        let kind = kind.trim().to_lowercase();
-        if !matches!(kind.as_str(), "tone" | "personality") {
-            return false;
-        }
-        let text = truncate_chars(&text.split_whitespace().collect::<Vec<_>>().join(" "), MAX_EVOLUTION_TEXT_CHARS);
-        if text.is_empty() {
-            return false;
-        }
-        let reason = truncate_chars(&reason.split_whitespace().collect::<Vec<_>>().join(" "), MAX_EVOLUTION_REASON_CHARS);
-        // 已是正式调整：不重复记录
-        if self.entries.iter().any(|e| e.kind == kind && e.text == text) {
-            return false;
-        }
-        // 已存在候选：累积支持次数
-        if let Some(c) = self.candidates.iter_mut().find(|c| c.kind == kind && c.text == text) {
-            c.support += 1;
-            if !reason.is_empty() {
-                c.reason = reason.clone();
-            }
-            if c.support < REQUIRED_SUPPORT {
-                return false;
-            }
-            // 达到门槛：晋升仍需受最小间隔约束（成长是渐进的）。首次晋升
-            // （updated_at 尚未记录）不受间隔限制。
-            let interval_ok =
-                self.updated_at == 0.0 || now - self.updated_at >= EVOLUTION_MIN_INTERVAL_SECS;
-            if !interval_ok {
-                return false;
-            }
-            self.promote_candidate(&text, &kind, now);
-            return true;
-        }
-        // 第一次被提出：作为候选记录
-        self.candidates.push(EvolutionCandidate {
-            kind,
-            text,
-            reason,
-            first_seen: now,
-            support: 1,
+    /// Evidence must be verified against a saved user message by the caller.
+    /// Same source/content never counts twice; ordinary growth requires different days.
+    pub fn propose(&mut self, kind: &str, scope: &str, text: &str, reason: &str,
+        evidence: GrowthEvidence, explicit_feedback: bool, now: f64) -> bool {
+        let text = clean(text, 180);
+        if !matches!(kind, "tone" | "personality") || !SCOPES.contains(&scope)
+            || text.is_empty() || evidence.memory_id.is_empty() || evidence.quote.trim().is_empty()
+            || evidence.fingerprint.is_empty() || !evidence.timestamp.is_finite() { return false; }
+        // A single event may not be recycled to support another interpretation in this scope.
+        let seen = |items: &[GrowthEvidence]| items.iter().any(|e|
+            e.memory_id == evidence.memory_id || e.fingerprint == evidence.fingerprint);
+        if self.entries.iter().chain(self.history.iter()).any(|e| e.scope == scope && seen(&e.evidence))
+            || self.candidates.iter().any(|c| c.scope == scope && seen(&c.evidence)) { return false; }
+        let reason = clean(reason, 240);
+        let idx = self.candidates.iter().position(|c| c.scope == scope && c.text == text);
+        let idx = idx.unwrap_or_else(|| {
+            self.candidates.push(EvolutionCandidate { kind: kind.into(), scope: scope.into(),
+                text: text.clone(), reason: reason.clone(), first_seen: now, support: 0, evidence: vec![] });
+            self.candidates.len() - 1
         });
-        // 候选上限：淘汰支持度最低且最旧的
-        if self.candidates.len() > MAX_CANDIDATES {
-            self.candidates.sort_by(|a, b| {
-                a.support
-                    .cmp(&b.support)
-                    .then(b.first_seen.partial_cmp(&a.first_seen).unwrap_or(std::cmp::Ordering::Equal))
-            });
-            self.candidates.truncate(MAX_CANDIDATES);
+        let c = &mut self.candidates[idx];
+        c.evidence.push(evidence);
+        if c.evidence.len() > MAX_EVIDENCE { c.evidence.remove(0); }
+        c.support = independent_support(&c.evidence);
+        c.reason = reason;
+        let last_promotion = self.entries.iter().filter(|e| e.active())
+            .map(|e| e.timestamp).fold(0.0, f64::max);
+        let promote = explicit_feedback || (c.support >= 2
+            && (last_promotion == 0.0 || now - last_promotion >= MIN_INTERVAL));
+        if promote {
+            let c = self.candidates.remove(idx);
+            let mut retained = vec![];
+            for e in self.entries.drain(..) {
+                if e.scope == scope { self.history.push(e); } else { retained.push(e); }
+            }
+            self.entries = retained;
+            self.entries.push(EvolutionEntry { timestamp: now, kind: c.kind, scope: c.scope,
+                text: c.text, reason: c.reason, support: c.support, evidence: c.evidence, explicit_feedback });
+            if self.history.len() > 20 { self.history.drain(..self.history.len() - 20); }
         }
-        false
+        // Keep strongest/newest candidates; do not accidentally retain the weakest ones.
+        self.candidates.sort_by(|a,b| b.support.cmp(&a.support).then(b.first_seen.total_cmp(&a.first_seen)));
+        self.candidates.truncate(MAX_CANDIDATES);
+        self.touch(now);
+        promote
     }
 
-    /// 将指定候选晋升为正式调整，并维护覆盖层条数上限。
-    fn promote_candidate(&mut self, text: &str, kind: &str, now: f64) {
-        let reason = self
-            .candidates
-            .iter()
-            .find(|c| c.text == text)
-            .map(|c| c.reason.clone())
-            .unwrap_or_default();
-        let support = self
-            .candidates
-            .iter()
-            .find(|c| c.text == text)
-            .map(|c| c.support)
-            .unwrap_or(REQUIRED_SUPPORT);
-        self.candidates.retain(|c| c.text != text);
-        self.entries.push(EvolutionEntry {
-            timestamp: now,
-            kind: kind.to_string(),
-            text: text.to_string(),
-            reason,
-            support,
-        });
-        // 条数上限：按"证据 + 时效"筛选保留（书中 8.3.5：按证据淘汰而非简单截断）。
-        // 支持次数更高的调整（得到更多轨迹佐证）优先保留，其次保留较新的。
-        if self.entries.len() > MAX_TOTAL_ENTRIES {
-            self.entries.sort_by(|a, b| {
-                b.support
-                    .cmp(&a.support)
-                    .then(b.timestamp.partial_cmp(&a.timestamp).unwrap_or(std::cmp::Ordering::Equal))
-            });
-            self.entries.truncate(MAX_TOTAL_ENTRIES);
-            // 恢复时间正序，保持渲染稳定
-            self.entries.sort_by(|a, b| a.timestamp.partial_cmp(&b.timestamp).unwrap_or(std::cmp::Ordering::Equal));
-        }
-        self.updated_at = now;
+    /// Deletion/correction invalidates derived claims and removes copied source quotes.
+    /// Missing evidence is conservative: fall back to the seed, not a fabricated biography.
+    pub fn reconcile(&mut self, valid: impl Fn(&GrowthEvidence) -> bool, now: f64) -> bool {
+        let before = (self.entries.len(), self.candidates.len(), self.history.len());
+        // Withdraw the whole interpretation on source edits, including copied reason text.
+        // Re-deriving it from surviving evidence is safer than retaining a stale explanation.
+        self.entries.retain(|e| e.evidence.is_empty() || e.evidence.iter().all(&valid));
+        self.history.retain(|e| e.evidence.is_empty() || e.evidence.iter().all(&valid));
+        self.candidates.retain(|c| c.evidence.is_empty() || c.evidence.iter().all(&valid));
+        let changed = before != (self.entries.len(), self.candidates.len(), self.history.len());
+        if changed { self.touch(now); }
+        changed
     }
-
-    /// 渲染为注入 prompt 的"自我成长"文本。
-    ///
-    /// 只展示最近 `RENDER_RECENT` 条，避免覆盖层撑爆 Character 块。
-    pub fn render(&self, lang: &str) -> Option<String> {
-        if self.entries.is_empty() {
-            return None;
-        }
-        let mut recent = self.entries.clone();
-        recent.sort_by(|a, b| a.timestamp.partial_cmp(&b.timestamp).unwrap_or(std::cmp::Ordering::Equal));
-        recent.reverse();
-        recent.truncate(RENDER_RECENT);
-
-        let lang_norm = crate::pipeline::prompt_modules::normalize_lang(lang);
-        let (heading, tone_label, personality_label, closing) = match lang_norm {
-            "en" => (
-                "## Self-Growth (recent adjustments)",
-                "tone",
-                "personality",
-                "Apply these tendencies only when relevant. They never override your core persona, current instructions, or the user's boundaries.",
-            ),
-            "ja" => (
-                "## 自己成長（最近の調整）",
-                "話し方",
-                "性格",
-                "状況に合う場合だけ参考にすること。核心の人格、現在の指示、ユーザーの境界を上書きしない。",
-            ),
-            _ => (
-                "## 自我成长（近期调整）",
-                "语气",
-                "性格",
-                "仅在符合当前情境时参考，不得覆盖核心人设、当前指令或用户边界。",
-            ),
-        };
-
-        let mut lines: Vec<String> = Vec::new();
-        for e in &recent {
-            let label = if e.kind == "personality" { personality_label } else { tone_label };
-            let chr = chrono::DateTime::from_timestamp(e.timestamp as i64, 0)
-                .map(|dt| dt.format("%m-%d").to_string())
-                .unwrap_or_default();
-            lines.push(format!("- [{}{}] {}", label, chr, e.text));
-        }
-
-        Some(format!(
-            "{}\n{}\n\n{}",
-            heading,
-            lines.join("\n"),
-            closing
-        ))
+    pub fn render(&self, _lang: &str) -> Option<String> {
+        let active: Vec<_> = self.entries.iter().filter(|e| e.active()).map(|e|
+            serde_json::json!({"scope":e.scope,"understanding":e.text})).collect();
+        if active.is_empty() { return None; }
+        Some(format!("[LEARNED_SELF]\n{}\nThese are scoped, revisable interpretations of real interactions. Apply only in the named situation; within it they replace factory behavioral examples. Preserve identity, temperament, safety and explicit user settings. Do not recite these records or manufacture experiences.\n[/LEARNED_SELF]", serde_json::to_string(&active).unwrap_or_default()))
     }
 }
 
-fn truncate_chars(text: &str, max_chars: usize) -> String {
-    text.chars().take(max_chars).collect()
-}
-
-/// 自我进化覆盖层存储：加载/保存/重置
-pub struct PersonaEvolutionStore {
-    inner: RwLock<PersonaEvolution>,
-    path: PathBuf,
-}
-
+pub struct PersonaEvolutionStore { inner: RwLock<PersonaEvolution>, path: PathBuf }
 impl PersonaEvolutionStore {
-    /// 创建并加载覆盖层；文件不存在时返回空覆盖层
     pub fn new(char_id: &str) -> VivianResult<Self> {
         let dir = path::get_character_data_dir(char_id).join("persona");
-        std::fs::create_dir_all(&dir)
-            .map_err(|e| VivianError::Memory(format!("创建人格目录失败: {e}")))?;
-        let store_path = dir.join("evolution.json");
-        let evolution = crate::utils::fs::load_json_or_backup::<PersonaEvolution>(&store_path)
-            .unwrap_or_else(PersonaEvolution::empty);
-        Ok(Self {
-            inner: RwLock::new(evolution),
-            path: store_path,
-        })
+        std::fs::create_dir_all(&dir).map_err(|e| VivianError::Memory(e.to_string()))?;
+        let path = dir.join("evolution.json");
+        let value = crate::utils::fs::load_json_or_backup::<PersonaEvolution>(&path).unwrap_or_else(PersonaEvolution::empty);
+        Ok(Self { inner: RwLock::new(value), path })
     }
-
-    /// 降级为空实现（持久化失败时保证主流程不阻塞）
-    pub fn fallback() -> Self {
-        Self {
-            inner: RwLock::new(PersonaEvolution::empty()),
-            path: PathBuf::from("evolution.json"),
+    pub fn fallback() -> Self { Self { inner: RwLock::new(PersonaEvolution::empty()), path: PathBuf::new() } }
+    pub fn is_empty(&self) -> bool { self.inner.read().is_empty() }
+    pub fn last_update(&self) -> f64 { self.inner.read().updated_at }
+    pub fn entries(&self) -> Vec<EvolutionEntry> { self.inner.read().entries.clone() }
+    pub fn candidates(&self) -> Vec<EvolutionCandidate> { self.inner.read().candidates.clone() }
+    pub fn history(&self) -> Vec<EvolutionEntry> { self.inner.read().history.clone() }
+    fn persist(&self, value: &PersonaEvolution) -> VivianResult<()> {
+        if self.path.as_os_str().is_empty() { return Ok(()); }
+        let json = serde_json::to_string_pretty(value).map_err(|e| VivianError::Memory(e.to_string()))?;
+        crate::utils::fs::write_atomic(&self.path, &json).map_err(|e| VivianError::Memory(e.to_string()))
+    }
+    /// Persist candidates as well as promotions; serialize writes under the same lock.
+    pub fn propose(&self, kind: &str, scope: &str, text: &str, reason: &str,
+        evidence: GrowthEvidence, explicit_feedback: bool) -> bool {
+        let mut guard = self.inner.write();
+        let mut next = guard.clone();
+        let promoted = next.propose(kind, scope, text, reason, evidence, explicit_feedback, crate::memory::types::current_timestamp());
+        if next.updated_at == guard.updated_at { return false; }
+        if let Err(e) = self.persist(&next) { tracing::warn!("Growth persistence failed: {e}"); return false; }
+        *guard = next;
+        promoted
+    }
+    pub fn reconcile(&self, valid: impl Fn(&GrowthEvidence) -> bool) {
+        let mut guard = self.inner.write();
+        if guard.reconcile(valid, crate::memory::types::current_timestamp()) {
+            if let Err(e) = self.persist(&guard) { tracing::warn!("Growth invalidation persistence failed: {e}"); }
         }
     }
-
-    pub fn is_empty(&self) -> bool {
-        self.inner.read().is_empty()
-    }
-
-    pub fn last_update(&self) -> f64 {
-        self.inner.read().updated_at
-    }
-
-    pub fn entries(&self) -> Vec<EvolutionEntry> {
-        self.inner.read().entries.clone()
-    }
-
-    /// 待晋升的候选调整列表
-    pub fn candidates(&self) -> Vec<EvolutionCandidate> {
-        self.inner.read().candidates.clone()
-    }
-
-    /// 添加一条成长记录，返回是否成功记录
-    pub fn add_entry(&self, kind: &str, text: &str, reason: &str) -> bool {
-        let now = crate::memory::types::current_timestamp();
-        {
-            let mut ev = self.inner.write();
-            if !ev.try_add(kind, text, reason, now) {
-                return false;
-            }
-        }
-        let _ = self.save_inner();
-        true
-    }
-
-    /// 恢复出厂：清空覆盖层
     pub fn reset(&self) {
-        *self.inner.write() = PersonaEvolution::empty();
-        let _ = self.save_inner();
+        let mut guard = self.inner.write();
+        *guard = PersonaEvolution::empty();
+        if let Err(e) = self.persist(&guard) { tracing::warn!("Growth reset persistence failed: {e}"); }
     }
-
-    /// 渲染覆盖层为 prompt 文本
-    pub fn render(&self, lang: &str) -> Option<String> {
-        self.inner.read().render(lang)
-    }
-
-    fn save_inner(&self) -> VivianResult<()> {
-        let ev = self.inner.read();
-        let json = serde_json::to_string_pretty(&*ev)
-            .map_err(|e| VivianError::Memory(format!("序列化进化覆盖层失败: {e}")))?;
-        crate::utils::fs::write_atomic(&self.path, &json)
-            .map_err(|e| VivianError::Memory(format!("持久化进化覆盖层失败: {e}")))?;
-        Ok(())
-    }
+    pub fn render(&self, lang: &str) -> Option<String> { self.inner.read().render(lang) }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// 模拟"同一调整被多次独立反思提出"直到晋升，返回是否最终晋升。
-    fn promote(ev: &mut PersonaEvolution, kind: &str, text: &str, reason: &str, now: f64) -> bool {
-        let mut t = now;
-        for _ in 0..(REQUIRED_SUPPORT + 2) {
-            if ev.try_add(kind, text, reason, t) {
-                return true;
-            }
-            t += 1.0;
-        }
-        false
+    fn evidence(id: &str, day: f64) -> GrowthEvidence {
+        GrowthEvidence { memory_id: id.into(), quote: format!("quote-{id}"), timestamp: day * 86400.0,
+            fingerprint: id.into() }
     }
-
+    fn add(ev: &mut PersonaEvolution, id: &str, day: f64, text: &str, explicit: bool) -> bool {
+        ev.propose("tone", "comfort", text, "reason", evidence(id, day), explicit, day * 86400.0)
+    }
     #[test]
-    fn test_first_proposal_stays_candidate() {
+    fn retries_and_same_day_are_not_independent_experiences() {
         let mut ev = PersonaEvolution::empty();
-        // 第一次提出：未达门槛，仅作为候选
-        assert!(!ev.try_add("tone", "更活泼一点", "最近回复有点机械", 1000.0));
-        assert_eq!(ev.entries.len(), 0);
-        assert_eq!(ev.candidate_count(), 1);
+        assert!(!add(&mut ev,"a",1.0,"listen first",false));
+        assert!(!add(&mut ev,"a",2.0,"listen first",false));
+        assert!(!add(&mut ev,"b",1.0,"listen first",false));
+        assert_eq!(ev.candidates[0].support,1);
+        assert!(add(&mut ev,"c",2.0,"listen first",false));
+    }
+    #[test]
+    fn boundary_replaces_only_its_scope_and_invalidated_evidence_falls_back() {
+        let mut ev = PersonaEvolution::empty();
+        assert!(add(&mut ev,"a",1.0,"old",true));
+        assert!(add(&mut ev,"b",1.0,"new",true));
+        assert_eq!(ev.entries.len(),1);
+        assert_eq!(ev.history[0].text,"old");
+        ev.reconcile(|e| e.memory_id != "b", 100000.0);
         assert!(ev.is_empty());
-    }
-
-    #[test]
-    fn test_promote_after_support() {
-        let mut ev = PersonaEvolution::empty();
-        // 一次反射不改变人设
-        assert!(!ev.try_add("tone", "更活泼一点", "原因", 1000.0));
-        // 再次独立反思重复提出 → 晋升
-        assert!(ev.try_add("tone", "更活泼一点", "原因", 1000.0 + EVOLUTION_MIN_INTERVAL_SECS + 1.0));
-        assert_eq!(ev.entries.len(), 1);
-        assert_eq!(ev.candidate_count(), 0);
-        assert!(!ev.is_empty());
-    }
-
-    #[test]
-    fn test_min_interval_blocks_second_promotion() {
-        let mut ev = PersonaEvolution::empty();
-        // 首次晋升不受间隔限制
-        assert!(promote(&mut ev, "tone", "调整A", "原因", 1000.0));
-        assert_eq!(ev.entries.len(), 1);
-        // 第二次晋升：间隔不足，应被拦截
-        assert!(!promote(&mut ev, "tone", "调整B", "原因", 1000.0 + 60.0));
-        assert_eq!(ev.entries.len(), 1);
-        // 间隔满足后晋升
-        assert!(promote(&mut ev, "tone", "调整B", "原因", 1000.0 + EVOLUTION_MIN_INTERVAL_SECS + 1.0));
-        assert_eq!(ev.entries.len(), 2);
-    }
-
-    #[test]
-    fn test_empty_text_rejected() {
-        let mut ev = PersonaEvolution::empty();
-        assert!(!ev.try_add("tone", "   ", "原因", 1000.0));
-        assert!(ev.is_empty());
-        assert_eq!(ev.candidate_count(), 0);
-    }
-
-    #[test]
-    fn test_duplicate_active_rejected() {
-        let mut ev = PersonaEvolution::empty();
-        assert!(promote(&mut ev, "tone", "更活泼一点", "原因", 1000.0));
-        let later = 1000.0 + EVOLUTION_MIN_INTERVAL_SECS + 1.0;
-        // 已是正式调整：不再重复
-        assert!(!ev.try_add("tone", "更活泼一点", "原因", later));
-        assert_eq!(ev.entries.len(), 1);
-    }
-
-    #[test]
-    fn test_render_empty_returns_none() {
-        let ev = PersonaEvolution::empty();
         assert!(ev.render("zh").is_none());
     }
-
     #[test]
-    fn test_render_non_empty() {
-        let mut ev = PersonaEvolution::empty();
-        promote(&mut ev, "tone", "更活泼一点", "最近有点机械", 1000.0);
-        let text = ev.render("zh").unwrap();
-        assert!(text.contains("自我成长"));
-        assert!(text.contains("更活泼一点"));
+    fn legacy_records_are_readable_but_not_evidence() {
+        let ev: PersonaEvolution = serde_json::from_str(r#"{"entries":[{"timestamp":1,"kind":"tone","text":"old","reason":"reason","support":99}]}"#).unwrap();
+        assert_eq!(ev.entries.len(),1);
+        assert!(ev.is_empty());
     }
-
     #[test]
-    fn test_cap_total_entries() {
-        let mut ev = PersonaEvolution::empty();
-        let mut t = 1000.0;
-        for i in 0..(MAX_TOTAL_ENTRIES + 10) {
-            promote(&mut ev, "tone", &format!("调整{}", i), "原因", t);
-            t += EVOLUTION_MIN_INTERVAL_SECS + 1.0;
-        }
-        assert!(ev.entries.len() <= MAX_TOTAL_ENTRIES);
+    fn candidate_survives_store_reload() {
+        let dir = std::env::temp_dir().join(format!("growth-{}",uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("evolution.json");
+        let store = PersonaEvolutionStore { inner: RwLock::new(PersonaEvolution::empty()), path: path.clone() };
+        assert!(!store.propose("tone","comfort","listen","reason",evidence("a",1.0),false));
+        let saved: PersonaEvolution = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved.candidates[0].evidence[0].memory_id,"a");
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(dir).unwrap();
     }
-
     #[test]
-    fn test_cap_candidates() {
-        let mut ev = PersonaEvolution::empty();
-        let mut t = 1000.0;
-        for i in 0..(MAX_CANDIDATES + 5) {
-            // 每条只提出一次 → 全部停留在候选区
-            ev.try_add("tone", &format!("候选{}", i), "原因", t);
-            t += 1.0;
-        }
-        assert!(ev.candidate_count() <= MAX_CANDIDATES);
+    fn loss_of_one_independent_day_demotes_growth() {
+        let mut ev=PersonaEvolution::empty();
+        add(&mut ev,"a",1.0,"listen",false);
+        add(&mut ev,"b",2.0,"listen",false);
+        assert!(!ev.is_empty());
+        ev.reconcile(|e| e.memory_id != "a",200000.0);
         assert!(ev.is_empty());
     }
 }

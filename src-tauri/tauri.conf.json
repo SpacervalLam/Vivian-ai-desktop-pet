@@ -27,7 +27,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self' asset: http://asset.localhost model: http://model.localhost; img-src 'self' asset: http://asset.localhost model: http://model.localhost data: blob:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.cn https://fonts.loli.net; font-src 'self' asset: http://asset.localhost https://fonts.gstatic.cn https://fonts.gstatic.com https://fonts.googleapis.cn https://gstatic.loli.net https://fonts.loli.net data:; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; connect-src 'self' asset: http://asset.localhost model: http://model.localhost https: wss: ipc: http://ipc.localhost",
+      "csp": "default-src 'self' asset: http://asset.localhost model: http://model.localhost; img-src 'self' asset: http://asset.localhost model: http://model.localhost data: blob:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.cn https://fonts.loli.net; font-src 'self' asset: http://asset.localhost https://fonts.gstatic.cn https://fonts.gstatic.com https://fonts.googleapis.cn https://gstatic.loli.net https://fonts.loli.net data:; script-src 'self' 'unsafe-inline' asset: http://asset.localhost https://cdn.jsdelivr.net; connect-src 'self' asset: http://asset.localhost model: http://model.localhost https: wss: ipc: http://ipc.localhost",
       "assetProtocol": {
         "enable": true,
         "scope": ["$RESOURCE/**/*", "$APPDATA/**/*", "$HOME/**/*", "**/*"]
@@ -39,7 +39,8 @@
       "targets": ["nsis", "msi"],
       "windows": {
         "nsis": {
-          "compression": "lzma"
+          "compression": "lzma",
+          "installerHooks": "windows/apartment-installer.nsh"
         },
         "wix": {
           "language": "zh-CN"
@@ -54,7 +55,10 @@
     ],
     "resources": {
       "vivian.bundle.enc": "vivian.bundle.enc",
-      "../browser-extension": "browser-extension/"
+      "../browser-extension": "browser-extension/",
+      "plugins/3d-apartment/plugin.json": "plugins/3d-apartment/plugin.json",
+      "plugins/3d-apartment/ui": "plugins/3d-apartment/ui/",
+      "../public/room": "plugins/3d-apartment/room/"
     },
     "copyright": "Copyright © 2026 Vivian",
     "category": "Entertainment",

@@ -412,6 +412,7 @@ pub async fn synthesize_with_llm(
     let result = router
         .generate(
             LLMRequest::new("inner_monologue", messages)
+                .with_usage_tag("current_thought")
                 .with_json_schema(thought_output_schema()),
         )
         .await?;

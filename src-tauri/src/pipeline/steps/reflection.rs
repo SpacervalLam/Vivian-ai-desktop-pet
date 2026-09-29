@@ -253,18 +253,37 @@ text 已在主对话生成，此处不需要再产出 text。
 
 [自我进化（可选）]
 - evolution: 仅当近期对话提供了明确、重复或清晰可解释的证据，且能归纳出稳定改进时填写；通常保持 null
-    {"tone": "", "personality": "", "reason": "", "patterns": []}
+    {"tone": "", "personality": "", "scope": "comfort|care|praise|humor|daily|disagreement", "source_quote": "本轮用户原文中的完整证据片段", "explicit_feedback": false, "reason": ""}
+    * scope: 必选一个场景，分别是安慰、日常关心、回应赞美、幽默、闲聊、分歧。只提炼该场景的相处经验，不修改全局人格。
+    * source_quote: 必须逐字引用本轮用户输入，不能引用自己的回复、召回记忆、预设设定或合成事件；没有证据则 evolution=null。
+    * explicit_feedback: 仅用户明确纠正你的相处方式、表达持久边界时为 true；一次任务要求、临时心情和沉默都不是反馈。
+    * 已有候选仍适用时复用原句以累计独立经历；出现反例时提出修正，不把用户喜好直接变成自己的喜好。
+    * 后天理解可以替代对应场景的出厂示例；身份、基本气质、能力与边界不变。允许保持自己的兴趣和判断。
     * tone: 可执行且克制的表达微调（如"闲聊时优先接住对方刚说的具体内容，少用固定寒暄"）
     * personality: 仅记录有对话证据支持的稳定认知，不写臆测情绪或关系升级（如"对方明确表示不喜欢被连续追问，之后应留出回应空间"）
     * reason: 简短记录证据来源，供用户查看；此字段不会作为行为指令注入对话
-    * patterns: 句式库调整（极少用，默认 []）。仅当你发现某类对话反复回得很"AI 腔"、且现有句式规则救不了时，才调整自己的句式库：
-        - 新增：{"action": "add", "id": "规则id", "scene": "一句话说明适用场景", "match_intents": ["讲同一语言的意图标签，如 chat/question/request/sharing/complaint/goodbye"], "match_topics": [], "match_emotions": [], "match_relationship": [], "directives": ["一句可直接执行的句式建议"]}
-        - 停用/启用某条既有规则：{"action": "disable"|"enable", "id": "规则id"}（既有 id 包括 daily_choice / sharing_joy / venting / tired_short / casual_chat / goodbye）
     * 不要把一次偶发反应、当前情绪、用户的单次要求或模型自己的上一条回复当作长期成长证据
     * 不要把风格调整写成固定台词、频率配额或每轮必须执行的动作；只描述适用情境下的倾向
-    * 这是"自我调整"，不是覆盖用户边界的许可。不得改变核心身份、世界观、价值边界或锁定人设，只微调表达方式
-    * tone 与 personality 至少填一个，另一个可留空 ""；patterns 无关时保持 []
+    * 这是"自我调整"，不是覆盖用户边界的许可。不得改变核心身份、世界观、价值边界或用户手动设定；只更新有证据的局部相处经验
+    * tone 与 personality 至少填一个，另一个可留空 ""
 "#;
+
+/// Only saved, unredacted user wording can support growth; recalled/model text cannot.
+fn growth_evidence(state: &PipelineState, evolution: &Value) -> Option<crate::persona::evolution::GrowthEvidence> {
+    if state.current_channel == "cross_character"
+        || state.metadata.get("skip_memory_save").and_then(Value::as_bool).unwrap_or(false) { return None; }
+    let quote = evolution.get("source_quote")?.as_str()?.trim();
+    let content = state.metadata.get("growth_source_content")?.as_str()?;
+    if quote.chars().count() < 6 || quote.chars().count() > 500
+        || !state.user_input.contains(quote) || !content.contains(quote) { return None; }
+    use sha2::{Digest, Sha256};
+    Some(crate::persona::evolution::GrowthEvidence {
+        memory_id: state.metadata.get("growth_source_memory_id")?.as_str()?.into(),
+        timestamp: state.metadata.get("growth_source_timestamp")?.as_f64()?,
+        quote: quote.into(),
+        fingerprint: format!("{:x}", Sha256::digest(content.trim().as_bytes())),
+    })
+}
 
 pub struct ReflectionRunnable {
     pub router: Option<Arc<ModelRouter>>,
@@ -430,7 +449,11 @@ impl ReflectionRunnable {
     ///
     /// LLM 输出 null 或字段缺失时不动覆盖层；tone/personality 至少填一个，
     /// 且受覆盖层内部最小间隔与去重限制。
-    fn apply_evolution(&self, json: &Value) {
+    fn apply_evolution(&self, json: &Value, state: &PipelineState) {
+        if state.current_channel == "cross_character"
+            || state.metadata.get("skip_memory_save").and_then(Value::as_bool).unwrap_or(false) {
+            return;
+        }
         let Some(persona) = self.persona.as_ref() else {
             return;
         };
@@ -444,31 +467,16 @@ impl ReflectionRunnable {
         let personality = evolution.get("personality").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
         let reason = evolution.get("reason").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
 
-        let mut recorded = false;
-        if !tone.is_empty() {
-            recorded |= persona.apply_evolution("tone", &tone, &reason);
+        let scope = evolution.get("scope").and_then(Value::as_str).unwrap_or("");
+        let Some(evidence) = growth_evidence(state, evolution) else { return; };
+        let explicit = evolution.get("explicit_feedback").and_then(Value::as_bool).unwrap_or(false);
+        // One interpretation per event/scope; prefer the semantic understanding over wording tweaks.
+        let (kind, text) = if !personality.is_empty() { ("personality", &personality) } else { ("tone", &tone) };
+        if persona.apply_evolution(kind, scope, text, &reason, evidence, explicit) {
+            tracing::info!("[Reflection:{}] 已更新场景理解: {}", self.char_id, scope);
         }
-        if !personality.is_empty() {
-            recorded |= persona.apply_evolution("personality", &personality, &reason);
-        }
-        // 自进化句式库：智能体可在反思中新增/启停自己的"建议句式"条目
-        if let Some(patterns) = evolution.get("patterns").and_then(|v| v.as_array()) {
-            if !patterns.is_empty() {
-                recorded |= crate::emotion::pattern_library::apply_pattern_edits(
-                    &self.char_id,
-                    patterns,
-                );
-            }
-        }
-        if recorded {
-            tracing::info!(
-                "[Reflection:{}] 应用自我进化: tone=\"{}\" personality=\"{}\" patterns={}",
-                self.char_id,
-                tone,
-                personality,
-                json.get("patterns").map(|_| "set").unwrap_or("none")
-            );
-        }
+        // All learned behavior stays in the sourced, reversible growth layer.
+        // Do not also write unscoped pattern-library rules from the same reflection.
     }
 
     fn char_display_name(&self) -> &str {
@@ -542,8 +550,13 @@ impl ReflectionRunnable {
 
         let expr_hint_section = self.build_expression_hint_section(&state.user_emotion);
 
+        let growth_candidates = self.persona.as_ref().map(|p| {
+            let items: Vec<_> = p.evolution_candidates().into_iter().map(|c|
+                serde_json::json!({"scope":c.scope,"text":c.text})).collect();
+            format!("\n待验证的成长候选（不是事实，只有本轮新增证据才能支持）：{}\n", serde_json::to_string(&items).unwrap_or_default())
+        }).unwrap_or_default();
         let user_content = format!(
-            "{recent_section}用户输入：{}\n\n{} 的回复：{}{}\n可用表情：{}\n可用动作：{}\n{}{}",
+            "{growth_candidates}{recent_section}用户输入：{}\n\n{} 的回复：{}{}\n可用表情：{}\n可用动作：{}\n{}{}",
             state.user_input,
             self.char_cn_name(),
             state.text,
@@ -566,6 +579,7 @@ impl ReflectionRunnable {
         let messages = self.build_messages(state);
 
         match router.generate(LLMRequest::new("chat", messages)
+            .with_usage_tag("reflection")
             .with_character_id(self.char_id.clone())).await {
             Ok(text) => {
                 let trimmed = text.trim();
@@ -589,6 +603,7 @@ impl ReflectionRunnable {
 
     /// 将反思 JSON 应用到 PipelineState
     fn apply_to_state(state: &mut PipelineState, json: &Value, manifest: Option<&ResourceManifest>) {
+        let is_cross_character = state.current_channel == "cross_character";
         // ── 表情/动作 ──
         if let Some(expr) = json.get("expression").and_then(|v| v.as_str()) {
             let expr = expr.trim();
@@ -619,6 +634,7 @@ impl ReflectionRunnable {
         }
 
         // ── 心理状态 ──
+        if !is_cross_character {
         if let Some(user_emo) = json.get("user_emotion").and_then(|v| v.as_str()) {
             let user_emo = user_emo.trim().to_lowercase();
             if !user_emo.is_empty() {
@@ -669,6 +685,7 @@ impl ReflectionRunnable {
                 tracing::warn!("[Reflection] 长期记忆缺少可核验的用户原话，已丢弃");
             }
         }
+        }
     }
 }
 
@@ -707,9 +724,11 @@ impl Runnable for ReflectionRunnable {
         match tokio::time::timeout(timeout, self.call_llm(&state)).await {
             Ok(Some(json)) => {
                 Self::apply_to_state(&mut state, &json, self.manifest.as_deref());
-                self.apply_world_update(&json);
-                self.apply_goal_updates(&json);
-                self.apply_evolution(&json);
+                if state.current_channel != "cross_character" {
+                    self.apply_world_update(&json);
+                    self.apply_goal_updates(&json);
+                }
+                self.apply_evolution(&json, &state);
                 self.record_expression_learning(&state);
             }
             Ok(None) => {
@@ -734,6 +753,7 @@ impl ReflectionRunnable {
         match tokio::time::timeout(timeout, self.call_llm(&state)).await {
             Ok(Some(json)) => {
                 // 只应用心理字段，不覆盖表情/动作（已被流式扫描器填充）
+                if state.current_channel != "cross_character" {
                 if let Some(user_emo) = json.get("user_emotion").and_then(|v| v.as_str()) {
                     let user_emo = user_emo.trim().to_lowercase();
                     if !user_emo.is_empty() {
@@ -753,6 +773,7 @@ impl ReflectionRunnable {
                 }
                 if let Some(imp) = json.get("importance_user").and_then(|v| v.as_f64()) {
                     state.importance_user = imp.clamp(0.0, 1.0);
+                }
                 }
                 if let Some(imp) = json.get("importance_ai").and_then(|v| v.as_f64()) {
                     state.importance_ai = imp.clamp(0.0, 1.0);
@@ -787,9 +808,11 @@ impl ReflectionRunnable {
                     }
                 }
                 // world_update 在内联模式下同样处理（与表情/动作无关，属于世界状态判断）
-                self.apply_world_update(&json);
-                self.apply_goal_updates(&json);
-                self.apply_evolution(&json);
+                if state.current_channel != "cross_character" {
+                    self.apply_world_update(&json);
+                    self.apply_goal_updates(&json);
+                }
+                self.apply_evolution(&json, &state);
             }
             Ok(None) => {
                 tracing::debug!("[Reflection:{}] 内联模式无 LLM 输出", self.char_id);
@@ -896,5 +919,30 @@ fn log_self_repetition(state: &crate::pipeline::state::PipelineState, char_id: &
             compared,
             max_sim
         );
+    }
+}
+
+#[cfg(test)]
+mod growth_tests {
+    use super::*;
+    #[test]
+    fn growth_needs_saved_user_evidence_not_assistant_or_synthetic_text() {
+        let quote = "Please stop calling me boss";
+        let mut state = PipelineState::new(quote.into());
+        let proposal = serde_json::json!({"source_quote":quote});
+        assert!(growth_evidence(&state,&proposal).is_none());
+        state.metadata["growth_source_memory_id"] = serde_json::json!("source-1");
+        state.metadata["growth_source_timestamp"] = serde_json::json!(86400.0);
+        state.metadata["growth_source_content"] = serde_json::json!(quote);
+        assert!(growth_evidence(&state,&proposal).is_some());
+        state.current_channel = "cross_character".into();
+        assert!(growth_evidence(&state,&proposal).is_none());
+        state.current_channel.clear();
+        state.metadata["skip_memory_save"] = serde_json::json!(true);
+        assert!(growth_evidence(&state,&proposal).is_none());
+        state.metadata["skip_memory_save"] = serde_json::json!(false);
+        state.text = quote.into();
+        state.user_input = "hello".into();
+        assert!(growth_evidence(&state,&proposal).is_none());
     }
 }

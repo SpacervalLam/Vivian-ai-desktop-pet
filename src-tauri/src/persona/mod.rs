@@ -413,7 +413,7 @@ impl PersonaEngine {
             }
         }
         let mut block =
-            prompt_render::render_character_block_tiered(&self.config.read(), &lang, tier);
+            prompt_render::render_character_block_growing(&self.config.read(), &lang, tier, &self.evolution.entries());
         if let Some(evolution_text) = self.evolution.render(&lang) {
             if !block.trim().is_empty() {
                 block.push_str("\n\n");
@@ -436,17 +436,20 @@ impl PersonaEngine {
     ///
     /// 由反思流程调用。受最小间隔限制，返回是否成功记录。
     /// 只影响最终拼入 prompt 的覆盖层，不修改原始人设文件。
-    pub fn apply_evolution(&self, kind: &str, text: &str, reason: &str) -> bool {
-        let added = self.evolution.add_entry(kind, text, reason);
-        if added {
-            tracing::info!(
-                "[PersonaEngine] 自我进化已记录: kind={}, text=\"{}\"",
-                kind,
-                text
-            );
-        }
-        added
+    pub fn apply_evolution(&self, kind: &str, scope: &str, text: &str, reason: &str,
+        evidence: evolution::GrowthEvidence, explicit_feedback: bool) -> bool {
+        self.evolution.propose(kind, scope, text, reason, evidence, explicit_feedback)
     }
+
+    pub fn reconcile_evolution(&self, memory: &crate::memory::MemoryManager) {
+        use sha2::{Digest, Sha256};
+        self.evolution.reconcile(|e| memory.get_memory_content_by_id(&e.memory_id)
+            .map(|content| content.contains(&e.quote)
+                && format!("{:x}", Sha256::digest(content.trim().as_bytes())) == e.fingerprint)
+            .unwrap_or(false));
+    }
+
+    pub fn evolution_history(&self) -> Vec<EvolutionEntry> { self.evolution.history() }
 
     /// 恢复出厂：清空自我进化覆盖层（原始人设文件不受影响）
     pub fn reset_evolution(&self) {

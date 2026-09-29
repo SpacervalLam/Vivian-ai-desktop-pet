@@ -295,6 +295,7 @@ pub async fn clear_all_memories(
         .clear_all_memories()
         .await
         .map_err(err_str)?;
+    character.brain.persona.reset_evolution();
     // 一并清空聊天历史记录文件，避免聊天窗口仍显示已清空的详细对话
     character
         .brain

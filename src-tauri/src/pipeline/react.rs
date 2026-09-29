@@ -449,7 +449,9 @@ impl ReactLoop {
 
     /// 窗口压缩：轮与轮之间治理对话总长度，避免工具结果累积撑爆上下文
     async fn compress_window(&mut self, ctx: &ReactCtx<'_>) {
-        let mid_end = self.messages.len().saturating_sub(ctx.compress_keep_recent);
+        let mid_end = crate::providers::tool_history::intact_tool_boundary(
+            &self.messages, self.messages.len().saturating_sub(ctx.compress_keep_recent),
+        );
         let snapshot = if mid_end > 1 {
             Some(crate::pipeline::compaction_reminder::CompactionSnapshot::from_mid_section(
                 &self.messages, 1, mid_end,
@@ -535,40 +537,23 @@ impl ReactLoop {
 
     /// 表达态收尾：恢复人设 →（可选）注入收尾指令 → 生成最终回复并推送
     ///
-    /// `with_tools=true` 保留工具通道（doom loop 打断后允许模型说明状态）；
+    /// 收尾关闭工具通道，避免模型又提出工具调用但宿主不执行；
     /// 生成失败时保留既有 `final_content`，不中断主流程。
-    async fn wrap_up(&mut self, ctx: &ReactCtx<'_>, prompt: Option<String>, with_tools: bool) {
+    async fn wrap_up(&mut self, ctx: &ReactCtx<'_>, prompt: Option<String>) {
         self.restore_persona();
         if let Some(p) = prompt {
             self.messages.push(ChatMessage::user(p));
         }
-        let reply = if with_tools {
-            match ctx
-                .router
-                .generate_with_tools(
-                    AIResponseGenerationRunnable::build_chat_request(
-                        ctx.task_type,
-                        self.messages.clone(),
-                    )
-                    .with_tools(self.tools.clone()),
-                )
-                .await
-            {
-                Ok(resp) => resp.content,
-                Err(e) => {
-                    tracing::warn!("[react] 收尾生成失败: {}", e);
-                    String::new()
-                }
-            }
-        } else {
-            ctx.router
-                .generate(AIResponseGenerationRunnable::build_chat_request(
-                    ctx.task_type,
-                    self.messages.clone(),
-                ))
-                .await
-                .unwrap_or_default()
-        };
+        let reply = ctx.router
+            .generate(AIResponseGenerationRunnable::build_chat_request(
+                ctx.task_type,
+                self.messages.clone(),
+            ))
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!("[react] 收尾生成失败: {}", e);
+                String::new()
+            });
         // 防御：模型偶尔仍包 JSON，提取 text 字段（纯文本时原样返回）
         let text = JsonParser::extract_text(&reply).unwrap_or(reply);
         if !text.is_empty() {
@@ -659,7 +644,6 @@ impl ReactLoop {
                     "[系统提示] 内部推演预算已用完。请停止继续思考或调用工具，基于现有信息直接给出当前最佳答案；如确实缺少只有用户知道的信息，简短说明并提出一个必要问题。"
                         .to_string(),
                 ),
-                false,
             )
             .await;
             return RoundOutcome::Terminated;
@@ -672,26 +656,28 @@ impl ReactLoop {
                 "[react] 第 {} 轮检测到 goal_completed，提前终止工具循环",
                 self.rounds
             );
-            self.wrap_up(ctx, Some(goal_completed_prompt(ctx.channel)), false)
+            self.wrap_up(ctx, Some(goal_completed_prompt(ctx.channel)))
                 .await;
             return RoundOutcome::Terminated;
         }
 
-        // Doom Loop：同 (tool, args) 签名重复调用达阈值 → 注入打断消息，表达态收尾
-        let round_calls: Vec<(String, serde_json::Value)> = calls
-            .iter()
-            .map(|tc| (tc.name.clone(), tc.arguments.clone()))
-            .collect();
-        let loop_status = self.doom_tracker.record_round(&round_calls);
+        // 参数和结果都重复才视为停滞；轮询得到了新状态时允许继续。
+        // execute_structured_calls 按模型顺序返回结果（并行只读批次亦如此）。
+        let mut loop_status = LoopStatus::Normal;
+        for (call, result) in calls.iter().zip(&results) {
+            loop_status = self.doom_tracker.record_result(
+                &call.name, &call.arguments, result.success, &tool_result_to_message_body(result),
+            );
+        }
         if let LoopStatus::Doomed { ref tool, count } = loop_status {
             tracing::warn!(
-                "[react] Doom loop 检测：工具 `{}` 已被相同参数调用 {} 次，注入打断消息",
+                "[react] Doom loop 检测：包含 `{}` 的调用序列及结果重复 {} 次，注入打断消息",
                 tool, count
             );
             if let Some(msg) = DoomLoopTracker::build_intervention_message(&loop_status) {
                 self.messages.push(ChatMessage::user(&msg));
             }
-            self.wrap_up(ctx, None, true).await;
+            self.wrap_up(ctx, None).await;
             return RoundOutcome::Terminated;
         }
 
@@ -771,7 +757,7 @@ pub(crate) async fn run_react_loop(
         "[react] 工具调用达到 {} 轮上限，强制生成最终回复",
         lp.rounds
     );
-    lp.wrap_up(&ctx, Some(round_limit_prompt(ctx.channel)), false)
+    lp.wrap_up(&ctx, Some(round_limit_prompt(ctx.channel)))
         .await;
     Ok(lp.finish())
 }

@@ -117,6 +117,12 @@ impl ToneInjector {
         user_input: &str,
         lang: &str,
     ) -> Option<String> {
+        self.build_tone_injection_growing(user_input, lang, &[])
+    }
+
+    /// A learned scene already has an experience-backed response tendency.
+    /// Do not reintroduce its old factory lines at the end of the prompt.
+    pub fn build_tone_injection_growing(&self, user_input: &str, lang: &str, learned: &[&str]) -> Option<String> {
         if user_input.trim().is_empty() {
             return None;
         }
@@ -135,7 +141,7 @@ impl ToneInjector {
                     continue;
                 }
                 if user_input.contains(sample.as_str()) {
-                    return Some(format_injection(scene, 1.0, "keyword", lang));
+                    return (!scene_is_learned(&scene.id, learned)).then(|| format_injection(scene, 1.0, "keyword", lang));
                 }
             }
         }
@@ -154,7 +160,7 @@ impl ToneInjector {
                 }
                 if let Some((scene, score)) = best {
                     if score >= SCENE_MATCH_THRESHOLD {
-                        return Some(format_injection(scene, score, "embedding", lang));
+                        return (!scene_is_learned(&scene.id, learned)).then(|| format_injection(scene, score, "embedding", lang));
                     }
                 }
             }
@@ -167,6 +173,14 @@ impl ToneInjector {
     pub fn char_id(&self) -> &str {
         &self.char_id
     }
+}
+
+fn scene_is_learned(scene: &str, learned: &[&str]) -> bool {
+    let scope = match scene {
+        "praised" => "praise", "playful" => "humor", "concern" => "care",
+        "annoyed" => "disagreement", "tired" => "comfort", other => other,
+    };
+    learned.contains(&scope)
 }
 
 /// 格式化注入文本
@@ -276,6 +290,15 @@ fn parse_scenes_md(md: &str) -> Vec<SceneEntry> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn learned_scene_stops_factory_quote_reinjection() {
+        let injector = ToneInjector::new("vivian");
+        let input = "今天好累啊";
+        assert!(injector.build_tone_injection(input, "zh").is_some());
+        assert!(injector.build_tone_injection_growing(input, "zh", &["comfort"]).is_none());
+        assert!(injector.build_tone_injection_growing(input, "zh", &["praise"]).is_some());
+    }
 
     #[test]
     fn parse_vivian_scenes() {

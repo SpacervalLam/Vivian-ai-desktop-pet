@@ -55,7 +55,11 @@
   --codex-shadow-sm: 0 1px 2px rgba(59, 52, 40, 0.1), 0 1px 3px rgba(59, 52, 40, 0.06);
   --codex-shadow-md: 0 2px 8px rgba(59, 52, 40, 0.14), 0 1px 2px rgba(59, 52, 40, 0.08);
   --codex-shadow-lg: 0 10px 28px rgba(59, 52, 40, 0.18), 0 3px 8px rgba(59, 52, 40, 0.1);
-  --codex-font: 'Kalam', 'Segoe Print', 'STKaiti', 'KaiTi', '楷体', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  /* 中文落马善政手写体：Kalam/Segoe Print 无中文字形→自然落到 'Ma Shan Zheng'，
+     后面的 楷体/宋体是离线兜底。这条链与 MindInspectorThemes.css 里
+     .mind-inspector-root[data-ui-style="minimal"] 外壳那段字面量必须逐字一致
+     （check-mind-shell-theme.mjs 会比对），改这里务必同步改那里。 */
+  --codex-font: 'Kalam', 'Ma Shan Zheng', 'Segoe Print', 'STKaiti', 'KaiTi', '楷体', 'PingFang SC', 'Microsoft YaHei', sans-serif;
   --codex-mono: 'Cascadia Code', 'JetBrains Mono', 'SF Mono', Consolas, 'Courier New', monospace;
 
   /* ---------- markdown 排版字体 ----------

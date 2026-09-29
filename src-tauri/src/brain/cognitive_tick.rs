@@ -236,7 +236,7 @@ impl CognitiveTickRunner {
 
         // ── 阶段 2: Self update ──
         // homeostasis 每次执行；mind_tick 30s 节流
-        result.self_update = self.phase_self_update(brain, now);
+        result.self_update = self.phase_self_update(brain, context);
 
         // ── 阶段 3: Observe decision ──
         // 规则决策：是否主动观察。当前默认每次观察。
@@ -282,7 +282,8 @@ impl CognitiveTickRunner {
     // - current_activity.update_from_snapshot：每次执行，根据世界/自我状态自动切换活动
     //
     // 注：proactive.tick 内部也会调一次 homeostasis_tick（幂等，成本可忽略）。
-    fn phase_self_update(&self, brain: &Brain, now: f64) -> PhaseDecision {
+    fn phase_self_update(&self, brain: &Brain, context: &TickContext) -> PhaseDecision {
+        let now = context.now;
         // Homeostasis tick（每次执行）
         brain.psychology.homeostasis_tick();
 
@@ -358,17 +359,19 @@ impl CognitiveTickRunner {
             }
         }
 
-        // ── current_thought 合成（60s 节流 + 事件驱动，混合策略）──
+        // ── current_thought 合成：事件驱动，稳定时低频兜底 ──
         // fire-and-forget：不阻塞认知循环，LLM 请求在后台完成
         // 受 enable_inner_monologue 开关控制（与内心独白共享同一滑块）
         {
             if brain.config.world.enable_inner_monologue {
-                let refresh_requested = brain.mind.consume_thought_refresh();
+                let refresh_requested = brain.mind.thought_refresh_requested();
                 let mut last_thought = self.last_thought_at.lock();
                 let thought_dt = now - *last_thought;
-                if refresh_requested || thought_dt >= 60.0 {
+                if should_refresh_thought(thought_dt, refresh_requested, context.user_present) {
                     *last_thought = now;
                     drop(last_thought);
+                    // Only consume after admission. A rapid second user event remains pending.
+                    brain.mind.consume_thought_refresh();
                     let mind = Arc::clone(&brain.mind);
                     let router = Arc::clone(&brain.router);
                     let world_provider = Arc::clone(&brain.world_provider);
@@ -588,6 +591,26 @@ impl CognitiveTickRunner {
         } else {
             Ok(PhaseDecision::executed())
         }
+    }
+}
+
+/// Keep thoughts fresh for meaningful events without paying for an unchanged scene each minute.
+fn should_refresh_thought(elapsed: f64, requested: bool, user_present: bool) -> bool {
+    elapsed >= if requested { 90.0 } else if user_present { 900.0 } else { 3600.0 }
+}
+
+#[cfg(test)]
+mod thought_refresh_tests {
+    use super::should_refresh_thought;
+
+    #[test]
+    fn unchanged_scene_waits_while_new_events_refresh_after_a_short_cooldown() {
+        assert!(!should_refresh_thought(60.0, false, true));
+        assert!(!should_refresh_thought(89.0, true, true));
+        assert!(should_refresh_thought(90.0, true, true));
+        assert!(should_refresh_thought(900.0, false, true));
+        assert!(!should_refresh_thought(900.0, false, false));
+        assert!(should_refresh_thought(3600.0, false, false));
     }
 }
 

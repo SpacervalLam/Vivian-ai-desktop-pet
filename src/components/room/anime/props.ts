@@ -56,6 +56,7 @@ import {
   jpClockFaceTexture,
   jpBathTileTexture,
 } from './toon';
+import { createSprayField, leafSprayTexture } from './foliage';
 
 /**
  * 住户入户门的三档轮换色（**外廊侧**）。
@@ -4960,6 +4961,18 @@ export function buildJpBalconyChair(spec: { pos: [number, number, number]; size:
   return g;
 }
 
+/**
+ * 花箱叶簇的贴图（模块级缓存）。
+ *
+ * `leafSprayTexture` 一次要抽几百次样、画一张 256² 的 canvas；阳台上有两个花箱、
+ * 将来还可能摆到更多地方，每个都生成一张就是白画几十次。
+ */
+let _planterLeafTex: THREE.CanvasTexture | null = null;
+function jpPlanterLeafTexture(): THREE.CanvasTexture {
+  if (!_planterLeafTex) _planterLeafTex = leafSprayTexture(makeRng(9341));
+  return _planterLeafTex;
+}
+
 /** 阳台花箱（プランター）。size = [宽X, 高Y, 深Z]，防腐木箱 + 土 + 绿植/小花。装饰件 nav:false。 */
 export function buildJpPlanter(spec: { pos: [number, number, number]; size: [number, number, number] }): THREE.Group {
   const g = new THREE.Group();
@@ -4971,20 +4984,40 @@ export function buildJpPlanter(spec: { pos: [number, number, number]; size: [num
   g.add(m(box(W - 0.04, 0.02, D - 0.04), deck, [0, 0.01, 0], 'receive'));
   // 土
   g.add(m(box(W - 0.06, 0.04, D - 0.06), toon('#5d4c3c'), [0, H - 0.04, 0], 'receive'));
-  // 绿植丛 + 几点小花
+  /* 绿植丛 + 几点小花。
+   *
+   * 原来是 7 颗 `SphereGeometry(0.07~0.11, 10, 8)` 拉高 —— 10×8 段的球在 0.9m 外的
+   * 阳台上就是 7 颗光滑的绿蛋，而且 203 自己那两箱是全场景**离镜头最近**的植栽
+   * （预览页的「公寓外眺」机位就在这排花箱边上）。
+   * 换成 `foliage` 的叶簇：带叶脉的 alphaTest 面片，和行道树、绿篱同一张图。
+   *
+   * 叶簇网格挂在**花箱自己的 group 里**：家具的落位由 `dormLayout` 的 `pos` 决定，
+   * 建这个组的时候还不知道世界坐标，用局部坐标挂进去就天然跟着走。
+   * 一个花箱一个 `InstancedMesh`（这间屋就两箱），不为此再搞一个全局场。 */
   const rng = makeRng(7781);
+  const leafField = createSprayField({ random: makeRng(4821), capacity: 90, texture: jpPlanterLeafTexture() });
+  // 内部芯：面片没有厚度，纯叶簇近距离从侧面会看穿到木箱后壁
+  g.add(m(box(W - 0.14, 0.10, D - 0.14), toon('#3f5138'), [0, H + 0.03, 0], 'cast'));
   const n = 7;
   for (let i = 0; i < n; i++) {
     const t = i / (n - 1);
     const x = -W / 2 + 0.10 + (W - 0.20) * t;
     const z = -D / 2 + 0.08 + rng() * (D - 0.16);
     const hgt = 0.16 + rng() * 0.16;
-    const bush = m(sph(0.07 + rng() * 0.04, 10, 8), rng() > 0.4 ? jpPlantGreen() : jpPlantGreenDark(), [x, H + hgt * 0.5, z], 'cast');
-    bush.scale.set(1, hgt / 0.14, 1);
-    g.add(bush);
+    // 半径按原来那颗球的 0.07~0.11 给：面片基准 2×2，`scale = r` 的半宽就等于 r
+    const r = 0.07 + rng() * 0.04;
+    for (let k = 0; k < 4; k++) {
+      leafField.spray(
+        x + (rng() - 0.5) * r * 1.1,
+        H + hgt * 0.5 + (rng() - 0.5) * r * 1.4,
+        z + (rng() - 0.5) * r * 1.1,
+        r * (0.85 + rng() * 0.45),
+      );
+    }
     if (rng() > 0.55)
       g.add(m(sph(0.022, 8, 6), rng() > 0.5 ? jpTerra() : jpCream(), [x + (rng() - 0.5) * 0.05, H + hgt, z + (rng() - 0.5) * 0.05], 'cast'));
   }
+  g.add(leafField.build('jp-planter-leaves'));
   return g;
 }
 

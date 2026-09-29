@@ -32,6 +32,17 @@ struct ManagerInner {
 }
 
 impl ConversationManager {
+    pub fn set_user_channel(&self, char_id: &str, channel: &str) {
+        if !matches!(channel, "direct" | "wechat") { return; }
+        if let Some(conv) = self.inner.write().active.get_mut(&pair_key("user", char_id)) {
+            if conv.is_alive() { conv.channel = Some(channel.to_string()); }
+        }
+    }
+
+    pub fn user_channel(&self, char_id: &str) -> Option<String> {
+        self.get("user", char_id).filter(|c| c.is_alive()).and_then(|c| c.channel)
+    }
+
     /// 获取或创建两个角色之间的会话
     ///
     /// - 若已有 Active 会话：返回它
@@ -350,20 +361,16 @@ impl ConversationManager {
         let mut closed: Vec<(String, CloseReason, Conversation)> = Vec::new();
         let mut to_close: Vec<(String, CloseReason)> = Vec::new();
 
-        for (key, conv) in inner.active.iter() {
-            // 只处理 user↔char 会话（key 以 "user|" 开头）
-            if !key.starts_with("user|") {
+        for conv in inner.active.values() {
+            // User sessions are identified by participants, independent of pair key sorting.
+            if !conv.participants.iter().any(|p| p == "user") {
                 continue;
             }
             if conv.state == ConversationState::Closed {
                 continue;
             }
 
-            let char_id = key
-                .strip_prefix("user|")
-                .or_else(|| key.strip_suffix("|user"))
-                .unwrap_or("")
-                .to_string();
+            let char_id = conv.other_participant("user").unwrap_or("").to_string();
 
             // 用户超时：Active/Cooling 状态下，用户长时间未发言
             if let Some(last_user_ts) = conv.last_user_message_at {
@@ -372,8 +379,8 @@ impl ConversationManager {
                     to_close.push((char_id.clone(), CloseReason::Timeout));
                     continue;
                 }
-            } else if conv.state == ConversationState::Active && conv.rounds > 0 {
-                // 有轮次但从未记录用户发言（理论不应发生，兜底）
+            } else {
+                // Includes proactive topics awaiting their first user reply.
                 let elapsed = now - conv.created_at;
                 if elapsed >= user_timeout_secs {
                     to_close.push((char_id.clone(), CloseReason::Timeout));
@@ -413,8 +420,8 @@ impl ConversationManager {
     /// （TopicExtension / CrossCharacterReply 等），避免主动消息打断正在进行的对话。
     pub fn is_any_user_session_active(&self) -> bool {
         let inner = self.inner.read();
-        inner.active.iter().any(|(key, conv)| {
-            key.starts_with("user|") && conv.state == ConversationState::Active
+        inner.active.values().any(|conv| {
+            conv.participants.iter().any(|p| p == "user") && conv.state == ConversationState::Active
         })
     }
 
@@ -516,8 +523,8 @@ impl ConversationManager {
         let now = chrono::Local::now().timestamp() as f64;
         const STALE_THRESHOLD_SECS: f64 = 3600.0;
 
-        inner.active.retain(|key, conv| {
-            if key.starts_with("user|") {
+        inner.active.retain(|_key, conv| {
+            if conv.participants.iter().any(|p| p == "user") {
                 return true;
             }
             match (conv.state, conv.closed_at) {
@@ -716,5 +723,37 @@ async fn summarize_conversation_topic(
             tracing::warn!("[OpenLoop] LLM 话题总结失败，回退 conv.topic: {}", e);
             conv.topic.clone()
         }
+    }
+}
+
+#[cfg(test)]
+mod channel_tests {
+    use super::*;
+    fn manager() -> ConversationManager {
+        ConversationManager { inner: RwLock::new(ManagerInner { active: Default::default(), seq: 0 }) }
+    }
+    #[test]
+    fn channel_survives_turns_and_resets_with_topic() {
+        let m = manager();
+        m.force_new_session("user", "nana", "topic");
+        m.set_user_channel("nana", "direct");
+        m.start_or_continue("user", "nana", "continuation");
+        assert_eq!(m.user_channel("nana").as_deref(), Some("direct"));
+        m.set_user_channel("nana", "wechat");
+        assert_eq!(m.user_channel("nana").as_deref(), Some("wechat"));
+        m.close_pair_with_reason("user", "nana", CloseReason::SwitchTopic);
+        assert_eq!(m.user_channel("nana"), None);
+        m.force_new_session("user", "nana", "new topic");
+        assert_eq!(m.user_channel("nana"), None);
+    }
+    #[test]
+    fn unanswered_proactive_topic_expires_regardless_of_pair_sort_order() {
+        let m = manager();
+        for id in ["nana", "vivian"] {
+            m.force_new_session("user", id, "topic");
+            m.set_user_channel(id, "wechat");
+        }
+        assert_eq!(m.sweep_user_session_timeouts(0.0).len(), 2);
+        assert_eq!(m.user_channel("nana"), None);
     }
 }

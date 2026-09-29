@@ -28,6 +28,7 @@ pub mod relationship_tools;
 pub mod research_tool;
 pub mod scheduler_tools;
 pub mod send_image_tool;
+pub mod send_chat_message_tool;
 pub mod share_link_tool;
 pub mod show_widget_tool;
 pub mod skill_tools;
@@ -152,6 +153,7 @@ pub fn register_builtin_tools(tool_system: &Arc<ToolSystem>) {
         Arc::new(share_link_tool::ShareLinkTool::new()),
         // 图片发送（智能体把本地图片发到微信面板 / 编程页聊天流）
         Arc::new(send_image_tool::SendImageTool::new()),
+        Arc::new(send_chat_message_tool::SendChatMessageTool),
         // 可视化组件（智能体把 SVG 流程图/图表渲染成编程页卡片）
         Arc::new(show_widget_tool::ShowWidgetTool::new()),
         // 技能激活（按名称获取目录化技能正文，按需加载不常驻上下文）

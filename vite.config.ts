@@ -38,7 +38,6 @@ interface KeepEntry {
 
 function copyPublicAssets(): Plugin {
   const KEEP: KeepEntry[] = [
-    { path: "room" },
     // 主窗口待机/高兴等姿态使用 chibi/*-atlas.webp（地址见 ChibiPetCanvas.css 的 --atlas-url）。
     { path: "chibi/vivian-atlas.webp" },
     { path: "chibi/nana-atlas.webp" },

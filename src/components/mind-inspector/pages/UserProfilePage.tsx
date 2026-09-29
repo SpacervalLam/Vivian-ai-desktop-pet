@@ -53,6 +53,7 @@ import {
   Tag,
   IconButton,
 } from '../shared-components';
+import './UserProfilePage.css';
 
 // ============================================================
 // 类型定义（与后端 commands/user_facts.rs 对齐）
@@ -151,13 +152,15 @@ if (
 }
 
 // 入场封装：为子区块提供渐次浮现动画（delay 为秒）
-const Reveal: React.FC<{ delay?: number; style?: React.CSSProperties; children?: React.ReactNode }> = ({
+const Reveal: React.FC<{ delay?: number; style?: React.CSSProperties; className?: string; children?: React.ReactNode }> = ({
   delay = 0,
   style,
+  className,
   children,
 }) => (
   <div
     data-reveal
+    className={className}
     style={{
       animation: `mind-inspector-rise ${DURATION.slow}s ${EASE.decel} both`,
       animationDelay: `${delay}s`,
@@ -248,6 +251,7 @@ const CharacterTabs: React.FC<CharacterTabsProps> = ({ character, setCharacter, 
 const RowDivider: React.FC = () => (
   <div
     aria-hidden
+    className="profile-row-divider"
     style={{
       height: 1,
       marginLeft: 122,
@@ -317,6 +321,7 @@ const IdentityRow: React.FC<IdentityRowProps> = ({
 
   return (
     <div
+      className="profile-identity-row"
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
       style={{
@@ -467,7 +472,7 @@ const CustomFactItem: React.FC<CustomFactItemProps> = ({ fact, onDelete, deletin
     <div
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
-      className="mind-hover"
+      className="mind-hover profile-custom-fact"
       style={{
         display: 'flex',
         alignItems: 'center',
@@ -675,7 +680,7 @@ const InterestRow: React.FC<{
     <div
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
-      className="mind-hover"
+      className="mind-hover profile-interest-row"
       style={{
         display: 'flex',
         alignItems: 'center',
@@ -964,7 +969,7 @@ const DiscoverySection: React.FC<{
 
   if (loading && !data) {
     return (
-      <section>
+      <section className="profile-section profile-discovery-section">
         <SectionTitle style={{ marginBottom: SPACING.sm }}>
           <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
             <Compass size={14} />
@@ -978,7 +983,7 @@ const DiscoverySection: React.FC<{
 
   if (error && !data) {
     return (
-      <section>
+      <section className="profile-section profile-discovery-section">
         <SectionTitle style={{ marginBottom: SPACING.sm }}>
           <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
             <Compass size={14} />
@@ -996,7 +1001,7 @@ const DiscoverySection: React.FC<{
   const opennessPct = Math.round(data!.exploration_openness * 100);
 
   return (
-    <section>
+    <section className="profile-section profile-discovery-section">
       <SectionTitle style={{ marginBottom: SPACING.sm }}>
         <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
           <Compass size={14} />
@@ -1256,9 +1261,10 @@ const DiscoverySection: React.FC<{
 // UserProfilePage
 // ============================================================
 
-const UserProfilePage: React.FC = () => {
+const UserProfilePage: React.FC<{ characterId?: CharacterId; embedded?: boolean }> = ({ characterId, embedded = false }) => {
   const { t } = useTranslation();
-  const [character, setCharacter] = useState<CharacterId>('vivian');
+  const [selectedCharacter, setCharacter] = useState<CharacterId>('vivian');
+  const character = characterId ?? selectedCharacter;
   const [profile, setProfile] = useState<UserProfileView | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -1379,7 +1385,7 @@ const UserProfilePage: React.FC = () => {
   if (loading && !profile) {
     return (
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: SPACING.md }}>
-        <CharacterTabs character={character} setCharacter={setCharacter} t={t} />
+        {!embedded && <CharacterTabs character={character} setCharacter={setCharacter} t={t} />}
         <EmptyState
           spinner
           text={t('mind_inspector.common.loading')}
@@ -1393,7 +1399,7 @@ const UserProfilePage: React.FC = () => {
   if (error && !profile) {
     return (
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: SPACING.md }}>
-        <CharacterTabs character={character} setCharacter={setCharacter} t={t} />
+        {!embedded && <CharacterTabs character={character} setCharacter={setCharacter} t={t} />}
         <EmptyState
           icon={<UserCircle size={32} />}
           text={t('mind_inspector.common.load_failed', { error })}
@@ -1406,6 +1412,7 @@ const UserProfilePage: React.FC = () => {
   return (
     <div
       id="mind-inspector-profile-root"
+      className={embedded ? 'profile-root-embedded' : undefined}
       style={{
         flex: 1,
         display: 'flex',
@@ -1417,15 +1424,26 @@ const UserProfilePage: React.FC = () => {
       }}
     >
       {/* 顶部：角色切换 + 错误提示 */}
-      <Reveal delay={0}>
+      <Reveal delay={0} className="profile-intro-reveal">
+        {embedded && <div className="profile-hero">
+          <div className="profile-hero-copy">
+            <span className="profile-hero-eyebrow">PERSONAL PROFILE · {character.toUpperCase()}</span>
+            <h3>{basicMap.get('name')?.content || '关于你'}<span aria-hidden="true"> ✦</span></h3>
+            <p>{character === 'vivian' ? 'Vivian' : 'Nana'} 从相处中慢慢认识的你。</p>
+          </div>
+          <div className="profile-hero-stats" aria-label="画像概览">
+            <span><strong>{profile?.basic_facts.filter((fact) => fact.content).length ?? 0}</strong> 已了解的资料</span>
+            <span><strong>{profile?.custom_facts.length ?? 0}</strong> 补充事实</span>
+          </div>
+        </div>}
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: SPACING.md }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: SPACING.md }}>
-            <CharacterTabs character={character} setCharacter={setCharacter} t={t} />
-            <span style={{ ...TYPO.body, color: COLORS.textTertiary, fontSize: 13.5 }}>
+            {!embedded && <CharacterTabs character={character} setCharacter={setCharacter} t={t} />}
+            {!embedded && <span style={{ ...TYPO.body, color: COLORS.textTertiary, fontSize: 13.5 }}>
               {t('mind_inspector.profile.subtitle', {
                 char: t(`mind_inspector.common.char_${character}`),
               })}
-            </span>
+            </span>}
           </div>
           {error && (
             <span style={{ ...TYPO.micro, color: COLORS.danger }}>
@@ -1436,8 +1454,8 @@ const UserProfilePage: React.FC = () => {
       </Reveal>
 
       {/* === L0 基础身份 === */}
-      <Reveal delay={0.12}>
-        <section>
+      <Reveal delay={0.12} className="profile-basic-reveal">
+        <section className="profile-section profile-identity-section">
           <SectionTitle style={{ marginBottom: SPACING.sm }}>
             <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
               <UserCircle size={14} />
@@ -1463,8 +1481,8 @@ const UserProfilePage: React.FC = () => {
       </Reveal>
 
       {/* === L0.5 结构化偏好 === */}
-      <Reveal delay={0.18}>
-        <section>
+      <Reveal delay={0.18} className="profile-preferences-reveal">
+        <section className="profile-section profile-identity-section">
           <SectionTitle style={{ marginBottom: SPACING.sm }}>
             <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
               <Heart size={14} />
@@ -1490,13 +1508,13 @@ const UserProfilePage: React.FC = () => {
       </Reveal>
 
       {/* === 兴趣画像（发现引擎：兴趣域 / 探针 / 不喜欢 / 开放度） === */}
-      <Reveal delay={0.21}>
+      <Reveal delay={0.21} className="profile-discovery-reveal">
         <DiscoverySection character={character} accent={accent} t={t} />
       </Reveal>
 
       {/* === L1 近期状态（只读） === */}
-      <Reveal delay={0.24}>
-        <section>
+      <Reveal delay={0.24} className="profile-recent-reveal">
+        <section className="profile-section profile-recent-section">
           <SectionTitle style={{ marginBottom: SPACING.sm }}>
             <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
               <Sparkles size={14} />
@@ -1554,8 +1572,8 @@ const UserProfilePage: React.FC = () => {
       </Reveal>
 
       {/* === L2 自由事实 === */}
-      <Reveal delay={0.3}>
-        <section>
+      <Reveal delay={0.3} className="profile-custom-reveal">
+        <section className="profile-section profile-custom-section">
           <SectionTitle style={{ marginBottom: SPACING.sm }}>
             <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
               <Plus size={14} />

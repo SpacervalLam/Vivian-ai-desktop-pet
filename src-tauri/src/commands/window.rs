@@ -178,6 +178,9 @@ pub fn set_room_mode(
     state: State<'_, std::sync::Arc<crate::state::AppState>>,
     active: bool,
 ) -> Result<(), String> {
+    if active && !crate::commands::apartment::enabled(state.inner()) {
+        return Err("3D 公寓插件未安装或已禁用".into());
+    }
     set_room_mode_internal(&app, state.inner(), active);
     Ok(())
 }

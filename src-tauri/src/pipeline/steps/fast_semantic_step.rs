@@ -49,8 +49,18 @@ impl Runnable for FastSemanticStep {
             return Ok(state.to_json());
         }
 
-        // 跳过跨角色前缀消息，避免对路由文本误判
-        let analyze_text = parse_speaker_prefix(&state.user_input).0;
+        // 跨角色来话不是用户发言。不能把角色间的打趣/陈述误判成用户情绪、意图或关系信号，
+        // 否则这些错误标签会被注入接收角色的回复提示（例如把闲聊判成 bored/goodbye/coldness）。
+        let (analyze_text, speaker_id) = parse_speaker_prefix(&state.user_input);
+        if speaker_id != "user" || state.current_channel == "cross_character" {
+            tracing::debug!(
+                "[FastSemanticStep:{}] 跳过非用户输入的语义分类: speaker={}, channel={}",
+                self.char_id,
+                speaker_id,
+                state.current_channel
+            );
+            return Ok(state.to_json());
+        }
         match self.analyzer.analyze(&analyze_text) {
             Ok(mut perception) => {
                 // 复用同一份嵌入分类结果（表情判定用的就是 emotion 维度），
@@ -131,4 +141,3 @@ impl Runnable for ParallelStep {
         Ok(state_a.to_json())
     }
 }
-

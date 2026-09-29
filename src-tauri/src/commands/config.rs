@@ -6,7 +6,7 @@ use std::sync::Arc;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tauri::State;
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::config::manager::WorkModelProfile;
 use crate::state::AppState;
@@ -54,10 +54,16 @@ pub fn get_all_config(state: State<'_, Arc<AppState>>) -> Result<Value, String> 
 
 /// 保存配置到磁盘
 #[tauri::command]
-pub fn save_config(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+pub fn save_config(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<(), String> {
     let config = state.config.read();
     config.save().map_err(err_str)?;
     drop(config);
+    if !crate::commands::apartment::enabled(state.inner()) {
+        if let Some(room) = app.get_webview_window(crate::commands::window::ROOM_WINDOW_LABEL) {
+            let _ = room.close();
+        }
+    }
+    let _ = app.emit("apartment:status-changed", ());
     // 配置已变更，热重载全局 HTTP 客户端的代理设置（影响天气/Edge TTS/URL 抓取等境外请求）
     let pc = crate::network::proxy::ProxyConfig::from_app_config(
         &state.config.read().get_all(),

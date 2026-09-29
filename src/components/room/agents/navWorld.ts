@@ -140,7 +140,9 @@ const AREAS: AreaSpec[] = [
   // 1F 大堂 + 电梯厅(1F) + 咖啡吧/书房区，南门通街
   { id: 'hall1', y: 0.062, yBand: [-0.05, 0.25], cell: 0.15, clip: { x0: -37, x1: 31.2, z0: -7.3, z1: 4.78 } },
   // 街区：整片路面，0.5m 粗栅格（±80m 用 0.15 就是上百万格）
-  { id: 'street', y: 0, yBand: [-0.05, 0.25], cell: 0.5, clip: { x0: -80, x1: 80, z0: -78, z1: 83 } },
+  { id: 'street', y: 0, yBand: [-0.05, 0.25], cell: 0.5, clip: { x0: -80, x1: 150, z0: -78, z1: 165 },
+    // Train occupancy changes every frame; keep static NPC routes off the railway until timed portals are added.
+    extraBlocks: [{ minX: 83.8, maxX: 93.2, minZ: -46, maxZ: 96 }] },
   // 便利店前厅（店门内 2.4m 深；地面盒被建成了 wall，所以可走面手工给）
   { id: 'cvs', y: 0.1, yBand: [0.05, 0.25], cell: 0.15, radius: 0.13, clip: { x0: -4.5, x1: 6.7, z0: 13.9, z1: 16.5 },
     plate: { x0: -4.4, x1: 6.6, z0: 14.0, z1: 16.4 } },

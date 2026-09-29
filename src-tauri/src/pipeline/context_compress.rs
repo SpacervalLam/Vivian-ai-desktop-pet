@@ -25,6 +25,7 @@ use std::time::Duration;
 
 use crate::providers::base::LLMRequest;
 use crate::providers::ModelRouter;
+use crate::providers::tool_history::intact_tool_boundary;
 use crate::types::response::ChatMessage;
 use crate::utils::token_estimate::{estimate_message_tokens, estimate_messages_tokens};
 
@@ -252,12 +253,16 @@ fn build_mid_groups(
         if let Some(tool_calls) = &msg.tool_calls {
             // assistant 消息：收集后续对应的 tool_result
             let mut results = Vec::new();
-            let call_ids: std::collections::HashSet<String> =
+            let mut call_ids: std::collections::HashSet<String> =
                 tool_calls.iter().map(|tc| tc.id.clone()).collect();
 
-            for j in (i + 1)..messages.len() {
+            for j in (i + 1)..end {
+                // 不能跨调用组借用结果：旧会话/程序模式可能重复使用调用 ID。
+                if messages[j].tool_calls.as_ref().is_some_and(|calls| !calls.is_empty()) {
+                    break;
+                }
                 if let Some(ref tc_id) = messages[j].tool_call_id {
-                    if call_ids.contains(tc_id) && !consumed.contains(&j) {
+                    if messages[j].role == "tool" && !consumed.contains(&j) && call_ids.remove(tc_id) {
                         consumed.insert(j);
                         results.push(messages[j].clone());
                     }
@@ -397,7 +402,7 @@ pub fn compress_conversation(
     }
 
     let len = messages.len();
-    let mid_end = len.saturating_sub(keep_recent);
+    let mid_end = intact_tool_boundary(messages, len.saturating_sub(keep_recent));
     if mid_end <= 1 {
         return CompressResult::default();
     }
@@ -577,7 +582,7 @@ pub async fn compress_conversation_context_aware(
     }
 
     let len = messages.len();
-    let mid_end = len.saturating_sub(keep_recent);
+    let mid_end = intact_tool_boundary(messages, len.saturating_sub(keep_recent));
     if mid_end <= 1 {
         return CompressResult::default();
     }
@@ -734,14 +739,55 @@ mod tests {
             user("recent"),
         ];
         let before_len = msgs.len();
-        let result = compress_conversation(&mut msgs, 200, 1);
+        // 截短后的消息约 185 tokens；200 只会测试截短路径，100 才会触发归档。
+        let result = compress_conversation(&mut msgs, 100, 1);
         assert!(result.saved_tokens > 0);
+        assert!(result.dropped_groups > 0);
         assert!(msgs.len() < before_len);
         assert_eq!(msgs.first().unwrap().content, "sys");
         assert_eq!(msgs.last().unwrap().content, "recent");
     }
 
     // === Tool call pair safety tests ===
+
+    #[test]
+    fn recent_tool_batch_stays_intact_across_interjection() {
+        let mut msgs = vec![
+            system("sys"), user(&"old history ".repeat(300)),
+            assistant_with_tools("reading", vec![("a", "read_file"), ("b", "read_file")]),
+            tool_result("a", &"A".repeat(500)), user("latest correction"),
+            tool_result("b", &"B".repeat(500)), user("continue"),
+        ];
+        let recent = serde_json::to_value(&msgs[2..]).unwrap();
+        // 原分界落在第二条结果上；整个调用组都属于必须保留的最近历史。
+        let result = compress_conversation(&mut msgs, 100, 2);
+        assert!(result.saved_tokens > 0);
+        let start = msgs.iter().position(|m| m.tool_calls.is_some()).unwrap();
+        assert_eq!(serde_json::to_value(&msgs[start..]).unwrap(), recent);
+        for id in ["a", "b"] {
+            assert_eq!(msgs.iter().filter(|m| m.tool_call_id.as_deref() == Some(id)).count(), 1);
+        }
+    }
+
+    #[test]
+    fn grouping_does_not_steal_results_from_later_call_with_same_id() {
+        let msgs = vec![
+            system("sys"), assistant_with_tools("first", vec![("a", "read_file")]),
+            tool_result("a", "first output"), assistant_with_tools("second", vec![("a", "read_file")]),
+            tool_result("a", "second output"),
+        ];
+        let (groups, _) = build_mid_groups(&msgs, 1, msgs.len());
+        assert_eq!(groups.len(), 2);
+        for (group, expected) in groups.iter().zip(["first output", "second output"]) {
+            match group {
+                MessageGroup::ToolBundle { tool_results, .. } => {
+                    assert_eq!(tool_results.len(), 1);
+                    assert_eq!(tool_results[0].content, expected);
+                }
+                _ => panic!("expected tool bundle"),
+            }
+        }
+    }
 
     #[test]
     fn tool_call_result_not_split() {

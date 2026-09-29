@@ -32,7 +32,26 @@ use crate::skills::BUILTIN_SKILL_NAMES;
 /// 插件清单（盘点插件目录，只读不装载；附带信任状态供设置页展示）。
 #[tauri::command]
 pub fn list_plugins() -> Vec<crate::plugins::PluginInventoryEntry> {
-    crate::plugins::scan_inventory()
+    let mut entries = crate::plugins::scan_inventory();
+    if crate::commands::apartment::installed() {
+        entries.push(crate::plugins::PluginInventoryEntry {
+            key: "3d-apartment".into(),
+            name: "3d-apartment".into(),
+            version: "1.1.0".into(),
+            description: "3D 公寓与街区探索。可在设置 → 通用中启用或禁用。".into(),
+            skills: Vec::new(),
+            tools: Vec::new(),
+            mcp_servers: Vec::new(),
+            providers: Vec::new(),
+            embeddings: Vec::new(),
+            status: "loaded".into(),
+            trust: "trusted".into(),
+            reason: None,
+            dir: crate::commands::apartment::plugin_dir()
+                .map(|path| path.display().to_string()).unwrap_or_default(),
+        });
+    }
+    entries
 }
 
 /// 敏感插件管理命令的调用边界：只允许设置窗口（label=config）发起。
