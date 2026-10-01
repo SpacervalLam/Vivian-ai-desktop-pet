@@ -22,14 +22,14 @@ use super::types::{
     PermissionResult, Tool, ToolCategory, ToolResult, ToolScene, ToolUseContext, ValidationResult,
 };
 
-/// 非阻塞工具集合 - 这些工具启动后立即返回，不等待完成
+/// 兼容旧调用方的集合。当前所有工具都等待实际登记或执行回执。
 /// 截屏必须等待授权以及实际视觉结果，不能只返回 started。
 /// 注意：open_application / open_url 虽然是进程启动，
 /// 但解析 + spawn 本身 < 100ms，应同步等待真实结果再反馈给 LLM，
 /// 否则 LLM 会误以为成功而回复"已打开"（实际可能失败）。
-pub const NON_BLOCKING_TOOLS: &[&str] = &[
-    "set_timer",
-];
+// Scheduling tools acknowledge registration; waiting for this receipt is cheap.
+// Detached execution used to report success even for nonexistent tools.
+pub const NON_BLOCKING_TOOLS: &[&str] = &[];
 
 /// 工具调用状态
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -188,169 +188,43 @@ impl ToolCallManager {
         calls: &[crate::providers::base::StructuredToolCall],
     ) -> Vec<ToolCallResult> {
         let tool_system = self.tool_system();
-        let mut ctx_snapshot = self.context_snapshot();
-        let mut results: Vec<ToolCallResult> = Vec::new();
-        let mut parallel_batch: Vec<(String, Value, usize)> = Vec::new();
-        let mut iterations_used = 0usize;
-
-        // flush 并行批次（与 execute_multi_step 共用逻辑）
-        async fn flush_batch(
-            batch: &mut Vec<(String, Value, usize)>,
-            ts: &Arc<ToolSystem>,
-            ctx: &mut ToolUseContext,
-            results: &mut Vec<ToolCallResult>,
-        ) {
-            if batch.is_empty() {
-                return;
+        let mut ctx = self.context_snapshot();
+        let mut results = Vec::with_capacity(calls.len());
+        let mut batch = Vec::new();
+        let mut last_result = None;
+        for (index, call) in calls.iter().enumerate() {
+            let mut args = call.arguments.clone();
+            let dependent = has_placeholders(&args);
+            if dependent {
+                flush_parallel_batch(&mut batch, &tool_system, &mut ctx, &mut results,
+                    &mut last_result, &self.context).await;
+                inject_placeholders(&mut args, &results, &last_result);
             }
-            let mut tasks = Vec::new();
-            for (name, args, idx) in batch.drain(..) {
-                let ts = Arc::clone(ts);
-                let ctx = ctx.clone();
-                let args_for_result = args.clone();
-                tasks.push(tokio::spawn(async move {
-                    (
-                        idx,
-                        name.clone(),
-                        args_for_result,
-                        execute_tool_use(&name, args, &ts, &ctx, None).await,
-                    )
-                }));
-            }
-            for task in tasks {
-                if let Ok((idx, name, args, mut r)) = task.await {
-                    let requires_confirmation = matches!(
-                        r.error.as_deref(),
-                        Some("PermissionRequired")
-                            | Some("SandboxConfirmationRequired")
-                            | Some("UserDenied")
-                    );
-                    let status = if requires_confirmation {
-                        ToolCallStatus::PermissionRequired
-                    } else if r.success {
-                        ToolCallStatus::Success
-                    } else {
-                        ToolCallStatus::Error
-                    };
-                    if let Some(modifier) = r.context_modifier.take() {
-                        modifier(ctx);
-                    }
-                    results.push(ToolCallResult {
-                        success: r.success,
-                        result: r.data,
-                        tool_name: name,
-                        arguments: args,
-                        tool_call_id: format!("call_{}", idx),
-                        error: r.error,
-                        status,
-                        requires_confirmation,
-                        goal_completed: r.goal_completed,
-                    });
-                }
-            }
-        }
-
-        for tc in calls {
-            iterations_used += 1;
-            let tool_name = tc.name.clone();
-            let arguments = tc.arguments.clone();
-
-            // 非阻塞工具：spawn 后立即继续
-            if NON_BLOCKING_TOOLS.contains(&tool_name.as_str()) {
-                flush_batch(&mut parallel_batch, &tool_system, &mut ctx_snapshot, &mut results).await;
-                tracing::info!("[ToolCallManager] 非阻塞工具(native fc): {}，启动后立即继续", tool_name);
-                let ts = Arc::clone(&tool_system);
-                let ctx = ctx_snapshot.clone();
-                let spawn_name = tool_name.clone();
-                let args = arguments.clone();
-                tokio::spawn(async move {
-                    let result = execute_tool_use(&spawn_name, args, &ts, &ctx, None).await;
-                    if !result.success {
-                        tracing::error!(
-                            "[ToolCallManager] 非阻塞工具 {} 执行失败: {:?}",
-                            spawn_name,
-                            result.error
-                        );
-                    }
-                });
-                results.push(ToolCallResult {
-                    success: true,
-                    result: Some(json!({
-                        "tool": tool_name,
-                        "status": "started",
-                        "message": "Tool started (non-blocking mode)"
-                    })),
-                    tool_name,
-                    arguments,
-                    tool_call_id: tc.id.clone(),
-                    error: None,
-                    status: ToolCallStatus::NonBlocking,
-                    requires_confirmation: false,
-                    goal_completed: false,
-                });
+            // A declared dependency must never be sent as a literal to a side-effecting tool.
+            if has_placeholders(&args) {
+                results.push(call_receipt(&call.name, args, call.id.clone(),
+                    ToolResult::standard_error("Referenced tool result is unavailable", Some("UnresolvedDependency"), None)));
+                last_result = None;
                 continue;
             }
-
-            // 只读且无 placeholder → 入并行批次
-            let can_parallel = tool_system
-                .find_tool(&tool_name)
-                .map(|t| t.is_read_only())
-                .unwrap_or(false)
-                && !has_placeholders(&arguments);
-
-            if can_parallel {
-                parallel_batch.push((tool_name, arguments, iterations_used));
+            let parallel = !dependent && tool_system.find_tool(&call.name)
+                .is_some_and(|tool| tool.is_read_only());
+            if parallel {
+                batch.push((call.name.clone(), args, index, call.id.clone()));
                 continue;
             }
-
-            // 写工具：先 flush 并行批次再串行执行
-            if !parallel_batch.is_empty() {
-                flush_batch(&mut parallel_batch, &tool_system, &mut ctx_snapshot, &mut results).await;
+            flush_parallel_batch(&mut batch, &tool_system, &mut ctx, &mut results,
+                &mut last_result, &self.context).await;
+            let mut result = execute_guarded(&call.name, args.clone(), &tool_system, &ctx).await;
+            if let Some(modifier) = result.context_modifier.take() {
+                modifier(&mut ctx);
+                *self.context.write() = ctx.clone();
             }
-
-            let args_for_result = arguments.clone();
-            let mut r = execute_tool_use(
-                &tool_name,
-                arguments,
-                &tool_system,
-                &ctx_snapshot,
-                None,
-            )
-            .await;
-
-            let requires_confirmation = matches!(
-                r.error.as_deref(),
-                Some("PermissionRequired")
-                    | Some("SandboxConfirmationRequired")
-                    | Some("UserDenied")
-            );
-            let status = if requires_confirmation {
-                ToolCallStatus::PermissionRequired
-            } else if r.success {
-                ToolCallStatus::Success
-            } else {
-                ToolCallStatus::Error
-            };
-            if let Some(modifier) = r.context_modifier.take() {
-                modifier(&mut ctx_snapshot);
-                *self.context.write() = ctx_snapshot.clone();
-            }
-            results.push(ToolCallResult {
-                success: r.success,
-                result: r.data,
-                tool_name,
-                arguments: args_for_result,
-                tool_call_id: tc.id.clone(),
-                error: r.error,
-                status,
-                requires_confirmation,
-                goal_completed: r.goal_completed,
-            });
+            last_result = if result.success { result.data.clone() } else { None };
+            results.push(call_receipt(&call.name, args, call.id.clone(), result));
         }
-
-        // flush 残留并行批次
-        flush_batch(&mut parallel_batch, &tool_system, &mut ctx_snapshot, &mut results).await;
-
+        flush_parallel_batch(&mut batch, &tool_system, &mut ctx, &mut results,
+            &mut last_result, &self.context).await;
         results
     }
 
@@ -556,9 +430,8 @@ impl ToolCallManager {
     /// 多步执行主循环：解析 AI 响应中的工具调用并执行
     ///
     /// 并发策略（细粒度并发控制）：
-    /// - 只读工具且无 `${result}`/`${step.N.result}` 依赖 → 累积并行批次，`join_all` 并发执行
+    /// - 只读工具且无结果依赖 → 累积批次，最多八个并行执行
     /// - 写工具或有依赖的工具 → 先 flush 并行批次，再串行执行
-    /// - 非阻塞工具 → 先 flush 并行批次，再 spawn 后立即继续
     pub async fn execute_multi_step(&self, ai_response: &str) -> MultiStepResult {
         let parsed = Self::parse_tool_calls(ai_response);
         let immediate_response = Self::extract_immediate_response(ai_response);
@@ -582,7 +455,7 @@ impl ToolCallManager {
         let mut iterations_used = 0usize;
         let mut final_status = ToolCallStatus::Success;
         // 并行批次：累积可并行的只读工具调用 (tool_name, arguments, iteration_index)
-        let mut parallel_batch: Vec<(String, Value, usize)> = Vec::new();
+        let mut parallel_batch: ReadBatch = Vec::new();
 
         for tc in parsed {
             if iterations_used >= self.max_iterations {
@@ -593,8 +466,22 @@ impl ToolCallManager {
             let tool_name = tc.tool;
             let mut arguments = tc.arguments;
 
+            // Dependencies wait for prior reads before substitution, just like native calls.
+            if has_placeholders(&arguments) {
+                flush_parallel_batch(&mut parallel_batch, &self.tool_system, &mut ctx_snapshot,
+                    &mut results, &mut last_result, &self.context).await;
+            }
             // 参数注入：把前一步结果注入 ${result} / ${step.N.result} 占位符
             inject_placeholders(&mut arguments, &results, &last_result);
+
+            if has_placeholders(&arguments) {
+                iterations_used += 1;
+                results.push(call_receipt(&tool_name, arguments, format!("call_{}", iterations_used),
+                    ToolResult::standard_error("Referenced tool result is unavailable", Some("UnresolvedDependency"), None)));
+                last_result = None;
+                final_status = ToolCallStatus::Error;
+                continue;
+            }
 
             // 重复检测：相同工具 + 相同参数跳过
             let call_key = fingerprint(&tool_name, &arguments);
@@ -609,57 +496,6 @@ impl ToolCallManager {
 
             iterations_used += 1;
 
-            // 非阻塞工具：先 flush 并行批次，再异步执行不等待
-            if NON_BLOCKING_TOOLS.contains(&tool_name.as_str()) {
-                flush_parallel_batch(
-                    &mut parallel_batch,
-                    &self.tool_system,
-                    &mut ctx_snapshot,
-                    &mut results,
-                    &mut last_result,
-                    &self.context,
-                )
-                .await;
-
-                tracing::info!(
-                    "[ToolCallManager] 非阻塞工具: {}，启动后立即继续",
-                    tool_name
-                );
-                let ts = Arc::clone(&self.tool_system);
-                let ctx = ctx_snapshot.clone();
-                let spawn_name = tool_name.clone();
-                let args = arguments.clone();
-                tokio::spawn(async move {
-                    let result = execute_tool_use(&spawn_name, args, &ts, &ctx, None).await;
-                    if !result.success {
-                        tracing::error!(
-                            "[ToolCallManager] 非阻塞工具 {} 执行失败: {:?}",
-                            spawn_name,
-                            result.error
-                        );
-                    }
-                });
-
-                let started_payload = serde_json::json!({
-                    "tool": tool_name,
-                    "status": "started",
-                    "message": "Tool started (non-blocking mode)"
-                });
-
-                results.push(ToolCallResult {
-                    success: true,
-                    result: Some(started_payload),
-                    tool_name: tool_name.clone(),
-                    arguments: arguments.clone(),
-                    tool_call_id: format!("call_{}_nb", iterations_used),
-                    error: None,
-                    status: ToolCallStatus::NonBlocking,
-                    requires_confirmation: false,
-                    goal_completed: false,
-                });
-                continue;
-            }
-
             // 判断是否可并行：只读 + 参数无 ${result}/${step.} 引用
             let can_parallel = self
                 .tool_system
@@ -669,7 +505,7 @@ impl ToolCallManager {
                 && !has_placeholders(&arguments);
 
             if can_parallel {
-                parallel_batch.push((tool_name, arguments, iterations_used));
+                parallel_batch.push((tool_name, arguments, iterations_used, format!("call_{}", iterations_used)));
                 continue;
             }
 
@@ -687,12 +523,11 @@ impl ToolCallManager {
             }
 
             // 串行执行（复用 execute_tool_use，权限检查在内部完成）
-            let mut tool_result = execute_tool_use(
+            let mut tool_result = execute_guarded(
                 &tool_name,
                 arguments.clone(),
                 &self.tool_system,
                 &ctx_snapshot,
-                None,
             )
             .await;
 
@@ -732,7 +567,7 @@ impl ToolCallManager {
             };
 
             // 仅阻塞工具的结果作为下一步注入源
-            last_result = result_data;
+            last_result = if tool_result.success { result_data } else { None };
             results.push(call_result);
         }
 
@@ -749,6 +584,15 @@ impl ToolCallManager {
             .await;
         }
 
+        if final_status != ToolCallStatus::MaxIterationsReached {
+            final_status = if results.iter().any(|r| r.requires_confirmation) {
+                ToolCallStatus::PermissionRequired
+            } else if results.iter().any(|r| !r.success) {
+                ToolCallStatus::Error
+            } else {
+                ToolCallStatus::Success
+            };
+        }
         MultiStepResult {
             results,
             immediate_response,
@@ -983,13 +827,10 @@ fn inject_value(v: &mut Value, history: &[ToolCallResult], last: &Option<Value>)
             if s.contains("${step.") {
                 for (i, r) in history.iter().enumerate() {
                     let placeholder = format!("${{step.{}.result}}", i);
-                    if s.contains(&placeholder) {
-                        let replacement = r
-                            .result
-                            .as_ref()
-                            .map(value_to_injectable_string)
-                            .unwrap_or_default();
-                        *s = s.replace(&placeholder, &replacement);
+                    if s.contains(&placeholder) && r.success {
+                        if let Some(result) = r.result.as_ref() {
+                            *s = s.replace(&placeholder, &value_to_injectable_string(result));
+                        }
                     }
                 }
             }
@@ -1028,79 +869,60 @@ fn has_placeholders(v: &Value) -> bool {
 
 /// 并行执行累积的只读工具批次
 ///
-/// - 使用 `futures::future::join_all` 并发执行所有累积的只读工具
+/// - 最多同时执行八个只读工具，不启动脱离当前调用的读任务
 /// - 执行完成后按原始顺序排序结果，保持顺序稳定
 /// - 应用 context_modifier（read-only 工具也可能产出 modifier，如情绪检测）
 /// - 同步到共享 context，让后续轮次感知 modifier 修改
+const MAX_PARALLEL_READS: usize = 8;
+type ReadBatch = Vec<(String, Value, usize, String)>;
+
+/// Every invocation gets a receipt, including a panicking plugin. No detached read tasks.
+async fn execute_guarded(name: &str, args: Value, tools: &ToolSystem, ctx: &ToolUseContext) -> ToolResult {
+    use futures::FutureExt;
+    match std::panic::AssertUnwindSafe(execute_tool_use(name, args, tools, ctx, None)).catch_unwind().await {
+        Ok(result) => result,
+        Err(_) => ToolResult::standard_error("Tool execution panicked", Some("ToolExecutionPanic"), None),
+    }
+}
+
+fn call_receipt(name: &str, args: Value, id: String, result: ToolResult) -> ToolCallResult {
+    let requires_confirmation = matches!(result.error.as_deref(),
+        Some("PermissionRequired" | "SandboxConfirmationRequired" | "UserDenied"));
+    let status = if requires_confirmation { ToolCallStatus::PermissionRequired }
+        else if result.success { ToolCallStatus::Success } else { ToolCallStatus::Error };
+    ToolCallResult {
+        success: result.success, result: result.data, tool_name: name.into(), arguments: args,
+        tool_call_id: id, error: result.error, status, requires_confirmation,
+        goal_completed: result.goal_completed,
+    }
+}
+
 async fn flush_parallel_batch(
-    batch: &mut Vec<(String, Value, usize)>,
-    tool_system: &Arc<ToolSystem>,
-    ctx: &mut ToolUseContext,
-    results: &mut Vec<ToolCallResult>,
-    last_result: &mut Option<Value>,
+    batch: &mut ReadBatch, tool_system: &Arc<ToolSystem>, ctx: &mut ToolUseContext,
+    results: &mut Vec<ToolCallResult>, last_result: &mut Option<Value>,
     shared_context: &Arc<RwLock<ToolUseContext>>,
 ) {
-    if batch.is_empty() {
-        return;
-    }
-
-    let batch_count = batch.len();
-    tracing::info!(
-        "[ToolCallManager] 并行执行 {} 个只读工具: {:?}",
-        batch_count,
-        batch.iter().map(|(n, _, _)| n.as_str()).collect::<Vec<_>>()
-    );
-
-    let futures: Vec<_> = batch
-        .drain(..)
-        .map(|(name, args, idx)| {
-            let ts = Arc::clone(tool_system);
-            let ctx_snapshot = ctx.clone();
-            async move {
-                let args_for_result = args.clone();
-                let result = execute_tool_use(&name, args, &ts, &ctx_snapshot, None).await;
-                (name, args_for_result, result, idx)
-            }
-        })
-        .collect();
-
-    let mut batch_results = futures::future::join_all(futures).await;
-    // 按原始顺序排序，保持结果顺序稳定
-    batch_results.sort_by_key(|(_, _, _, idx)| *idx);
-
-    for (tool_name, args, mut tool_result, iter_idx) in batch_results {
-        let result_data = tool_result.data.clone();
-        let success = tool_result.success;
-        let error = tool_result.error.clone();
-
-        // 应用上下文修改器（read-only 工具也可能产出 modifier，如情绪检测）
-        if let Some(modifier) = tool_result.context_modifier.take() {
-            modifier(ctx);
+    use futures::StreamExt;
+    if batch.is_empty() { return; }
+    let snapshot = ctx.clone();
+    let mut completed: Vec<_> = futures::stream::iter(batch.drain(..).map(|(name, args, index, id)| {
+        let snapshot = snapshot.clone();
+        async move {
+            let result = execute_guarded(&name, args.clone(), tool_system, &snapshot).await;
+            (index, name, args, id, result)
         }
-
-        let status = if success {
-            ToolCallStatus::Success
-        } else {
-            ToolCallStatus::Error
-        };
-
-        results.push(ToolCallResult {
-            success,
-            result: tool_result.data,
-            tool_name,
-            arguments: args,
-            tool_call_id: format!("call_{}", iter_idx),
-            error,
-            status,
-            requires_confirmation: false,
-            goal_completed: tool_result.goal_completed,
-        });
-
-        *last_result = result_data;
+    })).buffer_unordered(MAX_PARALLEL_READS).collect().await;
+    completed.sort_by_key(|(index, ..)| *index);
+    let mut context_changed = false;
+    for (_, name, args, id, mut result) in completed {
+        if let Some(modifier) = result.context_modifier.take() {
+            modifier(ctx);
+            context_changed = true;
+        }
+        *last_result = if result.success { result.data.clone() } else { None };
+        results.push(call_receipt(&name, args, id, result));
     }
-
-    // 同步到共享 context（让后续轮次感知 modifier 修改）
-    *shared_context.write() = ctx.clone();
+    if context_changed { *shared_context.write() = ctx.clone(); }
 }
 
 /// 工具列表元工具 - 生成可用工具列表给 AI
@@ -1909,6 +1731,129 @@ impl Tool for ToolSearchTool {
 mod tests {
     use super::*;
 
+    struct ReceiptProbe {
+        name: &'static str,
+        read_only: bool,
+        active: Arc<std::sync::atomic::AtomicUsize>,
+        peak: Arc<std::sync::atomic::AtomicUsize>,
+        total: Arc<std::sync::atomic::AtomicUsize>,
+    }
+    #[async_trait]
+    impl Tool for ReceiptProbe {
+        fn name(&self) -> &str { self.name }
+        fn description(&self) -> &str { "test receipt" }
+        fn parameters_schema(&self) -> Value { json!({"type":"object","properties":{}}) }
+        async fn validate_input(&self, _: &Value, _: &ToolUseContext) -> ValidationResult { ValidationResult::success(None) }
+        async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult { PermissionResult::allow() }
+        async fn call(&self, args: Value, ctx: &ToolUseContext) -> ToolResult {
+            use std::sync::atomic::Ordering::SeqCst;
+            self.total.fetch_add(1,SeqCst);
+            match args["mode"].as_str() {
+                Some("panic") => panic!("expected test plugin panic"),
+                Some("permission") => return ToolResult::standard_error("approval needed",Some("PermissionRequired"),None),
+                _ => {}
+            }
+            let active = self.active.fetch_add(1,SeqCst)+1;
+            self.peak.fetch_max(active,SeqCst);
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            self.active.fetch_sub(1,SeqCst);
+            let value = if args["mode"] == "context" { json!(ctx.recent_memory_summary) } else { args["value"].clone() };
+            let mut result = ToolResult::success(value);
+            if args["mode"] == "modify" {
+                result.context_modifier = Some(Arc::new(|ctx| ctx.recent_memory_summary = Some("observed".into())));
+            }
+            result
+        }
+        fn is_read_only(&self) -> bool { self.read_only }
+        fn category(&self) -> ToolCategory { ToolCategory::Memory }
+        fn risk(&self) -> crate::tools::types::ToolRiskTier { crate::tools::types::ToolRiskTier::FsRead }
+    }
+
+    fn probe_manager() -> (ToolCallManager, Arc<std::sync::atomic::AtomicUsize>, Arc<std::sync::atomic::AtomicUsize>) {
+        let system = Arc::new(ToolSystem::new());
+        let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let total = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        for (name, read_only) in [("receipt_read",true),("receipt_write",false)] {
+            system.register_tool(Arc::new(ReceiptProbe {name,read_only,active:active.clone(),peak:peak.clone(),total:total.clone()}));
+        }
+        (ToolCallManager::new(system,ToolUseContext::default()),peak,total)
+    }
+    fn probe_call(id: &str, name: &str, args: Value) -> crate::providers::base::StructuredToolCall {
+        crate::providers::base::StructuredToolCall {id:id.into(),name:name.into(),arguments:args}
+    }
+
+    #[tokio::test]
+    async fn parallel_receipts_keep_ids_order_and_bounded_concurrency() {
+        let (manager,peak,_) = probe_manager();
+        let calls: Vec<_> = (0..24).map(|i| probe_call(&format!("real-{i}"),"receipt_read",json!({"value":i}))).collect();
+        let results = manager.execute_structured_calls(&calls).await;
+        assert_eq!(results.len(),calls.len());
+        for (call,result) in calls.iter().zip(results) {
+            assert_eq!(result.tool_call_id,call.id);
+            assert_eq!(result.result,Some(call.arguments["value"].clone()));
+        }
+        let peak=peak.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(peak>1 && peak<=MAX_PARALLEL_READS,"peak={peak}");
+    }
+
+    #[tokio::test]
+    async fn panics_and_permission_failures_still_have_matching_receipts() {
+        let (manager,_,_) = probe_manager();
+        let results = manager.execute_structured_calls(&[
+            probe_call("panic-id","receipt_read",json!({"mode":"panic"})),
+            probe_call("permission-id","receipt_read",json!({"mode":"permission"})),
+            probe_call("ok-id","receipt_read",json!({"value":"ok"})),
+        ]).await;
+        assert_eq!(results.len(),3);
+        assert_eq!(results[0].tool_call_id,"panic-id");
+        assert_eq!(results[0].error.as_deref(),Some("ToolExecutionPanic"));
+        assert_eq!(results[1].status,ToolCallStatus::PermissionRequired);
+        assert!(results[1].requires_confirmation);
+        assert!(results[2].success);
+    }
+
+    #[tokio::test]
+    async fn both_protocols_wait_for_dependencies_and_context_modifiers() {
+        let (manager,_,_) = probe_manager();
+        let calls = [
+            probe_call("read","receipt_read",json!({"mode":"modify","value":"source"})),
+            probe_call("write","receipt_write",json!({"value":"prefix:${step.0.result}"})),
+            probe_call("context","receipt_write",json!({"mode":"context"})),
+        ];
+        let native = manager.execute_structured_calls(&calls).await;
+        let text = manager.execute_multi_step(&json!({"tool_calls":calls.iter().map(|c| json!({"tool":c.name,"arguments":c.arguments})).collect::<Vec<_>>()} ).to_string()).await;
+        for results in [&native,&text.results] {
+            assert_eq!(results[1].result,Some(json!("prefix:source")));
+            assert_eq!(results[2].result,Some(json!("observed")));
+        }
+        assert_eq!(manager.context_snapshot().recent_memory_summary.as_deref(),Some("observed"));
+    }
+
+    #[tokio::test]
+    async fn missing_or_failed_dependency_never_invokes_next_tool() {
+        for text_protocol in [false,true] {
+            let (manager,_,total) = probe_manager();
+            let calls = [probe_call("failed","receipt_read",json!({"mode":"permission"})),
+                probe_call("blocked","receipt_write",json!({"value":"${step.0.result}"}))];
+            let results = if text_protocol {
+                manager.execute_multi_step(&json!({"tool_calls":calls.iter().map(|c| json!({"tool":c.name,"arguments":c.arguments})).collect::<Vec<_>>()} ).to_string()).await.results
+            } else { manager.execute_structured_calls(&calls).await };
+            assert_eq!(total.load(std::sync::atomic::Ordering::SeqCst),1);
+            assert_eq!(results[1].error.as_deref(),Some("UnresolvedDependency"));
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_nonblocking_name_does_not_report_unexecuted_success() {
+        let manager=ToolCallManager::new(Arc::new(ToolSystem::new()),ToolUseContext::default());
+        let results=manager.execute_structured_calls(&[probe_call("timer","set_timer",json!({"seconds":1}))]).await;
+        assert_eq!(results.len(),1);
+        assert!(!results[0].success);
+        let text=manager.execute_multi_step(r#"{"tool":"set_timer","arguments":{"seconds":1}}"#).await;
+        assert_eq!(text.status,ToolCallStatus::Error);
+    }
+
     #[test]
     fn parse_array_of_tool_calls() {
         let resp = r#"[{"tool":"open_application","arguments":{"app_path":"notepad.exe"}}]"#;
@@ -2028,7 +1973,7 @@ mod tests {
         assert!(!NON_BLOCKING_TOOLS.contains(&"open_application"));
         assert!(!NON_BLOCKING_TOOLS.contains(&"take_screenshot"));
         assert!(!NON_BLOCKING_TOOLS.contains(&"screenshot_analyze"));
-        assert!(NON_BLOCKING_TOOLS.contains(&"set_timer"));
+        assert!(!NON_BLOCKING_TOOLS.contains(&"set_timer"));
         assert!(!NON_BLOCKING_TOOLS.contains(&"read_file"));
     }
 

@@ -30,8 +30,9 @@ pub fn serialize(
 
 /// Chat Completions `messages[]`（chat_completions.rs::build_messages 等价）
 pub fn chat_completions(messages: &[ChatMessage], instructions: &Option<String>) -> Vec<Value> {
+    let instructions = crate::providers::base::effective_instructions(instructions);
     let mut result: Vec<Value> = Vec::new();
-    if let Some(instr) = instructions {
+    if let Some(instr) = &instructions {
         if !instr.is_empty() {
             result.push(json!({"role": "system", "content": instr}));
         }

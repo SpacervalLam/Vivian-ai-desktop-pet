@@ -245,7 +245,7 @@ impl AnthropicProvider {
         let mut system_parts: Vec<String> = Vec::new();
         
         // 模型级别预设：instructions（框架规则一次性设置）
-        if let Some(instructions) = &self.instructions {
+        if let Some(instructions) = &crate::providers::base::effective_instructions(&self.instructions) {
             system_parts.push(instructions.clone());
         }
         

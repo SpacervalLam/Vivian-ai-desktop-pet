@@ -61,6 +61,7 @@ pub const CODING_TOOLS: &[&str] = &[
     "web_search",
     "web_fetch",
     "read_file",
+    "read_spilled_result",
     "write_file",
     "edit_file",
     "run_command",

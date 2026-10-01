@@ -200,7 +200,7 @@ impl OpenAiResponsesProvider {
         });
         // 工作智能体模式：省略 temperature（服务端默认）
         self.base.strip_temperature(&mut body);
-        if let Some(instructions) = &self.instructions {
+        if let Some(instructions) = &crate::providers::base::effective_instructions(&self.instructions) {
             body["instructions"] = json!(instructions);
         }
         // Structured Outputs: 把 schema 注入 text.format

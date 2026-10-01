@@ -103,10 +103,11 @@ impl ChatCompletionsProvider {
     /// - assistant + tool_calls：追加 `tool_calls` 字段
     /// - tool：`{"role":"tool","tool_call_id":"...","content":"..."}`
     pub(crate) fn build_messages(messages: &[ChatMessage], instructions: &Option<String>) -> Vec<Value> {
+        let instructions = crate::providers::base::effective_instructions(instructions);
         let mut result: Vec<Value> = Vec::new();
 
         // instructions 作为首条 system 消息注入
-        if let Some(instr) = instructions {
+        if let Some(instr) = &instructions {
             if !instr.is_empty() {
                 result.push(json!({"role": "system", "content": instr}));
             }

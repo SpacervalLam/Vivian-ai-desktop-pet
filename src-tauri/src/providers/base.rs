@@ -27,6 +27,8 @@ const CB_RESET_TIMEOUT: Duration = Duration::from_secs(30);
 /// 相互覆盖。`None` 表示沿用 provider 配置或外层作用域。
 #[derive(Debug, Clone, Default)]
 pub struct ProviderCallOptions {
+    /// 请求级隔离；None 沿用配置，Some(false) 不向执行代理注入桌宠框架。
+    pub include_framework_instructions: Option<bool>,
     pub enable_search: Option<bool>,
     pub temperature: Option<f64>,
     pub max_tokens: Option<u32>,
@@ -58,6 +60,7 @@ pub struct ProviderCallOptions {
 impl ProviderCallOptions {
     fn merged(self, inner: Self) -> Self {
         Self {
+            include_framework_instructions: inner.include_framework_instructions.or(self.include_framework_instructions),
             enable_search: inner.enable_search.or(self.enable_search),
             temperature: inner.temperature.or(self.temperature),
             max_tokens: inner.max_tokens.or(self.max_tokens),
@@ -83,6 +86,15 @@ impl ProviderCallOptions {
 
     pub fn current_json_schema() -> Option<Value> {
         Self::current().json_schema.as_deref().cloned()
+    }
+}
+
+/// 所有协议在构造请求体时使用本函数；task-local 避免并发桌宠请求受执行请求影响。
+pub fn effective_instructions(configured: &Option<String>) -> Option<String> {
+    if ProviderCallOptions::current().include_framework_instructions == Some(false) {
+        None
+    } else {
+        configured.clone()
     }
 }
 
@@ -194,6 +206,7 @@ pub const TASK_WORK_AGENT: &str = "work_agent";
 /// 不依赖服务端 Conversation State,避免双 Context 问题。Responses API 始终当 Stateless 用。
 #[derive(Debug, Clone)]
 pub struct LLMRequest {
+    pub include_framework_instructions: Option<bool>,
     /// 任务类型(路由 key):chat / reasoning / reflection / consolidation /
     /// inner_monologue / vision_describe 等
     pub task_type: String,
@@ -238,6 +251,7 @@ impl LLMRequest {
     /// 构造基础请求(无工具、非流式、不联网、默认参数)
     pub fn new(task_type: impl Into<String>, messages: Vec<ChatMessage>) -> Self {
         Self {
+            include_framework_instructions: None,
             task_type: task_type.into(),
             usage_tag: None,
             messages,
@@ -253,6 +267,12 @@ impl LLMRequest {
             reasoning: ReasoningPreference::AUTO,
             character_id: None,
         }
+    }
+
+    /// 仅抑制本次请求的框架注入，不更改共享 provider 或后续角色请求。
+    pub fn without_framework_instructions(mut self) -> Self {
+        self.include_framework_instructions = Some(false);
+        self
     }
 
     /// 设置工具定义(启用原生 function calling 路径)
@@ -974,6 +994,29 @@ impl ProviderBase {
 #[cfg(test)]
 mod sampling_penalty_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn framework_isolation_is_request_local_and_restored_after_error() {
+        let configured = Some("companion framework".to_string());
+        let isolated = scope_provider_call(ProviderCallOptions {
+            include_framework_instructions: Some(false), ..Default::default()
+        }, async {
+            tokio::task::yield_now().await;
+            assert!(effective_instructions(&configured).is_none());
+            let messages = crate::providers::chat_completions::ChatCompletionsProvider::build_messages(
+                &[ChatMessage::system("isolated executor")], &configured);
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0]["content"], "isolated executor");
+            Err::<(), &str>("executor error")
+        });
+        let companion = async {
+            tokio::task::yield_now().await;
+            assert_eq!(effective_instructions(&configured), configured);
+        };
+        let (result, _) = tokio::join!(isolated, companion);
+        assert!(result.is_err());
+        assert_eq!(effective_instructions(&configured), configured);
+    }
 
     #[test]
     fn provider_model_trims_config_whitespace() {

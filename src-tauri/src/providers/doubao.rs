@@ -200,7 +200,7 @@ impl DoubaoProvider {
         });
         // 工作智能体模式：省略 temperature（服务端默认）
         self.base.strip_temperature(&mut body);
-        if let Some(instructions) = &self.instructions {
+        if let Some(instructions) = &crate::providers::base::effective_instructions(&self.instructions) {
             body["instructions"] = json!(instructions);
         }
         // Structured Outputs: 火山方舟 Responses API 通过 response_format 注入 schema

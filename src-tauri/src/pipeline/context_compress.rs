@@ -101,6 +101,7 @@ pub fn truncate_tool_result_with_limit(content: &str, max_chars: usize) -> Strin
     if char_count <= max_chars {
         return content.to_string();
     }
+    if let Some(report) = compact_execution_receipts(content, max_chars) { return report; }
 
     let half = max_chars / 2;
     let head: String = content.chars().take(half).collect();
@@ -118,6 +119,41 @@ pub fn truncate_tool_result_with_limit(content: &str, max_chars: usize) -> Strin
         "{}\n…[截断 {} 字符]…\n{}",
         head, skipped, tail
     )
+}
+
+/// Compress evidence previews without cutting receipt IDs, failures or execution state.
+fn compact_execution_receipts(content: &str, budget: usize) -> Option<String> {
+    use serde_json::{Value, json};
+    let original: Value = serde_json::from_str(content).ok()?;
+    let count = if let Some(report) = original.get("execution_evidence") {
+        if report.get("source")?.as_str()? != "host_verified_tool_receipts" { return None; }
+        report.get("receipts")?.as_array()?.len()
+    } else if original.get("direct_receipt").is_some_and(Value::is_object) { 1 }
+    else { return None; };
+    let mut limit = (budget / count.max(1)).max(80);
+    loop {
+        let mut compact = original.clone();
+        let shrink = |receipt: &mut Value| {
+            let Some(object) = receipt.as_object_mut() else { return; };
+            let Some(evidence) = object.get("evidence").and_then(Value::as_str) else { return; };
+            if evidence.chars().count() > limit {
+                let preview = truncate_tool_result_with_limit(evidence,limit);
+                object.insert("evidence".into(),Value::String(preview));
+                object.insert("evidence_truncated".into(),Value::Bool(true));
+            }
+        };
+        if let Some(receipts) = compact.pointer_mut("/execution_evidence/receipts").and_then(Value::as_array_mut) {
+            for receipt in receipts { shrink(receipt); }
+        }
+        if let Some(receipt) = compact.get_mut("direct_receipt") { shrink(receipt); }
+        let serialized = compact.to_string();
+        if serialized.chars().count() <= budget { return Some(serialized); }
+        if limit == 80 {
+            compact.as_object_mut()?.insert("receipt_metadata_exceeds_soft_budget".into(),json!(true));
+            return Some(compact.to_string());
+        }
+        limit = (limit / 2).max(80);
+    }
 }
 
 /// 消息分组：用于保证 tool_call + tool_result 原子性
@@ -205,6 +241,11 @@ pub fn soft_trim_tool_results(messages: &mut [ChatMessage]) -> usize {
         }
         let char_count = msg.content.chars().count();
         if char_count <= threshold {
+            continue;
+        }
+        if let Some(report) = compact_execution_receipts(&msg.content, SOFT_TRIM_HEAD + SOFT_TRIM_TAIL) {
+            msg.content = report;
+            trimmed += 1;
             continue;
         }
 
@@ -673,6 +714,37 @@ pub async fn compress_conversation_context_aware(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn execution_receipt_compression_preserves_every_call_and_error() {
+        let body = serde_json::json!({"execution_evidence": {
+            "source":"host_verified_tool_receipts","stop_reason":"permission_required","executor_error":null,
+            "receipts":(0..12).map(|i| serde_json::json!({"call_id":format!("call-{i}"),"tool":"read_file",
+                "success":i!=5,"status":if i==5 {"permission_required"} else {"success"},
+                "error":if i==5 {Some("PermissionRequired")} else {None},"evidence":"真实🙂证据".repeat(2000)
+            })).collect::<Vec<_>>()
+        }});
+        let mut messages=vec![crate::types::response::ChatMessage::tool_result(body.to_string(),"parent-call")];
+        super::soft_trim_tool_results(&mut messages);
+        let compact:serde_json::Value=serde_json::from_str(&messages[0].content).unwrap();
+        let report=&compact["execution_evidence"];
+        assert_eq!(report["stop_reason"],"permission_required");
+        let receipts=report["receipts"].as_array().unwrap();
+        assert_eq!(receipts.len(),12);
+        for (i,receipt) in receipts.iter().enumerate() { assert_eq!(receipt["call_id"],format!("call-{i}")); }
+        assert_eq!(receipts[5]["error"],"PermissionRequired");
+        assert_eq!(receipts[5]["success"],false);
+        assert_eq!(receipts[0]["evidence_truncated"],true);
+    }
+
+    #[test]
+    fn individual_receipt_stays_valid_json_after_trimming() {
+        let body=serde_json::json!({"direct_receipt":{"call_id":"real-id","success":false,
+            "error":"ToolExecutionPanic","evidence":"output".repeat(2000)}}).to_string();
+        let compact=super::truncate_tool_result_with_limit(&body,500);
+        let receipt:serde_json::Value=serde_json::from_str(&compact).unwrap();
+        assert_eq!(receipt["direct_receipt"]["error"],"ToolExecutionPanic");
+        assert_eq!(receipt["direct_receipt"]["call_id"],"real-id");
+    }
     use super::*;
     use crate::types::response::MessageToolCall;
 

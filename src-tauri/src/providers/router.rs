@@ -566,10 +566,12 @@ impl ModelRouter {
             "tools": request.tools,
             "json_schema": request.json_schema,
             "stream": request.stream,
+            "include_framework_instructions": request.include_framework_instructions,
         })
         .to_string();
         let (presence_penalty, frequency_penalty) = self.conversational_penalties(request);
         ProviderCallOptions {
+            include_framework_instructions: request.include_framework_instructions,
             enable_search: Some(request.enable_search),
             temperature: request.temperature_override,
             max_tokens: request.max_tokens_override,

@@ -8,7 +8,9 @@
 //! # 对话阶段（一等概念）
 //!
 //! [`DialoguePhase`] 取代散落的字符串补丁：
-//! - 执行态：工具循环中间轮，system 换精简执行提示（persona token 经济），
+//! - 陪伴对话：实际工具交给 `tool_execution` 的私有上下文；主智能体保留完整人设，
+//!   只接收真实回执并判断如何回复。纯内部推演仍在主智能体上下文中完成。
+//! - 其他渠道执行态：工具循环中间轮，system 换精简执行提示（persona token 经济），
 //!   记忆要点随提示延续，防止中途丢上下文
 //! - 表达态（完整人设）：首轮与最终回复
 //!
@@ -115,6 +117,10 @@ fn persona_reply_was_already_streamed(rounds: usize) -> bool {
     rounds == 1
 }
 
+fn keeps_companion_persona(channel: &str) -> bool {
+    matches!(channel, "direct" | "proactive" | "wechat" | "cross_character")
+}
+
 /// 工具查到信息后，提醒角色用自己的语气转述关键内容（三语言 + 渠道感知）。
 /// 与 goal_completed 分支逻辑一致：恢复完整人设后注入，避免角色只给一句评价就结束。
 /// 气泡渠道（direct/proactive）精简转述，微信渠道（wechat）可详细展开。
@@ -202,7 +208,7 @@ fn round_limit_prompt(channel: &str) -> String {
 ///
 /// 成功：序列化 result payload；失败：透传完整结构化 payload
 /// （含 candidates/next_action 等细节），让 LLM 能基于结构化数据消歧或重试。
-fn tool_result_to_message_body(r: &ToolCallResult) -> String {
+pub(super) fn tool_result_to_message_body(r: &ToolCallResult) -> String {
     if r.success {
         r.result
             .as_ref()
@@ -232,7 +238,7 @@ fn tool_result_to_message_body(r: &ToolCallResult) -> String {
 ///    `enforce_result_budget` 替换为 `_truncated` 预览版，`matches` 字段丢失）
 /// 2. 关键词查询：从 `result.data.matches` 或 `result.matches` 提取工具名
 ///    （`standard_success` 把实际数据包在 `data` 字段里，需兼容两种结构）
-fn inject_deferred_tools_from_results(
+pub(super) fn inject_deferred_tools_from_results(
     calls: &[StructuredToolCall],
     results: &[ToolCallResult],
     tool_call_manager: &ToolCallManager,
@@ -356,6 +362,8 @@ pub(crate) struct ReactParams {
     pub(crate) task_type: String,
     pub(crate) channel: String,
     pub(crate) memory_text: String,
+    /// 原始请求；执行代理不接收角色提示或主对话历史。
+    pub(crate) user_request: String,
     /// 轮次上限（0 = 无限，由终止条件自然结束）
     pub(crate) max_rounds: u32,
     pub(crate) compress_threshold_tokens: usize,
@@ -416,13 +424,15 @@ impl ReactLoop {
 
     /// 进入执行态：换精简执行提示（幂等；跨角色对话用专用变体，
     /// 同时把记忆要点带入后续轮次，防止中途丢失上下文）
-    fn enter_execution(&mut self, calls: &[StructuredToolCall], memory_text: &str) {
+    fn enter_execution(&mut self, calls: &[StructuredToolCall], memory_text: &str, channel: &str) {
         if self.phase != DialoguePhase::Persona {
             return;
         }
         // 纯内部推演不应卸载角色人格。下一轮仍在陪伴者的人格和完整上下文中
         // 继续分析；只有真正进入工具执行时才切换精简执行提示。
-        if is_deliberation_only(calls) {
+        // 工具是角色的能力，不是更换成“执行助手”的理由。保留人设也让无工具
+        // 调用的后续轮直接成为角色回复，避免先写汇报草稿再让角色转述。
+        if keeps_companion_persona(channel) || is_deliberation_only(calls) {
             return;
         }
         let prompt = if has_cross_character_call(calls) {
@@ -685,7 +695,7 @@ impl ReactLoop {
         inject_deferred_tools_from_results(calls, &results, ctx.tool_call_manager, &mut self.tools);
 
         // 首轮工具执行完毕 → 进入执行态（后续轮精简 persona）
-        self.enter_execution(calls, ctx.memory_text);
+        self.enter_execution(calls, ctx.memory_text, ctx.channel);
 
         RoundOutcome::Continue
     }
@@ -702,6 +712,12 @@ pub(crate) async fn run_react_loop(
     emitter: &SharedStreamEmitter,
     params: ReactParams,
 ) -> crate::error::VivianResult<(String, Vec<ToolCallResult>, usize, Option<f64>)> {
+    if keeps_companion_persona(&params.channel)
+        && !params.first_calls.is_empty()
+        && !is_deliberation_only(&params.first_calls)
+    {
+        return super::tool_execution::run_companion_tools(router, tool_call_manager, emitter, params).await;
+    }
     let ReactParams {
         first_content,
         first_calls,
@@ -710,6 +726,7 @@ pub(crate) async fn run_react_loop(
         task_type,
         channel,
         memory_text,
+        user_request: _,
         max_rounds,
         compress_threshold_tokens,
         compress_keep_recent,
@@ -784,5 +801,30 @@ mod tests {
         ]));
         assert!(persona_reply_was_already_streamed(1));
         assert!(!persona_reply_was_already_streamed(2));
+    }
+
+    #[test]
+    fn companion_tool_rounds_keep_character_instructions_and_history() {
+        for channel in ["direct", "proactive", "wechat", "cross_character"] {
+            let mut lp = ReactLoop::new(vec![ChatMessage::system("Vivian persona and speech style"), ChatMessage::user("看看我在用什么")], vec![]);
+            lp.enter_execution(&[call("get_foreground_app_context")], "recalled memory", channel);
+            assert_eq!(lp.phase, DialoguePhase::Persona);
+            assert_eq!(lp.messages[0].content, "Vivian persona and speech style");
+            assert_eq!(lp.messages[1].content, "看看我在用什么");
+            // 后续截图调用也保持人设；第二轮最终文本需要正常推送。
+            lp.enter_execution(&[call("screenshot_analyze")], "recalled memory", channel);
+            assert_eq!(lp.phase, DialoguePhase::Persona);
+            assert!(!persona_reply_was_already_streamed(2));
+        }
+    }
+
+    #[test]
+    fn non_companion_execution_still_keeps_memory_and_can_restore_its_system() {
+        let mut lp = ReactLoop::new(vec![ChatMessage::system("original instructions")], vec![]);
+        lp.enter_execution(&[call("web_search")], "recalled memory", "work");
+        assert_eq!(lp.phase, DialoguePhase::Execution);
+        assert!(lp.messages[0].content.contains("recalled memory"));
+        lp.restore_persona();
+        assert_eq!(lp.messages[0].content, "original instructions");
     }
 }

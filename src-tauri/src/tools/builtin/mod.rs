@@ -172,6 +172,7 @@ pub fn register_builtin_tools(tool_system: &Arc<ToolSystem>) {
         Arc::new(notebook_tools::CreateHtmlNoteTool::default()),
         // 文件系统读取（按路径读本地文本/代码/HTML，受沙箱路径校验约束）
         Arc::new(file_tools::ReadFileTool::default()),
+        Arc::new(file_tools::ReadSpilledResultTool),
         // 编程智能体工具集（读/写/编辑/搜索/列目录/执行命令，构成 coding agent 闭环）
         Arc::new(coding_tools::WriteFileTool::new()),
         Arc::new(coding_tools::EditFileTool::new()),
@@ -210,7 +211,6 @@ pub fn register_builtin_tools(tool_system: &Arc<ToolSystem>) {
         ("grep", "grep_search"),
         ("cancel_scheduled", "manage_scheduled"),
         ("delete_todo", "manage_todo"),
-        ("take_screenshot", "screenshot_analyze"),
     ];
     let alias_count = tool_system.register_aliases(alias_pairs);
     tracing::info!(

@@ -460,6 +460,7 @@ impl AIResponseGenerationRunnable {
         compress_keep_recent: usize,
         channel: &str,
         memory_text: &str,
+        user_request: &str,
     ) -> VivianResult<(String, Vec<ToolCallResult>, usize, Option<f64>)> {
         // 首轮（完整人设轮）响应
         let first = router
@@ -486,6 +487,7 @@ impl AIResponseGenerationRunnable {
                 task_type: task_type.to_string(),
                 channel: channel.to_string(),
                 memory_text: memory_text.to_string(),
+                user_request: user_request.to_string(),
                 max_rounds,
                 compress_threshold_tokens,
                 compress_keep_recent,
@@ -519,6 +521,7 @@ impl AIResponseGenerationRunnable {
         compress_keep_recent: usize,
         channel: &str,
         memory_text: &str,
+        user_request: &str,
     ) -> VivianResult<(String, Vec<ToolCallResult>, usize, Option<f64>)> {
         // === 第一轮：流式获取 LLM 响应（带重试机制）===
         // DeepSeek V4 Flash 流式 native function calling 偶发失效：
@@ -744,6 +747,7 @@ impl AIResponseGenerationRunnable {
                 task_type: task_type.to_string(),
                 channel: channel.to_string(),
                 memory_text: memory_text.to_string(),
+                user_request: user_request.to_string(),
                 max_rounds,
                 compress_threshold_tokens,
                 compress_keep_recent,
@@ -908,6 +912,7 @@ impl Runnable for AIResponseGenerationRunnable {
                     self.compress_keep_recent,
                     &state.current_channel,
                     &state.memory_text,
+                    &state.user_input,
                 )
                 .await
             } else {
@@ -923,6 +928,7 @@ impl Runnable for AIResponseGenerationRunnable {
                     self.compress_keep_recent,
                     &state.current_channel,
                     &state.memory_text,
+                    &state.user_input,
                 )
                 .await
             };
@@ -1048,7 +1054,18 @@ impl Runnable for AIResponseGenerationRunnable {
                     let emitter_clone = Arc::clone(&self.stream_emitter);
                     let messages_clone = messages_vec.clone();
 
-                    let (final_response, iterations, all_results, first_tool_ts) = tcm
+                    let initial_calls = crate::pipeline::tool_execution::calls_from_text(&text);
+                    let (final_response, iterations, all_results, first_tool_ts) = if matches!(state.current_channel.as_str(), "direct" | "proactive" | "wechat" | "cross_character") && !initial_calls.is_empty() {
+                        let (reply, results, iterations, timestamp) = crate::pipeline::react::run_react_loop(
+                            &router, tcm, &self.stream_emitter, crate::pipeline::react::ReactParams {
+                                first_content: JsonParser::extract_text(&text).unwrap_or_default(),
+                                first_calls: initial_calls, messages: messages_vec.clone(), tools: state.tool_definitions.clone(),
+                                task_type: task_type.clone(), channel: state.current_channel.clone(), memory_text: state.memory_text.clone(),
+                                user_request: state.user_input.clone(), max_rounds: self.max_rounds,
+                                compress_threshold_tokens: self.compress_threshold_tokens, compress_keep_recent: self.compress_keep_recent,
+                            }).await?;
+                        (Some(reply), iterations, results, timestamp)
+                    } else { tcm
                         .run_feedback_loop(&text, |continue_prompt| {
                             let router = Arc::clone(&router_clone);
                             let emitter = Arc::clone(&emitter_clone);
@@ -1064,7 +1081,7 @@ impl Runnable for AIResponseGenerationRunnable {
                                     .ok()
                             }
                         })
-                        .await;
+                        .await };
 
                     if !all_results.is_empty() {
                         state.tool_call_executed = true;
@@ -1100,11 +1117,12 @@ impl Runnable for AIResponseGenerationRunnable {
 
                     // 用反馈循环的最终响应覆盖 state（LLM 基于工具结果生成的自然语言回复）
                     if let Some(final_resp) = final_response {
+                        // 即使最终表达为空，也不能回显执行工具前的草稿。
+                        state.response_text = final_resp.clone();
+                        state.response_json = Self::extract_json(&final_resp);
                         if !final_resp.trim().is_empty() {
-                            state.response_text = final_resp.clone();
                             // 重新提取 JSON（LLM 反馈轮次可能输出了新的 JSON）
-                            if let Some(parsed) = Self::extract_json(&final_resp) {
-                                state.response_json = Some(parsed.clone());
+                            if let Some(parsed) = state.response_json.as_ref() {
                                 let calls = Self::extract_tool_calls(&parsed);
                                 if !calls.is_empty() {
                                     state.tool_calls = calls;
@@ -1120,7 +1138,7 @@ impl Runnable for AIResponseGenerationRunnable {
                 state.generation_status = "ai_generation_complete".to_string();
 
                 // 同步 ai_response 字段以兼容下游（如 MoodStep）
-                state.ai_response = Some(AiResponse::new(text));
+                state.ai_response = Some(AiResponse::new(state.response_text.clone()));
                 state.metadata["streamed"] = json!(stream);
             }
             Err(e) => {

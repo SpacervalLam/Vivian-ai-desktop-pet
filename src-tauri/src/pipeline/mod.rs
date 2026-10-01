@@ -24,6 +24,7 @@ pub mod message_context;
 pub mod parsers;
 pub mod prompt_modules;
 pub mod react;
+pub(crate) mod tool_execution;
 pub mod state;
 pub mod steps;
 pub mod template_engine;

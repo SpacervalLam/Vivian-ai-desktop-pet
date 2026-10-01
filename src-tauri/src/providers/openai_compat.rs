@@ -766,7 +766,7 @@ impl BaseProvider for OpenAiCompatProvider {
             "temperature": self.base.effective_temperature(),
             "max_output_tokens": self.base.effective_max_tokens(),
         });
-        if let Some(instructions) = &self.instructions {
+        if let Some(instructions) = &crate::providers::base::effective_instructions(&self.instructions) {
             body["instructions"] = json!(instructions);
         }
         // 工作智能体模式：省略 temperature（服务端默认）
@@ -822,7 +822,7 @@ impl BaseProvider for OpenAiCompatProvider {
             "max_output_tokens": self.base.effective_max_tokens(),
         });
 
-        if let Some(instructions) = &self.instructions {
+        if let Some(instructions) = &crate::providers::base::effective_instructions(&self.instructions) {
             body["instructions"] = json!(instructions);
         }
 
@@ -862,7 +862,7 @@ impl BaseProvider for OpenAiCompatProvider {
             "stream": true,
         });
 
-        if let Some(instructions) = &self.instructions {
+        if let Some(instructions) = &crate::providers::base::effective_instructions(&self.instructions) {
             body["instructions"] = json!(instructions);
         }
 
@@ -1090,7 +1090,7 @@ impl BaseProvider for OpenAiCompatProvider {
         });
 
         // 模型级别预设：Responses API 原生支持 instructions 顶层参数
-        if let Some(instructions) = &self.instructions {
+        if let Some(instructions) = &crate::providers::base::effective_instructions(&self.instructions) {
             body["instructions"] = json!(instructions);
         }
 
@@ -1159,7 +1159,7 @@ impl BaseProvider for OpenAiCompatProvider {
             "tool_choice": "auto",
         });
 
-        if let Some(instructions) = &self.instructions {
+        if let Some(instructions) = &crate::providers::base::effective_instructions(&self.instructions) {
             body["instructions"] = json!(instructions);
         }
 

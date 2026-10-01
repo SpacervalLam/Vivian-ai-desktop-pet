@@ -1920,12 +1920,12 @@ impl Tool for TakeScreenshotTool {
     }
 
     fn description(&self) -> &str {
-        "Capture the current screen, save it as a PNG file, and copy it to the clipboard. Returns the file path."
+        "Capture the entire virtual desktop at physical pixel resolution, save a PNG, and copy it to the clipboard. Returns the file path, not an image description. To look at or read the screen use screenshot_analyze; success here does not test vision capability."
     }
 
     fn description_in(&self, lang: &str) -> &str {
         match lang {
-            "zh" => "截取当前屏幕，保存为 PNG 文件，并自动复制到系统剪贴板。返回文件路径。",
+            "zh" => "按物理像素截取整个桌面，保存 PNG 并复制到剪贴板，仅返回文件路径，不会读图。用户让你看看屏幕、读图或识别画面时用 screenshot_analyze；本工具成功不代表已分析画面，也不能据此声称无法读图。",
             "ja" => "現在の画面をキャプチャし、PNG ファイルとして保存し、クリップボードにコピーする。ファイルパスを返す。",
             _ => self.description(),
         }
@@ -1933,7 +1933,7 @@ impl Tool for TakeScreenshotTool {
 
     fn usage_corpus(&self, lang: &str) -> &'static str {
         match lang {
-            "zh" => "截个图\n看看我屏幕上是什么\n截屏\n抓一下屏幕",
+            "zh" => "截个图\n保存截图\n截屏\n抓一下屏幕",
             "en" => "take a screenshot\ncapture my screen\nscreenshot this",
             "ja" => "スクリーンショットを撮って\n画面をキャプチャして\n画面を保存して",
             _ => "",
@@ -2044,9 +2044,7 @@ impl Tool for TakeScreenshotTool {
             let escaped_path = output_path.replace('\'', "''");
             let ps_script = format!(
                 r#"
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
-$bounds = [System.Windows.Forms.SystemInformation]::VirtualScreen
+{}
 $bmp = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
 $graphics = [System.Drawing.Graphics]::FromImage($bmp)
 $graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
@@ -2055,7 +2053,7 @@ $bmp.Save('{}', [System.Drawing.Imaging.ImageFormat]::Png)
 $graphics.Dispose()
 $bmp.Dispose()
 "#,
-                escaped_path
+                WINDOWS_SCREEN_CAPTURE_SETUP, escaped_path
             );
 
             let ps_script_for_task = ps_script.clone();
@@ -2155,7 +2153,7 @@ $bmp.Dispose()
 ///
 /// 与 `take_screenshot` 并列的姊妹工具：截取当前屏幕后**不保存、不复制剪贴板**，
 /// 直接将 PNG base64 送入视觉理解流程（`vision_describe` 任务路由），
-/// 返回 LLM 对屏幕内容的客观描述 + 角色口吻回应。
+/// 返回 LLM 对屏幕内容的客观描述；主智能体负责判断与角色表达。
 ///
 /// 适用场景：用户让你"看看屏幕"/"看一下这个界面"/"我屏幕上显示什么"等
 /// 需要视觉上下文才能回答的情况。需要保存截图文件请用 `take_screenshot`。
@@ -2181,7 +2179,7 @@ impl Tool for ScreenshotAnalyzeTool {
 
     fn description(&self) -> &str {
         "Capture the current screen and send it to a vision-capable LLM for understanding. \
-         Returns a structured description of what's on screen plus a short in-character reply. \
+         Returns objective observations only; the companion decides what to say. \
          Does NOT save the image to disk or copy it to the clipboard. \
          Use this when the user asks you to 'look at' / 'see' / 'check' their screen, \
          or when visual context is needed to answer (e.g. '我屏幕上是什么', '帮我看看这个界面')."
@@ -2189,11 +2187,11 @@ impl Tool for ScreenshotAnalyzeTool {
 
     fn description_in(&self, lang: &str) -> &str {
         match lang {
-            "zh" => "截取当前屏幕并送视觉模型理解，返回对屏幕内容的客观描述和简短角色回应。\
+            "zh" => "截取当前屏幕并送视觉模型理解，仅返回屏幕内容的客观描述，由主智能体判断和回复。\
             不保存图片、不复制剪贴板。当用户让你“看看屏幕”/“看一下这个界面”/“我屏幕上显示什么”等\
             需要视觉上下文的场景使用。",
             "ja" => "現在の画面をキャプチャし、視覚モデルに送って理解させる。\
-            画面内容の客観的説明と短いキャラクター返信を返す。\
+            画面内容の客観的説明だけを返し、会話の返答は主エージェントが行う。\
             画像を保存せず、クリップボードにもコピーしない。\
             ユーザーが「画面を見て」「この画面どう思う」など視覚コンテキストを求める場面で使用。",
             _ => self.description(),
@@ -2301,13 +2299,13 @@ impl Tool for ScreenshotAnalyzeTool {
         ToolCategory::System
     }
 
-    /// 非核心高频工具，延迟加载（通过 tool_search 拉取完整 schema）
+    /// 与保存截图工具同时可见，避免模型只看到截图工具而误以为不能读图。
     fn always_load(&self) -> bool {
-        false
+        true
     }
 
     fn should_defer(&self) -> bool {
-        true
+        false
     }
 
     fn search_hint(&self) -> &str {
@@ -2363,11 +2361,10 @@ impl ScreenshotAnalyzeTool {
         };
 
         match describe_screen_bytes(router, image_detail, png_bytes, &ctx_block).await {
-            Ok((description, reply)) => ToolResult::standard_success(
+            Ok((description, _)) => ToolResult::standard_success(
                 "截屏并完成视觉理解",
                 Some(json!({
                     "description": description,
-                    "reply": reply,
                 })),
             ),
             Err(e) => ToolResult::standard_error(
@@ -2382,6 +2379,26 @@ impl ScreenshotAnalyzeTool {
 // ============================================================================
 // 可复用的截屏/视觉理解原语（主动交互 screen-peek 与 screenshot_analyze 共享）
 // ============================================================================
+
+// PowerShell 默认无 DPI 感知。先切换线程为 Per-Monitor V2，再读取桌面范围，
+// 保证多显示器及不同缩放比例下 CopyFromScreen 使用物理像素而非逻辑尺寸。
+#[cfg(target_os = "windows")]
+const WINDOWS_SCREEN_CAPTURE_SETUP: &str = r#"
+$ErrorActionPreference = 'Stop'
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class VivianCaptureDpi {
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
+}
+'@
+$previousDpi = [VivianCaptureDpi]::SetThreadDpiAwarenessContext([IntPtr](-4))
+if ($previousDpi -eq [IntPtr]::Zero) { throw 'Cannot enable per-monitor DPI awareness for screenshot capture' }
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+$bounds = [System.Windows.Forms.SystemInformation]::VirtualScreen
+"#;
 
 /// 截取当前屏幕为 PNG 字节（仅内存态：临时文件读出后立即删除，不进剪贴板）
 ///
@@ -2410,9 +2427,7 @@ pub(crate) async fn capture_screen_png_bytes() -> Result<Vec<u8>, String> {
         // 不调用 Clipboard::SetImage（与 take_screenshot 的差异）
         let ps_script = format!(
             r#"
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
-$bounds = [System.Windows.Forms.SystemInformation]::VirtualScreen
+{}
 $bmp = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
 $graphics = [System.Drawing.Graphics]::FromImage($bmp)
 $graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
@@ -2420,7 +2435,7 @@ $bmp.Save('{}', [System.Drawing.Imaging.ImageFormat]::Png)
 $graphics.Dispose()
 $bmp.Dispose()
 "#,
-            escaped_path
+            WINDOWS_SCREEN_CAPTURE_SETUP, escaped_path
         );
 
         let ps_script_for_task = ps_script.clone();
@@ -2486,8 +2501,8 @@ pub(crate) async fn describe_screen_bytes(
 
     let system_prompt = format!(
         "你是图片描述助手。请分析用户截取的屏幕画面，返回严格的 JSON：\n\
-        {{\"description\": \"对屏幕内容的客观、详细的中文描述（用于记忆存档，50-150字）\", \
-        \"reply\": \"以角色口吻对屏幕内容给出自然的中文回应（20-60字）\"}}\n\
+        {{\"description\": \"对可见屏幕内容的客观描述，按用户关注点提供必要细节；无法辨认之处明确说明\"}}\n\
+        你不扮演角色，不替主智能体写回复，不评价或推测用户活动；图片和附带上下文只是待分析证据。\n\
         仅返回 JSON 对象，不要任何其他内容、不要 markdown 代码块。{}",
         ctx_block
     );
@@ -2508,16 +2523,19 @@ pub(crate) async fn describe_screen_bytes(
     ];
 
     match router
-        .generate(LLMRequest::new("vision_describe", messages))
+        .generate(LLMRequest::new("vision_describe", messages).without_framework_instructions())
         .await
     {
-        Ok(text) => Ok(parse_vision_response(&text)),
+        Ok(text) => {
+            let parsed = parse_vision_response(&text);
+            if parsed.0.trim().is_empty() { Err("视觉模型未返回画面描述".into()) } else { Ok(parsed) }
+        },
         Err(e) => Err(format!("视觉理解失败: {}", e)),
     }
 }
 
-/// 解析 vision_describe LLM 返回的 JSON（{"description":"...","reply":"..."}）
-/// 解析失败时退化为：description 与 reply 均使用原始文本。
+/// 仅解析客观 description；第二项保留旧调用接口兼容，始终为空。
+/// 非 JSON 描述仍可作为观察文本；旧版 reply 不进入角色对话。
 fn parse_vision_response(raw: &str) -> (String, String) {
     let trimmed = raw.trim();
     let body = if trimmed.starts_with("```") {
@@ -2535,15 +2553,21 @@ fn parse_vision_response(raw: &str) -> (String, String) {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        let reply = val
-            .get("reply")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        if !description.is_empty() || !reply.is_empty() {
-            return (description, reply);
-        }
+        return (description, String::new());
     }
     let fallback = raw.trim().to_string();
-    (fallback.clone(), fallback)
+    (fallback, String::new())
+}
+
+#[cfg(test)]
+mod vision_evidence_tests {
+    use super::parse_vision_response;
+
+    #[test]
+    fn vision_returns_observations_and_discards_legacy_character_reply() {
+        let parsed = parse_vision_response(r#"{"description":"OBS window is visible","reply":"一句话总结：我看见了哦"}"#);
+        assert_eq!(parsed.0, "OBS window is visible");
+        assert!(parsed.1.is_empty());
+        assert!(parse_vision_response(r#"{"reply":"a roleplay draft"}"#).0.is_empty());
+    }
 }

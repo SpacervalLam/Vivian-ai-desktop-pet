@@ -144,7 +144,7 @@ impl OpenAiAgentsProvider {
         tools: &[ToolDefinition],
         schema: Option<Value>,
     ) -> Value {
-        let mut instructions = self.instructions.clone().unwrap_or_default();
+        let mut instructions = crate::providers::base::effective_instructions(&self.instructions).unwrap_or_default();
         let mut history = Vec::new();
         let mut content = Vec::new();
         for message in messages {

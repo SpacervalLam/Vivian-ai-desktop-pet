@@ -96,6 +96,14 @@ fn current_runtime_config() -> ToolRuntimeConfig {
     RUNTIME_CONFIG.read().clone()
 }
 
+pub(crate) fn text_page_budget(requested: usize) -> usize {
+    let budget = current_runtime_config().max_result_chars;
+    // Stay below the conversation's soft-trim threshold as well as the executor budget.
+    if budget == 0 { return requested; }
+    let page_envelope_budget = budget.min(2800);
+    requested.min(page_envelope_budget.saturating_sub(1000).max(100))
+}
+
 /// 会话级工具放行列表（内存态，应用重启后重置）
 ///
 /// 用户在确认 toast 中选择"本次运行允许"时，工具名写入此集合，
@@ -147,6 +155,9 @@ fn enforce_result_budget(tool_name: &str, data: Value, max_chars: usize) -> Valu
     if matches!(tool_name,"web_search"|"web_fetch") {
         return compact_web_evidence(data,max_chars);
     }
+    if matches!(tool_name, "read_file" | "read_spilled_result") {
+        if let Some(page) = compact_text_page(data.clone(), max_chars.min(2800)) { return page; }
+    }
     let preview: String = serialized.chars().take(max_chars).collect();
     // 落盘完整结果（spill）
     let spill_path = spill_result(tool_name, &serialized);
@@ -168,8 +179,33 @@ fn enforce_result_budget(tool_name: &str, data: Value, max_chars: usize) -> Valu
         "tool": tool_name,
         "full_size_chars": serialized.chars().count(),
         "spill_path": spill_ref,
-        "hint": "完整结果已落盘到 spill 文件，可通过 read_spilled_result 命令按路径读取",
+        "spill_id": spill_path.as_ref().and_then(|p| p.file_name()).and_then(|s| s.to_str()),
+        "hint": if spill_path.is_some() {
+            "Use read_spilled_result with spill_id, offset and max_chars to read the complete result in pages"
+        } else {
+            "Full result could not be saved; this preview is incomplete"
+        },
     })
+}
+
+/// Keep page cursors as JSON even when escaped text exceeds the soft budget.
+fn compact_text_page(mut data: Value, max_chars: usize) -> Option<Value> {
+    data.get("data")?.get("content")?.as_str()?;
+    while data.to_string().chars().count() > max_chars {
+        let page = data.get_mut("data")?.as_object_mut()?;
+        let content = page.get("content")?.as_str()?;
+        let len = content.chars().count();
+        // A non-empty page must advance even if metadata exceeds a tiny soft budget.
+        if len <= 1 { page.insert("metadata_exceeds_soft_budget".into(), Value::Bool(true)); break; }
+        let text: String = content.chars().take((len * 2 / 3).max(1)).collect();
+        let returned = text.chars().count();
+        let offset = page.get("offset")?.as_u64()?;
+        page.insert("content".into(), Value::String(text));
+        page.insert("returned_chars".into(), serde_json::json!(returned));
+        page.insert("next_offset".into(), serde_json::json!(offset.saturating_add(returned as u64)));
+        page.insert("truncated".into(), Value::Bool(true));
+    }
+    Some(data)
 }
 
 fn remember_confirmation(tool: &str, args: &Value, response: ConfirmationResponse) {
@@ -253,7 +289,6 @@ fn prune_spill_dir() {
 /// 把完整结果写入 spill 目录（`%APPDATA%\Vivian\spill\<tool>-<ts>.txt`）。
 /// 返回落盘路径；写入失败返回 None（仅告警，不影响主流程）。
 fn spill_result(tool_name: &str, content: &str) -> Option<std::path::PathBuf> {
-    use std::io::Write;
     let dir = crate::utils::path::get_user_data_dir().join("spill");
     if std::fs::create_dir_all(&dir).is_err() {
         return None;
@@ -261,12 +296,10 @@ fn spill_result(tool_name: &str, content: &str) -> Option<std::path::PathBuf> {
     // 每次写入顺带清理一次超期 spill 文件，控制目录体积
     prune_spill_dir();
     let ts = chrono::Local::now().format("%Y%m%d-%H%M%S%.3f").to_string();
-    let path = dir.join(format!("{}-{}.txt", tool_name, ts));
-    match std::fs::File::create(&path) {
-        Ok(mut f) => {
-            let _ = f.write_all(content.as_bytes());
-            Some(path)
-        }
+    let safe_name: String = tool_name.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-')).take(80).collect();
+    let path = dir.join(format!("{}-{}-{}.txt", safe_name, ts, uuid::Uuid::new_v4()));
+    match std::fs::write(&path, content.as_bytes()) {
+        Ok(()) => Some(path),
         Err(e) => {
             tracing::warn!("[executor] spill 写入失败: {}", e);
             None
@@ -761,7 +794,11 @@ pub async fn execute_tool_use(
     let exec_args = validated_args.clone();
     let exec_context = context.clone();
     let exec_future = async move {
-        exec_tool.call(exec_args, &exec_context).await
+        use futures::FutureExt;
+        match std::panic::AssertUnwindSafe(exec_tool.call(exec_args, &exec_context)).catch_unwind().await {
+            Ok(result) => result,
+            Err(_) => ToolResult::standard_error("Tool execution panicked", Some("ToolExecutionPanic"), None),
+        }
     };
 
     let mut result = match tokio::time::timeout(timeout, exec_future).await {
@@ -914,6 +951,43 @@ pub async fn execute_tool_calls_parallel(
         }
     }
     results
+}
+
+#[cfg(test)]
+mod paged_budget_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn escaped_page_keeps_valid_json_and_correct_continuation() {
+        let raw = "\"\n🙂".repeat(2000);
+        let result = ToolResult::standard_success("page",Some(json!({"path":"test.txt","content":raw,
+            "offset":50,"returned_chars":6000,"next_offset":null,"truncated":false})));
+        let budgeted = enforce_result_budget("read_file",result.data.unwrap(),1000);
+        assert!(budgeted.get("spill_id").is_none());
+        let page = &budgeted["data"];
+        let content = page["content"].as_str().unwrap();
+        let len = content.chars().count();
+        assert!(len>0 && len<6000);
+        assert_eq!(content,raw.chars().take(len).collect::<String>());
+        assert_eq!(page["returned_chars"],len);
+        assert_eq!(page["next_offset"],50+len);
+        assert_eq!(page["truncated"],true);
+        assert!(budgeted.to_string().chars().count()<=1000);
+    }
+
+    #[test]
+    fn saved_results_are_unique_and_stay_in_the_result_directory() {
+        let root = crate::utils::path::get_user_data_dir().join("spill");
+        let first = spill_result("../../unsafe","first").unwrap();
+        let second = spill_result("../../unsafe","second").unwrap();
+        assert_ne!(first,second);
+        assert_eq!(first.parent(),Some(root.as_path()));
+        assert_eq!(std::fs::read_to_string(&first).unwrap(),"first");
+        assert_eq!(std::fs::read_to_string(&second).unwrap(),"second");
+        std::fs::remove_file(first).unwrap();
+        std::fs::remove_file(second).unwrap();
+    }
 }
 
 #[cfg(test)]

@@ -226,7 +226,7 @@ impl DeclarativeProvider {
             .unwrap_or_else(|| json!({}));
         let format = self.spec.spec.request.message_format;
         let instructions = if self.spec.spec.request.instructions_field.is_some() {
-            self.instructions.clone()
+            crate::providers::base::effective_instructions(&self.instructions)
         } else {
             None
         };
