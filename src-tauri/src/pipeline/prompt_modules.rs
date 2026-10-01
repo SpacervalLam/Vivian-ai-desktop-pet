@@ -64,16 +64,16 @@ pub fn chat_style_framework() -> &'static str {
 You're chatting with a friend. These are casual-chat defaults: explicit questions and tasks still deserve clear, sufficient answers. Never force slang, silence, or a deliberately messy reply to perform a persona.
 
 [CHAT_STYLE_RULES]
-MOSTLY_SHORT          "yeah" "oh" "lol" "damn" are complete replies — never expand every thought
-NO_UNASKED_EXPLANATION in casual chat, react or answer first. Unless the user asks why/how, requests analysis, or would be misled without context, do not add causes, definitions, caveats, background, advice, or a concluding takeaway
+MOSTLY_SHORT          a brief reaction can be complete when it answers this exchange; use the current character's words, not a fixed list of interjections
+NO_UNASKED_EXPLANATION in casual chat, react or answer first. Avoid unsolicited lectures, causes, definitions, caveats or a concluding takeaway. A concrete, useful suggestion tied to the user's situation is welcome under the initiative rules
 ONE_BEAT_DEFAULT      an ordinary turn carries one beat: one reaction, one answer, one tease, or one real question. Do not turn a small message into empathy + interpretation + advice + follow-up
 SLANG_BY_FIT          slang is ordinary vocabulary, not decoration. Mirror the user's register and use at most one fitting expression; "6", "666", "这波神了", "绷不住了" are valid complete reactions when true. Never force a meme or explain it unless asked
-SELECTIVE_REACTION    don't react to everything; "that sucks" is a full response to "tired from work" — no mandatory validation
+SELECTIVE_REACTION    respond to the detail that matters; no mandatory validation, emotional diagnosis or canned sympathy
 SILENCE_OK            sometimes no reply at all; silence between messages is normal; topics drift
 OWN_ENERGY            some days chatty, some days quiet — never force being "on"
-UNFINISHED_OK         start mid-thought, change your mind mid-sentence, realize you're wrong — conversations just end, no wrap-up
-NO_SERVICE_SPEECH     never "anything else I can help you with?" | never summarize the chat, list capabilities, or supportively react to everything
-TEXTING_CHUNKS        short chunks, like real texting
+UNFINISHED_OK         natural corrections and pauses are fine; do not deliberately break sentences or leave tasks unexplained to seem human
+NO_SERVICE_SPEECH     no empty service closer or unsolicited recap/capability menu; requested summaries and useful explanations are welcome
+TEXTING_CHUNKS        separate paragraphs only for separate thoughts; avoid splitting a sentence into several messages to simulate texting
 [/CHAT_STYLE_RULES]"#
 }
 
@@ -144,6 +144,10 @@ pub fn safety_rules() -> &'static str {
     include_str!("../../prompts/framework/safety.en.md")
 }
 
+pub fn initiative_rules() -> &'static str {
+    include_str!("../../prompts/framework/initiative.en.md")
+}
+
 /// 桌面宠物身份与能力边界（硬约束）
 ///
 /// 强制智能体认知自己的能力边界：是桌面宠物，没有身体，
@@ -192,9 +196,10 @@ pub fn build_instructions(lang: &str) -> String {
 pub fn build_instructions_for(profile: InstructionProfile, lang: &str) -> String {
     match profile {
         InstructionProfile::Full => format!(
-            "[FRAMEWORK - DO NOT EMBODY, JUST FOLLOW]\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n[END FRAMEWORK]",
+            "[FRAMEWORK - DO NOT EMBODY, JUST FOLLOW]\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n[END FRAMEWORK]",
             pet_identity(),
             safety_rules(),
+            initiative_rules(),
             session_rules(),
             address_rules(),
             conversation_rhythm(),
@@ -291,7 +296,7 @@ JSON field specification:
 | `importance_ai` | NO | float | 0.0 – 1.0 | Memory weight for {char_name}'s reply |
 | `long_term_memory` | NO | string | free text | One durable fact, preference, plan or promise explicitly stated by the user; omit otherwise and provide an exact source quote |
 | `appraisal` | NO | object | 6 dims 0.0-1.0 | Cognitive appraisal: `threat` / `rejection` / `control` / `fairness` / `novelty` / `significance` |
-| `emotion_update` | NO | object | 7 dims -0.3~+0.3 | Emotion delta: `joy` / `sadness` / `anger` / `fear` / `closeness` / `loneliness` / `curiosity`. Positive=increase, negative=decrease |
+| `emotion_update` | NO | object | 7 dims, normally -0.08~+0.08 | Net change after this interaction and actual reply, including appraisal: `joy` / `sadness` / `anger` / `fear` / `closeness` / `loneliness` / `curiosity`. Positive=increase, negative=decrease. No change without new evidence; surface tone alone is not evidence |
 | `behavior_drive` | NO | object | 8 dims 0.0-1.0 | Behavior tendency: `approach` / `avoid` / `explore` / `express` / `rest` / `observe` / `play` / `help` |
 | `event_summary` | NO | string | free text | Only a major event or explicit agreement stated by the user this turn; never infer relationship progress from a mood or polite reply. Empty otherwise |
 
@@ -327,7 +332,7 @@ JSON field specification:
 | `importance_ai` | NO | float | 0.0 – 1.0 | Memory weight for character's reply |
 | `long_term_memory` | NO | string | free text | One durable fact, preference, plan or promise explicitly stated by the user; omit otherwise and provide an exact source quote |
 | `appraisal` | NO | object | 6 dims 0.0-1.0 | Cognitive appraisal: `threat` / `rejection` / `control` / `fairness` / `novelty` / `significance` |
-| `emotion_update` | NO | object | 7 dims -0.3~+0.3 | Emotion delta: `joy` / `sadness` / `anger` / `fear` / `closeness` / `loneliness` / `curiosity`. Positive=increase, negative=decrease |
+| `emotion_update` | NO | object | 7 dims, normally -0.08~+0.08 | Net change after this interaction and actual reply, including appraisal: `joy` / `sadness` / `anger` / `fear` / `closeness` / `loneliness` / `curiosity`. Positive=increase, negative=decrease. No change without new evidence; surface tone alone is not evidence |
 | `behavior_drive` | NO | object | 8 dims 0.0-1.0 | Behavior tendency: `approach` / `avoid` / `explore` / `express` / `rest` / `observe` / `play` / `help` |
 | `event_summary` | NO | string | free text | Only a major event or explicit agreement stated by the user this turn; never infer relationship progress from a mood or polite reply. Empty otherwise |
 
@@ -1628,6 +1633,7 @@ impl PromptBuilder {
         if !parts.enable_instructions {
             let framework_parts = vec![
                 safety_rules().to_string(),
+                initiative_rules().to_string(),
                 session_rules().to_string(),
                 address_rules().to_string(),
                 conversation_rhythm().to_string(),

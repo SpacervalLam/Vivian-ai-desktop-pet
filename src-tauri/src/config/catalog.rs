@@ -396,18 +396,18 @@ pub fn build_catalog() -> Vec<SettingEntry> {
         SettingEntry {
             key: "web_search.providers".into(),
             label: "启用的搜索引擎".into(),
-            description: "可同时启用多个引擎：duckduckgo（零配置）/ searxng（自部署）/ tavily（LLM 优化）/ bing（国内直连）/ deepseek（官方原生搜索，一次搜索=一次模型调用）。省略引擎参数时并发调用全部已启用引擎合并去重；智能体可在 web_search 工具的 engines 参数里自主选用一个或多个（以启用列表为范围）".into(),
+            description: "可同时启用多个引擎：duckduckgo（零配置）/ searxng（自部署）/ tavily（LLM 优化）（Bing v7 已退役）/ deepseek（官方原生搜索，一次搜索=一次模型调用）。陪伴侧默认快速选一个低成本引擎，工作侧默认并发研究；结果排序去重并保留来源；智能体可在 web_search 工具的 engines 参数里自主选用一个或多个（以启用列表为范围）".into(),
             layer: SettingLayer::Advanced,
             group: "网络搜索".into(),
             control: SettingControl::MultiSelect {
-                options: vec!["duckduckgo".into(), "searxng".into(), "tavily".into(), "bing".into(), "deepseek".into()],
+                options: vec!["duckduckgo".into(), "searxng".into(), "tavily".into(), "deepseek".into()],
             },
             default_value: serde_json::json!(["duckduckgo"]),
         },
         SettingEntry {
             key: "web_search.max_results".into(),
             label: "结果数".into(),
-            description: "每次搜索返回结果数（1-20）；0 = 自动，按调用方智能体取默认（聊天 10 / 工作 15）".into(),
+            description: "每次搜索返回结果数（1-20）；0 = 自动，按调用方智能体取默认（陪伴 5 / 工作 10）".into(),
             layer: SettingLayer::Advanced,
             group: "网络搜索".into(),
             control: SettingControl::Integer,
@@ -493,7 +493,7 @@ pub fn build_catalog() -> Vec<SettingEntry> {
         SettingEntry {
             key: "web_search.bing.api_key".into(),
             label: "Bing Search API Key".into(),
-            description: "Azure Bing Search API Key（https://portal.azure.com 创建 Bing Search 资源获取，国内直连，免费 1000 次/月）".into(),
+            description: "旧 Bing API 已退役，仅保留旧配置兼容；请选择 Tavily、SearXNG 或其他可用引擎".into(),
             layer: SettingLayer::Advanced,
             group: "网络搜索-Bing".into(),
             control: SettingControl::Password,
@@ -512,7 +512,7 @@ pub fn build_catalog() -> Vec<SettingEntry> {
         SettingEntry {
             key: "web_search.deepseek.api_key".into(),
             label: "DeepSeek API Key".into(),
-            description: "DeepSeek 官方原生联网搜索（Anthropic 兼容 Messages API + web_search server tool），引用级摘要质量最高，一次搜索消耗一次模型调用。留空且主对话服务商为 DeepSeek 时自动复用主对话 Key".into(),
+            description: "DeepSeek 官方原生联网搜索（Anthropic 兼容 Messages API + web_search server tool），可返回带引用摘录，一次搜索消耗一次模型调用。留空且主对话服务商为 DeepSeek 时自动复用主对话 Key".into(),
             layer: SettingLayer::Advanced,
             group: "网络搜索-DeepSeek".into(),
             control: SettingControl::Password,

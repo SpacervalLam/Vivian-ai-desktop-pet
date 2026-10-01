@@ -347,6 +347,7 @@ impl ChatCompletionsProvider {
             }
         }
 
+        let content = crate::providers::web_citations::attach(&content, &crate::providers::web_citations::sources(json_val));
         Ok(ChatResponse {
             content,
             tool_calls,
@@ -357,6 +358,11 @@ impl ChatCompletionsProvider {
     }
 
     async fn call_with_retry(&self, body: Value, cache_key_prompt: Option<&str>) -> VivianResult<String> {
+        // Tool/search responses must be evaluated against current evidence and permissions.
+        let cache_key_prompt = if body.get("tools").is_some()
+            || body.get("web_search_options").is_some()
+            || body.get("enable_search").and_then(serde_json::Value::as_bool) == Some(true)
+        { None } else { cache_key_prompt };
         if let Some(prompt) = cache_key_prompt {
             if let Some(cached) = self.base.get_cached_response(prompt) {
                 tracing::debug!("[chat_completions] 命中缓存: {}", self.base.model);
@@ -386,6 +392,7 @@ impl ChatCompletionsProvider {
             match self.send_request(body.clone()).await {
                 Ok(json_val) => {
                     let content = Self::extract_content(&json_val)?;
+                    let content = crate::providers::web_citations::attach(&content, &crate::providers::web_citations::sources(&json_val));
                     crate::providers::base::record_response_usage(&self.base.model, &json_val);
                     self.base.record_success();
                     if let Some(prompt) = cache_key_prompt {
@@ -412,6 +419,11 @@ impl ChatCompletionsProvider {
     }
 
     async fn invoke_with_retry(&self, body: Value, cache_key_prompt: Option<&str>) -> VivianResult<ChatResponse> {
+        // Tool/search responses must be evaluated against current evidence and permissions.
+        let cache_key_prompt = if body.get("tools").is_some()
+            || body.get("web_search_options").is_some()
+            || body.get("enable_search").and_then(serde_json::Value::as_bool) == Some(true)
+        { None } else { cache_key_prompt };
         if let Some(prompt) = cache_key_prompt {
             if let Some(cached) = self.base.get_cached_response(prompt) {
                 tracing::debug!("[chat_completions] 命中缓存(structured): {}", self.base.model);
@@ -626,6 +638,8 @@ impl BaseProvider for ChatCompletionsProvider {
                             return;
                         }
                         if let Ok(json_val) = serde_json::from_str::<Value>(data) {
+                            let sources = crate::providers::web_citations::sources(&json_val);
+                            if !sources.is_empty() { let _ = tx.send(StreamEvent::WebSources { sources }).await; }
                             if let Some(usage) = parse_stream_usage(&json_val["usage"]) {
                                 let _ = tx.send(usage).await;
                             }
@@ -888,6 +902,8 @@ impl BaseProvider for ChatCompletionsProvider {
                         }
 
                         if let Ok(json_val) = serde_json::from_str::<Value>(data) {
+                            let sources = crate::providers::web_citations::sources(&json_val);
+                            if !sources.is_empty() { let _ = tx.send(StreamEvent::WebSources { sources }).await; }
                             // usage chunk：stream_options.include_usage 下末尾 chunk 携带（choices 为空数组）
                             if let Some(ev) = parse_stream_usage(&json_val["usage"]) {
                                 let _ = tx.send(ev).await;

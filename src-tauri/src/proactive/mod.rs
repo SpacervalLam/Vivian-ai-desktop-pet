@@ -765,9 +765,41 @@ fn obvious_channel_for_new_topic(trigger: ProactiveTrigger, user_present: bool) 
     }
 }
 
+/// Recall against the concrete event and latest user topic, rather than the same generic query.
+fn proactive_recall_query(trigger: ProactiveTrigger, ctx: &behavior::LlmContext, history: &[ChatMessage]) -> Option<String> {
+    if matches!(trigger, ProactiveTrigger::TeasingResponse | ProactiveTrigger::SystemPressure | ProactiveTrigger::WorkNotice) {
+        return None; // reaction/metrics/task reports already carry their authoritative material
+    }
+    let event = match trigger {
+        ProactiveTrigger::ScreenPeek => &ctx.screen_hint,
+        ProactiveTrigger::MusicChanged => &ctx.music_hint,
+        ProactiveTrigger::AppDuration | ProactiveTrigger::WindowTrigger => &ctx.app_duration_hint,
+        _ => &ctx.memory_hint,
+    };
+    let user_topic = history.iter().rev().find(|message| message.role == "user" && !message.content.trim().is_empty())
+        .map(|message| crate::cross_character::parse_any_speaker_prefix(&message.content).0)
+        .unwrap_or_default();
+    let query = [event.as_str(), user_topic.as_str()].into_iter()
+        .filter(|part| !part.trim().is_empty()).map(|part| crate::utils::truncate_chars(part.trim(), 240))
+        .collect::<Vec<_>>().join("\n");
+    (!query.is_empty()).then_some(query)
+}
+
 #[cfg(test)]
 mod channel_cost_tests {
     use super::*;
+    #[test]
+    fn recall_uses_current_event_and_user_topic_without_generic_filler() {
+        let mut ctx = behavior::LlmContext::default();
+        ctx.music_hint = "a_specific_song".into();
+        let history = vec![ChatMessage::user("my_favorite_artist"), ChatMessage::assistant("irrelevant_assistant_text")];
+        let query = proactive_recall_query(ProactiveTrigger::MusicChanged, &ctx, &history).unwrap();
+        assert!(query.contains("a_specific_song"));
+        assert!(query.contains("my_favorite_artist"));
+        assert!(!query.contains("irrelevant_assistant_text"));
+        assert!(proactive_recall_query(ProactiveTrigger::Spontaneous, &behavior::LlmContext::default(), &[]).is_none());
+        assert!(proactive_recall_query(ProactiveTrigger::SystemPressure, &ctx, &history).is_none());
+    }
     #[test]
     fn only_clear_new_topic_intents_skip_model_judgement() {
         assert_eq!(obvious_channel_for_new_topic(ProactiveTrigger::ScreenPeek, true), Some("direct"));
@@ -4656,10 +4688,11 @@ impl ProactiveOrchestrator {
             handle.block_on(async move {
                 // 记忆检索（含知识库：busy 状态网络搜索获得的信息），让主动问候有真实素材
                 // 每条记忆带相对时间标注（如"3小时前"），让 LLM 区分刚发生的事与旧记忆
-                let memory_text = if let Some(mem_mgr) = memory_arc.as_ref() {
+                let recall_query = proactive_recall_query(trigger, &llm_ctx, &dialogue_messages);
+                let memory_text = if let (Some(mem_mgr), Some(query)) = (memory_arc.as_ref(), recall_query.as_deref()) {
                     match mem_mgr
                         .search_memories(
-                            "最近 用户 兴趣 话题 知识",
+                            query,
                             crate::memory::types::RetrievalStrategy::Hybrid,
                             24,
                         )
@@ -4713,7 +4746,10 @@ impl ProactiveOrchestrator {
                         crate::utils::truncate_chars(&memory_text, 360));
                     let prompt = format!("{}\nScene: {} {} {} {}\nIntent detail: {}", prompt,
                         llm_ctx.screen_hint, llm_ctx.music_hint, llm_ctx.system_hint, llm_ctx.app_duration_hint, llm_ctx.memory_hint);
-                    let decision = router_clone.generate(crate::providers::base::LLMRequest::new("chat", vec![ChatMessage::user(&prompt)]).with_character_id(self.char_id.clone()).with_usage_tag("proactive_channel")).await.ok()?;
+                    let decision = router_clone.generate(crate::providers::base::LLMRequest::new("chat", vec![ChatMessage::user(&prompt)])
+                        .with_character_id(self.char_id.clone()).with_usage_tag("proactive_channel")
+                        .with_temperature(0.0).with_reasoning(false)
+                        .with_penalties(0.0, 0.0)).await.ok()?;
                     match decision.trim().trim_matches('"') {
                         "wechat" => "wechat".into(),
                         "direct" => "direct".into(),

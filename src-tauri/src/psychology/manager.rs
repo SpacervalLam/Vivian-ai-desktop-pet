@@ -6,7 +6,7 @@
 //! 3. 应用 LLM 产出（appraisal + emotion_update + behavior_drive）
 //! 4. 应用关系更新
 //! 5. 构建心理学 prompt 上下文
-//! 6. 计算 Mood（仅 UI）
+//! 6. 计算统一 Mood（UI 与回复表达共用）
 //! 7. 提供规则驱动的 Behavior Drive
 
 use std::sync::Arc;
@@ -34,10 +34,21 @@ use super::snapshot::{PsychologySnapshot};
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PsychologyOutput {
     pub appraisal: Option<Appraisal>,
+    /// Net emotional change for the interaction, including its appraisal.
+    /// Some(all-zero) explicitly keeps emotion unchanged; None uses appraisal fallback.
     pub emotion_update: Option<EmotionDeltas>,
     pub behavior_drive: Option<BehaviorDrive>,
     /// 需求增量（可选，LLM 也可产出）
     pub need_update: Option<NeedDeltas>,
+}
+
+impl PsychologyOutput {
+    /// A direct update describes the final net change; appraisal is only the fallback.
+    fn resolved_emotion_delta(&self, sensitivity: f64, trust: f64) -> Option<EmotionDeltas> {
+        self.emotion_update.as_ref().map(|delta| delta.bounded(sensitivity, 0.12, 0.24))
+            .or_else(|| self.appraisal.as_ref()
+                .map(|appraisal| appraisal.to_emotion_deltas(sensitivity, trust)))
+    }
 }
 
 /// 用户交互的反馈 — 前端直接播放的 桌宠 表情/动作
@@ -309,19 +320,21 @@ impl PsychologyManager {
             if let Some(appraisal) = &output.appraisal {
                 snapshot.last_appraisal = Some(appraisal.clone());
 
-                let emotion_deltas_from_appraisal =
-                    appraisal.to_emotion_deltas(sensitivity_mult, trust);
-                snapshot.emotion.apply_delta(&emotion_deltas_from_appraisal, 1.0);
-
                 let need_deltas_from_appraisal = appraisal.to_need_deltas();
                 snapshot.needs.apply_delta(&need_deltas_from_appraisal);
             }
 
-            if let Some(emotion_update) = &output.emotion_update {
-                snapshot.emotion.apply_delta(emotion_update, sensitivity_mult);
+            // Explicit feedback is the whole turn's net change, not an additional
+            // copy of the appraisal response. Appraisal remains a fallback.
+            if let Some(delta) = output.resolved_emotion_delta(sensitivity_mult, trust) {
+                if output.emotion_update.is_some() {
+                    // Already a net change: do not let channel interactions
+                    // reverse explicit relief or count the same reaction again.
+                    snapshot.emotion.apply_delta(&delta, 1.0);
+                } else {
+                    snapshot.emotion.apply_feedback_delta(&delta, 1.0);
+                }
             }
-
-            let _ = snapshot.emotion.apply_interactions();
 
             // 应用 LLM 直接产出的 need_update
             if let Some(need_update) = &output.need_update {
@@ -793,7 +806,7 @@ impl PsychologyManager {
         probability.clamp(0.0, 0.95)
     }
 
-    /// 计算 Mood 快照（仅 UI）
+    /// 计算 Mood 快照（UI 与回复表达共用，不改变能力或事实判断）
     pub fn compute_mood(&self) -> MoodSnapshot {
         let state = self.state.read();
         compute_mood(
@@ -1184,6 +1197,65 @@ impl PsychologyManager {
 /// 持久化到文件的路径辅助
 pub fn default_psychology_path(data_dir: &std::path::Path) -> std::path::PathBuf {
     data_dir.join("companion-v2").join("psychology.json")
+}
+
+#[cfg(test)]
+mod feedback_tests {
+    use super::*;
+
+    #[test]
+    fn direct_feedback_replaces_appraisal_emotion_mapping_even_when_zero() {
+        let output = PsychologyOutput {
+            appraisal: Some(Appraisal { threat: 1.0, rejection: 1.0, ..Default::default() }),
+            emotion_update: Some(EmotionDeltas::default()), ..Default::default()
+        };
+        assert_eq!(output.resolved_emotion_delta(2.0, 0.2).unwrap().magnitude(), 0.0);
+        let fallback = PsychologyOutput { emotion_update: None, ..output };
+        assert!(fallback.resolved_emotion_delta(2.0, 0.2).unwrap().fear > 0.0);
+    }
+
+    #[test]
+    fn reply_feedback_updates_persisted_state_and_derived_mood() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("psychology.json");
+        let manager = PsychologyManager::load_or_init(path.clone());
+        {
+            let mut state = manager.state.write();
+            state.emotion.anger = 0.6;
+            state.emotion.fear = 0.5;
+            state.emotion.curiosity = 0.3;
+        }
+        let before = manager.compute_mood();
+        manager.apply_llm_output(&PsychologyOutput {
+            emotion_update: Some(EmotionDeltas { anger: -0.08, fear: -0.08, curiosity: 0.08, ..Default::default() }),
+            ..Default::default()
+        });
+        let after = manager.compute_mood();
+        assert!(after.stress < before.stress);
+        assert!(after.focus > before.focus);
+        // Existing persistence runs on a background thread. Wait for the actual
+        // snapshot, rather than treating scheduling the write as completing it.
+        let expected = serde_json::to_value(manager.emotion()).unwrap();
+        let matches_saved = |emotion: EmotionState| {
+            let actual = serde_json::to_value(emotion).unwrap();
+            expected.as_object().unwrap().iter().all(|(key, value)| {
+                (value.as_f64().unwrap() - actual[key].as_f64().unwrap()).abs() < 1e-9
+            })
+        };
+        let mut saved = false;
+        for _ in 0..200 {
+            let snapshot = std::fs::read_to_string(&path).ok()
+                .and_then(|text| serde_json::from_str::<PsychologySnapshot>(&text).ok());
+            if snapshot.map(|s| matches_saved(s.emotion)).unwrap_or(false) {
+                saved = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(saved, "feedback snapshot was not persisted: {:?}", std::fs::read_to_string(&path));
+        let reloaded = PsychologyManager::load_or_init(path);
+        assert!(matches_saved(reloaded.emotion()));
+    }
 }
 
 #[cfg(test)]

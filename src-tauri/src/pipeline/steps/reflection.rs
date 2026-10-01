@@ -183,14 +183,21 @@ text 已在主对话生成，此处不需要再产出 text。
 - user_emotion: 用户当前情绪标签（happy/sad/angry/anxious/frustrated/loneliness/curious/neutral 等）
 - user_emotion_intensity: 用户情绪强度 0.0-1.0
 - ai_emotion: 角色当前主导情绪标签
+    * 这是回复的表面情绪，不能单凭它增加内部情绪；温柔安慰不等于自己悲伤，礼貌感谢不等于关系升温。
 - importance_user: 本轮对话对用户的重要程度 0.0-1.0
 - importance_ai: 本轮对话对角色的重要程度 0.0-1.0
 - appraisal: 事件评估（可选，null 表示无显著事件）
-    {"significance": 0.5, "valence": 0.0, "arousal": 0.0, "novelty": 0.0}
-- emotion_update: 情绪维度增量（可选，null 表示无变化）
-    {"joy": 0.0, "sadness": 0.0, "anger": 0.0, "fear": 0.0, "loneliness": 0.0, "curiosity": 0.0}
+    {"threat": 0.0, "rejection": 0.0, "control": 0.5, "fairness": 0.5, "novelty": 0.0, "significance": 0.5}
+    * 六个维度均在 0.0–1.0；不要生成 valence/arousal 等不存在的字段。
+- emotion_update: 相对于回复前心情，本轮互动结束后的七维净变化；包含事件反应与表达后的真实变化，不重复叠加 appraisal。
+    {"joy": 0.0, "sadness": 0.0, "anger": 0.0, "fear": 0.0, "closeness": 0.0, "loneliness": 0.0, "curiosity": 0.0}
+    * 每维建议 -0.08～+0.08，正数增加、负数降低；系统会限制单维和整轮变化幅度。
+    * 结合用户原话、实际回复内容及回复前状态判断：表达并梳理真实不满可轻微降低 anger；讨论有内容的新想法可增加 curiosity；真实互动带来的宽慰可降低 fear/sadness；只提供建议不能假设问题已经解决。
+    * 不把引用、虚构、用户的情绪或自己的语气当作自己的经历；不要凭自己的安慰承诺推断用户接受了、关系升级了。
+    * 普通任务、礼貌措辞、沿用上一轮情绪但没有新事件或真实变化时留 null；不要每轮为了联动强行变化。
+    * 若 appraisal 有事件但最终心情确实没变化，可返回七维全 0，明确阻止事件映射备用增量。
 - behavior_drive: 行为驱动（可选，null 表示无特殊驱动）
-    {"approach": 0.0, "avoid": 0.0, "social": 0.0, "explore": 0.0, "rest": 0.0}
+    {"approach": 0.0, "avoid": 0.0, "explore": 0.0, "express": 0.0, "rest": 0.0, "observe": 0.0, "play": 0.0, "help": 0.0}
 
 [世界状态更新]
 - world_update: 世界状态变更建议（可选，null 表示无需更新）
@@ -556,7 +563,8 @@ impl ReflectionRunnable {
             format!("\n待验证的成长候选（不是事实，只有本轮新增证据才能支持）：{}\n", serde_json::to_string(&items).unwrap_or_default())
         }).unwrap_or_default();
         let user_content = format!(
-            "{growth_candidates}{recent_section}用户输入：{}\n\n{} 的回复：{}{}\n可用表情：{}\n可用动作：{}\n{}{}",
+            "回复前心情（内部参考，回复措辞不是新的外部事件）：{}\n{growth_candidates}{recent_section}用户输入：{}\n\n{} 的回复：{}{}\n可用表情：{}\n可用动作：{}\n{}{}",
+            state.metadata.get("mood_before_reply").map(Value::to_string).unwrap_or_else(|| "未提供；无证据时不猜测变化".into()),
             state.user_input,
             self.char_cn_name(),
             state.text,
@@ -919,6 +927,41 @@ fn log_self_repetition(state: &crate::pipeline::state::PipelineState, char_id: &
             compared,
             max_sim
         );
+    }
+}
+
+#[cfg(test)]
+mod mood_feedback_tests {
+    use super::*;
+
+    #[test]
+    fn reflection_sees_actual_reply_and_mood_baseline() {
+        let reflection = ReflectionRunnable::new(None, None, true, "vivian");
+        let mut state = PipelineState::new("我只想讨论，不要执行".into());
+        state.text = "那我们先梳理这个想法。".into();
+        state.metadata["mood_before_reply"] = serde_json::json!({"energy":23,"stress":61,"focus":42});
+        let messages = reflection.build_messages(&state);
+        let content = &messages[1].content;
+        assert!(content.contains(&state.text) && content.contains(&state.user_input));
+        assert!(content.contains("\"energy\":23"));
+        assert!(content.contains("不重复叠加 appraisal"));
+        assert!(content.contains("自己的语气"));
+    }
+
+    #[test]
+    fn reflection_parses_relief_and_curiosity_as_net_change() {
+        let mut state = PipelineState::new("聊完好多了".into());
+        let json = serde_json::json!({
+            "ai_emotion":"calm",
+            "appraisal":{"threat":0.0,"rejection":0.0,"control":0.7,"fairness":0.5,"novelty":0.6,"significance":0.4},
+            "emotion_update":{"anger":-0.06,"fear":-0.04,"closeness":0.02,"curiosity":0.05}
+        });
+        ReflectionRunnable::apply_to_state(&mut state, &json, None);
+        let delta = state.emotion_update.unwrap();
+        assert_eq!(delta.anger, -0.06);
+        assert_eq!(delta.curiosity, 0.05);
+        assert_eq!(delta.closeness, 0.02);
+        assert_eq!(state.appraisal.unwrap().control, 0.7);
     }
 }
 

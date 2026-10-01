@@ -18,7 +18,6 @@ import {
   frameStyle,
   getMotion,
   pose,
-  prefetchUrls,
   resolveMotion,
   reversePlayback,
   sheetUrl,
@@ -32,7 +31,17 @@ import { runSlide } from '../chibi/slideTrack';
 import { runFlee, FLEE_TAKEOVER_HOLD_MS, type FleeEnv } from '../chibi/fleeTrack';
 import type { FleeGeometry } from '../chibi/fleePlan';
 import { TapAngerLedger } from '../chibi/tapAnger';
+import { SheetLoader } from '../chibi/sheetLoader';
 import './ChibiPetCanvas.css';
+
+export interface PetInteractionMetrics {
+  clickCount?: number;
+  windowMs?: number;
+  intervalMs?: number;
+  pressDurationMs?: number;
+  dragSpeedPxPerMs?: number;
+  dragDistancePx?: number;
+}
 
 export type ChibiInteraction = 'single_click' | 'double_click' | 'rough_click';
 
@@ -71,6 +80,11 @@ const BUSY_IN_FRAMES = Array.from({ length: BUSY_IN_SPEC.frames }, (_, i) => i);
 const BUSY_OUT = reversePlayback(BUSY_IN_SPEC);
 const IDLE_SPEC = pose('idle');
 const IDLE_SLOT = IDLE_SPEC.slot;
+const SLEEP_SPEC = animation('sleep');
+const WAKE_SPEC = animation('wake');
+const TEND_SPEC = animation('tend');
+const TEND_OUT_SPEC = animation('tend-out');
+const SLEEP_WAKE_AFTER_MS = 5 * 60_000;
 
 /**
  * 是否是忙碌阶段占着舞台的那两个动作（掏出手机 / 看手机）。
@@ -266,7 +280,7 @@ export interface ChibiPetCanvasProps {
    * 一次点击手势的结果：单击、双击，或「戳烦了」（{@link TAP_ANNOY_THRESHOLD}）。
    * 前两者由点击节奏区分，`rough_click` 由画布内的戳烦了账本判定，三者互斥。
    */
-  onInteraction?: (interaction: ChibiInteraction) => void;
+  onInteraction?: (interaction: ChibiInteraction, metrics?: PetInteractionMetrics) => void;
   onOpenQuickChat?: () => void;
   /** Kept compatible with ModelCanvas while stage walking is coordinated above the renderer. */
   ambientMotionEnabled?: boolean;
@@ -306,6 +320,10 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
     const [poseName, setPoseName] = useState<ChibiPose>('idle');
     const poseNameRef = useRef<ChibiPose>('idle');
     const [walkDirection, setWalkDirection] = useState<ChibiDirection>('left');
+    const walkDirectionRef = useRef<ChibiDirection>('left');
+    walkDirectionRef.current = walkDirection;
+    const [sheetLoader] = useState(() => new SheetLoader());
+    const [, setSheetVersion] = useState(0);
     const [frame, setFrame] = useState(0);
     /** 智能避让指定的走动帧间隔（ms）；为 null 时按图集固有节奏播放。 */
     const walkFrameDelayMsRef = useRef<number | null>(null);
@@ -328,6 +346,8 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
     const clickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     /** 戳烦了账本（判定规则见 chibi/tapAnger）。 */
     const tapLedgerRef = useRef(new TapAngerLedger());
+    const recentTapTimesRef = useRef<number[]>([]);
+    const lastPressDurationRef = useRef<number | undefined>(undefined);
     /** 一趟逃离是否还在跑：期间点击一律不改动作，免得把正在跑的位移打断在半路。 */
     const fleeingRef = useRef(false);
     const scaleRef = useRef(1);
@@ -342,6 +362,9 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
     const busyPhaseRef = useRef<'idle' | 'in' | 'loop' | 'out'>('idle');
     /** 进场动画播到第几帧。半路退出时据此决定倒放起点。 */
     const busyInFrameRef = useRef(0);
+    const sleepPhaseRef = useRef<'idle' | 'in' | 'loop' | 'out'>('idle');
+    const wakeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const afterWakeRef = useRef<(() => void) | undefined>();
     const onReadyRef = useRef(onReady);
 
     useEffect(() => {
@@ -413,6 +436,8 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
       direction?: ChibiDirection,
       onFrame?: (index: number) => void,
     ): Promise<boolean> => {
+      await sheetLoader.load(sheetUrl(spec, characterId, direction ?? walkDirectionRef.current));
+      if (sequenceTokenRef.current !== token || pressedRef.current) return false;
       setActivePose(poseLabel);
       if (direction) setWalkDirection(direction);
       for (let index = 0; index < frames.length; index += 1) {
@@ -422,7 +447,57 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
         await wait(durations[index] ?? durations[durations.length - 1] ?? frameDurationMs(spec, index));
       }
       return sequenceTokenRef.current === token && !pressedRef.current;
-    }, [setActivePose]);
+    }, [characterId, setActivePose, sheetLoader]);
+
+    // 新事件在起身完成后接管；连续消息只保留最新动作，不重播起身。
+    const wakeUp = useCallback((after?: () => void): boolean => {
+      if (sleepPhaseRef.current === 'idle') return false;
+      if (after) afterWakeRef.current = after;
+      if (sleepPhaseRef.current === 'out') return true;
+      sleepPhaseRef.current = 'out';
+      if (wakeTimerRef.current) clearTimeout(wakeTimerRef.current);
+      wakeTimerRef.current = null;
+      clearPoseTimer();
+      const token = ++sequenceTokenRef.current;
+      void (async () => {
+        await playFrames(WAKE_SPEC, Array.from({ length: WAKE_SPEC.frames }, (_, i) => i),
+          WAKE_SPEC.durations, token, WAKE_SPEC.name);
+        if (sequenceTokenRef.current !== token) return;
+        sleepPhaseRef.current = 'idle';
+        const next = afterWakeRef.current;
+        afterWakeRef.current = undefined;
+        returnToTone(token);
+        next?.();
+      })();
+      return true;
+    }, [clearPoseTimer, playFrames, returnToTone]);
+
+    const startIdleRoutine = useCallback(() => {
+      if (sleepPhaseRef.current !== 'idle' || busyPhaseRef.current !== 'idle'
+        || pressedRef.current || positioningCoordinator.fleeInFlight) return;
+      clearPoseTimer();
+      const token = ++sequenceTokenRef.current;
+      const spec = characterId === 'vivian' ? SLEEP_SPEC : TEND_SPEC;
+      if (characterId === 'vivian') sleepPhaseRef.current = 'in';
+      void (async () => {
+        const completed = await playFrames(spec, Array.from({ length: spec.frames }, (_, i) => i),
+          spec.durations, token, spec.name);
+        if (!completed) return;
+        if (characterId === 'nana') {
+          const ended = await playFrames(TEND_OUT_SPEC,
+            Array.from({ length: TEND_OUT_SPEC.frames }, (_, i) => i),
+            TEND_OUT_SPEC.durations, token, TEND_OUT_SPEC.name);
+          if (ended) returnToTone(token);
+          return;
+        }
+        sleepPhaseRef.current = 'loop';
+        wakeTimerRef.current = setTimeout(() => wakeUp(), SLEEP_WAKE_AFTER_MS);
+        while (sequenceTokenRef.current === token && sleepPhaseRef.current === 'loop') {
+          if (!await playFrames(SLEEP_SPEC, [SLEEP_SPEC.frames - 2, SLEEP_SPEC.frames - 1],
+            [900, 900], token, SLEEP_SPEC.name)) break;
+        }
+      })();
+    }, [characterId, clearPoseTimer, playFrames, returnToTone, wakeUp]);
 
     /**
      * 进入忙碌：掏出手机，接上「看手机」循环，此后一直停在循环里。
@@ -431,6 +506,7 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
      * 这里只负责把姿态切过去。
      */
     const startBusy = useCallback(() => {
+      if (wakeUp(() => startBusy())) return;
       const phase = busyPhaseRef.current;
       // 已经在忙碌里（进场中或循环中）就不重播：presence 可能把同一个状态重复下发。
       if (phase === 'in' || phase === 'loop') return;
@@ -456,7 +532,7 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
         busyPhaseRef.current = 'loop';
         setActivePose(BUSY_LOOP_SPEC.name);
       })();
-    }, [clearPoseTimer, playFrames, setActivePose]);
+    }, [clearPoseTimer, playFrames, setActivePose, wakeUp]);
 
     /** 退出忙碌：倒放「掏出手机」把手收回去，播完回落到基准姿态。 */
     const stopBusy = useCallback(() => {
@@ -492,6 +568,15 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
      * 播完即回落，不受外部时长影响（调用方传 3000ms 只是想表达"持续一会儿"）。
      */
     const applyMotion = useCallback((raw: string, durationMs?: number) => {
+      const name = raw.trim().toLowerCase();
+      if (name === 'sleep' || (name === 'tend' && characterId === 'nana')) {
+        startIdleRoutine();
+        return;
+      }
+      if (wakeUp(() => applyMotion(raw, durationMs))) return;
+      // 角色专属动作不请求另一角色不存在的图集。
+      if ((characterId === 'nana' && name === 'wake')
+        || (characterId === 'vivian' && (name === 'tend' || name === 'tend-out'))) return;
       clearPoseTimer();
       const token = ++sequenceTokenRef.current;
       if (raw.trim().toLowerCase() === 'busy') {
@@ -526,20 +611,22 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
         // hold 动作（如睡觉）播完停在末帧，不回基调。
         if (completed && !spec.hold) returnToTone(token);
       })();
-    }, [clearPoseTimer, playFrames, returnToTone, setActivePose, startBusy, stopBusy]);
+    }, [characterId, clearPoseTimer, playFrames, returnToTone, setActivePose, startBusy, stopBusy, startIdleRoutine, wakeUp]);
 
     /** 原地演示转身（不移动窗口）。 */
     const previewTurn = useCallback((direction: ChibiDirection) => {
+      if (wakeUp(() => previewTurn(direction))) return;
       clearPoseTimer();
       const token = ++sequenceTokenRef.current;
       void playFrames(TURN_SPEC, TURN_IN_FRAMES, TURN_SPEC.durations, token, TURN_SPEC.name, direction)
         .then((completed) => {
           if (completed) returnToTone(token);
         });
-    }, [clearPoseTimer, playFrames, returnToTone]);
+    }, [clearPoseTimer, playFrames, returnToTone, wakeUp]);
 
     /** 原地演示走一圈：转身入场 → 走动 → 转身离场。 */
     const previewWalk = useCallback((direction: ChibiDirection) => {
+      if (wakeUp(() => previewWalk(direction))) return;
       clearPoseTimer();
       const token = ++sequenceTokenRef.current;
       walkFrameDelayMsRef.current = null;
@@ -566,18 +653,20 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
         );
         if (returned) returnToTone(token);
       })();
-    }, [clearPoseTimer, playFrames, returnToTone, setActivePose]);
+    }, [clearPoseTimer, playFrames, returnToTone, setActivePose, wakeUp]);
 
     const previewBlink = useCallback(() => {
+      if (wakeUp(() => previewBlink())) return;
       clearPoseTimer();
       const token = ++sequenceTokenRef.current;
       void playFrames(BLINK_SPEC, BLINK_FRAMES, BLINK_SPEC.durations, token, BLINK_SPEC.name)
         .then((completed) => {
           if (completed) returnToTone(token);
         });
-    }, [clearPoseTimer, playFrames, returnToTone]);
+    }, [clearPoseTimer, playFrames, returnToTone, wakeUp]);
 
     const playTurn = useCallback(async (direction: ChibiDirection): Promise<boolean> => {
+      if (wakeUp()) return false;
       clearPoseTimer();
       const token = ++sequenceTokenRef.current;
       // 不 returnToTone：停在转身末帧（侧身），由调用方接走动或回正。
@@ -589,10 +678,11 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
         TURN_SPEC.name,
         direction,
       );
-    }, [clearPoseTimer, playFrames]);
+    }, [clearPoseTimer, playFrames, wakeUp]);
 
     /** 智能避让收尾回身：末帧起步倒放回正面，播完回落到 idle。 */
     const playTurnBack = useCallback(async (): Promise<boolean> => {
+      if (wakeUp()) return false;
       clearPoseTimer();
       const token = ++sequenceTokenRef.current;
       // 不传 direction：沿用走动时的朝向，图集方向与转身前保持一致
@@ -605,7 +695,7 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
       );
       if (completed) returnToTone(token);
       return completed;
-    }, [clearPoseTimer, playFrames, returnToTone]);
+    }, [clearPoseTimer, playFrames, returnToTone, wakeUp]);
 
     /**
      * 起步走动：写好推进参数并切到走动姿态，返回本次走动的会话代号与「播完」的承诺。
@@ -621,6 +711,7 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
       frames: number,
       frameDelayMs: number,
     ): { token: number; done: Promise<boolean> } => {
+      if (wakeUp()) return { token: sequenceTokenRef.current, done: Promise.resolve(false) };
       clearPoseTimer();
       const token = ++sequenceTokenRef.current;
       walkTargetFramesRef.current = frames > 0 ? frames : null;
@@ -632,7 +723,7 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
       const done = wait(Math.max(0, frames) * Math.max(0, frameDelayMs))
         .then(() => sequenceTokenRef.current === token && !pressedRef.current);
       return { token, done };
-    }, [clearPoseTimer, setActivePose]);
+    }, [clearPoseTimer, setActivePose, wakeUp]);
 
     const playWalk = useCallback(async (
       direction: ChibiDirection,
@@ -654,6 +745,7 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
     }, [returnToTone]);
 
     const startCast = useCallback((durationMs: number) => {
+      if (wakeUp(() => startCast(durationMs))) return;
       stopCast();
       clearPoseTimer();
       const token = ++sequenceTokenRef.current;
@@ -674,7 +766,7 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
         castSessionRef.current = null;
         returnToTone();
       })();
-    }, [clearPoseTimer, returnToTone, setActivePose, stopCast]);
+    }, [clearPoseTimer, returnToTone, setActivePose, stopCast, wakeUp]);
 
     const cancelCast = useCallback(() => {
       const session = castSessionRef.current;
@@ -725,6 +817,7 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
         scaleRef.current = 1;
       },
       resetExpression: () => {
+        if (wakeUp(() => {})) return;
         // 打断当前动作并回落到 idle。基准姿态就是 idle（曾经还有一层"心情基调"
         // 能把它换成别的格位，那条通道已随持续基调一起撤掉），所以直接回落即可。
         clearPoseTimer();
@@ -742,44 +835,31 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
       startCast,
       cancelCast,
       stopCast,
-    }), [applyMotion, cancelCast, clearPoseTimer, onScaleChange, previewBlink, previewTurn, previewWalk, returnToTone, startBusy, startCast, stopBusy, stopCast, playTurn, playTurnBack, playWalk]);
+    }), [applyMotion, cancelCast, clearPoseTimer, onScaleChange, previewBlink, previewTurn, previewWalk, returnToTone, startBusy, startCast, stopBusy, stopCast, playTurn, playTurnBack, playWalk, wakeUp]);
 
-    // 动作图集在首次真正播放前预取：切换到走动/表情时不必等图集下载。
-    //
-    // 预取同时兼作「可用性探测」：帧序列的图集是一张张独立文件，任何一张缺失或损坏
-    // 都会让精灵的背景图解析失败——背景图没了精灵就是透明的，整只桌宠在动作播放期间
-    // 直接消失（只有影子还在），而且浏览器对背景图失败不报错。这里把结果记下来，
-    // 渲染时据此回落主图集，让缺图退化成「停在基准姿态」而不是「桌宠不见了」。
-    const [failedSheets, setFailedSheets] = useState<ReadonlySet<string>>(
-      () => new Set<string>(),
-    );
-    /** 持有预取中的 Image：局部变量出作用域被回收后，浏览器可能取消这次请求。 */
-    const sheetImagesRef = useRef<Map<string, HTMLImageElement>>(new Map());
+    // 仅加载当前动作；等待或缺图时维持主图集，避免空白精灵。
+    useEffect(() => {
+      const spec = resolveMotion(poseName);
+      if (spec.kind !== 'animation') return;
+      const source = sheetUrl(spec, characterId, walkDirection);
+      let cancelled = false;
+      void sheetLoader.load(source).then((ready) => {
+        if (cancelled) return;
+        setSheetVersion((version) => version + 1);
+        if (!ready) console.warn(`[ChibiPetCanvas] 动作图集加载失败，已回落主图集: ${source}`);
+      });
+      return () => { cancelled = true; };
+    }, [characterId, poseName, walkDirection, sheetLoader]);
 
     useEffect(() => {
-      const cache = new Map<string, HTMLImageElement>();
-      sheetImagesRef.current = cache;
-      let cancelled = false;
-      for (const source of prefetchUrls(characterId)) {
-        const image = new Image();
-        image.onerror = () => {
-          if (cancelled) return;
-          console.warn(`[ChibiPetCanvas] 动作图集加载失败，已回落主图集: ${source}`);
-          setFailedSheets((previous) => {
-            if (previous.has(source)) return previous;
-            const next = new Set(previous);
-            next.add(source);
-            return next;
-          });
-        };
-        image.src = source;
-        cache.set(source, image);
-      }
       return () => {
-        cancelled = true;
-        sheetImagesRef.current = new Map();
+        sequenceTokenRef.current += 1;
+        if (wakeTimerRef.current) clearTimeout(wakeTimerRef.current);
+        sleepPhaseRef.current = 'idle';
+        afterWakeRef.current = undefined;
+        sheetLoader.clear();
       };
-    }, [characterId]);
+    }, [characterId, sheetLoader]);
 
     // 循环型帧序列（当前只有走动）自推进；一次性动作由 applyMotion 自行播完。
     useEffect(() => {
@@ -1208,14 +1288,26 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
      * 从第 0 帧重播生气脸——脸于是永远停在第 0 帧，看起来就是「等用户停手才开始播」。
      */
     const handleClick = () => {
+      wakeUp();
       // 窗口发生过实际拖动时，mouseup 后浏览器仍可能补发 click；该 click 不应触发台词。
       if (Date.now() < suppressClickUntilRef.current) return;
-      const { annoyed, onset } = tapLedgerRef.current.note(Date.now());
+      const now = Date.now();
+      const previous = recentTapTimesRef.current[recentTapTimesRef.current.length - 1];
+      const recent = recentTapTimesRef.current.filter(at => now - at < 5000);
+      recent.push(now);
+      recentTapTimesRef.current = recent;
+      const metrics: PetInteractionMetrics = {
+        clickCount: recent.length, windowMs: 5000,
+        intervalMs: previous === undefined ? undefined : now - previous,
+        pressDurationMs: lastPressDurationRef.current,
+      };
+      lastPressDurationRef.current = undefined;
+      const { annoyed, onset } = tapLedgerRef.current.note(now);
       const doubleClick = takePendingClick();
 
       // 逃跑途中不改动作：改动作会打断正在跑的位移，把桌宠扔在半路。语气照旧。
       if (fleeingRef.current) {
-        onInteraction?.('rough_click');
+        onInteraction?.('rough_click', metrics);
         if (doubleClick) onOpenQuickChat?.();
         return;
       }
@@ -1223,7 +1315,7 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
       // 气头刚点着：立刻给脸、立刻跑。双击语义照旧保留（这一下可能正是某一对里的第二下）
       if (onset) {
         applyMotion('angry');
-        onInteraction?.('rough_click');
+        onInteraction?.('rough_click', metrics);
         if (doubleClick) onOpenQuickChat?.();
         void fleeFromTaps();
         return;
@@ -1235,7 +1327,7 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
         if (!(annoyed && poseNameRef.current === 'angry')) {
           applyMotion(annoyed ? 'angry' : 'talk', annoyed ? undefined : 700);
         }
-        onInteraction?.(annoyed ? 'rough_click' : 'double_click');
+        onInteraction?.(annoyed ? 'rough_click' : 'double_click', metrics);
         onOpenQuickChat?.();
         return;
       }
@@ -1247,7 +1339,7 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
         // 生气脸正播着同样不重播（理由同上，这条同时兜住键盘回车/空格那条路径）。
         const alreadyAngry = annoyed && poseNameRef.current === 'angry';
         if (reaction && !alreadyAngry) applyMotion(reaction);
-        onInteraction?.(annoyed ? 'rough_click' : 'single_click');
+        onInteraction?.(annoyed ? 'rough_click' : 'single_click', metrics);
       }, 230);
     };
 
@@ -1272,7 +1364,7 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
         ? sheetUrl(activeSpec, characterId, walkDirection)
         : null;
     const spriteFrameStyle =
-      activeSheet !== null && failedSheets.has(activeSheet)
+      activeSheet !== null && !sheetLoader.isReady(activeSheet)
         ? frameStyle(IDLE_SPEC, IDLE_SLOT, characterId, walkDirection)
         : frameStyle(activeSpec, frame, characterId, walkDirection);
 
@@ -1297,6 +1389,10 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
               // 与这一按落在格位上还是帧序列上无关（见 pressAliveRef 的说明）。
               pressAliveRef.current = true;
               pressStartedAtRef.current = Date.now();
+              if (wakeUp()) {
+                onModelClick?.();
+                return;
+              }
               const spec = getMotion(poseNameRef.current);
               // 忙碌阶段（掏出手机 / 看手机）虽然也是帧序列，但它表达的是常驻**状态**而不是
               // 一次性的表演：按住它不该把表演掐掉，可这一按仍要算一次正常点击——忙碌中的
@@ -1325,11 +1421,13 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
               onModelClick?.();
             }}
             onMouseUp={() => {
+              lastPressDurationRef.current = pressAliveRef.current ? Date.now() - pressStartedAtRef.current : undefined;
               pressAliveRef.current = false;
               pressedRef.current = false;
               setPressed(false);
             }}
             onMouseLeave={() => {
+              lastPressDurationRef.current = undefined;
               pressAliveRef.current = false;
               pressedRef.current = false;
               setPressed(false);

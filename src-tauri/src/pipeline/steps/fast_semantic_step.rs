@@ -61,7 +61,12 @@ impl Runnable for FastSemanticStep {
             );
             return Ok(state.to_json());
         }
-        match self.analyzer.analyze(&analyze_text) {
+        // Embedding providers expose a synchronous API (including remote HTTP).
+        // Move it off the async worker so join! can actually poll its other branches.
+        let analyzer = self.analyzer.clone();
+        let analysis = tokio::task::spawn_blocking(move || analyzer.analyze(&analyze_text)).await;
+        let analysis = analysis.unwrap_or_else(|error| Err(format!("语义分类任务失败: {error}")));
+        match analysis {
             Ok(mut perception) => {
                 // 复用同一份嵌入分类结果（表情判定用的就是 emotion 维度），
                 // 挑选当前情境最合适的"建议句式"并追加到 guidance，
@@ -141,3 +146,7 @@ impl Runnable for ParallelStep {
         Ok(state_a.to_json())
     }
 }
+
+#[cfg(test)]
+#[path = "routing_tests.rs"]
+mod routing_tests;

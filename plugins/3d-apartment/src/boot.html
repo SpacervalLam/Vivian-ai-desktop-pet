@@ -1,0 +1,58 @@
+<style>html,body,#root{margin:0;width:100%;height:100%;overflow:hidden}      /* ---------------- 公寓窗口首屏 loading 层 ----------------
+       *
+       * 只对 ?view=room 生效，盖住的是「主 chunk 求值 → 动态 import 房间 chunk
+       * （three.js 约 1MB）→ 场景同步装配 → 首帧」这整段：这期间 canvas 一个
+       * 像素都还没有，不盖就是一块空背景。
+       *
+       * 两个关键点：
+       *  - 默认就渲染，靠 `html.is-room` 关掉。不要反过来写成 `display:none`
+       *    再由 JS 打开——那样又要等脚本，等于把要盖住的时间又还回去一截。
+       *  - 动画只用 transform/opacity，并显式 will-change 提升为合成层。场景装配
+       *    是一整段同步阻塞主线程的代码，JS 驱动的动画在那期间会冻住；合成线程上的
+       *    CSS 动画不受影响。「转着的圈」和「卡死的圈」是完全不同的观感，后者会让
+       *    人以为程序挂了。
+       */
+      #boot-loader {
+        display: flex;
+        position: fixed;
+        inset: 0;
+        z-index: 2147483000;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 20px;
+        background: #1e1e28;
+        opacity: 1;
+        transition: opacity 360ms ease;
+      }
+      html.is-room #boot-loader { display: flex; }
+      #boot-loader.bl-out { opacity: 0; }
+      #boot-loader .bl-ring {
+        width: 42px;
+        height: 42px;
+        border: 3px solid rgba(201, 169, 97, 0.16);
+        border-top-color: #c9a961;
+        border-radius: 50%;
+        will-change: transform;
+        animation: bl-spin 900ms linear infinite;
+      }
+      #boot-loader .bl-text {
+        font: 400 13px/1.6 -apple-system, "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+        color: rgba(255, 255, 255, 0.5);
+        letter-spacing: 0.12em;
+      }
+      @keyframes bl-spin {
+        to { transform: rotate(360deg); }
+      }
+      /* 尊重系统「减少动态效果」：转圈换成静态环 + 文字呼吸 */
+      @media (prefers-reduced-motion: reduce) {
+        #boot-loader .bl-ring { animation: none; border-top-color: rgba(201, 169, 97, 0.16); }
+        #boot-loader .bl-text { animation: bl-pulse 1.6s ease-in-out infinite; }
+      }
+      @keyframes bl-pulse { 50% { opacity: 0.35; } }
+</style>    <div id="boot-loader" role="status" aria-live="polite" aria-label="loading">
+      <div class="bl-ring"></div>
+      <!-- 文案刻意不做 i18n：这一层在任何 JS 之前就要画出来，i18n 还没初始化，
+           三语统一用 "loading…"。 -->
+      <div class="bl-text">loading…</div>
+    </div>

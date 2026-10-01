@@ -60,15 +60,13 @@ vivian_data/
 # ===== 构建期脚本（本地工具，不入库） =====
 # 注意：encrypt-assets / doctor / check-* 等构建与哨兵脚本都在这里，
 # ignore 后新 clone 无法直接构建，需自行补齐 scripts/
-scripts/
+/scripts/*
+!/scripts/package-small.mjs
+!/scripts/package-apartment.mjs
 
 # ===== 免 Tauri 预览页（本地开发工具，不入库） =====
 # 免 Tauri 跑设置面板 / Toast / 房间用的 mock 入口，只服务本地调试，不参与应用运行、不进 dist。
-# room-preview.html 与 src/roomPreview.tsx 曾因「首个 commit 就在库里」而豁免于本规则，
-# 已于 2026-09-18 一并删除。注意它们曾被 scripts/room/export-base.mjs 与 verify-room.mjs
-# 用 Playwright 访问 http://127.0.0.1:1420/room-preview.html —— 要再跑房间美术构建链，
-# 需先 `git checkout b80c635 -- room-preview.html src/roomPreview.tsx` 恢复
-# （b80c635 = 删除前最后一个含这两个文件的提交）。
+# 公寓预览与美术工具已移到 plugins/3d-apartment，插件预览入口随源码保留。
 # 另：src/components/SkeletalRigPreview.tsx 名字带 Preview，但被 main.tsx 动态 import，
 # 是应用运行时组件，不在此列，别误删。
 *-preview.html
@@ -94,7 +92,7 @@ tmp/
 .npm-cache-tmp/
 
 # ===== Blender 美术工程（开发链路，不入库 / 不进包） =====
-# 应用运行只需要 public/room/models/vivian-furniture.glb（进 dist → 进安装包）。
+# 公寓运行模型位于 plugins/3d-apartment/room，只进入独立组件 ZIP。
 # /blender/ 下的 .blend 源工程、中间 glb、导出贴图、验证截图全部属于开发过程文件，
 # 构建链为：export-base.mjs → build_blender.py → export_blender.py → verify-room.mjs
 #
@@ -102,6 +100,9 @@ tmp/
 # 若要保留该源工程入库，把 /blender/ 那行注释掉，并保留下面一行反选：
 #   !/blender/room/vivian-furniture.blend
 /blender/
+/plugins/3d-apartment/art/
+/release/
+/src-tauri/windows/apartment-package.nsh
 *.blend1
 *.blend2
 

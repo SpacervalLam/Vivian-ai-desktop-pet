@@ -43,6 +43,8 @@ pub mod tool_call_manager;
 pub mod trust;
 pub mod trusted_origins;
 pub mod types;
+#[cfg(test)]
+mod web_evidence_tests;
 
 // 重新导出 Hook 系统
 pub use crate::hooks::{HookDecision, HookEventName, HookRegistry};

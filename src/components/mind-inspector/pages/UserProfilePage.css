@@ -82,6 +82,8 @@
 .profile-root-embedded .profile-identity-row:hover { background: color-mix(in srgb, var(--codex-accent-soft, #e7eff3) 35%, transparent) !important; }
 .profile-root-embedded .profile-identity-row > span:first-child { min-width: 84px !important; color: var(--memory-muted, #857b70) !important; font-size: 11px !important; }
 .profile-root-embedded .profile-identity-row > span:nth-of-type(2) { overflow: visible !important; white-space: normal !important; text-overflow: clip !important; color: var(--memory-ink, #342e29) !important; font-size: 12px !important; line-height: 1.5; }
+.profile-root-embedded .profile-identity-row > .profile-field-empty { color: #96938e !important; }
+.profile-root-embedded input::placeholder { color: #96938e; opacity: 1; }
 
 .profile-root-embedded .profile-interest-row,
 .profile-root-embedded .profile-custom-fact {

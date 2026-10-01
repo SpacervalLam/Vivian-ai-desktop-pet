@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 /// `engines` 是请求级引擎指定（LLM 工具调用时自主选择）：`None` 用配置的
 /// 供应商链（全部已启用引擎并发）；`Some` 指定一个或多个引擎，与用户已
 /// 启用的 providers 取交集后执行。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct WebSearchRequest {
     /// 搜索关键词
     pub query: String,
@@ -29,6 +29,16 @@ pub struct WebSearchRequest {
     pub max_results: Option<usize>,
     /// 请求级引擎指定（如 ["deepseek"] 或 ["bing", "tavily"]）；`None` = 用配置链
     pub engines: Option<Vec<String>>,
+    pub include_domains: Vec<String>,
+    pub exclude_domains: Vec<String>,
+    pub recency_days: Option<u32>,
+    pub language: Option<String>,
+    pub country: Option<String>,
+    /// Total deadline across engines, retries and fallback.
+    pub timeout_secs: u64,
+    /// Fast uses one inexpensive engine; research uses the enabled pool.
+    pub research: bool,
+    pub refresh: bool,
 }
 
 impl WebSearchRequest {
@@ -37,6 +47,14 @@ impl WebSearchRequest {
             query: query.into(),
             max_results: None,
             engines: None,
+            include_domains: vec![],
+            exclude_domains: vec![],
+            recency_days: None,
+            language: None,
+            country: None,
+            timeout_secs: 20,
+            research: false,
+            refresh: false,
         }
     }
 
@@ -78,6 +96,14 @@ pub struct WebSearchSource {
     /// 信心标注（CONFIRMED / MAJORITY / DISPUTED / SINGLE-SOURCE / UNKNOWN）
     #[serde(default)]
     pub confidence: String,
+    #[serde(default)]
+    pub source_id: String,
+    #[serde(default)]
+    pub retrieved_at: String,
+    #[serde(default)]
+    pub engines: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_content: Option<String>,
 }
 
 impl WebSearchSource {
@@ -90,6 +116,10 @@ impl WebSearchSource {
             published_at: None,
             source_tier: String::new(),
             confidence: String::new(),
+            source_id: String::new(),
+            retrieved_at: String::new(),
+            engines: vec![],
+            raw_content: None,
         }
     }
 
@@ -108,7 +138,7 @@ impl WebSearchSource {
 }
 
 /// 一次搜索的归一化结果。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct WebSearchResult {
     /// provider 生成的答案文本（答案型引擎如 Perplexity 类返回；普通引擎为 `None`）
     pub content: Option<String>,
@@ -116,6 +146,12 @@ pub struct WebSearchResult {
     pub sources: Vec<WebSearchSource>,
     /// 缝隙为满足 `max_results` 裁掉了来源时置 `true`
     pub truncated: bool,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+    #[serde(default)]
+    pub engines_used: Vec<String>,
+    #[serde(default)]
+    pub cached: bool,
 }
 
 impl WebSearchResult {
@@ -124,6 +160,7 @@ impl WebSearchResult {
             content: None,
             sources: Vec::new(),
             truncated: false,
+            ..Default::default()
         }
     }
 
@@ -244,7 +281,10 @@ mod tests {
         assert!(req.engines.is_none());
 
         let req = WebSearchRequest::new("q").with_engines(vec!["deepseek".into()]);
-        assert_eq!(req.engines.as_deref(), Some(["deepseek".to_string()].as_slice()));
+        assert_eq!(
+            req.engines.as_deref(),
+            Some(["deepseek".to_string()].as_slice())
+        );
     }
 
     #[test]
@@ -264,10 +304,7 @@ mod tests {
     #[test]
     fn test_error_display() {
         let e = WebError::provider_error("searxng", "请求失败");
-        assert_eq!(
-            e.to_string(),
-            "[WEB_PROVIDER_ERROR] searxng: 请求失败"
-        );
+        assert_eq!(e.to_string(), "[WEB_PROVIDER_ERROR] searxng: 请求失败");
         assert_eq!(e.code.as_str(), "WEB_PROVIDER_ERROR");
     }
 
@@ -278,6 +315,7 @@ mod tests {
             content: Some("answer".into()),
             sources: vec![],
             truncated: false,
+            ..Default::default()
         };
         assert!(r.has_content());
     }

@@ -665,6 +665,12 @@ impl PipelineState {
         if other.fast_perception.is_some() {
             self.fast_perception = other.fast_perception;
         }
+        if other.epistemic_assessment.is_some() {
+            self.epistemic_assessment = other.epistemic_assessment;
+        }
+        if other.schedule_assessment.is_some() {
+            self.schedule_assessment = other.schedule_assessment;
+        }
         if !other.messages.is_empty() {
             self.messages = other.messages;
         }

@@ -76,11 +76,24 @@ pub fn decode_html_entities(s: &str) -> String {
 /// - http/https 视为等价（去 scheme）
 pub fn normalize_url(url: &str) -> String {
     let url = url.trim();
-    if url.is_empty() {
-        return String::new();
+    let Ok(mut parsed) = reqwest::Url::parse(url) else {
+        return url.to_string();
+    };
+    parsed.set_fragment(None);
+    let pairs: Vec<(String, String)> = parsed
+        .query_pairs()
+        .filter(|(k, _)| {
+            !k.to_ascii_lowercase().starts_with("utm_")
+                && !matches!(k.as_ref(), "gclid" | "fbclid" | "mc_cid" | "mc_eid")
+        })
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect();
+    parsed.set_query(None);
+    if !pairs.is_empty() {
+        parsed.query_pairs_mut().extend_pairs(pairs);
     }
-
-    let lower = url.to_lowercase();
+    // URL paths and query values are case-sensitive. Only the parsed host is normalized.
+    let lower = parsed.as_str().to_string();
 
     // 去 fragment
     let without_fragment = lower.split('#').next().unwrap_or("");
@@ -144,14 +157,10 @@ pub fn normalize_url(url: &str) -> String {
 /// - P3：一般参考（百科、自媒体、未核验内容）
 pub fn classify_source_tier(url: &str) -> String {
     let normalized_url = url.trim().to_lowercase();
-    let host = url
-        .trim()
-        .trim_start_matches("http://")
-        .trim_start_matches("https://")
-        .split('/')
-        .next()
-        .unwrap_or("")
-        .to_lowercase();
+    let host = reqwest::Url::parse(url.trim())
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_ascii_lowercase))
+        .unwrap_or_default();
     let host = host.trim_start_matches("www.").trim_start_matches("m.");
 
     // P0：政府 / 官方 / 学术 / 原始数据
@@ -166,11 +175,12 @@ pub fn classify_source_tier(url: &str) -> String {
         || host.eq_ignore_ascii_case("doi.org")
         || host.eq_ignore_ascii_case("semanticscholar.org")
         || host.eq_ignore_ascii_case("pubmed.ncbi.nlm.nih.gov")
-        || host.eq_ignore_ascii_case("github.com")
         || host.eq_ignore_ascii_case("docs.rs")
         || host.eq_ignore_ascii_case("developer.mozilla.org")
-        || host.ends_with(".wikipedia.org")
-        || host.contains("official")
+        || host.eq_ignore_ascii_case("developers.openai.com")
+        || host.eq_ignore_ascii_case("platform.openai.com")
+        || host.eq_ignore_ascii_case("learn.microsoft.com")
+        || host.eq_ignore_ascii_case("ai.google.dev")
     {
         return "P0".to_string();
     }
@@ -188,14 +198,13 @@ pub fn classify_source_tier(url: &str) -> String {
         || host.eq_ignore_ascii_case("forbes.com")
         || host.eq_ignore_ascii_case("gartner.com")
         || host.eq_ignore_ascii_case("idc.com")
-        || host.contains("report")
-        || host.contains("research")
     {
         return "P1".to_string();
     }
 
     // P2：专业技术社区 / 问答 / 论坛
     if host.eq_ignore_ascii_case("stackoverflow.com")
+        || host.eq_ignore_ascii_case("github.com")
         || host.eq_ignore_ascii_case("stackexchange.com")
         || host.eq_ignore_ascii_case("zhihu.com")
         || host.eq_ignore_ascii_case("medium.com")
@@ -204,12 +213,10 @@ pub fn classify_source_tier(url: &str) -> String {
         || host.eq_ignore_ascii_case("juejin.cn")
         || host.eq_ignore_ascii_case("segmentfault.com")
         || host.eq_ignore_ascii_case("opensource.org")
-        || host.contains("blog")
         || normalized_url
             .split(['?', '#'])
             .next()
             .is_some_and(|value| value.contains("/blog"))
-        || host.contains("docs")
     {
         return "P2".to_string();
     }
@@ -221,23 +228,43 @@ pub fn classify_source_tier(url: &str) -> String {
 /// 依据来源分级派生信心标注（对应 research-guide 的 CONFIRMED 等）
 ///
 /// 单条结果仅代表该来源自身的可信度，最终结论级信心由 LLM 依据多来源综合。
-fn confidence_from_tier(tier: &str) -> String {
-    match tier {
-        "P0" => "CONFIRMED".to_string(),
-        "P1" => "MAJORITY".to_string(),
-        "P2" => "DISPUTED".to_string(),
-        _ => "SINGLE-SOURCE".to_string(),
-    }
+fn confidence_from_tier(_tier: &str) -> String {
+    "UNVERIFIED".to_string()
 }
 
 /// 为一条搜索来源补齐来源分级与信心标注（provider 解析后统一调用）
 pub fn annotate_source(mut s: WebSearchSource) -> WebSearchSource {
+    s.source_id = source_id(&s.url);
+    s.retrieved_at = chrono::Utc::now().to_rfc3339();
+    s.confidence = "UNVERIFIED".into();
     if s.source_tier.is_empty() {
         let tier = classify_source_tier(&s.url);
         s.confidence = confidence_from_tier(&tier);
         s.source_tier = tier;
     }
     s
+}
+
+/// Stable FNV-1a ID of a canonical URL; never claims that an excerpt verifies a claim.
+pub fn source_id(url: &str) -> String {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in normalize_url(url).bytes() {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("web_{hash:016x}")
+}
+
+pub fn domain_matches(url: &str, domains: &[String]) -> bool {
+    let Some(host) = reqwest::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_ascii_lowercase))
+    else {
+        return false;
+    };
+    domains
+        .iter()
+        .any(|domain| host == *domain || host.ends_with(&format!(".{domain}")))
 }
 
 /// 批量标注
@@ -256,12 +283,25 @@ mod tests {
     #[test]
     fn test_strip_html_tags() {
         assert_eq!(strip_html_tags("<b>Title</b>"), "Title");
-        assert_eq!(strip_html_tags("<a href='x'>Link &amp; Co</a>"), "Link & Co");
+        assert_eq!(
+            strip_html_tags("<a href='x'>Link &amp; Co</a>"),
+            "Link & Co"
+        );
         assert_eq!(strip_html_tags("no tags"), "no tags");
     }
 
     #[test]
     fn test_normalize_url() {
+        assert_ne!(
+            normalize_url("https://example.com/A?value=X"),
+            normalize_url("https://example.com/a?value=x")
+        );
+        assert_eq!(
+            source_id("https://example.com/A?utm_source=ads"),
+            source_id("https://example.com/A")
+        );
+        assert_eq!(classify_source_tier("https://official-fake.test/"), "P3");
+        assert_eq!(classify_source_tier("https://en.wikipedia.org/"), "P3");
         assert_eq!(normalize_url("https://Example.com/a/"), "example.com/a");
         assert_eq!(normalize_url("http://example.com/a"), "example.com/a");
         assert_eq!(
@@ -276,18 +316,21 @@ mod tests {
     fn test_classify_source_tier() {
         assert_eq!(classify_source_tier("https://www.gov.cn/news"), "P0");
         assert_eq!(classify_source_tier("https://arxiv.org/abs/1234"), "P0");
-        assert_eq!(classify_source_tier("https://github.com/user/repo"), "P0");
+        assert_eq!(classify_source_tier("https://github.com/user/repo"), "P2");
         assert_eq!(classify_source_tier("https://reuters.com/world"), "P1");
         assert_eq!(classify_source_tier("https://zhihu.com/question/1"), "P2");
         assert_eq!(classify_source_tier("https://csdn.net/article"), "P2");
         assert_eq!(classify_source_tier("https://example.com/blog"), "P2");
-        assert_eq!(classify_source_tier("https://some-unknown-site.com/x"), "P3");
+        assert_eq!(
+            classify_source_tier("https://some-unknown-site.com/x"),
+            "P3"
+        );
     }
 
     #[test]
     fn test_annotate_source() {
         let s = annotate_source(WebSearchSource::new("https://github.com/user/repo"));
-        assert_eq!(s.source_tier, "P0");
-        assert_eq!(s.confidence, "CONFIRMED");
+        assert_eq!(s.source_tier, "P2");
+        assert_eq!(s.confidence, "UNVERIFIED");
     }
 }

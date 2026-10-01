@@ -1513,7 +1513,7 @@ pub async fn send_image_message(
     character_id: Option<String>,
     channel: Option<String>,
     app: tauri::AppHandle,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let char_id = character_id
         .clone()
         .unwrap_or_else(|| state.active_character_id.read().clone());
@@ -1701,7 +1701,7 @@ pub async fn send_image_message(
     {
         let brain = match state.get_character(character_id.as_deref()) {
             Ok(inst) => inst.brain,
-            Err(_) => return Ok(()),
+            Err(_) => return Ok(reply),
         };
         let mut ai_msg = ChatMessage::assistant(&reply);
         ai_msg.meta = Some(crate::messages::MessageMeta::assistant().with_channel(&channel_str));
@@ -1763,7 +1763,7 @@ pub async fn send_image_message(
         }
     }
 
-    Ok(())
+    Ok(reply)
 }
 
 /// Open Loop 检测的调用包装：从 brain 取出 router 后转发到 conversation 模块
@@ -1796,8 +1796,43 @@ pub struct FileTextResult {
 /// 文件文本最大字符数（约 4000 tokens，避免 prompt 过长）
 const MAX_FILE_TEXT_CHARS: usize = 12000;
 
+#[derive(serde::Serialize)]
+pub struct SharedFile {
+    pub path: String,
+    pub filename: String,
+    pub size: u64,
+}
+
+/// Keep an independent copy so a shared attachment survives moving its source.
+#[tauri::command]
+pub async fn save_shared_file(source_path: String) -> Result<SharedFile, String> {
+    tokio::task::spawn_blocking(move || {
+        let source = std::path::Path::new(&source_path);
+        if !source.is_file() {
+            return Err("请选择文件，不能分享文件夹".to_string());
+        }
+        let filename = source.file_name().ok_or("文件名无效")?;
+        let dir = crate::utils::path::get_user_data_dir()
+            .join("attachments").join(uuid::Uuid::new_v4().to_string());
+        std::fs::create_dir_all(&dir).map_err(|e| format!("保存文件失败：{e}"))?;
+        let target = dir.join(filename);
+        let size = match std::fs::copy(source, &target) {
+            Ok(size) => size,
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&dir);
+                return Err(format!("保存文件失败：{e}"));
+            }
+        };
+        Ok(SharedFile {
+            path: target.to_string_lossy().into_owned(),
+            filename: filename.to_string_lossy().into_owned(),
+            size,
+        })
+    }).await.map_err(|e| format!("保存文件任务失败：{e}"))?
+}
+
 /// 判断文件扩展名属于哪种类型
-fn classify_file_extension(ext: &str) -> &'static str {
+pub(crate) fn classify_file_extension(ext: &str) -> &'static str {
     let ext_lower = ext.to_lowercase();
     // 图片
     const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "bmp"];
@@ -1942,8 +1977,8 @@ pub async fn extract_file_text(source_path: String) -> Result<FileTextResult, St
         .unwrap_or("unknown")
         .to_string();
 
-    if !path.exists() {
-        return Err("文件不存在".to_string());
+    if !path.is_file() {
+        return Err("文件不存在或不是普通文件".to_string());
     }
 
     let ext = path

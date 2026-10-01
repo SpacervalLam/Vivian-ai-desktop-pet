@@ -38,3 +38,5 @@ pub mod tools;
 pub mod tts;
 pub mod user_facts;
 pub mod window;
+
+pub mod apartment_host;

@@ -44,17 +44,49 @@ export default function SideChatPanel() {
   const [overflowed, setOverflowed] = useState(false);
   const idCounterRef = useRef(0);
   const activeCharRef = useRef<string | null>(null);
-  const lockedRef = useRef(false);
+  const inputRegionRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   // 跟踪用户是否处于底部附近（用于新消息到达时判断是否自动跟随）
   // column-reverse 容器中 scrollTop=0 即最底部，向上翻阅历史时值增大
   const atBottomRef = useRef(true);
 
-  // 输入框打开期间告知 Rust 禁止自动隐藏，避免打字途中窗口被收回
+  // 输入态与输入区域同步给 Rust；区域外继续使用原生鼠标穿透。
   useEffect(() => {
     void invoke('set_side_chat_input_open', { open: inputVisible, label: 'side_chat' }).catch(() => {});
   }, [inputVisible]);
+
+  useEffect(() => {
+    const region = inputRegionRef.current;
+    const update = () => {
+      const rect = region?.getBoundingClientRect();
+      void invoke<boolean>('set_side_chat_input_region', {
+        rect: rect ? [rect.left, rect.top, rect.right, rect.bottom] : null,
+      }).then(setLocked).catch(() => {});
+    };
+    update();
+    if (!region) return;
+    const observer = new ResizeObserver(update);
+    observer.observe(region);
+    if (contentRef.current) observer.observe(contentRef.current);
+    scrollRef.current?.addEventListener('scroll', update);
+    window.addEventListener('resize', update);
+    return () => {
+      observer.disconnect();
+      scrollRef.current?.removeEventListener('scroll', update);
+      window.removeEventListener('resize', update);
+      void invoke<boolean>('set_side_chat_input_region', { rect: null }).catch(() => {});
+    };
+  }, [inputVisible, overflowed]);
+
+  // 原生线程处理悬浮快捷键；阻止输入焦点下 Tab 的默认导航和 Esc 的旧关闭语义。
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Tab' || event.key === 'Escape') event.preventDefault();
+    };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, []);
 
   // 检测消息内容是否超出列表高度：未超出时整组内容垂直居中，超出时锚定底部
   useEffect(() => {
@@ -223,19 +255,20 @@ export default function SideChatPanel() {
       if (cancelled) { un3(); return; }
       unlistens.push(un3);
 
-      // 锁定状态同步（Rust 边缘线程呼出时复位 / 双击或快捷键设置）
-      const un4 = await listen<{ locked: boolean }>(
+      // 锁定状态同步（Rust 边缘线程呼出时复位 / Tab 或快捷键设置）
+      const un4 = await listen<{ locked: boolean; label?: string }>(
         'sidechat:lock_changed',
         (e) => {
-          lockedRef.current = !!e.payload?.locked;
-          setLocked(lockedRef.current);
+          if (e.payload?.label !== 'side_chat') return;
+          setLocked(!!e.payload?.locked);
         }
       );
       if (cancelled) { un4(); return; }
       unlistens.push(un4);
 
       // 边缘呼出时清理上次残留的输入态（Rust 线程在 show 后广播）
-      const un5 = await listen('sidechat:input_reset', () => {
+      const un5 = await listen<{ label?: string }>('sidechat:input_reset', (e) => {
+        if (e.payload?.label !== 'side_chat') return;
         setInputVisible(false);
         setAutoStartVoice(false);
       });
@@ -279,35 +312,9 @@ export default function SideChatPanel() {
     setAutoStartVoice(false);
   }, []);
 
-  // side_chat 在未输入时会启用原生鼠标穿透，方便继续操作桌面；因此不能只依赖
-  // React 的双击手势作为收起方式。输入态保留一个明确的关闭按钮，直接调用后端
-  // 收起窗口并同步复位锁定/输入状态。
-  const handleCollapse = useCallback(() => {
-    void invoke('collapse_side_chat', { label: 'side_chat' }).catch(() => {});
-    setInputVisible(false);
-    setAutoStartVoice(false);
-  }, []);
-
-  // ESC 关闭输入框时：若窗口处于锁定状态，同时解锁（光标离开即可自动隐藏）
-  const handleEscape = useCallback(() => {
-    if (lockedRef.current) {
-      void invoke('set_side_chat_locked', { locked: false, label: 'side_chat' }).catch(() => {});
-    }
-  }, []);
-
-  // 双击 header 切换锁定：锁定后窗口常驻，解锁后光标离开自动收回。
-  // 输入框打开时（交互模式，非穿透）禁用此处双击：背景双击仅用于关闭输入框
-  // （由 InputDialog 的 document mousedown 处理），避免同一手势同时切换锁定。
-  // 穿透模式下的双击锁定由全局鼠标钩子（WH_MOUSE_LL）独占处理。
-  const toggleLock = useCallback(() => {
-    if (inputVisible) return;
-    void invoke('set_side_chat_locked', { locked: !lockedRef.current, label: 'side_chat' }).catch(() => {});
-  }, [inputVisible]);
-
   return (
     <div
-      onDoubleClick={toggleLock}
-      title={locked ? '双击解锁（光标离开自动收回）' : '双击锁定（常驻）'}
+      title={locked ? '已锁定 · 悬浮按 Tab 解锁 · Esc 收起' : '已解锁 · 悬浮按 Tab 锁定 · Esc 收起'}
       style={{
         width: '100%',
         height: '100vh',
@@ -317,26 +324,13 @@ export default function SideChatPanel() {
         padding: '12px 10px 12px 22px',
         boxSizing: 'border-box',
         position: 'relative',
+        pointerEvents: 'none',
       }}
     >
       <style>{`@keyframes sidechat-enter { 0% { opacity: 0; transform: translateY(10px) scale(0.95); } 60% { opacity: 1; transform: translateY(0) scale(1.025); } 100% { opacity: 1; transform: translateY(0) scale(1); } } .sidechat-scroll::-webkit-scrollbar { display: none; }`}</style>
-      {inputVisible && (
-        <button
-          type="button"
-          aria-label="收起侧边栏"
-          title="收起侧边栏"
-          onMouseDown={(e) => e.stopPropagation()}
-          onClick={handleCollapse}
-          style={{
-            position: 'absolute', top: 8, right: 8, zIndex: 2, width: 26, height: 26,
-            border: '1px solid rgba(255, 255, 255, 0.2)', borderRadius: '50%',
-            background: 'rgba(30, 30, 40, 0.72)', color: 'rgba(255, 255, 255, 0.82)',
-            fontSize: 18, lineHeight: 1, cursor: 'pointer',
-          }}
-        >
-          ×
-        </button>
-      )}
+      <span aria-live="polite" style={{ position: 'absolute', top: 8, right: 10, fontSize: 10, color: 'rgba(255,255,255,0.5)' }}>
+        {locked ? '已锁定' : '已解锁'} · Tab 切换 · Esc 收起
+      </span>
 
       <div
         ref={scrollRef}
@@ -368,14 +362,13 @@ export default function SideChatPanel() {
           style={{ display: 'flex', flexDirection: 'column-reverse', gap: 10 }}
         >
           {inputVisible && (
-            <div style={{ marginBottom: 6 }}>
+            <div ref={inputRegionRef} style={{ marginBottom: 6, pointerEvents: 'auto' }}>
               <InputDialog
                 sideChat
                 broadcast={broadcast}
                 characterId={activeChar ?? undefined}
                 onSend={handleSend}
                 onClose={handleCloseInput}
-                onEscape={handleEscape}
                 visible={inputVisible}
                 autoStartVoice={autoStartVoice}
               />

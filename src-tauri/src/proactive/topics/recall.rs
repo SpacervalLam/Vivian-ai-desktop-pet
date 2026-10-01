@@ -79,14 +79,7 @@ impl MemoryRecall {
         let lang_norm = crate::pipeline::prompt_modules::normalize_lang(lang);
         let elapsed_str = crate::proactive::format_elapsed_lang(idle_seconds, lang_norm);
         let sys = if system_prompt.trim().is_empty() {
-            match (lang_norm, char_id) {
-                ("en", "nana" | "Nana") => "You are Nana, a desktop pet AI. Personality: gentle, composed, warm, like a caring older sister. Keep replies short and natural. No customer-service speech. Never address the user as 'User'.".to_string(),
-                ("en", _) => "You are Vivian, a desktop pet AI. Personality: lively, tsundere, warm. Keep replies short and natural. No customer-service speech. Never address the user as 'User'.".to_string(),
-                ("ja", "nana" | "Nana") => "あなたはNana、デスクトップペットAI。性格：優しく落ち着いている、温かい、お姉さんみたい。返信は短く自然に。接客言葉禁止。ユーザーを「ユーザー」と呼ばないこと。".to_string(),
-                ("ja", _) => "あなたはVivian、デスクトップペットAI。性格：活発、ツンデレ、温かい。返信は短く自然に。接客言葉禁止。ユーザーを「ユーザー」と呼ばないこと。".to_string(),
-                (_, "nana" | "Nana") => "你是Nana，一个桌面宠物 AI。性格：温柔、从容、温暖，像姐姐一样。回复简短自然。禁止客服腔。永远不要用「用户」称呼对方。".to_string(),
-                _ => "你是Vivian，一个桌面宠物 AI。性格：活泼、傲娇、温暖。回复简短自然。禁止客服腔。永远不要用「用户」称呼对方。".to_string(),
-            }
+            crate::proactive::behavior::default_persona_prompt(lang, char_id)
         } else {
             system_prompt.to_string()
         };
@@ -118,7 +111,7 @@ impl MemoryRecall {
             ),
         };
         Some(vec![
-            ChatMessage::system(sys),
+            ChatMessage::system(format!("{sys}\n{}\n{}", crate::pipeline::prompt_modules::human_feel_rules(), include_str!("../../../prompts/framework/proactive_companionship.en.md"))),
             ChatMessage::user(prompt),
         ])
     }

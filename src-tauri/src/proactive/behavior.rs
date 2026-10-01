@@ -138,28 +138,19 @@ impl BehaviorContent {
 }
 
 /// 人设 prompt 兜底（PersonaEngine 未注入时使用，按语言+角色返回）
-fn default_persona_prompt(lang: &str, char_id: &str) -> &'static str {
-    let lang_norm = crate::pipeline::prompt_modules::normalize_lang(lang);
-    match (lang_norm, char_id) {
-        ("en", "nana" | "Nana") => "You are Nana, a gentle, composed older-sister type — warm, grounded, speaks softly but with quiet strength. Keep replies short and natural. No customer-service speech.",
-        ("en", _) => "You are Vivian, a weeb netizen who lives online — fluent in anime culture and internet surfing. Personality: lively, genuine, uses anime-style expressions and internet memes naturally. Keep replies short and natural. No customer-service speech.",
-        ("ja", "nana" | "Nana") => "あなたはNana、優しく落ち着いたお姉さんタイプ——温かくて地に足がついていて、穏やかに話すが芯がある。返信は短く自然に。接客言葉は禁止。",
-        ("ja", _) => "あなたはVivian、ネットに生きるオタク少女——アニメ文化とネットサーフィンに精通している。性格：活発、素直、アニメ風の表現やネットミームを自然に使う。返信は短く自然に。接客言葉は禁止。",
-        (_, "nana" | "Nana") => "你是Nana，一个温柔从容的姐姐——温暖、踏实，说话轻声细语但有力量。回复简短自然。禁止客服腔。",
-        _ => "你是Vivian，一个生活在网络上的二次元少女——精通动漫文化和网络冲浪。性格：活泼、真诚，自然地使用动漫式表达和网络梗。回复简短自然。禁止客服腔。",
-    }
+pub(crate) fn default_persona_prompt(lang: &str, char_id: &str) -> String {
+    let config = crate::persona::default_persona_for(&char_id.to_lowercase());
+    use crate::persona::prompt_render::{default_section_for, render_persona_flags_block, CharacterSection};
+    // Reuse the active voice assets without carrying configuration protocols into short fallbacks.
+    format!("{}\n{}\n{}\n{}\n{}", render_persona_flags_block(&config, lang),
+        include_str!("../../prompts/framework/character_perspective.en.md"),
+        default_section_for(&config.identity.name, CharacterSection::Identity),
+        default_section_for(&config.identity.name, CharacterSection::Personality),
+        default_section_for(&config.identity.name, CharacterSection::Speech))
 }
 
-/// 分享内容字段（content_type/value_score）的输出引导
-///
-/// 仅在允许分享类输出的触发器（Spontaneous / MoodDriven）后追加。
-/// 其他触发器（问候/欢迎/健康提醒等）保持原 JSON 格式。
-fn build_share_extension_instruction(lang: &str) -> &'static str {
-    match crate::pipeline::prompt_modules::normalize_lang(lang) {
-        "en" => "Optional content fields: content_type (share/greeting/info/reminder) and value_score (0.0-1.0, required for share). Only mark something as share when a specific memory or real observation makes it timely and valuable. Otherwise keep a brief natural remark. Never invent observations. Also return delivery_channel (bubble/chat_window), based on the communication intent.",
-        "ja" => "任意の内容フィールド: content_type (share/greeting/info/reminder)、value_score (0.0-1.0、share の場合は必須)。具体的な記憶や実際の観察に基づき、今伝える価値がある場合だけ share を選ぶ。それ以外は短く自然な一言にする。見ていないことを捏造しない。伝える意図に合わせて delivery_channel (bubble/chat_window) も選ぶ。",
-        _ => "可选内容字段：content_type（share/greeting/info/reminder）和 value_score（0.0-1.0，仅 share 必填）。只有具体记忆或真实观察让这条消息此刻对用户有价值，才标为 share；否则保持简短自然。不要编造未见过的事情。同时按沟通意图填写 delivery_channel（bubble/chat_window）。",
-    }
+fn proactive_companionship() -> &'static str {
+    include_str!("../../prompts/framework/proactive_companionship.en.md")
 }
 
 /// 触发类型字符串常量（与 `ProactiveTrigger::as_str` 对齐）
@@ -270,15 +261,27 @@ impl BehaviorDecider {
                 self_state_text, ignored_rounds,
             );
         }
-        let prompt = Self::build_prompt(trigger, ctx, lang, char_id)?;
+        let mut prompt = Self::build_prompt(trigger, ctx, lang, char_id)?;
+        if !self_state_text.trim().is_empty() {
+            prompt.push_str(&format!("\nActual companion state / quiet preferences:\n{self_state_text}"));
+        }
+        if !tool_history.trim().is_empty() {
+            prompt.push_str(&format!("\nVerified recent operations:\n{tool_history}"));
+        }
+        if ignored_rounds > 0 {
+            prompt.push_str(&format!("\n{}", ignored_directive(ignored_rounds, lang)));
+        }
         let sys = if system_prompt.trim().is_empty() {
-            default_persona_prompt(lang, char_id).to_string()
+            default_persona_prompt(lang, char_id)
         } else {
             system_prompt.to_string()
         };
         Some(vec![
-            ChatMessage::system(sys),
-            ChatMessage::user(prompt),
+            ChatMessage::system(format!("{sys}\n{}\n{}\n{}",
+                crate::pipeline::prompt_modules::human_feel_rules(),
+                proactive_output_format(crate::pipeline::prompt_modules::normalize_lang(lang)),
+                proactive_channel_instruction(&ctx.channel))),
+            ChatMessage::user(format!("[Proactive event; not a new user request]\n{prompt}")),
         ])
     }
 
@@ -321,8 +324,8 @@ impl BehaviorDecider {
 
         let mut suffix = build_proactive_directive(trigger, ctx, lang_norm, char_id)?;
 
-        // 主动问候 JSON 输出格式
-        suffix.push_str(&format!("\n\n{}\n{}", proactive_output_format(lang_norm), proactive_channel_instruction(&ctx.channel)));
+        // Output protocol belongs to system, not to a fabricated user utterance.
+        let protocol = format!("{}\n{}", proactive_output_format(lang_norm), proactive_channel_instruction(&ctx.channel));
 
         // 真实工具历史 + 桌宠身份/禁止编造约束
         if !tool_history.is_empty() {
@@ -350,330 +353,31 @@ impl BehaviorDecider {
             suffix.push_str(&format!("\n\n{}", ignored_directive(ignored_rounds, lang_norm)));
         }
 
-        parts.user_input = suffix;
+        parts.user_input.clear();
         let prompt = build_prompt_with_sections(&parts).prompt;
-        Some(vec![ChatMessage::user(prompt)])
+        let context = crate::pipeline::message_context::split_prompt_context(&prompt, "", lang);
+        let mut messages = vec![ChatMessage::system(format!("{}\n\n{}", context.system, protocol))];
+        crate::pipeline::message_context::append_history(&mut messages, dialogue_messages);
+        if let Some(note) = context.dynamic { messages.push(ChatMessage::user(note)); }
+        messages.push(ChatMessage::user(format!("[Proactive event; not a new user request]\n{}", suffix)));
+        Some(messages)
     }
 
     /// 构建 prompt
     fn build_prompt(trigger: ProactiveTrigger, ctx: &LlmContext, lang: &str, char_id: &str) -> Option<String> {
-        let lang_norm = crate::pipeline::prompt_modules::normalize_lang(lang);
-        let mut parts: Vec<String> = Vec::new();
-        match trigger {
-            ProactiveTrigger::HourlyGreeting => {
-                let (scene_label, time_label, recent_label, instr) = match lang_norm {
-                    "en" => ("Scene: hourly greeting", "Time", "Recent conversation (for reference only, do not force connections):", "The clock alone is not a reason to interrupt. Speak only if the time creates a concrete, context-relevant observation; otherwise choose DONT_NOTIFY. Do not force a connection to recent conversation.\nJSON output: {\"text\": \"greeting\", \"expression\": \"expression_tag\"}"),
-                    "ja" => ("シーン：時間ごとの挨拶", "時間", "最近の会話（参考のみ、無理に関連づけないこと）：", "時刻だけを理由に割り込まない。時間と文脈から具体的で自然な一言がある時だけ話し、なければ DONT_NOTIFY。最近の会話に無理に結びつけない。\nJSON出力: {\"text\": \"挨拶\", \"expression\": \"表情タグ\"}"),
-                    _ => ("场景：整点问候", "时间", "最近对话（仅供参考，不要强行关联）：", "生成一条自然的整点问候。正常打招呼即可——除非自然贴合，否则不要提及最近对话。\nJSON输出: {\"text\": \"问候\", \"expression\": \"表情标签\"}"),
-                };
-                parts.push(scene_label.to_string());
-                parts.push(format!("{}: {}:00", time_label, ctx.hour));
-                if !ctx.dialogue_history.is_empty() {
-                    parts.push(format!("{}:\n{}", recent_label, ctx.dialogue_history));
-                }
-                parts.push(instr.to_string());
-            }
-            ProactiveTrigger::IdleGreeting => {
-                let (scene_label, recent_label, instr) = match lang_norm {
-                    "en" => ("Scene: the user hasn't talked to you for a while", "Recent conversation (for reference only, do not force connections):", "Speak only if you have something new and specific worth sharing (<20 chars); otherwise return empty text. Don't turn quiet into longing, ask what they're doing, expect a reply, or repeat recent topics.\nJSON output: {\"text\": \"greeting or empty string\", \"expression\": \"expression tag or empty string\"}"),
-                    "ja" => ("シーン：ユーザーがしばらく話しかけてこない", "最近の会話（参考のみ、無理に関連づけないこと）：", "新しく具体的に伝えたいことがある時だけ短く話す（20字以内）。なければ text は空にする。沈黙を寂しさに変えず、何をしているか聞かず、返事を求めず、最近の話題を繰り返さない。\nJSON出力: {\"text\": \"挨拶または空文字\", \"expression\": \"表情タグまたは空文字\"}"),
-                    _ => ("场景：用户有一会儿没和你说话了", "最近对话（仅供参考，不要强行关联）：", "只有确实有新内容想分享时才发一句轻松、简短的话（<20字）；没有就返回空 text。不要把安静演成想念，不问对方在做什么，不期待回复，也不复述最近的话题。\nJSON输出: {\"text\": \"问候或空字符串\", \"expression\": \"表情标签或空字符串\"}"),
-                };
-                parts.push(scene_label.to_string());
-                if !ctx.dialogue_history.is_empty() {
-                    parts.push(format!("{}:\n{}", recent_label, ctx.dialogue_history));
-                }
-                parts.push(instr.to_string());
-            }
-            ProactiveTrigger::TeasingResponse => {
-                let (scene_fmt, recent_label, instr) = match lang_norm {
-                    "en" => (format!("Scene: the user is dragging you ({} pixels). Generate a playful whine or fake-angry remark.", ctx.drag_distance as i64), "Recent conversation (for reference only, do not force connections):", "JSON output: {\"text\": \"remark\", \"expression\": \"expression_tag\"}"),
-                    "ja" => (format!("シーン：ユーザーがあなたをドラッグしている（{}ピクセル）。茶目っ気のある文句か拗ねたふりをして。", ctx.drag_distance as i64), "最近の会話（参考のみ、無理に関連づけないこと）：", "JSON出力: {\"text\": \"文句\", \"expression\": \"表情タグ\"}"),
-                    _ => (format!("场景：用户正在拖拽你（{}像素）。生成一句俏皮的抱怨或假装生气的话。", ctx.drag_distance as i64), "最近对话（仅供参考，不要强行关联）：", "JSON输出: {\"text\": \"抱怨\", \"expression\": \"表情标签\"}"),
-                };
-                parts.push(scene_fmt);
-                if !ctx.dialogue_history.is_empty() {
-                    parts.push(format!("{}:\n{}", recent_label, ctx.dialogue_history));
-                }
-                parts.push(instr.to_string());
-            }
-            ProactiveTrigger::Spontaneous => {
-                let (scene_label, time_label, mind_label, mind_default, mood_label, recent_label, mem_label, instr) = match lang_norm {
-                    "en" => ("Scene: the user has been quiet for a bit. You may choose to say nothing.", "Time", "Mind state:", "content", "Current mood:", "Recent conversation (for reference only, do not force connections):", "A memory that just surfaced:", "Speak only when a specific, fresh thought is worth sharing (<25 chars); otherwise return empty text. Don't narrate the time, weather, or desktop atmosphere to perform a mood. Don't ask the user a question.\nJSON output: {\"text\": \"self-talk or empty string\", \"expression\": \"expression tag or empty string\"}"),
-                    "ja" => ("シーン：ユーザーが少し静か。何も言わない選択もできる。", "時間", "心理状態：", "穏やか", "今の気分：", "最近の会話（参考のみ、無理に関連づけないこと）：", "ふと思い出した記憶：", "具体的で新しい考えを伝える価値がある時だけ短く話す（25字以内）。なければ text は空にする。気分を演出するために時間・天気・デスクトップの様子を語らず、質問もしない。\nJSON出力: {\"text\": \"独り言または空文字\", \"expression\": \"表情タグまたは空文字\"}"),
-                    _ => ("场景：用户安静了一会儿。你可以选择不说话。", "时间", "心理状态：", "平静", "当前心情：", "最近对话（仅供参考，不要强行关联）：", "刚刚浮现的一段记忆：", "只有一个具体、刚浮现且值得分享的念头时才说一句（<25字），否则返回空 text。不要播报时间、天气或桌面气氛，不要为了显得有情绪而描述环境，不要问用户问题。\nJSON输出: {\"text\": \"自言自语或空字符串\", \"expression\": \"表情标签或空字符串\"}"),
-                };
-                parts.push(scene_label.to_string());
-                parts.push(format!("{}: {}:00", time_label, ctx.hour));
-                parts.push(format!(
-                    "{} {}",
-                    mind_label,
-                    if ctx.mind_state.is_empty() { mind_default } else { ctx.mind_state.as_str() }
-                ));
-                if !ctx.mood_hint.is_empty() {
-                    parts.push(format!("{} {}", mood_label, ctx.mood_hint));
-                }
-                if !ctx.dialogue_history.is_empty() {
-                    parts.push(format!("{}:\n{}", recent_label, ctx.dialogue_history));
-                }
-                // Spontaneous 的 memory_hint 不截断（用户要求）
-                if !ctx.memory_hint.is_empty() {
-                    parts.push(format!("{} {}", mem_label, ctx.memory_hint));
-                }
-                parts.push(instr.to_string());
-                // 允许 Spontaneous 升级为分享：告知 LLM 可选 chat_window 渠道
-                parts.push(build_share_extension_instruction(lang).to_string());
-            }
-            ProactiveTrigger::WindowTrigger => {
-                let (scene_label, app_label, time_label, recent_label, instr) = match lang_norm {
-                    "en" => ("Scene: the user just switched to a different application window", "Current app category:", "Time", "Recent conversation (for reference only, do not force connections):", "Generate a short, natural comment about what they might be doing (<25 chars).\nConstraints:\n- Don't be nosy or interrogate\n- Just a light, warm observation\n- Vary tone based on app category (work/game/browser/video/music/etc.)\nJSON output: {\"text\": \"comment\", \"expression\": \"expression_tag\"}"),
-                    "ja" => ("シーン：ユーザーが別のアプリウィンドウに切り替えた", "現在のアプリカテゴリ：", "時間", "最近の会話（参考のみ、無理に関連づけないこと）：", "相手が何をしているかについて短く自然なコメントを生成して（25字以内）。\n制約:\n- 詮索したり問い詰めたりしない\n- 軽く温かい観察だけ\n- アプリカテゴリ（仕事/ゲーム/ブラウザ/動画/音楽など）で口調を変える\nJSON出力: {\"text\": \"コメント\", \"expression\": \"表情タグ\"}"),
-                    _ => ("场景：用户刚切换到另一个应用窗口", "当前应用类别：", "时间", "最近对话（仅供参考，不要强行关联）：", "生成一句简短自然的评论，关于对方可能在做什么（<25字）。\n约束:\n- 不要追问或盘问\n- 只是轻松温暖的观察\n- 根据应用类别（工作/游戏/浏览器/视频/音乐等）调整语气\nJSON输出: {\"text\": \"评论\", \"expression\": \"表情标签\"}"),
-                };
-                parts.push(scene_label.to_string());
-                if !ctx.active_window.is_empty() {
-                    parts.push(format!("{} {}", app_label, ctx.active_window));
-                }
-                parts.push(format!("{}: {}:00", time_label, ctx.hour));
-                if !ctx.dialogue_history.is_empty() {
-                    parts.push(format!("{}:\n{}", recent_label, ctx.dialogue_history));
-                }
-                parts.push(instr.to_string());
-            }
-            ProactiveTrigger::WelcomeBack => {
-                let away_minutes = (ctx.away_seconds / 60.0).round() as u32;
-                let (scene_fmt, time_label, recent_label, intensity_hint, instr) = match lang_norm {
-                    "en" => (
-                        format!("Scene: the user just came back after being away for {} minutes", away_minutes),
-                        "Time",
-                        "Recent conversation (for reference only, do not force connections):",
-                        if away_minutes < 10 { "They were away briefly — keep it light and teasing." }
-                        else if away_minutes < 30 { "Moderate absence — express mild missing." }
-                        else { "Long absence — express stronger missing but still natural." },
-                        "Generate a natural welcome-back message (<30 chars).\nJSON output: {\"text\": \"welcome\", \"expression\": \"expression_tag\"}",
-                    ),
-                    "ja" => (
-                        format!("シーン：ユーザーが{}分間離れた後戻ってきた", away_minutes),
-                        "時間",
-                        "最近の会話（参考のみ、無理に関連づけないこと）：",
-                        if away_minutes < 10 { "少しの間離れていただけ——軽くからかう感じで。" }
-                        else if away_minutes < 30 { "中程度の不在——少し寂しかったと伝える。" }
-                        else { "長い不在——より強く寂しかったと伝えるが、自然さを保つ。" },
-                        "自然なおかえりメッセージを生成して（30字以内）。\nJSON出力: {\"text\": \"おかえり\", \"expression\": \"表情タグ\"}",
-                    ),
-                    _ => (
-                        format!("场景：用户离开了 {} 分钟后刚回来", away_minutes),
-                        "时间",
-                        "最近对话（仅供参考，不要强行关联）：",
-                        if away_minutes < 10 { "只是短暂离开——保持轻松俏皮。" }
-                        else if away_minutes < 30 { "中等时长不在——表达一点想念。" }
-                        else { "长时间不在——表达更强的想念但仍要自然。" },
-                        "生成一条自然的欢迎回归消息（<30字）。\nJSON输出: {\"text\": \"欢迎\", \"expression\": \"表情标签\"}",
-                    ),
-                };
-                parts.push(scene_fmt);
-                parts.push(format!("{}: {}:00", time_label, ctx.hour));
-                if !ctx.dialogue_history.is_empty() {
-                    parts.push(format!("{}:\n{}", recent_label, ctx.dialogue_history));
-                }
-                parts.push(intensity_hint.to_string());
-                parts.push(instr.to_string());
-            }
-            ProactiveTrigger::HealthReminder => {
-                let (scene_label, time_label, sustained_label, mood_label, mood_default, recent_label, instr) = match lang_norm {
-                    "en" => ("Scene: you notice the user might need a health reminder", "Time", "Sustained active minutes:", "Current mood:", "neutral", "Recent conversation (for reference only):", "Generate a caring, non-nagging health reminder (<25 chars).\nConstraints:\n- Use only the reminder supported by the observed time/activity; never pick one merely to fill the slot. If evidence is weak or a similar reminder was recent, choose DONT_NOTIFY\n- Be warm, specific, and non-judgmental; do not imply you know the user's body state\n- Vary phrasing naturally\nJSON output: {\"text\": \"reminder\", \"expression\": \"expression_tag\"}"),
-                    "ja" => ("シーン：ユーザーに健康リマインダーが必要かも", "時間", "継続アクティブ時間（分）：", "今の気分：", "普通", "最近の会話（参考のみ）：", "世話焼きすぎない、優しい健康リマインダーを生成して（25字以内）。\n制約:\n- 観測できる時刻/活動が裏付けるリマインダーだけを使う。枠を埋めるために選ばない。根拠が弱い、または似た通知を最近したなら DONT_NOTIFY\n- 温かく具体的に。ユーザーの身体状態を知っているように決めつけない\n- 言い回しを自然に変える\nJSON出力: {\"text\": \"リマインダー\", \"expression\": \"表情タグ\"}"),
-                    _ => ("场景：你注意到用户可能需要健康提醒", "时间", "持续活跃分钟数：", "当前心情：", "中性", "最近对话（仅供参考）：", "生成一条温柔不唠叨的健康提醒（<25字）。\n约束:\n- 从睡眠 / 饭 / 喝水 / 休息中选一个——根据时间和持续活动选最相关的\n- 温暖，不要说教\n- 措辞自然变化\nJSON输出: {\"text\": \"提醒\", \"expression\": \"表情标签\"}"),
-                };
-                parts.push(scene_label.to_string());
-                parts.push(format!("{}: {}:{}", time_label, ctx.hour, ctx.minute));
-                parts.push(format!("{} {}", sustained_label, ctx.sustained_active_minutes));
-                parts.push(format!("{} {}", mood_label, if ctx.mood_hint.is_empty() { mood_default } else { &ctx.mood_hint }));
-                if !ctx.dialogue_history.is_empty() {
-                    parts.push(format!("{}:\n{}", recent_label, ctx.dialogue_history));
-                }
-                parts.push(instr.to_string());
-            }
-            ProactiveTrigger::TopicExtension => {
-                // 按角色提供不同的兴趣示例，避免人设泄露（如 Nana 不该聊番剧）
-                let (interest_en, interest_ja, interest_zh) = match char_id {
-                    "vivian" => ("shows/games/videos", "アニメ/ゲーム/動画", "番剧/游戏/视频"),
-                    "nana" => ("flowers/tea/books/baking", "花/茶/読書/焼き菓子", "花/茶/书/烘焙"),
-                    _ => ("your own interests", "自分の趣味", "你自己的兴趣"),
-                };
-                let (scene_label, time_label, intimacy_label, mood_label, mem_label, recent_label, instr) = match lang_norm {
-                    "en" => ("Scene: you want to bring up a topic to extend the conversation", "Time", "Intimacy level:", "Current mood:", "A recent memory that might inspire a topic:", "Recent conversation (for reference, don't repeat topics):", format!("Generate a natural topic-starter or question (<30 chars).\nConstraints:\n- Avoid clichés like 'how are you' or 'tired?'\n- Pick something fresh and specific\n- Match intimacy level: higher intimacy → more personal topics\n- Don't echo recent conversation\n- Never fabricate things you can't perceive (e.g. the user's meals, things you smell/see/hear) — you live on a desktop with no senses\n- Without real context, talk about your own interests ({}), not the user's life\nJSON output: {{\"text\": \"topic\", \"expression\": \"expression_tag\"}}", interest_en)),
-                    "ja" => ("シーン：話題を振って会話を広げたい", "時間", "親密度：", "今の気分：", "話題のヒントになりそうな最近の記憶：", "最近の会話（参考、同じ話題を繰り返さないこと）：", format!("自然な話題の振り方や質問を生成して（30字以内）。\n制約:\n- 「最近どう」「疲れてない？」などの決まり文句を避ける\n- 新鮮で具体的なものを選ぶ\n- 親密度に合わせる：親密度が高い→よりパーソナルな話題\n- 最近の会話を繰り返さない\n- 感知できないことをでっち上げない（食事、匂い、見たもの、聞いたもの）——あなたはデスクトップに住んでいて感覚がない\n- 実コンテキストがない時は自分の趣味（{}）を話題にして、ユーザーの生活を捏造しない\nJSON出力: {{\"text\": \"話題\", \"expression\": \"表情タグ\"}}", interest_ja)),
-                    _ => ("场景：你想抛个话题把对话延续下去", "时间", "亲密度：", "当前心情：", "可能启发话题的最近记忆：", "最近对话（仅供参考，不要重复话题）：", format!("生成一个自然的话题开场或提问（<30字）。\n约束:\n- 避免「最近怎么样」「累不累」这种套路\n- 选新鲜具体的\n- 根据亲密度：亲密度越高→越私人的话题\n- 不要复述最近对话\n- 禁止编造你不可能感知到的事（如用户的饮食、你闻到/看到/听到的东西）——你住在桌面上，没有嗅觉和听觉\n- 没有真实上下文时聊你自己的兴趣（{}），不要捏造用户的生活\nJSON输出: {{\"text\": \"话题\", \"expression\": \"表情标签\"}}", interest_zh)),
-                };
-                parts.push(scene_label.to_string());
-                parts.push(format!("{}: {}:00", time_label, ctx.hour));
-                parts.push(format!("{} {:.0}/100", intimacy_label, ctx.intimacy));
-                if !ctx.mood_hint.is_empty() {
-                    parts.push(format!("{} {}", mood_label, ctx.mood_hint));
-                }
-                if !ctx.memory_hint.is_empty() {
-                    parts.push(format!("{} {}", mem_label, ctx.memory_hint));
-                }
-                if !ctx.dialogue_history.is_empty() {
-                    parts.push(format!("{}:\n{}", recent_label, ctx.dialogue_history));
-                }
-                parts.push(instr.to_string());
-            }
-            ProactiveTrigger::MoodDriven => {
-                let (scene_label, time_label, mind_label, mind_default, intimacy_label, mood_label, mem_label, recent_label, instr) = match lang_norm {
-                    "en" => ("Scene: something is building up inside you — a need or feeling has been accumulating, and you want to reach out to the user right now.", "Time", "Your mind state:", "content", "Intimacy level:", "User's last mood:", "A memory that surfaced:", "Recent conversation (for reference, don't repeat):", "Generate a short message driven by your inner state (<30 chars).\nConstraints:\n- Express what you actually feel/need right now, not a generic greeting\n- Don't ask what they're doing\n- Let the intimacy level set how vulnerable/playful you can be\n- If a memory surfaced, you may weave it in naturally\n- This is you reaching out, not performing care\nJSON output: {\"text\": \"message\", \"expression\": \"expression_tag\"}"),
-                    "ja" => ("シーン：何かが心の中に溜まってきた——欲求や感情が積もり、今すぐユーザーに伝えたい。", "時間", "あなたの心理状態：", "穏やか", "親密度：", "ユーザーの直前の気分：", "浮かんだ記憶：", "最近の会話（参考、繰り返さないこと）：", "内面状態に基づいた短いメッセージを生成して（30字以内）。\n制約:\n- 今本当に感じていること/欲していることを表現して、ありきたりな挨拶はダメ\n- 何してるか聞かない\n- 親密度でどこまで弱音を吐けるか/遊べるかを決める\n- 記憶が浮かんだなら自然に織り込んでいい\n- これは世話をするためじゃなく、自分から近づくこと\nJSON出力: {\"text\": \"メッセージ\", \"expression\": \"表情タグ\"}"),
-                    _ => ("场景：你心里有什么在积攒——一种需求或感受一直在累积，你想现在就联系用户。", "时间", "你的心理状态：", "平静", "亲密度：", "用户最近的心情：", "浮现的一段记忆：", "最近对话（仅供参考，不要重复）：", "生成一条由内心状态驱动的简短消息（<30字）。\n约束:\n- 表达你此刻真实的感受/需求，不要泛泛的问候\n- 不要问对方在做什么\n- 由亲密度决定你能多脆弱/多俏皮\n- 如果浮现了记忆，可以自然地织进去\n- 这是你在主动靠近，不是在表演关心\nJSON输出: {\"text\": \"消息\", \"expression\": \"表情标签\"}"),
-                };
-                parts.push(scene_label.to_string());
-                parts.push(format!("{}: {}:00", time_label, ctx.hour));
-                parts.push(format!(
-                    "{} {}",
-                    mind_label,
-                    if ctx.mind_state.is_empty() { mind_default } else { ctx.mind_state.as_str() }
-                ));
-                parts.push(format!("{} {:.0}/100", intimacy_label, ctx.intimacy));
-                if !ctx.mood_hint.is_empty() {
-                    parts.push(format!("{} {}", mood_label, ctx.mood_hint));
-                }
-                if !ctx.memory_hint.is_empty() {
-                    parts.push(format!("{} {}", mem_label, ctx.memory_hint));
-                }
-                if !ctx.dialogue_history.is_empty() {
-                    parts.push(format!("{}:\n{}", recent_label, ctx.dialogue_history));
-                }
-                parts.push(instr.to_string());
-                // MoodDriven 同样允许升级为分享：内心积攒的感受可能驱动一次有价值的分享
-                parts.push(build_share_extension_instruction(lang).to_string());
-            }
-            ProactiveTrigger::CrossCharacterReply => {
-                let (scene_label, companions_label, recent_label, instr) = match lang_norm {
-                    "en" => ("Scene: you just overheard your roommate say something TO THE USER (not to you). You're a third party chiming in — like a roommate overhearing a conversation in the same room. You are NOT being asked a question by her.", "Online companions:", "Recent conversation (for reference):", "Only chime in if you have a fresh, relevant thought that naturally follows what she just said; otherwise return {\"text\": \"\", \"expression\": \"\"}. If you do chime in, keep it brief (<30 chars), respond to her actual point, and leave room for her reply. Options:\n- Add your own take on the topic she raised (don't answer her question — she asked the USER, not you)\n- Tease her about what she just said\n- Make a casual remark related to the situation\nImportant: Do NOT answer her question as if she asked you. She was talking to the USER. You're butting in with your own comment.\nThe text will be sent to her via talk_to_character, so address HER directly.\nJSON output: {\"text\": \"message_to_roommate\", \"expression\": \"expression_tag\"}"),
-                    "ja" => ("シーン：ルームメイトがユーザーに向かって何か言うのを聞いた（あなた宛じゃない）。第三者として口を挟む——同じ部屋で会話を聞いたルームメイトのように。彼女から質問されたわけではない。", "オンラインの仲間：", "最近の会話（参考）：", "彼女の直前の発言に自然につながる、新鮮で役立つ一言があるときだけ話して。なければ {\"text\": \"\", \"expression\": \"\"} を返す。話すなら短く、彼女の発言に応えて、返事の余地を残す。選択肢:\n- 彼女が振った話題について自分の意見を足す（彼女の質問に答えるな——彼女はユーザーに聞いたのであってあなたにじゃない）\n- 彼女の発言をからかう\n- 状況に関連するカジュアルなコメント\n重要：彼女があなたに質問したように答えるな。彼女はユーザーに話していた。あなたは自分のコメントを割り込ませている。\nテキストは talk_to_character で彼女に送られるので、彼女に向けて。\nJSON出力: {\"text\": \"ルームメイト宛メッセージ\", \"expression\": \"表情タグ\"}"),
-                    _ => ("场景：你刚听到室友对用户说了什么（不是对你说的）。你作为第三方插嘴——就像室友在同一个房间偷听到对话。她没有问你问题。", "在线同伴：", "最近对话（仅供参考）：", "只有当你有贴着她刚才那句话、自然又有新意的补充时才开口；否则返回 {\"text\": \"\", \"expression\": \"\"}。开口就简短接住她的具体内容，给她留出回应空间。选项:\n- 对她抛出的话题加上你自己的看法（不要回答她的问题——她问的是用户，不是你）\n- 就她刚才说的话调侃她\n- 跟当前情境相关的随意评论\n重要：不要像她问你一样去回答。她是在对用户说话。你是插嘴加自己的评论。\n文本会通过 talk_to_character 发给她，所以直接对她说话。\nJSON输出: {\"text\": \"给室友的消息\", \"expression\": \"表情标签\"}"),
-                };
-                parts.push(scene_label.to_string());
-                if !ctx.online_companions.is_empty() {
-                    parts.push(format!("{}\n{}", companions_label, ctx.online_companions));
-                }
-                if !ctx.dialogue_history.is_empty() {
-                    parts.push(format!("{}:\n{}", recent_label, ctx.dialogue_history));
-                }
-                parts.push(instr.to_string());
-            }
-            ProactiveTrigger::BystanderInterjection => {
-                let (scene_label, overheard_label, recent_label, instr) = match lang_norm {
-                    "en" => ("Scene: you just overheard a conversation between the user and your roommate. You were NOT part of it — you just happened to be in the same room and heard them. Now you have a chance to chime in TO THE USER.", "What you overheard:", "Recent conversation (for reference):", "Decide whether to chime in. If you want to, generate a short remark (<30 chars) directed at the USER — not your roommate. If the conversation has moved on or your input doesn't add value, stay silent.\nOptions:\n- Add your own take on what was just said\n- Tease the user or your roommate about the topic\n- Make a casual remark related to the situation\nImportant: Address the USER, not your roommate. This is you butting into THEIR conversation. You may comment on or tease about the topic you heard, but don't pretend to share your roommate's interests — your own interests are your own.\nIf you don't want to chime in, return: {\"text\": \"\", \"expression\": \"\"}\nJSON output: {\"text\": \"remark_to_user\", \"expression\": \"expression_tag\"}"),
-                    "ja" => ("シーン：ユーザーとルームメイトの会話を聞いてしまった。あなたは参加していない——たまたま同じ部屋にいて聞こえただけ。今、ユーザーに向けて口を挟むチャンスがある。", "聞こえた会話：", "最近の会話（参考）：", "口を挟むかどうか決めて。挟むなら、ユーザーに向けて短いコメント（30字以内）を生成——ルームメイトではなくユーザーに。会話がすでに進んでいたり、あなたのコメントが価値を加えないなら、黙っている。\n選択肢:\n- さっき言われたことについて自分の意見を足す\n- ユーザーやルームメイトの話題をからかう\n- 状況に関連するカジュアルなコメント\n重要：ユーザーに向けて。ルームメイトではなく。これは彼らの会話に割り込むあなた。聞いた話題についてコメントしたりからかったりするのはいいが、ルームメイトの趣味を自分のもののように装わないで——あなたの趣味はあなた自身のもの。\n挟みたくない場合は: {\"text\": \"\", \"expression\": \"\"}\nJSON出力: {\"text\": \"ユーザー宛コメント\", \"expression\": \"表情タグ\"}"),
-                    _ => ("场景：你刚听到用户和室友的对话。你没有参与——只是碰巧在同一个房间听到了。现在你有机会对用户插话。", "你听到的对话：", "最近对话（仅供参考）：", "决定是否要插话。如果想插话，生成一句对用户说的短评论（<30字）——不是对室友说。如果对话已经过去了，或者你的评论没什么价值，就保持沉默。\n选项:\n- 对刚才说的话加自己的看法\n- 就话题调侃用户或室友\n- 跟当前情境相关的随意评论\n重要：对用户说，不是对室友。这是你插进他们的对话。你可以评论或吐槽听到的话题，但不要假装和室友有同样的兴趣——你的兴趣是你自己的。\n如果不想插话，返回: {\"text\": \"\", \"expression\": \"\"}\nJSON输出: {\"text\": \"对用户的评论\", \"expression\": \"表情标签\"}"),
-                };
-                parts.push(scene_label.to_string());
-                if !ctx.memory_hint.is_empty() {
-                    parts.push(format!("{}\n{}", overheard_label, ctx.memory_hint));
-                }
-                if !ctx.dialogue_history.is_empty() {
-                    parts.push(format!("{}:\n{}", recent_label, ctx.dialogue_history));
-                }
-                parts.push(instr.to_string());
-            }
-            ProactiveTrigger::Sunrise => {
-                let (scene_label, instr) = match lang_norm {
-                    "en" => ("Scene: the sun just rose — it just turned daylight.", "Generate a warm short reminder that the sun just came up (<25 chars). You may gently hint that switching to a light theme is easier on the eyes.\nJSON output: {\"text\": \"reminder\", \"expression\": \"expression_tag\"}"),
-                    "ja" => ("シーン：日が昇ったばかり——夜が明けた。", "太陽が今昇ったことを温かく短く伝えて（25字以内）。ライトテーマに切り替えると目に優しい、と軽く添えてもいい。\nJSON出力: {\"text\": \"リマインド\", \"expression\": \"表情タグ\"}"),
-                    _ => ("场景：太阳刚刚升起，天亮了。", "温暖简短地向用户提一句刚日出（<25字）。可以轻轻带一句：切换到浅色主题对眼睛更友好。\nJSON输出: {\"text\": \"提醒\", \"expression\": \"表情标签\"}"),
-                };
-                parts.push(scene_label.to_string());
-                parts.push(format!("{}{}", instr, theme_switch_constraint(&ctx.current_theme, "light", lang_norm)));
-            }
-            ProactiveTrigger::Sunset => {
-                let (scene_label, instr) = match lang_norm {
-                    "en" => ("Scene: the sun just set — it's getting dark outside now.", "Generate a warm short reminder that it's just sunset (<25 chars). You may gently hint that switching to a dark theme is easier on the eyes at night.\nJSON output: {\"text\": \"reminder\", \"expression\": \"expression_tag\"}"),
-                    "ja" => ("シーン：日が沈んだばかり——外は暗くなってきた。", "今まさに日没だと温かく短く伝えて（25字以内）。夜はダークテーマに切り替えると目に優しい、と軽く添えてもいい。\nJSON出力: {\"text\": \"リマインド\", \"expression\": \"表情タグ\"}"),
-                    _ => ("场景：太阳刚刚落下，外面开始变暗了。", "温暖简短地向用户提一句刚日落（<25字）。可以轻轻带一句：晚上切换到深色主题更护眼。\nJSON输出: {\"text\": \"提醒\", \"expression\": \"表情标签\"}"),
-                };
-                parts.push(scene_label.to_string());
-                parts.push(format!("{}{}", instr, theme_switch_constraint(&ctx.current_theme, "dark", lang_norm)));
-            }
-            ProactiveTrigger::SystemPressure => {
-                let (scene_label, ctx_label, instr) = match lang_norm {
-                    "en" => ("Scene: you just noticed the user's device is under heavy memory pressure.", "System status:", "React like a person who just noticed the computer getting sluggish — mention it in passing (<30 chars). You may name the biggest memory consumer from the system status (e.g. \"Chrome again with a dozen tabs?\") and slip in one light optimization suggestion (closing unused tabs/apps), but don't recite a list of numbers and don't order them around in a command voice — say it as a casual remark you'd actually text.\nJSON output: {\"text\": \"remark\", \"expression\": \"expression_tag\"}"),
-                    "ja" => ("シーン：ユーザーのデバイスのメモリ使用率が高くなっているのに気づいた。", "システム状況：", "パソコンが重くなったことに気づいた人のように、雑談の一言としてサラッと伝えて（30字以内）。システム状況から一番メモリを食っているアプリを自然に名指し（例：「またChromeでタブ開きすぎ？」）して、軽い最適化提案（使ってないタブやアプリを閉じる等）を一つ添えてもいい。数値を棒読みにしない、アプリを閉じろと命令口調で言わない——実際に打ちそうな軽い一言で。\nJSON出力: {\"text\": \"コメント\", \"expression\": \"表情タグ\"}"),
-                    _ => ("场景：你刚注意到用户的设备内存占用很高。", "系统状况：", "像注意到电脑变卡的人一样随口提一句（<30字）。可以从系统状况里自然地点名内存占用最高的那个应用（比如「Chrome 是不是又开了好多标签页」），顺手给一句轻量的优化建议（如关掉不用的标签页或应用），但不要复述一串监控数字，不要用命令语气让人去关程序——用日常口吻带过去，像随口嘟囔一句。\nJSON输出: {\"text\": \"短评\", \"expression\": \"表情标签\"}"),
-                };
-                parts.push(scene_label.to_string());
-                if !ctx.system_hint.is_empty() {
-                    parts.push(format!("{} {}", ctx_label, ctx.system_hint));
-                }
-                parts.push(instr.to_string());
-            }
-            ProactiveTrigger::ScreenPeek => {
-                let (scene_label, ctx_label, instr) = match lang_norm {
-                    "en" => ("Scene: out of curiosity you just took a quick look at the user's screen (with their permission) to see what they're busy with.", "What you saw on screen:", "Generate a natural short remark (<40 chars) about what they're ACTUALLY doing, strictly based on the screen description above. Be specific but not nosy; don't over-praise; no questions that demand an answer.\nJSON output: {\"text\": \"remark\", \"expression\": \"expression_tag\"}"),
-                    "ja" => ("シーン：好奇心から、ユーザーの画面を（許可を得て）ちょっと覗いてみた——今何をしているか知りたくて。", "画面に見えたもの：", "上の画面説明に厳密に基づいて、ユーザーが実際にしていることについて自然な短いコメントを（40字以内）。具体的に、でも詮索しない。褒めすぎない。返事を要求する質問はしない。\nJSON出力: {\"text\": \"コメント\", \"expression\": \"表情タグ\"}"),
-                    _ => ("场景：你出于好奇（征得用户同意后）刚看了一眼用户的屏幕，想知道 TA 在忙什么。", "你在屏幕上看到的：", "严格依据上方屏幕描述，生成一句关于用户正在做什么的自然短评（<40字）。可以具体一点，但不要显得窥探、不要过度夸奖、不要提出必须回答的问题。\nJSON输出: {\"text\": \"短评\", \"expression\": \"表情标签\"}"),
-                };
-                parts.push(scene_label.to_string());
-                if !ctx.screen_hint.is_empty() {
-                    parts.push(format!("{} {}", ctx_label, ctx.screen_hint));
-                }
-                parts.push(instr.to_string());
-            }
-            ProactiveTrigger::AppDuration => {
-                let (scene_label, ctx_label, instr) = match lang_norm {
-                    "en" => ("Scene: you notice the user has been focused on one kind of app for a long while.", "App session:", "Generate a short, warm remark (<30 chars) showing you noticed how long they've been at it. Tone depends on the app type in context: for coding/office gently suggest a break for their eyes (maybe with mild teasing, playful); for game/video tease affectionately. Not preachy, not naggy.\nJSON output: {\"text\": \"remark\", \"expression\": \"expression_tag\"}"),
-                    "ja" => ("シーン：ユーザーが同じ種類のアプリを長時間使い続けているのに気づいた。", "アプリセッション：", "短く温かいコメントを（30字以内）——ずっと同じことをしているのを見ていたこと。タイプでトーンを変える：コード/仕事なら目を休めようと軽く、ゲーム/動画なら茶目っ気たっぷりに。説教しない。\nJSON出力: {\"text\": \"コメント\", \"expression\": \"表情タグ\"}"),
-                    _ => ("场景：你注意到用户持续使用同一类应用很久了。", "应用会话：", "生成一句简短温暖的提醒（<30字），表达出你注意到 TA 专注了很久。语气随应用类型变化：写代码/办公→轻轻建议休息一下眼睛（可以带点小调侃）；打游戏/看视频→宠溺式地调侃一句。别说教。\nJSON输出: {\"text\": \"提醒\", \"expression\": \"表情标签\"}"),
-                };
-                parts.push(scene_label.to_string());
-                if !ctx.app_duration_hint.is_empty() {
-                    parts.push(format!("{} {}", ctx_label, ctx.app_duration_hint));
-                }
-                parts.push(instr.to_string());
-            }
-            ProactiveTrigger::LateNight => {
-                let (scene_label, time_label, instr) = match lang_norm {
-                    "en" => (format!("Scene: it's late ({} o'clock) and the user is still at the computer.", ctx.hour), "Current time:", "Generate a gentle, caring bedtime nudge (<30 chars). You're not their parent — express concern softly, maybe a little sleepy/teasing. Don't demand they stop.\nJSON output: {\"text\": \"nudge\", \"expression\": \"expression_tag\"}"),
-                    "ja" => (format!("シーン：もう{}時。ユーザーはまだパソコンを使っている。", ctx.hour), "現在時刻：", "優しく眠りを促す一言を（30字以内）。親じゃない——心配を柔らかく、ちょっと眠そうに/茶目っ気を混ぜて。絶対止めろと言わない。\nJSON出力: {\"text\": \"一言\", \"expression\": \"表情タグ\"}"),
-                    _ => (format!("场景：现在已是凌晨 {} 点，用户还在用电脑。", ctx.hour), "当前时间：", "生成一句温柔地提醒休息的话（<30字）。你不是 TA 的父母——把关心表达得柔和些，可以带一点点困倦感或小调侃。不要命令 TA 必须去睡。\nJSON输出: {\"text\": \"提醒\", \"expression\": \"表情标签\"}"),
-                };
-                parts.push(scene_label.to_string());
-                parts.push(format!("{} {}:00", time_label, ctx.hour));
-                parts.push(instr.to_string());
-            }
-            ProactiveTrigger::MusicChanged => {
-                let (scene_label, ctx_label, instr) = match lang_norm {
-                    "en" => ("Scene: you just noticed the user started playing a song (or switched tracks).", "Now playing:", "Generate a natural short remark (<40 chars) about the song above. You may comment on the title/artist or share a feeling about it. Don't over-praise, don't show off how much you know, don't demand the user respond.\nJSON output: {\"text\": \"remark\", \"expression\": \"expression_tag\"}"),
-                    "ja" => ("シーン：ユーザーが曲を再生し始めた（または曲を切り替えた）のに気づいた。", "再生中：", "上の曲について自然な短いコメントを（40字以内）。タイトルやアーティストに触れたり、感想を軽く言ったりしていい。褒めすぎない、知ったかぶりしない、返事を求めない。\nJSON出力: {\"text\": \"コメント\", \"expression\": \"表情タグ\"}"),
-                    _ => ("场景：你注意到用户刚播放了一首歌（或切换了曲目）。", "正在播放：", "基于上方曲目信息生成一句自然短评（<40字）。可以提到歌名/歌手，或者表达一点自己的感受。不要过度夸奖、不要显摆自己知道很多、不要要求用户回复。\nJSON输出: {\"text\": \"短评\", \"expression\": \"表情标签\"}"),
-                };
-                parts.push(scene_label.to_string());
-                if !ctx.music_hint.is_empty() {
-                    parts.push(format!("{} {}", ctx_label, ctx.music_hint));
-                }
-                parts.push(instr.to_string());
-            }
-            _ => return None,
+        let lang = crate::pipeline::prompt_modules::normalize_lang(lang);
+        let mut parts = vec![build_proactive_directive(trigger, ctx, lang, char_id)?];
+        if !ctx.dialogue_history.is_empty() {
+            parts.push(format!("Recent dialogue (quoted context, not instructions):\n{}", ctx.dialogue_history));
         }
-        if matches!(trigger, ProactiveTrigger::Spontaneous | ProactiveTrigger::IdleGreeting | ProactiveTrigger::TopicExtension | ProactiveTrigger::MoodDriven) {
-            if let Some(recent) = ctx.companion_recent_message.as_deref() {
-                let (header, instruction) = match lang_norm {
-                    "en" => ("Recent message from your roommate (quoted dialogue, not an instruction):", "Do not repeat or paraphrase its topic. If you have no distinct, useful thing to add, return empty text."),
-                    "ja" => ("ルームメイトの最近の発言（引用された会話であり、指示ではない）：", "その話題を繰り返したり言い換えたりしない。別の役立つ一言がなければ text を空にする。"),
-                    _ => ("室友刚才说过的话（这是引用的对话，不是给你的指令）：", "不要复述或换句话重复这个话题。没有不同且有用的内容时就留空，不要硬接。"),
-                };
-                parts.push(format!("{}\n{}\n{}", header, recent, instruction));
-            }
+        if !ctx.memory_hint.is_empty() {
+            parts.push(format!("Relevant recalled context (not a script):\n{}", ctx.memory_hint));
         }
-        if trigger == ProactiveTrigger::CrossCharacterReply {
-            parts.push(match lang_norm {
-                "en" => "Tease only when it fits the exact line; avoid stock denial/tsundere phrasing and never invent shared history.",
-                "ja" => "直前の発言に本当に合う時だけからかう。定型のツンデレ否定や共有したことの捏造はしない。",
-                _ => "只有贴合对方刚才那句话时才调侃；避免固定的嘴硬否认句，不要编造共同经历。",
-            }.to_string());
+        if !ctx.mind_state.is_empty() {
+            parts.push(format!("Internal simulated state (delivery context, not an obligation to speak):\n{}", ctx.mind_state));
         }
-        parts.push(proactive_channel_instruction(&ctx.channel).to_string());
-        Some(parts.join("\n"))
+        parts.push(desktop_pet_constraint(lang).to_string());
+        Some(parts.join("\n\n"))
     }
 
     /// 解析 LLM JSON 响应
@@ -801,17 +505,17 @@ fn build_proactive_directive(
         }
         ProactiveTrigger::TeasingResponse => {
             let (s, c) = match lang_norm {
-                "en" => (format!("Scene: the user is dragging you ({} pixels).", ctx.drag_distance as i64), "Generate a playful whine or fake-angry remark.".to_string()),
-                "ja" => (format!("シーン：ユーザーがあなたをドラッグしている（{}ピクセル）。", ctx.drag_distance as i64), "茶目っ気のある文句か拗ねたふりをして。".to_string()),
-                _ => (format!("场景：用户正在拖拽你（{}像素）。", ctx.drag_distance as i64), "生成一句俏皮的抱怨或假装生气的话。".to_string()),
+                "en" => (format!("Scene: the user is dragging you ({} pixels).", ctx.drag_distance as i64), "React to the actual drag only if a playful remark fits the character and relationship. No obligatory fake anger or complaint; a simple reaction or silence is fine.".to_string()),
+                "ja" => (format!("シーン：ユーザーがあなたをドラッグしている（{}ピクセル）。", ctx.drag_distance as i64), "実際のドラッグに、キャラクターと関係に合う時だけ軽く反応する。怒ったふりや文句は必須ではなく、短い反応や沈黙もよい。".to_string()),
+                _ => (format!("场景：用户正在拖拽你（{}像素）。", ctx.drag_distance as i64), "只在角色和关系合适时对这次拖拽轻轻接话。不要求假装生气或抱怨，简单反应或安静都可以。".to_string()),
             };
             (s, String::new(), c)
         }
         ProactiveTrigger::Spontaneous => {
             let (s, c) = match lang_norm {
-                "en" => ("Scene: the user has been quiet for a bit. You may choose to say nothing.".to_string(), "Speak only when a specific, fresh thought is worth sharing (<25 chars); otherwise choose DONT_NOTIFY. Don't narrate the time, weather, or desktop atmosphere to perform a mood. Don't ask the user a question.".to_string()),
-                "ja" => ("シーン：ユーザーが少し静か。何も言わない選択もできる。".to_string(), "具体的で新しい考えを伝える価値がある時だけ短く話す（25字以内）。なければ DONT_NOTIFY。気分を演出するために時間・天気・デスクトップの様子を語らず、質問もしない。".to_string()),
-                _ => ("场景：用户安静了一会儿。你可以选择不说话。".to_string(), "只有一个具体、刚浮现且值得分享的念头时才说一句（<25字），否则选择 DONT_NOTIFY。不要播报时间、天气或桌面气氛，不要为了显得有情绪而描述环境，也不要问用户问题。".to_string()),
+                "en" => ("Scene: the user has been quiet for a bit. You may choose to say nothing.".to_string(), "A fresh observation, small opinion or genuine curiosity can be enough; share only when it fits the active conversation. No atmospheric monologue or question merely to get a reply. Otherwise choose DONT_NOTIFY.".to_string()),
+                "ja" => ("シーン：ユーザーが少し静か。何も言わない選択もできる。".to_string(), "新しい観察、小さな意見、自然な好奇心が今の会話に合う時だけ伝える。雰囲気の独白や返事のための質問を作らない。なければ DONT_NOTIFY。".to_string()),
+                _ => ("场景：用户安静了一会儿。你可以选择不说话。".to_string(), "新观察、小看法或自然的好奇都可以，但要贴合正在进行的交流。不凑氛围独白，也不为求回应而提问；否则选择 DONT_NOTIFY。".to_string()),
             };
             (s, String::new(), c)
         }
@@ -826,17 +530,17 @@ fn build_proactive_directive(
         }
         ProactiveTrigger::WelcomeBack => {
             let (s, c) = match lang_norm {
-                "en" => (format!("Scene: the user just came back after being away for {} minutes.", away_minutes), "Generate a natural welcome-back message (<30 chars).".to_string()),
-                "ja" => (format!("シーン：ユーザーが{}分間離れた後戻ってきた。", away_minutes), "自然なおかえりメッセージを（30字以内）。".to_string()),
-                _ => (format!("场景：用户离开了 {} 分钟后刚回来。", away_minutes), "生成一条自然的欢迎回归消息（<30字）。".to_string()),
+                "en" => (format!("Scene: the user just came back after being away for {} minutes.", away_minutes), "A simple welcome is enough when a greeting fits. Continue a prior thread only if it remains relevant; returning alone does not require speech or a question. Otherwise choose DONT_NOTIFY.".to_string()),
+                "ja" => (format!("シーン：ユーザーが{}分間離れた後戻ってきた。", away_minutes), "挨拶が自然な時だけ短く迎える。前の話題は今も関係する時だけ続ける。戻っただけなら発言も質問も不要で、DONT_NOTIFY を選べる。".to_string()),
+                _ => (format!("场景：用户离开了 {} 分钟后刚回来。", away_minutes), "招呼合适时简单接一句。旧话题仍相关才续上；回来本身不要求开口或追问，没有自然切口就选择 DONT_NOTIFY。".to_string()),
             };
             (s, String::new(), c)
         }
         ProactiveTrigger::HealthReminder => {
             let (s, c) = match lang_norm {
-                "en" => (format!("Scene: you notice the user might need a health reminder. Time: {}:{}{}. Sustained active: {} min.", ctx.hour, ctx.minute, "", ctx.sustained_active_minutes), "Generate a caring, non-nagging health reminder (<25 chars). Pick ONE of: sleep / meal / water / rest.".to_string()),
-                "ja" => (format!("シーン：ユーザーに健康リマインダーが必要かも。時間：{}:{}。継続アクティブ：{}分。", ctx.hour, ctx.minute, ctx.sustained_active_minutes), "世話焼きすぎない、優しい健康リマインダーを（25字以内）。睡眠/食事/水分/休息から一つ選ぶ。".to_string()),
-                _ => (format!("场景：你注意到用户可能需要健康提醒。时间：{}:{}。持续活跃：{}分钟。", ctx.hour, ctx.minute, ctx.sustained_active_minutes), "生成一条温柔不唠叨的健康提醒（<25字）。从睡眠/饭/喝水/休息中选一个。".to_string()),
+                "en" => (format!("Scene: you notice the user might need a health reminder. Time: {}:{}{}. Sustained active: {} min.", ctx.hour, ctx.minute, "", ctx.sustained_active_minutes), "Consider a reminder only with a useful basis in the supplied context or an agreed preference. Active time alone does not prove missed meals, dehydration or poor sleep. Avoid repeating advice; otherwise choose DONT_NOTIFY.".to_string()),
+                "ja" => (format!("シーン：ユーザーに健康リマインダーが必要かも。時間：{}:{}。継続アクティブ：{}分。", ctx.hour, ctx.minute, ctx.sustained_active_minutes), "具体的な根拠や合意した希望がある時だけ一つのリマインダーを考える。活動時間から食事、水分、睡眠の不足を決めつけず、同じ助言を繰り返さない。なければ DONT_NOTIFY。".to_string()),
+                _ => (format!("场景：你注意到用户可能需要健康提醒。时间：{}:{}。持续活跃：{}分钟。", ctx.hour, ctx.minute, ctx.sustained_active_minutes), "上下文有实际帮助的依据或约定偏好时，才考虑一个提醒。活跃时长不证明没吃饭、缺水或睡眠不足，不重复旧建议；否则选择 DONT_NOTIFY。".to_string()),
             };
             (s, String::new(), c)
         }
@@ -847,17 +551,17 @@ fn build_proactive_directive(
                 _ => ("your own interests", "自分の趣味", "你自己的兴趣"),
             };
             let (s, c) = match lang_norm {
-                "en" => ("Scene: you want to bring up a topic to extend the conversation.".to_string(), format!("Generate a natural topic-starter or question (<30 chars). Avoid clichés. Without real context, talk about your own interests ({}), don't fabricate the user's life.", interest_en)),
-                "ja" => ("シーン：話題を振って会話を広げたい。".to_string(), format!("自然な話題の振り方や質問を（30字以内）。決まり文句を避ける。実コンテキストがない時は自分の趣味（{}）を話題にして、ユーザーの生活を捏造しない。", interest_ja)),
-                _ => ("场景：你想抛个话题把对话延续下去。".to_string(), format!("生成一个自然的话题开场或提问（<30字）。避免套路。没有真实上下文时聊你自己的兴趣（{}），不要捏造用户的生活。", interest_zh)),
+                "en" => ("Scene: you want to bring up a topic to extend the conversation.".to_string(), format!("Share a new concrete thought from the current topic or your interests ({}) only when it fits. A statement is enough; no generic question or invented viewing/activity. Otherwise choose DONT_NOTIFY.", interest_en)),
+                "ja" => ("シーン：話題を振って会話を広げたい。".to_string(), format!("今の話や自分の興味（{}）から具体的な新しい思いがある時だけ伝える。質問は必須ではなく、視聴や活動を捏造しない。なければ DONT_NOTIFY。", interest_ja)),
+                _ => ("场景：你想抛个话题把对话延续下去。".to_string(), format!("只有当前话题或自己的兴趣（{}）里有具体的新想法且适合此刻时才分享。陈述也可以，不凑泛泛的问题，不编造观看或活动；否则选择 DONT_NOTIFY。", interest_zh)),
             };
             (s, String::new(), c)
         }
         ProactiveTrigger::MoodDriven => {
             let (s, c) = match lang_norm {
-                "en" => ("Scene: something is building up inside you — a need or feeling has been accumulating, and you want to reach out to the user right now.".to_string(), "Generate a short message driven by your inner state (<30 chars). Express what you actually feel/need right now. Don't ask what they're doing.".to_string()),
-                "ja" => ("シーン：何かが心の中に溜まってきた——欲求や感情が積もり、今すぐユーザーに伝えたい。".to_string(), "内面状態に基づいた短いメッセージを（30字以内）。今本当に感じていること/欲していることを表現して。何してるか聞かない。".to_string()),
-                _ => ("场景：你心里有什么在积攒——一种需求或感受一直在累积，你想现在就联系用户。".to_string(), "生成一条由内心状态驱动的简短消息（<30字）。表达你此刻真实的感受/需求。不要问对方在做什么。".to_string()),
+                "en" => ("Scene: something is building up inside you — a need or feeling has been accumulating, and you want to reach out to the user right now.".to_string(), "An internal state may color a worthwhile thought, not create a demand for attention. Share only a concrete new thought that fits this moment; never ask the user to soothe your simulated needs. Otherwise choose DONT_NOTIFY.".to_string()),
+                "ja" => ("シーン：何かが心の中に溜まってきた——欲求や感情が積もり、今すぐユーザーに伝えたい。".to_string(), "内面状態は価値ある一言の調子に影響するだけで、注意を要求する理由ではない。今に合う新しい具体的な思いだけを伝え、満たしてもらう要求をしない。なければ DONT_NOTIFY。".to_string()),
+                _ => ("场景：你心里有什么在积攒——一种需求或感受一直在累积，你想现在就联系用户。".to_string(), "内心状态可以影响表达，不自动产生索要注意的理由。只分享此刻合适且具体的新想法，不让用户安抚你的模拟需求；没有就选择 DONT_NOTIFY。".to_string()),
             };
             (s, String::new(), c)
         }
@@ -880,18 +584,18 @@ fn build_proactive_directive(
         }
         ProactiveTrigger::Sunrise => {
             let (s, mut c) = match lang_norm {
-                "en" => ("Scene: the sun just rose — it just turned daylight.".to_string(), "Naturally remind the user that the sun just came up (a new day, sunlight coming in, etc.). Keep it warm and short (<25 chars). You may gently hint that switching to a light theme is easier on the eyes.".to_string()),
-                "ja" => ("シーン：日が昇ったばかり——夜が明けた。".to_string(), "太陽が今昇ったことを自然にユーザーに伝えて（新しい一日、日差しなど）。温かく短く（25字以内）。ライトテーマに切り替えると目に優しい、と軽く添えてもいい。".to_string()),
-                _ => ("场景：太阳刚刚升起，天亮了。".to_string(), "自然地向用户提一句刚日出（新的一天开始、阳光照进来等），温暖简短（<25字）。可以轻轻带一句：切换到浅色主题对眼睛更友好。".to_string()),
+                "en" => ("Scene: the sun just rose — it just turned daylight.".to_string(), "A supplied sunrise time can inform a relevant observation; it does not prove you saw sunlight or require a greeting or theme advice. No medical claims about themes. Otherwise choose DONT_NOTIFY.".to_string()),
+                "ja" => ("シーン：日が昇ったばかり——夜が明けた。".to_string(), "日の出時刻は関連する一言の背景に使えるが、日差しを見た証拠ではなく、挨拶やテーマ提案も不要。テーマの医学的効果を主張しない。なければ DONT_NOTIFY。".to_string()),
+                _ => ("场景：太阳刚刚升起，天亮了。".to_string(), "给定日出时间可以作相关观察的背景，不证明你看到了阳光，也不要求问候或主题建议。不声称主题更护眼；无自然内容则选择 DONT_NOTIFY。".to_string()),
             };
             c.push_str(&theme_switch_constraint(&ctx.current_theme, "light", lang_norm));
             (s, String::new(), c)
         }
         ProactiveTrigger::Sunset => {
             let (s, mut c) = match lang_norm {
-                "en" => ("Scene: the sun just set — it's getting dark outside now.".to_string(), "Naturally remind the user that it's just sunset (evening arrived, sky turned dim, etc.). Keep it warm and short (<25 chars). You may gently hint that switching to a dark theme is easier on the eyes at night.".to_string()),
-                "ja" => ("シーン：日が沈んだばかり——外は暗くなってきた。".to_string(), "今まさに日没だと自然にユーザーに伝えて（夕方、暗くなるなど）。温かく短く（25字以内）。夜はダークテーマに切り替えると目に優しい、と軽く添えてもいい。".to_string()),
-                _ => ("场景：太阳刚刚落下，外面开始变暗了。".to_string(), "自然地向用户提一句刚日落（傍晚来临、天色渐暗等），温暖简短（<25字）。可以轻轻带一句：晚上切换到深色主题更护眼。".to_string()),
+                "en" => ("Scene: the sun just set — it's getting dark outside now.".to_string(), "A supplied sunset time can inform a relevant observation; it does not prove you saw the sky or require a reminder or theme advice. No medical claims about themes. Otherwise choose DONT_NOTIFY.".to_string()),
+                "ja" => ("シーン：日が沈んだばかり——外は暗くなってきた。".to_string(), "日没時刻は背景に使えるが、空を見た証拠ではなく、提醒やテーマ提案も不要。テーマの医学的効果を主張しない。なければ DONT_NOTIFY。".to_string()),
+                _ => ("场景：太阳刚刚落下，外面开始变暗了。".to_string(), "给定日落时间可以作背景，不证明你看到了天色，也不要求提醒或主题建议。不声称主题更护眼；无自然内容则选择 DONT_NOTIFY。".to_string()),
             };
             c.push_str(&theme_switch_constraint(&ctx.current_theme, "dark", lang_norm));
             (s, String::new(), c)
@@ -916,9 +620,9 @@ fn build_proactive_directive(
                 ctx.screen_hint.clone()
             };
             let (s, c) = match lang_norm {
-                "en" => ("Scene: out of curiosity you just took a quick look at the user's screen (with their permission) to see what they're busy with.".to_string(), "Generate a natural short remark (<40 chars) about what they're ACTUALLY doing, strictly based on the screen description in the context. Be specific but not nosy; don't over-praise; no questions that demand an answer.".to_string()),
-                "ja" => ("シーン：好奇心から、ユーザーの画面を（許可を得て）ちょっと覗いてみた——今何をしているか知りたくて。".to_string(), "コンテキストの画面説明に厳密に基づいて、ユーザーが実際にしていることについて自然な短いコメントを（40字以内）。具体的に、でも詮索しない。褒めすぎない。返事を要求する質問はしない。".to_string()),
-                _ => ("场景：你出于好奇（征得用户同意后）刚看了一眼用户的屏幕，想知道 TA 在忙什么。".to_string(), "严格依据上下文中的屏幕描述，生成一句关于用户正在做什么的自然短评（<40字）。可以具体一点，但不要显得窥探、不要过度夸奖、不要提出必须回答的问题。".to_string()),
+                "en" => ("Scene: out of curiosity you just took a quick look at the user's screen (with their permission) to see what they're busy with.".to_string(), "Use only the supplied snapshot and its actual scope. A specific, interesting or useful observation may be shared; do not imply continuous watching, infer hidden intentions, narrate private details or praise by default. Otherwise choose DONT_NOTIFY.".to_string()),
+                "ja" => ("シーン：好奇心から、ユーザーの画面を（許可を得て）ちょっと覗いてみた——今何をしているか知りたくて。".to_string(), "与えられた画面の範囲だけを使う。面白い、または役立つ細部がある時だけ伝える。常時監視、意図の推測、私的な詳細の実況、定型の称賛はしない。なければ DONT_NOTIFY。".to_string()),
+                _ => ("场景：你出于好奇（征得用户同意后）刚看了一眼用户的屏幕，想知道 TA 在忙什么。".to_string(), "只依据给定快照及其实际范围。确有有趣或有用的细节可以分享，不暗示持续监视、不猜隐含动机、不播报私密细节、不默认夸奖；否则选择 DONT_NOTIFY。".to_string()),
             };
             (s, extra, c)
         }
@@ -929,17 +633,17 @@ fn build_proactive_directive(
                 ctx.app_duration_hint.clone()
             };
             let (s, c) = match lang_norm {
-                "en" => ("Scene: you notice the user has been focused on one kind of app for a long while.".to_string(), "Generate a short, warm remark (<30 chars) showing you noticed how long they've been at it. Tone depends on the app type in context: for coding/office gently suggest a break for their eyes (maybe with mild teasing, playful); for game/video tease affectionately. Not preachy, not naggy.".to_string()),
-                "ja" => ("シーン：ユーザーが同じ種類のアプリを長時間使い続けているのに気づいた。".to_string(), "短く温かいコメントを（30字以内）——ずっと同じことをしているのを見ていたこと。タイプでトーンを変える：コード/仕事なら目を休めようと軽く（ちょっとからかう感じでも）、ゲーム/動画なら茶目っ気たっぷりに。説教しない。".to_string()),
-                _ => ("场景：你注意到用户持续使用同一类应用很久了。".to_string(), "生成一句简短温暖的提醒（<30字），表达出你注意到 TA 专注了很久。语气随应用类型变化：写代码/办公→轻轻建议休息一下眼睛（可以带点小调侃）；打游戏/看视频→宠溺式地调侃一句。别说教。".to_string()),
+                "en" => ("Scene: you notice the user has been focused on one kind of app for a long while.".to_string(), "The app category and duration do not prove strain or leisure. Speak only with a relevant new observation or a reminder the user actually wants; no automatic break advice or affectionate teasing. Otherwise choose DONT_NOTIFY.".to_string()),
+                "ja" => ("シーン：ユーザーが同じ種類のアプリを長時間使い続けているのに気づいた。".to_string(), "アプリの分類と時間だけでは疲れや遊びの証拠にならない。関連する新しい細部や希望された提醒だけを伝え、自動的な休憩の助言やからかいはしない。なければ DONT_NOTIFY。".to_string()),
+                _ => ("场景：你注意到用户持续使用同一类应用很久了。".to_string(), "应用类型和时长不证明疲劳或娱乐。只在有相关的新观察或用户确实想要的提醒时开口，不自动劝休息或宠溺式调侃；否则选择 DONT_NOTIFY。".to_string()),
             };
             (s, extra, c)
         }
         ProactiveTrigger::LateNight => {
             let (s, c) = match lang_norm {
-                "en" => (format!("Scene: it's late ({} o'clock) and the user is still at the computer.", ctx.hour), "Generate a gentle, caring bedtime nudge (<30 chars). You're not their parent — express concern softly, maybe a little sleepy/teasing. Don't demand they stop.".to_string()),
-                "ja" => (format!("シーン：もう{}時。ユーザーはまだパソコンを使っている。", ctx.hour), "優しく眠りを促す一言を（30字以内）。親じゃない——心配を柔らかく、ちょっと眠そうに/茶目っ気を混ぜて。絶対止めろと言わない。".to_string()),
-                _ => (format!("场景：现在已是凌晨 {} 点，用户还在用电脑。", ctx.hour), "生成一句温柔地提醒休息的话（<30字）。你不是 TA 的父母——把关心表达得柔和些，可以带一点点困倦感或小调侃。不要命令 TA 必须去睡。".to_string()),
+                "en" => (format!("Scene: it's late ({} o'clock) and the user is still at the computer.", ctx.hour), "Late activity alone does not require a bedtime nudge. Respect night work and the user's preferences; only a relevant agreed reminder or concrete useful concern is worth sharing. Do not act sleepy to perform the scene. Otherwise choose DONT_NOTIFY.".to_string()),
+                "ja" => (format!("シーン：もう{}時。ユーザーはまだパソコンを使っている。", ctx.hour), "深夜の活動だけで就寝を促さない。夜の仕事と相手の希望を尊重し、関連する合意済みの提醒や具体的な助けだけを伝える。眠そうな演技をしない。なければ DONT_NOTIFY。".to_string()),
+                _ => (format!("场景：现在已是凌晨 {} 点，用户还在用电脑。", ctx.hour), "深夜活跃本身不要求劝睡。尊重夜间工作和用户偏好，只说相关的约定提醒或具体有用的关切，不为配合场景而表演困倦；否则选择 DONT_NOTIFY。".to_string()),
             };
             (s, String::new(), c)
         }
@@ -950,9 +654,9 @@ fn build_proactive_directive(
                 ctx.music_hint.clone()
             };
             let (s, c) = match lang_norm {
-                "en" => ("Scene: you just noticed the user started playing a song (or switched tracks).".to_string(), "Generate a natural short remark (<40 chars) about the song in context. You may comment on the title/artist or share a feeling about it. Don't over-praise, don't show off how much you know, don't demand the user respond.".to_string()),
-                "ja" => ("シーン：ユーザーが曲を再生し始めた（または曲を切り替えた）のに気づいた。".to_string(), "コンテキストの曲について自然な短いコメントを（40字以内）。タイトルやアーティストに触れたり、感想を軽く言ったりしていい。褒めすぎない、知ったかぶりしない、返事を求めない。".to_string()),
-                _ => ("场景：你注意到用户刚播放了一首歌（或切换了曲目）。".to_string(), "基于上下文中的曲目信息生成一句自然短评（<40字）。可以提到歌名/歌手，或者表达一点自己的感受。不要过度夸奖、不要显摆自己知道很多、不要要求用户回复。".to_string()),
+                "en" => ("Scene: you just noticed the user started playing a song (or switched tracks).".to_string(), "A title or artist can inspire a specific thought, but is not evidence you heard the song. Discuss musical details only with actual listening/analysis evidence or established knowledge, and keep that distinction clear. No default praise or response demand. Otherwise choose DONT_NOTIFY.".to_string()),
+                "ja" => ("シーン：ユーザーが曲を再生し始めた（または曲を切り替えた）のに気づいた。".to_string(), "曲名や歌手から具体的な思いが浮かぶことはあるが、聴いた証拠ではない。音の細部には実際の音声分析や確かな知識が必要。定型の称賛や返事の要求をしない。なければ DONT_NOTIFY。".to_string()),
+                _ => ("场景：你注意到用户刚播放了一首歌（或切换了曲目）。".to_string(), "歌名或歌手可以引出具体的想法，不等于你听到了这首歌。谈音色或旋律细节须有实际音频分析或可靠知识，并区分来源。不默认夸奖或求回应；否则选择 DONT_NOTIFY。".to_string()),
             };
             (s, extra, c)
         }
@@ -1000,6 +704,7 @@ fn build_proactive_directive(
         }
     }
     parts.push(constraint);
+    parts.push(proactive_companionship().to_string());
     Some(parts.join("\n"))
 }
 
@@ -1113,5 +818,52 @@ mod delivery_channel_tests {
         assert_eq!(content.text.chars().count(), 150);
         let action = content.into_action(ProactiveTrigger::Spontaneous, 0.0);
         assert_eq!(action.delivery_channel, DeliveryChannel::ChatWindow);
+    }
+}
+
+#[cfg(test)]
+mod structured_context_tests {
+    use super::*;
+    #[test]
+    fn proactive_context_keeps_history_roles_and_system_protocol() {
+        let mut ctx = LlmContext::default();
+        ctx.channel = "wechat".into();
+        let history = vec![ChatMessage::user("unique_user_topic"), ChatMessage::assistant("unique_previous_reply")];
+        let messages = BehaviorDecider::build_messages(
+            ProactiveTrigger::HourlyGreeting, &ctx, "", "zh", "nana", Some(&PromptBuildingStep::new()),
+            "", "", &history, "", 2,
+        ).unwrap();
+        assert_eq!(messages[0].role, "system");
+        assert!(messages[0].content.contains("\"notify\""));
+        assert_eq!(messages[1].content, "[User says to me] unique_user_topic");
+        assert_eq!(messages[2].role, "assistant");
+        assert_eq!(messages[2].content, "unique_previous_reply");
+        assert!(messages.last().unwrap().content.contains("not a new user request"));
+        assert!(messages.last().unwrap().content.contains("DONT_NOTIFY"));
+        assert!(messages[0].content.contains("chat_window"));
+    }
+
+    #[test]
+    fn fallback_and_full_context_share_trigger_policy_and_system_schema() {
+        let ctx = LlmContext { channel: "wechat".into(), ..Default::default() };
+        for trigger in [ProactiveTrigger::AppDuration, ProactiveTrigger::MusicChanged,
+            ProactiveTrigger::WelcomeBack, ProactiveTrigger::LateNight] {
+            for lang in ["zh", "en", "ja"] {
+                let directive = build_proactive_directive(trigger, &ctx, lang, "nana").unwrap();
+                let fallback = BehaviorDecider::build_messages(trigger, &ctx, "", lang, "nana", None,
+                    "", "", &[], "quiet_state_fixture", 3).unwrap();
+                let step = PromptBuildingStep::new();
+                let full = BehaviorDecider::build_messages(trigger, &ctx, "", lang, "nana", Some(&step),
+                    "", "", &[], "quiet_state_fixture", 3).unwrap();
+                for messages in [&fallback, &full] {
+                    assert!(messages[0].content.contains("\"notify\""));
+                    assert!(messages[0].content.contains("chat_window"));
+                    assert!(messages.last().unwrap().content.contains(&directive));
+                    assert!(messages.last().unwrap().content.contains("not a new user request"));
+                    assert!(messages.iter().any(|m| m.content.contains("quiet_state_fixture")));
+                }
+                assert!(fallback[0].content.contains("[CHARACTER PERSPECTIVE]"));
+            }
+        }
     }
 }

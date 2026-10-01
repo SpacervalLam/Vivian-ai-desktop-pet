@@ -15,9 +15,10 @@ import { resolveAvatarUrl } from '../characterContext';
 import RealtimeCallOverlay, { RealtimeCallBubble } from './RealtimeCallWindow';
 import ImageViewer from './ImageViewer';
 import { useAppStore } from '../stores/useAppStore';
-import { useExtractFileText, type FileTextResult } from '../hooks/useTauriCommands';
+import { prepareSharedFile, fileMessage, fileMetadata } from '../utils/sharedFiles';
 import { stripActions } from '../utils/ActionText';
 import { routeAssistantMessage } from '../utils/chatMessageRouting';
+import { hasVisibleChatText, isVisibleChatMessage } from '../utils/chatMessageContent';
 import type { AiResponse } from '../types';
 
 type Role = 'user' | 'assistant';
@@ -50,6 +51,8 @@ interface ChatMessage {
     fileType: string;
     truncated: boolean;
     originalCharCount: number;
+    filePath?: string;
+    fileSize?: number;
   };
   /** 语音消息：原始音频用于聊天界面播放（发送给 LLM 的仍是 ASR 转写文本） */
   voice?: {
@@ -132,7 +135,20 @@ const SCROLL_DEBOUNCE_MS = 200;
 const TIME_GAP_MS = 5 * 60 * 1000;
 
 let idCounter = 0;
-const nextId = () => `m-${Date.now()}-${idCounter++}`;
+// Only IDs created by live events are eligible; history keeps its backend IDs.
+// Consume once so virtualized rows cannot replay the send animation on remount.
+const pendingMessageAnimations = new Map<string, number>();
+const nextId = () => {
+  const now = Date.now();
+  const id = `m-${now}-${idCounter++}`;
+  pendingMessageAnimations.set(id, now);
+  for (const [key, createdAt] of pendingMessageAnimations) {
+    if (now - createdAt > 2000 || pendingMessageAnimations.size > 256) {
+      pendingMessageAnimations.delete(key);
+    } else break;
+  }
+  return id;
+};
 
 /**
  * 把录制的音频 Blob 解码并重采样到 16kHz 单声道 f32 PCM，返回 base64 编码的字节流。
@@ -238,16 +254,19 @@ const toChatMessages = (e: HistoryEntry): ChatMessage[] => {
         fileType: typeof e.metadata?.file_type === 'string' ? e.metadata.file_type : '',
         truncated: e.metadata?.truncated === true,
         originalCharCount: typeof e.metadata?.original_char_count === 'number' ? e.metadata.original_char_count : 0,
+        filePath: typeof e.metadata?.file_path === 'string' ? e.metadata.file_path : undefined,
+        fileSize: typeof e.metadata?.file_size === 'number' ? e.metadata.file_size : undefined,
       },
     }];
   }
 
-  const lines = e.content.split('\n').map((l) => l.trim()).filter((l) => l.length > 0);
+  const lines = e.content.split('\n').map((l) => l.trim()).filter((l) => hasVisibleChatText(l, role));
+  if (lines.length === 0) return [];
   if (lines.length <= 1) {
     return [{
       id: e.id,
       role,
-      content: e.content,
+      content: lines[0],
       timestamp: ts,
     }];
   }
@@ -731,9 +750,23 @@ const VoiceBubble = React.memo(function VoiceBubble({ message, isUser }: { messa
 
 const Bubble = React.memo(function Bubble({ message, onOpenImage, senderName, characterId }: BubbleProps & { senderName?: string; characterId?: string }) {
   const isUser = message.role === 'user';
+  const entranceRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const createdAt = pendingMessageAnimations.get(message.id);
+    pendingMessageAnimations.delete(message.id);
+    const element = entranceRef.current;
+    if (createdAt === undefined || Date.now() - createdAt > 2000 || !element
+      || typeof element.animate !== 'function'
+      || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    element.animate([
+      { opacity: 0.35, transform: `translate(${isUser ? 6 : -6}px, 8px) scale(0.96)` },
+      { opacity: 1, transform: 'translate(0, 0) scale(1)' },
+    ], { duration: 180, easing: 'cubic-bezier(0.2, 0.8, 0.2, 1)' });
+    // No persistent class or transform: text updates and virtualizer measurements stay stable.
+  }, [message.id, isUser]);
   const avatarSize = 38;
   const isStreaming = !!message.streaming;
-  const isEmpty = isStreaming && !message.content;
+  const isEmpty = isStreaming && !hasVisibleChatText(message.content, message.role);
   const hasImage = !!message.imageDataUrl || !!message.imagePath;
   const hasLinkCard = !!message.linkCard;
   const hasFile = !!message.fileMeta;
@@ -789,9 +822,10 @@ const Bubble = React.memo(function Bubble({ message, onOpenImage, senderName, ch
       alignItems: 'flex-start', gap: 8, marginBottom: 16,
     }}>
       {isUser ? <UserAvatar size={avatarSize} /> : <AiAvatar size={avatarSize} characterId={characterId ?? message.character_id} />}
-      <div style={{
+      <div ref={entranceRef} style={{
         display: 'flex', flexDirection: 'column',
         alignItems: isUser ? 'flex-end' : 'flex-start', maxWidth: '68%',
+        transformOrigin: isUser ? 'right bottom' : 'left bottom',
       }}>
         {!isUser && senderName && (
           <span style={{ fontSize: 11, color: 'var(--wx-icon)', marginBottom: 2, marginLeft: 4 }}>{senderName}</span>
@@ -937,6 +971,7 @@ const Bubble = React.memo(function Bubble({ message, onOpenImage, senderName, ch
                 </div>
                 <div style={{ fontSize: 11, color: 'var(--wx-icon)', marginTop: 2 }}>
                   {message.fileMeta!.fileType.toUpperCase() || 'FILE'}
+                  {message.fileMeta!.fileSize !== undefined && <span> · {Math.ceil(message.fileMeta!.fileSize! / 1024)} KB</span>}
                   {message.fileMeta!.originalCharCount > 0 && (
                     <span> · {message.fileMeta!.originalCharCount} 字符</span>
                   )}
@@ -954,6 +989,14 @@ const Bubble = React.memo(function Bubble({ message, onOpenImage, senderName, ch
               </svg>
             </div>
             {/* 文件内容：默认折叠，避免长文本一次性渲染导致卡顿 */}
+            {message.fileMeta?.filePath && (
+              <button type="button" style={{ margin: '0 14px 10px', cursor: 'pointer' }}
+                onClick={() => void openShell(message.fileMeta!.filePath!).catch((e) => {
+                  void emit('toast:show', { message: String(e), type: 'error', duration: 4000, key: Date.now() });
+                })}>
+                {i18n.t('chat.open_shared_file', { defaultValue: '打开文件' })}
+              </button>
+            )}
             {fileExpanded && (
               <div style={{
                 borderTop: '0.5px solid var(--wx-border)',
@@ -2325,7 +2368,7 @@ const ChatWindow: React.FC = () => {
           const ch = event.payload.channel;
           const cid = event.payload.character_id;
           const text = event.payload.content?.trim();
-          if (!text) return;
+          if (!text || !hasVisibleChatText(text)) return;
           const ts = event.payload.timestamp ? normalizeTimestamp(event.payload.timestamp) : Date.now();
 
           const route = routeAssistantMessage(viewRef.current, privateCharIdRef.current, cid, ch);
@@ -2499,7 +2542,7 @@ const ChatWindow: React.FC = () => {
           const parts = buf.split('\n');
           if (parts.length > 1) {
             // 有换行符：除最后一段外都是完整段落，各自输出为已结算气泡
-            const completeParts = parts.slice(0, -1).map((p) => p.trim()).filter((p) => p.length > 0);
+            const completeParts = parts.slice(0, -1).map((p) => p.trim()).filter((p) => hasVisibleChatText(p));
             const remaining = parts[parts.length - 1];
             groupStreamBuffersRef.current.set(sid, remaining);
             if (completeParts.length > 0) {
@@ -2528,7 +2571,7 @@ const ChatWindow: React.FC = () => {
         const parts = buf.split('\n');
         if (parts.length > 1) {
           // 有换行符：除最后一段外都是完整段落，各自输出为已结算气泡
-          const completeParts = parts.slice(0, -1).map((p) => p.trim()).filter((p) => p.length > 0);
+          const completeParts = parts.slice(0, -1).map((p) => p.trim()).filter((p) => hasVisibleChatText(p));
           const remaining = parts[parts.length - 1];
           streamBuffersRef.current.set(sid, remaining);
           if (completeParts.length > 0) {
@@ -2577,7 +2620,7 @@ const ChatWindow: React.FC = () => {
                 duration: event.payload.voice_duration ?? 0,
               },
             });
-          } else if (trimmedBuf) {
+          } else if (hasVisibleChatText(trimmedBuf)) {
             newMsgs.push({
               id: nextId(),
               role: 'assistant',
@@ -2591,7 +2634,7 @@ const ChatWindow: React.FC = () => {
             setGroupMessages((prev) => [...prev, ...newMsgs]);
           }
           // 立即刷新主面板群聊预览（乐观更新）
-          const previewText = isVoiceMessage ? '[语音]' : (finalText.trim() || buf.trim());
+          const previewText = isVoiceMessage ? '[语音]' : stripActions(finalText.trim() || buf.trim());
           if (previewText) {
             setLastPreviews((prev) => ({
               ...prev,
@@ -2627,7 +2670,7 @@ const ChatWindow: React.FC = () => {
               duration: event.payload.voice_duration ?? 0,
             },
           }]);
-        } else if (trimmedBuf) {
+        } else if (hasVisibleChatText(trimmedBuf)) {
           setMessages((prev) => [...prev, {
             id: nextId(),
             role: 'assistant',
@@ -2637,7 +2680,7 @@ const ChatWindow: React.FC = () => {
           }]);
         }
         // 立即刷新主面板私聊预览（乐观更新）
-        const privatePreviewText = isVoiceMessage ? '[语音]' : finalText.trim();
+        const privatePreviewText = isVoiceMessage ? '[语音]' : stripActions(finalText);
         const previewCharId = privateCharIdRef.current;
         if (privatePreviewText && previewCharId) {
           setLastPreviews((prev) => ({
@@ -2863,7 +2906,7 @@ const ChatWindow: React.FC = () => {
       | { kind: 'msg'; msg: ChatMessage; ts: number }
       | { kind: 'card'; card: CardMessage; ts: number };
     const merged: Merged[] = [
-      ...messages.map((m) => ({ kind: 'msg' as const, msg: m, ts: m.timestamp })),
+      ...messages.filter(isVisibleChatMessage).map((m) => ({ kind: 'msg' as const, msg: m, ts: m.timestamp })),
       ...cards.map((c) => ({ kind: 'card' as const, card: c, ts: c.timestamp })),
     ];
     merged.sort((a, b) => a.ts - b.ts);
@@ -3770,7 +3813,6 @@ const ChatWindow: React.FC = () => {
   }, [t, addDraftImages]);
 
   // ── 文件拖放：通过 Tauri 原生 onDragDropEvent 获取文件路径 ──
-  const extractFileText = useExtractFileText();
   const [isDragOver, setIsDragOver] = useState(false);
 
   // Drop 逻辑用 ref 保存最新闭包，避免 onDragDropEvent 监听器持有过时状态
@@ -3798,12 +3840,12 @@ const ChatWindow: React.FC = () => {
     void (async () => {
       for (const filePath of paths) {
         try {
-          const result: FileTextResult = await extractFileText(filePath);
+          const { file, result } = await prepareSharedFile(filePath);
 
           if (result.file_type === 'image') {
             // 图片进入草稿（预览后可随文本一起发送），不再直接发送
             try {
-              const blob = await (await fetch(convertFileSrc(filePath))).blob();
+              const blob = await (await fetch(convertFileSrc(file.path))).blob();
               addDraftImages([new File([blob], result.filename || 'image', { type: blob.type || 'image/png' })]);
             } catch {
               void emit('toast:show', {
@@ -3811,32 +3853,11 @@ const ChatWindow: React.FC = () => {
                 type: 'error', duration: 4000, key: Date.now(),
               });
             }
-          } else if (result.file_type === 'unsupported') {
-            void emit('toast:show', {
-              message: t('toast.file_unsupported', {
-                filename: result.filename,
-                defaultValue: '不支持的文件类型：{{filename}}',
-              }),
-              type: 'warning', duration: 4000, key: Date.now(),
-            });
           } else {
-            const truncatedHint = result.truncated
-              ? t('toast.file_truncated', {
-                  count: result.original_char_count,
-                  defaultValue: `（文件过长，已截断，原始 ${result.original_char_count} 字符）`,
-                })
-              : '';
-            const message = `[文件：${result.filename}]\n${result.text}${truncatedHint}`;
-            const fileMetadata = {
-              kind: 'file',
-              file_name: result.filename,
-              file_type: result.file_type,
-              truncated: result.truncated,
-              original_char_count: result.original_char_count,
-            };
-            for (const cid of targetCharIds) {
-              void ChatController.sendMessage(message, cid, channel, undefined, fileMetadata);
-            }
+            const message = fileMessage(result);
+            const metadata = fileMetadata(result, file);
+            await Promise.all(targetCharIds.map((cid) =>
+              ChatController.sendMessage(message, cid, channel, undefined, metadata)));
           }
         } catch (err) {
           void emit('toast:show', {
@@ -3854,8 +3875,10 @@ const ChatWindow: React.FC = () => {
   // 注册原生拖放事件监听（仅一次）
   useEffect(() => {
     let unlisten: UnlistenFn | undefined;
+    let disposed = false;
     void (async () => {
       unlisten = await getCurrentWindow().onDragDropEvent((event) => {
+        if (disposed) return;
         const payload = event.payload;
         if (payload.type === 'enter') {
           setIsDragOver(true);
@@ -3866,8 +3889,9 @@ const ChatWindow: React.FC = () => {
           handleFileDropRef.current(payload.paths);
         }
       });
-    })();
-    return () => { unlisten?.(); };
+      if (disposed) unlisten();
+    })().catch((err) => console.warn('[ChatWindow] File drop listener:', err));
+    return () => { disposed = true; unlisten?.(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -3895,29 +3919,13 @@ const ChatWindow: React.FC = () => {
       const charId = privateCharId;
       if (!charId) return;
 
-      const result: FileTextResult = await extractFileText(filePath);
+      const { file, result } = await prepareSharedFile(filePath);
 
       if (result.file_type === 'image') {
         // 用户在文件选择器中选了图片：走多模态图片发送流程
-        await invoke('send_image_message', { sourcePath: filePath, characterId: charId, channel: 'wechat' });
-      } else if (result.file_type === 'unsupported') {
-        void emit('toast:show', {
-          message: t('toast.file_unsupported', { filename: result.filename, defaultValue: '不支持的文件类型：{{filename}}' }),
-          type: 'warning', duration: 4000, key: Date.now(),
-        });
+        await invoke('send_image_message', { sourcePath: file.path, characterId: charId, channel: 'wechat' });
       } else {
-        const truncatedHint = result.truncated
-          ? t('toast.file_truncated', { count: result.original_char_count, defaultValue: `（文件过长，已截断，原始 ${result.original_char_count} 字符）` })
-          : '';
-        const message = `[文件：${result.filename}]\n${result.text}${truncatedHint}`;
-        const fileMetadata = {
-          kind: 'file',
-          file_name: result.filename,
-          file_type: result.file_type,
-          truncated: result.truncated,
-          original_char_count: result.original_char_count,
-        };
-        void ChatController.sendMessage(message, charId, 'wechat', undefined, fileMetadata);
+        await ChatController.sendMessage(fileMessage(result), charId, 'wechat', undefined, fileMetadata(result, file));
       }
     } catch (e) {
       const errMsg = String(e);
@@ -3926,7 +3934,7 @@ const ChatWindow: React.FC = () => {
         type: 'error', duration: 5000, key: Date.now(),
       });
     }
-  }, [t, privateCharId, extractFileText]);
+  }, [t, privateCharId]);
 
   // ── 摄像头拍摄：打开拍摄模态，拍照后保存为临时文件并走 send_image_message ──
   const [cameraOpen, setCameraOpen] = useState(false);
@@ -3986,6 +3994,7 @@ const ChatWindow: React.FC = () => {
     const result: RenderItem[] = [];
     let prevTs: number | null = null;
     for (const m of groupMessages) {
+      if (!isVisibleChatMessage(m)) continue;
       if (prevTs === null || m.timestamp - prevTs > TIME_GAP_MS) {
         result.push({ kind: 'time', key: `t-${m.id}`, text: formatSeparatorTime(m.timestamp, t) });
       }

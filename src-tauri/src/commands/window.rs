@@ -132,249 +132,6 @@ pub fn freeze_window_webview(app: AppHandle, label: String) -> Result<(), String
     Ok(())
 }
 
-// ============ 房间模式：角色窗口批量显隐 + 冻结 ============
-//
-// 进入 3D 房间时桌面角色窗口整体让位：hide 之后 TrySuspend 冻结，
-// 桌宠 的每帧渲染循环随之停止——窗口 hide 不会自动暂停 rAF，
-// 不冻结的话两个角色在房间里仍持续空转 GPU/CPU，显存分配也照旧。
-// 离开时先 Resume 再 show，恢复渲染。
-//
-// hide→freeze 与 thaw→show 必须在主线程 FIFO 队列里保持先后，
-// 所以由本命令一次性完成，前端不再自己 show/hide 角色窗口。
-//
-// 进房间前的可见性记录在案：出房间只恢复原本可见的窗口，
-// 避免把用户手动下线的角色误 show 回来。
-
-/// 进入房间前各窗口的可见状态（label → visible）
-static ROOM_PREV_VISIBILITY: Lazy<Mutex<std::collections::HashMap<String, bool>>> =
-    Lazy::new(|| Mutex::new(std::collections::HashMap::new()));
-
-/// 房间模式是否已激活
-///
-/// 退出路径有两条且都会到达：前端卸载时 invoke set_room_mode(false)，
-/// 以及 room 窗口 CloseRequested / Destroyed 时 Rust 侧兜底。
-///
-/// 进入侧同样必须幂等，这比退出侧更容易被忽略：Tauri 命令在异步运行时上并发
-/// 执行，多个 invoke 之间没有先后保证（React StrictMode 会连发 true→false→true
-/// 三条）。若重复的「进入」不整体跳过，它会在角色窗口已被隐藏之后重新记一次档，
-/// 把 prev 里的可见性覆盖成 false —— 退出时读到 false 就不 show，桌宠从此消失。
-/// 「关闭房间后桌宠回不来」就是这个：不是恢复逻辑没跑，是它读到的是被覆盖过的档。
-static ROOM_MODE_ACTIVE: AtomicBool = AtomicBool::new(false);
-
-/// 房间模式期间与角色窗口一起让位的常驻窗口
-///
-/// 心智观察器是全屏窗口，房间窗口（无边框透明全屏）叠在它上面时，
-/// 场景之外的透明区域会透出它的内容；而且被完全盖住还在跑渲染没有意义。
-/// 它与角色窗口的区别是不冻结 WebView——它没有 桌宠 渲染循环，
-/// hide 之后 WebView2 自己就会节流，冻结反而会让期间的配置变更事件丢失。
-const ROOM_MODE_EXTRA_WINDOWS: &[&str] = &["memory"];
-
-/// 3D 公寓窗口的 label，与前端 utils/roomWindow.ts 的 ROOM_WINDOW_LABEL 保持一致
-pub(crate) const ROOM_WINDOW_LABEL: &str = "room";
-
-#[tauri::command]
-pub fn set_room_mode(
-    app: AppHandle,
-    state: State<'_, std::sync::Arc<crate::state::AppState>>,
-    active: bool,
-) -> Result<(), String> {
-    if active && !crate::commands::apartment::enabled(state.inner()) {
-        return Err("3D 公寓插件未安装或已禁用".into());
-    }
-    set_room_mode_internal(&app, state.inner(), active);
-    Ok(())
-}
-
-/// 房间模式的实际实现，命令与窗口事件两条路径共用
-///
-/// 幂等且串行：进入和退出都在 ROOM_PREV_VISIBILITY 的锁内完成，两个方向各自
-/// 只在状态真的翻转时执行一次。
-///
-/// 为什么要整段加锁：切换一次要做「读可见性 → 记档 → hide/show」三步，
-/// 并发的两个调用会读到彼此的中间态（一个刚记完档还没 hide，另一个就把
-/// 已隐藏的窗口记成 prev=false）。锁内只有往主线程 FIFO 投递的非阻塞窗口
-/// 操作，不会和主线程互相等待。
-pub(crate) fn set_room_mode_internal(
-    app: &AppHandle,
-    state: &std::sync::Arc<crate::state::AppState>,
-    active: bool,
-) {
-    let mut prev = ROOM_PREV_VISIBILITY.lock();
-
-    if active {
-        if ROOM_MODE_ACTIVE.swap(true, Ordering::SeqCst) {
-            return; // 已在房间模式：重复的进入调用不重新记档
-        }
-        // 上一次退出漏清的残留会让恢复时读到过期的可见性
-        prev.clear();
-
-        let chars_cfg = state.config.read().get_all().characters;
-        for entry in chars_cfg.list.iter() {
-            toggle_window_for_room(app, &entry.id, true, &mut prev);
-        }
-        for label in ROOM_MODE_EXTRA_WINDOWS {
-            toggle_window_for_room(app, label, false, &mut prev);
-        }
-    } else {
-        if !ROOM_MODE_ACTIVE.swap(false, Ordering::SeqCst) {
-            return; // 压根没进过房间模式，或已经退出过一次 → 重复的兜底调用
-        }
-        // 只恢复本次记过档的窗口：角色中途下线、或压根没建起来的窗口不在里面
-        let labels: Vec<String> = prev.keys().cloned().collect();
-        let chars_cfg = state.config.read().get_all().characters;
-        for label in labels {
-            let Some(was_visible) = prev.remove(&label) else {
-                continue;
-            };
-            let freeze = chars_cfg.list.iter().any(|e| e.id == label);
-            restore_window_for_room(app, &label, was_visible, freeze);
-        }
-    }
-}
-
-/// 进入房间：记录可见性后隐藏（`freeze` 为 true 时连同 WebView 一起冻结，
-/// 角色窗口走这条）
-fn toggle_window_for_room(
-    app: &AppHandle,
-    label: &str,
-    freeze: bool,
-    prev: &mut std::collections::HashMap<String, bool>,
-) {
-    let Some(win) = app.get_webview_window(label) else {
-        return;
-    };
-    let visible = win.is_visible().unwrap_or(false);
-    prev.insert(label.to_string(), visible);
-    let _ = win.hide();
-    if freeze {
-        freeze_webview(&win);
-    }
-}
-
-/// 离开房间：先解冻再按记档决定是否恢复显示
-fn restore_window_for_room(app: &AppHandle, label: &str, was_visible: bool, freeze: bool) {
-    let Some(win) = app.get_webview_window(label) else {
-        return;
-    };
-    if freeze {
-        thaw_webview(&win);
-    }
-    if was_visible {
-        let _ = win.show();
-    }
-}
-
-// ============ 房间窗口 ESC 看护线程 ============
-//
-// 第一人称 PointerLock 状态下，浏览器把 ESC 保留用于「退出指针锁定」，
-// 不会向页面派发 keydown——前端 keydown 监听永远收不到 ESC，用户按 ESC
-// 只会解锁鼠标、不会关闭窗口。这里改用原生 GetAsyncKeyState 轮询 ESC 的
-// 下降沿（硬件级按键状态，不受 PointerLock 影响），在 room 窗口是前台窗口
-// 时直接 close()。线程随窗口销毁 / 显式停止 / 应用退出自动结束。
-//
-// 生命周期用单调递增的「代号」而不是「运行中标志 + 停止标志」一对布尔。
-// 旧写法下 watch 会因为「已在运行」直接返回，而 stop 只是置位、要等线程下一轮
-// 轮询（≤20ms）才真正清掉运行中标志。于是 stop→start 间隔一旦短于这个退出延迟，
-// start 就被挡掉、旧线程随后才退出，看护永久消失且无法自愈。
-// React StrictMode 会把挂载 effect 跑成 mount→cleanup→mount，三条 invoke 挤在
-// 几毫秒内，必然命中这个时序——这就是「房间里按 ESC 没反应」。
-// 改成代号后：每次 watch 领一个新代号并让旧线程失效，stop 只是领一个没人认领的
-// 代号，无论调用多密集都恰好剩一个活线程。
-
-/// 当前有效的看护线程代号；每次启动或停止都 +1
-static ROOM_ESC_GEN: AtomicU32 = AtomicU32::new(0);
-
-/// 命令面板打开期间是否抑制硬件 ESC 看护。
-/// 前端 Minecraft 风格命令面板输入时，ESC 要由 keydown 关面板而不是关窗口；
-/// 硬件轮询不知道 DOM 状态，只能由前端显式开/关这个开关。
-static ROOM_ESC_SUPPRESSED: AtomicBool = AtomicBool::new(false);
-
-/// 窗口暂时查不到时的宽限时长：命令可能比窗口注册早到一瞬间
-const ROOM_ESC_MISSING_GRACE: Duration = Duration::from_secs(3);
-
-/// 启动 room 窗口的 ESC 看护线程（前端 RoomWindow 挂载时调用，重复调用安全）
-#[tauri::command]
-pub fn watch_room_escape(app: AppHandle) {
-    // 领号即让上一代看护失效，无需再判断它是否还在跑
-    let gen = ROOM_ESC_GEN.fetch_add(1, Ordering::SeqCst).wrapping_add(1);
-    // 新看护从非抑制态起步：上次会话面板没关干净留下的残留抑制不能带进来
-    ROOM_ESC_SUPPRESSED.store(false, Ordering::SeqCst);
-
-    thread::spawn(move || {
-        // 开局就按着 ESC（例如按着 ESC 点开房间）不算一次按下
-        let mut esc_prev = is_escape_down();
-        let mut missing_since: Option<Instant> = None;
-        // 上一轮是否处于抑制态。用于检测「抑制 → 恢复」沿，见下方对 esc_prev 的消耗。
-        let mut suppressed_prev = ROOM_ESC_SUPPRESSED.load(Ordering::SeqCst);
-
-        loop {
-            // 主应用退出（APP_EXITING）或本看护被更新的代号取代/stop 时立刻退出
-            if APP_EXITING.load(Ordering::SeqCst)
-                || ROOM_ESC_GEN.load(Ordering::SeqCst) != gen
-            {
-                break;
-            }
-            let Some(win) = app.get_webview_window(ROOM_WINDOW_LABEL) else {
-                // 窗口已销毁，或命令比窗口注册先到：给一段宽限期再退出，
-                // 否则一次早到的 invoke 就能让看护静默消失
-                let since = *missing_since.get_or_insert_with(Instant::now);
-                if since.elapsed() >= ROOM_ESC_MISSING_GRACE {
-                    break;
-                }
-                esc_prev = false;
-                thread::sleep(Duration::from_millis(20));
-                continue;
-            };
-            missing_since = None;
-
-            let esc_now = is_escape_down();
-            let suppressed = ROOM_ESC_SUPPRESSED.load(Ordering::SeqCst);
-            if suppressed {
-                // 命令面板打开：硬件 ESC 看护暂停，前端 keydown 负责关面板。
-                // 抑制期每次把 esc_prev 同步成现状——否则恢复后无法重建基线。
-                esc_prev = esc_now;
-                suppressed_prev = true;
-                thread::sleep(Duration::from_millis(20));
-                continue;
-            }
-            if suppressed_prev {
-                // 抑制刚解除（面板刚收掉）。关键竞态：关面板的那一次 ESC 此刻可能
-                // 还物理按着，而抑制期间的第一拍往往在「按下之前」就已把 esc_prev
-                // 同步为 false —— 若此时立即建档，会把同一次按键误判成新的下降沿
-                // 关掉整个窗口。所以恢复时先把当前 ESC 状态消费掉：必须松开再按，
-                // 才构成一次真正的关闭。
-                esc_prev = esc_now;
-                suppressed_prev = false;
-            }
-            if esc_now && !esc_prev && is_window_foreground(&win) {
-                // 下降沿 + 前台窗口：直接关闭。close 触发 CloseRequested，
-                // 由 lib.rs 的 on_window_event 兜底恢复角色窗口与心智观察器。
-                let _ = win.close();
-                break;
-            }
-            esc_prev = esc_now;
-            // 20ms 轮询：快于人类点按 ESC 的最短持续时间（~40-60ms），
-            // 避免"按下即松开"落在两次轮询之间被漏检
-            thread::sleep(Duration::from_millis(20));
-        }
-        tracing::info!("[room_escape] 看护线程已退出 (gen={gen})");
-    });
-}
-
-/// 命令面板开合时由前端调用：suppressed=true 期间硬件 ESC 看护暂停
-/// （ESC 只关面板不关窗口），面板收起后置回 false 恢复看护。
-#[tauri::command]
-pub fn set_room_escape_suppressed(suppressed: bool) {
-    ROOM_ESC_SUPPRESSED.store(suppressed, Ordering::SeqCst);
-}
-
-/// 停止 room 窗口的 ESC 看护线程（前端 RoomWindow 卸载时调用）
-#[tauri::command]
-pub fn stop_room_escape_watcher() {
-    // 让现有看护失效；下一次 watch_room_escape 会领新代号重新起线程
-    ROOM_ESC_GEN.fetch_add(1, Ordering::SeqCst);
-}
-
 /// 窗口当前是否为系统前台窗口。
 ///
 /// 两个来源都查，任一为 true 即视为前台，避免单个来源在透明/无边框窗口上
@@ -457,13 +214,13 @@ fn is_left_mouse_button_down() -> bool {
 
 /// ESC 键当前是否按下（边缘检测线程轮询用，配合下降沿避免重复触发）
 #[cfg(windows)]
-fn is_escape_down() -> bool {
+pub(crate) fn is_escape_down() -> bool {
     use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_ESCAPE};
     unsafe { GetAsyncKeyState(VK_ESCAPE.0 as i32) as u16 & 0x8000 != 0 }
 }
 
 #[cfg(not(windows))]
-fn is_escape_down() -> bool {
+pub(crate) fn is_escape_down() -> bool {
     false
 }
 
@@ -506,6 +263,7 @@ pub fn start_cursor_tracking(
             std::collections::VecDeque::new();
         // 上一帧是否处于拖拽状态，用于检测拖拽结束的瞬间
         let mut prev_is_dragging = false;
+        let mut drag_observation: Option<(Instant, f64, f64, f64, f64)> = None;
         // 上次发出「拖太快 → 晕乎乎」事件的时刻，用于节流（每次新拖拽会话重置）
         let mut last_dizzy_emit: Option<Instant> = None;
         // 连续超速帧计数：仅当连续 DRAG_FAST_MIN_STREAK 帧都在阈值之上才判「拖太快」，
@@ -541,6 +299,7 @@ pub fn start_cursor_tracking(
                 fast_drag_streak = 0;
                 fast_drag_peak = 0.0;
                 prev_is_dragging = false;
+                drag_observation = None;
                 thread::sleep(Duration::from_millis(60));
                 continue;
             }
@@ -594,6 +353,10 @@ pub fn start_cursor_tracking(
                 // 光标轨迹采样（全局物理坐标，不受窗口追逐延迟影响），
                 // 供松手瞬间计算惯性甩飞初速度
                 let now = std::time::Instant::now();
+                let observation = drag_observation.get_or_insert((now, c.x, c.y, 0.0, 0.0));
+                observation.3 += (c.x - observation.1).hypot(c.y - observation.2);
+                observation.1 = c.x;
+                observation.2 = c.y;
                 drag_samples.push_back((now, c.x, c.y));
                 while drag_samples.len() > 1
                     && now.duration_since(drag_samples[0].0).as_millis() as u64
@@ -612,6 +375,9 @@ pub fn start_cursor_tracking(
                     let prev = drag_samples[drag_samples.len() - 2];
                     let last = *drag_samples.back().unwrap();
                     let speed = drag_speed(prev, last);
+                    if let (Some(observation), Some(speed)) = (drag_observation.as_mut(), speed) {
+                        observation.4 = observation.4.max(speed);
+                    }
                     if speed.is_some_and(|v| v >= DRAG_FAST_VELOCITY) {
                         let v = speed.unwrap_or(0.0);
                         fast_drag_streak = fast_drag_streak.saturating_add(1);
@@ -630,6 +396,7 @@ pub fn start_cursor_tracking(
                             last_dizzy_emit = Some(Instant::now());
                             // 触发后清空连续段：下一次触发需重新累计一整段疯狂甩动，
                             // 避免持续超速时峰值一旦达标就永远保有资格
+                            let reaction_peak = fast_drag_peak;
                             fast_drag_streak = 0;
                             fast_drag_peak = 0.0;
                             // emit_to：晕乎乎是「这一只被抓着甩懵了」，广播会让另一只也晕
@@ -639,6 +406,7 @@ pub fn start_cursor_tracking(
                                 json!({
                                     "duration_ms": DRAG_FAST_DIZZY_MS,
                                     "reason": "fast_drag",
+                                    "speed_px_per_ms": reaction_peak,
                                 }),
                             );
                         }
@@ -650,6 +418,16 @@ pub fn start_cursor_tracking(
             // 覆盖正常 mouseup（前端 stop_window_drag）和 watchdog 兜底两条路径。
             if prev_is_dragging && !is_dragging {
                 let v = fling_velocity_from_samples(&drag_samples);
+                if let Some((started, _, _, distance, peak)) = drag_observation.take() {
+                    // Ignore click jitter, holds and reactions already covered by dizzy/fling.
+                    if distance >= 20.0 && last_dizzy_emit.is_none() && v.is_none() {
+                        let _ = win.emit_to(&label, "drag:interaction", json!({
+                            "duration_ms": started.elapsed().as_millis() as u64,
+                            "distance_px": distance,
+                            "speed_px_per_ms": peak,
+                        }));
+                    }
+                }
                 drag_samples.clear();
                 // 拖拽会话结束，晕眩节流窗口与连续超速计数一并作废：
                 // 下一次拖拽可以立即触发
@@ -1528,7 +1306,7 @@ pub fn show_side_chat_animated(app: AppHandle, label: Option<String>) -> Result<
             // 每次重新打开默认未锁定、无输入：光标离开自动隐藏（调用方可随后显式 set locked）
             SIDE_CHAT_LEFT_LOCKED.store(false, Ordering::SeqCst);
             SIDE_CHAT_LEFT_INPUT_OPEN.store(false, Ordering::SeqCst);
-            let _ = app.emit("sidechat:lock_changed", json!({ "locked": false }));
+            let _ = app.emit_to("side_chat", "sidechat:lock_changed", json!({ "locked": false, "label": "side_chat" }));
             side_chat_left_show(&win);
         }
         return Ok(());
@@ -1565,8 +1343,11 @@ pub fn collapse_side_chat(app: AppHandle, label: Option<String>) -> Result<(), S
     }
     // 直接对话侧边栏（side_chat）停靠屏幕左缘：不参与三态全局状态，直接隐藏。
     if label == "side_chat" {
-        let _ = app.emit("sidechat:lock_changed", json!({ "locked": false }));
-        let _ = app.emit("sidechat:input_reset", json!({}));
+        SIDE_CHAT_LEFT_LOCKED.store(false, Ordering::SeqCst);
+        SIDE_CHAT_LEFT_INPUT_OPEN.store(false, Ordering::SeqCst);
+        *SIDE_CHAT_LEFT_INPUT_REGION.lock() = None;
+        let _ = win.emit_to("side_chat", "sidechat:lock_changed", json!({ "locked": false, "label": "side_chat" }));
+        let _ = win.emit_to("side_chat", "sidechat:input_reset", json!({ "label": "side_chat" }));
         let _ = win.hide();
         freeze_webview(&win);
         return Ok(());
@@ -1579,7 +1360,7 @@ pub fn collapse_side_chat(app: AppHandle, label: Option<String>) -> Result<(), S
     Ok(())
 }
 
-// ============ side_chat 全局鼠标 Hook（Peek 单击展开 + 穿透态双击锁定） ============
+// ============ chat 右侧抽屉全局鼠标 Hook（Peek 单击展开 + 穿透态双击锁定） ============
 
 /// Hook 事件类别：0 = Peek 态单击探出条（展开），1 = 穿透态双击（切换锁定）
 const SIDE_CHAT_HOOK_CLICK: u8 = 0;
@@ -1639,33 +1420,6 @@ unsafe extern "system" fn side_chat_mouse_ll_proc(
 
 /// 消费线程命中处理：按事件类别分流（复检窗口可见性与落点矩形）。
 fn handle_side_chat_hook_event(app: &AppHandle, kind: u8, x: i32, y: i32) {
-    // 直接对话侧边栏（side_chat，左缘）：穿透态双击切换其独立锁定；解锁即隐藏。
-    // 无输入框时窗口为穿透态（ignore_cursor_events=true），React onDoubleClick 收不到，
-    // 故双击锁定由本全局 Hook 独占处理。
-    if kind == SIDE_CHAT_HOOK_DBLCLK && SIDE_CHAT_CLICK_THROUGH.load(Ordering::SeqCst) {
-        if let Some(win) = app.get_webview_window("side_chat") {
-            if win.is_visible().ok().unwrap_or(false) {
-                if let (Ok(pos), Ok(size)) = (win.outer_position(), win.outer_size()) {
-                    let hit = x >= pos.x
-                        && x <= pos.x + size.width as i32
-                        && y >= pos.y
-                        && y <= pos.y + size.height as i32;
-                    if hit {
-                        let new_locked = !SIDE_CHAT_LEFT_LOCKED.load(Ordering::SeqCst);
-                        SIDE_CHAT_LEFT_LOCKED.store(new_locked, Ordering::SeqCst);
-                        let _ = app.emit("sidechat:lock_changed", json!({ "locked": new_locked }));
-                        tracing::info!("[side_chat_hook] side_chat 双击切换锁定 → {new_locked}");
-                        if !new_locked {
-                            let _ = win.hide();
-                            freeze_webview(&win);
-                        }
-                        return;
-                    }
-                }
-            }
-        }
-    }
-
     // 微信抽屉（chat）：既有右缘逻辑
     let win = match app.get_webview_window("chat") {
         Some(w) => w,
@@ -2023,16 +1777,41 @@ pub(crate) fn stop_side_chat_edge_watcher_internal() {
     }
 }
 
-// ============ side_chat 左缘看护线程（直接对话侧边栏：自动隐藏 + 锁定 + ESC 解锁） ============
+// ============ side_chat 左缘看护线程（直接对话侧边栏：自动隐藏 + Tab 锁定 + Esc 收回） ============
 //
-// 与 chat（微信）右缘三态机制解耦：side_chat 停靠左缘，位置固定。恢复「双击解锁后光标
-// 离开自动隐藏」「ESC 解锁并隐藏」语义：未锁定且光标离开窗口到宽限后自动隐藏；锁定或
-// 输入框打开时保持；悬浮按 ESC（下降沿）解锁并立即隐藏。
+// side_chat 停靠左缘：悬浮按 Tab 切换锁定，Esc 收回；未锁定时光标离开自动隐藏。
+// 仅输入区域接收鼠标事件，其他区域保持原生穿透。
 
 /// side_chat 独立锁定标志（不共享 chat 的三态 SIDE_CHAT_LOCKED）
 static SIDE_CHAT_LEFT_LOCKED: AtomicBool = AtomicBool::new(false);
-/// side_chat 输入框打开标志：打字期间不自动隐藏
+/// side_chat 输入框打开标志：仅输入区域可交互
 static SIDE_CHAT_LEFT_INPUT_OPEN: AtomicBool = AtomicBool::new(false);
+/// 输入区域在 WebView 中的逻辑坐标；看护线程换算为物理屏幕坐标。
+static SIDE_CHAT_LEFT_INPUT_REGION: Lazy<Mutex<Option<[f64; 4]>>> =
+    Lazy::new(|| Mutex::new(None));
+
+#[tauri::command]
+pub fn set_side_chat_input_region(window: WebviewWindow, rect: Option<[f64; 4]>) -> Result<bool, String> {
+    if window.label() != "side_chat" {
+        return Err("仅 side_chat 可设置输入区域".into());
+    }
+    *SIDE_CHAT_LEFT_INPUT_REGION.lock() = rect.filter(|r| {
+        r.iter().all(|v| v.is_finite()) && r[2] > r[0] && r[3] > r[1]
+    });
+    Ok(SIDE_CHAT_LEFT_LOCKED.load(Ordering::SeqCst))
+}
+
+#[cfg(windows)]
+fn is_tab_down() -> bool {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_TAB};
+    unsafe { GetAsyncKeyState(VK_TAB.0 as i32) as u16 & 0x8000 != 0 }
+}
+
+#[cfg(not(windows))]
+fn is_tab_down() -> bool {
+    false
+}
+
 /// 左缘看护线程幂等守卫
 static SIDE_CHAT_LEFT_WATCH_RUNNING: AtomicBool = AtomicBool::new(false);
 /// 左缘看护线程停止标志与句柄
@@ -2098,6 +1877,9 @@ fn side_chat_left_show(win: &WebviewWindow) {
 
 /// Expanded → 收回：从当前位置滑出到屏外左侧后 hide。
 fn side_chat_left_hide(win: &WebviewWindow) {
+    SIDE_CHAT_LEFT_INPUT_OPEN.store(false, Ordering::SeqCst);
+    *SIDE_CHAT_LEFT_INPUT_REGION.lock() = None;
+    let _ = win.emit_to("side_chat", "sidechat:input_reset", json!({ "label": "side_chat" }));
     let Some(left) = side_chat_left_edge(win) else { return };
     let width = win.outer_size().map(|s| s.width as i32).unwrap_or(0);
     let pos = win.outer_position().ok();
@@ -2124,7 +1906,10 @@ pub fn start_side_chat_left_watcher(app: AppHandle) -> Result<(), String> {
         const FREEZE_DELAY_TICKS: u32 = 50;
         let mut hide_countdown: u32 = 0;
         let mut freeze_delay: u32 = 0;
-        let mut esc_prev = false;
+        let mut esc_prev = is_escape_down();
+        let mut tab_prev = is_tab_down();
+        let mut click_through: Option<bool> = None;
+        let mut edge_armed = true;
         let mut tick: u32 = 0;
         let mut mon: Option<(i32, i32, i32, i32)> = None; // (left, top, w, h)
 
@@ -2158,6 +1943,12 @@ pub fn start_side_chat_left_watcher(app: AppHandle) -> Result<(), String> {
             }
 
             let visible = win.is_visible().ok().unwrap_or(false);
+            let esc_now = is_escape_down();
+            let tab_now = is_tab_down();
+            let esc_pressed = esc_now && !esc_prev;
+            let tab_pressed = tab_now && !tab_prev;
+            esc_prev = esc_now;
+            tab_prev = tab_now;
 
             // 左缘滑动动画进行中：跳过本帧 show/hide 决策，避免与原生位移竞争
             if SIDE_CHAT_LEFT_ANIMATING.load(Ordering::SeqCst) {
@@ -2176,19 +1967,51 @@ pub fn start_side_chat_left_watcher(app: AppHandle) -> Result<(), String> {
                 None => false,
             };
 
-            // 光标是否在窗口矩形内（含 4px 容差）
+            // 光标是否在窗口矩形内（原生穿透不影响悬浮检测）
             let in_window = match (win.outer_position(), win.outer_size()) {
                 (Ok(pos), Ok(size)) => {
-                    cx >= pos.x - 4
-                        && cx <= pos.x + size.width as i32 + 4
-                        && cy >= pos.y - 4
-                        && cy <= pos.y + size.height as i32 + 4
+                    cx >= pos.x
+                        && cx < pos.x + size.width as i32
+                        && cy >= pos.y
+                        && cy < pos.y + size.height as i32
                 }
                 _ => false,
             };
 
+            if !in_edge_zone {
+                edge_armed = true;
+            }
+            // 原生穿透按输入区域切换，不依赖穿透态下无法接收的 DOM 鼠标事件。
+            let input_hit = visible && SIDE_CHAT_LEFT_INPUT_OPEN.load(Ordering::SeqCst)
+                && match (win.outer_position(), win.scale_factor(), *SIDE_CHAT_LEFT_INPUT_REGION.lock()) {
+                    (Ok(pos), Ok(scale), Some(r)) => {
+                        let x = (c.x - pos.x as f64) / scale;
+                        let y = (c.y - pos.y as f64) / scale;
+                        x >= r[0] && x < r[2] && y >= r[1] && y < r[3]
+                    }
+                    _ => false,
+                };
+            let ignore = !input_hit;
+            if click_through != Some(ignore) {
+                if win.set_ignore_cursor_events(ignore).is_ok() {
+                    click_through = Some(ignore);
+                }
+            }
+
+            if visible && in_window && esc_pressed {
+                SIDE_CHAT_LEFT_LOCKED.store(false, Ordering::SeqCst);
+                let _ = win.emit_to("side_chat", "sidechat:lock_changed", json!({ "locked": false, "label": "side_chat" }));
+                side_chat_left_hide(&win);
+                edge_armed = false; // Esc 后须离开左缘再悬停，避免立即重新呼出。
+                hide_countdown = 0;
+                thread::sleep(Duration::from_millis(60));
+                continue;
+            }
+            if visible && in_window && tab_pressed {
+                let locked = !SIDE_CHAT_LEFT_LOCKED.fetch_xor(true, Ordering::SeqCst);
+                let _ = win.emit_to("side_chat", "sidechat:lock_changed", json!({ "locked": locked, "label": "side_chat" }));
+            }
             let locked = SIDE_CHAT_LEFT_LOCKED.load(Ordering::SeqCst);
-            let input_open = SIDE_CHAT_LEFT_INPUT_OPEN.load(Ordering::SeqCst);
 
             if !visible {
                 // 隐藏态延迟冻结（幂等：每轮隐藏只触发一次）
@@ -2197,19 +2020,19 @@ pub fn start_side_chat_left_watcher(app: AppHandle) -> Result<(), String> {
                     freeze_webview(&win);
                 }
                 // 隐藏态：鼠标靠近左缘 → 呼出（复位锁定/输入，未锁定状态）
-                if in_edge_zone {
+                if in_edge_zone && edge_armed {
                     SIDE_CHAT_LEFT_LOCKED.store(false, Ordering::SeqCst);
                     SIDE_CHAT_LEFT_INPUT_OPEN.store(false, Ordering::SeqCst);
                     hide_countdown = 0;
                     side_chat_left_show(&win);
                     tracing::info!("[side_chat_left] 左缘悬停呼出");
-                    let _ = app.emit("sidechat:lock_changed", json!({ "locked": false }));
-                    let _ = app.emit("sidechat:input_reset", json!({}));
+                    let _ = win.emit_to("side_chat", "sidechat:lock_changed", json!({ "locked": false, "label": "side_chat" }));
+                    let _ = win.emit_to("side_chat", "sidechat:input_reset", json!({ "label": "side_chat" }));
                 }
             } else {
                 freeze_delay = 0;
-                // 锁定/输入框打开/光标在窗内/仍在左缘 → 保持；否则宽限后收回
-                if locked || input_open || in_window || in_edge_zone {
+                // 锁定或光标在窗内 → 保持；解锁后移出窗口则宽限后收回
+                if locked || in_window {
                     hide_countdown = 0;
                 } else {
                     hide_countdown += 1;
@@ -2219,16 +2042,6 @@ pub fn start_side_chat_left_watcher(app: AppHandle) -> Result<(), String> {
                         tracing::info!("[side_chat_left] 光标离开，自动收回");
                     }
                 }
-
-                // 鼠标悬停在窗口上按 ESC（下降沿）：解锁并立即收回隐藏
-                let esc_now = is_escape_down();
-                if esc_now && !esc_prev && in_window {
-                    SIDE_CHAT_LEFT_LOCKED.store(false, Ordering::SeqCst);
-                    let _ = app.emit("sidechat:lock_changed", json!({ "locked": false }));
-                    side_chat_left_hide(&win);
-                    tracing::info!("[side_chat_left] 悬浮按 ESC 收回");
-                }
-                esc_prev = esc_now;
             }
 
             thread::sleep(Duration::from_millis(60));
@@ -2259,7 +2072,7 @@ pub(crate) fn stop_side_chat_left_watcher_internal() {
     }
 }
 
-/// 设置 side_chat 锁定状态（双击 header 或快捷键调用）。
+/// 设置侧边栏锁定状态（左侧栏使用悬浮 Tab 或快捷键调用）。
 ///
 /// 锁定后边缘检测线程不会自动隐藏窗口；同时广播 `sidechat:lock_changed`
 /// 供前端同步锁图标。
@@ -2272,16 +2085,15 @@ pub fn set_side_chat_locked(app: AppHandle, locked: bool, label: Option<String>)
         // 直接对话侧边栏（side_chat）使用左缘独立锁定状态
         SIDE_CHAT_LEFT_LOCKED.store(locked, Ordering::SeqCst);
     }
-    let _ = app.emit("sidechat:lock_changed", json!({ "locked": locked }));
+    let target = if label.as_deref().map_or(true, |l| l == "chat") { "chat" } else { "side_chat" };
+    let _ = app.emit_to(target, "sidechat:lock_changed", json!({ "locked": locked, "label": target }));
     Ok(())
 }
 
 /// 设置侧边栏输入框打开状态（前端 InputDialog 显隐时调用）。
 ///
-/// 打开期间边缘检测线程不会自动隐藏窗口，避免打字途中被收回。
-/// 同时驱动状态化穿透：输入框打开 → 关闭穿透可交互打字；关闭 → 开启穿透不挡桌面
-/// （穿透态下双击由全局鼠标 Hook 识别，交互态下由前端 React onDoubleClick 识别）。
-/// 仅 `chat`（微信抽屉）参与全局状态；side_chat 输入面板不共享该状态。
+/// chat 输入期间保持展开，并切换整窗穿透。
+/// side_chat 由左缘看护线程按输入区域切换穿透，自动收回只取决于锁定与悬浮状态。
 #[tauri::command]
 pub fn set_side_chat_input_open(app: AppHandle, open: bool, label: Option<String>) -> Result<(), String> {
     let is_chat = label.as_deref().map_or(true, |l| l == "chat");
@@ -2289,6 +2101,10 @@ pub fn set_side_chat_input_open(app: AppHandle, open: bool, label: Option<String
         SIDE_CHAT_INPUT_OPEN.store(open, Ordering::SeqCst);
     } else {
         SIDE_CHAT_LEFT_INPUT_OPEN.store(open, Ordering::SeqCst);
+        if !open {
+            *SIDE_CHAT_LEFT_INPUT_REGION.lock() = None;
+        }
+        return Ok(());
     }
     if let Some(win) = app.get_webview_window(if is_chat { "chat" } else { "side_chat" }) {
         if open {

@@ -15,9 +15,7 @@ use crate::config::WebSearchConfig;
 use crate::network::web::providers::util::{
     annotate_sources, build_search_client, timeout_from_secs,
 };
-use crate::network::web::types::{
-    WebError, WebSearchRequest, WebSearchResult, WebSearchSource,
-};
+use crate::network::web::types::{WebError, WebSearchRequest, WebSearchResult, WebSearchSource};
 use crate::network::web::WebSearchProvider;
 
 /// 稳定注册 id
@@ -70,24 +68,46 @@ impl WebSearchProvider for TavilyProvider {
         let max = request.max_results.unwrap_or(5);
         let client = build_search_client(self.timeout, None, self.proxy_url.as_deref());
 
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "api_key": self.api_key,
             "query": request.query,
             "max_results": max,
             "include_answer": false,
-            "include_raw_content": self.include_raw_content,
-            "search_depth": self.search_depth,
+            "include_raw_content": self.include_raw_content && request.research,
+            "search_depth": if request.research { self.search_depth.as_str() } else { "basic" },
         });
 
+        body["include_domains"] = serde_json::json!(request.include_domains);
+        body["exclude_domains"] = serde_json::json!(request.exclude_domains);
+        body["include_domains_mode"] = serde_json::json!("restrict");
+        body["include_published_date"] = serde_json::json!(true);
+        if let Some(lang) = &request.language {
+            body["language"] = serde_json::json!(lang.split('-').next().unwrap_or(lang));
+        }
+        if let Some(country) = &request.country {
+            body["country"] = serde_json::json!(match country.to_ascii_lowercase().as_str() {
+                "cn" => "china",
+                "us" => "united states",
+                "jp" => "japan",
+                "gb" | "uk" => "united kingdom",
+                _ => country,
+            });
+        }
+        if let Some(days) = request.recency_days {
+            body["filter_by_published_date"] = serde_json::json!(true);
+            body["start_date"] = serde_json::json!((chrono::Utc::now()
+                - chrono::Duration::days(days as i64))
+            .format("%Y-%m-%d")
+            .to_string());
+        }
         let resp = client
             .post("https://api.tavily.com/search")
+            .bearer_auth(&self.api_key)
             .header("Content-Type", "application/json")
             .json(&body)
             .send()
             .await
-            .map_err(|e| {
-                WebError::provider_error(TAVILY_ID, format!("Tavily 请求失败: {e}"))
-            })?;
+            .map_err(|e| WebError::provider_error(TAVILY_ID, format!("Tavily 请求失败: {e}")))?;
         if !resp.status().is_success() {
             return Err(WebError::provider_error(
                 TAVILY_ID,
@@ -102,6 +122,7 @@ impl WebSearchProvider for TavilyProvider {
             content: None,
             sources: parse_tavily(&v),
             truncated: false,
+            ..Default::default()
         })
     }
 }
@@ -126,6 +147,8 @@ fn parse_tavily(v: &Value) -> Vec<WebSearchSource> {
         let mut s = WebSearchSource::new(url);
         s.title = non_empty(item.get("title").and_then(|t| t.as_str()));
         s.snippet = non_empty(item.get("content").and_then(|c| c.as_str()));
+        s.raw_content = non_empty(item.get("raw_content").and_then(|p| p.as_str()))
+            .map(|s| s.chars().take(16000).collect());
         s.published_at = non_empty(item.get("published_date").and_then(|p| p.as_str()));
         sources.push(s);
     }

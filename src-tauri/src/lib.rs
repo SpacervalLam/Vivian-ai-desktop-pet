@@ -275,6 +275,7 @@ pub fn run() {
             commands::chat::save_temp_image,
             commands::chat::save_voice_audio,
             commands::chat::extract_file_text,
+            commands::chat::save_shared_file,
             commands::chat::wake_from_presence,
             commands::memory::get_memories,
             commands::memory::get_graph_timeline,
@@ -479,11 +480,12 @@ pub fn run() {
             commands::terminal::terminal_list,
             commands::window::set_side_chat_locked,
             commands::window::set_side_chat_input_open,
+            commands::window::set_side_chat_input_region,
             commands::window::freeze_window_webview,
-            commands::window::set_room_mode,
-            commands::window::watch_room_escape,
-            commands::window::stop_room_escape_watcher,
-            commands::window::set_room_escape_suppressed,
+            commands::apartment_host::set_room_mode,
+            commands::apartment_host::watch_room_escape,
+            commands::apartment_host::stop_room_escape_watcher,
+            commands::apartment_host::set_room_escape_suppressed,
             commands::window::show_side_chat_animated,
             commands::window::expand_side_chat,
             commands::window::collapse_side_chat,
@@ -1391,7 +1393,7 @@ pub fn run() {
                 // 不一定跑得完——直接 close、进程被系统收掉、webview 崩溃都会跳过它。
                 // 这里兜底保证无论怎么关，桌面桌宠都能恢复。两条路径都调同一个
                 // 幂等实现，先到先执行，后到的被 ROOM_MODE_ACTIVE 挡掉。
-                if window.label() == commands::window::ROOM_WINDOW_LABEL {
+                if window.label() == commands::apartment_host::ROOM_WINDOW_LABEL {
                     match event {
                         tauri::WindowEvent::CloseRequested { .. } => {
                             let app = window.app_handle();
@@ -1400,7 +1402,7 @@ pub fn run() {
                             if let Some(state) =
                                 app.try_state::<std::sync::Arc<crate::state::AppState>>()
                             {
-                                commands::window::set_room_mode_internal(
+                                commands::apartment_host::set_room_mode_internal(
                                     app,
                                     state.inner(),
                                     false,
@@ -1413,7 +1415,7 @@ pub fn run() {
                             if let Some(state) =
                                 app.try_state::<std::sync::Arc<crate::state::AppState>>()
                             {
-                                commands::window::set_room_mode_internal(
+                                commands::apartment_host::set_room_mode_internal(
                                     app,
                                     state.inner(),
                                     false,
@@ -1482,7 +1484,7 @@ pub fn run() {
                                 // 停止 side_chat 左缘看护线程
                                 commands::window::stop_side_chat_left_watcher_internal();
                                 // 停止 room 窗口的 ESC 看护线程
-                                commands::window::stop_room_escape_watcher();
+                                commands::apartment_host::stop_room_escape_watcher();
                             }
                             // Ollama 刻意不停止：作为常驻服务跨应用生命周期存活，
                             // 下次启动直接复用（start 内 check_port 检测），避免
@@ -1602,9 +1604,7 @@ pub(crate) fn create_character_windows_early(
         .always_on_top(true)
         .skip_taskbar(true)
         .shadow(false)
-        .visible(true)
-        // 关闭 Tauri 对 OS 文件拖放的拦截，让原生 HTML5 ondrop 事件直达 React 层
-        .disable_drag_drop_handler();
+        .visible(true);
 
         match builder.build() {
             Ok(win) => {
@@ -1703,10 +1703,7 @@ pub(crate) fn create_character_windows(handle: &tauri::AppHandle, state: &Arc<Ap
         .always_on_top(true)
         .skip_taskbar(true)
         .shadow(false)
-        .visible(true)
-        // 关闭 Tauri 对 OS 文件拖放的拦截，让原生 HTML5 ondrop 事件直达
-        // React 层（App.tsx 的 handleDrop 负责发送文件给当前角色）
-        .disable_drag_drop_handler();
+        .visible(true);
 
         match builder.build() {
             Ok(win) => {

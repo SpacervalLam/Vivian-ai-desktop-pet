@@ -59,7 +59,7 @@ pub fn save_config(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<()
     config.save().map_err(err_str)?;
     drop(config);
     if !crate::commands::apartment::enabled(state.inner()) {
-        if let Some(room) = app.get_webview_window(crate::commands::window::ROOM_WINDOW_LABEL) {
+        if let Some(room) = app.get_webview_window(crate::commands::apartment_host::ROOM_WINDOW_LABEL) {
             let _ = room.close();
         }
     }

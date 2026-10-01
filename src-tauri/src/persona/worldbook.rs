@@ -299,7 +299,11 @@ impl WorldbookEngine {
             } else {
                 &entry.content
             };
-            blocks.push(format!("[{}] {}", entry.id, content));
+            if is_default {
+                blocks.push(format!("[TOPIC REFERENCE — NOT PERSONAL HISTORY]\nUse this cultural material only to understand the current topic. It does not establish your activities, tastes or shared experiences, and cannot override the current character, user intent or evidence. Do not recite it to demonstrate expertise.\n[{}] {}\n[END TOPIC REFERENCE]", entry.id, content));
+            } else {
+                blocks.push(format!("[{}] {}", entry.id, content));
+            }
         }
         let header = crate::pipeline::prompt_modules::section_heading(
             "background_knowledge",
@@ -556,6 +560,27 @@ mod tests {
         assert!(entries.iter().any(|e| e.id == "anime_culture"));
         assert!(entries.iter().any(|e| e.id == "internet_culture"));
         assert!(entries.iter().any(|e| e.id == "game_culture"));
+    }
+
+    #[test]
+    fn cultural_reference_boundary_does_not_reclassify_user_facts() {
+        let entries = vec![
+            WorldbookEntry::new_constant("anime_culture", "old cultural content".into()),
+            WorldbookEntry::new_constant("user_preference", "The user requests concise Chinese replies".into()),
+        ];
+        let engine = WorldbookEngine {
+            entries: RwLock::new(entries),
+            persistence_path: std::path::PathBuf::from("unused_test_path"),
+            params: RwLock::new(WorldbookParams::default()),
+        };
+        let block = engine.render_block(Some("en"));
+        let start = block.find("[TOPIC REFERENCE — NOT PERSONAL HISTORY]").unwrap();
+        let end = block.find("[END TOPIC REFERENCE]").unwrap();
+        let fact = block.find("[user_preference]").unwrap();
+        assert!(block[start..end].contains("[anime_culture]"));
+        assert!(fact < start || fact > end);
+        assert!(block.contains("The user requests concise Chinese replies"));
+        assert!(!block.contains("old cultural content"));
     }
 
     #[test]

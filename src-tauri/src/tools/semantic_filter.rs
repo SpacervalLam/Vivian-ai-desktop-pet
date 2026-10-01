@@ -70,6 +70,12 @@ impl ToolSemanticFilter {
         }
     }
 
+    /// Used only for short references to a preceding proposal; intent/emotion classification
+    /// continues to use the user's actual message. Call from a blocking worker.
+    pub(crate) fn embed_query(&self, query: &str) -> Result<Vec<f32>, String> {
+        self.provider.embed(query).map_err(|error| error.to_string())
+    }
+
     /// 启动预加载：立即嵌入所有工具描述（阻塞）。
     ///
     /// 供启动流程在开放 API 前调用，避免首个工具相关请求触发懒嵌入。

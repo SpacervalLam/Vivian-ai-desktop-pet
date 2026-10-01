@@ -13,7 +13,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { emit, listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { useAppStore } from '../stores/useAppStore';
-import { BubbleController, computeDuration } from './BubbleController';
+import { BubbleController } from './BubbleController';
 import { StreamController } from './StreamController';
 import { TtsStreamQueue } from './TtsStreamQueue';
 import type { AiResponse, ChatMessage } from '../types';
@@ -47,8 +47,6 @@ interface StreamSession {
   reject: (error: Error) => void;
   /** 消息渠道：wechat / direct / proactive */
   channel: string;
-  /** 已结算到 text 中的字符位置（换行分段用） */
-  settledUpTo: number;
   /** Layer 2 即时反应是否已触发（避免重复触发） */
   instantReactLayer2Fired: boolean;
   /** 当前会话是否已实际创建流式气泡（避免误用上一条回复的气泡） */
@@ -129,23 +127,9 @@ class ChatControllerClass {
         // 按 stream_id 路由：只累积当前 session 的文本
         session.text += chunk;
         session.streamParser.feed(chunk);
-        // 换行分段：检测新换行符，结算已完成段落
-        const lastNl = session.text.lastIndexOf('\n');
-        if (lastNl >= 0 && lastNl >= session.settledUpTo) {
-          const completed = session.text.slice(session.settledUpTo, lastNl + 1).replace(/\n+$/, '');
-          session.settledUpTo = lastNl + 1;
-          const remaining = session.text.slice(session.settledUpTo);
-          if (completed) {
-            BubbleController.settleSegment(completed, remaining);
-          } else if (remaining) {
-            BubbleController.showStreamingBubble(remaining);
-          }
-        } else {
-          // 无新换行：继续流式显示当前段落
-          const currentSegment = session.text.slice(session.settledUpTo);
-          BubbleController.showStreamingBubble(currentSegment);
-        }
-        session.bubbleStarted = BubbleController.hasActiveBubble;
+        if (!session.bubbleStarted) BubbleController.closeAll();
+        BubbleController.showStreamingBubble(session.text);
+        session.bubbleStarted = true;
         // 流式切片送 TTS 队列（后端串行化保证同一时刻只有一个流产 chunk）
         TtsStreamQueue.feed(chunk);
         this.handlers.onChunk?.(chunk, session.text, sid);
@@ -303,7 +287,6 @@ class ChatControllerClass {
         resolve,
         reject,
         channel: ch,
-        settledUpTo: 0,
         instantReactLayer2Fired: false,
         bubbleStarted: false,
       };
@@ -351,7 +334,6 @@ class ChatControllerClass {
         resolve: resolve as (response: AiResponse) => void,
         reject: () => resolve(null),
         channel: ch,
-        settledUpTo: 0,
         instantReactLayer2Fired: false,
         bubbleStarted: false,
       };
@@ -396,9 +378,9 @@ class ChatControllerClass {
     // 这种回复仍会进入 side_chat，却没有任何 currentBubble 可供结算，因而桌宠沉默。
     // 用最终文本补建气泡，保证 done 是气泡展示的可靠兜底。
     if (session.bubbleStarted) {
-      BubbleController.startAutoClose(computeDuration(finalText));
+      BubbleController.finishStreaming(finalText);
     } else {
-      BubbleController.showBubble(finalText, computeDuration(finalText));
+      BubbleController.showBubble(finalText);
     }
     this.handlers.onResponseReceived?.(response, sid);
     session.resolve(response);

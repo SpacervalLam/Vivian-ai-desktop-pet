@@ -98,7 +98,7 @@ impl ToolScope {
 pub fn tool_scope(name: &str) -> ToolScope {
     if WORK_AGENT_ONLY_TOOLS.contains(&name) {
         ToolScope::Work
-    } else if crate::brain::coding_agent::CODING_TOOLS.contains(&name) {
+    } else if crate::brain::coding_agent::CODING_TOOLS.contains(&name) || crate::brain::coding_agent::WORK_WEB_BROWSER_TOOLS.contains(&name) {
         ToolScope::Both
     } else {
         ToolScope::Companion

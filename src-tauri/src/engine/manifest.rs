@@ -212,6 +212,11 @@ impl ModelManifest {
             );
 
         for entry in entries {
+            if let Some(characters) = entry.get("characters").and_then(|value| value.as_array()) {
+                if !characters.iter().any(|id| id.as_str() == Some(char_id.as_str())) {
+                    continue;
+                }
+            }
             if entry.get("promptable").and_then(|value| value.as_bool()) != Some(true) {
                 continue;
             }
@@ -738,6 +743,9 @@ impl ResourceManifest {
         };
         let motion = if trigger.motion.is_empty() {
             DEFAULT_MOTION.to_string()
+        } else if mf.has_expression_name(&trigger.motion) {
+            // 状态帧序列也能作为闲置动作播放（例如 Vivian 的入睡）。
+            trigger.motion.clone()
         } else {
             self.normalize_motion(&trigger.motion)
         };

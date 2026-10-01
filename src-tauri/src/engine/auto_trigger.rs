@@ -31,8 +31,7 @@ const ACCENT_IDLE_PROBABILITY: f64 = 0.3;
 /// 心情点缀的展示时长（ms）
 ///
 /// 对图集格位（`dizzy`）是**必需**的：格位自己不会计时，没有时长就一直挂着。
-/// 取值与 `idle_triggers` 里那条 dizzy 的 4000ms 同量级，让规则驱动的晕脸在屏幕上
-/// 停留得差不多久；对帧序列类点缀无影响（它们按自己的节奏播完即落）。
+/// 对帧序列类点缀无影响（它们按自己的节奏播完即落）。
 const MOOD_ACCENT_DURATION_MS: u32 = 3000;
 
 /// 空闲阶段定义
@@ -44,9 +43,9 @@ pub enum IdleStage {
     Short = 1,
     /// 中等空闲（2-5分钟）
     Medium = 2,
-    /// 长时空闲（5-15分钟）
+    /// 长时空闲（5-12分钟）
     Long = 3,
-    /// 睡眠状态（15分钟以上）
+    /// 睡眠状态（12分钟以上）
     Asleep = 4,
 }
 
@@ -56,7 +55,7 @@ impl IdleStage {
             0..=30 => IdleStage::Active,
             31..=120 => IdleStage::Short,
             121..=300 => IdleStage::Medium,
-            301..=900 => IdleStage::Long,
+            301..=719 => IdleStage::Long,
             _ => IdleStage::Asleep,
         }
     }
@@ -164,6 +163,11 @@ impl AutoExpressionTrigger {
 
         self.with_state(char_id, |state| {
             state.current_mood_label = mood.primary_emotion.as_str().to_string();
+            if cue.accent == "dizzy"
+                && Instant::now().saturating_duration_since(state.last_interaction).as_secs() >= 301
+            {
+                return None;
+            }
 
             let changed = cue.accent != state.last_accent;
             let cooled_down = Instant::now().saturating_duration_since(state.last_accent_time)
@@ -227,7 +231,10 @@ impl AutoExpressionTrigger {
 
                         let should_trigger = rand::random::<f64>() < base_prob;
                         if should_trigger {
-                            if let Some(trigger) = manifest.get_idle_trigger(trigger_key) {
+                            if let Some(mut trigger) = manifest.get_idle_trigger(trigger_key) {
+                                if current_stage == IdleStage::Asleep && char_id.eq_ignore_ascii_case("nana") {
+                                    trigger.1 = "tend".to_string();
+                                }
                                 results.push(trigger);
                                 state.triggered_idle_stages.insert(current_stage);
                             }
@@ -239,11 +246,11 @@ impl AutoExpressionTrigger {
             // 心情持续表情：主导情绪持续超过45秒后，随机触发心情表情（有冷却）
             let mood_cooldown = Duration::from_secs(45);
             if now.saturating_duration_since(state.last_mood_idle_time) > mood_cooldown {
-                if current_stage >= IdleStage::Short {
+                if current_stage >= IdleStage::Short && current_stage < IdleStage::Asleep {
                     let mood_label = &state.current_mood_label;
                     // get_mood_idle_expression返回(expr, priority)，包装成TriggerResult
                     if let Some((expr_name, _priority)) = manifest.get_mood_idle_expression(mood_label) {
-                        if rand::random::<f64>() < 0.25 {
+                        if expr_name != "dizzy" && rand::random::<f64>() < 0.25 {
                             results.push((expr_name, String::new(), String::new(), Some(3000), 0.25));
                             state.last_mood_idle_time = now;
                         }
@@ -374,6 +381,31 @@ mod tests {
     use super::*;
     use crate::psychology::emotion::EmotionLabel;
     use crate::tools::builtin::pet_tools::drain_pending_actions;
+
+    #[test]
+    fn sleep_starts_at_twelve_minutes() {
+        assert_eq!(IdleStage::from_seconds(719), IdleStage::Long);
+        assert_eq!(IdleStage::from_seconds(720), IdleStage::Asleep);
+    }
+
+    #[test]
+    fn sleep_idle_trigger_keeps_state_animation_name() {
+        let mf = crate::engine::manifest::ModelManifest::load_from_dir(std::path::Path::new("Vivian"))
+            .expect("Vivian motion vocabulary");
+        let manifest = ResourceManifest::from_manifest(mf);
+        let trigger = manifest.get_idle_trigger("idle_asleep").expect("sleep idle trigger");
+        assert_eq!(trigger.0, "");
+        assert_eq!(trigger.1, "sleep");
+    }
+
+    #[test]
+    fn long_idle_does_not_emit_dizzy_accent() {
+        let trigger = AutoExpressionTrigger::new();
+        trigger.with_state("vivian", |state| {
+            state.last_interaction = Instant::now() - Duration::from_secs(360);
+        });
+        assert!(trigger.update_mood("vivian", &grieving_mood()).is_none());
+    }
 
     /// 严重悲伤 → `sadness_grieving` → 点缀 `dizzy`（图集格位，不是帧序列）。
     fn grieving_mood() -> MoodSnapshot {

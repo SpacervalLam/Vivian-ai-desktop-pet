@@ -896,6 +896,7 @@ impl ModelRouter {
                         permit,
                         provider.get_model().to_string(),
                         usage_tag.to_string(),
+                        task_type.to_string(),
                     ));
                 }
                 Err(e) => {
@@ -928,6 +929,7 @@ impl ModelRouter {
                             permit,
                             provider.get_model().to_string(),
                             usage_tag.to_string(),
+                            task_type.to_string(),
                         ));
                     }
                     Err(e) => {
@@ -958,6 +960,7 @@ impl ModelRouter {
                         permit,
                         provider.get_model().to_string(),
                         usage_tag.to_string(),
+                        task_type.to_string(),
                     ));
                 }
                 Err(e) => {
@@ -976,10 +979,12 @@ impl ModelRouter {
         permit: Option<tokio::sync::OwnedSemaphorePermit>,
         model: String,
         usage_tag: String,
+        route: String,
     ) -> mpsc::Receiver<StreamEvent> {
         let (tx, rx) = mpsc::channel(32);
         tokio::spawn(async move {
             let _permit = permit;
+            let mut usage = usage_store::StreamUsageAccumulator::default();
             while let Some(event) = source.recv().await {
                 if let StreamEvent::Usage {
                     input_tokens,
@@ -988,19 +993,13 @@ impl ModelRouter {
                     cache_write_tokens,
                 } = &event
                 {
-                    usage_store::record_usage_for_task(
-                        Some(&usage_tag),
-                        &model,
-                        *input_tokens,
-                        *output_tokens,
-                        *cache_read_tokens,
-                        *cache_write_tokens,
-                    );
+                    usage.observe(*input_tokens, *output_tokens, *cache_read_tokens, *cache_write_tokens);
                 }
                 if tx.send(event).await.is_err() {
                     break;
                 }
             }
+            usage.record(Some(&usage_tag), Some(&route), &model);
         });
         rx
     }
@@ -1225,14 +1224,16 @@ impl ModelRouter {
                 json_schema.clone()
             };
             let char_id = character_id.as_deref().unwrap_or("");
-            let result = usage_store::with_task(&usage_tag, scope_provider_call(options, async {
+            let result = usage_store::with_context(&usage_tag, &task_type, scope_provider_call(options, async {
                 if stream {
                     // 流式:累积所有 chunk 返回完整文本
                     let mut rx = self.query_stream(&task_type, messages, effective_schema, char_id, &usage_tag).await?;
                     let mut buf = String::new();
+                    let mut web_sources = Vec::new();
                     while let Some(event) = rx.recv().await {
                         match event {
                             StreamEvent::Text { content } => buf.push_str(&content),
+                            StreamEvent::WebSources { sources } => web_sources.extend(sources),
                             StreamEvent::Error { message } => {
                                 return Err(VivianError::Provider(format!(
                                     "流式响应中断: {}",
@@ -1242,7 +1243,7 @@ impl ModelRouter {
                             _ => {}
                         }
                     }
-                    Ok(buf)
+                    Ok(crate::providers::web_citations::attach(&buf, &web_sources))
                 } else {
                     self.query_with_fallback(&task_type, messages, effective_schema, char_id).await
                 }
@@ -1327,7 +1328,7 @@ impl ModelRouter {
                 character_id,
                 ..
             } = request.clone();
-            let result = usage_store::with_task(&usage_tag, scope_provider_call(
+            let result = usage_store::with_context(&usage_tag, &task_type, scope_provider_call(
                 options,
                 self.query_with_tools(&task_type, messages, tools, character_id.as_deref().unwrap_or("")),
             )).await;
@@ -1766,6 +1767,7 @@ impl ModelRouter {
                     messages.clone(),
                     tools.clone(),
                     usage_tag,
+                    task_type,
                 )
                 .await
                 {
@@ -1803,6 +1805,7 @@ impl ModelRouter {
                         messages.clone(),
                         tools.clone(),
                         usage_tag,
+                        task_type,
                     )
                     .await
                     {
@@ -1836,7 +1839,7 @@ impl ModelRouter {
                     task_type,
                     provider.get_model()
                 );
-                match Self::stream_with_tools_provider(provider, messages, tools, usage_tag).await {
+                match Self::stream_with_tools_provider(provider, messages, tools, usage_tag, task_type).await {
                     Ok(rx) => {
                         self.emit_route_status(task_type, "ok");
                         return Ok(Self::hold_event_stream_permit(rx, permit));
@@ -1882,12 +1885,15 @@ impl ModelRouter {
         messages: Vec<ChatMessage>,
         tools: Vec<ToolDefinition>,
         usage_tag: &str,
+        route: &str,
     ) -> VivianResult<mpsc::Receiver<StreamEvent>> {
         let mut rx = provider.stream_with_tools(messages, tools).await?;
         let usage_tag = usage_tag.to_string();
+        let route = route.to_string();
         let model = provider.get_model().to_string();
         let (tx, out_rx) = mpsc::channel::<StreamEvent>(32);
         tokio::spawn(async move {
+            let mut usage = usage_store::StreamUsageAccumulator::default();
             while let Some(event) = rx.recv().await {
                 if let StreamEvent::Usage {
                     input_tokens,
@@ -1896,19 +1902,13 @@ impl ModelRouter {
                     cache_write_tokens,
                 } = &event
                 {
-                    usage_store::record_usage_for_task(
-                        Some(&usage_tag),
-                        &model,
-                        *input_tokens,
-                        *output_tokens,
-                        *cache_read_tokens,
-                        *cache_write_tokens,
-                    );
+                    usage.observe(*input_tokens, *output_tokens, *cache_read_tokens, *cache_write_tokens);
                 }
                 if tx.send(event).await.is_err() {
                     break;
                 }
             }
+            usage.record(Some(&usage_tag), Some(&route), &model);
         });
         Ok(out_rx)
     }

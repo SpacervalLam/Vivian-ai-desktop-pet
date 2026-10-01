@@ -68,9 +68,15 @@
 /* 转身与眨眼的帧序列画的就是整体形变，叠加 CSS 形变会互相打架，故关掉呼吸； */
 /* 表情类动作（cast/angry/smug/think）保持默认呼吸，与改版前一致 */
 .pose-turn .chibi-pet-sprite,
+.pose-sleep .chibi-pet-sprite,
+.pose-wake .chibi-pet-sprite,
+.pose-tend .chibi-pet-sprite,
+.pose-tend-out .chibi-pet-sprite,
 .pose-blink .chibi-pet-sprite {
   animation: none;
 }
+
+.pose-sleep { transform: none; }
 
 .chibi-pet-stage.is-pressed .chibi-pet-sprite {
   animation: none;

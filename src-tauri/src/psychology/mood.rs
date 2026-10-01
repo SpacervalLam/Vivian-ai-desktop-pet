@@ -10,7 +10,7 @@ use super::emotion::{EmotionLabel, EmotionState};
 use super::needs::NeedsState;
 use super::relationship::RelationshipState;
 
-/// 前端展示用的 Mood 快照（仅 UI，不持久化）
+/// 前端展示与回复表达共用的 Mood 快照（派生值，不单独持久化）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MoodSnapshot {
     /// 效价（-1.0 ~ 1.0）：正面 vs 负面
@@ -67,7 +67,7 @@ impl Default for MoodSnapshot {
 /// 实时计算 Mood 快照
 ///
 /// Mood 是 Emotion + Needs + Relationship 的「投影」，不是独立状态。
-/// 公式刻意简单：Mood 只做 UI 翻译，不做决策。
+/// 公式刻意简单：Mood 提供展示与表达参考，不决定事实、能力或工具权限。
 pub fn compute_mood(
     emotion: &EmotionState,
     needs: &NeedsState,

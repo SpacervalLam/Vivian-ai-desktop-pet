@@ -43,6 +43,20 @@ const MAX_PUBLIC_EVENTS: usize = 1000;
 const MAX_CHARACTER_EVENTS: usize = 2000;
 /// 每次压缩时取最旧的事件批次大小
 const COMPACT_BATCH: usize = 80;
+/// Raw pet interactions are short-lived context; derived memories have their own lifecycle.
+const PET_ACTION_TTL_SECS: f64 = 5.0 * 60.0;
+
+fn event_expired(event: &UnifiedEvent, now: f64) -> bool {
+    event.event_type == "user_pet_action"
+        && (!event.timestamp.is_finite() || now >= event.timestamp + PET_ACTION_TTL_SECS)
+}
+
+
+/// Temporary interactions must never be promoted by automatic ledger compaction.
+fn compaction_batch(events: &[UnifiedEvent]) -> Vec<UnifiedEvent> {
+    events.iter().filter(|event| event.event_type != "user_pet_action")
+        .take(COMPACT_BATCH).cloned().collect()
+}
 
 /// 统一环境事件
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -108,6 +122,19 @@ struct LedgerInner {
 }
 
 impl LedgerInner {
+    fn purge_expired(&mut self, now: f64) -> usize {
+        let mut removed = 0;
+        for bucket in std::iter::once(&mut self.events)
+            .chain(std::iter::once(&mut self.public_events))
+            .chain(self.character_events.values_mut())
+        {
+            let before = bucket.len();
+            bucket.retain(|event| !event_expired(event, now));
+            removed += before - bucket.len();
+        }
+        removed
+    }
+
     /// 判定事件应归属的桶 key
     /// Public 事件返回 None（共享桶），其他返回关联角色 ID
     fn bucket_key(event: &UnifiedEvent) -> Option<String> {
@@ -177,7 +204,7 @@ pub struct UnifiedEventLedger {
 }
 
 static UNIFIED_EVENT_LEDGER: Lazy<Arc<UnifiedEventLedger>> = Lazy::new(|| {
-    Arc::new(UnifiedEventLedger::new().unwrap_or_else(|e| {
+    let ledger = Arc::new(UnifiedEventLedger::new().unwrap_or_else(|e| {
         tracing::error!("[UnifiedEventLedger] 引擎初始化失败，使用空状态: {e}");
         UnifiedEventLedger {
             inner: RwLock::new(LedgerInner::default()),
@@ -186,7 +213,15 @@ static UNIFIED_EVENT_LEDGER: Lazy<Arc<UnifiedEventLedger>> = Lazy::new(|| {
             compacting: std::sync::atomic::AtomicBool::new(false),
             router: Mutex::new(None),
         }
-    }))
+    }));
+    // Weak ownership lets the cleanup worker exit when the ledger is dropped.
+    let weak = Arc::downgrade(&ledger);
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_secs(30));
+        let Some(ledger) = weak.upgrade() else { break; };
+        ledger.purge_expired();
+    });
+    ledger
 });
 
 impl UnifiedEventLedger {
@@ -221,6 +256,10 @@ impl UnifiedEventLedger {
         if !inner.events.is_empty() {
             inner.migrate_from_legacy();
         }
+        let removed = inner.purge_expired(chrono::Utc::now().timestamp() as f64);
+        if removed > 0 {
+            Self::save_inner(&inner, &self.persistence_path)?;
+        }
         *self.inner.write() = inner;
         Ok(())
     }
@@ -232,12 +271,27 @@ impl UnifiedEventLedger {
         Ok(())
     }
 
+    /// Purge both memory and persisted raw events. Reads also call this for exact TTL visibility.
+    fn purge_expired(&self) {
+        let mut inner = self.inner.write();
+        if inner.purge_expired(chrono::Utc::now().timestamp() as f64) > 0 {
+            if let Err(error) = Self::save_inner(&inner, &self.persistence_path) {
+                tracing::warn!("[UnifiedEventLedger] 保存过期事件清理失败: {error}");
+            }
+        }
+    }
+
     /// 追加一条事件
     ///
     /// 事件按可见性与关联角色路由到对应桶。各桶独立计数，超过上限时触发 LLM 压缩。
     pub fn append(self: &Arc<Self>, event: UnifiedEvent) -> VivianResult<()> {
         {
             let mut inner = self.inner.write();
+            inner.purge_expired(chrono::Utc::now().timestamp() as f64);
+            if event_expired(&event, chrono::Utc::now().timestamp() as f64) {
+                Self::save_inner(&inner, &self.persistence_path)?;
+                return Ok(());
+            }
             match LedgerInner::bucket_key(&event) {
                 None => {
                     let bucket = &mut inner.public_events;
@@ -344,10 +398,12 @@ impl UnifiedEventLedger {
                 Some(b) => b,
                 None => return,
             };
-            if target.len() <= COMPACT_BATCH {
-                return;
-            }
-            target.drain(0..COMPACT_BATCH).collect()
+            // Do not turn raw, temporary interactions into permanent ledger summaries.
+            let batch = compaction_batch(target);
+            if batch.len() < COMPACT_BATCH { return; }
+            let ids: std::collections::HashSet<_> = batch.iter().map(|e| e.id.clone()).collect();
+            target.retain(|event| !ids.contains(&event.id));
+            batch
         };
 
         let ts_end = batch.last().map(|e| e.timestamp).unwrap_or(0.0);
@@ -454,6 +510,7 @@ impl UnifiedEventLedger {
     ///
     /// 合并共享桶与该角色独立桶，按 (importance, recency) 联合排序。
     pub fn recent_events_visible_to(&self, char_id: &str, n: usize) -> Vec<UnifiedEvent> {
+        self.purge_expired();
         let inner = self.inner.read();
         let pool_size = (n * 3).max(n);
         let mut candidates: Vec<UnifiedEvent> = Vec::with_capacity(pool_size);
@@ -500,6 +557,7 @@ impl UnifiedEventLedger {
         date: chrono::NaiveDate,
         limit: usize,
     ) -> Vec<UnifiedEvent> {
+        self.purge_expired();
         use chrono::{Local, TimeZone};
         let start = date
             .and_hms_opt(0, 0, 0)
@@ -546,6 +604,7 @@ impl UnifiedEventLedger {
 
     /// 查询两个实体之间的最近 N 条事件（双向：A→B 和 B→A）
     pub fn events_between(&self, entity_a: &str, entity_b: &str, n: usize) -> Vec<UnifiedEvent> {
+        self.purge_expired();
         let inner = self.inner.read();
         let mut matched: Vec<UnifiedEvent> = Vec::new();
         let matches = |e: &UnifiedEvent| {
@@ -586,6 +645,7 @@ impl UnifiedEventLedger {
 
     /// 查询全局公开事件（用于环境感知，所有角色共享）
     pub fn recent_public_events(&self, n: usize) -> Vec<UnifiedEvent> {
+        self.purge_expired();
         let inner = self.inner.read();
         let mut public: Vec<UnifiedEvent> = inner
             .public_events
@@ -1084,6 +1144,57 @@ mod tests {
     }
 
     #[test]
+    fn automatic_compaction_excludes_raw_pet_actions() {
+        let events = vec![
+            make_typed_event("user", "vivian", "user_pet_action", 1.0),
+            make_typed_event("user", "vivian", "dialogue", 2.0),
+            make_typed_event("system", "all", "compacted_summary", 3.0),
+        ];
+        let batch = compaction_batch(&events);
+        assert_eq!(batch.len(), 2);
+        assert!(batch.iter().all(|e| e.event_type != "user_pet_action"));
+    }
+
+    #[test]
+    fn pet_action_ttl_boundary_preserves_derived_memories() {
+        let now = 10_000.0;
+        let live = make_typed_event("user", "vivian", "user_pet_action", now - PET_ACTION_TTL_SECS + 1.0);
+        let expired = make_typed_event("user", "vivian", "user_pet_action", now - PET_ACTION_TTL_SECS);
+        assert!(!event_expired(&live, now));
+        assert!(event_expired(&expired, now));
+        let mut inner = LedgerInner::default();
+        inner.events.push(expired.clone());
+        inner.public_events = vec![expired.clone(), make_typed_event("system", "all", "compacted_summary", 1.0)];
+        inner.character_events.insert("vivian".into(), vec![expired, live,
+            make_typed_event("vivian", "user", "dialogue", 1.0)]);
+        assert_eq!(inner.purge_expired(now), 3);
+        assert_eq!(inner.purge_expired(now), 0);
+        assert_eq!(inner.public_events[0].event_type, "compacted_summary");
+        assert_eq!(inner.character_events["vivian"].len(), 2);
+    }
+
+    #[test]
+    fn expired_actions_are_removed_from_all_queries_and_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = chrono::Utc::now().timestamp() as f64;
+        let mut inner = LedgerInner::default();
+        inner.character_events.insert("vivian".into(), vec![
+            make_typed_event("user", "vivian", "user_pet_action", now - 301.0),
+            make_typed_event("user", "vivian", "dialogue", now - 600.0),
+        ]);
+        let mut ledger = make_ledger(inner);
+        ledger.persistence_path = dir.path().join("ledger.json");
+        UnifiedEventLedger::save_inner(&ledger.inner.read(), &ledger.persistence_path).unwrap();
+        assert_eq!(ledger.recent_events_visible_to("vivian", 10).len(), 1);
+        assert_eq!(ledger.events_between("user", "vivian", 10).len(), 1);
+        assert!(ledger.select_events_for_prompt("vivian", 10).iter().all(|e| e.event_type != "user_pet_action"));
+        let persisted: LedgerInner = serde_json::from_str(&std::fs::read_to_string(&ledger.persistence_path).unwrap()).unwrap();
+        assert_eq!(persisted.character_events["vivian"].len(), 1);
+        ledger.load().unwrap();
+        assert_eq!(ledger.recent_events_visible_to("vivian", 10).len(), 1);
+    }
+
+    #[test]
     fn test_select_events_reserves_quota_for_salient_events() {
         let now = chrono::Local::now().timestamp() as f64;
         let mut bucket: Vec<UnifiedEvent> = Vec::new();
@@ -1091,13 +1202,13 @@ mod tests {
         for i in 0..12 {
             bucket.push(make_typed_event("user", "vivian", "dialogue", now - i as f64 * 60.0));
         }
-        // 3 条用户对桌宠的物理动作（importance 0.6，同一天 → 衰减同为 0.95）
+        // 3 条仍在五分钟有效期内的物理动作
         for i in 0..3 {
             bucket.push(make_typed_event(
                 "user",
                 "vivian",
                 "user_pet_action",
-                now - 7200.0 - i as f64 * 60.0,
+                now - 30.0 - i as f64 * 60.0,
             ));
         }
         let mut inner = LedgerInner::default();

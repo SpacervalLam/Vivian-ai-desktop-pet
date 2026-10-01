@@ -517,6 +517,8 @@ pub trait BaseProvider: Send + Sync {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum StreamEvent {
+    /// Native search citations travel separately from JSON/text deltas.
+    WebSources { sources: Vec<crate::providers::web_citations::WebSource> },
     /// 文本增量（模型生成的自然语言片段）
     Text {
         content: String,
@@ -591,8 +593,9 @@ pub fn parse_stream_usage(usage: &serde_json::Value) -> Option<StreamEvent> {
         .or_else(|| usage["prompt_tokens_details"]["cached_tokens"].as_u64())
         .or_else(|| usage["cachedContentTokenCount"].as_u64())
         .or(anthropic_cache_read)
-        .unwrap_or(0)
-        .min(total_input);
+        .unwrap_or(0);
+    // Anthropic reports uncached input separately; cached input may exceed it.
+    let cache_read = if anthropic_cache_read.is_some() { cache_read } else { cache_read.min(total_input) };
     let cache_write = usage["cache_creation_input_tokens"].as_u64().unwrap_or(0);
     Some(StreamEvent::Usage {
         input_tokens: if anthropic_cache_read.is_some() {
@@ -694,6 +697,7 @@ impl ProviderBase {
         temperature: f64,
         max_tokens: u32,
     ) -> Self {
+        let model = model.trim().to_string();
         let breaker_name = format!("provider:{}", model);
         let circuit_breaker = register_circuit_breaker(
             breaker_name,
@@ -971,6 +975,13 @@ impl ProviderBase {
 mod sampling_penalty_tests {
     use super::*;
 
+    #[test]
+    fn provider_model_trims_config_whitespace() {
+        let base = ProviderBase::new("test-key".into(), "https://example.invalid/v1".into(),
+            " deepseek-flash \n".into(), 0.7, 256);
+        assert_eq!(base.model, "deepseek-flash");
+    }
+
     fn test_base() -> ProviderBase {
         ProviderBase::new(
             "test-key".to_string(),
@@ -1053,5 +1064,31 @@ mod sampling_penalty_tests {
             assert_eq!(body, serde_json::json!({}), "0.0 必须折叠为不发送");
         })
         .await;
+    }
+}
+
+#[cfg(test)]
+mod usage_reporting_tests {
+    use super::*;
+
+    #[test]
+    fn usage_reporting_anthropic_cache_is_separate_from_uncached_input() {
+        let event = parse_stream_usage(&serde_json::json!({"input_tokens": 10, "output_tokens": 5, "cache_read_input_tokens": 1000, "cache_creation_input_tokens": 20})).unwrap();
+        match event {
+            StreamEvent::Usage { input_tokens, output_tokens, cache_read_tokens, cache_write_tokens } => {
+                assert_eq!((input_tokens, output_tokens, cache_read_tokens, cache_write_tokens), (10, 5, 1000, 20));
+            }
+            _ => panic!("Expected usage"),
+        }
+    }
+
+    #[test]
+    fn usage_reporting_openai_cached_input_is_counted_once() {
+        let event = parse_stream_usage(&serde_json::json!({"prompt_tokens": 100, "completion_tokens": 5, "prompt_tokens_details": {"cached_tokens": 80}})).unwrap();
+        match event {
+            StreamEvent::Usage { input_tokens, cache_read_tokens, .. } => assert_eq!((input_tokens, cache_read_tokens), (20, 80)),
+            _ => panic!("Expected usage"),
+        }
+        assert!(parse_stream_usage(&serde_json::json!({"model": "no-usage"})).is_none());
     }
 }

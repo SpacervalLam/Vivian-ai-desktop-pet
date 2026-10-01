@@ -95,8 +95,9 @@ impl ToolConfirmationRegistry {
     /// - `request_id`：用于 emit 事件给前端
     /// - `receiver`：await 此 receiver 获取用户选择（Deny/AllowOnce/AllowAlways）
     ///   receiver 在 sender 被 drop 时返回 `Err`，表示用户未响应（如关闭窗口或 TTL 清理）
-    pub fn create_request(&self, request: ConfirmationRequest) -> (u64, oneshot::Receiver<ConfirmationResponse>) {
+    pub fn create_request(&self, mut request: ConfirmationRequest) -> (u64, oneshot::Receiver<ConfirmationResponse>) {
         let id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
+        request.request_id = id;
         let (tx, rx) = oneshot::channel();
         // 惰性清理过期请求，避免 pending 永驻
         self.cleanup_expired_locked();
@@ -415,6 +416,10 @@ mod tests {
         };
         let (id, mut rx) = registry.create_request(req);
 
+        let pending = registry.list_pending();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].request_id, id);
+
         // 在另一个"线程"（此处用同步调用模拟）解决请求
         let resolved = registry.resolve_request(id, ConfirmationResponse::AllowOnce);
         assert!(resolved);
@@ -422,6 +427,7 @@ mod tests {
         // receiver 应收到三态响应
         let response = rx.try_recv();
         assert_eq!(response, Ok(ConfirmationResponse::AllowOnce));
+        assert!(!registry.resolve_request(id, ConfirmationResponse::AllowOnce));
     }
 
     #[tokio::test]

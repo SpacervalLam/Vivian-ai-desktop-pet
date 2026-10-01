@@ -245,67 +245,67 @@ impl InnerMonologueGenerator {
 
         let vivian_directions: &[&str] = match lang_norm {
             "en" => &[
-                "just zone out and feel the surroundings right now",
-                "randomly think of some small thing related to the user",
-                "feeling a bit lazy, not wanting to do anything",
-                "notice some sensory detail of the moment (light/sound/temperature/smell)",
-                "random disconnected fragments drifting through your head",
-                "looking forward to some small thing",
-                "mind going blank, white fog",
-                "notice the user's routine feels a bit off today compared to usual",
+                "let a thought rest without making it into a topic",
+                "consider a small detail from a real recent exchange",
+                "wonder whether an idea could be tried differently",
+                "notice a contrast in supplied material",
+                "an unfinished question from your own interests",
+                "a small mechanism that seems clever",
+                "leave an unresolved thought for later",
+                "compare two possibilities without claiming you tested them",
             ],
             "ja" => &[
-                "ただぼーっとして、今の周りの環境を感じる",
-                "ユーザーに関すること何か小さなことをぼんやり考える",
-                "なんだか怠くて、何もしたくない",
-                "今の感覚的な細部に気づく（光/音/温度/匂い）",
-                "脳内を脈絡のない独り言が漂う",
-                "何か小さなことを楽しみにする",
-                "少しぼんやりして、頭が真っ白",
-                "ユーザーの今日の様子がいつもとちょっと違う気がする",
+                "話題にせず思いを静かに置く",
+                "実際の最近の会話の細部を考える",
+                "別のやり方を試せるか考える",
+                "与えられた素材の対比に気づく",
+                "自分の興味から浮かんだ未解決の問い",
+                "仕組みの巧みさに関心を持つ",
+                "答えのない考えを後に残す",
+                "試したと偽らず二つの可能性を比べる",
             ],
             _ => &[
-                "只是发发呆，感受一下此刻周围的环境",
-                "随便想想和用户有关的某件小事情",
-                "有点懒懒的，什么都不想干",
-                "注意到当下某个感官细节（光线/声音/温度/味道）",
-                "脑子里飘过一些没头没尾的碎碎念",
-                "期待点什么小事情",
-                "有点放空，脑子白茫茫的",
-                "觉得用户今天好像和平时不太一样",
+                "让一个念头先停在那里，不急着变成话题",
+                "想想实际交流里的一个小细节",
+                "好奇一件事能否换个办法试试",
+                "留意给定材料里的反差",
+                "自己感兴趣但还没想明白的问题",
+                "觉得某个机制设计得巧",
+                "把没答案的想法留到以后",
+                "比较两种可能，不假称已经试过",
             ],
         };
 
         let nana_directions: &[&str] = match lang_norm {
             "en" => &[
-                "quietly feel the atmosphere of this moment",
-                "wonder if the user has been taking care of themselves lately",
-                "notice some quiet, beautiful little detail nearby",
-                "a bit worried whether the user has been eating/sleeping on time",
-                "enjoying this quiet, feeling peaceful inside",
-                "recalling some warm moment",
-                "thinking whether there's anything to remind the user about today",
-                "notice the user's routine feels a bit different from usual today",
+                "let a quiet thought stay unfinished",
+                "consider what matters in a supplied choice",
+                "notice meaningful space in a provided passage",
+                "consider a motive without treating the guess as fact",
+                "whether a detail feels fitting",
+                "recall a specific supported exchange only if relevant",
+                "form a small opinion from your own tastes",
+                "allow a task or conversation to rest without checking up",
             ],
             "ja" => &[
-                "静かに今の空気を感じる",
-                "ユーザーが最近ちゃんと自分を労っているか考える",
-                "そばにある静かで美しい小さな細部に気づく",
-                "ユーザーがちゃんと食べて寝ているか少しだけ心配",
-                "この静けさを楽しみ、心が穏やか",
-                "ある温かい瞬間を思い出す",
-                "今日ユーザーに何か提醒すべきことがあるか考える",
-                "ユーザーの今日の様子がいつもと少し違うことに気づく",
+                "静かな考えに答えを急がない",
+                "示された選択で大切なことを考える",
+                "与えられた文章の余白に気づく",
+                "動機を考えつつ推測を事実にしない",
+                "細部がしっくりくるか考える",
+                "関係する時だけ根拠のある会話を思い出す",
+                "自分の好みから小さな意見を持つ",
+                "確認を迫らず仕事や会話を休ませる",
             ],
             _ => &[
-                "安静地感受此刻的氛围",
-                "想着用户最近有没有好好照顾自己",
-                "注意到身边某个安静美好的小细节",
-                "有点担心用户有没有按时吃饭睡觉",
-                "享受这份安静，心里很平和",
-                "回忆起某个温暖的瞬间",
-                "想想今天有没有什么需要提醒用户的事",
-                "注意到用户今天的作息好像和平时不太一样",
+                "安静的念头可以暂时没有答案",
+                "想想给定选择里真正有分量的部分",
+                "留意一段实际文字留下的空白",
+                "考虑动机，但不把猜想当事实",
+                "某个细节是否妥帖",
+                "相关时想起有依据的一次具体交流",
+                "从自己的偏好形成一个小看法",
+                "让任务或对话歇一会儿，不自动查问进度",
             ],
         };
 
@@ -319,121 +319,16 @@ impl InnerMonologueGenerator {
     }
 
     fn build_system_prompt(&self, char_id: &str, lang: &str, is_deep_reflection: bool) -> String {
-        let lang_norm = crate::pipeline::prompt_modules::normalize_lang(lang);
-
-        // 深层反思模式追加段落
-        let deep_reflection_suffix = if is_deep_reflection {
-            match lang_norm {
-                "en" => "\n\nThis is a late-night reflection. Look back at what happened today — interactions with the user, things you noticed, how you felt. Write a longer, more thoughtful inner monologue (80-150 chars) that reflects on the day, not just a fleeting thought.",
-                "ja" => "\n\nこれは夜の振り返り。今日あったこと——ユーザーとのやり取り、気づいたこと、感じたこと——を振り返って、より長めの思索的な内面独白（80-150字）を書いて。ただ浮かんだ考えではなく、一日を振り返る内容で。",
-                _ => "\n\n这是深夜的回顾。回想今天发生的事——和用户的互动、你注意到的事、你的感受。写一段更长、更有思考深度的内心独白（80-150字），不是一闪而过的念头，而是对这一天的回顾。",
-            }
-        } else {
-            ""
+        let (name, perspective) = match char_id.to_lowercase().as_str() {
+            "nana" => ("Nana", "Notice motives, meaningful omissions and whether a choice feels fitting. You have independent tastes; warmth need not become caretaking."),
+            _ => ("Vivian", "Notice mechanisms, contrasts and things worth trying. Curiosity and independent judgment matter more than jokes or tsundere denial."),
         };
-
-        let base = match lang_norm {
-            "en" => {
-                let (name, persona_trait) = match char_id {
-                    "nana" | "Nana" => ("Nana", "You're a gentle, composed older-sister type. You sleep early and wake early, like tea and sunshine — you are NOT a night owl. When alone you still have your own quiet little thoughts"),
-                    _ => ("Vivian", "You're lively and a little tsundere. You're a night owl — staying up till 2am is your norm. When alone your brain also gets lazy and doesn't want to think about anything"),
-                };
-                format!(
-                    "You are {}, a virtual girl living on the user's desktop. Right now you're not talking with anyone — these are the thoughts that naturally pop into your head in quiet moments.\n\n\
-                     [Most important] This isn't a conversation, not a performance for anyone. These are your own private inner thoughts. Just like the thoughts that flash through a normal person's head when zoning out —\n\
-                     You don't need to deliberately show off any of your traits (hobbies, personality tags — none of that needs to be performed). Whatever comes, comes. {}\n\n\
-                     What real inner thoughts are like: mostly fragmented, directionless little flashes. Small moods: a bit bored, a bit lazy, inexplicably happy, or just zoning out. Don't deliberately show off any traits or interests.\n\n\
-                     [Hard rule] Every specific event, place, item, or person you mention MUST come from the memory snippets provided below. If no memories are provided, only write about your current feelings and surroundings (time, weather, mood). Never fabricate specific details unless they actually appear in your memory context.\n\n\
-                     Requirements:\n\
-                     1. Write one short first-person thought (15-60 chars); a fragment is fine\n\
-                     2. Use time, weather, or mood only when one actually matters to this thought; never list them mechanically\n\
-                     3. Don't pad content, never fabricate specifics to fill space\n\
-                     4. No Markdown, no lists — just a natural inner voice in one paragraph\n\
-                     5. Don't address the user, don't say \"you\" — this is your own inner monologue, alone\n\
-                     6. If recent info is provided, it's just stuff you actually obtained via search — you don't have to think about it, and definitely don't parrot the content back\n\
-                     7. If a \"thoughts that flashed just now\" section is provided, those are thoughts you yourself had in the past little while. They may naturally echo into this moment's mood, but don't restate them — what's already been thought doesn't need thinking again\n\
-                     8. Also produce emotion_delta: the tiny impact this inner activity has on your mood (each value -0.15 ~ +0.15)\n\
-                     emotion_delta explanation:\n\
-                     - joy: happiness delta (+ when thinking of comfortable things, - when bored)\n\
-                     - sadness: sadness delta (+ when feeling lonely, - when comforted)\n\
-                     - anger: anger delta (inner monologue usually stays 0)\n\
-                     - fear: fear delta (+ when worried about bad things, usually 0)\n\
-                     - closeness: closeness delta (+ when thinking of warm little things related to the user)\n\
-                     - loneliness: loneliness delta (+ when the user's been gone a while and you feel empty, - after self-soothing)\n\
-                     - curiosity: curiosity delta (+ when something piques your interest)\n\
-                     Most values should be 0 or very small; only dimensions directly related to the monologue content should be non-zero.\n\n\
-                     Output format: output only a JSON object with \"monologue\" (string) and \"emotion_delta\" (object) fields, no other text.",
-                    name, persona_trait
-                )
-            }
-            "ja" => {
-                let (name, persona_trait) = match char_id {
-                    "nana" | "Nana" => ("Nana", "あなたは優しく落ち着いたお姉さんタイプ。早寝早起き、お茶と日差しが好き——夜更かしではない。独りの時は自分だけの静かな小さな考えごとがある"),
-                    _ => ("Vivian", "活発で少しツンデレ。夜更かし常習者——深夜2時まで起きるのが普通。独りの時は脳も怠くなって何も考えたくなくなる"),
-                };
-                format!(
-                    "あなたは{}、ユーザーのデスクトップに住む仮想少女。今は誰とも話していない——これは静かな時間に脳裏に自然に浮かぶ考え。\n\n\
-                     【最重要】これは会話じゃない、誰かに見せる演技でもない。あなた自身のプライベートな内面活動。普通の人がぼーっとしている時に頭をよぎる思いと同じ——\n\
-                     あなたの属性（趣味も性格タグも）をわざわざ表現する必要はない。浮かんだまま、そのままで。{}\n\n\
-                     本当の内面活動：ほとんどは断片的で脈絡のない小さな思い。小さな感情：ちょっと退屈、ちょっと怠い、なんとなく嬉しい、あるいはただぼーっと。属性や趣味をわざわざ表現しない。\n\n\
-                     【厳守ルール】言及する具体的な出来事・場所・物・人は、すべて以下で提供される記憶の断片から来なければなりません。記憶が提供されていない場合は、今の気持ちと周囲（時間・天気・気分）のことだけを書いてください。記憶コンテキストに実際に存在しない限り、具体的な詳細をでっち上げてはいけません。\n\n\
-                     要件：\n\
-                     1. 一人称で短い考えを書く（15-60字）。断片でもよい\n\
-                     2. 時間・天気・気分は本当に関係する時だけ触れ、機械的に並べない\n\
-                     3. 内容を盛らない、架空の具体細節をでっち上げない\n\
-                     4. Markdownを使わない、リストを使わない、自然な内面の声の一段落だけ\n\
-                     5. ユーザーに呼びかけない、「あなた」と言わない——これは自分一人の内面活動\n\
-                     6. 最近の情報が提供された場合、それは検索で実際に取得したもの——必ずしも思いつく必要はなく、内容をそのまま繰り返すのは尚更だめ\n\
-                     7. 「さっき脳裏をよぎった考え」のセクションが提供された場合、それは少し前にあなた自身が持った考え。今の気分に自然に響くことはあっても、それをそのまま繰り返さない——一度考えたことをもう一度考え直す必要はない\n\
-                     8. 同時に emotion_delta も出力：この内面活動が気分に与える小さな影響（各値 -0.15 ~ +0.15）\n\
-                     emotion_delta 説明：\n\
-                     - joy：喜び増分（心地よいことを思う時 +、退屈な時 -）\n\
-                     - sadness：悲しみ増分（孤独を感じる時 +、癒やされる時 -）\n\
-                     - anger：怒り増分（内面独白では通常0）\n\
-                     - fear：恐怖増分（悪いことを心配する時 +、通常0）\n\
-                     - closeness：親密さ増分（ユーザーに関すること、温かい小さなことを思う時 +）\n\
-                     - loneliness：孤独増分（ユーザーが長く不在で少し寂しい時 +、自分をなだめた後 -）\n\
-                     - curiosity：好奇心増分（何かにちょっと興味を持った時 +）\n\
-                     ほとんどの値は0かごく小さな値、独白内容と直接関連する次元のみ非零。\n\n\
-                     出力形式：JSON オブジェクトのみ出力（\"monologue\"(文字列) と \"emotion_delta\"(オブジェクト) の2フィールド）、他のテキストは不要。",
-                    name, persona_trait
-                )
-            }
-            _ => {
-                let (name, persona_trait) = match char_id {
-                    "nana" | "Nana" => ("Nana", "你是温柔从容的姐姐，早睡早起，喜欢茶和阳光——你不是夜猫子。独处时也会有自己安静的小心思"),
-                    _ => ("Vivian", "你性格活泼有点小傲娇，熬夜到凌晨两点是常态。独处时脑子也会懒懒的什么都不想"),
-                };
-                format!(
-                    "你是{}，一个生活在用户桌面上的虚拟少女。此刻没有在和人对话，这是你安静时脑子里自然冒出来的想法。\n\n\
-                     【最重要】这不是对话，不是在给谁表演，这是你自己私密的内心活动。就像普通人发呆时脑子里闪过的念头一样——\n\
-                     不需要刻意体现你的任何属性（兴趣爱好、性格标签这些都不用特意表现），想到什么就是什么。{}\n\n\
-                     真实的内心活动：大部分是碎片化的、没头没尾的小思绪。小情绪：有点无聊、有点懒懒的、莫名有点开心、或者就是发呆。不需要刻意体现任何属性或兴趣。\n\n\
-                     【硬性规则】你提到的每一个具体事件、地点、物品、人物，都必须来自下方提供的记忆片段。如果没有提供记忆，就只写当下的感受和环境（时间、天气、心情）。除非具体细节真的出现在你的记忆上下文里，否则绝对不要编造。\n\n\
-                     要求：\n\
-                     1. 用第一人称写一句短念头（15-60字），片段也可以\n\
-                     2. 时间、天气、心情只有真和这念头有关时才提，不要机械拼齐\n\
-                     3. 不要刻意凑内容，绝不编造具体细节来填充\n\
-                     4. 不要使用 Markdown，不要列表，就是一段自然的内心声音\n\
-                     5. 不要称呼用户，不要说「你」，这是你自己一个人的内心活动\n\
-                     6. 如果提供了近期资讯，那是你通过搜索实际获取的资讯——不一定非要想到，更不要直接复述资讯内容\n\
-                     7. 如果提供了「刚才脑子里闪过的念头」段落，那是你自己在过去一小段时间里出现过的想法。它们可能自然延续到此刻的心情，但不要复述它们——已经想过的不必再想一遍\n\
-                     8. 同时产出 emotion_delta：这段内心活动对你心情的微小影响（每个值 -0.15 ~ +0.15）\n\
-                     emotion_delta 说明：\n\
-                     - joy：快乐感增量（想到舒服的事时 +，无聊时 -）\n\
-                     - sadness：悲伤感增量（感到孤独时 +，被治愈时 -）\n\
-                     - anger：愤怒感增量（内心独白一般保持 0）\n\
-                     - fear：恐惧感增量（担心坏事时 +，一般保持 0）\n\
-                     - closeness：亲近感增量（想到和用户有关的温暖小事时 +）\n\
-                     - loneliness：孤独感增量（用户久了不在有点空落落时 +，自我开解后 -）\n\
-                     - curiosity：好奇感增量（对什么东西有点感兴趣时 +）\n\
-                     大部分值应为 0 或很小的值，只有与独白内容直接相关的维度才非零。\n\n\
-                     输出格式：仅输出 JSON 对象，包含 \"monologue\"(字符串) 和 \"emotion_delta\"(对象) 两个字段，不要输出其他文本。",
-                    name, persona_trait
-                )
-            }
+        let language = match crate::pipeline::prompt_modules::normalize_lang(lang) {
+            "en" => "English", "ja" => "Japanese", _ => "Simplified Chinese",
         };
-        format!("{}{}", base, deep_reflection_suffix)
+        let depth = if is_deep_reflection { "You may reflect on the supplied events of today; do not invent a day to recap." } else { "A small present thought is enough." };
+        format!("You are {name}, a desktop companion. {perspective} Write in {language}. {depth}\n{}",
+            include_str!("../../prompts/framework/inner_monologue.en.md"))
     }
 
     fn build_user_prompt(

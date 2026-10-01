@@ -83,6 +83,12 @@ export default function SkeletalRigPreview() {
         <button style={controlButtonStyle} type="button" onClick={() => petRef.current?.previewBlink()}>
           眨眼
         </button>
+        <button style={controlButtonStyle} type="button" onClick={() => petRef.current?.playMotion(character === 'vivian' ? 'sleep' : 'tend')}>
+          {character === 'vivian' ? '入睡' : '浇花'}
+        </button>
+        <button style={controlButtonStyle} type="button" onClick={() => petRef.current?.resetExpression()}>
+          回到待机
+        </button>
       </nav>
     </main>
   );

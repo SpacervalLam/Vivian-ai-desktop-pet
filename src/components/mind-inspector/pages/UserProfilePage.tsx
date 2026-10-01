@@ -373,6 +373,7 @@ const IdentityRow: React.FC<IdentityRowProps> = ({
         />
       ) : (
         <span
+          className={isEmpty ? 'profile-field-empty' : 'profile-field-value'}
           onDoubleClick={startEdit}
           title={isEmpty ? placeholder : fact!.content}
           style={{

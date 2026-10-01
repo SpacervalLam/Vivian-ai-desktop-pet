@@ -1,0 +1,18 @@
+{
+  "name": "@vivian/3d-apartment",
+  "version": "1.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json && vite build --config vite.config.ts && cd ../.. && node scripts/package-apartment.mjs"
+  },
+  "dependencies": {
+    "three": "^0.169.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "@tauri-apps/api": "^2.1.1"
+  },
+  "devDependencies": {
+    "@types/three": "^0.169.0"
+  }
+}

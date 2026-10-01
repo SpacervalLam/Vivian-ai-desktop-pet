@@ -369,6 +369,7 @@ impl GeminiProvider {
             .as_str()
             .map(|s| s.to_string());
 
+        let content = crate::providers::web_citations::attach(&content, &crate::providers::web_citations::sources(json));
         Ok(ChatResponse {
             content,
             tool_calls,
@@ -385,6 +386,11 @@ impl GeminiProvider {
         body: serde_json::Value,
         cache_key_prompt: Option<&str>,
     ) -> VivianResult<ChatResponse> {
+        // Tool/search responses must be evaluated against current evidence and permissions.
+        let cache_key_prompt = if body.get("tools").is_some()
+            || body.get("web_search_options").is_some()
+            || body.get("enable_search").and_then(serde_json::Value::as_bool) == Some(true)
+        { None } else { cache_key_prompt };
         if let Some(prompt) = cache_key_prompt {
             if let Some(cached) = self.base.get_cached_response(prompt) {
                 tracing::debug!("命中缓存(structured): {}", self.model);
@@ -450,6 +456,11 @@ impl GeminiProvider {
         body: serde_json::Value,
         cache_key_prompt: Option<&str>,
     ) -> VivianResult<String> {
+        // Tool/search responses must be evaluated against current evidence and permissions.
+        let cache_key_prompt = if body.get("tools").is_some()
+            || body.get("web_search_options").is_some()
+            || body.get("enable_search").and_then(serde_json::Value::as_bool) == Some(true)
+        { None } else { cache_key_prompt };
         if let Some(prompt) = cache_key_prompt {
             if let Some(cached) = self.base.get_cached_response(prompt) {
                 tracing::debug!("命中缓存: {}", self.model);
@@ -472,6 +483,7 @@ impl GeminiProvider {
             match self.send_request(body.clone()).await {
                 Ok(json) => {
                     let content = Self::extract_content(&json)?;
+                    let content = crate::providers::web_citations::attach(&content, &crate::providers::web_citations::sources(&json));
                     crate::providers::base::record_response_usage(&self.base.model, &json);
                     self.base.record_success();
                     if let Some(prompt) = cache_key_prompt {
@@ -504,7 +516,7 @@ impl BaseProvider for GeminiProvider {
         let prompt_key = messages_cache_key(&messages);
         let contents = Self::build_contents_from_chat(&messages);
         let schema = crate::providers::base::ProviderCallOptions::current_json_schema();
-        let body = self.build_body(contents, &schema);
+        let body = self.build_body_with_search(contents, self.base.is_enable_search(), &schema);
         self.call_with_retry(body, Some(&prompt_key)).await
     }
 
@@ -602,6 +614,8 @@ impl BaseProvider for GeminiProvider {
                             return;
                         }
                         if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
+                            let sources = crate::providers::web_citations::sources(&json);
+                            if !sources.is_empty() { let _ = tx.send(StreamEvent::WebSources { sources }).await; }
                             if let Some(usage) = parse_stream_usage(&json["usageMetadata"]) {
                                 let _ = tx.send(usage).await;
                             }
@@ -703,11 +717,11 @@ impl BaseProvider for GeminiProvider {
 
         let contents = Self::build_contents_from_chat(&messages);
         let schema = crate::providers::base::ProviderCallOptions::current_json_schema();
-        let mut body = self.build_body(contents, &schema);
+        let mut body = self.build_body_with_search(contents, self.base.is_enable_search(), &schema);
 
         // 注入 Gemini function calling 工具
         if let Some(tools_field) = self.build_tools_field() {
-            body["tools"] = tools_field;
+            crate::providers::web_citations::append_tools(&mut body, &tools_field);
         }
 
         self.invoke_with_retry(body, Some(&prompt_key)).await
@@ -739,12 +753,12 @@ impl BaseProvider for GeminiProvider {
 
         let contents = Self::build_contents_from_chat(&messages);
         let schema = crate::providers::base::ProviderCallOptions::current_json_schema();
-        let mut body = self.build_body(contents, &schema);
+        let mut body = self.build_body_with_search(contents, self.base.is_enable_search(), &schema);
 
         // 注入 Gemini function calling 工具声明（复用 build_tools_field）
         if !tools.is_empty() {
             if let Some(tools_field) = self.build_tools_field() {
-                body["tools"] = tools_field;
+                crate::providers::web_citations::append_tools(&mut body, &tools_field);
             }
         }
 
@@ -818,6 +832,8 @@ impl BaseProvider for GeminiProvider {
                             return;
                         }
                         if let Ok(json_val) = serde_json::from_str::<Value>(data) {
+                            let sources = crate::providers::web_citations::sources(&json_val);
+                            if !sources.is_empty() { let _ = tx.send(StreamEvent::WebSources { sources }).await; }
                             let candidate = &json_val["candidates"][0];
 
                             // 记录结束原因

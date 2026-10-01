@@ -8,7 +8,7 @@ import { getCharacterId } from '../characterContext';
 export interface InputDialogProps {
   onSend?: (text: string, whisper?: boolean) => void;
   onClose?: () => void;
-  /** 按下 ESC 时的附加回调（sideChat 用：关闭输入框的同时解锁窗口） */
+  /** 独立输入窗口按下 ESC 时的附加回调 */
   onEscape?: () => void;
   visible?: boolean;
   /** 挂载后自动启动语音识别（语音快捷键触发时为 true） */
@@ -83,8 +83,6 @@ const InputDialog: React.FC<InputDialogProps> = ({
   const whisperRef = useRef(false);
   useEffect(() => { whisperRef.current = whisper; }, [whisper]);
   const inputRef = useRef<HTMLInputElement>(null);
-  // sideChat 模式输入胶囊容器：点击其外部（窗口背景）时关闭输入框
-  const sideChatCapsuleRef = useRef<HTMLDivElement>(null);
   // 用 ref 跟踪 recording 最新值，确保卸载清理函数能读到当前状态
   const recordingRef = useRef(false);
   useEffect(() => { recordingRef.current = recording; }, [recording]);
@@ -180,18 +178,6 @@ const InputDialog: React.FC<InputDialogProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sideChat]);
 
-  // sideChat 模式：点击窗口背景（输入胶囊外部）关闭输入框
-  useEffect(() => {
-    if (!sideChat) return;
-    const onDown = (e: MouseEvent) => {
-      const cap = sideChatCapsuleRef.current;
-      if (cap && !cap.contains(e.target as Node)) handleClose();
-    };
-    document.addEventListener('mousedown', onDown);
-    return () => document.removeEventListener('mousedown', onDown);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sideChat]);
-
   // 组件卸载时自动停止录音，防止 AsrManager.is_recording 状态泄漏到其他窗口
   // （如 ChatWindow 调用 start_recognition 时会因 "已在进行中" 而失败）
   useEffect(() => {
@@ -245,7 +231,7 @@ const InputDialog: React.FC<InputDialogProps> = ({
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
+      if (e.key === 'Escape' && !sideChat) {
         e.preventDefault();
         onEscape?.();
         handleClose();
@@ -344,6 +330,10 @@ const InputDialog: React.FC<InputDialogProps> = ({
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     // Tab 键切换悄悄话模式（仅私聊模式可用）
+    if (e.key === 'Tab' && sideChat) {
+      e.preventDefault();
+      return;
+    }
     if (e.key === 'Tab' && !broadcast) {
       e.preventDefault();
       setWhisper((w) => !w);
@@ -606,7 +596,6 @@ const InputDialog: React.FC<InputDialogProps> = ({
           </div>
         )}
         <div
-          ref={sideChatCapsuleRef}
           style={{
             width: '100%',
             display: 'flex',
@@ -622,7 +611,6 @@ const InputDialog: React.FC<InputDialogProps> = ({
             animation: 'vivian-input-rise 0.2s ease',
           }}
           onMouseDown={(e) => e.stopPropagation()}
-          onDoubleClick={(e) => e.stopPropagation()}
         >
           <input
             ref={inputRef}

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { getCurrentWindow, currentMonitor, LogicalSize, LogicalPosition } from '@tauri-apps/api/window';
+import { getCurrentWindow, currentMonitor, LogicalSize, LogicalPosition, PhysicalPosition, PhysicalSize } from '@tauri-apps/api/window';
 import type { Effect } from '@tauri-apps/api/window';
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { listen, emit, type UnlistenFn } from '@tauri-apps/api/event';
@@ -17,13 +17,13 @@ import {
 } from './hooks/useTauriCommands';
 import type { ProactiveMessage, ProactiveTickContext, TtsConfig } from './types';
 import { ModelCanvas, type ModelRendererHandle } from './components/ModelCanvas';
-import type { ChibiInteraction } from './components/ChibiPetCanvas';
+import type { ChibiInteraction, PetInteractionMetrics } from './components/ChibiPetCanvas';
 import VideoAnimationLayer from './components/VideoAnimationLayer';
 import SystemTray, { syncTrayMenuCheck } from './components/SystemTray';
 import type { ToastType, ToastAction } from './components/Toast';
 import { PROVIDER_PRESETS } from './components/ConfigWindow';
 import { ChatController } from './controllers/ChatController';
-import { BubbleController, computeDuration } from './controllers/BubbleController';
+import { BubbleController } from './controllers/BubbleController';
 import { TtsStreamQueue } from './controllers/TtsStreamQueue';
 import { LifecycleController } from './controllers/LifecycleController';
 import { useHiding } from './hooks/useHiding';
@@ -35,6 +35,7 @@ import { changeLanguage } from './i18n';
 import type { BubblePosition } from './components/MessageBubble';
 import { getCharacterId } from './characterContext';
 import { stripActions } from './utils/ActionText';
+import { placeBubble } from './utils/bubbleLayout';
 import { raiseWindow, isWindowOnScreen, RAISE_UNLISTEN } from './utils/windowRaiser';
 import { openRoomWindow } from './utils/roomWindow';
 import { buildPetRectQuery, buildPrewarmQuery, emitPetReveal, PET_PREWARM_READY_EVENT, type PetPrewarmReady, type PetRect } from './utils/petReveal';
@@ -128,6 +129,7 @@ type PetAction =
   | 'double_click'
   | 'rough_click'
   | 'long_press'
+  | 'drag'
   | 'fast_drag'
   | 'edge_bounce';
 
@@ -641,6 +643,8 @@ export default function App() {
   // 渲染相关字段使用独立 selector；actions 与回调内读取的字段改用 useAppStore.getState() 即时获取。
   const currentBubble = useAppStore((s) => s.currentBubble);
   const settledBubbles = useAppStore((s) => s.settledBubbles);
+  const bubbleCrossCharacter = useAppStore((s) => s.bubbleCrossCharacter);
+  const bubbleListenerName = useAppStore((s) => s.bubbleListenerName);
   const ttsEnabled = useAppStore((s) => s.ttsEnabled);
   const voiceEnabled = useAppStore((s) => s.voiceEnabled);
   // 桌宠自身心情状态（energy=精力 0-100，focus=专注力 0-100，由后端 3s 心跳刷新）
@@ -801,6 +805,7 @@ export default function App() {
   const holdStartWinPosRef = useRef<{ x: number; y: number } | null>(null);
   // 长按触发时刻：用于吞掉触发后紧跟的 click 余波（不触发摸头台词）
   const holdCompletedAtRef = useRef(0);
+  const holdStartedAtRef = useRef(0);
   // 长按进度环挂载位置（client 坐标）；null = 未显示
   const [holdRingPos, setHoldRingPos] = useState<{ x: number; y: number } | null>(null);
   // 长按触发的动作（打开心智观察器），由下方 openMemory 定义后回填
@@ -815,20 +820,9 @@ export default function App() {
 
   // 气泡子窗口管理：currentBubble 变化时创建/更新/隐藏气泡窗口
   // currentBubble 是单一数据源（涵盖普通气泡、流式气泡、追加气泡）
-  const prevBubbleTextRef = useRef<string | null>(null);
-  // 气泡窗口 webview 是否已就绪（监听器已注册）
-  const bubbleReadyRef = useRef<boolean>(false);
-  // 待发送的首次气泡文本（窗口未就绪时缓存）
-  const pendingBubbleTextRef = useRef<string | null>(null);
-  // 最近一次气泡定位锚点（流式动态扩大时据此重新计算 y 坐标）
-  const lastBubbleAnchorRef = useRef<{
-    position: BubblePosition;
-    petWinY: number;
-    petWinH: number;
-    x: number;
-  } | null>(null);
-  // 上一次已结算气泡段列表的 ID 快照（用于检测增删并转发到气泡窗口）
-  const prevSettledIdsRef = useRef<Set<number>>(new Set());
+  const bubbleReadyRef = useRef(false);
+  const bubbleCreatingRef = useRef(false);
+  const bubbleSyncRef = useRef({ busy: false, dirty: false, height: BUBBLE_WINDOW_HEIGHT, measuredKey: '', measuredHeight: 0, appliedSize: '', appliedPosition: '' });
 
   // Toast 子窗口管理：屏幕右下角的透明、点击穿透窗口
   const toastReadyRef = useRef<boolean>(false);
@@ -1024,6 +1018,7 @@ export default function App() {
     x: number;
     y: number;
     position: BubblePosition;
+    factor: number;
   } | null> => {
     try {
       const win = getCurrentWindow();
@@ -1035,59 +1030,68 @@ export default function App() {
       const monitor = await currentMonitor();
       if (!monitor) return null;
 
-      const screenW = monitor.size.width / factor;
-      const screenH = monitor.size.height / factor;
-      const winX = pos.x / factor;
-      const winY = pos.y / factor;
-      const winW = size.width / factor;
-      const winH = size.height / factor;
-
-      // 纵向：优先放主窗口上方，空间不足则放下方
-      const spaceAbove = winY;
-      const above = spaceAbove >= height;
-      // position='top' → 尾巴朝下（气泡在桌宠上方）；position='bottom' → 尾巴朝上（气泡在下方）
-      const position: BubblePosition = above ? 'top' : 'bottom';
-      const y = above ? winY - height : winY + winH;
-
-      // 横向：气泡窗口与主窗口右对齐，但保证不超出屏幕
-      let x = winX + winW - BUBBLE_WINDOW_WIDTH;
-      if (x < 4) x = 4;
-      if (x + BUBBLE_WINDOW_WIDTH > screenW - 4) {
-        x = screenW - BUBBLE_WINDOW_WIDTH - 4;
-      }
-      // 缓存锚点，供流式动态扩大时同步重算 y
-      lastBubbleAnchorRef.current = { position, petWinY: winY, petWinH: winH, x };
-      return { x: Math.round(x), y: Math.round(y), position };
+      return { ...placeBubble({
+        x: pos.x / factor, y: pos.y / factor, width: size.width / factor, height: size.height / factor,
+      }, {
+        x: monitor.position.x / factor, y: monitor.position.y / factor,
+        width: monitor.size.width / factor, height: monitor.size.height / factor,
+      }, BUBBLE_WINDOW_WIDTH, height), factor };
     } catch {
       return null;
     }
   }, []);
 
-  /** 向气泡窗口发送 bubble:show 事件 */
-  const emitBubbleShow = useCallback(async (text: string) => {
-    // 首次显示即按文本长度估算高度，流式首块即可获得合适尺寸
-    const dynHeight = estimateBubbleHeight(text);
-    const posInfo = await computeBubbleWindowPosition(dynHeight);
-    if (!posInfo) return;
-    // 气泡窗口自身已设置 setIgnoreCursorEvents(true) 一直穿透，不影响 桌宠窗口的鼠标交互
-    let bubbleWin = await WebviewWindow.getByLabel(charScopedLabel('bubble'));
-    if (bubbleWin) {
-      try {
-        await bubbleWin.setSize(new LogicalSize(BUBBLE_WINDOW_WIDTH, dynHeight));
-        await bubbleWin.setPosition(new LogicalPosition(posInfo.x, posInfo.y));
+  /** Serialize layout writes and coalesce updates to the latest store snapshot. */
+  const emitBubbleShow = useCallback(async () => {
+    const sync = bubbleSyncRef.current;
+    sync.dirty = true;
+    if (sync.busy || !bubbleReadyRef.current) return;
+    sync.busy = true;
+    try {
+      while (sync.dirty && bubbleReadyRef.current) {
+        sync.dirty = false;
+        const state = useAppStore.getState();
+        const bubbleWin = await WebviewWindow.getByLabel(charScopedLabel('bubble'));
+        if (!bubbleWin) return;
+        const texts = [...state.settledBubbles.map((b) => b.text), ...(state.currentBubble ? [state.currentBubble] : [])];
+        if (!texts.length) {
+          await bubbleWin.emit('bubble:sync', { text: state.currentBubble, settled: [], character_id: getCharacterId() });
+          await bubbleWin.hide();
+          continue;
+        }
+        const estimated = texts.reduce((sum, text) => sum + estimateBubbleHeight(text), 0) + 8 * (texts.length - 1) + 16;
+        // Reuse the actual height while new text renders, then resize on its measurement.
+        const requestedHeight = sync.measuredHeight || estimated;
+        const monitor = await currentMonitor();
+        const factor = await getCurrentWindow().scaleFactor();
+        sync.height = Math.max(48, Math.min(requestedHeight, (monitor?.size.height ?? 1080) / factor - 8));
+        const posInfo = await computeBubbleWindowPosition(sync.height);
+        if (!posInfo) continue;
+        const sizeKey = `${BUBBLE_WINDOW_WIDTH}:${sync.height}:${posInfo.factor}`;
+        const positionKey = `${posInfo.x}:${posInfo.y}:${posInfo.factor}`;
+        if (sync.appliedSize !== sizeKey) {
+          await bubbleWin.setSize(new PhysicalSize(Math.round(BUBBLE_WINDOW_WIDTH * posInfo.factor), Math.round(sync.height * posInfo.factor)));
+          sync.appliedSize = sizeKey;
+        }
+        if (sync.appliedPosition !== positionKey) {
+          await bubbleWin.setPosition(new PhysicalPosition(Math.round(posInfo.x * posInfo.factor), Math.round(posInfo.y * posInfo.factor)));
+          sync.appliedPosition = positionKey;
+        }
+        await bubbleWin.emit('bubble:sync', {
+          text: state.currentBubble,
+          settled: state.settledBubbles,
+          position: posInfo.position,
+          character_id: getCharacterId(),
+          cross_character: state.bubbleCrossCharacter,
+          listener_name: state.bubbleListenerName,
+        });
         await bubbleWin.show();
-      } catch {
-        /* ignore */
       }
+    } catch (error) {
+      console.warn('[BubbleWindow] sync failed', error);
+    } finally {
+      sync.busy = false;
     }
-    void emit('bubble:show', {
-      text,
-      position: posInfo.position,
-      duration: 0,
-      character_id: getCharacterId() ?? undefined,
-      cross_character: useAppStore.getState().bubbleCrossCharacter,
-      listener_name: useAppStore.getState().bubbleListenerName ?? undefined,
-    });
   }, [computeBubbleWindowPosition]);
 
   const ensureSideChatWindow = useCallback(async (opts?: { show?: boolean; lock?: boolean; showInput?: boolean; autoVoice?: boolean }): Promise<void> => {
@@ -1118,7 +1122,7 @@ export default function App() {
         await invoke('show_side_chat_animated', { label: 'side_chat' }).catch(() => {});
       }
       if (opts?.lock) {
-        await invoke('set_side_chat_locked', { locked: true }).catch(() => {});
+        await invoke('set_side_chat_locked', { locked: true, label: 'side_chat' }).catch(() => {});
       }
       // 窗口已存在：通过事件通知显示 InputDialog（携带角色 ID 用于发送路由）
       if (opts?.showInput) {
@@ -1159,7 +1163,7 @@ export default function App() {
         void invoke('show_side_chat_animated', { label: 'side_chat' }).catch(() => {});
       }
       if (opts?.lock) {
-        void invoke('set_side_chat_locked', { locked: true }).catch(() => {});
+        void invoke('set_side_chat_locked', { locked: true, label: 'side_chat' }).catch(() => {});
       }
     });
   }, []);
@@ -1174,9 +1178,10 @@ export default function App() {
    * 完全静默：未配置模型 / 超时 / 失败时后端返回 null，这里不显示任何气泡，
    * 也不再回退到写死的固定台词。同类动作的节流在后端做，前端不重复计时。
    */
-  const requestPetReaction = useCallback((action: PetAction, impact?: number) => {
+  const requestPetReaction = useCallback((action: PetAction, impact?: number, metrics?: PetInteractionMetrics) => {
     void invoke<string | null>('generate_pet_reaction', {
       action,
+      metrics: metrics ?? null,
       impact: impact ?? null,
       characterId: getCharacterId() ?? undefined,
     })
@@ -1200,7 +1205,7 @@ export default function App() {
    * 长按（心智观察器）与甩飞晕眩（drag:dizzy）走各自的入口调同一个 requestPetReaction。
    * 从 rest/busy 唤醒仍由 onModelClick 的连续点击计数负责，不在这里重复处理。
    */
-  const handleChibiInteraction = useCallback((interaction: ChibiInteraction) => {
+  const handleChibiInteraction = useCallback((interaction: ChibiInteraction, metrics?: PetInteractionMetrics) => {
     // 长按触发打开心智观察器后紧接着的 click 是松手余波，不触发反应
     if (Date.now() - holdCompletedAtRef.current < 500) return;
     lastActivityRef.current = Date.now();
@@ -1211,7 +1216,7 @@ export default function App() {
       const characterId = (getCharacterId() ?? 'vivian').toLowerCase().includes('nana') ? 'nana' : 'vivian';
       playPetTapSound(characterId);
     }
-    requestPetReaction(interaction);
+    requestPetReaction(interaction, undefined, metrics);
   }, [requestPetReaction]);
 
   /** 确保/展开微信窗口（label='chat'，右缘三态侧边栏）。
@@ -1280,12 +1285,14 @@ export default function App() {
     });
   }, []);
   const ensureBubbleWindow = useCallback(async (): Promise<void> => {
+    if (bubbleCreatingRef.current) return;
+    bubbleCreatingRef.current = true;
     const bubbleLabel = charScopedLabel('bubble');
     const existing = await WebviewWindow.getByLabel(bubbleLabel);
-    if (existing) return;
+    if (existing) { bubbleCreatingRef.current = false; return; }
 
     bubbleReadyRef.current = false;
-    new WebviewWindow(bubbleLabel, {
+    const bubbleWindow = new WebviewWindow(bubbleLabel, {
       url: `/?view=bubble&character_id=${getCharacterId() ?? ''}`,
       title: 'Vivian Bubble',
       width: BUBBLE_WINDOW_WIDTH,
@@ -1306,148 +1313,48 @@ export default function App() {
       //   hideBubbleWithPet —— 不依赖各平台的 owner 隐藏语义。）
       parent: getCharacterId() ?? undefined,
     });
+    void bubbleWindow.once('tauri://error', () => { bubbleCreatingRef.current = false; });
     // 等待 BubbleWindow 挂载并发出 bubble:ready（由 useEffect 监听）
   }, []);
 
-  // 监听 bubble:ready：窗口就绪后发送缓存的待显示文本
+  // Readiness replays the entire current snapshot, including segments created during startup.
   useEffect(() => {
     let cancelled = false;
-    let unlisten: (() => void) | undefined;
+    const unlistens: Array<() => void> = [];
     void (async () => {
-      unlisten = await listen<{ character_id?: string }>('bubble:ready', (e) => {
-        if (e.payload?.character_id && e.payload.character_id !== getCharacterId()) return;
+      const ready = await listen<{ character_id?: string }>('bubble:ready', (e) => {
+        if (e.payload.character_id !== (getCharacterId() ?? '')) return;
         bubbleReadyRef.current = true;
-        const pending = pendingBubbleTextRef.current;
-        if (pending !== null) {
-          pendingBubbleTextRef.current = null;
-          void emitBubbleShow(pending);
-        }
+        bubbleCreatingRef.current = false;
+        bubbleSyncRef.current.appliedSize = bubbleSyncRef.current.appliedPosition = '';
+        void emitBubbleShow();
       });
-      if (cancelled) { safeUnlisten(unlisten); return; }
-      console.log(`[DIAG] listen registered: bubble:ready, char=${getCharacterId()}`);
+      if (cancelled) { ready(); return; }
+      unlistens.push(ready);
+      const measured = await listen<{ character_id: string; key: string; height: number }>('bubble:measured', (e) => {
+        if (e.payload.character_id !== (getCharacterId() ?? '')) return;
+        const state = useAppStore.getState();
+        const key = JSON.stringify([...state.settledBubbles.map((b) => b.text), ...(state.currentBubble ? [state.currentBubble] : [])]);
+        if (key !== e.payload.key) return;
+        const sync = bubbleSyncRef.current;
+        if (sync.measuredKey === e.payload.key && sync.measuredHeight === e.payload.height) return;
+        sync.measuredKey = e.payload.key;
+        sync.measuredHeight = e.payload.height;
+        void emitBubbleShow();
+      });
+      if (cancelled) { measured(); return; }
+      unlistens.push(measured);
     })();
-    return () => { cancelled = true; safeUnlisten(unlisten); };
+    return () => { cancelled = true; for (const unlisten of unlistens) unlisten(); };
   }, [emitBubbleShow]);
 
-  // 气泡窗口自身一直穿透（setIgnoreCursorEvents(true)），不需要 suspend/resume
-  // 桌宠窗口的穿透状态。
-
-  // 监听 currentBubble 变化，驱动气泡窗口生命周期
   useEffect(() => {
-    const text = currentBubble;
-    const prev = prevBubbleTextRef.current;
-    prevBubbleTextRef.current = text;
-
-    if (text === null) {
-      // 气泡隐藏
-      void emit('bubble:hide', { character_id: getCharacterId() ?? undefined });
-      void WebviewWindow.getByLabel(charScopedLabel('bubble')).then((w) => {
-        if (w) void w.hide();
-      });
-      pendingBubbleTextRef.current = null;
+    if (!bubbleReadyRef.current) {
+      if (currentBubble !== null || settledBubbles.length) void ensureBubbleWindow();
       return;
     }
-
-    if (prev === null) {
-      // 首次显示（null → 非空）
-      if (bubbleReadyRef.current) {
-        // 窗口已存在且就绪 → 直接发送
-        void emitBubbleShow(text);
-      } else {
-        // 窗口未创建或未就绪 → 缓存文本，创建窗口后由 bubble:ready 触发发送
-        pendingBubbleTextRef.current = text;
-        void ensureBubbleWindow();
-      }
-    } else {
-      // 文本更新（流式/追加）— 不重建窗口，仅更新文本
-      void emit('bubble:update', {
-        text,
-        character_id: getCharacterId() ?? undefined,
-        cross_character: useAppStore.getState().bubbleCrossCharacter,
-        listener_name: useAppStore.getState().bubbleListenerName ?? undefined,
-      });
-      // 流式动态扩大：根据文本长度重算窗口高度与 y 坐标，
-      // 使气泡随内容增长而增大（上方模式向上扩展，下方模式向下扩展）
-      const dynHeight = estimateBubbleHeight(text);
-      const anchor = lastBubbleAnchorRef.current;
-      if (anchor && dynHeight !== BUBBLE_WINDOW_HEIGHT) {
-        void WebviewWindow.getByLabel(charScopedLabel('bubble')).then(async (w) => {
-          if (!w) return;
-          try {
-            await w.setSize(new LogicalSize(BUBBLE_WINDOW_WIDTH, dynHeight));
-            // 上方模式：窗口底边贴合桌宠顶部 → y = petWinY - dynHeight
-            // 下方模式：窗口顶边贴合桌宠底部 → y = petWinY + petWinH
-            const newY = anchor.position === 'top'
-              ? anchor.petWinY - dynHeight
-              : anchor.petWinY + anchor.petWinH;
-            await w.setPosition(new LogicalPosition(anchor.x, Math.round(newY)));
-          } catch {
-            /* ignore */
-          }
-        });
-      }
-    }
-  }, [currentBubble, emitBubbleShow, ensureBubbleWindow]);
-
-  // 监听 settledBubbles 变化：转发 add/remove 事件到气泡窗口，并调整窗口高度
-  useEffect(() => {
-    const currentIds = new Set(settledBubbles.map((b) => b.id));
-    const prevIds = prevSettledIdsRef.current;
-    const charId = getCharacterId() ?? undefined;
-
-    // 检测新增的已结算气泡 → 发送 settled_add 事件
-    for (const b of settledBubbles) {
-      if (!prevIds.has(b.id)) {
-        void emit('bubble:settled_add', {
-          id: b.id,
-          text: b.text,
-          duration: b.duration,
-          character_id: charId,
-        });
-      }
-    }
-
-    // 检测移除的已结算气泡 → 发送 settled_remove 事件
-    for (const id of prevIds) {
-      if (!currentIds.has(id)) {
-        void emit('bubble:settled_remove', {
-          id,
-          character_id: charId,
-        });
-      }
-    }
-
-    prevSettledIdsRef.current = currentIds;
-
-    // 调整气泡窗口高度：活跃气泡 + 已结算气泡的总高度
-    const activeText = currentBubble ?? '';
-    const allTexts = [
-      ...settledBubbles.map((b) => b.text),
-      ...(activeText ? [activeText] : []),
-    ];
-    if (allTexts.length === 0) return;
-
-    // 估算总高度：各气泡高度之和 + gap(8) * (n-1) + padding(16)
-    const totalHeight = allTexts.reduce((sum, t) => sum + estimateBubbleHeight(t), 0)
-      + 8 * Math.max(0, allTexts.length - 1) + 16;
-    const dynHeight = Math.min(BUBBLE_WINDOW_MAX_HEIGHT * 2, Math.max(BUBBLE_WINDOW_MIN_HEIGHT, totalHeight));
-
-    const anchor = lastBubbleAnchorRef.current;
-    if (anchor) {
-      void WebviewWindow.getByLabel(charScopedLabel('bubble')).then(async (w) => {
-        if (!w) return;
-        try {
-          await w.setSize(new LogicalSize(BUBBLE_WINDOW_WIDTH, dynHeight));
-          const newY = anchor.position === 'top'
-            ? anchor.petWinY - dynHeight
-            : anchor.petWinY + anchor.petWinH;
-          await w.setPosition(new LogicalPosition(anchor.x, Math.round(newY)));
-        } catch {
-          /* ignore */
-        }
-      });
-    }
-  }, [settledBubbles, currentBubble]);
+    void emitBubbleShow();
+  }, [currentBubble, settledBubbles, bubbleCrossCharacter, bubbleListenerName, emitBubbleShow, ensureBubbleWindow]);
 
   /** 桌宠离场时气泡必须一起消失。
    *
@@ -1466,36 +1373,32 @@ export default function App() {
     petHideHookRef.current = hideBubbleWithPet;
   }, [hideBubbleWithPet]);
 
-  // 主窗口移动时重新定位气泡窗口
+  // Bind both user drags and programmatic movement/resize to the same layout pipeline.
   useEffect(() => {
     const win = getCurrentWindow();
-    let unlisten: (() => void) | undefined;
     let cancelled = false;
+    const unlistens: Array<() => void> = [];
+    let frame: number | null = null;
+    const reposition = () => {
+      if (!BubbleController.hasActiveBubble || frame !== null) return;
+      frame = requestAnimationFrame(() => { frame = null; void emitBubbleShow(); });
+    };
     void (async () => {
-      try {
-        unlisten = await win.onMoved(() => {
-          // 仅在气泡可见时（currentBubble 非空）重新定位
-          if (prevBubbleTextRef.current === null) return;
-          void (async () => {
-            const bubbleWin = await WebviewWindow.getByLabel(charScopedLabel('bubble'));
-            if (!bubbleWin) return;
-            const posInfo = await computeBubbleWindowPosition();
-            if (!posInfo) return;
-            try {
-              await bubbleWin.setPosition(new LogicalPosition(posInfo.x, posInfo.y));
-            } catch {
-              /* ignore */
-            }
-          })();
-        });
-        // 迟到 resolve 兜底：cleanup 先于监听器注册完成时，当场解绑防泄漏
-        if (cancelled) { safeUnlisten(unlisten); unlisten = undefined; }
-      } catch {
-        /* ignore */
+      for (const bind of [() => win.onMoved(reposition), () => win.onResized(reposition),
+        () => win.onScaleChanged(reposition)]) {
+        try {
+          const unlisten = await bind();
+          if (cancelled) { unlisten(); return; }
+          unlistens.push(unlisten);
+        } catch { /* Window may have closed during registration. */ }
       }
     })();
-    return () => { cancelled = true; safeUnlisten(unlisten); unlisten = undefined; };
-  }, [computeBubbleWindowPosition]);
+    return () => {
+      cancelled = true;
+      if (frame !== null) cancelAnimationFrame(frame);
+      for (const unlisten of unlistens) unlisten();
+    };
+  }, [emitBubbleShow]);
 
   // 记录用户活动（鼠标移动、键盘按下、点击）
   useEffect(() => {
@@ -2373,7 +2276,7 @@ export default function App() {
             }
             if (cancelled) return;
             if (finalText) {
-              BubbleController.showBubble(finalText, undefined, crossOpts);
+              BubbleController.finishStreaming(finalText, crossOpts);
               void emit('chat:assistant_message', {
                 content: finalText,
                 timestamp: new Date().toISOString(),
@@ -3216,10 +3119,12 @@ export default function App() {
           const result: FileTextResult = await extractFileText(filePath);
 
           if (result.file_type === 'image') {
-            await invoke('send_image_message', {
+            const reply = await invoke<string>('send_image_message', {
               sourcePath: filePath,
               characterId: charId,
+              channel: 'direct',
             });
+            if (reply?.trim()) BubbleController.showBubble(reply);
             showToast(
               t('toast.image_dropped', {
                 filename: result.filename,
@@ -3252,7 +3157,7 @@ export default function App() {
               truncated: result.truncated,
               original_char_count: result.original_char_count,
             };
-            void ChatController.sendMessage(message, charId, 'wechat', undefined, fileMetadata);
+            await ChatController.sendMessage(message, charId, 'direct', undefined, fileMetadata);
           }
         } catch (err) {
           showToast(
@@ -3271,9 +3176,11 @@ export default function App() {
   // 注册原生拖放事件监听（仅一次）
   useEffect(() => {
     let unlisten: UnlistenFn | undefined;
+    let disposed = false;
     void (async () => {
       // 点击穿透已移除：窗口始终响应鼠标，文件拖放不再需要 suspend/resume 配对
       unlisten = await getCurrentWindow().onDragDropEvent((event) => {
+        if (disposed) return;
         const payload = event.payload;
         if (payload.type === 'enter') {
           setIsDragOver(true);
@@ -3284,8 +3191,9 @@ export default function App() {
           handleFileDropRef.current(payload.paths);
         }
       });
-    })();
-    return () => { unlisten?.(); };
+      if (disposed) unlisten();
+    })().catch((err) => console.warn('[App] File drop listener:', err));
+    return () => { disposed = true; unlisten?.(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -3365,7 +3273,7 @@ export default function App() {
     // releasePrewarm 会直接走常规打开路径。
     releasePrewarm();
     // 长按本身也是一次用户动作：记进事件账本，并让桌宠随口反应一句
-    requestPetReaction('long_press');
+    requestPetReaction('long_press', undefined, { pressDurationMs: Date.now() - holdStartedAtRef.current });
   }, [requestPetReaction, releasePrewarm]);
 
   const startHold = useCallback((clientX: number, clientY: number) => {
@@ -3374,6 +3282,7 @@ export default function App() {
     cancelHold();
     holdActiveRef.current = true;
     holdCompletedAtRef.current = 0;
+    holdStartedAtRef.current = Date.now();
     // 记录窗口初始位置：拖拽期间窗口跟随光标移动（client 坐标不变，
     // mousemove 检测不到拖动），只能通过窗口位移判定
     void getCurrentWindow()
@@ -3596,6 +3505,20 @@ export default function App() {
     })();
 
     // 晕乎乎触发：拖动过快（拖动中）或甩飞撞到屏幕边缘（松手后）
+    let unlistenDragInteraction: (() => void) | undefined;
+    let dragInteractionDisposed = false;
+    void win.listen<{ duration_ms: number; distance_px: number; speed_px_per_ms: number }>(
+      'drag:interaction', event => {
+        requestPetReaction('drag', undefined, {
+          pressDurationMs: event.payload.duration_ms,
+          dragSpeedPxPerMs: event.payload.speed_px_per_ms,
+          dragDistancePx: event.payload.distance_px,
+        });
+      },
+    ).then(unlisten => {
+      if (dragInteractionDisposed) unlisten();
+      else unlistenDragInteraction = unlisten;
+    }).catch(() => {});
     let unlistenDizzy: (() => void) | undefined;
     void (async () => {
       try {
@@ -3603,13 +3526,14 @@ export default function App() {
           duration_ms?: number;
           reason?: string;
           impact?: number;
+          speed_px_per_ms?: number;
         }>('drag:dizzy', (event) => {
           applyDizzy(event.payload?.duration_ms ?? 0);
           // 「被甩懵了」是一次实打实的用户动作：除了切表情，也让桌宠反应一句
           // （后端据此记进统一事件账本，并带节流合并连续撞击）
           const reason = event.payload?.reason;
           if (reason === 'fast_drag') {
-            requestPetReaction('fast_drag');
+            requestPetReaction('fast_drag', undefined, { dragSpeedPxPerMs: event.payload?.speed_px_per_ms });
           } else if (reason === 'edge_bounce') {
             requestPetReaction('edge_bounce', event.payload?.impact);
           }
@@ -3624,6 +3548,8 @@ export default function App() {
     return () => {
       safeUnlisten(unlistenMoved);
       safeUnlisten(unlistenDragCancelled);
+      dragInteractionDisposed = true;
+      safeUnlisten(unlistenDragInteraction);
       safeUnlisten(unlistenDizzy);
       window.removeEventListener('mouseup', resetDragExpression);
       if (dragDeferTimerRef.current !== null) {
@@ -3745,12 +3671,12 @@ export default function App() {
   }, [ensureWechatWindow]);
 
   const openConfig = useCallback((showGuide = false) => {
-    void openWindow('config', 'config', t('config.title'), 768, 624, {
+    void openWindow('config', 'config', t('config.title'), 1120, 760, {
       decorations: false,
       transparent: false,
       shadow: true,
-      minWidth: 768,
-      minHeight: 624,
+      minWidth: 880,
+      minHeight: 600,
         extraQuery: showGuide ? 'guide=1' : undefined,
     });
   }, [t]);

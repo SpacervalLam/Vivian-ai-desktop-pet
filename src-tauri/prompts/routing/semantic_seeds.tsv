@@ -1,0 +1,144 @@
+# dimension<TAB>label<TAB>zh<TAB>en<TAB>ja
+# Curated routing anchors. Contrast explanation vs execution, boundaries vs rejection,
+# temporary states vs durable preferences. Do not add automatic Cartesian paraphrases.
+# Task parameters continue a request; short length alone is not a sign-off.
+intent	request	8分钟左右	About eight minutes	8分くらい
+relationship	none	8分钟左右	About eight minutes	8分くらい
+intent	chat	没什么事，就想过来待一会儿	Nothing in particular, just wanted to hang out	特に用はないけど、少し一緒にいたくて
+intent	chat	你今天有没有想聊的话题	Anything you feel like chatting about today?	今日は何か話したいことある？
+intent	chat	这个笑话有点冷哈哈	That joke was pretty lame, haha	その冗談ちょっと寒いね、はは
+intent	chat	不需要做什么，随便聊两句	No task, let's just chat for a bit	何かする必要はないよ、少し雑談しよう
+intent	chat	我刚回来，你还在呀	I'm back, you're still here	ただいま、まだいたんだね
+intent	chat	嗯，听你这么说也有道理	Yeah, that makes sense when you put it that way	うん、そう言われると確かにそうだね
+intent	question	解释这段代码，不要修改文件	Explain this code without changing any files	このコードを説明して、ファイルは変更しないで
+intent	question	先说一下原理，不用实际操作	Explain the principle first, don't actually do it	まず仕組みを説明して、実際の操作はしなくていい
+intent	question	这两个实现的时间复杂度有什么不同	How do these implementations differ in time complexity?	この二つの実装の時間計算量はどう違う？
+intent	question	如果网络断了会怎样处理	What happens if the network disconnects?	ネットが切れたらどう処理されるの？
+intent	question	你刚才那句话具体是什么意思	What exactly did you mean by that?	さっきの言葉は具体的にどういう意味？
+intent	question	为什么我按说明做还是不行	Why doesn't it work even when I follow the instructions?	説明どおりにしても動かないのはなぜ？
+intent	request	请把这段文字改得像日常聊天	Please rewrite this to sound conversational	この文章を普段の会話っぽく書き直して
+intent	request	帮我写一封拒绝邀请的邮件	Help me draft an email declining an invitation	招待を断るメールを書いてほしい
+intent	request	给我拟一份每周学习计划	Draft a weekly study plan for me	一週間の勉強計画を作って
+intent	request	能举两个具体例子说明吗	Could you give two concrete examples?	具体例を二つ挙げてもらえる？
+intent	request	把这一段翻译成中文，保留语气	Translate this into Chinese and preserve the tone	この段落を中国語に訳して、口調は保って
+intent	request	我心情不太好，帮我想想怎么沟通	I'm feeling down; help me figure out how to talk about it	落ち込んでいるんだけど、どう伝えるか一緒に考えて
+intent	sharing	刚做完演示，终于能松口气了	Just finished the presentation, finally a breather	発表が終わって、やっと一息つける
+intent	sharing	和朋友散步时看到一只很可爱的猫	Saw an adorable cat while walking with a friend	友達と散歩していたら、すごくかわいい猫を見た
+intent	sharing	我今天试了你上次提到的方法	I tried the method you mentioned last time today	この前教えてくれた方法を今日試してみた
+intent	sharing	刚才听到那首歌突然想起大学的事	That song suddenly reminded me of college	あの曲を聴いたら急に大学のことを思い出した
+intent	sharing	我已经把问题解决了，来告诉你一声	I've solved it, just wanted to let you know	問題はもう解決したよ、報告したくて
+intent	sharing	今天没出什么大事，就是有点疲惫	Nothing major today, just a little worn out	今日は大きな出来事はないけど、少し疲れた
+intent	complaint	又要重新填一遍表，真的很烦	I have to fill the form again, so annoying	また最初から入力し直しだって、本当に面倒
+intent	complaint	不是想让你解决，只想吐槽两句	I'm not asking you to solve it, just venting	解決してほしいわけじゃなくて、少し愚痴りたいだけ
+intent	complaint	这个需求今天已经改三次了	They've changed the requirement three times today	この要求、今日だけで三回も変わった
+intent	complaint	游戏输了就算了，队友还一直骂人	Losing is one thing, but my teammate kept insulting everyone	負けるのはいいけど、味方がずっと暴言を吐いていた
+intent	complaint	好不容易写完，结果程序崩了没保存	Finally finished writing, then it crashed without saving	やっと書き終えたのに、保存前にアプリが落ちた
+intent	complaint	他说好的事又临时变卦了	He changed his mind again after promising	約束していたのに、また直前で話を変えられた
+intent	goodbye	先不聊了，我要专心把这件事做完	Let's pause, I need to focus on finishing this	いったん話すのをやめて、これを終わらせたい
+intent	goodbye	别担心，我只是去吃饭，一会儿回来	Don't worry, just going to eat; I'll be back	心配しないで、ご飯に行くだけ。あとで戻るよ
+intent	goodbye	手机快没电了，下次再继续	My phone is dying, let's continue another time	スマホの電池が切れそう、続きはまた今度
+intent	goodbye	今天聊得很开心，明天见	That was a nice chat, see you tomorrow	今日は楽しかった、また明日ね
+intent	goodbye	已经很晚了，我先下线	It's late, I'm signing off	もう遅いから、先に落ちるね
+intent	goodbye	车到了，我要走了	My ride is here, I've got to go	車が来たから、もう行くね
+intent	tool_request	请修复这个错误并运行测试	Please fix this error and run the tests	このエラーを修正して、テストも実行して
+intent	tool_request	把刚才的方案写到项目文档里	Write that plan into the project documentation	さっきの案をプロジェクトの文書に書いて
+intent	tool_request	帮我搜索最新的版本信息	Search for the latest version information	最新のバージョン情報を検索して
+intent	tool_request	现在帮我把这个网页打开	Open this webpage for me now	今このページを開いて
+intent	tool_request	十分钟后提醒我关火	Remind me in ten minutes to turn off the stove	十分後に火を止めるよう知らせて
+intent	tool_request	暂停播放器，别继续播放了	Pause the player, stop playing	プレーヤーを一時停止して、もう再生しないで
+topic	daily_life	今天超市排队排了好久	The supermarket queue took forever today	今日はスーパーの列がすごく長かった
+topic	daily_life	周末打算收拾一下房间	Planning to tidy my room this weekend	週末は部屋を片付けようと思う
+topic	daily_life	早上没赶上公交车	Missed the bus this morning	今朝はバスに乗り遅れた
+topic	daily_life	刚把衣服洗完晾起来了	Just finished washing and hanging the laundry	洗濯が終わって、服を干したところ
+topic	work_study	论文的参考文献还没整理完	Still haven't finished the paper's references	論文の参考文献の整理がまだ終わっていない
+topic	work_study	这周项目排期太紧了	The project schedule is too tight this week	今週はプロジェクトの日程が詰まりすぎている
+topic	work_study	面试被问到一个没准备过的问题	An interview question caught me unprepared	面接で準備していなかった質問をされた
+topic	work_study	明天考试，今天在复习错题	Exam tomorrow, reviewing my mistakes today	明日は試験で、今日は間違えた問題を復習している
+topic	health	这两天嗓子疼，说话不舒服	My throat has hurt for two days; talking is uncomfortable	二日前から喉が痛くて、話すのがつらい
+topic	health	连续坐了几小时，肩膀很酸	My shoulders ache after hours of sitting	何時間も座っていたら肩がこった
+topic	health	最近在按医生的建议调整作息	Adjusting my sleep schedule on my doctor's advice	最近は医師の助言で生活リズムを整えている
+topic	health	运动完有点头晕，先坐下休息	A little dizzy after exercise, sitting down to rest	運動のあと少しめまいがするから、座って休む
+topic	gaming	这个关卡需要先躲开攻击再反击	This level needs dodging before counterattacking	このステージは攻撃を避けてから反撃する必要がある
+topic	gaming	今晚和朋友组队打副本	Doing a dungeon with friends tonight	今夜は友達と組んでダンジョンに行く
+topic	gaming	新版本把我常用角色削弱了	The new patch nerfed my main character	新バージョンでよく使うキャラが弱体化された
+topic	gaming	存档丢了，得重新玩一遍	Lost my save, have to start over	セーブが消えて、最初からやり直しだ
+topic	relationship	和室友在家务分工上意见不同	My roommate and I disagree about chores	ルームメイトと家事の分担で意見が違う
+topic	relationship	朋友最近很忙，约了几次都没见上	My friend's been busy; we keep missing each other	友達が忙しくて、何度誘っても会えていない
+topic	relationship	家里人总是替我做决定	My family keeps making decisions for me	家族がいつも私の代わりに決めてしまう
+topic	relationship	我想和对象认真谈谈这个问题	I want to discuss this seriously with my partner	この問題を恋人とちゃんと話し合いたい
+topic	life_event	今天正式开始第一份全职工作	Officially started my first full-time job today	今日、初めての正社員の仕事が始まった
+topic	life_event	我们准备下个月搬到另一个城市	We're moving to another city next month	来月は別の街へ引っ越す予定だ
+topic	life_event	等了很久，终于收到录取通知	After a long wait, I finally got accepted	ずっと待って、ようやく合格通知が来た
+topic	life_event	我决定结束这段长期关系	I've decided to end this long-term relationship	長く続いたこの関係を終わらせることにした
+topic	entertainment	刚看完一部电影，结尾很意外	Just watched a movie with a surprising ending	映画を見終えたところで、結末が意外だった
+topic	entertainment	这首歌的现场版比录音版更好听	The live version of this song sounds better	この曲は録音版よりライブ版のほうがいい
+topic	entertainment	最近在重看小时候喜欢的动画	Rewatching an anime I loved as a kid	最近、子どもの頃に好きだったアニメを見直している
+topic	entertainment	这个小说里的角色写得很真实	The characters in this novel feel real	この小説の人物描写はすごくリアルだ
+topic	technology	应用空闲时还占很多内存和CPU	The app uses lots of memory and CPU while idle	アプリが待機中でもメモリとCPUを多く使う
+topic	technology	语义嵌入和提示词准备能不能并行	Can embeddings and prompt preparation run in parallel?	埋め込みとプロンプトの準備は並列にできる？
+topic	technology	接口返回了错误码，不知道哪里出错	The API returned an error code; not sure why	APIがエラーコードを返したけど、原因がわからない
+topic	technology	线程阻塞会不会影响异步任务	Does blocking a thread affect asynchronous tasks?	スレッドのブロックは非同期タスクに影響する？
+memory	high	我以后要去另一个城市长期生活	I'm moving to another city long term	これから別の街で長く暮らす予定だ
+memory	high	我决定换一个职业方向	I've decided to change career paths	職業の方向性を変えることにした
+memory	high	这是我的过敏信息，一定要记住	These are my allergies, please remember them	これは私のアレルギー情報、必ず覚えておいて
+memory	high	以后不要拿我的家人开玩笑	Please don't joke about my family in future	これから家族のことで冗談を言わないで
+memory	high	我已经和交往多年的对象分手了	I've broken up with my long-term partner	長年付き合っていた恋人と別れた
+memory	high	今天我们迎来了第一个孩子	Our first child arrived today	今日、初めての子どもが生まれた
+memory	high	我下个月开始长期照顾父亲	Next month I'll start caring for my father long term	来月から父の介護を長く続けることになる
+memory	high	记住我更喜欢清楚直接的解释	Remember that I prefer clear, direct explanations	はっきりした説明のほうが好きだと覚えておいて
+memory	medium	我通常在周五晚上和朋友玩游戏	I usually game with friends on Friday evenings	普段は金曜の夜に友達とゲームをする
+memory	medium	最近在学做菜，周末会练习	Learning to cook lately, practicing on weekends	最近料理を習っていて、週末に練習している
+memory	medium	我喜欢轻音乐，不太喜欢重金属	I like soft music, not so much heavy metal	穏やかな音楽が好きで、ヘビーメタルはあまり好きじゃない
+memory	medium	我一般喝无糖饮料	I usually drink sugar-free drinks	普段は無糖の飲み物を飲む
+memory	medium	最近每天通勤都听这个播客	I've been listening to this podcast on my commute daily	最近は毎日の通勤でこのポッドキャストを聴いている
+memory	medium	我们家周末经常一起吃晚饭	My family often has dinner together on weekends	家では週末によく一緒に夕食を食べる
+memory	medium	我正在准备下周的演讲	I'm preparing for a presentation next week	来週の発表の準備をしている
+memory	medium	这个月想养成每天散步的习惯	I want to build a daily walking habit this month	今月は毎日散歩する習慣をつけたい
+memory	low	这一次不用记下来	No need to remember this one	今回は覚えなくていいよ
+memory	low	只是随口一说，不代表我一直这样想	Just a passing thought, not my settled view	何となく言っただけで、いつもそう思っているわけじゃない
+memory	low	我今天想喝茶，明天不一定	I feel like tea today, maybe not tomorrow	今日はお茶の気分だけど、明日はわからない
+memory	low	刚才那句是在开玩笑	That last line was a joke	さっきの言葉は冗談だよ
+memory	low	现在暂时有点困	A bit sleepy right now, temporarily	今は一時的に少し眠い
+memory	low	这只是举例，不是我自己的经历	That's just an example, not my own experience	これは例であって、私の体験じゃない
+memory	low	午饭吃什么我还没想好	Haven't decided what to have for lunch	昼ご飯に何を食べるかはまだ決めていない
+memory	low	今天试试这个口味，以后再说	Trying this flavor today, we'll see about later	今日はこの味を試して、今後はまた考える
+relationship	bond_increase	你认真听我讲这些，我很安心	I feel safe knowing you listen carefully	ちゃんと聞いてくれるから安心する
+relationship	bond_increase	我愿意和你说以前没告诉别人的事	I'm willing to tell you things I haven't shared before	他の人には話していないことも、あなたには話せる
+relationship	bond_increase	我们聊得越来越自然了	Our conversations are feeling more natural	私たちの会話、だんだん自然になってきたね
+relationship	bond_increase	忙完之后还是想来找你说说话	After work I still want to come talk to you	忙しいことが終わると、やっぱりあなたと話したくなる
+relationship	bond_increase	和你聊过以后我没那么紧张了	I'm less nervous after talking with you	あなたと話したら、少し緊張がほぐれた
+relationship	bond_increase	我很珍惜我们相处的时间	I value the time we spend together	一緒に過ごす時間を大事に思っている
+relationship	attention_seek	现在方便陪我一会儿吗	Do you have a moment to keep me company?	今、少しそばにいてもらえる？
+relationship	attention_seek	我想听听你对这件事的想法	I'd like to hear your thoughts on this	このことについて、あなたの考えを聞きたい
+relationship	attention_seek	你忙完可以回我一下吗	Could you reply when you're done?	忙しいのが終わったら、返事をもらえる？
+relationship	attention_seek	我还有点话想对你说	There's something else I want to tell you	まだ少しあなたに話したいことがある
+relationship	attention_seek	今天能不能多陪我聊一会儿	Could we chat a little longer today?	今日はもう少し長く話してもいい？
+relationship	attention_seek	先别结束，我还没讲完	Please don't wrap up yet, I'm not finished	まだ終わりにしないで、話し終わっていないんだ
+relationship	gratitude	这次解释得很清楚，谢谢	That explanation was clear, thank you	今回は説明がわかりやすかった、ありがとう
+relationship	gratitude	谢谢你没有催我马上决定	Thank you for not rushing my decision	すぐ決めるよう急かさないでくれて、ありがとう
+relationship	gratitude	你刚才的提醒帮我避免了失误	Your reminder helped me avoid a mistake	さっきの注意で失敗を避けられた
+relationship	gratitude	多亏你陪我把思路理清楚了	You helped me think it through, thanks	一緒に整理してくれたおかげで、考えがまとまった
+relationship	gratitude	很感谢你记得我说过的边界	I appreciate you remembering my boundaries	伝えた境界線を覚えていてくれて、ありがたい
+relationship	gratitude	这回真的帮到我了	You really helped me this time	今回は本当に助かったよ
+relationship	coldness	你总在重复同样的安慰，我不想听了	You keep repeating the same reassurance; I don't want it	同じ慰めばかり繰り返すから、もう聞きたくない
+relationship	coldness	我觉得你没认真看我说的话	I feel like you didn't read what I said carefully	私の言葉をちゃんと読んでいない気がする
+relationship	coldness	先停一下，这样聊天让我不舒服	Let's stop, this conversation makes me uncomfortable	いったんやめよう、こういう会話は居心地が悪い
+relationship	coldness	别再给我套话了，我有点失望	Stop giving me canned replies, I'm disappointed	決まり文句はもうやめて、少しがっかりしている
+relationship	coldness	我已经说了不喜欢这样，你却还在做	I said I don't like this, but you keep doing it	嫌だと言ったのに、まだ続けているんだね
+relationship	coldness	这次我不太想继续和你聊	I don't really want to keep chatting with you this time	今回はあまりあなたと話し続けたくない
+relationship	none	今天会议开了两个小时	Today's meeting lasted two hours	今日の会議は二時間かかった
+relationship	none	帮我看看这段代码哪里有问题	Help me find the issue in this code	このコードの問題を見てほしい
+relationship	none	朋友说谢谢，但不是对你说的	My friend said thanks, not to you	友達がありがとうと言ったけど、あなたにではないよ
+relationship	none	不需要安慰，直接解释原因就好	No reassurance needed, just explain the cause	慰めはいらないから、原因を説明して
+relationship	none	晚点回你，我正在开会	I'll reply later, I'm in a meeting	会議中だから、あとで返事するね
+relationship	none	嗯，我知道了	Yeah, got it	うん、わかった
+relationship	none	先不要主动提醒，我需要安静工作	Please pause reminders, I need to work quietly	まずは通知を控えて、静かに作業したい
+relationship	none	不是不想理你，我只是手头有事	I'm not avoiding you, I'm just busy	無視しているわけじゃなくて、今は用事があるだけ
+relationship	none	天气不错，我出去散步了	Nice weather, I'm going for a walk	天気がいいから、散歩に行くね
+relationship	none	这里的接口需要两个参数	This API takes two parameters	このAPIには二つの引数が必要だ
+relationship	none	他不想和室友说话，不是我不想和你聊	He doesn't want to talk to his roommate; I'm not rejecting you	彼は同居人と話したくないだけで、私があなたと話したくないわけじゃない
+relationship	none	今天有点累，先睡了	I'm tired today, going to bed	今日は少し疲れたから、先に寝るね
+relationship	none	这句谢谢是邮件里的原文	That thank-you is quoted from the email	この「ありがとう」はメールの原文だよ
+relationship	none	这只是技术问题，不用猜我的心情	It's just a technical question, no need to guess my mood	技術的な質問だけだから、気持ちを推測しなくていい
+relationship	none	别开玩笑了，这件事我想认真讨论	No jokes please, I want to discuss this seriously	冗談はやめて、この件は真剣に話したい
+relationship	none	暂时不用回复，我还在整理材料	No reply needed yet, I'm still organizing the material	まだ返事はいらないよ、資料を整理しているところ

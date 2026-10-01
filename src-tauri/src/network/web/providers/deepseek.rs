@@ -21,9 +21,7 @@ use serde_json::Value;
 
 use crate::config::WebSearchConfig;
 use crate::network::web::providers::util::annotate_sources;
-use crate::network::web::types::{
-    WebError, WebSearchRequest, WebSearchResult, WebSearchSource,
-};
+use crate::network::web::types::{WebError, WebSearchRequest, WebSearchResult, WebSearchSource};
 use crate::network::web::WebSearchProvider;
 
 /// 稳定注册 id
@@ -75,9 +73,7 @@ pub fn deepseek_factory(
 
 /// 解析运行参数（含主对话 key/model 复用）
 fn resolve_options(config: Option<&WebSearchConfig>) -> ResolvedOptions {
-    let mut cfg = config
-        .map(|c| c.deepseek.clone())
-        .unwrap_or_default();
+    let mut cfg = config.map(|c| c.deepseek.clone()).unwrap_or_default();
 
     // key 复用：主对话 provider 为 deepseek 且未单独配置搜索 key
     // （base_url 不复用：搜索走 Anthropic 兼容端点，主对话走 chat-completions）
@@ -111,14 +107,22 @@ fn resolve_options(config: Option<&WebSearchConfig>) -> ResolvedOptions {
     if cfg.model.is_empty() {
         cfg.model = "deepseek-chat".to_string();
     }
-    let timeout_secs = if cfg.timeout_secs == 0 { 60 } else { cfg.timeout_secs };
+    let timeout_secs = if cfg.timeout_secs == 0 {
+        60
+    } else {
+        cfg.timeout_secs
+    };
 
     ResolvedOptions {
         api_key: cfg.api_key,
         base_url: cfg.base_url,
         model: cfg.model,
         max_uses: if cfg.max_uses == 0 { 5 } else { cfg.max_uses },
-        max_tokens: if cfg.max_tokens == 0 { 4096 } else { cfg.max_tokens },
+        max_tokens: if cfg.max_tokens == 0 {
+            4096
+        } else {
+            cfg.max_tokens
+        },
         timeout: std::time::Duration::from_secs(timeout_secs),
     }
 }
@@ -127,7 +131,7 @@ impl DeepSeekProvider {
     /// 注入参数已由工厂解析；此处组装请求体并发送
     async fn dispatch(&self, request: &WebSearchRequest) -> Result<WebSearchResult, WebError> {
         let endpoint = format!("{}/messages", self.options.base_url.trim_end_matches('/'));
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "model": self.options.model,
             "max_tokens": self.options.max_tokens,
             "messages": [{
@@ -140,11 +144,18 @@ impl DeepSeekProvider {
             "tools": [{
                 "type": "web_search_20250305",
                 "name": "web_search",
-                "max_uses": self.options.max_uses
+                "max_uses": self.options.max_uses.min(if request.research {3} else {1})
             }]
         });
 
-        let resp = self.client
+        if !request.include_domains.is_empty() {
+            body["tools"][0]["allowed_domains"] = serde_json::json!(request.include_domains);
+        }
+        if request.include_domains.is_empty() && !request.exclude_domains.is_empty() {
+            body["tools"][0]["blocked_domains"] = serde_json::json!(request.exclude_domains);
+        }
+        let resp = self
+            .client
             .post(&endpoint)
             // 官方 DeepSeek 用 x-api-key；Anthropic 兼容代理用 Bearer —— 两者都发
             .header("x-api-key", &self.options.api_key)
@@ -171,15 +182,9 @@ impl DeepSeekProvider {
             return Err(WebError::provider_error(DEEPSEEK_ID, detail));
         }
 
-        let payload = resp
-            .json::<Value>()
-            .await
-            .map_err(|e| {
-                WebError::provider_error(
-                    DEEPSEEK_ID,
-                    format!("DeepSeek 返回无法解析的响应体: {e}"),
-                )
-            })?;
+        let payload = resp.json::<Value>().await.map_err(|e| {
+            WebError::provider_error(DEEPSEEK_ID, format!("DeepSeek 返回无法解析的响应体: {e}"))
+        })?;
 
         map_anthropic_response(&payload)
     }
@@ -211,11 +216,17 @@ fn extract_error_message(v: &Value) -> Option<String> {
     let err = v.get("error");
     let msg = err
         .and_then(|e| {
-            e.as_str()
-                .map(|s| s.to_string())
-                .or_else(|| e.get("message").and_then(|m| m.as_str()).map(|s| s.to_string()))
+            e.as_str().map(|s| s.to_string()).or_else(|| {
+                e.get("message")
+                    .and_then(|m| m.as_str())
+                    .map(|s| s.to_string())
+            })
         })
-        .or_else(|| v.get("message").and_then(|m| m.as_str()).map(|s| s.to_string()));
+        .or_else(|| {
+            v.get("message")
+                .and_then(|m| m.as_str())
+                .map(|s| s.to_string())
+        });
     msg.filter(|m| !m.is_empty())
 }
 
@@ -232,9 +243,13 @@ fn citation_snippets(content: &[Value]) -> HashMap<String, String> {
         if let Some(cites) = block.get("citations").and_then(|c| c.as_array()) {
             for cite in cites {
                 let url = cite.get("url").and_then(|u| u.as_str()).unwrap_or("");
-                let text = cite.get("cited_text").and_then(|t| t.as_str()).unwrap_or("");
+                let text = cite
+                    .get("cited_text")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("");
                 if !url.is_empty() && !text.is_empty() {
-                    map.entry(url.to_string()).or_insert_with(|| text.to_string());
+                    map.entry(url.to_string())
+                        .or_insert_with(|| text.to_string());
                 }
             }
         }
@@ -297,7 +312,10 @@ fn map_anthropic_response(response: &Value) -> Result<WebSearchResult, WebError>
             s.published_at = item
                 .get("page_age")
                 .and_then(|p| p.as_str())
-                .filter(|p| !p.is_empty())
+                .filter(|p| {
+                    chrono::NaiveDate::parse_from_str(p, "%Y-%m-%d").is_ok()
+                        || chrono::DateTime::parse_from_rfc3339(p).is_ok()
+                })
                 .map(|p| p.to_string());
             sources.push(s);
         }
@@ -310,6 +328,7 @@ fn map_anthropic_response(response: &Value) -> Result<WebSearchResult, WebError>
         content: None,
         sources: annotate_sources(sources),
         truncated: false,
+        ..Default::default()
     })
 }
 
@@ -358,7 +377,10 @@ mod tests {
         assert_eq!(result.sources[0].url, "https://a.com");
         assert_eq!(result.sources[0].title.as_deref(), Some("A"));
         assert_eq!(result.sources[0].snippet.as_deref(), Some("cited snippet"));
-        assert_eq!(result.sources[0].published_at.as_deref(), Some("2026-01-01"));
+        assert_eq!(
+            result.sources[0].published_at.as_deref(),
+            Some("2026-01-01")
+        );
         assert!(result.sources[0].snippet.is_some());
         // b.com 无 citation → snippet 为 None（诚实字段）
         assert_eq!(result.sources[1].url, "https://b.com");

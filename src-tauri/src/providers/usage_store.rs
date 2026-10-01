@@ -51,9 +51,40 @@ pub struct DayUsage {
     /// Actual provider-reported usage attributed to the request's purpose.
     #[serde(default)]
     pub tasks: HashMap<String, ModelUsage>,
+    /// Actual route → actual model. Historical files have no route attribution.
+    #[serde(default)]
+    pub route_models: HashMap<String, HashMap<String, ModelUsage>>,
 }
 
 tokio::task_local! { static CURRENT_TASK: String; }
+tokio::task_local! { static CURRENT_ROUTE: String; }
+
+pub async fn with_context<T>(task: &str, route: &str, future: impl Future<Output = T>) -> T {
+    CURRENT_ROUTE.scope(route.to_string(), with_task(task, future)).await
+}
+
+/// A stream can report cumulative usage more than once. Count one call and retain
+/// the largest provider-reported count for each category, never sum snapshots.
+#[derive(Default)]
+pub struct StreamUsageAccumulator { tokens: [u64; 4] }
+
+impl StreamUsageAccumulator {
+    pub fn observe(&mut self, input: u64, output: u64, read: u64, write: u64) {
+        for (stored, reported) in self.tokens.iter_mut().zip([input, output, read, write]) {
+            *stored = (*stored).max(reported);
+        }
+    }
+
+    pub fn record(self, task: Option<&str>, route: Option<&str>, model: &str) {
+        let [input, output, read, write] = self.tokens;
+        record_usage_for_context(task, route, model, input, output, read, write);
+    }
+
+    pub fn record_current(self, model: &str) {
+        let [input, output, read, write] = self.tokens;
+        record_usage(model, input, output, read, write);
+    }
+}
 
 pub async fn with_task<T>(tag: &str, future: impl Future<Output = T>) -> T {
     CURRENT_TASK.scope(tag.to_string(), future).await
@@ -68,12 +99,14 @@ struct UsageStore {
 struct StoreState {
     cache: UsageStore,
     loaded: bool,
+    read_error: Option<String>,
 }
 
 static STATE: Lazy<Mutex<StoreState>> = Lazy::new(|| {
     Mutex::new(StoreState {
         cache: UsageStore::default(),
         loaded: false,
+        read_error: None,
     })
 });
 
@@ -97,16 +130,26 @@ fn day_key_offset(offset: u64) -> String {
         .unwrap_or_default()
 }
 
-fn load_from_disk() -> UsageStore {
-    let path = store_path();
-    match std::fs::read_to_string(&path) {
-        Ok(raw) => serde_json::from_str(&raw).unwrap_or_default(),
-        Err(_) => UsageStore::default(),
+fn load_from_disk() -> Result<UsageStore, String> {
+    match std::fs::read_to_string(store_path()) {
+        Ok(raw) => serde_json::from_str(&raw).map_err(|_| "Local usage file is invalid".to_string()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(UsageStore::default()),
+        Err(_) => Err("Local usage file could not be read".to_string()),
+    }
+}
+
+fn ensure_loaded(state: &mut StoreState) {
+    if !state.loaded {
+        match load_from_disk() {
+            Ok(store) => { state.cache = store; state.read_error = None; state.loaded = true; }
+            Err(error) => { state.read_error = Some(error); }
+        }
     }
 }
 
 /// 原子落盘：先写 .tmp 再 rename，避免半写文件。
 fn flush_locked(state: &StoreState) {
+    if !state.loaded || state.read_error.is_some() { return; }
     let path = store_path();
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
@@ -137,6 +180,7 @@ fn apply_usage(
     day: &mut DayUsage,
     model: &str,
     task: Option<&str>,
+    route: Option<&str>,
     input: u64,
     output: u64,
     cache_read: u64,
@@ -161,6 +205,14 @@ fn apply_usage(
     entry.requests += 1;
     let task = task.filter(|t| !t.trim().is_empty()).unwrap_or("unattributed");
     let entry = day.tasks.entry(task.to_string()).or_default();
+    entry.input += input;
+    entry.output += output;
+    entry.hit += cache_read;
+    entry.miss += miss;
+    entry.cache_creation += cache_write;
+    entry.requests += 1;
+    let route = route.filter(|r| !r.trim().is_empty()).unwrap_or("unattributed");
+    let entry = day.route_models.entry(route.to_string()).or_default().entry(model.to_string()).or_default();
     entry.input += input;
     entry.output += output;
     entry.hit += cache_read;
@@ -193,21 +245,29 @@ pub fn record_usage_for_task(
     cache_read_tokens: u64,
     cache_write_tokens: u64,
 ) {
+    let route = CURRENT_ROUTE.try_with(Clone::clone).ok();
+    record_usage_for_context(task, route.as_deref(), model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens);
+}
+
+/// Spawned stream forwarding passes both attribution dimensions explicitly.
+pub fn record_usage_for_context(
+    task: Option<&str>, route: Option<&str>, model: &str,
+    input_tokens: u64, output_tokens: u64, cache_read_tokens: u64, cache_write_tokens: u64,
+) {
     if input_tokens == 0 && output_tokens == 0 && cache_read_tokens == 0 && cache_write_tokens == 0 {
         return;
     }
     let model = if model.trim().is_empty() { "未归类" } else { model.trim() };
     let key = today_key();
     if let Ok(mut state) = STATE.lock() {
-        if !state.loaded {
-            state.cache = load_from_disk();
-            state.loaded = true;
-        }
+        ensure_loaded(&mut state);
+        if state.read_error.is_some() { return; }
         let day = state.cache.days.entry(key).or_default();
         apply_usage(
             day,
             model,
             task,
+            route,
             input_tokens,
             output_tokens,
             cache_read_tokens,
@@ -229,6 +289,7 @@ pub fn clear() {
     if let Ok(mut state) = STATE.lock() {
         state.cache = UsageStore::default();
         state.loaded = true;
+        state.read_error = None;
         flush_locked(&state);
     }
 }
@@ -249,6 +310,9 @@ pub struct ModelUsageReport {
 #[derive(Debug, Clone, Serialize)]
 pub struct DayUsageReport {
     pub date: String,
+    pub models: Vec<ModelUsageReport>,
+    pub tasks: Vec<TaskUsageReport>,
+    pub routes: Vec<RouteUsageReport>,
     pub input: u64,
     pub output: u64,
     pub hit: u64,
@@ -263,6 +327,8 @@ pub struct UsageReport {
     pub days: Vec<DayUsageReport>,
     pub models: Vec<ModelUsageReport>,
     pub tasks: Vec<TaskUsageReport>,
+    pub routes: Vec<RouteUsageReport>,
+    pub read_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -275,80 +341,84 @@ pub struct TaskUsageReport {
     pub requests: u64,
 }
 
-/// 查询近 N 天的用量报表（无数据的天填 0，模型按总 token 降序）。
-pub fn get_usage_report(days: u32) -> UsageReport {
-    let days = days.clamp(1, 365);
-    let Ok(mut state) = STATE.lock() else {
-        return UsageReport { days: Vec::new(), models: Vec::new(), tasks: Vec::new() };
-    };
-    if !state.loaded {
-        state.cache = load_from_disk();
-        state.loaded = true;
-    }
-    let store = &state.cache;
+/// Route usage includes the actually observed model breakdown, including fallbacks.
+#[derive(Debug, Clone, Serialize)]
+pub struct RouteUsageReport {
+    pub route: String,
+    #[serde(flatten)]
+    pub usage: ModelUsage,
+    pub models: Vec<ModelUsageReport>,
+}
 
-    // 日汇总（升序）
-    let mut day_reports = Vec::with_capacity(days as usize);
+fn add_usage(target: &mut ModelUsage, source: &ModelUsage) {
+    target.input += source.input;
+    target.output += source.output;
+    target.hit += source.hit;
+    target.miss += source.input;
+    target.cache_creation += source.cache_creation;
+    target.requests += source.requests;
+}
+
+fn model_reports(models: &HashMap<String, ModelUsage>) -> Vec<ModelUsageReport> {
+    let mut rows: Vec<_> = models.iter().map(|(model, u)| ModelUsageReport {
+        model: model.clone(), input: u.input, output: u.output, hit: u.hit,
+        miss: u.input, cache_creation: u.cache_creation, requests: u.requests,
+    }).collect();
+    rows.sort_by_key(|row| (std::cmp::Reverse(row.input + row.output + row.hit + row.cache_creation), row.model.clone()));
+    rows
+}
+
+fn task_reports(tasks: &HashMap<String, ModelUsage>) -> Vec<TaskUsageReport> {
+    let mut rows: Vec<_> = tasks.iter().map(|(task, u)| TaskUsageReport {
+        task: task.clone(), input: u.input, output: u.output, hit: u.hit,
+        cache_creation: u.cache_creation, requests: u.requests,
+    }).collect();
+    rows.sort_by_key(|row| (std::cmp::Reverse(row.input + row.output + row.hit + row.cache_creation), row.task.clone()));
+    rows
+}
+
+fn route_reports(routes: &HashMap<String, HashMap<String, ModelUsage>>) -> Vec<RouteUsageReport> {
+    let mut rows: Vec<_> = routes.iter().map(|(route, models)| {
+        let mut usage = ModelUsage::default();
+        for model in models.values() { add_usage(&mut usage, model); }
+        RouteUsageReport { route: route.clone(), usage, models: model_reports(models) }
+    }).collect();
+    rows.sort_by_key(|row| (std::cmp::Reverse(row.usage.input + row.usage.output + row.usage.hit + row.usage.cache_creation), row.route.clone()));
+    rows
+}
+
+fn build_report(store: &UsageStore, keys: Vec<String>, read_error: Option<String>) -> UsageReport {
+    let mut day_reports = Vec::with_capacity(keys.len());
     let mut by_model: HashMap<String, ModelUsage> = HashMap::new();
     let mut by_task: HashMap<String, ModelUsage> = HashMap::new();
-    for i in (0..days).rev() {
-        let key = day_key_offset(i as u64);
-        let day = store.days.get(&key);
+    let mut by_route: HashMap<String, HashMap<String, ModelUsage>> = HashMap::new();
+    for date in keys {
+        let empty = DayUsage::default();
+        let day = store.days.get(&date).unwrap_or(&empty);
         day_reports.push(DayUsageReport {
-            date: key,
-            input: day.map(|d| d.input).unwrap_or(0),
-            output: day.map(|d| d.output).unwrap_or(0),
-            hit: day.map(|d| d.hit).unwrap_or(0),
-            // Older files double-subtracted cache reads here. `input` is already
-            // uncached provider input, so derive this field instead of trusting it.
-            miss: day.map(|d| d.input).unwrap_or(0),
-            cache_creation: day.map(|d| d.cache_creation).unwrap_or(0),
-            requests: day.map(|d| d.requests).unwrap_or(0),
+            date, input: day.input, output: day.output, hit: day.hit, miss: day.input,
+            cache_creation: day.cache_creation, requests: day.requests,
+            models: model_reports(&day.models), tasks: task_reports(&day.tasks), routes: route_reports(&day.route_models),
         });
-        if let Some(day) = day {
-            for (model, usage) in &day.models {
-                let entry = by_model.entry(model.clone()).or_default();
-                entry.input += usage.input;
-                entry.output += usage.output;
-                entry.hit += usage.hit;
-                entry.miss += usage.input;
-                entry.cache_creation += usage.cache_creation;
-                entry.requests += usage.requests;
-            }
-            for (task, usage) in &day.tasks {
-                let entry = by_task.entry(task.clone()).or_default();
-                entry.input += usage.input;
-                entry.output += usage.output;
-                entry.hit += usage.hit;
-                entry.miss += usage.input;
-                entry.cache_creation += usage.cache_creation;
-                entry.requests += usage.requests;
+        for (name, usage) in &day.models { add_usage(by_model.entry(name.clone()).or_default(), usage); }
+        for (name, usage) in &day.tasks { add_usage(by_task.entry(name.clone()).or_default(), usage); }
+        for (route, models) in &day.route_models {
+            for (model, usage) in models {
+                add_usage(by_route.entry(route.clone()).or_default().entry(model.clone()).or_default(), usage);
             }
         }
     }
+    UsageReport { days: day_reports, models: model_reports(&by_model), tasks: task_reports(&by_task), routes: route_reports(&by_route), read_error }
+}
 
-    // 模型占比（按总 token 降序）
-    let mut models: Vec<ModelUsageReport> = by_model
-        .into_iter()
-        .map(|(model, u)| ModelUsageReport {
-            model,
-            input: u.input,
-            output: u.output,
-            hit: u.hit,
-            miss: u.miss,
-            cache_creation: u.cache_creation,
-            requests: u.requests,
-        })
-        .collect();
-    models.sort_by(|a, b| (b.input + b.output).cmp(&(a.input + a.output)));
-
-    let mut tasks: Vec<TaskUsageReport> = by_task.into_iter().map(|(task, u)| TaskUsageReport {
-        task, input: u.input, output: u.output, hit: u.hit,
-        cache_creation: u.cache_creation, requests: u.requests,
-    }).collect();
-    tasks.sort_by(|a, b| (b.input + b.output).cmp(&(a.input + a.output)));
-
-    UsageReport { days: day_reports, models, tasks }
+/// Query local provider-reported usage; missing dates are unrecorded, not verified zero usage.
+pub fn get_usage_report(days: u32) -> UsageReport {
+    let keys = (0..days.clamp(1, 365)).rev().map(|i| day_key_offset(i as u64)).collect();
+    let Ok(mut state) = STATE.lock() else {
+        return build_report(&UsageStore::default(), keys, Some("Local usage store is unavailable".to_string()));
+    };
+    ensure_loaded(&mut state);
+    build_report(&state.cache, keys, state.read_error.clone())
 }
 
 #[cfg(test)]
@@ -358,13 +428,15 @@ mod attribution_tests {
     #[test]
     fn cache_and_task_usage_are_counted_once() {
         let mut day = DayUsage::default();
-        apply_usage(&mut day, "model", Some("proactive_channel"), 80, 12, 40, 0);
+        apply_usage(&mut day, "model", Some("proactive_channel"), Some("simple_judge"), 80, 12, 40, 0);
         assert_eq!(day.input, 80);
         assert_eq!(day.hit, 40);
         assert_eq!(day.miss, 80);
         assert_eq!(day.tasks["proactive_channel"].requests, 1);
         assert_eq!(day.tasks["proactive_channel"].input, 80);
         assert_eq!(day.models["model"].requests, 1);
+        assert_eq!(day.route_models["simple_judge"]["model"].input, 80);
+        assert!(!day.route_models.contains_key("proactive_channel"));
     }
 
     #[test]
@@ -372,5 +444,60 @@ mod attribution_tests {
         let old = r#"{"days":{"2026-09-29":{"input":5,"output":1,"hit":0,"miss":5,"cache_creation":0,"requests":1,"models":{}}}}"#;
         let usage: UsageStore = serde_json::from_str(old).unwrap();
         assert!(usage.days["2026-09-29"].tasks.is_empty());
+        assert!(usage.days["2026-09-29"].route_models.is_empty());
+        let report = build_report(&usage, vec!["2026-09-29".into(), "2026-09-30".into()], None);
+        assert_eq!(report.days[0].input, 5);
+        assert_eq!(report.days[1].requests, 0);
+        assert!(report.routes.is_empty(), "Do not infer historical routes");
+    }
+
+    #[test]
+    fn route_reports_preserve_models_cache_and_daily_totals() {
+        let mut store = UsageStore::default();
+        let day = store.days.entry("2026-09-30".into()).or_default();
+        apply_usage(day, "primary", Some("proactive_message"), Some("chat"), 10, 2, 30, 5);
+        apply_usage(day, "fallback", Some("proactive_message"), Some("chat"), 20, 3, 40, 6);
+        apply_usage(day, "primary", Some("reflection"), Some("reflection"), 50, 4, 0, 0);
+        let report = build_report(&store, vec!["2026-09-30".into()], None);
+        assert_eq!(report.days[0].requests, 3);
+        assert_eq!(report.days[0].cache_creation, 11);
+        let chat = report.routes.iter().find(|row| row.route == "chat").unwrap();
+        assert_eq!(chat.usage.requests, 2);
+        assert_eq!(chat.usage.input, 30);
+        assert_eq!(chat.usage.hit, 70);
+        assert_eq!(chat.models.len(), 2);
+        assert_eq!(report.days[0].routes.len(), 2);
+        let json = serde_json::to_value(chat).unwrap();
+        assert_eq!(json["input"], 30);
+        assert_eq!(json["cache_creation"], 11);
+        assert!(json.get("usage").is_none(), "Keep the frontend report contract flat");
+    }
+
+    #[test]
+    fn cumulative_usage_snapshots_do_not_multiply_tokens_or_calls() {
+        let mut usage = StreamUsageAccumulator::default();
+        usage.observe(100, 5, 30, 0);
+        usage.observe(100, 10, 30, 0);
+        usage.observe(0, 10, 0, 0);
+        assert_eq!(usage.tokens, [100, 10, 30, 0]);
+        let mut day = DayUsage::default();
+        let [input, output, read, write] = usage.tokens;
+        apply_usage(&mut day, "model", Some("chat"), Some("chat"), input, output, read, write);
+        assert_eq!(day.requests, 1);
+        assert_eq!(day.input, 100);
+        assert_eq!(day.output, 10);
+    }
+
+    #[tokio::test]
+    async fn route_and_purpose_contexts_are_distinct_and_do_not_leak() {
+        with_context("proactive_message", "chat", async {
+            assert_eq!(CURRENT_TASK.with(Clone::clone), "proactive_message");
+            assert_eq!(CURRENT_ROUTE.with(Clone::clone), "chat");
+            with_context("reflection", "reflection", async {
+                assert_eq!(CURRENT_ROUTE.with(Clone::clone), "reflection");
+            }).await;
+            assert_eq!(CURRENT_ROUTE.with(Clone::clone), "chat");
+        }).await;
+        assert!(CURRENT_ROUTE.try_with(Clone::clone).is_err());
     }
 }

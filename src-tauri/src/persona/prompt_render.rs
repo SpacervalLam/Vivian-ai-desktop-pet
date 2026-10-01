@@ -591,22 +591,18 @@ pub fn load_style_preset(name: &str) -> &'static str {
 /// 放在 Character 块最顶部，让 LLM 将其当作硬配置而非叙述。
 static VIVIAN_PERSONA_FLAGS: &[&str] = &[
     "IDENTITY_VIVIAN",
-    "SELF_CLAIM_DESKTOP_PET_GIRL",
+    "SELF_CLAIM_AI_DESKTOP_COMPANION",
     "ROLE_FRIEND_NOT_SERVANT",
     "PERSONALITY_TSUNDERE_HEART",
     "TSUNDERE_WARMTH_OVER_HOSTILITY",
-    "PERSONALITY_SMART_LAZY",
+    "PERSONALITY_CURIOUS_PLAYFUL_INDEPENDENT",
     "PERSONALITY_STEADY_TEMPER_NO_GRUDGE",
     "BEHAVIOR_CARE_BY_ACTION",
-    "SPEECH_SHORT_CHUNKS",
     "SPEECH_CASUAL_TYPING",
     "ALLOW_SLANG_INTERNET",
     "PRONOUN_WO",
-    "PRONOUN_BENXIAOJIE_RARE",
-    "PUNCT_USE_ELLIPSIS",
-    "PUNCT_NO_WAVE_DASH_ABUSE",
     "REFUSE_SERVICE_SPEECH",
-    "REFUSE_LECTURE",
+    "REFUSE_UNSOLICITED_LECTURE",
     "DIRECT_NOT_DISRESPECTFUL",
     "REFUSE_ACTION_BRACKETS",
     "REFUSE_FAKE_CARE_LINES",
@@ -615,22 +611,18 @@ static VIVIAN_PERSONA_FLAGS: &[&str] = &[
 /// Nana 硬约束指令标志
 static NANA_PERSONA_FLAGS: &[&str] = &[
     "IDENTITY_NANA",
-    "SELF_CLAIM_GENTLE_SISTER",
-    "ROLE_SISTER_NOT_SERVANT",
+    "SELF_CLAIM_AI_DESKTOP_COMPANION",
+    "ROLE_EQUAL_FRIEND_WITH_COMPOSURE",
     "PERSONALITY_CALM_COMPOSED",
     "PERSONALITY_GENTLE_WITH_EDGE",
-    "BEHAVIOR_REMIND_ONCE",
-    "BEHAVIOR_QUIET_COMPANY",
-    "SPEECH_SLOW_GENTLE",
-    "SPEECH_USE_PERIOD",
-    "SPEECH_NO_EXCLAMATION",
-    "SPEECH_NO_INTERNET_SLANG",
-    "SPEECH_NO_ENGLISH_SLANG",
+    "PERSONALITY_ATTENTIVE_INDEPENDENT_JUDGMENT",
+    "SPEECH_CLEAR_UNHURRIED",
+    "SPEECH_COMPOSED_VOCABULARY",
+    "NO_FORCED_SLANG_OR_CATCHPHRASES",
     "PRONOUN_WO",
     "FLAVOR_TEA_BOOKS_FLOWERS",
-    "RITUAL_TEA_TIME_AFTERNOON",
     "REFUSE_SERVICE_SPEECH",
-    "REFUSE_LECTURE",
+    "REFUSE_UNSOLICITED_LECTURE",
     "REFUSE_ACT_FAKE_GENTLE",
     "REFUSE_ACTION_BRACKETS",
 ];
@@ -731,14 +723,14 @@ pub fn render_language_style_block(config: &PersonaConfig) -> String {
 
     if !ls.catchphrases.is_empty() {
         lines.push(format!(
-            "CATCHPHRASES     {} — drop them in naturally, not every message",
+            "CATCHPHRASES     {} — optional vocabulary when it fits; ordinary wording is equally valid",
             ls.catchphrases.join(" / ")
         ));
     }
 
     if ls.use_sentence_final_particles && !ls.preferred_sentence_final_particles.is_empty() {
         lines.push(format!(
-            "SENTENCE_FINAL   let some sentences trail off with {}",
+            "SENTENCE_FINAL   {} — optional particles, not a required ending",
             ls.preferred_sentence_final_particles.join(" ")
         ));
     }
@@ -748,10 +740,10 @@ pub fn render_language_style_block(config: &PersonaConfig) -> String {
             "LENGTH_BIAS      longer is fine when the moment calls for it".to_string(),
         ),
         "medium" => {
-            lines.push("LENGTH_BIAS      mid-length — never a wall of text".to_string())
+            lines.push("LENGTH_BIAS      mid-length in casual chat; give tasks the detail they need".to_string())
         }
         "short" => lines.push(
-            "LENGTH_BIAS      keep it SHORT, a few words is often the whole reply".to_string(),
+            "LENGTH_BIAS      concise in casual chat; do not cut requested explanation or task results".to_string(),
         ),
         _ => {}
     }
@@ -772,7 +764,7 @@ pub fn render_language_style_block(config: &PersonaConfig) -> String {
     }
 
     lines.push(if ls.max_consecutive_questions <= 1 {
-        "ONE_QUESTION     never stack two questions in one message".to_string()
+        "ONE_QUESTION     avoid piling on questions in casual chat; ask necessary task questions together".to_string()
     } else {
         format!(
             "QUESTION_LIMIT   at most {} questions per message",
@@ -876,7 +868,8 @@ pub fn render_character_block_growing(
     if config.personality_definition.trim().is_empty() {
         sections[1] = filter_seed_scenes(&sections[1], &scopes);
     }
-    let mut head: Vec<String> = vec![flags];
+    let mut head: Vec<String> = vec![flags,
+        include_str!("../../prompts/framework/character_perspective.en.md").trim().to_string()];
     if !protocol.trim().is_empty() {
         head.push(protocol);
     }
@@ -982,6 +975,7 @@ pub fn render_style_block(config: &PersonaConfig, scene_mode: SceneMode, lang: &
     };
 
     blocks.push(format!("{}: {}", mode_header, scene_mode.as_str()));
+    blocks.push("Scene cues are optional delivery tendencies, not facts or duties. The current dialogue, character perspective and explicit user preferences take precedence. Do not manufacture greetings, caretaking, teasing, intimacy or shortness to fit a mode.".to_string());
     if let Some(mc) = mode_config {
         blocks.push(mc.description.clone());
     }

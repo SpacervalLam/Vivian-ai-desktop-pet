@@ -15,36 +15,19 @@ use crate::config::WebSearchConfig;
 use crate::network::web::providers::util::{
     annotate_sources, build_search_client, strip_html_tags, timeout_from_secs, USER_AGENT,
 };
-use crate::network::web::types::{
-    WebError, WebSearchRequest, WebSearchResult, WebSearchSource,
-};
+use crate::network::web::types::{WebError, WebSearchRequest, WebSearchResult, WebSearchSource};
 use crate::network::web::WebSearchProvider;
 
 /// 稳定注册 id
 const DUCKDUCKGO_ID: &str = "duckduckgo";
-
-// DuckDuckGo HTML 搜索结果正则
-static RESULT_A_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r#"(?s)<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]*)"[^>]*>(.*?)</a>"#)
-        .unwrap()
-});
-
-static RESULT_SNIPPET_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r#"(?s)<a[^>]*class="[^"]*result__snippet[^"]*"[^>]*>(.*?)</a>"#).unwrap()
-});
-
-// 通用链接正则（备用）
-static GENERIC_LINK_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r#"(?s)<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>"#).unwrap());
 
 // DuckDuckGo Lite 搜索结果正则
 static LITE_LINK_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r#"(?s)<a[^>]*rel="nofollow"[^>]*href="([^"]*)"[^>]*>\s*(.*?)\s*</a>"#).unwrap()
 });
 
-static LITE_SNIPPET_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r#"(?s)<td[^>]*class="[^"]*snippet[^"]*"[^>]*>(.*?)</td>"#).unwrap()
-});
+static LITE_SNIPPET_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r#"(?s)<td[^>]*class="[^"]*snippet[^"]*"[^>]*>(.*?)</td>"#).unwrap());
 
 /// DuckDuckGo 供应商
 pub struct DuckDuckGoProvider {
@@ -78,13 +61,23 @@ impl DuckDuckGoProvider {
     }
 
     /// HTML 端点搜索
-    async fn ddg_html(&self, query: &str, max: usize) -> Result<Vec<WebSearchSource>, WebError> {
+    async fn ddg_html(
+        &self,
+        request: &WebSearchRequest,
+        max: usize,
+    ) -> Result<Vec<WebSearchSource>, WebError> {
         let client = build_search_client(self.timeout, Some(USER_AGENT), self.proxy_url.as_deref());
         let resp = client
             .post("https://html.duckduckgo.com/html/")
             .header("Accept", "text/html,application/xhtml+xml")
-            .header("Accept-Language", self.accept_language())
-            .form(&[("q", query)])
+            .header(
+                "Accept-Language",
+                request
+                    .language
+                    .clone()
+                    .unwrap_or_else(|| self.accept_language()),
+            )
+            .form(&ddg_form(request))
             .send()
             .await
             .map_err(|e| {
@@ -99,15 +92,20 @@ impl DuckDuckGoProvider {
         let html = resp.text().await.map_err(|e| {
             WebError::provider_error(DUCKDUCKGO_ID, format!("DDG HTML 读体失败: {e}"))
         })?;
-        Ok(parse_html(&html, max))
+        detect_challenge(&html)?;
+        check_parsed_page(&html, parse_html(&html, max))
     }
 
     /// Lite 端点搜索
-    async fn ddg_lite(&self, query: &str, max: usize) -> Result<Vec<WebSearchSource>, WebError> {
+    async fn ddg_lite(
+        &self,
+        request: &WebSearchRequest,
+        max: usize,
+    ) -> Result<Vec<WebSearchSource>, WebError> {
         let client = build_search_client(self.timeout, Some(USER_AGENT), self.proxy_url.as_deref());
         let resp = client
             .post("https://lite.duckduckgo.com/lite/")
-            .form(&[("q", query)])
+            .form(&ddg_form(request))
             .send()
             .await
             .map_err(|e| {
@@ -122,7 +120,8 @@ impl DuckDuckGoProvider {
         let html = resp.text().await.map_err(|e| {
             WebError::provider_error(DUCKDUCKGO_ID, format!("DDG Lite 读体失败: {e}"))
         })?;
-        Ok(parse_lite(&html, max))
+        detect_challenge(&html)?;
+        check_parsed_page(&html, parse_lite(&html, max))
     }
 }
 
@@ -140,10 +139,23 @@ impl WebSearchProvider for DuckDuckGoProvider {
     async fn search(&self, request: &WebSearchRequest) -> Result<WebSearchResult, WebError> {
         let max = request.max_results.unwrap_or(5);
 
-        let mut sources = self.ddg_html(&request.query, max).await?;
+        let mut sources = match self.ddg_html(request, max).await {
+            Ok(s) => s,
+            Err(_) => {
+                return self
+                    .ddg_lite(request, max)
+                    .await
+                    .map(|sources| WebSearchResult {
+                        content: None,
+                        sources,
+                        truncated: false,
+                        ..Default::default()
+                    })
+            }
+        };
         if sources.is_empty() {
             // HTML 无结果 → Lite 回退；Lite 失败不掩盖「HTML 成功但无匹配」
-            match self.ddg_lite(&request.query, max).await {
+            match self.ddg_lite(request, max).await {
                 Ok(lite) => sources = lite,
                 Err(e) => tracing::warn!("[WebSearch:{DUCKDUCKGO_ID}] Lite 回退失败: {e}"),
             }
@@ -154,6 +166,7 @@ impl WebSearchProvider for DuckDuckGoProvider {
             content: None,
             sources,
             truncated: false,
+            ..Default::default()
         })
     }
 }
@@ -164,64 +177,59 @@ impl WebSearchProvider for DuckDuckGoProvider {
 
 /// 解析 DuckDuckGo HTML 搜索结果
 fn parse_html(html: &str, limit: usize) -> Vec<WebSearchSource> {
-    let mut results = Vec::new();
-
-    let titles: Vec<_> = RESULT_A_RE.captures_iter(html).collect();
-    let snippets: Vec<_> = RESULT_SNIPPET_RE.captures_iter(html).collect();
-
-    let max = titles.len().max(snippets.len()).min(limit);
-    for i in 0..max {
-        let mut result = WebSearchSource::new(String::new());
-
-        if i < titles.len() {
-            let href = titles[i].get(1).map(|m| m.as_str()).unwrap_or("");
-            let title_html = titles[i].get(2).map(|m| m.as_str()).unwrap_or("");
-            result.url = decode_ddg_url(href);
-            if !title_html.is_empty() {
-                result.title = Some(strip_html_tags(title_html));
+    let document = scraper::Html::parse_document(html);
+    let container = scraper::Selector::parse(".result").expect("selector");
+    let anchor = scraper::Selector::parse("a.result__a").expect("selector");
+    let snippet = scraper::Selector::parse(".result__snippet").expect("selector");
+    let mut sources = vec![];
+    for result in document.select(&container) {
+        if let Some(link) = result.select(&anchor).next() {
+            if let Some(href) = link.value().attr("href") {
+                let url = decode_ddg_url(href);
+                if !url.starts_with("http") {
+                    continue;
+                }
+                let mut source = WebSearchSource::new(url);
+                source.title = Some(link.text().collect::<String>());
+                source.snippet = result
+                    .select(&snippet)
+                    .next()
+                    .map(|s| s.text().collect::<String>());
+                sources.push(source);
             }
         }
-
-        if i < snippets.len() {
-            let snippet_html = snippets[i].get(1).map(|m| m.as_str()).unwrap_or("");
-            if !snippet_html.is_empty() {
-                result.snippet = Some(strip_html_tags(snippet_html));
-            }
-        }
-
-        if !result.url.is_empty() || result.title.is_some() {
-            results.push(result);
+        if sources.len() >= limit {
+            break;
         }
     }
-
-    // 备用模式：通用链接提取
-    if results.is_empty() {
-        for cap in GENERIC_LINK_RE.captures_iter(html).take(limit) {
-            let href = cap.get(1).map(|m| m.as_str()).unwrap_or("");
-            let title_html = cap.get(2).map(|m| m.as_str()).unwrap_or("");
-            let title = strip_html_tags(title_html);
-
-            if title.is_empty() || href.is_empty() {
-                continue;
-            }
-
-            let url = if href.contains("uddg=") {
-                decode_ddg_url(href)
-            } else if href.starts_with("http") && !href.contains("duckduckgo.com") {
-                href.to_string()
-            } else {
-                continue;
-            };
-
-            if !url.is_empty() {
-                let mut s = WebSearchSource::new(url);
-                s.title = Some(title);
-                results.push(s);
+    // Some lightweight result pages omit containers; keep their actual result anchors.
+    if sources.is_empty() {
+        for link in document.select(&anchor).take(limit) {
+            if let Some(href) = link.value().attr("href") {
+                let url = decode_ddg_url(href);
+                if !url.starts_with("http") {
+                    continue;
+                }
+                let mut source = WebSearchSource::new(url);
+                source.title = Some(link.text().collect::<String>());
+                for sibling in link.next_siblings() {
+                    let Some(element) = scraper::ElementRef::wrap(sibling) else {
+                        continue;
+                    };
+                    let classes = element.value().attr("class").unwrap_or("");
+                    if classes.split_whitespace().any(|c| c == "result__a") {
+                        break;
+                    }
+                    if classes.split_whitespace().any(|c| c == "result__snippet") {
+                        source.snippet = Some(element.text().collect::<String>());
+                        break;
+                    }
+                }
+                sources.push(source);
             }
         }
     }
-
-    annotate_sources(results)
+    annotate_sources(sources)
 }
 
 /// 解析 DuckDuckGo Lite 搜索结果
@@ -271,11 +279,6 @@ fn parse_lite(html: &str, limit: usize) -> Vec<WebSearchSource> {
 fn decode_ddg_url(href: &str) -> String {
     let href = href.trim();
 
-    // 直接是完整 URL
-    if href.starts_with("http://") || href.starts_with("https://") {
-        return href.to_string();
-    }
-
     // DDG 跳转格式：//duckduckgo.com/l/?uddg=ENCODED_URL
     if let Some(pos) = href.find("uddg=") {
         let encoded = &href[pos + 5..];
@@ -283,9 +286,13 @@ fn decode_ddg_url(href: &str) -> String {
         return percent_decode(&encoded[..end]);
     }
 
+    if href.starts_with("http://") || href.starts_with("https://") {
+        return href.to_string();
+    }
+
     // 去掉前导 //
     if let Some(stripped) = href.strip_prefix("//") {
-        return stripped.to_string();
+        return format!("https://{stripped}");
     }
 
     href.to_string()
@@ -343,7 +350,11 @@ mod tests {
         assert_eq!(decode_ddg_url(href2), "https://example.com/page");
 
         let href3 = "//example.com/path";
-        assert_eq!(decode_ddg_url(href3), "example.com/path");
+        assert_eq!(decode_ddg_url(href3), "https://example.com/path");
+        assert_eq!(
+            decode_ddg_url("https://duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com"),
+            "https://example.com"
+        );
     }
 
     #[test]
@@ -394,4 +405,70 @@ mod tests {
         assert_eq!(p.id(), "duckduckgo");
         assert!(p.available());
     }
+}
+
+fn ddg_form(r: &WebSearchRequest) -> Vec<(String, String)> {
+    let mut params = vec![("q".into(), r.query.clone())];
+    if let Some(days) = r.recency_days {
+        let range = if days <= 1 {
+            "d"
+        } else if days <= 7 {
+            "w"
+        } else if days <= 31 {
+            "m"
+        } else {
+            "y"
+        };
+        params.push(("df".into(), range.into()));
+    }
+    if let Some(country) = &r.country {
+        params.push((
+            "kl".into(),
+            format!(
+                "{}-{}",
+                country.to_ascii_lowercase(),
+                r.language
+                    .as_deref()
+                    .unwrap_or("en")
+                    .split('-')
+                    .next()
+                    .unwrap_or("en")
+            ),
+        ));
+    }
+    params
+}
+fn detect_challenge(html: &str) -> Result<(), WebError> {
+    if html.contains("anomaly.js")
+        || html.contains("anomaly-modal")
+        || html.contains("challenge-form")
+    {
+        return Err(WebError::provider_error(
+            DUCKDUCKGO_ID,
+            "搜索引擎返回反机器人验证页，不能视为无匹配",
+        ));
+    }
+    Ok(())
+}
+
+fn check_parsed_page(
+    html: &str,
+    sources: Vec<WebSearchSource>,
+) -> Result<Vec<WebSearchSource>, WebError> {
+    if sources.is_empty()
+        && ![
+            "no-results",
+            "No results",
+            "No more results",
+            "result--no-result",
+        ]
+        .iter()
+        .any(|marker| html.contains(marker))
+    {
+        return Err(WebError::provider_error(
+            DUCKDUCKGO_ID,
+            "未识别到搜索结果或无结果标记；可能页面结构变化，不能声称没有匹配",
+        ));
+    }
+    Ok(sources)
 }

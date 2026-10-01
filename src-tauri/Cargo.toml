@@ -39,7 +39,7 @@ serde_yaml = "0.9"
 schemars = { version = "0.8", features = ["preserve_order"] }
 
 # Async runtime
-tokio = { version = "1.41", features = ["full"] }
+tokio = { version = "1.41", features = ["rt-multi-thread", "macros", "time", "sync", "fs", "process", "io-util", "net"] }
 async-trait = "0.1"
 futures = "0.3"
 
@@ -74,6 +74,7 @@ regex = "1.11"
 glob = "0.3"
 # URL 百分号编码（discovery 多平台源的查询词编码）
 urlencoding = "2"
+scraper = "0.27"
 # Token 计数（记忆系统窗口压缩阈值用）
 tiktoken-rs = "0.12"
 # JavaScript 插件宿主（boa_engine 0.21）——让插件贡献任意可执行 JS 代码
@@ -185,7 +186,8 @@ default = []
 tempfile = "3"
 
 [profile.release]
-opt-level = 3
+# Prefer a smaller distribution without changing panic/unwind behavior.
+opt-level = "s"
 lto = "fat"
 codegen-units = 1
 overflow-checks = false

@@ -20,18 +20,10 @@ import type { FishSpeechServiceState, GptSoVitsServiceState, GptSoVitsServiceSta
 import PluginsPanel from './plugins/PluginsPanel';
 import ConnectionsPanel from './ConnectionsPanel';
 import TokenUsagePanel from './TokenUsagePanel';
-import { Settings, Cpu, Wrench, Database, Mic, Wifi, Cable, Puzzle, Info, Trash2, Sparkles, ExternalLink, Activity } from 'lucide-react';
-
-type TabKey =
-  | 'general'
-  | 'ai'
-  | 'tools'
-  | 'memory'
-  | 'voice'
-  | 'network'
-  | 'connections'
-  | 'plugins'
-  | 'about';
+import { Search, X, Trash2, Sparkles, ExternalLink, Activity } from 'lucide-react';
+import { settingsPages as tabs, settingsGroups, settingsCopy, findSettingsPages, type SettingsPageKey as TabKey } from './settings/navigation';
+import SettingsSections from './settings/SettingsSections';
+import './settings/SettingsWindow.css';
 
 interface TtsConfigState {
   enabled: boolean;
@@ -124,18 +116,6 @@ interface DiaryConfigState {
   min_interaction_threshold: number;
   max_diary_length: number;
 }
-
-const tabs: { key: TabKey; labelKey: string; icon: React.ElementType }[] = [
-  { key: 'general', labelKey: 'config.tab_general', icon: Settings },
-  { key: 'ai', labelKey: 'config.tab_ai', icon: Cpu },
-  { key: 'tools', labelKey: 'config.tab_tools', icon: Wrench },
-  { key: 'memory', labelKey: 'config.tab_memory', icon: Database },
-  { key: 'voice', labelKey: 'config.tab_voice', icon: Mic },
-  { key: 'network', labelKey: 'config.tab_network', icon: Wifi },
-  { key: 'connections', labelKey: 'config.tab_connections', icon: Cable },
-  { key: 'plugins', labelKey: 'config.tab_plugins', icon: Puzzle },
-  { key: 'about', labelKey: 'config.tab_about', icon: Info },
-];
 
 type ConfigValue = string | number | boolean | ConfigObject | string[] | null;
 interface ConfigObject {
@@ -302,6 +282,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
   { id: 'openai', labelKey: 'config.preset_openai', providerType: 'openai', endpoint: 'https://api.openai.com/v1', defaultModel: 'gpt-5.5', mainModels: ['gpt-5.5', 'gpt-5.6', 'gpt-5', 'o3', 'o4-mini'], contextWindow: 400_000, suggestedMaxTokens: 32768, consoleUrl: 'https://platform.openai.com/api-keys', protocols: [
     { providerType: 'openai', labelKey: 'config.proto_responses', endpoint: 'https://api.openai.com/v1' },
     { providerType: 'chat_completions', labelKey: 'config.proto_chat_completions', endpoint: 'https://api.openai.com/v1' },
+    { providerType: 'openai_agents', labelKey: 'config.proto_agents', endpoint: 'https://api.openai.com/v1' },
   ] },
   { id: 'anthropic', labelKey: 'config.preset_anthropic', providerType: 'anthropic', endpoint: 'https://api.anthropic.com', defaultModel: 'claude-sonnet-4-6', mainModels: ['claude-sonnet-4-6', 'claude-sonnet-5', 'claude-opus-4-8', 'claude-haiku-4-5'], contextWindow: 1_000_000, suggestedMaxTokens: 64000, consoleUrl: 'https://console.anthropic.com/settings/keys' },
   { id: 'gemini', labelKey: 'config.preset_gemini', providerType: 'gemini', endpoint: 'https://generativelanguage.googleapis.com', defaultModel: 'gemini-3.1-pro-preview', mainModels: ['gemini-3.1-pro-preview', 'gemini-3-flash-preview', 'gemini-3.1-flash-lite'], contextWindow: 1_000_000, suggestedMaxTokens: 65536, consoleUrl: 'https://aistudio.google.com/apikey' },
@@ -821,7 +802,7 @@ const ProviderSelector: React.FC<{
   };
 
   return (
-    <div style={fieldStyle}>
+    <div className="settings-field" style={fieldStyle}>
       <label style={labelStyle}>{t('config.field_provider')}</label>
       <ProviderPresetRow presets={presets} activeId={currentPresetId} onSelect={applyPreset} t={t} />
 
@@ -897,6 +878,11 @@ const ProviderSelector: React.FC<{
               {t('config.get_api_key')}
             </button>
           )}
+        </div>
+      )}
+      {currentType === 'openai_agents' && (
+        <div style={{ fontSize: 11, color: 'var(--panel-text-tertiary)', marginBottom: 12 }}>
+          {t('config.proto_agents_help')}
         </div>
       )}
     </div>
@@ -994,7 +980,7 @@ const WorkModelProviderSelector: React.FC<{
 
   return (
     <>
-      <div style={fieldStyle}>
+      <div className="settings-field" style={fieldStyle}>
         <label style={labelStyle}>{t('config.field_provider')}</label>
         <ProviderPresetRow presets={presets} activeId={currentPresetId} onSelect={applyPresetById} t={t} />
       </div>
@@ -1083,6 +1069,11 @@ const WorkModelProviderSelector: React.FC<{
           )}
         </div>
       )}
+      {currentType === 'openai_agents' && (
+        <div style={{ fontSize: 11, color: 'var(--panel-text-tertiary)', marginBottom: 12 }}>
+          {t('config.proto_agents_help')}
+        </div>
+      )}
     </>
   );
 };
@@ -1116,7 +1107,7 @@ const ReasoningPrefField: React.FC<{
   const efforts = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
 
   return (
-    <div style={fieldStyle}>
+    <div className="settings-field" style={fieldStyle}>
       <label style={labelStyle}>{label}</label>
       <div style={{ display: 'flex', gap: 6, marginBottom: mode === 'on' ? 8 : 0 }}>
         {modes.map((m) => {
@@ -1183,7 +1174,7 @@ const fieldStyle: React.CSSProperties = {
 };
 const labelStyle: React.CSSProperties = {
   display: 'block',
-  fontSize: 12,
+  fontSize: 13,
   fontWeight: 600,
   color: 'var(--panel-text-secondary)',
   marginBottom: 6,
@@ -1215,9 +1206,9 @@ const sectionTitleStyle: React.CSSProperties = {
   color: 'var(--panel-text)',
   marginBottom: 14,
   paddingBottom: 8,
-  paddingLeft: 12,
-  borderLeft: '4px solid var(--panel-accent)',
-  borderBottom: '2px dashed var(--panel-border)',
+  paddingLeft: 10,
+  borderLeft: '3px solid var(--panel-accent)',
+  borderBottom: '1px solid var(--panel-border)',
   letterSpacing: 0.3,
 };
 
@@ -1276,10 +1267,11 @@ const TextField: React.FC<{
   style?: React.CSSProperties;
   help?: string;
 }> = ({ label, value, onChange, placeholder, type = 'text', disabled = false, list, style, help }) => (
-  <div style={{ ...fieldStyle, ...style }}>
+  <div className="settings-field" style={{ ...fieldStyle, ...style }}>
     <label style={{ ...labelStyle, ...(disabled ? { opacity: 0.5 } : {}) }}>{label}</label>
     <input
       type={type}
+      aria-label={label}
       value={value}
       onChange={(e) => onChange(e.target.value)}
       placeholder={placeholder}
@@ -1315,11 +1307,12 @@ const BrowseTextField: React.FC<{
   browseLabel: string;
   disabled?: boolean;
 }> = ({ label, value, onChange, placeholder, onBrowse, browseLabel, disabled = false }) => (
-  <div style={{ ...fieldStyle, marginBottom: 18 }}>
+  <div className="settings-field" style={{ ...fieldStyle, marginBottom: 18 }}>
     <label style={{ ...labelStyle, ...(disabled ? { opacity: 0.5 } : {}) }}>{label}</label>
     <div style={{ display: 'flex', gap: 6, alignItems: 'stretch' }}>
       <input
         type="text"
+        aria-label={label}
         value={value}
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
@@ -1423,7 +1416,7 @@ const SelectField: React.FC<{
   const selectedOption = options.find((o) => o.value === value);
 
   return (
-    <div style={fieldStyle} ref={selectRef}>
+    <div className="settings-field" style={fieldStyle} ref={selectRef}>
       <div style={{ ...labelStyle, display: 'flex', alignItems: 'center', gap: 6 }}>
         <span>{label}</span>
         {labelExtra}
@@ -1432,7 +1425,12 @@ const SelectField: React.FC<{
         <button
           ref={buttonRef}
           type="button"
+          aria-label={`${label}: ${selectedOption?.label ?? t('common.please_select')}`}
+          aria-expanded={open}
           onClick={() => setOpen(!open)}
+          onKeyDown={(event) => {
+            if (event.key === 'Escape') setOpen(false);
+          }}
           style={{
             ...selectStyle,
             textAlign: 'left',
@@ -1537,7 +1535,7 @@ const NumberField: React.FC<{
   step?: number;
   help?: string;
 }> = ({ label, value, onChange, min, max, step, help }) => (
-  <div style={fieldStyle}>
+  <div className="settings-field" style={fieldStyle}>
     <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
       <label style={labelStyle}>{label}</label>
       {help && (
@@ -1548,6 +1546,7 @@ const NumberField: React.FC<{
     </div>
     <input
       type="number"
+      aria-label={label}
       value={value}
       onChange={(e) => onChange(Number(e.target.value))}
       min={min}
@@ -1568,7 +1567,7 @@ const SliderField: React.FC<{
   format?: (v: number) => string;
   help?: string;
 }> = ({ label, value, onChange, min, max, step, format, help }) => (
-  <div style={fieldStyle}>
+  <div className="settings-field" style={fieldStyle}>
     <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 2, flex: 1, minWidth: 0 }}>
         <label style={{ ...labelStyle, marginBottom: 0 }}>{label}</label>
@@ -1584,6 +1583,7 @@ const SliderField: React.FC<{
     </div>
     <input
       type="range"
+      aria-label={label}
       value={value}
       onChange={(e) => onChange(Number(e.target.value))}
       min={min}
@@ -1600,7 +1600,7 @@ const ToggleField: React.FC<{
   onChange: (v: boolean) => void;
   help?: string;
 }> = ({ label, value, onChange, help }) => (
-  <div style={{ ...fieldStyle, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+  <div className="settings-field" style={{ ...fieldStyle, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
     <div style={{ display: 'flex', flexDirection: 'column', gap: 2, flex: 1, minWidth: 0 }}>
       <label style={{ ...labelStyle, marginBottom: 0 }}>{label}</label>
       {help && (
@@ -1610,6 +1610,10 @@ const ToggleField: React.FC<{
       )}
     </div>
     <button
+      type="button"
+      role="switch"
+      aria-checked={value}
+      aria-label={label}
       onClick={() => onChange(!value)}
       style={{
         width: 40,
@@ -1875,7 +1879,7 @@ const MultiCheckboxField: React.FC<{
   };
 
   return (
-    <div style={fieldStyle}>
+    <div className="settings-field" style={fieldStyle}>
       <div style={{ ...labelStyle, display: 'flex', alignItems: 'center', gap: 6 }}>
         <span>{label}</span>
       </div>
@@ -2237,6 +2241,13 @@ const ShortcutsDrawer: React.FC<{
 const ConfigWindow: React.FC = () => {
   const { t, i18n } = useTranslation();
   const [activeTab, setActiveTab] = useState<TabKey>('general');
+  const [settingsQuery, setSettingsQuery] = useState('');
+  const contentRef = useRef<HTMLDivElement>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
+  const copy = settingsCopy[i18n.language.startsWith('zh') ? 'zh' : i18n.language.startsWith('ja') ? 'ja' : 'en'];
+  const currentPage = tabs.find((page) => page.key === activeTab)!;
+  const visiblePages = useMemo(() => findSettingsPages(settingsQuery, copy, (key) => t(key)), [settingsQuery, copy, t]);
+  useEffect(() => { contentRef.current?.scrollTo({ top: 0 }); }, [activeTab]);
   // 供应商预设（模型名 datalist 建议）：内置兜底 + llm-providers 插件贡献合并
   const allProviderPresets = useProviderPresets();
   // 主 LLM 未配置时显示初始配置引导弹窗
@@ -4251,6 +4262,11 @@ const ConfigWindow: React.FC = () => {
               />}
             </ShortcutsDrawer>
 
+          </>
+        );
+      case 'world':
+        return (
+          <>
             {/* ── 真实世界感知（原独立页签合并）── */}
             <div style={{ ...sectionTitleStyle, marginTop: 28 }}>
               {t('config.section_world')}
@@ -4315,6 +4331,11 @@ const ConfigWindow: React.FC = () => {
               </button>
             </div>
 
+          </>
+        );
+      case 'companion':
+        return (
+          <>
             {/* ── 内心独白 + 主动问候（合并分组，便于联动）── */}
             <div style={{ ...sectionTitleStyle, marginTop: 24 }}>
               {t('config.section_world_monologue')}
@@ -4429,6 +4450,11 @@ const ConfigWindow: React.FC = () => {
               />
             ) : null}
 
+          </>
+        );
+      case 'data':
+        return (
+          <>
             {/* ── 数据备份与整体操作 ── */}
             <div style={{ ...sectionTitleStyle, marginTop: 24 }}>
               {t('config.section_backup')}
@@ -4661,6 +4687,11 @@ const ConfigWindow: React.FC = () => {
               ]}
             />
 
+          </>
+        );
+      case 'routing':
+        return (
+          <>
             <div style={{ ...sectionTitleStyle, marginTop: 28 }}>{t('config.section_routing')}</div>
             <div style={{ fontSize: 12, color: 'var(--panel-text-tertiary)', marginBottom: 14 }}>
               {t('config.routing_description')}
@@ -4875,6 +4906,11 @@ const ConfigWindow: React.FC = () => {
               );
             })}
 
+          </>
+        );
+      case 'work':
+        return (
+          <>
             <div style={{ ...sectionTitleStyle, marginTop: 28 }}>{t('config.section_work_models')}</div>
             <div style={{ fontSize: 12, color: 'var(--panel-text-tertiary)', marginBottom: 14 }}>
               {t('config.work_models_description')}
@@ -5047,6 +5083,11 @@ const ConfigWindow: React.FC = () => {
               onBrowse={() => void handlePickDefaultWorkspace()}
               browseLabel={t('config.default_workspace_browse')}
             />
+          </>
+        );
+      case 'usage':
+        return (
+          <>
             <TokenUsagePanel />
           </>
         );
@@ -5608,7 +5649,7 @@ const ConfigWindow: React.FC = () => {
                 />
 
                 {/* Ollama 服务控制：启动/停止 + 状态徽章 + PID */}
-                <div style={{ ...fieldStyle, display: 'flex', alignItems: 'center', gap: 10 }}>
+                <div className="settings-field" style={{ ...fieldStyle, display: 'flex', alignItems: 'center', gap: 10 }}>
                   <button
                     type="button"
                     onClick={toggleOllamaService}
@@ -5676,7 +5717,7 @@ const ConfigWindow: React.FC = () => {
                 </div>
 
                 {/* 拉取模型 */}
-                <div style={{ ...fieldStyle, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                <div className="settings-field" style={{ ...fieldStyle, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
                   <button
                     type="button"
                     onClick={pullOllamaModel}
@@ -6451,6 +6492,11 @@ const ConfigWindow: React.FC = () => {
               </>
             )}
 
+          </>
+        );
+      case 'speech':
+        return (
+          <>
             <div style={{ ...sectionTitleStyle, marginTop: 24 }}>
               {t('config.section_tts')}
             </div>
@@ -7921,6 +7967,11 @@ const ConfigWindow: React.FC = () => {
               <div style={{ fontSize: 12, color: 'var(--panel-text-tertiary)' }}>{t('common.loading')}</div>
             )}
 
+          </>
+        );
+      case 'realtime':
+        return (
+          <>
             <div style={{ ...sectionTitleStyle, marginTop: 28 }}>{t('config.section_realtime')}</div>
             <ToggleField
               label={t('config.field_realtime_enable')}
@@ -8013,7 +8064,7 @@ const ConfigWindow: React.FC = () => {
               min={5}
               step={5}
             />
-            <div style={{ ...fieldStyle, display: 'flex', alignItems: 'center', gap: 12 }}>
+            <div className="settings-field" style={{ ...fieldStyle, display: 'flex', alignItems: 'center', gap: 12 }}>
               <button
                 onClick={() => setNetworkDiagnosisOpen(true)}
                 style={{
@@ -8099,6 +8150,11 @@ const ConfigWindow: React.FC = () => {
             />
 
             {/* ── 网络搜索（已并入网络页签，多引擎混用）── */}
+          </>
+        );
+      case 'search':
+        return (
+          <>
             <div style={{ ...sectionTitleStyle, marginTop: 24 }}>
               {t('config.section_web_search')}
             </div>
@@ -8113,7 +8169,6 @@ const ConfigWindow: React.FC = () => {
                 { value: 'duckduckgo', label: t('config.opt_web_search_duckduckgo') },
                 { value: 'searxng', label: t('config.opt_web_search_searxng') },
                 { value: 'tavily', label: t('config.opt_web_search_tavily') },
-                { value: 'bing', label: t('config.opt_web_search_bing') },
                 { value: 'deepseek', label: t('config.opt_web_search_deepseek') },
               ]}
               minSelected={1}
@@ -8294,14 +8349,14 @@ const ConfigWindow: React.FC = () => {
 
   return (
     <div
-      className="scrapbook scrapbook-bg"
+      className="scrapbook settings-window"
       style={{
         display: 'flex',
         flexDirection: 'column',
         height: '100vh',
         background: 'var(--panel-bg)',
         fontFamily:
-          '"Noto Serif SC", "Source Han Serif SC", "Songti SC", "STSong", "SimSun", "PingFang SC", "Microsoft YaHei", serif',
+          '"Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif',
         color: 'var(--panel-text)',
         overflow: 'hidden',
       }}
@@ -8329,7 +8384,7 @@ const ConfigWindow: React.FC = () => {
       {/* 手账封面条（清新插画风：纸胶带 + 印章标题） */}
       <header
         data-tauri-drag-region
-        className="cfg-cover"
+        className="settings-header"
         style={{
           position: 'relative',
           display: 'flex',
@@ -8360,6 +8415,7 @@ const ConfigWindow: React.FC = () => {
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <button
             onClick={() => setSetupGuideOpen(true)}
+            aria-label={t('config.setup_guide.guide_btn')}
             title={t('config.setup_guide.guide_btn')}
             style={{
               width: 26,
@@ -8393,6 +8449,7 @@ const ConfigWindow: React.FC = () => {
           </button>
           <button
             onClick={closeWindow}
+            aria-label={t('common.close')}
             title={t('common.close')}
             style={{
               width: 26,
@@ -8422,91 +8479,52 @@ const ConfigWindow: React.FC = () => {
         </div>
       </header>
 
-      <div style={{ display: 'flex', flex: 1, overflow: 'hidden', marginTop: 10 }}>
-        {/* 左侧贴纸导航 */}
-        <div
-          className="no-scrollbar"
-          style={{
-            width: 150,
-            background: 'transparent',
-            borderRight: '2px dashed var(--panel-border-light)',
-            padding: '14px 10px 20px 14px',
-            overflowY: 'auto',
-            flexShrink: 0,
-          }}
-        >
-          {tabs.map((tab, idx) => {
-            const isActive = activeTab === tab.key;
-            const Icon = tab.icon;
-            const stickerColors = [
-              'var(--sticker-pink-soft)',
-              'var(--sticker-lilac-soft)',
-              'var(--sticker-sky-soft)',
-              'var(--sticker-mint-soft)',
-              'var(--sticker-butter-soft)',
-            ];
-            const stickerColor = stickerColors[idx % stickerColors.length];
-            return (
-              <button
-                key={tab.key}
-                onClick={() => handleTabChange(tab.key)}
-                onMouseEnter={(e) => {
-                  if (!isActive) {
-                    const btn = e.currentTarget;
-                    btn.style.background = 'var(--panel-bg-hover)';
-                    btn.style.transform = 'translateY(-2px) rotate(-1deg)';
-                    btn.style.boxShadow = 'var(--panel-shadow-card)';
-                  }
-                }}
-                onMouseLeave={(e) => {
-                  if (!isActive) {
-                    const btn = e.currentTarget;
-                    btn.style.background = 'transparent';
-                    btn.style.transform = 'translateY(0) rotate(0)';
-                    btn.style.boxShadow = 'none';
-                  }
-                }}
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 9,
-                  width: '100%',
-                  textAlign: 'left',
-                  padding: '10px 12px',
-                  border: isActive ? '1.5px solid var(--panel-accent)' : '1.5px solid transparent',
-                  background: isActive ? stickerColor : 'transparent',
-                  color: 'var(--panel-text)',
-                  fontSize: 13,
-                  borderRadius: 14,
-                  cursor: 'pointer',
-                  marginBottom: 6,
-                  fontFamily: 'inherit',
-                  transition: 'transform 0.18s cubic-bezier(0.2,0.8,0.2,1), box-shadow 0.18s ease, border-color 0.18s ease, background 0.18s ease, color 0.15s ease',
-                  fontWeight: isActive ? 700 : 400,
-                  transform: isActive ? 'translateY(-2px) rotate(-1deg)' : 'translateY(0) rotate(0)',
-                  boxShadow: isActive ? 'var(--panel-shadow-card)' : 'none',
-                }}
-              >
-                <Icon size={16} strokeWidth={isActive ? 2.2 : 1.8} style={{ flexShrink: 0, color: 'var(--panel-accent)' }} />
-                {t(tab.labelKey)}
-              </button>
-            );
-          })}
-        </div>
-
-        <div
-          style={{
-            flex: 1,
-            overflowY: 'auto',
-            padding: '20px 26px',
-            animation: 'cfg-fade 0.3s cubic-bezier(0.22,0.9,0.28,1)',
-          }}
-        >
-          {renderTabContent()}
-        </div>
+      <div className="settings-layout">
+        <aside className="settings-sidebar">
+          <div className="settings-search">
+            <Search size={15} aria-hidden="true" />
+            <input ref={searchRef} aria-label={copy.search} placeholder={copy.search}
+              value={settingsQuery} onChange={(event) => setSettingsQuery(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Escape') setSettingsQuery('');
+                if (event.key === 'Enter' && visiblePages[0]) handleTabChange(visiblePages[0].key);
+              }} />
+            {settingsQuery && <button aria-label={copy.clearSearch} onClick={() => { setSettingsQuery(''); searchRef.current?.focus(); }}><X size={14} /></button>}
+          </div>
+          <nav aria-label={t('config.title')}>
+            {settingsGroups.map((group) => {
+              const pages = visiblePages.filter((page) => page.group === group);
+              if (!pages.length) return null;
+              return <div className="settings-nav-group" key={group}>
+                <div className="settings-nav-caption">{copy.groups[group]}</div>
+                {pages.map((page) => {
+                  const Icon = page.icon;
+                  return <button key={page.key} className="settings-nav-item"
+                    aria-current={activeTab === page.key ? 'page' : undefined}
+                    title={copy.pages[page.key][1]} onClick={() => handleTabChange(page.key)}>
+                    <Icon size={16} strokeWidth={1.8} aria-hidden="true" />
+                    <span>{copy.pages[page.key][0]}</span>
+                  </button>;
+                })}
+              </div>;
+            })}
+            {!visiblePages.length && <div className="settings-search-empty" role="status">{copy.noResults}</div>}
+          </nav>
+        </aside>
+        <main className="settings-content" ref={contentRef}>
+          <div className="settings-page-heading">
+            <span className="settings-page-eyebrow">{copy.groups[currentPage.group]}</span>
+            <h1>{copy.pages[activeTab][0]}</h1>
+            <p>{copy.pages[activeTab][1]}</p>
+          </div>
+          {activeTab === 'usage' ? renderTabContent() : <SettingsSections key={activeTab} contentsLabel={copy.contents}>
+            {renderTabContent()}
+          </SettingsSections>}
+        </main>
       </div>
 
       <div
+        className="settings-footer"
         style={{
           display: 'flex',
           alignItems: 'center',
@@ -8551,7 +8569,7 @@ const ConfigWindow: React.FC = () => {
             boxShadow: 'var(--panel-shadow-subtle)',
           }}
         >
-          {t('common.reset')}
+          {copy.reload}
         </button>
         <button
           onClick={handleSave}
@@ -8676,11 +8694,11 @@ const ConfigWindow: React.FC = () => {
           setSetupGuideOpen(false);
         }}
         onGoVoice={() => {
-          setActiveTab('voice');
+          setActiveTab('speech');
           setSetupGuideOpen(false);
         }}
         onGoSearch={() => {
-          setActiveTab('network');
+          setActiveTab('search');
           setSetupGuideOpen(false);
         }}
         status={{

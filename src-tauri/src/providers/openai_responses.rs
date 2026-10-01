@@ -8,7 +8,7 @@
 //! - 流式 SSE 事件类型：`response.output_text.delta` / `response.function_call_arguments.delta`
 //!   / `response.reasoning_summary_text.delta` / `response.completed`
 //! - 多模态原生支持（图片/音频输入输出）
-//! - web_search_options 原生联网搜索
+//! - tools=[{type: web_search}] 原生联网搜索
 //!
 //! 与 `OpenAiCompatProvider`（Chat Completions）的关键差异：
 //! - endpoint：`{base_url}/responses`（非 `/chat/completions`）
@@ -185,7 +185,9 @@ impl OpenAiResponsesProvider {
 
     fn inject_search_fields(&self, body: &mut Value) {
         if self.base.is_enable_search() {
-            body["web_search_options"] = json!({"search_context_size": "high"});
+            if !body["tools"].is_array() { body["tools"] = json!([]); }
+            body["tools"].as_array_mut().expect("array").push(json!({"type":"web_search"}));
+            body["include"] = json!(["web_search_call.action.sources"]);
         }
     }
 
@@ -401,6 +403,7 @@ impl OpenAiResponsesProvider {
             Some(reasoning_parts.join(""))
         };
 
+        let content = crate::providers::web_citations::attach(&content, &crate::providers::web_citations::sources(json));
         Ok(ChatResponse {
             content,
             tool_calls,
@@ -495,6 +498,8 @@ impl BaseProvider for OpenAiResponsesProvider {
                             return;
                         }
                         if let Ok(json_val) = serde_json::from_str::<Value>(data) {
+                            let sources = crate::providers::web_citations::sources(&json_val);
+                            if !sources.is_empty() { let _ = tx.send(StreamEvent::WebSources { sources }).await; }
                             if let Some(usage) = parse_stream_usage(&json_val["response"]["usage"])
                             {
                                 let _ = tx.send(usage).await;
@@ -615,7 +620,7 @@ impl BaseProvider for OpenAiResponsesProvider {
         let schema = crate::providers::base::ProviderCallOptions::current_json_schema();
         let mut body = self.build_request_body(input, &schema);
         if let Some(tools_field) = self.build_tools_field() {
-            body["tools"] = tools_field;
+            crate::providers::web_citations::append_tools(&mut body, &tools_field);
             body["tool_choice"] = json!("auto");
         }
 
@@ -657,7 +662,7 @@ impl BaseProvider for OpenAiResponsesProvider {
         let mut body = self.build_request_body(input, &schema);
         body["stream"] = json!(true);
         if !tools_field.as_array().map(|a| a.is_empty()).unwrap_or(true) {
-            body["tools"] = tools_field;
+            crate::providers::web_citations::append_tools(&mut body, &tools_field);
             body["tool_choice"] = json!("auto");
         }
 
@@ -724,6 +729,8 @@ impl BaseProvider for OpenAiResponsesProvider {
                             return;
                         }
                         if let Ok(json_val) = serde_json::from_str::<Value>(data) {
+                            let sources = crate::providers::web_citations::sources(&json_val);
+                            if !sources.is_empty() { let _ = tx.send(StreamEvent::WebSources { sources }).await; }
                             let event_type = json_val["type"].as_str().unwrap_or("");
                             match event_type {
                                 "response.output_text.delta" => {

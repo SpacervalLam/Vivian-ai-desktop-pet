@@ -278,11 +278,12 @@ impl OpenAiCompatProvider {
         let function_calling_active = !self.tools.is_empty();
 
         if model_lower.contains("deepseek") {
-            body["enable_search"] = json!(true);
-            tracing::info!("[Router] DeepSeek 联网搜索已启用: model={}", self.base.model);
-        } else if model_lower.contains("gpt-4o") {
+            // DeepSeek's documented search is an Anthropic server tool, not a
+            // Chat Completions enable_search switch. Use the shared web_search tool.
+            tracing::debug!("[Router] DeepSeek 查证使用 web_search 工具");
+        } else if model_lower == "gpt-5-search-api" {
             body["web_search_options"] = json!({"search_context_size": "high"});
-            tracing::info!("[Router] GPT-4o 联网搜索已启用: model={}", self.base.model);
+            tracing::info!("[Router] gpt-5-search-api 联网搜索已启用: model={}", self.base.model);
         } else if model_lower.contains("qwen") {
             body["enable_search"] = json!(true);
             tracing::info!("[Router] Qwen (DashScope) 联网搜索已启用: model={}", self.base.model);
@@ -316,11 +317,7 @@ impl OpenAiCompatProvider {
                 self.base.model
             );
         } else {
-            body["enable_search"] = json!(true);
-            tracing::info!(
-                "[Router] 通用联网搜索已启用: model={}, provider=openai_compat",
-                self.base.model
-            );
+            tracing::debug!("[Router] 未声明原生联网协议，使用 web_search 工具: model={}",self.base.model);
         }
     }
 
@@ -531,6 +528,7 @@ impl OpenAiCompatProvider {
             Some(reasoning_parts.join(""))
         };
 
+        let content = crate::providers::web_citations::attach(&content, &crate::providers::web_citations::sources(json));
         Ok(ChatResponse {
             content,
             tool_calls,
@@ -571,6 +569,11 @@ impl OpenAiCompatProvider {
         body: serde_json::Value,
         cache_key_prompt: Option<&str>,
     ) -> VivianResult<ChatResponse> {
+        // Tool/search responses must be evaluated against current evidence and permissions.
+        let cache_key_prompt = if body.get("tools").is_some()
+            || body.get("web_search_options").is_some()
+            || body.get("enable_search").and_then(serde_json::Value::as_bool) == Some(true)
+        { None } else { cache_key_prompt };
         if let Some(prompt) = cache_key_prompt {
             if let Some(cached) = self.base.get_cached_response(prompt) {
                 tracing::debug!("命中缓存(structured): {}", self.base.model);
@@ -643,6 +646,11 @@ impl OpenAiCompatProvider {
         body: serde_json::Value,
         cache_key_prompt: Option<&str>,
     ) -> VivianResult<String> {
+        // Tool/search responses must be evaluated against current evidence and permissions.
+        let cache_key_prompt = if body.get("tools").is_some()
+            || body.get("web_search_options").is_some()
+            || body.get("enable_search").and_then(serde_json::Value::as_bool) == Some(true)
+        { None } else { cache_key_prompt };
         if let Some(prompt) = cache_key_prompt {
             if let Some(cached) = self.base.get_cached_response(prompt) {
                 tracing::debug!("命中缓存: {}", self.base.model);
@@ -676,6 +684,7 @@ impl OpenAiCompatProvider {
             match self.send_request(body.clone()).await {
                 Ok(json) => {
                     let content = Self::extract_content(&json)?;
+                    let content = crate::providers::web_citations::attach(&content, &crate::providers::web_citations::sources(&json));
                     crate::providers::base::record_response_usage(&self.base.model, &json);
                     self.base.record_success();
                     if let Some(prompt) = cache_key_prompt {
@@ -795,8 +804,8 @@ impl BaseProvider for OpenAiCompatProvider {
     /// 带联网搜索的对话查询
     ///
     /// 当 `enable_search=true`（或 provider 自身开关开启）时，按模型名注入：
-    /// - DeepSeek/Qwen/通用：顶层 `enable_search=true`
-    /// - GPT-4o: `web_search_options={"search_context_size": "high"}`
+    /// - Qwen：顶层 `enable_search=true`；DeepSeek/未知协议使用通用 web_search 工具
+    /// - gpt-5-search-api：Chat Completions 的 `web_search_options`
     /// - GLM/Kimi/Doubao：通过 tools 字段注入对应搜索工具
     async fn call_chat_with_search(
         &self,
@@ -935,6 +944,8 @@ impl BaseProvider for OpenAiCompatProvider {
                             return;
                         }
                         if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(data) {
+                            let sources = crate::providers::web_citations::sources(&json_val);
+                            if !sources.is_empty() { let _ = tx.send(StreamEvent::WebSources { sources }).await; }
                             if let Some(usage) = parse_stream_usage(&json_val["response"]["usage"])
                                 .or_else(|| parse_stream_usage(&json_val["usage"]))
                             {
@@ -1245,6 +1256,8 @@ impl BaseProvider for OpenAiCompatProvider {
                             return;
                         }
                         if let Ok(json_val) = serde_json::from_str::<Value>(data) {
+                            let sources = crate::providers::web_citations::sources(&json_val);
+                            if !sources.is_empty() { let _ = tx.send(StreamEvent::WebSources { sources }).await; }
                             let event_type = json_val["type"].as_str().unwrap_or("");
                             match event_type {
                                 "response.output_text.delta" => {

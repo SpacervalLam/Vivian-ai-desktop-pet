@@ -1185,30 +1185,6 @@ body[data-ui-style="minimal"] :is(.codex-selbubble, .codex-editcard-overlay, .co
    极简只需要在三个调色板块里换掉 `--panel-scrollbar` / `--panel-scrollbar-hover`
    这两个颜色变量（见上面的调色板块），形状一个像素都不用重写。 */
 
-/* Keep the conversation usable between two resizable sidebars. */
-@media (max-width: 1180px) {
-  .mind-inspector-root.is-work-page .workbench-root .codex-inspector {
-    width: min(320px, 31vw) !important;
-  }
-
-  /* 同样只改基准变量，不碰 padding —— 见文件上方 `.codex-chat` 的说明。 */
-  .mind-inspector-root.is-work-page .workbench-root .codex-chat { --codex-chat-pad-x: 22px; }
-}
-
-@media (max-width: 940px) {
-  .mind-inspector-root.is-work-page .workbench-root .codex-sidebar {
-    width: min(220px, 28vw) !important;
-  }
-
-  .mind-inspector-root.is-work-page .workbench-root .codex-inspector {
-    width: min(270px, 31vw) !important;
-  }
-
-  .mind-inspector-root.is-work-page .codex-inspector-tab {
-    padding-inline: 7px;
-  }
-}
-
 @media (max-width: 720px) {
   .mind-ui-style-switch button span,
   .mind-sb-cover-apartment span { display: none; }

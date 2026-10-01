@@ -197,7 +197,7 @@ pub struct WebSearchConfig {
     /// 同时启用多个引擎时，搜索工具会并发调用并合并去重结果
     #[serde(default = "default_web_search_providers")]
     pub providers: Vec<String>,
-    /// 每次搜索返回结果数：0 = 自动（按调用方智能体取差异化默认：聊天 10 / 工作 15），
+    /// 每次搜索返回结果数：0 = 自动（按调用方智能体取差异化默认：陪伴 5 / 工作 10），
     /// 1-20 = 固定覆盖（仅当模型未显式传参时生效）
     #[serde(default = "default_web_search_max_results")]
     pub max_results: u32,
@@ -222,13 +222,13 @@ pub struct WebSearchConfig {
     /// Tavily 配置（专为 LLM Agent 设计的搜索 API）
     #[serde(default)]
     pub tavily: TavilyConfig,
-    /// Bing Search API 配置（国内直连可用，无需梯子）
+    /// 旧 Bing Search API 配置，仅保留迁移兼容，不再发送请求
     #[serde(default)]
     pub bing: BingConfig,
     /// DeepSeek 官方原生搜索配置（Anthropic 兼容 Messages API + web_search server tool）
     ///
     /// 一次搜索 = 一次 DeepSeek 模型调用（返回结构化 web_search_tool_result 块），
-    /// 引用级摘要质量最高。api_key 为空时自动复用主对话 ai 配置的 DeepSeek key。
+    /// 返回引用摘录。api_key 为空时自动复用主对话 ai 配置的 DeepSeek key。
     #[serde(default)]
     pub deepseek: WebSearchDeepSeekConfig,
 }
@@ -255,7 +255,7 @@ fn default_web_search_providers() -> Vec<String> {
     vec!["duckduckgo".to_string()]
 }
 
-/// 0 = 自动：按调用方智能体取差异化默认（聊天 10 / 工作 15）
+/// 0 = 自动：按调用方智能体取差异化默认（陪伴 5 / 工作 10）
 fn default_web_search_max_results() -> u32 {
     0
 }
@@ -313,10 +313,9 @@ fn default_tavily_search_depth() -> String {
     "basic".to_string()
 }
 
-/// Bing Search API 配置（国内直连可用，无需梯子）
+/// 旧 Bing Search API 配置，仅保留迁移兼容，不再发送请求
 ///
-/// 使用 Azure Bing Search API v7，国内直连（cn.bing.com 可访问），
-/// 每月免费 1000 次调用。申请地址：https://portal.azure.com -> Bing Search
+/// Azure Bing Search v7 已于 2025-08-11 退役。保留旧凭据，加载时移除引擎选择。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BingConfig {
     /// Bing Search API Key（Azure Portal 创建 Bing Search 资源获取）
@@ -1824,6 +1823,9 @@ impl ConfigManager {
             // 清空旧字段，避免下次再迁移（保存后 yaml 中 provider 变为空字符串）
             config.web_search.provider.clear();
         }
+        // Bing Search v7 retired on 2025-08-11. Preserve credential fields, migrate engine selection.
+        config.web_search.providers.retain(|p| p != "bing");
+        if config.web_search.provider == "bing" { config.web_search.provider = "duckduckgo".into(); }
         // 兜底：providers 为空时回退到 duckduckgo
         if config.web_search.providers.is_empty() {
             config.web_search.providers = default_web_search_providers();
@@ -1831,7 +1833,7 @@ impl ConfigManager {
 
         // ── 配置迁移：web_search.max_results 旧默认 5 → 0（自动）──
         // 旧版本默认 5 且配置全量落盘，老配置文件普遍持久化了 5；
-        // 一次性将其归零（运行时按调用方智能体取聊天 10 / 工作 15）。
+        // 一次性将其归零（运行时按调用方智能体取陪伴 5 / 工作 10）。
         // 标记随配置持久化，用户后来显式设置的任何值（含 5）不再被迁移。
         if !config.web_search.max_results_default_migrated {
             if config.web_search.max_results == 5 {

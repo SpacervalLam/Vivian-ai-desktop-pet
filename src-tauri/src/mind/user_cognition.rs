@@ -218,7 +218,7 @@ impl UserCognitionEngine {
             .router
             .generate(LLMRequest::new(
                 "reflection",
-                vec![ChatMessage::user(prompt)],
+                vec![ChatMessage::system(super::COGNITIVE_EVIDENCE_RULES), ChatMessage::user(prompt)],
             )
             .with_character_id(mind.char_id.clone()))
             .await?;

@@ -32,6 +32,8 @@ export interface ChibiAnimationSpec {
   label: string;
   category: string;
   promptable: boolean;
+  /** 省略时两个角色通用，否则只供这些角色使用。 */
+  characters?: string[];
   /** 图集路径模板，`{character}` 与 `{direction}` 由调用方填充。 */
   sheet: string;
   /** 有方向的动作为 ['left','right']，无方向为 null。 */
@@ -65,6 +67,7 @@ const ANIMATION_SPECS: ChibiAnimationSpec[] = vocab.animations.map((animation) =
   label: animation.label,
   category: animation.category,
   promptable: animation.promptable,
+  characters: animation.characters ? [...animation.characters] : undefined,
   sheet: animation.sheet,
   directions: (animation.directions as ChibiDirection[] | undefined) ?? null,
   cols: animation.cols,
@@ -270,6 +273,7 @@ export function frameStyle(
 export function prefetchUrls(character: string): string[] {
   const urls = new Set<string>([atlasUrl(character)]);
   for (const spec of ANIMATION_SPECS) {
+    if (spec.characters && !spec.characters.includes(character)) continue;
     for (const direction of spec.directions ?? (['left'] as ChibiDirection[])) {
       urls.add(sheetUrl(spec, character, direction));
     }

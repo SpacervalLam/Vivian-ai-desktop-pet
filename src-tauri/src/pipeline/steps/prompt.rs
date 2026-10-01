@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 
 use crate::emotion::{EmotionBridge, EpistemicAssessment, KnowledgeDecision, ScheduleAssessment};
+use crate::emotion::fast_semantic::PROMPT_ROUTING_CONFIDENCE;
 use crate::error::VivianResult;
 use crate::memory::user_facts::UserFactStore;
 use crate::memory::{MemoryManager, MemoryType};
@@ -82,6 +83,92 @@ fn fallback_label(id: &str, lang: &str) -> &'static str {
 // PromptBuildingStep：原有模块化 prompt 构建（保留）
 // ============================================================================
 
+/// Request-local candidates independent of query embeddings and retrieval results.
+/// Reports, topic counters, current mind state and tool scope are intentionally finalized later.
+struct PreparedPromptContext {
+    character_block: Option<String>,
+    examples_block: Option<String>,
+    style_block: Option<String>,
+    style_preset_block: Option<String>,
+    memory_md_section: Option<String>,
+    user_facts_section: Option<String>,
+    skill_section: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+struct OptionalContextSelection {
+    current_culture: bool,
+    random_echo: bool,
+    relationship_log: bool,
+}
+
+impl OptionalContextSelection {
+    fn for_state(state: &PipelineState) -> Self {
+        let Some(perception) = state.fast_perception.as_ref() else {
+            return Self { current_culture: state.user_input.chars().count() <= 48,
+                random_echo: false, relationship_log: true };
+        };
+        let casual = perception.intent.confidence >= PROMPT_ROUTING_CONFIDENCE
+            && matches!(perception.intent.label.as_str(), "chat" | "sharing" | "complaint");
+        let distressed = perception.emotion.confidence.unwrap_or(0.0) >= 0.45
+            && matches!(perception.emotion.emotion.as_str(), "sad" | "anxious" | "angry" | "disappointed" | "frustrated" | "tired");
+        Self {
+            current_culture: casual && !distressed,
+            random_echo: casual && !distressed
+                && matches!(perception.intent.label.as_str(), "chat" | "sharing")
+                && perception.suggested_modules.iter().any(|module| module == "memory_check"),
+            // Uncertain classification must not remove relationship continuity.
+            relationship_log: perception.relationship_signal.confidence < PROMPT_ROUTING_CONFIDENCE
+                || perception.suggested_modules.iter().any(|module| module == "relationship"),
+        }
+    }
+}
+
+/// Prepare stable candidates while the dependent semantic/retrieval/web chain runs.
+/// The typed snapshot stays inside this invocation, never serialized into intermediate states.
+pub struct PreparedPromptPipeline {
+    context: Box<dyn Runnable>,
+    prompt: PromptBuildingStep,
+}
+
+impl PreparedPromptPipeline {
+    pub fn new(context: Box<dyn Runnable>, prompt: PromptBuildingStep) -> Self { Self { context, prompt } }
+}
+
+#[async_trait]
+impl Runnable for PreparedPromptPipeline {
+    async fn ainvoke(&self, input: Value, config: Option<RunnableConfig>) -> VivianResult<Value> {
+        let should_prepare = input.get("is_command").and_then(Value::as_bool) != Some(true)
+            && input.get("should_respond").and_then(Value::as_bool) != Some(false);
+        let prompt = self.prompt.clone();
+        let preparation = async move {
+            if !should_prepare { return (None, 0, true); }
+            let start = std::time::Instant::now();
+            let result = tokio::task::spawn_blocking(move || prompt.prepare_context()).await;
+            let elapsed = start.elapsed().as_millis() as u64;
+            match result {
+                Ok(prepared) => (Some(prepared), elapsed, true),
+                Err(error) => {
+                    tracing::warn!("Prompt preparation failed; rebuild during finalization: {error}");
+                    (None, elapsed, false)
+                }
+            }
+        };
+        let ((prepared, prep_ms, prep_ok), context) = tokio::join!(preparation, self.context.ainvoke(input, config.clone()));
+        let start = std::time::Instant::now();
+        let mut output = self.prompt.ainvoke_prepared(context?, config, prepared).await?;
+        let finalize_ms = start.elapsed().as_millis() as u64;
+        let timings = &mut output["metadata"]["timings"];
+        if !timings.is_array() { *timings = json!([]); }
+        let timings = timings.as_array_mut().expect("initialized timings");
+        timings.push(json!({"stage":"prompt_preparation", "elapsed_ms":prep_ms, "success":prep_ok}));
+        timings.push(json!({"stage":"prompt_building", "elapsed_ms":finalize_ms, "success":true}));
+        tracing::info!(stage="prompt_preparation", elapsed_ms=prep_ms, "stage completed (overlapped)");
+        tracing::info!(stage="prompt_building", elapsed_ms=finalize_ms, "stage completed");
+        Ok(output)
+    }
+}
+
 #[derive(Clone)]
 pub struct PromptBuildingStep {
     pub persona: Option<Arc<PersonaEngine>>,
@@ -144,6 +231,41 @@ pub struct PromptBuildingStep {
 /// 一次 `tool_search` 才能拿到 schema，误召回的代价只是多几个工具的 schema，
 /// 两者不对称，所以阈值向下取。
 const TOOL_RECALL_MIN_SIM: f32 = 0.22;
+
+/// Retrieval context, never authorization. Keep this bounded to the immediately preceding
+/// exchange so an old proposal cannot silently revive after a topic change.
+fn proposal_followup_query(state: &PipelineState) -> Option<String> {
+    if state.current_channel == "cross_character"
+        || state.metadata.get("proactive_greeting").and_then(Value::as_bool) == Some(true)
+    {
+        return None;
+    }
+    let (input, speaker) = crate::cross_character::parse_speaker_prefix(&state.user_input);
+    if speaker != "user" || input.chars().count() > 48 {
+        return None;
+    }
+    let normalized = input.trim().trim_end_matches(|c: char| c.is_ascii_punctuation() || "。，！？".contains(c)).to_lowercase();
+    let references = [
+        "好", "好的", "可以", "行", "执行吧", "好，执行吧", "就按你说的做",
+        "好，帮我做", "帮我执行", "可以，执行吧", "就这么办", "按这个来",
+        "帮我做吧", "开始吧", "不用了", "不要执行", "先别执行",
+        "yes", "yes, do it", "do it", "go ahead", "no", "no thanks",
+        "お願い", "実行して", "いいよ", "やめて",
+    ];
+    if !references.contains(&normalized.as_str()) {
+        return None;
+    }
+    let last = state.messages.last()?;
+    if last.role != "assistant" || last.content.trim().is_empty() {
+        return None;
+    }
+    let previous_user = state.messages.iter().rev().nth(1)
+        .filter(|message| message.role == "user")
+        .map(|message| crate::utils::truncate_chars(&message.content, 600))
+        .unwrap_or_default();
+    Some(format!("Previous user: {previous_user}\nPrevious assistant: {}\nCurrent user: {input}",
+        crate::utils::truncate_chars(&last.content, 1200)))
+}
 
 /// 各场景下语义召回的工具数量上限
 ///
@@ -449,7 +571,7 @@ impl PromptBuildingStep {
     /// 完整 schema = 保底集 ∪ 召回集）与 `recalled_order`（按相似度降序，供"仅名称
     /// 一行"推荐提示）。取不到嵌入（主动开场 / 感知被跳过 / 嵌入服务不可用）时
     /// `recalled=None`，回退纯场景可见性，不丢能力。
-    fn compute_tool_scope(&self, ts: &ToolSystem, state: &PipelineState) -> ToolScope {
+    fn compute_tool_scope(&self, ts: &ToolSystem, state: &PipelineState, followup_embedding: Option<&[f32]>) -> ToolScope {
         let (scene, hidden) = self.resolve_tool_scope(ts, state);
 
         // 角色间的闲聊不应获得控制用户设备、工作流或记忆的工具；这些工具会让普通接话
@@ -472,7 +594,7 @@ impl PromptBuildingStep {
             .as_ref()
             .zip(state.fast_perception.as_ref())
             .map(|(filter, fp)| {
-                let emb = fp.query_embedding.as_slice();
+                let emb = followup_embedding.unwrap_or(fp.query_embedding.as_slice());
                 if emb.is_empty() {
                     return Vec::new();
                 }
@@ -508,6 +630,12 @@ impl PromptBuildingStep {
         state: &PipelineState,
         tool_scope: Option<&ToolScope>,
     ) -> PromptParts {
+        self.build_parts_prepared(state, tool_scope, None)
+    }
+
+    fn prepare_context(&self) -> PreparedPromptContext {
+        // Scene prototypes are independent of this message's semantic classification.
+        if let Some(injector) = &self.tone_injector { injector.preload(); }
         // Character 块（身份+人格+背景+兴趣+外观+说话风格+关系）/ 风格约束（场景 + 禁忌）/ Few-shot 示例
         // Character 块按关系熟悉度分档：熟客（stage>=2）裁掉自我介绍型段落（背景/兴趣/外观）
         let (character_block, examples_block, style_block, style_preset_block) = match self.persona.as_ref() {
@@ -528,7 +656,11 @@ impl PromptBuildingStep {
                 let style = p.build_style_prompt(intimacy, hour);
                 let cfg = p.get_config();
                 let preset = crate::persona::prompt_render::render_style_preset_block(&cfg, &self.language);
-                (Some(p.get_character_block_tiered(tier)), Some(crate::persona::prompt_render::render_examples_block_tiered(&cfg, &self.language, tier)), Some(style), if preset.is_empty() { None } else { Some(preset) })
+                // Explicit user-authored examples retain precedence. Factory examples are retrieved per turn.
+                let examples = if self.tone_injector.is_none() || !cfg.few_shot_examples.examples.is_empty() {
+                    Some(crate::persona::prompt_render::render_examples_block_tiered(&cfg, &self.language, tier))
+                } else { None };
+                (Some(p.get_character_block_tiered(tier)), examples, Some(style), if preset.is_empty() { None } else { Some(preset) })
             }
             None => (None, None, None, None),
         };
@@ -542,23 +674,6 @@ impl PromptBuildingStep {
             None
         };
 
-        // 关系段落：当前亲密度 + 阶段 + 策略（由 PsychologyManager 提供）
-        let relationship_section = self
-            .psychology
-            .as_ref()
-            .map(|psy| psy.relationship_section(&self.language));
-
-        // 关系日志近期线索：逐轮关系信号 + 每日摘要（由 RelationshipLogEngine 提供）
-        let relationship_log_section = {
-            let log = crate::psychology::relationship_log();
-            let text = log.build_context(5, 3, &self.language);
-            if text.trim().is_empty() {
-                None
-            } else {
-                Some(text)
-            }
-        };
-
         // 用户事实画像段落：name/age/gender/occupation/location + 自由事实
         // 空档案时返回 None（避免空段落污染 prompt）
         let user_facts_section = self.user_facts.as_ref().and_then(|store| {
@@ -569,6 +684,38 @@ impl PromptBuildingStep {
                 Some(text)
             }
         });
+
+        // 可用技能：从全局 ctx 取 SkillService，列出当前角色可见的技能（内置风格 + 目录 *.md）
+        let skill_section = crate::cordis::global_ctx()
+            .and_then(|ctx| ctx.get_service::<crate::skills::SkillService>())
+            .filter(|_| !self.char_id.is_empty())
+            .map(|svc| svc.prompt_section(&self.char_id))
+            .flatten();
+
+        PreparedPromptContext { character_block, examples_block, style_block, style_preset_block,
+            memory_md_section, user_facts_section, skill_section }
+    }
+
+    fn build_parts_prepared(&self, state: &PipelineState, tool_scope: Option<&ToolScope>, prepared: Option<PreparedPromptContext>) -> PromptParts {
+        let selection = OptionalContextSelection::for_state(state);
+        let PreparedPromptContext { character_block, examples_block, style_block, style_preset_block,
+            memory_md_section, user_facts_section, skill_section } = prepared.unwrap_or_else(|| self.prepare_context());
+        // 关系段落：当前亲密度 + 阶段 + 策略（由 PsychologyManager 提供）
+        let relationship_section = self
+            .psychology
+            .as_ref()
+            .map(|psy| psy.relationship_section(&self.language));
+
+        // 关系日志近期线索：逐轮关系信号 + 每日摘要（由 RelationshipLogEngine 提供）
+        let relationship_log_section = if selection.relationship_log {
+            let log = crate::psychology::relationship_log();
+            let text = log.build_context(5, 3, &self.language);
+            if text.trim().is_empty() {
+                None
+            } else {
+                Some(text)
+            }
+        } else { None };
 
         // 智能体动态行为画像段落：近期话题/情绪/消息长度等交互模式
         // 数据不足（< 3 轮）时返回 None
@@ -670,13 +817,6 @@ impl PromptBuildingStep {
 
         // 用户研究：活跃观察课题 + 已确认的行为习惯
         let user_research = self.research.as_ref().and_then(|r| r.build_prompt_section(&self.language));
-
-        // 可用技能：从全局 ctx 取 SkillService，列出当前角色可见的技能（内置风格 + 目录 *.md）
-        let skill_section = crate::cordis::global_ctx()
-            .and_then(|ctx| ctx.get_service::<crate::skills::SkillService>())
-            .filter(|_| !self.char_id.is_empty())
-            .map(|svc| svc.prompt_section(&self.char_id))
-            .flatten();
 
         // 室友在线状态：一句话提示，让 LLM 知道是否可用 talk_to_character
         // 通过 CROSS_CHARACTER_BUS 查询 AppState.characters（bus 已持有 AppHandle）
@@ -807,14 +947,23 @@ impl PromptBuildingStep {
         let tone_injection = self.tone_injector.as_ref().and_then(|injector| {
             let entries = self.persona.as_ref().map(|p| p.evolution_entries()).unwrap_or_default();
             let learned: Vec<_> = entries.iter().filter(|e| e.active()).map(|e| e.scope.as_str()).collect();
-            injector.build_tone_injection_growing(&state.user_input, &self.language, &learned)
+            let (text, _, _) = crate::cross_character::parse_any_speaker_prefix(&state.user_input);
+            let embedding = state.fast_perception.as_ref().map(|perception| perception.query_embedding.as_slice());
+            injector.build_tone_injection_with_embedding(&text, &self.language, &learned, embedding)
         });
 
         // 情绪表达偏置：注入连续效价/激活/主导强度，按比例影响节奏
         // 每轮最多体现一个轻微线索，避免跨阈值突然进入表演模式
         // 情绪只改变表达，不改变任务响应；与场景语气合并到 tone_injection
         let emotion_state = self.psychology.as_ref().and_then(|psy| {
-            build_emotion_state_section(&psy.emotion(), &self.char_id, &self.language)
+            let mood = state.metadata.get("mood_before_reply")
+                .and_then(|value| serde_json::from_value(value.clone()).ok())
+                .unwrap_or_else(|| psy.compute_mood());
+            let delivery = build_mood_delivery_section(&mood, &self.language);
+            Some(match build_emotion_state_section(&psy.emotion(), &self.char_id, &self.language) {
+                Some(emotion) => format!("{emotion}\n{delivery}"),
+                None => delivery,
+            })
         });
         let tone_injection = match (emotion_state, tone_injection) {
             (Some(es), Some(ti)) => Some(format!("{es}\n\n{ti}")),
@@ -826,14 +975,7 @@ impl PromptBuildingStep {
         // 很难真正影响闲聊。这里在闲聊类轮次提供一份紧凑的内部参考；它是用法
         // 背景，不是台词库，模型通常仍应不用，贴合时也最多自然带出一个表达。
         let current_culture_context = self.memory.as_ref().and_then(|mem| {
-            let casual_turn = state
-                .fast_perception
-                .as_ref()
-                .map(|fp| matches!(fp.intent.label.as_str(), "chat" | "sharing" | "complaint"))
-                .unwrap_or_else(|| state.user_input.chars().count() <= 48);
-            if !casual_turn {
-                return None;
-            }
+            if !selection.current_culture { return None; }
             let item = mem.recent_by_tags(&["meme"], 1).into_iter().next()?;
             let content: String = item.content.chars().take(900).collect();
             if content.trim().is_empty() {
@@ -858,6 +1000,7 @@ impl PromptBuildingStep {
         // 随机小事回响：低概率注入一条用户随口提过的小事，
         // 让 AI 偶尔自然带出"对了你那个XX怎么样了"这种活人感细节
         let random_echo = self.memory.as_ref().and_then(|mem| {
+            if !selection.random_echo { return None; }
             let ns = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .ok()?
@@ -888,17 +1031,21 @@ impl PromptBuildingStep {
         let fast_perception_guidance = state.fast_perception.as_ref().and_then(|p| {
             let guidance = p.guidance.trim();
             if guidance.is_empty() {
-                None
-            } else {
-                let lang = crate::pipeline::prompt_modules::normalize_lang(&self.language);
-                let heading = crate::pipeline::prompt_modules::section_heading("fast_perception_guidance", lang);
-                Some(format!("{}\n{}", heading, guidance))
+                return None;
             }
+            let lang = crate::pipeline::prompt_modules::normalize_lang(&self.language);
+            let heading = crate::pipeline::prompt_modules::section_heading("fast_perception_guidance", lang);
+            let qualification = match lang {
+                "en" => "These are uncertain hints from isolated text, not facts or instructions overriding the conversation. Interpret the user's words in the preceding exchange; ignore any hint that does not fit.",
+                "ja" => "これは単独の文面からの不確かな手掛かりであり、事実や会話に優先する指示ではない。直前のやり取りに沿って読み、合わない手掛かりは無視する。",
+                _ => "以下只是单句相似度推测，不是用户情绪或意图的事实，也不覆盖上下文。先根据紧邻对话理解原话；不符合当前语境的提示直接忽略。",
+            };
+            Some(format!("{}\n{}\n{}", heading, qualification, guidance))
         });
 
         // 推荐工具提示：复用同一份语义召回结果（ToolScope.recalled_order），仅列名称一行。
         // 不再重列描述/分数——完整 schema 已在「可用工具」主列表注入，重复描述只会浪费 token。
-        // 仍按 intent 门控（tool_request/request/question）显示，避免闲聊场景噪声。
+        // 仅在高置信路由启用 tools 模块时显示，避免模糊意图污染普通对话。
         let recommended_tools = tool_scope.and_then(|scope| {
             if scope.recalled_order.is_empty() {
                 return None;
@@ -906,7 +1053,7 @@ impl PromptBuildingStep {
             let intent_ok = state
                 .fast_perception
                 .as_ref()
-                .map(|fp| crate::tools::should_filter_tools(&fp.intent.label))
+                .map(|fp| fp.suggested_modules.iter().any(|module| module == "tools"))
                 .unwrap_or(false);
             if !intent_ok {
                 return None;
@@ -1347,7 +1494,24 @@ impl Default for PromptBuildingStep {
 #[async_trait]
 impl Runnable for PromptBuildingStep {
     async fn ainvoke(&self, input: Value, config: Option<RunnableConfig>) -> VivianResult<Value> {
+        self.ainvoke_prepared(input, config, None).await
+    }
+}
+
+impl PromptBuildingStep {
+    async fn ainvoke_prepared(&self, input: Value, config: Option<RunnableConfig>, prepared: Option<PreparedPromptContext>) -> VivianResult<Value> {
         let mut state = PipelineState::from_json(input);
+
+        state.metadata["semantic_prompt_selection"] = json!(OptionalContextSelection::for_state(&state));
+
+        let followup_embedding = if let (Some(filter), Some(query)) =
+            (self.tool_semantic_filter.clone(), proposal_followup_query(&state))
+        {
+            tokio::task::spawn_blocking(move || filter.embed_query(&query))
+                .await.ok().and_then(Result::ok).filter(|embedding| !embedding.is_empty())
+        } else {
+            None
+        };
 
         // 工具范围只算一次：场景 + 隐藏集 + 语义召回。文本通道（build_parts）与
         // 原生 FC 通道（下方 tool_definitions）共享同一份，杜绝此前两条路各算一遍、
@@ -1355,10 +1519,33 @@ impl Runnable for PromptBuildingStep {
         let tool_scope: Option<ToolScope> = self
             .tool_system
             .as_ref()
-            .map(|ts| self.compute_tool_scope(ts, &state));
+            .map(|ts| self.compute_tool_scope(ts, &state, followup_embedding.as_deref()));
 
         // 使用模块化提示词构建器 + 模板引擎元数据（Section Schema 驱动）
-        let mut parts = self.build_parts(&state, tool_scope.as_ref());
+        if let Some(psy) = &self.psychology {
+            state.metadata["mood_before_reply"] = json!(psy.compute_mood());
+        }
+        let mut parts = self.build_parts_prepared(&state, tool_scope.as_ref(), prepared);
+        // Contextual embeddings perform network I/O; keep them off async workers.
+        // Retrieved examples belong in the dynamic zone, preserving the stable prefix.
+        if parts.examples_block.is_none() {
+            if let Some(injector) = self.tone_injector.clone() {
+                let (user, _, _) = crate::cross_character::parse_any_speaker_prefix(&state.user_input);
+                let messages = state.messages.clone();
+                let query = state.fast_perception.as_ref().map(|p| p.query_embedding.clone());
+                let learned: Vec<String> = self.persona.as_ref().map(|p| p.evolution_entries()).unwrap_or_default()
+                    .into_iter().filter(|e| e.active()).map(|e| e.scope).collect();
+                let examples = tokio::task::spawn_blocking(move || injector.examples.retrieve(&user, &messages, query.as_ref().map(|q| q.as_slice()), &learned))
+                    .await.ok().flatten();
+                if let Some(examples) = examples {
+                    state.metadata["retrieved_example_chars"] = json!(examples.chars().count());
+                    parts.tone_injection = Some(match parts.tone_injection.take() {
+                        Some(tone) => format!("{tone}\n\n{examples}"),
+                        None => examples,
+                    });
+                }
+            }
+        }
         let task_type = config.as_ref().map(RunnableConfig::task_type)
             .unwrap_or_else(|| "chat".to_string());
         parts.model_context_window = Some(self.task_context_windows.get(&task_type)
@@ -1473,6 +1660,16 @@ impl Runnable for PromptBuildingStep {
 /// 旧实现把七个情绪分别切成三档并叠加台词式命令，数值跨过阈值时会突然
 /// “进入表演模式”。这里直接给模型连续的效价、激活度和主导强度，每轮只使用
 /// 一个轻微线索。情绪改变节奏，不改变是否回答用户，也不生成一段情绪剧情。
+fn build_mood_delivery_section(mood: &crate::psychology::MoodSnapshot, lang: &str) -> String {
+    let controls = match crate::pipeline::prompt_modules::normalize_lang(lang) {
+        "zh" => "精力低时减少铺垫和支线，但完成必要回答；压力高时语气更稳、少调侃；专注低时用清晰短句、一次处理一件事。按强度轻微调整，不表演疲惫，不把数值说出来，不改变事实、能力或对用户的尊重。用户的实际需要优先。",
+        "ja" => "低エネルギーなら前置きと脱線を減らし、必要な回答は完了する。高ストレスなら落ち着いた口調で冗談を控える。低集中なら短く明確に一件ずつ伝える。軽く調整し、疲労の演技や数値の読み上げをしない。事実・能力・敬意は変えず、相手の必要を優先する。",
+        _ => "Low energy: less preamble and fewer tangents, complete the needed answer. High stress: steadier tone, less teasing. Low focus: clear short sentences, one point at a time. Adjust subtly; do not perform fatigue or disclose the numbers. Facts, capabilities and respect stay intact; the user's needs take priority.",
+    };
+    format!("[Internal mood / 0–100] energy {:.0}, stress {:.0}, focus {:.0}.\n{}",
+        mood.energy, mood.stress, mood.focus, controls)
+}
+
 fn build_emotion_state_section(
     emotion: &crate::psychology::EmotionState,
     char_id: &str,
@@ -1514,6 +1711,20 @@ fn build_emotion_state_section(
 #[cfg(test)]
 mod emotion_delivery_tests {
     use super::*;
+
+    #[test]
+    fn unified_mood_changes_delivery_without_weakening_the_answer() {
+        let low = crate::psychology::MoodSnapshot { energy: 12.0, stress: 83.0, focus: 21.0, ..Default::default() };
+        let high = crate::psychology::MoodSnapshot { energy: 90.0, stress: 10.0, focus: 80.0, ..Default::default() };
+        let low_prompt = build_mood_delivery_section(&low, "zh");
+        assert_ne!(low_prompt, build_mood_delivery_section(&high, "zh"));
+        assert!(low_prompt.contains("energy 12, stress 83, focus 21"));
+        assert!(low_prompt.contains("完成必要回答"));
+        assert!(low_prompt.contains("不改变事实"));
+        for lang in ["en", "ja"] {
+            assert!(build_mood_delivery_section(&low, lang).contains("energy 12"));
+        }
+    }
 
     #[test]
     fn emotion_prompt_uses_continuous_delivery_controls() {
@@ -1631,4 +1842,85 @@ fn format_schedule_signals(assessment: &ScheduleAssessment) -> Option<String> {
     ];
 
     Some(lines.join("\n"))
+}
+
+#[cfg(test)]
+mod component_selection_tests {
+    use super::*;
+    use crate::emotion::{DimensionResult, FastPerceptionResult};
+
+    #[test]
+    fn proposal_followup_preserves_target_without_rewriting_user_input() {
+        let state = PipelineState {
+            user_input: "好，执行吧".into(),
+            messages: vec![
+                crate::types::response::ChatMessage::user("这个项目编译报错"),
+                crate::types::response::ChatMessage::assistant("我可以运行 cargo check 查一下错误，要我执行吗？"),
+            ],
+            ..Default::default()
+        };
+        let query = proposal_followup_query(&state).unwrap();
+        assert!(query.contains("cargo check"));
+        assert!(query.contains("这个项目编译报错"));
+        assert_eq!(state.user_input, "好，执行吧");
+    }
+
+    #[test]
+    fn proposal_context_is_bounded_and_is_not_a_consent_detector() {
+        let mut state = PipelineState {
+            user_input: "不用了".into(),
+            messages: vec![crate::types::response::ChatMessage::assistant(&"编写脚本".repeat(800))],
+            ..Default::default()
+        };
+        assert!(proposal_followup_query(&state).unwrap().chars().count() < 1400);
+        state.current_channel = "cross_character".into();
+        assert!(proposal_followup_query(&state).is_none());
+        state.current_channel.clear();
+        state.user_input = "今天晚饭吃什么".into();
+        assert!(proposal_followup_query(&state).is_none());
+        state.user_input = "好的".into();
+        state.messages.push(crate::types::response::ChatMessage::user("换个话题"));
+        assert!(proposal_followup_query(&state).is_none());
+    }
+
+    #[test]
+    fn uncertain_routing_keeps_core_context_without_extra_performance_cues() {
+        let state = PipelineState { user_input: "解释这个问题，不要修改".into(),
+            memory_text: "retrieved_fact".into(), fast_perception: Some(FastPerceptionResult::default()), ..Default::default() };
+        let selection = OptionalContextSelection::for_state(&state);
+        assert!(!selection.current_culture);
+        assert!(!selection.random_echo);
+        assert!(selection.relationship_log);
+        let prepared = PreparedPromptContext { character_block: Some("core_identity".into()),
+            examples_block: None, style_block: None, style_preset_block: None,
+            memory_md_section: Some("durable_notes".into()), user_facts_section: Some("user_facts".into()), skill_section: None };
+        let parts = PromptBuildingStep::new().build_parts_prepared(&state, None, Some(prepared));
+        assert_eq!(parts.character_block.as_deref(), Some("core_identity"));
+        assert_eq!(parts.memory_md_section.as_deref(), Some("durable_notes"));
+        assert_eq!(parts.user_facts_section.as_deref(), Some("user_facts"));
+        assert_eq!(parts.memory_text, "retrieved_fact");
+        assert_eq!(parts.user_input, state.user_input);
+    }
+
+    #[test]
+    fn tasks_disable_casual_extras_and_relevant_sharing_can_enable_them() {
+        let mut state = PipelineState { fast_perception: Some(FastPerceptionResult {
+            intent: DimensionResult { label: "tool_request".into(), confidence: 0.9 },
+            relationship_signal: DimensionResult { label: "none".into(), confidence: 0.9 },
+            suggested_modules: vec!["persona".into(), "tools".into()], ..Default::default()
+        }), ..Default::default() };
+        let task = OptionalContextSelection::for_state(&state);
+        assert!(!task.current_culture && !task.random_echo && !task.relationship_log);
+        let perception = state.fast_perception.as_mut().unwrap();
+        perception.intent.label = "sharing".into();
+        perception.relationship_signal.label = "bond_increase".into();
+        perception.suggested_modules = vec!["persona".into(), "relationship".into(), "memory_check".into()];
+        let sharing = OptionalContextSelection::for_state(&state);
+        assert!(sharing.current_culture && sharing.random_echo && sharing.relationship_log);
+        let perception = state.fast_perception.as_mut().unwrap();
+        perception.emotion.emotion = "sad".into();
+        perception.emotion.confidence = Some(0.9);
+        let distressed = OptionalContextSelection::for_state(&state);
+        assert!(!distressed.current_culture && !distressed.random_echo && distressed.relationship_log);
+    }
 }

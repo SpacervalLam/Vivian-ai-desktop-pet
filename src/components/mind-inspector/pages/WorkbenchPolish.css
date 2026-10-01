@@ -1,0 +1,240 @@
+/* Work-page refinements, loaded after both theme sheets. Panel geometry is owned
+   by workbenchLayout.ts; container queries only adapt the controls within a panel. */
+.mind-sb-menu-btn {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  border-radius: 8px;
+  color: var(--codex-ink-soft);
+  background: transparent;
+  border: 1px solid transparent;
+  cursor: pointer;
+}
+.mind-sb-menu-btn:hover,
+.mind-sb-menu-btn[aria-expanded="true"] { background: var(--codex-accent-soft); color: var(--codex-accent-deep); }
+.mind-sb-menu-btn:focus-visible { outline: 2px solid var(--codex-accent); outline-offset: 2px; }
+.mind-inspector-root .mind-sb-cover-title { min-width: 0; flex: 1; overflow: hidden; white-space: nowrap; }
+.mind-inspector-root .mind-sb-cover-seal { opacity: .65; }
+.mind-inspector-root.is-work-page .mind-nav-dock:not(.is-revealed),
+.mind-inspector-root.is-work-page .mind-nav-hotspot { width: 8px; }
+.mind-inspector-root[data-ui-style="minimal"] .mind-sb-cover { border-radius: 0; box-shadow: none; }
+.mind-inspector-root[data-ui-style="minimal"] .mind-sb-cover,
+.mind-inspector-root[data-ui-style="minimal"] .mind-nav-card { font-family: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif; }
+
+.mind-inspector-root.is-work-page .workbench-root {
+  --workbench-body: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  --workbench-display: 'Caveat', 'Segoe Print', 'Ma Shan Zheng', 'KaiTi', cursive;
+  --codex-font: var(--workbench-body);
+  --codex-md-font: var(--workbench-body);
+  --codex-md-hand: var(--workbench-body);
+  --codex-md-h-weight: 600;
+  font-family: var(--workbench-body);
+  position: relative;
+  background-image: none;
+}
+.mind-inspector-root[data-ui-style="minimal"] .workbench-root { --workbench-display: var(--workbench-body); }
+.mind-inspector-root[data-ui-style="scrapbook"].is-work-page .workbench-root { --codex-ink-faint: #786f62; --codex-note-ink-faint: var(--codex-ink-soft); }
+.mind-inspector-root[data-ui-style="minimal"].is-work-page .workbench-root { --codex-ink-faint: #727277; }
+:root[data-theme="dark"] .mind-inspector-root.is-work-page .workbench-root { --codex-ink-faint: #ada59b; }
+:root[data-theme="dark"] .mind-inspector-root[data-ui-style="minimal"].is-work-page .workbench-root { --codex-ink-faint: #aaaab0; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .mind-inspector-root.is-work-page .workbench-root { --codex-ink-faint: #ada59b; }
+  :root:not([data-theme="light"]) .mind-inspector-root[data-ui-style="minimal"].is-work-page .workbench-root { --codex-ink-faint: #aaaab0; }
+}
+.mind-inspector-root.is-work-page .codex-main { background: var(--codex-paper-card); }
+.mind-inspector-root[data-ui-style="minimal"] .codex-main { background: var(--codex-paper); }
+.mind-inspector-root.is-work-page .codex-sidebar { border-right: 1px solid var(--codex-line-light); }
+.mind-inspector-root.is-work-page .codex-inspector { border-left: 1px solid var(--codex-line-light); }
+.mind-inspector-root.is-work-page .codex-sidebar::before,
+.mind-inspector-root.is-work-page .codex-msg-user-bubble::before { display: none; }
+.mind-inspector-root.is-work-page .codex-brand-title,
+.mind-inspector-root.is-work-page .codex-hero-title { font-family: var(--workbench-display); }
+.mind-inspector-root.is-work-page .codex-brand { min-height: 52px; padding: 12px 14px; }
+.mind-inspector-root.is-work-page .codex-new-row { gap: 0; margin: 0 12px 14px; }
+.mind-inspector-root.is-work-page .codex-new-btn,
+.mind-inspector-root.is-work-page .codex-new-caret {
+  height: 36px;
+  margin: 0;
+  border: 1px solid var(--codex-line);
+  background: var(--codex-paper-card);
+  box-shadow: none;
+  transform: none;
+}
+.mind-inspector-root.is-work-page .codex-new-btn { border-radius: 8px 0 0 8px; }
+.mind-inspector-root.is-work-page .codex-new-caret { border-radius: 0 8px 8px 0; border-left: 0; width: 34px; }
+.mind-inspector-root.is-work-page .codex-sidebar.collapsed .codex-new-row { margin: 0; }
+.mind-inspector-root.is-work-page .codex-sidebar.collapsed .codex-brand { padding-inline: 10px; justify-content: center; }
+.mind-inspector-root.is-work-page .codex-sidebar.auto-collapsed { transition: none; }
+.mind-inspector-root.is-work-page .codex-new-btn:hover,
+.mind-inspector-root.is-work-page .codex-new-caret:hover { background: var(--panel-bg-hover); transform: none; }
+.mind-inspector-root.is-work-page .codex-session-item { min-height: 36px; border-radius: 7px; }
+.mind-inspector-root.is-work-page .codex-session-item.active { background: var(--codex-accent-soft); box-shadow: none; }
+.mind-inspector-root.is-work-page .codex-session-title { font-size: 13px; line-height: 20px; }
+.mind-inspector-root.is-work-page .codex-session-group-actions { opacity: 0; transition: opacity .12s; }
+.mind-inspector-root.is-work-page .codex-session-group:hover .codex-session-group-actions,
+.mind-inspector-root.is-work-page .codex-session-group:focus-within .codex-session-group-actions { opacity: 1; }
+.mind-inspector-root.is-work-page .codex-topbar { min-height: 54px; padding: 8px 16px; gap: 12px; }
+.mind-inspector-root.is-work-page .codex-topbar-title { font-size: 14px; font-weight: 600; }
+.mind-inspector-root.is-work-page .codex-topbar-path { font-size: 11px; color: var(--codex-ink-soft); line-height: 18px; }
+.mind-inspector-root.is-work-page .codex-topbar-actions { flex-shrink: 0; gap: 5px; }
+.codex-mode-label { white-space: nowrap; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.mind-inspector-root.is-work-page .codex-icon-btn:disabled { opacity: .45; cursor: default; }
+.mind-inspector-root.is-work-page .codex-main { container-type: inline-size; container-name: work-main; }
+.mind-inspector-root.is-work-page .auto-summary-hidden .codex-chat,
+.mind-inspector-root.is-work-page .auto-summary-hidden .codex-composer-wrap,
+.mind-inspector-root.is-work-page .auto-summary-hidden .codex-stats-line,
+.mind-inspector-root.is-work-page .auto-summary-hidden .codex-stats-disclosure,
+.mind-inspector-root.is-work-page .auto-summary-hidden .codex-pinned { transition: none; }
+.mind-inspector-root[data-ui-style="minimal"].is-work-page .workbench-root .codex-topbar { background: var(--codex-paper); }
+.mind-inspector-root[data-ui-style="minimal"].is-work-page .workbench-root .codex-dropdown-trigger,
+.mind-inspector-root[data-ui-style="minimal"].is-work-page .workbench-root .codex-deliverable-empty { background: var(--panel-bg-surface); }
+.mind-inspector-root[data-ui-style="minimal"].is-work-page .workbench-root .codex-dropdown-trigger:hover { background: var(--panel-bg-hover); }
+.mind-inspector-root[data-ui-style="minimal"].is-work-page .workbench-root .codex-msg-user-bubble { background: var(--panel-bg-active); box-shadow: none; border: 0; border-radius: 12px; }
+.mind-inspector-root.is-work-page .codex-chat { --codex-chat-pad-x: clamp(14px, 3cqw, 32px); padding-block: 22px 12px; }
+.mind-inspector-root.is-work-page .codex-composer-wrap { --codex-composer-pad-x: clamp(10px, 2cqw, 24px); }
+.mind-inspector-root.is-work-page .codex-msg-assistant { padding-block: 12px; }
+.mind-inspector-root.is-work-page .codex-md { font-size: 15px; line-height: 1.8; }
+.mind-inspector-root.is-work-page .codex-md strong { font-weight: 650; background: none; }
+.mind-inspector-root.is-work-page .codex-md-codeblock { box-shadow: none; border: 1px solid var(--codex-line-light); }
+.mind-inspector-root.is-work-page .codex-empty { padding: 28px 0; gap: 24px; width: 100%; max-width: 780px; margin-inline: auto; }
+.mind-inspector-root.is-work-page .codex-hero-title { font-size: clamp(23px, 4cqw, 32px); line-height: 1.35; flex-wrap: wrap; justify-content: center; }
+.mind-inspector-root.is-work-page .codex-hero-sub { overflow-wrap: anywhere; color: var(--codex-ink-soft); }
+.codex-quick-starts { display: flex; flex-wrap: wrap; width: 100%; gap: 8px; }
+.codex-quick-starts button {
+  display: flex; align-items: center; gap: 8px; flex: 1 1 160px; min-width: 0;
+  padding: 12px; color: var(--codex-ink-soft); border: 1px solid var(--codex-line-light);
+  border-radius: 8px; background: transparent; font-size: 12px; cursor: pointer;
+}
+.codex-quick-starts button span { flex: 1; text-align: left; }
+.codex-quick-starts button:hover { color: var(--codex-accent-deep); background: var(--codex-accent-soft); border-color: var(--codex-accent); }
+
+/* A long model name shrinks inside its own control instead of squeezing the editor. */
+.mind-inspector-root.is-work-page .codex-composer { border-radius: 12px; box-shadow: var(--codex-shadow-sm); padding-top: 10px; min-width: 0; }
+.mind-inspector-root.is-work-page .codex-composer:focus-within { border-color: var(--codex-accent); }
+.mind-inspector-root.is-work-page .codex-composer::before { width: 88px; height: 14px; top: -6px; opacity: .45; }
+.mind-inspector-root.is-work-page .codex-composer-editor { min-width: 0; overflow-wrap: anywhere; max-height: min(180px, 25dvh); }
+.mind-inspector-root.is-work-page .codex-composer-editor.codex-md { font-size: 14px; line-height: 1.65; }
+.mind-inspector-root.is-work-page .codex-composer-toolbar { display: flex; flex-wrap: wrap; gap: 8px; padding: 6px 10px 10px; }
+.mind-inspector-root.is-work-page .codex-composer-right { flex: 1 1 240px; justify-content: flex-end; }
+.mind-inspector-root.is-work-page .codex-composer-left { flex: 0 1 auto; }
+.mind-inspector-root.is-work-page .codex-model-dropdown { min-width: 0; flex: 0 1 auto; max-width: 100%; }
+.mind-inspector-root.is-work-page .codex-model-dropdown .codex-dropdown-trigger { min-width: 0; max-width: 100%; width: 100%; }
+.codex-model-label { min-width: 0; max-width: 170px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mind-inspector-root.is-work-page .codex-send-btn,
+.mind-inspector-root.is-work-page .codex-voice-btn { flex-shrink: 0; width: 32px; height: 32px; transform: none; }
+.mind-inspector-root.is-work-page .codex-composer .codex-dropdown-menu { min-width: min(224px, calc(100vw - 90px)); max-width: min(320px, calc(100vw - 90px)); max-height: min(340px, 45dvh); }
+.mind-inspector-root.is-work-page .codex-model-dropdown .codex-dropdown-menu { width: min(300px, calc(100vw - 90px)); }
+@container (max-width: 447px) {
+  .mind-inspector-root.is-work-page .codex-composer-left { width: 100%; justify-content: space-between; }
+  .mind-inspector-root.is-work-page .codex-composer-right { flex-basis: 100%; width: 100%; }
+  .mind-inspector-root.is-work-page .codex-model-dropdown { flex: 1; }
+  .codex-model-label { max-width: none; flex: 1; text-align: left; }
+  .mind-inspector-root.is-work-page .codex-composer::before { display: none; }
+}
+@container (max-width: 280px) {
+  .codex-reasoning-label { display: none; }
+}
+@container work-main (max-width: 420px) {
+  .mind-inspector-root.is-work-page .codex-topbar { padding-inline: 10px; gap: 5px; flex-wrap: wrap; }
+  .mind-inspector-root.is-work-page .codex-path { flex: 1 1 100%; }
+  .mind-inspector-root.is-work-page .codex-topbar-actions { width: 100%; justify-content: flex-end; flex-wrap: wrap; }
+  .mind-inspector-root.is-work-page .codex-topbar-actions > .codex-dropdown { flex: 1; min-width: 0; }
+  .mind-inspector-root.is-work-page .codex-topbar-actions .codex-dropdown-trigger { width: 100%; min-width: 0; }
+  .mind-inspector-root.is-work-page .codex-working { order: 2; flex-basis: 100%; white-space: nowrap; background: transparent; justify-content: flex-end; }
+  .mind-inspector-root.is-work-page .codex-quick-starts button { flex-basis: 100%; padding-block: 9px; }
+}
+
+/* Drawer panels overlay intentionally: they never reduce the composing width. */
+.mind-inspector-root.is-work-page .codex-resize-handle.hidden { width: 0; }
+.codex-drawer-backdrop { position: absolute; inset: 0; z-index: 49; border: 0; background: rgba(0,0,0,.22); cursor: pointer; }
+.mind-inspector-root.is-work-page .codex-inspector.drawer,
+.mind-inspector-root.is-work-page .codex-sidebar.drawer { position: absolute; top: 0; bottom: 0; z-index: 50; box-shadow: var(--codex-shadow-lg); transition: none; }
+.mind-inspector-root.is-work-page .codex-inspector.drawer { right: 0; }
+.mind-inspector-root.is-work-page .codex-sidebar.drawer { left: 0; }
+.mind-inspector-root.is-work-page .codex-inspector-inner { container-type: inline-size; container-name: inspector; }
+.codex-inspector-tab-select { display: none; min-width: 0; font: inherit; font-size: 13px; padding: 7px 10px; border: 1px solid var(--codex-line); border-radius: 7px; color: var(--codex-ink); background: var(--codex-paper-card); }
+.mind-inspector-root.is-work-page .codex-inspector-tabs { overflow: visible; min-height: 54px; align-items: center; padding: 7px 10px; gap: 3px; }
+.codex-drawer-close { order: 2; margin-left: auto; }
+.codex-tab-count { padding: 1px 4px; border-radius: 4px; background: var(--codex-accent-soft); font-size: 10px; }
+.codex-tab-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--codex-accent); }
+@container inspector (max-width: 420px) {
+  .mind-inspector-root.is-work-page .codex-inspector-tab { display: none; }
+  .codex-inspector-tab-select { display: block; flex: 1; }
+}
+.codex-overview-details { padding: 10px 0; border-top: 1px solid var(--codex-line-light); }
+.codex-overview-details > summary { color: var(--codex-ink-soft); cursor: pointer; font-size: 12px; margin-bottom: 8px; }
+.mind-inspector-root[data-ui-style="minimal"] .codex-info-card { border: 0; border-bottom: 1px solid var(--codex-line-light); border-radius: 0; box-shadow: none; background: transparent; padding: 12px 0; }
+.mind-inspector-root.is-work-page .codex-stats-disclosure { display: flex; align-items: center; gap: 14px; min-width: 0; margin: 0 max(20px, var(--codex-pinned-reserve, 0px)) 10px 20px; color: var(--codex-ink-soft); font-size: 11px; flex-shrink: 0; transition: margin-right var(--codex-summary-duration) var(--codex-summary-easing); }
+.codex-stats-hover-label { flex-shrink: 0; white-space: nowrap; cursor: default; }
+.codex-stats-hover-label > span { margin-left: 8px; color: var(--codex-ink-faint); }
+.codex-stats-hover-label:focus-visible { outline: 1px solid var(--codex-ink-faint); outline-offset: 3px; border-radius: 2px; }
+.mind-inspector-root.is-work-page .codex-stats-disclosure .codex-stats-line { flex: 1; min-width: 0; max-width: none; width: auto; margin: 0; padding: 0; line-height: 1.8; text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; visibility: hidden; }
+.mind-inspector-root.is-work-page .codex-stats-disclosure:hover .codex-stats-line,
+.mind-inspector-root.is-work-page .codex-stats-disclosure:focus-within .codex-stats-line { visibility: visible; }
+
+/* One concise row per tool; detail retains the full arguments/result. */
+.mind-inspector-root.is-work-page .codex-tool-card,
+.mind-inspector-root.is-work-page .codex-tool-group { margin: 6px 0; border: 1px solid var(--codex-line-light); border-radius: 8px; background: transparent; box-shadow: none; overflow: hidden; }
+.mind-inspector-root.is-work-page .codex-tool-header { padding: 8px 10px; min-height: 36px; gap: 7px; flex-wrap: nowrap; width: 100%; }
+.mind-inspector-root.is-work-page .codex-tool-label { flex: 0 0 auto; font-size: 12px; max-width: 35%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.codex-tool-target { flex: 1; min-width: 0; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--codex-mono); font-size: 11px; color: var(--codex-ink-soft); }
+.mind-inspector-root.is-work-page .codex-tool-duration { font-size: 10px; margin-left: 0; flex-shrink: 0; }
+.mind-inspector-root.is-work-page .codex-tool-status { font-size: 11px; white-space: nowrap; flex-shrink: 0; }
+.mind-inspector-root.is-work-page .codex-tool-header:hover,
+.mind-inspector-root.is-work-page .codex-tool-group-header:hover { background: var(--panel-bg-hover); }
+.mind-inspector-root.is-work-page .codex-tool-card.failed { border-color: color-mix(in srgb, var(--codex-danger) 35%, var(--codex-line-light)); }
+.mind-inspector-root.is-work-page .codex-tool-detail { border-top: 1px solid var(--codex-line-light); padding: 8px 10px; }
+.codex-tool-detail-name { font: 11px var(--codex-mono); color: var(--codex-ink-soft); margin-bottom: 7px; }
+.mind-inspector-root.is-work-page .codex-tool-summary { border-top: 0; padding: 0 10px 8px; }
+.mind-inspector-root.is-work-page .codex-inout-pre { max-height: 260px; overflow: auto; font-size: 11px; line-height: 1.6; }
+.mind-inspector-root.is-work-page .codex-tool-group-header { padding: 8px 10px; min-height: 36px; gap: 7px; flex-wrap: wrap; }
+.mind-inspector-root.is-work-page .codex-tool-group-meta { font-size: 11px; min-width: 0; }
+.mind-inspector-root.is-work-page .codex-tool-group-body { border-top: 1px solid var(--codex-line-light); padding: 0 10px; }
+.mind-inspector-root.is-work-page .codex-tool-group-body .codex-tool-card { border: 0; border-bottom: 1px solid var(--codex-line-light); border-radius: 0; margin: 0; }
+.mind-inspector-root.is-work-page .codex-tool-group-body .codex-tool-card:last-child { border-bottom: 0; }
+.codex-tool-group-current { padding: 0 10px 8px 30px; font-size: 11px; color: var(--codex-ink-soft); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+@container work-main (max-width: 420px) {
+  .mind-inspector-root.is-work-page .codex-tool-duration { display: none; }
+  .mind-inspector-root.is-work-page .codex-tool-header { flex-wrap: wrap; }
+  .mind-inspector-root.is-work-page .codex-tool-label { flex: 1; max-width: none; min-width: 0; }
+  .mind-inspector-root.is-work-page .codex-tool-target { order: 2; flex-basis: 100%; padding-left: 21px; font-size: 10px; }
+  .mind-inspector-root.is-work-page .codex-tool-group-meta { order: 2; flex-basis: 100%; }
+}
+@media (max-width: 600px) {
+  .mind-inspector-root.is-work-page .mind-sb-cover-sub,
+  .mind-inspector-root.is-work-page .mind-sb-cover-divider,
+  .mind-inspector-root.is-work-page .mind-sb-cover-seal { display: none; }
+  .mind-inspector-root.is-work-page .mind-sb-cover { gap: 5px; padding-inline: 8px; }
+}
+@media (max-height: 540px) {
+  .mind-inspector-root.is-work-page .codex-empty { padding-block: 12px; gap: 14px; }
+  .mind-inspector-root.is-work-page .codex-composer-editor { max-height: 80px; min-height: 36px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .mind-inspector-root.is-work-page .codex-tool-group-reveal,
+  .mind-inspector-root.is-work-page .codex-session-group-actions { transition: none; }
+}
+
+.codex-change-summary { margin: 14px 0 6px; border: 1px solid var(--codex-line); border-radius: 12px; background: var(--codex-paper-card); overflow: hidden; font-size: 12px; }
+.codex-change-summary-head { display: flex; align-items: center; gap: 10px; padding: 14px; }
+.codex-change-summary-head > svg { flex-shrink: 0; color: var(--codex-ink-muted); }
+.codex-change-summary-title { flex: 1; min-width: 0; display: grid; gap: 4px; }
+.codex-change-summary-title strong { font-size: 13px; }
+.codex-change-summary-counts { display: inline-flex; gap: 6px; white-space: nowrap; font-family: var(--codex-mono); font-variant-numeric: tabular-nums; }
+.codex-change-summary-view { flex-shrink: 0; padding: 6px 9px; border: 1px solid var(--codex-line); border-radius: 8px; color: var(--codex-ink); background: transparent; cursor: pointer; }
+.codex-change-summary-files { border-top: 1px solid var(--codex-line); padding: 6px 14px; }
+.codex-change-summary-file { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 7px 0; min-width: 0; }
+.codex-change-summary-path { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border: 0; padding: 0; background: transparent; color: var(--codex-ink-muted); cursor: pointer; text-align: left; }
+.codex-change-summary-path:hover { color: var(--codex-ink); text-decoration: underline; }
+.codex-change-summary-toggle { display: flex; align-items: center; gap: 6px; width: 100%; border: 0; border-top: 1px solid var(--codex-line); padding: 10px 14px; background: transparent; color: var(--codex-ink-muted); cursor: pointer; text-align: left; }
+@media (prefers-reduced-motion: reduce) { .codex-pinned, .codex-pinned.collapsed { transition: none; } }
+
+.codex-main-body.resizing .codex-stats-disclosure { transition: none; }
+@media (prefers-reduced-motion: reduce) {
+  .mind-inspector-root.is-work-page .codex-main-col .codex-chat,
+  .mind-inspector-root.is-work-page .codex-main-col .codex-composer-wrap,
+  .mind-inspector-root.is-work-page .codex-main-col .codex-stats-line,
+  .mind-inspector-root.is-work-page .codex-stats-disclosure { transition: none; }
+}

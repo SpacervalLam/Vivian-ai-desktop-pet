@@ -10,6 +10,7 @@
 
 pub mod dynamic_profile;
 pub mod evolution;
+pub mod example_retriever;
 pub mod persona_card;
 pub mod persona_decision;
 pub mod prompt_render;

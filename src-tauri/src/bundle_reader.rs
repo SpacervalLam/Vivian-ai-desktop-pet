@@ -76,13 +76,14 @@ impl AssetCache {
     }
 
     fn put(&mut self, path: &str, data: Arc<Vec<u8>>) {
-        if self.map.contains_key(path) {
+        // Oversized assets are served on demand, never retained or allowed to evict hot entries.
+        if data.len() > CACHE_CAP || self.map.contains_key(path) {
             return;
         }
         self.total += data.len();
         self.map.insert(path.to_string(), data);
         self.order.push_back(path.to_string());
-        while self.total > CACHE_CAP && self.order.len() > 1 {
+        while self.total > CACHE_CAP {
             if let Some(old) = self.order.pop_front() {
                 if let Some(v) = self.map.remove(&old) {
                     self.total -= v.len();
@@ -293,6 +294,30 @@ pub fn content_type(path: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn oversized_asset_does_not_evict_hot_assets() {
+        let mut cache = AssetCache::default();
+        cache.put("hot", Arc::new(vec![1; 1024]));
+        cache.put("large", Arc::new(vec![2; CACHE_CAP + 1]));
+        assert!(cache.get("large").is_none());
+        assert!(cache.get("hot").is_some());
+        assert_eq!(cache.total, 1024);
+    }
+
+    #[test]
+    fn cache_evicts_least_recently_used_within_byte_budget() {
+        let mut cache = AssetCache::default();
+        let bytes = Arc::new(vec![0; CACHE_CAP / 2]);
+        cache.put("a", bytes.clone());
+        cache.put("b", bytes.clone());
+        assert!(cache.get("a").is_some());
+        cache.put("c", bytes);
+        assert!(cache.get("b").is_none());
+        assert!(cache.get("a").is_some());
+        assert!(cache.get("c").is_some());
+        assert_eq!(cache.total, CACHE_CAP);
+    }
 
     /// 端到端：init 真实 VBL2 bundle → get 解密解压 → 缓存命中
     /// 工作区无 bundle 文件时（未跑打包脚本）自动跳过。

@@ -52,7 +52,7 @@ use crate::pipeline::steps::memory::{
 };
 use crate::pipeline::steps::mood::MoodStep;
 use crate::pipeline::steps::pre_processing::PreProcessingStep;
-use crate::pipeline::steps::prompt::PromptBuildingStep;
+use crate::pipeline::steps::prompt::{PromptBuildingStep, PreparedPromptPipeline};
 use crate::pipeline::steps::query_rewrite::QueryRewriteStep;
 use crate::pipeline::steps::fast_semantic_step::{FastSemanticStep, ParallelStep};
 use crate::pipeline::steps::reflection::ReflectionRunnable;
@@ -304,6 +304,7 @@ impl BrainChatChain {
             "user_memory_saving",
             Box::new(UserMemorySavingRunnable::with_memory(memory.clone())),
         )));
+        let mut context_steps = RunnableSequence::new();
         // 查询重写 ∥ 快速语义感知：两者互不依赖，并行执行缩短用户等待时间
         // - QueryRewriteStep：LLM 改写查询（用于记忆检索）
         // - FastSemanticStep：嵌入分类（情绪/意图/话题，用于 prompt 动态组装）
@@ -313,19 +314,19 @@ impl BrainChatChain {
                 Box::new(QueryRewriteStep::new(router.clone(), memory.clone())),
                 Box::new(FastSemanticStep::new(fast_sem.clone(), char_id.to_string())),
             );
-            steps.add_step(Box::new(TimingMiddleware::new(
+            context_steps.add_step(Box::new(TimingMiddleware::new(
                 "query_rewrite_and_fast_semantic",
                 Box::new(parallel),
             )));
         } else {
-            steps.add_step(Box::new(TimingMiddleware::new(
+            context_steps.add_step(Box::new(TimingMiddleware::new(
                 "query_rewrite",
                 Box::new(QueryRewriteStep::new(router.clone(), memory.clone())),
             )));
         }
         // 记忆检索（带 MemoryFilter 跨会话过滤，策略由 config.memory.retrieval_strategy 决定）
         // 注入 Mind 启用 Attention-weighted 重排序：当前注意力聚焦的实体相关记忆优先保留
-        steps.add_step(Box::new(TimingMiddleware::new(
+        context_steps.add_step(Box::new(TimingMiddleware::new(
             "memory_retrieval",
             Box::new(
                 MemoryRetrievalStep::with_filter_and_strategy(
@@ -414,14 +415,15 @@ impl BrainChatChain {
         // 克隆一份供 ProactiveOrchestrator 复用主对话完整 prompt（人设/记忆/知识库/环境等）
         let prompt_step_shared = prompt_step.clone();
         // Web 检索决策：在生成前根据用户问题决定是否开启联网搜索
-        steps.add_step(Box::new(TimingMiddleware::new(
+        context_steps.add_step(Box::new(TimingMiddleware::new(
             "web_context",
             Box::new(WebContextRunnable::with_router(router.clone())),
         )));
-        // Prompt 组装：注入人设/记忆/工具/认知信号/主动搜索结果等上下文
+        // Independent prompt candidates run beside the semantic/retrieval/web chain.
+        // Tool scope, retrieved evidence and semantic selections remain a final barrier.
         steps.add_step(Box::new(TimingMiddleware::new(
-            "prompt_building",
-            Box::new(prompt_step),
+            "context_and_prompt",
+            Box::new(PreparedPromptPipeline::new(Box::new(context_steps), prompt_step)),
         )));
         // AI 响应生成（智能路由 + 故障降级 + JSON 提取 + 工具调用执行）
         // 工具调用管理器：max_iterations / feedback_history_chars 从 config.tools 读取

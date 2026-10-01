@@ -405,7 +405,7 @@ pub async fn synthesize_with_llm(
     };
 
     let messages = vec![
-        ChatMessage::system(system_prompt),
+        ChatMessage::system(format!("{system_prompt}\n{}", super::COGNITIVE_EVIDENCE_RULES)),
         ChatMessage::user(user_prompt),
     ];
 

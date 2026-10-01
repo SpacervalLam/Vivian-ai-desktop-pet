@@ -5,12 +5,12 @@
  * 侧边栏导航在 8 个页面组件之间切换，激活态采用填充背景 + 顶部 accent 高亮线。
  */
 
-import React, { useState, useMemo, useEffect, useCallback } from 'react';
+import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { listen } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { BookOpen, House, LayoutGrid } from 'lucide-react';
+import { BookOpen, House, LayoutGrid, Menu } from 'lucide-react';
 import { openRoomWindow } from '../../utils/roomWindow';
 import { reportInspectorNav } from '../../utils/inspectorAttention';
 import {
@@ -29,6 +29,7 @@ import { invalidatePastelCache } from './pages/GraphPage';
 import PageErrorBoundary from './PageErrorBoundary';
 import './MindInspector.css';
 import './MindInspectorThemes.css';
+import './pages/WorkbenchPolish.css';
 
 type InspectorUiStyle = 'scrapbook' | 'minimal';
 
@@ -81,6 +82,22 @@ const MindInspector: React.FC = () => {
   const { t } = useTranslation();
   const [activeNav, setActiveNav] = useState<NavKey>('overview');
   const [navRevealed, setNavRevealed] = useState(false);
+  const [navPinned, setNavPinned] = useState(false);
+  const navRef = useRef<HTMLDivElement>(null);
+  const navToggleRef = useRef<HTMLButtonElement>(null);
+  const navOpen = navRevealed || navPinned;
+  useEffect(() => {
+    if (!navPinned) return;
+    const close = (event: MouseEvent) => {
+      if (!navRef.current?.contains(event.target as Node) && !navToggleRef.current?.contains(event.target as Node)) setNavPinned(false);
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') { setNavPinned(false); setNavRevealed(false); navToggleRef.current?.focus(); }
+    };
+    window.addEventListener('mousedown', close);
+    window.addEventListener('keydown', onKey);
+    return () => { window.removeEventListener('mousedown', close); window.removeEventListener('keydown', onKey); };
+  }, [navPinned]);
   const [pageParams, setPageParams] = useState<PageParams>({});
   const [uiStyle, setUiStyle] = useState<InspectorUiStyle>(readUiStyle);
 
@@ -186,7 +203,7 @@ const MindInspector: React.FC = () => {
         notebookId: nbId,
         notebookCharacter: (nbChar as 'vivian' | 'nana') || 'vivian',
       });
-    } else if (navParam && (['mind', 'world', 'graph', 'profile', 'diary', 'notebook', 'todo', 'scheduler']).includes(navParam)) {
+    } else if (navParam && (['overview', 'journal', 'code', 'mind', 'world', 'graph', 'profile', 'diary', 'notebook', 'todo', 'scheduler']).includes(navParam)) {
       navigateTo(navParam as NavKey, {});
     }
     void (async () => {
@@ -327,13 +344,14 @@ const MindInspector: React.FC = () => {
       <div
         className={`codex-theme mind-inspector-root mind-scrapbook-window${isWorkPage ? ' is-work-page' : ''}`}
         data-ui-style={effectiveUiStyle}
-        data-nav-revealed={navRevealed ? 'true' : 'false'}
+        data-nav-revealed={navOpen ? 'true' : 'false'}
       >
         {/* 手账本封面条（全局标题 + 窗口拖拽区 + 最小化/关闭按钮） */}
         <header className="mind-sb-cover">
+          <button ref={navToggleRef} type="button" className="mind-sb-menu-btn" aria-label={t('workbench.navigation')} title={t('workbench.navigation')} aria-controls="mind-page-navigation" aria-expanded={navOpen} onClick={() => { setNavRevealed(false); setNavPinned((open) => !open); }}><Menu size={17} /></button>
           <div className="mind-sb-cover-title" data-tauri-drag-region>
             <span className="mind-sb-cover-dot" />
-            Mind Scrapbook
+            {t('workbench.inspector')}
             <span className="mind-sb-cover-divider" />
             <span className="mind-sb-cover-sub">{t(coverLabelKey)}</span>
           </div>
@@ -419,7 +437,8 @@ const MindInspector: React.FC = () => {
         {/* 左侧贴纸导航栏 */}
         <div className="mind-sb-body">
           <div
-            className={`mind-nav-dock${navRevealed ? ' is-revealed' : ''}`}
+            ref={navRef}
+            className={`mind-nav-dock${navOpen ? ' is-revealed' : ''}`}
             onMouseEnter={() => setNavRevealed(true)}
             onMouseLeave={() => setNavRevealed(false)}
             onFocusCapture={() => setNavRevealed(true)}
@@ -431,14 +450,14 @@ const MindInspector: React.FC = () => {
             }}
           >
             <div className="mind-nav-hotspot" aria-hidden="true" />
-            <aside className="mind-nav-rail">
+            <aside id="mind-page-navigation" className="mind-nav-rail" aria-label={t('workbench.navigation')}>
               <div className="mind-nav-card">
                 {NAV_ITEMS.map((item) => (
                   <NavButton
                     key={item.key}
                     item={item}
                     active={item.key === activeNav}
-                    onClick={() => setActiveNav(item.key)}
+                    onClick={() => { setActiveNav(item.key); setNavPinned(false); setNavRevealed(false); }}
                   />
                 ))}
               </div>

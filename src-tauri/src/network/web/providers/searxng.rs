@@ -14,9 +14,7 @@ use crate::config::WebSearchConfig;
 use crate::network::web::providers::util::{
     annotate_sources, build_search_client, timeout_from_secs,
 };
-use crate::network::web::types::{
-    WebError, WebSearchRequest, WebSearchResult, WebSearchSource,
-};
+use crate::network::web::types::{WebError, WebSearchRequest, WebSearchResult, WebSearchSource};
 use crate::network::web::WebSearchProvider;
 
 /// 稳定注册 id
@@ -77,16 +75,32 @@ impl WebSearchProvider for SearXngProvider {
                 ("format", "json"),
                 ("pageno", "1"),
             ]);
-        if let Some(lang) = &self.language {
+        if let Some(lang) = request.language.as_ref().or(self.language.as_ref()) {
             req = req.query(&[("language", lang.as_str())]);
         }
         if !self.auth_token.is_empty() {
             req = req.header("Authorization", format!("Bearer {}", self.auth_token));
         }
 
-        let resp = req.send().await.map_err(|e| {
-            WebError::provider_error(SEARXNG_ID, format!("SearXNG 请求失败: {e}"))
-        })?;
+        if let Some(days) = request.recency_days {
+            req = req.query(&[(
+                "time_range",
+                if days <= 1 {
+                    "day"
+                } else if days <= 7 {
+                    "week"
+                } else if days <= 31 {
+                    "month"
+                } else {
+                    "year"
+                },
+            )]);
+        }
+        // Request language takes precedence over the configured default.
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| WebError::provider_error(SEARXNG_ID, format!("SearXNG 请求失败: {e}")))?;
         if !resp.status().is_success() {
             return Err(WebError::provider_error(
                 SEARXNG_ID,
@@ -101,6 +115,7 @@ impl WebSearchProvider for SearXngProvider {
             content: None,
             sources: parse_searxng(&v, max),
             truncated: false,
+            ..Default::default()
         })
     }
 }

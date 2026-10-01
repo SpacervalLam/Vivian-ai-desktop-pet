@@ -114,6 +114,7 @@
     },
     {
       "name": "sleep",
+      "characters": ["vivian"],
       "label": "入睡",
       "category": "state",
       "promptable": true,
@@ -163,6 +164,7 @@
     },
     {
       "name": "tend",
+      "characters": ["nana"],
       "label": "浇花",
       "category": "state",
       "promptable": true,
@@ -171,32 +173,33 @@
       "rows": 6,
       "frames": 24,
       "loop": false,
-      "hold": true,
       "durations": [120,120,130,140,150,160,160,160,150,150,160,170,170,160,150,150,160,160,150,150,140,140,140,140]
     },
     {
       "name": "tend-out",
+      "characters": ["nana"],
       "label": "浇花-起身",
       "category": "state",
       "promptable": true,
       "sheet": "/chibi/motion/{character}/{character}-tend-out-sheet.webp",
       "cols": 4,
-      "rows": 3,
-      "frames": 12,
+      "rows": 2,
+      "frames": 8,
       "loop": false,
-      "durations": [80,90,100,110,110,110,100,100,90,85,80,80]
+      "durations": [100,120,130,130,120,110,100,90]
     },
     {
       "name": "wake",
+      "characters": ["vivian"],
       "label": "睡醒起身",
       "category": "state",
       "promptable": true,
       "sheet": "/chibi/motion/{character}/{character}-wake-sheet.webp",
       "cols": 4,
-      "rows": 3,
-      "frames": 12,
+      "rows": 2,
+      "frames": 8,
       "loop": false,
-      "durations": [80,90,100,110,110,110,100,100,90,85,80,80]
+      "durations": [100,120,130,130,120,110,100,90]
     }
   ],
   "expression_aliases": {
@@ -243,7 +246,7 @@
     "idle_short": { "threshold_secs": 45, "expression": "", "motion": "think", "duration_ms": 2600, "probability": 0.4 },
     "idle_medium": { "threshold_secs": 150, "expression": "", "motion": "think", "duration_ms": 3200, "probability": 0.6 },
     "idle_long": { "threshold_secs": 360, "expression": "", "motion": "smug", "duration_ms": 3000, "probability": 0.8 },
-    "idle_asleep": { "threshold_secs": 720, "expression": "dizzy", "motion": "", "duration_ms": 4000, "probability": 0.95 }
+    "idle_asleep": { "threshold_secs": 720, "expression": "", "motion": "sleep", "duration_ms": 4000, "probability": 0.95 }
   },
   "event_triggers": {
     "user_return": { "expression": "", "motion": "happy", "duration_ms": 2400, "probability": 0.85 },

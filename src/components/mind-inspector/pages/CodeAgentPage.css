@@ -2542,62 +2542,6 @@
   background: transparent;
 }
 
-/* --------------------------------------------------------------------------
-   输入卡片太窄就收起来。**只收输入卡片，消息区照常显示** —— 对话还能读、还能滚、
-   还能选中复制，只是暂时没法发新消息。被右侧栏挤窄时用户最想保住的是「刚才那段
-   回复」，不是输入框。界面上不加任何提示文字。
-
-   ## 为什么是容器查询，而不是一个中栏宽度阈值
-
-   上一版在 TSX 里拿 `.codex-main-body` 的宽度跟一个常量（480）比。问题是：
-   **同一个中栏宽度下，卡片能拿到多少宽度取决于它在哪。**
-
-     消息视图：卡片长在 `.codex-composer-wrap` 里，只吃 16px×2 内边距
-     空状态：  卡片长在 `.codex-chat` → `.codex-empty` 里，多吃两层
-               （`--codex-chat-pad-x` + `.codex-empty` 的 20px，实测共约 119px）
-
-   实测：消息视图 445px 中栏就不折行了，空状态要 **540px** —— 差 95px。
-   所以拿中栏宽度做判据必然顾此失彼：按 480 收，空状态在 480~540 之间还露着一张
-   折行的卡片（用户报的就是这个）。而**折行边界是卡片自己的属性**
-   （卡片可用宽 ≥ 410px 就不折行），那就该量卡片自己的可用宽度。
-
-   `container-type: inline-size` 把输入槽变成「尺寸容器」，`@container` 查询量的
-   是它的**内容盒宽度** = 卡片实际能用的宽度。于是消息视图与空状态各按各的算，
-   阈值只有一个、语义还更准。
-
-   ## 阈值 448 怎么来的（实测）
-
-   `.workbuddy-ai/tmp/scan-empty-composer.mjs` 直接设槽宽、量工具条里那个 `<span>`
-   的高度（单行 16px / 折行 32px，药丸有固定高度所以看药丸本身看不出来）：
-
-     | 模型名 | 字符数 | 最小不折行槽宽 |
-     |---|---|---|
-     | `claude-sonnet-4-5-20250929` | 25 | 410px |
-     | `gemini-3.0-pro-preview-11-2026` | 29 | 430px |
-     | `deepseek-v4-reasoning-preview-2026-09` | 38 | 480px |
-
-   取 **448** = 默认名字的 410 + 38px 余量（约合再长 7~8 个字符的模型名）。
-   仓库里真实在用的模型 id 最长 22 字符（`qwen3-max-thinking`），所以 448 覆盖得住。
-   **注意这个边界会随模型名变长右移**：名字到 36 字符以上就该往上调。
-
-   ## 为什么能安心用 `display: none`
-
-   `container-type: inline-size` 蕴含 `contain: inline-size` —— 容器自身的行内尺寸
-   **与内容无关**。所以收起卡片不可能反过来改变容器的宽度，**结构上就不存在**
-   「收起 → 量到更宽 → 判定不窄 → 又展开」的反馈回路。上一版隐藏的是
-   `.codex-main-body` 自己，那才必须用 `visibility` 保住宽度。
-
-   收的是卡片本体 `.codex-composer`，不是外层的 `.codex-composer-wrap` ——
-   wrap 里还并排挂着预算横幅、子代理条、**提问卡（WorkQuestionCard）**，
-   连 wrap 一起收掉的话，Agent 抛问题让用户选的时候卡片会跟着消失，
-   那是功能故障、不只是不好看。
-   -------------------------------------------------------------------------- */
-@container (max-width: 447px) {
-  .codex-composer {
-    display: none;
-  }
-}
-
 /* 顶栏以下的那条横向带。置顶摘要绝对定位贴在 `.codex-main-col` 右边缘，
    不参与这里的 flex 分配（只留一个 `.codex-main-col` 撑满），
    所以它必须靠 `--codex-pinned-reserve` 让位而不是靠 flex 挤压。 */
@@ -2613,7 +2557,6 @@
    position:relative 同时是 `.codex-to-bottom` 与置顶摘要的定位基准。
    ----------------------------------------------------------------------
    三个宽度变量的**唯一来源**（React 内联 style 写入，其余规则只读）：
-     --codex-pinned-w           动画值，收起时为 0（面板宽度与留白都跟它走）
      --codex-pinned-w-expanded  展开值，收起期间不变（内层靠它保持展开宽度）
      --codex-pinned-reserve     为面板让出的总宽度，收起时为 0
      --codex-sb-w               对话滚动条实测宽度
@@ -2622,8 +2565,9 @@
    常量（PINNED_W_*、PINNED_GAP_W）都在 CodeAgentPageNew.tsx 顶部，改就改那里。
    ---------------------------------------------------------------------- */
 .codex-main-col {
-  --codex-pinned-w: 0px;
   --codex-pinned-w-expanded: 250px;
+  --codex-summary-duration: 0.6s;
+  --codex-summary-easing: cubic-bezier(0.4, 0, 0.2, 1);
   --codex-pinned-reserve: 0px;
   --codex-sb-w: 12px;
 
@@ -2651,8 +2595,7 @@
    所以基准值改由主题声明变量、这里只负责合成最终值，全局只有这一处写
    padding-right。
 
-   四者的过渡必须与面板的宽度过渡**同曲线同步**，否则收起动画期间正文会与
-   面板错位（面板已经在缩，正文还留在原位，看起来像在互相撞）。
+   正文和输入区用与摘要相同的时长和曲线平滑调整留白。
    -------------------------------------------------------------------------- */
 .codex-main-col .codex-chat {
   padding-right: max(var(--codex-chat-pad-x, 32px), var(--codex-pinned-reserve, 0px));
@@ -2660,23 +2603,23 @@
      内容从「不溢出」变成「溢出」时面板会横跳一个滚动条的宽度。
      槽在 border 与 padding 之间，所以正文可用宽是 `宽 - 槽 - 内边距`。 */
   scrollbar-gutter: stable;
-  transition: padding-right 0.32s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: padding-right var(--codex-summary-duration) var(--codex-summary-easing);
 }
 
 .codex-main-col .codex-composer-wrap {
   padding-right: max(var(--codex-composer-pad-x, 16px), var(--codex-pinned-reserve, 0px));
-  transition: padding-right 0.32s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: padding-right var(--codex-summary-duration) var(--codex-summary-easing);
 }
 
 .codex-main-col .codex-stats-line {
   padding-right: max(32px, var(--codex-pinned-reserve, 0px));
-  transition: padding-right 0.32s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: padding-right var(--codex-summary-duration) var(--codex-summary-easing);
 }
 
 .codex-main-col .codex-to-bottom {
   /* 位置固定，不随置顶摘要呼出收起而左右移动；展开时允许覆盖在其上 */
   right: var(--codex-to-bottom-right, 32px);
-  transition: right 0.32s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: none;
 }
 
 .codex-topbar {
@@ -2952,11 +2895,7 @@
   padding: 0 var(--codex-composer-pad-x) 10px;
 }
 
-/* 输入槽。**消息视图与空状态共用这一个类** —— 空状态里它就是 hero 下面那个槽
-   （见 `CodeAgentPageNew.tsx` 的两处 `.codex-composer-inner`）。
-   它同时是「太窄就收起输入卡片」那条容器查询的**尺寸容器**：
-   `container-type: inline-size` 让 `@container` 查询量到它的内容盒宽度，
-   也就是输入卡片实际能用的宽度。详见上面 `@container (max-width: 447px)` 那段注释。 */
+/* Shared width container for empty-state and conversation composers. */
 .codex-composer-inner {
   max-width: 780px;
   margin: 0 auto;
@@ -3871,6 +3810,7 @@
 
 .codex-msg-error {
   display: flex;
+  flex-direction: column;
   gap: 8px;
   align-items: flex-start;
   margin: 14px 0;
@@ -3884,10 +3824,53 @@
 }
 
 .codex-msg-error .codex-msg-error-text {
+  flex: 1 1 180px;
   min-width: 0;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
 }
+
+.codex-msg-error-main {
+  display: flex;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 8px;
+  width: 100%;
+}
+
+.codex-msg-error-actions {
+  display: flex;
+  gap: 14px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.codex-msg-error-link {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--codex-danger);
+  font: inherit;
+  line-height: inherit;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.codex-msg-error-link:hover { opacity: 0.8; }
+.codex-msg-error-link:focus-visible { outline: 2px solid currentColor; outline-offset: 3px; border-radius: 2px; }
+.codex-msg-error-link:disabled { opacity: 0.45; cursor: not-allowed; }
+
+.codex-msg-error-details {
+  width: 100%;
+  min-width: 0;
+  padding-top: 8px;
+  border-top: 1px solid var(--codex-warm);
+}
+
+.codex-msg-error-details time { font-size: 12px; }
+.codex-msg-error-details pre { margin: 6px 0 0; font: inherit; white-space: pre-wrap; overflow-wrap: anywhere; }
 
 /* 宿主中性状态提示（上下文压缩等）：与 error 同构但用中性色，
    语义是「告知」而非「报错」，不能借用错误样式。 */
@@ -6773,18 +6756,7 @@
    实测滚动条宽度 `--codex-sb-w`），所以滚动条始终在它右边。宽度取自祖先给的
    `--codex-pinned-w`，对话区 / 输入区 / 统计行则靠 `--codex-pinned-reserve`
    右缩同样的量——面板浮在那块留白上，不盖住任何正文。
-   收起时宽度归零 + `overflow:hidden`，靠内层固定展开宽度做裁切，内容不会在
-   动画期间被逐帧压窄重排。宽度过渡与两侧边栏用同一条曲线，节奏保持一致。
-
-   呼出 / 收起是**两轴同时**的：
-     · 横向 —— `width` 走 0 ↔ 250。这条必须留着：面板的横向占位一旦先于对话区
-       的让位出现，动画途中就会压住正文（让位靠 `--codex-pinned-reserve`，而
-       面板盒宽恒小于它，所以同步走就永远不重叠）。
-     · 纵向 —— `clip-path: inset()` 把可见区从**顶边往下**揭开、从**底边往上**
-       收掉，这是用户要求的主方向。
-   内层固定为展开宽度并**靠右对齐**（`align-items:flex-end`），所以内容在动画
-   期间一动不动——只是被一块从右上角向外扩张的窗口逐步揭开，读起来是「卡片
-   从上往下落下来」而不是「从右边滑进来」。`overflow:hidden` 负责横向裁切。
+   面板保持展开宽度，只用 clip-path 上下揭开与收起。正文和输入区同步平滑调整横向留白。
    与正文之间**不画分隔线**：面板自己就是主工作区的一部分，靠卡片自身的描边
    和留白区分即可。
    ========================================================================== */
@@ -6794,38 +6766,34 @@
   top: 0;
   right: var(--codex-sb-w, 12px);
   bottom: 0;
-  /* 宽度只认祖先的变量（React 写在 `.codex-main-col` 上），收起时它是 0 */
-  width: var(--codex-pinned-w, 250px);
-  /* 收起时把内容横向切掉；展开时也靠它保证内层固定宽度不撑破外层 */
+  /* 固定展开宽度，显隐只改变纵向可见区。 */
+  width: var(--codex-pinned-w-expanded, 250px);
+  /* 裁剪面板内容，显隐方向由 clip-path 决定。 */
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  /* 内层宽度固定为展开值，靠右对齐：外层变窄时它从**左侧**被 overflow 切掉，
-     内容本身不移动。若按默认的左对齐，整块内容会跟着外层左缘一起左移 250px，
-     看起来就变成「从右边滑进来」了。 */
+  /* 内层保持固定宽度，避免纵向揭开期间重排。 */
   align-items: flex-end;
   /* 纵向显隐。展开态写 `inset(0 0 0 0)` 而不是 `none` —— 两端形状一致才可插值。
      收起态底边内缩 100% ⇒ 可见高度归零；展开时底边从顶边一路降到底边，
      即「从上往下揭开」；收起时反向，即「从下往上收掉」。 */
   clip-path: inset(0 0 0 0);
-  transition: width 0.32s cubic-bezier(0.4, 0, 0.2, 1),
-              clip-path 0.32s cubic-bezier(0.4, 0, 0.2, 1),
-              /* visibility 是阶跃插值：0→1 之间都算 visible，所以配 0.32s 的延迟
+  transition: clip-path var(--codex-summary-duration) var(--codex-summary-easing),
+              /* visibility 是阶跃插值：0→1 之间都算 visible，所以配相同动画时长的延迟
                  就能让它「动画播完才真正隐藏」，既不影响过渡又退出 tab 序列。 */
               visibility 0s linear 0s;
 }
 
-/* 收起态：宽度由变量收到 0、纵向可见区归零，这里只负责断开交互并退出 tab 序列 */
+/* 收起态：纵向可见区归零，同时断开交互并退出 tab 序列。 */
 .codex-pinned.collapsed {
   pointer-events: none;
   visibility: hidden;
   clip-path: inset(0 0 100% 0);
-  transition: width 0.32s cubic-bezier(0.4, 0, 0.2, 1),
-              clip-path 0.32s cubic-bezier(0.4, 0, 0.2, 1),
-              visibility 0s linear 0.32s;
+  transition: clip-path var(--codex-summary-duration) var(--codex-summary-easing),
+              visibility 0s linear var(--codex-summary-duration);
 }
 
-/* 内层固定为展开宽度（收起期间也保持），由外层的 overflow:hidden 负责横向裁切 */
+/* 内层固定为展开宽度，收起期间也保持。 */
 .codex-pinned-inner {
   display: flex;
   flex-direction: column;

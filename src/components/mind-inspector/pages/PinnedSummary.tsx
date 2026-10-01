@@ -7,13 +7,13 @@
  *
  * **它是主工作区右侧的信息列**（`codex-main-col` 的绝对定位子元素，紧贴对话
  * 滚动条的左边）：宽度由父组件按主工作区实测宽度算好，写进祖先的
- * `--codex-pinned-w` / `--codex-pinned-w-expanded`，组件自己只读不持有；同时
+ * `--codex-pinned-w-expanded`，组件自己只读不持有；同时
  * 父组件让对话区 / 输入区 / 统计行统一右缩 `--codex-pinned-reserve`，所以面板
  * 浮在那块留白上、不会盖住正文。窗口太窄时先压面板、再压对话区（策略见
- * `CodeAgentPageNew.tsx` 的 PINNED_W_*）。收起时宽度归零 + `overflow:hidden`，
- * 靠内层固定展开宽度做裁切而不是逐帧重排。
+ * `CodeAgentPageNew.tsx` 的 PINNED_W_*）。显隐只做纵向裁剪，
+ * 面板宽度不变；正文 / 输入区留白与纵向动画同步过渡。
  *
- * **整块的收起 / 呼出由顶栏按钮控制**（`visible` prop，按钮夹在模式下拉与右侧
+ * **整块的收起 / 呼出由顶栏按钮控制**（`visible` prop，按钮位于右侧
  * 检查器按钮之间）——面板紧贴顶栏下方，开关放在它正上方那条栏上最顺手，
  * 也避免用户为了关掉面板去翻别处。可见性状态由父组件持有并落盘。
  * 每张卡片内部仍可单独折叠（只看 git 或只看来源）。
@@ -521,8 +521,8 @@ const PinnedSummary: React.FC<PinnedSummaryProps> = ({ workingDirectory, visible
           「被一块从右上角扩张的窗口逐步揭开」——既不逐帧压窄重排（宽度归零时
           文字会算出 0 宽），也不横向平移（左对齐的话整块会跟着左移 250px，
           看起来像从右边滑进来）。
-          外层与内层的宽度都来自祖先 `.codex-main-col` 上的 `--codex-pinned-w`
-          与 `--codex-pinned-w-expanded`（见 CodeAgentPage.css），组件自己不持有
+          外层与内层的宽度都来自祖先 `.codex-main-col` 上的
+          `--codex-pinned-w-expanded`（见 CodeAgentPage.css），组件自己不持有
           宽度——宽度策略只该有一个出处，就在父组件那三个 PINNED_W_* 常量里。 */}
       <div className="codex-pinned-inner">
         {/* ---------- 环境信息 ---------- */}

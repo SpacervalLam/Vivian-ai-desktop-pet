@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { stripActions } from '../utils/ActionText';
+import { computeDuration } from '../utils/bubbleText';
 
 export type BubblePosition = 'top' | 'bottom' | 'left' | 'right';
 
@@ -86,7 +87,7 @@ const LISTENER_TAG_STYLE: React.CSSProperties = {
 
 const MessageBubble: React.FC<MessageBubbleProps> = ({
   text,
-  duration = 5000,
+  duration,
   onClose,
   position = 'top',
   maxWidth = 300,
@@ -96,24 +97,28 @@ const MessageBubble: React.FC<MessageBubbleProps> = ({
 }) => {
   const [visible, setVisible] = useState(false);
   const closedRef = useRef(false);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  const dwell = duration ?? computeDuration(stripActions(text));
   const theme = getBubbleTheme(characterId);
   const { t } = useTranslation();
 
   useEffect(() => {
+    closedRef.current = false;
     setVisible(true);
-    if (duration <= 0) return;
-    const hideTimer = window.setTimeout(() => setVisible(false), duration);
+    if (dwell <= 0) return;
+    const hideTimer = window.setTimeout(() => setVisible(false), dwell);
     const closeTimer = window.setTimeout(() => {
       if (!closedRef.current) {
         closedRef.current = true;
-        onClose?.();
+        onCloseRef.current?.();
       }
-    }, duration + 250);
+    }, dwell + 250);
     return () => {
       window.clearTimeout(hideTimer);
       window.clearTimeout(closeTimer);
     };
-  }, [duration, onClose]);
+  }, [dwell, text]);
 
   // tailStyles 依赖 theme.tailColor，按 position 构建一份即可
   const tailStyle: React.CSSProperties = (() => {

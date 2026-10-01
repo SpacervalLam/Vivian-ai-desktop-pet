@@ -62,6 +62,7 @@ const CONFIRM_AT_ACTION_TOOLS: &[&str] = &[
     "edit_file",
     "list_dir",
     "grep_search",
+    "run_command",
     // 屏幕感知
     "take_screenshot",
     "screenshot_analyze",
@@ -914,6 +915,13 @@ mod tests {
 
     use crate::tools::types::{ToolCategory, ToolResult, ToolRiskTier, ValidationResult};
 
+    #[test]
+    fn proposed_command_still_requires_concrete_confirmation() {
+        assert_eq!(confirmation_tier("run_command", &json!({"command": "Get-Date"})),
+            ToolConfirmationTier::ConfirmAtAction);
+        assert!(is_confirmation_required_tool("run_command"));
+    }
+
     struct TestTool;
 
     #[async_trait]
@@ -1164,6 +1172,8 @@ mod tests {
             "edit_file",
             "list_dir",
             "grep_search",
+            "run_command",
+            "save_memory",
             "take_screenshot",
             "screenshot_analyze",
             "delete_plugin",

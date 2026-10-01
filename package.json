@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build --config vite.apartment.config.ts && vite build && node scripts/check-apartment-plugin.mjs",
+    "build": "tsc && vite build && node scripts/check-apartment-plugin.mjs --core",
     "preview": "vite preview",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
@@ -13,8 +13,10 @@
     "test:toast-dedup": "node scripts/toast-dedup.test.ts",
     "test:flee-plan": "node scripts/flee-plan.test.ts",
     "check:tap-anger": "node scripts/check-tap-anger.mjs",
-    "check:agent-track": "esbuild scripts/room/check-agent-track.ts --bundle --platform=node --format=esm --outfile=tmp/check-agent-track.mjs --log-level=warning && node tmp/check-agent-track.mjs",
-    "check:world-route": "node scripts/room/check-world-route.mjs"
+    "check:agent-track": "esbuild plugins/3d-apartment/tools/room/check-agent-track.ts --bundle --platform=node --format=esm --outfile=tmp/check-agent-track.mjs --log-level=warning && node tmp/check-agent-track.mjs",
+    "check:world-route": "node plugins/3d-apartment/tools/room/check-world-route.mjs",
+    "build:apartment": "npm run build --workspace @vivian/3d-apartment",
+    "package:small": "node scripts/package-small.mjs"
   },
   "dependencies": {
     "@tanstack/react-virtual": "^3.14.6",
@@ -30,25 +32,23 @@
     "i18next": "^23.16.0",
     "lucide-react": "^1.24.0",
     "mammoth": "^1.12.3",
-    "mermaid": "^10.9.8",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-i18next": "^15.1.0",
-    "three": "^0.169.0",
     "xlsx": "^0.18.5",
     "zustand": "^4.5.5"
   },
   "devDependencies": {
-    "@mongodb-js/zstd": "^7.0.0",
     "@tauri-apps/cli": "^2.1.0",
-    "@types/dompurify": "^3.0.5",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
-    "@types/three": "^0.169.0",
     "@vitejs/plugin-react": "^4.3.3",
     "esbuild": "^0.21.5",
     "sharp": "^0.35.4",
     "typescript": "^5.6.3",
     "vite": "^5.4.10"
-  }
+  },
+  "workspaces": [
+    "plugins/3d-apartment"
+  ]
 }

@@ -2,8 +2,8 @@
 //!
 //! - [`AIResponseGenerationRunnable`]：智能路由 + 故障降级 + graceful_exit 告别生成
 //! - [`ResponseParsingRunnable`]：使用 `JsonProcessor::process_response` 解析响应，
-//!   提取 text / motion / expression / importance / long_term_memory / intent /
-//!   user_emotion / ai_emotion / tool_calls
+//!   提取 text / intent / response_mode / voice_message / memory_used / tool_calls；
+//!   动作、表情与记忆评分由反思阶段处理。
 
 use std::sync::Arc;
 
@@ -15,7 +15,6 @@ use crate::brain::json_parser::{
     JsonParser, JsonProcessor, ProcessedResponse, StreamingJsonParser,
     StreamEvent as JsonStreamEvent,
 };
-use crate::cross_character::parse_any_speaker_prefix;
 use crate::error::{VivianError, VivianResult};
 use crate::pipeline::base::{Runnable, RunnableConfig};
 use crate::pipeline::decorators::is_retryable;
@@ -306,12 +305,7 @@ impl AIResponseGenerationRunnable {
     ///
     /// Only called when building the LLM messages array; does not modify conversation history/memory storage.
     fn ensure_speaker_prefix(content: &str) -> String {
-        let (_, existing_speaker, _) = parse_any_speaker_prefix(content);
-        if existing_speaker.is_some() {
-            content.to_string()
-        } else {
-            format!("[User says to me] {}", content)
-        }
+        crate::pipeline::message_context::ensure_speaker_prefix(content)
     }
 
     /// 构造 LLMRequest，对主对话路径（chat/reasoning/vision_describe）注入 Vivian 通用响应 Schema
@@ -375,6 +369,7 @@ impl AIResponseGenerationRunnable {
                 .generate_stream(Self::build_chat_request(task_type, messages).with_stream(true))
                 .await?;
             let mut buf = String::new();
+            let mut web_sources = Vec::new();
             let mut parser = StreamingJsonParser::new();
             let mut any_text_emitted = false;
             while let Some(event) = rx.recv().await {
@@ -389,12 +384,16 @@ impl AIResponseGenerationRunnable {
                             }
                         }
                     }
+                    ProviderStreamEvent::WebSources { sources } => web_sources.extend(sources),
                     ProviderStreamEvent::Error { message } => {
                         return Err(VivianError::Provider(format!("流式响应中断: {}", message)));
                     }
                     _ => {}
                 }
             }
+            let source_links = crate::providers::web_citations::links(&web_sources, &buf);
+            buf = crate::providers::web_citations::attach(&buf, &web_sources);
+            if any_text_emitted && !source_links.is_empty() { push_stream_chunk(emitter, &source_links); }
             if !any_text_emitted && !buf.is_empty() {
                 let text_to_push = JsonParser::extract_text(&buf).unwrap_or_else(|| buf.clone());
                 push_stream_chunk(emitter, &text_to_push);
@@ -550,6 +549,7 @@ impl AIResponseGenerationRunnable {
             let mut tool_call_names: Vec<Option<String>> = Vec::new();
             let mut tool_call_args: Vec<String> = Vec::new();
             let mut text_content = String::new();
+            let mut web_sources = Vec::new();
             let mut attempt_finish_reason: Option<String> = None;
             let mut stream_error: Option<String> = None;
 
@@ -601,6 +601,7 @@ impl AIResponseGenerationRunnable {
                         attempt_finish_reason = fr;
                         break;
                     }
+                    ProviderStreamEvent::WebSources { sources } => web_sources.extend(sources),
                     ProviderStreamEvent::Error { message } => {
                         stream_error = Some(message);
                         break;
@@ -649,7 +650,10 @@ impl AIResponseGenerationRunnable {
             if !is_parse_failure {
                 // 成功：有工具调用，或 finish_reason 非 tool_calls（纯文本回复）
                 finish_reason = attempt_finish_reason;
+                let source_links = crate::providers::web_citations::links(&web_sources, &text_content);
+                text_content = crate::providers::web_citations::attach(&text_content, &web_sources);
                 final_first_text = JsonParser::extract_text(&text_content).unwrap_or(text_content);
+                if attempt == 1 && fc_any_text_emitted && !source_links.is_empty() { push_stream_chunk(emitter, &source_links); }
                 first_round_calls = calls;
 
                 // 重试成功时补发缓冲文本到前端（首次尝试已实时推送，无需补发）
@@ -818,68 +822,16 @@ impl Runnable for AIResponseGenerationRunnable {
         // 每轮变化的只有尾部便签，前缀（静态 system + 全部历史）逐字节复用，
         // 实现缓存友好的"重放前缀 + 追加尾部"策略。
         let mut messages_vec: Vec<ChatMessage> = Vec::new();
-        let mut dynamic_note: Option<String> = None;
-        let sys = state.system_prompt.clone();
-        // 尝试按 STATIC_OPEN/STATIC_CLOSE 与边界分割
-        if !sys.is_empty() {
-            let static_open = crate::pipeline::prompt_modules::STATIC_OPEN;
-            let static_close = crate::pipeline::prompt_modules::STATIC_CLOSE;
-            let boundary = crate::pipeline::prompt_modules::SYSTEM_PROMPT_DYNAMIC_BOUNDARY;
-
-            if let (Some(start), Some(end)) = (sys.find(static_open), sys.find(static_close)) {
-                // 提取静态段内容
-                let s = &sys[start + static_open.len()..end];
-                messages_vec.push(ChatMessage::system(s.trim().to_string()));
-                // 若存在 boundary，提取 boundary 之后到用户输入之前的动态段（暂存，历史后插入）
-                if let Some(bpos) = sys.find(boundary) {
-                    let after_b = &sys[bpos + boundary.len()..];
-                    // 找到用户输入标题（语言相关的本地化标题，如 "# User Input" / "# 用户输入"），
-                    // 动态便签截到用户输入之前——用户输入由下方单独的 user message 注入，避免重复
-                    let ui_lang = crate::i18n::get_language();
-                    let ui_marker = format!(
-                        "{}\n",
-                        crate::pipeline::prompt_modules::section_heading("user_input", &ui_lang)
-                    );
-                    let dynamic_section = if let Some(upos) = after_b.find(&ui_marker) {
-                        after_b[..upos].to_string()
-                    } else {
-                        after_b.to_string()
-                    };
-
-                    if !dynamic_section.trim().is_empty() {
-                        dynamic_note = Some(dynamic_section.trim().to_string());
-                    }
-                }
-            } else {
-                // 无法找到静态标签时，退回到把整个 system_prompt 当作 system message
-                messages_vec.push(ChatMessage::system(sys.trim().to_string()));
-            }
+        let context = crate::pipeline::message_context::split_prompt_context(
+            &state.system_prompt, &state.user_input, &crate::i18n::get_language(),
+        );
+        if !context.system.is_empty() {
+            messages_vec.push(ChatMessage::system(context.system));
         }
-
-        // 插入历史消息（如果有）
-        // 不再添加 [直接对话]/[微信聊天] 程序化前缀——这类标签会让 LLM 进入"处理结构化数据"模式。
-        // 当前消息的渠道风格由 build_channel_style_guide 在 system prompt 末尾统一告知。
-        // user role 消息统一加发言者前缀（[用户 对你说] / [X 对你说]），让 LLM 区分消息来源。
-        if !state.messages.is_empty() {
-            for msg in &state.messages {
-                if msg.role == "user" {
-                    let prefixed = Self::ensure_speaker_prefix(&msg.content);
-                    messages_vec.push(ChatMessage {
-                        content: prefixed,
-                        ..msg.clone()
-                    });
-                } else {
-                    messages_vec.push(msg.clone());
-                }
-            }
-        }
-
-        // 动态感知便签：历史之后、用户输入之前（每轮重新生成，只影响尾部，前缀不受损）。
-        // 内容 = 时间/环境/情绪/记忆/工具提示等"此刻状态"，让 Agent 在不动历史的前提下保持知情。
-        if let Some(note) = dynamic_note {
+        crate::pipeline::message_context::append_history(&mut messages_vec, &state.messages);
+        if let Some(note) = context.dynamic {
             messages_vec.push(ChatMessage::user(note));
         }
-
         // 后台任务报告已随本次请求注入（便签或整体 system 两条路径均覆盖）
         // → 标记消费，后续轮次不再重复注入
         if let Some(ids) = state
@@ -1231,11 +1183,10 @@ impl Runnable for AIResponseGenerationRunnable {
 ///
 /// 使用 `JsonProcessor::process_response` 解析 `response_text`，
 /// 提取标准字段：
-/// - `text` / `motion` / `expression`
-/// - `importance_user` / `importance_ai`
-/// - `long_term_memory`
+/// - `text` / `response_mode` / `voice_message` / `memory_used`
 /// - `intent`（reply / short_reply / no_reply）
 /// - `tool_calls`
+/// 动作、表情、重要度和长期记忆由反思阶段填充，不接受主调用遗留字段。
 ///
 /// 特殊处理：
 /// - `intent=no_reply` 时主动把 `text` 置空（不展示回复）
@@ -1671,7 +1622,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_response_parsing_json_response() {
+    async fn test_response_parsing_ignores_legacy_reflection_fields() {
         let runnable = ResponseParsingRunnable::new();
         let mut state = PipelineState::default();
         state.should_respond = true;
@@ -1679,11 +1630,13 @@ mod tests {
         let result = runnable.ainvoke(state.to_json(), None).await.unwrap();
         let new_state = PipelineState::from_json(result);
         assert_eq!(new_state.text, "晚安");
-        assert_eq!(new_state.motion, "sleep");
-        assert_eq!(new_state.expression, "peaceful");
-        assert!((new_state.importance_user - 0.8).abs() < 1e-6);
-        assert!((new_state.importance_ai - 0.6).abs() < 1e-6);
-        assert_eq!(new_state.long_term_memory, "用户晚上10点睡觉");
+        // The main response owns dialogue fields; reflection owns the old metadata fields.
+        let defaults = PipelineState::default();
+        assert_eq!(new_state.motion, defaults.motion);
+        assert_eq!(new_state.expression, defaults.expression);
+        assert_eq!(new_state.importance_user, defaults.importance_user);
+        assert_eq!(new_state.importance_ai, defaults.importance_ai);
+        assert!(new_state.long_term_memory.is_empty());
         assert_eq!(new_state.intent, "short_reply");
     }
 

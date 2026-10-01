@@ -692,6 +692,10 @@ pub fn classify_llm_error_from_str(msg: &str) -> LlmErrorKind {
         || lower.contains("certificate")
         || lower.contains("ssl")
         || lower.contains("hyper error")
+        || lower.contains("error decoding response body")
+        || lower.contains("error reading a body from connection")
+        || lower.contains("stream ended before completion")
+        || lower.contains("流读取失败")
         || (lower.contains("connect") && (lower.contains("error") || lower.contains("fail") || lower.contains("reset")))
     {
         return LlmErrorKind::NetworkError;

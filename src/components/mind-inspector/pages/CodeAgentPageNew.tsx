@@ -13,6 +13,8 @@ import type { TFunction } from 'i18next';
 import { listen, emit, type UnlistenFn } from '@tauri-apps/api/event';
 import { invoke, convertFileSrc } from '@tauri-apps/api/core';
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
+import { getCurrentWindow } from '@tauri-apps/api/window';
+import { saveSharedFile } from '../../../utils/sharedFiles';
 import { open as openDialog, save as saveDialog, confirm as confirmDialog } from '@tauri-apps/plugin-dialog';
 import { raiseWindow } from '../../../utils/windowRaiser';
 import { reportInspectorSession } from '../../../utils/inspectorAttention';
@@ -24,9 +26,11 @@ import {
   Activity, Send, Square, ArrowDown, ArrowUp, List,
   PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, SlidersHorizontal, Ellipsis,
   Goal, ClipboardList, History, MessageSquare, Download, Copy, ThumbsUp, ThumbsDown, GitFork, Mic, Brain,
-  HelpCircle, FileDiff, Settings, File as FileIcon, Info, StickyNote,
+  HelpCircle, FileDiff, Settings, File as FileIcon, Info, StickyNote, Maximize2, Minimize2,
 } from 'lucide-react';
 import './CodeAgentPage.css';
+import './workbenchStrings';
+import { workbenchLayout, reconcileToolMessages, WORKBENCH_READING_WIDTH } from './workbenchLayout';
 import TrajectoryPanel from './TrajectoryPanel';
 import TurnRail, { buildTurns } from './TurnRail';
 import ComposerEditor, { type ComposerEditorHandle } from './ComposerEditor';
@@ -62,17 +66,24 @@ const RESIZE_HANDLE_W = 6;
  *  以及右侧栏的拖动上限（见 `WORKSPACE_MIN_W`）—— 所以只定义一次。 */
 const LEFT_DEFAULT_W = 268;
 
-/**
- * 中央工作区的**最小宽度**，右侧栏拖到多宽都不能把它压得比这个更窄。
- *
- * 取值即左侧栏默认宽度（268）：主区域至少要有同样多的地方放得下对话，
- * 比这更窄就「主区域被挤没了」而非「侧栏占地方」。
- *
- * 布局账（`.workbench-root` 是一行 flex）：
- *   root = 左栏 + 手柄 + 主区域 + 手柄 + 右栏
- * 所以右栏上限 = root − (左栏 + 手柄×2) − WORKSPACE_MIN_W。
- */
-const WORKSPACE_MIN_W = LEFT_DEFAULT_W;
+/** Minimum reading space when panels are docked; narrow windows use drawers. */
+const WORKSPACE_MIN_W = WORKBENCH_READING_WIDTH;
+
+const LAYOUT_STORAGE_KEY = 'vivian-workbench-layout-v1';
+function savedLayout() {
+  try {
+    const value = JSON.parse(localStorage.getItem(LAYOUT_STORAGE_KEY) || '{}');
+    return {
+      leftCollapsed: value.leftCollapsed === true,
+      rightCollapsed: value.rightCollapsed !== false,
+      focus: value.focus === true,
+      leftWidth: typeof value.leftWidth === 'number' && Number.isFinite(value.leftWidth) ? Math.max(180, Math.min(460, value.leftWidth)) : LEFT_DEFAULT_W,
+      rightWidth: typeof value.rightWidth === 'number' && Number.isFinite(value.rightWidth) ? Math.max(260, Math.min(720, value.rightWidth)) : 360,
+    };
+  } catch {
+    return { leftCollapsed: false, rightCollapsed: true, focus: false, leftWidth: LEFT_DEFAULT_W, rightWidth: 360 };
+  }
+}
 
 /**
  * 消息角色。
@@ -261,7 +272,7 @@ const PINNED_VISIBLE_KEY = 'vivian.code_agent.pinned_summary_visible';
  */
 const PINNED_W_IDEAL = 250;
 const PINNED_W_MIN = 186;
-const CHAT_MIN_W = 430;
+const CHAT_MIN_W = WORKBENCH_READING_WIDTH;
 /**
  * 面板与正文之间的呼吸缝（px），随 `--codex-pinned-reserve` 一起给出去。
  *
@@ -271,25 +282,7 @@ const CHAT_MIN_W = 430;
  */
 const PINNED_GAP_W = 18;
 
-/**
- * 输入卡片「太窄就收起来」的阈值 —— 这是一条 CSS 容器查询，
- * 见 `CodeAgentPage.css` 的 `.codex-composer-inner { container-type: inline-size }`
- * 与 `@container (max-width: 447px)`。
- *
- * 折行边界是卡片自己的属性（实测可用宽 ≥ 410px 才不折行），所以应量卡片自己的可用宽度。
- * 容器查询量的正是容器内容盒宽度，且结构上不可能有反馈回路：
- * `container-type: inline-size` 蕴含 `contain: inline-size`，容器行内尺寸与内容无关，
- * 收起卡片不会反过来改变它的宽度。
- *
- * （此前用 JS 阈值判定：同一中栏宽度下消息视图与空状态卡片可用宽差约 60px / 119px，
- * 单一中栏阈值必然顾此失彼——空状态在 480~540px 间仍露着折行卡片。）
- */
-
-const MODES: Array<{ key: 'standard' | 'code' | 'minimal'; label: string; hint: string }> = [
-  { key: 'standard', label: '标准模式', hint: '功能完整的编码 Agent，支持文件编辑、Shell、文件与网页检索、Skills、计划、目标、子代理和工作流。' },
-  { key: 'code', label: '代码模式', hint: '通过 Code Mode SDK 呈现工具，让模型用一个 TypeScript 程序组合多步操作。' },
-  { key: 'minimal', label: '极简模式', hint: '仅提供持久 bash 与 str_replace_editor 的双工具编码 Agent。' },
-];
+// Composer container queries progressively wrap controls; the editor stays available.
 
 const PERMISSIONS: Array<{ key: 'read_only' | 'workspace_write' | 'full_access'; label: string; icon: React.ReactNode; hint: string }> = [
   { key: 'read_only', label: 'Read Only', icon: <Lock size={14} />, hint: '只读权限' },
@@ -478,13 +471,16 @@ const StatsLine: React.FC<{ stats?: CodingStats | null }> = ({ stats }) => {
   }
   if (groups.length === 0) return null;
   return (
-    <div className="codex-stats-line" title={groups.join(' | ')}>
+    <div className="codex-stats-disclosure">
+      <span className="codex-stats-hover-label" tabIndex={0}>{t('workbench.details')}<span>{formatDuration(stats.llm_ms + stats.tool_ms)}</span></span>
+      <div className="codex-stats-line" title={groups.join(' | ')}>
       {groups.map((g, i) => (
         <React.Fragment key={g}>
           {i > 0 && <span style={{ margin: '0 10px' }} aria-hidden>|</span>}
           <span>{g}</span>
         </React.Fragment>
       ))}
+      </div>
     </div>
   );
 };
@@ -643,13 +639,13 @@ const DropOverlay: React.FC<{ disabled?: boolean }> = ({ disabled }) => {
   return (
   <div role="status" className="codex-drop-overlay">
     <div className="codex-drop-overlay-inner">
-      <ImageIcon size={40} strokeWidth={1.4} style={{ color: 'var(--codex-ink-soft)' }} />
+      <FileIcon size={40} strokeWidth={1.4} style={{ color: 'var(--codex-ink-soft)' }} />
       <div style={{ marginTop: 16, fontSize: 20, fontWeight: 600, lineHeight: 28 }}>
-        {disabled ? t('mind_inspector.code_attach_unsupported') : t('mind_inspector.code_attach_drop')}
+        {disabled ? t('mind_inspector.code_attach_unsupported') : t('workbench.dropFiles')}
       </div>
       {!disabled && (
         <div style={{ marginTop: 12, fontSize: 13, color: 'var(--codex-ink-faint)' }}>
-          {t('mind_inspector.code_attach_support')}
+          {t('workbench.dropFilesHint')}
         </div>
       )}
     </div>
@@ -1092,7 +1088,7 @@ const ToolCallCard: React.FC<{
   durationMs?: number | null;
 }> = ({ name, argumentsJson, result, success, running, durationMs }) => {
   const { t } = useTranslation();
-  const [expanded, setExpanded] = useState(!!running);
+  const [expanded, setExpanded] = useState(success === false);
   const meta = toolMeta(name);
   const label = toolLabel(name, t);
   const tr = (key: string, opts?: Record<string, unknown>) => t(key, { ...opts, defaultValue: '' });
@@ -1104,30 +1100,23 @@ const ToolCallCard: React.FC<{
         ? 'var(--codex-danger)'
         : 'var(--codex-ink-faint)';
 
-  const prevRunning = useRef(!!running);
   const prevSuccess = useRef(success);
   useEffect(() => {
-    if (running) {
+    if (success === false && prevSuccess.current !== false) {
       setExpanded(true);
-    } else if (prevRunning.current && !running) {
-      setExpanded(success !== true);
-    } else if (prevSuccess.current == null && success != null) {
-      setExpanded(success !== true);
     }
-    prevRunning.current = !!running;
     prevSuccess.current = success;
-  }, [running, success]);
+  }, [success]);
 
   const argSum = toolArgSummary(argumentsJson, tr);
   const resSum = toolResultSummary(name, result, success, tr);
 
   return (
-    <div className="codex-tool-card">
-      <button type="button" onClick={() => setExpanded((v) => !v)} className="codex-tool-header">
+    <div className={`codex-tool-card${expanded ? ' expanded' : ''}${success === false ? ' failed' : ''}`}>
+      <button type="button" onClick={() => setExpanded((v) => !v)} className="codex-tool-header" aria-expanded={expanded} title={`${label} · ${name}${argSum ? ` · ${argSum}` : ''}`}>
         <span style={{ color: statusColor, display: 'inline-flex', flexShrink: 0 }}>{meta.icon}</span>
-        <span className="codex-tool-badge">{t('mind_inspector.code_tool_call')}</span>
         <span className="codex-tool-label">{label}</span>
-        <span className="codex-tool-name">{name}</span>
+        <span className="codex-tool-target">{argSum || name}</span>
         {durationMs != null && !running && (
           <span className="codex-tool-duration">{formatDuration(durationMs)}</span>
         )}
@@ -1140,7 +1129,7 @@ const ToolCallCard: React.FC<{
           <span className="codex-tool-status codex-tool-status-ok">{t('mind_inspector.code_tool_done')}</span>
         ) : success === false ? (
           <span className="codex-tool-status codex-tool-status-err">{t('mind_inspector.code_tool_failed')}</span>
-        ) : null}
+        ) : result === undefined ? <span className="codex-tool-status">{t('workbench.pending')}</span> : null}
         <span style={{ color: 'var(--codex-ink-soft)', display: 'inline-flex', flexShrink: 0 }}>
           {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
         </span>
@@ -1149,22 +1138,18 @@ const ToolCallCard: React.FC<{
         expanded && <FileToolBody path={filePathFromArgs(argumentsJson)} result={result} name={name} />
       ) : (
         <>
-          {/* 紧凑摘要行：仅折叠态显示（展开后由完整 IN/OUT 取代，避免重复占位/双虚线） */}
-          {!expanded && (argSum || resSum) && (
-            <div className="codex-tool-summary">
-              {argSum && (
-                <span className="codex-tool-summary-arg">{argSum}</span>
-              )}
-              {resSum && (
+          {/* Errors remain visible even when their details are collapsed. */}
+          {!expanded && success === false && resSum && (
+            <div className="codex-tool-summary" title={resSum}>
                 <span className={`codex-tool-summary-res${success === false ? ' codex-tool-summary-err' : ''}`}>
                   {resSum}
                 </span>
-              )}
             </div>
           )}
           {/* 展开后的完整详情：IN/OUT（内容为空则该栏不显示；都空则整个详情不渲染） */}
           {expanded && (
             <div className="codex-tool-detail">
+              <div className="codex-tool-detail-name">{name}</div>
               {!isInOutEmpty(argumentsJson) || (result !== undefined && !isInOutEmpty(result)) ? (
                 <div className="codex-inout-box">
                   {!isInOutEmpty(argumentsJson) && (
@@ -1212,13 +1197,14 @@ function groupChatMessages(messages: CodingMessage[], running: boolean): ChatRen
         group.push(messages[j]);
         j += 1;
       }
-      if (group.length >= 2) {
+      const rows = reconcileToolMessages(group);
+      if (rows.length >= 2) {
         const followed = messages
           .slice(j)
           .some((x) => x.role === 'assistant' || x.role === 'user');
-        items.push({ kind: 'group', msgs: group, index: i, settled: followed || !running });
+        items.push({ kind: 'group', msgs: rows, index: i, settled: followed || !running });
       } else {
-        group.forEach((msg, k) => items.push({ kind: 'msg', msg, index: i + k }));
+        rows.forEach((msg, k) => items.push({ kind: 'msg', msg, index: i + k }));
       }
       i = j;
     } else {
@@ -1237,16 +1223,22 @@ const ToolProcessGroup: React.FC<{
   cwd: string;
 }> = ({ msgs, settled, sessionRunning, cwd }) => {
   const { t } = useTranslation();
-  // 进行中的组默认展开（实时观察）；历史组默认折叠。轮次完成瞬间自动收纳，
-  // 之后用户可自由开合（不再被程序强制）
-  const [expanded, setExpanded] = useState(!settled);
+  // Keep routine activity compact. Failures reveal details; preserve explicit user expansion.
+  const [expanded, setExpanded] = useState(msgs.some((m) => m.tool_success === false));
+  const manuallyExpanded = useRef(false);
   const prevSettled = useRef(settled);
   useEffect(() => {
-    if (!prevSettled.current && settled) {
+    if (!prevSettled.current && settled && !manuallyExpanded.current && !msgs.some((m) => m.tool_success === false)) {
       setExpanded(false);
     }
     prevSettled.current = settled;
-  }, [settled]);
+  }, [settled, msgs]);
+  const failureCount = msgs.filter((m) => m.tool_success === false).length;
+  const previousFailures = useRef(failureCount);
+  useEffect(() => {
+    if (failureCount > previousFailures.current) setExpanded(true);
+    previousFailures.current = failureCount;
+  }, [failureCount]);
 
   // 组统计：步数 / 失败数 / 涉及文件数 / 总耗时 / 未完成步骤
   const stats = useMemo(() => {
@@ -1275,7 +1267,7 @@ const ToolProcessGroup: React.FC<{
         started += 1;
       }
     }
-    return { steps, failed, ms, files: files.size, pending: Math.max(0, started - steps) };
+    return { steps, failed, ms, files: files.size, pending: started };
   }, [msgs]);
 
   const metaParts: string[] = [];
@@ -1286,7 +1278,7 @@ const ToolProcessGroup: React.FC<{
 
   return (
     <div className={`codex-tool-group${expanded ? ' expanded' : ''}`}>
-      <button type="button" className="codex-tool-group-header" onClick={() => setExpanded((v) => !v)}>
+      <button type="button" className="codex-tool-group-header" aria-expanded={expanded} onClick={() => { manuallyExpanded.current = true; setExpanded((v) => !v); }}>
         <List size={13} style={{ color: 'var(--codex-ink-faint)', flexShrink: 0 }} />
         <span className="codex-tool-group-label">
           {t('mind_inspector.code_tool_group_label', { defaultValue: '工作过程' })}
@@ -1297,9 +1289,11 @@ const ToolProcessGroup: React.FC<{
         {stats.failed > 0 && (
           <span className="codex-tool-group-fail">✕ {stats.failed}</span>
         )}
-        {settled ? (
+        {stats.failed > 0 ? (
+          <span className="codex-tool-group-status codex-tool-status-err">{t('workbench.failed')}</span>
+        ) : settled ? (
           <span className="codex-tool-group-status codex-tool-group-status-ok">
-            {t('mind_inspector.code_tool_group_done', { defaultValue: '已完成' })}
+            {stats.pending > 0 ? t('workbench.stopped') : t('mind_inspector.code_tool_group_done', { defaultValue: '已完成' })}
           </span>
         ) : (
           <span className="codex-tool-group-status codex-tool-group-status-run">
@@ -1314,7 +1308,12 @@ const ToolProcessGroup: React.FC<{
           <ChevronDown size={14} />
         </span>
       </button>
-      <div className={`codex-tool-group-reveal${expanded ? ' open' : ''}`}>
+      {!expanded && !settled && (
+        <div className="codex-tool-group-current">
+          {t('workbench.currentTool', { tool: toolLabel(msgs.find((m) => m.role === 'tool_use')?.tool_name || msgs[msgs.length - 1]?.tool_name || '', t) })}
+        </div>
+      )}
+      <div className={`codex-tool-group-reveal${expanded ? ' open' : ''}`} {...(!expanded ? { inert: '' } : {})}>
         <div className="codex-tool-group-body">
           {msgs.map((msg, i) => {
             // 聚合落库的"工具调用意图"桩消息：参数与结果已由 tool_result 承载，跳过
@@ -1352,7 +1351,7 @@ const ToolProcessGroup: React.FC<{
                 }
                 result={msg.role === 'tool_result' ? msg.content : undefined}
                 success={msg.tool_success ?? null}
-                running={msg.role === 'tool_use' && sessionRunning}
+                running={msg.role === 'tool_use' && sessionRunning && !settled}
                 durationMs={msg.tool_duration_ms ?? null}
               />
             );
@@ -1768,8 +1767,12 @@ const GoalPlanBar: React.FC<{
 const MessageBubble: React.FC<{
   msg: CodingMessage;
   onOpenImage?: (src: string, alt: string) => void;
-}> = ({ msg, onOpenImage }) => {
+  onRetry?: () => void;
+  retryDisabled?: boolean;
+}> = ({ msg, onOpenImage, onRetry, retryDisabled }) => {
   const { t } = useTranslation();
+  const [errorDetailsOpen, setErrorDetailsOpen] = useState(false);
+  const errorDetailsId = React.useId();
   if (msg.role === 'user') {
     const imgs = msg.images ?? [];
     const refs = msg.file_refs ?? [];
@@ -1847,11 +1850,23 @@ const MessageBubble: React.FC<{
   if (msg.role === 'error') {
     return (
       <div className="codex-msg-error">
-        <XCircle size={14} style={{ marginTop: 2, color: 'var(--codex-danger)', flexShrink: 0 }} />
-        <span className="codex-msg-error-text">
-          <strong style={{ marginRight: 6 }}>{t('mind_inspector.code_error_label')}</strong>
-          {msg.content}
-        </span>
+        <div className="codex-msg-error-main">
+          <XCircle size={14} style={{ marginTop: 2, color: 'var(--codex-danger)', flexShrink: 0 }} />
+          <span className="codex-msg-error-text">
+            <strong style={{ marginRight: 6 }}>{t('mind_inspector.code_error_label')}</strong>
+            {msg.content}
+          </span>
+          <div className="codex-msg-error-actions">
+            <button type="button" className="codex-msg-error-link" aria-expanded={errorDetailsOpen} aria-controls={errorDetailsId} onClick={() => setErrorDetailsOpen(open => !open)}>{t('workbench.errorInfo')}</button>
+            <button type="button" className="codex-msg-error-link" disabled={retryDisabled || !onRetry} onClick={onRetry}>{t('workbench.retry')}</button>
+          </div>
+        </div>
+        {errorDetailsOpen && (
+          <div id={errorDetailsId} className="codex-msg-error-details">
+            <time dateTime={new Date(msg.timestamp).toISOString()}>{new Date(msg.timestamp).toLocaleString()}</time>
+            <pre>{msg.content}</pre>
+          </div>
+        )}
       </div>
     );
   }
@@ -1873,19 +1888,25 @@ const MessageBubble: React.FC<{
  * 写/改工具执行成功的那一刻宿主就知道动了哪个文件，因此既不会漏报也不会编造。
  * 行号同样来自实际 diff 的首个 hunk，拿不到时只显示文件名。
  */
-const ChangedFilesList: React.FC<{ files: CodingFileChangeView[] }> = ({ files }) => {
+const ChangedFilesList: React.FC<{ files: CodingFileChangeView[]; onViewChanges?: () => void }> = ({ files, onViewChanges }) => {
   const { t } = useTranslation();
+  const [expanded, setExpanded] = useState(true);
+  const { onOpenFile } = useContext(MarkdownFileContext);
+  const totals = files.reduce((sum, file) => ({ added: sum.added + file.added, removed: sum.removed + file.removed }), { added: 0, removed: 0 });
   return (
-    <div className="codex-changed-files">
-      <div className="codex-changed-files-title">
-        <FileEdit size={13} strokeWidth={1.8} />
-        {t('mind_inspector.code_changed_files', { defaultValue: '修改文件' })}
+    <div className="codex-change-summary">
+      <div className="codex-change-summary-head">
+        <FileEdit size={20} strokeWidth={1.6} aria-hidden />
+        <div className="codex-change-summary-title">
+          <strong>{t('workbench.editedFiles', { count: files.length })}</strong>
+          <span className="codex-change-summary-counts"><span className="codex-changes-add">+{totals.added}</span><span className="codex-changes-rem">−{totals.removed}</span></span>
+        </div>
+        <button type="button" className="codex-change-summary-view" onClick={onViewChanges}>{t('workbench.viewChanges')}</button>
       </div>
-      <div className="codex-changed-files-list">
-        {files.map((f) => (
-          <FileChip key={f.path} path={f.path} line={f.line} added={f.added} removed={f.removed} />
-        ))}
-      </div>
+      {expanded && <div className="codex-change-summary-files">
+        {files.map((file) => <div className="codex-change-summary-file" key={file.path}><button type="button" className="codex-change-summary-path" title={file.path} disabled={!onOpenFile} onClick={() => onOpenFile?.(file.path, file.line)}>{file.path}</button><span className="codex-change-summary-counts"><span className="codex-changes-add">+{file.added}</span><span className="codex-changes-rem">−{file.removed}</span></span></div>)}
+      </div>}
+      <button type="button" className="codex-change-summary-toggle" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}>{t(expanded ? 'workbench.collapseFiles' : 'workbench.expandFiles')}<ChevronDown size={14} style={{ transform: expanded ? 'rotate(180deg)' : undefined }} /></button>
     </div>
   );
 };
@@ -1896,19 +1917,22 @@ const MessageRow: React.FC<{
   index: number;
   feedback?: string | null;
   changedFiles?: CodingFileChangeView[] | null;
+  onViewChanges?: () => void;
   onCopy: (content: string) => void;
   onFork: (index: number) => void;
   onFeedback: (index: number, rating: string) => void;
   onOpenImage?: (src: string, alt: string) => void;
-}> = ({ msg, index, feedback, changedFiles, onCopy, onFork, onFeedback, onOpenImage }) => {
+  onRetry?: () => void;
+  retryDisabled?: boolean;
+}> = ({ msg, index, feedback, changedFiles, onViewChanges, onCopy, onFork, onFeedback, onOpenImage, onRetry, retryDisabled }) => {
   const { t } = useTranslation();
   const isUser = msg.role === 'user';
   const hasActions = isUser || msg.role === 'assistant';
   return (
     <div className="codex-msg-row">
-      <MessageBubble msg={msg} onOpenImage={onOpenImage} />
+      <MessageBubble msg={msg} onOpenImage={onOpenImage} onRetry={onRetry} retryDisabled={retryDisabled} />
       {msg.role === 'assistant' && changedFiles && changedFiles.length > 0 && (
-        <ChangedFilesList files={changedFiles} />
+        <ChangedFilesList files={changedFiles} onViewChanges={onViewChanges} />
       )}
       {hasActions && (
         <div className={`codex-msg-actions${isUser ? ' codex-msg-actions-end' : ''}`}>
@@ -2123,55 +2147,6 @@ const WorkspaceFileTree: React.FC<{
 
 // ============ 下拉组件 ============
 
-const ModeDropdown: React.FC<{
-  value: string;
-  onChange: (mode: string) => void;
-  disabled?: boolean;
-}> = ({ value, onChange, disabled }) => {
-  const { t } = useTranslation();
-  const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement | null>(null);
-  const currentMode = MODES.find((m) => m.key === value) || MODES[0];
-
-  useEffect(() => {
-    const onDocDown = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
-    };
-    window.addEventListener('mousedown', onDocDown);
-    return () => window.removeEventListener('mousedown', onDocDown);
-  }, []);
-
-  return (
-    <div ref={ref} className="codex-dropdown">
-      <button type="button" disabled={disabled} onClick={() => setOpen((o) => !o)} className="codex-dropdown-trigger">
-        <span style={{ display: 'inline-flex', flexShrink: 0 }}><Sparkles size={14} /></span>
-        <span>{t(`mind_inspector.code_mode_label_${currentMode.key}`, { defaultValue: currentMode.label })}</span>
-        <ChevronDown size={12} style={{ color: 'var(--codex-ink-faint)', flexShrink: 0 }} />
-      </button>
-      {open && (
-        <div className="codex-dropdown-menu" style={{ maxWidth: 320 }}>
-          {MODES.map((mode) => (
-            <button
-              key={mode.key}
-              type="button"
-              onClick={() => { onChange(mode.key); setOpen(false); }}
-              className={`codex-dropdown-item ${mode.key === value ? 'selected' : ''}`}
-              style={{ flexDirection: 'column', alignItems: 'flex-start', gap: 2 }}
-            >
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%' }}>
-                <span style={{ fontWeight: 600 }}>{t(`mind_inspector.code_mode_label_${mode.key}`, { defaultValue: mode.label })}</span>
-                <div style={{ flex: 1 }} />
-                {mode.key === value && <span style={{ display: 'inline-flex', color: 'var(--codex-ink)' }}><Check size={14} /></span>}
-              </div>
-              <span className="codex-dropdown-hint">{t(`mind_inspector.code_mode_hint_${mode.key}`, { defaultValue: mode.hint })}</span>
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-};
-
 const PermissionDropdown: React.FC<{
   value: string;
   onChange: (permission: string) => void;
@@ -2194,10 +2169,10 @@ const PermissionDropdown: React.FC<{
   }, []);
 
   return (
-    <div ref={ref} className="codex-dropdown">
-      <button type="button" onClick={() => setOpen((o) => !o)} className="codex-dropdown-trigger">
+    <div ref={ref} className="codex-dropdown codex-permission-dropdown">
+      <button type="button" onClick={() => setOpen((o) => !o)} className="codex-dropdown-trigger" title={currentPerm.label} aria-label={currentPerm.label} aria-expanded={open}>
         <span style={{ display: 'inline-flex', flexShrink: 0 }}>{currentPerm.icon}</span>
-        <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{currentPerm.label}</span>
+        <span className="codex-permission-label" style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{currentPerm.label}</span>
         <ChevronDown size={11} style={{ color: 'var(--codex-ink-faint)', flexShrink: 0 }} />
       </button>
       {open && (
@@ -2383,14 +2358,14 @@ const ModelDropdown: React.FC<{
   const displayModel = models.find((m) => m.id === model)?.name ?? (model || models[0]?.name || '');
 
   return (
-    <div ref={ref} className="codex-dropdown">
-      <button type="button" onClick={() => setOpen((o) => !o)} className={`codex-dropdown-trigger${highlight ? ' codex-model-highlight' : ''}`}>
-        <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 170 }}>{displayModel}</span>
-        <span style={{ color: 'var(--codex-ink-faint)', flexShrink: 0 }}>{currentLevel.label}</span>
+    <div ref={ref} className="codex-dropdown codex-model-dropdown">
+      <button type="button" onClick={() => setOpen((o) => !o)} className={`codex-dropdown-trigger${highlight ? ' codex-model-highlight' : ''}`} title={`${displayModel} · ${currentLevel.label}`} aria-label={t('mind_inspector.code_model_label')} aria-expanded={open}>
+        <span className="codex-model-label">{displayModel || t('mind_inspector.code_model_label')}</span>
+        <span className="codex-reasoning-label" style={{ color: 'var(--codex-ink-faint)', flexShrink: 0 }}>{currentLevel.label}</span>
         <ChevronDown size={11} style={{ color: 'var(--codex-ink-faint)', flexShrink: 0 }} />
       </button>
       {open && (
-        <div className="codex-dropdown-menu" style={{ minWidth: 240, maxWidth: 320 }}>
+        <div className="codex-dropdown-menu">
           <div className="codex-dropdown-label">{t('mind_inspector.code_model_label')}</div>
           {models.length === 0 ? (
             <div className="codex-dropdown-empty">
@@ -3712,12 +3687,57 @@ const CodeAgentPage: React.FC = () => {
   const [budgetHint, setBudgetHint] = useState(false);
 
   // 左右侧边栏收纳与宽度
-  const [leftCollapsed, setLeftCollapsed] = useState(false);
-  const [rightCollapsed, setRightCollapsed] = useState(false);
-  const [leftWidth, setLeftWidth] = useState(LEFT_DEFAULT_W);
-  const [rightWidth, setRightWidth] = useState(360);
+  const [initialLayout] = useState(savedLayout);
+  const [leftCollapsed, setLeftCollapsed] = useState(initialLayout.leftCollapsed);
+  const [rightCollapsed, setRightCollapsed] = useState(initialLayout.rightCollapsed);
+  const [leftWidth, setLeftWidth] = useState(initialLayout.leftWidth);
+  const [rightWidth, setRightWidth] = useState(initialLayout.rightWidth);
+  const [focusMode, setFocusMode] = useState(initialLayout.focus);
+  const [rootWidth, setRootWidth] = useState(() => window.innerWidth - 16);
+  const [leftDrawerOpen, setLeftDrawerOpen] = useState(false);
+  const layout = workbenchLayout(rootWidth, leftWidth, rightWidth, leftCollapsed, rightCollapsed, focusMode);
+  const leftDrawer = layout.autoLeft && leftDrawerOpen && !focusMode;
+  const shownLeftCollapsed = layout.leftCollapsed && !leftDrawer;
   /** 工作区根节点：右侧栏拖动上限要按它的实际宽度算（窗口尺寸可变，不能写死） */
   const rootRef = useRef<HTMLDivElement | null>(null);
+  useLayoutEffect(() => {
+    const root = rootRef.current;
+    if (!root) return;
+    const measure = () => setRootWidth(root.clientWidth);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(root);
+    return () => observer.disconnect();
+  }, []);
+  const toggleLeftSidebar = useCallback(() => {
+    setFocusMode(false);
+    if (layout.autoLeft) { setRightCollapsed(true); setLeftDrawerOpen((open) => !open); }
+    else setLeftCollapsed((collapsed) => !collapsed);
+  }, [layout.autoLeft]);
+  useEffect(() => { setLeftDrawerOpen(false); }, [activeId]);
+  useEffect(() => {
+    if (!layout.rightDrawer && !leftDrawer) return;
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const panel = rootRef.current?.querySelector<HTMLElement>(leftDrawer ? '.codex-sidebar.drawer' : '.codex-inspector.drawer');
+    Array.from(panel?.querySelectorAll<HTMLElement>('button, select, [tabindex="0"]') || []).find((element) => element.getClientRects().length > 0)?.focus();
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Tab' && panel) {
+        const controls = Array.from(panel.querySelectorAll<HTMLElement>('button:not(:disabled), select, input, textarea, [tabindex="0"]')).filter((element) => element.getClientRects().length > 0 && getComputedStyle(element).visibility !== 'hidden');
+        const first = controls[0];
+        const last = controls[controls.length - 1];
+        if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+        else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+      }
+      if (event.key !== 'Escape' || event.defaultPrevented || event.isComposing) return;
+      setLeftDrawerOpen(false);
+      if (layout.rightDrawer) setRightCollapsed(true);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      if (previousFocus?.isConnected && !previousFocus.closest('[inert]')) previousFocus.focus();
+    };
+  }, [layout.rightDrawer, leftDrawer]);
   const resizeRef = useRef<{ side: 'left' | 'right'; startX: number; startWidth: number; maxWidth: number } | null>(null);
   /**
    * 正在拖拽调宽的那一侧。
@@ -3727,6 +3747,13 @@ const CodeAgentPage: React.FC = () => {
    * 变化、必须触发重渲染（只在按下 / 松开各变一次，开销可忽略）。
    */
   const [resizing, setResizing] = useState<'left' | 'right' | null>(null);
+  useEffect(() => {
+    if (resizing) return;
+    try {
+      localStorage.setItem(LAYOUT_STORAGE_KEY, JSON.stringify({ leftCollapsed, rightCollapsed, leftWidth, rightWidth, focus: focusMode }));
+    } catch { /* Layout still works without storage. */ }
+  }, [leftCollapsed, rightCollapsed, leftWidth, rightWidth, focusMode, resizing]);
+
 
   /**
    * 置顶摘要（主工作区右侧信息列）的显隐。
@@ -3764,6 +3791,8 @@ const CodeAgentPage: React.FC = () => {
    */
   const mainBodyRef = useRef<HTMLDivElement | null>(null);
   const [mainBodyW, setMainBodyW] = useState(0);
+  const pinnedAvailable = !focusMode && mainBodyW >= CHAT_MIN_W + PINNED_W_MIN + PINNED_GAP_W;
+  const shownPinned = pinnedVisible && pinnedAvailable;
 
   /**
    * 对话区滚动条的实测宽度。
@@ -3797,16 +3826,9 @@ const CodeAgentPage: React.FC = () => {
   /** 置顶摘要展开时的实际宽度：先满足对话区的最小可用宽度，剩下的才给面板 */
   const pinnedWidth = useMemo(() => {
     if (mainBodyW <= 0) return PINNED_W_IDEAL;
-    const spare = mainBodyW - CHAT_MIN_W;
+    const spare = mainBodyW - CHAT_MIN_W - PINNED_GAP_W;
     return Math.max(PINNED_W_MIN, Math.min(PINNED_W_IDEAL, spare));
   }, [mainBodyW]);
-
-  /**
-   * 「输入卡片过窄就收起来」的判据不在这里，在 CSS —— 见文件顶部那段注释，
-   * 以及 `CodeAgentPage.css` 的 `@container (max-width: 447px)`。
-   * 这里不需要任何状态：容器查询量的是输入槽自己的可用宽度，消息视图与空状态
-   * 各按各的算，天然正确。
-   */
 
   // 会话列表视图
   const [sessionView, setSessionView] = useState<'workspace' | 'flat'>('workspace');
@@ -3862,6 +3884,8 @@ const CodeAgentPage: React.FC = () => {
       return [...prev, { path, key: `pv-${previewCounter.current}` }];
     });
     setRightTab('preview');
+    setFocusMode(false);
+    setLeftDrawerOpen(false);
     setRightCollapsed(false);
   }, []);
 
@@ -3886,7 +3910,6 @@ const CodeAgentPage: React.FC = () => {
   const [draftImages, setDraftImages] = useState<DraftAttachment[]>([]);
   const [dragActive, setDragActive] = useState(false);
   const [lightbox, setLightbox] = useState<{ src: string; alt: string } | null>(null);
-  const dragDepthRef = useRef(0);
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<ComposerEditorHandle | null>(null);
@@ -3984,6 +4007,8 @@ const CodeAgentPage: React.FC = () => {
   }, [rightTab, termTabs.length, ensureTermTab]);
 
   const toggleRightSidebar = useCallback(() => {
+    setFocusMode(false);
+    setLeftDrawerOpen(false);
     setRightCollapsed((v) => !v);
   }, []);
 
@@ -4002,9 +4027,9 @@ const CodeAgentPage: React.FC = () => {
   const maxRightWidth = useCallback(() => {
     const root = rootRef.current;
     if (!root) return Number.MAX_SAFE_INTEGER;
-    const leftOccupied = (leftCollapsed ? 54 : leftWidth) + RESIZE_HANDLE_W * 2;
+    const leftOccupied = (layout.leftCollapsed ? 54 : leftWidth) + RESIZE_HANDLE_W * 2;
     return Math.max(260, root.clientWidth - leftOccupied - WORKSPACE_MIN_W);
-  }, [leftCollapsed, leftWidth]);
+  }, [layout.leftCollapsed, leftWidth]);
 
   const startResize = useCallback((e: React.MouseEvent, side: 'left' | 'right') => {
     e.preventDefault();
@@ -4015,17 +4040,17 @@ const CodeAgentPage: React.FC = () => {
       startWidth: side === 'left' ? leftWidth : rightWidth,
       // 上限在按下那一刻定死：拖动期间左侧栏不会变，按当下布局算最直观，
       // 也免得在 mousemove 里读到闭包里的旧值。
-      maxWidth: side === 'right' ? maxRightWidth() : Number.MAX_SAFE_INTEGER,
+      maxWidth: side === 'right' ? maxRightWidth() : Math.max(180, rootWidth - WORKSPACE_MIN_W - RESIZE_HANDLE_W * 2 - (!layout.rightCollapsed && !layout.rightDrawer ? rightWidth : 0)),
     };
     setResizing(side);
-  }, [leftWidth, rightWidth, maxRightWidth]);
+  }, [leftWidth, rightWidth, maxRightWidth, rootWidth, layout.rightCollapsed, layout.rightDrawer]);
 
   useEffect(() => {
     const onMove = (e: MouseEvent) => {
       const r = resizeRef.current;
       if (!r) return;
       if (r.side === 'left') {
-        setLeftWidth(Math.max(180, Math.min(460, r.startWidth + (e.clientX - r.startX))));
+        setLeftWidth(Math.max(180, Math.min(460, r.maxWidth, r.startWidth + (e.clientX - r.startX))));
       } else {
         setRightWidth(Math.max(260, Math.min(r.maxWidth, r.startWidth - (e.clientX - r.startX))));
       }
@@ -4041,25 +4066,6 @@ const CodeAgentPage: React.FC = () => {
       window.removeEventListener('mouseup', onUp);
     };
   }, []);
-
-  /**
-   * 约束一变，就把已经拉出来的宽度收回去。
-   *
-   * 光在拖动那一刻夹住还不够 —— `rightWidth` 是存下来的状态，之后有三种情况会让
-   * 它变得不合法：窗口变小、**左侧栏被拖宽**、左侧栏展开 / 收起。
-   * 尤其第二条：右栏先拉到上限、再把左栏拖宽，主区域照样会被压过
-   * `WORKSPACE_MIN_W` —— 那就等于「保证」没兑现。
-   *
-   * 依赖 `maxRightWidth` 本身（它只在 `leftCollapsed` / `leftWidth` 变时才换新），
-   * 于是这几件事都会触发重新夹一次，不必逐个列依赖。
-   * 夹完若值没变，`setState` 会 bail out，不会多渲染一轮。
-   */
-  useEffect(() => {
-    const clamp = () => setRightWidth((w) => Math.min(w, maxRightWidth()));
-    clamp();
-    window.addEventListener('resize', clamp);
-    return () => window.removeEventListener('resize', clamp);
-  }, [maxRightWidth]);
 
   const handleAddTermTab = useCallback(() => {
     const cwd = activeSession?.working_directory ?? '';
@@ -4107,82 +4113,62 @@ const CodeAgentPage: React.FC = () => {
     });
   }, []);
 
+  const addFilePaths = useCallback(async (paths: string[]) => {
+    for (const path of paths) {
+      try {
+        if (/\.(png|jpe?g|webp|gif)$/i.test(path)) {
+          const resp = await fetch(convertFileSrc(path));
+          if (!resp.ok) throw new Error(t('mind_inspector.code_img_read_failed'));
+          const blob = await resp.blob();
+          const ext = path.split('.').pop()?.toLowerCase();
+          const mime = ext === 'jpg' || ext === 'jpeg' ? 'image/jpeg' : `image/${ext}`;
+          addImages([new File([blob], path.split(/[\\/]/).pop() || 'image', { type: mime })]);
+        } else {
+          const file = await saveSharedFile(path);
+          setDraftRefs((prev) => [...prev, { path: file.path, label: file.filename }]);
+        }
+      } catch (e) {
+        notifyError(`${path.split(/[\\/]/).pop()}: ${String(e)}`);
+      }
+    }
+    inputRef.current?.focus();
+  }, [addImages, notifyError, t]);
+
   const handleAttachClick = useCallback(async () => {
     try {
       const picked = await openDialog({
         directory: false,
         multiple: true,
         defaultPath: activeSession?.working_directory ?? undefined,
-        filters: [{ name: t('mind_inspector.code_attach_image'), extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif'] }],
       });
       if (picked === null) return;
       const paths = Array.isArray(picked) ? picked : [picked];
-      const files: File[] = [];
-      for (const p of paths) {
-        try {
-          const resp = await fetch(convertFileSrc(p)).catch(() => null);
-          if (!resp?.ok) continue;
-          const blob = await resp.blob();
-          const mime = blob.type || 'image/png';
-          files.push(new File([blob], p.split(/[\\/]/).pop() || 'image', { type: mime }));
-        } catch { /* 跳过不可读文件 */ }
-      }
-      if (files.length === 0) {
-        notifyError(t('mind_inspector.code_img_read_failed'));
-      }
-      addImages(files);
+      await addFilePaths(paths);
     } catch (e) {
       notifyError(t('mind_inspector.code_img_add_failed', { e: String(e) }));
     }
-  }, [activeSession, addImages, t, notifyError]);
+  }, [activeSession, addFilePaths, t, notifyError]);
 
   useEffect(() => {
-    const fileTransfer = (event: DragEvent): DataTransfer | null => {
-      const dt = event.dataTransfer;
-      if (dt === null || !dt.types.includes('Files')) return null;
-      return dt;
-    };
-    const reset = (): void => {
-      dragDepthRef.current = 0;
-      setDragActive(false);
-    };
-    const onDragEnter = (event: DragEvent): void => {
-      if (fileTransfer(event) === null) return;
-      event.preventDefault();
-      dragDepthRef.current += 1;
-      setDragActive(true);
-    };
-    const onDragOver = (event: DragEvent): void => {
-      const dt = fileTransfer(event);
-      if (dt === null) return;
-      event.preventDefault();
-      dt.dropEffect = 'copy';
-    };
-    const onDragLeave = (event: DragEvent): void => {
-      if (fileTransfer(event) === null) return;
-      dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
-      if (dragDepthRef.current === 0) setDragActive(false);
-    };
-    const onDrop = (event: DragEvent): void => {
-      const dt = fileTransfer(event);
-      if (dt === null) return;
-      event.preventDefault();
-      reset();
-      addImages([...dt.files]);
-    };
-    document.addEventListener('dragenter', onDragEnter);
-    document.addEventListener('dragover', onDragOver);
-    document.addEventListener('dragleave', onDragLeave);
-    document.addEventListener('drop', onDrop);
-    window.addEventListener('dragend', reset);
+    let disposed = false;
+    let unlisten: UnlistenFn | undefined;
+    void getCurrentWindow().onDragDropEvent(({ payload }) => {
+      if (disposed) return;
+      if (payload.type === 'leave') { setDragActive(false); return; }
+      // Native positions are physical pixels relative to the webview.
+      const rect = rootRef.current?.querySelector('.codex-main')?.getBoundingClientRect();
+      const x = payload.position.x / window.devicePixelRatio;
+      const y = payload.position.y / window.devicePixelRatio;
+      const inside = !!rect && x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+      setDragActive(inside && payload.type !== 'drop');
+      if (inside && payload.type === 'drop') void addFilePaths(payload.paths);
+    }).then((off) => { if (disposed) off(); else unlisten = off; })
+      .catch((e) => { if (!disposed) notifyError(String(e)); });
     return () => {
-      document.removeEventListener('dragenter', onDragEnter);
-      document.removeEventListener('dragover', onDragOver);
-      document.removeEventListener('dragleave', onDragLeave);
-      document.removeEventListener('drop', onDrop);
-      window.removeEventListener('dragend', reset);
+      disposed = true;
+      unlisten?.();
     };
-  }, [addImages]);
+  }, [addFilePaths, notifyError]);
 
   const loadFileTree = useCallback(async (wd: string, expandRoot = true) => {
     if (!wd) { setFileTree([]); return; }
@@ -4251,10 +4237,10 @@ const CodeAgentPage: React.FC = () => {
     new WebviewWindow('config', {
       url: '/?view=config&tab=ai',
       title: t('config.title'),
-      width: 768,
-      height: 624,
-      minWidth: 768,
-      minHeight: 624,
+      width: 1120,
+      height: 760,
+      minWidth: 880,
+      minHeight: 600,
       decorations: false,
       transparent: false,
       shadow: true,
@@ -4269,8 +4255,10 @@ const CodeAgentPage: React.FC = () => {
       if (list.length > 0 && !activeIdRef.current) {
         const latest = [...list].sort((a, b) => b.updated_at - a.updated_at)[0];
         setActiveId(latest.session_id);
+        setRunning(latest.status === 'running');
         setMessages(latest.messages ?? []);
         setPermission(latest.permission ?? 'workspace_write');
+        setStats(latest.stats ?? null);
         setReasoningLevel(latest.reasoning_level ?? 'high');
         setModelName(latest.model_id ?? (await loadActiveModelId()) ?? '');
         void loadFileTree(latest.working_directory);
@@ -4643,15 +4631,6 @@ const CodeAgentPage: React.FC = () => {
     }
   }, [activeId, refreshSessions, switchSession, t, notifyError]);
 
-  const handleSetMode = useCallback(async (mode: string) => {
-    if (!activeId || running) return;
-    if ((activeSession?.mode ?? 'standard') === mode) return;
-    try {
-      await invoke('coding_set_mode', { sessionId: activeId, mode });
-      setSessions((prev) => prev.map((s) => (s.session_id === activeId ? { ...s, mode } : s)));
-    } catch { /* ignore */ }
-  }, [activeId, running, activeSession]);
-
   // ===== 工作区管理（主工作区 + 附加工作区）=====
   /** 只更新本地会话记录：工作区命令都返回最新列表，不必整表刷新。 */
   const patchSessionWorkspaces = useCallback(
@@ -4794,6 +4773,12 @@ const CodeAgentPage: React.FC = () => {
         if (!isMine(p)) return;
         setThinking(true);
         setThinkingText('');
+      });
+      await add('coding:stream_reset', (p) => {
+        if (!isMine(p)) return;
+        setStreamingText('');
+        setThinkingText('');
+        setThinking(true);
       });
       // 自动压缩上下文：开始/结束是宿主状态，不是错误。
       // 全程保持 thinking 指示器，避免压缩结束到主请求首 token 之间出现空档。
@@ -4947,11 +4932,11 @@ const CodeAgentPage: React.FC = () => {
       if (e.repeat) return;
       // 必须挡：浏览器默认用 Ctrl+B 打开书签管理器
       e.preventDefault();
-      setLeftCollapsed((v) => !v);
+      toggleLeftSidebar();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, []);
+  }, [toggleLeftSidebar]);
 
   // 「新会话」下拉菜单：点击外部或按 Esc 关闭（与页面其它下拉框一致）
   useEffect(() => {
@@ -5010,14 +4995,14 @@ const CodeAgentPage: React.FC = () => {
   }, [activeId]);
 
   /** 发送一条新的用户消息（供"继续"按钮等复用；无图片） */
-  const sendContinuation = useCallback((text: string) => {
+  const sendContinuation = useCallback((text: string, preserveInput = false) => {
     if (!activeId || running) return;
     setRunning(true);
     atBottomRef.current = true;
     setAtBottom(true);
     setBudgetStopped(false);
     setBudgetHint(false);
-    setInput('');
+    if (!preserveInput) setInput('');
     setMessages((prev) => [...prev, { role: 'user', content: text, timestamp: Date.now() }]);
     void invoke('coding_send_message', { sessionId: activeId, message: text }).catch((e) => {
       setMessages((prev) => [...prev, { role: 'error', content: String(e), timestamp: Date.now() }]);
@@ -5363,6 +5348,16 @@ const CodeAgentPage: React.FC = () => {
     sessionGroups.get(key)!.push(s);
   }
 
+  const quickStarts = (
+    <div className="codex-quick-starts">
+      {(['Project', 'Changes', 'Fix'] as const).map((kind) => (
+        <button key={kind} type="button" onClick={() => { handleInputChange(t(`workbench.prompt${kind}`)); inputRef.current?.focus(); }}>
+          {kind === 'Project' ? <FolderTree size={15} /> : kind === 'Changes' ? <FileDiff size={15} /> : <Wrench size={15} />}
+          <span>{t(`workbench.example${kind}`)}</span><ChevronRight size={13} />
+        </button>
+      ))}
+    </div>
+  );
   const composer = (
     <div className="codex-composer">
       {draftImages.length > 0 && (
@@ -5455,7 +5450,7 @@ const CodeAgentPage: React.FC = () => {
         <div className="codex-composer-left">
           <button
             type="button"
-            title={t('mind_inspector.code_attach', { defaultValue: '添加图片' })}
+            title={t('workbench.attachFiles')}
             onClick={() => void handleAttachClick()}
             className="codex-icon-btn"
           >
@@ -5510,11 +5505,15 @@ const CodeAgentPage: React.FC = () => {
 
   return (
     <MarkdownFileContext.Provider value={mdFileCtx}>
-    <div className="codex-theme workbench-root" ref={rootRef}>
+    <div className={`codex-theme workbench-root${focusMode ? ' focus-mode' : ''}`} ref={rootRef} data-right-drawer={layout.rightDrawer || undefined}>
+      {(layout.rightDrawer || leftDrawer) && <button type="button" className="codex-drawer-backdrop" aria-label={t('workbench.dismiss')} onClick={() => { setLeftDrawerOpen(false); if (layout.rightDrawer) setRightCollapsed(true); }} />}
       {/* ===== 左侧：任务会话栏 ===== */}
       <aside
-        className={`codex-sidebar ${leftCollapsed ? 'collapsed' : ''}${resizing === 'left' ? ' resizing' : ''}`}
-        style={{ width: leftCollapsed ? 54 : leftWidth }}
+        className={`codex-sidebar ${shownLeftCollapsed ? 'collapsed' : ''}${layout.autoLeft && !leftDrawer ? ' auto-collapsed' : ''}${leftDrawer ? ' drawer' : ''}${resizing === 'left' ? ' resizing' : ''}`}
+        style={{ width: shownLeftCollapsed ? 54 : Math.min(leftWidth, rootWidth - 20) }}
+        role={leftDrawer ? 'dialog' : 'complementary'}
+        aria-label={t('mind_inspector.code_expand_left')}
+        aria-modal={leftDrawer || undefined}
       >
         <div className="codex-brand">
           {/* 品牌标题不随收起卸载：卸载的话动画一开始标题就没了，只剩宽度在缩，
@@ -5525,19 +5524,19 @@ const CodeAgentPage: React.FC = () => {
           </span>
           <button
             type="button"
-            onClick={() => setLeftCollapsed((v) => !v)}
+            onClick={toggleLeftSidebar}
             className="codex-sidebar-collapse-btn"
             /* 提示里带上快捷键，否则 Ctrl+B 没人发现得了。
                本工程为 Windows 目标，直接写 Ctrl+B，不做平台判定。 */
-            title={`${leftCollapsed ? t('mind_inspector.code_expand_left') : t('mind_inspector.code_collapse_left')} (Ctrl+B)`}
-            aria-label={`${leftCollapsed ? t('mind_inspector.code_expand_left') : t('mind_inspector.code_collapse_left')} (Ctrl+B)`}
+            title={`${shownLeftCollapsed ? t('mind_inspector.code_expand_left') : t('mind_inspector.code_collapse_left')} (Ctrl+B)`}
+            aria-label={`${shownLeftCollapsed ? t('mind_inspector.code_expand_left') : t('mind_inspector.code_collapse_left')} (Ctrl+B)`}
           >
-            {leftCollapsed ? <PanelLeftOpen size={16} /> : <PanelLeftClose size={16} />}
+            {shownLeftCollapsed ? <PanelLeftOpen size={16} /> : <PanelLeftClose size={16} />}
           </button>
         </div>
         {/* 会话列表与新建按钮同样常驻渲染，收起时由 CSS 淡出 + 收掉占位，
             这样宽度动画期间内容是「跟着滑走」而不是「先消失再收缩」。 */}
-        <div className="codex-new-row" ref={newMenuRef}>
+        <div className="codex-new-row" ref={newMenuRef} {...(shownLeftCollapsed ? { inert: '' } : {})}>
             <button type="button" onClick={() => void handleCreate()} disabled={creating} className="codex-new-btn">
               <Plus size={15} />
               {t('mind_inspector.code_new_session', { defaultValue: '新建任务' })}
@@ -5585,7 +5584,7 @@ const CodeAgentPage: React.FC = () => {
             )}
         </div>
 
-        <div className="codex-sidebar-scroll">
+        <div className="codex-sidebar-scroll" {...(shownLeftCollapsed ? { inert: '' } : {})}>
           {activeSession?.working_directory ? (
             <div className="codex-sidebar-section codex-tree-section">
               <button
@@ -5705,6 +5704,10 @@ const CodeAgentPage: React.FC = () => {
                       <div
                         key={s.session_id}
                         onClick={() => switchSession(s)}
+                        role="button"
+                        tabIndex={0}
+                        aria-current={active ? 'true' : undefined}
+                        onKeyDown={(event) => { if (event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); switchSession(s); } }}
                         onContextMenu={(e) => { e.preventDefault(); setSessionMenu({ id: s.session_id, x: e.clientX, y: e.clientY }); }}
                         className={`codex-session-item ${active ? 'active' : ''}`}
                         title={s.title || t('mind_inspector.code_untitled', { defaultValue: '未命名' })}
@@ -5814,6 +5817,10 @@ const CodeAgentPage: React.FC = () => {
                           <div
                             key={s.session_id}
                             onClick={() => switchSession(s)}
+                            role="button"
+                            tabIndex={0}
+                            aria-current={active ? 'true' : undefined}
+                            onKeyDown={(event) => { if (event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); switchSession(s); } }}
                             onContextMenu={(e) => { e.preventDefault(); setSessionMenu({ id: s.session_id, x: e.clientX, y: e.clientY }); }}
                             className={`codex-session-item ${active ? 'active' : ''}`}
                             title={s.title || t('mind_inspector.code_untitled', { defaultValue: '未命名' })}
@@ -5883,12 +5890,12 @@ const CodeAgentPage: React.FC = () => {
 
       {/* 拖拽手柄常驻（收起时淡出并停用），否则它一消失布局会瞬跳 6px */}
       <div
-        className={`codex-resize-handle left${leftCollapsed ? ' hidden' : ''}`}
+        className={`codex-resize-handle left${layout.leftCollapsed || leftDrawer ? ' hidden' : ''}`}
         onMouseDown={(e) => startResize(e, 'left')}
       />
 
       {/* ===== 中央：对话区 ===== */}
-      <main className="codex-main">
+      <main className="codex-main" {...(layout.rightDrawer || leftDrawer ? { inert: '' } : {})}>
         <header className="codex-topbar">
           <div className="codex-path">
             <FolderOpen size={13} style={{ flexShrink: 0 }} />
@@ -5896,14 +5903,16 @@ const CodeAgentPage: React.FC = () => {
               <span className="codex-topbar-title">
                 {activeSession?.title || t('mind_inspector.code_untitled', { defaultValue: '未命名' })}
               </span>
+              <span className="codex-topbar-path" title={activeSession?.working_directory || defaultWorkspace}>
+                {activeSession?.working_directory || defaultWorkspace || t('mind_inspector.code_no_workspace')}
+              </span>
             </span>
           </div>
           <div className="codex-topbar-actions">
-            <ModeDropdown
-              value={activeSession?.mode ?? 'standard'}
-              onChange={(mode) => void handleSetMode(mode)}
-              disabled={running || !activeSession}
-            />
+            <button type="button" className="codex-icon-btn" aria-pressed={focusMode} title={t(focusMode ? 'workbench.focusExit' : 'workbench.focus')} aria-label={t(focusMode ? 'workbench.focusExit' : 'workbench.focus')} onClick={() => { setLeftDrawerOpen(false); setFocusMode((mode) => !mode); }}>
+              {focusMode ? <Minimize2 size={15} /> : <Maximize2 size={15} />}
+            </button>
+
               {running && (
                 <span className="codex-working">
                   {t('mind_inspector.code_working', { defaultValue: '工作中…' })}
@@ -5917,28 +5926,29 @@ const CodeAgentPage: React.FC = () => {
               <button
                 type="button"
                 onClick={togglePinnedSummary}
-                title={pinnedVisible
+                disabled={!pinnedAvailable}
+                title={!pinnedAvailable ? t('workbench.summarySpace') : shownPinned
                   ? t('mind_inspector.pinned_hide')
                   : t('mind_inspector.pinned_show')}
-                aria-label={pinnedVisible
+                aria-label={!pinnedAvailable ? t('workbench.summarySpace') : shownPinned
                   ? t('mind_inspector.pinned_hide')
                   : t('mind_inspector.pinned_show')}
-                aria-pressed={pinnedVisible}
+                aria-pressed={shownPinned}
                 className="codex-icon-btn"
-                style={{ background: pinnedVisible ? 'var(--codex-tape-blue)' : 'var(--codex-tape-yellow)' }}
+                style={{ background: shownPinned ? 'var(--codex-tape-blue)' : 'var(--codex-tape-yellow)' }}
               >
                 <StickyNote size={15} />
               </button>
               <button
                 type="button"
                 onClick={toggleRightSidebar}
-                title={rightCollapsed ? t('mind_inspector.code_expand_right') : t('mind_inspector.code_collapse_right')}
-                aria-label={rightCollapsed ? t('mind_inspector.code_expand_right') : t('mind_inspector.code_collapse_right')}
-                aria-expanded={!rightCollapsed}
+                title={layout.rightCollapsed ? t('mind_inspector.code_expand_right') : t('mind_inspector.code_collapse_right')}
+                aria-label={layout.rightCollapsed ? t('mind_inspector.code_expand_right') : t('mind_inspector.code_collapse_right')}
+                aria-expanded={!layout.rightCollapsed}
                 className="codex-icon-btn"
-                style={{ background: rightCollapsed ? 'var(--codex-tape-yellow)' : 'var(--codex-tape-blue)' }}
+                style={{ background: layout.rightCollapsed ? 'var(--codex-tape-yellow)' : 'var(--codex-tape-blue)' }}
               >
-                {rightCollapsed ? <PanelRightOpen size={15} /> : <PanelRightClose size={15} />}
+                {layout.rightCollapsed ? <PanelRightOpen size={15} /> : <PanelRightClose size={15} />}
               </button>
             </div>
           </header>
@@ -5973,18 +5983,16 @@ const CodeAgentPage: React.FC = () => {
           className={`codex-main-body${resizing ? ' resizing' : ''}`}
         >
           <div
-            className="codex-main-col"
+            className={`codex-main-col${pinnedVisible && !pinnedAvailable ? ' auto-summary-hidden' : ''}`}
             style={{
-              // 动画值：收起时为 0，面板宽度过渡与留白过渡都跟它走
-              '--codex-pinned-w': `${pinnedVisible ? pinnedWidth : 0}px`,
-              // 展开值：收起期间保持不变，内层靠它维持展开宽度（裁切而不重排）
+              // 固定宽度：显隐动画只做纵向裁剪。
               '--codex-pinned-w-expanded': `${pinnedWidth}px`,
               // 为面板让出的总宽度（面板 + 呼吸缝）。收起时必须是 0——
               // 若留着呼吸缝，正文会一直偏左，左右内边距不再对称。
               // 不加滚动条宽：槽位于 `.codex-chat` 的 border 与 padding 之间，
               // 正文可用宽本来就扣掉了它，所以 padding-right 给到「面板 + 缝」
               // 就足以让正文右缘停在面板左侧 PINNED_GAP_W 处。
-              '--codex-pinned-reserve': pinnedVisible
+              '--codex-pinned-reserve': shownPinned
                 ? `${pinnedWidth + PINNED_GAP_W}px`
                 : '0px',
               '--codex-sb-w': `${scrollbarW}px`,
@@ -6002,16 +6010,8 @@ const CodeAgentPage: React.FC = () => {
                         {defaultWorkspace ? t('mind_inspector.code_hero_sub_default') : t('mind_inspector.code_hero_sub')}
                       </div>
                     </div>
-                    {/* 空状态里的输入卡片长在 `.codex-chat` → `.codex-empty` 里面，
-                        比消息视图那张卡**多吃两层左右内边距**（`--codex-chat-pad-x`
-                        + `.codex-empty` 的 20px，实测共约 119px）。同一个中栏宽度下它更窄、
-                        折行得更早 —— 所以隐藏阈值必须挂在「卡片自己能拿到多少宽度」上，
-                        也就是这个槽的宽度。这里复用 `.codex-composer-inner`：它既是消息视图
-                        里的同一个「输入槽」，也带着 `container-type: inline-size` 与
-                        `max-width: 780px`，于是隐藏规则和测度上限都自动跟上。
-                        `width: 100%` 必须留着 —— `.codex-empty` 是 `align-items: center`
-                        的纵向 flex，不给宽度的话子项会收缩成内容宽。 */}
                     <div className="codex-composer-inner" style={{ width: '100%' }}>{composer}</div>
+                    {quickStarts}
                   </div>
                 ) : messages.length === 0 ? (
                   <div className="codex-empty">
@@ -6024,9 +6024,8 @@ const CodeAgentPage: React.FC = () => {
                         {activeSession.working_directory || t('mind_inspector.code_no_workspace')}
                       </div>
                     </div>
-                    {/* 同上：空会话（hero）这一支的输入槽也走 `.codex-composer-inner`，
-                        过窄时一起被收起来。 */}
                     <div className="codex-composer-inner" style={{ width: '100%' }}>{composer}</div>
+                    {quickStarts}
                   </div>
                 ) : (
                   <>
@@ -6106,10 +6105,13 @@ const CodeAgentPage: React.FC = () => {
                               msg={msg}
                               feedback={msgFeedback[i] ?? null}
                               changedFiles={msgChanges[i] ?? null}
+                              onViewChanges={() => { setFocusMode(false); setLeftDrawerOpen(false); setRightCollapsed(false); setRightTab('changes'); }}
                               onCopy={handleCopyMessage}
                               onFork={(idx) => void handleFork(idx)}
                               onFeedback={(idx, rating) => void handleFeedback(idx, rating)}
                               onOpenImage={(src, alt) => setLightbox({ src, alt })}
+                              onRetry={() => sendContinuation(t('mind_inspector.code_continue_task'), true)}
+                              retryDisabled={running || !activeId}
                             />
                           </React.Fragment>
                         );
@@ -6200,18 +6202,15 @@ const CodeAgentPage: React.FC = () => {
                 整块显隐由顶栏「模式下拉」与「检查器开关」之间的那个按钮控制。 */}
             <PinnedSummary
               workingDirectory={activeSession?.working_directory ?? ''}
-              visible={pinnedVisible}
+              visible={shownPinned}
             />
           </div>
         </div>
 
-        {/* 这里原本有一个「窗口太窄」的提示块，按用户要求去掉了 ——
-            中栏过窄时只把输入卡片收起来（见 `.codex-composer-inner` 的容器查询），
-            界面上不加任何说明文字。 */}
       </main>
 
       <div
-        className={`codex-resize-handle right${rightCollapsed ? ' hidden' : ''}`}
+        className={`codex-resize-handle right${layout.rightCollapsed || layout.rightDrawer ? ' hidden' : ''}`}
         onMouseDown={(e) => startResize(e, 'right')}
       />
 
@@ -6220,11 +6219,23 @@ const CodeAgentPage: React.FC = () => {
           内层固定为展开宽度，由外层的 overflow:hidden 裁切：这样动画期间内容是
           「整块滑出去」，不会被逐帧压窄重排（终端和代码预览一旦重排会明显抖动）。 */}
       <aside
-        className={`codex-inspector ${rightCollapsed ? 'collapsed' : ''}${resizing === 'right' ? ' resizing' : ''}`}
-        style={{ width: rightCollapsed ? 0 : rightWidth }}
+        className={`codex-inspector ${layout.rightCollapsed ? 'collapsed' : ''}${layout.rightDrawer ? ' drawer' : ''}${resizing === 'right' ? ' resizing' : ''}`}
+        aria-label={t('mind_inspector.code_expand_right')}
+        role={layout.rightDrawer ? 'dialog' : 'complementary'}
+        aria-modal={layout.rightDrawer || undefined}
+        {...(layout.rightCollapsed ? { inert: '' } : {})}
+        style={{ width: layout.rightCollapsed ? 0 : layout.rightWidth }}
       >
-        <div className="codex-inspector-inner" style={{ width: rightWidth }}>
+        <div className="codex-inspector-inner" style={{ width: layout.rightWidth }}>
           <div className="codex-inspector-tabs" ref={inspectorTabsRef}>
+            <select className="codex-inspector-tab-select" value={rightTab} aria-label={t('mind_inspector.code_expand_right')} onChange={(event) => setRightTab(event.target.value as typeof rightTab)}>
+              <option value="overview">{t('mind_inspector.code_inspector_overview')}</option>
+              <option value="trajectory">{t('mind_inspector.code_inspector_trajectory')}</option>
+              <option value="changes">{t('mind_inspector.code_tab_changes')}{activeSession?.file_changes?.length ? ` (${activeSession.file_changes.length})` : ''}</option>
+              <option value="preview">{t('mind_inspector.code_tab_preview')}</option>
+              <option value="terminal">{t('mind_inspector.code_tab_terminal')}</option>
+            </select>
+            {layout.rightDrawer && <button type="button" className="codex-icon-btn codex-drawer-close" aria-label={t('workbench.dismiss')} title={t('workbench.dismiss')} onClick={() => setRightCollapsed(true)}><X size={15} /></button>}
             <button
               type="button"
               onClick={() => setRightTab('overview')}
@@ -6251,6 +6262,7 @@ const CodeAgentPage: React.FC = () => {
             >
               <FileDiff size={14} />
               <span className="codex-inspector-tab-label">{t('mind_inspector.code_tab_changes')}</span>
+              {!!activeSession?.file_changes?.length && <span className="codex-tab-count">{activeSession.file_changes.length}</span>}
             </button>
             <button
               type="button"
@@ -6269,6 +6281,7 @@ const CodeAgentPage: React.FC = () => {
             >
               <TerminalIcon size={14} />
               <span className="codex-inspector-tab-label">{t('mind_inspector.code_tab_terminal')}</span>
+              {running && termTabs.length > 0 && <span className="codex-tab-dot" aria-label={t('mind_inspector.code_working')} />}
             </button>
           </div>
 
@@ -6277,10 +6290,11 @@ const CodeAgentPage: React.FC = () => {
               {/* 待办清单置顶（任务推进的核心） */}
               <WorkTodosCard key={activeId ?? 'none'} sessionId={activeId ?? ''} />
 
-              {/* 上下文空间：上下文占用与构成占比 */}
-              <ContextSpaceCard session={activeSession} />
-
               <DeliverablesCard cwd={activeSession?.working_directory ?? ''} deliverables={deliverables} onOpen={openPreview} />
+              <details className="codex-overview-details">
+                <summary>{t('workbench.details')}</summary>
+                <ContextSpaceCard session={activeSession} />
+              </details>
 
               {queue.length > 0 && (
                 <div className="codex-info-card">

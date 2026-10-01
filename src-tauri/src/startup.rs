@@ -348,8 +348,8 @@ pub(crate) fn open_config_with_guide(handle: &AppHandle) {
         WebviewUrl::App("index.html?view=config&guide=1".into()),
     )
     .title("设置")
-    .inner_size(768.0, 624.0)
-    .min_inner_size(768.0, 624.0)
+    .inner_size(1120.0, 760.0)
+    .min_inner_size(880.0, 600.0)
     .decorations(false)
     .transparent(false)
     .shadow(true)

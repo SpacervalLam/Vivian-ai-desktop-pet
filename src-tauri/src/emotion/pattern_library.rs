@@ -28,6 +28,9 @@ const PATTERN_EDIT_MIN_INTERVAL_SECS: f64 = 3600.0;
 const MAX_PATTERNS: usize = 30;
 /// 单轮注入 prompt 的句式条目上限。
 const RENDER_MAX: usize = 1;
+const PATTERN_INTENT_MIN_CONFIDENCE: f64 = 0.4;
+const PATTERN_SIGNAL_MIN_CONFIDENCE: f64 = 0.4;
+const PATTERN_EMOTION_MIN_CONFIDENCE: f64 = 0.45;
 
 /// 单条句子模式的"命中条件"
 ///
@@ -79,6 +82,58 @@ fn default_version() -> u32 {
     1
 }
 
+fn default_directive(id: &str, lang: &str) -> Option<&'static str> {
+    Some(match (id, lang) {
+        ("daily_choice", "en") => "When asked to choose, give one clear recommendation with a reason. Ask about preferences only when they affect the choice; do not invent personal experience or tastes",
+        ("daily_choice", "ja") => "選択を頼まれたら、理由を添えて一つ勧める。好みや条件が選択を左右する時だけ確認し、自分の経験や好みを作り話にしない",
+        ("daily_choice", _) => "当对方确实在请你帮忙选择时，先给一个有理由的明确建议；有偏好或重要取舍尚不清楚时再询问。不要为了显得果断而假装有个人经历或口味",
+        ("sharing_joy", "en") => "Respond to a specific detail in their good news. Ask a follow-up only when it arises naturally; keep praise or congratulations tied to the event",
+        ("sharing_joy", "ja") => "嬉しい知らせの具体的な点に触れる。自然に聞きたいことがある時だけ質問し、祝福や称賛はその出来事に即して伝える",
+        ("sharing_joy", _) => "回应分享中的具体细节；如果真有自然的问题再追问，不要把追问当成必选结尾。祝贺或赞赏要贴合事情本身，避免套话",
+        ("venting", "en") => "Respond to what specifically went wrong and match their tone without amplifying anger. If they have not asked what to do, do not rush into advice",
+        ("venting", "ja") => "何が問題だったか具体的に受け止め、怒りを強めずに相手の調子に合わせる。対処法を求められていなければ、助言を急がない",
+        ("venting", _) => "先回应具体哪里出了问题，语气跟随对方但不模仿或升级愤怒。对方没问怎么办时，不急着给方案或讲道理",
+        ("tired_short", "en") => "If they clearly sound tired or low, avoid lengthy comfort or an unsolicited checklist; still answer any question they actually asked",
+        ("tired_short", "ja") => "疲れや落ち込みが明確なら、長い慰めや求められていない行動リストを避ける。ただし、実際の質問にはきちんと答える",
+        ("tired_short", _) => "若对方明确表达疲惫或低落，避免长篇安慰和未经请求的行动清单；仍然完整回答对方实际提出的问题",
+        ("casual_chat", "en") => "Keep the exchange natural and match its length. A casual message does not always need a new topic, question, summary, or forced slang",
+        ("casual_chat", "ja") => "会話の長さと調子に合わせて自然に返す。毎回新しい話題や質問、要約、無理な俗語を足す必要はない",
+        ("casual_chat", _) => "保持轻松、自然，长度跟随对话；不必把每句话都扩展成正式话题、追问或总结，也不必刻意使用网络语气",
+        ("goodbye", "en") => "Close naturally in the current tone; avoid an unnecessary recap, exaggerated sentiment, or a stock farewell",
+        ("goodbye", "ja") => "今の会話の調子に合わせて自然に締めくくる。不要な要約や大げさな感傷、定型的な別れの言葉は避ける",
+        ("goodbye", _) => "自然收尾并匹配当前语气；避免不必要的总结、煽情或程式化客套",
+        _ => return None,
+    })
+}
+
+fn legacy_default_directive(id: &str) -> Option<&'static str> {
+    Some(match id {
+        "daily_choice" => "用户让你替他想/做选择时，不要列成'你可以A也可以B'的菜单——直接给一个你自己的明确选择，再反问一句他怎么想。比如对方不知道吃啥，就报一个你自己想吃的，比'想吃这个也行那个也行'像人话",
+        "sharing_joy" => "顺着一个具体的点追问下去（比如'真的假的，当时什么情况'），祝福或夸也要落到细节上，别笼统回'太好了'或'为你开心'",
+        "venting" => "先顺着他的话一起'啧'一声或骂一句，再最多接一句——不要一口气给出整套解决方案，不要讲道理。共情比建议重要",
+        "tired_short" => "回得短，两句以内，一句实际的关心（比如'去歇会儿'）就够——不要长篇大论安慰，更不要列'你该做什么'的清单",
+        "casual_chat" => "像发微信一样短接一句：语气词、吐槽、随口一问都行，不需要完整句子，更不要开启正式话题或给对话做总结",
+        "goodbye" => "干净利落地收尾，一两句，不煽情、不总结今天聊了什么、不用'期待下次'式客套",
+        _ => return None,
+    })
+}
+
+fn refresh_legacy_defaults(file: &mut PatternLibraryFile) -> bool {
+    let mut changed = false;
+    for pattern in &mut file.patterns {
+        if let (Some(old), Some(new)) = (
+            legacy_default_directive(&pattern.id),
+            default_directive(&pattern.id, "zh"),
+        ) {
+            if pattern.directives.len() == 1 && pattern.directives[0] == old {
+                pattern.directives[0] = new.to_string();
+                changed = true;
+            }
+        }
+    }
+    changed
+}
+
 impl PatternLibraryFile {
     pub fn new() -> Self {
         Self {
@@ -109,7 +164,7 @@ fn default_patterns() -> Vec<ReplyPattern> {
             match_emotions: vec![],
             match_relationship: vec![],
             directives: vec![
-                "用户让你替他想/做选择时，不要列成'你可以A也可以B'的菜单——直接给一个你自己的明确选择，再反问一句他怎么想。比如对方不知道吃啥，就报一个你自己想吃的，比'想吃这个也行那个也行'像人话".to_string(),
+                default_directive("daily_choice", "zh").unwrap().to_string(),
             ],
             enabled: true,
         },
@@ -121,7 +176,7 @@ fn default_patterns() -> Vec<ReplyPattern> {
             match_emotions: vec!["happy".into(), "excited".into(), "grateful".into()],
             match_relationship: vec![],
             directives: vec![
-                "顺着一个具体的点追问下去（比如'真的假的，当时什么情况'），祝福或夸也要落到细节上，别笼统回'太好了'或'为你开心'".to_string(),
+                default_directive("sharing_joy", "zh").unwrap().to_string(),
             ],
             enabled: true,
         },
@@ -134,7 +189,7 @@ fn default_patterns() -> Vec<ReplyPattern> {
             match_emotions: vec![],
             match_relationship: vec![],
             directives: vec![
-                "先顺着他的话一起'啧'一声或骂一句，再最多接一句——不要一口气给出整套解决方案，不要讲道理。共情比建议重要".to_string(),
+                default_directive("venting", "zh").unwrap().to_string(),
             ],
             enabled: true,
         },
@@ -146,7 +201,7 @@ fn default_patterns() -> Vec<ReplyPattern> {
             match_emotions: vec!["tired".into(), "sad".into(), "anxious".into()],
             match_relationship: vec![],
             directives: vec![
-                "回得短，两句以内，一句实际的关心（比如'去歇会儿'）就够——不要长篇大论安慰，更不要列'你该做什么'的清单".to_string(),
+                default_directive("tired_short", "zh").unwrap().to_string(),
             ],
             enabled: true,
         },
@@ -158,7 +213,7 @@ fn default_patterns() -> Vec<ReplyPattern> {
             match_emotions: vec![],
             match_relationship: vec![],
             directives: vec![
-                "像发微信一样短接一句：语气词、吐槽、随口一问都行，不需要完整句子，更不要开启正式话题或给对话做总结".to_string(),
+                default_directive("casual_chat", "zh").unwrap().to_string(),
             ],
             enabled: true,
         },
@@ -170,7 +225,7 @@ fn default_patterns() -> Vec<ReplyPattern> {
             match_emotions: vec![],
             match_relationship: vec![],
             directives: vec![
-                "干净利落地收尾，一两句，不煽情、不总结今天聊了什么、不用'期待下次'式客套".to_string(),
+                default_directive("goodbye", "zh").unwrap().to_string(),
             ],
             enabled: true,
         },
@@ -208,7 +263,12 @@ impl PatternLibrary {
         let file_path = Self::store_path(char_id);
         let pat_lib = match std::fs::read_to_string(&file_path) {
             Ok(text) => serde_json::from_str::<PatternLibraryFile>(&text)
-                .map(|f| {
+                .map(|mut f| {
+                    if refresh_legacy_defaults(&mut f) {
+                        if let Err(e) = Self::save_to_disk(char_id, &f) {
+                            tracing::warn!("[PatternLibrary:{}] 更新默认句式失败: {}", char_id, e);
+                        }
+                    }
                     tracing::info!(
                         "[PatternLibrary:{}] 已加载 {} 条句式",
                         char_id,
@@ -262,13 +322,19 @@ fn pattern_matches(p: &ReplyPattern, fp: &FastPerceptionResult) -> bool {
     if !p.enabled || p.directives.is_empty() {
         return false;
     }
-    let intent_ok = p.match_intents.is_empty() || p.match_intents.iter().any(|l| l == &fp.intent.label);
+    let intent_ok = p.match_intents.is_empty()
+        || (fp.intent.confidence >= PATTERN_INTENT_MIN_CONFIDENCE
+            && p.match_intents.iter().any(|l| l == &fp.intent.label));
     let topic_ok = p.match_topics.is_empty()
-        || fp.topics.iter().any(|t| p.match_topics.contains(&t.label));
+        || fp.topics.iter().any(|t| {
+            t.confidence >= PATTERN_SIGNAL_MIN_CONFIDENCE && p.match_topics.contains(&t.label)
+        });
     let emotion_ok = p.match_emotions.is_empty()
-        || p.match_emotions.iter().any(|l| l == &fp.emotion.emotion);
+        || (fp.emotion.confidence.unwrap_or(0.0) >= PATTERN_EMOTION_MIN_CONFIDENCE
+            && p.match_emotions.iter().any(|l| l == &fp.emotion.emotion));
     let rel_ok = p.match_relationship.is_empty()
-        || p.match_relationship.iter().any(|l| l == &fp.relationship_signal.label);
+        || (fp.relationship_signal.confidence >= PATTERN_SIGNAL_MIN_CONFIDENCE
+            && p.match_relationship.iter().any(|l| l == &fp.relationship_signal.label));
     intent_ok && topic_ok && emotion_ok && rel_ok
 }
 
@@ -282,7 +348,7 @@ fn specificity(p: &ReplyPattern) -> usize {
 /// 复用 `FastPerceptionResult`（即用于选择表情的那套嵌入分类结果），
 /// 只按标签匹配，不触发第二次嵌入。无命中或指令为空时返回 `None`。
 pub fn select_guidance(fp: &FastPerceptionResult, char_id: &str) -> Option<String> {
-    if fp.intent.confidence <= 0.0 {
+    if fp.intent.confidence < PATTERN_INTENT_MIN_CONFIDENCE {
         return None; // 未分类成功（例如低于相似度阈值），不强行套句式
     }
     let lib = PatternLibrary::get(char_id);
@@ -307,11 +373,17 @@ pub fn render_guidance(lib: &PatternLibraryFile, fp: &FastPerceptionResult) -> O
     });
     hits.truncate(RENDER_MAX);
 
+    let lang = normalize_lang(&crate::i18n::get_language());
     let mut directives: Vec<&str> = Vec::new();
     for p in &hits {
         for d in &p.directives {
-            if !directives.contains(&d.as_str()) {
-                directives.push(d);
+            let localized = if default_directive(&p.id, "zh") == Some(d.as_str()) {
+                default_directive(&p.id, lang).unwrap_or(d)
+            } else {
+                d
+            };
+            if !directives.contains(&localized) {
+                directives.push(localized);
             }
         }
     }
@@ -319,7 +391,6 @@ pub fn render_guidance(lib: &PatternLibraryFile, fp: &FastPerceptionResult) -> O
         return None;
     }
 
-    let lang = normalize_lang(&crate::i18n::get_language());
     let heading = match lang {
         "en" => "One optional reply cue (delivery only, not required content):",
         "ja" => "任意の返し方ヒント（テンポだけ、必須内容ではない）：",
@@ -477,12 +548,27 @@ mod tests {
     }
 
     #[test]
+    fn refresh_updates_only_unchanged_legacy_defaults() {
+        let mut lib = default_lib();
+        lib.patterns[0].directives = vec![legacy_default_directive("daily_choice").unwrap().into()];
+        lib.patterns[1].directives = vec!["用户自己的句式".into()];
+        lib.patterns[2].enabled = false;
+
+        assert!(refresh_legacy_defaults(&mut lib));
+        assert_eq!(lib.patterns[0].directives[0], default_directive("daily_choice", "zh").unwrap());
+        assert_eq!(lib.patterns[1].directives[0], "用户自己的句式");
+        assert!(!lib.patterns[2].enabled);
+        assert!(!refresh_legacy_defaults(&mut lib));
+        assert!(default_directive("daily_choice", "en").unwrap().is_ascii());
+    }
+
+    #[test]
     fn test_render_on_daily_choice() {
         let fp = perception("question", &["daily_life"], "neutral");
         let guid = render_guidance(&default_lib(), &fp);
         assert!(guid.is_some());
         let g = guid.unwrap();
-        assert!(g.contains("建议句式"));
+        assert!(g.contains("选择"));
         assert!(g.contains("选择"));
     }
 
@@ -491,7 +577,7 @@ mod tests {
         let fp = perception("complaint", &[], "angry");
         let guid = render_guidance(&default_lib(), &fp);
         assert!(guid.is_some());
-        assert!(guid.unwrap().contains("共情"));
+        assert!(guid.unwrap().contains("具体"));
     }
 
     #[test]

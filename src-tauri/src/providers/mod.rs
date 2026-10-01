@@ -7,6 +7,7 @@ pub mod factory;
 pub mod gemini;
 pub mod openai_compat;
 pub mod openai_responses;
+pub mod openai_agents;
 pub mod reasoning;
 pub mod router;
 pub mod schema;
@@ -15,6 +16,7 @@ pub mod thinking_stripper;
 pub(crate) mod tool_history;
 pub mod usage_store;
 pub mod wenxin;
+pub mod web_citations;
 pub mod zhipu;
 
 // 声明式协议引擎 + JS 插件宿主（provider 全链路插件化的核心）

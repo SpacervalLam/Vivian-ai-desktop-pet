@@ -43,6 +43,7 @@ struct SceneEntry {
 ///
 /// 每个角色一个实例，惰性初始化 embedding 缓存。
 pub struct ToneInjector {
+    pub(crate) examples: super::example_retriever::ExampleRetriever,
     /// 角色 ID
     char_id: String,
     /// 场景列表（按 scenes.md 顺序）
@@ -71,6 +72,7 @@ impl ToneInjector {
         );
 
         Self {
+            examples: super::example_retriever::ExampleRetriever::new(char_id, Arc::clone(&embedding)),
             char_id: char_id.to_string(),
             scenes: RwLock::new(scenes),
             embedding,
@@ -123,6 +125,12 @@ impl ToneInjector {
     /// A learned scene already has an experience-backed response tendency.
     /// Do not reintroduce its old factory lines at the end of the prompt.
     pub fn build_tone_injection_growing(&self, user_input: &str, lang: &str, learned: &[&str]) -> Option<String> {
+        self.build_tone_injection_with_embedding(user_input, lang, learned, None)
+    }
+
+    pub(crate) fn preload(&self) { self.ensure_initialized(); self.examples.preload(); }
+
+    pub(crate) fn build_tone_injection_with_embedding(&self, user_input: &str, lang: &str, learned: &[&str], query_embedding: Option<&[f32]>) -> Option<String> {
         if user_input.trim().is_empty() {
             return None;
         }
@@ -148,7 +156,11 @@ impl ToneInjector {
 
         // 2. embedding 匹配（secondary，仅远程 embedding 时启用）
         if self.embedding.is_remote() {
-            if let Ok(query_emb) = self.embedding.embed(match_text) {
+            let query_emb = query_embedding
+                .filter(|embedding| embedding.len() == self.embedding.dimension() && embedding.iter().all(|value| value.is_finite()))
+                .map(std::borrow::Cow::Borrowed)
+                .or_else(|| self.embedding.embed(match_text).ok().map(std::borrow::Cow::Owned));
+            if let Some(query_emb) = query_emb {
                 let mut best: Option<(&SceneEntry, f64)> = None;
                 for scene in scenes.iter() {
                     for sample_emb in &scene.sample_embeddings {
@@ -197,11 +209,11 @@ fn format_injection(scene: &SceneEntry, score: f64, match_type: &str, lang: &str
     let header = crate::pipeline::prompt_modules::section_heading("scene_tone", lang);
     let (match_label, sim_label, intro) = match lang_norm {
         "en" => ("match", "similarity",
-            "These are at most two optional cadence references, not lines to perform. The user's current register wins; use none if they do not fit, and never reuse a distinctive phrase verbatim:"),
+            "At most two optional scene reminders follow. Infer the actual situation from the conversation first; ignore reminders that do not fit. They are not dialogue to repeat:"),
         "ja" => ("マッチ", "類似度",
-            "最大二つの任意のテンポ参考であり、演じる台詞ではない。今のユーザーの言葉遣いを優先し、合わなければ使わず、特徴的な原文をそのまま繰り返さない："),
+            "最大二つの任意の場面メモ。まず会話から状況を読み取り、合わないものは無視する。繰り返す台詞ではない："),
         _ => ("命中", "相似度",
-            "以下最多两句只是可选的节奏参考，不是待完成的台词。当前用户语气优先；不自然就完全不用，也不要复述有辨识度的原句："),
+            "以下最多两条是可选的场景提醒。先从对话判断实际情境，不吻合就忽略；它们不是需要复述的台词："),
     };
 
     format!(

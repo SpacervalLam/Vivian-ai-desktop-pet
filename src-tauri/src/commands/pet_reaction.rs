@@ -33,6 +33,40 @@ use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use tauri::State;
 
+/// Observed input only; mouse hardware does not provide physical force.
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PetInteractionMetrics {
+    click_count: Option<u32>,
+    window_ms: Option<f64>,
+    interval_ms: Option<f64>,
+    press_duration_ms: Option<f64>,
+    drag_speed_px_per_ms: Option<f64>,
+    drag_distance_px: Option<f64>,
+}
+
+impl PetInteractionMetrics {
+    fn prompt_facts(&self) -> String {
+        let mut facts = Vec::new();
+        if let (Some(count), Some(window)) = (self.click_count, self.window_ms) {
+            if window.is_finite() && window > 0.0 {
+                facts.push(format!("最近 {window:.0} 毫秒内点击了 {count} 次"));
+            }
+        }
+        for (label, value, unit) in [
+            ("距上次点击", self.interval_ms, "毫秒"),
+            ("本次按住时长", self.press_duration_ms, "毫秒"),
+            ("拖动峰值速度", self.drag_speed_px_per_ms, "像素/毫秒"),
+            ("拖动轨迹总长度", self.drag_distance_px, "像素"),
+        ] {
+            if let Some(v) = value.filter(|v| v.is_finite() && *v >= 0.0) {
+                facts.push(format!("{label}：{v:.2} {unit}"));
+            }
+        }
+        facts.join("；")
+    }
+}
+
 use crate::pipeline::prompt_modules::build_tool_minimal_identity;
 use crate::providers::base::LLMRequest;
 use crate::state::AppState;
@@ -40,7 +74,7 @@ use crate::types::response::ChatMessage;
 
 // ============ 动作常量 ============
 
-/// 单击摸头
+/// 单击
 pub const ACTION_SINGLE_CLICK: &str = "single_click";
 /// 双击
 pub const ACTION_DOUBLE_CLICK: &str = "double_click";
@@ -48,6 +82,8 @@ pub const ACTION_DOUBLE_CLICK: &str = "double_click";
 pub const ACTION_ROUGH_CLICK: &str = "rough_click";
 /// 长按（进度环走满）
 pub const ACTION_LONG_PRESS: &str = "long_press";
+/// 普通拖动结束
+pub const ACTION_DRAG: &str = "drag";
 /// 拖动过快（拖动期间被判定疯狂甩动）
 pub const ACTION_FAST_DRAG: &str = "fast_drag";
 /// 甩飞撞到屏幕边缘
@@ -111,12 +147,13 @@ fn throttle_pass(char_id: &str, action: &str, now: f64) -> bool {
 /// `name` 是角色名（Vivian / Nana / Vivian / Nana），用于第三人称动作里指代自己。
 fn action_prompt_line(name: &str, action: &str, impact: Option<f64>) -> String {
     match action {
-        ACTION_SINGLE_CLICK => "用户用鼠标轻轻戳了戳你的脑袋，像是在摸头。".to_string(),
-        ACTION_DOUBLE_CLICK => "用户连着快速点了你两下，看起来有话想说。".to_string(),
+        ACTION_SINGLE_CLICK => "用户用鼠标点了你的桌宠形象一下。".to_string(),
+        ACTION_DOUBLE_CLICK => "用户连着快速点了你两下。".to_string(),
         ACTION_ROUGH_CLICK => {
             "用户戳你戳得太急太频繁了，跟摸头完全不是一回事，你有点被惹毛了。".to_string()
         }
-        ACTION_LONG_PRESS => "用户按住你不放，按了整整一秒才松手。".to_string(),
+        ACTION_LONG_PRESS => "用户按住你，已达到长按触发时长；此时可能还没有松手。".to_string(),
+        ACTION_DRAG => "用户按住并拖动了你的桌宠形象，速度和距离见观测数据。".to_string(),
         ACTION_FAST_DRAG => {
             "用户抓住你疯狂甩动，把你晃得头晕目眩、眼冒金星。".to_string()
         }
@@ -139,10 +176,11 @@ fn action_prompt_line(name: &str, action: &str, impact: Option<f64>) -> String {
 /// 返回 `None` 表示该动作不值得记账（当前没有这类动作，保留扩展位）。
 fn action_ledger_text(name: &str, action: &str, impact: Option<f64>) -> Option<String> {
     let text = match action {
-        ACTION_SINGLE_CLICK => format!("用户戳了戳{name}的脑袋，摸了摸头"),
-        ACTION_DOUBLE_CLICK => format!("用户快速双击了{name}，像是想跟她说话"),
+        ACTION_SINGLE_CLICK => format!("用户点击了{name}的桌宠形象"),
+        ACTION_DOUBLE_CLICK => format!("用户快速双击了{name}"),
         ACTION_ROUGH_CLICK => format!("用户连着猛戳了{name}好几下，把她惹毛了"),
-        ACTION_LONG_PRESS => format!("用户按住{name}不放，长按了整整一秒"),
+        ACTION_LONG_PRESS => format!("用户按住{name}，触发了长按"),
+        ACTION_DRAG => format!("用户拖动了{name}的桌宠形象"),
         ACTION_FAST_DRAG => format!("用户抓着{name}疯狂甩动，把她晃得头晕目眩"),
         ACTION_EDGE_BOUNCE => {
             let force = impact.unwrap_or(0.0);
@@ -164,6 +202,7 @@ fn action_tag(action: &str) -> &'static str {
         ACTION_DOUBLE_CLICK => "pet_double_click",
         ACTION_ROUGH_CLICK => "pet_rough_click",
         ACTION_LONG_PRESS => "pet_long_press",
+        ACTION_DRAG => "pet_drag",
         ACTION_FAST_DRAG => "pet_fast_drag",
         ACTION_EDGE_BOUNCE => "pet_edge_bounce",
         _ => "pet_action",
@@ -174,9 +213,10 @@ fn action_tag(action: &str) -> &'static str {
 
 /// 生成一次桌宠反应（前端在用户操作桌宠后调用）。
 ///
-/// - `action`：`single_click` / `double_click` / `rough_click` / `long_press` / `fast_drag` / `edge_bounce`
+/// - `action`：`single_click` / `double_click` / `rough_click` / `long_press` / `drag` / `fast_drag` / `edge_bounce`
 /// - `impact`：撞击力度（仅 `edge_bounce` 有值，来自后端甩飞线程）
 /// - `character_id`：缺省用当前活跃角色
+/// - `metrics`：点击节奏、按住时长与拖动速度等观测数据；缺省兼容旧调用
 ///
 /// 返回生成的一句话；被节流跳过、未配置模型或生成失败时返回 `None`（静默）。
 #[tauri::command]
@@ -185,10 +225,11 @@ pub async fn generate_pet_reaction(
     action: String,
     impact: Option<f64>,
     character_id: Option<String>,
+    metrics: Option<PetInteractionMetrics>,
 ) -> Result<Option<String>, String> {
     let char_id = character_id
         .unwrap_or_else(|| state.active_character_id.read().clone());
-    Ok(react_to_user_action(&state, &char_id, &action, impact).await)
+    Ok(react_to_user_action(&state, &char_id, &action, impact, metrics.as_ref()).await)
 }
 
 /// 桌宠反应核心逻辑（不依赖 tauri `State`，便于其它后端路径复用）。
@@ -200,14 +241,15 @@ pub async fn react_to_user_action(
     char_id: &str,
     action: &str,
     impact: Option<f64>,
+    metrics: Option<&PetInteractionMetrics>,
 ) -> Option<String> {
     let now = chrono::Local::now().timestamp() as f64;
     if !throttle_pass(char_id, action, now) {
         return None;
     }
 
-    log_action_to_ledger(state, char_id, action, impact, now);
-    generate_reaction(state, char_id, action, impact).await
+    log_action_to_ledger(state, char_id, action, impact, now, metrics);
+    generate_reaction(state, char_id, action, impact, metrics).await
 }
 
 /// 把用户对桌宠的操作写入统一事件账本。
@@ -217,6 +259,7 @@ fn log_action_to_ledger(
     action: &str,
     impact: Option<f64>,
     now: f64,
+    metrics: Option<&PetInteractionMetrics>,
 ) {
     let name = state
         .characters
@@ -225,9 +268,16 @@ fn log_action_to_ledger(
         .map(|c| c.name.clone())
         .unwrap_or_else(|| char_id.to_string());
 
-    let Some(text) = action_ledger_text(&name, action, impact) else {
+    let Some(mut text) = action_ledger_text(&name, action, impact) else {
         return;
     };
+
+    if let Some(metrics) = metrics {
+        let facts = metrics.prompt_facts();
+        if !facts.is_empty() {
+            text.push_str(&format!("（{facts}）"));
+        }
+    }
 
     crate::memory::unified_event_ledger::register_world_event(
         "user_pet_action",
@@ -248,6 +298,7 @@ async fn generate_reaction(
     char_id: &str,
     action: &str,
     impact: Option<f64>,
+    metrics: Option<&PetInteractionMetrics>,
 ) -> Option<String> {
     let router = state.model_router.read().as_ref().cloned()?;
 
@@ -267,7 +318,16 @@ async fn generate_reaction(
         .unwrap_or_default();
 
     let lang = crate::i18n::get_language();
-    let messages = build_reaction_messages(&name, char_id, &lang, action, impact, &history);
+    let mut messages = build_reaction_messages(&name, char_id, &lang, action, impact, &history);
+
+    if let Some(metrics) = metrics {
+        let facts = metrics.prompt_facts();
+        if !facts.is_empty() {
+            if let Some(message) = messages.last_mut() {
+                message.content.push_str(&format!("\n可观测的交互数据：{facts}。根据节奏与速度理解动作，亲近、逗弄、催促或打扰只作为可能含义，不要断言用户意图。鼠标无法测量真实力度，不要把速度或频率说成测得的压力；回复不要报数字。"));
+            }
+        }
+    }
 
     let request = LLMRequest::new("intent_judge", messages)
         .with_max_tokens(REACTION_MAX_TOKENS)
@@ -348,6 +408,7 @@ fn build_reaction_messages(
         "{persona}\n\n{task_heading}\n\
         用户刚刚对你的桌宠形象做了一个动作，你只需要随口给一句反应。\n\
         - {limit_rule}\n\
+        - 根据动作及观测数据，结合人设和聊天语境给出反应；单次点击不默认等于摸头，频繁点击与高速拖动可以表达不同态度。不要断言用户的意图或真实力度。\n\
         - 符合上面的人设和语气，不要客服腔，不要解释\n\
         - 只输出这句话本身：不要引号、不要动作描写、不要括号旁白、不要 Markdown"
     );
@@ -436,6 +497,35 @@ fn clean_reply(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frontend_metrics_deserialize_and_preserve_drag_units() {
+        let metrics: PetInteractionMetrics = serde_json::from_value(serde_json::json!({
+            "clickCount": 4, "windowMs": 5000, "intervalMs": 150,
+            "pressDurationMs": 80, "dragSpeedPxPerMs": 4.5, "dragDistancePx": 600,
+        })).unwrap();
+        let facts = metrics.prompt_facts();
+        assert!(facts.contains("4 次"));
+        assert!(facts.contains("80.00 毫秒"));
+        assert!(facts.contains("4.50 像素/毫秒"));
+        assert!(facts.contains("600.00 像素"));
+        assert!(PetInteractionMetrics::default().prompt_facts().is_empty());
+    }
+
+    #[test]
+    fn observations_are_neutral_and_reject_invalid_numbers() {
+        let facts = PetInteractionMetrics {
+            click_count: Some(4), window_ms: Some(5000.0), interval_ms: Some(150.0),
+            drag_speed_px_per_ms: Some(f64::NAN), press_duration_ms: Some(-1.0),
+            ..Default::default()
+        }.prompt_facts();
+        assert!(facts.contains("4 次"));
+        assert!(facts.contains("150.00"));
+        assert!(!facts.contains("NaN"));
+        assert!(!facts.contains("按住"));
+        assert!(!action_prompt_line("Nana", ACTION_SINGLE_CLICK, None).contains("摸头"));
+        assert!(!action_ledger_text("Nana", ACTION_SINGLE_CLICK, None).unwrap().contains("摸头"));
+    }
 
     #[test]
     fn clean_reply_strips_quotes_and_takes_first_line() {

@@ -1,14 +1,11 @@
 import { StrictMode } from 'react';
 import type { ReactElement } from 'react';
 import { createRoot } from 'react-dom/client';
-import { getCurrentWindow, LogicalPosition } from '@tauri-apps/api/window';
-import { convertFileSrc, invoke } from '@tauri-apps/api/core';
+import { getCurrentWindow } from '@tauri-apps/api/window';
+import { invoke } from '@tauri-apps/api/core';
 import { setCharacterId } from './characterContext';
-import { bootMark, dismissBootLoader } from './utils/roomBoot';
+import { mountApartment } from './utils/apartmentLoader';
 
-// 主 chunk 求值完成。它与 index.html 那个 'html' 节点之间的差值，就是
-// 「HTML 已可绘制 → 主 chunk 可执行」的网络+解析开销。
-bootMark('main');
 
 const root = document.getElementById('root');
 if (!root) {
@@ -19,9 +16,6 @@ const initialParams = new URLSearchParams(window.location.search);
 
 /** 显示错误消息（非透明背景，确保用户可见） */
 function showError(msg: string): void {
-  // 公寓窗口的首屏 loading 层必须一起撤掉，否则它会把错误信息整个盖住——
-  // 用户看到的是「一直转圈」而不是「加载失败的原因」，是最难排查的那种表现。
-  dismissBootLoader();
   document.documentElement.classList.remove('is-transparent');
   document.body.style.background = '#1e1e28';
   createRoot(container).render(
@@ -74,10 +68,14 @@ if (!isTauri && initialParams.get('view') === 'rig_preview') {
         return;
       }
 
+      if (view === 'room') {
+        await mountApartment(container);
+        return;
+      }
+
       // i18n 初始化有副作用（i18next init），必须在渲染任何窗口组件前完成
       await import('./i18n');
       await import('./styles/global.css');
-      bootMark('i18n+css');
 
       let element: React.ReactElement;
       switch (view) {
@@ -122,40 +120,6 @@ if (!isTauri && initialParams.get('view') === 'rig_preview') {
           element = <MessageBannerWindow />;
           break;
         }
-        case 'room': {
-          const status = await invoke<{ installed: boolean; enabled: boolean; asset_root: string | null; plugin_root: string | null }>('apartment_plugin_status');
-          if (!status.enabled) throw new Error('3D 公寓插件未安装或已禁用');
-          bootMark('room:chunk-start');
-          if (import.meta.env.DEV) {
-            // Vite 开发服务器直接提供源码；vite-ignore 保证生产主包不收录场景代码。
-            const devRoomUrl = '/src/components/room/RoomWindow.tsx';
-            const devAssetsUrl = '/src/components/room/apartmentAssets.ts';
-            const { configureApartmentAssets } = await import(/* @vite-ignore */ devAssetsUrl);
-            configureApartmentAssets(status.asset_root);
-            const RoomWindow = (await import(/* @vite-ignore */ devRoomUrl)).default;
-            bootMark('room:chunk-done');
-            element = <RoomWindow />;
-            break;
-          }
-
-          if (!status.plugin_root || !status.asset_root) throw new Error('3D 公寓插件文件不完整');
-          const win = getCurrentWindow();
-          await win.setPosition(new LogicalPosition(0, 0)).catch(() => {});
-          await win.show().catch(() => {});
-          await win.setFocus().catch(() => {});
-          await invoke('set_room_mode', { active: true });
-          const script = document.createElement('script');
-          script.src = convertFileSrc(`${status.plugin_root}\\ui\\room.js`);
-          await new Promise<void>((resolve, reject) => {
-            script.onload = () => resolve();
-            script.onerror = () => reject(new Error('加载 3D 公寓插件脚本失败'));
-            document.head.appendChild(script);
-          });
-          if (!window.VivianApartment) throw new Error('3D 公寓插件入口未注册');
-          bootMark('room:chunk-done');
-          window.VivianApartment.mount(container, status.asset_root);
-          return;
-        }
         default: {
           // 仅主窗口（无 view 参数）加载桌宠应用。
           const AppLazy = (await import('./App')).default;
@@ -170,32 +134,7 @@ if (!isTauri && initialParams.get('view') === 'rig_preview') {
         : element;
       createRoot(container).render(tree);
 
-      // 房间窗口自己完成「落地」：定位 → 显形 → 聚焦 → 让位，全部不依赖调用方。
-      //
-      // 为什么不能挂在 React 渲染之后：RoomScene 那一段同步场景装配会阻塞主线程
-      // 好几秒，rAF 与 setTimeout 在那期间都排不上，兜底形同虚设，窗口只能等装配
-      // 完才冒出来。首屏是 index.html 里静态画好的 loading 层，创建即可见，本来
-      // 就没有「渲染完才敢显形」的理由。触发点在 render() 之后、React commit 之前，
-      // 仍在装配之前。
-      //
-      // 为什么必须自己做完：心智观察器入口点开公寓时会把自己关掉，它那个 JS 上下文
-      // 一旦销毁，入口侧发给房间窗口的 show / setPosition / setFocus 全部丢失。
-      // 这条就是那种情况下房间唯一的显形路径，不是可有可无的兜底。
-      if (view === 'room' && !hidden) {
-        void (async () => {
-          const win = getCurrentWindow();
-          // 窗口尺寸等于屏幕尺寸，居中与 (0,0) 其实是同一处；显式定死，为的是
-          // 不依赖调用方那次 setPosition 有没有送达。
-          await win.setPosition(new LogicalPosition(0, 0)).catch(() => {});
-          await win.show().catch(() => {});
-          await win.setFocus().catch(() => {});
-          // 让位：心智观察器与桌宠都是置顶窗口，不让开的话房间窗口就算 show 了
-          // 也整个压在它们下面。命令幂等，入口那边也会调一次。
-          void invoke('set_room_mode', { active: true }).catch((e) =>
-            console.warn('[room] set_room_mode(true) 失败', e)
-          );
-        })();
-      } else if (view && view !== 'chat' && view !== 'bubble' && view !== 'toast' && view !== 'input' && view !== 'side_chat' && view !== 'message_banner' && !hidden) {
+      if (view && view !== 'chat' && view !== 'bubble' && view !== 'toast' && view !== 'input' && view !== 'side_chat' && view !== 'message_banner' && !hidden) {
         // 子窗口 UI 渲染完成后显示窗口，避免空白窗口闪烁。
         // bubble/toast/input 为常驻隐藏窗口，由调用方主动 show，不自动显示。
         const showWindow = () => {

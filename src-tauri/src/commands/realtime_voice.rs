@@ -49,9 +49,12 @@ pub async fn start_realtime_call(
         return Err("未配置豆包 App ID 或 Access Key".to_string());
     }
     let instance = state.get_character(character_id.as_deref())?;
+    let persona = crate::speech::realtime_voice::RealtimePersona::from_config(
+        &instance.id, &instance.brain.persona.get_config(),
+    );
     instance
         .realtime_voice
-        .start_call(app, config)
+        .start_call(app, config, persona)
         .await
         .map_err(err_str)
 }
@@ -64,18 +67,7 @@ pub fn stop_realtime_call(
 ) -> Result<(), String> {
     let instance = state.get_character(character_id.as_deref())?;
     instance.realtime_voice.stop_call();
-    // 持久化 dialog_id，下次通话时传入以恢复最近20轮上下文
-    let dialog_id = instance.realtime_voice.last_dialog_id();
-    if !dialog_id.is_empty() {
-        let cm = state.config.read();
-        if let Err(e) = cm.set_no_save(
-            "realtime_voice.dialog_id",
-            serde_json::Value::String(dialog_id),
-        ) {
-            tracing::warn!("保存实时通话 dialog_id 失败: {}", e);
-        }
-        let _ = cm.save();
-    }
+    // The manager persists the dialog under this character's own key.
     Ok(())
 }
 

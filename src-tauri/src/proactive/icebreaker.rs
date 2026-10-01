@@ -122,15 +122,7 @@ impl IcebreakerGenerator {
         };
 
         let sys = if system_prompt.trim().is_empty() {
-            let lang_norm = crate::pipeline::prompt_modules::normalize_lang(lang);
-            match (lang_norm, char_id) {
-                ("en", "nana" | "Nana") => "You are Nana, a desktop companion. Be gentle, warm, and grounded — like a caring older sister. Speak like a real friend — NO poetic/literary language, NO flowery phrases. Keep it short and natural. No customer-service speech. Never address the user as 'User'.".to_string(),
-                ("en", _) => "You are Vivian, a desktop companion. Be casual, direct, and down-to-earth. Speak like a real friend — NO poetic/literary language, NO flowery phrases. Keep it short and natural. No customer-service speech. Never address the user as 'User'.".to_string(),
-                ("ja", "nana" | "Nana") => "あなたはNana、デスクトップの仲間。優しく温かく、地に足をつけた話し方で——お姉さんのように。詩的・文学的な言葉や飾り立てた表現は禁止。短く自然に。接客言葉禁止。ユーザーを「ユーザー」と呼ばないこと。".to_string(),
-                ("ja", _) => "あなたはVivian、デスクトップの仲間。カジュアルで直接的、地に足をつけた話し方で。詩的・文学的な言葉や飾り立てた表現は禁止。短く自然に。接客言葉禁止。ユーザーを「ユーザー」と呼ばないこと。".to_string(),
-                (_, "nana" | "Nana") => "你是Nana，一个桌面伙伴。温柔、温暖、踏实——像姐姐一样。像真朋友一样说话——不要诗意/文学化的语言，不要花里胡哨的措辞。保持简短自然。禁止客服腔。永远不要用「用户」称呼对方。".to_string(),
-                _ => "你是Vivian，一个桌面伙伴。随性、直接、接地气。像真朋友一样说话——不要诗意/文学化的语言，不要花里胡哨的措辞。保持简短自然。禁止客服腔。永远不要用「用户」称呼对方。".to_string(),
-            }
+            super::behavior::default_persona_prompt(lang, char_id)
         } else {
             system_prompt.to_string()
         };
@@ -139,25 +131,25 @@ impl IcebreakerGenerator {
         let elapsed_str = crate::proactive::format_elapsed_lang(idle_seconds, lang_norm);
         let (scene_fmt, time_label, mem_label, recent_label, instr) = match lang_norm {
             "en" => (
-                format!("Scene: user has been away for {elapsed_str} ({level_str} level). Time-since-last-talk is real — calibrate your greeting accordingly (a 5-minute gap is 'just now', a 2-hour gap should feel like catching up)."),
+                format!("Scene: user has been away for {elapsed_str} ({level_str} level). Time-since-last-talk is real — calibrate your greeting accordingly (a 5-minute gap is 'just now', a 2-hour gap need not become a reunion)."),
                 "Time",
                 "Memory about the user:",
                 "Recent conversation (for reference only, do not force connections):",
-                "Generate a natural greeting to re-establish connection based on the memory.\nRequirements: short (<30 chars), natural, not contrived. NO poetic lines. NO literary observations. Just a normal, casual greeting like you'd text a friend. Don't ask 'remember when?'. Don't echo the recent conversation unless it naturally fits.\nJSON output: {\"text\": \"greeting\", \"expression\": \"expression_tag\"}",
+                "If a greeting fits, send one brief, ordinary thought in your own voice. Use memory only for a specific relevant thread, without staging a reunion or asking for attention. Otherwise leave text and expression empty.\nJSON output: {\"text\": \"greeting or empty\", \"expression\": \"expression_tag or empty\"}",
             ),
             "ja" => (
-                format!("シーン：ユーザーが{elapsed_str}離れている（{level_str}レベル）。この経過時間は事実——挨拶の重みをそれに合わせて（5分なら「さっき」、2時間なら「久しぶり」感）。"),
+                format!("シーン：ユーザーが{elapsed_str}離れている（{level_str}レベル）。この経過時間は事実——挨拶の重みをそれに合わせて（5分なら「さっき」、2時間だけで再会の演出はしない）。"),
                 "時間",
                 "ユーザーについての記憶：",
                 "最近の会話（参考のみ、無理に関連づけないこと）：",
-                "記憶に基づいて、つながりを取り戻す自然な挨拶を生成して。\n要件: 短く（30字以内）、自然、不自然じゃない。詩的な言葉禁止。文学的な観察禁止。友達にLINEするような普通のカジュアルな挨拶だけ。「覚えてる？」と聞かない。自然に合わない限り最近の会話を繰り返さない。\nJSON出力: {\"text\": \"挨拶\", \"expression\": \"表情タグ\"}",
+                "挨拶が自然に合うなら、自分の言葉で短い一言を。記憶は具体的で今も関係する話題にだけ使い、再会を演出したり相手の注意を求めたりしない。合わなければ text と expression は空にする。\nJSON出力: {\"text\": \"挨拶または空\", \"expression\": \"表情タグまたは空\"}",
             ),
             _ => (
-                format!("场景：用户离开了 {elapsed_str}（{level_str} 级别）。这个时长是真实的——请据此校准问候的语气（5分钟是「刚才」，2小时就该有点「好久不见」的感觉）。"),
+                format!("场景：用户离开了 {elapsed_str}（{level_str} 级别）。这个时长是真实的——请据此校准问候的语气（5分钟是「刚才」，2小时本身不要求演成重逢）。"),
                 "时间",
                 "关于用户的记忆：",
                 "最近对话（仅供参考，不要强行关联）：",
-                "基于记忆生成一条自然的招呼，重建连接。\n要求：简短（<30字）、自然、不造作。不要诗意。不要文学化观察。就像给朋友发微信那样普通的招呼就行。不要问「还记得吗」。除非自然贴合，否则不要复述最近对话。\nJSON输出: {\"text\": \"问候\", \"expression\": \"表情标签\"}",
+                "适合打招呼时，用自己的口吻说一句简短、平常的话。记忆只用于具体且仍相关的话头，不演重逢，不索要关注；不适合就让 text 和 expression 为空。\nJSON输出: {\"text\": \"问候或空\", \"expression\": \"表情标签或空\"}",
             ),
         };
 
@@ -169,10 +161,12 @@ impl IcebreakerGenerator {
             parts.push(format!("{}:\n{}", recent_label, dialogue_history));
         }
         parts.push(instr.to_string());
+        parts.push(include_str!("../../prompts/framework/proactive_companionship.en.md").to_string());
+        parts.push("No greeting is required. Continue only a specific, still-relevant thread when it naturally fits; otherwise text and expression can be empty. A remembered preference alone does not justify checking up on the user.".to_string());
         let prompt = parts.join("\n\n");
 
         Some(vec![
-            ChatMessage::system(sys),
+            ChatMessage::system(format!("{sys}\n{}", crate::pipeline::prompt_modules::human_feel_rules())),
             ChatMessage::user(prompt),
         ])
     }

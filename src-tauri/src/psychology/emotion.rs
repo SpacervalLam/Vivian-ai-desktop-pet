@@ -152,7 +152,97 @@ pub struct EmotionDeltas {
     pub curiosity: f64,
 }
 
+impl EmotionDeltas {
+    pub(crate) fn magnitude(&self) -> f64 {
+        self.joy.abs() + self.sadness.abs() + self.anger.abs() + self.fear.abs()
+            + self.closeness.abs() + self.loneliness.abs() + self.curiosity.abs()
+    }
+
+    /// Apply persona sensitivity before enforcing the per-channel and total budgets.
+    pub(crate) fn bounded(&self, sensitivity: f64, channel_limit: f64, total_limit: f64) -> Self {
+        let sensitivity = if sensitivity.is_finite() { sensitivity.max(0.0) } else { 0.0 };
+        let clamp = |v: f64| {
+            if v.is_finite() { (v.clamp(-0.3, 0.3) * sensitivity).clamp(-channel_limit, channel_limit) }
+            else { 0.0 }
+        };
+        let mut result = Self {
+            joy: clamp(self.joy), sadness: clamp(self.sadness), anger: clamp(self.anger),
+            fear: clamp(self.fear), closeness: clamp(self.closeness),
+            loneliness: clamp(self.loneliness), curiosity: clamp(self.curiosity),
+        };
+        let scale = (total_limit / result.magnitude().max(total_limit)).min(1.0);
+        result.joy *= scale; result.sadness *= scale; result.anger *= scale;
+        result.fear *= scale; result.closeness *= scale; result.loneliness *= scale;
+        result.curiosity *= scale;
+        result
+    }
+}
+
+#[cfg(test)]
+mod feedback_tests {
+    use super::*;
+
+    #[test]
+    fn neutral_feedback_does_not_reinforce_existing_emotion() {
+        let mut state = EmotionState { joy: 0.7, curiosity: 0.8, closeness: 0.6, ..Default::default() };
+        let before = serde_json::to_value(&state).unwrap();
+        for _ in 0..100 { state.apply_feedback_delta(&EmotionDeltas::default(), 2.0); }
+        assert_eq!(before, serde_json::to_value(&state).unwrap());
+    }
+
+    #[test]
+    fn feedback_budget_includes_persona_and_channel_interactions() {
+        let mut state = EmotionState { joy: 0.4, sadness: 0.4, anger: 0.4, fear: 0.4,
+            closeness: 0.4, loneliness: 0.4, curiosity: 0.4 };
+        let delta = EmotionDeltas { joy: 99.0, sadness: -99.0, anger: -99.0, fear: -99.0,
+            closeness: 99.0, loneliness: -99.0, curiosity: 99.0 };
+        state.apply_feedback_delta(&delta, 4.0);
+        let values = [state.joy, state.sadness, state.anger, state.fear, state.closeness, state.loneliness, state.curiosity];
+        let changes: Vec<f64> = values.iter().map(|v| (v - 0.4).abs()).collect();
+        assert!(changes.iter().all(|v| *v <= 0.12 + 1e-9));
+        assert!(changes.iter().sum::<f64>() <= 0.24 + 1e-9);
+        assert!(state.curiosity > 0.4);
+        let mut relieved = EmotionState { anger: 0.6, joy: 0.0, sadness: 0.0, fear: 0.0,
+            closeness: 0.0, loneliness: 0.0, curiosity: 0.0 };
+        relieved.apply_feedback_delta(&EmotionDeltas { anger: -0.08, ..Default::default() }, 1.0);
+        assert!(relieved.anger < 0.6);
+    }
+
+    #[test]
+    fn invalid_feedback_is_ignored_and_saturated_state_stays_valid() {
+        let mut state = EmotionState::default();
+        let before = serde_json::to_value(&state).unwrap();
+        state.apply_feedback_delta(&EmotionDeltas { joy: f64::NAN, fear: f64::INFINITY, ..Default::default() }, 1.0);
+        assert_eq!(before, serde_json::to_value(&state).unwrap());
+        state.joy = 0.99;
+        state.apply_feedback_delta(&EmotionDeltas { joy: 0.3, ..Default::default() }, 1.0);
+        assert!(state.joy.is_finite() && state.joy <= 1.0);
+    }
+}
+
 impl EmotionState {
+    /// Conversation feedback is a bounded net change, including channel interactions.
+    /// A neutral reply must not repeatedly amplify the existing mood by itself.
+    pub(crate) fn apply_feedback_delta(&mut self, delta: &EmotionDeltas, sensitivity: f64) {
+        let original = self.clone();
+        let finite = |v: f64| if v.is_finite() { v } else { 0.0 };
+        let bounded = delta.bounded(sensitivity, 0.12, 0.24);
+        if bounded.magnitude() == 0.0 { return; }
+        self.apply_delta(&bounded, 1.0);
+        let _ = self.apply_interactions();
+        let net = EmotionDeltas {
+            joy: finite(self.joy - original.joy),
+            sadness: finite(self.sadness - original.sadness),
+            anger: finite(self.anger - original.anger),
+            fear: finite(self.fear - original.fear),
+            closeness: finite(self.closeness - original.closeness),
+            loneliness: finite(self.loneliness - original.loneliness),
+            curiosity: finite(self.curiosity - original.curiosity),
+        }.bounded(1.0, 0.12, 0.24);
+        *self = original;
+        self.apply_delta(&net, 1.0);
+    }
+
     /// 应用情绪增量（钳制到 0.0-1.0）
     ///
     /// `sensitivity_mult` 来自 Persona，放大情绪变化幅度。

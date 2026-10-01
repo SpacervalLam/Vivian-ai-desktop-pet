@@ -17,6 +17,7 @@ use crate::providers::doubao::DoubaoProvider;
 use crate::providers::gemini::GeminiProvider;
 use crate::providers::openai_compat::{CacheStrategy, OpenAiCompatProvider};
 use crate::providers::openai_responses::OpenAiResponsesProvider;
+use crate::providers::openai_agents::OpenAiAgentsProvider;
 use crate::providers::protocol_registry;
 use crate::providers::spec::CompiledSpec;
 use crate::providers::spark::SparkProvider;
@@ -31,6 +32,7 @@ use crate::providers::zhipu::ZhipuProvider;
 const NATIVE_PROVIDER_TYPES: &[&str] = &[
     "openai",
     "openai_responses",
+    "openai_agents",
     "doubao",
     "gemini",
     "anthropic",
@@ -152,7 +154,7 @@ pub fn work_model_default_max_tokens(provider_type: &str, endpoint: &str) -> u32
     match provider_type.to_lowercase().as_str() {
         "anthropic" | "claude" => 64000,
         "gemini" | "google" => 65536,
-        "openai" | "openai_compat" | "openai-compat" | "openai_responses" | "responses_api" => 32768,
+        "openai" | "openai_compat" | "openai-compat" | "openai_responses" | "responses_api" | "openai_agents" | "agents_api" => 32768,
         "zhipu" | "glm" | "chatglm" | "bigmodel" => 32768,
         "doubao" | "doubao_responses" => 16384,
         "wenxin" | "ernie" | "baidu" => 8192,
@@ -166,6 +168,7 @@ pub fn work_model_default_max_tokens(provider_type: &str, endpoint: &str) -> u32
 /// 替代旧的"contains gemini"字符串启发式判断，按显式类型分发到对应实现：
 /// - `OpenAiCompat`：OpenAI Responses API 兼容接口（DeepSeek / Qwen / Moonshot / SiliconFlow / Doubao / GLM 等）
 /// - `OpenAiResponses`：OpenAI 官方 Responses API（`/v1/responses`），原生支持 MCP/Tool Calling/多模态，适用于 GPT-4o / o1 / o3 系列
+/// - `OpenAiAgents`：OpenAI Agents API（`/v1/agents/sessions`），托管任务会话，本地处理函数工具
 /// - `DoubaoResponses`：火山方舟豆包 Responses API（`/api/v3/responses`），仅支持 250615+ 新模型
 /// - `Gemini`：Google Gemini 原生 REST API（含 Google Search grounding）
 /// - `Anthropic`：Anthropic Claude 原生 /v1/messages（x-api-key + anthropic-version）
@@ -177,6 +180,7 @@ pub fn work_model_default_max_tokens(provider_type: &str, endpoint: &str) -> u32
 pub enum ProviderKind {
     OpenAiCompat,
     OpenAiResponses,
+    OpenAiAgents,
     DoubaoResponses,
     Gemini,
     Anthropic,
@@ -193,6 +197,7 @@ impl ProviderKind {
     /// 兼容旧配置：`openai` / `gemini` / `anthropic` / `wenxin` / `spark` / `custom`
     /// `doubao` / `doubao_responses` 走火山方舟 Responses API 专用路径。
     /// `openai_responses` / `responses_api` 走 OpenAI 官方 Responses API 路径。
+    /// `openai_agents` / `agents_api` 走 OpenAI Agents API 会话路径。
     /// `zhipu` / `glm` 走智谱 GLM Chat Completions 专用路径（含联网搜索）。
     /// 未知值统一回退到 `Custom`（按 OpenAI 兼容处理）。
     pub fn from_str(s: &str) -> Self {
@@ -205,6 +210,9 @@ impl ProviderKind {
             "openai" | "openai_compat" | "openai-compat" => ProviderKind::OpenAiCompat,
             "openai_responses" | "openai-responses" | "responses_api" | "responses-api" => {
                 ProviderKind::OpenAiResponses
+            }
+            "openai_agents" | "openai-agents" | "agents_api" | "agents-api" => {
+                ProviderKind::OpenAiAgents
             }
             "doubao" | "doubao_responses" | "doubao-responses" | "responses" => {
                 ProviderKind::DoubaoResponses
@@ -226,6 +234,7 @@ impl ProviderKind {
         match self {
             ProviderKind::OpenAiCompat => "openai",
             ProviderKind::OpenAiResponses => "openai_responses",
+            ProviderKind::OpenAiAgents => "openai_agents",
             ProviderKind::DoubaoResponses => "doubao",
             ProviderKind::Gemini => "gemini",
             ProviderKind::Anthropic => "anthropic",
@@ -523,6 +532,17 @@ fn create_provider_by_kind(
         }
         ProviderKind::OpenAiResponses => {
             let provider = OpenAiResponsesProvider::new(
+                provider_config,
+                temperature,
+                max_tokens,
+                effective_proxy_url,
+                client,
+            )
+            .with_instructions(instructions);
+            Ok(Box::new(provider))
+        }
+        ProviderKind::OpenAiAgents => {
+            let provider = OpenAiAgentsProvider::new(
                 provider_config,
                 temperature,
                 max_tokens,

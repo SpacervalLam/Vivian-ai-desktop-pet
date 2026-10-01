@@ -7,10 +7,10 @@
 //! - `duckduckgo`：零配置 HTML 爬取，始终可用的兜底
 //! - `searxng`：自部署元搜索引擎（需 base_url）
 //! - `tavily`：LLM 优化搜索 API（需 api_key）
-//! - `bing`：微软官方 API v7，国内直连（需 api_key）
+//! - `bing`：旧配置迁移占位（API v7 已退役，不再发送请求）
 //! - `deepseek`：DeepSeek 官方原生搜索（Anthropic 兼容 Messages API +
 //!   `web_search_20250305` server tool）。一次搜索 = 一次模型调用，
-//!   引用级摘要质量最高，消耗 DeepSeek API 额度
+//!   可返回引用摘录，消耗 DeepSeek API 额度
 
 pub(crate) mod bing;
 pub(crate) mod deepseek;

@@ -8,7 +8,7 @@ use crate::state::AppState;
 pub fn plugin_dir() -> Option<std::path::PathBuf> {
     if cfg!(debug_assertions) {
         return Some(std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("plugins/3d-apartment"));
+            .join("../plugins/3d-apartment"));
     }
     std::env::current_exe().ok()
         .and_then(|exe| exe.parent().map(|dir| dir.join("plugins/3d-apartment")))
@@ -38,9 +38,7 @@ pub fn apartment_plugin_status(state: State<'_, Arc<AppState>>) -> ApartmentPlug
     ApartmentPluginStatus {
         installed: installed(),
         enabled: enabled(state.inner()),
-        asset_root: if cfg!(debug_assertions) {
-            None
-        } else {
+        asset_root: {
             plugin_dir().map(|dir| dir.join("room"))
                 .filter(|path| path.is_dir())
                 .map(|path| path.to_string_lossy().into_owned())

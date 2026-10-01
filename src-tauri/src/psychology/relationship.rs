@@ -732,7 +732,7 @@ impl RelationshipState {
                      You know each other well enough to not stand on ceremony. You genuinely enjoy their company."
                 }
                 RelationshipStage::Soulmate => {
-                    "You know each other deeply. There's almost nothing you can't say to each other.\n\
+                    "You know each other deeply. You can speak comfortably while respecting the boundaries expressed in this conversation.\n\
                      Be completely natural — warm, honest, unguarded. This is someone who truly gets you."
                 }
             },
@@ -758,7 +758,7 @@ impl RelationshipState {
                      形式ばる必要がないほど互いを知っている。一緒にいることを心から楽しんでいる。"
                 }
                 RelationshipStage::Soulmate => {
-                    "深く知り合っている。言えないことはほとんどない。\n\
+                    "深く知り合っている。話しやすいが、今の会話で示された境界を尊重する。\n\
                      完全に自然に——温かく、誠実に、無防備に。あなたを本当に理解してくれる人だ。"
                 }
             },
@@ -784,7 +784,7 @@ impl RelationshipState {
                      熟到不用客套。你真心享受和对方在一起的时光。"
                 }
                 RelationshipStage::Soulmate => {
-                    "你们彼此深透了解。几乎没什么不能说的。\n\
+                    "你们彼此深透了解。可以自在交流，边界仍以对方当下的意愿为准。\n\
                      完全自然地——温暖、诚实、不设防。这是一个真正懂你的人。"
                 }
             },
@@ -797,9 +797,9 @@ impl RelationshipState {
         };
         let header = crate::pipeline::prompt_modules::section_heading("relationship_standing", lang);
         let not_disclose_note = match lang_norm {
-            "en" => "[INTERNAL NOTE: This relationship context is for your behavior guidance only. Do NOT mention relationship scores, metrics, or stages to the user. Behave naturally based on these cues.]",
-            "ja" => "[内部メモ: この関係コンテキストは行動ガイダンスのみに使用します。ユーザーに関係スコア、指標、段階について言及しないでください。これらの手がかりに基づいて自然に振る舞ってください。]",
-            _ => "[内部提示：这段关系上下文仅供你行为参考。**不要**向用户提及关系分数、指标或阶段。根据这些线索自然地表现即可。]",
+            "en" => "[INTERNAL NOTE: Familiarity guides ease, not permission or facts. The current dialogue sets boundaries; closeness does not require affection, private questions or proactive speech. Do NOT mention scores, metrics or stages. Use only supported shared history.]",
+            "ja" => "[内部メモ: 親しさは話しやすさの参考で、許可や事実ではない。今の会話の境界を尊重し、好意、私的な質問、自発的な発言を義務にしない。スコアや段階を口にせず、共有した過去は根拠のあるものだけ使う。]",
+            _ => "[内部提示：熟悉度影响相处的松弛程度，不构成授权或事实。边界以当前交流为准，亲近不要求撒娇、私人问题或主动开口。不提关系分数、指标或阶段；共同经历只用有依据的内容。]",
         };
         let mut lines = vec![
             header.to_string(),
@@ -818,7 +818,7 @@ impl RelationshipState {
                 1 => "You might occasionally say hi first, but you don't chase them.",
                 2 => "You're comfortable starting conversations sometimes.",
                 3 => "You'll often reach out when you feel like chatting.",
-                4 | 5 => "You actively initiate — you enjoy talking to them and aren't shy about it.",
+                4 | 5 => "You are comfortable initiating when a fresh, relevant thought fits; familiarity alone does not call for another message.",
                 _ => "",
             },
             "ja" => match strategy.proactivity_level {
@@ -826,7 +826,7 @@ impl RelationshipState {
                 1 => "たまに自分から挨拶することはあるが、追いかけない。",
                 2 => "時々なら自分から会話を始めても平気。",
                 3 => "話したい時はよく自分から話しかける。",
-                4 | 5 => "積極的に自分から——話すのが好きで、恥ずかしがらない。",
+                4 | 5 => "新しい具体的な一言が自然に合う時は自分から話せる。親しさだけで発言を増やさない。",
                 _ => "",
             },
             _ => match strategy.proactivity_level {
@@ -834,7 +834,7 @@ impl RelationshipState {
                 1 => "偶尔会先打招呼，但不会主动追着聊。",
                 2 => "有时候自己开头也不别扭。",
                 3 => "想聊的时候会主动开口。",
-                4 | 5 => "积极发起对话——就是喜欢聊，也不藏着。",
+                4 | 5 => "有新鲜、相关的内容且时机合适时，可以自然开口；熟悉本身不要求增加消息。",
                 _ => "",
             },
         };
@@ -846,9 +846,9 @@ impl RelationshipState {
         match strategy.response_length.as_str() {
             "very_short" => {
                 lines.push(match lang_norm {
-                    "en" => "Keep replies brief — don't ramble.",
-                    "ja" => "返信は短く——長々と喋らない。",
-                    _ => "回复简短一些——别啰嗦。",
+                    "en" => "Keep casual replies brief; direct tasks and questions still need useful detail.",
+                    "ja" => "雑談は短く。直接の依頼や質問には必要な詳しさで答える。",
+                    _ => "闲聊简短一些；直接请求和问题仍给足有用的细节。",
                 }.to_string());
             }
             "long" => {
