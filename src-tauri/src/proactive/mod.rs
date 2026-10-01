@@ -52,6 +52,12 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
+/// 同步生成入口会从认知循环的 Tokio worker 调用。先让出 worker，再等待
+/// LLM future，避免直接 Handle::block_on 在运行时内部触发嵌套运行时 panic。
+fn block_on_proactive<F: std::future::Future>(handle: &tokio::runtime::Handle, future: F) -> F::Output {
+    tokio::task::block_in_place(|| handle.block_on(future))
+}
+
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
@@ -3144,7 +3150,7 @@ impl ProactiveOrchestrator {
             .unwrap_or_default();
 
         let purpose = purpose.to_string();
-        let result = handle.block_on(async move {
+        let result = block_on_proactive(&handle, async move {
             use crate::providers::base::LLMRequest;
             use crate::types::response::ChatMessage;
 
@@ -3257,7 +3263,7 @@ impl ProactiveOrchestrator {
         let thought_key = thought_key.to_string();
         let context_hint = context_hint.to_string();
 
-        let result = handle.block_on(async move {
+        let result = block_on_proactive(&handle, async move {
             use crate::providers::base::LLMRequest;
             use crate::types::response::ChatMessage;
 
@@ -3368,7 +3374,7 @@ impl ProactiveOrchestrator {
         let thought_key = thought_key.to_string();
         let context_hint = context_hint.to_string();
 
-        let result: Option<(String, f32)> = handle.block_on(async move {
+        let result: Option<(String, f32)> = block_on_proactive(&handle, async move {
             use crate::providers::base::LLMRequest;
             use crate::types::response::ChatMessage;
 
@@ -3515,7 +3521,7 @@ impl ProactiveOrchestrator {
         let context_hint = context_hint.to_string();
         let roommate_name = roommate_name.to_string();
 
-        let result = handle.block_on(async move {
+        let result = block_on_proactive(&handle, async move {
             use crate::providers::base::LLMRequest;
             use crate::types::response::ChatMessage;
 
@@ -3754,7 +3760,7 @@ impl ProactiveOrchestrator {
         let char_id = self.char_id.clone();
         let festival_name = festival_name.to_string();
 
-        let result = handle.block_on(async move {
+        let result = block_on_proactive(&handle, async move {
             use crate::providers::base::LLMRequest;
             use crate::types::response::ChatMessage;
 
@@ -5669,6 +5675,34 @@ fn evaluate_monologue_gates(
         return false;
     }
     true
+}
+
+#[cfg(test)]
+mod runtime_bridge_tests {
+    use super::block_on_proactive;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn synchronous_generation_can_wait_from_async_worker() {
+        // 和节日问候一样，从 async tick 等待包含定时器/IO 的 LLM future。
+        let value = tokio::spawn(async {
+            block_on_proactive(&tokio::runtime::Handle::current(), async {
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                42
+            })
+        }).await.expect("同步生成不应触发嵌套运行时 panic");
+        assert_eq!(value, 42);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn synchronous_generation_also_works_on_blocking_pool() {
+        let value = tokio::task::spawn_blocking(|| {
+            block_on_proactive(&tokio::runtime::Handle::current(), async {
+                tokio::task::yield_now().await;
+                42
+            })
+        }).await.unwrap();
+        assert_eq!(value, 42);
+    }
 }
 
 #[cfg(test)]

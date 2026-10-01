@@ -1794,6 +1794,66 @@ fn cleanup_old_logs(log_dir: &std::path::Path, keep_days: u32) {
 /// 超限丢弃远比撑大常驻内存划算。4096 行足以覆盖秒级突发。
 const LOG_BUFFERED_LINES_LIMIT: usize = 4096;
 
+/// panic hook 只记录异常。Tokio 会把任务 panic 转为 JoinError，进程可能继续运行；
+/// 此时发出全局退出信号会让拖动、toast 和侧栏线程永久停止。
+/// 全局取消与 APP_EXITING 仅由真正的 ExitRequested 路径触发。
+fn install_panic_log_hook(panic_log_path: std::path::PathBuf) {
+    std::panic::set_hook(Box::new(move |info| {
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        let msg = format!("[PANIC] {}\nBacktrace:\n{}", info, backtrace);
+        eprintln!("{}", msg);
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&panic_log_path)
+        {
+            use std::io::Write;
+            let _ = writeln!(f, "{}", msg);
+        }
+    }));
+}
+
+#[cfg(test)]
+mod panic_hook_tests {
+    #[test]
+    fn background_panic_is_logged_without_shutdown() {
+        const CHILD_LOG: &str = "VIVIAN_PANIC_HOOK_TEST_LOG";
+        if let Some(path) = std::env::var_os(CHILD_LOG) {
+            // 在独立测试进程安装真正的 hook，避免影响并行运行的其他测试。
+            super::install_panic_log_hook(path.into());
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                // 持有取消订阅者，保证旧 hook 的 cancel() 确实能送达。
+                let waiter = tokio::spawn(crate::utils::cancel_token::cancel_token().cancelled());
+                tokio::task::yield_now().await;
+                let result = tokio::spawn(async { panic!("background-panic-regression") }).await;
+                assert!(result.unwrap_err().is_panic());
+                assert!(!crate::commands::window::APP_EXITING.load(std::sync::atomic::Ordering::SeqCst));
+                assert!(!crate::utils::cancel_token::cancel_token().is_cancelled());
+                assert_eq!(tokio::spawn(async { 42 }).await.unwrap(), 42);
+                waiter.abort();
+            });
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("panic.log");
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "panic_hook_tests::background_panic_is_logged_without_shutdown", "--nocapture"])
+            .env(CHILD_LOG, &path)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "子进程失败: {}\n{}",
+            String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        let log = std::fs::read_to_string(path).unwrap();
+        assert!(log.contains("background-panic-regression"));
+        assert!(log.contains("Backtrace:"));
+    }
+}
+
 fn init_logging() {
     use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
@@ -1812,31 +1872,7 @@ fn init_logging() {
 
     // panic hook：将 panic 信息和调用栈同步写入日志文件 + stderr
     // 不依赖 tracing 的 non-blocking writer（panic 后进程可能立即退出，缓冲区未刷新）
-    let panic_log_path = log_path.clone();
-    std::panic::set_hook(Box::new(move |info| {
-        let backtrace = std::backtrace::Backtrace::force_capture();
-        let msg = format!(
-            "[PANIC] {}\nBacktrace:\n{}",
-            info,
-            backtrace
-        );
-        eprintln!("{}", msg);
-        // 同步写入日志文件，确保 panic 信息不丢失
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&panic_log_path)
-        {
-            use std::io::Write;
-            let _ = writeln!(f, "{}", msg);
-        }
-        // 触发 CancellationToken 通知后台任务停止。
-        // 子进程由 Job Object 的 KILL_ON_JOB_CLOSE 兜底，无需在此手动清理。
-        // APP_EXITING 置位让光标追踪等原生线程感知退出。
-        commands::window::APP_EXITING
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-        crate::utils::cancel_token::cancel_token().cancel();
-    }));
+    install_panic_log_hook(log_path.clone());
 
     // 先用 File::create 确保文件存在（create(true).append(true) 在某些 Windows 环境会失败）
     let file_writer = std::fs::OpenOptions::new()
