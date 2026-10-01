@@ -30,6 +30,7 @@ import {
 } from 'lucide-react';
 import './CodeAgentPage.css';
 import './workbenchStrings';
+import SessionSearch from './SessionSearch';
 import { workbenchLayout, reconcileToolMessages, WORKBENCH_READING_WIDTH } from './workbenchLayout';
 import TrajectoryPanel from './TrajectoryPanel';
 import TurnRail, { buildTurns } from './TurnRail';
@@ -3833,7 +3834,6 @@ const CodeAgentPage: React.FC = () => {
   // 会话列表视图
   const [sessionView, setSessionView] = useState<'workspace' | 'flat'>('workspace');
   const [sessionSort, setSessionSort] = useState<'manual' | 'recent'>('recent');
-  const [sessionQuery, setSessionQuery] = useState('');
   const [sessionSearchOpen, setSessionSearchOpen] = useState(false);
   const [sessionToolsOpen, setSessionToolsOpen] = useState(false);
   const [manualOrder, setManualOrder] = useState<string[]>([]);
@@ -4938,6 +4938,17 @@ const CodeAgentPage: React.FC = () => {
     return () => window.removeEventListener('keydown', onKey);
   }, [toggleLeftSidebar]);
 
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === 'k' && !event.isComposing) {
+        event.preventDefault();
+        if (!event.repeat) { setLeftDrawerOpen(false); setSessionSearchOpen(true); }
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
   // 「新会话」下拉菜单：点击外部或按 Esc 关闭（与页面其它下拉框一致）
   useEffect(() => {
     if (!newMenuOpen) return;
@@ -5325,14 +5336,8 @@ const CodeAgentPage: React.FC = () => {
   }, [renamingWorkspace, renameDraft]);
 
   // 会话列表：搜索过滤 + 排序
-  const visibleSessions = sessions.filter((s) => {
-    const q = sessionQuery.trim().toLowerCase();
-    if (!q) return true;
-    return (
-      (s.title || '').toLowerCase().includes(q) ||
-      s.working_directory.toLowerCase().includes(q)
-    );
-  });
+  const searchSessionsData = useMemo<CodingSession[]>(() => sessions.map(session => session.session_id === activeId ? { ...session, messages, status: running ? 'running' : session.status === 'running' ? 'idle' : session.status } : session), [sessions, activeId, messages, running]);
+  const visibleSessions = sessions;
 
   const orderedSessions = [...visibleSessions].sort((a, b) => {
     if (sessionSort === 'recent') return b.updated_at - a.updated_at;
@@ -5616,7 +5621,8 @@ const CodeAgentPage: React.FC = () => {
                   type="button"
                   className="codex-session-tool-btn"
                   title={t('mind_inspector.code_search_sessions')}
-                  onClick={() => setSessionSearchOpen((v) => !v)}
+                  aria-label={t('workbench.searchTitle')}
+                  onClick={() => { setLeftDrawerOpen(false); setSessionSearchOpen(true); }}
                 >
                   <Search size={12} />
                 </button>
@@ -5630,23 +5636,6 @@ const CodeAgentPage: React.FC = () => {
                 </button>
               </div>
             </div>
-
-            {sessionSearchOpen && (
-              <div className="codex-session-search">
-                <Search size={12} />
-                <input
-                  autoFocus
-                  value={sessionQuery}
-                  onChange={(e) => setSessionQuery(e.target.value)}
-                  placeholder={t('mind_inspector.code_search_placeholder')}
-                />
-                {sessionQuery && (
-                  <button type="button" onClick={() => setSessionQuery('')} title={t('mind_inspector.code_clear')}>
-                    <X size={10} />
-                  </button>
-                )}
-              </div>
-            )}
 
             {sessionToolsOpen && (
               <div className="codex-session-tools-panel">
@@ -5909,6 +5898,7 @@ const CodeAgentPage: React.FC = () => {
             </span>
           </div>
           <div className="codex-topbar-actions">
+            <button type="button" className="codex-icon-btn" title={t('workbench.searchShortcut')} aria-label={t('workbench.searchTitle')} onClick={() => { setLeftDrawerOpen(false); setSessionSearchOpen(true); }}><Search size={15} /></button>
             <button type="button" className="codex-icon-btn" aria-pressed={focusMode} title={t(focusMode ? 'workbench.focusExit' : 'workbench.focus')} aria-label={t(focusMode ? 'workbench.focusExit' : 'workbench.focus')} onClick={() => { setLeftDrawerOpen(false); setFocusMode((mode) => !mode); }}>
               {focusMode ? <Minimize2 size={15} /> : <Maximize2 size={15} />}
             </button>
@@ -6406,6 +6396,7 @@ const CodeAgentPage: React.FC = () => {
       </aside>
 
       {/* ===== 覆盖层 ===== */}
+      {sessionSearchOpen && <SessionSearch sessions={searchSessionsData} onSelect={session => { switchSession(session); setLeftDrawerOpen(false); }} onClose={() => setSessionSearchOpen(false)} />}
       {dragActive && <DropOverlay />}
       {lightbox && (
         <ImageLightbox

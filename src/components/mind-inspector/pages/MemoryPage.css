@@ -45,6 +45,7 @@
 .memory-search input, .memory-search input:focus, .memory-search input:focus-visible { min-width: 0; flex: 1; border: 0; outline: none; box-shadow: none; color: var(--memory-ink); background: transparent; font-size: 12px; }
 .memory-search:focus-within { border-color: var(--codex-accent, #93a9b9); box-shadow: 0 0 0 3px color-mix(in srgb, var(--codex-accent, #93a9b9) 14%, transparent); }
 .memory-search input::placeholder { color: var(--memory-muted); }
+.memory-search-highlight { padding: 0 .08em; margin: 0 -.08em; border-radius: .22em .12em .2em .08em; color: inherit; background: linear-gradient(177deg, transparent 12%, #f4dc7890 20%, #f4dc78b8 82%, transparent 92%); box-decoration-break: clone; -webkit-box-decoration-break: clone; }
 .memory-list-note { margin: -4px 0 15px; color: var(--memory-muted); font-size: 12px; }
 .memory-error { color: #b14a4a; font-size: 12px; }
 .memory-empty { display: flex; align-items: center; flex-direction: column; justify-content: center; gap: 9px; min-height: 220px; padding: 24px; border: 1px dashed var(--memory-line); border-radius: 15px; color: var(--memory-muted); background: color-mix(in srgb, var(--codex-paper-card, #fffaf0) 55%, transparent); text-align: center; font-size: 12px; }

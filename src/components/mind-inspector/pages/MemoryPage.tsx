@@ -8,6 +8,16 @@ import './MemoryPage.css';
 
 type Layer = 'facts' | 'episodes' | 'outreach' | 'recent' | 'profile';
 
+const HighlightedText: React.FC<{ text: string; query: string }> = ({ text, query }) => {
+  const term = query.trim();
+  if (!term) return <>{text}</>;
+  const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const parts = text.split(new RegExp(`(${escaped})`, 'gi'));
+  return <>{parts.map((part, index) => index % 2 === 1
+    ? <mark className="memory-search-highlight" key={index}>{part}</mark>
+    : <React.Fragment key={index}>{part}</React.Fragment>)}</>;
+};
+
 const TABS = [
   { key: 'facts', title: '长期记忆', subtitle: '事实、偏好和约定', icon: Heart },
   { key: 'episodes', title: '共同经历', subtitle: '整理后的对话脉络', icon: BookOpen },
@@ -134,7 +144,7 @@ const MemoryPage: React.FC<{ initialLayer?: Layer }> = ({ initialLayer = 'facts'
         <div className="memory-thread-header"><span className="memory-thread-title"><MessageCircle size={15} />{thread.title}</span><span className="memory-thread-count">{thread.turns.length} 则交流</span><time>{dateText(thread.time)}</time></div>
         <div className="memory-thread-turns">{thread.turns.map((turn, index) => <div className={`memory-thread-turn${turn.speaker ? '' : ' memory-thread-turn-plain'}`} key={`${thread.id}-${index}`}>
           {turn.speaker && <span className="memory-thread-speaker">{turn.speaker}</span>}
-          <p>{turn.text}</p>
+          <p><HighlightedText text={turn.text} query={query} /></p>
         </div>)}</div>
       </article>)}
     </div> : <div className="memory-entry-grid">
@@ -146,9 +156,9 @@ const MemoryPage: React.FC<{ initialLayer?: Layer }> = ({ initialLayer = 'facts'
         return <article key={item.id} className={`memory-entry memory-entry-${layer}`}>
           <div className="memory-entry-top"><span className="memory-entry-kind">{categoryName(item)}</span><time>{dateText(item.created_at)}</time></div>
           {speech.speaker && <span className="memory-entry-speaker">{speechLabel(speech.speaker, speech.audience, character)}</span>}
-          <p className="memory-entry-content">{speech.body}</p>
-          {quote && quote !== speech.body && <div className="memory-entry-evidence"><span>来自原话</span>「{quote}」</div>}
-          {hooks.map((hook, index) => <div className="memory-entry-hook" key={index}><span>待跟进</span>{hook.condition}</div>)}
+          <p className="memory-entry-content"><HighlightedText text={speech.body} query={query} /></p>
+          {quote && quote !== speech.body && <div className="memory-entry-evidence"><span>来自原话</span>「<HighlightedText text={quote} query={query} />」</div>}
+          {hooks.map((hook, index) => <div className="memory-entry-hook" key={index}><span>待跟进</span><HighlightedText text={hook.condition} query={query} /></div>)}
         </article>;
       })}
     </div>}</>}
