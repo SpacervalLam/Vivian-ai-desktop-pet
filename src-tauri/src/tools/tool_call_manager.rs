@@ -23,12 +23,12 @@ use super::types::{
 };
 
 /// 非阻塞工具集合 - 这些工具启动后立即返回，不等待完成
+/// 截屏必须等待授权以及实际视觉结果，不能只返回 started。
 /// 注意：open_application / open_url 虽然是进程启动，
 /// 但解析 + spawn 本身 < 100ms，应同步等待真实结果再反馈给 LLM，
 /// 否则 LLM 会误以为成功而回复"已打开"（实际可能失败）。
 pub const NON_BLOCKING_TOOLS: &[&str] = &[
     "set_timer",
-    "take_screenshot",
 ];
 
 /// 工具调用状态
@@ -2026,9 +2026,40 @@ mod tests {
         // open_application 刻意不在名单：打开类工具必须同步等待真实结果，
         // 否则 LLM 会在 spawn 失败时仍回复"已打开"（见 NON_BLOCKING_TOOLS 注释）
         assert!(!NON_BLOCKING_TOOLS.contains(&"open_application"));
-        assert!(NON_BLOCKING_TOOLS.contains(&"take_screenshot"));
+        assert!(!NON_BLOCKING_TOOLS.contains(&"take_screenshot"));
+        assert!(!NON_BLOCKING_TOOLS.contains(&"screenshot_analyze"));
         assert!(NON_BLOCKING_TOOLS.contains(&"set_timer"));
         assert!(!NON_BLOCKING_TOOLS.contains(&"read_file"));
+    }
+
+    #[tokio::test]
+    async fn screenshot_without_confirmation_returns_real_failure_in_both_paths() {
+        let system = Arc::new(ToolSystem::new());
+        system.register_tool(Arc::new(crate::tools::builtin::system_ops::ScreenshotAnalyzeTool::new()));
+        system.register_alias("take_screenshot", "screenshot_analyze");
+        let manager = ToolCallManager::new(system, ToolUseContext::default());
+        let calls = [crate::providers::base::StructuredToolCall {
+            id: "screenshot_call".into(), name: "take_screenshot".into(), arguments: json!({}),
+        }];
+        let native = manager.execute_structured_calls(&calls).await;
+        let text = manager.execute_multi_step(r#"{"tool":"take_screenshot","arguments":{}}"#).await;
+        for results in [&native, &text.results] {
+            assert_eq!(results.len(), 1);
+            assert!(!results[0].success);
+            assert_eq!(results[0].status, ToolCallStatus::PermissionRequired);
+            assert!(results[0].error.is_some());
+        }
+    }
+
+    #[test]
+    fn foreground_app_is_visible_even_when_semantic_recall_misses_it() {
+        let tool: Arc<dyn Tool> = Arc::new(
+            crate::tools::builtin::perception_tools::GetForegroundAppContextTool::new());
+        let recalled = HashSet::new();
+        for scene in [ToolScene::Chat, ToolScene::LowTrust, ToolScene::Idle] {
+            assert!(matches!(resolve_visibility_with_recall(&tool, scene, Some(&recalled)),
+                crate::tools::types::ToolVisibility::Always));
+        }
     }
 
     #[test]

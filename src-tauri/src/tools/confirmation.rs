@@ -67,6 +67,7 @@ pub enum ConfirmationRisk {
 struct PendingEntry {
     sender: oneshot::Sender<ConfirmationResponse>,
     created_at: Instant,
+    ttl: Duration,
     request: ConfirmationRequest,
 }
 
@@ -75,7 +76,7 @@ struct PendingEntry {
 /// 存储 pending 的确认请求 + oneshot sender，等待前端回传结果。
 /// 线程安全，可被多个工具执行流共享。
 ///
-/// 内存保护：pending 请求带 5 分钟 TTL，超过未响应的请求在下次 create/resolve/cancel 时
+/// 内存保护：pending 请求带 TTL（工具系统使用配置的确认窗口期），过期请求惰性清理，
 /// 惰性清理，避免用户忽略确认弹窗导致 pending 永驻内存。
 pub struct ToolConfirmationRegistry {
     /// pending 请求：request_id → PendingEntry
@@ -95,7 +96,11 @@ impl ToolConfirmationRegistry {
     /// - `request_id`：用于 emit 事件给前端
     /// - `receiver`：await 此 receiver 获取用户选择（Deny/AllowOnce/AllowAlways）
     ///   receiver 在 sender 被 drop 时返回 `Err`，表示用户未响应（如关闭窗口或 TTL 清理）
-    pub fn create_request(&self, mut request: ConfirmationRequest) -> (u64, oneshot::Receiver<ConfirmationResponse>) {
+    pub fn create_request(&self, request: ConfirmationRequest) -> (u64, oneshot::Receiver<ConfirmationResponse>) {
+        self.create_request_with_timeout(request, PENDING_TTL)
+    }
+
+    pub fn create_request_with_timeout(&self, mut request: ConfirmationRequest, ttl: Duration) -> (u64, oneshot::Receiver<ConfirmationResponse>) {
         let id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
         request.request_id = id;
         let (tx, rx) = oneshot::channel();
@@ -106,6 +111,7 @@ impl ToolConfirmationRegistry {
             PendingEntry {
                 sender: tx,
                 created_at: Instant::now(),
+                ttl,
                 request,
             },
         );
@@ -155,7 +161,7 @@ impl ToolConfirmationRegistry {
         self.pending.lock().len()
     }
 
-    /// 惰性清理过期请求（超过 PENDING_TTL 未响应）
+    /// 惰性清理过期请求（超过该请求的确认窗口期未响应）
     ///
     /// 在 create_request / pending_count 时调用，无需额外后台任务。
     /// 清理时 sender 被 drop，receiver 收到 Err，await 处会处理为"未响应"。
@@ -163,13 +169,12 @@ impl ToolConfirmationRegistry {
         let now = Instant::now();
         let mut pending = self.pending.lock();
         let before = pending.len();
-        pending.retain(|_, entry| now.duration_since(entry.created_at) < PENDING_TTL);
+        pending.retain(|_, entry| now.duration_since(entry.created_at) < entry.ttl);
         let removed = before - pending.len();
         if removed > 0 {
             tracing::warn!(
-                "[Confirmation] 清理 {} 个超时未响应的 pending 请求（TTL={}s）",
-                removed,
-                PENDING_TTL.as_secs()
+                "[Confirmation] 清理 {} 个超时未响应的 pending 请求",
+                removed
             );
         }
     }
@@ -401,6 +406,26 @@ pub fn confirmation_info(tool_name: &str, args: &serde_json::Value) -> (Confirma
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn configured_confirmation_window_survives_default_ttl_then_expires() {
+        let registry = ToolConfirmationRegistry::new();
+        let req = ConfirmationRequest {
+            request_id: 0, tool: "take_screenshot".into(), arguments: serde_json::json!({}),
+            reason: "test".into(), risk_level: ConfirmationRisk::Medium,
+            char_id: "vivian".into(), allow_always_scope: "session".into(),
+        };
+        let (id, mut rx) = registry.create_request_with_timeout(req, Duration::from_secs(600));
+        registry.pending.lock().get_mut(&id).unwrap().created_at =
+            Instant::now() - Duration::from_secs(301);
+        assert_eq!(registry.list_pending().len(), 1);
+        assert!(matches!(rx.try_recv(), Err(oneshot::error::TryRecvError::Empty)));
+        registry.pending.lock().get_mut(&id).unwrap().created_at =
+            Instant::now() - Duration::from_secs(601);
+        assert!(registry.list_pending().is_empty());
+        assert!(matches!(rx.try_recv(), Err(oneshot::error::TryRecvError::Closed)));
+        assert!(!registry.resolve_request(id, ConfirmationResponse::AllowOnce));
+    }
 
     #[tokio::test]
     async fn test_create_and_resolve() {

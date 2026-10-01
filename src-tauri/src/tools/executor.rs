@@ -576,7 +576,9 @@ pub async fn execute_tool_use(
 
     // 4. 缓存检查（只读工具）
     // Web tools own freshness and document caches; generic cache lacks caller/config/freshness keys.
-    let is_read_only = tool.is_read_only() && !matches!(tool_name, "web_search" | "web_fetch");
+    // 前台应用是实时状态，不能返回几分钟前的窗口或进程。
+    let is_read_only = tool.is_read_only() && !matches!(tool.name(),
+        "web_search" | "web_fetch" | "get_foreground_app_context" | "get_active_window");
     if is_read_only {
         if let Some(cached) = tool_system.cache.get(tool_name, &validated_args) {
             tracing::debug!("工具 {} 命中缓存", tool_name);
@@ -749,7 +751,8 @@ pub async fn execute_tool_use(
     }
 
     // 6. 执行（带超时）
-    let timeout = get_tool_timeout(tool_name);
+    // 别名应使用实际工具的执行预算（take_screenshot 别名实际包含视觉模型调用）。
+    let timeout = get_tool_timeout(tool.name());
     let obs_record = tool_system
         .observability
         .start_call(tool_name, validated_args.clone());

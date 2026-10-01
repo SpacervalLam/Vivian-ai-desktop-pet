@@ -311,7 +311,10 @@ impl ToolSystem {
             char_id: char_id.to_string(),
             allow_always_scope: allow_always_scope.to_string(),
         };
-        let (id, rx) = self.confirmation.create_request(request.clone());
+        // 注册表清理和 await 使用同一窗口期，避免固定 5 分钟 TTL 提前丢弃请求。
+        let timeout_secs = *self.confirmation_timeout_secs.read();
+        let (id, rx) = self.confirmation.create_request_with_timeout(
+            request.clone(), std::time::Duration::from_secs(timeout_secs));
         let request = ConfirmationRequest { request_id: id, ..request };
 
         // emit 给发起角色对应的主窗口（label = char_id），避免广播到其他角色窗口
@@ -350,7 +353,6 @@ impl ToolSystem {
         );
 
         // 等待用户响应（超时由 config.tools.confirmation_timeout_secs 控制，避免永久阻塞）
-        let timeout_secs = *self.confirmation_timeout_secs.read();
         match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), rx).await {
             Ok(Ok(response)) => Some(response),
             Ok(Err(_)) => {

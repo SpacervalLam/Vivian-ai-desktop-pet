@@ -1,6 +1,6 @@
 //! 桌面感知工具 - 光标位置、空闲状态、前台应用上下文
 //!
-//! 通过 PowerShell P/Invoke 调用 user32.dll 获取桌面环境感知信息。
+//! 前台应用使用现有 Win32 感知原语，其余工具通过 PowerShell 获取信息。
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -9,7 +9,6 @@ use crate::tools::types::{
     PermissionResult, Tool, ToolCategory, ToolResult, ToolUseContext, ValidationResult,
     ToolRiskTier,
 };
-use crate::utils::run_ps_async;
 
 // ===== get_foreground_app_context =====
 
@@ -34,22 +33,22 @@ impl Tool for GetForegroundAppContextTool {
     }
 
     fn description(&self) -> &str {
-        "Get the foreground app context: window title and process name. Useful for understanding the user's current activity."
+        "Get the current foreground window title and process name. Use this first to identify which game or app the user is using; request a screenshot only if this is inconclusive or actual visual details are needed. Window metadata alone cannot reveal gameplay or screen contents."
     }
 
     fn description_in(&self, lang: &str) -> &str {
         match lang {
-            "zh" => "获取前台应用上下文：窗口标题和进程名。可用于了解用户当前活动。",
-            "ja" => "フォアグラウンドアプリのコンテキストを取得する：ウィンドウタイトルとプロセス名。ユーザーの現在の活動を理解するのに役立つ。",
+            "zh" => "获取当前前台应用的窗口标题和进程名。判断用户正在玩什么游戏、使用什么软件时优先调用；只有信息不足或需要查看实际画面细节时才请求截图。窗口信息不能证明游戏进度或画面内容。",
+            "ja" => "前面のウィンドウタイトルとプロセス名を取得する。どのゲームやアプリを使っているかはまずこのツールで確認し、情報不足や画面の詳細が必要な場合にスクリーンショットを求める。ゲームの進行や画面内容はこの情報だけでは分からない。",
             _ => self.description(),
         }
     }
 
     fn usage_corpus(&self, lang: &str) -> &'static str {
         match lang {
-            "zh" => "我现在在用哪个软件\n我现在打开了什么\n看看我在用啥\n当前窗口是哪个",
-            "en" => "what app am I using right now\nwhat's on my screen\nwhich program is open",
-            "ja" => "今どのアプリを使ってる\n今開いてるソフトは\n画面に何が出てる",
+            "zh" => "我正在玩什么游戏\n你知道我在玩什么吗\n看看我玩的是什么游戏\n我现在在用哪个软件\n我现在打开了什么\n看看我在用啥\n当前窗口是哪个",
+            "en" => "what game am I playing\ncan you tell which game I'm playing\nwhat app am I using right now\nwhich program is open",
+            "ja" => "今何のゲームをしてる\n今どのアプリを使ってる\n今開いてるソフトは",
             _ => "",
         }
     }
@@ -75,35 +74,29 @@ impl Tool for GetForegroundAppContextTool {
     }
 
     async fn call(&self, _args: Value, _ctx: &ToolUseContext) -> ToolResult {
-        let script = r#"Add-Type -TypeDefinition 'using System;using System.Runtime.InteropServices;using System.Text;public class W{[DllImport("user32.dll")]public static extern IntPtr GetForegroundWindow();[DllImport("user32.dll")]public static extern int GetWindowText(IntPtr h,StringBuilder s,int n);[DllImport("user32.dll")]public static extern uint GetWindowThreadProcessId(IntPtr h,out uint pid);}';
-$h = [W]::GetForegroundWindow();
-$sb = New-Object System.Text.StringBuilder 512;
-[W]::GetWindowText($h,$sb,512) | Out-Null;
-$pid = 0;
-[W]::GetWindowThreadProcessId($h,[ref]$pid) | Out-Null;
-$proc = (Get-Process -Id $pid -ErrorAction SilentlyContinue).ProcessName;
-"$($sb.ToString())|$proc|$pid"
-"#;
-        match run_ps_async(script).await {
-            Ok(out) => {
-                let parts: Vec<&str> = out.splitn(3, '|').collect();
-                let title = parts.first().unwrap_or(&"").to_string();
-                let process = parts.get(1).unwrap_or(&"").to_string();
-                let pid = parts.get(2).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
-                ToolResult::standard_success(
-                    "前台应用上下文",
-                    Some(json!({
-                        "title": title,
-                        "process": process,
-                        "pid": pid,
-                    })),
-                )
-            }
-            Err(e) => ToolResult::standard_error("获取前台应用失败", Some(&e), None),
+        let window = crate::world::foreground_window::get_foreground_window();
+        if window.pid == 0 {
+            return ToolResult::standard_error(
+                "当前没有可识别的外部前台应用，不能据此判断用户正在玩什么",
+                Some("ForegroundAppUnavailable"),
+                None,
+            );
         }
+        ToolResult::standard_success(
+            "前台应用上下文",
+            Some(json!({
+                "title": window.title,
+                "process": window.process,
+                "pid": window.pid,
+            })),
+        )
     }
 
     fn is_read_only(&self) -> bool {
+        true
+    }
+
+    fn always_load(&self) -> bool {
         true
     }
 
