@@ -96,7 +96,7 @@ impl ExampleRetriever {
             let attention = if e.attention.is_empty() { String::new() } else {
                 format!("Attention (creative direction, not a reasoning transcript): {}\n", e.attention)
             };
-            let block = format!("\nExample {}\nContext: {}\n{}User: {}\nResponse: {}\n", e.id, e.situation, attention, e.user, e.response);
+            let block = format!("\nExample {}\nFictional context (not user history): {}\n{}Fictional user: {}\nExample response: {}\n", e.id, e.situation, attention, e.user, e.response);
             if out.chars().count() + block.chars().count() + 40 > MAX_CHARS { continue; }
             out.push_str(&block);
             scopes.push(e.scope.clone()); ids.push(format!("{}:{score:.2}", e.id));

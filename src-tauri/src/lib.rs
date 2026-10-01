@@ -91,7 +91,19 @@ pub fn run() {
 
     // 恢复出厂清扫：必须在 AppState::new()（及任何数据模块打开文件）之前执行，
     // 此时 vectors.db 等尚未被 SQLite 打开，可无锁删除。
-    commands::system::factory_reset_sweep_if_pending();
+    if let Err(e) = commands::system::factory_reset_sweep_if_pending() {
+        tracing::error!("[factory_reset] {e}");
+        eprintln!("{e}");
+        #[cfg(target_os = "windows")]
+        {
+            use windows::core::PCWSTR;
+            use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
+            let message: Vec<u16> = e.encode_utf16().chain(std::iter::once(0)).collect();
+            let title: Vec<u16> = "恢复出厂未完成".encode_utf16().chain(std::iter::once(0)).collect();
+            unsafe { MessageBoxW(None, PCWSTR(message.as_ptr()), PCWSTR(title.as_ptr()), MB_OK | MB_ICONERROR); }
+        }
+        return;
+    }
 
     // 备份恢复：同样必须在 AppState::new() 之前执行（清空当前数据并回填备份，
     // 此时数据文件未被打开，可无锁覆盖）

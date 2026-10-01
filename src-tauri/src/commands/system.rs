@@ -45,11 +45,9 @@ const FACTORY_RESET_KEEP: &[&str] = &[
 ///
 /// 标记在下次启动、任何数据模块打开文件前被消费：
 /// 此时 SQLite 连接 / 日志句柄等均未建立，可无锁删除全部数据文件。
-fn mark_factory_reset_sweep() {
+fn mark_factory_reset_sweep() -> Result<(), String> {
     let marker = crate::utils::path::get_user_data_dir().join(FACTORY_RESET_MARKER);
-    if let Err(e) = std::fs::write(&marker, b"1") {
-        tracing::error!("[factory_reset] 写入清扫标记失败: {e}");
-    }
+    std::fs::write(&marker, b"1").map_err(|e| format!("写入恢复出厂清扫标记失败: {e}"))
 }
 
 /// 启动时消费清扫标记：删除保留清单外的全部用户数据
@@ -57,11 +55,15 @@ fn mark_factory_reset_sweep() {
 /// 必须在 AppState::new() 之前调用（任何 MemoryManager / 向量库 /
 /// 事件账本初始化之前），否则被占用的文件（如 vectors.db）在 Windows
 /// 上因共享冲突无法删除。
-pub fn factory_reset_sweep_if_pending() {
+pub fn factory_reset_sweep_if_pending() -> Result<(), String> {
     let root = crate::utils::path::get_user_data_dir();
+    sweep_factory_reset_dir(&root)
+}
+
+fn sweep_factory_reset_dir(root: &std::path::Path) -> Result<(), String> {
     let marker = root.join(FACTORY_RESET_MARKER);
     if !marker.exists() {
-        return;
+        return Ok(());
     }
     tracing::info!("[factory_reset] 检测到清扫标记，开始重置用户本地数据目录: {}", root.display());
 
@@ -69,24 +71,36 @@ pub fn factory_reset_sweep_if_pending() {
         Ok(e) => e,
         Err(e) => {
             tracing::error!("[factory_reset] 读取用户数据目录失败: {e}");
-            let _ = std::fs::remove_file(&marker);
-            return;
+            return Err(format!("读取恢复出厂数据目录失败: {e}"));
         }
     };
 
     let mut removed = 0usize;
     let mut failed = 0usize;
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("读取恢复出厂目录条目失败: {e}"))?;
         let name = entry.file_name().to_string_lossy().to_string();
         if FACTORY_RESET_KEEP.contains(&name.as_str()) || name == FACTORY_RESET_MARKER {
             continue;
         }
         let path = entry.path();
-        let result = if path.is_dir() {
-            std::fs::remove_dir_all(&path)
-        } else {
-            std::fs::remove_file(&path)
-        };
+        // Windows 重启时旧进程可能尚未释放 SQLite 等文件句柄。
+        // 短暂重试；仍失败则保留标记，不允许启动后读取旧数据。
+        let mut result = Ok(());
+        for attempt in 0..20 {
+            result = if path.is_dir() {
+                std::fs::remove_dir_all(&path)
+            } else {
+                std::fs::remove_file(&path)
+            };
+            if result.is_ok() || result.as_ref().is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) {
+                result = Ok(());
+                break;
+            }
+            if attempt < 19 {
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+        }
         match result {
             Ok(()) => {
                 removed += 1;
@@ -99,12 +113,74 @@ pub fn factory_reset_sweep_if_pending() {
         }
     }
 
-    let _ = std::fs::remove_file(&marker);
     tracing::info!(
         "[factory_reset] 用户数据目录清扫完成：删除 {} 项，失败 {} 项",
         removed,
         failed
     );
+    if failed > 0 {
+        return Err(format!("恢复出厂清扫未完成（{failed} 项失败）。清扫标记已保留；请关闭占用数据目录的程序后重新启动。"));
+    }
+    std::fs::remove_file(&marker).map_err(|e| format!("删除恢复出厂清扫标记失败: {e}"))
+}
+
+#[cfg(test)]
+mod reset_tests {
+    use super::*;
+
+    #[test]
+    fn sweep_only_runs_with_marker_and_preserves_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir(root.join("characters")).unwrap();
+        std::fs::write(root.join("characters/dynamic_profile.json"), "old dialogue").unwrap();
+        std::fs::write(root.join("config.yaml"), "settings").unwrap();
+        sweep_factory_reset_dir(root).unwrap();
+        assert!(root.join("characters").exists());
+        std::fs::write(root.join(FACTORY_RESET_MARKER), "1").unwrap();
+        sweep_factory_reset_dir(root).unwrap();
+        assert!(!root.join("characters").exists());
+        assert!(!root.join(FACTORY_RESET_MARKER).exists());
+        assert_eq!(std::fs::read_to_string(root.join("config.yaml")).unwrap(), "settings");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn sweep_retries_until_old_process_releases_file() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir(root.join("characters")).unwrap();
+        let file = std::fs::OpenOptions::new().write(true).create(true).share_mode(0)
+            .open(root.join("characters/locked.db")).unwrap();
+        std::fs::write(root.join(FACTORY_RESET_MARKER), "1").unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            drop(file);
+        });
+        sweep_factory_reset_dir(root).unwrap();
+        release.join().unwrap();
+        assert!(!root.join("characters").exists());
+        assert!(!root.join(FACTORY_RESET_MARKER).exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn locked_data_keeps_marker_until_next_successful_sweep() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir(root.join("characters")).unwrap();
+        let file = std::fs::OpenOptions::new().write(true).create(true).share_mode(0)
+            .open(root.join("characters/locked.db")).unwrap();
+        std::fs::write(root.join(FACTORY_RESET_MARKER), "1").unwrap();
+        assert!(sweep_factory_reset_dir(root).is_err());
+        assert!(root.join(FACTORY_RESET_MARKER).exists());
+        drop(file);
+        sweep_factory_reset_dir(root).unwrap();
+        assert!(!root.join("characters").exists());
+        assert!(!root.join(FACTORY_RESET_MARKER).exists());
+    }
 }
 
 /// 查询 Brain 是否已初始化完成（前端据此决定是否调用依赖 Brain 的命令）
@@ -157,6 +233,8 @@ pub async fn factory_reset(
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), String> {
     tracing::info!("[factory_reset] 开始恢复出厂设置流程");
+    // 在任何清空操作之前保证标记落盘，写入失败时不破坏当前数据。
+    mark_factory_reset_sweep()?;
 
     // ===== 1. 锁死所有行为 =====
     state.set_factory_reset_in_progress(true);
@@ -230,7 +308,6 @@ pub async fn factory_reset(
     tracing::info!("[factory_reset] 数据清空完成，准备重启应用");
     // 重启后在 AppState 构造前执行目录级清扫（保留清单外的全部数据删除），
     // 覆盖内存清空未触达的文件（screenshots / images / discovery / 历史遗留目录等）。
-    mark_factory_reset_sweep();
     // request_restart 会触发 RunEvent::ExitRequested，由 lib.rs 执行常规清理
     // （记忆落盘 / 停光标追踪 / 卸载子类化），随后 Tauri 自动重启进程。
     // 重启后 AppState 重新构造，factory_reset_in_progress 自然恢复为 false，行为恢复。
