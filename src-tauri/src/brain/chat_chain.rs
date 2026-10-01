@@ -1386,11 +1386,13 @@ Choose the appropriate expression and motion. Leave empty if nothing fits.",
     /// 同时设置 `skip_memory_save`，让 UserMemorySavingRunnable / MemorySavingRunnable
     /// 跳过写入——问候的对话历史与记忆由调用方（Brain::generate_startup_greeting）
     /// 独立完成后处理，避免把合成的问候指令当作用户消息污染记忆库。
-    pub async fn ainvoke_greeting(&self, user_input: &str) -> VivianResult<AiResponse> {
+    pub async fn ainvoke_greeting(&self, user_input: &str, is_first_meeting: bool) -> VivianResult<AiResponse> {
         let mut state = self.prepare_pipeline_state(user_input).await;
         state.metadata["skip_memory_save"] = serde_json::json!(true);
         // 标记本轮为主动开场：感知层据此跳过对合成触发模板的情绪/意图分类。
         state.metadata["proactive_greeting"] = serde_json::json!(true);
+        // Snapshot the startup decision before background observations can create memories.
+        state.metadata["first_contact_greeting"] = serde_json::json!(is_first_meeting);
         let (_, response) = self
             .execute_pipeline_and_build_response(state, false, user_input)
             .await?;

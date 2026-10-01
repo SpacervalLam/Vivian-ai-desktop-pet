@@ -82,6 +82,19 @@ pub struct Brain {
     pub char_id: String,
 }
 
+/// First contact is an introduction to a new person, not a generic idle-chat opener.
+fn first_contact_prompt(char_id: &str, time_desc: &str, language: &str) -> String {
+    let manner = if char_id == "nana" { "温柔亲切，轻轻接近新认识的人" }
+        else { "稍有拘谨，明快又有一点不好意思" };
+    format!("这是你第一次与这位用户见面，还没有共同经历或熟悉的称呼。\
+        请主动向这位新认识的人打招呼，顺口介绍自己的名字，表达愿意认识对方的自然态度。\
+        保留你的个性：{manner}；不挖苦、不装熟。\
+        一两句完整的话即可，可以轻轻留出接话空间，不罗列身份、能力或兴趣，也不必追问私人信息。\
+        当前时段是 {time_desc}，只是背景；不由此推测用户睡不着、熬夜、无聊或需要陪伴。\
+        没有工具观测就不描述桌面氛围。角色兴趣不是刚才读书、游戏或看番的证据。\
+        用 {language} 回复。")
+}
+
 impl Brain {
     pub async fn new(
         config: AppConfig,
@@ -900,16 +913,7 @@ impl Brain {
         // 首次见面走完整对话流水线（与直接渠道同一套提示词 + 记忆检索），
         // 让问候带着种子前史生成，而不是一张白纸。
         let greeting_prompt = if is_first_meeting {
-            format!(
-                "你和用户刚认识，这是你们第一次打招呼。现在是{time_desc}。\
-                 像真实聊天刚开始那样说一句：可以顺口提自己的名字，再带出一点符合你性格的反应或兴趣；\
-                 也可以从自己的兴趣切入。没有本轮工具观测就不知道屏幕、声音或用户活动：\
-                 不要把自己的安静、没有聊天记录或桌宠身份说成“桌面安静”“桌面热闹”等环境观察，\
-                 不推测用户是否出门或正在做什么。按自己的性格和兴趣开场，避免泛泛描述桌面氛围。\
-                 别把名字、身份、能力和欢迎词逐项报一遍，也不必硬塞问题。\
-                 让这句话听起来像你当下想说的，而不是照着迎新台词念；简短、友好，有一点你的个性即可。\
-                 用{user_language_name}回复。"
-            )
+            first_contact_prompt(&self.char_id, time_desc, user_language_name)
         } else {
             let memory_text = self.build_startup_greeting_memory_text().await;
             let context_section = if memory_text.is_empty() {
@@ -938,7 +942,7 @@ impl Brain {
         // 走完整对话流水线生成（与一般直接渠道对话相同提示词，含记忆检索→种子记忆在场）。
         // 返回 AiResponse；对话写回与记忆由下方独立后处理完成，避免把问候指令污染记忆库。
         let greeting_text = match &self.chat_chain {
-            Some(chain) => match chain.ainvoke_greeting(&greeting_prompt).await {
+            Some(chain) => match chain.ainvoke_greeting(&greeting_prompt, is_first_meeting).await {
                 Ok(resp) => {
                     let t = resp.text.trim().trim_matches('"').trim_matches('「').trim_matches('」').to_string();
                     if t.is_empty() {
@@ -2091,5 +2095,18 @@ fn language_code_to_name(code: &str) -> &'static str {
         "en" => "English",
         "ja" => "日本語",
         _ => "简体中文",
+    }
+}
+
+#[cfg(test)]
+mod first_contact_tests {
+    #[test]
+    fn companion_contact_greeting_is_an_introduction_not_idle_chat() {
+        let nana = super::first_contact_prompt("nana", "late night", "简体中文");
+        let vivian = super::first_contact_prompt("vivian", "late night", "简体中文");
+        assert!(nana.contains("第一次") && nana.contains("介绍自己的名字"));
+        assert!(nana.contains("温柔亲切") && !nana.contains("Vivian"));
+        assert!(vivian.contains("不好意思") && !vivian.contains("Nana"));
+        assert!(nana.contains("简体中文") && vivian.contains("不装熟"));
     }
 }

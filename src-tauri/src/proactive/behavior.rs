@@ -276,8 +276,11 @@ impl BehaviorDecider {
         } else {
             system_prompt.to_string()
         };
+        let voice = if trigger == ProactiveTrigger::CrossCharacterReply {
+            crate::pipeline::prompt_modules::build_cross_character_voice_guide(char_id)
+        } else { String::new() };
         Some(vec![
-            ChatMessage::system(format!("{sys}\n{}\n{}\n{}",
+            ChatMessage::system(format!("{sys}\n{voice}\n{}\n{}\n{}",
                 crate::pipeline::prompt_modules::human_feel_rules(),
                 proactive_output_format(crate::pipeline::prompt_modules::normalize_lang(lang)),
                 proactive_channel_instruction(&ctx.channel))),
@@ -325,7 +328,10 @@ impl BehaviorDecider {
         let mut suffix = build_proactive_directive(trigger, ctx, lang_norm, char_id)?;
 
         // Output protocol belongs to system, not to a fabricated user utterance.
-        let protocol = format!("{}\n{}", proactive_output_format(lang_norm), proactive_channel_instruction(&ctx.channel));
+        let voice = if trigger == ProactiveTrigger::CrossCharacterReply {
+            crate::pipeline::prompt_modules::build_cross_character_voice_guide(char_id)
+        } else { String::new() };
+        let protocol = format!("{}\n{}\n{voice}", proactive_output_format(lang_norm), proactive_channel_instruction(&ctx.channel));
 
         // 真实工具历史 + 桌宠身份/禁止编造约束
         if !tool_history.is_empty() {
@@ -791,6 +797,27 @@ pub fn format_recent_tool_history(ts: &ToolSystem, lang: &str) -> String {
 #[cfg(test)]
 mod non_response_prompt_tests {
     use super::*;
+
+    #[test]
+    fn companion_contact_roommate_guide_reaches_both_proactive_paths() {
+        let ctx = LlmContext::default();
+        let step = PromptBuildingStep::new();
+        for prompt_step in [None, Some(&step)] {
+            let messages = BehaviorDecider::build_messages(
+                ProactiveTrigger::CrossCharacterReply, &ctx, "", "zh", "vivian",
+                prompt_step, "", "", &[], "", 0,
+            ).unwrap();
+            assert!(messages[0].content.contains("Talking to Nana as Vivian"));
+            assert!(messages[0].content.contains("relaxed and candid"));
+            assert!(messages[0].content.contains("genuinely touches a feeling"));
+            assert!(!messages[0].content.contains("Talking to Vivian as Nana"));
+        }
+        let plain = BehaviorDecider::build_messages(
+            ProactiveTrigger::HourlyGreeting, &ctx, "", "zh", "vivian", None,
+            "", "", &[], "", 0,
+        ).unwrap();
+        assert!(!plain[0].content.contains("Talking to Nana as Vivian"));
+    }
 
     #[test]
     fn non_response_is_timing_context_not_emotional_punishment() {

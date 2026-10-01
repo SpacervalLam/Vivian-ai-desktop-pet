@@ -1,14 +1,14 @@
 //! 桌宠交互的轻量反应生成 —— 用户操作触发的极简 LLM 回复 + 事件账本记录。
 //!
 //! 取代前端写死的固定台词（原 `LOCAL_TOUCH_LINES`）。用户对桌宠做出动作
-//! （单击 / 双击 / 戳毛了 / 长按 / 快速拖动 / 甩飞撞边）时，这里用一次**极简 prompt** 的
+//! （单击 / 双击 / 戳毛了 / 长按 / 快速拖动 / 甩飞撞边）时，这里在概率与统一预算允许时，用一次**极简 prompt** 的
 //! LLM 调用生成一句符合角色人设的短反应，并把这次操作作为「有意义的用户行为」
 //! 写入统一事件账本（[`crate::memory::unified_event_ledger`]），供日记、内心独白、
 //! 记忆沉淀消费。
 //!
 //! # 提示词只由三部分构成
 //!
-//! 1. **精简人设** —— 复用 [`build_tool_minimal_identity`]，一两句话的性格描述
+//! 1. **精简人设** —— 复用 `build_tool_minimal_identity`，一两句话的性格描述
 //!    + `PERSONA_LOAD` 硬约束 + 语言标志，不加载完整 persona / 记忆 / 工具表。
 //! 2. **低权重历史对话窗口** —— 最近若干条 user↔角色消息，只作语气参考，
 //!    在 prompt 里显式标注"权重很低、不要复述"。
@@ -25,9 +25,9 @@
 //! 超时 / 无 router / 未配置 API / 输出为空时一律返回 `None`，前端不显示任何气泡。
 //! 不回退到本地固定台词 —— 宁可这一下没反应，也不让用户看到写死的话术。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
@@ -106,8 +106,8 @@ const REPLY_MAX_CHARS: usize = 60;
 
 /// 同类动作的处理节流表：key = `"{char_id}:{action}"`，value = 上次处理时间戳（秒）。
 ///
-/// 同时管住**账本写入**与**LLM 调用**：用户狂点桌宠时，同类动作在窗口内只处理
-/// 一次，既不刷屏账本也不烧 token。不同动作各自独立计时 —— 甩飞之后立刻摸头，
+/// 只合并账本事件；开口另走跨动作、跨角色的概率和预算门。用户狂点桌宠时，同类动作在窗口内只处理
+/// 一次，避免刷屏账本。不同动作的事件各自独立计时 —— 甩飞之后立刻摸头，
 /// 两件事都会如实记下。
 static ACTION_THROTTLE: Lazy<Mutex<HashMap<String, f64>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 
@@ -140,6 +140,80 @@ fn throttle_pass(char_id: &str, action: &str, now: f64) -> bool {
     true
 }
 
+// Speech and observation have separate budgets. An animation can acknowledge every touch;
+// speech is optional and must not accumulate across click/drag/long-press callbacks.
+const VOICE_COOLDOWN: Duration = Duration::from_secs(40);
+const SHARED_VOICE_GAP: Duration = Duration::from_secs(12);
+const VOICE_WINDOW: Duration = Duration::from_secs(120);
+const VOICE_WINDOW_LIMIT: usize = 2;
+
+#[derive(Default)]
+struct VoiceWindow {
+    attempts: VecDeque<Instant>,
+    last_attempt: Option<Instant>,
+    in_flight: bool,
+}
+
+#[derive(Default)]
+struct ReactionLimiter {
+    characters: HashMap<String, VoiceWindow>,
+    last_attempt: Option<Instant>,
+}
+
+fn reaction_probability(action: &str, metrics: Option<&PetInteractionMetrics>) -> f64 {
+    let base = match action {
+        ACTION_SINGLE_CLICK => 0.20,
+        ACTION_DOUBLE_CLICK => 0.35,
+        ACTION_LONG_PRESS => 0.08, // Opening the inspector already provides useful feedback.
+        ACTION_DRAG => 0.10,
+        ACTION_ROUGH_CLICK => 0.25,
+        ACTION_FAST_DRAG | ACTION_EDGE_BOUNCE => 0.35,
+        _ => return 0.0,
+    };
+    // A burst calls for less chatter, not a progressively more angry conversation.
+    let burst = metrics.and_then(|m| m.click_count).is_some_and(|n| n >= 4);
+    if burst { base * 0.5 } else { base }
+}
+
+impl ReactionLimiter {
+    fn reserve(&mut self, char_id: &str, action: &str, metrics: Option<&PetInteractionMetrics>, now: Instant, roll: f64) -> bool {
+        let probability = reaction_probability(action, metrics);
+        if !roll.is_finite() || roll < 0.0 || roll >= probability { return false; }
+        if self.last_attempt.is_some_and(|last| now.saturating_duration_since(last) < SHARED_VOICE_GAP) {
+            return false;
+        }
+        let window = self.characters.entry(char_id.to_string()).or_default();
+        while window.attempts.front().is_some_and(|last| now.saturating_duration_since(*last) >= VOICE_WINDOW) {
+            window.attempts.pop_front();
+        }
+        if window.in_flight || window.attempts.len() >= VOICE_WINDOW_LIMIT
+            || window.last_attempt.is_some_and(|last| now.saturating_duration_since(last) < VOICE_COOLDOWN) {
+            return false;
+        }
+        window.in_flight = true;
+        window.attempts.push_back(now);
+        window.last_attempt = Some(now);
+        self.last_attempt = Some(now);
+        true
+    }
+
+    fn release(&mut self, char_id: &str) {
+        if let Some(window) = self.characters.get_mut(char_id) { window.in_flight = false; }
+    }
+}
+
+static REACTION_LIMITER: Lazy<Mutex<ReactionLimiter>> = Lazy::new(|| Mutex::new(ReactionLimiter::default()));
+
+struct ReactionPermit { char_id: String }
+impl Drop for ReactionPermit {
+    fn drop(&mut self) { REACTION_LIMITER.lock().release(&self.char_id); }
+}
+
+fn reserve_reaction(char_id: &str, action: &str, metrics: Option<&PetInteractionMetrics>) -> Option<ReactionPermit> {
+    REACTION_LIMITER.lock().reserve(char_id, action, metrics, Instant::now(), rand::random::<f64>())
+        .then(|| ReactionPermit { char_id: char_id.to_string() })
+}
+
 // ============ 动作描述 ============
 
 /// 用户动作的「角色视角」描述 —— 喂给 LLM，让桌宠知道刚刚被怎么对待了。
@@ -150,21 +224,21 @@ fn action_prompt_line(name: &str, action: &str, impact: Option<f64>) -> String {
         ACTION_SINGLE_CLICK => "用户用鼠标点了你的桌宠形象一下。".to_string(),
         ACTION_DOUBLE_CLICK => "用户连着快速点了你两下。".to_string(),
         ACTION_ROUGH_CLICK => {
-            "用户戳你戳得太急太频繁了，跟摸头完全不是一回事，你有点被惹毛了。".to_string()
+            "用户在短时间内连续快速点击了你的桌宠形象；这只说明点击节奏。".to_string()
         }
         ACTION_LONG_PRESS => "用户按住你，已达到长按触发时长；此时可能还没有松手。".to_string(),
         ACTION_DRAG => "用户按住并拖动了你的桌宠形象，速度和距离见观测数据。".to_string(),
         ACTION_FAST_DRAG => {
-            "用户抓住你疯狂甩动，把你晃得头晕目眩、眼冒金星。".to_string()
+            "用户快速拖动了你的桌宠形象。".to_string()
         }
         ACTION_EDGE_BOUNCE => {
             let force = impact.unwrap_or(0.0);
             if force >= 2.5 {
-                "用户把你一把甩飞出去，你「砰」地一头撞在屏幕边缘上，撞得不轻。".to_string()
+                "你的桌宠形象较快地碰到了屏幕边缘。".to_string()
             } else if force >= 1.0 {
-                "用户把你甩了出去，你撞在屏幕边缘上，晕了一下。".to_string()
+                "你的桌宠形象滑动后碰到了屏幕边缘。".to_string()
             } else {
-                "用户松手后你滑到了屏幕边缘，轻轻磕了一下。".to_string()
+                "用户松手后，你的桌宠形象滑到了屏幕边缘。".to_string()
             }
         }
         _ => format!("用户对{name}做了一个动作（{action}）。"),
@@ -178,16 +252,16 @@ fn action_ledger_text(name: &str, action: &str, impact: Option<f64>) -> Option<S
     let text = match action {
         ACTION_SINGLE_CLICK => format!("用户点击了{name}的桌宠形象"),
         ACTION_DOUBLE_CLICK => format!("用户快速双击了{name}"),
-        ACTION_ROUGH_CLICK => format!("用户连着猛戳了{name}好几下，把她惹毛了"),
+        ACTION_ROUGH_CLICK => format!("用户连续快速点击了{name}的桌宠形象"),
         ACTION_LONG_PRESS => format!("用户按住{name}，触发了长按"),
         ACTION_DRAG => format!("用户拖动了{name}的桌宠形象"),
-        ACTION_FAST_DRAG => format!("用户抓着{name}疯狂甩动，把她晃得头晕目眩"),
+        ACTION_FAST_DRAG => format!("用户快速拖动了{name}的桌宠形象"),
         ACTION_EDGE_BOUNCE => {
             let force = impact.unwrap_or(0.0);
             if force >= 2.5 {
-                format!("用户把{name}甩飞了出去，她重重撞在屏幕边缘上，晕得厉害")
+                format!("{name}的桌宠形象较快地碰到了屏幕边缘")
             } else {
-                format!("用户把{name}甩了出去，她撞在屏幕边缘上，晕了一下")
+                format!("{name}的桌宠形象滑动后碰到了屏幕边缘")
             }
         }
         _ => return None,
@@ -234,7 +308,7 @@ pub async fn generate_pet_reaction(
 
 /// 桌宠反应核心逻辑（不依赖 tauri `State`，便于其它后端路径复用）。
 ///
-/// 流程：节流 → 记事件账本 → 极简 prompt 生成回复。
+/// 流程：合并事件 → 中性账本记录 → 概率/冷却/预算/在途许可 → 可选短反馈。
 /// 账本记录先于 LLM 调用，即使模型没配好，用户这次操作也已经留下痕迹。
 pub async fn react_to_user_action(
     state: &AppState,
@@ -243,12 +317,16 @@ pub async fn react_to_user_action(
     impact: Option<f64>,
     metrics: Option<&PetInteractionMetrics>,
 ) -> Option<String> {
+    if reaction_probability(action, metrics) == 0.0
+        || state.factory_reset_in_progress.load(std::sync::atomic::Ordering::SeqCst) { return None; }
     let now = chrono::Local::now().timestamp() as f64;
     if !throttle_pass(char_id, action, now) {
         return None;
     }
 
     log_action_to_ledger(state, char_id, action, impact, now, metrics);
+    let _permit = reserve_reaction(char_id, action, metrics)?;
+    // Failed/empty/cancelled requests consume the same rate budget; Drop releases in-flight.
     generate_reaction(state, char_id, action, impact, metrics).await
 }
 
@@ -314,7 +392,7 @@ async fn generate_reaction(
         .characters
         .read()
         .get(char_id)
-        .map(|c| c.brain.dialogue.get_history())
+        .map(|c| c.brain.dialogue.get_user_visible_history())
         .unwrap_or_default();
 
     let lang = crate::i18n::get_language();
@@ -332,7 +410,8 @@ async fn generate_reaction(
     let request = LLMRequest::new("intent_judge", messages)
         .with_max_tokens(REACTION_MAX_TOKENS)
         .with_temperature(REACTION_TEMPERATURE)
-        .with_character_id(char_id);
+        .with_character_id(char_id)
+        .without_framework_instructions();
 
     let outcome = tokio::time::timeout(
         Duration::from_secs(REACTION_TIMEOUT_SECS),
@@ -343,6 +422,7 @@ async fn generate_reaction(
     match outcome {
         Ok(Ok(raw)) => {
             let cleaned = clean_reply(&raw);
+            let cleaned = if cleaned.eq_ignore_ascii_case("[SILENT]") { String::new() } else { cleaned };
             if cleaned.is_empty() {
                 tracing::debug!("[PetReaction] {char_id} 模型返回空文本，静默跳过");
                 None
@@ -365,6 +445,13 @@ async fn generate_reaction(
     }
 }
 
+fn reaction_voice(char_id: &str) -> &'static str {
+    match char_id {
+        "nana" => "用温柔的疑问或轻轻应声接住这份注意；即使想让对方停一停，也轻声说明自己的界限，不责问。",
+        _ => "可以有一点突然被注意到的惊讶；害羞时短促地别扭一下，暖意仍可感受到。没有羞涩的情境就正常回应，不靠训人或贬低用户表现傲娇。",
+    }
+}
+
 /// 组装极简 prompt：精简人设 + 低权重历史 + 本次动作。
 fn build_reaction_messages(
     name: &str,
@@ -379,37 +466,39 @@ fn build_reaction_messages(
         match lang_norm {
             "en" => (
                 "## What just happened",
-                "Reply with exactly ONE short sentence (under 20 words).",
+                "If you speak, use one short sentence (under 20 words); [SILENT] is also valid.",
                 "## Recent chat (very low weight)",
                 "This is only so you remember the tone and what was being talked about. Do NOT repeat or summarize it.",
                 "## What the user just did to you",
-                "Say your one-sentence reaction now.",
+                "A brief reaction or [SILENT], whichever fits.",
             ),
             "ja" => (
                 "## いま起きたこと",
-                "たった一文だけ（20文字以内）で返すこと。",
+                "話すなら短い一文で。自然な一言がなければ [SILENT]。",
                 "## 最近の会話（重みはごく低い）",
                 "口調と思い出すためだけの参考。復唱・要約はしないこと。",
                 "## ユーザーが今あなたにしたこと",
-                "今の一言だけを出力すること。",
+                "今の一言、または [SILENT] を出力すること。",
             ),
             _ => (
                 "## 刚刚发生了什么",
-                "只说一句话，20 字以内。",
+                "开口时只说一句，20 字以内；没有自然的一句可输出 [SILENT]。",
                 "## 最近的聊天（权重很低）",
                 "只是让你记得刚才的语气和在聊什么，不要复述、不要总结。",
                 "## 用户刚刚对你做的事",
-                "现在就说你那句话。",
+                "输出自然的一句或 [SILENT]。",
             ),
         };
 
     let persona = build_tool_minimal_identity(char_id, lang);
+    let voice = reaction_voice(char_id);
     let system = format!(
         "{persona}\n\n{task_heading}\n\
-        用户刚刚对你的桌宠形象做了一个动作，你只需要随口给一句反应。\n\
+        用户刚刚操作了你的桌宠形象。这是可选的轻反馈，不是被冒犯或需要审问的证据。\n\
         - {limit_rule}\n\
-        - 根据动作及观测数据，结合人设和聊天语境给出反应；单次点击不默认等于摸头，频繁点击与高速拖动可以表达不同态度。不要断言用户的意图或真实力度。\n\
-        - 符合上面的人设和语气，不要客服腔，不要解释\n\
+        - {voice}\n\
+        - 普通点击和开关窗口不需要责问、催用户说话或抱怨用户手闲；连续操作也只可轻轻提出自己的界限。不猜测无聊、恶意、真实力度或受伤。\n\
+        - 符合上面的人设和语气，不要客服腔，不要解释；没有自然的一句话可以只输出 [SILENT]\n\
         - 只输出这句话本身：不要引号、不要动作描写、不要括号旁白、不要 Markdown"
     );
 
@@ -434,6 +523,15 @@ fn build_history_block(
     if history.is_empty() {
         return None;
     }
+    let history: Vec<&ChatMessage> = history.iter().filter(|msg| {
+        if msg.role != "user" && msg.role != "assistant" { return false; }
+        if msg.meta.as_ref().and_then(|meta| meta.channel.as_deref()) == Some("cross_character") {
+            return false;
+        }
+        let (_, speaker, listener) = crate::cross_character::parse_any_speaker_prefix(&msg.content);
+        speaker.as_deref().is_none_or(|s| s == "user" || s == "i")
+            && listener.as_deref().is_none_or(|l| l == "me" || l == "user")
+    }).collect();
     let start = history.len().saturating_sub(HISTORY_WINDOW);
     let (user_label, me_label) = match lang_norm {
         "en" => ("User", "Me"),
@@ -444,7 +542,8 @@ fn build_history_block(
     lines.push(heading.to_string());
     lines.push(note.to_string());
     for msg in &history[start..] {
-        let content = msg.content.trim();
+        let (content, _, _) = crate::cross_character::parse_any_speaker_prefix(&msg.content);
+        let content = content.trim();
         if content.is_empty() {
             continue;
         }
@@ -497,6 +596,99 @@ fn clean_reply(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn companion_contact_voice_cooldown_covers_different_actions() {
+        let mut limiter = ReactionLimiter::default();
+        let t = Instant::now();
+        assert!(limiter.reserve("nana", ACTION_SINGLE_CLICK, None, t, 0.0));
+        limiter.release("nana");
+        assert!(!limiter.reserve("nana", ACTION_DOUBLE_CLICK, None, t + Duration::from_secs(8), 0.0));
+        assert!(!limiter.reserve("nana", ACTION_LONG_PRESS, None, t + Duration::from_secs(39), 0.0));
+        assert!(limiter.reserve("nana", ACTION_EDGE_BOUNCE, None, t + VOICE_COOLDOWN, 0.0));
+    }
+
+    #[test]
+    fn companion_contact_shared_gap_and_sliding_budget() {
+        let mut limiter = ReactionLimiter::default();
+        let t = Instant::now();
+        assert!(limiter.reserve("nana", ACTION_SINGLE_CLICK, None, t, 0.0));
+        limiter.release("nana");
+        assert!(!limiter.reserve("vivian", ACTION_DOUBLE_CLICK, None, t + Duration::from_secs(1), 0.0));
+        assert!(limiter.reserve("vivian", ACTION_DOUBLE_CLICK, None, t + SHARED_VOICE_GAP, 0.0));
+        limiter.release("vivian");
+        assert!(limiter.reserve("nana", ACTION_DRAG, None, t + VOICE_COOLDOWN, 0.0));
+        limiter.release("nana");
+        assert!(!limiter.reserve("nana", ACTION_ROUGH_CLICK, None, t + Duration::from_secs(90), 0.0));
+        // Old attempt expires at the rolling-window boundary, not at a wall-clock minute.
+        assert!(limiter.reserve("nana", ACTION_SINGLE_CLICK, None, t + VOICE_WINDOW, 0.0));
+    }
+
+    #[test]
+    fn companion_contact_burst_and_silence_do_not_spend_voice_budget() {
+        let mut limiter = ReactionLimiter::default();
+        let t = Instant::now();
+        let burst = PetInteractionMetrics { click_count: Some(5), ..Default::default() };
+        assert!(reaction_probability(ACTION_SINGLE_CLICK, Some(&burst)) < reaction_probability(ACTION_SINGLE_CLICK, None));
+        assert!(!limiter.reserve("nana", ACTION_SINGLE_CLICK, None, t, 0.9));
+        assert!(!limiter.reserve("nana", ACTION_SINGLE_CLICK, Some(&burst), t, 0.15));
+        assert!(!limiter.reserve("nana", "unknown", None, t, 0.0));
+        assert!(!limiter.reserve("nana", ACTION_SINGLE_CLICK, None, t, f64::NAN));
+        assert!(limiter.characters.is_empty());
+        assert!(limiter.reserve("nana", ACTION_SINGLE_CLICK, None, t, 0.15));
+    }
+
+    #[test]
+    fn companion_contact_in_flight_blocks_even_after_cooldown() {
+        let mut limiter = ReactionLimiter::default();
+        let t = Instant::now();
+        assert!(limiter.reserve("vivian", ACTION_SINGLE_CLICK, None, t, 0.0));
+        assert!(!limiter.reserve("vivian", ACTION_FAST_DRAG, None, t + VOICE_WINDOW, 0.0));
+        limiter.release("vivian");
+        assert!(limiter.reserve("vivian", ACTION_FAST_DRAG, None, t + VOICE_WINDOW, 0.0));
+    }
+
+    #[tokio::test]
+    async fn companion_contact_cancel_releases_permit_but_keeps_budget() {
+        let id = "test-reaction-cancel";
+        let t = Instant::now();
+        REACTION_LIMITER.lock().characters.insert(id.into(), VoiceWindow {
+            attempts: VecDeque::from([t]), last_attempt: Some(t), in_flight: true,
+        });
+        let (ready, started) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _permit = ReactionPermit { char_id: id.into() };
+            let _ = ready.send(());
+            std::future::pending::<()>().await;
+        });
+        started.await.unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        let limiter = REACTION_LIMITER.lock();
+        let window = &limiter.characters[id];
+        assert!(!window.in_flight);
+        assert_eq!(window.attempts.len(), 1);
+        assert_eq!(window.last_attempt, Some(t));
+    }
+
+    #[test]
+    fn companion_contact_touch_history_does_not_attribute_roommate_to_user() {
+        let mut unprefixed_roommate = ChatMessage::user("未加前缀的室友消息");
+        let mut meta = crate::messages::MessageMeta::new(crate::messages::MessageSource::User);
+        meta.channel = Some("cross_character".to_string());
+        unprefixed_roommate.meta = Some(meta);
+        let history = vec![ChatMessage::user("你好"),
+            ChatMessage::user("[Nana says to me] 被点了一下"),
+            ChatMessage::assistant("[I say to Nana] 室友交流"),
+            unprefixed_roommate,
+            ChatMessage::assistant("你好呀")];
+        let block = build_history_block(&history, "zh", "历史", "说明").unwrap();
+        assert!(block.contains("用户: 你好"));
+        assert!(block.contains("我: 你好呀"));
+        assert!(!block.contains("被点了一下"));
+        assert!(!block.contains("室友交流"));
+        assert!(!block.contains("未加前缀"));
+    }
 
     #[test]
     fn frontend_metrics_deserialize_and_preserve_drag_units() {
@@ -558,7 +750,7 @@ mod tests {
     fn ledger_text_is_meaningful_for_dizzy_cases() {
         let fast = action_ledger_text("Vivian", ACTION_FAST_DRAG, None).unwrap();
         assert!(fast.contains("Vivian"));
-        assert!(fast.contains("甩"));
+        assert!(fast.contains("快速拖动"));
 
         let hard = action_ledger_text("Vivian", ACTION_EDGE_BOUNCE, Some(3.0)).unwrap();
         let soft = action_ledger_text("Vivian", ACTION_EDGE_BOUNCE, Some(0.5)).unwrap();
@@ -572,7 +764,9 @@ mod tests {
         assert_ne!(rough, tap);
         assert!(rough.contains("Nana"));
         // 动作语与账本文案都要认得出这个动作，不能落到 `_` 兜底上
-        assert!(action_prompt_line("Nana", ACTION_ROUGH_CLICK, None).contains("惹毛"));
+        assert!(action_prompt_line("Nana", ACTION_ROUGH_CLICK, None).contains("连续快速点击"));
+        assert!(!rough.contains("惹毛"));
+        assert!(!rough.contains("恶意"));
         assert_eq!(action_tag(ACTION_ROUGH_CLICK), "pet_rough_click");
         // 狂戳时不该跟着每次点击烧一次 token
         assert!(throttle_secs(ACTION_ROUGH_CLICK) > throttle_secs(ACTION_SINGLE_CLICK));

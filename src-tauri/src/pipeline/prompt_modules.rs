@@ -796,8 +796,8 @@ pub fn build_tools_block(tools_text: Option<&str>, enable_native_fc: bool, lang:
 /// 语言标志与语言指令按界面语言（lang）动态生成，不固定为中文。
 pub fn build_tool_minimal_identity(char_id: &str, lang: &str) -> String {
     let (name, cn_name, style_desc) = match char_id {
-        "nana" => ("Nana", "Nana", "gentle and composed, like a warm older sister. Speak softly and naturally."),
-        _ => ("Vivian", "Vivian", "casual and direct, a bit tsundere. Be sharp-tongued but warm underneath."),
+        "nana" => ("Nana", "Nana", "gentle and composed, like a warm older sister. Receive ordinary attention with soft curiosity; set a calm boundary only when needed, never interrogate or belittle."),
+        _ => ("Vivian", "Vivian", "lively, curious and a little bashful about affection. Deflect embarrassment lightly when it actually arises; ordinary attention is welcome, never a reason for contempt or scolding."),
     };
     let (lang_flag, lang_instruction) = match normalize_lang(lang) {
         "en" => ("LANG_EN_US_ONLY", "Always reply in English"),
@@ -810,7 +810,7 @@ REFUSE_SERVICE_SPEECH
 [END PERSONA_LOAD]
 
 ## Identity (Keep This!)
-You are {name} ({cn_name}), a girl chatting with a friend. Be casual and natural — {style_desc}
+You are {name} ({cn_name}), a desktop companion speaking with the current interlocutor. Let familiarity follow the actual relationship. Be casual and natural — {style_desc}
 - Keep replies extremely short — 1-2 sentences, like real chat
 - NEVER use customer-service speech, NEVER say 'How may I help you' or similar
 - {lang_instruction}"#)
@@ -1173,6 +1173,8 @@ pub struct PromptParts {
     pub user_research: Option<String>,
     /// 是否为首次见面（由持久记忆库状态独立判定，不能从本轮空召回推断）
     pub is_first_meeting: bool,
+    /// Only the startup greeting; a first user task must not become an introduction.
+    pub first_contact_greeting: bool,
     /// 当前消息渠道（"wechat" 聊天面板 / "direct" 直接说话），影响 LLM 回复风格
     pub channel: String,
     /// 当前在场状态（"online"/"busy"/"rest"/"offline"），空字符串表示未启用
@@ -1596,6 +1598,10 @@ impl PromptBuilder {
             "[HOW A PERSON TALKS - EMBODY THIS]\n{}\n[END]",
             human_feel_rules()
         ));
+
+        if parts.first_contact_greeting {
+            static_sections.push(include_str!("../../prompts/framework/first_contact.en.md").to_string());
+        }
 
         // ===== Layer 2: Advanced（高级配置，人格的延伸） =====
         if let Some(style) = &parts.style_block {
@@ -2040,7 +2046,9 @@ pub(crate) fn build_cross_character_voice_guide(char_id: &str) -> String {
 Keep your own quick, concise, internet-native voice while letting Nana keep her calmer, gentler rhythm.
 Treat this as a real conversation between close roommates, not a performance or a contest:
 - Respond to the detail she actually said; add one reaction, thought, or follow-up at a time
-- Light teasing is welcome when it fits, but mix it with sharing and genuine interest; don't make her the punchline
+- Ordinary roommate talk is relaxed and candid; sharing an observation does not require a defensive or tsundere pose
+- Your guarded affection concerns the user: if the conversation genuinely touches a feeling you are shy about revealing, brief flustered deflection can emerge; otherwise speak plainly
+- Light teasing needs a real conversational invitation; do not turn neutral attention from the user into a complaint about their character or motives
 - If she sounds tired, serious, or ready to stop, soften or let the exchange end without chasing another reply
 - Don't force slang, a question, or a tsundere line into every turn."#.to_string(),
         "nana" => r#"## Talking to Vivian as Nana
@@ -2241,6 +2249,16 @@ pub fn build_inner_reaction(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn companion_contact_guide_only_applies_to_startup_introduction() {
+        let marker = "[FIRST CONTACT GREETING]";
+        let startup = PromptParts { first_contact_greeting: true, ..Default::default() };
+        assert!(PromptBuilder::build_prompt(&startup).contains(marker));
+        let first_task = PromptParts { is_first_meeting: true, user_input: "检查代码".into(), ..Default::default() };
+        assert!(!PromptBuilder::build_prompt(&first_task).contains(marker));
+        assert!(!PromptBuilder::build_prompt(&PromptParts::default()).contains(marker));
+    }
 
     #[test]
     fn test_build_prompt_contains_static_tags() {

@@ -1141,6 +1141,8 @@ impl PromptBuildingStep {
             user_model_section: if state.user_model_text.is_empty() { None } else { Some(state.user_model_text.clone()) },
             proactive_search_section: if state.web_context.is_empty() { None } else { Some(state.web_context.clone()) },
             is_first_meeting,
+            first_contact_greeting: state.metadata.get("first_contact_greeting")
+                .and_then(serde_json::Value::as_bool).unwrap_or(false),
             channel: state.current_channel.clone(),
             presence_state: state.presence_state.clone(),
             roommate_status,
@@ -1848,6 +1850,19 @@ fn format_schedule_signals(assessment: &ScheduleAssessment) -> Option<String> {
 mod component_selection_tests {
     use super::*;
     use crate::emotion::{DimensionResult, FastPerceptionResult};
+
+    #[test]
+    fn companion_contact_startup_snapshot_survives_prompt_preparation() {
+        let mut state = PipelineState::default();
+        state.metadata["first_contact_greeting"] = serde_json::json!(true);
+        // No injected memory manager: the normal first-meeting inference is false.
+        // The explicit startup decision must still reach the rendered introduction.
+        let step = PromptBuildingStep::new();
+        let parts = step.build_parts(&state, None);
+        assert!(parts.first_contact_greeting);
+        state.metadata["first_contact_greeting"] = serde_json::json!(false);
+        assert!(!step.build_parts(&state, None).first_contact_greeting);
+    }
 
     #[test]
     fn proposal_followup_preserves_target_without_rewriting_user_input() {
