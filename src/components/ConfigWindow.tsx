@@ -20,7 +20,7 @@ import type { FishSpeechServiceState, GptSoVitsServiceState, GptSoVitsServiceSta
 import PluginsPanel from './plugins/PluginsPanel';
 import ConnectionsPanel from './ConnectionsPanel';
 import TokenUsagePanel from './TokenUsagePanel';
-import { Search, X, Trash2, Sparkles, ExternalLink, Activity } from 'lucide-react';
+import { Search, X, Trash2, Sparkles, ExternalLink, Activity, Download, Upload, RotateCcw } from 'lucide-react';
 import { settingsPages as tabs, settingsGroups, settingsCopy, findSettingsPages, type SettingsPageKey as TabKey } from './settings/navigation';
 import SettingsSections from './settings/SettingsSections';
 import './settings/SettingsWindow.css';
@@ -4455,85 +4455,44 @@ const ConfigWindow: React.FC = () => {
       case 'data':
         return (
           <>
-            {/* ── 数据备份与整体操作 ── */}
-            <div style={{ ...sectionTitleStyle, marginTop: 24 }}>
-              {t('config.section_backup')}
-            </div>
-            <div style={{ fontSize: 12, color: 'var(--panel-text-tertiary)', lineHeight: 1.6, marginBottom: 12 }}>
-              {t('config.backup_help')}
-            </div>
-            <CollapsibleSection
-              title={t('config.section_operations')}
-              tone="danger"
-              defaultOpen={false}
-            >
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 8, padding: '2px 2px 4px' }}>
-                {/* 导出备份 */}
-                <button
-                  onClick={() => void handleBackup()}
-                  disabled={backingUp}
-                  style={{
-                    width: '100%',
-                    padding: '11px 14px',
-                    borderRadius: 12,
-                    background: backingUp ? 'var(--panel-selected-bg)' : 'var(--panel-accent)',
-                    border: 'none',
-                    color: 'var(--panel-selected-text)',
-                    fontSize: 13,
-                    fontWeight: 600,
-                    cursor: backingUp ? 'not-allowed' : 'pointer',
-                    opacity: backingUp ? 0.7 : 1,
-                    fontFamily: 'inherit',
-                    transition: 'opacity 0.2s',
-                    boxShadow: 'var(--panel-shadow-subtle)',
-                  }}
-                >
+            <div style={sectionTitleStyle}>{t('config.section_backup')}</div>
+            <p className="settings-data-help">{t('config.backup_help')}</p>
+            <div className="settings-data-actions">
+              <div className="settings-data-row">
+                <span className="settings-data-icon"><Download size={18} aria-hidden="true" /></span>
+                <div className="settings-data-copy">
+                  <h3>{t('config.backup_btn')}</h3>
+                  <p>{t('config.backup_export_help')}</p>
+                </div>
+                <button type="button" className="settings-data-button settings-data-button-primary"
+                  onClick={() => void handleBackup()} disabled={backingUp || restoring}>
                   {backingUp ? t('common.saving') : t('config.backup_btn')}
                 </button>
-                {/* 导入备份（经二次确认弹窗，与恢复出厂设置一致） */}
-                <button
-                  onClick={() => void handleRestorePick()}
-                  disabled={restoring}
-                  style={{
-                    width: '100%',
-                    padding: '11px 14px',
-                    borderRadius: 12,
-                    background: 'transparent',
-                    border: '1px solid var(--panel-accent)',
-                    color: 'var(--panel-accent)',
-                    fontSize: 13,
-                    fontWeight: 600,
-                    cursor: restoring ? 'not-allowed' : 'pointer',
-                    opacity: restoring ? 0.7 : 1,
-                    fontFamily: 'inherit',
-                    transition: 'opacity 0.2s',
-                  }}
-                >
+              </div>
+              <div className="settings-data-row">
+                <span className="settings-data-icon"><Upload size={18} aria-hidden="true" /></span>
+                <div className="settings-data-copy">
+                  <h3>{t('config.restore_btn')}</h3>
+                  <p>{t('config.backup_restore_help')}</p>
+                </div>
+                <button type="button" className="settings-data-button"
+                  onClick={() => void handleRestorePick()} disabled={restoring || backingUp}>
                   {restoring ? t('config.restore_btn_loading') : t('config.restore_btn')}
                 </button>
-                {/* 恢复出厂设置 */}
-                <button
-                  onClick={() => setClearMemoriesOpen(true)}
-                  style={{
-                    width: '100%',
-                    padding: '11px 14px',
-                    borderRadius: 12,
-                    background: 'rgba(255, 69, 58, 0.12)',
-                    border: '1px solid rgba(255, 69, 58, 0.3)',
-                    color: '#E53935',
-                    fontSize: 13,
-                    fontWeight: 600,
-                    cursor: 'pointer',
-                    transition: 'background 0.2s',
-                    fontFamily: 'inherit',
-                  }}
-                  onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(255, 69, 58, 0.2)'; }}
-                  onMouseLeave={(e) => { e.currentTarget.style.background = 'rgba(255, 69, 58, 0.12)'; }}
-                >
-                  {t('config.clear_memories_btn')}
-                </button>
               </div>
-            </CollapsibleSection>
+            </div>
+            <div style={{ ...sectionTitleStyle, marginTop: 24 }}>{t('config.backup_reset_title')}</div>
+            <div className="settings-data-row settings-data-reset">
+              <span className="settings-data-icon"><RotateCcw size={18} aria-hidden="true" /></span>
+              <div className="settings-data-copy">
+                <h3>{t('config.clear_memories_btn')}</h3>
+                <p>{t('config.backup_reset_help')}</p>
+              </div>
+              <button type="button" className="settings-data-button settings-data-button-danger"
+                onClick={() => setClearMemoriesOpen(true)} disabled={backingUp || restoring}>
+                {t('config.clear_memories_btn')}
+              </button>
+            </div>
           </>
         );
       case 'ai':
@@ -8481,17 +8440,19 @@ const ConfigWindow: React.FC = () => {
 
       <div className="settings-layout">
         <aside className="settings-sidebar">
-          <div className="settings-search">
-            <Search size={15} aria-hidden="true" />
-            <input ref={searchRef} aria-label={copy.search} placeholder={copy.search}
-              value={settingsQuery} onChange={(event) => setSettingsQuery(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === 'Escape') setSettingsQuery('');
-                if (event.key === 'Enter' && visiblePages[0]) handleTabChange(visiblePages[0].key);
-              }} />
-            {settingsQuery && <button aria-label={copy.clearSearch} onClick={() => { setSettingsQuery(''); searchRef.current?.focus(); }}><X size={14} /></button>}
+          <div className="settings-search-region">
+            <div className="settings-search">
+              <Search size={15} aria-hidden="true" />
+              <input ref={searchRef} aria-label={copy.search} placeholder={copy.search}
+                value={settingsQuery} onChange={(event) => setSettingsQuery(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Escape') setSettingsQuery('');
+                  if (event.key === 'Enter' && visiblePages[0]) handleTabChange(visiblePages[0].key);
+                }} />
+              {settingsQuery && <button aria-label={copy.clearSearch} onClick={() => { setSettingsQuery(''); searchRef.current?.focus(); }}><X size={14} /></button>}
+            </div>
           </div>
-          <nav aria-label={t('config.title')}>
+          <nav className="settings-navigation" aria-label={t('config.title')}>
             {settingsGroups.map((group) => {
               const pages = visiblePages.filter((page) => page.group === group);
               if (!pages.length) return null;
