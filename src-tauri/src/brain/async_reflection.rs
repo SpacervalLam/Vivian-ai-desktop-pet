@@ -115,6 +115,7 @@ struct ThrottleState {
     turns_since_last: u32,
     last_update_at: Instant,
     last_user_msg_at: Instant,
+    in_flight: bool,
 }
 
 impl Default for ThrottleState {
@@ -123,6 +124,7 @@ impl Default for ThrottleState {
             turns_since_last: 0,
             last_update_at: Instant::now(),
             last_user_msg_at: Instant::now(),
+            in_flight: false,
         }
     }
 }
@@ -139,29 +141,47 @@ static THROTTLE_STATES: once_cell::sync::Lazy<Mutex<std::collections::HashMap<St
 ///
 /// 抑制条件：
 /// - 激烈对话（连续两轮间隔 < 10s）→ 推迟到对话间隙
-pub fn should_trigger(char_id: &str) -> bool {
+fn should_trigger(char_id: &str) -> bool {
     let mut states = THROTTLE_STATES.lock();
     let state = states.entry(char_id.to_string()).or_default();
 
     let now = Instant::now();
-    let turns_ok = state.turns_since_last >= TURNS_THRESHOLD;
-    let time_ok = now.duration_since(state.last_update_at) > TIME_THRESHOLD;
-    let not_intense = now.duration_since(state.last_user_msg_at) > INTENSE_DIALOG_GAP;
-
-    // 更新 last_user_msg_at（本轮用户消息时间）
-    state.last_user_msg_at = now;
-    state.turns_since_last += 1;
-
-    (turns_ok || time_ok) && not_intense
+    state.reserve(now)
 }
 
-/// 重置节流计数器（触发成功后调用）
-fn reset_throttle(char_id: &str) {
-    let mut states = THROTTLE_STATES.lock();
-    if let Some(state) = states.get_mut(char_id) {
-        state.turns_since_last = 0;
-        state.last_update_at = Instant::now();
+impl ThrottleState {
+    fn reserve(&mut self, now: Instant) -> bool {
+        let turns_ok = self.turns_since_last >= TURNS_THRESHOLD;
+        let time_ok = now.duration_since(self.last_update_at) > TIME_THRESHOLD;
+        let not_intense = now.duration_since(self.last_user_msg_at) > INTENSE_DIALOG_GAP;
+
+        // 更新 last_user_msg_at（本轮用户消息时间）
+        self.last_user_msg_at = now;
+        self.turns_since_last = self.turns_since_last.saturating_add(1);
+
+        if self.in_flight || !((turns_ok || time_ok) && not_intense) { return false; }
+        // Reserve before spawning: failed requests also consume a cooldown, not a retry storm.
+        self.in_flight = true;
+        self.turns_since_last = 0;
+        self.last_update_at = now;
+        true
     }
+}
+
+/// Own the reservation across awaits; errors/cancellation release it on drop.
+pub struct ReflectionPermit { char_id: String }
+impl Drop for ReflectionPermit {
+    fn drop(&mut self) {
+        if let Some(state) = THROTTLE_STATES.lock().get_mut(&self.char_id) {
+            state.in_flight = false;
+            state.last_update_at = Instant::now();
+        }
+    }
+}
+
+pub fn reserve_reflection(char_id: &str, user_input: &str) -> Option<ReflectionPermit> {
+    if user_input.trim().chars().count() < 4 || !should_trigger(char_id) { return None; }
+    Some(ReflectionPermit { char_id: char_id.into() })
 }
 
 /// 异步反思入口
@@ -180,27 +200,20 @@ pub async fn run_async_reflection(
     recent_context: &str,
     char_id: String,
     psychology: Option<Arc<PsychologyManager>>,
+    _permit: ReflectionPermit,
 ) {
-    // 节流检查
-    if !should_trigger(&char_id) {
-        return;
-    }
-
     let trimmed = user_input.trim();
-    if trimmed.len() < 4 {
-        return;
-    }
 
     let ai_reply_trimmed = ai_reply.trim();
     let recent_context_trimmed = recent_context.trim();
 
     // 拼接 user prompt：用户输入 + AI 回复 + 最近对话（非空字段才注入）
-    let mut user_prompt = format!("用户输入：{}", trimmed);
+    let mut user_prompt = format!("用户输入：{}", crate::utils::truncate_chars(trimmed, 1200));
     if !ai_reply_trimmed.is_empty() {
-        user_prompt.push_str(&format!("\nAI回复：{}", ai_reply_trimmed));
+        user_prompt.push_str(&format!("\nAI回复：{}", crate::utils::truncate_chars(ai_reply_trimmed, 600)));
     }
     if !recent_context_trimmed.is_empty() {
-        user_prompt.push_str(&format!("\n最近对话：\n{}", recent_context_trimmed));
+        user_prompt.push_str(&format!("\n最近对话：\n{}", crate::utils::truncate_chars(recent_context_trimmed, 600)));
     }
 
     let messages = vec![
@@ -213,6 +226,11 @@ pub async fn run_async_reflection(
     let result = tokio::time::timeout(
         Duration::from_secs(timeout_secs),
         router.generate(LLMRequest::new("reflection", messages)
+        .with_usage_tag("attention_reflection")
+        .with_max_tokens(256)
+        .with_reasoning_pref(crate::providers::reasoning::ReasoningPreference {
+            mode: crate::providers::reasoning::ReasoningMode::Off, effort: None,
+        })
         .with_character_id(char_id.clone())),
     )
     .await;
@@ -244,7 +262,7 @@ pub async fn run_async_reflection(
     // 应用实体 boost
     let now = chrono::Utc::now().timestamp();
     let mut boosted_count = 0;
-    for entity_boost in &parsed.entities {
+    for entity_boost in parsed.entities.iter().take(5) {
         let entity = entity_boost.entity.trim().to_lowercase();
         if entity.is_empty() {
             continue;
@@ -267,9 +285,6 @@ pub async fn run_async_reflection(
             apply_emotion_hint(psy, hint, &char_id);
         }
     }
-
-    // 触发成功，重置节流计数器
-    reset_throttle(&char_id);
 }
 
 /// 应用 LLM 识别的情绪标签作为微增量（±0.05）
@@ -339,5 +354,41 @@ fn extract_json_object(text: &str) -> Option<String> {
         Some(cleaned[start..=end].to_string())
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod throttle_tests {
+    use super::*;
+
+    #[test]
+    fn reservation_prevents_overlapping_calls_and_preserves_cooldown() {
+        let start = Instant::now();
+        let mut state = ThrottleState { last_update_at: start, last_user_msg_at: start,
+            turns_since_last: 5, in_flight: false };
+        assert!(state.reserve(start + Duration::from_secs(11)));
+        assert_eq!(state.turns_since_last, 0);
+        assert!(!state.reserve(start + Duration::from_secs(40 * 60)), "in-flight call blocks even overdue requests");
+        state.in_flight = false;
+        state.last_update_at = start + Duration::from_secs(40 * 60);
+        assert!(!state.reserve(start + Duration::from_secs(40 * 60 + 11)), "failure still has a cooldown");
+    }
+
+    #[test]
+    fn permit_drop_releases_failed_or_cancelled_requests_per_character() {
+        let id = format!("reflection-test-{}", uuid::Uuid::new_v4());
+        let now = Instant::now();
+        THROTTLE_STATES.lock().insert(id.clone(), ThrottleState {
+            turns_since_last: 5, last_update_at: now - TIME_THRESHOLD,
+            last_user_msg_at: now - INTENSE_DIALOG_GAP - Duration::from_secs(1), in_flight: false,
+        });
+        assert!(reserve_reflection(&id, "嗯").is_none());
+        let permit = reserve_reflection(&id, "今天的事情很有意思").unwrap();
+        assert!(THROTTLE_STATES.lock()[&id].in_flight);
+        assert!(reserve_reflection(&id, "另一条消息").is_none());
+        drop(permit);
+        assert!(!THROTTLE_STATES.lock()[&id].in_flight);
+        assert!(reserve_reflection(&id, "失败后不要立即重试").is_none());
+        THROTTLE_STATES.lock().remove(&id);
     }
 }

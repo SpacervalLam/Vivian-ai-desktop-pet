@@ -76,6 +76,14 @@ impl EvolutionEntry {
             && (self.explicit_feedback || independent_support(&self.evidence) >= 2)
     }
 }
+impl EvolutionCandidate {
+    /// Snapshot reference lets the model refine wording without fragmenting support.
+    pub fn reference(&self) -> String {
+        use sha2::{Digest, Sha256};
+        format!("{:x}", Sha256::digest(format!("{}\0{}\0{}\0{}",
+            self.kind, self.scope, self.first_seen, self.text).as_bytes()))[..16].to_string()
+    }
+}
 impl PersonaEvolution {
     pub fn empty() -> Self {
         Self { entries: vec![], candidates: vec![], history: vec![], updated_at: 0.0 }
@@ -87,6 +95,11 @@ impl PersonaEvolution {
     /// Same source/content never counts twice; ordinary growth requires different days.
     pub fn propose(&mut self, kind: &str, scope: &str, text: &str, reason: &str,
         evidence: GrowthEvidence, explicit_feedback: bool, now: f64) -> bool {
+        self.propose_revision(kind, scope, text, reason, evidence, explicit_feedback, now, None)
+    }
+
+    pub fn propose_revision(&mut self, kind: &str, scope: &str, text: &str, reason: &str,
+        evidence: GrowthEvidence, explicit_feedback: bool, now: f64, revises: Option<&str>) -> bool {
         let text = clean(text, 180);
         if !matches!(kind, "tone" | "personality") || !SCOPES.contains(&scope)
             || text.is_empty() || evidence.memory_id.is_empty() || evidence.quote.trim().is_empty()
@@ -97,13 +110,21 @@ impl PersonaEvolution {
         if self.entries.iter().chain(self.history.iter()).any(|e| e.scope == scope && seen(&e.evidence))
             || self.candidates.iter().any(|c| c.scope == scope && seen(&c.evidence)) { return false; }
         let reason = clean(reason, 240);
-        let idx = self.candidates.iter().position(|c| c.scope == scope && c.text == text);
+        let idx = if let Some(reference) = revises.filter(|r| !r.is_empty()) {
+            // Never merge across scopes/kinds or accept references from an old snapshot.
+            let Some(idx) = self.candidates.iter().position(|c|
+                c.scope == scope && c.kind == kind && c.reference() == reference) else { return false; };
+            Some(idx)
+        } else {
+            self.candidates.iter().position(|c| c.scope == scope && c.kind == kind && c.text == text)
+        };
         let idx = idx.unwrap_or_else(|| {
             self.candidates.push(EvolutionCandidate { kind: kind.into(), scope: scope.into(),
                 text: text.clone(), reason: reason.clone(), first_seen: now, support: 0, evidence: vec![] });
             self.candidates.len() - 1
         });
         let c = &mut self.candidates[idx];
+        c.text = text;
         c.evidence.push(evidence);
         if c.evidence.len() > MAX_EVIDENCE { c.evidence.remove(0); }
         c.support = independent_support(&c.evidence);
@@ -174,9 +195,14 @@ impl PersonaEvolutionStore {
     /// Persist candidates as well as promotions; serialize writes under the same lock.
     pub fn propose(&self, kind: &str, scope: &str, text: &str, reason: &str,
         evidence: GrowthEvidence, explicit_feedback: bool) -> bool {
+        self.propose_revision(kind, scope, text, reason, evidence, explicit_feedback, None)
+    }
+    pub fn propose_revision(&self, kind: &str, scope: &str, text: &str, reason: &str,
+        evidence: GrowthEvidence, explicit_feedback: bool, revises: Option<&str>) -> bool {
         let mut guard = self.inner.write();
         let mut next = guard.clone();
-        let promoted = next.propose(kind, scope, text, reason, evidence, explicit_feedback, crate::memory::types::current_timestamp());
+        let promoted = next.propose_revision(kind, scope, text, reason, evidence, explicit_feedback,
+            crate::memory::types::current_timestamp(), revises);
         if next.updated_at == guard.updated_at { return false; }
         if let Err(e) = self.persist(&next) { tracing::warn!("Growth persistence failed: {e}"); return false; }
         *guard = next;
@@ -252,5 +278,52 @@ mod tests {
         assert!(!ev.is_empty());
         ev.reconcile(|e| e.memory_id != "a",200000.0);
         assert!(ev.is_empty());
+    }
+    #[test]
+    fn refined_candidate_keeps_independent_evidence_and_rewrites_prompt() {
+        let mut ev = PersonaEvolution::empty();
+        assert!(!add(&mut ev, "a", 1.0, "listen first", false));
+        let reference = ev.candidates[0].reference();
+        assert!(ev.propose_revision("tone", "comfort", "先听具体困扰，再给建议", "new evidence",
+            evidence("b", 2.0), false, 2.0 * 86400.0, Some(&reference)));
+        assert!(ev.candidates.is_empty());
+        assert_eq!(ev.entries[0].evidence.len(), 2);
+        assert_eq!(ev.entries[0].support, 2);
+        let prompt = ev.render("zh").unwrap();
+        assert!(prompt.contains("先听具体困扰，再给建议"));
+        assert!(!prompt.contains("listen first"));
+        ev.reconcile(|e| e.memory_id != "a", 3.0 * 86400.0);
+        assert!(ev.render("zh").is_none(), "revised wording still depends on original evidence");
+    }
+    #[test]
+    fn references_cannot_merge_other_scopes_kinds_or_recycled_sources() {
+        let mut ev = PersonaEvolution::empty();
+        add(&mut ev, "a", 1.0, "listen first", false);
+        let reference = ev.candidates[0].reference();
+        for (kind, scope, id, target) in [
+            ("tone", "daily", "b", reference.as_str()),
+            ("personality", "comfort", "b", reference.as_str()),
+            ("tone", "comfort", "b", "stale-reference"),
+            ("tone", "comfort", "a", reference.as_str()),
+        ] {
+            assert!(!ev.propose_revision(kind, scope, "rewritten", "reason", evidence(id, 2.0),
+                false, 2.0 * 86400.0, Some(target)));
+        }
+        assert_eq!(ev.candidates.len(), 1);
+        assert_eq!(ev.candidates[0].text, "listen first");
+        assert_eq!(ev.candidates[0].support, 1);
+    }
+    #[test]
+    fn active_revision_preserves_history_and_explicit_correction_wins() {
+        let mut ev = PersonaEvolution::empty();
+        add(&mut ev, "a", 1.0, "old", false);
+        add(&mut ev, "b", 2.0, "old", false);
+        assert!(!add(&mut ev, "c", 3.0, "new", false));
+        assert_eq!(ev.entries[0].text, "old", "one new event cannot rewrite active behavior");
+        assert!(add(&mut ev, "d", 4.0, "new", false));
+        assert_eq!(ev.history[0].text, "old");
+        assert!(add(&mut ev, "e", 4.0, "user correction", true));
+        assert_eq!(ev.entries[0].text, "user correction");
+        assert_eq!(ev.history.len(), 2);
     }
 }

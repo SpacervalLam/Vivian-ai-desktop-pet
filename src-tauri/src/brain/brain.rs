@@ -636,44 +636,19 @@ impl Brain {
         // fire-and-forget，节流触发（5 轮或 30 分钟 OR 关系，激烈对话抑制）。
         // 失败静默，不阻塞主响应路径。
         // 跨角色对话场景跳过反思——闲聊价值有限，节省 LLM 配额。
-        if run_reflection {
+        let reflection_permit = if run_reflection {
+            super::async_reflection::reserve_reflection(&self.char_id, user_input)
+        } else { None };
+        if let Some(permit) = reflection_permit {
             let router = self.router.clone();
             let mind = self.mind.clone();
-            let input_owned = user_input.to_string();
+            let input_owned = crate::utils::truncate_chars(user_input, 1200);
             let cid = self.char_id.clone();
             let psychology = Some(self.psychology.clone());
 
             // AI 回复 + 最近对话上下文：从 DialogueManager 历史末尾提取
             // （当前轮 AI 尚未生成，使用上一轮 AI 回复作为参考；空时降级）
-            let (ai_reply_owned, recent_context_owned) = {
-                let history = self.dialogue.get_history();
-                let ai_reply = history
-                    .iter()
-                    .rev()
-                    .find(|m| m.role == "assistant")
-                    .map(|m| m.content.clone())
-                    .unwrap_or_default();
-
-                // 最近 4 条消息格式化为 "role: content"（截断 100 字符）
-                let take = 4.min(history.len());
-                let start = history.len() - take;
-                let mut lines: Vec<String> = Vec::new();
-                for msg in &history[start..] {
-                    let role = match msg.role.as_str() {
-                        "user" => "User",
-                        "assistant" => "AI",
-                        _ => continue,
-                    };
-                    let content = msg.content.trim();
-                    if content.is_empty() {
-                        continue;
-                    }
-                    let truncated = crate::utils::truncate_chars(content, 100);
-                    let suffix = if content.chars().count() > 100 { "…" } else { "" };
-                    lines.push(format!("{}: {}{}", role, truncated, suffix));
-                }
-                (ai_reply, lines.join("\n"))
-            };
+            let (ai_reply_owned, recent_context_owned) = self.dialogue.reflection_context();
 
             tokio::spawn(async move {
                 super::async_reflection::run_async_reflection(
@@ -684,6 +659,7 @@ impl Brain {
                     &recent_context_owned,
                     cid,
                     psychology,
+                    permit,
                 )
                 .await;
             });

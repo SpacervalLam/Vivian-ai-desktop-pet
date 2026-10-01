@@ -56,6 +56,64 @@ impl Default for HistoryFile {
 /// 对话缓冲区 flush 间隔（2 秒），平衡 IO 频率和实时性
 const FLUSH_INTERVAL: Duration = Duration::from_secs(2);
 
+fn reflection_context_from_messages(messages: &[ChatMessage]) -> (String, String) {
+    let recent: Vec<_> = messages.iter().rev().filter(|m|
+        matches!(m.role.as_str(), "user" | "assistant") && !m.content.trim().is_empty()
+            && m.tool_calls.is_none()
+    ).take(4).collect();
+    let reply = recent.iter().find(|m| m.role == "assistant")
+        .map(|m| crate::utils::truncate_chars(m.content.trim(), 600)).unwrap_or_default();
+    let lines: Vec<_> = recent.iter().rev().map(|m| format!("{}: {}",
+        if m.role == "user" { "User" } else { "AI" },
+        crate::utils::truncate_chars(m.content.trim(), 100))).collect();
+    (reply, lines.join("\n"))
+}
+
+#[cfg(test)]
+mod reflection_context_tests {
+    use super::*;
+
+    #[test]
+    fn context_is_bounded_chronological_and_skips_tool_payloads() {
+        let mut reply = ChatMessage::assistant("答".repeat(2000));
+        reply.reasoning = Some("内部推理".repeat(10000));
+        let messages = vec![ChatMessage::user("旧消息"), ChatMessage::user("当前问题"),
+            reply, ChatMessage::tool_result("不可发送的工具结果".repeat(10000), "call-1")];
+        let (reply, context) = reflection_context_from_messages(&messages);
+        assert_eq!(reply.chars().count(), 600);
+        assert!(context.find("当前问题").unwrap() < context.find("AI: ").unwrap());
+        assert!(!context.contains("工具结果") && !context.contains("内部推理"));
+        assert!(context.chars().count() <= 4 * 106);
+        assert_eq!(reflection_context_from_messages(&[]), (String::new(), String::new()));
+    }
+
+    #[test]
+    #[ignore = "controlled local performance measurement"]
+    fn reflection_snapshot_performance_baseline() {
+        let messages: Vec<_> = (0..50).map(|i| if i % 2 == 0 {
+            ChatMessage::user("问".repeat(8000))
+        } else { ChatMessage::assistant("答".repeat(8000)) }).collect();
+        for _ in 0..3 {
+            let started = std::time::Instant::now();
+            for _ in 0..100 {
+                let history = messages.clone();
+                let reply = history.iter().rev().find(|m| m.role == "assistant").unwrap().content.clone();
+                let context = history[history.len()-4..].iter().map(|m| format!("{}: {}", m.role,
+                    crate::utils::truncate_chars(&m.content, 100))).collect::<Vec<_>>().join("\n");
+                std::hint::black_box((history, reply, context));
+            }
+            let old_us = started.elapsed().as_micros() / 100;
+            let started = std::time::Instant::now();
+            for _ in 0..100 { std::hint::black_box(reflection_context_from_messages(&messages)); }
+            let new_us = started.elapsed().as_micros() / 100;
+            let (reply, context) = reflection_context_from_messages(&messages);
+            let old_bytes: usize = messages.iter().map(|m| m.content.len()).sum::<usize>() + messages.last().unwrap().content.len();
+            println!("reflection_snapshot old_us={old_us} new_us={new_us} old_copied_content_bytes={old_bytes} new_content_bytes={}",
+                reply.len() + context.len());
+        }
+    }
+}
+
 pub struct DialogueManager {
     /// 角色 ID（用于持久化路径分桶）
     char_id: String,
@@ -353,6 +411,12 @@ impl DialogueManager {
             *self.messages.lock() = history.clone();
         }
         history
+    }
+
+    /// Read-only analyzer context: no tool payloads, images or full-history clones.
+    /// This is not provider history; tool-call repair belongs to get_history().
+    pub fn reflection_context(&self) -> (String, String) {
+        reflection_context_from_messages(&self.messages.lock())
     }
 
     /// 获取按 channel 过滤的近期消息（用于工作记忆通道隔离）

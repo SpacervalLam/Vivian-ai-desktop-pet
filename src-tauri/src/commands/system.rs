@@ -1,15 +1,93 @@
 //! 系统命令 - 系统信息、进程管理与应用控制
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
+use std::time::{Duration, Instant};
 
+use once_cell::sync::Lazy;
+use parking_lot::Mutex;
 use serde_json::{json, Value};
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
 use tauri::State;
 
 use crate::state::AppState;
 
-static SYSTEM_REFRESH: AtomicBool = AtomicBool::new(false);
+/// Keep CPU sampling history and share a one-second snapshot across windows.
+/// System::new() deliberately avoids enumerating processes for a CPU/RAM query.
+struct SystemInfoSampler {
+    system: System,
+    cached: Option<(Instant, Value)>,
+}
+
+impl SystemInfoSampler {
+    fn new() -> Self { Self { system: System::new(), cached: None } }
+
+    fn sample(&mut self) -> Value {
+        if let Some((at, value)) = &self.cached {
+            if at.elapsed() < Duration::from_secs(1) { return value.clone(); }
+        }
+        self.system.refresh_cpu_usage();
+        self.system.refresh_memory();
+        let total = self.system.total_memory();
+        let used = self.system.used_memory();
+        let value = json!({
+            "cpu_usage": self.system.global_cpu_usage(),
+            "cpu_count": self.system.cpus().len(),
+            "total_memory": total,
+            "used_memory": used,
+            "available_memory": total.saturating_sub(used),
+            "memory_usage_pct": if total > 0 { used as f64 / total as f64 * 100.0 } else { 0.0 },
+            "uptime": System::uptime(),
+            "host_name": System::host_name().unwrap_or_default(),
+            "os_name": System::name().unwrap_or_default(),
+            "os_version": System::os_version().unwrap_or_default(),
+        });
+        self.cached = Some((Instant::now(), value.clone()));
+        value
+    }
+}
+
+static SYSTEM_INFO: Lazy<Mutex<SystemInfoSampler>> = Lazy::new(|| Mutex::new(SystemInfoSampler::new()));
+
+#[cfg(test)]
+mod sampler_tests {
+    use super::*;
+
+    #[test]
+    fn snapshots_never_enumerate_processes_and_refresh_after_expiry() {
+        let mut sampler = SystemInfoSampler::new();
+        let first = sampler.sample();
+        assert_eq!(sampler.sample(), first);
+        assert!(sampler.system.processes().is_empty());
+        sampler.cached.as_mut().unwrap().0 = Instant::now() - Duration::from_secs(2);
+        let next = sampler.sample();
+        assert!(next["cpu_usage"].as_f64().unwrap().is_finite());
+        assert!(sampler.cached.as_ref().unwrap().0.elapsed() < Duration::from_secs(1));
+        assert!(sampler.system.processes().is_empty());
+    }
+
+    #[test]
+    #[ignore = "controlled local performance measurement"]
+    fn system_info_performance_baseline() {
+        for _ in 0..3 {
+            let started = Instant::now();
+            let mut old = System::new_with_specifics(RefreshKind::everything());
+            old.refresh_cpu_usage();
+            old.refresh_memory();
+            let old_us = started.elapsed().as_micros();
+            let started = Instant::now();
+            let mut sampler = SystemInfoSampler::new();
+            let value = sampler.sample();
+            let cold_us = started.elapsed().as_micros();
+            let started = Instant::now();
+            for _ in 0..100 { std::hint::black_box(sampler.sample()); }
+            let cached_us = started.elapsed().as_micros() / 100;
+            assert!(value["total_memory"].as_u64().unwrap() > 0);
+            println!("system_info old_us={old_us} new_cold_us={cold_us} new_cached_us={cached_us} old_processes={} new_processes={}",
+                old.processes().len(), sampler.system.processes().len());
+        }
+    }
+}
 
 /// 恢复出厂清扫标记文件（写入用户数据目录根，下次启动时消费并删除）
 const FACTORY_RESET_MARKER: &str = ".factory_reset_pending";
@@ -368,33 +446,7 @@ pub async fn reinitialize(
 /// 获取系统信息（CPU、内存）
 #[tauri::command]
 pub fn get_system_info() -> Result<Value, String> {
-    SYSTEM_REFRESH.store(true, Ordering::SeqCst);
-    let mut sys = System::new_with_specifics(RefreshKind::everything());
-    sys.refresh_cpu_usage();
-    sys.refresh_memory();
-    SYSTEM_REFRESH.store(false, Ordering::SeqCst);
-
-    let total_memory = sys.total_memory();
-    let used_memory = sys.used_memory();
-    let available_memory = total_memory.saturating_sub(used_memory);
-    let memory_usage_pct = if total_memory > 0 {
-        (used_memory as f64 / total_memory as f64) * 100.0
-    } else {
-        0.0
-    };
-
-    Ok(json!({
-        "cpu_usage": sys.global_cpu_usage(),
-        "cpu_count": sys.cpus().len(),
-        "total_memory": total_memory,
-        "used_memory": used_memory,
-        "available_memory": available_memory,
-        "memory_usage_pct": memory_usage_pct,
-        "uptime": System::uptime(),
-        "host_name": System::host_name().unwrap_or_default(),
-        "os_name": System::name().unwrap_or_default(),
-        "os_version": System::os_version().unwrap_or_default(),
-    }))
+    Ok(SYSTEM_INFO.lock().sample())
 }
 
 /// 获取正在运行的进程列表

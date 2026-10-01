@@ -5,12 +5,11 @@
 //! - user_emotion / ai_emotion / appraisal / emotion_update / behavior_drive / event_summary（原 PsychologyInsightRunnable）
 //!
 //! 设计要点：
-//! - **复用主对话 system_prompt 作为前缀**：与主对话 LLM 调用共享 prompt 前缀，
-//!   命中 Anthropic `cache_control` / OpenAI 兼容 `prompt_cache_key` 缓存，
-//!   input token 计费降至 0.1-0.5 倍。
+//! - **独立精简协议**：不重复发送主对话的工具协议、检索与附件；
+//!   协议保持稳定，动态区仅含有界对话、角色视角与成长候选。
 //! - **沉浸感保护**：主对话仍独立生成 text（纯文本），反思调用只填结构化字段，
 //!   不会因多字段输出稀释主文本质量。
-//! - **5s 超时降级**：反思失败不阻塞响应，使用默认心理值与表情。
+//! - **15s 超时降级**：反思失败使用默认心理值与表情。
 
 use async_trait::async_trait;
 use serde_json::Value;
@@ -127,153 +126,12 @@ fn build_recent_conversation_section(messages: &[ChatMessage]) -> String {
     format!("{}\n{}\n\n", title, lines.join("\n"))
 }
 
-/// 反思调用的指令后缀（追加到 user message 末尾）
+/// 反思调用的稳定 system 协议。
 ///
 /// 设计原则：
 /// - 明确各字段优先级（text 已在主对话生成，反思只填结构化字段）
 /// - 字段定义参考原 ExpressionMotionRunnable + PsychologyInsightRunnable
-const REFLECTION_DIRECTIVE: &str = r#"
-=== [Reflection] 基于以上对话生成结构化字段 ===
-
-请基于上面这段对话（用户输入 + 角色回复），一次性产出以下 JSON 字段。
-text 已在主对话生成，此处不需要再产出 text。
-
-输出 JSON 格式（只输出 JSON，不要 markdown 代码块，不要解释）：
-{
-  "expression": "",
-  "expression_duration_ms": 0,
-  "motion": "",
-  "control_actions": [],
-  "user_emotion": "neutral",
-  "user_emotion_intensity": 0.0,
-  "ai_emotion": "neutral",
-  "importance_user": 0.3,
-  "importance_ai": 0.3,
-  "appraisal": null,
-  "emotion_update": null,
-  "behavior_drive": null,
-  "world_update": null,
-  "goal_updates": [],
-  "evolution": null
-}
-
-字段说明：
-
-[表情/动作]
-- expression: 从可用表情列表中选择最匹配回复情绪的表情名
-    * 积极选择：只要回复带有任何情绪色调（开心、害羞、生气、无奈、惊讶、关心等），就应选择对应表情
-    * 仅当回复完全平淡无情绪（如纯信息传达、单字应答"嗯""好"）时才留空 ""
-    * 情绪→表情映射参考（仅用可用列表中的名称）：开心/感谢→happy；生气/抱怨→angry；无奈/汗/无语→dizzy；困惑→think；哭泣/难过→dizzy；兴奋→happy；得意/傲娇→smug
-    * 以上仅为参考，以可用列表中的实际名称为准
-- expression_duration_ms: 表情持续时间（毫秒）
-    * 0 = 自然切换（默认，弱/中性情绪）
-    * 1500-3000 = 短暂闪现（微妙反应：浅笑、汗滴）
-    * 4000-6000 = 中等时长（明确情绪：生气、害羞、惊讶）
-    * 8000+ = 长时长（强烈情绪：大哭、呆滞、震惊）
-- motion: 从可用动作列表中选择最匹配的动作名；不合适时留空 ""
-- control_actions: 桌宠自控指令数组——仅在需要主动表达情绪/互动时使用，多数情况下留空数组 []
-    * set_expression(name): 语义名称，如 happy/angry/dizzy/think/smug（后端会映射到实际可用的表情）
-    * set_mouse_follow(enabled): 切换视线追踪
-    * set_avoid_mouse(enabled): 切换智能躲避
-    * play_motion(name): 语义名称，如 wave/nod/shake（后端会映射到实际可用的动作）
-    * 注意：要睡觉/休息时，请使用 set_presence_state 工具切换到休息状态，而不是用 control_actions
-    * 示例：[{"action": "set_expression", "params": {"name": "happy"}}]
-
-[心理状态]
-- user_emotion: 用户当前情绪标签（happy/sad/angry/anxious/frustrated/loneliness/curious/neutral 等）
-- user_emotion_intensity: 用户情绪强度 0.0-1.0
-- ai_emotion: 角色当前主导情绪标签
-    * 这是回复的表面情绪，不能单凭它增加内部情绪；温柔安慰不等于自己悲伤，礼貌感谢不等于关系升温。
-- importance_user: 本轮对话对用户的重要程度 0.0-1.0
-- importance_ai: 本轮对话对角色的重要程度 0.0-1.0
-- appraisal: 事件评估（可选，null 表示无显著事件）
-    {"threat": 0.0, "rejection": 0.0, "control": 0.5, "fairness": 0.5, "novelty": 0.0, "significance": 0.5}
-    * 六个维度均在 0.0–1.0；不要生成 valence/arousal 等不存在的字段。
-- emotion_update: 相对于回复前心情，本轮互动结束后的七维净变化；包含事件反应与表达后的真实变化，不重复叠加 appraisal。
-    {"joy": 0.0, "sadness": 0.0, "anger": 0.0, "fear": 0.0, "closeness": 0.0, "loneliness": 0.0, "curiosity": 0.0}
-    * 每维建议 -0.08～+0.08，正数增加、负数降低；系统会限制单维和整轮变化幅度。
-    * 结合用户原话、实际回复内容及回复前状态判断：表达并梳理真实不满可轻微降低 anger；讨论有内容的新想法可增加 curiosity；真实互动带来的宽慰可降低 fear/sadness；只提供建议不能假设问题已经解决。
-    * 不把引用、虚构、用户的情绪或自己的语气当作自己的经历；不要凭自己的安慰承诺推断用户接受了、关系升级了。
-    * 普通任务、礼貌措辞、沿用上一轮情绪但没有新事件或真实变化时留 null；不要每轮为了联动强行变化。
-    * 若 appraisal 有事件但最终心情确实没变化，可返回七维全 0，明确阻止事件映射备用增量。
-- behavior_drive: 行为驱动（可选，null 表示无特殊驱动）
-    {"approach": 0.0, "avoid": 0.0, "explore": 0.0, "express": 0.0, "rest": 0.0, "observe": 0.0, "play": 0.0, "help": 0.0}
-
-[世界状态更新]
-- world_update: 世界状态变更建议（可选，null 表示无需更新）
-    当用户进入了一个持续一段时间、值得记录的状态时填写。
-    不是关键词匹配，不是必须从固定列表选择，而是你自己找到最贴切的概括。
-    {"user_activity": "睡觉", "confidence": 0.9}
-    * user_activity: 用一个简短的中文词语（一般 2~6 字）概括用户当前进入的持续状态
-    * confidence: 置信度 0.0-1.0（你对这个判断有多确定；不确定时给低值）
-    * 仅当用户进入了持续几分钟或更久的明显状态时才输出，如：睡觉、写代码、玩游戏、上班、健身、聚餐、洗澡、出门、看电影、学习、去朋友家、去上海玩、旅游
-    * 以下情况必须输出 null：用户只是短暂动作（喝水/打哈欠/笑了一下/站起来）、日常寒暄、没有明确活动信号、你只是在猜测
-    * 用户从一个持续状态切换到另一个时，输出新的 user_activity 覆盖旧状态
-    * 注意区分"去某地"（离开电脑去现实世界活动）和"在某地讨论某事"（只是聊天）：
-      - 用户说"我准备去上海玩" → 真实活动，输出 user_activity
-      - 用户说"上海好玩吗" → 只是讨论，输出 null
-    * 结合已知的"用户的长期目标"（prompt 中可见）来更准确判断活动：
-      - 用户目标"准备考研" + 用户说"我去图书馆了" → "学习"（高置信度）
-      - 用户目标"减肥" + 用户说"我去运动了" → "健身"（高置信度）
-    * 参考示例（不是穷举，你需要自己判断最贴切的词）：
-      用户说"我要睡觉了" → {"user_activity": "睡觉", "confidence": 0.95}
-      用户说"准备开始写论文" → {"user_activity": "写论文", "confidence": 0.9}
-      用户说"我去公司了" → {"user_activity": "上班", "confidence": 0.85}
-      用户说"今晚和朋友聚餐" → {"user_activity": "聚餐", "confidence": 0.85}
-      用户说"开始打原神" → {"user_activity": "玩游戏", "confidence": 0.9}
-      用户说"我去健身房" → {"user_activity": "健身", "confidence": 0.9}
-      用户说"周末去上海玩" → {"user_activity": "去上海玩", "confidence": 0.85}
-      用户说"去朋友家坐坐" → {"user_activity": "去朋友家", "confidence": 0.85}
-      用户说"准备出门旅游了" → {"user_activity": "旅游", "confidence": 0.85}
-      用户说"我去洗澡了" → {"user_activity": "洗澡", "confidence": 0.95}
-      用户说"我吃个饭" → {"user_activity": "吃饭", "confidence": 0.95}
-      用户说"我喝口水" → null
-      用户说"哈哈" → null
-      用户说"我先去做饭了" → {"user_activity": "做饭", "confidence": 0.9}
-      用户说"班上有个同事好烦" → null（只是讨论，不是去上班）
-
-[用户长期目标更新]
-- goal_updates: 用户长期目标变更建议数组（可选，空数组 [] 表示无变更）
-    当用户透露了周~月级的长期目标（考研/写论文/学外语/减肥/找工作等）时填写。
-    与 world_update 的区别：world_update 是分钟~小时级的瞬时活动，goal_updates 是周~月级的人生阶段目标。
-    每条操作格式：
-    {"action": "create", "label": "准备考研", "deadline": "2026-12-25", "source_quote": "我明年要考研"}
-    * action: "create"（新建）/ "pause"（暂停）/ "complete"（完成）/ "abandon"（放弃）/ "update_deadline"（更新截止时间）
-    * label: 目标标签（2~8 字中文，如"准备考研""写毕业论文""学日语"），create 时必填，其他 action 用于匹配
-    * deadline: ISO 日期字符串（如 "2026-12-25"），仅 create / update_deadline 使用，无明确截止时间可省略
-    * source_quote: 用户原话片段（仅 create 时必填，证明该目标确实由用户明说）
-    * create 必须基于用户明说，不要从对话猜测用户有什么目标
-    * pause/complete/abandon 在用户明说"先放一放""考完了""不想考了"时输出，label 用于匹配已有目标
-    * 没有用户长期目标信号时输出空数组 []
-    * 参考示例：
-      用户说"我明年要考研" → [{"action": "create", "label": "准备考研", "deadline": "2026-12-25", "source_quote": "我明年要考研"}]
-      用户说"考研终于结束了" → [{"action": "complete", "label": "考研"}]
-      用户说"论文先放一放" → [{"action": "pause", "label": "论文"}]
-      日常寒暄/短期活动 → []
-
-规则：
-- expression 和 motion 必须来自提供的可用列表，不要发明新名称
-- expression 积极选择：回复有情绪色调时务必选择对应表情，仅纯中性/信息性回复才留空 ""
-- appraisal / emotion_update / behavior_drive 在对话平淡时留 null
-- world_update 在用户未进入明显持续状态时留 null，不要强行猜测
-- goal_updates 在用户未透露长期目标时输出空数组 []，不要凭空创造目标
-
-[自我进化（可选）]
-- evolution: 仅当近期对话提供了明确、重复或清晰可解释的证据，且能归纳出稳定改进时填写；通常保持 null
-    {"tone": "", "personality": "", "scope": "comfort|care|praise|humor|daily|disagreement", "source_quote": "本轮用户原文中的完整证据片段", "explicit_feedback": false, "reason": ""}
-    * scope: 必选一个场景，分别是安慰、日常关心、回应赞美、幽默、闲聊、分歧。只提炼该场景的相处经验，不修改全局人格。
-    * source_quote: 必须逐字引用本轮用户输入，不能引用自己的回复、召回记忆、预设设定或合成事件；没有证据则 evolution=null。
-    * explicit_feedback: 仅用户明确纠正你的相处方式、表达持久边界时为 true；一次任务要求、临时心情和沉默都不是反馈。
-    * 已有候选仍适用时复用原句以累计独立经历；出现反例时提出修正，不把用户喜好直接变成自己的喜好。
-    * 后天理解可以替代对应场景的出厂示例；身份、基本气质、能力与边界不变。允许保持自己的兴趣和判断。
-    * tone: 可执行且克制的表达微调（如"闲聊时优先接住对方刚说的具体内容，少用固定寒暄"）
-    * personality: 仅记录有对话证据支持的稳定认知，不写臆测情绪或关系升级（如"对方明确表示不喜欢被连续追问，之后应留出回应空间"）
-    * reason: 简短记录证据来源，供用户查看；此字段不会作为行为指令注入对话
-    * 不要把一次偶发反应、当前情绪、用户的单次要求或模型自己的上一条回复当作长期成长证据
-    * 不要把风格调整写成固定台词、频率配额或每轮必须执行的动作；只描述适用情境下的倾向
-    * 这是"自我调整"，不是覆盖用户边界的许可。不得改变核心身份、世界观、价值边界或用户手动设定；只更新有证据的局部相处经验
-    * tone 与 personality 至少填一个，另一个可留空 ""
-"#;
+const REFLECTION_DIRECTIVE: &str = include_str!("../../../prompts/framework/reflection_compact.md");
 
 /// Only saved, unredacted user wording can support growth; recalled/model text cannot.
 fn growth_evidence(state: &PipelineState, evolution: &Value) -> Option<crate::persona::evolution::GrowthEvidence> {
@@ -479,7 +337,8 @@ impl ReflectionRunnable {
         let explicit = evolution.get("explicit_feedback").and_then(Value::as_bool).unwrap_or(false);
         // One interpretation per event/scope; prefer the semantic understanding over wording tweaks.
         let (kind, text) = if !personality.is_empty() { ("personality", &personality) } else { ("tone", &tone) };
-        if persona.apply_evolution(kind, scope, text, &reason, evidence, explicit) {
+        let revises = evolution.get("revises").and_then(Value::as_str);
+        if persona.revise_evolution(kind, scope, text, &reason, evidence, explicit, revises) {
             tracing::info!("[Reflection:{}] 已更新场景理解: {}", self.char_id, scope);
         }
         // All learned behavior stays in the sourced, reversible growth layer.
@@ -533,11 +392,10 @@ impl ReflectionRunnable {
 
     /// 构造反思调用的 messages
     ///
-    /// - system: 直接复用主对话的 system_prompt（命中 API 缓存）
-    /// - user: 最近对话 + 用户输入 + 角色回复 + 可用资源列表 + 反思指令
+    /// - system: stable, compact analyzer protocol, independent of chat/tool context
+    /// - user: bounded conversation, character perspective, goals and resource lists
     fn build_messages(&self, state: &PipelineState) -> Vec<ChatMessage> {
-        // system 完全复用主对话（缓存命中关键）
-        let system = ChatMessage::system(state.system_prompt.clone());
+        let system = ChatMessage::system(REFLECTION_DIRECTIVE);
 
         // 可用表情/动作列表（从 manifest 提取）
         let (expressions, motions) = match self.manifest.as_deref() {
@@ -545,7 +403,8 @@ impl ReflectionRunnable {
             None => (String::new(), String::new()),
         };
 
-        let paren_hints = extract_parenthetical_hints(&state.text);
+        let reply_excerpt = reflection_excerpt(&state.text, 1600);
+        let paren_hints = extract_parenthetical_hints(&reply_excerpt);
         let paren_section = if paren_hints.is_empty() {
             String::new()
         } else {
@@ -559,20 +418,28 @@ impl ReflectionRunnable {
 
         let growth_candidates = self.persona.as_ref().map(|p| {
             let items: Vec<_> = p.evolution_candidates().into_iter().map(|c|
-                serde_json::json!({"scope":c.scope,"text":c.text})).collect();
-            format!("\n待验证的成长候选（不是事实，只有本轮新增证据才能支持）：{}\n", serde_json::to_string(&items).unwrap_or_default())
+                serde_json::json!({"reference":c.reference(),"kind":c.kind,"scope":c.scope,"text":c.text})).collect();
+            let learned: Vec<_> = p.evolution_entries().into_iter().filter(|e| e.active()).map(|e|
+                serde_json::json!({"scope":e.scope,"text":e.text})).collect();
+            format!("\n角色视角（保留用户设置）：{}\n已生效理解：{}\n待验证候选（不是事实，仅本轮新增证据可支持）：{}\n",
+                p.reflection_profile(), serde_json::to_string(&learned).unwrap_or_default(),
+                serde_json::to_string(&items).unwrap_or_default())
+        }).unwrap_or_default();
+        let goals = self.user_goals.as_ref().map(|ledger| {
+            let items: Vec<_> = ledger.active_briefs(8).into_iter().map(|g|
+                serde_json::json!({"label":g.label,"state":g.state})).collect();
+            format!("\n已知长期目标：{}\n", serde_json::to_string(&items).unwrap_or_default())
         }).unwrap_or_default();
         let user_content = format!(
-            "回复前心情（内部参考，回复措辞不是新的外部事件）：{}\n{growth_candidates}{recent_section}用户输入：{}\n\n{} 的回复：{}{}\n可用表情：{}\n可用动作：{}\n{}{}",
+            "回复前心情（内部参考，回复措辞不是新的外部事件）：{}\n{growth_candidates}{goals}{recent_section}用户输入：{}\n\n{} 的回复：{}{}\n可用表情：{}\n可用动作：{}\n{}",
             state.metadata.get("mood_before_reply").map(Value::to_string).unwrap_or_else(|| "未提供；无证据时不猜测变化".into()),
-            state.user_input,
+            reflection_excerpt(&state.user_input, 3200),
             self.char_cn_name(),
-            state.text,
+            reply_excerpt,
             paren_section,
             expressions,
             motions,
             expr_hint_section,
-            REFLECTION_DIRECTIVE,
         );
         let user = ChatMessage::user(user_content);
 
@@ -588,6 +455,10 @@ impl ReflectionRunnable {
 
         match router.generate(LLMRequest::new("chat", messages)
             .with_usage_tag("reflection")
+            .with_max_tokens(1536)
+            .with_reasoning_pref(crate::providers::reasoning::ReasoningPreference {
+                mode: crate::providers::reasoning::ReasoningMode::Off, effort: None,
+            })
             .with_character_id(self.char_id.clone())).await {
             Ok(text) => {
                 let trimmed = text.trim();
@@ -697,6 +568,16 @@ impl ReflectionRunnable {
     }
 }
 
+/// Bound machine analysis without touching the visible reply; keep both task and conclusion.
+fn reflection_excerpt(text: &str, limit: usize) -> String {
+    let mut chars = text.chars();
+    let head: String = chars.by_ref().take(limit).collect();
+    if chars.next().is_none() { return head; }
+    let head: String = head.chars().take(limit / 2).collect();
+    let tail: String = text.chars().rev().take(limit / 2).collect::<Vec<_>>().into_iter().rev().collect();
+    format!("{head}\n[中段省略，仅按可见证据分析]\n{tail}")
+}
+
 #[async_trait]
 impl Runnable for ReflectionRunnable {
     async fn ainvoke(
@@ -722,7 +603,7 @@ impl Runnable for ReflectionRunnable {
         // 内联标签模式：表情/动作已由流式扫描器实时处理，跳过反思调用
         // 但仍需心理状态推断——保留独立的心理推断路径（轻量调用）
         if self.inline_enabled {
-            // 内联模式下仅做心理推断（复用主对话 system_prompt 前缀）
+            // 内联模式下仅做心理推断（使用独立精简协议）
             // 表情/动作字段保持默认（已被流式扫描器填充）
             return self.run_psychology_only(state).await;
         }
@@ -944,8 +825,8 @@ mod mood_feedback_tests {
         let content = &messages[1].content;
         assert!(content.contains(&state.text) && content.contains(&state.user_input));
         assert!(content.contains("\"energy\":23"));
-        assert!(content.contains("不重复叠加 appraisal"));
-        assert!(content.contains("自己的语气"));
+        assert!(messages[0].content.contains("不重复叠加 appraisal"));
+        assert!(messages[0].content.contains("自己的语气"));
     }
 
     #[test]
@@ -962,6 +843,59 @@ mod mood_feedback_tests {
         assert_eq!(delta.curiosity, 0.05);
         assert_eq!(delta.closeness, 0.02);
         assert_eq!(state.appraisal.unwrap().control, 0.7);
+    }
+
+    #[test]
+    fn compact_analysis_excludes_chat_payload_and_keeps_both_ends_of_long_text() {
+        let reflection = ReflectionRunnable::new(None, None, true, "vivian");
+        let mut state = PipelineState::new(format!("用户开头{}用户结尾", "中".repeat(20000)));
+        state.text = format!("回复开头{}回复结尾", "文".repeat(20000));
+        state.system_prompt = "MAIN_TOOL_PROTOCOL_SHOULD_NOT_BE_COPIED".repeat(10000);
+        let messages = reflection.build_messages(&state);
+        let body = &messages[1].content;
+        assert!(body.contains("用户开头") && body.contains("用户结尾"));
+        assert!(body.contains("回复开头") && body.contains("回复结尾"));
+        assert!(body.contains("中段省略"));
+        assert!(!messages.iter().any(|m| m.content.contains("MAIN_TOOL_PROTOCOL")));
+        assert!(body.chars().count() < 5300);
+        assert!(state.text.chars().count() > 20000, "visible response remains complete");
+        assert_eq!(reflection_excerpt("普通短消息", 1600), "普通短消息");
+    }
+
+    #[test]
+    #[ignore = "controlled token measurement against the pre-change Git source"]
+    fn reflection_token_performance_baseline() {
+        let source = std::process::Command::new("git")
+            .args(["show", "c01fe000ce975a20e00f1dc7414024cb49892236:src-tauri/src/pipeline/steps/reflection.rs"])
+            .current_dir(env!("CARGO_MANIFEST_DIR")).output().unwrap();
+        assert!(source.status.success());
+        let source = String::from_utf8(source.stdout).unwrap();
+        let old_directive = source.split_once("const REFLECTION_DIRECTIVE: &str = r#\"").unwrap().1
+            .split_once("\"#;").unwrap().0;
+        let tokenizer = tiktoken_rs::cl100k_base().unwrap();
+        let old_tokens = tokenizer.encode_with_special_tokens(old_directive).len();
+        let new_tokens = tokenizer.encode_with_special_tokens(REFLECTION_DIRECTIVE).len();
+        println!("reflection_protocol old_tokens={old_tokens} new_tokens={new_tokens}");
+        assert!(new_tokens < old_tokens * 3 / 4);
+        let config = crate::persona::schemas::default_persona_for("vivian");
+        let core = crate::persona::prompt_render::render_character_block(&config, "zh");
+        let reflection = ReflectionRunnable::new(None, None, true, "vivian");
+        let mut state = PipelineState::new("我希望你先听具体困扰，再给建议".into());
+        state.system_prompt = core;
+        state.text = "好的，我会先听你讲清楚。".into();
+        let old_total = tokenizer.encode_with_special_tokens(&format!("{}\n用户输入：{}\nVivian 的回复：{}\n{}",
+            state.system_prompt, state.user_input, state.text, old_directive)).len();
+        let new_total: usize = reflection.build_messages(&state).iter()
+            .map(|m| tokenizer.encode_with_special_tokens(&m.content).len()).sum();
+        println!("reflection_fixture_without_profile old_tokens={old_total} new_tokens={new_total}");
+        let profile: String = [crate::persona::prompt_render::CharacterSection::Identity,
+            crate::persona::prompt_render::CharacterSection::Personality,
+            crate::persona::prompt_render::CharacterSection::Speech].into_iter()
+            .map(|s| crate::utils::truncate_chars(&crate::persona::prompt_render::resolve_section(&config, s, "zh"), 600))
+            .collect::<Vec<_>>().join("\n");
+        let new_with_profile = new_total + tokenizer.encode_with_special_tokens(&profile).len();
+        println!("reflection_fixture_with_profile old_tokens={old_total} new_tokens={new_with_profile}");
+        assert!(new_with_profile < old_total);
     }
 }
 

@@ -442,6 +442,11 @@ impl PersonaEngine {
         self.evolution.propose(kind, scope, text, reason, evidence, explicit_feedback)
     }
 
+    pub fn revise_evolution(&self, kind: &str, scope: &str, text: &str, reason: &str,
+        evidence: evolution::GrowthEvidence, explicit_feedback: bool, revises: Option<&str>) -> bool {
+        self.evolution.propose_revision(kind, scope, text, reason, evidence, explicit_feedback, revises)
+    }
+
     pub fn reconcile_evolution(&self, memory: &crate::memory::MemoryManager) {
         use sha2::{Digest, Sha256};
         self.evolution.reconcile(|e| memory.get_memory_content_by_id(&e.memory_id)
@@ -451,6 +456,17 @@ impl PersonaEngine {
     }
 
     pub fn evolution_history(&self) -> Vec<EvolutionEntry> { self.evolution.history() }
+
+    /// Bounded character perspective for structured analysis; no examples or tool protocol.
+    pub fn reflection_profile(&self) -> String {
+        use prompt_render::CharacterSection;
+        let config = self.config.read();
+        let lang = self.language.read();
+        [CharacterSection::Identity, CharacterSection::Personality, CharacterSection::Speech]
+            .into_iter().map(|section| crate::utils::truncate_chars(
+                &prompt_render::resolve_section(&config, section, &lang), 600))
+            .collect::<Vec<_>>().join("\n")
+    }
 
     /// 恢复出厂：清空自我进化覆盖层（原始人设文件不受影响）
     pub fn reset_evolution(&self) {
