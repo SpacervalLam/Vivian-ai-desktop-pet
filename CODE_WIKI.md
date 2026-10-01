@@ -192,10 +192,10 @@ Memory 窗口（`MemoryWindow`，默认全屏大小）内嵌 [`MindInspector.tsx
 - **形态**：**贴在主工作区右缘的一条信息列**（`position: absolute`，`right: var(--codex-sb-w)` 紧贴对话滚动条的左边），不是占位的 flex 列。对话区 / 输入区 / 统计行 / 「回到底部」按钮统一用 `padding-right` 让出 `--codex-pinned-reserve`，所以面板既不盖正文，又不会把滚动条挤到自己左边（滚动条属于铺满整条宽度的 `.codex-chat`，恒在最右侧）。面板与对话区之间**没有分隔线**（`border-left` 已删）——分隔靠底色与留白，不靠线。`codex-main-col` 带 `position: relative`，同时给 `.codex-pinned` 和 `.codex-to-bottom` 当定位基准
 - **宽度策略**：三个常量构成优先级——`PINNED_W_IDEAL`(250) / `PINNED_W_MIN`(186) / `CHAT_MIN_W`(430)：先保证对话区 border-box 至少 430（= 工作区宽 − 面板宽），剩下的才给面板；面板自己也不低于 186（再窄「提交或推送」那排按钮会换行）。父组件用 `ResizeObserver` 量 `codex-main-body`，把宽度写成 `.codex-main-col` 上的四个 CSS 变量：`--codex-pinned-w`（动画值，收起为 0）、`--codex-pinned-w-expanded`（展开值，收起期间不变，内层靠它维持展开宽度做裁切）、`--codex-pinned-reserve`（= 面板 + 呼吸缝 `PINNED_GAP_W`(18)，收起为 0）、`--codex-sb-w`（实测滚动条宽）。首帧用 `useLayoutEffect` 同步量一次，否则初始那次宽度变化会被当成动画播一遍。**面板宽度不再走 prop**，宽度策略只该有一个出处
 - **让位怎么合成**（`CodeAgentPage.css`）：四处统一用 `max(基准内边距, --codex-pinned-reserve)`。展开时 reserve 远大于基准（≥186+18），正文右缘恰好停在面板左侧 `PINNED_GAP_W`=18px 处（就是「刚好不遮挡」）；收起时 reserve 归零，`max()` 取回基准，左右内边距重新对称。**基准值必须由主题声明成变量**（`--codex-chat-pad-x` / `--codex-composer-pad-x` / `--codex-to-bottom-right`），不能写死在让位规则里——让位规则是 `.codex-main-col .codex-chat`（0,2,0），而主题的 `.mind-main[data-ui-style="minimal"] .codex-chat` 是 0,3,0、窄屏那条 `.mind-inspector-root.is-work-page .workbench-root .codex-chat` 是 0,4,0，写死会被整条盖掉（实测展开时右内边距仍是 34px、窄窗下正文被压住 196px、输入卡片被压住 205px）。滚动条槽在 border 与 padding 之间，正文可用宽本来就减掉了它，所以 reserve **不加**滚动条宽；只有浮动按钮的 `right` 要额外加 `--codex-sb-w` 才能和正文列右缘对齐
-- **收放动画（两轴同时）**：320ms `cubic-bezier(0.4,0,0.2,1)`（与两侧边栏同一条曲线），两条轴并行——**横向** `width` 走 0 ↔ 250，**纵向** `clip-path: inset()` 把可见区**从上往下揭开**（呼出）/ **从下往上收掉**（收起）。横向那条必须留着：让位靠 `--codex-pinned-reserve`，面板盒宽恒小于它，同步走才保证任何一帧都不压住正文。纵向两端形状要一致才可插值，所以展开态写 `inset(0 0 0 0)` 而不是 `none`，收起态 `inset(0 0 100% 0)`（底边内缩 100% ⇒ 可见高度归零）；实测顶边内缩全程恒为 0，即「锚在顶边往下揭开」。内层 `.codex-pinned-inner` 固定展开宽度并 `align-items: flex-end` **靠右对齐**——外层变窄时它从左侧被 `overflow` 切掉，内容不横向平移（若默认左对齐，整块会跟着外层左缘左移 250px，读起来就变成「从右边滑进来」了）。四处让位（`padding-right` / `right`）**必须同曲线同步**——不同步的话收起期间正文与面板会互相错位。外加 `visibility 0s` 延迟切换（`visibility` 是阶跃插值，配延迟就能让内容动画播完才真正隐藏，顺带退出 tab 序列）。**不随收起卸载**（`if (!visible) return null` 已删——卸载了就没有元素可做动画）。拖拽调宽期间 `.codex-main-body.resizing` 一次性关掉面板（含 `clip-path`）与四处让位的过渡，否则宽度被缓动拖住
+- **收放动画**：摘要保持固定展开宽度，仅用 `clip-path: inset()` 从上往下揭开、从下往上收起。`--codex-summary-duration: 0.6s` 与 `--codex-summary-easing` 同时控制正文 / 输入区的 `padding-right` 和统计详情的右侧留白，让阅读区同步平滑挤压、恢复。收起后的 `visibility` 延迟相同时长；拖拽调宽、空间不足自动隐藏以及减少动画偏好下关闭相关过渡。
 - **输入框不再有蓝色焦点框**：`.codex-composer-textarea` 自身写了 `outline: none`（0,1,0），但 `MindInspectorThemes.css` 的通用 `.mind-inspector-root .workbench-root textarea:focus-visible { outline: 2px solid var(--codex-accent) }`（0,3,1）压过它——手账主题的 accent 是印章青蓝 `#537d96`，于是聚焦时卡片里凭空多一个青蓝框。现在按 0,4,0 加了一条例外把 `.codex-composer-textarea` / `.codex-pinned-input` / `.codex-pinned-select` 设回 `outline: none`，焦点提示改由 `.codex-composer:focus-within`（描边色 + 阴影）承担
 - **底色**：`--codex-pinned-bg`，极简主题下覆写为纯白（浅色 `#fff`）/ `#242424`（深色）；其余主题退回 `--codex-paper-card`。**深色那两块（`@media prefers-color-scheme` 与 `:root[data-theme="dark"]`）都要声明**——浅色块同样命中深色环境，漏一处卡片会保持纯白，在深色界面里刺眼
-- **显隐开关**：顶栏「模式下拉」与「右侧检查器按钮」之间的便签按钮（`StickyNote`，`aria-pressed` 同步状态）控制整块面板的收起 / 呼出。可见性落盘 `localStorage['vivian.code_agent.pinned_summary_visible']`，**默认展开**——只有显式存过 `'0'` 才默认收起，把「用户主动关过」和「从没设置过」区分开。面板不可见、或环境信息卡收起时不轮询 git。每张卡片内部仍可单独折叠；环境信息卡收起时若工作区脏则显示暖色圆点，避免收起来就失明。注意极简主题把 `.codex-icon-btn` 背景统一压成 `transparent !important`，`MindInspectorThemes.css` 里按 `aria-pressed`/`aria-expanded` 把「已开启」态补回来，否则看不出按没按
+- **显隐开关**：顶栏便签按钮（`StickyNote`，`aria-pressed` 同步状态）控制整块面板的收起 / 呼出。可见性落盘 `localStorage['vivian.code_agent.pinned_summary_visible']`，**默认展开**——只有显式存过 `'0'` 才默认收起，把「用户主动关过」和「从没设置过」区分开。面板不可见、或环境信息卡收起时不轮询 git。每张卡片内部仍可单独折叠；环境信息卡收起时若工作区脏则显示暖色圆点，避免收起来就失明。注意极简主题把 `.codex-icon-btn` 背景统一压成 `transparent !important`，`MindInspectorThemes.css` 里按 `aria-pressed`/`aria-expanded` 把「已开启」态补回来，否则看不出按没按
 - **环境信息**（git 仓库状态）：变更 `+N -M` 与改动文件数 / 本地（仓库目录名）/ 分支（detached 时显示「游离 HEAD」）/ 同步（领先 · 落后 · 未设置上游分支）/ 最近提交（短 hash + 说明 + 时间）。数据来自 `git_repo_status`，工作区或折叠态变化时立即拉一次，之后**仅窗口可见时**每 8 秒轮询（`document.visibilityState`）；请求带序号（`reqSeq`），工作区切得快时旧响应不会覆盖新状态
 - **写操作**：`提交或推送`（内联表单，Enter 提交 / 按钮提交并推送，**执行前弹确认框**并写明「会暂存全部改动」与目标仓库名）、`比较分支`（拉 `git_list_branches` 填下拉，默认选中推测基准，出 `git_branch_diff` 的领先/落后/增删/提交列表）。无未提交改动时提交按钮禁用
 - **来源**：`list_plugins` / `list_skills` / `list_mcp_servers` 三份清单并行拉取后汇总计数，展开可看插件明细（绿=trusted 生效 / 黄=changed 待重认 / 灰=untrusted）；「已装载」只数 `status === 'loaded'`，跳过的插件不计入
@@ -203,6 +203,12 @@ Memory 窗口（`MemoryWindow`，默认全屏大小）内嵌 [`MindInspector.tsx
 - **后端**：[`commands/git.rs`](src-tauri/src/commands/git.rs)，全部走系统 `git` CLI（`-C <dir>` 指定目录，不依赖进程 cwd），不引入 libgit2/git2。`-c core.quotepath=false` 必须带，否则中文路径会变成八进制转义串；Windows 下 `CREATE_NO_WINDOW` 必须加，否则每次轮询闪一次黑框。未跟踪文件的行数单独统计（`git diff --numstat HEAD` 看不见它们），计入「变更 +N」，带 200 文件 / 2MB 预算上限防大目录卡顿
 
 **兼容跳转**：`MindInspector` 的 `resolveNav` 把合并前的子视图跳转（`navigateTo('mind'/'world'/'graph'/'profile'/'diary'/'notebook'/'todo'/'scheduler')`、URL 参数 `nav=...`、`nb_id`、`memory:navigate` 事件）统一映射为「合并页主键 + `pageParams.sub`」，由合并页跟随切换子 tab。导航定义与 `NavKey` 在 [`design-system.ts`](src/components/mind-inspector/design-system.ts)。
+
+#### 会话搜索与记忆高亮
+
+[`SessionSearch.tsx`](src/components/mind-inspector/pages/SessionSearch.tsx) 用原生 modal dialog 提供焦点隔离与关闭后的焦点恢复，入口位于工作页侧栏、顶栏及 `Ctrl+K`。`searchIndex.ts` 在会话数据变化时建立本地索引，搜索标题、工作区及 user/assistant 消息，不搜索原始工具输出；多关键词全部匹配，标题命中优先，其余按最近更新时间排序，最多展示 50 项。结果保留命中附近的文本摘要、工作区、运行状态与关键词高亮。方向键选择，Enter、点击或 Alt+1–9 调用既有 `switchSession`，不会发送任务或访问搜索服务。
+
+`MemoryPage.tsx` 在已有筛选结果中高亮正文、引用证据、待跟进条件及最近交流；关键词转义后按字面匹配，不将输入作为正则表达式执行。搜索弹窗适配手账、极简与窄窗口。
 
 ### 暖纸主题（UI 视觉统一）
 
@@ -349,8 +355,8 @@ pub struct MemoryItem {
 | `brain.think_cross_character(input, stream)` | 跨角色对话专用入口，跳过异步反思：`think_inner(input, stream, false, false)` |
 | `brain.think_proactive(input, stream)` | 主动对话入口，跳过对话历史写入：`think_inner(input, stream, true, true)` |
 | `brain.think_inner(input, stream, skip_dialogue_write, run_reflection)` | 内部统一实现，执行完整 pipeline |
-| `brain.generate_startup_greeting()` | 生成启动问候。不再区分首次/回归分支，统一走完整对话流水线（`chain.ainvoke_greeting`）——与一般直接渠道对话同一套提示词（含记忆检索→种子记忆进入 prompt），仅在用户消息前加一句"这是首次见面"/"用户回来了"的提示。写入记忆库前自动补 `build_speaker_prefix(char_id, "user", char_id)` 前缀（`[I say to User]`），与主对话入库格式统一（`commands/engine.rs::try_wake_greeting` 的唤醒问候同样处理） |
-| `chain.ainvoke_greeting(user_input)` | 启动问候专用流水线入口。走完整 `prepare_pipeline_state` + `execute_pipeline_and_build_response`（含记忆检索→种子记忆在场），但设置 `skip_memory_save` 门控让 UserMemorySavingRunnable / MemorySavingRunnable 跳过写入，避免把合成的问候指令当作用户消息污染记忆库。对话写回与记忆写入由调用方独立后处理 |
+| `brain.generate_startup_greeting()` | 启动问候沿用完整对话流水线。无非种子记忆且历史为空时，按首次见面生成简短问候与名字介绍；其余情况走回归问候。`ainvoke_greeting` 将启动时的 `first_contact_greeting` 快照传入 prompt，避免后台写入改变本轮判断；该标记只用于启动介绍，不让普通空召回或首次任务自动触发介绍。问候保存时补统一说话者前缀。 |
+| `chain.ainvoke_greeting(user_input, is_first_meeting)` | 启动问候专用流水线入口。走完整 `prepare_pipeline_state` + `execute_pipeline_and_build_response`（含记忆检索→种子记忆在场），但设置 `skip_memory_save` 门控让 UserMemorySavingRunnable / MemorySavingRunnable 跳过写入，避免把合成的问候指令当作用户消息污染记忆库。对话写回与记忆写入由调用方独立后处理 |
 
 #### 子模块
 
@@ -552,7 +558,7 @@ pub struct MemoryItem {
   - **为什么 `WORKSPACE_MIN_W` 取「左栏默认宽度」而不是手调一个像素**：它回答的是「主区域被挤到多少就算没法用了」。一个标准宽度的侧栏摆在那儿，主区域至少还该有同样多的地方放得下对话——比这更窄已经不是「侧栏占地方」而是「主区域被挤没了」。它与左栏共用同一个常量 `LEFT_DEFAULT_W`（侧栏初始宽度也用它），于是「改侧栏默认宽度」只在一个地方发生、两处不会漂移；回归哨兵里有一条专门对账 CSS 的 `.codex-sidebar` 宽度 vs 这个常量，另一条钉住 `leftWidth` 初值用的是 `LEFT_DEFAULT_W` 而不是又写一遍 268
   - **光在拖动那一刻夹住不够**：`rightWidth` 是**存下来的状态**，之后有三种情况会让它变得不合法——窗口变小、**左栏被拖宽**、左栏展开 / 收起。尤其第二条：先拉右栏到上限、再把左栏拖宽，主区域照样会被压过 `WORKSPACE_MIN_W`，那就等于「保证」没兑现。所以另有一个 effect 在 `maxRightWidth` 换新时重新夹一次，**并且挂载时也夹一次**（`rightWidth` 可能来自上次会话的持久值）。依赖写 `maxRightWidth` 本身而不是逐个列 `leftWidth` / `leftCollapsed`——它只在真正影响上限时才是新函数；夹完若值没变，`setState` 会 bail out，不会多渲染一轮
   - **顺带修掉一个既有 bug：右栏收起后仍占 1px**。`MindInspectorThemes.css` 的主题规则 `.mind-main[data-ui-style="scrapbook"] .codex-inspector { border-left: 1px solid … }` 是 **(0,3,0)** 且用的是 `border-left` **简写**，压过基类 `.codex-inspector.collapsed { border-left-width: 0 }`（0,2,0）——于是收起态（宽度已写 0）仍占 1px、右缘留一条竖线。修法是在**同一个作用域**里补一条 `.codex-inspector.collapsed { border-left-width: 0 }`（(0,4,0) 稳赢），而不是去基类上加 `!important`：谁设的边框谁负责清，出问题就在这两行旁边能看到。这个 bug 是回归哨兵发现的（「右栏收起 ⇒ 主区域拿到整块剩余宽度」实测 1159px 而非 1160px，五块宽度和少 1）
-- **输入卡片过窄时收起（容器查询，不是中栏宽度阈值）**：右栏既然能拖到把中栏压到 `WORKSPACE_MIN_W`（268px，见上一条），就得回答「挤到多窄算没法用」。判据是 `CodeAgentPage.css` 的 `.codex-composer-inner { container-type: inline-size }` + `@container (max-width: 447px) { .codex-composer { display: none } }` —— **量的是输入槽自己的内容盒宽度，也就是卡片实际能用的宽度**。窄了就整块收起来，**消息区、顶栏、统计行全不动**（对话还能读 / 滚 / 选中复制，只是暂时发不了新消息），**界面上不加任何提示文字**。
+- **窄窗口输入区**：输入区始终保留；容器查询让工具栏换行、模型长名省略，保护麦克风与发送按钮。辅助面板在无法保住阅读空间时自动收起或转为抽屉，不再通过隐藏输入卡片腾位置。
   - **为什么不能用「中栏宽度 < 常量」**：同一个中栏宽度下，卡片能拿到多少宽度**取决于它在哪** —— 消息视图里卡片长在 `.codex-composer-wrap` 里只吃 16px×2；空状态里长在 `.codex-chat` → `.codex-empty` 里，多吃 `--codex-chat-pad-x` + 20px（实测共约 119px）。实测消息视图 445px 中栏就不折行、空状态要 **540px**，差 95px。所以中栏宽度阈值必然顾此失彼：上一版按 480 收，空状态在 480~540 之间还露着一张折行的卡片（用户报的「空状态下宽度过小时输入框也要隐藏」就是它）。**折行边界是卡片自己的属性**，就该量卡片自己的可用宽度 —— 容器查询正是干这个的。顺带把 JS 侧的观察者 / 状态 / 类名全省掉了，而且 `container-type: inline-size` 蕴含 `contain: inline-size`（容器行内尺寸与内容无关），**结构上不可能再有反馈回路**。
   - **两处输入槽复用同一个 `.codex-composer-inner`**：消息视图 1 处 + 空状态 2 处（`CodeAgentPageNew.tsx` 的两个 `{composer}` 分支）。空状态那两处原来写的是内联 `style={{width:'100%',maxWidth:780}}`，现在改成 `className="codex-composer-inner"`（顺带把重复的 780 收进 CSS），`width: '100%'` 必须留着 —— `.codex-empty` 是 `align-items: center` 的纵向 flex，不给宽度子项会收缩成内容宽。**空状态那两处漏掉类名，容器查询就对它们无效**（没有 `container-type`），这正是上一版的漏洞。
   - **阈值 448 = 折行边界 410 + 38px 余量**。实测（直接设槽宽、量药丸里那个 `<span>` 的高度）：默认模型名 `claude-sonnet-4-5-20250929`（25 字符）折行边界 **410px**；448 约合再长 7~8 个字符。仓库里真实在用的模型 id 最长 22 字符（`qwen3-max-thinking`）。**注意这个边界随模型名变长右移**：29 字符 → 430px，38 字符 → 480px，名字到 36 字符以上就该往上调。
@@ -916,22 +922,19 @@ Prompt 使用总量软预算：`resolve_prompt_budget` 根据模型窗口、用�
 
 共享陪伴、内心独白与认知证据规则也用于主动路径，减少直接对话与后台生成的口吻分裂。相关实现、取舍与验证见 [语义路由](docs/semantic-prompt-routing-2026-09-30.md)、[提示词协调](docs/prompt-coordination-2026-10-01.md) 与 [人设写作](docs/persona-writing-2026-10-01.md)。
 
-#### `is_first_meeting` 判据（2026-09-15 修正）
+#### 首次见面与启动介绍
 
-`PromptParts.is_first_meeting` 的字段文档（`prompt_modules.rs`）写明
-「由持久记忆库状态独立判定，**不能从本轮空召回推断**」，`brain.rs::generate_startup_greeting`
-也是正确实现（`memory.non_seed_count() == 0 && dialogue.get_history_length() == 0`）。
+`brain.rs::generate_startup_greeting` 用 `memory.non_seed_count() == 0 && dialogue.get_history_length() == 0` 判断首次见面。提示词准备阶段用持久记忆与历史独立判断 `is_first_meeting`，不能从本轮空召回推断；没有记忆管理器时取 `false`。
 
-但 `steps/prompt.rs` 曾写成 `state.memory_text.is_empty()` —— 把"这轮没召回到高相关记忆"
-误判成"第一次见面"，触发 `human_feel.en.md` 的 `NO_ONBOARDING` 反例（自我介绍 / 破冰脚本）。
-而召回为空远比真·首次见面常见（短查询、query rewrite 跳过、分数低于 `min_score` 被过滤都会命中），
-所以这是陪伴侧"机器感"的一个高频来源。
+启动问候另外携带 `first_contact_greeting` 布尔快照。只有该快照为真才注入 `framework/first_contact.en.md`：一两句自然问候和名字介绍，体现新认识的距离感，不虚构共同经历、刚做过的事或用户失眠。普通首次任务不插入开场介绍。Vivian 在面对用户的亲近、赞许等确实引起羞涩时才有口是心非的掩饰；与 Nana 的日常交流采用放松、坦率的语气。室友交流指引覆盖主对话与主动决策的完整、回退路径。
 
-现改为与 `brain.rs` 同源判据：`memory.non_seed_count() == 0 && state.messages.is_empty()`。
-两个要点：
-- `state.messages` 在 `PromptBuildingStep` 运行时**只含历史**——本轮用户消息要到
-  `chat_chain.rs` 末尾的 `add_message_with_metadata` 才入历史，所以"历史为空"这个判据可靠。
-- `memory` 未注入时取 `false`（宁可漏掉一次破冰，也不要误判出自我介绍）。
+#### 桌宠交互的可选语音反馈
+
+`commands/pet_reaction.rs` 将事件合并与开口频率分开处理。账本只记录可观测的点击、拖动与边缘碰撞，不预判用户恶意或角色生气。点击反馈参考用户可见历史，并排除室友渠道和旧格式的室友前缀。
+
+普通单击的开口尝试概率为 20%，双击 35%，长按 8%，普通拖动 10%，连续点击 25%，快速拖动与边缘碰撞 35%；观测到至少四次连续点击时概率减半。每个角色跨动作共用 40 秒冷却和 120 秒内最多两次生成尝试的滑动预算，两个角色之间至少间隔 12 秒；同一角色不并发生成。失败、空结果和取消仍消耗尝试预算，取消释放在途许可。即时动画、音效不受此语音门控影响。
+
+反应生成只携带精简身份与当前角色的反馈语气，不叠加主框架。Nana 以温柔好奇接住注意，Vivian 可以惊讶、害羞地别扭一下；两者不因普通点击责问或贬低用户。没有自然的一句话时允许 `[SILENT]`，后端转换为无回复。主动陪伴提示词同样禁止把界面动作扩展成对用户的抱怨。
 
 #### 关键函数
 
@@ -2947,3 +2950,7 @@ lib.rs::setup
 3. TOCTOU 加固：获取目标锁后再次校验目标角色状态（非源角色），处理竞态
 4. 超时兜底：think_lock 25s 超时 + 工具层 60s 超时
 ```
+
+### 后台异常与同步主动生成
+
+`lib.rs::install_panic_log_hook` 同步写出异常与 backtrace，不因单个后台任务 panic 置全局退出标记或取消所有服务；正常退出仍由 ExitRequested 路径负责。`proactive/mod.rs::block_on_proactive` 用 `tokio::task::block_in_place` 让出多线程运行时 worker，再等待同步生成入口的 future，避免在 async tick 内直接 `Handle::block_on` 导致嵌套运行时 panic。回归测试分别覆盖 async worker、blocking pool 和独立子进程中的 panic hook。
