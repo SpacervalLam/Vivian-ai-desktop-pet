@@ -41,6 +41,13 @@
   pointer-events: none;
 }
 
+.chibi-pet-tap-feedback {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  transform-origin: 50% 90%;
+}
+
 .chibi-pet-sprite {
   position: absolute;
   z-index: 1;

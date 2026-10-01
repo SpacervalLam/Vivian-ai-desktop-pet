@@ -197,6 +197,18 @@ pub(crate) static APP_EXITING: AtomicBool = AtomicBool::new(false);
 pub(crate) static DRAG_OFFSET: Lazy<Mutex<std::collections::HashMap<String, (i32, i32)>>> =
     Lazy::new(|| Mutex::new(std::collections::HashMap::new()));
 
+/// 先快照拖动偏移并释放锁，再调用窗口移动接口。
+/// Windows 的跨线程 SetWindowPos 会等待窗口线程处理消息；如果此时窗口线程
+/// 正在执行 stop_window_drag 并等待 DRAG_OFFSET，就会互相等待，连 toast 的
+/// 窗口命中轮询也会阻塞。不能把 lock() 写进 if let 的匹配表达式中：
+/// Rust 2021 会让那个临时锁一直存活到整个 if let 结束。
+fn update_drag_position(label: &str, cursor_x: i32, cursor_y: i32, move_to: impl FnOnce(i32, i32)) {
+    let offset = { DRAG_OFFSET.lock().get(label).copied() };
+    if let Some((offset_x, offset_y)) = offset {
+        move_to(cursor_x - offset_x, cursor_y - offset_y);
+    }
+}
+
 /// 查询左键当前物理按下状态（不依赖事件投递）
 ///
 /// 用于拖动 watchdog：当窗口追逐延迟导致 mouseup 无法到达 WebView 时，
@@ -345,11 +357,9 @@ pub fn start_cursor_tracking(
             //   导致桌宠持续闪烁。）
 
             if is_dragging {
-                if let Some(offset) = DRAG_OFFSET.lock().get(&label).copied() {
-                    let new_x = c.x as i32 - offset.0;
-                    let new_y = c.y as i32 - offset.1;
-                    move_window(&win, new_x, new_y);
-                }
+                update_drag_position(&label, c.x as i32, c.y as i32, |x, y| {
+                    move_window(&win, x, y);
+                });
                 // 光标轨迹采样（全局物理坐标，不受窗口追逐延迟影响），
                 // 供松手瞬间计算惯性甩飞初速度
                 let now = std::time::Instant::now();
@@ -3140,6 +3150,26 @@ pub fn find_safe_position(
 #[cfg(test)]
 mod dizzy_tests {
     use super::*;
+
+    #[test]
+    fn drag_move_releases_state_lock_before_window_dispatch() {
+        let label = "test-drag-window-dispatch";
+        DRAG_OFFSET.lock().insert(label.into(), (12, 34));
+        let mut moved = false;
+        update_drag_position(label, 100, 200, |x, y| {
+            // 模拟窗口线程在移动期间收到松手命令。用 try_lock 避免回归时测试挂死。
+            let mut offsets = DRAG_OFFSET
+                .try_lock()
+                .expect("窗口移动时仍持有拖动锁，松手命令会与窗口线程死锁");
+            assert_eq!(offsets.remove(label), Some((12, 34)));
+            assert_eq!((x, y), (88, 166));
+            moved = true;
+        });
+        assert!(moved);
+        update_drag_position(label, 100, 200, |_, _| {
+            panic!("松手后不应继续移动窗口");
+        });
+    }
 
     fn at(ms: u64, x: f64, y: f64) -> (Instant, f64, f64) {
         (Instant::now() + Duration::from_millis(ms), x, y)

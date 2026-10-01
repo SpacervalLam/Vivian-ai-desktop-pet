@@ -331,6 +331,25 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
     const walkTargetFramesRef = useRef<number | null>(null);
     const [pressed, setPressed] = useState(false);
     const pressedRef = useRef(false);
+    const tapFeedbackRef = useRef<HTMLDivElement>(null);
+    const tapFeedbackAnimationRef = useRef<Animation | null>(null);
+    useEffect(() => () => { tapFeedbackAnimationRef.current?.cancel(); }, []);
+
+    // Animate a separate layer so tap feedback composes with expression/idle transforms.
+    const playTapFeedback = () => {
+      tapFeedbackAnimationRef.current?.cancel();
+      if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+      const layer = tapFeedbackRef.current;
+      if (!layer) return;
+      tapFeedbackAnimationRef.current = layer.animate([
+        { transform: 'translateY(0) scale(1, 1)', offset: 0 },
+        { transform: 'translateY(1%) scale(1.08, .88)', offset: .16 },
+        { transform: 'translateY(-1.5%) scale(.96, 1.07)', offset: .40 },
+        { transform: 'translateY(.4%) scale(1.03, .97)', offset: .64 },
+        { transform: 'translateY(-.2%) scale(.99, 1.02)', offset: .82 },
+        { transform: 'translateY(0) scale(1, 1)', offset: 1 },
+      ], { duration: 420, easing: 'cubic-bezier(.22,.7,.35,1)' });
+    };
     /**
      * 左键此刻是否按着（不分姿态）。
      *
@@ -1291,6 +1310,7 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
       wakeUp();
       // 窗口发生过实际拖动时，mouseup 后浏览器仍可能补发 click；该 click 不应触发台词。
       if (Date.now() < suppressClickUntilRef.current) return;
+      playTapFeedback();
       const now = Date.now();
       const previous = recentTapTimesRef.current[recentTapTimesRef.current.length - 1];
       const recent = recentTapTimesRef.current.filter(at => now - at < 5000);
@@ -1379,65 +1399,70 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
           className={`chibi-pet-stage pose-${poseName}${pressed ? ' is-pressed' : ''}`}
         >
           <div className="chibi-pet-shadow" />
-          <div
-            className="chibi-pet-sprite"
-            style={spriteFrameStyle}
-            role="button"
-            tabIndex={0}
-            onMouseDown={() => {
-              // 按下这件事先记下来，再谈它要不要打断当前姿态：逃离问的是「按了多久」，
-              // 与这一按落在格位上还是帧序列上无关（见 pressAliveRef 的说明）。
-              pressAliveRef.current = true;
-              pressStartedAtRef.current = Date.now();
-              if (wakeUp()) {
-                onModelClick?.();
-                return;
-              }
-              const spec = getMotion(poseNameRef.current);
-              // 忙碌阶段（掏出手机 / 看手机）虽然也是帧序列，但它表达的是常驻**状态**而不是
-              // 一次性的表演：按住它不该把表演掐掉，可这一按仍要算一次正常点击——忙碌中的
-              // 单击唤醒正是由 onModelClick 发起的。若把它并进下面「按住就打断帧序列」那条
-              // 路，onModelClick 永远不会被调用，忙起来的桌宠就再也叫不醒了。
-              const busyStage = isBusyStage(spec);
-              if (spec?.kind === 'animation' && !busyStage) {
-                // 气头上的生气脸不许抹掉：逃离途中桌上唯一会播的就是这张脸，抹掉它
-                // 这次「戳毛了」就只剩一次没有表情的位移了。
-                //
-                // mousedown 早于 click，连点的时候每一下都先把帧序列清回待机，再由
-                // click 从头重播——「等用户停手才开始播」的另一半原因就在这里。
-                // 气头上一共也就 2.5s，这段时间里「按住就打断」的交互让位给「它正在气头上」。
-                if (spec.name === 'angry' && tapLedgerRef.current.isAnnoyed(Date.now())) {
+          <div ref={tapFeedbackRef} className="chibi-pet-tap-feedback">
+            <div
+              className="chibi-pet-sprite"
+              style={spriteFrameStyle}
+              role="button"
+              tabIndex={0}
+              onMouseDown={() => {
+                // 按下这件事先记下来，再谈它要不要打断当前姿态：逃离问的是「按了多久」，
+                // 与这一按落在格位上还是帧序列上无关（见 pressAliveRef 的说明）。
+                pressAliveRef.current = true;
+                pressStartedAtRef.current = Date.now();
+                if (wakeUp()) {
+                  onModelClick?.();
                   return;
                 }
-                sequenceTokenRef.current += 1;
-                returnToTone();
-                return;
-              }
-              // 忙碌阶段的帧序列不由点击作废：它归 presence 管。作废了 token 却没有任何一方
-              // 接手，进场就会停在半路那一格上（循环推进器不认识 busy-in，不会来接）。
-              if (!busyStage) sequenceTokenRef.current += 1;
-              pressedRef.current = true;
-              setPressed(true);
-              onModelClick?.();
-            }}
-            onMouseUp={() => {
-              lastPressDurationRef.current = pressAliveRef.current ? Date.now() - pressStartedAtRef.current : undefined;
-              pressAliveRef.current = false;
-              pressedRef.current = false;
-              setPressed(false);
-            }}
-            onMouseLeave={() => {
-              lastPressDurationRef.current = undefined;
-              pressAliveRef.current = false;
-              pressedRef.current = false;
-              setPressed(false);
-            }}
-            onClick={handleClick}
-            onDoubleClick={(event) => event.preventDefault()}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter' || event.key === ' ') handleClick();
-            }}
-          />
+                const spec = getMotion(poseNameRef.current);
+                // 忙碌阶段（掏出手机 / 看手机）虽然也是帧序列，但它表达的是常驻**状态**而不是
+                // 一次性的表演：按住它不该把表演掐掉，可这一按仍要算一次正常点击——忙碌中的
+                // 单击唤醒正是由 onModelClick 发起的。若把它并进下面「按住就打断帧序列」那条
+                // 路，onModelClick 永远不会被调用，忙起来的桌宠就再也叫不醒了。
+                const busyStage = isBusyStage(spec);
+                if (spec?.kind === 'animation' && !busyStage) {
+                  // 气头上的生气脸不许抹掉：逃离途中桌上唯一会播的就是这张脸，抹掉它
+                  // 这次「戳毛了」就只剩一次没有表情的位移了。
+                  //
+                  // mousedown 早于 click，连点的时候每一下都先把帧序列清回待机，再由
+                  // click 从头重播——「等用户停手才开始播」的另一半原因就在这里。
+                  // 气头上一共也就 2.5s，这段时间里「按住就打断」的交互让位给「它正在气头上」。
+                  if (spec.name === 'angry' && tapLedgerRef.current.isAnnoyed(Date.now())) {
+                    return;
+                  }
+                  sequenceTokenRef.current += 1;
+                  returnToTone();
+                  return;
+                }
+                // 忙碌阶段的帧序列不由点击作废：它归 presence 管。作废了 token 却没有任何一方
+                // 接手，进场就会停在半路那一格上（循环推进器不认识 busy-in，不会来接）。
+                if (!busyStage) sequenceTokenRef.current += 1;
+                pressedRef.current = true;
+                setPressed(true);
+                onModelClick?.();
+              }}
+              onMouseUp={() => {
+                lastPressDurationRef.current = pressAliveRef.current ? Date.now() - pressStartedAtRef.current : undefined;
+                pressAliveRef.current = false;
+                pressedRef.current = false;
+                setPressed(false);
+              }}
+              onMouseLeave={() => {
+                lastPressDurationRef.current = undefined;
+                pressAliveRef.current = false;
+                pressedRef.current = false;
+                setPressed(false);
+              }}
+              onClick={handleClick}
+              onDoubleClick={(event) => event.preventDefault()}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.preventDefault();
+                  if (!event.repeat) handleClick();
+                }
+              }}
+            />
+          </div>
         </div>
       </div>
     );
