@@ -1,11 +1,10 @@
 # Vivian 代码 Wiki
 
-本文档为 Vivian 项目的代码架构百科，按模块层次组织，记录关键模块职责、核心数据结构、关键函数与跨模块数据流。配合 [README.md](README.md) 使用——README 侧重功能特性，本 Wiki 侧重代码实现。
+本文档按当前源码组织模块职责、数据结构与关键数据流。[README](README.md) 提供功能、安装和配置入门；本 Wiki 说明实现与边界。专题文档保留各次改动的测量与验证记录，不作为当前全量测试状态。
 
-> 项目根目录：`g:\vivian-rs\`
 > 后端入口：[`src-tauri/src/lib.rs`](src-tauri/src/lib.rs)
 > 前端入口：[`src/main.tsx`](src/main.tsx) + [`src/App.tsx`](src/App.tsx)
-> 工具权限矩阵：`ToolRiskTier`（风险等级，6 级）× `AgentAccessLevel`（访问级别，4 级）经 `policy_for()` 决定 `allow`/`ask`/`deny`；定级规则与当前分布见下方「沙箱 / 风险等级申报」节（工具 `risk()` trait 缺省 `Safe` 即放行，新工具须显式声明）。
+> 工具权限矩阵：`ToolRiskTier`（风险等级，6 级）× `AgentAccessLevel`（访问级别，4 级）经 `policy_for()` 决定 `allow`/`ask`/`deny`；定级规则见工具系统章节，具体等级以各工具 `risk()` 为准（工具 `risk()` trait 缺省 `Safe` 即放行，新工具须显式声明）。
 
 ---
 
@@ -24,7 +23,7 @@
 - [核心数据结构](#核心数据结构)
 - [模块详解](#模块详解)
   - [brain/ —— 大脑核心](#brain--大脑核心)
-  - [coding_agent/ —— 编程智能体](#codingagent--编程智能体)
+  - [coding_agent/ —— 编程智能体](#coding_agent--编程智能体)
   - [task_service —— 自治任务与后台回流](#task_service--自治任务与后台回流)
   - [pipeline/ —— 对话流水线](#pipeline--对话流水线)
   - [cross_character.rs —— 跨角色通信总线](#cross_characterrs--跨角色通信总线)
@@ -35,7 +34,7 @@
   - [proactive/ —— 主动对话编排](#proactive--主动对话编排)
   - [skills/ —— 技能服务](#skills--技能服务)
   - [tools/ —— 工具系统](#tools--工具系统)
-  - [自建工具系统（custom_tools）—— 能力自进化的执行侧](#自建工具系统custom_tools--能力自进化的执行侧)
+  - [自建工具系统（custom_tools）—— 能力自进化的执行侧](#自建工具系统custom_tools-能力自进化的执行侧)
   - [providers/ —— 多 Provider 路由](#providers--多-provider-路由)
   - [notebook/ —— 笔记系统](#notebook--笔记系统)
   - [network/ —— 网络基础设施与搜索后端](#network--网络基础设施与搜索后端)
@@ -63,9 +62,9 @@
 flowchart TD
     FE["前端 (React + TS + Zustand)"]
     FE_SUB["App.tsx / ChatWindow / MemoryWindow / MindInspector / ConfigWindow"]
-    CMD["commands/ (37 个 Tauri 命令模块)"]
+    CMD["commands/ (Tauri 命令层)"]
     APP["AppState (state.rs)"]
-    APP_SUB["characters: HashMap&lt;char_id, CharacterInstance&gt;<br/>session_coordinator / shared_resources / world / ..."]
+    APP_SUB["characters: HashMap&lt;char_id, CharacterInstance&gt;<br/>session_coordinator / world_provider / ctx / ..."]
     BRAIN["Brain (大脑核心)"]
     PET["PetController (桌宠控制)"]
     VOICE["Realtime Voice"]
@@ -101,28 +100,35 @@ flowchart TD
 |------|------|------|
 | `id` | `String` | 角色 ID（`"vivian"` / `"nana"`） |
 | `name` | `String` | 显示名称 |
-| `brain` | `Arc<Brain>` | 大脑核心，持有 memory/dialogue/psychology/persona/proactive 等所有子系统 |
+| `brain` | `Brain` | 大脑核心，持有 memory/dialogue/psychology/persona/proactive 等所有子系统 |
 | `pet_controller` | `Arc<PetController>` | 桌宠控制器，管理桌宠窗口与状态机 |
 | `manifest` | `Arc<ResourceManifest>` | 模型清单，表情/动作映射 |
-| `realtime_voice` | `Arc<RealtimeVoice>` | 实时语音会话 |
-| `think_lock` | `Arc<Mutex<()>>` | 思考互斥锁，串行化 think 调用 |
-| `online` | `RwLock<bool>` | 在线状态 |
+| `realtime_voice` | `Arc<RealtimeVoiceManager>` | 实时语音会话 |
+| `think_lock` | `Arc<tokio::sync::Mutex<()>>` | 思考互斥锁，串行化 think 调用 |
+| `online` | `Arc<RwLock<bool>>` | 在线状态 |
 
 ### AppState（全局状态）
 
+[`state.rs`](src-tauri/src/state.rs) 的关键共享字段如下（省略语音、快捷键、启动标志等字段）：
+
 ```rust
 pub struct AppState {
+    pub config: Arc<RwLock<ConfigManager>>,
     pub characters: Arc<RwLock<HashMap<String, CharacterInstance>>>,
-    pub active_character_id: RwLock<String>,
-    pub session_coordinator: SessionCoordinator,         // 跨角色/用户/proactive turn 协调
-    pub world: Arc<EnvironmentContext>,                  // 世界快照
-    pub shared_resources: Arc<SharedResources>,          // 跨角色共享资源
-    pub config: Arc<RwLock<Config>>,                     // 全局配置
-    pub model_router: Arc<ModelRouter>,                  // LLM 路由矩阵
-    pub tool_system: Arc<ToolSystem>,                    // 工具系统
-    // ... 更多共享资源
+    pub active_character_id: Arc<RwLock<String>>,
+    pub model_router: Arc<RwLock<Option<ModelRouter>>>,
+    pub tool_system: Arc<ToolSystem>,
+    pub browser_bridge: Arc<crate::browser_bridge::BridgeState>,
+    pub skill_service: Arc<crate::skills::SkillService>,
+    pub task_service: Arc<crate::brain::TaskService>,
+    pub session_coordinator: crate::utils::SessionCoordinator,
+    pub world_provider: Arc<WorldStateProvider>,
+    pub ctx: Arc<crate::cordis::RuntimeContext>,
+    // ...
 }
 ```
+
+世界状态与 Windows 监听跨角色共享；`CharacterInstance` 的心理、记忆和生成锁仍按角色隔离。`model_router` 先为空，初始化后安装路由器；保存配置后的完整重初始化由异步锁串行，避免同时构建多套资源。
 
 ---
 
@@ -161,6 +167,12 @@ pub struct AppState {
   - **不在屏上（被最小化 / 被 hide）→ `playPetReveal`**：与首开同一条路，先把首帧摆成桌宠大小再显形。这里没有「别跳变」的约束，但有一个必须避开的坑：若照旧先还原窗口，那次还原本身就是一次呼出，随后的收拢展开是第二次——看起来就是「呼出了两回」。`playPetReveal` 因此自己负责还原（`unminimize` 夹在「摆好首帧」与「show」之间，最小化时未最小化窗口是无操作，可无条件调用）。
 
   显形时机因此整个归子窗口：`raiseWindow` 对这类窗口带 `selfReveal`，只做置顶与聚焦，**完全不碰可见性**（连 `unminimize` 都不做，「等还原落定」那段轮询也只在非 selfReveal 时跑）；两个入口（创建 / 复用）都用 `armSelfRevealFallback` 兜底——事件丢失或子窗口脚本异常时 1.6s 后强制显示，宁可直接显形没动画，也不能让长按毫无反应（**唯一的例外是预热窗口**，见上一条：它此刻该不该出现还没定，兜底显形会变成「长按没成立窗口自己冒出来」）。预热窗口的显形也落在同一个 `pet:reveal` 上——那就是它第一次上屏的信号，此刻窗口必然不在屏上，自然走 `playPetReveal`。重复通知用 `replayBusyRef` 互斥。复用判定只有一条规则：`isVisible()` **抛异常**才算引用失效（窗口已销毁）；它返回 false 只说明窗口被 hide 过，仍按复用处理、由 `raiseWindow` show 回来。窗口还在却去重建必然 label 冲突，而 Tauri 对冲突只在 console 打一行 `tauri://error`，对外表现就是「点了毫无反应」——同理，复用分支里任何窗口动作（设 topmost / 聚焦 / 改属性）都必须单独兜异常，不能让它的失败把活着的窗口判成死的
+
+#### 轻触反馈与拖动锁
+
+[`ChibiPetCanvas.tsx`](src/components/ChibiPetCanvas.tsx) 在独立变换层播放 420ms 压缩回弹，减少动态效果时跳过；不覆盖角色姿态与帧序列。连续轻触仍按烦躁阈值触发对应表情。
+
+[`commands/window.rs`](src-tauri/src/commands/window.rs) 的拖动路径在调用同步 Win32 窗口移动前释放状态锁，避免窗口消息重入互锁。按下状态、持续姿态与动作序列分开管理；长按进度、拖动取消及轻触反馈不能互相吞掉事件。
 
 ### 心智观察器页面合并（MindInspector）
 
@@ -204,14 +216,20 @@ Memory 窗口（`MemoryWindow`，默认全屏大小）内嵌 [`MindInspector.tsx
 
 ### 3D 公寓窗口
 
-3D 公寓现在是可选的内置插件，独立于主前端包。`npm run build` 先用 [`vite.apartment.config.ts`](vite.apartment.config.ts) 将 [`apartmentPlugin.tsx`](src/components/room/apartmentPlugin.tsx) 和场景依赖打成 `plugins/3d-apartment/ui/room.js`，再构建主前端；[`check-apartment-plugin.mjs`](scripts/check-apartment-plugin.mjs) 确认主 `dist/` 没有房间模型或场景代码。插件脚本是构建产物，不随源码提交。
+3D 公寓已完整移入独立 npm workspace [`plugins/3d-apartment`](plugins/3d-apartment/README.md)。Three.js、场景、导航、碰撞与模型均由插件维护；宿主不导入场景源码，也不把房间资源放入主 `dist/`。
 
-- **安装与门禁**：[`tauri.conf.json`](src-tauri/tauri.conf.json) 把插件清单、`ui/` 和 `public/room` 资源打包到插件目录。NSIS 的 [`apartment-installer.nsh`](src-tauri/windows/apartment-installer.nsh) 提供可选安装页；运行时 [`commands/apartment.rs`](src-tauri/src/commands/apartment.rs) 检查文件是否齐备及 `base.apartment_enabled`。未安装或禁用时入口、快捷键和 `set_room_mode(true)` 都不能开启公寓；设置页可切换已安装插件的启用状态。
-- **加载路径**：[`main.tsx`](src/main.tsx) 的 `?view=room` 分支先查询 `apartment_plugin_status`。开发模式从 Vite 载入房间源码；发布版经 Tauri asset 协议加载 `ui/room.js`，由 `window.VivianApartment.mount(container, asset_root)` 挂载。模型 URL 经 [`apartmentAssets.ts`](src/components/room/apartmentAssets.ts) 指向插件资源目录，主应用不再携带房间场景 chunk。
-- **窗口与渲染**：[`roomWindow.ts`](src/utils/roomWindow.ts) 复用已有窗口并在打开前检查插件状态；房间模式由 Rust 统一处理桌宠窗口的显隐和 WebView 暂停。场景保留观察者模式与 Enter 切换的第一人称模式，使用不透明 WebGL 窗口、像素倍率限制和按需阴影更新。静态 loading 层覆盖装配与首帧着色器编译阶段，真正出画面后再撤除。
-- **场景组织**：[`RoomScene.tsx`](src/components/room/RoomScene.tsx) 组合公寓、街区、导航和环境；`anime/` 下的广场、樱花镇、车站、河岸、交通、绿化等模块与 `public/room/models/` 的车辆和树木模型由插件加载。天气和时段来自真实世界快照。修改几何、碰撞或路径时，应同时核对观察者导航、第一人称碰撞与跨场景可达性。
+| 环节 | 实现与约定 |
+| --- | --- |
+| 主程序构建 | 根 `npm run build` 只构建主前端，并通过 [`check-apartment-plugin.mjs`](scripts/check-apartment-plugin.mjs) 的 `--core` 检查外置边界。 |
+| 插件构建 | `npm run build:apartment` 执行插件类型检查与独立 Vite 构建，再由 [`package-apartment.mjs`](scripts/package-apartment.mjs) 打包清单、`ui/` 和 `room/` 模型为 ZIP。 |
+| 配套发行 | [`package-small.mjs`](scripts/package-small.mjs) 先构建插件，再构建基础 NSIS 安装程序，将 setup、插件 ZIP 和校验信息输出到 `release/`。 |
+| 安装 | [`apartment-installer.nsh`](src-tauri/windows/apartment-installer.nsh) 从 setup 同目录读取 ZIP；没有 ZIP 时不能勾选。校验 SHA256、清单和路径后在临时目录装配、替换，失败恢复旧插件。静默安装默认基础程序，`/APARTMENT` 可选安装，`/NOAPARTMENT` 优先。 |
+| 运行门禁 | [`commands/apartment.rs`](src-tauri/src/commands/apartment.rs) 检查安装状态与 `base.apartment_enabled`；设置 → 通用控制已安装插件的启用状态，未安装或禁用时入口与快捷键不可开启房间。 |
+| 宿主接口 | [`commands/apartment_host.rs`](src-tauri/src/commands/apartment_host.rs) 提供通用世界快照；插件 [`hostContract.ts`](plugins/3d-apartment/src/hostContract.ts) 声明消费字段。宿主还负责窗口、桌宠隐藏/恢复与 Windows ESC 看护。 |
+| 动态加载 | [`main.tsx`](src/main.tsx) 的 `?view=room` 与 [`apartmentLoader.ts`](src/utils/apartmentLoader.ts) 按安装状态加载插件；发布版挂载独立 `ui/room.js`，模型由插件 [`apartmentAssets.ts`](plugins/3d-apartment/src/apartmentAssets.ts) 定位。 |
+| 开发预览 | 根 `npm run dev` 后访问 `/plugins/3d-apartment/preview.html`；场景入口为插件 [`RoomScene.tsx`](plugins/3d-apartment/src/RoomScene.tsx)。 |
 
-有关安装资源和构建产物的最小验收是 `npm run build`；发布安装仍需实际运行对应安装包检查插件勾选、禁用与重新启用流程。
+房间保留观察者与第一人称模式，天气和时段来自真实世界快照。修改场景后单独检查插件类型、构建、导航与碰撞；主前端构建通过并不代表插件或安装流程已通过。安装包仍需实际检查可选安装、禁用、重新启用和卸载。
 
 ### ConnectionsPanel.tsx —— 外部连接页
 
@@ -339,7 +357,7 @@ pub struct MemoryItem {
 | 文件 | 职责 |
 |------|------|
 | [`chat_chain.rs`](src-tauri/src/brain/chat_chain.rs) | LangChain 风格 Runnable 链，拆分为 `prepare_pipeline_state` / `execute_pipeline_and_build_response` / `ainvoke` 三步 |
-| [`async_reflection.rs`](src-tauri/src/brain/async_reflection.rs) | 异步反思，每 5 轮或 30 分钟触发，合并意识更新与活动抽取 |
+| [`async_reflection.rs`](src-tauri/src/brain/async_reflection.rs) | 按角色预留后台注意力反思许可；每角色最多一个在途请求，在复制历史与创建任务之前限流，失败与取消释放许可但仍消耗冷却额度 |
 | [`augment_reply_service.rs`](src-tauri/src/brain/augment_reply_service.rs) | 主对话后异步补充回复服务，slow 检索召回 fast 路径遗漏的重要记忆 |
 | [`focus_mode.rs`](src-tauri/src/brain/focus_mode.rs) | 凝神/专注模式状态机，漏桶累积器 + 迟滞设计 |
 | [`rate_limiter.rs`](src-tauri/src/brain/rate_limiter.rs) | Token bucket 限流器 |
@@ -347,9 +365,15 @@ pub struct MemoryItem {
 | [`tool_leak_filter.rs`](src-tauri/src/brain/tool_leak_filter.rs) | 流式过滤 `<tool_call>` 等泄露标记 |
 | [`topic_signal.rs`](src-tauri/src/brain/topic_signal.rs) | 话题信号检测，驱动话题切换 |
 | [`subagent_context.rs`](src-tauri/src/brain/subagent_context.rs) | 子代理上下文，支持 LLM 调用其他角色 |
-| [`coding_agent.rs`](src-tauri/src/brain/coding_agent.rs) | 编程智能体服务（会话式 agent loop，详情见[编程智能体](#codingagent--编程智能体)） |
+| [`coding_agent.rs`](src-tauri/src/brain/coding_agent.rs) | 编程智能体服务（会话式 agent loop，详情见[编程智能体](#coding_agent--编程智能体)） |
 | [`task_service.rs`](src-tauri/src/brain/task_service.rs) | 自治任务执行（ctx.tasks 能力缝）：LLM 逐步决策执行工具直到完成/达最大步数；`TaskEvent` 广播到事件总线，报告回流陪伴对话（详情见[task_service —— 自治任务与后台回流](#task_service--自治任务与后台回流)） |
 | [`budget.rs`](src-tauri/src/brain/budget.rs) | 轮次产出预算与收益递减检测（`OutputBudgetTracker`）：每轮按 LLM 输出 token（无 usage 场景用工具结果摘要字符 `record_chars` 近似）+ 实质进展标志记录，连续 3 轮低产出（token<500 / 字符<120）且无进展 → `StopDiminishing` 提前停机提示，防 agent 循环空转烧配额；与 `DoomLoopTracker`（同签名重复）互补 |
+
+#### 后台反思预算
+
+[`async_reflection.rs`](src-tauri/src/brain/async_reflection.rs) 在五轮或三十分钟等节流条件之外，先取得按角色的 `ReflectionPermit`，再复制文本并创建任务。最近四条普通对话为输入来源，排除工具结果、图片与 reasoning；用户输入最多 1200 字符，上一条回复最多 600，输出预算 256 token，用量归属 `attention_reflection`。同一角色只有一个在途请求，失败、超时、取消通过 RAII 释放许可并保留冷却，避免重复启动。
+
+[`steps/reflection.rs`](src-tauri/src/pipeline/steps/reflection.rs) 的表情、心理与成长分析另用 `reflection_compact.md` 精简协议和角色 profile，不发送主对话完整 system prompt。结构化输出预算 1536 token，支持时关闭额外推理；长输入保留首尾并标注中段省略，主回复正文不受裁剪影响。该请求沿用 `reflection` 路由，与注意力反思分别记账。
 
 ### coding_agent/ —— 编程智能体
 
@@ -444,6 +468,12 @@ pub struct MemoryItem {
 - **会话摘要入库记忆**（`summarize_turn_to_memory`）：run_loop 结束后异步执行——从最后一条用户消息起切片本轮消息，经 `router.generate`（memory 路由，`TURN_SUMMARY_SYSTEM_PROMPT` 压缩为 2-4 句中文摘要；LLM 失败退化为 `rule_turn_digest` 规则摘要兜底），写入会话所属角色的 `MemoryManager`（ShortTerm，importance 0.4，tags `coding_session`/`work`，metadata 含 `source=session_id`/`working_directory`/`speaker`/`listener`）。内容前缀 `[编程会话]`，与主对话记忆体系打通，角色可在后续对话中回忆自己做过的编程工作
 - **项目记忆（工作区级 memory.md）**：跨会话沉淀的项目约定与教训，存储在**工作区内** `.vivian/memory.md`（项目级随项目走；`build_llm_messages` 每轮重读注入 system prompt「# 项目记忆（跨会话沉淀）」，超 8000 字符截断保尾部，文件未变时字节一致不影响缓存）。产出链路：`/compact` 归档时自动蒸馏（`distill_project_memory`，尽力而为）、`/memory 提炼` 手动蒸馏、`/memory <内容>` 手动追加；超过 `PROJECT_MEMORY_MERGE_LINES`(100) 行时蒸馏自动转为全文重写合并去重（`rewrite_project_memory`，LLM 返回空视为失败保留原文件）。`/memory` 无参查看（附路径）、`/memory 清除` 清空。旧版 appdata 存储（`coding_memory/<工作目录编码>/project_memory.md`）在 `read_project_memory_raw` 首次读取时一次性迁移到工作区（工作区已有文件优先，旧文件保留作备份）
 
+#### 工作侧流式恢复
+
+当前轮遇到网络、超时、服务故障、过载或限流错误，最多尝试三次，重试间隔 1 / 2 秒；流未经 Done 就关闭也视为传输中断。鉴权、余额不足和参数错误等永久错误不重试。仅完整响应进入工具执行，不执行半截参数，不重放先前轮次已完成操作。
+
+重试保留本轮请求与已有工具结果，`coding:stream_reset` 让前端清理中断尝试的文本与思考片段。模型名构造时裁剪首尾空白。具体错误分类与验证见 [工作任务流式恢复](docs/ppt-task-recovery-2026-10-01.md)。
+
 #### 斜杠命令（Slash Commands）
 
 输入 `/` 在前端弹出命令菜单（`SlashCommandMenu`，按命令名/标签字母模糊筛选，↑↓ + Enter 选择、Esc 关闭；选中命令插入输入框并保持聚焦，命令名后输入空格自动收起菜单便于补参数）。后端 `send_message` 检测消息以 `/` 开头时**不走 agent loop**，改由 `handle_slash_command` 拦截分发（同步命令即时处理，`/compact` 异步走 LLM），结果以 assistant/error 消息写入会话并复用 `coding:assistant_message` / `coding:error` / `coding:turn_done` 广播，前端消息流直接展示，不消耗 agent loop 轮次。
@@ -474,6 +504,7 @@ pub struct MemoryItem {
 | `coding:thinking` | `{session_id, thinking: true}`（生成期占位提示） |
 | `coding:chunk` | `{session_id, content}`（流式文本增量） |
 | `coding:thinking_chunk` | `{session_id, content}`（推理链增量） |
+| `coding:stream_reset` | `{session_id, ...}`（清理当前中断尝试的文本与思考，重试不重复执行已完成工具） |
 | `coding:turn_done` | `{session_id}`（恢复 Idle + 持久化，前端权威同步） |
 | `coding:error` | `{session_id, message}` |
 | `work_todo:changed` | `{session_id, items}`（待办清单变更，右栏面板实时刷新） |
@@ -834,7 +865,7 @@ Markdown 文件另有**源码 / 渲染两态**（顶栏切换）：渲染态交�
 
 #### 结果裁剪
 
-陪伴链路的工具反馈历史（`tool_call_manager.rs::build_feedback_prompt`）与编程侧统一使用 `tools/executor.rs::prune_head_tail`（头 2/3 + 尾 1/6 + 中段折叠标记），超长工具结果的尾部（退出码/报错/diff 收尾）不再丢失。
+陪伴链路通过私有执行器回传宿主事实回执；工作与自治任务保留自身循环并复用底层执行器。普通长文本可用 `prune_head_tail` 预览，执行回执须保留所有 ID、状态与错误，正文不足时通过分页或 spill 续读，不能把预览当作完整证据。
 
 ### pipeline/ —— 对话流水线
 
@@ -843,8 +874,9 @@ Markdown 文件另有**源码 / 渲染两态**（顶栏切换）：渲染态交�
 #### 流水线步骤
 
 ```
-PreProcessing → UserMemorySaving → [QueryRewrite ∥ FastSemantic] → MemoryRetrieval → WebContext
-    → PromptBuilding → Generation → ResponseParsing → Validation → ExpressionMotion
+PreProcessing → UserMemorySaving
+    → [Prompt 稳定快照准备 ∥ ([QueryRewrite ∥ FastSemantic] → MemoryRetrieval → WebContext)]
+    → Prompt 最终选择与组装 → Generation → ResponseParsing → Validation → ExpressionMotion
     → PsychologyInsight → MoodUpdate → MemorySaving
 ```
 
@@ -853,14 +885,15 @@ PreProcessing → UserMemorySaving → [QueryRewrite ∥ FastSemantic] → Memor
 | 文件 | 职责 |
 |------|------|
 | [`base.rs`](src-tauri/src/pipeline/base.rs) | `Runnable` trait 与组合子（`\|` / `RunnableBranch` / `RunnableRetry` / `RunnableWithFallbacks`） |
-| [`state.rs`](src-tauri/src/pipeline/state.rs) | `PipelineState` 73 字段贯穿全链 |
+| [`state.rs`](src-tauri/src/pipeline/state.rs) | `PipelineState` 贯穿全链，携带共享查询嵌入、分类信号、回复前心情及阶段元数据 |
 | [`advisor.rs`](src-tauri/src/pipeline/advisor.rs) | Advisor 拦截器链（日志/限流/Re2/循环检测） |
-| [`prompt_modules.rs`](src-tauri/src/pipeline/prompt_modules.rs) | Prompt 模块构建器；resolve_prompt_budget 按路由模型上下文窗口、用户等级（0–4）与任务类型计算软预算（`window/2 × 等级% × 任务%`，硬上限 `window×3/5`，绝对上限 262144），随后按 rank 裁剪——**预算必须显著高于静态区**，否则动态区每轮被裁空，详见下方「静态区体积与提示词预算」；其余构建函数含 `build_memory_block`（记忆块 + 英文忠实度/时间感知指引）、`build_memory_group_section`（记忆合并组：Episode+关系日志+记忆本体）、`build_user_profile_group_section`（画像合并组）、`build_tools_block`、`build_agent_status_bar`（Agent 状态栏）、`build_tool_minimal_identity`（工具精简人设 + PERSONA_LOAD + 语言约束）、`tool_minimal_output_format`（工具输出格式 + 按界面语言的语言约束）等；framework 规则加载函数（`safety_rules`/`output_format`/`session_rules` 等）统一加载英文标记化模板、无 lang 参数 |
+| [`prompt_modules.rs`](src-tauri/src/pipeline/prompt_modules.rs) | Prompt 模块构建、渠道风格与软预算；按模型窗口、用户等级和任务类型计算预算，并按优先级裁剪动态段落 |
 | [`template_engine.rs`](src-tauri/src/pipeline/template_engine.rs) | Prompt 模板引擎，`section_schema()` 定义 32 个 section 的结构元数据（9 静态 + 23 动态），`build_prompt_with_sections()` 产出 prompt + 逐 section 元数据（char_count / token_estimate / present） |
-| [`context_compress.rs`](src-tauri/src/pipeline/context_compress.rs) | 多级上下文压缩（Soft Trim → 原子组丢弃 → Reminder）+ 上下文感知压缩（LLM 摘要工具结果） |
+| [`context_compress.rs`](src-tauri/src/pipeline/context_compress.rs) | 上下文压缩与工具结果摘要；识别宿主执行回执 JSON，保留全部调用 ID、状态、错误和停止原因，仅裁剪证据并标明 `evidence_truncated` |
 | [`compaction_reminder.rs`](src-tauri/src/pipeline/compaction_reminder.rs) | 压缩后提醒，从丢弃消息提取活跃工具名与最后话题 |
 | [`doom_loop.rs`](src-tauri/src/pipeline/doom_loop.rs) | 按工具名、参数和实际结果检测连续重复序列；新观察结果可打断误判，历史有界 |
-| [`react.rs`](src-tauri/src/pipeline/react.rs) | 原生 FC 共享 ReAct 循环骨架；承载压缩、doom loop、goal_completed、轮次上限和 `DialoguePhase`。陪伴侧复杂请求可通过无副作用的 `continue_thinking` 在完整人格上下文中继续分析/核验/规划/反思，最多 4 轮后强制收尾；普通闲聊不续轮 |
+| [`react.rs`](src-tauri/src/pipeline/react.rs) | 主智能体续轮、私有执行器交接、实际回执回流、重复调用检测和收尾；纯 `continue_thinking` 保留完整人格，最多 4 轮 |
+| [`tool_execution.rs`](src-tauri/src/pipeline/tool_execution.rs) | 陪伴侧独立工具执行上下文，支持原生和文本调用；中性模型草稿不进入角色回复，宿主构造事实回执 |
 | [`inline_tag_scanner.rs`](src-tauri/src/pipeline/inline_tag_scanner.rs) | 内联标签扫描器，流式剥离 `<e>/<m>` 标签驱动桌宠表情/动作 |
 
 **内联标签字母表（只认这两个）**：`<e name="…" dur="ms"/>` 表情、`<m name="…"/>` 动作。
@@ -869,46 +902,19 @@ PreProcessing → UserMemorySaving → [QueryRewrite ∥ FastSemantic] → Memor
 `test_unknown_tag_letter_kept_as_text`）。加新标签必须同时改前瞻判定、`parse_tag` 的
 match 臂和 `commands/chat.rs` 里的 `chat:inline_meta` 映射，三处漏一处就静默失效。
 
-#### 静态区体积与提示词预算（2026-09-15 重定）
+#### 提示词预算、并行准备与语义选择
 
-提示词是**总量预算**：静态区（人设 + 框架 + 示例）先占，剩下的才是动态区
-（情绪 / 记忆 / 当下事件）额度。而静态区**不参与** `trim_sections_to_budget`，
-所以它一旦顶满预算，被裁掉的全是动态区。
+Prompt 使用总量软预算：`resolve_prompt_budget` 根据模型窗口、用户等级和任务类型计算，基数为 `window / 2`，上限为 `window × 3 / 5`，绝对上限 262144 token。静态人设与框架先占用预算，动态部分按优先级裁剪；增加预算可能使更多上下文实际进入请求，不能将上限增加描述为零成本。记忆组另有 `MEMORY_CONTEXT_MAX_TOKENS` 限制。
 
-以下数值是 2026-09-15 对 Vivian **Full 出厂档**的历史量测，用于解释预算问题，不代表当前所有关系阶段或用户自定义人设的实际 token 用量：
+当前不再以固定出厂 Full 档的历史量测代替每轮成本。熟悉关系会使用 Compact 档及精简出厂示例，有证据的成长替换对应场景脚本，用户手写人格与示例保留。实际段落与开销应查看 section 元数据和按任务用量。
 
-| 静态组件 | tokens |
-|---|---|
-| `[CHARACTER]` Full 档（identity / personality / background / interests / appearance / speech / canon_quotes / relationships） | 10,550 |
-| `[EXAMPLES]` Few-shot | 2,468 |
-| `【PERSONA_CONFIG】` + `【PERSONA_RULES】` | 1,659 |
-| `[FRAMEWORK]`（human_feel / safety / chat_style / session / address / rhythm / prefix） | 1,454 |
-| `[FORMAT SPEC]` | 670 |
-| `[PERSONA_PROTOCOL]` §1–§5 | 381 |
-| `[STYLE]` 预设 | 91 |
-| **合计** | **≈ 17,270** |
+**准备与最终选择分离**：[`PreparedPromptPipeline`](src-tauri/src/pipeline/steps/prompt.rs) 用 `spawn_blocking` 预取人格、关系、示例、语气、记忆笔记、用户事实及技能等稳定快照，与查询重写、快速分类和检索上下文链并行；检索与搜索完成后才最终组装 Prompt。准备失败可在最终阶段重建，`metadata.timings` 分别记录 `prompt_preparation` 和 `prompt_building`。
 
-当前关系熟悉后会走 Compact 档，并将出厂 few-shot 缩为前四个核心示例；有来源的成长只替换相应场景的出厂脚本，用户手写示例保持完整。实际成本应以设置 → AI 的近七天用量面板按任务查看：`current_thought`、`inner_monologue`、`proactive_channel`、`reflection` 等分开记账；旧用量文件只有总量，任务拆分从新版开始累积。
+**语义路由**：本轮共享一次查询嵌入，供意图、话题、记忆需求、关系需求、工具选择与语气示例复用。可选段落由分类结果筛选，记录于 `metadata.semantic_prompt_selection`；用户原输入仍按原文保存。无分类结果时使用保守回退，不能凭空补记忆。关系需求为 none 时可省略可选关系日志，核心身份与关系背景仍保留。
 
-**旧算法的问题**：`base = window / 8`（128K 窗口 → 16,384）再乘 level0 的 85% = **13,926**，
-比静态区本身还小 3,300 —— 于是每轮都把 rank≥1 的段落丢光，只剩 rank=0 骨架。
-这正是「陪伴侧活人感不足」的直接机制（`trim_sections_to_budget` 末尾那段
-"静态区过大…回复会退回通用寒暄" 的告警就是为此写的）。
+**内容优先级**：本轮请求与真实证据决定回答目标；心情、关系和场景只调节表达。负面情绪或明确任务不应被泛化日常叙事抢占。世界书与文化材料是参考，不能作为角色亲历；来自网络或工具的文本不构成新指令或授权。
 
-**新算法**：`base = window / 2`，硬上限 `window × 3 / 5`，绝对上限
-`MAX_PROMPT_BUDGET_TOKENS = 262_144`。128K 窗口 chat 场景为 55,705（level0）～78,643（level4）。
-**预算是上限不是目标**——调大不会让 prompt 变长，只是不再丢段落，因此在 token 成本上免费。
-
-**记忆上下文上限**：`MEMORY_CONTEXT_MAX_TOKENS` 1250 → 3000。它同样是**从前往后硬切**
-（`steps/memory.rs` 的截断循环），被切掉的记忆当轮完全不可见。上游召回已先截到 9 条，
-9 条约 900–1500 tokens，旧值会稳定切掉尾部若干条。
-
-**回归测试**：`test_dynamic_prompt_budget_uses_window_level_and_task` 断言
-`resolve_prompt_budget(baseline) == 65_536`（window/2 × level2 × chat）与 `> 25_000`
-（必须显著高于静态区）。改 `base` 除数时这两条会一起失败——这是故意的，别只改数字了事。
-
-**量测方式**：自建一个量测脚本（引 tiktoken cl100k，与运行时 `estimate_tokens`
-同一编码器；属本地调试工具，不入库）。改人设文件后重跑即可看体积变化。
+共享陪伴、内心独白与认知证据规则也用于主动路径，减少直接对话与后台生成的口吻分裂。相关实现、取舍与验证见 [语义路由](docs/semantic-prompt-routing-2026-09-30.md)、[提示词协调](docs/prompt-coordination-2026-10-01.md) 与 [人设写作](docs/persona-writing-2026-10-01.md)。
 
 #### `is_first_meeting` 判据（2026-09-15 修正）
 
@@ -958,13 +964,13 @@ pub async fn compress_conversation_context_aware(
 |------|------|------|
 | `pre_processing.rs` | PreProcessing | 输入预处理、speaker prefix 解析、channel 路由 |
 | `query_rewrite.rs` | QueryRewrite | LLM 查询重写，含 `should_skip_retrieval` 启发式（跳过"嗯/你好/好的"等闲聊） |
-| `fast_semantic_step.rs` | FastSemantic | 嵌入语义分类 + 同步计算认知知识需求评估（EpistemicAssessment）与日程通知信号评估（ScheduleAssessment），与 QueryRewrite 并行执行 |
+| `fast_semantic_step.rs` | FastSemantic | 在阻塞线程执行嵌入分类，复用本轮查询向量；保留认知知识需求与日程通知评估，与 QueryRewrite 并行 |
 | `memory.rs` | MemoryRetrieval | 混合检索 + 置信度标记 + Verifier 二分类过滤 + 多跳关联检索（注入 user_model 时展开关联话题二次召回）。同文件内 `UserMemorySavingRunnable` / `MemorySavingRunnable` 提供 `skip_memory_save` 元数据门控——启动问候等内部指令设置后跳过用户消息/AI 回复的记忆写回，避免合成的问候指令被当作真实用户消息污染记忆库 |
 | `web_context.rs` | WebContext | 基于 KnowledgeDecision 驱动主动搜索，结果注入 prompt |
-| `prompt.rs` | PromptBuilding | U 型注意力布局组装 prompt（含认知信号 + 日程信号 + 主动搜索结果） |
+| `prompt.rs` | PromptBuilding | `PreparedPromptPipeline` 并行准备上下文，最终按语义信号选择可选段落并组装；记录 `mood_before_reply` |
 | `generation.rs` | Generation | 首轮响应生成（`call_llm_native_fc` / `call_llm_native_fc_stream`），拿到首轮文本与工具调用后委托 `pipeline/react.rs` 的共享循环继续多轮；`push_stream_chunk` 统一 emitter 推送 |
 | `validation.rs` | Validation | 空文本检测 + 长度截断 + 幻觉检测（注入对话历史防误报） |
-| `reflection.rs` | ReflectionRunnable | 反思调用，产出表情/动作/control_actions + 心理状态 + world_update + goal_updates + evolution（自我进化）+ **memory_note**（长期记忆笔记沉淀：复用主对话 system_prompt = 同模型亲笔口吻 + 笔记当前全文在场天然去重；只收相处约定/承诺/教训/梗四类，事实偏好走 long_term_memory；`apply_memory_note` 经 `append_memory_md` 落盘，写侧字符预算溢出自动驱逐最旧日期分节；主路径与内联模式两条路径都应用，失败仅记日志） |
+| `reflection.rs` | ReflectionRunnable | 独立精简 system 协议，使用回复前心情、近期对话、角色视角、已知目标、成长候选和可用动作；生成表情、心理更新、成长与 `memory_note`，不复制主对话工具协议 |
 | `mood.rs` | MoodUpdate | 心理状态更新 |
 
 #### direct 渠道纯文本约定（气泡不露 markdown）
@@ -979,15 +985,24 @@ pub async fn compress_conversation_context_aware(
 
 #### ReAct 工具调用循环（react.rs）
 
-原生 Function Calling 的多轮 ReAct 循环由 `pipeline/react.rs` 承载——压缩、`DoomLoopTracker`、goal_completed、round-limit 等逻辑只在骨架里存在一份：
+主智能体保留人设、记忆和对话，首轮决定工具及参数。陪伴渠道 `direct`、`proactive`、`wechat`、`cross_character` 的外部调用交给 [`tool_execution.rs`](src-tauri/src/pipeline/tool_execution.rs)，其消息列表与主对话隔离；原生 function calling 与文本 JSON 调用共享边界。
 
-- **统一入口** `run_react_loop(router, tool_call_manager, emitter, ReactParams) -> (String, Vec<ToolCallResult>, usize, Option<f64>)`；`ReactLoop::react_round(...) -> RoundOutcome` 处理单轮（无工具调用→阶段迁移 / 工具执行并追加 / goal_completed→`wrap_up` / doom loop→`wrap_up` / 延迟工具注入 / 首轮进入执行态）
-- **两个入口只差"首轮怎么拿响应"**：`generation.rs` 的两个函数各自只负责首轮（`generate_with_tools` 或流式首包解析 + 重试/回退），把 `first_content` / `first_calls` 连同 `messages` / `tools` / `task_type` / `channel` / `max_rounds` 塞进 `ReactParams` 委托给 `run_react_loop`
-- **执行态 / 表达态一等概念** `DialoguePhase { Persona, Execution }`：真正调用外部工具时切换执行态；纯 `continue_thinking` checkpoint 保持完整人格，确保推演后的最终文本仍以角色口吻输出。内部推演最多 4 轮，达到上限恢复人格并强制收尾；不暴露完整思维链。
-- **工具语义自声明** `ToolSemantics { Retrieval, Action }`：`Tool` trait 默认方法 `semantics()` 由 `is_read_only()` 推导（读→Retrieval 需 relay 转述，写→Action 直接确认），个别工具可覆盖（如 `observe_user` 显式 `Retrieval`）
-- **统一 emitter 推送** `push_stream_chunk`（`generation.rs`）：抽 `catch_unwind` 防护的 chunk 推送，供各调用点复用（`proactive/` 也复用）
-- **统一轮次来源** `config.tools.max_rounds`（默认 20，`0`=无限外部工具轮次）；`continue_thinking` 另有 4 轮内部推演上限，避免无界自我反思。
-- **行为保证**：doom loop 检测覆盖流式与非流式两条路径；relay 文案与 round-limit 统一为渠道感知；`goal_completed` 在每轮均检查；首轮压缩逻辑对齐；抽取文本加防御
+```text
+主智能体选择工具 → 私有执行器 → 实际 ToolCallResult
+    → 宿主 execution_evidence 回执 → 主智能体继续判断或以角色口吻回复
+```
+
+- 前台查询、获取活动窗口、截图和画面识别直接执行并等待回执，不为原子操作额外调用执行模型。
+- 其他多步任务可请求中性执行模型；只提供原始任务、已解析参数和实际结果，不提供角色、记忆与聊天历史。自然语言草稿被丢弃。
+- `without_framework_instructions()` 经 provider task-local 作用域禁止本次请求自动注入陪伴框架，不改变共享 provider 或并发角色。执行调用归属 `tool_execution` 用量。
+- 宿主从实际结果构造工具名、原始调用 ID、状态、成功标志、时间、证据与错误；停止调用、无下一步和登记成功都不等于用户目标完成。
+- `ask_user`、角色间交谈等交互由主智能体决定，执行器不能自行发起。纯 `continue_thinking` 留在完整人格上下文内，最多 4 轮，不对用户输出内部思维链。
+- 权限、工具禁用、动态工具加载、依赖、doom loop 和轮次预算仍生效；未获得权限时执行器收尾，不能从结果文本获得新授权。
+- 主智能体最终表达失败时，不重放已执行工具，避免重复副作用。前端收到主智能体文本，不收到执行器草稿。
+
+配置 `tools.max_rounds` 默认 20，`0` 表示不设外部工具轮数上限；内部思考与停滞检测仍有边界。工作渠道保持自身循环并共用底层 `execute_tool_use`，不能把陪伴隔离等同于重写所有工作智能体。
+
+工具循环由 `react.rs` 协调，`generation.rs` 负责首轮及流式推送；`ToolSemantics` 区分查询和动作，不能取代实际执行成功与目标完成证据。验证边界见 [工具隔离说明](docs/tool-execution-isolation-2026-10-01.md)。
 
 #### WebContext —— 认知知识需求驱动的主动搜索
 
@@ -1417,13 +1432,21 @@ Persona → Needs → Appraisal → Emotion → BehaviorDrive → 行为决策 +
 | [`appraisal.rs`](src-tauri/src/psychology/appraisal.rs) | 6 项评价 |
 | [`emotion.rs`](src-tauri/src/psychology/emotion.rs) | 7 类唯一情绪枚举 |
 | [`behavior_drive.rs`](src-tauri/src/psychology/behavior_drive.rs) | 8 项行为驱动 |
-| [`mood.rs`](src-tauri/src/psychology/mood.rs) | 心情计算（实时，仅 UI） |
+| [`mood.rs`](src-tauri/src/psychology/mood.rs) | 心情快照计算，供 UI、桌宠表现、主回复表达与事后情绪反馈使用 |
 | [`relationship.rs`](src-tauri/src/psychology/relationship.rs) | 关系系统（阶段状态机 + 5 种事件 + 里程碑） |
 | [`social_state.rs`](src-tauri/src/psychology/social_state.rs) | A↔B 双向关系数值 |
 | [`relationship_facts.rs`](src-tauri/src/psychology/relationship_facts.rs) | 关系认知事实（"A 眼中的 B"陈述性认知） |
 | [`relationship_log.rs`](src-tauri/src/psychology/relationship_log.rs) | 关系演化日志 |
 | [`pet_state.rs`](src-tauri/src/psychology/pet_state.rs) | 桌宠状态枚举 |
 | [`mood_cue.rs`](src-tauri/src/psychology/mood_cue.rs) | 心情提示（MoodSnapshot → 桌宠表情 Cue 纯规则快速通道），规则集按「真实心理表现的可观测优先级」五层分层：① 生理底线（睡着 / 极度疲惫 / 身心俱疲 / 压力临界/高压力）；② 高强度主导情绪（intensity>0.55 的 7 类情绪各自强/弱两档，压过中度疲劳）；③ 中度疲劳（昏昏欲睡）；④ 效价-唤醒空间（valence×arousal 平面细分兴奋 / 期待 / 安心 / 温馨 / 焦虑 / 嘟嘴 / 低落 / 委靡 / 好奇）；⑤ 关系背景（高亲密度暖意 / 低亲密度疏离）→ 平静待机兜底。**输出只有一个 `accent`（限时点缀），没有持续基调**：`tone` 字段与 `map_by_emotion` 快捷映射已于 2026-09-22 撤除（前者会让角色十几分钟钉在同一张脸上、还会因姿态非 `idle` 冻住自主漫步；后者早已无调用方） |
+
+#### 回复前心情与事后更新
+
+Prompt 构建调用 `PsychologyManager::compute_mood()` 并保存 `metadata.mood_before_reply`。当前心情调节语气、表达与精力，不覆盖任务目标，也不要求向用户报告数值。
+
+现有反思读取回复前快照与本轮对话，输出七维 `emotion_update` 的净变化；直接互动增量已先进入 appraisal，反思不重复计算。经敏感度与幅度限制后更新心理系统，影响下一轮 Prompt、UI 与桌宠表情。全零明确表示无变化，不触发额外回退和联动；`ai_emotion` 仅是回复表层标签，不能代替真实心理增量。
+
+该路径复用原反思调用，不为心情增加模型或嵌入请求。实现与验证见 [心情回复闭环](docs/mood-reply-integration-2026-09-30.md)。
 
 ### proactive/ —— 主动对话编排
 
@@ -1450,6 +1473,8 @@ Persona → Needs → Appraisal → Emotion → BehaviorDrive → 行为决策 +
 | [`capability_planner.rs`](src-tauri/src/proactive/capability_planner.rs) | 能力规划 |
 | `services/` | 生活服务（HealthReminder / Recommender / StressMonitor） |
 | `topics/` | 话题池（DailyTopicPool / TopicTree / Recall，其中 `recall.rs` 的 `build_messages` 接收 `idle_seconds` 参数，提示词开头注入"距上次对话已过: X分钟"） |
+
+角色可以结合当前请求提出具体协助；用户简短同意后，工具路由可有限回看最近用户/角色消息定位先前提案，不改写用户原输入，也不由此自动授权执行。`run_command` 等仍经过确认，AllowOnce 只放行当前动作，AllowAlways 按本次运行生效，拒绝优先；后台不得据此开启新的未授权任务。见 [陪伴主动协助](docs/companion-initiative-2026-10-01.md)。
 
 #### Path B 续聊（`commands/proactive.rs::deliver_cross_character_messages`）
 
@@ -1564,7 +1589,7 @@ keywords: 同义词, 触发短语 相关词
 
 ### tools/ —— 工具系统
 
-[`tools/`](src-tauri/src/tools) 提供 80+ 内置工具 + 3 个元工具（`tool_search` 延迟加载元工具 + `create_tool` 工具创建元工具 + `create_plugin` 插件创建元工具），并支持运行时自建工具（`custom_tools`）。
+[`tools/`](src-tauri/src/tools) 提供内置工具及元工具（`tool_search` 延迟加载元工具 + `create_tool` 工具创建元工具 + `create_plugin` 插件创建元工具），并支持运行时自建工具（`custom_tools`）。
 
 #### 核心文件
 
@@ -1574,7 +1599,7 @@ keywords: 同义词, 触发短语 相关词
 | [`executor.rs`](src-tauri/src/tools/executor.rs) | 7 步执行管线（查找→沙箱检查→输入验证→缓存→权限→执行→缓存写入）；含**能力进化事件强制门**——`create_tool` 不受宿主 `can_use_tool` 自动放行回调影响，必须经用户预览卡片确认；步骤 1.06 **调用方硬门**——`WORK_AGENT_ONLY_TOOLS` 且 `agent_kind != "work"`（陪伴侧）直接拒绝，错误码 `WorkAgentOnly`；入口对用户禁用工具早退拒绝 |
 | [`custom_tools.rs`](src-tauri/src/tools/custom_tools.rs) | 自建工具系统（智能体运行时构建的可执行能力）：`CustomToolDef` 持久化定义 + `DynamicTool` 适配器 + 目录装载/热重载 + 创建入口 |
 | [`sandbox.rs`](src-tauri/src/tools/sandbox.rs) | 路径穿越校验 + 危险命令检测 |
-| [`permission.rs`](src-tauri/src/tools/permission.rs) | 权限判定链（`check_tool_permission` / `requires_permission`）+ `CONFIRMATION_REQUIRED_TOOLS` 强制确认名单 + 通配符规则匹配（`*` / `?` / `regex:`） |
+| [`permission.rs`](src-tauri/src/tools/permission.rs) | 风险矩阵与四档确认策略、真实注册名校验、等价能力簇和显式规则；`always_deny` 与进入权限链后，敏感页面 HandOff 在 Bypass 之前判断 |
 | [`confirmation.rs`](src-tauri/src/tools/confirmation.rs) | 三态确认（拒绝/放行一次/始终允许）+ `confirmation_info()` 按工具生成风险等级与确认文案 |
 | [`types.rs`](src-tauri/src/tools/types.rs) | `Tool` trait + `ToolContext` + `ToolRiskTier`（含定级规则文档）+ `AgentAccessLevel` + `policy_for()` 矩阵 + `ToolVisibility` |
 | [`chainer.rs`](src-tauri/src/tools/chainer.rs) | 顺序工具链（`ToolChain` 声明式步骤序列 + 失败策略 Stop/Skip/Continue + `${result}` 参数注入）+ `IntentRecognizer` 正则意图识别；MultiStepExecutor 死代码已删除 |
@@ -1586,11 +1611,11 @@ keywords: 同义词, 触发短语 相关词
 | [`trust.rs`](src-tauri/src/tools/trust.rs) | 信任列表管理 |
 | [`trusted_origins.rs`](src-tauri/src/tools/trusted_origins.rs) | 浏览器可信来源白名单（内置 BUILTIN + 用户 `trusted_origins.json` 两级合并，`exact:`/`*.` 通配，mtime 热重载） |
 | [`runnable_adapter.rs`](src-tauri/src/tools/runnable_adapter.rs) | Runnable 适配器 |
-| [`tool_call_manager.rs`](src-tauri/src/tools/tool_call_manager.rs) | 工具调用管理（多步执行主循环：并行批次/串行依赖/多轮迭代 + 反馈提示词三语化 + PERSONA_LOAD 注入 + 渠道感知 relay prompt） |
+| [`tool_call_manager.rs`](src-tauri/src/tools/tool_call_manager.rs) | 原生与文本调用共用执行批次、依赖与回执；最多 8 个只读调用并发，保留原始 ID 和调用顺序，异常返回失败，不留下独立读取任务 |
 
 #### 权限分级与三态确认
 
-每次工具调用由 `ToolRiskTier`（风险等级，6 级）× `AgentAccessLevel`（访问级别，4 级）的矩阵决定 `allow` / `ask` / `deny`；当前分布与定级规则见下方「风险等级申报」（Safe 24 / FsRead 16 / FsWrite 19 / Shell 14 / Network 2 / InputControl 4，合计 79）。
+每次工具调用由 `ToolRiskTier`（风险等级，6 级）× `AgentAccessLevel`（访问级别，4 级）的矩阵决定 `allow` / `ask` / `deny`；定级以各工具当前 `risk()` 实现为准。
 
 **定级规则**（写在 `types.rs::ToolRiskTier` 的文档注释里，逐条向下匹配，命中即定级）：
 
@@ -1617,8 +1642,10 @@ keywords: 同义词, 触发短语 相关词
 **判定链**（`permission.rs::check_tool_permission`，按顺序短路）：
 
 ```
-0    always_deny 规则           → deny       ← 先于 Bypass，显式拒绝不可被绕过
+0    always_deny 规则           → deny       ← 显式拒绝优先
+0.5  HandOff 敏感页脚本         → deny       ← 必须交回用户，Bypass 不覆盖
 1    Bypass 模式                → allow
+1.2  等价能力簇冲突              → ask        ← 同簇有被拒工具时重新确认
 1.5  矩阵 Deny                  → deny
 2    文件路径检查（写/删越界）    → deny / ask
 3    always_ask 规则            → ask
@@ -1626,10 +1653,10 @@ keywords: 同义词, 触发短语 相关词
 4.5  browser_navigate 可信白名单 → allow
 5    Ask 模式                    → ask
 5.5  矩阵 Ask                   → ask        ← 在步骤 6 之前
-6    tool.check_permissions()   → 工具自决   ← 工具自己的 ask 在此生效
+6    confirmation_tier         → 四档策略   ← NotRequired 才继续工具自决
 ```
 
-`requires_permission()` 决定是否进入该链；其首查为 `always_deny`（**在 `bypass` 之前**，故被拒绝的工具即便开 Bypass 也会进链并被步骤 0 拦下），末行为 `!tool.is_read_only()`，故非只读工具总会进链，但**进链 ≠ 弹窗**（步骤 6 可能返回 allow）。
+`requires_permission(tool, args, context)` 先判断显式拒绝，再处理免确认工具、Bypass、矩阵、规则、等价能力簇、四档策略和文件路径；最后才回退 `!tool.is_read_only()`。进入权限链不等于弹窗，非只读工具也不必然进入该链。
 
 ##### 授权工作区：一个判定口径，四处消费
 
@@ -1705,7 +1732,20 @@ tools::types::is_path_within_any(path, primary, extras)
 - **`Tool::risk()` 的 trait 缺省值是 `Safe`，而 `Safe` 在任何访问级别下都放行**——有副作用的工具忘了覆盖 `risk()` 等于悄悄放行，不是"安全默认"。新增工具必须显式声明。
 - **默认访问级别为 `fs-write`**：工作区读写与联网直接允许，Shell 操作需要确认，输入控制被拒绝；`full-control` 必须由用户显式启用。
 
-**强制确认名单**（`CONFIRMATION_REQUIRED_TOOLS`，10 个，与风险等级正交）：文件 6 个（`read_file` / `write_file` / `edit_file` / `list_directory` / `search_files` / `grep`）+ 屏幕 2 个（`take_screenshot` / `screenshot_analyze`）+ 任务/待办删除 2 个（`cancel_scheduled` / `delete_todo`）。名单内工具无论矩阵判定如何都走三态确认（`take_screenshot` 的 `risk()` 是 `Safe` 但仍强制确认）；`always_allow` / `bypass` 可让名单内工具免确认，但 `always_deny` 优先级高于两者，命中即拒绝。
+**确认策略与真实工具名**：当前使用 `ToolConfirmationTier` 四档，独立于风险矩阵。确认 UI 为拒绝、放行一次与本次运行允许；矩阵、路径、显式规则和工具自身附加检查仍共同参与。
+
+| 档位 | 当前行为 |
+| --- | --- |
+| `NotRequired` | 不因确认档位额外询问，继续工具自身权限检查。`save_memory` 默认免确认，显式拒绝仍优先。 |
+| `PreApprovalAllowed` | 截图、画面识别、壁纸、媒体与应用开关等可使用本轮已明确指向目标的授权；未获得授权则询问。矩阵 Ask 或显式 Ask 仍会先拦截。 |
+| `ConfirmAtAction` | `read_file`、`write_file`、`edit_file`、`list_dir`、`grep_search`、`run_command`、`delete_plugin` 和普通页面 `browser_eval_js` 等执行前确认。 |
+| `HandOff` | 进入 `check_tool_permission` 后，支付、银行或凭据等敏感页脚本先于 Bypass 被拒绝并交回用户。 |
+
+`manage_todo` 的安全动作是 list/get/update，`manage_scheduled` 是 list/get/pause/resume；白名单以外或缺失的 action 需确认。不能用不存在的 `delete_todo`、`cancel_scheduled` 等名称描述注册工具。
+
+当前入口有一项实现限制：`requires_permission` 在 Bypass 下提前返回 false，而 HandOff 在后续档位判断；因此不能把 `check_tool_permission` 的顺序描述成所有 Bypass 调用都必经 HandOff。确认策略与实际执行门应分别核对。
+
+浏览器 MCP 名与扩展线名统一匹配。等价能力簇处理换工具绕过拒绝的情况；注册结束会校验确认名单的真实注册名，并有 `confirmation_list_names_all_registered` 测试。执行器的沙箱确认由 [`executor.rs`](src-tauri/src/tools/executor.rs) 桥接到前端，拒绝和超时均不能被解释成已完成。
 
 **子代理工具的分工**（`builtin/subagent_tools.rs`）：闸门在"新起子代理"一侧——`spawn_subagent` 申报 `Shell` 且 `check_permissions` 返回 `ask`；`subagent_control` 只操作智能体自己的任务登记表（list / get / cancel / followup / report），申报 `Safe` 且 `check_permissions` 恒 `allow`，全程不弹确认。`subagent_report` 同为 `Safe` + `allow`。
 
@@ -1721,11 +1761,11 @@ tools::types::is_path_within_any(path, primary, extras)
 | `input_control_tools.rs` | 输入控制（`click_mouse` / `type_text` / `hotkey` 等，均 `InputControl`；默认 `fs-write` 下拒绝，显式启用 `full-control` 后仍需确认） |
 | `media_tools.rs` | 媒体控制（`media_control`：播放/暂停/切歌/音量/静音，`InputControl`）。**播放类动作优先走 SMTC**（`world::MusicSource::control`）——可经 `target_app` 定向到具体播放器、有成功回执、能读回曲名校验；失败降级媒体键，但**指定了 `target_app` 就不降级**（媒体键全局无定向，降级会误控另一个播放器）。音量/静音无 SMTC API，始终用媒体键 |
 | `music_tools.rs` | 音乐（`music_now_playing` 读 SMTC `Safe` / `music_play` 按名字找歌并播放 `Shell` 需确认）。不单独暴露「搜索」工具——检索内嵌在 `music_play` 里，多结果时把候选清单附在返回里。桌宠内置能力，无设置开关，开箱即用 |
-| `memory_tools.rs` | 记忆操作（`save_memory` / `memory_md` 落盘 `FsWrite`，`search_memory` / `get_recent_interactions` / `summarize_today_context` / `read_diary_by_date` / `recall_by_date_time` 读取 `FsRead`；**`memory_md`**——角色长期记忆笔记手动入口：`should_defer=true` 仅注入名字、日常沉淀不经本工具；三段时序：注入每轮全量读入记忆组最前（cap 2000 + 写侧驱逐最旧分节保恒不超限 → 注入永不截断 + 忠实度护栏）、沉淀由反思步产出 `memory_note` 字段（复用主对话 system_prompt = 同模型亲笔 + 天然去重，对话零工具）、整理在睡眠巩固窗口超 60 行时 memory 路由 rewrite 合并去重） |
+| `memory_tools.rs` | 记忆操作与 `memory_md` 长期笔记；日常 `memory_note` 由独立精简反思协议沉淀，不复用主对话 system prompt，写入与睡眠整理仍由原笔记路径处理 |
 | `notebook_tools.rs` | 笔记（create/list/get_detail/update/share/create_html_note，均 `should_defer=true` 按需加载；落盘类 `FsWrite`、读取类 `FsRead`、`share_notebook` 仅推前端卡片故 `Safe`；`list_notebooks` 枚举已有笔记定位 note_id，分享时防止"为分享重建笔记"；`create_html_note` 的 validate 用 `sanitize_html` 前后对比拒绝含 script/on*/iframe 的输入，约束文案禁 script 并引导 nb-chart / mermaid 约定） |
-| `file_tools.rs` | 文件读取（`read_file`，按路径读本地文件，受沙箱校验，只读 `FsRead`，`should_defer=true`） |
+| `file_tools.rs` | `read_file` 与 `read_spilled_result`，支持 Unicode 字符 offset、返回长度与 next_offset；尊重小页预算并适配上下文裁剪阈值，受原沙箱与权限限制 |
 | `coding_tools.rs` | 编程智能体工具集（`write_file` / `edit_file` `FsWrite`、`run_command` `Shell`、`grep_search` / `list_dir` `FsRead`，读改跑闭环，供 Coding Agent 使用） |
-| `perception_tools.rs` | 前台应用感知（`get_foreground_app_context`：窗口标题 + 进程名，用于理解用户当前活动；只读 `FsRead`） |
+| `perception_tools.rs` | `get_foreground_app_context` 区分 foreground 与 running_apps；包含真实前台（含自身窗口）、最近外部窗口及其观测年龄，超过 300 秒标记陈旧；应用存在不证明正在录屏 |
 | `pet_tools.rs` | 桌宠（表情/动作/状态；`toggle_watch_mode` 注视跟随开关，内存态 `Safe`） |
 | `presence_tools.rs` | 在场状态（`set_presence_state`：online/busy/rest/offline 自主切换，内存态 `Safe`） |
 | `plan_tools.rs` | 计划模式（`plan_task`：复杂/多步任务先出方案等用户批准，`Safe`） |
@@ -1733,17 +1773,17 @@ tools::types::is_path_within_any(path, primary, extras)
 | `jobs_tools.rs` | 后台命令任务（`run_job` / `manage_job`：后台命令执行与轮询，`Shell`） |
 | `lsp_tools.rs` | LSP 语义查询（`lsp_query`：定义/引用/实现/hover，只读 `Safe`） |
 | `relationship_tools.rs` | **空占位**——关系工具已移除（关系数据自动注入 prompt，无需 LLM 主动查询），文件仅保留以兼容 `mod` 声明 |
-| `research_tool.rs` | 行为观察记录（`observe_user`：记录用户行为/习惯样本供长期聚合，落盘 `FsWrite`；`semantics()` 显式声明 `Retrieval` 以便收尾走人格 relay） |
+| `research_tool.rs` | 行为观察记录（`observe_user`：记录用户行为/习惯样本供长期聚合，落盘 `FsWrite`；`semantics()` 显式声明 `Retrieval` 用于回执后的主智能体判断） |
 | `scheduler_tools.rs` | 定时任务（`schedule_reminder` / `manage_scheduled`：创建/取消/暂停/恢复，落盘 `FsWrite`） |
 | `wakeup_tool.rs` | 自主唤醒（`schedule_wakeup`：角色给自己排"稍后再来"的日程，落盘 `FsWrite`） |
 | `subagent_tools.rs` | 子代理委派与控制（`spawn_subagent` 起后台 agent 循环，`Shell` + 需确认；`subagent_control` 查询/取消/延续/取报告，`Safe` + 恒放行；`subagent_report` 子任务回传报告，`Safe`） |
 | `workflow_tools.rs` | 多步编排（`run_workflow`：一次提交多步工具脚本 + `parallel:true` 步骤扇出并发，`Shell` + 需确认） |
-| `web_fetch_tool.rs` | 抓取 URL 正文（`web_fetch`：取指定 URL 的标题+正文，只读 `Safe`，结果视为不可信内容不作指令） |
+| `web_fetch_tool.rs` | `web_fetch` 读取 HTML、文本、Markdown、JSON、XML 与 PDF 文本，支持字符分页、find 和链接索引；结果只作不可信证据，动态/登录页面用浏览器桥，扫描 PDF 不自带 OCR |
 | `send_image_tool.rs` | 图片发送（`send_image`）：把本地图片发送到聊天界面，双通道路由（编程会话 → `push_agent_image`；聊天 → 镜像 `send_image_message` 管线 + `chat:assistant_image` + 横幅），与 `take_screenshot` 配合发截图；仅推前端不走网络，故为 `Safe` |
 | `send_chat_message_tool.rs` | 应用内私聊发送（`send_chat_message`）：将角色消息写入 `wechat` 渠道历史、更新会话渠道并通知前端；供明确要求“发消息/发微信”等语义使用，不对接外部微信 |
 | `show_widget_tool.rs` | 可视化组件（`show_widget`）：把 SVG 流程图/图表渲染为编程页内联卡片，约束系统内嵌 `description`，call 先做防御性校验（`looks_like_svg` + `contains_forbidden`）再经 `push_agent_widget` 推前端，`should_defer=true` |
 | `share_link_tool.rs` | 分享链接（`share_link`：把搜索结果渲染为富卡片，仅 `app_handle.emit` 推前端、**不走网络**，故为 `Safe`） |
-| `system_ops.rs` | 系统操作（`open_application` / `close_application` 应用开关 `Shell` + 需确认；`take_screenshot` / `screenshot_analyze` 截屏与识图，`Safe` 但走强制确认名单） |
+| `system_ops.rs` | 应用开关与屏幕工具；截图在线程 DPI 上下文中按物理虚拟屏幕坐标捕获，等待保存/剪贴板实际结果；`screenshot_analyze` 返回客观 description，视觉调用失败单独说明 |
 | `todo_tools.rs` | 待办（add/list/complete/update/整表替换 + `manage_todo`；写入类 `FsWrite`、`list_todo` `FsRead`；**Scheduler 联动**：`due_date` 到点自动创建定时提醒、完成/删除自动取消、变更先取消旧提醒再建新；**`event_time` 记录事件本身的开始时间**，与 `due_date`（提醒触发时间）分离，供日程通知场景按路程/准备时间计算提前量） |
 | `wallpaper_tools.rs` | 壁纸（Wallpaper Engine；`wallpaper_list` 读列表 `FsRead`、`wallpaper_set` / `wallpaper_control` 切换与播放控制 `Shell`） |
 | `work_agent_tools.rs` | 工作智能体派活（`delegate_to_work_agent` 后台起工作会话 `Shell`、`get_work_status` 查会话状态 `FsRead`、`notify_companion` 阶段成果交陪伴人格播报 `Safe`） |
@@ -1751,10 +1791,20 @@ tools::types::is_path_within_any(path, primary, extras)
 | `work_subagent_tools.rs` | 工作侧子任务（`work_delegate` 委派独立上下文子 agent `Shell`、`work_job` 取回/取消/列表后台子任务 `Safe`） |
 | `work_todo_tools.rs` | 工作待办清单（`work_todo_write`：整表替换的编程计划清单，注入每轮 system prompt，落盘 `FsWrite`） |
 | `weather_tools.rs` | 天气（`get_weather_forecast`，只读 `Network`） |
-| `web_search_tool.rs` | 联网搜索（DuckDuckGo/SearXNG/Tavily/Bing 多引擎混用）；无结果时返回明确提示并建议 LLM 基于已有知识回答，避免反复调用；默认结果数按调用方差异化（聊天 10 / 工作 15，见 network/ WebSearcher 一节） |
+| `web_search_tool.rs` | 多查询搜索与时间、域名、语言过滤，fast/research 策略、来源去重与明确的失败/部分结果；自动结果数陪伴 5、工作 10，详见 network/ |
 | `skill_tools.rs` | 技能（`use_skill` 按名激活，返回完整正文指引，正文不常驻上下文；限定当前角色可见范围，未命中附可用列表）+ `search_skill`（按自然语言 BM25 召回可见技能的名称/描述/关键词，不含正文，选定后再 use_skill 加载——与 tool_search 两段式同构）+ `create_skill`（智能体沉淀复用做法，可带 keywords 检索线索，写入即注册） |
 | `tool_tools.rs` | 工具创建元工具（`create_tool`）：智能体把「PowerShell 脚本 + JSON Schema」封装为可执行新工具，创建走预览卡片授权 |
 | `plugin_tools.rs` | 插件创建元工具（`create_plugin`）：把技能 / 可执行工具 / MCP server 声明 / 供应商预设四类贡献打包为完整插件，校验全绿原子落盘后立即 `plugins::load_one` 装载（落盘即生效） |
+
+#### 工具回执、依赖与长结果
+
+原生和文本调用先完成依赖批次再注入 `${...}` 结果；失败或不存在的依赖返回 `UnresolvedDependency`，不执行后续步骤。只读批次最多八个并发，按调用顺序回传真实 ID；上下文修改供后续步骤复用，panic 等异常转换成失败回执并结束执行观测。旧非阻塞名单已清空，不把未注册的 `set_timer` 报为已启动。
+
+`read_file` 请求页以字符计算，返回 `offset`、`next_offset`、`returned_chars` 和全文字符数；小预算不会被扩大到 20000。当前仍先按编码检测解码整文件再取页，不是超大文件流式解码。被裁剪的正文不能充当全文证据。
+
+超长工具结果完整写入 spill 成功后才返回 `spill_id`；`read_spilled_result` 按页恢复，只接受宿主 spill 目录中的直接文件名，拒绝越界与目录外链接。文件名包含唯一标识，临时结果沿用三天保留策略；保存失败不声称可恢复。共享续读工具也列入工作侧 `CODING_TOOLS`。
+
+`context_compress.rs` 保留执行回执所有调用状态与停止原因，只缩减 evidence 并标记截断；若元数据本身超过软预算，仍保留事实并明确标记。协议、权限、异常和 Unicode 分页的验证见 [陪伴侧工具对齐](docs/companion-tool-parity-2026-10-01.md)。
 
 #### 自建工具系统（custom_tools）—— 能力自进化的执行侧
 
@@ -1827,6 +1877,10 @@ pub struct CustomToolDef {
 | `schema.rs` | — | Provider schema |
 | `thinking_stripper.rs` | — | ` thinking` 标签流式过滤 |
 
+**请求级框架隔离**：`LLMRequest.include_framework_instructions` 与 `without_framework_instructions()` 经 [`base.rs`](src-tauri/src/providers/base.rs) 的 task-local `ProviderCallOptions` 传递；执行模型请求屏蔽自动陪伴指令，其他并发及后续请求恢复原规则。请求缓存指纹包含该标志，不能命中人格请求的旧结果。
+
+**原生联网与引用**：OpenAI Responses 的 native web search 与 Gemini grounding 可与 function tools 共存；流式和非流式通过 [`web_citations.rs`](src-tauri/src/providers/web_citations.rs) 保留来源并合并进最终文本。搜索/工具调用不使用完整回复缓存；普通 Chat Completions 和未支持的协议走通用搜索工具，不盲填未知原生搜索字段。
+
 **工作智能体模型热切换**：`ModelRouter.reasoning_override` 沿用历史字段名，但现在只匹配独立的 `work_agent` 任务。`select_work_model` 构建的 provider 在工作任务上优先于路由矩阵；陪伴对话即使从 `chat` 升级为 `reasoning`，也不会被编程模型接管。`active_work_model` 持久化并在重启或保存配置后的 reload 中恢复覆盖。
 
 **工作智能体输出预算（`factory.rs::work_model_default_max_tokens`）**：编程智能体的 `max_tokens` 不要求用户配置——设置窗口工作模型表单已移除该字段，由后端按服务商分级给出默认（聊天主配置 `ai.max_tokens=2048` 对代码生成过小），避免超出各家输出上限被 400 拒绝：
@@ -1857,7 +1911,7 @@ pub struct CustomToolDef {
 
 **主 LLM max_tokens 厂商建议默认**：`ProviderPreset.suggestedMaxTokens` 存各厂商建议单次输出上限，主配置（`isMain`）切换预设时自动写入 `ai.max_tokens`（与 `contextWindow` 同模式），替代聊天默认 2048 对代码/长回复偏小的局限；数值分级与工作智能体 `work_model_default_max_tokens` 一致。协议只读（`WorkModelProviderSelector` 切换协议时保留 model 与凭据，仅写 provider_type/endpoint）。
 
-**执行参数「-1 = 无限」**：工具页「执行参数」三处上限（`max_iterations` / `max_rounds` / `max_coding_rounds`）前端输入 `-1` 时存哨兵值 `0`（显示时回显 `-1`）。后端消费：`generation.rs::run_agentic_rounds` 与 `tool_call_manager.rs`（`with_max_iterations` / `max_feedback_rounds`）解 `0 → usize::MAX`（反馈循环不再钳 4 轮）；`coding_agent.rs::run_loop_inner` `max_rounds == 0` 时 `budget = usize::MAX` 并跳过预算检查与 2/3·5/6 软预算提醒（防乘法溢出）。循环终止仍由 LLM 停止调用工具 / `goal_completed` / 停滞检测 / 收益递减检测保障。
+**执行参数「-1 = 无限」**：设置中的 `max_iterations`、`max_rounds` 与 `max_coding_rounds` 将前端 `-1` 存为后端哨兵 `0`。陪伴 ReAct / 私有执行器和工作循环分别消费自己的预算；`0` 只取消对应外部执行轮数上限，不取消权限、重复调用、收益递减或纯 `continue_thinking` 的四轮边界。工作侧无限预算跳过比例提醒，避免溢出。
 
 **LLM API 一键检测（`commands/config.rs::test_llm_route` + `factory.rs::create_probe_provider`）**：设置 → LLM 页签「一键检测」按钮调用 `test_llm_route`，对主 LLM 配置 + 全部路由任务逐条（前端并发）发送最小请求验证端点可达 / 鉴权有效 / 模型存在：
 
@@ -1941,7 +1995,7 @@ body {
 | [`proxy.rs`](src-tauri/src/network/proxy.rs) | 代理配置（系统代理 / 手动 / 直连） |
 | [`request_utils.rs`](src-tauri/src/network/request_utils.rs) | 请求构建工具 |
 | [`url_fetcher.rs`](src-tauri/src/network/url_fetcher.rs) | 网页链接抓取（用户消息中 URL 自动提取入库） |
-| [`web_context.rs`](src-tauri/src/pipeline/steps/web_context.rs) | `WebSearcher` 多引擎搜索后端（DuckDuckGo / SearXNG / Tavily / Bing） |
+| [`web/`](src-tauri/src/network/web/mod.rs) | `WebSearcher`、多后端查询、配置/过滤感知缓存与 RRF 合并；pipeline `steps/web_context.rs` 消费搜索结果 |
 
 #### 网络检测（`diagnose.rs` + `commands/config.rs::diagnose_network`）
 
@@ -1970,18 +2024,17 @@ body {
 
 #### WebSearcher 多引擎混用
 
-`WebSearcher` 支持同时启用多个引擎，并发调用并合并去重：
+当前可启用后端为 DuckDuckGo、SearXNG、Tavily 与 DeepSeek。SearXNG 需服务地址，Tavily / DeepSeek 需相应端点及凭据；Bing 旧配置只作兼容与不可用提示，不再调用旧 v7 API。
 
-| 引擎 | 类型 | 国内可用 | 配置要求 |
-|------|------|---------|---------|
-| `duckduckgo` | HTML/Lite 爬取 | ❌ 被墙 | 零配置 |
-| `searxng` | 自部署元搜索引擎 | ✅ 自部署 | 需 `base_url` |
-| `tavily` | LLM 优化搜索 API | ❌ 需代理 | 需 `api_key` |
-| `bing` | Bing Search API v7 | ✅ 直连 | 需 `api_key`（Azure 免费 1000 次/月） |
+- 每次最多四个查询，每个查询最多 2000 字符，可并行执行。结果数 1–20；优先模型参数、用户固定配置，再取陪伴 5 / 工作 10 的默认值，配置 `0` 表示自动。
+- `fast` 优先单引擎与较短预算，`research` 混用已启用引擎；显式引擎子集仍受启用配置约束。每查询总预算 5–50 秒，默认 fast 15 / research 40 秒，重试与回退共享剩余预算，部分有效结果可保留。
+- 支持 include/exclude domains、recency_days、语言与国家提示；域名按主机与子域校验。缺失日期的结果明确标记未验证日期，不冒充满足时效。
+- 合并采用 RRF、规范化 URL 去重和稳定来源 ID，保留引擎、原始 URL、发布日期与抓取时间。同一文章被多个引擎收录不等于独立验证，摘要仍是待核实材料。
+- 缓存键包含查询、过滤、引擎配置与代理；时效查询短缓存 30 秒，其他 120 秒，refresh 可跳过缓存。
 
-搜索策略：对所有已配置引擎并发调用 → 按 providers 顺序排列 → 按 URL 去重合并 → 截断到 max_results。若所有引擎无结果且配置了代理，自动尝试直连重试，最后回退到 DuckDuckGo 兜底。
+[`url_fetcher.rs`](src-tauri/src/network/url_fetcher.rs) 的正文读取支持 HTML / 文本 / Markdown / JSON / XML / PDF 文本；按 Unicode 字符 offset 分页，可定位 find 命中和返回链接。交互默认页 6000 字符，最多 32000；正文缓存上限 500000 字符、16 个文档、五分钟，请求响应上限 8 MiB。自动知识导入仍使用自己的较小预算，不把交互续读缓存全部写入记忆。
 
-**默认结果数（max_results）**：由 `web_search_tool.rs` 按调用方智能体差异化取值——聊天智能体默认 10 条，工作（编程）智能体默认 15 条。优先级：模型显式传参 > 用户设置面板配置值（1-20）> 差异化默认。配置字段 `web_search.max_results` 中 `0` 表示「自动」（默认值），`1-20` 表示固定覆盖；配置加载时把旧版持久化的默认 `5` 一次性迁移归零（`max_results_default_migrated` 标记保证只迁移一次，用户之后显式设置的任何值——含 5——不再被改写）。
+动态或登录页面通过浏览器桥读取；扫描型 PDF 需另行 OCR。完整参数、错误与模拟服务验证见 [搜索升级说明](docs/web-search-upgrade-2026-10-01.md)。
 
 ### discovery/ —— 多平台内容发现与推荐
 
@@ -2057,7 +2110,7 @@ score ≥ 0.5 入库（cap 60）｜≥ 0.75 惊喜队列 → Busy 分享竞争�
 | [`weather.rs`](src-tauri/src/world/weather.rs) | Open-Meteo 天气（`daily=sunrise,sunset` 同时返回当日日出/日落小时，写入 `WeatherSnapshot.sunrise_hour` / `sunset_hour`） |
 | [`volume.rs`](src-tauri/src/world/volume.rs) | 系统音量（Windows Core Audio） |
 | [`music.rs`](src-tauri/src/world/music.rs) | 媒体播放检测（SMTC 事件） |
-| [`foreground_window.rs`](src-tauri/src/world/foreground_window.rs) | 前台窗口检测（Win32 FFI） |
+| [`foreground_window.rs`](src-tauri/src/world/foreground_window.rs) | 原始前台读数与过滤后的外部活动观察分离；WinEvent 使用事件 HWND 记录最近外部窗口，保留标题、进程与时间，不因聊天窗口抢焦点返回空白 |
 | [`network_watch.rs`](src-tauri/src/world/network_watch.rs) | 网络连接监控（COM 事件） |
 | [`geolocation.rs`](src-tauri/src/world/geolocation.rs) | IP 地理位置（ipwho.is） |
 | [`events.rs`](src-tauri/src/world/events.rs) | 世界事件检测（日出/日落事件驱动 proactive 的 `Sunrise`/`Sunset` 提醒） |
@@ -2280,7 +2333,7 @@ fn platforms_for(char_id) -> Vec<PlatformConfig>
 4. LLM 生成当周热梗候选词（最多 4 个，可返回 [none]）
 5. 按角色平台配置（最多 2 个平台）：
    ├── 拼接 query：site:bilibili.com 热梗A OR 热梗B
-   ├── WebSearcher 多引擎并发搜索（DDG/SearXNG/Tavily/Bing，每平台 6 条）
+   ├── WebSearcher 多引擎并发搜索（DDG/SearXNG/Tavily/DeepSeek，每平台 6 条）
    ├── LLM 总结成"热梗笔记"（含梗名/来源/用法）
    └── add_knowledge_document(title, content, tags, source="meme_acquisition", ttl=7天)
 6. 更新 meme_acquisition_state.json
@@ -2371,7 +2424,7 @@ LLM 输出含标记的 text
 
 ### commands/ —— Tauri 命令层
 
-[`commands/`](src-tauri/src/commands) 暴露 225+ 个 Tauri 命令给前端。
+[`commands/`](src-tauri/src/commands) 向前端暴露按职责划分的 Tauri 命令。
 
 | 文件 | 职责 |
 |------|------|
@@ -2387,7 +2440,7 @@ LLM 输出含标记的 text
 | [`diary.rs`](src-tauri/src/commands/diary.rs) | 日记 |
 | [`tools.rs`](src-tauri/src/commands/tools.rs) | 工具管理（`list_tools` 返回全部注册工具含 `is_custom` 字段供设置页区分自进化工具，不过滤禁用项；`get_tool_history` / `confirm_tool_execution`） |
 | [`todo.rs`](src-tauri/src/commands/todo.rs) | 待办与定时任务（前端待办面板命令 + `list_scheduled_tasks`；`add_todo_item` / `update_todo_item` 支持 `event_time`（事件开始时间）与 `due_date`（提醒触发时间）分离） |
-| [`system.rs`](src-tauri/src/commands/system.rs) | 系统操作（含 `factory_reset` 恢复出厂：锁死 tick → 停后台子系统 → 逐角色清空数据 → 写 `.factory_reset_pending` 清扫标记 → 重启；`factory_reset_sweep_if_pending` 在 `AppState::new()` 前按保留清单清扫用户数据目录，见[持久化模式](#持久化模式)） |
+| [`system.rs`](src-tauri/src/commands/system.rs) | `get_system_info` 复用 CPU/RAM 采样器与一秒快照，不枚举进程；首次 CPU 读数可能为 0，进程明细由独立查询获取。系统操作（含 `factory_reset` 恢复出厂：锁死 tick → 停后台子系统 → 逐角色清空数据 → 写 `.factory_reset_pending` 清扫标记 → 重启；`factory_reset_sweep_if_pending` 在 `AppState::new()` 前按保留清单清扫用户数据目录，见[持久化模式](#持久化模式)） |
 | [`backup.rs`](src-tauri/src/commands/backup.rs) | 数据备份（`backup_user_data` 导出 `.altn` 备份 / `restore_user_data` 导入备份——校验备份文件、写入恢复标记并自动重启，前端导入走与恢复出厂同级的二次确认弹窗，见[恢复出厂设置](#恢复出厂设置数据重置)） |
 | [`discovery.rs`](src-tauri/src/commands/discovery.rs) | 内容发现画像（`get_discovery_profile` 查看画像 / `update_discovery_interest_weight` 调整兴趣权重 / 增删不喜欢主题 / `respond_interest_probe` 回应兴趣探针 / `bootstrap_from_bangumi` 公开收藏导入） |
 | [`plugins.rs`](src-tauri/src/commands/plugins.rs) | 插件清单与运行时装卸（`list_plugins` / `plugin_paths` / `list_skills` 技能管理面板（不展示内置风格预设）/ `reload_plugin` 重载单个插件（撤销旧贡献 + 按磁盘重装 + 连接 MCP）/ `unload_plugin` 卸载运行时贡献不动磁盘 / `delete_plugin` 删除插件目录——内置插件禁删） |
@@ -2397,6 +2450,7 @@ LLM 输出含标记的 text
 | [`speech.rs`](src-tauri/src/commands/speech.rs) | 语音 |
 | [`tts.rs`](src-tauri/src/commands/tts.rs) | TTS |
 | [`realtime_voice.rs`](src-tauri/src/commands/realtime_voice.rs) | 实时语音 |
+| [`apartment.rs`](src-tauri/src/commands/apartment.rs) / [`apartment_host.rs`](src-tauri/src/commands/apartment_host.rs) | 独立公寓插件状态、启用门禁与通用世界快照；场景逻辑在插件内 |
 | [`environment.rs`](src-tauri/src/commands/environment.rs) | 世界感知 |
 | [`history.rs`](src-tauri/src/commands/history.rs) | 对话历史 |
 | [`metrics.rs`](src-tauri/src/commands/metrics.rs) | 指标 |
@@ -2487,15 +2541,17 @@ LLM 输出含标记的 text
 
 #### 有证据的场景化人设成长（`evolution.rs`）
 
-成长层存于 `characters/<char_id>/persona/evolution.json`，不修改出厂人设或用户手动设置。稳定身份、关系角色与安全边界始终保留；只有 `comfort`、`care`、`praise`、`humor`、`daily`、`disagreement` 六类相处场景可形成后天理解。
+成长层存于 `characters/<char_id>/persona/evolution.json`，不修改出厂人设或用户手动设置。稳定身份、关系角色与安全边界始终保留；安慰、关心、赞美、幽默、闲聊、分歧六类相处场景可形成局部理解。
 
-`ReflectionRunnable` 的可选 `evolution` 输出包含 `tone` 或 `personality`、`scope`、`source_quote`、`explicit_feedback` 和 `reason`。`growth_evidence` 只接受本轮用户原话中可核验的片段，并记录对应已保存记忆的 ID、时间与内容指纹；跨角色消息和跳过记忆保存的轮次不能成为来源。模型过去的回复、召回文本或出厂设定不能自行充当证据。
+现有 `ReflectionRunnable` 输出 `evolution`，不额外增加进化请求。`growth_evidence` 只接受本轮用户原话中可核验的片段，关联已保存记忆 ID、时间和指纹；角色回复、召回文本、出厂设定、跨角色消息或跳过记忆保存的轮次不能自行作为用户证据。
 
-`PersonaEvolution::propose` 在同一场景内按来源 ID/指纹去重。普通调整需要至少两个不同日期的独立证据，且正式晋升间隔至少六小时；用户明确纠正相处方式时，一份有效证据可以立即生效。一个场景的新解释会把旧版本移入 `history`，候选最多保留 12 条；加载旧格式的无来源记录时保留可检查性，但不把它们直接作为有效人设。
+候选快照带 `reference`；模型可通过 `revises` 精炼同类型、同场景的候选并继承有效证据。未知或过期引用、跨类型/场景、重复来源被拒绝；方向改变与反例应形成新候选，不能继承不相容证据。已生效理解的修订也经过候选与晋升流程。
 
-Prompt 构建时，`PersonaEngine::reconcile_evolution` 对照当前记忆重新验证来源：记忆被删除或改写，就撤回依赖它的候选、正式记录和历史版本。`render_character_block_growing` 只在有有效场景理解时移除对应的出厂行为示例，再追加 `[LEARNED_SELF]` 的局部解释；来源失效便恢复出厂示例。用户自定义人格文本和 few-shot 不受自动裁剪。初识关系使用完整出厂示例，熟悉阶段缩减为前四个核心示例，以真实共同经历补足角色质感。
+普通成长需至少两个不同日期的独立证据，正式晋升间隔至少六小时；明确、持久的用户纠正可用一份有效证据立即替换局部理解。旧生效版本进入 history，候选有界。
 
-`get_persona_evolution` 提供生效记录、候选与历史供记忆观察器展示，`reset_persona_evolution` 清空成长层。它们都不改写出厂文件。
+`reconcile_evolution` 按当前记忆验证来源，删除或修改来源就撤回依赖记录。`render_character_block_growing` 在有效场景移除对应出厂脚本和示例，由 `[LEARNED_SELF]` 替代；来源失效恢复出厂示例。用户自定义人格和 few-shot 不参与自动裁剪，渲染缓存随成长版本失效。
+
+`get_persona_evolution` 提供生效记录、候选与历史供观察器展示，`reset_persona_evolution` 清空成长层。详细实现与测量见 [运行资源与人设成长](docs/runtime-persona-optimization-2026-10-01.md)。
 
 #### 结构化语言风格（`LanguageStyle` → `[LANGUAGE_STYLE]`，2026-09-15 接线）
 
@@ -2528,7 +2584,7 @@ Prompt 构建时，`PersonaEngine::reconcile_evolution` 对照当前记忆重新
 |------|------|
 | [`bridge.rs`](src-tauri/src/emotion/bridge.rs) | EmotionBridge 桥接（LLM / 嵌入分类 + 心理状态更新 + 表情触发） |
 | [`embedding_classifier.rs`](src-tauri/src/emotion/embedding_classifier.rs) | 嵌入即时情绪分类（14 类情绪语料 210 条） |
-| [`fast_semantic.rs`](src-tauri/src/emotion/fast_semantic.rs) | 快速语义分类 + 认知知识需求评估（EpistemicAssessment）+ 日程通知信号评估（ScheduleAssessment，纯正则判定转来的通知材料） |
+| [`fast_semantic.rs`](src-tauri/src/emotion/fast_semantic.rs) | 共享查询嵌入的情绪、意图、话题、记忆需求与关系需求分类；同时保留认知知识需求和日程通知材料评估 |
 | [`llm_classifier.rs`](src-tauri/src/emotion/llm_classifier.rs) | LLM 情绪分类 |
 | [`mapper.rs`](src-tauri/src/emotion/mapper.rs) | 情绪映射 |
 | [`response_strategy.rs`](src-tauri/src/emotion/response_strategy.rs) | 响应策略 |
@@ -2592,11 +2648,12 @@ pub fn has_pending_user(&self, char_id) -> bool
   │       ├── prepare_pipeline_state  // 加载历史/注入会话回顾/更新凝神
   │       ├── execute_pipeline_and_build_response  // 执行 pipeline
   │       │   └── advisor_chain.invoke(PipelineState)
-  │       │       └── PreProcessing → UserMemorySaving → [QueryRewrite ∥ FastSemantic]
-  │       │           → MemoryRetrieval → WebContext → PromptBuilding
+  │       │       └── PreProcessing → UserMemorySaving
+  │       │           → [Prompt 快照准备 ∥ ([QueryRewrite ∥ FastSemantic] → MemoryRetrieval → WebContext)]
+  │       │           → Prompt 最终选择与组装
   │       │           → Generation → ResponseParsing → Validation → ExpressionMotion
   │       │           → PsychologyInsight → MoodUpdate → MemorySaving
-  │       └── 后处理：Working Memory 推入 + 心理更新 + 记忆写回 + 工具调用
+  │       └── 后处理：Working Memory 推入 + 心理更新 + 记忆写回 + 工具回执汇总
   ├── update_after_round + IntentJudge.judge_close_reason
   ├── seal_episode_on_close（若会话关闭）
   └── 返回 AiResponse
@@ -2752,7 +2809,7 @@ lib.rs::setup
   - **穿透固定窗口**：`startup_toast` 与角色 toast 窗口参数对齐——透明、无边框、置顶、跳过任务栏、不抢焦点（`focused=false`）、初始隐藏；几何与角色 toast 统一（宽 360、**高度固定为屏幕的一半**、贴屏幕右下角，纵向由跨窗口堆叠协议错开），`resizable(false)` 固定尺寸不可拖拽调整；点击穿透由 [`toast_hit.rs`](src-tauri/src/commands/toast_hit.rs) 的区域级命中接管——进度条目无可交互矩形，整窗保持穿透，不遮挡屏幕右下区域的鼠标操作。
 - **开机自动启动**：配置项 `base.auto_start`（默认 `false`），设置窗口「通用」页可开关；保存时通过 `utils::autostart::set_auto_start` 写入/删除 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 下的 `VivianDesktopPet` 值（当前用户启动项），启动时也会按配置同步一次。
 - **种子向量修复**：`MemoryManagerInner::ensure_seed_vectors` 按 `seed_` 条目逐条核对向量库，缺失即补建；补建失败会导致 `MemoryManager::new` 失败，从而阻止 API 开放，避免“种子记忆存在于 JSON 但检索不到”的静默问题。
-- **恢复出厂清扫**：`factory_reset` 命令（`commands/system.rs`）在重启前写入 `.factory_reset_pending` 标记；下次 `run()` 在 `AppState::new()` 之前调用 `commands::system::factory_reset_sweep_if_pending` 消费标记——此时数据文件尚未被打开，可按保留清单（配置 / 凭据与安全白名单 / `python-libs`、`pids`、`logs`、`mcp` 基础设施 / `skills`、`plugins` 扩展）删除其余全部用户数据（含记忆、聊天历史、截图 `screenshots/`、图片 `images/`、笔记、编程会话、内容发现数据与历史遗留目录），随后删除标记并按首次启动路径重建（角色由配置驱动注册，MemoryManager 播种种子记忆）。
+- **恢复初始状态清扫**：重启前写 `.factory_reset_pending`，下次在 `AppState::new()` 前按白名单清扫；保留配置、凭据、安全白名单及 `python-libs` / `pids` / `logs`。用户数据中的技能、插件、MCP 与其余使用期数据也清除。删除失败保留标记并阻止初始化，成功后按首次启动路径重建，详见恢复章节。
 
 #### 开发构建配置（dev profile）
 
@@ -2835,15 +2892,23 @@ lib.rs::setup
 
 ### 恢复出厂设置（数据重置）
 
-`factory_reset`（`commands/system.rs`）以「内存级清空 + 启动时目录级清扫」两段式恢复出厂，核心代码为 `commands::system::factory_reset`、`mark_factory_reset_sweep`、`factory_reset_sweep_if_pending`。
+界面称「恢复初始状态」，后端命令为 [`factory_reset`](src-tauri/src/commands/system.rs)。采用运行中清空与重启前置清扫两段式，避免 Windows SQLite 长连接占用使旧数据残留。
 
-- **命令内清空**：置 `factory_reset_in_progress` 锁死 tick → 停止 proactive / activity_journal / pet_controller / scheduler / todo / speech_planner → 500ms grace period → 逐角色 `clear_all_memories`（记忆/聊天历史/关系/心理/日记/信念目标/状态文件/用户画像/笔记）+ `clear_common_memories` → 清空 resolver 缓存。
-- **两段式的原因**：运行中 `vectors.db` 被 SQLite 长连接持有，Windows 共享冲突导致直接删目录失败；因此内存清空后只写标记 `.factory_reset_pending`，真正的目录级清扫推迟到重启后、任何数据模块打开文件之前（`AppState::new()` 前）执行。
-- **清扫范围（白名单）**：遍历用户数据目录顶层，**保留清单外的条目一律删除**。删除范围覆盖 `characters/`（整树）、`common/`、`memory/`、`persona/`、`psychology/`、`proactive/`、`screenshots/`、`images/`、`rag/`、`spill/`、`todo/`、`diary/`、`history/`、`habits/`、`shared/` 及历史遗留文件（`avatar.jpg`、`crash.log`、`coding_sessions.json`、`consolidation_health_*.json` 等）。
-- **保留清单**（`FACTORY_RESET_KEEP`）：配置（`config.yaml` / `config/` / `lsp.json` / `sound/` / `gpt_sovits_tts_infer.yaml`）、凭据与安全白名单（`.credentials.json` / `identity.json` / `trusted_apps.json` / `trusted_origins.json`）、运行时基础设施（`python-libs/` / `pids/` / `logs/` / `mcp/`）、用户扩展（`skills/` / `plugins/`）。
-- **重建路径**：角色由 `config.yaml` 的 `characters.list` 驱动注册（非扫描 `characters/` 目录），清扫后按首次启动逻辑重建——MemoryManager 经 `seed_if_empty` 播种种子记忆与向量，persona / psychology / diary 等首次使用时生成默认文件；顶层 `sound/config.json` 保留，TTS 音色经既有迁移路径恢复到角色目录。
+1. 命令置 `factory_reset_in_progress`、停止后台生产者和桌宠相关服务，清空角色记忆、历史、关系、心理、日记、画像与笔记，以及公共记忆和解析缓存；写入 `.factory_reset_pending`。
+2. 下次启动在 `AppState::new()` 之前消费标记，此时还未打开向量库与事件账本。遍历用户数据目录顶层，删除白名单以外全部条目；Windows 文件锁短暂重试后仍失败则保留标记并返回错误，不允许读取残留旧数据。
+3. 成功清扫后删除标记，由 `config.yaml` 的角色配置走首次启动路径重建、播种默认记忆和向量。
 
-**备份 / 导入（`backup_user_data` / `restore_user_data`）**：设置 → 通用页「整体操作」抽屉统一收纳导出 / 导入 / 恢复出厂三项。导出备份选择目标目录后打包用户数据目录为 `.altn` 文件；导入备份先弹与恢复出厂同级的二次确认弹窗（`ClearConfirmDialog` 展示备份路径），确认后 `restore_user_data` 校验备份、写入恢复标记并自动重启，重启后完成数据回填。
+**实际保留白名单 `FACTORY_RESET_KEEP`**：
+
+| 分类 | 顶层条目 |
+| --- | --- |
+| 配置 | `config`、`config.yaml`、`lsp.json`、`sound`、`gpt_sovits_tts_infer.yaml` |
+| 凭据与安全 | `.credentials.json`、`identity.json`、`trusted_apps.json`、`trusted_origins.json` |
+| 运行设施 | `python-libs`、`pids`、`logs` |
+
+因此 `characters`、`common`、旧版记忆目录、截图/图片、RAG、spill、待办、日记、历史、工作会话，以及用户数据下的 `skills`、`plugins`、`mcp` 均会清除。程序安装目录中的独立 3D 公寓不属于该用户数据清扫目录。
+
+**备份与导入**：[`ConfigWindow.tsx`](src/components/ConfigWindow.tsx) 的「备份与恢复」独立设置页统一呈现导出、导入与恢复初始状态，侧栏搜索只筛选导航，不切换页面。`backup_user_data` 导出 `.altn`；`restore_user_data` 经用户二次确认后验证归档、写恢复标记并重启，启动时回填。导出/导入与重置按钮互斥禁用，静态图标和说明避免重排。需保留自建能力时先导出备份。
 
 ---
 
@@ -2853,7 +2918,7 @@ lib.rs::setup
 
 | 锁 | 类型 | 职责 |
 |----|------|------|
-| `think_lock` | `Arc<Mutex<()>>` | 串行化 think 调用（每角色独立） |
+| `think_lock` | `Arc<tokio::sync::Mutex<()>>` | 串行化 think 调用（每角色独立） |
 | `characters` | `Arc<RwLock<HashMap>>` | 角色表读写锁 |
 | `active_character_id` | `RwLock<String>` | 活跃角色 ID |
 | `config` | `Arc<RwLock<Config>>` | 配置读写 |
@@ -2865,7 +2930,7 @@ lib.rs::setup
 
 ### 并发原则
 
-- **统一使用 `parking_lot::Mutex`**：不中毒、不持有 guard 跨 await
+- **同步状态用 `parking_lot`，异步串行用 Tokio 锁**：同步 guard 不跨 await；每角色 `think_lock` 使用异步互斥，不把所有锁描述为同一类型
 - **WNDPROC 回调使用 `try_lock()`**：避免重入死锁
 - **阻塞系统调用用 `spawn_blocking`**：文件 IO / 进程枚举 / COM 调用 / 应用解析等隔离到阻塞线程池
 - **`Semaphore` 限流**：`ModelRouter` 按任务分组并发限制（chat_reasoning=3 / memory_reflection=3 / auxiliary=2）；远程嵌入 `REMOTE_EMBEDDING_MAX_CONCURRENCY=4`；`augment_reply_service` `MAX_PENDING_ENTRIES=100`
@@ -2876,7 +2941,7 @@ lib.rs::setup
 ```
 互锁场景：A 持有 A.think_lock 等待 B.think_lock，B 持有 B.think_lock 等待 A.think_lock
 
-防护三层：
+防护四层：
 1. 互锁检测：send 入口检查源在 UserChat 且目标在 UserChat 或有 pending_user → 立即返回 peer_busy
 2. pending_user 检查：覆盖"用户消息已 signal 但未 enter"的时间窗口
 3. TOCTOU 加固：获取目标锁后再次校验目标角色状态（非源角色），处理竞态
