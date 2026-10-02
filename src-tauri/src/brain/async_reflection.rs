@@ -229,8 +229,7 @@ pub async fn run_async_reflection(
         .with_usage_tag("attention_reflection")
         .with_max_tokens(256)
         .with_reasoning_pref(crate::providers::reasoning::ReasoningPreference {
-            mode: crate::providers::reasoning::ReasoningMode::Off, effort: None,
-        })
+            mode: crate::providers::reasoning::ReasoningMode::Off, effort: None, budget_tokens: None })
         .with_character_id(char_id.clone())),
     )
     .await;

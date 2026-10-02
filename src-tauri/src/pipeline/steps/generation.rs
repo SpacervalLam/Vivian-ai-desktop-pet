@@ -254,6 +254,12 @@ impl AIResponseGenerationRunnable {
             return true;
         }
         if let Some(map) = parsed.unwrap().as_object() {
+            // Explicit silence is a valid response, not a reason to force another turn.
+            if map.get("intent").and_then(Value::as_str) == Some("no_reply")
+                && map.get("text").and_then(Value::as_str).is_some() {
+                return false;
+            }
+            if map.get("sticker_id").and_then(Value::as_str).is_some_and(|s|!s.is_empty()) { return false; }
             for key in ["text", "content", "output", "reply"] {
                 if let Some(Value::String(s)) = map.get(key) {
                     if !s.trim().is_empty() {
@@ -313,11 +319,22 @@ impl AIResponseGenerationRunnable {
     /// 通过 Structured Outputs / JSON Mode 通道下发 schema 约束，让 LLM 按结构化 JSON 返回。
     /// 非主对话任务（reflection/consolidation/farewell 等）不注入 schema，保持纯文本。
     pub(crate) fn build_chat_request(task_type: &str, messages: Vec<ChatMessage>) -> LLMRequest {
+        let companion = messages.iter().any(|m| m.role == "system" && m.content.contains("[COMPANION DIALOGUE]"));
         let mut req = LLMRequest::new(task_type, messages);
+        if companion { req = req.without_framework_instructions(); }
         if matches!(task_type, "chat" | "reasoning" | "vision_describe") {
             req = req.with_json_schema(vivian_response_schema());
         }
         req
+    }
+
+    /// Native tools already have a structured channel. Companion speech does not
+    /// also need JSON mode, which can produce whitespace-only responses in some models.
+    pub(crate) fn build_native_chat_request(task_type: &str, messages: Vec<ChatMessage>, tools: Vec<ToolDefinition>) -> LLMRequest {
+        let companion = messages.iter().any(|m| m.role == "system" && m.content.contains("[COMPANION DIALOGUE]"));
+        let mut request = Self::build_chat_request(task_type, messages).with_tools(tools);
+        if companion { request.json_schema = None; }
+        request
     }
 
     /// 主路径：调用 LLM 生成响应（流式 / 非流式）
@@ -348,11 +365,7 @@ impl AIResponseGenerationRunnable {
     ) -> VivianResult<String> {
         let mut req = Self::build_chat_request(task_type, messages);
         if add_emphasis {
-            if let Some(last_msg) = req.messages.last_mut() {
-                if last_msg.role == "user" {
-                    last_msg.content.push_str(&Self::json_format_emphasis());
-                }
-            }
+            req.messages.push(ChatMessage::system(Self::json_format_emphasis()));
         }
         router.generate(req).await
     }
@@ -393,6 +406,9 @@ impl AIResponseGenerationRunnable {
             }
             let source_links = crate::providers::web_citations::links(&web_sources, &buf);
             buf = crate::providers::web_citations::attach(&buf, &web_sources);
+            if !any_text_emitted && buf.trim().is_empty() {
+                return Err(VivianError::Provider("模型返回了空白响应".to_string()));
+            }
             if any_text_emitted && !source_links.is_empty() { push_stream_chunk(emitter, &source_links); }
             if !any_text_emitted && !buf.is_empty() {
                 let text_to_push = JsonParser::extract_text(&buf).unwrap_or_else(|| buf.clone());
@@ -465,7 +481,7 @@ impl AIResponseGenerationRunnable {
         // 首轮（完整人设轮）响应
         let first = router
             .generate_with_tools(
-                Self::build_chat_request(task_type, messages.clone()).with_tools(tools.clone()),
+                Self::build_native_chat_request(task_type, messages.clone(), tools.clone()),
             )
             .await?;
         // 防御：模型偶尔仍包 JSON，提取 text 字段（纯文本时原样返回）
@@ -543,7 +559,7 @@ impl AIResponseGenerationRunnable {
 
             let mut rx = router
                 .generate_stream_with_tools(
-                    Self::build_chat_request(task_type, attempt_msgs).with_tools(tools.clone()),
+                    Self::build_native_chat_request(task_type, attempt_msgs, tools.clone()),
                 )
                 .await?;
 
@@ -691,7 +707,7 @@ impl AIResponseGenerationRunnable {
         // 非流式模式下 tool_calls 作为完整 JSON 返回，解析更可靠
         if first_round_calls.is_empty() && finish_reason.is_none() {
             let fallback_req =
-                Self::build_chat_request(task_type, messages.clone()).with_tools(tools.clone());
+                Self::build_native_chat_request(task_type, messages.clone(), tools.clone());
             match router.generate_with_tools(fallback_req).await {
                 Ok(resp) if !resp.tool_calls.is_empty() => {
                     tracing::info!(
@@ -777,14 +793,16 @@ impl Runnable for AIResponseGenerationRunnable {
 
         // 用 task-local 递归进入一次有作用域的调用，避免修改共享 provider 状态。
         // 第二次进入时可见当前 extra，因而不会再次递归。
-        if state.focus_active
-            && state.focus_extra_tokens > 0
-            && ProviderCallOptions::current().max_tokens_extra == 0
-        {
+        let options = ProviderCallOptions::current();
+        let suppress_framework = state.metadata.get("companion_prompt").is_some()
+            && options.include_framework_instructions != Some(false);
+        let focus_extra = state.focus_active && state.focus_extra_tokens > 0 && options.max_tokens_extra == 0;
+        if suppress_framework || focus_extra {
             return router
                 .scope_call_options(
                     ProviderCallOptions {
-                        max_tokens_extra: state.focus_extra_tokens,
+                        max_tokens_extra: if focus_extra { state.focus_extra_tokens } else { 0 },
+                        include_framework_instructions: suppress_framework.then_some(false),
                         ..ProviderCallOptions::default()
                     },
                     self.ainvoke(state.to_json(), config),
@@ -818,24 +836,30 @@ impl Runnable for AIResponseGenerationRunnable {
             return Ok(state.to_json());
         }
 
-        // 构建 messages 列表（KV-cache 友好顺序）：
-        // [static system] → [历史消息] → [动态感知便签(user)] → [用户输入] → [status_bar]
-        //
-        // 静态段（人设/规则/格式）作为 system message 冻结在前缀；
-        // 动态段（时间/环境/情绪/记忆）作为 user 便签插在历史**之后**、用户输入之前——
-        // 每轮变化的只有尾部便签，前缀（静态 system + 全部历史）逐字节复用，
-        // 实现缓存友好的"重放前缀 + 追加尾部"策略。
-        let mut messages_vec: Vec<ChatMessage> = Vec::new();
-        let context = crate::pipeline::message_context::split_prompt_context(
-            &state.system_prompt, &state.user_input, &crate::i18n::get_language(),
-        );
-        if !context.system.is_empty() {
-            messages_vec.push(ChatMessage::system(context.system));
-        }
-        crate::pipeline::message_context::append_history(&mut messages_vec, &state.messages);
-        if let Some(note) = context.dynamic {
-            messages_vec.push(ChatMessage::user(note));
-        }
+        // Request-local role orchestration. Provider presets are disabled below so
+        // an old assistant framework cannot reappear behind the conversation card.
+        let companion = state.metadata.get("companion_prompt").cloned()
+            .and_then(|value| serde_json::from_value::<crate::pipeline::companion_prompt::CompanionPrompt>(value).ok());
+        let system_directive = state.metadata.get("system_directive").and_then(serde_json::Value::as_bool).unwrap_or(false);
+        let status = crate::pipeline::prompt_modules::build_agent_status_bar(
+            &state.messages, &state.user_input, state.focus_active);
+        let focus = state.focus_active.then_some(
+            "用户开启了凝神模式。用更安静、专注的节奏接住当前交流；需要细节时耐心说清楚。不要把普通聊天自动改成深度分析。");
+        let mut messages_vec = if let Some(prompt) = &companion {
+            prompt.messages(&state.messages, &state.user_input, system_directive, status.as_deref(), focus)
+        } else {
+            let context = crate::pipeline::message_context::split_prompt_context(
+                &state.system_prompt, &state.user_input, &crate::i18n::get_language());
+            let mut messages = Vec::new();
+            if !context.system.is_empty() { messages.push(ChatMessage::system(context.system)); }
+            crate::pipeline::message_context::append_history(&mut messages, &state.messages);
+            if let Some(note) = context.dynamic { messages.push(ChatMessage::system(note)); }
+            if let Some(status) = &status { messages.push(ChatMessage::system(status)); }
+            if let Some(focus) = focus { messages.push(ChatMessage::system(focus)); }
+            messages.push(if system_directive { ChatMessage::system(&state.user_input) }
+                else { ChatMessage::user(Self::ensure_speaker_prefix(&state.user_input)) });
+            messages
+        };
         // 后台任务报告已随本次请求注入（便签或整体 system 两条路径均覆盖）
         // → 标记消费，后续轮次不再重复注入
         if let Some(ids) = state
@@ -851,28 +875,6 @@ impl Runnable for AIResponseGenerationRunnable {
             if let Some(ts) = crate::brain::task_service::global() {
                 ts.mark_reports_consumed(&ids);
             }
-        }
-
-        // 凝神模式：激活时追加认知模式指令，让 LLM 进入更深度的思考与陪伴状态
-        if state.focus_active {
-            messages_vec.push(ChatMessage::system(
-                "【凝神模式】用户正处于需要专注或深度陪伴的状态。放慢节奏，回答更周全、更安静，\
-                          避免轻率或跳跃式回应；优先给出有深度的内容而非寒暄。",
-            ));
-        }
-
-        // 最终的用户输入总是作为最后一条 user message（统一加发言者前缀）
-        let prefixed_input = Self::ensure_speaker_prefix(&state.user_input);
-        messages_vec.push(ChatMessage::user(&prefixed_input));
-
-        // Agent 状态栏：以 user-role 元消息追加在用户输入之后、紧邻生成位置。
-        // 键值对 + 时间感操作策略，KV-cache 友好（只追加不修改前缀）。
-        if let Some(status_bar) = crate::pipeline::prompt_modules::build_agent_status_bar(
-            &state.messages,
-            &state.user_input,
-            state.focus_active,
-        ) {
-            messages_vec.push(ChatMessage::user(status_bar));
         }
 
         // ── 双路径切换：原生 function calling vs 文本路径 ──
@@ -1145,30 +1147,8 @@ impl Runnable for AIResponseGenerationRunnable {
                 tracing::warn!("[AIResponse] 主路径失败，降级到直接推理: {}", e);
 
                 // ── 故障降级：直接调用 chat 任务（不带工具/不带 stream）──
-                // 构建降级调用的 messages（保留 system + history，如上）
-                let mut fallback_messages: Vec<ChatMessage> = Vec::new();
-                if !state.system_prompt.is_empty() {
-                    fallback_messages.push(ChatMessage::system(state.system_prompt.clone()));
-                }
-                if !state.messages.is_empty() {
-                    for msg in &state.messages {
-                        if msg.role == "user" {
-                            let prefixed = Self::ensure_speaker_prefix(&msg.content);
-                            fallback_messages.push(ChatMessage {
-                                content: prefixed,
-                                ..msg.clone()
-                            });
-                        } else {
-                            fallback_messages.push(msg.clone());
-                        }
-                    }
-                } else if !state.prompt.is_empty() {
-                    let prefixed = Self::ensure_speaker_prefix(&state.prompt);
-                    fallback_messages.push(ChatMessage::user(&prefixed));
-                } else {
-                    let prefixed = Self::ensure_speaker_prefix(&state.user_input);
-                    fallback_messages.push(ChatMessage::user(&prefixed));
-                }
+                // Reuse the same role-separated conversation on fallback.
+                let fallback_messages = messages_vec.clone();
 
                 match Self::call_llm(&router, fallback_messages, "chat", false, &self.stream_emitter).await {
                     Ok(text) => {
@@ -1264,6 +1244,7 @@ impl ResponseParsingRunnable {
 
         // 微信渠道语音消息标志
         state.voice_message = processed.voice_message;
+        state.sticker_id = processed.sticker_id.clone();
 
         // 记忆归因（memory_used）：只记录不展示。
         // 有值时才打日志——绝大多数回复不带这个字段，无条件打会把日志淹掉。
@@ -1409,6 +1390,7 @@ impl Runnable for ResponseParsingRunnable {
             }
         }
 
+        crate::stickers::finalize(&mut state);
         state.generation_status = "response_parsing_complete".to_string();
 
         // 同步 ai_response 字段以兼容下游（如 MoodStep / MemorySaving）
@@ -1418,6 +1400,7 @@ impl Runnable for ResponseParsingRunnable {
             resp.importance_ai = state.importance_ai;
             resp.response_mode = state.response_mode.clone();
             resp.voice_message = state.voice_message;
+            resp.sticker = state.sticker.clone();
         }
 
         Ok(state.to_json())
@@ -1561,6 +1544,7 @@ mod tests {
             intent: "no_reply".to_string(),
             response_mode: "speak".to_string(),
             voice_message: false,
+            sticker_id: None,
             memory_used: Vec::new(),
             tool_calls: Vec::new(),
         };
@@ -1577,6 +1561,7 @@ mod tests {
             intent: "short_reply".to_string(),
             response_mode: "speak".to_string(),
             voice_message: false,
+            sticker_id: None,
             memory_used: Vec::new(),
             tool_calls: Vec::new(),
         };
@@ -1594,6 +1579,7 @@ mod tests {
             intent: "unknown_intent".to_string(),
             response_mode: "speak".to_string(),
             voice_message: false,
+            sticker_id: None,
             memory_used: Vec::new(),
             tool_calls: Vec::new(),
         };
@@ -1613,6 +1599,29 @@ mod tests {
         let new_state = PipelineState::from_json(result);
         // 命令跳过，text 应保持为空
         assert!(new_state.text.is_empty());
+    }
+
+    #[test]
+    fn companion_format_validation_preserves_explicit_silence() {
+        assert!(!AIResponseGenerationRunnable::is_json_parse_failed(r#"{"text":"","intent":"no_reply"}"#));
+        assert!(!AIResponseGenerationRunnable::is_json_parse_failed(r#"{"text":"你好","intent":"reply"}"#));
+        assert!(!AIResponseGenerationRunnable::is_json_parse_failed(r#"{"text":"","intent":"short_reply","sticker_id":"vivian_happy_01"}"#));
+        assert!(AIResponseGenerationRunnable::is_json_parse_failed("   "));
+        assert!(AIResponseGenerationRunnable::is_json_parse_failed(r#"{"text":"","intent":"reply"}"#));
+    }
+
+    #[test]
+    fn companion_native_tools_keep_speech_outside_json_mode() {
+        let tool: ToolDefinition = serde_json::from_value(json!({
+            "name":"fixture", "description":"fixture", "parameters":{"type":"object","properties":{}}
+        })).unwrap();
+        let messages = vec![ChatMessage::system("[COMPANION DIALOGUE] character")];
+        let native = AIResponseGenerationRunnable::build_native_chat_request("chat", messages.clone(), vec![tool]);
+        assert!(!native.wants_json());
+        assert!(native.wants_tools());
+        assert_eq!(native.include_framework_instructions, Some(false));
+        assert!(AIResponseGenerationRunnable::build_chat_request("chat", messages).wants_json());
+        assert!(AIResponseGenerationRunnable::build_native_chat_request("chat", vec![ChatMessage::system("legacy")], vec![]).wants_json());
     }
 
     #[tokio::test]

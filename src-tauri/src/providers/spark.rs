@@ -163,7 +163,7 @@ impl SparkProvider {
         });
         // 工作智能体模式：省略 temperature（服务端默认）
         self.base.strip_temperature(&mut body);
-        body
+        self.base.finalize_body(body)
     }
 
     fn extract_content(json: &Value) -> VivianResult<String> {
@@ -349,6 +349,15 @@ fn urlencode(s: &str) -> String {
 
 #[async_trait]
 impl BaseProvider for SparkProvider {
+    fn set_request_customization(&self, customization: crate::providers::reasoning_profiles::RequestCustomization) {
+        *self.base.request_customization.write() = customization;
+    }
+
+    fn set_request_parameters(&self, temperature: bool, max_tokens: bool) {
+        self.base.send_temperature.store(temperature, std::sync::atomic::Ordering::Relaxed);
+        self.base.send_max_tokens.store(max_tokens, std::sync::atomic::Ordering::Relaxed);
+    }
+
     async fn call_chat(&self, messages: Vec<ChatMessage>) -> VivianResult<String> {
         let prompt_key = messages_cache_key(&messages);
         let (host, path, domain) = self.resolve_endpoint();

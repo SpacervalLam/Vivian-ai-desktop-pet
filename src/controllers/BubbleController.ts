@@ -2,10 +2,13 @@ import { useAppStore } from '../stores/useAppStore';
 import { stripMarkdown } from '../utils/stripMarkdown';
 import { stripActions } from '../utils/ActionText';
 import { bubbleCharacters, computeDuration, nextBubbleBoundary } from '../utils/bubbleText';
+import { STICKER_BUBBLE_DURATION } from '../utils/bubbleContent';
+import type { StickerRef } from '../types';
 
 export interface BubbleOptions {
   crossCharacter?: boolean;
   listenerName?: string;
+  sticker?: StickerRef;
 }
 
 /** A single reveal queue owns segmentation and dwell; the bubble window only renders. */
@@ -24,6 +27,7 @@ export class BubbleControllerClass {
   private fallbackTimer: ReturnType<typeof setTimeout> | null = null;
   private settledTimers = new Map<number, ReturnType<typeof setTimeout>>();
   private settledId = 0;
+  private pendingSticker?: StickerRef;
 
   get currentBubble(): string | null { return useAppStore.getState().currentBubble; }
   get hasActiveBubble(): boolean { return this.currentBubble !== null || useAppStore.getState().settledBubbles.length > 0; }
@@ -38,6 +42,8 @@ export class BubbleControllerClass {
     this.targetText = this.clean(text);
     this.finalDuration = durationMs;
     this.setOptions(options);
+    this.pendingSticker = options?.sticker;
+    if (!this.targetText && this.pendingSticker) { this.revealSticker(); return; }
     useAppStore.setState({ currentBubble: '' });
     this.startTypewriter();
   }
@@ -69,6 +75,7 @@ export class BubbleControllerClass {
     if (!this.streamingBubble) { this.showBubble(text, undefined, options); return; }
     this.targetText = this.clean(text);
     if (options) this.setOptions(options);
+    this.pendingSticker = options?.sticker;
     this.startAutoClose();
   }
 
@@ -97,6 +104,24 @@ export class BubbleControllerClass {
     return true;
   }
 
+  /** A sticker has its own dwell and never enters the typewriter or spoken text. */
+  showSticker(sticker: StickerRef, options?: BubbleOptions): void {
+    this.showBubble('', undefined, { ...options, sticker });
+  }
+
+  private revealSticker(): void {
+    const sticker = this.pendingSticker;
+    if (!sticker) return;
+    this.pendingSticker = undefined;
+    const id = ++this.settledId;
+    useAppStore.getState().addSettledBubble({ id, text: '', sticker, duration: STICKER_BUBBLE_DURATION });
+    this.settledTimers.set(id, setTimeout(() => {
+      useAppStore.getState().removeSettledBubble(id);
+      this.settledTimers.delete(id);
+      if (!this.hasActiveBubble) this.closeAll();
+    }, STICKER_BUBBLE_DURATION));
+  }
+
   private startTypewriter(): void {
     if (this.raf !== null || this.closeTimer !== null) return;
     const step = (ts: number) => {
@@ -110,6 +135,7 @@ export class BubbleControllerClass {
       const remaining = allChars.slice(this.consumed);
       const boundary = nextBubbleBoundary(remaining, !this.streamingBubble);
       const length = boundary ?? remaining.length;
+      if (!this.streamingBubble && this.revealed >= length && remaining.length <= length) this.revealSticker();
       if (this.segmentRead && this.revealed < length) {
         this.segmentRead = false;
         this.pauseUntil = 0;
@@ -144,7 +170,12 @@ export class BubbleControllerClass {
             ? this.finalDuration : computeDuration(remaining.slice(0, length).join('')));
         } else if (!this.streamingBubble && remaining.length <= length) {
           this.lastTs = null;
-          this.closeTimer = setTimeout(() => this.closeAll(), remaining.length ? 0 : 3000);
+          this.closeTimer = setTimeout(() => {
+            this.closeTimer = null;
+            if (useAppStore.getState().settledBubbles.some(bubble => bubble.sticker)) {
+              useAppStore.setState({ currentBubble: null });
+            } else this.closeAll();
+          }, remaining.length ? 0 : 3000);
           return;
         }
       }
@@ -171,6 +202,7 @@ export class BubbleControllerClass {
     this.segmentRead = this.streamingBubble = false;
     this.targetText = '';
     this.finalDuration = undefined;
+    this.pendingSticker = undefined;
     useAppStore.getState().clearBubbleTimer();
     useAppStore.setState({ currentBubble: null, settledBubbles: [], bubbleCrossCharacter: false, bubbleListenerName: null });
   }

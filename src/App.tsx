@@ -36,6 +36,7 @@ import type { BubblePosition } from './components/MessageBubble';
 import { getCharacterId } from './characterContext';
 import { stripActions } from './utils/ActionText';
 import { placeBubble } from './utils/bubbleLayout';
+import { bubbleContentKey, STICKER_BUBBLE_SIZE } from './utils/bubbleContent';
 import { raiseWindow, isWindowOnScreen, RAISE_UNLISTEN } from './utils/windowRaiser';
 import { openRoomWindow } from './utils/roomWindow';
 import { buildPetRectQuery, buildPrewarmQuery, emitPetReveal, PET_PREWARM_READY_EVENT, type PetPrewarmReady, type PetRect } from './utils/petReveal';
@@ -1053,13 +1054,14 @@ export default function App() {
         const state = useAppStore.getState();
         const bubbleWin = await WebviewWindow.getByLabel(charScopedLabel('bubble'));
         if (!bubbleWin) return;
-        const texts = [...state.settledBubbles.map((b) => b.text), ...(state.currentBubble ? [state.currentBubble] : [])];
-        if (!texts.length) {
+        const count = state.settledBubbles.length + (state.currentBubble ? 1 : 0);
+        if (!count) {
           await bubbleWin.emit('bubble:sync', { text: state.currentBubble, settled: [], character_id: getCharacterId() });
           await bubbleWin.hide();
           continue;
         }
-        const estimated = texts.reduce((sum, text) => sum + estimateBubbleHeight(text), 0) + 8 * (texts.length - 1) + 16;
+        const estimated = state.settledBubbles.reduce((sum, bubble) => sum + (bubble.sticker ? STICKER_BUBBLE_SIZE : estimateBubbleHeight(bubble.text)), 0)
+          + (state.currentBubble ? estimateBubbleHeight(state.currentBubble) : 0) + 8 * (count - 1) + 16;
         // Reuse the actual height while new text renders, then resize on its measurement.
         const requestedHeight = sync.measuredHeight || estimated;
         const monitor = await currentMonitor();
@@ -1334,7 +1336,7 @@ export default function App() {
       const measured = await listen<{ character_id: string; key: string; height: number }>('bubble:measured', (e) => {
         if (e.payload.character_id !== (getCharacterId() ?? '')) return;
         const state = useAppStore.getState();
-        const key = JSON.stringify([...state.settledBubbles.map((b) => b.text), ...(state.currentBubble ? [state.currentBubble] : [])]);
+        const key = bubbleContentKey(state.settledBubbles, state.currentBubble);
         if (key !== e.payload.key) return;
         const sync = bubbleSyncRef.current;
         if (sync.measuredKey === e.payload.key && sync.measuredHeight === e.payload.height) return;

@@ -499,7 +499,7 @@ const DimensionCard: React.FC<DimensionCardProps> = ({
   children,
   onClick,
 }) => (
-  <Card style={bgTint ? { background: bgTint } : undefined} onClick={onClick}>
+  <Card style={{ height: '100%', boxSizing: 'border-box', ...(bgTint ? { background: bgTint } : {}) }} onClick={onClick}>
     {bgImage && (
       <img
         src={bgImage}
@@ -1326,6 +1326,8 @@ const WorldPage: React.FC = () => {
             style={{
               display: 'grid',
               gridTemplateColumns: 'repeat(4, minmax(0, 1fr))',
+              gridAutoRows: 'minmax(160px, 1fr)',
+              alignItems: 'stretch',
               gap: SPACING.cardGap,
               width: '100%',
             }}

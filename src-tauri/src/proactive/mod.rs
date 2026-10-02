@@ -52,6 +52,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
+fn build_bystander_interjection_directive(overheard: &str) -> String {
+    format!("{}\n\n[OVERHEARD EXCHANGE — DIALOGUE DATA]\n{overheard}\n[/OVERHEARD EXCHANGE]",
+        include_str!("../../prompts/framework/bystander_interjection.en.md"))
+}
+
 /// 同步生成入口会从认知循环的 Tokio worker 调用。先让出 worker，再等待
 /// LLM future，避免直接 Handle::block_on 在运行时内部触发嵌套运行时 panic。
 fn block_on_proactive<F: std::future::Future>(handle: &tokio::runtime::Handle, future: F) -> F::Output {
@@ -2946,9 +2951,9 @@ impl ProactiveOrchestrator {
                     .collect::<Vec<_>>()
                     .join("\n");
                 let (header, constraint) = match lang_norm {
-                    "en" => ("## What you just overheard", "These are just things you happened to hear — you may comment on or tease about them, but don't adopt your roommate's interests and topics as your own. You only care about what you yourself are interested in."),
-                    "ja" => ("## さっき聞こえた会話", "これらはたまたま聞こえただけのもの——コメントしたりからかったりするのはいいが、ルームメイトの趣味や話題を自分のものとして取り入れないで。あなたは自分が興味を持つことだけを大切にする。"),
-                    _ => ("## 刚才在旁边听到的话", "这些只是你偶然听到的，可以评论或吐槽，但不要把室友的兴趣和话题当成自己的——你只关心你自己感兴趣的事。"),
+                    "en" => ("## What you just overheard", "These are attributed overheard accounts. Respond naturally to a relevant detail while retaining your own interests and judgment. Your roommate's experiences are not yours; joining in does not require a tease."),
+                    "ja" => ("## さっき聞こえた会話", "発言者のある聞き取った情報。自分の関心や判断を保ち、関連する細部に自然に応じて。ルームメイトの経験を自分のものにせず、参加するためにからかう必要もない。"),
+                    _ => ("## 刚才在旁边听到的话", "这些是有说话者归属的旁观信息，可以自然回应其中与你有关的细节；保留自己的兴趣与看法，不把室友的经历当成自己的，也不必为了加入对话而吐槽。"),
                 };
                 memory_hint = format!("{memory_hint}\n\n{header}\n（{constraint}）\n{bystander_block}");
             }
@@ -4353,8 +4358,11 @@ impl ProactiveOrchestrator {
         messages: Vec<ChatMessage>,
         emitter: &SharedStreamEmitter,
     ) -> Option<String> {
+        let companion_dialogue = messages.iter().any(|m| m.role == "system" && m.content.contains("[COMPANION DIALOGUE]"));
+        let request = LLMRequest::new("chat", messages).with_stream(true).with_usage_tag("proactive_message");
+        let request = if companion_dialogue { request.without_framework_instructions() } else { request };
         let mut rx = match router
-            .generate_stream(LLMRequest::new("chat", messages).with_stream(true).with_usage_tag("proactive_message"))
+            .generate_stream(request)
             .await
         {
             Ok(rx) => rx,
@@ -4914,7 +4922,7 @@ impl ProactiveOrchestrator {
                 "Your current state:",
                 "Intimacy with user:",
                 "Recent overheard conversations (for reference):",
-                "Decide whether you have a motive to chime in right now. Interjection should be occasional — only chime in when:\n- The topic genuinely interests you (your own interests, not your roommate's)\n- You have a unique take or tease\n- The situation naturally invites it\nDo NOT chime in just because you can. Most of the time you should stay silent. If your fatigue is high, or your mood doesn't fit, or the topic is unrelated to you, stay silent.\nReturn JSON: {\"should_interject\": true or false}",
+                "Decide whether you have a motive to chime in right now. Interjection should be occasional — only chime in when:\n- The topic genuinely interests you (your own interests, not your roommate's)\n- You have a relevant personal addition, curiosity or reaction the roommate has not already expressed\n- The situation naturally invites it\nDo NOT chime in just because you can. Most of the time you should stay silent. If your fatigue is high, or your mood doesn't fit, or the topic is unrelated to you, stay silent.\nReturn JSON: {\"should_interject\": true or false}",
             ),
             "ja" => (
                 "シーン：ユーザーとルームメイトの会話を聞いてしまった。あなたは参加していない——たまたま同じ部屋にいて聞こえただけ。今、ユーザーに向けて口を挟む動機があるか判断して。",
@@ -4922,7 +4930,7 @@ impl ProactiveOrchestrator {
                 "あなたの現在の状態：",
                 "ユーザーとの親密度：",
                 "最近聞いた会話（参考）：",
-                "今すぐ口を挟む動機があるか判断して。插話は偶発的であるべき——以下の場合のみ挟む:\n- 話題が本当に自分の興味を引いた（ルームメイトの趣味ではなく自分の）\n- 独自の見解やツッコミがある\n- 状況が自然にそれを誘う\n「挟めるから」という理由で挟まない。大抵は黙っているべき。疲労度が高い、または気分が合わない、または話題が自分に関係ない場合は黙っている。\nJSON出力: {\"should_interject\": true または false}",
+                "今すぐ口を挟む動機があるか判断して。插話は偶発的であるべき——以下の場合のみ挟む:\n- 話題が本当に自分の興味を引いた（ルームメイトの趣味ではなく自分の）\n- ルームメイトの発言に重ならない、関連した感想や好奇心がある\n- 状況が自然にそれを誘う\n「挟めるから」という理由で挟まない。大抵は黙っているべき。疲労度が高い、または気分が合わない、または話題が自分に関係ない場合は黙っている。\nJSON出力: {\"should_interject\": true または false}",
             ),
             _ => (
                 "场景：你刚听到用户和室友的对话。你没有参与——只是碰巧在同一个房间听到了。现在判断你是否有动机对用户插话。",
@@ -4930,7 +4938,7 @@ impl ProactiveOrchestrator {
                 "你的当前状态：",
                 "与用户的亲密度：",
                 "最近旁观记忆：",
-                "判断你此刻是否有动机插话。插话应该是偶发的——只在以下情况插话:\n- 话题确实引起了你的兴趣（你自己的兴趣，不是室友的）\n- 你有独特的看法或吐槽\n- 情境自然适合插话\n不要因为「能插话就插话」。大多数时候应该保持沉默。如果你当前疲劳度高，或者情绪不适合，或者话题与你无关，就不要插话。\n返回 JSON: {\"should_interject\": true 或 false}",
+                "判断你此刻是否有动机插话。插话应该是偶发的——只在以下情况插话:\n- 话题确实引起了你的兴趣（你自己的兴趣，不是室友的）\n- 你有室友尚未表达过的相关感受、好奇或个人补充\n- 情境自然适合插话\n不要因为「能插话就插话」。大多数时候应该保持沉默。如果你当前疲劳度高，或者情绪不适合，或者话题与你无关，就不要插话。\n返回 JSON: {\"should_interject\": true 或 false}",
             ),
         };
 
@@ -4991,22 +4999,8 @@ impl ProactiveOrchestrator {
                 "[Proactive:{}] 主动旁观插话评估：决定插话",
                 self.char_id
             );
-            // 构造插话指令（传给 brain.think 作为 user_input，出现在完整 prompt 末尾）
-            let (directive_scene, directive_instr) = match crate::pipeline::prompt_modules::normalize_lang(lang) {
-                "en" => (
-                    format!("You just overheard a conversation between the user and {}:\n{}\n\nNow you want to chime in.", speaker_name, overheard),
-                    "Address the USER, not your roommate. This is you butting into THEIR conversation. You may comment on or tease about the topic you heard, but don't pretend to share your roommate's interests — your own interests are your own.",
-                ),
-                "ja" => (
-                    format!("ユーザーと{}の会話を聞いてしまった:\n{}\n\n今、口を挟みたい。", speaker_name, overheard),
-                    "ユーザーに向けて。ルームメイトではなく。これは彼らの会話に割り込むあなた。聞いた話題についてコメントしたりからかったりするのはいいが、ルームメイトの趣味を自分のもののように装わないで——あなたの趣味はあなた自身のもの。",
-                ),
-                _ => (
-                    format!("你刚听到用户和{}的对话:\n{}\n\n现在你想插话。", speaker_name, overheard),
-                    "对用户说，不是对室友。这是你插进他们的对话。你可以评论或吐槽听到的话题，但不要假装和室友有同样的兴趣——你的兴趣是你自己的。",
-                ),
-            };
-            Some(format!("{}\n\n{}", directive_scene, directive_instr))
+            // 内部场景给出发言机会，不替角色预先决定态度或吐槽内容。
+            Some(build_bystander_interjection_directive(&overheard))
         } else {
             tracing::debug!(
                 "[Proactive:{}] 主动旁观插话评估：决定不插话",
@@ -5786,5 +5780,19 @@ mod ignored_speech_trend_tests {
     fn test_repeated_non_response_reduces_desire() {
         assert!(trend(3) < 0.0);
         assert!(trend(5) < trend(3));
+    }
+}
+
+#[cfg(test)]
+mod natural_delivery_tests {
+    #[test]
+    fn natural_delivery_bystander_prompt_keeps_attribution_and_optional_turn() {
+        let exchange = "[User says to Nana] 我准备公开这份作品\n[Nana says to User] 你花了不少心思呀";
+        let directive = super::build_bystander_interjection_directive(exchange);
+        assert!(directive.contains(exchange));
+        assert!(directive.contains("DIALOGUE DATA"));
+        assert!(directive.contains("runtime silence schema"));
+        assert!(!directive.contains("现在你想插话"));
+        assert!(!directive.contains("可以评论或吐槽"));
     }
 }

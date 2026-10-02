@@ -1,0 +1,32 @@
+import assert from 'node:assert/strict';
+import { build } from 'esbuild';
+const { outputFiles } = await build({entryPoints:['src/components/settings/llmProbe.ts'],bundle:true,write:false,platform:'node',format:'esm'});
+const { runProbeBatch, classifyProbeError } = await import('data:text/javascript;base64,'+Buffer.from(outputFiles[0].text).toString('base64'));
+const a={key:'main',providerType:'gemini',endpoint:'https://example.test/v1/',model:'m',apiKey:'dummy',apiSecret:'',appId:''};
+let calls=0; const results={};
+await runProbeBatch([a,{...a,key:'chat',endpoint:'https://example.test/v1'},{...a,key:'other',model:'other'},{...a,key:'empty',model:''}],async()=>{calls++;return {state:'ok'};},(keys,r)=>keys.forEach(k=>results[k]=r));
+assert.equal(calls,2); assert.equal(results.chat,results.main); assert.equal(results.empty.state,'skipped');
+assert.equal(classifyProbeError('User location is not supported for the API use.').errorKind,'region');
+assert.equal(classifyProbeError('429 RESOURCE_EXHAUSTED "retryDelay": "55s"').retrySeconds,55);
+assert.equal(classifyProbeError('429 Please retry in 55.47s').retrySeconds,56);
+const q={...a,key:'quota',model:'limited'};
+let time=1000; calls=0;
+const probe=async()=>{calls++;return {state:'error',error:'429 "retryDelay": "55s"'};};
+await runProbeBatch([q],probe,()=>{},()=>time);
+time+=1000;
+let result;
+await runProbeBatch([q],probe,(_,r)=>result=r,()=>time);
+assert.equal(calls,1);assert.equal(result.retrySeconds,54);
+time+=55000;
+await runProbeBatch([q],probe,()=>{},()=>time);assert.equal(calls,2);
+let active=0;
+await runProbeBatch([a,{...a,key:'different-key',apiKey:'different'}],async()=>{assert.equal(active++,0);await Promise.resolve();active--;return {state:'ok'};},()=>{});
+console.log('LLM probe checks passed: dedup, credential isolation, sequential requests, errors and cooldown.');
+
+calls=0;
+await runProbeBatch([a,{...a,key:'no-temperature',sendTemperature:false},{...a,key:'no-tokens',sendMaxTokens:false}],async()=>{calls++;return {state:'ok'};},()=>{});
+assert.equal(calls,3,'Different parameter switches need independent probes');
+
+calls=0;
+await runProbeBatch([a,{...a,key:'thought',reasoning:{mode:'On',effort:'Low'}},{...a,key:'raw',reasoningOverrides:{thinking:{type:'disabled'}}}],async()=>{calls++;return {state:'ok'};},()=>{});
+assert.equal(calls,3,'Reasoning preferences and overrides must be probed independently');

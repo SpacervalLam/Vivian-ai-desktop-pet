@@ -324,7 +324,7 @@ pub fn create_task_provider(
         model: task_config.model.clone(),
     };
 
-    create_provider_by_kind(
+    let provider = create_provider_by_kind(
         kind,
         &task_config.provider_type,
         &provider_config,
@@ -337,7 +337,15 @@ pub fn create_task_provider(
         CacheStrategy::from_str(&config.tools.cache_strategy),
         &config.base.language,
         true,
-    )
+    )?;
+    provider.set_request_parameters(task_config.send_temperature.unwrap_or(config.ai.send_temperature), task_config.send_max_tokens.unwrap_or(config.ai.send_max_tokens));
+    if let Some(overrides) = &task_config.reasoning_overrides { crate::providers::reasoning_profiles::validate_patch(overrides).map_err(VivianError::Provider)?; }
+    provider.set_request_customization(crate::providers::reasoning_profiles::RequestCustomization {
+        profile: crate::providers::reasoning_profiles::resolve(&task_config.provider_type, &task_config.model),
+        overrides: task_config.reasoning_overrides.clone(),
+    });
+    provider.set_reasoning_pref(task_config.reasoning.or(config.ai.reasoning));
+    Ok(provider)
 }
 
 /// 为 API 可用性探测（一键检测）创建"裸" provider
@@ -389,7 +397,7 @@ pub fn create_probe_provider(
         model: task_config.model.clone(),
     };
 
-    create_provider_by_kind(
+    let provider = create_provider_by_kind(
         kind,
         &task_config.provider_type,
         &provider_config,
@@ -402,7 +410,15 @@ pub fn create_probe_provider(
         CacheStrategy::from_str(&config.tools.cache_strategy),
         &config.base.language,
         false,
-    )
+    )?;
+    provider.set_request_parameters(task_config.send_temperature.unwrap_or(config.ai.send_temperature), task_config.send_max_tokens.unwrap_or(config.ai.send_max_tokens));
+    if let Some(overrides) = &task_config.reasoning_overrides { crate::providers::reasoning_profiles::validate_patch(overrides).map_err(VivianError::Provider)?; }
+    provider.set_request_customization(crate::providers::reasoning_profiles::RequestCustomization {
+        profile: crate::providers::reasoning_profiles::resolve(&task_config.provider_type, &task_config.model),
+        overrides: task_config.reasoning_overrides.clone(),
+    });
+    provider.set_reasoning_pref(task_config.reasoning.or(config.ai.reasoning));
+    Ok(provider)
 }
 
 /// 按协议类型分发到具体 Provider 实现
@@ -454,6 +470,7 @@ fn create_provider_by_kind(
             let provider = GeminiProvider::new(
                 &provider_config.api_key,
                 &provider_config.model,
+                &provider_config.base_url,
                 temperature,
                 max_tokens,
                 effective_proxy_url,

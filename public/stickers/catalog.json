@@ -1,0 +1,218 @@
+[
+  {
+    "id": "vivian_happy_01",
+    "character_id": "vivian",
+    "label": "开心",
+    "meaning": "分享开心，轻松的喜悦",
+    "version": "2",
+    "builtin": true,
+    "filename": "vivian_happy_01-v2.webp"
+  },
+  {
+    "id": "vivian_shy_01",
+    "character_id": "vivian",
+    "label": "害羞",
+    "meaning": "收到亲近或赞美，轻微害羞",
+    "version": "2",
+    "builtin": true,
+    "filename": "vivian_shy_01-v2.webp"
+  },
+  {
+    "id": "vivian_curious_01",
+    "character_id": "vivian",
+    "label": "好奇",
+    "meaning": "轻松地好奇或疑惑",
+    "version": "2",
+    "builtin": true,
+    "filename": "vivian_curious_01-v2.webp"
+  },
+  {
+    "id": "vivian_proud_01",
+    "character_id": "vivian",
+    "label": "得意",
+    "meaning": "分享自己的小成就",
+    "version": "2",
+    "builtin": true,
+    "filename": "vivian_proud_01-v2.webp"
+  },
+  {
+    "id": "vivian_thanks_01",
+    "character_id": "vivian",
+    "label": "谢谢",
+    "meaning": "感谢对方的用心",
+    "version": "2",
+    "builtin": true,
+    "filename": "vivian_thanks_01-v2.webp"
+  },
+  {
+    "id": "vivian_cheer_01",
+    "character_id": "vivian",
+    "label": "加油",
+    "meaning": "对方欢迎的轻松鼓励",
+    "version": "2",
+    "builtin": true,
+    "filename": "vivian_cheer_01-v2.webp"
+  },
+  {
+    "id": "vivian_laugh_01",
+    "character_id": "vivian",
+    "label": "笑了",
+    "meaning": "一起觉得好笑",
+    "version": "2",
+    "builtin": true,
+    "filename": "vivian_laugh_01-v2.webp"
+  },
+  {
+    "id": "vivian_okay_01",
+    "character_id": "vivian",
+    "label": "好呀",
+    "meaning": "轻松地答应或确认",
+    "version": "2",
+    "builtin": true,
+    "filename": "vivian_okay_01-v2.webp"
+  },
+  {
+    "id": "vivian_wave_01",
+    "character_id": "vivian",
+    "label": "挥手",
+    "meaning": "打招呼或结束聊天",
+    "version": "2",
+    "builtin": true,
+    "filename": "vivian_wave_01-v2.webp"
+  },
+  {
+    "id": "vivian_sleepy_01",
+    "character_id": "vivian",
+    "label": "困啦",
+    "meaning": "自己轻松地道晚安",
+    "version": "2",
+    "builtin": true,
+    "filename": "vivian_sleepy_01-v2.webp"
+  },
+  {
+    "id": "vivian_surprise_01",
+    "character_id": "vivian",
+    "label": "惊喜",
+    "meaning": "对分享的好消息感到惊喜",
+    "version": "2",
+    "builtin": true,
+    "filename": "vivian_surprise_01-v2.webp"
+  },
+  {
+    "id": "vivian_heart_01",
+    "character_id": "vivian",
+    "label": "喜欢",
+    "meaning": "符合当前关系的温暖表达",
+    "version": "2",
+    "builtin": true,
+    "filename": "vivian_heart_01-v2.webp"
+  },
+  {
+    "id": "nana_happy_01",
+    "character_id": "nana",
+    "label": "开心",
+    "meaning": "分享开心，轻松的喜悦",
+    "version": "2",
+    "builtin": true,
+    "filename": "nana_happy_01-v2.webp"
+  },
+  {
+    "id": "nana_shy_01",
+    "character_id": "nana",
+    "label": "害羞",
+    "meaning": "收到亲近或赞美，轻微害羞",
+    "version": "2",
+    "builtin": true,
+    "filename": "nana_shy_01-v2.webp"
+  },
+  {
+    "id": "nana_curious_01",
+    "character_id": "nana",
+    "label": "好奇",
+    "meaning": "轻松地好奇或疑惑",
+    "version": "2",
+    "builtin": true,
+    "filename": "nana_curious_01-v2.webp"
+  },
+  {
+    "id": "nana_proud_01",
+    "character_id": "nana",
+    "label": "得意",
+    "meaning": "分享自己的小成就",
+    "version": "2",
+    "builtin": true,
+    "filename": "nana_proud_01-v2.webp"
+  },
+  {
+    "id": "nana_thanks_01",
+    "character_id": "nana",
+    "label": "谢谢",
+    "meaning": "感谢对方的用心",
+    "version": "2",
+    "builtin": true,
+    "filename": "nana_thanks_01-v2.webp"
+  },
+  {
+    "id": "nana_cheer_01",
+    "character_id": "nana",
+    "label": "加油",
+    "meaning": "对方欢迎的轻松鼓励",
+    "version": "2",
+    "builtin": true,
+    "filename": "nana_cheer_01-v2.webp"
+  },
+  {
+    "id": "nana_laugh_01",
+    "character_id": "nana",
+    "label": "笑了",
+    "meaning": "一起觉得好笑",
+    "version": "2",
+    "builtin": true,
+    "filename": "nana_laugh_01-v2.webp"
+  },
+  {
+    "id": "nana_okay_01",
+    "character_id": "nana",
+    "label": "好呀",
+    "meaning": "轻松地答应或确认",
+    "version": "2",
+    "builtin": true,
+    "filename": "nana_okay_01-v2.webp"
+  },
+  {
+    "id": "nana_wave_01",
+    "character_id": "nana",
+    "label": "挥手",
+    "meaning": "打招呼或结束聊天",
+    "version": "2",
+    "builtin": true,
+    "filename": "nana_wave_01-v2.webp"
+  },
+  {
+    "id": "nana_sleepy_01",
+    "character_id": "nana",
+    "label": "困啦",
+    "meaning": "自己轻松地道晚安",
+    "version": "2",
+    "builtin": true,
+    "filename": "nana_sleepy_01-v2.webp"
+  },
+  {
+    "id": "nana_surprise_01",
+    "character_id": "nana",
+    "label": "惊喜",
+    "meaning": "对分享的好消息感到惊喜",
+    "version": "2",
+    "builtin": true,
+    "filename": "nana_surprise_01-v2.webp"
+  },
+  {
+    "id": "nana_heart_01",
+    "character_id": "nana",
+    "label": "喜欢",
+    "meaning": "符合当前关系的温暖表达",
+    "version": "2",
+    "builtin": true,
+    "filename": "nana_heart_01-v2.webp"
+  }
+]

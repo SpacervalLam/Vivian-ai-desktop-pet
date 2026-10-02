@@ -989,6 +989,9 @@ pub struct ProcessedResponse {
     /// 微信渠道语音消息标志：为 true 时前端不显示文本，合成 TTS 后以语音气泡发出
     #[serde(default)]
     pub voice_message: bool,
+    /// Optional local sticker ID, validated by the host before delivery.
+    #[serde(default)]
+    pub sticker_id: Option<String>,
     /// 本轮回复实际依赖的记忆条目 id（归因/调试用）。
     ///
     /// **前端永不展示**：这是内部可追溯性字段，不是给用户看的引用。见
@@ -1252,6 +1255,7 @@ impl JsonProcessor {
             intent: get_str("intent", "reply"),
             response_mode: get_str("response_mode", "speak"),
             voice_message,
+            sticker_id: map.and_then(|m|m.get("sticker_id")).and_then(Value::as_str).filter(|id|!id.is_empty()).map(str::to_string),
             memory_used,
             tool_calls,
         }

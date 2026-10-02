@@ -220,6 +220,9 @@ impl ModelRouter {
                 endpoint: endpoint.to_string(),
                 api_secret: config.ai.api_secret.clone().unwrap_or_default(),
                 app_id: config.ai.app_id.clone().unwrap_or_default(),
+                send_temperature: None,
+                send_max_tokens: None,
+                reasoning_overrides: config.ai.reasoning_overrides.clone(),
                 temperature: None,
                 max_tokens: None,
                 context_window: None,
@@ -388,19 +391,18 @@ impl ModelRouter {
             );
             return None;
         }
-        // 编程输出预算按服务商分级默认，忽略历史保存的 max_tokens：
-        // 该字段已从设置界面移除（用户不应关心单次输出上限），
-        // 旧版本保存的 2048 等小预算会限制代码生成。
+        // 用户填写的预算优先；未填写时使用编程默认预算。发送开关由 factory 应用。
         let mut cfg = cfg.clone();
-        cfg.max_tokens = Some(crate::providers::factory::work_model_default_max_tokens(
+        cfg.send_max_tokens = Some(cfg.send_max_tokens.unwrap_or(true));
+        cfg.max_tokens = cfg.max_tokens.or_else(|| Some(crate::providers::factory::work_model_default_max_tokens(
             &cfg.provider_type,
             &cfg.endpoint,
-        ));
+        )));
         match create_task_provider(&cfg, config, client_cache) {
             Ok(p) => {
                 // 工作智能体请求省略 temperature（服务端默认）：
                 // 编程任务要确定性，且推理模型对非默认温度敏感
-                p.set_omit_temperature(true);
+                p.set_omit_temperature(cfg.send_temperature.is_none());
                 tracing::info!(
                     "[ModelRouter] 已恢复工作智能体模型覆盖: {} @ {}",
                     cfg.model,
@@ -445,6 +447,10 @@ impl ModelRouter {
     /// 是否已配置主 LLM API（`config.ai` 三项字段齐全且 provider 构建成功）
     pub fn has_main_provider(&self) -> bool {
         self.main_provider.is_some()
+    }
+
+    pub fn has_task_provider(&self, task_type: &str) -> bool {
+        self.enable_routing_matrix && self.task_providers.contains_key(task_type)
     }
 
     /// 注入 Tauri AppHandle，启用 `chat:route_fallback` 事件发送能力
@@ -1411,18 +1417,18 @@ impl ModelRouter {
         task_config: &TaskRouteConfig,
         config: &AppConfig,
     ) -> VivianResult<()> {
-        // 编程输出预算按服务商分级默认（忽略传入的 max_tokens，理由见
-        // build_reasoning_override）：该字段已从设置界面移除，用户不应关心。
+        // 用户填写的预算优先；未填写时使用编程默认预算。
         let mut cfg = task_config.clone();
-        cfg.max_tokens = Some(crate::providers::factory::work_model_default_max_tokens(
+        cfg.send_max_tokens = Some(cfg.send_max_tokens.unwrap_or(true));
+        cfg.max_tokens = cfg.max_tokens.or_else(|| Some(crate::providers::factory::work_model_default_max_tokens(
             &cfg.provider_type,
             &cfg.endpoint,
-        ));
+        )));
         match create_task_provider(&cfg, config, &self.client_cache) {
             Ok(provider) => {
                 // 工作智能体请求省略 temperature（服务端默认）：
                 // 编程任务要确定性，且推理模型对非默认温度敏感
-                provider.set_omit_temperature(true);
+                provider.set_omit_temperature(cfg.send_temperature.is_none());
                 tracing::info!(
                     "[ModelRouter] 工作智能体模型 {} 已切换 {} @ {}",
                     task_config.model,

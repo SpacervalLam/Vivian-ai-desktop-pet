@@ -592,12 +592,12 @@ pub fn load_style_preset(name: &str) -> &'static str {
 static VIVIAN_PERSONA_FLAGS: &[&str] = &[
     "IDENTITY_VIVIAN",
     "SELF_CLAIM_AI_DESKTOP_COMPANION",
-    "ROLE_FRIEND_NOT_SERVANT",
+    "ROLE_EQUAL_COMPANION",
     "PERSONALITY_TSUNDERE_HEART",
     "TSUNDERE_WARMTH_OVER_HOSTILITY",
     "PERSONALITY_CURIOUS_PLAYFUL_INDEPENDENT",
     "PERSONALITY_STEADY_TEMPER_NO_GRUDGE",
-    "BEHAVIOR_CARE_BY_ACTION",
+    "CARE_THROUGH_WORDS_AND_ACTION_WHEN_RELEVANT",
     "SPEECH_CASUAL_TYPING",
     "ALLOW_SLANG_INTERNET",
     "PRONOUN_WO",
@@ -605,7 +605,7 @@ static VIVIAN_PERSONA_FLAGS: &[&str] = &[
     "REFUSE_UNSOLICITED_LECTURE",
     "DIRECT_NOT_DISRESPECTFUL",
     "REFUSE_ACTION_BRACKETS",
-    "REFUSE_FAKE_CARE_LINES",
+    "CARE_GROUNDED_IN_CURRENT_DIALOGUE",
 ];
 
 /// Nana 硬约束指令标志
@@ -614,8 +614,8 @@ static NANA_PERSONA_FLAGS: &[&str] = &[
     "SELF_CLAIM_AI_DESKTOP_COMPANION",
     "ROLE_EQUAL_FRIEND_WITH_COMPOSURE",
     "PERSONALITY_CALM_COMPOSED",
-    "PERSONALITY_GENTLE_WITH_EDGE",
-    "PERSONALITY_ATTENTIVE_INDEPENDENT_JUDGMENT",
+    "PERSONALITY_GENTLE_RECEPTIVE_WITH_OWN_PREFERENCES",
+    "PERSONALITY_ATTENTIVE_INTERESTED_IN_THE_PERSON",
     "SPEECH_CLEAR_UNHURRIED",
     "SPEECH_COMPOSED_VOCABULARY",
     "NO_FORCED_SLANG_OR_CATCHPHRASES",
@@ -623,7 +623,7 @@ static NANA_PERSONA_FLAGS: &[&str] = &[
     "FLAVOR_TEA_BOOKS_FLOWERS",
     "REFUSE_SERVICE_SPEECH",
     "REFUSE_UNSOLICITED_LECTURE",
-    "REFUSE_ACT_FAKE_GENTLE",
+    "WARMTH_THROUGH_ATTENTION_AND_RESPONSE",
     "REFUSE_ACTION_BRACKETS",
 ];
 
@@ -651,7 +651,7 @@ pub fn render_persona_flags_block(config: &PersonaConfig, lang: &str) -> String 
         } else { seeds.push(*flag); }
     }
     format!("[PERSONA_LOAD]\n[CORE_IDENTITY_AND_BOUNDARIES]\n{}\n[INITIAL_TEMPERAMENT_AND_STYLE - TENDENCIES, NOT QUOTAS]\n{}\n[END PERSONA_LOAD]",
-        core.join("\n"), seeds.join("\n"))
+        core.join("\n"), format!("{}\nWarm greetings, appreciation, playful participation and honest help are compatible with equal companionship. REFUSE_SERVICE_SPEECH excludes canned service closers, not ordinary kindness. Temperament guides a response; it never requires a tease, correction or emotional distance.", seeds.join("\n")))
 }
 
 // ============================================================================
@@ -832,6 +832,66 @@ pub fn render_character_block_tiered(
     tier: CharacterBlockTier,
 ) -> String {
     render_character_block_growing(config, lang, tier, &[])
+}
+
+/// Conversation card: readable character material, without configuration protocols
+/// or a second library of scripted reactions. Explicit overrides and learned scopes apply.
+pub fn render_dialogue_card(
+    config: &PersonaConfig, lang: &str, entries: &[super::evolution::EvolutionEntry],
+) -> String {
+    let scopes: Vec<&str> = entries.iter().filter(|e| e.active()).map(|e| e.scope.as_str()).collect();
+    let mut sections = Vec::new();
+    for section in [CharacterSection::Identity, CharacterSection::Personality,
+        CharacterSection::Speech, CharacterSection::Background, CharacterSection::Interests,
+        CharacterSection::Relationships] {
+        let text = resolve_section(config, section, lang);
+        sections.push(if section == CharacterSection::Personality && config.personality_definition.trim().is_empty() {
+            filter_seed_scenes(&text, &scopes)
+        } else { text });
+    }
+    // Identity already carries the visible silhouette. Detailed costume reference
+    // stays in the editor/full card; an explicit appearance override remains active.
+    if !config.appearance_definition.trim().is_empty() {
+        sections.push(resolve_section(config, CharacterSection::Appearance, lang));
+    }
+    sections.push(render_language_style_block(config));
+    for taboo in config.identity.taboos.iter().filter(|t| t.enabled) {
+        sections.push(taboo.prompt_instruction.clone());
+    }
+    sections.into_iter().filter(|s| !s.trim().is_empty()).collect::<Vec<_>>().join("\n\n")
+}
+
+/// Keep explicit scene edits without repeating factory response scripts.
+pub fn render_dialogue_preferences(config: &PersonaConfig, mode: SceneMode) -> String {
+    let mut lines = Vec::new();
+    if let Some(scene) = config.scene_modes.get(&mode) {
+        let factory = super::schemas::DEFAULT_SCENE_MODES.get(&mode);
+        if factory.map(|default| &default.description) != Some(&scene.description) {
+            lines.push(scene.description.clone());
+        }
+        if factory.map(|default| &default.extra_instructions) != Some(&scene.extra_instructions) {
+            lines.extend(scene.extra_instructions.clone());
+        }
+    }
+    if lines.is_empty() { String::new() } else {
+        format!("[EXPLICIT SCENE PREFERENCES]\n{}\n[/EXPLICIT SCENE PREFERENCES]", lines.join("\n"))
+    }
+}
+
+/// A small stable voice anchor when no scene example matches. Whole fictional
+/// contexts are retained; learned scene replacements and authored examples win.
+pub fn render_dialogue_seed_examples(config: &PersonaConfig, learned: &[String]) -> Option<String> {
+    if !config.few_shot_examples.examples.is_empty() { return None; }
+    let source = default_section_for(&config.identity.name, CharacterSection::Examples);
+    let offsets: Vec<_> = source.match_indices("**Example ").map(|(offset, _)| offset).collect();
+    let mut references = Vec::new();
+    for (index, start) in offsets.iter().take(2).enumerate() {
+        let scope = if index == 0 && config.identity.name == "Vivian" { "play" } else { "sharing" };
+        if learned.iter().any(|item| item == scope) { continue; }
+        let end = offsets.get(index + 1).copied().unwrap_or(source.len());
+        references.push(source[*start..end].trim());
+    }
+    (!references.is_empty()).then(|| references.join("\n\n"))
 }
 
 /// Remove only factory scene examples whose scope has acquired a supported interpretation.
@@ -1067,6 +1127,9 @@ mod tests {
                     }],
                 };
                 let grown = render_character_block_growing(&config, lang, CharacterBlockTier::Full, &[entry.clone()]);
+                let dialogue = render_dialogue_card(&config, lang, &[entry.clone()]);
+                assert!(!dialogue.contains(plain));
+                assert!(dialogue.contains(&config.identity.name));
                 assert!(!grown.contains(plain));
                 assert!(!grown.contains("WHEN_USER_SAD="));
                 assert!(grown.contains("[CORE_IDENTITY_AND_BOUNDARIES]"));
@@ -1074,6 +1137,8 @@ mod tests {
                 assert!(restored.contains(plain));
                 let mut custom = config;
                 custom.personality_definition = "My explicitly edited personality".into();
+                assert!(render_dialogue_card(&custom, lang, &[entry.clone()])
+                    .contains("My explicitly edited personality"));
                 assert!(render_character_block_growing(&custom, lang, CharacterBlockTier::Full, &[entry])
                     .contains("My explicitly edited personality"));
             }
@@ -1092,6 +1157,9 @@ mod tests {
         assert!(!v.contains("IDENTITY_NANA"));
         assert!(n.contains("IDENTITY_NANA"));
         assert!(!n.contains("IDENTITY_VIVIAN"));
+        assert!(n.contains("PERSONALITY_GENTLE_RECEPTIVE_WITH_OWN_PREFERENCES"));
+        assert!(!n.contains("REFUSE_ACT_FAKE_GENTLE"));
+        assert!(v.contains("ordinary kindness") && n.contains("ordinary kindness"));
     }
 
     #[test]

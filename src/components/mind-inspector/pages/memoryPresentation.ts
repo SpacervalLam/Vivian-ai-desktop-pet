@@ -88,6 +88,8 @@ const parseCrossSummary = (body: string, character: Character): { turns: MemoryT
 export const prepareMemory = (item: MemoryRecord, character: Character): PreparedMemory | null => {
   const speech = splitSpeechPrefix(item.content);
   const body = speech.body;
+  if (item.metadata?.speaker === 'system' || item.metadata?.system_directive === true
+    || /^(?:你刚听到用户和[^\n]+的对话[:：]|You just overheard a conversation between the user and|ユーザーと[^\n]+の会話を聞いてしまった[:：])/.test(body)) return null;
   if (!body || /^(?:Treat this as context|Respond to the latest message|JSON output|输出 JSON|tags:|importance:|protected:)/i.test(body)) return null;
   const summary = item.tags.includes('topic_summary') && item.tags.includes('cross_character')
     ? parseCrossSummary(body, character) : null;
@@ -114,14 +116,17 @@ export const buildRecentThreads = (items: MemoryRecord[], character: Character):
   curated.sort((a, b) => seconds(a.item.created_at) - seconds(b.item.created_at));
 
   const threads: Array<RecentThread & { key: string; lastTime: number }> = [];
+  const sessions = new Map<string, typeof threads[number]>();
   for (const entry of curated) {
     const channel = String(entry.item.metadata?.channel ?? 'direct');
-    const key = entry.partner ? `cross:${entry.partner}` : `channel:${channel}`;
+    const session = entry.item.metadata?.conversation_id || entry.item.metadata?.session_id;
+    const sessionId = typeof session === 'string' ? session.trim() : '';
+    // direct/wechat/proactive are entry points into the same user conversation.
+    const key = sessionId ? `session:${sessionId}` : entry.partner ? `cross:${entry.partner}` : 'user';
     const time = seconds(entry.item.created_at);
-    const last = threads[threads.length - 1];
-    const canJoin = !!last && last.key === key && time - last.lastTime <= 600
-      && last.turns.length + entry.turns.length <= 10
-      && entry.turns.every((turn) => turn.speaker);
+    const last = sessionId ? sessions.get(sessionId) : threads[threads.length - 1];
+    const canJoin = !!last && last.key === key && (sessionId || time - last.lastTime <= 1800)
+      && (sessionId || entry.turns.every((turn) => turn.speaker));
     const title = entry.partner ? `与 ${entry.partner} 的对话` : channel === 'wechat' ? '微信对话' : '对话记录';
     if (canJoin) {
       last.items.push(entry.item);
@@ -129,12 +134,14 @@ export const buildRecentThreads = (items: MemoryRecord[], character: Character):
       last.time = Math.max(last.time, entry.item.created_at);
       for (const turn of entry.turns) {
         const signature = normalized(turn.text);
-        if (signature.length < 6 || !last.turns.some((existing) => existing.speaker === turn.speaker && normalized(existing.text) === signature)) last.turns.push(turn);
+        // Only collapse duplicated summary evidence; repeated real utterances are legitimate.
+        if (!entry.isDialogueSummary || signature.length < 6 || !last.turns.some((existing) => existing.speaker === turn.speaker && normalized(existing.text) === signature)) last.turns.push(turn);
       }
       last.searchText = last.turns.map((turn) => turn.text).join(' ');
     } else {
       threads.push({ id: entry.item.id, title, time: entry.item.created_at, turns: [...entry.turns], items: [entry.item], searchText: entry.turns.map((turn) => turn.text).join(' '), key, lastTime: time });
+      if (sessionId) sessions.set(sessionId, threads[threads.length - 1]);
     }
   }
-  return threads.reverse();
+  return threads.sort((a, b) => seconds(b.time) - seconds(a.time));
 };

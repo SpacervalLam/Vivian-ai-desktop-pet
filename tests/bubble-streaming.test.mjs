@@ -125,5 +125,44 @@ controller.finishStreaming(sentence + '下一句。');
 advance(500);
 assert.equal(controller.currentBubble, '下一句。');
 controller.closeAll();
+// Standalone stickers bypass the typewriter and expire independently.
+const sticker = {id:'vivian_happy_01',character_id:'vivian',version:'2',label:'开心',meaning:'喜悦'};
+controller.showSticker(sticker);
+assert.equal(controller.currentBubble, null);
+assert.equal(frames.size, 0);
+assert.equal(useAppStore.getState().settledBubbles[0].sticker, sticker);
+advance(3900);
+assert.equal(controller.hasActiveBubble, true);
+advance(200);
+assert.equal(controller.hasActiveBubble, false);
+
+// A text attachment appears after reveal, and survives the text's shorter dwell.
+controller.showBubble('你好', undefined, {sticker});
+assert.equal(useAppStore.getState().settledBubbles.length, 0);
+advance(500);
+assert.equal(controller.currentBubble, '你好');
+assert.equal(useAppStore.getState().settledBubbles[0].sticker, sticker);
+advance(3000);
+assert.equal(controller.currentBubble, null);
+assert.equal(useAppStore.getState().settledBubbles.length, 1);
+advance(1000);
+assert.equal(controller.hasActiveBubble, false);
+
+// Streaming completion carries an attachment; replacement cancels pending artwork.
+controller.showStreamingBubble('🙂'.repeat(40));
+controller.finishStreaming('🙂'.repeat(40), {sticker});
+advance(16);
+assert.equal(useAppStore.getState().settledBubbles.length, 0);
+controller.showBubble('换一句');
+advance(1000);
+assert.equal(useAppStore.getState().settledBubbles.length, 0);
+controller.closeAll();
+controller.showStreamingBubble('好呀');
+controller.finishStreaming('好呀', {sticker});
+advance(500);
+assert.equal(useAppStore.getState().settledBubbles[0].sticker, sticker);
+controller.closeAll();
+assert.equal(frames.size, 0);
+assert.equal(timers.size, 0);
 unsubscribe();
 console.log('Bubble segmentation, reveal queue, adaptive dwell, movement geometry and cleanup: passed');

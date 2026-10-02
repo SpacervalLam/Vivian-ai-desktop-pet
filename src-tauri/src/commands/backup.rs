@@ -172,11 +172,16 @@ fn write_archive(root: &Path, dest: &Path) -> Result<u64, String> {
         .map_err(|e| format!("写入备份失败: {e}"))?;
     enc.write_all(&header).map_err(|e| format!("写入备份失败: {e}"))?;
     let mut count = 0u64;
-    for (rel, _size) in &files {
+    for (rel, size) in &files {
         // 清单路径为 '/' 分隔；Windows 文件系统 API 同样接受 '/' 分隔符
         let src = root.join(rel);
         let mut f = std::fs::File::open(&src).map_err(|e| format!("打开 {} 失败: {e}", src.display()))?;
-        std::io::copy(&mut f, &mut enc).map_err(|e| format!("写入 {} 失败: {e}", src.display()))?;
+        // 文件可能在打包期间继续追加；严格遵守清单长度，避免后续文件错位。
+        let copied = std::io::copy(&mut (&mut f).take(*size), &mut enc)
+            .map_err(|e| format!("写入 {} 失败: {e}", src.display()))?;
+        if copied != *size {
+            return Err(format!("备份期间文件被截断: {}，请重试备份", src.display()));
+        }
         count += 1;
     }
     enc.finish()
@@ -267,8 +272,7 @@ fn extract_archive(archive: &Path, dest: &Path) -> Result<u64, String> {
 
 /// 一键备份：把用户数据目录压缩为 `<dest>/<vivian_backup_时间戳>.altn`
 ///
-/// 备份前先 flush 各角色 MemoryManager，确保内存中的记忆条目落盘，
-/// 让备份中的 SQLite 文件尽量新。
+/// 备份前刷新各角色对话和记忆；落盘失败时不生成成功备份。
 #[tauri::command]
 pub async fn backup_user_data(
     dest_dir: String,
@@ -284,13 +288,14 @@ pub async fn backup_user_data(
         return Err("备份保存位置不能在应用数据目录内部（恢复时会被清除）".to_string());
     }
 
-    // 先落盘各角色记忆（best effort，失败不阻塞备份）
+    // 对话可能仍在两秒缓冲窗口内，必须先落盘再收集备份清单。
     {
         let chars = state.characters.read();
         for (id, instance) in chars.iter() {
-            if let Err(e) = instance.brain.memory.flush() {
-                tracing::warn!("[backup] 角色 {} 记忆落盘失败（继续备份）: {e}", id);
-            }
+            instance.brain.dialogue.force_flush()
+                .map_err(|e| format!("角色 {id} 对话落盘失败，备份已取消: {e}"))?;
+            instance.brain.memory.flush()
+                .map_err(|e| format!("角色 {id} 记忆落盘失败，备份已取消: {e}"))?;
         }
     }
 
@@ -306,7 +311,10 @@ pub async fn backup_user_data(
 
     let user_data_clone = user_data.clone();
     let result_path = tokio::task::spawn_blocking(move || -> Result<PathBuf, String> {
-        let files = write_archive(&user_data_clone, &archive_path)?;
+        let files = write_archive(&user_data_clone, &archive_path).map_err(|e| {
+            let _ = std::fs::remove_file(&archive_path);
+            e
+        })?;
         tracing::info!(
             "[backup] 备份完成：{} 个文件 → {}",
             files,
@@ -568,6 +576,57 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<u64, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn conversation_backup_restore_preserves_original_bytes() {
+        let tmp = std::env::temp_dir().join(format!("vivian_conversation_backup_{}", uuid::Uuid::new_v4()));
+        let src = tmp.join("src");
+        let dest = tmp.join("dest");
+        let archive = tmp.join("conversation.altn");
+        let records = [
+            ("characters/vivian/companion-v2/history/chat_history.jsonl", "{\"role\":\"user\",\"content\":\"原文：你好 🌸\\n第二行\"}\n{\"role\":\"assistant\",\"content\":\"完整回复\"}\n"),
+            ("characters/vivian/companion-v2/memory/conversation_archive.jsonl", "{\"level\":2,\"summary\":\"压缩摘要\"}\n"),
+            ("characters/nana/companion-v2/history/chat_history.jsonl", "{\"role\":\"user\",\"content\":\"另一角色原文\"}\n"),
+            ("characters/vivian/history/full_chat_history.json.migrated", "[\"旧版对话备份\"]"),
+        ];
+        for (rel, content) in records {
+            let path = src.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, content.as_bytes()).unwrap();
+        }
+        assert_eq!(write_archive(&src, &archive).unwrap(), records.len() as u64);
+        std::fs::create_dir_all(&dest).unwrap();
+        run_restore(&dest, &archive).unwrap();
+        for (rel, content) in records {
+            assert_eq!(std::fs::read(dest.join(rel)).unwrap(), content.as_bytes(), "{rel}");
+        }
+        std::fs::remove_dir_all(tmp).unwrap();
+    }
+
+    #[test]
+    fn incomplete_backup_does_not_clear_existing_conversation() {
+        let tmp = std::env::temp_dir().join(format!("vivian_incomplete_backup_{}", uuid::Uuid::new_v4()));
+        let root = tmp.join("data");
+        let history = root.join("characters/vivian/companion-v2/history/chat_history.jsonl");
+        std::fs::create_dir_all(history.parent().unwrap()).unwrap();
+        std::fs::write(&history, "现有对话原文").unwrap();
+        let manifest = ArchiveManifest {
+            version: 1,
+            created_at: String::new(),
+            dirs: vec![],
+            files: vec![ArchiveFileEntry { path: "characters/vivian/companion-v2/history/chat_history.jsonl".into(), size: 100 }],
+        };
+        let header = serde_json::to_vec(&manifest).unwrap();
+        let mut payload = ARCHIVE_MAGIC.to_vec();
+        payload.extend_from_slice(&(header.len() as u32).to_le_bytes());
+        payload.extend_from_slice(&header);
+        payload.extend_from_slice(b"short");
+        let archive = tmp.join("incomplete.altn");
+        std::fs::write(&archive, zstd::encode_all(payload.as_slice(), 3).unwrap()).unwrap();
+        assert!(run_restore(&root, &archive).is_err());
+        assert_eq!(std::fs::read_to_string(&history).unwrap(), "现有对话原文");
+        std::fs::remove_dir_all(tmp).unwrap();
+    }
 
     /// 归档写读往返：目录结构、文件内容、排除规则、清单路径一致性
     #[test]

@@ -95,7 +95,8 @@ const MemoryPage: React.FC<{ initialLayer?: Layer }> = ({ initialLayer = 'facts'
     return () => { cancelled = true; unlisten?.(); };
   }, [character, load]);
 
-  const recentThreads = useMemo(() => buildRecentThreads(items.filter((item) => layerOf(item) === 'recent'), character), [items, character]);
+  const recentThreads = useMemo(() => buildRecentThreads(items.filter((item) => layerOf(item) === 'recent'
+    || (layerOf(item) === 'outreach' && !!(item.metadata?.conversation_id || item.metadata?.session_id))), character), [items, character]);
   const counts = useMemo(() => items.reduce((acc, item) => {
     const key = layerOf(item);
     if (key && key !== 'recent' && prepareMemory(item, character)) acc[key]++;
@@ -136,12 +137,12 @@ const MemoryPage: React.FC<{ initialLayer?: Layer }> = ({ initialLayer = 'facts'
       <div className="memory-list-heading"><activeTab.icon size={17} /><strong>{activeTab.title}</strong><span>{counts[layer]} {layer === 'recent' ? '组' : '条'}</span></div>
       <label className="memory-search"><Search size={16} /><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索这里的记忆" aria-label="搜索记忆" /></label>
     </div>
-    {layer === 'recent' && <p className="memory-list-note">按交流整理的近期片段；系统提示和重复记录已隐藏。这些片段之后会逐渐整理成共同经历。</p>}
+    {layer === 'recent' && <p className="memory-list-note">每张卡片记录一次会话，包含连续发言和多轮交流；之后会逐渐整理成共同经历。</p>}
     {layer === 'outreach' && <p className="memory-list-note">包含启动时的问候，以及从桌面或私聊主动发起的交流。</p>}
     {error && <p className="memory-error" role="alert">{error}</p>}
     {loading ? <div className="memory-empty">正在读取记忆…</div> : (layer === 'recent' ? visibleThreads.length === 0 : visible.length === 0) ? <div className="memory-empty"><Clock3 size={24} /><strong>{query ? '没有找到匹配的记忆' : `还没有${activeTab.title}的记录`}</strong><span>{query ? '试试其他关键词' : '有新的交流时，这里会慢慢丰富起来'}</span></div> : layer === 'recent' ? <div className="memory-thread-list">
       {visibleThreads.map((thread) => <article className="memory-thread" key={thread.id}>
-        <div className="memory-thread-header"><span className="memory-thread-title"><MessageCircle size={15} />{thread.title}</span><span className="memory-thread-count">{thread.turns.length} 则交流</span><time>{dateText(thread.time)}</time></div>
+        <div className="memory-thread-header"><span className="memory-thread-title"><MessageCircle size={15} />{thread.title}</span><span className="memory-thread-count">{thread.turns.length} 条消息</span><time>{dateText(thread.time)}</time></div>
         <div className="memory-thread-turns">{thread.turns.map((turn, index) => <div className={`memory-thread-turn${turn.speaker ? '' : ' memory-thread-turn-plain'}`} key={`${thread.id}-${index}`}>
           {turn.speaker && <span className="memory-thread-speaker">{turn.speaker}</span>}
           <p><HighlightedText text={turn.text} query={query} /></p>

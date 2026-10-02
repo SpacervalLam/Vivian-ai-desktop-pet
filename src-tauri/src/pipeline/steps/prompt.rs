@@ -653,14 +653,15 @@ impl PromptBuildingStep {
                     .as_ref()
                     .map(|psy| psy.relationship().intimacy * 100.0)
                     .unwrap_or(0.0);
-                let style = p.build_style_prompt(intimacy, hour);
+                p.build_style_prompt(intimacy, hour);
+                let style = p.dialogue_preferences();
                 let cfg = p.get_config();
                 let preset = crate::persona::prompt_render::render_style_preset_block(&cfg, &self.language);
                 // Explicit user-authored examples retain precedence. Factory examples are retrieved per turn.
                 let examples = if self.tone_injector.is_none() || !cfg.few_shot_examples.examples.is_empty() {
                     Some(crate::persona::prompt_render::render_examples_block_tiered(&cfg, &self.language, tier))
                 } else { None };
-                (Some(p.get_character_block_tiered(tier)), examples, Some(style), if preset.is_empty() { None } else { Some(preset) })
+                (Some(p.dialogue_card()), examples, Some(style), if preset.is_empty() { None } else { Some(preset) })
             }
             None => (None, None, None, None),
         };
@@ -694,6 +695,14 @@ impl PromptBuildingStep {
 
         PreparedPromptContext { character_block, examples_block, style_block, style_preset_block,
             memory_md_section, user_facts_section, skill_section }
+    }
+
+    pub(crate) fn voice_seed_examples(&self) -> Option<String> {
+        self.persona.as_ref().and_then(|persona| {
+            let learned: Vec<_> = persona.evolution_entries().into_iter().filter(|entry| entry.active())
+                .map(|entry| entry.scope).collect();
+            crate::persona::prompt_render::render_dialogue_seed_examples(&persona.get_config(), &learned)
+        })
     }
 
     fn build_parts_prepared(&self, state: &PipelineState, tool_scope: Option<&ToolScope>, prepared: Option<PreparedPromptContext>) -> PromptParts {
@@ -1541,12 +1550,12 @@ impl PromptBuildingStep {
                     .await.ok().flatten();
                 if let Some(examples) = examples {
                     state.metadata["retrieved_example_chars"] = json!(examples.chars().count());
-                    parts.tone_injection = Some(match parts.tone_injection.take() {
-                        Some(tone) => format!("{tone}\n\n{examples}"),
-                        None => examples,
-                    });
+                    parts.examples_block = Some(examples);
                 }
             }
+        }
+        if parts.examples_block.is_none() {
+            parts.examples_block = self.voice_seed_examples();
         }
         let task_type = config.as_ref().map(RunnableConfig::task_type)
             .unwrap_or_else(|| "chat".to_string());
@@ -1569,10 +1578,17 @@ impl PromptBuildingStep {
             }
         }
 
-        // 使用模板引擎的 enriched builder：产出 prompt + 每个 section 的元数据
-        // Section 列表由 template_engine::section_schema() 统一定义，消除硬编码
-        let enriched =
-            crate::pipeline::template_engine::build_prompt_with_sections(&parts);
+        // Actual retained companion blocks drive both API assembly and Inspector.
+        state.metadata["sticker_character_id"] = json!(parts.char_id);
+        let companion = crate::pipeline::companion_prompt::CompanionPrompt::build(&parts, &state.messages);
+        let prompt_text = companion.render();
+        let enriched = crate::pipeline::template_engine::PromptRenderResult {
+            total_chars: prompt_text.chars().count(),
+            total_tokens: crate::memory::time_stamped::estimate_tokens(&prompt_text),
+            prompt: prompt_text,
+            sections: companion.sections(),
+        };
+        state.metadata["companion_prompt"] = json!(companion);
 
         // 将 SectionRenderInfo 数组序列化到 metadata，供 Mind Inspector 前端使用
         // （BrainChatChain::ainvoke 据此构造 PromptBreakdown）
@@ -1650,7 +1666,7 @@ impl PromptBuildingStep {
         state.system_prompt = prompt.clone();
         state.prompt = prompt;
         state.metadata["prompt_length"] = json!(state.system_prompt.chars().count());
-        state.metadata["prompt_sections"] = json!(12);
+        state.metadata["prompt_sections"] = json!(enriched.sections.len());
 
         Ok(state.to_json())
     }
@@ -1850,6 +1866,24 @@ fn format_schedule_signals(assessment: &ScheduleAssessment) -> Option<String> {
 mod component_selection_tests {
     use super::*;
     use crate::emotion::{DimensionResult, FastPerceptionResult};
+
+    #[tokio::test]
+    async fn companion_prompt_reaches_generation_metadata_and_inspector() {
+        let state = PipelineState { should_respond: true, user_input: "unique_input".into(),
+            memory_text: "unique_recalled_evidence".into(), ..Default::default() };
+        let result = PromptBuildingStep::new().ainvoke(state.to_json(), None).await.unwrap();
+        let state = PipelineState::from_json(result);
+        let companion: crate::pipeline::companion_prompt::CompanionPrompt =
+            serde_json::from_value(state.metadata["companion_prompt"].clone()).unwrap();
+        assert_eq!(state.system_prompt, companion.render());
+        assert!(!state.system_prompt.contains("unique_input"));
+        assert!(state.system_prompt.contains("unique_recalled_evidence"));
+        let sections = state.metadata["prompt_sections_breakdown"].as_array().unwrap();
+        assert_eq!(sections.len(), companion.sections().len());
+        assert_eq!(sections.last().unwrap()["section_id"], "post_history");
+        let messages = companion.messages(&state.messages, &state.user_input, false, None, None);
+        assert_eq!(messages.iter().filter(|m| m.role == "user").count(), 1);
+    }
 
     #[test]
     fn companion_contact_startup_snapshot_survives_prompt_preparation() {

@@ -1,3 +1,7 @@
+import StickerSettings from './stickers/StickerSettings';
+import ReasoningPrefField, { type ReasoningPref } from './settings/ReasoningConfigField';
+import LlmProbeResults from './settings/LlmProbeResults';
+import { runProbeBatch, type ProbeResult } from './settings/llmProbe';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import ReactDOM from 'react-dom';
 import { invoke } from '@tauri-apps/api/core';
@@ -148,6 +152,7 @@ const ROUTING_TASKS: { groupKey: string; labelKey: string; taskType: string; hel
   { groupKey: 'config.routing_group_conversation', labelKey: 'config.routing_chat', taskType: 'chat', helpKey: 'config.routing_chat_help' },
   { groupKey: 'config.routing_group_conversation', labelKey: 'config.routing_reasoning', taskType: 'reasoning', helpKey: 'config.routing_reasoning_help' },
   { groupKey: 'config.routing_group_conversation', labelKey: 'config.routing_vision_describe', taskType: 'vision_describe', helpKey: 'config.routing_vision_describe_help' },
+  { groupKey: 'config.routing_group_background', labelKey: 'config.routing_tool_execution', taskType: 'tool_execution', helpKey: 'config.routing_tool_execution_help' },
   { groupKey: 'config.routing_group_background', labelKey: 'config.routing_memory', taskType: 'memory', helpKey: 'config.routing_memory_help' },
   { groupKey: 'config.routing_group_background', labelKey: 'config.routing_reflection', taskType: 'reflection', helpKey: 'config.routing_reflection_help' },
   { groupKey: 'config.routing_group_background', labelKey: 'config.routing_consolidation', taskType: 'consolidation', helpKey: 'config.routing_consolidation_help' },
@@ -1088,87 +1093,6 @@ const WorkModelProviderSelector: React.FC<{
  * - mode=off：关闭思考（不支持关闭的模型由后端折叠为开启）
  * - mode=on：开启思考，可选档位（档位经后端按模型能力校验，不支持时回退默认档）
  */
-const ReasoningPrefField: React.FC<{
-  label: string;
-  help?: string;
-  value: { mode: string; effort?: string | null } | null | undefined;
-  onChange: (v: { mode: string; effort?: string | null } | null) => void;
-  t: (key: string) => string;
-}> = ({ label, help, value, onChange, t }) => {
-  const mode = value?.mode ?? 'auto';
-  const effort = value?.effort ?? '';
-
-  const modes: { key: string; labelKey: string }[] = [
-    { key: 'auto', labelKey: 'config.reasoning_mode_auto' },
-    { key: 'off', labelKey: 'config.reasoning_mode_off' },
-    { key: 'on', labelKey: 'config.reasoning_mode_on' },
-  ];
-
-  const efforts = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
-
-  return (
-    <div className="settings-field" style={fieldStyle}>
-      <label style={labelStyle}>{label}</label>
-      <div style={{ display: 'flex', gap: 6, marginBottom: mode === 'on' ? 8 : 0 }}>
-        {modes.map((m) => {
-          const active = mode === m.key;
-          return (
-            <button
-              key={m.key}
-              type="button"
-              onClick={() => {
-                if (m.key === 'auto') {
-                  onChange(null);
-                } else if (m.key === 'off') {
-                  onChange({ mode: 'off' });
-                } else {
-                  onChange({ mode: 'on', effort: effort || 'medium' });
-                }
-              }}
-              style={{
-                flex: 1,
-                padding: '8px 10px',
-                borderRadius: 10,
-                border: active
-                  ? '1.5px solid var(--panel-accent)'
-                  : '1.5px solid var(--panel-border)',
-                background: active ? 'var(--panel-bg-hover)' : 'var(--panel-surface)',
-                color: active ? 'var(--panel-accent)' : 'var(--panel-text-secondary)',
-                fontSize: 12,
-                fontWeight: active ? 700 : 500,
-                cursor: 'pointer',
-                fontFamily: 'inherit',
-                transition: 'all 0.15s ease',
-              }}
-            >
-              {t(m.labelKey)}
-            </button>
-          );
-        })}
-      </div>
-      {mode === 'on' && (
-        <select
-          value={effort}
-          onChange={(e) => onChange({ mode: 'on', effort: e.target.value })}
-          style={{ ...inputStyle, padding: '7px 10px', fontSize: 12 }}
-        >
-          <option value="">{t('config.reasoning_effort_default')}</option>
-          {efforts.map((e) => (
-            <option key={e} value={e}>
-              {t(`config.reasoning_effort_${e}`)}
-            </option>
-          ))}
-        </select>
-      )}
-      {help && (
-        <div style={{ fontSize: 11, color: 'var(--panel-text-tertiary)', marginTop: 6, lineHeight: 1.5 }}>
-          {help}
-        </div>
-      )}
-    </div>
-  );
-};
-
 const fieldStyle: React.CSSProperties = {
   marginBottom: 18,
 };
@@ -2373,15 +2297,11 @@ const ConfigWindow: React.FC = () => {
   // key = 'main'（主 LLM 配置）或路由 taskType
   const [llmTesting, setLlmTesting] = useState(false);
   const [llmTestResults, setLlmTestResults] = useState<
-    Record<string, {
-      state: 'testing' | 'ok' | 'error' | 'skipped';
-      error?: string;
-      elapsedMs?: number;
-      reply?: string;
-    }>
+    Record<string, ProbeResult>
   >({});
 
   // 供应商预设核对：一键激活的状态提示（成功=已发出指令、失败=发送错误）
+  const [presetVerifying, setPresetVerifying] = useState(false);
   const [presetVerifyNotice, setPresetVerifyNotice] = useState<
     { text: string; error?: boolean } | null
   >(null);
@@ -2422,10 +2342,13 @@ const ConfigWindow: React.FC = () => {
     endpoint: string;
     api_secret?: string;
     app_id?: string;
+    send_temperature?: boolean | null;
+    send_max_tokens?: boolean | null;
     temperature?: number | null;
     max_tokens?: number | null;
     context_window?: number | null;
-    reasoning?: { mode: string; effort?: string | null } | null;
+    reasoning?: ReasoningPref | null;
+    reasoning_overrides?: Record<string, unknown> | null;
   };
   const workModels = (get('work_models', []) as WorkModelProfile[]);
   const workModelsActiveId = (config?.active_work_model ?? null) as string | null;
@@ -3753,25 +3676,16 @@ const ConfigWindow: React.FC = () => {
     await invoke('set_config', { key: 'network.timeout', value: timeout });
   };
 
-  // ===== 供应商预设核对（一键激活） =====
-  // 以用户身份向当前活跃角色注入一条指令消息（send_message 走完整对话管线，
-  // 会话管理 / 事件发射 / 聊天面板实时渲染全部复用）。智能体收到后经 use_skill
-  // 激活 llm-providers/verify-provider-presets 技能走完整核对流，落盘经
-  // update_provider_preset 工具。fire-and-forget：send_message 要等 think 结束
-  // 才返回，按钮不等它——立即提示已发出，进度看聊天窗口。
-  const handleVerifyProviderPresets = () => {
-    const message =
-      '请执行供应商预设核对流程：联网核对各家 LLM 供应商的官方 API 文档，' +
-      '修正预设中过期或错误的端点、协议、模型名、上下文窗口与输出上限。' +
-      '技能 llm-providers/verify-provider-presets 沉淀了完整流程，请先用 use_skill 激活它再照做。';
-    setPresetVerifyNotice({ text: t('config.update_presets_sent') });
-    invoke('send_message', { message, characterId: null })
-      .catch((e: unknown) => {
-        setPresetVerifyNotice({
-          text: t('config.update_presets_failed', { error: String(e ?? 'unknown') }),
-          error: true,
-        });
-      });
+  // Run verification in a dedicated work session, without companion conversation history.
+  const handleVerifyProviderPresets = async () => {
+    if (presetVerifying) return;
+    setPresetVerifying(true);
+    try {
+      const paths = await invoke<{plugins_dir:string}>('plugin_paths');
+      const session = await invoke<{session_id:string}>('coding_new_session', {charId:getCharacterId(),workingDirectory:`${paths.plugins_dir}/llm-providers`,mode:'standard'});
+      await invoke('coding_send_message',{sessionId:session.session_id,message:'请先使用 use_skill 激活 llm-providers/verify-provider-presets，再联网核对官方 API 文档，更新供应商预设与逐模型、逐协议的思考开关、强度、预算能力及官方来源。保留未核实资料，不修改用户密钥、模型路由或应用源代码。'});
+      setPresetVerifyNotice({text:t('config.update_presets_sent')});
+    } catch(e) {setPresetVerifyNotice({text:t('config.update_presets_failed',{error:String(e)}),error:true});} finally {setPresetVerifying(false);}
   };
 
   // ===== LLM 一键检测 =====
@@ -3781,6 +3695,10 @@ const ConfigWindow: React.FC = () => {
     const s = (path: string, fallback = '') => ((get(path, fallback) as string) ?? '');
     return [
       {
+        reasoning: get('ai.reasoning', null) as ReasoningPref | null,
+        reasoningOverrides: get('ai.reasoning_overrides', null) as Record<string, unknown> | null,
+        sendTemperature: get('ai.send_temperature', true) as boolean,
+        sendMaxTokens: get('ai.send_max_tokens', true) as boolean,
         key: 'main',
         label: t('config.llm_test_main_label'),
         providerType: s('ai.provider', 'openai') || 'openai',
@@ -3791,6 +3709,10 @@ const ConfigWindow: React.FC = () => {
         appId: s('ai.app_id'),
       },
       ...workModels.map((m) => ({
+        reasoning: m.reasoning ?? get('ai.reasoning', null) as ReasoningPref | null,
+        reasoningOverrides: m.reasoning_overrides,
+        sendTemperature: m.send_temperature ?? false,
+        sendMaxTokens: m.send_max_tokens ?? true,
         key: `work:${m.id}`,
         label: `${t('config.llm_test_work_model_label')}${m.name}`,
         providerType: m.provider_type || 'openai',
@@ -3801,6 +3723,10 @@ const ConfigWindow: React.FC = () => {
         appId: m.app_id ?? '',
       })),
       ...ROUTING_TASKS.map((task) => ({
+        reasoning: get(`routing_matrix.${task.taskType}.reasoning`, get('ai.reasoning', null)) as ReasoningPref | null,
+        reasoningOverrides: get(`routing_matrix.${task.taskType}.reasoning_overrides`, null) as Record<string, unknown> | null,
+        sendTemperature: (get(`routing_matrix.${task.taskType}.send_temperature`, get('ai.send_temperature', true)) ?? get('ai.send_temperature', true)) as boolean,
+        sendMaxTokens: (get(`routing_matrix.${task.taskType}.send_max_tokens`, get('ai.send_max_tokens', true)) ?? get('ai.send_max_tokens', true)) as boolean,
         key: task.taskType,
         label: t(task.labelKey),
         providerType: s(`routing_matrix.${task.taskType}.provider_type`) || 'openai',
@@ -3813,7 +3739,7 @@ const ConfigWindow: React.FC = () => {
     ];
   };
 
-  // 一键检测：给主配置和每个已配置路由的 API 发送最小请求（"ping"，temperature=0、max_tokens=16）
+  // 相同连接共享一次探测，串行执行并遵守服务端限流冷却。
   const handleTestLlmRoutes = async () => {
     if (llmTesting) return;
     const targets = collectLlmTestTargets();
@@ -3821,41 +3747,25 @@ const ConfigWindow: React.FC = () => {
     setLlmTestResults(
       Object.fromEntries(targets.map((tg) => [tg.key, { state: 'testing' as const }]))
     );
-    await Promise.all(
-      targets.map(async (tg) => {
-        // 本地服务（Ollama 等）允许空 API Key，仅模型/端点必填
-        if (!tg.model || !tg.endpoint) {
-          setLlmTestResults((prev) => ({ ...prev, [tg.key]: { state: 'skipped' } }));
-          return;
-        }
-        try {
-          const res = await invoke<{
-            success: boolean;
-            elapsed_ms: number;
-            error: string | null;
-            reply: string | null;
-          }>('test_llm_route', {
-            params: {
-              provider_type: tg.providerType,
-              model: tg.model,
-              api_key: tg.apiKey,
-              endpoint: tg.endpoint,
-              api_secret: tg.apiSecret,
-              app_id: tg.appId,
-            },
-          });
-          setLlmTestResults((prev) => ({
-            ...prev,
-            [tg.key]: res.success
-              ? { state: 'ok', elapsedMs: res.elapsed_ms, reply: res.reply ?? undefined }
-              : { state: 'error', error: res.error ?? 'Unknown', elapsedMs: res.elapsed_ms },
-          }));
-        } catch (e) {
-          setLlmTestResults((prev) => ({ ...prev, [tg.key]: { state: 'error', error: String(e) } }));
-        }
-      })
-    );
-    setLlmTesting(false);
+    try {
+      await runProbeBatch(targets, async (tg) => {
+        const res = await invoke<{
+          success: boolean; elapsed_ms: number; error: string | null; reply: string | null;
+        }>('test_llm_route', { params: {
+          provider_type: tg.providerType, model: tg.model, api_key: tg.apiKey,
+          reasoning: tg.reasoning, reasoning_overrides: tg.reasoningOverrides,
+          send_temperature: tg.sendTemperature, send_max_tokens: tg.sendMaxTokens,
+          endpoint: tg.endpoint, api_secret: tg.apiSecret, app_id: tg.appId,
+        } });
+        return res.success
+          ? { state: 'ok', elapsedMs: res.elapsed_ms, reply: res.reply ?? undefined }
+          : { state: 'error', error: res.error ?? 'Unknown', elapsedMs: res.elapsed_ms };
+      }, (keys, result) => {
+        setLlmTestResults(prev => ({ ...prev, ...Object.fromEntries(keys.map(key => [key, result])) }));
+      });
+    } finally {
+      setLlmTesting(false);
+    }
   };
 
   const handleSave = async () => {
@@ -4525,6 +4435,7 @@ const ConfigWindow: React.FC = () => {
                 )}
                 <button
                   onClick={handleVerifyProviderPresets}
+                  disabled={presetVerifying}
                   title={t('config.update_presets_btn')}
                   style={{
                     flexShrink: 0,
@@ -4596,7 +4507,8 @@ const ConfigWindow: React.FC = () => {
               onChange={(v) => setNested('ai.endpoint', v)}
               placeholder={t('config.ph_endpoint')}
             />
-            <SliderField
+            <ToggleField label={t('config.send_temperature')} value={(get('ai.send_temperature', true) ?? true) as boolean} onChange={v => setNested('ai.send_temperature', v)} help={t('config.parameter_send_help')} />
+                {(get('ai.send_temperature', true) ?? true) as boolean && (<SliderField
               label={t('config.field_temperature')}
               value={get('ai.temperature', 0.70)}
               onChange={(v) => setNested('ai.temperature', v)}
@@ -4604,14 +4516,15 @@ const ConfigWindow: React.FC = () => {
               max={2}
               step={0.05}
               format={(v) => v.toFixed(2)}
-            />
-            <NumberField
+            />)}
+            <ToggleField label={t('config.send_max_tokens')} value={(get('ai.send_max_tokens', true) ?? true) as boolean} onChange={v => setNested('ai.send_max_tokens', v)} help={t('config.parameter_send_help')} />
+                {(get('ai.send_max_tokens', true) ?? true) as boolean && (<NumberField
               label={t('config.field_max_tokens')}
               value={get('ai.max_tokens', 2048)}
               onChange={(v) => setNested('ai.max_tokens', v)}
               min={64}
               step={64}
-            />
+            />)}
             <NumberField
               label={t('config.field_context_window')}
               value={get('ai.context_window', 1000000)}
@@ -4623,11 +4536,14 @@ const ConfigWindow: React.FC = () => {
             <ReasoningPrefField
               label={t('config.field_reasoning_pref')}
               help={t('config.reasoning_pref_help')}
-              value={get('ai.reasoning', null) as { mode: string; effort?: string | null } | null}
+              providerType={get('ai.provider', 'openai') as string} model={get('ai.model', '') as string}
+              overrides={get('ai.reasoning_overrides', null) as Record<string, unknown> | null} onOverridesChange={v=>setNested('ai.reasoning_overrides',v as ConfigValue)}
+              value={get('ai.reasoning', null) as ReasoningPref | null}
               onChange={(v) => setNested('ai.reasoning', v as ConfigValue)}
               t={t}
             />
 
+            <StickerSettings />
             <div style={{ ...sectionTitleStyle, marginTop: 28 }}>{t('config.section_multimodal')}</div>
             <ToggleField
               label={t('config.field_enable_vision')}
@@ -4683,71 +4599,9 @@ const ConfigWindow: React.FC = () => {
                 {llmTesting ? t('config.llm_test_testing') : t('config.llm_test_btn')}
               </button>
             </div>
-            {Object.keys(llmTestResults).length > 0 && (() => {
-              const targets = collectLlmTestTargets();
-              const okCount = targets.filter((tg) => llmTestResults[tg.key]?.state === 'ok').length;
-              const testedCount = targets.filter((tg) => {
-                const st = llmTestResults[tg.key]?.state;
-                return st === 'ok' || st === 'error';
-              }).length;
-              return (
-                <div
-                  style={{
-                    border: '1px solid var(--panel-border)',
-                    borderRadius: 8,
-                    padding: '10px 14px',
-                    marginBottom: 14,
-                    background: 'var(--panel-card)',
-                    fontSize: 12,
-                    display: 'flex',
-                    flexDirection: 'column',
-                    gap: 4,
-                  }}
-                >
-                  <div style={{ fontWeight: 600, marginBottom: 4 }}>
-                    {llmTesting
-                      ? t('config.llm_test_testing')
-                      : t('config.llm_test_summary', { ok: okCount, total: testedCount })}
-                  </div>
-                  {targets.map((tg) => {
-                    const r = llmTestResults[tg.key];
-                    if (!r) return null;
-                    const statusText =
-                      r.state === 'ok'
-                        ? t('config.llm_test_ok')
-                        : r.state === 'error'
-                          ? t('config.llm_test_failed')
-                          : r.state === 'testing'
-                            ? t('config.llm_test_testing')
-                            : t('config.llm_test_skipped');
-                    const color =
-                      r.state === 'ok'
-                        ? '#4caf50'
-                        : r.state === 'error'
-                          ? '#f44336'
-                          : r.state === 'testing'
-                            ? 'var(--panel-text-tertiary)'
-                            : 'var(--panel-text-quaternary)';
-                    return (
-                      <div key={tg.key} style={{ display: 'flex', gap: 8, alignItems: 'baseline' }}>
-                        <span style={{ color, fontWeight: 600, minWidth: 56 }}>{statusText}</span>
-                        <span style={{ color: 'var(--panel-text-secondary)' }}>{tg.label}</span>
-                        {r.state === 'ok' && (
-                          <span style={{ color: 'var(--panel-text-tertiary)' }}>
-                            {tg.model}
-                            {typeof r.elapsedMs === 'number' ? ` · ${r.elapsedMs}ms` : ''}
-                            {r.reply ? ` · ${r.reply}` : ''}
-                          </span>
-                        )}
-                        {r.state === 'error' && (
-                          <span style={{ color: '#f44336', wordBreak: 'break-all' }}>{r.error}</span>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              );
-            })()}
+            {Object.keys(llmTestResults).length > 0 && (
+              <LlmProbeResults targets={collectLlmTestTargets()} results={llmTestResults} testing={llmTesting} />
+            )}
             {ROUTING_TASKS.map((task, index) => {
               const prefix = `routing_matrix.${task.taskType}`;
               const providerType = get(`${prefix}.provider_type`, '') as string;
@@ -4842,7 +4696,8 @@ const ConfigWindow: React.FC = () => {
                   onChange={(v) => setNested(`routing_matrix.${task.taskType}.endpoint`, v)}
                   placeholder={t('config.ph_endpoint')}
                 />
-                <SliderField
+                <ToggleField label={t('config.send_temperature')} value={(get(`routing_matrix.${task.taskType}.send_temperature`, get('ai.send_temperature', true)) ?? get('ai.send_temperature', true)) as boolean} onChange={v => setNested(`routing_matrix.${task.taskType}.send_temperature`, v)} help={t('config.parameter_send_help')} />
+                {(get(`routing_matrix.${task.taskType}.send_temperature`, get('ai.send_temperature', true)) ?? get('ai.send_temperature', true)) as boolean && (<SliderField
                   label={t('config.field_temperature')}
                   value={get(`routing_matrix.${task.taskType}.temperature`, get('ai.temperature', 0.70))}
                   onChange={(v) => setNested(`routing_matrix.${task.taskType}.temperature`, v)}
@@ -4851,15 +4706,21 @@ const ConfigWindow: React.FC = () => {
                   step={0.05}
                   format={(v) => v.toFixed(2)}
                   help={t('config.field_route_temperature_help')}
-                />
-                <NumberField
+                />)}
+                <ToggleField label={t('config.send_max_tokens')} value={(get(`routing_matrix.${task.taskType}.send_max_tokens`, get('ai.send_max_tokens', true)) ?? get('ai.send_max_tokens', true)) as boolean} onChange={v => setNested(`routing_matrix.${task.taskType}.send_max_tokens`, v)} help={t('config.parameter_send_help')} />
+                {(get(`routing_matrix.${task.taskType}.send_max_tokens`, get('ai.send_max_tokens', true)) ?? get('ai.send_max_tokens', true)) as boolean && (<NumberField
                   label={t('config.field_max_tokens')}
                   value={get(`routing_matrix.${task.taskType}.max_tokens`, get('ai.max_tokens', 2048))}
                   onChange={(v) => setNested(`routing_matrix.${task.taskType}.max_tokens`, v)}
                   min={64}
                   step={64}
                   help={t('config.field_route_max_tokens_help')}
-                />
+                />)}
+                <ReasoningPrefField label={t('config.field_reasoning_pref')} providerType={get(`routing_matrix.${task.taskType}.provider_type`, 'openai') as string} model={get(`routing_matrix.${task.taskType}.model`, '') as string}
+                  value={get(`routing_matrix.${task.taskType}.reasoning`, get('ai.reasoning', null)) as ReasoningPref | null}
+                  onChange={v=>setNested(`routing_matrix.${task.taskType}.reasoning`,v as ConfigValue)}
+                  overrides={get(`routing_matrix.${task.taskType}.reasoning_overrides`, null) as Record<string, unknown> | null}
+                  onOverridesChange={v=>setNested(`routing_matrix.${task.taskType}.reasoning_overrides`,v as ConfigValue)} t={t}/>
               </CollapsibleSection>
               </React.Fragment>
               );
@@ -4986,11 +4847,10 @@ const ConfigWindow: React.FC = () => {
                       placeholder={t('config.ph_app_id')}
                     />
                   )}
-                  {/* 不提供 temperature 配置：工作智能体请求统一省略该参数（服务端默认）。
-                      编程任务对确定性要求高，且推理模型对非默认温度敏感
-                      （o 系列仅接受默认值、reasoner 忽略），参考 codex / Claude Code
-                      的做法不让用户关心；后端构建 override provider 时已置
-                      omit_temperature，旧配置残留值不会生效。 */}
+                  <ToggleField label={t('config.send_temperature')} value={m.send_temperature ?? false} onChange={v => patchWorkModel(idx, { send_temperature: v })} help={t('config.parameter_send_help')} />
+                  {m.send_temperature && <SliderField label={t('config.field_temperature')} value={m.temperature ?? 0.7} onChange={v => patchWorkModel(idx, { temperature: v })} min={0} max={2} step={0.05} format={v => v.toFixed(2)} />}
+                  <ToggleField label={t('config.send_max_tokens')} value={m.send_max_tokens ?? true} onChange={v => patchWorkModel(idx, { send_max_tokens: v })} help={t('config.parameter_send_help')} />
+                  {(m.send_max_tokens ?? true) && <NumberField label={t('config.field_max_tokens')} value={m.max_tokens ?? 16384} onChange={v => patchWorkModel(idx, { max_tokens: v })} min={64} step={64} />}
                   <NumberField
                     label={t('config.field_context_window')}
                     value={m.context_window ?? 1000000}
@@ -5002,13 +4862,13 @@ const ConfigWindow: React.FC = () => {
                   <ReasoningPrefField
                     label={t('config.field_reasoning_pref')}
                     help={t('config.reasoning_pref_help')}
-                    value={(m as { reasoning?: { mode: string; effort?: string | null } | null }).reasoning ?? null}
+                    providerType={m.provider_type} model={m.model}
+                    overrides={m.reasoning_overrides} onOverridesChange={v=>patchWorkModel(idx,{reasoning_overrides:v})}
+                    value={m.reasoning ?? null}
                     onChange={(v) => patchWorkModel(idx, { reasoning: v } as Partial<WorkModelProfile>)}
                     t={t}
                   />
-                  {/* 不提供 max_tokens 配置：编程输出预算由后端统一给予充足默认值
-                      （WORK_MODEL_DEFAULT_MAX_TOKENS），参考 codex / Claude Code 的做法，
-                      不要求用户关心单次输出上限。 */}
+
                 </div>
               );
             })}
@@ -7828,7 +7688,8 @@ const ConfigWindow: React.FC = () => {
                             value={get('routing_matrix.translation.endpoint', '')}
                             onChange={(v) => setNested('routing_matrix.translation.endpoint', v)}
                           />
-                          <SliderField
+                          <ToggleField label={t('config.send_temperature')} value={(get('routing_matrix.translation.send_temperature', get('ai.send_temperature', true)) ?? get('ai.send_temperature', true)) as boolean} onChange={v => setNested('routing_matrix.translation.send_temperature', v)} help={t('config.parameter_send_help')} />
+                {(get('routing_matrix.translation.send_temperature', get('ai.send_temperature', true)) ?? get('ai.send_temperature', true)) as boolean && (<SliderField
                             label={t('config.field_temperature')}
                             value={get('routing_matrix.translation.temperature', get('ai.temperature', 0.70))}
                             onChange={(v) => setNested('routing_matrix.translation.temperature', v)}
@@ -7837,15 +7698,19 @@ const ConfigWindow: React.FC = () => {
                             step={0.05}
                             format={(v) => v.toFixed(2)}
                             help={t('config.field_route_temperature_help')}
-                          />
-                          <NumberField
+                          />)}
+                          <ToggleField label={t('config.send_max_tokens')} value={(get('routing_matrix.translation.send_max_tokens', get('ai.send_max_tokens', true)) ?? get('ai.send_max_tokens', true)) as boolean} onChange={v => setNested('routing_matrix.translation.send_max_tokens', v)} help={t('config.parameter_send_help')} />
+                {(get('routing_matrix.translation.send_max_tokens', get('ai.send_max_tokens', true)) ?? get('ai.send_max_tokens', true)) as boolean && (<NumberField
                             label={t('config.field_max_tokens')}
                             value={get('routing_matrix.translation.max_tokens', get('ai.max_tokens', 2048))}
                             onChange={(v) => setNested('routing_matrix.translation.max_tokens', v)}
                             min={64}
                             step={64}
                             help={t('config.field_route_max_tokens_help')}
-                          />
+                          />)}
+                          <ReasoningPrefField label={t('config.field_reasoning_pref')} providerType={get('routing_matrix.translation.provider_type','openai') as string} model={get('routing_matrix.translation.model','') as string}
+                            value={get('routing_matrix.translation.reasoning',get('ai.reasoning',null)) as ReasoningPref|null} onChange={v=>setNested('routing_matrix.translation.reasoning',v as ConfigValue)}
+                            overrides={get('routing_matrix.translation.reasoning_overrides',null) as Record<string,unknown>|null} onOverridesChange={v=>setNested('routing_matrix.translation.reasoning_overrides',v as ConfigValue)} t={t}/>
                         </>
                       ) : (
                         <>

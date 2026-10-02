@@ -291,7 +291,7 @@ impl AnthropicProvider {
             .header("x-api-key", &self.base.api_key)
             .header("anthropic-version", ANTHROPIC_API_VERSION)
             .header("content-type", "application/json")
-            .json(body)
+            .json(&self.base.finalize_body(body.clone()))
             .send()
             .await?;
 
@@ -565,6 +565,15 @@ impl AnthropicProvider {
 
 #[async_trait]
 impl BaseProvider for AnthropicProvider {
+    fn set_request_customization(&self, customization: crate::providers::reasoning_profiles::RequestCustomization) {
+        *self.base.request_customization.write() = customization;
+    }
+
+    fn set_request_parameters(&self, temperature: bool, max_tokens: bool) {
+        self.base.send_temperature.store(temperature, std::sync::atomic::Ordering::Relaxed);
+        self.base.send_max_tokens.store(max_tokens, std::sync::atomic::Ordering::Relaxed);
+    }
+
     async fn call_chat(&self, messages: Vec<ChatMessage>) -> VivianResult<String> {
         let prompt_key = messages_cache_key(&messages);
         let body = self.build_body(&messages, false);
@@ -629,7 +638,7 @@ impl BaseProvider for AnthropicProvider {
             .header("x-api-key", &self.base.api_key)
             .header("anthropic-version", ANTHROPIC_API_VERSION)
             .header("content-type", "application/json")
-            .json(&body)
+            .json(&self.base.finalize_body(body.clone()))
             .send()
             .await?;
 
@@ -801,8 +810,11 @@ impl BaseProvider for AnthropicProvider {
                 client: self.base.client.clone(),
                 max_tokens_override: std::sync::atomic::AtomicU32::new(0),
                 temperature_override: std::sync::atomic::AtomicU64::new(0),
-                omit_temperature: std::sync::atomic::AtomicBool::new(false),
+                omit_temperature: std::sync::atomic::AtomicBool::new(self.base.should_omit_temperature()),
+                send_temperature: std::sync::atomic::AtomicBool::new(self.base.send_temperature.load(std::sync::atomic::Ordering::Relaxed)),
+                send_max_tokens: std::sync::atomic::AtomicBool::new(self.base.send_max_tokens.load(std::sync::atomic::Ordering::Relaxed)),
                 reasoning_pref: parking_lot::RwLock::new(*self.base.reasoning_pref.read()),
+                request_customization: parking_lot::RwLock::new(self.base.request_customization.read().clone()),
             },
             tools,
             cache_strategy: self.cache_strategy,
@@ -864,7 +876,7 @@ impl BaseProvider for AnthropicProvider {
             .header("x-api-key", &self.base.api_key)
             .header("anthropic-version", ANTHROPIC_API_VERSION)
             .header("content-type", "application/json")
-            .json(&body)
+            .json(&self.base.finalize_body(body.clone()))
             .send()
             .await?;
 

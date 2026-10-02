@@ -211,7 +211,7 @@ impl WenxinProvider {
         let response = client
             .post(&url)
             .header("content-type", "application/json")
-            .json(body)
+            .json(&self.base.finalize_body(body.clone()))
             .send()
             .await
             .map_err(|e| {
@@ -254,6 +254,15 @@ impl WenxinProvider {
 
 #[async_trait]
 impl BaseProvider for WenxinProvider {
+    fn set_request_customization(&self, customization: crate::providers::reasoning_profiles::RequestCustomization) {
+        *self.base.request_customization.write() = customization;
+    }
+
+    fn set_request_parameters(&self, temperature: bool, max_tokens: bool) {
+        self.base.send_temperature.store(temperature, std::sync::atomic::Ordering::Relaxed);
+        self.base.send_max_tokens.store(max_tokens, std::sync::atomic::Ordering::Relaxed);
+    }
+
     async fn call_chat(&self, messages: Vec<ChatMessage>) -> VivianResult<String> {
         let prompt_key = messages_cache_key(&messages);
         if let Some(cached) = self.base.get_cached_response(&prompt_key) {
@@ -311,7 +320,7 @@ impl BaseProvider for WenxinProvider {
         let response = client
             .post(&url)
             .header("content-type", "application/json")
-            .json(&body)
+            .json(&self.base.finalize_body(body.clone()))
             .send()
             .await
             .map_err(|e| {

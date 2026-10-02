@@ -2,11 +2,15 @@ import React, { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { stripActions } from '../utils/ActionText';
 import { computeDuration } from '../utils/bubbleText';
+import { STICKER_BUBBLE_SIZE } from '../utils/bubbleContent';
+import StickerImage from './stickers/StickerImage';
+import type { StickerRef } from '../types';
 
 export type BubblePosition = 'top' | 'bottom' | 'left' | 'right';
 
 export interface MessageBubbleProps {
   text: string;
+  sticker?: StickerRef;
   duration?: number;
   onClose?: () => void;
   position?: BubblePosition;
@@ -87,6 +91,7 @@ const LISTENER_TAG_STYLE: React.CSSProperties = {
 
 const MessageBubble: React.FC<MessageBubbleProps> = ({
   text,
+  sticker,
   duration,
   onClose,
   position = 'top',
@@ -118,7 +123,7 @@ const MessageBubble: React.FC<MessageBubbleProps> = ({
       window.clearTimeout(hideTimer);
       window.clearTimeout(closeTimer);
     };
-  }, [dwell, text]);
+  }, [dwell, text, sticker?.id, sticker?.version]);
 
   // tailStyles 依赖 theme.tailColor，按 position 构建一份即可
   const tailStyle: React.CSSProperties = (() => {
@@ -155,7 +160,8 @@ const MessageBubble: React.FC<MessageBubbleProps> = ({
         background: theme.background,
         color: theme.textColor,
         borderRadius: 12,
-        padding: '10px 14px',
+        padding: sticker ? 3 : '10px 14px',
+        ...(sticker ? { width: STICKER_BUBBLE_SIZE, height: STICKER_BUBBLE_SIZE, boxSizing: 'border-box' as const, flexShrink: 0 } : {}),
         boxShadow: theme.shadow,
         backdropFilter: 'blur(10px)',
         WebkitBackdropFilter: 'blur(10px)',
@@ -168,13 +174,15 @@ const MessageBubble: React.FC<MessageBubbleProps> = ({
         ...crossStyle,
       }}
     >
-      <span style={{ position: 'absolute', ...tailStyle }} />
-      {crossCharacter && listenerName && (
+      <span style={{ position: 'absolute', ...tailStyle, ...(sticker ? (position === 'top' || position === 'bottom' ? { left: 'calc(50% - 8px)' } : { top: 'calc(50% - 8px)' }) : {}) }} />
+      {crossCharacter && listenerName && !sticker && (
         <span style={LISTENER_TAG_STYLE} aria-label={t('chat.cross_character_to', { name: listenerName })}>
           <span aria-hidden="true">↗</span> {t('chat.cross_character_to', { name: listenerName })}
         </span>
       )}
-      <span style={{ display: 'block' }}>{stripActions(text)}</span>
+      {sticker ? <div style={{ position: 'relative', display: 'flex', alignItems: 'center', justifyContent: 'center', width: '100%', height: '100%' }} title={crossCharacter && listenerName ? `${listenerName}: ${sticker.meaning}` : sticker.meaning}>
+        <StickerImage sticker={sticker} size={STICKER_BUBBLE_SIZE - 6} />
+      </div> : <span style={{ display: 'block' }}>{stripActions(text)}</span>}
       {/* 明确标出这是说给另一位角色的话，避免与对用户发言混淆 */}
     </div>
   );

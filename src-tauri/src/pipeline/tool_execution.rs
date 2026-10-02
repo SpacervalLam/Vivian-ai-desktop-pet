@@ -195,7 +195,10 @@ pub(super) async fn run_companion_tools(
     let mut first_tool_ts = None;
     loop {
         first_tool_ts.get_or_insert_with(crate::memory::types::current_timestamp);
-        let report = execute_session(router, manager, &params.task_type, &params.user_request,
+        let execution_route = if router.has_task_provider(crate::providers::base::TASK_TOOL_EXECUTION) {
+            crate::providers::base::TASK_TOOL_EXECUTION
+        } else { &params.task_type };
+        let report = execute_session(router, manager, execution_route, &params.user_request,
             &mut tools, &calls, limit.saturating_sub(rounds), &mut tracker, params.compress_threshold_tokens, params.compress_keep_recent).await;
         rounds += report.rounds;
         deliberations += report.results.iter().filter(|r| r.tool_name == "continue_thinking").count();
@@ -204,8 +207,8 @@ pub(super) async fn run_companion_tools(
             || matches!(report.stop_reason.as_str(), "goal_completed" | "permission_required" | "repeated_calls" | "executor_error");
         all_results.extend(report.results);
         super::context_compress::compress_conversation(&mut messages, params.compress_threshold_tokens, params.compress_keep_recent);
-        let request = AIResponseGenerationRunnable::build_chat_request(&params.task_type, messages.clone())
-            .with_tools(if close_tools { vec![] } else { tools.clone() });
+        let request = AIResponseGenerationRunnable::build_native_chat_request(
+            &params.task_type, messages.clone(), if close_tools { vec![] } else { tools.clone() });
         let primary_result = if close_tools {
             router.generate(request).await.map(|text| (text, vec![]))
         } else {
@@ -277,6 +280,13 @@ mod tests {
         config.ai.api_key = Some("local-test-key".into());
         config.ai.model = format!("test-isolation-{}", uuid::Uuid::new_v4());
         config.network.proxy_mode = "direct".into();
+        config.enable_routing_matrix = true;
+        config.routing_matrix.insert(crate::providers::base::TASK_TOOL_EXECUTION.into(), crate::config::manager::TaskRouteConfig {
+            provider_type: "chat_completions".into(), model: "test-isolated-executor".into(),
+            endpoint: config.ai.endpoint.clone().unwrap(), api_key: "local-test-key".into(),
+            ..Default::default()
+        });
+        let primary_model = config.ai.model.clone();
         let router = ModelRouter::new(&config).unwrap();
         let system = Arc::new(crate::tools::registry::ToolSystem::new());
         system.register_tool(Arc::new(EvidenceTool("mock_lookup")));
@@ -303,6 +313,9 @@ mod tests {
         assert_eq!(output.lock().as_str(), "ROLE_REPLY_SENTINEL");
         let requests = captured.lock();
         assert_eq!(requests.len(), 3);
+        assert_eq!(requests[0]["model"], "test-isolated-executor");
+        assert_eq!(requests[1]["model"], "test-isolated-executor");
+        assert_eq!(requests[2]["model"], primary_model);
         for request in &requests[..2] {
             let body = request.to_string();
             assert!(!body.contains("PRIMARY_PERSONA_SENTINEL"));

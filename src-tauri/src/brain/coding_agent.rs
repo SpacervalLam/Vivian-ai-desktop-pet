@@ -166,7 +166,7 @@ fn tools_for_mode(mode: &str) -> Vec<&'static str> {
 /// 档位经 provider 层按模型能力校验，不支持的档位自动回退默认档。
 pub(crate) fn reasoning_level_to_pref(level: &str) -> ReasoningPreference {
     match level {
-        "low" => ReasoningPreference { mode: ReasoningMode::Off, effort: None },
+        "low" => ReasoningPreference { mode: ReasoningMode::Off, effort: None, budget_tokens: None },
         "medium" => ReasoningPreference::on(Some(ReasoningEffort::Medium)),
         "high" => ReasoningPreference::on(Some(ReasoningEffort::High)),
         _ => ReasoningPreference::AUTO,

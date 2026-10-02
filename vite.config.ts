@@ -45,6 +45,8 @@ function copyPublicAssets(): Plugin {
     // 逐帧序列与 walk/source 只是制图时的中间产物，运行时一次都不会加载。
     { path: "chibi/walk", match: /-sheet\.webp$/ },
     { path: "chibi/motion", match: /-sheet\.webp$/ },
+    // Only individual runtime stickers; no source art or preview sheets in the bundle.
+    { path: "stickers", match: /-v2\.webp$/ },
     { path: "fonts" },
     { path: "icons" },
     { path: "favicon.ico" },

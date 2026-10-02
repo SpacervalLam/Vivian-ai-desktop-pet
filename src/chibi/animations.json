@@ -200,6 +200,18 @@
       "frames": 8,
       "loop": false,
       "durations": [100,120,130,130,120,110,100,90]
+    },
+    {
+      "name": "gift",
+      "label": "害羞递显卡",
+      "category": "emote",
+      "promptable": true,
+      "sheet": "/chibi/motion/{character}/{character}-gift-sheet.webp",
+      "cols": 4,
+      "rows": 3,
+      "frames": 12,
+      "loop": false,
+      "durations": [100,110,120,120,130,130,140,150,160,160,160,160]
     }
   ],
   "expression_aliases": {

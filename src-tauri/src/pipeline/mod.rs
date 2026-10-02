@@ -21,6 +21,7 @@ pub mod errors;
 pub mod inline_tag_scanner;
 pub mod injection_guard;
 pub mod message_context;
+pub mod companion_prompt;
 pub mod parsers;
 pub mod prompt_modules;
 pub mod react;

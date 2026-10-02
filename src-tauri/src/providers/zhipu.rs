@@ -166,7 +166,7 @@ impl ZhipuProvider {
     }
 
     /// 按当前推理覆盖注入思考控制字段（GLM 思考型模型映射 thinking /
-    /// reasoning_effort；强制思考模型的 Auto 档显式映射为较轻档位）。
+    /// reasoning_effort；Auto 采用服务端默认）。
     fn apply_reasoning_fields(&self, body: &mut Value, has_tools: bool) {
         let pref = self.base.effective_reasoning();
         let cap = crate::providers::reasoning::resolve_reasoning_capability(&self.base.model);
@@ -179,7 +179,7 @@ impl ZhipuProvider {
         let req = self
             .apply_auth(client.post(&self.endpoint()))
             .header("Content-Type", "application/json")
-            .json(&body);
+            .json(&self.base.finalize_body(body.clone()));
         let response = match req.send().await {
             Ok(r) => r,
             Err(e) => {
@@ -350,6 +350,15 @@ impl ZhipuProvider {
 
 #[async_trait]
 impl BaseProvider for ZhipuProvider {
+    fn set_request_customization(&self, customization: crate::providers::reasoning_profiles::RequestCustomization) {
+        *self.base.request_customization.write() = customization;
+    }
+
+    fn set_request_parameters(&self, temperature: bool, max_tokens: bool) {
+        self.base.send_temperature.store(temperature, std::sync::atomic::Ordering::Relaxed);
+        self.base.send_max_tokens.store(max_tokens, std::sync::atomic::Ordering::Relaxed);
+    }
+
     async fn call_chat(&self, messages: Vec<ChatMessage>) -> VivianResult<String> {
         crate::persona::prompt_render::check_messages_for_leaks(
             &messages,
@@ -436,7 +445,7 @@ impl BaseProvider for ZhipuProvider {
         let req = self
             .apply_auth(client.post(&self.endpoint()))
             .header("Content-Type", "application/json")
-            .json(&body);
+            .json(&self.base.finalize_body(body.clone()));
         let response = req.send().await?;
 
         if !response.status().is_success() {
@@ -577,8 +586,11 @@ impl BaseProvider for ZhipuProvider {
                 client: self.base.client.clone(),
                 max_tokens_override: std::sync::atomic::AtomicU32::new(0),
                 temperature_override: std::sync::atomic::AtomicU64::new(0),
-                omit_temperature: std::sync::atomic::AtomicBool::new(false),
+                omit_temperature: std::sync::atomic::AtomicBool::new(self.base.should_omit_temperature()),
+                send_temperature: std::sync::atomic::AtomicBool::new(self.base.send_temperature.load(std::sync::atomic::Ordering::Relaxed)),
+                send_max_tokens: std::sync::atomic::AtomicBool::new(self.base.send_max_tokens.load(std::sync::atomic::Ordering::Relaxed)),
                 reasoning_pref: parking_lot::RwLock::new(*self.base.reasoning_pref.read()),
+                request_customization: parking_lot::RwLock::new(self.base.request_customization.read().clone()),
             },
             tools,
             instructions: self.instructions.clone(),
@@ -659,7 +671,7 @@ impl BaseProvider for ZhipuProvider {
         let req = self
             .apply_auth(client.post(&self.endpoint()))
             .header("Content-Type", "application/json")
-            .json(&body);
+            .json(&self.base.finalize_body(body.clone()));
         let response = req.send().await?;
 
         if !response.status().is_success() {

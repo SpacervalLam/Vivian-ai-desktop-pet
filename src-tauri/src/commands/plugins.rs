@@ -226,3 +226,33 @@ pub fn list_skills(state: State<'_, Arc<AppState>>) -> Vec<SkillEntryInfo> {
         })
         .collect()
 }
+
+/// Reasoning-only preview. Contains no key, endpoint credentials, messages or tools.
+#[tauri::command]
+pub fn preview_reasoning_config(
+    provider_type: String, model: String,
+    preference: Option<crate::providers::reasoning::ReasoningPreference>,
+    overrides: Option<serde_json::Value>,
+) -> Result<serde_json::Value, String> {
+    use crate::providers::{reasoning, reasoning_profiles};
+    crate::plugins::ensure_builtin_plugins();
+    if let Some(patch) = &overrides { reasoning_profiles::validate_patch(patch)?; }
+    let profile = reasoning_profiles::resolve(&provider_type, &model);
+    let pref = preference.unwrap_or(reasoning::ReasoningPreference::AUTO);
+    let mut preview = serde_json::json!({});
+    let (known, disable, efforts, budget, source, verified_at) = if let Some(p) = &profile {
+        p.apply(&mut preview, pref);
+        (true, p.disabled.is_some(), p.efforts.keys().cloned().collect::<Vec<_>>(), serde_json::to_value(&p.budget).unwrap_or_default(), Some(p.source.clone()), Some(p.verified_at.clone()))
+    } else {
+        let cap = reasoning::resolve_reasoning_capability(&model);
+        let known = cap.control != reasoning::ReasoningControl::None;
+        if provider_type == "openai" || provider_type == "openai_responses" || provider_type == "openai_agents" {
+            reasoning::apply_responses_reasoning(&mut preview, pref, &cap);
+        } else if provider_type != "gemini" {
+            reasoning::apply_reasoning_preference(&mut preview, pref, &cap, false);
+        }
+        (known, cap.supports_disable, cap.supported_efforts.iter().map(|e| e.as_str().to_string()).collect(), serde_json::Value::Null, None, None)
+    };
+    if let Some(patch) = &overrides { reasoning_profiles::merge_patch(&mut preview, patch); }
+    Ok(serde_json::json!({"known":known,"supportsDisable":disable,"efforts":efforts,"budget":budget,"source":source,"verifiedAt":verified_at,"preview":preview,"overridden":overrides.as_ref().and_then(|v|v.as_object()).map(|v|!v.is_empty()).unwrap_or(false)}))
+}

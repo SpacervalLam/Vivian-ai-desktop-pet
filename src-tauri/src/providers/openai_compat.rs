@@ -328,7 +328,7 @@ impl OpenAiCompatProvider {
             .post(&self.endpoint())
             .bearer_auth(&self.base.api_key)
             .header("OpenAI-Beta", "responses=1")
-            .json(&body)
+            .json(&self.base.finalize_body(body.clone()))
             .send()
             .await;
         let response = match response {
@@ -753,6 +753,15 @@ impl OpenAiCompatProvider {
 
 #[async_trait]
 impl BaseProvider for OpenAiCompatProvider {
+    fn set_request_customization(&self, customization: crate::providers::reasoning_profiles::RequestCustomization) {
+        *self.base.request_customization.write() = customization;
+    }
+
+    fn set_request_parameters(&self, temperature: bool, max_tokens: bool) {
+        self.base.send_temperature.store(temperature, std::sync::atomic::Ordering::Relaxed);
+        self.base.send_max_tokens.store(max_tokens, std::sync::atomic::Ordering::Relaxed);
+    }
+
     async fn call_chat(&self, messages: Vec<ChatMessage>) -> VivianResult<String> {
         // 提示词占位符泄露检测（生产 warn，测试 panic）
         crate::persona::prompt_render::check_messages_for_leaks(
@@ -884,7 +893,7 @@ impl BaseProvider for OpenAiCompatProvider {
             .post(&self.endpoint())
             .bearer_auth(&self.base.api_key)
             .header("OpenAI-Beta", "responses=1")
-            .json(&body)
+            .json(&self.base.finalize_body(body.clone()))
             .send()
             .await?;
 
@@ -1058,8 +1067,11 @@ impl BaseProvider for OpenAiCompatProvider {
                 client: self.base.client.clone(),
                 max_tokens_override: std::sync::atomic::AtomicU32::new(0),
                 temperature_override: std::sync::atomic::AtomicU64::new(0),
-                omit_temperature: std::sync::atomic::AtomicBool::new(false),
+                omit_temperature: std::sync::atomic::AtomicBool::new(self.base.should_omit_temperature()),
+                send_temperature: std::sync::atomic::AtomicBool::new(self.base.send_temperature.load(std::sync::atomic::Ordering::Relaxed)),
+                send_max_tokens: std::sync::atomic::AtomicBool::new(self.base.send_max_tokens.load(std::sync::atomic::Ordering::Relaxed)),
                 reasoning_pref: parking_lot::RwLock::new(*self.base.reasoning_pref.read()),
+                request_customization: parking_lot::RwLock::new(self.base.request_customization.read().clone()),
             },
             tools,
             cache_strategy: self.cache_strategy,
@@ -1177,7 +1189,7 @@ impl BaseProvider for OpenAiCompatProvider {
             .post(&self.endpoint())
             .bearer_auth(&self.base.api_key)
             .header("OpenAI-Beta", "responses=1")
-            .json(&body)
+            .json(&self.base.finalize_body(body.clone()))
             .send()
             .await?;
 

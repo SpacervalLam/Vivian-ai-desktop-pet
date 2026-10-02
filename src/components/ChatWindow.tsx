@@ -1,3 +1,6 @@
+import StickerImage from './stickers/StickerImage';
+import { parseSticker } from './stickers/stickers';
+import type { StickerRef } from '../types';
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { invoke, convertFileSrc } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
@@ -36,6 +39,7 @@ interface ChatMessage {
   imageDataUrl?: string;
   /** 图片消息：相对用户数据目录的图片路径（历史记录加载时据此懒加载 data URL） */
   imagePath?: string;
+  sticker?: StickerRef;
   /** 群聊视图：AI 消息来源角色 ID（用于显示发送者名称） */
   character_id?: string;
   /** 链接卡片：微信风格链接分享 */
@@ -189,7 +193,7 @@ const normalizeTimestamp = (raw: number | string): number => {
   return Number.isNaN(t) ? Date.now() : t;
 };
 
-const toChatMessages = (e: HistoryEntry): ChatMessage[] => {
+const toChatTextMessages = (e: HistoryEntry): ChatMessage[] => {
   const isImage = e.metadata?.kind === 'image';
   const imagePath = typeof e.metadata?.image_path === 'string' ? e.metadata.image_path : undefined;
   const role = (e.role === 'user' ? 'user' : 'assistant') as Role;
@@ -277,6 +281,13 @@ const toChatMessages = (e: HistoryEntry): ChatMessage[] => {
     content: line,
     timestamp: ts + i,
   }));
+};
+
+const toChatMessages = (e: HistoryEntry): ChatMessage[] => {
+  const rows = toChatTextMessages(e);
+  const sticker=parseSticker(e.metadata?.sticker);
+  if(sticker)rows.push({id:`${e.id}#sticker`,role:'assistant',content:'',timestamp:normalizeTimestamp(e.timestamp)+rows.length,sticker,character_id:sticker.character_id});
+  return rows;
 };
 
 const formatSeparatorTime = (
@@ -830,7 +841,9 @@ const Bubble = React.memo(function Bubble({ message, onOpenImage, senderName, ch
         {!isUser && senderName && (
           <span style={{ fontSize: 11, color: 'var(--wx-icon)', marginBottom: 2, marginLeft: 4 }}>{senderName}</span>
         )}
-        {hasImage ? (
+        {message.sticker ? (
+          <StickerImage sticker={message.sticker} />
+        ) : hasImage ? (
           <ImageThumb message={message} onOpen={onOpenImage} />
         ) : hasVoice ? (
           <VoiceBubble message={message} isUser={isUser} />
@@ -1725,7 +1738,7 @@ const ChatWindow: React.FC = () => {
         const ch = typeof e.metadata?.channel === 'string' ? (e.metadata.channel as string) : undefined;
         const ts = typeof e.timestamp === 'number' ? e.timestamp : Number(e.timestamp) || 0;
         const imagePath = typeof e.metadata?.image_path === 'string' ? (e.metadata.image_path as string) : undefined;
-        const entry: Preview = { content: e.content, timestamp: ts, role: e.role, imagePath, characterId: e.character_id };
+        const entry: Preview = { content: e.content || (parseSticker(e.metadata?.sticker) ? `[${parseSticker(e.metadata?.sticker)!.label}]` : ''), timestamp: ts, role: e.role, imagePath, characterId: e.character_id };
         if (ch === 'wechat') {
           map[e.character_id] = entry;
         } else if (ch === 'wechat_group') {
@@ -2129,6 +2142,7 @@ const ChatWindow: React.FC = () => {
           : 0;
         const newerMsgs = prev.filter((m) => {
           if (m.timestamp <= lastHistoryTs) return false;
+          if (m.sticker && historySlice.some(h=>h.sticker?.id===m.sticker!.id && h.sticker?.version===m.sticker!.version && h.sticker?.character_id===m.sticker!.character_id && Math.abs(h.timestamp-m.timestamp)<5000)) return false;
           // 流式分段消息去重：后端 dialogue 存完整文本，前端流式按行分段追加
           // timestamp 时序竞争（后端 T1 < 前端 Date.now() T2）导致分段被保留
           // 检查历史中是否已有包含此内容的 assistant 消息，有则丢弃流式副本
@@ -2361,30 +2375,31 @@ const ChatWindow: React.FC = () => {
         if (cancelled) { unLinkCard(); return; }
         // chat:assistant_message：外部触发的助手消息（无 stream_id 的非流式消息，
         // 如定时提醒、share_link 跟进评论等。正常对话走 chunk/done 流式通道，此处避免重复）
-        unAssistantMsg = await listen<{ content: string; timestamp?: string; character_id?: string; channel?: string; stream_id?: string }>('chat:assistant_message', (event) => {
+        unAssistantMsg = await listen<{ content: string; timestamp?: string; character_id?: string; channel?: string; stream_id?: string; sticker?: StickerRef }>('chat:assistant_message', (event) => {
           if (cancelled || !event.payload) return;
           // 有 stream_id 的是流式消息（ChatController 正常对话），已通过 chunk/done 处理，跳过
           if (event.payload.stream_id) return;
           const ch = event.payload.channel;
           const cid = event.payload.character_id;
-          const text = event.payload.content?.trim();
-          if (!text || !hasVisibleChatText(text)) return;
+          const text = event.payload.content?.trim() || '';
+          const sticker=parseSticker(event.payload.sticker);
+          if (!hasVisibleChatText(text) && !sticker) return;
           const ts = event.payload.timestamp ? normalizeTimestamp(event.payload.timestamp) : Date.now();
 
           const route = routeAssistantMessage(viewRef.current, privateCharIdRef.current, cid, ch);
           if (route.append === 'group') {
-            setGroupMessages((prev) => [...prev, {
+            setGroupMessages((prev) => [...prev, ...(hasVisibleChatText(text)?[{
               id: nextId(), role: 'assistant', content: text, timestamp: ts, character_id: cid,
-            }]);
+            } as ChatMessage]:[]), ...(sticker?[{id:nextId(),role:'assistant' as const,content:'',timestamp:ts+1,sticker,character_id:cid}]:[])]);
           } else if (route.append === 'private') {
-            setMessages((prev) => [...prev, {
+            setMessages((prev) => [...prev, ...(hasVisibleChatText(text)?[{
               id: nextId(), role: 'assistant', content: text, timestamp: ts,
-            }]);
+            } as ChatMessage]:[]), ...(sticker?[{id:nextId(),role:'assistant' as const,content:'',timestamp:ts+1,sticker,character_id:cid}]:[])]);
           }
           // Update the correct conversation even while viewing another person or the group.
           if (route.preview) {
             const target = route.preview;
-            setLastPreviews((prev) => ({ ...prev, [target]: { content: text, timestamp: ts, role: 'assistant' } }));
+            setLastPreviews((prev) => ({ ...prev, [target]: { content: text || (sticker ? `[${sticker.label}]` : ''), timestamp: ts, role: 'assistant' } }));
           }
           if (route.unread) {
             const target = route.unread;
@@ -2591,10 +2606,11 @@ const ChatWindow: React.FC = () => {
       });
       if (cancelled) { unlistenChunk(); return; }
       // chat:done：输出缓冲区剩余文本作为最终气泡，清理流式状态
-      unlistenDone = await listen<{ text: string; stream_id?: string; character_id?: string; channel?: string; voice_message?: boolean; voice_audio_path?: string | null; voice_duration?: number | null }>('chat:done', (event) => {
+      unlistenDone = await listen<{ text: string; stream_id?: string; character_id?: string; channel?: string; voice_message?: boolean; voice_audio_path?: string | null; voice_duration?: number | null; sticker?: StickerRef }>('chat:done', (event) => {
         const sid = event.payload.stream_id ?? '';
         if (!sid) return;
         const finalText = event.payload.text || '';
+        const sticker = parseSticker(event.payload.sticker);
         const isVoiceMessage = !!event.payload.voice_message && !!event.payload.voice_audio_path;
         const ch = event.payload.channel;
         // 群聊流路由
@@ -2630,11 +2646,12 @@ const ChatWindow: React.FC = () => {
               character_id: cid,
             });
           }
+          if(sticker)newMsgs.push({id:`sticker:${sid}`,role:'assistant',content:'',timestamp:Date.now()+1,sticker,character_id:cid});
           if (newMsgs.length > 0) {
             setGroupMessages((prev) => [...prev, ...newMsgs]);
           }
           // 立即刷新主面板群聊预览（乐观更新）
-          const previewText = isVoiceMessage ? '[语音]' : stripActions(finalText.trim() || buf.trim());
+          const previewText = isVoiceMessage ? '[语音]' : stripActions(finalText.trim() || buf.trim()) || (sticker ? `[${sticker.label}]` : '');
           if (previewText) {
             setLastPreviews((prev) => ({
               ...prev,
@@ -2679,8 +2696,9 @@ const ChatWindow: React.FC = () => {
             streaming: false,
           }]);
         }
+        if(sticker)setMessages(prev=>[...prev,{id:`sticker:${sid}`,role:'assistant',content:'',timestamp:Date.now()+1,sticker,character_id:doneCid}]);
         // 立即刷新主面板私聊预览（乐观更新）
-        const privatePreviewText = isVoiceMessage ? '[语音]' : stripActions(finalText);
+        const privatePreviewText = isVoiceMessage ? '[语音]' : stripActions(finalText) || (sticker ? `[${sticker.label}]` : '');
         const previewCharId = privateCharIdRef.current;
         if (privatePreviewText && previewCharId) {
           setLastPreviews((prev) => ({

@@ -74,6 +74,7 @@ fn parse_preset(input: &Value) -> Result<ProviderPresetData, String> {
         });
 
     Ok(ProviderPresetData {
+        reasoning_profiles: input.get("reasoningProfiles").map(|v| serde_json::from_value(v.clone())).transpose().map_err(|e| format!("思考能力格式无效: {e}"))?.unwrap_or_default(),
         id,
         label_key: input
             .get("labelKey")
@@ -162,6 +163,7 @@ impl Tool for UpdateProviderPresetTool {
                 "defaultModel": { "type": "string", "description": "Recommended flagship/default model ID" },
                 "mainModels": { "type": "array", "items": { "type": "string" }, "description": "Currently valid model IDs from the official model list (remove retired ones)" },
                 "contextWindow": { "type": "integer", "description": "Context window in tokens (input + output combined)" },
+                "reasoningProfiles": {"type":"array","items":{"type":"object"},"description":"Protocol- and model-specific reasoning capability mappings with official source, verifiedAt, enabled/disabled JSON patches, efforts, managedPaths and optional budget."},
                 "suggestedMaxTokens": { "type": "integer", "description": "Suggested per-request output cap; be conservative (a 400 is thrown when exceeded)" },
                 "needsSecret": { "type": "boolean", "description": "Whether an api_secret is required (OAuth/HMAC providers like wenxin)" },
                 "needsAppId": { "type": "boolean", "description": "Whether an app_id is required" },
@@ -200,7 +202,8 @@ impl Tool for UpdateProviderPresetTool {
                     "defaultModel": { "type": "string", "description": "推荐的旗舰/默认模型 ID" },
                     "mainModels": { "type": "array", "items": { "type": "string" }, "description": "官方模型列表中当前有效的模型 ID（退役的要移除）" },
                     "contextWindow": { "type": "integer", "description": "上下文窗口（tokens，输入+输出合计）" },
-                    "suggestedMaxTokens": { "type": "integer", "description": "建议单次输出上限，保守取值（超限会被 400 拒绝）" },
+                    "reasoningProfiles": {"type":"array","items":{"type":"object"},"description":"Protocol- and model-specific reasoning capability mappings with official source, verifiedAt, enabled/disabled JSON patches, efforts, managedPaths and optional budget."},
+                "suggestedMaxTokens": { "type": "integer", "description": "建议单次输出上限，保守取值（超限会被 400 拒绝）" },
                     "needsSecret": { "type": "boolean", "description": "是否需要 api_secret（文心等 OAuth/HMAC 厂商）" },
                     "needsAppId": { "type": "boolean", "description": "是否需要 app_id" },
                     "consoleUrl": { "type": "string", "description": "API Key 控制台/获取页 URL" },
@@ -232,7 +235,8 @@ impl Tool for UpdateProviderPresetTool {
                     "defaultModel": { "type": "string", "description": "推奨の主力/デフォルトモデル ID" },
                     "mainModels": { "type": "array", "items": { "type": "string" }, "description": "公式モデル一覧の現行有効なモデル ID（廃止分は除去）" },
                     "contextWindow": { "type": "integer", "description": "コンテキストウィンドウ（tokens、入力+出力合計）" },
-                    "suggestedMaxTokens": { "type": "integer", "description": "推奨出力上限、控えめに（超過は 400 拒否）" },
+                    "reasoningProfiles": {"type":"array","items":{"type":"object"},"description":"Protocol- and model-specific reasoning capability mappings with official source, verifiedAt, enabled/disabled JSON patches, efforts, managedPaths and optional budget."},
+                "suggestedMaxTokens": { "type": "integer", "description": "推奨出力上限、控えめに（超過は 400 拒否）" },
                     "consoleUrl": { "type": "string", "description": "API キーコンソール URL" },
                     "protocols": {
                         "type": "array",
@@ -464,6 +468,7 @@ impl Tool for ManageProviderPresetTool {
                 "providerType":{"type":"string"}, "endpoint":{"type":"string"},
                 "defaultModel":{"type":"string"}, "mainModels":{"type":"array","items":{"type":"string"}},
                 "contextWindow":{"type":"integer"}, "suggestedMaxTokens":{"type":"integer"},
+                "reasoningProfiles":{"type":"array","items":{"type":"object"},"description":"Verified model/protocol reasoning mappings; preserve unchanged profiles when updating."},
                 "needsSecret":{"type":"boolean"}, "needsAppId":{"type":"boolean"},
                 "consoleUrl":{"type":"string"}, "protocols":{"type":"array","items":{"type":"object"}},
                 "provider":{"type":"string"}, "model":{"type":"string"},

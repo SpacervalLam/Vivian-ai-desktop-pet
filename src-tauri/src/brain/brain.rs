@@ -82,17 +82,15 @@ pub struct Brain {
     pub char_id: String,
 }
 
-/// First contact is an introduction to a new person, not a generic idle-chat opener.
-fn first_contact_prompt(char_id: &str, time_desc: &str, language: &str) -> String {
-    let manner = if char_id == "nana" { "温柔亲切，轻轻接近新认识的人" }
-        else { "稍有拘谨，明快又有一点不好意思" };
-    format!("这是你第一次与这位用户见面，还没有共同经历或熟悉的称呼。\
-        请主动向这位新认识的人打招呼，顺口介绍自己的名字，表达愿意认识对方的自然态度。\
-        保留你的个性：{manner}；不挖苦、不装熟。\
-        一两句完整的话即可，可以轻轻留出接话空间，不罗列身份、能力或兴趣，也不必追问私人信息。\
-        当前时段是 {time_desc}，只是背景；不由此推测用户睡不着、熬夜、无聊或需要陪伴。\
-        没有工具观测就不描述桌面氛围。角色兴趣不是刚才读书、游戏或看番的证据。\
-        用 {language} 回复。")
+/// Fixed first contact also anchors the voice in actual assistant history.
+/// Returning sessions retain their contextual greeting; resets restore first contact.
+fn fixed_startup_greeting(char_id: &str, first_meeting: bool) -> Option<&'static str> {
+    if !first_meeting { return None; }
+    match char_id {
+        "vivian" => Some("嗨，我是 Vivian！第一次见面，你叫什么名字？"),
+        "nana" => Some("你好呀，我是 Nana。很高兴认识你。"),
+        _ => None,
+    }
 }
 
 impl Brain {
@@ -608,6 +606,14 @@ impl Brain {
         self.think_with_options(user_input, stream, false).await
     }
 
+    /// 内部插话指令不是用户发言；调用方只保存实际说出的回复。
+    pub async fn think_system_directive(&self, directive: &str) -> VivianResult<AiResponse> {
+        match &self.chat_chain {
+            Some(chain) => chain.ainvoke_system_directive(directive).await,
+            None => Err(VivianError::Engine("聊天链未初始化".to_string())),
+        }
+    }
+
     /// 带选项的思考调用。
     ///
     /// `skip_dialogue_write`: 跳过将本轮用户消息和 AI 回复写入对话历史。
@@ -834,19 +840,62 @@ impl Brain {
         }
     }
 
-    /// 生成启动问候（通过 LLM 生成，失败返回 None）
-    ///
-    /// 首次见面（无真实记忆，仅有种子记忆）请求 LLM 生成自我介绍式问候；
-    /// 老朋友根据时间、亲密度等信息请求 LLM 生成回归问候。
-    /// 问候生成成功后会写入对话历史与记忆系统，并在聊天记录中可见。
-    /// 判定依据：non_seed_count() == 0 即首次见面——
-    /// seed_if_empty() 在 MemoryManager::new() 时已植入种子记忆，
-    /// 因此 entry_count() 从不为 0；须排除种子才能正确判断。
+    /// 首次见面使用固定开场，回归问候才调用 LLM。两者均写入真实历史、
+    /// 记忆和主动问候冷却，使后续聊天能承接，而不把生成指令当作用户发言。
     pub async fn generate_startup_greeting(&self) -> Option<String> {
+        let first_meeting = self.memory.non_seed_count() == 0 && self.dialogue.get_history_length() == 0;
+        let greeting_text = match fixed_startup_greeting(&self.char_id, first_meeting) {
+            Some(text) => Some(text.to_owned()),
+            None => self.generate_returning_greeting().await,
+        };
+
+        // 独立后处理：写入对话历史 + 记忆系统 + 纳入主动问候冷却
+        if let Some(greeting) = greeting_text {
+            *self.last_greeting_error.lock().await = None;
+            let mut greeting_msg = ChatMessage::assistant(greeting.as_str());
+            greeting_msg.meta = Some(crate::messages::MessageMeta::assistant().with_channel("proactive"));
+            self.dialogue.add_message(greeting_msg);
+            // 写入记忆系统（role 通过 tags 标记，记忆管理面板可显示）
+            let tags = vec![
+                "assistant".to_string(),
+                "startup_greeting".to_string(),
+                "dialogue_turn".to_string(),
+            ];
+            let meta = serde_json::json!({
+                "channel": "proactive",
+                "speaker": self.char_id,
+                "listener": "user",
+                "perspective": "speaker",
+                "knowledge_source": "direct",
+            });
+            // 与主对话统一格式：给裸问候补上说话者前缀（如 "[I say to User]"）。
+            // 前端/对话历史展示的是剥离前缀后的原始问候，仅记忆入库时带前缀统一格式。
+            let prefixed = format!(
+                "{} {}",
+                crate::cross_character::build_speaker_prefix(
+                    &self.char_id, "user", &self.char_id
+                ),
+                greeting
+            );
+            if let Err(e) = self
+                .memory
+                .add_memory_with_metadata(&prefixed, crate::memory::types::MemoryType::CasualConversation, 0.3, tags, meta)
+                .await
+            {
+                tracing::warn!("[startup_greeting] 写入记忆系统失败: {}", e);
+            }
+            // 纳入主动问候共享冷却，避免启动问候后很快又触发主动问候
+            self.proactive.record_greeting_arrival("startup_greeting");
+            Some(greeting)
+        } else {
+            None
+        }
+    }
+
+    async fn generate_returning_greeting(&self) -> Option<String> {
         let rel = self.psychology.relationship();
         let hour = chrono::Local::now().format("%H").to_string().parse::<u32>().unwrap_or(12);
         let intimacy = rel.intimacy * 100.0;
-        let is_first_meeting = self.memory.non_seed_count() == 0 && self.dialogue.get_history_length() == 0;
 
         // 读取当前情绪与天气，让问候语气与状态衔接
         // 情绪跨会话保留（上次对话结束的情绪带到这次开场），天气提供情境感
@@ -909,12 +958,7 @@ impl Brain {
             _ => "late night",
         };
 
-        // 用户消息：首次见面时在前面加一句"这是首次见面"提示，其余与一般对话一致。
-        // 首次见面走完整对话流水线（与直接渠道同一套提示词 + 记忆检索），
-        // 让问候带着种子前史生成，而不是一张白纸。
-        let greeting_prompt = if is_first_meeting {
-            first_contact_prompt(&self.char_id, time_desc, user_language_name)
-        } else {
+        let greeting_prompt = {
             let memory_text = self.build_startup_greeting_memory_text().await;
             let context_section = if memory_text.is_empty() {
                 String::new()
@@ -941,8 +985,8 @@ impl Brain {
 
         // 走完整对话流水线生成（与一般直接渠道对话相同提示词，含记忆检索→种子记忆在场）。
         // 返回 AiResponse；对话写回与记忆由下方独立后处理完成，避免把问候指令污染记忆库。
-        let greeting_text = match &self.chat_chain {
-            Some(chain) => match chain.ainvoke_greeting(&greeting_prompt, is_first_meeting).await {
+        match &self.chat_chain {
+            Some(chain) => match chain.ainvoke_greeting(&greeting_prompt, false).await {
                 Ok(resp) => {
                     let t = resp.text.trim().trim_matches('"').trim_matches('「').trim_matches('」').to_string();
                     if t.is_empty() {
@@ -960,9 +1004,7 @@ impl Brain {
             },
             // chat_chain 未就绪时回退到精简定制提示词
             None => {
-                let character_block = self.persona.get_character_block_tiered(
-                    crate::persona::prompt_render::CharacterBlockTier::Compact,
-                );
+                let character_block = self.persona.dialogue_card();
                 let style_block = self.persona.build_style_prompt(intimacy, hour);
                 let style_preset_block = crate::persona::prompt_render::render_style_preset_block(
                     &self.persona.get_config(),
@@ -988,10 +1030,11 @@ impl Brain {
                 );
                 let messages = vec![
                     ChatMessage::system(system_prompt),
-                    ChatMessage::user(greeting_prompt),
+                    ChatMessage::system(greeting_prompt),
                 ];
                 match self.router.generate(
                     LLMRequest::new("chat", messages).with_temperature(0.9)
+                        .without_framework_instructions()
                         .with_character_id(self.char_id.clone())
                 ).await {
                     Ok(text) => {
@@ -1010,48 +1053,6 @@ impl Brain {
                     }
                 }
             }
-        };
-
-        // 独立后处理：写入对话历史 + 记忆系统 + 纳入主动问候冷却
-        if let Some(greeting) = greeting_text {
-            *self.last_greeting_error.lock().await = None;
-            let mut greeting_msg = ChatMessage::assistant(greeting.as_str());
-            greeting_msg.meta = Some(crate::messages::MessageMeta::assistant().with_channel("proactive"));
-            self.dialogue.add_message(greeting_msg);
-            // 写入记忆系统（role 通过 tags 标记，记忆管理面板可显示）
-            let tags = vec![
-                "assistant".to_string(),
-                "startup_greeting".to_string(),
-                "dialogue_turn".to_string(),
-            ];
-            let meta = serde_json::json!({
-                "channel": "proactive",
-                "speaker": self.char_id,
-                "listener": "user",
-                "perspective": "speaker",
-                "knowledge_source": "direct",
-            });
-            // 与主对话统一格式：给裸问候补上说话者前缀（如 "[I say to User]"）。
-            // 前端/对话历史展示的是剥离前缀后的原始问候，仅记忆入库时带前缀统一格式。
-            let prefixed = format!(
-                "{} {}",
-                crate::cross_character::build_speaker_prefix(
-                    &self.char_id, "user", &self.char_id
-                ),
-                greeting
-            );
-            if let Err(e) = self
-                .memory
-                .add_memory_with_metadata(&prefixed, crate::memory::types::MemoryType::CasualConversation, 0.3, tags, meta)
-                .await
-            {
-                tracing::warn!("[startup_greeting] 写入记忆系统失败: {}", e);
-            }
-            // 纳入主动问候共享冷却，避免启动问候后很快又触发主动问候
-            self.proactive.record_greeting_arrival("startup_greeting");
-            Some(greeting)
-        } else {
-            None
         }
     }
 
@@ -2101,12 +2102,13 @@ fn language_code_to_name(code: &str) -> &'static str {
 #[cfg(test)]
 mod first_contact_tests {
     #[test]
-    fn companion_contact_greeting_is_an_introduction_not_idle_chat() {
-        let nana = super::first_contact_prompt("nana", "late night", "简体中文");
-        let vivian = super::first_contact_prompt("vivian", "late night", "简体中文");
-        assert!(nana.contains("第一次") && nana.contains("介绍自己的名字"));
-        assert!(nana.contains("温柔亲切") && !nana.contains("Vivian"));
-        assert!(vivian.contains("不好意思") && !vivian.contains("Nana"));
-        assert!(nana.contains("简体中文") && vivian.contains("不装熟"));
+    fn companion_contact_uses_exact_greetings_only_for_first_meeting() {
+        assert_eq!(super::fixed_startup_greeting("vivian", true),
+            Some("嗨，我是 Vivian！第一次见面，你叫什么名字？"));
+        assert_eq!(super::fixed_startup_greeting("nana", true),
+            Some("你好呀，我是 Nana。很高兴认识你。"));
+        assert_eq!(super::fixed_startup_greeting("vivian", false), None);
+        assert_eq!(super::fixed_startup_greeting("nana", false), None);
+        assert_eq!(super::fixed_startup_greeting("unknown", true), None);
     }
 }

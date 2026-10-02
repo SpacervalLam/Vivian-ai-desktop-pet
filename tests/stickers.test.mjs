@@ -1,0 +1,16 @@
+import assert from 'node:assert/strict';
+import {build} from 'esbuild';
+const bundle=async(entry)=>{const r=await build({entryPoints:[entry],bundle:true,write:false,platform:'node',format:'esm',plugins:[{name:'mock-tauri',setup(b){b.onResolve({filter:/^@tauri-apps\/api\/core$/},()=>({path:'tauri',namespace:'mock'}));b.onLoad({filter:/.*/,namespace:'mock'},()=>({contents:'export function invoke(command,args){globalThis.__stickerCalls.push(args.sticker);return Promise.resolve("data:image/png;base64,dummy")}'}));}}]});return import('data:text/javascript;base64,'+Buffer.from(r.outputFiles[0].text).toString('base64'));};
+const {parseSticker,stickerSource}=await bundle('src/components/stickers/stickers.ts');
+const {isVisibleChatMessage}=await bundle('src/utils/chatMessageContent.ts');
+const sticker={id:'vivian_happy_01',character_id:'vivian',version:'1',label:'开心',meaning:'轻松的喜悦'};
+assert.deepEqual(parseSticker(sticker),sticker);
+assert.equal(parseSticker({...sticker,id:'../outside'}),undefined);
+assert.equal(parseSticker({...sticker,character_id:'nana'}),undefined);
+assert.equal(parseSticker({...sticker,version:'../../outside'}),undefined);
+assert.equal(isVisibleChatMessage({role:'assistant',content:'',sticker}),true);
+assert.equal(isVisibleChatMessage({role:'assistant',content:''}),false);
+globalThis.__stickerCalls=[];
+await Promise.all([stickerSource(sticker),stickerSource({...sticker})]);assert.equal(globalThis.__stickerCalls.length,1);
+await stickerSource({...sticker,version:'newversion'});assert.equal(globalThis.__stickerCalls.length,2);
+console.log('Sticker checks passed: standalone visibility, scoped IDs, path validation and versioned resource cache.');

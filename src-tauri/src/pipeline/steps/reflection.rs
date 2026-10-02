@@ -457,8 +457,7 @@ impl ReflectionRunnable {
             .with_usage_tag("reflection")
             .with_max_tokens(1536)
             .with_reasoning_pref(crate::providers::reasoning::ReasoningPreference {
-                mode: crate::providers::reasoning::ReasoningMode::Off, effort: None,
-            })
+                mode: crate::providers::reasoning::ReasoningMode::Off, effort: None, budget_tokens: None })
             .with_character_id(self.char_id.clone())).await {
             Ok(text) => {
                 let trimmed = text.trim();

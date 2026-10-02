@@ -868,6 +868,7 @@ impl Runnable for UserMemorySavingRunnable {
                 "listener": char_id,
                 "perspective": "speaker",
                 "knowledge_source": "heard",
+                "conversation_id": state.conversation_id,
             });
             // 检查是否已有前缀（防御性），没有则添加
             let (_, existing_spk, _) = parse_any_speaker_prefix(&storage_text);
@@ -998,6 +999,7 @@ impl MemorySavingRunnable {
                 responses.push(final_text.to_string());
             }
         }
+        if responses.is_empty() && state.sticker.is_some() {responses.push("[表情包]".into());}
         responses
     }
 }
@@ -1105,6 +1107,11 @@ impl Runnable for MemorySavingRunnable {
                 (Some(um), Some(am))
             };
 
+            let mut ai_meta = ai_meta;
+            if let Some(meta) = ai_meta.as_mut() {
+                meta["conversation_id"] = json!(state.conversation_id);
+                if let Some(sticker)=&state.sticker {meta["sticker"]=json!(sticker);}
+            }
             let save_fut = memory_manager.save_context_with_metadata(
                 None,
                 &clean_responses,

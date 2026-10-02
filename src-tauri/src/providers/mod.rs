@@ -48,3 +48,5 @@ pub use spark::SparkProvider;
 pub use thinking_stripper::{leaks_thinking_in_content, strip_thinking_segments, ThinkingStreamStripper};
 pub use wenxin::WenxinProvider;
 pub use zhipu::ZhipuProvider;
+
+pub mod reasoning_profiles;

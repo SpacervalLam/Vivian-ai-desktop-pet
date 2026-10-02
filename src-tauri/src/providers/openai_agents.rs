@@ -194,6 +194,7 @@ impl OpenAiAgentsProvider {
             self.base.effective_reasoning(),
             &capability,
         );
+        agent = self.base.finalize_body(agent);
         if let Some(schema) = schema {
             agent["text"] = json!({"format": {"type": "json_schema", "name": "response", "strict": true, "schema": schema}});
         }
@@ -647,6 +648,15 @@ async fn emit_text(
 
 #[async_trait]
 impl BaseProvider for OpenAiAgentsProvider {
+    fn set_request_customization(&self, customization: crate::providers::reasoning_profiles::RequestCustomization) {
+        *self.base.request_customization.write() = customization;
+    }
+
+    fn set_request_parameters(&self, temperature: bool, max_tokens: bool) {
+        self.base.send_temperature.store(temperature, std::sync::atomic::Ordering::Relaxed);
+        self.base.send_max_tokens.store(max_tokens, std::sync::atomic::Ordering::Relaxed);
+    }
+
     async fn call_chat(&self, messages: Vec<ChatMessage>) -> VivianResult<String> {
         Ok(self.invoke(messages).await?.content)
     }

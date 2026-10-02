@@ -13,11 +13,12 @@ export function isVisibleChatMessage(message: {
   streaming?: boolean;
   imageDataUrl?: string;
   imagePath?: string;
+  sticker?: unknown;
   linkCard?: unknown;
   fileMeta?: unknown;
   voice?: unknown;
 }): boolean {
-  return !!(message.streaming || message.imageDataUrl || message.imagePath
+  return !!(message.streaming || message.sticker || message.imageDataUrl || message.imagePath
     || message.linkCard || message.fileMeta || message.voice)
     || hasVisibleChatText(message.content, message.role);
 }

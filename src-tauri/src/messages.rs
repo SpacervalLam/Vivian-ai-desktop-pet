@@ -80,6 +80,8 @@ pub struct MessageMeta {
     /// 用于区分文件/图片消息与纯文本，区别于用户手动输入的 `[文件：...]` 前缀。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sticker: Option<crate::stickers::StickerRef>,
 }
 
 impl MessageMeta {
@@ -91,6 +93,7 @@ impl MessageMeta {
             mirror_kind: None,
             channel: None,
             kind: None,
+            sticker: None,
         }
     }
 

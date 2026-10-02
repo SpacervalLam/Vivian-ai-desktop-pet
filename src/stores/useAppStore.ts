@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { MoodState } from '../types';
+import type { MoodState, StickerRef } from '../types';
 
 /** voiceEnabled 的持久化 key（右键菜单运行时静音状态，跨重启保留） */
 const VOICE_ENABLED_STORAGE_KEY = 'vivian.voiceEnabled';
@@ -24,6 +24,7 @@ export const hasPersistedVoiceEnabled = (): boolean => {
 export interface SettledBubble {
   id: number;
   text: string;
+  sticker?: StickerRef;
   /** 显示时长（ms），由文本长度决定，最少 4s */
   duration: number;
 }

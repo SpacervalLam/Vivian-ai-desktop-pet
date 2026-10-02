@@ -302,6 +302,7 @@ pub async fn share_link_to_wechat(
                 reasoning: None,
                 images: None,
                 meta: Some(MessageMeta {
+                    sticker: None,
                     source: MessageSource::Assistant,
                     is_memory_disabled: false,
                     mirror_kind: None,
@@ -330,6 +331,7 @@ pub async fn share_link_to_wechat(
                     reasoning: None,
                     images: None,
                     meta: Some(MessageMeta {
+                    sticker: None,
                         source: MessageSource::Assistant,
                         is_memory_disabled: false,
                         mirror_kind: None,

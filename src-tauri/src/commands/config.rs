@@ -123,6 +123,14 @@ pub struct LlmRouteTestParams {
     pub provider_type: String,
     /// 模型名称
     pub model: String,
+    #[serde(default = "probe_parameter_enabled")]
+    pub send_temperature: bool,
+    #[serde(default = "probe_parameter_enabled")]
+    pub send_max_tokens: bool,
+    #[serde(default)]
+    pub reasoning: Option<crate::providers::reasoning::ReasoningPreference>,
+    #[serde(default)]
+    pub reasoning_overrides: Option<serde_json::Value>,
     /// API Key
     pub api_key: String,
     /// 接口端点
@@ -134,6 +142,8 @@ pub struct LlmRouteTestParams {
     #[serde(default)]
     pub app_id: String,
 }
+
+fn probe_parameter_enabled() -> bool { true }
 
 /// LLM 路由 API 可用性测试结果
 #[derive(Debug, Clone, Serialize)]
@@ -168,10 +178,13 @@ pub async fn test_llm_route(
         endpoint: params.endpoint,
         api_secret: params.api_secret,
         app_id: params.app_id,
+                send_temperature: Some(params.send_temperature),
+                send_max_tokens: Some(params.send_max_tokens),
+                reasoning_overrides: params.reasoning_overrides,
         temperature: Some(0.0),
         max_tokens: Some(16),
         context_window: None,
-        reasoning: None,
+        reasoning: params.reasoning,
     };
 
     // 配置读锁不能跨 await：先取快照再异步执行

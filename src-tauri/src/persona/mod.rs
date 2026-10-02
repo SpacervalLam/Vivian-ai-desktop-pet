@@ -425,6 +425,28 @@ impl PersonaEngine {
         block
     }
 
+    /// Readable dialogue card; full configuration protocols remain available to
+    /// analysis/editor paths without dominating the character's spoken replies.
+    pub fn dialogue_card(&self) -> String {
+        let lang = self.language.read().clone();
+        let mut card = prompt_render::render_dialogue_card(&self.config_with_card_overlay(), &lang, &self.evolution.entries());
+        if let Some(learned) = self.evolution.render(&lang) {
+            card.push_str("\n\n");
+            card.push_str(&learned);
+        }
+        card
+    }
+
+    pub fn dialogue_preferences(&self) -> String {
+        let config = self.config_with_card_overlay();
+        let mut preferences = prompt_render::render_dialogue_preferences(&config, *self.current_scene_mode.read());
+        let extra = self.get_card_extra_instructions();
+        if !extra.is_empty() {
+            preferences.push_str(&format!("\n[ACTIVE CHARACTER CARD PREFERENCES]\n{}", extra.join("\n")));
+        }
+        preferences
+    }
+
     /// 人设配置修订号递增（所有 config 变更点调用，驱动渲染缓存失效）
     fn bump_config_revision(&self) {
         self.config_revision

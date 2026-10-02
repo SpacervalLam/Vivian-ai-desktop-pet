@@ -93,6 +93,10 @@ pub struct PipelineState {
     /// 微信渠道语音消息标志：为 true 时前端不显示文本，合成 TTS 后以语音气泡发出
     #[serde(default)]
     pub voice_message: bool,
+    #[serde(default)]
+    pub sticker_id: Option<String>,
+    #[serde(default)]
+    pub sticker: Option<crate::stickers::StickerRef>,
     /// 本轮回复实际依赖的记忆条目 id（归因/调试用，**前端永不展示**）
     ///
     /// 对应 LLM 输出的 `memory_used` 字段。用于定位"这句话她是根据哪条记忆说的"、
@@ -365,6 +369,8 @@ impl Default for PipelineState {
             intent: default_intent(),
             response_mode: default_response_mode(),
             voice_message: false,
+            sticker_id: None,
+            sticker: None,
             memory_used: Vec::new(),
             topic_activeness: default_topic_activeness(),
             focus_active: false,

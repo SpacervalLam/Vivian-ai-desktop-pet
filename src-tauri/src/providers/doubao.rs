@@ -230,7 +230,7 @@ impl DoubaoProvider {
         let response = client
             .post(&self.endpoint())
             .bearer_auth(&self.base.api_key)
-            .json(&body)
+            .json(&self.base.finalize_body(body.clone()))
             .send()
             .await
             .map_err(|e| VivianError::Provider(format!("HTTP 发送失败: {}", e)))?;
@@ -407,6 +407,15 @@ impl DoubaoProvider {
 
 #[async_trait]
 impl BaseProvider for DoubaoProvider {
+    fn set_request_customization(&self, customization: crate::providers::reasoning_profiles::RequestCustomization) {
+        *self.base.request_customization.write() = customization;
+    }
+
+    fn set_request_parameters(&self, temperature: bool, max_tokens: bool) {
+        self.base.send_temperature.store(temperature, std::sync::atomic::Ordering::Relaxed);
+        self.base.send_max_tokens.store(max_tokens, std::sync::atomic::Ordering::Relaxed);
+    }
+
     async fn call_chat(&self, messages: Vec<ChatMessage>) -> VivianResult<String> {
         crate::persona::prompt_render::check_messages_for_leaks(
             &messages,
@@ -434,7 +443,7 @@ impl BaseProvider for DoubaoProvider {
         let response = client
             .post(&self.endpoint())
             .bearer_auth(&self.base.api_key)
-            .json(&body)
+            .json(&self.base.finalize_body(body.clone()))
             .send()
             .await
             .map_err(|e| VivianError::Provider(format!("流式请求失败: {}", e)))?;
@@ -586,8 +595,11 @@ impl BaseProvider for DoubaoProvider {
                 client: self.base.client.clone(),
                 max_tokens_override: std::sync::atomic::AtomicU32::new(0),
                 temperature_override: std::sync::atomic::AtomicU64::new(0),
-                omit_temperature: std::sync::atomic::AtomicBool::new(false),
+                omit_temperature: std::sync::atomic::AtomicBool::new(self.base.should_omit_temperature()),
+                send_temperature: std::sync::atomic::AtomicBool::new(self.base.send_temperature.load(std::sync::atomic::Ordering::Relaxed)),
+                send_max_tokens: std::sync::atomic::AtomicBool::new(self.base.send_max_tokens.load(std::sync::atomic::Ordering::Relaxed)),
                 reasoning_pref: parking_lot::RwLock::new(*self.base.reasoning_pref.read()),
+                request_customization: parking_lot::RwLock::new(self.base.request_customization.read().clone()),
             },
             tools,
             instructions: self.instructions.clone(),
@@ -655,7 +667,7 @@ impl BaseProvider for DoubaoProvider {
         let response = client
             .post(&self.endpoint())
             .bearer_auth(&self.base.api_key)
-            .json(&body)
+            .json(&self.base.finalize_body(body.clone()))
             .send()
             .await
             .map_err(|e| VivianError::Provider(format!("流式请求失败: {}", e)))?;

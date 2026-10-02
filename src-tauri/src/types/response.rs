@@ -20,6 +20,8 @@ impl Default for AiTaskType {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AiResponse {
     pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sticker: Option<crate::stickers::StickerRef>,
     #[serde(default = "default_motion")]
     pub motion: String,
     #[serde(default = "default_expression")]
@@ -78,7 +80,7 @@ impl AiResponse {
     pub fn new(text: String) -> Self {
         Self {
             text,
-            motion: default_motion(),
+            sticker: None,            motion: default_motion(),
             expression: default_expression(),
             expression_duration_ms: 0,
             emotion_score: 0.0,
@@ -95,6 +97,7 @@ impl AiResponse {
     pub fn error(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
+            sticker: None,
             motion: "idle".to_string(),
             expression: "angry".to_string(),
             expression_duration_ms: 0,

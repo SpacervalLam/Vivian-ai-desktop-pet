@@ -128,6 +128,23 @@ mod tests {
     use crate::memory::embedding::default_embedding;
     fn message(role: &str, content: &str) -> ChatMessage { serde_json::from_value(serde_json::json!({"role":role,"content":content})).unwrap() }
     #[test]
+    fn natural_delivery_social_references_are_bounded_and_obey_learned_scopes() {
+        for name in ["nana", "vivian"] {
+            let r = ExampleRetriever::new(name, default_embedding());
+            for (input, id, scope) in [
+                ("猜猜我刚拿到什么", "social-invitation", "play"),
+                ("我偷偷织了两周围巾", "personal-effort", "sharing"),
+                ("你是什么性格", "personal-description", "self"),
+            ] {
+                let out = r.retrieve(input, &[], None, &[]).unwrap();
+                assert!(out.contains(id));
+                assert!(out.chars().count() <= MAX_CHARS);
+                assert!(out.contains("Fictional context (not user history)"));
+                assert!(r.retrieve(input, &[], None, &[scope.into()]).is_none());
+            }
+        }
+    }
+    #[test]
     fn duration_requires_current_presentation_context() {
         let r = ExampleRetriever::new("nana", default_embedding());
         assert!(r.retrieve("8分钟左右", &[], None, &[]).is_none());

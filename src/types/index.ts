@@ -3,6 +3,7 @@
 /** AI 响应 - 对应 backend `AiResponse` */
 export interface AiResponse {
   text: string;
+  sticker?: StickerRef | null;
   motion: string;
   expression: string;
   emotion_score: number;
@@ -684,3 +685,5 @@ export interface StartupGreeting {
   /** LLM 调用失败时的错误信息（greeting 为空时可能携带） */
   error?: string | null;
 }
+
+export interface StickerRef {id:string;character_id:string;version:string;label:string;meaning:string}

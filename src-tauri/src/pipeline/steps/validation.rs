@@ -210,7 +210,7 @@ impl Runnable for ValidationRunnable {
         }
 
         // 1. 空文本检测
-        if state.text.trim().is_empty() {
+        if state.text.trim().is_empty() && state.sticker.is_none() {
             tracing::warn!(
                 "[Validation] AI 回复文本为空（should_respond=true, response_mode={}）",
                 state.response_mode

@@ -32,4 +32,21 @@ assert.equal(direct.length, 1);
 assert.deepEqual(direct[0].turns.map(({ speaker }) => speaker), ['用户', 'Vivian']);
 assert.equal(direct[0].searchText.includes('says to'), false);
 
+const sessionRecords = Array.from({ length: 14 }, (_, i) => record(`turn-${i}`, `连续发言 ${i}`, 3000 + i * 200,
+  [], { channel: i % 2 ? 'wechat' : 'direct', speaker: i % 3 ? 'user' : 'vivian', conversation_id: 'session-a' }));
+sessionRecords.push(record('other-session', '另一段会话', 3100, [], { speaker: 'user', conversation_id: 'session-b' }));
+sessionRecords.push(record('system', '内部指令', 3101, [], { speaker: 'system', conversation_id: 'session-a' }));
+sessionRecords.push(record('interjection-prompt', '[User says to me] 你刚听到用户和Nana的对话:\n引用内容\n现在你想插话。', 3102, [], { speaker: 'user', conversation_id: 'session-a' }));
+sessionRecords.push(record('repeat', '连续发言 1', 5900, [], { speaker: 'user', conversation_id: 'session-a' }));
+const sessions = buildRecentThreads(sessionRecords, 'vivian');
+assert.equal(sessions.length, 2);
+assert.equal(sessions[0].turns.length, 15);
+assert.equal(sessions[0].searchText.includes('内部指令'), false);
+assert.equal(sessions[0].searchText.includes('现在你想插话'), false);
+const storedSession = buildRecentThreads([
+  record('stored-user', '你好', 6000, [], { speaker: 'user', session_id: 'stored-session' }),
+  record('stored-ai', '刚刚聊到的事情', 8000, [], { speaker: 'vivian', session_id: 'stored-session' }),
+], 'vivian');
+assert.equal(storedSession.length, 1);
+assert.equal(storedSession[0].turns.length, 2);
 console.log('memory presentation: ok');

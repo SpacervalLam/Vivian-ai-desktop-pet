@@ -4,15 +4,11 @@
 //! 偏好 → 按请求风格注入各家 wire 字段。
 //!
 //! 关键不变量：
-//! - `Auto` 不增加任何字段（模型存在 `auto_effort` 显式映射的除外）
+//! - `Auto` 不增加任何字段，采用服务端默认
 //! - 不支持关闭的模型（`supports_disable=false`）`Off` 折叠为 `On`，
 //!   否则发送关闭字段会被服务端直接拒绝
 //! - 各请求风格使用互斥字段，路径互不交叉
 //!
-//! 思考爆炸防护：部分强制思考模型（如 GLM-5.3）服务端默认档为 `max`，
-//! `Auto` 不发字段等价于 `max`，多步工具任务的思考会吃穿输出预算；
-//! 这些模型通过 `auto_effort` 把 `Auto` 显式映射为较轻档位。
-
 use once_cell::sync::Lazy;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -24,21 +20,30 @@ use crate::providers::capabilities::{detect_vendor, VendorId};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReasoningMode {
     /// 不干预，交由服务端默认
+    #[serde(alias = "auto")]
     Auto,
     /// 关闭思考
+    #[serde(alias = "off")]
     Off,
     /// 开启思考（可带档位）
+    #[serde(alias = "on")]
     On,
 }
 
 /// 推理档位。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReasoningEffort {
+    #[serde(alias = "minimal")]
     Minimal,
+    #[serde(alias = "low")]
     Low,
+    #[serde(alias = "medium")]
     Medium,
+    #[serde(alias = "high")]
     High,
+    #[serde(alias = "xhigh")]
     Xhigh,
+    #[serde(alias = "max")]
     Max,
 }
 
@@ -62,16 +67,19 @@ pub struct ReasoningPreference {
     pub mode: ReasoningMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<ReasoningEffort>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_tokens: Option<u32>,
 }
 
 impl ReasoningPreference {
     pub const AUTO: ReasoningPreference = ReasoningPreference {
         mode: ReasoningMode::Auto,
         effort: None,
+        budget_tokens: None,
     };
 
     pub fn on(effort: Option<ReasoningEffort>) -> Self {
-        Self { mode: ReasoningMode::On, effort }
+        Self { mode: ReasoningMode::On, effort, budget_tokens: None }
     }
 }
 
@@ -406,7 +414,7 @@ pub fn resolve_reasoning_capability(model: &str) -> ReasoningCapability {
 /// 决策顺序：
 /// 1. 无控制字段 → 强制 Auto（不干预）
 /// 2. 强制开启 → 永远 On（不读偏好）
-/// 3. `Auto` 且模型有 `auto_effort` → 视为 On + auto_effort
+/// 3. `Auto` → 采用服务端默认
 /// 4. `Off` 且不支持关闭 → 折叠为 On
 /// 5. `On`：effort 不在支持列表 → 退回默认档；缺省 → 填默认档
 pub fn resolve_effective_reasoning(
@@ -418,25 +426,16 @@ pub fn resolve_effective_reasoning(
         return ReasoningPreference::AUTO;
     }
 
-    // 2. 强制开启 → 永远 On
-    if capability.control == ReasoningControl::FixedOn {
-        return ReasoningPreference::on(None);
-    }
-
-    // 3. Auto 档显式映射（防思考爆炸：服务端默认档不可控的模型）
-    if pref.mode == ReasoningMode::Auto {
-        if let Some(effort) = capability.auto_effort {
-            return ReasoningPreference::on(Some(effort));
-        }
-        return ReasoningPreference::AUTO;
-    }
+    // Auto always follows the server default, including fixed-on models.
+    if pref.mode == ReasoningMode::Auto { return ReasoningPreference::AUTO; }
+    if capability.control == ReasoningControl::FixedOn { return ReasoningPreference::on(None); }
 
     // 4. Off 折叠：不支持关闭的模型发关闭字段会被服务端拒绝
     if pref.mode == ReasoningMode::Off {
         if !capability.supports_disable {
             return ReasoningPreference::on(None);
         }
-        return ReasoningPreference { mode: ReasoningMode::Off, effort: None };
+        return ReasoningPreference { mode: ReasoningMode::Off, effort: None, budget_tokens: None };
     }
 
     // 5. On：档位校验与兜底
@@ -505,8 +504,7 @@ pub fn apply_reasoning_preference(
 /// Responses API 风格的推理注入（原地修改）。
 ///
 /// Responses API 的推理参数为 `reasoning: {"effort": "..."}`，
-/// 仅在生效偏好为 On 且带档位时注入；Off / Auto 不发字段
-/// （Responses 端对关闭语义支持不一，保守省略交由服务端默认）。
+/// On 指定支持的档位；确认可关闭的 effort 协议发送 none，Auto 不发字段。
 pub fn apply_responses_reasoning(
     body: &mut Value,
     pref: ReasoningPreference,
@@ -514,6 +512,10 @@ pub fn apply_responses_reasoning(
 ) {
     let effective = resolve_effective_reasoning(pref, capability);
     if capability.control == ReasoningControl::None {
+        return;
+    }
+    if effective.mode == ReasoningMode::Off && capability.supports_disable && capability.request_style == ReasoningRequestStyle::OpenaiEffort {
+        body["reasoning"] = serde_json::json!({"effort":"none"});
         return;
     }
     if let ReasoningMode::On = effective.mode {
@@ -591,20 +593,20 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn glm_53_auto_maps_to_high() {
+    fn glm_53_auto_uses_server_default() {
         let cap = resolve_reasoning_capability("glm-5.3");
         assert_eq!(cap.control, ReasoningControl::ToggleEffort);
         assert!(!cap.supports_disable);
         let eff = resolve_effective_reasoning(ReasoningPreference::AUTO, &cap);
-        assert_eq!(eff.mode, ReasoningMode::On);
-        assert_eq!(eff.effort, Some(ReasoningEffort::High));
+        assert_eq!(eff.mode, ReasoningMode::Auto);
+        assert_eq!(eff.effort, None);
     }
 
     #[test]
     fn glm_53_off_folds_to_on() {
         let cap = resolve_reasoning_capability("GLM-5.3-Flash");
         let eff = resolve_effective_reasoning(
-            ReasoningPreference { mode: ReasoningMode::Off, effort: None },
+            ReasoningPreference { mode: ReasoningMode::Off, effort: None, budget_tokens: None },
             &cap,
         );
         assert_eq!(eff.mode, ReasoningMode::On);
@@ -649,7 +651,7 @@ mod tests {
         let mut body = json!({});
         apply_reasoning_preference(
             &mut body,
-            ReasoningPreference { mode: ReasoningMode::Off, effort: None },
+            ReasoningPreference { mode: ReasoningMode::Off, effort: None, budget_tokens: None },
             &cap,
             false,
         );

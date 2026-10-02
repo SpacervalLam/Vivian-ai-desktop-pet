@@ -794,10 +794,10 @@ pub async fn send_message_stream(
 
     match result {
         Ok(response) => {
-            // 空文本或 response_mode=ignore：跳过 chat:meta/chat:done 发射，避免向微信界面发送空消息
-            if response.text.trim().is_empty() || response.response_mode == "ignore" {
+            // ignore 模式不展示；空文本仍结算流，允许纯贴纸并清理前端 typing 状态。
+            if response.response_mode == "ignore" {
                 tracing::info!(
-                    "[Chat:{}] 空文本或 ignore 模式，跳过 chat:done 发射: stream_id={}",
+                    "[Chat:{}] ignore 模式，跳过 chat:done 发射: stream_id={}",
                     char_id,
                     stream_id
                 );
@@ -858,6 +858,7 @@ pub async fn send_message_stream(
                 "chat:done",
                 json!({
                     "text": display_text,
+                    "sticker": response.sticker,
                     "motion": response.motion,
                     "expression": response.expression,
                     "expression_duration_ms": response.expression_duration_ms,
@@ -1082,14 +1083,19 @@ pub async fn send_message_stream(
                                 let prev_channel = observer_dialogue_clone.get_channel();
                                 observer_dialogue_clone.set_channel("proactive");
 
-                                // 非流式调用主对话流程，插话指令作为 user_input
-                                // 完整 prompt 会包含人设/记忆/情绪/工具等，插话指令出现在末尾
+                                let previous_session = observer_dialogue_clone.get_session_id();
+                                let interjection_session = crate::conversation::CONVERSATION_MANAGER
+                                    .start_or_continue("user", &other_id_clone, "")
+                                    .map(|conv| conv.id);
+                                observer_dialogue_clone.set_session_id(interjection_session.clone());
+                                // 内部指令以 system 身份生成，不写入用户历史或记忆。
                                 let result = observer_brain_clone
-                                    .think(&interjection_directive, false)
+                                    .think_system_directive(&interjection_directive)
                                     .await;
 
                                 // 恢复渠道
                                 observer_dialogue_clone.set_channel(&prev_channel);
+                                observer_dialogue_clone.set_session_id(previous_session);
                                 drop(_brain_guard);
 
                                 let response = match result {
@@ -1124,6 +1130,8 @@ pub async fn send_message_stream(
                                     "perspective": "speaker",
                                     "knowledge_source": "direct",
                                     "content_type": "bystander_interjection",
+                                    "conversation_id": interjection_session,
+                                    "session_id": interjection_session,
                                 });
                                 let _ = observer_memory_clone
                                     .add_memory_with_metadata(
@@ -1406,10 +1414,10 @@ pub async fn wake_from_presence(
 
     match result {
         Ok(response) => {
-            // 空文本或 response_mode=ignore：跳过 chat:meta/chat:done 发射，避免向微信界面发送空消息
-            if response.text.trim().is_empty() || response.response_mode == "ignore" {
+            // ignore 模式不展示；空文本仍结算流，允许纯贴纸并清理前端 typing 状态。
+            if response.response_mode == "ignore" {
                 tracing::info!(
-                    "[Chat:{}] 空文本或 ignore 模式，跳过 chat:done 发射: stream_id={}",
+                    "[Chat:{}] ignore 模式，跳过 chat:done 发射: stream_id={}",
                     char_id,
                     stream_id
                 );
@@ -1433,6 +1441,7 @@ pub async fn wake_from_presence(
                 "chat:done",
                 json!({
                     "text": response.text,
+                    "sticker": response.sticker,
                     "motion": response.motion,
                     "expression": response.expression,
                     "expression_duration_ms": response.expression_duration_ms,

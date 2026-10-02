@@ -610,6 +610,12 @@ pub struct AiConfig {
     pub endpoint: Option<String>,
     pub temperature: f64,
     pub max_tokens: u32,
+    #[serde(default = "default_true")]
+    pub send_temperature: bool,
+    #[serde(default = "default_true")]
+    pub send_max_tokens: bool,
+    #[serde(default)]
+    pub reasoning_overrides: Option<serde_json::Value>,
     /// API Secret（仅文心 / 讯飞等需要 OAuth/HMAC 签名的服务商使用）
     #[serde(default)]
     pub api_secret: Option<String>,
@@ -972,6 +978,13 @@ pub struct TaskRouteConfig {
     /// 生成温度（None 时回退到主 LLM 配置）
     #[serde(default)]
     pub temperature: Option<f64>,
+    /// None inherits the main configuration; false omits the wire parameter.
+    #[serde(default)]
+    pub send_temperature: Option<bool>,
+    #[serde(default)]
+    pub send_max_tokens: Option<bool>,
+    #[serde(default)]
+    pub reasoning_overrides: Option<serde_json::Value>,
     /// 最大 token 数（None 时回退到主 LLM 配置）
     #[serde(default)]
     pub max_tokens: Option<u32>,
@@ -1603,6 +1616,9 @@ impl Default for AppConfig {
                 model: "deepseek-ai/DeepSeek-V3.1".to_string(),
                 api_key: None,
                 endpoint: Some("https://api.siliconflow.cn/v1".to_string()),
+                send_temperature: true,
+                send_max_tokens: true,
+                reasoning_overrides: None,
                 temperature: 0.70,
                 max_tokens: 2048,
                 api_secret: None,
@@ -1631,6 +1647,7 @@ impl Default for AppConfig {
                     // 工作智能体专属任务类型：与陪伴对话的 reasoning 分开，
                     // 让"按任务类型分流"能区分二者（见 TASK_WORK_AGENT 的说明）
                     crate::providers::base::TASK_WORK_AGENT,
+                    crate::providers::base::TASK_TOOL_EXECUTION,
                     "text_rewrite",
                     "diary",
                     "memory",

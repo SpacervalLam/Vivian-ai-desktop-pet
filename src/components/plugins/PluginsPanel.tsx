@@ -219,7 +219,7 @@ const PluginsPanel: React.FC = () => {
         </div>
       )}
 
-      <div style={sectionTitle}>{t('config.plugins.section_plugins')}</div>
+      <div style={sectionTitle}>{t('config.plugins.section_plugins')}</div><p style={{fontSize:12,color:'var(--panel-text-secondary)'}}>{t('config.plugins.package_help')}</p>
       {error ? (
         <div style={{ fontSize: 13, color: '#E53935' }}>{error}</div>
       ) : plugins === null ? (
@@ -418,7 +418,7 @@ const PluginsPanel: React.FC = () => {
         </div>
       </div>
 
-      <div style={sectionTitle}>{t('config.plugins.section_skills')}</div>
+      <div style={sectionTitle}>{t('config.plugins.section_skills')}</div><p style={{fontSize:12,color:'var(--panel-text-secondary)'}}>{t('config.plugins.workflow_help')}</p>
       {error ? null : skills === null ? (
         <div style={{ fontSize: 13, color: 'var(--panel-text-secondary)' }}>{t('mind_inspector.common.loading')}</div>
       ) : (
@@ -447,7 +447,7 @@ const PluginsPanel: React.FC = () => {
                 {s.name}
               </span>
               <span style={{ fontSize: 11, color: 'var(--panel-text-tertiary)', flexShrink: 0 }}>
-                {originLabel(s.origin)}
+                {originLabel(s.origin)}{s.origin === 'plugin' ? ` · ${s.name.split('/')[0]}` : ''}
               </span>
               <span
                 style={{

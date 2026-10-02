@@ -3,6 +3,7 @@ import { listen, emit } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import MessageBubble, { type BubblePosition } from './MessageBubble';
 import type { SettledBubble } from '../stores/useAppStore';
+import { bubbleContentKey } from '../utils/bubbleContent';
 
 interface BubbleSnapshot {
   text: string | null;
@@ -19,7 +20,7 @@ export default function BubbleWindow() {
   const container = useRef<HTMLDivElement>(null);
   const myCharId = new URLSearchParams(window.location.search).get('character_id') ?? '';
   const position = snapshot.position ?? 'top';
-  const key = JSON.stringify([...snapshot.settled.map((b) => b.text), ...(snapshot.text ? [snapshot.text] : [])]);
+  const key = bubbleContentKey(snapshot.settled, snapshot.text);
   const hasContent = !!snapshot.text || snapshot.settled.length > 0;
 
   useEffect(() => {
@@ -59,7 +60,7 @@ export default function BubbleWindow() {
         display: 'flex', flexDirection: position === 'top' ? 'column' : 'column-reverse',
         alignItems: 'center', gap: 8, padding: 8,
       }}>
-        {snapshot.settled.map((bubble) => (
+        {snapshot.settled.filter(bubble => !bubble.sticker).map((bubble) => (
           <MessageBubble key={bubble.id} text={bubble.text} duration={0} position={position}
             characterId={myCharId} crossCharacter={snapshot.cross_character}
             listenerName={snapshot.listener_name ?? undefined} />
@@ -69,6 +70,11 @@ export default function BubbleWindow() {
             characterId={myCharId} crossCharacter={snapshot.cross_character}
             listenerName={snapshot.listener_name ?? undefined} />
         )}
+        {snapshot.settled.filter(bubble => bubble.sticker).map((bubble) => (
+          <MessageBubble key={bubble.id} text="" sticker={bubble.sticker} duration={0} position={position}
+            characterId={myCharId} crossCharacter={snapshot.cross_character}
+            listenerName={snapshot.listener_name ?? undefined} />
+        ))}
       </div>
     </div>
   );

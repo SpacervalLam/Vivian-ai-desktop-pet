@@ -37,6 +37,7 @@ impl GeminiProvider {
     pub fn new(
         api_key: &str,
         model: &str,
+        endpoint: &str,
         temperature: f64,
         max_tokens: u32,
         proxy: Option<String>,
@@ -44,7 +45,7 @@ impl GeminiProvider {
     ) -> Self {
         let base = ProviderBase::new(
             api_key.to_string(),
-            GEMINI_BASE_URL.to_string(),
+            Self::normalize_endpoint(endpoint),
             model.to_string(),
             temperature,
             max_tokens,
@@ -61,18 +62,26 @@ impl GeminiProvider {
         }
     }
 
+    fn normalize_endpoint(endpoint: &str) -> String {
+        let endpoint = endpoint.trim().trim_end_matches('/');
+        if endpoint.is_empty() {
+            return GEMINI_BASE_URL.to_string();
+        }
+        // A bare origin needs an API version. Preserve custom prefixes and versions.
+        match reqwest::Url::parse(endpoint) {
+            Ok(url) if url.path().is_empty() || url.path() == "/" => {
+                format!("{}/v1beta", endpoint)
+            }
+            _ => endpoint.to_string(),
+        }
+    }
+
     fn generate_endpoint(&self) -> String {
-        format!(
-            "{}/models/{}:generateContent?key={}",
-            GEMINI_BASE_URL, self.model, self.api_key
-        )
+        format!("{}/models/{}:generateContent", self.base.base_url, self.model)
     }
 
     fn stream_endpoint(&self) -> String {
-        format!(
-            "{}/models/{}:streamGenerateContent?alt=sse&key={}",
-            GEMINI_BASE_URL, self.model, self.api_key
-        )
+        format!("{}/models/{}:streamGenerateContent?alt=sse", self.base.base_url, self.model)
     }
 
     fn build_contents_from_chat(messages: &[ChatMessage]) -> serde_json::Value {
@@ -176,15 +185,12 @@ impl GeminiProvider {
         let mut generation_config = json!({
             "temperature": self.base.effective_temperature(),
             "maxOutputTokens": self.base.effective_max_tokens(),
-            // JSON Mode：强制 Gemini 返回合法 JSON，与 prompt 中的 OUTPUT_FORMAT 约束协同
-            // 注意：function calling 路径（stream_with_tools）也会走 build_body，
-            // Gemini 允许 responseMimeType 与 tools 同时使用（与 OpenAI 不同），故统一注入
-            "responseMimeType": "application/json",
         });
         // Structured Outputs: Gemini 通过 generationConfig.responseSchema 约束输出
         // 与 responseMimeType=application/json 配合使用
         // 注意：Gemini 不支持 JSON Schema 的 $ref / $defs，需内联解析后再注入
         if let Some(schema) = json_schema {
+            generation_config["responseMimeType"] = json!("application/json");
             let sanitized = Self::resolve_schema_refs(schema);
             generation_config["responseSchema"] = sanitized;
         }
@@ -193,7 +199,9 @@ impl GeminiProvider {
         match pref.mode {
             ReasoningMode::Auto => {}
             ReasoningMode::Off => {
-                generation_config["thinkingConfig"] = json!({"thinkingBudget": 0});
+                generation_config["thinkingConfig"] = if self.model.starts_with("gemini-3.8") {
+                    json!({"thinkingLevel": "low"})
+                } else { json!({"thinkingBudget": 0}) };
             }
             ReasoningMode::On => {
                 let level = match pref.effort.unwrap_or(ReasoningEffort::Medium) {
@@ -291,7 +299,8 @@ impl GeminiProvider {
         let client = self.base.get_client();
         let response = client
             .post(&self.generate_endpoint())
-            .json(&body)
+            .header("x-goog-api-key", &self.api_key)
+            .json(&self.base.finalize_body(body.clone()))
             .send()
             .await?;
 
@@ -512,6 +521,15 @@ impl GeminiProvider {
 
 #[async_trait]
 impl BaseProvider for GeminiProvider {
+    fn set_request_customization(&self, customization: crate::providers::reasoning_profiles::RequestCustomization) {
+        *self.base.request_customization.write() = customization;
+    }
+
+    fn set_request_parameters(&self, temperature: bool, max_tokens: bool) {
+        self.base.send_temperature.store(temperature, std::sync::atomic::Ordering::Relaxed);
+        self.base.send_max_tokens.store(max_tokens, std::sync::atomic::Ordering::Relaxed);
+    }
+
     async fn call_chat(&self, messages: Vec<ChatMessage>) -> VivianResult<String> {
         let prompt_key = messages_cache_key(&messages);
         let contents = Self::build_contents_from_chat(&messages);
@@ -567,7 +585,8 @@ impl BaseProvider for GeminiProvider {
         let client = self.base.get_client();
         let response = client
             .post(&self.stream_endpoint())
-            .json(&body)
+            .header("x-goog-api-key", &self.api_key)
+            .json(&self.base.finalize_body(body.clone()))
             .send()
             .await?;
 
@@ -695,8 +714,11 @@ impl BaseProvider for GeminiProvider {
                 client: self.base.client.clone(),
                 max_tokens_override: std::sync::atomic::AtomicU32::new(0),
                 temperature_override: std::sync::atomic::AtomicU64::new(0),
-                omit_temperature: std::sync::atomic::AtomicBool::new(false),
+                omit_temperature: std::sync::atomic::AtomicBool::new(self.base.should_omit_temperature()),
+                send_temperature: std::sync::atomic::AtomicBool::new(self.base.send_temperature.load(std::sync::atomic::Ordering::Relaxed)),
+                send_max_tokens: std::sync::atomic::AtomicBool::new(self.base.send_max_tokens.load(std::sync::atomic::Ordering::Relaxed)),
                 reasoning_pref: parking_lot::RwLock::new(*self.base.reasoning_pref.read()),
+                request_customization: parking_lot::RwLock::new(self.base.request_customization.read().clone()),
             },
             tools,
         }))
@@ -763,16 +785,13 @@ impl BaseProvider for GeminiProvider {
         }
 
         // 流式端点（不在 URL 中携带 key，改用 x-goog-api-key header）
-        let endpoint = format!(
-            "{}/models/{}:streamGenerateContent?alt=sse",
-            GEMINI_BASE_URL, self.model
-        );
+        let endpoint = self.stream_endpoint();
 
         let client = self.base.get_client();
         let response = client
             .post(&endpoint)
             .header("x-goog-api-key", &self.api_key)
-            .json(&body)
+            .json(&self.base.finalize_body(body.clone()))
             .send()
             .await?;
 
@@ -901,5 +920,44 @@ impl BaseProvider for GeminiProvider {
         });
 
         Ok(rx)
+    }
+}
+
+#[cfg(test)]
+mod routing_protocol_tests {
+    use super::*;
+    use crate::providers::reasoning::{ReasoningPreference, ReasoningMode};
+
+    #[test]
+    fn configured_endpoints_are_used_for_all_request_paths() {
+        for (input, expected) in [
+            ("", GEMINI_BASE_URL),
+            (" https://generativelanguage.googleapis.com/ ", GEMINI_BASE_URL),
+            ("https://proxy.example/v1beta/", "https://proxy.example/v1beta"),
+            ("http://localhost:8080", "http://localhost:8080/v1beta"),
+            ("https://proxy.example/gemini/v1/", "https://proxy.example/gemini/v1"),
+        ] {
+            let provider = GeminiProvider::new("secret-test-key", "gemini-3.8-flash", input, 1.0, 256, None, None);
+            assert_eq!(provider.base.base_url, expected);
+            assert_eq!(provider.generate_endpoint(), format!("{expected}/models/gemini-3.8-flash:generateContent"));
+            assert_eq!(provider.stream_endpoint(), format!("{expected}/models/gemini-3.8-flash:streamGenerateContent?alt=sse"));
+            assert!(!provider.generate_endpoint().contains("secret-test-key"));
+            assert!(!provider.stream_endpoint().contains("secret-test-key"));
+        }
+    }
+
+    #[test]
+    fn gemini_38_plain_speech_and_structured_output_are_separate() {
+        let provider = GeminiProvider::new("local-test", "gemini-3.8-flash", "", 1.0, 2048, None, None);
+        provider.base.set_reasoning_pref(Some(ReasoningPreference { mode: ReasoningMode::Off, effort: None, budget_tokens: None }));
+        let plain = provider.build_body(json!([]), &None);
+        assert!(plain["generationConfig"].get("responseMimeType").is_none());
+        assert_eq!(plain["generationConfig"]["thinkingConfig"], json!({"thinkingLevel":"low"}));
+        let structured = provider.build_body(json!([]), &Some(json!({"type":"object","properties":{"text":{"type":"string"}}})));
+        assert_eq!(structured["generationConfig"]["responseMimeType"], "application/json");
+        assert!(structured["generationConfig"].get("responseSchema").is_some());
+        let legacy = GeminiProvider::new("local-test", "gemini-2.5-flash", "", 1.0, 2048, None, None);
+        legacy.base.set_reasoning_pref(Some(ReasoningPreference { mode: ReasoningMode::Off, effort: None, budget_tokens: None }));
+        assert_eq!(legacy.build_body(json!([]), &None)["generationConfig"]["thinkingConfig"], json!({"thinkingBudget":0}));
     }
 }

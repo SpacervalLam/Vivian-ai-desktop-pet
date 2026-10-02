@@ -278,6 +278,7 @@ fn parse_providers(input: &Value) -> Result<Vec<ProviderPresetData>, String> {
                     .collect::<Vec<_>>()
             });
             Ok(ProviderPresetData {
+                reasoning_profiles: p.get("reasoningProfiles").map(|v|serde_json::from_value(v.clone())).transpose().map_err(|e|format!("思考能力格式无效: {e}"))?.unwrap_or_default(),
                 id,
                 label_key: p.get("labelKey").and_then(|v| v.as_str()).map(String::from),
                 label: p.get("label").and_then(|v| v.as_str()).map(String::from),

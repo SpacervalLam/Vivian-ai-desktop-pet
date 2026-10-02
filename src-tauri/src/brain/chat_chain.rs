@@ -950,6 +950,7 @@ Choose the appropriate expression and motion. Leave empty if nothing fits.",
             }
         }
         state.current_channel = current_ch;
+        state.conversation_id = self.dialogue.get_session_id().unwrap_or_default();
         if let Some(presence) = &self.presence {
             state.presence_state = presence.current().as_str().to_string();
         }
@@ -1056,6 +1057,7 @@ Choose the appropriate expression and motion. Leave empty if nothing fits.",
             Some(response) => response,
             None => AiResponse::new(final_state.text.clone()),
         };
+        response.sticker = final_state.sticker.clone();
         response.user_emotion = final_state.user_emotion.clone();
         response.expression = final_state.expression.clone();
         response.expression_duration_ms = final_state.expression_duration_ms;
@@ -1294,7 +1296,7 @@ Choose the appropriate expression and motion. Leave empty if nothing fits.",
             );
             // AI 回复元数据：与用户消息对称标注。
             // 广播时自己的回复同样是当众说的（同屋的人听得见），listener 也记 "all"。
-            let ai_metadata = serde_json::json!({
+            let mut ai_metadata = serde_json::json!({
                 "channel": channel,
                 "speaker": listener,
                 "listener": if is_broadcast { "all" } else { speaker.as_str() },
@@ -1305,6 +1307,10 @@ Choose the appropriate expression and motion. Leave empty if nothing fits.",
             ai_msg.meta = Some(
                 crate::messages::MessageMeta::assistant().with_channel(&channel),
             );
+            if let Some(sticker) = &response.sticker {
+                ai_metadata["sticker"] = serde_json::json!(sticker);
+                if let Some(meta)=ai_msg.meta.as_mut(){meta.sticker=Some(sticker.clone());}
+            }
             self.dialogue.add_message_with_metadata(user_msg, user_metadata);
             self.dialogue.add_message_with_metadata(ai_msg, ai_metadata);
 
@@ -1380,12 +1386,22 @@ Choose the appropriate expression and motion. Leave empty if nothing fits.",
         Ok(response)
     }
 
-    /// 启动问候专用：走完整对话流水线生成，但跳过记忆写入与对话写回。
-    ///
-    /// 与一般直接渠道对话复用同一套完整提示词（含记忆检索 → 种子记忆进入 prompt），
-    /// 同时设置 `skip_memory_save`，让 UserMemorySavingRunnable / MemorySavingRunnable
-    /// 跳过写入——问候的对话历史与记忆由调用方（Brain::generate_startup_greeting）
-    /// 独立完成后处理，避免把合成的问候指令当作用户消息污染记忆库。
+    /// 内部系统指令走生成流水线，跳过用户记忆、画像和对话抽取，仅写回真实回复。
+    pub async fn ainvoke_system_directive(&self, directive: &str) -> VivianResult<AiResponse> {
+        let mut state = self.prepare_pipeline_state(directive).await;
+        state.metadata["skip_memory_save"] = serde_json::json!(true);
+        state.metadata["system_directive"] = serde_json::json!(true);
+        state.metadata["proactive_greeting"] = serde_json::json!(true);
+        let (_, response) = self.execute_pipeline_and_build_response(state, false, directive).await?;
+        if !response.text.trim().is_empty() {
+            let mut message = ChatMessage::assistant(&MemorySavingRunnable::strip_json_if_any(&response.text));
+            message.meta = Some(crate::messages::MessageMeta::assistant().with_channel(&self.dialogue.get_channel()));
+            self.dialogue.add_message_with_metadata(message, serde_json::json!({ "speaker": self.char_id, "listener": "user", "content_type": "bystander_interjection" }));
+        }
+        Ok(response)
+    }
+
+    /// 启动问候由调用方保存实际回复，不将合成触发指令写入记忆或历史。
     pub async fn ainvoke_greeting(&self, user_input: &str, is_first_meeting: bool) -> VivianResult<AiResponse> {
         let mut state = self.prepare_pipeline_state(user_input).await;
         state.metadata["skip_memory_save"] = serde_json::json!(true);

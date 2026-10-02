@@ -140,6 +140,8 @@ pub struct DialogueManager {
     written_tail: Mutex<Vec<HistoryEntry>>,
     /// JSONL 就绪标志：首次 flush 前完成旧格式迁移与尾部缓存恢复
     jsonl_ready: Mutex<bool>,
+    /// 串行化追加、清空和元数据修补，避免整文件重写覆盖新消息。
+    history_io: Mutex<()>,
 }
 
 impl DialogueManager {
@@ -156,6 +158,7 @@ impl DialogueManager {
             current_session_id: Mutex::new(None),
             written_tail: Mutex::new(Vec::new()),
             jsonl_ready: Mutex::new(false),
+            history_io: Mutex::new(()),
         }
     }
 
@@ -319,6 +322,7 @@ impl DialogueManager {
                 meta.kind = Some(kind.to_string());
             }
         }
+        if let Some(sticker)=metadata.get("sticker").and_then(|s|serde_json::from_value(s.clone()).ok()){meta.sticker=Some(sticker);}
         // 最终生效的 channel：优先用 msg 自带的，否则用 current_channel
         let effective_channel = meta.channel.clone().unwrap_or_else(|| default_channel.clone());
 
@@ -474,24 +478,21 @@ impl DialogueManager {
 
     /// 刷新缓冲区到磁盘（JSONL 追加写，带尾部重复检测）
     pub fn flush_buffer(&self) -> VivianResult<()> {
-        // 1. 取出缓冲区内容（不在持锁期间进行文件 I/O）
-        let messages_to_write = {
-            let mut buf = self.buffer.lock();
-            if buf.is_empty() {
-                return Ok(());
-            }
-            let taken = buf.clone();
-            buf.clear();
-            taken
-        };
+        let _io = self.history_io.lock();
+        // 持锁直到写入成功，防止后台刷新与备份刷新并发或失败时丢失待写消息。
+        let mut pending = self.buffer.lock();
+        if pending.is_empty() {
+            return Ok(());
+        }
+        let messages_to_write = pending.clone();
 
         // 2. 首次刷新：完成旧格式迁移并恢复尾部缓存
         self.ensure_jsonl_ready();
 
         // 3. 重复检测（仅比对已落盘尾部 20 条）后逐行序列化
         let mut lines: Vec<String> = Vec::with_capacity(messages_to_write.len());
+        let mut tail = self.written_tail.lock().clone();
         {
-            let mut tail = self.written_tail.lock();
             for msg in &messages_to_write {
                 if Self::is_duplicate(msg, tail.as_slice()) {
                     tracing::debug!("检测到重复消息，跳过: {}", msg.id);
@@ -500,8 +501,9 @@ impl DialogueManager {
                 let line = match serde_json::to_string(msg) {
                     Ok(l) => l,
                     Err(e) => {
-                        tracing::error!("消息序列化失败，跳过该条: {}", e);
-                        continue;
+                        return Err(VivianError::Io(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData, e,
+                        )));
                     }
                 };
                 lines.push(line);
@@ -512,6 +514,7 @@ impl DialogueManager {
             }
         }
         if lines.is_empty() {
+            pending.clear();
             return Ok(());
         }
 
@@ -529,13 +532,15 @@ impl DialogueManager {
             buf.push_str(&line);
             buf.push('\n');
         }
-        if let Err(e) = file.write_all(buf.as_bytes()) {
+        let original_len = file.metadata()?.len();
+        if let Err(e) = file.write_all(buf.as_bytes()).and_then(|_| file.sync_all()) {
             tracing::error!("刷新缓冲区失败: {}", e);
-            // 写入失败，将消息放回缓冲区等待重试
-            let mut b = self.buffer.lock();
-            b.extend(messages_to_write);
+            // 回滚部分写入；缓冲区及去重缓存只在成功后提交。
+            file.set_len(original_len)?;
             return Err(VivianError::Io(e));
         }
+        *self.written_tail.lock() = tail;
+        pending.clear();
         tracing::debug!("已追加 {} 条消息到磁盘", messages_to_write.len());
         Ok(())
     }
@@ -569,6 +574,7 @@ impl DialogueManager {
             if existing_ts == new_ts_key
                 && existing_content == new_content_key
                 && msg.role == new_msg.role
+                && msg.metadata.get("sticker") == new_msg.metadata.get("sticker")
             {
                 return true;
             }
@@ -737,6 +743,7 @@ impl DialogueManager {
 
     /// 清空历史文件（供命令层调用）：截断 JSONL 并重置尾部缓存
     pub fn clear_history_file(&self) -> VivianResult<()> {
+        let _io = self.history_io.lock();
         self.ensure_jsonl_ready();
         let path = self.history_jsonl_file();
         fs::write(&path, "")?;
@@ -776,6 +783,8 @@ impl DialogueManager {
                     (None, Some(k)) => Some(crate::messages::MessageMeta::user().with_kind(k)),
                     (None, None) => None,
                 };
+                let sticker = e.metadata.get("sticker").and_then(|s|serde_json::from_value(s.clone()).ok());
+                let meta = if sticker.is_some() {let mut m=meta.unwrap_or_default();m.sticker=sticker;Some(m)}else{meta};
                 ChatMessage {
                     role: e.role,
                     content: e.content,
@@ -1091,6 +1100,7 @@ impl DialogueManager {
     ///
     /// 同时同步尾部缓存中对应条目，保持重复检测视图一致。
     fn patch_last_on_disk(&self, role: &str, patch_fn: impl FnOnce(&mut HistoryEntry)) {
+        let _io = self.history_io.lock();
         self.ensure_jsonl_ready();
         let path = self.history_jsonl_file();
         if !path.exists() {
@@ -1120,7 +1130,9 @@ impl DialogueManager {
             }
             let mut out = lines.join("\n");
             out.push('\n');
-            let _ = std::fs::write(&path, out);
+            if let Err(e) = crate::utils::fs::write_atomic(&path, &out) {
+                tracing::error!("修补历史元数据失败: {e}");
+            }
             return;
         }
     }

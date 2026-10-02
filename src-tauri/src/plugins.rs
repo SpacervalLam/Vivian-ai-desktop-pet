@@ -148,6 +148,8 @@ pub struct ProviderPresetData {
     /// 模型名输入建议列表（datalist，仍可自由输入）
     #[serde(default)]
     pub main_models: Vec<String>,
+    #[serde(default)]
+    pub reasoning_profiles: Vec<crate::providers::reasoning_profiles::ReasoningProfile>,
     /// 上下文窗口（tokens），用于自动压缩阈值判定
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u32>,
@@ -1171,6 +1173,23 @@ fn seed_builtin_plugin(dir_name: &str, manifest: &str, files: &[(PathBuf, &str)]
     let mut writes = vec![(manifest_path, manifest)];
     writes.extend(files.iter().cloned());
     for (path, content) in writes {
+        let merged;
+        let content = if dir_name == BUILTIN_PLUGIN_DIR && path.file_name().and_then(|n|n.to_str()) == Some("providers.json") && path.exists() {
+            match (std::fs::read_to_string(&path).ok().and_then(|s|serde_json::from_str::<Vec<ProviderPresetData>>(&s).ok()), serde_json::from_str::<Vec<ProviderPresetData>>(content)) {
+                (Some(mut existing), Ok(builtin)) => {
+                    for row in &mut existing {
+                        if row.reasoning_profiles.is_empty() {
+                            if let Some(default) = builtin.iter().find(|p|p.id==row.id) { row.reasoning_profiles = default.reasoning_profiles.clone(); }
+                        }
+                    }
+                    merged = serde_json::to_string_pretty(&existing).unwrap_or_else(|_|content.to_string());
+                    merged.as_str()
+                }
+                _ => { tracing::warn!("[Plugins] 保留无法解析的 providers.json，未覆盖用户数据"); continue; }
+            }
+        } else if dir_name == BUILTIN_PLUGIN_DIR && path.file_name().and_then(|n|n.to_str()) == Some("embedding-providers.json") && path.exists() {
+            continue;
+        } else { content };
         if let Err(e) = std::fs::write(&path, content) {
             tracing::warn!(
                 "[Plugins] 内置插件 {dir_name} 播种失败 {}: {e}",
@@ -1433,6 +1452,15 @@ fn upsert_provider_preset_at(
         .map_err(|e| format!("读取 {} 失败: {e}", providers_path.display()))?;
     let mut rows: Vec<ProviderPresetData> = serde_json::from_str(&content)
         .map_err(|e| format!("解析 providers.json 失败: {e}"))?;
+
+    let old_profiles = rows.iter().find(|row| row.id == preset.id).map(|row| &row.reasoning_profiles);
+    for profile in &mut preset.reasoning_profiles {
+        let unchanged = old_profiles.map(|profiles| profiles.iter().any(|old| serde_json::to_value(old).ok() == serde_json::to_value(&*profile).ok())).unwrap_or(false);
+        // Unchanged mappings retain their own verification date; updating an
+        // endpoint must not falsely refresh every model's capability evidence.
+        if !unchanged { profile.verified_at = chrono::Local::now().format("%Y-%m-%d").to_string(); }
+        profile.validate()?;
+    }
 
     // 按 id 整行替换或追加
     let is_new = !rows.iter().any(|p| p.id == preset.id);
@@ -2694,6 +2722,7 @@ mod tests {
             endpoint: "https://example.com/v2".into(),
             default_model: "m2".into(),
             main_models: vec!["m2".into()],
+            reasoning_profiles: Vec::new(),
             context_window: Some(256000),
             suggested_max_tokens: Some(8192),
             needs_secret: None,
@@ -2740,6 +2769,7 @@ mod tests {
             endpoint: "https://new.example.com".into(),
             default_model: "nv1".into(),
             main_models: vec![],
+            reasoning_profiles: Vec::new(),
             context_window: None,
             suggested_max_tokens: None,
             needs_secret: None,
@@ -2775,6 +2805,7 @@ mod tests {
             endpoint: String::new(),
             default_model: String::new(),
             main_models: vec![],
+            reasoning_profiles: Vec::new(),
             context_window: None,
             suggested_max_tokens: None,
             needs_secret: None,
@@ -2801,6 +2832,7 @@ mod tests {
             endpoint: String::new(),
             default_model: String::new(),
             main_models: vec![],
+            reasoning_profiles: Vec::new(),
             context_window: None,
             suggested_max_tokens: None,
             needs_secret: None,
@@ -2820,6 +2852,7 @@ mod tests {
             endpoint: String::new(),
             default_model: String::new(),
             main_models: vec![],
+            reasoning_profiles: Vec::new(),
             context_window: None,
             suggested_max_tokens: None,
             needs_secret: None,

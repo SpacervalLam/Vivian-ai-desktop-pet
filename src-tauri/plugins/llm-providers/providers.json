@@ -5,13 +5,345 @@
     "providerType": "openai",
     "endpoint": "https://api.openai.com/v1",
     "defaultModel": "gpt-5.5",
-    "mainModels": ["gpt-5.5", "gpt-5.6", "gpt-5", "o3", "o4-mini"],
+    "mainModels": [
+      "gpt-5.5",
+      "gpt-5.6",
+      "gpt-5",
+      "o3",
+      "o4-mini"
+    ],
     "contextWindow": 400000,
     "suggestedMaxTokens": 32768,
     "consoleUrl": "https://platform.openai.com/api-keys",
     "protocols": [
-      { "providerType": "openai", "labelKey": "config.proto_responses", "endpoint": "https://api.openai.com/v1" },
-      { "providerType": "chat_completions", "labelKey": "config.proto_chat_completions", "endpoint": "https://api.openai.com/v1" }
+      {
+        "providerType": "openai",
+        "labelKey": "config.proto_responses",
+        "endpoint": "https://api.openai.com/v1"
+      },
+      {
+        "providerType": "chat_completions",
+        "labelKey": "config.proto_chat_completions",
+        "endpoint": "https://api.openai.com/v1"
+      }
+    ],
+    "reasoningProfiles": [
+      {
+        "modelPattern": "gpt-6-luna*",
+        "providerTypes": [
+          "openai",
+          "openai_responses",
+          "openai_agents"
+        ],
+        "source": "https://developers.openai.com/api/docs/guides/latest-model",
+        "verifiedAt": "2026-10-02",
+        "enabled": {
+          "reasoning": {
+            "effort": "medium"
+          }
+        },
+        "disabled": {
+          "reasoning": {
+            "effort": "none"
+          }
+        },
+        "efforts": {
+          "low": {
+            "reasoning": {
+              "effort": "low"
+            }
+          },
+          "medium": {
+            "reasoning": {
+              "effort": "medium"
+            }
+          },
+          "high": {
+            "reasoning": {
+              "effort": "high"
+            }
+          }
+        },
+        "managedPaths": [
+          "/reasoning",
+          "/reasoning_effort"
+        ]
+      },
+      {
+        "modelPattern": "gpt-6-luna*",
+        "providerTypes": [
+          "chat_completions"
+        ],
+        "source": "https://developers.openai.com/api/docs/guides/latest-model",
+        "verifiedAt": "2026-10-02",
+        "enabled": {
+          "reasoning_effort": "medium"
+        },
+        "disabled": {
+          "reasoning_effort": "none"
+        },
+        "efforts": {
+          "low": {
+            "reasoning_effort": "low"
+          },
+          "medium": {
+            "reasoning_effort": "medium"
+          },
+          "high": {
+            "reasoning_effort": "high"
+          }
+        },
+        "managedPaths": [
+          "/reasoning",
+          "/reasoning_effort"
+        ]
+      },
+      {
+        "modelPattern": "gpt-6-sol*",
+        "providerTypes": [
+          "openai",
+          "openai_responses",
+          "openai_agents"
+        ],
+        "source": "https://developers.openai.com/api/docs/guides/latest-model",
+        "verifiedAt": "2026-10-02",
+        "enabled": {
+          "reasoning": {
+            "effort": "medium"
+          }
+        },
+        "disabled": {
+          "reasoning": {
+            "effort": "none"
+          }
+        },
+        "efforts": {
+          "low": {
+            "reasoning": {
+              "effort": "low"
+            }
+          },
+          "medium": {
+            "reasoning": {
+              "effort": "medium"
+            }
+          },
+          "high": {
+            "reasoning": {
+              "effort": "high"
+            }
+          },
+          "xhigh": {
+            "reasoning": {
+              "effort": "xhigh"
+            }
+          },
+          "max": {
+            "reasoning": {
+              "effort": "max"
+            }
+          }
+        },
+        "managedPaths": [
+          "/reasoning",
+          "/reasoning_effort"
+        ]
+      },
+      {
+        "modelPattern": "gpt-6-sol*",
+        "providerTypes": [
+          "chat_completions"
+        ],
+        "source": "https://developers.openai.com/api/docs/guides/latest-model",
+        "verifiedAt": "2026-10-02",
+        "enabled": {
+          "reasoning_effort": "medium"
+        },
+        "disabled": {
+          "reasoning_effort": "none"
+        },
+        "efforts": {
+          "low": {
+            "reasoning_effort": "low"
+          },
+          "medium": {
+            "reasoning_effort": "medium"
+          },
+          "high": {
+            "reasoning_effort": "high"
+          },
+          "xhigh": {
+            "reasoning_effort": "xhigh"
+          },
+          "max": {
+            "reasoning_effort": "max"
+          }
+        },
+        "managedPaths": [
+          "/reasoning",
+          "/reasoning_effort"
+        ]
+      },
+      {
+        "modelPattern": "gpt-6.1-sol*",
+        "providerTypes": [
+          "openai",
+          "openai_responses",
+          "openai_agents"
+        ],
+        "source": "https://developers.openai.com/api/docs/guides/latest-model",
+        "verifiedAt": "2026-10-02",
+        "enabled": {
+          "reasoning": {
+            "effort": "medium"
+          }
+        },
+        "disabled": null,
+        "efforts": {
+          "low": {
+            "reasoning": {
+              "effort": "low"
+            }
+          },
+          "medium": {
+            "reasoning": {
+              "effort": "medium"
+            }
+          },
+          "high": {
+            "reasoning": {
+              "effort": "high"
+            }
+          },
+          "xhigh": {
+            "reasoning": {
+              "effort": "xhigh"
+            }
+          },
+          "max": {
+            "reasoning": {
+              "effort": "max"
+            }
+          }
+        },
+        "managedPaths": [
+          "/reasoning",
+          "/reasoning_effort"
+        ]
+      },
+      {
+        "modelPattern": "gpt-6.1-sol*",
+        "providerTypes": [
+          "chat_completions"
+        ],
+        "source": "https://developers.openai.com/api/docs/guides/latest-model",
+        "verifiedAt": "2026-10-02",
+        "enabled": {
+          "reasoning_effort": "medium"
+        },
+        "disabled": null,
+        "efforts": {
+          "low": {
+            "reasoning_effort": "low"
+          },
+          "medium": {
+            "reasoning_effort": "medium"
+          },
+          "high": {
+            "reasoning_effort": "high"
+          },
+          "xhigh": {
+            "reasoning_effort": "xhigh"
+          },
+          "max": {
+            "reasoning_effort": "max"
+          }
+        },
+        "managedPaths": [
+          "/reasoning",
+          "/reasoning_effort"
+        ]
+      },
+      {
+        "modelPattern": "gpt-6-astra*",
+        "providerTypes": [
+          "openai",
+          "openai_responses",
+          "openai_agents"
+        ],
+        "source": "https://developers.openai.com/api/docs/guides/latest-model",
+        "verifiedAt": "2026-10-02",
+        "enabled": {
+          "reasoning": {
+            "effort": "medium"
+          }
+        },
+        "disabled": null,
+        "efforts": {
+          "low": {
+            "reasoning": {
+              "effort": "low"
+            }
+          },
+          "medium": {
+            "reasoning": {
+              "effort": "medium"
+            }
+          },
+          "high": {
+            "reasoning": {
+              "effort": "high"
+            }
+          },
+          "xhigh": {
+            "reasoning": {
+              "effort": "xhigh"
+            }
+          },
+          "max": {
+            "reasoning": {
+              "effort": "max"
+            }
+          }
+        },
+        "managedPaths": [
+          "/reasoning",
+          "/reasoning_effort"
+        ]
+      },
+      {
+        "modelPattern": "gpt-6-astra*",
+        "providerTypes": [
+          "chat_completions"
+        ],
+        "source": "https://developers.openai.com/api/docs/guides/latest-model",
+        "verifiedAt": "2026-10-02",
+        "enabled": {
+          "reasoning_effort": "medium"
+        },
+        "disabled": null,
+        "efforts": {
+          "low": {
+            "reasoning_effort": "low"
+          },
+          "medium": {
+            "reasoning_effort": "medium"
+          },
+          "high": {
+            "reasoning_effort": "high"
+          },
+          "xhigh": {
+            "reasoning_effort": "xhigh"
+          },
+          "max": {
+            "reasoning_effort": "max"
+          }
+        },
+        "managedPaths": [
+          "/reasoning",
+          "/reasoning_effort"
+        ]
+      }
     ]
   },
   {
@@ -20,7 +352,12 @@
     "providerType": "anthropic",
     "endpoint": "https://api.anthropic.com",
     "defaultModel": "claude-sonnet-4-6",
-    "mainModels": ["claude-sonnet-4-6", "claude-sonnet-5", "claude-opus-4-8", "claude-haiku-4-5"],
+    "mainModels": [
+      "claude-sonnet-4-6",
+      "claude-sonnet-5",
+      "claude-opus-4-8",
+      "claude-haiku-4-5"
+    ],
     "contextWindow": 1000000,
     "suggestedMaxTokens": 64000,
     "consoleUrl": "https://console.anthropic.com/settings/keys"
@@ -31,10 +368,52 @@
     "providerType": "gemini",
     "endpoint": "https://generativelanguage.googleapis.com",
     "defaultModel": "gemini-3.1-pro-preview",
-    "mainModels": ["gemini-3.1-pro-preview", "gemini-3-flash-preview", "gemini-3.1-flash-lite"],
+    "mainModels": [
+      "gemini-3.1-pro-preview",
+      "gemini-3-flash-preview",
+      "gemini-3.1-flash-lite"
+    ],
     "contextWindow": 1000000,
     "suggestedMaxTokens": 65536,
-    "consoleUrl": "https://aistudio.google.com/apikey"
+    "consoleUrl": "https://aistudio.google.com/apikey",
+    "reasoningProfiles": [
+      {
+        "modelPattern": "gemini-3.8-flash*",
+        "providerTypes": [
+          "gemini"
+        ],
+        "source": "https://ai.google.dev/gemini-api/docs/thinking",
+        "verifiedAt": "2026-10-02",
+        "enabled": {},
+        "disabled": null,
+        "efforts": {
+          "low": {
+            "generationConfig": {
+              "thinkingConfig": {
+                "thinkingLevel": "low"
+              }
+            }
+          },
+          "medium": {
+            "generationConfig": {
+              "thinkingConfig": {
+                "thinkingLevel": "medium"
+              }
+            }
+          },
+          "high": {
+            "generationConfig": {
+              "thinkingConfig": {
+                "thinkingLevel": "high"
+              }
+            }
+          }
+        },
+        "managedPaths": [
+          "/generationConfig/thinkingConfig"
+        ]
+      }
+    ]
   },
   {
     "id": "deepseek",
@@ -42,14 +421,268 @@
     "providerType": "openai",
     "endpoint": "https://api.deepseek.com",
     "defaultModel": "deepseek-v4-flash",
-    "mainModels": ["deepseek-v4-pro", "deepseek-v4-flash", "deepseek-v4-flash-vision-exp"],
+    "mainModels": [
+      "deepseek-v4-pro",
+      "deepseek-v4-flash",
+      "deepseek-v4-flash-vision-exp"
+    ],
     "contextWindow": 1000000,
     "suggestedMaxTokens": 16384,
     "consoleUrl": "https://platform.deepseek.com/api_keys",
     "protocols": [
-      { "providerType": "openai", "labelKey": "config.proto_responses", "endpoint": "https://api.deepseek.com" },
-      { "providerType": "chat_completions", "labelKey": "config.proto_chat_completions", "endpoint": "https://api.deepseek.com" },
-      { "providerType": "anthropic", "labelKey": "config.proto_anthropic", "endpoint": "https://api.deepseek.com/anthropic" }
+      {
+        "providerType": "openai",
+        "labelKey": "config.proto_responses",
+        "endpoint": "https://api.deepseek.com"
+      },
+      {
+        "providerType": "chat_completions",
+        "labelKey": "config.proto_chat_completions",
+        "endpoint": "https://api.deepseek.com"
+      },
+      {
+        "providerType": "anthropic",
+        "labelKey": "config.proto_anthropic",
+        "endpoint": "https://api.deepseek.com/anthropic"
+      }
+    ],
+    "reasoningProfiles": [
+      {
+        "modelPattern": "deepseek-flash",
+        "providerTypes": [
+          "openai",
+          "openai_responses"
+        ],
+        "source": "https://api-docs.deepseek.com/zh-cn/guides/thinking_mode/",
+        "verifiedAt": "2026-10-02",
+        "enabled": {
+          "reasoning": {
+            "effort": "high"
+          }
+        },
+        "disabled": {
+          "reasoning": {
+            "effort": "none"
+          }
+        },
+        "efforts": {
+          "low": {
+            "reasoning": {
+              "effort": "low"
+            }
+          },
+          "high": {
+            "reasoning": {
+              "effort": "high"
+            }
+          },
+          "max": {
+            "reasoning": {
+              "effort": "max"
+            }
+          }
+        },
+        "managedPaths": [
+          "/reasoning",
+          "/reasoning_effort",
+          "/thinking",
+          "/output_config/effort"
+        ]
+      },
+      {
+        "modelPattern": "deepseek-flash",
+        "providerTypes": [
+          "chat_completions"
+        ],
+        "source": "https://api-docs.deepseek.com/zh-cn/guides/thinking_mode/",
+        "verifiedAt": "2026-10-02",
+        "enabled": {
+          "thinking": {
+            "type": "enabled"
+          }
+        },
+        "disabled": {
+          "thinking": {
+            "type": "disabled"
+          }
+        },
+        "efforts": {
+          "low": {
+            "reasoning_effort": "low"
+          },
+          "high": {
+            "reasoning_effort": "high"
+          },
+          "max": {
+            "reasoning_effort": "max"
+          }
+        },
+        "managedPaths": [
+          "/reasoning",
+          "/reasoning_effort",
+          "/thinking",
+          "/output_config/effort"
+        ]
+      },
+      {
+        "modelPattern": "deepseek-flash",
+        "providerTypes": [
+          "anthropic"
+        ],
+        "source": "https://api-docs.deepseek.com/zh-cn/guides/thinking_mode/",
+        "verifiedAt": "2026-10-02",
+        "enabled": {
+          "thinking": {
+            "type": "enabled"
+          }
+        },
+        "disabled": {
+          "thinking": {
+            "type": "disabled"
+          }
+        },
+        "efforts": {
+          "low": {
+            "output_config": {
+              "effort": "low"
+            }
+          },
+          "high": {
+            "output_config": {
+              "effort": "high"
+            }
+          },
+          "max": {
+            "output_config": {
+              "effort": "max"
+            }
+          }
+        },
+        "managedPaths": [
+          "/reasoning",
+          "/reasoning_effort",
+          "/thinking",
+          "/output_config/effort"
+        ]
+      },
+      {
+        "modelPattern": "deepseek-v4*",
+        "providerTypes": [
+          "openai",
+          "openai_responses"
+        ],
+        "source": "https://api-docs.deepseek.com/zh-cn/guides/thinking_mode/",
+        "verifiedAt": "2026-10-02",
+        "enabled": {
+          "reasoning": {
+            "effort": "high"
+          }
+        },
+        "disabled": {
+          "reasoning": {
+            "effort": "none"
+          }
+        },
+        "efforts": {
+          "low": {
+            "reasoning": {
+              "effort": "low"
+            }
+          },
+          "high": {
+            "reasoning": {
+              "effort": "high"
+            }
+          },
+          "max": {
+            "reasoning": {
+              "effort": "max"
+            }
+          }
+        },
+        "managedPaths": [
+          "/reasoning",
+          "/reasoning_effort",
+          "/thinking",
+          "/output_config/effort"
+        ]
+      },
+      {
+        "modelPattern": "deepseek-v4*",
+        "providerTypes": [
+          "chat_completions"
+        ],
+        "source": "https://api-docs.deepseek.com/zh-cn/guides/thinking_mode/",
+        "verifiedAt": "2026-10-02",
+        "enabled": {
+          "thinking": {
+            "type": "enabled"
+          }
+        },
+        "disabled": {
+          "thinking": {
+            "type": "disabled"
+          }
+        },
+        "efforts": {
+          "low": {
+            "reasoning_effort": "low"
+          },
+          "high": {
+            "reasoning_effort": "high"
+          },
+          "max": {
+            "reasoning_effort": "max"
+          }
+        },
+        "managedPaths": [
+          "/reasoning",
+          "/reasoning_effort",
+          "/thinking",
+          "/output_config/effort"
+        ]
+      },
+      {
+        "modelPattern": "deepseek-v4*",
+        "providerTypes": [
+          "anthropic"
+        ],
+        "source": "https://api-docs.deepseek.com/zh-cn/guides/thinking_mode/",
+        "verifiedAt": "2026-10-02",
+        "enabled": {
+          "thinking": {
+            "type": "enabled"
+          }
+        },
+        "disabled": {
+          "thinking": {
+            "type": "disabled"
+          }
+        },
+        "efforts": {
+          "low": {
+            "output_config": {
+              "effort": "low"
+            }
+          },
+          "high": {
+            "output_config": {
+              "effort": "high"
+            }
+          },
+          "max": {
+            "output_config": {
+              "effort": "max"
+            }
+          }
+        },
+        "managedPaths": [
+          "/reasoning",
+          "/reasoning_effort",
+          "/thinking",
+          "/output_config/effort"
+        ]
+      }
     ]
   },
   {
@@ -58,13 +691,29 @@
     "providerType": "openai",
     "endpoint": "https://dashscope.aliyuncs.com/compatible-mode/v1",
     "defaultModel": "qwen3.8-max",
-    "mainModels": ["qwen3.8-max", "qwen3.7-max", "qwen3.7-plus", "qwen3.7-flash", "qwen3-max", "qwen-plus", "qwen-flash"],
+    "mainModels": [
+      "qwen3.8-max",
+      "qwen3.7-max",
+      "qwen3.7-plus",
+      "qwen3.7-flash",
+      "qwen3-max",
+      "qwen-plus",
+      "qwen-flash"
+    ],
     "contextWindow": 256000,
     "suggestedMaxTokens": 32768,
     "consoleUrl": "https://bailian.console.aliyun.com/?apiKey=1",
     "protocols": [
-      { "providerType": "openai", "labelKey": "config.proto_responses", "endpoint": "https://dashscope.aliyuncs.com/compatible-mode/v1" },
-      { "providerType": "chat_completions", "labelKey": "config.proto_chat_completions", "endpoint": "https://dashscope.aliyuncs.com/compatible-mode/v1" }
+      {
+        "providerType": "openai",
+        "labelKey": "config.proto_responses",
+        "endpoint": "https://dashscope.aliyuncs.com/compatible-mode/v1"
+      },
+      {
+        "providerType": "chat_completions",
+        "labelKey": "config.proto_chat_completions",
+        "endpoint": "https://dashscope.aliyuncs.com/compatible-mode/v1"
+      }
     ]
   },
   {
@@ -73,14 +722,32 @@
     "providerType": "zhipu",
     "endpoint": "https://open.bigmodel.cn/api/paas/v4",
     "defaultModel": "glm-5.3",
-    "mainModels": ["glm-5.3", "glm-5.2", "glm-5", "glm-5.3-flash", "glm-4.7"],
+    "mainModels": [
+      "glm-5.3",
+      "glm-5.2",
+      "glm-5",
+      "glm-5.3-flash",
+      "glm-4.7"
+    ],
     "contextWindow": 1000000,
     "suggestedMaxTokens": 65536,
     "consoleUrl": "https://open.bigmodel.cn/apikey/platform",
     "protocols": [
-      { "providerType": "zhipu", "labelKey": "config.proto_zhipu", "endpoint": "https://open.bigmodel.cn/api/paas/v4" },
-      { "providerType": "openai", "labelKey": "config.proto_responses", "endpoint": "https://open.bigmodel.cn/api/paas/v4" },
-      { "providerType": "anthropic", "labelKey": "config.proto_anthropic", "endpoint": "https://open.bigmodel.cn/api/anthropic" }
+      {
+        "providerType": "zhipu",
+        "labelKey": "config.proto_zhipu",
+        "endpoint": "https://open.bigmodel.cn/api/paas/v4"
+      },
+      {
+        "providerType": "openai",
+        "labelKey": "config.proto_responses",
+        "endpoint": "https://open.bigmodel.cn/api/paas/v4"
+      },
+      {
+        "providerType": "anthropic",
+        "labelKey": "config.proto_anthropic",
+        "endpoint": "https://open.bigmodel.cn/api/anthropic"
+      }
     ]
   },
   {
@@ -89,13 +756,26 @@
     "providerType": "openai",
     "endpoint": "https://api.moonshot.cn/v1",
     "defaultModel": "kimi-k2.6",
-    "mainModels": ["kimi-k3", "kimi-k2.6", "kimi-k2.5", "kimi-k2-thinking"],
+    "mainModels": [
+      "kimi-k3",
+      "kimi-k2.6",
+      "kimi-k2.5",
+      "kimi-k2-thinking"
+    ],
     "contextWindow": 256000,
     "suggestedMaxTokens": 32768,
     "consoleUrl": "https://platform.moonshot.cn/console/api-keys",
     "protocols": [
-      { "providerType": "openai", "labelKey": "config.proto_responses", "endpoint": "https://api.moonshot.cn/v1" },
-      { "providerType": "chat_completions", "labelKey": "config.proto_chat_completions", "endpoint": "https://api.moonshot.cn/v1" }
+      {
+        "providerType": "openai",
+        "labelKey": "config.proto_responses",
+        "endpoint": "https://api.moonshot.cn/v1"
+      },
+      {
+        "providerType": "chat_completions",
+        "labelKey": "config.proto_chat_completions",
+        "endpoint": "https://api.moonshot.cn/v1"
+      }
     ]
   },
   {
@@ -104,15 +784,36 @@
     "providerType": "openai",
     "endpoint": "https://ark.cn-beijing.volces.com/api/v3",
     "defaultModel": "doubao-seed-2.1-pro",
-    "mainModels": ["doubao-seed-2.1-pro", "doubao-seed-2.1-turbo", "doubao-seed-evolving", "doubao-seed-2.1-pro-260628"],
+    "mainModels": [
+      "doubao-seed-2.1-pro",
+      "doubao-seed-2.1-turbo",
+      "doubao-seed-evolving",
+      "doubao-seed-2.1-pro-260628"
+    ],
     "contextWindow": 256000,
     "suggestedMaxTokens": 65536,
     "consoleUrl": "https://console.volcengine.com/ark",
     "protocols": [
-      { "providerType": "openai", "labelKey": "config.proto_responses", "endpoint": "https://ark.cn-beijing.volces.com/api/v3" },
-      { "providerType": "doubao", "labelKey": "config.proto_doubao_responses", "endpoint": "https://ark.cn-beijing.volces.com/api/v3" },
-      { "providerType": "chat_completions", "labelKey": "config.proto_chat_completions", "endpoint": "https://ark.cn-beijing.volces.com/api/v3" },
-      { "providerType": "anthropic", "labelKey": "config.proto_anthropic", "endpoint": "https://ark.cn-beijing.volces.com/api/v3/anthropic" }
+      {
+        "providerType": "openai",
+        "labelKey": "config.proto_responses",
+        "endpoint": "https://ark.cn-beijing.volces.com/api/v3"
+      },
+      {
+        "providerType": "doubao",
+        "labelKey": "config.proto_doubao_responses",
+        "endpoint": "https://ark.cn-beijing.volces.com/api/v3"
+      },
+      {
+        "providerType": "chat_completions",
+        "labelKey": "config.proto_chat_completions",
+        "endpoint": "https://ark.cn-beijing.volces.com/api/v3"
+      },
+      {
+        "providerType": "anthropic",
+        "labelKey": "config.proto_anthropic",
+        "endpoint": "https://ark.cn-beijing.volces.com/api/v3/anthropic"
+      }
     ]
   },
   {
@@ -121,14 +822,30 @@
     "providerType": "openai",
     "endpoint": "https://api.minimaxi.com/v1",
     "defaultModel": "MiniMax-M3",
-    "mainModels": ["MiniMax-M3", "MiniMax-M2.7", "MiniMax-M2.5"],
+    "mainModels": [
+      "MiniMax-M3",
+      "MiniMax-M2.7",
+      "MiniMax-M2.5"
+    ],
     "contextWindow": 1000000,
     "suggestedMaxTokens": 16384,
     "consoleUrl": "https://platform.minimaxi.com/user-center/basic-information/interface-key",
     "protocols": [
-      { "providerType": "openai", "labelKey": "config.proto_responses", "endpoint": "https://api.minimaxi.com/v1" },
-      { "providerType": "chat_completions", "labelKey": "config.proto_chat_completions", "endpoint": "https://api.minimaxi.com/v1" },
-      { "providerType": "anthropic", "labelKey": "config.proto_anthropic", "endpoint": "https://api.minimaxi.com/anthropic" }
+      {
+        "providerType": "openai",
+        "labelKey": "config.proto_responses",
+        "endpoint": "https://api.minimaxi.com/v1"
+      },
+      {
+        "providerType": "chat_completions",
+        "labelKey": "config.proto_chat_completions",
+        "endpoint": "https://api.minimaxi.com/v1"
+      },
+      {
+        "providerType": "anthropic",
+        "labelKey": "config.proto_anthropic",
+        "endpoint": "https://api.minimaxi.com/anthropic"
+      }
     ]
   },
   {
@@ -137,14 +854,29 @@
     "providerType": "openai",
     "endpoint": "https://api.xiaomimimo.com/v1",
     "defaultModel": "mimo-v2.5-pro",
-    "mainModels": ["mimo-v2.5-pro", "mimo-v2.5"],
+    "mainModels": [
+      "mimo-v2.5-pro",
+      "mimo-v2.5"
+    ],
     "contextWindow": 1000000,
     "suggestedMaxTokens": 16384,
     "consoleUrl": "https://www.xiaomimimo.com/",
     "protocols": [
-      { "providerType": "openai", "labelKey": "config.proto_responses", "endpoint": "https://api.xiaomimimo.com/v1" },
-      { "providerType": "chat_completions", "labelKey": "config.proto_chat_completions", "endpoint": "https://api.xiaomimimo.com/v1" },
-      { "providerType": "anthropic", "labelKey": "config.proto_anthropic", "endpoint": "https://api.xiaomimimo.com/anthropic" }
+      {
+        "providerType": "openai",
+        "labelKey": "config.proto_responses",
+        "endpoint": "https://api.xiaomimimo.com/v1"
+      },
+      {
+        "providerType": "chat_completions",
+        "labelKey": "config.proto_chat_completions",
+        "endpoint": "https://api.xiaomimimo.com/v1"
+      },
+      {
+        "providerType": "anthropic",
+        "labelKey": "config.proto_anthropic",
+        "endpoint": "https://api.xiaomimimo.com/anthropic"
+      }
     ]
   },
   {
@@ -153,13 +885,25 @@
     "providerType": "openai",
     "endpoint": "https://api.x.ai/v1",
     "defaultModel": "grok-4.5",
-    "mainModels": ["grok-4.5", "grok-4.3", "grok-4.1-fast"],
+    "mainModels": [
+      "grok-4.5",
+      "grok-4.3",
+      "grok-4.1-fast"
+    ],
     "contextWindow": 500000,
     "suggestedMaxTokens": 32768,
     "consoleUrl": "https://console.x.ai",
     "protocols": [
-      { "providerType": "openai", "labelKey": "config.proto_responses", "endpoint": "https://api.x.ai/v1" },
-      { "providerType": "chat_completions", "labelKey": "config.proto_chat_completions", "endpoint": "https://api.x.ai/v1" }
+      {
+        "providerType": "openai",
+        "labelKey": "config.proto_responses",
+        "endpoint": "https://api.x.ai/v1"
+      },
+      {
+        "providerType": "chat_completions",
+        "labelKey": "config.proto_chat_completions",
+        "endpoint": "https://api.x.ai/v1"
+      }
     ]
   },
   {
@@ -168,7 +912,11 @@
     "providerType": "chat_completions",
     "endpoint": "https://openrouter.ai/api/v1",
     "defaultModel": "openai/gpt-4o",
-    "mainModels": ["openai/gpt-4o", "anthropic/claude-sonnet-4", "deepseek/deepseek-chat"],
+    "mainModels": [
+      "openai/gpt-4o",
+      "anthropic/claude-sonnet-4",
+      "deepseek/deepseek-chat"
+    ],
     "contextWindow": 131072,
     "suggestedMaxTokens": 8192,
     "consoleUrl": "https://openrouter.ai/settings/keys"
@@ -179,7 +927,10 @@
     "providerType": "chat_completions",
     "endpoint": "https://api.groq.com/openai/v1",
     "defaultModel": "llama-3.3-70b-versatile",
-    "mainModels": ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"],
+    "mainModels": [
+      "llama-3.3-70b-versatile",
+      "llama-3.1-8b-instant"
+    ],
     "contextWindow": 131072,
     "suggestedMaxTokens": 8192,
     "consoleUrl": "https://console.groq.com/keys"
@@ -190,7 +941,11 @@
     "providerType": "chat_completions",
     "endpoint": "http://localhost:11434/v1",
     "defaultModel": "llama3.2",
-    "mainModels": ["llama3.2", "qwen2.5", "deepseek-r1"],
+    "mainModels": [
+      "llama3.2",
+      "qwen2.5",
+      "deepseek-r1"
+    ],
     "contextWindow": 131072,
     "suggestedMaxTokens": 8192,
     "consoleUrl": "https://ollama.com"
@@ -201,7 +956,10 @@
     "providerType": "chat_completions",
     "endpoint": "https://api.mistral.ai/v1",
     "defaultModel": "mistral-large-latest",
-    "mainModels": ["mistral-large-latest", "mistral-small-latest"],
+    "mainModels": [
+      "mistral-large-latest",
+      "mistral-small-latest"
+    ],
     "contextWindow": 256000,
     "suggestedMaxTokens": 16384,
     "consoleUrl": "https://console.mistral.ai/api-keys"
@@ -212,7 +970,10 @@
     "providerType": "chat_completions",
     "endpoint": "https://api.together.xyz/v1",
     "defaultModel": "meta-llama/Llama-3.3-70B-Instruct-Turbo",
-    "mainModels": ["meta-llama/Llama-3.3-70B-Instruct-Turbo", "deepseek-ai/DeepSeek-V3"],
+    "mainModels": [
+      "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+      "deepseek-ai/DeepSeek-V3"
+    ],
     "contextWindow": 131072,
     "suggestedMaxTokens": 8192,
     "consoleUrl": "https://api.together.ai/settings/api-keys"
@@ -223,7 +984,11 @@
     "providerType": "wenxin",
     "endpoint": "https://aip.baidubce.com",
     "defaultModel": "ernie-4.5-8k-latest",
-    "mainModels": ["ernie-4.5-8k-latest", "ernie-4.5-turbo-8k", "ernie-4.0-8k-latest"],
+    "mainModels": [
+      "ernie-4.5-8k-latest",
+      "ernie-4.5-turbo-8k",
+      "ernie-4.0-8k-latest"
+    ],
     "contextWindow": 8192,
     "suggestedMaxTokens": 4096,
     "needsSecret": true,
@@ -235,7 +1000,13 @@
     "providerType": "chat_completions",
     "endpoint": "https://api.hunyuan.cloud.tencent.com/v1",
     "defaultModel": "hunyuan-turbos-latest",
-    "mainModels": ["hunyuan-turbos-latest", "hunyuan-t1-latest", "hunyuan-pro", "hunyuan-standard", "hunyuan-lite"],
+    "mainModels": [
+      "hunyuan-turbos-latest",
+      "hunyuan-t1-latest",
+      "hunyuan-pro",
+      "hunyuan-standard",
+      "hunyuan-lite"
+    ],
     "contextWindow": 32000,
     "suggestedMaxTokens": 16384,
     "consoleUrl": "https://console.cloud.tencent.com/tokenhub/apikey"

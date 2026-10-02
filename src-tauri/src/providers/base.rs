@@ -200,6 +200,8 @@ pub struct ToolDefinition {
 /// 让工作智能体走自己的任务类型，"按任务类型分流"才重新成立，
 /// 不需要在陪伴侧挂"绕过覆盖"这类补丁。
 pub const TASK_WORK_AGENT: &str = "work_agent";
+/// Isolated companion tool execution, independently routed from spoken replies.
+pub const TASK_TOOL_EXECUTION: &str = "tool_execution";
 
 /// 不包含 `previous_response_id`:Vivian 已有完整记忆架构(MemoryManager +
 /// TimeStampedMemory + ConsolidationPipeline),Brain 每轮传完整 messages,
@@ -408,6 +410,10 @@ pub trait BaseProvider: Send + Sync {
     /// ModelRouter 在构建工作智能体覆盖 provider 时设置为 true，
     /// provider 构造请求体后按厂商路径移除 temperature（服务端默认）。
     fn set_omit_temperature(&self, _omit: bool) {}
+
+    fn set_request_parameters(&self, _temperature: bool, _max_tokens: bool) {}
+    fn set_request_customization(&self, _customization: crate::providers::reasoning_profiles::RequestCustomization) {}
+
 
     /// 设置推理偏好运行时覆盖（请求级）。
     ///
@@ -704,6 +710,9 @@ pub struct ProviderBase {
     /// （OpenAI o 系列仅接受默认值，reasoner 忽略该参数），
     /// 故工作智能体模型统一不发送 temperature。
     pub omit_temperature: AtomicBool,
+    pub send_temperature: AtomicBool,
+    pub send_max_tokens: AtomicBool,
+    pub request_customization: RwLock<crate::providers::reasoning_profiles::RequestCustomization>,
     /// 推理偏好运行时覆盖（None 表示不干预，交由服务端默认）。
     /// ModelRouter 按请求设置 / 恢复，provider 构造请求体时读取。
     pub reasoning_pref: RwLock<Option<ReasoningPreference>>,
@@ -739,6 +748,9 @@ impl ProviderBase {
             max_tokens_override: AtomicU32::new(0),
             temperature_override: AtomicU64::new(0),
             omit_temperature: AtomicBool::new(false),
+            send_temperature: AtomicBool::new(true),
+            send_max_tokens: AtomicBool::new(true),
+            request_customization: RwLock::new(Default::default()),
             reasoning_pref: RwLock::new(None),
         }
     }
@@ -808,6 +820,7 @@ impl ProviderBase {
 
     /// 若处于省略模式，按各厂商请求体路径移除 temperature 字段。
     ///
+    /// 同时按用户配置省略最大输出预算；不根据模型名称强制改变开关。
     /// 路径覆盖：
     /// - 顶层 `temperature`：OpenAI 兼容 / Responses / Anthropic / 文心 / 豆包 / 智谱 等
     /// - `generationConfig.temperature`：Gemini
@@ -816,7 +829,18 @@ impl ProviderBase {
     /// 不做递归移除：消息内容 / 工具 JSON Schema 中可能出现名为
     /// temperature 的业务字段（如天气工具的参数定义），递归删除会破坏语义。
     pub fn strip_temperature(&self, body: &mut serde_json::Value) {
-        if !self.should_omit_temperature() {
+        if !self.send_max_tokens.load(Ordering::Relaxed) {
+            if let Some(obj) = body.as_object_mut() {
+                for key in ["max_tokens", "max_completion_tokens", "max_output_tokens"] { obj.remove(key); }
+            }
+            if let Some(obj) = body.get_mut("generationConfig").and_then(Value::as_object_mut) {
+                obj.remove("maxOutputTokens");
+            }
+            if let Some(obj) = body.pointer_mut("/parameter/chat").and_then(Value::as_object_mut) {
+                obj.remove("max_tokens");
+            }
+        }
+        if !self.should_omit_temperature() && self.send_temperature.load(Ordering::Relaxed) {
             return;
         }
         if let Some(obj) = body.as_object_mut() {
@@ -836,6 +860,14 @@ impl ProviderBase {
         {
             chat.remove("temperature");
         }
+    }
+
+    /// Final reasoning mappings and user patches run immediately before transport.
+    /// User overrides win, but explicit sampling switches still control their fields.
+    pub fn finalize_body(&self, mut body: Value) -> Value {
+        self.request_customization.read().apply(&mut body, self.effective_reasoning());
+        self.strip_temperature(&mut body);
+        body
     }
 
     /// 惩罚参数的合法化：`None` / 非有限值 / `0.0` 一律视为"不发送"。
@@ -1133,5 +1165,33 @@ mod usage_reporting_tests {
             _ => panic!("Expected usage"),
         }
         assert!(parse_stream_usage(&serde_json::json!({"model": "no-usage"})).is_none());
+    }
+}
+
+#[cfg(test)]
+mod request_parameter_switch_tests {
+    use super::*;
+    #[test]
+    fn switches_control_wire_fields_and_preserve_tool_schemas() {
+        for (temperature, tokens) in [(true,true),(true,false),(false,true),(false,false)] {
+            let base = ProviderBase::new("dummy".into(), "https://example.test".into(), "unknown-model".into(), 0.7, 256);
+            base.send_temperature.store(temperature, Ordering::Relaxed);
+            base.send_max_tokens.store(tokens, Ordering::Relaxed);
+            let mut body = serde_json::json!({
+                "temperature":0.7,"max_tokens":256,"max_output_tokens":256,"max_completion_tokens":256,
+                "generationConfig":{"temperature":0.7,"maxOutputTokens":256},
+                "parameter":{"chat":{"temperature":0.7,"max_tokens":256}},
+                "tools":[{"parameters":{"properties":{"temperature":{"type":"number"},"max_tokens":{"type":"integer"}}}}]
+            });
+            base.strip_temperature(&mut body);
+            assert_eq!(body.get("temperature").is_some(), temperature);
+            assert_eq!(body["generationConfig"].get("temperature").is_some(), temperature);
+            assert_eq!(body["parameter"]["chat"].get("temperature").is_some(), temperature);
+            for field in ["max_tokens","max_output_tokens","max_completion_tokens"] { assert_eq!(body.get(field).is_some(), tokens); }
+            assert_eq!(body["generationConfig"].get("maxOutputTokens").is_some(), tokens);
+            assert_eq!(body["parameter"]["chat"].get("max_tokens").is_some(), tokens);
+            assert_eq!(body["tools"][0]["parameters"]["properties"]["temperature"]["type"], "number");
+            assert_eq!(body["tools"][0]["parameters"]["properties"]["max_tokens"]["type"], "integer");
+        }
     }
 }

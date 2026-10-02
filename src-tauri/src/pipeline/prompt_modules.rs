@@ -66,7 +66,7 @@ You're chatting with a friend. These are casual-chat defaults: explicit question
 [CHAT_STYLE_RULES]
 MOSTLY_SHORT          a brief reaction can be complete when it answers this exchange; use the current character's words, not a fixed list of interjections
 NO_UNASKED_EXPLANATION in casual chat, react or answer first. Avoid unsolicited lectures, causes, definitions, caveats or a concluding takeaway. A concrete, useful suggestion tied to the user's situation is welcome under the initiative rules
-ONE_BEAT_DEFAULT      an ordinary turn carries one beat: one reaction, one answer, one tease, or one real question. Do not turn a small message into empathy + interpretation + advice + follow-up
+ONE_FOCUS_DEFAULT     stay with one conversational focus. A personal reaction and a connected answer or question can fit together. Do not turn a small message into a mandatory empathy + interpretation + advice + follow-up routine
 SLANG_BY_FIT          slang is ordinary vocabulary, not decoration. Mirror the user's register and use at most one fitting expression; "6", "666", "这波神了", "绷不住了" are valid complete reactions when true. Never force a meme or explain it unless asked
 SELECTIVE_REACTION    respond to the detail that matters; no mandatory validation, emotional diagnosis or canned sympathy
 SILENCE_OK            sometimes no reply at all; silence between messages is normal; topics drift
@@ -1852,8 +1852,12 @@ impl PromptBuilder {
         // 这里在生成之前就把自己最近的说法摆到模型眼前。
         push!(0, "recent_self_utterances", parts.recent_self_utterances.clone().unwrap_or_default());
 
-        // 快速语义感知引导（多维度嵌入分类合成的简短指令，让 LLM 知道"如何回应"）
-        push!(1, "fast_perception_guidance", parts.fast_perception_guidance.clone().unwrap_or_default());
+        // 分类与建议只是参考，不替用户定义动机；边界与提示一起裁剪。
+        let perception_reference = parts.fast_perception_guidance.as_deref()
+            .filter(|hint| !hint.trim().is_empty())
+            .map(|hint| format!("[FALLIBLE CONVERSATION HINTS]\nThese automated labels and suggested patterns may be wrong. Let the user's words and immediate dialogue decide the scene; a friendly invitation does not establish boredom, hostility or attention-seeking. Use a suggestion only when it fits, never as a compulsory line.\n{hint}\n[/FALLIBLE CONVERSATION HINTS]"))
+            .unwrap_or_default();
+        push!(1, "fast_perception_guidance", perception_reference);
 
         // 推荐工具（语义粗筛 Top-N，引导 LLM 优先使用最匹配的工具）
         push!(3, "recommended_tools", parts.recommended_tools.clone().unwrap_or_default());
@@ -1861,6 +1865,9 @@ impl PromptBuilder {
         // 工具列表（放最后，让 LLM 先进入意识状态再看可用工具）
         // 原生 FC 路径下工具描述通过 API 的 tools 参数传递，不在 prompt 中注入
         push!(0, "tools", build_tools_block(parts.tools.as_deref(), parts.enable_native_fc, &parts.language));
+
+        // 在本轮输入附近保留简短的交流焦点，防止远处的角色标签抢占接话目的。
+        push!(0, "conversation_focus", include_str!("../../prompts/framework/conversation_focus.en.md").to_string());
 
         // 用户输入（Task 层）
         if !parts.user_input.is_empty() {
@@ -2251,6 +2258,41 @@ mod tests {
     use super::*;
 
     #[test]
+    fn natural_delivery_references_survive_full_and_compact_prompt_assembly() {
+        use crate::persona::prompt_render::{self, CharacterBlockTier};
+        for char_id in ["nana", "vivian"] {
+            let config = crate::persona::schemas::default_persona_for(char_id);
+            for tier in [CharacterBlockTier::Full, CharacterBlockTier::Compact] {
+                let parts = PromptParts {
+                    char_id: char_id.into(), language: "zh".into(), channel: "broadcast".into(),
+                    user_input: "猜猜我刚拿到什么".into(),
+                    character_block: Some(prompt_render::render_character_block_tiered(&config, "zh", tier)),
+                    examples_block: Some(prompt_render::render_examples_block_tiered(&config, "zh", tier)),
+                    fast_perception_guidance: Some("emotion=bored rel=attention_seek".into()),
+                    ..Default::default()
+                };
+                let prompt = PromptBuilder::build_prompt(&parts);
+                assert!(prompt.contains("[HUMAN_FEEL_RULES]"));
+                assert!(prompt.contains("[CURRENT COMPANION TURN]"));
+                assert!(prompt.contains("[FALLIBLE CONVERSATION HINTS]"));
+                assert!(prompt.contains("emotion=bored rel=attention_seek"));
+                assert!(prompt.contains("**Example 2 - 新认识与个人投入") || prompt.contains("**Example 2 - 在意个人投入"));
+                assert!(prompt.contains("\"intent\": \"no_reply\""));
+                assert!(!prompt.contains("分得有点省事"));
+                if tier == CharacterBlockTier::Full {
+                    // Optional offline export for manually reviewing real assembled prompts.
+                    if let Ok(dir) = std::env::var("VIVIAN_NATURAL_DELIVERY_PROBE_DIR") {
+                        std::fs::create_dir_all(&dir).unwrap();
+                        std::fs::write(std::path::Path::new(&dir).join(format!("{char_id}.txt")), &prompt).unwrap();
+                    }
+                }
+            }
+        }
+        let plain = PromptBuilder::build_prompt(&PromptParts::default());
+        assert!(!plain.contains("[FALLIBLE CONVERSATION HINTS]"));
+    }
+
+    #[test]
     fn companion_contact_guide_only_applies_to_startup_introduction() {
         let marker = "[FIRST CONTACT GREETING]";
         let startup = PromptParts { first_contact_greeting: true, ..Default::default() };
@@ -2467,7 +2509,7 @@ mod tests {
             assert!(format.contains(key), "output_format 丢失语义锚点: {key}");
         }
         // 示例对话必须原样保留（语气锚点不压缩）
-        assert!(format.contains("{\"text\": \"Hmph... fine, you got me there\""));
+        assert!(format.contains("{\"text\": \"好，就这么定。\""));
         assert!(format.contains("\"voice_message\": true"));
         // 其他规则文件的标记块
         assert!(pet_identity().contains("[CAPABILITY_BOUNDARY]"));

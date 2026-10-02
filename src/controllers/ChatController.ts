@@ -153,6 +153,7 @@ class ChatControllerClass {
         motion?: string;
         expression?: string;
         emotion_score?: number;
+        sticker?: AiResponse['sticker'];
         user_emotion?: string;
         stream_id?: string;
       }>('chat:done', (event) => {
@@ -168,13 +169,14 @@ class ChatControllerClass {
         if (userEmotion) {
           useAppStore.getState().setLastUserEmotion(userEmotion);
         }
-        if (!finalText) {
+        if (!finalText && !event.payload.sticker) {
           // 空文本（LLM 真正返回空内容）时跳过对话历史写入，避免污染记忆
           this.finishSessionEmpty(sid);
           return;
         }
         this.finishSession(sid, finalText, {
           text: finalText,
+          sticker: event.payload.sticker,
           motion: event.payload.motion ?? '',
           expression: event.payload.expression ?? '',
           emotion_score: event.payload.emotion_score ?? 0,
@@ -368,6 +370,7 @@ class ChatControllerClass {
     const assistantTimestamp = new Date().toISOString();
     void emit('chat:assistant_message', {
       content: finalText,
+      sticker: response.sticker,
       timestamp: assistantTimestamp,
       stream_id: sid,
       character_id: getCharacterId() ?? undefined,
@@ -378,9 +381,11 @@ class ChatControllerClass {
     // 这种回复仍会进入 side_chat，却没有任何 currentBubble 可供结算，因而桌宠沉默。
     // 用最终文本补建气泡，保证 done 是气泡展示的可靠兜底。
     if (session.bubbleStarted) {
-      BubbleController.finishStreaming(finalText);
-    } else {
-      BubbleController.showBubble(finalText);
+      BubbleController.finishStreaming(finalText, { sticker: response.sticker ?? undefined });
+    } else if (finalText.trim()) {
+      BubbleController.showBubble(finalText, undefined, { sticker: response.sticker ?? undefined });
+    } else if (response.sticker) {
+      BubbleController.showSticker(response.sticker);
     }
     this.handlers.onResponseReceived?.(response, sid);
     session.resolve(response);

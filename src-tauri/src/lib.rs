@@ -9,6 +9,7 @@ pub mod character_behavior;
 pub mod character_registry;
 pub mod commands;
 pub mod config;
+pub mod stickers;
 pub mod conversation;
 pub mod cordis;
 pub mod credentials;
@@ -474,6 +475,11 @@ pub fn run() {
             commands::plugins::plugin_diagnostics,
             commands::plugins::list_skills,
             commands::plugins::list_provider_presets,
+            stickers::list_stickers,
+            stickers::set_sticker_frequency,
+            stickers::get_sticker_data_url,
+            stickers::import_sticker,
+            commands::plugins::preview_reasoning_config,
             commands::plugins::trust_plugin,
             commands::plugins::reload_plugin,
             commands::plugins::unload_plugin,

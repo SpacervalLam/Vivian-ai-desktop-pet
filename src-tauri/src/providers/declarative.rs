@@ -398,9 +398,7 @@ impl DeclarativeProvider {
         }
 
         // 省略 temperature 时按 spec 通知后端（默认移除顶层 temperature）
-        if self.base.should_omit_temperature() {
-            self.base.strip_temperature(&mut body);
-        }
+        self.base.strip_temperature(&mut body);
 
         body
     }
@@ -462,7 +460,7 @@ impl DeclarativeProvider {
         Ok(self
             .apply_auth(builder)
             .header("Content-Type", "application/json")
-            .json(body))
+            .json(&self.base.finalize_body(body.clone())))
     }
 
     async fn send_json(&self, body: Value) -> VivianResult<(u16, Value)> {
@@ -629,6 +627,11 @@ impl DeclarativeProvider {
         );
         provider.instructions = self.instructions.clone();
         provider.tools = tools;
+        provider.set_request_customization(self.base.request_customization.read().clone());
+        provider.set_request_parameters(
+            self.base.send_temperature.load(std::sync::atomic::Ordering::Relaxed),
+            self.base.send_max_tokens.load(std::sync::atomic::Ordering::Relaxed),
+        );
         provider
             .base
             .set_omit_temperature(self.base.should_omit_temperature());
@@ -750,6 +753,15 @@ impl DeclarativeProvider {
 
 #[async_trait]
 impl BaseProvider for DeclarativeProvider {
+    fn set_request_customization(&self, customization: crate::providers::reasoning_profiles::RequestCustomization) {
+        *self.base.request_customization.write() = customization;
+    }
+
+    fn set_request_parameters(&self, temperature: bool, max_tokens: bool) {
+        self.base.send_temperature.store(temperature, std::sync::atomic::Ordering::Relaxed);
+        self.base.send_max_tokens.store(max_tokens, std::sync::atomic::Ordering::Relaxed);
+    }
+
     fn get_model(&self) -> &str {
         &self.base.model
     }

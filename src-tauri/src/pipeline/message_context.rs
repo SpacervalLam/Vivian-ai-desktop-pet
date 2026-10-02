@@ -37,7 +37,10 @@ pub fn append_history(messages: &mut Vec<ChatMessage>, history: &[ChatMessage]) 
     messages.extend(history.iter().map(|message| {
         if message.role == "user" {
             ChatMessage { content: ensure_speaker_prefix(&message.content), ..message.clone() }
-        } else { message.clone() }
+        } else { let mut message = message.clone();
+            if let Some(sticker)=message.meta.as_ref().and_then(|m|m.sticker.as_ref()){message.content.push_str(&format!("\n[Sent sticker: {}]",serde_json::json!({"label":sticker.label,"meaning":sticker.meaning})));}
+            message
+        }
     }));
 }
 

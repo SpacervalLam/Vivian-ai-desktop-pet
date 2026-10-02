@@ -6,7 +6,6 @@ use super::triggers::ProactiveTrigger;
 use super::{ContentType, DeliveryChannel, ProactiveAction};
 use crate::pipeline::state::PipelineState;
 use crate::pipeline::steps::prompt::PromptBuildingStep;
-use crate::pipeline::template_engine::build_prompt_with_sections;
 use crate::providers::base::LLMRequest;
 use crate::providers::ModelRouter;
 use crate::tools::ToolSystem;
@@ -284,7 +283,7 @@ impl BehaviorDecider {
                 crate::pipeline::prompt_modules::human_feel_rules(),
                 proactive_output_format(crate::pipeline::prompt_modules::normalize_lang(lang)),
                 proactive_channel_instruction(&ctx.channel))),
-            ChatMessage::user(format!("[Proactive event; not a new user request]\n{prompt}")),
+            ChatMessage::system(format!("[Proactive event; not a new user request]\n{prompt}")),
         ])
     }
 
@@ -319,6 +318,7 @@ impl BehaviorDecider {
         state.self_state_text = self_state_text.to_string();
 
         let mut parts = step.build_parts(&state, None);
+        if parts.examples_block.is_none() { parts.examples_block = step.voice_seed_examples(); }
         // 跳过主对话 output_format（主动问候用专属输出格式）
         parts.has_native_schema = true;
         // 主动问候不注入工具列表（不需要工具调用）
@@ -360,12 +360,11 @@ impl BehaviorDecider {
         }
 
         parts.user_input.clear();
-        let prompt = build_prompt_with_sections(&parts).prompt;
-        let context = crate::pipeline::message_context::split_prompt_context(&prompt, "", lang);
-        let mut messages = vec![ChatMessage::system(format!("{}\n\n{}", context.system, protocol))];
-        crate::pipeline::message_context::append_history(&mut messages, dialogue_messages);
-        if let Some(note) = context.dynamic { messages.push(ChatMessage::user(note)); }
-        messages.push(ChatMessage::user(format!("[Proactive event; not a new user request]\n{}", suffix)));
+        let prompt = crate::pipeline::companion_prompt::CompanionPrompt::build(&parts, dialogue_messages);
+        let event = format!("[Proactive event; not a new user request]\n{suffix}");
+        let mut messages = prompt.messages(dialogue_messages, &event, true, None, None);
+        // Proactive silence/delivery schema is the final protocol in this channel.
+        messages.push(ChatMessage::system(protocol));
         Some(messages)
     }
 
@@ -807,10 +806,12 @@ mod non_response_prompt_tests {
                 ProactiveTrigger::CrossCharacterReply, &ctx, "", "zh", "vivian",
                 prompt_step, "", "", &[], "", 0,
             ).unwrap();
-            assert!(messages[0].content.contains("Talking to Nana as Vivian"));
-            assert!(messages[0].content.contains("relaxed and candid"));
-            assert!(messages[0].content.contains("genuinely touches a feeling"));
-            assert!(!messages[0].content.contains("Talking to Vivian as Nana"));
+            let system = messages.iter().filter(|m| m.role == "system")
+                .map(|m| m.content.as_str()).collect::<Vec<_>>().join("\n");
+            assert!(system.contains("Talking to Nana as Vivian"));
+            assert!(system.contains("relaxed and candid"));
+            assert!(system.contains("genuinely touches a feeling"));
+            assert!(!system.contains("Talking to Vivian as Nana"));
         }
         let plain = BehaviorDecider::build_messages(
             ProactiveTrigger::HourlyGreeting, &ctx, "", "zh", "vivian", None,
@@ -861,13 +862,13 @@ mod structured_context_tests {
             "", "", &history, "", 2,
         ).unwrap();
         assert_eq!(messages[0].role, "system");
-        assert!(messages[0].content.contains("\"notify\""));
+        assert!(messages.last().unwrap().content.contains("\"notify\""));
         assert_eq!(messages[1].content, "[User says to me] unique_user_topic");
         assert_eq!(messages[2].role, "assistant");
         assert_eq!(messages[2].content, "unique_previous_reply");
-        assert!(messages.last().unwrap().content.contains("not a new user request"));
+        assert!(messages.iter().any(|m| m.role == "system" && m.content.contains("not a new user request")));
         assert!(messages.last().unwrap().content.contains("DONT_NOTIFY"));
-        assert!(messages[0].content.contains("chat_window"));
+        assert!(messages.last().unwrap().content.contains("chat_window"));
     }
 
     #[test]
@@ -883,10 +884,11 @@ mod structured_context_tests {
                 let full = BehaviorDecider::build_messages(trigger, &ctx, "", lang, "nana", Some(&step),
                     "", "", &[], "quiet_state_fixture", 3).unwrap();
                 for messages in [&fallback, &full] {
-                    assert!(messages[0].content.contains("\"notify\""));
-                    assert!(messages[0].content.contains("chat_window"));
-                    assert!(messages.last().unwrap().content.contains(&directive));
-                    assert!(messages.last().unwrap().content.contains("not a new user request"));
+                    assert!(messages.iter().any(|m| m.role == "system" && m.content.contains("\"notify\"")));
+                    assert!(messages.iter().any(|m| m.role == "system" && m.content.contains("chat_window")));
+                    assert!(messages.iter().any(|m| m.role == "system" && m.content.contains(&directive)));
+                    assert!(messages.iter().any(|m| m.role == "system" && m.content.contains("not a new user request")));
+                    assert!(messages.iter().all(|m| m.role != "user"));
                     assert!(messages.iter().any(|m| m.content.contains("quiet_state_fixture")));
                 }
                 assert!(fallback[0].content.contains("[CHARACTER PERSPECTIVE]"));
