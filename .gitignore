@@ -1,20 +1,19 @@
-# ===== Rust / Tauri =====
-src-tauri/target/
-target_check/
-src-tauri/gen/schemas/
-src-tauri/cargo_check*.txt
-
-# ===== Node.js / Frontend =====
+# 构建与依赖
 node_modules/
 dist/
 dist-ssr/
-*.local
-
-# ===== Vite =====
+target/
+target_check/
+src-tauri/gen/schemas/
 *.tsbuildinfo
 vite.config.ts.timestamp-*.mjs
+*.local
+*.exe
+*.dll
+*.lib
+*.pdb
 
-# ===== IDE / Editor =====
+# 编辑器与系统文件
 .vscode/
 .idea/
 *.swp
@@ -23,96 +22,68 @@ vite.config.ts.timestamp-*.mjs
 .DS_Store
 Thumbs.db
 
-# ===== Tauri WebView 缓存 =====
-.webview-data/
-
-# ===== 环境变量与密钥 =====
+# 密钥与运行时数据
 .env
 .env.*
 !.env.example
-
-# ===== 日志与运行时数据 =====
+.webview-data/
+vivian_data/
+.vivian/
 *.log
 logs/
-src-tauri/logs/
-
-# ===== 构建产物 =====
-*.exe
-*.dll
-*.lib
-*.pdb
-*.tmp
-
-# ===== 临时与备份文件 =====
-# 曾经因为缺 *.bak 这一条，src/components/room/ 下 16 个手改备份（.phase2 / .phase3 /
-# .jp-redesign 等，共 1.27MB）被提交进库。改源码前留的备份一律不进库 ——
-# 要留历史请用 git（分支 / stash / commit），不要用文件副本。
-*.bak
-*.orig
-*.rej
-
-# ===== 用户运行时数据（不应入库） =====
-vivian_data/
-# 工作侧智能体在「选定工作区」下生成的跨会话项目记忆（<工作区>/.vivian/memory.md）
-# 每个工作区各一份、由 LLM 每轮重写，属本地运行时状态，不入库
-.vivian/
-
-# ===== 构建期脚本（本地工具，不入库） =====
-# 注意：encrypt-assets / doctor / check-* 等构建与哨兵脚本都在这里，
-# ignore 后新 clone 无法直接构建，需自行补齐 scripts/
-/scripts/*
-!/scripts/package-small.mjs
-!/scripts/package-apartment.mjs
-
-# ===== 免 Tauri 预览页（本地开发工具，不入库） =====
-# 免 Tauri 跑设置面板 / Toast / 房间用的 mock 入口，只服务本地调试，不参与应用运行、不进 dist。
-# 公寓预览与美术工具已移到 plugins/3d-apartment，插件预览入口随源码保留。
-# 另：src/components/SkeletalRigPreview.tsx 名字带 Preview，但被 main.tsx 动态 import，
-# 是应用运行时组件，不在此列，别误删。
-*-preview.html
-src/*Preview.tsx
-
-# ===== 加密资源与密钥（构建产物，不入库） =====
 src-tauri/assets_enc/
 src-tauri/asset_key.bin
 src-tauri/vivian.bundle.enc
 src-tauri/vivian.bundle.index.json
 
-# ===== AI 会话产物=====
-.workbuddy/
-.workbuddy-ai/
-MEMORY_OPTIMIZATION.md
+# 临时文件与缓存
+tmp/
+temp/
+.npm-cache/
+.npm-cache-tmp/
+__pycache__/
+*.pyc
+*.tmp
+*.bak
+*.orig
+*.rej
+*.blend1
+*.blend2
 .texture-backup-4096/
 .glb-backup-4096/
 .config-backup-*/
+/tmp-*
+/tmp_*
+/temp-*
+/temp_*
 
-# ===== 本地临时区（脚本中间产物 / 归档 / 缓存，不入库） =====
-tmp/
-.npm-cache/
-.npm-cache-tmp/
+# 本地脚本与预览；保留构建和打包入口
+/scripts/*
+!/scripts/check-apartment-plugin.mjs
+!/scripts/package-small.mjs
+!/scripts/package-apartment.mjs
+*-preview.html
+src/*Preview.tsx
 
-# ===== Blender 美术工程（开发链路，不入库 / 不进包） =====
-# 公寓运行模型位于 plugins/3d-apartment/room，只进入独立组件 ZIP。
-# /blender/ 下的 .blend 源工程、中间 glb、导出贴图、验证截图全部属于开发过程文件，
-# 构建链为：export-base.mjs → build_blender.py → export_blender.py → verify-room.mjs
-#
-# 代价须知：忽略后 vivian-furniture.blend 将不再有任何版本管理，仅存本机一份。
-# 若要保留该源工程入库，把 /blender/ 那行注释掉，并保留下面一行反选：
-#   !/blender/room/vivian-furniture.blend
+# AI 工作记录与开发文档
+/docs/
+.workbuddy/
+.workbuddy-ai/
+.codex/
+.claude/
+/CODE_WIKI.md
+/COMPANION_MEMORY.md
+/MEMORY_OPTIMIZATION.md
+/src-tauri/prompts/PROMPT_EVALUATION.md
+
+# 美术工程与发布产物
 /blender/
 /plugins/3d-apartment/art/
 /release/
 /src-tauri/windows/apartment-package.nsh
-*.blend1
-*.blend2
 
-# ===== 开发调试残留（仅本地，不入库） =====
-# src-tauri 根目录的 txt 都是 cargo check / cargo test 的输出重定向，源码不放这里
+# 本地调试输出
 src-tauri/*.txt
-# cargo test 在工作目录生成的向量库与状态快照
-# （见 src/memory/strategy.rs 与 src/psychology/social_state.rs 的测试模块）
 src-tauri/test_vectors.json
 src-tauri/test_social.json
-# 无任何引用的散落测试文件、锁文件副本
 src-tauri/test_sqlite.rs
-src-tauri/Cargo.lock.tmp
