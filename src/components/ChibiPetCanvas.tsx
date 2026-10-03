@@ -1,3 +1,4 @@
+import { ReplyWaiting } from '../chibi/replyWaiting';
 import {
   forwardRef,
   useCallback,
@@ -319,6 +320,7 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
     const stageRef = useRef<HTMLDivElement | null>(null);
     const [poseName, setPoseName] = useState<ChibiPose>('idle');
     const poseNameRef = useRef<ChibiPose>('idle');
+    const waitingForReplyRef = useRef(false);
     const [walkDirection, setWalkDirection] = useState<ChibiDirection>('left');
     const walkDirectionRef = useRef<ChibiDirection>('left');
     walkDirectionRef.current = walkDirection;
@@ -413,7 +415,7 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
     const isAtRest = useCallback(() => poseNameRef.current === 'idle', []);
 
     /**
-     * 回到基准姿态：忙碌中回到「看手机」循环，否则回 `idle`。
+     * 回到基准姿态：等待首字时回「思考中」，忙碌中回「看手机」循环，否则回 `idle`。
      *
      * 忙碌是 presence 级的常驻状态，优先级高于基准姿态：插播的一次性动作（说话、表情、
      * 触摸反应）播完必须回落到循环里。否则角色只要在忙碌期间说一句话，那个循环就被
@@ -424,6 +426,13 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
       poseTimerRef.current = null;
       walkFrameDelayMsRef.current = null;
       walkTargetFramesRef.current = null;
+      if (waitingForReplyRef.current) {
+        const alreadyThinking = poseNameRef.current === 'thinking';
+        setActivePose('thinking');
+        if (!alreadyThinking) setFrame(0);
+        onExpressionEnd?.();
+        return;
+      }
       if (busyPhaseRef.current === 'in' || busyPhaseRef.current === 'loop') {
         // 进场被打断（按住、或被插播动作顶掉）也落进循环：停在进场半路的一格上
         // 没有任何含义，看起来就是卡住了。
@@ -620,6 +629,7 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
         walkFrameDelayMsRef.current = null;
         walkTargetFramesRef.current = null;
         setActivePose(spec.name);
+        if (spec.name === 'thinking') return;
         const holdMs = durationMs && durationMs > 0 ? durationMs : totalDurationMs(spec);
         poseTimerRef.current = setTimeout(() => returnToTone(token), holdMs);
         return;
@@ -807,6 +817,7 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
 
     useImperativeHandle(ref, () => ({
       setExpression: (name, durationMs) => {
+        if (waitingForReplyRef.current && resolveMotion(name).name !== 'drag') return;
         const spec = resolveMotion(name);
         if (spec.kind === 'animation' && spec.directions) {
           setWalkDirection(/right|east|右/i.test(name) ? 'right' : 'left');
@@ -815,6 +826,7 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
         applyMotion(name, durationMs);
       },
       playMotion: (group) => {
+        if (waitingForReplyRef.current) return;
         const spec = resolveMotion(group);
         if (spec.kind === 'animation' && spec.directions) {
           setWalkDirection(/right|east|右/i.test(group) ? 'right' : 'left');
@@ -880,7 +892,7 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
       };
     }, [characterId, sheetLoader]);
 
-    // 循环型帧序列（当前只有走动）自推进；一次性动作由 applyMotion 自行播完。
+    // 循环型帧序列（走动、忙碌、思考中）自推进；一次性动作由 applyMotion 自行播完。
     useEffect(() => {
       const spec = getMotion(poseName);
       if (!spec || spec.kind !== 'animation' || !spec.loop) {
@@ -992,20 +1004,45 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
       };
 
       void add<{ character_id?: string }>('tts:started', (p) => {
-        if (mine(p.character_id)) applyMotion('talk');
+        if (mine(p.character_id) && !waitingForReplyRef.current) applyMotion('talk');
       });
       void add<{ character_id?: string }>('tts:finished', (p) => {
-        if (mine(p.character_id)) applyMotion('happy', 700);
+        if (mine(p.character_id) && !waitingForReplyRef.current) applyMotion('happy', 700);
       });
       void add<{ character_id?: string }>('tts:error', (p) => {
-        if (mine(p.character_id)) applyMotion('idle');
+        if (mine(p.character_id) && !waitingForReplyRef.current) applyMotion('idle');
       });
-      void add<{ character_id?: string }>('chat:chunk', (p) => {
-        if (mine(p.character_id)) applyMotion('talk');
+      const waiting = new ReplyWaiting();
+      type ReplyEvent = { character_id?: string; stream_id?: string; text?: string };
+      const updateWaiting = () => {
+        const next = waiting.thinking;
+        if (next === waitingForReplyRef.current) return;
+        waitingForReplyRef.current = next;
+        if (next) applyMotion('thinking');
+        else if (poseNameRef.current === 'thinking') applyMotion('idle');
+      };
+      const startReply = (p: ReplyEvent) => {
+        if (!mine(p.character_id)) return;
+        waiting.start(p.stream_id ?? '');
+        updateWaiting();
+      };
+      void add<ReplyEvent>('chat:waiting', startReply);
+      void add<ReplyEvent>('chat:start', startReply);
+      void add<ReplyEvent>('chat:chunk', (p) => {
+        if (!mine(p.character_id) || !waiting.text(p.stream_id ?? '', p.text ?? '')) return;
+        updateWaiting();
+        applyMotion('talk');
       });
-      void add<{ character_id?: string }>('chat:done', (p) => {
-        if (mine(p.character_id)) applyMotion('happy', 850);
-      });
+      const finishReply = (p: ReplyEvent, success = false) => {
+        if (!mine(p.character_id)) return;
+        waiting.finish(p.stream_id ?? '');
+        updateWaiting();
+        if (success && !waiting.thinking) applyMotion('happy', 850);
+      };
+      void add<ReplyEvent>('chat:done', p => finishReply(p, true));
+      for (const event of ['chat:error', 'chat:cancelled', 'chat:config_error', 'chat:presence_blocked', 'chat:yielded', 'chat:waiting-ended']) {
+        void add<ReplyEvent>(event, p => finishReply(p));
+      }
       void add<{ speaker_id?: string; listener_id?: string }>('cross:start', (p) => {
         if (p.speaker_id?.toLowerCase() === characterId) applyMotion('talk');
         else if (p.listener_id?.toLowerCase() === characterId) applyMotion('listen');
@@ -1023,6 +1060,7 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
       return () => {
         cancelled = true;
         unlisteners.forEach((unlisten) => unlisten());
+        waitingForReplyRef.current = false;
       };
     }, [characterId, previewMode, applyMotion]);
 

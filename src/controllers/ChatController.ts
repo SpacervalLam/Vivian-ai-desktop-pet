@@ -40,6 +40,7 @@ export interface ChatHandlers {
 /** 单条消息的流式会话状态 */
 interface StreamSession {
   id: string;
+  characterId?: string;
   /** 累积的流式文本 */
   text: string;
   streamParser: StreamController;
@@ -201,6 +202,12 @@ class ChatControllerClass {
         this.finishSessionCancelled(sid);
       }),
     );
+    // These terminal paths do not emit chat:done; settle their sessions as well.
+    for (const eventName of ['chat:config_error', 'chat:presence_blocked', 'chat:yielded']) {
+      this.unlisteners.push(await listen<{ stream_id?: string }>(eventName, event => {
+        this.finishSessionCancelled(event.payload.stream_id ?? '');
+      }));
+    }
     // 广播消息：由广播窗口发出，各角色窗口各自通过 sendMessage 走完整流程（session + TTS + 气泡）。
     //
     // 渠道必须是 'broadcast' 而不是 'direct'：
@@ -284,6 +291,7 @@ class ChatControllerClass {
     return new Promise<AiResponse>((resolve, reject) => {
       const session: StreamSession = {
         id: streamId,
+        characterId: targetCharId,
         text: '',
         streamParser: new StreamController(),
         resolve,
@@ -294,7 +302,9 @@ class ChatControllerClass {
       };
       this.sessions.set(streamId, session);
 
-      invoke('send_message_stream', { message, streamId, characterId: targetCharId, channel: ch, whisper: whisper ?? false, fileMetadata }).catch((err) => {
+      void emit('chat:waiting', { stream_id: streamId, character_id: targetCharId })
+        .catch(() => {})
+        .then(() => invoke('send_message_stream', { message, streamId, characterId: targetCharId, channel: ch, whisper: whisper ?? false, fileMetadata })).catch((err) => {
         // invoke 本身失败（如命令不存在），直接结束 session
         this.finishSessionWithError(streamId, String(err));
       });
@@ -331,6 +341,7 @@ class ChatControllerClass {
     return new Promise<AiResponse | null>((resolve) => {
       const session: StreamSession = {
         id: streamId,
+        characterId: targetCharId,
         text: '',
         streamParser: new StreamController(),
         resolve: resolve as (response: AiResponse) => void,
@@ -341,7 +352,9 @@ class ChatControllerClass {
       };
       this.sessions.set(streamId, session);
 
-      invoke('wake_from_presence', { characterId: targetCharId, streamId }).catch((err) => {
+      void emit('chat:waiting', { stream_id: streamId, character_id: targetCharId })
+        .catch(() => {})
+        .then(() => invoke('wake_from_presence', { characterId: targetCharId, streamId })).catch((err) => {
         this.finishSessionWithError(streamId, String(err));
       });
     });
@@ -365,6 +378,7 @@ class ChatControllerClass {
     if (!session) return;
     const ch = session.channel;
     this.sessions.delete(sid);
+    void emit('chat:waiting-ended', { stream_id: sid, character_id: session.characterId });
     this.maybeClearThinking();
     // 通知其他窗口（如 ChatWindow）立即追加 AI 回复
     const assistantTimestamp = new Date().toISOString();
@@ -396,6 +410,7 @@ class ChatControllerClass {
     const session = this.sessions.get(sid);
     if (!session) return;
     this.sessions.delete(sid);
+    void emit('chat:waiting-ended', { stream_id: sid, character_id: session.characterId });
     this.maybeClearThinking();
     BubbleController.startAutoClose(3000);
     this.handlers.onResponseReceived?.(
@@ -410,6 +425,7 @@ class ChatControllerClass {
     const session = this.sessions.get(sid);
     if (!session) return;
     this.sessions.delete(sid);
+    void emit('chat:waiting-ended', { stream_id: sid, character_id: session.characterId });
     this.maybeClearThinking();
     // API 错误通过 toast 提示，不写入对话历史、不展示气泡，避免兜底文案污染记忆
     void emit('toast:show', { message: error, type: 'error', duration: 5000, key: Date.now() });
@@ -422,6 +438,7 @@ class ChatControllerClass {
     const session = this.sessions.get(sid);
     if (!session) return;
     this.sessions.delete(sid);
+    void emit('chat:waiting-ended', { stream_id: sid, character_id: session.characterId });
     this.maybeClearThinking();
     BubbleController.startAutoClose(3000);
     this.handlers.onCancelled?.(sid);

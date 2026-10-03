@@ -89,6 +89,18 @@
       "durations": [70, 80, 80, 80, 85, 85, 85, 85, 85, 90, 90, 95]
     },
     {
+      "name": "thinking",
+      "label": "思考中",
+      "category": "state",
+      "promptable": false,
+      "sheet": "/chibi/motion/{character}/{character}-think-sheet.webp",
+      "cols": 4,
+      "rows": 3,
+      "frames": 12,
+      "loop": true,
+      "durations": [100, 100, 140, 180, 260, 280, 320, 280, 240, 180, 140, 100]
+    },
+    {
       "name": "think",
       "label": "思考",
       "category": "emotion",

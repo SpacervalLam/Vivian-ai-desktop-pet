@@ -801,6 +801,7 @@ pub async fn send_message_stream(
                     char_id,
                     stream_id
                 );
+                let _ = app.emit("chat:cancelled", json!({ "stream_id": &stream_id, "character_id": &char_id, "channel": &channel_str }));
                 return Ok(());
             }
             // 推送 meta 事件：expression/motion（前端提前播放 桌宠 动画）
@@ -1421,6 +1422,7 @@ pub async fn wake_from_presence(
                     char_id,
                     stream_id
                 );
+                let _ = app.emit("chat:cancelled", json!({ "stream_id": &stream_id, "character_id": &char_id, "channel": &channel_str }));
                 return Ok(());
             }
             if !response.expression.is_empty() || response.motion != "idle" {
