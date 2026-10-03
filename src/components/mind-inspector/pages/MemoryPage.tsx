@@ -1,12 +1,12 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { BookOpen, Clock3, Heart, MessageCircle, RefreshCw, Search, Sparkles, UserCircle } from 'lucide-react';
+import { BookOpen, Clock3, Heart, MessageCircle, RefreshCw, Search, UserCircle } from 'lucide-react';
 import UserProfilePage from './UserProfilePage';
-import { buildRecentThreads, prepareMemory, speechLabel, splitSpeechPrefix, type Character, type MemoryRecord } from './memoryPresentation';
+import { buildRecentThreads, isDialogueMemory, isMemorySummary, prepareMemory, speechLabel, splitSpeechPrefix, type Character, type MemoryRecord } from './memoryPresentation';
 import './MemoryPage.css';
 
-type Layer = 'facts' | 'episodes' | 'outreach' | 'recent' | 'profile';
+type Layer = 'facts' | 'episodes' | 'recent' | 'profile';
 
 const HighlightedText: React.FC<{ text: string; query: string }> = ({ text, query }) => {
   const term = query.trim();
@@ -21,22 +21,17 @@ const HighlightedText: React.FC<{ text: string; query: string }> = ({ text, quer
 const TABS = [
   { key: 'facts', title: '长期记忆', subtitle: '事实、偏好和约定', icon: Heart },
   { key: 'episodes', title: '共同经历', subtitle: '整理后的对话脉络', icon: BookOpen },
-  { key: 'outreach', title: '主动问候', subtitle: '她主动发起的交流', icon: Sparkles },
-  { key: 'recent', title: '近期对话', subtitle: '等待整理的片段', icon: MessageCircle },
+  { key: 'recent', title: '对话记录', subtitle: '每次交流的原始发言', icon: MessageCircle },
   { key: 'profile', title: '用户画像', subtitle: '关于你的了解', icon: UserCircle },
 ] as const;
 
-const isOutreach = (item: MemoryRecord) => item.memory_type === 'casual_conversation'
-  && item.metadata?.perspective !== 'observer'
-  && (item.tags.includes('startup_greeting') || item.tags.includes('proactive'));
-
 const layerOf = (item: MemoryRecord): Layer | null => {
-  if (item.consolidated || ['system_seed', 'environment_preset'].includes(String(item.metadata?.source ?? ''))) return null;
+  if (['system_seed', 'environment_preset'].includes(String(item.metadata?.source ?? ''))) return null;
+  if (isDialogueMemory(item)) return 'recent';
+  if (item.consolidated) return null;
   if (item.memory_type === 'long_term' || item.memory_type === 'important_event') return 'facts';
-  if (item.memory_type === 'session_summary') return 'episodes';
-  if (isOutreach(item)) return 'outreach';
+  if (isMemorySummary(item)) return 'episodes';
   if (item.metadata?.perspective === 'observer') return null;
-  if (item.memory_type === 'short_term' || item.memory_type === 'casual_conversation') return 'recent';
   return null;
 };
 
@@ -48,14 +43,12 @@ const dateText = (value: number) => {
 };
 
 const categoryName = (item: MemoryRecord) => {
-  if (item.tags.includes('startup_greeting')) return '启动问候';
-  if (isOutreach(item)) return item.metadata?.channel === 'wechat' ? '主动私聊' : '桌面问候';
   if (item.memory_type === 'important_event') return '重要事件';
   if (item.tags.includes('preference')) return '偏好';
   if (item.tags.includes('relationship')) return '关系';
   if (item.tags.includes('user_profile')) return '关于你';
   if (item.tags.includes('project_context')) return '共同话题';
-  if (item.memory_type === 'session_summary') return '对话整理';
+  if (isMemorySummary(item)) return '对话整理';
   return '对话片段';
 };
 
@@ -95,13 +88,12 @@ const MemoryPage: React.FC<{ initialLayer?: Layer }> = ({ initialLayer = 'facts'
     return () => { cancelled = true; unlisten?.(); };
   }, [character, load]);
 
-  const recentThreads = useMemo(() => buildRecentThreads(items.filter((item) => layerOf(item) === 'recent'
-    || (layerOf(item) === 'outreach' && !!(item.metadata?.conversation_id || item.metadata?.session_id))), character), [items, character]);
+  const recentThreads = useMemo(() => buildRecentThreads(items.filter((item) => layerOf(item) === 'recent'), character), [items, character]);
   const counts = useMemo(() => items.reduce((acc, item) => {
     const key = layerOf(item);
     if (key && key !== 'recent' && prepareMemory(item, character)) acc[key]++;
     return acc;
-  }, { facts: 0, episodes: 0, outreach: 0, recent: recentThreads.length, profile: 0 }), [items, character, recentThreads]);
+  }, { facts: 0, episodes: 0, recent: recentThreads.length, profile: 0 }), [items, character, recentThreads]);
 
   const visible = useMemo(() => items
     .filter((item) => layerOf(item) === layer && prepareMemory(item, character)?.body.toLowerCase().includes(query.trim().toLowerCase()))
@@ -138,7 +130,6 @@ const MemoryPage: React.FC<{ initialLayer?: Layer }> = ({ initialLayer = 'facts'
       <label className="memory-search"><Search size={16} /><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索这里的记忆" aria-label="搜索记忆" /></label>
     </div>
     {layer === 'recent' && <p className="memory-list-note">每张卡片记录一次会话，包含连续发言和多轮交流；之后会逐渐整理成共同经历。</p>}
-    {layer === 'outreach' && <p className="memory-list-note">包含启动时的问候，以及从桌面或私聊主动发起的交流。</p>}
     {error && <p className="memory-error" role="alert">{error}</p>}
     {loading ? <div className="memory-empty">正在读取记忆…</div> : (layer === 'recent' ? visibleThreads.length === 0 : visible.length === 0) ? <div className="memory-empty"><Clock3 size={24} /><strong>{query ? '没有找到匹配的记忆' : `还没有${activeTab.title}的记录`}</strong><span>{query ? '试试其他关键词' : '有新的交流时，这里会慢慢丰富起来'}</span></div> : layer === 'recent' ? <div className="memory-thread-list">
       {visibleThreads.map((thread) => <article className="memory-thread" key={thread.id}>
@@ -151,7 +142,7 @@ const MemoryPage: React.FC<{ initialLayer?: Layer }> = ({ initialLayer = 'facts'
     </div> : <div className="memory-entry-grid">
       {visible.map((item) => {
         const rawQuote = typeof item.metadata?.source_quote === 'string' ? item.metadata.source_quote : '';
-        const quote = layer === 'outreach' ? '' : splitSpeechPrefix(rawQuote).body;
+        const quote = splitSpeechPrefix(rawQuote).body;
         const hooks = (item.open_hooks ?? []).filter((hook) => hook.closed_at == null);
         const speech = splitSpeechPrefix(item.content);
         return <article key={item.id} className={`memory-entry memory-entry-${layer}`}>

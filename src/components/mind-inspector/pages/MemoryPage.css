@@ -26,7 +26,7 @@
 .memory-refresh .spinning { animation: memory-spin 1s linear infinite; }
 @keyframes memory-spin { to { transform: rotate(360deg); } }
 
-.memory-layer-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; margin-bottom: 26px; }
+.memory-layer-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-bottom: 26px; }
 .memory-layer-card { display: flex; align-items: center; gap: 10px; min-width: 0; padding: 15px 14px; text-align: left; border: 1px solid var(--memory-line); border-radius: 15px; color: var(--memory-ink); background: var(--codex-paper-card, #fffaf0); box-shadow: var(--codex-shadow-sm, 0 2px 8px #342b2510); transition: transform .15s, border-color .15s, background .15s; }
 .memory-layer-card:hover { transform: translateY(-2px); border-color: var(--codex-accent, #93a9b9); }
 .memory-layer-card.active { background: var(--codex-accent-soft, #e7eff3); border-color: var(--codex-accent, #93a9b9); }
@@ -53,7 +53,6 @@
 
 .memory-entry-grid { columns: 2; column-gap: 12px; }
 .memory-entry { display: inline-block; box-sizing: border-box; width: 100%; min-width: 0; margin-bottom: 12px; padding: 13px 16px 14px; break-inside: avoid; border: 1px solid var(--memory-line); border-left: 3px solid var(--codex-accent, #93a9b9); border-radius: 12px; background: var(--codex-paper-card, #fffaf0); box-shadow: var(--codex-shadow-sm, 0 2px 8px #342b2510); vertical-align: top; }
-.memory-entry-outreach { border-left-color: #d6a875; }
 .memory-entry-episodes { border-left-color: #a8b994; }
 .memory-entry-recent { border-left-color: #bba5b7; }
 .memory-entry-top { display: flex; align-items: center; gap: 10px; color: var(--memory-muted); font-size: 11px; }
@@ -78,7 +77,7 @@
 .memory-thread-turn-plain { display: block; }
 .memory-profile-panel { padding: 2px 0 12px; }
 
-@media (max-width: 1100px) { .memory-layer-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (max-width: 1100px) { .memory-layer-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 720px) { .memory-page-header { flex-direction: column; } .memory-entry-grid { columns: 1; } .memory-list-toolbar { align-items: stretch; flex-direction: column; } .memory-search { width: 100%; box-sizing: border-box; } .memory-layer-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 520px) { .memory-thread { padding: 14px; } .memory-thread-turn { grid-template-columns: 58px minmax(0, 1fr); gap: 7px; } .memory-thread-header { flex-wrap: wrap; } }
 @media (max-width: 440px) { .memory-layer-grid { grid-template-columns: 1fr; } }

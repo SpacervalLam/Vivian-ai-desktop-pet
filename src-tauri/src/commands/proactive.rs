@@ -27,13 +27,13 @@ fn retain_topic_channel(char_id: &str, messages: &mut Vec<crate::proactive::Proa
     });
 }
 
-fn remember_delivered_channel(char_id: &str, action: &crate::proactive::ProactiveAction) {
+fn remember_delivered_channel(char_id: &str, action: &crate::proactive::ProactiveAction) -> String {
     let manager = &crate::conversation::CONVERSATION_MANAGER;
-    if manager.is_user_session_closed(char_id) {
-        manager.force_new_session("user", char_id, &action.content);
-    }
+    let session = manager.start_or_continue("user", char_id, &action.content)
+        .unwrap_or_else(|| manager.force_new_session("user", char_id, &action.content));
     let channel = if action.delivery_channel == crate::proactive::DeliveryChannel::ChatWindow { "wechat" } else { "direct" };
     manager.set_user_channel(char_id, channel);
+    session.id
 }
 
 fn deliverable_proactive_action(action: &crate::proactive::ProactiveAction) -> bool {
@@ -850,6 +850,8 @@ pub async fn proactive_tick(
                 let memory = brain.memory.clone();
                 let cid = char_id.clone();
                 let text = farewell.clone();
+                let session_id = crate::conversation::CONVERSATION_MANAGER.get("user", &char_id).map(|conv| conv.id);
+                let spoken_at = chrono::Utc::now().timestamp_millis() as f64 / 1000.0;
                 tokio::spawn(async move {
                     let meta = serde_json::json!({
                         "channel": "proactive",
@@ -857,6 +859,9 @@ pub async fn proactive_tick(
                         "listener": "user",
                         "perspective": "speaker",
                         "knowledge_source": "direct",
+                        "session_id": session_id,
+                        "conversation_id": session_id,
+                        "spoken_at": spoken_at,
                     });
                     let _ = memory
                         .add_memory_with_metadata(
@@ -1313,15 +1318,18 @@ pub async fn proactive_tick(
         persist_arbitration_state();
     }
 
+    let mut delivered_sessions = Vec::new();
+    let spoken_at = chrono::Utc::now().timestamp_millis() as f64 / 1000.0;
     for action in &user_messages {
-        remember_delivered_channel(&char_id, action);
+        let session_id = remember_delivered_channel(&char_id, action);
+        delivered_sessions.push(session_id.clone());
         let clean_content = crate::utils::strip_markdown_syntax(&action.content);
         if action.delivery_channel == crate::proactive::DeliveryChannel::ChatWindow {
             deliver_chat_message(&app, &char_id, &clean_content)?;
         } else {
             let mut m = ChatMessage::assistant(&clean_content);
             m.meta = Some(MessageMeta::new(MessageSource::Assistant).with_channel("proactive"));
-            brain.dialogue.add_message(m);
+            brain.dialogue.add_message_with_metadata(m, json!({ "session_id": session_id }));
         }
     }
 
@@ -1332,7 +1340,7 @@ pub async fn proactive_tick(
         let msgs_clone = user_messages.clone();
         let char_id_for_mem = char_id.clone();
         tokio::spawn(async move {
-            for action in &msgs_clone {
+            for (action, session_id) in msgs_clone.iter().zip(&delivered_sessions) {
                 // Share 类未达发送阈值：直接跳过（不再入待分享池）
                 // 设计变更：知识采集时已直接通过微信面板发送分享类链接，
                 // Spontaneous/MoodDriven 触发器产出的 Share 若未达阈值则丢弃，
@@ -1360,6 +1368,9 @@ pub async fn proactive_tick(
                     "perspective": "speaker",
                     "knowledge_source": "direct",
                     "content_type": format!("{:?}", action.content_type).to_lowercase(),
+                    "session_id": session_id,
+                    "conversation_id": session_id,
+                    "spoken_at": spoken_at,
                 });
                 let clean_for_mem = crate::utils::strip_markdown_syntax(&action.content);
                 let _ = memory
@@ -1569,22 +1580,25 @@ pub async fn drain_proactive_messages(
     messages.retain(deliverable_proactive_action);
     retain_topic_channel(&brain.char_id, &mut messages);
     // Alternate drain must have exactly the same realtime/private-history delivery contract.
+    let mut delivered_sessions = Vec::new();
+    let spoken_at = chrono::Utc::now().timestamp_millis() as f64 / 1000.0;
     for action in &messages {
-        remember_delivered_channel(&brain.char_id, action);
+        let session_id = remember_delivered_channel(&brain.char_id, action);
+        delivered_sessions.push(session_id.clone());
         let clean_content = crate::utils::strip_markdown_syntax(&action.content);
         if action.delivery_channel == crate::proactive::DeliveryChannel::ChatWindow {
             deliver_chat_message(&app, &brain.char_id, &clean_content)?;
         } else {
             let mut m = ChatMessage::assistant(&clean_content);
             m.meta = Some(MessageMeta::new(MessageSource::Assistant).with_channel("proactive"));
-            brain.dialogue.add_message(m);
+            brain.dialogue.add_message_with_metadata(m, json!({ "session_id": session_id }));
         }
     }
 
     // 主动消息存入记忆系统
     if !messages.is_empty() {
         let char_id_for_mem = brain.char_id.clone();
-        for action in &messages {
+        for (action, session_id) in messages.iter().zip(&delivered_sessions) {
             let channel_str = match action.delivery_channel {
                 crate::proactive::DeliveryChannel::Bubble => "proactive",
                 crate::proactive::DeliveryChannel::ChatWindow => "wechat",
@@ -1596,6 +1610,9 @@ pub async fn drain_proactive_messages(
                 "perspective": "speaker",
                 "knowledge_source": "direct",
                 "content_type": format!("{:?}", action.content_type).to_lowercase(),
+                "session_id": session_id,
+                "conversation_id": session_id,
+                "spoken_at": spoken_at,
             });
             let clean_for_mem = crate::utils::strip_markdown_syntax(&action.content);
             let _ = brain

@@ -19,12 +19,11 @@ pub fn deliver_chat_message(app: &AppHandle, char_id: &str, content: &str) -> Re
     let character = state.get_character(Some(char_id))?;
     let mut message = crate::types::response::ChatMessage::assistant(content);
     message.meta = Some(crate::messages::MessageMeta::assistant().with_channel("wechat"));
-    character.brain.dialogue.add_message(message);
     let manager = &crate::conversation::CONVERSATION_MANAGER;
-    if manager.is_user_session_closed(char_id) {
-        manager.force_new_session("user", char_id, content);
-    }
+    let session = manager.start_or_continue("user", char_id, content)
+        .unwrap_or_else(|| manager.force_new_session("user", char_id, content));
     manager.set_user_channel(char_id, "wechat");
+    character.brain.dialogue.add_message_with_metadata(message, json!({ "session_id": session.id }));
     // Hidden/suspended windows recover from history. Never report the saved message as unsent
     // on an event error, which would invite duplicate retries.
     if let Err(e) = app.emit("chat:assistant_message", chat_payload(char_id, content)) {

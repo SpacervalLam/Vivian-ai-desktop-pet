@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { buildRecentThreads, splitSpeechPrefix } from '../src/components/mind-inspector/pages/memoryPresentation.ts';
+import { buildRecentThreads, isDialogueMemory, isMemorySummary, splitSpeechPrefix } from '../src/components/mind-inspector/pages/memoryPresentation.ts';
 
 const record = (id, content, created_at, tags, metadata) => ({
   id, content, created_at, tags, metadata, memory_type: 'casual_conversation', importance: 0.4,
@@ -17,11 +17,13 @@ const threads = buildRecentThreads(records, 'vivian');
 assert.equal(threads.length, 1);
 assert.equal(threads[0].title, '与 Nana 的对话');
 assert.deepEqual(threads[0].turns.map(({ speaker, text }) => [speaker, text]), [
-  ['Vivian', '喂 Nana，一上来就查户口啊'],
   ['Nana', '我哪查户口了，就说了你一句'],
   ['Vivian', '行吧，不记了'],
 ]);
 assert.equal(threads[0].searchText.includes('Current conversation thread'), false);
+assert.equal(threads[0].searchText.includes('我和 Nana 聊了聊'), false);
+assert.equal(isMemorySummary(records[0]), true);
+assert.equal(isDialogueMemory(records[0]), false);
 assert.equal(splitSpeechPrefix('[User says to me] 晚安').body, '晚安');
 
 const direct = buildRecentThreads([
@@ -33,20 +35,38 @@ assert.deepEqual(direct[0].turns.map(({ speaker }) => speaker), ['用户', 'Vivi
 assert.equal(direct[0].searchText.includes('says to'), false);
 
 const sessionRecords = Array.from({ length: 14 }, (_, i) => record(`turn-${i}`, `连续发言 ${i}`, 3000 + i * 200,
-  [], { channel: i % 2 ? 'wechat' : 'direct', speaker: i % 3 ? 'user' : 'vivian', conversation_id: 'session-a' }));
-sessionRecords.push(record('other-session', '另一段会话', 3100, [], { speaker: 'user', conversation_id: 'session-b' }));
+  ['dialogue_turn'], { channel: i % 2 ? 'wechat' : 'direct', speaker: i % 3 ? 'user' : 'vivian', conversation_id: 'session-a' }));
+sessionRecords.push(record('other-session', '另一段会话', 3100, ['dialogue_turn'], { speaker: 'user', conversation_id: 'session-b' }));
 sessionRecords.push(record('system', '内部指令', 3101, [], { speaker: 'system', conversation_id: 'session-a' }));
 sessionRecords.push(record('interjection-prompt', '[User says to me] 你刚听到用户和Nana的对话:\n引用内容\n现在你想插话。', 3102, [], { speaker: 'user', conversation_id: 'session-a' }));
-sessionRecords.push(record('repeat', '连续发言 1', 5900, [], { speaker: 'user', conversation_id: 'session-a' }));
+sessionRecords.push(record('repeat', '连续发言 1', 5900, ['dialogue_turn'], { speaker: 'user', conversation_id: 'session-a' }));
 const sessions = buildRecentThreads(sessionRecords, 'vivian');
 assert.equal(sessions.length, 2);
 assert.equal(sessions[0].turns.length, 15);
 assert.equal(sessions[0].searchText.includes('内部指令'), false);
 assert.equal(sessions[0].searchText.includes('现在你想插话'), false);
 const storedSession = buildRecentThreads([
-  record('stored-user', '你好', 6000, [], { speaker: 'user', session_id: 'stored-session' }),
-  record('stored-ai', '刚刚聊到的事情', 8000, [], { speaker: 'vivian', session_id: 'stored-session' }),
+  record('stored-user', '你好', 6000, ['dialogue_turn'], { speaker: 'user', session_id: 'stored-session' }),
+  record('stored-ai', '刚刚聊到的事情', 8000, ['dialogue_turn'], { speaker: 'vivian', session_id: 'stored-session' }),
 ], 'vivian');
 assert.equal(storedSession.length, 1);
 assert.equal(storedSession[0].turns.length, 2);
+const greeting = record('opening', '中午好，今天怎么样？', 9000, ['assistant', 'startup_greeting', 'dialogue_turn'],
+  { speaker: 'vivian', channel: 'proactive', session_id: 'greeting-session' });
+const greetingThreads = buildRecentThreads([
+  record('response', '正在写代码', 9002, ['user', 'dialogue_turn'], { speaker: 'user', channel: 'wechat', conversation_id: 'greeting-session' }),
+  greeting,
+  record('summary-with-speaker', '我记下了用户正在写代码', 9003, ['topic_summary'], { speaker: 'vivian', session_id: 'greeting-session' }),
+  record('unknown', '无法确认来源的整理文字', 9004, [], { speaker: 'vivian', session_id: 'greeting-session' }),
+], 'vivian');
+assert.equal(greetingThreads.length, 1);
+assert.deepEqual(greetingThreads[0].turns.map(({ speaker, text }) => [speaker, text]), [
+  ['Vivian', '中午好，今天怎么样？'], ['用户', '正在写代码'],
+]);
+assert.equal(buildRecentThreads([greeting], 'vivian')[0].turns.length, 1);
+const delayedWrite = buildRecentThreads([
+  { ...greeting, created_at: 9010, metadata: { ...greeting.metadata, spoken_at: 9000 } },
+  record('early-response', '刚到家', 9005, ['user'], { speaker: 'user', session_id: 'greeting-session' }),
+], 'vivian');
+assert.deepEqual(delayedWrite[0].turns.map(({ speaker }) => speaker), ['Vivian', '用户']);
 console.log('memory presentation: ok');

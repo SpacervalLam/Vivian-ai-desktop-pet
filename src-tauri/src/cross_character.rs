@@ -995,7 +995,7 @@ impl CrossCharacterBus {
 
                 // ── 源角色记忆持久化 ──
                 // 目标角色已通过 brain.think 记录了对话和记忆（dialogue + memory）。
-                // 源角色也必须记住这次跨角色交流：写入 dialogue（2 条消息）+ 1 条记忆，
+                // 源角色也必须记住这次跨角色交流：写入 dialogue 与实际发言记忆，
                 // 并标注 speaker/listener/perspective，供检索和中期记忆巩固使用。
                 //
                 // 非 speak 模式下，目标角色没有回复文本，源角色记录"她没说话/没理我"。
@@ -1048,67 +1048,32 @@ impl CrossCharacterBus {
                     });
                     dialogue_add_with_meta(&source_dialogue, target_msg, target_meta);
 
-                    // 2.5. 源角色记忆：合并写入（去冗余）
-                    // 之前分 ShortTerm（2条逐轮）+ CasualConversation（1条总结）= 3 条记忆，
-                    // 内容高度重叠。现合并为 1 条 CasualConversation 总结，带 short_term 标签
-                    // 确保仍可被短期检索，同时减少记忆膨胀。
-                    let memory_content = if response_mode.needs_speech() {
-                        format!(
-                            "我和 {} 聊了聊：我对她说：{}；她回复我：{}",
-                            target_name, req.message, final_text
-                        )
-                    } else {
-                        format!(
-                            "我对 {} 说了：{}；她{}",
-                            target_name,
-                            req.message,
-                            match response_mode {
-                                crate::conversation::ResponseMode::NonVerbal => "没有说话，只是做了一个动作回应".to_string(),
-                                crate::conversation::ResponseMode::Internal => "听到了但没有回应，似乎在思考".to_string(),
-                                crate::conversation::ResponseMode::Ignore => "没有理我".to_string(),
-                                _ => "没有回应".to_string(),
-                            }
-                        )
-                    };
-                    let memory_meta = json!({
-                        "channel": "cross_character",
-                        "speaker": req.source_id,
-                        "listener": req.target_id,
-                        "perspective": "speaker",
-                        "response_mode": response_mode.as_str(),
-                    });
-                    let sid = req.source_id.clone();
-                    let tid = req.target_id.clone();
-                    let mem_for_spawn = source_memory.clone();
-                    let content_for_spawn = memory_content;
+                    // 源角色保存真实发言；非言语反馈不伪装成对话记录。
+                    let memory = source_memory.clone();
+                    let source_id = req.source_id.clone();
+                    let target_id = req.target_id.clone();
+                    let session_id = conv.id.clone();
+                    let spoken_input = req.message.clone();
+                    let spoken_reply = if response_mode.needs_speech() { Some(final_text.clone()) } else { None };
                     tokio::spawn(async move {
                         use crate::memory::types::MemoryType;
-                        if let Err(e) = mem_for_spawn
-                            .add_memory_with_metadata(
-                                &content_for_spawn,
-                                MemoryType::CasualConversation,
-                                0.45,
-                                vec![
-                                    "cross_character".to_string(),
-                                    "dialogue".to_string(),
-                                    "topic_summary".to_string(),
-                                    "short_term".to_string(),
-                                ],
-                                memory_meta,
-                            )
-                            .await
-                        {
-                            tracing::warn!(
-                                "[CrossCharacter] 源角色 {} 写入跨角色对话记忆失败: {}",
-                                sid,
-                                e
-                            );
-                        } else {
-                            tracing::debug!(
-                                "[CrossCharacter] 源角色 {} 已记录与 {} 的跨角色对话记忆",
-                                sid,
-                                tid
-                            );
+                        let mut turns = vec![(source_id.clone(), target_id.clone(), spoken_input)];
+                        if let Some(reply) = spoken_reply.filter(|text| !text.trim().is_empty()) {
+                            turns.push((target_id.clone(), source_id.clone(), reply));
+                        }
+                        for (speaker, listener, text) in turns {
+                            let metadata = json!({
+                                "channel": "cross_character", "speaker": speaker, "listener": listener,
+                                "perspective": "speaker", "content_type": "dialogue_turn",
+                                "session_id": session_id, "conversation_id": session_id,
+                            });
+                            if let Err(error) = memory.add_memory_with_metadata(
+                                &text, MemoryType::ShortTerm, 0.45,
+                                vec!["cross_character".into(), "dialogue_turn".into(), "short_term".into()],
+                                metadata,
+                            ).await {
+                                tracing::warn!("[CrossCharacter] 原始发言写入失败: {}", error);
+                            }
                         }
                     });
 

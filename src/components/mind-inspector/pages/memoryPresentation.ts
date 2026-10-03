@@ -17,7 +17,6 @@ export type PreparedMemory = {
   body: string;
   turns: MemoryTurn[];
   partner: string;
-  isDialogueSummary: boolean;
 };
 export type RecentThread = {
   id: string;
@@ -33,8 +32,10 @@ const SCAFFOLD_MARKERS = [
   '[交接上下文：', '[共同观察]', '[Natural closing]', '[Conversation rhythm]',
 ];
 
-const normalized = (text: string) => text.replace(/\s+/g, '').replace(/[，。；、！？,.!?;:：]/g, '').toLowerCase();
 const seconds = (value: number) => value > 1e12 ? value / 1000 : value;
+const dialogueTime = (item: MemoryRecord) => seconds(
+  typeof item.metadata?.spoken_at === 'number' ? item.metadata.spoken_at : item.created_at,
+);
 const speakerName = (value: string, character: Character) => {
   const key = value.trim().toLowerCase();
   if (key === 'i' || key === 'me') return character === 'vivian' ? 'Vivian' : 'Nana';
@@ -66,23 +67,19 @@ export const speechLabel = (speaker: string, audience: string, character: Charac
   return `${name} → ${target}`;
 };
 
-const parseCrossSummary = (body: string, character: Character): { turns: MemoryTurn[]; partner: string } | null => {
-  const current = character === 'vivian' ? 'Vivian' : 'Nana';
-  const source = body.match(/^我和\s*(Vivian|Nana)\s*聊了聊[：:]\s*我对她说[：:]\s*([\s\S]*?)[；;]\s*她回复我[：:]\s*([\s\S]*)$/);
-  if (source) return { partner: source[1], turns: [
-    { speaker: current, text: source[2].trim() },
-    { speaker: source[1], text: source[3].trim() },
-  ] };
-  const target = body.match(/^(Vivian|Nana)\s*和我聊天[：:]\s*她说[：:]\s*([\s\S]*?)[；;]\s*我回复她[：:]\s*([\s\S]*)$/);
-  if (target) return { partner: target[1], turns: [
-    { speaker: target[1], text: target[2].trim() },
-    { speaker: current, text: target[3].trim() },
-  ] };
-  const singleSource = body.match(/^我对\s*(Vivian|Nana)\s*说了[：:]\s*([\s\S]*?)[；;]\s*她([\s\S]*)$/);
-  if (singleSource) return { partner: singleSource[1], turns: [{ speaker: current, text: singleSource[2].trim() }] };
-  const singleTarget = body.match(/^(Vivian|Nana)\s*对我说[：:]\s*([\s\S]*?)[；;]\s*我([\s\S]*)$/);
-  if (singleTarget) return { partner: singleTarget[1], turns: [{ speaker: singleTarget[1], text: singleTarget[2].trim() }] };
-  return null;
+export const isMemorySummary = (item: MemoryRecord): boolean =>
+  item.memory_type === 'session_summary'
+  || item.tags.some((tag) => ['topic_summary', 'session_summary', 'summary'].includes(tag))
+  || ['summary', 'session_summary', 'topic_summary', 'compacted_summary'].includes(String(item.metadata?.content_type ?? ''));
+
+export const isDialogueMemory = (item: MemoryRecord): boolean => {
+  if (isMemorySummary(item) || item.metadata?.perspective === 'observer'
+    || !['short_term', 'casual_conversation'].includes(item.memory_type)
+    || item.tags.some((tag) => ['reflection', 'inner_monologue', 'current_thought'].includes(tag))) return false;
+  const speech = splitSpeechPrefix(item.content);
+  const speaker = speech.speaker || String(item.metadata?.speaker ?? '');
+  const actualSpeech = !!speech.speaker || item.tags.some((tag) => ['dialogue_turn', 'user', 'assistant'].includes(tag));
+  return actualSpeech && ['user', 'vivian', 'nana', 'i', 'me'].includes(speaker.trim().toLowerCase());
 };
 
 export const prepareMemory = (item: MemoryRecord, character: Character): PreparedMemory | null => {
@@ -91,29 +88,19 @@ export const prepareMemory = (item: MemoryRecord, character: Character): Prepare
   if (item.metadata?.speaker === 'system' || item.metadata?.system_directive === true
     || /^(?:你刚听到用户和[^\n]+的对话[:：]|You just overheard a conversation between the user and|ユーザーと[^\n]+の会話を聞いてしまった[:：])/.test(body)) return null;
   if (!body || /^(?:Treat this as context|Respond to the latest message|JSON output|输出 JSON|tags:|importance:|protected:)/i.test(body)) return null;
-  const summary = item.tags.includes('topic_summary') && item.tags.includes('cross_character')
-    ? parseCrossSummary(body, character) : null;
   const metaSpeaker = typeof item.metadata?.speaker === 'string' ? item.metadata.speaker : '';
   const metaAudience = typeof item.metadata?.listener === 'string' ? item.metadata.listener : '';
   const speaker = speech.speaker || (item.tags.includes('topic_summary') ? '' : metaSpeaker);
-  const turns = summary?.turns ?? [{ speaker: speaker ? speakerName(speaker, character) : '', audience: speech.audience || metaAudience, text: body }];
-  const partner = summary?.partner ?? (String(item.metadata?.channel ?? '') === 'cross_character'
-    ? speakerName(metaSpeaker.toLowerCase() === character ? metaAudience : metaSpeaker, character) : '');
-  return { item, body, turns: turns.filter((turn) => turn.text), partner, isDialogueSummary: !!summary };
+  const turns = [{ speaker: speaker ? speakerName(speaker, character) : '', audience: speech.audience || metaAudience, text: body }];
+  const partner = (String(item.metadata?.channel ?? '') === 'cross_character'
+    ? speakerName(speakerName(speaker, character).toLowerCase() === character ? (speech.audience || metaAudience) : speaker, character) : '');
+  return { item, body, turns: turns.filter((turn) => turn.text), partner };
 };
 
-const near = (a: MemoryRecord, b: MemoryRecord) => Math.abs(seconds(a.created_at) - seconds(b.created_at)) <= 180;
-
 export const buildRecentThreads = (items: MemoryRecord[], character: Character): RecentThread[] => {
-  const prepared = items.map((item) => prepareMemory(item, character)).filter((item): item is PreparedMemory => !!item && item.turns.length > 0);
-  const summaries = prepared.filter((entry) => entry.isDialogueSummary);
-  const curated = prepared.filter((entry) => {
-    if (entry.isDialogueSummary || entry.item.metadata?.channel !== 'cross_character') return true;
-    const text = normalized(entry.body);
-    return !summaries.some((summary) => near(entry.item, summary.item)
-      && summary.turns.some((turn) => normalized(turn.text) === text));
-  });
-  curated.sort((a, b) => seconds(a.item.created_at) - seconds(b.item.created_at));
+  const curated = items.filter(isDialogueMemory).map((item) => prepareMemory(item, character))
+    .filter((item): item is PreparedMemory => !!item && item.turns.length > 0);
+  curated.sort((a, b) => dialogueTime(a.item) - dialogueTime(b.item));
 
   const threads: Array<RecentThread & { key: string; lastTime: number }> = [];
   const sessions = new Map<string, typeof threads[number]>();
@@ -123,7 +110,7 @@ export const buildRecentThreads = (items: MemoryRecord[], character: Character):
     const sessionId = typeof session === 'string' ? session.trim() : '';
     // direct/wechat/proactive are entry points into the same user conversation.
     const key = sessionId ? `session:${sessionId}` : entry.partner ? `cross:${entry.partner}` : 'user';
-    const time = seconds(entry.item.created_at);
+    const time = dialogueTime(entry.item);
     const last = sessionId ? sessions.get(sessionId) : threads[threads.length - 1];
     const canJoin = !!last && last.key === key && (sessionId || time - last.lastTime <= 1800)
       && (sessionId || entry.turns.every((turn) => turn.speaker));
@@ -131,15 +118,11 @@ export const buildRecentThreads = (items: MemoryRecord[], character: Character):
     if (canJoin) {
       last.items.push(entry.item);
       last.lastTime = time;
-      last.time = Math.max(last.time, entry.item.created_at);
-      for (const turn of entry.turns) {
-        const signature = normalized(turn.text);
-        // Only collapse duplicated summary evidence; repeated real utterances are legitimate.
-        if (!entry.isDialogueSummary || signature.length < 6 || !last.turns.some((existing) => existing.speaker === turn.speaker && normalized(existing.text) === signature)) last.turns.push(turn);
-      }
+      last.time = Math.max(last.time, time);
+      last.turns.push(...entry.turns);
       last.searchText = last.turns.map((turn) => turn.text).join(' ');
     } else {
-      threads.push({ id: entry.item.id, title, time: entry.item.created_at, turns: [...entry.turns], items: [entry.item], searchText: entry.turns.map((turn) => turn.text).join(' '), key, lastTime: time });
+      threads.push({ id: entry.item.id, title, time, turns: [...entry.turns], items: [entry.item], searchText: entry.turns.map((turn) => turn.text).join(' '), key, lastTime: time });
       if (sessionId) sessions.set(sessionId, threads[threads.length - 1]);
     }
   }

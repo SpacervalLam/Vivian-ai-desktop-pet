@@ -852,9 +852,12 @@ impl Brain {
         // 独立后处理：写入对话历史 + 记忆系统 + 纳入主动问候冷却
         if let Some(greeting) = greeting_text {
             *self.last_greeting_error.lock().await = None;
+            let session = crate::conversation::CONVERSATION_MANAGER
+                .start_or_continue("user", &self.char_id, &greeting)
+                .unwrap_or_else(|| crate::conversation::CONVERSATION_MANAGER.force_new_session("user", &self.char_id, &greeting));
             let mut greeting_msg = ChatMessage::assistant(greeting.as_str());
             greeting_msg.meta = Some(crate::messages::MessageMeta::assistant().with_channel("proactive"));
-            self.dialogue.add_message(greeting_msg);
+            self.dialogue.add_message_with_metadata(greeting_msg, serde_json::json!({ "session_id": session.id }));
             // 写入记忆系统（role 通过 tags 标记，记忆管理面板可显示）
             let tags = vec![
                 "assistant".to_string(),
@@ -867,6 +870,8 @@ impl Brain {
                 "listener": "user",
                 "perspective": "speaker",
                 "knowledge_source": "direct",
+                "session_id": session.id,
+                "conversation_id": session.id,
             });
             // 与主对话统一格式：给裸问候补上说话者前缀（如 "[I say to User]"）。
             // 前端/对话历史展示的是剥离前缀后的原始问候，仅记忆入库时带前缀统一格式。
