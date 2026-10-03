@@ -41,20 +41,54 @@ pub struct UserProfileView {
 
 /// 获取指定角色的用户画像
 #[tauri::command]
-pub fn get_user_facts(
+pub async fn get_user_facts(
     state: State<'_, Arc<AppState>>,
     character_id: String,
 ) -> Result<UserProfileView, String> {
-    let characters = state.characters.read();
-    let instance = characters
-        .get(&character_id)
-        .ok_or_else(|| format!("角色不存在: {character_id}"))?;
-    let chat_chain = instance
-        .brain
+    let brain = {
+        let characters = state.characters.read();
+        characters.get(&character_id).ok_or_else(|| format!("角色不存在: {character_id}"))?.brain.clone()
+    };
+    let chat_chain = brain
         .chat_chain
         .as_ref()
         .ok_or_else(|| "ChatChain 未初始化".to_string())?;
     let store = &chat_chain.user_facts;
+
+    // 补全自动画像停用期间漏记的资料；只读取真实用户原话，不读取角色总结。
+    if store.needs_identity_recovery() {
+        if let Ok(mut memories) = brain.memory.get_all_memories().await {
+            memories.sort_by(|a, b| a.timestamp.total_cmp(&b.timestamp));
+            let raw_turns: Vec<String> = memories.into_iter().filter(|item| {
+                matches!(item.memory_type.as_str(), "short_term" | "casual_conversation")
+                    && item.tags.iter().any(|tag| tag == "dialogue_turn" || tag == "user")
+                    && !item.tags.iter().any(|tag| tag == "topic_summary" || tag == "session_summary")
+                    && item.metadata.get("speaker").and_then(serde_json::Value::as_str) == Some("user")
+                    && !item.metadata.get("system_directive").and_then(serde_json::Value::as_bool).unwrap_or(false)
+                    && !item.content.contains("现在你想插话")
+            }).map(|item| {
+                crate::cross_character::parse_any_speaker_prefix(&item.content).0
+            }).collect();
+            // 优先保留自我介绍，避免名字在最近几十轮之外时再次被遗漏。
+            let mut remaining = 8000usize;
+            let mut seen = std::collections::HashSet::new();
+            let mut selected: Vec<(usize, String)> = raw_turns.iter().enumerate().rev().filter(|(_, text)| {
+                ["我叫", "我是", "名字", "叫我", "my name", "call me", "I'm", "名前"]
+                    .iter().any(|cue| text.contains(cue))
+            }).chain(raw_turns.iter().enumerate().rev().take(20)).filter_map(|(index, text)| {
+                if !seen.insert(index) { return None; }
+                let length = text.chars().count();
+                if length > remaining { return None; }
+                remaining -= length;
+                Some((index, text.clone()))
+            }).take(40).collect();
+            selected.sort_by_key(|(index, _)| *index);
+            let turns: Vec<String> = selected.into_iter().map(|(_, text)| text).collect();
+            if let Err(error) = store.recover_from_user_turns(&turns).await {
+                tracing::warn!("[UserFacts] 历史用户资料补全失败: {}", error);
+            }
+        }
+    }
 
     let (basic_data, custom_facts) = store.get_all_facts();
     let recent_state = store.get_recent_state();

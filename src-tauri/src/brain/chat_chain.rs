@@ -1098,6 +1098,24 @@ Choose the appropriate expression and motion. Leave empty if nothing fits.",
             .execute_pipeline_and_build_response(state, stream, user_input)
             .await?;
 
+        // 画像直接消费真实用户原话，不等待批量长期记忆抽取或会话压缩。
+        let (fact_input, speaker, _) = self.parse_speaker_prefix(user_input);
+        if !skip_dialogue_write && !final_state.is_command && speaker == "user"
+            && !final_state.metadata.get("skip_memory_save").and_then(serde_json::Value::as_bool).unwrap_or(false) {
+            let facts = self.user_facts.clone();
+            let memory = self.memory.clone();
+            let reply = MemorySavingRunnable::strip_json_if_any(&response.text);
+            let source_id = final_state.metadata.get("growth_source_memory_id")
+                .and_then(serde_json::Value::as_str).map(str::to_string);
+            tokio::spawn(async move {
+                match facts.extract_and_upsert(&fact_input, &reply, source_id.as_deref()).await {
+                    Ok(updated) if !updated.is_empty() => memory.notify_user_facts_updated(),
+                    Ok(_) => {},
+                    Err(error) => tracing::warn!("[UserFacts] 自动画像更新失败: {}", error),
+                }
+            });
+        }
+
         // ── Working Memory：推入本轮对话摘要 ──
         // 蒸馏为 ≤80 字短摘要，让 LLM 下一轮感知"最近几轮在聊什么"。
         // 跨角色对话也推入，但用不同 source 标签（AiReply / UserMessage）。
@@ -1514,7 +1532,7 @@ Choose the appropriate expression and motion. Leave empty if nothing fits.",
             );
         }
 
-        // 自动事实只由 AutoExtractor 写入长期记忆；用户事实卡保留手工编辑。
+        // 结构化画像在主流程独立更新；AutoExtractor 继续负责长期记忆。
         let clean_ai_text = MemorySavingRunnable::strip_json_if_any(&response.text);
 
         // 2.5.5 用户认知模型：强证据检测与弱证据积累

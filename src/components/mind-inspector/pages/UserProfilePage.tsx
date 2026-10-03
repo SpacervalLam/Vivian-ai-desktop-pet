@@ -18,6 +18,7 @@ import React, { Fragment, useCallback, useEffect, useMemo, useRef, useState } fr
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import {
   Lock,
   LockOpen,
@@ -1293,6 +1294,17 @@ const UserProfilePage: React.FC<{ characterId?: CharacterId; embedded?: boolean 
   useEffect(() => {
     setProfile(null);
     loadProfile(character);
+  }, [character, loadProfile]);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listen<{ character_id: string }>('user-facts:updated', ({ payload }) => {
+      if (payload.character_id === character) loadProfile(character);
+    }).then((cleanup) => {
+      if (disposed) cleanup(); else unlisten = cleanup;
+    }).catch(() => {});
+    return () => { disposed = true; unlisten?.(); };
   }, [character, loadProfile]);
 
   // === 编辑操作 ===

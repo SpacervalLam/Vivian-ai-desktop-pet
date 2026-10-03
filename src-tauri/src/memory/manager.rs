@@ -571,6 +571,12 @@ impl MemoryManager {
         }
     }
 
+    pub fn notify_user_facts_updated(&self) {
+        if let Some(handle) = self.app_handle.lock().as_ref() {
+            let _ = handle.emit("user-facts:updated", serde_json::json!({ "character_id": self.char_id }));
+        }
+    }
+
     /// 暴露知识图谱引用（供检索策略和外部命令使用）
     pub fn knowledge_graph(&self) -> &Arc<KnowledgeGraph> {
         &self.knowledge_graph
