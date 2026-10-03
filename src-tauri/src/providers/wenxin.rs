@@ -116,13 +116,7 @@ impl WenxinProvider {
             .map_err(|e| VivianError::Provider(format!("文心 access_token 请求失败: {}", e)))?;
 
         if !response.status().is_success() {
-            let text = response.text().await.unwrap_or_default();
-            // Mask 错误响应体，避免泄露完整 URL（含 access_token）或其他敏感信息到日志
-            let masked = truncate_for_log(&text, 100);
-            return Err(VivianError::Provider(format!(
-                "文心 OAuth 失败: {}",
-                masked
-            )));
+            return Err(crate::providers::transport::http_error(response).await);
         }
 
         let json: Value = response
@@ -166,9 +160,7 @@ impl WenxinProvider {
         messages
             .iter()
             .filter(|m| m.role != "system")
-            .map(|m| {
-                json!({"role": m.role, "content": m.content})
-            })
+            .map(|m| json!({"role": m.role, "content": m.content}))
             .collect()
     }
 
@@ -220,13 +212,8 @@ impl WenxinProvider {
                 VivianError::Provider(format!("文心 API 请求失败: {}", msg))
             })?;
 
-        let status = response.status();
-        if !status.is_success() {
-            let text = response.text().await.unwrap_or_default();
-            return Err(VivianError::Provider(format!(
-                "文心 API 请求失败 ({}): {}",
-                status, text
-            )));
+        if !response.status().is_success() {
+            return Err(crate::providers::transport::http_error(response).await);
         }
         let json: Value = response.json().await?;
         Ok(json)
@@ -254,13 +241,20 @@ impl WenxinProvider {
 
 #[async_trait]
 impl BaseProvider for WenxinProvider {
-    fn set_request_customization(&self, customization: crate::providers::reasoning_profiles::RequestCustomization) {
+    fn set_request_customization(
+        &self,
+        customization: crate::providers::reasoning_profiles::RequestCustomization,
+    ) {
         *self.base.request_customization.write() = customization;
     }
 
     fn set_request_parameters(&self, temperature: bool, max_tokens: bool) {
-        self.base.send_temperature.store(temperature, std::sync::atomic::Ordering::Relaxed);
-        self.base.send_max_tokens.store(max_tokens, std::sync::atomic::Ordering::Relaxed);
+        self.base
+            .send_temperature
+            .store(temperature, std::sync::atomic::Ordering::Relaxed);
+        self.base
+            .send_max_tokens
+            .store(max_tokens, std::sync::atomic::Ordering::Relaxed);
     }
 
     async fn call_chat(&self, messages: Vec<ChatMessage>) -> VivianResult<String> {
@@ -269,11 +263,14 @@ impl BaseProvider for WenxinProvider {
             return Ok(cached);
         }
         let body = self.build_body(&messages);
-        self.base.check_circuit()?;
-        let json = self.send_request(&body).await?;
-        crate::providers::base::record_response_usage(&self.base.model, &json);
-        self.base.record_success();
-        let content = Self::extract_content(&json)?;
+        let content = crate::providers::transport::with_retry(&self.base, || async {
+            let json = self.send_request(&body).await?;
+            crate::providers::transport::validate_json(&json)?;
+            let content = Self::extract_content(&json)?;
+            crate::providers::base::record_response_usage(&self.base.model, &json);
+            Ok(content)
+        })
+        .await?;
         self.base.cache_response(&prompt_key, &content);
         Ok(content)
     }
@@ -294,11 +291,14 @@ impl BaseProvider for WenxinProvider {
             body["enable_search"] = json!(true);
             tracing::info!("[Router] 文心百度搜索增强已启用: model={}", self.base.model);
         }
-        self.base.check_circuit()?;
-        let json = self.send_request(&body).await?;
-        crate::providers::base::record_response_usage(&self.base.model, &json);
-        self.base.record_success();
-        let content = Self::extract_content(&json)?;
+        let content = crate::providers::transport::with_retry(&self.base, || async {
+            let json = self.send_request(&body).await?;
+            crate::providers::transport::validate_json(&json)?;
+            let content = Self::extract_content(&json)?;
+            crate::providers::base::record_response_usage(&self.base.model, &json);
+            Ok(content)
+        })
+        .await?;
         self.base.cache_response(&prompt_key, &content);
         Ok(content)
     }
@@ -310,7 +310,7 @@ impl BaseProvider for WenxinProvider {
     ) -> VivianResult<mpsc::Receiver<StreamEvent>> {
         // 文心流式接口：URL 改为 /wenxinworkshop/chat/{model}?access_token=xxx&stream=true
         // body 加 stream: true；响应为 SSE，data: 行为 JSON
-        self.base.check_circuit()?;
+        let guard = crate::providers::transport::RequestGuard::begin(&self.base)?;
         let token = self.get_access_token().await?;
         let url = self.chat_endpoint(&token) + "&stream=true";
         let mut body = self.build_body(&messages);
@@ -322,33 +322,25 @@ impl BaseProvider for WenxinProvider {
             .header("content-type", "application/json")
             .json(&self.base.finalize_body(body.clone()))
             .send()
-            .await
-            .map_err(|e| {
-                // reqwest 错误 Display 含完整 URL（含 access_token），mask 后再写入错误消息
-                let msg = e.to_string().replace(&token, "***");
-                VivianError::Network(format!("文心流式 API 请求失败: {}", msg))
-            })?;
-
-        if !response.status().is_success() {
-            self.base.record_failure();
-            let status = response.status();
-            let text = response.text().await.unwrap_or_default();
-            return Err(VivianError::Provider(format!(
-                "文心流式 API 请求失败 ({}): {}",
-                status, text
-            )));
-        }
-        self.base.record_success();
+            .await;
+        let (response, guard) = guard.response(response).await?;
 
         let (tx, rx) = mpsc::channel::<StreamEvent>(32);
         tokio::spawn(async move {
-            let mut stream = response.bytes_stream();
+            let mut stream = crate::providers::sse::normalize_sse_until_closed(
+                response.bytes_stream(),
+                tx.clone(),
+            );
             let mut buffer = String::new();
             while let Some(chunk_result) = stream.next().await {
                 let chunk = match chunk_result {
                     Ok(c) => c,
                     Err(e) => {
-                        let _ = tx.send(StreamEvent::Error { message: e.to_string() }).await;
+                        let _ = tx
+                            .send(StreamEvent::Error {
+                                message: e.to_string(),
+                            })
+                            .await;
                         return;
                     }
                 };
@@ -371,7 +363,13 @@ impl BaseProvider for WenxinProvider {
                             // 文心流式响应：{"result":"...","is_end":false,...}
                             if let Some(text) = json.get("result").and_then(|t| t.as_str()) {
                                 if !text.is_empty() {
-                                    if tx.send(StreamEvent::Text { content: text.to_string() }).await.is_err() {
+                                    if tx
+                                        .send(StreamEvent::Text {
+                                            content: text.to_string(),
+                                        })
+                                        .await
+                                        .is_err()
+                                    {
                                         return;
                                     }
                                 }
@@ -381,11 +379,15 @@ impl BaseProvider for WenxinProvider {
                 }
             }
         });
-        Ok(rx)
+        Ok(crate::providers::transport::track_stream(rx, guard))
     }
 
     fn get_model(&self) -> &str {
         &self.base.model
+    }
+
+    fn get_endpoint(&self) -> &str {
+        &self.base.base_url
     }
 
     fn provider_identity(&self) -> String {

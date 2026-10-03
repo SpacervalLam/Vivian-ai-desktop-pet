@@ -11,6 +11,7 @@ pub mod commands;
 pub mod config;
 pub mod stickers;
 pub mod conversation;
+pub mod dialogue_lab;
 pub mod cordis;
 pub mod credentials;
 pub mod cross_character;
@@ -36,6 +37,7 @@ pub mod self_state;
 pub mod pet_controller;
 pub mod pipeline;
 pub mod plugins;
+pub mod plugin_contributions;
 pub mod presence;
 pub mod proactive;
 pub mod providers;
@@ -313,6 +315,12 @@ pub fn run() {
             commands::mind::get_memory_health,
             commands::mind_inspector::get_recent_reasoning_traces,
             commands::mind_inspector::get_last_prompt_breakdown,
+            commands::dialogue_lab::list_dialogue_lab,
+            commands::dialogue_lab::get_dialogue_lab,
+            commands::dialogue_lab::create_dialogue_lab,
+            commands::dialogue_lab::fork_dialogue_lab,
+            commands::dialogue_lab::run_dialogue_lab,
+            commands::dialogue_lab::delete_dialogue_lab,
             commands::mind_inspector::get_prompt_template_preview,
             commands::mind_inspector::get_sessions,
             commands::mind_inspector::get_prompt_section_schema,
@@ -564,6 +572,7 @@ pub fn run() {
             commands::proactive::start_proactive,
             commands::proactive::stop_proactive,
             commands::proactive::proactive_tick,
+            commands::proactive::proactive_heartbeat,
             commands::proactive::drain_proactive_messages,
             commands::proactive::mark_proactive_ignored,
             commands::proactive::update_proactive_config,
@@ -618,6 +627,7 @@ pub fn run() {
             commands::config::get_work_models,
             commands::config::select_work_model,
             commands::config::clear_work_model,
+            commands::todo::acknowledge_reminder_delivery,
             commands::todo::list_todos,
             commands::todo::add_todo_item,
             commands::todo::update_todo_item,

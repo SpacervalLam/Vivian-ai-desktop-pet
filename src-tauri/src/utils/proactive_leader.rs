@@ -82,6 +82,10 @@ impl ProactiveLeaderCoordinator {
         is_present: bool,
         is_active: bool,
     ) -> bool {
+        if !is_online || !is_present {
+            self.resign(char_id);
+            return false;
+        }
         let my_priority = Self::compute_priority(char_id, is_online, is_present, is_active);
         let now = Instant::now();
         let mut current = self.inner.current.write();
@@ -166,7 +170,11 @@ impl ProactiveLeaderCoordinator {
 
     /// 查询当前 leader
     pub fn current_leader(&self) -> Option<String> {
-        self.inner.current.read().as_ref().map(|s| s.leader_id.clone())
+        self.inner
+            .current
+            .read()
+            .as_ref()
+            .map(|s| s.leader_id.clone())
     }
 
     /// 查询当前 leader 心跳年龄
@@ -190,5 +198,29 @@ impl ProactiveLeaderCoordinator {
 impl Default for ProactiveLeaderCoordinator {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn unavailable_characters_cannot_hold_a_lease() {
+        let coordinator = ProactiveLeaderCoordinator::new();
+        assert!(!coordinator.try_acquire_or_renew("vivian", true, false, true));
+        assert_eq!(coordinator.current_leader(), None);
+        assert!(coordinator.try_acquire_or_renew("nana", true, true, true));
+        assert!(!coordinator.try_acquire_or_renew("nana", false, true, true));
+        assert_eq!(coordinator.current_leader(), None);
+    }
+    #[test]
+    fn regular_heartbeats_keep_the_term_stable() {
+        let coordinator = ProactiveLeaderCoordinator::new();
+        assert!(coordinator.try_acquire_or_renew("nana", true, true, true));
+        for _ in 0..10 {
+            assert!(coordinator.try_acquire_or_renew("nana", true, true, true));
+            assert!(!coordinator.try_acquire_or_renew("vivian", true, true, false));
+        }
+        assert_eq!(coordinator.inner.current.read().as_ref().unwrap().term, 1);
     }
 }

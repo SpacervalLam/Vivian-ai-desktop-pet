@@ -138,7 +138,17 @@ const MemoryWindow: React.FC = () => {
     const t = window.setTimeout(() => {
       if (root.style.opacity === '0') {
         root.style.opacity = '';
-        void getCurrentWindow().show().catch(() => {});
+        void (async () => {
+          const win = getCurrentWindow();
+          await win.show().catch(() => {});
+          // show 是即发即忘的，不等影子标志落定，setFocus 会被 tao 静默跳过，
+          // 窗口就会停在 Z 序后排（看得见、点不到前面）
+          for (let i = 0; i < 12; i++) {
+            if (await isWindowOnScreen(win).catch(() => false)) break;
+            await new Promise((resolve) => window.setTimeout(resolve, 10));
+          }
+          await win.setFocus().catch(() => {});
+        })();
       }
     }, 1200);
     return () => window.clearTimeout(t);

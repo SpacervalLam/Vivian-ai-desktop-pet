@@ -24,8 +24,7 @@
 //! Responses API 当 Stateless 接口用。
 
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -40,12 +39,8 @@ use crate::providers::base::{
     ProviderCallOptions, StreamEvent, StructuredToolCall, ToolDefinition,
 };
 use crate::providers::thinking_stripper::{strip_thinking_segments, ThinkingStreamStripper};
-use crate::resilience::{classify_error, ErrorCategory};
 use crate::types::response::ChatMessage;
 
-const MAX_RETRIES: usize = 2;
-const INITIAL_BACKOFF: Duration = Duration::from_millis(500);
-const LARGE_PROMPT_BYTES: usize = 20_000;
 const CONNECT_TIMEOUT_SECS: u64 = 10;
 
 /// OpenAI 官方 Responses API Provider
@@ -54,6 +49,51 @@ pub struct OpenAiResponsesProvider {
     tools: Vec<ToolDefinition>,
     instructions: Option<String>,
     client: Option<reqwest::Client>,
+}
+
+#[cfg(test)]
+mod request_search_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn request_scoped_search_is_wired_without_replacing_function_tools() {
+        let provider = OpenAiResponsesProvider::new(
+            &crate::config::manager::ProviderConfig {
+                base_url: "https://example.test/v1".into(),
+                api_key: "test-key".into(),
+                model: "test-model".into(),
+            },
+            0.7,
+            100,
+            None,
+            None,
+        );
+        assert!(provider
+            .build_request_body(vec![], &None)
+            .get("tools")
+            .is_none());
+        scope_provider_call(
+            ProviderCallOptions {
+                enable_search: Some(true),
+                ..Default::default()
+            },
+            async {
+                let mut body = provider.build_request_body(vec![], &None);
+                crate::providers::web_citations::append_tools(
+                    &mut body,
+                    &json!([{"type":"function","name":"read_file","parameters":{"type":"object"}}]),
+                );
+                assert_eq!(body["tools"][0]["type"], "web_search");
+                assert_eq!(body["tools"][1]["name"], "read_file");
+                assert_eq!(body["include"], json!(["web_search_call.action.sources"]));
+            },
+        )
+        .await;
+        assert!(provider
+            .build_request_body(vec![], &None)
+            .get("tools")
+            .is_none());
+    }
 }
 
 impl OpenAiResponsesProvider {
@@ -89,12 +129,7 @@ impl OpenAiResponsesProvider {
     }
 
     fn endpoint(&self) -> String {
-        let url = self.base.base_url.trim_end_matches('/');
-        if url.ends_with("/responses") {
-            url.to_string()
-        } else {
-            format!("{}/responses", url)
-        }
+        crate::providers::transport::api_endpoint(&self.base.base_url, "responses", None)
     }
 
     fn get_client(&self) -> reqwest::Client {
@@ -115,8 +150,8 @@ impl OpenAiResponsesProvider {
                     }
                     if let Some(tcs) = &m.tool_calls {
                         for tc in tcs {
-                            let args_str =
-                                serde_json::to_string(&tc.arguments).unwrap_or_else(|_| "{}".into());
+                            let args_str = serde_json::to_string(&tc.arguments)
+                                .unwrap_or_else(|_| "{}".into());
                             input.push(json!({
                                 "type": "function_call",
                                 "call_id": tc.id,
@@ -183,15 +218,28 @@ impl OpenAiResponsesProvider {
         Some(Value::Array(arr))
     }
 
+    /// 按需注入 OpenAI Responses API 的原生联网搜索字段。
+    ///
+    /// 所有文本/工具、流式/非流式请求都经由 build_request_body；
+    /// 追加搜索工具后，外部函数工具仍由 append_tools 合并。
     fn inject_search_fields(&self, body: &mut Value) {
         if self.base.is_enable_search() {
-            if !body["tools"].is_array() { body["tools"] = json!([]); }
-            body["tools"].as_array_mut().expect("array").push(json!({"type":"web_search"}));
+            if !body["tools"].is_array() {
+                body["tools"] = json!([]);
+            }
+            body["tools"]
+                .as_array_mut()
+                .expect("array")
+                .push(json!({"type":"web_search"}));
             body["include"] = json!(["web_search_call.action.sources"]);
         }
     }
 
-    fn build_request_body(&self, input: Vec<Value>, json_schema: &Option<serde_json::Value>) -> Value {
+    fn build_request_body(
+        &self,
+        input: Vec<Value>,
+        json_schema: &Option<serde_json::Value>,
+    ) -> Value {
         let mut body = json!({
             "model": self.base.model,
             "input": input,
@@ -200,7 +248,9 @@ impl OpenAiResponsesProvider {
         });
         // 工作智能体模式：省略 temperature（服务端默认）
         self.base.strip_temperature(&mut body);
-        if let Some(instructions) = &crate::providers::base::effective_instructions(&self.instructions) {
+        if let Some(instructions) =
+            &crate::providers::base::effective_instructions(&self.instructions)
+        {
             body["instructions"] = json!(instructions);
         }
         // Structured Outputs: 把 schema 注入 text.format
@@ -215,13 +265,7 @@ impl OpenAiResponsesProvider {
                 }
             });
         }
-        let capability =
-            crate::providers::reasoning::resolve_reasoning_capability(&self.base.model);
-        crate::providers::reasoning::apply_responses_reasoning(
-            &mut body,
-            self.base.effective_reasoning(),
-            &capability,
-        );
+        // Reasoning fields are applied once by the final request adapter.
         self.inject_search_fields(&mut body);
         body
     }
@@ -267,13 +311,8 @@ impl OpenAiResponsesProvider {
             }
         };
 
-        let status = response.status();
-        if !status.is_success() {
-            let text = response.text().await.unwrap_or_default();
-            return Err(VivianError::Provider(format!(
-                "Responses API 请求失败 ({}): {}",
-                status, text
-            )));
+        if !response.status().is_success() {
+            return Err(crate::providers::transport::http_error(response).await);
         }
 
         response
@@ -283,49 +322,12 @@ impl OpenAiResponsesProvider {
     }
 
     async fn call_with_retry(&self, body: Value) -> VivianResult<Value> {
-        let body_size = body.to_string().len();
-        let bypass_circuit_failure = body_size > LARGE_PROMPT_BYTES;
-        if bypass_circuit_failure {
-            tracing::warn!(
-                "[OpenAiResponses] {} 大 prompt 检测 ({} bytes)，失败时跳过熔断器记录",
-                self.base.model,
-                body_size
-            );
-        }
-
-        let mut last_error: Option<VivianError> = None;
-        let mut backoff = INITIAL_BACKOFF;
-
-        for attempt in 0..=MAX_RETRIES {
-            if attempt > 0 {
-                tracing::warn!("[OpenAiResponses] 第 {} 次重试: {}", attempt, self.base.model);
-                tokio::time::sleep(backoff).await;
-                backoff *= 2;
-            }
-
-            self.base.check_circuit()?;
-            match self.send_request(body.clone()).await {
-                Ok(json) => {
-                    self.base.record_success();
-                    return Ok(json);
-                }
-                Err(err) => {
-                    if !bypass_circuit_failure {
-                        self.base.record_failure();
-                    }
-                    let category = classify_error(&err);
-                    match category {
-                        ErrorCategory::Permanent => return Err(err),
-                        ErrorCategory::Transient | ErrorCategory::RateLimit => {
-                            last_error = Some(err);
-                            continue;
-                        }
-                    }
-                }
-            }
-        }
-
-        Err(last_error.unwrap_or_else(|| VivianError::Provider("重试次数耗尽".to_string())))
+        crate::providers::transport::with_retry(&self.base, || async {
+            let json = self.send_request(body.clone()).await?;
+            crate::providers::transport::validate_json(&json)?;
+            Ok(json)
+        })
+        .await
     }
 
     fn extract_responses_response(json: &Value) -> VivianResult<ChatResponse> {
@@ -403,7 +405,10 @@ impl OpenAiResponsesProvider {
             Some(reasoning_parts.join(""))
         };
 
-        let content = crate::providers::web_citations::attach(&content, &crate::providers::web_citations::sources(json));
+        let content = crate::providers::web_citations::attach(
+            &content,
+            &crate::providers::web_citations::sources(json),
+        );
         Ok(ChatResponse {
             content,
             tool_calls,
@@ -421,13 +426,20 @@ impl OpenAiResponsesProvider {
 
 #[async_trait]
 impl BaseProvider for OpenAiResponsesProvider {
-    fn set_request_customization(&self, customization: crate::providers::reasoning_profiles::RequestCustomization) {
+    fn set_request_customization(
+        &self,
+        customization: crate::providers::reasoning_profiles::RequestCustomization,
+    ) {
         *self.base.request_customization.write() = customization;
     }
 
     fn set_request_parameters(&self, temperature: bool, max_tokens: bool) {
-        self.base.send_temperature.store(temperature, std::sync::atomic::Ordering::Relaxed);
-        self.base.send_max_tokens.store(max_tokens, std::sync::atomic::Ordering::Relaxed);
+        self.base
+            .send_temperature
+            .store(temperature, std::sync::atomic::Ordering::Relaxed);
+        self.base
+            .send_max_tokens
+            .store(max_tokens, std::sync::atomic::Ordering::Relaxed);
     }
 
     async fn call_chat(&self, messages: Vec<ChatMessage>) -> VivianResult<String> {
@@ -452,7 +464,7 @@ impl BaseProvider for OpenAiResponsesProvider {
         let mut body = self.build_request_body(input, &json_schema);
         body["stream"] = json!(true);
 
-        self.base.check_circuit()?;
+        let guard = crate::providers::transport::RequestGuard::begin(&self.base)?;
         let client = self.get_client();
         let response = client
             .post(&self.endpoint())
@@ -460,24 +472,16 @@ impl BaseProvider for OpenAiResponsesProvider {
             .header("OpenAI-Beta", "responses=1")
             .json(&self.base.finalize_body(body.clone()))
             .send()
-            .await
-            .map_err(|e| VivianError::Provider(format!("流式请求失败: {}", e)))?;
-
-        if !response.status().is_success() {
-            self.base.record_failure();
-            let status = response.status();
-            let text = response.text().await.unwrap_or_default();
-            return Err(VivianError::Provider(format!(
-                "Responses API 流式请求失败 ({}): {}",
-                status, text
-            )));
-        }
-        self.base.record_success();
+            .await;
+        let (response, guard) = guard.response(response).await?;
 
         let (tx, rx) = mpsc::channel::<StreamEvent>(64);
 
         tokio::spawn(async move {
-            let mut stream = response.bytes_stream();
+            let mut stream = crate::providers::sse::normalize_sse_until_closed(
+                response.bytes_stream(),
+                tx.clone(),
+            );
             let mut buffer = String::new();
             let mut stripper = ThinkingStreamStripper::new();
 
@@ -485,7 +489,11 @@ impl BaseProvider for OpenAiResponsesProvider {
                 let chunk = match chunk_result {
                     Ok(c) => c,
                     Err(e) => {
-                        let _ = tx.send(StreamEvent::Error { message: e.to_string() }).await;
+                        let _ = tx
+                            .send(StreamEvent::Error {
+                                message: e.to_string(),
+                            })
+                            .await;
                         return;
                     }
                 };
@@ -508,7 +516,9 @@ impl BaseProvider for OpenAiResponsesProvider {
                         }
                         if let Ok(json_val) = serde_json::from_str::<Value>(data) {
                             let sources = crate::providers::web_citations::sources(&json_val);
-                            if !sources.is_empty() { let _ = tx.send(StreamEvent::WebSources { sources }).await; }
+                            if !sources.is_empty() {
+                                let _ = tx.send(StreamEvent::WebSources { sources }).await;
+                            }
                             if let Some(usage) = parse_stream_usage(&json_val["response"]["usage"])
                             {
                                 let _ = tx.send(usage).await;
@@ -519,7 +529,11 @@ impl BaseProvider for OpenAiResponsesProvider {
                                     if let Some(delta) = json_val["delta"].as_str() {
                                         let out = stripper.feed(delta);
                                         if !out.is_empty() {
-                                            if tx.send(StreamEvent::Text { content: out }).await.is_err() {
+                                            if tx
+                                                .send(StreamEvent::Text { content: out })
+                                                .await
+                                                .is_err()
+                                            {
                                                 return;
                                             }
                                         }
@@ -528,7 +542,8 @@ impl BaseProvider for OpenAiResponsesProvider {
                                 "response.completed" => {
                                     let residual = stripper.flush();
                                     if !residual.is_empty() {
-                                        let _ = tx.send(StreamEvent::Text { content: residual }).await;
+                                        let _ =
+                                            tx.send(StreamEvent::Text { content: residual }).await;
                                     }
                                     return;
                                 }
@@ -536,7 +551,11 @@ impl BaseProvider for OpenAiResponsesProvider {
                                     let msg = json_val["response"]["error"]["message"]
                                         .as_str()
                                         .unwrap_or("Responses API 流式失败");
-                                    let _ = tx.send(StreamEvent::Error { message: msg.to_string() }).await;
+                                    let _ = tx
+                                        .send(StreamEvent::Error {
+                                            message: msg.to_string(),
+                                        })
+                                        .await;
                                     return;
                                 }
                                 _ => {}
@@ -551,15 +570,22 @@ impl BaseProvider for OpenAiResponsesProvider {
             }
         });
 
-        Ok(rx)
+        Ok(crate::providers::transport::track_stream(rx, guard))
     }
 
     fn get_model(&self) -> &str {
         &self.base.model
     }
 
+    fn get_endpoint(&self) -> &str {
+        &self.base.base_url
+    }
+
     fn provider_identity(&self) -> String {
-        format!("openai_responses:{}@{}", self.base.model, self.base.base_url)
+        format!(
+            "openai_responses:{}@{}",
+            self.base.model, self.base.base_url
+        )
     }
 
     fn get_circuit_breaker_stats(&self) -> Value {
@@ -597,25 +623,7 @@ impl BaseProvider for OpenAiResponsesProvider {
 
     fn bind_tools(&self, tools: Vec<ToolDefinition>) -> VivianResult<Box<dyn BaseProvider>> {
         Ok(Box::new(OpenAiResponsesProvider {
-            base: ProviderBase {
-                api_key: self.base.api_key.clone(),
-                base_url: self.base.base_url.clone(),
-                model: self.base.model.clone(),
-                temperature: self.base.effective_temperature(),
-                max_tokens: self.base.effective_max_tokens(),
-                circuit_breaker: Arc::clone(&self.base.circuit_breaker),
-                request_cache: parking_lot::Mutex::new(HashMap::new()),
-                enable_search: std::sync::atomic::AtomicBool::new(self.base.is_enable_search()),
-                proxy: self.base.proxy.clone(),
-                client: self.base.client.clone(),
-                max_tokens_override: std::sync::atomic::AtomicU32::new(0),
-                temperature_override: std::sync::atomic::AtomicU64::new(0),
-                omit_temperature: std::sync::atomic::AtomicBool::new(self.base.should_omit_temperature()),
-                send_temperature: std::sync::atomic::AtomicBool::new(self.base.send_temperature.load(std::sync::atomic::Ordering::Relaxed)),
-                send_max_tokens: std::sync::atomic::AtomicBool::new(self.base.send_max_tokens.load(std::sync::atomic::Ordering::Relaxed)),
-                reasoning_pref: parking_lot::RwLock::new(*self.base.reasoning_pref.read()),
-                request_customization: parking_lot::RwLock::new(self.base.request_customization.read().clone()),
-            },
+            base: self.base.fork(),
             tools,
             instructions: self.instructions.clone(),
             client: self.client.clone(),
@@ -650,7 +658,7 @@ impl BaseProvider for OpenAiResponsesProvider {
             &messages,
             &format!("stream_with_tools model={}", self.base.model),
         );
-        self.base.check_circuit()?;
+        let guard = crate::providers::transport::RequestGuard::begin(&self.base)?;
 
         let tools_field: Value = if tools.is_empty() {
             Value::Array(vec![])
@@ -685,24 +693,16 @@ impl BaseProvider for OpenAiResponsesProvider {
             .header("OpenAI-Beta", "responses=1")
             .json(&self.base.finalize_body(body.clone()))
             .send()
-            .await
-            .map_err(|e| VivianError::Provider(format!("流式请求失败: {}", e)))?;
-
-        if !response.status().is_success() {
-            self.base.record_failure();
-            let status = response.status();
-            let text = response.text().await.unwrap_or_default();
-            return Err(VivianError::Provider(format!(
-                "Responses API 流式请求失败 ({}): {}",
-                status, text
-            )));
-        }
-        self.base.record_success();
+            .await;
+        let (response, guard) = guard.response(response).await?;
 
         let (tx, rx) = mpsc::channel::<StreamEvent>(64);
 
         tokio::spawn(async move {
-            let mut stream = response.bytes_stream();
+            let mut stream = crate::providers::sse::normalize_sse_until_closed(
+                response.bytes_stream(),
+                tx.clone(),
+            );
             let mut buffer = String::new();
             let mut finish_reason: Option<String> = None;
             let mut stripper = ThinkingStreamStripper::new();
@@ -742,7 +742,9 @@ impl BaseProvider for OpenAiResponsesProvider {
                         }
                         if let Ok(json_val) = serde_json::from_str::<Value>(data) {
                             let sources = crate::providers::web_citations::sources(&json_val);
-                            if !sources.is_empty() { let _ = tx.send(StreamEvent::WebSources { sources }).await; }
+                            if !sources.is_empty() {
+                                let _ = tx.send(StreamEvent::WebSources { sources }).await;
+                            }
                             let event_type = json_val["type"].as_str().unwrap_or("");
                             match event_type {
                                 "response.output_text.delta" => {
@@ -776,16 +778,15 @@ impl BaseProvider for OpenAiResponsesProvider {
                                 "response.output_item.added" => {
                                     let item = &json_val["item"];
                                     if item["type"].as_str() == Some("function_call") {
-                                        let output_index = json_val["output_index"]
-                                            .as_u64()
-                                            .unwrap_or(0) as usize;
-                                        let call_id = item["call_id"]
-                                            .as_str()
-                                            .map(String::from);
+                                        let output_index =
+                                            json_val["output_index"].as_u64().unwrap_or(0) as usize;
+                                        let call_id = item["call_id"].as_str().map(String::from);
                                         let name = item["name"].as_str().map(String::from);
-                                        let entry = tool_calls
-                                            .entry(output_index)
-                                            .or_insert((None, None, String::new()));
+                                        let entry = tool_calls.entry(output_index).or_insert((
+                                            None,
+                                            None,
+                                            String::new(),
+                                        ));
                                         if call_id.is_some() {
                                             entry.0 = call_id;
                                         }
@@ -807,13 +808,14 @@ impl BaseProvider for OpenAiResponsesProvider {
                                     }
                                 }
                                 "response.function_call_arguments.delta" => {
-                                    let output_index = json_val["output_index"]
-                                        .as_u64()
-                                        .unwrap_or(0) as usize;
+                                    let output_index =
+                                        json_val["output_index"].as_u64().unwrap_or(0) as usize;
                                     if let Some(delta) = json_val["delta"].as_str() {
-                                        let entry = tool_calls
-                                            .entry(output_index)
-                                            .or_insert((None, None, String::new()));
+                                        let entry = tool_calls.entry(output_index).or_insert((
+                                            None,
+                                            None,
+                                            String::new(),
+                                        ));
                                         entry.2.push_str(delta);
                                         if tx
                                             .send(StreamEvent::ToolCallDelta {
@@ -830,22 +832,19 @@ impl BaseProvider for OpenAiResponsesProvider {
                                     }
                                 }
                                 "response.completed" => {
-                                    let status = json_val["response"]["status"]
-                                        .as_str()
-                                        .unwrap_or("");
+                                    let status =
+                                        json_val["response"]["status"].as_str().unwrap_or("");
                                     if status == "completed" {
-                                        finish_reason =
-                                            if !tool_calls.is_empty() {
-                                                Some("tool_calls".to_string())
-                                            } else {
-                                                Some("stop".to_string())
-                                            };
+                                        finish_reason = if !tool_calls.is_empty() {
+                                            Some("tool_calls".to_string())
+                                        } else {
+                                            Some("stop".to_string())
+                                        };
                                     }
                                     let residual = stripper.flush();
                                     if !residual.is_empty() {
-                                        let _ = tx
-                                            .send(StreamEvent::Text { content: residual })
-                                            .await;
+                                        let _ =
+                                            tx.send(StreamEvent::Text { content: residual }).await;
                                     }
                                     let _ = tx
                                         .send(StreamEvent::Done {
@@ -883,7 +882,7 @@ impl BaseProvider for OpenAiResponsesProvider {
                 .await;
         });
 
-        Ok(rx)
+        Ok(crate::providers::transport::track_stream(rx, guard))
     }
 
     async fn call_chat_with_search(

@@ -23,6 +23,7 @@
 
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { emit, emitTo } from '@tauri-apps/api/event';
+import { isWindowOnScreen } from './windowRaiser';
 
 /** 入场动画时长（毫秒） */
 export const PET_REVEAL_DURATION_MS = 340;
@@ -256,7 +257,7 @@ function resetTransformStyle(root: HTMLElement): void {
 }
 
 /**
- * 把窗口放上屏幕：最小化的先还原。
+ * 把窗口放上屏幕：最小化的先还原，然后抢到前台。
  *
  * 还原本身就会显示窗口，所以**只能在首帧已经摆好之后**调用——否则用户先看到的
  * 是复位后的整屏窗口，紧接着才看到它缩回桌宠重新长出来，视觉上等于呼出了两次。
@@ -264,11 +265,22 @@ function resetTransformStyle(root: HTMLElement): void {
  *
  * `unminimize()` 对未最小化的窗口是无操作（标志没变化就不发 Win32 调用），
  * 所以可以无条件调用，不必先查状态。
+ *
+ * 末尾的 `setFocus()` 不是可选项：tao 的 set_focus 只对「可见、非最小化、且不在
+ * 前台」的窗口动手，而上面两下是投递到主线程队列的即发即忘操作，此刻影子标志
+ * 还没翻转，不等就会静默空转。少了这一步，窗口会回到屏幕却停在 Z 序后排
+ * （看得见、点不到前面）。这里轮询等状态落定再激活。
  */
 async function bringWindowOnScreen(): Promise<void> {
   const win = getCurrentWindow();
   await win.unminimize().catch(() => {});
   await win.show().catch(() => {});
+  // 等可见标志真正落定：show 是即发即忘的，不等则 setFocus 读到的仍是旧值
+  for (let i = 0; i < 12; i++) {
+    if (await isWindowOnScreen(win).catch(() => false)) break;
+    await new Promise((resolve) => window.setTimeout(resolve, 10));
+  }
+  await win.setFocus().catch(() => {});
 }
 
 /**

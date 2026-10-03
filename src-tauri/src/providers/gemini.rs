@@ -1,26 +1,19 @@
 use std::collections::HashMap;
-use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
-use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::StreamExt;
-use parking_lot::Mutex;
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
 use crate::error::{VivianError, VivianResult};
 use crate::providers::base::{
-    parse_stream_usage, BaseProvider, ChatResponse, ProviderBase, StreamEvent,
-    StructuredToolCall, ToolDefinition, PENALTY_KEYS_CAMEL,
+    parse_stream_usage, BaseProvider, ChatResponse, ProviderBase, StreamEvent, StructuredToolCall,
+    ToolDefinition, PENALTY_KEYS_CAMEL,
 };
-use crate::resilience::{classify_error, ErrorCategory};
 use crate::types::response::ChatMessage;
 use crate::utils::messages_cache_key;
 
 const GEMINI_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta";
-const MAX_RETRIES: usize = 2;
-const INITIAL_BACKOFF: Duration = Duration::from_millis(500);
 
 pub struct GeminiProvider {
     api_key: String,
@@ -69,19 +62,48 @@ impl GeminiProvider {
         }
         // A bare origin needs an API version. Preserve custom prefixes and versions.
         match reqwest::Url::parse(endpoint) {
-            Ok(url) if url.path().is_empty() || url.path() == "/" => {
-                format!("{}/v1beta", endpoint)
+            Ok(mut url) if url.path().is_empty() || url.path() == "/" => {
+                url.set_path("/v1beta");
+                url.to_string()
             }
             _ => endpoint.to_string(),
         }
     }
 
     fn generate_endpoint(&self) -> String {
-        format!("{}/models/{}:generateContent", self.base.base_url, self.model)
+        crate::providers::transport::api_endpoint(
+            &self.base.base_url,
+            &format!(
+                "models/{}:generateContent",
+                self.model.trim_start_matches("models/")
+            ),
+            None,
+        )
     }
 
     fn stream_endpoint(&self) -> String {
-        format!("{}/models/{}:streamGenerateContent?alt=sse", self.base.base_url, self.model)
+        let endpoint = crate::providers::transport::api_endpoint(
+            &self.base.base_url,
+            &format!(
+                "models/{}:streamGenerateContent",
+                self.model.trim_start_matches("models/")
+            ),
+            None,
+        );
+        if let Ok(mut url) = reqwest::Url::parse(&endpoint) {
+            let query: Vec<(String, String)> = url
+                .query_pairs()
+                .filter(|(key, _)| key != "alt")
+                .map(|(key, value)| (key.into_owned(), value.into_owned()))
+                .collect();
+            url.set_query(None);
+            url.query_pairs_mut()
+                .extend_pairs(query)
+                .append_pair("alt", "sse");
+            url.to_string()
+        } else {
+            endpoint
+        }
     }
 
     fn build_contents_from_chat(messages: &[ChatMessage]) -> serde_json::Value {
@@ -181,7 +203,11 @@ impl GeminiProvider {
         json!(contents)
     }
 
-    fn build_body(&self, contents: serde_json::Value, json_schema: &Option<serde_json::Value>) -> serde_json::Value {
+    fn build_body(
+        &self,
+        contents: serde_json::Value,
+        json_schema: &Option<serde_json::Value>,
+    ) -> serde_json::Value {
         let mut generation_config = json!({
             "temperature": self.base.effective_temperature(),
             "maxOutputTokens": self.base.effective_max_tokens(),
@@ -194,26 +220,7 @@ impl GeminiProvider {
             let sanitized = Self::resolve_schema_refs(schema);
             generation_config["responseSchema"] = sanitized;
         }
-        use crate::providers::reasoning::{ReasoningEffort, ReasoningMode};
-        let pref = self.base.effective_reasoning();
-        match pref.mode {
-            ReasoningMode::Auto => {}
-            ReasoningMode::Off => {
-                generation_config["thinkingConfig"] = if self.model.starts_with("gemini-3.8") {
-                    json!({"thinkingLevel": "low"})
-                } else { json!({"thinkingBudget": 0}) };
-            }
-            ReasoningMode::On => {
-                let level = match pref.effort.unwrap_or(ReasoningEffort::Medium) {
-                    ReasoningEffort::Minimal | ReasoningEffort::Low => "low",
-                    ReasoningEffort::Medium => "medium",
-                    ReasoningEffort::High
-                    | ReasoningEffort::Xhigh
-                    | ReasoningEffort::Max => "high",
-                };
-                generation_config["thinkingConfig"] = json!({"thinkingLevel": level});
-            }
-        }
+        // Thinking fields belong to the request adapter.
         // 采样惩罚：Gemini 的 generationConfig 原生支持 presencePenalty / frequencyPenalty
         // （驼峰命名，与 OpenAI 家族的蛇形不同，故走 `PenaltyKeys` 参数化）。
         // 未配置时该函数不写入任何字段，请求体与改动前完全一致。
@@ -235,7 +242,12 @@ impl GeminiProvider {
     /// 注：Rust 生态暂无成熟的 `google-genai` SDK，使用 REST API 直接调用，
     /// 通过 `tools=[{"google_search": {}}]` 实现等效的 Google Search grounding。
     /// 后续可替换为原生 SDK 调用以获得更完整的 grounding 元数据。
-    fn build_body_with_search(&self, contents: serde_json::Value, enable_search: bool, json_schema: &Option<serde_json::Value>) -> serde_json::Value {
+    fn build_body_with_search(
+        &self,
+        contents: serde_json::Value,
+        enable_search: bool,
+        json_schema: &Option<serde_json::Value>,
+    ) -> serde_json::Value {
         let mut body = self.build_body(contents, json_schema);
         if enable_search {
             body["tools"] = json!([{"google_search": {}}]);
@@ -252,7 +264,8 @@ impl GeminiProvider {
     /// Gemini 的 `responseSchema` 不支持 `$ref` / `$defs`，
     /// 需要在发送前将所有引用展开为内联定义。
     fn resolve_schema_refs(schema: &serde_json::Value) -> serde_json::Value {
-        let defs = schema.get("$defs")
+        let defs = schema
+            .get("$defs")
             .or_else(|| schema.get("definitions"))
             .cloned()
             .unwrap_or(json!({}));
@@ -266,7 +279,11 @@ impl GeminiProvider {
     }
 
     /// 递归地将 `$ref` 替换为内联定义
-    fn inline_refs(value: &serde_json::Value, defs: &serde_json::Value, depth: u32) -> serde_json::Value {
+    fn inline_refs(
+        value: &serde_json::Value,
+        defs: &serde_json::Value,
+        depth: u32,
+    ) -> serde_json::Value {
         if depth > 10 {
             return value.clone();
         }
@@ -286,11 +303,11 @@ impl GeminiProvider {
                 }
                 serde_json::Value::Object(new_obj)
             }
-            serde_json::Value::Array(arr) => {
-                serde_json::Value::Array(
-                    arr.iter().map(|v| Self::inline_refs(v, defs, depth + 1)).collect(),
-                )
-            }
+            serde_json::Value::Array(arr) => serde_json::Value::Array(
+                arr.iter()
+                    .map(|v| Self::inline_refs(v, defs, depth + 1))
+                    .collect(),
+            ),
             _ => value.clone(),
         }
     }
@@ -304,13 +321,8 @@ impl GeminiProvider {
             .send()
             .await?;
 
-        let status = response.status();
-        if !status.is_success() {
-            let text = response.text().await.unwrap_or_default();
-            return Err(VivianError::Provider(format!(
-                "Gemini API 请求失败 ({}): {}",
-                status, text
-            )));
+        if !response.status().is_success() {
+            return Err(crate::providers::transport::http_error(response).await);
         }
 
         let json: serde_json::Value = response.json().await?;
@@ -374,18 +386,18 @@ impl GeminiProvider {
             }
         }
 
-        let finish_reason = candidate["finishReason"]
-            .as_str()
-            .map(|s| s.to_string());
+        let finish_reason = candidate["finishReason"].as_str().map(|s| s.to_string());
 
-        let content = crate::providers::web_citations::attach(&content, &crate::providers::web_citations::sources(json));
+        let content = crate::providers::web_citations::attach(
+            &content,
+            &crate::providers::web_citations::sources(json),
+        );
         Ok(ChatResponse {
             content,
             tool_calls,
             finish_reason,
             reasoning: None,
             raw: json.clone(),
-
         })
     }
 
@@ -398,8 +410,15 @@ impl GeminiProvider {
         // Tool/search responses must be evaluated against current evidence and permissions.
         let cache_key_prompt = if body.get("tools").is_some()
             || body.get("web_search_options").is_some()
-            || body.get("enable_search").and_then(serde_json::Value::as_bool) == Some(true)
-        { None } else { cache_key_prompt };
+            || body
+                .get("enable_search")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+        {
+            None
+        } else {
+            cache_key_prompt
+        };
         if let Some(prompt) = cache_key_prompt {
             if let Some(cached) = self.base.get_cached_response(prompt) {
                 tracing::debug!("命中缓存(structured): {}", self.model);
@@ -407,46 +426,19 @@ impl GeminiProvider {
             }
         }
 
-        let mut last_error: Option<VivianError> = None;
-        let mut backoff = INITIAL_BACKOFF;
-
-        for attempt in 0..=MAX_RETRIES {
-            if attempt > 0 {
-                tracing::warn!("第 {} 次重试请求: {}", attempt, self.model);
-                tokio::time::sleep(backoff).await;
-                backoff *= 2;
-            }
-
-            self.base.check_circuit()?;
-
-            match self.send_request(body.clone()).await {
-                Ok(json) => {
-                    let resp = self.extract_chat_response(&json)?;
-                    self.base.record_success();
-                    // 仅缓存无工具调用的响应（带工具调用的响应需重新触发执行）
-                    if !resp.has_tool_calls() {
-                        if let Some(prompt) = cache_key_prompt {
-                            self.base.cache_response(prompt, &resp.content);
-                        }
-                    }
-                    return Ok(resp);
-                }
-                Err(err) => {
-                    self.base.record_failure();
-                    let category = classify_error(&err);
-                    match category {
-                        ErrorCategory::Permanent => return Err(err),
-                        ErrorCategory::Transient | ErrorCategory::RateLimit => {
-                            last_error = Some(err);
-                            continue;
-                        }
-                    }
-                }
+        let resp = crate::providers::transport::with_retry(&self.base, || async {
+            let json = self.send_request(body.clone()).await?;
+            crate::providers::transport::validate_json(&json)?;
+            let resp = self.extract_chat_response(&json)?;
+            Ok(resp)
+        })
+        .await?;
+        if !resp.has_tool_calls() {
+            if let Some(prompt) = cache_key_prompt {
+                self.base.cache_response(prompt, &resp.content);
             }
         }
-
-        Err(last_error
-            .unwrap_or_else(|| VivianError::Provider("重试次数耗尽".to_string())))
+        Ok(resp)
     }
 
     fn extract_content(json: &serde_json::Value) -> VivianResult<String> {
@@ -454,9 +446,7 @@ impl GeminiProvider {
             .as_str()
             .map(|s| s.to_string())
             .ok_or_else(|| {
-                VivianError::Provider(
-                    "响应中缺少 candidates[0].content.parts[0].text".to_string(),
-                )
+                VivianError::Provider("响应中缺少 candidates[0].content.parts[0].text".to_string())
             })
     }
 
@@ -468,8 +458,15 @@ impl GeminiProvider {
         // Tool/search responses must be evaluated against current evidence and permissions.
         let cache_key_prompt = if body.get("tools").is_some()
             || body.get("web_search_options").is_some()
-            || body.get("enable_search").and_then(serde_json::Value::as_bool) == Some(true)
-        { None } else { cache_key_prompt };
+            || body
+                .get("enable_search")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+        {
+            None
+        } else {
+            cache_key_prompt
+        };
         if let Some(prompt) = cache_key_prompt {
             if let Some(cached) = self.base.get_cached_response(prompt) {
                 tracing::debug!("命中缓存: {}", self.model);
@@ -477,57 +474,41 @@ impl GeminiProvider {
             }
         }
 
-        let mut last_error: Option<VivianError> = None;
-        let mut backoff = INITIAL_BACKOFF;
-
-        for attempt in 0..=MAX_RETRIES {
-            if attempt > 0 {
-                tracing::warn!("第 {} 次重试请求: {}", attempt, self.model);
-                tokio::time::sleep(backoff).await;
-                backoff *= 2;
-            }
-
-            self.base.check_circuit()?;
-
-            match self.send_request(body.clone()).await {
-                Ok(json) => {
-                    let content = Self::extract_content(&json)?;
-                    let content = crate::providers::web_citations::attach(&content, &crate::providers::web_citations::sources(&json));
-                    crate::providers::base::record_response_usage(&self.base.model, &json);
-                    self.base.record_success();
-                    if let Some(prompt) = cache_key_prompt {
-                        self.base.cache_response(prompt, &content);
-                    }
-                    return Ok(content);
-                }
-                Err(err) => {
-                    self.base.record_failure();
-                    let category = classify_error(&err);
-                    match category {
-                        ErrorCategory::Permanent => return Err(err),
-                        ErrorCategory::Transient | ErrorCategory::RateLimit => {
-                            last_error = Some(err);
-                            continue;
-                        }
-                    }
-                }
-            }
+        let content = crate::providers::transport::with_retry(&self.base, || async {
+            let json = self.send_request(body.clone()).await?;
+            crate::providers::transport::validate_json(&json)?;
+            let content = Self::extract_content(&json)?;
+            let content = crate::providers::web_citations::attach(
+                &content,
+                &crate::providers::web_citations::sources(&json),
+            );
+            crate::providers::base::record_response_usage(&self.base.model, &json);
+            Ok(content)
+        })
+        .await?;
+        if let Some(prompt) = cache_key_prompt {
+            self.base.cache_response(prompt, &content);
         }
-
-        Err(last_error
-            .unwrap_or_else(|| VivianError::Provider("重试次数耗尽".to_string())))
+        Ok(content)
     }
 }
 
 #[async_trait]
 impl BaseProvider for GeminiProvider {
-    fn set_request_customization(&self, customization: crate::providers::reasoning_profiles::RequestCustomization) {
+    fn set_request_customization(
+        &self,
+        customization: crate::providers::reasoning_profiles::RequestCustomization,
+    ) {
         *self.base.request_customization.write() = customization;
     }
 
     fn set_request_parameters(&self, temperature: bool, max_tokens: bool) {
-        self.base.send_temperature.store(temperature, std::sync::atomic::Ordering::Relaxed);
-        self.base.send_max_tokens.store(max_tokens, std::sync::atomic::Ordering::Relaxed);
+        self.base
+            .send_temperature
+            .store(temperature, std::sync::atomic::Ordering::Relaxed);
+        self.base
+            .send_max_tokens
+            .store(max_tokens, std::sync::atomic::Ordering::Relaxed);
     }
 
     async fn call_chat(&self, messages: Vec<ChatMessage>) -> VivianResult<String> {
@@ -576,11 +557,12 @@ impl BaseProvider for GeminiProvider {
         messages: Vec<ChatMessage>,
         json_schema: Option<serde_json::Value>,
     ) -> VivianResult<mpsc::Receiver<StreamEvent>> {
-        self.base.check_circuit()?;
+        let guard = crate::providers::transport::RequestGuard::begin(&self.base)?;
 
         let contents = Self::build_contents_from_chat(&messages);
         // 流式联网搜索：读取 provider 自身的 enable_search 字段（由 set_enable_search 同步）
-        let body = self.build_body_with_search(contents, self.base.is_enable_search(), &json_schema);
+        let body =
+            self.build_body_with_search(contents, self.base.is_enable_search(), &json_schema);
 
         let client = self.base.get_client();
         let response = client
@@ -588,31 +570,27 @@ impl BaseProvider for GeminiProvider {
             .header("x-goog-api-key", &self.api_key)
             .json(&self.base.finalize_body(body.clone()))
             .send()
-            .await?;
-
-        if !response.status().is_success() {
-            self.base.record_failure();
-            let status = response.status();
-            let text = response.text().await.unwrap_or_default();
-            return Err(VivianError::Provider(format!(
-                "Gemini API 请求失败 ({}): {}",
-                status, text
-            )));
-        }
-
-        self.base.record_success();
+            .await;
+        let (response, guard) = guard.response(response).await?;
 
         let (tx, rx) = mpsc::channel::<StreamEvent>(32);
 
         tokio::spawn(async move {
-            let mut stream = response.bytes_stream();
+            let mut stream = crate::providers::sse::normalize_sse_until_closed(
+                response.bytes_stream(),
+                tx.clone(),
+            );
             let mut buffer = String::new();
 
             while let Some(chunk_result) = stream.next().await {
                 let chunk = match chunk_result {
                     Ok(c) => c,
                     Err(e) => {
-                        let _ = tx.send(StreamEvent::Error { message: e.to_string() }).await;
+                        let _ = tx
+                            .send(StreamEvent::Error {
+                                message: e.to_string(),
+                            })
+                            .await;
                         return;
                     }
                 };
@@ -634,7 +612,9 @@ impl BaseProvider for GeminiProvider {
                         }
                         if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
                             let sources = crate::providers::web_citations::sources(&json);
-                            if !sources.is_empty() { let _ = tx.send(StreamEvent::WebSources { sources }).await; }
+                            if !sources.is_empty() {
+                                let _ = tx.send(StreamEvent::WebSources { sources }).await;
+                            }
                             if let Some(usage) = parse_stream_usage(&json["usageMetadata"]) {
                                 let _ = tx.send(usage).await;
                             }
@@ -642,7 +622,13 @@ impl BaseProvider for GeminiProvider {
                                 json["candidates"][0]["content"]["parts"][0]["text"].as_str()
                             {
                                 if !content.is_empty() {
-                                    if tx.send(StreamEvent::Text { content: content.to_string() }).await.is_err() {
+                                    if tx
+                                        .send(StreamEvent::Text {
+                                            content: content.to_string(),
+                                        })
+                                        .await
+                                        .is_err()
+                                    {
                                         return;
                                     }
                                 }
@@ -653,11 +639,15 @@ impl BaseProvider for GeminiProvider {
             }
         });
 
-        Ok(rx)
+        Ok(crate::providers::transport::track_stream(rx, guard))
     }
 
     fn get_model(&self) -> &str {
         &self.model
+    }
+
+    fn get_endpoint(&self) -> &str {
+        &self.base.base_url
     }
 
     fn provider_identity(&self) -> String {
@@ -694,32 +684,11 @@ impl BaseProvider for GeminiProvider {
     /// 通过克隆基础配置（api_key / base_url / model / circuit_breaker / cache 等）
     /// 构造新实例，并在新实例的 `tools` 字段填充工具列表。
     /// 后续 `invoke` 调用会把 tools 注入请求体并解析响应中的 `functionCall`。
-    fn bind_tools(
-        &self,
-        tools: Vec<ToolDefinition>,
-    ) -> VivianResult<Box<dyn BaseProvider>> {
+    fn bind_tools(&self, tools: Vec<ToolDefinition>) -> VivianResult<Box<dyn BaseProvider>> {
         Ok(Box::new(GeminiProvider {
             api_key: self.api_key.clone(),
             model: self.model.clone(),
-            base: ProviderBase {
-                api_key: self.base.api_key.clone(),
-                base_url: self.base.base_url.clone(),
-                model: self.base.model.clone(),
-                temperature: self.base.effective_temperature(),
-                max_tokens: self.base.effective_max_tokens(),
-                circuit_breaker: Arc::clone(&self.base.circuit_breaker),
-                request_cache: Mutex::new(HashMap::new()),
-                enable_search: AtomicBool::new(self.base.is_enable_search()),
-                proxy: self.base.proxy.clone(),
-                client: self.base.client.clone(),
-                max_tokens_override: std::sync::atomic::AtomicU32::new(0),
-                temperature_override: std::sync::atomic::AtomicU64::new(0),
-                omit_temperature: std::sync::atomic::AtomicBool::new(self.base.should_omit_temperature()),
-                send_temperature: std::sync::atomic::AtomicBool::new(self.base.send_temperature.load(std::sync::atomic::Ordering::Relaxed)),
-                send_max_tokens: std::sync::atomic::AtomicBool::new(self.base.send_max_tokens.load(std::sync::atomic::Ordering::Relaxed)),
-                reasoning_pref: parking_lot::RwLock::new(*self.base.reasoning_pref.read()),
-                request_customization: parking_lot::RwLock::new(self.base.request_customization.read().clone()),
-            },
+            base: self.base.fork(),
             tools,
         }))
     }
@@ -771,7 +740,7 @@ impl BaseProvider for GeminiProvider {
         messages: Vec<ChatMessage>,
         tools: Vec<ToolDefinition>,
     ) -> VivianResult<mpsc::Receiver<StreamEvent>> {
-        self.base.check_circuit()?;
+        let guard = crate::providers::transport::RequestGuard::begin(&self.base)?;
 
         let contents = Self::build_contents_from_chat(&messages);
         let schema = crate::providers::base::ProviderCallOptions::current_json_schema();
@@ -793,24 +762,16 @@ impl BaseProvider for GeminiProvider {
             .header("x-goog-api-key", &self.api_key)
             .json(&self.base.finalize_body(body.clone()))
             .send()
-            .await?;
-
-        if !response.status().is_success() {
-            self.base.record_failure();
-            let status = response.status();
-            let text = response.text().await.unwrap_or_default();
-            return Err(VivianError::Provider(format!(
-                "Gemini API 请求失败 ({}): {}",
-                status, text
-            )));
-        }
-
-        self.base.record_success();
+            .await;
+        let (response, guard) = guard.response(response).await?;
 
         let (tx, rx) = mpsc::channel::<StreamEvent>(64);
 
         tokio::spawn(async move {
-            let mut stream = response.bytes_stream();
+            let mut stream = crate::providers::sse::normalize_sse_until_closed(
+                response.bytes_stream(),
+                tx.clone(),
+            );
             let mut buffer = String::new();
             let mut finish_reason: Option<String> = None;
             // 工具调用索引：按 functionCall 在流中的出现顺序递增
@@ -845,14 +806,15 @@ impl BaseProvider for GeminiProvider {
                             let _ = tx
                                 .send(StreamEvent::Done {
                                     finish_reason: finish_reason.take(),
-                        
                                 })
                                 .await;
                             return;
                         }
                         if let Ok(json_val) = serde_json::from_str::<Value>(data) {
                             let sources = crate::providers::web_citations::sources(&json_val);
-                            if !sources.is_empty() { let _ = tx.send(StreamEvent::WebSources { sources }).await; }
+                            if !sources.is_empty() {
+                                let _ = tx.send(StreamEvent::WebSources { sources }).await;
+                            }
                             let candidate = &json_val["candidates"][0];
 
                             // 记录结束原因
@@ -885,8 +847,8 @@ impl BaseProvider for GeminiProvider {
                                     if let Some(fc) = part.get("functionCall") {
                                         let name = fc["name"].as_str().map(String::from);
                                         // args 是完整 JSON 对象，序列化为字符串作为 arguments_delta
-                                        let arguments_delta = serde_json::to_string(&fc["args"])
-                                            .ok();
+                                        let arguments_delta =
+                                            serde_json::to_string(&fc["args"]).ok();
                                         let idx = tool_call_index;
                                         tool_call_index += 1;
 
@@ -914,33 +876,55 @@ impl BaseProvider for GeminiProvider {
             let _ = tx
                 .send(StreamEvent::Done {
                     finish_reason: finish_reason.take(),
-        
                 })
                 .await;
         });
 
-        Ok(rx)
+        Ok(crate::providers::transport::track_stream(rx, guard))
     }
 }
 
 #[cfg(test)]
 mod routing_protocol_tests {
     use super::*;
-    use crate::providers::reasoning::{ReasoningPreference, ReasoningMode};
+    use crate::providers::reasoning::{ReasoningMode, ReasoningPreference};
 
     #[test]
     fn configured_endpoints_are_used_for_all_request_paths() {
         for (input, expected) in [
             ("", GEMINI_BASE_URL),
-            (" https://generativelanguage.googleapis.com/ ", GEMINI_BASE_URL),
-            ("https://proxy.example/v1beta/", "https://proxy.example/v1beta"),
+            (
+                " https://generativelanguage.googleapis.com/ ",
+                GEMINI_BASE_URL,
+            ),
+            (
+                "https://proxy.example/v1beta/",
+                "https://proxy.example/v1beta",
+            ),
             ("http://localhost:8080", "http://localhost:8080/v1beta"),
-            ("https://proxy.example/gemini/v1/", "https://proxy.example/gemini/v1"),
+            (
+                "https://proxy.example/gemini/v1/",
+                "https://proxy.example/gemini/v1",
+            ),
         ] {
-            let provider = GeminiProvider::new("secret-test-key", "gemini-3.8-flash", input, 1.0, 256, None, None);
+            let provider = GeminiProvider::new(
+                "secret-test-key",
+                "gemini-3.8-flash",
+                input,
+                1.0,
+                256,
+                None,
+                None,
+            );
             assert_eq!(provider.base.base_url, expected);
-            assert_eq!(provider.generate_endpoint(), format!("{expected}/models/gemini-3.8-flash:generateContent"));
-            assert_eq!(provider.stream_endpoint(), format!("{expected}/models/gemini-3.8-flash:streamGenerateContent?alt=sse"));
+            assert_eq!(
+                provider.generate_endpoint(),
+                format!("{expected}/models/gemini-3.8-flash:generateContent")
+            );
+            assert_eq!(
+                provider.stream_endpoint(),
+                format!("{expected}/models/gemini-3.8-flash:streamGenerateContent?alt=sse")
+            );
             assert!(!provider.generate_endpoint().contains("secret-test-key"));
             assert!(!provider.stream_endpoint().contains("secret-test-key"));
         }
@@ -948,16 +932,59 @@ mod routing_protocol_tests {
 
     #[test]
     fn gemini_38_plain_speech_and_structured_output_are_separate() {
-        let provider = GeminiProvider::new("local-test", "gemini-3.8-flash", "", 1.0, 2048, None, None);
-        provider.base.set_reasoning_pref(Some(ReasoningPreference { mode: ReasoningMode::Off, effort: None, budget_tokens: None }));
-        let plain = provider.build_body(json!([]), &None);
+        let provider =
+            GeminiProvider::new("local-test", "gemini-3.8-flash", "", 1.0, 2048, None, None);
+        // Match the factory's protocol metadata and assert the final wire body;
+        // reasoning is now applied by finalize_body, not by build_body.
+        provider.set_request_customization(
+            crate::providers::reasoning_profiles::RequestCustomization {
+                provider_type: "gemini".into(),
+                ..Default::default()
+            },
+        );
+        provider.base.set_reasoning_pref(Some(ReasoningPreference {
+            mode: ReasoningMode::Off,
+            effort: None,
+            budget_tokens: None,
+        }));
+        let plain = provider
+            .base
+            .finalize_body(provider.build_body(json!([]), &None));
         assert!(plain["generationConfig"].get("responseMimeType").is_none());
-        assert_eq!(plain["generationConfig"]["thinkingConfig"], json!({"thinkingLevel":"low"}));
-        let structured = provider.build_body(json!([]), &Some(json!({"type":"object","properties":{"text":{"type":"string"}}})));
-        assert_eq!(structured["generationConfig"]["responseMimeType"], "application/json");
-        assert!(structured["generationConfig"].get("responseSchema").is_some());
-        let legacy = GeminiProvider::new("local-test", "gemini-2.5-flash", "", 1.0, 2048, None, None);
-        legacy.base.set_reasoning_pref(Some(ReasoningPreference { mode: ReasoningMode::Off, effort: None, budget_tokens: None }));
-        assert_eq!(legacy.build_body(json!([]), &None)["generationConfig"]["thinkingConfig"], json!({"thinkingBudget":0}));
+        assert_eq!(
+            plain["generationConfig"]["thinkingConfig"],
+            json!({"thinkingLevel":"low"})
+        );
+        let structured = provider.base.finalize_body(provider.build_body(
+            json!([]),
+            &Some(json!({"type":"object","properties":{"text":{"type":"string"}}})),
+        ));
+        assert_eq!(
+            structured["generationConfig"]["responseMimeType"],
+            "application/json"
+        );
+        assert!(structured["generationConfig"]
+            .get("responseSchema")
+            .is_some());
+        let legacy =
+            GeminiProvider::new("local-test", "gemini-2.5-flash", "", 1.0, 2048, None, None);
+        legacy.set_request_customization(
+            crate::providers::reasoning_profiles::RequestCustomization {
+                provider_type: "gemini".into(),
+                ..Default::default()
+            },
+        );
+        legacy.base.set_reasoning_pref(Some(ReasoningPreference {
+            mode: ReasoningMode::Off,
+            effort: None,
+            budget_tokens: None,
+        }));
+        assert_eq!(
+            legacy
+                .base
+                .finalize_body(legacy.build_body(json!([]), &None))["generationConfig"]
+                ["thinkingConfig"],
+            json!({"thinkingBudget":0})
+        );
     }
 }

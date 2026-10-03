@@ -2432,6 +2432,7 @@ impl CodingAgentService {
             }
         };
         self.stats_turn_started(session_id);
+        let turn_output_baseline = self.stats_snapshot(session_id).map(|stats| stats.usage.output_tokens).unwrap_or(0);
         let mode = self.select_work_mode(session_id, router).await;
         if self.is_canceled(session_id) {
             self.finish_turn(app, session_id, CodingStatus::Canceled);
@@ -2671,6 +2672,11 @@ impl CodingAgentService {
                             cache_read_tokens,
                             cache_write_tokens,
                         } => {
+                            let completed = self.stats_snapshot(session_id).map(|stats| stats.usage.output_tokens).unwrap_or(0);
+                            let _ = app.emit("coding:turn_tokens", serde_json::json!({
+                                "session_id": session_id,
+                                "output_tokens": completed.saturating_sub(turn_output_baseline) + output_tokens,
+                            }));
                             attempt_usage = Some(CodingTokenUsage {
                                 input_tokens,
                                 output_tokens,
@@ -3173,6 +3179,12 @@ impl CodingAgentService {
             }
         };
         self.stats_step_done(session_id, llm_start.elapsed().as_millis() as u64, None);
+        // Non-streaming code mode has no provider usage payload; keep the estimate explicit.
+        let _ = app.emit("coding:turn_tokens", serde_json::json!({
+            "session_id": session_id,
+            "output_tokens": crate::utils::token_estimate::estimate_tokens(&resp),
+            "estimated": true,
+        }));
 
         // 2. 解析程序：{"steps":[{"tool","arguments"}...], "summary":"..."}
         let parsed = crate::brain::json_parser::JsonParser::parse_single(&resp);

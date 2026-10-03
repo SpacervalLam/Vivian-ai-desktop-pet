@@ -17,6 +17,17 @@ export const RAISE_UNLISTEN = new Map<string, () => void>();
 const RESTORE_WAIT_STEP_MS = 10;
 const RESTORE_WAIT_STEPS = 12;
 
+/** 等「窗口确实上了屏」的轮询：同样 10ms × 12 = 120ms 封顶。
+ *
+ *  为什么必须等：tao 的 `show` / `unminimize` 是投递到主线程 FIFO 队列的
+ * 「即发即忘」操作，`await` 返回时窗口的影子标志还没翻转。而 `setFocus`
+ * 恰恰是靠**同步读那份影子标志**决策的（见 tao window.rs：
+ * `if is_visible && !is_minimized && !is_foreground`），于是紧跟在 show 之后
+ * 调用 setFocus，读到的仍是「不可见」，整段被静默跳过、不报错。
+ * 这个空转就是「窗口回到屏幕上了，却停在 Z 序后排」的直接成因。 */
+const VISIBLE_WAIT_STEP_MS = 10;
+const VISIBLE_WAIT_STEPS = 12;
+
 /** 只要能查可见性与最小化状态的窗口句柄——`Window` 与 `WebviewWindow` 都满足，
  *  调用方（子窗口自身用 `getCurrentWindow()`、父窗口用 `WebviewWindow`）不必统一到一种类型 */
 type VisibilityProbe = {
@@ -34,6 +45,19 @@ export async function isWindowOnScreen(win: VisibilityProbe): Promise<boolean> {
     return (await win.isVisible()) && !(await win.isMinimized());
   } catch {
     return false;
+  }
+}
+
+/** 等窗口真正上屏（可见且未最小化），最多 `VISIBLE_WAIT_STEPS` 轮。
+ *
+ *  给「显形归子窗口」的调用方用：子窗口要先摆好入场动画的首帧才 show，
+ *  父窗口这边 `show` 之后拿到的仍是过期的影子标志，此刻调 setFocus 会被
+ *  tao 静默跳过（见 VISIBLE_WAIT_STEP_MS 处的说明）。轮询到上屏为止，
+ *  超时也照常返回——窗口可能已被用户关掉，不该把调用方卡在这里。 */
+async function waitUntilOnScreen(win: VisibilityProbe): Promise<void> {
+  for (let i = 0; i < VISIBLE_WAIT_STEPS; i++) {
+    if (await isWindowOnScreen(win).catch(() => false)) return;
+    await new Promise((resolve) => window.setTimeout(resolve, VISIBLE_WAIT_STEP_MS));
   }
 }
 
@@ -85,7 +109,16 @@ export async function raiseWindow(
   // 心智观察器是全屏窗口，但桌宠必须始终绘制在它上面。
   // 最小化时 setFocus 可能被 tao 跳过，入场动画的显形会继续激活窗口。
   await win.setAlwaysOnTop(label !== 'memory');
-  await win.setFocus();
+  if (selfReveal) {
+    // 显形归子窗口（它要先摆好首帧再 show），所以此刻窗口多半还不可见——
+    // 上面的 setFocus 会被 tao 的 `is_visible` 门静默跳过。子窗口 show 完之后
+    // 没有任何一处补抢焦点，窗口就停在 Z 序后排：看得见、但点不到前面。
+    // 这里等它真正上屏再补一次激活；轮询上限 120ms，正常一两轮就过。
+    await waitUntilOnScreen(win);
+    await win.setFocus().catch(() => {});
+  } else {
+    await win.setFocus();
+  }
 
   // 普通层级窗口：失焦时自动降回 non-topmost
   if (label && NORMAL_TIER_WINDOWS.has(label)) {

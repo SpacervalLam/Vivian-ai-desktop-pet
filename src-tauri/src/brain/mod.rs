@@ -33,6 +33,7 @@ pub mod json_parser;
 pub mod plan_mode;
 pub mod rate_limiter;
 pub mod scheduler;
+pub mod reminder_delivery;
 pub mod smart_app_classifier;
 pub mod subagent_context;
 pub mod coding_agent;

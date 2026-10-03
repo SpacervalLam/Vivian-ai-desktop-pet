@@ -1028,13 +1028,10 @@ Choose the appropriate expression and motion. Leave empty if nothing fits.",
         stream: bool,
         user_input: &str,
     ) -> VivianResult<(PipelineState, AiResponse)> {
-        let config = if stream {
-            let mut c = RunnableConfig::default();
-            c.tags.push("stream".to_string());
-            Some(c)
-        } else {
-            None
-        };
+        let mut config = RunnableConfig::default();
+        config.metadata["lab_character_id"] = serde_json::json!(self.char_id);
+        if stream { config.tags.push("stream".into()); }
+        let config = Some(config);
 
         // 8 维情绪向量 → temperature 覆盖：让 LLM 输出温度随当前情绪变化
         let emotion_state = self.psychology.emotion();
@@ -1239,7 +1236,6 @@ Choose the appropriate expression and motion. Leave empty if nothing fits.",
             let time_stamped = self.time_stamped.clone();
             let conversation_archive = self.conversation_archive.clone();
             let router = self.router.clone();
-            let user_facts = self.user_facts.clone();
             let hook_judge = self.hook_judge.clone();
             let dynamic_profile = self.dynamic_profile.clone();
             let user_model = self.user_model.clone();
@@ -1261,7 +1257,6 @@ Choose the appropriate expression and motion. Leave empty if nothing fits.",
                     time_stamped,
                     conversation_archive,
                     router,
-                    user_facts,
                     hook_judge,
                     dynamic_profile,
                     user_model,
@@ -1422,6 +1417,7 @@ Choose the appropriate expression and motion. Leave empty if nothing fits.",
     /// 启动问候由调用方保存实际回复，不将合成触发指令写入记忆或历史。
     pub async fn ainvoke_greeting(&self, user_input: &str, is_first_meeting: bool) -> VivianResult<AiResponse> {
         let mut state = self.prepare_pipeline_state(user_input).await;
+        state.metadata["system_directive"] = serde_json::json!(true);
         state.metadata["skip_memory_save"] = serde_json::json!(true);
         // 标记本轮为主动开场：感知层据此跳过对合成触发模板的情绪/意图分类。
         state.metadata["proactive_greeting"] = serde_json::json!(true);
@@ -1447,7 +1443,6 @@ Choose the appropriate expression and motion. Leave empty if nothing fits.",
             RwLock<crate::memory::conversation_archive::ConversationArchive>,
         >,
         router: Arc<ModelRouter>,
-        user_facts: Arc<UserFactStore>,
         hook_judge: Arc<HookJudge>,
         dynamic_profile: Arc<DynamicBehaviorProfile>,
         user_model: Arc<UserModelManager>,
@@ -1636,76 +1631,11 @@ Choose the appropriate expression and motion. Leave empty if nothing fits.",
         // 4. 巩固流水线只压缩原话为 SessionSummary；长期事实由 AutoExtractor 统一写入。
         match pipeline.run(&memory).await {
             Ok(report) => {
-                if report.stage1_summaries > 0
-                    || report.stage2_facts > 0
-                    || report.stage3_insights > 0
-                {
+                if report.stage1_summaries > 0 {
                     tracing::info!(
-                        "[BrainChatChain] ConsolidationPipeline 完成：stage1_summaries={}, stage2_facts={}, stage3_insights={}, stage2_acquired_behaviors={}, stage2_relationship_signals={}",
-                        report.stage1_summaries,
-                        report.stage2_facts,
-                        report.stage3_insights,
-                        report.stage2_acquired_behaviors.len(),
-                        report.stage2_relationship_signals.len()
+                        "[BrainChatChain] ConsolidationPipeline 完成：stage1_summaries={}",
+                        report.stage1_summaries
                     );
-                }
-                // Stage 2 第四路抽取的语义级行为画像合并到 DynamicBehaviorProfile
-                // （由 pipeline 返回，BrainChatChain 负责持久化到 dynamic_profile.json）
-                if !report.stage2_acquired_behaviors.is_empty() {
-                    dynamic_profile.merge_acquired_behaviors(report.stage2_acquired_behaviors);
-                }
-                // Stage 2 第五路抽取的关系信号写入关系日志
-                if !report.stage2_relationship_signals.is_empty() {
-                    let log = crate::psychology::relationship_log();
-                    let now = crate::memory::types::current_timestamp();
-                    let date = crate::psychology::date_str_from_ts(now);
-                    for (idx, signal) in report.stage2_relationship_signals.iter().enumerate() {
-                        let entry = crate::psychology::RelationshipLogEntry {
-                            id: format!("sig_{}_{}", now as u64, idx),
-                            date: date.clone(),
-                            created_at: now,
-                            user_mood: signal.user_mood.clone(),
-                            relationship_signal: signal.relationship_signal.clone(),
-                            important_moment: signal.important_moment.clone(),
-                            next_care_cue: signal.next_care_cue.clone(),
-                            direction: crate::psychology::RelationshipDirection::UserAgent,
-                            target_agent_id: None,
-                        };
-                        if let Err(e) = log.append_entry(entry) {
-                            tracing::warn!("[BrainChatChain] 关系日志写入失败: {}", e);
-                        }
-                    }
-                    // 尝试生成昨日摘要
-                    let yesterday = crate::psychology::yesterday_date_str();
-                    if let Some(summary) = log.try_generate_daily_summary(&yesterday) {
-                        if let Err(e) = log.upsert_daily_summary(summary) {
-                            tracing::warn!("[BrainChatChain] 昨日关系摘要生成失败: {}", e);
-                        }
-                    }
-                }
-                // Stage 2 第六路抽取的 L1 近期状态更新到 UserFactStore
-                if let Some(l1) = report.stage2_recent_state {
-                    // 从 L1 近期状态自动注册项目到用户认知模型
-                    for project_desc in &l1.current_projects {
-                        if !project_desc.trim().is_empty() {
-                            // 使用项目描述的前 20 字作为项目名
-                            let project_name: String = project_desc.chars().take(20).collect();
-                            user_model.upsert_project(
-                                &project_name,
-                                project_desc,
-                                Vec::new(),
-                                "active",
-                                crate::memory::user_model::ProjectStatus::Active,
-                            );
-                        }
-                    }
-                    if let Err(e) = user_facts.update_recent_state(
-                        l1.recent_goals,
-                        l1.current_projects,
-                        l1.recent_preferences,
-                    ) {
-                        tracing::warn!("[BrainChatChain] L1 近期状态更新失败: {}", e);
-                    }
                 }
             }
             Err(e) => {

@@ -18,6 +18,7 @@ interface PluginEntry {
   trust: string;
   reason?: string | null;
   dir: string;
+  capability_kind?: string;
 }
 
 /** 内置插件（播种体系所有，禁删；改内置的正确方式是复制为新插件） */
@@ -61,7 +62,10 @@ interface ConfirmState {
 
 /** 设置窗口「插件/技能」页：盘点插件与技能清单（只读，不装载/卸载）。 */
 const PluginsPanel: React.FC = () => {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
+  const zh = i18n.language.startsWith('zh');
+  const ja = i18n.language.startsWith('ja');
+  const kindLabels: Record<string, string> = zh ? {executable:'可执行扩展', data:'配置数据包', guidance:'使用指导包', mixed:'可执行扩展 · 附带指导'} : ja ? {executable:'実行機能',data:'設定データ',guidance:'利用ガイド',mixed:'実行機能・ガイド付き'} : {executable:'Executable extension',data:'Configuration data',guidance:'Usage guidance',mixed:'Executable extension with guidance'};
   const [plugins, setPlugins] = useState<PluginEntry[] | null>(null);
   const [skills, setSkills] = useState<SkillEntry[] | null>(null);
   const [diag, setDiag] = useState<PluginDiagnostics | null>(null);
@@ -219,7 +223,7 @@ const PluginsPanel: React.FC = () => {
         </div>
       )}
 
-      <div style={sectionTitle}>{t('config.plugins.section_plugins')}</div><p style={{fontSize:12,color:'var(--panel-text-secondary)'}}>{t('config.plugins.package_help')}</p>
+      <div style={sectionTitle}>{t('config.plugins.section_plugins')}</div><p style={{fontSize:12,color:'var(--panel-text-secondary)'}}>{zh ? '插件注册可执行能力、服务或配置数据；技能只提供按需读取的使用指导，不执行操作或授予权限。附带指导在下面的技能清单单独列出。' : ja ? 'プラグインは機能やデータを登録し、スキルは利用ガイドだけを提供します。' : 'Plugins register capabilities or data. Skills provide usage guidance and cannot execute operations or grant permissions. Bundled guidance is listed separately below.'}</p>
       {error ? (
         <div style={{ fontSize: 13, color: '#E53935' }}>{error}</div>
       ) : plugins === null ? (
@@ -249,6 +253,7 @@ const PluginsPanel: React.FC = () => {
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 2 }}>
                 <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--panel-text)' }}>{p.name}</span>
                 <span style={{ fontSize: 11, color: 'var(--panel-text-tertiary)' }}>v{p.version}</span>
+                {p.capability_kind && <span style={{fontSize:11,color:'var(--panel-accent)'}}>{kindLabels[p.capability_kind]}</span>}
                 {BUILTIN_PLUGIN_NAMES.includes(p.name) && (
                   <span
                     style={{
@@ -349,7 +354,7 @@ const PluginsPanel: React.FC = () => {
               )}
               <div style={{ fontSize: 12, color: 'var(--panel-text-secondary)' }}>
                 {[
-                  p.skills.length > 0 ? t('config.plugins.skills_count', { n: p.skills.length }) : '',
+                  p.skills.length > 0 ? `${zh ? '附带使用指导' : ja ? '付属ガイド' : 'Bundled guidance'} ${p.skills.length}` : '',
                   p.tools.length > 0 ? t('config.plugins.tools_count', { n: p.tools.length }) : '',
                   p.providers.length > 0 ? t('config.plugins.providers_count', { n: p.providers.length }) : '',
                   p.mcp_servers.length > 0 ? `MCP ${p.mcp_servers.length}` : '',

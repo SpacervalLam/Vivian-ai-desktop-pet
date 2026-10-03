@@ -24,6 +24,7 @@ import { NavigationProvider } from './NavigationContext';
 import type { PageParams } from './NavigationContext';
 import OverviewPage from './pages/OverviewPage';
 import JournalPage from './pages/JournalPage';
+import DialogueLabPage from './pages/DialogueLabPage';
 import CodeAgentPage from './pages/CodeAgentPageNew';
 import { invalidatePastelCache } from './pages/GraphPage';
 import PageErrorBoundary from './PageErrorBoundary';
@@ -238,6 +239,8 @@ const MindInspector: React.FC = () => {
         return 'mind_inspector.nav_journal';
       case 'code':
         return 'mind_inspector.nav_code';
+      case 'dialogue_lab':
+        return 'mind_inspector.nav_dialogue_lab';
       default:
         return 'mind_inspector.nav_overview';
     }
@@ -324,6 +327,8 @@ const MindInspector: React.FC = () => {
         return <JournalPage />;
       case 'code':
         return <CodeAgentPage />;
+      case 'dialogue_lab':
+        return <DialogueLabPage />;
       default:
         return null;
     }

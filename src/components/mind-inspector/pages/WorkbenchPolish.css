@@ -238,3 +238,7 @@
   .mind-inspector-root.is-work-page .codex-main-col .codex-stats-line,
   .mind-inspector-root.is-work-page .codex-stats-disclosure { transition: none; }
 }
+
+.codex-live-turn { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; margin: 14px 0 4px; color: var(--codex-ink-soft); font-size: 12px; line-height: 1.6; font-variant-numeric: tabular-nums; }
+.codex-live-turn > svg { color: var(--codex-warm); flex-shrink: 0; }
+.codex-live-turn-state { min-width: 0; overflow-wrap: anywhere; }

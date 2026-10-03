@@ -1,0 +1,314 @@
+/* ============================================================
+   Claude 风格 · 记忆页 / 用户画像
+   米白纸底 + 陶土橙点缀 + 衬线标题 + 克制的细线与留白。
+   通过在 .claude-memory 作用域内重写 --memory-* / --codex-* / --panel-*
+   变量，让共享组件（Card / Tag / SectionTitle / IconButton）一并换肤。
+   ============================================================ */
+
+.claude-memory {
+  --claude-bg: #faf9f5;
+  --claude-surface: #ffffff;
+  --claude-sunken: #f0eee6;
+  --claude-ink: #141413;
+  --claude-ink-soft: #3d3d3a;
+  --claude-muted: #73726c;
+  --claude-faint: #a3a198;
+  --claude-line: #e8e6dc;
+  --claude-line-strong: #d6d3c6;
+  --claude-clay: #c96442;
+  --claude-clay-bright: #d97757;
+  --claude-clay-soft: #f6e9e2;
+  --claude-sage: #788c5d;
+  --claude-shadow: 0 1px 2px rgba(20, 20, 19, .04), 0 2px 10px rgba(20, 20, 19, .035);
+  --claude-serif: "Tiempos Text", "Copernicus", "Source Serif 4", "Source Serif Pro", Georgia, "Noto Serif SC", "Source Han Serif SC", "Songti SC", "STSong", serif;
+  --claude-sans: "Styrene B", "Inter", ui-sans-serif, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+
+  /* 页内变量 */
+  --memory-ink: var(--claude-ink);
+  --memory-muted: var(--claude-muted);
+  --memory-line: var(--claude-line);
+  --codex-accent: var(--claude-clay);
+  --codex-accent-deep: var(--claude-clay);
+  --codex-accent-soft: var(--claude-clay-soft);
+  --codex-paper-card: var(--claude-surface);
+  --codex-paper-deep: var(--claude-sunken);
+  --codex-ink-soft: var(--claude-ink-soft);
+  --codex-ink-faint: var(--claude-muted);
+  --codex-shadow-sm: var(--claude-shadow);
+
+  /* 共享组件变量 */
+  --panel-bg: var(--claude-bg);
+  --panel-surface: var(--claude-surface);
+  --panel-elevated: var(--claude-surface);
+  --panel-bg-surface: var(--claude-bg);
+  --panel-bg-surface-elevated: var(--claude-surface);
+  --panel-bg-hover: var(--claude-sunken);
+  --panel-bg-active: var(--claude-sunken);
+  --panel-subtle-bg: var(--claude-sunken);
+  --panel-subtle-border: var(--claude-line);
+  --panel-border: var(--claude-line);
+  --panel-border-light: var(--claude-line);
+  --panel-border-hover: var(--claude-line-strong);
+  --panel-border-strong: var(--claude-line-strong);
+  --panel-accent: var(--claude-clay);
+  --panel-accent-bright: var(--claude-clay);
+  --panel-accent-muted: var(--claude-clay-soft);
+  --panel-accent-soft: color-mix(in srgb, var(--claude-clay) 14%, transparent);
+  --panel-text: var(--claude-ink);
+  --panel-text-secondary: var(--claude-ink-soft);
+  --panel-text-tertiary: var(--claude-muted);
+  --panel-text-quaternary: var(--claude-faint);
+  --panel-shadow-card: var(--claude-shadow);
+  --panel-shadow-subtle: none;
+  --sticker-sky-soft: transparent;
+
+  box-sizing: border-box;
+  min-height: 100%;
+  padding: 34px clamp(20px, 3.4vw, 48px) 48px;
+  border-radius: 18px;
+  color: var(--claude-ink);
+  background: var(--claude-bg);
+  font-family: var(--claude-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+:root[data-theme="dark"] .claude-memory {
+  --claude-bg: #262624;
+  --claude-surface: #30302e;
+  --claude-sunken: #1f1e1d;
+  --claude-ink: #faf9f5;
+  --claude-ink-soft: #dcdad2;
+  --claude-muted: #a6a39a;
+  --claude-faint: #7a786f;
+  --claude-line: #3e3e38;
+  --claude-line-strong: #52514a;
+  --claude-clay: #d97757;
+  --claude-clay-soft: #3d2d26;
+  --claude-shadow: 0 1px 2px rgba(0, 0, 0, .25);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) .claude-memory {
+    --claude-bg: #262624;
+    --claude-surface: #30302e;
+    --claude-sunken: #1f1e1d;
+    --claude-ink: #faf9f5;
+    --claude-ink-soft: #dcdad2;
+    --claude-muted: #a6a39a;
+    --claude-faint: #7a786f;
+    --claude-line: #3e3e38;
+    --claude-line-strong: #52514a;
+    --claude-clay: #d97757;
+    --claude-clay-soft: #3d2d26;
+    --claude-shadow: 0 1px 2px rgba(0, 0, 0, .25);
+  }
+}
+
+/* 组件把手写体写在 inline style 里，统一收回为 Claude 的无衬线 UI 字体 */
+.claude-memory *:not(svg):not(svg *) { font-family: inherit !important; }
+.claude-memory .claude-serif,
+.claude-memory .memory-page-header h2,
+.claude-memory .profile-hero h3,
+.claude-memory .profile-hero-stats dd,
+.claude-memory .memory-entry-content,
+.claude-memory .memory-thread-turn p { font-family: var(--claude-serif) !important; }
+
+.claude-spark {
+  display: inline-block;
+  margin-right: 7px;
+  color: var(--claude-clay);
+  font-size: 1.35em;
+  line-height: 1;
+  vertical-align: -0.12em;
+  letter-spacing: 0;
+}
+
+/* ---------- 页头 ---------- */
+.claude-memory .memory-page-header { align-items: flex-end; margin: 0 0 30px; padding-bottom: 24px; border-bottom: 1px solid var(--claude-line); }
+.claude-memory .memory-eyebrow { display: flex; align-items: center; margin-bottom: 12px; color: var(--claude-muted); font-size: 12.5px; font-weight: 500; letter-spacing: .01em; }
+.claude-memory .memory-page-header h2 { font-size: clamp(30px, 3.2vw, 40px); font-weight: 400; letter-spacing: -.015em; line-height: 1.15; color: var(--claude-ink); }
+.claude-memory .memory-page-intro { margin-top: 10px; color: var(--claude-muted); font-size: 14px; line-height: 1.6; }
+.claude-memory .memory-character-switch { padding: 3px; border-color: var(--claude-line); border-radius: 10px; background: var(--claude-sunken); }
+.claude-memory .memory-character-switch button { padding: 6px 14px; border-radius: 8px; color: var(--claude-muted); font-size: 13px; font-weight: 500; transition: color .15s, background .15s, box-shadow .15s; }
+.claude-memory .memory-character-switch button:hover { color: var(--claude-ink); }
+.claude-memory .memory-character-switch button.active { color: var(--claude-ink); background: var(--claude-surface); box-shadow: 0 1px 2px rgba(20, 20, 19, .08), 0 0 0 1px var(--claude-line); }
+.claude-memory .memory-refresh { width: 34px; height: 34px; border-radius: 10px; border-color: var(--claude-line); color: var(--claude-muted); background: var(--claude-surface); transition: color .15s, border-color .15s; }
+.claude-memory .memory-refresh:hover { color: var(--claude-clay); border-color: var(--claude-line-strong); }
+.claude-memory button:focus-visible { outline: 2px solid var(--claude-clay); outline-offset: 2px; }
+
+/* ---------- 分类切换：安静的卡片，选中时陶土描边 ---------- */
+.claude-memory .memory-layer-grid { gap: 10px; margin-bottom: 30px; }
+.claude-memory .memory-layer-card { padding: 14px 15px; border-radius: 12px; border-color: var(--claude-line); background: var(--claude-surface); box-shadow: none; transition: border-color .15s, background .15s, box-shadow .15s; }
+.claude-memory .memory-layer-card:hover { transform: none; border-color: var(--claude-line-strong); background: var(--claude-surface); }
+.claude-memory .memory-layer-card.active { border-color: var(--claude-clay); background: var(--claude-surface); box-shadow: 0 0 0 3px color-mix(in srgb, var(--claude-clay) 12%, transparent); }
+.claude-memory .memory-layer-icon { width: 34px; height: 34px; border-radius: 9px; color: var(--claude-muted); background: var(--claude-sunken); transition: color .15s, background .15s; }
+.claude-memory .memory-layer-card.active .memory-layer-icon { color: var(--claude-clay); background: var(--claude-clay-soft); }
+.claude-memory .memory-layer-copy { gap: 3px; }
+.claude-memory .memory-layer-copy strong { font-size: 13.5px; font-weight: 600; }
+.claude-memory .memory-layer-copy small { color: var(--claude-muted); font-size: 12px; }
+.claude-memory .memory-layer-count { color: var(--claude-faint); font-size: 13px; font-weight: 500; font-variant-numeric: tabular-nums; }
+.claude-memory .memory-layer-card.active .memory-layer-count { color: var(--claude-clay); }
+
+/* ---------- 列表 ---------- */
+.claude-memory .memory-list-heading { color: var(--claude-clay); }
+.claude-memory .memory-list-heading strong { font-size: 16px; font-weight: 600; }
+.claude-memory .memory-list-heading span { color: var(--claude-faint); }
+.claude-memory .memory-search { border-radius: 10px; border-color: var(--claude-line); background: var(--claude-surface); }
+.claude-memory .memory-search:focus-within { border-color: var(--claude-clay); box-shadow: 0 0 0 3px color-mix(in srgb, var(--claude-clay) 14%, transparent); }
+.claude-memory .memory-search input { font-size: 13px; }
+.claude-memory .memory-search-highlight { padding: 0 .1em; border-radius: 3px; background: color-mix(in srgb, var(--claude-clay) 20%, transparent); }
+.claude-memory .memory-list-note { color: var(--claude-muted); font-size: 12.5px; }
+.claude-memory .memory-empty { border-color: var(--claude-line-strong); border-radius: 14px; background: transparent; color: var(--claude-muted); }
+.claude-memory .memory-entry,
+.claude-memory .memory-thread { border: 1px solid var(--claude-line); border-radius: 14px; background: var(--claude-surface); box-shadow: none; transition: border-color .15s, box-shadow .15s; }
+.claude-memory .memory-entry:hover,
+.claude-memory .memory-thread:hover { border-color: var(--claude-line-strong); box-shadow: var(--claude-shadow); }
+.claude-memory .memory-entry { padding: 15px 18px 16px; }
+.claude-memory .memory-entry-kind,
+.claude-memory .memory-thread-speaker { padding: 2px 8px; border-radius: 6px; color: var(--claude-ink-soft); background: var(--claude-sunken); font-size: 11.5px; font-weight: 500; }
+.claude-memory .memory-entry-facts .memory-entry-kind { color: var(--claude-clay); background: var(--claude-clay-soft); }
+.claude-memory .memory-entry-speaker { border-color: var(--claude-line); border-radius: 6px; color: var(--claude-muted); background: transparent; font-weight: 500; }
+.claude-memory .memory-entry-content { font-size: 15px; line-height: 1.65; color: var(--claude-ink); }
+.claude-memory .memory-entry-evidence,
+.claude-memory .memory-entry-hook { border-top: 1px solid var(--claude-line); color: var(--claude-muted); font-size: 12px; }
+.claude-memory .memory-entry-evidence span,
+.claude-memory .memory-entry-hook span { color: var(--claude-clay); font-weight: 600; }
+.claude-memory .memory-thread-header { border-bottom: 1px solid var(--claude-line); }
+.claude-memory .memory-thread-title svg { color: var(--claude-clay); }
+.claude-memory .memory-thread-turn p { font-size: 14.5px; line-height: 1.7; }
+
+/* ============================================================
+   用户画像
+   ============================================================ */
+.claude-memory .profile-root-embedded { column-gap: 20px !important; row-gap: 32px !important; color: var(--claude-ink); }
+
+/* Hero：米白底上的一张安静名片，左侧问候、右侧数字 */
+.claude-memory .profile-hero {
+  align-items: center;
+  gap: 32px;
+  min-height: 0;
+  padding: 28px 32px;
+  border: 1px solid var(--claude-line);
+  border-radius: 16px;
+  background: var(--claude-surface);
+  box-shadow: none;
+}
+.claude-memory .profile-hero::before { content: none; }
+.claude-memory .profile-hero::after {
+  content: '✻';
+  top: 50%;
+  right: -18px;
+  transform: translateY(-50%);
+  color: color-mix(in srgb, var(--claude-clay) 7%, transparent);
+  font-size: 220px;
+}
+.claude-memory .profile-hero-eyebrow { display: flex; align-items: center; color: var(--claude-muted); font-size: 12.5px; font-weight: 500; letter-spacing: .01em; }
+.claude-memory .profile-hero h3 { margin: 12px 0 8px; font-size: clamp(26px, 2.6vw, 34px); font-weight: 400; letter-spacing: -.015em; color: var(--claude-ink); }
+.claude-memory .profile-hero p { max-width: 46ch; color: var(--claude-muted); font-size: 13.5px; line-height: 1.65; }
+.claude-memory .profile-hero-stats { display: flex; gap: 0; margin: 0; padding: 4px 0; }
+.claude-memory .profile-hero-stats > div { display: flex; flex-direction: column-reverse; gap: 4px; min-width: 96px; padding: 0 22px; border-left: 1px solid var(--claude-line); }
+.claude-memory .profile-hero-stats > div:first-child { padding-left: 0; border-left: 0; }
+.claude-memory .profile-hero-stats dt { color: var(--claude-muted); font-size: 12px; white-space: nowrap; }
+.claude-memory .profile-hero-stats dd { margin: 0; color: var(--claude-ink); font-size: 30px; font-weight: 400; line-height: 1.1; font-variant-numeric: tabular-nums; }
+.claude-memory .profile-hero-stats dd small { color: var(--claude-faint); font-size: 15px; }
+
+/* 分区标题：去掉手账贴纸，换成小号无衬线 + 陶土图标 + 一条细线 */
+.claude-memory .profile-root-embedded .profile-section > div:first-child { margin-bottom: 12px !important; color: var(--claude-ink) !important; }
+.claude-memory .profile-root-embedded .profile-section > div:first-child > span:first-child {
+  padding: 0 !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  color: var(--claude-ink) !important;
+  font-size: 14px !important;
+  font-weight: 600 !important;
+  letter-spacing: 0 !important;
+  text-transform: none !important;
+}
+.claude-memory .profile-root-embedded .profile-section > div:first-child > span:first-child svg { color: var(--claude-clay); }
+.claude-memory .profile-root-embedded .profile-section > div:first-child > span:last-child:not(:first-child) {
+  background: var(--claude-line) !important;
+  height: 1px !important;
+  opacity: 1 !important;
+}
+
+/* 卡片：白底细线，无倾斜无浮起 */
+.claude-memory .profile-card,
+.claude-memory .profile-root-embedded .profile-identity-section > div:nth-child(2),
+.claude-memory .profile-root-embedded .profile-recent-section > div:last-child > div,
+.claude-memory .profile-root-embedded .profile-discovery-section > div:last-child > div {
+  border: 1px solid var(--claude-line) !important;
+  border-radius: 14px !important;
+  background: var(--claude-surface) !important;
+  box-shadow: none !important;
+  transform: none !important;
+}
+.claude-memory .profile-card > div[aria-hidden]:first-child { display: none; }
+.claude-memory .profile-card-head svg { color: var(--claude-clay) !important; }
+.claude-memory .profile-card-head > span { font-size: 14px !important; font-weight: 600 !important; }
+
+/* 资料行 */
+.claude-memory .profile-root-embedded .profile-row-divider { margin-left: 18px !important; margin-right: 18px !important; background: var(--claude-line) !important; }
+.claude-memory .profile-root-embedded .profile-identity-row { min-height: 50px !important; padding: 10px 14px 10px 18px !important; }
+.claude-memory .profile-root-embedded .profile-identity-row:hover { background: color-mix(in srgb, var(--claude-sunken) 60%, transparent) !important; }
+.claude-memory .profile-root-embedded .profile-identity-row > span:first-child { min-width: 88px !important; color: var(--claude-muted) !important; font-size: 12.5px !important; font-weight: 500 !important; }
+.claude-memory .profile-root-embedded .profile-identity-row > span:nth-of-type(2) { color: var(--claude-ink) !important; font-size: 14px !important; line-height: 1.55; }
+.claude-memory .profile-root-embedded .profile-identity-row > .profile-field-empty { color: var(--claude-faint) !important; font-style: italic; }
+.claude-memory .profile-root-embedded .profile-identity-row input {
+  padding: 5px 9px !important;
+  border: 1px solid var(--claude-clay) !important;
+  border-radius: 8px !important;
+  background: var(--claude-surface) !important;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--claude-clay) 14%, transparent) !important;
+  font-size: 14px !important;
+}
+
+/* 兴趣 / 自由事实 */
+.claude-memory .profile-root-embedded .profile-interest-row,
+.claude-memory .profile-root-embedded .profile-custom-fact {
+  padding: 10px 14px !important;
+  border: 1px solid var(--claude-line) !important;
+  border-left: 1px solid var(--claude-line) !important;
+  border-radius: 12px !important;
+  background: var(--claude-surface) !important;
+  box-shadow: none !important;
+  transition: border-color .15s;
+}
+.claude-memory .profile-root-embedded .profile-interest-row:hover,
+.claude-memory .profile-root-embedded .profile-custom-fact:hover { border-color: var(--claude-line-strong) !important; }
+.claude-memory .profile-root-embedded .profile-interest-row > span:first-child,
+.claude-memory .profile-root-embedded .profile-custom-fact > span:first-child { font-size: 14px !important; }
+.claude-memory .profile-meter { height: 4px !important; background: var(--claude-sunken) !important; }
+.claude-memory .profile-meter-fill { background: var(--claude-clay) !important; opacity: 1 !important; }
+
+/* 近期状态 */
+.claude-memory .profile-state-item { padding: 6px 2px !important; border-radius: 0 !important; background: transparent !important; }
+.claude-memory .profile-state-item + .profile-state-item { border-top: 1px solid var(--claude-line); }
+.claude-memory .profile-state-item > span:last-child { font-size: 13.5px !important; color: var(--claude-ink-soft) !important; line-height: 1.55; }
+.claude-memory .profile-state-dot { margin-top: 8px !important; width: 4px !important; height: 4px !important; background: var(--claude-clay) !important; }
+
+/* 兴趣探针 */
+.claude-memory .profile-probe-card { border-color: color-mix(in srgb, var(--claude-clay) 30%, var(--claude-line)) !important; }
+.claude-memory .profile-probe-btn { border-radius: 8px !important; font-size: 12.5px !important; transition: background .15s, border-color .15s, color .15s; }
+.claude-memory .profile-probe-btn:not(.is-primary) { border-color: var(--claude-line) !important; color: var(--claude-ink-soft) !important; }
+.claude-memory .profile-probe-btn:not(.is-primary):hover:not(:disabled) { background: var(--claude-sunken) !important; }
+.claude-memory .profile-probe-btn.is-primary { border-color: var(--claude-clay) !important; background: var(--claude-clay) !important; color: #fff !important; }
+.claude-memory .profile-probe-btn.is-primary:hover:not(:disabled) { background: var(--claude-clay-bright) !important; }
+
+/* 输入条：类似 Claude 输入框 —— 白底细线，聚焦陶土光圈 */
+.claude-memory .profile-add-row {
+  padding: 9px 14px !important;
+  border: 1px solid var(--claude-line) !important;
+  border-radius: 12px !important;
+  background: var(--claude-surface) !important;
+  transition: border-color .15s, box-shadow .15s;
+}
+.claude-memory .profile-add-row:hover { border-color: var(--claude-line-strong) !important; }
+.claude-memory .profile-add-row:focus-within { border-color: var(--claude-clay) !important; box-shadow: 0 0 0 3px color-mix(in srgb, var(--claude-clay) 14%, transparent); }
+.claude-memory .profile-add-row input { font-size: 13.5px !important; }
+.claude-memory .profile-root-embedded input::placeholder { color: var(--claude-faint); }
+
+@media (max-width: 760px) {
+  .claude-memory { padding: 22px 16px 36px; }
+  .claude-memory .profile-hero { flex-direction: column; align-items: flex-start; padding: 22px; }
+  .claude-memory .profile-hero-stats { width: 100%; }
+  .claude-memory .profile-hero-stats > div { flex: 1; min-width: 0; padding: 0 14px; }
+}

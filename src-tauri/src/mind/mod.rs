@@ -34,6 +34,7 @@ pub mod attention;
 pub(crate) const COGNITIVE_EVIDENCE_RULES: &str = include_str!("../../prompts/framework/cognitive_evidence.en.md");
 pub mod belief;
 pub mod belief_generator;
+pub mod belief_sources;
 pub mod current_activity;
 pub mod goal;
 pub mod goal_service;

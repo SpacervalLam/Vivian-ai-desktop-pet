@@ -381,52 +381,20 @@ impl AppState {
         // Scheduler
         crate::tools::builtin::todo_tools::set_scheduler(self.scheduler.clone());
         let tool_system_for_cb = self.tool_system.clone();
+        let scheduler_for_cb = self.scheduler.clone();
         self.scheduler
             .set_callback(std::sync::Arc::new(move |task| {
                 let tool_system = tool_system_for_cb.clone();
+                let scheduler = scheduler_for_cb.clone();
                 tauri::async_runtime::spawn(async move {
-                    crate::tools::builtin::todo_tools::handle_task_trigger(task, tool_system).await;
+                    let id = task.id.clone();
+                    let character_id = task.char_id.clone();
+                    let result = crate::tools::builtin::todo_tools::handle_task_trigger(task, tool_system).await;
+                    scheduler.complete_execution(&id, result);
+                    crate::tools::builtin::todo_tools::publish_scheduler_changed(&character_id);
                 });
             }));
 
-        // 预触发回调：在 scheduled_time - 5s 发起主 LLM 调用，
-        // 把定时任务内容说明作为 user_input 注入完整提示词，
-        // 让智能体提前决定如何进行该定时任务。
-        let characters_for_pre = self.characters.clone();
-        let active_char_id_for_pre = self.active_character_id.clone();
-        self.scheduler
-            .set_pre_trigger_callback(std::sync::Arc::new(move |task| {
-                let characters = characters_for_pre.clone();
-                let active = active_char_id_for_pre.clone();
-                tauri::async_runtime::spawn(async move {
-                    // 解析 char_id：优先任务记录的 char_id，回退到当前激活角色
-                    let char_id = if !task.char_id.is_empty() {
-                        task.char_id.clone()
-                    } else {
-                        active.read().clone()
-                    };
-
-                    // 从角色表中获取 brain
-                    let brain = {
-                        let chars = characters.read();
-                        chars.get(&char_id).map(|c| c.brain.clone())
-                    };
-
-                    let brain = match brain {
-                        Some(b) => b,
-                        None => {
-                            tracing::warn!(
-                                task_id = %task.id,
-                                char_id = %char_id,
-                                "[Scheduler] 预触发任务找不到角色，跳过 LLM 调用"
-                            );
-                            return;
-                        }
-                    };
-
-                    crate::tools::builtin::todo_tools::handle_task_pre_trigger(task, brain).await;
-                });
-            }));
 
         // 调度主循环是常驻任务（仅 shutdown 唤醒退出）：reinitialize 会重跑
         // initialize()，不设守卫的话每次改配置都会多 spawn 一个循环，

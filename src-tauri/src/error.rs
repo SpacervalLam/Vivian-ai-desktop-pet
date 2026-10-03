@@ -8,6 +8,14 @@ pub enum VivianError {
     #[error("AI 提供商错误: {0}")]
     Provider(String),
 
+    /// Preserve upstream status and retry delay instead of parsing numbers from messages.
+    #[error("AI 上游 HTTP 请求失败 ({status}): {message}")]
+    ProviderHttp {
+        status: u16,
+        message: String,
+        retry_after_secs: Option<u64>,
+    },
+
     #[error("网络请求失败: {0}")]
     Network(String),
 
@@ -60,6 +68,7 @@ impl VivianError {
         match self {
             VivianError::Config(_) => "CONFIG",
             VivianError::Provider(_) => "PROVIDER",
+            VivianError::ProviderHttp { .. } => "PROVIDER_HTTP",
             VivianError::Network(_) => "NETWORK",
             VivianError::Tool(_) => "TOOL",
             VivianError::Permission(_) => "PERMISSION",

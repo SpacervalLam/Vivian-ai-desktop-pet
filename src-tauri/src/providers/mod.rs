@@ -10,6 +10,7 @@ pub mod openai_responses;
 pub mod openai_agents;
 pub mod reasoning;
 pub mod router;
+pub mod routing;
 pub mod schema;
 pub mod spark;
 pub mod thinking_stripper;
@@ -28,6 +29,7 @@ pub mod protocol_registry;
 pub mod spec;
 pub mod spec_path;
 pub mod sse;
+pub mod transport;
 
 pub use declarative::DeclarativeProvider;
 pub use js_runtime::{

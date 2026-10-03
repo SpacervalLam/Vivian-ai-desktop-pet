@@ -118,11 +118,7 @@ impl OpenAiAgentsProvider {
         if response.status().is_success() {
             return Ok(response);
         }
-        let status = response.status();
-        let detail = response.text().await.unwrap_or_default();
-        Err(VivianError::Provider(format!(
-            "Agents API {status}: {detail}"
-        )))
+        Err(crate::providers::transport::http_error(response).await)
     }
 
     async fn get_json(&self, suffix: &str) -> VivianResult<Value> {
@@ -144,7 +140,8 @@ impl OpenAiAgentsProvider {
         tools: &[ToolDefinition],
         schema: Option<Value>,
     ) -> Value {
-        let mut instructions = crate::providers::base::effective_instructions(&self.instructions).unwrap_or_default();
+        let mut instructions =
+            crate::providers::base::effective_instructions(&self.instructions).unwrap_or_default();
         let mut history = Vec::new();
         let mut content = Vec::new();
         for message in messages {
@@ -187,13 +184,7 @@ impl OpenAiAgentsProvider {
         }
         let mut agent = json!({"model": self.base.model, "instructions": instructions,
             "tools": agent_tools, "multi_agent": {"enabled": false}});
-        let capability =
-            crate::providers::reasoning::resolve_reasoning_capability(&self.base.model);
-        crate::providers::reasoning::apply_responses_reasoning(
-            &mut agent,
-            self.base.effective_reasoning(),
-            &capability,
-        );
+        // Reasoning fields are applied once by the final request adapter.
         agent = self.base.finalize_body(agent);
         if let Some(schema) = schema {
             agent["text"] = json!({"format": {"type": "json_schema", "name": "response", "strict": true, "schema": schema}});
@@ -340,7 +331,10 @@ impl OpenAiAgentsProvider {
                     {
                         result.push((
                             format!("{}:{index}", item["id"].as_str().unwrap_or_default()),
-                            crate::providers::web_citations::attach(value, &crate::providers::web_citations::sources(part)),
+                            crate::providers::web_citations::attach(
+                                value,
+                                &crate::providers::web_citations::sources(part),
+                            ),
                         ));
                     }
                 }
@@ -471,7 +465,9 @@ impl OpenAiAgentsProvider {
                 } else if line.is_empty() && !frame.is_empty() {
                     let event: Value = serde_json::from_str(&std::mem::take(&mut frame))?;
                     let sources = crate::providers::web_citations::sources(&event);
-                    if !sources.is_empty() { let _ = tx.send(StreamEvent::WebSources { sources }).await; }
+                    if !sources.is_empty() {
+                        let _ = tx.send(StreamEvent::WebSources { sources }).await;
+                    }
                     if let Some(id) = event["session"]["id"]
                         .as_str()
                         .or_else(|| event["session_id"].as_str())
@@ -579,7 +575,7 @@ impl OpenAiAgentsProvider {
         tools: Vec<ToolDefinition>,
         schema: Option<Value>,
     ) -> VivianResult<mpsc::Receiver<StreamEvent>> {
-        self.base.check_circuit()?;
+        let guard = crate::providers::transport::RequestGuard::begin(&self.base)?;
         let provider = self.clone();
         let options = ProviderCallOptions::current();
         let (tx, rx) = mpsc::channel(128);
@@ -587,11 +583,15 @@ impl OpenAiAgentsProvider {
             let mut session = None;
             let outcome = tokio::select! {
                 result = tokio::time::timeout(Duration::from_secs(600), provider.run(messages, tools, schema, &tx, &mut session)) => result,
-                _ = tx.closed() => Ok(Err(VivianError::Provider("Agents API 请求已取消".into()))),
+                _ = tx.closed() => {
+                    drop(guard);
+                    if let Some(id) = session.as_deref() { provider.cleanup(id, true).await; }
+                    return;
+                },
             };
             match outcome {
                 Ok(Ok(pending)) => {
-                    provider.base.record_success();
+                    guard.success();
                     if !pending {
                         if let Some(id) = session.as_deref() {
                             provider.cleanup(id, false).await;
@@ -604,14 +604,15 @@ impl OpenAiAgentsProvider {
                         .await;
                 }
                 error => {
-                    provider.base.record_failure();
+                    let error = match error {
+                        Ok(Err(error)) => error,
+                        _ => VivianError::Timeout("Agents API 请求超时".into()),
+                    };
+                    guard.failure(&error);
                     if let Some(id) = session.as_deref() {
                         provider.cleanup(id, true).await;
                     }
-                    let message = match error {
-                        Ok(Err(e)) => e.to_string(),
-                        _ => "Agents API 请求超时".into(),
-                    };
+                    let message = error.to_string();
                     let _ = tx.send(StreamEvent::Error { message }).await;
                 }
             }
@@ -648,13 +649,20 @@ async fn emit_text(
 
 #[async_trait]
 impl BaseProvider for OpenAiAgentsProvider {
-    fn set_request_customization(&self, customization: crate::providers::reasoning_profiles::RequestCustomization) {
+    fn set_request_customization(
+        &self,
+        customization: crate::providers::reasoning_profiles::RequestCustomization,
+    ) {
         *self.base.request_customization.write() = customization;
     }
 
     fn set_request_parameters(&self, temperature: bool, max_tokens: bool) {
-        self.base.send_temperature.store(temperature, std::sync::atomic::Ordering::Relaxed);
-        self.base.send_max_tokens.store(max_tokens, std::sync::atomic::Ordering::Relaxed);
+        self.base
+            .send_temperature
+            .store(temperature, std::sync::atomic::Ordering::Relaxed);
+        self.base
+            .send_max_tokens
+            .store(max_tokens, std::sync::atomic::Ordering::Relaxed);
     }
 
     async fn call_chat(&self, messages: Vec<ChatMessage>) -> VivianResult<String> {
@@ -690,11 +698,17 @@ impl BaseProvider for OpenAiAgentsProvider {
                     cache_read_tokens,
                     cache_write_tokens,
                 } => {
-                    usage.observe(input_tokens, output_tokens, cache_read_tokens, cache_write_tokens);
+                    usage.observe(
+                        input_tokens,
+                        output_tokens,
+                        cache_read_tokens,
+                        cache_write_tokens,
+                    );
                 }
                 StreamEvent::Done { finish_reason } => {
                     usage.record_current(&self.base.model);
-                    response.content = crate::providers::web_citations::attach(&response.content, &web_sources);
+                    response.content =
+                        crate::providers::web_citations::attach(&response.content, &web_sources);
                     response.finish_reason = finish_reason;
                     return Ok(response);
                 }
@@ -738,6 +752,10 @@ impl BaseProvider for OpenAiAgentsProvider {
 
     fn get_model(&self) -> &str {
         &self.base.model
+    }
+
+    fn get_endpoint(&self) -> &str {
+        &self.base.base_url
     }
     fn provider_identity(&self) -> String {
         format!("openai_agents:{}@{}", self.base.model, self.base.base_url)

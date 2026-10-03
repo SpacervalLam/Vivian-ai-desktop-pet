@@ -15,13 +15,10 @@
 //! - 联网搜索：tools 字段中 type=web_search 的内置工具
 
 use std::collections::HashMap;
-use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use async_trait::async_trait;
 use futures::StreamExt;
-use parking_lot::Mutex;
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
@@ -31,16 +28,10 @@ use crate::providers::base::{
     parse_stream_usage, BaseProvider, ChatResponse, ProviderBase, StreamEvent, ToolDefinition,
 };
 use crate::providers::chat_completions::ChatCompletionsProvider;
-use crate::providers::thinking_stripper::{
-    leaks_thinking_in_content, ThinkingStreamStripper,
-};
-use crate::resilience::{classify_error, ErrorCategory};
+use crate::providers::thinking_stripper::{leaks_thinking_in_content, ThinkingStreamStripper};
 use crate::types::response::ChatMessage;
 use crate::utils::messages_cache_key;
 
-const MAX_RETRIES: usize = 2;
-const INITIAL_BACKOFF: Duration = Duration::from_millis(500);
-const LARGE_PROMPT_BYTES: usize = 20_000;
 const CONNECT_TIMEOUT_SECS: u64 = 10;
 
 /// 智谱 GLM API 限制 temperature 最多 2 位小数（错误码 1210）。
@@ -100,12 +91,7 @@ impl ZhipuProvider {
     }
 
     fn endpoint(&self) -> String {
-        let url = self.base.base_url.trim_end_matches('/');
-        if url.ends_with("/chat/completions") {
-            url.to_string()
-        } else {
-            format!("{}/chat/completions", url)
-        }
+        crate::providers::transport::api_endpoint(&self.base.base_url, "chat/completions", None)
     }
 
     fn apply_auth(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
@@ -167,10 +153,8 @@ impl ZhipuProvider {
 
     /// 按当前推理覆盖注入思考控制字段（GLM 思考型模型映射 thinking /
     /// reasoning_effort；Auto 采用服务端默认）。
-    fn apply_reasoning_fields(&self, body: &mut Value, has_tools: bool) {
-        let pref = self.base.effective_reasoning();
-        let cap = crate::providers::reasoning::resolve_reasoning_capability(&self.base.model);
-        crate::providers::reasoning::apply_reasoning_preference(body, pref, &cap, has_tools);
+    fn apply_reasoning_fields(&self, _body: &mut Value, _has_tools: bool) {
+        // Final request adapter owns reasoning fields.
     }
 
     async fn send_request(&self, body: Value) -> VivianResult<Value> {
@@ -208,13 +192,8 @@ impl ZhipuProvider {
             }
         };
 
-        let status = response.status();
-        if !status.is_success() {
-            let text = response.text().await.unwrap_or_default();
-            return Err(VivianError::Provider(format!(
-                "智谱 GLM 请求失败 ({}): {}",
-                status, text
-            )));
+        if !response.status().is_success() {
+            return Err(crate::providers::transport::http_error(response).await);
         }
 
         let json_val: Value = match response.json().await {
@@ -244,47 +223,18 @@ impl ZhipuProvider {
             }
         }
 
-        let body_size = body.to_string().len();
-        let bypass_circuit_failure = body_size > LARGE_PROMPT_BYTES;
-
-        let mut last_error: Option<VivianError> = None;
-        let mut backoff = INITIAL_BACKOFF;
-
-        for attempt in 0..=MAX_RETRIES {
-            if attempt > 0 {
-                tracing::warn!("[zhipu] 第 {} 次重试: {}", attempt, self.base.model);
-                tokio::time::sleep(backoff).await;
-                backoff *= 2;
-            }
-
-            self.base.check_circuit()?;
-
-            match self.send_request(body.clone()).await {
-                Ok(json_val) => {
-                    let content = ChatCompletionsProvider::extract_content(&json_val)?;
-                    crate::providers::base::record_response_usage(&self.base.model, &json_val);
-                    self.base.record_success();
-                    if let Some(prompt) = cache_key_prompt {
-                        self.base.cache_response(prompt, &content);
-                    }
-                    return Ok(content);
-                }
-                Err(err) => {
-                    if !bypass_circuit_failure {
-                        self.base.record_failure();
-                    }
-                    match classify_error(&err) {
-                        ErrorCategory::Permanent => return Err(err),
-                        ErrorCategory::Transient | ErrorCategory::RateLimit => {
-                            last_error = Some(err);
-                            continue;
-                        }
-                    }
-                }
-            }
+        let content = crate::providers::transport::with_retry(&self.base, || async {
+            let json_val = self.send_request(body.clone()).await?;
+            crate::providers::transport::validate_json(&json_val)?;
+            let content = ChatCompletionsProvider::extract_content(&json_val)?;
+            crate::providers::base::record_response_usage(&self.base.model, &json_val);
+            Ok(content)
+        })
+        .await?;
+        if let Some(prompt) = cache_key_prompt {
+            self.base.cache_response(prompt, &content);
         }
-
-        Err(last_error.unwrap_or_else(|| VivianError::Provider("重试次数耗尽".to_string())))
+        Ok(content)
     }
 
     async fn invoke_with_retry(
@@ -299,64 +249,38 @@ impl ZhipuProvider {
             }
         }
 
-        let body_size = body.to_string().len();
-        let bypass_circuit_failure = body_size > LARGE_PROMPT_BYTES;
-
-        let mut last_error: Option<VivianError> = None;
-        let mut backoff = INITIAL_BACKOFF;
-
-        for attempt in 0..=MAX_RETRIES {
-            if attempt > 0 {
-                tracing::warn!(
-                    "[zhipu] 第 {} 次重试(structured): {}",
-                    attempt,
-                    self.base.model
-                );
-                tokio::time::sleep(backoff).await;
-                backoff *= 2;
-            }
-
-            self.base.check_circuit()?;
-
-            match self.send_request(body.clone()).await {
-                Ok(json_val) => {
-                    let resp = ChatCompletionsProvider::extract_chat_response(&json_val)?;
-                    self.base.record_success();
-                    if !resp.has_tool_calls() {
-                        if let Some(prompt) = cache_key_prompt {
-                            self.base.cache_response(prompt, &resp.content);
-                        }
-                    }
-                    return Ok(resp);
-                }
-                Err(err) => {
-                    if !bypass_circuit_failure {
-                        self.base.record_failure();
-                    }
-                    match classify_error(&err) {
-                        ErrorCategory::Permanent => return Err(err),
-                        ErrorCategory::Transient | ErrorCategory::RateLimit => {
-                            last_error = Some(err);
-                            continue;
-                        }
-                    }
-                }
+        let resp = crate::providers::transport::with_retry(&self.base, || async {
+            let json_val = self.send_request(body.clone()).await?;
+            crate::providers::transport::validate_json(&json_val)?;
+            let resp = ChatCompletionsProvider::extract_chat_response(&json_val)?;
+            Ok(resp)
+        })
+        .await?;
+        if !resp.has_tool_calls() {
+            if let Some(prompt) = cache_key_prompt {
+                self.base.cache_response(prompt, &resp.content);
             }
         }
-
-        Err(last_error.unwrap_or_else(|| VivianError::Provider("重试次数耗尽".to_string())))
+        Ok(resp)
     }
 }
 
 #[async_trait]
 impl BaseProvider for ZhipuProvider {
-    fn set_request_customization(&self, customization: crate::providers::reasoning_profiles::RequestCustomization) {
+    fn set_request_customization(
+        &self,
+        customization: crate::providers::reasoning_profiles::RequestCustomization,
+    ) {
         *self.base.request_customization.write() = customization;
     }
 
     fn set_request_parameters(&self, temperature: bool, max_tokens: bool) {
-        self.base.send_temperature.store(temperature, std::sync::atomic::Ordering::Relaxed);
-        self.base.send_max_tokens.store(max_tokens, std::sync::atomic::Ordering::Relaxed);
+        self.base
+            .send_temperature
+            .store(temperature, std::sync::atomic::Ordering::Relaxed);
+        self.base
+            .send_max_tokens
+            .store(max_tokens, std::sync::atomic::Ordering::Relaxed);
     }
 
     async fn call_chat(&self, messages: Vec<ChatMessage>) -> VivianResult<String> {
@@ -427,7 +351,7 @@ impl BaseProvider for ZhipuProvider {
             &messages,
             &format!("call_stream_chat model={}", self.base.model),
         );
-        self.base.check_circuit()?;
+        let guard = crate::providers::transport::RequestGuard::begin(&self.base)?;
 
         let mut body = json!({
             "model": self.base.model,
@@ -446,25 +370,17 @@ impl BaseProvider for ZhipuProvider {
             .apply_auth(client.post(&self.endpoint()))
             .header("Content-Type", "application/json")
             .json(&self.base.finalize_body(body.clone()));
-        let response = req.send().await?;
-
-        if !response.status().is_success() {
-            self.base.record_failure();
-            let status = response.status();
-            let text = response.text().await.unwrap_or_default();
-            return Err(VivianError::Provider(format!(
-                "智谱 GLM 流式请求失败 ({}): {}",
-                status, text
-            )));
-        }
-
-        self.base.record_success();
+        let response = req.send().await;
+        let (response, guard) = guard.response(response).await?;
 
         let (tx, rx) = mpsc::channel::<StreamEvent>(32);
         let leaks = leaks_thinking_in_content(&self.base.model);
 
         tokio::spawn(async move {
-            let mut stream = response.bytes_stream();
+            let mut stream = crate::providers::sse::normalize_sse_until_closed(
+                response.bytes_stream(),
+                tx.clone(),
+            );
             let mut buffer = String::new();
             let mut stripper = if leaks {
                 Some(ThinkingStreamStripper::new())
@@ -476,7 +392,11 @@ impl BaseProvider for ZhipuProvider {
                 let chunk = match chunk_result {
                     Ok(c) => c,
                     Err(e) => {
-                        let _ = tx.send(StreamEvent::Error { message: e.to_string() }).await;
+                        let _ = tx
+                            .send(StreamEvent::Error {
+                                message: e.to_string(),
+                            })
+                            .await;
                         return;
                     }
                 };
@@ -517,7 +437,11 @@ impl BaseProvider for ZhipuProvider {
                                                 content.to_string()
                                             };
                                             if !out.is_empty() {
-                                                if tx.send(StreamEvent::Text { content: out }).await.is_err() {
+                                                if tx
+                                                    .send(StreamEvent::Text { content: out })
+                                                    .await
+                                                    .is_err()
+                                                {
                                                     return;
                                                 }
                                             }
@@ -538,11 +462,15 @@ impl BaseProvider for ZhipuProvider {
             }
         });
 
-        Ok(rx)
+        Ok(crate::providers::transport::track_stream(rx, guard))
     }
 
     fn get_model(&self) -> &str {
         &self.base.model
+    }
+
+    fn get_endpoint(&self) -> &str {
+        &self.base.base_url
     }
 
     fn provider_identity(&self) -> String {
@@ -573,25 +501,7 @@ impl BaseProvider for ZhipuProvider {
 
     fn bind_tools(&self, tools: Vec<ToolDefinition>) -> VivianResult<Box<dyn BaseProvider>> {
         Ok(Box::new(ZhipuProvider {
-            base: ProviderBase {
-                api_key: self.base.api_key.clone(),
-                base_url: self.base.base_url.clone(),
-                model: self.base.model.clone(),
-                temperature: zhipu_temperature(self.base.effective_temperature()),
-                max_tokens: self.base.effective_max_tokens(),
-                circuit_breaker: Arc::clone(&self.base.circuit_breaker),
-                request_cache: Mutex::new(HashMap::new()),
-                enable_search: AtomicBool::new(self.base.is_enable_search()),
-                proxy: self.base.proxy.clone(),
-                client: self.base.client.clone(),
-                max_tokens_override: std::sync::atomic::AtomicU32::new(0),
-                temperature_override: std::sync::atomic::AtomicU64::new(0),
-                omit_temperature: std::sync::atomic::AtomicBool::new(self.base.should_omit_temperature()),
-                send_temperature: std::sync::atomic::AtomicBool::new(self.base.send_temperature.load(std::sync::atomic::Ordering::Relaxed)),
-                send_max_tokens: std::sync::atomic::AtomicBool::new(self.base.send_max_tokens.load(std::sync::atomic::Ordering::Relaxed)),
-                reasoning_pref: parking_lot::RwLock::new(*self.base.reasoning_pref.read()),
-                request_customization: parking_lot::RwLock::new(self.base.request_customization.read().clone()),
-            },
+            base: self.base.fork(),
             tools,
             instructions: self.instructions.clone(),
         }))
@@ -631,7 +541,7 @@ impl BaseProvider for ZhipuProvider {
             &messages,
             &format!("stream_with_tools model={}", self.base.model),
         );
-        self.base.check_circuit()?;
+        let guard = crate::providers::transport::RequestGuard::begin(&self.base)?;
 
         let tools_field: Value = if tools.is_empty() {
             Value::Array(vec![])
@@ -672,25 +582,17 @@ impl BaseProvider for ZhipuProvider {
             .apply_auth(client.post(&self.endpoint()))
             .header("Content-Type", "application/json")
             .json(&self.base.finalize_body(body.clone()));
-        let response = req.send().await?;
-
-        if !response.status().is_success() {
-            self.base.record_failure();
-            let status = response.status();
-            let text = response.text().await.unwrap_or_default();
-            return Err(VivianError::Provider(format!(
-                "智谱 GLM 流式请求失败 ({}): {}",
-                status, text
-            )));
-        }
-
-        self.base.record_success();
+        let response = req.send().await;
+        let (response, guard) = guard.response(response).await?;
 
         let (tx, rx) = mpsc::channel::<StreamEvent>(64);
         let leaks = leaks_thinking_in_content(&self.base.model);
 
         tokio::spawn(async move {
-            let mut stream = response.bytes_stream();
+            let mut stream = crate::providers::sse::normalize_sse_until_closed(
+                response.bytes_stream(),
+                tx.clone(),
+            );
             let mut buffer = String::new();
             let mut finish_reason: Option<String> = None;
             let mut stripper = if leaks {
@@ -775,9 +677,7 @@ impl BaseProvider for ZhipuProvider {
                                         }
                                     }
 
-                                    if let Some(reasoning) =
-                                        delta["reasoning_content"].as_str()
-                                    {
+                                    if let Some(reasoning) = delta["reasoning_content"].as_str() {
                                         if !reasoning.is_empty() {
                                             if tx
                                                 .send(StreamEvent::Thinking {
@@ -793,18 +693,17 @@ impl BaseProvider for ZhipuProvider {
 
                                     if let Some(tcs) = delta["tool_calls"].as_array() {
                                         for tc in tcs {
-                                            let index =
-                                                tc["index"].as_u64().unwrap_or(0) as usize;
-                                            let entry = tool_calls
-                                                .entry(index)
-                                                .or_insert((None, None, String::new()));
+                                            let index = tc["index"].as_u64().unwrap_or(0) as usize;
+                                            let entry = tool_calls.entry(index).or_insert((
+                                                None,
+                                                None,
+                                                String::new(),
+                                            ));
 
                                             if let Some(id) = tc["id"].as_str() {
                                                 entry.0 = Some(id.to_string());
                                             }
-                                            if let Some(name) =
-                                                tc["function"]["name"].as_str()
-                                            {
+                                            if let Some(name) = tc["function"]["name"].as_str() {
                                                 if !name.is_empty() {
                                                     entry.1 = Some(name.to_string());
                                                 }
@@ -820,8 +719,7 @@ impl BaseProvider for ZhipuProvider {
                                                     index,
                                                     id: entry.0.clone(),
                                                     name: entry.1.clone(),
-                                                    arguments_delta: tc["function"]
-                                                        ["arguments"]
+                                                    arguments_delta: tc["function"]["arguments"]
                                                         .as_str()
                                                         .map(String::from),
                                                 })
@@ -852,6 +750,6 @@ impl BaseProvider for ZhipuProvider {
                 .await;
         });
 
-        Ok(rx)
+        Ok(crate::providers::transport::track_stream(rx, guard))
     }
 }

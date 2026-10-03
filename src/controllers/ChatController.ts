@@ -52,6 +52,7 @@ interface StreamSession {
   instantReactLayer2Fired: boolean;
   /** 当前会话是否已实际创建流式气泡（避免误用上一条回复的气泡） */
   bubbleStarted: boolean;
+  presentation?: { expression: string; motion: string; expressionDurationMs?: number };
 }
 
 /** 生成 stream_id（优先用 crypto.randomUUID，降级到时间戳+随机数） */
@@ -89,24 +90,54 @@ class ChatControllerClass {
       await listen<{ expression?: string; expression_duration_ms?: number; motion?: string; stream_id?: string; character_id?: string }>('chat:meta', (event) => {
         // 按 stream_id 过滤：忽略不属于本窗口的 meta 事件，防止其他角色的表情/动作在当前角色桌宠上播放
         const metaSid = event.payload.stream_id ?? '';
-        if (metaSid && !this.sessions.has(metaSid)) return;
+        const session = this.sessions.get(metaSid);
+        if (!session) return;
         const meta = {
           expression: event.payload.expression ?? '',
           expressionDurationMs: event.payload.expression_duration_ms,
           motion: event.payload.motion ?? '',
         };
-        this.lastMeta = meta;
+        session.presentation = {
+          expression: meta.expression || session.presentation?.expression || '',
+          motion: meta.motion || session.presentation?.motion || '',
+          expressionDurationMs: meta.expressionDurationMs ?? session.presentation?.expressionDurationMs,
+        };
+        this.lastMeta = session.presentation;
+        TtsStreamQueue.beginStream(metaSid, session.characterId);
         // 同步表达层信息到 TTS 队列,后续 speak_text 调用会携带 presentation
         TtsStreamQueue.setPresentation(meta);
-        this.handlers.onMeta?.(meta);
+        if (!TtsStreamQueue.isEnabled()) this.handlers.onMeta?.(meta);
       }),
     );
+    let pendingPresentation: Parameters<NonNullable<ChatHandlers['onMeta']>>[0] | undefined;
+    const applyPendingPresentation = () => {
+      if (!pendingPresentation) return;
+      this.handlers.onMeta?.(pendingPresentation);
+      pendingPresentation = undefined;
+    };
+    this.unlisteners.push(await listen<{ speaker_id: string; presentation?: { expression?: string; motion?: string; expression_duration_ms?: number } }>('presentation:start', event => {
+      if (event.payload.speaker_id !== getCharacterId()) return;
+      const presentation = event.payload.presentation;
+      pendingPresentation = presentation ? { expression: presentation.expression ?? '', motion: presentation.motion ?? '', expressionDurationMs: presentation.expression_duration_ms } : undefined;
+      // Planner start precedes synthesis; apply expression at actual audio start.
+      if (!TtsStreamQueue.isEnabled()) applyPendingPresentation();
+    }));
+    for (const name of ['tts:started', 'tts:error']) {
+      this.unlisteners.push(await listen<{ character_id?: string }>(name, event => {
+        if (event.payload.character_id && event.payload.character_id !== getCharacterId()) return;
+        applyPendingPresentation();
+      }));
+    }
+    this.unlisteners.push(await listen<{ speaker_id: string }>('presentation:stop', event => {
+      if (event.payload.speaker_id === getCharacterId()) pendingPresentation = undefined;
+    }));
     // chat:inline_meta 事件在流式输出过程中即时触发（内联标签扫描器剥离 <e>/<m> 标签），
     // 让表情/动作在文字流式输出过程中即时切换，无需等待 ExpressionMotionRunnable 的第二次 LLM 调用。
     this.unlisteners.push(
       await listen<{ type: string; name: string; duration_ms?: number | null; stream_id?: string; character_id?: string }>('chat:inline_meta', (event) => {
         const metaSid = event.payload.stream_id ?? '';
-        if (metaSid && !this.sessions.has(metaSid)) return;
+        const session = this.sessions.get(metaSid);
+        if (!session) return;
         const { type, name } = event.payload;
         // 将 discriminated 格式映射为 onMeta 的 flat 格式
         const meta = {
@@ -114,9 +145,15 @@ class ChatControllerClass {
           expressionDurationMs: type === 'expression' ? (event.payload.duration_ms ?? undefined) : undefined,
           motion: type === 'motion' ? name : '',
         };
-        this.lastMeta = meta;
+        session.presentation = {
+          expression: meta.expression || session.presentation?.expression || '',
+          motion: meta.motion || session.presentation?.motion || '',
+          expressionDurationMs: meta.expressionDurationMs ?? session.presentation?.expressionDurationMs,
+        };
+        this.lastMeta = session.presentation;
+        TtsStreamQueue.beginStream(metaSid, session.characterId);
         TtsStreamQueue.setPresentation(meta);
-        this.handlers.onMeta?.(meta);
+        if (!TtsStreamQueue.isEnabled()) this.handlers.onMeta?.(meta);
       }),
     );
     this.unlisteners.push(
@@ -125,6 +162,7 @@ class ChatControllerClass {
         const sid = event.payload.stream_id ?? '';
         const session = this.sessions.get(sid);
         if (!session) return;
+        TtsStreamQueue.beginStream(sid, session.characterId);
         // 按 stream_id 路由：只累积当前 session 的文本
         session.text += chunk;
         session.streamParser.feed(chunk);
@@ -137,7 +175,7 @@ class ChatControllerClass {
 
         // Layer 2: AI 文本首段完成时触发即时反应（覆盖 Layer 1）
         // 触发条件：出现换行符 或 累积文本达 40 字符（仅触发一次）
-        if (!session.instantReactLayer2Fired) {
+        if (!session.instantReactLayer2Fired && !session.presentation?.expression) {
           const hasNewline = chunk.includes('\n');
           const textLen = session.text.length;
           if (hasNewline || textLen >= 40) {
@@ -162,6 +200,15 @@ class ChatControllerClass {
         const session = this.sessions.get(sid);
         if (!session) return;
         const finalText = event.payload.text || session.text;
+        TtsStreamQueue.beginStream(sid, session.characterId);
+        if (session.presentation) TtsStreamQueue.setPresentation(session.presentation);
+        if (!session.text.trim() && finalText.trim()) {
+          TtsStreamQueue.setPresentation({ expression: event.payload.expression ?? session.presentation?.expression ?? '', motion: event.payload.motion ?? session.presentation?.motion ?? '' });
+          TtsStreamQueue.feed(finalText);
+        }
+        if (!TtsStreamQueue.isEnabled() && (event.payload.expression || event.payload.motion)) {
+          this.handlers.onMeta?.({ expression: event.payload.expression ?? '', motion: event.payload.motion ?? '' });
+        }
         // 流式结束：把 TTS 队列中剩余的 buffer 送出
         TtsStreamQueue.flush();
         // 捕获 LLM 在 JSON 中判定的真实用户情绪，供 proactive tick 使用
@@ -387,7 +434,7 @@ class ChatControllerClass {
       sticker: response.sticker,
       timestamp: assistantTimestamp,
       stream_id: sid,
-      character_id: getCharacterId() ?? undefined,
+      character_id: session.characterId ?? getCharacterId() ?? undefined,
       channel: ch,
     });
     // 正常情况下 chunk 已创建流式气泡，这里只需结算并启动自动关闭。
@@ -400,6 +447,10 @@ class ChatControllerClass {
       BubbleController.showBubble(finalText, undefined, { sticker: response.sticker ?? undefined });
     } else if (response.sticker) {
       BubbleController.showSticker(response.sticker);
+    }
+    if (TtsStreamQueue.isEnabled() && finalText.trim()) {
+      const release = BubbleController.holdForSpeech();
+      void TtsStreamQueue.waitForDrain().finally(release);
     }
     this.handlers.onResponseReceived?.(response, sid);
     session.resolve(response);

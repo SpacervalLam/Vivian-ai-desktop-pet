@@ -12,13 +12,10 @@
 //! - 流式工具调用：`choices[0].delta.tool_calls[]` 按 index 累积
 
 use std::collections::HashMap;
-use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use async_trait::async_trait;
 use futures::StreamExt;
-use parking_lot::Mutex;
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
@@ -31,13 +28,9 @@ use crate::providers::base::{
 use crate::providers::thinking_stripper::{
     leaks_thinking_in_content, strip_thinking_segments, ThinkingStreamStripper,
 };
-use crate::resilience::{classify_error, ErrorCategory};
 use crate::types::response::ChatMessage;
 use crate::utils::messages_cache_key;
 
-const MAX_RETRIES: usize = 2;
-const INITIAL_BACKOFF: Duration = Duration::from_millis(500);
-const LARGE_PROMPT_BYTES: usize = 20_000;
 const CONNECT_TIMEOUT_SECS: u64 = 10;
 
 /// 标准 Chat Completions 协议 Provider
@@ -79,12 +72,7 @@ impl ChatCompletionsProvider {
     }
 
     fn endpoint(&self) -> String {
-        let url = self.base.base_url.trim_end_matches('/');
-        if url.ends_with("/chat/completions") {
-            url.to_string()
-        } else {
-            format!("{}/chat/completions", url)
-        }
+        crate::providers::transport::api_endpoint(&self.base.base_url, "chat/completions", None)
     }
 
     /// 构造请求头：api_key 为空时不发送 Authorization（支持 Ollama 等无鉴权本地服务）
@@ -102,7 +90,10 @@ impl ChatCompletionsProvider {
     /// - user + images：content 转数组 `[{"type":"text",...},{"type":"image_url",...}]`
     /// - assistant + tool_calls：追加 `tool_calls` 字段
     /// - tool：`{"role":"tool","tool_call_id":"...","content":"..."}`
-    pub(crate) fn build_messages(messages: &[ChatMessage], instructions: &Option<String>) -> Vec<Value> {
+    pub(crate) fn build_messages(
+        messages: &[ChatMessage],
+        instructions: &Option<String>,
+    ) -> Vec<Value> {
         let instructions = crate::providers::base::effective_instructions(instructions);
         let mut result: Vec<Value> = Vec::new();
 
@@ -212,10 +203,8 @@ impl ChatCompletionsProvider {
 
     /// 按当前推理覆盖注入思考控制字段（思考型模型按能力映射 thinking /
     /// reasoning_effort / enable_thinking；非思考模型不注入）。
-    fn apply_reasoning_fields(&self, body: &mut Value, has_tools: bool) {
-        let pref = self.base.effective_reasoning();
-        let cap = crate::providers::reasoning::resolve_reasoning_capability(&self.base.model);
-        crate::providers::reasoning::apply_reasoning_preference(body, pref, &cap, has_tools);
+    fn apply_reasoning_fields(&self, _body: &mut Value, _has_tools: bool) {
+        // Final request adapter owns reasoning fields.
     }
 
     /// 注入 response_format（按能力分级：json_schema / json_object / 不注入）
@@ -272,13 +261,8 @@ impl ChatCompletionsProvider {
             }
         };
 
-        let status = response.status();
-        if !status.is_success() {
-            let text = response.text().await.unwrap_or_default();
-            return Err(VivianError::Provider(format!(
-                "Chat Completions 请求失败 ({}): {}",
-                status, text
-            )));
+        if !response.status().is_success() {
+            return Err(crate::providers::transport::http_error(response).await);
         }
 
         let json_val: Value = match response.json().await {
@@ -348,7 +332,10 @@ impl ChatCompletionsProvider {
             }
         }
 
-        let content = crate::providers::web_citations::attach(&content, &crate::providers::web_citations::sources(json_val));
+        let content = crate::providers::web_citations::attach(
+            &content,
+            &crate::providers::web_citations::sources(json_val),
+        );
         Ok(ChatResponse {
             content,
             tool_calls,
@@ -358,12 +345,23 @@ impl ChatCompletionsProvider {
         })
     }
 
-    async fn call_with_retry(&self, body: Value, cache_key_prompt: Option<&str>) -> VivianResult<String> {
+    async fn call_with_retry(
+        &self,
+        body: Value,
+        cache_key_prompt: Option<&str>,
+    ) -> VivianResult<String> {
         // Tool/search responses must be evaluated against current evidence and permissions.
         let cache_key_prompt = if body.get("tools").is_some()
             || body.get("web_search_options").is_some()
-            || body.get("enable_search").and_then(serde_json::Value::as_bool) == Some(true)
-        { None } else { cache_key_prompt };
+            || body
+                .get("enable_search")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+        {
+            None
+        } else {
+            cache_key_prompt
+        };
         if let Some(prompt) = cache_key_prompt {
             if let Some(cached) = self.base.get_cached_response(prompt) {
                 tracing::debug!("[chat_completions] 命中缓存: {}", self.base.model);
@@ -371,125 +369,83 @@ impl ChatCompletionsProvider {
             }
         }
 
-        let body_size = body.to_string().len();
-        let bypass_circuit_failure = body_size > LARGE_PROMPT_BYTES;
-
-        let mut last_error: Option<VivianError> = None;
-        let mut backoff = INITIAL_BACKOFF;
-
-        for attempt in 0..=MAX_RETRIES {
-            if attempt > 0 {
-                tracing::warn!(
-                    "[chat_completions] 第 {} 次重试: {}",
-                    attempt,
-                    self.base.model
-                );
-                tokio::time::sleep(backoff).await;
-                backoff *= 2;
-            }
-
-            self.base.check_circuit()?;
-
-            match self.send_request(body.clone()).await {
-                Ok(json_val) => {
-                    let content = Self::extract_content(&json_val)?;
-                    let content = crate::providers::web_citations::attach(&content, &crate::providers::web_citations::sources(&json_val));
-                    crate::providers::base::record_response_usage(&self.base.model, &json_val);
-                    self.base.record_success();
-                    if let Some(prompt) = cache_key_prompt {
-                        self.base.cache_response(prompt, &content);
-                    }
-                    return Ok(content);
-                }
-                Err(err) => {
-                    if !bypass_circuit_failure {
-                        self.base.record_failure();
-                    }
-                    match classify_error(&err) {
-                        ErrorCategory::Permanent => return Err(err),
-                        ErrorCategory::Transient | ErrorCategory::RateLimit => {
-                            last_error = Some(err);
-                            continue;
-                        }
-                    }
-                }
-            }
+        let content = crate::providers::transport::with_retry(&self.base, || async {
+            let json_val = self.send_request(body.clone()).await?;
+            crate::providers::transport::validate_json(&json_val)?;
+            let content = Self::extract_content(&json_val)?;
+            let content = crate::providers::web_citations::attach(
+                &content,
+                &crate::providers::web_citations::sources(&json_val),
+            );
+            crate::providers::base::record_response_usage(&self.base.model, &json_val);
+            Ok(content)
+        })
+        .await?;
+        if let Some(prompt) = cache_key_prompt {
+            self.base.cache_response(prompt, &content);
         }
-
-        Err(last_error.unwrap_or_else(|| VivianError::Provider("重试次数耗尽".to_string())))
+        Ok(content)
     }
 
-    async fn invoke_with_retry(&self, body: Value, cache_key_prompt: Option<&str>) -> VivianResult<ChatResponse> {
+    async fn invoke_with_retry(
+        &self,
+        body: Value,
+        cache_key_prompt: Option<&str>,
+    ) -> VivianResult<ChatResponse> {
         // Tool/search responses must be evaluated against current evidence and permissions.
         let cache_key_prompt = if body.get("tools").is_some()
             || body.get("web_search_options").is_some()
-            || body.get("enable_search").and_then(serde_json::Value::as_bool) == Some(true)
-        { None } else { cache_key_prompt };
+            || body
+                .get("enable_search")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+        {
+            None
+        } else {
+            cache_key_prompt
+        };
         if let Some(prompt) = cache_key_prompt {
             if let Some(cached) = self.base.get_cached_response(prompt) {
-                tracing::debug!("[chat_completions] 命中缓存(structured): {}", self.base.model);
+                tracing::debug!(
+                    "[chat_completions] 命中缓存(structured): {}",
+                    self.base.model
+                );
                 return Ok(ChatResponse::from_text(cached));
             }
         }
 
-        let body_size = body.to_string().len();
-        let bypass_circuit_failure = body_size > LARGE_PROMPT_BYTES;
-
-        let mut last_error: Option<VivianError> = None;
-        let mut backoff = INITIAL_BACKOFF;
-
-        for attempt in 0..=MAX_RETRIES {
-            if attempt > 0 {
-                tracing::warn!(
-                    "[chat_completions] 第 {} 次重试(structured): {}",
-                    attempt,
-                    self.base.model
-                );
-                tokio::time::sleep(backoff).await;
-                backoff *= 2;
-            }
-
-            self.base.check_circuit()?;
-
-            match self.send_request(body.clone()).await {
-                Ok(json_val) => {
-                    let resp = Self::extract_chat_response(&json_val)?;
-                    self.base.record_success();
-                    if !resp.has_tool_calls() {
-                        if let Some(prompt) = cache_key_prompt {
-                            self.base.cache_response(prompt, &resp.content);
-                        }
-                    }
-                    return Ok(resp);
-                }
-                Err(err) => {
-                    if !bypass_circuit_failure {
-                        self.base.record_failure();
-                    }
-                    match classify_error(&err) {
-                        ErrorCategory::Permanent => return Err(err),
-                        ErrorCategory::Transient | ErrorCategory::RateLimit => {
-                            last_error = Some(err);
-                            continue;
-                        }
-                    }
-                }
+        let resp = crate::providers::transport::with_retry(&self.base, || async {
+            let json_val = self.send_request(body.clone()).await?;
+            crate::providers::transport::validate_json(&json_val)?;
+            let resp = Self::extract_chat_response(&json_val)?;
+            Ok(resp)
+        })
+        .await?;
+        if !resp.has_tool_calls() {
+            if let Some(prompt) = cache_key_prompt {
+                self.base.cache_response(prompt, &resp.content);
             }
         }
-
-        Err(last_error.unwrap_or_else(|| VivianError::Provider("重试次数耗尽".to_string())))
+        Ok(resp)
     }
 }
 
 #[async_trait]
 impl BaseProvider for ChatCompletionsProvider {
-    fn set_request_customization(&self, customization: crate::providers::reasoning_profiles::RequestCustomization) {
+    fn set_request_customization(
+        &self,
+        customization: crate::providers::reasoning_profiles::RequestCustomization,
+    ) {
         *self.base.request_customization.write() = customization;
     }
 
     fn set_request_parameters(&self, temperature: bool, max_tokens: bool) {
-        self.base.send_temperature.store(temperature, std::sync::atomic::Ordering::Relaxed);
-        self.base.send_max_tokens.store(max_tokens, std::sync::atomic::Ordering::Relaxed);
+        self.base
+            .send_temperature
+            .store(temperature, std::sync::atomic::Ordering::Relaxed);
+        self.base
+            .send_max_tokens
+            .store(max_tokens, std::sync::atomic::Ordering::Relaxed);
     }
 
     async fn call_chat(&self, messages: Vec<ChatMessage>) -> VivianResult<String> {
@@ -568,7 +524,7 @@ impl BaseProvider for ChatCompletionsProvider {
             &messages,
             &format!("call_stream_chat model={}", self.base.model),
         );
-        self.base.check_circuit()?;
+        let guard = crate::providers::transport::RequestGuard::begin(&self.base)?;
 
         let mut body = json!({
             "model": self.base.model,
@@ -591,25 +547,17 @@ impl BaseProvider for ChatCompletionsProvider {
             .apply_auth(client.post(&self.endpoint()))
             .header("Content-Type", "application/json")
             .json(&self.base.finalize_body(body.clone()));
-        let response = req.send().await?;
-
-        if !response.status().is_success() {
-            self.base.record_failure();
-            let status = response.status();
-            let text = response.text().await.unwrap_or_default();
-            return Err(VivianError::Provider(format!(
-                "Chat Completions 流式请求失败 ({}): {}",
-                status, text
-            )));
-        }
-
-        self.base.record_success();
+        let response = req.send().await;
+        let (response, guard) = guard.response(response).await?;
 
         let (tx, rx) = mpsc::channel::<StreamEvent>(32);
         let leaks = leaks_thinking_in_content(&self.base.model);
 
         tokio::spawn(async move {
-            let mut stream = response.bytes_stream();
+            let mut stream = crate::providers::sse::normalize_sse_until_closed(
+                response.bytes_stream(),
+                tx.clone(),
+            );
             let mut buffer = String::new();
             let mut stripper = if leaks {
                 Some(ThinkingStreamStripper::new())
@@ -621,7 +569,11 @@ impl BaseProvider for ChatCompletionsProvider {
                 let chunk = match chunk_result {
                     Ok(c) => c,
                     Err(e) => {
-                        let _ = tx.send(StreamEvent::Error { message: e.to_string() }).await;
+                        let _ = tx
+                            .send(StreamEvent::Error {
+                                message: e.to_string(),
+                            })
+                            .await;
                         return;
                     }
                 };
@@ -649,7 +601,9 @@ impl BaseProvider for ChatCompletionsProvider {
                         }
                         if let Ok(json_val) = serde_json::from_str::<Value>(data) {
                             let sources = crate::providers::web_citations::sources(&json_val);
-                            if !sources.is_empty() { let _ = tx.send(StreamEvent::WebSources { sources }).await; }
+                            if !sources.is_empty() {
+                                let _ = tx.send(StreamEvent::WebSources { sources }).await;
+                            }
                             if let Some(usage) = parse_stream_usage(&json_val["usage"]) {
                                 let _ = tx.send(usage).await;
                             }
@@ -664,7 +618,11 @@ impl BaseProvider for ChatCompletionsProvider {
                                                 content.to_string()
                                             };
                                             if !out.is_empty() {
-                                                if tx.send(StreamEvent::Text { content: out }).await.is_err() {
+                                                if tx
+                                                    .send(StreamEvent::Text { content: out })
+                                                    .await
+                                                    .is_err()
+                                                {
                                                     return;
                                                 }
                                             }
@@ -685,15 +643,22 @@ impl BaseProvider for ChatCompletionsProvider {
             }
         });
 
-        Ok(rx)
+        Ok(crate::providers::transport::track_stream(rx, guard))
     }
 
     fn get_model(&self) -> &str {
         &self.base.model
     }
 
+    fn get_endpoint(&self) -> &str {
+        &self.base.base_url
+    }
+
     fn provider_identity(&self) -> String {
-        format!("chat_completions:{}@{}", self.base.model, self.base.base_url)
+        format!(
+            "chat_completions:{}@{}",
+            self.base.model, self.base.base_url
+        )
     }
 
     fn get_circuit_breaker_stats(&self) -> Value {
@@ -718,30 +683,9 @@ impl BaseProvider for ChatCompletionsProvider {
         true
     }
 
-    fn bind_tools(
-        &self,
-        tools: Vec<ToolDefinition>,
-    ) -> VivianResult<Box<dyn BaseProvider>> {
+    fn bind_tools(&self, tools: Vec<ToolDefinition>) -> VivianResult<Box<dyn BaseProvider>> {
         Ok(Box::new(ChatCompletionsProvider {
-            base: ProviderBase {
-                api_key: self.base.api_key.clone(),
-                base_url: self.base.base_url.clone(),
-                model: self.base.model.clone(),
-                temperature: self.base.effective_temperature(),
-                max_tokens: self.base.effective_max_tokens(),
-                circuit_breaker: Arc::clone(&self.base.circuit_breaker),
-                request_cache: Mutex::new(HashMap::new()),
-                enable_search: AtomicBool::new(self.base.is_enable_search()),
-                proxy: self.base.proxy.clone(),
-                client: self.base.client.clone(),
-                max_tokens_override: std::sync::atomic::AtomicU32::new(0),
-                temperature_override: std::sync::atomic::AtomicU64::new(0),
-                omit_temperature: std::sync::atomic::AtomicBool::new(self.base.should_omit_temperature()),
-                send_temperature: std::sync::atomic::AtomicBool::new(self.base.send_temperature.load(std::sync::atomic::Ordering::Relaxed)),
-                send_max_tokens: std::sync::atomic::AtomicBool::new(self.base.send_max_tokens.load(std::sync::atomic::Ordering::Relaxed)),
-                reasoning_pref: parking_lot::RwLock::new(*self.base.reasoning_pref.read()),
-                request_customization: parking_lot::RwLock::new(self.base.request_customization.read().clone()),
-            },
+            base: self.base.fork(),
             tools,
             instructions: self.instructions.clone(),
         }))
@@ -792,7 +736,7 @@ impl BaseProvider for ChatCompletionsProvider {
             &messages,
             &format!("stream_with_tools model={}", self.base.model),
         );
-        self.base.check_circuit()?;
+        let guard = crate::providers::transport::RequestGuard::begin(&self.base)?;
 
         let tools_field: Value = if tools.is_empty() {
             Value::Array(vec![])
@@ -838,25 +782,17 @@ impl BaseProvider for ChatCompletionsProvider {
             .apply_auth(client.post(&self.endpoint()))
             .header("Content-Type", "application/json")
             .json(&self.base.finalize_body(body.clone()));
-        let response = req.send().await?;
-
-        if !response.status().is_success() {
-            self.base.record_failure();
-            let status = response.status();
-            let text = response.text().await.unwrap_or_default();
-            return Err(VivianError::Provider(format!(
-                "Chat Completions 流式请求失败 ({}): {}",
-                status, text
-            )));
-        }
-
-        self.base.record_success();
+        let response = req.send().await;
+        let (response, guard) = guard.response(response).await?;
 
         let (tx, rx) = mpsc::channel::<StreamEvent>(64);
         let leaks = leaks_thinking_in_content(&self.base.model);
 
         tokio::spawn(async move {
-            let mut stream = response.bytes_stream();
+            let mut stream = crate::providers::sse::normalize_sse_until_closed(
+                response.bytes_stream(),
+                tx.clone(),
+            );
             let mut buffer = String::new();
             let mut finish_reason: Option<String> = None;
             let mut stripper = if leaks {
@@ -916,7 +852,9 @@ impl BaseProvider for ChatCompletionsProvider {
 
                         if let Ok(json_val) = serde_json::from_str::<Value>(data) {
                             let sources = crate::providers::web_citations::sources(&json_val);
-                            if !sources.is_empty() { let _ = tx.send(StreamEvent::WebSources { sources }).await; }
+                            if !sources.is_empty() {
+                                let _ = tx.send(StreamEvent::WebSources { sources }).await;
+                            }
                             // usage chunk：stream_options.include_usage 下末尾 chunk 携带（choices 为空数组）
                             if let Some(ev) = parse_stream_usage(&json_val["usage"]) {
                                 let _ = tx.send(ev).await;
@@ -951,9 +889,7 @@ impl BaseProvider for ChatCompletionsProvider {
                                     }
 
                                     // 推理增量（DeepSeek / Qwen 风格）
-                                    if let Some(reasoning) =
-                                        delta["reasoning_content"].as_str()
-                                    {
+                                    if let Some(reasoning) = delta["reasoning_content"].as_str() {
                                         if !reasoning.is_empty() {
                                             if tx
                                                 .send(StreamEvent::Thinking {
@@ -970,18 +906,17 @@ impl BaseProvider for ChatCompletionsProvider {
                                     // 工具调用增量
                                     if let Some(tcs) = delta["tool_calls"].as_array() {
                                         for tc in tcs {
-                                            let index =
-                                                tc["index"].as_u64().unwrap_or(0) as usize;
-                                            let entry = tool_calls
-                                                .entry(index)
-                                                .or_insert((None, None, String::new()));
+                                            let index = tc["index"].as_u64().unwrap_or(0) as usize;
+                                            let entry = tool_calls.entry(index).or_insert((
+                                                None,
+                                                None,
+                                                String::new(),
+                                            ));
 
                                             if let Some(id) = tc["id"].as_str() {
                                                 entry.0 = Some(id.to_string());
                                             }
-                                            if let Some(name) =
-                                                tc["function"]["name"].as_str()
-                                            {
+                                            if let Some(name) = tc["function"]["name"].as_str() {
                                                 if !name.is_empty() {
                                                     entry.1 = Some(name.to_string());
                                                 }
@@ -997,8 +932,7 @@ impl BaseProvider for ChatCompletionsProvider {
                                                     index,
                                                     id: entry.0.clone(),
                                                     name: entry.1.clone(),
-                                                    arguments_delta: tc["function"]
-                                                        ["arguments"]
+                                                    arguments_delta: tc["function"]["arguments"]
                                                         .as_str()
                                                         .map(String::from),
                                                 })
@@ -1030,6 +964,6 @@ impl BaseProvider for ChatCompletionsProvider {
                 .await;
         });
 
-        Ok(rx)
+        Ok(crate::providers::transport::track_stream(rx, guard))
     }
 }

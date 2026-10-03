@@ -68,6 +68,9 @@ fn task_to_json(task: &crate::brain::scheduler::ScheduledTask) -> Value {
         "status": format!("{:?}", task.status).to_lowercase(),
         "priority": priority_str(task.priority),
         "remaining_seconds": task.remaining_seconds(),
+        "reminder_context": if task.task_type == TaskType::Reminder {
+            Some(crate::brain::reminder_delivery::ReminderContext::new(task.scheduled_time, crate::brain::scheduler::now_ts_public(), &task.delivery))
+        } else { None },
     })
 }
 

@@ -278,6 +278,8 @@ pub struct PluginInventoryEntry {
     pub reason: Option<String>,
     /// 插件目录路径（便于用户定位/编辑）
     pub dir: String,
+    /// executable / data / guidance / mixed; packaging never makes a skill executable.
+    pub capability_kind: String,
 }
 
 /// 插件装载结果
@@ -1533,6 +1535,7 @@ pub fn scan_inventory() -> Vec<PluginInventoryEntry> {
                     .unwrap_or_default()
                     .to_string();
                 out.push(PluginInventoryEntry {
+                    capability_kind: crate::plugin_contributions::contribution_kind(!manifest.tools.is_empty() || !manifest.mcp_servers.is_empty() || !manifest.js.is_empty(), manifest.providers.is_some() || manifest.embeddings.is_some(), !manifest.skills.is_empty()).into(),
                     skills: expanded_skills(&pdir, &name, &manifest.skills)
                         .into_iter()
                         .map(|(n, _, _, _)| n)
@@ -1573,6 +1576,7 @@ pub fn scan_inventory() -> Vec<PluginInventoryEntry> {
                 name,
                 version: String::new(),
                 description: String::new(),
+                capability_kind: "unknown".into(),
                 skills: Vec::new(),
                 tools: Vec::new(),
                 mcp_servers: Vec::new(),

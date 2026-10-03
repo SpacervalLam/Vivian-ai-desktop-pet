@@ -1,10 +1,11 @@
 //! 记忆巩固 —— 夜间/空闲时整理记忆，模拟"睡眠巩固"
 //!
 //! 在深夜（2-5 点）或用户长时间离场时触发：
-//! 1. 调用现有 ConsolidationPipeline 跑完整三阶段（ShortTerm→MidTerm→LongTerm→Insight）
+//! 1. 调用 ConsolidationPipeline 跑 Stage 1（ShortTerm→MidTerm SessionSummary）；
+//!    长期事实统一由 AutoExtractor 从原始对话提取，不再由摘要二次抽取
 //! 2. 强化近期重要记忆（提升 importance）
 //! 3. 衰减无关的临时记忆
-//! 4. Belief/Goal 生成（Stage 4）：从 Insight + LongTerm 提炼信念写入 Mind
+//! 4. Belief/Goal 生成（Stage 4）：从 LongTerm 提炼信念写入 Mind
 //! 5. memory.md 整理（Stage 5）：由 [`MemoryConsolidator::tidy_memory_md`] 按 [`TidyNeed`] 分派增量整理或全量压缩
 //!
 //! 设计：复用现有 MemoryManager 与 ConsolidationPipeline，不重复造轮子。

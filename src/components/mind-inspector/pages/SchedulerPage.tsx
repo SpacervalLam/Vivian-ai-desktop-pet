@@ -27,6 +27,7 @@ interface ScheduledTask {
   repeat_interval?: number | null;
   status: TaskStatus;
   created_at: number;
+  delivery?: { confirmed_count: number; next_attempt_at?: number | null; last_delivered_at?: number | null };
 }
 
 type Tab = 'active' | 'history' | 'all';
@@ -72,7 +73,9 @@ function timestampToLocalDateTime(ts: number): string {
 }
 
 const SchedulerPage: React.FC = () => {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
+  const zh = i18n.language.startsWith('zh');
+  const ja = i18n.language.startsWith('ja');
   const [tasks, setTasks] = useState<ScheduledTask[]>([]);
   const [tab, setTab] = useState<Tab>('active');
   const [loading, setLoading] = useState(true);
@@ -372,6 +375,10 @@ const SchedulerPage: React.FC = () => {
                   }}
                 >
                   <div>⏰ {formatDateTime(task.scheduled_time)}</div>
+                  {task.task_type === 'reminder' && task.delivery && <div>
+                    {zh ? '已确认投递' : ja ? '配信確認済み' : 'Confirmed deliveries'}：{task.delivery.confirmed_count}
+                    {task.delivery.next_attempt_at && <> · {zh ? '下次重试' : ja ? '再試行予定' : 'Retry at'} {formatDateTime(task.delivery.next_attempt_at)}</>}
+                  </div>}
                   {isActive && (
                     <div style={{ color: STATUS_COLORS[task.status] }}>
                       {t('scheduler_window.remaining', {

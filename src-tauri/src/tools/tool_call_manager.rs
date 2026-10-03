@@ -12,7 +12,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value};
 
 use super::executor::execute_tool_use;
 use super::discovery::{DiscoverableTool, ToolSearchIndex};
@@ -1729,6 +1729,7 @@ impl Tool for ToolSearchTool {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
     use super::*;
 
     struct ReceiptProbe {

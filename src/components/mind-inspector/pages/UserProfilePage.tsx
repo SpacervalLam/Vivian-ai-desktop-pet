@@ -176,6 +176,9 @@ const Reveal: React.FC<{ delay?: number; style?: React.CSSProperties; className?
 // 工具函数
 // ============================================================
 
+// 嵌入「记忆」页时使用 Claude 风格的陶土橙强调色（需为 hex：Tag 等组件会拼接透明度后缀）
+const CLAUDE_CLAY = '#C96442';
+
 const toMs = (ts: number): number => (ts < 1e12 ? ts * 1000 : ts);
 
 const formatRelative = (ts: number, t: TFunction): string => {
@@ -536,8 +539,8 @@ const L1StateCard: React.FC<L1StateCardProps> = ({
   emptyText,
   accent,
 }) => (
-  <Card style={{ flex: 1, minWidth: 0 }}>
-    <div style={{ display: 'flex', alignItems: 'center', gap: SPACING.xs, marginBottom: SPACING.sm }}>
+  <Card className="profile-card profile-state-card" style={{ flex: 1, minWidth: 0 }}>
+    <div className="profile-card-head" style={{ display: 'flex', alignItems: 'center', gap: SPACING.xs, marginBottom: SPACING.sm }}>
       <span style={{ color: accent, display: 'inline-flex' }}>{icon}</span>
       <span style={{ ...TYPO.h3, color: COLORS.textPrimary }}>{title}</span>
       <span
@@ -559,6 +562,7 @@ const L1StateCard: React.FC<L1StateCardProps> = ({
         {items.map((item, i) => (
           <div
             key={`${title}-${i}`}
+            className="profile-state-item"
             style={{
               display: 'flex',
               alignItems: 'flex-start',
@@ -570,6 +574,7 @@ const L1StateCard: React.FC<L1StateCardProps> = ({
           >
             <span
               aria-hidden
+              className="profile-state-dot"
               style={{
                 marginTop: 6,
                 width: 5,
@@ -619,6 +624,7 @@ const AddCustomFact: React.FC<{ onAdd: (content: string) => Promise<void> }> = (
 
   return (
     <div
+      className="profile-add-row"
       style={{
         display: 'flex',
         alignItems: 'center',
@@ -706,6 +712,7 @@ const InterestRow: React.FC<{
       </span>
       {/* 权重条 */}
       <div
+        className="profile-meter"
         style={{
           flex: 1,
           minWidth: 0,
@@ -716,6 +723,7 @@ const InterestRow: React.FC<{
         }}
       >
         <div
+          className="profile-meter-fill"
           style={{
             width: `${pct}%`,
             height: '100%',
@@ -756,6 +764,7 @@ const ProbeCard: React.FC<{
   t: TFunction;
 }> = ({ probe, accent, onRespond, busy, t }) => (
   <Card
+    className="profile-card profile-probe-card"
     style={{
       display: 'flex',
       flexDirection: 'column',
@@ -799,6 +808,7 @@ const ProbeCard: React.FC<{
         type="button"
         disabled={busy}
         onClick={() => onRespond('confirm')}
+        className="profile-probe-btn is-primary"
         style={{
           display: 'inline-flex',
           alignItems: 'center',
@@ -822,6 +832,7 @@ const ProbeCard: React.FC<{
         type="button"
         disabled={busy}
         onClick={() => onRespond('reject')}
+        className="profile-probe-btn"
         style={{
           display: 'inline-flex',
           alignItems: 'center',
@@ -845,6 +856,7 @@ const ProbeCard: React.FC<{
         type="button"
         disabled={busy}
         onClick={() => onRespond('defer')}
+        className="profile-probe-btn"
         style={{
           display: 'inline-flex',
           alignItems: 'center',
@@ -1055,6 +1067,7 @@ const DiscoverySection: React.FC<{
 
       {/* Bangumi 公开收藏导入 */}
       <div
+        className="profile-add-row"
         style={{
           display: 'flex',
           alignItems: 'center',
@@ -1140,8 +1153,9 @@ const DiscoverySection: React.FC<{
 
       {/* 不喜欢主题 + 探索开放度 */}
       <div style={{ display: 'flex', gap: SPACING.cardGap, flexWrap: 'wrap' }}>
-        <Card style={{ flex: 1.4, minWidth: 260 }}>
+        <Card className="profile-card" style={{ flex: 1.4, minWidth: 260 }}>
           <div
+            className="profile-card-head"
             style={{
               display: 'flex',
               alignItems: 'center',
@@ -1155,6 +1169,7 @@ const DiscoverySection: React.FC<{
             </span>
           </div>
           <div
+            className="profile-add-row"
             style={{
               display: 'flex',
               alignItems: 'center',
@@ -1217,8 +1232,9 @@ const DiscoverySection: React.FC<{
           )}
         </Card>
 
-        <Card style={{ flex: 1, minWidth: 200 }}>
+        <Card className="profile-card" style={{ flex: 1, minWidth: 200 }}>
           <div
+            className="profile-card-head"
             style={{
               display: 'flex',
               alignItems: 'center',
@@ -1232,6 +1248,7 @@ const DiscoverySection: React.FC<{
             </span>
           </div>
           <div
+            className="profile-meter"
             style={{
               height: 6,
               borderRadius: RADIUS.pill,
@@ -1241,6 +1258,7 @@ const DiscoverySection: React.FC<{
             }}
           >
             <div
+              className="profile-meter-fill"
               style={{
                 width: `${opennessPct}%`,
                 height: '100%',
@@ -1386,7 +1404,7 @@ const UserProfilePage: React.FC<{ characterId?: CharacterId; embedded?: boolean 
   const l0Fields = BASIC_FIELD_DEFS.filter((d) => d.layer === 'L0');
   const l05Fields = BASIC_FIELD_DEFS.filter((d) => d.layer === 'L0.5');
 
-  const accent = CHARACTER_ACCENT[character];
+  const accent = embedded ? CLAUDE_CLAY : CHARACTER_ACCENT[character];
   const l1 = profile?.recent_state;
   const hasL1Data =
     !!l1 &&
@@ -1440,14 +1458,15 @@ const UserProfilePage: React.FC<{ characterId?: CharacterId; embedded?: boolean 
       <Reveal delay={0} className="profile-intro-reveal">
         {embedded && <div className="profile-hero">
           <div className="profile-hero-copy">
-            <span className="profile-hero-eyebrow">PERSONAL PROFILE · {character.toUpperCase()}</span>
-            <h3>{basicMap.get('name')?.content || '关于你'}<span aria-hidden="true"> ✦</span></h3>
-            <p>{character === 'vivian' ? 'Vivian' : 'Nana'} 从相处中慢慢认识的你。</p>
+            <span className="profile-hero-eyebrow"><span className="claude-spark" aria-hidden="true">✻</span>Personal profile · {character === 'vivian' ? 'Vivian' : 'Nana'}</span>
+            <h3>{basicMap.get('name')?.content || '关于你'}</h3>
+            <p>{character === 'vivian' ? 'Vivian' : 'Nana'} 从相处中慢慢认识的你。双击字段即可修改，锁定后不会被自动覆盖。</p>
           </div>
-          <div className="profile-hero-stats" aria-label="画像概览">
-            <span><strong>{profile?.basic_facts.filter((fact) => fact.content).length ?? 0}</strong> 已了解的资料</span>
-            <span><strong>{profile?.custom_facts.length ?? 0}</strong> 补充事实</span>
-          </div>
+          <dl className="profile-hero-stats" aria-label="画像概览">
+            <div><dt>已了解的资料</dt><dd>{BASIC_FIELD_DEFS.filter((def) => basicMap.get(def.type)?.content).length}<small> / {BASIC_FIELD_DEFS.length}</small></dd></div>
+            <div><dt>补充事实</dt><dd>{profile?.custom_facts.length ?? 0}</dd></div>
+            <div><dt>近期线索</dt><dd>{(l1?.recent_goals.length ?? 0) + (l1?.current_projects.length ?? 0) + (l1?.recent_preferences.length ?? 0)}</dd></div>
+          </dl>
         </div>}
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: SPACING.md }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: SPACING.md }}>
@@ -1475,7 +1494,7 @@ const UserProfilePage: React.FC<{ characterId?: CharacterId; embedded?: boolean 
               {t('mind_inspector.profile.section_basic')}
             </span>
           </SectionTitle>
-          <Card style={{ padding: 0, overflow: 'hidden' }}>
+          <Card className="profile-card profile-list-card" style={{ padding: 0, overflow: 'hidden' }}>
             {l0Fields.map((def, idx) => (
               <Fragment key={def.type}>
                 {idx > 0 && <RowDivider />}
@@ -1502,7 +1521,7 @@ const UserProfilePage: React.FC<{ characterId?: CharacterId; embedded?: boolean 
               {t('mind_inspector.profile.section_preferences')}
             </span>
           </SectionTitle>
-          <Card style={{ padding: 0, overflow: 'hidden' }}>
+          <Card className="profile-card profile-list-card" style={{ padding: 0, overflow: 'hidden' }}>
             {l05Fields.map((def, idx) => (
               <Fragment key={def.type}>
                 {idx > 0 && <RowDivider />}

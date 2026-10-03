@@ -8,8 +8,8 @@
 //!   若期间用户请求过唤醒（pending_exit_to_online），由 finish_task 自动切回 Online。
 //!
 //! - **Rest 记忆沉淀**：进入 Rest 状态时 spawn 一个 `run_memory_consolidation` 任务，
-//!   直接调用 `ConsolidationPipeline::run(&memory)` 跑完整三阶段（Stage 1/2/3 自带
-//!   条件门控，不满足时直接返回 None，不调 LLM，因此 Rest 期间多次触发是安全的）。
+//!   直接调用 `ConsolidationPipeline::run(&memory)` 跑 Stage 1（自带条件门控，
+//!   不满足时直接返回 None、不调 LLM，因此 Rest 期间多次触发是安全的）。
 //!   同样在结束时调 `presence.finish_task()` 收尾。
 //!
 //! 所有任务都通过 `tokio::spawn` 异步执行，不阻塞 transition 调用方。
@@ -200,8 +200,6 @@ pub fn spawn_memory_consolidation(
                 "character_id": &char_id,
                 "task": "memory_consolidation",
                 "stage1_summaries": report.stage1_summaries,
-                "stage2_facts": report.stage2_facts,
-                "stage3_insights": report.stage3_insights,
             }),
         );
     });

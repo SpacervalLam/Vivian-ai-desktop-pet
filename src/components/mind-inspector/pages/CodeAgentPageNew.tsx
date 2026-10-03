@@ -3681,6 +3681,9 @@ const CodeAgentPage: React.FC = () => {
   const guideRef = useRef<string | null>(null);
   const [turnStart, setTurnStart] = useState<number | null>(null);
   const [turnElapsed, setTurnElapsed] = useState(0);
+  const [turnOutput, setTurnOutput] = useState({ tokens: 0, estimated: true });
+  const confirmedOutputRef = useRef(0);
+  const streamedEstimateRef = useRef(0);
   const [atBottom, setAtBottom] = useState(true);
   const atBottomRef = useRef(true);
   // 工具轮次预算耗尽：任务被硬停止后，弹出去向选择条（继续 / 补充说明后继续 / 停止）
@@ -4553,12 +4556,16 @@ const CodeAgentPage: React.FC = () => {
 
   useEffect(() => {
     if (running) {
-      setTurnStart((prev) => prev ?? Date.now());
+      const lastUser = [...messages].reverse().find(message => message.role === 'user');
+      setTurnStart(lastUser?.timestamp ?? Date.now());
+      confirmedOutputRef.current = 0;
+      streamedEstimateRef.current = 0;
+      setTurnOutput({ tokens: 0, estimated: true });
     } else {
       setTurnStart(null);
       setTurnElapsed(0);
     }
-  }, [running]);
+  }, [running, activeId]);
 
   useEffect(() => {
     if (turnStart === null) return;
@@ -4799,15 +4806,31 @@ const CodeAgentPage: React.FC = () => {
         if (kind === 'compact') setCompacting(false);
         append({ role: 'notice', content: message, timestamp: Date.now() });
       });
+      const countOutput = (content: string) => {
+        // Streaming providers usually report usage only at the end of a request.
+        // Until then, label a mixed CJK/Latin character estimate explicitly.
+        streamedEstimateRef.current += Array.from(content).reduce((sum, char) => sum + (/[^\u0000-\u007f]/.test(char) ? 1 : 0.25), 0);
+        setTurnOutput({ tokens: confirmedOutputRef.current + Math.ceil(streamedEstimateRef.current), estimated: true });
+      };
+      await add('coding:turn_tokens', (p) => {
+        if (!isMine(p)) return;
+        const tokens = (p as { output_tokens: number }).output_tokens;
+        if (!Number.isFinite(tokens) || tokens < 0) return;
+        confirmedOutputRef.current = tokens;
+        streamedEstimateRef.current = 0;
+        setTurnOutput({ tokens, estimated: (p as { estimated?: boolean }).estimated === true });
+      });
       await add('coding:thinking_chunk', (p) => {
         if (!isMine(p)) return;
         setThinking(true);
+        countOutput((p as { content: string }).content);
         setThinkingText((prev) => prev + (p as { content: string }).content);
       });
       await add('coding:chunk', (p) => {
         if (!isMine(p)) return;
         setThinking(false);
         setThinkingText('');
+        countOutput((p as { content: string }).content);
         setStreamingText((prev) => prev + (p as { content: string }).content);
       });
       await add('coding:assistant_message', (p) => {
@@ -6128,6 +6151,12 @@ const CodeAgentPage: React.FC = () => {
                           )}
                         </div>
                       )}
+                      {running && <div className="codex-live-turn" aria-label={t('workbench.liveTurn')}>
+                        <Loader2 size={15} className="codex-spin" aria-hidden />
+                        <span>{formatClock(turnElapsed)}</span><span aria-hidden>·</span>
+                        <span title={t(turnOutput.estimated ? 'workbench.tokensEstimated' : 'workbench.tokensReported')}>{turnOutput.estimated ? '≈ ' : ''}{turnOutput.tokens.toLocaleString()} tokens</span>
+                        <span aria-hidden>·</span><span className="codex-live-turn-state">{t(compacting ? 'mind_inspector.code_compacting' : ask ? 'workbench.awaitAnswer' : thinking ? 'mind_inspector.code_thinking' : streamingText ? 'workbench.replyStreaming' : 'workbench.taskRunning')}</span>
+                      </div>}
                     </div>
                   </>
                 )}

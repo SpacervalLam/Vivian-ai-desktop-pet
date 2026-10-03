@@ -12,9 +12,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::utils::path::get_user_data_dir;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use crate::utils::path::get_user_data_dir;
 
 /// 已完成/取消/失败任务的保留期（秒）
 ///
@@ -130,12 +130,19 @@ pub struct ScheduledTask {
     /// 此字段防止每秒 tick 重复发起预触发。
     #[serde(default)]
     pub pre_triggered: bool,
+    #[serde(default)]
+    pub delivery: super::reminder_delivery::DeliveryState,
 }
 
 impl ScheduledTask {
     /// 生成 8 字符随机 ID（取 uuid 前 8 字符）。
     fn generate_id() -> String {
-        uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("00000000").to_string()
+        uuid::Uuid::new_v4()
+            .to_string()
+            .split('-')
+            .next()
+            .unwrap_or("00000000")
+            .to_string()
     }
 
     pub fn new_reminder(message: impl Into<String>, scheduled_time: f64) -> Self {
@@ -154,6 +161,7 @@ impl ScheduledTask {
             completed_at: None,
             char_id: String::new(),
             pre_triggered: false,
+            delivery: Default::default(),
         }
     }
 
@@ -177,6 +185,7 @@ impl ScheduledTask {
             completed_at: None,
             char_id: String::new(),
             pre_triggered: false,
+            delivery: Default::default(),
         }
     }
 
@@ -215,15 +224,13 @@ pub struct Scheduler {
     inner: Arc<Mutex<SchedulerInner>>,
     /// 持久化文件路径（None = 不持久化）。
     persistence_path: Option<PathBuf>,
+    persistence_gate: Arc<Mutex<()>>,
     shutdown: Arc<tokio::sync::Notify>,
 }
 
 struct SchedulerInner {
     tasks: HashMap<String, ScheduledTask>,
     callback: Option<SchedulerCallback>,
-    /// 预触发回调：在 `scheduled_time - 5s` 到 `scheduled_time` 之间触发一次，
-    /// 让主 LLM 提前决定如何进行该定时任务。
-    pre_trigger_callback: Option<SchedulerCallback>,
 }
 
 impl Scheduler {
@@ -238,9 +245,9 @@ impl Scheduler {
             inner: Arc::new(Mutex::new(SchedulerInner {
                 tasks: HashMap::new(),
                 callback: None,
-                pre_trigger_callback: None,
             })),
             persistence_path,
+            persistence_gate: Arc::new(Mutex::new(())),
             shutdown: Arc::new(tokio::sync::Notify::new()),
         };
         if let Some(path) = scheduler.persistence_path.clone() {
@@ -249,26 +256,13 @@ impl Scheduler {
         scheduler
     }
 
-    /// 设置任务触发回调。
+    /// Register dispatch; completion must be reported with complete_execution.
     pub fn set_callback(&self, callback: SchedulerCallback) {
         self.inner.lock().callback = Some(callback);
     }
 
-    /// 设置预触发回调。
-    ///
-    /// 在 `scheduled_time - 5s` 到 `scheduled_time` 之间触发一次，
-    /// 用于发起主 LLM 调用，让智能体提前决定如何进行定时任务。
-    /// 与正常 `set_callback` 分离，避免影响到期触发的原有行为。
-    pub fn set_pre_trigger_callback(&self, callback: SchedulerCallback) {
-        self.inner.lock().pre_trigger_callback = Some(callback);
-    }
-
     /// 调度一个提醒任务，返回任务 ID。
-    pub fn schedule_reminder(
-        &self,
-        message: impl Into<String>,
-        scheduled_time: f64,
-    ) -> String {
+    pub fn schedule_reminder(&self, message: impl Into<String>, scheduled_time: f64) -> String {
         let task = ScheduledTask::new_reminder(message, scheduled_time);
         let id = task.id.clone();
         self.insert_task(task);
@@ -289,11 +283,7 @@ impl Scheduler {
     }
 
     /// 调度一个重复任务，返回任务 ID。
-    pub fn schedule_repeat(
-        &self,
-        task: ScheduledTask,
-        interval_seconds: u64,
-    ) -> String {
+    pub fn schedule_repeat(&self, task: ScheduledTask, interval_seconds: u64) -> String {
         let mut task = task;
         task.repeat_interval = Some(interval_seconds);
         let id = task.id.clone();
@@ -307,6 +297,7 @@ impl Scheduler {
         if let Some(task) = inner.tasks.get_mut(task_id) {
             if task.status == TaskStatus::Pending {
                 task.scheduled_time = new_time;
+                task.delivery.next_attempt_at = None;
                 drop(inner);
                 self.persist();
                 tracing::info!(task_id, new_time, "[Scheduler] 任务时间已更新");
@@ -385,7 +376,11 @@ impl Scheduler {
                 let now = now_ts();
                 if task.scheduled_time <= now {
                     task.scheduled_time = now + 60.0;
-                    tracing::info!(task_id, new_time = task.scheduled_time, "[Scheduler] 恢复时已顺延过期任务");
+                    tracing::info!(
+                        task_id,
+                        new_time = task.scheduled_time,
+                        "[Scheduler] 恢复时已顺延过期任务"
+                    );
                 }
                 drop(inner);
                 self.persist();
@@ -403,8 +398,7 @@ impl Scheduler {
 
     /// 列出所有任务（按计划时间升序）。
     pub fn list_tasks(&self) -> Vec<ScheduledTask> {
-        let mut tasks: Vec<ScheduledTask> =
-            self.inner.lock().tasks.values().cloned().collect();
+        let mut tasks: Vec<ScheduledTask> = self.inner.lock().tasks.values().cloned().collect();
         tasks.sort_by(|a, b| {
             a.scheduled_time
                 .partial_cmp(&b.scheduled_time)
@@ -427,9 +421,11 @@ impl Scheduler {
             .collect();
         // 先按优先级降序，再按计划时间升序
         tasks.sort_by(|a, b| {
-            b.priority
-                .cmp(&a.priority)
-                .then_with(|| a.scheduled_time.partial_cmp(&b.scheduled_time).unwrap_or(std::cmp::Ordering::Equal))
+            b.priority.cmp(&a.priority).then_with(|| {
+                a.scheduled_time
+                    .partial_cmp(&b.scheduled_time)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
         });
         tasks
     }
@@ -460,56 +456,18 @@ impl Scheduler {
     /// 集成 InterruptionController：执行前检查是否适合打扰，
     /// 避免在用户专注/静默期触发提醒。
     pub async fn tick(&self) {
-        // ── 预触发检测：在 scheduled_time - 5s 到 scheduled_time 之间
-        // 发起一次主 LLM 调用，让智能体提前决定如何进行定时任务 ──
-        const PRE_TRIGGER_LEAD_SECS: f64 = 5.0;
-        let now = now_ts();
-        let pre_trigger_tasks: Vec<ScheduledTask> = {
-            let mut inner = self.inner.lock();
-            let callback = inner.pre_trigger_callback.clone();
-            if callback.is_none() {
-                // 没有注册预触发回调：跳过检测，避免无谓遍历
-                Vec::new()
-            } else {
-                inner
-                    .tasks
-                    .values_mut()
-                    .filter(|t| {
-                        // 仅 Reminder 类型参与预触发（ToolCall 类型本身即智能体自执行，无需预触发）
-                        t.status == TaskStatus::Pending
-                            && !t.pre_triggered
-                            && t.task_type == TaskType::Reminder
-                            && t.scheduled_time > now
-                            && t.scheduled_time - now <= PRE_TRIGGER_LEAD_SECS
-                    })
-                    .map(|t| {
-                        t.pre_triggered = true;
-                        t.clone()
-                    })
-                    .collect()
-            }
-        };
-
-        if !pre_trigger_tasks.is_empty() {
-            self.persist();
-            let callback = self.inner.lock().pre_trigger_callback.clone();
-            if let Some(cb) = callback {
-                for task in pre_trigger_tasks {
-                    let cb = cb.clone();
-                    tokio::spawn(async move {
-                        cb(task);
-                    });
-                }
-            }
-        }
-
+        // Reminders are delivered only at their due time; preparation is not delivery.
         let due_tasks: Vec<ScheduledTask> = {
             let inner = self.inner.lock();
             inner
                 .tasks
                 .values()
                 .filter(|t| {
-                    t.status == TaskStatus::Pending && t.scheduled_time <= now_ts()
+                    t.status == TaskStatus::Pending
+                        && t.scheduled_time <= now_ts()
+                        && t.delivery
+                            .next_attempt_at
+                            .map_or(true, |retry| retry <= now_ts())
                 })
                 .cloned()
                 .collect()
@@ -518,7 +476,9 @@ impl Scheduler {
         for task in due_tasks {
             // 打扰检查：将任务优先级映射到 InterruptPriority
             let interrupt_priority = match task.priority {
-                Priority::Urgent => crate::brain::interruption_controller::InterruptPriority::Urgent,
+                Priority::Urgent => {
+                    crate::brain::interruption_controller::InterruptPriority::Urgent
+                }
                 Priority::High => crate::brain::interruption_controller::InterruptPriority::High,
                 Priority::Low | Priority::Normal => {
                     crate::brain::interruption_controller::InterruptPriority::Normal
@@ -537,55 +497,25 @@ impl Scheduler {
                     continue;
                 }
             }
-            // 标记为 Running
-            {
-                let mut inner = self.inner.lock();
-                if let Some(t) = inner.tasks.get_mut(&task.id) {
-                    t.status = TaskStatus::Running;
-                }
-            }
-
-            // 触发回调
             let callback = self.inner.lock().callback.clone();
-            if let Some(cb) = callback {
-                let task_clone = task.clone();
-                let inner_arc = self.inner.clone();
-                let persistence_path = self.persistence_path.clone();
-                // 异步执行，避免阻塞调度循环
+            let Some(cb) = callback else {
+                continue;
+            };
+            let reserved = {
+                let mut inner = self.inner.lock();
+                match inner.tasks.get_mut(&task.id) {
+                    Some(t) if t.status == TaskStatus::Pending => {
+                        t.status = TaskStatus::Running;
+                        t.delivery.attempts = t.delivery.attempts.saturating_add(1);
+                        Some(t.clone())
+                    }
+                    _ => None,
+                }
+            };
+            if let Some(task) = reserved {
+                self.persist();
                 tokio::spawn(async move {
-                    let cb = cb.clone();
-                    // 在 try_into 之前先 clone 任务用于回调
-                    cb(task_clone.clone());
-
-                    // 处理重复任务或清理
-                    {
-                        let mut guard = inner_arc.lock();
-                        if let Some(t) = guard.tasks.get_mut(&task_clone.id) {
-                            if let Some(interval) = t.repeat_interval {
-                                // 基于原定时间 + interval 计算下次触发，避免时间漂移
-                                // 若已过去则顺延到未来（避免立即触发或累积延迟）
-                                let interval_f = interval as f64;
-                                let mut next = t.scheduled_time + interval_f;
-                                let now = now_ts();
-                                while next <= now {
-                                    next += interval_f;
-                                }
-                                t.scheduled_time = next;
-                                t.status = TaskStatus::Pending;
-                                // 重置预触发标志：新一轮等待窗口可再次发起 LLM 预调用
-                                t.pre_triggered = false;
-                            } else {
-                                t.status = TaskStatus::Completed;
-                                t.completed_at = Some(now_ts());
-                            }
-                        }
-                    }
-                    if let Some(path) = persistence_path {
-                        let tasks = inner_arc.lock().tasks.clone();
-                        if let Err(e) = save_tasks_to(&path, &tasks) {
-                            tracing::warn!(error = %e, "[scheduler] 定时任务保存失败，重启后可能丢失已设置的提醒");
-                        }
-                    }
+                    cb(task);
                 });
             }
         }
@@ -593,6 +523,49 @@ impl Scheduler {
         // tick 末尾滚动清理：drain 已完成且超过 SCHEDULER_COMPLETED_RETENTION_SECS 的任务
         // 避免单次运行期内 Completed/Cancelled/Failed 任务持续累积导致内存增长
         self.cleanup_terminal_tasks();
+    }
+
+    /// Callback completion is distinct from dispatch. Failures never count as reminders.
+    pub fn complete_execution(&self, task_id: &str, result: Result<String, String>) {
+        let now = now_ts();
+        {
+            let mut inner = self.inner.lock();
+            let Some(task) = inner.tasks.get_mut(task_id) else {
+                return;
+            };
+            if task.status != TaskStatus::Running {
+                return;
+            }
+            match result {
+                Ok(text) => {
+                    if task.task_type == TaskType::Reminder {
+                        task.delivery.confirmed(now, text);
+                    }
+                    if let Some(interval) = task.repeat_interval.filter(|i| *i > 0) {
+                        let step = interval as f64;
+                        let skipped = ((now - task.scheduled_time) / step).floor().max(0.0) + 1.0;
+                        task.scheduled_time += skipped * step;
+                        task.status = TaskStatus::Pending;
+                        task.pre_triggered = false;
+                    } else {
+                        task.status = TaskStatus::Completed;
+                        task.completed_at = Some(now);
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(task_id, error, "[scheduler] execution/delivery failed");
+                    if task.task_type == TaskType::Reminder {
+                        task.delivery.failed(now);
+                        task.status = TaskStatus::Pending;
+                    } else {
+                        // Never automatically repeat an operation with possible side effects.
+                        task.status = TaskStatus::Failed;
+                        task.completed_at = Some(now);
+                    }
+                }
+            }
+        }
+        self.persist();
     }
 
     /// 清理已完成/取消/失败且超过保留期的任务
@@ -646,6 +619,7 @@ impl Scheduler {
 
     fn persist(&self) {
         if let Some(path) = &self.persistence_path {
+            let _write = self.persistence_gate.lock();
             let tasks = self.inner.lock().tasks.clone();
             if let Err(e) = save_tasks_to(path, &tasks) {
                 tracing::warn!(error = %e, "[scheduler] 定时任务保存失败，重启后可能丢失已设置的提醒");
@@ -661,17 +635,17 @@ impl Scheduler {
             }
             if let Ok(data) = serde_json::from_str::<Persisted>(&content) {
                 let mut inner = self.inner.lock();
-                for task in data.tasks {
+                for mut task in data.tasks {
                     // 加载未完成的 Pending 任务（过期也保留，tick 会立即触发）
                     // 和 Paused 任务（暂停状态需保留，等待用户恢复）
+                    if task.status == TaskStatus::Running && task.task_type == TaskType::Reminder {
+                        task.status = TaskStatus::Pending;
+                    }
                     if task.status == TaskStatus::Pending || task.status == TaskStatus::Paused {
                         inner.tasks.insert(task.id.clone(), task);
                     }
                 }
-                tracing::info!(
-                    loaded = inner.tasks.len(),
-                    "[Scheduler] 已加载持久化任务"
-                );
+                tracing::info!(loaded = inner.tasks.len(), "[Scheduler] 已加载持久化任务");
             }
         }
     }
@@ -723,8 +697,8 @@ pub fn parse_time_spec(time_spec: &str) -> Result<f64, String> {
 
 /// 解析 ISO 8601 持续时间 (PnYnMnDTnHnMnS)。
 fn parse_iso_duration(spec: &str) -> Result<chrono::Duration, String> {
-    use regex::Regex;
     use once_cell::sync::Lazy;
+    use regex::Regex;
 
     static RE: Lazy<Regex> = Lazy::new(|| {
         Regex::new(r"^P(?:(\d+)Y)?(?:(\d+)M)?(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$")
@@ -735,16 +709,33 @@ fn parse_iso_duration(spec: &str) -> Result<chrono::Duration, String> {
         .captures(spec)
         .ok_or_else(|| format!("无效的 ISO 8601 持续时间: {}", spec))?;
 
-    let years = caps.get(1).map(|m| m.as_str().parse::<u64>().unwrap_or(0)).unwrap_or(0);
-    let months = caps.get(2).map(|m| m.as_str().parse::<u64>().unwrap_or(0)).unwrap_or(0);
-    let days = caps.get(3).map(|m| m.as_str().parse::<u64>().unwrap_or(0)).unwrap_or(0);
-    let hours = caps.get(4).map(|m| m.as_str().parse::<u64>().unwrap_or(0)).unwrap_or(0);
-    let minutes = caps.get(5).map(|m| m.as_str().parse::<u64>().unwrap_or(0)).unwrap_or(0);
-    let seconds = caps.get(6).map(|m| m.as_str().parse::<u64>().unwrap_or(0)).unwrap_or(0);
+    let years = caps
+        .get(1)
+        .map(|m| m.as_str().parse::<u64>().unwrap_or(0))
+        .unwrap_or(0);
+    let months = caps
+        .get(2)
+        .map(|m| m.as_str().parse::<u64>().unwrap_or(0))
+        .unwrap_or(0);
+    let days = caps
+        .get(3)
+        .map(|m| m.as_str().parse::<u64>().unwrap_or(0))
+        .unwrap_or(0);
+    let hours = caps
+        .get(4)
+        .map(|m| m.as_str().parse::<u64>().unwrap_or(0))
+        .unwrap_or(0);
+    let minutes = caps
+        .get(5)
+        .map(|m| m.as_str().parse::<u64>().unwrap_or(0))
+        .unwrap_or(0);
+    let seconds = caps
+        .get(6)
+        .map(|m| m.as_str().parse::<u64>().unwrap_or(0))
+        .unwrap_or(0);
 
     let total_days = days + years * 365 + months * 30;
-    let total_seconds =
-        total_days * 86400 + hours * 3600 + minutes * 60 + seconds;
+    let total_seconds = total_days * 86400 + hours * 3600 + minutes * 60 + seconds;
     Ok(chrono::Duration::seconds(total_seconds as i64))
 }
 
@@ -771,8 +762,11 @@ fn save_tasks_to(path: &PathBuf, tasks: &HashMap<String, ScheduledTask>) -> Resu
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    std::fs::write(path, serde_json::to_string_pretty(&data).map_err(|e| e.to_string())?)
-        .map_err(|e| e.to_string())
+    crate::utils::fs::write_atomic(
+        path,
+        &serde_json::to_string_pretty(&data).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())
 }
 
 // 引入 chrono Local 转换
@@ -827,6 +821,65 @@ mod tests {
     #[test]
     fn test_parse_invalid_format() {
         assert!(parse_time_spec("invalid").is_err());
+    }
+
+    #[tokio::test]
+    async fn reminder_waits_for_completion_and_retries_without_counting_attempts() {
+        let scheduler = Scheduler::new(false);
+        let counter = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let calls = counter.clone();
+        scheduler.set_callback(Arc::new(move |_| {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }));
+        let original = now_ts() - 100.0;
+        let id = scheduler.schedule_reminder("test", original);
+        scheduler.tick().await;
+        tokio::task::yield_now().await;
+        assert_eq!(
+            scheduler.inner.lock().tasks[&id].status,
+            TaskStatus::Running
+        );
+        assert_eq!(
+            scheduler.inner.lock().tasks[&id].delivery.confirmed_count,
+            0
+        );
+        scheduler.complete_execution(&id, Err("transport failed".into()));
+        assert_eq!(scheduler.inner.lock().tasks[&id].scheduled_time, original);
+        scheduler.tick().await;
+        tokio::task::yield_now().await;
+        assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 1);
+        scheduler
+            .inner
+            .lock()
+            .tasks
+            .get_mut(&id)
+            .unwrap()
+            .delivery
+            .next_attempt_at = None;
+        scheduler.tick().await;
+        tokio::task::yield_now().await;
+        scheduler.complete_execution(&id, Ok("delivered".into()));
+        scheduler.complete_execution(&id, Ok("duplicate acknowledgement".into()));
+        let inner = scheduler.inner.lock();
+        let task = &inner.tasks[&id];
+        assert_eq!(task.status, TaskStatus::Completed);
+        assert_eq!(task.delivery.attempts, 2);
+        assert_eq!(task.delivery.confirmed_count, 1);
+        assert_eq!(task.delivery.last_text.as_deref(), Some("delivered"));
+    }
+    #[tokio::test]
+    async fn failed_tool_calls_are_not_repeated() {
+        let scheduler = Scheduler::new(false);
+        scheduler.set_callback(Arc::new(|_| {}));
+        let id = scheduler.schedule_tool_call("operation", serde_json::json!({}), now_ts() - 1.0);
+        scheduler.tick().await;
+        tokio::task::yield_now().await;
+        scheduler.complete_execution(&id, Err("operation failed".into()));
+        assert_eq!(scheduler.inner.lock().tasks[&id].status, TaskStatus::Failed);
+        assert_eq!(
+            scheduler.inner.lock().tasks[&id].delivery.confirmed_count,
+            0
+        );
     }
 
     #[tokio::test]

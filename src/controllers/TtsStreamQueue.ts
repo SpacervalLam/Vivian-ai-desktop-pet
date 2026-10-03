@@ -16,9 +16,10 @@
  * - 句级切片：在句末标点处切分，让首句尽快送合成，长段落不再整段等待
  * - 生成与播报并行：LLM 边产出 chunk，TTS 边播放已切好的片段
  * - 串行队列：避免多段音频重叠播放
- * - 队列积压保护：超过 5 段时合并剩余片段，避免延迟过大
+ * - 队列积压保护：超过 5 段时合并相邻且表达信息相同的片段，避免延迟过大
  */
 
+import { mergePresentation, speechSegment, compactSpeechSegments, type SpeechSegment } from './speechPresentation';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { getCharacterId } from '../characterContext';
@@ -26,7 +27,7 @@ import { getCharacterId } from '../characterContext';
 /** buffer 最大字符数（无换行长文本积压保护，超过则强制切片） */
 const MAX_BUFFER_CHARS = 200;
 
-/** 队列积压阈值（超过则合并剩余片段） */
+/** 队列积压阈值（超过则合并相容的相邻片段） */
 const MAX_QUEUE_SIZE = 5;
 
 /** 段落边界（换行符）— 最高优先级切分点 */
@@ -77,7 +78,11 @@ function findLastSentenceEnd(buffer: string, maxChars: number): number {
 }
 
 class TtsStreamQueueClass {
-  private queue: string[] = [];
+  private queue: SpeechSegment[] = [];
+  private pumping = false;
+  private playbackEpoch = 0;
+  private streamId?: string;
+  private characterId?: string;
   private buffer = '';
   private speaking = false;
   private enabled = false;
@@ -118,7 +123,9 @@ class TtsStreamQueueClass {
           this.streamCbs?.onFirstAudioStart?.();
         }
       });
-      this.unlistenError = await listen<{ character_id?: string }>('tts:error', () => {
+      this.unlistenError = await listen<{ character_id?: string }>('tts:error', (event) => {
+        const cid = getCharacterId();
+        if (event.payload?.character_id && cid && event.payload.character_id !== cid) return;
         while (this.startResolvers.length > 0) {
           const resolve = this.startResolvers.shift();
           if (resolve) resolve();
@@ -129,9 +136,8 @@ class TtsStreamQueueClass {
           this.streamCbs?.onFirstAudioStart?.();
         }
       });
-      // tts:finished 后端播放结束（正常或超时强制中断）。
-      // 后端 speak_text 可能因 is_playing 卡死而无法返回，但 emit tts:finished
-      // 在 speak_with_context 收尾时仍会触发，借此强制唤醒 waitForDrain。
+      // Playback events update audio state; the awaited command owns queue serialization.
+      // A stalled command is bounded by waitForDrain's timeout.
       this.unlistenFinished = await listen<{ character_id?: string }>('tts:finished', (event) => {
         const cid = getCharacterId();
         if (event.payload?.character_id && cid && event.payload.character_id !== cid) return;
@@ -170,13 +176,19 @@ class TtsStreamQueueClass {
    * 后端 SpeakIntent 会携带此 presentation,Planner 在真正开始播放时
    * 发射 `presentation:start` 事件,前端据此同步播放表情/动作/气泡。
    */
-  setPresentation(meta: { expression: string; motion: string }): void {
-    this.currentPresentation = {
-      expression: meta.expression || undefined,
-      motion: meta.motion || undefined,
-      bubble: false,
-      typing_indicator: false,
-    };
+  beginStream(streamId: string, characterId?: string): void {
+    if (this.streamId === streamId) return;
+    this.flush();
+    this.streamId = streamId;
+    this.characterId = characterId;
+    this.currentPresentation = null;
+    this.prewarmed = false;
+  }
+
+  setPresentation(meta: { expression: string; motion: string; expressionDurationMs?: number }): void {
+    // A metadata boundary also closes the preceding spoken segment.
+    this.flush();
+    this.currentPresentation = mergePresentation(this.currentPresentation, meta);
   }
 
   /**
@@ -320,13 +332,15 @@ class TtsStreamQueueClass {
    *  超时后强制清空队列并 resolve，避免 flushSync 无限等待导致
    *  气泡不消失、消息不入记忆图谱。 */
   async waitForDrain(): Promise<void> {
-    if (this.queue.length === 0 && !this.speaking) return;
+    if (this.queue.length === 0 && !this.pumping) return;
     const deadline = Date.now() + DRAIN_TIMEOUT_MS;
-    while ((this.queue.length > 0 || this.speaking) && Date.now() < deadline) {
+    while ((this.queue.length > 0 || this.pumping) && Date.now() < deadline) {
       await new Promise((r) => window.setTimeout(r, 50));
     }
-    if (this.queue.length > 0 || this.speaking) {
+    if (this.queue.length > 0 || this.pumping) {
       console.warn('[TtsStreamQueue] waitForDrain 超时，强制清空队列（避免卡死）');
+      this.playbackEpoch++;
+      this.pumping = false;
       this.queue = [];
       this.speaking = false;
       this.startResolvers = [];
@@ -340,6 +354,11 @@ class TtsStreamQueueClass {
 
   /** 清空队列并停止播放 */
   async stop(): Promise<void> {
+    this.playbackEpoch++;
+    this.pumping = false;
+    this.speaking = false;
+    this.streamId = undefined;
+    this.characterId = undefined;
     this.queue = [];
     this.buffer = '';
     this.prewarmed = false;
@@ -356,6 +375,8 @@ class TtsStreamQueueClass {
 
   /** 清空 buffer 但不停止当前播放（用于新一轮对话开始前） */
   resetBuffer(): void {
+    this.streamId = undefined;
+    this.characterId = undefined;
     this.buffer = '';
     this.queue = [];
     this.prewarmed = false;
@@ -372,41 +393,45 @@ class TtsStreamQueueClass {
     if (!/[\u4e00-\u9fa5a-zA-Z0-9]/.test(trimmed)) return;
 
     if (this.queue.length >= MAX_QUEUE_SIZE) {
-      const merged = this.queue.join('');
-      this.queue = [merged];
+      this.queue = compactSpeechSegments(this.queue);
     }
 
-    this.queue.push(trimmed);
+    this.queue.push(speechSegment(trimmed, this.currentPresentation, this.characterId ?? getCharacterId() ?? undefined, this.streamId));
     void this.pump();
   }
 
   /** 串行播放队列，合成并行流水线 */
   private async pump(): Promise<void> {
-    if (this.speaking) return;
+    if (this.pumping) return;
+    this.pumping = true;
+    const epoch = this.playbackEpoch;
     this.speaking = true;
-    const cid = getCharacterId() ?? undefined;
 
-    while (this.queue.length > 0) {
+    while (this.queue.length > 0 && epoch === this.playbackEpoch) {
       // 预取队列中所有待播句：后端各自独立连接并行合成
       // 已缓存的句子会立即返回，不会重复请求
-      for (const text of this.queue) {
-        void invoke('prefetch_tts', { text, characterId: cid }).catch(() => {});
+      for (const segment of this.queue) {
+        void invoke('prefetch_tts', { text: segment.text, characterId: segment.characterId }).catch(() => {});
       }
 
-      const text = this.queue.shift()!;
+      const segment = this.queue.shift()!;
       try {
         await invoke('speak_text', {
-          text,
-          characterId: cid,
-          presentation: this.currentPresentation,
+          text: segment.text,
+          characterId: segment.characterId,
+          presentation: segment.presentation,
         });
       } catch (e) {
+        if (epoch !== this.playbackEpoch) return;
         console.warn('[TtsStreamQueue] speak_text 失败:', e);
         const resolve = this.startResolvers.shift();
         if (resolve) resolve();
       }
     }
-    this.speaking = false;
+    if (epoch === this.playbackEpoch) {
+      this.speaking = false;
+      this.pumping = false;
+    }
   }
 }
 

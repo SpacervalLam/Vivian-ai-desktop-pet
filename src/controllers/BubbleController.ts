@@ -28,6 +28,23 @@ export class BubbleControllerClass {
   private settledTimers = new Map<number, ReturnType<typeof setTimeout>>();
   private settledId = 0;
   private pendingSticker?: StickerRef;
+  private bubbleGeneration = 0;
+  private speechHeld = false;
+
+  /** A completion from an older message cannot release the new bubble. */
+  holdForSpeech(): () => void {
+    const generation = this.bubbleGeneration;
+    this.speechHeld = true;
+    if (this.closeTimer) clearTimeout(this.closeTimer);
+    this.closeTimer = null;
+    let released = false;
+    return () => {
+      if (released || generation !== this.bubbleGeneration) return;
+      released = true;
+      this.speechHeld = false;
+      this.startTypewriter();
+    };
+  }
 
   get currentBubble(): string | null { return useAppStore.getState().currentBubble; }
   get hasActiveBubble(): boolean { return this.currentBubble !== null || useAppStore.getState().settledBubbles.length > 0; }
@@ -135,7 +152,7 @@ export class BubbleControllerClass {
       const remaining = allChars.slice(this.consumed);
       const boundary = nextBubbleBoundary(remaining, !this.streamingBubble);
       const length = boundary ?? remaining.length;
-      if (!this.streamingBubble && this.revealed >= length && remaining.length <= length) this.revealSticker();
+      if (!this.speechHeld && !this.streamingBubble && this.revealed >= length && remaining.length <= length) this.revealSticker();
       if (this.segmentRead && this.revealed < length) {
         this.segmentRead = false;
         this.pauseUntil = 0;
@@ -170,6 +187,7 @@ export class BubbleControllerClass {
             ? this.finalDuration : computeDuration(remaining.slice(0, length).join('')));
         } else if (!this.streamingBubble && remaining.length <= length) {
           this.lastTs = null;
+          if (this.speechHeld) return;
           this.closeTimer = setTimeout(() => {
             this.closeTimer = null;
             if (useAppStore.getState().settledBubbles.some(bubble => bubble.sticker)) {
@@ -190,6 +208,8 @@ export class BubbleControllerClass {
   }
 
   closeAll(): void {
+    this.bubbleGeneration++;
+    this.speechHeld = false;
     if (this.raf !== null) cancelAnimationFrame(this.raf);
     if (this.closeTimer) clearTimeout(this.closeTimer);
     if (this.fallbackTimer) clearTimeout(this.fallbackTimer);

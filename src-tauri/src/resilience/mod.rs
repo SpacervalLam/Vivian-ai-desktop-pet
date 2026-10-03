@@ -15,8 +15,8 @@ pub enum CircuitState {
 
 /// 半开探测的兜底时长。
 ///
-/// 探测请求可能不回报结果：响应解析失败会提前 `?` 返回，大 prompt 又按设计跳过
-/// 熔断器记账。以时刻记账 + 超时重新放行，可避免熔断器被这类请求永久卡在半开。
+/// Provider RequestGuard 会在取消时释放探测；本超时用于尚未使用 guard 的调用方，
+/// 避免异常退出后永久占据半开名额。
 const PROBE_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone)]
@@ -104,6 +104,17 @@ impl CircuitBreaker {
         // 探测已回报结果，释放半开占位
         self.probe_started_at = None;
         self.state = CircuitState::Closed;
+    }
+
+    pub(crate) fn probe_ticket(&self) -> Option<Instant> {
+        self.probe_started_at
+    }
+
+    /// Release only the probe owned by this request; cancellation is health-neutral.
+    pub(crate) fn release_probe(&mut self, ticket: Option<Instant>) {
+        if ticket.is_some() && self.probe_started_at == ticket {
+            self.probe_started_at = None;
+        }
     }
 
     pub fn record_failure(&mut self) {
@@ -228,7 +239,34 @@ pub enum LlmErrorKind {
     Unknown,
 }
 
-pub fn classify_error(error: &dyn std::error::Error) -> ErrorCategory {
+pub fn classify_error(error: &(dyn std::error::Error + 'static)) -> ErrorCategory {
+    match error.downcast_ref::<crate::error::VivianError>() {
+        Some(
+            crate::error::VivianError::Config(_) | crate::error::VivianError::Serialization(_),
+        ) => return ErrorCategory::Permanent,
+        Some(
+            crate::error::VivianError::Network(_)
+            | crate::error::VivianError::Timeout(_)
+            | crate::error::VivianError::CircuitBreaker(_),
+        ) => return ErrorCategory::Transient,
+        _ => {}
+    }
+    if let Some(crate::error::VivianError::ProviderHttp {
+        status, message, ..
+    }) = error.downcast_ref::<crate::error::VivianError>()
+    {
+        // Vendor semantics (e.g. an unpaid account returning 429) take precedence.
+        if let Some(kind) = classify_structured(message) {
+            if kind != LlmErrorKind::Unknown {
+                return kind_to_category(&kind);
+            }
+        }
+        return match status {
+            429 => ErrorCategory::RateLimit,
+            408 | 409 | 425 | 500..=599 => ErrorCategory::Transient,
+            _ => ErrorCategory::Permanent,
+        };
+    }
     classify_error_from_str(&error.to_string())
 }
 
@@ -251,9 +289,7 @@ pub fn classify_error_from_str(msg: &str) -> ErrorCategory {
         || msg.contains("incorrect api key")
     {
         ErrorCategory::Permanent
-    } else if msg.contains("400")
-        || msg.contains("bad request")
-        || msg.contains("invalid_argument")
+    } else if msg.contains("400") || msg.contains("bad request") || msg.contains("invalid_argument")
     {
         // 400 Bad Request：请求格式错误，重试无意义
         ErrorCategory::Permanent
@@ -289,10 +325,7 @@ pub fn classify_error_from_str(msg: &str) -> ErrorCategory {
         || msg.contains("overloaded")
     {
         ErrorCategory::Transient
-    } else if msg.contains("timeout")
-        || msg.contains("timed out")
-        || msg.contains("deadline")
-    {
+    } else if msg.contains("timeout") || msg.contains("timed out") || msg.contains("deadline") {
         ErrorCategory::Transient
     } else if msg.contains("dns")
         || msg.contains("unreachable")
@@ -312,13 +345,9 @@ pub fn classify_error_from_str(msg: &str) -> ErrorCategory {
         || msg.contains("ip whitelist")
     {
         ErrorCategory::Permanent
-    } else if msg.contains("permission")
-        || msg.contains("access denied")
-    {
+    } else if msg.contains("permission") || msg.contains("access denied") {
         ErrorCategory::Permanent
-    } else if msg.contains("circuit_breaker")
-        || msg.contains("熔断器")
-    {
+    } else if msg.contains("circuit_breaker") || msg.contains("熔断器") {
         ErrorCategory::Transient
     } else {
         ErrorCategory::Transient
@@ -348,7 +377,9 @@ struct ParsedProviderError {
 /// provider 层统一把响应格式化为 `… 请求失败 (402 Payment Required): {json}`，
 /// 左括号是可靠的锚点。若放宽成全文子串匹配，`request_id=4012…`、`bandwidth 500`
 /// 这类噪声都会被误认成 HTTP 状态。
-const RECOGNIZED_STATUS: &[u16] = &[400, 401, 402, 403, 404, 408, 409, 422, 429, 498, 499, 500, 502, 503, 504];
+const RECOGNIZED_STATUS: &[u16] = &[
+    400, 401, 402, 403, 404, 408, 409, 422, 429, 498, 499, 500, 502, 503, 504,
+];
 
 fn extract_status_code(raw: &str) -> Option<u16> {
     for (i, _) in raw.match_indices('(') {
@@ -392,7 +423,9 @@ fn find_error_code(value: &serde_json::Value) -> Option<String> {
     }
     for container in containers {
         for key in ["code", "type", "status_code"] {
-            let Some(v) = pick_ci(container, key) else { continue };
+            let Some(v) = pick_ci(container, key) else {
+                continue;
+            };
             match v {
                 // 腾讯混元的业务码是整型，其余多为字符串，两种都要接住
                 serde_json::Value::String(s) if !s.is_empty() => return Some(s.clone()),
@@ -504,21 +537,21 @@ fn classify_vendor_error(p: &ParsedProviderError) -> Option<LlmErrorKind> {
         // 审核命中，Together 报上下文超长，其余才是真正的权限不足。按状态码统一提示
         // 「权限不足」会严重误导，必须落到 code 上区分。
         403 => {
-            if matches_any(code, &["AccountOverdueError", "ServiceOverdue", "account_overdue"])
-                || message_matches(
-                    msg,
-                    &[
-                        "overdue balance",
-                        "overdue account",
-                        "overdue payment",
-                        "access denied due to overdue",
-                    ],
-                )
-            {
+            if matches_any(
+                code,
+                &["AccountOverdueError", "ServiceOverdue", "account_overdue"],
+            ) || message_matches(
+                msg,
+                &[
+                    "overdue balance",
+                    "overdue account",
+                    "overdue payment",
+                    "access denied due to overdue",
+                ],
+            ) {
                 return Some(LlmErrorKind::InsufficientBalance);
             }
-            if matches_any(code, &["moderation"]) || message_matches(msg, &["moderation flagged"])
-            {
+            if matches_any(code, &["moderation"]) || message_matches(msg, &["moderation flagged"]) {
                 return Some(LlmErrorKind::ContentPolicy);
             }
             if message_matches(msg, &["context length", "max_tokens", "context window"]) {
@@ -595,7 +628,11 @@ pub fn classify_llm_error_from_str(msg: &str) -> LlmErrorKind {
     if lower.contains("invalid_api_key")
         || lower.contains("invalid authentication")
         || lower.contains("incorrect api key")
-        || (lower.contains("api key") && (lower.contains("invalid") || lower.contains("expired") || lower.contains("revoked") || lower.contains("incorrect")))
+        || (lower.contains("api key")
+            && (lower.contains("invalid")
+                || lower.contains("expired")
+                || lower.contains("revoked")
+                || lower.contains("incorrect")))
         || (lower.contains("401") && !lower.contains("ip"))
     {
         return LlmErrorKind::InvalidApiKey;
@@ -696,7 +733,8 @@ pub fn classify_llm_error_from_str(msg: &str) -> LlmErrorKind {
         || lower.contains("error reading a body from connection")
         || lower.contains("stream ended before completion")
         || lower.contains("流读取失败")
-        || (lower.contains("connect") && (lower.contains("error") || lower.contains("fail") || lower.contains("reset")))
+        || (lower.contains("connect")
+            && (lower.contains("error") || lower.contains("fail") || lower.contains("reset")))
     {
         return LlmErrorKind::NetworkError;
     }
@@ -720,9 +758,7 @@ pub fn classify_llm_error_from_str(msg: &str) -> LlmErrorKind {
         return LlmErrorKind::PermissionDenied;
     }
 
-    if lower.contains("bad request")
-        || lower.contains("400")
-    {
+    if lower.contains("bad request") || lower.contains("400") {
         return LlmErrorKind::BadRequest;
     }
 
@@ -865,7 +901,7 @@ pub async fn async_retry<F, Fut, T, E>(config: &RetryConfig, operation: F) -> Re
 where
     F: Fn() -> Fut,
     Fut: std::future::Future<Output = Result<T, E>>,
-    E: std::error::Error,
+    E: std::error::Error + 'static,
 {
     let mut attempt = 1u32;
     loop {
@@ -1043,7 +1079,8 @@ mod tests {
 
     #[test]
     fn minimax_underscore_code_and_base_resp() {
-        let e = r#"Responses API 请求失败 (402 Payment Required): {"base_resp":{"status_code":1008}}"#;
+        let e =
+            r#"Responses API 请求失败 (402 Payment Required): {"base_resp":{"status_code":1008}}"#;
         assert_eq!(kind_of(e), LlmErrorKind::InsufficientBalance);
     }
 
@@ -1076,7 +1113,9 @@ mod tests {
     #[test]
     fn auth_and_server_paths() {
         assert_eq!(
-            kind_of(r#"请求失败 (401 Unauthorized): {"error":{"message":"Incorrect API key provided"}}"#),
+            kind_of(
+                r#"请求失败 (401 Unauthorized): {"error":{"message":"Incorrect API key provided"}}"#
+            ),
             LlmErrorKind::InvalidApiKey
         );
         assert_eq!(
@@ -1141,11 +1180,15 @@ mod tests {
             ErrorCategory::Permanent
         );
         assert_eq!(
-            classify_error_from_str(r#"请求失败 (500 Internal Server Error): {"error":{"message":"boom"}}"#),
+            classify_error_from_str(
+                r#"请求失败 (500 Internal Server Error): {"error":{"message":"boom"}}"#
+            ),
             ErrorCategory::Transient
         );
         assert_eq!(
-            classify_error_from_str(r#"请求失败 (503 Service Unavailable): {"error":{"message":"overloaded"}}"#),
+            classify_error_from_str(
+                r#"请求失败 (503 Service Unavailable): {"error":{"message":"overloaded"}}"#
+            ),
             ErrorCategory::Transient
         );
     }
@@ -1154,7 +1197,9 @@ mod tests {
     #[test]
     fn body_only_judgement() {
         assert_eq!(
-            classify_error_from_str(r#"{"error":{"code":"Arrearage","message":"account is in good standing"}}"#),
+            classify_error_from_str(
+                r#"{"error":{"code":"Arrearage","message":"account is in good standing"}}"#
+            ),
             ErrorCategory::Permanent
         );
     }

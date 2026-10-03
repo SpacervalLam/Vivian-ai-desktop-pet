@@ -466,86 +466,6 @@ pub fn replace_todo_items(items: Vec<TodoItem>, character_id: &str) -> Vec<TodoI
     normalized
 }
 
-/// 预触发处理：在 `scheduled_time - 5s` 到 `scheduled_time` 之间发起一次主 LLM 调用。
-///
-/// 把定时任务内容说明作为 `user_input` 注入完整提示词链路（persona/memory/上下文），
-/// 让 LLM 提前决定如何进行该定时任务。回复通过 `chat:assistant_message` emit 给前端。
-///
-/// 与 `handle_task_trigger`（到期触发，走桌面通知 + 标准气泡）分离：
-/// - 预触发让 LLM 智能决定（可能调用工具、可能自然提醒、也可能判定不该打扰而简短回复）
-/// - 到期触发保留原有 Reminder 行为作为兜底（系统通知 + 标准气泡），确保到点一定有反馈
-///
-/// `brain.think(directive, false)` 会复用完整提示词构造，并按正常对话流程更新
-/// 记忆/对话历史/关系等运行时状态——预触发被视为智能体的一次真实交互。
-pub async fn handle_task_pre_trigger(task: ScheduledTask, brain: crate::brain::Brain) {
-    use chrono::TimeZone;
-
-    let app_handle = match APP_HANDLE.read().clone() {
-        Some(h) => h,
-        None => {
-            tracing::warn!(
-                "[Scheduler] 预触发任务 {} 但 AppHandle 未注入，跳过",
-                task.id
-            );
-            return;
-        }
-    };
-
-    let task_message = task.message.as_deref().unwrap_or("(无内容)");
-    let scheduled_ts = task.scheduled_time as i64;
-    let scheduled_local = chrono::Local
-        .timestamp_opt(scheduled_ts, 0)
-        .single()
-        .unwrap_or_else(chrono::Local::now);
-    let time_str = scheduled_local.format("%Y-%m-%d %H:%M:%S").to_string();
-    let remaining =
-        (task.scheduled_time - crate::brain::scheduler::now_ts_public()).round() as i64;
-
-    // 构造指令：作为 user_input 注入完整提示词，替换原本的用户消息部分
-    let directive = format!(
-        "[定时任务即将触发]\n任务内容：{}\n计划时间：{}\n剩余：{}秒\n\n\
-         这是你设定的定时任务，马上就要到点触发。请基于你的角色设定、记忆和当前情境，\
-         自然地决定如何进行这个定时任务：可以提醒用户、调用相关工具执行、或自然回复。\
-         你的回复将作为对话气泡发送给用户。",
-        task_message, time_str, remaining
-    );
-
-    tracing::info!(
-        task_id = %task.id,
-        char_id = %task.char_id,
-        "[Scheduler] 预触发：发起主 LLM 调用让智能体决定如何进行定时任务"
-    );
-
-    // 调用 brain.think（非流式）：复用完整提示词构造，user_input 部分被替换为定时任务说明
-    let result = brain.think(&directive, false).await;
-
-    match result {
-        Ok(ai_response) => {
-            if !ai_response.text.is_empty() {
-                let _ = app_handle.emit(
-                    "chat:assistant_message",
-                    json!({
-                        "content": ai_response.text,
-                        "timestamp": chrono::Local::now().to_rfc3339(),
-                    }),
-                );
-            }
-            tracing::info!(
-                task_id = %task.id,
-                text_len = ai_response.text.chars().count(),
-                "[Scheduler] 预触发 LLM 调用完成，已发出回复"
-            );
-        }
-        Err(e) => {
-            tracing::warn!(
-                task_id = %task.id,
-                error = %e,
-                "[Scheduler] 预触发 LLM 调用失败，到期时仍会走原有 Reminder 流程兜底"
-            );
-        }
-    }
-}
-
 /// Complete handling logic when Scheduler task triggers (called by state.rs callback).
 ///
 /// Dispatches by task_type:
@@ -553,7 +473,7 @@ pub async fn handle_task_pre_trigger(task: ScheduledTask, brain: crate::brain::B
 /// - **ToolCall**: Call ToolSystem to execute tool, emit result as chat bubble to frontend
 ///
 /// Both types additionally emit `scheduler:changed` (action=triggered) to refresh frontend task list.
-pub async fn handle_task_trigger(task: ScheduledTask, tool_system: Arc<ToolSystem>) {
+pub async fn handle_task_trigger(task: ScheduledTask, tool_system: Arc<ToolSystem>) -> Result<String, String> {
     use tauri_plugin_notification::NotificationExt;
 
     let app_handle = match APP_HANDLE.read().clone() {
@@ -563,40 +483,32 @@ pub async fn handle_task_trigger(task: ScheduledTask, tool_system: Arc<ToolSyste
                 "[Scheduler] 任务 {} 触发但 AppHandle 未注入，无法呈现",
                 task.id
             );
-            return;
+            return Err("提醒投递服务尚未初始化".into());
         }
     };
 
     match task.task_type {
         TaskType::Reminder => {
-            let message = task.message.as_deref().unwrap_or("定时提醒");
-
-            // 1. 系统桌面通知
-            let _ = app_handle
-                .notification()
-                .builder()
-                .title("Vivian 提醒")
-                .body(message)
-                .show();
-
-            // 2. 对话气泡 + 聊天记录（前端 ChatWindow 监听 chat:assistant_message 自动追加）
-            let _ = app_handle.emit(
-                "chat:assistant_message",
-                json!({
-                    "content": message,
-                    "timestamp": chrono::Local::now().to_rfc3339(),
-                }),
-            );
-
-            // 3. 刷新前端任务列表（归属=创建该任务的角色）
-            emit_event(
-                "scheduler:changed",
-                &json!({
-                    "action": "triggered",
-                    "task": task,
-                    "character_id": task.char_id,
-                }),
-            );
+            use tauri::Manager;
+            let state = app_handle.state::<Arc<crate::state::AppState>>();
+            let character_id = if task.char_id.is_empty() { state.active_character_id.read().clone() } else { task.char_id.clone() };
+            let language = state.config.read().get_all().base.language;
+            let context = crate::brain::reminder_delivery::ReminderContext::new(task.scheduled_time, crate::brain::scheduler::now_ts_public(), &task.delivery);
+            let text = context.wording(task.message.as_deref().unwrap_or("定时提醒"), &character_id, &language);
+            let (delivery_id, receipt) = crate::brain::reminder_delivery::register_receipt();
+            let emitted = app_handle.emit("reminder:deliver", json!({
+                "delivery_id":delivery_id, "task_id":task.id, "character_id":character_id,
+                "content":text, "context":context,
+            }));
+            let accepted = if emitted.is_ok() {
+                matches!(tokio::time::timeout(std::time::Duration::from_secs(8), receipt).await, Ok(Ok(())))
+            } else { false };
+            crate::brain::reminder_delivery::discard_receipt(&delivery_id);
+            if !accepted {
+                // OS acceptance is a confirmed transport handoff, never evidence of reading.
+                app_handle.notification().builder().title(if character_id == "nana" {"Nana 提醒"} else {"Vivian 提醒"}).body(&text).show().map_err(|e| e.to_string())?;
+            }
+            return Ok(text);
         }
         TaskType::ToolCall => {
             let tool_name = match task.tool_name.as_deref() {
@@ -606,7 +518,7 @@ pub async fn handle_task_trigger(task: ScheduledTask, tool_system: Arc<ToolSyste
                         "[Scheduler] ToolCall 任务 {} 缺少 tool_name，跳过执行",
                         task.id
                     );
-                    return;
+                    return Err("定时工具任务缺少 tool_name".into());
                 }
             };
             let args = task.tool_arguments.clone();
@@ -618,6 +530,7 @@ pub async fn handle_task_trigger(task: ScheduledTask, tool_system: Arc<ToolSyste
                 crate::tools::execute_tool_use(&tool_name, args, &tool_system, &context, None)
                     .await;
 
+            let success = result.success;
             let content = if result.success {
                 let detail = result
                     .data
@@ -653,6 +566,7 @@ pub async fn handle_task_trigger(task: ScheduledTask, tool_system: Arc<ToolSyste
                     "character_id": task.char_id,
                 }),
             );
+            return if success { Ok(content) } else { Err(content) };
         }
     }
 }
@@ -1442,4 +1356,8 @@ impl Tool for UpdateTodoTool {
     fn search_hint(&self) -> &str {
         "replace todo list update all"
     }
+}
+
+pub(crate) fn publish_scheduler_changed(character_id: &str) {
+    emit_event("scheduler:changed", &json!({"action":"execution_settled", "character_id":character_id}));
 }

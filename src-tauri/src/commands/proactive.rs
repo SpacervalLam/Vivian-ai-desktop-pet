@@ -291,14 +291,6 @@ pub fn persist_arbitration_state() {
     }
 }
 
-/// 多角色轮流触发：每角色的 tick 计数（char_id → 累计调用次数）
-///
-/// 两角色都在线时，每角色隔一次 tick 跳过（奇数次运行、偶数次跳过），
-/// 等效每角色每 20s 触发一次（原 10s），总系统 tick 频率从 1/5s 降至 1/10s。
-/// 单角色在线时不跳过，保持原 10s 频率。
-static CHAR_TICK_COUNT: Lazy<RwLock<std::collections::HashMap<String, u64>>> =
-    Lazy::new(|| RwLock::new(std::collections::HashMap::new()));
-
 // ============================================================================
 // 焦点租约（Focus Lease）：15s TTL + 检查机制
 // ============================================================================
@@ -484,6 +476,23 @@ pub fn stop_proactive(
     Ok(())
 }
 
+fn renew_proactive_heartbeat(state: &AppState, char_id: &str) -> Result<bool, String> {
+    let instance = state.get_character(Some(char_id))?;
+    let present = !matches!(instance.brain.presence.current(),
+        crate::presence::PresenceState::Rest | crate::presence::PresenceState::Offline | crate::presence::PresenceState::Busy);
+    let online = *instance.online.read();
+    let active = *state.active_character_id.read() == char_id;
+    Ok(state.leader_coordinator.try_acquire_or_renew(char_id, online, present, active))
+}
+
+/// Lightweight liveness independent of long model generations and speech cooldowns.
+#[tauri::command]
+pub fn proactive_heartbeat(character_id: Option<String>, state: State<'_, Arc<AppState>>) -> Result<bool, String> {
+    if state.is_factory_reset_in_progress() || state.is_rebuild_in_progress() { return Ok(false); }
+    let char_id = character_id.unwrap_or_else(|| state.active_character_id.read().clone());
+    renew_proactive_heartbeat(&state, &char_id)
+}
+
 /// 单次主动交互 tick（前端每 10 秒调用一次）
 #[tauri::command]
 pub async fn proactive_tick(
@@ -509,33 +518,9 @@ pub async fn proactive_tick(
     let brain = instance.brain.clone();
     let state_arc = state.inner().clone();
 
-    // 多角色轮流触发：两角色都在线时每角色隔一次 tick 跳过（奇数次运行、偶数次跳过）。
-    // 等效每角色每 20s 触发一次（原 10s），与前端错峰结合，总系统 tick 频率从 1/5s 降至 1/10s。
-    // 单角色在线时不跳过，保持原 10s 频率。
-    {
-        let other_online = state
-            .characters
-            .read()
-            .iter()
-            .any(|(id, inst)| id.as_str() != char_id.as_str() && inst.brain.presence.is_in_presence());
-        if other_online {
-            let mut counts = CHAR_TICK_COUNT.write();
-            let count = counts.entry(char_id.clone()).or_insert(0);
-            *count += 1;
-            if *count % 2 == 0 {
-                tracing::debug!(
-                    "[Proactive] {} 跳过：多角色轮流触发（count={}）",
-                    char_id,
-                    count
-                );
-                return Ok(json!({
-                    "produced": false,
-                    "messages": [],
-                    "skipped": true,
-                }));
-            }
-        }
-    }
+    // Renew liveness before cooldown/focus/other early exits. Speech eligibility is
+    // evaluated later and must not determine whether a live window has a heartbeat.
+    renew_proactive_heartbeat(&state, &char_id)?;
 
     // 优先使用系统级空闲时间（跨应用，权威）；失败时回退到前端 webview 信号
     let system_idle_seconds = crate::utils::get_system_idle_seconds().unwrap_or_else(|| {

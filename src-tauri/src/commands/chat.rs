@@ -1041,7 +1041,7 @@ pub async fn send_message_stream(
                             .collect::<Vec<_>>()
                             .join("\n");
 
-                        if let Some(interjection_directive) = observer_proactive
+                        if let Some(mut interjection) = observer_proactive
                             .evaluate_active_bystander_interjection(
                                 &user_msg_full,
                                 &agent_reply_full,
@@ -1062,6 +1062,7 @@ pub async fn send_message_stream(
                             let observer_memory_clone = observer_memory.clone();
                             let observer_dialogue_clone = observer_dialogue.clone();
                             let observer_brain_clone = observer_brain.clone();
+                            let observer_proactive_clone = observer_proactive.clone();
                             let observer_think_lock_clone = observer_think_lock.clone();
                             tokio::spawn(async move {
                                 // 基础延迟：让 A 的气泡/TTS 先显示
@@ -1091,7 +1092,7 @@ pub async fn send_message_stream(
                                 observer_dialogue_clone.set_session_id(interjection_session.clone());
                                 // 内部指令以 system 身份生成，不写入用户历史或记忆。
                                 let result = observer_brain_clone
-                                    .think_system_directive(&interjection_directive)
+                                    .think_system_directive(&interjection.directive)
                                     .await;
 
                                 // 恢复渠道
@@ -1149,18 +1150,24 @@ pub async fn send_message_stream(
                                     )
                                     .await;
 
-                                // 更新 LAST_SPOKEN，参与跨角色冷却仲裁
-                                crate::commands::proactive::touch_last_spoken(&other_id_clone);
-
                                 // emit proactive:bubble 事件，前端监听后 showBubble + TTS
-                                let _ = app_clone2.emit(
+                                if let Err(error) = app_clone2.emit(
                                     "proactive:bubble",
                                     json!({
                                         "character_id": &other_id_clone,
                                         "content": &text,
                                         "expression": &expression,
+                                        "motion": &response.motion,
+                                        "sticker": &response.sticker,
                                     }),
-                                );
+                                ) {
+                                    tracing::warn!("[Chat] 旁观插话投递失败: {}", error);
+                                    return;
+                                }
+                                let spoken_at = chrono::Local::now().timestamp() as f64;
+                                interjection.mark_spoken(spoken_at, &text);
+                                observer_proactive_clone.record_active_bystander_spoken(spoken_at);
+                                crate::commands::proactive::touch_last_spoken(&other_id_clone);
 
                                 tracing::info!(
                                     "[Chat] 旁观者 {}({}) 主动插话: {}",

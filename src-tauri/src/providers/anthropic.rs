@@ -1,11 +1,5 @@
-use std::collections::HashMap;
-use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
-use std::time::Duration;
-
 use async_trait::async_trait;
 use futures::StreamExt;
-use parking_lot::Mutex;
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
@@ -14,13 +8,10 @@ use crate::providers::base::{
     BaseProvider, ChatResponse, ProviderBase, StreamEvent, StructuredToolCall, ToolDefinition,
 };
 use crate::providers::openai_compat::CacheStrategy;
-use crate::resilience::{classify_error, ErrorCategory};
 use crate::types::response::ChatMessage;
 use crate::utils::messages_cache_key;
 
 const ANTHROPIC_API_VERSION: &str = "2023-06-01";
-const MAX_RETRIES: usize = 2;
-const INITIAL_BACKOFF: Duration = Duration::from_millis(500);
 
 /// Anthropic Claude 原生 Messages API Provider
 ///
@@ -85,15 +76,7 @@ impl AnthropicProvider {
     }
 
     fn endpoint(&self) -> String {
-        let url = self.base.base_url.trim_end_matches('/');
-        // 用户填的 base_url 可能已含 /v1，也可能不含；统一规范化为 {base}/v1/messages
-        if url.ends_with("/v1") {
-            format!("{}/messages", url)
-        } else if url.ends_with("/messages") {
-            url.to_string()
-        } else {
-            format!("{}/v1/messages", url)
-        }
+        crate::providers::transport::api_endpoint(&self.base.base_url, "v1/messages", None)
     }
 
     /// 把 OpenAI 风格 messages 转换为 Anthropic 风格
@@ -243,12 +226,14 @@ impl AnthropicProvider {
         self.base.strip_temperature(&mut body);
 
         let mut system_parts: Vec<String> = Vec::new();
-        
+
         // 模型级别预设：instructions（框架规则一次性设置）
-        if let Some(instructions) = &crate::providers::base::effective_instructions(&self.instructions) {
+        if let Some(instructions) =
+            &crate::providers::base::effective_instructions(&self.instructions)
+        {
             system_parts.push(instructions.clone());
         }
-        
+
         // messages 中的 system 内容
         if let Some(s) = system {
             if let Some(arr) = s.as_array() {
@@ -259,7 +244,7 @@ impl AnthropicProvider {
                 }
             }
         }
-        
+
         if !system_parts.is_empty() {
             let system_text = system_parts.join("\n\n");
             // cache_control 策略：Auto / CacheControl 时给 system 块打 ephemeral 标记
@@ -278,9 +263,7 @@ impl AnthropicProvider {
             }
         }
         // 思考控制：Claude 新系模型按推理偏好映射 thinking.type / output_config.effort
-        let pref = self.base.effective_reasoning();
-        let cap = crate::providers::reasoning::resolve_reasoning_capability(&self.base.model);
-        crate::providers::reasoning::apply_reasoning_preference(&mut body, pref, &cap, false);
+        // Reasoning fields are applied once by the final request adapter.
         body
     }
 
@@ -295,13 +278,8 @@ impl AnthropicProvider {
             .send()
             .await?;
 
-        let status = response.status();
-        if !status.is_success() {
-            let text = response.text().await.unwrap_or_default();
-            return Err(VivianError::Provider(format!(
-                "Anthropic API 请求失败 ({}): {}",
-                status, text
-            )));
+        if !response.status().is_success() {
+            return Err(crate::providers::transport::http_error(response).await);
         }
         let json: Value = response.json().await?;
         Ok(json)
@@ -420,8 +398,8 @@ impl AnthropicProvider {
                         // 把它序列化后塞到 content 顶部，让 JsonProcessor 像解析
                         // 普通 LLM 输出那样解析（保持下游处理路径统一）
                         if crate::providers::schema::is_emit_response_call(&name) {
-                            let json_str = serde_json::to_string(&input)
-                                .unwrap_or_else(|_| "{}".to_string());
+                            let json_str =
+                                serde_json::to_string(&input).unwrap_or_else(|_| "{}".to_string());
                             // emit_response 内容优先级低于 text 块，仅在 text 为空时填充
                             if text.is_empty() {
                                 text = json_str;
@@ -450,7 +428,6 @@ impl AnthropicProvider {
             finish_reason,
             reasoning,
             raw: json.clone(),
-
         })
     }
 
@@ -469,45 +446,19 @@ impl AnthropicProvider {
             }
         }
 
-        let mut last_error: Option<VivianError> = None;
-        let mut backoff = INITIAL_BACKOFF;
-
-        for attempt in 0..=MAX_RETRIES {
-            if attempt > 0 {
-                tracing::warn!("第 {} 次重试 Anthropic 请求: {}", attempt, self.base.model);
-                tokio::time::sleep(backoff).await;
-                backoff *= 2;
-            }
-
-            self.base.check_circuit()?;
-
-            match self.send_request(&body).await {
-                Ok(json) => {
-                    let resp = self.extract_chat_response(&json)?;
-                    self.base.record_success();
-                    if !resp.has_tool_calls() {
-                        if let Some(prompt) = cache_key_prompt {
-                            self.base.cache_response(prompt, &resp.content);
-                        }
-                    }
-                    return Ok(resp);
-                }
-                Err(err) => {
-                    self.base.record_failure();
-                    let category = classify_error(&err);
-                    match category {
-                        ErrorCategory::Permanent => return Err(err),
-                        ErrorCategory::Transient | ErrorCategory::RateLimit => {
-                            last_error = Some(err);
-                            continue;
-                        }
-                    }
-                }
+        let resp = crate::providers::transport::with_retry(&self.base, || async {
+            let json = self.send_request(&body).await?;
+            crate::providers::transport::validate_json(&json)?;
+            let resp = self.extract_chat_response(&json)?;
+            Ok(resp)
+        })
+        .await?;
+        if !resp.has_tool_calls() {
+            if let Some(prompt) = cache_key_prompt {
+                self.base.cache_response(prompt, &resp.content);
             }
         }
-
-        Err(last_error
-            .unwrap_or_else(|| VivianError::Provider("Anthropic 重试次数耗尽".to_string())))
+        Ok(resp)
     }
 
     async fn call_with_retry(
@@ -522,56 +473,37 @@ impl AnthropicProvider {
             }
         }
 
-        let mut last_error: Option<VivianError> = None;
-        let mut backoff = INITIAL_BACKOFF;
-
-        for attempt in 0..=MAX_RETRIES {
-            if attempt > 0 {
-                tracing::warn!("第 {} 次重试 Anthropic 请求: {}", attempt, self.base.model);
-                tokio::time::sleep(backoff).await;
-                backoff *= 2;
-            }
-
-            self.base.check_circuit()?;
-
-            match self.send_request(&body).await {
-                Ok(json) => {
-                    let content = Self::extract_content(&json)?;
-                    crate::providers::base::record_response_usage(&self.base.model, &json);
-                    self.base.record_success();
-                    if let Some(prompt) = cache_key_prompt {
-                        self.base.cache_response(prompt, &content);
-                    }
-                    return Ok(content);
-                }
-                Err(err) => {
-                    self.base.record_failure();
-                    let category = classify_error(&err);
-                    match category {
-                        ErrorCategory::Permanent => return Err(err),
-                        ErrorCategory::Transient | ErrorCategory::RateLimit => {
-                            last_error = Some(err);
-                            continue;
-                        }
-                    }
-                }
-            }
+        let content = crate::providers::transport::with_retry(&self.base, || async {
+            let json = self.send_request(&body).await?;
+            crate::providers::transport::validate_json(&json)?;
+            let content = Self::extract_content(&json)?;
+            crate::providers::base::record_response_usage(&self.base.model, &json);
+            Ok(content)
+        })
+        .await?;
+        if let Some(prompt) = cache_key_prompt {
+            self.base.cache_response(prompt, &content);
         }
-
-        Err(last_error
-            .unwrap_or_else(|| VivianError::Provider("Anthropic 重试次数耗尽".to_string())))
+        Ok(content)
     }
 }
 
 #[async_trait]
 impl BaseProvider for AnthropicProvider {
-    fn set_request_customization(&self, customization: crate::providers::reasoning_profiles::RequestCustomization) {
+    fn set_request_customization(
+        &self,
+        customization: crate::providers::reasoning_profiles::RequestCustomization,
+    ) {
         *self.base.request_customization.write() = customization;
     }
 
     fn set_request_parameters(&self, temperature: bool, max_tokens: bool) {
-        self.base.send_temperature.store(temperature, std::sync::atomic::Ordering::Relaxed);
-        self.base.send_max_tokens.store(max_tokens, std::sync::atomic::Ordering::Relaxed);
+        self.base
+            .send_temperature
+            .store(temperature, std::sync::atomic::Ordering::Relaxed);
+        self.base
+            .send_max_tokens
+            .store(max_tokens, std::sync::atomic::Ordering::Relaxed);
     }
 
     async fn call_chat(&self, messages: Vec<ChatMessage>) -> VivianResult<String> {
@@ -625,7 +557,7 @@ impl BaseProvider for AnthropicProvider {
         messages: Vec<ChatMessage>,
         json_schema: Option<serde_json::Value>,
     ) -> VivianResult<mpsc::Receiver<StreamEvent>> {
-        self.base.check_circuit()?;
+        let guard = crate::providers::transport::RequestGuard::begin(&self.base)?;
 
         let mut body = self.build_body(&messages, true);
         // Structured Outputs: 注入 emit_response 伪工具
@@ -640,24 +572,16 @@ impl BaseProvider for AnthropicProvider {
             .header("content-type", "application/json")
             .json(&self.base.finalize_body(body.clone()))
             .send()
-            .await?;
-
-        if !response.status().is_success() {
-            self.base.record_failure();
-            let status = response.status();
-            let text = response.text().await.unwrap_or_default();
-            return Err(VivianError::Provider(format!(
-                "Anthropic 流式 API 请求失败 ({}): {}",
-                status, text
-            )));
-        }
-
-        self.base.record_success();
+            .await;
+        let (response, guard) = guard.response(response).await?;
 
         let (tx, rx) = mpsc::channel::<StreamEvent>(32);
 
         tokio::spawn(async move {
-            let mut stream = response.bytes_stream();
+            let mut stream = crate::providers::sse::normalize_sse_until_closed(
+                response.bytes_stream(),
+                tx.clone(),
+            );
             let mut buffer = String::new();
             let mut input_tokens = 0;
             let mut cache_read_tokens = 0;
@@ -671,7 +595,11 @@ impl BaseProvider for AnthropicProvider {
                 let chunk = match chunk_result {
                     Ok(c) => c,
                     Err(e) => {
-                        let _ = tx.send(StreamEvent::Error { message: e.to_string() }).await;
+                        let _ = tx
+                            .send(StreamEvent::Error {
+                                message: e.to_string(),
+                            })
+                            .await;
                         return;
                     }
                 };
@@ -690,17 +618,14 @@ impl BaseProvider for AnthropicProvider {
                                 if json["type"] == "message_start" {
                                     let usage = &json["message"]["usage"];
                                     input_tokens = usage["input_tokens"].as_u64().unwrap_or(0);
-                                    cache_read_tokens = usage["cache_read_input_tokens"]
-                                        .as_u64()
-                                        .unwrap_or(0);
-                                    cache_write_tokens = usage["cache_creation_input_tokens"]
-                                        .as_u64()
-                                        .unwrap_or(0);
+                                    cache_read_tokens =
+                                        usage["cache_read_input_tokens"].as_u64().unwrap_or(0);
+                                    cache_write_tokens =
+                                        usage["cache_creation_input_tokens"].as_u64().unwrap_or(0);
                                 }
                                 if json["type"] == "message_delta" {
-                                    let output_tokens = json["usage"]["output_tokens"]
-                                        .as_u64()
-                                        .unwrap_or(0);
+                                    let output_tokens =
+                                        json["usage"]["output_tokens"].as_u64().unwrap_or(0);
                                     let _ = tx
                                         .send(StreamEvent::Usage {
                                             input_tokens,
@@ -720,7 +645,13 @@ impl BaseProvider for AnthropicProvider {
                                         .and_then(|t| t.as_str())
                                     {
                                         if !text.is_empty() {
-                                            if tx.send(StreamEvent::Text { content: text.to_string() }).await.is_err() {
+                                            if tx
+                                                .send(StreamEvent::Text {
+                                                    content: text.to_string(),
+                                                })
+                                                .await
+                                                .is_err()
+                                            {
                                                 return;
                                             }
                                         }
@@ -733,11 +664,15 @@ impl BaseProvider for AnthropicProvider {
             }
         });
 
-        Ok(rx)
+        Ok(crate::providers::transport::track_stream(rx, guard))
     }
 
     fn get_model(&self) -> &str {
         &self.base.model
+    }
+
+    fn get_endpoint(&self) -> &str {
+        &self.base.base_url
     }
 
     fn provider_identity(&self) -> String {
@@ -792,30 +727,9 @@ impl BaseProvider for AnthropicProvider {
     /// 后续 `invoke` 调用会把 tools 注入请求体（Anthropic `input_schema` 格式），
     /// 并解析响应 content 数组中的 `tool_use` 块。
     /// 注意：`request_cache` 不共享（新实例独立缓存），`circuit_breaker` 共享（Arc）。
-    fn bind_tools(
-        &self,
-        tools: Vec<ToolDefinition>,
-    ) -> VivianResult<Box<dyn BaseProvider>> {
+    fn bind_tools(&self, tools: Vec<ToolDefinition>) -> VivianResult<Box<dyn BaseProvider>> {
         Ok(Box::new(AnthropicProvider {
-            base: ProviderBase {
-                api_key: self.base.api_key.clone(),
-                base_url: self.base.base_url.clone(),
-                model: self.base.model.clone(),
-                temperature: self.base.effective_temperature(),
-                max_tokens: self.base.effective_max_tokens(),
-                circuit_breaker: Arc::clone(&self.base.circuit_breaker),
-                request_cache: Mutex::new(HashMap::new()),
-                enable_search: AtomicBool::new(self.base.is_enable_search()),
-                proxy: self.base.proxy.clone(),
-                client: self.base.client.clone(),
-                max_tokens_override: std::sync::atomic::AtomicU32::new(0),
-                temperature_override: std::sync::atomic::AtomicU64::new(0),
-                omit_temperature: std::sync::atomic::AtomicBool::new(self.base.should_omit_temperature()),
-                send_temperature: std::sync::atomic::AtomicBool::new(self.base.send_temperature.load(std::sync::atomic::Ordering::Relaxed)),
-                send_max_tokens: std::sync::atomic::AtomicBool::new(self.base.send_max_tokens.load(std::sync::atomic::Ordering::Relaxed)),
-                reasoning_pref: parking_lot::RwLock::new(*self.base.reasoning_pref.read()),
-                request_customization: parking_lot::RwLock::new(self.base.request_customization.read().clone()),
-            },
+            base: self.base.fork(),
             tools,
             cache_strategy: self.cache_strategy,
             instructions: self.instructions.clone(),
@@ -859,7 +773,7 @@ impl BaseProvider for AnthropicProvider {
         messages: Vec<ChatMessage>,
         tools: Vec<ToolDefinition>,
     ) -> VivianResult<mpsc::Receiver<StreamEvent>> {
-        self.base.check_circuit()?;
+        let guard = crate::providers::transport::RequestGuard::begin(&self.base)?;
 
         let mut body = self.build_body(&messages, true);
         // tools 非空时注入 tools 字段
@@ -878,24 +792,16 @@ impl BaseProvider for AnthropicProvider {
             .header("content-type", "application/json")
             .json(&self.base.finalize_body(body.clone()))
             .send()
-            .await?;
-
-        if !response.status().is_success() {
-            self.base.record_failure();
-            let status = response.status();
-            let text = response.text().await.unwrap_or_default();
-            return Err(VivianError::Provider(format!(
-                "Anthropic 流式 API 请求失败 ({}): {}",
-                status, text
-            )));
-        }
-
-        self.base.record_success();
+            .await;
+        let (response, guard) = guard.response(response).await?;
 
         let (tx, rx) = mpsc::channel::<StreamEvent>(64);
 
         tokio::spawn(async move {
-            let mut stream = response.bytes_stream();
+            let mut stream = crate::providers::sse::normalize_sse_until_closed(
+                response.bytes_stream(),
+                tx.clone(),
+            );
             let mut buffer = String::new();
             let mut finish_reason: Option<String> = None;
             // 跟踪 emit_response 伪工具的 content_block index
@@ -932,17 +838,16 @@ impl BaseProvider for AnthropicProvider {
                         if let Some(data) = line.strip_prefix("data: ") {
                             let data = data.trim();
                             if let Ok(json_val) = serde_json::from_str::<Value>(data) {
-                                let event_type = json_val
-                                    .get("type")
-                                    .and_then(|t| t.as_str())
-                                    .unwrap_or("");
+                                let event_type =
+                                    json_val.get("type").and_then(|t| t.as_str()).unwrap_or("");
 
                                 match event_type {
                                     "content_block_start" => {
                                         let index = json_val
                                             .get("index")
                                             .and_then(|i| i.as_u64())
-                                            .unwrap_or(0) as usize;
+                                            .unwrap_or(0)
+                                            as usize;
                                         let block = &json_val["content_block"];
                                         let block_type = block
                                             .get("type")
@@ -963,7 +868,9 @@ impl BaseProvider for AnthropicProvider {
                                             // emit_response 伪工具: 记录 index, 不发 ToolCallDelta
                                             // 它的 input_json_delta 会被转成 Text 事件
                                             if let Some(n) = &name {
-                                                if crate::providers::schema::is_emit_response_call(n) {
+                                                if crate::providers::schema::is_emit_response_call(
+                                                    n,
+                                                ) {
                                                     emit_response_indices.insert(index);
                                                 } else if tx
                                                     .send(StreamEvent::ToolCallDelta {
@@ -984,7 +891,8 @@ impl BaseProvider for AnthropicProvider {
                                         let index = json_val
                                             .get("index")
                                             .and_then(|i| i.as_u64())
-                                            .unwrap_or(0) as usize;
+                                            .unwrap_or(0)
+                                            as usize;
                                         let delta = &json_val["delta"];
                                         let delta_type = delta
                                             .get("type")
@@ -996,11 +904,12 @@ impl BaseProvider for AnthropicProvider {
                                                     delta.get("text").and_then(|t| t.as_str())
                                                 {
                                                     if !text.is_empty()
-                                                        && tx.send(StreamEvent::Text {
-                                                            content: text.to_string(),
-                                                        })
-                                                        .await
-                                                        .is_err()
+                                                        && tx
+                                                            .send(StreamEvent::Text {
+                                                                content: text.to_string(),
+                                                            })
+                                                            .await
+                                                            .is_err()
                                                     {
                                                         return;
                                                     }
@@ -1031,11 +940,12 @@ impl BaseProvider for AnthropicProvider {
                                                     // 让下游消费者拿到结构化 JSON 文本
                                                     if emit_response_indices.contains(&index) {
                                                         if !partial.is_empty()
-                                                            && tx.send(StreamEvent::Text {
-                                                                content: partial.to_string(),
-                                                            })
-                                                            .await
-                                                            .is_err()
+                                                            && tx
+                                                                .send(StreamEvent::Text {
+                                                                    content: partial.to_string(),
+                                                                })
+                                                                .await
+                                                                .is_err()
                                                         {
                                                             return;
                                                         }
@@ -1074,7 +984,6 @@ impl BaseProvider for AnthropicProvider {
                                         let _ = tx
                                             .send(StreamEvent::Done {
                                                 finish_reason: finish_reason.take(),
-                                    
                                             })
                                             .await;
                                         return;
@@ -1091,11 +1000,10 @@ impl BaseProvider for AnthropicProvider {
             let _ = tx
                 .send(StreamEvent::Done {
                     finish_reason: finish_reason.take(),
-        
                 })
                 .await;
         });
 
-        Ok(rx)
+        Ok(crate::providers::transport::track_stream(rx, guard))
     }
 }

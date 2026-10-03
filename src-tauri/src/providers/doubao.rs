@@ -16,8 +16,6 @@
 //! Responses API 当 Stateless 接口用。
 
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -27,17 +25,12 @@ use tokio::sync::mpsc;
 use crate::config::manager::ProviderConfig;
 use crate::error::{VivianError, VivianResult};
 use crate::providers::base::{
-    parse_stream_usage, BaseProvider, ChatResponse, ProviderBase, StreamEvent,
-    StructuredToolCall, ToolDefinition,
+    parse_stream_usage, BaseProvider, ChatResponse, ProviderBase, StreamEvent, StructuredToolCall,
+    ToolDefinition,
 };
 use crate::providers::thinking_stripper::{strip_thinking_segments, ThinkingStreamStripper};
-use crate::resilience::{classify_error, ErrorCategory};
 use crate::types::response::ChatMessage;
 use crate::utils::messages_cache_key;
-
-const MAX_RETRIES: usize = 2;
-const INITIAL_BACKOFF: Duration = Duration::from_millis(500);
-const LARGE_PROMPT_BYTES: usize = 20_000;
 
 /// 火山方舟 Responses API Provider
 ///
@@ -89,10 +82,7 @@ impl DoubaoProvider {
     }
 
     fn endpoint(&self) -> String {
-        format!(
-            "{}/responses",
-            self.base.base_url.trim_end_matches('/')
-        )
+        crate::providers::transport::api_endpoint(&self.base.base_url, "responses", None)
     }
 
     /// 把 ChatMessage 数组转为 Responses API 的 `input` 数组
@@ -114,8 +104,8 @@ impl DoubaoProvider {
                     // assistant 工具调用拆分为独立 function_call 项
                     if let Some(tcs) = &m.tool_calls {
                         for tc in tcs {
-                            let args_str =
-                                serde_json::to_string(&tc.arguments).unwrap_or_else(|_| "{}".into());
+                            let args_str = serde_json::to_string(&tc.arguments)
+                                .unwrap_or_else(|_| "{}".into());
                             input.push(json!({
                                 "type": "function_call",
                                 "call_id": tc.id,
@@ -191,7 +181,11 @@ impl DoubaoProvider {
     }
 
     /// 构造请求体基础字段
-    fn build_request_body(&self, input: Vec<Value>, json_schema: &Option<serde_json::Value>) -> Value {
+    fn build_request_body(
+        &self,
+        input: Vec<Value>,
+        json_schema: &Option<serde_json::Value>,
+    ) -> Value {
         let mut body = json!({
             "model": self.base.model,
             "input": input,
@@ -200,7 +194,9 @@ impl DoubaoProvider {
         });
         // 工作智能体模式：省略 temperature（服务端默认）
         self.base.strip_temperature(&mut body);
-        if let Some(instructions) = &crate::providers::base::effective_instructions(&self.instructions) {
+        if let Some(instructions) =
+            &crate::providers::base::effective_instructions(&self.instructions)
+        {
             body["instructions"] = json!(instructions);
         }
         // Structured Outputs: 火山方舟 Responses API 通过 response_format 注入 schema
@@ -214,13 +210,7 @@ impl DoubaoProvider {
                 }
             });
         }
-        let capability =
-            crate::providers::reasoning::resolve_reasoning_capability(&self.base.model);
-        crate::providers::reasoning::apply_responses_reasoning(
-            &mut body,
-            self.base.effective_reasoning(),
-            &capability,
-        );
+        // Reasoning fields are applied once by the final request adapter.
         body
     }
 
@@ -236,12 +226,7 @@ impl DoubaoProvider {
             .map_err(|e| VivianError::Provider(format!("HTTP 发送失败: {}", e)))?;
 
         if !response.status().is_success() {
-            let status = response.status();
-            let text = response.text().await.unwrap_or_default();
-            return Err(VivianError::Provider(format!(
-                "Responses API 请求失败 ({}): {}",
-                status, text
-            )));
+            return Err(crate::providers::transport::http_error(response).await);
         }
 
         response
@@ -253,51 +238,14 @@ impl DoubaoProvider {
     /// 带重试 + 熔断的请求
     ///
     /// 简化版（相比 `OpenAiCompatProvider::call_with_retry`）：不做请求缓存
-    /// （Responses API 有服务端缓存），保留熔断与大 prompt 跳过熔断逻辑。
+    /// （Responses API 有服务端缓存），请求健康与重试由公共传输层治理。
     async fn call_with_retry(&self, body: Value) -> VivianResult<Value> {
-        let body_size = body.to_string().len();
-        let bypass_circuit_failure = body_size > LARGE_PROMPT_BYTES;
-        if bypass_circuit_failure {
-            tracing::warn!(
-                "[DoubaoResponses] {} 大 prompt 检测 ({} bytes)，失败时跳过熔断器记录",
-                self.base.model,
-                body_size
-            );
-        }
-
-        let mut last_error: Option<VivianError> = None;
-        let mut backoff = INITIAL_BACKOFF;
-
-        for attempt in 0..=MAX_RETRIES {
-            if attempt > 0 {
-                tracing::warn!("[DoubaoResponses] 第 {} 次重试: {}", attempt, self.base.model);
-                tokio::time::sleep(backoff).await;
-                backoff *= 2;
-            }
-
-            self.base.check_circuit()?;
-            match self.send_request(body.clone()).await {
-                Ok(json) => {
-                    self.base.record_success();
-                    return Ok(json);
-                }
-                Err(err) => {
-                    if !bypass_circuit_failure {
-                        self.base.record_failure();
-                    }
-                    let category = classify_error(&err);
-                    match category {
-                        ErrorCategory::Permanent => return Err(err),
-                        ErrorCategory::Transient | ErrorCategory::RateLimit => {
-                            last_error = Some(err);
-                            continue;
-                        }
-                    }
-                }
-            }
-        }
-
-        Err(last_error.unwrap_or_else(|| VivianError::Provider("重试次数耗尽".to_string())))
+        crate::providers::transport::with_retry(&self.base, || async {
+            let json = self.send_request(body.clone()).await?;
+            crate::providers::transport::validate_json(&json)?;
+            Ok(json)
+        })
+        .await
     }
 
     /// 从 Responses API 非流式响应提取结构化结果
@@ -407,13 +355,20 @@ impl DoubaoProvider {
 
 #[async_trait]
 impl BaseProvider for DoubaoProvider {
-    fn set_request_customization(&self, customization: crate::providers::reasoning_profiles::RequestCustomization) {
+    fn set_request_customization(
+        &self,
+        customization: crate::providers::reasoning_profiles::RequestCustomization,
+    ) {
         *self.base.request_customization.write() = customization;
     }
 
     fn set_request_parameters(&self, temperature: bool, max_tokens: bool) {
-        self.base.send_temperature.store(temperature, std::sync::atomic::Ordering::Relaxed);
-        self.base.send_max_tokens.store(max_tokens, std::sync::atomic::Ordering::Relaxed);
+        self.base
+            .send_temperature
+            .store(temperature, std::sync::atomic::Ordering::Relaxed);
+        self.base
+            .send_max_tokens
+            .store(max_tokens, std::sync::atomic::Ordering::Relaxed);
     }
 
     async fn call_chat(&self, messages: Vec<ChatMessage>) -> VivianResult<String> {
@@ -438,31 +393,23 @@ impl BaseProvider for DoubaoProvider {
         let mut body = self.build_request_body(input, &json_schema);
         body["stream"] = json!(true);
 
-        self.base.check_circuit()?;
+        let guard = crate::providers::transport::RequestGuard::begin(&self.base)?;
         let client = self.base.get_client();
         let response = client
             .post(&self.endpoint())
             .bearer_auth(&self.base.api_key)
             .json(&self.base.finalize_body(body.clone()))
             .send()
-            .await
-            .map_err(|e| VivianError::Provider(format!("流式请求失败: {}", e)))?;
-
-        if !response.status().is_success() {
-            self.base.record_failure();
-            let status = response.status();
-            let text = response.text().await.unwrap_or_default();
-            return Err(VivianError::Provider(format!(
-                "Responses API 流式请求失败 ({}): {}",
-                status, text
-            )));
-        }
-        self.base.record_success();
+            .await;
+        let (response, guard) = guard.response(response).await?;
 
         let (tx, rx) = mpsc::channel::<StreamEvent>(64);
 
         tokio::spawn(async move {
-            let mut stream = response.bytes_stream();
+            let mut stream = crate::providers::sse::normalize_sse_until_closed(
+                response.bytes_stream(),
+                tx.clone(),
+            );
             let mut buffer = String::new();
             // Responses API 默认不泄露 thinking 到 content，保留 stripper 以兼容异常情况
             let mut stripper = ThinkingStreamStripper::new();
@@ -471,7 +418,11 @@ impl BaseProvider for DoubaoProvider {
                 let chunk = match chunk_result {
                     Ok(c) => c,
                     Err(e) => {
-                        let _ = tx.send(StreamEvent::Error { message: e.to_string() }).await;
+                        let _ = tx
+                            .send(StreamEvent::Error {
+                                message: e.to_string(),
+                            })
+                            .await;
                         return;
                     }
                 };
@@ -503,7 +454,11 @@ impl BaseProvider for DoubaoProvider {
                                     if let Some(delta) = json_val["delta"].as_str() {
                                         let out = stripper.feed(delta);
                                         if !out.is_empty() {
-                                            if tx.send(StreamEvent::Text { content: out }).await.is_err() {
+                                            if tx
+                                                .send(StreamEvent::Text { content: out })
+                                                .await
+                                                .is_err()
+                                            {
                                                 return;
                                             }
                                         }
@@ -512,7 +467,8 @@ impl BaseProvider for DoubaoProvider {
                                 "response.completed" => {
                                     let residual = stripper.flush();
                                     if !residual.is_empty() {
-                                        let _ = tx.send(StreamEvent::Text { content: residual }).await;
+                                        let _ =
+                                            tx.send(StreamEvent::Text { content: residual }).await;
                                     }
                                     return;
                                 }
@@ -520,7 +476,11 @@ impl BaseProvider for DoubaoProvider {
                                     let msg = json_val["response"]["error"]["message"]
                                         .as_str()
                                         .unwrap_or("Responses API 流式失败");
-                                    let _ = tx.send(StreamEvent::Error { message: msg.to_string() }).await;
+                                    let _ = tx
+                                        .send(StreamEvent::Error {
+                                            message: msg.to_string(),
+                                        })
+                                        .await;
                                     return;
                                 }
                                 _ => {}
@@ -536,11 +496,15 @@ impl BaseProvider for DoubaoProvider {
             }
         });
 
-        Ok(rx)
+        Ok(crate::providers::transport::track_stream(rx, guard))
     }
 
     fn get_model(&self) -> &str {
         &self.base.model
+    }
+
+    fn get_endpoint(&self) -> &str {
+        &self.base.base_url
     }
 
     fn provider_identity(&self) -> String {
@@ -582,25 +546,7 @@ impl BaseProvider for DoubaoProvider {
 
     fn bind_tools(&self, tools: Vec<ToolDefinition>) -> VivianResult<Box<dyn BaseProvider>> {
         Ok(Box::new(DoubaoProvider {
-            base: ProviderBase {
-                api_key: self.base.api_key.clone(),
-                base_url: self.base.base_url.clone(),
-                model: self.base.model.clone(),
-                temperature: self.base.effective_temperature(),
-                max_tokens: self.base.effective_max_tokens(),
-                circuit_breaker: Arc::clone(&self.base.circuit_breaker),
-                request_cache: parking_lot::Mutex::new(HashMap::new()),
-                enable_search: std::sync::atomic::AtomicBool::new(self.base.is_enable_search()),
-                proxy: self.base.proxy.clone(),
-                client: self.base.client.clone(),
-                max_tokens_override: std::sync::atomic::AtomicU32::new(0),
-                temperature_override: std::sync::atomic::AtomicU64::new(0),
-                omit_temperature: std::sync::atomic::AtomicBool::new(self.base.should_omit_temperature()),
-                send_temperature: std::sync::atomic::AtomicBool::new(self.base.send_temperature.load(std::sync::atomic::Ordering::Relaxed)),
-                send_max_tokens: std::sync::atomic::AtomicBool::new(self.base.send_max_tokens.load(std::sync::atomic::Ordering::Relaxed)),
-                reasoning_pref: parking_lot::RwLock::new(*self.base.reasoning_pref.read()),
-                request_customization: parking_lot::RwLock::new(self.base.request_customization.read().clone()),
-            },
+            base: self.base.fork(),
             tools,
             instructions: self.instructions.clone(),
         }))
@@ -635,7 +581,7 @@ impl BaseProvider for DoubaoProvider {
             &messages,
             &format!("stream_with_tools model={}", self.base.model),
         );
-        self.base.check_circuit()?;
+        let guard = crate::providers::transport::RequestGuard::begin(&self.base)?;
 
         let tools_field: Value = if tools.is_empty() {
             Value::Array(vec![])
@@ -669,25 +615,17 @@ impl BaseProvider for DoubaoProvider {
             .bearer_auth(&self.base.api_key)
             .json(&self.base.finalize_body(body.clone()))
             .send()
-            .await
-            .map_err(|e| VivianError::Provider(format!("流式请求失败: {}", e)))?;
-
-        if !response.status().is_success() {
-            self.base.record_failure();
-            let status = response.status();
-            let text = response.text().await.unwrap_or_default();
-            return Err(VivianError::Provider(format!(
-                "Responses API 流式请求失败 ({}): {}",
-                status, text
-            )));
-        }
-        self.base.record_success();
+            .await;
+        let (response, guard) = guard.response(response).await?;
 
         let (tx, rx) = mpsc::channel::<StreamEvent>(64);
         let leaks = false; // Responses API 默认不泄露 thinking 到 content
 
         tokio::spawn(async move {
-            let mut stream = response.bytes_stream();
+            let mut stream = crate::providers::sse::normalize_sse_until_closed(
+                response.bytes_stream(),
+                tx.clone(),
+            );
             let mut buffer = String::new();
             let mut finish_reason: Option<String> = None;
             let mut stripper = if leaks {
@@ -769,16 +707,15 @@ impl BaseProvider for DoubaoProvider {
                                     // function_call 项开始：记录 call_id 和 name
                                     let item = &json_val["item"];
                                     if item["type"].as_str() == Some("function_call") {
-                                        let output_index = json_val["output_index"]
-                                            .as_u64()
-                                            .unwrap_or(0) as usize;
-                                        let call_id = item["call_id"]
-                                            .as_str()
-                                            .map(String::from);
+                                        let output_index =
+                                            json_val["output_index"].as_u64().unwrap_or(0) as usize;
+                                        let call_id = item["call_id"].as_str().map(String::from);
                                         let name = item["name"].as_str().map(String::from);
-                                        let entry = tool_calls
-                                            .entry(output_index)
-                                            .or_insert((None, None, String::new()));
+                                        let entry = tool_calls.entry(output_index).or_insert((
+                                            None,
+                                            None,
+                                            String::new(),
+                                        ));
                                         if call_id.is_some() {
                                             entry.0 = call_id;
                                         }
@@ -801,13 +738,14 @@ impl BaseProvider for DoubaoProvider {
                                     }
                                 }
                                 "response.function_call_arguments.delta" => {
-                                    let output_index = json_val["output_index"]
-                                        .as_u64()
-                                        .unwrap_or(0) as usize;
+                                    let output_index =
+                                        json_val["output_index"].as_u64().unwrap_or(0) as usize;
                                     if let Some(delta) = json_val["delta"].as_str() {
-                                        let entry = tool_calls
-                                            .entry(output_index)
-                                            .or_insert((None, None, String::new()));
+                                        let entry = tool_calls.entry(output_index).or_insert((
+                                            None,
+                                            None,
+                                            String::new(),
+                                        ));
                                         entry.2.push_str(delta);
                                         if tx
                                             .send(StreamEvent::ToolCallDelta {
@@ -827,16 +765,14 @@ impl BaseProvider for DoubaoProvider {
                                     // 单个工具调用参数完成（无需特殊处理，累积已在 delta 中完成）
                                 }
                                 "response.completed" => {
-                                    let status = json_val["response"]["status"]
-                                        .as_str()
-                                        .unwrap_or("");
+                                    let status =
+                                        json_val["response"]["status"].as_str().unwrap_or("");
                                     if status == "completed" {
-                                        finish_reason =
-                                            if !tool_calls.is_empty() {
-                                                Some("tool_calls".to_string())
-                                            } else {
-                                                Some("stop".to_string())
-                                            };
+                                        finish_reason = if !tool_calls.is_empty() {
+                                            Some("tool_calls".to_string())
+                                        } else {
+                                            Some("stop".to_string())
+                                        };
                                     }
                                     // 排空 stripper 残留
                                     if let Some(s) = stripper.as_mut() {
@@ -886,6 +822,6 @@ impl BaseProvider for DoubaoProvider {
                 .await;
         });
 
-        Ok(rx)
+        Ok(crate::providers::transport::track_stream(rx, guard))
     }
 }

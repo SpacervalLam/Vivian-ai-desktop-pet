@@ -64,6 +64,7 @@ export interface CardProps {
   hover?: boolean;
   /** 使用提升的卡片背景 */
   elevated?: boolean;
+  className?: string;
   style?: CSSProperties;
   children?: React.ReactNode;
   onClick?: () => void;
@@ -76,6 +77,7 @@ export interface CardProps {
 const CardBase: React.FC<CardProps> = ({
   hover,
   elevated,
+  className,
   style,
   children,
   onClick,
@@ -87,6 +89,7 @@ const CardBase: React.FC<CardProps> = ({
   const isHover = (hover || !!onClick) && hovered;
   return (
     <div
+      className={className}
       role={onClick ? 'button' : undefined}
       onClick={onClick}
       onMouseEnter={() => {

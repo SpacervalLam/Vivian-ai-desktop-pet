@@ -15,33 +15,14 @@ use crate::providers::chat_completions::ChatCompletionsProvider;
 use crate::providers::declarative::DeclarativeProvider;
 use crate::providers::doubao::DoubaoProvider;
 use crate::providers::gemini::GeminiProvider;
+use crate::providers::openai_agents::OpenAiAgentsProvider;
 use crate::providers::openai_compat::{CacheStrategy, OpenAiCompatProvider};
 use crate::providers::openai_responses::OpenAiResponsesProvider;
-use crate::providers::openai_agents::OpenAiAgentsProvider;
 use crate::providers::protocol_registry;
-use crate::providers::spec::CompiledSpec;
 use crate::providers::spark::SparkProvider;
+use crate::providers::spec::CompiledSpec;
 use crate::providers::wenxin::WenxinProvider;
 use crate::providers::zhipu::ZhipuProvider;
-
-/// 原生 adapter 覆盖的 provider_type。这些类型始终走专用 native 实现
-/// （鲁棒性更全：重试/缓存/工具等），**不**被声明式协议注册表接管。
-///
-/// 全新协议（插件带来的新 provider_type，如 `interactions`）不在本集合内，
-/// 命中注册表时路由到 `DeclarativeProvider`（通用解释器）。
-const NATIVE_PROVIDER_TYPES: &[&str] = &[
-    "openai",
-    "openai_responses",
-    "openai_agents",
-    "doubao",
-    "gemini",
-    "anthropic",
-    "wenxin",
-    "spark",
-    "chat_completions",
-    "zhipu",
-    "custom",
-];
 
 /// 声明式协议路由：非原生类型查协议注册表。
 ///
@@ -50,10 +31,10 @@ const NATIVE_PROVIDER_TYPES: &[&str] = &[
 /// 运行时装载插件后由 js_host 触发 invalidate 重载。
 fn declarative_spec_for(provider_type: &str) -> Option<Arc<CompiledSpec>> {
     // 原生类型交给专用 adapter（不做声明式接管——重试/缓存/工具链更全）
-    if NATIVE_PROVIDER_TYPES.contains(&provider_type) {
+    if ProviderKind::try_from_str(provider_type.trim()).is_some() {
         return None;
     }
-    protocol_registry::spec_for(provider_type)
+    protocol_registry::spec_for(provider_type.trim())
 }
 
 /// 失效声明式协议注册表缓存（下次创建 provider 时重新读盘装载）。
@@ -80,9 +61,8 @@ fn cached_http_client(
     if let Some(client) = cache.get(&cache_key).cloned() {
         return Ok((*client).clone());
     }
-    let client = build_client_with_proxy(proxy_config).map_err(|error| {
-        VivianError::Provider(format!("创建代理 HTTP 客户端失败: {}", error))
-    })?;
+    let client = build_client_with_proxy(proxy_config)
+        .map_err(|error| VivianError::Provider(format!("创建代理 HTTP 客户端失败: {}", error)))?;
     cache.insert(cache_key, Arc::new(client.clone()));
     Ok(client)
 }
@@ -154,7 +134,8 @@ pub fn work_model_default_max_tokens(provider_type: &str, endpoint: &str) -> u32
     match provider_type.to_lowercase().as_str() {
         "anthropic" | "claude" => 64000,
         "gemini" | "google" => 65536,
-        "openai" | "openai_compat" | "openai-compat" | "openai_responses" | "responses_api" | "openai_agents" | "agents_api" => 32768,
+        "openai" | "openai_compat" | "openai-compat" | "openai_responses" | "responses_api"
+        | "openai_agents" | "agents_api" => 32768,
         "zhipu" | "glm" | "chatglm" | "bigmodel" => 32768,
         "doubao" | "doubao_responses" => 16384,
         "wenxin" | "ernie" | "baidu" => 8192,
@@ -205,7 +186,7 @@ impl ProviderKind {
     }
 
     pub fn try_from_str(s: &str) -> Option<Self> {
-        let lower = s.to_lowercase();
+        let lower = s.trim().to_lowercase();
         Some(match lower.as_str() {
             "openai" | "openai_compat" | "openai-compat" => ProviderKind::OpenAiCompat,
             "openai_responses" | "openai-responses" | "responses_api" | "responses-api" => {
@@ -252,9 +233,7 @@ fn is_local_endpoint(endpoint: &str) -> bool {
         .ok()
         .and_then(|url| url.host_str().map(str::to_owned))
         .is_some_and(|host| {
-            host.eq_ignore_ascii_case("localhost")
-                || host == "127.0.0.1"
-                || host == "::1"
+            host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1"
         })
 }
 
@@ -273,6 +252,32 @@ pub fn provider_configuration_complete(config: &TaskRouteConfig) -> bool {
     !config.api_key.trim().is_empty()
 }
 
+fn validate_task_config(config: &TaskRouteConfig) -> VivianResult<()> {
+    let kind = ProviderKind::try_from_str(&config.provider_type);
+    if kind.is_none() && declarative_spec_for(config.provider_type.trim()).is_none() {
+        return Err(VivianError::Config(format!(
+            "未知 provider_type: {}",
+            config.provider_type
+        )));
+    }
+    crate::providers::transport::validate_endpoint(
+        &config.endpoint,
+        kind == Some(ProviderKind::Spark),
+    )?;
+    if config.model.trim().is_empty() {
+        return Err(VivianError::Config("Provider model 不能为空".into()));
+    }
+    // Reject malformed pasted keys before constructing a request; never echo credentials.
+    if !config.api_key.trim().is_empty()
+        && reqwest::header::HeaderValue::from_str(config.api_key.trim()).is_err()
+    {
+        return Err(VivianError::Config(
+            "Provider API key 包含非法 HTTP header 字符".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// 为路由矩阵中的单个任务创建独立 provider 实例
 ///
 /// 此函数从 `TaskRouteConfig`（完整模型配置）创建 provider，使每个任务拥有独立的模型/API Key/端点。
@@ -281,6 +286,7 @@ pub fn create_task_provider(
     config: &AppConfig,
     client_cache: &ClientCache,
 ) -> VivianResult<Box<dyn BaseProvider>> {
+    validate_task_config(task_config)?;
     let temperature = task_config.temperature.unwrap_or(config.ai.temperature);
     let max_tokens = task_config.max_tokens.unwrap_or(config.ai.max_tokens);
 
@@ -308,20 +314,12 @@ pub fn create_task_provider(
 
     let client = cached_http_client(client_cache, cache_key, &proxy_config)?;
 
-    let kind = ProviderKind::try_from_str(&task_config.provider_type).unwrap_or(ProviderKind::Custom);
-    if kind == ProviderKind::Custom
-        && !task_config.provider_type.eq_ignore_ascii_case("custom")
-        && declarative_spec_for(task_config.provider_type.trim()).is_none()
-    {
-        return Err(VivianError::Provider(format!(
-            "未知 provider_type: {}",
-            task_config.provider_type
-        )));
-    }
+    let kind =
+        ProviderKind::try_from_str(&task_config.provider_type).unwrap_or(ProviderKind::Custom);
     let provider_config = ProviderConfig {
-        base_url: task_config.endpoint.clone(),
-        api_key: task_config.api_key.clone(),
-        model: task_config.model.clone(),
+        base_url: task_config.endpoint.trim().to_string(),
+        api_key: task_config.api_key.trim().to_string(),
+        model: task_config.model.trim().to_string(),
     };
 
     let provider = create_provider_by_kind(
@@ -338,12 +336,32 @@ pub fn create_task_provider(
         &config.base.language,
         true,
     )?;
-    provider.set_request_parameters(task_config.send_temperature.unwrap_or(config.ai.send_temperature), task_config.send_max_tokens.unwrap_or(config.ai.send_max_tokens));
-    if let Some(overrides) = &task_config.reasoning_overrides { crate::providers::reasoning_profiles::validate_patch(overrides).map_err(VivianError::Provider)?; }
-    provider.set_request_customization(crate::providers::reasoning_profiles::RequestCustomization {
-        profile: crate::providers::reasoning_profiles::resolve(&task_config.provider_type, &task_config.model),
-        overrides: task_config.reasoning_overrides.clone(),
-    });
+    provider.set_request_parameters(
+        task_config
+            .send_temperature
+            .unwrap_or(config.ai.send_temperature),
+        task_config
+            .send_max_tokens
+            .unwrap_or(config.ai.send_max_tokens),
+    );
+    let request_profile = crate::providers::reasoning_profiles::resolve(
+        &task_config.provider_type,
+        &task_config.model,
+    );
+    if let Some(overrides) = &task_config.reasoning_overrides {
+        crate::providers::reasoning_profiles::validate_adapter_patch(
+            overrides,
+            request_profile.as_ref(),
+        )
+        .map_err(VivianError::Provider)?;
+    }
+    provider.set_request_customization(
+        crate::providers::reasoning_profiles::RequestCustomization {
+            provider_type: task_config.provider_type.clone(),
+            profile: request_profile,
+            overrides: task_config.reasoning_overrides.clone(),
+        },
+    );
     provider.set_reasoning_pref(task_config.reasoning.or(config.ai.reasoning));
     Ok(provider)
 }
@@ -358,6 +376,7 @@ pub fn create_probe_provider(
     config: &AppConfig,
     client_cache: &ClientCache,
 ) -> VivianResult<Box<dyn BaseProvider>> {
+    validate_task_config(task_config)?;
     // 探测用最小参数：temperature=0 + 输出预算 16 token，把每次探测成本压到最低
     let probe_config = TaskRouteConfig {
         temperature: Some(0.0),
@@ -381,20 +400,12 @@ pub fn create_probe_provider(
 
     let client = cached_http_client(client_cache, cache_key, &proxy_config)?;
 
-    let kind = ProviderKind::try_from_str(&task_config.provider_type).unwrap_or(ProviderKind::Custom);
-    if kind == ProviderKind::Custom
-        && !task_config.provider_type.eq_ignore_ascii_case("custom")
-        && declarative_spec_for(task_config.provider_type.trim()).is_none()
-    {
-        return Err(VivianError::Provider(format!(
-            "未知 provider_type: {}",
-            task_config.provider_type
-        )));
-    }
+    let kind =
+        ProviderKind::try_from_str(&task_config.provider_type).unwrap_or(ProviderKind::Custom);
     let provider_config = ProviderConfig {
-        base_url: task_config.endpoint.clone(),
-        api_key: task_config.api_key.clone(),
-        model: task_config.model.clone(),
+        base_url: task_config.endpoint.trim().to_string(),
+        api_key: task_config.api_key.trim().to_string(),
+        model: task_config.model.trim().to_string(),
     };
 
     let provider = create_provider_by_kind(
@@ -411,12 +422,32 @@ pub fn create_probe_provider(
         &config.base.language,
         false,
     )?;
-    provider.set_request_parameters(task_config.send_temperature.unwrap_or(config.ai.send_temperature), task_config.send_max_tokens.unwrap_or(config.ai.send_max_tokens));
-    if let Some(overrides) = &task_config.reasoning_overrides { crate::providers::reasoning_profiles::validate_patch(overrides).map_err(VivianError::Provider)?; }
-    provider.set_request_customization(crate::providers::reasoning_profiles::RequestCustomization {
-        profile: crate::providers::reasoning_profiles::resolve(&task_config.provider_type, &task_config.model),
-        overrides: task_config.reasoning_overrides.clone(),
-    });
+    provider.set_request_parameters(
+        task_config
+            .send_temperature
+            .unwrap_or(config.ai.send_temperature),
+        task_config
+            .send_max_tokens
+            .unwrap_or(config.ai.send_max_tokens),
+    );
+    let request_profile = crate::providers::reasoning_profiles::resolve(
+        &task_config.provider_type,
+        &task_config.model,
+    );
+    if let Some(overrides) = &task_config.reasoning_overrides {
+        crate::providers::reasoning_profiles::validate_adapter_patch(
+            overrides,
+            request_profile.as_ref(),
+        )
+        .map_err(VivianError::Provider)?;
+    }
+    provider.set_request_customization(
+        crate::providers::reasoning_profiles::RequestCustomization {
+            provider_type: task_config.provider_type.clone(),
+            profile: request_profile,
+            overrides: task_config.reasoning_overrides.clone(),
+        },
+    );
     provider.set_reasoning_pref(task_config.reasoning.or(config.ai.reasoning));
     Ok(provider)
 }

@@ -132,8 +132,8 @@ impl Tool for UseSkillTool {
         let skill = svc.list_for(&char_id).into_iter().find(|s| s.name == name);
         match skill {
             Some(s) => ToolResult::standard_success(
-                &format!("技能「{}」已激活，请按以下指引行动：\n\n{}", s.name, s.body),
-                Some(json!({ "name": s.name, "activated": true })),
+                &format!("技能「{}」使用指导已加载；它不执行操作、不授予权限，也不安装工具。只使用已注册且获准的能力，缺少能力时说明限制：\n\n{}", s.name, s.body),
+                Some(json!({ "name": s.name, "activated": true, "kind": "usage_guidance", "executes": false })),
             ),
             None => {
                 // 附带可见技能列表，方便 LLM 纠正名称后重试

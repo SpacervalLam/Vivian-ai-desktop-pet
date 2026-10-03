@@ -102,11 +102,11 @@ impl BeliefGenerator {
         // 取最近 Insight 和 LongTerm 作为源数据
         let insights: Vec<&MemoryItem> = all
             .iter()
-            .filter(|m| m.tags.iter().any(|t| t == "insight"))
+            .filter(|m| super::belief_sources::matches(&m.memory_type, &m.metadata, &m.tags, "insight"))
             .collect();
         let long_terms: Vec<&MemoryItem> = all
             .iter()
-            .filter(|m| m.tags.iter().any(|t| t == "long_term"))
+            .filter(|m| super::belief_sources::matches(&m.memory_type, &m.metadata, &m.tags, "long_term"))
             .collect();
 
         // 源数据不足时跳过（至少 3 条 Insight 或 5 条 LongTerm）

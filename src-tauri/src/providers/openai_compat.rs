@@ -1,11 +1,8 @@
 use std::collections::HashMap;
-use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use async_trait::async_trait;
 use futures::StreamExt;
-use parking_lot::Mutex;
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
@@ -18,15 +15,9 @@ use crate::providers::base::{
 use crate::providers::thinking_stripper::{
     leaks_thinking_in_content, strip_thinking_segments, ThinkingStreamStripper,
 };
-use crate::resilience::{classify_error, ErrorCategory};
 use crate::types::response::ChatMessage;
 use crate::utils::messages_cache_key;
 
-const MAX_RETRIES: usize = 2;
-const INITIAL_BACKOFF: Duration = Duration::from_millis(500);
-/// 大 prompt 阈值（字节）：超过此体积的请求失败时不计入熔断器，
-/// 避免一次性大 prompt 触发熔断后拖垮全局可用性。
-const LARGE_PROMPT_BYTES: usize = 20_000;
 /// 连接阶段超时上限（秒），与 `connect_timeout` 保持一致，
 /// 用于在错误日志中区分 connect 阶段与 read 阶段失败。
 const CONNECT_TIMEOUT_SECS: u64 = 10;
@@ -124,12 +115,7 @@ impl OpenAiCompatProvider {
     }
 
     fn endpoint(&self) -> String {
-        let url = self.base.base_url.trim_end_matches('/');
-        if url.ends_with("/responses") {
-            url.to_string()
-        } else {
-            format!("{}/responses", url)
-        }
+        crate::providers::transport::api_endpoint(&self.base.base_url, "responses", None)
     }
 
     /// 注入 Responses API 的结构化输出约束（`text.format`）
@@ -283,19 +269,31 @@ impl OpenAiCompatProvider {
             tracing::debug!("[Router] DeepSeek 查证使用 web_search 工具");
         } else if model_lower == "gpt-5-search-api" {
             body["web_search_options"] = json!({"search_context_size": "high"});
-            tracing::info!("[Router] gpt-5-search-api 联网搜索已启用: model={}", self.base.model);
+            tracing::info!(
+                "[Router] gpt-5-search-api 联网搜索已启用: model={}",
+                self.base.model
+            );
         } else if model_lower.contains("qwen") {
             body["enable_search"] = json!(true);
-            tracing::info!("[Router] Qwen (DashScope) 联网搜索已启用: model={}", self.base.model);
+            tracing::info!(
+                "[Router] Qwen (DashScope) 联网搜索已启用: model={}",
+                self.base.model
+            );
         } else if model_lower.contains("glm") {
             if !function_calling_active {
                 body["tools"] = json!([{
                     "type": "web_search",
                     "web_search": {"enable": true, "search_result": true}
                 }]);
-                tracing::info!("[Router] GLM (智谱) 联网搜索已启用: model={}", self.base.model);
+                tracing::info!(
+                    "[Router] GLM (智谱) 联网搜索已启用: model={}",
+                    self.base.model
+                );
             } else {
-                tracing::info!("[Router] GLM 联网搜索已禁用（function calling 占用 tools 字段）: model={}", self.base.model);
+                tracing::info!(
+                    "[Router] GLM 联网搜索已禁用（function calling 占用 tools 字段）: model={}",
+                    self.base.model
+                );
             }
         } else if model_lower.contains("moonshot") || model_lower.contains("kimi") {
             if !function_calling_active {
@@ -317,7 +315,10 @@ impl OpenAiCompatProvider {
                 self.base.model
             );
         } else {
-            tracing::debug!("[Router] 未声明原生联网协议，使用 web_search 工具: model={}",self.base.model);
+            tracing::debug!(
+                "[Router] 未声明原生联网协议，使用 web_search 工具: model={}",
+                self.base.model
+            );
         }
     }
 
@@ -366,13 +367,8 @@ impl OpenAiCompatProvider {
             }
         };
 
-        let status = response.status();
-        if !status.is_success() {
-            let text = response.text().await.unwrap_or_default();
-            return Err(VivianError::Provider(format!(
-                "Responses API 请求失败 ({}): {}",
-                status, text
-            )));
+        if !response.status().is_success() {
+            return Err(crate::providers::transport::http_error(response).await);
         }
 
         let json: serde_json::Value = match response.json().await {
@@ -420,12 +416,18 @@ impl OpenAiCompatProvider {
         // 检查是否存在 function_call 项（合法的工具调用响应，无文本输出）
         let has_function_calls = json["output"]
             .as_array()
-            .map(|arr| arr.iter().any(|item| item["type"].as_str() == Some("function_call")))
+            .map(|arr| {
+                arr.iter()
+                    .any(|item| item["type"].as_str() == Some("function_call"))
+            })
             .unwrap_or(false);
         // 检查是否存在 reasoning 项（模型只输出思考内容，无最终 message 文本）
         let has_reasoning = json["output"]
             .as_array()
-            .map(|arr| arr.iter().any(|item| item["type"].as_str() == Some("reasoning")))
+            .map(|arr| {
+                arr.iter()
+                    .any(|item| item["type"].as_str() == Some("reasoning"))
+            })
             .unwrap_or(false);
         if has_function_calls || has_reasoning {
             Ok(String::new())
@@ -528,7 +530,10 @@ impl OpenAiCompatProvider {
             Some(reasoning_parts.join(""))
         };
 
-        let content = crate::providers::web_citations::attach(&content, &crate::providers::web_citations::sources(json));
+        let content = crate::providers::web_citations::attach(
+            &content,
+            &crate::providers::web_citations::sources(json),
+        );
         Ok(ChatResponse {
             content,
             tool_calls,
@@ -572,8 +577,15 @@ impl OpenAiCompatProvider {
         // Tool/search responses must be evaluated against current evidence and permissions.
         let cache_key_prompt = if body.get("tools").is_some()
             || body.get("web_search_options").is_some()
-            || body.get("enable_search").and_then(serde_json::Value::as_bool) == Some(true)
-        { None } else { cache_key_prompt };
+            || body
+                .get("enable_search")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+        {
+            None
+        } else {
+            cache_key_prompt
+        };
         if let Some(prompt) = cache_key_prompt {
             if let Some(cached) = self.base.get_cached_response(prompt) {
                 tracing::debug!("命中缓存(structured): {}", self.base.model);
@@ -581,64 +593,19 @@ impl OpenAiCompatProvider {
             }
         }
 
-        let body_size = body.to_string().len();
-        // 大 prompt 失败不计入熔断器：避免一次性大请求拖垮全局可用性
-        let bypass_circuit_failure = body_size > LARGE_PROMPT_BYTES;
-        if bypass_circuit_failure {
-            tracing::warn!(
-                "[invoke_with_retry] {} 大 prompt 检测 ({} bytes)，失败时跳过熔断器记录",
-                self.base.model,
-                body_size
-            );
-        }
-
-        let mut last_error: Option<VivianError> = None;
-        let mut backoff = INITIAL_BACKOFF;
-
-        for attempt in 0..=MAX_RETRIES {
-            if attempt > 0 {
-                tracing::warn!("第 {} 次重试请求: {}", attempt, self.base.model);
-                tokio::time::sleep(backoff).await;
-                backoff *= 2;
-            }
-
-            self.base.check_circuit()?;
-
-            match self.send_request(body.clone()).await {
-                Ok(json) => {
-                    let resp = Self::extract_chat_response(&json)?;
-                    self.base.record_success();
-                    // 仅缓存无工具调用的响应（带工具调用的响应需重新触发执行）
-                    if !resp.has_tool_calls() {
-                        if let Some(prompt) = cache_key_prompt {
-                            self.base.cache_response(prompt, &resp.content);
-                        }
-                    }
-                    return Ok(resp);
-                }
-                Err(err) => {
-                    if bypass_circuit_failure {
-                        tracing::debug!(
-                            "[invoke_with_retry] 大 prompt 失败已跳过熔断器记录: {}",
-                            err
-                        );
-                    } else {
-                        self.base.record_failure();
-                    }
-                    let category = classify_error(&err);
-                    match category {
-                        ErrorCategory::Permanent => return Err(err),
-                        ErrorCategory::Transient | ErrorCategory::RateLimit => {
-                            last_error = Some(err);
-                            continue;
-                        }
-                    }
-                }
+        let resp = crate::providers::transport::with_retry(&self.base, || async {
+            let json = self.send_request(body.clone()).await?;
+            crate::providers::transport::validate_json(&json)?;
+            let resp = Self::extract_chat_response(&json)?;
+            Ok(resp)
+        })
+        .await?;
+        if !resp.has_tool_calls() {
+            if let Some(prompt) = cache_key_prompt {
+                self.base.cache_response(prompt, &resp.content);
             }
         }
-
-        Err(last_error
-            .unwrap_or_else(|| VivianError::Provider("重试次数耗尽".to_string())))
+        Ok(resp)
     }
 
     async fn call_with_retry(
@@ -649,8 +616,15 @@ impl OpenAiCompatProvider {
         // Tool/search responses must be evaluated against current evidence and permissions.
         let cache_key_prompt = if body.get("tools").is_some()
             || body.get("web_search_options").is_some()
-            || body.get("enable_search").and_then(serde_json::Value::as_bool) == Some(true)
-        { None } else { cache_key_prompt };
+            || body
+                .get("enable_search")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+        {
+            None
+        } else {
+            cache_key_prompt
+        };
         if let Some(prompt) = cache_key_prompt {
             if let Some(cached) = self.base.get_cached_response(prompt) {
                 tracing::debug!("命中缓存: {}", self.base.model);
@@ -658,63 +632,22 @@ impl OpenAiCompatProvider {
             }
         }
 
-        let body_size = body.to_string().len();
-        // 大 prompt 失败不计入熔断器：避免一次性大请求拖垮全局可用性
-        let bypass_circuit_failure = body_size > LARGE_PROMPT_BYTES;
-        if bypass_circuit_failure {
-            tracing::warn!(
-                "[call_with_retry] {} 大 prompt 检测 ({} bytes)，失败时跳过熔断器记录",
-                self.base.model,
-                body_size
+        let content = crate::providers::transport::with_retry(&self.base, || async {
+            let json = self.send_request(body.clone()).await?;
+            crate::providers::transport::validate_json(&json)?;
+            let content = Self::extract_content(&json)?;
+            let content = crate::providers::web_citations::attach(
+                &content,
+                &crate::providers::web_citations::sources(&json),
             );
+            crate::providers::base::record_response_usage(&self.base.model, &json);
+            Ok(content)
+        })
+        .await?;
+        if let Some(prompt) = cache_key_prompt {
+            self.base.cache_response(prompt, &content);
         }
-
-        let mut last_error: Option<VivianError> = None;
-        let mut backoff = INITIAL_BACKOFF;
-
-        for attempt in 0..=MAX_RETRIES {
-            if attempt > 0 {
-                tracing::warn!("第 {} 次重试请求: {}", attempt, self.base.model);
-                tokio::time::sleep(backoff).await;
-                backoff *= 2;
-            }
-
-            self.base.check_circuit()?;
-
-            match self.send_request(body.clone()).await {
-                Ok(json) => {
-                    let content = Self::extract_content(&json)?;
-                    let content = crate::providers::web_citations::attach(&content, &crate::providers::web_citations::sources(&json));
-                    crate::providers::base::record_response_usage(&self.base.model, &json);
-                    self.base.record_success();
-                    if let Some(prompt) = cache_key_prompt {
-                        self.base.cache_response(prompt, &content);
-                    }
-                    return Ok(content);
-                }
-                Err(err) => {
-                    if bypass_circuit_failure {
-                        tracing::debug!(
-                            "[call_with_retry] 大 prompt 失败已跳过熔断器记录: {}",
-                            err
-                        );
-                    } else {
-                        self.base.record_failure();
-                    }
-                    let category = classify_error(&err);
-                    match category {
-                        ErrorCategory::Permanent => return Err(err),
-                        ErrorCategory::Transient | ErrorCategory::RateLimit => {
-                            last_error = Some(err);
-                            continue;
-                        }
-                    }
-                }
-            }
-        }
-
-        Err(last_error
-            .unwrap_or_else(|| VivianError::Provider("重试次数耗尽".to_string())))
+        Ok(content)
     }
 
     /// 应用提示缓存策略
@@ -744,22 +677,27 @@ impl OpenAiCompatProvider {
 
     /// 按当前推理覆盖注入思考档位（Responses API 的 `reasoning.effort` 字段；
     /// Off / Auto 不注入，交由服务端默认）。
-    fn apply_reasoning_fields(&self, body: &mut Value) {
-        let pref = self.base.effective_reasoning();
-        let cap = crate::providers::reasoning::resolve_reasoning_capability(&self.base.model);
-        crate::providers::reasoning::apply_responses_reasoning(body, pref, &cap);
+    fn apply_reasoning_fields(&self, _body: &mut Value) {
+        // Final request adapter owns reasoning fields.
     }
 }
 
 #[async_trait]
 impl BaseProvider for OpenAiCompatProvider {
-    fn set_request_customization(&self, customization: crate::providers::reasoning_profiles::RequestCustomization) {
+    fn set_request_customization(
+        &self,
+        customization: crate::providers::reasoning_profiles::RequestCustomization,
+    ) {
         *self.base.request_customization.write() = customization;
     }
 
     fn set_request_parameters(&self, temperature: bool, max_tokens: bool) {
-        self.base.send_temperature.store(temperature, std::sync::atomic::Ordering::Relaxed);
-        self.base.send_max_tokens.store(max_tokens, std::sync::atomic::Ordering::Relaxed);
+        self.base
+            .send_temperature
+            .store(temperature, std::sync::atomic::Ordering::Relaxed);
+        self.base
+            .send_max_tokens
+            .store(max_tokens, std::sync::atomic::Ordering::Relaxed);
     }
 
     async fn call_chat(&self, messages: Vec<ChatMessage>) -> VivianResult<String> {
@@ -775,7 +713,9 @@ impl BaseProvider for OpenAiCompatProvider {
             "temperature": self.base.effective_temperature(),
             "max_output_tokens": self.base.effective_max_tokens(),
         });
-        if let Some(instructions) = &crate::providers::base::effective_instructions(&self.instructions) {
+        if let Some(instructions) =
+            &crate::providers::base::effective_instructions(&self.instructions)
+        {
             body["instructions"] = json!(instructions);
         }
         // 工作智能体模式：省略 temperature（服务端默认）
@@ -831,7 +771,9 @@ impl BaseProvider for OpenAiCompatProvider {
             "max_output_tokens": self.base.effective_max_tokens(),
         });
 
-        if let Some(instructions) = &crate::providers::base::effective_instructions(&self.instructions) {
+        if let Some(instructions) =
+            &crate::providers::base::effective_instructions(&self.instructions)
+        {
             body["instructions"] = json!(instructions);
         }
 
@@ -861,7 +803,7 @@ impl BaseProvider for OpenAiCompatProvider {
             &messages,
             &format!("call_stream_chat model={}", self.base.model),
         );
-        self.base.check_circuit()?;
+        let guard = crate::providers::transport::RequestGuard::begin(&self.base)?;
 
         let mut body = json!({
             "model": self.base.model,
@@ -871,7 +813,9 @@ impl BaseProvider for OpenAiCompatProvider {
             "stream": true,
         });
 
-        if let Some(instructions) = &crate::providers::base::effective_instructions(&self.instructions) {
+        if let Some(instructions) =
+            &crate::providers::base::effective_instructions(&self.instructions)
+        {
             body["instructions"] = json!(instructions);
         }
 
@@ -895,25 +839,17 @@ impl BaseProvider for OpenAiCompatProvider {
             .header("OpenAI-Beta", "responses=1")
             .json(&self.base.finalize_body(body.clone()))
             .send()
-            .await?;
-
-        if !response.status().is_success() {
-            self.base.record_failure();
-            let status = response.status();
-            let text = response.text().await.unwrap_or_default();
-            return Err(VivianError::Provider(format!(
-                "Responses API 请求失败 ({}): {}",
-                status, text
-            )));
-        }
-
-        self.base.record_success();
+            .await;
+        let (response, guard) = guard.response(response).await?;
 
         let (tx, rx) = mpsc::channel::<StreamEvent>(32);
         let leaks = leaks_thinking_in_content(&self.base.model);
 
         tokio::spawn(async move {
-            let mut stream = response.bytes_stream();
+            let mut stream = crate::providers::sse::normalize_sse_until_closed(
+                response.bytes_stream(),
+                tx.clone(),
+            );
             let mut buffer = String::new();
             let mut stripper = if leaks {
                 Some(ThinkingStreamStripper::new())
@@ -925,7 +861,11 @@ impl BaseProvider for OpenAiCompatProvider {
                 let chunk = match chunk_result {
                     Ok(c) => c,
                     Err(e) => {
-                        let _ = tx.send(StreamEvent::Error { message: e.to_string() }).await;
+                        let _ = tx
+                            .send(StreamEvent::Error {
+                                message: e.to_string(),
+                            })
+                            .await;
                         return;
                     }
                 };
@@ -954,7 +894,9 @@ impl BaseProvider for OpenAiCompatProvider {
                         }
                         if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(data) {
                             let sources = crate::providers::web_citations::sources(&json_val);
-                            if !sources.is_empty() { let _ = tx.send(StreamEvent::WebSources { sources }).await; }
+                            if !sources.is_empty() {
+                                let _ = tx.send(StreamEvent::WebSources { sources }).await;
+                            }
                             if let Some(usage) = parse_stream_usage(&json_val["response"]["usage"])
                                 .or_else(|| parse_stream_usage(&json_val["usage"]))
                             {
@@ -971,7 +913,11 @@ impl BaseProvider for OpenAiCompatProvider {
                                                 delta.to_string()
                                             };
                                             if !out.is_empty() {
-                                                if tx.send(StreamEvent::Text { content: out }).await.is_err() {
+                                                if tx
+                                                    .send(StreamEvent::Text { content: out })
+                                                    .await
+                                                    .is_err()
+                                                {
                                                     return;
                                                 }
                                             }
@@ -983,7 +929,9 @@ impl BaseProvider for OpenAiCompatProvider {
                                     if let Some(s) = stripper.as_mut() {
                                         let residual = s.flush();
                                         if !residual.is_empty() {
-                                            let _ = tx.send(StreamEvent::Text { content: residual }).await;
+                                            let _ = tx
+                                                .send(StreamEvent::Text { content: residual })
+                                                .await;
                                         }
                                     }
                                     return;
@@ -1004,11 +952,15 @@ impl BaseProvider for OpenAiCompatProvider {
             }
         });
 
-        Ok(rx)
+        Ok(crate::providers::transport::track_stream(rx, guard))
     }
 
     fn get_model(&self) -> &str {
         &self.base.model
+    }
+
+    fn get_endpoint(&self) -> &str {
+        &self.base.base_url
     }
 
     fn provider_identity(&self) -> String {
@@ -1049,30 +1001,9 @@ impl BaseProvider for OpenAiCompatProvider {
     /// 通过克隆基础配置（api_key / base_url / model / circuit_breaker / cache 等）
     /// 构造新实例，并在新实例的 `tools` 字段填充工具列表。
     /// 后续 `invoke` 调用会把 tools 注入请求体并解析响应中的 tool_calls。
-    fn bind_tools(
-        &self,
-        tools: Vec<ToolDefinition>,
-    ) -> VivianResult<Box<dyn BaseProvider>> {
+    fn bind_tools(&self, tools: Vec<ToolDefinition>) -> VivianResult<Box<dyn BaseProvider>> {
         Ok(Box::new(OpenAiCompatProvider {
-            base: ProviderBase {
-                api_key: self.base.api_key.clone(),
-                base_url: self.base.base_url.clone(),
-                model: self.base.model.clone(),
-                temperature: self.base.effective_temperature(),
-                max_tokens: self.base.effective_max_tokens(),
-                circuit_breaker: Arc::clone(&self.base.circuit_breaker),
-                request_cache: Mutex::new(HashMap::new()),
-                enable_search: AtomicBool::new(self.base.is_enable_search()),
-                proxy: self.base.proxy.clone(),
-                client: self.base.client.clone(),
-                max_tokens_override: std::sync::atomic::AtomicU32::new(0),
-                temperature_override: std::sync::atomic::AtomicU64::new(0),
-                omit_temperature: std::sync::atomic::AtomicBool::new(self.base.should_omit_temperature()),
-                send_temperature: std::sync::atomic::AtomicBool::new(self.base.send_temperature.load(std::sync::atomic::Ordering::Relaxed)),
-                send_max_tokens: std::sync::atomic::AtomicBool::new(self.base.send_max_tokens.load(std::sync::atomic::Ordering::Relaxed)),
-                reasoning_pref: parking_lot::RwLock::new(*self.base.reasoning_pref.read()),
-                request_customization: parking_lot::RwLock::new(self.base.request_customization.read().clone()),
-            },
+            base: self.base.fork(),
             tools,
             cache_strategy: self.cache_strategy,
             instructions: self.instructions.clone(),
@@ -1102,7 +1033,9 @@ impl BaseProvider for OpenAiCompatProvider {
         });
 
         // 模型级别预设：Responses API 原生支持 instructions 顶层参数
-        if let Some(instructions) = &crate::providers::base::effective_instructions(&self.instructions) {
+        if let Some(instructions) =
+            &crate::providers::base::effective_instructions(&self.instructions)
+        {
             body["instructions"] = json!(instructions);
         }
 
@@ -1141,7 +1074,7 @@ impl BaseProvider for OpenAiCompatProvider {
             &messages,
             &format!("stream_with_tools model={}", self.base.model),
         );
-        self.base.check_circuit()?;
+        let guard = crate::providers::transport::RequestGuard::begin(&self.base)?;
 
         // 直接使用传入的 tools 构造 schema（扁平格式，无需 bind_tools 步骤）
         let tools_field: Value = if tools.is_empty() {
@@ -1171,7 +1104,9 @@ impl BaseProvider for OpenAiCompatProvider {
             "tool_choice": "auto",
         });
 
-        if let Some(instructions) = &crate::providers::base::effective_instructions(&self.instructions) {
+        if let Some(instructions) =
+            &crate::providers::base::effective_instructions(&self.instructions)
+        {
             body["instructions"] = json!(instructions);
         }
 
@@ -1191,25 +1126,17 @@ impl BaseProvider for OpenAiCompatProvider {
             .header("OpenAI-Beta", "responses=1")
             .json(&self.base.finalize_body(body.clone()))
             .send()
-            .await?;
-
-        if !response.status().is_success() {
-            self.base.record_failure();
-            let status = response.status();
-            let text = response.text().await.unwrap_or_default();
-            return Err(VivianError::Provider(format!(
-                "Responses API 请求失败 ({}): {}",
-                status, text
-            )));
-        }
-
-        self.base.record_success();
+            .await;
+        let (response, guard) = guard.response(response).await?;
 
         let (tx, rx) = mpsc::channel::<StreamEvent>(64);
         let leaks = leaks_thinking_in_content(&self.base.model);
 
         tokio::spawn(async move {
-            let mut stream = response.bytes_stream();
+            let mut stream = crate::providers::sse::normalize_sse_until_closed(
+                response.bytes_stream(),
+                tx.clone(),
+            );
             let mut buffer = String::new();
             let mut finish_reason: Option<String> = None;
             let mut stripper = if leaks {
@@ -1269,7 +1196,9 @@ impl BaseProvider for OpenAiCompatProvider {
                         }
                         if let Ok(json_val) = serde_json::from_str::<Value>(data) {
                             let sources = crate::providers::web_citations::sources(&json_val);
-                            if !sources.is_empty() { let _ = tx.send(StreamEvent::WebSources { sources }).await; }
+                            if !sources.is_empty() {
+                                let _ = tx.send(StreamEvent::WebSources { sources }).await;
+                            }
                             let event_type = json_val["type"].as_str().unwrap_or("");
                             match event_type {
                                 "response.output_text.delta" => {
@@ -1309,15 +1238,15 @@ impl BaseProvider for OpenAiCompatProvider {
                                 "response.output_item.added" => {
                                     let item = &json_val["item"];
                                     if item["type"].as_str() == Some("function_call") {
-                                        let output_index = json_val["output_index"]
-                                            .as_u64()
-                                            .unwrap_or(0) as usize;
-                                        let call_id =
-                                            item["call_id"].as_str().map(String::from);
+                                        let output_index =
+                                            json_val["output_index"].as_u64().unwrap_or(0) as usize;
+                                        let call_id = item["call_id"].as_str().map(String::from);
                                         let name = item["name"].as_str().map(String::from);
-                                        let entry = tool_calls
-                                            .entry(output_index)
-                                            .or_insert((None, None, String::new()));
+                                        let entry = tool_calls.entry(output_index).or_insert((
+                                            None,
+                                            None,
+                                            String::new(),
+                                        ));
                                         if call_id.is_some() {
                                             entry.0 = call_id;
                                         }
@@ -1339,13 +1268,14 @@ impl BaseProvider for OpenAiCompatProvider {
                                     }
                                 }
                                 "response.function_call_arguments.delta" => {
-                                    let output_index = json_val["output_index"]
-                                        .as_u64()
-                                        .unwrap_or(0) as usize;
+                                    let output_index =
+                                        json_val["output_index"].as_u64().unwrap_or(0) as usize;
                                     if let Some(delta) = json_val["delta"].as_str() {
-                                        let entry = tool_calls
-                                            .entry(output_index)
-                                            .or_insert((None, None, String::new()));
+                                        let entry = tool_calls.entry(output_index).or_insert((
+                                            None,
+                                            None,
+                                            String::new(),
+                                        ));
                                         entry.2.push_str(delta);
                                         if tx
                                             .send(StreamEvent::ToolCallDelta {
@@ -1362,9 +1292,8 @@ impl BaseProvider for OpenAiCompatProvider {
                                     }
                                 }
                                 "response.completed" => {
-                                    let status = json_val["response"]["status"]
-                                        .as_str()
-                                        .unwrap_or("");
+                                    let status =
+                                        json_val["response"]["status"].as_str().unwrap_or("");
                                     if status == "completed" {
                                         finish_reason = if !tool_calls.is_empty() {
                                             Some("tool_calls".to_string())
@@ -1373,7 +1302,9 @@ impl BaseProvider for OpenAiCompatProvider {
                                         };
                                     }
                                     // usage：Responses API 在 response.completed 携带，兼容各家字段名
-                                    if let Some(ev) = parse_stream_usage(&json_val["response"]["usage"]) {
+                                    if let Some(ev) =
+                                        parse_stream_usage(&json_val["response"]["usage"])
+                                    {
                                         let _ = tx.send(ev).await;
                                     }
                                     if let Some(s) = stripper.as_mut() {
@@ -1423,6 +1354,6 @@ impl BaseProvider for OpenAiCompatProvider {
                 .await;
         });
 
-        Ok(rx)
+        Ok(crate::providers::transport::track_stream(rx, guard))
     }
 }

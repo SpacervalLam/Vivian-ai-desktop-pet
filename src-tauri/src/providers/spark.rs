@@ -14,9 +14,6 @@ use crate::providers::base::{parse_stream_usage, BaseProvider, ProviderBase, Str
 use crate::types::response::ChatMessage;
 use crate::utils::messages_cache_key;
 
-const MAX_RETRIES: usize = 2;
-const INITIAL_BACKOFF: Duration = Duration::from_millis(500);
-
 type HmacSha256 = Hmac<Sha256>;
 
 /// 讯飞星火认知大模型 WebSocket Provider
@@ -100,18 +97,20 @@ impl SparkProvider {
     /// 5. url = wss://{host}{path}?authorization={authorization}&date={date}&host={host}
     fn build_auth_url(&self, host: &str, path: &str) -> VivianResult<String> {
         // RFC1123 格式 UTC 时间
-        let date = chrono::Utc::now().format("%a, %d %b %Y %H:%M:%S GMT").to_string();
+        let date = chrono::Utc::now()
+            .format("%a, %d %b %Y %H:%M:%S GMT")
+            .to_string();
 
-        let signature_origin = format!(
-            "host: {}\ndate: {}\nGET {} HTTP/1.1",
-            host, date, path
-        );
+        let signature_origin = format!("host: {}\ndate: {}\nGET {} HTTP/1.1", host, date, path);
 
         let mut mac = HmacSha256::new_from_slice(self.api_secret.as_bytes())
             .map_err(|e| VivianError::Provider(format!("HMAC 密钥初始化失败: {}", e)))?;
         mac.update(signature_origin.as_bytes());
         let signature = mac.finalize().into_bytes();
-        let signature_hex = signature.iter().map(|b| format!("{:02x}", b)).collect::<String>();
+        let signature_hex = signature
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect::<String>();
 
         let authorization_origin = format!(
             "api_key=\"{}\", algorithm=\"hmac-sha256\", headers=\"host date request-line\", signature=\"{}\"",
@@ -137,9 +136,7 @@ impl SparkProvider {
         let text: Vec<Value> = messages
             .iter()
             .filter(|m| m.role != "system")
-            .map(|m| {
-                json!({"role": m.role, "content": m.content})
-            })
+            .map(|m| json!({"role": m.role, "content": m.content}))
             .collect();
 
         let mut body = json!({
@@ -197,7 +194,9 @@ impl SparkProvider {
             .and_then(|first| first.get("content"))
             .and_then(|c| c.as_str())
             .map(|s| s.to_string())
-            .ok_or_else(|| VivianError::Provider("讯飞响应缺少 payload.choices.text[0].content".to_string()))
+            .ok_or_else(|| {
+                VivianError::Provider("讯飞响应缺少 payload.choices.text[0].content".to_string())
+            })
     }
 
     /// 通过 WebSocket 发送请求并聚合响应（同步阻塞等待全部片段）
@@ -284,50 +283,18 @@ impl SparkProvider {
             }
         }
 
-        let mut last_error: Option<VivianError> = None;
-        let mut backoff = INITIAL_BACKOFF;
-
-        for attempt in 0..=MAX_RETRIES {
-            if attempt > 0 {
-                tracing::warn!("第 {} 次重试讯飞请求: {}", attempt, self.base.model);
-                tokio::time::sleep(backoff).await;
-                backoff *= 2;
-            }
-
-            self.base.check_circuit()?;
-
-            let auth_url = match self.build_auth_url(host, path) {
-                Ok(u) => u,
-                Err(e) => return Err(e),
-            };
-
-            match self.send_ws_request(&frame, &auth_url).await {
-                Ok(json) => {
-                    let content = Self::extract_content(&json)?;
-                    crate::providers::base::record_response_usage(&self.base.model, &json);
-                    self.base.record_success();
-                    if let Some(prompt) = cache_key_prompt {
-                        self.base.cache_response(prompt, &content);
-                    }
-                    return Ok(content);
-                }
-                Err(err) => {
-                    self.base.record_failure();
-                    let category = crate::resilience::classify_error(&err);
-                    match category {
-                        crate::resilience::ErrorCategory::Permanent => return Err(err),
-                        crate::resilience::ErrorCategory::Transient
-                        | crate::resilience::ErrorCategory::RateLimit => {
-                            last_error = Some(err);
-                            continue;
-                        }
-                    }
-                }
-            }
+        let content = crate::providers::transport::with_retry(&self.base, || async {
+            let auth_url = self.build_auth_url(host, path)?;
+            let json = self.send_ws_request(&frame, &auth_url).await?;
+            let content = Self::extract_content(&json)?;
+            crate::providers::base::record_response_usage(&self.base.model, &json);
+            Ok(content)
+        })
+        .await?;
+        if let Some(prompt) = cache_key_prompt {
+            self.base.cache_response(prompt, &content);
         }
-
-        Err(last_error
-            .unwrap_or_else(|| VivianError::Provider("讯飞重试次数耗尽".to_string())))
+        Ok(content)
     }
 }
 
@@ -349,20 +316,28 @@ fn urlencode(s: &str) -> String {
 
 #[async_trait]
 impl BaseProvider for SparkProvider {
-    fn set_request_customization(&self, customization: crate::providers::reasoning_profiles::RequestCustomization) {
+    fn set_request_customization(
+        &self,
+        customization: crate::providers::reasoning_profiles::RequestCustomization,
+    ) {
         *self.base.request_customization.write() = customization;
     }
 
     fn set_request_parameters(&self, temperature: bool, max_tokens: bool) {
-        self.base.send_temperature.store(temperature, std::sync::atomic::Ordering::Relaxed);
-        self.base.send_max_tokens.store(max_tokens, std::sync::atomic::Ordering::Relaxed);
+        self.base
+            .send_temperature
+            .store(temperature, std::sync::atomic::Ordering::Relaxed);
+        self.base
+            .send_max_tokens
+            .store(max_tokens, std::sync::atomic::Ordering::Relaxed);
     }
 
     async fn call_chat(&self, messages: Vec<ChatMessage>) -> VivianResult<String> {
         let prompt_key = messages_cache_key(&messages);
         let (host, path, domain) = self.resolve_endpoint();
         let frame = self.build_frame(&messages, domain);
-        self.call_with_retry(frame, Some(&prompt_key), host, path).await
+        self.call_with_retry(frame, Some(&prompt_key), host, path)
+            .await
     }
 
     async fn call_chat_with_search(
@@ -392,7 +367,7 @@ impl BaseProvider for SparkProvider {
         _json_schema: Option<serde_json::Value>,
     ) -> VivianResult<mpsc::Receiver<StreamEvent>> {
         // 讯飞流式：通过 WebSocket 接收所有片段，每收到一帧就转发到 channel
-        self.base.check_circuit()?;
+        let guard = crate::providers::transport::RequestGuard::begin(&self.base)?;
         let (host, path, domain) = self.resolve_endpoint();
         let frame = self.build_frame(&messages, domain);
         let auth_url = self.build_auth_url(host, path)?;
@@ -404,7 +379,11 @@ impl BaseProvider for SparkProvider {
             let (ws_stream, _response) = match connect_async(&auth_url).await {
                 Ok(s) => s,
                 Err(e) => {
-                    let _ = tx.send(StreamEvent::Error { message: e.to_string() }).await;
+                    let _ = tx
+                        .send(StreamEvent::Error {
+                            message: e.to_string(),
+                        })
+                        .await;
                     return;
                 }
             };
@@ -413,22 +392,44 @@ impl BaseProvider for SparkProvider {
             let frame_str = match serde_json::to_string(&frame) {
                 Ok(s) => s,
                 Err(e) => {
-                    let _ = tx.send(StreamEvent::Error { message: e.to_string() }).await;
+                    let _ = tx
+                        .send(StreamEvent::Error {
+                            message: e.to_string(),
+                        })
+                        .await;
                     return;
                 }
             };
             if let Err(e) = write.send(Message::Text(frame_str)).await {
-                let _ = tx.send(StreamEvent::Error { message: e.to_string() }).await;
+                let _ = tx
+                    .send(StreamEvent::Error {
+                        message: e.to_string(),
+                    })
+                    .await;
                 return;
             }
 
             let _ = app_id; // 仅供日志使用
 
-            while let Some(msg_result) = read.next().await {
+            loop {
+                let msg_result = tokio::select! {
+                    _ = tx.closed() => return,
+                    result = tokio::time::timeout(Duration::from_secs(120), read.next()) => {
+                        match result {
+                            Ok(Some(message)) => message,
+                            Ok(None) => return,
+                            Err(_) => {
+                                let _ = tx.send(StreamEvent::Error { message: "Spark stream idle timeout".into() }).await;
+                                return;
+                            }
+                        }
+                    }
+                };
                 match msg_result {
                     Ok(Message::Text(text)) => {
                         if let Ok(json) = serde_json::from_str::<Value>(&text) {
-                            if let Some(usage) = parse_stream_usage(&json["payload"]["usage"]["text"])
+                            if let Some(usage) =
+                                parse_stream_usage(&json["payload"]["usage"]["text"])
                             {
                                 let _ = tx.send(usage).await;
                             }
@@ -439,10 +440,20 @@ impl BaseProvider for SparkProvider {
                                 .and_then(|s| s.as_i64())
                                 .unwrap_or(0);
 
-                            if let Ok(content) = SparkProvider::extract_content(&json) {
-                                if !content.is_empty() {
-                                    if tx.send(StreamEvent::Text { content }).await.is_err() {
-                                        return;
+                            match SparkProvider::extract_content(&json) {
+                                Err(error) => {
+                                    let _ = tx
+                                        .send(StreamEvent::Error {
+                                            message: error.to_string(),
+                                        })
+                                        .await;
+                                    return;
+                                }
+                                Ok(content) => {
+                                    if !content.is_empty() {
+                                        if tx.send(StreamEvent::Text { content }).await.is_err() {
+                                            return;
+                                        }
                                     }
                                 }
                             }
@@ -454,7 +465,11 @@ impl BaseProvider for SparkProvider {
                     }
                     Ok(Message::Close(_)) => return,
                     Err(e) => {
-                        let _ = tx.send(StreamEvent::Error { message: e.to_string() }).await;
+                        let _ = tx
+                            .send(StreamEvent::Error {
+                                message: e.to_string(),
+                            })
+                            .await;
                         return;
                     }
                     _ => {}
@@ -462,11 +477,15 @@ impl BaseProvider for SparkProvider {
             }
         });
 
-        Ok(rx)
+        Ok(crate::providers::transport::track_stream(rx, guard))
     }
 
     fn get_model(&self) -> &str {
         &self.base.model
+    }
+
+    fn get_endpoint(&self) -> &str {
+        &self.base.base_url
     }
 
     fn provider_identity(&self) -> String {

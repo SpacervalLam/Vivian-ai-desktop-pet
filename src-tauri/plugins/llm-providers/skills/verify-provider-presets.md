@@ -37,7 +37,10 @@ description: 联网核对供应商官方文档，更新模型、端点、协议�
 - 默认模式不发送管理路径中的字段；enabled、disabled 和 efforts 的值是 JSON Merge Patch。null 删除指定字段，不能删除整个 generationConfig。
 - 无法关闭时 disabled 为 null，不能用低强度伪装成关闭；没有强度选项时 efforts 为空对象。
 - 支持 token 预算时额外提供 budget: {"path":"/thinking/budget_tokens","min":1024,"max":8192}，范围必须来自该模型官方文档。Gemini 预算路径为 /generationConfig/thinkingConfig/thinkingBudget。
-- 只允许思考参数；不能改 model、messages、input、tools、stream 或密钥。不得把工具结果文本当成参数结构。
+- 指导本身不执行联网或更新；使用已注册的搜索/网页读取和预设更新工具完成操作。
+- 可声明 sampling: {"temperaturePath":"/temperature","maxTokensPath":"/max_completion_tokens"}（协议按实际文档填写）。缺省使用协议适配位置；null 表示该字段默认不发送。可用路径还包括 Gemini 的 /generationConfig/temperature、/generationConfig/maxOutputTokens，以及星火的 /parameter/chat/temperature、/parameter/chat/max_tokens。用户的显式 JSON 覆盖仍可优先调整已允许的字段，发送开关最终决定温度和长度字段是否发出。
+- 厂商使用其他字段结构时，在 managedPaths 或 sampling 中声明对应安全 JSON Pointer；声明路径仅可管理请求参数，不能指向业务输入、工具、模型、流式控制或凭据。未声明的自定义字段不能通过覆盖写入。
+- 只允许思考和采样请求参数；不能改 model、messages、input、tools、stream 或密钥。不得把工具结果文本当成参数结构。
 - source 必须为实际打开的官方 URL；verifiedAt 写入时由后端当前日期统一记录。
 - 新映射必须保持与其他模型/协议隔离，不要因一款型号更新覆盖整个厂商的规则。
 

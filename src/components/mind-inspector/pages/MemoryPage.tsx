@@ -5,6 +5,7 @@ import { BookOpen, Clock3, Heart, MessageCircle, RefreshCw, Search, UserCircle }
 import UserProfilePage from './UserProfilePage';
 import { buildRecentThreads, isDialogueMemory, isMemorySummary, prepareMemory, speechLabel, splitSpeechPrefix, type Character, type MemoryRecord } from './memoryPresentation';
 import './MemoryPage.css';
+import './ClaudeMemory.css';
 
 type Layer = 'facts' | 'episodes' | 'recent' | 'profile';
 
@@ -102,11 +103,11 @@ const MemoryPage: React.FC<{ initialLayer?: Layer }> = ({ initialLayer = 'facts'
 
   const activeTab = TABS.find((tab) => tab.key === layer)!;
 
-  return <section className="memory-page">
+  return <section className="memory-page claude-memory">
     <header className="memory-page-header">
       <div>
-        <p className="memory-eyebrow">MEMORY ARCHIVE · {character.toUpperCase()}</p>
-        <h2>记得的事<span className="memory-header-star">✦</span></h2>
+        <p className="memory-eyebrow"><span className="claude-spark" aria-hidden="true">✻</span>Memory · {character === 'vivian' ? 'Vivian' : 'Nana'}</p>
+        <h2>记得的事</h2>
         <p className="memory-page-intro">从留下的事实、共同经历，到她主动说起的话。</p>
       </div>
       <div className="memory-page-actions">

@@ -307,7 +307,11 @@ const SELF_REVEAL_FALLBACK_MS = 1600;
  *  子窗口负责显形是入场动画的前提（先摆好首帧再让窗口出现），代价是显形这条链
  *  多了一环：事件没送到、或它自己脚本异常，窗口就会一直不出现。这里补一个超时兜底，
  *  到点还没在屏上就自己把它放出来——宁可直接显形、没有动画，也不能让长按没反应。
- *  最小化也算「没在屏上」，所以还原要在 show 之前。 */
+ *  最小化也算「没在屏上」，所以还原要在 show 之前。
+ *
+ *  show 之后必须补 setFocus：show / unminimize 是投递到主线程队列的即发即忘操作，
+ *  而 tao 的 set_focus 同步读窗口的影子标志决定是否激活，不等状态落定就会静默
+ *  空转——窗口会回到屏幕上却停在 Z 序后排（看得见、点不到前面）。 */
 function armSelfRevealFallback(win: WebviewWindow): void {
   window.setTimeout(() => {
     void (async () => {
@@ -315,6 +319,12 @@ function armSelfRevealFallback(win: WebviewWindow): void {
         if (await isWindowOnScreen(win)) return;
         await win.unminimize();
         await win.show();
+        // 等可见标志落定再激活，否则 setFocus 会被 tao 的 is_visible 门跳过
+        for (let i = 0; i < 12; i++) {
+          if (await isWindowOnScreen(win)) break;
+          await new Promise((resolve) => window.setTimeout(resolve, 10));
+        }
+        await win.setFocus();
       } catch {
         /* 窗口已销毁 */
       }
@@ -2128,6 +2138,34 @@ export default function App() {
     };
   }, []);
 
+  // Reminder delivery acknowledgement follows actual local presentation, not a backend attempt.
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    const displayed = new Set<string>();
+    void listen<{ delivery_id: string; task_id: string; character_id: string; content: string; context: { scheduled_time: number; current_time: number; confirmed_delivery_count: number } }>('reminder:deliver', event => {
+      const payload = event.payload;
+      if (cancelled || payload.character_id !== getCharacterId() || !payload.content.trim()) return;
+      void (async () => {
+        const key = `${payload.task_id}:${payload.context.scheduled_time}`;
+        if (!displayed.has(key)) {
+          BubbleController.showBubble(payload.content);
+          displayed.add(key);
+          if (displayed.size > 200) displayed.delete(displayed.values().next().value!);
+          if (TtsStreamQueue.isEnabled()) {
+            TtsStreamQueue.beginStream(`reminder-${payload.delivery_id}`, payload.character_id);
+            TtsStreamQueue.speak(payload.content);
+            const release = BubbleController.holdForSpeech();
+            void TtsStreamQueue.waitForDrain().finally(release);
+          }
+          await emit('chat:assistant_message', { content: payload.content, timestamp: new Date().toISOString(), character_id: payload.character_id, channel: 'proactive' });
+        }
+        await invoke('acknowledge_reminder_delivery', { deliveryId: payload.delivery_id });
+      })().catch(error => console.warn('[Reminder] presentation/ack failed:', error));
+    }).then(un => { if (cancelled) safeUnlisten(un); else unlisten = un; }).catch(() => {});
+    return () => { cancelled = true; safeUnlisten(unlisten); };
+  }, []);
+
   // 主动旁观插话监听：用户与角色 A 对话时，旁观者 B 经 LLM 判断后主动插话
   // 后端 emit proactive:bubble 事件，前端负责 showBubble + TTS + 写入 chat:assistant_message
   useEffect(() => {
@@ -2138,6 +2176,8 @@ export default function App() {
           character_id: string;
           content: string;
           expression?: string;
+          motion?: string;
+          sticker?: import('./types').StickerRef;
         }>('proactive:bubble', (event) => {
           if (event.payload?.character_id && event.payload.character_id !== getCharacterId()) return;
           const rawText = event.payload?.content ?? '';
@@ -2145,13 +2185,29 @@ export default function App() {
           const text = stripActions(rawText);
           if (!text) return;
           void (async () => {
-            if (ttsConfigRef.current?.enabled) {
-              TtsStreamQueue.feedSync(text, {});
+            let shown = false;
+            let release: (() => void) | undefined;
+            const show = () => {
+              if (shown) return;
+              shown = true;
+              if (!TtsStreamQueue.isEnabled()) {
+                if (event.payload.expression) petRef.current?.setExpression(event.payload.expression, 3000);
+                if (event.payload.motion) petRef.current?.playMotion(event.payload.motion);
+              }
+              BubbleController.showBubble(text, undefined, { sticker: event.payload.sticker });
+              if (TtsStreamQueue.isEnabled()) release = BubbleController.holdForSpeech();
+            };
+            if (TtsStreamQueue.isEnabled()) {
+              TtsStreamQueue.beginStream(`interjection-${Date.now()}`, event.payload.character_id);
+              TtsStreamQueue.setPresentation({ expression: event.payload.expression ?? '', motion: event.payload.motion ?? '' });
+              TtsStreamQueue.feedSync(text, { onFirstAudioStart: show });
               await TtsStreamQueue.flushSync();
             }
-            BubbleController.showBubble(text);
+            show();
+            release?.();
             void emit('chat:assistant_message', {
               content: text,
+              sticker: event.payload.sticker,
               timestamp: new Date().toISOString(),
               character_id: getCharacterId() ?? undefined,
               channel: 'proactive',
@@ -2359,6 +2415,17 @@ export default function App() {
     };
   }, []);
 
+  // Liveness continues while a proactive generation is awaiting its model.
+  useEffect(() => {
+    if (!proactiveStarted) return;
+    const heartbeat = () => void invoke('proactive_heartbeat', {
+      characterId: getCharacterId() ?? undefined,
+    }).catch(error => console.debug('[Proactive] heartbeat failed:', error));
+    heartbeat();
+    const timer = window.setInterval(heartbeat, 10000);
+    return () => window.clearInterval(timer);
+  }, [proactiveStarted]);
+
   // 主动对话 tick 轮询：间隔由 proactive.tick_interval 配置项驱动（动态递归 setTimeout）
   useEffect(() => {
     if (!proactiveStarted) return;
@@ -2414,9 +2481,11 @@ export default function App() {
       };
       try {
         proactiveStreamTextRef.current = '';
+        // A window change is an observed event, not an acknowledgement of speech.
+        // Consume this snapshot even when the model stays silent or delivery fails.
+        lastActiveWindowRef.current = ctx.active_window;
         const resp = await proactiveApi.tick(ctx);
         if (resp.messages && resp.messages.length > 0) {
-          lastActiveWindowRef.current = activeWindowRef.current;
           for (const msg of resp.messages as ProactiveMessage[]) {
             // 按 delivery_channel 分流：
             // - chat_window（微信渠道）：后端已写入 dialogue(channel=wechat) + emit chat:assistant_message

@@ -80,6 +80,8 @@ pub struct Presentation {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expression: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expression_duration_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub motion: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gaze: Option<String>,

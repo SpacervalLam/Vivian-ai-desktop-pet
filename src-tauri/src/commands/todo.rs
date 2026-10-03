@@ -203,3 +203,9 @@ pub fn resume_scheduled_task(
     }
     Ok(ok)
 }
+
+/// An acknowledgement means accepted by a presentation surface, not read by the user.
+#[tauri::command]
+pub fn acknowledge_reminder_delivery(delivery_id: String) -> bool {
+    crate::brain::reminder_delivery::acknowledge(&delivery_id)
+}

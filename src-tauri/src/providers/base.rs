@@ -51,6 +51,8 @@ pub struct ProviderCallOptions {
     pub reasoning: Option<ReasoningPreference>,
     /// 本次调用要求的结构化输出 schema。使用 Arc 避免嵌套作用域重复复制大对象。
     pub json_schema: Option<Arc<Value>>,
+    /// Explicitly clear an outer schema when a provider cannot accept it.
+    pub disable_json_schema: bool,
     /// schema、工具定义等不直接进入 messages 的请求参数摘要。
     pub request_fingerprint: Option<u64>,
     /// 工具调用等具副作用/结构化语义的请求禁止复用纯文本答案缓存。
@@ -60,21 +62,20 @@ pub struct ProviderCallOptions {
 impl ProviderCallOptions {
     fn merged(self, inner: Self) -> Self {
         Self {
-            include_framework_instructions: inner.include_framework_instructions.or(self.include_framework_instructions),
+            include_framework_instructions: inner
+                .include_framework_instructions
+                .or(self.include_framework_instructions),
             enable_search: inner.enable_search.or(self.enable_search),
             temperature: inner.temperature.or(self.temperature),
             max_tokens: inner.max_tokens.or(self.max_tokens),
-            max_tokens_extra: self
-                .max_tokens_extra
-                .saturating_add(inner.max_tokens_extra),
+            max_tokens_extra: self.max_tokens_extra.saturating_add(inner.max_tokens_extra),
             presence_penalty: inner.presence_penalty.or(self.presence_penalty),
             frequency_penalty: inner.frequency_penalty.or(self.frequency_penalty),
             reasoning: inner.reasoning.or(self.reasoning),
             json_schema: inner.json_schema.or(self.json_schema),
+            disable_json_schema: inner.disable_json_schema || self.disable_json_schema,
             request_fingerprint: inner.request_fingerprint.or(self.request_fingerprint),
-            response_cache_allowed: inner
-                .response_cache_allowed
-                .or(self.response_cache_allowed),
+            response_cache_allowed: inner.response_cache_allowed.or(self.response_cache_allowed),
         }
     }
 
@@ -85,7 +86,12 @@ impl ProviderCallOptions {
     }
 
     pub fn current_json_schema() -> Option<Value> {
-        Self::current().json_schema.as_deref().cloned()
+        let options = Self::current();
+        if options.disable_json_schema {
+            None
+        } else {
+            options.json_schema.as_deref().cloned()
+        }
     }
 }
 
@@ -380,6 +386,9 @@ pub trait BaseProvider: Send + Sync {
         json_schema: Option<Value>,
     ) -> VivianResult<tokio::sync::mpsc::Receiver<StreamEvent>>;
     fn get_model(&self) -> &str;
+    fn get_endpoint(&self) -> &str {
+        ""
+    }
     /// strict 熔断与诊断使用的稳定身份。默认至少按模型隔离。
     fn provider_identity(&self) -> String {
         self.get_model().to_string()
@@ -412,8 +421,11 @@ pub trait BaseProvider: Send + Sync {
     fn set_omit_temperature(&self, _omit: bool) {}
 
     fn set_request_parameters(&self, _temperature: bool, _max_tokens: bool) {}
-    fn set_request_customization(&self, _customization: crate::providers::reasoning_profiles::RequestCustomization) {}
-
+    fn set_request_customization(
+        &self,
+        _customization: crate::providers::reasoning_profiles::RequestCustomization,
+    ) {
+    }
 
     /// 设置推理偏好运行时覆盖（请求级）。
     ///
@@ -454,10 +466,7 @@ pub trait BaseProvider: Send + Sync {
     /// 返回一个新的 provider 实例，该实例在后续调用中会向 LLM 透传工具 schema。
     /// 默认实现返回 `NotImplemented` 错误，表示当前 provider 不支持原生 function calling。
     /// 支持的 provider（如 OpenAiCompatProvider）应覆盖此方法。
-    fn bind_tools(
-        &self,
-        _tools: Vec<ToolDefinition>,
-    ) -> VivianResult<Box<dyn BaseProvider>> {
+    fn bind_tools(&self, _tools: Vec<ToolDefinition>) -> VivianResult<Box<dyn BaseProvider>> {
         Err(VivianError::NotImplemented(format!(
             "bind_tools 未实现: provider {} 不支持原生 function calling",
             self.get_model()
@@ -544,19 +553,17 @@ pub trait BaseProvider: Send + Sync {
 #[serde(tag = "type")]
 pub enum StreamEvent {
     /// Native search citations travel separately from JSON/text deltas.
-    WebSources { sources: Vec<crate::providers::web_citations::WebSource> },
-    /// 文本增量（模型生成的自然语言片段）
-    Text {
-        content: String,
+    WebSources {
+        sources: Vec<crate::providers::web_citations::WebSource>,
     },
+    /// 文本增量（模型生成的自然语言片段）
+    Text { content: String },
     /// 推理/思维链增量
     ///
     /// 不入可见输出流。来源：
     /// - OpenAI 兼容：`delta.reasoning_content`（DeepSeek / Qwen / GLM / 火山）
     /// - Anthropic：`thinking_delta` 事件（Claude extended thinking）
-    Thinking {
-        content: String,
-    },
+    Thinking { content: String },
     /// 工具调用增量
     ToolCallDelta {
         /// 工具调用索引（用于多工具并发调用时区分）
@@ -589,9 +596,7 @@ pub enum StreamEvent {
         cache_write_tokens: u64,
     },
     /// 错误事件（流中断）
-    Error {
-        message: String,
-    },
+    Error { message: String },
 }
 
 /// 从流式响应末尾的 usage 对象解析 token 用量（兼容 OpenAI / DeepSeek / Anthropic 字段名）。
@@ -621,7 +626,11 @@ pub fn parse_stream_usage(usage: &serde_json::Value) -> Option<StreamEvent> {
         .or(anthropic_cache_read)
         .unwrap_or(0);
     // Anthropic reports uncached input separately; cached input may exceed it.
-    let cache_read = if anthropic_cache_read.is_some() { cache_read } else { cache_read.min(total_input) };
+    let cache_read = if anthropic_cache_read.is_some() {
+        cache_read
+    } else {
+        cache_read.min(total_input)
+    };
     let cache_write = usage["cache_creation_input_tokens"].as_u64().unwrap_or(0);
     Some(StreamEvent::Usage {
         input_tokens: if anthropic_cache_read.is_some() {
@@ -719,6 +728,30 @@ pub struct ProviderBase {
 }
 
 impl ProviderBase {
+    /// Bind tools without registering another breaker or baking task-local
+    /// overrides into persistent defaults (which would apply extra tokens twice).
+    pub fn fork(&self) -> Self {
+        Self {
+            api_key: self.api_key.clone(),
+            base_url: self.base_url.clone(),
+            model: self.model.clone(),
+            temperature: self.temperature,
+            max_tokens: self.max_tokens,
+            circuit_breaker: self.circuit_breaker.clone(),
+            request_cache: Mutex::new(HashMap::new()),
+            enable_search: AtomicBool::new(self.enable_search.load(Ordering::Relaxed)),
+            proxy: self.proxy.clone(),
+            client: self.client.clone(),
+            max_tokens_override: AtomicU32::new(self.max_tokens_override.load(Ordering::Relaxed)),
+            temperature_override: AtomicU64::new(self.temperature_override.load(Ordering::Relaxed)),
+            omit_temperature: AtomicBool::new(self.omit_temperature.load(Ordering::Relaxed)),
+            send_temperature: AtomicBool::new(self.send_temperature.load(Ordering::Relaxed)),
+            send_max_tokens: AtomicBool::new(self.send_max_tokens.load(Ordering::Relaxed)),
+            reasoning_pref: RwLock::new(*self.reasoning_pref.read()),
+            request_customization: RwLock::new(self.request_customization.read().clone()),
+        }
+    }
+
     pub fn new(
         api_key: String,
         base_url: String,
@@ -829,43 +862,21 @@ impl ProviderBase {
     /// 不做递归移除：消息内容 / 工具 JSON Schema 中可能出现名为
     /// temperature 的业务字段（如天气工具的参数定义），递归删除会破坏语义。
     pub fn strip_temperature(&self, body: &mut serde_json::Value) {
-        if !self.send_max_tokens.load(Ordering::Relaxed) {
-            if let Some(obj) = body.as_object_mut() {
-                for key in ["max_tokens", "max_completion_tokens", "max_output_tokens"] { obj.remove(key); }
-            }
-            if let Some(obj) = body.get_mut("generationConfig").and_then(Value::as_object_mut) {
-                obj.remove("maxOutputTokens");
-            }
-            if let Some(obj) = body.pointer_mut("/parameter/chat").and_then(Value::as_object_mut) {
-                obj.remove("max_tokens");
-            }
-        }
-        if !self.should_omit_temperature() && self.send_temperature.load(Ordering::Relaxed) {
-            return;
-        }
-        if let Some(obj) = body.as_object_mut() {
-            obj.remove("temperature");
-        }
-        if let Some(cfg) = body
-            .get_mut("generationConfig")
-            .and_then(serde_json::Value::as_object_mut)
-        {
-            cfg.remove("temperature");
-        }
-        if let Some(chat) = body
-            .get_mut("parameter")
-            .and_then(serde_json::Value::as_object_mut)
-            .and_then(|p| p.get_mut("chat"))
-            .and_then(serde_json::Value::as_object_mut)
-        {
-            chat.remove("temperature");
-        }
+        let sampling = self.request_customization.read().sampling();
+        crate::providers::reasoning_profiles::apply_sampling_switches(
+            body,
+            !self.should_omit_temperature() && self.send_temperature.load(Ordering::Relaxed),
+            self.send_max_tokens.load(Ordering::Relaxed),
+            &sampling,
+        );
     }
 
     /// Final reasoning mappings and user patches run immediately before transport.
     /// User overrides win, but explicit sampling switches still control their fields.
     pub fn finalize_body(&self, mut body: Value) -> Value {
-        self.request_customization.read().apply(&mut body, self.effective_reasoning());
+        self.request_customization
+            .read()
+            .apply(&mut body, self.effective_reasoning(), &self.model);
         self.strip_temperature(&mut body);
         body
     }
@@ -923,9 +934,11 @@ impl ProviderBase {
 
     /// 返回当前生效的推理偏好：无覆盖时为 Auto（不干预）。
     pub fn effective_reasoning(&self) -> ReasoningPreference {
-        ProviderCallOptions::current()
-            .reasoning
-            .unwrap_or_else(|| self.reasoning_pref.read().unwrap_or(ReasoningPreference::AUTO))
+        ProviderCallOptions::current().reasoning.unwrap_or_else(|| {
+            self.reasoning_pref
+                .read()
+                .unwrap_or(ReasoningPreference::AUTO)
+        })
     }
 
     /// 读取联网搜索开关
@@ -937,9 +950,7 @@ impl ProviderBase {
 
     /// 获取 HTTP 客户端：优先使用专属客户端（带代理），否则回退到全局客户端
     pub fn get_client(&self) -> reqwest::Client {
-        self.client
-            .clone()
-            .unwrap_or_else(get_global_client)
+        self.client.clone().unwrap_or_else(get_global_client)
     }
 
     pub fn get_cache_key(&self, prompt: &str) -> String {
@@ -1030,17 +1041,24 @@ mod sampling_penalty_tests {
     #[tokio::test]
     async fn framework_isolation_is_request_local_and_restored_after_error() {
         let configured = Some("companion framework".to_string());
-        let isolated = scope_provider_call(ProviderCallOptions {
-            include_framework_instructions: Some(false), ..Default::default()
-        }, async {
-            tokio::task::yield_now().await;
-            assert!(effective_instructions(&configured).is_none());
-            let messages = crate::providers::chat_completions::ChatCompletionsProvider::build_messages(
-                &[ChatMessage::system("isolated executor")], &configured);
-            assert_eq!(messages.len(), 1);
-            assert_eq!(messages[0]["content"], "isolated executor");
-            Err::<(), &str>("executor error")
-        });
+        let isolated = scope_provider_call(
+            ProviderCallOptions {
+                include_framework_instructions: Some(false),
+                ..Default::default()
+            },
+            async {
+                tokio::task::yield_now().await;
+                assert!(effective_instructions(&configured).is_none());
+                let messages =
+                    crate::providers::chat_completions::ChatCompletionsProvider::build_messages(
+                        &[ChatMessage::system("isolated executor")],
+                        &configured,
+                    );
+                assert_eq!(messages.len(), 1);
+                assert_eq!(messages[0]["content"], "isolated executor");
+                Err::<(), &str>("executor error")
+            },
+        );
         let companion = async {
             tokio::task::yield_now().await;
             assert_eq!(effective_instructions(&configured), configured);
@@ -1052,8 +1070,13 @@ mod sampling_penalty_tests {
 
     #[test]
     fn provider_model_trims_config_whitespace() {
-        let base = ProviderBase::new("test-key".into(), "https://example.invalid/v1".into(),
-            " deepseek-flash \n".into(), 0.7, 256);
+        let base = ProviderBase::new(
+            "test-key".into(),
+            "https://example.invalid/v1".into(),
+            " deepseek-flash \n".into(),
+            0.7,
+            256,
+        );
         assert_eq!(base.model, "deepseek-flash");
     }
 
@@ -1088,8 +1111,14 @@ mod sampling_penalty_tests {
         let base = test_base();
         let mut body = serde_json::json!({"model": "test-model"});
         base.apply_sampling_penalties(&mut body, PENALTY_KEYS_SNAKE);
-        assert!(body.get("presence_penalty").is_none(), "无作用域时不应写入 presence_penalty");
-        assert!(body.get("frequency_penalty").is_none(), "无作用域时不应写入 frequency_penalty");
+        assert!(
+            body.get("presence_penalty").is_none(),
+            "无作用域时不应写入 presence_penalty"
+        );
+        assert!(
+            body.get("frequency_penalty").is_none(),
+            "无作用域时不应写入 frequency_penalty"
+        );
         assert_eq!(base.effective_presence_penalty(), None);
         assert_eq!(base.effective_frequency_penalty(), None);
     }
@@ -1116,8 +1145,14 @@ mod sampling_penalty_tests {
             {
                 base.apply_sampling_penalties_to(cfg, PENALTY_KEYS_CAMEL);
             }
-            assert_eq!(gemini_style["generationConfig"]["presencePenalty"], serde_json::json!(0.3));
-            assert_eq!(gemini_style["generationConfig"]["frequencyPenalty"], serde_json::json!(0.2));
+            assert_eq!(
+                gemini_style["generationConfig"]["presencePenalty"],
+                serde_json::json!(0.3)
+            );
+            assert_eq!(
+                gemini_style["generationConfig"]["frequencyPenalty"],
+                serde_json::json!(0.2)
+            );
             // 驼峰路径不得污染顶层（反之亦然）
             assert!(gemini_style.get("presence_penalty").is_none());
         })
@@ -1150,8 +1185,21 @@ mod usage_reporting_tests {
     fn usage_reporting_anthropic_cache_is_separate_from_uncached_input() {
         let event = parse_stream_usage(&serde_json::json!({"input_tokens": 10, "output_tokens": 5, "cache_read_input_tokens": 1000, "cache_creation_input_tokens": 20})).unwrap();
         match event {
-            StreamEvent::Usage { input_tokens, output_tokens, cache_read_tokens, cache_write_tokens } => {
-                assert_eq!((input_tokens, output_tokens, cache_read_tokens, cache_write_tokens), (10, 5, 1000, 20));
+            StreamEvent::Usage {
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                cache_write_tokens,
+            } => {
+                assert_eq!(
+                    (
+                        input_tokens,
+                        output_tokens,
+                        cache_read_tokens,
+                        cache_write_tokens
+                    ),
+                    (10, 5, 1000, 20)
+                );
             }
             _ => panic!("Expected usage"),
         }
@@ -1161,7 +1209,11 @@ mod usage_reporting_tests {
     fn usage_reporting_openai_cached_input_is_counted_once() {
         let event = parse_stream_usage(&serde_json::json!({"prompt_tokens": 100, "completion_tokens": 5, "prompt_tokens_details": {"cached_tokens": 80}})).unwrap();
         match event {
-            StreamEvent::Usage { input_tokens, cache_read_tokens, .. } => assert_eq!((input_tokens, cache_read_tokens), (20, 80)),
+            StreamEvent::Usage {
+                input_tokens,
+                cache_read_tokens,
+                ..
+            } => assert_eq!((input_tokens, cache_read_tokens), (20, 80)),
             _ => panic!("Expected usage"),
         }
         assert!(parse_stream_usage(&serde_json::json!({"model": "no-usage"})).is_none());
@@ -1171,10 +1223,44 @@ mod usage_reporting_tests {
 #[cfg(test)]
 mod request_parameter_switch_tests {
     use super::*;
+    #[tokio::test]
+    async fn bound_provider_shares_health_but_does_not_capture_request_overrides() {
+        let base = ProviderBase::new(
+            "dummy".into(),
+            "https://example.test".into(),
+            "fork-test".into(),
+            0.7,
+            100,
+        );
+        let bound = scope_provider_call(
+            ProviderCallOptions {
+                max_tokens_extra: 50,
+                temperature: Some(0.2),
+                ..Default::default()
+            },
+            async {
+                let bound = base.fork();
+                assert_eq!(bound.effective_max_tokens(), 150);
+                assert_eq!(bound.effective_temperature(), 0.2);
+                bound
+            },
+        )
+        .await;
+        assert!(Arc::ptr_eq(&base.circuit_breaker, &bound.circuit_breaker));
+        assert_eq!(bound.effective_max_tokens(), 100);
+        assert_eq!(bound.effective_temperature(), 0.7);
+    }
+
     #[test]
     fn switches_control_wire_fields_and_preserve_tool_schemas() {
-        for (temperature, tokens) in [(true,true),(true,false),(false,true),(false,false)] {
-            let base = ProviderBase::new("dummy".into(), "https://example.test".into(), "unknown-model".into(), 0.7, 256);
+        for (temperature, tokens) in [(true, true), (true, false), (false, true), (false, false)] {
+            let base = ProviderBase::new(
+                "dummy".into(),
+                "https://example.test".into(),
+                "unknown-model".into(),
+                0.7,
+                256,
+            );
             base.send_temperature.store(temperature, Ordering::Relaxed);
             base.send_max_tokens.store(tokens, Ordering::Relaxed);
             let mut body = serde_json::json!({
@@ -1185,13 +1271,33 @@ mod request_parameter_switch_tests {
             });
             base.strip_temperature(&mut body);
             assert_eq!(body.get("temperature").is_some(), temperature);
-            assert_eq!(body["generationConfig"].get("temperature").is_some(), temperature);
-            assert_eq!(body["parameter"]["chat"].get("temperature").is_some(), temperature);
-            for field in ["max_tokens","max_output_tokens","max_completion_tokens"] { assert_eq!(body.get(field).is_some(), tokens); }
-            assert_eq!(body["generationConfig"].get("maxOutputTokens").is_some(), tokens);
-            assert_eq!(body["parameter"]["chat"].get("max_tokens").is_some(), tokens);
-            assert_eq!(body["tools"][0]["parameters"]["properties"]["temperature"]["type"], "number");
-            assert_eq!(body["tools"][0]["parameters"]["properties"]["max_tokens"]["type"], "integer");
+            assert_eq!(
+                body["generationConfig"].get("temperature").is_some(),
+                temperature
+            );
+            assert_eq!(
+                body["parameter"]["chat"].get("temperature").is_some(),
+                temperature
+            );
+            for field in ["max_tokens", "max_output_tokens", "max_completion_tokens"] {
+                assert_eq!(body.get(field).is_some(), tokens);
+            }
+            assert_eq!(
+                body["generationConfig"].get("maxOutputTokens").is_some(),
+                tokens
+            );
+            assert_eq!(
+                body["parameter"]["chat"].get("max_tokens").is_some(),
+                tokens
+            );
+            assert_eq!(
+                body["tools"][0]["parameters"]["properties"]["temperature"]["type"],
+                "number"
+            );
+            assert_eq!(
+                body["tools"][0]["parameters"]["properties"]["max_tokens"]["type"],
+                "integer"
+            );
         }
     }
 }

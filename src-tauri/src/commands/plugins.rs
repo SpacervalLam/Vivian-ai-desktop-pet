@@ -40,6 +40,7 @@ pub fn list_plugins() -> Vec<crate::plugins::PluginInventoryEntry> {
             version: "1.1.0".into(),
             description: "3D 公寓与街区探索。可在设置 → 通用中启用或禁用。".into(),
             skills: Vec::new(),
+            capability_kind: "executable".into(),
             tools: Vec::new(),
             mcp_servers: Vec::new(),
             providers: Vec::new(),
@@ -236,23 +237,18 @@ pub fn preview_reasoning_config(
 ) -> Result<serde_json::Value, String> {
     use crate::providers::{reasoning, reasoning_profiles};
     crate::plugins::ensure_builtin_plugins();
-    if let Some(patch) = &overrides { reasoning_profiles::validate_patch(patch)?; }
     let profile = reasoning_profiles::resolve(&provider_type, &model);
+    if let Some(patch) = &overrides { reasoning_profiles::validate_adapter_patch(patch, profile.as_ref())?; }
     let pref = preference.unwrap_or(reasoning::ReasoningPreference::AUTO);
     let mut preview = serde_json::json!({});
     let (known, disable, efforts, budget, source, verified_at) = if let Some(p) = &profile {
-        p.apply(&mut preview, pref);
         (true, p.disabled.is_some(), p.efforts.keys().cloned().collect::<Vec<_>>(), serde_json::to_value(&p.budget).unwrap_or_default(), Some(p.source.clone()), Some(p.verified_at.clone()))
     } else {
         let cap = reasoning::resolve_reasoning_capability(&model);
-        let known = cap.control != reasoning::ReasoningControl::None;
-        if provider_type == "openai" || provider_type == "openai_responses" || provider_type == "openai_agents" {
-            reasoning::apply_responses_reasoning(&mut preview, pref, &cap);
-        } else if provider_type != "gemini" {
-            reasoning::apply_reasoning_preference(&mut preview, pref, &cap, false);
-        }
-        (known, cap.supports_disable, cap.supported_efforts.iter().map(|e| e.as_str().to_string()).collect(), serde_json::Value::Null, None, None)
+        (cap.control != reasoning::ReasoningControl::None, cap.supports_disable, cap.supported_efforts.iter().map(|e|e.as_str().to_string()).collect(), serde_json::Value::Null, None, None)
     };
-    if let Some(patch) = &overrides { reasoning_profiles::merge_patch(&mut preview, patch); }
-    Ok(serde_json::json!({"known":known,"supportsDisable":disable,"efforts":efforts,"budget":budget,"source":source,"verifiedAt":verified_at,"preview":preview,"overridden":overrides.as_ref().and_then(|v|v.as_object()).map(|v|!v.is_empty()).unwrap_or(false)}))
+    let adapter = reasoning_profiles::RequestCustomization { profile, overrides: overrides.clone(), provider_type };
+    adapter.apply(&mut preview, pref, &model);
+    let sampling = adapter.sampling();
+    Ok(serde_json::json!({"sampling":sampling,"adapterOrigin":if source.is_some(){"verified_profile"}else{"compatibility"},"known":known,"supportsDisable":disable,"efforts":efforts,"budget":budget,"source":source,"verifiedAt":verified_at,"preview":preview,"overridden":overrides.as_ref().and_then(|v|v.as_object()).map(|v|!v.is_empty()).unwrap_or(false)}))
 }

@@ -290,13 +290,6 @@ impl ResourceLoader {
         stripped.parse::<u32>().unwrap_or(0)
     }
 
-    /// 获取文件名（不含最后一个扩展名）
-    fn file_stem(path: &Path) -> String {
-        path.file_stem()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_default()
-    }
-
     /// 获取动作信息
     pub fn get_motion(&self, name: &str) -> Option<MotionInfo> {
         self.resources.read().motions.get(name).cloned()

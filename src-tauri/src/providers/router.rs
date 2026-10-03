@@ -11,6 +11,7 @@ use tokio::sync::Semaphore;
 
 use crate::config::manager::{AppConfig, TaskRouteConfig, WorkModelProfile};
 use crate::error::{VivianError, VivianResult};
+use crate::providers::base::TASK_WORK_AGENT;
 use crate::providers::base::{
     scope_provider_call, BaseProvider, ChatResponse, LLMRequest, ProviderCallOptions, StreamEvent,
     ToolDefinition,
@@ -21,8 +22,21 @@ use crate::providers::factory::{
 use crate::providers::reasoning::ReasoningPreference;
 use crate::providers::usage_store;
 use crate::resilience::{classify_llm_error_from_str, error_kind_to_message_key, LlmErrorKind};
-use crate::providers::base::TASK_WORK_AGENT;
 use crate::types::response::ChatMessage;
+
+enum RouteProvider<'a> {
+    Configured(&'a Box<dyn BaseProvider>),
+    Override(Arc<Box<dyn BaseProvider>>),
+}
+
+impl RouteProvider<'_> {
+    fn provider(&self) -> &Box<dyn BaseProvider> {
+        match self {
+            Self::Configured(provider) => provider,
+            Self::Override(provider) => provider.as_ref(),
+        }
+    }
+}
 
 /// 模型路由
 ///
@@ -42,16 +56,10 @@ use crate::types::response::ChatMessage;
 pub struct ModelRouter {
     /// 主 LLM API provider —— 由 `config.ai` 构建，必须配置
     main_provider: Arc<Option<Box<dyn BaseProvider>>>,
-    /// 主 LLM API 的 endpoint。LLM 错误 toast 用它把用户引导到对应厂商的控制台
-    /// （充值页因厂商而异，前端按 endpoint 反查预设里的 consoleUrl）。
-    main_endpoint: String,
     /// 任务专属 provider —— 每个任务独立配置的模型实例
     task_providers: Arc<HashMap<String, Box<dyn BaseProvider>>>,
     /// Native decision endpoint; Jev does not implement chat completions.
     jev_decision: Option<Arc<crate::providers::jev::JevClient>>,
-    /// 任务类型 → 该任务绑定的 provider endpoint。查不到的任务回退 `main_endpoint`
-    /// （路由矩阵关闭或任务未配置时全部走主 API）。
-    task_endpoints: Arc<HashMap<String, String>>,
     /// 工作智能体模型热切换覆盖
     ///
     /// 用户为工作智能体选择的 provider 实例。`None` 表示未覆盖。
@@ -198,6 +206,10 @@ fn load_strict_broken_models() -> HashSet<String> {
 }
 
 fn save_strict_broken_models(models: &HashSet<String>) {
+    // Unit tests must not change the user's persistent capability cache.
+    if cfg!(test) {
+        return;
+    }
     if let Ok(bytes) = serde_json::to_vec(models) {
         let _ = crate::utils::fs::atomic_write(&strict_broken_path(), &bytes);
     }
@@ -229,9 +241,7 @@ impl ModelRouter {
                 reasoning: None,
             };
             if !provider_configuration_complete(&task_config) {
-                tracing::warn!(
-                    "[ModelRouter] 主 LLM API 未配置完整，跳过创建 main_provider"
-                );
+                tracing::warn!("[ModelRouter] 主 LLM API 未配置完整，跳过创建 main_provider");
                 None
             } else {
                 match create_task_provider(&task_config, config, &client_cache) {
@@ -257,8 +267,6 @@ impl ModelRouter {
         let mut task_providers: HashMap<String, Box<dyn BaseProvider>> = HashMap::new();
         let mut jev_decision = None;
         let mut task_reasoning = HashMap::new();
-        // 任务 → endpoint 映射：错误 toast 用它引导用户前往对应厂商控制台
-        let mut task_endpoints: HashMap<String, String> = HashMap::new();
         if config.enable_routing_matrix {
             for (task_type, task_config) in &config.routing_matrix {
                 // 跳过空配置（未填写 model 或 endpoint 的任务）→ 由主 API 兜底
@@ -277,7 +285,9 @@ impl ModelRouter {
                     continue;
                 }
                 if task_config.provider_type == "jev" {
-                    tracing::warn!("[ModelRouter] Jev only supports simple_judge, skipping {task_type}");
+                    tracing::warn!(
+                        "[ModelRouter] Jev only supports simple_judge, skipping {task_type}"
+                    );
                     continue;
                 }
                 // reasoning（编程 / 深度推理）未显式配置 max_tokens 时按服务商分级默认，
@@ -299,7 +309,6 @@ impl ModelRouter {
                             cfg.endpoint
                         );
                         task_providers.insert(task_type.clone(), provider);
-                        task_endpoints.insert(task_type.clone(), cfg.endpoint.clone());
                         if let Some(reasoning) = cfg.reasoning {
                             task_reasoning.insert(task_type.clone(), reasoning);
                         }
@@ -333,10 +342,8 @@ impl ModelRouter {
 
         Ok(Self {
             main_provider: Arc::new(main_provider),
-            main_endpoint: config.ai.endpoint.as_deref().unwrap_or("").trim().to_string(),
             task_providers: Arc::new(task_providers),
             jev_decision,
-            task_endpoints: Arc::new(task_endpoints),
             reasoning_override: Arc::new(RwLock::new(reasoning_override)),
             enable_routing_matrix: config.enable_routing_matrix,
             enable_search: Arc::new(AtomicBool::new(false)),
@@ -394,10 +401,12 @@ impl ModelRouter {
         // 用户填写的预算优先；未填写时使用编程默认预算。发送开关由 factory 应用。
         let mut cfg = cfg.clone();
         cfg.send_max_tokens = Some(cfg.send_max_tokens.unwrap_or(true));
-        cfg.max_tokens = cfg.max_tokens.or_else(|| Some(crate::providers::factory::work_model_default_max_tokens(
-            &cfg.provider_type,
-            &cfg.endpoint,
-        )));
+        cfg.max_tokens = cfg.max_tokens.or_else(|| {
+            Some(crate::providers::factory::work_model_default_max_tokens(
+                &cfg.provider_type,
+                &cfg.endpoint,
+            ))
+        });
         match create_task_provider(&cfg, config, client_cache) {
             Ok(p) => {
                 // 工作智能体请求省略 temperature（服务端默认）：
@@ -411,10 +420,7 @@ impl ModelRouter {
                 Some(Arc::new(p))
             }
             Err(e) => {
-                tracing::warn!(
-                    "[ModelRouter] 恢复工作智能体模型 provider 失败: {}",
-                    e
-                );
+                tracing::warn!("[ModelRouter] 恢复工作智能体模型 provider 失败: {}", e);
                 None
             }
         }
@@ -584,13 +590,13 @@ impl ModelRouter {
             max_tokens_extra: request.max_tokens_extra,
             presence_penalty,
             frequency_penalty,
-            reasoning: Some(self.effective_request_reasoning(
-                &request.task_type,
-                request.reasoning,
-            )),
+            reasoning: Some(
+                self.effective_request_reasoning(&request.task_type, request.reasoning),
+            ),
             json_schema: request.json_schema.clone().map(Arc::new),
+            disable_json_schema: false,
             request_fingerprint: Some(crate::utils::fnv1a_64(&fingerprint_source)),
-            response_cache_allowed: Some(request.tools.is_empty()),
+            response_cache_allowed: Some(request.tools.is_empty() && !request.enable_search),
         }
     }
 
@@ -691,7 +697,13 @@ impl ModelRouter {
     /// 且「余额不足」引发的连续失败会同时触发熔断，两条 toast 并存时后者会盖掉真正该看的那条。
     ///
     /// `character_id` 为触发本次调用的角色归属（空串 = 无归属，前端不弹 toast）。
-    fn emit_llm_error_toast(&self, task_type: &str, error: &str, endpoint: &str, character_id: &str) {
+    fn emit_llm_error_toast(
+        &self,
+        task_type: &str,
+        error: &str,
+        endpoint: &str,
+        character_id: &str,
+    ) {
         let error_kind = classify_llm_error_from_str(error);
 
         if matches!(error_kind, LlmErrorKind::CircuitBreakerOpen) {
@@ -739,6 +751,79 @@ impl ModelRouter {
         }
     }
 
+    /// One ordered candidate list for all four invocation modes.
+    fn route_candidates(&self, task_type: &str, require_tools: bool) -> Vec<RouteProvider<'_>> {
+        let mut candidates = Vec::new();
+        if let Some(provider) = self.override_provider_for(task_type) {
+            candidates.push(RouteProvider::Override(provider));
+        }
+        if self.enable_routing_matrix {
+            if let Some(provider) = self.task_providers.get(task_type) {
+                candidates.push(RouteProvider::Configured(provider));
+            }
+        }
+        if let Some(provider) = self.main_provider.as_ref() {
+            candidates.push(RouteProvider::Configured(provider));
+        }
+        candidates.retain(|candidate| {
+            !require_tools || candidate.provider().supports_native_function_calling()
+        });
+        candidates
+    }
+
+    async fn acquire_route_permit(
+        &self,
+        task_type: &str,
+    ) -> VivianResult<Option<tokio::sync::OwnedSemaphorePermit>> {
+        match self.get_semaphore(task_type) {
+            Some(semaphore) => Ok(Some(semaphore.acquire_owned().await.map_err(|_| {
+                VivianError::Provider("Provider concurrency queue closed".into())
+            })?)),
+            None => Ok(None),
+        }
+    }
+
+    async fn with_candidate_schema<T, F, Fut>(
+        &self,
+        provider: &Box<dyn BaseProvider>,
+        schema: Option<serde_json::Value>,
+        operation: F,
+    ) -> VivianResult<T>
+    where
+        F: FnMut(Option<serde_json::Value>) -> Fut,
+        Fut: std::future::Future<Output = VivianResult<T>>,
+    {
+        super::routing::with_candidate_schema(
+            provider.as_ref(),
+            &self.strict_broken,
+            save_strict_broken_models,
+            schema,
+            operation,
+        )
+        .await
+    }
+
+    fn route_failure(
+        &self,
+        task_type: &str,
+        error: &VivianError,
+        character_id: &str,
+        has_next: bool,
+    ) {
+        self.emit_route_status(task_type, "error");
+        if has_next {
+            self.emit_route_fallback(task_type, &error.to_string(), character_id);
+        }
+    }
+
+    /// Commit a route only after a useful event. Leading usage/citations are replayed
+    /// in order; errors and empty streams before output still allow failover.
+    async fn prime_stream(
+        source: mpsc::Receiver<StreamEvent>,
+    ) -> VivianResult<mpsc::Receiver<StreamEvent>> {
+        super::routing::prime_stream(source).await
+    }
+
     async fn query_with_fallback(
         &self,
         task_type: &str,
@@ -747,125 +832,52 @@ impl ModelRouter {
         character_id: &str,
     ) -> VivianResult<String> {
         Self::log_llm_request(task_type, &messages, &[]);
-        // 按任务分组获取并发信号量，acquire 后才执行（防止后处理 LLM 同时挤占主对话）
-        // 信号量在 _permit 作用域结束时自动释放
-        let sem_opt = self.get_semaphore(task_type);
-        let _permit = if let Some(sem) = sem_opt {
-            Some(
-                sem.acquire_owned()
-                    .await
-                    .map_err(|e| VivianError::Provider(format!("获取并发信号量失败: {}", e)))?,
-            )
-        } else {
-            None
-        };
-
-        let mut last_error: Option<VivianError> = None;
-        // 跟随 last_error 一起记录：最后实际失败的 provider 的 endpoint，
-        // 供 llm:error toast 反查厂商直达控制台。为 None 时前端查不到就不挂动作。
-        let mut last_error_endpoint: Option<String> = None;
-        let enable_search = self.is_enable_search();
-
-        // 0. 工作智能体覆盖模型优先（仅 reasoning 任务）——用户显式选择，优先级高于路由矩阵
-        if let Some(provider) = self.override_provider_for(task_type) {
-            tracing::debug!(
-                "[ModelRouter] 路由任务 {} 到工作智能体覆盖模型 ({})",
-                task_type,
-                provider.get_model()
-            );
-            match provider
-                .call_chat_with_search(messages.clone(), enable_search, json_schema.clone())
-                .await
-            {
-                Ok(result) => {
-                    Self::log_text_response(task_type, &result);
+        let _permit = self.acquire_route_permit(task_type).await?;
+        let candidates = self.route_candidates(task_type, false);
+        let mut last_error = VivianError::Provider("没有可用的提供商".into());
+        let mut endpoint = String::new();
+        for (index, candidate) in candidates.iter().enumerate() {
+            let provider = candidate.provider();
+            endpoint = provider.get_endpoint().to_string();
+            let result = self
+                .with_candidate_schema(provider, json_schema.clone(), |schema| {
+                    let messages = messages.clone();
+                    async move {
+                        provider
+                            .call_chat_with_search(
+                                messages,
+                                ProviderCallOptions::current()
+                                    .enable_search
+                                    .unwrap_or_else(|| self.is_enable_search()),
+                                schema,
+                            )
+                            .await
+                    }
+                })
+                .await;
+            match result {
+                Ok(content) => {
+                    Self::log_text_response(task_type, &content);
                     self.emit_route_status(task_type, "ok");
-                    return Ok(result);
+                    return Ok(content);
                 }
-                Err(e) => {
-                    tracing::warn!(
-                        "[ModelRouter] 工作智能体覆盖模型失败，回退到默认路由: {}",
-                        e
+                Err(error) => {
+                    let failover = crate::providers::transport::may_failover(&error);
+                    self.route_failure(
+                        task_type,
+                        &error,
+                        character_id,
+                        failover && index + 1 < candidates.len(),
                     );
-                    self.emit_route_status(task_type, "error");
-                    self.emit_route_fallback(task_type, &e.to_string(), character_id);
-                    last_error = Some(e);
-                }
-            }
-        }
-
-        // 1. 路由矩阵启用时优先使用任务专属 provider；失败则通知前端并回退到主 API
-        if self.enable_routing_matrix {
-            if let Some(provider) = self.task_providers.get(task_type) {
-                tracing::debug!(
-                    "[ModelRouter] 路由任务 {} 到专属 provider ({})",
-                    task_type,
-                    provider.get_model()
-                );
-                match provider
-                    .call_chat_with_search(messages.clone(), enable_search, json_schema.clone())
-                    .await
-                {
-                    Ok(result) => {
-                        Self::log_text_response(task_type, &result);
-                        self.emit_route_status(task_type, "ok");
-                        return Ok(result);
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "[ModelRouter] 任务 {} 专属 provider 失败，回退到主 LLM API: {}",
-                            task_type,
-                            e
-                        );
-                        self.emit_route_status(task_type, "error");
-                        self.emit_route_fallback(task_type, &e.to_string(), character_id);
-                        last_error = Some(e);
-                        last_error_endpoint = self.task_endpoints.get(task_type).cloned();
+                    last_error = error;
+                    if !failover {
+                        break;
                     }
                 }
             }
         }
-
-        // 2. 主 LLM API
-        if let Some(provider) = self.main_provider.as_ref() {
-            tracing::debug!(
-                "[ModelRouter] 任务 {} 使用主 LLM API ({})",
-                task_type,
-                provider.get_model()
-            );
-            match provider
-                .call_chat_with_search(messages.clone(), enable_search, json_schema.clone())
-                .await
-            {
-                Ok(result) => {
-                    Self::log_text_response(task_type, &result);
-                    // 回退主 LLM 成功，恢复绿色状态
-                    if last_error.is_some() {
-                        self.emit_route_status(task_type, "ok");
-                    }
-                    return Ok(result);
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "[ModelRouter] 主 LLM API 失败: {}",
-                        e
-                    );
-                    self.emit_route_status(task_type, "error");
-                    last_error = Some(e);
-                    last_error_endpoint = Some(self.main_endpoint.clone());
-                }
-            }
-        }
-
-        let err = last_error
-            .unwrap_or_else(|| VivianError::Provider("没有可用的提供商".to_string()));
-        self.emit_llm_error_toast(
-            task_type,
-            &err.to_string(),
-            last_error_endpoint.as_deref().unwrap_or(""),
-            character_id,
-        );
-        Err(err)
+        self.emit_llm_error_toast(task_type, &last_error.to_string(), &endpoint, character_id);
+        Err(last_error)
     }
 
     async fn query_stream(
@@ -877,109 +889,50 @@ impl ModelRouter {
         usage_tag: &str,
     ) -> VivianResult<mpsc::Receiver<StreamEvent>> {
         Self::log_llm_request(task_type, &messages, &[]);
-        // permit 由返回流的转发任务持有，直到流结束或调用方丢弃 receiver。
-        let sem_opt = self.get_semaphore(task_type);
-        let permit = if let Some(sem) = sem_opt {
-            Some(
-                sem.acquire_owned()
-                    .await
-                    .map_err(|e| VivianError::Provider(format!("获取并发信号量失败: {}", e)))?,
-            )
-        } else {
-            None
-        };
-
-        // 0. 工作智能体覆盖模型优先（仅 reasoning 任务）——用户显式选择，优先级高于路由矩阵
-        if let Some(provider) = self.override_provider_for(task_type) {
-            tracing::debug!(
-                "[ModelRouter] 路由流式任务 {} 到工作智能体覆盖模型 ({})",
-                task_type,
-                provider.get_model()
-            );
-            match provider.call_stream_chat(messages.clone(), json_schema.clone()).await {
-                Ok(rx) => {
+        let permit = self.acquire_route_permit(task_type).await?;
+        let candidates = self.route_candidates(task_type, false);
+        let mut last_error = VivianError::Provider("没有可用的流式提供商".into());
+        let mut endpoint = String::new();
+        for (index, candidate) in candidates.iter().enumerate() {
+            let provider = candidate.provider();
+            endpoint = provider.get_endpoint().to_string();
+            let result = self
+                .with_candidate_schema(provider, json_schema.clone(), |schema| {
+                    let messages = messages.clone();
+                    async move {
+                        let source = provider.call_stream_chat(messages, schema).await?;
+                        Self::prime_stream(source).await
+                    }
+                })
+                .await;
+            match result {
+                Ok(source) => {
                     self.emit_route_status(task_type, "ok");
                     return Ok(Self::hold_text_stream_permit(
-                        rx,
+                        source,
                         permit,
                         provider.get_model().to_string(),
                         usage_tag.to_string(),
                         task_type.to_string(),
                     ));
                 }
-                Err(e) => {
-                    tracing::warn!(
-                        "[ModelRouter] 流式工作智能体覆盖模型失败，回退到默认路由: {}",
-                        e
+                Err(error) => {
+                    let failover = crate::providers::transport::may_failover(&error);
+                    self.route_failure(
+                        task_type,
+                        &error,
+                        character_id,
+                        failover && index + 1 < candidates.len(),
                     );
-                    self.emit_route_status(task_type, "error");
-                    self.emit_route_fallback(task_type, &e.to_string(), character_id);
-                }
-            }
-        }
-
-        // 1. 路由矩阵启用时优先使用任务专属 provider
-        if self.enable_routing_matrix {
-            if let Some(provider) = self.task_providers.get(task_type) {
-                tracing::debug!(
-                    "[ModelRouter] 路由流式任务 {} 到专属 provider ({})",
-                    task_type,
-                    provider.get_model()
-                );
-                match provider
-                    .call_stream_chat(messages.clone(), json_schema.clone())
-                    .await
-                {
-                    Ok(rx) => {
-                        self.emit_route_status(task_type, "ok");
-                        return Ok(Self::hold_text_stream_permit(
-                            rx,
-                            permit,
-                            provider.get_model().to_string(),
-                            usage_tag.to_string(),
-                            task_type.to_string(),
-                        ));
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "[ModelRouter] 流式任务 {} 专属 provider 失败，回退到主 API: {}",
-                            task_type,
-                            e
-                        );
-                        self.emit_route_status(task_type, "error");
-                        self.emit_route_fallback(task_type, &e.to_string(), character_id);
+                    last_error = error;
+                    if !failover {
+                        break;
                     }
                 }
             }
         }
-
-        // 2. 回退到主 LLM API
-        if let Some(provider) = self.main_provider.as_ref() {
-            tracing::debug!(
-                "[ModelRouter] 流式任务 {} 使用主 LLM API ({})",
-                task_type,
-                provider.get_model()
-            );
-            match provider.call_stream_chat(messages, json_schema).await {
-                Ok(rx) => {
-                    self.emit_route_status(task_type, "ok");
-                    return Ok(Self::hold_text_stream_permit(
-                        rx,
-                        permit,
-                        provider.get_model().to_string(),
-                        usage_tag.to_string(),
-                        task_type.to_string(),
-                    ));
-                }
-                Err(e) => {
-                    self.emit_route_status(task_type, "error");
-                    self.emit_llm_error_toast(task_type, &e.to_string(), &self.main_endpoint, character_id);
-                    return Err(e);
-                }
-            }
-        }
-
-        Err(VivianError::Provider("没有可用的流式提供商".to_string()))
+        self.emit_llm_error_toast(task_type, &last_error.to_string(), &endpoint, character_id);
+        Err(last_error)
     }
 
     fn hold_text_stream_permit(
@@ -993,7 +946,27 @@ impl ModelRouter {
         tokio::spawn(async move {
             let _permit = permit;
             let mut usage = usage_store::StreamUsageAccumulator::default();
-            while let Some(event) = source.recv().await {
+            let mut content_bytes = 0usize;
+            let mut content_hash = 0xcbf29ce484222325u64;
+            let mut outcome = "completed";
+            loop {
+                let event = tokio::select! {
+                    _ = tx.closed() => { outcome = "consumer_closed"; break; },
+                    event = source.recv() => event,
+                };
+                let Some(event) = event else {
+                    break;
+                };
+                if let StreamEvent::Text { content } = &event {
+                    content_bytes += content.len();
+                    for byte in content.bytes() {
+                        content_hash ^= byte as u64;
+                        content_hash = content_hash.wrapping_mul(0x100000001b3);
+                    }
+                }
+                if matches!(&event, StreamEvent::Error { .. }) {
+                    outcome = "provider_error";
+                }
                 if let StreamEvent::Usage {
                     input_tokens,
                     output_tokens,
@@ -1001,12 +974,20 @@ impl ModelRouter {
                     cache_write_tokens,
                 } = &event
                 {
-                    usage.observe(*input_tokens, *output_tokens, *cache_read_tokens, *cache_write_tokens);
+                    usage.observe(
+                        *input_tokens,
+                        *output_tokens,
+                        *cache_read_tokens,
+                        *cache_write_tokens,
+                    );
                 }
                 if tx.send(event).await.is_err() {
+                    outcome = "consumer_closed";
                     break;
                 }
             }
+            tracing::debug!("[LLM-IO] <<< stream task={} usage_tag={} model={} outcome={} content_bytes={} content_hash={:016x}",
+                route, usage_tag, model, outcome, content_bytes, content_hash);
             usage.record(Some(&usage_tag), Some(&route), &model);
         });
         rx
@@ -1094,7 +1075,8 @@ impl ModelRouter {
                     self.emit_route_status("simple_judge", "ok");
                     tracing::debug!(
                         "[simple_judge] Jev choice={} confidence={:.3}",
-                        choice.choice, choice.confidence,
+                        choice.choice,
+                        choice.confidence,
                     );
                     return Some(choice.choice);
                 }
@@ -1108,24 +1090,40 @@ impl ModelRouter {
         if !self.enable_routing_matrix || !self.task_providers.contains_key("simple_judge") {
             return None;
         }
-        let options: serde_json::Map<String, serde_json::Value> = choices.iter()
+        let options: serde_json::Map<String, serde_json::Value> = choices
+            .iter()
             .map(|(name, description)| ((*name).to_owned(), json!(description)))
             .collect();
         let messages = vec![
             ChatMessage::system("You make one small decision. Return only JSON with one key, choice. The choice must exactly match an option key."),
             ChatMessage::user(format!("Instructions: {instructions}\nOptions: {}\nState: {state}", json!(options))),
         ];
-        match self.generate(LLMRequest::new("simple_judge", messages)
-            .with_character_id(character_id.to_owned())
-            .with_temperature(0.0)
-            .with_max_tokens(64)).await {
+        match self
+            .generate(
+                LLMRequest::new("simple_judge", messages)
+                    .with_character_id(character_id.to_owned())
+                    .with_temperature(0.0)
+                    .with_max_tokens(64),
+            )
+            .await
+        {
             Ok(reply) => {
-                let value = reply.find('{').and_then(|start| reply.rfind('}')
-                    .filter(|end| *end >= start)
-                    .and_then(|end| serde_json::from_str::<serde_json::Value>(&reply[start..=end]).ok()));
-                let choice = value.as_ref().and_then(|v| v.get("choice"))
+                let value = reply.find('{').and_then(|start| {
+                    reply
+                        .rfind('}')
+                        .filter(|end| *end >= start)
+                        .and_then(|end| {
+                            serde_json::from_str::<serde_json::Value>(&reply[start..=end]).ok()
+                        })
+                });
+                let choice = value
+                    .as_ref()
+                    .and_then(|v| v.get("choice"))
                     .and_then(|v| v.as_str())?;
-                choices.iter().any(|(name, _)| *name == choice).then(|| choice.to_owned())
+                choices
+                    .iter()
+                    .any(|(name, _)| *name == choice)
+                    .then(|| choice.to_owned())
             }
             Err(e) => {
                 tracing::warn!("[simple_judge] LLM failed: {e}");
@@ -1161,19 +1159,30 @@ impl ModelRouter {
         if !self.enable_routing_matrix || !self.task_providers.contains_key("simple_judge") {
             return None;
         }
-        let definitions: serde_json::Map<String, serde_json::Value> = questions.iter()
-            .map(|(key, instruction, yes, no)| ((*key).to_owned(), json!({
-                "question": instruction, "true": yes, "false": no
-            })))
+        let definitions: serde_json::Map<String, serde_json::Value> = questions
+            .iter()
+            .map(|(key, instruction, yes, no)| {
+                (
+                    (*key).to_owned(),
+                    json!({
+                        "question": instruction, "true": yes, "false": no
+                    }),
+                )
+            })
             .collect();
         let messages = vec![
             ChatMessage::system("Answer independent yes/no questions. Return only a JSON object mapping every question key to the probability (0 to 1) that its true criterion holds. No prose."),
             ChatMessage::user(format!("Questions: {}\nState: {state}", json!(definitions))),
         ];
-        let reply = self.generate(LLMRequest::new("simple_judge", messages)
-            .with_character_id(character_id.to_owned())
-            .with_temperature(0.0)
-            .with_max_tokens((questions.len() as u32 * 12 + 32).min(512))).await.ok()?;
+        let reply = self
+            .generate(
+                LLMRequest::new("simple_judge", messages)
+                    .with_character_id(character_id.to_owned())
+                    .with_temperature(0.0)
+                    .with_max_tokens((questions.len() as u32 * 12 + 32).min(512)),
+            )
+            .await
+            .ok()?;
         let start = reply.find('{')?;
         let end = reply.rfind('}')?;
         let values: serde_json::Value = serde_json::from_str(reply.get(start..=end)?).ok()?;
@@ -1190,7 +1199,11 @@ impl ModelRouter {
 
     /// Mixed Choice + Score route for emotion classification. A normal chat
     /// provider keeps using the existing emotion_analysis prompt as fallback.
-    pub async fn classify_emotion_simple(&self, text: &str, labels: &[&str]) -> Option<(String, f64)> {
+    pub async fn classify_emotion_simple(
+        &self,
+        text: &str,
+        labels: &[&str],
+    ) -> Option<(String, f64)> {
         let jev = self.jev_decision.as_ref()?;
         match jev.classify_emotion(text, labels).await {
             Ok(result) => {
@@ -1207,35 +1220,37 @@ impl ModelRouter {
 
     pub async fn generate(&self, mut request: LLMRequest) -> VivianResult<String> {
         Self::repair_request_history(&mut request);
-        loop {
-            let options = self.call_options(&request);
-            let usage_tag = request.usage_tag.clone().unwrap_or_else(|| request.task_type.clone());
-            let LLMRequest {
-                task_type,
-                messages,
-                stream,
-                tools,
-                json_schema,
-                character_id,
-                ..
-            } = request.clone();
-            // tools 非空应走 generate_with_tools,这里防御性检查
-            if !tools.is_empty() {
-                return Err(VivianError::Provider(
-                    "generate() 不支持 tools 非空,请用 generate_with_tools()".to_string(),
-                ));
-            }
-            // strict 熔断后强制降级为无 schema
-            let effective_schema = if self.strict_is_broken(&task_type) {
-                None
-            } else {
-                json_schema.clone()
-            };
-            let char_id = character_id.as_deref().unwrap_or("");
-            let result = usage_store::with_context(&usage_tag, &task_type, scope_provider_call(options, async {
+        let options = self.call_options(&request);
+        let usage_tag = request
+            .usage_tag
+            .clone()
+            .unwrap_or_else(|| request.task_type.clone());
+        let LLMRequest {
+            task_type,
+            messages,
+            stream,
+            tools,
+            json_schema,
+            character_id,
+            ..
+        } = request.clone();
+        // tools 非空应走 generate_with_tools,这里防御性检查
+        if !tools.is_empty() {
+            return Err(VivianError::Provider(
+                "generate() 不支持 tools 非空,请用 generate_with_tools()".to_string(),
+            ));
+        }
+        let effective_schema = json_schema.clone();
+        let char_id = character_id.as_deref().unwrap_or("");
+        let result = usage_store::with_context(
+            &usage_tag,
+            &task_type,
+            scope_provider_call(options, async {
                 if stream {
                     // 流式:累积所有 chunk 返回完整文本
-                    let mut rx = self.query_stream(&task_type, messages, effective_schema, char_id, &usage_tag).await?;
+                    let mut rx = self
+                        .query_stream(&task_type, messages, effective_schema, char_id, &usage_tag)
+                        .await?;
                     let mut buf = String::new();
                     let mut web_sources = Vec::new();
                     while let Some(event) = rx.recv().await {
@@ -1253,19 +1268,13 @@ impl ModelRouter {
                     }
                     Ok(crate::providers::web_citations::attach(&buf, &web_sources))
                 } else {
-                    self.query_with_fallback(&task_type, messages, effective_schema, char_id).await
+                    self.query_with_fallback(&task_type, messages, effective_schema, char_id)
+                        .await
                 }
-            })).await;
-            // strict 拒绝检测:熔断后重试(不带 schema)
-            if let Err(ref e) = result {
-                if json_schema.is_some() && self.handle_strict_failure(&task_type, e) {
-                    request.json_schema = None;
-                    tracing::info!("[ModelRouter] strict 熔断，重试 generate(无 schema)");
-                    continue;
-                }
-            }
-            return result;
-        }
+            }),
+        )
+        .await;
+        result
     }
 
     /// 统一流式文本生成入口(无工具)
@@ -1276,80 +1285,75 @@ impl ModelRouter {
         mut request: LLMRequest,
     ) -> VivianResult<tokio::sync::mpsc::Receiver<StreamEvent>> {
         Self::repair_request_history(&mut request);
-        loop {
-            let options = self.call_options(&request);
-            let usage_tag = request.usage_tag.clone().unwrap_or_else(|| request.task_type.clone());
-            let LLMRequest {
-                task_type,
-                messages,
-                tools,
-                json_schema,
-                stream: _,
-                character_id,
-                ..
-            } = request.clone();
-            if !tools.is_empty() {
-                return Err(VivianError::Provider(
-                    "generate_stream() 不支持 tools 非空,请用 generate_stream_with_tools()".to_string(),
-                ));
-            }
-            let effective_schema = if self.strict_is_broken(&task_type) {
-                None
-            } else {
-                json_schema.clone()
-            };
-            let rx = scope_provider_call(
-                options,
-                self.query_stream(&task_type, messages, effective_schema, character_id.as_deref().unwrap_or(""), &usage_tag),
-            )
-            .await;
-            // strict 拒绝检测:仅在流未开始时(返回 Err)可重试;流已开始则无法重试
-            if let Err(ref e) = rx {
-                if json_schema.is_some() && self.handle_strict_failure(&task_type, e) {
-                    request.json_schema = None;
-                    tracing::info!("[ModelRouter] strict 熔断，重试 generate_stream(无 schema)");
-                    continue;
-                }
-            }
-            return rx;
+        let options = self.call_options(&request);
+        let usage_tag = request
+            .usage_tag
+            .clone()
+            .unwrap_or_else(|| request.task_type.clone());
+        let LLMRequest {
+            task_type,
+            messages,
+            tools,
+            json_schema,
+            stream: _,
+            character_id,
+            ..
+        } = request.clone();
+        if !tools.is_empty() {
+            return Err(VivianError::Provider(
+                "generate_stream() 不支持 tools 非空,请用 generate_stream_with_tools()".to_string(),
+            ));
         }
+        let effective_schema = json_schema.clone();
+        let rx = scope_provider_call(
+            options,
+            self.query_stream(
+                &task_type,
+                messages,
+                effective_schema,
+                character_id.as_deref().unwrap_or(""),
+                &usage_tag,
+            ),
+        )
+        .await;
+        rx
     }
 
     /// 统一工具调用入口(原生 function calling 非流式)
     ///
     /// 内部转调 `query_with_tools`。调用方应先通过 `supports_native_function_calling`
     /// 确认 provider 支持,否则应回退到文本路径。
-    pub async fn generate_with_tools(
-        &self,
-        mut request: LLMRequest,
-    ) -> VivianResult<ChatResponse> {
+    pub async fn generate_with_tools(&self, mut request: LLMRequest) -> VivianResult<ChatResponse> {
         Self::repair_request_history(&mut request);
-        loop {
-            let options = self.call_options(&request);
-            let usage_tag = request.usage_tag.clone().unwrap_or_else(|| request.task_type.clone());
-            let LLMRequest {
-                task_type,
-                messages,
-                tools,
-                json_schema,
-                stream: _,
-                character_id,
-                ..
-            } = request.clone();
-            let result = usage_store::with_context(&usage_tag, &task_type, scope_provider_call(
+        let options = self.call_options(&request);
+        let usage_tag = request
+            .usage_tag
+            .clone()
+            .unwrap_or_else(|| request.task_type.clone());
+        let LLMRequest {
+            task_type,
+            messages,
+            tools,
+            json_schema: _,
+            stream: _,
+            character_id,
+            ..
+        } = request.clone();
+        let result = usage_store::with_context(
+            &usage_tag,
+            &task_type,
+            scope_provider_call(
                 options,
-                self.query_with_tools(&task_type, messages, tools, character_id.as_deref().unwrap_or("")),
-            )).await;
-            // strict 拒绝检测:熔断后重试(不带 schema)
-            if let Err(ref e) = result {
-                if json_schema.is_some() && self.handle_strict_failure(&task_type, e) {
-                    request.json_schema = None;
-                    tracing::info!("[ModelRouter] strict 熔断，重试 generate_with_tools(无 schema)");
-                    continue;
-                }
-            }
-            return result;
-        }
+                self.query_with_tools(
+                    &task_type,
+                    messages,
+                    tools,
+                    character_id.as_deref().unwrap_or(""),
+                ),
+            ),
+        )
+        .await;
+        result
     }
 
     /// 统一工具调用入口(原生 function calling 流式)
@@ -1360,33 +1364,32 @@ impl ModelRouter {
         mut request: LLMRequest,
     ) -> VivianResult<tokio::sync::mpsc::Receiver<crate::providers::base::StreamEvent>> {
         Self::repair_request_history(&mut request);
-        loop {
-            let options = self.call_options(&request);
-            let usage_tag = request.usage_tag.clone().unwrap_or_else(|| request.task_type.clone());
-            let LLMRequest {
-                task_type,
+        let options = self.call_options(&request);
+        let usage_tag = request
+            .usage_tag
+            .clone()
+            .unwrap_or_else(|| request.task_type.clone());
+        let LLMRequest {
+            task_type,
+            messages,
+            tools,
+            json_schema: _,
+            stream: _,
+            character_id,
+            ..
+        } = request.clone();
+        let rx = scope_provider_call(
+            options,
+            self.query_stream_with_tools(
+                &task_type,
                 messages,
                 tools,
-                json_schema,
-                stream: _,
-                character_id,
-                ..
-            } = request.clone();
-            let rx = scope_provider_call(
-                options,
-                self.query_stream_with_tools(&task_type, messages, tools, character_id.as_deref().unwrap_or(""), &usage_tag),
-            )
-            .await;
-            // strict 拒绝检测:仅在流未开始时(返回 Err)可重试;流已开始则无法重试
-            if let Err(ref e) = rx {
-                if json_schema.is_some() && self.handle_strict_failure(&task_type, e) {
-                    request.json_schema = None;
-                    tracing::info!("[ModelRouter] strict 熔断，重试 generate_stream_with_tools(无 schema)");
-                    continue;
-                }
-            }
-            return rx;
-        }
+                character_id.as_deref().unwrap_or(""),
+                &usage_tag,
+            ),
+        )
+        .await;
+        rx
     }
 
     /// 四个请求入口统一治理历史，文本收尾请求也可能携带此前的工具调用。
@@ -1420,10 +1423,12 @@ impl ModelRouter {
         // 用户填写的预算优先；未填写时使用编程默认预算。
         let mut cfg = task_config.clone();
         cfg.send_max_tokens = Some(cfg.send_max_tokens.unwrap_or(true));
-        cfg.max_tokens = cfg.max_tokens.or_else(|| Some(crate::providers::factory::work_model_default_max_tokens(
-            &cfg.provider_type,
-            &cfg.endpoint,
-        )));
+        cfg.max_tokens = cfg.max_tokens.or_else(|| {
+            Some(crate::providers::factory::work_model_default_max_tokens(
+                &cfg.provider_type,
+                &cfg.endpoint,
+            ))
+        });
         match create_task_provider(&cfg, config, &self.client_cache) {
             Ok(provider) => {
                 // 工作智能体请求省略 temperature（服务端默认）：
@@ -1440,10 +1445,7 @@ impl ModelRouter {
                 Ok(())
             }
             Err(e) => {
-                tracing::warn!(
-                    "[ModelRouter] 构建工作智能体 provider 失败: {}",
-                    e
-                );
+                tracing::warn!("[ModelRouter] 构建工作智能体 provider 失败: {}", e);
                 Err(e)
             }
         }
@@ -1476,6 +1478,13 @@ impl ModelRouter {
     }
 
     /// 解析任务的当前 provider（按路由顺序：task_providers → main）
+    /// Configured model label; fallback may use a different model.
+    pub fn dialogue_model_name(&self, task_type: &str) -> String {
+        self.resolve_provider(task_type)
+            .map(|p| p.get_model().to_string())
+            .unwrap_or_default()
+    }
+
     fn resolve_provider(&self, task_type: &str) -> Option<&Box<dyn BaseProvider>> {
         if self.enable_routing_matrix {
             if let Some(p) = self.task_providers.get(task_type) {
@@ -1486,19 +1495,6 @@ impl ModelRouter {
             return Some(p);
         }
         None
-    }
-
-    fn strict_identity_for_task(&self, task_type: &str) -> Option<String> {
-        if let Some(provider) = self.override_provider_for(task_type) {
-            return Some(provider.provider_identity());
-        }
-        self.resolve_provider(task_type)
-            .map(|provider| provider.provider_identity())
-    }
-
-    fn strict_is_broken(&self, task_type: &str) -> bool {
-        self.strict_identity_for_task(task_type)
-            .is_some_and(|identity| self.strict_broken.read().contains(&identity))
     }
 
     /// 带原生 function calling 的对话查询
@@ -1520,132 +1516,44 @@ impl ModelRouter {
         character_id: &str,
     ) -> VivianResult<ChatResponse> {
         Self::log_llm_request(task_type, &messages, &tools);
-        // 按任务分组获取并发信号量
-        let sem_opt = self.get_semaphore(task_type);
-        let _permit = if let Some(sem) = sem_opt {
-            Some(
-                sem.acquire_owned()
-                    .await
-                    .map_err(|e| VivianError::Provider(format!("获取并发信号量失败: {}", e)))?,
-            )
-        } else {
-            None
-        };
-
-        let mut last_error: Option<VivianError> = None;
-        // 跟随 last_error 一起记录：最后实际失败的 provider 的 endpoint
-        let mut last_error_endpoint: Option<String> = None;
-
-        // 0. 工作智能体覆盖模型优先（仅 reasoning 任务）——用户显式选择，优先级高于路由矩阵
-        if let Some(provider) = self.override_provider_for(task_type) {
-            if provider.supports_native_function_calling() {
-                tracing::debug!(
-                    "[ModelRouter] 路由任务 {} (native fc) 到工作智能体覆盖模型 ({})",
-                    task_type,
-                    provider.get_model()
-                );
-                match Self::invoke_with_tools(&provider, messages.clone(), tools.clone()).await {
-                    Ok(resp) => {
-                        Self::log_llm_response(task_type, &resp);
-                        self.emit_route_status(task_type, "ok");
-                        return Ok(resp);
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "[ModelRouter] 工作智能体覆盖模型 native fc 失败，回退到默认路由: {}",
-                            e
-                        );
-                        self.emit_route_status(task_type, "error");
-                        self.emit_route_fallback(task_type, &e.to_string(), character_id);
-                        last_error = Some(e);
-                    }
+        let _permit = self.acquire_route_permit(task_type).await?;
+        let candidates = self.route_candidates(task_type, true);
+        let mut last_error =
+            VivianError::NotImplemented(format!("任务 {task_type} 没有支持工具调用的 provider"));
+        let mut endpoint = String::new();
+        for (index, candidate) in candidates.iter().enumerate() {
+            let provider = candidate.provider();
+            endpoint = provider.get_endpoint().to_string();
+            let result = self
+                .with_candidate_schema(provider, ProviderCallOptions::current_json_schema(), |_| {
+                    let messages = messages.clone();
+                    let tools = tools.clone();
+                    async move { Self::invoke_with_tools(provider, messages, tools).await }
+                })
+                .await;
+            match result {
+                Ok(response) => {
+                    Self::log_llm_response(task_type, &response);
+                    self.emit_route_status(task_type, "ok");
+                    return Ok(response);
                 }
-            } else {
-                tracing::debug!(
-                    "[ModelRouter] 工作智能体覆盖模型不支持 native fc，跳过",
-                );
-            }
-        }
-
-        // 1. 路由矩阵启用时优先用任务专属 provider
-        if self.enable_routing_matrix {
-            if let Some(provider) = self.task_providers.get(task_type) {
-                if provider.supports_native_function_calling() {
-                    tracing::debug!(
-                        "[ModelRouter] 路由任务 {} (native fc) 到专属 provider ({})",
+                Err(error) => {
+                    let failover = crate::providers::transport::may_failover(&error);
+                    self.route_failure(
                         task_type,
-                        provider.get_model()
+                        &error,
+                        character_id,
+                        failover && index + 1 < candidates.len(),
                     );
-                    match Self::invoke_with_tools(provider, messages.clone(), tools.clone()).await {
-                        Ok(resp) => {
-                            Self::log_llm_response(task_type, &resp);
-                            self.emit_route_status(task_type, "ok");
-                            return Ok(resp);
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                "[ModelRouter] 任务 {} 专属 provider native fc 失败，回退到主 LLM API: {}",
-                                task_type,
-                                e
-                            );
-                            self.emit_route_status(task_type, "error");
-                            self.emit_route_fallback(task_type, &e.to_string(), character_id);
-                            last_error = Some(e);
-                            last_error_endpoint = self.task_endpoints.get(task_type).cloned();
-                        }
-                    }
-                } else {
-                    tracing::debug!(
-                        "[ModelRouter] 任务 {} 专属 provider 不支持 native fc，跳过",
-                        task_type
-                    );
-                }
-            }
-        }
-
-        // 2. 主 LLM API
-        if let Some(provider) = self.main_provider.as_ref() {
-            if provider.supports_native_function_calling() {
-                tracing::debug!(
-                    "[ModelRouter] 任务 {} (native fc) 使用主 LLM API ({})",
-                    task_type,
-                    provider.get_model()
-                );
-                match Self::invoke_with_tools(provider, messages.clone(), tools.clone()).await {
-                    Ok(resp) => {
-                        Self::log_llm_response(task_type, &resp);
-                        // 回退主 LLM 成功，恢复绿色状态
-                        if last_error.is_some() {
-                            self.emit_route_status(task_type, "ok");
-                        }
-                        return Ok(resp);
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "[ModelRouter] 主 LLM API native fc 失败: {}",
-                            e
-                        );
-                        self.emit_route_status(task_type, "error");
-                        last_error = Some(e);
-                        last_error_endpoint = Some(self.main_endpoint.clone());
+                    last_error = error;
+                    if !failover {
+                        break;
                     }
                 }
             }
         }
-
-        let err = last_error.unwrap_or_else(|| {
-            VivianError::NotImplemented(format!(
-                "任务 {} 没有可用的 provider 支持原生 function calling",
-                task_type
-            ))
-        });
-        self.emit_llm_error_toast(
-            task_type,
-            &err.to_string(),
-            last_error_endpoint.as_deref().unwrap_or(""),
-            character_id,
-        );
-        Err(err)
+        self.emit_llm_error_toast(task_type, &last_error.to_string(), &endpoint, character_id);
+        Err(last_error)
     }
 
     /// 内部辅助：bind_tools + invoke 的两步组合
@@ -1718,11 +1626,7 @@ impl ModelRouter {
 
     /// LLM 非流式响应日志辅助函数
     fn log_llm_response(task_type: &str, resp: &ChatResponse) {
-        let tool_names: Vec<&str> = resp
-            .tool_calls
-            .iter()
-            .map(|tc| tc.name.as_str())
-            .collect();
+        let tool_names: Vec<&str> = resp.tool_calls.iter().map(|tc| tc.name.as_str()).collect();
         tracing::debug!(
             "[LLM-IO] <<< task={} finish_reason={:?} content_bytes={} content_hash={:016x} tools=[{}]",
             task_type,
@@ -1750,233 +1654,53 @@ impl ModelRouter {
         usage_tag: &str,
     ) -> VivianResult<mpsc::Receiver<StreamEvent>> {
         Self::log_llm_request(task_type, &messages, &tools);
-        // 按任务分组获取并发信号量
-        let sem_opt = self.get_semaphore(task_type);
-        let permit = if let Some(sem) = sem_opt {
-            Some(
-                sem.acquire_owned()
-                    .await
-                    .map_err(|e| VivianError::Provider(format!("获取并发信号量失败: {}", e)))?,
-            )
-        } else {
-            None
-        };
-
-        // 0. 工作智能体覆盖模型优先（仅 reasoning 任务）——用户显式选择，优先级高于路由矩阵
-        if let Some(provider) = self.override_provider_for(task_type) {
-            if provider.supports_native_function_calling() {
-                tracing::debug!(
-                    "[ModelRouter] 路由流式任务 {} (native fc) 到工作智能体覆盖模型 ({})",
-                    task_type,
-                    provider.get_model()
-                );
-                match Self::stream_with_tools_provider(
-                    &provider,
-                    messages.clone(),
-                    tools.clone(),
-                    usage_tag,
-                    task_type,
-                )
-                .await
-                {
-                    Ok(rx) => {
-                        self.emit_route_status(task_type, "ok");
-                        return Ok(Self::hold_event_stream_permit(rx, permit));
+        let permit = self.acquire_route_permit(task_type).await?;
+        let candidates = self.route_candidates(task_type, true);
+        let mut last_error = VivianError::NotImplemented(format!(
+            "任务 {task_type} 没有支持流式工具调用的 provider"
+        ));
+        let mut endpoint = String::new();
+        for (index, candidate) in candidates.iter().enumerate() {
+            let provider = candidate.provider();
+            endpoint = provider.get_endpoint().to_string();
+            let result = self
+                .with_candidate_schema(provider, ProviderCallOptions::current_json_schema(), |_| {
+                    let messages = messages.clone();
+                    let tools = tools.clone();
+                    async move {
+                        let source = provider.stream_with_tools(messages, tools).await?;
+                        Self::prime_stream(source).await
                     }
-                    Err(e) => {
-                        tracing::warn!(
-                            "[ModelRouter] 工作模型流式 FC 失败，回退默认路由: {}",
-                            e
-                        );
-                        self.emit_route_status(task_type, "error");
-                        self.emit_route_fallback(task_type, &e.to_string(), character_id);
-                    }
+                })
+                .await;
+            match result {
+                Ok(source) => {
+                    self.emit_route_status(task_type, "ok");
+                    return Ok(Self::hold_text_stream_permit(
+                        source,
+                        permit,
+                        provider.get_model().to_string(),
+                        usage_tag.to_string(),
+                        task_type.to_string(),
+                    ));
                 }
-            } else {
-                tracing::debug!(
-                    "[ModelRouter] 工作智能体覆盖模型不支持 native fc stream，跳过",
-                );
-            }
-        }
-
-        // 1. 路由矩阵启用时优先用任务专属 provider
-        if self.enable_routing_matrix {
-            if let Some(provider) = self.task_providers.get(task_type) {
-                if provider.supports_native_function_calling() {
-                    tracing::debug!(
-                        "[ModelRouter] 路由流式任务 {} (native fc) 到专属 provider ({})",
+                Err(error) => {
+                    let failover = crate::providers::transport::may_failover(&error);
+                    self.route_failure(
                         task_type,
-                        provider.get_model()
+                        &error,
+                        character_id,
+                        failover && index + 1 < candidates.len(),
                     );
-                    match Self::stream_with_tools_provider(
-                        provider,
-                        messages.clone(),
-                        tools.clone(),
-                        usage_tag,
-                        task_type,
-                    )
-                    .await
-                    {
-                        Ok(rx) => {
-                            self.emit_route_status(task_type, "ok");
-                            return Ok(Self::hold_event_stream_permit(rx, permit));
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                "[ModelRouter] 任务 {} 专属 provider 流式 FC 失败，回退主 API: {}",
-                                task_type,
-                                e
-                            );
-                            self.emit_route_status(task_type, "error");
-                            self.emit_route_fallback(task_type, &e.to_string(), character_id);
-                        }
-                    }
-                }
-                tracing::debug!(
-                    "[ModelRouter] 任务 {} 专属 provider 不支持 native fc stream",
-                    task_type
-                );
-            }
-        }
-
-        // 2. 主 LLM API
-        if let Some(provider) = self.main_provider.as_ref() {
-            if provider.supports_native_function_calling() {
-                tracing::debug!(
-                    "[ModelRouter] 流式任务 {} (native fc) 使用主 LLM API ({})",
-                    task_type,
-                    provider.get_model()
-                );
-                match Self::stream_with_tools_provider(provider, messages, tools, usage_tag, task_type).await {
-                    Ok(rx) => {
-                        self.emit_route_status(task_type, "ok");
-                        return Ok(Self::hold_event_stream_permit(rx, permit));
-                    }
-                    Err(e) => {
-                        self.emit_route_status(task_type, "error");
-                        self.emit_llm_error_toast(task_type, &e.to_string(), &self.main_endpoint, character_id);
-                        return Err(e);
+                    last_error = error;
+                    if !failover {
+                        break;
                     }
                 }
             }
         }
-
-        Err(VivianError::NotImplemented(format!(
-            "任务 {} 没有可用的 provider 支持流式原生 function calling",
-            task_type
-        )))
-    }
-
-    fn hold_event_stream_permit(
-        mut source: mpsc::Receiver<StreamEvent>,
-        permit: Option<tokio::sync::OwnedSemaphorePermit>,
-    ) -> mpsc::Receiver<StreamEvent> {
-        let (tx, rx) = mpsc::channel(32);
-        tokio::spawn(async move {
-            let _permit = permit;
-            while let Some(event) = source.recv().await {
-                if tx.send(event).await.is_err() {
-                    break;
-                }
-            }
-        });
-        rx
-    }
-
-    /// 内部辅助：直接调用 provider 的 stream_with_tools
-    ///
-    /// 与 `invoke_with_tools` 不同，stream_with_tools 直接接受外部 tools 参数，
-    /// 不需要 bind_tools 步骤（避免克隆 provider 实例的开销）。
-    /// 流式事件原样转发，同时采集 Usage 事件计入全局用量存储。
-    async fn stream_with_tools_provider(
-        provider: &Box<dyn BaseProvider>,
-        messages: Vec<ChatMessage>,
-        tools: Vec<ToolDefinition>,
-        usage_tag: &str,
-        route: &str,
-    ) -> VivianResult<mpsc::Receiver<StreamEvent>> {
-        let mut rx = provider.stream_with_tools(messages, tools).await?;
-        let usage_tag = usage_tag.to_string();
-        let route = route.to_string();
-        let model = provider.get_model().to_string();
-        let (tx, out_rx) = mpsc::channel::<StreamEvent>(32);
-        tokio::spawn(async move {
-            let mut usage = usage_store::StreamUsageAccumulator::default();
-            while let Some(event) = rx.recv().await {
-                if let StreamEvent::Usage {
-                    input_tokens,
-                    output_tokens,
-                    cache_read_tokens,
-                    cache_write_tokens,
-                } = &event
-                {
-                    usage.observe(*input_tokens, *output_tokens, *cache_read_tokens, *cache_write_tokens);
-                }
-                if tx.send(event).await.is_err() {
-                    break;
-                }
-            }
-            usage.record(Some(&usage_tag), Some(&route), &model);
-        });
-        Ok(out_rx)
-    }
-
-    /// 识别 strict schema 拒绝错误
-    ///
-    /// 各 provider 返回错误格式为 `"XXX API 请求失败 (400): ..."`，
-    /// strict 拒绝的响应文本通常包含 schema / response_format / json_schema /
-    /// strict / responseSchema 等关键词。
-    ///
-    /// 匹配条件（同时满足）：
-    /// 1. HTTP 400 状态码（错误字符串包含 "400"）
-    /// 2. 响应文本包含 schema 相关关键词之一
-    fn is_strict_error(err: &VivianError) -> bool {
-        let msg = err.to_string();
-        // 必须是 400 错误
-        if !msg.contains("400") {
-            return false;
-        }
-        // 检查 schema 相关关键词（覆盖 OpenAI / 豆包 / Gemini 的错误信息）
-        const SCHEMA_KEYWORDS: &[&str] = &[
-            "json_schema",
-            "response_format",
-            "responseSchema",
-            "response_schema",
-            "structured output",
-            "structured_output",
-            "invalid schema",
-            "schema validation",
-            "strict",
-            "$ref",
-            "$defs",
-        ];
-        let lower = msg.to_lowercase();
-        SCHEMA_KEYWORDS.iter().any(|kw| lower.contains(kw))
-    }
-
-    /// 处理 strict 拒绝：熔断 + 记录日志
-    ///
-    /// 返回 true 表示已熔断（调用方应重试），false 表示未识别为 strict 错误。
-    fn handle_strict_failure(&self, task_type: &str, err: &VivianError) -> bool {
-        if !Self::is_strict_error(err) {
-            return false;
-        }
-        let identity = self
-            .strict_identity_for_task(task_type)
-            .unwrap_or_else(|| format!("task:{}", task_type));
-        let mut broken = self.strict_broken.write();
-        if !broken.insert(identity.clone()) {
-            // 已经熔断过，不应该再触发（理论上 apply_json_schema 已降级）
-            tracing::debug!("[ModelRouter] strict 熔断已生效，但仍有 strict 错误: {}", err);
-        } else {
-            tracing::warn!(
-                "[ModelRouter] 检测到 strict schema 拒绝，按 provider 熔断并降级: identity={} error={}",
-                identity,
-                err,
-            );
-            save_strict_broken_models(&broken);
-        }
-        true
+        self.emit_llm_error_toast(task_type, &last_error.to_string(), &endpoint, character_id);
+        Err(last_error)
     }
 }
 
@@ -2017,5 +1741,208 @@ mod conversational_penalty_tests {
         ] {
             assert!(!is_conversational_task(task), "{task} 不应注入采样惩罚");
         }
+    }
+}
+
+#[cfg(test)]
+mod route_tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    struct MockProvider {
+        model: &'static str,
+        events: Vec<StreamEvent>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl BaseProvider for MockProvider {
+        async fn call_chat(&self, _: Vec<ChatMessage>) -> VivianResult<String> {
+            Ok(self.model.into())
+        }
+        async fn call_stream_chat(
+            &self,
+            _: Vec<ChatMessage>,
+            _: Option<serde_json::Value>,
+        ) -> VivianResult<mpsc::Receiver<StreamEvent>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let (tx, rx) = mpsc::channel(16);
+            for event in &self.events {
+                tx.send(event.clone()).await.unwrap();
+            }
+            Ok(rx)
+        }
+        fn get_model(&self) -> &str {
+            self.model
+        }
+        fn get_circuit_breaker_stats(&self) -> serde_json::Value {
+            json!({})
+        }
+    }
+
+    fn router(
+        primary: Vec<StreamEvent>,
+        fallback: Vec<StreamEvent>,
+    ) -> (ModelRouter, Arc<AtomicUsize>) {
+        let mut router = ModelRouter::new(&AppConfig::default()).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        router.main_provider = Arc::new(Some(Box::new(MockProvider {
+            model: "fallback",
+            events: fallback,
+            calls: calls.clone(),
+        })));
+        router.task_providers = Arc::new(HashMap::from([(
+            "chat".into(),
+            Box::new(MockProvider {
+                model: "primary",
+                events: primary,
+                calls: Arc::new(AtomicUsize::new(0)),
+            }) as Box<dyn BaseProvider>,
+        )]));
+        router.enable_routing_matrix = true;
+        router.strict_broken = Arc::new(RwLock::new(HashSet::new()));
+        (router, calls)
+    }
+
+    #[tokio::test]
+    async fn early_stream_error_falls_back_but_late_error_never_replays_generation() {
+        let error = StreamEvent::Error {
+            message: "upstream unavailable".into(),
+        };
+        let text = StreamEvent::Text {
+            content: "你好😀".into(),
+        };
+        let (router, calls) = router(vec![error.clone()], vec![text.clone()]);
+        let mut rx = router
+            .query_stream("chat", vec![], None, "", "test")
+            .await
+            .unwrap();
+        assert!(
+            matches!(rx.recv().await, Some(StreamEvent::Text { content }) if content == "你好😀")
+        );
+        assert!(rx.recv().await.is_none());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let (router, calls) = self::router(vec![text, error], vec![]);
+        let mut rx = router
+            .query_stream("chat", vec![], None, "", "test")
+            .await
+            .unwrap();
+        assert!(matches!(rx.recv().await, Some(StreamEvent::Text { .. })));
+        assert!(matches!(rx.recv().await, Some(StreamEvent::Error { .. })));
+        assert!(rx.recv().await.is_none());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn empty_done_is_not_success_and_leading_usage_is_replayed_once() {
+        let (tx, rx) = mpsc::channel(4);
+        tx.send(StreamEvent::Done {
+            finish_reason: None,
+        })
+        .await
+        .unwrap();
+        drop(tx);
+        assert!(ModelRouter::prime_stream(rx).await.is_err());
+        let (tx, rx) = mpsc::channel(4);
+        tx.send(StreamEvent::Usage {
+            input_tokens: 2,
+            output_tokens: 1,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+        })
+        .await
+        .unwrap();
+        tx.send(StreamEvent::Text {
+            content: "ok".into(),
+        })
+        .await
+        .unwrap();
+        drop(tx);
+        let mut rx = ModelRouter::prime_stream(rx).await.unwrap();
+        assert!(matches!(rx.recv().await, Some(StreamEvent::Usage { .. })));
+        assert!(matches!(rx.recv().await, Some(StreamEvent::Text { .. })));
+        assert!(rx.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn strict_downgrade_is_local_to_actual_candidate_and_clears_outer_schema() {
+        let (router, _) = router(vec![], vec![]);
+        let provider = router.main_provider.as_ref().as_ref().unwrap();
+        let schema = json!({"type":"object"});
+        let mut attempts = 0;
+        scope_provider_call(
+            ProviderCallOptions {
+                json_schema: Some(Arc::new(schema.clone())),
+                ..Default::default()
+            },
+            router.with_candidate_schema(provider, Some(schema), |_| {
+                attempts += 1;
+                let attempt = attempts;
+                async move {
+                    if attempt == 1 {
+                        assert!(ProviderCallOptions::current_json_schema().is_some());
+                        Err(VivianError::ProviderHttp {
+                            status: 400,
+                            message: "unsupported responseSchema".into(),
+                            retry_after_secs: None,
+                        })
+                    } else {
+                        assert!(ProviderCallOptions::current_json_schema().is_none());
+                        Ok(())
+                    }
+                }
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(attempts, 2);
+        assert!(router.strict_broken.read().contains("fallback"));
+        assert!(!router.strict_broken.read().contains("primary"));
+    }
+
+    #[tokio::test]
+    async fn stalled_stream_cancellation_releases_concurrency_slot_immediately() {
+        let semaphore = Arc::new(Semaphore::new(1));
+        let permit = semaphore.clone().acquire_owned().await.unwrap();
+        let (tx, source) = mpsc::channel(1);
+        let rx = ModelRouter::hold_text_stream_permit(
+            source,
+            Some(permit),
+            "test".into(),
+            "test".into(),
+            "test".into(),
+        );
+        drop(rx);
+        tokio::time::timeout(std::time::Duration::from_secs(1), tx.closed())
+            .await
+            .unwrap();
+        let _permit = tokio::time::timeout(std::time::Duration::from_secs(1), semaphore.acquire())
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn invalid_schema_does_not_poison_model_capability_cache() {
+        let (router, _) = router(vec![], vec![]);
+        let provider = router.main_provider.as_ref().as_ref().unwrap();
+        let mut attempts = 0;
+        router
+            .with_candidate_schema(provider, Some(json!({"type":"object"})), |_| {
+                attempts += 1;
+                std::future::ready(if attempts == 1 {
+                    Err(VivianError::ProviderHttp {
+                        status: 400,
+                        message: "invalid schema: missing required field".into(),
+                        retry_after_secs: None,
+                    })
+                } else {
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+        assert_eq!(attempts, 2);
+        assert!(router.strict_broken.read().is_empty());
     }
 }

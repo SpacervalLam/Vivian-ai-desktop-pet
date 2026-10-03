@@ -10,6 +10,7 @@ import {
   Layers,
   NotebookPen,
   Code2,
+  FlaskConical,
 } from 'lucide-react';
 
 // === 颜色（跟随 --panel-* 主题变量） ===
@@ -208,6 +209,7 @@ export type NavKey =
   | 'journal'
   // 独立页
   | 'code'
+  | 'dialogue_lab'
   // 兼容合并前的子视图跳转目标（navigateTo 内部映射到 overview / journal + sub）
   | 'mind'
   | 'world'
@@ -228,4 +230,5 @@ export const NAV_ITEMS: NavItem[] = [
   { key: 'overview', icon: Layers, labelKey: 'mind_inspector.nav_overview' },
   { key: 'journal', icon: NotebookPen, labelKey: 'mind_inspector.nav_journal' },
   { key: 'code', icon: Code2, labelKey: 'mind_inspector.nav_code' },
+  { key: 'dialogue_lab', icon: FlaskConical, labelKey: 'mind_inspector.nav_dialogue_lab' },
 ];
