@@ -1,4 +1,5 @@
 // Run against npm run dev. Exercise the real renderer via headless Chrome.
+// @test-environment live-desktop
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -53,7 +54,7 @@ try {
     }
     throw new Error('Preview not ready');
   };
-  const record = (button, duration, action = '') => evaluate(`(async () => {
+  const record = (button, duration, action = '', waitForIdle = false) => evaluate(`(async () => {
     const wait = ms => new Promise(r => setTimeout(r, ms));
     const stage = document.querySelector('.chibi-pet-stage');
     const sprite = document.querySelector('.chibi-pet-sprite');
@@ -62,14 +63,20 @@ try {
     const timer = setInterval(() => samples.push({pose: stage.className, pos: sprite.style.backgroundPosition, sheet: sprite.style.backgroundImage}), 40);
     click(${JSON.stringify(button)});
     ${action}
-    await wait(${duration}); clearInterval(timer); return samples;
+    await wait(${duration});
+    if (${waitForIdle}) {
+      const deadline = performance.now() + 10000;
+      while (!stage.className.includes('pose-idle') && performance.now() < deadline) await wait(40);
+    }
+    samples.push({pose: stage.className, pos: sprite.style.backgroundPosition, sheet: sprite.style.backgroundImage});
+    clearInterval(timer); return samples;
   })()`);
   await open('vivian');
   let samples = await record('入睡', 6100);
   const tail = samples.slice(-45);
   assert(tail.every(s => s.pose.includes('pose-sleep')));
   assert.deepEqual([...new Set(tail.map(s => s.pos))].sort(), ['100% 100%', '66.6667% 100%'].sort());
-  samples = await record('回到待机', 1500);
+  samples = await record('回到待机', 1500, '', true);
   assert(samples.some(s => s.pose.includes('pose-wake')));
   assert(samples.at(-1).pose.includes('pose-idle'));
   samples = await record('入睡', 6500, `await wait(4100); sprite.dispatchEvent(new MouseEvent('mousedown', {bubbles:true})); sprite.dispatchEvent(new MouseEvent('mouseup', {bubbles:true})); sprite.click();`);
@@ -77,11 +84,11 @@ try {
   assert(!samples.at(-1).pose.includes('pose-sleep'));
   // Speed up only the automatic wake timer; retain real frame timings.
   await evaluate(`window.originalTimeout = window.setTimeout; window.setTimeout = (fn, ms, ...args) => window.originalTimeout(fn, ms === 300000 ? 120 : ms, ...args)`);
-  samples = await record('入睡', 5300);
+  samples = await record('入睡', 5300, '', true);
   assert(samples.some(s => s.pose.includes('pose-wake')));
   assert(samples.at(-1).pose.includes('pose-idle'));
   await open('nana');
-  samples = await record('浇花', 5300);
+  samples = await record('浇花', 5300, '', true);
   const poses = [...new Set(samples.map(s => s.pose))];
   assert(poses.findIndex(s => s.includes('pose-tend ' ) || s.endsWith('pose-tend')) < poses.findIndex(s => s.includes('pose-tend-out')));
   assert(samples.some(s => s.sheet.includes('nana-tend-out-sheet.webp')));

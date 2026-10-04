@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { buildSync } from 'esbuild';
 
 const result = buildSync({ entryPoints: ['src/components/mind-inspector/pages/workbenchLayout.ts'], bundle: true, write: false, format: 'esm', platform: 'node' });
-const { workbenchLayout, reconcileToolMessages } = await import(`data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString('base64')}`);
+const { workbenchLayout, reconcileToolMessages, groupWorkMessages } = await import(`data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString('base64')}`);
 
 let cases = 0;
 for (const width of [320, 480, 640, 768, 960, 1180, 1440, 1920]) {
@@ -28,3 +28,19 @@ assert.equal(reconcileToolMessages([{ ...intent, tool_call_id: null }, { ...inte
 assert.equal(reconcileToolMessages([intent, { ...outcome, tool_name: null }])[0].tool_name, 'read_file', 'legacy results inherit the intent name');
 assert.deepEqual(reconcileToolMessages([intent, { ...intent, tool_call_id: 'b' }, outcome, { ...outcome, tool_call_id: 'b' }]).map(row => row.tool_call_id), ['a', 'b'], 'parallel completion preserves invocation order');
 console.log(`Workbench: ${cases} width/panel combinations and tool reconciliation checks passed.`);
+
+// Process prose must survive tool completion and session reload without becoming a final reply.
+const thought = { role: 'thinking', content: '检查工作目录与错误原因' };
+const commentary = { role: 'commentary', content: '先读取配置，然后修复构建脚本。' };
+const user = { role: 'user', content: '修复项目' };
+const live = groupWorkMessages([user, thought, commentary, intent], true);
+assert.equal(live[1].kind, 'group');
+assert.equal(live[1].settled, false);
+assert.deepEqual(live[1].msgs.slice(0, 2), [thought, commentary]);
+const completed = [user, thought, commentary, intent, outcome, { role: 'assistant', content: '修复完成' }];
+const restored = groupWorkMessages(JSON.parse(JSON.stringify(completed)), false);
+assert.equal(restored[1].settled, true);
+assert.deepEqual(restored[1].msgs.slice(0, 2), [thought, commentary]);
+assert.equal(restored[1].msgs[2].role, 'tool_result');
+assert.equal(restored[2].msg.role, 'assistant', 'final reply stays outside the work process');
+console.log('Work process text survives tool completion and reload.');

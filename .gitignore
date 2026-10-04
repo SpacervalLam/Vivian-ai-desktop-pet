@@ -39,6 +39,9 @@ src-tauri/vivian.bundle.index.json
 # 临时文件与缓存
 tmp/
 temp/
+.trash/
+/test_social.json
+/test_vectors.json
 .npm-cache/
 .npm-cache-tmp/
 __pycache__/
@@ -62,6 +65,12 @@ __pycache__/
 !/scripts/check-apartment-plugin.mjs
 !/scripts/package-small.mjs
 !/scripts/package-apartment.mjs
+!/scripts/run-tests.mjs
+!/scripts/run-rust-tests.mjs
+!/scripts/evaluate-companion.mjs
+!/scripts/evaluate-prompts.mjs
+!/scripts/*.test.mjs
+!/scripts/*.test.ts
 *-preview.html
 src/*Preview.tsx
 
@@ -71,7 +80,6 @@ src/*Preview.tsx
 .workbuddy-ai/
 .codex/
 .claude/
-/CODE_WIKI.md
 /COMPANION_MEMORY.md
 /MEMORY_OPTIMIZATION.md
 /src-tauri/prompts/PROMPT_EVALUATION.md

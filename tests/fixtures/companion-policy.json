@@ -1,0 +1,13 @@
+[
+  {"id":"quoted_preference","content":"我喜欢喝茶","memory_type":"preference","age_hours":720,"metadata":{"source_quote":"我喜欢喝茶"},"recall":true,"durable_fact":true},
+  {"id":"confirmed_identity","content":"用户叫小林","memory_type":"identity","age_hours":1000,"metadata":{"source_quote":"叫我小林"},"recall":true,"durable_fact":true},
+  {"id":"private_thought","content":"我猜用户讨厌我","memory_type":"inner_monologue","age_hours":0,"metadata":{},"recall":false,"durable_fact":false},
+  {"id":"inferred_insight","content":"用户可能在生气","memory_type":"insight","age_hours":0,"metadata":{},"recall":false,"durable_fact":false},
+  {"id":"screen_observation","content":"看到编辑器窗口","memory_type":"observation_note","age_hours":0,"metadata":{},"recall":false,"durable_fact":false},
+  {"id":"summary_is_not_fact","content":"讨论过周五见面","memory_type":"session_summary","age_hours":48,"metadata":{},"recall":true,"durable_fact":false},
+  {"id":"recent_original","content":"周五方便","memory_type":"short_term","age_hours":1,"metadata":{},"recall":true,"durable_fact":false},
+  {"id":"expired_original","content":"昨天的临时对话","memory_type":"short_term","age_hours":13,"metadata":{},"recall":false,"durable_fact":false},
+  {"id":"revoked_fact","content":"用户喜欢咖啡","memory_type":"preference","age_hours":0,"metadata":{"index_active":false},"recall":false,"durable_fact":false},
+  {"id":"seed_is_not_user_fact","content":"系统预设角色背景","memory_type":"identity","age_hours":0,"metadata":{"source":"system_seed"},"recall":true,"durable_fact":false},
+  {"id":"unknown_category","content":"没有分类的生成内容","memory_type":"unrecognized","age_hours":0,"metadata":{},"recall":false,"durable_fact":false}
+]
