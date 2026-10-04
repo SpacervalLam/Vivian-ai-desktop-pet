@@ -490,40 +490,6 @@ impl ModelRouter {
         self.enable_search.load(Ordering::Relaxed)
     }
 
-    /// 对某任务的 provider 设置 max_tokens 运行时覆盖（凝神模式激活时调用）。
-    ///
-    /// 按路由顺序匹配首个可用 provider（task_providers → main_provider）。
-    /// `extra_tokens` 为 0 时等价于清除覆盖。
-    pub fn set_focus_boost(&self, task_type: &str, extra_tokens: u32) {
-        let target = self.task_providers.get(task_type);
-        let provider: &dyn BaseProvider = match target {
-            Some(p) => p.as_ref(),
-            None => match self.main_provider.as_ref() {
-                Some(p) => p.as_ref(),
-                None => {
-                    tracing::warn!(
-                        "[ModelRouter] set_focus_boost 无可用 provider，跳过 (task={})",
-                        task_type
-                    );
-                    return;
-                }
-            },
-        };
-        provider.set_max_tokens_override(extra_tokens);
-        if extra_tokens > 0 {
-            tracing::debug!(
-                "[ModelRouter] 凝神模式激活：task={} max_tokens 额外余量={}",
-                task_type,
-                extra_tokens
-            );
-        }
-    }
-
-    /// 清除某任务 provider 的 max_tokens 覆盖（凝神模式退出后调用）。
-    pub fn clear_focus_boost(&self, task_type: &str) {
-        self.set_focus_boost(task_type, 0);
-    }
-
     /// 全局设置 temperature 运行时覆盖（emotion→temperature 映射在每轮对话前调用）。
     ///
     /// 传播到 main_provider 和 task_providers 中的所有 provider。
@@ -587,7 +553,6 @@ impl ModelRouter {
             enable_search: Some(request.enable_search),
             temperature: request.temperature_override,
             max_tokens: request.max_tokens_override,
-            max_tokens_extra: request.max_tokens_extra,
             presence_penalty,
             frequency_penalty,
             reasoning: Some(

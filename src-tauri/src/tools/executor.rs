@@ -40,6 +40,7 @@ static TOOL_TIMEOUTS: Lazy<HashMap<&'static str, u64>> = Lazy::new(|| {
     m.insert("take_screenshot", 30);
     // 截屏识图含 LLM 视觉调用，给 90s 余量（截屏 1~2s + 视觉模型 10~60s）
     m.insert("screenshot_analyze", 90);
+    m.insert("computer_action", 180);
     m.insert("open_application", 30);
     m.insert("close_application", 30);
     m.insert("save_memory", 15);
@@ -227,7 +228,7 @@ pub fn compact_web_evidence(mut data: Value,max_chars:usize)->Value {
     fn shrink(v:&mut Value,limit:usize) {
         if let Some(obj)=v.as_object_mut() {
             obj.remove("raw_content");
-            for key in ["snippet","text"] {
+            for key in ["snippet","text","answer","focused_summary"] {
                 if let Some(s)=obj.get(key).and_then(Value::as_str).map(str::to_string) {
                     if s.chars().count()>limit {
                         let text:String=s.chars().take(limit).collect();

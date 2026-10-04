@@ -453,7 +453,6 @@ pub fn build_context_block(ctx: &EnvironmentContext, lang: &str) -> String {
 pub fn build_agent_status_bar(
     messages: &[ChatMessage],
     user_input: &str,
-    focus_active: bool,
 ) -> Option<String> {
     if user_input.trim().is_empty() {
         return None;
@@ -471,46 +470,35 @@ pub fn build_agent_status_bar(
     // 对话轮数：截止当前的用户发言条数（确定性计数，代码维护）
     let rounds: usize = messages.iter().filter(|m| m.role == "user").count();
 
-    let (time_label, tool_label, focus_label, rounds_label, focus_on, focus_off, policy) = match lang {
+    let (time_label, tool_label, rounds_label, policy) = match lang {
         "en" => (
             "Current time",
             "Recent tool calls",
-            "Focus mode",
             "Rounds in this conversation",
-            "on",
-            "off",
             "If you've called the same tool several times without progress, switch strategy or answer directly instead of retrying.",
         ),
         "ja" => (
             "現在時刻",
             "最近のツール呼び出し",
-            "集中モード",
             "この会話のターン数",
-            "オン",
-            "オフ",
             "同じツールを何度も呼び出しても進展がない場合は、戦略を変えるか直接回答してください。",
         ),
         _ => (
             "当前时间",
             "最近工具调用",
-            "专注模式",
             "本次对话轮数",
-            "开",
-            "关",
             "若已连续多次调用同一工具仍无进展，应立即换一种策略或直接回答，不要反复重试。",
         ),
     };
 
     Some(format!(
-        "<agent_status>\n{}: {}\n{}: {} 轮\n{}: {} 次\n{}: {}\n{}\n</agent_status>",
+        "<agent_status>\n{}: {}\n{}: {} 轮\n{}: {} 次\n{}\n</agent_status>",
         time_label,
         time_str,
         rounds_label,
         rounds,
         tool_label,
         tool_calls,
-        focus_label,
-        if focus_active { focus_on } else { focus_off },
         policy
     ))
 }
@@ -2276,7 +2264,7 @@ mod tests {
                 assert!(prompt.contains("[CURRENT COMPANION TURN]"));
                 assert!(prompt.contains("[FALLIBLE CONVERSATION HINTS]"));
                 assert!(prompt.contains("emotion=bored rel=attention_seek"));
-                assert!(prompt.contains("**Example 2 - 新认识与个人投入") || prompt.contains("**Example 2 - 在意个人投入"));
+                assert!(prompt.contains("**Example 2 - 高兴里的小别扭") || prompt.contains("**Example 2 - 有自己的期待"));
                 assert!(prompt.contains("\"intent\": \"no_reply\""));
                 assert!(!prompt.contains("分得有点省事"));
                 if tier == CharacterBlockTier::Full {

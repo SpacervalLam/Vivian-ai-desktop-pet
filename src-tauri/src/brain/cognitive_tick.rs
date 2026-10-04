@@ -1,46 +1,9 @@
-//! Cognitive Tick —— 统一认知循环流水线。
+//! Six-stage companion cognition: ingest world events, update state, observe, think, act, speak.
 //!
-//! 把原来的双 tick（30s `mind_tick` + 10s `proactive.tick`）重构为显式 6 阶段流水线，
-//! 让"说话"从系统驱动力变成认知循环的可能输出之一。
-//!
-//! ## 设计哲学
-//!
-//! 持续自主活动模式：不是"收到事件 → 思考 → 等待"，而是"固定节拍 → 更新世界 → 更新自我 →
-//! 决策观察 → 决策思考 → 决策行动 → 决策说话"。
-//!
-//! ## 六阶段
-//!
-//! 1. **World ingest**：摄入世界状态（每次执行，无 LLM）
-//!    - WorldState 超时检测
-//!    - 注：窗口轮询/世界事件检测由 `proactive.tick` 在 Speak 阶段完成
-//! 2. **Self update**：更新自我认知（规则层，无 LLM）
-//!    - PsychologyManager homeostasis_tick（每次，10s 级 Needs/Emotion 回归）
-//!    - Mind mind_tick（30s 节流：Attention Drift + Goal Update + Belief Consolidation + Working Memory Decay）
-//! 3. **Observe decision**：决策是否主动观察（规则层）
-//!    - 当前默认每次观察，为未来"选择性观察"留接口
-//! 4. **Think decision**：决策是否进行内部 LLM 思考（规则层）
-//!    - social_urge 高但被防打扰阻止 → 内心独白
-//!    - 用户长时间不在 → 内心独白
-//!    - 长时间未发言 + 非安静模式 → 内心独白
-//!    - 注：实际 LLM 调用由 `proactive.tick` 内 `maybe_spawn_inner_monologue` 完成
-//! 5. **Act decision**：决策是否执行工具/操作（规则层，当前占位）
-//!    - 未来可接入：主动检索记忆 / 主动截图 / 主动调用工具
-//! 6. **Speak decision**：决策是否产生用户可见消息（规则 + LLM）
-//!    - 调用 `proactive.tick` 完成实际的触发器检查、内容生成、消息推送
-//!
-//! ## 节流策略
-//!
-//! - WorldIngest / Observe / Speak：每次 tick（10s）执行
-//! - SelfUpdate：homeostasis 每次执行，mind_tick 30s 节流
-//! - Think：5 分钟节流（避免频繁 LLM 独白）
-//! - Act：当前占位，每次返回 skip
-//!
-//! ## LLM 调用控制
-//!
-//! 仅以下情况调用 LLM：
-//! - Think 阶段决策通过 + `proactive.tick` 内 inner monologue 冷却到期 → 异步 LLM 独白
-//! - Speak 阶段触发器命中 + `proactive.tick` 内 LLM 生成 → 同步 LLM 主动消息
-//! 其余阶段纯规则，零 LLM 调用。
+//! World events are applied before decisions. The speech stage reuses that prepared state and
+//! does not repeat homeostasis or event detection. Think decisions gate inner-monologue calls;
+//! Act dispatches the action planner at most once per minute. Background memory arbitration and
+//! thought synthesis have independent budgets and do not block the tick.
 
 use std::sync::Arc;
 
@@ -64,7 +27,7 @@ pub enum CognitiveTickPhase {
     Observe,
     /// 4. 决策是否进行内部思考 —— 规则层
     Think,
-    /// 5. 决策是否执行行动 —— 规则层（当前占位）
+    /// 5. 决策是否执行行动 —— 规则与模型判定
     Act,
     /// 6. 决策是否说话 —— 规则 + LLM
     Speak,
@@ -232,7 +195,7 @@ impl CognitiveTickRunner {
         // ── 阶段 1: World ingest ──
         // 每次 tick 都执行：WorldState 超时检测
         // 注：窗口轮询/世界事件检测由阶段 6 的 proactive.tick 完成
-        result.world_ingest = self.phase_world_ingest(brain);
+        result.world_ingest = self.phase_world_ingest(brain, context);
 
         // ── 阶段 2: Self update ──
         // homeostasis 每次执行；mind_tick 30s 节流
@@ -247,19 +210,17 @@ impl CognitiveTickRunner {
         result.think = self.phase_think(brain, context, now);
 
         // ── 阶段 5: Act decision ──
-        // 规则决策：是否执行工具/操作。当前为占位实现。
+        // 规则决策：是否执行工具/操作。按规划结果分流执行。
         result.act = self.phase_act(brain, context, now);
 
         // ── 阶段 6: Speak decision ──
         // 规则 + LLM：是否产生用户可见消息
-        // proactive.tick 内部同时处理：
-        // - homeostasis（重复执行，幂等，成本可忽略）
+        // speech 使用前面阶段准备的状态，继续处理：
         // - poll_window / update_sustained_activity / behavior_mode
-        // - detect_and_apply_world_events（世界事件检测）
         // - update_mind_state
         // - try_special_date_greeting / 触发器检查 / 内容生成（Speak）
-        // - maybe_spawn_inner_monologue（Think 阶段实际 LLM 调用）
-        result.speak = self.phase_speak(brain, context)?;
+        // - maybe_spawn_inner_monologue（受 Think 决策门控）
+        result.speak = self.phase_speak(brain, context, result.think.executed)?;
         result.produced_user_message = result.speak.produced;
 
         Ok(result)
@@ -267,10 +228,9 @@ impl CognitiveTickRunner {
 
     // ── 阶段 1: World ingest ──
     //
-    // 摄入世界状态：WorldState 超时检测。
-    // 窗口轮询和世界事件检测留给阶段 6 的 proactive.tick 完成（它需要 TickContext
-    // 的完整字段，且内部按顺序依赖这些数据）。
-    fn phase_world_ingest(&self, _brain: &Brain) -> PhaseDecision {
+    // 在自我更新和行动决策前摄入世界事件；窗口轮询仍在 speech 阶段处理。
+    fn phase_world_ingest(&self, brain: &Brain, context: &TickContext) -> PhaseDecision {
+        brain.proactive.ingest_world_events(context);
         PhaseDecision::executed()
     }
 
@@ -281,7 +241,7 @@ impl CognitiveTickRunner {
     // - mind_tick：30s 节流，Attention Drift + Goal Update + Belief Consolidation + Working Memory Decay + CurrentActivity 过期
     // - current_activity.update_from_snapshot：每次执行，根据世界/自我状态自动切换活动
     //
-    // 注：proactive.tick 内部也会调一次 homeostasis_tick（幂等，成本可忽略）。
+    // speech 阶段复用此次更新，不重复调用 homeostasis_tick。
     fn phase_self_update(&self, brain: &Brain, context: &TickContext) -> PhaseDecision {
         let now = context.now;
         // Homeostasis tick（每次执行）
@@ -583,9 +543,9 @@ impl CognitiveTickRunner {
     // 8. maybe_spawn_inner_monologue（Think 阶段决策通过时的实际 LLM 调用）
     //
     // 返回 produced=true 表示产生了用户可见消息。
-    fn phase_speak(&self, brain: &Brain, context: &TickContext) -> VivianResult<PhaseDecision> {
+    fn phase_speak(&self, brain: &Brain, context: &TickContext, think_allowed: bool) -> VivianResult<PhaseDecision> {
         // tick 以 Arc<Self> 为接收者（内部 spawn 的截屏任务需要持有 orchestrator 引用）
-        let produced = std::sync::Arc::clone(&brain.proactive).tick(context)?;
+        let produced = std::sync::Arc::clone(&brain.proactive).tick_after_cognitive_update(context, think_allowed)?;
         if produced {
             Ok(PhaseDecision::executed_with_produced())
         } else {

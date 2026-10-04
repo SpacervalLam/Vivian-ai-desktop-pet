@@ -61,8 +61,6 @@ pub struct Brain {
     pub consolidator: Option<Arc<crate::memory::consolidation::MemoryConsolidator>>,
     /// 角色认知聚合句柄：Belief / Goal / Attention + 心理架构
     pub mind: Arc<crate::mind::Mind>,
-    /// 凝神/专注模式状态机
-    pub focus_state: Arc<Mutex<super::focus_mode::FocusState>>,
     /// 在场状态管理器（四态状态机：Online/Busy/Rest/Offline）
     pub presence: Arc<PresenceManager>,
     /// 自我状态聚合器（只读整合 PetMindState/presence/fatigue/quiet_mode/ignored_count/今日主动次数）
@@ -271,10 +269,6 @@ impl Brain {
         let intimacy = psychology.relationship().intimacy * 100.0;
         persona.adjust_for_relationship(intimacy, "");
 
-        // 凝神模式状态机：与 BrainChatChain 共享同一 Arc 实例
-        let focus_state: Arc<Mutex<super::focus_mode::FocusState>> =
-            Arc::new(Mutex::new(super::focus_mode::FocusState::new()));
-
         // 在场状态管理器：按角色隔离的四态状态机（Online/Busy/Rest/Offline）
         let presence = Arc::new(
             PresenceManager::new(char_id).unwrap_or_else(|e| {
@@ -356,7 +350,6 @@ impl Brain {
                 Some(tool_semantic_filter.clone()),
                 Some(fast_semantic.clone()),
             )
-            .with_focus_state(focus_state.clone())
             .with_presence(presence.clone())
             .with_self_state(self_state.clone())
             .with_mind(mind.clone())
@@ -381,7 +374,6 @@ impl Brain {
                 Some(tool_semantic_filter.clone()),
                 Some(fast_semantic.clone()),
             )
-            .with_focus_state(focus_state.clone())
             .with_presence(presence.clone())
             .with_self_state(self_state.clone())
             .with_mind(mind.clone()),
@@ -433,7 +425,6 @@ impl Brain {
             research: research.clone(),
             consolidator,
             mind,
-            focus_state,
             presence: presence.clone(),
             self_state: self_state.clone(),
             last_greeting_error: Arc::new(Mutex::new(None)),
@@ -734,7 +725,7 @@ impl Brain {
     /// WorldIngest → SelfUpdate → Observe → Think → Act → Speak
     ///
     /// 仅 Speak 阶段调用 LLM（主动消息触发器命中时），其余阶段纯规则。
-    /// Tick 之外仍处理：Focus idle 冷却 / 夜间记忆巩固 / 日常 pipeline.run()。
+    /// Tick 之外仍处理：夜间记忆巩固 / 日常 pipeline.run()。
     pub async fn proactive_tick(
         &self,
         context: &crate::proactive::TickContext,
@@ -751,14 +742,6 @@ impl Brain {
             self.char_id,
             tick_result.render_summary()
         );
-
-        // 凝神模式 idle 冷却：proactive tick 期间用户未交互，Focus 电荷按 idle retention 衰减
-        {
-            let now = chrono::Local::now().timestamp() as f64;
-            let th = super::focus_mode::FocusThresholds::default();
-            let mut fs = self.focus_state.lock().await;
-            fs.idle_cooldown(produced, now, &th);
-        }
 
         // 记忆巩固：由 Rest 状态转换触发（见 presence::background_tasks），
         // 此处仅保留日常 pipeline.run() 检查，让 Stage 1 的"空闲触发"条件能在用户离开期间被检查到。

@@ -15,6 +15,11 @@ fn err_str(e: impl std::fmt::Display) -> String {
     e.to_string()
 }
 
+#[tauri::command]
+pub fn get_desktop_settings() -> serde_json::Value {
+    crate::desktop_contract::settings_schema()
+}
+
 /// 读取指定键的配置值（支持点号分隔的嵌套键）
 #[tauri::command]
 pub fn get_config(state: State<'_, Arc<AppState>>, key: String) -> Result<Value, String> {

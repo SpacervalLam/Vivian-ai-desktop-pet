@@ -71,9 +71,10 @@ static NAME_PATTERNS: Lazy<Vec<Regex>> = Lazy::new(|| {
     ];
     let mut patterns = Vec::new();
     for p in prefixes {
-        patterns.push(Regex::new(&format!("{p}{cn}")).expect("名字检测正则编译失败"));
-        patterns.push(Regex::new(&format!("{p}{en}")).expect("名字检测正则编译失败"));
+        patterns.push(Regex::new(&format!("{p}\\s*{cn}")).expect("名字检测正则编译失败"));
+        patterns.push(Regex::new(&format!("{p}\\s*{en}")).expect("名字检测正则编译失败"));
     }
+    patterns.push(Regex::new(r"(?i)\bmy\s+name\s+is\s+[A-Za-z]{2,}").unwrap());
     patterns
 });
 
@@ -384,7 +385,7 @@ mod tests {
     fn test_should_summarize_by_token() {
         let mut mem = TimeStampedMemory::new();
         // 单条消息塞大量文本，让 token 数超过 21000 阈值
-        let big = "这是一段很长的文本用于测试 token 阈值触发摘要。".repeat(500);
+        let big = "这是一段很长的文本用于测试 token 阈值触发摘要。".repeat(2000);
         mem.add_message(ChatMessage::user(big));
         assert!(mem.total_tokens() > SUMMARY_TOKEN_THRESHOLD);
         assert!(mem.should_summarize());
@@ -394,9 +395,10 @@ mod tests {
     fn test_should_summarize_by_message_fallback() {
         let mut mem = TimeStampedMemory::new();
         // 80 条短消息（token 不会超阈值），触发消息数辅助上限
-        for i in 0..SUMMARY_MESSAGE_FALLBACK {
-            mem.add_message(ChatMessage::user(format!("msg {}", i)));
+        for i in 0..=SUMMARY_MESSAGE_FALLBACK {
+            mem.add_message(ChatMessage::user(format!("msg {} {}", i, "今天聊聊测试记忆的各种内容。".repeat(10))));
         }
+        assert!(mem.total_tokens() > SUMMARY_MIN_TOKENS_FOR_LEN_TRIGGER);
         assert!(mem.should_summarize());
     }
 
@@ -413,7 +415,7 @@ mod tests {
     fn test_summarize_keeps_recent() {
         let mut mem = TimeStampedMemory::new();
         // 用大消息触发摘要（避免依赖消息数 fallback）
-        let big = "x".repeat(100000);
+        let big = "这是一段很长的文本用于测试 token 阈值触发摘要。".repeat(2000);
         mem.add_message(ChatMessage::user(big));
         for i in 0..10 {
             mem.add_message(ChatMessage::user(format!("msg {}", i)));

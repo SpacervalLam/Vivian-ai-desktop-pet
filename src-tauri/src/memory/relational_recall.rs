@@ -70,7 +70,7 @@ const SEED_PATTERN: &str = r"(.{1,40}?)";
 /// who_rel 模式：谁投资了/创建了/顾问了 SEED
 static WHO_REL_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(&format!(
-        r"(?:谁|什么人|哪家公司|哪个机构).*?(?:投资了?|注资|领投|参投|创建了?|创办了?|成立了?|创立了?|担任.*顾问|给.*当顾问)\s*{SEED_PATTERN}"
+        r"(?:谁|什么人|哪家公司|哪个机构).*?(?:投资了?|注资|领投|参投|创建了?|创办了?|成立了?|创立了?|担任.*顾问|给.*当顾问)\s*{SEED_PATTERN}(?:[?？!！。]|$)"
     )).unwrap()
 });
 
@@ -91,14 +91,14 @@ static CONNECTS_RE: Lazy<Regex> = Lazy::new(|| {
 /// intro 模式：谁介绍我认识 SEED
 static INTRO_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(&format!(
-        r"(?:谁|什么人).*?(?:介绍|引荐|带我认识|引见).*?(?:认识)?\s*{SEED_PATTERN}"
+        r"(?:谁|什么人).*?(?:介绍|引荐|带我认识|引见).*?(?:认识)?\s*{SEED_PATTERN}(?:[?？!！。]|$)"
     )).unwrap()
 });
 
 /// who_feels 模式：谁喜欢/讨厌/信任/想念 SEED
 static WHO_FEELS_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(&format!(
-        r"(?:谁|什么人|哪些人).*?(?:喜欢|喜爱|讨厌|不喜欢|反感|信任|想念|思念|关心|在意)\s*{SEED_PATTERN}"
+        r"(?:谁|什么人|哪些人).*?(?:喜欢|喜爱|讨厌|不喜欢|反感|信任|想念|思念|关心|在意)\s*{SEED_PATTERN}(?:[?？!！。]|$)"
     )).unwrap()
 });
 

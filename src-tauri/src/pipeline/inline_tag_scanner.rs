@@ -112,7 +112,7 @@ impl InlineTagScanner {
         let search_range = text[start..].char_indices().take(200);
         for (i, _) in search_range {
             let abs = start + i;
-            if abs + 1 < text.len() && &text[abs..abs + 2] == "/>" {
+            if text.as_bytes().get(abs..abs + 2) == Some(b"/>") {
                 return Some(abs);
             }
         }

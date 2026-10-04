@@ -731,11 +731,6 @@ impl BaseProvider for OpenAiCompatProvider {
         self.base.set_enable_search(enable);
     }
 
-    /// 设置 max_tokens 运行时覆盖 —— 凝神模式激活时由生成层调用。
-    fn set_max_tokens_override(&self, tokens: u32) {
-        self.base.set_max_tokens_override(tokens);
-    }
-
     /// 设置 temperature 运行时覆盖 —— emotion→temperature 映射在每轮对话前调用。
     fn set_temperature_override(&self, temp: Option<f64>) {
         self.base.set_temperature_override(temp);

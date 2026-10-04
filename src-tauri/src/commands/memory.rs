@@ -18,6 +18,23 @@ fn item_to_value(item: &crate::memory::types::MemoryItem) -> Value {
     serde_json::to_value(item).unwrap_or(json!({}))
 }
 
+/// 原始消息按会话投影，包含尚未 flush 的消息；不读取记忆中的对白副本。
+#[tauri::command]
+pub async fn get_memory_conversations(state: State<'_, Arc<AppState>>, character_id: Option<String>)
+    -> Result<Vec<crate::memory::conversations::ConversationRecord>, String> {
+    let character = state.get_character(character_id.as_deref())?;
+    character.brain.dialogue.memory_conversations().map_err(err_str)
+}
+
+#[tauri::command]
+pub async fn summarize_memory_conversation(state: State<'_, Arc<AppState>>,
+    character_id: Option<String>, conversation_id: String) -> Result<Value, String> {
+    let character = state.get_character(character_id.as_deref())?;
+    let chain = character.brain.chat_chain.as_ref().ok_or_else(|| "记忆整理尚未初始化".to_string())?;
+    let item = chain.pipeline.summarize_session(&character.brain.memory, &conversation_id).await.map_err(err_str)?;
+    Ok(item_to_value(&item))
+}
+
 /// 获取所有记忆（记忆管理窗口使用）
 ///
 /// 过滤配置预设与系统 seed 记忆 —— 这些是身份锚点与

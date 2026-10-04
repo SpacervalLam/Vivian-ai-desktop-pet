@@ -3,7 +3,6 @@
 //! - 表 `entries(id TEXT PRIMARY KEY, json TEXT NOT NULL)`：每条记忆一行，
 //!   json 为 MemoryItem 的紧凑序列化
 //! - 元数据（version）存 `meta` 表
-//! - 旧版 unified_memory.json 首次打开时自动迁移，原文件重命名为 .migrated
 //! - 明文镜像：默认关闭；显式设置 `VIVIAN_MEMORY_PLAIN_MIRROR=1` 后写入
 //!   `plain/<id>.txt`，删除时同步移除
 
@@ -14,7 +13,7 @@ use std::path::{Path, PathBuf};
 use parking_lot::Mutex;
 use rusqlite::Connection;
 
-use super::types::{MemoryItem, MemoryStoreData};
+use super::types::MemoryItem;
 use crate::error::{VivianError, VivianResult};
 
 pub struct MemoryEntryStore {
@@ -40,8 +39,8 @@ const SQLITE_CACHE_SIZE_KIB: i64 = -4096;
 const WAL_CHECKPOINT_THRESHOLD: u64 = 1024 * 1024;
 
 impl MemoryEntryStore {
-    /// 打开（或创建）条目存储；legacy_json 存在且数据库为空时执行迁移
-    pub fn open(db_path: PathBuf, legacy_json: &Path) -> VivianResult<Self> {
+    /// 打开（或创建）条目存储。
+    pub fn open(db_path: PathBuf) -> VivianResult<Self> {
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| VivianError::Memory(format!("创建记忆目录失败: {e}")))?;
@@ -93,36 +92,7 @@ impl MemoryEntryStore {
         // 启动时先把历史遗留的 WAL 收进主库，避免 load_all 回放一大段 WAL
         store.checkpoint_if_needed(0);
 
-        // 旧版 JSON 迁移：数据库无条目且 legacy 存在时导入
-        let is_empty = store.entry_count()? == 0;
-        if is_empty && legacy_json.exists() {
-            if let Ok(content) = std::fs::read_to_string(legacy_json) {
-                if let Ok(data) = serde_json::from_str::<MemoryStoreData>(&content) {
-                    if !data.entries.is_empty() {
-                        store.write_rows(
-                            data.entries.iter().map(|e| (e.id.clone(), e.clone())).collect(),
-                            &[],
-                        )?;
-                        store.set_meta("version", &data.version.to_string())?;
-                        let migrated = legacy_json.with_extension("json.migrated");
-                        let _ = std::fs::rename(legacy_json, migrated);
-                        tracing::info!(
-                            "[MemoryEntryStore] 已迁移 {} 条记忆到 SQLite，旧文件保留为 .migrated",
-                            data.entries.len()
-                        );
-                    }
-                }
-            }
-        }
         Ok(store)
-    }
-
-    fn entry_count(&self) -> VivianResult<usize> {
-        let conn = self.conn.lock();
-        let n: i64 = conn
-            .query_row("SELECT COUNT(*) FROM entries", [], |r| r.get(0))
-            .map_err(|e| VivianError::Memory(format!("统计记忆条数失败: {e}")))?;
-        Ok(n as usize)
     }
 
     /// 写入元数据（version 等）

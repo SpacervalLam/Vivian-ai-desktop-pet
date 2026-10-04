@@ -474,10 +474,6 @@ impl BaseProvider for ChatCompletionsProvider {
         self.base.set_enable_search(enable);
     }
 
-    fn set_max_tokens_override(&self, tokens: u32) {
-        self.base.set_max_tokens_override(tokens);
-    }
-
     fn set_temperature_override(&self, temp: Option<f64>) {
         self.base.set_temperature_override(temp);
     }

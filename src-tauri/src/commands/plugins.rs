@@ -234,13 +234,19 @@ pub fn preview_reasoning_config(
     provider_type: String, model: String,
     preference: Option<crate::providers::reasoning::ReasoningPreference>,
     overrides: Option<serde_json::Value>,
+    temperature: Option<f64>, max_tokens: Option<u32>,
+    send_temperature: Option<bool>, send_max_tokens: Option<bool>,
+    sample_body: Option<serde_json::Value>,
 ) -> Result<serde_json::Value, String> {
     use crate::providers::{reasoning, reasoning_profiles};
     crate::plugins::ensure_builtin_plugins();
     let profile = reasoning_profiles::resolve(&provider_type, &model);
-    if let Some(patch) = &overrides { reasoning_profiles::validate_adapter_patch(patch, profile.as_ref())?; }
+    if let Some(patch) = &overrides { crate::providers::request_body::validate(patch, profile.as_ref())?; }
     let pref = preference.unwrap_or(reasoning::ReasoningPreference::AUTO);
-    let mut preview = serde_json::json!({});
+    let base_body = sample_body.unwrap_or_else(||crate::providers::request_body::example(&provider_type, &model, temperature.unwrap_or(0.7), max_tokens.unwrap_or(2048)));
+    if !base_body.is_object() || serde_json::to_vec(&base_body).map_err(|e|e.to_string())?.len()>256*1024 {
+        return Err("示例请求体必须是 256 KB 以内的 JSON 对象".into());
+    }
     let (known, disable, efforts, budget, source, verified_at) = if let Some(p) = &profile {
         (true, p.disabled.is_some(), p.efforts.keys().cloned().collect::<Vec<_>>(), serde_json::to_value(&p.budget).unwrap_or_default(), Some(p.source.clone()), Some(p.verified_at.clone()))
     } else {
@@ -248,7 +254,7 @@ pub fn preview_reasoning_config(
         (cap.control != reasoning::ReasoningControl::None, cap.supports_disable, cap.supported_efforts.iter().map(|e|e.as_str().to_string()).collect(), serde_json::Value::Null, None, None)
     };
     let adapter = reasoning_profiles::RequestCustomization { profile, overrides: overrides.clone(), provider_type };
-    adapter.apply(&mut preview, pref, &model);
+    let preview = adapter.finalize(base_body.clone(), pref, &model, send_temperature.unwrap_or(true), send_max_tokens.unwrap_or(true));
     let sampling = adapter.sampling();
-    Ok(serde_json::json!({"sampling":sampling,"adapterOrigin":if source.is_some(){"verified_profile"}else{"compatibility"},"known":known,"supportsDisable":disable,"efforts":efforts,"budget":budget,"source":source,"verifiedAt":verified_at,"preview":preview,"overridden":overrides.as_ref().and_then(|v|v.as_object()).map(|v|!v.is_empty()).unwrap_or(false)}))
+    Ok(serde_json::json!({"sampling":sampling,"adapterOrigin":if source.is_some(){"verified_profile"}else{"compatibility"},"known":known,"supportsDisable":disable,"efforts":efforts,"budget":budget,"source":source,"verifiedAt":verified_at,"preview":crate::providers::request_body::redact(&preview),"baseBody":base_body,"overridden":overrides.as_ref().and_then(|v|v.as_object()).map(|v|!v.is_empty()).unwrap_or(false)}))
 }

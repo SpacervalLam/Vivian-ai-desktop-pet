@@ -173,84 +173,84 @@ pub struct Relation {
 /// 工作于：在...工作 / 就职于 / 是...的员工 / 加入...担任
 static WORKS_AT_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
-        r"(?i)(?:在|就职于|加入|任职于|效力于)\s*(.{1,30}?)\s*(?:工作|任职|就职|效力|担任|做|当)|(?:是|为)\s*(.{1,30}?)\s*(?:的)?(?:员工|工程师|经理|总监|主管|负责人|合伙人|创始人|CTO|CEO|CFO|COO|VP)"
+        r"(?i)(?:在|就职于|加入|任职于|效力于)\s*([^，。！？;；\n]{1,30})\s*(?:工作|任职|就职|效力|担任|做|当)|(?:是|为)\s*([^，。！？;；\n]{1,30})\s*(?:的)?(?:员工|工程师|经理|总监|主管|负责人|合伙人|创始人|CTO|CEO|CFO|COO|VP)"
     ).unwrap()
 });
 
 /// 投资：投资了 / 注资 / 领投 / 参投 / 出资
 static INVESTED_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
-        r"(?i)(.{1,30}?)\s*(?:投资了?|注资|领投|参投|出资|融资|注资了?)\s*(.{1,30}?)|(?:给|为)\s*(.{1,30}?)\s*(?:投了?|注资|出资)"
+        r"(?i)([^，。！？;；\n]{1,30})\s*(?:投资了?|注资|领投|参投|出资|融资|注资了?)\s*([^，。！？;；\n]{1,30})|(?:给|为)\s*([^，。！？;；\n]{1,30})\s*(?:投了?|注资|出资)"
     ).unwrap()
 });
 
 /// 创立：创建了 / 创办了 / 联合创始人 / 成立了
 static FOUNDED_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
-        r"(?i)(.{1,30}?)\s*(?:创建|创办|成立|创立|建立)了?\s*(.{1,30}?)|(.{1,30}?)\s*(?:是|为)\s*(.{1,30}?)\s*(?:的)?(?:创始人|联合创始人|创办人|发起人)"
+        r"(?i)([^，。！？;；\n]{1,30})\s*(?:创建|创办|成立|创立|建立)了?\s*([^，。！？;；\n]{1,30})|([^，。！？;；\n]{1,30})\s*(?:是|为)\s*([^，。！？;；\n]{1,30})\s*(?:的)?(?:创始人|联合创始人|创办人|发起人)"
     ).unwrap()
 });
 
 /// 顾问：担任...顾问 / 给...当顾问 / 是...的顾问
 static ADVISES_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
-        r"(?i)(.{1,30}?)\s*(?:担任|当|做|是)\s*(.{1,30}?)\s*(?:的)?(?:顾问|参谋|指导)|给\s*(.{1,30}?)\s*(?:当|做)\s*顾问"
+        r"(?i)([^，。！？;；\n]{1,30})\s*(?:担任|当|做|是)\s*([^，。！？;；\n]{1,30})\s*(?:的)?(?:顾问|参谋|指导)|给\s*([^，。！？;；\n]{1,30})\s*(?:当|做)\s*顾问"
     ).unwrap()
 });
 
 /// 认识：认识 / 介绍了 / 带我认识 / 引荐
 static KNOWS_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
-        r"(?i)(.{1,30}?)\s*(?:认识|介绍|引荐|带.*认识)\s*(.{1,30}?)"
+        r"(?i)([^，。！？;；\n]{1,30})\s*(?:认识|介绍|引荐|带.*认识)\s*([^，。！？;；\n]{1,30})"
     ).unwrap()
 });
 
 /// 喜欢：喜欢 / 喜爱 / 钟爱 / 爱好
 static LIKES_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
-        r"(?i)(.{1,30}?)\s*(?:喜欢|喜爱|钟爱|爱好|偏爱)\s*(.{1,30}?)"
+        r"(?i)([^，。！？;；\n]{1,30})\s*(?:喜欢|喜爱|钟爱|爱好|偏爱)\s*([^，。！？;；\n]{1,30})"
     ).unwrap()
 });
 
 /// 不喜欢：不喜欢 / 讨厌 / 反感 / 厌恶
 static DISLIKES_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
-        r"(?i)(.{1,30}?)\s*(?:不喜欢|讨厌|反感|厌恶|不感冒)\s*(.{1,30}?)"
+        r"(?i)([^，。！？;；\n]{1,30})\s*(?:不喜欢|讨厌|反感|厌恶|不感冒)\s*([^，。！？;；\n]{1,30})"
     ).unwrap()
 });
 
 /// 朋友：是...的朋友 / 和...是朋友
 static FRIEND_OF_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
-        r"(?i)(.{1,30}?)\s*(?:是|和|与)\s*(.{1,30}?)\s*(?:的)?(?:朋友|好友|闺蜜|哥们)|(?:和|与)\s*(.{1,30}?)\s*是\s*(?:朋友|好友)"
+        r"(?i)([^，。！？;；\n]{1,30})\s*(?:是|和|与)\s*([^，。！？;；\n]{1,30})\s*(?:的)?(?:朋友|好友|闺蜜|哥们)|(?:和|与)\s*([^，。！？;；\n]{1,30})\s*是\s*(?:朋友|好友)"
     ).unwrap()
 });
 
 /// 家人：是...的家人 / 和...是家人
 static FAMILY_OF_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
-        r"(?i)(.{1,30}?)\s*(?:是|和|与)\s*(.{1,30}?)\s*(?:的)?(?:家人|哥哥|弟弟|姐姐|妹妹|爸爸|妈妈|父亲|母亲|儿子|女儿|丈夫|妻子|老公|老婆)"
+        r"(?i)([^，。！？;；\n]{1,30})\s*(?:是|和|与)\s*([^，。！？;；\n]{1,30})\s*(?:的)?(?:家人|哥哥|弟弟|姐姐|妹妹|爸爸|妈妈|父亲|母亲|儿子|女儿|丈夫|妻子|老公|老婆)"
     ).unwrap()
 });
 
 /// 信任：信任 / 相信
 static TRUSTS_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
-        r"(?i)(.{1,30}?)\s*(?:信任|信赖|相信)\s*(.{1,30}?)"
+        r"(?i)([^，。！？;；\n]{1,30})\s*(?:信任|信赖|相信)\s*([^，。！？;；\n]{1,30})"
     ).unwrap()
 });
 
 /// 关心：关心 / 在意 / 照顾
 static CARES_FOR_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
-        r"(?i)(.{1,30}?)\s*(?:关心|在意|照顾|惦念|挂念)\s*(.{1,30}?)"
+        r"(?i)([^，。！？;；\n]{1,30})\s*(?:关心|在意|照顾|惦念|挂念)\s*([^，。！？;；\n]{1,30})"
     ).unwrap()
 });
 
 /// 想念：想念 / 思念 / 惦记
 static MISSES_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
-        r"(?i)(.{1,30}?)\s*(?:想念|思念|惦记|怀念)\s*(.{1,30}?)"
+        r"(?i)([^，。！？;；\n]{1,30})\s*(?:想念|思念|惦记|怀念)\s*([^，。！？;；\n]{1,30})"
     ).unwrap()
 });
 
@@ -435,6 +435,13 @@ fn build_relation_from_capture(
     rel_type: RelationType,
     base_confidence: f64,
 ) -> Option<Relation> {
+    if matches!(rel_type, RelationType::Likes | RelationType::Trusts | RelationType::CaresFor | RelationType::Misses)
+        && cap.get(1).is_some_and(|subject| {
+            let prefix = subject.as_str().trim_end();
+            ["不", "没", "没有", "未", "并非"].iter().any(|word| prefix.ends_with(word))
+        }) {
+        return None;
+    }
     // 遍历所有捕获组，找两个已知实体
     let mut found_subject: Option<String> = None;
     let mut found_object: Option<String> = None;
@@ -447,12 +454,12 @@ fn build_relation_from_capture(
                 continue;
             }
             // 检查是否匹配已知实体
-            if entity_names.iter().any(|&name| name == matched || matched.contains(name) || name.contains(matched)) {
+            if let Some(name) = entity_names.iter().filter(|&&name| matched.contains(name)).max_by_key(|name| name.len()) {
                 if found_subject.is_none() {
-                    found_subject = Some(matched.to_string());
+                    found_subject = Some((*name).to_string());
                     context_snippet = extract_context(text, m.start(), 40);
                 } else if found_object.is_none() {
-                    found_object = Some(matched.to_string());
+                    found_object = Some((*name).to_string());
                 }
             }
         }
@@ -612,6 +619,9 @@ mod tests {
         let text = "小明讨厌香菜";
         let relations = infer_relations(text, &entities);
         assert!(relations.iter().any(|r| r.relation_type == RelationType::Dislikes));
+        let negated = infer_relations("小明不喜欢香菜", &entities);
+        assert!(negated.iter().any(|r| r.relation_type == RelationType::Dislikes));
+        assert!(!negated.iter().any(|r| r.relation_type == RelationType::Likes));
     }
 
     #[test]

@@ -402,6 +402,10 @@ impl MemoryRetentionGuard {
         let mut to_delete: Vec<String> = Vec::new();
 
         for memory in &memories {
+            // 相同对白可以在多次会话真实发生；摘要也必须保留会话边界。
+            if super::kinds::kind(memory) != super::kinds::RecordKind::Fact || memory.consolidated {
+                continue;
+            }
             let key = memory.content.trim().to_lowercase();
             // 综合评分：evidence_score 为主，importance 为辅（避免证据为 0 时无法区分）
             let combined = evidence_score(memory, now) + memory.importance * 0.1;

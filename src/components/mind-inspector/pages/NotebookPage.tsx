@@ -1,13 +1,13 @@
 /**
- * Notebook 页 — 卡片风格 HTML 笔记列表 + 预览 + 编辑
+ * Notebook 页 — 笔记索引 + 预览 / 编辑
  *
  * 数据源：invoke('list_notebooks') / invoke('get_notebook_html') / invoke('get_notebook_detail')
  * 写入：invoke('create_notebook') / invoke('update_notebook')
  * 刷新：监听 notebook:created / notebook:updated / notebook:deleted 事件
  *
- * 布局：左右两栏（左 36% 笔记列表 + 右 64% 预览/编辑）
- * 顶部角色切换（vivian / nana）
- * 支持 pageParams.notebookId 直接定位笔记
+ * 布局（编辑型）：左索引（紧凑行：标题 + 标签 + 时间）/ 右工作面（顶栏 + 预览或编辑）。
+ * 索引行不做卡片、不做倾斜，靠行距与一条选中色条区分。
+ * 版式刻度与共用控件走 RecordTheme.css，本文件只管这页的形状。
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -16,71 +16,33 @@ import { invoke, convertFileSrc } from '@tauri-apps/api/core';
 import { listen, emit, type UnlistenFn } from '@tauri-apps/api/event';
 import { open } from '@tauri-apps/plugin-dialog';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { Trash2, FileText, Plus, ChevronUp, ChevronDown, Pencil, X, Check, NotebookPen, MousePointerClick, ListChecks, Upload } from 'lucide-react';
-import { COLORS, TYPO, SPACING, RADIUS, EASE, DURATION, SHADOW } from '../design-system';
-import { EmptyState } from '../shared-components';
+import {
+  Check,
+  ChevronDown,
+  ChevronUp,
+  FileText,
+  LayoutTemplate,
+  ListChecks,
+  MousePointerClick,
+  NotebookPen,
+  Palette,
+  Pencil,
+  Plus,
+  Tag,
+  Trash2,
+  Upload,
+  X,
+} from 'lucide-react';
 import { useNavigation } from '../NavigationContext';
 import {
   Block,
-  BlockStyle,
   Cover,
   NoteBook,
   CharacterId,
   BlockType,
 } from './notebook-types';
 import { WysiwygEditor } from './NoteWysiwyg';
-
-// ============================================================
-// 手账风格 CSS 关键帧
-// ============================================================
-const NOTEBOOK_STYLE_ID = 'notebook-page-journal-styles';
-if (typeof document !== 'undefined' && !document.getElementById(NOTEBOOK_STYLE_ID)) {
-  const style = document.createElement('style');
-  style.id = NOTEBOOK_STYLE_ID;
-  style.textContent = `
-@keyframes journal-float {
-  0%, 100% { transform: translateY(0) rotate(var(--float-rotate, 0deg)); }
-  50% { transform: translateY(-3px) rotate(var(--float-rotate, 0deg)); }
-}
-@keyframes journal-shimmer {
-  0% { background-position: -200% center; }
-  100% { background-position: 200% center; }
-}
-@keyframes tape-peel {
-  0% { clip-path: inset(0 100% 0 0); }
-  100% { clip-path: inset(0 0 0 0); }
-}
-@keyframes card-enter {
-  0% { opacity: 0; transform: translateY(8px) scale(0.97); }
-  100% { opacity: 1; transform: translateY(0) scale(1); }
-}
-@keyframes ink-draw {
-  0% { width: 0; }
-  100% { width: 100%; }
-}
-@keyframes nb-fade-up {
-  0% { opacity: 0; transform: translateY(12px); }
-  100% { opacity: 1; transform: translateY(0); }
-}
-/* 输入/选择控件聚焦高亮（覆盖内联样式，仅作用于本页面） */
-.notebook-page input:focus,
-.notebook-page select:focus,
-.notebook-page textarea:focus {
-  border-color: var(--panel-accent) !important;
-  outline: none;
-  background: var(--panel-bg) !important;
-  box-shadow: 0 0 0 3px var(--panel-accent-muted) !important;
-}
-/* 尊重系统减弱动效偏好：关闭入场/上浮动画 */
-@media (prefers-reduced-motion: reduce) {
-  .notebook-page .nb-fade,
-  .notebook-page .nb-note-card {
-    animation: none !important;
-  }
-}
-`;
-  document.head.appendChild(style);
-}
+import './RecordTheme.css';
 
 // ============================================================
 // 类型定义
@@ -148,6 +110,8 @@ const CHAR_LABEL: Record<CharacterId, string> = {
   vivian: 'Vivian',
   nana: 'Nana',
 };
+
+const CHARACTERS: CharacterId[] = ['vivian', 'nana'];
 
 // ============================================================
 // 工具函数
@@ -229,6 +193,46 @@ function emptyDraft(charId: CharacterId): NoteBook {
     blocks: [defaultBlock('paragraph')],
   };
 }
+
+// ============================================================
+// 共用片段
+// ============================================================
+
+const Blank: React.FC<{
+  icon: React.ElementType;
+  title: string;
+  hint?: string;
+  children?: React.ReactNode;
+}> = ({ icon: Icon, title, hint, children }) => (
+  <div className="rec-blank">
+    <span className="rec-blank-icon">
+      <Icon size={30} strokeWidth={1.2} />
+    </span>
+    <span className="rec-blank-title">{title}</span>
+    {hint ? <span className="rec-blank-hint">{hint}</span> : null}
+    {children}
+  </div>
+);
+
+const CastSwitch: React.FC<{
+  value: CharacterId;
+  onChange: (c: CharacterId) => void;
+}> = ({ value, onChange }) => (
+  <div className="rec-cast" role="group">
+    {CHARACTERS.map((id) => (
+      <button
+        key={id}
+        type="button"
+        onClick={() => onChange(id)}
+        className={`rec-cast-item${value === id ? ' is-active' : ''}`}
+        aria-pressed={value === id}
+      >
+        <span className="rec-cast-dot" />
+        {CHAR_LABEL[id]}
+      </button>
+    ))}
+  </div>
+);
 
 // ============================================================
 // NotebookPage 主组件
@@ -604,168 +608,50 @@ const NotebookPage: React.FC = () => {
   // ============================================================
 
   return (
-    <div className="notebook-page" style={{ display: 'flex', height: '100%', gap: SPACING.md }}>
-      {/* === 左侧：笔记列表 === */}
-      <div
-        style={{
-          width: '36%',
-          minWidth: 280,
-          maxWidth: 420,
-          display: 'flex',
-          flexDirection: 'column',
-          gap: SPACING.sm,
-          position: 'relative',
-        }}
-      >
-        {/* 装饰角标 */}
-        <div
-          style={{
-            position: 'absolute',
-            top: -4,
-            right: -4,
-            width: 20,
-            height: 20,
-            borderTop: '3px solid var(--panel-border-strong, #ddd)',
-            borderRight: '3px solid var(--panel-border-strong, #ddd)',
-            borderRadius: '0 4px 0 0',
-            opacity: 0.3,
-          }}
-        />
-        {/* 角色切换 + 新建 */}
-        <div style={{ display: 'flex', gap: SPACING.xs, flexShrink: 0, alignItems: 'center' }}>
-          {/* 角色胶囊切换控件 */}
-          <div
-            style={{
-              flex: 1,
-              display: 'flex',
-              gap: 2,
-              padding: 4,
-              borderRadius: RADIUS.pill,
-              background: COLORS.subtleBg,
-              border: `1px solid ${COLORS.subtleBorder}`,
+    <div className="record-note">
+      {/* === 左：笔记索引 === */}
+      <div className="record-note-index">
+        <div className="record-note-index-head">
+          <CastSwitch
+            value={character}
+            onChange={(id) => {
+              setCharacter(id);
+              setSelectedId(null);
+              setHtml('');
             }}
-          >
-            {(['vivian', 'nana'] as CharacterId[]).map((id) => {
-              const active = character === id;
-              return (
-                <button
-                  key={id}
-                  onClick={() => {
-                    setCharacter(id);
-                    setSelectedId(null);
-                    setHtml('');
-                  }}
-                  style={{
-                    flex: 1,
-                    padding: '7px 14px',
-                    border: 'none',
-                    borderRadius: RADIUS.pill,
-                    background: active ? `${COLORS.accent}22` : 'transparent',
-                    color: active ? COLORS.accent : COLORS.textSecondary,
-                    fontWeight: 600,
-                    fontSize: 14,
-                    cursor: 'pointer',
-                    transition: `all ${DURATION.normal}s ${EASE.swift}`,
-                    fontFamily: TYPO.fontFamily,
-                    letterSpacing: '0.5px',
-                  }}
-                  onMouseEnter={(e) => {
-                    if (!active) e.currentTarget.style.background = COLORS.bgHover;
-                  }}
-                  onMouseLeave={(e) => {
-                    e.currentTarget.style.background = active ? `${COLORS.accent}22` : 'transparent';
-                  }}
-                >
-                  {CHAR_LABEL[id]}
-                </button>
-              );
-            })}
-          </div>
-          {/* 新建笔记按钮（hover 反馈 + 按压反馈） */}
+          />
+          <span className="record-note-index-head-spacer" />
           <button
+            type="button"
             onClick={startNew}
             disabled={editing}
             title={t('notebook.new_note')}
-            style={{
-              padding: '8px 12px',
-              border: 'none',
-              borderRadius: RADIUS.pill,
-              background: COLORS.accentMuted,
-              color: COLORS.accentBright,
-              cursor: editing ? 'not-allowed' : 'pointer',
-              opacity: editing ? 0.5 : 1,
-              display: 'inline-flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              transition: `all ${DURATION.normal}s ${EASE.swift}`,
-            }}
-            onMouseEnter={(e) => {
-              e.currentTarget.style.background = `${COLORS.accent}22`;
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.background = COLORS.accentMuted;
-            }}
-            onMouseDown={(e) => {
-              e.currentTarget.style.transform = 'scale(0.92)';
-            }}
-            onMouseUp={(e) => {
-              e.currentTarget.style.transform = 'scale(1)';
-            }}
+            className="rec-icon-btn is-accent"
           >
             <Plus size={16} />
           </button>
-          {/* 导入 HTML 文件按钮（文件选择器，读取完整 HTML 转为笔记） */}
           <button
+            type="button"
             onClick={() => void handlePickHtml()}
             disabled={editing}
             title={t('notebook.import_html', { defaultValue: '导入 HTML 文件' })}
-            style={{
-              padding: '8px 12px',
-              border: 'none',
-              borderRadius: RADIUS.pill,
-              background: COLORS.subtleBg,
-              color: COLORS.textSecondary,
-              cursor: editing ? 'not-allowed' : 'pointer',
-              opacity: editing ? 0.5 : 1,
-              display: 'inline-flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              transition: `all ${DURATION.normal}s ${EASE.swift}`,
-            }}
-            onMouseEnter={(e) => {
-              e.currentTarget.style.background = COLORS.bgHover;
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.background = COLORS.subtleBg;
-            }}
+            className="rec-icon-btn"
           >
-            <Upload size={16} />
+            <Upload size={15} />
           </button>
         </div>
 
-        {/* 笔记列表 */}
-        <div
-          style={{
-            flex: 1,
-            overflow: 'auto',
-            display: 'flex',
-            flexDirection: 'column',
-            gap: SPACING.sm,
-            paddingRight: 4,
-          }}
-        >
+        <div className="record-note-index-scroll">
           {loading && notes.length === 0 ? (
-            <div style={{ textAlign: 'center', color: COLORS.textTertiary, padding: SPACING.xl }}>
-              {t('common.loading')}
-            </div>
+            <Blank icon={NotebookPen} title={t('common.loading')} />
           ) : notes.length === 0 ? (
-            <EmptyState
-              icon={<NotebookPen size={36} strokeWidth={1.2} />}
-              text={t('notebook.empty_hint', { name: t(`mind_inspector.common.char_${character}`) })}
+            <Blank
+              icon={NotebookPen}
+              title={t('notebook.empty_hint', { name: t(`mind_inspector.common.char_${character}`) })}
             />
           ) : (
             notes.map((note) => (
-              <NoteCard
+              <NoteRow
                 key={note.id}
                 note={note}
                 active={note.id === selectedId}
@@ -777,23 +663,8 @@ const NotebookPage: React.FC = () => {
         </div>
       </div>
 
-      {/* === 右侧：预览 / 编辑 === */}
-      <div
-        className="nb-fade"
-        style={{
-          flex: 1,
-          minWidth: 0,
-          borderRadius: '4px 18px 4px 18px',
-          overflow: 'hidden',
-          background: `linear-gradient(180deg, ${COLORS.bgSurface} 0%, ${COLORS.bgBase} 100%)`,
-          boxShadow: SHADOW.card,
-          border: `1.5px solid ${COLORS.border}`,
-          display: 'flex',
-          flexDirection: 'column',
-          position: 'relative',
-          animation: `nb-fade-up 0.45s ${EASE.decel} both`,
-        }}
-      >
+      {/* === 右：工作面 === */}
+      <div className="record-note-work">
         {editing && draft ? (
           <NoteEditor
             draft={draft}
@@ -809,255 +680,78 @@ const NotebookPage: React.FC = () => {
             onRemoveBlock={removeBlock}
             onMoveBlock={moveBlock}
             onAddBlock={addBlock}
-            onSave={saveEdit}
+            onSave={() => void saveEdit()}
             onCancel={cancelEdit}
           />
         ) : selectedNote ? (
           <>
-            {/* 预览顶栏 — 手账风格 */}
-            <div
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                padding: `${SPACING.sm}px ${SPACING.md}px`,
-                borderBottom: `1.5px solid ${COLORS.border}`,
-                background: `linear-gradient(180deg, ${COLORS.bgSurface} 0%, ${COLORS.bgBase} 100%)`,
-                flexShrink: 0,
-                position: 'relative',
-              }}
-            >
-              {/* 装饰胶带 */}
-              <div
-                style={{
-                  position: 'absolute',
-                  top: -6,
-                  left: '30%',
-                  width: 60,
-                  height: 12,
-                  background: 'rgba(255,255,255,0.35)',
-                  borderRadius: 1,
-                  transform: 'rotate(-2deg)',
-                  boxShadow: '0 1px 2px rgba(0,0,0,0.06)',
-                }}
-              />
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, overflow: 'hidden', flex: 1, minWidth: 0 }}>
-                <span style={{ fontSize: 16, flexShrink: 0 }}>📄</span>
-                <span
-                  style={{
-                    fontSize: 15,
-                    fontWeight: 600,
-                    color: COLORS.textPrimary,
-                    fontFamily: TYPO.fontFamily,
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap',
-                  }}
-                >
-                  {selectedNote.title}
-                </span>
+            <div className="record-note-work-head">
+              <div className="record-note-work-title">
+                <FileText size={15} />
+                <span className="record-note-work-title-text">{selectedNote.title}</span>
               </div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: SPACING.sm, flexShrink: 0 }}>
-                <span style={{
-                  fontSize: 12,
-                  color: COLORS.textTertiary,
-                  fontFamily: TYPO.fontFamily,
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 4,
-                }}>
-                  <span style={{ opacity: 0.5 }}>📝</span>
-                  {formatTime(selectedNote.updated_at)}
-                  <span style={{ opacity: 0.4 }}>·</span>
+              <div className="rec-meta">
+                <span>{formatTime(selectedNote.updated_at)}</span>
+                <span>
                   {selectedNote.render_type === 'raw_html'
                     ? 'HTML'
                     : `${selectedNote.block_count} ${t('notebook.blocks')}`}
                 </span>
-                {selectedNote.render_type === 'raw_html' ? (
-                  <span
-                    style={{
-                      fontSize: 11,
-                      color: COLORS.textTertiary,
-                      fontFamily: TYPO.fontFamily,
-                      border: `1px solid ${COLORS.border}`,
-                      padding: '2px 8px',
-                      borderRadius: '6px 2px 6px 2px',
-                      display: 'inline-flex',
-                      alignItems: 'center',
-                      gap: 4,
-                    }}
-                  >
-                    <FileText size={12} /> 只读
-                  </span>
-                ) : (
-                  <button
-                    onClick={() => void startEdit(selectedNote.id)}
-                    title={t('notebook.edit')}
-                    style={{
-                      border: 'none',
-                      background: 'transparent',
-                      color: COLORS.accent,
-                      cursor: 'pointer',
-                      padding: '4px 10px',
-                      borderRadius: '2px 8px 2px 8px',
-                      display: 'inline-flex',
-                      alignItems: 'center',
-                      gap: 4,
-                      fontFamily: TYPO.fontFamily,
-                      fontSize: 12,
-                      fontWeight: 600,
-                      transition: `background ${DURATION.fast}s ${EASE.swift}`,
-                    }}
-                    onMouseEnter={(e) => {
-                      e.currentTarget.style.background = COLORS.bgActive;
-                    }}
-                    onMouseLeave={(e) => {
-                      e.currentTarget.style.background = 'transparent';
-                    }}
-                  >
-                    <Pencil size={13} /> 编辑
-                  </button>
-                )}
               </div>
+              {selectedNote.render_type === 'raw_html' ? (
+                <span className="rec-tag">{t('notebook.readonly', { defaultValue: '只读' })}</span>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => void startEdit(selectedNote.id)}
+                  title={t('notebook.edit')}
+                  className="rec-btn"
+                >
+                  <Pencil size={13} /> {t('notebook.edit')}
+                </button>
+              )}
             </div>
             {/* 笔记预览（iframe src = asset URL 渲染完整文档，跨源隔离） */}
-            <div style={{ flex: 1, overflow: 'auto', position: 'relative' }}>
-              {loadingHtml ? (
+            <div className="record-note-work-body">
+              {loadingHtml && (
                 <div
                   style={{
                     position: 'absolute',
                     inset: 0,
+                    zIndex: 10,
                     display: 'flex',
-                    flexDirection: 'column',
                     alignItems: 'center',
                     justifyContent: 'center',
-                    color: COLORS.textTertiary,
-                    fontSize: 14,
-                    fontFamily: TYPO.fontFamily,
                     gap: 8,
-                    background: 'var(--panel-bg-surface)',
-                    zIndex: 10,
+                    background: 'var(--claude-surface)',
+                    color: 'var(--rec-muted)',
+                    fontSize: 'var(--rec-fs-body)',
                   }}
                 >
-                  <span style={{ fontSize: 24, opacity: 0.5 }}>📖</span>
-                  <span>{t('common.loading')}</span>
+                  {t('common.loading')}
                 </div>
-              ) : null}
+              )}
               <iframe
                 ref={iframeRef}
                 title="notebook-preview"
                 src={html}
                 sandbox="allow-same-origin"
-                style={{
-                  width: '100%',
-                  height: '100%',
-                  minHeight: 0,
-                  border: 'none',
-                  display: 'block',
-                }}
+                className="record-note-frame"
               />
             </div>
           </>
         ) : (
-          <div
-            style={{
-              flex: 1,
-              display: 'flex',
-              flexDirection: 'column',
-              alignItems: 'center',
-              justifyContent: 'center',
-              gap: SPACING.md,
-              color: COLORS.textTertiary,
-              background: `linear-gradient(180deg, ${COLORS.bgSurface} 0%, ${COLORS.bgBase} 100%)`,
-              position: 'relative',
-              overflow: 'hidden',
-            }}
-          >
-            {/* 装饰元素 */}
-            <div style={{
-              position: 'absolute',
-              top: -20,
-              right: -20,
-              width: 120,
-              height: 120,
-              borderRadius: '50%',
-              background: COLORS.accentMuted,
-              opacity: 0.3,
-            }} />
-            <div style={{
-              position: 'absolute',
-              bottom: -30,
-              left: -30,
-              width: 80,
-              height: 80,
-              borderRadius: '50%',
-              background: COLORS.accentMuted,
-              opacity: 0.2,
-            }} />
-            <div style={{
-              position: 'absolute',
-              top: '30%',
-              left: '10%',
-              width: 40,
-              height: 12,
-              background: 'rgba(255,255,255,0.3)',
-              borderRadius: 1,
-              transform: 'rotate(-15deg)',
-            }} />
-            <div style={{
-              position: 'absolute',
-              bottom: '25%',
-              right: '15%',
-              width: 50,
-              height: 12,
-              background: 'rgba(255,255,255,0.25)',
-              borderRadius: 1,
-              transform: 'rotate(8deg)',
-            }} />
-            <EmptyState
-              icon={<NotebookPen size={40} strokeWidth={1.2} />}
-              text={t('notebook.select_hint')}
-            />
-            <button
-              onClick={() => void handlePickHtml()}
-              style={{
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: 8,
-                padding: '10px 18px',
-                border: `1.5px dashed ${COLORS.borderAccent}`,
-                borderRadius: '4px 14px 4px 14px',
-                background: COLORS.bgSurface,
-                color: COLORS.accent,
-                cursor: 'pointer',
-                fontFamily: TYPO.fontFamily,
-                fontSize: 13,
-                fontWeight: 600,
-                transition: `all ${DURATION.fast}s ${EASE.swift}`,
-              }}
-              onMouseEnter={(e) => {
-                e.currentTarget.style.background = COLORS.accentMuted;
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.background = COLORS.bgSurface;
-              }}
+          <div className="record-note-work-body">
+            <Blank
+              icon={NotebookPen}
+              title={t('notebook.select_hint')}
+              hint={t('notebook.import_drop_hint', { defaultValue: '或将 .html 文件拖入此窗口' })}
             >
-              <Upload size={15} />
-              {t('notebook.import_html', { defaultValue: '导入 HTML 文件' })}
-            </button>
-            <div
-              style={{
-                fontSize: 12,
-                color: COLORS.textTertiary,
-                fontFamily: TYPO.fontFamily,
-                display: 'flex',
-                alignItems: 'center',
-                gap: 6,
-              }}
-            >
-              <span style={{ opacity: 0.6 }}>↧</span>
-              {t('notebook.import_drop_hint', { defaultValue: '或将 .html 文件拖入此窗口' })}
-            </div>
+              <button type="button" onClick={() => void handlePickHtml()} className="rec-btn">
+                <Upload size={14} />
+                {t('notebook.import_html', { defaultValue: '导入 HTML 文件' })}
+              </button>
+            </Blank>
           </div>
         )}
       </div>
@@ -1066,229 +760,64 @@ const NotebookPage: React.FC = () => {
 };
 
 // ============================================================
-// NoteCard 子组件
+// NoteRow — 索引行
 // ============================================================
 
-const NoteCard: React.FC<{
+const NoteRow: React.FC<{
   note: NoteSummary;
   active: boolean;
   onClick: () => void;
   onDelete: (e: React.MouseEvent) => void;
 }> = ({ note, active, onClick, onDelete }) => {
-  const [hovered, setHovered] = useState(false);
-  const paletteGradient = PALETTE_COLORS[note.palette] || PALETTE_COLORS.warm;
-  const cardIndex = useRef(Math.floor(Math.random() * 3));
-
+  const { t } = useTranslation();
   return (
     <div
-      className="mind-hover nb-note-card"
+      role="button"
+      tabIndex={0}
       onClick={onClick}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-      style={{
-        position: 'relative',
-        padding: '14px 16px 12px 18px',
-        borderRadius: '3px 14px 3px 14px',
-        background: active
-          ? `linear-gradient(135deg, ${COLORS.accentMuted} 0%, ${COLORS.bgSurface} 100%)`
-          : COLORS.bgSurface,
-        border: `1.5px solid ${active ? COLORS.borderAccent : COLORS.border}`,
-        cursor: 'pointer',
-        transition: `all ${DURATION.normal}s ${EASE.swift}`,
-        overflow: 'hidden',
-        boxShadow: SHADOW.subtle,
-        transform: active
-          ? 'translateY(-1px) rotate(-0.3deg)'
-          : 'translateY(0) rotate(0deg)',
-        animation: !active ? `card-enter 0.35s ${EASE.ios} backwards` : 'none',
-        animationDelay: `${cardIndex.current * 0.04}s`,
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          onClick();
+        }
       }}
+      className={`record-note-row${active ? ' is-active' : ''}`}
     >
-      {/* 纸胶带装饰条 */}
-      <div
-        style={{
-          position: 'absolute',
-          left: 0,
-          top: 0,
-          bottom: 0,
-          width: 5,
-          background: paletteGradient,
-          borderRadius: '0 2px 2px 0',
-          boxShadow: active ? `inset 0 0 8px rgba(0,0,0,0.1)` : 'none',
-        }}
-      />
-
-      {/* 纸胶带顶部装饰 */}
-      <div
-        style={{
-          position: 'absolute',
-          top: -6,
-          left: 24,
-          width: 40,
-          height: 12,
-          background: active ? 'rgba(255,255,255,0.5)' : 'rgba(255,255,255,0.35)',
-          borderRadius: 1,
-          transform: 'rotate(-4deg)',
-          boxShadow: '0 1px 2px rgba(0,0,0,0.06)',
-          opacity: hovered ? 0.8 : 0.5,
-          transition: `opacity ${DURATION.normal}s ${EASE.swift}`,
-        }}
-      />
-
-      {/* 标题（手写体风格） */}
-      <div
-        style={{
-          fontSize: 16,
-          fontWeight: 600,
-          color: active ? COLORS.accentBright : COLORS.textPrimary,
-          marginBottom: 6,
-          overflow: 'hidden',
-          textOverflow: 'ellipsis',
-          whiteSpace: 'nowrap',
-          paddingLeft: 10,
-          fontFamily: TYPO.fontFamily,
-          letterSpacing: '0.3px',
-        }}
-      >
-        {note.title || '无标题'}
-      </div>
-
-      {/* 标签（贴纸风格） */}
+      <span className="record-note-row-title">{note.title || '无标题'}</span>
       {note.tags.length > 0 && (
-        <div
-          style={{
-            display: 'flex',
-            flexWrap: 'wrap',
-            gap: 5,
-            marginBottom: 6,
-            paddingLeft: 10,
-          }}
-        >
-          {note.tags.slice(0, 4).map((tag, i) => (
-            <span
-              key={i}
-              style={{
-                fontSize: 11,
-                color: active ? COLORS.accentBright : COLORS.textSecondary,
-                background: active ? COLORS.accentSoft : COLORS.subtleBg,
-                padding: '2px 10px',
-                borderRadius: '2px 10px 2px 10px',
-                lineHeight: 1.5,
-                transform: i % 2 === 0 ? 'rotate(-1deg)' : 'rotate(0.5deg)',
-                letterSpacing: '0.3px',
-                fontFamily: TYPO.fontFamily,
-                border: active ? `1px solid ${COLORS.borderAccent}` : 'none',
-              }}
-            >
+        <span className="record-note-row-tags">
+          {note.tags.slice(0, 3).map((tag, i) => (
+            <span key={i} className={`rec-tag${active ? ' is-accent' : ''}`}>
               {tag}
             </span>
           ))}
-          {note.tags.length > 4 && (
-            <span
-              style={{
-                fontSize: 10,
-                color: COLORS.textTertiary,
-                padding: '2px 6px',
-                fontFamily: TYPO.fontFamily,
-              }}
-            >
-              +{note.tags.length - 4}
+          {note.tags.length > 3 && (
+            <span style={{ color: 'var(--rec-faint)', fontSize: 'var(--rec-fs-micro)' }}>
+              +{note.tags.length - 3}
             </span>
           )}
-        </div>
-      )}
-
-      {/* 底栏：时间 + 删除 */}
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          paddingLeft: 10,
-        }}
-      >
-        <span
-          style={{
-            fontSize: 12,
-            color: COLORS.textTertiary,
-            fontFamily: TYPO.fontFamily,
-            display: 'flex',
-            alignItems: 'center',
-            gap: 4,
-          }}
-        >
-          <span style={{ opacity: 0.5 }}>📝</span>
-          {formatTime(note.updated_at)}
         </span>
+      )}
+      <span className="record-note-row-foot">
+        <span>{formatTime(note.updated_at)}</span>
+        <span className="record-note-row-foot-spacer" />
         <button
+          type="button"
           onClick={onDelete}
-          title="删除"
-          style={{
-            border: 'none',
-            background: 'transparent',
-            color: COLORS.danger,
-            cursor: 'pointer',
-            padding: 4,
-            borderRadius: RADIUS.xs,
-            display: 'inline-flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            visibility: hovered ? 'visible' : 'hidden',
-            transition: `all ${DURATION.fast}s ${EASE.swift}`,
-            opacity: hovered ? 0.7 : 0,
-          }}
-          onMouseEnter={(e) => {
-            e.currentTarget.style.background = COLORS.bgActive;
-            e.currentTarget.style.opacity = '1';
-          }}
-          onMouseLeave={(e) => {
-            e.currentTarget.style.background = 'transparent';
-            e.currentTarget.style.opacity = '0.7';
-          }}
+          title={t('notebook.delete_block')}
+          className="rec-icon-btn is-danger record-note-row-del"
+          style={{ width: 22, height: 22 }}
         >
           <Trash2 size={13} />
         </button>
-      </div>
+      </span>
     </div>
   );
 };
 
 // ============================================================
-// NoteEditor 子组件（编辑模式）
+// NoteEditor — 编辑态
 // ============================================================
-
-const inputStyle: React.CSSProperties = {
-  width: '100%',
-  padding: '10px 12px',
-  border: `1.5px solid ${COLORS.border}`,
-  borderRadius: '3px 10px 3px 10px',
-  background: COLORS.bgSurface,
-  color: COLORS.textPrimary,
-  fontSize: 14,
-  fontFamily: TYPO.fontFamily,
-  outline: 'none',
-  transition: `border-color ${DURATION.fast}s ${EASE.swift}, box-shadow ${DURATION.fast}s ${EASE.swift}`,
-  boxShadow: 'inset 0 1px 3px rgba(0,0,0,0.04)',
-};
-
-const textareaStyle: React.CSSProperties = {
-  ...inputStyle,
-  resize: 'vertical',
-  minHeight: 72,
-  lineHeight: 1.7,
-  borderRadius: '3px 12px 3px 12px',
-};
-
-const labelStyle: React.CSSProperties = {
-  fontSize: 12,
-  fontWeight: 600,
-  color: COLORS.textSecondary,
-  marginBottom: 6,
-  display: 'block',
-  fontFamily: TYPO.fontFamily,
-  letterSpacing: '0.5px',
-  paddingLeft: 2,
-};
 
 const NoteEditor: React.FC<{
   draft: NoteBook;
@@ -1309,6 +838,7 @@ const NoteEditor: React.FC<{
 }> = ({
   draft,
   isNew,
+  dirty,
   saving,
   loadingDetail,
   error,
@@ -1331,15 +861,7 @@ const NoteEditor: React.FC<{
 
   if (loadingDetail) {
     return (
-      <div
-        style={{
-          flex: 1,
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          color: COLORS.textTertiary,
-        }}
-      >
+      <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--rec-muted)' }}>
         {t('common.loading')}
       </div>
     );
@@ -1347,446 +869,304 @@ const NoteEditor: React.FC<{
 
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
-      {/* 编辑顶栏 — 手账风格 */}
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          padding: `${SPACING.sm}px ${SPACING.md}px`,
-          borderBottom: `1.5px solid ${COLORS.border}`,
-          background: `linear-gradient(180deg, ${COLORS.bgSurface} 0%, ${COLORS.bgBase} 100%)`,
-          flexShrink: 0,
-          position: 'relative',
-        }}
-      >
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <span style={{ fontSize: 16 }}>{isNew ? '✨' : '✏️'}</span>
-          <span style={{
-            fontSize: 15,
-            fontWeight: 600,
-            color: COLORS.textPrimary,
-            fontFamily: TYPO.fontFamily,
-          }}>
+      {/* 编辑顶栏 */}
+      <div className="record-note-work-head">
+        <div className="record-note-work-title">
+          <Pencil size={15} />
+          <span className="record-note-work-title-text">
             {isNew ? t('notebook.new_note') : t('notebook.edit')}
           </span>
+          {dirty && (
+            <span className="record-note-dirty">
+              <span className="rec-dot" />
+              {t('notebook.unsaved', { defaultValue: '未保存' })}
+            </span>
+          )}
         </div>
-        <div style={{ display: 'flex', gap: SPACING.xs, alignItems: 'center' }}>
-          {/* 编辑模式切换（胶囊切换控件） */}
-          <div
-            style={{
-              display: 'flex',
-              gap: 2,
-              padding: 4,
-              borderRadius: RADIUS.pill,
-              background: COLORS.subtleBg,
-              border: `1px solid ${COLORS.subtleBorder}`,
-            }}
+
+        <div className="rec-seg">
+          <button
+            type="button"
+            onClick={() => setMode('wysiwyg')}
+            title={t('notebook.mode_wysiwyg')}
+            className={`rec-seg-item${mode === 'wysiwyg' ? ' is-active' : ''}`}
           >
-            <button
-              onClick={() => setMode('wysiwyg')}
-              title={t('notebook.mode_wysiwyg')}
-              style={{
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: 4,
-                padding: '6px 12px',
-                borderRadius: RADIUS.pill,
-                border: 'none',
-                background: mode === 'wysiwyg' ? `${COLORS.accent}22` : 'transparent',
-                color: mode === 'wysiwyg' ? COLORS.accent : COLORS.textSecondary,
-                fontSize: 12,
-                fontWeight: 600,
-                cursor: 'pointer',
-                fontFamily: TYPO.fontFamily,
-                transition: `all ${DURATION.normal}s ${EASE.swift}`,
-              }}
-              onMouseEnter={(e) => {
-                if (mode !== 'wysiwyg') e.currentTarget.style.background = COLORS.bgHover;
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.background = mode === 'wysiwyg' ? `${COLORS.accent}22` : 'transparent';
-              }}
-            >
-              <MousePointerClick size={13} /> {t('notebook.mode_wysiwyg')}
-            </button>
-            <button
-              onClick={() => setMode('form')}
-              title={t('notebook.mode_form')}
-              style={{
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: 4,
-                padding: '6px 12px',
-                borderRadius: RADIUS.pill,
-                border: 'none',
-                background: mode === 'form' ? `${COLORS.accent}22` : 'transparent',
-                color: mode === 'form' ? COLORS.accent : COLORS.textSecondary,
-                fontSize: 12,
-                fontWeight: 600,
-                cursor: 'pointer',
-                fontFamily: TYPO.fontFamily,
-                transition: `all ${DURATION.normal}s ${EASE.swift}`,
-              }}
-              onMouseEnter={(e) => {
-                if (mode !== 'form') e.currentTarget.style.background = COLORS.bgHover;
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.background = mode === 'form' ? `${COLORS.accent}22` : 'transparent';
-              }}
-            >
-              <ListChecks size={13} /> {t('notebook.mode_form')}
-            </button>
-          </div>
-          <ActionButton onClick={onCancel} disabled={saving}>
-            <X size={14} /> {t('common.cancel')}
-          </ActionButton>
-          <ActionButton primary onClick={onSave} disabled={saving}>
-            {saving ? <Check size={14} /> : <Check size={14} />} {saving ? t('common.saving') : t('common.save')}
-          </ActionButton>
+            <MousePointerClick size={13} /> {t('notebook.mode_wysiwyg')}
+          </button>
+          <button
+            type="button"
+            onClick={() => setMode('form')}
+            title={t('notebook.mode_form')}
+            className={`rec-seg-item${mode === 'form' ? ' is-active' : ''}`}
+          >
+            <ListChecks size={13} /> {t('notebook.mode_form')}
+          </button>
         </div>
+
+        <button type="button" onClick={onCancel} disabled={saving} className="rec-btn">
+          <X size={13} /> {t('common.cancel')}
+        </button>
+        <button type="button" onClick={onSave} disabled={saving} className="rec-btn is-primary">
+          <Check size={13} /> {saving ? t('common.saving') : t('common.save')}
+        </button>
       </div>
 
-      {/* 编辑区 — 手账笔记本风格 */}
-      <div
-        style={{
-          flex: 1,
-          overflow: 'auto',
-          padding: `${SPACING.md}px ${SPACING.md}px ${SPACING.lg}px`,
-          display: 'flex',
-          flexDirection: 'column',
-          gap: SPACING.md,
-          background: `linear-gradient(180deg, ${COLORS.bgSurface} 0%, ${COLORS.bgBase} 100%)`,
-          position: 'relative',
-        }}
-      >
-        {/* 装饰横线 */}
-        <div
-          style={{
-            position: 'absolute',
-            top: 0, left: 0, right: 0,
-            height: 3,
-            background: `linear-gradient(90deg, transparent 0%, ${COLORS.accent} 20%, ${COLORS.accent} 80%, transparent 100%)`,
-            opacity: 0.15,
-          }}
-        />
-
-        {/* 标题 */}
-        <div>
-          <label style={labelStyle}>
-            <span style={{ marginRight: 4 }}>📖</span>
-            {t('notebook.title')}
-          </label>
-          <input
-            style={{ ...inputStyle, fontSize: 17, fontWeight: 600, fontFamily: TYPO.fontFamily }}
-            value={draft.title}
-            placeholder={t('notebook.title')}
-            onChange={(e) => onPatch((d) => ({ ...d, title: e.target.value }))}
-          />
-        </div>
-
-        {/* 配色 */}
-        <div>
-          <label style={labelStyle}>
-            <span style={{ marginRight: 4 }}>🎨</span>
-            {t('notebook.palette')}
-          </label>
-          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-            {PALETTE_KEYS.map((key) => (
-              <button
-                key={key}
-                onClick={() => onPatch((d) => ({ ...d, palette: key }))}
-                title={key}
-                style={{
-                  width: 34,
-                  height: 34,
-                  borderRadius: '3px 14px 3px 14px',
-                  border: draft.palette === key ? `2.5px solid ${COLORS.accentBright}` : '2px solid transparent',
-                  background: PALETTE_COLORS[key],
-                  cursor: 'pointer',
-                  padding: 0,
-                  transition: `transform ${DURATION.fast}s ${EASE.spring}, box-shadow ${DURATION.fast}s ${EASE.swift}`,
-                  transform: draft.palette === key ? 'scale(1.15) rotate(-5deg)' : 'scale(1)',
-                  boxShadow: draft.palette === key ? `0 0 12px ${COLORS.accentGlow}` : 'none',
-                }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.transform = draft.palette === key ? 'scale(1.2) rotate(-5deg)' : 'scale(1.12)';
-                  e.currentTarget.style.boxShadow = `0 0 12px ${COLORS.accentGlow}`;
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.transform = draft.palette === key ? 'scale(1.15) rotate(-5deg)' : 'scale(1)';
-                  e.currentTarget.style.boxShadow = draft.palette === key ? `0 0 12px ${COLORS.accentGlow}` : 'none';
-                }}
-              />
-            ))}
+      {/* 编辑区 */}
+      <div className="record-note-work-body">
+        <div className="record-note-blocks">
+          <div className="rec-field">
+            <label className="rec-label">{t('notebook.title')}</label>
+            <input
+              className="rec-input"
+              style={{ fontSize: 17, fontWeight: 500 }}
+              value={draft.title}
+              placeholder={t('notebook.title')}
+              onChange={(e) => onPatch((d) => ({ ...d, title: e.target.value }))}
+            />
           </div>
-        </div>
 
-        {/* 布局 */}
-        <div>
-          <label style={labelStyle}>
-            <span style={{ marginRight: 4 }}>📐</span>
-            {t('notebook.layout')}
-          </label>
-          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-            {LAYOUT_OPTIONS.map((opt) => {
-              const active = draft.layout === opt.value;
-              return (
+          <div className="rec-field">
+            <label className="rec-label">
+              <span style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
+                <Palette size={13} /> {t('notebook.palette')}
+              </span>
+            </label>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              {PALETTE_KEYS.map((key) => (
+                <button
+                  key={key}
+                  type="button"
+                  onClick={() => onPatch((d) => ({ ...d, palette: key }))}
+                  title={key}
+                  aria-label={key}
+                  aria-pressed={draft.palette === key}
+                  style={{
+                    width: 30,
+                    height: 30,
+                    borderRadius: 999,
+                    border: draft.palette === key ? '2px solid var(--rec-accent)' : '2px solid transparent',
+                    background: PALETTE_COLORS[key],
+                    cursor: 'pointer',
+                    padding: 0,
+                    boxShadow: '0 0 0 0.5px var(--claude-line)',
+                    transition: 'border-color 0.16s cubic-bezier(0.2,0.8,0.2,1)',
+                  }}
+                />
+              ))}
+            </div>
+          </div>
+
+          <div className="rec-field">
+            <label className="rec-label">
+              <span style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
+                <LayoutTemplate size={13} /> {t('notebook.layout')}
+              </span>
+            </label>
+            <div className="rec-seg" style={{ alignSelf: 'flex-start' }}>
+              {LAYOUT_OPTIONS.map((opt) => (
                 <button
                   key={opt.value}
+                  type="button"
                   onClick={() => onPatch((d) => ({ ...d, layout: opt.value }))}
-                  style={{
-                    padding: '6px 14px',
-                    borderRadius: RADIUS.pill,
-                    border: `1px solid ${active ? COLORS.accent : COLORS.subtleBorder}`,
-                    background: active ? `${COLORS.accent}22` : 'transparent',
-                    color: active ? COLORS.accent : COLORS.textSecondary,
-                    fontSize: 12,
-                    fontWeight: 600,
-                    cursor: 'pointer',
-                    fontFamily: TYPO.fontFamily,
-                    transition: `all ${DURATION.fast}s ${EASE.swift}`,
-                    transform: active ? 'translateY(-1px)' : 'translateY(0)',
-                  }}
-                  onMouseEnter={(e) => {
-                    if (!active) e.currentTarget.style.background = COLORS.bgHover;
-                  }}
-                  onMouseLeave={(e) => {
-                    e.currentTarget.style.background = active ? `${COLORS.accent}22` : 'transparent';
-                  }}
+                  className={`rec-seg-item${draft.layout === opt.value ? ' is-active' : ''}`}
                 >
                   {layoutLabel(opt.value, lang)}
                 </button>
-              );
-            })}
+              ))}
+            </div>
           </div>
-        </div>
 
-        {/* 标签 */}
-        <div>
-          <label style={labelStyle}>
-            <span style={{ marginRight: 4 }}>🏷️</span>
-            {t('notebook.tags')}
-            <span style={{ fontWeight: 400, color: COLORS.textTertiary, fontSize: 11 }}> ({t('notebook.items_hint')})</span>
-          </label>
-          <input
-            style={inputStyle}
-            value={tagsText}
-            placeholder="美食, 旅行, 攻略"
-            onChange={(e) =>
-              onPatch((d) => ({
-                ...d,
-                tags: e.target.value
-                  .split(',')
-                  .map((s) => s.trim())
-                  .filter(Boolean),
-              }))
-            }
-          />
-        </div>
+          <div className="rec-field">
+            <label className="rec-label">
+              <span style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
+                <Tag size={13} /> {t('notebook.tags')}
+                <span className="rec-label-hint">({t('notebook.items_hint')})</span>
+              </span>
+            </label>
+            <input
+              className="rec-input"
+              value={tagsText}
+              placeholder="美食, 旅行, 攻略"
+              onChange={(e) =>
+                onPatch((d) => ({
+                  ...d,
+                  tags: e.target.value
+                    .split(',')
+                    .map((s) => s.trim())
+                    .filter(Boolean),
+                }))
+              }
+            />
+          </div>
 
-        {/* 封面 */}
-        {showCover && (
-          <div
-            style={{
-              padding: SPACING.md,
-              borderRadius: '3px 14px 3px 14px',
-              background: COLORS.subtleBg,
-              border: `1.5px dashed ${COLORS.border}`,
-              display: 'flex',
-              flexDirection: 'column',
-              gap: SPACING.sm,
-              position: 'relative',
-            }}
-          >
-            <div style={{
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'space-between',
-              borderBottom: `1px dashed ${COLORS.border}`,
-              paddingBottom: 8,
-            }}>
-              <label style={{ ...labelStyle, marginBottom: 0, display: 'flex', alignItems: 'center', gap: 4 }}>
-                <span>📄</span> {t('notebook.cover')}
+          {/* 封面 */}
+          {showCover && (
+            <div className="rec-field">
+              <label className="rec-label">
+                <span style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
+                  <FileText size={13} /> {t('notebook.cover')}
+                </span>
               </label>
-              <button
-                onClick={() =>
-                  onPatch((d) => ({
-                    ...d,
-                    cover: d.cover
-                      ? null
-                      : { title: d.title, subtitle: '', emoji: '', background: '' },
-                  }))
-                }
+              <div
                 style={{
-                  border: 'none',
-                  background: 'transparent',
-                  color: COLORS.accent,
-                  fontSize: 12,
-                  cursor: 'pointer',
-                  padding: '2px 8px',
-                  borderRadius: '2px 8px 2px 8px',
-                  fontFamily: TYPO.fontFamily,
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 'var(--rec-gap-3)',
+                  padding: 'var(--rec-gap-4)',
+                  border: 'var(--rec-line)',
+                  borderRadius: 'var(--rec-radius)',
+                  background: 'var(--rec-sunken)',
                 }}
               >
-                {cover ? '✕ 删除' : '+ 添加'}
-              </button>
-            </div>
-            {cover && (
-              <>
-                <div>
-                  <label style={labelStyle}>{t('notebook.cover_title')}</label>
-                  <input
-                    style={inputStyle}
-                    value={cover.title}
-                    onChange={(e) =>
+                <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                  <button
+                    type="button"
+                    onClick={() =>
                       onPatch((d) => ({
                         ...d,
-                        cover: { ...d.cover!, title: e.target.value },
+                        cover: d.cover
+                          ? null
+                          : { title: d.title, subtitle: '', emoji: '', background: '' },
                       }))
                     }
-                  />
+                    className="rec-btn is-ghost"
+                  >
+                    {cover ? t('common.delete', { defaultValue: '删除' }) : t('common.add', { defaultValue: '添加' })}
+                  </button>
                 </div>
-                <div>
-                  <label style={labelStyle}>{t('notebook.cover_subtitle')}</label>
-                  <input
-                    style={inputStyle}
-                    value={cover.subtitle || ''}
-                    onChange={(e) =>
-                      onPatch((d) => ({
-                        ...d,
-                        cover: { ...d.cover!, subtitle: e.target.value },
-                      }))
-                    }
-                  />
-                </div>
-                <div style={{ display: 'flex', gap: SPACING.sm }}>
-                  <div style={{ flex: '0 0 120px' }}>
-                    <label style={labelStyle}>{t('notebook.cover_emoji')}</label>
-                    <input
-                      style={inputStyle}
-                      value={cover.emoji || ''}
-                      onChange={(e) =>
-                        onPatch((d) => ({
-                          ...d,
-                          cover: { ...d.cover!, emoji: e.target.value },
-                        }))
-                      }
-                    />
-                  </div>
-                  <div style={{ flex: 1 }}>
-                    <label style={labelStyle}>{t('notebook.cover_bg')}</label>
-                    <input
-                      style={inputStyle}
-                      value={cover.background || ''}
-                      placeholder="#FF6B6B / linear-gradient(...)"
-                      onChange={(e) =>
-                        onPatch((d) => ({
-                          ...d,
-                          cover: { ...d.cover!, background: e.target.value },
-                        }))
-                      }
-                    />
-                  </div>
-                </div>
-              </>
-            )}
-          </div>
-        )}
-
-        {/* 内容块：可视化编辑 / 表单编辑 */}
-        {mode === 'wysiwyg' ? (
-          <WysiwygEditor
-            blocks={draft.blocks}
-            onUpdateBlock={onUpdateBlock}
-            onRemoveBlock={onRemoveBlock}
-            onMoveBlock={onMoveBlock}
-            onAddBlock={onAddBlock}
-            t={t}
-          />
-        ) : (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: SPACING.sm }}>
-            <label style={labelStyle}>
-              <span style={{ marginRight: 4 }}>📝</span>
-              {t('notebook.blocks')}
-              <span style={{ fontWeight: 400, color: COLORS.textTertiary, fontSize: 11 }}> ({draft.blocks.length})</span>
-            </label>
-            {draft.blocks.map((block, idx) => (
-              <BlockEditor
-                key={idx}
-                block={block}
-                index={idx}
-                total={draft.blocks.length}
-                t={t}
-                onUpdate={(patch) => onUpdateBlock(idx, patch)}
-                onRemove={() => onRemoveBlock(idx)}
-                onMove={(dir) => onMoveBlock(idx, dir)}
-              />
-            ))}
-            {draft.blocks.length === 0 && (
-              <div style={{
-                padding: SPACING.md,
-                textAlign: 'center',
-                color: COLORS.textTertiary,
-                fontSize: 13,
-                fontFamily: TYPO.fontFamily,
-                border: `1.5px dashed ${COLORS.border}`,
-                borderRadius: '3px 12px 3px 12px',
-              }}>
-                {t('notebook.add_block')}
+                {cover && (
+                  <>
+                    <div className="rec-field">
+                      <label className="rec-label">{t('notebook.cover_title')}</label>
+                      <input
+                        className="rec-input"
+                        value={cover.title}
+                        onChange={(e) =>
+                          onPatch((d) => ({ ...d, cover: { ...d.cover!, title: e.target.value } }))
+                        }
+                      />
+                    </div>
+                    <div className="rec-field">
+                      <label className="rec-label">{t('notebook.cover_subtitle')}</label>
+                      <input
+                        className="rec-input"
+                        value={cover.subtitle || ''}
+                        onChange={(e) =>
+                          onPatch((d) => ({ ...d, cover: { ...d.cover!, subtitle: e.target.value } }))
+                        }
+                      />
+                    </div>
+                    <div className="record-note-block-row">
+                      <div style={{ flex: '0 0 120px' }}>
+                        <label className="rec-label">{t('notebook.cover_emoji')}</label>
+                        <input
+                          className="rec-input"
+                          value={cover.emoji || ''}
+                          onChange={(e) =>
+                            onPatch((d) => ({ ...d, cover: { ...d.cover!, emoji: e.target.value } }))
+                          }
+                        />
+                      </div>
+                      <div style={{ flex: 1 }}>
+                        <label className="rec-label">{t('notebook.cover_bg')}</label>
+                        <input
+                          className="rec-input"
+                          value={cover.background || ''}
+                          placeholder="#FF6B6B / linear-gradient(...)"
+                          onChange={(e) =>
+                            onPatch((d) => ({ ...d, cover: { ...d.cover!, background: e.target.value } }))
+                          }
+                        />
+                      </div>
+                    </div>
+                  </>
+                )}
               </div>
-            )}
-          </div>
-        )}
+            </div>
+          )}
 
-        {/* 添加块 */}
-        <div
-          style={{
-            display: 'flex',
-            gap: SPACING.xs,
-            padding: `${SPACING.sm}px 0`,
-            borderTop: `1.5px dashed ${COLORS.border}`,
-            marginTop: 4,
-          }}
-        >
-          <select
-            value={addType}
-            onChange={(e) => setAddType(e.target.value as BlockType)}
-            style={{
-              ...inputStyle,
-              flex: 1,
-              cursor: 'pointer',
-              appearance: 'auto',
-              fontFamily: TYPO.fontFamily,
-            }}
-          >
-            {BLOCK_TYPES.map((bt) => (
-              <option key={bt} value={bt}>
-                {bt}
-              </option>
-            ))}
-          </select>
-          <ActionButton primary onClick={() => onAddBlock(addType)} style={{ whiteSpace: 'nowrap' }}>
-            <Plus size={14} /> {t('notebook.add_block')}
-          </ActionButton>
+          {/* 内容块：可视化编辑 / 表单编辑 */}
+          {mode === 'wysiwyg' ? (
+            <WysiwygEditor
+              blocks={draft.blocks}
+              onUpdateBlock={onUpdateBlock}
+              onRemoveBlock={onRemoveBlock}
+              onMoveBlock={onMoveBlock}
+              onAddBlock={onAddBlock}
+              t={t}
+            />
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--rec-gap-3)' }}>
+              <div className="rec-label">
+                <span style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
+                  <ListChecks size={13} /> {t('notebook.blocks')}
+                  <span className="rec-label-hint">({draft.blocks.length})</span>
+                </span>
+              </div>
+              {draft.blocks.map((block, idx) => (
+                <BlockEditor
+                  key={idx}
+                  block={block}
+                  index={idx}
+                  total={draft.blocks.length}
+                  t={t}
+                  onUpdate={(patch) => onUpdateBlock(idx, patch)}
+                  onRemove={() => onRemoveBlock(idx)}
+                  onMove={(dir) => onMoveBlock(idx, dir)}
+                />
+              ))}
+              {draft.blocks.length === 0 && (
+                <div
+                  style={{
+                    padding: 'var(--rec-gap-5)',
+                    textAlign: 'center',
+                    border: 'var(--rec-line)',
+                    borderRadius: 'var(--rec-radius)',
+                    color: 'var(--rec-faint)',
+                    fontSize: 'var(--rec-fs-meta)',
+                  }}
+                >
+                  {t('notebook.add_block')}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* 添加块 */}
+          <div style={{ display: 'flex', gap: 'var(--rec-gap-2)', paddingTop: 'var(--rec-gap-2)' }}>
+            <select
+              value={addType}
+              onChange={(e) => setAddType(e.target.value as BlockType)}
+              className="rec-select"
+              style={{ flex: 1 }}
+            >
+              {BLOCK_TYPES.map((bt) => (
+                <option key={bt} value={bt}>
+                  {bt}
+                </option>
+              ))}
+            </select>
+            <button type="button" onClick={() => onAddBlock(addType)} className="rec-btn is-primary">
+              <Plus size={14} /> {t('notebook.add_block')}
+            </button>
+          </div>
+
+          {/* 错误提示 */}
+          {error && (
+            <div
+              style={{
+                padding: 'var(--rec-gap-3) var(--rec-gap-4)',
+                border: '0.5px solid color-mix(in srgb, #b4553f 34%, transparent)',
+                borderRadius: 'var(--rec-radius-sm)',
+                background: 'color-mix(in srgb, #b4553f 9%, transparent)',
+                color: '#b4553f',
+                fontSize: 'var(--rec-fs-meta)',
+              }}
+            >
+              {error}
+            </div>
+          )}
         </div>
-
-        {/* 错误提示 */}
-        {error && (
-          <div
-            style={{
-              padding: `${SPACING.sm}px ${SPACING.md}px`,
-              borderRadius: '3px 10px 3px 10px',
-              background: 'rgba(229, 57, 53, 0.08)',
-              color: COLORS.danger,
-              fontSize: 13,
-              border: `1.5px solid rgba(229, 57, 53, 0.2)`,
-              fontFamily: TYPO.fontFamily,
-            }}
-          >
-            {error}
-          </div>
-        )}
       </div>
     </div>
   );
@@ -1805,101 +1185,63 @@ const BlockEditor: React.FC<{
   onRemove: () => void;
   onMove: (dir: -1 | 1) => void;
 }> = ({ block, index, total, t, onUpdate, onRemove, onMove }) => {
-  const type = block.type;
+  const { type } = block;
 
-  const itemsText = useMemo(() => {
-    if (type === 'list' || type === 'tags') {
-      return block.items.join('\n');
-    }
-    return '';
-  }, [block, type]);
-
-  const tableHeadersText = useMemo(() => {
-    if (type === 'table') return block.headers.join('\n');
-    return '';
-  }, [block, type]);
-
-  const tableRowsText = useMemo(() => {
-    if (type === 'table') return block.rows.map((r) => r.join('\t')).join('\n');
-    return '';
-  }, [block, type]);
-
-  const chartCatsText = useMemo(() => {
-    if (type === 'chart') return block.categories.join('\n');
-    return '';
-  }, [block, type]);
-
-  const chartSeriesText = useMemo(() => {
-    if (type === 'chart')
-      return block.series.map((s) => `${s.name}\t${s.data.join(',')}`).join('\n');
-    return '';
-  }, [block, type]);
+  // 各类型字段的文本化取值。Block 是判别联合，字段挂在具体成员上，
+  // 所以这里按 type 收窄后取，而不是在联合上直接读（那会编译不过）。
+  const itemsText = type === 'list' || type === 'tags' ? (block.items || []).join('\n') : '';
+  const tagsValue = type === 'tags' ? (block.items || []).join(', ') : '';
+  const tableHeadersText = type === 'table' ? (block.headers || []).join('\n') : '';
+  const tableRowsText =
+    type === 'table' ? (block.rows || []).map((r: string[]) => r.join('\t')).join('\n') : '';
+  const chartCatsText = type === 'chart' ? (block.categories || []).join('\n') : '';
+  const chartSeriesText =
+    type === 'chart'
+      ? (block.series || [])
+          .map((s: { name: string; data: number[] }) => `${s.name}\t${s.data.join(',')}`)
+          .join('\n')
+      : '';
 
   return (
-    <div
-      style={{
-        padding: SPACING.md,
-        borderRadius: '3px 14px 3px 14px',
-        background: COLORS.bgSurface,
-        border: `1.5px solid ${COLORS.border}`,
-        display: 'flex',
-        flexDirection: 'column',
-        gap: SPACING.sm,
-        position: 'relative',
-        transition: `border-color ${DURATION.fast}s ${EASE.swift}`,
-      }}
-    >
-      {/* 装饰胶带 */}
-      <div
-        style={{
-          position: 'absolute',
-          top: -6,
-          right: 20,
-          width: 36,
-          height: 12,
-          background: 'rgba(255,255,255,0.4)',
-          borderRadius: 1,
-          transform: 'rotate(3deg)',
-          boxShadow: '0 1px 2px rgba(0,0,0,0.06)',
-        }}
-      />
-      {/* 块顶栏：类型 + 操作 */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-        <span
-          style={{
-            fontSize: 11,
-            fontWeight: 600,
-            color: COLORS.accent,
-            background: COLORS.accentMuted,
-            padding: '2px 10px',
-            borderRadius: '2px 10px 2px 10px',
-            letterSpacing: 0.5,
-            fontFamily: TYPO.fontFamily,
-          }}
+    <div className="record-note-block">
+      <div className="record-note-block-head">
+        <span className="rec-tag is-accent">{type}</span>
+        <span className="record-note-block-head-spacer" />
+        <button
+          type="button"
+          disabled={index === 0}
+          title={t('notebook.move_up')}
+          onClick={() => onMove(-1)}
+          className="rec-icon-btn"
         >
-          {type}
-        </span>
-        <div style={{ display: 'flex', gap: 2 }}>
-          <IconBtn disabled={index === 0} title={t('notebook.move_up')} onClick={() => onMove(-1)}>
-            <ChevronUp size={14} />
-          </IconBtn>
-          <IconBtn disabled={index === total - 1} title={t('notebook.move_down')} onClick={() => onMove(1)}>
-            <ChevronDown size={14} />
-          </IconBtn>
-          <IconBtn title={t('notebook.delete_block')} danger onClick={onRemove}>
-            <Trash2 size={14} />
-          </IconBtn>
-        </div>
+          <ChevronUp size={14} />
+        </button>
+        <button
+          type="button"
+          disabled={index === total - 1}
+          title={t('notebook.move_down')}
+          onClick={() => onMove(1)}
+          className="rec-icon-btn"
+        >
+          <ChevronDown size={14} />
+        </button>
+        <button
+          type="button"
+          title={t('notebook.delete_block')}
+          onClick={onRemove}
+          className="rec-icon-btn is-danger"
+        >
+          <Trash2 size={14} />
+        </button>
       </div>
 
-      {/* 类型特定字段 */}
-      {type === 'heading' && (
-        <>
-          <div style={{ display: 'flex', gap: SPACING.sm }}>
+      <div className="record-note-block-fields">
+        {type === 'heading' && (
+          <div className="record-note-block-row">
             <div style={{ flex: '0 0 90px' }}>
-              <label style={labelStyle}>{t('notebook.level')}</label>
+              <label className="rec-label">{t('notebook.level')}</label>
               <select
-                style={{ ...inputStyle, cursor: 'pointer', appearance: 'auto' }}
+                className="rec-select"
                 value={block.level}
                 onChange={(e) => onUpdate({ level: Number(e.target.value) } as Partial<Block>)}
               >
@@ -1909,91 +1251,80 @@ const BlockEditor: React.FC<{
               </select>
             </div>
             <div style={{ flex: 1 }}>
-              <label style={labelStyle}>{t('notebook.text')}</label>
+              <label className="rec-label">{t('notebook.text')}</label>
               <input
-                style={inputStyle}
+                className="rec-input"
                 value={block.text}
                 onChange={(e) => onUpdate({ text: e.target.value } as Partial<Block>)}
               />
             </div>
           </div>
-        </>
-      )}
+        )}
 
-      {type === 'paragraph' && (
-        <div>
-          <label style={labelStyle}>{t('notebook.text')}</label>
-          <textarea
-            style={textareaStyle}
-            value={block.text}
-            onChange={(e) => onUpdate({ text: e.target.value } as Partial<Block>)}
-          />
-        </div>
-      )}
-
-      {type === 'card' && (
-        <>
-          <div>
-            <label style={labelStyle}>{t('notebook.cover_title')}</label>
-            <input
-              style={inputStyle}
-              value={block.title || ''}
-              onChange={(e) => onUpdate({ title: e.target.value } as Partial<Block>)}
-            />
-          </div>
-          <div>
-            <label style={labelStyle}>{t('notebook.body')}</label>
+        {type === 'paragraph' && (
+          <div className="rec-field">
+            <label className="rec-label">{t('notebook.text')}</label>
             <textarea
-              style={textareaStyle}
-              value={block.body}
-              onChange={(e) => onUpdate({ body: e.target.value } as Partial<Block>)}
-            />
-          </div>
-          <div style={{ flex: '0 0 120px' }}>
-            <label style={labelStyle}>{t('notebook.emoji')}</label>
-            <input
-              style={inputStyle}
-              value={block.emoji || ''}
-              onChange={(e) => onUpdate({ emoji: e.target.value } as Partial<Block>)}
-            />
-          </div>
-        </>
-      )}
-
-      {type === 'quote' && (
-        <>
-          <div>
-            <label style={labelStyle}>{t('notebook.text')}</label>
-            <textarea
-              style={textareaStyle}
+              className="rec-textarea"
               value={block.text}
               onChange={(e) => onUpdate({ text: e.target.value } as Partial<Block>)}
             />
           </div>
-          <div>
-            <label style={labelStyle}>{t('notebook.author')}</label>
-            <input
-              style={inputStyle}
-              value={block.author || ''}
-              onChange={(e) => onUpdate({ author: e.target.value } as Partial<Block>)}
-            />
-          </div>
-        </>
-      )}
+        )}
 
-      {type === 'list' && (
-        <>
-          <div style={{ display: 'flex', alignItems: 'center', gap: SPACING.sm }}>
-            <label
-              style={{
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: 6,
-                fontSize: 12,
-                color: COLORS.textSecondary,
-                cursor: 'pointer',
-              }}
-            >
+        {type === 'card' && (
+          <>
+            <div className="rec-field">
+              <label className="rec-label">{t('notebook.cover_title')}</label>
+              <input
+                className="rec-input"
+                value={block.title || ''}
+                onChange={(e) => onUpdate({ title: e.target.value } as Partial<Block>)}
+              />
+            </div>
+            <div className="rec-field">
+              <label className="rec-label">{t('notebook.body')}</label>
+              <textarea
+                className="rec-textarea"
+                value={block.body}
+                onChange={(e) => onUpdate({ body: e.target.value } as Partial<Block>)}
+              />
+            </div>
+            <div style={{ flex: '0 0 120px' }}>
+              <label className="rec-label">{t('notebook.emoji')}</label>
+              <input
+                className="rec-input"
+                value={block.emoji || ''}
+                onChange={(e) => onUpdate({ emoji: e.target.value } as Partial<Block>)}
+              />
+            </div>
+          </>
+        )}
+
+        {type === 'quote' && (
+          <>
+            <div className="rec-field">
+              <label className="rec-label">{t('notebook.text')}</label>
+              <textarea
+                className="rec-textarea"
+                value={block.text}
+                onChange={(e) => onUpdate({ text: e.target.value } as Partial<Block>)}
+              />
+            </div>
+            <div className="rec-field">
+              <label className="rec-label">{t('notebook.author')}</label>
+              <input
+                className="rec-input"
+                value={block.author || ''}
+                onChange={(e) => onUpdate({ author: e.target.value } as Partial<Block>)}
+              />
+            </div>
+          </>
+        )}
+
+        {type === 'list' && (
+          <>
+            <label className="record-note-block-check">
               <input
                 type="checkbox"
                 checked={block.ordered || false}
@@ -2001,350 +1332,249 @@ const BlockEditor: React.FC<{
               />
               {t('notebook.ordered')}
             </label>
-          </div>
-          <div>
-            <label style={labelStyle}>
-              {t('notebook.text')}{' '}
-              <span style={{ fontWeight: 400, color: COLORS.textTertiary }}>{t('notebook.items_hint')}</span>
+            <div className="rec-field">
+              <label className="rec-label">
+                {t('notebook.text')}{' '}
+                <span className="rec-label-hint">{t('notebook.items_hint')}</span>
+              </label>
+              <textarea
+                className="rec-textarea"
+                value={itemsText}
+                onChange={(e) =>
+                  onUpdate({ items: e.target.value.split('\n') } as Partial<Block>)
+                }
+              />
+            </div>
+          </>
+        )}
+
+        {type === 'tags' && (
+          <div className="rec-field">
+            <label className="rec-label">
+              {t('notebook.tags')}{' '}
+              <span className="rec-label-hint">{t('notebook.items_hint')}</span>
             </label>
             <textarea
-              style={textareaStyle}
-              value={itemsText}
+              className="rec-textarea"
+              value={tagsValue}
               onChange={(e) =>
                 onUpdate({
-                  items: e.target.value.split('\n'),
+                  items: e.target.value.split(',').map((s) => s.trim()).filter(Boolean),
                 } as Partial<Block>)
               }
             />
           </div>
-        </>
-      )}
+        )}
 
-      {type === 'tags' && (
-        <div>
-          <label style={labelStyle}>
-            {t('notebook.tags')}{' '}
-            <span style={{ fontWeight: 400, color: COLORS.textTertiary }}>{t('notebook.items_hint')}</span>
-          </label>
-          <textarea
-            style={textareaStyle}
-            value={itemsText}
-            onChange={(e) =>
-              onUpdate({
-                items: e.target.value.split('\n'),
-              } as Partial<Block>)
-            }
-          />
-        </div>
-      )}
+        {type === 'image' && (
+          <>
+            <div className="rec-field">
+              <label className="rec-label">{t('notebook.url')}</label>
+              <input
+                className="rec-input"
+                value={block.url}
+                onChange={(e) => onUpdate({ url: e.target.value } as Partial<Block>)}
+              />
+            </div>
+            <div className="rec-field">
+              <label className="rec-label">{t('notebook.caption')}</label>
+              <input
+                className="rec-input"
+                value={block.caption || ''}
+                onChange={(e) => onUpdate({ caption: e.target.value } as Partial<Block>)}
+              />
+            </div>
+          </>
+        )}
 
-      {type === 'image' && (
-        <>
-          <div>
-            <label style={labelStyle}>{t('notebook.url')}</label>
-            <input
-              style={inputStyle}
-              value={block.url}
-              onChange={(e) => onUpdate({ url: e.target.value } as Partial<Block>)}
-            />
-          </div>
-          <div>
-            <label style={labelStyle}>{t('notebook.caption')}</label>
-            <input
-              style={inputStyle}
-              value={block.caption || ''}
-              onChange={(e) => onUpdate({ caption: e.target.value } as Partial<Block>)}
-            />
-          </div>
-        </>
-      )}
-
-      {type === 'divider' && (
-        <div style={{ flex: '0 0 120px' }}>
-          <label style={labelStyle}>{t('notebook.emoji')}</label>
-          <input
-            style={inputStyle}
-            value={block.emoji || ''}
-            onChange={(e) => onUpdate({ emoji: e.target.value } as Partial<Block>)}
-          />
-        </div>
-      )}
-
-      {type === 'callout' && (
-        <>
-          <div>
-            <label style={labelStyle}>{t('notebook.text')}</label>
-            <textarea
-              style={textareaStyle}
-              value={block.text}
-              onChange={(e) => onUpdate({ text: e.target.value } as Partial<Block>)}
-            />
-          </div>
+        {type === 'divider' && (
           <div style={{ flex: '0 0 120px' }}>
-            <label style={labelStyle}>{t('notebook.emoji')}</label>
+            <label className="rec-label">{t('notebook.emoji')}</label>
             <input
-              style={inputStyle}
+              className="rec-input"
               value={block.emoji || ''}
               onChange={(e) => onUpdate({ emoji: e.target.value } as Partial<Block>)}
             />
           </div>
-        </>
-      )}
+        )}
 
-      {type === 'table' && (
-        <>
-          <div>
-            <label style={labelStyle}>
-              {t('notebook.table_headers')}{' '}
-              <span style={{ fontWeight: 400, color: COLORS.textTertiary }}>{t('notebook.items_hint')}</span>
-            </label>
-            <textarea
-              style={textareaStyle}
-              value={tableHeadersText}
-              placeholder={'城市\t人均预算'}
-              onChange={(e) =>
-                onUpdate({
-                  headers: e.target.value.split('\n').filter(Boolean),
-                } as Partial<Block>)
-              }
-            />
-          </div>
-          <div>
-            <label style={labelStyle}>
-              {t('notebook.table_rows')}{' '}
-              <span style={{ fontWeight: 400, color: COLORS.textTertiary }}>{t('notebook.table_rows_hint')}</span>
-            </label>
-            <textarea
-              style={{ ...textareaStyle, minHeight: 100, fontFamily: TYPO.fontMono, fontSize: 12 }}
-              value={tableRowsText}
-              placeholder={'成都\t1200\n重庆\t800'}
-              onChange={(e) =>
-                onUpdate({
-                  rows: e.target.value
-                    .split('\n')
-                    .filter((line) => line.trim() !== '')
-                    .map((line) => line.split('\t')),
-                } as Partial<Block>)
-              }
-            />
-          </div>
-          <div>
-            <label style={labelStyle}>{t('notebook.caption')}</label>
-            <input
-              style={inputStyle}
-              value={block.caption || ''}
-              onChange={(e) => onUpdate({ caption: e.target.value } as Partial<Block>)}
-            />
-          </div>
-        </>
-      )}
-
-      {type === 'chart' && (
-        <>
-          <div style={{ display: 'flex', gap: SPACING.sm }}>
-            <div style={{ flex: '0 0 110px' }}>
-              <label style={labelStyle}>{t('notebook.chart_type')}</label>
-              <select
-                style={{ ...inputStyle, cursor: 'pointer', appearance: 'auto' }}
-                value={block.chart_type}
-                onChange={(e) => onUpdate({ chart_type: e.target.value } as Partial<Block>)}
-              >
-                <option value="bar">柱状图</option>
-                <option value="line">折线图</option>
-                <option value="pie">饼图</option>
-              </select>
-            </div>
-            <div style={{ flex: 1 }}>
-              <label style={labelStyle}>{t('notebook.chart_title')}</label>
-              <input
-                style={inputStyle}
-                value={block.title || ''}
-                onChange={(e) => onUpdate({ title: e.target.value } as Partial<Block>)}
+        {type === 'callout' && (
+          <>
+            <div className="rec-field">
+              <label className="rec-label">{t('notebook.text')}</label>
+              <textarea
+                className="rec-textarea"
+                value={block.text}
+                onChange={(e) => onUpdate({ text: e.target.value } as Partial<Block>)}
               />
             </div>
-          </div>
-          <div>
-            <label style={labelStyle}>
-              {t('notebook.chart_categories')}{' '}
-              <span style={{ fontWeight: 400, color: COLORS.textTertiary }}>{t('notebook.items_hint')}</span>
-            </label>
-            <textarea
-              style={textareaStyle}
-              value={chartCatsText}
-              placeholder={'季度1\n季度2\n季度3'}
-              onChange={(e) =>
-                onUpdate({
-                  categories: e.target.value.split('\n').filter(Boolean),
-                } as Partial<Block>)
-              }
-            />
-          </div>
-          <div>
-            <label style={labelStyle}>
-              {t('notebook.chart_series')}{' '}
-              <span style={{ fontWeight: 400, color: COLORS.textTertiary }}>{t('notebook.chart_series_hint')}</span>
-            </label>
-            <textarea
-              style={{ ...textareaStyle, minHeight: 90, fontFamily: TYPO.fontMono, fontSize: 12 }}
-              value={chartSeriesText}
-              placeholder={'销售额\t120,180,240'}
-              onChange={(e) =>
-                onUpdate({
-                  series: e.target.value
-                    .split('\n')
-                    .filter((line) => line.trim() !== '')
-                    .map((line) => {
-                      const [name, dataStr] = line.split('\t');
-                      const data = (dataStr || '')
-                        .split(',')
-                        .map((v) => Number(v.trim()))
-                        .filter((n) => !Number.isNaN(n));
-                      return { name: name || '系列', data };
-                    }),
-                } as Partial<Block>)
-              }
-            />
-          </div>
-        </>
-      )}
+            <div style={{ flex: '0 0 120px' }}>
+              <label className="rec-label">{t('notebook.emoji')}</label>
+              <input
+                className="rec-input"
+                value={block.emoji || ''}
+                onChange={(e) => onUpdate({ emoji: e.target.value } as Partial<Block>)}
+              />
+            </div>
+          </>
+        )}
 
-      {type === 'mermaid' && (
-        <>
-          <div>
-            <label style={labelStyle}>{t('notebook.mermaid_code')}</label>
-            <textarea
-              style={{ ...textareaStyle, minHeight: 140, fontFamily: TYPO.fontMono, fontSize: 12 }}
-              value={block.code}
-              placeholder={'graph TD\n  A[开始] --> B[过程]\n  B --> C[结束]'}
-              onChange={(e) => onUpdate({ code: e.target.value } as Partial<Block>)}
-            />
-          </div>
-          <div>
-            <label style={labelStyle}>{t('notebook.caption')}</label>
-            <input
-              style={inputStyle}
-              value={block.caption || ''}
-              onChange={(e) => onUpdate({ caption: e.target.value } as Partial<Block>)}
-            />
-          </div>
-        </>
-      )}
+        {type === 'table' && (
+          <>
+            <div className="rec-field">
+              <label className="rec-label">
+                {t('notebook.table_headers')}{' '}
+                <span className="rec-label-hint">{t('notebook.items_hint')}</span>
+              </label>
+              <textarea
+                className="rec-textarea"
+                value={tableHeadersText}
+                placeholder={'城市\t人均预算'}
+                onChange={(e) =>
+                  onUpdate({
+                    headers: e.target.value.split('\n').filter(Boolean),
+                  } as Partial<Block>)
+                }
+              />
+            </div>
+            <div className="rec-field">
+              <label className="rec-label">
+                {t('notebook.table_rows')}{' '}
+                <span className="rec-label-hint">{t('notebook.table_rows_hint')}</span>
+              </label>
+              <textarea
+                className="rec-textarea"
+                style={{ minHeight: 100, fontFamily: 'var(--claude-sans)', fontSize: 12 }}
+                value={tableRowsText}
+                placeholder={'成都\t1200\n重庆\t800'}
+                onChange={(e) =>
+                  onUpdate({
+                    rows: e.target.value
+                      .split('\n')
+                      .filter((line) => line.trim() !== '')
+                      .map((line) => line.split('\t')),
+                  } as Partial<Block>)
+                }
+              />
+            </div>
+            <div className="rec-field">
+              <label className="rec-label">{t('notebook.caption')}</label>
+              <input
+                className="rec-input"
+                value={block.caption || ''}
+                onChange={(e) => onUpdate({ caption: e.target.value } as Partial<Block>)}
+              />
+            </div>
+          </>
+        )}
 
-      {type === 'custom' && (
-        <div>
-          <label style={labelStyle}>{t('notebook.html')}</label>
-          <textarea
-            style={{ ...textareaStyle, minHeight: 100, fontFamily: TYPO.fontMono, fontSize: 12 }}
-            value={block.html}
-            onChange={(e) => onUpdate({ html: e.target.value } as Partial<Block>)}
-          />
-        </div>
-      )}
+        {type === 'chart' && (
+          <>
+            <div className="record-note-block-row">
+              <div style={{ flex: '0 0 110px' }}>
+                <label className="rec-label">{t('notebook.chart_type')}</label>
+                <select
+                  className="rec-select"
+                  value={block.chart_type}
+                  onChange={(e) => onUpdate({ chart_type: e.target.value } as Partial<Block>)}
+                >
+                  <option value="bar">柱状图</option>
+                  <option value="line">折线图</option>
+                  <option value="pie">饼图</option>
+                </select>
+              </div>
+              <div style={{ flex: 1 }}>
+                <label className="rec-label">{t('notebook.chart_title')}</label>
+                <input
+                  className="rec-input"
+                  value={block.title || ''}
+                  onChange={(e) => onUpdate({ title: e.target.value } as Partial<Block>)}
+                />
+              </div>
+            </div>
+            <div className="rec-field">
+              <label className="rec-label">
+                {t('notebook.chart_categories')}{' '}
+                <span className="rec-label-hint">{t('notebook.items_hint')}</span>
+              </label>
+              <textarea
+                className="rec-textarea"
+                value={chartCatsText}
+                placeholder={'季度1\n季度2\n季度3'}
+                onChange={(e) =>
+                  onUpdate({
+                    categories: e.target.value.split('\n').filter(Boolean),
+                  } as Partial<Block>)
+                }
+              />
+            </div>
+            <div className="rec-field">
+              <label className="rec-label">
+                {t('notebook.chart_series')}{' '}
+                <span className="rec-label-hint">{t('notebook.chart_series_hint')}</span>
+              </label>
+              <textarea
+                className="rec-textarea"
+                style={{ minHeight: 90, fontFamily: 'var(--claude-sans)', fontSize: 12 }}
+                value={chartSeriesText}
+                placeholder={'销售额\t120,180,240'}
+                onChange={(e) =>
+                  onUpdate({
+                    series: e.target.value
+                      .split('\n')
+                      .filter((line) => line.trim() !== '')
+                      .map((line) => {
+                        const [name, dataStr] = line.split('\t');
+                        const data = (dataStr || '')
+                          .split(',')
+                          .map((v) => Number(v.trim()))
+                          .filter((n) => !Number.isNaN(n));
+                        return { name: name || '系列', data };
+                      }),
+                  } as Partial<Block>)
+                }
+              />
+            </div>
+          </>
+        )}
+
+        {type === 'mermaid' && (
+          <>
+            <div className="rec-field">
+              <label className="rec-label">{t('notebook.mermaid_code')}</label>
+              <textarea
+                className="rec-textarea"
+                style={{ minHeight: 140, fontFamily: 'var(--claude-sans)', fontSize: 12 }}
+                value={block.code}
+                placeholder={'graph TD\n  A[开始] --> B[过程]\n  B --> C[结束]'}
+                onChange={(e) => onUpdate({ code: e.target.value } as Partial<Block>)}
+              />
+            </div>
+            <div className="rec-field">
+              <label className="rec-label">{t('notebook.caption')}</label>
+              <input
+                className="rec-input"
+                value={block.caption || ''}
+                onChange={(e) => onUpdate({ caption: e.target.value } as Partial<Block>)}
+              />
+            </div>
+          </>
+        )}
+
+        {type === 'custom' && (
+          <div className="rec-field">
+            <label className="rec-label">{t('notebook.html')}</label>
+            <textarea
+              className="rec-textarea"
+              style={{ minHeight: 100, fontFamily: 'var(--claude-sans)', fontSize: 12 }}
+              value={block.html}
+              onChange={(e) => onUpdate({ html: e.target.value } as Partial<Block>)}
+            />
+          </div>
+        )}
+      </div>
     </div>
   );
 };
-
-// ============================================================
-// 辅助组件/样式
-// ============================================================
-
-function pillBtn(primary: boolean): React.CSSProperties {
-  return {
-    display: 'inline-flex',
-    alignItems: 'center',
-    gap: 4,
-    padding: '6px 14px',
-    border: 'none',
-    borderRadius: primary ? '3px 14px 3px 14px' : '3px 10px 3px 10px',
-    background: primary ? COLORS.accent : COLORS.bgHover,
-    color: primary ? '#fff' : COLORS.textSecondary,
-    fontSize: 13,
-    fontWeight: 600,
-    fontFamily: TYPO.fontFamily,
-    transition: `all ${DURATION.fast}s ${EASE.swift}`,
-  };
-}
-
-// 胶囊交互按钮：统一 hover / 按压反馈
-const ActionButton: React.FC<{
-  primary?: boolean;
-  disabled?: boolean;
-  onClick: () => void;
-  children: React.ReactNode;
-  style?: React.CSSProperties;
-}> = ({ primary, disabled, onClick, children, style }) => {
-  const [hovered, setHovered] = useState(false);
-  const [pressed, setPressed] = useState(false);
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={disabled}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => {
-        setHovered(false);
-        setPressed(false);
-      }}
-      onMouseDown={() => setPressed(true)}
-      onMouseUp={() => setPressed(false)}
-      style={{
-        ...pillBtn(Boolean(primary)),
-        cursor: disabled ? 'not-allowed' : 'pointer',
-        opacity: disabled ? 0.5 : 1,
-        background: primary
-          ? hovered
-            ? COLORS.accentBright
-            : COLORS.accent
-          : hovered
-            ? COLORS.accentMuted
-            : COLORS.bgHover,
-        color: primary ? '#fff' : COLORS.textSecondary,
-        transform: pressed && !disabled ? 'scale(0.95)' : 'scale(1)',
-        ...style,
-      }}
-    >
-      {children}
-    </button>
-  );
-};
-
-const IconBtn: React.FC<{
-  children: React.ReactNode;
-  onClick: () => void;
-  title: string;
-  disabled?: boolean;
-  danger?: boolean;
-}> = ({ children, onClick, title, disabled, danger }) => (
-  <button
-    onClick={onClick}
-    title={title}
-    disabled={disabled}
-    style={{
-      border: 'none',
-      background: 'transparent',
-      color: disabled
-        ? COLORS.textTertiary
-        : danger
-          ? COLORS.danger
-          : COLORS.textSecondary,
-      cursor: disabled ? 'not-allowed' : 'pointer',
-      padding: 4,
-      borderRadius: RADIUS.xs,
-      display: 'inline-flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      opacity: disabled ? 0.4 : 1,
-      transition: `background ${DURATION.fast}s ${EASE.swift}`,
-    }}
-    onMouseEnter={(e) => {
-      if (!disabled) e.currentTarget.style.background = COLORS.bgActive;
-    }}
-    onMouseLeave={(e) => {
-      e.currentTarget.style.background = 'transparent';
-    }}
-  >
-    {children}
-  </button>
-);
 
 export default NotebookPage;

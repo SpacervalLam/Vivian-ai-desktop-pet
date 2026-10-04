@@ -241,6 +241,10 @@ impl FeatureFlags {
 
     /// 仅用于测试或显式构造
     pub fn new_with_defaults() -> Self {
+        Self::new_with_path(persistence_path())
+    }
+
+    fn new_with_path(persist_path: PathBuf) -> Self {
         let mut flags = HashMap::new();
         for def in PRESET_FLAGS {
             flags.insert(def.name.to_string(), def.default);
@@ -248,7 +252,7 @@ impl FeatureFlags {
         Self {
             flags: RwLock::new(flags),
             overrides: RwLock::new(HashSet::new()),
-            persist_path: RwLock::new(persistence_path()),
+            persist_path: RwLock::new(persist_path),
         }
     }
 
@@ -283,8 +287,10 @@ impl FeatureFlags {
             let mut flags = self.flags.write();
             flags.insert(name.to_string(), def.default);
         }
-        let mut overrides = self.overrides.write();
-        overrides.remove(name);
+        {
+            let mut overrides = self.overrides.write();
+            overrides.remove(name);
+        }
         if let Err(e) = self.persist() {
             tracing::warn!(error = %e, "[feature_flags] 持久化失败，重启后 flag 可能回退");
         }
@@ -474,12 +480,16 @@ mod tests {
 
     #[test]
     fn test_preset_flags_nonempty() {
-        assert!(PRESET_FLAGS.len() >= 18);
+        assert!(!PRESET_FLAGS.is_empty());
+        let names: HashSet<_> = PRESET_FLAGS.iter().map(|flag| flag.name).collect();
+        assert_eq!(names.len(), PRESET_FLAGS.len(), "preset names must be unique");
+        assert!(names.contains("voice"));
+        assert!(names.contains("desktop_control"));
     }
 
     #[test]
     fn test_defaults_loaded() {
-        let flags = FeatureFlags::new_with_defaults();
+        let flags = FeatureFlags::new_with_path(std::env::temp_dir().join(format!("vivian-flags-{}.json", uuid::Uuid::new_v4())));
         assert!(flags.is_enabled("voice"));
         assert!(flags.is_enabled("diary"));
         assert!(!flags.is_enabled("desktop_control"));
@@ -488,17 +498,21 @@ mod tests {
 
     #[test]
     fn test_unknown_flag_defaults_true() {
-        let flags = FeatureFlags::new_with_defaults();
+        let flags = FeatureFlags::new_with_path(std::env::temp_dir().join(format!("vivian-flags-{}.json", uuid::Uuid::new_v4())));
         assert!(flags.is_enabled("this_flag_does_not_exist"));
     }
 
     #[test]
     fn test_set_and_reset() {
-        let flags = FeatureFlags::new_with_defaults();
+        let dir = tempfile::tempdir().unwrap();
+        let flags = FeatureFlags::new_with_path(dir.path().join("feature_flags.json"));
         flags.set("voice", false, true);
         assert!(!flags.is_enabled("voice"));
         flags.reset("voice");
         assert!(flags.is_enabled("voice"));
+        let saved: PersistedState = serde_json::from_slice(&std::fs::read(dir.path().join("feature_flags.json")).unwrap()).unwrap();
+        assert_eq!(saved.flags.get("voice"), Some(&true));
+        assert!(!saved.overrides.iter().any(|name| name == "voice"));
     }
 
     #[test]
@@ -509,7 +523,7 @@ mod tests {
 
     #[test]
     fn test_get_by_category() {
-        let flags = FeatureFlags::new_with_defaults();
+        let flags = FeatureFlags::new_with_path(std::env::temp_dir().join(format!("vivian-flags-{}.json", uuid::Uuid::new_v4())));
         let ui_flags = flags.get_by_category(FlagCategory::Ui);
         assert!(ui_flags.contains_key("wechat_style_chat"));
         assert!(ui_flags["wechat_style_chat"]);
@@ -517,7 +531,7 @@ mod tests {
 
     #[test]
     fn test_dump_state_serializable() {
-        let flags = FeatureFlags::new_with_defaults();
+        let flags = FeatureFlags::new_with_path(std::env::temp_dir().join(format!("vivian-flags-{}.json", uuid::Uuid::new_v4())));
         let state = flags.dump_state();
         assert!(state.is_object());
         assert!(state.get("flags").is_some());

@@ -333,7 +333,7 @@ mod tests {
         let strategy = WindowStrategy::new(history.clone(), 4);
         let ctx = strategy.load_context().await;
         assert_eq!(ctx.len(), 4);
-        assert_eq!(ctx[0].content, "ai msg 3"); // 最近 4 条：ai3, user4, ai4, user5
+        assert_eq!(ctx[0].content, "user msg 3"); // 最近 4 条：user3, ai3, user4, ai4
     }
 
     #[tokio::test]
@@ -376,7 +376,7 @@ mod tests {
         let s1 = create_strategy(MemoryStrategyKind::Window(5), history.clone(), None);
         assert_eq!(s1.load_context().await.len(), 0); // 空 history
 
-        populate(&history, 2).await;
+        populate(&history, 3).await;
         let s2 = create_strategy(
             MemoryStrategyKind::Token(100),
             history.clone(),
@@ -387,7 +387,7 @@ mod tests {
         let s3 = create_strategy(
             MemoryStrategyKind::SummaryBuffer {
                 max_messages: 2,
-                retain_recent: 2,
+                retain_recent: 1,
             },
             history.clone(),
             None,

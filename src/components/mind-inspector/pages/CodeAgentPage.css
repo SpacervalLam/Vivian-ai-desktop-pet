@@ -2971,11 +2971,12 @@
 /* 形态与原来的 textarea 对齐（高度、行高、内边距），只是内容变成了块序列。
    块类沿用 .codex-md-*，所以粘贴进来的 markdown 与上方消息区长得一样。 */
 .codex-composer-editor {
+  --composer-editor-padding-y: 8px;
   flex: 1;
   min-height: 48px;
   max-height: 130px;
   overflow-y: auto;
-  padding: 8px 0;
+  padding: var(--composer-editor-padding-y) 0;
   /* 与上方消息区同字体。这里必须显式写出来：`.codex-md`（在文件更后面）也设了
      font-family，同优先级下源码顺序靠后的它会把这条覆盖掉 —— 与其依赖顺序，
      不如直接指向同一个变量，意图才明确。 */
@@ -2990,7 +2991,11 @@
 
 /* 空文档时的占位符。标记由 JS 直接写在 dataset 上（不走 React state，
    否则每次按键都会重渲染，光标会被弹走）。 */
+.codex-composer-editor { position: relative; }
 .codex-composer-editor[data-empty='true']::before {
+  position: absolute;
+  top: var(--composer-editor-padding-y);
+  left: 0;
   content: attr(data-placeholder);
   color: var(--codex-ink-faint);
   font-style: italic;

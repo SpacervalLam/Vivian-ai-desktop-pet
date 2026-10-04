@@ -715,7 +715,7 @@ mod tests {
             .date_naive()
             .and_hms_opt(local_hour.floor() as u32, ((local_hour * 60.0) % 60.0) as u32, 0)
             .unwrap_or_else(|| now_local.naive_local());
-        let started = target.and_utc().timestamp() as f64;
+        let started = chrono::TimeZone::from_local_datetime(&chrono::Local, &target).single().expect("unambiguous local test time").timestamp() as f64;
         let duration = duration_hours * 3600.0;
         UserBehaviorEntry {
             id: format!("test_at_{}", local_hour),
@@ -793,9 +793,9 @@ mod tests {
         // dinner_hour 旧 19，新 23 → circular_distance=4，归一化 4/12
         let dev = compute_deviation(23.0, 19.0, MetricKind::TimeOfDay);
         assert!((dev - (4.0 / 12.0)).abs() < 1e-6);
-        // 跨日：旧 19，新 2 → circular_distance=5，归一化 5/12
+        // 跨日：旧 19，新 2 → circular_distance=7，归一化 7/12
         let dev = compute_deviation(2.0, 19.0, MetricKind::TimeOfDay);
-        assert!((dev - (5.0 / 12.0)).abs() < 1e-6);
+        assert!((dev - (7.0 / 12.0)).abs() < 1e-6);
         // 同点：偏差 0
         assert_eq!(compute_deviation(19.0, 19.0, MetricKind::TimeOfDay), 0.0);
     }

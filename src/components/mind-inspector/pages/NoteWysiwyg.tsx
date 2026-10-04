@@ -22,6 +22,10 @@ import {
   Bold,
   Italic,
   Type,
+  Lightbulb,
+  BarChart3,
+  GitBranch,
+  Minus,
 } from 'lucide-react';
 import { COLORS, TYPO, SPACING, EASE, DURATION } from '../design-system';
 import {
@@ -440,7 +444,13 @@ const EditableBlock: React.FC<{
         return (
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, color: COLORS.textTertiary }}>
             <div style={{ flex: 1, height: 1, background: COLORS.border }} />
-            <span>{block.emoji || '✿'}</span>
+            {/* 块自带 emoji 时用用户的；没有就用一条短横 ——
+                不再兜底 '✿'：emoji 渲染随系统字体变化、字形不可控。 */}
+            {block.emoji ? (
+              <span>{block.emoji}</span>
+            ) : (
+              <Minus size={14} />
+            )}
             <div style={{ flex: 1, height: 1, background: COLORS.border }} />
           </div>
         );
@@ -457,7 +467,11 @@ const EditableBlock: React.FC<{
               alignItems: 'flex-start',
             }}
           >
-            <span style={{ fontSize: 18 }}>{block.emoji || '💡'}</span>
+            {block.emoji ? (
+              <span style={{ fontSize: 18, lineHeight: 1 }}>{block.emoji}</span>
+            ) : (
+              <Lightbulb size={17} style={{ color: COLORS.accent, flexShrink: 0 }} />
+            )}
             <EditableText
               value={block.text}
               onCommit={commitText('text')}
@@ -528,6 +542,7 @@ const EditableBlock: React.FC<{
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
+              gap: 7,
               color: COLORS.textSecondary,
               background: COLORS.subtleBg,
               borderRadius: '3px 12px 3px 12px',
@@ -535,7 +550,8 @@ const EditableBlock: React.FC<{
               fontFamily: TYPO.fontFamily,
             }}
           >
-            📊 图表（{block.chart_type}）：{block.title || '未命名'}
+            <BarChart3 size={14} style={{ flexShrink: 0 }} />
+            图表（{block.chart_type}）：{block.title || '未命名'}
           </div>
         );
       case 'mermaid':
@@ -549,9 +565,13 @@ const EditableBlock: React.FC<{
               fontSize: 13,
               fontFamily: TYPO.fontFamily,
               whiteSpace: 'pre-wrap',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 7,
             }}
           >
-            🔰 Mermaid 图
+            <GitBranch size={14} style={{ flexShrink: 0 }} />
+            Mermaid 图
             {block.caption && <div style={{ marginTop: 4 }}>{block.caption}</div>}
           </div>
         );

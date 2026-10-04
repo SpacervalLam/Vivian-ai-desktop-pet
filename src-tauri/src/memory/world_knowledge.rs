@@ -521,8 +521,9 @@ mod tests {
         let s = engine.format_for_prompt(10, "zh").unwrap();
         assert!(s.contains("## 共享世界知识"));
         assert!(s.contains("[UserPreference] 用户喜欢原神"));
-        assert!(s.contains("重要性: 0.80"));
-        assert!(s.contains("强化次数: 3"));
+        assert!(s.contains("用户喜欢原神"));
+        assert!(!s.contains("importance:"));
+        assert_eq!(engine.inner.read().facts[0].reinforcement_count, 3);
     }
 
     #[test]

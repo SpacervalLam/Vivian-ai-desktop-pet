@@ -1010,6 +1010,9 @@ impl CrossCharacterBus {
                         crate::messages::MessageMeta::assistant().with_channel("cross_character"),
                     );
                     let source_meta = json!({
+                        "conversation_id": conv.id,
+                        "session_id": conv.id,
+                        "content_type": "dialogue_turn",
                         "channel": "cross_character",
                         "speaker": req.source_id,
                         "listener": req.target_id,
@@ -1040,6 +1043,9 @@ impl CrossCharacterBus {
                         crate::messages::MessageMeta::user().with_channel("cross_character"),
                     );
                     let target_meta = json!({
+                        "conversation_id": conv.id,
+                        "session_id": conv.id,
+                        "content_type": if response_mode.needs_speech() { "dialogue_turn" } else { "response_status" },
                         "channel": "cross_character",
                         "speaker": req.target_id,
                         "listener": req.source_id,
@@ -1077,62 +1083,8 @@ impl CrossCharacterBus {
                         }
                     });
 
-                    // 4. 目标角色也补写一条带 speaker/listener 标注的记忆
-                    //    非 speak 模式下，目标角色自己 think 时 text 已被清空，
-                    //    这里补一条带 response_mode 元数据的记忆，便于后续巩固。
-                    let target_memory = target_instance.brain.memory.clone();
-                    let target_mem_content = if response_mode.needs_speech() {
-                        format!(
-                            "{} 和我聊天：她说：{}；我回复她：{}",
-                            source_name, req.message, final_text
-                        )
-                    } else {
-                        format!(
-                            "{} 对我说：{}；我{}",
-                            source_name,
-                            req.message,
-                            match response_mode {
-                                crate::conversation::ResponseMode::NonVerbal => "没有说话，只是做了一个动作回应".to_string(),
-                                crate::conversation::ResponseMode::Internal => "听到了但没有回应，在心里记下了".to_string(),
-                                crate::conversation::ResponseMode::Ignore => "没有回应".to_string(),
-                                _ => "没有回应".to_string(),
-                            }
-                        )
-                    };
-                    let target_mem_meta = json!({
-                        "channel": "cross_character",
-                        "speaker": req.target_id,
-                        "listener": req.source_id,
-                        "perspective": "speaker",
-                        "response_mode": response_mode.as_str(),
-                    });
-                    let tid2 = req.target_id.clone();
-                    let sid2 = req.source_id.clone();
-                    let content2 = target_mem_content;
-                    tokio::spawn(async move {
-                        use crate::memory::types::MemoryType;
-                        if let Err(e) = target_memory
-                            .add_memory_with_metadata(
-                                &content2,
-                                MemoryType::CasualConversation,
-                                0.45,
-                                vec!["cross_character".to_string(), "dialogue".to_string(), "topic_summary".to_string()],
-                                target_mem_meta,
-                            )
-                            .await
-                        {
-                            tracing::warn!(
-                                "[CrossCharacter] 目标角色 {} 写入跨角色对话记忆失败: {}",
-                                tid2,
-                                e
-                            );
-                        } else {
-                            tracing::debug!(
-                                "[CrossCharacter] 目标角色 {} 已补记与 {} 的跨角色对话记忆",
-                                tid2, sid2
-                            );
-                        }
-                    });
+                    // 目标角色的输入与回复已由 Brain 的记忆步骤按 conversation_id 保存。
+                    // 不再额外拼接一条复述；原始消息本身就是会话的组成部分。
 
                     // 5. 写入 AgentAgent 关系日志（记录跨角色关系信号）
                     // 源角色主动发起与目标角色的对话，记录一条 AgentAgent 方向的关系信号。

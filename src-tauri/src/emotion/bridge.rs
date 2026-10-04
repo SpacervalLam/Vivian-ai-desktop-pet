@@ -229,10 +229,14 @@ impl EmotionBridge {
             )
         };
 
+        self.apply_classified_emotion(text, &final_result, &source)
+    }
+
+    fn apply_classified_emotion(&self, text: &str, final_result: &EmotionResult, source: &str) -> EmotionPipelineResult {
         // 5. 规范化情绪标签到 14 类
         let normalized_emotion = normalize_llm_emotion(&final_result.emotion).to_string();
         let mut pipeline_result =
-            EmotionPipelineResult::from_emotion_result(&final_result, &source);
+            EmotionPipelineResult::from_emotion_result(final_result, source);
         pipeline_result.emotion = normalized_emotion.clone();
 
         // 6. 映射到 EmotionLabel 并通过 PsychologyManager 更新情绪状态
@@ -654,17 +658,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_process_emotion_no_llm_uses_keyword() {
+    async fn test_process_emotion_no_llm_does_not_infer_from_keywords() {
         let bridge = make_bridge_no_llm();
         let result = bridge.process_emotion("今天真的很开心，哈哈！").await;
-        // 关键词命中 happy
-        assert_eq!(result.emotion, "happy");
-        assert_eq!(result.source, "keyword");
+        // 无分类器时不猜测情绪
+        assert_eq!(result.emotion, "neutral");
+        assert_eq!(result.source, "no_llm");
         assert!(!result.from_cache);
         // pet_emotion 应映射到 Joy
-        assert_eq!(result.pet_emotion, "joy");
+        assert_eq!(result.pet_emotion, "curiosity");
         // happy → "star_eyes" 表情（由 Vivian model_manifest.json emotion_map 映射）
-        assert_eq!(result.expression, "star_eyes");
+        assert_eq!(result.expression, "");
     }
 
     #[tokio::test]
@@ -672,7 +676,7 @@ mod tests {
         let bridge = make_bridge_no_llm();
         let result = bridge.process_emotion("今天天气不错").await;
         assert_eq!(result.emotion, "neutral");
-        assert_eq!(result.source, "keyword");
+        assert_eq!(result.source, "no_llm");
         // neutral 不触发表情
         assert_eq!(result.expression, "");
     }
@@ -683,7 +687,7 @@ mod tests {
         let text = "今天真的很开心，哈哈！";
         let first = bridge.process_emotion(text).await;
         assert!(!first.from_cache);
-        assert_eq!(first.source, "keyword");
+        assert_eq!(first.source, "no_llm");
 
         // 第二次相同文本应命中缓存
         let second = bridge.process_emotion(text).await;
@@ -696,11 +700,11 @@ mod tests {
     #[tokio::test]
     async fn test_process_emotion_updates_psychology() {
         let bridge = make_bridge_no_llm();
-        let _ = bridge.process_emotion("气死我了，烦死了").await;
+        let before = bridge.psychology.emotion().anger;
+        bridge.apply_classified_emotion("分类后的输入", &EmotionResult { emotion: "angry".into(), intensity: 1.0, source: "llm".into(), ..Default::default() }, "llm");
         // 应更新 PsychologyManager 主导情绪为 Anger
         let emotion = bridge.psychology.emotion();
-        let (label, _) = emotion.dominant();
-        assert_eq!(label, EmotionLabel::Anger);
+        assert!(emotion.anger > before);
     }
 
     #[tokio::test]
@@ -714,7 +718,7 @@ mod tests {
         let results = bridge.process_emotion_batch(texts).await;
         assert_eq!(results.len(), 3);
         // 最后一条是 angry
-        assert_eq!(results[2].emotion, "angry");
+        assert!(results.iter().all(|result| result.emotion == "neutral" && result.source == "no_llm"));
     }
 
     #[tokio::test]
@@ -735,7 +739,7 @@ mod tests {
             .with_expression_trigger(trigger);
 
         // happy → "star_eyes" 表情，应触发回调
-        let _ = bridge.process_emotion("今天好开心，哈哈").await;
+        bridge.apply_classified_emotion("分类后的输入", &EmotionResult { emotion: "happy".into(), intensity: 0.8, source: "llm".into(), ..Default::default() }, "llm");
         let calls = trigger_calls.lock().unwrap();
         assert!(calls.iter().any(|(n, _)| n == "star_eyes"));
     }
@@ -795,11 +799,11 @@ mod tests {
         let bridge = make_bridge_no_llm();
         let ctx = bridge.analyze_and_track("今天好开心，哈哈").await;
         // 原始情感来自关键词分析
-        assert_eq!(ctx.original_emotion, "happy");
+        assert_eq!(ctx.original_emotion, "neutral");
         // 分类后情感已规范化
-        assert_eq!(ctx.classified_emotion, "happy");
+        assert_eq!(ctx.classified_emotion, "neutral");
         // pet_emotion 应为 joy
-        assert_eq!(ctx.pet_emotion, "joy");
+        assert_eq!(ctx.pet_emotion, "curiosity");
         // PsychologyManager 应已更新
         assert!(ctx.pet_status_updated);
         // perception_bias 应包含全部 14 类
@@ -809,8 +813,12 @@ mod tests {
     #[tokio::test]
     async fn test_get_current_emotion_reflects_psychology() {
         let bridge = make_bridge_no_llm();
-        // 触发一次分析以更新 PsychologyManager
-        let _ = bridge.process_emotion("气死我了，烦死了").await;
+        for _ in 0..10 {
+            bridge.apply_classified_emotion("分类后的输入", &EmotionResult {
+                emotion: "angry".into(), intensity: 1.0, source: "llm".into(),
+                ..Default::default()
+            }, "llm");
+        }
         let current = bridge.get_current_emotion();
         // 主导情绪为 Anger → 14 类 angry
         assert_eq!(current.emotion, "angry");

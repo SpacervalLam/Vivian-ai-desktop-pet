@@ -50,24 +50,15 @@ if (!isTauri && initialParams.get('view') === 'rig_preview') {
     setCharacterId(characterIdParam);
   } else if (!view) {
     // 角色主窗口（无 view 参数）：label 就是 character_id（如 vivian / nana）
-    setCharacterId(currentWindowLabel !== 'main' ? currentWindowLabel : null);
+    setCharacterId(currentWindowLabel);
   } else {
     // 共享子窗口（有 view 但无 character_id）：不绑定角色，由内部三视图切换决定
     setCharacterId(null);
   }
 
-  // main 窗口是 tauri.conf.json 预定义的隐藏控制器窗口（visible:false），
-  // 不加载任何 UI — 角色窗口由 lib.rs 按需创建（label = character_id）。
-  const isHiddenController = currentWindowLabel === 'main' && !view;
-
   // 各窗口按需动态加载，主桌宠使用轻量 Q 版图集，不再预载 Cubism SDK。
   void (async () => {
     try {
-      // 隐藏控制器窗口不渲染任何 UI，也跳过 i18n/样式加载，保持最小内存足迹
-      if (isHiddenController) {
-        return;
-      }
-
       if (view === 'room') {
         await mountApartment(container);
         return;

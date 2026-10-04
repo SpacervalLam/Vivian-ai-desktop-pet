@@ -733,8 +733,8 @@ mod tests {
         let result = parser.parse(text).unwrap();
         // ProcessedResponse 序列化后应包含这些字段
         assert_eq!(result["text"], "你好");
-        assert_eq!(result["motion"], "idle");
-        assert_eq!(result["importance_user"], 0.8);
+        assert!(result.get("motion").is_none()); // Legacy motion field is not model-controlled.
+        assert!(result.get("importance_user").is_none());
     }
 
     #[derive(Debug, Deserialize, Serialize, PartialEq)]
@@ -778,7 +778,7 @@ mod tests {
         StateFieldParser::apply_value(&mut state, &value);
         assert_eq!(state.text, "你好呀");
         assert_eq!(state.motion, "idle");
-        assert_eq!(state.expression, "star_eyes");
+        assert!(state.expression.is_empty()); // Controlled by the expression subsystem.
         assert_eq!(state.importance_user, 0.7);
         assert_eq!(state.importance_ai, 0.4);
         assert_eq!(state.long_term_memory, "用户打招呼");
@@ -833,7 +833,7 @@ mod tests {
         let result = parser.ainvoke(input, None).await.unwrap();
         let final_state = PipelineState::from_json(result);
         assert_eq!(final_state.text, "来自response_text");
-        assert_eq!(final_state.motion, "nod");
+        assert_eq!(final_state.motion, "idle");
     }
 
     #[test]
@@ -909,11 +909,12 @@ mod tests {
         parser.atransform(input, tx, None).await.unwrap();
 
         let mut got_delta = false;
+        let mut accumulated = String::new();
         let mut got_done = false;
         while let Some(v) = rx.recv().await {
             match v.get("type").and_then(|t| t.as_str()) {
                 Some("text_delta") => {
-                    assert_eq!(v["data"], "hi");
+                    accumulated.push_str(v["data"].as_str().unwrap());
                     got_delta = true;
                 }
                 Some("text_done") => {
@@ -926,5 +927,6 @@ mod tests {
         }
         assert!(got_delta, "应产生 text_delta 事件");
         assert!(got_done, "应产生 text_done 事件");
+        assert_eq!(accumulated, "hi");
     }
 }

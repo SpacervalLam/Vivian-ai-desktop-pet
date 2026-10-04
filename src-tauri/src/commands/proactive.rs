@@ -1314,7 +1314,7 @@ pub async fn proactive_tick(
         } else {
             let mut m = ChatMessage::assistant(&clean_content);
             m.meta = Some(MessageMeta::new(MessageSource::Assistant).with_channel("proactive"));
-            brain.dialogue.add_message_with_metadata(m, json!({ "session_id": session_id }));
+            brain.dialogue.add_message_with_metadata(m, json!({ "session_id": session_id, "speaker": brain.char_id, "listener": "user" }));
         }
     }
 
@@ -1481,15 +1481,16 @@ async fn deliver_cross_character_messages(
     if cross_messages.is_empty() {
         return;
     }
-    let target = {
-        let characters = state.characters.read();
-        characters
-            .iter()
-            .find(|(id, inst)| *id != char_id && *inst.online.read())
-            .map(|(id, inst)| (id.clone(), inst.name.clone()))
-    };
-    if let Some((target_id, _)) = target {
-        for msg in &cross_messages {
+    for msg in &cross_messages {
+        let target = {
+            let characters = state.characters.read();
+            // Never redirect a composed message to another character if the original leaves.
+            characters.iter()
+                .find(|(id, inst)| *id != char_id && *inst.online.read()
+                    && msg.listener.as_deref().map_or(true, |listener| listener == id.as_str()))
+                .map(|(id, inst)| (id.clone(), inst.name.clone()))
+        };
+        if let Some((target_id, _)) = target {
             if msg.content.trim().is_empty() {
                 tracing::info!(
                     "[Proactive:{}] 跨角色空文本消息，跳过发送: trigger={}",
@@ -1544,12 +1545,10 @@ async fn deliver_cross_character_messages(
                     );
                 }
             }
+        } else {
+            tracing::debug!(character = char_id, listener = ?msg.listener,
+                "跨角色消息原定对象不在线，丢弃");
         }
-    } else {
-        tracing::debug!(
-            "[Proactive:{}] 产生了跨角色消息但无在线室友，丢弃",
-            char_id
-        );
     }
 }
 
@@ -1563,6 +1562,10 @@ pub async fn drain_proactive_messages(
     let brain = state.get_character(character_id.as_deref())?.brain;
     let mut messages = brain.drain_proactive_messages();
     messages.retain(deliverable_proactive_action);
+    let cross_messages: Vec<_> = messages.iter()
+        .filter(|message| message.trigger == "cross_character_reply").cloned().collect();
+    messages.retain(|message| message.trigger != "cross_character_reply");
+    deliver_cross_character_messages(&app, &state, &brain.char_id, cross_messages).await;
     retain_topic_channel(&brain.char_id, &mut messages);
     // Alternate drain must have exactly the same realtime/private-history delivery contract.
     let mut delivered_sessions = Vec::new();
@@ -1576,7 +1579,7 @@ pub async fn drain_proactive_messages(
         } else {
             let mut m = ChatMessage::assistant(&clean_content);
             m.meta = Some(MessageMeta::new(MessageSource::Assistant).with_channel("proactive"));
-            brain.dialogue.add_message_with_metadata(m, json!({ "session_id": session_id }));
+            brain.dialogue.add_message_with_metadata(m, json!({ "session_id": session_id, "speaker": brain.char_id, "listener": "user" }));
         }
     }
 

@@ -58,6 +58,8 @@ pub const CODING_MODES: &[&str] = &["standard", "code", "minimal"];
 /// 末三者为能力进化工具：工作智能体是"进化事件"的执行主体——沉淀方法论
 /// （create_skill / use_skill）与构建新工具（create_tool，经用户预览卡片授权）。
 pub const CODING_TOOLS: &[&str] = &[
+    "computer_action",
+    "screenshot_analyze",
     "web_search",
     "web_fetch",
     "read_file",
@@ -192,6 +194,10 @@ pub fn valid_mode(mode: &str) -> bool {
 pub enum CodingRole {
     User,
     Assistant,
+    /// 工具执行前的模型说明，不是最终回复。
+    Commentary,
+    /// 模型接口返回、已对用户展示的思考文本，仅用于工作过程展示。
+    Thinking,
     ToolUse,
     ToolResult,
     Error,
@@ -2321,7 +2327,7 @@ impl CodingAgentService {
                 CodingRole::User => {
                     md.push_str(&format!("### 用户（{ts}）\n\n{}\n\n", m.content));
                 }
-                CodingRole::Assistant => {
+                CodingRole::Assistant | CodingRole::Commentary => {
                     md.push_str(&format!("### 助手（{ts}）\n\n{}\n\n", m.content));
                 }
                 CodingRole::ToolUse => {
@@ -2344,6 +2350,9 @@ impl CodingAgentService {
                 }
                 CodingRole::Error => {
                     md.push_str(&format!("### 错误（{ts}）\n\n{}\n\n", m.content));
+                }
+                CodingRole::Thinking => {
+                    md.push_str(&format!("### 工作思考（{ts}）\n\n{}\n\n", m.content));
                 }
                 CodingRole::Notice => {
                     md.push_str(&format!("> {}\n\n", m.content));
@@ -2492,6 +2501,7 @@ impl CodingAgentService {
         let mut output_tracker = crate::brain::budget::OutputBudgetTracker::new();
         // 清单全部完成后只提示一次收尾，避免每轮重复注入同一句提醒
         let mut plan_done_hinted = false;
+        let mut delivery_hinted = false;
 
         loop {
             // 本轮是否有实质进展（本轮内被置 true），收益递减检测用
@@ -2512,7 +2522,7 @@ impl CodingAgentService {
                 self.push_message(
                     session_id,
                     CodingMessage {
-                        role: CodingRole::Error,
+                        role: CodingRole::Notice,
                         images: None,
                         content: format!(
                             "已达到单轮最大工具调用轮数（{old_budget}），检测到任务仍在推进，自动续轮 {} 轮。",
@@ -2529,9 +2539,9 @@ impl CodingAgentService {
                         timestamp: chrono::Utc::now().timestamp_millis(),
                     },
                 );
-                let _ = app.emit("coding:error", serde_json::json!({
+                let _ = app.emit("coding:notice", serde_json::json!({
                     "session_id": session_id,
-                    "kind": CodingErrorKind::BudgetExtended,
+                    "kind": "budget_extended",
                     "message": format!("已达到单轮最大工具调用轮数（{old_budget}），自动续轮 {} 轮", budget - old_budget),
                 }));
             }
@@ -2596,6 +2606,7 @@ impl CodingAgentService {
             // 识别后自动重试（最多 3 次），仍失败则明确报错收尾，而不是静默当成"最终回复"断在一半。
             const MAX_STREAM_ATTEMPTS: usize = 3;
             let mut streamed_text = String::new();
+            let mut streamed_thinking = String::new();
             let mut web_sources = Vec::new();
             let mut call_buf: BTreeMap<usize, (String, String, String)> = BTreeMap::new(); // index -> (id, name, args)
             let mut step_usage: Option<CodingTokenUsage> = None;
@@ -2604,7 +2615,7 @@ impl CodingAgentService {
             let mut calls: Vec<MessageToolCall> = Vec::new();
             let mut missing_tool_calls = false;
 
-            'stream_attempt: for attempt in 1..=MAX_STREAM_ATTEMPTS {
+            'stream_attempt: for attempt in 1..=MAX_STREAM_ATTEMPTS + 1 {
                 if self.is_canceled(session_id) {
                     self.finish_turn(app.clone(), session_id, CodingStatus::Canceled);
                     return;
@@ -2626,10 +2637,47 @@ impl CodingAgentService {
                     .with_character_id(char_id.clone());
                 // 推理等级：low 关闭思维链，medium/high 按档位开启（按模型能力映射 wire 字段）
                 attempt_req.reasoning = reasoning_level_to_pref(&reasoning_level);
+                // SSE 连续中断后只尝试一次非流式原生工具调用。
+                // 当前请求的工具尚未执行，恢复不会重放此前已执行的步骤。
+                if attempt > MAX_STREAM_ATTEMPTS {
+                    let _ = app.emit("coding:notice", serde_json::json!({
+                        "session_id": session_id,
+                        "kind": "stream_recovery",
+                        "message": "模型流式连接连续中断，正在尝试非流式恢复，已执行的步骤会保留。",
+                    }));
+                    let response = tokio::select! {
+                        result = tokio::time::timeout(std::time::Duration::from_secs(90), router.generate_with_tools(attempt_req)) => result,
+                        _ = async {
+                            while !self.is_canceled(session_id) {
+                                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                            }
+                        } => {
+                            self.finish_turn(app.clone(), session_id, CodingStatus::Canceled);
+                            return;
+                        }
+                    };
+                    match response {
+                        Ok(Ok(response)) => {
+                            streamed_text = response.content;
+                            streamed_thinking = response.reasoning.unwrap_or_default();
+                            calls = response.tool_calls.into_iter().map(|call| MessageToolCall {
+                                id: call.id, name: call.name, arguments: call.arguments,
+                            }).collect();
+                            done_finish_reason = response.finish_reason;
+                            // 丢弃失败流的 token 用量，不能当作本次响应的已确认用量。
+                            step_usage = None;
+                            break 'stream_attempt;
+                        }
+                        Ok(Err(error)) => self.report_llm_error(&app, session_id, "LLM 非流式恢复", &error.to_string()),
+                        Err(_) => self.report_llm_error(&app, session_id, "LLM 非流式恢复", "request timed out"),
+                    }
+                    self.finish_turn(app.clone(), session_id, CodingStatus::Idle);
+                    return;
+                }
                 let mut event_rx = match router.generate_stream_with_tools(attempt_req).await {
                     Ok(rx) => rx,
                     Err(e) => {
-                        if should_retry_work_stream(&e.to_string(), attempt, MAX_STREAM_ATTEMPTS) {
+                        if should_retry_work_stream(&e.to_string(), attempt, MAX_STREAM_ATTEMPTS + 1) {
                             tracing::warn!("[CodingAgent] 流式请求失败，重试 {attempt}/{MAX_STREAM_ATTEMPTS}: {e}");
                             tokio::time::sleep(std::time::Duration::from_secs(attempt as u64)).await;
                             continue 'stream_attempt;
@@ -2641,6 +2689,7 @@ impl CodingAgentService {
                 };
 
                 streamed_text.clear();
+                streamed_thinking.clear();
                 web_sources.clear();
                 call_buf.clear();
                 done_finish_reason = None;
@@ -2685,8 +2734,9 @@ impl CodingAgentService {
                             });
                         }
                         StreamEvent::Thinking { content } => {
-                            // 推理链增量：转发前端在"思考占位"内渐进展开灰色文本（不入库）
+                            // 推理链增量先实时展示，完整尝试结束后保存为工作过程消息。
                             if !content.is_empty() {
+                                streamed_thinking.push_str(&content);
                                 if !first_token_tracked {
                                     first_token_tracked = true;
                                     self.stats_first_token(
@@ -2732,7 +2782,7 @@ impl CodingAgentService {
                 if !stream_completed {
                     let message = stream_error.unwrap_or_else(|| "stream ended before completion".into());
                     // 工具仅在完整响应后执行；重放当前请求不会重复执行前面轮次的命令。
-                    if should_retry_work_stream(&message, attempt, MAX_STREAM_ATTEMPTS) {
+                    if should_retry_work_stream(&message, attempt, MAX_STREAM_ATTEMPTS + 1) {
                         tracing::warn!("[CodingAgent] 流式响应中断，重试 {attempt}/{MAX_STREAM_ATTEMPTS}: {message}");
                         tokio::time::sleep(std::time::Duration::from_secs(attempt as u64)).await;
                         continue 'stream_attempt;
@@ -2771,19 +2821,18 @@ impl CodingAgentService {
                 break 'stream_attempt;
             }
 
+            self.record_work_text(&app, session_id, CodingRole::Thinking, &streamed_thinking);
+            if !calls.is_empty() || done_finish_reason.as_deref() == Some("tool_calls") {
+                self.record_work_text(&app, session_id, CodingRole::Commentary, &streamed_text);
+            }
+
             // 重试仍失败：声明工具调用却始终收不到 → 明确报错，不再静默当"最终回复"断在一半
             if calls.is_empty() && done_finish_reason.as_deref() == Some("tool_calls") {
                 let m = "模型声明要调用工具，但调用数据在流式传输中多次丢失（DeepSeek V4 Flash 偶发问题）。本轮已停止，可发送“继续”重试。";
-                self.push_error(session_id, m);
-                let _ = app.emit(
-                    "coding:error",
-                    serde_json::json!({
-                        "session_id": session_id,
-                        "kind": CodingErrorKind::ToolStreamLost,
-                        "message": m,
-                    }),
-                );
-                self.finish_turn(app.clone(), session_id, CodingStatus::Idle);
+                self.finish_stopped_turn(
+                    &app, session_id, router, m,
+                    "检查模型的工具调用兼容性与网络连接，必要时切换模型后从未完成步骤继续。",
+                ).await;
                 return;
             }
 
@@ -2798,7 +2847,7 @@ impl CodingAgentService {
             self.stats_step_done(
                 session_id,
                 llm_start.elapsed().as_millis() as u64,
-                step_usage,
+                step_usage.clone(),
             );
 
             // 无工具调用：assistant 文本回复即轮次结束（流式已逐步推送，此处落库 + 通知前端定型）
@@ -2853,7 +2902,7 @@ impl CodingAgentService {
                 return;
             }
 
-            // 有工具调用：记录 assistant 工具调用意图（工具调用前若已有零星文本，不作为最终回复）
+            // 有工具调用：过程文本已单独保存，再记录结构化调用意图。
             self.record_assistant_tool_calls(session_id, &calls);
             for c in &calls {
                 let _ = app.emit(
@@ -2920,7 +2969,7 @@ impl CodingAgentService {
                     };
                     (true, summarize_result(&data), data)
                 } else {
-                    let error = result.error.clone().unwrap_or_else(|| "执行失败".into());
+                    let error = tool_failure_text(&result);
                     (false, error.clone(), error)
                 };
 
@@ -2930,9 +2979,9 @@ impl CodingAgentService {
                 // 比较裁剪前的输出，避免大结果只有中间内容变化时被误判为原地重复。
                 round_loop_status = doom_tracker.record_result(&call.name, &call.arguments, ok, &observation);
                 if ok {
-                    // 任何成功都是进展：清空失败停滞计数；写/改/执行类工具成功记为实质进展（用于自动续轮判定）
+                    // 任何成功都是进展：清空失败停滞计数
                     fail_counts.clear();
-                    if matches!(call.name.as_str(), "write_file" | "edit_file" | "run_command") {
+                    if is_substantive_progress(&call.name, result.success, &result) {
                         made_progress = true;
                         round_progress = true;
                     }
@@ -2995,6 +3044,15 @@ impl CodingAgentService {
                 pending_hint = Some(hint);
             }
 
+            if !delivery_hinted {
+                let hint = self.sessions.read().get(session_id)
+                    .and_then(|session| research_delivery_hint(&session.messages));
+                if let Some(hint) = hint {
+                    pending_hint = Some(hint);
+                    delivery_hinted = true;
+                }
+            }
+
             // 收益递减检测：连续多轮低产出且无实质进展 → 提前停机，不磨满轮数预算
             // 产出量信号：有 usage 上报按输出 token 判定；无上报按产出字符数判定
             let verdict = match &step_usage {
@@ -3008,58 +3066,78 @@ impl CodingAgentService {
                 }
             };
             if let crate::brain::budget::BudgetVerdict::StopDiminishing { low_rounds } = verdict {
-                self.push_message(
-                    session_id,
-                    CodingMessage {
-                        role: CodingRole::Error,
-                        images: None,
-                        content: format!(
-                            "连续 {low_rounds} 轮无实质产出（收益递减），已提前停止以节省配额。可调整方案或重新描述目标后继续。"
-                        ),
-                        file_refs: None,
-                        widgets: None,
-                        interjected: None,
-                        guided: None,
-                        tool_name: None,
-                        tool_arguments: None,
-                        tool_success: None,
-                        tool_call_id: None,
-                        timestamp: chrono::Utc::now().timestamp_millis(),
-                    },
-                );
-                let _ = app.emit("coding:error", serde_json::json!({
-                    "session_id": session_id,
-                    "kind": CodingErrorKind::LowOutputStop,
-                    "message": format!("连续 {low_rounds} 轮无实质产出，已提前停止（收益递减保护）"),
-                }));
-                self.finish_turn(app.clone(), session_id, CodingStatus::Idle);
+                self.finish_stopped_turn(
+                    &app, session_id, router,
+                    &format!("连续 {low_rounds} 轮无实质产出（收益递减），已提前停止以节省配额。"),
+                    "检查最近的工具失败原因与工作区配置，改用其他方案；补充缺失信息后再继续。",
+                ).await;
                 return;
             }
         }
 
-        // 达到轮数上限（含续轮后仍耗尽）：通知用户收尾，等待下一条消息
-        self.push_message(
-            session_id,
-            CodingMessage {
-                role: CodingRole::Error,
-                images: None,
-                content: format!("已达到单轮最大工具调用轮数（{budget}），自动停止。可发送新消息继续。"),
-                file_refs: None,
-                widgets: None,
-                interjected: None,
-                guided: None,
-                tool_name: None,
-                tool_arguments: None,
-                tool_success: None,
-                tool_call_id: None,
-                timestamp: chrono::Utc::now().timestamp_millis(),
-            },
-        );
-        let _ = app.emit("coding:error", serde_json::json!({
+        self.finish_stopped_turn(
+            &app, session_id, router,
+            &format!("已达到单轮最大工具调用轮数（{budget}），本次任务未完成。"),
+            "根据已完成的工作缩小下一轮目标，优先处理未解决的障碍，再继续执行与验证。",
+        ).await;
+    }
+
+    /// 明确原因的停止走最终报告，不再向用户追加终止错误块。
+    /// 只允许一次无工具总结请求；超时/模型失败时使用已有执行事实保底。
+    async fn finish_stopped_turn(
+        &self,
+        app: &tauri::AppHandle,
+        session_id: &str,
+        router: &ModelRouter,
+        reason: &str,
+        suggestion: &str,
+    ) {
+        if self.is_canceled(session_id) {
+            self.finish_turn(app.clone(), session_id, CodingStatus::Canceled);
+            return;
+        }
+        let _ = app.emit("coding:summary_started", serde_json::json!({
             "session_id": session_id,
-            "kind": CodingErrorKind::BudgetExhausted,
-            "message": format!("已达到单轮最大工具调用轮数（{budget}）"),
         }));
+        let (char_id, history) = {
+            let sessions = self.sessions.read();
+            let Some(session) = sessions.get(session_id) else { return; };
+            let start = session.messages.iter().rposition(|m| m.role == CodingRole::User).unwrap_or(0);
+            (session.char_id.clone(), session.messages[start..].to_vec())
+        };
+        let (prompt, fallback) = stopped_turn_report(&history, reason, suggestion);
+        let request = LLMRequest::new(crate::providers::base::TASK_WORK_AGENT, vec![
+            ChatMessage::system("你处于任务最终总结阶段。任务已停止且未完成，禁止调用工具、继续执行或宣称任务成功。仅根据给出的执行记录，用用户的语言说明已完成工作、未完成事项、具体失败原因及可操作的修复建议。区分已验证事实与建议，不要虚构修改或检查结果。"),
+            ChatMessage::user(&prompt),
+        ]).with_character_id(char_id).with_max_tokens(1400);
+        let started = std::time::Instant::now();
+        let result = tokio::select! {
+            result = tokio::time::timeout(std::time::Duration::from_secs(45), router.generate(request)) => result,
+            _ = async {
+                while !self.is_canceled(session_id) {
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                }
+            } => {
+                self.finish_turn(app.clone(), session_id, CodingStatus::Canceled);
+                return;
+            }
+        };
+        self.stats_step_done(session_id, started.elapsed().as_millis() as u64, None);
+        let text = match result {
+            Ok(Ok(report)) if !report.trim().is_empty() => {
+                format!("任务未完成。{reason}\n\n{}", report.trim())
+            }
+            _ => fallback,
+        };
+        if self.is_canceled(session_id) {
+            self.finish_turn(app.clone(), session_id, CodingStatus::Canceled);
+            return;
+        }
+        self.push_host_message(session_id, CodingRole::Assistant, &text);
+        let _ = app.emit("coding:assistant_message", serde_json::json!({
+            "session_id": session_id, "content": text,
+        }));
+        self.report_work_completion(session_id, "任务未完成", &text.chars().take(1600).collect::<String>());
         self.finish_turn(app.clone(), session_id, CodingStatus::Idle);
     }
 
@@ -3095,6 +3173,16 @@ impl CodingAgentService {
             "coding:turn_done",
             serde_json::json!({ "session_id": session_id, "stats": stats }),
         );
+    }
+
+    /// 将已完成流式尝试的可见过程文本定型，刷新会话后也能回看。
+    fn record_work_text(&self, app: &tauri::AppHandle, session_id: &str, role: CodingRole, text: &str) {
+        let text = text.trim();
+        if text.is_empty() { return; }
+        self.push_host_message(session_id, role, text);
+        let _ = app.emit("coding:work_text", serde_json::json!({
+            "session_id": session_id, "role": role, "content": text,
+        }));
     }
 
     /// 记录 assistant 工具调用意图为历史消息（含 tool_calls 结构，回传 LLM 保持关联）。
@@ -3192,9 +3280,9 @@ impl CodingAgentService {
             Ok(p) => p,
             Err(e) => {
                 let m = format!("程序解析失败：{e}（模型未输出合法 JSON）");
-                self.push_error(session_id, &m);
-                fail(&m);
-                self.finish_turn(app, session_id, CodingStatus::Idle);
+                self.finish_stopped_turn(&app, session_id, router, &m,
+                    "检查模型对编排格式的支持，切换模型或将任务拆分后重试。",
+                ).await;
                 return;
             }
         };
@@ -3206,9 +3294,9 @@ impl CodingAgentService {
         let steps_raw = parsed.get("steps").and_then(|v| v.as_array()).cloned().unwrap_or_default();
         if steps_raw.is_empty() {
             let m = "程序没有步骤（steps 为空）";
-            self.push_error(session_id, m);
-            fail(m);
-            self.finish_turn(app, session_id, CodingStatus::Idle);
+            self.finish_stopped_turn(&app, session_id, router, m,
+                "明确下一步操作与必要输入，调整计划或模型后继续。",
+            ).await;
             return;
         }
 
@@ -3246,7 +3334,6 @@ impl CodingAgentService {
 
         // 4. 顺序执行步骤（取消检查 + 失败中止）
         let mut executed = 0usize;
-        let mut aborted = false;
         for (i, step) in steps_raw.iter().take(CODE_MODE_MAX_STEPS).enumerate() {
             if self.is_canceled(session_id) {
                 self.finish_turn(app.clone(), session_id, CodingStatus::Canceled);
@@ -3301,7 +3388,7 @@ impl CodingAgentService {
                 .unwrap_or_default();
                 (true, summarize_result(&data))
             } else {
-                (false, result.error.clone().unwrap_or_else(|| "执行失败".into()))
+                (false, tool_failure_text(&result))
             };
             executed += 1;
             self.push_message(
@@ -3329,20 +3416,17 @@ impl CodingAgentService {
                 }),
             );
             if !ok {
-                let m = format!("步骤 {i}（{tool}）失败，已中止剩余步骤");
-                self.push_error(session_id, &m);
-                fail(&m);
-                aborted = true;
-                break;
+                let m = format!("步骤 {}（{tool}）失败，已中止剩余步骤", i + 1);
+                self.finish_stopped_turn(
+                    &app, session_id, router, &format!("{m}：{text}"),
+                    "修复该步骤报告的错误，确认前置条件后，从失败步骤继续并验证结果。",
+                ).await;
+                return;
             }
         }
 
-        // 5. 总结（失败中止时若无 summary 则跳过，错误消息已说明）
-        let final_text = if aborted && summary.is_empty() {
-            String::new()
-        } else {
-            summary
-        };
+        // 5. 正常执行结束；失败步骤已通过最终报告收尾。
+        let final_text = summary;
         if !final_text.is_empty() {
             self.push_message(
                 session_id,
@@ -3365,7 +3449,7 @@ impl CodingAgentService {
                 "coding:assistant_message",
                 serde_json::json!({ "session_id": session_id, "content": final_text }),
             );
-        } else if !aborted {
+        } else {
             let fallback = format!("程序执行完成：共 {executed} 步。");
             self.push_message(
                 session_id,
@@ -3463,11 +3547,6 @@ impl CodingAgentService {
         }
     }
 
-    /// 追加错误消息到会话历史。
-    fn push_error(&self, session_id: &str, message: &str) {
-        self.push_host_message(session_id, CodingRole::Error, message);
-    }
-
     /// 记录一条宿主自产的中性状态提示（非错误），随会话持久化。
     fn push_notice(&self, session_id: &str, message: &str) {
         self.push_host_message(session_id, CodingRole::Notice, message);
@@ -3495,8 +3574,8 @@ impl CodingAgentService {
         );
     }
 
-    /// 记录并广播一条分类后的 LLM 错误：友好提示进会话历史与前端事件，
-    /// 原始错误只进日志。事件载荷带 error_type / error_kind 供前端细分处理。
+    /// 模型不可用时直接根据已有记录输出失败报告，避免再请求故障模型。
+    /// 原始错误保留日志，面向用户的报告包含分类后的原因。
     fn report_llm_error(
         &self,
         app: &tauri::AppHandle,
@@ -3505,22 +3584,20 @@ impl CodingAgentService {
         raw: &str,
     ) {
         let class = classify_llm_failure(raw);
-        tracing::warn!("[CodingAgent] {stage}失败（error_type={}）：{raw}", class.error_type);
-        self.push_error(session_id, &class.user_message);
-        let _ = app.emit(
-            "coding:error",
-            serde_json::json!({
-                "session_id": session_id,
-                "kind": CodingErrorKind::LlmFailure,
-                "message": class.user_message,
-                "error_type": class.error_type,
-                "error_kind": class.kind,
-            }),
-        );
-        // 登记给陪伴角色：只传事实（错误文案 + 本次任务未完成），
-        // 怎么说是 TA 的事，不在这里拼固定话术。
-        let notice = format!("{} 本次工作任务未完成，可稍后重试。", class.user_message);
-        self.report_work_completion(session_id, "模型调用失败", &notice);
+        tracing::warn!("[CodingAgent] {stage}失败（error_type={}, kind={:?}）：{raw}", class.error_type, class.kind);
+        let history = self.sessions.read().get(session_id).map(|session| {
+            let start = session.messages.iter().rposition(|m| m.role == CodingRole::User).unwrap_or(0);
+            session.messages[start..].to_vec()
+        }).unwrap_or_default();
+        let (_, report) = stopped_turn_report(&history, &class.user_message,
+            "按上述原因检查模型配置、账户配额与网络连接；修复后继续未完成的步骤。模型当前不可用，此报告依据已有执行记录生成。");
+        let _ = app.emit("coding:summary_started", serde_json::json!({"session_id": session_id}));
+        self.push_host_message(session_id, CodingRole::Assistant, &report);
+        let _ = app.emit("coding:assistant_message", serde_json::json!({
+            "session_id": session_id, "content": report,
+        }));
+        self.report_work_completion(session_id, "模型调用失败", &report);
+
     }
 
     /// 登记一条工作事实，交给陪伴角色自行决定要不要向用户提及。
@@ -3793,7 +3870,7 @@ impl CodingAgentService {
                     }
                 }
                 // 智能体图片消息：content 可能为空（仅图片），给 LLM 上下文加占位说明
-                CodingRole::Assistant => {
+                CodingRole::Assistant | CodingRole::Commentary => {
                     let text = if msg.content.trim().is_empty() && msg.images.as_ref().is_some_and(|v| !v.is_empty()) {
                         "[已向用户发送图片]"
                     } else {
@@ -3830,7 +3907,7 @@ impl CodingAgentService {
                 }
                 // Notice 只面向用户界面，不回传 LLM：压缩结果已通过
                 // `session.compacted` 注入 system prompt，重复回传纯属噪声
-                CodingRole::Notice => {}
+                CodingRole::Notice | CodingRole::Thinking => {}
             }
         }
         messages
@@ -4029,7 +4106,7 @@ fn classify_llm_failure(raw: &str) -> ClassifiedLlmError {
         ),
         LlmErrorKind::Timeout => ("timeout", "请求超时，请检查网络后重试。".into()),
         LlmErrorKind::NetworkError => {
-            ("network_error", "网络连接失败，请检查网络后重试。".into())
+            ("network_error", "模型服务连接或响应流中断，本轮未能继续；这不代表网页搜索工具不可用。".into())
         }
         LlmErrorKind::ModelNotFound => (
             "model_not_found",
@@ -4114,7 +4191,7 @@ fn build_turn_transcript_with_limit(
     for m in messages {
         match m.role {
             CodingRole::User => lines.push(format!("用户：{}", truncate_chars(&m.content, 1000))),
-            CodingRole::Assistant => {
+            CodingRole::Assistant | CodingRole::Commentary => {
                 lines.push(format!("助手：{}", truncate_chars(&m.content, 2000)));
             }
             CodingRole::ToolResult => {
@@ -4135,7 +4212,7 @@ fn build_turn_transcript_with_limit(
             CodingRole::ToolUse => {}
             CodingRole::Error => lines.push(format!("[错误] {}", truncate_chars(&m.content, 300))),
             // 状态提示与任务轨迹无关，不进摘要
-            CodingRole::Notice => {}
+            CodingRole::Notice | CodingRole::Thinking => {}
         }
     }
     truncate_chars(&lines.join("\n"), max_chars)
@@ -4314,6 +4391,80 @@ fn append_project_memory(working_directory: &str, body: &str) -> Result<(), Stri
     std::fs::write(&path, content).map_err(|e| format!("写入 {PROJECT_MEMORY_FILE} 失败：{e}"))
 }
 
+/// 判断一次成功调用是否构成「实质进展」。
+///
+/// 供两处消费：轮级收益递减检测（`OutputBudgetTracker`）与预算耗尽时的自动续轮判定。
+///
+/// 只认「写/改/执行」会让"先调研后交付"型任务（做 PPT、写报告、查资料后总结）
+/// 在调研阶段全程零进展：这类任务直到定稿才会第一次写文件，中途每轮都在取证，
+/// 连续三轮就被判空转停机——保护机制误杀了正常流程。
+///
+/// 取证类工具按「是否真的取到内容」判定：翻出空页面、搜索零命中仍是空转，
+/// 不能无条件豁免，否则会掩盖真正的抓取循环。
+fn is_substantive_progress(
+    call_name: &str,
+    ok: bool,
+    result: &crate::tools::types::ToolResult,
+) -> bool {
+    if !ok {
+        return false;
+    }
+    match call_name {
+        // 产物落地：任何成功都是实质进展
+        "write_file" | "edit_file" | "run_command" => true,
+        // 取证成功且有内容：调研阶段的真实推进
+        "web_search" => web_payload_has_content(result.data.as_ref(), &["results", "queries"]),
+        "web_fetch" => web_payload_has_content(result.data.as_ref(), &["text"]),
+        // 其余只读工具（read_file / list_dir / grep_search 等）不计进展：
+        // 反复读同一批小文件正是收益递减要抓的形态，放宽会掩盖空转。
+        _ => false,
+    }
+}
+
+/// 判断 web 工具结果里是否带回了实际内容。
+///
+/// 兼容单查询（字段直接挂在 payload 上）与多查询（`queries` 数组）两种形状。
+fn web_payload_has_content(
+    data: Option<&serde_json::Value>,
+    content_keys: &[&str],
+) -> bool {
+    let Some(payload) = data.filter(|v| v.is_object()) else {
+        return false;
+    };
+    // data 可能再包一层 { data: {...} }
+    let payload = payload
+        .get("data")
+        .filter(|v| v.is_object())
+        .unwrap_or(payload);
+
+    if let Some(items) = payload.get("queries").and_then(|v| v.as_array()) {
+        return items
+            .iter()
+            .any(|item| content_keys.iter().any(|k| json_str_len(item.get(*k)) > 0));
+    }
+    content_keys
+        .iter()
+        .any(|k| json_str_len(payload.get(*k)) > 0)
+}
+
+/// 取 JSON 值的「内容体量」，0 表示无内容。
+///
+/// 递归下探而非只看顶层字符串：搜索结果的 `results` 是对象数组
+/// （`[{title,url,snippet}]`），只累加元素的字符串值会算成 0，
+/// 把真实命中误判成空转。空数组 / 空串 / null 一律为 0。
+fn json_str_len(value: Option<&serde_json::Value>) -> usize {
+    match value {
+        None | Some(serde_json::Value::Null) => 0,
+        Some(serde_json::Value::String(s)) => s.trim().len(),
+        Some(serde_json::Value::Array(a)) => a.iter().map(|v| json_str_len(Some(v))).sum(),
+        Some(serde_json::Value::Object(o)) => o
+            .values()
+            .map(|v| json_str_len(Some(v)))
+            .sum(),
+        Some(other) => other.to_string().len(),
+    }
+}
+
 /// 按字符截断。
 fn truncate_chars(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
@@ -4394,9 +4545,272 @@ fn resolve_file_refs(
     out
 }
 
+/// 保留标准工具错误里的可读原因，不能只返回 FetchFailed 等错误码。
+fn tool_failure_text(result: &crate::tools::types::ToolResult) -> String {
+    let message = result.data.as_ref().and_then(|data| data.get("message"))
+        .and_then(serde_json::Value::as_str).filter(|message| !message.trim().is_empty());
+    match (message, result.error.as_deref()) {
+        (Some(message), Some(code)) if message != code => format!("[{code}] {message}"),
+        (Some(message), _) => message.to_string(),
+        (_, Some(error)) => error.to_string(),
+        _ => "执行失败".into(),
+    }
+}
+
+/// 保底报告面向用户展示结果，不倾倒工具协议、网页导航与 JSON 元数据。
+fn readable_tool_record(message: &CodingMessage) -> String {
+    let name = message.tool_name.as_deref().unwrap_or("");
+    let args = message.tool_arguments.as_ref();
+    let parsed = serde_json::from_str::<serde_json::Value>(&message.content).ok();
+    let payload = parsed.as_ref().map(|data| data.get("data").filter(|v| v.is_object()).unwrap_or(data));
+    let text = if name == "web_fetch" && message.tool_success == Some(true) {
+        let url = payload.and_then(|data|data.get("url")).and_then(serde_json::Value::as_str)
+            .or_else(||args.and_then(|a| a.get("url")).and_then(serde_json::Value::as_str)).unwrap_or("网页");
+        let title = payload.and_then(|data| data.get("title")).and_then(serde_json::Value::as_str).unwrap_or("");
+        format!("已读取{} {url}", if title.is_empty() { String::new() } else { format!("《{title}》") })
+    } else if name == "web_fetch" && message.tool_success == Some(false) {
+        let url = args.and_then(|a| a.get("url")).and_then(serde_json::Value::as_str).unwrap_or("网页");
+        format!("{url}：{}", message.content)
+    } else if name == "web_search" && message.tool_success == Some(true) {
+        format!("已取得搜索结果：{}", args.map(|a| a.get("query").or_else(|| a.get("queries")).map(|v| v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string())).unwrap_or_default()).unwrap_or_default())
+    } else if let Some(summary) = parsed.as_ref().and_then(|data| data.get("message")).and_then(serde_json::Value::as_str) {
+        summary.to_string()
+    } else {
+        message.content.clone()
+    };
+    text.chars().take(500).collect()
+}
+
+/// 对产物制作任务提示转入交付，不对纯研究任务限制检索。
+fn research_delivery_hint(messages: &[CodingMessage]) -> Option<String> {
+    let start = messages.iter().rposition(|m| m.role == CodingRole::User)?;
+    let goal = messages[start].content.to_lowercase();
+    let artifact = ["ppt", "幻灯片", "演示文稿", "slides", "presentation", "报告", "文档", "docx", "pdf", "xlsx"]
+        .iter().any(|word| goal.contains(word));
+    let creation = ["做", "制作", "生成", "创建", "编写", "写", "create", "make", "build", "generate", "prepare"]
+        .iter().any(|word| goal.contains(word));
+    if !artifact || !creation { return None; }
+    let results: Vec<_> = messages[start..].iter().filter(|m| m.role == CodingRole::ToolResult).collect();
+    if results.iter().any(|m| m.tool_success == Some(true) && matches!(m.tool_name.as_deref(), Some("write_file" | "edit_file"))) {
+        return None;
+    }
+    let research = results.iter().filter(|m| m.tool_success == Some(true) && matches!(m.tool_name.as_deref(), Some("web_search" | "web_fetch"))).count();
+    (research >= 6).then(|| "[系统提示] 本轮已经取得多次联网取证结果，但尚未写入交付文件。请根据已有已核验材料开始制作并验证初版产物，只有明确影响交付的证据缺口才继续检索；不要为可选的最新数字反复抓取，无法核验的内容可省略并说明。".into())
+}
+
+/// 总结只消费本轮真实记录；限制上下文，并在模型不可用时保留失败与执行事实。
+fn stopped_turn_report(history: &[CodingMessage], reason: &str, suggestion: &str) -> (String, String) {
+    let goal = history.iter().find(|m| m.role == CodingRole::User)
+        .map(|m| m.content.chars().take(4000).collect::<String>()).unwrap_or_default();
+    let results: Vec<_> = history.iter().filter(|m| m.role == CodingRole::ToolResult).collect();
+    let succeeded = results.iter().filter(|m| m.tool_success == Some(true)).count();
+    let failed = results.iter().filter(|m| m.tool_success == Some(false)).count();
+    let completed = results.iter().rev().filter(|m| m.tool_success == Some(true)).take(4)
+        .map(|m| format!("- {}：{}", m.tool_name.as_deref().unwrap_or("工具"), readable_tool_record(m)))
+        .collect::<Vec<_>>().join("\n");
+    let failures = results.iter().rev().filter(|m| m.tool_success == Some(false)).take(4)
+        .map(|m| format!("- {}：{}", m.tool_name.as_deref().unwrap_or("工具"), readable_tool_record(m)))
+        .collect::<Vec<_>>().join("\n");
+    let mut remaining = 24000;
+    let mut records = Vec::new();
+    for message in history.iter().rev().filter(|m| m.role != CodingRole::User && m.role != CodingRole::ToolUse) {
+        if remaining == 0 { break; }
+        let arguments = message.tool_arguments.as_ref().map(|args| args.to_string().chars().take(1000).collect::<String>()).unwrap_or_default();
+        let record = format!("{:?} {} success={:?} arguments={arguments}: {}", message.role,
+            message.tool_name.as_deref().unwrap_or(""), message.tool_success,
+            message.content.chars().take(2000).collect::<String>());
+        let record = record.chars().take(remaining).collect::<String>();
+        remaining -= record.chars().count();
+        records.push(record);
+    }
+    records.reverse();
+    let prompt = format!("用户目标：{goal}\n停止原因：{reason}\n建议方向：{suggestion}\n执行记录（可能截断，仅按记录报告）：\n{}", records.join("\n"));
+    let fallback = format!("任务未完成。{reason}\n\n本轮记录了 {succeeded} 次成功的工具执行、{failed} 次失败的工具执行；这些执行记录不代表目标已完成，剩余工作仍需核验。{}{}\n\n修复建议：{suggestion}",
+        if completed.is_empty() { String::new() } else { format!("\n\n最近已执行的工作：\n{completed}") },
+        if failures.is_empty() { String::new() } else { format!("\n\n最近的失败记录：\n{failures}") });
+    (prompt, fallback)
+}
+
+#[cfg(test)]
+mod progress_signal_tests {
+    use super::*;
+    use crate::tools::types::ToolResult;
+
+    fn result(data: serde_json::Value) -> ToolResult {
+        ToolResult {
+            data: Some(data),
+            error: None,
+            success: true,
+            goal_completed: false,
+            context_modifier: None,
+        }
+    }
+
+    #[test]
+    fn write_and_exec_always_count() {
+        for name in ["write_file", "edit_file", "run_command"] {
+            assert!(
+                is_substantive_progress(name, true, &result(serde_json::json!({}))),
+                "{name} 成功应记为实质进展"
+            );
+        }
+    }
+
+    /// 失败调用一律不算：进展信号不能被失败的写文件刷出来。
+    #[test]
+    fn failure_never_counts() {
+        let r = result(serde_json::json!({}));
+        for name in ["write_file", "web_fetch", "web_search", "run_command"] {
+            assert!(!is_substantive_progress(name, false, &r));
+        }
+    }
+
+    /// 本次事故的形状：PPT 任务全程只有取证，没有一次写文件。
+    /// 若取证不计进展，第 2/3/4 轮连续触发低产出 → 3 轮误判停机。
+    #[test]
+    fn evidence_gathering_counts() {
+        let fetch = result(serde_json::json!({
+            "url": "https://ec.europa.eu/ai-act",
+            "text": "不可信网页数据：AI Act entered into force..."
+        }));
+        assert!(is_substantive_progress("web_fetch", true, &fetch));
+
+        let search = result(serde_json::json!({
+            "results": [{"title": "T", "url": "https://a.com", "snippet": "S"}],
+            "count": 1
+        }));
+        assert!(is_substantive_progress("web_search", true, &search));
+    }
+
+    /// 空结果仍是空转：翻出空页面 / 零命中不能豁免检测，否则掩盖真实抓取循环。
+    #[test]
+    fn empty_evidence_does_not_count() {
+        let empty_search = result(serde_json::json!({"results": [], "count": 0}));
+        assert!(!is_substantive_progress("web_search", true, &empty_search));
+
+        let blank_fetch = result(serde_json::json!({"url": "https://x.com", "text": ""}));
+        assert!(!is_substantive_progress("web_fetch", true, &blank_fetch));
+
+        assert!(!is_substantive_progress(
+            "web_fetch",
+            true,
+            &result(serde_json::Value::Null)
+        ));
+    }
+
+    /// 多查询形状：queries 数组里任一条有内容即算。
+    #[test]
+    fn multi_query_shape() {
+        let mixed = result(serde_json::json!({
+            "queries": [
+                {"query": "a", "results": []},
+                {"query": "b", "results": [{"url": "https://b.com", "snippet": "hit"}]}
+            ],
+            "partial_failure": true
+        }));
+        assert!(is_substantive_progress("web_search", true, &mixed));
+
+        let all_empty = result(serde_json::json!({
+            "queries": [{"query": "a", "results": []}, {"query": "b", "results": []}]
+        }));
+        assert!(!is_substantive_progress("web_search", true, &all_empty));
+    }
+
+    /// data 多包一层 { data: {...} } 时也要能取到内容。
+    #[test]
+    fn nested_data_wrapper() {
+        let nested = result(serde_json::json!({
+            "success": true,
+            "data": {"results": [{"url": "https://a.com", "snippet": "S"}]}
+        }));
+        assert!(is_substantive_progress("web_search", true, &nested));
+    }
+
+    /// 只读工具不放宽：反复读小文件正是收益递减要抓的形态。
+    #[test]
+    fn read_only_tools_stay_excluded() {
+        let r = result(serde_json::json!({"text": "file contents..."}));
+        for name in ["read_file", "list_dir", "grep_search", "lsp_query"] {
+            assert!(
+                !is_substantive_progress(name, true, &r),
+                "{name} 不应被算作实质进展"
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod compaction_boundary_tests {
     use super::*;
+    #[test]
+    fn work_task_errors_keep_actionable_cause() {
+        let failure = crate::tools::types::ToolResult::standard_error(
+            "抓取失败：HTTP 403 Forbidden", Some("FetchFailed"), None,
+        );
+        assert_eq!(tool_failure_text(&failure), "[FetchFailed] 抓取失败：HTTP 403 Forbidden");
+        assert!(classify_llm_failure("error decoding response body").user_message.contains("模型服务"));
+    }
+
+    #[test]
+    fn work_task_report_does_not_dump_web_protocol() {
+        let mut fetch = message(CodingRole::ToolResult, r#"{"cached":true,"links":[{"title":"Skip to content"}],"title":"AI Index","text":"Evidence"}"#);
+        fetch.tool_name = Some("web_fetch".into());
+        fetch.tool_success = Some(true);
+        fetch.tool_arguments = Some(serde_json::json!({"url":"https://example.com/ai"}));
+        let (_, report) = stopped_turn_report(&[fetch], "模型服务连接中断", "修复后继续制作 PPT");
+        assert!(report.contains("已读取《AI Index》 https://example.com/ai"));
+        assert!(!report.contains("Skip to content"));
+        assert!(!report.contains("cached"));
+    }
+
+    #[test]
+    fn work_task_delivery_hint_preserves_pure_research() {
+        let mut history = vec![message(CodingRole::User, "做一个英语课pre的ppt，8min左右")];
+        let mut fetch = message(CodingRole::ToolResult, "已取得来源");
+        fetch.tool_name = Some("web_fetch".into());
+        fetch.tool_success = Some(true);
+        history.extend(vec![fetch; 5]);
+        assert!(research_delivery_hint(&history).is_none());
+        history.push(history.last().unwrap().clone());
+        assert!(research_delivery_hint(&history).is_some());
+        history[0].content = "调查人工智能的最新进展".into();
+        assert!(research_delivery_hint(&history).is_none());
+        history[0].content = "制作 PPT".into();
+        let mut write = message(CodingRole::ToolResult, "已写入初版");
+        write.tool_name = Some("write_file".into());
+        write.tool_success = Some(true);
+        history.push(write);
+        assert!(research_delivery_hint(&history).is_none());
+        assert!(should_retry_work_stream("error decoding response body", 3, 4));
+        assert!(!should_retry_work_stream("invalid_api_key", 3, 4));
+    }
+    #[test]
+    fn stopped_turn_report_preserves_failure_and_real_results() {
+        let user = message(CodingRole::User, "修复项目");
+        let mut success = message(CodingRole::ToolResult, "文件已写入");
+        success.tool_name = Some("write_file".into());
+        success.tool_success = Some(true);
+        let mut failure = message(CodingRole::ToolResult, "找不到构建命令");
+        failure.tool_name = Some("run_command".into());
+        failure.tool_success = Some(false);
+        let (prompt, fallback) = stopped_turn_report(&[user, success, failure], "连续三轮无进展", "检查构建配置");
+        assert!(prompt.contains("修复项目"));
+        assert!(prompt.contains("文件已写入"));
+        assert!(fallback.starts_with("任务未完成。连续三轮无进展"));
+        assert!(fallback.contains("1 次成功"));
+        assert!(fallback.contains("1 次失败"));
+        assert!(fallback.contains("run_command：找不到构建命令"));
+        assert!(fallback.contains("修复建议：检查构建配置"));
+    }
+
+    #[test]
+    fn stopped_turn_report_handles_empty_and_bounds_context() {
+        let (_, fallback) = stopped_turn_report(&[], "配额不足", "补充配额");
+        assert!(fallback.contains("任务未完成。配额不足"));
+        let history = vec![message(CodingRole::ToolResult, &"长".repeat(5000)); 100];
+        let (prompt, _) = stopped_turn_report(&history, "轮数耗尽", "缩小下一轮目标");
+        assert!(prompt.chars().count() < 24500);
+    }
     #[test]
     fn work_stream_transport_failure_is_retryable_and_classified() {
         for raw in [

@@ -484,6 +484,7 @@ mod tests {
         let negative = EmotionState {
             sadness: 0.8,
             anger: 0.7,
+            joy: 0.0, closeness: 0.0, curiosity: 0.0,
             ..Default::default()
         };
         assert!(negative.valence() < -0.3);

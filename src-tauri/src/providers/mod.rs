@@ -52,3 +52,4 @@ pub use wenxin::WenxinProvider;
 pub use zhipu::ZhipuProvider;
 
 pub mod reasoning_profiles;
+pub mod request_body;

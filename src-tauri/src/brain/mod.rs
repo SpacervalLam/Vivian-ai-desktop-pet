@@ -26,7 +26,6 @@ pub mod cognitive_tick;
 pub mod command_handler;
 pub mod computer_control;
 pub mod control_action_executor;
-pub mod focus_mode;
 pub mod interruption_controller;
 pub mod jobs;
 pub mod json_parser;
@@ -52,7 +51,6 @@ pub use brain::Brain;
 pub use callbacks::CallbackManager;
 pub use chat_chain::BrainChatChain;
 pub use cognitive_tick::{CognitiveTickPhase, CognitiveTickResult, CognitiveTickRunner, PhaseDecision};
-pub use focus_mode::{CognitionMode, FocusDecision, FocusState, FocusThresholds};
 pub use subagent_context::{SubagentContext, SubagentTask};
 pub use task_service::{TaskEvent, TaskEventKind, TaskService, TaskStatus, MAX_TASK_STEPS};
 pub use work_question::{

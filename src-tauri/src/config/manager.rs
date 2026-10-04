@@ -188,13 +188,13 @@ fn default_active_character() -> String {
 /// - 若所有引擎都不可用，最终回退到 DuckDuckGo 兜底
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebSearchConfig {
-    /// 已弃用：旧版单一引擎选择（保留仅为向后兼容迁移）
-    /// 新代码应使用 `providers` 字段
+    /// 已弃用：旧版单一引擎选择。加载时由 `migrate_web_search_providers` 迁进
+    /// `providers` 并清空；新代码不应读取本字段。
     #[serde(default)]
     pub provider: String,
     /// 启用的搜索引擎列表（混用模式）
-    /// 候选值：duckduckgo / searxng / tavily / bing
-    /// 同时启用多个引擎时，搜索工具会并发调用并合并去重结果
+    /// 候选值：duckduckgo / searxng / tavily / deepseek
+    /// research 模式下并发调用并合并去重结果；单引擎失败时按本列表顺序降级
     #[serde(default = "default_web_search_providers")]
     pub providers: Vec<String>,
     /// 每次搜索返回结果数：0 = 自动（按调用方智能体取差异化默认：陪伴 5 / 工作 10），
@@ -222,15 +222,23 @@ pub struct WebSearchConfig {
     /// Tavily 配置（专为 LLM Agent 设计的搜索 API）
     #[serde(default)]
     pub tavily: TavilyConfig,
-    /// 旧 Bing Search API 配置，仅保留迁移兼容，不再发送请求
-    #[serde(default)]
-    pub bing: BingConfig,
     /// DeepSeek 官方原生搜索配置（Anthropic 兼容 Messages API + web_search server tool）
     ///
     /// 一次搜索 = 一次 DeepSeek 模型调用（返回结构化 web_search_tool_result 块），
     /// 返回引用摘录。api_key 为空时自动复用主对话 ai 配置的 DeepSeek key。
     #[serde(default)]
     pub deepseek: WebSearchDeepSeekConfig,
+    /// Optional external search backends. Empty keys/models never trigger paid calls.
+    #[serde(default)]
+    pub exa: SearchApiConfig,
+    #[serde(default)]
+    pub perplexity: SearchApiConfig,
+    #[serde(default)]
+    pub openai: SearchApiConfig,
+    #[serde(default)]
+    pub xai: SearchApiConfig,
+    #[serde(default)]
+    pub anthropic: SearchApiConfig,
 }
 
 impl Default for WebSearchConfig {
@@ -245,10 +253,25 @@ impl Default for WebSearchConfig {
             language: None,
             searxng: SearXngConfig::default(),
             tavily: TavilyConfig::default(),
-            bing: BingConfig::default(),
             deepseek: WebSearchDeepSeekConfig::default(),
+            exa: SearchApiConfig::default(),
+            perplexity: SearchApiConfig::default(),
+            openai: SearchApiConfig::default(),
+            xai: SearchApiConfig::default(),
+            anthropic: SearchApiConfig::default(),
         }
     }
+}
+
+/// Provider-owned endpoints; models are explicit for model-backed search.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SearchApiConfig {
+    #[serde(default)]
+    pub api_key: String,
+    #[serde(default)]
+    pub base_url: String,
+    #[serde(default)]
+    pub model: String,
 }
 
 fn default_web_search_providers() -> Vec<String> {
@@ -311,36 +334,6 @@ impl Default for TavilyConfig {
 
 fn default_tavily_search_depth() -> String {
     "basic".to_string()
-}
-
-/// 旧 Bing Search API 配置，仅保留迁移兼容，不再发送请求
-///
-/// Azure Bing Search v7 已于 2025-08-11 退役。保留旧凭据，加载时移除引擎选择。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BingConfig {
-    /// Bing Search API Key（Azure Portal 创建 Bing Search 资源获取）
-    #[serde(default)]
-    pub api_key: String,
-    /// Bing 市场代码（如 "zh-CN" / "en-US" / "ja-JP"），默认 "zh-CN"
-    #[serde(default = "default_bing_mkt")]
-    pub mkt: String,
-    /// 搜索结果计数偏移（分页用，默认 0）
-    #[serde(default)]
-    pub offset: u32,
-}
-
-impl Default for BingConfig {
-    fn default() -> Self {
-        Self {
-            api_key: String::new(),
-            mkt: default_bing_mkt(),
-            offset: 0,
-        }
-    }
-}
-
-fn default_bing_mkt() -> String {
-    "zh-CN".to_string()
 }
 
 /// DeepSeek 官方原生搜索配置（Anthropic 兼容 Messages API + `web_search_20250305` server tool）
@@ -730,6 +723,8 @@ impl<'de> serde::Deserialize<'de> for DisabledTools {
 /// 替代分散在 `executor.rs` / `registry.rs` / `tool_call_manager.rs` / `generation.rs` 的硬编码常量。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolConfig {
+    #[serde(default)]
+    pub desktop: crate::desktop_contract::DesktopConfig,
     // ── 原生 function calling ──
     /// 是否启用原生 function calling（结构化 tools 字段路径）
     ///
@@ -821,6 +816,7 @@ pub struct ToolConfig {
 impl Default for ToolConfig {
     fn default() -> Self {
         Self {
+            desktop: crate::desktop_contract::DesktopConfig::default(),
             enable_native_function_calling: true,
             max_iterations: default_tool_max_iterations(),
             max_rounds: default_tool_max_rounds(),
@@ -1826,27 +1822,8 @@ impl ConfigManager {
             config.tools.enable_native_function_calling = false;
         }
 
-        // ── 配置迁移：web_search.provider (String) → web_search.providers (Vec<String>) ──
-        // 旧版本中只支持单一引擎选择（provider 字段）；新版本改为多引擎混用（providers 列表）。
-        // 若旧配置中 provider 有值且 providers 仍是默认值（仅 duckduckgo），
-        // 则将旧 provider 合并进 providers，保留用户原选择。
-        if !config.web_search.provider.is_empty() {
-            let old_provider = config.web_search.provider.clone();
-            let providers = &mut config.web_search.providers;
-            // 去重插入旧 provider
-            if !providers.iter().any(|p| p == &old_provider) {
-                providers.insert(0, old_provider);
-            }
-            // 清空旧字段，避免下次再迁移（保存后 yaml 中 provider 变为空字符串）
-            config.web_search.provider.clear();
-        }
-        // Bing Search v7 retired on 2025-08-11. Preserve credential fields, migrate engine selection.
-        config.web_search.providers.retain(|p| p != "bing");
-        if config.web_search.provider == "bing" { config.web_search.provider = "duckduckgo".into(); }
-        // 兜底：providers 为空时回退到 duckduckgo
-        if config.web_search.providers.is_empty() {
-            config.web_search.providers = default_web_search_providers();
-        }
+        // ── 配置迁移：web_search 引擎选择 → web_search.providers (Vec<String>) ──
+        Self::migrate_web_search_providers(&mut config);
 
         // ── 配置迁移：web_search.max_results 旧默认 5 → 0（自动）──
         // 旧版本默认 5 且配置全量落盘，老配置文件普遍持久化了 5；
@@ -1879,6 +1856,38 @@ impl ConfigManager {
         }
 
         Ok(config)
+    }
+
+    /// 搜索引擎选择迁移：单引擎 `provider` → 多引擎 `providers`。
+    ///
+    /// 旧版本只支持单一引擎；新版本允许多引擎混用。保留用户原选择（去重插入到
+    /// 列表首位）。
+    ///
+    /// 迁移完成后 `provider` 归零，避免二次迁移。`providers` 兜底为默认值，
+    /// 避免旧配置把启用列表清空导致搜索静默失效。
+    fn migrate_web_search_providers(config: &mut AppConfig) {
+        // Azure Bing Search v7 已于 2025-08-11 退役，provider 与配置结构都已删除。
+        // 用户磁盘上的旧配置可能仍写着它 —— 在这里静默剔除，否则它会作为一个
+        // 未注册的引擎 id 留在启用列表里，让用户以为搜索仍走 Bing。
+        const RETIRED_ENGINES: &[&str] = &["bing"];
+
+        let old_provider = config.web_search.provider.clone();
+        if !old_provider.is_empty() {
+            if !RETIRED_ENGINES.contains(&old_provider.as_str()) {
+                let providers = &mut config.web_search.providers;
+                if !providers.iter().any(|p| p == &old_provider) {
+                    providers.insert(0, old_provider);
+                }
+            }
+            config.web_search.provider.clear();
+        }
+        config
+            .web_search
+            .providers
+            .retain(|p| !RETIRED_ENGINES.contains(&p.as_str()));
+        if config.web_search.providers.is_empty() {
+            config.web_search.providers = default_web_search_providers();
+        }
     }
 
     fn save_to_file(path: &Path, config: &AppConfig) -> VivianResult<()> {
@@ -1953,5 +1962,89 @@ impl ConfigManager {
 impl Default for ConfigManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod web_search_migration_tests {
+    use super::*;
+
+    fn cfg_with(provider: &str, providers: &[&str]) -> AppConfig {
+        let mut c = AppConfig::default();
+        c.web_search.provider = provider.into();
+        c.web_search.providers = providers.iter().map(|s| (*s).to_string()).collect();
+        c
+    }
+
+    #[test]
+    fn legacy_single_provider_is_preserved() {
+        let mut c = cfg_with("tavily", &["duckduckgo"]);
+        ConfigManager::migrate_web_search_providers(&mut c);
+        assert_eq!(c.web_search.providers, vec!["tavily", "duckduckgo"]);
+        assert!(c.web_search.provider.is_empty(), "旧字段迁移后应清空，避免二次迁移");
+    }
+
+    #[test]
+    fn bing_is_dropped_from_both_fields() {
+        // Bing v7 已退役：旧单引擎字段与新列表都要剔除
+        let mut c = cfg_with("bing", &["duckduckgo"]);
+        ConfigManager::migrate_web_search_providers(&mut c);
+        assert_eq!(c.web_search.providers, vec!["duckduckgo"]);
+        assert!(c.web_search.provider.is_empty());
+
+        let mut c2 = cfg_with("", &["tavily", "bing"]);
+        ConfigManager::migrate_web_search_providers(&mut c2);
+        assert_eq!(c2.web_search.providers, vec!["tavily"]);
+    }
+
+    #[test]
+    fn empty_providers_fall_back_to_default() {
+        let mut c = cfg_with("bing", &[]);
+        ConfigManager::migrate_web_search_providers(&mut c);
+        assert_eq!(c.web_search.providers, default_web_search_providers());
+    }
+
+    #[test]
+    fn migration_is_idempotent() {
+        let mut c = cfg_with("tavily", &["duckduckgo"]);
+        ConfigManager::migrate_web_search_providers(&mut c);
+        let once = c.web_search.providers.clone();
+        ConfigManager::migrate_web_search_providers(&mut c);
+        assert_eq!(c.web_search.providers, once, "重复迁移不应改变结果");
+    }
+
+    #[test]
+    fn duplicate_legacy_choice_is_not_inserted_twice() {
+        let mut c = cfg_with("tavily", &["tavily", "deepseek"]);
+        ConfigManager::migrate_web_search_providers(&mut c);
+        assert_eq!(c.web_search.providers, vec!["tavily", "deepseek"]);
+    }
+
+    /// 用户磁盘上的旧配置可能仍带 `bing:` 整块。结构已删除，反序列化必须忽略它
+    /// 而不是报错，否则升级直接失败打不开设置。
+    #[test]
+    fn legacy_yaml_with_bing_block_still_loads() {
+        // 以默认配置为底，注入退役引擎的痕迹，模拟一份升级前的用户配置
+        let mut value = serde_yaml::to_value(AppConfig::default()).expect("默认配置可序列化");
+        {
+            let ws = value
+                .get_mut("web_search")
+                .and_then(|v| v.as_mapping_mut())
+                .expect("默认配置含 web_search");
+            ws.insert(
+                serde_yaml::Value::String("provider".into()),
+                serde_yaml::Value::String("bing".into()),
+            );
+            ws.insert(
+                serde_yaml::Value::String("bing".into()),
+                serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+            );
+        }
+
+        let mut config: AppConfig = serde_yaml::from_value(value)
+            .expect("含已删除 bing 块的旧配置应能反序列化");
+        ConfigManager::migrate_web_search_providers(&mut config);
+        assert_eq!(config.web_search.providers, default_web_search_providers());
+        assert!(config.web_search.provider.is_empty());
     }
 }

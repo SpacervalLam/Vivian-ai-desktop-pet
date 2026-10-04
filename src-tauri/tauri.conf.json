@@ -10,22 +10,7 @@
     "beforeBuildCommand": "npm run build"
   },
   "app": {
-    "windows": [
-      {
-        "label": "main",
-        "title": "Vivian",
-        "width": 288,
-        "height": 400,
-        "resizable": false,
-        "transparent": true,
-        "decorations": false,
-        "alwaysOnTop": true,
-        "skipTaskbar": true,
-        "shadow": false,
-        "visible": false,
-        "dragDropEnabled": true
-      }
-    ],
+    "windows": [],
     "security": {
       "csp": "default-src 'self' asset: http://asset.localhost model: http://model.localhost; img-src 'self' asset: http://asset.localhost model: http://model.localhost data: blob:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.cn https://fonts.loli.net; font-src 'self' asset: http://asset.localhost https://fonts.gstatic.cn https://fonts.gstatic.com https://fonts.googleapis.cn https://gstatic.loli.net https://fonts.loli.net data:; script-src 'self' 'unsafe-inline' asset: http://asset.localhost https://cdn.jsdelivr.net; connect-src 'self' asset: http://asset.localhost model: http://model.localhost https: wss: ipc: http://ipc.localhost",
       "assetProtocol": {

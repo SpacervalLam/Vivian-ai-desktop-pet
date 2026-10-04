@@ -7,6 +7,13 @@
   box-shadow: none !important;
 }
 .settings-header button { min-width: 32px; min-height: 32px; }
+.settings-minimize-button {
+  display: inline-flex; align-items: center; justify-content: center;
+  padding: 0; border: none; border-radius: 999px;
+  background: transparent; color: var(--panel-text-secondary); cursor: pointer;
+  transition: background .15s ease, color .15s ease;
+}
+.settings-minimize-button:hover { background: var(--panel-bg-hover); color: var(--panel-text); }
 .settings-layout { display: flex; flex: 1; min-height: 0; overflow: hidden; }
 .settings-sidebar {
   width: 208px;

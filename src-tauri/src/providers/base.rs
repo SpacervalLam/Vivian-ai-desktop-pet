@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -32,7 +32,6 @@ pub struct ProviderCallOptions {
     pub enable_search: Option<bool>,
     pub temperature: Option<f64>,
     pub max_tokens: Option<u32>,
-    pub max_tokens_extra: u32,
     /// 存在惩罚：对本轮已出现过的 token 施加固定惩罚，抑制"同一句话/同一个词反复出现"。
     ///
     /// **协议支持面是不完整的**，因此按 provider 分别决定是否写入请求体：
@@ -68,7 +67,6 @@ impl ProviderCallOptions {
             enable_search: inner.enable_search.or(self.enable_search),
             temperature: inner.temperature.or(self.temperature),
             max_tokens: inner.max_tokens.or(self.max_tokens),
-            max_tokens_extra: self.max_tokens_extra.saturating_add(inner.max_tokens_extra),
             presence_penalty: inner.presence_penalty.or(self.presence_penalty),
             frequency_penalty: inner.frequency_penalty.or(self.frequency_penalty),
             reasoning: inner.reasoning.or(self.reasoning),
@@ -188,7 +186,7 @@ pub struct ToolDefinition {
 /// - ModelRouter 根据 `task_type` 路由到对应 provider,内部转调 BaseProvider 方法
 /// - `tools` 为空表示走文本路径;非空且 provider 支持时走原生 function calling
 /// - temperature / max_tokens 运行时覆盖优先使用请求级字段,无则沿用 ModelRouter setter
-///   (保持现有 emotion→temperature / focus_boost 机制)
+///   (保持现有 emotion→temperature 机制)
 ///
 /// 工作智能体（编程智能体）专属任务类型
 ///
@@ -232,8 +230,6 @@ pub struct LLMRequest {
     pub temperature_override: Option<f64>,
     /// 请求级 max_tokens 覆盖(None 表示沿用 ModelRouter 默认值)
     pub max_tokens_override: Option<u32>,
-    /// 在 provider 默认值或 `max_tokens_override` 基础上追加的输出预算。
-    pub max_tokens_extra: u32,
     /// 请求级存在惩罚覆盖（None 表示沿用 `ModelRouter` 按任务类型给出的默认值）。
     ///
     /// 协议支持面见 `ProviderCallOptions::presence_penalty`：只有 Chat Completions
@@ -268,7 +264,6 @@ impl LLMRequest {
             enable_search: false,
             temperature_override: None,
             max_tokens_override: None,
-            max_tokens_extra: 0,
             presence_penalty: None,
             frequency_penalty: None,
             json_schema: None,
@@ -315,12 +310,6 @@ impl LLMRequest {
     /// 设置请求级 max_tokens
     pub fn with_max_tokens(mut self, tokens: u32) -> Self {
         self.max_tokens_override = Some(tokens);
-        self
-    }
-
-    /// 在当前输出预算上追加 token（例如凝神模式），仅对本请求生效。
-    pub fn with_extra_max_tokens(mut self, tokens: u32) -> Self {
-        self.max_tokens_extra = tokens;
         self
     }
 
@@ -399,12 +388,6 @@ pub trait BaseProvider: Send + Sync {
     ///
     /// 默认空实现，由具体 provider 覆盖。使用 `&self` + 内部可变性（AtomicBool）。
     fn set_enable_search(&self, _enable: bool) {}
-
-    /// 设置 max_tokens 运行时覆盖（0 表示恢复默认）。
-    ///
-    /// 默认空实现，由持有 `ProviderBase` 的具体 provider 覆盖。
-    /// 凝神模式激活时由生成层调用，给混合推理模型留出思考 token 余量。
-    fn set_max_tokens_override(&self, _tokens: u32) {}
 
     /// 设置 temperature 运行时覆盖。
     ///
@@ -708,9 +691,6 @@ pub struct ProviderBase {
     pub proxy: Option<String>,
     /// 专属 HTTP 客户端（带代理配置时创建，None 时回退到全局客户端）
     pub client: Option<reqwest::Client>,
-    /// max_tokens 运行时覆盖（0 表示用 max_tokens 默认值；>0 时优先使用）
-    /// 凝神模式激活时由生成层设置，退出后清零。
-    pub max_tokens_override: AtomicU32,
     /// temperature 运行时覆盖（存储 f64::to_bits()；0 表示无覆盖，用配置默认值）。
     /// 由 emotion→temperature 映射在每轮对话前设置，让 LLM 输出温度随情绪变化。
     pub temperature_override: AtomicU64,
@@ -742,7 +722,6 @@ impl ProviderBase {
             enable_search: AtomicBool::new(self.enable_search.load(Ordering::Relaxed)),
             proxy: self.proxy.clone(),
             client: self.client.clone(),
-            max_tokens_override: AtomicU32::new(self.max_tokens_override.load(Ordering::Relaxed)),
             temperature_override: AtomicU64::new(self.temperature_override.load(Ordering::Relaxed)),
             omit_temperature: AtomicBool::new(self.omit_temperature.load(Ordering::Relaxed)),
             send_temperature: AtomicBool::new(self.send_temperature.load(Ordering::Relaxed)),
@@ -778,7 +757,6 @@ impl ProviderBase {
             enable_search: AtomicBool::new(false),
             proxy: None,
             client: None,
-            max_tokens_override: AtomicU32::new(0),
             temperature_override: AtomicU64::new(0),
             omit_temperature: AtomicBool::new(false),
             send_temperature: AtomicBool::new(true),
@@ -793,24 +771,9 @@ impl ProviderBase {
         self.enable_search.store(enable, Ordering::Relaxed);
     }
 
-    /// 返回当前生效的 max_tokens：覆盖值 > 0 时在默认值上叠加，否则用配置默认值。
+    /// 返回当前生效的 max_tokens：请求级覆盖优先，否则用配置默认值。
     pub fn effective_max_tokens(&self) -> u32 {
-        let options = ProviderCallOptions::current();
-        if let Some(tokens) = options.max_tokens {
-            return tokens.saturating_add(options.max_tokens_extra);
-        }
-        let ov = self.max_tokens_override.load(Ordering::Relaxed);
-        let base = if ov > 0 {
-            self.max_tokens.saturating_add(ov)
-        } else {
-            self.max_tokens
-        };
-        base.saturating_add(options.max_tokens_extra)
-    }
-
-    /// 设置 max_tokens 运行时覆盖（0 表示恢复默认）。
-    pub fn set_max_tokens_override(&self, tokens: u32) {
-        self.max_tokens_override.store(tokens, Ordering::Relaxed);
+        ProviderCallOptions::current().max_tokens.unwrap_or(self.max_tokens)
     }
 
     /// 设置 temperature 运行时覆盖。
@@ -872,12 +835,12 @@ impl ProviderBase {
     }
 
     /// Final reasoning mappings and user patches run immediately before transport.
-    /// User overrides win, but explicit sampling switches still control their fields.
-    pub fn finalize_body(&self, mut body: Value) -> Value {
-        self.request_customization
-            .read()
-            .apply(&mut body, self.effective_reasoning(), &self.model);
-        self.strip_temperature(&mut body);
+    /// Legacy parameter patches obey sampling switches; full-body customization runs last.
+    pub fn finalize_body(&self, body: Value) -> Value {
+        let customization = self.request_customization.read();
+        let body = customization.finalize(body, self.effective_reasoning(), &self.model,
+            !self.should_omit_temperature() && self.send_temperature.load(Ordering::Relaxed),
+            self.send_max_tokens.load(Ordering::Relaxed));
         body
     }
 
@@ -1234,7 +1197,7 @@ mod request_parameter_switch_tests {
         );
         let bound = scope_provider_call(
             ProviderCallOptions {
-                max_tokens_extra: 50,
+                max_tokens: Some(150),
                 temperature: Some(0.2),
                 ..Default::default()
             },

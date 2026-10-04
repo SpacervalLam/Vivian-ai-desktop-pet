@@ -4,15 +4,27 @@
  * 数据源：invoke('list_todos') / invoke('add_todo_item') / ...
  * 刷新：监听 todo:changed 事件
  *
- * 从 TodoWindow.tsx 改造：去除窗口外壳（标题栏/minimize/close/getCurrentWindow），
- * 适配 MindInspector 的 page 渲染模式。
+ * 布局（看板型）：顶部筛选行（状态分段 + 计数 + 新增）/ 下方任务行列表。
+ * 任务行不是卡片：左侧一条 2px 优先级竖条承担全部色彩编码，
+ * 行间用发丝线分隔 —— 看板要的是扫视速度，不是卡片阴影。
+ * 版式刻度与共用控件走 RecordTheme.css。
  */
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { useTranslation } from 'react-i18next';
+import {
+  Bell,
+  Check,
+  CheckCheck,
+  ListChecks,
+  Pencil,
+  Plus,
+  Trash2,
+} from 'lucide-react';
 import LoadingSpinner from '../../LoadingSpinner';
+import './RecordTheme.css';
 
 interface TodoItem {
   id: string;
@@ -27,6 +39,13 @@ interface TodoItem {
 }
 
 type Tab = 'pending' | 'completed' | 'all';
+
+/** 优先级色阶：只驱动左侧竖条与状态点，不做色块底 */
+const PRIORITY_COLORS: Record<number, string> = {
+  1: '#8A8780',
+  2: '#C08A3E',
+  3: '#B4553F',
+};
 
 // 将 due_date 转换为 datetime-local input 所需的格式（YYYY-MM-DDTHH:MM）
 function dueDateToInputValue(dueDate: string | null | undefined): string {
@@ -53,12 +72,6 @@ function formatDueDate(dueDate: string | null | undefined): string {
   }
   return dueDate;
 }
-
-const PRIORITY_COLORS: Record<number, string> = {
-  1: '#8E8E93',
-  2: '#FF9500',
-  3: '#FF453A',
-};
 
 const TodoPage: React.FC = () => {
   const { t } = useTranslation();
@@ -119,6 +132,16 @@ const TodoPage: React.FC = () => {
       return true;
     });
   }, [items, tab]);
+
+  // 各分段的条目数，供筛选行上的计数使用
+  const counts = useMemo(
+    () => ({
+      pending: items.filter((it) => !it.completed).length,
+      completed: items.filter((it) => it.completed).length,
+      all: items.length,
+    }),
+    [items],
+  );
 
   const openForm = useCallback((item?: TodoItem) => {
     if (item) {
@@ -186,401 +209,185 @@ const TodoPage: React.FC = () => {
     [t],
   );
 
-  const inputStyle: React.CSSProperties = {
-    width: '100%',
-    padding: '8px 12px',
-    background: 'var(--panel-surface)',
-    border: '1.5px solid var(--panel-border)',
-    borderRadius: 8,
-    color: 'var(--panel-text)',
-    fontSize: 14,
-    fontFamily: 'inherit',
-    outline: 'none',
-    boxSizing: 'border-box',
-    boxShadow: '0 1px 2px rgba(0,0,0,0.02)',
-  };
+  const TABS: Array<{ key: Tab; label: string }> = [
+    { key: 'pending', label: t('todo_window.tab_pending') },
+    { key: 'completed', label: t('todo_window.tab_completed') },
+    { key: 'all', label: t('todo_window.tab_all') },
+  ];
 
   return (
-    <div
-      className="vivian-scroll"
-      style={{
-        display: 'flex',
-        flexDirection: 'column',
-        height: '100%',
-        overflow: 'hidden',
-        color: 'var(--panel-text)',
-      }}
-    >
-      {/* Tab 切换 */}
-      <div
-        style={{
-          display: 'flex',
-          gap: 4,
-          padding: '10px 16px',
-          flexShrink: 0,
-          borderBottom: '1.5px solid var(--panel-border)',
-          background: 'var(--panel-bar-bg)',
-        }}
-      >
-        {(
-          [
-            { key: 'pending', label: t('todo_window.tab_pending') },
-            { key: 'completed', label: t('todo_window.tab_completed') },
-            { key: 'all', label: t('todo_window.tab_all') },
-          ] as { key: Tab; label: string }[]
-        ).map((tb) => (
-          <button
-            key={tb.key}
-            onClick={() => setTab(tb.key)}
-            style={{
-              padding: '6px 14px',
-              border: 'none',
-              borderRadius: 16,
-              background: tab === tb.key ? 'var(--panel-selected-bg)' : 'transparent',
-              color: tab === tb.key ? 'var(--panel-selected-text)' : 'var(--panel-text-secondary)',
-              fontSize: 13,
-              fontWeight: 500,
-              cursor: 'pointer',
-              transition: 'background 0.15s ease, color 0.15s ease',
-            }}
-          >
-            {tb.label}
-          </button>
-        ))}
+    <div className="record-plan">
+      <div className="record-plan-bar">
+        <div className="rec-seg">
+          {TABS.map((tb) => (
+            <button
+              key={tb.key}
+              type="button"
+              onClick={() => setTab(tb.key)}
+              className={`rec-seg-item${tab === tb.key ? ' is-active' : ''}`}
+            >
+              {tb.label}
+              <span style={{ color: 'var(--rec-faint)', fontVariantNumeric: 'tabular-nums' }}>
+                {counts[tb.key]}
+              </span>
+            </button>
+          ))}
+        </div>
+        <span className="record-plan-bar-spacer" />
+        <button type="button" onClick={() => openForm()} className="rec-btn is-primary">
+          <Plus size={14} /> {t('todo_window.btn_add')}
+        </button>
       </div>
 
-      {/* 列表 */}
-      <div
-        className="vivian-scroll"
-        style={{
-          flex: 1,
-          overflowY: 'auto',
-          padding: '12px 16px',
-        }}
-      >
+      <div className="record-plan-list">
         {loading ? (
-          <div
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              gap: 8,
-              color: 'var(--panel-text-tertiary)',
-              fontSize: 13,
-              marginTop: 40,
-            }}
-          >
-            <LoadingSpinner size={16} color="var(--panel-text-tertiary)" thickness={1.5} />
+          <div style={{ display: 'flex', justifyContent: 'center', paddingTop: 40 }}>
+            <LoadingSpinner size={16} color="var(--rec-faint)" thickness={1.5} />
           </div>
         ) : filtered.length === 0 ? (
-          <div
-            style={{
-              display: 'flex',
-              flexDirection: 'column',
-              alignItems: 'center',
-              justifyContent: 'center',
-              gap: 8,
-              color: 'var(--panel-text-tertiary)',
-              fontSize: 14,
-              marginTop: 60,
-            }}
-          >
-            <div style={{ fontSize: 28, opacity: 0.4 }}>✓</div>
-            <div>{t('todo_window.empty')}</div>
-            <div style={{ fontSize: 12, opacity: 0.7 }}>
-              {t('todo_window.empty_hint')}
-            </div>
+          <div className="rec-blank">
+            <span className="rec-blank-icon">
+              <CheckCheck size={30} strokeWidth={1.2} />
+            </span>
+            <span className="rec-blank-title">{t('todo_window.empty')}</span>
+            <span className="rec-blank-hint">{t('todo_window.empty_hint')}</span>
           </div>
         ) : (
           filtered.map((it) => (
             <div
               key={it.id}
-              className="mind-hover"
-              style={{
-                background: 'var(--panel-surface)',
-                borderRadius: 12,
-                padding: '12px 14px',
-                marginBottom: 10,
-                border: '1.5px solid var(--panel-border)',
-                boxShadow: '0 1px 3px rgba(0,0,0,0.04)',
-              }}
+              className={`record-plan-row${it.completed ? ' is-done' : ''}`}
+              style={{ ['--rec-accent-bar' as string]: PRIORITY_COLORS[it.priority] ?? 'var(--rec-faint)' }}
             >
-              <div
-                style={{
-                  display: 'flex',
-                  alignItems: 'flex-start',
-                  justifyContent: 'space-between',
-                  gap: 8,
-                }}
-              >
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 8,
-                      marginBottom: 4,
-                    }}
-                  >
-                    <span
-                      style={{
-                        fontSize: 11,
-                        padding: '2px 8px',
-                        borderRadius: 8,
-                        background: PRIORITY_COLORS[it.priority]
-                          ? `${PRIORITY_COLORS[it.priority]}22`
-                          : 'var(--panel-tag-bg)',
-                        color: PRIORITY_COLORS[it.priority] || 'var(--panel-text-tertiary)',
-                        fontWeight: 500,
-                      }}
+              <div className="record-plan-row-top">
+                <div className="record-plan-row-main">
+                  <span className="record-plan-title">{it.title}</span>
+                  {it.description && <span className="record-plan-desc">{it.description}</span>}
+                </div>
+                <div className="record-plan-actions">
+                  {!it.completed && (
+                    <button
+                      type="button"
+                      onClick={() => void handleComplete(it.id)}
+                      title={t('todo_window.btn_complete')}
+                      className="rec-icon-btn"
                     >
-                      {t(`todo_window.priority_${it.priority}` as const)}
-                    </span>
-                    {it.due_date && (
-                      <span style={{ fontSize: 11, color: 'var(--panel-text-tertiary)' }}>
-                        📅 {formatDueDate(it.due_date)}
-                      </span>
-                    )}
-                    {it.reminder_id && (
-                      <span style={{ fontSize: 11, color: '#4CAF50' }}>🔔</span>
-                    )}
-                  </div>
-                  <div
-                    style={{
-                      fontSize: 15,
-                      fontWeight: 500,
-                      textDecoration: it.completed ? 'line-through' : 'none',
-                      opacity: it.completed ? 0.6 : 1,
-                      wordBreak: 'break-word',
-                      color: 'var(--panel-text)',
-                    }}
-                  >
-                    {it.title}
-                  </div>
-                  {it.description && (
-                    <div
-                      style={{
-                        fontSize: 13,
-                        color: 'var(--panel-text-secondary)',
-                        marginTop: 4,
-                        whiteSpace: 'pre-wrap',
-                        wordBreak: 'break-word',
-                      }}
-                    >
-                      {it.description}
-                    </div>
+                      <Check size={15} />
+                    </button>
                   )}
+                  <button
+                    type="button"
+                    onClick={() => openForm(it)}
+                    title={t('todo_window.btn_edit')}
+                    className="rec-icon-btn"
+                  >
+                    <Pencil size={14} />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void handleDelete(it.id)}
+                    title={t('todo_window.btn_delete')}
+                    className="rec-icon-btn is-danger"
+                  >
+                    <Trash2 size={14} />
+                  </button>
                 </div>
               </div>
-              <div
-                style={{
-                  display: 'flex',
-                  gap: 6,
-                  marginTop: 10,
-                  justifyContent: 'flex-end',
-                }}
-              >
-                {!it.completed && (
-                  <button
-                    onClick={() => handleComplete(it.id)}
-                    style={actionBtn}
-                    onMouseEnter={(e) =>
-                      (e.currentTarget.style.background = 'rgba(76,175,80,0.10)')
-                    }
-                    onMouseLeave={(e) =>
-                      (e.currentTarget.style.background = 'transparent')
-                    }
-                  >
-                    {t('todo_window.btn_complete')}
-                  </button>
-                )}
-                {!it.completed && (
-                  <button
-                    onClick={() => openForm(it)}
-                    style={actionBtn}
-                    onMouseEnter={(e) =>
-                      (e.currentTarget.style.background = 'var(--panel-bg-hover)')
-                    }
-                    onMouseLeave={(e) =>
-                      (e.currentTarget.style.background = 'transparent')
-                    }
-                  >
-                    {t('todo_window.btn_edit')}
-                  </button>
-                )}
-                <button
-                  onClick={() => handleDelete(it.id)}
-                  style={actionBtn}
-                  onMouseEnter={(e) =>
-                    (e.currentTarget.style.background = 'rgba(229,57,53,0.10)')
-                  }
-                  onMouseLeave={(e) =>
-                    (e.currentTarget.style.background = 'transparent')
-                  }
-                >
-                  {t('todo_window.btn_delete')}
-                </button>
-              </div>
+
+              {(it.priority > 1 || it.due_date || it.reminder_id) && (
+                <div className="record-plan-foot">
+                  {it.priority > 1 && (
+                    <span className="record-plan-badge">
+                      <span className="rec-dot" style={{ color: PRIORITY_COLORS[it.priority] }} />
+                      {t(`todo_window.priority_${it.priority}` as const)}
+                    </span>
+                  )}
+                  {it.due_date && (
+                    <span className="record-plan-badge">
+                      <ListChecks size={12} />
+                      {formatDueDate(it.due_date)}
+                    </span>
+                  )}
+                  {it.reminder_id && (
+                    <span className="record-plan-badge">
+                      <Bell size={12} />
+                    </span>
+                  )}
+                </div>
+              )}
             </div>
           ))
         )}
       </div>
 
-      {/* 底部添加按钮 */}
-      <div
-        style={{
-          padding: '10px 16px calc(10px + env(safe-area-inset-bottom, 0px))',
-          flexShrink: 0,
-          background: 'var(--panel-bar-bg)',
-          borderTop: '1.5px solid var(--panel-border)',
-        }}
-      >
-        <button
-          onClick={() => openForm()}
-          style={{
-            width: '100%',
-            padding: '10px',
-            border: 'none',
-            borderRadius: 12,
-            background: 'var(--panel-accent)',
-            color: 'var(--panel-selected-text)',
-            fontSize: 14,
-            fontWeight: 600,
-            cursor: 'pointer',
-            boxShadow: '0 1px 3px rgba(0,0,0,0.08)',
-          }}
-        >
-          + {t('todo_window.btn_add')}
-        </button>
-      </div>
-
       {/* 表单弹窗 */}
       {showForm && (
-        <div
-          style={{
-            position: 'fixed',
-            inset: 0,
-            background: 'var(--panel-overlay)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            zIndex: 100,
-          }}
-          onClick={() => setShowForm(false)}
-        >
-          <div
-            style={{
-              background: 'var(--panel-surface)',
-              borderRadius: 16,
-              padding: 20,
-              width: '80%',
-              maxWidth: 400,
-              border: '1.5px solid var(--panel-border)',
-              boxShadow: '0 8px 32px rgba(0,0,0,0.12)',
-            }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 16, color: 'var(--panel-text)' }}>
+        <div className="rec-overlay" onClick={() => setShowForm(false)}>
+          <div className="rec-dialog" onClick={(e) => e.stopPropagation()}>
+            <h3 className="rec-dialog-title">
               {editing ? t('todo_window.btn_edit') : t('todo_window.btn_add')}
-            </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-              <div>
-                <label style={labelStyle}>{t('todo_window.field_title')}</label>
+            </h3>
+            <div className="rec-dialog-body">
+              <div className="rec-field">
+                <label className="rec-label">{t('todo_window.field_title')}</label>
                 <input
+                  className="rec-input"
                   value={formTitle}
                   onChange={(e) => setFormTitle(e.target.value)}
-                  style={inputStyle}
                   autoFocus
                 />
               </div>
-              <div>
-                <label style={labelStyle}>
-                  {t('todo_window.field_description')}
-                </label>
+              <div className="rec-field">
+                <label className="rec-label">{t('todo_window.field_description')}</label>
                 <textarea
+                  className="rec-textarea"
+                  style={{ minHeight: 60 }}
                   value={formDescription}
                   onChange={(e) => setFormDescription(e.target.value)}
-                  style={{ ...inputStyle, minHeight: 60, resize: 'vertical' }}
                   rows={3}
                 />
               </div>
-              <div>
-                <label style={labelStyle}>
-                  {t('todo_window.field_priority')}
-                </label>
-                <div style={{ display: 'flex', gap: 6 }}>
+              <div className="rec-field">
+                <label className="rec-label">{t('todo_window.field_priority')}</label>
+                <div className="rec-seg" style={{ alignSelf: 'stretch' }}>
                   {[1, 2, 3].map((p) => (
                     <button
                       key={p}
+                      type="button"
                       onClick={() => setFormPriority(p)}
-                      style={{
-                        flex: 1,
-                        padding: '8px',
-                        border: 'none',
-                        borderRadius: 8,
-                        background:
-                          formPriority === p
-                            ? PRIORITY_COLORS[p]
-                            : 'var(--panel-tag-bg)',
-                        color: formPriority === p ? 'var(--panel-selected-text)' : 'var(--panel-text-secondary)',
-                        fontSize: 13,
-                        fontWeight: 500,
-                        cursor: 'pointer',
-                      }}
+                      className={`rec-seg-item${formPriority === p ? ' is-active' : ''}`}
+                      style={{ flex: 1, justifyContent: 'center' }}
                     >
+                      {formPriority === p && (
+                        <span
+                          className="rec-dot"
+                          style={{ color: PRIORITY_COLORS[p] }}
+                        />
+                      )}
                       {t(`todo_window.priority_${p}` as const)}
                     </button>
                   ))}
                 </div>
               </div>
-              <div>
-                <label style={labelStyle}>
-                  {t('todo_window.field_due_date')}
-                </label>
+              <div className="rec-field">
+                <label className="rec-label">{t('todo_window.field_due_date')}</label>
                 <input
+                  className="rec-input"
                   type="datetime-local"
                   value={formDueDate}
                   onChange={(e) => setFormDueDate(e.target.value)}
-                  style={inputStyle}
                 />
               </div>
             </div>
-            <div
-              style={{
-                display: 'flex',
-                gap: 8,
-                marginTop: 20,
-                justifyContent: 'flex-end',
-              }}
-            >
-              <button
-                onClick={() => setShowForm(false)}
-                style={{
-                  padding: '8px 16px',
-                  border: 'none',
-                  borderRadius: 10,
-                  background: 'var(--panel-tag-bg)',
-                  color: 'var(--panel-text)',
-                  fontSize: 14,
-                  cursor: 'pointer',
-                }}
-              >
+            <div className="rec-dialog-foot">
+              <button type="button" onClick={() => setShowForm(false)} className="rec-btn">
                 {t('todo_window.btn_cancel')}
               </button>
               <button
-                onClick={handleSave}
+                type="button"
+                onClick={() => void handleSave()}
                 disabled={!formTitle.trim() || saving}
-                style={{
-                  padding: '8px 16px',
-                  border: 'none',
-                  borderRadius: 10,
-                  background:
-                    formTitle.trim() && !saving ? 'var(--panel-accent)' : 'var(--panel-toggle-off)',
-                  color: 'var(--panel-selected-text)',
-                  fontSize: 14,
-                  fontWeight: 600,
-                  cursor: formTitle.trim() && !saving ? 'pointer' : 'not-allowed',
-                }}
+                className="rec-btn is-primary"
               >
                 {t('todo_window.btn_save')}
               </button>
@@ -590,25 +397,6 @@ const TodoPage: React.FC = () => {
       )}
     </div>
   );
-};
-
-const actionBtn: React.CSSProperties = {
-  padding: '4px 12px',
-  border: 'none',
-  borderRadius: 8,
-  background: 'transparent',
-  color: 'var(--panel-text-secondary)',
-  fontSize: 12,
-  fontWeight: 500,
-  cursor: 'pointer',
-  transition: 'background 0.15s ease',
-};
-
-const labelStyle: React.CSSProperties = {
-  display: 'block',
-  fontSize: 12,
-  color: 'var(--panel-text-secondary)',
-  marginBottom: 4,
 };
 
 export default TodoPage;

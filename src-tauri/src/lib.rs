@@ -11,7 +11,6 @@ pub mod commands;
 pub mod config;
 pub mod stickers;
 pub mod conversation;
-pub mod dialogue_lab;
 pub mod cordis;
 pub mod credentials;
 pub mod cross_character;
@@ -37,6 +36,8 @@ pub mod self_state;
 pub mod pet_controller;
 pub mod pipeline;
 pub mod plugins;
+pub mod plugin_contract;
+pub mod desktop_contract;
 pub mod plugin_contributions;
 pub mod presence;
 pub mod proactive;
@@ -161,8 +162,9 @@ pub fn run() {
         })
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             // 已有实例运行时唤起活跃角色窗口并聚焦。
-            // "main" 现在是无 UI 的隐藏控制器窗口，唤起它用户看不到任何反馈。
-            // 这里依次尝试：活跃角色 → 任一在线角色 → 兜底 main。
+            // 没有隐藏控制器窗口了（那是个纯浪费的 WebView2 进程，已删除），
+            // 所以只认角色窗口：活跃角色 → 任一在线角色。
+            // 都离线时不动作 —— 离线是用户自己选的状态，替他强行拉起一个窗口才是打扰。
             let target_window = {
                 let state = app.state::<std::sync::Arc<AppState>>();
                 let chars = state.characters.read();
@@ -180,11 +182,12 @@ pub fn run() {
                             .map(|c| c.id.clone())
                     })
             };
-            let label = target_window.as_deref().unwrap_or("main");
-            if let Some(window) = app.get_webview_window(label) {
-                let _ = window.unminimize();
-                let _ = window.show();
-                let _ = window.set_focus();
+            if let Some(label) = target_window.as_deref() {
+                if let Some(window) = app.get_webview_window(label) {
+                    let _ = window.unminimize();
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
             }
         }))
         .plugin(tauri_plugin_shell::init())
@@ -293,6 +296,8 @@ pub fn run() {
             commands::chat::save_shared_file,
             commands::chat::wake_from_presence,
             commands::memory::get_memories,
+            commands::memory::get_memory_conversations,
+            commands::memory::summarize_memory_conversation,
             commands::memory::get_graph_timeline,
             commands::memory::get_memories_range,
             commands::memory::get_memory_summary,
@@ -315,12 +320,6 @@ pub fn run() {
             commands::mind::get_memory_health,
             commands::mind_inspector::get_recent_reasoning_traces,
             commands::mind_inspector::get_last_prompt_breakdown,
-            commands::dialogue_lab::list_dialogue_lab,
-            commands::dialogue_lab::get_dialogue_lab,
-            commands::dialogue_lab::create_dialogue_lab,
-            commands::dialogue_lab::fork_dialogue_lab,
-            commands::dialogue_lab::run_dialogue_lab,
-            commands::dialogue_lab::delete_dialogue_lab,
             commands::mind_inspector::get_prompt_template_preview,
             commands::mind_inspector::get_sessions,
             commands::mind_inspector::get_prompt_section_schema,
@@ -624,6 +623,7 @@ pub fn run() {
             commands::config::get_user_avatar_data_url,
             commands::config::clear_user_avatar,
             commands::config::get_settings_catalog,
+            commands::config::get_desktop_settings,
             commands::config::get_work_models,
             commands::config::select_work_model,
             commands::config::clear_work_model,
@@ -1044,7 +1044,7 @@ pub fn run() {
                             );
 
                             // 启动时预取天气：若经纬度已配置，立即刷新全局天气缓存
-                            // 这样不必等到用户打开世界页或 proactive tick 才有天气数据
+                            // 这样不必等到 proactive tick 才有天气数据
                             {
                                 let world_cfg_for_weather =
                                     state.config.read().get_all().world.clone();
@@ -1400,7 +1400,7 @@ pub fn run() {
 
             #[cfg(debug_assertions)]
             {
-                // "main" 现在是无 UI 的隐藏控制器，DevTools 应开在角色窗口上。
+                // 隐藏控制器窗口已删除，debug 构建没有可开 DevTools 的常驻窗口。
                 // 角色窗口在异步 initialize 完成后才创建，DevTools 由角色窗口创建循环负责打开。
             }
             Ok(())

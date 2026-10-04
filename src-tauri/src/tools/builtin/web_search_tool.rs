@@ -103,11 +103,21 @@ fn validate(args: &Value) -> Result<(), String> {
     if args.get("refresh").is_some_and(|v| !v.is_boolean()) {
         return Err("refresh 必须为布尔值".into());
     }
-    if strings(args, "engines")
-        .iter()
-        .any(|s| !matches!(s.as_str(), "duckduckgo" | "searxng" | "tavily" | "deepseek"))
-    {
-        return Err("未知或已退役的搜索引擎；支持 duckduckgo/searxng/tavily/deepseek".into());
+    if strings(args, "engines").iter().any(|s| {
+        !matches!(
+            s.as_str(),
+            "duckduckgo"
+                | "searxng"
+                | "tavily"
+                | "deepseek"
+                | "exa"
+                | "perplexity"
+                | "openai"
+                | "xai"
+                | "anthropic"
+        )
+    }) {
+        return Err("未知或已退役的搜索引擎；支持 duckduckgo/searxng/tavily/deepseek/exa/perplexity/openai/xai/anthropic".into());
     }
     for key in ["language", "country"] {
         if args.get(key).is_some_and(|v| {
@@ -143,7 +153,7 @@ impl Tool for WebSearchTool {
         "query":{"type":"string","description":"A specific search query"},
         "queries":{"type":"array","items":{"type":"string"},"minItems":1,"maxItems":4,"description":"Up to four queries; total including query must be <=4"},
         "max_results":{"type":"integer","minimum":1,"maximum":20,"description":"Per-query result limit; chat 5, work 10 unless configured"},
-        "engines":{"type":"array","items":{"type":"string","enum":["duckduckgo","searxng","tavily","deepseek"]},"description":"Only enabled engines; omitted fast selects one inexpensive available engine, research uses enabled pool"},
+        "engines":{"type":"array","items":{"type":"string","enum":["duckduckgo","searxng","tavily","deepseek","exa","perplexity","openai","xai","anthropic"]},"description":"Only enabled engines; omitted fast tries them in order until one returns content, research queries all concurrently"},
         "include_domains":{"type":"array","items":{"type":"string"},"maxItems":100,"description":"Allowed hostnames, e.g. docs.rs. Enforced after retrieval"},
         "exclude_domains":{"type":"array","items":{"type":"string"},"maxItems":100},
         "recency_days":{"type":"integer","minimum":1,"maximum":3650,"description":"Request recent content. Undated results explicitly remain unverified"},
@@ -218,14 +228,26 @@ impl Tool for WebSearchTool {
             .iter()
             .map(|r| WebSearchService::shared().search(r, config.as_ref(), proxy.as_deref()));
         let results = futures::future::join_all(calls).await;
+        let store = crate::network::web_evidence::EvidenceStore::for_session(
+            &ctx.session_id,
+            &ctx.char_id,
+            &ctx.user_id,
+        );
         let mut batches = vec![];
         let mut success = 0;
         let mut errors = vec![];
         for (r, result) in requests.iter().zip(results) {
             match result {
-                Ok(result) => {
+                Ok(mut result) => {
+                    for source in &result.sources {
+                        if let Err(e) = store.save_source(source) {
+                            result
+                                .warnings
+                                .push(format!("Evidence persistence failed: {e}"));
+                        }
+                    }
                     success += 1;
-                    batches.push(json!({"query":r.query,"results":result.sources,"count":result.sources.len(),"truncated":result.truncated,"warnings":result.warnings,"engines_used":result.engines_used,"cached":result.cached}));
+                    batches.push(json!({"query":r.query,"results":result.sources,"count":result.sources.len(),"truncated":result.truncated,"warnings":result.warnings,"engines_used":result.engines_used,"cached":result.cached,"answer":result.content,"answer_status":"MODEL_SUMMARY_UNVERIFIED"}));
                 }
                 Err(e) => {
                     errors.push(e.to_string());
@@ -275,7 +297,7 @@ mod tests {
         assert!(validate(&json!({"queries":["rust","tauri"]})).is_ok());
         assert!(validate(&json!({"query":"x","max_results":-1})).is_err());
         assert!(validate(&json!({"query":"x","include_domains":["https://evil.com"]})).is_err());
-        assert!(validate(&json!({"query":"x","engines":["bing"]})).is_err());
+        assert!(validate(&json!({"query":"x","engines":["no_such_engine"]})).is_err());
         assert!(validate(&json!({"queries":["a","b","c","d","e"]})).is_err());
     }
 }

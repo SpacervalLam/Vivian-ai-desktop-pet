@@ -10,7 +10,7 @@
 //! - 实体从记忆内容自动抽取
 //! - 增加 source_memory_id 溯源（每条边关联到来源记忆）
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -299,18 +299,18 @@ impl KnowledgeGraph {
         let max_depth = max_depth.clamp(1, 3);
         let mut visited: HashMap<String, usize> = HashMap::new();
         let mut results: Vec<FanoutResult> = Vec::new();
-        let mut queue: Vec<(String, usize, Vec<String>)> = Vec::new();
+        let mut queue: VecDeque<(String, usize, Vec<String>)> = VecDeque::new();
 
         // 初始化种子
         for seed in seeds {
             if store.entities.contains_key(*seed) {
                 visited.insert(seed.to_string(), 0);
-                queue.push((seed.to_string(), 0, vec![seed.to_string()]));
+                queue.push_back((seed.to_string(), 0, vec![seed.to_string()]));
             }
         }
 
         // BFS
-        while let Some((current, depth, path)) = queue.pop() {
+        while let Some((current, depth, path)) = queue.pop_front() {
             if depth >= max_depth {
                 continue;
             }
@@ -354,7 +354,7 @@ impl KnowledgeGraph {
                     source_memory_id: edge.source_memory_id.clone(),
                 });
 
-                queue.push((neighbor, depth + 1, new_path));
+                queue.push_back((neighbor, depth + 1, new_path));
             }
         }
 
@@ -515,17 +515,9 @@ mod tests {
     #[test]
     fn test_fanout_finds_neighbors() {
         let graph = make_test_graph();
-        graph.ingest_from_memory(
-            "mem_test1",
-            "马化腾创建了腾讯",
-            1000.0,
-        );
-        graph.ingest_from_memory(
-            "mem_test2",
-            "张三在腾讯工作",
-            2000.0,
-        );
-
+        // Traversal fixtures use explicit entities; tokenization is tested separately.
+        graph.ingest_concepts("马化腾", &["腾讯".into()], &["mem1".into()], 1000.0);
+        graph.ingest_concepts("张三", &["腾讯".into()], &["mem2".into()], 2000.0);
         // 从"腾讯"出发，应该能找到"马化腾"和"张三"
         let results = graph.fanout(&["腾讯"], &[], 2, 10);
         assert!(!results.is_empty());
@@ -550,8 +542,8 @@ mod tests {
     #[test]
     fn test_fanout_max_depth() {
         let graph = make_test_graph();
-        graph.ingest_from_memory("mem1", "A创建了B", 1000.0);
-        graph.ingest_from_memory("mem2", "B投资了C", 2000.0);
+        graph.ingest_concepts("A", &["B".into()], &["mem1".into()], 1000.0);
+        graph.ingest_concepts("B", &["C".into()], &["mem2".into()], 2000.0);
 
         // depth=1：只找直接邻居
         let results = graph.fanout(&["A"], &[], 1, 10);

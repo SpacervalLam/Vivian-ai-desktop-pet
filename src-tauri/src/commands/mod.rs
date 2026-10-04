@@ -12,7 +12,6 @@ pub mod engine;
 pub mod environment;
 pub mod git;
 pub mod history;
-pub mod dialogue_lab;
 pub mod inspector;
 pub mod memory;
 pub mod metrics;

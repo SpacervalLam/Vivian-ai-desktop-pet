@@ -135,9 +135,11 @@ struct CardStoreData {
     /// 对话轮次计数器（每轮 +1，用于冷却判断）
     turn_counter: u32,
     /// 上次切换轮次
-    last_switch_turn: u32,
+    #[serde(default)]
+    last_switch_turn: Option<u32>,
     /// 上次创建轮次
-    last_create_turn: u32,
+    #[serde(default)]
+    last_create_turn: Option<u32>,
     /// 上次更新轮次（按卡片 ID 索引）
     last_update_turns: HashMap<String, u32>,
 }
@@ -247,7 +249,7 @@ impl PersonaCardStore {
     pub fn create_card(&self, name: &str, description: &str) -> VivianResult<PersonaCard> {
         let mut data = self.inner.write();
         let turn = data.turn_counter;
-        let elapsed = turn.saturating_sub(data.last_create_turn);
+        let elapsed = data.last_create_turn.map_or(CREATE_COOLDOWN_TURNS, |last| turn.saturating_sub(last));
         if elapsed < CREATE_COOLDOWN_TURNS {
             return Err(VivianError::Memory(format!(
                 "创建冷却中：还需 {} 轮才可创建新卡片",
@@ -278,7 +280,7 @@ impl PersonaCardStore {
         };
 
         data.cards.push(card.clone());
-        data.last_create_turn = turn;
+        data.last_create_turn = Some(turn);
         drop(data);
 
         self.append_event(&PersonaEvent::Create {
@@ -306,8 +308,7 @@ impl PersonaCardStore {
     ) -> VivianResult<()> {
         let mut data = self.inner.write();
         let turn = data.turn_counter;
-        let last_update = data.last_update_turns.get(card_id).copied().unwrap_or(0);
-        let elapsed = turn.saturating_sub(last_update);
+        let elapsed = data.last_update_turns.get(card_id).map_or(UPDATE_COOLDOWN_TURNS, |last| turn.saturating_sub(*last));
         if elapsed < UPDATE_COOLDOWN_TURNS {
             return Err(VivianError::Memory(format!(
                 "更新冷却中：还需 {} 轮才可更新此卡片",
@@ -360,7 +361,7 @@ impl PersonaCardStore {
     pub fn switch_card(&self, card_id: Option<&str>) -> VivianResult<()> {
         let mut data = self.inner.write();
         let turn = data.turn_counter;
-        let elapsed = turn.saturating_sub(data.last_switch_turn);
+        let elapsed = data.last_switch_turn.map_or(SWITCH_COOLDOWN_TURNS, |last| turn.saturating_sub(last));
         if elapsed < SWITCH_COOLDOWN_TURNS {
             return Err(VivianError::Memory(format!(
                 "切换冷却中：还需 {} 轮才可切换",
@@ -381,7 +382,7 @@ impl PersonaCardStore {
                         turn,
                     };
                     data.active_card_id = None;
-                    data.last_switch_turn = turn;
+                    data.last_switch_turn = Some(turn);
                     drop(data);
                     self.append_event(&event);
                     self.save_to()?;
@@ -407,7 +408,7 @@ impl PersonaCardStore {
                     turn,
                 };
                 data.active_card_id = Some(id.to_string());
-                data.last_switch_turn = turn;
+                data.last_switch_turn = Some(turn);
                 drop(data);
                 self.append_event(&event);
                 self.save_to()?;
@@ -528,20 +529,19 @@ impl PersonaCardStore {
 
     pub fn turns_until_can_switch(&self) -> u32 {
         let data = self.inner.read();
-        let elapsed = data.turn_counter.saturating_sub(data.last_switch_turn);
+        let elapsed = data.last_switch_turn.map_or(SWITCH_COOLDOWN_TURNS, |last| data.turn_counter.saturating_sub(last));
         SWITCH_COOLDOWN_TURNS.saturating_sub(elapsed)
     }
 
     pub fn turns_until_can_create(&self) -> u32 {
         let data = self.inner.read();
-        let elapsed = data.turn_counter.saturating_sub(data.last_create_turn);
+        let elapsed = data.last_create_turn.map_or(CREATE_COOLDOWN_TURNS, |last| data.turn_counter.saturating_sub(last));
         CREATE_COOLDOWN_TURNS.saturating_sub(elapsed)
     }
 
     pub fn turns_until_can_update(&self, card_id: &str) -> u32 {
         let data = self.inner.read();
-        let last = data.last_update_turns.get(card_id).copied().unwrap_or(0);
-        let elapsed = data.turn_counter.saturating_sub(last);
+        let elapsed = data.last_update_turns.get(card_id).map_or(UPDATE_COOLDOWN_TURNS, |last| data.turn_counter.saturating_sub(*last));
         UPDATE_COOLDOWN_TURNS.saturating_sub(elapsed)
     }
 }
@@ -554,6 +554,7 @@ mod tests {
     fn create_and_switch() {
         let store = PersonaCardStore::fallback();
         let card = store.create_card("测试卡", "用于测试").unwrap();
+        assert_eq!(store.turns_until_can_update(&card.id), 0);
         assert_eq!(store.list_cards(false).len(), 1);
         store.switch_card(Some(&card.id)).unwrap();
         assert_eq!(store.get_active_card().unwrap().id, card.id);

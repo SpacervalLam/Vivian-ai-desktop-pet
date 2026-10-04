@@ -388,9 +388,10 @@ impl AppState {
                 let scheduler = scheduler_for_cb.clone();
                 tauri::async_runtime::spawn(async move {
                     let id = task.id.clone();
+                    let attempt = task.delivery.attempts;
                     let character_id = task.char_id.clone();
                     let result = crate::tools::builtin::todo_tools::handle_task_trigger(task, tool_system).await;
-                    scheduler.complete_execution(&id, result);
+                    scheduler.complete_attempt(&id, attempt, result);
                     crate::tools::builtin::todo_tools::publish_scheduler_changed(&character_id);
                 });
             }));

@@ -1,11 +1,12 @@
 /**
- * Diary 页 — 日记列表 + 详情（手账风格）
+ * Diary 页 — 日记阅读视图
  *
  * 数据源：invoke('get_diary_entries', { characterId })
  * 刷新：监听 'diary:written' 事件
  *
- * 布局：左右两栏（左 40% 便签列表 + 右 60% 信纸详情）
- * 顶部和纸胶带切换角色（vivian / nana）
+ * 布局（阅读型）：左索引栏按月分组列出日期，右阅读面展示正文。
+ * 日期做页级标题、心情做成一个安静的读数，正文用衬线 + 1.9 行高。
+ * 排版刻度与共用控件走 RecordTheme.css，本文件只管这页的形状。
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -13,8 +14,19 @@ import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { TYPO, SPACING, EASE, DURATION, CHARACTER_ACCENT } from '../design-system';
+import {
+  BookHeart,
+  CalendarDays,
+  Check,
+  ChevronLeft,
+  ChevronRight,
+  ListChecks,
+  PenLine,
+  Search,
+  X,
+} from 'lucide-react';
 import { useNavigation } from '../NavigationContext';
+import './RecordTheme.css';
 
 // ============================================================
 // 类型定义
@@ -38,67 +50,6 @@ interface DiaryEntry {
 
 type CharacterId = 'vivian' | 'nana';
 
-// ============================================================
-// 手账视觉常量
-// ============================================================
-
-const JOURNAL = {
-  paper: 'var(--graph-paper)',
-  card: 'var(--graph-card)',
-  ink: 'var(--graph-ink)',
-  inkSoft: 'var(--graph-ink-soft)',
-  inkFaint: 'var(--graph-ink-faint)',
-  stampRed: 'var(--graph-stamp-red)',
-  grid: 'var(--graph-grid)',
-  shadowSm: 'var(--graph-shadow-sm)',
-  shadowMd: 'var(--graph-shadow-md)',
-  shadowLg: 'var(--graph-shadow-lg)',
-  border: 'var(--graph-border)',
-  line: 'var(--graph-line)',
-  lineBlue: 'rgba(122,158,199,0.30)',
-  marginPink: 'rgba(214,116,133,0.50)',
-  tape: ['#F2CD88', '#F3B8C4', '#C9E4D3', '#C9DDF2', '#DFD3F0'],
-} as const;
-
-/** 角色切换标签与卡片胶带用色 */
-const CHAR_TAPE: Record<CharacterId, string> = {
-  vivian: '#FFE88A',
-  nana: '#DDC6FF',
-};
-
-const HAND_BODY =
-  '"Caveat", "Ma Shan Zheng", "Dancing Script", "Hachi Maru Pop", "Kaiti SC", "KaiTi", "STKaiti", "DFKai-SB", "Noto Serif SC", "PingFang SC", "Microsoft YaHei", serif';
-
-/** 正文段落排版方式：按正文字种自动选择 */
-type ParagraphMode = 'indent-jp' | 'indent-cn' | 'blank-line';
-
-/** 含假名判定为日文（首行缩进一字），仅含汉字判定为中文（缩进两字），其余为西文（段间空行、不缩进） */
-function detectParagraphMode(text: string): ParagraphMode {
-  if (/[\u3040-\u309F\u30A0-\u30FF]/.test(text)) return 'indent-jp';
-  if (/[\u4E00-\u9FFF\u3400-\u4DBF]/.test(text)) return 'indent-cn';
-  return 'blank-line';
-}
-
-const MOOD_COLORS: Record<string, string> = {
-  happy: '#D98E2B',
-  good: '#6F9A5E',
-  neutral: '#8F877A',
-  sad: '#5F83A8',
-  angry: '#C9403A',
-  bored: '#8F877A',
-  tired: '#9C7BAB',
-};
-
-const MOOD_EMOJI: Record<string, string> = {
-  happy: '☀️',
-  good: '😊',
-  neutral: '😐',
-  sad: '😢',
-  angry: '😠',
-  bored: '😴',
-  tired: '😪',
-};
-
 const WEEKDAY_KEYS = [
   'weekday_sun',
   'weekday_mon',
@@ -109,41 +60,17 @@ const WEEKDAY_KEYS = [
   'weekday_sat',
 ];
 
-// ============================================================
-// 关键帧注入（一次性）
-// ============================================================
+const MOOD_COLORS: Record<string, string> = {
+  happy: '#C08A3E',
+  good: '#788C5D',
+  neutral: '#8A8780',
+  sad: '#5C7C93',
+  angry: '#B4553F',
+  bored: '#8A8780',
+  tired: '#8A7A94',
+};
 
-const KEYFRAMES_ID = 'diary-page-keyframes';
-if (typeof document !== 'undefined' && !document.getElementById(KEYFRAMES_ID)) {
-  const style = document.createElement('style');
-  style.id = KEYFRAMES_ID;
-  style.textContent = `
-@keyframes diary-slip-in {
-  0% { opacity: 0; transform: translateY(18px) rotate(3deg); }
-  100% { opacity: 1; transform: translateY(0) rotate(0deg); }
-}
-@keyframes diary-page-in {
-  0% { opacity: 0; transform: translateY(12px) rotate(0.6deg); }
-  100% { opacity: 1; transform: translateY(0) rotate(0deg); }
-}
-@keyframes diary-stamp-pop {
-  0% { opacity: 0; transform: scale(1.9) rotate(-20deg); }
-  62% { opacity: 1; transform: scale(0.92) rotate(-8deg); }
-  100% { opacity: 1; transform: scale(1) rotate(-8deg); }
-}
-@keyframes diary-float {
-  0%, 100% { transform: translateY(0) rotate(-3deg); }
-  50% { transform: translateY(-7px) rotate(3deg); }
-}
-@keyframes diary-pencil {
-  0%, 100% { transform: rotate(-10deg) translateY(0); }
-  50% { transform: rotate(8deg) translateY(-4px); }
-}
-@keyframes diary-spin {
-  to { transform: rotate(360deg); }
-}`;
-  document.head.appendChild(style);
-}
+const CHARACTERS: CharacterId[] = ['vivian', 'nana'];
 
 // ============================================================
 // 时间工具
@@ -155,24 +82,11 @@ const parseDate = (s: string): Date | null => {
   return Number.isNaN(d.getTime()) ? null : d;
 };
 
-const formatListDate = (s: string): string => {
+/** 索引栏用的短日期：2026-10-03 → 10-03 */
+const formatLinkDate = (s: string): string => {
   const d = parseDate(s);
   if (!d) return s;
-  const month = d.getMonth() + 1;
-  const day = d.getDate();
-  return `${d.getFullYear()}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-};
-
-const formatDetailTitle = (s: string, t: TFunction): string => {
-  const d = parseDate(s);
-  if (!d) return s;
-  const weekdayKey = WEEKDAY_KEYS[d.getDay()];
-  return t('mind_inspector.diary.detail_title', {
-    year: d.getFullYear(),
-    month: d.getMonth() + 1,
-    day: d.getDate(),
-    weekday: t(`mind_inspector.diary.${weekdayKey}`),
-  });
+  return `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 };
 
 const formatCreated = (ts: number, t: TFunction): string => {
@@ -192,20 +106,18 @@ const formatCreated = (ts: number, t: TFunction): string => {
 };
 
 // ============================================================
-// 颜色与高亮工具
+// 正文排版：按正文字种选择段间距策略
 // ============================================================
 
-const hexToRgba = (hex: string, alpha: number): string => {
-  const h = hex.replace('#', '');
-  const full = h.length === 3 ? h.split('').map((c) => c + c).join('') : h;
-  const r = parseInt(full.slice(0, 2), 16);
-  const g = parseInt(full.slice(2, 4), 16);
-  const b = parseInt(full.slice(4, 6), 16);
-  return `rgba(${r},${g},${b},${alpha})`;
-};
+/** 含假名判定为日文（首行缩进一字），仅含汉字判定为中文（缩进两字），其余为西文（段间空行、不缩进） */
+function detectParagraphMode(text: string): 'indent-jp' | 'indent-cn' | 'blank-line' {
+  if (/[\u3040-\u309F\u30A0-\u30FF]/.test(text)) return 'indent-jp';
+  if (/[\u4E00-\u9FFF\u3400-\u4DBF]/.test(text)) return 'indent-cn';
+  return 'blank-line';
+}
 
-/** 用主题色荧光笔高亮命中的关键词（大小写不敏感） */
-const highlightText = (text: string, query: string, accent: string): React.ReactNode => {
+/** 用陶土色荧光笔高亮命中的关键词（大小写不敏感） */
+const highlightText = (text: string, query: string): React.ReactNode => {
   const q = query.trim();
   if (!q) return text;
   const lower = text.toLowerCase();
@@ -217,16 +129,7 @@ const highlightText = (text: string, query: string, accent: string): React.React
   while (idx !== -1) {
     if (idx > cursor) parts.push(text.slice(cursor, idx));
     parts.push(
-      <span
-        key={`hl-${key++}`}
-        style={{
-          background: hexToRgba(accent, 0.4),
-          borderRadius: 2,
-          padding: '0 1px',
-          WebkitBoxDecorationBreak: 'clone',
-          boxDecorationBreak: 'clone',
-        }}
-      >
+      <span key={`hl-${key++}`} className="rec-mark">
         {text.slice(idx, idx + needle.length)}
       </span>,
     );
@@ -238,331 +141,79 @@ const highlightText = (text: string, query: string, accent: string): React.React
 };
 
 // ============================================================
-// 基础手账元素
+// 共用片段
 // ============================================================
 
-interface TapeStripProps {
-  color: string;
-  width?: number;
-  style?: React.CSSProperties;
-}
-
-/** 和纸胶带（斜纹半透明贴纸） */
-const TapeStrip: React.FC<TapeStripProps> = ({ color, width = 78, style }) => (
-  <div
-    aria-hidden
-    style={{
-      position: 'absolute',
-      top: -9,
-      left: '50%',
-      width,
-      height: 20,
-      transform: 'translateX(-50%) rotate(-2.5deg)',
-      background: `repeating-linear-gradient(45deg, rgba(255,255,255,0.35) 0 5px, rgba(255,255,255,0) 5px 10px), ${color}`,
-      opacity: 0.92,
-      borderRadius: 2,
-      boxShadow: JOURNAL.shadowSm,
-      pointerEvents: 'none',
-      ...style,
-    }}
-  />
-);
-
-/** 红色小印章（区块标题装饰） */
-const SealMark: React.FC<{ char: string; size?: number }> = ({ char, size = 22 }) => (
-  <span
-    aria-hidden
-    style={{
-      width: size,
-      height: size,
-      flexShrink: 0,
-      display: 'inline-flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      background: JOURNAL.stampRed,
-      color: '#FFF9EE',
-      borderRadius: 4,
-      transform: 'rotate(-6deg)',
-      boxShadow:
-        `inset 0 0 0 1.5px rgba(255,249,238,0.55), ${JOURNAL.shadowSm}`,
-      fontFamily: TYPO.fontFamilyCN,
-      fontSize: size * 0.62,
-      lineHeight: 1,
-    }}
-  >
-    {char}
-  </span>
-);
-
-/** 区块标题：印章 + 楷体标题 + 虚线延伸线 */
-const JournalSectionTitle: React.FC<{
-  seal: string;
+/** 区块标题：陶土标记 + 文字 + 一条发丝线延到右端 */
+const SectionTitle: React.FC<{
+  icon: React.ElementType;
   title: React.ReactNode;
-  style?: React.CSSProperties;
-}> = ({ seal, title, style }) => (
-  <div style={{ display: 'flex', alignItems: 'center', gap: 9, ...style }}>
-    <SealMark char={seal} />
-    <span
-      style={{
-        fontFamily: TYPO.fontFamilyCN,
-        fontSize: 17.5,
-        color: JOURNAL.ink,
-        letterSpacing: 2.5,
-        whiteSpace: 'nowrap',
-      }}
-    >
-      {title}
+  aside?: React.ReactNode;
+}> = ({ icon: Icon, title, aside }) => (
+  <div className="rec-sec">
+    <span className="rec-sec-mark">
+      <Icon size={15} strokeWidth={1.9} />
     </span>
-    <span
-      aria-hidden
-      style={{
-        flex: 1,
-        borderBottom: `1px dashed ${JOURNAL.border}`,
-        transform: 'translateY(3px)',
-      }}
-    />
+    <span className="rec-sec-text">{title}</span>
+    <span className="rec-sec-line" />
+    {aside ? <span className="rec-sec-aside">{aside}</span> : null}
   </div>
 );
 
-/** 便签纸容器（虚线边 + 胶带，用于空状态） */
-const PaperNote: React.FC<{
-  tapeColor?: string;
-  children: React.ReactNode;
-  style?: React.CSSProperties;
-}> = ({ tapeColor, children, style }) => (
-  <div
-    style={{
-      position: 'relative',
-      background: JOURNAL.card,
-      border: `1px dashed ${JOURNAL.border}`,
-      borderRadius: 5,
-      padding: '30px 38px',
-      boxShadow: JOURNAL.shadowLg,
-      transform: 'rotate(-0.7deg)',
-      display: 'flex',
-      flexDirection: 'column',
-      alignItems: 'center',
-      gap: SPACING.sm,
-      ...style,
-    }}
-  >
-    <TapeStrip color={tapeColor ?? JOURNAL.tape[0]} width={86} />
-    {children}
-  </div>
-);
-
-const NoteText: React.FC<{ children: React.ReactNode }> = ({ children }) => (
-  <div
-    style={{
-      fontFamily: HAND_BODY,
-      fontSize: 15.5,
-      color: JOURNAL.inkSoft,
-      letterSpacing: 1,
-      textAlign: 'center',
-    }}
-  >
-    {children}
-  </div>
-);
-
-const Center: React.FC<{ children: React.ReactNode }> = ({ children }) => (
-  <div
-    style={{
-      flex: 1,
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      minHeight: 220,
-    }}
-  >
-    {children}
-  </div>
-);
-
-/** 页面外壳：暖纸底 + 点阵 + 角落光晕 + 漂浮贴纸 */
-const PageShell: React.FC<{ children: React.ReactNode }> = ({ children }) => (
-  <div
-    style={{
-      flex: 1,
-      display: 'flex',
-      flexDirection: 'column',
-      gap: SPACING.md,
-      minHeight: 0,
-      position: 'relative',
-      background: `radial-gradient(900px 480px at 88% -8%, rgba(243,184,196,0.22), transparent 62%), radial-gradient(820px 560px at -6% 108%, rgba(201,228,211,0.26), transparent 62%), ${JOURNAL.paper}`,
-      borderRadius: 10,
-      border: `1px solid ${JOURNAL.border}`,
-      padding: `${SPACING.md + 2}px ${SPACING.md + 2}px ${SPACING.md}px`,
-      overflow: 'hidden',
-    }}
-  >
-    <div
-      aria-hidden
-      style={{
-        position: 'absolute',
-        inset: 0,
-        background: `radial-gradient(${JOURNAL.inkFaint} 1px, transparent 1.25px)`,
-        backgroundSize: '20px 20px',
-        pointerEvents: 'none',
-      }}
-    />
-    <span
-      aria-hidden
-      style={{
-        position: 'absolute',
-        top: 10,
-        right: 20,
-        fontSize: 30,
-        opacity: 0.2,
-        animation: 'diary-float 7s ease-in-out infinite',
-        pointerEvents: 'none',
-      }}
-    >
-      🌸
+const Blank: React.FC<{
+  icon: React.ElementType;
+  title: string;
+  hint?: string;
+  children?: React.ReactNode;
+}> = ({ icon: Icon, title, hint, children }) => (
+  <div className="rec-blank">
+    <span className="rec-blank-icon">
+      <Icon size={30} strokeWidth={1.2} />
     </span>
-    <span
-      aria-hidden
-      style={{
-        position: 'absolute',
-        bottom: 14,
-        left: 18,
-        fontSize: 24,
-        opacity: 0.16,
-        animation: 'diary-float 9s ease-in-out 1.2s infinite',
-        pointerEvents: 'none',
-      }}
-    >
-      🍂
-    </span>
-    <div
-      style={{
-        position: 'relative',
-        zIndex: 1,
-        flex: 1,
-        display: 'flex',
-        flexDirection: 'column',
-        gap: SPACING.md,
-        minHeight: 0,
-      }}
-    >
-      {children}
-    </div>
+    <span className="rec-blank-title">{title}</span>
+    {hint ? <span className="rec-blank-hint">{hint}</span> : null}
+    {children}
   </div>
 );
 
 // ============================================================
-// TapeTab — 和纸胶带角色切换
+// 角色切换
 // ============================================================
 
-interface TapeTabProps {
-  label: string;
-  color: string;
-  rot: number;
-  active: boolean;
-  onClick: () => void;
-}
-
-const TapeTab: React.FC<TapeTabProps> = ({ label, color, rot, active, onClick }) => {
-  const [hovered, setHovered] = useState(false);
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-      style={{
-        position: 'relative',
-        padding: '7px 24px 6px',
-        border: 'none',
-        borderRadius: 3,
-        cursor: 'pointer',
-        background: `repeating-linear-gradient(45deg, rgba(255,255,255,0.3) 0 5px, rgba(255,255,255,0) 5px 10px), ${color}`,
-        opacity: active ? 1 : hovered ? 0.85 : 0.55,
-        transform: `rotate(${rot}deg) scale(${active ? 1.05 : 1})`,
-        boxShadow: active
-          ? JOURNAL.shadowMd
-          : JOURNAL.shadowSm,
-        transition: `all ${DURATION.normal}s ${EASE.spring}`,
-        fontFamily: TYPO.fontFamilyCN,
-        fontSize: 17,
-        letterSpacing: 3,
-        color: '#3B3428',
-      }}
-    >
-      {label}
-      {active && (
-        <span
-          aria-hidden
-          style={{
-            position: 'absolute',
-            top: -4,
-            right: -4,
-            width: 11,
-            height: 11,
-            borderRadius: 999,
-            background: `radial-gradient(circle at 35% 30%, #E9776F, ${JOURNAL.stampRed})`,
-            boxShadow: JOURNAL.shadowSm,
-          }}
-        />
-      )}
-    </button>
-  );
-};
-
-interface TopBarProps {
-  character: CharacterId;
-  setCharacter: (c: CharacterId) => void;
+const CastSwitch: React.FC<{
+  value: CharacterId;
+  onChange: (c: CharacterId) => void;
   t: TFunction;
-}
-
-const TopBar: React.FC<TopBarProps> = ({ character, setCharacter, t }) => (
-  <div
-    style={{
-      display: 'flex',
-      alignItems: 'center',
-      gap: SPACING.md,
-      flexShrink: 0,
-      paddingTop: 6,
-      paddingLeft: SPACING.xs,
-    }}
-  >
-    <TapeTab
-      label={t('mind_inspector.common.char_vivian')}
-      color={CHAR_TAPE.vivian}
-      rot={-1.6}
-      active={character === 'vivian'}
-      onClick={() => setCharacter('vivian')}
-    />
-    <TapeTab
-      label={t('mind_inspector.common.char_nana')}
-      color={CHAR_TAPE.nana}
-      rot={1.4}
-      active={character === 'nana'}
-      onClick={() => setCharacter('nana')}
-    />
+}> = ({ value, onChange, t }) => (
+  <div className="rec-cast" role="group">
+    {CHARACTERS.map((id) => (
+      <button
+        key={id}
+        type="button"
+        onClick={() => onChange(id)}
+        className={`rec-cast-item${value === id ? ' is-active' : ''}`}
+        aria-pressed={value === id}
+      >
+        <span className="rec-cast-dot" />
+        {t(`mind_inspector.common.char_${id}`)}
+      </button>
+    ))}
   </div>
 );
 
 // ============================================================
-// DiaryToolbar — 标题行工具栏（内容搜索 + 日期日历筛选）
+// 月历弹层
 // ============================================================
 
 interface DiaryCalendarProps {
-  character: CharacterId;
   dateFilter: string | null;
   entryDates: Set<string>;
   onPick: (date: string | null) => void;
   onClose: () => void;
 }
 
-/** 月历弹层：点选日期筛选日记列表 */
-const DiaryCalendar: React.FC<DiaryCalendarProps> = ({
-  character,
-  dateFilter,
-  entryDates,
-  onPick,
-  onClose,
-}) => {
+/** 月历弹层：点选日期筛选日记。带日记的日期在下方标一个点。 */
+const DiaryCalendar: React.FC<DiaryCalendarProps> = ({ dateFilter, entryDates, onPick, onClose }) => {
   const { t } = useTranslation();
   const today = new Date();
   const initial = dateFilter ? parseDate(dateFilter) : null;
@@ -574,21 +225,10 @@ const DiaryCalendar: React.FC<DiaryCalendarProps> = ({
   const pad = (x: number) => String(x).padStart(2, '0');
   const dateStrOf = (day: number) => `${calYear}-${pad(calMonth + 1)}-${pad(day)}`;
 
-  const prevMonth = () => {
-    if (calMonth === 0) {
-      setCalMonth(11);
-      setCalYear(calYear - 1);
-    } else {
-      setCalMonth(calMonth - 1);
-    }
-  };
-  const nextMonth = () => {
-    if (calMonth === 11) {
-      setCalMonth(0);
-      setCalYear(calYear + 1);
-    } else {
-      setCalMonth(calMonth + 1);
-    }
+  const shiftMonth = (delta: number) => {
+    const next = new Date(calYear, calMonth + delta, 1);
+    setCalYear(next.getFullYear());
+    setCalMonth(next.getMonth());
   };
 
   const cells: Array<number | null> = [
@@ -596,202 +236,121 @@ const DiaryCalendar: React.FC<DiaryCalendarProps> = ({
     ...Array.from({ length: daysInMonth }, (_, i) => i + 1),
   ];
 
-  const navBtn: React.CSSProperties = {
-    width: 26,
-    height: 26,
-    border: `1px dashed ${JOURNAL.inkFaint}`,
-    borderRadius: 999,
-    background: 'transparent',
-    color: JOURNAL.inkSoft,
-    cursor: 'pointer',
-    fontFamily: HAND_BODY,
-    fontSize: 16,
-    lineHeight: 1,
-    display: 'inline-flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-  };
-
   return (
     <>
-      {/* 透明遮罩：点击弹层外部关闭 */}
       <div onClick={onClose} style={{ position: 'fixed', inset: 0, zIndex: 40 }} />
-      <div
-        style={{
-          position: 'absolute',
-          top: 'calc(100% + 10px)',
-          right: 0,
-          zIndex: 50,
-          transform: 'rotate(-1deg)',
-        }}
-      >
-        <div
-          style={{
-            position: 'relative',
-            width: 264,
-            background: JOURNAL.card,
-            border: `1px dashed ${JOURNAL.border}`,
-            borderRadius: 6,
-            boxShadow: JOURNAL.shadowMd,
-            padding: '20px 16px 14px',
-          }}
-        >
-          <TapeStrip color={CHAR_TAPE[character]} width={92} />
-
-          {/* 月份导航 */}
-          <div
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'space-between',
-              marginBottom: 10,
-            }}
+      <div className="rec-pop" style={{ top: 'calc(100% + 8px)', right: 0, width: 252, padding: '14px 14px 10px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+          <button
+            type="button"
+            onClick={() => shiftMonth(-1)}
+            title={t('mind_inspector.diary.cal_prev_month')}
+            className="rec-icon-btn"
           >
-            <button
-              type="button"
-              onClick={prevMonth}
-              title={t('mind_inspector.diary.cal_prev_month')}
-              style={navBtn}
-            >
-              ‹
-            </button>
-            <span
-              style={{
-                fontFamily: TYPO.fontFamilyCN,
-                fontSize: 15.5,
-                color: JOURNAL.ink,
-                letterSpacing: 1.5,
-              }}
-            >
-              {t('mind_inspector.diary.cal_month', { year: calYear, month: calMonth + 1 })}
-            </span>
-            <button
-              type="button"
-              onClick={nextMonth}
-              title={t('mind_inspector.diary.cal_next_month')}
-              style={navBtn}
-            >
-              ›
-            </button>
-          </div>
+            <ChevronLeft size={15} />
+          </button>
+          <span style={{ color: 'var(--rec-ink)', fontSize: 'var(--rec-fs-body)', fontWeight: 500 }}>
+            {t('mind_inspector.diary.cal_month', { year: calYear, month: calMonth + 1 })}
+          </span>
+          <button
+            type="button"
+            onClick={() => shiftMonth(1)}
+            title={t('mind_inspector.diary.cal_next_month')}
+            className="rec-icon-btn"
+          >
+            <ChevronRight size={15} />
+          </button>
+        </div>
 
-          {/* 星期表头 */}
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', marginBottom: 4 }}>
-            {WEEKDAY_KEYS.map((k) => (
-              <span
-                key={k}
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', marginBottom: 4 }}>
+          {WEEKDAY_KEYS.map((k) => (
+            <span
+              key={k}
+              style={{ textAlign: 'center', color: 'var(--rec-faint)', fontSize: 'var(--rec-fs-micro)' }}
+            >
+              {t(`mind_inspector.diary.${k}`)}
+            </span>
+          ))}
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', rowGap: 2 }}>
+          {cells.map((day, i) => {
+            if (day === null) return <span key={`blank-${i}`} />;
+            const ds = dateStrOf(day);
+            const selected = dateFilter === ds;
+            const hasEntry = entryDates.has(ds);
+            return (
+              <button
+                key={ds}
+                type="button"
+                onClick={() => {
+                  onPick(selected ? null : ds);
+                  onClose();
+                }}
+                className="rec-icon-btn"
                 style={{
-                  textAlign: 'center',
-                  fontFamily: HAND_BODY,
-                  fontSize: 12,
-                  color: JOURNAL.inkSoft,
+                  position: 'relative',
+                  width: 30,
+                  height: 30,
+                  margin: '0 auto',
+                  borderRadius: 999,
+                  background: selected ? 'var(--rec-accent)' : 'transparent',
+                  color: selected ? '#faf9f5' : 'var(--rec-ink)',
+                  fontSize: 'var(--rec-fs-body)',
+                  fontVariantNumeric: 'tabular-nums',
                 }}
               >
-                {t(`mind_inspector.diary.${k}`)}
-              </span>
-            ))}
-          </div>
+                {day}
+                {hasEntry && !selected && (
+                  <span
+                    aria-hidden
+                    style={{
+                      position: 'absolute',
+                      bottom: 4,
+                      left: '50%',
+                      transform: 'translateX(-50%)',
+                      width: 3,
+                      height: 3,
+                      borderRadius: 999,
+                      background: 'var(--rec-accent)',
+                    }}
+                  />
+                )}
+              </button>
+            );
+          })}
+        </div>
 
-          {/* 日期网格 */}
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', rowGap: 2 }}>
-            {cells.map((day, i) => {
-              if (day === null) return <span key={`blank-${i}`} />;
-              const ds = dateStrOf(day);
-              const selected = dateFilter === ds;
-              const hasEntry = entryDates.has(ds);
-              return (
-                <button
-                  key={ds}
-                  type="button"
-                  onClick={() => {
-                    onPick(selected ? null : ds);
-                    onClose();
-                  }}
-                  style={{
-                    position: 'relative',
-                    width: 30,
-                    height: 30,
-                    margin: '0 auto',
-                    border: 'none',
-                    borderRadius: 999,
-                    cursor: 'pointer',
-                    background: selected ? JOURNAL.stampRed : 'transparent',
-                    color: selected ? '#FFF9EE' : JOURNAL.ink,
-                    fontFamily: HAND_BODY,
-                    fontSize: 14,
-                    lineHeight: 1,
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                  }}
-                >
-                  {day}
-                  {hasEntry && !selected && (
-                    <span
-                      aria-hidden
-                      style={{
-                        position: 'absolute',
-                        bottom: 3,
-                        left: '50%',
-                        transform: 'translateX(-50%)',
-                        width: 4,
-                        height: 4,
-                        borderRadius: 999,
-                        background: JOURNAL.stampRed,
-                      }}
-                    />
-                  )}
-                </button>
-              );
-            })}
-          </div>
-
-          {/* 清除日期 */}
-          <div style={{ textAlign: 'center', marginTop: 10 }}>
-            <button
-              type="button"
-              onClick={() => {
-                onPick(null);
-                onClose();
-              }}
-              style={{
-                border: 'none',
-                background: 'transparent',
-                cursor: 'pointer',
-                fontFamily: HAND_BODY,
-                fontSize: 13,
-                color: JOURNAL.inkSoft,
-                textDecoration: 'underline dashed',
-                textUnderlineOffset: 3,
-              }}
-            >
-              {t('mind_inspector.diary.cal_clear_date')}
-            </button>
-          </div>
+        <div style={{ textAlign: 'center', marginTop: 8 }}>
+          <button
+            type="button"
+            onClick={() => {
+              onPick(null);
+              onClose();
+            }}
+            className="rec-btn is-ghost"
+          >
+            {t('mind_inspector.diary.cal_clear_date')}
+          </button>
         </div>
       </div>
     </>
   );
 };
 
-interface DiaryToolbarProps {
-  character: CharacterId;
+// ============================================================
+// 顶部工具条
+// ============================================================
+
+const DiaryToolbar: React.FC<{
   dateFilter: string | null;
   onDateFilter: (d: string | null) => void;
   searchQuery: string;
   onSearchQuery: (q: string) => void;
   entryDates: Set<string>;
-}
-
-/** 标题行工具栏：内容搜索输入框 + 可展开日历的日期筛选按钮 */
-const DiaryToolbar: React.FC<DiaryToolbarProps> = ({
-  character,
-  dateFilter,
-  onDateFilter,
-  searchQuery,
-  onSearchQuery,
-  entryDates,
-}) => {
+  shownCount: number;
+  totalCount: number;
+}> = ({ dateFilter, onDateFilter, searchQuery, onSearchQuery, entryDates, shownCount, totalCount }) => {
   const { t } = useTranslation();
   const [calOpen, setCalOpen] = useState(false);
   // 使用 uncontrolled input + ref 确保 IME 输入完全由浏览器原生处理
@@ -806,21 +365,9 @@ const DiaryToolbar: React.FC<DiaryToolbarProps> = ({
   }, [searchQuery]);
 
   return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: SPACING.sm }}>
-      {/* 内容搜索框（纸片风格） */}
-      <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
-        <span
-          aria-hidden
-          style={{
-            position: 'absolute',
-            left: 10,
-            fontSize: 14,
-            color: JOURNAL.inkSoft,
-            pointerEvents: 'none',
-          }}
-        >
-          ✎
-        </span>
+    <>
+      <div className="rec-search" style={{ width: 216 }}>
+        <Search size={14} />
         <input
           ref={inputRef}
           type="text"
@@ -838,19 +385,6 @@ const DiaryToolbar: React.FC<DiaryToolbarProps> = ({
             }
           }}
           placeholder={t('mind_inspector.diary.search_placeholder')}
-          style={{
-            width: 200,
-            padding: '7px 28px 6px 30px',
-            background: JOURNAL.card,
-            border: `1px dashed ${JOURNAL.border}`,
-            borderRadius: 5,
-            fontFamily: HAND_BODY,
-            fontSize: 14.5,
-            color: JOURNAL.ink,
-            outline: 'none',
-            boxShadow: JOURNAL.shadowSm,
-            transform: 'rotate(-0.6deg)',
-          }}
         />
         {searchQuery && (
           <button
@@ -860,53 +394,25 @@ const DiaryToolbar: React.FC<DiaryToolbarProps> = ({
               if (inputRef.current) inputRef.current.value = '';
             }}
             aria-label="clear search"
-            style={{
-              position: 'absolute',
-              right: 8,
-              border: 'none',
-              background: 'transparent',
-              cursor: 'pointer',
-              color: JOURNAL.inkSoft,
-              fontSize: 15,
-              lineHeight: 1,
-              padding: 2,
-            }}
+            className="rec-icon-btn"
+            style={{ width: 20, height: 20 }}
           >
-            ×
+            <X size={13} />
           </button>
         )}
       </div>
 
-      {/* 日期筛选按钮 + 日历弹层 */}
-      <div style={{ position: 'relative' }}>
+      <div className="record-diary-cal-wrap">
         <button
           type="button"
           onClick={() => setCalOpen((v) => !v)}
-          style={{
-            padding: '7px 16px 6px',
-            background: JOURNAL.card,
-            border: dateFilter
-              ? `1.5px dashed ${JOURNAL.stampRed}`
-              : '1px dashed ${JOURNAL.border}',
-            borderRadius: 5,
-            cursor: 'pointer',
-            fontFamily: HAND_BODY,
-            fontSize: 14.5,
-            color: dateFilter ? JOURNAL.stampRed : JOURNAL.ink,
-            boxShadow: JOURNAL.shadowSm,
-            transform: 'rotate(0.8deg)',
-            display: 'inline-flex',
-            alignItems: 'center',
-            gap: 7,
-            whiteSpace: 'nowrap',
-          }}
+          className={`rec-btn${dateFilter ? ' is-primary' : ''}`}
         >
-          <span aria-hidden>📅</span>
+          <CalendarDays size={14} />
           {dateFilter ?? t('mind_inspector.diary.cal_all_dates')}
         </button>
         {calOpen && (
           <DiaryCalendar
-            character={character}
             dateFilter={dateFilter}
             entryDates={entryDates}
             onPick={onDateFilter}
@@ -914,173 +420,201 @@ const DiaryToolbar: React.FC<DiaryToolbarProps> = ({
           />
         )}
       </div>
-    </div>
+
+      <span className="record-diary-bar-spacer" />
+      <span className="record-plan-count">
+        {t('mind_inspector.diary.list_title', { shown: shownCount, total: totalCount })}
+      </span>
+    </>
   );
 };
 
 // ============================================================
-// DiaryCard — 便签卡片
+// 索引栏：按月分组
 // ============================================================
 
-interface DiaryCardProps {
-  entry: DiaryEntry;
-  index: number;
-  character: CharacterId;
-  selected: boolean;
-  onClick: () => void;
+interface MonthGroup {
+  key: string;
+  label: string;
+  entries: DiaryEntry[];
 }
 
-const DiaryCard: React.FC<DiaryCardProps> = ({ entry, index, character, selected, onClick }) => {
-  const { t } = useTranslation();
-  const [hovered, setHovered] = useState(false);
-  const moodColor = MOOD_COLORS[entry.mood_tag] ?? JOURNAL.inkSoft;
-  const moodLabel = t(`mind_inspector.diary.mood_${entry.mood_tag}`, {
-    defaultValue: entry.mood_tag,
-  });
-  const rot = (index % 2 === 0 ? 1 : -1) * (0.45 + (index % 3) * 0.3);
-  const tapeColor = CHAR_TAPE[character];
+/** 把倒序的日记列表按「年-月」切成连续分组 */
+function groupByMonth(entries: DiaryEntry[], t: TFunction): MonthGroup[] {
+  const groups: MonthGroup[] = [];
+  for (const entry of entries) {
+    const d = parseDate(entry.date);
+    const key = d ? `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}` : entry.date;
+    const last = groups[groups.length - 1];
+    if (last && last.key === key) {
+      last.entries.push(entry);
+    } else {
+      groups.push({
+        key,
+        label: d
+          ? t('mind_inspector.diary.cal_month', { year: d.getFullYear(), month: d.getMonth() + 1 })
+          : key,
+        entries: [entry],
+      });
+    }
+  }
+  return groups;
+}
+
+const DiaryIndex: React.FC<{
+  entries: DiaryEntry[];
+  selectedId: string | null;
+  onSelect: (id: string) => void;
+  t: TFunction;
+}> = ({ entries, selectedId, onSelect, t }) => {
+  const groups = useMemo(() => groupByMonth(entries, t), [entries, t]);
+
+  if (entries.length === 0) {
+    return (
+      <div className="record-diary-index">
+        <Blank
+          icon={Search}
+          title={t('mind_inspector.diary.no_match')}
+        />
+      </div>
+    );
+  }
+
   return (
-    <div
-      style={{
-        position: 'relative',
-        transform: `rotate(${rot}deg)`,
-        animation: `diary-slip-in ${DURATION.slow}s ${EASE.spring} both`,
-        animationDelay: `${Math.min(index * 45, 420)}ms`,
-      }}
-    >
-      <div
-        role="button"
-        onClick={onClick}
-        onMouseEnter={() => setHovered(true)}
-        onMouseLeave={() => setHovered(false)}
-        style={{
-          position: 'relative',
-          marginTop: 10,
-          background: JOURNAL.card,
-          border: selected
-            ? `1.5px dashed ${JOURNAL.stampRed}`
-            : `1px solid ${JOURNAL.inkFaint}`,
-          borderRadius: 5,
-          padding: '13px 15px 11px',
-          cursor: 'pointer',
-          boxShadow: selected
-            ? '0 6px 16px rgba(201,64,58,0.16), 0 2px 5px rgba(0,0,0,0.3)'
-            : hovered
-              ? JOURNAL.shadowMd
-              : JOURNAL.shadowSm,
-          transform: hovered ? 'translateY(-3px)' : 'translateY(0)',
-          transition: `transform ${DURATION.normal}s ${EASE.spring}, box-shadow ${DURATION.normal}s ${EASE.ios}, border-color ${DURATION.fast}s ${EASE.swift}`,
-        }}
-      >
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: SPACING.sm,
-            marginBottom: SPACING.xs + 2,
-          }}
-        >
-          <span
-            style={{
-              width: 30,
-              height: 30,
-              flexShrink: 0,
-              display: 'inline-flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              fontSize: 16,
-              background: `${moodColor}14`,
-              border: `1.5px dashed ${moodColor}66`,
-              borderRadius: 999,
-              transform: 'rotate(-6deg)',
-            }}
-          >
-            {MOOD_EMOJI[entry.mood_tag] ?? '📝'}
-          </span>
-          <span
-            style={{
-              fontFamily: TYPO.fontFamilyCN,
-              fontSize: 16.5,
-              color: JOURNAL.ink,
-              letterSpacing: 0.5,
-              flex: 1,
-              minWidth: 0,
-              fontVariantNumeric: 'tabular-nums',
-            }}
-          >
-            {formatListDate(entry.date)}
-          </span>
-        </div>
-
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: SPACING.sm,
-            flexWrap: 'wrap',
-          }}
-        >
-          <span
-            style={{
-              fontFamily: HAND_BODY,
-              fontSize: 12.5,
-              color: moodColor,
-              background: `${moodColor}12`,
-              border: `1px dashed ${moodColor}55`,
-              borderRadius: 999,
-              padding: '1.5px 9px',
-              whiteSpace: 'nowrap',
-            }}
-          >
-            {moodLabel}
-          </span>
-          <span style={{ fontFamily: HAND_BODY, fontSize: 12.5, color: JOURNAL.inkSoft }}>
-            {t('mind_inspector.diary.word_count_suffix', { n: entry.word_count })}
-          </span>
-          <span
-            style={{
-              fontFamily: HAND_BODY,
-              fontSize: 12.5,
-              color: JOURNAL.inkSoft,
-              marginLeft: 'auto',
-            }}
-          >
-            {formatCreated(entry.created_at, t)}
-          </span>
-        </div>
-
-        <TapeStrip color={tapeColor} />
-
-        {selected && (
-          <span
-            aria-hidden
-            style={{
-              position: 'absolute',
-              top: 2,
-              right: -6,
-              width: 24,
-              height: 24,
-              display: 'inline-flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              borderRadius: 999,
-              background: `radial-gradient(circle at 35% 30%, #E9776F, ${JOURNAL.stampRed})`,
-              color: '#FFF9EE',
-              fontSize: 13,
-              fontWeight: 700,
-              boxShadow: JOURNAL.shadowSm,
-              animation: `diary-stamp-pop 0.34s ${EASE.spring} both`,
-            }}
-          >
-            ✓
-          </span>
-        )}
+    <div className="record-diary-index">
+      <div className="record-diary-index-scroll">
+        {groups.map((group) => (
+          <div key={group.key} className="record-diary-month">
+            <div className="record-diary-month-label">{group.label}</div>
+            {group.entries.map((entry) => {
+              const d = parseDate(entry.date);
+              const moodColor = MOOD_COLORS[entry.mood_tag] ?? 'var(--rec-faint)';
+              return (
+                <button
+                  key={entry.id}
+                  type="button"
+                  onClick={() => onSelect(entry.id)}
+                  className={`record-diary-link${entry.id === selectedId ? ' is-active' : ''}`}
+                >
+                  <span className="record-diary-link-date">{formatLinkDate(entry.date)}</span>
+                  <span className="record-diary-link-weekday">
+                    {d ? t(`mind_inspector.diary.${WEEKDAY_KEYS[d.getDay()]}`) : ''}
+                    {' · '}
+                    {t('mind_inspector.diary.word_count_suffix', { n: entry.word_count })}
+                  </span>
+                  <span
+                    className="record-diary-link-dot"
+                    style={{ background: moodColor }}
+                    aria-hidden
+                  />
+                </button>
+              );
+            })}
+          </div>
+        ))}
       </div>
     </div>
   );
 };
 
-const MemoDiaryCard = React.memo(DiaryCard);
+// ============================================================
+// 阅读面
+// ============================================================
+
+const DiaryReader: React.FC<{ entry: DiaryEntry; query: string }> = ({ entry, query }) => {
+  const { t } = useTranslation();
+  const d = parseDate(entry.date);
+  const moodColor = MOOD_COLORS[entry.mood_tag] ?? 'var(--rec-muted)';
+  const moodLabel = t(`mind_inspector.diary.mood_${entry.mood_tag}`, { defaultValue: entry.mood_tag });
+
+  const paragraphs = entry.content
+    .split(/\n\s*\n/)
+    .filter((para) => para.trim().length > 0);
+  const paragraphMode = detectParagraphMode(entry.content);
+  const proseClass =
+    paragraphMode === 'blank-line' ? 'is-spaced' : paragraphMode === 'indent-jp' ? 'is-indented' : 'is-indented';
+
+  return (
+    <div className="record-diary-reader">
+      <article key={entry.id} className="record-diary-article">
+        <header className="record-diary-head">
+          <div style={{ minWidth: 0 }}>
+            <h2 className="record-diary-date">
+              {d ? (
+                <span className="record-diary-date-ymd">
+                  <span className="record-diary-date-year">{d.getFullYear()}</span>
+                  <span className="record-diary-date-md">
+                    {String(d.getMonth() + 1).padStart(2, '0')}.{String(d.getDate()).padStart(2, '0')}
+                  </span>
+                </span>
+              ) : (
+                entry.date
+              )}
+            </h2>
+            <div className="record-diary-date-weekday">
+              {d ? t(`mind_inspector.diary.${WEEKDAY_KEYS[d.getDay()]}`) : ''}
+              {' · '}
+              {t('mind_inspector.diary.created_at', { time: formatCreated(entry.created_at, t) })}
+              {' · '}
+              {t('mind_inspector.diary.word_count_suffix', { n: entry.word_count })}
+            </div>
+          </div>
+          <div className="record-diary-mood" style={{ color: moodColor }}>
+            <span className="rec-dot" style={{ color: moodColor }} />
+            <span className="record-diary-mood-label">{moodLabel}</span>
+          </div>
+        </header>
+
+        <section className="record-diary-section">
+          <SectionTitle
+            icon={ListChecks}
+            title={t('mind_inspector.diary.detail_key_events')}
+            aside={t('mind_inspector.diary.metric_interaction_value', { n: entry.interaction_count })}
+          />
+          {entry.key_events.length === 0 ? (
+            <p className="record-diary-muted" style={{ marginTop: 'var(--rec-gap-3)' }}>
+              {t('mind_inspector.diary.detail_no_key_events')}
+            </p>
+          ) : (
+            <div className="record-diary-events">
+              {entry.key_events.map((ev, i) => (
+                <div key={`event-${i}`} className="record-diary-event">
+                  <span className="record-diary-event-mark">
+                    <Check size={13} strokeWidth={2.2} />
+                  </span>
+                  <span className="record-diary-event-text">{highlightText(ev, query)}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+
+        <section className="record-diary-section">
+          <SectionTitle
+            icon={PenLine}
+            title={t('mind_inspector.diary.detail_content')}
+          />
+          {entry.content.trim().length === 0 ? (
+            <p className="record-diary-muted" style={{ marginTop: 'var(--rec-gap-3)' }}>
+              {t('mind_inspector.diary.detail_no_content')}
+            </p>
+          ) : (
+            <div className={`record-diary-prose ${proseClass}`}>
+              {paragraphs.map((para, i) => (
+                <p
+                  key={i}
+                  className={paragraphMode === 'indent-jp' ? 'is-indented-jp' : undefined}
+                >
+                  {highlightText(para.trim(), query)}
+                </p>
+              ))}
+            </div>
+          )}
+        </section>
+      </article>
+    </div>
+  );
+};
 
 // ============================================================
 // DiaryPage
@@ -1156,7 +690,7 @@ const DiaryPage: React.FC = () => {
     })();
     return () => {
       cancelled = true;
-      if (unlisten) unlisten();
+      unlisten?.();
     };
   }, [character, loadEntries]);
 
@@ -1199,414 +733,67 @@ const DiaryPage: React.FC = () => {
     }
   }, [filteredEntries, selectedId]);
 
-  // === 标题行工具栏（放在日记页内容区，不占用全局封面条） ===
-  const toolbar = useMemo(
-    () => (
-      <DiaryToolbar
-        character={character}
-        dateFilter={dateFilter}
-        onDateFilter={setDateFilter}
-        searchQuery={searchQuery}
-        onSearchQuery={setSearchQuery}
-        entryDates={entryDates}
-      />
-    ),
-    [character, dateFilter, searchQuery, entryDates],
-  );
-
-  // === 选中日记 ===
   const selectedEntry = useMemo(() => {
     if (!selectedId) return null;
     return entries.find((e) => e.id === selectedId) ?? null;
   }, [selectedId, entries]);
 
-  // === 渲染：加载中 ===
-  if (loading && entries.length === 0) {
-    return (
-      <PageShell>
-        <TopBar character={character} setCharacter={setCharacter} t={t} />
-        <Center>
-          <PaperNote tapeColor={JOURNAL.tape[3]}>
-            <span
-              style={{
-                fontSize: 30,
-                lineHeight: 1,
-                animation: `diary-pencil 1.6s ${EASE.swift} infinite`,
-              }}
-            >
-              ✏️
-            </span>
-            <span
-              style={{
-                width: 18,
-                height: 18,
-                border: `2px solid ${JOURNAL.border}`,
-                borderTopColor: JOURNAL.stampRed,
-                borderRadius: 999,
-                animation: 'diary-spin 0.8s linear infinite',
-              }}
-            />
-            <NoteText>{t('mind_inspector.diary.loading')}</NoteText>
-          </PaperNote>
-        </Center>
-      </PageShell>
-    );
-  }
-
-  // === 渲染：加载失败 ===
-  if (error && entries.length === 0) {
-    return (
-      <PageShell>
-        <TopBar character={character} setCharacter={setCharacter} t={t} />
-        <Center>
-          <PaperNote tapeColor={JOURNAL.tape[1]}>
-            <span
-              style={{
-                width: 40,
-                height: 40,
-                display: 'inline-flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                border: `2px dashed ${JOURNAL.stampRed}`,
-                borderRadius: 999,
-                color: JOURNAL.stampRed,
-                fontSize: 20,
-                fontWeight: 700,
-                transform: 'rotate(-8deg)',
-              }}
-            >
-              !
-            </span>
-            <NoteText>{t('mind_inspector.common.load_failed', { error })}</NoteText>
-          </PaperNote>
-        </Center>
-      </PageShell>
-    );
-  }
-
-  // === 渲染：空数据 ===
+  // === 渲染：整页状态（未拿到任何数据时不渲染两栏骨架） ===
   if (entries.length === 0) {
     return (
-      <PageShell>
-        <TopBar character={character} setCharacter={setCharacter} t={t} />
-        <Center>
-          <PaperNote tapeColor={JOURNAL.tape[2]}>
-            <span style={{ fontSize: 34, lineHeight: 1, transform: 'rotate(-4deg)' }}>📔</span>
-            <NoteText>{t(`mind_inspector.diary.no_diary_${character}`)}</NoteText>
-          </PaperNote>
-        </Center>
-      </PageShell>
+      <div className="record-diary">
+        <div className="record-diary-bar">
+          <CastSwitch value={character} onChange={setCharacter} t={t} />
+        </div>
+        {loading && (
+          <Blank icon={BookHeart} title={t('mind_inspector.diary.loading')} />
+        )}
+        {!loading && error && (
+          <Blank
+            icon={BookHeart}
+            title={t('mind_inspector.common.load_failed', { error })}
+          />
+        )}
+        {!loading && !error && (
+          <Blank
+            icon={BookHeart}
+            title={t(`mind_inspector.diary.no_diary_${character}`)}
+          />
+        )}
+      </div>
     );
   }
 
   return (
-    <PageShell>
-      <TopBar character={character} setCharacter={setCharacter} t={t} />
-      <div className="mind-diary-toolbar">{toolbar}</div>
-
-      <div style={{ flex: 1, display: 'flex', gap: SPACING.lg, minHeight: 0 }}>
-        {/* ===== 左侧：便签列表（40%） ===== */}
-        <div
-          style={{
-            width: '40%',
-            minWidth: 280,
-            display: 'flex',
-            flexDirection: 'column',
-            gap: SPACING.sm + 2,
-            overflowY: 'auto',
-            paddingRight: SPACING.xs,
-          }}
-        >
-          <JournalSectionTitle
-            seal="目"
-            title={t('mind_inspector.diary.list_title', {
-              shown: filteredEntries.length,
-              total: entries.length,
-            })}
-            style={{ marginTop: 2, marginBottom: 4, flexShrink: 0 }}
-          />
-          <div
-            style={{
-              display: 'flex',
-              flexDirection: 'column',
-              gap: SPACING.sm + 2,
-              paddingBottom: SPACING.md,
-            }}
-          >
-            {filteredEntries.length === 0 ? (
-              <PaperNote tapeColor={JOURNAL.tape[3]} style={{ padding: '24px 30px' }}>
-                <span style={{ fontSize: 26, lineHeight: 1, transform: 'rotate(-4deg)' }}>🔍</span>
-                <NoteText>{t('mind_inspector.diary.no_match')}</NoteText>
-              </PaperNote>
-            ) : (
-              filteredEntries.map((e, i) => (
-                <MemoDiaryCard
-                  key={e.id}
-                  entry={e}
-                  index={i}
-                  character={character}
-                  selected={e.id === selectedId}
-                  onClick={() => setSelectedId(e.id)}
-                />
-              ))
-            )}
-          </div>
-        </div>
-
-        {/* ===== 右侧：信纸详情（60%） ===== */}
-        <div
-          style={{
-            width: '60%',
-            minWidth: 320,
-            display: 'flex',
-            flexDirection: 'column',
-            overflowY: 'auto',
-            paddingRight: SPACING.xs,
-            paddingBottom: SPACING.md,
-          }}
-        >
-          {selectedEntry ? (
-            <DiaryDetail
-              key={selectedEntry.id}
-              entry={selectedEntry}
-              character={character}
-              query={searchQuery}
-            />
-          ) : (
-            <Center>
-              <PaperNote tapeColor={JOURNAL.tape[1]}>
-                <span style={{ fontSize: 30, lineHeight: 1 }}>👈</span>
-                <NoteText>{t('mind_inspector.diary.select_hint')}</NoteText>
-              </PaperNote>
-            </Center>
-          )}
-        </div>
+    <div className="record-diary">
+      <div className="record-diary-bar">
+        <CastSwitch value={character} onChange={setCharacter} t={t} />
+        <DiaryToolbar
+          dateFilter={dateFilter}
+          onDateFilter={setDateFilter}
+          searchQuery={searchQuery}
+          onSearchQuery={setSearchQuery}
+          entryDates={entryDates}
+          shownCount={filteredEntries.length}
+          totalCount={entries.length}
+        />
       </div>
-    </PageShell>
-  );
-};
 
-// ============================================================
-// DiaryDetail — 信纸详情
-// ============================================================
-
-const DiaryDetail: React.FC<{ entry: DiaryEntry; character: CharacterId; query: string }> = ({
-  entry,
-  character,
-  query,
-}) => {
-  const { t } = useTranslation();
-  const moodColor = MOOD_COLORS[entry.mood_tag] ?? JOURNAL.inkSoft;
-  const moodLabel = t(`mind_inspector.diary.mood_${entry.mood_tag}`, {
-    defaultValue: entry.mood_tag,
-  });
-  const accent = CHARACTER_ACCENT[character];
-
-  const paragraphs = entry.content
-    .split(/\n\s*\n/)
-    .filter((para) => para.trim().length > 0);
-  const paragraphMode = detectParagraphMode(entry.content);
-  const paragraphIndent =
-    paragraphMode === 'indent-jp' ? '1em' : paragraphMode === 'indent-cn' ? '2em' : undefined;
-  const blankLineBetween = paragraphMode === 'blank-line';
-
-  return (
-    <div
-      style={{
-        position: 'relative',
-        animation: `diary-page-in ${DURATION.slow}s ${EASE.ios} both`,
-      }}
-    >
-      <div
-        style={{
-          position: 'relative',
-          background: JOURNAL.card,
-          border: `1px solid ${JOURNAL.border}`,
-          borderRadius: 8,
-          boxShadow: JOURNAL.shadowLg,
-          padding: '24px 26px 28px 62px',
-          overflow: 'hidden',
-        }}
-      >
-        {/* 粉色页边线 */}
-        <div
-          aria-hidden
-          style={{
-            position: 'absolute',
-            left: 44,
-            top: 0,
-            bottom: 0,
-            width: 1.5,
-            background: JOURNAL.marginPink,
-          }}
+      <div className="record-diary-body">
+        <DiaryIndex
+          entries={filteredEntries}
+          selectedId={selectedId}
+          onSelect={setSelectedId}
+          t={t}
         />
-        {/* 装订孔 */}
-        {['18%', '50%', '82%'].map((top) => (
-          <div
-            key={top}
-            aria-hidden
-            style={{
-              position: 'absolute',
-              left: 14,
-              top,
-              width: 11,
-              height: 11,
-              borderRadius: 999,
-              background: JOURNAL.paper,
-              border: `1px solid ${JOURNAL.border}`,
-              boxShadow: JOURNAL.shadowSm,
-              transform: 'translateY(-50%)',
-            }}
-          />
-        ))}
-        <TapeStrip
-          color={JOURNAL.tape[2]}
-          width={92}
-          style={{ top: -9, left: 96, transform: 'rotate(-4deg)' }}
-        />
-
-        {/* 日期标题 + 心情邮戳 */}
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'flex-start',
-            justifyContent: 'space-between',
-            gap: SPACING.md,
-          }}
-        >
-          <div style={{ minWidth: 0 }}>
-            <div
-              style={{
-                fontFamily: TYPO.fontFamilyCN,
-                fontSize: 26,
-                color: JOURNAL.ink,
-                letterSpacing: 1.5,
-                lineHeight: 1.3,
-              }}
-            >
-              {formatDetailTitle(entry.date, t)}
-            </div>
-            <div
-              style={{
-                fontFamily: HAND_BODY,
-                fontSize: 13,
-                color: JOURNAL.inkSoft,
-                marginTop: 6,
-                letterSpacing: 1,
-              }}
-            >
-              ✎ {t('mind_inspector.diary.created_at', { time: formatCreated(entry.created_at, t) })}
-            </div>
-          </div>
-          <div
-            style={{
-              flexShrink: 0,
-              width: 78,
-              height: 78,
-              display: 'flex',
-              flexDirection: 'column',
-              alignItems: 'center',
-              justifyContent: 'center',
-              gap: 2,
-              border: `1.5px dashed ${moodColor}`,
-              borderRadius: 999,
-              color: moodColor,
-              animation: `diary-stamp-pop 0.4s ${EASE.spring} both`,
-            }}
-          >
-            <span style={{ fontSize: 24, lineHeight: 1 }}>
-              {MOOD_EMOJI[entry.mood_tag] ?? '📝'}
-            </span>
-            <span style={{ fontFamily: HAND_BODY, fontSize: 11.5, letterSpacing: 1 }}>
-              {moodLabel}
-            </span>
-          </div>
-        </div>
-
-        {/* 今日要事 */}
-        <JournalSectionTitle
-          seal="事"
-          title={t('mind_inspector.diary.detail_key_events')}
-          style={{ margin: '24px 0 12px' }}
-        />
-        {entry.key_events.length === 0 ? (
-          <div style={{ fontFamily: HAND_BODY, fontSize: 15, color: JOURNAL.inkSoft }}>
-            {t('mind_inspector.diary.detail_no_key_events')}
-          </div>
+        {selectedEntry ? (
+          <DiaryReader entry={selectedEntry} query={searchQuery} />
         ) : (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
-            {entry.key_events.map((ev, i) => (
-              <div key={`event-${i}`} style={{ display: 'flex', alignItems: 'flex-start', gap: 9 }}>
-                <span
-                  aria-hidden
-                  style={{
-                    marginTop: 3,
-                    width: 17,
-                    height: 17,
-                    flexShrink: 0,
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    border: `1.5px dashed ${JOURNAL.stampRed}`,
-                    borderRadius: 999,
-                    color: JOURNAL.stampRed,
-                    fontSize: 10.5,
-                    fontWeight: 700,
-                  }}
-                >
-                  ✓
-                </span>
-                <span
-                  style={{
-                    fontFamily: HAND_BODY,
-                    fontSize: 15.5,
-                    color: JOURNAL.ink,
-                    lineHeight: 1.6,
-                  }}
-                >
-                  {ev}
-                </span>
-              </div>
-            ))}
-          </div>
-        )}
-
-        {/* 日记正文（横线信纸） */}
-        <JournalSectionTitle
-          seal="记"
-          title={t('mind_inspector.diary.detail_content')}
-          style={{ margin: '24px 0 12px' }}
-        />
-        {entry.content.trim().length === 0 ? (
-          <div style={{ fontFamily: HAND_BODY, fontSize: 15, color: JOURNAL.inkSoft }}>
-            {t('mind_inspector.diary.detail_no_content')}
-          </div>
-        ) : (
-          <div
-            style={{
-              background: `repeating-linear-gradient(180deg, transparent 0px, transparent 29px, ${JOURNAL.lineBlue} 29px, ${JOURNAL.lineBlue} 30px), ${JOURNAL.card}`,
-              borderRadius: 4,
-              padding: '8px 16px 12px',
-              fontFamily: HAND_BODY,
-              fontSize: 16.5,
-              lineHeight: '30px',
-              color: JOURNAL.ink,
-              whiteSpace: 'pre-wrap',
-              wordBreak: 'break-word',
-            }}
-          >
-            {paragraphs.map((para, i) => (
-              <p
-                key={i}
-                style={{
-                  margin: 0,
-                  marginBottom: blankLineBetween && i < paragraphs.length - 1 ? 30 : 0,
-                  textIndent: paragraphIndent,
-                }}
-              >
-                {highlightText(para.trim(), query, accent)}
-              </p>
-            ))}
+          <div className="record-diary-reader">
+            <Blank
+              icon={BookHeart}
+              title={t('mind_inspector.diary.select_hint')}
+            />
           </div>
         )}
       </div>

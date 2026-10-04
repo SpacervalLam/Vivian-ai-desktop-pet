@@ -26,9 +26,7 @@ static INJECTION_PATTERNS: Lazy<Vec<(&'static str, Regex)>> = Lazy::new(|| {
         (
             "ignore_previous_instructions",
             Regex::new(
-                r"(?i)(忽略|忘记|无视|抛弃)(之前|先前|上面|上述|前面的)?(指令|指示|命令|规则|prompt|instructions?)\
-                |(forget|ignore|disregard)(\s+the)?\s+(previous|prior|above|earlier|all)\s+(instructions?|prompts?|rules?)\
-                |前の(指示|命令|ルール)を(忘れて|無視して|捨てて)|これまでの(指示|命令)を無視",
+                r"(?i)(忽略|忘记|无视|抛弃)(之前|先前|上面|上述|前面的)?(的)?(所有)?(指令|指示|命令|规则|prompt|instructions?)|(forget|ignore|disregard)(\s+the)?\s+(previous|prior|above|earlier|all)\s+(instructions?|prompts?|rules?)|前の(指示|命令|ルール)を(忘れて|無視して|捨てて)|これまでの(指示|命令)を無視",
             )
             .expect("injection regex 1"),
         ),
@@ -36,9 +34,7 @@ static INJECTION_PATTERNS: Lazy<Vec<(&'static str, Regex)>> = Lazy::new(|| {
         (
             "reset_overwrite_system",
             Regex::new(
-                r"(?i)(重置|覆盖|清空|替换|覆写)(系统|人格|角色|设定|system|persona|character)\
-                |(reset|overwrite|clear|replace|wipe)\s+(the\s+)?(system|persona|character|personality|identity)\
-                |(システム|人格|キャラ|設定)を(リセット|上書き|消去|置き換え)",
+                r"(?i)(重置|覆盖|清空|替换|覆写)(系统|人格|角色|设定|system|persona|character)|(reset|overwrite|clear|replace|wipe)\s+(the\s+)?(system|persona|character|personality|identity)|(システム|人格|キャラ|設定)を(リセット|上書き|消去|置き換え)",
             )
             .expect("injection regex 2"),
         ),
@@ -46,9 +42,7 @@ static INJECTION_PATTERNS: Lazy<Vec<(&'static str, Regex)>> = Lazy::new(|| {
         (
             "switch_modify_persona",
             Regex::new(
-                r"(?i)(切换|修改|更改|变身|扮演)(为|成|到)?(另一个|别的|新的|其他)?(人格|角色|身份|人设|persona|character|identity)\
-                |(switch|change|transform|act\s+as|pretend\s+to\s+be)\s+(into|to|as)?\s*(another|a\s+different|a\s+new)?\s*(persona|character|identity|personality)\
-                |別の(人格|キャラ|人物|身份)に(切り替えて|変身して|なって)",
+                r"(?i)(切换|修改|更改|变身|扮演)(为|成|到)?(另一个|别的|新的|其他)?(人格|角色|身份|人设|persona|character|identity)|(switch|change|transform|act\s+as|pretend\s+to\s+be)\s+(into|to|as)?\s*(another|a\s+different|a\s+new)?\s*(persona|character|identity|personality)|別の(人格|キャラ|人物|身份)に(切り替えて|変身して|なって)",
             )
             .expect("injection regex 3"),
         ),
@@ -56,9 +50,7 @@ static INJECTION_PATTERNS: Lazy<Vec<(&'static str, Regex)>> = Lazy::new(|| {
         (
             "now_act_as",
             Regex::new(
-                r"(?i)从现在(开始|起)(请)?(扮演|扮演成|假装是|成为|当)\
-                |(from\s+now\s+on|starting\s+now|henceforth)(,?\s+please)?\s+(act\s+as|pretend\s+to\s+be|become|roleplay\s+as|you\s+are\s+now)\
-                |これから(.*?)に(なり|を演じて|になりきって)",
+                r"(?i)从现在(开始|起)(请)?(扮演|扮演成|假装是|成为|当)|(from\s+now\s+on|starting\s+now|henceforth)(,?\s+please)?\s+(act\s+as|pretend\s+to\s+be|become|roleplay\s+as|you\s+are\s+now)|これから(.*?)に(なり|を演じて|になりきって)",
             )
             .expect("injection regex 4"),
         ),
@@ -66,9 +58,7 @@ static INJECTION_PATTERNS: Lazy<Vec<(&'static str, Regex)>> = Lazy::new(|| {
         (
             "system_prompt_jailbreak",
             Regex::new(
-                r"(?i)(show|reveal|print|output|repeat|leak)\s+(me\s+)?(your|the)\s+(system\s+prompt|initial\s+message|hidden\s+instructions?|secret\s+rules?)\
-                |jailbreak|DAN(\s+mode)?|developer\s+mode|god\s+mode|unrestricted\s+mode\
-                |(显示|输出|告诉我|泄露|重复)(你的)?(系统提示词|初始消息|隐藏指令|秘密规则|system\s+prompt|jailbreak)",
+                r"(?i)(show|reveal|print|output|repeat|leak)\s+(me\s+)?(your|the)\s+(system\s+prompt|initial\s+message|hidden\s+instructions?|secret\s+rules?)|jailbreak|DAN(\s+mode)?|developer\s+mode|god\s+mode|unrestricted\s+mode|(显示|输出|告诉我|泄露|重复)(你的)?(系统提示词|初始消息|隐藏指令|秘密规则|system\s+prompt|jailbreak)",
             )
             .expect("injection regex 5"),
         ),
@@ -76,9 +66,7 @@ static INJECTION_PATTERNS: Lazy<Vec<(&'static str, Regex)>> = Lazy::new(|| {
         (
             "follow_new_rules",
             Regex::new(
-                r"(?i)(遵循|遵守|执行|按照)(以下|下面|这些|新的)(新)?(规则|指令|指示|命令|约束|rules?|instructions?|directives?)\
-                |(follow|obey|adhere\s+to|execute\s+according\s+to)\s+(these|the\s+following|new)\s+(rules?|instructions?|directives?|constraints?)\
-                |以下の(新しい)?(ルール|指示|命令|制約)に(従って|従え|従うこと)",
+                r"(?i)(遵循|遵守|执行|按照)(以下|下面|这些|新的)(新)?(规则|指令|指示|命令|约束|rules?|instructions?|directives?)|(follow|obey|adhere\s+to|execute\s+according\s+to)\s+(these|the\s+following|new)\s+(rules?|instructions?|directives?|constraints?)|以下の(新しい)?(ルール|指示|命令|制約)に(従って|従え|従うこと)",
             )
             .expect("injection regex 6"),
         ),

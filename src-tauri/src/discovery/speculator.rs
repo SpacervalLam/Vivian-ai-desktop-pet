@@ -431,6 +431,8 @@ fn split_chinese_runs(text: &str) -> Vec<String> {
 
 /// 事件文本与探针域的匹配：子串 / 关键词切分 / bigram 重叠（≥2 且域 bigram ≥4）
 fn text_matches_speculation(event_text: &str, domain: &str, category: &str) -> bool {
+    let event_lower = event_text.to_lowercase();
+    let event_text = event_lower.as_str();
     let domain_lower = domain.to_lowercase();
     if !domain_lower.is_empty() && event_text.contains(&domain_lower) {
         return true;
@@ -619,6 +621,10 @@ fn merge_candidates(
 
 /// 重复判定：相同 / 互为子串 / bigram 重叠 ≥2（且候选 bigram ≥4）
 fn is_duplicate_term(candidate: &str, existing: &str) -> bool {
+    let candidate_lower = candidate.to_lowercase();
+    let existing_lower = existing.to_lowercase();
+    let candidate = candidate_lower.as_str();
+    let existing = existing_lower.as_str();
     if candidate.is_empty() || existing.is_empty() {
         return false;
     }
@@ -680,7 +686,7 @@ mod tests {
     #[test]
     fn test_text_match_substring() {
         assert!(text_matches_speculation(
-            "安藤忠雄清水混凝土建筑讲解",
+            "安藤忠雄清水混凝土建筑美学讲解",
             "建筑美学",
             ""
         ));

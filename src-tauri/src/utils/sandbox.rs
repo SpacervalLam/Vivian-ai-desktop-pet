@@ -502,6 +502,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires Windows restricted-token process privileges; run test:windows-integration in a supported environment"]
     fn benign_script_runs_with_stdin_payload() {
         let out = run(
             "$p = [Console]::In.ReadToEnd() | ConvertFrom-Json; Write-Output \"hello-$($p.name)\"",
@@ -513,6 +514,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires Windows restricted-token process privileges; run test:windows-integration in a supported environment"]
     fn temp_redirects_to_scratch() {
         let out = run("Write-Output $env:TEMP", "");
         assert_eq!(out.exit_code, 0, "stderr: {}", out.stderr);
@@ -524,6 +526,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires Windows restricted-token process privileges; run test:windows-integration in a supported environment"]
     fn user_profile_write_denied() {
         // 低完整性 + Users restricting SID：用户资料目录写不进去
         let out = run(
@@ -542,6 +545,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires Windows restricted-token process privileges; run test:windows-integration in a supported environment"]
     fn exit_code_passthrough() {
         let out = run("exit 3", "");
         assert_eq!(out.exit_code, 3);

@@ -68,38 +68,13 @@ impl WebSearchProvider for TavilyProvider {
         let max = request.max_results.unwrap_or(5);
         let client = build_search_client(self.timeout, None, self.proxy_url.as_deref());
 
-        let mut body = serde_json::json!({
-            "api_key": self.api_key,
-            "query": request.query,
-            "max_results": max,
-            "include_answer": false,
-            "include_raw_content": self.include_raw_content && request.research,
-            "search_depth": if request.research { self.search_depth.as_str() } else { "basic" },
-        });
-
-        body["include_domains"] = serde_json::json!(request.include_domains);
-        body["exclude_domains"] = serde_json::json!(request.exclude_domains);
-        body["include_domains_mode"] = serde_json::json!("restrict");
-        body["include_published_date"] = serde_json::json!(true);
-        if let Some(lang) = &request.language {
-            body["language"] = serde_json::json!(lang.split('-').next().unwrap_or(lang));
-        }
-        if let Some(country) = &request.country {
-            body["country"] = serde_json::json!(match country.to_ascii_lowercase().as_str() {
-                "cn" => "china",
-                "us" => "united states",
-                "jp" => "japan",
-                "gb" | "uk" => "united kingdom",
-                _ => country,
-            });
-        }
-        if let Some(days) = request.recency_days {
-            body["filter_by_published_date"] = serde_json::json!(true);
-            body["start_date"] = serde_json::json!((chrono::Utc::now()
-                - chrono::Duration::days(days as i64))
-            .format("%Y-%m-%d")
-            .to_string());
-        }
+        let body = build_body(
+            &self.api_key,
+            request,
+            max,
+            self.include_raw_content && request.research,
+            &self.search_depth,
+        );
         let resp = client
             .post("https://api.tavily.com/search")
             .bearer_auth(&self.api_key)
@@ -125,6 +100,56 @@ impl WebSearchProvider for TavilyProvider {
             ..Default::default()
         })
     }
+}
+
+/// 构造 `/search` 请求体。
+///
+/// 域名过滤字段按需发送：`include_domains_mode` 依赖非空 `include_domains`，
+/// 空列表仍携带该 mode 属于非法组合，服务端直接判 400。
+fn build_body(
+    api_key: &str,
+    request: &WebSearchRequest,
+    max: usize,
+    include_raw_content: bool,
+    search_depth: &str,
+) -> Value {
+    let mut body = serde_json::json!({
+        "api_key": api_key,
+        "query": request.query,
+        "max_results": max,
+        "include_answer": false,
+        "include_raw_content": include_raw_content,
+        "search_depth": if request.research { search_depth } else { "basic" },
+    });
+
+    if !request.include_domains.is_empty() {
+        body["include_domains"] = serde_json::json!(request.include_domains);
+        body["include_domains_mode"] = serde_json::json!("restrict");
+    }
+    if !request.exclude_domains.is_empty() {
+        body["exclude_domains"] = serde_json::json!(request.exclude_domains);
+    }
+    body["include_published_date"] = serde_json::json!(true);
+    if let Some(lang) = &request.language {
+        body["language"] = serde_json::json!(lang.split('-').next().unwrap_or(lang));
+    }
+    if let Some(country) = &request.country {
+        body["country"] = serde_json::json!(match country.to_ascii_lowercase().as_str() {
+            "cn" => "china",
+            "us" => "united states",
+            "jp" => "japan",
+            "gb" | "uk" => "united kingdom",
+            _ => country,
+        });
+    }
+    if let Some(days) = request.recency_days {
+        body["filter_by_published_date"] = serde_json::json!(true);
+        body["start_date"] = serde_json::json!((chrono::Utc::now()
+            - chrono::Duration::days(days as i64))
+        .format("%Y-%m-%d")
+        .to_string());
+    }
+    body
 }
 
 /// 解析 Tavily JSON 响应
@@ -187,5 +212,42 @@ mod tests {
         assert_eq!(sources.len(), 2);
         assert_eq!(sources[0].published_at.as_deref(), Some("2026-01-01"));
         assert_eq!(sources[1].published_at, None);
+    }
+
+    /// `include_domains_mode` 依赖非空 `include_domains`：空列表仍携带该 mode
+    /// 会被服务端判为非法组合（400），进而让整条搜索链失效。
+    #[test]
+    fn no_domains_means_no_mode() {
+        let body = build_body("tvly-x", &WebSearchRequest::new("q"), 5, false, "basic");
+        assert!(body.get("include_domains").is_none());
+        assert!(body.get("include_domains_mode").is_none());
+        assert!(body.get("exclude_domains").is_none());
+        assert_eq!(body["include_published_date"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn domains_present_carries_mode() {
+        let mut req = WebSearchRequest::new("q");
+        req.include_domains = vec!["a.com".into()];
+        req.exclude_domains = vec!["b.com".into()];
+        let body = build_body("tvly-x", &req, 5, false, "basic");
+        assert_eq!(body["include_domains"], serde_json::json!(["a.com"]));
+        assert_eq!(body["include_domains_mode"], serde_json::json!("restrict"));
+        assert_eq!(body["exclude_domains"], serde_json::json!(["b.com"]));
+    }
+
+    /// 非 research 请求的 depth 固定 basic：research 深度按次计费，不能被 fast 路径蹭到。
+    #[test]
+    fn depth_pinned_by_mode() {
+        let mut req = WebSearchRequest::new("q");
+        assert_eq!(
+            build_body("k", &req, 5, true, "advanced")["search_depth"],
+            serde_json::json!("basic")
+        );
+        req.research = true;
+        assert_eq!(
+            build_body("k", &req, 5, true, "advanced")["search_depth"],
+            serde_json::json!("advanced")
+        );
     }
 }

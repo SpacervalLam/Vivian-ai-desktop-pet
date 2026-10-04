@@ -318,6 +318,8 @@ pub struct AsrManager {
 }
 
 struct AsrManagerInner {
+    /// Serialize complete lifecycle operations, including lazy initialization.
+    lifecycle: Mutex<()>,
     config: RwLock<AsrConfig>,
     backend: Mutex<Option<Box<dyn AsrEngine + Send + Sync>>>,
     is_recording: AtomicBool,
@@ -336,6 +338,7 @@ impl AsrManager {
         let (event_tx, _) = broadcast::channel(64);
         Self {
             inner: Arc::new(AsrManagerInner {
+                lifecycle: Mutex::new(()),
                 config: RwLock::new(config),
                 backend: Mutex::new(None),
                 is_recording: AtomicBool::new(false),
@@ -399,6 +402,7 @@ impl AsrManager {
 
     /// 开始语音识别。
     pub async fn start_recognition(&self) -> VivianResult<()> {
+        let _operation = self.inner.lifecycle.lock().await;
         if self.inner.is_recording.load(Ordering::SeqCst) {
             return Err(VivianError::Speech(
                 "语音识别已在进行中".to_string(),
@@ -422,21 +426,24 @@ impl AsrManager {
 
     /// 停止语音识别（幂等：已停止时直接返回 Ok）。
     pub async fn stop_recognition(&self) -> VivianResult<()> {
+        let _operation = self.inner.lifecycle.lock().await;
         if !self.inner.is_recording.load(Ordering::SeqCst) {
             return Ok(());
         }
         let mut backend_guard = self.inner.backend.lock().await;
+        let mut result = Ok(());
         if let Some(backend) = backend_guard.as_mut() {
-            let _ = backend.stop_recording().await;
+            result = backend.stop_recording().await;
         }
         self.inner.is_recording.store(false, Ordering::SeqCst);
         let _ = self.inner.event_tx.send(AsrEvent::Stopped);
         tracing::info!("语音识别已停止");
-        Ok(())
+        result
     }
 
     /// 对音频样本进行转译（委托给当前后端）。
     pub async fn transcribe(&self, audio: &[f32]) -> VivianResult<String> {
+        let _operation = self.inner.lifecycle.lock().await;
         self.ensure_initialized().await?;
         let backend_guard = self.inner.backend.lock().await;
         if let Some(backend) = backend_guard.as_ref() {
@@ -479,6 +486,7 @@ impl AsrManager {
     }
 
     async fn reconfigure_with<F: FnOnce(&mut AsrConfig)>(&self, f: F) -> VivianResult<()> {
+        let _operation = self.inner.lifecycle.lock().await;
         // 先释放后端（异步获取锁，避免在 async 上下文中 block_on）
         let backend_opt = {
             let mut backend_guard = self.inner.backend.lock().await;
@@ -500,6 +508,7 @@ impl AsrManager {
 
     /// 释放所有资源。
     pub async fn dispose(&self) {
+        let _operation = self.inner.lifecycle.lock().await;
         let mut backend_guard = self.inner.backend.lock().await;
         if let Some(backend) = backend_guard.as_mut() {
             backend.dispose();
@@ -579,6 +588,63 @@ impl Default for SpeechManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct LifecycleBackend {
+        starts: Arc<std::sync::atomic::AtomicUsize>,
+        disposals: Arc<std::sync::atomic::AtomicUsize>,
+        fail_stop: bool,
+    }
+    #[async_trait]
+    impl AsrEngine for LifecycleBackend {
+        async fn initialize(&mut self) -> VivianResult<bool> { Ok(true) }
+        async fn start_recording(&mut self) -> VivianResult<()> {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            self.starts.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        async fn stop_recording(&mut self) -> VivianResult<()> {
+            if self.fail_stop { Err(VivianError::Speech("finalization failed".into())) } else { Ok(()) }
+        }
+        async fn transcribe(&self, _: &[f32]) -> VivianResult<String> { Ok(String::new()) }
+        fn is_available(&self) -> bool { true }
+        fn supports_silence_detection(&self) -> bool { false }
+        fn supports_partial_results(&self) -> bool { false }
+        fn backend_type(&self) -> AsrBackendType { AsrBackendType::Whisper }
+        fn dispose(&mut self) { self.disposals.fetch_add(1, Ordering::SeqCst); }
+    }
+
+    #[tokio::test]
+    async fn concurrent_starts_are_serialized_and_stop_keeps_the_backend_warm() {
+        let manager = AsrManager::new();
+        let starts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let disposals = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        *manager.inner.backend.lock().await = Some(Box::new(LifecycleBackend {
+            starts: starts.clone(), disposals: disposals.clone(), fail_stop: false,
+        }));
+        let (first, second) = tokio::join!(manager.start_recognition(), manager.start_recognition());
+        assert_eq!(usize::from(first.is_ok()) + usize::from(second.is_ok()), 1);
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
+        manager.stop_recognition().await.unwrap();
+        manager.start_recognition().await.unwrap();
+        manager.stop_recognition().await.unwrap();
+        assert_eq!(starts.load(Ordering::SeqCst), 2);
+        assert_eq!(disposals.load(Ordering::SeqCst), 0);
+        manager.reconfigure().await.unwrap();
+        assert_eq!(disposals.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn finalization_errors_are_returned_and_recording_state_is_cleared() {
+        let manager = AsrManager::new();
+        *manager.inner.backend.lock().await = Some(Box::new(LifecycleBackend {
+            starts: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            disposals: Arc::new(std::sync::atomic::AtomicUsize::new(0)), fail_stop: true,
+        }));
+        manager.start_recognition().await.unwrap();
+        assert!(manager.stop_recognition().await.is_err());
+        assert!(!manager.is_recording());
+        manager.stop_recognition().await.unwrap();
+    }
 
     #[test]
     fn test_asr_config_default() {

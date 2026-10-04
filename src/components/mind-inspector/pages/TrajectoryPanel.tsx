@@ -8,7 +8,7 @@ import { GitFork, Search, X } from 'lucide-react';
 
 // ============ 类型 ============
 
-type TrajectoryRole = 'user' | 'assistant' | 'tool_use' | 'tool_result' | 'error' | 'notice';
+type TrajectoryRole = 'user' | 'assistant' | 'tool_use' | 'tool_result' | 'error' | 'notice' | 'commentary' | 'thinking';
 type TrajectoryKind = 'user' | 'assistant' | 'tool' | 'error';
 
 /** 结构兼容 CodingMessage 的最小消息形状（结构化类型，无需导入页面类型）。 */
@@ -102,7 +102,7 @@ function deriveTrajectoryRecords(messages: readonly TrajectoryMessage[]): Trajec
     }
     let kind: TrajectoryKind;
     if (message.role === 'user') kind = 'user';
-    else if (message.role === 'assistant') kind = 'assistant';
+    else if (message.role === 'assistant' || message.role === 'commentary' || message.role === 'thinking') kind = 'assistant';
     else if (message.role === 'tool_use' || message.role === 'tool_result') kind = 'tool';
     else kind = 'error';
     records.push({ index, kind, message, turn });

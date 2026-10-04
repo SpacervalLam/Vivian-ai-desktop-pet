@@ -88,6 +88,7 @@ chardetng = "0.1"
 md-5 = "0.10"
 # 讯飞星火 WebSocket 鉴权需要 HMAC-SHA256 + base64
 sha2 = "0.10"
+fs2 = "0.4"
 hmac = "0.12"
 base64 = "0.22"
 # 资源 AES-256-GCM 加密（构建期加密打包进 vivian.bundle.enc）

@@ -217,10 +217,10 @@ pub struct TtsConfig {
     /// 若配置则直接用此文件;若未配置但用户填了模型路径/GPU,会自动生成临时 yaml
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpt_sovits_config_path: Option<String>,
-    /// GPT(t2s)模型路径(.ckpt) — 写入生成的 tts_infer.yaml 的 t2s_weights_path
+    /// GPT(t2s)模型路径(.ckpt)：用于服务启动 YAML，并在合成前选择权重。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpt_sovits_gpt_model: Option<String>,
-    /// SoVITS(vits)模型路径(.pth) — 写入生成的 tts_infer.yaml 的 vits_weights_path
+    /// SoVITS(vits)模型路径(.pth)：用于服务启动 YAML，并在合成前选择权重。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpt_sovits_sovits_model: Option<String>,
     /// GPU 卡号(0=第一张 GPU,1=第二张...;-1=CPU 推理)
@@ -531,6 +531,26 @@ impl Default for TtsConfig {
 }
 
 impl TtsConfig {
+    /// Identity of all GPT-SoVITS inputs that change the resulting voice/audio.
+    fn gpt_sovits_cache_identity(&self) -> String {
+        serde_json::json!({
+            "version": 2,
+            "url": self.gpt_sovits_url,
+            "gpt": self.gpt_sovits_gpt_model,
+            "sovits": self.gpt_sovits_sovits_model,
+            "reference": self.gpt_sovits_ref_audio,
+            "prompt": self.gpt_sovits_prompt_text,
+            "language": self.gpt_sovits_prompt_lang,
+            "auxiliary": self.gpt_sovits_aux_ref_audios,
+            "format": self.gpt_sovits_format,
+            "split": self.gpt_sovits_text_split_method,
+            "parallel": self.gpt_sovits_parallel_infer,
+            "top_k": self.gpt_sovits_top_k,
+            "top_p": self.gpt_sovits_top_p,
+            "temperature": self.gpt_sovits_temperature,
+        }).to_string()
+    }
+
     /// 是否应在应用启动时拉起 GPT-SoVITS 本地服务。
     ///
     /// `auto_start` 只在 TTS 已启用、GPT-SoVITS 是当前主引擎且安装路径有效时生效。
@@ -1082,14 +1102,9 @@ impl TtsManager {
 
         // 检查缓存命中
         // GPT-SoVITS 的音色由参考音频决定(voice_id 恒为空),
-        // 需把参考音频+文本纳入缓存 key,否则换音色后会命中旧音色的缓存
+        // 将模型、服务地址和参考音频等参数纳入缓存，避免换音色命中旧音频。
         let voice_str = if engine_name == "gpt-sovits" {
-            format!(
-                "{}|{}|{}",
-                config.gpt_sovits_ref_audio.as_deref().unwrap_or(""),
-                config.gpt_sovits_prompt_text.as_deref().unwrap_or(""),
-                config.gpt_sovits_format.as_deref().unwrap_or("wav")
-            )
+            config.gpt_sovits_cache_identity()
         } else {
             config.voice_id.clone().unwrap_or_default()
         };
@@ -2073,6 +2088,23 @@ fn mci_set_volume(alias: &str, volume: u32) -> VivianResult<()> {
 #[cfg(test)]
 mod auto_start_tests {
     use super::{TtsConfig, TtsEngine};
+
+    #[test]
+    fn model_language_and_auxiliary_reference_changes_invalidate_cache() {
+        let config = TtsConfig::default();
+        let identity = config.gpt_sovits_cache_identity();
+        for field in ["gpt", "sovits", "language", "auxiliary", "url"] {
+            let mut changed = config.clone();
+            match field {
+                "gpt" => changed.gpt_sovits_gpt_model = Some("new.ckpt".into()),
+                "sovits" => changed.gpt_sovits_sovits_model = Some("new.pth".into()),
+                "language" => changed.gpt_sovits_prompt_lang = Some("ja".into()),
+                "auxiliary" => changed.gpt_sovits_aux_ref_audios = Some(vec!["new.wav".into()]),
+                _ => changed.gpt_sovits_url = Some("http://localhost:9881".into()),
+            }
+            assert_ne!(identity, changed.gpt_sovits_cache_identity(), "{field}");
+        }
+    }
 
     #[test]
     fn disabled_tts_never_autostarts_gpt_sovits() {

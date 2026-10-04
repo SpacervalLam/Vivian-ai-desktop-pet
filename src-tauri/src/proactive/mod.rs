@@ -832,6 +832,9 @@ mod channel_cost_tests {
 /// 待发送的主动行为
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProactiveAction {
+    /// Locked addressee selected before generation (legacy records may omit it).
+    #[serde(default)]
+    pub listener: Option<String>,
     pub trigger: String,
     pub content: String,
     pub timestamp: f64,
@@ -866,6 +869,7 @@ impl ProactiveAction {
             content_type: ContentType::Greeting,
             importance: 0.5,
             value_score: None,
+            listener: None,
         }
     }
 }
@@ -1377,6 +1381,20 @@ impl ProactiveOrchestrator {
 
     /// 单次 tick：由调用方每 10 秒触发一次
     pub fn tick(self: Arc<Self>, context: &TickContext) -> VivianResult<bool> {
+        self.tick_inner(context, false, true)
+    }
+
+    pub(crate) fn ingest_world_events(&self, context: &TickContext) {
+        if self.is_running() && self.config.read().enabled {
+            self.detect_and_apply_world_events(context);
+        }
+    }
+
+    pub(crate) fn tick_after_cognitive_update(self: Arc<Self>, context: &TickContext, think_allowed: bool) -> VivianResult<bool> {
+        self.tick_inner(context, true, think_allowed)
+    }
+
+    fn tick_inner(self: Arc<Self>, context: &TickContext, prepared: bool, think_allowed: bool) -> VivianResult<bool> {
         if !self.is_running() {
             return Ok(false);
         }
@@ -1387,8 +1405,10 @@ impl ProactiveOrchestrator {
         }
 
         // 0. 心理系统 Homeostasis tick（让 Needs/Emotion 自动回归 set point）
-        if let Some(psy) = self.psychology.read().as_ref() {
-            psy.homeostasis_tick();
+        if !prepared {
+            if let Some(psy) = self.psychology.read().as_ref() {
+                psy.homeostasis_tick();
+            }
         }
 
         // 0.5. 策略 C：说话欲望累积
@@ -1495,7 +1515,7 @@ impl ProactiveOrchestrator {
         // 6.5. 世界事件检测 → Appraisal → 心理状态更新（不打扰用户）
         //      比较前后 WorldSnapshot 产出事件（天气变化/节日到来/日出日落等），
         //      通过 Appraisal 机制隐式影响情绪/需求，不产生主动消息。
-        self.detect_and_apply_world_events(context);
+        if !prepared { self.detect_and_apply_world_events(context); }
 
         // 6.6. 用户离设备门控
         //      idle_seconds 已由命令层用系统级 GetLastInputInfo 覆盖（跨应用权威）。
@@ -1505,7 +1525,7 @@ impl ProactiveOrchestrator {
         let user_away = context.idle_seconds > self.config.read().away_threshold_seconds as f64;
         if user_away {
             // 内心独白仍可运行：让 Vivian 的内心生活继续，但不产生气泡
-            let _ = self.maybe_spawn_inner_monologue(context);
+            if think_allowed { let _ = self.maybe_spawn_inner_monologue(context); }
             *self.last_tick.write() = Instant::now();
             return Ok(false);
         }
@@ -1611,7 +1631,7 @@ impl ProactiveOrchestrator {
         //    如果有思绪积累到"忍不住想说话"的程度，桥接到主动消息。
         //    非 leader 时仅运行内心独白部分，不桥接为主动消息。
         let thought_share = if !produced {
-            self.maybe_spawn_inner_monologue(context)
+            if think_allowed { self.maybe_spawn_inner_monologue(context) } else { None }
         } else {
             None
         };
@@ -4454,6 +4474,7 @@ impl ProactiveOrchestrator {
                                 content_type,
                                 importance,
                                 value_score,
+                                listener: None,
                             });
                         }
                     }
@@ -4635,6 +4656,13 @@ impl ProactiveOrchestrator {
             (sys, intimacy, history, recent_messages, lang)
         };
 
+        // Freeze the addressee before composing; ordinary proactive turns address the user.
+        let recipient = if trigger == ProactiveTrigger::CrossCharacterReply {
+            let companion = self.companions_snapshot()?;
+            (companion.id, companion.name)
+        } else {
+            ("user".to_string(), "the user".to_string())
+        };
         let companion_recent_message = self.companions_snapshot().and_then(|companion| {
             let spoke_recently = companion
                 .last_spoke_secs_ago
@@ -4725,7 +4753,12 @@ impl ProactiveOrchestrator {
         let idle_seconds = ctx.idle_seconds;
         let system_prompt_clone = system_prompt;
         let lang_clone = lang;
-        let emitter = self.stream_emitter.clone();
+        // Roommate turns are presented by the cross-character bus after recipient validation.
+        let emitter = if trigger == ProactiveTrigger::CrossCharacterReply {
+            new_shared_stream_emitter()
+        } else {
+            self.stream_emitter.clone()
+        };
 
         tokio::task::block_in_place(|| {
             handle.block_on(async move {
@@ -4777,7 +4810,9 @@ impl ProactiveOrchestrator {
                 // 连续未回应轮次：用于要求模型保持安静且不做情绪化解读
                 let ignored_rounds = self.state.read().ignored_count;
                 // Select the medium before writing: an alive topic always retains its channel.
-                llm_ctx.channel = if let Some(channel) = crate::conversation::CONVERSATION_MANAGER.user_channel(&self.char_id) {
+                llm_ctx.channel = if recipient.0 != "user" {
+                    "direct".into()
+                } else if let Some(channel) = crate::conversation::CONVERSATION_MANAGER.user_channel(&self.char_id) {
                     channel
                 } else if let Some(channel) = obvious_channel_for_new_topic(trigger, ctx.user_present) {
                     channel.into()
@@ -4854,6 +4889,14 @@ impl ProactiveOrchestrator {
                     _ => return None,
                 };
 
+                let audience_rule = if recipient.0 == "user" {
+                    "Speak directly to the user in second person when referring to them. Roommate exchanges in history are context, not this turn's audience. Do not continue a roommate exchange or discuss the user with an imagined listener. A greeting can be omitted; say nothing if there is no fresh reason to speak."
+                } else {
+                    "Speak directly to this roommate. The human user is a third party in this exchange. Do not answer questions addressed to the human. This turn will be delivered through the character-to-character bus."
+                };
+                messages.push(ChatMessage::system(&format!(
+                    "Current speaker: {}. This turn's locked addressee: {} ({}). {} Do not change the addressee based on earlier dialogue. If returning a listener field, it must equal {}.",
+                    self.char_id, recipient.0, recipient.1, audience_rule, recipient.0)));
                 messages.push(ChatMessage::system(&format!(
                     "The topic channel is locked to {}. {} Write for this medium; return delivery_channel={} in JSON. Do not move an ongoing conversation to another medium.",
                     llm_ctx.channel, crate::pipeline::prompt_modules::build_channel_style_guide(&llm_ctx.channel),
@@ -4893,7 +4936,13 @@ impl ProactiveOrchestrator {
                         return None;
                     }
                 };
-                let content = Self::parse_proactive_json(&data.to_string())?;
+                if !output::matches_listener(&data, &recipient.0) {
+                    tracing::warn!(character = %self.char_id, planned_listener = %recipient.0,
+                        "主动回复对象不一致，跳过投递");
+                    return None;
+                }
+                let mut content = Self::parse_proactive_json(&data.to_string())?;
+                content.listener = Some(recipient.0.clone());
                 tracing::debug!(character = %self.char_id, trigger = trigger.as_str(), planned, "主动回复解析完成");
                 Some(content)
             })

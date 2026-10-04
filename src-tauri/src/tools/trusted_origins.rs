@@ -30,6 +30,9 @@ impl TrustedRule {
 }
 
 /// 内置默认可信来源（桌宠常用的高信任站点）。
+///
+/// 这些是「用户可能主动打开浏览」的站点，与联网搜索的 provider 池是两件事：
+/// 搜索 provider 已随 Bing Search v7 退役而移除，这里的 bing.com 仍应保留。
 const BUILTIN: &[&str] = &[
     "github.com",
     "bilibili.com",

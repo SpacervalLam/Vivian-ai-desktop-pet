@@ -265,7 +265,7 @@ fn citation_snippets(content: &[Value]) -> HashMap<String, String> {
 ///
 /// **没有 result 块即报错**：原生搜索未触发时宁可失败也不做散文爬取兜底，
 /// 保持结果可追溯。
-fn map_anthropic_response(response: &Value) -> Result<WebSearchResult, WebError> {
+pub(crate) fn map_anthropic_response(response: &Value) -> Result<WebSearchResult, WebError> {
     let content = response
         .get("content")
         .and_then(|c| c.as_array())
@@ -287,8 +287,15 @@ fn map_anthropic_response(response: &Value) -> Result<WebSearchResult, WebError>
     let snippets = citation_snippets(&content);
     let mut seen = std::collections::HashSet::new();
     let mut sources: Vec<WebSearchSource> = Vec::new();
+    let mut warnings = Vec::new();
 
     for block in &result_blocks {
+        if block["content"]["type"] == "web_search_tool_result_error" {
+            warnings.push(format!(
+                "Native web search failed: {}", block["content"]["error_code"].as_str().unwrap_or("unknown")
+            ));
+            continue;
+        }
         let items = block
             .get("content")
             .and_then(|c| c.as_array())
@@ -321,12 +328,16 @@ fn map_anthropic_response(response: &Value) -> Result<WebSearchResult, WebError>
         }
     }
 
+    if sources.is_empty() && !warnings.is_empty() {
+        return Err(WebError::provider_error(DEEPSEEK_ID, warnings.join("; ")));
+    }
     // 缝隙负责最终 maxResults 截断，此处 truncated 恒为 false
     Ok(WebSearchResult {
         // 不返回模型生成的 text 总结（sources + 引用摘录已足够，
         // 模型总结面向 API 消费格式不稳定）
         content: None,
         sources: annotate_sources(sources),
+        warnings,
         truncated: false,
         ..Default::default()
     })
@@ -339,6 +350,16 @@ fn map_anthropic_response(response: &Value) -> Result<WebSearchResult, WebError>
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn web_native_partial_failure_keeps_successful_sources() {
+        let result=map_anthropic_response(&serde_json::json!({"content":[
+            {"type":"web_search_tool_result","content":[{"type":"web_search_result","url":"https://example.com","title":"Evidence"}]},
+            {"type":"web_search_tool_result","content":{"type":"web_search_tool_result_error","error_code":"max_uses_exceeded"}}
+        ]})).unwrap();
+        assert_eq!(result.sources.len(),1);
+        assert!(result.warnings[0].contains("max_uses_exceeded"));
+        assert!(map_anthropic_response(&serde_json::json!({"content":[{"type":"web_search_tool_result","content":{"type":"web_search_tool_result_error","error_code":"unavailable"}}]})).is_err());
+    }
 
     #[test]
     fn test_citation_snippets_first_wins() {

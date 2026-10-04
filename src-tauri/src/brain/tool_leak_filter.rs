@@ -197,7 +197,8 @@ impl ToolLeakFilter {
                 return format!("[tool-call markup omitted]{}", pending);
             }
             self.suppressing = false;
-            std::mem::take(&mut self.pending)
+            self.pending.clear();
+            "[tool-call markup omitted]".to_string()
         } else {
             std::mem::take(&mut self.pending)
         }

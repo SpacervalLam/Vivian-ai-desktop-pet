@@ -27,7 +27,7 @@ pub struct WebSearchRequest {
     pub query: String,
     /// 返回来源数上限；`None` = 不设限
     pub max_results: Option<usize>,
-    /// 请求级引擎指定（如 ["deepseek"] 或 ["bing", "tavily"]）；`None` = 用配置链
+    /// 请求级引擎指定（如 ["deepseek"] 或 ["searxng", "tavily"]）；`None` = 用配置链
     pub engines: Option<Vec<String>>,
     pub include_domains: Vec<String>,
     pub exclude_domains: Vec<String>,

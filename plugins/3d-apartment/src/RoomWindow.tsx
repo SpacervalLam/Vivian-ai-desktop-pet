@@ -27,13 +27,35 @@ export default function RoomWindow() {
   // 两条关闭路径（前端 keydown 与 Rust 看护线程）都会响应同一次按键，
   // 用这个标志挡掉第二次，避免对已经销毁的窗口重复 close。
   const closingRef = useRef(false);
+  // 场景装配完成后交来的「立即释放 GPU 资源」函数，见 RoomSceneProps.onDisposeReady。
+  const disposeSceneRef = useRef<(() => void) | null>(null);
 
   const closeRoom = useCallback(() => {
     if (closingRef.current) return;
     closingRef.current = true;
-    void getCurrentWindow().close().catch((err) => {
-      console.warn('[room] 关闭窗口失败', err);
-    });
+    void (async () => {
+      // 关窗**之前**先把显存还掉。
+      //
+      // 房间窗口是 close 掉的，WebView2 上下文随进程一起没了，React 的 unmount
+      // cleanup 一次都跑不到——那套 dispose（geometry / material / texture /
+      // shadow.map / composer RT / forceContextLoss）全部落空。而 Tauri v2 的
+      // 所有窗口共享同一个 WebView2 environment，关掉房间窗口并不拆 GPU 环境，
+      // 这份显存要等 WebView2 自己逐出，时机不确定。主动调一次，释放才是确定性的。
+      try {
+        disposeSceneRef.current?.();
+      } catch (err) {
+        console.warn('[room] 释放场景资源失败，仍继续关窗', err);
+      }
+      try {
+        await getCurrentWindow().close();
+      } catch (err) {
+        console.warn('[room] 关闭窗口失败', err);
+      }
+    })();
+  }, []);
+
+  const handleDisposeReady = useCallback((dispose: () => void) => {
+    disposeSceneRef.current = dispose;
   }, []);
 
   useEffect(() => {
@@ -78,5 +100,36 @@ export default function RoomWindow() {
     return () => window.removeEventListener('keydown', onKeyDown, true);
   }, [closeRoom]);
 
-  return <RoomScene />;
+  // 兜底释放：任何关闭路径都会走到这里。
+  //
+  // 上一条 closeRoom 只覆盖前端 ESC；ESC 看护线程那条路是 **Rust 直接
+  // `win.close()`**（apartment_host.rs 的 20ms 硬件轮询），根本不经过前端
+  // 的 closeRoom，挂在那儿就漏了。所以真正的兜底必须挂在 close-requested
+  // 事件上——无论谁发起的关闭，事件都会派发到 JS。
+  //
+  // 同步调用，不 await：three 的 dispose 全是同步的，而 close-requested 的
+  // 派发不会等我们的异步工作跑完（不等就等于没做）。disposeScene 幂等，
+  // 和 closeRoom 里那次调用重复执行无副作用。
+  useEffect(() => {
+    const win = getCurrentWindow();
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    void (async () => {
+      const u = await win.onCloseRequested(() => {
+        try {
+          disposeSceneRef.current?.();
+        } catch (err) {
+          console.warn('[room] close-requested 释放资源失败', err);
+        }
+      });
+      if (cancelled) u();
+      else unlisten = u;
+    })();
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+
+  return <RoomScene onDisposeReady={handleDisposeReady} />;
 }

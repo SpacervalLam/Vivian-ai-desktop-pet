@@ -222,7 +222,7 @@ mod tests {
     use crate::memory::types::{current_timestamp, Granularity};
 
     fn make(content: &str, importance: f64, now: f64) -> MemoryItem {
-        MemoryItem::new(content.to_string(), Granularity::Summary, importance)
+        { let mut item = MemoryItem::new(content.to_string(), Granularity::Summary, importance); item.timestamp = now; item }
     }
 
     #[test]
@@ -281,7 +281,7 @@ mod tests {
             make(&"b".repeat(20), 0.8, now),
             make(&"c".repeat(20), 0.2, now),
         ];
-        let plan = plan_compression(&items, 40, now);
+        let plan = plan_compression(&items, super::super::time_stamped::estimate_tokens(&items[0].content) + super::super::time_stamped::estimate_tokens(&items[1].content), now);
         // 低健康度的 c 应进入压缩候选
         assert!(plan.compress_candidates.iter().any(|m| m.content.starts_with('c')));
         // 高健康度 a/b 保留

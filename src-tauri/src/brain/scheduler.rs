@@ -241,6 +241,10 @@ impl Scheduler {
         } else {
             None
         };
+        Self::with_persistence_path(persistence_path)
+    }
+
+    fn with_persistence_path(persistence_path: Option<PathBuf>) -> Self {
         let mut scheduler = Self {
             inner: Arc::new(Mutex::new(SchedulerInner {
                 tasks: HashMap::new(),
@@ -457,21 +461,25 @@ impl Scheduler {
     /// 避免在用户专注/静默期触发提醒。
     pub async fn tick(&self) {
         // Reminders are delivered only at their due time; preparation is not delivery.
-        let due_tasks: Vec<ScheduledTask> = {
+        let now = now_ts();
+        let mut due_tasks: Vec<ScheduledTask> = {
             let inner = self.inner.lock();
             inner
                 .tasks
                 .values()
                 .filter(|t| {
                     t.status == TaskStatus::Pending
-                        && t.scheduled_time <= now_ts()
+                        && t.scheduled_time <= now
                         && t.delivery
                             .next_attempt_at
-                            .map_or(true, |retry| retry <= now_ts())
+                            .map_or(true, |retry| retry <= now)
                 })
                 .cloned()
                 .collect()
         };
+        due_tasks.sort_by(|a, b| b.priority.cmp(&a.priority)
+            .then_with(|| a.scheduled_time.total_cmp(&b.scheduled_time))
+            .then_with(|| a.id.cmp(&b.id)));
 
         for task in due_tasks {
             // 打扰检查：将任务优先级映射到 InterruptPriority
@@ -504,7 +512,9 @@ impl Scheduler {
             let reserved = {
                 let mut inner = self.inner.lock();
                 match inner.tasks.get_mut(&task.id) {
-                    Some(t) if t.status == TaskStatus::Pending => {
+                    Some(t) if t.status == TaskStatus::Pending
+                        && t.scheduled_time <= now
+                        && t.delivery.next_attempt_at.map_or(true, |retry| retry <= now) => {
                         t.status = TaskStatus::Running;
                         t.delivery.attempts = t.delivery.attempts.saturating_add(1);
                         Some(t.clone())
@@ -513,7 +523,17 @@ impl Scheduler {
                 }
             };
             if let Some(task) = reserved {
-                self.persist();
+                // Persist the reservation before allowing an external side effect.
+                if !self.persist() {
+                    let mut inner = self.inner.lock();
+                    if let Some(t) = inner.tasks.get_mut(&task.id) {
+                        if t.status == TaskStatus::Running {
+                            t.status = TaskStatus::Pending;
+                            t.delivery.attempts = t.delivery.attempts.saturating_sub(1);
+                        }
+                    }
+                    continue;
+                }
                 tokio::spawn(async move {
                     cb(task);
                 });
@@ -527,13 +547,19 @@ impl Scheduler {
 
     /// Callback completion is distinct from dispatch. Failures never count as reminders.
     pub fn complete_execution(&self, task_id: &str, result: Result<String, String>) {
+        let Some(attempt) = self.get_task(task_id).map(|task|task.delivery.attempts) else {return;};
+        self.complete_attempt(task_id,attempt,result);
+    }
+
+    /// A receipt belongs to one reservation; delayed receipts cannot complete a later repetition.
+    pub fn complete_attempt(&self, task_id: &str, attempt: u32, result: Result<String, String>) {
         let now = now_ts();
         {
             let mut inner = self.inner.lock();
             let Some(task) = inner.tasks.get_mut(task_id) else {
                 return;
             };
-            if task.status != TaskStatus::Running {
+            if task.status != TaskStatus::Running || task.delivery.attempts != attempt {
                 return;
             }
             match result {
@@ -594,6 +620,8 @@ impl Scheduler {
                 removed,
                 SCHEDULER_COMPLETED_RETENTION_SECS
             );
+            drop(inner);
+            self.persist();
         }
     }
 
@@ -605,6 +633,7 @@ impl Scheduler {
     /// 清空所有定时任务（内存 + 持久化文件）
     /// 供 factory_reset 调用：清空内存 HashMap 并删除磁盘文件，避免重启后任务"复活"
     pub fn clear_all_tasks(&self) {
+        let _write = self.persistence_gate.lock();
         {
             let mut inner = self.inner.lock();
             inner.tasks.clear();
@@ -617,36 +646,46 @@ impl Scheduler {
         tracing::info!("[scheduler] 已清空所有定时任务（factory_reset）");
     }
 
-    fn persist(&self) {
+    fn persist(&self) -> bool {
         if let Some(path) = &self.persistence_path {
             let _write = self.persistence_gate.lock();
             let tasks = self.inner.lock().tasks.clone();
             if let Err(e) = save_tasks_to(path, &tasks) {
                 tracing::warn!(error = %e, "[scheduler] 定时任务保存失败，重启后可能丢失已设置的提醒");
+                return false;
             }
         }
+        true
     }
 
     fn load_tasks_from(&mut self, path: &PathBuf) {
-        if let Ok(content) = std::fs::read_to_string(path) {
-            #[derive(serde::Deserialize)]
-            struct Persisted {
-                tasks: Vec<ScheduledTask>,
-            }
-            if let Ok(data) = serde_json::from_str::<Persisted>(&content) {
+        #[derive(serde::Deserialize)]
+        struct Persisted {
+            tasks: Vec<ScheduledTask>,
+        }
+        if let Some(data) = crate::utils::fs::load_json_or_backup::<Persisted>(path) {
                 let mut inner = self.inner.lock();
                 for mut task in data.tasks {
-                    // 加载未完成的 Pending 任务（过期也保留，tick 会立即触发）
-                    // 和 Paused 任务（暂停状态需保留，等待用户恢复）
-                    if task.status == TaskStatus::Running && task.task_type == TaskType::Reminder {
-                        task.status = TaskStatus::Pending;
+                    if task.status == TaskStatus::Running {
+                        if task.task_type == TaskType::Reminder {
+                            task.status = TaskStatus::Pending;
+                        } else {
+                            task.status = TaskStatus::Failed;
+                            task.completed_at = Some(now_ts());
+                            if !task.metadata.is_object() { task.metadata = serde_json::json!({}); }
+                            task.metadata["recovery_error"] = serde_json::json!(
+                                "Execution was interrupted; its outcome is unknown. Review the result before retrying."
+                            );
+                        }
                     }
-                    if task.status == TaskStatus::Pending || task.status == TaskStatus::Paused {
+                    if matches!(task.status, TaskStatus::Pending | TaskStatus::Paused)
+                        || task.completed_at.is_some_and(|at| now_ts() - at < SCHEDULER_COMPLETED_RETENTION_SECS as f64) {
                         inner.tasks.insert(task.id.clone(), task);
                     }
                 }
                 tracing::info!(loaded = inner.tasks.len(), "[Scheduler] 已加载持久化任务");
-            }
+                drop(inner);
+                self.persist();
         }
     }
 }
@@ -775,6 +814,72 @@ use chrono::TimeZone;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn delayed_receipt_cannot_complete_the_next_repeat_attempt() {
+        let scheduler=Scheduler::new(false);
+        scheduler.set_callback(Arc::new(|_|{}));
+        let id=scheduler.schedule_repeat(ScheduledTask::new_reminder("repeat",now_ts()-1.0),60);
+        scheduler.tick().await;
+        scheduler.complete_attempt(&id,1,Ok("first".into()));
+        scheduler.update_task_scheduled_time(&id,now_ts()-1.0);
+        scheduler.tick().await;
+        scheduler.complete_attempt(&id,1,Ok("late duplicate".into()));
+        assert_eq!(scheduler.get_task(&id).unwrap().status,TaskStatus::Running);
+        assert_eq!(scheduler.get_task(&id).unwrap().delivery.confirmed_count,1);
+        scheduler.complete_attempt(&id,2,Ok("second".into()));
+        assert_eq!(scheduler.get_task(&id).unwrap().delivery.confirmed_count,2);
+        assert_eq!(scheduler.get_task(&id).unwrap().delivery.last_text.as_deref(),Some("second"));
+    }
+
+    #[tokio::test]
+    async fn restart_recovers_reminders_but_preserves_unknown_tool_outcomes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tasks.json");
+        let scheduler = Scheduler::with_persistence_path(Some(path.clone()));
+        let reminder = scheduler.schedule_reminder("remember", now_ts() - 1.0);
+        let tool = scheduler.schedule_tool_call("write_file", serde_json::json!({}), now_ts() - 1.0);
+        scheduler.set_callback(Arc::new(|_| {}));
+        scheduler.tick().await;
+        tokio::task::yield_now().await;
+        drop(scheduler);
+        let restored = Scheduler::with_persistence_path(Some(path.clone()));
+        assert_eq!(restored.get_task(&reminder).unwrap().status, TaskStatus::Pending);
+        let interrupted = restored.get_task(&tool).unwrap();
+        assert_eq!(interrupted.status, TaskStatus::Failed);
+        assert!(interrupted.metadata["recovery_error"].as_str().unwrap().contains("unknown"));
+        let second_restart = Scheduler::with_persistence_path(Some(path));
+        assert_eq!(second_restart.get_task(&tool).unwrap().status, TaskStatus::Failed);
+    }
+
+    #[tokio::test]
+    async fn failed_reservation_persistence_never_dispatches_a_tool() {
+        let dir = tempfile::tempdir().unwrap();
+        // A directory at the target path makes atomic file replacement fail.
+        let path = dir.path().join("blocked");
+        std::fs::create_dir(&path).unwrap();
+        let scheduler = Scheduler::with_persistence_path(Some(path));
+        let calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let counter = calls.clone();
+        scheduler.set_callback(Arc::new(move |_| { counter.fetch_add(1,std::sync::atomic::Ordering::SeqCst); }));
+        let id = scheduler.schedule_tool_call("write_file",serde_json::json!({}),now_ts()-1.0);
+        scheduler.tick().await;
+        tokio::task::yield_now().await;
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst),0);
+        let task = scheduler.get_task(&id).unwrap();
+        assert_eq!(task.status,TaskStatus::Pending);
+        assert_eq!(task.delivery.attempts,0);
+    }
+
+    #[test]
+    fn corrupted_state_is_preserved_for_diagnosis() {
+        let dir=tempfile::tempdir().unwrap();let path=dir.path().join("tasks.json");
+        std::fs::write(&path,"{partial").unwrap();
+        let scheduler=Scheduler::with_persistence_path(Some(path.clone()));
+        assert!(scheduler.list_tasks().is_empty());
+        assert!(!path.exists());
+        assert!(std::fs::read_dir(dir.path()).unwrap().any(|entry|entry.unwrap().file_name().to_string_lossy().contains(".corrupt-")));
+    }
 
     #[test]
     fn test_schedule_reminder() {

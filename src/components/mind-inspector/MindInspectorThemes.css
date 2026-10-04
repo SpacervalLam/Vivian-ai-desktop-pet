@@ -347,8 +347,7 @@ body[data-ui-style="minimal"] :is(.codex-selbubble, .codex-editcard-overlay, .co
    日期印章的底与虚线描边、导航按钮与页内 Tab 的悬停底 / 激活底、「进入公寓」的悬停底。
    换掉变量本身就全跟着变，一个元素都不用单独写。
 
-   作用域**只给外壳这三块容器**，不是整个窗口根 —— 内容页（JournalPage /
-   OverviewPage / shared-components）也在用 --sticker-sky-soft 做强调底，那属于内容区，
+   作用域**只给外壳这三块容器**，不是整个窗口根 —— 内容页（日记 / 记忆 / shared-components）也在用 --sticker-sky-soft 做强调底，那属于内容区，
    不在「窗口配色」的范围里。写在容器上、由子元素继承：印章在封面条里、
    导航按钮在导航卡里、页内 Tab 在 Tab 栏里，所以三条就覆盖了全部用点。
 

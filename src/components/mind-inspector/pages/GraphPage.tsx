@@ -500,20 +500,27 @@ const NodeShape: React.FC<NodeShapeProps> = ({ type, color, size, x, y, isCore, 
       );
     }
     case 'reading': {
-      // 阅读/链接分享：圆形背景 + 🔗 图标
+      // 阅读/链接分享：圆形背景 + 链接图标。
+      // 用内联 path 而非 emoji 文本：同函数内其余节点类型（信念/目标/关系/日记…）
+      // 全部是几何图形，这里用 emoji 会成为整套图形语言里唯一的例外，
+      // 且 emoji 渲染随系统字体变化，字形不可控。
+      const s = r * 0.42;          // 图标半宽
+      const sw = Math.max(1.4, r * 0.11); // 描边宽度
       return (
         <g {...shapeProps}>
           <circle cx={x} cy={y} r={r} fill={pastel(color)} stroke={GPAPER.card} strokeWidth={2.5} />
-          <text
-            x={x}
-            y={y}
-            textAnchor="middle"
-            dominantBaseline="central"
-            fontSize={r * 1.05}
-            style={{ userSelect: 'none' }}
+          {/* 链环：两段同斜率的短弧 + 中间横杠，构成「链接」 */}
+          <g
+            transform={`translate(${x} ${y})`}
+            fill="none"
+            stroke={color}
+            strokeWidth={sw}
+            strokeLinecap="round"
           >
-            🔗
-          </text>
+            <path d={`M ${-s * 0.15} ${-s * 0.55} L ${-s * 0.15} ${-s * 1.05} A ${s * 0.62} ${s * 0.62} 0 0 0 ${s * 0.47} ${-s * 1.05} L ${s * 0.72} ${-s * 0.8}`} />
+            <path d={`M ${s * 0.15} ${s * 0.55} L ${s * 0.15} ${s * 1.05} A ${s * 0.62} ${s * 0.62} 0 0 0 ${-s * 0.47} ${s * 1.05} L ${-s * 0.72} ${s * 0.8}`} />
+            <line x1={-s * 0.42} y1={s * 0.42} x2={s * 0.42} y2={-s * 0.42} />
+          </g>
         </g>
       );
     }

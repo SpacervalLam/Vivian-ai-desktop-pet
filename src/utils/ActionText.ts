@@ -1,4 +1,31 @@
-const ACTION_PAREN_REGEX = /[（(]([^)）]+)[)）]/g;
+export interface ActionTextPart {
+  text: string;
+  action: boolean;
+}
+
+/** Keep narration in storage, but hide it from speech even before its closing bracket arrives. */
+export function splitActionText(text: string): ActionTextPart[] {
+  const parts: ActionTextPart[] = [];
+  let start = 0;
+  let depth = 0;
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === '（' || text[i] === '(') {
+      if (depth === 0) {
+        if (i > start) parts.push({ text: text.slice(start, i), action: false });
+        start = i;
+      }
+      depth++;
+    } else if ((text[i] === '）' || text[i] === ')') && depth > 0) {
+      depth--;
+      if (depth === 0) {
+        parts.push({ text: text.slice(start, i + 1), action: true });
+        start = i + 1;
+      }
+    }
+  }
+  if (start < text.length) parts.push({ text: text.slice(start), action: depth > 0 });
+  return parts;
+}
 
 export interface TextWithActions {
   text: string;
@@ -6,23 +33,21 @@ export interface TextWithActions {
 }
 
 export function extractActions(text: string): TextWithActions {
-  const actions: string[] = [];
-  const filteredText = text.replace(ACTION_PAREN_REGEX, (match, content) => {
-    if (content.trim()) {
-      actions.push(content.trim());
-    }
-    return '';
-  }).trim();
-  return { text: filteredText, actions };
+  const parts = splitActionText(text);
+  return {
+    text: parts.filter((part) => !part.action).map((part) => part.text).join('').trim(),
+    actions: parts.filter((part) => part.action).map((part) => part.text.replace(/^[（(]|[）)]$/g, '').trim()).filter(Boolean),
+  };
 }
 
 export function stripActions(text: string): string {
   return extractActions(text).text;
 }
 
+const escapeHtml = (text: string): string => text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+
 export function renderTextWithActions(text: string): string {
-  return text.replace(ACTION_PAREN_REGEX, (match, content) => {
-    if (!content.trim()) return match;
-    return ` <span style="color: #8B5CF6; font-style: italic;">${content}</span> `;
-  });
+  return splitActionText(text).map((part) => part.action
+    ? `<span style="color: #888; font-style: italic;">${escapeHtml(part.text)}</span>`
+    : escapeHtml(part.text)).join('');
 }

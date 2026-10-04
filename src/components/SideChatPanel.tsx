@@ -1,3 +1,4 @@
+import { stripActions } from '../utils/ActionText';
 import React, { useEffect, useState, useRef, useCallback } from 'react';
 import { listen, emit, type UnlistenFn } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
@@ -374,7 +375,7 @@ export default function SideChatPanel() {
               />
             </div>
           )}
-          {[...entries].reverse().map((entry) => (
+          {[...entries].reverse().filter((entry) => entry.role === 'user' || stripActions(entry.text).trim()).map((entry) => (
           <div
             key={entry.id}
             style={{
@@ -414,7 +415,7 @@ export default function SideChatPanel() {
                 WebkitBackdropFilter: 'blur(4px)',
               }}
             >
-              {entry.text}
+              {entry.role === 'user' ? entry.text : stripActions(entry.text)}
             </div>
           </div>
         ))}

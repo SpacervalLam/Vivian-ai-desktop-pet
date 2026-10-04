@@ -1,0 +1,1051 @@
+/* ============================================================
+   记录三页（日记 / 笔记 / 计划）· 共享版式层
+   ------------------------------------------------------------
+   这份文件只管**三页共同的排版刻度与控件**，不管布局形状。
+
+   布局形状按内容性质分三种，互不强行统一：
+     · 日记 = 阅读型   record-diary-*     索引栏 + 阅读面
+     · 笔记 = 编辑型   record-note-*      索引栏 + 工作面
+     · 计划 = 看板型   record-plan-*      筛选栏 + 任务行
+
+   三页共享的是：字号阶梯、间距节奏、发丝线、状态色阶、
+   控件形态（分段控件 / 图标按钮 / 输入 / 空态）。
+
+   作用域：.record-scope 挂在组页根，三页子树全部继承。
+   颜色一律取 --claude-*（由 ClaudeTheme.css 提供明暗两套），
+   这里不重新定义色值，只定义「哪个角色用哪支笔」。
+
+   与旧版的差别：手账装饰（胶带 / 印章 / 装订孔 / 倾斜 / 点阵）
+   全部移除。手写体已由 .claude-theme 的 font-family 收敛规则
+   统一接管，这里不再与它对抗 —— 手写感靠「字号与留白的对比」
+   建立，不靠贴纸。
+   ============================================================ */
+
+.record-scope {
+  /* ---- 排版刻度：三页唯一的字号来源 ----
+     比例接近 1.25，但顶部收得比通用 UI 紧，因为内容区要密而不挤。 */
+  --rec-fs-micro: 11.5px;   /* 元信息：时间、字数、来源 */
+  --rec-fs-meta: 12.5px;    /* 次级信息：标签、状态文字 */
+  --rec-fs-body: 14.5px;    /* 正文 / 列表主行 */
+  --rec-fs-lead: 16px;      /* 引文、详情首段 */
+  --rec-fs-title: 19px;     /* 区块标题 */
+  --rec-fs-display: 30px;   /* 页级标题、日期数字 */
+
+  --rec-lh-tight: 1.35;
+  --rec-lh-body: 1.7;
+  --rec-lh-prose: 1.9;     /* 日记正文：中文长段落需要更松 */
+
+  /* ---- 间距节奏：4px 基准，段间距用 20/28 两档，不随手加 ---- */
+  --rec-gap-1: 4px;
+  --rec-gap-2: 8px;
+  --rec-gap-3: 12px;
+  --rec-gap-4: 16px;
+  --rec-gap-5: 20px;
+  --rec-gap-6: 28px;
+
+  --rec-pad-page: 28px;
+
+  /* ---- 发丝线与面 ---- */
+  --rec-line: 0.5px solid var(--claude-line);
+  --rec-line-soft: 0.5px solid color-mix(in srgb, var(--claude-line) 60%, transparent);
+  --rec-line-strong: 0.5px solid var(--claude-line-strong);
+  --rec-surface: var(--claude-surface);
+  --rec-sunken: var(--claude-sunken);
+  --rec-ink: var(--claude-ink);
+  --rec-ink-soft: var(--claude-ink-soft);
+  --rec-muted: var(--claude-muted);
+  --rec-faint: var(--claude-faint);
+  --rec-accent: var(--claude-clay);
+  --rec-accent-soft: var(--claude-clay-soft);
+
+  --rec-radius: 10px;
+  --rec-radius-sm: 7px;
+  --rec-radius-lg: 14px;
+
+  --rec-ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --rec-dur: 0.16s;
+
+  color: var(--rec-ink);
+  font-family: var(--claude-sans);
+
+  /* 组页不再挂 .claude-surface（那层会与 .mind-page-content 的 :has() 规则
+     互相抵消，内边距翻倍），外边距由这里给。
+     box-sizing + min-height:0 是必需的：三页根都是 height:100% 的 flex 列，
+     不锁住盒模型与最小高度就会连同内边距一起溢出视口。 */
+  box-sizing: border-box;
+  min-height: 0;
+  padding: var(--rec-pad-page) clamp(20px, 3vw, 44px) 36px;
+  /* 铺底色：真实窗口里 .mind-inspector-root 会铺 --claude-bg，
+     这里再铺一层是为了让 record-scope 自身在深色下不依赖祖先 ——
+     三页可能被单独复用（例如将来嵌到别的壳里），那时底色得跟得住。 */
+  background: var(--claude-bg);
+}
+.record-scope *,
+.record-scope *::before,
+.record-scope *::after { box-sizing: border-box; }
+
+/* 日记正文要衬线，但 .claude-theme 有一条
+   `.claude-theme *:not(svg) { font-family: inherit !important }` 通配，
+   它的特异性 (0,1,2)+important 高于本文件的类选择器。
+   所以这里必须同样带 important —— 记账三页里唯一允许换字体的两处
+   （日记正文、块编辑器的等宽区），其余一律走无衬线，不与那条通配对抗。 */
+.record-scope .record-diary-prose {
+  font-family: var(--claude-serif) !important;
+}
+.record-scope :is(.rec-textarea, .rec-input, .rec-select).is-mono {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace !important;
+  font-size: 12px;
+}
+
+.record-scope ::-webkit-scrollbar { width: 9px; height: 9px; }
+.record-scope ::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--claude-ink) 16%, transparent);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+.record-scope ::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--claude-ink) 28%, transparent);
+  background-clip: content-box;
+}
+.record-scope ::-webkit-scrollbar-track { background: transparent; }
+
+/* ============================================================
+   共用控件
+   ============================================================ */
+
+/* ---- 分段控件：三页唯一的「模式切换」形态 ----
+   替代旧版三种并存：胶囊药丸（todo/scheduler）、1.5px 边框药丸、
+   以及 .mind-tabs 手账胶囊。
+
+   页内 tab 共用这一形态，一级页面由左侧导航切换。 */
+.rec-seg {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border: var(--rec-line);
+  border-radius: 8px;
+  background: var(--rec-sunken);
+}
+
+/* 二级（页内）：默认尺寸 */
+.rec-seg-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--rec-muted);
+  font-family: inherit;
+  font-size: var(--rec-fs-meta);
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color var(--rec-dur) var(--rec-ease), background var(--rec-dur) var(--rec-ease);
+}
+.rec-seg-item:hover:not(.is-active) { color: var(--rec-ink); }
+.rec-seg-item.is-active {
+  color: var(--rec-ink);
+  background: var(--rec-surface);
+  box-shadow: 0 1px 2px rgba(20, 20, 19, .07), 0 0 0 0.5px var(--claude-line);
+}
+
+/* ---- 角色切换：与分段控件同构，尺寸略大（是页级选择） ---- */
+.rec-cast {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border: var(--rec-line);
+  border-radius: 9px;
+  background: var(--rec-sunken);
+}
+.rec-cast-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 13px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--rec-muted);
+  font-family: inherit;
+  font-size: var(--rec-fs-body);
+  font-weight: 500;
+  cursor: pointer;
+  transition: color var(--rec-dur) var(--rec-ease), background var(--rec-dur) var(--rec-ease);
+}
+.rec-cast-item:hover:not(.is-active) { color: var(--rec-ink); }
+.rec-cast-item.is-active {
+  color: var(--rec-ink);
+  background: var(--rec-surface);
+  box-shadow: 0 1px 2px rgba(20, 20, 19, .07), 0 0 0 0.5px var(--claude-line);
+}
+.rec-cast-item.is-active .rec-cast-dot { opacity: 1; }
+.rec-cast-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--claude-clay);
+  opacity: 0.28;
+  transition: opacity var(--rec-dur) var(--rec-ease);
+}
+
+/* ---- 图标按钮：所有次级动作的统一形态 ---- */
+.rec-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--rec-radius-sm);
+  background: transparent;
+  color: var(--rec-muted);
+  cursor: pointer;
+  transition: background var(--rec-dur) var(--rec-ease), color var(--rec-dur) var(--rec-ease);
+}
+.rec-icon-btn:hover:not(:disabled) { background: var(--rec-sunken); color: var(--rec-ink); }
+.rec-icon-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+.rec-icon-btn.is-danger:hover:not(:disabled) {
+  background: color-mix(in srgb, #b4553f 12%, transparent);
+  color: #b4553f;
+}
+.rec-icon-btn.is-accent { color: var(--rec-accent); }
+.rec-icon-btn.is-accent:hover:not(:disabled) {
+  background: var(--rec-accent-soft);
+  color: var(--rec-accent);
+}
+
+/* ---- 文字按钮 ---- */
+.rec-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 13px;
+  border: var(--rec-line);
+  border-radius: var(--rec-radius-sm);
+  background: var(--rec-surface);
+  color: var(--rec-ink-soft);
+  font-family: inherit;
+  font-size: var(--rec-fs-meta);
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: border-color var(--rec-dur) var(--rec-ease), background var(--rec-dur) var(--rec-ease),
+    color var(--rec-dur) var(--rec-ease);
+}
+.rec-btn:hover:not(:disabled) { border-color: var(--claude-line-strong); color: var(--rec-ink); }
+.rec-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.rec-btn.is-primary {
+  border-color: var(--rec-accent);
+  background: var(--rec-accent);
+  color: #faf9f5;
+}
+.rec-btn.is-primary:hover:not(:disabled) {
+  border-color: var(--claude-clay-bright);
+  background: var(--claude-clay-bright);
+  color: #faf9f5;
+}
+.rec-btn.is-ghost { border-color: transparent; background: transparent; }
+.rec-btn.is-ghost:hover:not(:disabled) { background: var(--rec-sunken); }
+
+/* ---- 输入 ---- */
+.rec-input,
+.rec-textarea,
+.rec-select {
+  width: 100%;
+  padding: 8px 11px;
+  border: var(--rec-line);
+  border-radius: var(--rec-radius-sm);
+  background: var(--rec-surface);
+  color: var(--rec-ink);
+  font-family: inherit;
+  font-size: var(--rec-fs-body);
+  outline: none;
+  box-sizing: border-box;
+  transition: border-color var(--rec-dur) var(--rec-ease), box-shadow var(--rec-dur) var(--rec-ease);
+}
+.rec-textarea { resize: vertical; min-height: 72px; line-height: var(--rec-lh-body); }
+.rec-input::placeholder,
+.rec-textarea::placeholder { color: var(--rec-faint); }
+.rec-input:focus,
+.rec-textarea:focus,
+.rec-select:focus {
+  border-color: var(--rec-accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--rec-accent) 14%, transparent);
+}
+.rec-select { cursor: pointer; }
+
+.rec-field { display: flex; flex-direction: column; gap: var(--rec-gap-2); }
+.rec-label {
+  display: block;
+  color: var(--rec-muted);
+  font-size: var(--rec-fs-meta);
+  font-weight: 500;
+}
+.rec-label-hint { color: var(--rec-faint); font-weight: 400; }
+
+/* 聚焦态统一：所有表单控件走同一条规则，页面内不再各写一份 */
+.record-scope :is(input, textarea, select):focus-visible {
+  outline: none;
+  border-color: var(--rec-accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--rec-accent) 14%, transparent);
+}
+
+/* ---- 搜索框 ---- */
+.rec-search {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 10px;
+  border: var(--rec-line);
+  border-radius: var(--rec-radius-sm);
+  background: var(--rec-surface);
+  color: var(--rec-muted);
+  transition: border-color var(--rec-dur) var(--rec-ease), box-shadow var(--rec-dur) var(--rec-ease);
+}
+.rec-search:focus-within {
+  border-color: var(--rec-accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--rec-accent) 14%, transparent);
+}
+.rec-search input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: var(--rec-ink);
+  font-family: inherit;
+  font-size: var(--rec-fs-body);
+  outline: none;
+}
+.rec-search input::placeholder { color: var(--rec-faint); }
+
+/* ---- 区块标题：小号无衬线 + 陶土标记 + 一条发丝线延到右端 ----
+   替代旧版「印章 + 楷体标题 + 虚线」。 */
+.rec-sec {
+  display: flex;
+  align-items: center;
+  gap: var(--rec-gap-2);
+  min-width: 0;
+}
+.rec-sec-mark { color: var(--rec-accent); display: inline-flex; flex-shrink: 0; }
+.rec-sec-text {
+  color: var(--rec-ink);
+  font-size: var(--rec-fs-title);
+  font-weight: 500;
+  letter-spacing: -.01em;
+  white-space: nowrap;
+}
+.rec-sec-line { flex: 1; height: 0.5px; background: var(--claude-line); min-width: 12px; }
+.rec-sec-aside {
+  color: var(--rec-faint);
+  font-size: var(--rec-fs-micro);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* ---- 标签 ---- */
+.rec-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 7px;
+  border-radius: 5px;
+  background: var(--rec-sunken);
+  color: var(--rec-ink-soft);
+  font-size: var(--rec-fs-micro);
+  font-weight: 500;
+  white-space: nowrap;
+}
+.rec-tag.is-accent { color: var(--rec-accent); background: var(--rec-accent-soft); }
+
+/* ---- 状态点 + 状态文字 ---- */
+.rec-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  flex-shrink: 0;
+  background: currentColor;
+}
+.rec-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--rec-muted);
+  font-size: var(--rec-fs-meta);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+/* ---- 元信息行：图标 + 文字，三页统一 ---- */
+.rec-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--rec-gap-3);
+  color: var(--rec-faint);
+  font-size: var(--rec-fs-micro);
+  min-width: 0;
+}
+.rec-meta > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+.rec-meta svg { flex-shrink: 0; opacity: 0.85; }
+
+/* ---- 空态 / 载入态：不再用虚线便签 + emoji ---- */
+.rec-blank {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--rec-gap-3);
+  min-height: 200px;
+  padding: var(--rec-gap-6);
+  text-align: center;
+}
+.rec-blank-icon { color: var(--rec-faint); opacity: 0.55; display: inline-flex; }
+.rec-blank-title { color: var(--rec-ink); font-size: var(--rec-fs-body); font-weight: 500; }
+.rec-blank-hint { color: var(--rec-muted); font-size: var(--rec-fs-meta); line-height: var(--rec-lh-body); max-width: 40ch; }
+
+/* ---- 关键词高亮 ---- */
+.rec-mark {
+  padding: 0 1px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--rec-accent) 26%, transparent);
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+
+/* ---- 弹层遮罩与对话框（计划页表单 / 日记日历共用） ---- */
+.rec-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--rec-gap-5);
+  background: var(--panel-overlay);
+  animation: rec-fade var(--rec-dur) var(--rec-ease);
+}
+.rec-dialog {
+  width: 100%;
+  max-width: 420px;
+  padding: var(--rec-gap-5);
+  border: var(--rec-line);
+  border-radius: var(--rec-radius-lg);
+  background: var(--rec-surface);
+  box-shadow: 0 12px 40px rgba(20, 20, 19, .16);
+  animation: rec-pop 0.2s var(--rec-ease);
+}
+.rec-dialog-title {
+  margin: 0 0 var(--rec-gap-4);
+  color: var(--rec-ink);
+  font-size: var(--rec-fs-title);
+  font-weight: 500;
+  letter-spacing: -.01em;
+}
+.rec-dialog-body { display: flex; flex-direction: column; gap: var(--rec-gap-3); }
+.rec-dialog-foot { display: flex; gap: var(--rec-gap-2); justify-content: flex-end; margin-top: var(--rec-gap-5); }
+
+/* ---- 悬浮弹层（日历、选区菜单等）：不跟随旋转，跟随发丝线 ---- */
+.rec-pop {
+  position: absolute;
+  z-index: 50;
+  border: var(--rec-line);
+  border-radius: var(--rec-radius);
+  background: var(--rec-surface);
+  box-shadow: 0 8px 28px rgba(20, 20, 19, .13);
+  animation: rec-pop 0.16s var(--rec-ease);
+}
+
+@keyframes rec-fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes rec-pop {
+  from { opacity: 0; transform: translateY(-4px) scale(0.985); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+@keyframes rec-rise {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .record-scope *,
+  .record-scope *::before,
+  .record-scope *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* ============================================================
+   日记 · 阅读型
+   ------------------------------------------------------------
+   形状：左索引栏（按月分组的日期 + 心情点）/ 右阅读面。
+   阅读面是这页的主角：日期做页级标题，正文用衬线 + 1.9 行高，
+   分段靠留白与一条发丝线，不靠底色块。
+   ============================================================ */
+
+/* 三页根：撑满组页剩余空间，而不是 height:100%
+   —— 父容器 .record-scope 已带内边距，height:100% 会算成内容区高度再叠加
+   内边距，直接溢出视口底部。flex:1 + min-height:0 才是正确写法。 */
+.record-diary {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+/* 顶部一行：角色切换 + 搜索 / 日期筛选 */
+.record-diary-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--rec-gap-3);
+  flex-wrap: wrap;
+  padding-bottom: var(--rec-gap-4);
+  margin-bottom: var(--rec-gap-5);
+  border-bottom: var(--rec-line);
+  flex-shrink: 0;
+}
+.record-diary-bar-spacer { flex: 1; min-width: 0; }
+.record-diary-cal-wrap { position: relative; flex-shrink: 0; }
+
+/* 主体两栏 */
+.record-diary-body {
+  display: grid;
+  grid-template-columns: 244px minmax(0, 1fr);
+  gap: var(--rec-gap-6);
+  flex: 1;
+  min-height: 0;
+}
+
+/* ---- 左：日期索引栏 ---- */
+.record-diary-index {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  padding-right: var(--rec-gap-4);
+  border-right: var(--rec-line-soft);
+}
+.record-diary-index-scroll {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rec-gap-5);
+  overflow-y: auto;
+  padding-right: var(--rec-gap-2);
+  min-height: 0;
+}
+.record-diary-month {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.record-diary-month-label {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: var(--rec-gap-2) 0 var(--rec-gap-1);
+  background: var(--claude-bg);
+  color: var(--rec-faint);
+  font-size: var(--rec-fs-micro);
+  font-weight: 500;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+.record-diary-month-empty {
+  padding: var(--rec-gap-1) 0 var(--rec-gap-2) 10px;
+  color: var(--rec-faint);
+  font-size: var(--rec-fs-micro);
+}
+
+/* 索引行：日期数字 + 星期 + 心情点，hover 出一条底线 */
+.record-diary-link {
+  display: flex;
+  align-items: center;
+  gap: var(--rec-gap-3);
+  padding: 7px 10px;
+  border: 0;
+  border-radius: var(--rec-radius-sm);
+  background: transparent;
+  color: var(--rec-ink-soft);
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--rec-dur) var(--rec-ease), color var(--rec-dur) var(--rec-ease);
+}
+.record-diary-link:hover { background: var(--rec-sunken); color: var(--rec-ink); }
+.record-diary-link.is-active { background: var(--rec-accent-soft); color: var(--rec-accent); }
+.record-diary-link-date {
+  font-size: var(--rec-fs-body);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+.record-diary-link-weekday {
+  font-size: var(--rec-fs-micro);
+  color: var(--rec-faint);
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.record-diary-link.is-active .record-diary-link-weekday { color: color-mix(in srgb, var(--rec-accent) 70%, var(--rec-muted)); }
+.record-diary-link-dot { width: 5px; height: 5px; border-radius: 999px; flex-shrink: 0; }
+
+/* ---- 右：阅读面 ---- */
+.record-diary-reader {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: var(--rec-gap-2);
+}
+.record-diary-article { animation: rec-rise 0.24s var(--rec-ease); }
+
+.record-diary-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--rec-gap-5);
+  padding-bottom: var(--rec-gap-4);
+  margin-bottom: var(--rec-gap-5);
+  border-bottom: var(--rec-line);
+}
+.record-diary-date {
+  margin: 0;
+  color: var(--rec-ink);
+  font-size: var(--rec-fs-display);
+  font-weight: 400;
+  letter-spacing: -.02em;
+  line-height: 1.1;
+}
+/* 日期里的年月日分三级：年最小、其次月日、最大的是日号 */
+.record-diary-date-ymd {
+  display: flex;
+  align-items: baseline;
+  gap: var(--rec-gap-2);
+  color: var(--rec-ink);
+}
+.record-diary-date-year {
+  color: var(--rec-faint);
+  font-size: var(--rec-fs-title);
+  font-weight: 400;
+  letter-spacing: 0;
+}
+.record-diary-date-md { color: var(--rec-ink); font-size: var(--rec-fs-display); }
+.record-diary-date-weekday {
+  margin-top: var(--rec-gap-2);
+  color: var(--rec-muted);
+  font-size: var(--rec-fs-meta);
+}
+
+/* 心情锚点：这是全页唯一保留的「情绪装饰」，但它是一个安静的读数，不是贴纸 */
+.record-diary-mood {
+  display: flex;
+  align-items: center;
+  gap: var(--rec-gap-2);
+  padding: 5px 11px 5px 9px;
+  border: 0.5px solid currentColor;
+  border-radius: 999px;
+  flex-shrink: 0;
+}
+.record-diary-mood-label { font-size: var(--rec-fs-meta); font-weight: 500; white-space: nowrap; }
+
+.record-diary-section { margin-bottom: var(--rec-gap-6); }
+.record-diary-section:last-child { margin-bottom: 0; }
+
+/* 要事：一条竖线把事件串起来，替代旧的圆形勾选章 */
+.record-diary-events {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rec-gap-3);
+  padding-left: var(--rec-gap-4);
+  border-left: 1px solid var(--claude-line);
+  margin-top: var(--rec-gap-3);
+}
+.record-diary-event {
+  display: flex;
+  align-items: baseline;
+  gap: var(--rec-gap-2);
+  color: var(--rec-ink-soft);
+  font-size: var(--rec-fs-body);
+  line-height: var(--rec-lh-body);
+}
+.record-diary-event-mark {
+  flex-shrink: 0;
+  color: var(--rec-accent);
+  transform: translateY(-1px);
+  display: inline-flex;
+}
+.record-diary-event-text { min-width: 0; word-break: break-word; }
+
+.record-diary-prose {
+  margin-top: var(--rec-gap-3);
+  color: var(--rec-ink);
+  font-family: var(--claude-serif);
+  font-size: 15.5px;
+  line-height: var(--rec-lh-prose);
+  word-break: break-word;
+}
+.record-diary-prose p { margin: 0; }
+.record-diary-prose p + p { margin-top: 0; }
+/* 段间距：中日文首行缩进 + 零段距（靠缩进断句），西文用段间空行 */
+.record-diary-prose.is-indented p + p { text-indent: 2em; }
+.record-diary-prose.is-spaced p + p { margin-top: 1.1em; }
+.record-diary-prose p.is-indented-jp { text-indent: 1em; }
+
+.record-diary-muted { color: var(--rec-muted); font-size: var(--rec-fs-body); }
+
+/* ============================================================
+   笔记 · 编辑型
+   ------------------------------------------------------------
+   形状：左索引（紧凑行：标题 + 标签 + 时间）/ 右工作面。
+   索引行不做卡片、不做倾斜，靠行距与一条选中底线区分。
+   工作面 = 顶栏（标题 + 模式 + 动作）/ 内容（编辑或预览）。
+   ============================================================ */
+
+.record-note {
+  display: flex;
+  gap: var(--rec-gap-5);
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+
+.record-note-index {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rec-gap-3);
+  width: 292px;
+  min-width: 240px;
+  flex-shrink: 0;
+  min-height: 0;
+  padding-right: var(--rec-gap-4);
+  border-right: var(--rec-line-soft);
+}
+.record-note-index-head {
+  display: flex;
+  align-items: center;
+  gap: var(--rec-gap-2);
+  flex-shrink: 0;
+}
+.record-note-index-head-spacer { flex: 1; min-width: 0; }
+.record-note-index-scroll {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow-y: auto;
+  min-height: 0;
+  padding-right: var(--rec-gap-2);
+}
+
+/* 索引行：一条 hairline 分隔，不用卡片 */
+.record-note-row {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 9px 10px 9px 11px;
+  border: 0;
+  border-radius: var(--rec-radius-sm);
+  background: transparent;
+  color: var(--rec-ink-soft);
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--rec-dur) var(--rec-ease);
+}
+.record-note-row::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 8px;
+  bottom: 8px;
+  width: 2px;
+  border-radius: 999px;
+  background: transparent;
+  transition: background var(--rec-dur) var(--rec-ease);
+}
+.record-note-row:hover { background: var(--rec-sunken); }
+.record-note-row.is-active { background: var(--rec-sunken); }
+.record-note-row.is-active::before { background: var(--rec-accent); }
+.record-note-row-title {
+  color: var(--rec-ink);
+  font-size: var(--rec-fs-body);
+  font-weight: 500;
+  line-height: var(--rec-lh-tight);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.record-note-row.is-active .record-note-row-title { color: var(--rec-ink); }
+.record-note-row-tags { display: flex; flex-wrap: wrap; gap: 4px; min-height: 0; }
+.record-note-row-foot { display: flex; align-items: center; gap: var(--rec-gap-2); color: var(--rec-faint); font-size: var(--rec-fs-micro); }
+.record-note-row-foot-spacer { flex: 1; min-width: 0; }
+.record-note-row-del { opacity: 0; transition: opacity var(--rec-dur) var(--rec-ease); }
+.record-note-row:hover .record-note-row-del,
+.record-note-row:focus-within .record-note-row-del { opacity: 1; }
+
+/* 工作面 */
+.record-note-work {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  border: var(--rec-line);
+  border-radius: var(--rec-radius-lg);
+  background: var(--rec-surface);
+  overflow: hidden;
+}
+/* 内容区在无选中时也要撑开，否则空态会被顶到上面靠边 */
+.record-note-work-body {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  position: relative;
+}
+.record-note-work-head {
+  display: flex;
+  align-items: center;
+  gap: var(--rec-gap-3);
+  padding: var(--rec-gap-3) var(--rec-gap-4);
+  border-bottom: var(--rec-line);
+  flex-shrink: 0;
+  min-width: 0;
+}
+.record-note-work-title {
+  display: flex;
+  align-items: center;
+  gap: var(--rec-gap-2);
+  min-width: 0;
+  flex: 1;
+}
+.record-note-work-title-text {
+  color: var(--rec-ink);
+  font-size: var(--rec-fs-lead);
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.record-note-work-title svg { color: var(--rec-accent); flex-shrink: 0; }
+.record-note-frame { width: 100%; height: 100%; border: 0; display: block; background: var(--rec-surface); }
+
+/* 编辑态顶栏的「脏」提示：一条陶土色短线，不弹窗 */
+.record-note-dirty {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--rec-accent);
+  font-size: var(--rec-fs-micro);
+  font-weight: 500;
+}
+
+/* 表单模式：块编辑区，块与块之间靠发丝线分组 */
+.record-note-blocks {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rec-gap-3);
+  padding: var(--rec-gap-4);
+}
+.record-note-block {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rec-gap-2);
+  padding: var(--rec-gap-3) var(--rec-gap-4) var(--rec-gap-4);
+  border: var(--rec-line);
+  border-radius: var(--rec-radius);
+  background: var(--rec-surface);
+  transition: border-color var(--rec-dur) var(--rec-ease);
+}
+.record-note-block:hover { border-color: var(--claude-line-strong); }
+.record-note-block-head { display: flex; align-items: center; gap: var(--rec-gap-2); }
+.record-note-block-head-spacer { flex: 1; min-width: 0; }
+.record-note-block-fields { display: flex; flex-direction: column; gap: var(--rec-gap-3); }
+.record-note-block-row { display: flex; gap: var(--rec-gap-3); }
+.record-note-block-row > * { min-width: 0; }
+.record-note-block-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--rec-ink-soft);
+  font-size: var(--rec-fs-meta);
+  cursor: pointer;
+}
+
+/* ============================================================
+   计划 · 看板型
+   ------------------------------------------------------------
+   形状：顶部筛选行（状态分段 + 计数 + 新增）/ 下方任务行列表。
+   任务行是「一条横线 + 左侧优先级竖条 + 主行 + 元信息」，
+   不是卡片 —— 看板要的是扫视速度，不是卡片阴影。
+   ============================================================ */
+
+.record-plan {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+
+.record-plan-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--rec-gap-3);
+  flex-wrap: wrap;
+  padding-bottom: var(--rec-gap-3);
+  margin-bottom: var(--rec-gap-3);
+  border-bottom: var(--rec-line);
+  flex-shrink: 0;
+}
+.record-plan-bar-spacer { flex: 1; min-width: 0; }
+.record-plan-count {
+  color: var(--rec-faint);
+  font-size: var(--rec-fs-meta);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.record-plan-list {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: var(--rec-gap-2);
+}
+
+/* 任务行：左侧 2px 优先级条承担全部色彩编码。
+   条的颜色由行内 --rec-accent-bar 注入（各页按自己的语义给值），
+   没给时回落到中性灰 —— 于是「色彩 = 优先级」这条规则只有一处实现。 */
+.record-plan-row {
+  --rec-accent-bar: var(--rec-faint);
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: var(--rec-gap-2);
+  padding: var(--rec-gap-3) var(--rec-gap-4) var(--rec-gap-3) calc(var(--rec-gap-4) + 3px);
+  border-bottom: var(--rec-line-soft);
+  transition: background var(--rec-dur) var(--rec-ease);
+}
+.record-plan-row:last-child { border-bottom: 0; }
+.record-plan-row::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: var(--rec-gap-2);
+  bottom: var(--rec-gap-2);
+  width: 2px;
+  border-radius: 999px;
+  background: var(--rec-accent-bar);
+  opacity: 0.5;
+  transition: opacity var(--rec-dur) var(--rec-ease);
+}
+.record-plan-row:hover { background: color-mix(in srgb, var(--rec-sunken) 55%, transparent); }
+.record-plan-row:hover::before { opacity: 1; }
+.record-plan-row.is-done { opacity: 0.58; }
+.record-plan-row.is-done .record-plan-title { text-decoration: line-through; }
+.record-plan-row.is-done::before { opacity: 0.2; }
+
+.record-plan-row-top { display: flex; align-items: flex-start; gap: var(--rec-gap-3); }
+.record-plan-row-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 5px; }
+.record-plan-title {
+  color: var(--rec-ink);
+  font-size: var(--rec-fs-body);
+  font-weight: 500;
+  line-height: var(--rec-lh-tight);
+  word-break: break-word;
+}
+.record-plan-desc {
+  color: var(--rec-muted);
+  font-size: var(--rec-fs-meta);
+  line-height: var(--rec-lh-body);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.record-plan-row-side { display: flex; align-items: center; gap: var(--rec-gap-2); flex-shrink: 0; }
+.record-plan-actions { display: flex; align-items: center; gap: var(--rec-gap-1); flex-shrink: 0; }
+.record-plan-foot { display: flex; align-items: center; gap: var(--rec-gap-3); flex-wrap: wrap; }
+.record-plan-foot-spacer { flex: 1; min-width: 0; }
+
+/* 优先级 / 状态：文字 + 点，不再是色块底 */
+.record-plan-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--rec-muted);
+  font-size: var(--rec-fs-meta);
+  font-weight: 500;
+  white-space: nowrap;
+}
+.record-plan-badge .rec-dot { width: 5px; height: 5px; }
+
+/* 分组小标题（今天 / 逾期 / 之后） */
+.record-plan-group-label {
+  display: flex;
+  align-items: center;
+  gap: var(--rec-gap-2);
+  padding: var(--rec-gap-4) 0 var(--rec-gap-2);
+  color: var(--rec-faint);
+  font-size: var(--rec-fs-micro);
+  font-weight: 500;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+.record-plan-group-line { flex: 1; height: 0.5px; background: var(--claude-line); }
+
+/* ============================================================
+   窄窗降级：索引栏退到顶部，横向排布，不再压成 244px
+
+   断点取值依据：心智观察器窗口 minWidth 1260（ChatWindow.tsx 建窗时设的），
+   正常使用不会低于这个数。这里的 1080 / 980 是留给「用户手动拖窄」与
+   「缩放 >100%」的余量，不是日常路径 —— 所以降级形态只要不塌就不必精修。
+   ============================================================ */
+@media (max-width: 1080px) {
+  .record-diary-body { grid-template-columns: minmax(0, 1fr); gap: var(--rec-gap-4); }
+  .record-diary-index {
+    padding-right: 0;
+    padding-bottom: var(--rec-gap-3);
+    border-right: 0;
+    border-bottom: var(--rec-line);
+    max-height: 116px;
+  }
+  .record-diary-index-scroll { flex-direction: row; gap: var(--rec-gap-3); overflow-x: auto; }
+  /* 横排时月标签仍须是分组头：给它固定宽度 + 右侧发丝线，
+     让「这一段属于哪个月」在横向流里依然读得出来，而不是混进日期里。
+     （不用竖排 —— 中文「2026 年 10 月」竖排可读性太差。） */
+  .record-diary-month { flex-direction: row; gap: var(--rec-gap-1); align-items: center; }
+  .record-diary-month-label {
+    position: static;
+    flex-shrink: 0;
+    padding: 0 var(--rec-gap-2) 0 var(--rec-gap-1);
+    border-right: var(--rec-line);
+    writing-mode: horizontal-tb;
+    white-space: nowrap;
+  }
+  .record-diary-month-empty { display: none; }
+}
+
+@media (max-width: 980px) {
+  .record-note { flex-direction: column; gap: var(--rec-gap-3); }
+  .record-note-index {
+    width: 100%;
+    min-width: 0;
+    max-height: 200px;
+    padding-right: 0;
+    padding-bottom: var(--rec-gap-3);
+    border-right: 0;
+    border-bottom: var(--rec-line);
+  }
+}

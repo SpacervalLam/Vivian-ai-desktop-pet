@@ -106,12 +106,6 @@ pub struct PipelineState {
     /// 话题活跃度
     #[serde(default = "default_topic_activeness")]
     pub topic_activeness: i32,
-    /// 凝神模式是否激活（本轮）
-    #[serde(default)]
-    pub focus_active: bool,
-    /// 凝神模式激活时的 max_tokens 额外余量
-    #[serde(default)]
-    pub focus_extra_tokens: u32,
 
     // ── 命令层 ──
     /// 命令类型
@@ -373,8 +367,6 @@ impl Default for PipelineState {
             sticker: None,
             memory_used: Vec::new(),
             topic_activeness: default_topic_activeness(),
-            focus_active: false,
-            focus_extra_tokens: 0,
             // 命令层
             command: None,
             command_args: default_json_object(),

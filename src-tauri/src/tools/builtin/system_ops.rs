@@ -15,7 +15,7 @@ use crate::types::response::{ChatMessage, MessageImage};
 use crate::utils::process::silent_command;
 
 /// 全局 AppHandle（由 lib.rs setup 注入，用于读取 AppState 中的 ModelRouter / Config）
-static APP_HANDLE: Lazy<RwLock<Option<tauri::AppHandle>>> = Lazy::new(|| RwLock::new(None));
+pub(crate) static APP_HANDLE: Lazy<RwLock<Option<tauri::AppHandle>>> = Lazy::new(|| RwLock::new(None));
 
 /// 注入 AppHandle（lib.rs setup 调用一次）
 pub fn set_app_handle(handle: tauri::AppHandle) {

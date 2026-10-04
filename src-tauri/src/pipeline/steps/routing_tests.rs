@@ -106,7 +106,7 @@ async fn prompt_preparation_overlaps_context_and_finalizes_with_current_results(
     let result = PipelineState::from_json(pipeline.ainvoke(state.to_json(), None).await.unwrap());
     assert!(!provider.timed_out.load(Ordering::SeqCst), "preparation blocked context progress");
     assert!(result.system_prompt.contains("unique_retrieved_evidence_724F2"));
-    assert!(result.system_prompt.contains("unique_semantic_guidance_724F2"));
+    assert!(!result.system_prompt.contains("unique_semantic_guidance_724F2")); // Automated labels route retrieval, not the spoken response script.
     let timings = result.metadata["timings"].as_array().unwrap();
     assert!(timings.iter().any(|timing| timing["stage"] == "prompt_preparation"));
     assert!(timings.iter().any(|timing| timing["stage"] == "prompt_building"));
@@ -135,14 +135,14 @@ async fn retrieved_examples_are_dynamic_and_absent_without_relevant_scene() {
     })).unwrap()];
     let state = PipelineState { user_input: "8分钟左右".into(), messages, ..Default::default() };
     let result = PipelineState::from_json(prompt.ainvoke(state.to_json(), None).await.unwrap());
-    let position = result.system_prompt.find("[RETRIEVED EXAMPLES").unwrap();
-    let boundary = result.system_prompt.find(crate::pipeline::prompt_modules::SYSTEM_PROMPT_DYNAMIC_BOUNDARY).unwrap();
-    assert!(position > boundary);
+    let position = result.system_prompt.find("[FICTIONAL DIALOGUE").unwrap();
+    let boundary = result.system_prompt.find("[NEXT TURN]").unwrap();
+    assert!(position < boundary);
     assert!(result.system_prompt.contains("presentation-duration"));
     assert!(result.metadata["retrieved_example_chars"].as_u64().unwrap() <= 1800);
     let state = PipelineState { user_input: "怎么安装软件".into(), ..Default::default() };
     let result = PipelineState::from_json(prompt.ainvoke(state.to_json(), None).await.unwrap());
-    assert!(!result.system_prompt.contains("[RETRIEVED EXAMPLES"));
+    assert!(!result.system_prompt.contains("presentation-duration"));
 }
 
 #[test]

@@ -1,3 +1,6 @@
+import { TextField, BrowseTextField, SelectField, NumberField, SliderField, ToggleField, subsectionTitleStyle, fieldStyle, labelStyle, inputStyle, selectStyle, sectionTitleStyle } from './settings/SettingsFields';
+import { ROUTING_TASKS, normalizeEmbeddingEndpoint, presetMatches, useProviderPresets, needsSecretFor, needsAppIdFor, ProviderSelector, WorkModelProviderSelector, invalidateProviderPresetsCache, type ConfigValue, type ConfigObject, type EmbeddingProviderPreset } from './settings/ModelSettings';
+export { PROVIDER_PRESETS, invalidateProviderPresetsCache } from './settings/ModelSettings';
 import StickerSettings from './stickers/StickerSettings';
 import ReasoningPrefField, { type ReasoningPref } from './settings/ReasoningConfigField';
 import LlmProbeResults from './settings/LlmProbeResults';
@@ -16,6 +19,7 @@ import { changeLanguage } from '../i18n';
 import { getCharacterId } from '../characterContext';
 import TtsHelpDrawer, { TtsBackendKey } from './TtsHelpDrawer';
 import AsrHelpDrawer, { AsrBackendKey } from './AsrHelpDrawer';
+import './settings/SpeechSettings.css';
 import ShortcutRecorder, { type ConflictResult, formatForDisplay } from './ShortcutRecorder';
 import ClearConfirmDialog from './ClearConfirmDialog';
 import NetworkDiagnosisDialog from './NetworkDiagnosisDialog';
@@ -24,9 +28,10 @@ import type { FishSpeechServiceState, GptSoVitsServiceState, GptSoVitsServiceSta
 import PluginsPanel from './plugins/PluginsPanel';
 import ConnectionsPanel from './ConnectionsPanel';
 import TokenUsagePanel from './TokenUsagePanel';
-import { Search, X, Trash2, Sparkles, ExternalLink, Activity, Download, Upload, RotateCcw } from 'lucide-react';
+import { Search, X, Minus, Trash2, Sparkles, ExternalLink, Activity, Download, Upload, RotateCcw } from 'lucide-react';
 import { settingsPages as tabs, settingsGroups, settingsCopy, findSettingsPages, type SettingsPageKey as TabKey } from './settings/navigation';
 import SettingsSections from './settings/SettingsSections';
+import SchemaSettings from './settings/SchemaSettings';
 import './settings/SettingsWindow.css';
 
 interface TtsConfigState {
@@ -121,968 +126,6 @@ interface DiaryConfigState {
   max_diary_length: number;
 }
 
-type ConfigValue = string | number | boolean | ConfigObject | string[] | null;
-interface ConfigObject {
-  [key: string]: ConfigValue;
-}
-
-/**
- * 路由矩阵任务定义 - 各任务可独立配置模型或判断接口
- *
- * 任务职责说明：
- * - chat:                日常对话与问答（高频，人格核心，可用便宜模型）
- * - reasoning:           主对话输入超过阈值或需要工具时升级使用；需可靠的长上下文理解与 function calling
- * - work_agent:          编程/复杂工作任务（工作模型配置优先，路由矩阵作为默认与回退）
- * - vision_describe:     图片理解（用户发图时使用，必须配置支持视觉的多模态模型）
- * - diary:               智能日记内容生成
- * - memory:              写入时记忆抽取、检索改写、记忆路由/校验与用户画像复用；高频结构化任务
- * - consolidation:       离线记忆巩固与精修（三阶段流水线、相似记忆精修、冲突仲裁，低频，需深度推理模型）
- * - reflection:          异步反思（每5轮或30分钟触发，合并意识更新与活动抽取，fire-and-forget，失败静默）
- * - inner_monologue:     离线内心独白（用户不交互时自主思考，含兴趣话题联网搜索，建议廉价快速模型）
- * - emotion_analysis:    情绪分类（用户/角色情绪效价与唤醒度，LLM 分类器，建议便宜快速模型）
- * - knowledge_acquisition: 空闲时知识搜索学习（后台低频，建议便宜模型）
- * - translation:         跨语言 TTS 文本翻译（仅翻译服务选 LLM 时使用，简单任务，便宜模型即可）
- * - bystander_judge:     旁观插话判断（用户对话时轻量判断旁观者是否插话，建议便宜快速模型）
- * - simple_judge:        选择渠道、旁观插话、会话结束原因等结构化简短判断（可使用 Jev）
- * - intent_judge:        会话关闭意图判断 + 桌宠反应（每轮对话后判断是否应关闭及关闭原因；用户摸头/双击/长按/拖拽/甩飞桌宠时生成一句短反应。极高频，建议最便宜的快速模型）
- * - asr_polish:          语音识别结果整理（识别结束后修正同音字/语气词/标点，建议便宜快速模型）
- * - text_rewrite:        工作区选中文本改写，按编辑要求最小幅度重写，不参与工作智能体的代码执行
- */
-const ROUTING_TASKS: { groupKey: string; labelKey: string; taskType: string; helpKey: string }[] = [
-  { groupKey: 'config.routing_group_conversation', labelKey: 'config.routing_chat', taskType: 'chat', helpKey: 'config.routing_chat_help' },
-  { groupKey: 'config.routing_group_conversation', labelKey: 'config.routing_reasoning', taskType: 'reasoning', helpKey: 'config.routing_reasoning_help' },
-  { groupKey: 'config.routing_group_conversation', labelKey: 'config.routing_vision_describe', taskType: 'vision_describe', helpKey: 'config.routing_vision_describe_help' },
-  { groupKey: 'config.routing_group_background', labelKey: 'config.routing_tool_execution', taskType: 'tool_execution', helpKey: 'config.routing_tool_execution_help' },
-  { groupKey: 'config.routing_group_background', labelKey: 'config.routing_memory', taskType: 'memory', helpKey: 'config.routing_memory_help' },
-  { groupKey: 'config.routing_group_background', labelKey: 'config.routing_reflection', taskType: 'reflection', helpKey: 'config.routing_reflection_help' },
-  { groupKey: 'config.routing_group_background', labelKey: 'config.routing_consolidation', taskType: 'consolidation', helpKey: 'config.routing_consolidation_help' },
-  { groupKey: 'config.routing_group_background', labelKey: 'config.routing_diary', taskType: 'diary', helpKey: 'config.routing_diary_help' },
-  { groupKey: 'config.routing_group_background', labelKey: 'config.routing_inner_monologue', taskType: 'inner_monologue', helpKey: 'config.routing_inner_monologue_help' },
-  { groupKey: 'config.routing_group_background', labelKey: 'config.routing_knowledge_acquisition', taskType: 'knowledge_acquisition', helpKey: 'config.routing_knowledge_acquisition_help' },
-  { groupKey: 'config.routing_group_decisions', labelKey: 'config.routing_simple_judge', taskType: 'simple_judge', helpKey: 'config.routing_simple_judge_help' },
-  { groupKey: 'config.routing_group_decisions', labelKey: 'config.routing_bystander_judge', taskType: 'bystander_judge', helpKey: 'config.routing_bystander_judge_help' },
-  { groupKey: 'config.routing_group_decisions', labelKey: 'config.routing_intent_judge', taskType: 'intent_judge', helpKey: 'config.routing_intent_judge_help' },
-  { groupKey: 'config.routing_group_decisions', labelKey: 'config.routing_emotion_analysis', taskType: 'emotion_analysis', helpKey: 'config.routing_emotion_analysis_help' },
-  { groupKey: 'config.routing_group_decisions', labelKey: 'config.routing_asr_polish', taskType: 'asr_polish', helpKey: 'config.routing_asr_polish_help' },
-  { groupKey: 'config.routing_group_work', labelKey: 'config.routing_work_agent', taskType: 'work_agent', helpKey: 'config.routing_work_agent_help' },
-  { groupKey: 'config.routing_group_work', labelKey: 'config.routing_text_rewrite', taskType: 'text_rewrite', helpKey: 'config.routing_text_rewrite_help' },
-  { groupKey: 'config.routing_group_work', labelKey: 'config.routing_translation', taskType: 'translation', helpKey: 'config.routing_translation_help' },
-];
-
-/** 厂商下的一个嵌入模型（插件 llm-providers 的 embedding-providers.json） */
-interface EmbeddingProviderModelPreset {
-  model: string;
-  /** 默认输出维度，选中模型时自动填入 */
-  dimension: number;
-  /** 单请求 input 数组条数上限（适配器据此分块） */
-  maxBatch?: number;
-  /** 可切换的维度取值，仅作提示 */
-  dimensions?: number[];
-  note?: string;
-}
-
-/** 云端嵌入厂商预设（厂商级：选厂商 → 自动填充端点，模型仍由用户选定） */
-interface EmbeddingProviderPreset {
-  id: string;
-  provider: string;
-  endpoint: string;
-  models: EmbeddingProviderModelPreset[];
-  region?: string;
-  consoleUrl?: string;
-  /** 请求体里下发维度的参数名；缺省表示不下发（服务端维度固定） */
-  dimensionParam?: string;
-  /** 本地服务填任意占位 Key 即可 */
-  needsApiKey?: boolean;
-  recommendedFor?: string;
-  verifiedAt?: string;
-  verifiedSource?: string;
-}
-
-/**
- * 端点归一化：仅用于「当前配置命中哪个厂商预设」的反查。
- * 用户可能把 `/embeddings` 后缀一起写进端点（适配器两种写法都接受），比较时要去掉，
- * 否则明明填的是智谱官方端点却显示成「自定义」。
- */
-const normalizeEmbeddingEndpoint = (v: string): string =>
-  (v || '').trim().replace(/\/+$/, '').replace(/\/embeddings$/i, '');
-
-/**
- * 服务商预设 - 选中后自动填充 provider_type / endpoint / 默认 model
- *
- * 数据来源：2026-07 各服务商官方 API 文档实测
- * - OpenAI: https://api.openai.com/v1
- * - Anthropic: https://api.anthropic.com（原生 /v1/messages，非 OpenAI 兼容）
- * - Gemini: https://generativelanguage.googleapis.com（原生 REST）
- * - DeepSeek: https://api.deepseek.com（官方文档 base_url；/v1 仅为 OpenAI SDK 兼容后缀，
- *             与模型版本无关，两种写法均可用，这里取官方文档写法）
- * - 通义千问 Qwen: DashScope OpenAI 兼容模式 https://dashscope.aliyuncs.com/compatible-mode/v1
- * - 智谱 GLM: https://open.bigmodel.cn/api/paas/v4（OpenAI 兼容）
- * - Moonshot Kimi: https://api.moonshot.cn/v1（OpenAI 兼容）
- * - 豆包 Doubao: 火山方舟 https://ark.cn-beijing.volces.com/api/v3（OpenAI 兼容）
- * - 文心一言: https://aip.baidubce.com（原生 OAuth + access_token）
- * - 腾讯混元: https://api.hunyuan.cloud.tencent.com/v1（OpenAI 兼容 Chat Completions）
- *
- * 注：讯飞星火因 WebSocket + HMAC 鉴权复杂且预设实用性低，未提供预设；
- *     用户仍可通过手动选择 provider=spark 进行配置。
- */
-interface ProviderPreset {
-  /** 稳定标识，用作 provider_cache 的 key（不随 i18n 变化） */
-  id: string;
-  /** 服务商名 i18n key（内置预设用；插件预设可用 label 直接给名，二者至少其一） */
-  labelKey?: string;
-  /** 直接显示名（插件预设可用，无 i18n 键时使用；优先于 labelKey） */
-  label?: string;
-  providerType: string;
-  endpoint: string;
-  /** 选中预设时自动填充的默认模型（可缺省——如「自定义」卡片） */
-  defaultModel?: string;
-  /** 模型名输入建议列表（datalist 下拉建议，仍可自由输入） */
-  mainModels?: string[];
-  /** 该预设的上下文窗口（tokens），用于自动压缩阈值判定 */
-  contextWindow?: number;
-  /** 该厂商的建议单次输出上限（tokens），切换主 LLM 预设时自动填入 max_tokens */
-  suggestedMaxTokens?: number;
-  /** 是否需要 api_secret（文心等 OAuth/HMAC 鉴权） */
-  needsSecret?: boolean;
-  /** 是否需要 app_id */
-  needsAppId?: boolean;
-  /** 供应商 API 控制台/官网（获取 API Key 的页面），有值时显示跳转按钮 */
-  consoleUrl?: string;
-  /** 该厂商支持的 API 协议变体（≥2 时显示协议选择器）。
-   *
-   *  每项是 (provider_type, endpoint) 组合；缺省时仅有默认
-   *  providerType + endpoint 一种（无选择器）。切换协议只覆盖
-   *  provider_type 与 endpoint，不动 model / api_key。 */
-  protocols?: ProviderProtocol[];
-}
-
-/** 单个协议变体：后端 provider_type + 该协议的端点 */
-interface ProviderProtocol {
-  /** 后端 provider_type 值（openai / chat_completions / anthropic / …） */
-  providerType: string;
-  /** 协议显示名 i18n key（复用 config.proto_* 键） */
-  labelKey?: string;
-  /** 直接显示名（插件预设可用；优先于 labelKey） */
-  label?: string;
-  /** 该协议的接口端点 */
-  endpoint: string;
-}
-
-/**
- * 预设是否包含指定的 (provider_type, endpoint) 组合 ——
- * 匹配默认协议或任一协议变体。endpoint 为空时仅按 provider_type 匹配。
- */
-const presetMatches = (p: ProviderPreset, type: string, endpoint: string): boolean =>
-  (p.providerType === type && (endpoint === '' || p.endpoint === endpoint)) ||
-  (p.protocols ?? []).some(
-    (pr) => pr.providerType === type && (endpoint === '' || pr.endpoint === endpoint),
-  );
-
-/**
- * 厂商预设表。导出供 App.tsx 在 LLM 错误 toast 里反查：
- * 错误事件只带 endpoint，据此拿 consoleUrl 与显示名，给「余额不足」类
- * 错误挂上直达对应厂商控制台的动作。
- */
-export const PROVIDER_PRESETS: ProviderPreset[] = [
-  { id: 'openai', labelKey: 'config.preset_openai', providerType: 'openai', endpoint: 'https://api.openai.com/v1', defaultModel: 'gpt-5.5', mainModels: ['gpt-5.5', 'gpt-5.6', 'gpt-5', 'o3', 'o4-mini'], contextWindow: 400_000, suggestedMaxTokens: 32768, consoleUrl: 'https://platform.openai.com/api-keys', protocols: [
-    { providerType: 'openai', labelKey: 'config.proto_responses', endpoint: 'https://api.openai.com/v1' },
-    { providerType: 'chat_completions', labelKey: 'config.proto_chat_completions', endpoint: 'https://api.openai.com/v1' },
-    { providerType: 'openai_agents', labelKey: 'config.proto_agents', endpoint: 'https://api.openai.com/v1' },
-  ] },
-  { id: 'anthropic', labelKey: 'config.preset_anthropic', providerType: 'anthropic', endpoint: 'https://api.anthropic.com', defaultModel: 'claude-sonnet-4-6', mainModels: ['claude-sonnet-4-6', 'claude-sonnet-5', 'claude-opus-4-8', 'claude-haiku-4-5'], contextWindow: 1_000_000, suggestedMaxTokens: 64000, consoleUrl: 'https://console.anthropic.com/settings/keys' },
-  { id: 'gemini', labelKey: 'config.preset_gemini', providerType: 'gemini', endpoint: 'https://generativelanguage.googleapis.com', defaultModel: 'gemini-3.1-pro-preview', mainModels: ['gemini-3.1-pro-preview', 'gemini-3-flash-preview', 'gemini-3.1-flash-lite'], contextWindow: 1_000_000, suggestedMaxTokens: 65536, consoleUrl: 'https://aistudio.google.com/apikey' },
-  { id: 'deepseek', labelKey: 'config.preset_deepseek', providerType: 'openai', endpoint: 'https://api.deepseek.com', defaultModel: 'deepseek-v4-flash', mainModels: ['deepseek-v4-pro', 'deepseek-v4-flash', 'deepseek-v4-flash-vision-exp'], contextWindow: 1_000_000, suggestedMaxTokens: 16384, consoleUrl: 'https://platform.deepseek.com/api_keys', protocols: [
-    { providerType: 'openai', labelKey: 'config.proto_responses', endpoint: 'https://api.deepseek.com' },
-    { providerType: 'chat_completions', labelKey: 'config.proto_chat_completions', endpoint: 'https://api.deepseek.com' },
-    { providerType: 'anthropic', labelKey: 'config.proto_anthropic', endpoint: 'https://api.deepseek.com/anthropic' },
-  ] },
-  { id: 'qwen', labelKey: 'config.preset_qwen', providerType: 'openai', endpoint: 'https://dashscope.aliyuncs.com/compatible-mode/v1', defaultModel: 'qwen3.8-max', mainModels: ['qwen3.8-max', 'qwen3.7-max', 'qwen3.7-plus', 'qwen3.7-flash', 'qwen3-max', 'qwen-plus', 'qwen-flash'], contextWindow: 256_000, suggestedMaxTokens: 32768, consoleUrl: 'https://bailian.console.aliyun.com/?apiKey=1', protocols: [
-    { providerType: 'openai', labelKey: 'config.proto_responses', endpoint: 'https://dashscope.aliyuncs.com/compatible-mode/v1' },
-    { providerType: 'chat_completions', labelKey: 'config.proto_chat_completions', endpoint: 'https://dashscope.aliyuncs.com/compatible-mode/v1' },
-  ] },
-  { id: 'glm', labelKey: 'config.preset_glm', providerType: 'zhipu', endpoint: 'https://open.bigmodel.cn/api/paas/v4', defaultModel: 'glm-5.3', mainModels: ['glm-5.3', 'glm-5.2', 'glm-5', 'glm-5.3-flash', 'glm-4.7'], contextWindow: 1_000_000, suggestedMaxTokens: 65536, consoleUrl: 'https://open.bigmodel.cn/apikey/platform', protocols: [
-    { providerType: 'zhipu', labelKey: 'config.proto_zhipu', endpoint: 'https://open.bigmodel.cn/api/paas/v4' },
-    { providerType: 'openai', labelKey: 'config.proto_responses', endpoint: 'https://open.bigmodel.cn/api/paas/v4' },
-    { providerType: 'anthropic', labelKey: 'config.proto_anthropic', endpoint: 'https://open.bigmodel.cn/api/anthropic' },
-  ] },
-  { id: 'moonshot', labelKey: 'config.preset_moonshot', providerType: 'openai', endpoint: 'https://api.moonshot.cn/v1', defaultModel: 'kimi-k2.6', mainModels: ['kimi-k3', 'kimi-k2.6', 'kimi-k2.5', 'kimi-k2-thinking'], contextWindow: 256_000, suggestedMaxTokens: 32768, consoleUrl: 'https://platform.moonshot.cn/console/api-keys', protocols: [
-    { providerType: 'openai', labelKey: 'config.proto_responses', endpoint: 'https://api.moonshot.cn/v1' },
-    { providerType: 'chat_completions', labelKey: 'config.proto_chat_completions', endpoint: 'https://api.moonshot.cn/v1' },
-  ] },
-  { id: 'doubao', labelKey: 'config.preset_doubao', providerType: 'openai', endpoint: 'https://ark.cn-beijing.volces.com/api/v3', defaultModel: 'doubao-seed-2.1-pro', mainModels: ['doubao-seed-2.1-pro', 'doubao-seed-2.1-turbo', 'doubao-seed-evolving', 'doubao-seed-2.1-pro-260628'], contextWindow: 256_000, suggestedMaxTokens: 65536, consoleUrl: 'https://console.volcengine.com/ark', protocols: [
-    { providerType: 'openai', labelKey: 'config.proto_responses', endpoint: 'https://ark.cn-beijing.volces.com/api/v3' },
-    { providerType: 'doubao', labelKey: 'config.proto_doubao_responses', endpoint: 'https://ark.cn-beijing.volces.com/api/v3' },
-    { providerType: 'chat_completions', labelKey: 'config.proto_chat_completions', endpoint: 'https://ark.cn-beijing.volces.com/api/v3' },
-    { providerType: 'anthropic', labelKey: 'config.proto_anthropic', endpoint: 'https://ark.cn-beijing.volces.com/api/v3/anthropic' },
-  ] },
-  { id: 'minimax', labelKey: 'config.preset_minimax', providerType: 'openai', endpoint: 'https://api.minimaxi.com/v1', defaultModel: 'MiniMax-M3', mainModels: ['MiniMax-M3', 'MiniMax-M2.7', 'MiniMax-M2.5'], contextWindow: 1_000_000, suggestedMaxTokens: 16384, consoleUrl: 'https://platform.minimaxi.com/user-center/basic-information/interface-key', protocols: [
-    { providerType: 'openai', labelKey: 'config.proto_responses', endpoint: 'https://api.minimaxi.com/v1' },
-    { providerType: 'chat_completions', labelKey: 'config.proto_chat_completions', endpoint: 'https://api.minimaxi.com/v1' },
-    { providerType: 'anthropic', labelKey: 'config.proto_anthropic', endpoint: 'https://api.minimaxi.com/anthropic' },
-  ] },
-  { id: 'mimo', labelKey: 'config.preset_mimo', providerType: 'openai', endpoint: 'https://api.xiaomimimo.com/v1', defaultModel: 'mimo-v2.5-pro', mainModels: ['mimo-v2.5-pro', 'mimo-v2.5'], contextWindow: 1_000_000, suggestedMaxTokens: 16384, consoleUrl: 'https://www.xiaomimimo.com/', protocols: [
-    { providerType: 'openai', labelKey: 'config.proto_responses', endpoint: 'https://api.xiaomimimo.com/v1' },
-    { providerType: 'chat_completions', labelKey: 'config.proto_chat_completions', endpoint: 'https://api.xiaomimimo.com/v1' },
-    { providerType: 'anthropic', labelKey: 'config.proto_anthropic', endpoint: 'https://api.xiaomimimo.com/anthropic' },
-  ] },
-  { id: 'grok', labelKey: 'config.preset_grok', providerType: 'openai', endpoint: 'https://api.x.ai/v1', defaultModel: 'grok-4.5', mainModels: ['grok-4.5', 'grok-4.3', 'grok-4.1-fast'], contextWindow: 500_000, suggestedMaxTokens: 32768, consoleUrl: 'https://console.x.ai', protocols: [
-    { providerType: 'openai', labelKey: 'config.proto_responses', endpoint: 'https://api.x.ai/v1' },
-    { providerType: 'chat_completions', labelKey: 'config.proto_chat_completions', endpoint: 'https://api.x.ai/v1' },
-  ] },
-  { id: 'openrouter', labelKey: 'config.preset_openrouter', providerType: 'chat_completions', endpoint: 'https://openrouter.ai/api/v1', defaultModel: 'openai/gpt-4o', mainModels: ['openai/gpt-4o', 'anthropic/claude-sonnet-4', 'deepseek/deepseek-chat'], contextWindow: 131_072, suggestedMaxTokens: 8192, consoleUrl: 'https://openrouter.ai/settings/keys' },
-  { id: 'groq', labelKey: 'config.preset_groq', providerType: 'chat_completions', endpoint: 'https://api.groq.com/openai/v1', defaultModel: 'llama-3.3-70b-versatile', mainModels: ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant'], contextWindow: 131_072, suggestedMaxTokens: 8192, consoleUrl: 'https://console.groq.com/keys' },
-  { id: 'ollama', labelKey: 'config.preset_ollama', providerType: 'chat_completions', endpoint: 'http://localhost:11434/v1', defaultModel: 'llama3.2', mainModels: ['llama3.2', 'qwen2.5', 'deepseek-r1'], contextWindow: 131_072, suggestedMaxTokens: 8192, consoleUrl: 'https://ollama.com' },
-  { id: 'mistral', labelKey: 'config.preset_mistral', providerType: 'chat_completions', endpoint: 'https://api.mistral.ai/v1', defaultModel: 'mistral-large-latest', mainModels: ['mistral-large-latest', 'mistral-small-latest'], contextWindow: 256_000, suggestedMaxTokens: 16384, consoleUrl: 'https://console.mistral.ai/api-keys' },
-  { id: 'together', labelKey: 'config.preset_together', providerType: 'chat_completions', endpoint: 'https://api.together.xyz/v1', defaultModel: 'meta-llama/Llama-3.3-70B-Instruct-Turbo', mainModels: ['meta-llama/Llama-3.3-70B-Instruct-Turbo', 'deepseek-ai/DeepSeek-V3'], contextWindow: 131_072, suggestedMaxTokens: 8192, consoleUrl: 'https://api.together.ai/settings/api-keys' },
-  { id: 'wenxin', labelKey: 'config.preset_wenxin', providerType: 'wenxin', endpoint: 'https://aip.baidubce.com', defaultModel: 'ernie-4.5-8k-latest', mainModels: ['ernie-4.5-8k-latest', 'ernie-4.5-turbo-8k', 'ernie-4.0-8k-latest'], contextWindow: 8192, suggestedMaxTokens: 4096, needsSecret: true, consoleUrl: 'https://console.bce.baidu.com/iam/#/iam/apikey/list' },
-  { id: 'hunyuan', labelKey: 'config.preset_hunyuan', providerType: 'chat_completions', endpoint: 'https://api.hunyuan.cloud.tencent.com/v1', defaultModel: 'hunyuan-turbos-latest', mainModels: ['hunyuan-turbos-latest', 'hunyuan-t1-latest', 'hunyuan-pro', 'hunyuan-standard', 'hunyuan-lite'], contextWindow: 32_000, suggestedMaxTokens: 16384, consoleUrl: 'https://console.cloud.tencent.com/tokenhub/apikey' },
-  { id: 'jev', labelKey: 'config.preset_jev', providerType: 'jev', endpoint: 'https://api.typesafe.ai/v1/systemone', defaultModel: 'jev-latest', mainModels: ['jev-latest'], consoleUrl: 'https://console.typesafe.ai/' },
-  { id: 'custom', labelKey: 'config.preset_custom', providerType: 'chat_completions', endpoint: '', defaultModel: '', mainModels: [] },
-];
-
-/**
- * 插件贡献的供应商预设行（对齐后端 plugins::ProviderPresetData，camelCase）。
- * 由 `list_provider_presets` 命令返回（来源：`plugins/<name>/providers.json`，
- * 内置 llm-providers 插件播种于 <用户数据目录>/plugins/llm-providers/）；
- * 后端对 None 字段 skip 序列化——未出现的键不参与合并覆盖。
- */
-interface ProviderPresetData {
-  id: string;
-  labelKey?: string;
-  label?: string;
-  providerType: string;
-  endpoint: string;
-  defaultModel?: string;
-  mainModels?: string[];
-  contextWindow?: number;
-  suggestedMaxTokens?: number;
-  needsSecret?: boolean;
-  needsAppId?: boolean;
-  consoleUrl?: string;
-  protocols?: ProviderProtocol[];
-  /** 上次逐字段核对官方 API 文档的日期（YYYY-MM-DD，核对技能写入；透传字段） */
-  verifiedAt?: string;
-  /** 本次核对依据的官方文档入口 URL（下次核对直接回访） */
-  verifiedSource?: string;
-}
-
-/**
- * 合并内置预设与插件贡献的预设（llm-providers 插件为厂商卡片主数据源）：
- * - 插件按 id 浅合并覆盖内置同名项（仅覆盖出现的字段，凭据缓存按 id 索引不受影响）
- * - 插件新增的 id 追加在「自定义」卡片之前
- * - 插件数据为空（未安装/解析失败）时原样返回内置兜底
- */
-const mergeProviderPresets = (builtin: ProviderPreset[], pluginRows: ProviderPresetData[]): ProviderPreset[] => {
-  if (!pluginRows.length) return builtin;
-  const byId = new Map<string, ProviderPreset>(builtin.map((p) => [p.id, p]));
-  const appended: ProviderPreset[] = [];
-  for (const row of pluginRows) {
-    if (!row || !row.id) continue;
-    const merged = { ...(byId.get(row.id) ?? {}), ...row } as ProviderPreset;
-    if (byId.has(row.id)) {
-      byId.set(row.id, merged);
-    } else {
-      appended.push(merged);
-    }
-  }
-  const ordered = [...byId.values()];
-  const customIdx = ordered.findIndex((p) => p.id === 'custom');
-  if (customIdx >= 0) {
-    const custom = ordered.splice(customIdx, 1)[0];
-    return [...ordered, ...appended, custom];
-  }
-  return [...ordered, ...appended];
-};
-
-/** 合并结果缓存：多个选择器共享一次 invoke（窗口 focus 时失效，保证插件变更后刷新） */
-let providerPresetsCache: ProviderPreset[] | null = null;
-let providerPresetsPromise: Promise<ProviderPreset[]> | null = null;
-
-/** 失效预设缓存（插件信任/重载/删除后、窗口重新聚焦时调用） */
-export const invalidateProviderPresetsCache = () => {
-  providerPresetsCache = null;
-  providerPresetsPromise = null;
-};
-
-const loadProviderPresets = (): Promise<ProviderPreset[]> => {
-  if (providerPresetsCache) return Promise.resolve(providerPresetsCache);
-  if (!providerPresetsPromise) {
-    providerPresetsPromise = invoke<ProviderPresetData[]>('list_provider_presets')
-      .then((rows) => {
-        providerPresetsCache = mergeProviderPresets(PROVIDER_PRESETS, rows ?? []);
-        return providerPresetsCache;
-      })
-      .catch(() => {
-        providerPresetsCache = PROVIDER_PRESETS;
-        return providerPresetsCache;
-      });
-  }
-  return providerPresetsPromise;
-};
-
-/** 供应商预设（内置兜底 + 插件贡献合并；插件数据到达后自动刷新） */
-const useProviderPresets = (): ProviderPreset[] => {
-  const [presets, setPresets] = useState<ProviderPreset[]>(PROVIDER_PRESETS);
-  useEffect(() => {
-    let alive = true;
-    void loadProviderPresets().then((p) => {
-      if (alive) setPresets(p);
-    });
-    return () => {
-      alive = false;
-    };
-  }, []);
-  return presets;
-};
-
-/** 预设显示名：插件直给的 label 优先，其次 i18n key，兜底 id */
-const presetLabel = (
-  p: { label?: string; labelKey?: string; id: string },
-  t: (key: string) => string,
-): string => p.label || (p.labelKey ? t(p.labelKey) : p.id);
-
-/**
- * 厂商 logo 资源映射（public/icons/providers/）
- *
- * 映射缺失的厂商（无 logo 文件）在卡片中以首字母徽标兜底。
- */
-const PROVIDER_LOGOS: Record<string, string> = {
-  openai: 'icons/providers/openai.svg',
-  anthropic: 'icons/providers/claude.svg',
-  deepseek: 'icons/providers/deepseek.svg',
-  gemini: 'icons/providers/gemini.svg',
-  qwen: 'icons/providers/qwen.svg',
-  glm: 'icons/providers/glm.svg',
-  moonshot: 'icons/providers/kimi.svg',
-  doubao: 'icons/providers/volcengine.svg',
-  minimax: 'icons/providers/minimax.svg',
-  mimo: 'icons/providers/xiaomimimo.svg',
-  grok: 'icons/providers/grok.svg',
-  openrouter: 'icons/providers/openrouter.svg',
-  groq: 'icons/providers/groq.svg',
-  ollama: 'icons/providers/ollama.svg',
-  mistral: 'icons/providers/mistral.svg',
-  together: 'icons/providers/together.svg',
-  wenxin: 'icons/providers/wenxin.svg',
-  hunyuan: 'icons/providers/hunyuan.svg',
-  custom: 'icons/providers/custom-endpoint.svg',
-};
-
-/** 当前 provider_type 是否需要 api_secret 字段 */
-const needsSecretFor = (providerType: string): boolean => {
-  const t = providerType.toLowerCase();
-  return t === 'wenxin' || t === 'spark';
-};
-
-/** 当前 provider_type 是否需要 app_id 字段 */
-const needsAppIdFor = (providerType: string): boolean => {
-  const t = providerType.toLowerCase();
-  return t === 'spark';
-};
-
-/** 预设卡片选中态的贴纸轮换色 */
-const STICKER_COLORS = [
-  'var(--sticker-pink-soft)',
-  'var(--sticker-lilac-soft)',
-  'var(--sticker-sky-soft)',
-  'var(--sticker-mint-soft)',
-  'var(--sticker-butter-soft)',
-];
-
-/**
- * 厂商预设卡片横滚行（共享组件）—— 主配置与工作模型选择器复用
- *
- * 隐藏原生横向滚动条，改为左右两侧竖向感应块（矩形块内三角箭头）：
- * 悬停缓慢滚动、按住快速滚动；滚轮在整行任意位置可横向滚动。
- * 直接操作 scrollLeft（requestAnimationFrame 循环），不触发 React 重渲染。
- */
-const ProviderPresetRow: React.FC<{
-  presets: ProviderPreset[];
-  activeId: string;
-  onSelect: (presetId: string) => void;
-  t: (key: string) => string;
-}> = ({ presets, activeId, onSelect, t }) => {
-  const scrollRowRef = useRef<HTMLDivElement>(null);
-  const zoneLeft = useRef(0); // 0=off / 1=slow / 2=fast
-  const zoneRight = useRef(0);
-  const rafRef = useRef<number>(0);
-
-  useEffect(() => {
-    const tick = () => {
-      const el = scrollRowRef.current;
-      if (el) {
-        if (zoneLeft.current > 0 || zoneRight.current > 0) {
-          const fast = zoneLeft.current === 2 || zoneRight.current === 2;
-          const speed = fast ? 8 : 1.8;
-          let dir = 0;
-          if (zoneLeft.current > 0) dir -= 1;
-          if (zoneRight.current > 0) dir += 1;
-          el.scrollLeft += dir * speed;
-        }
-      }
-      rafRef.current = requestAnimationFrame(tick);
-    };
-    rafRef.current = requestAnimationFrame(tick);
-
-    // 滚轮：纵向滚轮增量映射为横向滚动，任意位置可用
-    const el = scrollRowRef.current;
-    const onWheel = (e: WheelEvent) => {
-      if (!el || (e.deltaX === 0 && e.deltaY === 0)) return;
-      e.preventDefault();
-      el.scrollLeft += e.deltaX || e.deltaY;
-    };
-    el?.addEventListener('wheel', onWheel, { passive: false });
-
-    return () => {
-      cancelAnimationFrame(rafRef.current);
-      el?.removeEventListener('wheel', onWheel);
-    };
-  }, []);
-
-  const enterLeft = () => { if (zoneLeft.current < 1) zoneLeft.current = 1; };
-  const leaveLeft = () => { zoneLeft.current = 0; };
-  const pressLeft = (e: React.MouseEvent) => {
-    e.preventDefault();
-    zoneLeft.current = 2;
-    const up = () => { zoneLeft.current = 1; window.removeEventListener('mouseup', up); };
-    window.addEventListener('mouseup', up);
-  };
-  const enterRight = () => { if (zoneRight.current < 1) zoneRight.current = 1; };
-  const leaveRight = () => { zoneRight.current = 0; };
-  const pressRight = (e: React.MouseEvent) => {
-    e.preventDefault();
-    zoneRight.current = 2;
-    const up = () => { zoneRight.current = 1; window.removeEventListener('mouseup', up); };
-    window.addEventListener('mouseup', up);
-  };
-
-  return (
-    <>
-      {/* 样式（.provider-hscroll 隐藏滚动条 + .provider-zone 感应块）见 global.css */}
-      <div style={{ position: 'relative' }}>
-        <div
-          ref={scrollRowRef}
-          className="provider-hscroll"
-          style={{
-            display: 'flex',
-            gap: 8,
-            overflowX: 'auto',
-            overflowY: 'hidden',
-            padding: '4px 2px 8px',
-          }}
-        >
-          {presets.map((p, idx) => {
-            const active = p.id === activeId;
-            const bg = active ? STICKER_COLORS[idx % STICKER_COLORS.length] : 'var(--panel-bg)';
-            const logo = PROVIDER_LOGOS[p.id];
-            return (
-              <button
-                key={p.id}
-                type="button"
-                onClick={() => onSelect(p.id)}
-                title={p.endpoint || t('config.preset_custom')}
-                style={{
-                  flex: '0 0 auto',
-                  display: 'flex',
-                  flexDirection: 'column',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  gap: 5,
-                  width: 84,
-                  padding: '10px 6px 8px',
-                  borderRadius: 12,
-                  border: active
-                    ? '1.5px solid var(--panel-accent)'
-                    : '1.5px solid var(--panel-border)',
-                  background: bg,
-                  color: 'var(--panel-text)',
-                  fontSize: 11,
-                  fontWeight: active ? 700 : 500,
-                  cursor: 'pointer',
-                  textAlign: 'center',
-                  transition: 'all 0.15s ease',
-                  fontFamily: 'inherit',
-                  lineHeight: 1.2,
-                }}
-                onMouseEnter={(e) => {
-                  if (!active) {
-                    e.currentTarget.style.borderColor = 'var(--panel-accent)';
-                    e.currentTarget.style.transform = 'translateY(-2px)';
-                  }
-                }}
-                onMouseLeave={(e) => {
-                  if (!active) {
-                    e.currentTarget.style.borderColor = 'var(--panel-border)';
-                    e.currentTarget.style.transform = 'translateY(0)';
-                  }
-                }}
-              >
-                {logo ? (
-                  p.id === 'moonshot' ? (
-                    // Moonshot(Kimi) 的浅色/白色 logo 在浅色模式下对比不足，
-                    // 增加一块中心深、向四周渐隐的径向渐变底提升辨识度
-                    <div
-                      style={{
-                        width: 24,
-                        height: 24,
-                        borderRadius: 7,
-                        flex: '0 0 auto',
-                        display: 'inline-flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        background:
-                          'radial-gradient(circle at 55% 45%, rgba(22,24,32,0.9) 0%, rgba(32,34,44,0.45) 55%, transparent 78%)',
-                      }}
-                    >
-                      <img
-                        src={logo}
-                        alt=""
-                        style={{ width: 15, height: 15, objectFit: 'contain' }}
-                        draggable={false}
-                      />
-                    </div>
-                  ) : (
-                    <img
-                      src={logo}
-                      alt=""
-                      style={{ width: 22, height: 22, objectFit: 'contain' }}
-                      draggable={false}
-                    />
-                  )
-                ) : (
-                  <span
-                    style={{
-                      width: 22,
-                      height: 22,
-                      borderRadius: 6,
-                      display: 'inline-flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      background: 'var(--panel-toggle-off)',
-                      color: 'var(--panel-text-secondary)',
-                      fontSize: 11,
-                      fontWeight: 700,
-                    }}
-                  >
-                    {presetLabel(p, t).slice(0, 1)}
-                  </span>
-                )}
-                <span
-                  style={{
-                    maxWidth: '100%',
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap',
-                  }}
-                >
-                  {presetLabel(p, t)}
-                </span>
-              </button>
-            );
-          })}
-        </div>
-        <div
-          className="provider-zone provider-zone-left"
-          aria-hidden="true"
-          onMouseEnter={enterLeft}
-          onMouseLeave={leaveLeft}
-          onMouseDown={pressLeft}
-        />
-        <div
-          className="provider-zone provider-zone-right"
-          aria-hidden="true"
-          onMouseEnter={enterRight}
-          onMouseLeave={leaveRight}
-          onMouseDown={pressRight}
-        />
-      </div>
-    </>
-  );
-};
-
-/**
- * 服务商预设选择卡片网格 —— 替代原下拉选择
- *
- * 卡片网格（3 列、贴纸风格轮换色）展示全部服务商预设；
- * 选中预设 → 自动填充 provider_type / endpoint / model / context_window。
- *
- * 切换缓存机制：
- *   - 切换前把当前槽位的 provider_type/endpoint/model/api_key/api_secret/app_id
- *     快照到 config.provider_cache[当前preset.id]
- *   - 切换后从 config.provider_cache[目标preset.id] 恢复敏感字段；
- *     无缓存则清空 api_key/api_secret/app_id（防粘滞，避免上一家 key 误存到下一家）
- *   - 主配置与路由矩阵共享同一份 cache（同一家厂商的凭据应一致）
- *
- * pathPrefix 决定写入的配置路径前缀：
- *   - 主配置：'ai'（ai.provider / ai.endpoint / ai.model）
- *   - 路由任务：'routing_matrix.{taskType}'（routing_matrix.{taskType}.provider_type / .endpoint / .model）
- */
-const ProviderSelector: React.FC<{
-  pathPrefix: string;
-  get: <T extends ConfigValue>(path: string, fallback: T) => T;
-  setNested: (path: string, value: ConfigValue) => void;
-  t: (key: string) => string;
-}> = ({ pathPrefix, get, setNested, t }) => {
-  const isMain = pathPrefix === 'ai';
-  // 供应商预设：内置兜底 + llm-providers 插件贡献（providers.json）合并
-  const allPresets = useProviderPresets();
-  const presets = allPresets.filter((p) => pathPrefix === 'routing_matrix.simple_judge' || p.providerType !== 'jev');
-  const providerTypePath = isMain ? 'ai.provider' : `${pathPrefix}.provider_type`;
-  const endpointPath = `${pathPrefix}.endpoint`;
-  const modelPath = `${pathPrefix}.model`;
-  const apiKeyPath = `${pathPrefix}.api_key`;
-  const apiSecretPath = `${pathPrefix}.api_secret`;
-  const appIdPath = `${pathPrefix}.app_id`;
-  const contextWindowPath = `${pathPrefix}.context_window`;
-
-  const currentType = get(providerTypePath, 'openai') as string;
-  const currentEndpoint = get(endpointPath, '') as string;
-
-  // 匹配当前配置对应的预设（用于回显当前选中项）
-  // 优先按 provider_type + endpoint 双重匹配（含协议变体）；endpoint 为空时回退到 provider_type 匹配
-  const matchingPreset = presets.find((p) => presetMatches(p, currentType, currentEndpoint));
-  const currentPresetId = matchingPreset?.id ?? 'custom';
-  // 当前预设的协议变体与当前生效协议
-  const presetProtocols = matchingPreset?.protocols ?? [];
-  const activeProtocol = presetProtocols.find(
-    (pr) => pr.providerType === currentType && (currentEndpoint === '' || pr.endpoint === currentEndpoint),
-  );
-
-  /** 切换 API 协议：仅覆盖 provider_type 与 endpoint，不动 model / api_key */
-  const applyProtocol = (pr: ProviderProtocol) => {
-    if (pr.providerType === currentType && pr.endpoint === currentEndpoint) return;
-    setNested(providerTypePath, pr.providerType);
-    setNested(endpointPath, pr.endpoint);
-  };
-
-  const applyPreset = (presetId: string) => {
-    const preset = presets.find((p) => p.id === presetId);
-    if (!preset || presetId === currentPresetId) return;
-
-    // ① 切换前快照当前槽位配置到 provider_cache[当前preset.id]
-    //    保留用户已填的 api_key/api_secret/app_id，切回来时自动恢复
-    const currentApiKey = (get(apiKeyPath, '') as string) ?? '';
-    const currentApiSecret = (get(apiSecretPath, '') as string) ?? '';
-    const currentAppId = (get(appIdPath, '') as string) ?? '';
-    const currentModel = (get(modelPath, '') as string) ?? '';
-    setNested(`provider_cache.${currentPresetId}`, {
-      provider_type: currentType,
-      endpoint: currentEndpoint,
-      model: currentModel,
-      api_key: currentApiKey,
-      api_secret: currentApiSecret,
-      app_id: currentAppId,
-    });
-
-    // ② 切换预设：覆盖 provider_type / endpoint / model / context_window / max_tokens
-    setNested(providerTypePath, preset.providerType);
-    setNested(endpointPath, preset.endpoint);
-    if (preset.defaultModel) {
-      setNested(modelPath, preset.defaultModel);
-    }
-    if (preset.contextWindow) {
-      setNested(contextWindowPath, preset.contextWindow);
-    }
-    // 主 LLM 配置：切换厂商时自动填入该厂商的建议输出上限（2048 默认对代码/长回复过小）
-    if (isMain && preset.suggestedMaxTokens) {
-      setNested('ai.max_tokens', preset.suggestedMaxTokens);
-    }
-
-    // ③ 从 provider_cache[目标preset.id] 恢复敏感字段；无缓存则清空（防粘滞）
-    const cached = get(`provider_cache.${preset.id}`, '' as ConfigValue) as
-      | { api_key?: string; api_secret?: string; app_id?: string }
-      | string
-      | null;
-    const cachedProfile =
-      cached && typeof cached === 'object' ? cached : null;
-    if (cachedProfile) {
-      setNested(apiKeyPath, cachedProfile.api_key ?? '');
-      setNested(apiSecretPath, cachedProfile.api_secret ?? '');
-      setNested(appIdPath, cachedProfile.app_id ?? '');
-    } else {
-      setNested(apiKeyPath, '');
-      setNested(apiSecretPath, '');
-      setNested(appIdPath, '');
-    }
-  };
-
-  return (
-    <div className="settings-field" style={fieldStyle}>
-      <label style={labelStyle}>{t('config.field_provider')}</label>
-      <ProviderPresetRow presets={presets} activeId={currentPresetId} onSelect={applyPreset} t={t} />
-
-      {/* API 协议选择（厂商支持多种协议时）+ 跳转供应商控制台获取 API Key */}
-      {(presetProtocols.length > 1 || !!matchingPreset?.consoleUrl) && (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginTop: -2, marginBottom: 14 }}>
-          {presetProtocols.length > 1 && (
-            <>
-              <span style={{ fontSize: 11, color: 'var(--panel-text-tertiary)', flexShrink: 0 }}>
-                {t('config.field_api_protocol')}
-              </span>
-              <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
-                {presetProtocols.map((pr) => {
-                  const active = pr === activeProtocol;
-                  return (
-                    <button
-                      key={`${pr.providerType}:${pr.endpoint}`}
-                      type="button"
-                      onClick={() => applyProtocol(pr)}
-                      style={{
-                        padding: '4px 10px',
-                        borderRadius: 8,
-                        border: active
-                          ? '1.5px solid var(--panel-accent)'
-                          : '1.5px solid var(--panel-border)',
-                        background: active ? 'var(--panel-bg-hover)' : 'var(--panel-surface)',
-                        color: active ? 'var(--panel-accent)' : 'var(--panel-text-secondary)',
-                        fontSize: 11,
-                        fontWeight: active ? 700 : 500,
-                        cursor: 'pointer',
-                        fontFamily: 'inherit',
-                        transition: 'all 0.15s ease',
-                      }}
-                    >
-                      {pr.label || (pr.labelKey ? t(pr.labelKey) : pr.providerType)}
-                    </button>
-                  );
-                })}
-              </div>
-            </>
-          )}
-          {matchingPreset?.consoleUrl && (
-            <button
-              type="button"
-              onClick={() => {
-                const url = matchingPreset.consoleUrl;
-                if (!url) return;
-                try { const u = new URL(url); if (u.protocol !== 'https:' && u.protocol !== 'http:') return; } catch { return; }
-                void openShell(url).catch(() => window.open(url, '_blank', 'noopener,noreferrer'));
-              }}
-              title={matchingPreset.consoleUrl}
-              style={{
-                marginLeft: 'auto',
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: 4,
-                padding: '4px 10px',
-                borderRadius: 8,
-                border: '1px solid var(--panel-border)',
-                background: 'transparent',
-                color: 'var(--panel-accent)',
-                fontSize: 11,
-                fontWeight: 600,
-                cursor: 'pointer',
-                fontFamily: 'inherit',
-                transition: 'border-color 0.15s ease, background 0.15s ease',
-                flexShrink: 0,
-              }}
-              onMouseEnter={(e) => { e.currentTarget.style.borderColor = 'var(--panel-accent)'; e.currentTarget.style.background = 'var(--panel-bg-hover)'; }}
-              onMouseLeave={(e) => { e.currentTarget.style.borderColor = 'var(--panel-border)'; e.currentTarget.style.background = 'transparent'; }}
-            >
-              <ExternalLink size={11} strokeWidth={2} />
-              {t('config.get_api_key')}
-            </button>
-          )}
-        </div>
-      )}
-      {currentType === 'openai_agents' && (
-        <div style={{ fontSize: 11, color: 'var(--panel-text-tertiary)', marginBottom: 12 }}>
-          {t('config.proto_agents_help')}
-        </div>
-      )}
-    </div>
-  );
-};
-
-/**
- * 工作模型服务商选择器 —— 复用主配置的供应商预设（内置兜底 + llm-providers 插件贡献合并）
- *
- * 行为与主配置的 ProviderSelector 保持一致：
- *  - 选中预设自动填充 provider_type / endpoint / 默认 model；
- *  - 切换前把当前工作模型的凭据快照到 provider_cache[当前预设 id]，
- *    切换后从 provider_cache[目标预设 id] 恢复；无缓存则清空（防粘滞）；
- *  - 与主配置 / 路由矩阵共享同一份 provider_cache（同一家厂商的凭据应一致）。
- *
- * 额外保留"讯飞星火"选项（预设列表按主配置约定不含星火，但工作模型表单
- * 已支持 app_id / api_secret 字段，故单独列出以免丢失该能力）。
- */
-const WorkModelProviderSelector: React.FC<{
-  model: {
-    provider_type: string;
-    model: string;
-    endpoint: string;
-    api_key: string;
-    api_secret?: string;
-    app_id?: string;
-  };
-  onPatch: (patch: {
-    provider_type: string;
-    endpoint: string;
-    model?: string;
-    api_key: string;
-    api_secret: string;
-    app_id: string;
-  }) => void;
-  get: <T extends ConfigValue>(path: string, fallback: T) => T;
-  setNested: (path: string, value: ConfigValue) => void;
-  t: (key: string) => string;
-}> = ({ model, onPatch, get, setNested, t }) => {
-  // 供应商预设：与主配置共用（内置兜底 + llm-providers 插件贡献合并）
-  const presets = useProviderPresets().filter((p) => p.providerType !== 'jev');
-  const currentType = model.provider_type || 'openai';
-  const currentEndpoint = model.endpoint || '';
-  const matchingPreset = presets.find((p) => presetMatches(p, currentType, currentEndpoint));
-  const currentPresetId = matchingPreset?.id ?? 'custom';
-  // 当前预设的协议变体与当前生效协议
-  const presetProtocols = matchingPreset?.protocols ?? [];
-  const activeProtocol = presetProtocols.find(
-    (pr) => pr.providerType === currentType && (currentEndpoint === '' || pr.endpoint === currentEndpoint),
-  );
-
-  /** 选中厂商预设卡片：快照当前凭据 → 覆盖 provider/endpoint/model → 恢复目标厂商缓存凭据 */
-  const applyPresetById = (presetId: string) => {
-    if (presetId === currentPresetId) return;
-    // ① 切换前快照当前工作模型配置到 provider_cache[当前preset.id]
-    setNested(`provider_cache.${currentPresetId}`, {
-      provider_type: currentType,
-      endpoint: currentEndpoint,
-      model: model.model ?? '',
-      api_key: model.api_key ?? '',
-      api_secret: model.api_secret ?? '',
-      app_id: model.app_id ?? '',
-    });
-
-    const preset = presets.find((p) => p.id === presetId);
-    if (!preset) return;
-
-    // ② 从 provider_cache[目标preset.id] 恢复敏感字段；无缓存则清空（防粘滞）
-    const cached = get(`provider_cache.${preset.id}`, '' as ConfigValue) as
-      | { api_key?: string; api_secret?: string; app_id?: string }
-      | string
-      | null;
-    const cachedProfile = cached && typeof cached === 'object' ? cached : null;
-
-    // ③ 覆盖 provider_type / endpoint / model，并写入（或清空）凭据
-    const patch: {
-      provider_type: string;
-      endpoint: string;
-      model?: string;
-      api_key: string;
-      api_secret: string;
-      app_id: string;
-    } = {
-      provider_type: preset.providerType,
-      endpoint: preset.endpoint,
-      api_key: cachedProfile?.api_key ?? '',
-      api_secret: cachedProfile?.api_secret ?? '',
-      app_id: cachedProfile?.app_id ?? '',
-    };
-    if (preset.defaultModel) {
-      patch.model = preset.defaultModel;
-    }
-    onPatch(patch);
-  };
-
-  return (
-    <>
-      <div className="settings-field" style={fieldStyle}>
-        <label style={labelStyle}>{t('config.field_provider')}</label>
-        <ProviderPresetRow presets={presets} activeId={currentPresetId} onSelect={applyPresetById} t={t} />
-      </div>
-
-      {/* API 协议选择（厂商支持多种协议时）+ 跳转供应商控制台获取 API Key */}
-      {(presetProtocols.length > 1 || !!matchingPreset?.consoleUrl) && (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginTop: -10, marginBottom: 14 }}>
-          {presetProtocols.length > 1 && (
-            <>
-              <span style={{ fontSize: 11, color: 'var(--panel-text-tertiary)', flexShrink: 0 }}>
-                {t('config.field_api_protocol')}
-              </span>
-              <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
-                {presetProtocols.map((pr) => {
-                  const active = pr === activeProtocol;
-                  return (
-                    <button
-                      key={`${pr.providerType}:${pr.endpoint}`}
-                      type="button"
-                      onClick={() => {
-                        if (pr.providerType === currentType && pr.endpoint === currentEndpoint) return;
-                        // 切换协议：仅覆盖 provider_type / endpoint，保留 model 与凭据
-                        onPatch({
-                          provider_type: pr.providerType,
-                          endpoint: pr.endpoint,
-                          api_key: model.api_key ?? '',
-                          api_secret: model.api_secret ?? '',
-                          app_id: model.app_id ?? '',
-                        });
-                      }}
-                      style={{
-                        padding: '4px 10px',
-                        borderRadius: 8,
-                        border: active
-                          ? '1.5px solid var(--panel-accent)'
-                          : '1.5px solid var(--panel-border)',
-                        background: active ? 'var(--panel-bg-hover)' : 'var(--panel-surface)',
-                        color: active ? 'var(--panel-accent)' : 'var(--panel-text-secondary)',
-                        fontSize: 11,
-                        fontWeight: active ? 700 : 500,
-                        cursor: 'pointer',
-                        fontFamily: 'inherit',
-                        transition: 'all 0.15s ease',
-                      }}
-                    >
-                      {pr.label || (pr.labelKey ? t(pr.labelKey) : pr.providerType)}
-                    </button>
-                  );
-                })}
-              </div>
-            </>
-          )}
-          {matchingPreset?.consoleUrl && (
-            <button
-              type="button"
-              onClick={() => {
-                const url = matchingPreset.consoleUrl;
-                if (!url) return;
-                try { const u = new URL(url); if (u.protocol !== 'https:' && u.protocol !== 'http:') return; } catch { return; }
-                void openShell(url).catch(() => window.open(url, '_blank', 'noopener,noreferrer'));
-              }}
-              title={matchingPreset.consoleUrl}
-              style={{
-                marginLeft: 'auto',
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: 4,
-                padding: '4px 10px',
-                borderRadius: 8,
-                border: '1px solid var(--panel-border)',
-                background: 'transparent',
-                color: 'var(--panel-accent)',
-                fontSize: 11,
-                fontWeight: 600,
-                cursor: 'pointer',
-                fontFamily: 'inherit',
-                transition: 'border-color 0.15s ease, background 0.15s ease',
-                flexShrink: 0,
-              }}
-              onMouseEnter={(e) => { e.currentTarget.style.borderColor = 'var(--panel-accent)'; e.currentTarget.style.background = 'var(--panel-bg-hover)'; }}
-              onMouseLeave={(e) => { e.currentTarget.style.borderColor = 'var(--panel-border)'; e.currentTarget.style.background = 'transparent'; }}
-            >
-              <ExternalLink size={11} strokeWidth={2} />
-              {t('config.get_api_key')}
-            </button>
-          )}
-        </div>
-      )}
-      {currentType === 'openai_agents' && (
-        <div style={{ fontSize: 11, color: 'var(--panel-text-tertiary)', marginBottom: 12 }}>
-          {t('config.proto_agents_help')}
-        </div>
-      )}
-    </>
-  );
-};
-
 /**
  * 推理偏好控件 —— 三态选择（自动 / 关闭 / 开启）+ 档位下拉
  *
@@ -1093,49 +136,6 @@ const WorkModelProviderSelector: React.FC<{
  * - mode=off：关闭思考（不支持关闭的模型由后端折叠为开启）
  * - mode=on：开启思考，可选档位（档位经后端按模型能力校验，不支持时回退默认档）
  */
-const fieldStyle: React.CSSProperties = {
-  marginBottom: 18,
-};
-const labelStyle: React.CSSProperties = {
-  display: 'block',
-  fontSize: 13,
-  fontWeight: 600,
-  color: 'var(--panel-text-secondary)',
-  marginBottom: 6,
-  paddingLeft: 2,
-};
-const inputStyle: React.CSSProperties = {
-  width: '100%',
-  padding: '9px 12px',
-  border: '1.5px solid var(--panel-border)',
-  borderRadius: 12,
-  background: 'var(--panel-surface)',
-  color: 'var(--panel-text)',
-  fontSize: 13,
-  fontFamily: 'inherit',
-  outline: 'none',
-  boxSizing: 'border-box',
-  boxShadow: 'var(--panel-shadow-subtle)',
-  transition: 'border-color 0.15s ease, box-shadow 0.15s ease',
-};
-const selectStyle: React.CSSProperties = {
-  ...inputStyle,
-  appearance: 'none',
-  cursor: 'pointer',
-  paddingRight: 30,
-};
-const sectionTitleStyle: React.CSSProperties = {
-  fontSize: 14,
-  fontWeight: 700,
-  color: 'var(--panel-text)',
-  marginBottom: 14,
-  paddingBottom: 8,
-  paddingLeft: 10,
-  borderLeft: '3px solid var(--panel-accent)',
-  borderBottom: '1px solid var(--panel-border)',
-  letterSpacing: 0.3,
-};
-
 /**
  * 云端服务商"获取 API Key"按钮 —— 用系统默认浏览器打开对应控制台的密钥页面
  * 用于 TTS / ASR 云端引擎配置区（LLM 区域走 ProviderSelector 的 consoleUrl 逻辑）
@@ -1179,393 +179,6 @@ const OLLAMA_MODEL_DIMS: Record<string, number> = {
   'bge-m3': 1024,
   'nomic-embed-text': 768,
 };
-
-const TextField: React.FC<{
-  label: string;
-  value: string;
-  onChange: (v: string) => void;
-  placeholder?: string;
-  type?: 'text' | 'password' | 'number';
-  disabled?: boolean;
-  list?: string;
-  style?: React.CSSProperties;
-  help?: string;
-}> = ({ label, value, onChange, placeholder, type = 'text', disabled = false, list, style, help }) => (
-  <div className="settings-field" style={{ ...fieldStyle, ...style }}>
-    <label style={{ ...labelStyle, ...(disabled ? { opacity: 0.5 } : {}) }}>{label}</label>
-    <input
-      type={type}
-      aria-label={label}
-      value={value}
-      onChange={(e) => onChange(e.target.value)}
-      placeholder={placeholder}
-      disabled={disabled}
-      list={list}
-      style={{
-        ...inputStyle,
-        ...(disabled
-          ? {
-              cursor: 'not-allowed',
-              opacity: 0.5,
-            }
-          : {}),
-      }}
-    />
-    {help && (
-      <div style={{ fontSize: 11, color: 'var(--panel-text-tertiary)', marginTop: 6, lineHeight: 1.5 }}>
-        {help}
-      </div>
-    )}
-  </div>
-);
-
-/// 带浏览按钮的文本输入框：输入框与按钮在同一行水平对齐
-/// （用 alignItems: 'flex-end' 让按钮底部与 input 底部齐平，
-///   按钮的 padding 与 input 完全一致以保持高度相同）
-const BrowseTextField: React.FC<{
-  label: string;
-  value: string;
-  onChange: (v: string) => void;
-  placeholder?: string;
-  onBrowse: () => void;
-  browseLabel: string;
-  disabled?: boolean;
-}> = ({ label, value, onChange, placeholder, onBrowse, browseLabel, disabled = false }) => (
-  <div className="settings-field" style={{ ...fieldStyle, marginBottom: 18 }}>
-    <label style={{ ...labelStyle, ...(disabled ? { opacity: 0.5 } : {}) }}>{label}</label>
-    <div style={{ display: 'flex', gap: 6, alignItems: 'stretch' }}>
-      <input
-        type="text"
-        aria-label={label}
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        placeholder={placeholder}
-        disabled={disabled}
-        style={{
-          ...inputStyle,
-          flex: 1,
-          ...(disabled ? { cursor: 'not-allowed', opacity: 0.5 } : {}),
-        }}
-      />
-      <button
-        type="button"
-        onClick={onBrowse}
-        disabled={disabled}
-        style={{
-          padding: '8px 12px',
-          border: '1.5px solid var(--panel-border)',
-          borderRadius: 12,
-          background: 'var(--panel-sticker-soft, var(--panel-surface))',
-          color: 'var(--panel-text-secondary)',
-          fontSize: 11,
-          cursor: disabled ? 'not-allowed' : 'pointer',
-          fontFamily: 'inherit',
-          whiteSpace: 'nowrap',
-          boxSizing: 'border-box',
-          flexShrink: 0,
-          opacity: disabled ? 0.5 : 1,
-          boxShadow: 'var(--panel-shadow-subtle)',
-        }}
-      >
-        {browseLabel}
-      </button>
-    </div>
-  </div>
-);
-
-/// 分组小标题（GPT-SoVITS 面板内部使用）
-const subsectionTitleStyle: React.CSSProperties = {
-  marginTop: 20,
-  marginBottom: 10,
-  fontSize: 11,
-  color: 'var(--panel-text-tertiary)',
-  fontWeight: 600,
-  letterSpacing: 0.5,
-  textTransform: 'uppercase',
-};
-
-const SelectField: React.FC<{
-  label: string;
-  value: string;
-  onChange: (v: string) => void;
-  options: { value: string; label: string; disabled?: boolean }[];
-  labelExtra?: React.ReactNode;
-}> = ({ label, value, onChange, options, labelExtra }) => {
-  const { t } = useTranslation();
-  const [open, setOpen] = useState(false);
-  const selectRef = React.useRef<HTMLDivElement>(null);
-  const dropdownRef = React.useRef<HTMLDivElement>(null);
-  const buttonRef = React.useRef<HTMLButtonElement>(null);
-  const [dropdownPos, setDropdownPos] = React.useState<{ top: number; left: number; width: number; upward: boolean } | null>(null);
-
-  const updateDropdownPosition = React.useCallback(() => {
-    if (buttonRef.current) {
-      const rect = buttonRef.current.getBoundingClientRect();
-      const dropdownHeight = Math.min(options.length * 40 + 2, 200);
-      const spaceBelow = window.innerHeight - rect.bottom;
-      const upward = spaceBelow < dropdownHeight + 8 && rect.top > dropdownHeight + 8;
-      setDropdownPos({
-        top: upward ? rect.top - 4 : rect.bottom + 4,
-        left: rect.left,
-        width: rect.width,
-        upward,
-      });
-    }
-  }, [options.length]);
-
-  useEffect(() => {
-    const handleClickOutside = (e: MouseEvent) => {
-      const target = e.target as Node;
-      if (
-        (selectRef.current && selectRef.current.contains(target)) ||
-        (dropdownRef.current && dropdownRef.current.contains(target))
-      ) {
-        return;
-      }
-      setOpen(false);
-    };
-    if (open) {
-      document.addEventListener('mousedown', handleClickOutside);
-      updateDropdownPosition();
-      window.addEventListener('scroll', updateDropdownPosition, true);
-      window.addEventListener('resize', updateDropdownPosition);
-    }
-    return () => {
-      document.removeEventListener('mousedown', handleClickOutside);
-      window.removeEventListener('scroll', updateDropdownPosition, true);
-      window.removeEventListener('resize', updateDropdownPosition);
-    };
-  }, [open, updateDropdownPosition]);
-
-  const selectedOption = options.find((o) => o.value === value);
-
-  return (
-    <div className="settings-field" style={fieldStyle} ref={selectRef}>
-      <div style={{ ...labelStyle, display: 'flex', alignItems: 'center', gap: 6 }}>
-        <span>{label}</span>
-        {labelExtra}
-      </div>
-      <div>
-        <button
-          ref={buttonRef}
-          type="button"
-          aria-label={`${label}: ${selectedOption?.label ?? t('common.please_select')}`}
-          aria-expanded={open}
-          onClick={() => setOpen(!open)}
-          onKeyDown={(event) => {
-            if (event.key === 'Escape') setOpen(false);
-          }}
-          style={{
-            ...selectStyle,
-            textAlign: 'left',
-            position: 'relative',
-            background: 'var(--panel-bg-surface-elevated)',
-            width: '100%',
-          }}
-        >
-          <span style={{ color: selectedOption ? 'var(--panel-text)' : 'var(--panel-text-tertiary)' }}>
-            {selectedOption ? selectedOption.label : t('common.please_select')}
-          </span>
-          <span
-            style={{
-              position: 'absolute',
-              right: 10,
-              top: '50%',
-              transform: `translateY(-50%) ${open ? 'rotate(180deg)' : 'rotate(0deg)'}`,
-              transition: 'transform 0.2s ease',
-              color: 'var(--panel-text-tertiary)',
-              fontSize: 10,
-            }}
-          >
-            ▾
-          </span>
-        </button>
-        {open && dropdownPos && ReactDOM.createPortal(
-          <div
-            ref={dropdownRef}
-            style={{
-              position: 'fixed',
-              top: dropdownPos.top,
-              left: dropdownPos.left,
-              width: dropdownPos.width,
-              background: 'var(--panel-surface)',
-              border: '1.5px solid var(--panel-border-strong)',
-              borderRadius: 10,
-              boxShadow: 'var(--panel-shadow-elevated)',
-              zIndex: 10000,
-              maxHeight: 200,
-              overflowY: 'auto',
-              animation: 'fadeIn 0.15s ease-out',
-            }}
-          >
-            {options.map((o) => (
-              <button
-                key={o.value}
-                type="button"
-                disabled={o.disabled}
-                onClick={() => {
-                  if (o.disabled) return;
-                  onChange(o.value);
-                  setOpen(false);
-                }}
-                style={{
-                  width: '100%',
-                  textAlign: 'left',
-                  padding: '10px 14px',
-                  background: o.value === value ? 'var(--panel-selected-bg)' : 'transparent',
-                  color: o.disabled
-                    ? 'var(--panel-text-tertiary)'
-                    : o.value === value
-                      ? 'var(--panel-selected-text)'
-                      : 'var(--panel-text)',
-                  border: 'none',
-                  cursor: o.disabled ? 'not-allowed' : 'pointer',
-                  fontSize: 13,
-                  fontFamily: 'inherit',
-                  opacity: o.disabled ? 0.5 : 1,
-                  transition: 'background 0.1s ease',
-                }}
-                onMouseEnter={(e) => {
-                  if (o.disabled || o.value === value) return;
-                  e.currentTarget.style.background = 'var(--panel-bg-hover)';
-                }}
-                onMouseLeave={(e) => {
-                  if (o.disabled || o.value === value) return;
-                  e.currentTarget.style.background = 'transparent';
-                }}
-              >
-                {o.label}
-                {o.disabled && (
-                  <span style={{ marginLeft: 6, fontSize: 11, color: 'var(--panel-text-tertiary)' }}>
-                    {t('common.coming_soon')}
-                  </span>
-                )}
-              </button>
-            ))}
-          </div>,
-          document.body
-        )}
-      </div>
-    </div>
-  );
-};
-
-const NumberField: React.FC<{
-  label: string;
-  value: number;
-  onChange: (v: number) => void;
-  min?: number;
-  max?: number;
-  step?: number;
-  help?: string;
-}> = ({ label, value, onChange, min, max, step, help }) => (
-  <div className="settings-field" style={fieldStyle}>
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-      <label style={labelStyle}>{label}</label>
-      {help && (
-        <span style={{ fontSize: 11, color: 'var(--panel-text-tertiary)', lineHeight: 1.4 }}>
-          {help}
-        </span>
-      )}
-    </div>
-    <input
-      type="number"
-      aria-label={label}
-      value={value}
-      onChange={(e) => onChange(Number(e.target.value))}
-      min={min}
-      max={max}
-      step={step}
-      style={inputStyle}
-    />
-  </div>
-);
-
-const SliderField: React.FC<{
-  label: string;
-  value: number;
-  onChange: (v: number) => void;
-  min: number;
-  max: number;
-  step: number;
-  format?: (v: number) => string;
-  help?: string;
-}> = ({ label, value, onChange, min, max, step, format, help }) => (
-  <div className="settings-field" style={fieldStyle}>
-    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 2, flex: 1, minWidth: 0 }}>
-        <label style={{ ...labelStyle, marginBottom: 0 }}>{label}</label>
-        {help && (
-          <span style={{ fontSize: 11, color: 'var(--panel-text-tertiary)', lineHeight: 1.4 }}>
-            {help}
-          </span>
-        )}
-      </div>
-      <span style={{ fontSize: 12, color: 'var(--panel-text)', fontVariantNumeric: 'tabular-nums' }}>
-        {format ? format(value) : value}
-      </span>
-    </div>
-    <input
-      type="range"
-      aria-label={label}
-      value={value}
-      onChange={(e) => onChange(Number(e.target.value))}
-      min={min}
-      max={max}
-      step={step}
-      style={{ width: '100%', accentColor: 'var(--panel-accent)' }}
-    />
-  </div>
-);
-
-const ToggleField: React.FC<{
-  label: string;
-  value: boolean;
-  onChange: (v: boolean) => void;
-  help?: string;
-}> = ({ label, value, onChange, help }) => (
-  <div className="settings-field" style={{ ...fieldStyle, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 2, flex: 1, minWidth: 0 }}>
-      <label style={{ ...labelStyle, marginBottom: 0 }}>{label}</label>
-      {help && (
-        <span style={{ fontSize: 11, color: 'var(--panel-text-tertiary)', lineHeight: 1.4 }}>
-          {help}
-        </span>
-      )}
-    </div>
-    <button
-      type="button"
-      role="switch"
-      aria-checked={value}
-      aria-label={label}
-      onClick={() => onChange(!value)}
-      style={{
-        width: 40,
-        height: 22,
-        borderRadius: 11,
-        border: 'none',
-        background: value ? 'var(--panel-accent)' : 'var(--panel-toggle-off)',
-        position: 'relative',
-        cursor: 'pointer',
-        transition: 'background 0.2s ease',
-      }}
-    >
-      <span
-        style={{
-          position: 'absolute',
-          top: 2,
-          left: value ? 20 : 2,
-          width: 18,
-          height: 18,
-          borderRadius: '50%',
-          background: 'var(--panel-surface)',
-          transition: 'left 0.2s ease',
-          boxShadow: 'var(--panel-shadow-subtle)',
-        }}
-      />
-    </button>
-  </div>
-);
 
 /**
  * 工具开关卡片 —— 设置-工具页的工具级启用/禁用开关
@@ -4346,6 +2959,11 @@ const ConfigWindow: React.FC = () => {
               onChange={(v) => setNested('proactive.enable_music_trigger', v)}
             />
 
+            <div style={{ ...sectionTitleStyle, marginTop: 24 }}>
+              {i18n.language.startsWith('zh') ? '聊天表情包' : 'Chat stickers'}
+            </div>
+            <StickerSettings />
+
             {/* ── 日记（仅保留启用开关，其余由智能体自主决定）── */}
             <div style={{ ...sectionTitleStyle, marginTop: 24 }}>
               {t('config.section_diary')}
@@ -4537,13 +3155,14 @@ const ConfigWindow: React.FC = () => {
               label={t('config.field_reasoning_pref')}
               help={t('config.reasoning_pref_help')}
               providerType={get('ai.provider', 'openai') as string} model={get('ai.model', '') as string}
+              temperature={get<number>('ai.temperature',0.7)} maxTokens={get<number>('ai.max_tokens',2048)}
+              sendTemperature={get<boolean>('ai.send_temperature',true)} sendMaxTokens={get<boolean>('ai.send_max_tokens',true)}
               overrides={get('ai.reasoning_overrides', null) as Record<string, unknown> | null} onOverridesChange={v=>setNested('ai.reasoning_overrides',v as ConfigValue)}
               value={get('ai.reasoning', null) as ReasoningPref | null}
               onChange={(v) => setNested('ai.reasoning', v as ConfigValue)}
               t={t}
             />
 
-            <StickerSettings />
             <div style={{ ...sectionTitleStyle, marginTop: 28 }}>{t('config.section_multimodal')}</div>
             <ToggleField
               label={t('config.field_enable_vision')}
@@ -4717,6 +3336,8 @@ const ConfigWindow: React.FC = () => {
                   help={t('config.field_route_max_tokens_help')}
                 />)}
                 <ReasoningPrefField label={t('config.field_reasoning_pref')} providerType={get(`routing_matrix.${task.taskType}.provider_type`, 'openai') as string} model={get(`routing_matrix.${task.taskType}.model`, '') as string}
+                  temperature={get<number>(`routing_matrix.${task.taskType}.temperature`,get<number>('ai.temperature',0.7))} maxTokens={get<number>(`routing_matrix.${task.taskType}.max_tokens`,get<number>('ai.max_tokens',2048))}
+                  sendTemperature={get<boolean>(`routing_matrix.${task.taskType}.send_temperature`,get<boolean>('ai.send_temperature',true))} sendMaxTokens={get<boolean>(`routing_matrix.${task.taskType}.send_max_tokens`,get<boolean>('ai.send_max_tokens',true))}
                   value={get(`routing_matrix.${task.taskType}.reasoning`, get('ai.reasoning', null)) as ReasoningPref | null}
                   onChange={v=>setNested(`routing_matrix.${task.taskType}.reasoning`,v as ConfigValue)}
                   overrides={get(`routing_matrix.${task.taskType}.reasoning_overrides`, null) as Record<string, unknown> | null}
@@ -4863,6 +3484,8 @@ const ConfigWindow: React.FC = () => {
                     label={t('config.field_reasoning_pref')}
                     help={t('config.reasoning_pref_help')}
                     providerType={m.provider_type} model={m.model}
+                    temperature={m.temperature ?? get<number>('ai.temperature',0.7)} maxTokens={m.max_tokens ?? get<number>('ai.max_tokens',2048)}
+                    sendTemperature={m.send_temperature ?? get<boolean>('ai.send_temperature',true)} sendMaxTokens={m.send_max_tokens ?? get<boolean>('ai.send_max_tokens',true)}
                     overrides={m.reasoning_overrides} onOverridesChange={v=>patchWorkModel(idx,{reasoning_overrides:v})}
                     value={m.reasoning ?? null}
                     onChange={(v) => patchWorkModel(idx, { reasoning: v } as Partial<WorkModelProfile>)}
@@ -5052,6 +3675,8 @@ const ConfigWindow: React.FC = () => {
             )}
 
             <div style={{ ...sectionTitleStyle, marginTop: 28 }}>{t('config.section_tools_execution')}</div>
+            <SchemaSettings command="get_desktop_settings" language={i18n.language}
+              get={(key, fallback) => get(key, fallback) as number} set={setNested} />
             <NumberField
               label={t('config.field_tool_max_iterations')}
               value={(get('tools.max_iterations', 10) as number) === 0 ? -1 : (get('tools.max_iterations', 10) as number)}
@@ -5705,6 +4330,7 @@ const ConfigWindow: React.FC = () => {
         return (
           <>
             <div style={sectionTitleStyle}>{t('config.section_asr')}</div>
+            <div className="speech-settings-note">{t('speechSettings.asr_intro')}</div>
             <SelectField
               label={t('config.field_asr_engine')}
               value={get('speech_recognition.engine', 'winrt')}
@@ -5913,6 +4539,7 @@ const ConfigWindow: React.FC = () => {
                 {/* ── 普通模式：常用选项 ── */}
 
                 {/* 模型选择 */}
+                <p className="speech-settings-hint">{t('speechSettings.local_service_help')}</p>
                 <SelectField
                   label={t('config.field_whisper_service_model')}
                   value={get('speech_recognition.whisper.service_model', 'small')}
@@ -5942,6 +4569,36 @@ const ConfigWindow: React.FC = () => {
                   ]}
                 />
 
+
+                    <div style={{ ...sectionTitleStyle, marginTop: 12 }}>
+                      {t('speechSettings.connection')}
+                    </div>
+                    <p className="speech-settings-hint">{t('speechSettings.connection_help')}</p>
+                    <TextField
+                      label={t('config.field_whisper_server_url')}
+                      value={get('speech_recognition.whisper.server_url', '')}
+                      onChange={(v) => setNested('speech_recognition.whisper.server_url', v)}
+                      placeholder="http://127.0.0.1:8000"
+                    />
+                    {get<string>('speech_recognition.whisper.streaming_mode', 'none') !== 'realtime_ws' && (
+                    <SelectField
+                      label={t('config.field_whisper_api_format')}
+                      value={get('speech_recognition.whisper.api_format', 'openai')}
+                      onChange={(v) => setNested('speech_recognition.whisper.api_format', v)}
+                      options={[
+                        { value: 'openai', label: t('config.opt_whisper_api_format_openai') },
+                        { value: 'whisper_cpp', label: t('config.opt_whisper_api_format_whisper_cpp') },
+                      ]}
+                    />
+                    )}
+                    <TextField
+                      label={t('config.field_whisper_api_key')}
+                      value={get('speech_recognition.whisper.api_key', '')}
+                      onChange={(v) => setNested('speech_recognition.whisper.api_key', v)}
+                      placeholder={t('speechSettings.api_key_placeholder')}
+                      type="password"
+                    />
+
                 {/* 流式模式 */}
                 <SelectField
                   label={t('config.field_whisper_streaming_mode')}
@@ -5964,12 +4621,39 @@ const ConfigWindow: React.FC = () => {
                     lineHeight: 1.5,
                   }}
                 >
-                  {t('config.whisper_hint_streaming_mode')}
+                  {t(`speechSettings.whisper_modes.${get('speech_recognition.whisper.streaming_mode', 'none')}`)}
                 </div>
+
+                {get<string>('speech_recognition.whisper.streaming_mode', 'none') === 'realtime_ws' && (
+                  <>
+                    {/* Realtime WebSocket 专属配置 */}
+                    <div style={{ ...sectionTitleStyle, marginTop: 12 }}>
+                      {t('config.section_whisper_realtime')}
+                    </div>
+                    <TextField
+                      label={t('config.field_whisper_realtime_model')}
+                      value={get('speech_recognition.whisper.realtime_model', '') ?? ''}
+                      onChange={(v) =>
+                        setNested('speech_recognition.whisper.realtime_model', v)
+                      }
+                      placeholder={t('config.placeholder_whisper_realtime_model')}
+                    />
+                    <TextField
+                      label={t('config.field_whisper_realtime_language')}
+                      value={get('speech_recognition.whisper.realtime_language', '') ?? ''}
+                      onChange={(v) =>
+                        setNested('speech_recognition.whisper.realtime_language', v)
+                      }
+                      placeholder="zh / en / ja"
+                    />
+
+                  </>
+                )}
 
                 {/* ── 高级设置折叠区 ── */}
                 <button
                   type="button"
+                  aria-expanded={whisperAdvancedOpen}
                   onClick={() => setWhisperAdvancedOpen((v) => !v)}
                   style={{
                     width: '100%',
@@ -6110,53 +4794,7 @@ const ConfigWindow: React.FC = () => {
                       {t('config.whisper_hint_pip_required')}
                     </div>
 
-                    {/* Realtime WebSocket 专属配置 */}
-                    <div style={{ ...sectionTitleStyle, marginTop: 12 }}>
-                      {t('config.section_whisper_realtime')}
-                    </div>
-                    <TextField
-                      label={t('config.field_whisper_realtime_model')}
-                      value={get('speech_recognition.whisper.realtime_model', '') ?? ''}
-                      onChange={(v) =>
-                        setNested('speech_recognition.whisper.realtime_model', v)
-                      }
-                      placeholder={t('config.placeholder_whisper_realtime_model')}
-                    />
-                    <TextField
-                      label={t('config.field_whisper_realtime_language')}
-                      value={get('speech_recognition.whisper.realtime_language', '') ?? ''}
-                      onChange={(v) =>
-                        setNested('speech_recognition.whisper.realtime_language', v)
-                      }
-                      placeholder="zh / en / ja"
-                    />
-
-                    {/* 手动配置外部 Whisper 服务（whisper.cpp / OpenAI API 等） */}
-                    <div style={{ ...sectionTitleStyle, marginTop: 12 }}>
-                      {t('config.section_whisper')}
-                    </div>
-                    <TextField
-                      label={t('config.field_whisper_server_url')}
-                      value={get('speech_recognition.whisper.server_url', '')}
-                      onChange={(v) => setNested('speech_recognition.whisper.server_url', v)}
-                      placeholder="http://localhost:8080"
-                    />
-                    <SelectField
-                      label={t('config.field_whisper_api_format')}
-                      value={get('speech_recognition.whisper.api_format', 'openai')}
-                      onChange={(v) => setNested('speech_recognition.whisper.api_format', v)}
-                      options={[
-                        { value: 'openai', label: t('config.opt_whisper_api_format_openai') },
-                        { value: 'whisper_cpp', label: t('config.opt_whisper_api_format_whisper_cpp') },
-                      ]}
-                    />
-                    <TextField
-                      label={t('config.field_whisper_api_key')}
-                      value={get('speech_recognition.whisper.api_key', '')}
-                      onChange={(v) => setNested('speech_recognition.whisper.api_key', v)}
-                      placeholder={t('config.field_whisper_api_key_placeholder')}
-                      type="password"
-                    />
+                    {get<string>('speech_recognition.whisper.streaming_mode', 'none') !== 'realtime_ws' && (
                     <NumberField
                       label={t('config.field_whisper_max_seconds')}
                       value={get('speech_recognition.whisper.max_audio_seconds', 30)}
@@ -6165,6 +4803,7 @@ const ConfigWindow: React.FC = () => {
                       max={60}
                       step={5}
                     />
+                    )}
                   </>
                 )}
               </>
@@ -6316,6 +4955,7 @@ const ConfigWindow: React.FC = () => {
       case 'speech':
         return (
           <>
+            <div className="speech-settings-note">{t('speechSettings.tts_intro')}</div>
             <div style={{ ...sectionTitleStyle, marginTop: 24 }}>
               {t('config.section_tts')}
             </div>
@@ -6689,7 +5329,7 @@ const ConfigWindow: React.FC = () => {
                         lineHeight: 1.5,
                       }}
                     >
-                      {t('config.gptsovits_hint_url_only')}
+                      {t('speechSettings.shared_service')}
                     </div>
 
                     {/* 服务地址（基础配置：本地服务启动后自动填入；远程/Docker 服务手填） */}
@@ -6699,6 +5339,39 @@ const ConfigWindow: React.FC = () => {
                       onChange={(v) => setTtsConfig({ ...ttsConfig, gpt_sovits_url: v || null })}
                       placeholder={t('config.placeholder_gptsovits_url')}
                     />
+                    <div style={subsectionTitleStyle}>{t('speechSettings.models')}</div>
+                    <p className="speech-settings-hint">{t('speechSettings.model_path_help')}</p>
+                    <BrowseTextField
+                      label={t('config.field_tts_gptsovits_gpt_model')}
+                      value={ttsConfig.gpt_sovits_gpt_model ?? ''}
+                      onChange={(v) => setTtsConfig({ ...ttsConfig, gpt_sovits_gpt_model: v.trim() ? v : null })}
+                      placeholder={t('speechSettings.model_placeholder')}
+                      list="gptsovits-gpt-model-suggestions"
+                      onBrowse={() => pickPath('gpt_sovits_gpt_model', false, ['ckpt'])}
+                      browseLabel={t('config.btn_browse')}
+                    />
+                    <datalist id="gptsovits-gpt-model-suggestions">
+                      {gptSovitsModels.gpt_models.map((m) => <option key={m.path} value={m.path}>{m.name}</option>)}
+                    </datalist>
+                    <BrowseTextField
+                      label={t('config.field_tts_gptsovits_sovits_model')}
+                      value={ttsConfig.gpt_sovits_sovits_model ?? ''}
+                      onChange={(v) => setTtsConfig({ ...ttsConfig, gpt_sovits_sovits_model: v.trim() ? v : null })}
+                      placeholder={t('speechSettings.model_placeholder')}
+                      list="gptsovits-sovits-model-suggestions"
+                      onBrowse={() => pickPath('gpt_sovits_sovits_model', false, ['pth'])}
+                      browseLabel={t('config.btn_browse')}
+                    />
+                    <datalist id="gptsovits-sovits-model-suggestions">
+                      {gptSovitsModels.sovits_models.map((m) => <option key={m.path} value={m.path}>{m.name}</option>)}
+                    </datalist>
+                    <div className="speech-settings-note" role="status"
+                      data-state={!!ttsConfig.gpt_sovits_gpt_model?.trim() !== !!ttsConfig.gpt_sovits_sovits_model?.trim() ? 'partial' : 'normal'}>
+                      {t(ttsConfig.gpt_sovits_gpt_model?.trim() && ttsConfig.gpt_sovits_sovits_model?.trim()
+                        ? 'speechSettings.models_ready'
+                        : ttsConfig.gpt_sovits_gpt_model?.trim() || ttsConfig.gpt_sovits_sovits_model?.trim()
+                          ? 'speechSettings.models_partial' : 'speechSettings.models_default')}
+                    </div>
                     <SelectField
                       label={t('config.field_tts_gptsovits_format')}
                       value={ttsConfig.gpt_sovits_format ?? 'wav'}
@@ -6710,6 +5383,7 @@ const ConfigWindow: React.FC = () => {
                     />
                     <TextField
                       label={t('config.field_tts_gptsovits_timeout')}
+                      help={t('speechSettings.timeout_help')}
                       value={ttsConfig.gpt_sovits_timeout_secs?.toString() ?? ''}
                       onChange={(v) => {
                         const n = parseInt(v, 10);
@@ -6720,6 +5394,7 @@ const ConfigWindow: React.FC = () => {
                     />
 
                     {/* 参考音频 — 决定音色 */}
+                    <p className="speech-settings-hint">{t('speechSettings.reference_help')}</p>
                     <div style={subsectionTitleStyle}>
                       {t('config.gptsovits_section_reference')}
                     </div>
@@ -6956,40 +5631,6 @@ const ConfigWindow: React.FC = () => {
                         <div style={subsectionTitleStyle}>
                           {t('config.gptsovits_section_deploy')}
                         </div>
-                        <SelectField
-                          label={t('config.field_tts_gptsovits_gpt_model')}
-                          value={ttsConfig.gpt_sovits_gpt_model ?? ''}
-                          onChange={(v) => setTtsConfig({ ...ttsConfig, gpt_sovits_gpt_model: v || null })}
-                          options={[
-                            { value: '', label: t('config.opt_gptsovits_model_none') },
-                            ...gptSovitsModels.gpt_models.map((m) => ({ value: m.path, label: m.name })),
-                          ]}
-                        />
-                        <SelectField
-                          label={t('config.field_tts_gptsovits_sovits_model')}
-                          value={ttsConfig.gpt_sovits_sovits_model ?? ''}
-                          onChange={(v) => setTtsConfig({ ...ttsConfig, gpt_sovits_sovits_model: v || null })}
-                          options={[
-                            { value: '', label: t('config.opt_gptsovits_model_none') },
-                            ...gptSovitsModels.sovits_models.map((m) => ({ value: m.path, label: m.name })),
-                          ]}
-                        />
-                        {gptSovitsModels.gpt_models.length === 0 &&
-                          gptSovitsModels.sovits_models.length === 0 && (
-                            <div
-                              style={{
-                                width: '100%',
-                                fontSize: 11,
-                                color: '#e67e22',
-                                background: 'rgba(230,126,34,0.08)',
-                                padding: '6px 8px',
-                                borderRadius: 4,
-                                marginBottom: 8,
-                              }}
-                            >
-                              {t('config.gptsovits_hint_no_models')}
-                            </div>
-                          )}
                         <TextField
                           label={t('config.field_tts_gptsovits_gpu')}
                           value={ttsConfig.gpt_sovits_gpu?.toString() ?? '0'}
@@ -7709,6 +6350,8 @@ const ConfigWindow: React.FC = () => {
                             help={t('config.field_route_max_tokens_help')}
                           />)}
                           <ReasoningPrefField label={t('config.field_reasoning_pref')} providerType={get('routing_matrix.translation.provider_type','openai') as string} model={get('routing_matrix.translation.model','') as string}
+                            temperature={get<number>('routing_matrix.translation.temperature',get<number>('ai.temperature',0.7))} maxTokens={get<number>('routing_matrix.translation.max_tokens',get<number>('ai.max_tokens',2048))}
+                            sendTemperature={get<boolean>('routing_matrix.translation.send_temperature',get<boolean>('ai.send_temperature',true))} sendMaxTokens={get<boolean>('routing_matrix.translation.send_max_tokens',get<boolean>('ai.send_max_tokens',true))}
                             value={get('routing_matrix.translation.reasoning',get('ai.reasoning',null)) as ReasoningPref|null} onChange={v=>setNested('routing_matrix.translation.reasoning',v as ConfigValue)}
                             overrides={get('routing_matrix.translation.reasoning_overrides',null) as Record<string,unknown>|null} onOverridesChange={v=>setNested('routing_matrix.translation.reasoning_overrides',v as ConfigValue)} t={t}/>
                         </>
@@ -7994,6 +6637,11 @@ const ConfigWindow: React.FC = () => {
                 { value: 'searxng', label: t('config.opt_web_search_searxng') },
                 { value: 'tavily', label: t('config.opt_web_search_tavily') },
                 { value: 'deepseek', label: t('config.opt_web_search_deepseek') },
+                { value: 'exa', label: 'Exa' },
+                { value: 'perplexity', label: 'Perplexity' },
+                { value: 'openai', label: 'OpenAI Web Search' },
+                { value: 'xai', label: 'Grok Web Search' },
+                { value: 'anthropic', label: 'Claude Web Search' },
               ]}
               minSelected={1}
             />
@@ -8082,6 +6730,26 @@ const ConfigWindow: React.FC = () => {
                 />
               </CollapsibleSection>
             )}
+
+            {[
+              { id: 'exa', label: 'Exa', endpoint: 'https://api.exa.ai', native: false },
+              { id: 'perplexity', label: 'Perplexity', endpoint: 'https://api.perplexity.ai', native: false },
+              { id: 'openai', label: 'OpenAI Web Search', endpoint: 'https://api.openai.com/v1', native: true },
+              { id: 'xai', label: 'Grok Web Search', endpoint: 'https://api.x.ai/v1', native: true },
+              { id: 'anthropic', label: 'Claude Web Search', endpoint: 'https://api.anthropic.com/v1', native: true },
+            ].filter(({ id }) => get<string[]>('web_search.providers', ['duckduckgo']).includes(id)).map(({ id, label, endpoint, native }) => (
+              <CollapsibleSection key={id} title={label} defaultOpen>
+                <TextField label="API Key" value={get(`web_search.${id}.api_key`, '')}
+                  onChange={(v) => setNested(`web_search.${id}.api_key`, v)} type="password" />
+                <TextField label={t('config.field_ds_search_base_url')} value={get(`web_search.${id}.base_url`, '')}
+                  onChange={(v) => setNested(`web_search.${id}.base_url`, v)} placeholder={endpoint} />
+                {native && <TextField label={t('config.field_ds_search_model')} value={get(`web_search.${id}.model`, '')}
+                  onChange={(v) => setNested(`web_search.${id}.model`, v)} placeholder={t('config.search_model_required')} />}
+                <div style={{ fontSize: 12, color: 'var(--panel-text-secondary)', padding: '8px 0' }}>
+                  {t(native ? 'config.native_search_cost' : 'config.search_api_cost')}
+                </div>
+              </CollapsibleSection>
+            ))}
 
             {/* DeepSeek 官方原生搜索子配置（启用 deepseek 时显示） */}
             {get<string[]>('web_search.providers', ['duckduckgo']).includes('deepseek') && (
@@ -8270,6 +6938,15 @@ const ConfigWindow: React.FC = () => {
             }}
           >
             ?
+          </button>
+          <button
+            type="button"
+            className="settings-minimize-button"
+            onClick={() => { void getCurrentWindow().minimize().catch((error) => console.error('Failed to minimize settings window', error)); }}
+            aria-label={t('common.minimize')}
+            title={t('common.minimize')}
+          >
+            <Minus size={16} />
           </button>
           <button
             onClick={closeWindow}

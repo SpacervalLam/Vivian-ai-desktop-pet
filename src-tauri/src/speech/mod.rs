@@ -26,6 +26,7 @@ pub mod asr;
 pub mod azure_backend;
 pub mod fish_speech_service;
 pub mod gpt_sovits_service;
+mod model_session;
 pub mod planner;
 pub mod realtime_protocol;
 pub mod realtime_voice;

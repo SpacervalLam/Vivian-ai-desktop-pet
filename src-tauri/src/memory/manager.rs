@@ -144,7 +144,7 @@ enum ConflictOutcome {
 
 /// 判断记忆条目是否应建立向量索引（重建与计数共用）
 fn is_indexable_entry(e: &MemoryItem) -> bool {
-    if e.content.trim().is_empty() {
+    if !super::kinds::recallable(e) {
         return false;
     }
     match MemoryType::from_str(&e.memory_type) {
@@ -214,7 +214,6 @@ impl MemoryManager {
         let memory_dir = path::get_companion_data_dir(char_id).join("memory");
         path::ensure_dir(&memory_dir)?;
 
-        let store_path = memory_dir.join("unified_memory.json");
 
         let mut capacities = HashMap::new();
         for (g, c) in DEFAULT_CAPACITIES.iter() {
@@ -244,7 +243,6 @@ impl MemoryManager {
             capacities,
             entry_store: super::entry_store::MemoryEntryStore::open(
                 memory_dir.join("entries.db"),
-                &store_path,
             )?,
             persisted: HashMap::new(),
             vector_store,
@@ -1115,7 +1113,7 @@ impl MemoryManager {
             }
         }
 
-        let embedding_result = if should_index(importance, &memory_type) {
+        let embedding_result = if is_indexable_entry(&item) {
             let emb_provider = self.embedding();
             match emb_provider.embed(content) {
                 Ok(v) => Some(v),
@@ -1130,7 +1128,7 @@ impl MemoryManager {
 
         let mut inner = self.inner.write();
         inner.add_entry(item.clone())?;
-        if should_index(importance, &memory_type) {
+        if is_indexable_entry(&item) {
             if let Some(emb) = embedding_result {
                 let vec = MemoryVector {
                     doc_id: item.id.clone(),
@@ -1246,6 +1244,7 @@ impl MemoryManager {
         });
         let emb_body = safe_emb_text.as_deref().unwrap_or(content);
         // 上下文感知检索前缀：拼接时间 + 说话者/听者背景，让向量检索感知"何时谁对谁说了什么"
+        super::kinds::initialize_record(&mut item);
         let context_prefix = build_context_prefix(&item);
         let emb_source = if context_prefix.is_empty() {
             emb_body.to_string()
@@ -1254,8 +1253,9 @@ impl MemoryManager {
         };
 
         // 预计算 embedding（冲突检测 + 向量索引共用，避免重复计算）
-        let need_embedding = should_index(importance, &memory_type)
-            || super::conflict::should_check_conflict(memory_type);
+        let should_check_conflict = super::kinds::kind(&item) == super::kinds::RecordKind::Fact
+            && super::conflict::should_check_conflict(memory_type);
+        let need_embedding = is_indexable_entry(&item) || should_check_conflict;
         let embedding_result = if need_embedding {
             let emb_provider = self.embedding();
             match emb_provider.embed(&emb_source) {
@@ -1272,7 +1272,7 @@ impl MemoryManager {
         };
 
         // 冲突检测（只读阶段）：对持久型记忆查找相似记忆并评分
-        let conflict_outcome = if super::conflict::should_check_conflict(memory_type) {
+        let conflict_outcome = if should_check_conflict {
             if let Some(ref emb) = embedding_result {
                 self.detect_memory_conflict(emb, &item)
             } else {
@@ -1353,7 +1353,7 @@ impl MemoryManager {
         // 向量索引（复用预计算的 embedding，content 用 emb_source 保持一致性）
         // 旁观记忆（perspective="observer"）也进入向量索引，但在检索时降权（score * 0.5），
         // 使其能被找到但排名低于直接参与的记忆。
-        if should_index(importance, &memory_type) {
+        if is_indexable_entry(&item) {
             if let Some(emb) = embedding_result {
                 let memory_id = item.id.clone();
                 let memory_type_str = memory_type.as_str().to_string();
@@ -1411,7 +1411,10 @@ impl MemoryManager {
         // Memory Router：同步路由判断是否应额外写入共享世界记忆层
         // 候选条目（含持久性词汇的用户偏好/家规/环境事实）写入 WorldKnowledge
         // RelationshipFact 由 cross_character.rs 的 LLM 抽取负责，不在此处理
-        route_to_shared_world(content, importance, &item.metadata, &self.char_id, &item.id);
+        // 原话索引、主观想法和旁观笔记不能绕过事实抽取，直接升级为共享事实。
+        if super::kinds::kind(&item) == super::kinds::RecordKind::Fact {
+            route_to_shared_world(content, importance, &item.metadata, &self.char_id, &item.id);
+        }
 
         // 种子记忆生命周期管理：当真实记忆积累后，逐步降低种子记忆的 importance
         // 这样种子记忆不会被突然删除，而是在检索排序中自然被真实记忆替代
@@ -1438,6 +1441,9 @@ impl MemoryManager {
                 }
                 let idx = inner.id_index.get(mem_id)?;
                 let old_item = inner.data.entries.get(*idx)?;
+                if !super::companion_policy::is_durable_fact(old_item) || old_item.protected {
+                    return None;
+                }
                 // 只对有一定重要性的记忆做冲突检测（避免与 ShortTerm 缓冲冲突）
                 if old_item.importance < 0.3 {
                     return None;
@@ -2070,6 +2076,77 @@ impl MemoryManager {
         Ok(())
     }
 
+    /// 一个会话只对应一个摘要节点。先提交规范条目，再更新可重建的向量索引。
+    /// 不使用通用语义去重、冲突合并或容量淘汰，避免跨会话串联。
+    /// Repair derived links when semantic grouping changes; never rewrite or delete originals.
+    pub fn reconcile_conversation_projection(&self, groups: &[super::conversations::ConversationRecord]) -> VivianResult<()> {
+        let valid: std::collections::HashSet<_> = groups.iter().map(|g| g.id.as_str()).collect();
+        let owners: HashMap<_, _> = groups.iter().flat_map(|g| g.turns.iter().map(move |t| (t.id.as_str(), g.id.as_str()))).collect();
+        let mut inner = self.inner.write();
+        let mut previous = Vec::new();
+        let mut retired = Vec::new();
+        for (idx, item) in inner.data.entries.iter_mut().enumerate() {
+            let mut updated = item.clone();
+            if super::conversations::refresh_derived_links(&mut updated, &valid, &owners) {
+                retired.push(item.id.clone());
+            }
+            if updated.metadata != item.metadata || updated.consolidated != item.consolidated {
+                previous.push((idx, item.clone())); *item = updated;
+            }
+        }
+        if previous.is_empty() { return Ok(()); }
+        if let Err(error) = inner.save_to_disk() {
+            for (idx, old) in previous { inner.data.entries[idx] = old; } return Err(error);
+        }
+        for id in retired { inner.vector_store.delete_by_memory_id(&id); }
+        if let Err(error) = inner.vector_store.save_to() { tracing::warn!("[MemoryManager] 分组索引持久化失败: {error}"); }
+        drop(inner); self.search_cache.lock().clear();
+        if let Some(app) = self.app_handle.lock().as_ref() {
+            let _ = app.emit("memory:updated", serde_json::json!({"character_id": self.char_id()}));
+        }
+        Ok(())
+    }
+
+    pub async fn upsert_session_summary(&self, conversation_id: &str, content: &str,
+        importance: f64, metadata: serde_json::Value) -> VivianResult<MemoryItem> {
+        let id = super::session_summary::summary_id(self.char_id(), conversation_id);
+        let (content, _, _) = redact_content(content);
+        let embedding = if content.trim().is_empty() { None } else { self.embedding().embed(&content).ok() };
+        let mut inner = self.inner.write();
+        let existing = inner.id_index.get(&id).copied();
+        let previous = existing.map(|idx| inner.data.entries[idx].clone());
+        let mut item = previous.clone().unwrap_or_else(||
+            MemoryItem::new(content.clone(), Granularity::Summary, importance.clamp(0.0, 1.0)));
+        item.id = id.clone(); item.content = content.clone();
+        item.importance = importance.clamp(0.0, 1.0);
+        item.memory_type = MemoryType::SessionSummary.as_str().into();
+        item.tags = vec!["session_summary".into()];
+        item.metadata = metadata;
+        item.consolidated = false;
+        super::kinds::initialize_record(&mut item);
+        if let Some(idx) = existing { inner.data.entries[idx] = item.clone(); }
+        else { inner.data.entries.push(item.clone()); inner.rebuild_index(); }
+        if let Err(error) = inner.save_to_disk() {
+            if let (Some(idx), Some(previous)) = (existing, previous) { inner.data.entries[idx] = previous; }
+            else { inner.data.entries.retain(|entry| entry.id != id); inner.rebuild_index(); }
+            return Err(error);
+        }
+        inner.vector_store.delete_by_memory_id(&id);
+        if let Some(embedding) = embedding {
+            if let Err(error) = inner.vector_store.add(MemoryVector {
+                doc_id: id.clone(), memory_id: id, content, embedding,
+                importance: item.importance, memory_type: item.memory_type.clone(), timestamp: item.timestamp,
+            }) { tracing::warn!("[MemoryManager] 会话摘要已保存，向量索引更新失败: {error}"); }
+        }
+        if let Err(error) = inner.vector_store.save_to() {
+            tracing::warn!("[MemoryManager] 会话摘要向量持久化失败: {error}");
+        }
+        drop(inner);
+        self.search_cache.lock().clear();
+        self.emit_memory_updated();
+        Ok(item)
+    }
+
     /// 原子地合并 metadata 字段到指定记忆（用于巩固流水线注入 promoted_from 等）。
     ///
     /// 在已有 metadata 基础上做对象级 merge：`patch` 中的键覆盖已有同名键。
@@ -2444,14 +2521,14 @@ impl MemoryManager {
             .data
             .entries
             .iter()
-            .any(|e| e.consolidated && !is_summarized(e));
+            .any(|e| !super::kinds::recallable(e));
         let all_entries: Cow<[MemoryItem]> = if needs_filter {
             Cow::Owned(
                 inner
                     .data
                     .entries
                     .iter()
-                    .filter(|e| !e.consolidated || is_summarized(e))
+                    .filter(|e| super::kinds::recallable(e))
                     .cloned()
                     .collect(),
             )
@@ -2519,14 +2596,14 @@ impl MemoryManager {
             .data
             .entries
             .iter()
-            .any(|e| (e.consolidated && !is_summarized(e)) || !filter.matches(e));
+            .any(|e| !super::kinds::recallable(e) || !filter.matches(e));
         let all_entries: Cow<[MemoryItem]> = if needs_filter {
             Cow::Owned(
                 inner
                     .data
                     .entries
                     .iter()
-                    .filter(|e| !e.consolidated || is_summarized(e))
+                    .filter(|e| super::kinds::recallable(e))
                     .filter(|e| filter.matches(e))
                     .cloned()
                     .collect(),
@@ -2584,8 +2661,9 @@ impl MemoryManager {
             }
             // Step 1: 基础检索（扩大候选集到 limit * 3，给后续过滤留余量）
             let candidate_limit = (limit * 3).max(10);
+            let recall_entries: Vec<_> = inner.data.entries.iter().filter(|e| super::kinds::recallable(e)).cloned().collect();
             let ctx = RetrievalContext {
-                entries: &inner.data.entries,
+                entries: &recall_entries,
                 vector_store: &inner.vector_store,
                 embedding: &inner.embedding,
                 graph: Some(&self.knowledge_graph),
@@ -2612,7 +2690,7 @@ impl MemoryManager {
                 super::precision_filter::exclude_visible_context(filtered, visible_ids);
 
             // Step 4: 上下文扩窗
-            super::retriever::expand_context(excluded, &inner.data.entries, max_expansion)
+            super::retriever::expand_context(excluded, &recall_entries, max_expansion)
         };
 
         // Step 5: 相对时间锚点
@@ -3219,13 +3297,13 @@ fn infer_tags_for_content(content: &str, memory_type: &MemoryType) -> Vec<String
 
 impl MemoryManagerInner {
     fn load_from_disk(&mut self) -> VivianResult<()> {
-        // SQLite 条目库为准；旧版 unified_memory.json 已在 MemoryEntryStore::open 迁移
+        // SQLite 是唯一条目存储，不导入旧文件或补写旧记录类别。
         let entries = self.entry_store.load_all()?;
         // 完全归档记录保留在 SQLite 作为审计/恢复材料，但不在每次启动时
-        // 重新常驻内存；待摘要记录仍需保留给 Stage 1 消费。
+        // 重新常驻内存；会话摘要始终基于原始历史生成。
         self.data.entries = entries
             .into_iter()
-            .filter(|entry| !entry.consolidated || is_summarized(entry))
+            .filter(|entry| !entry.consolidated && super::kinds::kind(entry) != super::kinds::RecordKind::Internal)
             .collect();
         self.data.version = self
             .entry_store
@@ -3303,28 +3381,13 @@ impl MemoryManagerInner {
         }
     }
 
-    fn add_entry(&mut self, item: MemoryItem) -> VivianResult<()> {
+    fn add_entry(&mut self, mut item: MemoryItem) -> VivianResult<()> {
+        super::kinds::initialize_record(&mut item);
         let gran = Granularity::from_str(&item.granularity).unwrap_or(Granularity::Turn);
         let capacity = self.capacities.get(&gran).copied().unwrap_or(50);
 
-        let gran_entries: Vec<usize> = self
-            .data
-            .entries
-            .iter()
-            .enumerate()
-            .filter(|(_, e)| e.granularity == gran.as_str())
-            .map(|(i, _)| i)
-            .collect();
-
-        if gran_entries.len() >= capacity {
-            // 容量满时，标记最旧的条目为 summarized（保留磁盘和向量索引），
-            // 让 Stage 1 在下次 Rest 时统一压缩为 SessionSummary。
-            // 不再机械拼接，避免与 Stage 1 职责重叠。
-            if let Some(&oldest_idx) = gran_entries.first() {
-                let item = self.data.entries[oldest_idx].clone();
-                let marked = mark_summarized_item(item);
-                self.data.entries[oldest_idx] = marked;
-            }
+        if let Some(retired) = super::kinds::retire_dialogue_window(&mut self.data.entries, &item, capacity) {
+            self.vector_store.delete_by_memory_id(&retired);
         }
 
         let new_idx = self.data.entries.len();
@@ -3592,7 +3655,7 @@ impl MemoryManagerInner {
                     }
                 }
 
-                let item = MemoryItem {
+                let mut item = MemoryItem {
                     id: id.clone(),
                     content: chunk.clone(),
                     granularity: Granularity::Summary.as_str().to_string(),
@@ -3620,6 +3683,8 @@ impl MemoryManagerInner {
                     consolidated: false,
                     rebuttal_grace_remaining: 0,
                 };
+
+                super::kinds::initialize_record(&mut item);
 
                 // 向量索引不由这里写入：条目落库后由紧随其后的 ensure_seed_vectors
                 // 统一批量补建（嵌入输入 = 前缀 + 内容 + description，见 embed_input_for），
@@ -3909,22 +3974,6 @@ impl SeedSpecBuilder {
             source: "system_seed".to_string(),
         })
     }
-}
-
-/// 标记 MemoryItem 为已摘要（consolidated=true + metadata.summarized=true）
-///
-/// 用于位置驱动驱逐和 Stage 0 压缩场景，保留原始内容和向量索引，
-/// 但不参与历史对话注入路径。
-fn mark_summarized_item(mut item: MemoryItem) -> MemoryItem {
-    item.consolidated = true;
-    if let Some(obj) = item.metadata.as_object_mut() {
-        obj.insert("summarized".to_string(), serde_json::Value::Bool(true));
-    } else {
-        let mut obj = serde_json::Map::new();
-        obj.insert("summarized".to_string(), serde_json::Value::Bool(true));
-        item.metadata = serde_json::Value::Object(obj);
-    }
-    item
 }
 
 /// Memory Router 辅助函数：同步路由判断是否应写入共享世界记忆层

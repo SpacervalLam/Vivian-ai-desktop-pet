@@ -443,7 +443,7 @@ mod tests {
             "src/main.rs - MyEditor",
             "myeditor.exe",
         ));
-        assert_eq!(result.as_ref().map(|(l, _)| l.as_str()), Some("写代码"));
+        assert!(result.is_none()); // Unrecognized title alone is insufficient evidence.
     }
 
     #[test]
@@ -453,7 +453,7 @@ mod tests {
             "微信群聊(3)",
             "unknown.exe",
         ));
-        assert_eq!(result.as_ref().map(|(l, _)| l.as_str()), Some("聊天"));
+        assert!(result.is_none());
     }
 
     #[test]
@@ -462,7 +462,7 @@ mod tests {
             "【合集】新番推荐 - 哔哩哔哩",
             "browser.exe",
         ));
-        assert_eq!(result.as_ref().map(|(l, _)| l.as_str()), Some("看视频"));
+        assert_eq!(result.as_ref().map(|(l, _)| l.as_str()), Some("浏览网页"));
     }
 
     #[test]

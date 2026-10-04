@@ -11,7 +11,7 @@
  * - L1 近期状态（最近目标/当前项目/近期偏好）— 只读，由对话中自动抽取
  * - L2 自由事实 — 可新增/删除
  *
- * 视觉风格：iOS 面板（磨砂玻璃 + continuous corners），与 WorldPage 一致。
+ * 视觉风格：iOS 面板（磨砂玻璃 + continuous corners）。
  */
 
 import React, { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -46,6 +46,7 @@ import {
   EASE,
   DURATION,
   CHARACTER_ACCENT,
+  CLAUDE_ACCENT,
 } from '../design-system';
 import {
   Card,
@@ -175,9 +176,6 @@ const Reveal: React.FC<{ delay?: number; style?: React.CSSProperties; className?
 // ============================================================
 // 工具函数
 // ============================================================
-
-// 嵌入「记忆」页时使用 Claude 风格的陶土橙强调色（需为 hex：Tag 等组件会拼接透明度后缀）
-const CLAUDE_CLAY = '#C96442';
 
 const toMs = (ts: number): number => (ts < 1e12 ? ts * 1000 : ts);
 
@@ -1404,7 +1402,7 @@ const UserProfilePage: React.FC<{ characterId?: CharacterId; embedded?: boolean 
   const l0Fields = BASIC_FIELD_DEFS.filter((d) => d.layer === 'L0');
   const l05Fields = BASIC_FIELD_DEFS.filter((d) => d.layer === 'L0.5');
 
-  const accent = embedded ? CLAUDE_CLAY : CHARACTER_ACCENT[character];
+  const accent = embedded ? CLAUDE_ACCENT : CHARACTER_ACCENT[character];
   const l1 = profile?.recent_state;
   const hasL1Data =
     !!l1 &&

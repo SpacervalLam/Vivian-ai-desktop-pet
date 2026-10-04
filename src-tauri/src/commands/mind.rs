@@ -1,10 +1,10 @@
 //! Mind 命令 - 心智观察器（Mind Inspector）数据接口。
 //!
 //! 与 PsychologyManager 的差异：Mind 模块聚合 Belief / Goal / Attention 三个一等公民，
-//! 加上 FocusState 的认知模式与心理状态合成 thought，构成"实时心智快照"。
+//! 加上心理状态合成 thought，构成"实时心智快照"。
 //! 前端 Mind Inspector 用这些数据展示两个智能体的大脑运转状态。
 //!
-//! - `get_mind_state`：单角色心智快照（Attention + Goals + CognitionMode + 最近 thought）
+//! - `get_mind_state`：单角色心智快照（Attention + Goals + 最近 thought）
 //! - `get_world_snapshot`：世界快照 + 用户研究任务
 //! - `list_beliefs`：BeliefStore 全量信念
 //! - `get_memory_health`：记忆巩固流水线步骤健康快照
@@ -21,8 +21,6 @@ use crate::state::AppState;
 /// 一次性返回 Mind Inspector 首页所需的全部字段，避免前端多次 IPC 往返：
 /// - `attention_top`: 注意力 Top-N 实体（实体名 + 权重）
 /// - `goals`: 当前活跃目标列表
-/// - `cognition_mode`: 认知模式（regular / focus / true_name）
-/// - `focus_charge`: 凝神电荷值（0.0-1.0）
 /// - `current_thought`: 从心理状态合成的一句话摘要（情绪+需求+活动+注意力）
 #[tauri::command]
 pub async fn get_mind_state(
@@ -59,12 +57,6 @@ pub async fn get_mind_state(
         })
         .collect();
 
-    // CognitionMode + charge（tokio Mutex，须 await）
-    let focus = brain.focus_state.lock().await;
-    let cognition_mode = focus.mode.as_str().to_string();
-    let focus_charge = focus.charge;
-    drop(focus);
-
     // current_thought: 仅使用 LLM 合成缓存，不存在时留空
     let current_thought = brain.mind.current_thought_snapshot().unwrap_or_default();
     // 内心独白/当前想法总开关（前端据此决定是否显示占位文本）
@@ -75,8 +67,6 @@ pub async fn get_mind_state(
         "character_name": instance.name,
         "attention_top": attention_top,
         "goals": goals,
-        "cognition_mode": cognition_mode,
-        "focus_charge": focus_charge,
         "current_thought": current_thought,
         "inner_monologue_enabled": inner_monologue_enabled,
     }))

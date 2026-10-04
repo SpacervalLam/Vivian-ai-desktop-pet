@@ -259,7 +259,7 @@ mod tests {
     #[test]
     fn test_compute_pet_state_angry() {
         let emotion = EmotionState {
-            anger: 0.8,
+            anger: 1.0, fear: 0.8, curiosity: 0.9, joy: 0.5,
             ..Default::default()
         };
         let needs = NeedsState::default();

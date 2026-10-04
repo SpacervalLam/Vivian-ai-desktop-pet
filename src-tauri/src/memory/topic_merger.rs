@@ -83,6 +83,7 @@ impl TopicMerger {
             .into_iter()
             .filter(|m| {
                 m.importance >= MIN_IMPORTANCE_FOR_MERGE
+                    && super::kinds::kind(m) == super::kinds::RecordKind::Fact
                     && !m.protected
                     && m.embedding.is_some()
                     && !m.content.trim().is_empty()
@@ -178,6 +179,7 @@ impl TopicMerger {
             .fold(f64::INFINITY, f64::min);
 
         let mut metadata = primary.metadata.clone();
+        for item in cluster { metadata = super::kinds::with_evidence(metadata, &item.metadata); }
         if let Some(obj) = metadata.as_object_mut() {
             obj.insert("merged_from".to_string(), json!(original_ids));
             obj.insert("merged_at".to_string(), json!(current_timestamp()));

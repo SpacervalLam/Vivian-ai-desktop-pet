@@ -1,13 +1,13 @@
 //! Self Model —— 角色对自身的统一认知状态。
 //!
 //! 核心问题：散落的自我状态碎片（PetMindState / ignored_count / quiet_mode /
-//! PresenceState / fatigue / FocusState / BehaviorMode）让 prompt 注入和决策
+//! PresenceState / fatigue / BehaviorMode）让 prompt 注入和决策
 //! 逻辑无法看到完整的"我正在做什么、我今天的节奏如何"。SelfState 把这些
 //! 碎片聚合为只读快照，供 prompt 序列化与 proactive 决策查询。
 //!
 //! 设计原则：
 //! - **只读聚合视图**：SelfState 不拥有状态所有权，现有状态留在 ProactiveState /
-//!   PresencePersistState / FocusState 等原所有者处。SelfState 持有 Arc 引用，
+//!   PresencePersistState 等原所有者处。SelfState 持有 Arc 引用，
 //!   snapshot() 时统一读取。
 //! - **单一持久化字段**：只有 `proactive_initiated_today` 是真空白需新建，
 //!   其他字段从原所有者读取。持久化路径：`characters/<char_id>/self_state.json`。
@@ -46,7 +46,7 @@ struct SelfStatePersist {
     last_reset_date: String,
 }
 
-/// "当前正在做什么"的统一枚举（折叠 task_in_progress / FocusState / BehaviorMode）
+/// "当前正在做什么"的统一枚举（折叠 task_in_progress / behavior_mode / presence）
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CurrentActivity {
@@ -54,8 +54,6 @@ pub enum CurrentActivity {
     Idle,
     /// 正在与用户对话
     Talking,
-    /// 凝神模式（深度思考）
-    Focusing,
     /// 后台知识采集（Busy）
     GatheringKnowledge,
     /// 后台记忆沉淀（Rest）
@@ -73,7 +71,6 @@ impl CurrentActivity {
         match self {
             CurrentActivity::Idle => "idle",
             CurrentActivity::Talking => "talking",
-            CurrentActivity::Focusing => "focusing",
             CurrentActivity::GatheringKnowledge => "gathering_knowledge",
             CurrentActivity::ConsolidatingMemory => "consolidating_memory",
             CurrentActivity::FollowingCursor => "following_cursor",
@@ -503,7 +500,6 @@ impl SelfState {
         // current_activity: 折叠多个碎片
         let current_activity = self.resolve_current_activity(
             presence_state,
-            mind_state,
             behavior_mode_str,
         );
 
@@ -532,10 +528,9 @@ impl SelfState {
     fn resolve_current_activity(
         &self,
         presence: PresenceState,
-        mind_state: PetMindState,
         behavior_mode: &str,
     ) -> CurrentActivity {
-        // 优先级：后台任务 > 凝神模式 > behavior_mode > presence > mind_state
+        // 优先级：后台任务 > behavior_mode > presence
 
         // 后台任务（Busy = 知识采集 / Rest = 记忆沉淀）
         if presence == PresenceState::Busy {
@@ -551,11 +546,6 @@ impl SelfState {
             "guardian" => return CurrentActivity::Guardian,
             "companion" => return CurrentActivity::Companion,
             _ => {}
-        }
-
-        // 凝神模式（通过 mind_state 粗略推断，精确判断需 FocusState 注入）
-        if mind_state == PetMindState::Curious {
-            // Curious 是默认值，不一定是 focusing，保持 Idle
         }
 
         CurrentActivity::Idle

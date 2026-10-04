@@ -31,7 +31,9 @@ import {
 import './CodeAgentPage.css';
 import './workbenchStrings';
 import SessionSearch from './SessionSearch';
-import { workbenchLayout, reconcileToolMessages, WORKBENCH_READING_WIDTH } from './workbenchLayout';
+import WebEvidenceCard from './WebEvidenceCard';
+import { parseWebEvidence } from './webEvidence';
+import { workbenchLayout, groupWorkMessages as groupChatMessages, WORKBENCH_READING_WIDTH } from './workbenchLayout';
 import TrajectoryPanel from './TrajectoryPanel';
 import TurnRail, { buildTurns } from './TurnRail';
 import ComposerEditor, { type ComposerEditorHandle } from './ComposerEditor';
@@ -92,7 +94,7 @@ function savedLayout() {
  * `notice` 是宿主自己产生的**中性状态消息**（上下文压缩等），与 `error` 分开：
  * 后者代表执行失败、渲染成红色警示，前者只是提示，混用会把正常状态读成故障。
  */
-type CodingRole = 'user' | 'assistant' | 'tool_use' | 'tool_result' | 'error' | 'notice';
+type CodingRole = 'user' | 'assistant' | 'tool_use' | 'tool_result' | 'error' | 'notice' | 'commentary' | 'thinking';
 
 /**
  * `coding:error` 事件的结构化分类，与后端 `CodingErrorKind` 一一对应。
@@ -1137,6 +1139,8 @@ const ToolCallCard: React.FC<{
       </button>
       {isFileTool(name) ? (
         expanded && <FileToolBody path={filePathFromArgs(argumentsJson)} result={result} name={name} />
+      ) : ((name === 'web_search' || name === 'web_fetch') && parseWebEvidence(result)) ? (
+        expanded && <WebEvidenceCard result={result} />
       ) : (
         <>
           {/* Errors remain visible even when their details are collapsed. */}
@@ -1174,48 +1178,6 @@ const ToolCallCard: React.FC<{
 
 // ============ 单轮工作过程分组（连续工具卡片收纳） ============
 
-/** 聊天流渲染项：普通消息 或 一组连续的工具调用消息 */
-type ChatRenderItem =
-  | { kind: 'msg'; msg: CodingMessage; index: number }
-  | { kind: 'group'; msgs: CodingMessage[]; index: number; settled: boolean };
-
-/**
- * 把消息列表切分为渲染项：连续的 tool_use/tool_result 消息聚为一组，
- * 其余消息原样透传。组 ≥2 条工具消息才成组（单张卡片直接渲染，避免一层空壳）。
- *
- * `settled`（组已收尾）判定：组后出现了总结（assistant）/下一轮 user 消息，
- * 或会话已不在运行态——此时分组自动折叠成一行摘要。
- */
-function groupChatMessages(messages: CodingMessage[], running: boolean): ChatRenderItem[] {
-  const items: ChatRenderItem[] = [];
-  let i = 0;
-  while (i < messages.length) {
-    const m = messages[i];
-    if (m.role === 'tool_use' || m.role === 'tool_result') {
-      let j = i;
-      const group: CodingMessage[] = [];
-      while (j < messages.length && (messages[j].role === 'tool_use' || messages[j].role === 'tool_result')) {
-        group.push(messages[j]);
-        j += 1;
-      }
-      const rows = reconcileToolMessages(group);
-      if (rows.length >= 2) {
-        const followed = messages
-          .slice(j)
-          .some((x) => x.role === 'assistant' || x.role === 'user');
-        items.push({ kind: 'group', msgs: rows, index: i, settled: followed || !running });
-      } else {
-        rows.forEach((msg, k) => items.push({ kind: 'msg', msg, index: i + k }));
-      }
-      i = j;
-    } else {
-      items.push({ kind: 'msg', msg: m, index: i });
-      i += 1;
-    }
-  }
-  return items;
-}
-
 /** 工作过程分组容器：折叠时一行摘要（步数/文件/耗时），展开时逐步工具卡片。 */
 const ToolProcessGroup: React.FC<{
   msgs: CodingMessage[];
@@ -1224,12 +1186,11 @@ const ToolProcessGroup: React.FC<{
   cwd: string;
 }> = ({ msgs, settled, sessionRunning, cwd }) => {
   const { t } = useTranslation();
-  // Keep routine activity compact. Failures reveal details; preserve explicit user expansion.
-  const [expanded, setExpanded] = useState(msgs.some((m) => m.tool_success === false));
-  const manuallyExpanded = useRef(false);
+  // 执行中展示失败细节，进入最终报告时统一收起过程；仍可手动展开。
+  const [expanded, setExpanded] = useState(!settled && msgs.some((m) => m.tool_success === false || m.role === 'commentary' || m.role === 'thinking'));
   const prevSettled = useRef(settled);
   useEffect(() => {
-    if (!prevSettled.current && settled && !manuallyExpanded.current && !msgs.some((m) => m.tool_success === false)) {
+    if (!prevSettled.current && settled) {
       setExpanded(false);
     }
     prevSettled.current = settled;
@@ -1237,9 +1198,16 @@ const ToolProcessGroup: React.FC<{
   const failureCount = msgs.filter((m) => m.tool_success === false).length;
   const previousFailures = useRef(failureCount);
   useEffect(() => {
-    if (failureCount > previousFailures.current) setExpanded(true);
+    if (!settled && failureCount > previousFailures.current) setExpanded(true);
     previousFailures.current = failureCount;
-  }, [failureCount]);
+  }, [failureCount, settled]);
+
+  const textCount = msgs.filter((m) => m.role === 'commentary' || m.role === 'thinking').length;
+  const previousTextCount = useRef(textCount);
+  useEffect(() => {
+    if (!settled && textCount > previousTextCount.current) setExpanded(true);
+    previousTextCount.current = textCount;
+  }, [textCount, settled]);
 
   // 组统计：步数 / 失败数 / 涉及文件数 / 总耗时 / 未完成步骤
   const stats = useMemo(() => {
@@ -1279,7 +1247,7 @@ const ToolProcessGroup: React.FC<{
 
   return (
     <div className={`codex-tool-group${expanded ? ' expanded' : ''}`}>
-      <button type="button" className="codex-tool-group-header" aria-expanded={expanded} onClick={() => { manuallyExpanded.current = true; setExpanded((v) => !v); }}>
+      <button type="button" className="codex-tool-group-header" aria-expanded={expanded} onClick={() => { setExpanded((v) => !v); }}>
         <List size={13} style={{ color: 'var(--codex-ink-faint)', flexShrink: 0 }} />
         <span className="codex-tool-group-label">
           {t('mind_inspector.code_tool_group_label', { defaultValue: '工作过程' })}
@@ -1317,6 +1285,12 @@ const ToolProcessGroup: React.FC<{
       <div className={`codex-tool-group-reveal${expanded ? ' open' : ''}`} {...(!expanded ? { inert: '' } : {})}>
         <div className="codex-tool-group-body">
           {msgs.map((msg, i) => {
+            if (msg.role === 'commentary' || msg.role === 'thinking') {
+              return <div className="codex-msg-assistant" key={`text-${i}`}>
+                {msg.role === 'thinking' && <div className="codex-tool-group-meta">{t('workbench.workThinking')}</div>}
+                <MarkdownText text={msg.content} keyPrefix={`process-${i}`} />
+              </div>;
+            }
             // 聚合落库的"工具调用意图"桩消息：参数与结果已由 tool_result 承载，跳过
             if (msg.role === 'tool_use' && !msg.tool_name) return null;
             const wfRun =
@@ -3627,6 +3601,9 @@ const CodeAgentPage: React.FC = () => {
   const [activeId, setActiveId] = useState<string | null>(null);
   const [messages, setMessages] = useState<CodingMessage[]>([]);
   const [running, setRunning] = useState(false);
+  const [summarizing, setSummarizing] = useState(false);
+  useEffect(() => { setSummarizing(false); }, [activeId]);
+  useEffect(() => { if (!running) setSummarizing(false); }, [running]);
   const [input, setInput] = useState('');
   const [creating, setCreating] = useState(false);
 
@@ -4829,9 +4806,27 @@ const CodeAgentPage: React.FC = () => {
       await add('coding:chunk', (p) => {
         if (!isMine(p)) return;
         setThinking(false);
-        setThinkingText('');
         countOutput((p as { content: string }).content);
         setStreamingText((prev) => prev + (p as { content: string }).content);
+      });
+      await add('coding:work_text', (p) => {
+        if (!isMine(p)) return;
+        const { role, content } = p as { role: 'commentary' | 'thinking'; content: string };
+        if (role === 'thinking') {
+          setThinking(false);
+          setThinkingText('');
+        } else {
+          setStreamingText('');
+        }
+        append({ role, content, timestamp: Date.now() });
+      });
+      await add('coding:summary_started', (p) => {
+        if (!isMine(p)) return;
+        setSummarizing(true);
+        setThinking(true);
+        setThinkingText('');
+        setStreamingText('');
+        setBudgetStopped(false);
       });
       await add('coding:assistant_message', (p) => {
         if (!isMine(p)) return;
@@ -6049,14 +6044,14 @@ const CodeAgentPage: React.FC = () => {
                         planMode={activeSession?.plan_mode ?? false}
                         onRun={(text) => sendContinuation(text)}
                       />
-                      {groupChatMessages(messages, running).map((it) => {
+                      {groupChatMessages(messages, running && !summarizing).map((it) => {
                         if (it.kind === 'group') {
                           return (
                             <ToolProcessGroup
                               key={`grp-${it.index}`}
                               msgs={it.msgs}
                               settled={it.settled}
-                              sessionRunning={running}
+                              sessionRunning={running && !summarizing}
                               cwd={activeSession?.working_directory ?? ''}
                             />
                           );
@@ -6135,17 +6130,17 @@ const CodeAgentPage: React.FC = () => {
                           <span className="codex-cursor" />
                         </div>
                       )}
-                      {thinking && (
+                      {(thinking || thinkingText) && (
                         <div className="codex-thinking">
-                          <div className="codex-thinking-status">
+                          {thinking && <div className="codex-thinking-status">
                             <Braces size={15} strokeWidth={1.8} className="codex-breathe" style={{ color: 'var(--codex-ink-faint)' }} />
                             <span>
-                              {compacting
+                              {summarizing ? t('workbench.summarizing') : compacting
                                 ? t('mind_inspector.code_compacting', { defaultValue: '正在压缩上下文…' })
                                 : t('mind_inspector.code_thinking', { defaultValue: '正在思考…' })}
                             </span>
                             <span className="codex-dots"><i /><i /><i /></span>
-                          </div>
+                          </div>}
                           {thinkingText && !compacting && (
                             <div className="codex-thinking-chain">{thinkingText}</div>
                           )}
@@ -6155,7 +6150,7 @@ const CodeAgentPage: React.FC = () => {
                         <Loader2 size={15} className="codex-spin" aria-hidden />
                         <span>{formatClock(turnElapsed)}</span><span aria-hidden>·</span>
                         <span title={t(turnOutput.estimated ? 'workbench.tokensEstimated' : 'workbench.tokensReported')}>{turnOutput.estimated ? '≈ ' : ''}{turnOutput.tokens.toLocaleString()} tokens</span>
-                        <span aria-hidden>·</span><span className="codex-live-turn-state">{t(compacting ? 'mind_inspector.code_compacting' : ask ? 'workbench.awaitAnswer' : thinking ? 'mind_inspector.code_thinking' : streamingText ? 'workbench.replyStreaming' : 'workbench.taskRunning')}</span>
+                        <span aria-hidden>·</span><span className="codex-live-turn-state">{t(summarizing ? 'workbench.summarizing' : compacting ? 'mind_inspector.code_compacting' : ask ? 'workbench.awaitAnswer' : thinking ? 'mind_inspector.code_thinking' : streamingText ? 'workbench.replyStreaming' : 'workbench.taskRunning')}</span>
                       </div>}
                     </div>
                   </>

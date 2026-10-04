@@ -473,7 +473,29 @@ const CMD_GROUPS: { key: CmdEntry['group']; label: string }[] = [
 /** 去掉命令前导斜杠，联想/执行都拿"纯字母名"做前缀匹配。 */
 const normCmdName = (c: string) => (c.startsWith('/') ? c.slice(1) : c);
 
-export function RoomScene() {
+export interface RoomSceneProps {
+  /**
+   * 场景装配完成后回调一次，交出「立即释放全部 GPU 资源」的函数。
+   *
+   * 为什么需要它：卸载时 React 的 cleanup 只能在**组件正常卸载**时跑。
+   * 而房间窗口是直接 `close()` 掉的——WebView2 上下文随进程一起销毁，
+   * JS 不会再执行任何语句，那套 dispose（geometry / material / texture /
+   * shadow.map / composer RT / forceContextLoss）一次都不会跑。
+   * Tauri v2 的所有窗口共享同一个 WebView2 environment，关掉房间窗口
+   * 并不会拆掉 GPU 环境，于是这份显存要等 WebView2 自己回收，时机不确定。
+   * 宿主（RoomWindow）先调它再关窗，释放就是确定性的。
+   *
+   * 幂等：重复调用安全，cleanup 路径与主动释放路径共用同一份实现。
+   */
+  onDisposeReady?: (dispose: () => void) => void;
+}
+
+export function RoomScene({ onDisposeReady }: RoomSceneProps = {}) {
+  // 用 ref 承接而不是进 effect 依赖：下面那个装配 effect 的依赖必须保持 []，
+  // 任何变化都会把整座场景重建一遍。父组件传进来的函数身份不受控，ref 是唯一
+  // 不会引起重装配的接法。
+  const onDisposeReadyRef = useRef(onDisposeReady);
+  onDisposeReadyRef.current = onDisposeReady;
   const containerRef = useRef<HTMLDivElement>(null);
   const hudStatsRef = useRef<HTMLDivElement>(null);
   const hudAgentsRef = useRef<HTMLDivElement>(null);
@@ -3116,7 +3138,11 @@ export function RoomScene() {
 
     /* ---------------- Cleanup ---------------- */
 
-    return () => {
+    // 幂等：卸载路径与「关窗前主动释放」路径共用同一份实现，两条都跑也只释放一次。
+    let disposed = false;
+    const disposeScene = () => {
+      if (disposed) return;
+      disposed = true;
       alive = false;
       characterAnimations.forEach(animation=>animation?.dispose());
       disposeBlenderFurniture();
@@ -3176,6 +3202,12 @@ export function RoomScene() {
       environmentApplyRef.current = null;
       (window as any).__ROOM__.setEnvironmentSource = undefined;
     };
+
+    // 场景建好了，把「立即释放」交给宿主。关窗路径（RoomWindow.closeRoom）会在
+    // close 之前调它，这样显存回收不再依赖 WebView2 何时销毁上下文。
+    onDisposeReadyRef.current?.(disposeScene);
+
+    return disposeScene;
   }, []);
 
   /* ---------------- 真实世界感知 → 房间环境 ---------------- */

@@ -75,7 +75,11 @@
 .usage-search button { display: flex; border: none; padding: 5px; color: inherit; background: transparent; }
 .usage-ranking { display: grid; gap: 8px; }
 .usage-rank-row { display: block; width: 100%; padding: 12px; text-align: left; border: 1px solid transparent; background: var(--panel-bg); color: var(--panel-text); border-radius: 9px; }
-.usage-rank-row:hover, .usage-rank-row[aria-pressed="true"] { border-color: var(--usage-input); }
+.usage-rank-row:hover, .usage-rank-row[aria-expanded="true"] { border-color: var(--usage-input); }
+.usage-rank-row[aria-expanded="true"] { border-radius: 9px 9px 0 0; }
+.usage-rank-row[aria-expanded="true"] .usage-rank-title svg { transform: rotate(90deg); }
+.usage-rank-item { min-width: 0; }
+.usage-rank-item > .usage-selection { border-top: 0; border-radius: 0 0 9px 9px; margin-bottom: 0; }
 .usage-rank-title { display: flex; align-items: center; gap: 10px; }
 .usage-rank-title > span { flex: 1; min-width: 0; overflow-wrap: anywhere; font-weight: 600; }
 .usage-rank-title strong { flex-shrink: 0; font-size: 12px; font-variant-numeric: tabular-nums; }
@@ -93,7 +97,9 @@
 .usage-matrix th small { display: block; color: var(--panel-text-tertiary); font-size: 9px; font-weight: 400; }
 .usage-matrix td { padding: 5px; min-width: 90px; }
 .usage-matrix td button { padding: 10px; border: 1px solid transparent; border-radius: 6px; color: var(--panel-text); width: 100%; min-width: 72px; font-variant-numeric: tabular-nums; }
-.usage-matrix td button:hover, .usage-matrix td button[aria-pressed="true"] { border-color: var(--panel-accent); }
+.usage-matrix td button:hover, .usage-matrix td button[aria-expanded="true"] { border-color: var(--panel-accent); }
+.usage-matrix .usage-matrix-detail > td { padding: 8px 0; white-space: normal; text-align: left; }
+.usage-matrix-detail .usage-selection { margin-bottom: 0; }
 .usage-no-cell { display: block; text-align: center; color: var(--panel-text-tertiary); }
 .usage-selection { border: 1px solid var(--usage-input); border-radius: 12px; padding: 18px; margin-bottom: 14px; background: var(--panel-surface); scroll-margin-top: 16px; }
 .usage-selection-heading { align-items: flex-start; margin-bottom: 14px; }

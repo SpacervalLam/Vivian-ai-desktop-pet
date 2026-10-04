@@ -1263,7 +1263,7 @@ mod cold_shoulder_tests {
     use super::*;
 
     fn manager(name: &str) -> PsychologyManager {
-        let path = std::env::temp_dir().join(format!("psych_cold_shoulder_{}.json", name));
+        let path = std::env::temp_dir().join(format!("psych_cold_shoulder_{}_{}.json", name, uuid::Uuid::new_v4()));
         PsychologyManager::load_or_init(path)
     }
 

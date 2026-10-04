@@ -181,7 +181,7 @@ mod tests {
         let msgs = vec![user(&long)];
         let topic = extract_last_user_topic(&msgs);
         assert!(topic.is_some());
-        assert!(topic.unwrap().len() <= 102); // 100 + "…"
+        assert!(topic.unwrap().chars().count() <= 101); // 100 + "…"
     }
 
     #[test]

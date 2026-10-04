@@ -33,16 +33,78 @@ pub struct ProgressState {
     pub stage: String,
 }
 
+/// 启动进度 Toast 窗口的 label。
+const STARTUP_TOAST_LABEL: &str = "startup_toast";
+
+/// 启动轮次代号：每轮 `begin_startup` 领新号。
+///
+/// 用途是给「延迟销毁启动 Toast」上保险——收尾时不会立即 close（那会让
+/// 「启动完成 ✓」来不及看），而是排一个宽限期后的销毁任务。宽限期内若又
+/// 开始了新一轮（重初始化），旧任务的代号已失效，不会误关新一轮正在用的窗口。
+static STARTUP_GEN: AtomicUsize = AtomicUsize::new(0);
+
+/// 进度条跑完到销毁窗口之间的停留时长。
+///
+/// 要够用户读完「启动完成 ✓」并看清进度条收尾，同时不至于让那个 WebView2
+/// 进程赖太久——这 1.6s 是「看得清」和「不白占内存」之间的折中。
+const FINISH_GRACE: Duration = Duration::from_millis(1600);
+
 /// 标记启动流程开始。
 pub fn begin_startup() {
     STARTUP_IN_PROGRESS.store(true, Ordering::SeqCst);
     LAST_PERCENT.store(0, Ordering::SeqCst);
     *LAST_PROGRESS.write() = None;
+    // 上一轮结束时启动进度 Toast 已被销毁（见 finish_startup），这一轮要重新建。
+    // 重置重试预算：否则「建一次失败就重试 10 次」的老额度可能已经在上一轮耗光，
+    // 这一轮偶发 ERROR_BUSY（快速重启时 WebView2 user data folder 锁残留）就没兜底了。
+    TOAST_RETRY_LEFT.store(TOAST_RETRY_BUDGET, Ordering::SeqCst);
+    STARTUP_GEN.fetch_add(1, Ordering::SeqCst);
 }
 
-/// 标记启动流程结束。
+/// 标记启动流程结束，并在宽限期后销毁启动进度 Toast 窗口。
+///
+/// 启动进度是一次性产物：进度条跑完还留着这个窗口，等于白占一个 WebView2
+/// 渲染进程（自带 Chromium runtime + V8 heap + compositor）到应用退出。
+/// 每次 `begin_startup`（含重初始化）需要时由 [`show_startup_toast`] 重建。
+///
+/// **不立即 close**：那会让「启动完成 ✓」一帧都没显示就消失。先排一个
+/// [`FINISH_GRACE`] 的延迟销毁，期间若新一轮启动领了新代号（重初始化），
+/// 旧任务自动作废，不会误关新一轮的窗口。
+///
+/// **无在线角色窗口时完全不销毁**。角色窗口一个都没有 = 启动没成功
+/// （预检未过 / 初始化失败），此时进度条上的「请完成配置」是用户唯一的
+/// 指引，连同自动弹出的设置引导窗一起留在屏幕上，不能撤。
 pub fn finish_startup() {
     STARTUP_IN_PROGRESS.store(false, Ordering::SeqCst);
+
+    let handle = { STARTUP_HANDLE.read().clone() };
+    let Some(handle) = handle else {
+        return;
+    };
+    let Some(state) = handle.try_state::<std::sync::Arc<AppState>>() else {
+        return;
+    };
+    if !crate::commands::window::any_online_character_window_exists(&handle, state.inner()) {
+        tracing::info!("[Startup] 无在线角色窗口，保留启动进度 Toast");
+        return;
+    }
+    if handle.get_webview_window(STARTUP_TOAST_LABEL).is_none() {
+        return;
+    }
+
+    // 领一个「永远不会被认领」的代号：新一轮 begin_startup 会把 STARTUP_GEN
+    // 推上去，这个值就再也匹配不上，任务自然空跑退出。
+    let stale = STARTUP_GEN.load(Ordering::SeqCst);
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(FINISH_GRACE).await;
+        if STARTUP_GEN.load(Ordering::SeqCst) != stale {
+            return;
+        }
+        if let Some(win) = handle.get_webview_window(STARTUP_TOAST_LABEL) {
+            let _ = win.close();
+            tracing::info!("[Startup] 启动流程结束，已销毁启动进度 Toast 窗口");
+        }
+    });
 }
 
 /// 注入启动进度事件使用的 AppHandle（在 lib.rs setup 中调用一次）。
@@ -231,9 +293,12 @@ pub async fn preflight(handle: &AppHandle, state: &Arc<AppState>) -> bool {
     true
 }
 
-/// 创建 startup_toast 窗口失败后的剩余重试次数（偶发 WebView2 ERROR_BUSY 时退避重试）。
+/// 创建 startup_toast 窗口失败后的初始重试预算（偶发 WebView2 ERROR_BUSY 时退避重试）。
 /// 快速重启场景下上一实例的 WebView2 子进程退出需要数秒，重试窗口需覆盖该周期。
-static TOAST_RETRY_LEFT: AtomicUsize = AtomicUsize::new(10);
+const TOAST_RETRY_BUDGET: usize = 10;
+
+/// 每轮启动/重初始化开始时把重试预算重置到这个值。
+static TOAST_RETRY_LEFT: AtomicUsize = AtomicUsize::new(TOAST_RETRY_BUDGET);
 
 /// 创建专用的启动进度 toast 窗口。
 ///
@@ -247,7 +312,7 @@ pub fn ensure_startup_toast() {
     let Some(handle) = STARTUP_HANDLE.read().as_ref().cloned() else {
         return;
     };
-    if handle.get_webview_window("startup_toast").is_some() {
+    if handle.get_webview_window(STARTUP_TOAST_LABEL).is_some() {
         TOAST_RETRY_LEFT.store(0, Ordering::SeqCst);
         return;
     }
@@ -271,7 +336,7 @@ pub fn ensure_startup_toast() {
         .unwrap_or((0.0, 0.0, 600.0));
     match WebviewWindowBuilder::new(
         &handle,
-        "startup_toast",
+        STARTUP_TOAST_LABEL,
         WebviewUrl::App("index.html?view=toast&character_id=startup".into()),
     )
     .title("Vivian Startup")
@@ -319,12 +384,21 @@ pub fn ensure_startup_toast() {
 /// 显示启动进度 Toast 窗口（后端兜底）。
 ///
 /// 前端挂载后通过 hasContent effect 自行 show，这里在握手返回后再 show 一次作为双保险，
-/// 避免前端渲染异常时进度条窗口无法出现。窗口未创建或已关闭时静默跳过。
+/// 避免前端渲染异常时进度条窗口无法出现。
+///
+/// 窗口不存在时**重建**而不是静默跳过：上一轮启动/重初始化收尾时
+/// [`finish_startup`] 已把它销毁（省一个常驻 WebView2 进程），
+/// 重初始化正是靠本函数重新把进度条拉起来。
 pub fn show_startup_toast() {
-    if let Some(handle) = STARTUP_HANDLE.read().as_ref() {
-        if let Some(win) = handle.get_webview_window("startup_toast") {
+    let handle = { STARTUP_HANDLE.read().clone() };
+    let Some(handle) = handle else {
+        return;
+    };
+    match handle.get_webview_window(STARTUP_TOAST_LABEL) {
+        Some(win) => {
             let _ = win.show();
         }
+        None => ensure_startup_toast(),
     }
 }
 

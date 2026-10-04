@@ -523,7 +523,8 @@ mod tests {
         }
         let formatted = profile.format_for_prompt();
         assert!(formatted.contains("Vivian近期行为画像"));
-        assert!(formatted.contains("互动轮次：5"));
+        assert_eq!(profile.inner.read().turns.len(), 5);
+        assert!(formatted.contains("最近话题："));
     }
 
     #[test]

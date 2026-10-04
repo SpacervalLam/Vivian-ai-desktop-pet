@@ -62,6 +62,8 @@ pub fn is_proactive_silence(raw: &str) -> bool {
 /// 主动行为内容
 #[derive(Debug, Clone)]
 pub struct BehaviorContent {
+    /// Runtime-selected addressee, never inferred from generated pronouns.
+    pub listener: Option<String>,
     pub text: String,
     pub expression: String,
     /// 投递渠道（默认 Bubble）
@@ -83,6 +85,7 @@ impl Default for BehaviorContent {
             content_type: ContentType::Greeting,
             importance: 0.5,
             value_score: None,
+            listener: None,
         }
     }
 }
@@ -132,6 +135,7 @@ impl BehaviorContent {
             content_type: self.content_type,
             importance: self.importance,
             value_score: self.value_score,
+            listener: self.listener,
         }
     }
 }
@@ -362,7 +366,7 @@ impl BehaviorDecider {
         parts.user_input.clear();
         let prompt = crate::pipeline::companion_prompt::CompanionPrompt::build(&parts, dialogue_messages);
         let event = format!("[Proactive event; not a new user request]\n{suffix}");
-        let mut messages = prompt.messages(dialogue_messages, &event, true, None, None);
+        let mut messages = prompt.messages(dialogue_messages, &event, true, None);
         // Proactive silence/delivery schema is the final protocol in this channel.
         messages.push(ChatMessage::system(protocol));
         Some(messages)
@@ -424,6 +428,7 @@ impl BehaviorDecider {
             content_type,
             importance,
             value_score,
+            listener: None,
         })
     }
 }
@@ -837,6 +842,17 @@ mod non_response_prompt_tests {
 #[cfg(test)]
 mod delivery_channel_tests {
     use super::*;
+    #[test]
+    fn composed_roommate_turn_preserves_locked_listener_in_queue() {
+        let content = BehaviorContent {
+            text: "你也发现了？".into(),
+            listener: Some("nana".into()),
+            ..Default::default()
+        };
+        let action = content.into_action(ProactiveTrigger::CrossCharacterReply, 0.0);
+        assert_eq!(action.listener.as_deref(), Some("nana"));
+        assert_eq!(action.trigger, "cross_character_reply");
+    }
     #[test]
     fn text_message_retains_channel_and_is_not_cut_to_bubble_length() {
         let text = "a".repeat(150);

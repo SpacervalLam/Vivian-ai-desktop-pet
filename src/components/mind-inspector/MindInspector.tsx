@@ -2,7 +2,7 @@
  * Mind Inspector 壳组件
  *
  * Large Title 大标题 + 浮动胶囊侧边栏 + 页面切换动画。
- * 侧边栏导航在 8 个页面组件之间切换，激活态采用填充背景 + 顶部 accent 高亮线。
+ * 侧边栏导航在六个一级页面之间切换，激活态采用填充背景 + 顶部 accent 高亮线。
  */
 
 import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react';
@@ -22,9 +22,11 @@ import {
 } from './design-system';
 import { NavigationProvider } from './NavigationContext';
 import type { PageParams } from './NavigationContext';
-import OverviewPage from './pages/OverviewPage';
-import JournalPage from './pages/JournalPage';
-import DialogueLabPage from './pages/DialogueLabPage';
+import MindPage from './pages/MindPage';
+import MemoryPage from './pages/MemoryPage';
+import DiaryPage from './pages/DiaryPage';
+import NotebookPage from './pages/NotebookPage';
+import PlannerPage from './pages/PlannerPage';
 import CodeAgentPage from './pages/CodeAgentPageNew';
 import { invalidatePastelCache } from './pages/GraphPage';
 import PageErrorBoundary from './PageErrorBoundary';
@@ -81,7 +83,7 @@ const NavButton: React.FC<{
 
 const MindInspector: React.FC = () => {
   const { t } = useTranslation();
-  const [activeNav, setActiveNav] = useState<NavKey>('overview');
+  const [activeNav, setActiveNav] = useState<NavKey>('mind');
   const [navRevealed, setNavRevealed] = useState(false);
   const [navPinned, setNavPinned] = useState(false);
   const navRef = useRef<HTMLDivElement>(null);
@@ -106,7 +108,7 @@ const MindInspector: React.FC = () => {
      **极简只在工作页生效，其他页永远是手账。**
 
      理由：极简是给「工作」那一页的密集信息界面（代码 / 轨迹 / 对话）准备的，
-     记忆 / 世界 / 画像三页是浏览型页面，保持手账本的手写纸感。
+     记忆 / 画像页面是浏览型页面，保持手账本的手写纸感。
 
        · `uiStyle`          —— 用户的**偏好**。要持久化、要驱动开关自己的高亮、
                                在非工作页也不能被改写（否则切走一次偏好就没了）。
@@ -166,20 +168,21 @@ const MindInspector: React.FC = () => {
     invalidatePastelCache();
   }, []);
 
-  // 合并前子视图跳转 → 合并页主键 + pageParams.sub。兼容 GraphPage → diary、MindPage → graph 等内部跳转。
+  // 将旧分组入口和内部定位目标映射到一级页面。
   const resolveNav = (page: NavKey, params?: PageParams): { key: NavKey; params: PageParams } => {
     const base = params ?? {};
     switch (page) {
-      case 'mind':
-      case 'world':
-      case 'graph':
+      case 'overview':
+        if (base.sub === 'graph' || base.sub === 'profile') return resolveNav(base.sub, base);
+        return { key: 'mind', params: base };
+      case 'journal':
+        if (base.sub === 'notebook' || base.sub === 'todo' || base.sub === 'scheduler' || base.sub === 'planner') return resolveNav(base.sub, base);
+        return { key: 'diary', params: base };
       case 'profile':
-        return { key: 'overview', params: { ...base, sub: page } };
-      case 'diary':
-      case 'notebook':
+        return { key: 'graph', params: { ...base, sub: 'profile' } };
       case 'todo':
       case 'scheduler':
-        return { key: 'journal', params: { ...base, sub: page } };
+        return { key: 'planner', params: { ...base, sub: page } };
       default:
         return { key: page, params: base };
     }
@@ -204,7 +207,7 @@ const MindInspector: React.FC = () => {
         notebookId: nbId,
         notebookCharacter: (nbChar as 'vivian' | 'nana') || 'vivian',
       });
-    } else if (navParam && (['overview', 'journal', 'code', 'mind', 'world', 'graph', 'profile', 'diary', 'notebook', 'todo', 'scheduler']).includes(navParam)) {
+    } else if (navParam && (['overview', 'journal', 'code', 'mind', 'graph', 'profile', 'diary', 'notebook', 'planner', 'todo', 'scheduler']).includes(navParam)) {
       navigateTo(navParam as NavKey, {});
     }
     void (async () => {
@@ -212,7 +215,7 @@ const MindInspector: React.FC = () => {
         'memory:navigate',
         (e) => {
           const p = e.payload;
-          if ((p.page === 'notebook' && p.notebookId) || p.page === 'diary' || p.page === 'todo' || p.page === 'scheduler') {
+          if (['mind', 'graph', 'profile', 'diary', 'notebook', 'planner', 'todo', 'scheduler', 'code', 'overview', 'journal'].includes(p.page)) {
             navigateTo(p.page as NavKey, {
               notebookId: p.notebookId,
               notebookCharacter: (p.notebookCharacter as 'vivian' | 'nana') || 'vivian',
@@ -233,18 +236,7 @@ const MindInspector: React.FC = () => {
   };
 
   // 封面条副标题：跟随当前主导航，显示具体页面名
-  const coverLabelKey = (() => {
-    switch (activeNav) {
-      case 'journal':
-        return 'mind_inspector.nav_journal';
-      case 'code':
-        return 'mind_inspector.nav_code';
-      case 'dialogue_lab':
-        return 'mind_inspector.nav_dialogue_lab';
-      default:
-        return 'mind_inspector.nav_overview';
-    }
-  })();
+  const coverLabelKey = NAV_ITEMS.find((item) => item.key === activeNav)?.labelKey ?? 'mind_inspector.nav_mind';
 
   // 窗口控制（封面条右侧按钮）：本组件仅用于 MemoryWindow，操作当前窗口
   const minimizeWindow = useCallback(async () => {
@@ -312,23 +304,20 @@ const MindInspector: React.FC = () => {
 
   const renderPage = (): React.ReactNode => {
     switch (activeNav) {
-      case 'overview':
-      // 兼容旧值直接命中（正常已被 resolveNav 映射，兜底）
       case 'mind':
-      case 'world':
+        return <div className="claude-theme claude-surface" style={{ minWidth: 0 }}><MindPage /></div>;
       case 'graph':
-      case 'profile':
-        return <OverviewPage />;
-      case 'journal':
+        return <MemoryPage initialLayer={pageParams.sub === 'profile' ? 'profile' : undefined} />;
       case 'diary':
       case 'notebook':
-      case 'todo':
-      case 'scheduler':
-        return <JournalPage />;
+      case 'planner':
+        return (
+          <div className="claude-theme record-scope" style={{ minWidth: 0, display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
+            {activeNav === 'diary' ? <DiaryPage /> : activeNav === 'notebook' ? <NotebookPage /> : <PlannerPage />}
+          </div>
+        );
       case 'code':
         return <CodeAgentPage />;
-      case 'dialogue_lab':
-        return <DialogueLabPage />;
       default:
         return null;
     }
@@ -347,7 +336,7 @@ const MindInspector: React.FC = () => {
           其他页这三处标记一律写回 "scrapbook"（含 `<body>` 那处，共三处标记），
           于是整窗（外壳 + 内容 + 弹层）一起回到手账，不存在「一半极简一半手账」。 */}
       <div
-        className={`codex-theme mind-inspector-root mind-scrapbook-window${isWorkPage ? ' is-work-page' : ''}`}
+        className={`codex-theme mind-inspector-root mind-scrapbook-window${isWorkPage ? ' is-work-page' : ' is-claude'}`}
         data-ui-style={effectiveUiStyle}
         data-nav-revealed={navOpen ? 'true' : 'false'}
       >
@@ -462,7 +451,7 @@ const MindInspector: React.FC = () => {
                     key={item.key}
                     item={item}
                     active={item.key === activeNav}
-                    onClick={() => { setActiveNav(item.key); setNavPinned(false); setNavRevealed(false); }}
+                    onClick={() => { navigateTo(item.key); setNavPinned(false); setNavRevealed(false); }}
                   />
                 ))}
               </div>

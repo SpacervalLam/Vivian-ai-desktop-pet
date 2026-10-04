@@ -11,30 +11,10 @@ use crate::tools::types::{
     PermissionResult, Tool, ToolCategory, ToolResult, ToolRiskTier, ToolUseContext,
     ValidationResult,
 };
-use crate::utils::process::silent_command;
 
-fn run_ps(script: &str) -> Result<String, String> {
-    let wrapped = format!(
-        "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; $OutputEncoding = [System.Text.Encoding]::UTF8; {}",
-        script
-    );
-    let output = silent_command("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &wrapped])
-        .output()
-        .map_err(|e| format!("启动 PowerShell 失败: {}", e))?;
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-    } else {
-        Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
-    }
-}
 
-/// 在阻塞线程池中执行 run_ps，避免同步子进程阻塞异步运行时工作线程
 async fn run_ps_async(script: &str) -> Result<String, String> {
-    let script = script.to_string();
-    tokio::task::spawn_blocking(move || run_ps(&script))
-        .await
-        .map_err(|e| format!("PowerShell 任务执行失败: {}", e))?
+    super::desktop_runtime::run_input(script).await
 }
 
 /// user32 P-Invoke 类型定义片段
@@ -183,6 +163,9 @@ impl Tool for ClickMouseTool {
                 );
             }
         }
+        if let Err(error) = super::desktop_runtime::validate_point(input["x"].as_i64().unwrap(), input["y"].as_i64().unwrap()) {
+            return ValidationResult::failure(error, 2);
+        }
         ValidationResult::success(Some(input.clone()))
     }
 
@@ -211,7 +194,7 @@ impl Tool for ClickMouseTool {
             single
         };
         let script = format!(
-            "{}; [U]::SetCursorPos({},{}) | Out-Null; {}",
+            "{}; if (-not [U]::SetCursorPos({},{})) {{ throw 'Cannot move cursor' }}; {}",
             USER32_TYPES.trim(),
             x,
             y,
@@ -489,7 +472,7 @@ impl Tool for TypeTextTool {
 
     async fn validate_input(&self, input: &Value, _ctx: &ToolUseContext) -> ValidationResult {
         match input.get("text").and_then(|v| v.as_str()) {
-            Some(t) if !t.is_empty() => ValidationResult::success(Some(input.clone())),
+            Some(t) if !t.is_empty() && t.chars().count() <= 4000 => ValidationResult::success(Some(input.clone())),
             _ => ValidationResult::failure("text 是必填项", 2),
         }
     }

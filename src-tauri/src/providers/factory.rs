@@ -349,7 +349,7 @@ pub fn create_task_provider(
         &task_config.model,
     );
     if let Some(overrides) = &task_config.reasoning_overrides {
-        crate::providers::reasoning_profiles::validate_adapter_patch(
+        crate::providers::request_body::validate(
             overrides,
             request_profile.as_ref(),
         )
@@ -435,7 +435,7 @@ pub fn create_probe_provider(
         &task_config.model,
     );
     if let Some(overrides) = &task_config.reasoning_overrides {
-        crate::providers::reasoning_profiles::validate_adapter_patch(
+        crate::providers::request_body::validate(
             overrides,
             request_profile.as_ref(),
         )

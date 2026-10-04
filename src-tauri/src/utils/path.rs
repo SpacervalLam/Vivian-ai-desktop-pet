@@ -5,6 +5,10 @@ use std::path::PathBuf;
 /// 平台默认路径（Windows: %APPDATA%\Vivian，macOS: ~/Library/Application Support/Vivian，Linux: ~/.local/share/Vivian），
 /// 失败时回退到当前目录下的 `vivian_data`。
 pub fn get_user_data_dir() -> PathBuf {
+    #[cfg(test)]
+    if let Some(directory) = std::env::var_os("VIVIAN_TEST_DATA_DIR") {
+        return PathBuf::from(directory);
+    }
     #[cfg(target_os = "windows")]
     {
         if let Some(appdata) = std::env::var_os("APPDATA") {

@@ -105,9 +105,6 @@ impl ValidationRunnable {
                 }
                 prev_blank = true;
             } else {
-                if prev_blank && !result.is_empty() {
-                    result.push('\n');
-                }
                 result.push_str(trimmed);
                 result.push('\n');
                 prev_blank = false;

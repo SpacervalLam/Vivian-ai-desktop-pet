@@ -2266,11 +2266,10 @@ pub fn close_child_window(app: AppHandle, label: String) -> Result<(), String> {
 
 /// 获取所有子窗口标签
 ///
-/// 排除以下窗口：
-/// - `"main"`：tauri.conf.json 预定义的隐藏控制器，无 UI
-/// - 角色桌宠窗口：label = character_id（如 "nana" / "vivian"），由角色窗口自身管理生命周期
+/// 排除角色桌宠窗口：label = character_id（如 "nana" / "vivian"），
+/// 由角色窗口自身管理生命周期。
 ///
-/// 仅返回真正的子窗口（chat / config / memory / diary / bubble / toast / status 等），
+/// 仅返回真正的子窗口（chat / config / memory / bubble / toast / startup_toast 等），
 /// 供退出时批量关闭使用。
 #[tauri::command]
 pub fn list_child_windows(
@@ -2286,7 +2285,6 @@ pub fn list_child_windows(
     let labels: Vec<String> = app
         .webview_windows()
         .keys()
-        .filter(|k| *k != "main")
         .filter(|k| !character_ids.contains(*k))
         .cloned()
         .collect();

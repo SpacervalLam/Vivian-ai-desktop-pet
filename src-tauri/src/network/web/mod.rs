@@ -1,10 +1,14 @@
 //! Shared search service for companion and work agents.
 //!
 //! Enabled engines form the request authorization pool. Explicit unsupported or
-//! disabled engines are rejected before resolution. Fast mode chooses one available
-//! inexpensive engine; research mode queries the pool concurrently. Reciprocal-rank
-//! fusion, source diversity and URL provenance preserve useful results across engines.
-//! Bing is a compatibility tombstone and never makes a network request.
+//! disabled engines are rejected before resolution. Fast mode queries the pool
+//! sequentially and keeps the first engine that returns content; research mode
+//! queries the pool concurrently. Reciprocal-rank fusion, source diversity and URL
+//! provenance preserve useful results across engines.
+//!
+//! Sequential fast mode exists because engine availability cannot be known without
+//! issuing a request: a configured key may be revoked, rate-limited or rejected.
+//! Trimming the pool up front would leave nobody to take over such a failure.
 //!
 //! Domain/date filters, short-lived caches and a whole-request deadline apply across
 //! retries and fallback. Partial failures remain visible; no match is distinct from
@@ -98,7 +102,7 @@ pub struct ProviderRegistry {
 }
 
 impl ProviderRegistry {
-    /// 内置注册表：duckduckgo / searxng / tavily / bing / deepseek
+    /// 内置注册表：duckduckgo / searxng / tavily / deepseek
     pub fn builtin() -> Self {
         let mut reg = Self::default();
         // 内置 id 唯一，注册失败直接 panic（程序错误而非运行时状态）
@@ -108,10 +112,17 @@ impl ProviderRegistry {
             .expect("builtin provider ids are unique");
         reg.register("tavily", providers::tavily_factory)
             .expect("builtin provider ids are unique");
-        reg.register("bing", providers::bing_factory)
-            .expect("builtin provider ids are unique");
         reg.register("deepseek", providers::deepseek_factory)
             .expect("builtin provider ids are unique");
+        for (id, factory) in [
+            ("exa", providers::exa_factory as ProviderFactory),
+            ("perplexity", providers::perplexity_factory as ProviderFactory),
+            ("openai", providers::openai_factory as ProviderFactory),
+            ("xai", providers::xai_factory as ProviderFactory),
+            ("anthropic", providers::anthropic_factory as ProviderFactory),
+        ] {
+            reg.register(id, factory).expect("builtin provider ids are unique");
+        }
         reg
     }
 
@@ -238,7 +249,9 @@ impl WebSearchService {
                 .map(|c| c.providers.clone())
                 .filter(|v| !v.is_empty())
                 .unwrap_or_else(|| vec!["duckduckgo".into()]);
-            if engines.iter().any(|e| e == "bing" || !enabled.contains(e)) {
+            // 已退役或未在配置中启用的引擎一律拒绝，不静默换人：
+            // 模型明确点了某家，换成别家会给出它没预期的来源。
+            if engines.iter().any(|e| !enabled.contains(e)) {
                 return Err(WebError::new(
                     WebErrorCode::ProviderConfiguredUnavailable,
                     "请求引擎未启用或已退役；不会静默扩大到其他引擎",
@@ -302,7 +315,15 @@ impl WebSearchService {
         proxy_url: Option<&str>,
     ) -> Result<WebSearchResult, WebError> {
         let chain = self.resolve_chain(request, config);
-        let mut outcome = self.run_chain(&chain, request, config, proxy_url).await;
+        // fast 模式（未指定 engines、非 research）走顺序降级：只成功调用一家引擎，
+        // 但第一家跑不通时下一家接手。research 模式并发扇出，合并多源提升覆盖率。
+        let sequential = request.engines.is_none() && !request.research;
+        let mut outcome = if sequential {
+            self.run_chain_sequential(&chain, request, config, proxy_url)
+                .await
+        } else {
+            self.run_chain(&chain, request, config, proxy_url).await
+        };
         if let Some(mut result) = outcome.merged.take() {
             result
                 .warnings
@@ -313,7 +334,12 @@ impl WebSearchService {
         // 空结果或全失败：代理场景直连重试一次（代理不可用不瘫痪搜索）
         if proxy_url.is_some() {
             tracing::warn!("[WebSearch] 配置了代理但无结果，尝试直连重试");
-            let mut retry = self.run_chain(&chain, request, config, None).await;
+            let mut retry = if sequential {
+                self.run_chain_sequential(&chain, request, config, None)
+                    .await
+            } else {
+                self.run_chain(&chain, request, config, None).await
+            };
             if let Some(mut result) = retry.merged.take() {
                 result
                     .warnings
@@ -402,23 +428,63 @@ impl WebSearchService {
             }
         }
 
-        if request.engines.is_none() && !request.research {
-            for id in ["tavily", "searxng", "duckduckgo", "deepseek"] {
-                if chain.contains(&id)
-                    && self
-                        .registry
-                        .read()
-                        .build(id, config, None)
-                        .is_some_and(|p| p.available())
-                {
-                    return vec![id];
-                }
-            }
-        }
+        // fast 模式（未指定 engines 且非 research）：链上只用一个引擎，按成本排序取第一个
+        // 「本地检查可用」的。返回完整链——是否只用一个由 run_chain 的顺序降级负责，
+        // 不能在这里截断：`available()` 只看凭据非空（不发请求），运行时故障
+        // （限流 / 鉴权失效 / 请求被判非法）不会反映到它上面，截断后就无人接手。
         chain
     }
 
-    /// 按链执行一次：并发扇出 → 收集 Ok/Err → 合并去重截断
+    /// 顺序尝试链上引擎，取第一个取得内容的成功结果。
+    ///
+    /// 用于 fast 模式：成本上仍只成功调用一家（失败调用不计结果），但把
+    /// 「凭据存在却跑不通」的情况交给下一家兜底，而不是整条搜索直接失败。
+    /// 按配置顺序尝试——用户把谁排在前面，就优先用谁。
+    async fn run_chain_sequential(
+        &self,
+        chain: &[&'static str],
+        request: &WebSearchRequest,
+        config: Option<&WebSearchConfig>,
+        proxy_url: Option<&str>,
+    ) -> ChainOutcome {
+        let mut errors = Vec::new();
+        let mut any_ok = false;
+        let mut empty_result: Option<WebSearchResult> = None;
+
+        for id in chain {
+            let outcome = self.run_chain(&[*id], request, config, proxy_url).await;
+            let failed_here = !outcome.errors.is_empty();
+            errors.extend(outcome.errors);
+            if outcome.merged.is_some() {
+                if failed_here && chain.len() > 1 {
+                    tracing::warn!(
+                        "[WebSearch] 前序引擎不可用，已降级到「{id}」并取得结果"
+                    );
+                }
+                return ChainOutcome {
+                    merged: outcome.merged,
+                    any_ok: true,
+                    empty_result: None,
+                    errors,
+                };
+            }
+            if outcome.any_ok {
+                any_ok = true;
+                if empty_result.is_none() {
+                    empty_result = outcome.empty_result;
+                }
+            }
+        }
+
+        ChainOutcome {
+            merged: None,
+            any_ok,
+            empty_result,
+            errors,
+        }
+    }
+
+    /// 并发扇出执行：收集 Ok/Err → 合并去重截断
     async fn run_chain(
         &self,
         chain: &[&'static str],
@@ -759,7 +825,11 @@ mod tests {
         assert!(svc.search(&req, Some(&cfg), None).await.unwrap().cached);
         req.refresh = true;
         assert!(!svc.search(&req, Some(&cfg), None).await.unwrap().cached);
-        req.engines = Some(vec!["bing".into()]);
+        // 未在配置中启用的引擎：请求级指定应被直接拒绝，而不是静默换人
+        req.engines = Some(vec!["mock_slow".into()]);
+        assert!(svc.search(&req, Some(&cfg), None).await.is_err());
+        // 未注册的引擎 id 同理
+        req.engines = Some(vec!["no_such_engine".into()]);
         assert!(svc.search(&req, Some(&cfg), None).await.is_err());
     }
     #[test]
@@ -812,16 +882,16 @@ mod tests {
         let mut reg = ProviderRegistry::builtin();
         assert_eq!(
             reg.ids(),
-            vec!["duckduckgo", "searxng", "tavily", "bing", "deepseek"]
+            vec!["duckduckgo", "searxng", "tavily", "deepseek", "exa", "perplexity", "openai", "xai", "anthropic"]
         );
 
         let err = reg
-            .register("bing", bing_factory_dup as ProviderFactory)
+            .register("deepseek", deepseek_factory_dup as ProviderFactory)
             .unwrap_err();
         assert_eq!(err.code, WebErrorCode::DuplicateProvider);
     }
 
-    fn bing_factory_dup(
+    fn deepseek_factory_dup(
         _c: Option<&WebSearchConfig>,
         _p: Option<&str>,
     ) -> Arc<dyn WebSearchProvider> {
@@ -844,18 +914,18 @@ mod tests {
             vec!["duckduckgo"]
         );
 
-        // 配置顺序保留 + 未知 id 过滤
-        cfg.providers = vec!["tavily".into(), "unknown".into(), "bing".into()];
+        // 配置顺序保留 + 未注册 id 过滤
+        cfg.providers = vec!["tavily".into(), "unknown".into(), "searxng".into()];
         assert_eq!(
             svc.resolve_chain(&WebSearchRequest::new("q"), Some(&cfg)),
-            vec!["tavily", "bing"]
+            vec!["tavily", "searxng"]
         );
 
         // 去重
-        cfg.providers = vec!["bing".into(), "bing".into()];
+        cfg.providers = vec!["tavily".into(), "tavily".into()];
         assert_eq!(
             svc.resolve_chain(&WebSearchRequest::new("q"), Some(&cfg)),
-            vec!["bing"]
+            vec!["tavily"]
         );
     }
 
@@ -863,14 +933,14 @@ mod tests {
     fn test_resolve_chain_request_engines() {
         let svc = WebSearchService::shared();
         let mut cfg = WebSearchConfig::default();
-        cfg.providers = vec!["bing".into(), "deepseek".into(), "tavily".into()];
+        cfg.providers = vec!["searxng".into(), "deepseek".into(), "tavily".into()];
         let mut base = WebSearchRequest::new("q");
         base.research = true;
 
         // 请求不带 engines → 全部已启用引擎
         assert_eq!(
             svc.resolve_chain(&base, Some(&cfg)),
-            vec!["bing", "deepseek", "tavily"]
+            vec!["searxng", "deepseek", "tavily"]
         );
 
         // 请求指定单个引擎（在已启用池内）→ 只用该引擎
@@ -885,22 +955,22 @@ mod tests {
         );
 
         // 指定未启用的引擎 → 交集空 → 回退全部已启用
-        let req = WebSearchRequest::new("q").with_engines(vec!["searxng".into()]);
+        let req = WebSearchRequest::new("q").with_engines(vec!["duckduckgo".into()]);
         assert_eq!(
             svc.resolve_chain(&req, Some(&cfg)),
-            vec!["bing", "deepseek", "tavily"]
+            vec!["searxng", "deepseek", "tavily"]
         );
 
         // 混合：部分启用部分未启用 → 只保留启用的部分
-        let req = WebSearchRequest::new("q").with_engines(vec!["searxng".into(), "bing".into()]);
-        assert_eq!(svc.resolve_chain(&req, Some(&cfg)), vec!["bing"]);
+        let req = WebSearchRequest::new("q").with_engines(vec!["duckduckgo".into(), "tavily".into()]);
+        assert_eq!(svc.resolve_chain(&req, Some(&cfg)), vec!["tavily"]);
 
         // 空字符串 / 空列表 → 忽略请求级指定
         let mut req = WebSearchRequest::new("q").with_engines(vec![" ".into()]);
         req.research = true;
         assert_eq!(
             svc.resolve_chain(&req, Some(&cfg)),
-            vec!["bing", "deepseek", "tavily"]
+            vec!["searxng", "deepseek", "tavily"]
         );
 
         // 默认池（用户未启用任何）下指定 duckduckgo → 可用

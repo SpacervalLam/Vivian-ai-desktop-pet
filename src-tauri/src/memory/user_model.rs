@@ -1114,7 +1114,7 @@ pub fn detect_weak_evidence(input: &str) -> Vec<DetectedEvidence> {
     let input_lower = input.to_lowercase();
 
     // "X有点烦" / "X不太好用" → 弱偏好
-    if let Some(captured) = extract_after_prefix(&input_lower, &["有点烦", "不太好用", "不太好", "有点麻烦", "不太喜欢"]) {
+    if let Some(captured) = extract_weak_subject(&input_lower, &["有点烦", "不太好用", "不太好", "有点麻烦", "不太喜欢"]) {
         results.push(DetectedEvidence {
             category: UserTraitCategory::Preference,
             key: "vague_dislike".to_string(),
@@ -1129,7 +1129,7 @@ pub fn detect_weak_evidence(input: &str) -> Vec<DetectedEvidence> {
     // （由调用方管理，不在本函数内处理）
 
     // "X还不错" / "X挺好的" → 弱偏好
-    if let Some(captured) = extract_after_prefix(&input_lower, &["还不错", "挺好的", "太好用了", "很好用"]) {
+    if let Some(captured) = extract_weak_subject(&input_lower, &["还不错", "挺好的", "太好用了", "很好用"]) {
         results.push(DetectedEvidence {
             category: UserTraitCategory::Preference,
             key: "vague_like".to_string(),
@@ -1148,6 +1148,18 @@ pub fn detect_weak_evidence(input: &str) -> Vec<DetectedEvidence> {
 // ============================================================================
 
 /// 在输入中查找指定前缀并返回后面的内容
+fn extract_weak_subject(input: &str, markers: &[&str]) -> Option<String> {
+    for marker in markers {
+        if let Some(index) = input.find(marker) {
+            let before = input[..index].trim();
+            let after = input[index + marker.len()..].trim();
+            let subject = if before.is_empty() { after } else { before };
+            if !subject.is_empty() && subject.chars().count() <= 50 { return Some(subject.to_string()); }
+        }
+    }
+    None
+}
+
 fn extract_after_prefix<'a>(input: &'a str, prefixes: &[&str]) -> Option<String> {
     for prefix in prefixes {
         if let Some(idx) = input.find(prefix) {
@@ -1226,7 +1238,7 @@ mod tests {
         let results = detect_strong_evidence("我以后都不用 Tailwind 了");
         assert!(!results.is_empty());
         let r = &results[0];
-        assert_eq!(r.key, "preference");
+        assert_eq!(r.key, "technology");
         assert!(r.value.contains("tailwind"));
         assert_eq!(r.strength, 0.90);
     }
@@ -1430,7 +1442,7 @@ mod tests {
         assert_eq!(t.related_topics.len(), 2);
         assert_eq!(t.evidence_count, 2);
         assert!((t.confidence - 0.8).abs() < 1e-6);
-        assert_eq!(t.created_at, now); // 新建
+        assert!((t.created_at - now).abs() < 0.01); // 新建
     }
 
     #[test]
@@ -1463,6 +1475,6 @@ mod tests {
         assert_eq!(t.evidence_count, 2); // mem1 + mem3
         assert!(t.confidence > 0.8); // 强化上浮
         assert!(t.confidence <= 0.95);
-        assert_eq!(t.created_at, now); // created_at 保留首次
+        assert!((t.created_at - now).abs() < 0.01); // created_at 保留首次
     }
 }

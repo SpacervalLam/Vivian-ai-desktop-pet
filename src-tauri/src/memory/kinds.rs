@@ -1,0 +1,209 @@
+//! 内容、证据与保留策略各自独立。写入时明确类别，读取时只使用明确类别。
+use super::types::MemoryItem;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecordKind {
+    Dialogue,
+    SessionSummary,
+    Fact,
+    Subjective,
+    Observation,
+    Internal,
+}
+
+/// Persisted records carry their own category; missing categories are never inferred.
+pub fn kind(item: &MemoryItem) -> RecordKind {
+    item.metadata
+        .get("record_kind")
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+        .unwrap_or(RecordKind::Internal)
+}
+
+/// Stamp a newly created record from the write API, never reinterpret stored data.
+pub fn initialize_record(item: &mut MemoryItem) {
+    let record_kind = item
+        .metadata
+        .get("record_kind")
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+        .unwrap_or_else(|| match item.memory_type.as_str() {
+            "short_term" | "casual_conversation" | "temporary_context" | "mid_term" => {
+                RecordKind::Dialogue
+            }
+            "session_summary" => RecordKind::SessionSummary,
+            "inner_monologue" | "insight" => RecordKind::Subjective,
+            "observation_note" => RecordKind::Observation,
+            "long_term" | "user" | "feedback" | "project" | "reference" | "general"
+            | "preference" | "identity" | "important_event" | "knowledge" => RecordKind::Fact,
+            _ => RecordKind::Internal,
+        });
+    if !item.metadata.is_object() {
+        item.metadata = serde_json::json!({});
+    }
+    let meta = item.metadata.as_object_mut().unwrap();
+    meta.insert(
+        "record_kind".into(),
+        serde_json::to_value(record_kind).unwrap(),
+    );
+    meta.insert("memory_schema_version".into(), serde_json::json!(2));
+    meta.entry("retention").or_insert_with(|| {
+        serde_json::json!(match record_kind {
+            RecordKind::Dialogue => "window",
+            RecordKind::Subjective | RecordKind::Internal | RecordKind::Observation => "ephemeral",
+            _ => "durable",
+        })
+    });
+    let evidence = if record_kind == RecordKind::Subjective {
+        "inferred"
+    } else if record_kind == RecordKind::SessionSummary {
+        "derived"
+    } else if meta
+        .get("source_quote")
+        .and_then(|v| v.as_str())
+        .is_some_and(|v| !v.trim().is_empty())
+    {
+        "quoted"
+    } else {
+        "unspecified"
+    };
+    meta.entry("evidence_kind")
+        .or_insert_with(|| serde_json::json!(evidence));
+    meta.entry("important_event")
+        .or_insert_with(|| serde_json::json!(item.memory_type == "important_event"));
+    meta.entry("topics").or_insert_with(|| {
+        serde_json::json!(item
+            .tags
+            .iter()
+            .filter(|tag| matches!(
+                tag.as_str(),
+                "preference"
+                    | "identity"
+                    | "user_profile"
+                    | "project_context"
+                    | "relationship"
+                    | "health"
+                    | "reference"
+                    | "knowledge"
+            ))
+            .collect::<Vec<_>>())
+    });
+}
+
+pub fn recallable(item: &MemoryItem) -> bool {
+    !item.content.trim().is_empty()
+        && !item.consolidated
+        && item.metadata["index_active"] != false
+        && matches!(
+            kind(item),
+            RecordKind::Fact | RecordKind::SessionSummary | RecordKind::Dialogue
+        )
+}
+
+/// 原话索引是窗口缓存，退窗不意味着已经摘要，更不能淘汰事实/约定。
+/// 保留内容与 ID，供旧成长证据接口及审计使用；规范原话仍在 DialogueManager。
+pub fn retire_dialogue_window(
+    entries: &mut [MemoryItem],
+    incoming: &MemoryItem,
+    capacity: usize,
+) -> Option<String> {
+    if kind(incoming) != RecordKind::Dialogue {
+        return None;
+    }
+    let active: Vec<_> = entries
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| {
+            kind(item) == RecordKind::Dialogue
+                && item.granularity == incoming.granularity
+                && !item.consolidated
+                && item.metadata["index_active"] != false
+                && !item.protected
+        })
+        .collect();
+    if active.len() < capacity {
+        return None;
+    }
+    let oldest = active
+        .into_iter()
+        .min_by(|a, b| a.1.timestamp.total_cmp(&b.1.timestamp))
+        .map(|(idx, _)| idx);
+    if let Some(idx) = oldest {
+        if !entries[idx].metadata.is_object() {
+            entries[idx].metadata = serde_json::json!({});
+        }
+        entries[idx].metadata["index_active"] = serde_json::json!(false);
+        return Some(entries[idx].id.clone());
+    }
+    None
+}
+
+/// 合并事实时保留每份原话证据，来源可以跨会话，摘要本身不参与这条链路。
+pub fn with_evidence(
+    mut incoming: serde_json::Value,
+    old: &serde_json::Value,
+) -> serde_json::Value {
+    if !incoming.is_object() {
+        incoming = serde_json::json!({});
+    }
+    let mut sources = Vec::new();
+    for meta in [old, &incoming] {
+        if let Some(existing) = meta["evidence_sources"].as_array() {
+            for source in existing {
+                if !sources.contains(source) {
+                    sources.push(source.clone());
+                }
+            }
+        }
+        if let Some(quote) = meta["source_quote"]
+            .as_str()
+            .filter(|q| !q.trim().is_empty())
+        {
+            let source = serde_json::json!({"quote":quote, "conversation_id":meta["conversation_id"],
+                "message_ids":meta["source_message_ids"], "subject":meta["subject"]});
+            if !sources.contains(&source) {
+                sources.push(source);
+            }
+        }
+    }
+    incoming["evidence_sources"] = serde_json::json!(sources);
+    incoming
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::types::Granularity;
+    use super::*;
+    fn item(t: &str) -> MemoryItem {
+        let mut m = MemoryItem::new("原文".into(), Granularity::Turn, 0.5);
+        m.memory_type = t.into();
+        initialize_record(&mut m);
+        m
+    }
+    #[test]
+    fn stored_labels_are_not_inferred_or_migrated() {
+        let mut unsupported = MemoryItem::new("旧原文".into(), Granularity::Turn, 0.5);
+        unsupported.memory_type = "long_term".into();
+        unsupported.tags.push("topic_summary".into());
+        assert_eq!(kind(&unsupported), RecordKind::Internal);
+        assert!(!recallable(&unsupported));
+        let mut fact = item("long_term");
+        fact.tags.push("inner_os".into());
+        assert_eq!(kind(&fact), RecordKind::Fact);
+        fact.metadata["record_kind"] = serde_json::json!("subjective");
+        assert!(!recallable(&fact));
+    }
+    #[test]
+    fn window_pressure_keeps_facts_and_never_claims_summary_success() {
+        let mut entries = vec![item("identity"), item("short_term")];
+        let fact = item("preference");
+        retire_dialogue_window(&mut entries, &fact, 1);
+        assert!(recallable(&entries[0]) && recallable(&entries[1]));
+        retire_dialogue_window(&mut entries, &item("short_term"), 1);
+        assert!(recallable(&entries[0]));
+        assert!(!recallable(&entries[1]));
+        assert!(!entries[1].consolidated);
+        assert!(entries[1].metadata.get("summarized").is_none());
+        assert_eq!(entries[1].content, "原文");
+    }
+}

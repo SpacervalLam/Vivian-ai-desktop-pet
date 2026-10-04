@@ -769,16 +769,61 @@ export default function ToastWindow() {
     };
   }, []);
 
-  // 窗口可见性：有 toast 或确认卡片时显示，全部清除后隐藏
+  // 窗口可见性：有内容时显示，全部清除后**销毁**。
+  //
+  // 为什么不是 hide：WebView2 的隐藏窗口不会释放渲染进程——一个空转的
+  // toast 窗口照样占着一份 Chromium runtime + V8 heap + compositor。
+  // toast 是典型的「需要时才在」的东西，没内容就该连窗口一起消失；
+  // 下次要显示时由角色窗口的 ensureToastWindow() 重新创建（冷启动开销
+  // 只在真有 toast 时付）。
+  //
+  // 四个必要约束，缺一个就出事：
+  //
+  // 1. `everShownRef` 守卫：本 effect 挂载时就会跑一次，那时 hasContent=false。
+  //    无条件 close 会让窗口在挂载瞬间自毁，而角色窗口的 ensureToastWindow
+  //    见窗口不存在又会重建 —— 变成 create/close 死循环。
+  // 2. startup_toast 例外：它要留到启动流程真正收尾，由后端 finish_startup
+  //    统一销毁（那边有 1.6s 宽限让「启动完成 ✓」读得完）。这里抢跑 close
+  //    会把那条提示砍掉。
+  // 3. 退场动画不受影响：条目是在 300ms 退场动画播完、handleExited 把它从
+  //    items 摘掉之后，hasContent 才变 false 的，所以 close 发生在动画之后。
+  // 4. 销毁前必须主动归还跨窗口占位：窗口被销毁时 JS 上下文直接消失，下面那条
+  //    「卸载前归还占位」的 cleanup 根本没机会跑。漏了这一步，兄弟 toast 窗口
+  //    （nana ↔ vivian）会一直为一个已经不存在的窗口空出竖直位置。
   const hasContent = items.length > 0 || confirms.length > 0;
+  const everShownRef = useRef(false);
   useEffect(() => {
     const win = getCurrentWindow();
     if (hasContent) {
+      everShownRef.current = true;
       void win.show().catch(() => {});
-    } else {
-      void win.hide().catch(() => {});
+      return;
     }
-  }, [hasContent]);
+    if (!everShownRef.current) return;
+    if (myCharId === 'startup') return;
+    everShownRef.current = false;
+    void (async () => {
+      // 销毁前把「我走了」和「我的占位还回去了」一起广播出去。
+      //
+      // toast:closed 是给角色窗口的复位信号（toast:ready 的反向对称事件）。
+      // **刻意不用 `getCurrentWindow().onCloseRequested` 让角色窗口监听销毁**：
+      // 那是挂在「别的窗口对象」上的跨窗口句柄，而实测只要角色窗口注册了它，
+      // 非活跃角色的窗口就会消失（6 次运行 4:2 一致复现，机制未追清）。改成由本
+      // 窗口在 close 前自报，全程留在自己的 JS 上下文里，与既有的 toast:ready /
+      // toast:stack 是同一套广播机制，行为可预测。
+      try {
+        await emit('toast:stack', { char_id: myCharId, height: 0 });
+        await emit('toast:closed', { character_id: myCharId });
+      } catch {
+        /* ignore */
+      }
+      try {
+        await win.close();
+      } catch {
+        /* ignore */
+      }
+    })();
+  }, [hasContent, myCharId]);
 
   // 监听其他窗口广播的占用高度（emit 是全局广播，自己也会收到，故过滤掉自身）
   useEffect(() => {

@@ -290,7 +290,15 @@ const ComposerEditor = React.forwardRef<ComposerEditorHandle, ComposerEditorProp
       const root = rootRef.current;
       if (!root) return '';
       const next: EditorBlock[] = [];
-      for (const child of Array.from(root.children)) {
+      for (const child of Array.from(root.childNodes)) {
+        // Typing into an empty contentEditable can create a root text node,
+        // rather than a paragraph. Read it without wrapping it or moving the caret.
+        if (child.nodeType === Node.TEXT_NODE) {
+          const text = child.textContent ?? '';
+          if (text) next.push({ id: nextBlockId(), type: 'p', html: escapeHtml(text) });
+          continue;
+        }
+        if (!(child instanceof HTMLElement)) continue;
         const el = child as HTMLElement;
         if (!el.dataset.blockId) {
           el.dataset.blockId = nextBlockId();

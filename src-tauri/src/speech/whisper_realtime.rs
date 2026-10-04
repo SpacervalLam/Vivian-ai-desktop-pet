@@ -53,9 +53,10 @@ pub struct WhisperRealtimeBackend {
     capture_thread: Option<std::thread::JoinHandle<()>>,
     stop_flag: Option<Arc<AtomicBool>>,
     /// WS 主任务（连接 + 收发循环）
-    ws_task: Option<JoinHandle<()>>,
+    ws_task: Option<JoinHandle<VivianResult<()>>>,
     /// 向 WS 任务发送指令的通道
     cmd_tx: Option<mpsc::UnboundedSender<WsCmd>>,
+    pending_audio: Arc<RwLock<Vec<i16>>>,
 }
 
 impl WhisperRealtimeBackend {
@@ -70,6 +71,7 @@ impl WhisperRealtimeBackend {
             stop_flag: None,
             ws_task: None,
             cmd_tx: None,
+            pending_audio: Arc::new(RwLock::new(Vec::with_capacity(CHUNK_SAMPLES * 2))),
         }
     }
 
@@ -161,8 +163,8 @@ impl WhisperRealtimeBackend {
         };
 
         // 重采样后的样本缓冲（24kHz），攒够 CHUNK_SAMPLES 发一次
-        let resampled_buf: Arc<RwLock<Vec<i16>>> =
-            Arc::new(RwLock::new(Vec::with_capacity(CHUNK_SAMPLES * 2)));
+        self.pending_audio.write().clear();
+        let resampled_buf = self.pending_audio.clone();
 
         let handle = std::thread::spawn(move || {
             let stream = match sample_format {
@@ -239,9 +241,12 @@ impl WhisperRealtimeBackend {
     ) -> VivianResult<()> {
         let api_key = self.whisper_cfg.api_key.clone();
         let handle = tokio::spawn(async move {
-            if let Err(e) = run_ws_loop(ws_url, api_key, cmd_rx, event_tx).await {
+            let result = run_ws_loop(ws_url, api_key, cmd_rx, event_tx.clone()).await;
+            if let Err(e) = &result {
                 tracing::error!("[Whisper-RT] WS 主任务异常退出: {e}");
+                let _ = event_tx.send(AsrEvent::error(e.to_string()));
             }
+            result
         });
         self.ws_task = Some(handle);
         Ok(())
@@ -332,6 +337,8 @@ async fn run_ws_loop(
 
     let mut accumulated_text = String::new();
     let mut speech_active = false;
+    let mut finishing = false;
+    let mut finishing_item: Option<String> = None;
 
     loop {
         tokio::select! {
@@ -346,11 +353,29 @@ async fn run_ws_loop(
                         ) {
                             tracing::warn!("[Whisper-RT] 处理 WS 消息失败: {e}");
                         }
+                        if let Ok(event) = serde_json::from_str::<serde_json::Value>(&text) {
+                            let kind = event["type"].as_str().unwrap_or("");
+                            let item = event["item_id"].as_str();
+                            if finishing && kind == "input_audio_buffer.committed" {
+                                finishing_item = item.map(str::to_owned);
+                            }
+                            if finishing && kind == "error" {
+                                return Err(VivianError::Speech("Realtime 服务拒绝音频提交".into()));
+                            }
+                            if finishing && kind == "conversation.item.input_audio_transcription.completed"
+                                && finishing_item.as_deref() == item {
+                                let _ = ws_write.send(Message::Close(None)).await;
+                                return Ok(());
+                            }
+                        }
                     }
                     Some(Ok(Message::Binary(_))) => {
                         // transcription 模式一般不发二进制
                     }
                     Some(Ok(Message::Close(_))) | None => {
+                        if finishing {
+                            return Err(VivianError::Speech("Realtime 连接在最终识别结果到达前关闭".into()));
+                        }
                         tracing::info!("[Whisper-RT] WS 连接关闭");
                         let _ = event_tx.send(AsrEvent::Stopped);
                         return Ok(());
@@ -384,7 +409,9 @@ async fn run_ws_loop(
                     }
                     Some(WsCmd::Commit) => {
                         let payload = serde_json::json!({"type": "input_audio_buffer.commit"});
-                        let _ = ws_write.send(Message::Text(payload.to_string())).await;
+                        ws_write.send(Message::Text(payload.to_string())).await
+                            .map_err(|e| VivianError::Speech(format!("提交 Realtime 音频失败: {e}")))?;
+                        finishing = true;
                         // commit 后等服务端 completed 事件，不主动关闭
                     }
                     Some(WsCmd::Clear) => {
@@ -527,7 +554,10 @@ impl AsrEngine for WhisperRealtimeBackend {
         self.start_ws_task(ws_url, cmd_rx, event_tx)?;
 
         // 启动 cpal 采集
-        self.start_capture(cmd_tx.clone())?;
+        if let Err(error) = self.start_capture(cmd_tx.clone()) {
+            if let Some(task) = self.ws_task.take() { task.abort(); }
+            return Err(error);
+        }
 
         self.cmd_tx = Some(cmd_tx);
         self.is_running = true;
@@ -549,26 +579,38 @@ impl AsrEngine for WhisperRealtimeBackend {
         self.stop_flag = None;
 
         // 发送 commit 指令，让 WS 任务发 input_audio_buffer.commit
-        if let Some(tx) = self.cmd_tx.take() {
+        if let Some(tx) = &self.cmd_tx {
+            let tail: Vec<i16> = self.pending_audio.write().drain(..).collect();
+            if !tail.is_empty() { let _ = tx.send(WsCmd::Audio(tail)); }
             let _ = tx.send(WsCmd::Commit);
-            // tx drop 后 WS 任务的 cmd_rx 会返回 None，触发关闭
+            // Keep the sender alive until completed arrives, then close the socket.
         }
 
         // 等待 WS 任务结束（带超时）
-        if let Some(handle) = self.ws_task.take() {
-            let _ = tokio::time::timeout(
+        let mut result = Ok(());
+        if let Some(mut handle) = self.ws_task.take() {
+            match tokio::time::timeout(
                 std::time::Duration::from_secs(5),
-                handle,
+                &mut handle,
             )
-            .await;
+            .await {
+                Ok(Ok(completion)) => result = completion,
+                Ok(Err(error)) => result = Err(VivianError::Speech(format!("Realtime 任务失败: {error}"))),
+                Err(_) => {
+                    handle.abort();
+                    let _ = handle.await;
+                    result = Err(VivianError::Speech("等待 Realtime 最终识别结果超时".into()));
+                }
+            }
         }
+        self.cmd_tx = None;
 
         self.is_running = false;
         if let Some(tx) = &self.event_tx {
             let _ = tx.send(AsrEvent::Stopped);
         }
         tracing::info!("[Whisper-RT] 录音已停止");
-        Ok(())
+        result
     }
 
     async fn transcribe(&self, audio: &[f32]) -> VivianResult<String> {
@@ -632,6 +674,53 @@ impl std::fmt::Debug for WhisperRealtimeBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn stop_flushes_tail_and_waits_for_delayed_final_text() {
+        use futures::{SinkExt, StreamExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}/v1/realtime", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+            let append = ws.next().await.unwrap().unwrap();
+            let append: serde_json::Value = serde_json::from_str(append.to_text().unwrap()).unwrap();
+            assert_eq!(append["type"], "input_audio_buffer.append");
+            assert_eq!(base64::engine::general_purpose::STANDARD.decode(append["audio"].as_str().unwrap()).unwrap(), vec![1, 0, 2, 0]);
+            let commit = ws.next().await.unwrap().unwrap();
+            assert!(commit.to_text().unwrap().contains("input_audio_buffer.commit"));
+            ws.send(Message::Text(serde_json::json!({
+                "type": "input_audio_buffer.committed", "item_id": "last"
+            }).to_string())).await.unwrap();
+            // A previous VAD turn may finish after our commit. It must not
+            // close the connection before the newly committed turn completes.
+            ws.send(Message::Text(serde_json::json!({
+                "type": "conversation.item.input_audio_transcription.completed",
+                "item_id": "previous", "transcript": "前一句"
+            }).to_string())).await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+            ws.send(Message::Text(serde_json::json!({
+                "type": "conversation.item.input_audio_transcription.completed",
+                "item_id": "last",
+                "transcript": "完整的最后一句"
+            }).to_string())).await.unwrap();
+        });
+        let (events, mut received) = broadcast::channel(16);
+        let (commands, rx) = mpsc::unbounded_channel();
+        let mut backend = WhisperRealtimeBackend::from_config(AsrConfig::default(), WhisperConfig::default());
+        backend.event_tx = Some(events.clone());
+        backend.cmd_tx = Some(commands);
+        backend.is_running = true;
+        backend.pending_audio.write().extend([1, 2]);
+        backend.ws_task = Some(tokio::spawn(async move { run_ws_loop(url, String::new(), rx, events).await }));
+        backend.stop_recording().await.unwrap();
+        assert!(matches!(received.recv().await.unwrap(), AsrEvent::FinalResult { text, .. } if text == "前一句"));
+        assert!(matches!(received.recv().await.unwrap(), AsrEvent::FinalResult { text, .. } if text == "完整的最后一句"));
+        assert!(matches!(received.recv().await.unwrap(), AsrEvent::Stopped));
+        assert!(backend.ws_task.is_none());
+        assert!(backend.cmd_tx.is_none());
+        server.await.unwrap();
+    }
 
     #[test]
     fn test_build_ws_url_http() {

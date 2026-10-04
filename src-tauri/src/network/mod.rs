@@ -5,6 +5,7 @@ pub mod proxy;
 pub mod request_utils;
 pub mod url_fetcher;
 pub mod web;
+pub mod web_evidence;
 
 pub use diagnose::{
     resolve_service_endpoint, run_diagnosis, DiagnosisFacts, DiagnosisItem, DiagnosisStatus,

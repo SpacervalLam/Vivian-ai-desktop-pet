@@ -1,37 +1,26 @@
-//! 陪伴对话的记忆边界。存储类型可以保持兼容，但进入对话提示词的内容必须有明确用途。
+//! 陪伴对话的记忆边界。进入对话提示词的内容必须有明确用途。
 use std::collections::HashSet;
 
 use super::types::MemoryItem;
 
-/// 内心活动和机器生成的索引不是用户经历的证据。旧数据库中的这些条目也在召回时隔离。
+/// 内心活动和机器生成的索引不是用户经历的证据。类别由写入方明确声明。
 pub fn is_dialogue_evidence(item: &MemoryItem) -> bool {
-    if item.consolidated || item.content.trim().is_empty() {
-        return false;
-    }
-    if matches!(item.memory_type.as_str(), "inner_monologue" | "observation_note") {
-        return false;
-    }
-    !item.tags.iter().any(|tag| {
-        matches!(tag.as_str(), "inner_monologue" | "inner_os" | "topic_signal" | "return_recap" | "tool_call")
-    }) && !item.metadata.get("topic_signal").and_then(|v| v.as_bool()).unwrap_or(false)
+    super::kinds::recallable(item)
 }
 
 /// 长期事实抽取的已知事实只来自长期层，避免拿原话、摘要、想法充当已确认事实。
 pub fn is_durable_fact(item: &MemoryItem) -> bool {
-    is_dialogue_evidence(item)
-        && matches!(
-            item.memory_type.as_str(),
-            "long_term" | "user" | "feedback" | "project" | "preference" | "identity" | "important_event"
-        )
+    is_dialogue_evidence(item) && super::kinds::kind(item) == super::kinds::RecordKind::Fact
+        && !matches!(item.metadata["source"].as_str(), Some("system_seed" | "environment_preset"))
 }
 
-/// 近端对话由 DialogueManager 提供；旧原话只在近期内允许补充，防止它挤掉长期事实。
+/// 近端对话由 DialogueManager 提供；原话缓存只在近期内允许补充，防止它挤掉长期事实。
 pub fn is_recallable(item: &MemoryItem, now: f64) -> bool {
     if !is_dialogue_evidence(item) {
         return false;
     }
-    match item.memory_type.as_str() {
-        "short_term" | "casual_conversation" | "temporary_context" =>
+    match super::kinds::kind(item) {
+        super::kinds::RecordKind::Dialogue =>
             now - item.timestamp <= 12.0 * 3600.0,
         _ => true,
     }
@@ -75,6 +64,7 @@ mod tests {
         thought.memory_type = "inner_monologue".into();
         let mut a = MemoryItem::new("喜欢喝茶".into(), Granularity::Summary, 0.8);
         a.memory_type = "preference".into();
+        super::super::kinds::initialize_record(&mut a);
         let mut b = a.clone();
         b.id = "another".into();
         let mut old_turn = MemoryItem::new("昨天聊天".into(), Granularity::Turn, 0.3);

@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 
 use tauri::{AppHandle, Emitter};
 
-use crate::error::{VivianError, VivianResult};
+use crate::error::VivianResult;
 
 /// 事件内容预览的最大字符数
 const CONTENT_PREVIEW_MAX_CHARS: usize = 80;
@@ -244,13 +244,9 @@ impl UnifiedEventLedger {
         if !self.persistence_path.exists() {
             return Ok(());
         }
-        let content = std::fs::read_to_string(&self.persistence_path)?;
-        if content.trim().is_empty() {
+        let Some(inner) = crate::utils::fs::load_json_or_backup::<LedgerInner>(&self.persistence_path) else {
             return Ok(());
-        }
-        let inner: LedgerInner = serde_json::from_str(&content).map_err(|e| {
-            VivianError::Other(format!("unified_event_ledger.json 解析失败: {e}"))
-        })?;
+        };
         let mut inner = inner;
         // 旧格式迁移：单 Vec → 分桶
         if !inner.events.is_empty() {
@@ -290,6 +286,11 @@ impl UnifiedEventLedger {
             inner.purge_expired(chrono::Utc::now().timestamp() as f64);
             if event_expired(&event, chrono::Utc::now().timestamp() as f64) {
                 Self::save_inner(&inner, &self.persistence_path)?;
+                return Ok(());
+            }
+            // Re-delivery of the same event must not duplicate model context or compaction input.
+            if inner.public_events.iter().chain(inner.character_events.values().flatten())
+                .any(|stored| stored.id == event.id) {
                 return Ok(());
             }
             match LedgerInner::bucket_key(&event) {
@@ -1141,6 +1142,25 @@ mod tests {
             compacting: std::sync::atomic::AtomicBool::new(false),
             router: Mutex::new(None),
         }
+    }
+
+    #[test]
+    fn repeated_event_delivery_is_idempotent_and_survives_restart() {
+        let dir=tempfile::tempdir().unwrap();
+        let mut ledger=make_ledger(LedgerInner::default());
+        ledger.persistence_path=dir.path().join("ledger.json");
+        let ledger=Arc::new(ledger);
+        let event=make_event("user","vivian",EventVisibility::Participants,chrono::Utc::now().timestamp() as f64);
+        ledger.append(event.clone()).unwrap();
+        ledger.append(event.clone()).unwrap();
+        assert_eq!(ledger.recent_events_visible_to("vivian",10).len(),1);
+        let mut restored=make_ledger(LedgerInner::default());
+        restored.persistence_path=ledger.persistence_path.clone();
+        restored.load().unwrap();
+        let restored=Arc::new(restored);
+        restored.append(event).unwrap();
+        assert_eq!(restored.recent_events_visible_to("vivian",10).len(),1);
+        assert!(restored.recent_events_visible_to("nana",10).is_empty());
     }
 
     #[test]

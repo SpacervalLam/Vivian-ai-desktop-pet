@@ -275,7 +275,8 @@ mod tests {
     fn test_ledger_blocks_reconsume() {
         let mut store = ContentStore::default();
         store.admit(item("BV1", 0.8, "科技"), 100);
-        assert!(!store.contains_bvid("BV1"));
+        assert!(store.contains_bvid("BV1"));
+        assert!(store.recommended_ledger.is_empty());
         store.mark_recommended(&["BV1".to_string()]);
         assert!(store.contains_bvid("BV1"));
     }

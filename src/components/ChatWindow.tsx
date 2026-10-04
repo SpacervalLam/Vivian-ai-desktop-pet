@@ -1,5 +1,5 @@
 import StickerImage from './stickers/StickerImage';
-import { parseSticker } from './stickers/stickers';
+import { parseSticker, stickerLabel } from './stickers/stickers';
 import type { StickerRef } from '../types';
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { invoke, convertFileSrc } from '@tauri-apps/api/core';
@@ -2399,7 +2399,7 @@ const ChatWindow: React.FC = () => {
           // Update the correct conversation even while viewing another person or the group.
           if (route.preview) {
             const target = route.preview;
-            setLastPreviews((prev) => ({ ...prev, [target]: { content: text || (sticker ? `[${sticker.label}]` : ''), timestamp: ts, role: 'assistant' } }));
+            setLastPreviews((prev) => ({ ...prev, [target]: { content: text || (sticker ? `[${stickerLabel(sticker)}]` : ''), timestamp: ts, role: 'assistant' } }));
           }
           if (route.unread) {
             const target = route.unread;
@@ -2651,7 +2651,7 @@ const ChatWindow: React.FC = () => {
             setGroupMessages((prev) => [...prev, ...newMsgs]);
           }
           // 立即刷新主面板群聊预览（乐观更新）
-          const previewText = isVoiceMessage ? '[语音]' : stripActions(finalText.trim() || buf.trim()) || (sticker ? `[${sticker.label}]` : '');
+          const previewText = isVoiceMessage ? '[语音]' : stripActions(finalText.trim() || buf.trim()) || (sticker ? `[${stickerLabel(sticker)}]` : '');
           if (previewText) {
             setLastPreviews((prev) => ({
               ...prev,
@@ -2698,7 +2698,7 @@ const ChatWindow: React.FC = () => {
         }
         if(sticker)setMessages(prev=>[...prev,{id:`sticker:${sid}`,role:'assistant',content:'',timestamp:Date.now()+1,sticker,character_id:doneCid}]);
         // 立即刷新主面板私聊预览（乐观更新）
-        const privatePreviewText = isVoiceMessage ? '[语音]' : stripActions(finalText) || (sticker ? `[${sticker.label}]` : '');
+        const privatePreviewText = isVoiceMessage ? '[语音]' : stripActions(finalText) || (sticker ? `[${stickerLabel(sticker)}]` : '');
         const previewCharId = privateCharIdRef.current;
         if (privatePreviewText && previewCharId) {
           setLastPreviews((prev) => ({

@@ -489,6 +489,7 @@ async function openWindow(
     onExisting?: (win: WebviewWindow) => void;
   } = {},
   t?: (key: string) => string,
+  retryOnCreationFailure = true,
 ): Promise<WebviewWindow | null> {
   // 按角色区分 label，避免多角色窗口的子窗口冲突
   const fullLabel = charScopedLabel(label);
@@ -576,6 +577,7 @@ async function openWindow(
   const transparent = options.transparent ?? false;
   const isFullscreen = options.fullscreen ?? false;
   try {
+    let creationFailed = false;
     const win = new WebviewWindow(fullLabel, {
       // 共享子窗口不绑定 character_id，由窗口内部三视图切换决定数据源
       url: SHARED_SUBWINDOWS.has(label)
@@ -620,6 +622,12 @@ async function openWindow(
       });
     }
     win.once('tauri://error', (e) => {
+      creationFailed = true;
+      // A failed WebView must not remain cached as an open inspector window.
+      if (CHILD_WINDOWS.get(fullLabel) === win) {
+        CHILD_WINDOWS.delete(fullLabel);
+        CLOSE_CLEANUP_REGISTERED.delete(fullLabel);
+      }
       console.error(`[openWindow] 窗口 "${fullLabel}" 创建失败:`, e);
     });
 
@@ -640,6 +648,15 @@ async function openWindow(
     win.once('tauri://error', settleOnce);
     creationTimer = window.setTimeout(settleOnce, WINDOW_CREATION_TIMEOUT_MS);
 
+    await creation;
+    if (creationFailed) {
+      // Retry an explicit open once, without turning cancelled prewarming into a visible window.
+      if (retryOnCreationFailure && !options.prewarm) {
+        await new Promise((resolve) => window.setTimeout(resolve, 250));
+        return openWindow(label, view, title, width, height, options, t, false);
+      }
+      return null;
+    }
     return win;
   } catch (err) {
     console.error(`[openWindow] 创建窗口 "${fullLabel}" 失败:`, err);
@@ -842,11 +859,65 @@ export default function App() {
   // 窗口未就绪时缓存的工具确认请求（载荷原样转发给 toast 子窗口）
   const pendingConfirmRef = useRef<ToolConfirmPayload[]>([]);
 
+  /** 把缓存的待发请求全部推给 toast 窗口，并清空缓存。
+   *
+   *  toast 窗口是「需要才建、用完即毁」的，所以这个函数不止在首屏挂载时调用：
+   *  每次新建窗口后（`toast:ready` 到达时，或事件丢失时的超时兜底）都要重放一遍，
+   *  否则等待期间攒下的请求会跟着上一个窗口一起消失。 */
+  const flushPendingToasts = useCallback(() => {
+    toastReadyRef.current = true;
+    const pending = pendingToastRef.current;
+    pendingToastRef.current = [];
+    for (const p of pending) {
+      void emit('toast:show', { message: p.message, type: p.type, duration: p.duration, key: p.key, action: p.action, character_id: p.owner });
+    }
+    const pendingConfirms = pendingConfirmRef.current;
+    pendingConfirmRef.current = [];
+    for (const c of pendingConfirms) {
+      void emit('toast:confirm', c);
+    }
+  }, []);
+
+  // `toast:ready` 事件丢失时的兜底定时器句柄（toast 窗口会反复建毁，每次都要重新武装）
+  const toastReadyFallbackRef = useRef<number | null>(null);
+  // 兜底逻辑要能回调 ensureToastWindow，但 ensureToastWindow 内部又会武装本定时器——
+  // 直接进依赖会构成循环定义。用 ref 打断：每次渲染同步最新引用，语义等价且无环。
+  const ensureToastWindowRef = useRef<() => Promise<void>>(async () => {});
+  const armToastReadyFallback = useCallback(() => {
+    if (toastReadyFallbackRef.current !== null) window.clearTimeout(toastReadyFallbackRef.current);
+    toastReadyFallbackRef.current = window.setTimeout(() => {
+      toastReadyFallbackRef.current = null;
+      void (async () => {
+        if (toastReadyRef.current) return;
+        // 补发前必须确认窗口还在。
+        //
+        // 窗口是「用完即毁」的，而 close 是异步 IPC：一条新 toast 完全可能落在
+        // 「close 已发起、窗口尚未销毁」的空档里——此时 showToast sees 窗口存在
+        // 就不重建，close-requested 又已把 ready 复位成 false，请求进了 pending。
+        // 1s 后若无脑补发，就等于 emit 给一个死窗口：这条丢失还算轻，更糟的是
+        // flushPendingToasts 会把 ready 重新置 true，而此后不会再有 close 事件
+        // 来复位它 —— **之后每一条 toast 都会静默丢失**，应用看起来像坏了。
+        // 窗口不在就重建一轮（ensureToastWindow 内部会自行重新武装）。
+        const alive = await WebviewWindow.getByLabel(charScopedLabel('toast')).catch(() => null);
+        if (!alive) {
+          await ensureToastWindowRef.current();
+          return;
+        }
+        flushPendingToasts();
+      })();
+    }, 1000);
+  }, [flushPendingToasts]);
+
   /** 创建 Toast 子窗口（首次惰性创建），定位到屏幕右下角并设置点击穿透 */
   const ensureToastWindow = useCallback(async (): Promise<void> => {
     const toastLabel = charScopedLabel('toast');
     const existing = await WebviewWindow.getByLabel(toastLabel);
-    if (existing) return;
+    if (existing) {
+      // 已存在：可能正处在「刚建好、还没 ready」的窗口化阶段，兜底照样武装一次。
+      // （若已就绪，定时器触发后看到 ready=true 会直接空跑，无副作用）
+      armToastReadyFallback();
+      return;
+    }
     // 先取屏幕尺寸，用于窗口高度（固定为屏幕的一半）+ 定位到右下角。
     // 半屏高是 ToastWindow 容量管理的前提：可用空间是确定的，新 toast 放不下时就先让
     // 最老的平滑退出再入场；若高度跟着内容伸缩，增删条目与重新测高之间必有一帧错位，
@@ -896,7 +967,19 @@ export default function App() {
     win.once('tauri://error', (e) => {
       console.error('[ensureToastWindow] toast 窗口创建失败:', e);
     });
-  }, []);
+    // 窗口用完会自己 close（内容清空即销毁，见 ToastWindow 的可见性 effect）。
+    // 这里必须把就绪标志复位：否则下一条 toast 会因 toastReadyRef 仍为 true
+    // 而直接 emit 给一个已被销毁的窗口，消息无声消失——用户看到的是
+    // 「点了没反应」。窗口是可反复建毁的，所以监听挂在每次新建出来的实例上。
+    // 窗口用完会自己 close（内容清空即销毁，见 ToastWindow 的可见性 effect）。
+    // 角色窗口靠 toast 窗口 close 前自报的 `toast:closed` 复位就绪标志（见下方
+    // 监听）——刻意不在这里对 `win` 注册 onCloseRequested：那是跨窗口句柄，
+    // 实测会让非活跃角色的窗口消失。
+    armToastReadyFallback();
+  }, [armToastReadyFallback]);
+
+  // 同步最新引用，供上面的兜底定时器回调（打破与 ensureToastWindow 的定义循环）
+  ensureToastWindowRef.current = ensureToastWindow;
 
   /** 创建微信消息横幅窗口（首次惰性创建），常驻隐藏，由 wechat:message_banner 事件触发显示 */
   const ensureMessageBannerWindow = useCallback(async (): Promise<void> => {
@@ -952,50 +1035,36 @@ export default function App() {
     [ensureToastWindow],
   );
 
-  // 注册 toast:ready 监听并创建 toast 子窗口（必须先 await listen 再创建窗口，避免竞态：
+  // 注册 toast:ready / toast:closed 监听并创建 toast 子窗口
+  // （必须先 await listen 再创建窗口，避免竞态：
   // 若窗口先创建，ToastWindow emit('toast:ready') 时本窗口的监听器可能尚未注册，事件丢失）
+  //
+  // 监听器是**常驻**的：toast 窗口用完即毁，这里要接住每一次重建后的 ready，
+  // 以及每一次销毁前的 closed。
+  // 补发逻辑已抽成 flushPendingToasts（ready 回调与超时兜底共用），
+  // 超时兜底的重新武装在 ensureToastWindow 内——那是唯一知道「又建了一个新窗口」的地方。
   useEffect(() => {
     let cancelled = false;
-    let unlisten: (() => void) | undefined;
+    const unlistens: Array<() => void> = [];
     void (async () => {
-      unlisten = await listen<{ character_id?: string }>('toast:ready', (e) => {
+      unlistens.push(await listen<{ character_id?: string }>('toast:ready', (e) => {
         if (e.payload?.character_id && e.payload.character_id !== getCharacterId()) return;
-        toastReadyRef.current = true;
-        const pending = pendingToastRef.current;
-        pendingToastRef.current = [];
-        for (const p of pending) {
-          void emit('toast:show', { message: p.message, type: p.type, duration: p.duration, key: p.key, action: p.action, character_id: p.owner });
-        }
-        const pendingConfirms = pendingConfirmRef.current;
-        pendingConfirmRef.current = [];
-        for (const c of pendingConfirms) {
-          void emit('toast:confirm', c);
-        }
-      });
-      if (cancelled) { safeUnlisten(unlisten); return; }
-      console.log(`[DIAG] listen registered: toast:ready, char=${getCharacterId()}`);
+        flushPendingToasts();
+      }));
+      // toast 窗口 close 前自报离场。没有它就绪标志会一直是 true，
+      // 之后每条 toast 都会 emit 给一个已被销毁的窗口——静默丢失，且再无事件
+      // 能复位。emit 是全局广播，必须按 character_id 过滤掉另一个角色的窗口。
+      unlistens.push(await listen<{ character_id?: string }>('toast:closed', (e) => {
+        if (e.payload?.character_id && e.payload.character_id !== getCharacterId()) return;
+        toastReadyRef.current = false;
+      }));
+      if (cancelled) { unlistens.forEach((u) => u()); return; }
+      console.log(`[DIAG] listen registered: toast:ready/closed, char=${getCharacterId()}`);
       // 监听器注册完成后再创建窗口
-      void ensureToastWindow().then(() => {
-        // 超时保险：若 toast:ready 事件因异常原因丢失，1 秒后强制补发 pending
-        setTimeout(() => {
-          if (!toastReadyRef.current) {
-            toastReadyRef.current = true;
-            const pending = pendingToastRef.current;
-            pendingToastRef.current = [];
-            for (const p of pending) {
-              void emit('toast:show', { message: p.message, type: p.type, duration: p.duration, key: p.key, action: p.action, character_id: p.owner });
-            }
-            const pendingConfirms = pendingConfirmRef.current;
-            pendingConfirmRef.current = [];
-            for (const c of pendingConfirms) {
-              void emit('toast:confirm', c);
-            }
-          }
-        }, 1000);
-      });
+      void ensureToastWindow();
     })();
-    return () => { cancelled = true; safeUnlisten(unlisten); };
-  }, [ensureToastWindow]);
+    return () => { cancelled = true; unlistens.forEach((u) => u()); };
+  }, [ensureToastWindow, flushPendingToasts]);
 
   // 监听后台记忆向量重建进度：切换嵌入模型后设置窗口立即关闭，
   // 重建由后端 spawn 任务执行，进度经事件推送到这里，用常驻 toast 实时展示。

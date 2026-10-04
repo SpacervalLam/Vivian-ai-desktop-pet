@@ -6,7 +6,6 @@
 //!
 //! 采集到的历史标题经 LLM 提炼为兴趣域，写回兴趣画像（登录态画像初始化）。
 
-use serde_json::Value;
 
 use crate::discovery::profile::InterestProfile;
 
@@ -66,17 +65,7 @@ pub async fn collect_bilibili_history(limit: usize) -> Vec<String> {
 
 fn parse_history_titles(text: &str) -> Vec<String> {
     // eval 返回的是 JSON 序列化字符串（可能被双引号包裹）
-    let trimmed = text.trim();
-    let parsed: Value = if let Ok(v) = serde_json::from_str(trimmed) {
-        v
-    } else if let Ok(inner) = serde_json::from_str::<String>(trimmed) {
-        match serde_json::from_str(&inner) {
-            Ok(v) => v,
-            Err(_) => return Vec::new(),
-        }
-    } else {
-        return Vec::new();
-    };
+    let Some(parsed) = crate::discovery::parse_json_tolerant(text) else { return Vec::new(); };
     parsed
         .as_array()
         .map(|arr| {

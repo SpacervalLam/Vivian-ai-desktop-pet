@@ -75,6 +75,9 @@ use crate::tools::McpManager;
 /// 插件清单（plugins/<name>/plugin.json）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PluginManifest {
+    /// Missing on legacy plugins, which use the original API contract.
+    #[serde(default = "crate::plugin_contract::default_api_version")]
+    api: u32,
     /// 插件名（缺省取目录名）
     #[serde(default)]
     name: String,
@@ -711,6 +714,8 @@ fn read_manifest(pdir: &Path) -> Result<(String, PluginManifest), (String, Strin
         .map_err(|e| (dir_name.clone(), format!("清单读取失败 {e}")))?;
     let mut manifest: PluginManifest =
         serde_json::from_str(&content).map_err(|e| (dir_name.clone(), format!("清单解析失败 {e}")))?;
+    crate::plugin_contract::validate_api_version(manifest.api)
+        .map_err(|error| (dir_name.clone(), error))?;
     if manifest.name.trim().is_empty() {
         manifest.name = dir_name;
     }
@@ -2393,6 +2398,7 @@ pub fn write_plugin_files(draft: &PluginDraft) -> Result<PathBuf, String> {
     // plugin.json（tools 声明固定指向 tools/*.json；providers 固定文件名）
     let manifest = serde_json::json!({
         "name": name,
+        "api": crate::plugin_contract::PLUGIN_API_VERSION,
         "version": draft.version.trim(),
         "description": draft.description.trim(),
         "skills": if draft.skills.is_empty() { Vec::<String>::new() } else { vec!["skills/*.md".to_string()] },
@@ -2518,6 +2524,18 @@ fn collect_md(base: &Path, dir: &Path, recursive: bool, out: &mut Vec<PathBuf>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn manifest_api_is_checked_before_plugin_code_or_contributions_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plugin.json");
+        std::fs::write(&path,r#"{"name":"contract-test","version":"1.0.0"}"#).unwrap();
+        assert!(read_manifest(dir.path()).is_ok());
+        std::fs::write(&path,serde_json::json!({"name":"contract-test","api":crate::plugin_contract::PLUGIN_API_VERSION+1}).to_string()).unwrap();
+        assert!(read_manifest(dir.path()).unwrap_err().1.contains("不兼容"));
+        std::fs::write(&path,r#"{"name":"contract-test","api":"1"}"#).unwrap();
+        assert!(read_manifest(dir.path()).is_err());
+    }
 
     #[test]
     fn version_parse_and_compare() {

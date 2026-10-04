@@ -127,7 +127,7 @@ impl CompanionPrompt {
     /// Stable prefix → fictional references → real history → evidence → actual turn
     /// → brief post-history direction. Synthetic content never takes user identity.
     pub fn messages(&self, history: &[ChatMessage], input: &str, internal: bool,
-        status: Option<&str>, extra_system: Option<&str>) -> Vec<ChatMessage> {
+        status: Option<&str>) -> Vec<ChatMessage> {
         let mut messages = Vec::new();
         let main = self.contents(Position::Main).join("\n\n");
         if !main.is_empty() { messages.push(ChatMessage::system(main)); }
@@ -138,7 +138,6 @@ impl CompanionPrompt {
         if let Some(status) = status.filter(|s| !s.trim().is_empty()) {
             messages.push(ChatMessage::system(format!("[INTERNAL STATUS — NOT A USER REQUEST]\n{status}")));
         }
-        if let Some(extra) = extra_system { messages.push(ChatMessage::system(extra)); }
         if !input.trim().is_empty() {
             messages.push(if internal { ChatMessage::system(input) }
                 else { ChatMessage::user(message_context::ensure_speaker_prefix(input)) });
@@ -193,7 +192,7 @@ mod tests {
         let history = vec![ChatMessage::user("older_user"), ChatMessage::assistant("older_assistant")];
         let parts = PromptParts { character_block: Some("my_identity".into()), user_input: "latest_user".into(),
             memory_text: "real_memory".into(), examples_block: Some("Example invitation\nFictional user: a\nExample response: b".into()), ..Default::default() };
-        let messages = CompanionPrompt::build(&parts, &history).messages(&history, &parts.user_input, false, Some("energy=50"), None);
+        let messages = CompanionPrompt::build(&parts, &history).messages(&history, &parts.user_input, false, Some("energy=50"));
         assert!(messages[0].content.contains("my_identity"));
         assert_eq!(messages[1].role, "system");
         assert!(messages[1].content.contains("FICTIONAL DIALOGUE"));
@@ -213,12 +212,12 @@ mod tests {
             format!("Example one\n{}\nExample two\n{}", "a ".repeat(3000), "b ".repeat(3000))), ..Default::default() };
         let prompt = CompanionPrompt::build(&parts, &history);
         assert!(prompt.contents(Position::Example).is_empty());
-        assert!(prompt.messages(&history, "current", false, None, None).iter().any(|m| m.content == history[0].content));
+        assert!(prompt.messages(&history, "current", false, None).iter().any(|m| m.content == history[0].content));
     }
     #[test]
     fn internal_events_and_status_never_impersonate_user() {
         let prompt = CompanionPrompt::build(&PromptParts::default(), &[]);
-        let messages = prompt.messages(&[], "startup_event", true, Some("status"), None);
+        let messages = prompt.messages(&[], "startup_event", true, Some("status"));
         assert!(messages.iter().all(|m| m.role == "system"));
         assert!(messages.iter().any(|m| m.content == "startup_event"));
     }
@@ -271,7 +270,7 @@ mod tests {
         let restored: CompanionPrompt = serde_json::from_value(serde_json::to_value(&prompt).unwrap()).unwrap();
         assert_eq!(prompt.render(), restored.render());
         assert_eq!(prompt.contents(Position::Example).len(), 3);
-        let messages = restored.messages(&[], "hello", false, None, None);
+        let messages = restored.messages(&[], "hello", false, None);
         let request = crate::pipeline::steps::generation::AIResponseGenerationRunnable::build_chat_request("chat", messages);
         assert_eq!(request.include_framework_instructions, Some(false));
         assert!(request.messages.last().unwrap().content.contains("[ACTIVE RESPONSE PROTOCOL]"));
@@ -303,7 +302,7 @@ mod tests {
                         .or_else(|| crate::persona::prompt_render::render_dialogue_seed_examples(&config, &[])),
                     has_native_schema: true, ..Default::default() };
                 let prompt = CompanionPrompt::build(&parts, &history);
-                let messages = prompt.messages(&history, input, false, None, None);
+                let messages = prompt.messages(&history, input, false, None);
                 assert!(messages.last().unwrap().content.contains("[NEXT TURN]"));
                 assert_eq!(messages.iter().filter(|m| m.content.contains(input)).count(), 1);
                 if let Some(dir) = &export {

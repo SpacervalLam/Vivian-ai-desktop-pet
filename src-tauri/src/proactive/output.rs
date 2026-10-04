@@ -1,6 +1,14 @@
 //! Normalize delivery metadata without turning malformed protocol output into speech.
 use serde_json::{json, Value};
 
+/// Older responses may omit audience metadata; an explicit conflict must never be rerouted.
+pub fn matches_listener(data: &Value, planned: &str) -> bool {
+    match data.get("listener") {
+        None => true,
+        Some(value) => value.as_str() == Some(planned),
+    }
+}
+
 pub fn normalize(raw: &str, planned_channel: &str) -> Result<Option<Value>, &'static str> {
     let text = raw.trim();
     if text.is_empty() {
@@ -59,6 +67,15 @@ pub fn normalize(raw: &str, planned_channel: &str) -> Result<Option<Value>, &'st
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn listener_is_locked_independently_of_transport() {
+        assert!(matches_listener(&json!({"text":"还在忙呀？"}), "user"));
+        assert!(matches_listener(&json!({"listener":"user"}), "user"));
+        assert!(matches_listener(&json!({"listener":"nana"}), "nana"));
+        assert!(!matches_listener(&json!({"listener":"nana"}), "user"));
+        assert!(!matches_listener(&json!({"listener":"user"}), "nana"));
+        assert!(!matches_listener(&json!({"listener":null}), "user"));
+    }
     #[test]
     fn prose_and_omitted_metadata_keep_the_planned_medium() {
         assert_eq!(

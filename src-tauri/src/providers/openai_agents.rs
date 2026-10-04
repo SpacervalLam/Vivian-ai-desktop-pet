@@ -185,13 +185,12 @@ impl OpenAiAgentsProvider {
         let mut agent = json!({"model": self.base.model, "instructions": instructions,
             "tools": agent_tools, "multi_agent": {"enabled": false}});
         // Reasoning fields are applied once by the final request adapter.
-        agent = self.base.finalize_body(agent);
         if let Some(schema) = schema {
             agent["text"] = json!({"format": {"type": "json_schema", "name": "response", "strict": true, "schema": schema}});
         }
         // Agents does not accept Chat/Responses sampling or max_output_tokens fields.
-        json!({"agent": agent, "environment": {"type": "none"},
-            "input": [{"role": "user", "content": content}], "stream": true})
+        self.base.finalize_body(json!({"agent": agent, "environment": {"type": "none"},
+            "input": [{"role": "user", "content": content}], "stream": true}))
     }
 
     fn continuation(messages: &[ChatMessage]) -> VivianResult<Option<(CallReference, Vec<Value>)>> {
@@ -771,9 +770,6 @@ impl BaseProvider for OpenAiAgentsProvider {
     }
     fn set_enable_search(&self, enable: bool) {
         self.base.set_enable_search(enable);
-    }
-    fn set_max_tokens_override(&self, tokens: u32) {
-        self.base.set_max_tokens_override(tokens);
     }
     fn set_temperature_override(&self, temp: Option<f64>) {
         self.base.set_temperature_override(temp);

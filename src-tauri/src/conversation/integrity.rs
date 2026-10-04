@@ -80,6 +80,7 @@ impl ConversationIntegrity {
         // 倒序确保插入不影响后续索引计算
         let mut repairs = Vec::new();
         let mut sorted_orphans = orphaned;
+        sorted_orphans.reverse();
         sorted_orphans.sort_by(|a, b| b.0.cmp(&a.0)); // 降序
 
         for (assistant_idx, tool_call_id, tool_name) in sorted_orphans {
@@ -94,7 +95,10 @@ impl ConversationIntegrity {
             // 插入位置：assistant 消息之后
             // 如果有多个 tool_call 对应同一个 assistant 消息，
             // 它们会被按倒序插入，最终保持原始顺序
-            let insert_pos = (assistant_idx + 1).min(messages.len());
+            let mut insert_pos = (assistant_idx + 1).min(messages.len());
+            while insert_pos < messages.len() && messages[insert_pos].role == "tool" {
+                insert_pos += 1;
+            }
             messages.insert(insert_pos, synthetic);
 
             repairs.push(RepairAction::InsertedSyntheticResult {

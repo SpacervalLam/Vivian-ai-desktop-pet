@@ -39,7 +39,7 @@ pub enum ActivityKind {
     Idle,
     /// 正在与用户对话
     Talking,
-    /// 凝神/专注（深度思考、工作、学习）
+    /// 专注（深度思考、工作、学习）
     Focusing,
     /// 桌面观察（用户在前台做事，角色在观察）
     Observing,
@@ -117,7 +117,7 @@ impl Default for ActivityState {
 impl ActivityState {
     /// 持续时间（秒）
     pub fn duration_secs(&self, now: i64) -> f64 {
-        if self.started_at == 0 {
+        if self.kind == ActivityKind::Idle {
             0.0
         } else {
             (now - self.started_at).max(0) as f64

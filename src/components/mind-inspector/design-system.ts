@@ -7,10 +7,12 @@
 
 import type { LucideIcon } from 'lucide-react';
 import {
-  Layers,
+  Brain,
+  Network,
+  BookHeart,
+  CalendarClock,
   NotebookPen,
   Code2,
-  FlaskConical,
 } from 'lucide-react';
 
 // === 颜色（跟随 --panel-* 主题变量） ===
@@ -202,23 +204,15 @@ export const CHARACTER_ACCENT = {
   nana: '#C084FC',
 } as const;
 
+/** 心智观察器内容页（Claude 主题）的统一强调色：陶土橙。
+    角色色 CHARACTER_ACCENT（黄 / 紫）留给聊天窗口；内容页统一用这一支，
+    才能和页面里的纸、墨、标签对上。 */
+export const CLAUDE_ACCENT = '#C96442';
+
 // === 导航项定义 ===
-export type NavKey =
-  // 合并页主键（侧边栏导航项）
-  | 'overview'
-  | 'journal'
-  // 独立页
-  | 'code'
-  | 'dialogue_lab'
-  // 兼容合并前的子视图跳转目标（navigateTo 内部映射到 overview / journal + sub）
-  | 'mind'
-  | 'world'
-  | 'graph'
-  | 'profile'
-  | 'diary'
-  | 'notebook'
-  | 'todo'
-  | 'scheduler';
+/** 一级页面；其余键用于兼容已有深链接和跨页跳转。 */
+export type NavKey = 'mind' | 'graph' | 'diary' | 'notebook' | 'planner' | 'code'
+  | 'profile' | 'todo' | 'scheduler' | 'overview' | 'journal';
 
 export interface NavItem {
   key: NavKey;
@@ -227,8 +221,10 @@ export interface NavItem {
 }
 
 export const NAV_ITEMS: NavItem[] = [
-  { key: 'overview', icon: Layers, labelKey: 'mind_inspector.nav_overview' },
-  { key: 'journal', icon: NotebookPen, labelKey: 'mind_inspector.nav_journal' },
+  { key: 'mind', icon: Brain, labelKey: 'mind_inspector.nav_mind' },
+  { key: 'graph', icon: Network, labelKey: 'mind_inspector.nav_graph' },
+  { key: 'diary', icon: BookHeart, labelKey: 'mind_inspector.nav_diary' },
+  { key: 'notebook', icon: NotebookPen, labelKey: 'mind_inspector.nav_notebook' },
+  { key: 'planner', icon: CalendarClock, labelKey: 'mind_inspector.nav_planner' },
   { key: 'code', icon: Code2, labelKey: 'mind_inspector.nav_code' },
-  { key: 'dialogue_lab', icon: FlaskConical, labelKey: 'mind_inspector.nav_dialogue_lab' },
 ];

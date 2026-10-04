@@ -3,7 +3,7 @@ use crate::error::{VivianError, VivianResult};
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use scraper::{Html, Selector};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     sync::Arc,
@@ -11,12 +11,12 @@ use std::{
 };
 const MAX_BYTES: usize = 8 * 1024 * 1024;
 const MAX_TEXT: usize = 500_000;
-#[derive(Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PageLink {
     pub title: String,
     pub url: String,
 }
-#[derive(Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FetchedPage {
     pub url: String,
     pub title: String,
@@ -27,6 +27,9 @@ pub struct FetchedPage {
     pub published_at: Option<String>,
     pub truncated: bool,
     pub cached: bool,
+    /// Original PDF retained independently of the bounded text preview.
+    #[serde(skip)]
+    pub raw_pdf: Option<Arc<Vec<u8>>>,
 }
 static CACHE: Lazy<Mutex<HashMap<String, (Instant, Arc<FetchedPage>)>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
@@ -54,6 +57,9 @@ pub async fn fetch_page(url: &str) -> VivianResult<FetchedPage> {
     Ok(page)
 }
 pub async fn fetch_page_with_refresh(url: &str, refresh: bool) -> VivianResult<FetchedPage> {
+    fetch_document(url, refresh, false).await
+}
+async fn fetch_document(url: &str, refresh: bool, allow_local: bool) -> VivianResult<FetchedPage> {
     let u = validate_url(url)?;
     let key = u.to_string();
     if !refresh {
@@ -65,13 +71,7 @@ pub async fn fetch_page_with_refresh(url: &str, refresh: bool) -> VivianResult<F
             }
         }
     }
-    let mut resp = crate::network::http_client::get_global_client()
-        .get(u)
-        .header("User-Agent", "Mozilla/5.0 (compatible; VivianBot/1.0)")
-        .timeout(Duration::from_secs(20))
-        .send()
-        .await
-        .map_err(|e| VivianError::Other(format!("抓取失败: {e}")))?;
+    let mut resp = public_response(u, allow_local).await?;
     if !resp.status().is_success() {
         return Err(VivianError::Other(format!("HTTP {}", resp.status())));
     }
@@ -99,11 +99,13 @@ pub async fn fetch_page_with_refresh(url: &str, refresh: bool) -> VivianResult<F
     }
     let decode_url = url.clone();
     let decode_type = content_type.clone();
+    let raw_pdf = (content_type.contains("application/pdf") || bytes.starts_with(b"%PDF-"))
+        .then(|| Arc::new(bytes.clone()));
     let (title, text, links, published_at) =
         tokio::task::spawn_blocking(move || decode_document(&decode_url, &decode_type, &bytes))
             .await
             .map_err(|e| VivianError::Other(format!("解析失败: {e}")))??;
-    if text.trim().is_empty() {
+    if text.trim().is_empty() && raw_pdf.is_none() {
         return Err(VivianError::Other("未提取到正文；可能需要登录、浏览器渲染或扫描 PDF 的 OCR。可使用已连接的浏览器桥读取页面。".into()));
     }
     let page = FetchedPage {
@@ -116,6 +118,7 @@ pub async fn fetch_page_with_refresh(url: &str, refresh: bool) -> VivianResult<F
         retrieved_at: chrono::Utc::now().to_rfc3339(),
         published_at,
         cached: false,
+        raw_pdf,
     };
     let mut cache = CACHE.lock();
     cache.retain(|_, (at, _)| at.elapsed() < Duration::from_secs(300));
@@ -131,14 +134,104 @@ pub async fn fetch_page_with_refresh(url: &str, refresh: bool) -> VivianResult<F
     cache.insert(key, (Instant::now(), Arc::new(page.clone())));
     Ok(page)
 }
+fn public_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(ip) => {
+            !ip.is_private()
+                && !ip.is_loopback()
+                && !ip.is_link_local()
+                && !ip.is_unspecified()
+                && !ip.is_multicast()
+                && !ip.is_broadcast()
+                && !ip.is_documentation()
+                && ip.octets()[0] != 0
+                && ip.octets()[0] < 240
+                && !(ip.octets()[0] == 100 && (64..=127).contains(&ip.octets()[1]))
+                && !(ip.octets()[0] == 198 && (18..=19).contains(&ip.octets()[1]))
+        }
+        std::net::IpAddr::V6(ip) => ip
+            .to_ipv4_mapped()
+            .map(|v| public_ip(v.into()))
+            .unwrap_or_else(|| {
+                (ip.segments()[0] & 0xe000) == 0x2000
+                    && !ip.is_loopback()
+                    && !ip.is_unspecified()
+                    && !ip.is_multicast()
+                    && (ip.segments()[0] & 0xfe00) != 0xfc00
+                    && (ip.segments()[0] & 0xffc0) != 0xfe80
+                    && !(ip.segments()[0] == 0x2001 && ip.segments()[1] == 0xdb8)
+            }),
+    }
+}
+/// Redirects are followed manually: inspect every destination before sending a request.
+async fn public_response(
+    mut url: reqwest::Url,
+    allow_local: bool,
+) -> VivianResult<reqwest::Response> {
+    let started = Instant::now();
+    let (_, proxy) = crate::network::web::read_search_config();
+    for hop in 0..=5 {
+        validate_url(url.as_str())?;
+        let host = url
+            .host_str()
+            .ok_or_else(|| VivianError::Other("Missing hostname".into()))?;
+        let addresses = tokio::time::timeout(
+            Duration::from_secs(5),
+            tokio::net::lookup_host((host, url.port_or_known_default().unwrap_or(443))),
+        )
+        .await
+        .map_err(|_| VivianError::Other("DNS lookup timed out".into()))?
+        .map_err(|e| VivianError::Other(format!("DNS lookup failed: {e}")))?
+        .collect::<Vec<_>>();
+        if addresses.is_empty() || (!allow_local && addresses.iter().any(|a| !public_ip(a.ip()))) {
+            return Err(VivianError::Other("Web retrieval only permits public internet destinations; use authorized workspace/browser tools for local resources".into()));
+        }
+        let remaining = Duration::from_secs(20)
+            .checked_sub(started.elapsed())
+            .ok_or_else(|| VivianError::Other("Fetch reached its time budget".into()))?;
+        let mut builder = reqwest::Client::builder()
+            .timeout(remaining)
+            .redirect(reqwest::redirect::Policy::none())
+            .resolve_to_addrs(host, &addresses);
+        if let Some(proxy) = &proxy {
+            builder = builder
+                .proxy(reqwest::Proxy::all(proxy).map_err(|e| VivianError::Other(e.to_string()))?);
+        } else {
+            builder = builder.no_proxy();
+        }
+        let response = builder
+            .build()
+            .map_err(|e| VivianError::Other(e.to_string()))?
+            .get(url.clone())
+            .header("User-Agent", "Mozilla/5.0 (compatible; VivianBot/1.0)")
+            .send()
+            .await
+            .map_err(|e| VivianError::Other(format!("Fetch failed: {e}")))?;
+        if !response.status().is_redirection() {
+            return Ok(response);
+        }
+        if hop == 5 {
+            return Err(VivianError::Other("Too many redirects".into()));
+        }
+        let location = response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|h| h.to_str().ok())
+            .ok_or_else(|| VivianError::Other("Redirect omitted Location".into()))?;
+        url = url
+            .join(location)
+            .map_err(|e| VivianError::Other(e.to_string()))?;
+    }
+    unreachable!()
+}
+
 fn decode_document(
     url: &str,
     ct: &str,
     bytes: &[u8],
 ) -> VivianResult<(String, String, Vec<PageLink>, Option<String>)> {
     if ct.contains("application/pdf") || bytes.starts_with(b"%PDF-") {
-        let text = pdf_extract::extract_text_from_mem(bytes)
-            .map_err(|e| VivianError::Other(format!("PDF 提取失败: {e}")))?;
+        let text = pdf_extract::extract_text_from_mem(bytes).unwrap_or_default();
         return Ok((url.into(), text, vec![], None));
     }
     let mut detector = chardetng::EncodingDetector::new();
@@ -168,57 +261,7 @@ fn extract_html(url: &str, html: &str) -> (String, String, Vec<PageLink>, Option
         .select(&main_selector)
         .next()
         .unwrap_or_else(|| document.root_element());
-    let mut text = String::new();
-    for node in root.descendants() {
-        if node.ancestors().any(|n| {
-            n.value().as_element().is_some_and(|e| {
-                matches!(
-                    e.name(),
-                    "script"
-                        | "style"
-                        | "nav"
-                        | "header"
-                        | "footer"
-                        | "aside"
-                        | "noscript"
-                        | "iframe"
-                        | "form"
-                        | "svg"
-                        | "head"
-                ) || e.attr("hidden").is_some()
-                    || e.attr("aria-hidden") == Some("true")
-            })
-        }) {
-            continue;
-        }
-        match node.value() {
-            scraper::Node::Text(t) => text.push_str(t),
-            scraper::Node::Element(e)
-                if matches!(
-                    e.name(),
-                    "p" | "div"
-                        | "br"
-                        | "h1"
-                        | "h2"
-                        | "h3"
-                        | "li"
-                        | "tr"
-                        | "section"
-                        | "pre"
-                        | "blockquote"
-                ) =>
-            {
-                text.push('\n')
-            }
-            _ => {}
-        }
-    }
-    let text = text
-        .lines()
-        .map(|s| s.split_whitespace().collect::<Vec<_>>().join(" "))
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n");
+    let text = markdown_element(root, url).trim().to_string();
     let link_selector = Selector::parse("a[href]").expect("constant selector");
     let base = reqwest::Url::parse(url).ok();
     let mut seen = std::collections::HashSet::new();
@@ -246,6 +289,120 @@ fn extract_html(url: &str, html: &str) -> (String, String, Vec<PageLink>, Option
     });
     (title.trim().into(), text, links, published_at)
 }
+/// Preserve source structure, especially code, lists and tables; discard executable/UI noise.
+fn markdown_element(element: scraper::ElementRef<'_>, base: &str) -> String {
+    markdown_at_depth(element, base, 0)
+}
+fn markdown_at_depth(element: scraper::ElementRef<'_>, base: &str, depth: usize) -> String {
+    if depth > 128 {
+        return String::new();
+    }
+    let e = element.value();
+    if matches!(
+        e.name(),
+        "script"
+            | "style"
+            | "nav"
+            | "header"
+            | "footer"
+            | "aside"
+            | "noscript"
+            | "iframe"
+            | "form"
+            | "svg"
+            | "head"
+    ) || e.attr("hidden").is_some()
+        || e.attr("aria-hidden") == Some("true")
+        || e.attr("style").is_some_and(|style| {
+            let style = style
+                .split_whitespace()
+                .collect::<String>()
+                .to_ascii_lowercase();
+            style.contains("display:none") || style.contains("visibility:hidden")
+        })
+    {
+        return String::new();
+    }
+    if e.name() == "pre" {
+        let raw = element.text().collect::<String>();
+        let fence = "`".repeat(
+            raw.split(|c| c != '`')
+                .map(str::len)
+                .max()
+                .unwrap_or(0)
+                .max(2)
+                + 1,
+        );
+        return format!("\n\n{fence}\n{raw}\n{fence}\n\n");
+    }
+    let mut body = String::new();
+    for child in element.children() {
+        if let Some(el) = scraper::ElementRef::wrap(child) {
+            body.push_str(&markdown_at_depth(el, base, depth + 1));
+        } else if let Some(text) = child.value().as_text() {
+            // Preserve an inter-element space without joining adjacent paragraphs.
+            let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            if text.starts_with(char::is_whitespace) && !body.ends_with(char::is_whitespace) {
+                body.push(' ');
+            }
+            body.push_str(&collapsed);
+            if text.ends_with(char::is_whitespace) {
+                body.push(' ');
+            }
+        }
+    }
+    let trimmed = body.trim();
+    match e.name() {
+        "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => format!(
+            "\n\n{} {trimmed}\n\n",
+            "#".repeat(e.name()[1..].parse().unwrap_or(1))
+        ),
+        "p" | "div" | "section" | "article" | "main" | "ul" | "ol" => format!("\n\n{trimmed}\n\n"),
+        "li" => format!(
+            "\n{} {trimmed}\n",
+            if element
+                .parent()
+                .and_then(scraper::ElementRef::wrap)
+                .is_some_and(|p| p.value().name() == "ol")
+            {
+                "1."
+            } else {
+                "-"
+            }
+        ),
+        "br" => "\n".into(),
+        "code" => format!("`{trimmed}`"),
+        "a" => e
+            .attr("href")
+            .and_then(|href| reqwest::Url::parse(base).ok()?.join(href).ok())
+            .filter(|u| matches!(u.scheme(), "http" | "https"))
+            .map(|u| format!("[{trimmed}]({u})"))
+            .unwrap_or(body),
+        "th" | "td" => format!(" {} |", trimmed.replace('|', "\\|")),
+        "tr" => {
+            let header = element
+                .children()
+                .filter_map(scraper::ElementRef::wrap)
+                .any(|c| c.value().name() == "th");
+            let divider = if header {
+                format!(
+                    "\n|{}",
+                    " --- |".repeat(
+                        element
+                            .children()
+                            .filter_map(scraper::ElementRef::wrap)
+                            .count()
+                    )
+                )
+            } else {
+                String::new()
+            };
+            format!("\n|{trimmed}{divider}\n")
+        }
+        _ => body,
+    }
+}
+
 pub fn extract_first_url(text: &str) -> Option<String> {
     static RE: Lazy<regex::Regex> = Lazy::new(|| {
         regex::Regex::new(r#"https?://[^\s<>"'，。、）)】\]]+"#).expect("constant regex")
@@ -257,6 +414,40 @@ pub fn extract_first_url(text: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn web_markdown_preserves_code_tables_and_lists() {
+        let (_,text,_,_)=extract_html("https://example.com", "<main><h2>Evidence</h2><ul><li>one</li><li>two</li></ul><pre>  a\n    b</pre><table><tr><th>Name</th><th>Value</th></tr><tr><td>AI</td><td>42</td></tr></table></main>");
+        assert!(text.contains("## Evidence"));
+        assert!(text.contains("- one"));
+        assert!(text.contains("- two"));
+        assert!(text.contains("```\n  a\n    b\n```"));
+        assert!(text.contains("| --- | --- |"));
+        assert!(text.contains("AI |"));
+    }
+    #[test]
+    fn web_public_destinations_exclude_local_and_mapped_ips() {
+        for ip in [
+            "127.0.0.1",
+            "10.0.0.1",
+            "169.254.169.254",
+            "100.64.0.1",
+            "::1",
+            "::ffff:127.0.0.1",
+            "fc00::1",
+            "fe80::1",
+        ] {
+            assert!(!public_ip(ip.parse().unwrap()), "{ip}");
+        }
+        assert!(public_ip("8.8.8.8".parse().unwrap()));
+    }
+    #[tokio::test]
+    async fn web_local_fetch_is_rejected_before_request() {
+        assert!(fetch_page_with_refresh("http://127.0.0.1:9/private", true)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("public internet"));
+    }
     #[tokio::test]
     async fn web_http_redirect_cache_and_refresh() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -280,14 +471,14 @@ mod tests {
             }
         });
         let url = format!("http://{address}/redirect");
-        let first = fetch_page_with_refresh(&url, false).await.unwrap();
+        let first = fetch_document(&url, false, true).await.unwrap();
         assert!(first.url.ends_with("/final"));
         assert!(first.text.chars().count() > 12000);
         assert_eq!(first.published_at.as_deref(), Some("2026-09-30"));
-        let cached = fetch_page_with_refresh(&url, false).await.unwrap();
+        let cached = fetch_document(&url, false, true).await.unwrap();
         assert!(cached.cached);
         assert_eq!(first.text, cached.text);
-        let refreshed = fetch_page_with_refresh(&url, true).await.unwrap();
+        let refreshed = fetch_document(&url, true, true).await.unwrap();
         assert!(!refreshed.cached);
         assert!(refreshed.text.ends_with("证据-2"));
         let knowledge = fetch_page(&url).await.unwrap();

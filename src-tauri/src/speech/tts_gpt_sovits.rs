@@ -137,6 +137,10 @@ impl TtsBackend for GptSoVitsBackend {
     async fn synthesize(&self, text: &str, config: &TtsConfig) -> VivianResult<TtsSynthesisResult> {
         let base = Self::base_url(config)?;
         let lang = Self::detect_language(text);
+        let _session = super::model_session::acquire(base, Self::request_timeout(config)).await?;
+        // Select configured weights on every request: another process or a server
+        // restart can invalidate any client-side notion of the active character.
+        self.select_models(config, base).await?;
 
         // 优先尝试 v2 端点(`/tts`),失败时回退 v1(`/`)
         match self.try_v2(text, config, base, lang).await {
@@ -185,6 +189,25 @@ impl TtsBackend for GptSoVitsBackend {
 }
 
 impl GptSoVitsBackend {
+    async fn select_models(&self, config: &TtsConfig, base: &str) -> VivianResult<()> {
+        for (endpoint, path) in [
+            ("set_gpt_weights", config.gpt_sovits_gpt_model.as_deref()),
+            ("set_sovits_weights", config.gpt_sovits_sovits_model.as_deref()),
+        ] {
+            let Some(path) = path.filter(|p| !p.trim().is_empty()) else { continue };
+            let response = self.client.get(format!("{}/{endpoint}", base.trim_end_matches('/')))
+                .query(&[("weights_path", path)])
+                .timeout(Self::request_timeout(config)).send().await
+                .map_err(|e| VivianError::Speech(format!("GPT-SoVITS 模型切换失败 ({endpoint}): {e}")))?;
+            if !response.status().is_success() {
+                let status = response.status();
+                let body = response.text().await.unwrap_or_default();
+                return Err(VivianError::Speech(format!("GPT-SoVITS 模型切换失败 ({endpoint}) [{status}]: {body}")));
+            }
+        }
+        Ok(())
+    }
+
     /// v2 端点 `/tts` — 对齐 api_v2.py
     async fn try_v2(
         &self,
@@ -404,5 +427,72 @@ impl GptSoVitsBackend {
         let format = Self::resolve_format(&audio, &content_type, config);
 
         Ok(TtsSynthesisResult::new(audio, format))
+    }
+}
+
+#[cfg(test)]
+mod session_tests {
+    use super::*;
+    use axum::{extract::{Query, State}, routing::{get, post}, Json, Router};
+    use std::{collections::HashMap, sync::{Arc, Mutex}};
+    type Log = Arc<Mutex<Vec<String>>>;
+
+    async fn weights(State(log): State<Log>, Query(query): Query<HashMap<String, String>>) -> &'static str {
+        log.lock().unwrap().push(query["weights_path"].clone());
+        tokio::time::sleep(Duration::from_millis(15)).await;
+        "ok"
+    }
+    async fn audio(State(log): State<Log>, Json(body): Json<serde_json::Value>) -> Vec<u8> {
+        log.lock().unwrap().push(body["text"].as_str().unwrap().into());
+        tokio::time::sleep(Duration::from_millis(15)).await;
+        b"RIFFmockaudio".to_vec()
+    }
+
+    #[tokio::test]
+    async fn character_weights_and_synthesis_cannot_interleave() {
+        let log: Log = Arc::new(Mutex::new(Vec::new()));
+        let app = Router::new().route("/set_gpt_weights", get(weights))
+            .route("/set_sovits_weights", get(weights)).route("/tts", post(audio))
+            .with_state(log.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mut a = TtsConfig::default();
+        a.gpt_sovits_url = Some(endpoint.clone());
+        a.gpt_sovits_gpt_model = Some("a.ckpt".into());
+        a.gpt_sovits_sovits_model = Some("a.pth".into());
+        let mut b = a.clone();
+        b.gpt_sovits_url = Some(format!("{endpoint}/"));
+        b.gpt_sovits_gpt_model = Some("b.ckpt".into());
+        b.gpt_sovits_sovits_model = Some("b.pth".into());
+        let first = GptSoVitsBackend::new();
+        let second = GptSoVitsBackend::new();
+        let (ra, rb) = tokio::join!(first.synthesize("a", &a), second.synthesize("b", &b));
+        assert!(ra.is_ok(), "{ra:?}");
+        assert!(rb.is_ok(), "{rb:?}");
+        let entries = log.lock().unwrap().clone();
+        assert_eq!(entries.len(), 6);
+        for group in entries.chunks(3) {
+            let character = &group[2];
+            assert_eq!(group[0], format!("{character}.ckpt"));
+            assert_eq!(group[1], format!("{character}.pth"));
+        }
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn model_selection_failure_does_not_synthesize_the_previous_voice() {
+        let log: Log = Arc::new(Mutex::new(Vec::new()));
+        let app = Router::new()
+            .route("/set_gpt_weights", get(|| async { axum::http::StatusCode::INTERNAL_SERVER_ERROR }))
+            .route("/tts", post(audio)).with_state(log.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut config = TtsConfig::default();
+        config.gpt_sovits_url = Some(format!("http://{}", listener.local_addr().unwrap()));
+        config.gpt_sovits_gpt_model = Some("broken.ckpt".into());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        assert!(GptSoVitsBackend::new().synthesize("hello", &config).await.is_err());
+        assert!(log.lock().unwrap().is_empty());
+        server.abort();
     }
 }

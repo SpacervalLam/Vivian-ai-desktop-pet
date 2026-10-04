@@ -1,5 +1,12 @@
 import {invoke} from '@tauri-apps/api/core';
 import type {StickerRef} from '../../types';
+import i18n from '../../i18n';
+export function stickerLabel(sticker:StickerRef):string {
+ // Imported replacements have unique versions and retain their user-defined labels.
+ const match=/^(vivian|nana)_([a-z]+)_01$/.exec(sticker.id);
+ if(!match || !['1','2'].includes(sticker.version))return sticker.label;
+ return i18n.t(`stickers.${match[2]}`,{defaultValue:sticker.label});
+}
 export function parseSticker(value:unknown):StickerRef|undefined {
  if(!value||typeof value!=='object')return;
  const s=value as Record<string,unknown>;

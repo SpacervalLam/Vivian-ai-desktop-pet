@@ -956,7 +956,8 @@ fn build_extract_prompt(
             1. Only extract facts the user **explicitly stated**; do not extract the AI's words\n\
             2. Only extract facts that hold long-term; do not extract temporary emotions or one-time needs\n\
             3. Prefer missing over wrong; when no clear facts exist, set detected=false\n\
-            4. Do not re-extract facts already listed in \"Known Facts\" below\n\n\
+            4. Do not re-extract facts already listed in \"Known Facts\" below\n\
+            5. Never extract credentials, API keys, tokens, passwords or card numbers, and never keep a fragment of one\n\n\
             ## Tense Isolation Constraint (Important)\n\
             Only extract the user's **current stable state**; strictly distinguish tenses:\n\
             - Past experience != current state: \"have been to Beijing\" or \"was on a business trip in Shanghai last week\" should not be extracted as location\n\
@@ -996,7 +997,8 @@ fn build_extract_prompt(
             1. ユーザーが**明示的に述べた**事実のみを抽出し、AI の発言は抽出しない\n\
             2. 長期的に成り立つ事実のみを抽出し、一時的な感情や一回限りの要望は抽出しない\n\
             3. 割り切って不足させるほうがマシ、明確な事実がない場合は detected=false\n\
-            4. 以下の「既知の事実」に既に含まれる事実を再抽出しない\n\n\
+            4. 以下の「既知の事実」に既に含まれる事実を再抽出しない\n\
+            5. パスワード・Token・APIキー・カード番号などの秘密は抽出せず、断片も保存しない\n\n\
             ## 時制隔離制約（重要）\n\
             ユーザーの**現在の安定した状態**のみを抽出し、時制を厳格に区別すること：\n\
             - 過去の経験 != 現在の状態：「北京に行ったことがある」「先週上海へ出張した」は location として抽出しない\n\
@@ -1036,7 +1038,8 @@ fn build_extract_prompt(
             1. 只提取用户**明确陈述**的事实，不提取 AI 的话\n\
             2. 只提取能长期成立的事实，不提取临时情绪或一次性需求\n\
             3. 宁缺毋滥，没有明确事实时 detected=false\n\
-            4. 不要重复抽取下方「已知事实」中已列出的事实\n\n\
+            4. 不要重复抽取下方「已知事实」中已列出的事实\n\
+            5. 密码、Token、密钥、卡号等秘密一律不提取，也不要保存其片段\n\n\
             ## 时态隔离约束（重要）\n\
             仅提取用户**当前稳定的状态**，必须严格区分时态：\n\
             - 过去经历≠当前状态：「去过北京」「上周在上海出差」不应提取为 location\n\

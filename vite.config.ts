@@ -15,7 +15,7 @@ const host = process.env.TAURI_DEV_HOST;
 /**
  * 构建期按白名单复制明文资源。
  *
- * public 下的 Vivian / Nana / world-bg 元数据已由资源加密步骤打包进
+ * public 下的 Vivian / Nana 元数据已由资源加密步骤打包进
  * vivian.bundle.enc（现作为预构建产物随仓库提供，原生成脚本 scripts/encrypt-assets.mjs 已移除）。chibi 图集是主窗口实际使用的 sprite 纹理，需要随前端静态资源发布。
  *
  * 这里用「显式清单 + copyPublicDir 关闭」而不是「先全量复制再删除」：删除式清理

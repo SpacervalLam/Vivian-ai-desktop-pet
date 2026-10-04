@@ -396,11 +396,6 @@ async fn get_mind(
         })
         .collect();
 
-    let focus = brain.focus_state.lock().await;
-    let cognition_mode = focus.mode.as_str().to_string();
-    let focus_charge = focus.charge;
-    drop(focus);
-
     let current_thought = brain.mind.current_thought_snapshot().unwrap_or_default();
     let inner_monologue_enabled = brain.config.world.enable_inner_monologue;
 
@@ -409,8 +404,6 @@ async fn get_mind(
         "character_name": instance.name,
         "attention_top": attention_top,
         "goals": goals,
-        "cognition_mode": cognition_mode,
-        "focus_charge": focus_charge,
         "current_thought": current_thought,
         "inner_monologue_enabled": inner_monologue_enabled,
     })))

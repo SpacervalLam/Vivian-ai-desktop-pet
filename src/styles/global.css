@@ -641,6 +641,8 @@ body {
 
 /* ===== 厂商预设卡片横滚行：隐藏原生横向滚动条，改用左右竖向感应块 ===== */
 .provider-hscroll {
+  min-width: 0;
+  scroll-snap-type: x mandatory;
   scrollbar-width: none;
   -ms-overflow-style: none;
 }
@@ -651,9 +653,11 @@ body {
 }
 /* 与卡片行等高的竖向感应块（矩形块内三角箭头）：悬停缓慢滚动、按住快速滚动 */
 .provider-zone {
-  position: absolute;
-  top: 0;
-  bottom: 0;
+  position: relative;
+  margin: 4px 0 8px;
+  padding: 0;
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
   width: 28px;
   display: flex;
   align-items: center;
@@ -674,15 +678,13 @@ body {
   transition: opacity 0.15s ease, transform 0.15s ease;
 }
 .provider-zone-left {
-  left: 0;
-  border-radius: 8px 0 0 8px;
+  border-radius: 8px;
 }
 .provider-zone-left::after {
   border-right: 10px solid var(--panel-text-secondary);
 }
 .provider-zone-right {
-  right: 0;
-  border-radius: 0 8px 8px 0;
+  border-radius: 8px;
 }
 .provider-zone-right::after {
   border-left: 10px solid var(--panel-text-secondary);
@@ -700,6 +702,10 @@ body {
 .provider-zone-right:hover::after {
   border-left-color: var(--panel-accent);
 }
+.provider-preset-row { display: grid; grid-template-columns: 28px minmax(0, 1fr) 28px; gap: 8px; }
+.provider-zone:disabled { opacity: .3; cursor: default; background: transparent; }
+.provider-zone:disabled::after { transform: none; }
+.provider-zone:focus-visible { outline: 2px solid var(--panel-accent); outline-offset: 2px; }
 
 /* ===== Custom Scrollbar（精细 6px，悬停反馈） ===== */
 ::-webkit-scrollbar {

@@ -18,7 +18,7 @@ pub fn build_search_client(
     user_agent: Option<&str>,
     proxy_url: Option<&str>,
 ) -> reqwest::Client {
-    let mut builder = reqwest::Client::builder().timeout(timeout);
+    let mut builder = reqwest::Client::builder().timeout(timeout).redirect(reqwest::redirect::Policy::none());
     if let Some(ua) = user_agent {
         builder = builder.user_agent(ua);
     }

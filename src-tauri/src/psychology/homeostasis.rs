@@ -401,7 +401,7 @@ impl HomeostasisEngine {
             emotion.closeness,
             (set_points.closeness + circadian.closeness_delta).clamp(0.0, 1.0),
             recovery_rates.closeness * circadian.recovery_mult,
-            compress(0.85),
+            compress(0.0001), // Preserve relationship warmth through ordinary offline periods.
         );
         emotion.curiosity = regress(
             emotion.curiosity,

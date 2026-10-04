@@ -1,0 +1,10 @@
+.web-evidence-card { padding: 10px 14px; color: var(--codex-ink); font-size: 12px; min-width: 0; }
+.web-evidence-caption { color: var(--codex-ink-soft); margin-bottom: 8px; }
+.web-evidence-source { padding: 8px 0; border-bottom: 1px solid var(--codex-line-light); min-width: 0; }
+.web-evidence-source a { color: var(--codex-accent); text-decoration: none; overflow-wrap: anywhere; font-weight: 500; }
+.web-evidence-source a:hover { text-decoration: underline; }
+.web-evidence-meta { display: flex; flex-wrap: wrap; gap: 8px; color: var(--codex-ink-soft); font-size: 11px; margin-top: 4px; overflow-wrap: anywhere; }
+.web-evidence-source p { color: var(--codex-ink-soft); margin: 6px 0 0; line-height: 1.6; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+.web-evidence-card details { margin-top: 10px; }
+.web-evidence-card summary { cursor: pointer; color: var(--codex-ink-soft); }
+.web-evidence-warning { color: var(--codex-danger); overflow-wrap: anywhere; }

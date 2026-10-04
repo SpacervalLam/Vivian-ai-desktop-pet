@@ -116,7 +116,7 @@ pub fn classify_metric(metric: &str) -> MetricKind {
 /// 循环距离（用于时点类度量的偏差计算）
 ///
 /// 例如 dinner_hour=19 与新值 23，circular_distance=4
-/// dinner_hour=19 与新值 2（次日凌晨），circular_distance=5（而非 17）
+/// dinner_hour=19 与新值 2（次日凌晨），circular_distance=7（而非 17）
 pub fn circular_distance(a: f64, b: f64, period: f64) -> f64 {
     let diff = (a - b).abs() % period;
     diff.min(period - diff)
@@ -512,7 +512,7 @@ mod tests {
         // 简单距离
         assert!((circular_distance(19.0, 23.0, 24.0) - 4.0).abs() < 1e-6);
         // 跨日距离取最短弧
-        assert!((circular_distance(19.0, 2.0, 24.0) - 5.0).abs() < 1e-6);
+        assert!((circular_distance(19.0, 2.0, 24.0) - 7.0).abs() < 1e-6);
         assert!((circular_distance(23.5, 0.5, 24.0) - 1.0).abs() < 1e-6);
         // 对径点距离 = period/2
         assert!((circular_distance(0.0, 12.0, 24.0) - 12.0).abs() < 1e-6);

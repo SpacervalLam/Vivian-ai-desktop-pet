@@ -26,6 +26,39 @@ use crate::error::{VivianError, VivianResult};
 
 use super::asr::{AsrBackendType, AsrConfig, AsrEngine, AsrEvent};
 
+/// Append each capture callback, rather than indexing from the beginning of the
+/// whole recording. Cap the total recording, not each individual callback.
+fn append_pcm<T: Copy>(buffer: &mut VecDeque<i16>, data: &[T], input_rate: f32,
+    max_samples: usize, convert: impl Fn(T) -> i16) {
+    let count = ((data.len() as f32 * 16000.0 / input_rate) as usize)
+        .min(max_samples.saturating_sub(buffer.len()));
+    for out in 0..count {
+        let input = (out as f32 * input_rate / 16000.0) as usize;
+        if let Some(&sample) = data.get(input) {
+            buffer.push_back(convert(sample));
+        }
+    }
+}
+
+#[cfg(test)]
+mod capture_tests {
+    use super::*;
+    #[test]
+    fn callbacks_append_in_order_and_limit_the_whole_recording() {
+        let mut buffer = VecDeque::new();
+        append_pcm(&mut buffer, &[1i16, 2, 3], 16000.0, 5, |s| s);
+        append_pcm(&mut buffer, &[4i16, 5, 6], 16000.0, 5, |s| s);
+        assert_eq!(Vec::from(buffer), vec![1, 2, 3, 4, 5]);
+    }
+    #[test]
+    fn resampling_preserves_callbacks() {
+        let mut buffer = VecDeque::new();
+        append_pcm(&mut buffer, &[1i16, 2, 3, 4, 5, 6], 48000.0, 10, |s| s);
+        append_pcm(&mut buffer, &[7i16, 8, 9, 10, 11, 12], 48000.0, 10, |s| s);
+        assert_eq!(Vec::from(buffer), vec![1, 4, 7, 10]);
+    }
+}
+
 /// Whisper HTTP 服务的 API 格式
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
@@ -201,7 +234,6 @@ impl WhisperBackend {
         let stop_for_thread = stop_flag.clone();
         let stop_for_loop = stop_flag.clone();
         let sr_in = actual_rate as f32;
-        let sr_out = 16000f32;
         let max_samples = (self.whisper_cfg.max_audio_seconds * 16000) as usize;
 
         let err_fn = |e: cpal::StreamError| {
@@ -216,17 +248,7 @@ impl WhisperBackend {
                         if stop_for_thread.load(Ordering::SeqCst) {
                             return;
                         }
-                        let mut buf = buffer.write();
-                        let ratio = sr_out / sr_in;
-                        for (i, &s) in data.iter().enumerate() {
-                            let out_idx = (i as f32 * ratio) as usize;
-                            if out_idx < max_samples {
-                                while buf.len() <= out_idx {
-                                    buf.push_back(0);
-                                }
-                                buf[out_idx] = s;
-                            }
-                        }
+                        append_pcm(&mut buffer.write(), data, sr_in, max_samples, |s| s);
                     },
                     err_fn,
                     None,
@@ -237,18 +259,7 @@ impl WhisperBackend {
                         if stop_for_thread.load(Ordering::SeqCst) {
                             return;
                         }
-                        let mut buf = buffer.write();
-                        let ratio = sr_out / sr_in;
-                        for (i, &s) in data.iter().enumerate() {
-                            let out_idx = (i as f32 * ratio) as usize;
-                            let pcm = (s as i32 - 32768) as i16;
-                            if out_idx < max_samples {
-                                while buf.len() <= out_idx {
-                                    buf.push_back(0);
-                                }
-                                buf[out_idx] = pcm;
-                            }
-                        }
+                        append_pcm(&mut buffer.write(), data, sr_in, max_samples, |s| (s as i32 - 32768) as i16);
                     },
                     err_fn,
                     None,
@@ -259,18 +270,7 @@ impl WhisperBackend {
                         if stop_for_thread.load(Ordering::SeqCst) {
                             return;
                         }
-                        let mut buf = buffer.write();
-                        let ratio = sr_out / sr_in;
-                        for (i, &s) in data.iter().enumerate() {
-                            let out_idx = (i as f32 * ratio) as usize;
-                            let pcm = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
-                            if out_idx < max_samples {
-                                while buf.len() <= out_idx {
-                                    buf.push_back(0);
-                                }
-                                buf[out_idx] = pcm;
-                            }
-                        }
+                        append_pcm(&mut buffer.write(), data, sr_in, max_samples, |s: f32| (s.clamp(-1.0, 1.0) * 32767.0) as i16);
                     },
                     err_fn,
                     None,
@@ -636,26 +636,28 @@ impl AsrEngine for WhisperBackend {
             }
         };
 
-        match result {
+        let completion = match result {
             Ok(text) => {
                 if !text.is_empty() {
                     if let Some(tx) = &self.event_tx {
                         let _ = tx.send(AsrEvent::final_result(text, 0.8));
                     }
                 }
+                Ok(())
             }
             Err(e) => {
                 tracing::error!("Whisper 识别失败: {e}");
                 if let Some(tx) = &self.event_tx {
                     let _ = tx.send(AsrEvent::error(format!("{e}")));
                 }
+                Err(e)
             }
-        }
+        };
         if let Some(tx) = &self.event_tx {
             let _ = tx.send(AsrEvent::Stopped);
         }
         tracing::info!("Whisper 录音已停止");
-        Ok(())
+        completion
     }
 
     async fn transcribe(&self, audio: &[f32]) -> VivianResult<String> {

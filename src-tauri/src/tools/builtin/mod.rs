@@ -11,6 +11,8 @@ pub mod discovery_tools;
 pub mod extended_system_ops;
 pub mod file_tools;
 pub mod input_control_tools;
+pub mod desktop_runtime;
+pub mod computer_action;
 pub mod jobs_tools;
 pub mod lsp_tools;
 pub mod media_tools;
@@ -57,6 +59,7 @@ pub fn register_builtin_tools(tool_system: &Arc<ToolSystem>) {
         Arc::new(system_ops::CloseApplicationTool::new()),
         Arc::new(system_ops::TakeScreenshotTool::new()),
         Arc::new(system_ops::ScreenshotAnalyzeTool::new()),
+        Arc::new(computer_action::ComputerActionTool),
         // 扩展系统工具
         Arc::new(extended_system_ops::OpenUrlTool::new()),
         Arc::new(extended_system_ops::GetActiveWindowTool::new()),

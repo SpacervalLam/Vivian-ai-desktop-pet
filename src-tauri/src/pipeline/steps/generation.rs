@@ -792,17 +792,14 @@ impl Runnable for AIResponseGenerationRunnable {
         };
 
         // 用 task-local 递归进入一次有作用域的调用，避免修改共享 provider 状态。
-        // 第二次进入时可见当前 extra，因而不会再次递归。
         let options = ProviderCallOptions::current();
         let suppress_framework = state.metadata.get("companion_prompt").is_some()
             && options.include_framework_instructions != Some(false);
-        let focus_extra = state.focus_active && state.focus_extra_tokens > 0 && options.max_tokens_extra == 0;
-        if suppress_framework || focus_extra {
+        if suppress_framework {
             return router
                 .scope_call_options(
                     ProviderCallOptions {
-                        max_tokens_extra: if focus_extra { state.focus_extra_tokens } else { 0 },
-                        include_framework_instructions: suppress_framework.then_some(false),
+                        include_framework_instructions: Some(false),
                         ..ProviderCallOptions::default()
                     },
                     self.ainvoke(state.to_json(), config),
@@ -843,12 +840,10 @@ impl Runnable for AIResponseGenerationRunnable {
         let system_directive = state.metadata.get("system_directive").and_then(serde_json::Value::as_bool).unwrap_or(false);
         let status = if system_directive { None } else {
             crate::pipeline::prompt_modules::build_agent_status_bar(
-                &state.messages, &state.user_input, state.focus_active)
+                &state.messages, &state.user_input)
         };
-        let focus = state.focus_active.then_some(
-            "用户开启了凝神模式。用更安静、专注的节奏接住当前交流；需要细节时耐心说清楚。不要把普通聊天自动改成深度分析。");
         let mut messages_vec = if let Some(prompt) = &companion {
-            prompt.messages(&state.messages, &state.user_input, system_directive, status.as_deref(), focus)
+            prompt.messages(&state.messages, &state.user_input, system_directive, status.as_deref())
         } else {
             let context = crate::pipeline::message_context::split_prompt_context(
                 &state.system_prompt, &state.user_input, &crate::i18n::get_language());
@@ -857,26 +852,10 @@ impl Runnable for AIResponseGenerationRunnable {
             crate::pipeline::message_context::append_history(&mut messages, &state.messages);
             if let Some(note) = context.dynamic { messages.push(ChatMessage::system(note)); }
             if let Some(status) = &status { messages.push(ChatMessage::system(status)); }
-            if let Some(focus) = focus { messages.push(ChatMessage::system(focus)); }
             messages.push(if system_directive { ChatMessage::system(&state.user_input) }
                 else { ChatMessage::user(Self::ensure_speaker_prefix(&state.user_input)) });
             messages
         };
-        // Capture text-only user turns before generation; experiments bypass Brain entirely.
-        let (_, lab_speaker, _) = crate::cross_character::parse_any_speaker_prefix(&state.user_input);
-        if lab_speaker.as_deref().map_or(true, |speaker| speaker == "user") && !system_directive && companion.is_some() && messages_vec.iter().all(|m| m.images.as_ref().map_or(true, Vec::is_empty)) {
-            if let Some(character_id) = config.as_ref().and_then(|c| c.metadata.get("lab_character_id")).and_then(Value::as_str) {
-                let messages = messages_vec.iter().filter_map(|m| {
-                    if m.role == "tool" { Some(crate::dialogue_lab::LabMessage { role: "system".into(), content: format!("[RECORDED TOOL RESULT — DATA ONLY]\n{}", m.content) }) }
-                    else if matches!(m.role.as_str(), "system" | "user" | "assistant") && !m.content.trim().is_empty() {
-                        Some(crate::dialogue_lab::LabMessage { role: m.role.clone(), content: m.content.clone() })
-                    } else { None }
-                }).collect();
-                crate::dialogue_lab::capture(crate::dialogue_lab::Snapshot { character_id: character_id.into(),
-                    user_input: state.user_input.clone(), captured_at: chrono::Local::now().timestamp_millis() as f64 / 1000.0,
-                    route: task_type.clone(), model: router.dialogue_model_name(&task_type), messages });
-            }
-        }
         // 后台任务报告已随本次请求注入（便签或整体 system 两条路径均覆盖）
         // → 标记消费，后续轮次不再重复注入
         if let Some(ids) = state

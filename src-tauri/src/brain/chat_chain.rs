@@ -13,7 +13,6 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 
 use crate::brain::control_action_executor::ControlActionExecutor;
-use crate::brain::focus_mode::{compute_focus_score, FocusState, FocusThresholds};
 use crate::brain::rate_limiter::RateLimiterRegistry;
 use crate::dialogue::DialogueManager;
 use crate::emotion::EmotionBridge;
@@ -183,8 +182,6 @@ pub struct BrainChatChain {
     pub stream_emitter: SharedStreamEmitter,
     /// 世界状态提供者：注入后 prompt 注入天气/节气/节日等真实世界感知
     pub world_provider: Option<Arc<crate::world::WorldStateProvider>>,
-    /// 凝神/专注模式状态机（与 Brain 共享同一实例）
-    pub focus_state: Arc<tokio::sync::Mutex<FocusState>>,
     /// 角色 ID（多角色架构下标识当前链所属角色，注入 ToolUseContext 供工具路由）
     pub char_id: String,
     /// 界面语言（从 config.base.language 读取，供 prompt 段落三语化使用）
@@ -249,17 +246,15 @@ impl BrainChatChain {
         let auto_extractor = Arc::new(
             AutoExtractor::new()
                 .with_llm(router.clone())
-                .with_memory(memory.clone()),
+                .with_memory(memory.clone())
+                .with_dialogue(dialogue.clone()),
         );
         let consolidator = Arc::new(MemoryRetentionGuard::new());
         let pipeline = Arc::new(ConsolidationPipeline::new(
             router.clone(),
             config.memory.consolidation.clone(),
+            dialogue.clone(),
         ));
-        // 注入锁定核心文本：让反思明确哪些人设字段不可修改
-        pipeline.set_locked_core(persona.get_config().locked_core_summary());
-        // 绑定角色 ID：启用 Stage 1 断点续跑（崩溃后恢复未完成的摘要标记）
-        pipeline.set_progress_char_id(char_id);
         let time_stamped = Arc::new(RwLock::new(TimeStampedMemory::new()));
         // 多级对话存档：从磁盘加载既有存档（跨重启伪常驻）
         let conversation_archive = Arc::new(RwLock::new(
@@ -290,8 +285,6 @@ impl BrainChatChain {
         // 用户认知模型管理器：从磁盘加载已有用户模型数据，无需 LLM
         // 将散落的记忆证据组织成"对这个人的理解"，在 prompt 中注入"我对你的了解"段落
         let user_model = Arc::new(UserModelManager::new(char_id));
-        // 注入巩固流水线：Stage 3 末尾把 Insight 归并为概念层（UserModel + 图谱）
-        pipeline.set_user_model(user_model.clone());
 
         // 组装流水线步骤（每步用 TimingMiddleware 包装，输出 stage 耗时日志）
         let mut steps = RunnableSequence::new();
@@ -540,7 +533,6 @@ impl BrainChatChain {
             advisor_chain,
             stream_emitter,
             world_provider,
-            focus_state: Arc::new(tokio::sync::Mutex::new(FocusState::new())),
             char_id: char_id.to_string(),
             language: config.base.language.clone(),
             presence: None,
@@ -554,15 +546,6 @@ impl BrainChatChain {
             topic_signal_buffer: Arc::new(super::topic_signal::TopicSignalBuffer::new()),
             user_model,
         }
-    }
-
-    /// 注入共享的 FocusState（与 Brain 共享同一实例）。
-    pub fn with_focus_state(
-        mut self,
-        focus_state: Arc<tokio::sync::Mutex<FocusState>>,
-    ) -> Self {
-        self.focus_state = focus_state;
-        self
     }
 
     /// 注入角色 ID（多角色架构下供工具系统路由到对应角色资源）。
@@ -922,7 +905,7 @@ Choose the appropriate expression and motion. Leave empty if nothing fits.",
     }
 
     /// 初始化 PipelineState：加载对话历史、注入会话回顾/在场状态/SelfState、
-    /// 更新凝神模式状态机、刷新工具调用上下文。
+    /// 刷新工具调用上下文。
     async fn prepare_pipeline_state(&self, user_input: &str) -> PipelineState {
         let mut state = PipelineState::default();
         state.user_input = user_input.to_string();
@@ -965,33 +948,6 @@ Choose the appropriate expression and motion. Leave empty if nothing fits.",
             .format_for_prompt(&self.language)
             .unwrap_or_default();
 
-        // 凝神模式状态机更新：本轮输入 + 当前用户情绪 → 评分 → 三态切换
-        {
-            let emotion = self.emotion_bridge.get_current_emotion().emotion;
-            let score = compute_focus_score(user_input, &emotion);
-            let topic_changed = self.topic_signal_buffer.detect_topic_change(&self.char_id, user_input);
-            let now = chrono::Local::now().timestamp() as f64;
-            let th = FocusThresholds::default();
-            let mut fs = self.focus_state.lock().await;
-            let decision = fs.update(score, topic_changed, true, now, &th);
-            if fs.is_focus() {
-                state.focus_active = true;
-                state.focus_extra_tokens = th.thinking_extra_tokens;
-            }
-            if decision.action == crate::brain::focus_mode::FocusAction::Enter {
-                tracing::info!(
-                    "[BrainChatChain] 凝神模式激活（charge={:.3}），本轮 max_tokens 额外余量={}",
-                    decision.charge,
-                    th.thinking_extra_tokens
-                );
-            } else if decision.action == crate::brain::focus_mode::FocusAction::Exit {
-                tracing::info!(
-                    "[BrainChatChain] 凝神模式退出（reason={:?}）",
-                    decision.reason
-                );
-            }
-        }
-
         // 工具调用上下文刷新：让工具感知当前情绪 / 关系阶段 / 最近记忆摘要
         if let Some(tcm) = &self.tool_call_manager {
             let emotion = self.emotion_bridge.get_current_emotion().emotion;
@@ -1029,7 +985,6 @@ Choose the appropriate expression and motion. Leave empty if nothing fits.",
         user_input: &str,
     ) -> VivianResult<(PipelineState, AiResponse)> {
         let mut config = RunnableConfig::default();
-        config.metadata["lab_character_id"] = serde_json::json!(self.char_id);
         if stream { config.tags.push("stream".into()); }
         let config = Some(config);
 
@@ -1368,7 +1323,9 @@ Choose the appropriate expression and motion. Leave empty if nothing fits.",
         // 同时将累积的对话传递到 post_process_memory_async 中做批量抽取。
         // 注意：此处的 batch 数据仅用于 AutoExtractor 批量分析，
         // TimeStampedMemory 写入、动态行为画像等每轮单独执行的操作不受影响。
-        if !final_state.is_command && final_state.should_respond {
+        if !final_state.is_command && final_state.should_respond && !skip_dialogue_write
+            && !final_state.metadata.get("skip_memory_save").and_then(serde_json::Value::as_bool).unwrap_or(false)
+            && self.parse_speaker_prefix(user_input).1 == "user" {
             let (raw_input, _, _) = self.parse_speaker_prefix(user_input);
             let clean_ai = MemorySavingRunnable::strip_json_if_any(&response.text);
             let user_msg = ChatMessage::user(&raw_input);

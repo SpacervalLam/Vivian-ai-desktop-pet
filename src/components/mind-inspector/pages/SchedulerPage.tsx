@@ -4,15 +4,29 @@
  * 数据源：invoke('list_scheduled_tasks') / invoke('add_scheduled_reminder') / ...
  * 刷新：监听 scheduler:changed 事件
  *
- * 从 SchedulerWindow.tsx 改造：去除窗口外壳（标题栏/minimize/close/getCurrentWindow），
- * 适配 MindInspector 的 page 渲染模式。
+ * 布局（看板型）：与待办共用一套任务行骨架 —— 顶部筛选行 + 行列表。
+ * 两页共用 .record-plan-* 形态，差异只在注入的 --rec-accent-bar（状态色）
+ * 与元信息字段，因此「待办」和「日程」在视觉上是一套语言。
  */
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { useTranslation } from 'react-i18next';
+import {
+  AlarmClock,
+  Bell,
+  BellRing,
+  Clock,
+  Pause,
+  Play,
+  Plus,
+  Repeat,
+  Wrench,
+  X,
+} from 'lucide-react';
 import LoadingSpinner from '../../LoadingSpinner';
+import './RecordTheme.css';
 
 type TaskStatus = 'pending' | 'running' | 'completed' | 'cancelled' | 'failed' | 'paused';
 type TaskType = 'reminder' | 'tool_call';
@@ -27,18 +41,19 @@ interface ScheduledTask {
   repeat_interval?: number | null;
   status: TaskStatus;
   created_at: number;
+  metadata?: { recovery_error?: string };
   delivery?: { confirmed_count: number; next_attempt_at?: number | null; last_delivered_at?: number | null };
 }
 
 type Tab = 'active' | 'history' | 'all';
 
 const STATUS_COLORS: Record<TaskStatus, string> = {
-  pending: '#FF9800',
-  running: '#4CAF50',
-  completed: '#9E9E9E',
-  cancelled: '#9E9E9E',
-  failed: '#E53935',
-  paused: '#FFC107',
+  pending: '#C08A3E',
+  running: '#788C5D',
+  completed: '#8A8780',
+  cancelled: '#8A8780',
+  failed: '#B4553F',
+  paused: '#B8823C',
 };
 
 function formatRemaining(ts: number, now: number): string {
@@ -137,6 +152,19 @@ const SchedulerPage: React.FC = () => {
     });
   }, [tasks, tab]);
 
+  const counts = useMemo(
+    () => ({
+      active: tasks.filter(
+        (t) => t.status === 'pending' || t.status === 'running' || t.status === 'paused',
+      ).length,
+      history: tasks.filter(
+        (t) => t.status === 'completed' || t.status === 'cancelled' || t.status === 'failed',
+      ).length,
+      all: tasks.length,
+    }),
+    [tasks],
+  );
+
   const openForm = useCallback(() => {
     // 默认时间为 1 小时后
     const defaultTs = Math.floor(Date.now() / 1000) + 3600;
@@ -193,390 +221,209 @@ const SchedulerPage: React.FC = () => {
     }
   }, []);
 
-  const inputStyle: React.CSSProperties = {
-    width: '100%',
-    padding: '8px 12px',
-    background: 'var(--panel-surface)',
-    border: '1.5px solid var(--panel-border)',
-    borderRadius: 8,
-    color: 'var(--panel-text)',
-    fontSize: 14,
-    fontFamily: 'inherit',
-    outline: 'none',
-    boxSizing: 'border-box',
-    boxShadow: '0 1px 2px rgba(0,0,0,0.02)',
-  };
-
   const statusLabel = (s: TaskStatus) => t(`scheduler_window.status_${s}` as const);
 
+  const TABS: Array<{ key: Tab; label: string }> = [
+    { key: 'active', label: t('scheduler_window.status_pending') },
+    { key: 'history', label: t('scheduler_window.status_completed') },
+    { key: 'all', label: t('todo_window.tab_all') },
+  ];
+
   return (
-    <div
-      className="vivian-scroll"
-      style={{
-        display: 'flex',
-        flexDirection: 'column',
-        height: '100%',
-        overflow: 'hidden',
-        color: 'var(--panel-text)',
-      }}
-    >
-      {/* Tab 切换 */}
-      <div
-        style={{
-          display: 'flex',
-          gap: 4,
-          padding: '10px 16px',
-          flexShrink: 0,
-          borderBottom: '1.5px solid var(--panel-border)',
-          background: 'var(--panel-bar-bg)',
-        }}
-      >
-        {(
-          [
-            { key: 'active', label: t('scheduler_window.status_pending') },
-            { key: 'history', label: t('scheduler_window.status_completed') },
-            { key: 'all', label: t('todo_window.tab_all') },
-          ] as { key: Tab; label: string }[]
-        ).map((tb) => (
-          <button
-            key={tb.key}
-            onClick={() => setTab(tb.key)}
-            style={{
-              padding: '6px 14px',
-              border: 'none',
-              borderRadius: 16,
-              background: tab === tb.key ? 'var(--panel-selected-bg)' : 'transparent',
-              color: tab === tb.key ? 'var(--panel-selected-text)' : 'var(--panel-text-secondary)',
-              fontSize: 13,
-              fontWeight: 500,
-              cursor: 'pointer',
-              transition: 'background 0.15s ease, color 0.15s ease',
-            }}
-          >
-            {tb.label}
-          </button>
-        ))}
+    <div className="record-plan">
+      <div className="record-plan-bar">
+        <div className="rec-seg">
+          {TABS.map((tb) => (
+            <button
+              key={tb.key}
+              type="button"
+              onClick={() => setTab(tb.key)}
+              className={`rec-seg-item${tab === tb.key ? ' is-active' : ''}`}
+            >
+              {tb.label}
+              <span style={{ color: 'var(--rec-faint)', fontVariantNumeric: 'tabular-nums' }}>
+                {counts[tb.key]}
+              </span>
+            </button>
+          ))}
+        </div>
+        <span className="record-plan-bar-spacer" />
+        <button type="button" onClick={openForm} className="rec-btn is-primary">
+          <Plus size={14} /> {t('scheduler_window.btn_add')}
+        </button>
       </div>
 
-      {/* 列表 */}
-      <div
-        className="vivian-scroll"
-        style={{
-          flex: 1,
-          overflowY: 'auto',
-          padding: '12px 16px',
-        }}
-      >
+      <div className="record-plan-list">
         {loading ? (
-          <div
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              gap: 8,
-              color: 'var(--panel-text-tertiary)',
-              fontSize: 13,
-              marginTop: 40,
-            }}
-          >
-            <LoadingSpinner size={16} color="var(--panel-text-tertiary)" thickness={1.5} />
+          <div style={{ display: 'flex', justifyContent: 'center', paddingTop: 40 }}>
+            <LoadingSpinner size={16} color="var(--rec-faint)" thickness={1.5} />
           </div>
         ) : filtered.length === 0 ? (
-          <div
-            style={{
-              display: 'flex',
-              flexDirection: 'column',
-              alignItems: 'center',
-              justifyContent: 'center',
-              gap: 8,
-              color: 'var(--panel-text-tertiary)',
-              fontSize: 14,
-              marginTop: 60,
-            }}
-          >
-            <div style={{ fontSize: 28, opacity: 0.4 }}>⏰</div>
-            <div>{t('scheduler_window.empty')}</div>
-            <div style={{ fontSize: 12, opacity: 0.7 }}>
-              {t('scheduler_window.empty_hint')}
-            </div>
+          <div className="rec-blank">
+            <span className="rec-blank-icon">
+              <AlarmClock size={30} strokeWidth={1.2} />
+            </span>
+            <span className="rec-blank-title">{t('scheduler_window.empty')}</span>
+            <span className="rec-blank-hint">{t('scheduler_window.empty_hint')}</span>
           </div>
         ) : (
           filtered.map((task) => {
             const isActive = task.status === 'pending' || task.status === 'running' || task.status === 'paused';
             const isPaused = task.status === 'paused';
             const isPending = task.status === 'pending';
+            const statusColor = STATUS_COLORS[task.status];
             return (
               <div
                 key={task.id}
-                className="mind-hover"
-                style={{
-                  background: 'var(--panel-surface)',
-                  borderRadius: 12,
-                  padding: '12px 14px',
-                  marginBottom: 10,
-                  border: '1.5px solid var(--panel-border)',
-                  boxShadow: '0 1px 3px rgba(0,0,0,0.04)',
-                }}
+                className={`record-plan-row${isActive ? '' : ' is-done'}`}
+                style={{ ['--rec-accent-bar' as string]: statusColor }}
               >
-                <div
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 8,
-                    marginBottom: 6,
-                    flexWrap: 'wrap',
-                  }}
-                >
-                  <span
-                    style={{
-                      fontSize: 11,
-                      padding: '2px 8px',
-                      borderRadius: 8,
-                      background: `${STATUS_COLORS[task.status]}22`,
-                      color: STATUS_COLORS[task.status],
-                      fontWeight: 500,
-                    }}
-                  >
-                    {statusLabel(task.status)}
-                  </span>
-                  {task.task_type === 'reminder' && (
-                    <span style={{ fontSize: 11, color: '#4CAF50' }}>🔔</span>
-                  )}
-                  {task.task_type === 'tool_call' && (
-                    <span style={{ fontSize: 11, color: '#2196F3' }}>🛠</span>
-                  )}
-                  {task.repeat_interval && (
-                    <span style={{ fontSize: 11, color: '#FF9800' }}>
-                      ↻ {task.repeat_interval}s
+                <div className="record-plan-row-top">
+                  <div className="record-plan-row-main">
+                    <span className="record-plan-title">
+                      {task.message || task.tool_name || task.id}
                     </span>
-                  )}
-                </div>
-
-                <div
-                  style={{
-                    fontSize: 15,
-                    fontWeight: 500,
-                    wordBreak: 'break-word',
-                    opacity: isActive ? 1 : 0.6,
-                    color: 'var(--panel-text)',
-                  }}
-                >
-                  {task.message || task.tool_name || task.id}
-                </div>
-
-                <div
-                  style={{
-                    fontSize: 12,
-                    color: 'var(--panel-text-secondary)',
-                    marginTop: 6,
-                    display: 'flex',
-                    flexDirection: 'column',
-                    gap: 2,
-                  }}
-                >
-                  <div>⏰ {formatDateTime(task.scheduled_time)}</div>
-                  {task.task_type === 'reminder' && task.delivery && <div>
-                    {zh ? '已确认投递' : ja ? '配信確認済み' : 'Confirmed deliveries'}：{task.delivery.confirmed_count}
-                    {task.delivery.next_attempt_at && <> · {zh ? '下次重试' : ja ? '再試行予定' : 'Retry at'} {formatDateTime(task.delivery.next_attempt_at)}</>}
-                  </div>}
-                  {isActive && (
-                    <div style={{ color: STATUS_COLORS[task.status] }}>
-                      {t('scheduler_window.remaining', {
-                        time: formatRemaining(task.scheduled_time, now),
-                      })}
-                    </div>
-                  )}
-                </div>
-
-                {isActive && (
-                  <div
-                    style={{
-                      display: 'flex',
-                      gap: 6,
-                      marginTop: 10,
-                      justifyContent: 'flex-end',
-                    }}
-                  >
+                    {task.metadata?.recovery_error && <span role="status" style={{ color: 'var(--rec-accent)', fontSize: 12 }}>
+                      {i18n.language.startsWith('en') ? 'Execution was interrupted. Check the result before retrying.'
+                        : i18n.language.startsWith('ja') ? '実行が中断されました。再試行の前に結果を確認してください。'
+                        : '执行曾中断，结果未确认；重试前请先检查实际结果。'}
+                    </span>}
+                  </div>
+                  <div className="record-plan-actions">
                     {isPending && (
                       <button
-                        onClick={() => handlePause(task.id)}
-                        style={actionBtn}
-                        onMouseEnter={(e) =>
-                          (e.currentTarget.style.background = 'rgba(255,152,0,0.10)')
-                        }
-                        onMouseLeave={(e) =>
-                          (e.currentTarget.style.background = 'transparent')
-                        }
+                        type="button"
+                        onClick={() => void handlePause(task.id)}
+                        title={t('scheduler_window.btn_pause', '暂停')}
+                        className="rec-icon-btn"
                       >
-                        {t('scheduler_window.btn_pause', '暂停')}
+                        <Pause size={14} />
                       </button>
                     )}
                     {isPaused && (
                       <button
-                        onClick={() => handleResume(task.id)}
-                        style={actionBtn}
-                        onMouseEnter={(e) =>
-                          (e.currentTarget.style.background = 'rgba(76,175,80,0.10)')
-                        }
-                        onMouseLeave={(e) =>
-                          (e.currentTarget.style.background = 'transparent')
-                        }
+                        type="button"
+                        onClick={() => void handleResume(task.id)}
+                        title={t('scheduler_window.btn_resume', '恢复')}
+                        className="rec-icon-btn"
                       >
-                        {t('scheduler_window.btn_resume', '恢复')}
+                        <Play size={14} />
                       </button>
                     )}
-                    <button
-                      onClick={() => handleCancel(task.id)}
-                      style={actionBtn}
-                      onMouseEnter={(e) =>
-                        (e.currentTarget.style.background = 'rgba(229,57,53,0.10)')
-                      }
-                      onMouseLeave={(e) =>
-                        (e.currentTarget.style.background = 'transparent')
-                      }
-                    >
-                      {t('scheduler_window.btn_cancel')}
-                    </button>
+                    {isActive && (
+                      <button
+                        type="button"
+                        onClick={() => void handleCancel(task.id)}
+                        title={t('scheduler_window.btn_cancel')}
+                        className="rec-icon-btn is-danger"
+                      >
+                        <X size={14} />
+                      </button>
+                    )}
                   </div>
-                )}
+                </div>
+
+                <div className="record-plan-foot">
+                  <span className="record-plan-badge">
+                    <span className="rec-dot" style={{ color: statusColor }} />
+                    {statusLabel(task.status)}
+                  </span>
+                  {task.task_type === 'reminder' && (
+                    <span className="record-plan-badge">
+                      <Bell size={12} />
+                    </span>
+                  )}
+                  {task.task_type === 'tool_call' && (
+                    <span className="record-plan-badge">
+                      <Wrench size={12} />
+                    </span>
+                  )}
+                  <span className="record-plan-badge">
+                    <Clock size={12} />
+                    {formatDateTime(task.scheduled_time)}
+                  </span>
+                  {task.repeat_interval && (
+                    <span className="record-plan-badge">
+                      <Repeat size={12} />
+                      {task.repeat_interval}s
+                    </span>
+                  )}
+                  {isActive && (
+                    <span className="record-plan-badge" style={{ color: statusColor }}>
+                      <BellRing size={12} />
+                      {t('scheduler_window.remaining', {
+                        time: formatRemaining(task.scheduled_time, now),
+                      })}
+                    </span>
+                  )}
+                  <span className="record-plan-foot-spacer" />
+                  {task.task_type === 'reminder' && task.delivery && task.delivery.confirmed_count > 0 && (
+                    <span className="record-plan-badge">
+                      {zh ? '已确认投递' : ja ? '配信確認済み' : 'Confirmed deliveries'}：
+                      {task.delivery.confirmed_count}
+                      {task.delivery.next_attempt_at && (
+                        <>
+                          {' · '}
+                          {zh ? '下次重试' : ja ? '再試行予定' : 'Retry at'}{' '}
+                          {formatDateTime(task.delivery.next_attempt_at)}
+                        </>
+                      )}
+                    </span>
+                  )}
+                </div>
               </div>
             );
           })
         )}
       </div>
 
-      {/* 底部添加按钮 */}
-      <div
-        style={{
-          padding: '10px 16px calc(10px + env(safe-area-inset-bottom, 0px))',
-          flexShrink: 0,
-          background: 'var(--panel-bar-bg)',
-          borderTop: '1.5px solid var(--panel-border)',
-        }}
-      >
-        <button
-          onClick={openForm}
-          style={{
-            width: '100%',
-            padding: '10px',
-            border: 'none',
-            borderRadius: 12,
-            background: 'var(--panel-accent)',
-            color: 'var(--panel-selected-text)',
-            fontSize: 14,
-            fontWeight: 600,
-            cursor: 'pointer',
-            boxShadow: '0 1px 3px rgba(0,0,0,0.08)',
-          }}
-        >
-          + {t('scheduler_window.btn_add')}
-        </button>
-      </div>
-
       {/* 表单弹窗 */}
       {showForm && (
-        <div
-          style={{
-            position: 'fixed',
-            inset: 0,
-            background: 'var(--panel-overlay)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            zIndex: 100,
-          }}
-          onClick={() => setShowForm(false)}
-        >
-          <div
-            style={{
-              background: 'var(--panel-surface)',
-              borderRadius: 16,
-              padding: 20,
-              width: '80%',
-              maxWidth: 400,
-              border: '1.5px solid var(--panel-border)',
-              boxShadow: '0 8px 32px rgba(0,0,0,0.12)',
-            }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 16, color: 'var(--panel-text)' }}>
-              {t('scheduler_window.btn_add')}
-            </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-              <div>
-                <label style={labelStyle}>
-                  {t('scheduler_window.field_message')}
-                </label>
+        <div className="rec-overlay" onClick={() => setShowForm(false)}>
+          <div className="rec-dialog" onClick={(e) => e.stopPropagation()}>
+            <h3 className="rec-dialog-title">{t('scheduler_window.btn_add')}</h3>
+            <div className="rec-dialog-body">
+              <div className="rec-field">
+                <label className="rec-label">{t('scheduler_window.field_message')}</label>
                 <textarea
+                  className="rec-textarea"
+                  style={{ minHeight: 60 }}
                   value={formMessage}
                   onChange={(e) => setFormMessage(e.target.value)}
-                  style={{ ...inputStyle, minHeight: 60, resize: 'vertical' }}
                   rows={3}
                   autoFocus
                 />
               </div>
-              <div>
-                <label style={labelStyle}>
-                  {t('scheduler_window.field_time')}
-                </label>
+              <div className="rec-field">
+                <label className="rec-label">{t('scheduler_window.field_time')}</label>
                 <input
+                  className="rec-input"
                   type="datetime-local"
                   value={formTime}
                   onChange={(e) => setFormTime(e.target.value)}
-                  style={inputStyle}
                 />
               </div>
-              <div>
-                <label style={labelStyle}>
-                  {t('scheduler_window.field_repeat')}
-                </label>
+              <div className="rec-field">
+                <label className="rec-label">{t('scheduler_window.field_repeat')}</label>
                 <input
+                  className="rec-input"
                   type="number"
                   value={formRepeat}
                   onChange={(e) => setFormRepeat(e.target.value)}
-                  style={inputStyle}
                   min={1}
                   placeholder="0"
                 />
               </div>
             </div>
-            <div
-              style={{
-                display: 'flex',
-                gap: 8,
-                marginTop: 20,
-                justifyContent: 'flex-end',
-              }}
-            >
-              <button
-                onClick={() => setShowForm(false)}
-                style={{
-                  padding: '8px 16px',
-                  border: 'none',
-                  borderRadius: 10,
-                  background: 'var(--panel-tag-bg)',
-                  color: 'var(--panel-text)',
-                  fontSize: 14,
-                  cursor: 'pointer',
-                }}
-              >
+            <div className="rec-dialog-foot">
+              <button type="button" onClick={() => setShowForm(false)} className="rec-btn">
                 {t('todo_window.btn_cancel')}
               </button>
               <button
-                onClick={handleSave}
+                type="button"
+                onClick={() => void handleSave()}
                 disabled={!formMessage.trim() || !formTime || saving}
-                style={{
-                  padding: '8px 16px',
-                  border: 'none',
-                  borderRadius: 10,
-                  background:
-                    formMessage.trim() && formTime && !saving ? 'var(--panel-accent)' : 'var(--panel-toggle-off)',
-                  color: 'var(--panel-selected-text)',
-                  fontSize: 14,
-                  fontWeight: 600,
-                  cursor:
-                    formMessage.trim() && formTime && !saving ? 'pointer' : 'not-allowed',
-                }}
+                className="rec-btn is-primary"
               >
                 {t('todo_window.btn_save')}
               </button>
@@ -586,25 +433,6 @@ const SchedulerPage: React.FC = () => {
       )}
     </div>
   );
-};
-
-const actionBtn: React.CSSProperties = {
-  padding: '4px 12px',
-  border: 'none',
-  borderRadius: 8,
-  background: 'transparent',
-  color: 'var(--panel-text-secondary)',
-  fontSize: 12,
-  fontWeight: 500,
-  cursor: 'pointer',
-  transition: 'background 0.15s ease',
-};
-
-const labelStyle: React.CSSProperties = {
-  display: 'block',
-  fontSize: 12,
-  color: 'var(--panel-text-secondary)',
-  marginBottom: 4,
 };
 
 export default SchedulerPage;

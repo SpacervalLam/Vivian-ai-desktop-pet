@@ -29,6 +29,32 @@ pub struct SpeechCache {
     max_entries: usize,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cache_publishes_complete_replacements_and_ignores_empty_audio() {
+        let directory = std::env::temp_dir().join(format!("vivian-cache-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let cache = SpeechCache { cache_dir: directory.clone(), index: Arc::new(RwLock::new(HashMap::new())), max_entries: 10 };
+        for bytes in [vec![1, 2, 3], vec![4, 5, 6, 7], vec![]] {
+            cache.put("text", "voice", None, "test", 1.0, 1.0, None,
+                &TtsSynthesisResult::new(bytes, AudioFormat::Wav));
+        }
+        assert_eq!(cache.get("text", "voice", None, "test", 1.0, 1.0, None).unwrap().audio, vec![4, 5, 6, 7]);
+        std::fs::write(directory.join("1.wav"), []).unwrap();
+        std::fs::write(directory.join("2.part"), [9]).unwrap();
+        cache.index.write().clear();
+        cache.scan_existing().unwrap();
+        assert_eq!(cache.index.read().len(), 1);
+        cache.clear().unwrap();
+        std::fs::remove_file(directory.join("1.wav")).unwrap();
+        std::fs::remove_file(directory.join("2.part")).unwrap();
+        std::fs::remove_dir(directory).unwrap();
+    }
+}
+
 impl SpeechCache {
     /// 创建缓存实例,目录为 `<character_data_dir>/sound/cache/`
     pub fn new(char_id: &str) -> VivianResult<Self> {
@@ -87,6 +113,9 @@ impl SpeechCache {
                         };
                         if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
                             if let Ok(hash) = stem.parse::<u64>() {
+                                if entry.metadata().map(|m| m.len() == 0).unwrap_or(true) {
+                                    continue;
+                                }
                                 index.insert(hash, (path, format));
                             }
                         }
@@ -177,6 +206,7 @@ impl SpeechCache {
         pitch: Option<f64>,
         result: &TtsSynthesisResult,
     ) {
+        if result.audio.is_empty() { return; }
         let key = Self::compute_key(text, voice, emotion, engine_name, rate, volume, pitch);
         let ext = match result.format {
             AudioFormat::Mp3 => "mp3",
@@ -188,9 +218,14 @@ impl SpeechCache {
         let filename = format!("{}.{}", key, ext);
         let path = self.cache_dir.join(&filename);
 
-        match std::fs::write(&path, &result.audio) {
+        // Serialize writes with get/clear for this cache. A unique staging file
+        // prevents concurrent synthesis and interrupted writes exposing partial audio.
+        let mut index = self.index.write();
+        let temporary = self.cache_dir.join(format!("{key}.{}.part", uuid::Uuid::new_v4()));
+        let written = std::fs::write(&temporary, &result.audio)
+            .and_then(|_| std::fs::rename(&temporary, &path));
+        match written {
             Ok(()) => {
-                let mut index = self.index.write();
                 // LRU 淘汰:超过上限时删除最旧的文件
                 if index.len() >= self.max_entries && !index.contains_key(&key) {
                     if let Some((&old_key, (old_path, _))) = index.iter().next() {
@@ -202,6 +237,7 @@ impl SpeechCache {
                 tracing::debug!("[SpeechCache] 写入缓存: key={} entries={}", key, index.len());
             }
             Err(e) => {
+                let _ = std::fs::remove_file(&temporary);
                 tracing::warn!("[SpeechCache] 写入缓存失败: {}", e);
             }
         }

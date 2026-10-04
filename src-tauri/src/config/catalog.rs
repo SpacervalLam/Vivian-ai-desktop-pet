@@ -396,11 +396,11 @@ pub fn build_catalog() -> Vec<SettingEntry> {
         SettingEntry {
             key: "web_search.providers".into(),
             label: "启用的搜索引擎".into(),
-            description: "可同时启用多个引擎：duckduckgo（零配置）/ searxng（自部署）/ tavily（LLM 优化）（Bing v7 已退役）/ deepseek（官方原生搜索，一次搜索=一次模型调用）。陪伴侧默认快速选一个低成本引擎，工作侧默认并发研究；结果排序去重并保留来源；智能体可在 web_search 工具的 engines 参数里自主选用一个或多个（以启用列表为范围）".into(),
+            description: "可同时启用多个引擎：searxng（自部署）/ tavily（LLM 优化）/ deepseek（官方原生搜索，一次搜索=一次模型调用）/ duckduckgo（零配置但常被反机器人拦截，仅作末位兜底）。未配置任何凭据时搜索不可用；陪伴侧默认快速选一个低成本引擎，工作侧默认并发研究；结果排序去重并保留来源；智能体可在 web_search 工具的 engines 参数里自主选用一个或多个（以启用列表为范围）。单引擎失败时自动降级到列表中的下一家".into(),
             layer: SettingLayer::Advanced,
             group: "网络搜索".into(),
             control: SettingControl::MultiSelect {
-                options: vec!["duckduckgo".into(), "searxng".into(), "tavily".into(), "deepseek".into()],
+                options: vec!["duckduckgo".into(), "searxng".into(), "tavily".into(), "deepseek".into(), "exa".into(), "perplexity".into(), "openai".into(), "xai".into(), "anthropic".into()],
             },
             default_value: serde_json::json!(["duckduckgo"]),
         },
@@ -489,25 +489,6 @@ pub fn build_catalog() -> Vec<SettingEntry> {
             },
             default_value: serde_json::json!("basic"),
         },
-        // Bing Search API 配置
-        SettingEntry {
-            key: "web_search.bing.api_key".into(),
-            label: "Bing Search API Key".into(),
-            description: "旧 Bing API 已退役，仅保留旧配置兼容；请选择 Tavily、SearXNG 或其他可用引擎".into(),
-            layer: SettingLayer::Advanced,
-            group: "网络搜索-Bing".into(),
-            control: SettingControl::Password,
-            default_value: serde_json::json!(""),
-        },
-        SettingEntry {
-            key: "web_search.bing.mkt".into(),
-            label: "Bing 市场代码".into(),
-            description: "搜索结果市场（如 zh-CN / en-US / ja-JP），默认 zh-CN".into(),
-            layer: SettingLayer::Expert,
-            group: "网络搜索-Bing".into(),
-            control: SettingControl::String,
-            default_value: serde_json::json!("zh-CN"),
-        },
         // DeepSeek 官方原生搜索配置
         SettingEntry {
             key: "web_search.deepseek.api_key".into(),
@@ -562,6 +543,81 @@ pub fn build_catalog() -> Vec<SettingEntry> {
             group: "网络搜索-DeepSeek".into(),
             control: SettingControl::Integer,
             default_value: serde_json::json!(60),
+        },
+        SettingEntry {
+            key: "web_search.exa.api_key".into(), label: "Exa api_key".into(), description: "留空不调用；凭据单独保存".into(),
+            layer: SettingLayer::Advanced, group: "网络搜索-Exa".into(),
+            control: SettingControl::Password, default_value: serde_json::json!(""),
+        },
+        SettingEntry {
+            key: "web_search.exa.base_url".into(), label: "Exa base_url".into(), description: "服务商 API 根地址；留空使用官方端点".into(),
+            layer: SettingLayer::Advanced, group: "网络搜索-Exa".into(),
+            control: SettingControl::String, default_value: serde_json::json!(""),
+        },
+        SettingEntry {
+            key: "web_search.exa.model".into(), label: "Exa model".into(), description: "原生联网搜索模型名；Exa/Perplexity Search 不使用此字段".into(),
+            layer: SettingLayer::Advanced, group: "网络搜索-Exa".into(),
+            control: SettingControl::String, default_value: serde_json::json!(""),
+        },
+        SettingEntry {
+            key: "web_search.perplexity.api_key".into(), label: "Perplexity api_key".into(), description: "留空不调用；凭据单独保存".into(),
+            layer: SettingLayer::Advanced, group: "网络搜索-Perplexity".into(),
+            control: SettingControl::Password, default_value: serde_json::json!(""),
+        },
+        SettingEntry {
+            key: "web_search.perplexity.base_url".into(), label: "Perplexity base_url".into(), description: "服务商 API 根地址；留空使用官方端点".into(),
+            layer: SettingLayer::Advanced, group: "网络搜索-Perplexity".into(),
+            control: SettingControl::String, default_value: serde_json::json!(""),
+        },
+        SettingEntry {
+            key: "web_search.perplexity.model".into(), label: "Perplexity model".into(), description: "原生联网搜索模型名；Exa/Perplexity Search 不使用此字段".into(),
+            layer: SettingLayer::Advanced, group: "网络搜索-Perplexity".into(),
+            control: SettingControl::String, default_value: serde_json::json!(""),
+        },
+        SettingEntry {
+            key: "web_search.openai.api_key".into(), label: "OpenAI api_key".into(), description: "留空不调用；凭据单独保存".into(),
+            layer: SettingLayer::Advanced, group: "网络搜索-OpenAI".into(),
+            control: SettingControl::Password, default_value: serde_json::json!(""),
+        },
+        SettingEntry {
+            key: "web_search.openai.base_url".into(), label: "OpenAI base_url".into(), description: "服务商 API 根地址；留空使用官方端点".into(),
+            layer: SettingLayer::Advanced, group: "网络搜索-OpenAI".into(),
+            control: SettingControl::String, default_value: serde_json::json!(""),
+        },
+        SettingEntry {
+            key: "web_search.openai.model".into(), label: "OpenAI model".into(), description: "原生联网搜索模型名；Exa/Perplexity Search 不使用此字段".into(),
+            layer: SettingLayer::Advanced, group: "网络搜索-OpenAI".into(),
+            control: SettingControl::String, default_value: serde_json::json!(""),
+        },
+        SettingEntry {
+            key: "web_search.xai.api_key".into(), label: "Grok api_key".into(), description: "留空不调用；凭据单独保存".into(),
+            layer: SettingLayer::Advanced, group: "网络搜索-Grok".into(),
+            control: SettingControl::Password, default_value: serde_json::json!(""),
+        },
+        SettingEntry {
+            key: "web_search.xai.base_url".into(), label: "Grok base_url".into(), description: "服务商 API 根地址；留空使用官方端点".into(),
+            layer: SettingLayer::Advanced, group: "网络搜索-Grok".into(),
+            control: SettingControl::String, default_value: serde_json::json!(""),
+        },
+        SettingEntry {
+            key: "web_search.xai.model".into(), label: "Grok model".into(), description: "原生联网搜索模型名；Exa/Perplexity Search 不使用此字段".into(),
+            layer: SettingLayer::Advanced, group: "网络搜索-Grok".into(),
+            control: SettingControl::String, default_value: serde_json::json!(""),
+        },
+        SettingEntry {
+            key: "web_search.anthropic.api_key".into(), label: "Claude api_key".into(), description: "留空不调用；凭据单独保存".into(),
+            layer: SettingLayer::Advanced, group: "网络搜索-Claude".into(),
+            control: SettingControl::Password, default_value: serde_json::json!(""),
+        },
+        SettingEntry {
+            key: "web_search.anthropic.base_url".into(), label: "Claude base_url".into(), description: "服务商 API 根地址；留空使用官方端点".into(),
+            layer: SettingLayer::Advanced, group: "网络搜索-Claude".into(),
+            control: SettingControl::String, default_value: serde_json::json!(""),
+        },
+        SettingEntry {
+            key: "web_search.anthropic.model".into(), label: "Claude model".into(), description: "原生联网搜索模型名；Exa/Perplexity Search 不使用此字段".into(),
+            layer: SettingLayer::Advanced, group: "网络搜索-Claude".into(),
+            control: SettingControl::String, default_value: serde_json::json!(""),
         },
         // ========== 专家层 ==========
         SettingEntry {

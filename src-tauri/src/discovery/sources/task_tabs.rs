@@ -145,6 +145,13 @@ fn record_task_tab(char_id: &str, platform: &str) {
 /// 任务 tab 结果文本（untrusted 包裹 + 可能的双重 JSON 字符串）→ 原始条目数组
 fn parse_task_tab_items(text: &str) -> Vec<Value> {
     // 剥离 <UNTRUSTED_PAGE_CONTENT ...> 包裹与转义字符串双重包装
+    let text = text.trim();
+    let text = if text.starts_with("<UNTRUSTED_PAGE_CONTENT") {
+        match (text.find('>'), text.rfind("</UNTRUSTED_PAGE_CONTENT>")) {
+            (Some(start), Some(end)) if start < end => text[start + 1..end].trim(),
+            _ => return Vec::new(),
+        }
+    } else { text };
     let Some(value) = crate::discovery::parse_json_tolerant(text) else {
         return Vec::new();
     };

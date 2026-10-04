@@ -437,8 +437,23 @@ impl RequestCustomization {
             self.sampling().apply(body);
         }
         if let Some(overrides) = &self.overrides {
-            merge_patch(body, overrides);
+            if !super::request_body::is_full(overrides) { merge_patch(body, overrides); }
         }
+    }
+
+    /// Shared by request transport and settings preview. Full-body overrides always run last.
+    pub fn finalize(
+        &self, mut body: Value, pref: ReasoningPreference, model: &str,
+        send_temperature: bool, send_max_tokens: bool,
+    ) -> Value {
+        let is_agents = matches!(self.provider_type.as_str(), "openai_agents" | "openai-agents" | "agents_api" | "agents-api");
+        let parameters = if is_agents && body.get("agent").is_some() {
+            body.get_mut("agent").unwrap()
+        } else { &mut body };
+        self.apply(parameters, pref, model);
+        apply_sampling_switches(parameters, send_temperature, send_max_tokens, &self.sampling());
+        super::request_body::apply(&mut body, self.overrides.as_ref());
+        body
     }
 }
 

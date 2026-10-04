@@ -4,7 +4,7 @@
 //! - 重复检测（UUID + 内容+时间戳+角色，仅比对已落盘尾部 20 条）
 //! - 分页查询（offset/limit + has_more）
 //! - 持久化：JSONL 追加写（每行一条 HistoryEntry），刷新仅追加新消息，
-//!   不再全量重写整个文件；旧版 full_chat_history.json 首次访问时自动迁移
+//!   不再全量重写整个文件；只读取当前 JSONL 存储
 
 pub mod history;
 pub mod intent_judge;
@@ -36,21 +36,6 @@ pub struct HistoryEntry {
     pub session_id: Option<String>,
     #[serde(default)]
     pub metadata: serde_json::Value,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct HistoryFile {
-    version: String,
-    messages: Vec<HistoryEntry>,
-}
-
-impl Default for HistoryFile {
-    fn default() -> Self {
-        Self {
-            version: "1.0".to_string(),
-            messages: Vec::new(),
-        }
-    }
 }
 
 /// 对话缓冲区 flush 间隔（2 秒），平衡 IO 频率和实时性
@@ -133,15 +118,16 @@ pub struct DialogueManager {
     /// 当前会话 ID（来自 ConversationManager），由 send_message_stream 在 think 前设置
     ///
     /// 写入 HistoryEntry.session_id，实现对话历史按会话切分。
-    /// None 表示未启用会话管理（向后兼容旧消息）。
+    /// None 表示本轮未启用会话管理。
     current_session_id: Mutex<Option<String>>,
     /// 已落盘消息的尾部缓存（最近 20 条），供 flush 时重复检测，
     /// 避免每次刷新全量读文件
     written_tail: Mutex<Vec<HistoryEntry>>,
-    /// JSONL 就绪标志：首次 flush 前完成旧格式迁移与尾部缓存恢复
+    /// JSONL 就绪标志：首次 flush 前恢复尾部缓存
     jsonl_ready: Mutex<bool>,
     /// 串行化追加、清空和元数据修补，避免整文件重写覆盖新消息。
     history_io: Mutex<()>,
+    pub conversation_boundaries: crate::memory::conversation_semantics::ConversationBoundaryStore,
 }
 
 impl DialogueManager {
@@ -159,6 +145,8 @@ impl DialogueManager {
             written_tail: Mutex::new(Vec::new()),
             jsonl_ready: Mutex::new(false),
             history_io: Mutex::new(()),
+            conversation_boundaries: crate::memory::conversation_semantics::ConversationBoundaryStore::new(
+                crate::utils::path::get_companion_data_dir(char_id).join("history").join("conversation_boundaries.json")),
         }
     }
 
@@ -427,7 +415,7 @@ impl DialogueManager {
     ///
     /// 过滤规则：
     /// - 包含 channel 匹配的消息（通过 msg.meta.channel 判断）
-    /// - 包含没有 channel 标记的旧消息（向后兼容）
+    /// - 未指定 channel 的新消息属于 direct
     /// - 排除其他 channel 的消息（如跨角色对话不污染用户对话上下文）
     ///
     /// 当 `channel` 为 None 或 "all" 时返回全部（等价于 get_history）。
@@ -438,9 +426,9 @@ impl DialogueManager {
             Some(target_ch) => history
                 .into_iter()
                 .filter(|msg| {
-                    // 没有 meta 或 channel 字段的旧消息默认保留
+                    // 未指定渠道的消息只属于默认 direct 渠道
                     match msg.meta.as_ref().and_then(|m| m.channel.as_deref()) {
-                        None => true,
+                        None => target_ch == "direct",
                         Some(ch) => ch == target_ch,
                     }
                 })
@@ -448,7 +436,7 @@ impl DialogueManager {
         }
     }
 
-    /// 获取用户可见渠道的近期消息（direct/wechat/proactive 及无标记旧消息）
+    /// 获取用户可见渠道的近期消息（direct/wechat/proactive 及默认 direct 消息）
     ///
     /// 仅排除 `cross_character` 渠道消息，使同一用户在不同入口
     /// （Chat window、侧边栏、微信）切换时共享完整上下文。
@@ -486,7 +474,7 @@ impl DialogueManager {
         }
         let messages_to_write = pending.clone();
 
-        // 2. 首次刷新：完成旧格式迁移并恢复尾部缓存
+        // 2. 首次刷新：恢复尾部缓存
         self.ensure_jsonl_ready();
 
         // 3. 重复检测（仅比对已落盘尾部 20 条）后逐行序列化
@@ -589,67 +577,19 @@ impl DialogueManager {
         dir
     }
 
-    /// 旧版全量 JSON 历史文件（仅用于迁移读取）
-    fn history_file(&self) -> PathBuf {
-        self.history_dir().join("full_chat_history.json")
-    }
-
     /// 当前历史存储：JSONL（每行一条 HistoryEntry，追加写）
     fn history_jsonl_file(&self) -> PathBuf {
         self.history_dir().join("chat_history.jsonl")
     }
 
-    /// JSONL 就绪：首次访问时把旧版 JSON 历史迁移为 JSONL，并恢复尾部缓存
+    /// 首次访问恢复 JSONL 尾部缓存
     fn ensure_jsonl_ready(&self) {
         let mut ready = self.jsonl_ready.lock();
         if *ready {
             return;
         }
-        let jsonl = self.history_jsonl_file();
-        if !jsonl.exists() {
-            if let Some(entries) = self.read_legacy_json() {
-                if !entries.is_empty() {
-                    let mut buf = String::new();
-                    for e in &entries {
-                        if let Ok(line) = serde_json::to_string(e) {
-                            buf.push_str(&line);
-                            buf.push('\n');
-                        }
-                    }
-                    if fs::write(&jsonl, &buf).is_ok() {
-                        // 旧文件重命名保留为迁移备份
-                        let legacy = self.history_file();
-                        if legacy.exists() {
-                            let _ =
-                                fs::rename(&legacy, legacy.with_extension("json.migrated"));
-                        }
-                        tracing::info!(
-                            "[DialogueManager] 历史已迁移为 JSONL（{} 条），旧文件保留为 .migrated",
-                            entries.len()
-                        );
-                    }
-                }
-            }
-        }
         *self.written_tail.lock() = self.read_jsonl_tail(20);
         *ready = true;
-    }
-
-    /// 读取旧版 JSON 历史文件（支持 {version,messages} 与裸数组两种格式）
-    fn read_legacy_json(&self) -> Option<Vec<HistoryEntry>> {
-        let path = self.history_file();
-        if !path.exists() {
-            return None;
-        }
-        let content = fs::read_to_string(&path).ok()?;
-        let trimmed = content.trim_start();
-        if trimmed.starts_with('{') {
-            serde_json::from_str::<HistoryFile>(&content).ok().map(|f| f.messages)
-        } else if trimmed.starts_with('[') {
-            serde_json::from_str::<Vec<HistoryEntry>>(&content).ok()
-        } else {
-            None
-        }
     }
 
     /// 从 JSONL 尾部读取最近 n 条完整记录（倒序块读取，O(tail)）
@@ -703,7 +643,7 @@ impl DialogueManager {
         entries
     }
 
-    /// 读取所有消息：JSONL 逐行解析（跳过损坏行），无 JSONL 时回退旧版 JSON
+    /// 读取所有消息：只解析 JSONL，跳过损坏行
     fn read_all_messages(&self) -> Vec<HistoryEntry> {
         self.ensure_jsonl_ready();
         let path = self.history_jsonl_file();
@@ -747,8 +687,23 @@ impl DialogueManager {
         self.ensure_jsonl_ready();
         let path = self.history_jsonl_file();
         fs::write(&path, "")?;
+        self.buffer.lock().clear();
+        self.messages.lock().clear();
+        self.conversation_boundaries.clear()?;
         *self.written_tail.lock() = Vec::new();
         Ok(())
+    }
+
+    /// Every consumer sees the same persisted semantic boundaries without making network calls.
+    pub fn memory_conversations(&self) -> VivianResult<Vec<crate::memory::conversations::ConversationRecord>> {
+        let (_, decisions) = self.conversation_boundaries.snapshot();
+        Ok(crate::memory::conversations::project_conversations(&self.get_all_history()?, &self.char_id, &decisions).0)
+    }
+
+    pub fn notify_conversation_grouping_changed(&self) {
+        if let Some(app) = self.app_handle.lock().as_ref() {
+            let _ = app.emit("dialogue:changed", serde_json::json!({"character_id": self.char_id}));
+        }
     }
 
     /// 保存当前内存中的对话历史（委托给缓冲区刷新）

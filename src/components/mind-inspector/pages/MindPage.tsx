@@ -43,7 +43,7 @@ import {
   RADIUS,
   EASE,
   DURATION,
-  CHARACTER_ACCENT,
+  CLAUDE_ACCENT,
 } from '../design-system';
 import { useNavigation } from '../NavigationContext';
 import {
@@ -321,7 +321,7 @@ const CharacterMindPanel: React.FC<CharacterMindPanelProps> = ({
 }) => {
   const { t } = useTranslation();
   const nav = useNavigation();
-  const accent = CHARACTER_ACCENT[characterId];
+  const accent = CLAUDE_ACCENT;
   const label = t(`mind_inspector.common.char_${characterId}`);
   const emotionKey = mood?.primary_emotion ?? '';
   const emotionLabel = t(`mind_inspector.mind.em_${emotionKey}`, {
@@ -1234,6 +1234,7 @@ const MemoLiveMindView = React.memo(LiveMindView);
 const MindPage: React.FC = () => {
   return (
     <div
+      className="claude-page claude-page-mind"
       style={{
         flex: 1,
         overflowY: 'auto',

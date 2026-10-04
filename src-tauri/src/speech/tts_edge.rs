@@ -25,6 +25,8 @@ use super::tts::{TtsConfig, VoiceInfo};
 use super::tts_backend::{AudioFormat, TtsBackend, TtsSynthesisResult, WordBoundary};
 
 const TRUSTED_CLIENT_TOKEN: &str = "6A5AA1D4EAFF4E9FB37E23D68491D6F4";
+/// 微软 Edge 朗读的官方端点。域名含 bing.com 与 Bing Search API 无关——
+/// 后者已于 2025-08-11 退役并从搜索 provider 池移除，不要连带删除这里。
 const EDGE_TTS_URL: &str = "wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1";
 const EDGE_ORIGIN: &str = "chrome-extension://jdiccldimpdaibmpdkjnbmckianbfold";
 const CHROMIUM_FULL_VERSION: &str = "143.0.3650.75";

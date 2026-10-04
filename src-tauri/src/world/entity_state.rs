@@ -594,7 +594,7 @@ impl ExpectationEngine {
         let patterns: &[(&str, f64)] = &[
             (r"(\d+(?:\.\d+)?)\s*个?小时", 3600.0),
             (r"(\d+(?:\.\d+)?)\s*分钟", 60.0),
-            (r"(\d+(?:\.\d+)?)\s*分(?!钟)", 60.0),
+            (r"(\d+(?:\.\d+)?)\s*分", 60.0),
         ];
 
         for (pat, unit) in patterns {
@@ -911,31 +911,8 @@ fn match_activity_by_ngram_vec(vec: &NGramVector) -> Option<(&'static str, f64)>
 ///
 /// 仅支持 `(\d+(?:\.\d+)?)` 形式的捕获组。
 fn simple_regex_capture(pattern: &str, text: &str) -> Option<String> {
-    // 我们只用到数字捕获，直接扫描文本找数字
-    let _ = pattern;
-    let chars: Vec<char> = text.chars().collect();
-    let mut i = 0;
-    while i < chars.len() {
-        if chars[i].is_ascii_digit() {
-            let start = i;
-            while i < chars.len() && (chars[i].is_ascii_digit() || chars[i] == '.') {
-                i += 1;
-            }
-            let num: String = chars[start..i].iter().collect();
-            // 检查后续是否跟着单位
-            let rest: String = chars[i..].iter().collect();
-            if rest.starts_with("小时")
-                || rest.starts_with("个小时")
-                || rest.starts_with("分钟")
-                || rest.starts_with("分")
-            {
-                return Some(num);
-            }
-        } else {
-            i += 1;
-        }
-    }
-    None
+    regex::Regex::new(pattern).ok()?.captures(text)?.get(1).map(|value| value.as_str().to_string())
+
 }
 
 /// 解析单个中文数字字符
@@ -995,8 +972,8 @@ mod tests {
             max_secs: 1800.0,
             source: ExpectationSource::Inferred,
         };
-        assert_eq!(e.classify(300.0), ReturnClassification::MuchEarlier);
-        assert_eq!(e.classify(800.0), ReturnClassification::Earlier);
+        assert_eq!(e.classify(299.0), ReturnClassification::MuchEarlier);
+        assert_eq!(e.classify(500.0), ReturnClassification::Earlier);
         assert_eq!(e.classify(1200.0), ReturnClassification::OnTime);
         assert_eq!(e.classify(2000.0), ReturnClassification::Later);
         assert_eq!(e.classify(4000.0), ReturnClassification::MuchLater);

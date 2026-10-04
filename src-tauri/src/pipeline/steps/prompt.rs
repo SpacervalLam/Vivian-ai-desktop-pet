@@ -1881,7 +1881,7 @@ mod component_selection_tests {
         let sections = state.metadata["prompt_sections_breakdown"].as_array().unwrap();
         assert_eq!(sections.len(), companion.sections().len());
         assert_eq!(sections.last().unwrap()["section_id"], "post_history");
-        let messages = companion.messages(&state.messages, &state.user_input, false, None, None);
+        let messages = companion.messages(&state.messages, &state.user_input, false, None);
         assert_eq!(messages.iter().filter(|m| m.role == "user").count(), 1);
     }
 

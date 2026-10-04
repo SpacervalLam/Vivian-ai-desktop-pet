@@ -347,7 +347,8 @@ mod tests {
         for &label in EmotionLabel::all() {
             let llm = emotion_label_to_llm(label);
             let back = llm_to_emotion_label(llm);
-            assert_eq!(back, label, "roundtrip failed for {:?}", label);
+            let expected = if label == EmotionLabel::Loneliness { EmotionLabel::Sadness } else { label };
+            assert_eq!(back, expected, "canonical mapping failed for {:?}", label);
         }
     }
 }

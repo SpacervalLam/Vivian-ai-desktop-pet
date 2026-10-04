@@ -86,6 +86,11 @@ pub async fn llm_complete(system: &str, user: &str, temperature: Option<f64>) ->
 
 /// 容错 JSON 解析：剥离代码围栏后取首个完整 JSON 值（对象或数组）
 pub fn parse_json_tolerant(content: &str) -> Option<Value> {
+    parse_json_tolerant_inner(content, 0)
+}
+
+fn parse_json_tolerant_inner(content: &str, depth: usize) -> Option<Value> {
+    if depth > 4 { return None; }
     let mut text = content.trim();
     // 剥离 ```json ... ``` 围栏
     if let Some(rest) = text.strip_prefix("```json") {
@@ -99,6 +104,9 @@ pub fn parse_json_tolerant(content: &str) -> Option<Value> {
 
     // 直接解析
     if let Ok(v) = serde_json::from_str::<Value>(text) {
+        if let Some(inner) = v.as_str() {
+            return parse_json_tolerant_inner(inner, depth + 1);
+        }
         if v.is_object() || v.is_array() {
             return Some(v);
         }

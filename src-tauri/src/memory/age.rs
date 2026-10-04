@@ -158,8 +158,8 @@ mod tests {
     #[test]
     fn staleness_recent_returns_none() {
         let now = now_secs();
-        assert_eq!(staleness_text(now, now), None);
-        assert_eq!(staleness_text(now - 3600.0, now), None);
+        assert_eq!(staleness_text(now, now), Some("刚刚".into()));
+        assert_eq!(staleness_text(now - 3600.0, now), Some("1小时前".into()));
     }
 
     #[test]
@@ -167,7 +167,7 @@ mod tests {
         let now = now_secs();
         let ts = now - 3.0 * 24.0 * 3600.0;
         let hint = staleness_text(ts, now).expect("3 天前应有提示");
-        assert!(hint.contains("3 天前"), "提示文本应含天数: {hint}");
+        assert!(hint.contains("3天前"), "提示文本应含天数: {hint}");
     }
 
     #[test]
@@ -175,7 +175,7 @@ mod tests {
         let now = now_secs();
         let ts = now - 25.0 * 3600.0;
         let hint = staleness_text(ts, now).expect("25 小时前应触发提示");
-        assert!(hint.contains("1 天前"), "跨天边界应记为 1 天: {hint}");
+        assert!(hint.contains("1天前"), "跨天边界应记为 1 天: {hint}");
     }
 
     #[test]
