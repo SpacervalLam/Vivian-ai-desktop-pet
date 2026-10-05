@@ -3094,4 +3094,4 @@ DialogueManager 通过 history_io 串行化追加、清空及元数据修补；�
 - `npm run eval:companion`：记忆来源、恢复及提示词离线检查；不调用真实模型，也不测量真实对话质量。
 - `npm run test:desktop`：需要已启动的本机前端及 Chrome，只验证角色动画；`npm run test:windows-integration` 需要可创建受限令牌进程的 Windows 环境。
 
-[CI](.github/workflows/ci.yml) 在 Windows 运行主程序测试，在 Windows/Linux/macOS 运行前端及契约测试，不代表完整原生应用已跨平台适配。具体验收数量、跳过原因与后续交互检查见 [运行契约](RUNTIME_CONTRACTS.md)。
+[CI](.github/workflows/ci.yml) 在 Windows 运行主程序测试，在 Windows/Linux/macOS 运行前端及契约测试，不代表完整原生应用已跨平台适配。2026-10-05 本机验收：主程序 Rust 1802 项通过、9 项显式跳过；27 个 Node 测试脚本、76 项可移植契约测试、类型检查及前端构建通过。四项受限令牌沙箱测试需具备对应 Windows 权限，其余跳过项沿用原有标记；真实模型质量、多屏 DPI 与原生桌面输入仍需对应环境验收。

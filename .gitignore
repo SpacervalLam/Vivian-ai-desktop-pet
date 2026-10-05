@@ -25,7 +25,6 @@ Thumbs.db
 # 密钥与运行时数据
 .env
 .env.*
-!.env.example
 .webview-data/
 vivian_data/
 .vivian/
@@ -75,6 +74,12 @@ __pycache__/
 src/*Preview.tsx
 
 # AI 工作记录与开发文档
+/*.md
+!/README.md
+!/CODE_WIKI.md
+/*.txt
+/*.pdf
+/*.docx
 /docs/
 .workbuddy/
 .workbuddy-ai/

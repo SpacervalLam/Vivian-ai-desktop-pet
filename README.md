@@ -93,7 +93,7 @@ npm run package:small
 
 基础安装包位于 `src-tauri/target/release/bundle/nsis/`，配套发行文件位于 `release/`。主程序的 `npm run build` 不构建公寓，Three.js 和场景资源由插件独立管理；安装与预览方式见 [公寓插件说明](plugins/3d-apartment/README.md)。
 
-CI 在 Windows 验证主程序 Rust，在 Windows/Linux/macOS 验证前端与可移植契约；原生桌面输入目前仅支持 Windows。离线评估不调用模型，不代表对话质量测试。原生沙箱与角色动画检查使用独立入口，命令及验收范围见 [运行契约](RUNTIME_CONTRACTS.md)。
+CI 在 Windows 验证主程序 Rust，在 Windows/Linux/macOS 验证前端与可移植契约；原生桌面输入目前仅支持 Windows。离线评估不调用模型，不代表对话质量测试。原生沙箱与角色动画检查使用独立入口，命令及验收范围见 [代码 Wiki](CODE_WIKI.md)。
 
 发布版使用加密美术资源包。打包前须准备匹配的 `src-tauri/vivian.bundle.enc`、`vivian.bundle.index.json` 与 `asset_key.bin`；密钥不进入版本管理。资源更新后也需重新生成匹配的包、索引与密钥，不能把缺少密钥时可编译的开发兜底当作可用发行包。
 
@@ -113,7 +113,7 @@ CI 在 Windows 验证主程序 Rust，在 Windows/Linux/macOS 验证前端与可
 
 ## 开发参考
 
-[代码 Wiki](CODE_WIKI.md) 记录模块职责、数据流与实现边界；[运行契约](RUNTIME_CONTRACTS.md) 记录恢复语义、插件兼容和验证命令。`docs/` 保留本地专题记录，不纳入版本管理。3D 公寓的构建与安装见 [插件说明](plugins/3d-apartment/README.md)。
+[代码 Wiki](CODE_WIKI.md) 记录模块职责、数据流、恢复语义、插件兼容和验证命令。`docs/` 保留本地专题记录，不纳入版本管理。3D 公寓的构建与安装见 [插件说明](plugins/3d-apartment/README.md)。
 
 修改代码后运行对应编译检查和相关测试；发布前还需实际检查安装、窗口交互和所配置模型的表现。专题文档中的历史测试结果不代表当前所有模块均通过。
 
