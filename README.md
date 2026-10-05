@@ -120,3 +120,5 @@ CI 在 Windows 验证主程序 Rust，在 Windows/Linux/macOS 验证前端与可
 问题反馈：[GitHub Issues](https://github.com/SpacervalLam/Vivian-ai-desktop-pet/issues)；联系：spacervallam@gmail.com。
 
 采用 [MIT 许可证](LICENSE)。
+
+恢复初始状态只清除记忆、聊天历史及衍生状态；角色、人设、ASR/TTS、模型路径、插件/MCP、待办、定时任务、笔记和使用统计会保留。

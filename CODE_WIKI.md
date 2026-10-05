@@ -2520,7 +2520,7 @@ LLM 输出含标记的 text
 | [`diary.rs`](src-tauri/src/commands/diary.rs) | 日记 |
 | [`tools.rs`](src-tauri/src/commands/tools.rs) | 工具管理（`list_tools` 返回全部注册工具含 `is_custom` 字段供设置页区分自进化工具，不过滤禁用项；`get_tool_history` / `confirm_tool_execution`） |
 | [`todo.rs`](src-tauri/src/commands/todo.rs) | 待办与定时任务（前端待办面板命令 + `list_scheduled_tasks`；`add_todo_item` / `update_todo_item` 支持 `event_time`（事件开始时间）与 `due_date`（提醒触发时间）分离） |
-| [`system.rs`](src-tauri/src/commands/system.rs) | `get_system_info` 复用 CPU/RAM 采样器与一秒快照，不枚举进程；首次 CPU 读数可能为 0，进程明细由独立查询获取。系统操作（含 `factory_reset` 恢复出厂：锁死 tick → 停后台子系统 → 逐角色清空数据 → 写 `.factory_reset_pending` 清扫标记 → 重启；`factory_reset_sweep_if_pending` 在 `AppState::new()` 前按保留清单清扫用户数据目录，见[持久化模式](#持久化模式)） |
+| [`system.rs`](src-tauri/src/commands/system.rs) | `get_system_info` 复用 CPU/RAM 采样器与一秒快照，不枚举进程；首次 CPU 读数可能为 0，进程明细由独立查询获取。系统操作（含 `factory_reset` 恢复出厂：锁死 tick → 停后台子系统 → 逐角色清空数据 → 写 `.factory_reset_pending` 清扫标记 → 重启；`factory_reset_sweep_if_pending` 在 `AppState::new()` 前按明确的记忆路径清理内容，见[持久化模式](#持久化模式)） |
 | [`backup.rs`](src-tauri/src/commands/backup.rs) | 数据备份（`backup_user_data` 导出 `.altn` 备份 / `restore_user_data` 导入备份——校验备份文件、写入恢复标记并自动重启，前端导入走与恢复出厂同级的二次确认弹窗，见[恢复出厂设置](#恢复出厂设置数据重置)） |
 | [`discovery.rs`](src-tauri/src/commands/discovery.rs) | 内容发现画像（`get_discovery_profile` 查看画像 / `update_discovery_interest_weight` 调整兴趣权重 / 增删不喜欢主题 / `respond_interest_probe` 回应兴趣探针 / `bootstrap_from_bangumi` 公开收藏导入） |
 | [`plugins.rs`](src-tauri/src/commands/plugins.rs) | 插件清单与运行时装卸（`list_plugins` / `plugin_paths` / `list_skills` 技能管理面板（不展示内置风格预设）/ `reload_plugin` 重载单个插件（撤销旧贡献 + 按磁盘重装 + 连接 MCP）/ `unload_plugin` 卸载运行时贡献不动磁盘 / `delete_plugin` 删除插件目录——内置插件禁删） |
@@ -2831,7 +2831,7 @@ lib.rs::run
   ├── init_logging()              # 文件日志 non_blocking 缓冲上限 4096 行（防磁盘繁忙时内存堆积）
   ├── factory_reset_sweep_if_pending()        # 消费恢复出厂清扫标记
 
-  │   └── 存在 .factory_reset_pending → 按保留清单删除用户数据目录其余条目（此时
+  │   └── 存在 .factory_reset_pending → 只清理明确的记忆路径（此时
   │       数据文件尚未被打开，可无锁删除，规避 vectors.db 的 SQLite 共享冲突），
   │       随后删除标记
   └── AppState::new()                         # 之后再进入 Builder setup
@@ -2889,7 +2889,7 @@ lib.rs::setup
   - **穿透固定窗口**：`startup_toast` 与角色 toast 窗口参数对齐——透明、无边框、置顶、跳过任务栏、不抢焦点（`focused=false`）、初始隐藏；几何与角色 toast 统一（宽 360、**高度固定为屏幕的一半**、贴屏幕右下角，纵向由跨窗口堆叠协议错开），`resizable(false)` 固定尺寸不可拖拽调整；点击穿透由 [`toast_hit.rs`](src-tauri/src/commands/toast_hit.rs) 的区域级命中接管——进度条目无可交互矩形，整窗保持穿透，不遮挡屏幕右下区域的鼠标操作。
 - **开机自动启动**：配置项 `base.auto_start`（默认 `false`），设置窗口「通用」页可开关；保存时通过 `utils::autostart::set_auto_start` 写入/删除 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 下的 `VivianDesktopPet` 值（当前用户启动项），启动时也会按配置同步一次。
 - **种子向量修复**：`MemoryManagerInner::ensure_seed_vectors` 按 `seed_` 条目逐条核对向量库，缺失即补建；补建失败会导致 `MemoryManager::new` 失败，从而阻止 API 开放，避免“种子记忆存在于 JSON 但检索不到”的静默问题。
-- **恢复初始状态清扫**：重启前写 `.factory_reset_pending`，下次在 `AppState::new()` 前按白名单清扫；保留配置、凭据、安全白名单及 `python-libs` / `pids` / `logs`。用户数据中的技能、插件、MCP 与其余使用期数据也清除。删除失败保留标记并阻止初始化，成功后按首次启动路径重建，详见恢复章节。
+- **恢复初始状态清扫**：启动前仅清理明确的记忆路径，保留配置与内容资产。文件锁重试失败保留标记并阻止初始化。
 
 #### 开发构建配置（dev profile）
 
@@ -2969,25 +2969,15 @@ lib.rs::setup
 - **降级模式**：持久化目录不可写时降级到临时目录
 - **错误传播**：核心数据结构返回 `VivianResult<()>`，非关键路径 `tracing::warn!` 后降级
 
-### 恢复出厂设置（数据重置）
+### 恢复出厂设置（记忆重置）
 
-界面称「恢复初始状态」，后端命令为 [`factory_reset`](src-tauri/src/commands/system.rs)。采用运行中清空与重启前置清扫两段式，避免 Windows SQLite 长连接占用使旧数据残留。
+`factory_reset` 只清除记忆、对话历史、关系与心理状态、日记及对话衍生画像。停止后台生产者和调度器后清空记忆，写入 `.factory_reset_pending` 并重启。
 
-1. 命令置 `factory_reset_in_progress`、停止后台生产者和桌宠相关服务，清空角色记忆、历史、关系、心理、日记、画像与笔记，以及公共记忆和解析缓存；写入 `.factory_reset_pending`。
-2. 下次启动在 `AppState::new()` 之前消费标记，此时还未打开向量库与事件账本。遍历用户数据目录顶层，删除白名单以外全部条目；Windows 文件锁短暂重试后仍失败则保留标记并返回错误，不允许读取残留旧数据。
-3. 成功清扫后删除标记，由 `config.yaml` 的角色配置走首次启动路径重建、播种默认记忆和向量。
+启动清扫按 `MEMORY_RESET_PATHS` 和 `SHARED_MEMORY_RESET_PATHS` 处理明确的记忆路径，不删除整个角色目录。配置和未知路径默认保留，不跟随符号链接。文件锁重试失败时保留标记，阻止初始化；成功后删除标记。
 
-**实际保留白名单 `FACTORY_RESET_KEEP`**：
+保留角色、人设、日记和 ASR/TTS 配置（角色 `sound/` 内的启动 YAML、参考音频）、模型路径、凭据、插件/MCP、技能、待办、定时任务、笔记、截图/图片、编程会话和使用统计。记忆目录内混存的 config 文件、YAML 和触发偏好也保留。
 
-| 分类 | 顶层条目 |
-| --- | --- |
-| 配置 | `config`、`config.yaml`、`lsp.json`、`sound`、`gpt_sovits_tts_infer.yaml` |
-| 凭据与安全 | `.credentials.json`、`identity.json`、`trusted_apps.json`、`trusted_origins.json` |
-| 运行设施 | `python-libs`、`pids`、`logs` |
-
-因此 `characters`、`common`、旧版记忆目录、截图/图片、RAG、spill、待办、日记、历史、工作会话，以及用户数据下的 `skills`、`plugins`、`mcp` 均会清除。程序安装目录中的独立 3D 公寓不属于该用户数据清扫目录。
-
-**备份与导入**：[`ConfigWindow.tsx`](src/components/ConfigWindow.tsx) 的「备份与恢复」独立设置页统一呈现导出、导入与恢复初始状态，侧栏搜索只筛选导航，不切换页面。`backup_user_data` 导出 `.altn`；`restore_user_data` 经用户二次确认后验证归档、写恢复标记并重启，启动时回填。导出/导入与重置按钮互斥禁用，静态图标和说明避免重排。需保留自建能力时先导出备份。
+**备份与导入**：[`ConfigWindow.tsx`](src/components/ConfigWindow.tsx) 的「备份与恢复」独立设置页统一呈现导出、导入与恢复初始状态，侧栏搜索只筛选导航，不切换页面。`backup_user_data` 导出 `.altn`；`restore_user_data` 经用户二次确认后验证归档、写恢复标记并重启，启动时回填。导出/导入与重置按钮互斥禁用，静态图标和说明避免重排。重置保留自建能力与配置；清除记忆前仍建议导出备份。
 
 ---
 

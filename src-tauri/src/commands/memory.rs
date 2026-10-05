@@ -369,7 +369,7 @@ pub async fn clear_all_memories(
     // ===== 3. 运行时状态持久化层（删除文件，下次启动重新初始化）=====
     // Proactive 状态文件：state.json / topics.json / habits.json / trigger_preferences.json
     let proactive_dir = char_data_dir.join("proactive");
-    for name in ["state.json", "topics.json", "habits.json", "trigger_preferences.json"] {
+    for name in ["state.json", "topics.json", "habits.json"] {
         let p = proactive_dir.join(name);
         if p.exists() {
             let _ = std::fs::remove_file(&p);
@@ -389,11 +389,13 @@ pub async fn clear_all_memories(
     }
 
     // ===== 5. 内容资产层：笔记目录 =====
-    // 删除整个 notebook/ 目录（note.json / note.html / .memory_ref / index.json）。
+    // 恢复初始状态只清除记忆，保留笔记资产；单独清空记忆命令维持原行为。
     // 知识库条目已随上面的 memory.clear_all_memories() 的 entries.clear() 一并清空，
     // 无需逐个读 .memory_ref 调用 delete_knowledge_document。
-    if let Err(e) = crate::notebook::storage::clear_all(&char_id) {
-        tracing::warn!("[clear_all_memories] 清空角色 {} 笔记目录失败: {e}", char_id);
+    if !state.is_factory_reset_in_progress() {
+        if let Err(e) = crate::notebook::storage::clear_all(&char_id) {
+            tracing::warn!("[clear_all_memories] 清空角色 {} 笔记目录失败: {e}", char_id);
+        }
     }
 
     let _ = app.emit(
