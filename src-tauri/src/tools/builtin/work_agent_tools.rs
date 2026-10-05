@@ -77,22 +77,22 @@ impl Tool for DelegateToWorkAgentTool {
     }
 
     fn description(&self) -> &str {
-        "Use the work agent as an execution tool shared by the user and companion. Write a self-contained task prompt on the user's behalf, preserving the user's objective, constraints, expected deliverable, and known context without inventing authority. The work runs in a separate background session. You receive a session_id immediately; get_work_status returns progress and the final work summary. After delegation, do not duplicate the same execution yourself."
+        "Proactively delegate user-requested work requiring sustained research, multiple execution steps, coding, commands, file processing or deliverables such as PPTs, documents, spreadsheets and reports. The user need not name this tool; their work request authorizes delegation within its scope. Answer ordinary explanations and casual conversation yourself. Resolve follow-ups using the preceding task and write a self-contained prompt preserving objective, constraints, known context, deliverable and verification criteria without inventing authority. Runs in a background session; claim it started only after a successful session_id receipt. get_work_status returns progress and the final summary. Do not duplicate delegated execution."
     }
 
     fn description_in(&self, lang: &str) -> &str {
         match lang {
-            "zh" => "把工作智能体当作用户和陪伴侧共同使用的执行工具。你要以用户身份写一份自包含的任务提示词，完整保留用户目标、约束、期望交付物和已知上下文，不添加用户没有给出的授权。任务在独立会话后台执行，立即返回 session_id；get_work_status 可读取进度和最终工作总结。派发后不要自己重复执行同一项工作。",
-            "ja" => "ユーザーの代理として作業エージェント（独立したコーディング/実行エージェント）にタスクを委任する。コーディング、ファイル処理、コマンド実行、多段階実行などユーザーが作業を必要としていることに会話中に気づいた際、あなたはコンパニオンとして話し続けながら使用する。タスクは独立セッションでバックグラウンド実行され、即座に session_id が返る。進捗は get_work_status で確認できる。作業エージェントは完了時に結果サマリをメモリに書き込むので、後で自然に言及できる。",
+            "zh" => "用户要求完成持续研究、多步骤执行、编程、命令、文件处理或制作 PPT、文档、表格、报告时，主动委派工作智能体；无需用户点名工具，原任务请求就是范围内的委派授权。普通解释和闲聊自己回答。结合前文解析‘交给工作侧’等追问，以用户身份写自包含任务，保留目标、约束、已知上下文、交付物和验证标准，不虚构授权或路径。任务后台执行；只有成功回执含 session_id 才能说已开始。get_work_status 可读取进度和最终总结；派发后不要重复执行。",
+            "ja" => "ユーザーが継続的な調査、多段階実行、コード、コマンド、ファイル処理、PPT・文書・表・レポート作成を依頼したら、作業エージェントに自ら委任する。ツール名の指定は不要で、依頼の範囲内で委任できる。通常の説明や雑談は自分で答える。前の会話も踏まえ、目的・制約・既知の背景・成果物・検証基準を含む完全な指示を作り、権限やパスを捏造しない。バックグラウンド実行は成功した session_id の受領後にのみ開始済みと伝える。get_work_status で進捗と最終要約を確認し、委任した作業を重複実行しない。",
             _ => self.description(),
         }
     }
 
     fn usage_corpus(&self, lang: &str) -> &'static str {
         match lang {
-            "zh" => "让工作智能体去做\n交给编程那边\n这个交给它处理",
-            "en" => "hand this to the coding agent\nlet the work agent handle it\ndelegate this",
-            "ja" => "作業エージェントに任せて\nプログラム側に任せる\nこれは委任して",
+            "zh" => "找一条今天的新闻并做成两页PPT\n帮我整理文件并生成报告\n研究这些资料做一份表格\n修复代码并运行验证\n让工作智能体去做\n交给编程那边\n这个交给它处理",
+            "en" => "find today's news and create a two-slide PPT\nprocess these files and create a report\nresearch these sources and build a spreadsheet\nfix the code and verify it\nhand this to the coding agent\nlet the work agent handle it\ndelegate this",
+            "ja" => "今日のニュースを探して2枚のPPTを作成して\nファイルを整理してレポートを作成して\n資料を調査して表を作成して\nコードを修正して検証して\n作業エージェントに任せて\nプログラム側に任せる\nこれは委任して",
             _ => "",
         }
     }
