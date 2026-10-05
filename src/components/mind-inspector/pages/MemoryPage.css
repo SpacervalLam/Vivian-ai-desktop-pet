@@ -1,12 +1,46 @@
+/* 记忆页是「整页纸面」：内边距全部由本页自己给（外壳的 .mind-page-content
+   被 `:has(.claude-theme)` 清零，见 ClaudeTheme.css）。 */
 .memory-page {
   --memory-ink: var(--codex-ink, #342e29);
   --memory-muted: var(--codex-ink-faint, #857b70);
   --memory-line: var(--codex-line-light, #e8ddd0);
+  /* 左右留白的目标值。原先写死 4px（外壳那圈 :has() 已把 .mind-page-content 清零），
+     1920 宽的窗口上卡片几乎顶到两侧，太挤。现在按窗口宽度伸缩，与同级的
+     Claude 页（.claude-theme.claude-surface 的 clamp(20px, 3.4vw, 48px)）同一条节奏。 */
+  --memory-gutter: clamp(20px, 3.4vw, 48px);
   color: var(--memory-ink);
-  padding: 6px 4px 32px;
+  /* 左右同值即可 —— 外壳那圈留白两侧等宽（见 MindInspector.css 的
+     `.mind-inspector-root:not(.is-work-page) .mind-sb-body`），这里不用再补偿。
+     右侧也不用为滚动条补偿：本页的滚动条已在下面隐藏。 */
+  padding: 6px var(--memory-gutter) 32px;
   /* 继承手账主题字体链（含马善政手写体），不要再写死无衬线——否则整页中文
      落回黑体，与标题(var(--codex-font))对不上，心智观察器整体也就没用上马善政 */
   font-family: var(--codex-font);
+}
+
+/* ==========================================================================
+   记忆页：隐藏滚动条，但**保留滚动**
+   --------------------------------------------------------------------------
+   滚动容器是外壳的 .mind-page-content（overflow: auto），不是 .memory-page。
+   隐藏它的滚动条会连带去掉 12px 槽位，于是整页宽度恒定，内容增减不再引起
+   横向跳动；这也正是上面 .memory-page 右侧不用为滚动条留补偿的原因。
+
+   只对**记忆页**生效：同一容器还承载心智 / 日记 / 笔记 / 计划页，那些页有自己的
+   滚动条预期，不能一起改。回归判据：那两族的槽位仍应是 12px。
+
+   两条声明是互补的、不是重复：
+     · `scrollbar-width: none` 是标准属性（Chromium 121+ / Firefox 认）；
+     · `::-webkit-scrollbar { display: none }` 给老 WebView2 / WebKit 兜底。
+   注意 CodeAgentPage.css 的「滚动条」一节写着「声明标准属性会让 Chromium 忽略
+   ::-webkit-scrollbar」——那条警告针对的是「想用自定义样式却被标准属性顶掉」。
+   这里两侧都指向「隐藏」，语义一致，不存在互相顶掉的问题。
+   -------------------------------------------------------------------------- */
+.mind-page-content:has(.memory-page) {
+  scrollbar-width: none;
+}
+
+.mind-page-content:has(.memory-page)::-webkit-scrollbar {
+  display: none;
 }
 
 .memory-page button, .memory-page input { font: inherit; }

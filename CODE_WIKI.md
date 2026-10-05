@@ -233,6 +233,38 @@ Memory 窗口内嵌 [`MindInspector.tsx`](src/components/mind-inspector/MindInsp
 - 同一会话不因气泡、聊天窗或微信渠道变化而拆分；运行会话 ID、主题和固定 30 分钟窗口不决定边界，广播与参与者变化不拆分。摘要保留确切来源，不跨会话语义合并。
 - 新事实不再使用 topic_summary 标签；读取仅认明确的 record_kind。程序拼接 exchange_record、OS 和会话摘要不作为共同经历卡片。
 
+#### 整页纸面的左右留白与滚动条（心智 / 记忆 / 日记·笔记·计划）
+
+这四页是**整页纸面**：`.memory-page` / `.claude-surface` / `.record-scope` 都带 `.claude-theme`，于是 ClaudeTheme.css 的 `.mind-page-content:has(.claude-theme)` 会把外壳为手账留的那圈内边距清零，**左右留白只能由页面自己给**。这条约束最容易漏，漏了就变成「卡片几乎顶到窗口两侧」。
+
+**外壳只给了左边那 16px，右侧没有对称的一份。** `.mind-sb-body` 是 `padding-left: 16px`（给左缘呼出热区留呼吸位），没有 `padding-right`。于是每个整页纸面的内容都离左缘比离右缘近 16px，整页看着偏左。1440 宽实测（修复前）：
+
+| 页面 | 左留白 | 右留白（到滚动条） | Δ |
+|---|---|---|---|
+| 心智 `.claude-surface` | 64.0 | 48.0 | −16 |
+| 日记·笔记·计划 `.record-scope` | 59.2 | 43.2 | −16 |
+| 记忆 `.memory-page` | 20.0 | 4.0 | −16 |
+
+补法只有一处：**`.mind-page-content:has(.claude-theme) { padding: 0 16px 0 0 }`** —— 把那 16px 加在**滚动容器**的右侧内边距上。容器的 padding 落在「页面」与「滚动条」之间（滚动条画在 padding box 之外，仍贴窗口右缘），所以这 16px 变成纯留白，滚动条位置不动；一条规则覆盖全部三族（Δ 全为 0），而且命中的正是**同一批页面** —— 这个 `:has(.claude-theme)` 本来就等于「整页纸面」的集合。
+
+另外两种补法都试过并量过，都否掉：
+
+- **给 `.mind-sb-body` 加 `padding-right: 16px` —— 错。** 它会缩窄 `.mind-main`，把滚动条一起推进来 16px（实测「滚动条距窗口右缘」0 → 16px），滚动条变成悬在窗口里、右边还留一道缝；而且因为滚动条又吃掉 12px，Δ 依旧是 −16，根本没修好。
+- **每个页面自己左补偿（`padding-left: calc(gutter - 16px)`）—— 能修好但不要。** Δ 确实变 0，代价是要在三份页面样式里各写一遍，新加一个页面就会忘，等于把同一个知识复制 N 份。
+
+要点：
+
+- **工作页必须排除在外，而它是自动排除的**：`CodeAgentPageNew` 不挂 `.claude-theme`，够不着上面那条规则。这是对的 —— 它的 `.mind-page-content` 自带**故意不对称**的 padding（手账下 `0 14px 16px 4px`、极简下 `0`，视觉 20/14），再叠 16px 会把右留白推到 30px，从「偏左」变成「偏右」；而且工作台的宽度是运行时量的（`ResizeObserver` + `--codex-sb-w`），外壳的视觉留白不该去改它的可用宽度。回归判据：工作页实测仍是 20/14。
+- **多出来那 16px 条带不会露馅**：它露出的是窗口根的纸面，而 `.mind-inspector-root.is-claude` 与 `.claude-theme` 声明同一支 `--claude-bg`（当初就是为了「外壳与内容同一张纸」），像素级实测两侧同色（浅色 `250,249,245`、深色 `38,38,36`）。
+- **判据要把滚动条当窗框**：右留白 = `滚动条左缘 − 内容盒右缘`（无滚动条时才退化为窗口右缘）。若按窗口右缘量，12px 的滚动条会被算进右留白里，于是「滚动条贴窗口缘 + 两侧留白相等」这条**永远判不过**，会把人往「把滚动条推进来」那个错解上带。滚动条车道用 `clientLeft + clientWidth` 反推，别猜。
+- **记忆页额外把自己的滚动条藏掉**（`MemoryPage.css`）：`.mind-page-content:has(.memory-page) { scrollbar-width: none }` + 同选择器 `::-webkit-scrollbar { display: none }`。滚动容器是外壳的 `.mind-page-content`，只对记忆页生效、不动兄弟页。这里的标准属性与 webkit 规则**都指向隐藏**，不适用「滚动条」一节里「标准属性顶掉自定义样式」那条警告；副作用是槽位归零、整页宽度恒定，内容增减不再横向跳动。滚动功能不受影响（滚轮 / 触控板 / 键盘）。
+- **记忆页自己的留白**：`--memory-gutter: clamp(20px, 3.4vw, 48px)`，`padding: 6px var(--memory-gutter) 32px`。**左右同值即可** —— 外壳那圈已经等宽，不用再补偿；右侧也不用为滚动条补偿，因为滚动条已藏。视觉留白 = 16（外壳）+ gutter。
+- **窄屏兜底要排除记忆页**：`@media (max-width: 760px) { .claude-theme:not(.memory-page) { padding: 22px 16px 36px } }`。`:not(.memory-page)` 是必须的：那条媒体查询在源码顺序上晚于 `MemoryPage.css`，不加排除会静默把记忆页自己声明的 gutter 覆盖成 16px。（记忆窗口 `minWidth: 1260` 且 `resizable: false`，这条窄屏路径当前不可达，属防回归。）
+- **验证手法**（免构建，脚本属本地 dev 工具、不入库）：预览页复刻**完整祖先链**（含 `#root` 挂载层）+ 各族真实标记，链接真实 CSS 文件，用 CDP `Runtime.evaluate` 量。两个坑：
+  1. **外壳不能叫 `#root`**。`global.css` 有 `html, body, #root { background: transparent !important }`，而真 app 里 `#root` 是 React 挂载点、是外壳的**祖先**。预览页若把外壳也叫 `#root`，纸面会被打成透明，量出来的底色是假的（本次就先把「右侧有接缝」误报了一次）。
+  2. **别用多列容器里的卡片当右边界**：`.memory-entry` 在两列 masonry 里，右边缘是列边界，拿它算右留白会得到假 FAIL。
+  判据十条：三族左右留白相等（±1px）、滚动条仍贴窗口右缘、工作页保持 20/14、`nav-dock` 恒贴窗口左缘且宽度符合各族设计值（浏览页 24 / 工作页 8，后者由 `WorkbenchPolish.css` 收窄）、封面条左右对称、记忆页槽位 0、心智/记录页槽位 12，外加 CDP `Input.dispatchMouseEvent` 真滚轮让 `scrollTop` 前进（「能滚」不能只靠 `scrollHeight > clientHeight` 推断）。实测 1440/1920/1260/700 × 浅色/深色 **全部 10/10**，记忆页专项 8/8，兄弟页 2/2。
+
 #### 跨会话事件时间线
 
 共同经历按现实事件而非会话归组。巩固模型在同一次原文整理请求中独立输出 `events`；没有事件必须输出空数组。每个事件包含已有事件 ID（或 null）、具体标题、planned / started / progressed / completed / cancelled 阶段、本次进展、用户原消息 ID、逐字证据和置信度。计划不能冒充完成；普通寒暄、资料偏好、角色猜测或幻想不创建事件。同一主题下的不同活动不能仅凭主题合并。
@@ -781,6 +813,7 @@ Markdown 文件另有**源码 / 渲染两态**（顶栏切换）：渲染态交�
 - **颜色跟着主题走要覆盖 `--panel-scrollbar` 本身**：它定义在 `.codex-theme` 的调色板里（手账暖棕 `rgba(59,52,40,.22)`），极简那三个调色板块**没有**这一支 ⇒ 极简下滚动条一直是暖棕。自定义属性在**声明它的元素**上求值、子元素只继承值不重算，所以在极简调色板块里补 `rgba(0,0,0,.22)` / 深色 `rgba(255,255,255,.22)` 即可，三个板块都要写。
 - **一处写死、别处各写各的**：原先共有五种滚动条处理 —— `.codex-theme` 一套（死代码）、`.codex-trajectory-table` 8px + 用 `--panel-scrollbar-hover` 当底色、`.codex-pinned-inner` 6px/圆角 3px、极简 7px、以及一堆 `scrollbar-width: none` 的隐藏。前三种已删，统一继承 `.codex-theme` 那套。顺带一个反讽：轨迹表那两行 `scrollbar-width: thin` + `scrollbar-color: var(--panel-scrollbar-hover)` 的注释写的是「列表滚动条显式化：默认主题的滑块太淡」——**那两行恰恰是滑块太淡的原因**。
 - **`--codex-sb-w` 是实测的，改槽宽不用动它**：`CodeAgentPageNew.tsx` 用 `chat.offsetWidth - chat.clientWidth` 量出来写进 CSS 变量（配合 `.codex-chat` 的 `scrollbar-gutter: stable`），只有 `--codex-sb-w: 12px` 这个兜底默认值要跟着槽宽改。
+- **唯一的例外：记忆页把滚动条整个藏掉**（`MemoryPage.css`）。滚动容器是外壳的 `.mind-page-content`，规则写成 `.mind-page-content:has(.memory-page) { scrollbar-width: none }` + 同选择器的 `::-webkit-scrollbar { display: none }`，只作用于记忆页、不动兄弟页。这里的标准属性与 webkit 规则**都指向隐藏**，所以不适用上面第一条「标准属性顶掉自定义样式」的警告；副作用是槽位归零、整页宽度恒定，内容增减不再横向跳动。滚动功能不受影响（滚轮 / 触控板 / 键盘），验证要靠真滚轮事件而不是 `scrollHeight > clientHeight`。详见「整页纸面的左右留白与滚动条」。
 - **验证手法**（免构建，脚本属本地 dev 工具、不入库）：预览页复刻 `.codex-theme` 祖先链，同时放一个纵向滚动容器（长内容）与一个横向滚动容器（超宽内容）。判据四条：① **源码级**——兜底块之外不许有任何「会顶掉自定义样式」的标准属性（`scrollbar-width: none` 放行，它是故意隐藏），注意要先 `strip` 注释再找 `@supports`（主注释里就引用了一次那个条件，直接 `indexOf` 会命中注释）；② **实测槽宽** = `offsetWidth - clientWidth - 左右边框`（不减边框的话带 `border` 的容器会多出 2px）；③ **颜色跟主题**（手账暖棕 / 极简中性灰，浅深四套两两不同）；④ **像素级**——逐列扫滚动条那一条找「暗像素」（亮度比纸面低 20 以上；阈值 20 的来历：稿纸点阵只低约 9，滑块与原生箭头都低约 40），滚动条**底部**必须 0 个暗像素（原生向下箭头在那里）、**顶部**滑块恰好 6 列且两侧各留 3px、**横向右端** ≤3 个（容器有 `border-radius` 时圆角弧线会伸进采样框 1~2 个抗锯齿像素，实测就是 1 个 `--codex-line-light`；原生箭头是 ~10×10 实心三角，同一块区域里 40+ 个）。实测 41/41 PASS。
 - **连带修掉一条过拟合的哨兵**：`check-main-too-narrow` 里「中栏 → 槽宽」的换算常量原先写死 `EMPTY_OFFSET = 119`（注释记的是「chatPad 34×2 + empty 20×2 + 滚动条槽 11」，两个数都不对，只是恰好也等于 119，因为当时槽宽是 15px：64+40+15 = 119）。槽宽变成 12px 后偏移成了 116，`mainAt(SLOT_MIN_W - 1)` 算出的中栏宽偏大 3px、卡片其实还在，「槽宽低于阈值时卡片已收」当场假 FAIL 两条。**改成在接近阈值的宽度上实测一次**（`600 - widthOf('#composerSlot')`），这条断言就再也不会因为滚动条变粗变细而误报。教训：**凡是含「浏览器相关尺寸」的换算常量，都别写死。**
 

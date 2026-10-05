@@ -449,7 +449,12 @@
 .claude-theme .profile-root-embedded input::placeholder { color: var(--claude-faint); }
 
 @media (max-width: 760px) {
-  .claude-theme { padding: 22px 16px 36px; }
+  /* 排除记忆页：它是整页纸面，左右留白自己用 `--memory-gutter: clamp(20px, 3.4vw, 48px)`
+     伸缩（见 MemoryPage.css），而这套窄屏兜底是给挂在 .claude-surface 里的页用的。
+     不排除的话，这条规则在源码顺序上晚于 MemoryPage.css，会静默把记忆页的留白
+     压成 16px —— 页面自己声明的那份 gutter 就白写了。
+     （记忆窗口 minWidth: 1260 且 resizable: false，这条窄屏路径当前不可达，属防回归。） */
+  .claude-theme:not(.memory-page) { padding: 22px 16px 36px; }
   .claude-theme .profile-hero { flex-direction: column; align-items: flex-start; padding: 22px; }
   .claude-theme .profile-hero-stats { width: 100%; }
   .claude-theme .profile-hero-stats > div { flex: 1; min-width: 0; padding: 0 14px; }
@@ -471,8 +476,38 @@
 .claude-theme .claude-group-head .mind-tabs { flex: 0 0 auto; }
 
 /* 内容区从「手账纸上的卡片」变成整页 Claude 纸：清掉外壳为手账留的内边距。
+   但**右侧要留回 16px** —— 见下面的长注释。
    :has() 不被支持时（很旧的 WebView）自然退回带内边距的版本，不会坏。 */
-.mind-page-content:has(.claude-theme) { padding: 0; }
+/* ==========================================================================
+   `padding: 0 16px 0 0` 里那个右侧 16px 是「左右留白等宽」的支点
+   --------------------------------------------------------------------------
+   外壳 .mind-sb-body **只有 `padding-left: 16px`**（给左缘呼出热区留呼吸位），
+   右侧没有对称的一份。于是每个整页纸面的内容都离左缘比离右缘近 16px，整页看着
+   偏左。1440 宽实测（本次修复前）：
+     · 心智 .claude-surface     左 64.0 / 右（到滚动条）48.0   Δ = −16
+     · 日记·笔记·计划 .record-scope  左 59.2 / 右 43.2          Δ = −16
+     · 记忆 .memory-page         左 20.0 / 右 4.0（另有滚动条 12px）
+   这三族的页面内边距**本身是对称的**（左右同值），偏的只有外壳那 16px。
+
+   补法只在这一处，理由是把另外两种都试过并量过：
+
+   ① 给 `.mind-sb-body` 加 `padding-right: 16px` —— **错**。它会缩窄 `.mind-main`，
+      把滚动条一起推进来 16px（实测「滚动条距窗口右缘」0 → 16px），滚动条变成
+      悬在窗口里、右边还留一道缝；而且因为滚动条又吃掉 12px，Δ 依旧是 −16，
+      根本没修好。
+   ② 每个页面自己左补偿（`padding-left: calc(gutter - 16px)`）—— 能修好（Δ = 0），
+      但要在三份页面样式里各写一遍，新加一个页面就会忘，属于把同一个知识复制 N 份。
+   ③ **本行**：把 16px 加在**滚动容器**的右侧内边距上。容器的 padding 落在
+      「页面」与「滚动条」之间（滚动条画在 padding box 之外，仍贴窗口右缘），
+      所以这 16px 变成纯留白，滚动条位置不动。一条规则覆盖全部三族（Δ 全为 0），
+      而且命中的正是**同一批页面** —— 这个 `:has(.claude-theme)` 本来就等于
+      「整页纸面」的集合；工作页没有 `.claude-theme`，自动不受影响。
+
+   多出来的这 16px 条带露出的是外壳纸面：`.mind-inspector-root.is-claude` 与
+   `.claude-theme` 声明同一支 `--claude-bg`（当初就是为了「外壳与内容同一张纸」），
+   所以这条带子与页面底色同色，看不出来。
+   ========================================================================== */
+.mind-page-content:has(.claude-theme) { padding: 0 16px 0 0; }
 .mind-page-content:has(.claude-theme) .claude-theme.claude-surface { border-radius: 0; }
 
 /* 手账胶囊贴纸 → Claude 安静胶囊 */
