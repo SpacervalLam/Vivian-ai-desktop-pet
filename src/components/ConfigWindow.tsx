@@ -5425,8 +5425,8 @@ const ConfigWindow: React.FC = () => {
                       placeholder={t('config.placeholder_gptsovits_prompt_text')}
                     />
 
-                    {/* 本地服务管理抽屉（可选 — 仅本地部署需要；远程/Docker 服务无需展开） */}
-                    <details style={{ marginTop: 8 }}>
+                    {/* 已配置本地安装时展开，直接显示启动按钮与运行状态。 */}
+                    <details open={Boolean(ttsConfig.gpt_sovits_install_path)} style={{ marginTop: 8 }}>
                       <summary
                         style={{
                           fontSize: 11,
