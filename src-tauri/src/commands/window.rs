@@ -735,6 +735,7 @@ fn drag_speed(prev: (Instant, f64, f64), last: (Instant, f64, f64)) -> Option<f6
 /// 注意：本函数只回答「这一帧快不快」，是否真的判定「拖得太快」还需调用方
 /// 累计连续超速帧数（见 `DRAG_FAST_MIN_STREAK`）并核对峰值，避免缓慢挪动
 /// 被单帧抖动带出晕眩。
+#[cfg(test)]
 fn is_drag_too_fast(prev: (Instant, f64, f64), last: (Instant, f64, f64)) -> bool {
     drag_speed(prev, last).is_some_and(|v| v >= DRAG_FAST_VELOCITY)
 }
