@@ -176,6 +176,93 @@ mod tests {
             for e in r.entries { assert!(ids.insert(e.id)); assert!(!e.cues.is_empty()); assert!(e.response["text"].is_string()); assert!(e.response["intent"].is_string()); }
         }
     }
+    /// 网络口语语料（`net_*` scope）不变量。
+    ///
+    /// 这批语料在所有渠道生效，检索层不做 channel 门控，因此以下三点必须成立：
+    /// 1. 短 cue 会经裸 `contains` 误命中（`6` 撞「16分钟」、`草` 撞「草率」），
+    ///    所以每条 cue 至少 2 字。
+    /// 2. 同一 scope 每轮只取一条，scope 太少会让这批语料互相挤掉。
+    /// 3. `no_reply` 必须配空文本，否则模型会照着念出来。
+    ///
+    /// 注意：条数**不设等式约束**。语料库是持续增长的资产，写死 `assert_eq!(net.len(), N)`
+    /// 会在每次扩充时失败，把「规模变化」误报成「质量回归」。真正该守的是
+    /// 每条的 cue 质量与 scope 采样面，故下面用下限表达。
+    #[test]
+    fn net_corpus_cues_are_unambiguous_and_scopes_stay_distinct() {
+        for name in ["nana", "vivian"] {
+            let r = ExampleRetriever::new(name, default_embedding());
+            let net: Vec<_> = r.entries.iter().filter(|e| e.scope.starts_with("net_")).collect();
+            assert!(net.len() >= 36, "{name} 网络口语语料被删减到 {} 条", net.len());
+            for e in &net {
+                for cue in &e.cues {
+                    assert!(cue.chars().count() >= 2, "{name}/{} 的 cue 过短: {cue}", e.id);
+                }
+                if e.response["intent"] == "no_reply" {
+                    assert_eq!(e.response["text"], "", "{name}/{} 是 no_reply 但带文本", e.id);
+                }
+            }
+            // 同 scope 每轮只取一条，所以采样面由 scope 数量决定而非条数。
+            let scopes: std::collections::HashSet<_> = net.iter().map(|e| e.scope.as_str()).collect();
+            assert!(
+                scopes.len() >= 20,
+                "{name} 的 net_ scope 只有 {} 个，采样面不足",
+                scopes.len()
+            );
+        }
+        // 同一 cue 下的两种人格必须给出不同反应，否则语料会把角色拉向同一个腔调。
+        let vivian = ExampleRetriever::new("vivian", default_embedding());
+        let nana = ExampleRetriever::new("nana", default_embedding());
+        for (a, b) in vivian.entries.iter().zip(nana.entries.iter()) {
+            assert_eq!(a.id, b.id);
+            if a.id.starts_with("net-") && a.response["intent"] == "reply" {
+                assert_ne!(a.response["text"], b.response["text"], "{} 两人格给了同一句回复", a.id);
+            }
+        }
+    }
+    /// 语料规模护栏。
+    ///
+    /// `MAX_EXAMPLES = 3` + `MAX_CHARS = 1800` 意味着单条回复必须够短，
+    /// 否则三条并排注入时会挤掉第三条。语料条数本身不设上限——
+    /// 有效采样面由 scope 数量决定（同 scope 每轮只取一条）。
+    #[test]
+    fn example_responses_stay_short_enough_for_the_char_budget() {
+        for name in ["nana", "vivian"] {
+            for e in ExampleRetriever::new(name, default_embedding()).entries {
+                let n = e.response["text"].as_str().map(|s| s.chars().count()).unwrap_or(0);
+                assert!(
+                    n <= 120,
+                    "{name}/{} 回复 {n} 字，过长会挤掉同轮其他示例（预算 {}）",
+                    e.id,
+                    MAX_CHARS
+                );
+            }
+        }
+    }
+    #[test]
+    fn modern_net_examples_reach_companion_prompt_without_remote_embeddings() {
+        for name in ["nana", "vivian"] {
+            let r = ExampleRetriever::new(name, default_embedding());
+            let modern: Vec<_> = r.entries.iter().filter(|e| e.id.starts_with("net-modern-")).collect();
+            assert_eq!(modern.len(), 24);
+            for e in modern {
+                assert!(e.context_cues.is_empty(), "{} must work without group history", e.id);
+                for input in std::iter::once(&e.user).chain(e.cues.iter()) {
+                    let examples = r.retrieve(input, &[], None, &[]).expect("offline cue retrieval");
+                    assert!(examples.contains(&format!("Example {}\n", e.id)), "{name}/{} missing for {input}", e.id);
+                    assert!(examples.chars().count() <= MAX_CHARS);
+                    for channel in ["", "desktop", "private", "group"] {
+                        let parts = crate::pipeline::prompt_modules::PromptParts {
+                            char_id: name.into(), channel: channel.into(),
+                            examples_block: Some(examples.clone()), ..Default::default()
+                        };
+                        let prompt = crate::pipeline::companion_prompt::CompanionPrompt::build(&parts, &[]);
+                        let messages = prompt.messages(&[], input, false, None);
+                        assert!(messages.iter().any(|m| m.role == "system" && m.content.contains(&format!("Example {}\n", e.id))), "{name}/{} missing in {channel} prompt", e.id);
+                    }
+                }
+            }
+        }
+    }
     struct SemanticFixture(std::sync::atomic::AtomicUsize);
     impl MemoryEmbeddingProvider for SemanticFixture {
         fn dimension(&self) -> usize { 2 }
