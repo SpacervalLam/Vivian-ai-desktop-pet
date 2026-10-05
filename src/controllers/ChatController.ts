@@ -53,7 +53,18 @@ interface StreamSession {
   /** 当前会话是否已实际创建流式气泡（避免误用上一条回复的气泡） */
   bubbleStarted: boolean;
   presentation?: { expression: string; motion: string; expressionDurationMs?: number };
+  /** 看门狗定时器：长时间无任何进展时兜底结算这条流 */
+  watchdogTimer?: number;
 }
+
+/**
+ * 流式看门狗超时（毫秒）。
+ *
+ * 后端正常/异常路径都会发终态事件，但一旦后端卡死（抢不到 think_lock、或 think 内部
+ * 死锁），就什么都不会发。此时若前端不兜底，界面会永远停在「思考中」、桌宠也会一直
+ * 循环思考动作。取值要明显大于一次正常回复（含工具调用的长回合）。
+ */
+const STREAM_IDLE_TIMEOUT_MS = 180_000;
 
 /** 生成 stream_id（优先用 crypto.randomUUID，降级到时间戳+随机数） */
 function generateStreamId(): string {
@@ -103,6 +114,8 @@ class ChatControllerClass {
           expressionDurationMs: meta.expressionDurationMs ?? session.presentation?.expressionDurationMs,
         };
         this.lastMeta = session.presentation;
+        // meta 先于正文到达，也算「后端在推进」：重置空闲看门狗
+        this.armWatchdog(metaSid);
         TtsStreamQueue.beginStream(metaSid, session.characterId);
         // 同步表达层信息到 TTS 队列,后续 speak_text 调用会携带 presentation
         TtsStreamQueue.setPresentation(meta);
@@ -151,6 +164,8 @@ class ChatControllerClass {
           expressionDurationMs: meta.expressionDurationMs ?? session.presentation?.expressionDurationMs,
         };
         this.lastMeta = session.presentation;
+        // meta 先于正文到达，也算「后端在推进」：重置空闲看门狗
+        this.armWatchdog(metaSid);
         TtsStreamQueue.beginStream(metaSid, session.characterId);
         TtsStreamQueue.setPresentation(meta);
         if (!TtsStreamQueue.isEnabled()) this.handlers.onMeta?.(meta);
@@ -163,6 +178,8 @@ class ChatControllerClass {
         const session = this.sessions.get(sid);
         if (!session) return;
         TtsStreamQueue.beginStream(sid, session.characterId);
+        // 有 chunk 说明后端在正常推进：重置空闲看门狗
+        this.armWatchdog(sid);
         // 按 stream_id 路由：只累积当前 session 的文本
         session.text += chunk;
         session.streamParser.feed(chunk);
@@ -311,7 +328,6 @@ class ChatControllerClass {
    * @returns 完整响应（流式结束后 resolve）
    */
   async sendMessage(message: string, characterId?: string, channel?: string, whisper?: boolean, fileMetadata?: Record<string, unknown>): Promise<AiResponse> {
-    const store = useAppStore.getState();
     const targetCharId = characterId ?? getCharacterId() ?? undefined;
     const ch = channel ?? 'wechat';
     // 添加用户消息到历史
@@ -327,7 +343,6 @@ class ChatControllerClass {
       character_id: targetCharId,
       channel: ch,
     });
-    store.setThinking(true);
 
     const streamId = generateStreamId();
     this.handlers.onThinkingStarted?.(streamId);
@@ -348,6 +363,7 @@ class ChatControllerClass {
         bubbleStarted: false,
       };
       this.sessions.set(streamId, session);
+      this.armWatchdog(streamId);
 
       void emit('chat:waiting', { stream_id: streamId, character_id: targetCharId })
         .catch(() => {})
@@ -377,10 +393,8 @@ class ChatControllerClass {
    * 3. 流式 emit chat:meta / chat:chunk / chat:done
    */
   async triggerWakeInteraction(characterId?: string): Promise<AiResponse | null> {
-    const store = useAppStore.getState();
     const targetCharId = characterId ?? getCharacterId() ?? undefined;
     const ch = 'direct';
-    store.setThinking(true);
 
     const streamId = generateStreamId();
     this.handlers.onThinkingStarted?.(streamId);
@@ -398,6 +412,7 @@ class ChatControllerClass {
         bubbleStarted: false,
       };
       this.sessions.set(streamId, session);
+      this.armWatchdog(streamId);
 
       void emit('chat:waiting', { stream_id: streamId, character_id: targetCharId })
         .catch(() => {})
@@ -407,15 +422,34 @@ class ChatControllerClass {
     });
   }
 
-  /** 显示 AI 对话窗口 */
-  showChatWindow(): void {
-    useAppStore.getState().setChatOpen(true);
+  /**
+   * 重新武装看门狗：每次收到 chunk / meta 都调用，实现「空闲计时」语义。
+   *
+   * 必须在 session 建好之后调用；session 结束时由 `clearWatchdog` 撤销。
+   */
+  private armWatchdog(sid: string): void {
+    const session = this.sessions.get(sid);
+    if (!session) return;
+    if (session.watchdogTimer !== undefined) window.clearTimeout(session.watchdogTimer);
+    session.watchdogTimer = window.setTimeout(() => {
+      const current = this.sessions.get(sid);
+      if (!current) return;
+      current.watchdogTimer = undefined;
+      // 走到这里说明后端既没有 chunk 也没有终态事件——按失败结算，
+      // 让 thinking 归位、桌宠退出思考循环，并给用户一个可操作的提示。
+      this.finishSessionWithError(
+        sid,
+        i18n.t('stream_timeout', { defaultValue: '回复超时，本次请求已放弃，请重试' }),
+      );
+    }, STREAM_IDLE_TIMEOUT_MS);
   }
 
-  /** 当所有 session 结束时重置 thinking 状态 */
-  private maybeClearThinking(): void {
-    if (this.sessions.size === 0) {
-      useAppStore.getState().setThinking(false);
+  /** 撤销看门狗（session 结算时调用） */
+  private clearWatchdog(sid: string): void {
+    const session = this.sessions.get(sid);
+    if (session?.watchdogTimer !== undefined) {
+      window.clearTimeout(session.watchdogTimer);
+      session.watchdogTimer = undefined;
     }
   }
 
@@ -424,9 +458,9 @@ class ChatControllerClass {
     const session = this.sessions.get(sid);
     if (!session) return;
     const ch = session.channel;
+    this.clearWatchdog(sid);
     this.sessions.delete(sid);
     void emit('chat:waiting-ended', { stream_id: sid, character_id: session.characterId });
-    this.maybeClearThinking();
     // 通知其他窗口（如 ChatWindow）立即追加 AI 回复
     const assistantTimestamp = new Date().toISOString();
     void emit('chat:assistant_message', {
@@ -460,9 +494,9 @@ class ChatControllerClass {
   private finishSessionEmpty(sid: string): void {
     const session = this.sessions.get(sid);
     if (!session) return;
+    this.clearWatchdog(sid);
     this.sessions.delete(sid);
     void emit('chat:waiting-ended', { stream_id: sid, character_id: session.characterId });
-    this.maybeClearThinking();
     BubbleController.startAutoClose(3000);
     this.handlers.onResponseReceived?.(
       { text: '', motion: 'idle', expression: '', emotion_score: 0 },
@@ -475,9 +509,9 @@ class ChatControllerClass {
   private finishSessionWithError(sid: string, error: string): void {
     const session = this.sessions.get(sid);
     if (!session) return;
+    this.clearWatchdog(sid);
     this.sessions.delete(sid);
     void emit('chat:waiting-ended', { stream_id: sid, character_id: session.characterId });
-    this.maybeClearThinking();
     // API 错误通过 toast 提示，不写入对话历史、不展示气泡，避免兜底文案污染记忆
     void emit('toast:show', { message: error, type: 'error', duration: 5000, key: Date.now() });
     this.handlers.onError?.(error, sid);
@@ -488,9 +522,9 @@ class ChatControllerClass {
   private finishSessionCancelled(sid: string): void {
     const session = this.sessions.get(sid);
     if (!session) return;
+    this.clearWatchdog(sid);
     this.sessions.delete(sid);
     void emit('chat:waiting-ended', { stream_id: sid, character_id: session.characterId });
-    this.maybeClearThinking();
     BubbleController.startAutoClose(3000);
     this.handlers.onCancelled?.(sid);
     // 取消生成：resolve 空响应，避免 Promise 永远挂起

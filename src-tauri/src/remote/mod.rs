@@ -144,6 +144,12 @@ static TOAST_QUEUE: OnceLock<Mutex<Vec<RemoteToast>>> = OnceLock::new();
 /// 队列容量：超出后丢弃最旧的
 const TOAST_MAX: usize = 100;
 
+/// 远程 HTTP 通道等待角色 `think_lock` 的上限（秒）。
+///
+/// 与本地聊天命令同理：正常排队只应等待前一个请求的 think 时长，超过上限说明持锁方
+/// 已经卡死。HTTP 侧不能无限挂起，超时直接返回 503，让调用方自行重试。
+const REMOTE_THINK_LOCK_WAIT_SECS: u64 = 90;
+
 fn toast_queue_lock() -> &'static Mutex<Vec<RemoteToast>> {
     TOAST_QUEUE.get_or_init(|| Mutex::new(Vec::new()))
 }
@@ -676,9 +682,28 @@ async fn chat_handler(
     brain.dialogue.set_channel(&channel_str);
 
     // ── 串行化 brain.think ──
+    // 等待必须有上限：持锁方一旦卡死，无超时的 lock().await 会让 HTTP 请求永久挂起。
     state.app_state.session_coordinator.signal_user_input(&char_id);
     let _brain_lock = instance.think_lock.clone();
-    let _brain_guard = _brain_lock.lock().await;
+    let _brain_guard = match tokio::time::timeout(
+        std::time::Duration::from_secs(REMOTE_THINK_LOCK_WAIT_SECS),
+        _brain_lock.lock(),
+    )
+    .await
+    {
+        Ok(guard) => guard,
+        Err(_) => {
+            tracing::warn!(
+                "[Remote] 角色 {} 的 think_lock 等待超过 {}s，返回 503",
+                char_id,
+                REMOTE_THINK_LOCK_WAIT_SECS
+            );
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "角色当前正忙，请稍后重试".to_string(),
+            ));
+        }
+    };
     state.app_state.reset_generation_cancel(&char_id);
 
     // ── 会话生命周期：获取或创建会话 ──

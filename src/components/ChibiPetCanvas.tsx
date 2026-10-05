@@ -35,6 +35,15 @@ import { TapAngerLedger } from '../chibi/tapAnger';
 import { SheetLoader } from '../chibi/sheetLoader';
 import './ChibiPetCanvas.css';
 
+/**
+ * 「等待回复」姿态的最长保持时间。
+ *
+ * 正常回复会在收到首字（chat:chunk）或终态事件（chat:done / chat:error / …）时退出思考。
+ * 后端一旦卡死则不会有任何事件到达，超时后强制回落到静息姿态，避免桌宠永远循环思考动作。
+ * 取值与 ChatController 的流式看门狗保持一致。
+ */
+const REPLY_THINKING_TIMEOUT_MS = 180_000;
+
 export interface PetInteractionMetrics {
   clickCount?: number;
   windowMs?: number;
@@ -1014,12 +1023,32 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
       });
       const waiting = new ReplyWaiting();
       type ReplyEvent = { character_id?: string; stream_id?: string; text?: string };
+      // 思考看门狗：进入「等待回复」后若长时间没有任何终态事件，强制退出思考循环。
+      // 后端卡死（抢不到 think_lock、或 think 内部死锁）时不会有任何 chat:* 事件到达，
+      // 没有这个兜底，桌宠会永远循环思考动作。
+      let thinkingWatchdog: number | null = null;
+      const clearThinkingWatchdog = () => {
+        if (thinkingWatchdog !== null) {
+          window.clearTimeout(thinkingWatchdog);
+          thinkingWatchdog = null;
+        }
+      };
       const updateWaiting = () => {
         const next = waiting.thinking;
         if (next === waitingForReplyRef.current) return;
         waitingForReplyRef.current = next;
-        if (next) applyMotion('thinking');
-        else if (poseNameRef.current === 'thinking') applyMotion('idle');
+        if (next) {
+          applyMotion('thinking');
+          clearThinkingWatchdog();
+          thinkingWatchdog = window.setTimeout(() => {
+            thinkingWatchdog = null;
+            waiting.clear();
+            updateWaiting();
+          }, REPLY_THINKING_TIMEOUT_MS);
+        } else {
+          clearThinkingWatchdog();
+          if (poseNameRef.current === 'thinking') applyMotion('idle');
+        }
       };
       const startReply = (p: ReplyEvent) => {
         if (!mine(p.character_id)) return;
@@ -1060,6 +1089,7 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
       return () => {
         cancelled = true;
         unlisteners.forEach((unlisten) => unlisten());
+        clearThinkingWatchdog();
         waitingForReplyRef.current = false;
       };
     }, [characterId, previewMode, applyMotion]);

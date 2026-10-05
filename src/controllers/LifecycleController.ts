@@ -14,7 +14,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { emit } from '@tauri-apps/api/event';
 import { BubbleController } from './BubbleController';
-import { useAppStore } from '../stores/useAppStore';
 import { getCharacterId } from '../characterContext';
 import type { StartupGreeting } from '../types';
 

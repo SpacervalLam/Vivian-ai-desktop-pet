@@ -10,6 +10,14 @@ export class ReplyWaiting {
     return true;
   }
   finish(id: string): void { this.streams.delete(id); }
+  /**
+   * Drop every pending stream.
+   *
+   * Used by the watchdog: when the backend dies mid-request no terminal event ever
+   * arrives, so `finish(id)` is never called and the pet would loop the thinking
+   * pose forever. Clearing here lets the caller fall back to the resting pose.
+   */
+  clear(): void { this.streams.clear(); }
   get thinking(): boolean {
     const states = [...this.streams.values()];
     // An actively speaking reply takes precedence over another queued reply.

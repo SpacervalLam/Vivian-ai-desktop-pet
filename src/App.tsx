@@ -1561,7 +1561,6 @@ export default function App() {
         if (!initialized) {
           console.log(`[DIAG] init: backend not initialized, opening config guide, char=${getCharacterId()}`);
           openConfig(true);
-          useAppStore.getState().setInitialized(true);
           return;
         }
       } catch {
@@ -1574,7 +1573,6 @@ export default function App() {
         if (!mainApiConfigured) {
           console.log(`[DIAG] init: main LLM not configured, opening config window, char=${getCharacterId()}`);
           openConfig();
-          useAppStore.getState().setInitialized(true);
           return;
         }
       } catch {
@@ -1628,7 +1626,6 @@ export default function App() {
       } catch {
         /* ignore */
       }
-      useAppStore.getState().setInitialized(true);
       console.log(`[DIAG] init useEffect COMPLETE, char=${getCharacterId()}, time=${Date.now()}`);
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps

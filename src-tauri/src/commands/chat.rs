@@ -20,6 +20,14 @@ fn err_str(e: impl std::fmt::Display) -> String {
     e.to_string()
 }
 
+/// 等待角色 `think_lock` 的上限。
+///
+/// 正常排队只需要等待「前一个请求的 think 时长」（典型 3–30s，含工具调用可能更久）。
+/// 超过该上限说明持锁方已经卡死（例如在持有 Mind / 记忆锁时死锁），此时**必须放弃等待
+/// 并回一个终态事件**：无超时的 `lock().await` 会让本次请求永久挂起，既不回包也不报错，
+/// 前端会一直停在「思考中」，而且之后所有消息都会被静默吞掉。
+const THINK_LOCK_WAIT: Duration = Duration::from_secs(90);
+
 /// 会话关闭时触发 Episode 封包，让经历边界对齐会话边界
 ///
 /// 从 Conversation 提取 topic/timestamps/memory_ids，调 EpisodeStore::seal_episode。
@@ -116,9 +124,27 @@ pub async fn send_message(
 
     state.session_coordinator.signal_user_input(&char_id);
 
-    // 串行化 brain.think，与流式路径共用 brain_lock
+    // 串行化 brain.think，与流式路径共用 brain_lock。
+    // 等待必须有上限：持锁方一旦卡死，无超时的 lock().await 会让本请求永久挂起。
     let _brain_lock = instance.think_lock.clone();
-    let _brain_guard = _brain_lock.lock().await;
+    let _brain_guard = match tokio::time::timeout(THINK_LOCK_WAIT, _brain_lock.lock()).await {
+        Ok(guard) => guard,
+        Err(_) => {
+            tracing::warn!(
+                "[Chat:{}] think_lock 等待超过 {}s，放弃本次请求（持锁方疑似卡死）",
+                char_id,
+                THINK_LOCK_WAIT.as_secs()
+            );
+            let _ = app.emit(
+                "chat:error",
+                json!({
+                    "error": "上一个请求长时间未结束，本次消息已放弃。请重试；若反复出现请重启应用。",
+                    "character_id": &char_id,
+                }),
+            );
+            return Err("THINK_LOCK_TIMEOUT".to_string());
+        }
+    };
     state.reset_generation_cancel(&char_id);
 
     // 临时开启路由回退事件发送
@@ -564,7 +590,37 @@ pub async fn send_message_stream(
     let queued_at = chrono::Local::now();
     state.session_coordinator.signal_user_input(&char_id);
     let _brain_lock = instance.think_lock.clone();
-    let _brain_guard = _brain_lock.lock().await;
+    // 等待必须有上限：持锁方一旦卡死（例如在持有 Mind / 记忆锁时死锁），
+    // 无超时的 lock().await 会让本请求永久挂起，既不回包也不报错，
+    // 前端会永远停在「思考中」，之后所有消息也会被静默吞掉。
+    let _brain_guard = match tokio::time::timeout(THINK_LOCK_WAIT, _brain_lock.lock()).await {
+        Ok(guard) => guard,
+        Err(_) => {
+            tracing::warn!(
+                "[Chat:{}] think_lock 等待超过 {}s，放弃本次请求 stream_id={}（持锁方疑似卡死）",
+                char_id,
+                THINK_LOCK_WAIT.as_secs(),
+                stream_id
+            );
+            let _ = app.emit(
+                "chat:error",
+                json!({
+                    "error": "上一个请求长时间未结束，本次消息已放弃。请重试；若反复出现请重启应用。",
+                    "stream_id": &stream_id,
+                    "character_id": &char_id,
+                    "channel": &channel_str,
+                }),
+            );
+            return Ok(());
+        }
+    };
+    // 排队耗时打点：定位「发出去后久久没有反应」是卡在排队还是卡在 think 内部
+    tracing::info!(
+        "[Chat:{}] 已获得 think_lock stream_id={} 排队等待 {}ms",
+        char_id,
+        stream_id,
+        (chrono::Local::now() - queued_at).num_milliseconds()
+    );
     state.reset_generation_cancel(&char_id);
 
     // 设置消息渠道标记（影响 dialogue 写入的 metadata.channel）
@@ -1077,9 +1133,26 @@ pub async fn send_message_stream(
                                 }
 
                                 // 调用主对话流程生成插话内容
-                                // 串行化 brain.think，与 send_message_stream 共用 brain_lock
+                                // 串行化 brain.think，与 send_message_stream 共用 brain_lock。
+                                // 插话是可选的锦上添花：等不到锁就直接放弃，绝不无限等待
+                                // （否则旁观者任务会永久挂住，并连带占住这把锁）。
                                 let _brain_lock = observer_think_lock_clone.clone();
-                                let _brain_guard = _brain_lock.lock().await;
+                                let _brain_guard = match tokio::time::timeout(
+                                    Duration::from_secs(20),
+                                    _brain_lock.lock(),
+                                )
+                                .await
+                                {
+                                    Ok(guard) => guard,
+                                    Err(_) => {
+                                        tracing::info!(
+                                            "[Chat] 旁观者 {}({}) 等待 think_lock 超时，跳过本次插话",
+                                            other_name_clone,
+                                            other_id_clone
+                                        );
+                                        return;
+                                    }
+                                };
 
                                 // 设置渠道为 proactive，让 dialogue 写入标记为主动气泡路径
                                 let prev_channel = observer_dialogue_clone.get_channel();
@@ -1321,6 +1394,16 @@ pub async fn wake_from_presence(
                 "hint": hint,
             }),
         );
+        // 必须同时回一个终态事件：前端只认 chat:* 终态来结算这条流并清除「思考中」。
+        // 只发 presence:wake_deferred（前端只弹 toast）会让气泡/桌宠永远停在思考状态。
+        let _ = app.emit(
+            "chat:cancelled",
+            json!({
+                "stream_id": &stream_id,
+                "character_id": &char_id,
+                "channel": channel_str,
+            }),
+        );
         return Ok(());
     }
 
@@ -1392,9 +1475,30 @@ pub async fn wake_from_presence(
             );
         });
 
-    // 串行化 brain.think
+    // 串行化 brain.think。唤醒同样要有等待上限，否则角色一旦卡死，
+    // 连续点击桌宠会永远得不到任何回应（连「在忙」的提示都不会出现）。
     let _brain_lock = instance.think_lock.clone();
-    let _brain_guard = _brain_lock.lock().await;
+    let _brain_guard = match tokio::time::timeout(THINK_LOCK_WAIT, _brain_lock.lock()).await {
+        Ok(guard) => guard,
+        Err(_) => {
+            tracing::warn!(
+                "[Chat:{}] 唤醒时 think_lock 等待超过 {}s，放弃本次唤醒 stream_id={}",
+                char_id,
+                THINK_LOCK_WAIT.as_secs(),
+                stream_id
+            );
+            let _ = app.emit(
+                "chat:error",
+                json!({
+                    "error": "上一个请求长时间未结束，本次唤醒已放弃。请重试；若反复出现请重启应用。",
+                    "stream_id": &stream_id,
+                    "character_id": &char_id,
+                    "channel": channel_str,
+                }),
+            );
+            return Ok(());
+        }
+    };
     state.reset_generation_cancel(&char_id);
 
     brain.dialogue.set_channel("direct");

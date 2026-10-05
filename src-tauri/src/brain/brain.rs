@@ -635,12 +635,30 @@ impl Brain {
         skip_dialogue_write: bool,
         run_reflection: bool,
     ) -> VivianResult<AiResponse> {
+        // 入口打点：此前从进入 think 到 pipeline 打印第一行日志之间是完全的观测盲区，
+        // 一旦在这段区间卡住（例如抢不到 Mind 的锁），日志上会表现为「什么都没有发生」，
+        // 既看不到请求进来、也看不到失败。这里给出进入/返回两条日志，把盲区补上。
+        let think_started = std::time::Instant::now();
+        tracing::info!(
+            "[Think:{}] 进入 think stream={} input_chars={}",
+            self.char_id,
+            stream,
+            user_input.chars().count()
+        );
+
         // 主动对话冷却重置（关系更新由 chat_chain 在 MoodStep 后基于真实情绪执行）
         let _ = self.proactive.on_user_interacted();
 
         // Attention boost：用户输入驱动注意力聚焦（纯规则，不调 LLM，毫秒级）
         let now = chrono::Utc::now().timestamp();
         crate::mind::boost_attention_from_input(&self.mind, user_input, now);
+        // 前处理（proactive 冷却重置 + 注意力聚焦）耗时打点：这两步都要抢 Mind 的锁，
+        // 若这里卡住，说明有别的任务长期持有 Mind 的锁。
+        tracing::debug!(
+            "[Think:{}] 前处理完成 elapsed_ms={}",
+            self.char_id,
+            think_started.elapsed().as_millis()
+        );
 
         // 异步反思（合并 consciousness_update + activity_extractor）：
         // fire-and-forget，节流触发（5 轮或 30 分钟 OR 关系，激烈对话抑制）。
@@ -675,10 +693,22 @@ impl Brain {
             });
         }
 
-        match &self.chat_chain {
+        tracing::debug!(
+            "[Think:{}] 进入 pipeline elapsed_ms={}",
+            self.char_id,
+            think_started.elapsed().as_millis()
+        );
+        let result = match &self.chat_chain {
             Some(chain) => chain.ainvoke_with_options(user_input, stream, skip_dialogue_write).await,
             None => Err(VivianError::Engine("聊天链未初始化".to_string())),
-        }
+        };
+        tracing::info!(
+            "[Think:{}] 退出 think ok={} elapsed_ms={}",
+            self.char_id,
+            result.is_ok(),
+            think_started.elapsed().as_millis()
+        );
+        result
     }
 
     /// 设置流式 chunk 推送回调（转发到 BrainChatChain）
@@ -730,6 +760,10 @@ impl Brain {
         &self,
         context: &crate::proactive::TickContext,
     ) -> VivianResult<bool> {
+        // Mind 锁争用探针：必须在本函数（以及 cognitive_tick 的各阶段）尚未持有任何
+        // Mind 锁之前调用，否则会自己把自己判成争用。非阻塞，拿不到锁只打日志。
+        self.mind.log_contended_locks(context.now);
+
         // ── 统一认知循环：6 阶段流水线 ──
         // 替换原 WorldState 超时 + Mind Tick + proactive.tick 三段独立逻辑，
         // 合并为显式流水线。每阶段独立决策，仅 Speak 调 LLM。

@@ -1937,6 +1937,23 @@ const ChatWindow: React.FC = () => {
   useEffect(() => {
     let cancelled = false;
     let unlisten: UnlistenFn | undefined;
+    let retryTimer: number | null = null;
+
+    /**
+     * 发送某个角色暂存的待发消息。
+     *
+     * 只在角色确实不再忙碌时调用；调用后把该角色的条目从队列里摘掉，
+     * 避免重复发送（`ChatController.sendMessage` 内部会带 stream_id 走完整流程）。
+     */
+    const flushPendingForChar = (charId: string) => {
+      const pending = pendingMessagesRef.current.filter((m) => m.charId === charId);
+      if (pending.length === 0) return;
+      pendingMessagesRef.current = pendingMessagesRef.current.filter((m) => m.charId !== charId);
+      for (const m of pending) {
+        void ChatController.sendMessage(m.text, m.charId, 'wechat', m.whisper, m.fileMetadata);
+      }
+    };
+
     void (async () => {
       try {
         const states = await invoke<Array<{ character_id: string; state: string }>>('get_all_presence_states');
@@ -1952,19 +1969,41 @@ const ChatWindow: React.FC = () => {
           setPresenceStates((prev) => ({ ...prev, [e.payload.character_id]: newState }));
           // 角色从忙碌恢复为在线/休息时，发送暂存的待发消息
           if (newState !== 'busy' && newState !== 'offline') {
-            const pending = pendingMessagesRef.current.filter((m) => m.charId === e.payload.character_id);
-            if (pending.length > 0) {
-              pendingMessagesRef.current = pendingMessagesRef.current.filter((m) => m.charId !== e.payload.character_id);
-              for (const m of pending) {
-                void ChatController.sendMessage(m.text, m.charId, 'wechat');
-              }
-            }
+            flushPendingForChar(e.payload.character_id);
           }
         });
       } catch { /* ignore */ }
       if (cancelled) { unlisten?.(); }
     })();
-    return () => { cancelled = true; unlisten?.(); };
+
+    // 兜底冲刷：不能只依赖 presence:changed。
+    // 该事件只在状态「发生变化」时发出，而角色可能在我们暂存消息之前就已经回到 Online
+    // （或该事件在窗口初始化期间丢失），此时消息会永远躺在队列里、界面上却像是"已发送"。
+    // 这里定期回查一次真实 presence，发现角色已不忙碌就补发。
+    retryTimer = window.setInterval(() => {
+      const queued = pendingMessagesRef.current;
+      if (queued.length === 0) return;
+      const charIds = [...new Set(queued.map((m) => m.charId))];
+      void (async () => {
+        try {
+          const states = await invoke<Array<{ character_id: string; state: string }>>('get_all_presence_states');
+          if (cancelled) return;
+          const map: Record<string, string> = {};
+          for (const s of states) map[s.character_id] = s.state;
+          setPresenceStates(map);
+          for (const id of charIds) {
+            const state = map[id];
+            if (state && state !== 'busy' && state !== 'offline') flushPendingForChar(id);
+          }
+        } catch { /* ignore */ }
+      })();
+    }, 5000);
+
+    return () => {
+      cancelled = true;
+      unlisten?.();
+      if (retryTimer !== null) window.clearInterval(retryTimer);
+    };
   }, []);
 
   /** 状态栏时间 */
@@ -1987,8 +2026,12 @@ const ChatWindow: React.FC = () => {
   const typingSafetyTimerRef = useRef<number | null>(null);
   /** typing 延迟显示定时器：chat:start 后随机延迟 1-1.5s 再显示"对方正在输入"，避免突兀 */
   const typingDelayTimerRef = useRef<number | null>(null);
-  /** 待发送消息队列：私聊对象忙碌时暂存消息，待状态恢复在线后发送 */
-  const pendingMessagesRef = useRef<Array<{ charId: string; text: string }>>([]);
+  /**
+   * 待发送消息队列：私聊对象忙碌时暂存消息，待状态恢复在线后补发。
+   *
+   * 保留 `whisper` / `fileMetadata`，让补发与原发送语义一致（例如语音消息的元数据不丢）。
+   */
+  const pendingMessagesRef = useRef<Array<{ charId: string; text: string; whisper?: boolean; fileMetadata?: Record<string, unknown> }>>([]);
   /** 流式缓冲区：按 stream_id 累积未遇到换行符的文本 */
   const streamBuffersRef = useRef<Map<string, string>>(new Map());
   /** stream_id 到段落气泡 id 列表的映射，用于 chat:done 时清理 */
@@ -3069,11 +3112,14 @@ const ChatWindow: React.FC = () => {
         ...prev,
         [privateCharId]: { content: text, timestamp: Date.now(), role: 'user' },
       }));
-      // 忙碌状态下暂存消息，等状态恢复在线后再发送
+      // 忙碌状态下暂存消息，等状态恢复在线后再发送。
+      // 注意：这条路径**不会**调用后端，所以后端日志/对话历史里不会有这条消息。
+      // 必须保证它最终一定会被补发，否则用户会看到"自己发了消息但对方毫无反应"。
       if (presenceStates[privateCharId] === 'busy') {
         // 立即在聊天列表显示用户消息（不经过 ChatController，不会触发 chat:user_message 事件）
         setMessages((prev) => [...prev, { id: nextId(), role: 'user', content: text, timestamp: Date.now() }]);
         pendingMessagesRef.current.push({ charId: privateCharId, text });
+        console.info(`[ChatWindow] ${privateCharId} 处于忙碌，消息已暂存待发:`, text);
       } else if (text) {
         void ChatController.sendMessage(text, privateCharId, 'wechat');
       }
@@ -3753,9 +3799,10 @@ const ChatWindow: React.FC = () => {
             return;
           }
 
-          // 忙碌状态下暂存
+          // 忙碌状态下暂存（补发时会带上 fileMetadata，语音元数据不丢）
           if (presenceStates[targetCharId] === 'busy') {
-            pendingMessagesRef.current.push({ charId: targetCharId, text: messageText });
+            pendingMessagesRef.current.push({ charId: targetCharId, text: messageText, fileMetadata: voiceMeta });
+            console.info(`[ChatWindow] ${targetCharId} 处于忙碌，语音消息已暂存待发`);
             return;
           }
           // 标记跳过 chat:user_message 的文本气泡（本地已显示语音气泡）

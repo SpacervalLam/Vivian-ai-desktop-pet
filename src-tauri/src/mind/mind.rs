@@ -9,7 +9,8 @@
 //! - 检索预过滤：`mind.attention_snapshot()` → 传入 PrecisionFilterCriteria
 //! - Reflection 写回：`mind.apply_reflection(...)` → 由 ConsolidationPipeline 调用
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use parking_lot::RwLock;
 
@@ -192,6 +193,54 @@ impl Mind {
             let _ = std::fs::write(self.persistence_dir.join("working_memory.json"), json);
         }
         Ok(())
+    }
+
+    /// Mind 内部锁的争用探针（诊断用，非阻塞）。
+    ///
+    /// `mind_tick` 与 `persist` 会按 `attention → goals → beliefs → working_memory` 的顺序
+    /// 加锁并做文件 IO。若某个任务在这条路径上卡死，外部表现是：该角色的
+    /// `mind/*.json` 停止更新，且之后所有 `think` 都卡在 pipeline 之前、日志上毫无痕迹
+    /// （见 `brain.think_inner` 的入口打点）。这里用 `try_write` 做非阻塞探测：拿不到锁
+    /// 说明有人正持有它；持续拿不到就是卡死的强信号，直接把锁名打出来。
+    ///
+    /// **调用点必须选在调用方自己不持有任何 Mind 锁的位置**（当前为 `Brain::proactive_tick`
+    /// 入口，早于 `cognitive_tick` 的各阶段）。报告按角色节流，避免每 tick 刷屏。
+    pub fn log_contended_locks(&self, now: f64) {
+        // try_write 拿到即说明当前无争用；守卫在表达式结束时立刻释放。
+        let contended: Vec<&'static str> = [
+            ("attention", self.attention.try_write().is_none()),
+            ("goals", self.goals.try_write().is_none()),
+            ("beliefs", self.beliefs.try_write().is_none()),
+            ("working_memory", self.working_memory.try_write().is_none()),
+        ]
+        .into_iter()
+        .filter_map(|(name, busy)| busy.then_some(name))
+        .collect();
+
+        static LAST_WARN: OnceLock<Mutex<HashMap<String, f64>>> = OnceLock::new();
+        let mut last_warn = LAST_WARN
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        if contended.is_empty() {
+            last_warn.remove(&self.char_id);
+            return;
+        }
+
+        const WARN_INTERVAL_SECS: f64 = 60.0;
+        if now - last_warn.get(&self.char_id).copied().unwrap_or(0.0) < WARN_INTERVAL_SECS {
+            return;
+        }
+        last_warn.insert(self.char_id.clone(), now);
+        tracing::warn!(
+            "[Mind:{}] 检测到内部锁被长期占用: {:?}（持续 {}s 以上）——\
+             持有者一旦阻塞，该角色的 think 会卡在 pipeline 之前、mind/*.json 也会停止更新。\
+             请检查持有该锁期间是否发生了阻塞调用。",
+            self.char_id,
+            contended,
+            WARN_INTERVAL_SECS as u64
+        );
     }
 
     /// Attention 快照（用于检索预过滤，clone 后释放锁）
