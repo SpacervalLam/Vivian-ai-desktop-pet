@@ -312,7 +312,7 @@ pub static CORPUS_JA: &[CorpusEntry] = &[
     CorpusEntry { text: "明日提出", emotion: "neutral", target: EmotionTarget::Self_, context: EmotionContext::WorkStudy },
     CorpusEntry { text: "今週は忙しい", emotion: "neutral", target: EmotionTarget::Situation, context: EmotionContext::WorkStudy },
     CorpusEntry { text: "特に問題ない", emotion: "neutral", target: EmotionTarget::Self_, context: EmotionContext::HealthBody },
-    CorpusEntry { text: "家族は元気", emotion: "neutral", target: EmotionTarget::Other, context: EmotionContext::HealthBody },
+    CorpusEntry { text: "体調は変わらない", emotion: "neutral", target: EmotionTarget::Self_, context: EmotionContext::HealthBody },
     CorpusEntry { text: "来週は何かある", emotion: "neutral", target: EmotionTarget::Self_, context: EmotionContext::Event },
     CorpusEntry { text: "今日は平常運転", emotion: "neutral", target: EmotionTarget::Situation, context: EmotionContext::Event },
     CorpusEntry { text: "今日は普通の配信", emotion: "neutral", target: EmotionTarget::Self_, context: EmotionContext::Livestream },

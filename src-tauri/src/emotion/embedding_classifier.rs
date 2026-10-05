@@ -202,7 +202,7 @@ static CORPUS_ZH: &[CorpusEntry] = &[
     CorpusEntry { text: "这角色怎么这么难玩", emotion: "frustrated", target: EmotionTarget::Situation, context: EmotionContext::Gaming },
     CorpusEntry { text: "刷了这么久还是没出", emotion: "frustrated", target: EmotionTarget::Situation, context: EmotionContext::Gaming },
     CorpusEntry { text: "好不容易约好的又取消了", emotion: "frustrated", target: EmotionTarget::Situation, context: EmotionContext::Event },
-    CorpusEntry { text: "限量的东西又没抢到", emotion: "frustrated", target: EmotionTarget::Situation, context: EmotionContext::Event },
+    CorpusEntry { text: "限量的东西又没抢到", emotion: "frustrated", target: EmotionTarget::Situation, context: EmotionContext::Livestream },
     CorpusEntry { text: "好不容易抢到的票又被取消了", emotion: "frustrated", target: EmotionTarget::Situation, context: EmotionContext::Event },
     CorpusEntry { text: "又失眠了", emotion: "frustrated", target: EmotionTarget::Self_, context: EmotionContext::HealthBody },
     CorpusEntry { text: "跑步膝盖又疼了", emotion: "frustrated", target: EmotionTarget::Situation, context: EmotionContext::HealthBody },
@@ -443,6 +443,40 @@ static CORPUS_ZH: &[CorpusEntry] = &[
     CorpusEntry { text: "你这个逻辑我没跟上", emotion: "confused", target: EmotionTarget::Ai, context: EmotionContext::AiCompanionship },
     CorpusEntry { text: "你理解错我的意思了吧", emotion: "confused", target: EmotionTarget::Ai, context: EmotionContext::AiCompanionship },
 
+    // ── Gaming 补充 ──
+    // 原语料的 Gaming 只覆盖 9 类情绪（缺 happy/grateful/sad/anxious/neutral），
+    // 导致这些情绪在游戏语境下无候选参与 Top-K 投票，context 加权失效。
+    CorpusEntry { text: "今天日常任务全清了", emotion: "happy", target: EmotionTarget::Self_, context: EmotionContext::Gaming },
+    CorpusEntry { text: "他带我躺赢了一整把", emotion: "happy", target: EmotionTarget::Other, context: EmotionContext::Gaming },
+    CorpusEntry { text: "这赛季的段位终于上去了", emotion: "happy", target: EmotionTarget::Situation, context: EmotionContext::Gaming },
+    CorpusEntry { text: "队友帮我挡了一波我才能收线", emotion: "grateful", target: EmotionTarget::Other, context: EmotionContext::Gaming },
+    CorpusEntry { text: "客服补偿终于到账了", emotion: "grateful", target: EmotionTarget::Other, context: EmotionContext::Gaming },
+    CorpusEntry { text: "连跪一晚上心态崩了", emotion: "sad", target: EmotionTarget::Self_, context: EmotionContext::Gaming },
+    CorpusEntry { text: "他退游了以后再没人叫我双排", emotion: "sad", target: EmotionTarget::Other, context: EmotionContext::Gaming },
+    CorpusEntry { text: "排位赛还剩十分钟我还在黄金", emotion: "anxious", target: EmotionTarget::Self_, context: EmotionContext::Gaming },
+    CorpusEntry { text: "这关限时我卡在最后一波", emotion: "anxious", target: EmotionTarget::Situation, context: EmotionContext::Gaming },
+    CorpusEntry { text: "打开游戏日常签到", emotion: "neutral", target: EmotionTarget::Self_, context: EmotionContext::Gaming },
+    CorpusEntry { text: "这版本改动不大", emotion: "neutral", target: EmotionTarget::Situation, context: EmotionContext::Gaming },
+
+    // ── Livestream 补充 ──
+    // 原语料 Livestream 仅 11 条 / 4 类情绪，是全部 8 个 context 中最薄的一档，
+    // 与 JA/EN 各 28 条的覆盖差距最大。
+    CorpusEntry { text: "抢到了直播间送的小礼物", emotion: "happy", target: EmotionTarget::Self_, context: EmotionContext::Livestream },
+    CorpusEntry { text: "主播居然记得我的名字", emotion: "happy", target: EmotionTarget::Other, context: EmotionContext::Livestream },
+    CorpusEntry { text: "谢谢运营今天发的福袋", emotion: "grateful", target: EmotionTarget::Other, context: EmotionContext::Livestream },
+    CorpusEntry { text: "主播今天提前下播了", emotion: "sad", target: EmotionTarget::Self_, context: EmotionContext::Livestream },
+    CorpusEntry { text: "关注这么久都没连上麦", emotion: "sad", target: EmotionTarget::Situation, context: EmotionContext::Livestream },
+    CorpusEntry { text: "网卡了三次都进不去直播间", emotion: "frustrated", target: EmotionTarget::Self_, context: EmotionContext::Livestream },
+    CorpusEntry { text: "蹲了整场没抢到那双鞋", emotion: "frustrated", target: EmotionTarget::Situation, context: EmotionContext::Livestream },
+    CorpusEntry { text: "连麦PK对面是大神", emotion: "anxious", target: EmotionTarget::Self_, context: EmotionContext::Livestream },
+    CorpusEntry { text: "福袋还有十秒开奖", emotion: "anxious", target: EmotionTarget::Situation, context: EmotionContext::Livestream },
+    CorpusEntry { text: "看了一晚上直播眼睛好累", emotion: "tired", target: EmotionTarget::Self_, context: EmotionContext::Livestream },
+    CorpusEntry { text: "蹲了一晚上结果名额满了", emotion: "disappointed", target: EmotionTarget::Self_, context: EmotionContext::Livestream },
+    CorpusEntry { text: "主播这个操作是怎么做到的", emotion: "curious", target: EmotionTarget::Other, context: EmotionContext::Livestream },
+    CorpusEntry { text: "随便看看直播", emotion: "neutral", target: EmotionTarget::Self_, context: EmotionContext::Livestream },
+    CorpusEntry { text: "这个频道今天在播什么", emotion: "neutral", target: EmotionTarget::Situation, context: EmotionContext::Livestream },
+    CorpusEntry { text: "这个跳转是新功能吗", emotion: "confused", target: EmotionTarget::Situation, context: EmotionContext::Livestream },
+    CorpusEntry { text: "榜一怎么突然换人了", emotion: "confused", target: EmotionTarget::Situation, context: EmotionContext::Livestream },
 ];
 
 /// 按语言返回情绪分类语料。
@@ -835,7 +869,33 @@ mod tests {
     #[test]
     fn test_corpus_size_reasonable() {
         let clf = make_classifier();
-        assert_eq!(clf.corpus_size(), 14 * 24, "每类应保留 24 条代表样本");
+        // 每类至少 24 条代表样本（原为恰好 24）。补 Gaming / Livestream 覆盖后
+        // 总数上升，但补的是 context 维度、不改变 14 类情绪的相对权重，
+        // 因此下限约束比等式更贴合这条断言的真实意图。
+        assert!(
+            clf.corpus_size() >= 14 * 24,
+            "每类应保留至少 24 条代表样本，实际 {}",
+            clf.corpus_size()
+        );
+        // 但也不能无限膨胀——语料是编译期常量，每条都要嵌入。
+        assert!(clf.corpus_size() <= 14 * 32, "语料膨胀失控：{}", clf.corpus_size());
+    }
+
+    #[test]
+    fn test_corpus_covers_each_emotion_evenly() {
+        // 补 context 不得破坏情绪维度的均衡：任何一类的条数不应超过最小类的两倍。
+        let clf = make_classifier();
+        let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        for e in clf.corpus.iter() {
+            *counts.entry(e.emotion).or_default() += 1;
+        }
+        let min = *counts.values().min().expect("语料非空");
+        let max = *counts.values().max().expect("语料非空");
+        assert!(
+            max <= min * 2,
+            "情绪分布失衡 min={min} max={max}：{:?}",
+            counts
+        );
     }
 
     #[test]
