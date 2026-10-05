@@ -13,6 +13,7 @@
  */
 
 import React, { useCallback, useContext, useState } from 'react';
+import { StreamFadeContext, StreamFadeText } from './StreamFadeText';
 import {
   Braces, Check, File as FileIcon, FileCode, FileText, Hash, Image as ImageIcon,
 } from 'lucide-react';
@@ -137,7 +138,7 @@ function renderInline(text: string, kp: string, ctx: InlineCtx): React.ReactNode
 
   const flush = () => {
     if (buf) {
-      out.push(buf);
+      out.push(<StreamFadeText key={`t${kp}${n++}`} text={buf} />);
       buf = '';
     }
   };
@@ -153,7 +154,7 @@ function renderInline(text: string, kp: string, ctx: InlineCtx): React.ReactNode
         flush();
         out.push(
           <code key={`c${kp}${n++}`} className="codex-md-code">
-            {text.slice(i + 1, end)}
+            <StreamFadeText text={text.slice(i + 1, end)} />
           </code>,
         );
         i = end + 1;
@@ -223,7 +224,7 @@ function renderInline(text: string, kp: string, ctx: InlineCtx): React.ReactNode
               onClick={() => ctx.onOpenFile?.(filePath, fileTarget?.line, fileTarget?.column)}
             >
               <span className="codex-md-filelink-icon"><Icon size={13} strokeWidth={2} /></span>
-              <span className="codex-md-filelink-text">{label}</span>
+              <span className="codex-md-filelink-text"><StreamFadeText text={label} /></span>
             </button>,
           );
         } else {
@@ -237,7 +238,7 @@ function renderInline(text: string, kp: string, ctx: InlineCtx): React.ReactNode
               title={href}
               onClick={filePath ? (e) => e.preventDefault() : undefined}
             >
-              {label}
+              <StreamFadeText text={label} />
             </a>,
           );
         }
@@ -279,7 +280,7 @@ const CodeBlock: React.FC<{ lang: string; code: string }> = ({ lang, code }) => 
         </button>
       </div>
       <pre className="codex-md-pre">
-        <code>{code}</code>
+        <code><StreamFadeText text={code} /></code>
       </pre>
     </div>
   );
@@ -479,24 +480,22 @@ const renderList = (items: ListNode[], ordered: boolean, kp: string, ctx: Inline
 /**
  * 块序列 → React 节点。引用块内部递归复用，保证嵌套结构也能渲染。
  *
- * `animate` 打开时给每个块挂递增的入场延迟，流式输出下新块逐个淡入；
- * 块 key 由下标决定，已存在的块 React 复用 DOM，动画不会重放。
+ * 流式文字由 StreamFadeContext 按新增片段渐显，不重复淡入整个段落。
  */
-function renderBlocks(blocks: Block[], kp: string, ctx: InlineCtx, animate = false): React.ReactNode[] {
+function renderBlocks(blocks: Block[], kp: string, ctx: InlineCtx): React.ReactNode[] {
   return blocks.map((b, idx) => {
     const key = `${kp}-${idx}`;
-    const style = animate ? { animationDelay: `${Math.min(idx, 10) * 26}ms` } : undefined;
     switch (b.kind) {
       case 'h': {
         const Tag = (`h${Math.min(b.level, 6)}`) as 'h1' | 'h2' | 'h3' | 'h4' | 'h5' | 'h6';
-        return <Tag key={key} style={style} className={`codex-md-h codex-md-h${b.level}`}>{inline(b.text, key, ctx)}</Tag>;
+        return <Tag key={key} className={`codex-md-h codex-md-h${b.level}`}>{inline(b.text, key, ctx)}</Tag>;
       }
       case 'hr':
-        return <hr key={key} style={style} className="codex-md-hr" />;
+        return <hr key={key} className="codex-md-hr" />;
       case 'quote':
         return (
-          <blockquote key={key} style={style} className="codex-md-quote">
-            {renderBlocks(parseBlocks(b.lines.join('\n')), `${key}q`, ctx, animate)}
+          <blockquote key={key} className="codex-md-quote">
+            {renderBlocks(parseBlocks(b.lines.join('\n')), `${key}q`, ctx)}
           </blockquote>
         );
       case 'list':
@@ -505,7 +504,7 @@ function renderBlocks(blocks: Block[], kp: string, ctx: InlineCtx, animate = fal
         return <CodeBlock key={key} lang={b.lang} code={b.code} />;
       case 'table':
         return (
-          <div key={key} style={style} className="codex-md-table-wrap">
+          <div key={key} className="codex-md-table-wrap">
             <table className="codex-md-table">
               <thead>
                 <tr>
@@ -527,7 +526,7 @@ function renderBlocks(blocks: Block[], kp: string, ctx: InlineCtx, animate = fal
           </div>
         );
       default:
-        return <p key={key} style={style} className="codex-md-p">{inline(b.text, key, ctx)}</p>;
+        return <p key={key} className="codex-md-p">{inline(b.text, key, ctx)}</p>;
     }
   });
 }
@@ -536,7 +535,7 @@ function renderBlocks(blocks: Block[], kp: string, ctx: InlineCtx, animate = fal
  * 渲染 markdown 正文。
  *
  * `keyPrefix` 用于区分同一页面里的多段文本，避免同层 key 冲突。
- * `animate` 仅流式输出时打开：逐块淡入，历史消息保持静态。
+ * `animate` 仅流式输出时打开：新增片段渐显，历史消息保持静态。
  * 本地文件链接的打开能力由外层 `MarkdownFileContext` 提供。
  */
 export const MarkdownText: React.FC<{ text: string; keyPrefix?: string; animate?: boolean }> = ({
@@ -544,9 +543,11 @@ export const MarkdownText: React.FC<{ text: string; keyPrefix?: string; animate?
 }) => {
   const ctx = useContext(MarkdownFileContext);
   return (
-    <div className="codex-md" data-md-animated={animate ? '1' : undefined}>
-      {renderBlocks(parseBlocks(text || ''), keyPrefix, ctx, animate)}
-    </div>
+    <StreamFadeContext.Provider value={animate}>
+      <div className="codex-md">
+        {renderBlocks(parseBlocks(text || ''), keyPrefix, ctx)}
+      </div>
+    </StreamFadeContext.Provider>
   );
 };
 

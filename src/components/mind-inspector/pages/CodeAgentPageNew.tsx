@@ -39,6 +39,7 @@ import TurnRail, { buildTurns } from './TurnRail';
 import ComposerEditor, { type ComposerEditorHandle } from './ComposerEditor';
 import PinnedSummary from './PinnedSummary';
 import { MarkdownFileContext, MarkdownText, FileChip, renderMarkdownBlocks } from './codeMarkdown';
+import { StreamFadeContext, StreamFadeText } from './StreamFadeText';
 import { SourceFileView } from './SourceFileView';
 import OfficePreview from './OfficePreview';
 import { PreviewEditCard, SelectionBubble, resolveSelectionTarget, type PendingEdit, type SelectionTarget } from './PreviewSelectionEdit';
@@ -6142,7 +6143,11 @@ const CodeAgentPage: React.FC = () => {
                             <span className="codex-dots"><i /><i /><i /></span>
                           </div>}
                           {thinkingText && !compacting && (
-                            <div className="codex-thinking-chain">{thinkingText}</div>
+                            <div className="codex-thinking-chain">
+                              <StreamFadeContext.Provider value={thinking}>
+                                <StreamFadeText text={thinkingText} />
+                              </StreamFadeContext.Provider>
+                            </div>
                           )}
                         </div>
                       )}

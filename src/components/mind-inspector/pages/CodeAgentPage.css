@@ -3490,13 +3490,16 @@
 .codex-md > *:first-child { margin-top: 0; }
 .codex-md > *:last-child { margin-bottom: 0; }
 
-/* 流式输出：逐块淡入（延迟由渲染层按块序号递增注入） */
-.codex-md[data-md-animated] > * {
-  opacity: 0;
-  animation: codex-md-fade 0.28s ease forwards;
+/* 新到达的文字渐显；只改透明度，保持光标、换行和滚动位置稳定。 */
+.codex-stream-fade {
+  animation: codex-stream-fade 420ms cubic-bezier(.2, .65, .3, 1) both;
 }
-@keyframes codex-md-fade {
+@keyframes codex-stream-fade {
+  from { opacity: .15; }
   to { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .codex-stream-fade { animation: none; }
 }
 
 /* 正文块收窄到阅读宽度；宽块（代码/表格）保持整列 */
