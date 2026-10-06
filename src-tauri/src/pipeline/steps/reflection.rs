@@ -150,11 +150,13 @@ fn growth_evidence(state: &PipelineState, evolution: &Value) -> Option<crate::pe
     })
 }
 
+#[derive(Clone)]
 pub struct ReflectionRunnable {
+    active_turn: Option<(Arc<std::sync::atomic::AtomicU64>, u64)>,
     pub router: Option<Arc<ModelRouter>>,
     pub manifest: Option<Arc<ResourceManifest>>,
     pub char_id: String,
-    /// 内联标签模式：启用时跳过 LLM 调用（表情/动作已由流式扫描器实时处理）
+    /// 内联标签模式：仅推断心理状态（表情/动作已由流式扫描器实时处理）
     pub inline_enabled: bool,
     /// 世界状态引用：解析 world_update 后直接写入用户活动状态机
     pub world_state: Option<Arc<WorldState>>,
@@ -172,6 +174,7 @@ impl ReflectionRunnable {
         char_id: impl Into<String>,
     ) -> Self {
         Self {
+            active_turn: None,
             router,
             manifest,
             inline_enabled,
@@ -183,6 +186,18 @@ impl ReflectionRunnable {
     }
 
     /// 注入世界状态引用（用于解析 world_update 后更新用户活动状态机）
+    pub fn for_turn(&self, revision: Arc<std::sync::atomic::AtomicU64>, turn: u64) -> Self {
+        let mut reflection = self.clone();
+        reflection.active_turn = Some((revision, turn));
+        reflection
+    }
+
+    fn is_current_turn(&self) -> bool {
+        self.active_turn.as_ref().is_none_or(|(revision, turn)| {
+            revision.load(std::sync::atomic::Ordering::SeqCst) == *turn
+        })
+    }
+
     pub fn with_world_state(mut self, world_state: Arc<WorldState>) -> Self {
         self.world_state = Some(world_state);
         self
@@ -611,6 +626,7 @@ impl Runnable for ReflectionRunnable {
         let timeout = std::time::Duration::from_secs(15);
         match tokio::time::timeout(timeout, self.call_llm(&state)).await {
             Ok(Some(json)) => {
+                if !self.is_current_turn() { return Ok(state.to_json()); }
                 Self::apply_to_state(&mut state, &json, self.manifest.as_deref());
                 if state.current_channel != "cross_character" {
                     self.apply_world_update(&json);
@@ -640,6 +656,7 @@ impl ReflectionRunnable {
         let timeout = std::time::Duration::from_secs(15);
         match tokio::time::timeout(timeout, self.call_llm(&state)).await {
             Ok(Some(json)) => {
+                if !self.is_current_turn() { return Ok(state.to_json()); }
                 // 只应用心理字段，不覆盖表情/动作（已被流式扫描器填充）
                 if state.current_channel != "cross_character" {
                 if let Some(user_emo) = json.get("user_emotion").and_then(|v| v.as_str()) {

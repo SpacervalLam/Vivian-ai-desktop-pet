@@ -280,7 +280,7 @@ impl ToolCallManager {
             }
 
             // 2. 构建反馈提示词（汇总工具执行结果给 LLM）
-            let continue_prompt = self.build_feedback_prompt(&results_ref, &current_response);
+            let continue_prompt = self.build_feedback_prompt(&all_results, &current_response);
 
             // 3. 调用 LLM 让它基于工具结果继续生成
             match ai_generate(continue_prompt).await {
@@ -362,7 +362,13 @@ impl ToolCallManager {
                 "FAILED"
             };
             lines.push(format!("### {} [{}]", r.tool_name, status));
-            if r.success {
+            // Preserve invocation identity and execution state independently of payload clipping.
+            lines.push(serde_json::json!({
+                "call_id": r.tool_call_id, "arguments": r.arguments, "status": r.status,
+                "success": r.success, "requires_confirmation": r.requires_confirmation,
+                "goal_completed": r.goal_completed, "error": r.error,
+            }).to_string());
+            if r.result.is_some() {
                 if let Some(data) = &r.result {
                     let data_str = serde_json::to_string_pretty(data).unwrap_or_default();
                     // 截断过长的结果（避免提示词爆炸）—— 截断长度由 config.tools.feedback_history_chars 控制；
@@ -453,6 +459,7 @@ impl ToolCallManager {
         let mut executed: HashSet<String> = HashSet::new();
         let mut last_result: Option<Value> = None;
         let mut iterations_used = 0usize;
+        let invocation_batch = uuid::Uuid::new_v4();
         let mut final_status = ToolCallStatus::Success;
         // 并行批次：累积可并行的只读工具调用 (tool_name, arguments, iteration_index)
         let mut parallel_batch: ReadBatch = Vec::new();
@@ -476,7 +483,7 @@ impl ToolCallManager {
 
             if has_placeholders(&arguments) {
                 iterations_used += 1;
-                results.push(call_receipt(&tool_name, arguments, format!("call_{}", iterations_used),
+                results.push(call_receipt(&tool_name, arguments, format!("call_{}_{}", invocation_batch, iterations_used),
                     ToolResult::standard_error("Referenced tool result is unavailable", Some("UnresolvedDependency"), None)));
                 last_result = None;
                 final_status = ToolCallStatus::Error;
@@ -490,6 +497,18 @@ impl ToolCallManager {
                     "[ToolCallManager] 跳过重复调用: {} (相同参数已执行)",
                     tool_name
                 );
+                // Reuse the verified receipt, but retain this invocation's step slot.
+                // Dropping it would shift ${step.N.result} for every later consumer.
+                flush_parallel_batch(&mut parallel_batch, &self.tool_system, &mut ctx_snapshot,
+                    &mut results, &mut last_result, &self.context).await;
+                iterations_used += 1;
+                if let Some(previous) = results.iter().rev().find(|result|
+                    fingerprint(&result.tool_name, &result.arguments) == call_key).cloned() {
+                    last_result = if previous.success { previous.result.clone() } else { None };
+                    let mut reused = previous;
+                    reused.tool_call_id = format!("call_{}_{}", invocation_batch, iterations_used);
+                    results.push(reused);
+                }
                 continue;
             }
             executed.insert(call_key);
@@ -505,7 +524,7 @@ impl ToolCallManager {
                 && !has_placeholders(&arguments);
 
             if can_parallel {
-                parallel_batch.push((tool_name, arguments, iterations_used, format!("call_{}", iterations_used)));
+                parallel_batch.push((tool_name, arguments, iterations_used, format!("call_{}_{}", invocation_batch, iterations_used)));
                 continue;
             }
 
@@ -559,7 +578,7 @@ impl ToolCallManager {
                 result: tool_result.data,
                 tool_name: tool_name.clone(),
                 arguments: arguments.clone(),
-                tool_call_id: format!("call_{}", iterations_used),
+                tool_call_id: format!("call_{}_{}", invocation_batch, iterations_used),
                 error: tool_result.error,
                 status,
                 requires_confirmation,
@@ -819,6 +838,21 @@ fn inject_placeholders(args: &mut Value, history: &[ToolCallResult], last: &Opti
 fn inject_value(v: &mut Value, history: &[ToolCallResult], last: &Option<Value>) {
     match v {
         Value::String(s) => {
+            // A whole-value reference is JSON data, not a string interpolation.
+            // Keep numeric IDs, arrays and objects in their original types.
+            let exact = if s == "${result}" {
+                last.clone()
+            } else {
+                s.strip_prefix("${step.").and_then(|tail| tail.strip_suffix(".result}"))
+                    .and_then(|index| index.parse::<usize>().ok())
+                    .and_then(|index| history.get(index))
+                    .filter(|result| result.success)
+                    .and_then(|result| result.result.clone())
+            };
+            if let Some(value) = exact {
+                *v = value;
+                return;
+            }
             if s.contains("${result}") {
                 if let Some(last_val) = last {
                     *s = s.replace("${result}", &value_to_injectable_string(last_val));
@@ -1832,6 +1866,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn both_protocols_preserve_dependency_json_types() {
+        for text_protocol in [false, true] {
+            for value in [json!(176), json!([1, 2]), json!({"id": "3490034653"}), json!(null)] {
+                let (manager, _, _) = probe_manager();
+                let calls = [
+                    probe_call("source", "receipt_read", json!({"value": value})),
+                    probe_call("consumer", "receipt_write", json!({"value": "${step.0.result}"})),
+                    probe_call("last", "receipt_write", json!({"value": "${result}"})),
+                ];
+                let results = if text_protocol {
+                    manager.execute_multi_step(&json!({"tool_calls": calls.iter().map(|c|
+                        json!({"tool": c.name, "arguments": c.arguments})).collect::<Vec<_>>()} ).to_string()).await.results
+                } else { manager.execute_structured_calls(&calls).await };
+                assert_eq!(results.len(), 3);
+                assert_eq!(results[1].arguments["value"], value);
+                assert_eq!(results[2].result, Some(value));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn duplicate_text_calls_keep_step_slots_without_replaying_actions() {
+        let (manager, _, total) = probe_manager();
+        let response = json!({"tool_calls": [
+            {"tool": "receipt_read", "arguments": {"value": "source"}},
+            {"tool": "receipt_read", "arguments": {"value": "source"}},
+            {"tool": "receipt_write", "arguments": {"value": "copy:${step.1.result}"}},
+        ]}).to_string();
+        let first = manager.execute_multi_step(&response).await;
+        assert_eq!(first.results.len(), 3);
+        assert_eq!(first.results[2].result, Some(json!("copy:source")));
+        assert_eq!(total.load(std::sync::atomic::Ordering::SeqCst), 2);
+        let second = manager.execute_multi_step(&response).await;
+        assert_ne!(first.results[0].tool_call_id, second.results[0].tool_call_id);
+    }
+
+    #[tokio::test]
+    async fn feedback_keeps_earlier_receipts_across_rounds() {
+        let (manager, _, _) = probe_manager();
+        let mut round = 0;
+        let (_, _, results, _) = manager.run_feedback_loop(
+            r#"{"tool":"receipt_read","arguments":{"value":"EARLY_EVIDENCE"}}"#,
+            |prompt| {
+                round += 1;
+                assert!(prompt.contains("EARLY_EVIDENCE"));
+                assert!(prompt.contains("call_id") && prompt.contains("requires_confirmation"));
+                let response = if round == 1 {
+                    r#"{"tool":"receipt_write","arguments":{"value":"LATER_EVIDENCE"}}"#.to_string()
+                } else {
+                    assert!(prompt.contains("LATER_EVIDENCE"));
+                    "finished".to_string()
+                };
+                std::future::ready(Some(response))
+            },
+        ).await;
+        assert_eq!(round, 2);
+        assert_eq!(results.len(), 2);
+    }
+
+    #[tokio::test]
     async fn missing_or_failed_dependency_never_invokes_next_tool() {
         for text_protocol in [false,true] {
             let (manager,_,total) = probe_manager();
@@ -1954,7 +2048,7 @@ mod tests {
             goal_completed: false,
         }];
         inject_placeholders(&mut args, &history, &None);
-        assert_eq!(args["q"], "42");
+        assert_eq!(args["q"], serde_json::json!(42));
     }
 
     #[test]

@@ -99,10 +99,11 @@ const MEMORY_RESET_PATHS: &[&str] = &[
     "diary/diaries.json", "persona/evolution.json", "persona/dynamic_profile.json",
     "persona/persona_events.jsonl", "companion-v2/memory", "companion-v2/history",
     "companion-v2/mind", "companion-v2/proactive", "companion-v2/psychology.json",
-    "companion-v2/user_facts.json", "companion-v2/research",
+    "companion-v2/user_facts.json", "companion-v2/user_model.json", "user_model.json", "companion-v2/research",
 ];
 const SHARED_MEMORY_RESET_PATHS: &[&str] = &[
     "memory", "history", "psychology", "mind", "proactive", "user_facts.json",
+    "user_model.json", "companion-v2/user_model.json",
     "common/memory", "common/diary/diaries.json", "diary/diaries.json",
     "companion-v2/memory", "companion-v2/common/memory", "companion-v2/psychology", "shared/memory",
     "persona/evolution.json", "persona/dynamic_profile.json", "persona/persona_events.jsonl",
@@ -252,6 +253,11 @@ mod reset_tests {
             std::fs::write(path, "preserve exactly").unwrap();
         }
         std::fs::write(root.join("token_usage.json"), "42").unwrap();
+        for name in ["characters/nana/companion-v2/user_model.json", "characters/vivian/user_model.json", "companion-v2/user_model.json"] {
+            let path = root.join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "old user knowledge").unwrap();
+        }
 
         sweep_factory_reset_dir(root).unwrap();
         assert!(root.join("characters").exists());
@@ -259,6 +265,9 @@ mod reset_tests {
         sweep_factory_reset_dir(root).unwrap();
         assert!(!root.join("characters/nana/memory").exists());
         assert!(!root.join(FACTORY_RESET_MARKER).exists());
+        for name in ["characters/nana/companion-v2/user_model.json", "characters/vivian/user_model.json", "companion-v2/user_model.json"] {
+            assert!(!root.join(name).exists());
+        }
         assert_eq!(std::fs::read_to_string(root.join("config.yaml")).unwrap(), "settings");
         for name in ["characters/nana/sound/config.json", "characters/nana/sound/voice.yaml",
             "characters/nana/persona/persona.json", "characters/nana/diary/config.json",

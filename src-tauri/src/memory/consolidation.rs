@@ -131,16 +131,22 @@ impl MemoryConsolidator {
     /// 失败不烧满冷却：30 分钟后自动重试，凭证/网络恢复即可自愈。
     /// 连续失败达阈值的步骤熔断暂停：完全跳过，1 小时后半开重试。
     pub async fn consolidate(&self) -> bool {
+        self.consolidate_with_report().await.is_some()
+    }
+
+    // 外层 None = 冷却跳过；内层 None = 失败/暂停，无法确认完整产出。
+    async fn consolidate_with_report(&self) -> Option<Option<usize>> {
         // 半开恢复：暂停超过 1 小时的步骤解除暂停，允许本轮重试
         self.health.try_resume(PAUSE_COOLDOWN_SEC);
 
         let now = chrono::Utc::now().timestamp() as f64;
         if !self.should_run() {
-            return false;
+            return None;
         }
 
         tracing::info!("开始夜间记忆巩固...");
         let mut all_ok = true;
+        let mut stage1_summaries = None;
 
         // 跑完整巩固流水线（Stage 1/2/3：ShortTerm→MidTerm→LongTerm→Insight）
         // ConsolidationPipeline::run 会处理 ShortTerm 摘要、画像抽取、Insight 生成
@@ -150,6 +156,7 @@ impl MemoryConsolidator {
         } else {
             match self.pipeline.run(&self.memory).await {
                 Ok(report) => {
+                    stage1_summaries = Some(report.stage1_summaries);
                     tracing::info!("记忆巩固完成: {:?}", report);
                     self.health.mark_success("pipeline");
                 }
@@ -218,7 +225,7 @@ impl MemoryConsolidator {
         if !all_ok {
             tracing::info!("巩固部分失败，{:.0} 分钟后自动重试", FAILURE_RETRY_SEC / 60.0);
         }
-        true
+        Some(stage1_summaries)
     }
 
     /// 整理角色长期记忆笔记（memory.md）。
@@ -323,51 +330,21 @@ impl MemoryConsolidator {
     ///
     /// 返回值：本次恢复是否补跑了摘要（Stage 1 产出 > 0）。
     pub async fn recover(&self) -> bool {
-        tracing::info!("[MemoryConsolidator] 启动恢复检查：扫描崩溃前未巩固的短期记忆...");
-        let before_short_term = self.count_pending_short_term().await;
-        let ran = self.consolidate().await;
-        let recovered = ran && before_short_term > 0;
-        if recovered {
-            tracing::info!(
-                "[MemoryConsolidator] 恢复完成：崩溃前遗留 {} 条短期记忆已进入巩固流水线",
-                before_short_term
-            );
+        tracing::info!("[MemoryConsolidator] 启动检查：补跑满足条件的会话摘要");
+        match self.consolidate_with_report().await {
+            Some(Some(summaries)) => {
+                tracing::info!("[MemoryConsolidator] 启动检查完成：实际生成 {} 份会话摘要", summaries);
+                summaries > 0
+            }
+            Some(None) => {
+                tracing::warn!("[MemoryConsolidator] 启动检查未完成：没有完整产出报告，保留记忆等待重试");
+                false
+            }
+            None => {
+                tracing::debug!("[MemoryConsolidator] 启动检查因冷却跳过，未确认新增摘要");
+                false
+            }
         }
-        recovered
-    }
-
-    /// 统计待摘要的 ShortTerm 记忆条数（与 Stage 1 相同的筛选口径，只读不写）
-    async fn count_pending_short_term(&self) -> usize {        let Ok(all) = self.memory.get_all_memories().await else {
-            return 0;
-        };
-        all.iter()
-            .filter(|m| {
-                let is_short_term = m.tags.iter().any(|t| t == "short_term")
-                    || m.metadata
-                        .get("memory_type")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s == "short_term")
-                        .unwrap_or(false);
-                let is_inner = m.tags.iter().any(|t| t == "inner_monologue")
-                    || m.metadata
-                        .get("memory_type")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s == "inner_monologue")
-                        .unwrap_or(false);
-                let is_observation = m.tags.iter().any(|t| t == "observation_note")
-                    || m.metadata
-                        .get("memory_type")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s == "observation_note")
-                        .unwrap_or(false)
-                    || m.metadata
-                        .get("perspective")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s == "observer")
-                        .unwrap_or(false);
-                is_short_term && !is_inner && !is_observation
-            })
-            .count()
     }
 
     /// 健康快照（每步的成败/连续失败计数，供 UI / 诊断接口读取）

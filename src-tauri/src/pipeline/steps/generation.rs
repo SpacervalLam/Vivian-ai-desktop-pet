@@ -1201,6 +1201,7 @@ impl Runnable for AIResponseGenerationRunnable {
 
                     if !all_results.is_empty() {
                         state.tool_call_executed = true;
+                        state.metadata["verified_tool_receipts"] = json!(&all_results);
                         state.metadata["tool_call_count"] = json!(all_results.len());
                         state.metadata["tool_call_iterations"] = json!(iterations);
                         state.metadata["native_function_calling"] = json!(true);
@@ -1375,6 +1376,7 @@ impl Runnable for AIResponseGenerationRunnable {
 
                     if !all_results.is_empty() {
                         state.tool_call_executed = true;
+                        state.metadata["verified_tool_receipts"] = json!(&all_results);
                         state.metadata["tool_call_count"] = json!(all_results.len());
                         state.metadata["tool_call_iterations"] = json!(iterations);
                         state.metadata["tool_executed_at"] = json!(first_tool_ts.unwrap_or_else(crate::memory::types::current_timestamp));

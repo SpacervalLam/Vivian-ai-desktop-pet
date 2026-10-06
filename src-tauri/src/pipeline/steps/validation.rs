@@ -4,8 +4,8 @@
 //! - 空文本检测：should_respond=true 但 text 为空时记录 warning
 //! - 长度上限截断：超过 MAX_RESPONSE_CHARS 时在句边界截断
 //! - 基础清理：去除首尾空白、折叠连续空行
-//! - 轻量幻觉检测（可选）：注入 router 后，当记忆上下文非空且回复较长时，
-//!   用小模型检查回复是否包含与记忆矛盾的陈述。仅记录 warning，不修改回复。
+//! - 事实核对（可选）：注入 router 后，对非空主对话回复执行，
+//!   逐条核对当前用户、工具回执和历史证据；记录矛盾/未知，不将未知视为通过。
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -20,14 +20,15 @@ use crate::providers::base::LLMRequest;
 use crate::providers::ModelRouter;
 use crate::types::response::ChatMessage;
 
+fn evidence_json(evidence: &super::faithfulness::Evidence) -> String {
+    serde_json::to_string(evidence).expect("evidence only contains JSON serializable strings")
+}
+
 /// 回复文本最大字符数（超过后在句边界截断）
 const MAX_RESPONSE_CHARS: usize = 500;
 
 /// 截断时保留的最小字符数（避免截断到只剩几个字）
 const MIN_KEEP_CHARS: usize = 50;
-
-/// 幻觉检测触发的最小回复长度（字符数）
-const HALLUCINATION_CHECK_MIN_LEN: usize = 30;
 
 /// 幻觉检测超时时间
 const HALLUCINATION_CHECK_TIMEOUT: Duration = Duration::from_secs(8);
@@ -113,83 +114,27 @@ impl ValidationRunnable {
         result.trim().to_string()
     }
 
-    /// 轻量幻觉检测：用小模型检查回复是否包含与记忆矛盾的陈述。
-    ///
-    /// 返回 `Ok(Some(issue))` 表示检测到潜在幻觉，`Ok(None)` 表示通过。
-    /// 超时或 LLM 失败时返回 `Err`，调用方降级为跳过。
-    async fn check_faithfulness(
-        router: &ModelRouter,
-        memory_text: &str,
-        reply_text: &str,
-        dialogue_history: &str,
-    ) -> Result<Option<String>, String> {
-        let judgment = router.judge_noul_batch(
-            json!({
-                "memory": memory_text,
-                "recent_dialogue": dialogue_history,
-                "assistant_reply": reply_text,
-            }),
-            &[("unsupported", "Does the assistant reply clearly contradict the memory or invent a factual claim absent from the supplied context?",
-                "A clear contradiction or invented factual claim exists",
-                "The reply is consistent with the supplied context, or uncertainty remains")],
-            "",
-        );
-        if let Ok(Some(answers)) = tokio::time::timeout(HALLUCINATION_CHECK_TIMEOUT, judgment).await {
-            return Ok((answers.get("unsupported").copied().unwrap_or(0.0) >= 0.80)
-                .then(|| "ISSUE: reply contains a likely unsupported or contradictory factual claim".to_string()));
-        }
-        let lang_norm =
-            crate::pipeline::prompt_modules::normalize_lang(&crate::i18n::get_language());
-        let (system, user) = match lang_norm {
-            "en" => (
-                "You are a hallucination detector. Check if the AI reply contains claims that contradict or fabricate information not supported by the memories or recent conversation. Output 'OK' if no issue, or 'ISSUE: <brief description>' if a potential hallucination is found. Be conservative — only flag clear contradictions or fabrications. Characters mentioned in the conversation history are real, not fabricated.",
-                format!(
-                    "Recent conversation:\n{}\n\nMemories:\n{}\n\nAI reply:\n{}\n\nCheck for hallucinations:",
-                    dialogue_history,
-                    memory_text,
-                    reply_text
-                ),
-            ),
-            "ja" => (
-                "あなたは幻覚検出器です。AIの返信に記憶と矛盾する、または記憶や最近の会話で裏付けられない虚構の情報が含まれているか確認してください。問題なければ 'OK'、問題があれば 'ISSUE: <簡潔な説明>' と出力してください。明らかな矛盾や虚構のみをフラグしてください。会話履歴に登場するキャラクターは実在します。",
-                format!(
-                    "最近の会話：\n{}\n\n記憶：\n{}\n\nAIの返信：\n{}\n\n幻覚チェック：",
-                    dialogue_history,
-                    memory_text,
-                    reply_text
-                ),
-            ),
-            _ => (
-                "你是幻觉检测器。检查 AI 回复中是否包含与记忆或最近对话矛盾、或编造了记忆和对话中不存在的信息。如果没有问题输出 'OK'，如果发现潜在幻觉输出 'ISSUE: <简要描述>'。保守判断——只标记明确的矛盾或编造。会话历史中出现过的角色是真实存在的，不算编造。",
-                format!(
-                    "最近对话：\n{}\n\n记忆：\n{}\n\nAI 回复：\n{}\n\n幻觉检查：",
-                    dialogue_history,
-                    memory_text,
-                    reply_text
-                ),
-            ),
-        };
-        let messages = vec![
-            ChatMessage::system(system),
-            ChatMessage::user(&user),
-        ];
-        let fut = router.generate(LLMRequest::new("memory", messages));
-        match tokio::time::timeout(HALLUCINATION_CHECK_TIMEOUT, fut).await {
-            Ok(Ok(resp)) => {
-                let resp_lower = resp.trim().to_lowercase();
-                if resp_lower.starts_with("ok") {
-                    Ok(None)
-                } else if resp_lower.starts_with("issue") {
-                    Ok(Some(resp.trim().to_string()))
-                } else {
-                    // 无法解析，视为通过
-                    Ok(None)
-                }
-            }
-            Ok(Err(e)) => Err(format!("LLM 调用失败: {}", e)),
-            Err(_) => Err("超时".to_string()),
-        }
+    /// 单次有截止时间的事实核对；失败和证据不足都不能当成通过。
+    async fn check_faithfulness(router: &ModelRouter, state: &PipelineState) -> Result<Value, String> {
+        use super::faithfulness::{Evidence, CHECK_PROMPT, schema, assess};
+        use crate::providers::reasoning::{ReasoningPreference, ReasoningMode, ReasoningEffort};
+        let evidence = Evidence::from_state(state);
+        let request = LLMRequest::new("memory", vec![
+            ChatMessage::system(CHECK_PROMPT),
+            ChatMessage::user(evidence_json(&evidence)),
+        ])
+            .with_json_schema(schema())
+            .with_max_tokens(1800)
+            .with_temperature(0.0)
+            .with_reasoning_pref(ReasoningPreference { mode: ReasoningMode::Off,
+                effort: Some(ReasoningEffort::Minimal), budget_tokens: None })
+            .without_framework_instructions();
+        let raw = tokio::time::timeout(HALLUCINATION_CHECK_TIMEOUT, router.generate(request)).await
+            .map_err(|_| "事实核对超时，未得出结论".to_string())?
+            .map_err(|e| format!("事实核对调用失败: {e}"))?;
+        assess(&raw, &evidence)
     }
+
 }
 
 #[async_trait]
@@ -206,6 +151,10 @@ impl Runnable for ValidationRunnable {
             return Ok(state.to_json());
         }
 
+        state.text = crate::utils::protocol_text::strip_protocol_text(&state.text);
+        if let Some(response) = state.ai_response.as_mut() {
+            response.text = crate::utils::protocol_text::strip_protocol_text(&response.text);
+        }
         // 1. 空文本检测
         if state.text.trim().is_empty() && state.sticker.is_none() {
             tracing::warn!(
@@ -236,60 +185,29 @@ impl Runnable for ValidationRunnable {
             state.text = truncated;
         }
 
-        // 4. 轻量幻觉检测（可选）
-        // 仅当注入了 router、记忆上下文非空且回复足够长时触发。
-        // 用小模型检查回复是否包含与记忆矛盾的陈述，仅记录 warning，不修改回复。
-        // 跨角色对话跳过幻觉检测：闲聊场景风险低，且检测耗时（最高 8s）会挤占
-        // talk_to_character 工具的超时预算，导致源角色误判目标角色"没回复"。
-        if let Some(router) = &self.router {
-            let is_cross_character = state.current_channel == "cross_character";
-            let mem_text = state.memory_text.trim();
-            let reply_text = state.text.trim();
-            if !is_cross_character
-                && !mem_text.is_empty()
-                && reply_text.chars().count() >= HALLUCINATION_CHECK_MIN_LEN
-            {
-                // 从 state.messages 提取最近对话历史，让幻觉检测能感知上下文。
-                // 避免把"会话中出现过的角色"误判为"编造的角色"。
-                let dialogue_history: String = state
-                    .messages
-                    .iter()
-                    .rev()
-                    .take(8)
-                    .collect::<Vec<_>>()
-                    .into_iter()
-                    .rev()
-                    .map(|m| {
-                        let role = match m.role.as_str() {
-                            "user" => "User",
-                            "assistant" => "AI",
-                            other => other,
-                        };
-                        format!("{}: {}", role, m.content)
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                match Self::check_faithfulness(router, mem_text, reply_text, &dialogue_history).await {
-                    Ok(Some(issue)) => {
-                        tracing::warn!(
-                            "[Validation] 幻觉检测发现问题: {}",
-                            issue
-                        );
-                        state.metadata["hallucination_check"] = json!({
-                            "status": "flagged",
-                            "issue": issue,
-                        });
+        // 保证核对的是最终返回的正文；格式清理不能只更新 PipelineState.text。
+        if let Some(response) = state.ai_response.as_mut() { response.text = state.text.clone(); }
+
+        // 所有非空主对话回复均可核对，包括短回复、无记忆但有工具回执的回复。
+        // 跨角色工具路径预算有限，显式记录未核对，而不是给出“通过”。
+        state.metadata["hallucination_check"] = if state.current_channel == "cross_character" {
+            json!({"status":"skipped", "reason":"cross_character_latency_budget"})
+        } else if let Some(router) = &self.router {
+            match Self::check_faithfulness(router, &state).await {
+                Ok(report) => {
+                    if report["status"] == "flagged" {
+                        tracing::warn!("[Validation] 模型报告潜在证据矛盾: {}", report);
+                    } else if report["status"] == "uncertain" {
+                        tracing::debug!("[Validation] 部分事实暂无法验证: {}", report);
                     }
-                    Ok(None) => {
-                        state.metadata["hallucination_check"] = json!({"status": "ok"});
-                    }
-                    Err(e) => {
-                        tracing::debug!("[Validation] 幻觉检测跳过: {}", e);
-                        state.metadata["hallucination_check"] = json!({"status": "skipped"});
-                    }
+                    report
+                }
+                Err(error) => {
+                    tracing::debug!("[Validation] 事实核对未完成: {}", error);
+                    json!({"status":"unknown", "reason":error})
                 }
             }
-        }
+        } else { json!({"status":"skipped", "reason":"router_not_configured"}) };
 
         Ok(state.to_json())
     }
@@ -298,6 +216,55 @@ impl Runnable for ValidationRunnable {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn short_reply_without_memory_uses_current_tool_evidence_and_invalid_report_is_unknown() {
+        use axum::{Router, Json, extract::State, routing::post};
+        type Captured = Arc<parking_lot::Mutex<Vec<Value>>>;
+        async fn handle(State(captured): State<Captured>, Json(body): Json<Value>) -> Json<Value> {
+            let index = { let mut requests = captured.lock(); let index = requests.len(); requests.push(body); index };
+            let content = if index == 0 {
+                json!({"non_factual":false,"claims":[{"claim":"换好了","verdict":"contradicted",
+                    "citations":[{"source_id":"current_tool:0","quote":"\"success\":false"}],"reason":"工具实际拒绝执行"}]}).to_string()
+            } else { "OK".to_string() };
+            Json(json!({"id":"audit-test","object":"chat.completion","choices":[{"index":0,
+                "message":{"role":"assistant","content":content},"finish_reason":"stop"}],
+                "usage":{"prompt_tokens":1,"completion_tokens":1}}))
+        }
+        let captured: Captured = Arc::new(parking_lot::Mutex::new(vec![]));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut config = crate::config::manager::AppConfig::default();
+        config.enable_routing_matrix = false;
+        config.ai.provider = "chat_completions".into();
+        config.ai.endpoint = Some(format!("http://{}/v1", listener.local_addr().unwrap()));
+        config.ai.api_key = Some("local-test-key".into());
+        config.ai.model = format!("test-faithfulness-{}", uuid::Uuid::new_v4());
+        config.network.proxy_mode = "direct".into();
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+        let app = Router::new().route("/v1/chat/completions", post(handle)).with_state(captured.clone());
+        let server = tokio::spawn(async move { axum::serve(listener, app).with_graceful_shutdown(async { let _ = stop_rx.await; }).await.unwrap(); });
+        let runnable = ValidationRunnable::with_router(Arc::new(ModelRouter::new(&config).unwrap()));
+        let mut state = PipelineState::default();
+        state.user_input = "帮我设置无尽の梦，我今年29岁。".into();
+        state.text = "换好了。".into();
+        state.ai_response = Some(crate::types::response::AiResponse::new(state.text.clone()));
+        state.metadata["verified_tool_receipts"] = json!([{"tool_name":"wallpaper_set","success":false,"result":null,"error":"拒绝执行"}]);
+        let result = tokio::time::timeout(Duration::from_secs(15), runnable.ainvoke(state.to_json(), None)).await.unwrap().unwrap();
+        let result = PipelineState::from_json(result);
+        assert_eq!(result.metadata["hallucination_check"]["status"], "flagged");
+        state.text = "你好呀。".into();
+        let result = runnable.ainvoke(state.to_json(), None).await.unwrap();
+        let result = PipelineState::from_json(result);
+        assert_eq!(result.metadata["hallucination_check"]["status"], "unknown");
+        assert_eq!(result.ai_response.unwrap().text, "你好呀。");
+        let _ = stop_tx.send(()); server.await.unwrap();
+        let requests = captured.lock();
+        assert_eq!(requests.len(), 2, "单次核对不得叠加 NOUL 与 fallback 超时");
+        let messages = requests[0]["messages"].to_string();
+        assert!(messages.contains("我今年29岁"));
+        assert!(messages.contains("current_tool:0"));
+        assert!(!messages.contains("PERSONA_LOAD"));
+    }
 
     #[test]
     fn truncate_short_text_unchanged() {

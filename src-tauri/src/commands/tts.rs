@@ -262,7 +262,7 @@ pub async fn speak_text(
     };
 
     // 过滤括号动作描述，避免 TTS 朗读动作文本
-    let tts_text = strip_action_text(&tts_text);
+    let tts_text = strip_action_text(&crate::utils::protocol_text::strip_protocol_text(&tts_text));
     if tts_text.trim().is_empty() {
         tracing::info!("[TTS] 过滤后文本为空，跳过朗读");
         return Ok(());
@@ -416,6 +416,8 @@ pub async fn prefetch_tts(
         return Ok(());
     }
 
+    let text = crate::utils::protocol_text::strip_protocol_text(&text);
+    if text.trim().is_empty() { return Ok(()); }
     tts.prefetch(&text, emotion.as_deref())
         .await
         .map_err(|e| e.to_string())

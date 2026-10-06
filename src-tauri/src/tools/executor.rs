@@ -159,6 +159,9 @@ fn enforce_result_budget(tool_name: &str, data: Value, max_chars: usize) -> Valu
     if matches!(tool_name, "read_file" | "read_spilled_result") {
         if let Some(page) = compact_text_page(data.clone(), max_chars.min(2800)) { return page; }
     }
+    if tool_name == "wallpaper_list" {
+        if let Some(compact) = compact_wallpaper_evidence(data.clone(), max_chars) { return compact; }
+    }
     let preview: String = serialized.chars().take(max_chars).collect();
     // 落盘完整结果（spill）
     let spill_path = spill_result(tool_name, &serialized);
@@ -187,6 +190,31 @@ fn enforce_result_budget(tool_name: &str, data: Value, max_chars: usize) -> Valu
             "Full result could not be saved; this preview is incomplete"
         },
     })
+}
+
+/// Preserve title/ID pairs as valid JSON rather than slicing a wallpaper record.
+pub(crate) fn compact_wallpaper_evidence(mut data: Value, max_chars: usize) -> Option<Value> {
+    let page = data.get_mut("data")?.as_object_mut()?;
+    let items = page.get_mut("wallpapers")?.as_array_mut()?;
+    for item in items.iter_mut() {
+        if let Some(record) = item.as_object_mut() { record.remove("folder_path"); }
+    }
+    while data.to_string().chars().count() > max_chars {
+        let page = data.get_mut("data")?.as_object_mut()?;
+        let items = page.get_mut("wallpapers")?.as_array_mut()?;
+        if items.len() <= 1 { break; } // a complete identity is preferable to an invalid preview
+        items.pop();
+    }
+    let page = data.get_mut("data")?.as_object_mut()?;
+    let returned = page.get("wallpapers")?.as_array()?.len();
+    let offset = page.get("offset").and_then(Value::as_u64).unwrap_or(0);
+    let total = page.get("filtered_count").and_then(Value::as_u64).unwrap_or(returned as u64);
+    page.insert("returned".into(), serde_json::json!(returned));
+    page.insert("next_offset".into(), if offset + (returned as u64) < total {
+        serde_json::json!(offset + returned as u64)
+    } else { Value::Null });
+    page.insert("truncated".into(), Value::Bool(offset + (returned as u64) < total));
+    Some(data)
 }
 
 /// Keep page cursors as JSON even when escaped text exceeds the soft budget.
@@ -958,6 +986,25 @@ pub async fn execute_tool_calls_parallel(
 mod paged_budget_tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn wallpaper_budget_preserves_identity_and_page_cursor() {
+        let records: Vec<_> = (0..50).map(|i| serde_json::json!({
+            "workshop_id": format!("{i}"), "title": format!("壁纸{i}"), "tags": ["Anime"],
+            "folder_path": "long path".repeat(100)
+        })).collect();
+        let raw = serde_json::json!({"success": true, "data": {
+            "wallpapers": records, "filtered_count": 176, "returned": 50, "offset": 0
+        }});
+        let compact = enforce_result_budget("wallpaper_list", raw, 1200);
+        let items = compact["data"]["wallpapers"].as_array().unwrap();
+        assert!(!items.is_empty());
+        assert!(items.len() < 50);
+        assert_eq!(items[0]["workshop_id"], "0");
+        assert_eq!(items[0]["title"], "壁纸0");
+        assert_eq!(compact["data"]["next_offset"], items.len());
+        assert!(compact.get("preview").is_none());
+    }
 
     #[test]
     fn escaped_page_keeps_valid_json_and_correct_continuation() {

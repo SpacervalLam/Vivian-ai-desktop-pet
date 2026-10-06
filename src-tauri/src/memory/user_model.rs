@@ -577,6 +577,13 @@ impl UserModelManager {
         self.inner.read().format_for_prompt(lang)
     }
 
+    /// 同步锁也有期限：不能依赖 async timeout 中断阻塞的线程。
+    pub fn try_format_for_prompt(&self, lang: &str) -> crate::error::VivianResult<Option<String>> {
+        let model = self.inner.try_read_for(std::time::Duration::from_millis(250))
+            .ok_or_else(|| crate::error::VivianError::Timeout("读取用户认知模型超时，请稍后重试".into()))?;
+        Ok(model.format_for_prompt(lang))
+    }
+
     // ── 强证据在线更新 ──
 
     /// 添加强证据并更新 Trait
@@ -640,6 +647,7 @@ impl UserModelManager {
         }
 
         model.updated_at = now;
+        drop(model);
         self.save_inner();
     }
 
@@ -664,6 +672,7 @@ impl UserModelManager {
                 trait_.lifecycle = TraitLifecycle::Contradicted;
             }
             model.updated_at = now;
+            drop(model);
             self.save_inner();
         }
     }
@@ -740,6 +749,7 @@ impl UserModelManager {
         }
 
         model.updated_at = now;
+        drop(model);
         self.save_inner();
     }
 
@@ -830,6 +840,7 @@ impl UserModelManager {
         }
 
         model.updated_at = now;
+        drop(model);
         self.save_inner();
     }
 
@@ -841,6 +852,7 @@ impl UserModelManager {
                 project.related_memory_ids.push(memory_id.to_string());
             }
         }
+        drop(model);
         self.save_inner();
     }
 
@@ -876,6 +888,7 @@ impl UserModelManager {
         }
 
         model.updated_at = now;
+        drop(model);
         self.save_inner();
     }
 
@@ -951,6 +964,7 @@ impl UserModelManager {
         }
 
         model.updated_at = now;
+        drop(model);
         self.save_inner();
     }
 
@@ -969,8 +983,8 @@ impl UserModelManager {
     }
 
     fn save_inner(&self) {
-        let model = self.inner.read();
-        if let Ok(data) = serde_json::to_string_pretty(&*model) {
+        let serialized = { serde_json::to_string_pretty(&*self.inner.read()) };
+        if let Ok(data) = serialized {
             if let Some(parent) = self.store_path.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
@@ -1220,8 +1234,55 @@ fn classify_preference(captured: &str) -> Option<(String, String)> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn blocked_model_read_returns_timeout_and_recovers_after_release() {
+        let manager = std::sync::Arc::new(UserModelManager {
+            inner: RwLock::new(UserModel::empty()),
+            store_path: std::path::PathBuf::new(), char_id: "test".into(),
+        });
+        let write = manager.inner.write();
+        let reader = manager.clone();
+        let (send, receive) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || send.send(reader.try_format_for_prompt("zh")).unwrap());
+        let result = receive.recv_timeout(std::time::Duration::from_secs(2)).expect("sync read must have a deadline");
+        assert!(matches!(result, Err(crate::error::VivianError::Timeout(_))));
+        drop(write);
+        thread.join().unwrap();
+        assert!(manager.try_format_for_prompt("zh").is_ok());
+    }
+
     use super::*;
     use crate::memory::types::current_timestamp;
+
+    #[test]
+    fn mutations_release_write_lock_before_persistence() {
+        let root = std::env::temp_dir().join(format!("vivian-user-model-{}", uuid::Uuid::new_v4()));
+        let worker_root = root.clone();
+        let (send, receive) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let manager = UserModelManager {
+                inner: RwLock::new(UserModel::empty()),
+                store_path: worker_root.join("user_model.json"), char_id: "test".into(),
+            };
+            manager.apply_strong_evidence(UserTraitCategory::Value, "test", "v", "", "m1", 0.9);
+            manager.apply_contradicting_evidence("test", "m2", 0.5);
+            let weak = detect_weak_evidence("其实是之前用的一个live2d模型改的，因为感觉live2d不太好用");
+            assert!(!weak.is_empty());
+            for evidence in weak {
+                manager.add_candidate_evidence(evidence.category, &evidence.key, &evidence.value, "m3", evidence.strength);
+            }
+            manager.upsert_project("project", "description", vec!["rust".into()], "start", ProjectStatus::Active);
+            manager.relate_memory_to_project("project", "m4");
+            manager.upsert_goal("goal", GoalStatus::Current, 0.8, "m5");
+            manager.maintain();
+            assert!(manager.format_for_prompt("zh").is_some());
+            assert!(manager.store_path.exists());
+            send.send(()).unwrap();
+        });
+        receive.recv_timeout(std::time::Duration::from_secs(5)).expect("user model mutation deadlocked");
+        worker.join().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn test_detect_strong_preference_like() {

@@ -1,3 +1,4 @@
+pub mod protocol_text;
 pub mod autostart;
 pub mod cancel_token;
 pub mod environment;
@@ -189,6 +190,8 @@ pub fn filter_parentheses_sync(text: &str) -> String {
 /// 标题前缀、引用前缀、无序/有序列表前缀、分隔线、HTML 标签。
 /// 保留换行与自然空格（不压缩为单行），适合显示与持久化。
 pub fn strip_markdown_syntax(text: &str) -> String {
+    let clean_protocol = protocol_text::strip_protocol_text(text);
+    let text = clean_protocol.as_str();
     use once_cell::sync::Lazy;
     use regex::Regex;
 

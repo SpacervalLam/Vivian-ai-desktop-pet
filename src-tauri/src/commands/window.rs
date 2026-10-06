@@ -30,73 +30,128 @@ fn err_str(e: impl std::fmt::Display) -> String {
 // 调用（阻塞等待，~100-300ms，被 220ms 滑入动画与用户反应时间掩盖）。
 // 代计数器防止快速 hide→show 时迟到的 TrySuspend 冻结已重新显示的窗口。
 
-/// 冻结请求代号：resume 使未执行的 suspend 请求失效
-static WEBVIEW_FREEZE_GEN: AtomicU32 = AtomicU32::new(0);
+/// 每个窗口独立的代号和失败退避，避免一个窗口解冻取消另一个窗口的冻结。
+#[derive(Default)]
+struct WebviewFreezeState {
+    generation: AtomicU32,
+    desired_frozen: AtomicBool,
+    retry_after: Mutex<Option<Instant>>,
+}
+static WEBVIEW_FREEZE_STATES: Lazy<Mutex<std::collections::HashMap<String, Arc<WebviewFreezeState>>>> =
+    Lazy::new(|| Mutex::new(std::collections::HashMap::new()));
 
-/// 冻结窗口 WebView（窗口隐藏后调用）。非 Windows 平台为空操作。
-/// with_webview 与窗口操作同走主线程 FIFO 队列，后续 thaw_webview 天然排在本次冻结之后。
+fn webview_freeze_state(label: &str) -> Arc<WebviewFreezeState> {
+    WEBVIEW_FREEZE_STATES.lock().entry(label.to_string()).or_default().clone()
+}
+
 pub(crate) fn freeze_webview(win: &WebviewWindow) {
     #[cfg(windows)]
     {
-        let gen = WEBVIEW_FREEZE_GEN.fetch_add(1, Ordering::SeqCst);
+        let state = webview_freeze_state(win.label());
+        state.desired_frozen.store(true, Ordering::SeqCst);
+        let generation = state.generation.fetch_add(1, Ordering::SeqCst).wrapping_add(1);
+        if state.retry_after.lock().is_some_and(|deadline| Instant::now() < deadline) { return; }
+        let label = win.label().to_string();
         let _ = win.with_webview(move |wv| unsafe {
-            // 迟到的冻结请求被后续 thaw 取代：跳过
-            if WEBVIEW_FREEZE_GEN.load(Ordering::SeqCst) != gen + 1 {
-                return;
-            }
-            // 注意：这里不查 is_visible()——hide 走主线程 FIFO 队列，此时 hide 尚未生效，
-            // is_visible 仍是旧值 true，查了会把正常冻结误判成「窗口还可见」而跳过，
-            // 导致 桌宠 后台空转。真正防「快速 hide→show 竞态」靠上面的代计数器。
-            webview_freeze_op(&wv, true);
+            if state.generation.load(Ordering::SeqCst) != generation { return; }
+            webview_freeze_op(&wv, true, state, generation, label);
         });
     }
     #[cfg(not(windows))]
     let _ = win;
 }
 
-/// 恢复窗口 WebView（窗口 show 之前调用）。非 Windows 平台为空操作。
-/// 提交的 Resume 在主线程队列中先于随后调用的 show() 执行，渲染就绪后才显示窗口。
 pub(crate) fn thaw_webview(win: &WebviewWindow) {
     #[cfg(windows)]
     {
-        // 使所有排队中的冻结请求失效
-        WEBVIEW_FREEZE_GEN.fetch_add(1, Ordering::SeqCst);
-        let _ = win.with_webview(|wv| unsafe {
-            webview_freeze_op(&wv, false);
+        let state = webview_freeze_state(win.label());
+        state.desired_frozen.store(false, Ordering::SeqCst);
+        let generation = state.generation.fetch_add(1, Ordering::SeqCst).wrapping_add(1);
+        let label = win.label().to_string();
+        let _ = win.with_webview(move |wv| unsafe {
+            webview_freeze_op(&wv, false, state, generation, label);
         });
     }
     #[cfg(not(windows))]
     let _ = win;
 }
 
-/// WebView2 挂起/恢复的原生操作（仅 Windows）
+fn suspend_failed(state: &WebviewFreezeState, label: &str, detail: impl std::fmt::Display) {
+    let mut retry_after = state.retry_after.lock();
+    if retry_after.is_none_or(|deadline| Instant::now() >= deadline) {
+        tracing::debug!("[webview_freezer:{label}] suspend 未成功: {detail}；60 秒后再尝试");
+    }
+    *retry_after = Some(Instant::now() + Duration::from_secs(60));
+}
+
 #[cfg(windows)]
 unsafe fn webview_freeze_op(
     wv: &tauri::webview::PlatformWebview,
     freeze: bool,
+    state: Arc<WebviewFreezeState>,
+    generation: u32,
+    label: String,
 ) {
     use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2_3;
     use webview2_com::TrySuspendCompletedHandler;
     use windows_core::Interface;
 
     let controller = wv.controller();
-    let Ok(core) = controller.CoreWebView2() else {
-        return;
-    };
+    let Ok(core) = controller.CoreWebView2() else { return; };
     let Ok(wv3) = core.cast::<ICoreWebView2_3>() else {
-        tracing::debug!("[webview_freezer] ICoreWebView2_3 不支持，跳过");
+        if freeze { suspend_failed(&state, &label, "ICoreWebView2_3 不支持"); }
         return;
     };
-    // TrySuspend 完成回调忽略结果（失败仅意味着内存照旧，无功能影响）
-    let result = if freeze {
-        wv3.TrySuspend(&TrySuspendCompletedHandler::create(Box::new(
-            |_error, _success| Ok(()),
-        )))
-    } else {
-        wv3.Resume()
-    };
-    if let Err(e) = result {
-        tracing::debug!("[webview_freezer] {:?} 失败: {e}", if freeze { "suspend" } else { "resume" });
+    if !freeze {
+        if let Err(error) = wv3.Resume() {
+            tracing::debug!("[webview_freezer:{label}] resume 失败: {error}");
+        }
+        if let Err(error) = controller.SetIsVisible(true) {
+            tracing::warn!("[webview_freezer:{label}] 恢复 WebView 可见性失败: {error}");
+        }
+        return;
+    }
+    // hide() 隐藏的是原生窗口；TrySuspend 要求 WebView2 控制器自身也不可见。
+    // https://learn.microsoft.com/en-us/dotnet/api/microsoft.web.webview2.core.corewebview2.trysuspendasync
+    if let Err(error) = controller.SetIsVisible(false) {
+        suspend_failed(&state, &label, error);
+        return;
+    }
+    let callback_state = state.clone();
+    let callback_label = label.clone();
+    let callback_webview = wv3.clone();
+    let result = wv3.TrySuspend(&TrySuspendCompletedHandler::create(Box::new(move |error, success| {
+        let current = callback_state.generation.load(Ordering::SeqCst) == generation;
+        if error.is_err() || !success {
+            if current {
+                suspend_failed(&callback_state, &callback_label, format!("HRESULT={error:?}, success={success}"));
+            }
+        } else if !callback_state.desired_frozen.load(Ordering::SeqCst) {
+            // 已请求显示时撤销迟到挂起；新的 hide 请求仍期望冻结时不要误解冻。
+            let _ = callback_webview.Resume();
+        } else if current {
+            *callback_state.retry_after.lock() = None;
+        }
+        Ok(())
+    })));
+    if let Err(error) = result { suspend_failed(&state, &label, error); }
+}
+
+#[cfg(test)]
+mod freeze_state_tests {
+    #[test]
+    fn resume_invalidates_only_its_own_window() {
+        use super::*;
+        let a = webview_freeze_state("test_chat");
+        let b = webview_freeze_state("test_banner");
+        let request = a.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        b.generation.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(a.generation.load(Ordering::SeqCst), request);
+        a.generation.fetch_add(1, Ordering::SeqCst);
+        assert_ne!(a.generation.load(Ordering::SeqCst), request);
+        suspend_failed(&a, "test_chat", "test failure");
+        assert!(a.retry_after.lock().is_some_and(|deadline| deadline > Instant::now()));
+        assert!(b.retry_after.lock().is_none());
     }
 }
 

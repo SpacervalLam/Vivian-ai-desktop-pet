@@ -8,3 +8,5 @@ pub mod query_rewrite;
 pub mod reflection;
 pub mod validation;
 pub mod web_context;
+
+mod faithfulness;

@@ -92,7 +92,7 @@ pub const ACTION_EDGE_BOUNCE: &str = "edge_bounce";
 /// 生成超时：桌宠反应是「随手一摸」的轻反馈，超时即静默放弃
 const REACTION_TIMEOUT_SECS: u64 = 6;
 /// 输出上限：只要一句话
-const REACTION_MAX_TOKENS: u32 = 64;
+const REACTION_MAX_TOKENS: u32 = 256;
 /// 采样温度：略高一点，让同一动作的反应不至于每次都一样
 const REACTION_TEMPERATURE: f64 = 0.85;
 /// 历史对话窗口条数（仅作极低权重语气参考）
@@ -407,22 +407,21 @@ async fn generate_reaction(
         }
     }
 
-    let request = LLMRequest::new("intent_judge", messages)
-        .with_max_tokens(REACTION_MAX_TOKENS)
-        .with_temperature(REACTION_TEMPERATURE)
-        .with_character_id(char_id)
-        .without_framework_instructions();
+    let request = build_reaction_request(messages, char_id);
 
     let outcome = tokio::time::timeout(
         Duration::from_secs(REACTION_TIMEOUT_SECS),
-        router.generate(request),
+        retry_empty_reaction(|| router.generate(request.clone())),
     )
     .await;
 
     match outcome {
         Ok(Ok(raw)) => {
             let cleaned = clean_reply(&raw);
-            let cleaned = if cleaned.eq_ignore_ascii_case("[SILENT]") { String::new() } else { cleaned };
+            if cleaned.eq_ignore_ascii_case("[SILENT]") {
+                tracing::debug!("[PetReaction] {char_id} 模型选择保持安静");
+                return None;
+            }
             if cleaned.is_empty() {
                 tracing::debug!("[PetReaction] {char_id} 模型返回空文本，静默跳过");
                 None
@@ -442,6 +441,35 @@ async fn generate_reaction(
             );
             None
         }
+    }
+}
+
+fn build_reaction_request(messages: Vec<crate::types::response::ChatMessage>, char_id: &str) -> LLMRequest {
+    use crate::providers::reasoning::{ReasoningPreference, ReasoningMode, ReasoningEffort};
+    LLMRequest::new("intent_judge", messages)
+        .with_max_tokens(REACTION_MAX_TOKENS)
+        .with_temperature(REACTION_TEMPERATURE)
+        // with_reasoning(false) 在此仓库代表 Auto，必须显式 Off。
+        // 不支持关闭的模型会折叠为 On，此时使用最小思考档位。
+        .with_reasoning_pref(ReasoningPreference {
+            mode: ReasoningMode::Off, effort: Some(ReasoningEffort::Minimal), budget_tokens: None,
+        })
+        .with_character_id(char_id)
+        .without_framework_instructions()
+}
+
+/// 只对真实空响应重试一次；调用方的总 timeout 包含两次请求。
+async fn retry_empty_reaction<F, Fut>(mut generate: F) -> crate::error::VivianResult<String>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = crate::error::VivianResult<String>>,
+{
+    let first = generate().await?;
+    if clean_reply(&first).is_empty() {
+        tracing::debug!("[PetReaction] 空响应，重试一次");
+        generate().await
+    } else {
+        Ok(first)
     }
 }
 
@@ -560,7 +588,7 @@ fn build_history_block(
 
 /// 清洗模型输出：去掉引号/换行/Markdown 痕迹，截断到合理长度。
 fn clean_reply(raw: &str) -> String {
-    let mut text = raw.trim().to_string();
+    let mut text = crate::utils::protocol_text::strip_protocol_text(raw).trim().to_string();
 
     // 只取第一行非空内容，避免模型输出多段
     if let Some(first) = text.lines().map(str::trim).find(|l| !l.is_empty()) {
@@ -575,6 +603,8 @@ fn clean_reply(raw: &str) -> String {
                 .to_string();
         }
     }
+
+    if text.eq_ignore_ascii_case("[SILENT]") { return "[SILENT]".into(); }
 
     // 整句被旁白括号包住时剥掉外层（如「（晕……）」→「晕……」）
     const WRAPPERS: [(char, char); 4] =
@@ -595,6 +625,60 @@ fn clean_reply(raw: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn reaction_request_explicitly_disables_reasoning_instead_of_inheriting_auto() {
+        let request = super::build_reaction_request(vec![], "nana");
+        assert_eq!(request.reasoning.mode, crate::providers::reasoning::ReasoningMode::Off);
+        assert_eq!(request.reasoning.effort, Some(crate::providers::reasoning::ReasoningEffort::Minimal));
+        assert_eq!(request.max_tokens_override, Some(256));
+    }
+
+    #[tokio::test]
+    async fn empty_reaction_retries_but_silence_and_errors_do_not() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = AtomicUsize::new(0);
+        let text = super::retry_empty_reaction(|| {
+            let n = calls.fetch_add(1, Ordering::SeqCst);
+            std::future::ready(Ok(if n == 0 { "" } else { "嗯？" }.to_string()))
+        }).await.unwrap();
+        assert_eq!(text, "嗯？");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        calls.store(0, Ordering::SeqCst);
+        assert_eq!(super::retry_empty_reaction(|| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            std::future::ready(Ok("[SILENT]".into()))
+        }).await.unwrap(), "[SILENT]");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        calls.store(0, Ordering::SeqCst);
+        assert!(super::retry_empty_reaction(|| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            std::future::ready(Err(crate::error::VivianError::Provider("test failure".into())))
+        }).await.is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn retry_is_covered_by_one_total_deadline() {
+        let mut calls = 0;
+        let result = tokio::time::timeout(std::time::Duration::from_millis(20), super::retry_empty_reaction(|| {
+            calls += 1;
+            let n = calls;
+            async move {
+                if n > 1 { std::future::pending::<()>().await; }
+                Ok(String::new())
+            }
+        })).await;
+        assert!(result.is_err());
+        assert_eq!(calls, 2);
+    }
+
+    #[test]
+    fn intentional_silence_and_tool_protocol_never_become_reactions() {
+        assert_eq!(super::clean_reply("[SILENT]"), "[SILENT]");
+        assert_eq!(super::clean_reply("\"[silent]\""), "[SILENT]");
+        assert!(super::clean_reply("<｜DSML｜function_calls><｜DSML｜invoke name=\"test\">x</｜DSML｜invoke></｜DSML｜function_calls>").is_empty());
+    }
+
     use super::*;
 
     #[test]

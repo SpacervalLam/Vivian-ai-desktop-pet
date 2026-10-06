@@ -699,7 +699,13 @@ impl Brain {
             think_started.elapsed().as_millis()
         );
         let result = match &self.chat_chain {
-            Some(chain) => chain.ainvoke_with_options(user_input, stream, skip_dialogue_write).await,
+            Some(chain) => match tokio::time::timeout(
+                std::time::Duration::from_secs(300),
+                chain.ainvoke_with_options(user_input, stream, skip_dialogue_write),
+            ).await {
+                Ok(result) => result,
+                Err(_) => Err(VivianError::Timeout("本轮对话处理超过 300 秒，已停止等待；已完成的工具操作不会自动重试".into())),
+            },
             None => Err(VivianError::Engine("聊天链未初始化".to_string())),
         };
         tracing::info!(

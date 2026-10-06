@@ -351,7 +351,11 @@ impl GptSoVitsServiceManager {
                     let reader = tokio::io::BufReader::new(stderr);
                     let mut lines = reader.lines();
                     while let Ok(Some(line)) = lines.next_line().await {
-                        tracing::warn!("[GPT-SoVITS:{p}] stderr: {line}");
+                        if stderr_is_warning(&line) {
+                            tracing::warn!("[GPT-SoVITS:{p}] stderr: {line}");
+                        } else {
+                            tracing::debug!("[GPT-SoVITS:{p}] {line}");
+                        }
                         let mut b = buf.lock();
                         if b.len() > 2000 {
                             b.clear();
@@ -1100,4 +1104,26 @@ pub async fn service() -> &'static Arc<GptSoVitsServiceManager> {
     SERVICE
         .get_or_init(|| async { Arc::new(GptSoVitsServiceManager::new()) })
         .await
+}
+
+// Python 日志和进度条也使用 stderr，不能仅凭输出通道判定失败。
+fn stderr_is_warning(line: &str) -> bool {
+    let text = line.trim().to_ascii_lowercase();
+    text.starts_with("warning") || text.starts_with("error")
+        || text.contains("traceback (most recent call last)")
+        || text.contains("error:") || text.contains("exception:")
+        || text.contains("warning:") || text.contains("[warning]") || text.contains("[error]")
+}
+
+#[cfg(test)]
+mod stderr_log_tests {
+    #[test]
+    fn distinguishes_python_errors_from_normal_stderr() {
+        for line in ["INFO:     Started server process [42]", "Building prefix dict...", "100%|████| 5/5"] {
+            assert!(!super::stderr_is_warning(line));
+        }
+        for line in ["RuntimeError: CUDA out of memory", "Traceback (most recent call last):", "UserWarning: slow fallback"] {
+            assert!(super::stderr_is_warning(line));
+        }
+    }
 }

@@ -101,6 +101,11 @@ pub fn truncate_tool_result_with_limit(content: &str, max_chars: usize) -> Strin
     if char_count <= max_chars {
         return content.to_string();
     }
+    if let Ok(value) = serde_json::from_str(content) {
+        if let Some(page) = crate::tools::executor::compact_wallpaper_evidence(value, max_chars) {
+            return page.to_string();
+        }
+    }
     if let Some(report) = compact_execution_receipts(content, max_chars) { return report; }
 
     let half = max_chars / 2;

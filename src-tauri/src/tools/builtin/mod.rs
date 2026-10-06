@@ -221,6 +221,19 @@ pub fn register_builtin_tools(tool_system: &Arc<ToolSystem>) {
         alias_pairs.len()
     );
 
+    // 注册 ToolSearchTool（延迟工具搜索元工具）
+    // 快照作为兜底；同时持有 ToolSystem 弱引用——自建工具（create_tool）在
+    // 运行时注册，搜索时优先查活注册表才能找到它们
+    let snapshot = Arc::new(tools.clone());
+    tool_system.register_tool(Arc::new(
+        crate::tools::tool_call_manager::ToolSearchTool::new(snapshot, Arc::downgrade(tool_system)),
+    ));
+
+    tracing::info!("已注册 {} 个内置工具（含 tool_search 元工具）", count + 1);
+}
+
+/// 在所有内置和运行时工具注册完成后检查确认名单。
+pub fn validate_confirmation_tools(tool_system: &crate::tools::ToolSystem) {
     // 确认名单自检：名单里的名字必须对应真实注册的工具，否则强制确认会静默失效
     // （不报错、无测试覆盖，表现为该问的没问）。
     let unresolved = crate::tools::permission::unresolved_confirmation_names(|name| {
@@ -235,13 +248,4 @@ pub fn register_builtin_tools(tool_system: &Arc<ToolSystem>) {
         );
     }
 
-    // 注册 ToolSearchTool（延迟工具搜索元工具）
-    // 快照作为兜底；同时持有 ToolSystem 弱引用——自建工具（create_tool）在
-    // 运行时注册，搜索时优先查活注册表才能找到它们
-    let snapshot = Arc::new(tools.clone());
-    tool_system.register_tool(Arc::new(
-        crate::tools::tool_call_manager::ToolSearchTool::new(snapshot, Arc::downgrade(tool_system)),
-    ));
-
-    tracing::info!("已注册 {} 个内置工具（含 tool_search 元工具）", count + 1);
 }

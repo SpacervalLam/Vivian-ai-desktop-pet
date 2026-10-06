@@ -938,6 +938,8 @@ impl TtsManager {
     /// 前端在播放当前句子时 fire-and-forget 调用此方法预合成下一句，
     /// 后续 speak_text 命中缓存直接播放，消除句间合成延迟。
     pub async fn prefetch(&self, text: &str, emotion: Option<&str>) -> VivianResult<()> {
+        let clean_protocol = crate::utils::protocol_text::strip_protocol_text(text);
+        let text = clean_protocol.as_str();
         if text.trim().is_empty() {
             return Ok(());
         }
@@ -981,6 +983,8 @@ impl TtsManager {
         text: &str,
         emotion: Option<&str>,
     ) -> VivianResult<(String, f64)> {
+        let clean_protocol = crate::utils::protocol_text::strip_protocol_text(text);
+        let text = clean_protocol.as_str();
         if text.trim().is_empty() {
             return Err(VivianError::Speech("文本为空，无法合成".to_string()));
         }
@@ -1201,7 +1205,8 @@ impl TtsManager {
 
         // 解析 TTS 控制标记（书中 9.7）：剥离 [EMO]/[THINKING]/[SPEED]/[PAUSE]，
         // 提取语速覆盖与思考停顿。后续全部使用剥离标记后的文本。
-        let controls = parse_tts_controls(text);
+        let clean_protocol = crate::utils::protocol_text::strip_protocol_text(text);
+        let controls = parse_tts_controls(&clean_protocol);
         let text: &str = controls.text.as_str();
         if text.trim().is_empty() {
             // 纯标记（如仅 [THINKING]）无可读文本，跳过合成

@@ -366,6 +366,7 @@ impl AppState {
                 self.tool_system.clone(),
             ),
         ));
+        crate::tools::builtin::validate_confirmation_tools(&self.tool_system);
         crate::tools::custom_tools::spawn_hot_reload(
             self.tool_system.clone(),
             std::time::Duration::from_secs(30),

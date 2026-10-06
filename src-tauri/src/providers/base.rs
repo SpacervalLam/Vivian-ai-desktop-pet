@@ -938,7 +938,7 @@ impl ProviderBase {
         let key = self.get_cache_key(prompt);
         let cache = self.request_cache.lock();
         if let Some((response, timestamp)) = cache.get(&key) {
-            if timestamp.elapsed() < CACHE_TTL {
+            if timestamp.elapsed() < CACHE_TTL && !response.trim().is_empty() {
                 return Some(response.clone());
             }
         }
@@ -946,7 +946,8 @@ impl ProviderBase {
     }
 
     pub fn cache_response(&self, prompt: &str, response: &str) {
-        if ProviderCallOptions::current().response_cache_allowed == Some(false) {
+        // 空文本不是可复用的成功结果；缓存它会让空响应重试永远无法到达提供商。
+        if response.trim().is_empty() || ProviderCallOptions::current().response_cache_allowed == Some(false) {
             return;
         }
         let key = self.get_cache_key(prompt);
@@ -1051,6 +1052,21 @@ mod sampling_penalty_tests {
             0.7,
             256,
         )
+    }
+
+    #[test]
+    fn empty_response_does_not_poison_retries_or_replace_a_valid_cache_entry() {
+        let base = test_base();
+        base.cache_response("request", "  ");
+        assert!(base.get_cached_response("request").is_none());
+        base.cache_response("request", "嗯？");
+        assert_eq!(base.get_cached_response("request").as_deref(), Some("嗯？"));
+        base.cache_response("request", "");
+        assert_eq!(base.get_cached_response("request").as_deref(), Some("嗯？"));
+        // 兼容改动前同一进程内已经存在的空缓存。
+        let key = base.get_cache_key("old request");
+        base.request_cache.lock().insert(key, (String::new(), Instant::now()));
+        assert!(base.get_cached_response("old request").is_none());
     }
 
     /// `0.0` / 非有限值必须折叠成"不发送"。

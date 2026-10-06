@@ -347,7 +347,7 @@ impl Tool for WallpaperListTool {
          Strategy for using the filter parameter:\n\
          - When the user describes using the exact word from the wallpaper title (e.g. the user says \"Hina\" and the title contains \"Hina\"), pass filter to do a backend substring match and reduce the returned volume.\n\
          - When the user uses a semantically related description (e.g. the user says \"Weathering with You\" but the wallpaper title is \"Hodaka and Hina's Sky\" or \"Tokyo Rain\"), **do not pass filter**; fetch the full list and let you (the LLM) do the semantic association match — the backend substring match cannot recognize common knowledge like \"Hodaka/Hina are characters from Weathering with You\", only you can.\n\
-         - When unsure, prefer not to pass filter (the default limit=50 is enough to cover most wallpaper libraries).\n\
+         - When unsure, prefer not to pass filter (use next_offset to fetch remaining pages before concluding no match).\n\
          \n\
          Handling multiple matches: do not return a candidate list for the user to choose; let you (the LLM) autonomously pick the most relevant one.\
          Selection priority: exact title match > title contains match > tag match > semantic association match; when relevance is equal, prefer the video type (animated wallpapers look better)."
@@ -363,7 +363,7 @@ impl Tool for WallpaperListTool {
          - 当用户描述使用了壁纸标题中的精确词（例如用户说\"Hina\"且标题包含\"Hina\"），传入 filter 做后端子串匹配以减少返回量。\n\
          - 当用户使用语义相关描述（例如用户说\"天气之子\"但壁纸标题是\"Hodaka and Hina's Sky\"或\"Tokyo Rain\"），**不要传 filter**；\
          获取完整列表让你（LLM）做语义关联匹配——后端子串匹配无法识别\"Hodaka/Hina 是天气之子角色\"这类常识，只有你能识别。\n\
-         - 不确定时优先不传 filter（默认 limit=50 已足以覆盖大多数壁纸库）。\n\
+         - 不确定时优先不传 filter（根据 next_offset 继续翻页，遍历完成前不能判定没有匹配壁纸）。\n\
          \n\
          处理多重匹配：不要返回候选列表让用户选择；让你（LLM）自主挑选最相关的一个。\
          选择优先级：标题精确匹配 > 标题包含匹配 > 标签匹配 > 语义关联匹配；当相关性相当时，优先选择 video 类型（动态壁纸视觉效果更好）。",
@@ -375,7 +375,7 @@ impl Tool for WallpaperListTool {
          - ユーザーが壁紙タイトルの正確な単語を使用した場合（例：ユーザーが\"Hina\"と言い、タイトルに\"Hina\"が含まれる）、filter を渡してバックエンドの部分一致を行い、返却量を減らす。\n\
          - ユーザーが意味的に関連する説明を使用した場合（例：ユーザーが\"天気の子\"と言うが、壁紙タイトルは\"Hodaka and Hina's Sky\"や\"Tokyo Rain\"）、**filter を渡さない**；\
          完全なリストを取得してあなた（LLM）が意味的関連マッチを行う——バックエンドの部分一致は\"Hodaka/Hina は天気の子のキャラクター\"という常識を認識できず、あなただけが認識できる。\n\
-         - 不確かな場合は filter を渡さないことを優先する（デフォルトの limit=50 でほとんどの壁紙ライブラリをカバーできる）。\n\
+         - 不確かな場合は filter を渡さないことを優先する（next_offset で残りのページを確認する）。\n\
          \n\
          複数マッチの処理：候補リストを返してユーザーに選ばせない；あなた（LLM）が自律的に最も関連するものを一つ選ぶ。\
          選択優先度：タイトル完全一致 > タイトル含有一致 > タグ一致 > 意味的関連マッチ；関連性が同等の場合、video タイプを優先する（動く壁紙の方が見栄えが良い）。",
@@ -402,6 +402,7 @@ impl Tool for WallpaperListTool {
                      Note: filter is a backend string match and cannot recognize semantic associations (e.g. \"Weathering with You\" -> \"Hodaka and Hina\").\
                      For semantic association scenarios, leave filter empty to fetch the full list and let the LLM do the matching itself."
                 },
+                "offset": {"type": "integer", "minimum": 0, "description": "Result offset; use next_offset from the previous page. Default 0."},
                 "limit": {
                     "type": "integer",
                     "description": "Maximum number of results to return, default 50. When filter is not provided, it's recommended to keep the default value.",
@@ -422,6 +423,7 @@ impl Tool for WallpaperListTool {
                          注意：filter 是后端字符串匹配，无法识别语义关联（例如\"天气之子\" -> \"Hodaka and Hina\"）。\
                          对于语义关联场景，留空 filter 以获取完整列表，让 LLM 自行匹配。"
                     },
+                    "offset": {"type": "integer", "minimum": 0, "description": "Result offset; use next_offset from the previous page. Default 0."},
                     "limit": {
                         "type": "integer",
                         "description": "返回结果的最大数量，默认 50。未提供 filter 时，建议保持默认值。",
@@ -438,6 +440,7 @@ impl Tool for WallpaperListTool {
                          注意：filter はバックエンドの文字列マッチであり、意味的関連（例：\"天気の子\" -> \"Hodaka and Hina\"）を認識できない。\
                          意味的関連シナリオでは、filter を空にして完全なリストを取得し、LLM にマッチングを行わせる。"
                     },
+                    "offset": {"type": "integer", "minimum": 0, "description": "Result offset; use next_offset from the previous page. Default 0."},
                     "limit": {
                         "type": "integer",
                         "description": "返却結果の最大数、デフォルト 50。filter が指定されていない場合、デフォルト値を維持することを推奨。",
@@ -491,8 +494,8 @@ impl Tool for WallpaperListTool {
         }
         let filtered_count = wallpapers.len();
 
-        // 截断
-        wallpapers.truncate(limit);
+        let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
+        let wallpapers: Vec<_> = wallpapers.into_iter().skip(offset).take(limit).collect();
 
         // 序列化为紧凑视图（避免 description 过长污染 LLM 上下文）
         let items: Vec<Value> = wallpapers
@@ -516,6 +519,10 @@ impl Tool for WallpaperListTool {
                 "filtered_count": filtered_count,
                 "returned": items.len(),
                 "filter": filter,
+                "offset": offset,
+                "next_offset": if offset.saturating_add(items.len()) < filtered_count {
+                    Some(offset.saturating_add(items.len()))
+                } else { None },
             })),
         )
     }
@@ -720,15 +727,17 @@ impl Tool for WallpaperSetTool {
         let folder_path_arg = args.get("folder_path").and_then(|v| v.as_str());
         let title = args.get("title").and_then(|v| v.as_str());
 
+        tracing::info!("[wallpaper_set] resolving workshop_id={:?} title={:?} folder_path={:?}",
+            workshop_id, title, folder_path_arg);
         // 1. 解析壁纸文件夹路径
         let target_folder: PathBuf = if let Some(id) = workshop_id.filter(|s| !s.is_empty()) {
             match find_wallpaper_by_id(id) {
                 Some(p) => p,
                 None => {
                     return ToolResult::standard_error(
-                        &format!("未找到 workshop_id={} 对应的壁纸", id),
+                        &format!("未找到传入的 workshop_id={} 对应的壁纸；这不代表此前列表中的同名壁纸不存在。请使用 wallpaper_list 返回的真实 ID 重试。", id),
                         Some("WallpaperNotFound"),
-                        Some(json!({"workshop_id": id})),
+                        Some(json!({"workshop_id": id, "title": title, "next_action": "Use the exact workshop_id from the verified wallpaper_list result; do not infer the wallpaper is absent from a failed ID lookup."})),
                     );
                 }
             }
