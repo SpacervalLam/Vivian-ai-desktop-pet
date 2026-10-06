@@ -18,7 +18,7 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::messages::{MessageMeta, MessageSource};
-use crate::notebook::{storage, Block, Cover, Layout, NoteBook, Palette};
+use crate::notebook::{css_guide, storage, Block, Cover, Layout, NoteBook, Palette};
 use crate::state::AppState;
 use crate::tools::types::{
     PermissionResult, Tool, ToolCategory, ToolResult, ToolRiskTier, ToolUseContext, ValidationResult,
@@ -103,13 +103,13 @@ impl Tool for CreateNotebookTool {
     }
 
     fn description(&self) -> &str {
-        "Create a beautiful Xiaohongshu-style HTML note page from collected information. You provide structured content (title, layout, palette, cover, content blocks), and the system renders it into a visually appealing HTML page saved locally. The page can be viewed in the Notebook tab of the memory window and shared to WeChat chat later. Proactively reach for this whenever you are doing data-organizing work — researching a topic, summarizing a travel guide, writing a how-to, compiling recommendations, structuring a report — so the user gets a polished visual artifact instead of a plain chat reply. Don't wait for the user to explicitly ask; if you find yourself gathering and structuring multiple pieces of information worth presenting, this is the natural way to deliver it.\n\nFollow a writing workflow, not just block assembly:\n0. Assess evidence dependence first — decide how much of what this note conveys comes from your own memory vs. the outside world. Timely news, other people's data, and specialized knowledge need a web_search; personal experience and opinion can come straight from memory. When you do search, collect and verify: prefer authoritative sources, cross-check key data across 2+ independent sources, present conflicts honestly instead of picking one side arbitrarily, and flag missing data rather than inventing numbers. Treat search results as material, not as conclusions. Trust P0/P1 sources for firm statements and for chart/table data; soften wording on single-source or low-authority claims (e.g. \"some say...\") rather than asserting them as established fact.\n1. Frame the note — decide its purpose (inform / record / educate / entertain), its reader, and the emotional tone, and keep the tone consistent with who you are.\n2. Choose the right form — pick layout and palette to match the content: a guide or structured data fits cover_flow with tags plus a table/chart; a long reflective piece or travelogue fits article; a collection of recommendations fits gallery; a short memo fits simple.\n3. Shape the content — open with a hook, develop in sections, close with a takeaway. Use heading for sections, paragraph for prose, card/quote/callout for emphasis, list for enumerations, and tags for keywords. Use block types sparingly rather than padding for variety — structure serves the content, not the other way around.\n4. Visualize when it helps — use a chart (bar/line/pie) when there are 3+ comparable data points, a table for discrete comparisons, and a Mermaid diagram for a process or timeline. Grouped data brought back from search fits a table or chart especially well. Every chart must be referenced and explained by the adjacent prose, never left floating; weave visuals into the flow, not as an afterthought.\n5. Write with care — avoid checklist jargon and empty superlatives; keep paragraphs 3-8 sentences with a clear flow; make headings accurate and functional; state a conclusion once and let other sections add new evidence rather than restating it. When you cite facts you looked up, say so naturally instead of pretending you already knew them; separate \"facts retrieved from search\" from \"your own inference\" and \"the user's own words\". Keep the voice natural and consistent with your personality."
+        "Create a beautiful Xiaohongshu-style HTML note page from collected information. You provide structured content (title, layout, palette, cover, content blocks), and the system renders it into a visually appealing HTML page saved locally. The page can be viewed in the Notebook tab of the memory window and shared to WeChat chat later. Proactively reach for this whenever you are doing data-organizing work — researching a topic, summarizing a travel guide, writing a how-to, compiling recommendations, structuring a report — so the user gets a polished visual artifact instead of a plain chat reply. Don't wait for the user to explicitly ask; if you find yourself gathering and structuring multiple pieces of information worth presenting, this is the natural way to deliver it.\n\nFollow a writing workflow, not just block assembly:\n0. Assess evidence dependence first — decide how much of what this note conveys comes from your own memory vs. the outside world. Timely news, other people's data, and specialized knowledge need a web_search; personal experience and opinion can come straight from memory. When you do search, collect and verify: prefer authoritative sources, cross-check key data across 2+ independent sources, present conflicts honestly instead of picking one side arbitrarily, and flag missing data rather than inventing numbers. Treat search results as material, not as conclusions. Trust P0/P1 sources for firm statements and for chart/table data; soften wording on single-source or low-authority claims (e.g. \"some say...\") rather than asserting them as established fact.\n1. Frame the note — decide its purpose (inform / record / educate / entertain), its reader, and the emotional tone, and keep the tone consistent with who you are.\n6. Do not use emoji anywhere - not in body text, titles, the cover, or block content. Visual hierarchy comes from heading levels, palette, and card structure rather than decorative icons. \n7. Make tags reusable over time - call list_notebooks first to see which tags existing notes already use, and reuse a tag when the meaning matches instead of inventing a synonym (if「热梗」already exists, do not add「网络流行语」or「梗文化」). Only create a new tag when nothing fits; use 2-4 tags naming the topic or domain. The notes page filters by tag, so tag sprawl breaks filtering. \n8. Only write custom_css when you want a look the preset palettes cannot give you - it is mutually exclusive with palette and becomes the single theme source. See the custom_css parameter description for how to write it: adjust CSS variables for the overall color first, then use selectors for layout. Using palette is the default; do not hand-write CSS just to look distinctive.\n2. Choose the right form — pick layout and palette to match the content: a guide or structured data fits cover_flow with tags plus a table/chart; a long reflective piece or travelogue fits article; a collection of recommendations fits gallery; a short memo fits simple.\n3. Shape the content — open with a hook, develop in sections, close with a takeaway. Use heading for sections, paragraph for prose, card/quote/callout for emphasis, list for enumerations, and tags for keywords. Use block types sparingly rather than padding for variety — structure serves the content, not the other way around.\n4. Visualize when it helps — use a chart (bar/line/pie) when there are 3+ comparable data points, a table for discrete comparisons, and a Mermaid diagram for a process or timeline. Grouped data brought back from search fits a table or chart especially well. Every chart must be referenced and explained by the adjacent prose, never left floating; weave visuals into the flow, not as an afterthought.\n5. Write with care — avoid checklist jargon and empty superlatives; keep paragraphs 3-8 sentences with a clear flow; make headings accurate and functional; state a conclusion once and let other sections add new evidence rather than restating it. When you cite facts you looked up, say so naturally instead of pretending you already knew them; separate \"facts retrieved from search\" from \"your own inference\" and \"the user's own words\". Keep the voice natural and consistent with your personality."
     }
 
     fn description_in(&self, lang: &str) -> &str {
         match lang {
-            "zh" => "根据搜集到的信息制作漂亮的卡片风格 HTML 页面。你只需提供结构化内容（标题、布局、配色、封面、内容块），系统会自动渲染成视觉精美的 HTML 页面并保存在本地。页面可在笔记本窗口的'笔记'tab 中查阅，之后也可分享到微信聊天。当你在做资料整理类工作时——研究某个话题、总结旅行攻略、撰写步骤教程、整理好物推荐、结构化报告等——应主动用此工具，让用户得到一份精美的可视化产物而不是普通聊天回复。不必等用户明确要求；一旦你发现自己在搜集并组织多条值得呈现的信息，就该自然想到用这个方式交付。\n\n请遵循一套撰写工作流，而不是机械地堆砌内容块：\n0. 先判断信息依赖——这篇笔记要传达的事实，多少来自你的既有记忆、多少依赖外部世界？时效新闻、他人数据、专有知识需要检索；个人经历与观点从记忆取材即可。要检索时用 web_search 采集并核验：优先权威来源，关键数据交叉验证（≥2 个独立来源），来源冲突时如实呈现而非任意取舍，数据不足就明确标注缺漏、绝不编造数字。把检索结果当作素材而非结论。P0/P1 来源的数据可放心用于图表和肯定性表述；单来源或低权威的说法要降调措辞（如「有人提到…」），不要写成既定事实。\n1. 构思定位——先想清楚这篇笔记的目的（告知/记录/教学/娱乐）、读者和情绪基调，并与你自己的语气保持一致。\n2. 选对形式——根据内容选择布局与配色：攻略或结构化资料适合 cover_flow（封面+卡片流）并配标签和表格/图表；长文反思或游记适合 article（无封面）；好物推荐适合 gallery；简短备忘适合 simple。\n3. 组织内容——开头抓人、主体分节、结尾有收束。用 heading 分节、paragraph 写正文、card/quote/callout 做强调、list 做罗列、tags 做关键词。块类型按需选用，不为凑数堆砌——结构服务内容，不是为类型齐全而填满。\n4. 善用可视化——3 组以上可比数据用图表（柱状/折线/饼图）；离散数据对比优先用表格；流程或时序用 mermaid 流程图。检索带回的成组数据尤其适合用表格和图表呈现。每个图表都要被相邻正文引用并解释，不孤立放图；把可视化融入行文，而不是事后补图。\n5. 用心写作——避免清单式套话和空泛形容词；段落保持 3-8 句、逻辑连贯；标题准确功能化；一个结论只完整出现一次，其余部分补充新证据而非复述。检索来的事实要自然说明是查到的，不假装本来就知道；区分「搜索到的事实」「你的推断」和「用户原话」。保持语气自然，符合你的性格。",
-            "ja" => "集めた情報から美しいカード風HTMLノートページを作成する。構造化コンテンツ（タイトル、レイアウト、配色、カバー、コンテンツブロック）を提供するだけで、システムが視覚的に美しいHTMLページにレンダリングしてローカルに保存する。ページはノートウィンドウの「ノート」タブで閲覧でき、後でWeChatチャットに共有することもできる。資料整理系の作業——テーマのリサーチ、旅行ガイドのまとめ、ハウツーの執筆、おすすめの整理、レポートの構造化など——を行う時は、普通のチャット返信の代わりに美しいビジュアル成果物をユーザーに届けるため、自らこのツールを使うこと。ユーザーに明示的に頼まれるのを待つ必要はない；複数の提示価値のある情報を集めて構造化している自分に気付いたら、自然にこの手段を選ぶ。\n\nブロックを機械的に並べるのではなく、次の書き方ワークフローに従ってください：\n0. まず情報依存を判断する——このノートが伝える事実のうち、どれだけが自分の記憶から来て、どれだけが外部世界に依存するか。時事ニュース、他人のデータ、専門知識は検索が必要；個人的な経験や意見は記憶から直接取材できる。検索する場合は web_search で収集・検証する：権威あるソースを優先し、重要データは 2 つ以上の独立ソースで相互検証し、矛盾があれば好き勝手に選ばず正直に提示し、データ不足なら欠けていることを明記し、数字を捏造しない。検索結果は結論ではなく素材として扱う。P0/P1 ソースのデータはチャートや断定表現に安心して使える；単一ソースや低権威の主張は「〜と言う人もいる」のようにトーンを下げ、確立した事実のように書かない。\n1. 構想を固める——このノートの目的（伝える/記録する/教える/楽しませる）、読者、感情のトーンを決め、あなた自身の口調と一致させる。\n2. 形式を選ぶ——内容に合わせてレイアウトと配色を選ぶ：攻略や構造化データには cover_flow（カバー+カード流）＋タグ＋表/チャート、長文の回想や紀行には article（カバーなし）、おすすめ集には gallery、短いメモには simple。\n3. 内容を組み立てる——冒頭で引き込む、本文で展開、結びで締める。節には heading、散文には paragraph、強調には card/quote/callout、羅列には list、キーワードには tags を使う。ブロックタイプは数合わせではなく必要に応じて選ぶ——構造は内容に仕えるもので、内容が構造に仕えるのではない。\n4. 可視化を活用——3 組以上の比較可能なデータはチャート（棒/折れ線/円）、離散データの比較は表、プロセスや時系列は mermaid フロー図。検索で得たまとまったデータは特に表やチャートに向く。各チャートは隣接する本文で参照・説明され、孤立して置かないこと。後付けではなく、本文の流れに自然に組み込む。\n5. 丁寧に書く——チェックリスト風の決まり文句や飾り形容詞を避け、段落は 3〜8 文で論理的に、見出しは正確かつ機能的に。結論は一度だけ完全に述べ、他の節は言い換えではなく新しい証拠を加える。調べた事実は自然に「調べた」と述べ、元から知っていたように振る舞わない；「検索で得た事実」「自分の推測」「ユーザーの言葉」を区別する。口調は自然に、あなたの性格に合わせる。",
+            "zh" => "根据搜集到的信息制作漂亮的卡片风格 HTML 页面。你只需提供结构化内容（标题、布局、配色、封面、内容块），系统会自动渲染成视觉精美的 HTML 页面并保存在本地。页面可在笔记本窗口的'笔记'tab 中查阅，之后也可分享到微信聊天。当你在做资料整理类工作时——研究某个话题、总结旅行攻略、撰写步骤教程、整理好物推荐、结构化报告等——应主动用此工具，让用户得到一份精美的可视化产物而不是普通聊天回复。不必等用户明确要求；一旦你发现自己在搜集并组织多条值得呈现的信息，就该自然想到用这个方式交付。\n\n请遵循一套撰写工作流，而不是机械地堆砌内容块：\n0. 先判断信息依赖——这篇笔记要传达的事实，多少来自你的既有记忆、多少依赖外部世界？时效新闻、他人数据、专有知识需要检索；个人经历与观点从记忆取材即可。要检索时用 web_search 采集并核验：优先权威来源，关键数据交叉验证（≥2 个独立来源），来源冲突时如实呈现而非任意取舍，数据不足就明确标注缺漏、绝不编造数字。把检索结果当作素材而非结论。P0/P1 来源的数据可放心用于图表和肯定性表述；单来源或低权威的说法要降调措辞（如「有人提到…」），不要写成既定事实。\n1. 构思定位——先想清楚这篇笔记的目的（告知/记录/教学/娱乐）、读者和情绪基调，并与你自己的语气保持一致。\n2. 选对形式——根据内容选择布局与配色：攻略或结构化资料适合 cover_flow（封面+卡片流）并配标签和表格/图表；长文反思或游记适合 article（无封面）；好物推荐适合 gallery；简短备忘适合 simple。\n3. 组织内容——开头抓人、主体分节、结尾有收束。用 heading 分节、paragraph 写正文、card/quote/callout 做强调、list 做罗列、tags 做关键词。块类型按需选用，不为凑数堆砌——结构服务内容，不是为类型齐全而填满。\n4. 善用可视化——3 组以上可比数据用图表（柱状/折线/饼图）；离散数据对比优先用表格；流程或时序用 mermaid 流程图。检索带回的成组数据尤其适合用表格和图表呈现。每个图表都要被相邻正文引用并解释，不孤立放图；把可视化融入行文，而不是事后补图。\n5. 用心写作——避免清单式套话和空泛形容词；段落保持 3-8 句、逻辑连贯；标题准确功能化；一个结论只完整出现一次，其余部分补充新证据而非复述。检索来的事实要自然说明是查到的，不假装本来就知道；区分「搜索到的事实」「你的推断」和「用户原话」。保持语气自然，符合你的性格。\n6. 不要用 emoji——正文、标题、封面、块内容里都不放。视觉层次靠标题层级、配色与卡片结构表达，而不是靠图标装饰。\n7. 标签要能长期复用——创建前先 list_notebooks 看已有标签，语义相同就复用已有标签，不要造同义标签（已有「热梗」就别再新建「网络流行语」「梗文化」）。确实没有可复用的分类才新建，2-4 个，取主题/领域词。笔记页靠标签做分类筛选，标签泛滥会让筛选失效。\n8. 想要预设配色之外的视觉风格时才写 custom_css——它与 palette 互斥，填了就以它为唯一主题来源。写法见 custom_css 参数说明：先改 CSS 变量做整体换色，再用选择器调排版。默认走palette 就够，别为了显得特别而手写 CSS。\n9. 用你的人格写，不是写报告——读者是 vivian / nana 本人，不是外人。title 字段的描述里给了各角色的文风指引，认领属于你那一行照着写。\n涉及检索得来的事实时用「我刚查到」「我翻了两份盘点」这种自然说法带过，不要写成「据检索结果显示」——那是对检索系统的说话方式，不是对熟人的。",
+            "ja" => "集めた情報から美しいカード風HTMLノートページを作成する。構造化コンテンツ（タイトル、レイアウト、配色、カバー、コンテンツブロック）を提供するだけで、システムが視覚的に美しいHTMLページにレンダリングしてローカルに保存する。ページはノートウィンドウの「ノート」タブで閲覧でき、後でWeChatチャットに共有することもできる。資料整理系の作業——テーマのリサーチ、旅行ガイドのまとめ、ハウツーの執筆、おすすめの整理、レポートの構造化など——を行う時は、普通のチャット返信の代わりに美しいビジュアル成果物をユーザーに届けるため、自らこのツールを使うこと。ユーザーに明示的に頼まれるのを待つ必要はない；複数の提示価値のある情報を集めて構造化している自分に気付いたら、自然にこの手段を選ぶ。\n\nブロックを機械的に並べるのではなく、次の書き方ワークフローに従ってください：\n0. まず情報依存を判断する——このノートが伝える事実のうち、どれだけが自分の記憶から来て、どれだけが外部世界に依存するか。時事ニュース、他人のデータ、専門知識は検索が必要；個人的な経験や意見は記憶から直接取材できる。検索する場合は web_search で収集・検証する：権威あるソースを優先し、重要データは 2 つ以上の独立ソースで相互検証し、矛盾があれば好き勝手に選ばず正直に提示し、データ不足なら欠けていることを明記し、数字を捏造しない。検索結果は結論ではなく素材として扱う。P0/P1 ソースのデータはチャートや断定表現に安心して使える；単一ソースや低権威の主張は「〜と言う人もいる」のようにトーンを下げ、確立した事実のように書かない。\n1. 構想を固める——このノートの目的（伝える/記録する/教える/楽しませる）、読者、感情のトーンを決め、あなた自身の口調と一致させる。\n2. 形式を選ぶ——内容に合わせてレイアウトと配色を選ぶ：攻略や構造化データには cover_flow（カバー+カード流）＋タグ＋表/チャート、長文の回想や紀行には article（カバーなし）、おすすめ集には gallery、短いメモには simple。\n3. 内容を組み立てる——冒頭で引き込む、本文で展開、結びで締める。節には heading、散文には paragraph、強調には card/quote/callout、羅列には list、キーワードには tags を使う。ブロックタイプは数合わせではなく必要に応じて選ぶ——構造は内容に仕えるもので、内容が構造に仕えるのではない。\n4. 可視化を活用——3 組以上の比較可能なデータはチャート（棒/折れ線/円）、離散データの比較は表、プロセスや時系列は mermaid フロー図。検索で得たまとまったデータは特に表やチャートに向く。各チャートは隣接する本文で参照・説明され、孤立して置かないこと。後付けではなく、本文の流れに自然に組み込む。\n5. 丁寧に書く——チェックリスト風の決まり文句や飾り形容詞を避け、段落は 3〜8 文で論理的に、見出しは正確かつ機能的に。結論は一度だけ完全に述べ、他の節は言い換えではなく新しい証拠を加える。調べた事実は自然に「調べた」と述べ、元から知っていたように振る舞わない；「検索で得た事実」「自分の推測」「ユーザーの言葉」を区別する。口調は自然に、あなたの性格に合わせる。\n6. emoji は使わない——本文・タイトル・カバー・各ブロックの内容すべてに入れない。視覚的な階層はアイコンではなく、見出しのレベル・配色・カードの構造で表現する。\n7. タグは長期的に再利用できるようにする——まず list_notebooks で既存ノートがどのタグを使っているか確認し、意味が同じなら既存のタグを再利用するのであって、同義のタグを 새로作らない（すでに「熱梗」があるなら「ネットワーク流行語」や「梗文化」は作らない）。本当に該当するものがないときだけ新規作成し、2〜4 個で主題や分野を表す。ノートページはタグで絞り込むため、タグが乱発すると絞り込みが効かなくなる。\n8. Write custom_css ONLY when you need a look the preset palettes cannot give. It is mutually exclusive with palette and becomes the single theme source. The custom_css parameter description explains how to write it: change CSS variables for the overall color first, then use selectors for layout. palette alone is the default - do not hand-write CSS just to look distinctive. \n9. Write in your persona, not as a report - the reader is vivian/nana herself, not an outsider. Use first person throughout, like her own diary or a note to herself: open straight into the content, never 「this article will」 or 「the following」; sentences may carry mood, preference and snark, and need not be strictly neutral. Ask yourself 「how would she write this if she were writing for herself」. For facts you looked up, say it naturally - 「I just found」, 「I went through two roundups」 - never 「according to the search results」, which is how you talk to a search engine, not to someone familiar. \n",
             _ => self.description(),
         }
     }
@@ -124,10 +124,26 @@ impl Tool for CreateNotebookTool {
     }
 
     fn parameters_schema(&self) -> Value {
+        // custom_css 的描述里要带「自定义范式」（可用变量与选择器清单），
+        // 所以这个 schema 不能是纯字面量 json!，得在运行时把 css_guide 拼进去。
+        // 范式集中维护在 notebook::css_guide，避免工具描述与实际渲染的类名漂移。
+        let palette_desc = "配色方案：warm=暖色珊瑚粉，fresh=清新薄荷绿，elegant=优雅紫罗兰，cute=可爱粉橙，cool=冷色天蓝，nature=自然橄榄绿。「与 custom_css 互斥」：填了 custom_css 就忽略 palette。";
+        let custom_css_desc = format!(
+            "自定义 CSS（纯片段，不要包<style> 标签）。与 palette 互斥，填了就以它为唯一主题来源。\n\n{}",
+            css_guide::CSS_GUIDE
+        );
+        // title 描述里拼入笔记文风人设：title 是必填字段、模型一定会看它的描述，
+        // 是静态 description() 之外唯一可靠的注入点（description_in 返回 &'static str，
+        // 装不下按角色变化的人设）。人设走 all_brief（两个角色并列），
+        // 由模型按当前 char_id 认领属于自己那段。
+        let title_desc = format!(
+            "笔记标题（简洁吸引人，建议15字以内）。\n\n{}",
+            crate::pipeline::prompt_modules::build_notebook_persona_brief_all("zh")
+        );
         json!({
             "type": "object",
             "properties": {
-                "title": { "type": "string", "description": "笔记标题（简洁吸引人，建议15字以内）" },
+                "title": { "type": "string", "description": title_desc },
                 "layout": {
                     "type": "string",
                     "enum": ["cover_flow", "article", "gallery", "simple"],
@@ -137,20 +153,23 @@ impl Tool for CreateNotebookTool {
                 "palette": {
                     "type": "string",
                     "enum": ["warm", "fresh", "elegant", "cute", "cool", "nature"],
-                    "description": "配色方案：warm=暖色珊瑚粉，fresh=清新薄荷绿，elegant=优雅紫罗兰，cute=可爱粉橙，cool=冷色天蓝，nature=自然橄榄绿",
+                    "description": palette_desc,
                     "default": "warm"
+                },
+                "custom_css": {
+                    "type": "string",
+                    "description": custom_css_desc
                 },
                 "tags": {
                     "type": "array",
                     "items": { "type": "string" },
-                    "description": "笔记标签（3-5个关键词，如['美食','早餐','简单']）"
+                    "description": "分类标签，2-4 个。「创建前先调 list_notebooks 看已有笔记都在用什么标签，能复用就复用」（例如已有「热梗」就别新建「网络流行语」），只有确实没有可复用的分类时才新建。标签用于笔记页的分类筛选，取主题/领域词，不要「待办」「重要」这类状态词，也不要日期。"
                 },
                 "cover": {
                     "type": "object",
                     "properties": {
                         "title": { "type": "string", "description": "封面大标题" },
                         "subtitle": { "type": "string", "description": "副标题（可选）" },
-                        "emoji": { "type": "string", "description": "封面装饰emoji（如🍳✈️📚）" },
                         "background": { "type": "string", "description": "自定义背景CSS（如'#FF6B6B'或'linear-gradient(...)'，留空用配色默认渐变）" }
                     },
                     "required": ["title"],
@@ -196,22 +215,22 @@ impl Tool for CreateNotebookTool {
                     "tags": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "笔记标签（3-5个关键词，如['美食','早餐','简单']）"
+                        "description": "分类标签，2-4 个。「创建前先调 list_notebooks 看已有笔记都在用什么标签，能复用就复用」（例如已有「热梗」就别新建「网络流行语」），只有确实没有可复用的分类时才新建。标签用于笔记页的分类筛选，取主题/领域词，不要「待办」「重要」这类状态词，也不要日期。"
                     },
                     "cover": {
                         "type": "object",
                         "properties": {
                             "title": { "type": "string", "description": "封面大标题" },
                             "subtitle": { "type": "string", "description": "副标题（可选）" },
-                            "emoji": { "type": "string", "description": "封面装饰emoji（如🍳✈️📚）" },
-                            "background": { "type": "string", "description": "自定义背景CSS（如'#FF6B6B'或'linear-gradient(...)'，留空用配色默认渐变）" }
+                                "background": { "type": "string", "description": "自定义背景CSS（如'#FF6B6B'或'linear-gradient(...)'，留空用配色默认渐变）" }
                         },
                         "required": ["title"],
                         "description": "封面配置（cover_flow/gallery布局需要，article/simple布局忽略）"
                     },
                     "blocks": {
                         "type": "array",
-                        "description": "内容块列表，按顺序排列，构成一篇有起承转合的笔记。建议按“开头点题—主体分节—结尾收束”组织：heading 分节、paragraph 写正文、card/quote/callout 做强调、list 罗列要点。3 组以上可比数据用 chart 可视化，离散数据对比优先 table，流程/时序用 mermaid。每个块用type字段指定类型，其余字段为内容。\n可用块类型：\n- heading: {type,text,level(1-3)} 标题\n- paragraph: {type,text} 段落\n- card: {type,title?,body,emoji?} 卡片\n- quote: {type,text,author?} 引用\n- list: {type,items[],ordered?} 列表\n- tags: {type,items[]} 标签云\n- image: {type,url,caption?} 图片\n- divider: {type,emoji?} 分割线\n- callout: {type,text,emoji?} 提示框\n- table: {type,headers[],rows[][],caption?} 数据表格（headers为列头，rows为二维数据）\n- chart: {type,chart_type('bar'柱状/'line'折线/'pie'饼图),categories[],series[{name,data[]}]} 图表\n- mermaid: {type,code,caption?} 流程图（code为Mermaid源码，如```graph TD\\n A-->B```）\n- custom: {type,html} 自定义HTML片段",
+                        "description": "内容块列表，按顺序排列，构成一篇有起承转合的笔记。建议按“开头点题—主体分节—结尾收束”组织：heading 分节、paragraph 写正文、card/quote/callout 做强调、list 罗列要点。3 组以上可比数据用 chart 可视化，离散数据对比优先 table，流程/时序用 mermaid。每个块用type字段指定类型，其余字段为内容。\n可用块类型：\n- heading: {type,text,level(1-3)} 标题\n- paragraph: {type,text} 段落\n- card: {type,title?,body} 卡片\n- quote: {type,text,author?} 引用\n- list: {type,items[],ordered?} 列表\n- tags: {type,items[]} 标签云\n- image: {type,url,caption?} 图片\n- divider: {type} 分割线\n- callout: {type,text} 提示框\n- table: {type,headers[],rows[][],caption?} 数据表格（headers为列头，rows为二维数据）\n- chart: {type,chart_type('bar'柱状/'line'折线/'pie'饼图),categories[],series[{name,data[]}]} 图表\n- mermaid: {type,code,caption?} 流程图（code为Mermaid源码，如```graph TD\\n A-->B```）\n- custom: {type,html} 自定义HTML片段
+- meta: {type,key,text} 「不渲染的元数据」（存进笔记文件、能被知识库检索到，但页面上看不到）。数据来源说明、检索可靠性评估这类「给自己看、不给读者看」的内容写到这里。",
                         "items": { "type": "object" }
                     }
                 },
@@ -233,6 +252,10 @@ impl Tool for CreateNotebookTool {
                         "description": "配色：warm=暖色コーラルピンク、fresh=ミントグリーン、elegant=エレガント紫、cute=キュートピンクオレンジ、cool=クールブルー、nature=ナチュラルオリーブ",
                         "default": "warm"
                     },
+                    "custom_css": {
+                        "type": "string",
+                        "description": "カスタム CSS（<style> タグなしでstylesheet の断片だけ）。palette と排他。"
+                    },
                     "tags": {
                         "type": "array",
                         "items": { "type": "string" },
@@ -243,7 +266,6 @@ impl Tool for CreateNotebookTool {
                         "properties": {
                             "title": { "type": "string", "description": "カバー大タイトル" },
                             "subtitle": { "type": "string", "description": "サブタイトル（任意）" },
-                            "emoji": { "type": "string", "description": "カバー装飾emoji" },
                             "background": { "type": "string", "description": "カスタム背景CSS" }
                         },
                         "required": ["title"],
@@ -287,6 +309,13 @@ impl Tool for CreateNotebookTool {
         let title = args.get("title").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
         let layout = args.get("layout").and_then(|v| v.as_str()).map(parse_layout).unwrap_or_default();
         let palette = args.get("palette").and_then(|v| v.as_str()).map(parse_palette).unwrap_or_default();
+        // 空白串等同未提供：避免空 CSS 被NoteBook::theme 当成自定义主题
+        let custom_css = args
+            .get("custom_css")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+            .map(str::to_string);
         let tags: Vec<String> = args.get("tags")
             .and_then(|v| v.as_array())
             .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
@@ -313,6 +342,7 @@ impl Tool for CreateNotebookTool {
             tags,
             layout,
             palette,
+            custom_css,
             cover,
             blocks,
         };
@@ -1238,6 +1268,12 @@ fn note_to_searchable_text(note: &NoteBook) -> String {
                     parts.push(trimmed.to_string());
                 }
             }
+            // Meta 块不渲染但**必须参与检索**——这正是它存在的意义：
+            // 数据来源说明、检索可靠性评估等内容供后续问答/RAG 召回，
+            // 若这里漏掉，存了也等于没存。
+            Block::Meta { key, text } => {
+                parts.push(format!("{key}: {text}"));
+            }
         }
     }
     parts.join("\n")
@@ -1345,13 +1381,13 @@ impl Tool for CreateHtmlNoteTool {
     }
 
     fn description(&self) -> &str {
-        "Create a fully self-contained HTML note where YOU write the complete HTML/CSS directly — not the block-based renderer. Ideal when the content needs full layout and visual freedom: data dashboards, polished reports, landing-page style notes, complex mixed media. Provide the complete HTML document (with <style>), and the system saves it as-is and renders it in the Notebook tab. Reuse the same authoring discipline as a polished HTML report: design a coherent visual system via CSS variables on :root (colors, fonts, spacing); use font-size/weight/whitespace for hierarchy, not font families; keep layouts responsive; ensure ink-on-bg contrast ≥ 4.5:1; structure with proper headings; use a BODY-level or :host-compatible background rather than relying on a <body> element (the document is rendered inside a shadow root, so :root and body selectors are rewritten to :host automatically). For data, use ECharts via <div class=\"nb-chart\" data-option='{...}'> (bar/line/pie supported, lazy-loaded by the frontend) or Mermaid via <pre class=\"mermaid\">...</pre> — every chart must have a visible title and be referenced by adjacent prose. Never use <script>, on* event attributes, nested <iframe>, or javascript: URLs — scripts do not run and will be stripped; use the nb-chart / mermaid conventions for any visualization. Use tables wrapped in a scrollable container for discrete comparisons. Cite sources when facts come from search. Keep the tone natural and consistent with your personality. Prefer this tool over create_notebook when you need fine-grained visual control; use create_notebook for simpler card-style notes."
+        "Create a fully self-contained HTML note where YOU write the complete HTML/CSS directly — not the block-based renderer. Ideal when the content needs full layout and visual freedom: data dashboards, polished reports, landing-page style notes, complex mixed media. Provide the complete HTML document (with <style>), and the system saves it as-is and renders it in the Notebook tab. Reuse the same authoring discipline as a polished HTML report: design a coherent visual system via CSS variables on :root (colors, fonts, spacing); use font-size/weight/whitespace for hierarchy, not font families; keep layouts responsive; ensure ink-on-bg contrast ≥ 4.5:1; structure with proper headings; use a BODY-level or :host-compatible background rather than relying on a <body> element (the document is rendered inside a shadow root, so :root and body selectors are rewritten to :host automatically). For data, use ECharts via <div class=\"nb-chart\" data-option='{...}'> (bar/line/pie supported, lazy-loaded by the frontend) or Mermaid via <pre class=\"mermaid\">...</pre> — every chart must have a visible title and be referenced by adjacent prose. Never use <script>, on* event attributes, nested <iframe>, or javascript: URLs — scripts do not run and will be stripped; use the nb-chart / mermaid conventions for any visualization. Use tables wrapped in a scrollable container for discrete comparisons. Cite sources when facts come from search. Keep the tone natural and consistent with your personality. Write in first person like your own diary, not as a report: open straight into the content, no 「this document will」 phrasing, sentences may carry mood and preference, and say looked-up facts naturally (「I just found」). Do not use emoji anywhere - not in text, headings, or decorative markup. For tags, call list_notebooks first and reuse an existing tag whenever the meaning matches; only create a new one when nothing fits. \nPrefer this tool over create_notebook when you need fine-grained visual control; use create_notebook for simpler card-style notes."
     }
 
     fn description_in(&self, lang: &str) -> &str {
         match lang {
-            "zh" => "制作一篇由你直接撰写完整 HTML/CSS 的自包含笔记（不经过结构化内容块渲染）。适合需要完全自由版式与视觉控制的场景：数据大屏、精美报告、落地页式笔记、复杂图文混排等。你提供完整的 HTML 文档（含 <style>），系统原样保存并在笔记 tab 中原样渲染。请遵循与精美 HTML 报告一致的撰写纪律：用 :root 上的 CSS 变量（颜色/字体/间距）建立统一视觉系统；用字号粗细与留白建立层级，而非换字体家族；保持响应式布局；正文与背景对比度 ≥ 4.5:1；用规范标题组织结构；背景建议写在 body/{:host 兼容} 上——文档在 Shadow DOM 内渲染，:root 与 body 选择器会被自动改写为 :host。数据可视化用 ECharts（<div class=\"nb-chart\" data-option='{...}'>，支持柱状/折线/饼图，前端懒加载）或 Mermaid（<pre class=\"mermaid\">…</pre>），每个图表必须有可见标题并被相邻正文引用解释。禁止 <script>、on* 事件属性、嵌套 <iframe> 与 javascript: 协议——脚本不执行且会被移除，可视化一律用 nb-chart / mermaid 约定。离散数据对比优先用可横向滚动的表格容器。检索得来的事实要自然说明是查到的，不假装本来就知道，并区分「搜索事实」「你的推断」「用户原话」。保持语气自然，符合你的性格。需要精细视觉控制时优先用本工具；简单卡片风格笔记用 create_notebook。",
-            "ja" => "完全自己でHTML/CSSを書く自己完結型HTMLノートを作成する（構造化コンテンツブロックのレンダラーは使わない）。自由なレイアウトと視覚制御が必要な場面に最適：データダッシュボード、洗練されたレポート、ランディングページ風ノート、複雑なメディア混在など。完全なHTML文書（<style>含む）を提供すると、システムがそのまま保存し、ノートタブでそのままレンダリングする。洗練されたHTMLレポートと同じ執筆規律に従うこと：:root上のCSS変数（色/フォント/間隔）で一貫したビジュアルシステムを確立；フォントファミリーではなくフォントサイズ/太さ/空白で階層を作る；レスポンシブレイアウトを維持；本文と背景のコントラスト比は4.5:1以上；見出しで構造化；背景はbody/{:host}互換で書く——文書はShadow DOM内でレンダリングされ、:rootとbodyセレクタは自動的に:hostへ書き換えられる。データ可視化はECharts（<div class=\"nb-chart\" data-option='{...}'>、棒/折れ線/円対応、フロントエンドで遅延ロード）またはMermaid（<pre class=\"mermaid\">…</pre>）を使い、各チャートには可視タイトルを付け、隣接する本文で参照・説明すること。離散データ比較は横スクロール可能なテーブルコンテナを優先。検索で得た事実は自然に「調べた」と述べ、元から知っていたように振る舞わない。「検索で得た事実」「自分の推測」「ユーザーの言葉」を区別する。口調は自然に、性格に合わせる。細かい視覚制御が必要な場合は本ツールを、簡単なカード風ノートはcreate_notebookを使うこと。",
+            "zh" => "制作一篇由你直接撰写完整 HTML/CSS 的自包含笔记（不经过结构化内容块渲染）。适合需要完全自由版式与视觉控制的场景：数据大屏、精美报告、落地页式笔记、复杂图文混排等。你提供完整的 HTML 文档（含 <style>），系统原样保存并在笔记 tab 中原样渲染。请遵循与精美 HTML 报告一致的撰写纪律：用 :root 上的 CSS 变量（颜色/字体/间距）建立统一视觉系统；用字号粗细与留白建立层级，而非换字体家族；保持响应式布局；正文与背景对比度 ≥ 4.5:1；用规范标题组织结构；背景建议写在 body/{:host 兼容} 上——文档在 Shadow DOM 内渲染，:root 与 body 选择器会被自动改写为 :host。数据可视化用 ECharts（<div class=\"nb-chart\" data-option='{...}'>，支持柱状/折线/饼图，前端懒加载）或 Mermaid（<pre class=\"mermaid\">…</pre>），每个图表必须有可见标题并被相邻正文引用解释。禁止 <script>、on* 事件属性、嵌套 <iframe> 与 javascript: 协议——脚本不执行且会被移除，可视化一律用 nb-chart / mermaid 约定。离散数据对比优先用可横向滚动的表格容器。检索得来的事实要自然说明是查到的，不假装本来就知道，并区分「搜索事实」「你的推断」「用户原话」。保持语气自然，符合你的性格。像写自己的日记那样用第一人称，不要写成报告——开头直接切进内容，别用「本文将」「以下是」；句子可以有情绪和偏好，不必客观中立；检索来的事实用「我刚查到」这类自然说法带过。\n不要用 emoji——正文、标题与装饰标记里都不放。标签同样先 list_notebooks 看已有标签、能复用就复用，确实无匹配才新建。需要精细视觉控制时优先用本工具；简单卡片风格笔记用 create_notebook。",
+            "ja" => "完全自己でHTML/CSSを書く自己完結型HTMLノートを作成する（構造化コンテンツブロックのレンダラーは使わない）。自由なレイアウトと視覚制御が必要な場面に最適：データダッシュボード、洗練されたレポート、ランディングページ風ノート、複雑なメディア混在など。完全なHTML文書（<style>含む）を提供すると、システムがそのまま保存し、ノートタブでそのままレンダリングする。洗練されたHTMLレポートと同じ執筆規律に従うこと：:root上のCSS変数（色/フォント/間隔）で一貫したビジュアルシステムを確立；フォントファミリーではなくフォントサイズ/太さ/空白で階層を作る；レスポンシブレイアウトを維持；本文と背景のコントラスト比は4.5:1以上；見出しで構造化；背景はbody/{:host}互換で書く——文書はShadow DOM内でレンダリングされ、:rootとbodyセレクタは自動的に:hostへ書き換えられる。データ可視化はECharts（<div class=\"nb-chart\" data-option='{...}'>、棒/折れ線/円対応、フロントエンドで遅延ロード）またはMermaid（<pre class=\"mermaid\">…</pre>）を使い、各チャートには可視タイトルを付け、隣接する本文で参照・説明すること。離散データ比較は横スクロール可能なテーブルコンテナを優先。検索で得た事実は自然に「調べた」と述べ、元から知っていたように振る舞わない。「検索で得た事実」「自分の推測」「ユーザーの言葉」を区別する。口調は自然に、性格に合わせる。\nemoji は使わない——本文・見出し・装飾マークアップすべてに入れない。タグもまず list_notebooks で既存タグを確認し、意味が同じなら再利用する——本当に該当するものがないときだけ新規作成する。\n細かい視覚制御が必要な場合は本ツールを、簡単なカード風ノートはcreate_notebookを使うこと。",
             _ => self.description(),
         }
     }
@@ -1374,7 +1410,7 @@ impl Tool for CreateHtmlNoteTool {
                 "tags": {
                     "type": "array",
                     "items": { "type": "string" },
-                    "description": "笔记标签（3-5个关键词）"
+                    "description": "分类标签，2-4 个。先调 list_notebooks 看已有标签，能复用就复用，确实没有可复用的分类时才新建。用于笔记页分类筛选，取主题/领域词，不要状态词与日期。"
                 }
             },
             "required": ["title", "html"]
@@ -1388,10 +1424,11 @@ impl Tool for CreateHtmlNoteTool {
                 "properties": {
                     "title": { "type": "string", "description": "笔记标题（简洁吸引人，建议15字以内）" },
                     "html": { "type": "string", "description": "完整自包含 HTML 文档（含 <style>）。可含 <div class=\"nb-chart\" data-option='...> 图表（柱状/折线/饼图）与 <pre class=\"mermaid\"> 流程图，前端会懒加载渲染。禁止 <script>、on* 事件属性、嵌套 <iframe> 与 javascript: 协议——脚本不执行且会被移除。样式用 :root 上的 CSS 变量统一，背景写在 body（会被自动改写为 :host）。" },
+                    "meta_note": { "type": "string", "description": "数据来源说明等「不渲染但参与检索」的元数据：会存进笔记目录供后续 RAG 召回，但页面上看不到。把「整理自哪几个来源」「可靠性如何」「哪些结果没收录」这类交代写在这里，不要写进正文。" },
                     "tags": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "笔记标签（3-5个关键词）"
+                        "description": "分类标签，2-4 个。先调 list_notebooks 看已有标签，能复用就复用，确实没有可复用的分类时才新建。用于笔记页分类筛选，取主题/领域词，不要状态词与日期。"
                     }
                 },
                 "required": ["title", "html"]
@@ -1448,9 +1485,20 @@ impl Tool for CreateHtmlNoteTool {
             .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
             .unwrap_or_default();
 
+        // 侧车元数据：数据来源说明等，存进笔记目录但不渲染，只参与 RAG 检索
+        let meta_note = args
+            .get("meta_note")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|m| !m.is_empty())
+            .map(str::to_string);
+
         let note_id = NoteBook::generate_id();
         if let Err(e) = storage::save_raw_html(&char_id, &note_id, &title, &tags, &html) {
             return ToolResult::standard_error(&format!("保存笔记失败: {}", e), None, None);
+        }
+        if let Err(e) = storage::save_raw_html_meta(&char_id, &note_id, meta_note.as_deref()) {
+            tracing::warn!("[Notebook] 写入侧车元数据失败: {e}");
         }
 
         // emit 事件通知前端刷新笔记列表并定位
@@ -1556,7 +1604,12 @@ pub(crate) async fn sync_raw_html_to_knowledge(
         }
     };
 
-    let content = raw_html_to_searchable_text(html);
+    // 侧车里的来源说明不渲染但要参与检索——否则「存了」等于没存
+    let mut content = raw_html_to_searchable_text(html);
+    if let Some(meta) = storage::load_raw_html_meta(char_id, note_id) {
+        content.push_str("\nprovenance: ");
+        content.push_str(&meta);
+    }
     if content.trim().is_empty() {
         tracing::warn!("[Notebook] HTML 笔记 {} 无可检索文本，跳过知识库同步", note_id);
         return;
@@ -1578,5 +1631,55 @@ pub(crate) async fn sync_raw_html_to_knowledge(
         Err(e) => {
             tracing::warn!("[Notebook] HTML 笔记同步到知识库失败: {}", e);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::notebook::{Cover, Layout, Palette};
+
+    fn note_with_meta() -> NoteBook {
+        NoteBook {
+            id: "note_meta_test".into(),
+            title: "热梗速览".into(),
+            char_id: "vivian".into(),
+            created_at: 1_780_000_000.0,
+            updated_at: 1_780_000_000.0,
+            tags: vec!["知识采集".into()],
+            layout: Layout::CoverFlow,
+            palette: Palette::Warm,
+            custom_css: None,
+            cover: None,
+            blocks: vec![
+                Block::Meta {
+                    key: "provenance".into(),
+                    text: "整理自两份聚合盘点，可靠性中等；抖音站内结果未收录。".into(),
+                },
+                Block::Paragraph {
+                    text: "1. 班味：打工人语境里的高频词。".into(),
+                    style: None,
+                },
+            ],
+        }
+    }
+
+    /// Meta 块**必须**进入检索文本——它不渲染，存了却不能被召回就毫无意义。
+    #[test]
+    fn meta_block_takes_part_in_retrieval() {
+        let text = note_to_searchable_text(&note_with_meta());
+        assert!(
+            text.contains("provenance") && text.contains("可靠性中等"),
+            "Meta 内容应进入检索文本，实际: {text}"
+        );
+        assert!(text.contains("班味"), "正文也应进入检索文本");
+    }
+
+    /// 反面对照：正文块照常提取，Meta 不应污染成可见内容。
+    #[test]
+    fn meta_block_is_not_rendered() {
+        let html = crate::notebook::renderer::render_html(&note_with_meta());
+        assert!(!html.contains("可靠性中等"), "Meta 不该出现在 HTML 里");
+        assert!(html.contains("班味"), "正文应渲染");
     }
 }

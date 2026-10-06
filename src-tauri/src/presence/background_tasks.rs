@@ -428,11 +428,18 @@ async fn run_knowledge_acquisition(
                             "busy_task".to_string(),
                             tw.topic.clone(),
                         ];
-                        match memory
-                            .add_knowledge_document(&title, &content, tags, "web", Some(ttl_days))
-                            .await
+                        match crate::notebook::collected::ingest_collected(
+                            char_id,
+                            memory,
+                            &title,
+                            &content,
+                            tags,
+                            "web",
+                            Some(ttl_days),
+                        )
+                        .await
                         {
-                            Ok(_) => {
+                            Some(_) => {
                                 acquired += 1;
                                 topic_summaries.push(format!("「{}」", title));
                                 tracing::info!(
@@ -447,12 +454,11 @@ async fn run_knowledge_acquisition(
                                     }
                                 );
                             }
-                            Err(e) => {
+                            None => {
                                 tracing::warn!(
-                                    "[Presence:{}] 主题「{}」知识入库失败: {}",
+                                    "[Presence:{}] 主题「{}」知识入库失败",
                                     char_id,
-                                    tw.topic,
-                                    e
+                                    tw.topic
                                 );
                             }
                         }
@@ -1066,6 +1072,11 @@ async fn collect_expired_knowledge_topics(memory: &MemoryManager) -> Vec<String>
                 tracing::info!(
                     "[KnowledgeRefresh] 过期知识已删除，将刷新: {}",
                     title
+                );
+                // 同步清掉归档笔记，否则知识条目过期后笔记里还留着空壳
+                crate::notebook::collected::remove_collected_note(
+                    memory.char_id(),
+                    &crate::notebook::collected::collected_note_id(&doc.id),
                 );
                 topics.push(title);
             }

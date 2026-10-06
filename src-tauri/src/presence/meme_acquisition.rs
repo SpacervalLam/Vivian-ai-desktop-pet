@@ -380,17 +380,18 @@ async fn run_meme_acquisition(
                     "sns".to_string(),
                     platform.name.to_string(),
                 ];
-                match memory
-                    .add_knowledge_document(
-                        &title,
-                        &content,
-                        tags,
-                        "meme_acquisition",
-                        Some(3), // TTL=3 天，避免上周用法长期污染当前语境
-                    )
-                    .await
+                match crate::notebook::collected::ingest_collected(
+                    char_id,
+                    memory,
+                    &title,
+                    &content,
+                    tags,
+                    "meme_acquisition",
+                    Some(3), // TTL=3 天，避免上周用法长期污染当前语境
+                )
+                .await
                 {
-                    Ok(_) => {
+                    Some(_) => {
                         acquired += 1;
                         summaries.push(format!("「{}」", title));
                         tracing::info!(
@@ -401,12 +402,11 @@ async fn run_meme_acquisition(
                             results.len()
                         );
                     }
-                    Err(e) => {
+                    None => {
                         tracing::warn!(
-                            "[MemeAcquisition:{}] 平台 {} 热梗入库失败: {}",
+                            "[MemeAcquisition:{}] 平台 {} 热梗入库失败",
                             char_id,
-                            platform.name,
-                            e
+                            platform.name
                         );
                     }
                 }

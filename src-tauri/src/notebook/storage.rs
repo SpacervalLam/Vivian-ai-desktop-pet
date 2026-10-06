@@ -10,6 +10,7 @@ use std::path::PathBuf;
 
 use once_cell::sync::Lazy;
 use regex::Regex;
+use serde_json::json;
 use serde::{Deserialize, Serialize};
 
 use super::NoteBook;
@@ -143,6 +144,49 @@ pub fn is_raw_html(char_id: &str, note_id: &str) -> bool {
     let json_path = note_dir(char_id, note_id).join("note.json");
     let html_path = note_dir(char_id, note_id).join("note.html");
     !json_path.exists() && html_path.exists()
+}
+
+/// raw_html 笔记的侧车元数据文件名。
+///
+/// raw_html 笔记只有 `note.html`、没有 `note.json`，所以「不渲染但参与检索」的
+/// 来源说明（对应结构化笔记的 `Block::Meta`）存在这个侧车里。独立文件而不是
+/// 塞进 note.json：raw_html 的定义就是「没有 note.json」，加回来会破坏
+/// `is_raw_html` 的判据。
+const META_SIDECAR: &str = "meta.json";
+
+/// 写入 raw_html 笔记的侧车元数据（数据来源说明等，不渲染但参与 RAG 检索）。
+///
+/// 空白 `meta_note` 会删掉侧车文件，避免留下空壳。
+pub fn save_raw_html_meta(
+    char_id: &str,
+    note_id: &str,
+    meta_note: Option<&str>,
+) -> Result<(), String> {
+    let dir = note_dir(char_id, note_id);
+    let path = dir.join(META_SIDECAR);
+    match meta_note.map(str::trim).filter(|m| !m.is_empty()) {
+        Some(text) => {
+            ensure_dir(&dir).map_err(|e| format!("创建笔记目录失败: {}", e))?;
+            let value = json!({ "provenance": text });
+            std::fs::write(&path, serde_json::to_string_pretty(&value).unwrap_or_default())
+                .map_err(|e| format!("写入笔记元数据失败: {}", e))
+        }
+        None => {
+            if path.exists() {
+                std::fs::remove_file(&path).map_err(|e| format!("删除笔记元数据失败: {}", e))?;
+            }
+            Ok(())
+        }
+    }
+}
+
+/// 读取 raw_html 笔记的侧车元数据（供检索文本拼接用）。
+pub fn load_raw_html_meta(char_id: &str, note_id: &str) -> Option<String> {
+    let path = note_dir(char_id, note_id).join(META_SIDECAR);
+    let raw = std::fs::read_to_string(path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let text = value.get("provenance")?.as_str()?.trim();
+    (!text.is_empty()).then(|| text.to_string())
 }
 
 /// 插入或更新索引中的摘要

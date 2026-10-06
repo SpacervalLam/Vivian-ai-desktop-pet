@@ -738,6 +738,53 @@
   flex-shrink: 0;
 }
 .record-note-index-head-spacer { flex: 1; min-width: 0; }
+
+/* 标签筛选条：横向可滚动的 chip 行，单选切换 */
+.record-note-tagbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  flex-shrink: 0;
+  padding-bottom: 2px;
+  max-height: 84px;
+  overflow-y: auto;
+}
+.record-note-tagchip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border: 1px solid var(--rec-line-soft);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--rec-ink-soft);
+  font-family: inherit;
+  font-size: 11.5px;
+  line-height: 1.7;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background var(--rec-dur) var(--rec-ease),
+    color var(--rec-dur) var(--rec-ease),
+    border-color var(--rec-dur) var(--rec-ease);
+}
+.record-note-tagchip:hover {
+  border-color: var(--rec-line-strong);
+  color: var(--rec-ink);
+}
+/* 激活态沿用 seg/cast 的做法：surface 底 + 细描边，不做反色填充 */
+.record-note-tagchip.is-active {
+  color: var(--rec-ink);
+  background: var(--rec-surface);
+  border-color: var(--rec-line);
+  box-shadow: 0 1px 2px rgba(20, 20, 19, .07);
+}
+.record-note-tagchip-count {
+  font-size: 10.5px;
+  color: var(--rec-ink-faint);
+  font-variant-numeric: tabular-nums;
+}
+.record-note-tagchip.is-active .record-note-tagchip-count { color: var(--rec-ink-soft); }
+
 .record-note-index-scroll {
   display: flex;
   flex-direction: column;

@@ -8,6 +8,9 @@ pub enum RecordKind {
     Dialogue,
     SessionSummary,
     Fact,
+    /// 采集来的外部资料（联网搜索总结、分享链接抓取、笔记成文）。
+    /// 可被检索召回，但没有用户原话支撑，不参与事实合并与共享世界路由。
+    Reference,
     Subjective,
     Observation,
     Internal,
@@ -34,8 +37,11 @@ pub fn initialize_record(item: &mut MemoryItem) {
             "session_summary" => RecordKind::SessionSummary,
             "inner_monologue" | "insight" => RecordKind::Subjective,
             "observation_note" => RecordKind::Observation,
+            // 采集资料是外部内容，不是「关于用户的事实」：`reference` 是用户口述的
+            // 资料性事实（save_memory 的 category），仍属事实层。
+            "knowledge" => RecordKind::Reference,
             "long_term" | "user" | "feedback" | "project" | "reference" | "general"
-            | "preference" | "identity" | "important_event" | "knowledge" => RecordKind::Fact,
+            | "preference" | "identity" | "important_event" => RecordKind::Fact,
             _ => RecordKind::Internal,
         });
     if !item.metadata.is_object() {
@@ -51,12 +57,14 @@ pub fn initialize_record(item: &mut MemoryItem) {
         serde_json::json!(match record_kind {
             RecordKind::Dialogue => "window",
             RecordKind::Subjective | RecordKind::Internal | RecordKind::Observation => "ephemeral",
-            _ => "durable",
+            // 采集资料按自身 TTL/expires_at 过期，不因类别被提前淘汰。
+            RecordKind::Reference | RecordKind::Fact | RecordKind::SessionSummary => "durable",
         })
     });
     let evidence = if record_kind == RecordKind::Subjective {
         "inferred"
-    } else if record_kind == RecordKind::SessionSummary {
+    } else if matches!(record_kind, RecordKind::SessionSummary | RecordKind::Reference) {
+        // 采集资料由搜索结果总结而来，不是谁的原话。
         "derived"
     } else if meta
         .get("source_quote")
@@ -90,13 +98,20 @@ pub fn initialize_record(item: &mut MemoryItem) {
     });
 }
 
+/// 能进入检索与对话上下文的类别。
+///
+/// Reference（采集资料）在这里是**有意保留**的：角色需要能引用联网查到的热梗与
+/// 知识。它不进入长期记忆展示，也不参与事实合并，靠类别而非可达性区分。
 pub fn recallable(item: &MemoryItem) -> bool {
     !item.content.trim().is_empty()
         && !item.consolidated
         && item.metadata["index_active"] != false
         && matches!(
             kind(item),
-            RecordKind::Fact | RecordKind::SessionSummary | RecordKind::Dialogue
+            RecordKind::Fact
+                | RecordKind::SessionSummary
+                | RecordKind::Dialogue
+                | RecordKind::Reference
         )
 }
 
@@ -205,5 +220,20 @@ mod tests {
         assert!(!entries[1].consolidated);
         assert!(entries[1].metadata.get("summarized").is_none());
         assert_eq!(entries[1].content, "原文");
+    }
+
+    #[test]
+    fn collected_knowledge_is_reference_not_fact_but_still_recallable() {
+        let collected = item("knowledge");
+        // 采集资料不是「关于用户的事实」：不能被当成已知事实注入或参与合并。
+        assert_eq!(kind(&collected), RecordKind::Reference);
+        assert_ne!(kind(&collected), RecordKind::Fact);
+        // 但仍可被检索召回，角色要能引用查到的热梗与资料。
+        assert!(recallable(&collected));
+        assert_eq!(collected.metadata["evidence_kind"], serde_json::json!("derived"));
+        assert_eq!(collected.metadata["retention"], serde_json::json!("durable"));
+
+        // 用户口述的资料性事实仍属事实层，不受采集资料拆分影响。
+        assert_eq!(kind(&item("reference")), RecordKind::Fact);
     }
 }

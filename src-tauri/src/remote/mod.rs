@@ -817,15 +817,23 @@ async fn chat_handler(
     {
         let memory = brain.memory.clone();
         let msg_for_kb = message.clone();
+        let char_id_for_kb = char_id.clone();
         tokio::spawn(async move {
             if let Some(url) = crate::network::url_fetcher::extract_first_url(&msg_for_kb) {
                 tracing::info!("[Remote] 检测到用户分享链接，开始抓取: {}", url);
                 match crate::network::url_fetcher::fetch_page(&url).await {
                     Ok(page) => {
                         let tags = vec!["user_link".to_string()];
-                        let _ = memory
-                            .add_knowledge_document(&page.title, &page.text, tags, "user_link", Some(-1))
-                            .await;
+                        let _ = crate::notebook::collected::ingest_collected(
+                            &char_id_for_kb,
+                            &memory,
+                            &page.title,
+                            &page.text,
+                            tags,
+                            "user_link",
+                            Some(-1),
+                        )
+                        .await;
                     }
                     Err(e) => tracing::warn!("[Remote] 抓取链接 {} 失败: {}", url, e),
                 }
@@ -1224,6 +1232,9 @@ pub struct NoteWriteRequest {
     pub layout: Option<String>,
     #[serde(default)]
     pub palette: Option<String>,
+    /// 自定义 CSS（与 palette 互斥，有值时以它为唯一主题来源）
+    #[serde(default)]
+    pub custom_css: Option<String>,
     #[serde(default)]
     pub tags: Option<Vec<String>>,
     #[serde(default)]
@@ -1294,6 +1305,13 @@ async fn create_note(
         tags: req.tags.unwrap_or_default(),
         layout: req.layout.as_deref().map(parse_layout).unwrap_or_default(),
         palette: req.palette.as_deref().map(parse_palette).unwrap_or_default(),
+        // 空白串等同未提供，避免空CSS 被当成自定义主题
+        custom_css: req
+            .custom_css
+            .as_deref()
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+            .map(str::to_string),
         cover: match req.cover {
             Some(c) if !c.is_null() => parse_cover(&c).map_err(err_status)?,
             _ => None,

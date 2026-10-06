@@ -778,6 +778,72 @@ pub fn build_tools_block(tools_text: Option<&str>, enable_native_fc: bool, lang:
 
 // ========== 工具调用专用模块（ToolContinue / ToolRetry / ToolParameterGuide） ==========
 
+/// 笔记专用人设精简版：根据角色 ID 返回**写日记/笔记**的文风指引。
+///
+/// 与 [`build_tool_minimal_identity`] 同源但目标不同：那个是「聊天时怎么说话」
+/// （1-2 句、简短），这个是「写笔记时怎么落笔」（第一人称、有叙事感）。
+/// 两者不能互相替代——笔记是长文本，用聊天的简短约束会把内容写干。
+///
+/// 复用 `PersonaConfig` 的实际数值（见 `notebook::persona_brief`）而不是硬编码，
+/// 这样人设卡调整后笔记文风跟着变。数值必须转成可执行的措辞，
+/// 直接给模型 `tsundere: 0.3` 是无效输入。
+///
+/// **当前工具描述走的是** [`build_notebook_persona_brief_all`]：工具实例是
+/// 无状态全局单例，拿不到 `char_id`，只能并列全部角色让模型自己认领。
+/// 本函数留给将来「已知 char_id 的调用上下文」——那时精度更高（只需一个角色的
+/// 文风，不必让模型在两段里挑）。
+pub fn build_notebook_persona_brief(char_id: &str, lang: &str) -> String {
+    let brief = match normalize_lang(lang) {
+        "en" => crate::notebook::persona_brief::brief_en(char_id),
+        _ => crate::notebook::persona_brief::brief_zh(char_id),
+    };
+    if brief.trim().is_empty() {
+        return String::new();
+    }
+    let (header, footer) = match normalize_lang(lang) {
+        "en" => (
+            "## Voice for this note (write AS this person, first person)",
+            "Write like these notes are her own diary to herself - not a report, not an article.",
+        ),
+        _ => (
+            "## 笔记文风（用这个人的人格写，第一人称）",
+            "把这些笔记当作她写给自己的日记，不是报告，不是文章。",
+        ),
+    };
+    format!("{header}\n{brief}\n{footer}")
+}
+
+/// 全部已知角色的笔记人设并列版（给工具描述用）。
+///
+/// 工具实例是**无状态全局单例**（`CreateNotebookTool::new()` 不带角色上下文），
+/// 而人设按角色变化。静态 schema 字符串里装不下单个角色的人设，
+/// 所以并列给出全部角色，由模型按当前 `char_id` 认领属于自己那一段。
+pub fn build_notebook_persona_brief_all(lang: &str) -> String {
+    let briefs = match normalize_lang(lang) {
+        "en" => crate::notebook::persona_brief::all_brief_en(),
+        _ => crate::notebook::persona_brief::all_brief_zh(),
+    };
+    if briefs.trim().is_empty() {
+        return String::new();
+    }
+    let (header, footer) = match normalize_lang(lang) {
+        "en" => (
+            "## Voice for this note (pick the line matching who you are, first person)",
+            "Write it as your own diary to yourself - not a report, not an article. \
+             Open straight into the content, no report phrasing; sentences may carry mood, \
+             preference and snark. For facts you looked up, say it naturally \
+             (\"I just found\"), never \"according to the search results\".",
+        ),
+        _ => (
+            "## 笔记文风（认领属于你的人格那一行，用第一人称写）",
+            "当作她写给自己的日记，不是报告不是文章。开头直接切进内容，别用「本文将」\
+             「以下是」这类报告腔；句子可以有情绪、偏好、吐槽，不必客观中立。\
+             检索来的事实用「我刚查到」这类自然说法带过，不要写成「据检索结果显示」。",
+        ),
+    };
+    format!("{header}\n{briefs}\n{footer}")
+}
+
 /// 工具继续模块：根据角色ID返回精简版人设
 ///
 /// 顶部注入 PERSONA_LOAD 硬约束标志，让精简路径同样遵守角色的服务话术红线；
@@ -2603,5 +2669,44 @@ mod tests {
     #[test]
     fn test_channel_style_guide_unknown_channel_is_empty() {
         assert_eq!(build_channel_style_guide("no_such_channel"), "");
+    }
+
+    /// 笔记人设必须**按角色区分**——这是它存在的全部理由。
+    ///
+    /// Vivian 与 Nana 的出厂数值截然相反（Vivian: 毒舌 0.65/傲娇 0.30；
+    /// Nana: 毒舌 0.10/傲娇 0.05、治愈 0.90），如果两者产出相同文案，
+    /// 说明提炼逻辑坏了，模型会拿错角色的口吻写笔记。
+    #[test]
+    fn notebook_brief_differs_between_characters() {
+        let vivian = build_notebook_persona_brief("vivian", "zh");
+        let nana = build_notebook_persona_brief("nana", "zh");
+        assert!(vivian.contains("Vivian"), "{vivian}");
+        assert!(nana.contains("Nana"), "{nana}");
+        assert_ne!(vivian, nana, "两个角色的文风指引不该相同");
+    }
+
+    /// 人设精简版必须有字数上限——它每轮都进 prompt。
+    #[test]
+    fn notebook_brief_is_bounded() {
+        for id in ["vivian", "nana"] {
+            for lang in ["zh", "en", "ja"] {
+                let brief = build_notebook_persona_brief(id, lang);
+                assert!(!brief.is_empty(), "{id}/{lang} 不该为空");
+                assert!(
+                    brief.chars().count() < 900,
+                    "{id}/{lang} 过长: {} 字符",
+                    brief.chars().count()
+                );
+            }
+        }
+    }
+
+    /// 并列版要把两个角色都列出来——工具描述是静态的，模型要自己认领。
+    #[test]
+    fn notebook_brief_all_lists_every_character() {
+        let all = build_notebook_persona_brief_all("zh");
+        assert!(all.contains("Vivian"), "{all}");
+        assert!(all.contains("Nana"), "{all}");
+        assert!(all.contains("认领"), "应说明按角色认领: {all}");
     }
 }

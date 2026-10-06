@@ -56,6 +56,7 @@ pub async fn create_notebook(
     blocks: Value,
     layout: Option<String>,
     palette: Option<String>,
+    custom_css: Option<String>,
     tags: Option<Vec<String>>,
     cover: Option<Value>,
     app: AppHandle,
@@ -66,6 +67,10 @@ pub async fn create_notebook(
     }
     let layout = layout.as_deref().map(parse_layout).unwrap_or_default();
     let palette = palette.as_deref().map(parse_palette).unwrap_or_default();
+    // 空白串等同未提供，避免 NoteBook::theme 把空CSS 当成自定义主题
+    let custom_css = custom_css
+        .map(|c| c.trim().to_string())
+        .filter(|c| !c.is_empty());
     let tags = tags.unwrap_or_default();
     let cover = match cover {
         Some(c) if !c.is_null() => parse_cover(&c)?,
@@ -86,6 +91,7 @@ pub async fn create_notebook(
         tags,
         layout,
         palette,
+        custom_css,
         cover,
         blocks,
     };
@@ -111,6 +117,7 @@ pub async fn update_notebook(
     blocks: Option<Value>,
     layout: Option<String>,
     palette: Option<String>,
+    custom_css: Option<String>,
     tags: Option<Vec<String>>,
     cover: Option<Value>,
     app: AppHandle,
@@ -129,6 +136,11 @@ pub async fn update_notebook(
     }
     if let Some(p) = palette {
         note.palette = parse_palette(&p);
+    }
+    // 传空串表示「撤掉自定义 CSS 回到预设配色」。不能只认None——
+    // 那就没法把一篇自定义过主题的笔记改回预设。
+    if let Some(c) = custom_css {
+        note.custom_css = Some(c.trim().to_string()).filter(|c| !c.is_empty());
     }
     if let Some(t) = tags {
         note.tags = t;

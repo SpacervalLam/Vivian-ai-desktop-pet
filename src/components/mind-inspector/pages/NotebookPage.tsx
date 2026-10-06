@@ -20,6 +20,7 @@ import {
   Check,
   ChevronDown,
   ChevronUp,
+  Code,
   FileText,
   LayoutTemplate,
   ListChecks,
@@ -35,6 +36,7 @@ import {
 } from 'lucide-react';
 import { useNavigation } from '../NavigationContext';
 import {
+  AddableBlockType,
   Block,
   Cover,
   NoteBook,
@@ -77,6 +79,27 @@ const PALETTE_COLORS: Record<string, string> = {
 
 const PALETTE_KEYS = Object.keys(PALETTE_COLORS);
 
+/** 开启自定义 CSS 时写入的起步样式：先给一组变量示范怎么改，而不是空白页 */
+const CSS_PRESET_PLACEHOLDER = `:root {
+    --accent: #4A7C9B;
+    --ink: #1C2024;
+    --rule: #CFD8DC;
+    --accent-grad: linear-gradient(135deg, #31576B, #5E8FA3);
+}
+.heading { margin-top: 40px; }`;
+
+const CSS_PLACEHOLDER = `:root {
+    /* 主强调色 / 正文墨色 / 分隔线 / 封面渐变 */
+    --accent: #4A7C9B;
+    --ink: #1C2024;
+    --rule: #CFD8DC;
+    --accent-grad: linear-gradient(135deg, #31576B, #5E8FA3);
+}
+
+/* 可覆盖：.container .cover .cover-title .cover-subtitle .card .card-title
+   .card-body .heading .heading-1/2/3 .paragraph .quote .list .list-item
+   .callout .tag .nb-table .chart .mermaid .footer .divider */`;
+
 const LAYOUT_OPTIONS: { value: string; labelKey: string }[] = [
   { value: 'cover_flow', labelKey: 'cover_flow' },
   { value: 'article', labelKey: 'article' },
@@ -90,7 +113,7 @@ const LAYOUT_LABELS: Record<string, Record<string, string>> = {
   ja: { cover_flow: 'カバー', article: '記事', gallery: 'ギャラリー', simple: 'シンプル' },
 };
 
-const BLOCK_TYPES: BlockType[] = [
+const BLOCK_TYPES: AddableBlockType[] = [
   'heading',
   'paragraph',
   'card',
@@ -137,14 +160,15 @@ function layoutLabel(value: string, lang: string): string {
   return table[value] || value;
 }
 
-function defaultBlock(type: BlockType): Block {
+// 只接受 AddableBlockType：meta 块由采集链路写入，不提供新增入口
+function defaultBlock(type: AddableBlockType): Block {
   switch (type) {
     case 'heading':
       return { type: 'heading', text: '', level: 2 };
     case 'paragraph':
       return { type: 'paragraph', text: '' };
     case 'card':
-      return { type: 'card', title: '', body: '', emoji: '' };
+      return { type: 'card', title: '', body: '' };
     case 'quote':
       return { type: 'quote', text: '', author: '' };
     case 'list':
@@ -154,9 +178,9 @@ function defaultBlock(type: BlockType): Block {
     case 'image':
       return { type: 'image', url: '', caption: '' };
     case 'divider':
-      return { type: 'divider', emoji: '' };
+      return { type: 'divider' };
     case 'callout':
-      return { type: 'callout', text: '', emoji: '' };
+      return { type: 'callout', text: '' };
     case 'table':
       return { type: 'table', headers: [''], rows: [['']], caption: '' };
     case 'chart':
@@ -244,6 +268,8 @@ const NotebookPage: React.FC = () => {
   const [character, setCharacter] = useState<CharacterId>('vivian');
   const [notes, setNotes] = useState<NoteSummary[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  // 标签筛选：单选，再次点击同一标签取消。null = 不筛选。
+  const [activeTag, setActiveTag] = useState<string | null>(null);
   const [html, setHtml] = useState<string>('');
   const [loading, setLoading] = useState(false);
   const [loadingHtml, setLoadingHtml] = useState(false);
@@ -388,6 +414,39 @@ const NotebookPage: React.FC = () => {
       unlistens.forEach((u) => u());
     };
   }, [character, loadNotes, loadNoteHtml]);
+
+  // 标签聚合：统计每个标签的笔记数，按数量降序（同数按名称稳定排序）。
+  // 标签池随笔记自然生长（不设受控词表），所以这里只聚合现有数据。
+  const tagStats = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const note of notes) {
+      for (const tag of note.tags ?? []) {
+        const key = tag.trim();
+        if (key) counts.set(key, (counts.get(key) ?? 0) + 1);
+      }
+    }
+    return [...counts.entries()]
+      .map(([tag, count]) => ({ tag, count }))
+      .sort((a, b) => b.count - a.count || a.tag.localeCompare(b.tag));
+  }, [notes]);
+
+  // 筛选后的笔记列表。标签为空（trim 后）的笔记视为无分类，任何标签筛选下都不出现。
+  const visibleNotes = useMemo(() => {
+    if (!activeTag) return notes;
+    return notes.filter((note) => (note.tags ?? []).some((t) => t.trim() === activeTag));
+  }, [notes, activeTag]);
+
+  // 被筛掉的笔记正好是当前选中项时清空右侧预览，避免「列表看不到、正文还在」
+  // 再次点击同一标签即取消筛选
+  const toggleTag = useCallback((tag: string) => {
+    setActiveTag((prev) => (prev === tag ? null : tag));
+  }, []);
+
+  useEffect(() => {
+    if (!activeTag) return;
+    // 标签被删或笔记不再命中该标签时，退出筛选而不是留一个空列表
+    if (!tagStats.some((s) => s.tag === activeTag)) setActiveTag(null);
+  }, [tagStats, activeTag]);
 
   // 删除笔记
   const handleDelete = useCallback(
@@ -535,6 +594,8 @@ const NotebookPage: React.FC = () => {
           blocks: blocksJson,
           layout: draft.layout,
           palette: draft.palette,
+          // 传undefined 而非空串：create 侧空串会被 trim 过滤成None
+          customCss: draft.custom_css ?? undefined,
           tags: draft.tags,
           cover: coverVal,
         });
@@ -547,6 +608,9 @@ const NotebookPage: React.FC = () => {
           blocks: blocksJson,
           layout: draft.layout,
           palette: draft.palette,
+          // 必传：空串表示「显式撤销自定义 CSS 回到预设配色」，
+          // 不传则 update_notebook 保持原值
+          customCss: draft.custom_css ?? '',
           tags: draft.tags,
           cover: coverVal,
         });
@@ -595,7 +659,8 @@ const NotebookPage: React.FC = () => {
   );
 
   const addBlock = useCallback(
-    (type: BlockType) => {
+    // 用 AddableBlockType：meta 块只能由采集链路写入，用户不提供新增入口
+    (type: AddableBlockType) => {
       patchDraft((d) => ({ ...d, blocks: [...d.blocks, defaultBlock(type)] }));
     },
     [patchDraft],
@@ -641,6 +706,32 @@ const NotebookPage: React.FC = () => {
           </button>
         </div>
 
+        {tagStats.length > 0 && (
+          <div className="record-note-tagbar" role="group" aria-label={t('notebook.filter_by_tag', { defaultValue: '按标签筛选' })}>
+            <button
+              type="button"
+              className={`record-note-tagchip${activeTag === null ? ' is-active' : ''}`}
+              aria-pressed={activeTag === null}
+              onClick={() => setActiveTag(null)}
+            >
+              {t('notebook.tag_all', { defaultValue: '全部' })}
+              <span className="record-note-tagchip-count">{notes.length}</span>
+            </button>
+            {tagStats.map(({ tag, count }) => (
+              <button
+                key={tag}
+                type="button"
+                className={`record-note-tagchip${activeTag === tag ? ' is-active' : ''}`}
+                aria-pressed={activeTag === tag}
+                onClick={() => toggleTag(tag)}
+              >
+                {tag}
+                <span className="record-note-tagchip-count">{count}</span>
+              </button>
+            ))}
+          </div>
+        )}
+
         <div className="record-note-index-scroll">
           {loading && notes.length === 0 ? (
             <Blank icon={NotebookPen} title={t('common.loading')} />
@@ -649,8 +740,13 @@ const NotebookPage: React.FC = () => {
               icon={NotebookPen}
               title={t('notebook.empty_hint', { name: t(`mind_inspector.common.char_${character}`) })}
             />
+          ) : visibleNotes.length === 0 ? (
+            <Blank
+              icon={Tag}
+              title={t('notebook.tag_filter_empty', { defaultValue: '该标签下没有笔记' })}
+            />
           ) : (
-            notes.map((note) => (
+            visibleNotes.map((note) => (
               <NoteRow
                 key={note.id}
                 note={note}
@@ -832,7 +928,7 @@ const NoteEditor: React.FC<{
   onUpdateBlock: (idx: number, patch: Partial<Block>) => void;
   onRemoveBlock: (idx: number) => void;
   onMoveBlock: (idx: number, dir: -1 | 1) => void;
-  onAddBlock: (type: BlockType) => void;
+  onAddBlock: (type: AddableBlockType) => void;
   onSave: () => void;
   onCancel: () => void;
 }> = ({
@@ -852,10 +948,12 @@ const NoteEditor: React.FC<{
   onSave,
   onCancel,
 }) => {
-  const [addType, setAddType] = useState<BlockType>('paragraph');
+  const [addType, setAddType] = useState<AddableBlockType>('paragraph');
   const [mode, setMode] = useState<'form' | 'wysiwyg'>('wysiwyg');
   const showCover = draft.layout === 'cover_flow' || draft.layout === 'gallery';
   const cover = draft.cover;
+  // 自定义 CSS 与palette 互斥：开启时 palette 选择器要禁用（后端会忽略它）
+  const cssMode = (draft.custom_css ?? '').trim().length > 0;
 
   const tagsText = useMemo(() => draft.tags.join(', '), [draft.tags]);
 
@@ -936,6 +1034,9 @@ const NoteEditor: React.FC<{
                 <button
                   key={key}
                   type="button"
+                  // 启用自定义 CSS 时改palette 无效（后端以 CSS 为唯一主题来源），
+                  // 所以禁用并给出说明，而不是让用户改了却看不到变化
+                  disabled={cssMode}
                   onClick={() => onPatch((d) => ({ ...d, palette: key }))}
                   title={key}
                   aria-label={key}
@@ -946,14 +1047,77 @@ const NoteEditor: React.FC<{
                     borderRadius: 999,
                     border: draft.palette === key ? '2px solid var(--rec-accent)' : '2px solid transparent',
                     background: PALETTE_COLORS[key],
-                    cursor: 'pointer',
+                    cursor: cssMode ? 'not-allowed' : 'pointer',
                     padding: 0,
+                    opacity: cssMode ? 0.4 : 1,
                     boxShadow: '0 0 0 0.5px var(--claude-line)',
                     transition: 'border-color 0.16s cubic-bezier(0.2,0.8,0.2,1)',
                   }}
                 />
               ))}
             </div>
+          </div>
+
+          <div className="rec-field">
+            <label className="rec-label">
+              <span style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
+                <Code size={13} /> {t('notebook.custom_css')}
+              </span>
+            </label>
+            <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginBottom: cssMode ? 8 : 0 }}>
+              <button
+                type="button"
+                className={`rec-btn${cssMode ? ' is-primary' : ''}`}
+                aria-pressed={cssMode}
+                onClick={() =>
+                  onPatch((d) => ({
+                    ...d,
+                    // 关闭时写入空串而非 undefined：后端 update_notebook 靠
+                    // Some("") 区分「显式撤销 CSS」与「这次没改这个字段」
+                    custom_css: cssMode ? null : CSS_PRESET_PLACEHOLDER,
+                  }))
+                }
+              >
+                {cssMode
+                  ? t('notebook.custom_css_on', { defaultValue: '使用自定义 CSS' })
+                  : t('notebook.custom_css_off', { defaultValue: '启用自定义 CSS' })}
+              </button>
+              {cssMode && (
+                <span className="rec-label-hint">
+                  {t('notebook.custom_css_hint', {
+                    defaultValue: '与配色互斥：自定义 CSS 是唯一主题来源',
+                  })}
+                </span>
+              )}
+            </div>
+            {cssMode && (
+              <>
+                <textarea
+                  className="rec-textarea"
+                  style={{ minHeight: 180, fontFamily: 'ui-monospace, monospace', fontSize: 12.5 }}
+                  value={draft.custom_css ?? ''}
+                  placeholder={CSS_PLACEHOLDER}
+                  onChange={(e) => onPatch((d) => ({ ...d, custom_css: e.target.value }))}
+                />
+                <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+                  <button
+                    type="button"
+                    className="rec-btn is-ghost"
+                    onClick={() => onPatch((d) => ({ ...d, custom_css: CSS_PRESET_PLACEHOLDER }))}
+                  >
+                    {t('notebook.custom_css_example', { defaultValue: '插入示例' })}
+                  </button>
+                  <button
+                    type="button"
+                    className="rec-btn is-ghost"
+                    disabled={!(draft.custom_css ?? '').trim()}
+                    onClick={() => onPatch((d) => ({ ...d, custom_css: '' }))}
+                  >
+                    {t('notebook.custom_css_clear', { defaultValue: '清空' })}
+                  </button>
+                </div>
+              </>
+            )}
           </div>
 
           <div className="rec-field">
@@ -1026,7 +1190,7 @@ const NoteEditor: React.FC<{
                         ...d,
                         cover: d.cover
                           ? null
-                          : { title: d.title, subtitle: '', emoji: '', background: '' },
+                          : { title: d.title, subtitle: '', background: '' },
                       }))
                     }
                     className="rec-btn is-ghost"
@@ -1056,28 +1220,16 @@ const NoteEditor: React.FC<{
                         }
                       />
                     </div>
-                    <div className="record-note-block-row">
-                      <div style={{ flex: '0 0 120px' }}>
-                        <label className="rec-label">{t('notebook.cover_emoji')}</label>
-                        <input
-                          className="rec-input"
-                          value={cover.emoji || ''}
-                          onChange={(e) =>
-                            onPatch((d) => ({ ...d, cover: { ...d.cover!, emoji: e.target.value } }))
-                          }
-                        />
-                      </div>
-                      <div style={{ flex: 1 }}>
-                        <label className="rec-label">{t('notebook.cover_bg')}</label>
-                        <input
-                          className="rec-input"
-                          value={cover.background || ''}
-                          placeholder="#FF6B6B / linear-gradient(...)"
-                          onChange={(e) =>
-                            onPatch((d) => ({ ...d, cover: { ...d.cover!, background: e.target.value } }))
-                          }
-                        />
-                      </div>
+                    <div className="rec-field">
+                      <label className="rec-label">{t('notebook.cover_bg')}</label>
+                      <input
+                        className="rec-input"
+                        value={cover.background || ''}
+                        placeholder="#FF6B6B / linear-gradient(...)"
+                        onChange={(e) =>
+                          onPatch((d) => ({ ...d, cover: { ...d.cover!, background: e.target.value } }))
+                        }
+                      />
                     </div>
                   </>
                 )}
@@ -1136,7 +1288,7 @@ const NoteEditor: React.FC<{
           <div style={{ display: 'flex', gap: 'var(--rec-gap-2)', paddingTop: 'var(--rec-gap-2)' }}>
             <select
               value={addType}
-              onChange={(e) => setAddType(e.target.value as BlockType)}
+              onChange={(e) => setAddType(e.target.value as AddableBlockType)}
               className="rec-select"
               style={{ flex: 1 }}
             >
@@ -1290,15 +1442,7 @@ const BlockEditor: React.FC<{
                 onChange={(e) => onUpdate({ body: e.target.value } as Partial<Block>)}
               />
             </div>
-            <div style={{ flex: '0 0 120px' }}>
-              <label className="rec-label">{t('notebook.emoji')}</label>
-              <input
-                className="rec-input"
-                value={block.emoji || ''}
-                onChange={(e) => onUpdate({ emoji: e.target.value } as Partial<Block>)}
-              />
-            </div>
-          </>
+                      </>
         )}
 
         {type === 'quote' && (
@@ -1388,13 +1532,10 @@ const BlockEditor: React.FC<{
         )}
 
         {type === 'divider' && (
-          <div style={{ flex: '0 0 120px' }}>
-            <label className="rec-label">{t('notebook.emoji')}</label>
-            <input
-              className="rec-input"
-              value={block.emoji || ''}
-              onChange={(e) => onUpdate({ emoji: e.target.value } as Partial<Block>)}
-            />
+          <div className="rec-field">
+            <p className="rec-label-hint">
+              {t('notebook.divider_hint', { defaultValue: '分割线（无线可设置）' })}
+            </p>
           </div>
         )}
 
@@ -1408,15 +1549,7 @@ const BlockEditor: React.FC<{
                 onChange={(e) => onUpdate({ text: e.target.value } as Partial<Block>)}
               />
             </div>
-            <div style={{ flex: '0 0 120px' }}>
-              <label className="rec-label">{t('notebook.emoji')}</label>
-              <input
-                className="rec-input"
-                value={block.emoji || ''}
-                onChange={(e) => onUpdate({ emoji: e.target.value } as Partial<Block>)}
-              />
-            </div>
-          </>
+                      </>
         )}
 
         {type === 'table' && (

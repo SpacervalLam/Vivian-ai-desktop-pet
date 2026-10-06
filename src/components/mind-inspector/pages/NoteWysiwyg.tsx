@@ -29,6 +29,7 @@ import {
 } from 'lucide-react';
 import { COLORS, TYPO, SPACING, EASE, DURATION } from '../design-system';
 import {
+  AddableBlockType,
   Block,
   BlockStyle,
   isStyledBlock,
@@ -323,7 +324,6 @@ const EditableBlock: React.FC<{
             }}
           >
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
-              {block.emoji && <span>{block.emoji}</span>}
               {block.title !== undefined && (
                 <EditableText
                   value={block.title || ''}
@@ -444,13 +444,8 @@ const EditableBlock: React.FC<{
         return (
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, color: COLORS.textTertiary }}>
             <div style={{ flex: 1, height: 1, background: COLORS.border }} />
-            {/* 块自带 emoji 时用用户的；没有就用一条短横 ——
-                不再兜底 '✿'：emoji 渲染随系统字体变化、字形不可控。 */}
-            {block.emoji ? (
-              <span>{block.emoji}</span>
-            ) : (
-              <Minus size={14} />
-            )}
+            {/* 笔记不用 emoji，分割线固定用一条短横 */}
+            <Minus size={14} />
             <div style={{ flex: 1, height: 1, background: COLORS.border }} />
           </div>
         );
@@ -467,11 +462,8 @@ const EditableBlock: React.FC<{
               alignItems: 'flex-start',
             }}
           >
-            {block.emoji ? (
-              <span style={{ fontSize: 18, lineHeight: 1 }}>{block.emoji}</span>
-            ) : (
-              <Lightbulb size={17} style={{ color: COLORS.accent, flexShrink: 0 }} />
-            )}
+            {/* 统一用 lucide 图标而非 emoji：字形随系统字体变化、不可控 */}
+            <Lightbulb size={17} style={{ color: COLORS.accent, flexShrink: 0 }} />
             <EditableText
               value={block.text}
               onCommit={commitText('text')}
@@ -625,7 +617,8 @@ export const WysiwygEditor: React.FC<{
   onUpdateBlock: (idx: number, patch: Partial<Block>) => void;
   onRemoveBlock: (idx: number) => void;
   onMoveBlock: (idx: number, dir: -1 | 1) => void;
-  onAddBlock: (type: Block['type']) => void;
+  // 用 AddableBlockType：meta 块不渲染也不提供新增入口
+  onAddBlock: (type: AddableBlockType) => void;
   t: (key: string, opts?: Record<string, unknown>) => string;
 }> = ({ blocks, onUpdateBlock, onRemoveBlock, onMoveBlock, onAddBlock, t }) => {
   const [selectedIdx, setSelectedIdx] = useState<number | null>(null);

@@ -700,22 +700,23 @@ pub async fn send_message_stream(
                     };
                     if !content.trim().is_empty() {
                         let title = format!("文件：{}", file_name);
-                        match memory
-                            .add_knowledge_document(
-                                &title,
-                                &content,
-                                vec!["user_file".to_string()],
-                                "user_file",
-                                Some(-1),
-                            )
-                            .await
+                        match crate::notebook::collected::ingest_collected(
+                            &char_id_for_kb,
+                            &memory,
+                            &title,
+                            &content,
+                            vec!["user_file".to_string()],
+                            "user_file",
+                            Some(-1),
+                        )
+                        .await
                         {
-                            Ok(item) => tracing::info!(
+                            Some(id) => tracing::info!(
                                 "[Knowledge] 用户文件「{}」已入库，memory_id={}",
                                 file_name,
-                                item.id
+                                id
                             ),
-                            Err(e) => tracing::warn!("[Knowledge] 文件入库失败: {}", e),
+                            None => tracing::warn!("[Knowledge] 文件入库失败"),
                         }
                     }
                 }
@@ -726,22 +727,23 @@ pub async fn send_message_stream(
                     match crate::network::url_fetcher::fetch_page(&url).await {
                         Ok(page) => {
                             let tags = vec!["user_link".to_string()];
-                            match memory
-                                .add_knowledge_document(
-                                    &page.title,
-                                    &page.text,
-                                    tags,
-                                    "user_link",
-                                    Some(-1),
-                                )
-                                .await
+                            match crate::notebook::collected::ingest_collected(
+                                &char_id_for_kb,
+                                &memory,
+                                &page.title,
+                                &page.text,
+                                tags,
+                                "user_link",
+                                Some(-1),
+                            )
+                            .await
                             {
-                                Ok(item) => tracing::info!(
+                                Some(id) => tracing::info!(
                                     "[Knowledge] 用户链接「{}」已入库，memory_id={}",
                                     page.title,
-                                    item.id
+                                    id
                                 ),
-                                Err(e) => tracing::warn!("[Knowledge] 链接入库失败: {}", e),
+                                None => tracing::warn!("[Knowledge] 链接入库失败"),
                             }
                         }
                         Err(e) => tracing::warn!(
@@ -752,7 +754,6 @@ pub async fn send_message_stream(
                     }
                 }
             }
-            let _ = char_id_for_kb;
         });
     }
 

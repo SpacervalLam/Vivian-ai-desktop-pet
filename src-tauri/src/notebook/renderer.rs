@@ -1,13 +1,15 @@
 //! 渲染引擎 - 将 NoteBook JSON + 预设 CSS 主题合成为自包含 HTML 页面
 //!
 //! 设计要点：
-//! - CSS 主题预设卡片风格（圆角卡片 / 暖色调 / emoji 装饰 / 标签胶囊）
+//! - CSS 主题预设卡片风格（圆角卡片 / 暖色调 / 标签胶囊）
 //! - 6 套配色方案（warm/fresh/elegant/cute/cool/nature）
 //! - 4 种布局模板（cover_flow/article/gallery/simple）
+//! - 可选的自定义 CSS（`NoteBook::custom_css`）：与 palette **互斥**，
+//!   有值时预设配色变量降级为兜底，自定义规则在预设 CSS 之后注入
 //! - 自定义 HTML 片段经 storage::sanitize_html 清理（移除 script/on*/javascript:）
 //! - 输出为自包含 HTML 文件（内联 CSS，可直接在 webview/浏览器打开）
 
-use super::{Block, BlockStyle, ChartSeries, Cover, Layout, NoteBook, Palette};
+use super::{Block, BlockStyle, ChartSeries, Cover, Layout, NoteBook, Palette, Theme};
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -281,7 +283,9 @@ body {{
     border-radius: 18px;
     padding: 52px 28px 44px;
     margin-bottom: 34px;
-    background: var(--accent-grad);
+    /* --cover-bg 由内联 style 提供（仅当笔记显式设了自定义背景），
+       缺省回落到配色渐变。用变量而非内联 background，让自定义 CSS 也能覆盖。 */
+    background: var(--cover-bg, var(--accent-grad));
     color: #fff;
     text-align: center;
     position: relative;
@@ -303,15 +307,6 @@ body {{
     width: 220px; height: 220px;
     border-radius: 50%;
     background: rgba(255,255,255,0.07);
-}}
-.cover-emoji {{
-    font-size: 52px;
-    margin-bottom: 12px;
-    display: block;
-    line-height: 1.2;
-    position: relative;
-    z-index: 1;
-    filter: drop-shadow(0 2px 6px rgba(0,0,0,0.15));
 }}
 .cover-title {{
     font-family: "Ma Shan Zheng", "Caveat", sans-serif;
@@ -349,9 +344,12 @@ body {{
     letter-spacing: 1px;
 }}
 .heading::before {{
-    content: "✦";
-    color: {primary};
-    font-size: 0.7em;
+    content: "";
+    width: 7px;
+    height: 7px;
+    background: {primary};
+    border-radius: 2px;
+    flex-shrink: 0;
 }}
 .heading::after {{
     content: "";
@@ -384,7 +382,6 @@ body {{
     box-shadow: var(--shadow);
 }}
 .card-header {{ display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }}
-.card-emoji {{ font-size: 22px; line-height: 1; }}
 .card-title {{
     font-family: "Ma Shan Zheng", "Caveat", sans-serif;
     font-size: 19px;
@@ -511,7 +508,6 @@ body {{
     background: linear-gradient(90deg, transparent, var(--rule), transparent);
     max-width: 140px;
 }}
-.divider-emoji {{ font-size: 22px; filter: drop-shadow(0 1px 2px rgba(0,0,0,0.08)); }}
 
 /* === 提示框（左强调线） === */
 .callout {{
@@ -521,13 +517,9 @@ body {{
     border-radius: 12px;
     padding: 16px 18px;
     margin: 22px 0;
-    display: flex;
-    gap: 12px;
-    align-items: flex-start;
     box-shadow: var(--shadow);
 }}
-.callout-emoji {{ font-size: 20px; line-height: 1.4; flex-shrink: 0; }}
-.callout-text {{ font-size: 15px; color: {text}; line-height: 1.8; flex: 1; }}
+.callout-text {{ font-size: 15px; color: {text}; line-height: 1.8; }}
 
 /* === 自定义 HTML === */
 .custom {{ margin: 16px 0; border-radius: 12px; overflow: hidden; }}
@@ -735,19 +727,13 @@ fn render_block(block: &Block) -> String {
                 style = style_attr(style)
             )
         }
-        Block::Card { title, body, emoji, style } => {
-            let header = if let Some(t) = title {
-                let emoji_html = emoji
-                    .as_ref()
-                    .map(|e| format!(r#"<span class="card-emoji">{}</span>"#, escape_html(e)))
-                    .unwrap_or_default();
-                format!(
-                    r#"<div class="card-header">{}<span class="card-title">{}</span></div>"#,
-                    emoji_html,
+        Block::Card { title, body, style } => {
+            let header = match title {
+                Some(t) => format!(
+                    r#"<div class="card-header"><span class="card-title">{}</span></div>"#,
                     escape_html(t)
-                )
-            } else {
-                String::new()
+                ),
+                None => String::new(),
             };
             format!(
                 r#"<div class="block"><div class="card">{}<div class="card-body"{style}>{}</div></div></div>"#,
@@ -805,21 +791,12 @@ fn render_block(block: &Block) -> String {
                 caption_html
             )
         }
-        Block::Divider { emoji } => {
-            let emoji_html = emoji
-                .as_ref()
-                .map(|e| format!(r#"<span class="divider-emoji">{}</span>"#, escape_html(e)))
-                .unwrap_or_else(|| r#"<span class="divider-emoji">✿</span>"#.to_string());
-            format!(r#"<div class="block"><div class="divider">{}</div></div>"#, emoji_html)
+        Block::Divider => {
+            format!(r#"<div class="block"><div class="divider"></div></div>"#)
         }
-        Block::Callout { text, emoji, style } => {
-            let emoji_html = emoji
-                .as_ref()
-                .map(|e| format!(r#"<span class="callout-emoji">{}</span>"#, escape_html(e)))
-                .unwrap_or_else(|| r#"<span class="callout-emoji">💡</span>"#.to_string());
+        Block::Callout { text, style } => {
             format!(
-                r#"<div class="block"><div class="callout">{}<div class="callout-text"{style}>{}</div></div></div>"#,
-                emoji_html,
+                r#"<div class="block"><div class="callout"><div class="callout-text"{style}>{}</div></div></div>"#,
                 escape_html(text).replace('\n', "<br>"),
                 style = style_attr(style)
             )
@@ -855,7 +832,7 @@ fn render_block(block: &Block) -> String {
             let chart_id = format!("nb-chart-{}", chart_id_counter::next());
             let option = build_chart_option(chart_type, categories, series);
             format!(
-                r#"<div class="block"><div class="nb-chart-wrap">{title_html}<div id="{id}" class="nb-chart" data-option='{opt}'><div class="nb-chart-fallback">📊 图表「{cname}」加载中…</div></div></div></div>"#,
+                r#"<div class="block"><div class="nb-chart-wrap">{title_html}<div id="{id}" class="nb-chart" data-option='{opt}'><div class="nb-chart-fallback">图表「{cname}」加载中…</div></div></div></div>"#,
                 id = chart_id,
                 opt = sanitize_single_quote(&option),
                 cname = escape_html(
@@ -883,21 +860,21 @@ fn render_block(block: &Block) -> String {
                 super::storage::sanitize_html(html)
             )
         }
+        // Meta 块在 render_html 里已被过滤掉；这里兜底返回空串，
+        // 保证「误调用render_block(Meta) 也不会往页面里漏内容」
+        Block::Meta { .. } => String::new(),
     }
 }
 
 /// 渲染封面
-fn render_cover(cover: &Cover, palette: &PaletteColors) -> String {
-    let bg = cover
+fn render_cover(cover: &Cover) -> String {
+    // 背景走**内联 style**时优先级高于任何样式表，智能体的自定义 CSS 就覆盖不了它。
+    // 所以显式自定义背景时改写成 CSS 变量，由 .cover 规则消费——
+    // 这样预设 CSS 与自定义 CSS 都能通过 `.cover { background: ... }` 正常覆盖。
+    let bg_var = cover
         .background
         .as_ref()
-        .map(|b| b.clone())
-        .unwrap_or_else(|| palette.accent_gradient.to_string());
-
-    let emoji_html = cover
-        .emoji
-        .as_ref()
-        .map(|e| format!(r#"<span class="cover-emoji">{}</span>"#, escape_html(e)))
+        .map(|b| format!(" style=\"--cover-bg: {b};\""))
         .unwrap_or_default();
 
     let subtitle_html = cover
@@ -907,9 +884,7 @@ fn render_cover(cover: &Cover, palette: &PaletteColors) -> String {
         .unwrap_or_default();
 
     format!(
-        r#"<div class="cover" style="background: {};">{}<div class="cover-title">{}</div>{}</div>"#,
-        bg,
-        emoji_html,
+        r#"<div class="cover"{bg_var}><div class="cover-title">{}</div>{}</div>"#,
         escape_html(&cover.title),
         subtitle_html
     )
@@ -917,22 +892,40 @@ fn render_cover(cover: &Cover, palette: &PaletteColors) -> String {
 
 /// 渲染完整 HTML 页面
 pub fn render_html(note: &NoteBook) -> String {
+    // 主题只有一个来源：预设配色或自定义 CSS（互斥，见 NoteBook::theme）。
+    // 预设配色变量在两种情况下都会注入，作为自定义 CSS 的兜底色板——
+    // 自定义只覆盖 .card 间距而没定义颜色时，不至于拿到错误的暖橙。
     let palette = palette_colors(&note.palette);
-    let css = build_css(&palette, &note.layout);
+    let base_css = build_css(&palette, &note.layout);
+    let custom_css = match note.theme() {
+        Theme::Custom(css) => format!("\n/* === 自定义 CSS（覆盖上方预设主题） === */\n{css}\n"),
+        Theme::Preset(_) => String::new(),
+    };
+    let css = format!("{base_css}{custom_css}");
 
     let cover_html = match (&note.layout, &note.cover) {
         (Layout::Article, _) | (Layout::Simple, _) => String::new(),
-        (_, Some(cover)) => render_cover(cover, &palette),
+        (_, Some(cover)) => render_cover(cover),
         (_, None) => String::new(),
     };
 
-    let blocks_html: String = note.blocks.iter().map(render_block).collect();
+    // Meta 块不渲染：它只进note.json 与知识库检索，页面上不出现。
+    // 显式过滤而不是靠 render_block 返回空串——空串无法与「渲染意外失败」区分。
+    let blocks_html: String = note
+        .blocks
+        .iter()
+        .filter(|b| !matches!(b, Block::Meta { .. }))
+        .map(render_block)
+        .collect();
 
     let has_chart = note.blocks.iter().any(|b| matches!(b, Block::Chart { .. }));
     let has_mermaid = note.blocks.iter().any(|b| matches!(b, Block::Mermaid { .. }));
     let head_scripts = build_head_scripts(has_chart, has_mermaid);
 
-    let footer_tags: String = if note.tags.is_empty() {
+    // 采集笔记的 tags 是**筛选用的分类标记**（如「知识采集」），不是给读者看的装饰，
+    // 所以不渲染到页脚——页脚只留给手写笔记的关键词标签云。
+    let show_footer_tags = !crate::notebook::collected::is_collected_note(&note.id);
+    let footer_tags: String = if !show_footer_tags || note.tags.is_empty() {
         String::new()
     } else {
         let tags: String = note
@@ -947,9 +940,17 @@ pub fn render_html(note: &NoteBook) -> String {
         .map(|dt| dt.format("%Y-%m-%d").to_string())
         .unwrap_or_default();
 
+    // 笔记不用 emoji，日期以纯文字表达：采集笔记的 created_at 是「首次采集时间」
+    // （刷新时保留，见 collected.rs），手写笔记是创建时间。语义差异靠文案区分而非图标。
+    let date_line = if crate::notebook::collected::is_collected_note(&note.id) {
+        format!("采集于 {date_str}")
+    } else {
+        date_str.clone()
+    };
+
     let footer_html = format!(
-        r#"<div class="footer">{}<span>📝 {}</span></div>"#,
-        footer_tags, date_str
+        r#"<div class="footer">{}<span>{}</span></div>"#,
+        footer_tags, date_line
     );
 
     format!(
@@ -1023,7 +1024,7 @@ fn build_head_scripts(has_chart: bool, has_mermaid: bool) -> String {
         var codeVar = el.textContent;
         mermaid.render('mmd-' + Math.random().toString(36).slice(2,8), codeVar)
           .then(function(res){ el.innerHTML = res.svg; })
-          .catch(function(){ el.innerHTML = '<div class="nb-mermaid-error">⚠️ 流程图解析失败</div>'; });
+          .catch(function(){ el.innerHTML = '<div class="nb-mermaid-error">流程图解析失败</div>'; });
       });
     }catch(e){}
   }
@@ -1050,10 +1051,10 @@ mod tests {
             tags: vec!["测试".into()],
             layout: Layout::CoverFlow,
             palette: Palette::Fresh,
+            custom_css: None,
             cover: Some(Cover {
                 title: "数据总览".into(),
                 subtitle: Some("一张测试封面".into()),
-                emoji: Some("📊".into()),
                 background: None,
             }),
             blocks: vec![
@@ -1106,5 +1107,129 @@ mod tests {
         let html = render_html(&note);
         assert!(!html.contains("echarts.min.js"));
         assert!(!html.contains("mermaid.min.js"));
+    }
+
+    /// 笔记不使用 emoji：整页扫描 emoji 码位，CSS `content` 里的装饰字符也算。
+    ///
+    /// 这条锁住的是「约定」而非某个具体字符——历史上有两处漏网
+    /// （标题装饰 `✦` 与页脚 `📅`），都是靠肉眼 review 漏掉的。
+    #[test]
+    fn rendered_note_contains_no_emoji() {
+        let mut note = sample_note();
+        note.blocks.push(Block::Divider);
+        note.blocks.push(Block::Callout {
+            text: "提示".into(),
+            style: None,
+        });
+        let html = render_html(&note);
+
+        let mut found: Vec<char> = Vec::new();
+        for ch in html.chars() {
+            let c = ch as u32;
+            let is_emoji = (0x1F300..=0x1FAFF).contains(&c)   // 常用 pictograph
+                || (0x1F000..=0x1F2FF).contains(&c)   // 麻将/扑克/杂项符号
+                || (0x2600..=0x27BF).contains(&c)   // 装饰符号、 dingbat
+                || c == 0xFE0F                              // 变体选择符
+                || c == 0x2705
+                || c == 0x274C;
+            if is_emoji && !found.contains(&ch) {
+                found.push(ch);
+            }
+        }
+        assert!(found.is_empty(), "笔记渲染不应含 emoji，发现: {found:?}");
+    }
+
+    /// 采集笔记的分类标签只用于筛选，不进页脚。
+    ///
+    /// 断言必须定位到页脚片段再检查，不能用 `html.contains("footer-tags")` ——
+    /// 那个字符串在 `<style>` 的 CSS 规则里也会出现，断言会假阳性。
+    #[test]
+    fn collected_note_tags_stay_out_of_the_footer() {
+        use crate::notebook::collected::{build_collected_note, COLLECTED_TAG};
+        let note = build_collected_note(
+            "vivian",
+            "mem_footer_tag",
+            "douyin热梗速览",
+            "整理自搜索结果。\n\n1. 梗\n用法：自嘲",
+            "meme_acquisition",
+        );
+        assert_eq!(note.tags, vec![COLLECTED_TAG.to_string()]);
+        let html = render_html(&note);
+        let footer_at = html.find("class=\"footer\"").expect("应渲染页脚");
+        let rest = &html[footer_at..];
+        let end = rest.find("</div>").unwrap_or(0);
+        let footer = &rest[..end];
+        assert!(!footer.contains("class=\"tag\""), "页脚不该有标签: {footer}");
+
+        // 反面对照：手写笔记的标签仍要渲染，否则这条测试只是在验证「都没了」
+        let mut hand_written = sample_note();
+        hand_written.id = "note_handwritten".into();
+        hand_written.tags = vec!["手写标签".into()];
+        let hand_html = render_html(&hand_written);
+        let hand_footer_at = hand_html.find("class=\"footer\"").expect("应渲染页脚");
+        let hand_rest = &hand_html[hand_footer_at..];
+        let hand_end = hand_rest.find("</div>").unwrap_or(0);
+        assert!(
+            hand_rest[..hand_end].contains("class=\"tag\""),
+            "手写笔记的标签标签云仍应渲染"
+        );
+    }
+
+    /// `custom_css` 与 `palette` 互斥：有CSS 时自定义是唯一主题来源。
+    #[test]
+    fn custom_css_takes_precedence_over_palette() {
+        let mut note = sample_note();
+        assert!(!note.has_custom_css(), "默认走预设配色");
+
+        note.custom_css = Some(":root { --accent: #123456; }".into());
+        assert!(note.has_custom_css());
+        let html = render_html(&note);
+        assert!(html.contains("#123456"), "自定义 CSS 应被注入");
+        // 注入在预设 CSS 之后：同优先级下后写先生效
+        let custom_at = html.find("/* === 自定义 CSS").expect("应有自定义段标记");
+        let preset_var_at = html.find("--accent: #2BA39B").expect("预设变量应仍在");
+        assert!(
+            custom_at > preset_var_at,
+            "自定义 CSS 必须排在预设 CSS 之后才能覆盖"
+        );
+    }
+
+    #[test]
+    fn blank_custom_css_falls_back_to_palette() {
+        let mut note = sample_note();
+        // 空白串等同未提供——否则 NoteBook::theme 会把空CSS 当成自定义主题，
+        // 笔记就变成「没有配色也没有样式」的白板
+        note.custom_css = Some("   \n\t ".into());
+        assert!(!note.has_custom_css());
+        assert!(matches!(note.theme(), Theme::Preset(_)));
+        let html = render_html(&note);
+        // 断言要精确：CSS 里别处也有「自定义 CSS」这几个字（注释说明），
+        // 模糊匹配会假阳性
+        assert!(
+            !html.contains("/* === 自定义 CSS"),
+            "空白 CSS 不该产生注入段"
+        );
+    }
+
+    /// 封面自定义背景必须能被 CSS 覆盖——曾经用内联 style 导致智能体改不动。
+    #[test]
+    fn cover_background_is_overridable_by_css() {
+        let mut note = sample_note();
+        note.cover = Some(Cover {
+            title: "封面".into(),
+            subtitle: None,
+            background: Some("#ABCDEF".into()),
+        });
+        // 预设 CSS 里 .cover 消费 --cover-bg（而非内联 background）
+        let html = render_html(&note);
+        assert!(html.contains("--cover-bg: #ABCDEF"), "背景应走 CSS 变量");
+        assert!(
+            html.contains("background: var(--cover-bg, var(--accent-grad))"),
+            ".cover 应通过变量消费背景，自定义 CSS 才能覆盖"
+        );
+        assert!(
+            !html.contains("class=\"cover\" style=\"background:"),
+            "不应再有内联 background，否则 CSS 覆盖不了"
+        );
     }
 }
