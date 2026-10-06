@@ -65,38 +65,7 @@ pub async fn get_memories(
         .collect())
 }
 
-/// 获取图谱时间轴骨架点（记忆 + 日记）
-///
-/// 每个点仅含 `{id, ts, kind}`，不含内容与 embedding，用于驱动时间比例尺与迷你地图。
-/// 过滤条件与范围查询共享 `is_graph_visible_memory` 谓词，避免骨架与内容不一致产生幽灵点。
-#[tauri::command]
-pub async fn get_graph_timeline(
-    state: State<'_, Arc<AppState>>,
-    character_id: Option<String>,
-) -> Result<Vec<Value>, String> {
-    let character = state.get_character(character_id.as_deref())?;
-    let mut pts: Vec<Value> = character
-        .brain
-        .memory
-        .timeline_points()
-        .into_iter()
-        .map(|(id, ts)| json!({ "id": id, "ts": ts, "kind": "memory" }))
-        .collect();
-    let diaries = crate::diary::get_entries(&character.id, None).map_err(err_str)?;
-    pts.extend(diaries.iter().map(|d| {
-        json!({ "id": d.id, "ts": d.created_at, "kind": "diary" })
-    }));
-    pts.sort_by(|a, b| {
-        a["ts"]
-            .as_f64()
-            .unwrap_or(0.0)
-            .partial_cmp(&b["ts"].as_f64().unwrap_or(0.0))
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    Ok(pts)
-}
-
-/// 按时间窗口获取完整记忆（图谱懒加载内容层）
+/// 按时间窗口获取完整记忆
 ///
 /// 返回 `[after, before)` 区间内的完整记忆条目，序列化前剥离 embedding 以减小载荷。
 #[tauri::command]

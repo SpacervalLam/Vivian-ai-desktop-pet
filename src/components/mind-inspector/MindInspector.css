@@ -38,15 +38,6 @@
   box-shadow: var(--codex-shadow-lg);
 }
 
-.mind-diary-toolbar {
-  display: flex;
-  justify-content: flex-end;
-  align-items: center;
-  flex-shrink: 0;
-  min-height: 34px;
-  padding: 0 4px;
-}
-
 .mind-sb-cover-title {
   display: flex;
   align-items: center;

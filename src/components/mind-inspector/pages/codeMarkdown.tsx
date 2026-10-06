@@ -82,10 +82,6 @@ export function localFileTarget(href: string): MarkdownFileTarget | null {
   return FILE_EXTS.has(ext) ? { path, line, column } : null;
 }
 
-/** 兼容已有调用者：只取不带行列后缀的文件路径。 */
-export function localFilePath(href: string): string | null {
-  return localFileTarget(href)?.path ?? null;
-}
 
 /** 按扩展名挑图标，贴合文件树里同类文件的观感 */
 function fileIconFor(path: string): React.ElementType {

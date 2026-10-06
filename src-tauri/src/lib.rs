@@ -12,7 +12,6 @@ pub mod config;
 pub mod stickers;
 pub mod conversation;
 pub mod cordis;
-pub mod credentials;
 pub mod cross_character;
 pub mod diary;
 pub mod discovery;
@@ -52,7 +51,6 @@ pub mod startup;
 pub mod state;
 pub mod storage;
 pub mod tools;
-pub mod workspace;
 pub mod translation;
 pub mod types;
 pub mod utils;
@@ -298,8 +296,6 @@ pub fn run() {
             commands::memory::get_memories,
             commands::memory::get_memory_conversations,
             commands::memory::summarize_memory_conversation,
-            commands::memory::get_graph_timeline,
-            commands::memory::get_memories_range,
             commands::memory::get_memory_summary,
             commands::memory::search_memories,
             commands::memory::get_memories_all,
@@ -582,6 +578,7 @@ pub fn run() {
             commands::presence::set_presence_state,
             commands::tts::get_tts_config,
             commands::tts::set_tts_config,
+            commands::tts::set_tts_enabled_all,
             commands::tts::speak_text,
             commands::tts::stop_speaking,
             commands::tts::get_speaking_status,
@@ -1029,6 +1026,9 @@ pub fn run() {
                             crate::startup::finish_startup();
 
                             tracing::info!("所有角色初始化完成，发送 app:ready 事件");
+                            // 语音开关的勾选态以角色实际加载完的 TTS 配置为准
+                            // （setup_tray 阶段角色尚未就绪，只能先用默认值）
+                            commands::system_tray::sync_voice_check_from_state(&state);
                             let _ = handle.emit("app:ready", ());
 
                             // 启动远程访问 HTTP 服务（按配置启停，支持自定义端口）

@@ -28,7 +28,6 @@ import DiaryPage from './pages/DiaryPage';
 import NotebookPage from './pages/NotebookPage';
 import PlannerPage from './pages/PlannerPage';
 import CodeAgentPage from './pages/CodeAgentPageNew';
-import { invalidatePastelCache } from './pages/GraphPage';
 import PageErrorBoundary from './PageErrorBoundary';
 import './MindInspector.css';
 import './MindInspectorThemes.css';
@@ -162,11 +161,6 @@ const MindInspector: React.FC = () => {
   useEffect(() => {
     reportInspectorNav(activeNav);
   }, [activeNav]);
-
-  // 挂载时刷新 pastel 主题色缓存，应对用户切换主题后重新打开 Mind Inspector 的场景
-  useEffect(() => {
-    invalidatePastelCache();
-  }, []);
 
   // 将旧分组入口和内部定位目标映射到一级页面。
   const resolveNav = (page: NavKey, params?: PageParams): { key: NavKey; params: PageParams } => {

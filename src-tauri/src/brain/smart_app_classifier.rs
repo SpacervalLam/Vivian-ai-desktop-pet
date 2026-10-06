@@ -1,7 +1,6 @@
 //! 智能应用分类器。
 //!
 //! - 根据 window title / process name 分类应用（工作/娱乐/社交等）
-//! - 用于 computer_control 的上下文感知
 //! - LLM 驱动的语义理解（非关键词匹配）
 //! - TTL 缓存
 //!

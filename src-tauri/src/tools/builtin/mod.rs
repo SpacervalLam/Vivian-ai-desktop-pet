@@ -26,7 +26,6 @@ pub mod plugin_tools;
 pub mod provider_preset_tools;
 pub mod presence_tools;
 pub mod question_tools;
-pub mod relationship_tools;
 pub mod research_tool;
 pub mod scheduler_tools;
 pub mod send_image_tool;

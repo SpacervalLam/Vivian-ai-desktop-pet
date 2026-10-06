@@ -1299,7 +1299,7 @@ pub enum ResponseMode {
 | [`conversations.rs`](src-tauri/src/memory/conversations.rs) | UI 与巩固共用的原始消息会话投影；按社会交流场景与持久化语义边界归组，运行会话 ID 只作诊断，参与者变化只更新名单，聊天入口切换不拆分；保留消息 ID、说话者、受众、时间和贴纸，按 ID 去重，不按内容去重 |
 | [`session_summary.rs`](src-tauri/src/memory/session_summary.rs) | 约 12000 字符分段，超长单条按 4000 字符切片，原文完整覆盖；分段指纹及字符范围用于恢复和失效判断，每次生成仍读原文，避免摘要二次摘要漂移 |
 | [`conversation_semantics.rs`](src-tauri/src/memory/conversation_semantics.rs) | 交流边界候选、结构化 LLM 判断与持久化；后台 consolidation 路由，中性指令；按原文指纹缓存，重置使在途判断失效 |
-| [`kinds.rs`](src-tauri/src/memory/kinds.rs) | 新记录类别初始化、主观与内部记录隔离；record_kind / retention / topics / important_event / evidence_kind 互相独立；事实合并保留 evidence_sources |
+| [`kinds.rs`](src-tauri/src/memory/kinds.rs) | 新记录类别初始化、主观与内部记录隔离；record_kind / retention / topics / important_event / evidence_kind 互相独立；`memory_type = knowledge` 归reference（采集资料，可召回但不进事实链路），`reference` 仍属 fact；事实合并保留 evidence_sources |
 | [`consolidation.rs`](src-tauri/src/memory/consolidation.rs) | 夜间睡眠巩固；**步骤级熔断**：pipeline / belief / memory_md 三步连续失败 ≥ 5 次转 `paused`（显式 `paused_reason`，暂停期间跳过不烧 LLM，1 小时半开重试），健康快照持久化到 `consolidation_health_<char_id>.json` 供 UI 读取；**memory.md 整理步**（Stage 5）：`tidy_need` 非 `None` 才触发——`Incremental` 经 `split_regions` 取待整理区（仅新增沉淀）交 memory 路由（机械整理不需人设）产出条目，由 `merge_entries` 机械并入已整理区，`FullCompaction` 读全文按主题重排精简；并入后逼近 1700 字符自动回落全量压缩；`write_memory_md` 内部校验预算上限、超限拒绝写保原文件不动 |
 | [`step_health.rs`](src-tauri/src/memory/step_health.rs) | 步骤健康跟踪：每步 last_success/error + 熔断暂停原因；同根因错误签名只打一次 error；原子写入。**熔断双路径**：① 连续失败 ≥ 5 次（快路径，彻底死亡）；② 滑动窗口错误率 ≥ 60% 且样本 ≥ 5（慢路径，半死不活状态）——`recent_results` 窗口记录最近 20 次成败（成功样本也计入，偶发失败不误熔断，交替成败的 flaky 步骤照样熔断）；serde default 兼容旧持久化 |
 | [`retriever.rs`](src-tauri/src/memory/retriever.rs) | 混合检索（BM25 + 向量 + RRF 融合 + 实体/专名多路补充召回 + 语义去重 + **MMR 多样化**）。**MMR 多样化**（`mmr_diversify` / `MMR_LAMBDA=0.7`）：对排序结果贪心重排 `λ×relevance − (1−λ)×max_sim(已选集)`，相似度用 Jaccard token 重叠（jieba 分词，零嵌入成本），让 Top-K 覆盖更多不同侧面而非近重复堆叠，插入在精排/综合权重排序之后、截断之前；λ≥1 短路纯相关度。`MemoryRetrievalFilter` 结构化预过滤（memory_type/tags/时间窗口）；检索评测集（hit@k / MRR）。**BM25 分词缓存**：以 `memory_id` 为 key 的全局有界缓存（上限 8000 条），值为 `(内容指纹, 词频表+总词数)`，指纹由 content/tags/description 哈希得到，内容变更自动重算，避免每次对话重复 jieba 分词 |
@@ -1337,7 +1337,14 @@ pub enum ResponseMode {
 
 会话摘要 ID 为角色与会话投影 ID 的 SHA-256 标识（`mem_session_<hash>`），保持稳定并适用于 Windows 明文镜像文件名；`upsert_session_summary` 跳过通用相似去重和容量淘汰，原子写入规范条目，再更新可重建的向量索引。metadata 保存参与者、起止时间、source_message_ids、source_message_count、summary_parts（原消息字符切片和指纹）、completed_parts / total_parts 及 summary_status（partial / complete / no_content）。只有已完整覆盖的消息进入 source_message_ids。无可延续内容的明确 null 结果保存为不展示、不召回的水位；失败不标记为成功。单次手动超出八段时可继续整理，已完成分段不会重复调用模型。
 
-内容类型在 metadata.record_kind 中区分 dialogue / session_summary / fact / subjective / observation / internal；evidence_kind 区分 quoted / derived / inferred / unspecified。retention 是独立策略提示（window / durable / ephemeral），topics 表示偏好、身份、项目等主题，important_event 是标记，重要程度继续使用 importance。新记录写入时声明类别；读取时不按类型名称、标签或文本猜测类别，也不补写旧记录。
+内容类型在 metadata.record_kind 中区分 dialogue / session_summary / fact / reference / subjective / observation / internal；evidence_kind 区分 quoted / derived / inferred / unspecified。retention 是独立策略提示（window / durable / ephemeral），topics 表示偏好、身份、项目等主题，important_event 是标记，重要程度继续使用 importance。新记录写入时声明类别；读取时不按类型名称、标签或文本猜测类别，也不补写旧记录。
+
+**采集资料不属于事实层。** `memory_type = knowledge`（后台热梗采集、后台知识采集、分享链接抓取、笔记成文，均经 `add_knowledge_document` 写入）归入 `record_kind = reference` 而非 `fact`。区分依据是证据来源：事实要有用户原话支撑（quoted），采集资料是由搜索结果总结出的外部内容（derived）。两者混为一类，会让「Vivian 记得的事」被外部资料淹没。
+
+- `reference` **可召回**：`recallable()` 包含它，检索与对话上下文照常使用——角色要能引用查到的热梗，否则整个采集功能白做。过期由自身 `expires_at` / TTL 控制，不因类别被提前淘汰。
+- `reference` **不进事实链路**：`is_durable_fact`、retention 内容去重、topic_merger、共享世界路由都只处理 `fact`，因此采集资料不会被当作「已知事实」注入 AutoExtractor，也不会与真实事实互相合并。
+- 心智观察器 `MemoryPage` 的 `layerOf` 只认 `record_kind = fact`，采集资料因此天然不出现在长期记忆页，不需要前端额外过滤。
+- `memory_type = reference`（save_memory 的 category）是**用户口述的资料性事实**，仍属 `fact`，与上述采集资料是两回事。
 
 事实抽取与画像独立处理原话，跳过其他角色发言、问候指令及内部插话指令。AutoExtractor 用同一次抽取判定写入 semantic_type（user / relationship / project / reference），无需再逐条调用 enrich；source_quote 必须来自对应说话者。事实合并保留 evidence_sources，显式更正通过 supersedes 留下追溯关系。通用去重和话题合并只处理事实，不能删除同样内容但不同 ID 的真实发言或会话摘要。
 
@@ -2046,7 +2053,185 @@ pub struct CustomToolDef {
 |------|------|
 | [`renderer.rs`](src-tauri/src/notebook/renderer.rs) | HTML 渲染器，手账风格 CSS |
 | [`storage.rs`](src-tauri/src/notebook/storage.rs) | 笔记存储（按 char_id 隔离） |
+| [`collected.rs`](src-tauri/src/notebook/collected.rs) | 采集资料 → 笔记的反向同步（`ingest_collected` 统一入口） |
 | [`mod.rs`](src-tauri/src/notebook/mod.rs) | 模块入口 |
+
+#### 采集资料归档为笔记
+
+采集资料（热梗采集、后台知识采集、分享链接抓取、用户文件）经`add_knowledge_document`
+写入知识库后，由 `collected::ingest_collected` 另存一份笔记，使其在 NotebookPage
+有正式归档位置，而不是只躺在记忆条目里。
+
+- **知识条目是权威副本，笔记是可读归档。** 与 `sync_notebook_to_knowledge`（笔记 → 知识库）
+  方向相反。采集笔记因此是只读的：用户编辑它不会回写知识条目，两个方向不会互相覆盖。
+- **笔记 id 由知识条目 id 派生**（`note_collected_<memory_id>`），不是时间戳。
+  这样「重新采集刷新」会原地覆盖同一篇笔记，不会每次刷新堆一篇新的。
+- **`should_archive` 明确排除两类来源**：`notebook`（反方向同步的产物，归档会自循环）
+  与 `migration`（历史搬迁，归档只会产生重复内容）。这是防自循环的唯一闸门。
+- **过期同步清理**：知识条目 TTL 过期被删除时（`collect_expired_knowledge_topics`），
+  一并删掉对应归档笔记，否则笔记里会留下空壳。
+- 归档失败只记日志不阻断：采集链路的主产物是知识条目，笔记是次要的。
+
+反向的 `delete_notebook` 链路已能处理归档笔记：删笔记时先读 `.memory_ref` 清知识条目，
+而采集笔记的 `.memory_ref` 里正是知识条目 id，双向都通。
+
+#### 采集笔记的呈现约定
+
+采集笔记只带**一个**固定标签 `COLLECTED_TAG`（「知识采集」），来源与细分主题
+在封面（标题 + 中文副标题）里表达。来源枚举值 → 中文说明由 `source_label` 映射
+（`meme_acquisition`→网络热梗采集 / `web`→后台知识采集 / `user_link`→分享链接 /
+`user_file`→分享文件），**未登记来源退化为「采集资料」而非透传原始枚举值**。
+
+`COLLECTED_TAG` 是**筛选标记而非展示标签**：`renderer.rs` 判到采集笔记就跳过页脚
+标签云，所以内部枚举值不会重新摆到成品页面上。手写笔记的标签云照常渲染
+（`collected_note_tags_stay_out_of_the_footer` 有反面对照断言）。
+
+`created_at` 的语义是**首次采集时间**，不是最后更新时间：TTL 资料（如 3 天有效的
+热梗）每次刷新都重建笔记，若跟着刷新就变成了「最后一次采集」，对「这资料有多新」
+是反向误导。因此 `first_collected_at` 会在覆盖前先读旧笔记沿用其 `created_at`，
+页脚文案相应写「采集于」以区别于手写笔记的纯日期。
+
+采集内容的排版走 `compose_blocks` 结构化编排（实测样本为 11 个编号条目，
+每条固定「来源/背景 / 用法 / 慎用」三字段），而非按空行切段塞纯文本；
+字段标签用 `KNOWN_FIELDS` 白名单识别——汉字的 `is_alphanumeric()` 为 true，
+靠字符集猜测会把「他说：这样」误判成字段。自由形态内容退回按空行分段。
+
+#### 笔记不使用 emoji
+
+笔记正文、标题、封面与块内容里都不放 emoji，视觉层次靠标题层级、配色与卡片结构
+表达。这条约定落在四处：
+
+- **数据结构**：`Cover` 与 `Block`（`Card` / `Divider` / `Callout`）都没有 `emoji` 字段，
+  `Block::Divider` 因此是无字段变体。旧的 `note.json` 若残留该字段，serde 会忽略，
+  **存量笔记无需迁移**。
+- **渲染器**：不渲染任何 emoji；页脚日期用纯文字（「采集于」/ 日期本身），
+  标题装饰符 `✦` 改为 CSS 绘制的小方块。图表加载占位与 mermaid 错误提示也用纯文字。
+- **工具 schema**：`create_notebook` 不再向 LLM 提供 `cover.emoji` 与各块的 emoji 字段。
+- **工具描述**：`create_notebook` 与 `create_html_note` 的中/英/日三语描述各加一条
+  明确禁令——只删 schema 不够，模型仍可能自己往正文里塞 emoji。
+
+**`rendered_note_contains_no_emoji` 按码位区间扫描整页 HTML**（含 CSS `content`），
+而不是枚举具体字符：历史上有四处漏网（标题 `✦`、页脚 `📅`、图表占位 `📊`、
+mermaid 错误 `⚠️`）都是枚举式断言与肉眼 review 漏掉的。约定要由测试守住。
+
+#### 笔记分类标签
+
+笔记标签是**筛选标记**，用于笔记页的分类筛选，由智能体自主标注。
+
+- **复用优先**：`create_notebook` 与 `create_html_note` 的三语描述都要求
+  「创建前先 `list_notebooks` 看已有标签，语义相同就复用」。不设受控词表——
+  标签池随笔记自然生长，所以更需要模型主动收敛近义标签。
+- 标签取主题/领域词，不取「待办」「重要」这类状态词与日期，2-4 个。
+- 采集笔记固定带 `COLLECTED_TAG`（「知识采集」），供筛选自动归档的资料。
+
+**标签池是自由生长的，但筛选 UI 是单选 chip**（`NotebookPage` 的 `activeTag`，
+再次点击同一标签取消，另设「全部」）。标签统计从 `NoteSummary.tags` 实时聚合，
+按笔记数降序、同数按名称稳定排序。
+
+#### 主题：预设配色 vs 自定义 CSS
+
+`NoteBook::custom_css` 让智能体在 `create_notebook` 时自定义视觉风格。
+**两者互斥**（Alen 定的），由 `NoteBook::theme()` 收敛成唯一决策点：
+```rust
+pub enum Theme {
+    Preset(Palette),   // 用预设配色
+    Custom(String),    // 用智能体写的 CSS 片段
+}
+```
+
+- **互斥实现**：`render_html` 匹配 `Theme` —— `Custom` 时不套预设配色逻辑，
+  自定义规则注入在预设 CSS **之后**（同优先级下后写先生效）。
+  预设的配色变量仍会注入，作为兜底色板（自定义只改 `.card` 间距而没定义颜色时，
+  不会拿到错误的暖橙）。
+- **空白串等同未提供**：`theme()` 对 `custom_css` 做 trim，空串返回 `Preset`——
+  否则笔记会变成「既没配色也没样式」的白板。
+- **注入点集中在一处**：`render_html` 拼 `base_css + custom_css`，
+  不在各个 `render_*` 里散落判断。
+
+**封面背景曾有覆盖漏洞**：`render_cover` 原本写内联 `style="background: ..."`，
+内联优先级高于任何样式表，智能体的自定义 CSS 改不动。现改为写
+`style="--cover-bg: ..."` + CSS `background: var(--cover-bg, var(--accent-grad))`，
+自定义与预设都能正常覆盖（`cover_background_is_overridable_by_css` 锁住）。
+
+**「自定义范式」集中在 `notebook/css_guide.rs`**：可用 CSS 变量清单
+（`--accent` / `--ink` / `--rule` …）与可用选择器清单（`.cover` / `.card` /
+`.heading` / `.nb-table` …）都是**从 `renderer.rs` 实际 CSS 里核对出来的**，
+不是设计意图——避免模型去改不存在的类。范式以常量复用到三处：工具 schema 的
+`custom_css` 字段描述、工具描述正文第 8 条、前端编辑器提示。
+
+写入路径三处：`create_notebook` / `update_notebook`（传空串表示「显式撤销 CSS
+回到预设」，不传则保持原值）、`remote::mod.rs` 的远程创建接口。
+`collected.rs` 显式置 `None`——采集笔记的排版由 `compose_blocks` 固定编排。
+前端编辑器开启自定义时**禁用配色选择器**（`opacity: 0.4` + `not-allowed`），
+否则用户改了配色却看不到变化。
+
+#### 笔记人设：char_id 的精简版拼进工具描述
+
+**笔记要体现人设、用第一人称写**（Alen 要求，像日记而非报告）。
+做法是把 `char_id` 的人设做成**笔记专用精简版**拼进工具描述——
+只用文字引导不够「软」，给了具体锚点命中率才高。
+
+实现落在 `notebook/persona_brief.rs` + `prompt_modules::build_notebook_persona_brief*`。
+
+**只取 4 类字段**，其余（外观、场景模式、决策权重、演化层）不进prompt——
+大部分与「怎么写笔记」无关，而这段每轮都进 prompt：
+
+| 来源 | 产出 |
+|---|---|
+| `identity.name` | 角色名（必报，否则模型认不出自己是谁） |
+| `language_style.catchphrases` | 最多 2 个口癖（再多变口头禅堆砌） |
+| `expression` 数值 | **转成可执行措辞**（见下） |
+| `identity.taboos` | 写作相关禁令：客服腔、动作描写 |
+
+**数值必须转成文字，不能直接给模型**：`tsundere: 0.3` 对模型无意义，
+「关心藏在别扭的语气后面，不要直白说在乎」才可执行。阈值分档而非线性插值
+（`sass >= 0.6` / `< 0.3` 两档），每档给写法提示而不只是形容词。
+
+**双语用 `TraitLine { zh, en }` 成对产出**——不要「先出中文、再按中文匹配回英文」，
+那种靠字符串相等判断语义的写法改一个字就静默失配。同理最终 `join` 的分隔符
+要跟语言走（中文「；」/ 英文 `"; "`），混用会让英文描述里出现中文分号。
+
+**中文版不硬译 tagline**：出厂 `identity.tagline` 是英文
+（"A weeb netizen who lives online…"），混进中文句子只是噪音。
+真正决定文风的是表达倾向与禁令，所以中文版只报名字。
+
+**注入点选 `parameters_schema` 的 `title` 字段描述**，而不是 `description()`：
+`Tool::description()` / `description_in()` 返回 `&'static str`（trait 约束），
+装不下按角色变化的人设；而 `title` 是必填字段、模型一定会看它的描述，
+`parameters_schema()` 本身已是运行时 `format!`（拼 `css_guide` 的先例）。
+
+**并列全部角色而不是只给当前角色**：工具实例是**无状态全局单例**
+（`CreateNotebookTool::new()` 不带角色上下文），`ToolScene` 也不携带 `char_id`，
+整条静态组装链路都拿不到角色。所以 schema 里并列 Vivian 与 Nana 两段，
+由模型按 `char_id` 认领（`all_brief_zh` / `all_brief_en`，`known_char_ids` 是权威清单）。
+`build_notebook_persona_brief(char_id, lang)` 留给将来「已知 char_id 的调用上下文」。
+
+**不复用 `PersonaEngine::new()`**：那个构造函数会 `create_dir_all` 写磁盘，
+工具层拿个描述文本不该有文件副作用。`load_persona_for_notes` 直接读
+`persona.json`，失败回退 `default_persona_for`（当前实测用户还没保存过
+persona.json，所以这条回退路径是主路径而非边缘情况）。
+
+**来源说明存但不渲染**用 `Block::Meta { key, text }`：
+
+- **不渲染**：`render_html` 显式 `filter(|b| !matches!(b, Block::Meta { .. }))`，
+  不是靠 `render_block` 返回空串——空串无法与「渲染意外失败」区分。
+- **参与检索**：`note_to_searchable_text` 把 Meta 拼成 `key: text` 进检索文本。
+  漏了这一步就等于「存了也白存」：`meta_block_takes_part_in_retrieval` 锁住。
+- **成块而非独立字段**：块序列是数据层的统一载体，智能体用 `create_notebook`
+  也能主动写 Meta 块，不必为它单开一套参数。
+- **前端不提供编辑入口**：类型上用 `AddableBlockType = Exclude<BlockType, 'meta'>`
+  排除，`tsc` 会在任何试图新增 meta 的地方报错（实施时抓到 3 处）。
+- **raw_html 路径没有 note.json**，所以用 `meta.json` **侧车文件**
+  （`storage::save_raw_html_meta` / `load_raw_html_meta`），工具参数是 `meta_note`。
+  独立文件而不是塞进 note.json：raw_html 的定义就是「没有 note.json」，
+  加回来会破坏 `is_raw_html` 的判据。
+
+**采集笔记的导语改成了 Meta 块**，带来两个连带影响：
+1. **封面副标题不再取导语首句**，改用 `source_label` 的中文来源标签
+   （「网络热梗采集」）。原先截断 48 字后仍会把「…可靠性中等」这类
+   来源声明摆在封面上，与「不渲染来源说明」的意图矛盾。签名顺势简化成
+   `cover_subtitle(source)`。
+2. 渲染后的页面**不再有 Callout**，11 个条目直接以 Heading 起头。
 
 #### 两种笔记形态
 
@@ -2577,7 +2762,7 @@ LLM 输出含标记的 text
 | [`ollama.rs`](src-tauri/src/commands/ollama.rs) | Ollama |
 | [`coding_agent.rs`](src-tauri/src/commands/coding_agent.rs) | 编程智能体（`coding_new_session` / `coding_list_sessions` / `coding_delete_session` / `coding_cancel_session` / `coding_send_message`） |
 | [`rag.rs`](src-tauri/src/commands/rag.rs) | RAG |
-| [`system_tray.rs`](src-tauri/src/commands/system_tray.rs) | 系统托盘 |
+| [`system_tray.rs`](src-tauri/src/commands/system_tray.rs) | 系统托盘。「语音开关」是唯一在**后端直控**的菜单项：点击即改写所有角色的 `TtsConfig.enabled`（经 [`tts.rs`](src-tauri/src/commands/tts.rs) 的 `set_tts_enabled_all`），启用时按 `should_auto_start_*` 拉起 GPT-SoVITS / Fish Speech 本地服务，禁用时打断正在朗读的语音。托盘是全局入口，不依赖角色窗口在线，因此不经前端 `tray:menu_action` 路由 |
 | [`toast_hit.rs`](src-tauri/src/commands/toast_hit.rs) | toast 窗口的区域级点击穿透：登记前端上报的可交互矩形，8ms 轮询光标命中才关穿透；只在状态翻转时下发（该调用触发透明窗口整块重绘，高频无条件调用会持续闪烁）。详见 [ToastWindow.tsx](#toastwindowtsx--toast-通知窗口) |
 
 ### remote/ —— 远程访问 HTTP 服务

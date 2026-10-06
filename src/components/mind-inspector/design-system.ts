@@ -184,20 +184,6 @@ export const DURATION = {
 // === 阴影（导出兼容旧引用） ===
 export const SHADOW = COLORS.shadow;
 
-// === 玻璃拟态 ===
-export const GLASS = {
-  base: 'backdrop-filter: blur(24px) saturate(180%); -webkit-backdrop-filter: blur(24px) saturate(180%);',
-  strong: 'backdrop-filter: blur(40px) saturate(200%); -webkit-backdrop-filter: blur(40px) saturate(200%);',
-  light: 'backdrop-filter: blur(16px) saturate(150%); -webkit-backdrop-filter: blur(16px) saturate(150%);',
-} as const;
-
-// === 侧边栏 ===
-export const SIDEBAR = {
-  widthCollapsed: 72,
-  widthExpanded: 220,
-  margin: 12,
-} as const;
-
 // === 角色配色（用于 Twin View 区分） ===
 export const CHARACTER_ACCENT = {
   vivian: '#FFD60A',

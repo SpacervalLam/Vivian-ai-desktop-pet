@@ -9,10 +9,8 @@
 //! - [`rate_limiter`]：Token bucket 限流器
 //! - [`scheduler`]：任务调度器
 //! - [`interruption_controller`]：中断控制器
-//! - [`command_handler`]：命令处理器 + 解析器
 //! - [`smart_app_classifier`]：智能应用分类器
 //! - [`augment_reply_service`]：回复增强服务
-//! - [`computer_control`]：电脑控制执行引擎（简化实现）
 //! - [`control_action_executor`]：桌宠自控动作执行器（chat 产出 桌宠 模型控制指令）
 
 pub mod async_reflection;
@@ -23,8 +21,6 @@ pub mod budget;
 pub mod callbacks;
 pub mod chat_chain;
 pub mod cognitive_tick;
-pub mod command_handler;
-pub mod computer_control;
 pub mod control_action_executor;
 pub mod interruption_controller;
 pub mod jobs;

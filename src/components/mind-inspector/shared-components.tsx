@@ -38,24 +38,6 @@ if (typeof document !== 'undefined' && !document.getElementById(KEYFRAMES_ID)) {
   document.head.appendChild(style);
 }
 
-// === 角色名翻译辅助 ===
-const CHAR_IDS = ['vivian', 'nana'] as const;
-
-/**
- * 将后端返回的角色 ID（'vivian'/'nana'）翻译为记忆面板专用显示名。
- * 其他值（'system'/'user'/'all'/自定义字符串）原样返回。
- */
-export function charLabel(
-  id: string | undefined | null,
-  t: (key: string) => string,
-): string {
-  if (!id) return '—';
-  if ((CHAR_IDS as readonly string[]).includes(id)) {
-    return t(`mind_inspector.common.char_${id}`);
-  }
-  return id;
-}
-
 // ============================================================
 // 1. Card — 基础卡片（iOS 风格：磨砂玻璃 + continuous corners）
 // ============================================================

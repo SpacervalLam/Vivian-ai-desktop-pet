@@ -1,48 +1,17 @@
-import { useCallback, useMemo } from 'react';
+import { useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { listen } from '@tauri-apps/api/event';
-import type { UnlistenFn } from '@tauri-apps/api/event';
 import { getCharacterId } from '../characterContext';
 import type {
-  AiResponse,
   AppConfig,
-  ChatDonePayload,
-  ChatErrorPayload,
   EnvironmentInfo,
-  MemoryItem,
-  MemoryType,
   MoodState,
   GptSoVitsServiceState,
   ProactiveTickContext,
   ProactiveTickResponse,
-  RelationshipInfo,
   StartupGreeting,
-  SystemInfo,
-  ToolInfo,
   TtsConfig,
   UserActivity,
 } from '../types';
-
-/** 发送消息（一次性完整响应） */
-export function useSendMessage() {
-  return useCallback(async (message: string): Promise<AiResponse> => {
-    return invoke<AiResponse>('send_message', { message, characterId: getCharacterId() ?? undefined });
-  }, []);
-}
-
-/** 停止当前生成 */
-export function useStopGeneration() {
-  return useCallback(async (): Promise<void> => {
-    return invoke('stop_generation', { characterId: getCharacterId() ?? undefined });
-  }, []);
-}
-
-/** 发送本地图片消息（多模态）：后端读取图片、调用 LLM 生成描述并存入记忆 */
-export function useSendImageMessage() {
-  return useCallback(async (sourcePath: string): Promise<void> => {
-    return invoke('send_image_message', { sourcePath, characterId: getCharacterId() ?? undefined });
-  }, []);
-}
 
 /** 文件文本提取结果 */
 export interface FileTextResult {
@@ -58,127 +27,6 @@ export function useExtractFileText() {
   return useCallback(async (sourcePath: string): Promise<FileTextResult> => {
     return invoke<FileTextResult>('extract_file_text', { sourcePath });
   }, []);
-}
-
-/** 读取已保存的图片文件并返回 data URL（供聊天/记忆面板加载历史图片） */
-export function useGetImageDataURL() {
-  return useCallback(async (imagePath: string): Promise<string | null> => {
-    return invoke<string | null>('get_image_data_url', { imagePath });
-  }, []);
-}
-
-interface StreamHandlers {
-  onChunk?: (text: string) => void;
-  onDone?: (payload: ChatDonePayload) => void;
-  onError?: (error: string) => void;
-}
-
-/** 流式发送消息 - 通过事件订阅 chat:chunk / chat:done / chat:error */
-export function useSendMessageStream() {
-  return useCallback(
-    async (message: string, handlers: StreamHandlers): Promise<void> => {
-      const unlisteners: UnlistenFn[] = [];
-      const cleanup = () => {
-        for (const un of unlisteners) {
-          try {
-            un();
-          } catch {
-            /* ignore */
-          }
-        }
-      };
-
-      // 生成 stream_id 用于路由本请求的流式事件
-      const streamId =
-        typeof crypto !== 'undefined' && crypto.randomUUID
-          ? crypto.randomUUID()
-          : `s-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-
-      try {
-        unlisteners.push(
-          await listen<{ text: string; stream_id?: string }>('chat:chunk', (e) => {
-            if (e.payload.stream_id !== streamId) return;
-            handlers.onChunk?.(e.payload.text);
-          }),
-        );
-        unlisteners.push(
-          await listen<ChatDonePayload & { stream_id?: string }>('chat:done', (e) => {
-            if (e.payload.stream_id !== streamId) return;
-            handlers.onDone?.(e.payload);
-            cleanup();
-          }),
-        );
-        unlisteners.push(
-          await listen<ChatErrorPayload & { stream_id?: string }>('chat:error', (e) => {
-            if (e.payload.stream_id !== streamId) return;
-            handlers.onError?.(e.payload.error);
-            cleanup();
-          }),
-        );
-        // 取消生成：后端停止时会 emit chat:cancelled，不监听的话三个监听器
-        // 永远等不到 done/error，每次被取消的流式请求都会泄漏一组监听器
-        unlisteners.push(
-          await listen<{ stream_id?: string }>('chat:cancelled', (e) => {
-            if (e.payload.stream_id !== streamId) return;
-            cleanup();
-          }),
-        );
-
-        await invoke('send_message_stream', { message, streamId, characterId: getCharacterId() ?? undefined });
-      } catch (err) {
-        handlers.onError?.(String(err));
-        cleanup();
-      }
-    },
-    [],
-  );
-}
-
-/** 记忆 CRUD */
-export function useMemories() {
-  const getAll = useCallback(async (): Promise<MemoryItem[]> => {
-    return invoke<MemoryItem[]>('get_memories', { characterId: getCharacterId() ?? undefined });
-  }, []);
-
-  const add = useCallback(
-    async (
-      content: string,
-      memoryType: MemoryType,
-      importance: number,
-    ): Promise<MemoryItem> => {
-      return invoke<MemoryItem>('add_memory', {
-        content,
-        memoryType,
-        importance,
-        characterId: getCharacterId() ?? undefined,
-      });
-    },
-    [],
-  );
-
-  const remove = useCallback(async (id: string): Promise<void> => {
-    return invoke('delete_memory', { id, characterId: getCharacterId() ?? undefined });
-  }, []);
-
-  const clearAll = useCallback(async (): Promise<void> => {
-    return invoke('clear_all_memories', { characterId: getCharacterId() ?? undefined });
-  }, []);
-
-  const search = useCallback(
-    async (query: string, limit = 10): Promise<MemoryItem[]> => {
-      return invoke<MemoryItem[]>('search_memories', { query, limit, characterId: getCharacterId() ?? undefined });
-    },
-    [],
-  );
-
-  const getSummary = useCallback(async (): Promise<string> => {
-    return invoke<string>('get_memory_summary', { characterId: getCharacterId() ?? undefined });
-  }, []);
-
-  return useMemo(
-    () => ({ getAll, add, remove, clearAll, search, getSummary }),
-    [getAll, add, remove, clearAll, search, getSummary],
-  );
 }
 
 /** 配置读写 */
@@ -206,26 +54,6 @@ export function useConfig() {
   return { get, set, getAll, save, reload };
 }
 
-/** 系统信息 */
-export function useSystemInfo() {
-  return useCallback(async (): Promise<SystemInfo> => {
-    const raw = await invoke<Record<string, unknown>>('get_system_info');
-    return {
-      cpu_usage: Number(raw.cpu_usage ?? 0),
-      memory_usage: Number(raw.memory_usage_pct ?? raw.memory_usage ?? 0),
-      cpu_count: Number(raw.cpu_count ?? 0),
-      total_memory: Number(raw.total_memory ?? 0),
-      used_memory: raw.used_memory != null ? Number(raw.used_memory) : undefined,
-      available_memory:
-        raw.available_memory != null ? Number(raw.available_memory) : undefined,
-      uptime: raw.uptime != null ? Number(raw.uptime) : undefined,
-      host_name: raw.host_name as string | undefined,
-      os_name: raw.os_name as string | undefined,
-      os_version: raw.os_version as string | undefined,
-    };
-  }, []);
-}
-
 /** 情绪状态 */
 export function useMood() {
   const getCurrent = useCallback(async (): Promise<MoodState> => {
@@ -241,35 +69,6 @@ export function useMood() {
   }, []);
 
   return { getCurrent, getHistory, setExpression };
-}
-
-/** 工具系统 */
-export function useTools() {
-  const list = useCallback(async (): Promise<ToolInfo[]> => {
-    // 注意：list_tools 是全局工具清单（返回全部注册工具 + 分侧 scope 与开关状态），
-    // 不接受 characterId；设置页与智能体工具面的一致性由后端 tool_scope 单一真相源保证。
-    const raw = await invoke<{ tools: ToolInfo[]; total: number }>('list_tools');
-    return raw.tools ?? [];
-  }, []);
-
-  return { list };
-}
-
-/** 窗口控制 */
-export function useWindowControl() {
-  const setPosition = useCallback(async (x: number, y: number): Promise<void> => {
-    return invoke('set_window_position', { x, y, characterId: getCharacterId() ?? undefined });
-  }, []);
-
-  const getPosition = useCallback(async (): Promise<{ x: number; y: number }> => {
-    return invoke<{ x: number; y: number }>('get_window_position', { characterId: getCharacterId() ?? undefined });
-  }, []);
-
-  const toggleAlwaysOnTop = useCallback(async (): Promise<void> => {
-    return invoke('toggle_always_on_top', { characterId: getCharacterId() ?? undefined });
-  }, []);
-
-  return { setPosition, getPosition, toggleAlwaysOnTop };
 }
 
 /** TTS 语音合成 */
@@ -405,61 +204,4 @@ export function useEnvironment() {
   }, []);
 
   return { getInfo, getCurrentState, getUserActivity, update, getStartupGreeting };
-}
-
-/** 关系系统 */
-export function useRelationship() {
-  const get = useCallback(async (): Promise<RelationshipInfo> => {
-    return invoke<RelationshipInfo>('get_relationship', { characterId: getCharacterId() ?? undefined });
-  }, []);
-
-  const getStage = useCallback(async (): Promise<string> => {
-    return invoke<string>('get_relationship_stage', { characterId: getCharacterId() ?? undefined });
-  }, []);
-
-  const getMilestones = useCallback(
-    async (): Promise<{ milestones: RelationshipInfo['milestones']; total: number }> => {
-      return invoke<{ milestones: RelationshipInfo['milestones']; total: number }>(
-        'get_milestones',
-        { characterId: getCharacterId() ?? undefined },
-      );
-    },
-    [],
-  );
-
-  const reset = useCallback(async (): Promise<void> => {
-    return invoke('reset_relationship', { characterId: getCharacterId() ?? undefined });
-  }, []);
-
-  return { get, getStage, getMilestones, reset };
-}
-
-/** 在场状态（Presence） */
-export interface PresenceStateInfo {
-  character_id: string;
-  state: string; // "online" | "busy" | "rest" | "offline"
-  display_zh: string;
-  can_direct: boolean;
-  is_in_presence: boolean;
-  since: number;
-  elapsed_seconds: number;
-}
-
-export function usePresence() {
-  const getState = useCallback(async (): Promise<PresenceStateInfo> => {
-    return invoke<PresenceStateInfo>('get_presence_state', { characterId: getCharacterId() ?? undefined });
-  }, []);
-
-  const getAll = useCallback(async (): Promise<PresenceStateInfo[]> => {
-    return invoke<PresenceStateInfo[]>('get_all_presence_states');
-  }, []);
-
-  const set = useCallback(async (target: string): Promise<{ changed: boolean; current: string }> => {
-    return invoke<{ changed: boolean; current: string }>('set_presence_state', {
-      target,
-      characterId: getCharacterId() ?? undefined,
-    });
-  }, []);
-
-  return { getState, getAll, set };
 }

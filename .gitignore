@@ -47,6 +47,10 @@ __pycache__/
 *.pyc
 *.tmp
 *.bak
+# 备份残留：带时间戳后缀的编辑器/手工备份（*.bak 匹配不到 .bak_20260904_120722 这类）
+*.bak_*
+*.bak.*
+*.old
 *.orig
 *.rej
 *.blend1

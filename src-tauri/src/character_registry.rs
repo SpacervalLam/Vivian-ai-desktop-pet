@@ -1,6 +1,6 @@
 //! 角色资源注册表 — 多角色架构下，按 char_id 索引 MemoryManager / PsychologyManager / manifest
 //!
-//! 工具系统（memory_tools / relationship_tools）和 manifest 归一化函数
+//! 工具系统（memory_tools）和 manifest 归一化函数
 //! 原来使用全局单例，只能服务一个角色。多角色架构下改为按 char_id 索引。
 //!
 //! 每个角色在 state.rs::AppState::initialize 时调用 register_character 注册自己的资源。

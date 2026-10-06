@@ -79,7 +79,6 @@
 .mind-inspector-root.is-work-page .codex-topbar-title { font-size: 14px; font-weight: 600; }
 .mind-inspector-root.is-work-page .codex-topbar-path { font-size: 11px; color: var(--codex-ink-soft); line-height: 18px; }
 .mind-inspector-root.is-work-page .codex-topbar-actions { flex-shrink: 0; gap: 5px; }
-.codex-mode-label { white-space: nowrap; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .mind-inspector-root.is-work-page .codex-icon-btn:disabled { opacity: .45; cursor: default; }
 .mind-inspector-root.is-work-page .codex-main { container-type: inline-size; container-name: work-main; }
 .mind-inspector-root.is-work-page .auto-summary-hidden .codex-chat,

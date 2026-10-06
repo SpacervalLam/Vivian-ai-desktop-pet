@@ -43,11 +43,3 @@ export function extractActions(text: string): TextWithActions {
 export function stripActions(text: string): string {
   return extractActions(text).text;
 }
-
-const escapeHtml = (text: string): string => text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-
-export function renderTextWithActions(text: string): string {
-  return splitActionText(text).map((part) => part.action
-    ? `<span style="color: #888; font-style: italic;">${escapeHtml(part.text)}</span>`
-    : escapeHtml(part.text)).join('');
-}

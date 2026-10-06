@@ -490,128 +490,6 @@ body {
   --accent: #537D96;
 }
 
-.scrapbook-bg {
-  background-color: var(--panel-bg);
-}
-
-/* ===== 清新手账布局工具类（心智观察器/设置窗共用） ===== */
-/* 手绘本竖虚线（用于分栏或侧栏边缘） */
-.sb-ruled-line {
-  position: relative;
-}
-.sb-ruled-line::before {
-  content: '';
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  width: 1px;
-  background: repeating-linear-gradient(
-    to bottom,
-    var(--panel-border) 0 6px,
-    transparent 6px 11px
-  );
-  opacity: 0.4;
-}
-
-/* 顶部胶带装饰条（清新插画风：低饱和彩条） */
-.sb-tape {
-  position: relative;
-}
-.sb-tape::before {
-  content: '';
-  position: absolute;
-  top: -9px;
-  left: 50%;
-  transform: translateX(-50%) rotate(-2deg);
-  width: 96px;
-  height: 18px;
-  background: linear-gradient(90deg, var(--sticker-pink-soft), var(--sticker-sky-soft));
-  border-radius: 3px;
-  opacity: 0.85;
-  pointer-events: none;
-  box-shadow: var(--panel-shadow-subtle);
-}
-
-/* 低饱和贴纸芯片（标签/徽章） */
-.sb-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 3px 10px;
-  border-radius: var(--radius-pill);
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.3px;
-  background: var(--sticker-sky-soft);
-  color: var(--panel-accent);
-}
-
-.sb-chip--pink { background: var(--sticker-pink-soft); color: var(--panel-danger); }
-.sb-chip--mint { background: var(--sticker-mint-soft); color: var(--panel-success); }
-.sb-chip--butter { background: var(--sticker-butter-soft); color: var(--panel-warning); }
-.sb-chip--lilac { background: var(--sticker-lilac-soft); color: var(--panel-text-secondary); }
-
-/* 圆润卡片（清新插画风主卡片） */
-.sb-card {
-  background: var(--panel-surface);
-  border: 1px solid var(--panel-border-light);
-  border-radius: var(--radius-lg);
-  box-shadow: var(--panel-shadow-card);
-}
-
-/* 插画角落点缀（纸角折痕） */
-.sb-corner--fold {
-  position: relative;
-  overflow: hidden;
-}
-.sb-corner--fold::before {
-  content: '';
-  position: absolute;
-  top: 0;
-  right: 0;
-  width: 22px;
-  height: 22px;
-  background: linear-gradient(225deg, var(--sticker-butter-soft) 0 50%, var(--panel-bg) 50% 100%);
-  border-bottom-left-radius: 8px;
-  pointer-events: none;
-}
-
-/* ===== 设置窗口封面条（清新插画风纸胶带） ===== */
-.cfg-cover::before {
-  content: '';
-  position: absolute;
-  top: -7px;
-  left: 30px;
-  width: 58px;
-  height: 16px;
-  background: var(--sticker-pink-soft);
-  transform: rotate(-3deg);
-  border-radius: 2px;
-  opacity: 0.85;
-  pointer-events: none;
-  box-shadow: var(--panel-shadow-subtle);
-}
-.cfg-cover::after {
-  content: '';
-  position: absolute;
-  top: -6px;
-  left: 96px;
-  width: 38px;
-  height: 14px;
-  background: var(--sticker-sky-soft);
-  transform: rotate(4deg);
-  border-radius: 2px;
-  opacity: 0.8;
-  pointer-events: none;
-  box-shadow: var(--panel-shadow-subtle);
-}
-
-.scrapbook-card {
-  background: var(--panel-surface);
-  border: 1px solid var(--panel-border);
-  border-radius: 3px;
-  box-shadow: var(--panel-shadow-card);
-}
 
 /* .scrapbook 容器内统一清新圆润控件 */
 .scrapbook button,
@@ -619,9 +497,6 @@ body {
 .scrapbook select,
 .scrapbook textarea {
   border-radius: 12px;
-}
-.scrapbook .sb-chip {
-  border-radius: var(--radius-pill) !important;
 }
 .scrapbook hr {
   border: none;
@@ -835,14 +710,4 @@ input[type="number"] {
 
 .slide-up {
   animation: slideUp 0.26s cubic-bezier(0.16, 1, 0.3, 1) both;
-}
-
-/* ===== Marquee / 跑马灯滚动文字 ===== */
-@keyframes marquee-loop {
-  0% { transform: translateX(0); }
-  100% { transform: translateX(-50%); }
-}
-
-.marquee-pause:hover {
-  animation-play-state: paused;
 }

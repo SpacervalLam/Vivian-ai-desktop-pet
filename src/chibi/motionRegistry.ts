@@ -86,16 +86,6 @@ for (const spec of [...ANIMATION_SPECS, ...POSE_SPECS]) {
 
 const ALIASES: Record<string, string> = vocab.expression_aliases;
 
-/** 面向前端的动作名清单（含别名），供调试面板与验收脚本使用。 */
-export const ANIMATION_NAMES: string[] = ANIMATION_SPECS.map((spec) => spec.name);
-export const POSE_NAMES: string[] = POSE_SPECS.map((spec) => spec.name);
-export const PROMPTABLE_NAMES: string[] = [...ANIMATION_SPECS, ...POSE_SPECS]
-  .filter((spec) => spec.promptable)
-  .map((spec) => spec.name);
-export const DIRECTIONAL_NAMES: string[] = ANIMATION_SPECS
-  .filter((spec) => spec.directions !== null)
-  .map((spec) => spec.name);
-
 /**
  * 后端可能仍在发旧词汇（历史语义名或自由文本），此处做最后一道兜底。
  * 新词汇命中规则越少说明该收敛了，不要在这里继续加语义。
@@ -160,11 +150,6 @@ export function pose(name: string): ChibiPoseSpec {
   return spec;
 }
 
-/** 该动作是否需要方向（决定调用方是否要记录 left/right）。 */
-export function isDirectional(spec: ChibiMotionSpec): spec is ChibiAnimationSpec {
-  return spec.kind === 'animation' && spec.directions !== null;
-}
-
 export function totalDurationMs(spec: ChibiAnimationSpec): number {
   return spec.durations.reduce((total, duration) => total + duration, 0);
 }
@@ -218,16 +203,6 @@ export function sheetUrl(
 }
 
 /**
- * 主状态图集地址。
- *
- * 与 `ChibiPetCanvas.css` 的 `--atlas-url` 必须指向同一份文件：这里是 JS 侧的
- * 唯一出处，供预取与「帧序列图集加载失败」时的回落使用。
- */
-export function atlasUrl(character: string): string {
-  return `/chibi/${character}-atlas.webp`;
-}
-
-/**
  * 把「第 frame 帧」换算成图集定位，UI 侧无需再手算百分比。
  *
  * 图集格位只产出定位，背景图仍由 `.chibi-pet-sprite` 的 `--atlas-url` 提供；
@@ -262,21 +237,4 @@ export function frameStyle(
     style.backgroundImage = `url('${sheetUrl(spec, character, direction)}')`;
   }
   return style;
-}
-
-/**
- * 动作运行时实际需要的图集地址清单（用于首帧前预取）。
- *
- * 有方向的动作用到几张图就预取几张：只预取 left 的话，环境走路的第一次「向右走」
- * 会在图集下载完成前先渲染一帧空背景，看起来像桌宠闪了一下。
- */
-export function prefetchUrls(character: string): string[] {
-  const urls = new Set<string>([atlasUrl(character)]);
-  for (const spec of ANIMATION_SPECS) {
-    if (spec.characters && !spec.characters.includes(character)) continue;
-    for (const direction of spec.directions ?? (['left'] as ChibiDirection[])) {
-      urls.add(sheetUrl(spec, character, direction));
-    }
-  }
-  return [...urls];
 }
