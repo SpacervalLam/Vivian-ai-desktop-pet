@@ -8,6 +8,10 @@
 //! 多角色架构下，托盘事件 payload 携带活跃角色 character_id，
 //! 由前端 SystemTray 组件按角色过滤后响应（活跃角色在 active_character_id 中维护）。
 //!
+//! **语音开关是唯一的后端直控项**：托盘作为全局入口不依赖窗口在线，
+//! 点击后由 `toggle_voice` 直接改写所有角色的 `TtsConfig.enabled`，
+//! 用户无需再进设置窗口启用/禁用。
+//!
 //! 窗口内右键菜单由前端 `ContextMenu` 组件独立实现，与本组件互不依赖。
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -137,9 +141,12 @@ pub fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
 
 /// 处理菜单项点击 → emit `tray:menu_action` 事件给前端 SystemTray 组件
 ///
-/// 前端根据 action id 路由到 openStatus / openMemory / openChat / toggleVoice 等回调。
+/// 前端根据 action id 路由到 openStatus / openMemory / openChat 等回调。
 /// voice / smart_positioning 是 CheckMenuItem，前端需自行 toggle 状态后再 invoke
 /// `set_tray_menu_check` 同步勾选标记（避免后端重复维护前端状态）。
+///
+/// 例外：**voice 在后端直接处理**。托盘是全局入口，不应依赖某个角色窗口是否在线；
+/// 且语音朗读的真相源在后端 `TtsConfig.enabled`，走前端会形成第二条状态链。
 fn handle_menu_event(app: &AppHandle, event: &MenuEvent) {
     let id = event.id().as_ref();
     let character_id = active_character_id(app);
@@ -154,6 +161,12 @@ fn handle_menu_event(app: &AppHandle, event: &MenuEvent) {
         return;
     }
 
+    // 语音开关：直接在后端切换所有角色的 TTS enabled，失败时回滚勾选标记
+    if id == menu_id::VOICE {
+        toggle_voice(app);
+        return;
+    }
+
     tracing::debug!(
         "[tray] 菜单点击：{} (active_character={})",
         id,
@@ -164,6 +177,49 @@ fn handle_menu_event(app: &AppHandle, event: &MenuEvent) {
         "tray:menu_action",
         json!({ "action": id, "character_id": character_id }),
     );
+}
+
+/// 切换全局语音朗读开关
+///
+/// CheckMenuItem 被点击时自身已翻转勾选态，这里以「翻转后的实际状态」为准写回后端；
+/// 写入失败则把勾选标记回滚，避免菜单显示与后端配置不一致。
+fn toggle_voice(app: &AppHandle) {
+    let Some(items) = CHECK_ITEMS.get() else {
+        tracing::warn!("[tray] 托盘菜单未初始化，忽略语音开关");
+        return;
+    };
+    // 点击后 CheckMenuItem 已自动翻转，读到的即为用户期望的目标状态
+    let target = match items.lock().voice.is_checked() {
+        Ok(checked) => checked,
+        Err(e) => {
+            tracing::warn!("[tray] 读取语音开关状态失败: {e}");
+            return;
+        }
+    };
+    tracing::info!("[tray] 语音开关 -> {}", target);
+
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let state = app.state::<std::sync::Arc<AppState>>();
+        match crate::commands::tts::set_tts_enabled_all(state, app.clone(), target).await {
+            Ok(()) => tracing::info!("[tray] 语音开关已生效: enabled={}", target),
+            Err(e) => {
+                tracing::warn!("[tray] 语音开关生效失败: {e}");
+                // 回滚勾选标记，保持菜单与后端一致
+                if let Some(items) = CHECK_ITEMS.get() {
+                    let _ = items.lock().voice.set_checked(!target);
+                }
+                let _ = app.emit(
+                    "toast:show",
+                    json!({
+                        "type": "error",
+                        "message": format!("语音开关切换失败: {e}"),
+                        "duration": 5000,
+                    }),
+                );
+            }
+        }
+    });
 }
 
 /// 设置托盘 tooltip
@@ -231,10 +287,13 @@ pub fn set_tray_visible(app: AppHandle, visible: bool) -> Result<(), String> {
 
 /// 更新托盘菜单中 CheckMenuItem 的勾选状态
 ///
-/// 由前端在 `voiceEnabled` / `smartPositioningEnabled` 变化时调用，
-/// 让后端原生菜单的勾选标记与前端 store 保持一致。
+/// 由前端在 `smartPositioningEnabled` 变化时调用，让后端原生菜单的勾选标记
+/// 与前端 store 保持一致。
 ///
-/// `item_id` 取值：`"voice"` / `"smart_positioning"`
+/// `item_id` 取值：`"smart_positioning"`。
+///
+/// **注意**：`"voice"` 不再走这条路径——语音开关由 `toggle_voice` 在后端直接处理，
+/// 前端不需要（也不应该）回写 voice 的勾选状态。
 #[tauri::command]
 pub fn set_tray_menu_check(item_id: String, checked: bool) -> Result<(), String> {
     let items = CHECK_ITEMS
@@ -243,7 +302,6 @@ pub fn set_tray_menu_check(item_id: String, checked: bool) -> Result<(), String>
         .lock();
 
     let target = match item_id.as_str() {
-        menu_id::VOICE => &items.voice,
         menu_id::SMART_POSITIONING => &items.smart_positioning,
         other => {
             return Err(format!("未知菜单项 ID: {}", other));
@@ -253,6 +311,28 @@ pub fn set_tray_menu_check(item_id: String, checked: bool) -> Result<(), String>
     target.set_checked(checked).map_err(err_str)?;
     tracing::debug!("[tray] 菜单勾选更新: {} = {}", item_id, checked);
     Ok(())
+}
+
+/// 根据后端实际的 TTS 配置同步托盘「语音开关」勾选态
+///
+/// 在角色初始化完成后调用：`setup_tray` 时角色尚未加载，勾选态只能取默认值，
+/// 真实配置要等 `TtsConfig` 从各角色 config.json 读出后才拿得到。
+/// 多个角色状态不一致时以「任一启用即视为启用」，避免菜单显示关但实际在朗读。
+pub fn sync_voice_check_from_state(state: &std::sync::Arc<AppState>) {
+    let Some(items) = CHECK_ITEMS.get() else {
+        return;
+    };
+    let enabled = {
+        let characters = state.characters.read();
+        characters
+            .values()
+            .any(|c| c.brain.tts.get_config().enabled)
+    };
+    if let Err(e) = items.lock().voice.set_checked(enabled) {
+        tracing::warn!("[tray] 同步语音开关勾选态失败: {e}");
+    } else {
+        tracing::debug!("[tray] 语音开关勾选态已同步: {}", enabled);
+    }
 }
 
 /// 注销系统托盘图标（应用退出前调用，避免进程结束后残留图标）

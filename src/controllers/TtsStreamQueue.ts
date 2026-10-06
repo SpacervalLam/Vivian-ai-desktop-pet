@@ -152,7 +152,7 @@ class TtsStreamQueueClass {
     }
   }
 
-  /** 设置是否启用流式 TTS（由 TTS 配置 + voiceEnabled 共同决定） */
+  /** 设置是否启用流式 TTS（镜像后端 `TtsConfig.enabled`） */
   setEnabled(enabled: boolean): void {
     this.enabled = enabled;
     if (!enabled) {

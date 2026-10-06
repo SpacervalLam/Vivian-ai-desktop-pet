@@ -1,25 +1,6 @@
 import { create } from 'zustand';
 import type { MoodState, StickerRef } from '../types';
 
-/** voiceEnabled 的持久化 key（右键菜单运行时静音状态，跨重启保留） */
-const VOICE_ENABLED_STORAGE_KEY = 'vivian.voiceEnabled';
-
-const loadPersistedVoiceEnabled = (): boolean => {
-  try {
-    return localStorage.getItem(VOICE_ENABLED_STORAGE_KEY) === 'true';
-  } catch {
-    return false;
-  }
-};
-
-export const hasPersistedVoiceEnabled = (): boolean => {
-  try {
-    return localStorage.getItem(VOICE_ENABLED_STORAGE_KEY) !== null;
-  } catch {
-    return false;
-  }
-};
-
 /** 已结算的气泡段（从流式气泡中分离出来，独立显示并自动关闭） */
 export interface SettledBubble {
   id: number;
@@ -31,7 +12,11 @@ export interface SettledBubble {
 
 interface AppState {
   // 状态
-  voiceEnabled: boolean;
+  /**
+   * 语音朗读开关（后端 `TtsConfig.enabled` 的前端镜像）。
+   * 唯一真相源在后端：托盘「语音开关」与设置窗口 TTS 面板都写后端，
+   * 前端只读镜像，不持有独立的静音状态（否则会出现菜单显示开但后端拒绝合成的双轨）。
+   */
   ttsEnabled: boolean;
   currentBubble: string | null;
   /** 跨角色对话标记：当前气泡是角色对另一个角色说的话（非对用户） */
@@ -53,7 +38,6 @@ interface AppState {
   userAvatarUrl: string | null;
 
   // 动作
-  setVoiceEnabled: (value: boolean) => void;
   setTtsEnabled: (value: boolean) => void;
   showBubble: (text: string) => void;
   /** 清除 store 内部气泡计时器（供 BubbleController 在流式场景调用） */
@@ -79,7 +63,6 @@ const clearBubbleTimer = () => {
 };
 
 export const useAppStore = create<AppState>((set) => ({
-  voiceEnabled: loadPersistedVoiceEnabled(),
   ttsEnabled: false,
   currentBubble: null,
   bubbleCrossCharacter: false,
@@ -90,14 +73,6 @@ export const useAppStore = create<AppState>((set) => ({
   lastUserEmotion: '',
   userAvatarUrl: null,
 
-  setVoiceEnabled: (value) => {
-    try {
-      localStorage.setItem(VOICE_ENABLED_STORAGE_KEY, value ? 'true' : 'false');
-    } catch {
-      /* ignore */
-    }
-    set({ voiceEnabled: value });
-  },
   setTtsEnabled: (value) => set({ ttsEnabled: value }),
 
   showBubble: (text) => {

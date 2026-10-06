@@ -5,7 +5,10 @@
  * 通过 `tray:menu_action` 事件广播 payload：{ action, character_id }
  *
  * 菜单项 ID 与 ContextMenu.tsx 中的 items 一一对应：
- *   memory / settings / chat / voice / smart_positioning / quit
+ *   memory / settings / chat / smart_positioning / quit
+ *
+ * **语音开关（voice）不在此处处理**：它由后端 `commands/system_tray.rs` 直接改写
+ * 所有角色的 `TtsConfig.enabled`，不经过前端。托盘是全局入口，不应依赖角色窗口在线。
  *
  * 多角色架构下，托盘点击只作用于活跃角色（后端在 payload 中带 character_id），
  * 每个角色窗口的 SystemTray 只响应对应自己的事件，避免两个桌宠同时响应。
@@ -29,7 +32,6 @@ export type TrayMenuAction =
   | 'memory'
   | 'settings'
   | 'chat'
-  | 'voice'
   | 'smart_positioning'
   | 'quit';
 
@@ -40,8 +42,6 @@ export interface SystemTrayProps {
   onOpenSettings?: () => void;
   /** 打开微信（AI Chat）子窗口 */
   onOpenChat?: () => void;
-  /** 切换语音开关 */
-  onToggleVoice?: () => void;
   /** 切换智能避让开关 */
   onToggleSmartPositioning?: () => void;
   /** 退出应用 */
@@ -106,9 +106,6 @@ async function routeMenuAction(action: string, props: SystemTrayProps): Promise<
       case 'chat':
         props.onOpenChat?.();
         break;
-      case 'voice':
-        props.onToggleVoice?.();
-        break;
       case 'smart_positioning':
         props.onToggleSmartPositioning?.();
         break;
@@ -125,11 +122,11 @@ async function routeMenuAction(action: string, props: SystemTrayProps): Promise<
 
 /** 同步托盘菜单 CheckMenuItem 的勾选状态到后端
  *
- * 由前端在 voiceEnabled / smartPositioningEnabled 变化时调用，
- * 让后端原生菜单的勾选标记与前端 store 保持一致。
- * item_id 取值：'voice' / 'smart_positioning'
+ * 由前端在 smartPositioningEnabled 变化时调用，让后端原生菜单的勾选标记
+ * 与前端 store 保持一致。item_id 当前只支持 `'smart_positioning'`
+ * （语音开关由后端自行维护勾选态）。
  */
-export async function syncTrayMenuCheck(item_id: 'voice' | 'smart_positioning', checked: boolean): Promise<void> {
+export async function syncTrayMenuCheck(item_id: 'smart_positioning', checked: boolean): Promise<void> {
   try {
     await invoke('set_tray_menu_check', { itemId: item_id, checked });
   } catch (err) {

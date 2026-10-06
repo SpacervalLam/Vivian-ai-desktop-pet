@@ -4,7 +4,7 @@ import type { Effect } from '@tauri-apps/api/window';
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { listen, emit, type UnlistenFn } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
-import { useAppStore, hasPersistedVoiceEnabled } from './stores/useAppStore';
+import { useAppStore } from './stores/useAppStore';
 import { useTranslation } from 'react-i18next';
 import {
   useConfig,
@@ -674,7 +674,6 @@ export default function App() {
   const bubbleCrossCharacter = useAppStore((s) => s.bubbleCrossCharacter);
   const bubbleListenerName = useAppStore((s) => s.bubbleListenerName);
   const ttsEnabled = useAppStore((s) => s.ttsEnabled);
-  const voiceEnabled = useAppStore((s) => s.voiceEnabled);
   // 桌宠自身心情状态（energy=精力 0-100，focus=专注力 0-100，由后端 3s 心跳刷新）
   const currentMood = useAppStore((s) => s.currentMood);
   const { t } = useTranslation();
@@ -1528,20 +1527,12 @@ export default function App() {
       } catch {
         /* ignore */
       }
-      // 加载 TTS 配置
+      // 加载 TTS 配置（后端 enabled 是唯一真相源，前端只做镜像）
       try {
         ttsConfigRef.current = await ttsApi.getConfig();
         const ttsOn = !!ttsConfigRef.current?.enabled;
-        // 同步后端 TTS 配置到 store
         useAppStore.getState().setTtsEnabled(ttsOn);
-        // 后端启用且无持久化值（首次启动）时，前端 voiceEnabled 自动跟随启用；
-        // 已有持久化值时尊重用户上次的选择，避免重启后静音状态丢失
-        if (ttsOn && !hasPersistedVoiceEnabled()) {
-          useAppStore.getState().setVoiceEnabled(true);
-        }
-        // 读取最新 state（set 后闭包中的 store 仍是旧快照），初始化 TtsStreamQueue
-        const latestState = useAppStore.getState();
-        TtsStreamQueue.setEnabled(ttsOn && latestState.voiceEnabled);
+        TtsStreamQueue.setEnabled(ttsOn);
       } catch {
         /* ignore */
       }
@@ -1872,7 +1863,7 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [proactiveStarted]);
 
-  // 监听 TTS 配置变更（设置窗口保存后触发），同步 ttsEnabled 与 voiceEnabled
+  // 监听 TTS 配置变更（设置窗口保存或托盘语音开关后由后端触发），同步 ttsEnabled
   useEffect(() => {
     let cancelled = false;
     let unlistenFn: (() => void) | undefined;
@@ -1883,27 +1874,9 @@ export default function App() {
           async (event) => {
             const ttsOn = !!event.payload?.enabled;
             ttsConfigRef.current = await ttsApi.getConfig().catch(() => ttsConfigRef.current);
-            let shouldEnableQueue = ttsOn;
-            if (ttsOn) {
-              // 后端启用朗读：读取当前 voiceEnabled 状态
-              const curState = useAppStore.getState();
-              if (!curState.voiceEnabled) {
-                // voiceEnabled 为 false 时自动开启（首次启用/后端刚打开）
-                curState.setVoiceEnabled(true);
-              }
-              // 读取更新后的最新 state
-              const latestState = useAppStore.getState();
-              shouldEnableQueue = latestState.voiceEnabled;
-              curState.setTtsEnabled(true);
-            } else {
-              // 后端禁用朗读：强制关闭前端语音开关并停止播放
-              const curState = useAppStore.getState();
-              curState.setTtsEnabled(false);
-              curState.setVoiceEnabled(false);
-              shouldEnableQueue = false;
-              void TtsStreamQueue.stop();
-            }
-            TtsStreamQueue.setEnabled(shouldEnableQueue);
+            useAppStore.getState().setTtsEnabled(ttsOn);
+            // setEnabled(false) 内部会 stop()，正在播放的朗读随之打断
+            TtsStreamQueue.setEnabled(ttsOn);
           },
         );
         if (cancelled) { safeUnlisten(unlistenFn); return; }
@@ -4134,23 +4107,12 @@ export default function App() {
           即使两个角色都 Offline、桌宠窗口被 hide_window 隐藏，
           托盘菜单仍可访问所有子窗口入口（记忆/设置/微信），
           也可通过「微信」入口发消息唤醒离线智能体。
-          与系统托盘菜单共用同一组 openXxx / toggleXxx 回调。 */}
+          与系统托盘菜单共用同一组 openXxx / toggleXxx 回调。
+          注：语音开关由后端直接处理（托盘不依赖窗口在线），不经过本组件。 */}
       <SystemTray
         onOpenMemory={openMemory}
         onOpenSettings={openConfig}
         onOpenChat={openChat}
-        onToggleVoice={() => {
-          // 后端 TTS 未启用：弹 toast 提示前往设置开启
-          if (!ttsEnabled) {
-            showToast(t('toast.voice_disabled_hint'), 'warning', 5000);
-            return;
-          }
-          const next = !voiceEnabled;
-          useAppStore.getState().setVoiceEnabled(next);
-          // 同步 TtsStreamQueue 启用状态，并停止正在播放的 TTS
-          TtsStreamQueue.setEnabled(!!ttsConfigRef.current?.enabled && next);
-          if (!next) void TtsStreamQueue.stop();
-        }}
         onToggleSmartPositioning={() => {
           const next = !smartPositioningEnabled;
           setSmartPositioningEnabled(next);
@@ -4165,13 +4127,9 @@ export default function App() {
         onQuit={() => void handleQuit()}
       />
 
-      {/* 托盘菜单勾选状态同步：voiceEnabled / ttsEnabled / smartPositioningEnabled 变化时
-          通知后端更新原生 CheckMenuItem 的勾选标记。
-          多角色窗口都会同步，最后一次写入覆盖前面，无害（store 全局共享同一值）。 */}
-      <TrayCheckSync
-        voiceChecked={ttsEnabled && voiceEnabled}
-        smartPositioningChecked={smartPositioningEnabled}
-      />
+      {/* 托盘菜单勾选状态同步：smartPositioningEnabled 变化时通知后端更新原生
+          CheckMenuItem 的勾选标记。多角色窗口都会同步，最后一次写入覆盖前面，无害。 */}
+      <TrayCheckSync smartPositioningChecked={smartPositioningEnabled} />
 
       {/* Q 版桌宠主内容（透明窗口；智能避让与窗口定位仍沿用原后端） */}
       <div
@@ -4270,17 +4228,8 @@ export default function App() {
 
 /* ============ 托盘菜单勾选状态同步组件 ============ */
 
-/** 把前端的 voice / smart_positioning 勾选状态同步到后端原生 CheckMenuItem */
-function TrayCheckSync({
-  voiceChecked,
-  smartPositioningChecked,
-}: {
-  voiceChecked: boolean;
-  smartPositioningChecked: boolean;
-}) {
-  useEffect(() => {
-    void syncTrayMenuCheck('voice', voiceChecked);
-  }, [voiceChecked]);
+/** 把前端的 smart_positioning 勾选状态同步到后端原生 CheckMenuItem */
+function TrayCheckSync({ smartPositioningChecked }: { smartPositioningChecked: boolean }) {
   useEffect(() => {
     void syncTrayMenuCheck('smart_positioning', smartPositioningChecked);
   }, [smartPositioningChecked]);

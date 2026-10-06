@@ -14,6 +14,104 @@ use crate::speech::{
 };
 use crate::state::AppState;
 
+/// 应用全局语音开关后的副作用决策（纯函数，便于单测）
+///
+/// - `needs_gpt_sovits` / `needs_fish_speech`：是否需要拉起本地推理服务
+/// - `changed`：配置是否真的发生了变化（未变化时不重复落盘）
+#[derive(Debug, Default, PartialEq, Eq)]
+struct EnableOutcome {
+    changed: bool,
+    needs_gpt_sovits: bool,
+    needs_fish_speech: bool,
+}
+
+/// 把目标 `enabled` 应用到单个角色的 TTS 配置上，返回是否需要变更
+fn apply_enabled(config: &mut TtsConfig, enabled: bool) -> EnableOutcome {
+    let mut outcome = EnableOutcome::default();
+    if config.enabled != enabled {
+        config.enabled = enabled;
+        outcome.changed = true;
+    }
+    if enabled {
+        // 无论配置是否变化都要判定：托盘重复点击同一目标值时，
+        // 服务可能已停（如用户手动停过），需要重新拉起
+        outcome.needs_gpt_sovits = config.should_auto_start_gpt_sovits();
+        outcome.needs_fish_speech = config.should_auto_start_fish_speech();
+    }
+    outcome
+}
+
+/// 全局启用/禁用所有角色的语音朗读（托盘「语音开关」的唯一入口）
+///
+/// 托盘是全局入口，不绑定单个角色窗口，因此这里对**所有**已加载角色统一写入
+/// `TtsConfig.enabled` 并持久化到各自的 config.json。后端配置是朗读的唯一真相源：
+/// 前端不再持有独立的静音开关（否则会出现"菜单显示开但后端拒绝合成"的双轨状态）。
+///
+/// 启用时按各角色配置的 `should_auto_start_*` 判定拉起本地推理服务
+/// （GPT-SoVITS / Fish Speech 常驻数 GB 内存，只在真正启用时才拉起）；
+/// 禁用时打断所有正在进行的朗读。
+#[tauri::command]
+pub async fn set_tts_enabled_all(
+    state: State<'_, Arc<AppState>>,
+    app: AppHandle,
+    enabled: bool,
+) -> Result<(), String> {
+    // 1) 写入所有角色的 TTS 配置（先落盘，失败则不触发服务启停）
+    // 服务为全局单例，多角色都要求启动时按首次命中的配置即可
+    let mut gpt_sovits_cfg: Option<TtsConfig> = None;
+    let mut fish_speech_cfg: Option<TtsConfig> = None;
+
+    {
+        let characters = state.characters.read();
+        for character in characters.values() {
+            let tts = &character.brain.tts;
+            let mut config = tts.get_config();
+            let outcome = apply_enabled(&mut config, enabled);
+            if outcome.changed {
+                tts.set_config(config.clone()).map_err(|e| e.to_string())?;
+                tracing::info!(
+                    "[TTS] 全局语音开关：角色 {} 的 enabled -> {}",
+                    character.id,
+                    enabled
+                );
+            }
+            if outcome.needs_gpt_sovits && gpt_sovits_cfg.is_none() {
+                gpt_sovits_cfg = Some(config.clone());
+            }
+            if outcome.needs_fish_speech && fish_speech_cfg.is_none() {
+                fish_speech_cfg = Some(config.clone());
+            }
+        }
+    }
+
+    if enabled {
+        // 2a) 启用：按需拉起本地推理服务（start 内部后台做健康检查，不阻塞）
+        if let Some(config) = gpt_sovits_cfg {
+            let svc = gpt_sovits_service().await;
+            match svc.start(&config).await {
+                Ok(s) => tracing::info!("[TTS] GPT-SoVITS 已按需启动: {:?}", s.status),
+                Err(e) => tracing::warn!("[TTS] GPT-SoVITS 启动失败: {e}"),
+            }
+        }
+        if let Some(config) = fish_speech_cfg {
+            let svc = fish_speech_service().await;
+            match svc.start(&config).await {
+                Ok(s) => tracing::info!("[TTS] Fish Speech 已按需启动: {:?}", s.status),
+                Err(e) => tracing::warn!("[TTS] Fish Speech 启动失败: {e}"),
+            }
+        }
+    } else {
+        // 2b) 禁用：打断正在朗读的语音（否则当前这句话会播完才停）
+        let planner = get_planner().await;
+        let _ = planner.stop_all().await;
+        state.playback_gate.mark_finished();
+    }
+
+    // 3) 通知所有窗口同步（多角色窗口共享同一份 enabled 真相）
+    let _ = app.emit("tts:config-changed", serde_json::json!({ "enabled": enabled }));
+    Ok(())
+}
+
 /// 过滤掉文本中的括号动作描述（如 `(轻声笑了笑)`），避免 TTS 朗读动作文本
 fn strip_action_text(text: &str) -> String {
     let re = regex::Regex::new(r"\([^)]*\)").unwrap();
@@ -563,5 +661,87 @@ pub fn list_gpt_sovits_models(
 /// 路径转字符串(统一用正斜杠,避免后端 JSON 转义)
 fn path_to_str(p: &std::path::Path) -> String {
     p.to_string_lossy().replace('\\', "/")
+}
+
+#[cfg(test)]
+mod global_voice_switch_tests {
+    use super::apply_enabled;
+    use crate::speech::{TtsConfig, TtsEngine};
+
+    #[test]
+    fn enabling_turns_on_every_role_config() {
+        let mut config = TtsConfig::default();
+        assert!(!config.enabled);
+
+        let outcome = apply_enabled(&mut config, true);
+
+        assert!(config.enabled, "托盘启用必须直接改写后端配置");
+        assert!(outcome.changed);
+    }
+
+    #[test]
+    fn disabling_turns_off_every_role_config() {
+        let mut config = TtsConfig::default();
+        config.enabled = true;
+
+        let outcome = apply_enabled(&mut config, false);
+
+        assert!(!config.enabled);
+        assert!(outcome.changed);
+    }
+
+    #[test]
+    fn repeated_toggle_is_idempotent_and_skips_persist() {
+        let mut config = TtsConfig::default();
+        config.enabled = true;
+
+        // 重复点同一目标值：状态已一致，不需再次落盘
+        let outcome = apply_enabled(&mut config, true);
+
+        assert!(config.enabled);
+        assert!(!outcome.changed, "配置未变化时不应重复写盘");
+    }
+
+    #[test]
+    fn enabling_starts_gpt_sovits_only_when_auto_start_configured() {
+        let mut config = TtsConfig::default();
+        config.engine = TtsEngine::GptSoVits;
+        config.gpt_sovits_auto_start = true;
+        config.gpt_sovits_install_path = Some("C:\\GPT-SoVITS".to_string());
+
+        let outcome = apply_enabled(&mut config, true);
+
+        assert!(outcome.needs_gpt_sovits, "托盘启用应按需拉起本地模型");
+        assert!(!outcome.needs_fish_speech);
+    }
+
+    #[test]
+    fn enabling_without_auto_start_never_spawns_local_service() {
+        let mut config = TtsConfig::default();
+        config.engine = TtsEngine::GptSoVits;
+        // auto_start 未开：托盘勾选只改 enabled，不擅自拉起占用数 GB 内存的本地服务
+        config.gpt_sovits_install_path = Some("C:\\GPT-SoVITS".to_string());
+
+        let outcome = apply_enabled(&mut config, true);
+
+        assert!(!outcome.needs_gpt_sovits);
+        assert!(!outcome.needs_fish_speech);
+    }
+
+    #[test]
+    fn disabling_never_starts_services_and_keeps_existing_choice() {
+        let mut config = TtsConfig::default();
+        config.enabled = true;
+        config.engine = TtsEngine::FishSpeech;
+        config.fish_speech_auto_start = true;
+        config.fish_speech_install_path = Some("C:\\fish-speech".to_string());
+
+        let outcome = apply_enabled(&mut config, false);
+
+        assert!(!outcome.needs_fish_speech, "禁用路径不应触发服务启动");
+        assert!(!outcome.needs_gpt_sovits);
+        // 禁用不应抹掉用户此前配置的 auto_start 偏好
+        assert!(config.fish_speech_auto_start);
+    }
 }
 
