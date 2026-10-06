@@ -973,8 +973,12 @@ impl BaseProvider for OpenAiCompatProvider {
     }
 
     /// OpenAI 兼容接口（OpenAI / DeepSeek / Qwen / Moonshot / GLM / Doubao / SiliconFlow 等）
-    /// 普遍支持原生 function calling，返回 true。
-    /// 个别极简实现可能不支持，但主流服务商均支持，此处乐观返回 true。
+    /// 普遍支持原生 function calling，故一律乐观返回 true。
+    ///
+    /// **不在这里维护"哪些模型不支持"的名单**：名单滞后且覆盖不全，判错还有代价。
+    /// 模型不支持工具调用时由运行时兜底发现——原生路径拿不到工具调用（百炼这类网关是
+    /// 静默忽略 `tools`：200 + 0 tool_calls、不报错）时，`generation.rs` 的
+    /// `retry_via_text_path()` 会改走文本路径，把工具清单注入 prompt 再要一次。
     fn supports_native_function_calling(&self) -> bool {
         true
     }

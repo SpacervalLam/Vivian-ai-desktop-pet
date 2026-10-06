@@ -667,6 +667,8 @@ impl BaseProvider for ChatCompletionsProvider {
         })
     }
 
+    /// 与 `OpenAiCompatProvider` 同一口径：一律乐观 true，不维护模型级黑名单；
+    /// 模型不支持工具调用时由 `generation.rs` 的 `retry_via_text_path()` 在运行时兜底。
     fn supports_native_function_calling(&self) -> bool {
         true
     }

@@ -238,6 +238,18 @@ pub fn vendor_capability(vendor: VendorId) -> &'static VendorCapability {
         .unwrap_or_else(|| VENDOR_CAPABILITIES.last().expect("能力表非空"))
 }
 
+// 注：这里**故意不维护**「哪些模型不支持 function calling」的模型级名单。
+//
+// 曾经加过一张（依据百炼 qwen-plus-character 能力表「Function Calling 不支持」），
+// 后来撤掉了：名单永远是滞后的、覆盖不全的，而且判错的代价不对称。改成
+// **运行时发现**：一律先走原生路径把 `tools` 交给 API，拿不到工具调用时由
+// `pipeline/steps/generation.rs` 的 `retry_via_text_path()` 改走文本路径
+// （工具清单注入 prompt + JSON tool_calls 解析）。这样任何不支持工具调用的模型
+// 都能被覆盖，不需要预先知道它是谁。
+//
+// 厂商级 `VendorCapability::supports_tools` 仍在表里，但表达的是「这家厂商的模型
+// 普遍支持吗」，粒度不足以描述模型级例外；且 `vendor_capability()` 目前无调用者。
+
 /// 按模型名给出该厂商主力模型的上下文窗口默认值（tokens）。
 ///
 /// 用于自动压缩阈值判定：用户未显式配置 context_window 时的兜底，

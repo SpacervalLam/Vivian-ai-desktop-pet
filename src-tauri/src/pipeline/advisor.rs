@@ -496,6 +496,9 @@ impl Advisor for LoopDetectionAdvisor {
 
         let mut attempts = 0;
         let mut current_req = req.clone();
+        // 上一次尝试的原文。下游若对同一请求确定性地产出同一句话（例如执行守卫的兜底
+        // 文案），重试只会原样再拿到一次，白跑 max_retries 次 LLM 调用。
+        let mut last_attempt: Option<String> = None;
         loop {
             let resp = next.invoke(current_req.clone(), config.clone()).await?;
             let text = resp
@@ -509,6 +512,17 @@ impl Advisor for LoopDetectionAdvisor {
                 self.push_history(&text);
                 return Ok(resp);
             }
+
+            if last_attempt.as_deref() == Some(text.as_str()) {
+                // 重试得到的文本与上一次完全相同 → 下游是确定性的，继续重试没有意义
+                tracing::warn!(
+                    advisor = %self.name,
+                    "loop detected, retry returned identical text; giving up on retries"
+                );
+                self.push_history(&text);
+                return Ok(resp);
+            }
+            last_attempt = Some(text.clone());
 
             // 命中重复
             attempts += 1;
@@ -643,6 +657,25 @@ mod tests {
         assert_eq!(call_count.load(std::sync::atomic::Ordering::Relaxed), 2);
         let text = resp.get("text").unwrap().as_str().unwrap();
         assert_eq!(text, "你好，很高兴见到你");
+    }
+
+    #[tokio::test]
+    async fn loop_detection_gives_up_when_retry_is_identical() {
+        // 下游确定性地产出同一句话（执行守卫的兜底文案就是这样）：重试只会拿到同一句，
+        // 必须立刻返回，而不是把 max_retries 跑满。
+        let advisor = LoopDetectionAdvisor::new(5, 3);
+        advisor.push_history("你好");
+        let call_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let call_count_clone = call_count.clone();
+        let next = LoopTestNext {
+            call_count: call_count_clone,
+            first: "你好".to_string(),
+            second: "你好".to_string(),
+        };
+        let resp = advisor.around_invoke(serde_json::json!({}), None, &next).await.unwrap();
+        // 第 1 次拿到重复 → 重试；第 2 次仍是同一句 → 放弃重试
+        assert_eq!(call_count.load(std::sync::atomic::Ordering::Relaxed), 2);
+        assert_eq!(resp.get("text").unwrap().as_str().unwrap(), "你好");
     }
 
     struct LoopTestNext {
