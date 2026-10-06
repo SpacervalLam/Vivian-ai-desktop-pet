@@ -269,6 +269,7 @@ if (liveReady) {
       model,
       messages: [
         { role: 'system', content: systemFor(scenario) },
+        ...(scenario.state?.dialogue ?? []),
         { role: 'user', content: userFor(scenario) },
       ],
       temperature: 0.7,

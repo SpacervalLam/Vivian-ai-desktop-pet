@@ -741,7 +741,9 @@ mod channel_tests {
         assert_eq!(m.user_channel("nana").as_deref(), Some("direct"));
         m.set_user_channel("nana", "wechat");
         assert_eq!(m.user_channel("nana").as_deref(), Some("wechat"));
-        m.close_pair_with_reason("user", "nana", CloseReason::SwitchTopic);
+        // 关闭后渠道应被重置。此处用 Natural 而非 SwitchTopic：转向话题不再关闭会话
+        // （见 IntentJudge::parse_close_reason），用转向来表达"结束"已不成立。
+        m.close_pair_with_reason("user", "nana", CloseReason::Natural);
         assert_eq!(m.user_channel("nana"), None);
         m.force_new_session("user", "nana", "new topic");
         assert_eq!(m.user_channel("nana"), None);

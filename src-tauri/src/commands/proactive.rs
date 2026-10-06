@@ -737,7 +737,9 @@ pub async fn proactive_tick(
         let reason = crate::conversation::CONVERSATION_MANAGER
             .user_session_close_reason(&char_id);
         // GoodNight/NoResponse/Timeout → 跳过主动搭话
-        // 其余原因（Natural/SwitchTopic）允许主动开新话题
+        // Natural（自然收尾）允许主动开新话题。
+        // SwitchTopic 不再出现在关闭原因里——转向话题不代表会话结束，用户可能
+        // 正在说新内容，此时插话等于打断；若真要收尾，自然路径会给出 Natural。
         let skip = matches!(
             reason,
             Some(crate::conversation::CloseReason::GoodNight)

@@ -305,6 +305,168 @@
           "\\b(failed|error)[^.]{0,20}(success|completed|succeeded)\\b"
         ]
       }
+    },
+    {
+      "id": "abrupt_topic_change",
+      "group": "companion",
+      "title": "abrupt_topic_change",
+      "input": "猫为什么像液体",
+      "state": {
+        "dialogue": [
+          {
+            "role": "user",
+            "content": "明天工作好多。"
+          },
+          {
+            "role": "assistant",
+            "content": "先做最急的那件吧。"
+          }
+        ]
+      },
+      "expect": {
+        "format": "json",
+        "reply_min_chars": 2,
+        "reply_forbidden": [
+          "回到.{0,8}(工作|正题)",
+          "你(其实|真正)想说.{0,8}工作"
+        ]
+      }
+    },
+    {
+      "id": "playful_babble",
+      "group": "companion",
+      "title": "playful_babble",
+      "input": "阿巴阿巴",
+      "state": {
+        "dialogue": [
+          {
+            "role": "user",
+            "content": "今天主打一个啥也没干。"
+          },
+          {
+            "role": "assistant",
+            "content": "待办列表毫发无伤。"
+          }
+        ]
+      },
+      "expect": {
+        "format": "json",
+        "reply_min_chars": 2,
+        "reply_forbidden": [
+          "(阿巴).{0,12}(意思是|意味着|说明你)",
+          "(智力|认知障碍|精神疾病)"
+        ]
+      }
+    },
+    {
+      "id": "scrambled_text",
+      "group": "companion",
+      "title": "scrambled_text",
+      "input": "撒看见和对方bask决定是否",
+      "state": {
+        "dialogue": [
+          {
+            "role": "user",
+            "content": "刚吃完饭。"
+          },
+          {
+            "role": "assistant",
+            "content": "吃了什么？"
+          }
+        ]
+      },
+      "expect": {
+        "format": "json",
+        "reply_min_chars": 2,
+        "reply_forbidden": [
+          "bask.{0,15}(晒太阳|享受|沐浴|沉浸)",
+          "(你是想说|你的意思是|你其实想).{0,60}(对方|决定|是否)",
+          "(心理状态|潜意识|精神疾病)"
+        ]
+      }
+    },
+    {
+      "id": "serious_correction",
+      "group": "companion",
+      "title": "serious_correction",
+      "input": "不是玩梗，我是认真问的，刚才打错了",
+      "state": {
+        "dialogue": [
+          {
+            "role": "user",
+            "content": "阿巴阿巴"
+          },
+          {
+            "role": "assistant",
+            "content": "阿巴，收到。"
+          }
+        ]
+      },
+      "expect": {
+        "format": "json",
+        "reply_min_chars": 2,
+        "reply_forbidden": [
+          "阿巴",
+          "你(明明|就是|肯定).{0,8}(玩梗|开玩笑)"
+        ]
+      }
+    },
+    {
+      "id": "incomplete_real_task",
+      "group": "companion",
+      "title": "incomplete_real_task",
+      "input": "把标题改成那个呃啊然后那个",
+      "state": {
+        "dialogue": []
+      },
+      "expect": {
+        "format": "json",
+        "reply_min_chars": 2,
+        "reply_forbidden": [
+          "(已经|已|帮你).{0,8}(改好|修改|改成|完成)"
+        ]
+      }
+    },
+    {
+      "id": "meaningful_mixed_language",
+      "group": "companion",
+      "title": "meaningful_mixed_language",
+      "input": "这个 borrow checker 报错怎么修",
+      "state": {
+        "dialogue": []
+      },
+      "expect": {
+        "format": "json",
+        "reply_min_chars": 2,
+        "reply_forbidden": [
+          "(乱码|胡言乱语|阿巴)",
+          "(已经|已).{0,8}(修好|修复)"
+        ]
+      }
+    },
+    {
+      "id": "unclear_input_rules",
+      "group": "companion",
+      "kind": "prompt_invariant",
+      "title": "换题和不明确输入规则",
+      "prompt_must_match": [
+        {
+          "file": "src-tauri/prompts/framework/companion_dialogue.en.md",
+          "pattern": "clear new topic replace the old one"
+        },
+        {
+          "file": "src-tauri/prompts/framework/companion_dialogue.en.md",
+          "pattern": "do not decode fragments"
+        },
+        {
+          "file": "src-tauri/prompts/framework/companion_dialogue.en.md",
+          "pattern": "do not claim to know their intent"
+        },
+        {
+          "file": "src-tauri/prompts/framework/companion_dialogue.en.md",
+          "pattern": "mixed languages.*real speech"
+        }
+      ]
     }
   ]
 }

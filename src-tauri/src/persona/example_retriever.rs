@@ -263,6 +263,22 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn conversation_turn_examples_are_retrievable_without_remote_embeddings() {
+        for name in ["vivian", "nana"] {
+            let r = ExampleRetriever::new(name, default_embedding());
+            for id in ["topic-hard-turn", "playful-babble", "scrambled-message", "serious-after-babble", "task-incomplete", "mixed-language-clear"] {
+                let e = r.entries.iter().find(|e| e.id == id).unwrap();
+                let history = vec![message("user", "明天工作好多"), message("assistant", "先做最急的那件吧")];
+                for input in std::iter::once(&e.user).chain(e.cues.iter()) {
+                    let result = r.retrieve(input, &history, None, &[]).unwrap();
+                    assert!(result.contains(&format!("Example {id}\n")), "{name}: {input}");
+                    assert!(result.chars().count() <= MAX_CHARS);
+                }
+                assert!(e.context_cues.is_empty());
+            }
+        }
+    }
     struct SemanticFixture(std::sync::atomic::AtomicUsize);
     impl MemoryEmbeddingProvider for SemanticFixture {
         fn dimension(&self) -> usize { 2 }
@@ -282,7 +298,7 @@ mod tests {
         assert!(result.contains("creative-choice"));
         r.preload();
         assert_eq!(provider.0.load(std::sync::atomic::Ordering::Relaxed), 0);
-        assert!(result.matches("\nExample ").count() <= MAX_EXAMPLES);
+        assert!(result.lines().filter(|line| line.starts_with("Example ") && !line.starts_with("Example response:")).count() <= MAX_EXAMPLES);
         // A wrong-dimension shared query must be replaced, never silently compared.
         r.retrieve("标题", &[], Some(&[1.0]), &[]);
         assert_eq!(provider.0.load(std::sync::atomic::Ordering::Relaxed), 1);

@@ -305,14 +305,14 @@ impl IntentJudge {
             Duration::from_secs(JUDGE_TIMEOUT_SECS),
             router.choose_simple(
                 serde_json::json!({"latest_message": text, "recent_conversation": history_text}),
-                "Does the latest message end or interrupt the current conversation? Select none for an ordinary reply; only select a close reason when the context supports it.",
+                "Does the latest message end or interrupt the current conversation? Select none for an ordinary reply; only select a close reason when the context supports it. Changing to an unrelated subject is NOT an ending: the speaker is still talking, so prefer none for that case.",
                 &[
-                    ("none", "The conversation continues normally"),
+                    ("none", "The conversation continues normally, including when the speaker abruptly changes the subject"),
                     ("good_night", "Speaker is going to sleep"),
                     ("good_bye", "Speaker is leaving or ending the chat"),
                     ("interrupted", "Speaker steps away temporarily"),
                     ("conflict", "Conversation ends after a conflict"),
-                    ("switch_topic", "Speaker clearly begins a new topic"),
+                    ("switch_topic", "Speaker clearly begins a new topic — not an ending, prefer none"),
                     ("no_response", "Other side has stopped replying"),
                     ("timeout", "Long silence without engagement"),
                     ("natural", "Topic has reached a natural conclusion"),
@@ -419,7 +419,8 @@ impl IntentJudge {
                  - good_bye: speaker is leaving / saying goodbye / ending chat\n\
                  - interrupted: speaker temporarily steps away but intends to come back (phone call, busy moment, brb)\n\
                  - conflict: conversation ended after an argument / fight / tension\n\
-                 - switch_topic: speaker explicitly opens a clearly new topic, signaling the old one is done\n\
+                 - switch_topic: speaker explicitly opens a clearly new topic. This is NOT an ending —\
+                   the speaker is still talking, so prefer none. It is listed only to distinguish it from a real ending.\n\
                  - no_response: passive silence — the other side has stopped replying\n\
                  - timeout: long silence with no engagement\n\
                  - natural: topic reached natural conclusion, conversation fading, no explicit farewell\n\
@@ -436,7 +437,8 @@ impl IntentJudge {
                  - good_bye：発言者が立ち去る / 別れを告げる / チャットを終える\n\
                  - interrupted：発言者が一時的に離れるが戻るつもり（電話、忙しい場面、brb）\n\
                  - conflict：口論 / けんか / 緊張の後に会話が終了\n\
-                 - switch_topic：発言者が明示的に新しい話題を始め、旧話題の終了を示唆\n\
+                 - switch_topic：発言者が明示的に新しい話題を始める。これは終了ではない — 発言者は\
+                   まだ話しているため、none を優先する。実際の終了と区別するための項目。\n\
                  - no_response：受動的な沈黙 — 相手が返信をやめた\n\
                  - timeout：長い沈黙、エンゲージメントなし\n\
                  - natural：話題が自然に着地、会話がフェードアウト、明示的な別れはない\n\
@@ -453,7 +455,8 @@ impl IntentJudge {
                  - good_bye：发言者要离开 / 道别 / 结束聊天\n\
                  - interrupted：发言者暂时离开但打算回来（电话、临时有事、brb）\n\
                  - conflict：争吵 / 冲突 / 紧张后对话结束\n\
-                 - switch_topic：发言者明确开启新话题，标志着旧话题结束\n\
+                 - switch_topic：发言者明确开启新话题。这不是结束——发言者仍在说话，应选 none。\n\
+                   列出它只是为了与真正的结束相区分。\n\
                  - no_response：被动沉默——对方停止回复\n\
                  - timeout：长时间沉默，无互动\n\
                  - natural：话题自然结束，对话渐弱，无明确告别\n\
@@ -464,6 +467,15 @@ impl IntentJudge {
     }
 
     /// 解析 LLM 单行响应为 CloseReason
+    ///
+    /// `switch_topic` 在此被降级为"不关闭"：换一个话题不等于结束会话。调用方
+    /// （`commands/chat.rs`）会把返回的 `Some(reason)` 直接交给
+    /// `close_with_reason`，若放行 `SwitchTopic`，用户随口换个话题就会被关掉会话——
+    /// 表现为角色突然结束当前对话、可能转去主动开新话题，而用户的话还没说完。
+    ///
+    /// 保留枚举值本身是有意的：它仍是有用的诊断信号（Mind Inspector 与日志需要
+    /// 区分"转向"和"自然结束"），只是不再是关闭理由。真正的自然收尾走 `natural`，
+    /// 它在语义上要求"对话渐弱、无明确告别"，与转向不同。
     fn parse_close_reason(response: &str) -> Option<CloseReason> {
         let trimmed = response.trim().to_lowercase();
         // 取首行首词，容错 LLM 偶发的换行/标点尾巴
@@ -478,7 +490,8 @@ impl IntentJudge {
             "good_bye" | "goodbye" => Some(CloseReason::GoodBye),
             "interrupted" => Some(CloseReason::Interrupted),
             "conflict" => Some(CloseReason::Conflict),
-            "switch_topic" => Some(CloseReason::SwitchTopic),
+            // 转向不是结束：用户在说话，只是换了方向。
+            "switch_topic" => None,
             "no_response" => Some(CloseReason::NoResponse),
             "timeout" => Some(CloseReason::Timeout),
             "natural" => Some(CloseReason::Natural),
@@ -546,13 +559,19 @@ mod tests {
             Some(CloseReason::GoodNight)
         );
         assert_eq!(
-            IntentJudge::parse_close_reason("switch_topic"),
-            Some(CloseReason::SwitchTopic)
+            IntentJudge::parse_close_reason("natural"),
+            Some(CloseReason::Natural)
         );
         assert_eq!(
             IntentJudge::parse_close_reason("  Conflict  \n"),
             Some(CloseReason::Conflict)
         );
+    }
+
+    /// 转向话题不是结束：调用方会把它当关闭理由交给 `close_with_reason`。
+    #[test]
+    fn switching_topic_does_not_close_the_conversation() {
+        assert_eq!(IntentJudge::parse_close_reason("switch_topic"), None);
     }
 
     #[test]
