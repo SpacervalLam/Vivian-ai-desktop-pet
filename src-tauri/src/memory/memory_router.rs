@@ -109,7 +109,7 @@ impl RouterLlmClient for crate::providers::ModelRouter {
     }
 
     async fn classify_destination(&self, ctx: &RouteContext<'_>) -> Option<MemoryDestination> {
-        let choice = self.choose_simple(
+        let choice = self.choose_simple_for("memory",
             serde_json::json!({
                 "content": ctx.content, "importance": ctx.importance,
                 "channel": ctx.channel, "speaker": ctx.speaker,

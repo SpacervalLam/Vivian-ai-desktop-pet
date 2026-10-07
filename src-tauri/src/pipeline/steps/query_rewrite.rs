@@ -30,7 +30,7 @@ use crate::providers::base::LLMRequest;
 use crate::providers::ModelRouter;
 use crate::types::response::ChatMessage;
 
-const REWRITE_TASK: &str = "memory";
+const REWRITE_TASK: &str = "query_rewrite";
 const REWRITE_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// 查询重写步骤。
@@ -254,7 +254,7 @@ mod tests {
 
     #[test]
     fn rewrite_constants_are_reasonable() {
-        assert_eq!(REWRITE_TASK, "memory");
+        assert_eq!(REWRITE_TASK, "query_rewrite");
         assert!(REWRITE_TIMEOUT >= Duration::from_secs(1));
     }
 }

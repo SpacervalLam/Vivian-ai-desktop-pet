@@ -303,7 +303,7 @@ impl IntentJudge {
         let history_text = Self::build_history_text(history);
         let simple_choice = tokio::time::timeout(
             Duration::from_secs(JUDGE_TIMEOUT_SECS),
-            router.choose_simple(
+            router.choose_simple_for("intent_judge",
                 serde_json::json!({"latest_message": text, "recent_conversation": history_text}),
                 "Does the latest message end or interrupt the current conversation? Select none for an ordinary reply; only select a close reason when the context supports it. Changing to an unrelated subject is NOT an ending: the speaker is still talking, so prefer none for that case.",
                 &[

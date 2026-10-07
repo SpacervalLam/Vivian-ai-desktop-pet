@@ -194,7 +194,8 @@ impl Brain {
 
         // 初始化工具语义筛选器（复用嵌入 provider，对工具描述做语义匹配）
         let tool_semantic_filter = Arc::new(
-            crate::tools::ToolSemanticFilter::new(embedding_provider, language),
+            crate::tools::ToolSemanticFilter::new(embedding_provider, language)
+                .with_corpus_path(crate::utils::path::get_user_data_dir().join("memory/tool_usage_corpus.json")),
         );
         // 启动预加载：工具描述嵌入，避免首个工具推荐请求触发懒嵌入
         tool_semantic_filter.preload(&tool_system);
@@ -1061,7 +1062,7 @@ impl Brain {
                     ChatMessage::system(greeting_prompt),
                 ];
                 match self.router.generate(
-                    LLMRequest::new("chat", messages).with_temperature(0.9)
+                    LLMRequest::new(crate::providers::base::TASK_COMPANION, messages).with_temperature(0.9)
                         .without_framework_instructions()
                         .with_character_id(self.char_id.clone())
                 ).await {
@@ -1283,7 +1284,7 @@ impl Brain {
             ChatMessage::user(user_prompt),
         ];
 
-        match self.router.generate(LLMRequest::new("chat", messages)
+        match self.router.generate(LLMRequest::new(crate::providers::base::TASK_COMPANION, messages)
             .with_character_id(self.char_id.clone())).await {
             Ok(text) => {
                 let greeting = text.trim().trim_matches('"').trim_matches('「').trim_matches('」').to_string();
@@ -1394,7 +1395,7 @@ impl Brain {
             ChatMessage::user(user_prompt),
         ];
 
-        match self.router.generate(LLMRequest::new("chat", messages)
+        match self.router.generate(LLMRequest::new(crate::providers::base::TASK_COMPANION, messages)
             .with_character_id(self.char_id.clone())).await {
             Ok(text) => {
                 let farewell = text.trim().trim_matches('"').trim_matches('「').trim_matches('」').to_string();

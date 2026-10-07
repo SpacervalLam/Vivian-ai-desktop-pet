@@ -201,7 +201,7 @@ impl SummaryBufferStrategy {
             ),
         };
         let llm_messages = vec![ChatMessage::user(&prompt)];
-        match router.generate(LLMRequest::new("chat", llm_messages)).await {
+        match router.generate(LLMRequest::new("context_compress", llm_messages)).await {
             Ok(text) => text.trim().to_string(),
             Err(e) => {
                 tracing::warn!("[SummaryBufferStrategy] LLM 摘要失败，回退本地: {}", e);

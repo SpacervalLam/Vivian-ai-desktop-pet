@@ -135,6 +135,10 @@ pub trait MemoryEmbeddingProvider: Send + Sync {
     fn model_id(&self) -> &str {
         "hashing"
     }
+    /// Persisted tool corpus vectors must belong to the same embedding space.
+    fn index_identity(&self) -> String {
+        format!("{}:{}:{}", self.model_id(), self.dimension(), self.is_remote())
+    }
 }
 
 /// 异步嵌入服务 trait（远程调用专用）
@@ -737,6 +741,9 @@ impl MemoryEmbeddingProvider for RemoteMemoryEmbedding {
 
     fn model_id(&self) -> &str {
         &self.model
+    }
+    fn index_identity(&self) -> String {
+        format!("remote:{}:{}:{:x}", self.model, self.dimension, fnv1a_64(&self.base_url))
     }
 }
 

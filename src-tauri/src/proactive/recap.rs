@@ -83,7 +83,7 @@ pub async fn generate_return_recap(
         event_lines.join("\n")
     );
 
-    let req = LLMRequest::new("memory", vec![ChatMessage::user(prompt)])
+    let req = LLMRequest::new(crate::providers::base::TASK_COMPANION, vec![ChatMessage::user(prompt)])
         .with_character_id(char_id.to_string());
     let recap = match router.generate(req).await {
         Ok(text) => text.trim().to_string(),

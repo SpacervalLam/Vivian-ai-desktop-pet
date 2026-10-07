@@ -468,7 +468,7 @@ impl ReflectionRunnable {
         let router = self.router.as_ref()?;
         let messages = self.build_messages(state);
 
-        match router.generate(LLMRequest::new("chat", messages)
+        match router.generate(LLMRequest::new("reflection", messages)
             .with_usage_tag("reflection")
             .with_max_tokens(1536)
             .with_reasoning_pref(crate::providers::reasoning::ReasoningPreference {

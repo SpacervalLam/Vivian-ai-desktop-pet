@@ -133,15 +133,14 @@ pub trait ExtractorLlmClient: Send + Sync {
 
 /// 为 `ModelRouter` 实现 LLM 客户端
 ///
-/// 使用 `reflection` 路由：巩固反思类任务（ADD/UPDATE/DELETE 抽取、画像分析、
-/// 洞察生成）需要强推理模型，与写入时 `enrich` 的高频低复杂度任务分离，
-/// 让用户可以分别为两者配置不同模型。
+/// 使用 memory 路由提取真实用户证据对应的 ADD/UPDATE/DELETE 操作。
+/// 心情与角色理解的回顾属于 reflection，既有记忆的合并精修属于 consolidation。
 #[async_trait]
 impl ExtractorLlmClient for crate::providers::ModelRouter {
     async fn complete(&self, prompt: &str) -> VivianResult<String> {
         let messages = vec![ChatMessage::user(prompt)];
         self.generate(crate::providers::base::LLMRequest::new(
-            "reflection",
+            "memory",
             messages,
         ).without_framework_instructions())
         .await

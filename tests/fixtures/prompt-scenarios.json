@@ -445,6 +445,35 @@
       }
     },
     {
+      "id": "developer_introduction_without_invented_history",
+      "group": "companion",
+      "title": "重置后开发者介绍不伪造共同经历",
+      "input": "你们好，我是AlenTinn，算是你们的开发者吧",
+      "state": {
+        "dialogue": [],
+        "memory": "[预置背景 | 角色预设；非真实共同经历] AlenTinn创造了我。他说：慢慢来，不着急。此条是虚构角色背景，不能作为当前用户说过的话。"
+      },
+      "expect": {
+        "format": "json",
+        "reply_min_chars": 2,
+        "reply_forbidden": ["你(之前|以前|当时).{0,8}(说|告诉)", "(还记得|记得你|又见面)"]
+      }
+    },
+    {
+      "id": "model_origin_reply_without_duplicate_question",
+      "group": "companion",
+      "title": "外观来源解释不变成重复采访",
+      "input": "其实是之前用的一个live2d模型改的，因为感觉live2d不太好用",
+      "state": {
+        "dialogue": [{"role":"assistant","content":"银白头发和这条尾巴，是你挑的吗？"}]
+      },
+      "expect": {
+        "format": "json",
+        "reply_min_chars": 2,
+        "reply_forbidden": ["所以你是嫌", "长什么样.{0,15}改之前", "这理由倒挺实在"]
+      }
+    },
+    {
       "id": "unclear_input_rules",
       "group": "companion",
       "kind": "prompt_invariant",

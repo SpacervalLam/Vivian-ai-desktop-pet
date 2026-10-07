@@ -38,6 +38,7 @@ pub mod registry;
 pub mod runnable_adapter;
 pub mod sandbox;
 pub mod semantic_filter;
+pub mod usage_corpus;
 pub mod services;
 pub mod tool_call_manager;
 pub mod trust;

@@ -6,7 +6,9 @@ export type ToastType = 'info' | 'success' | 'error' | 'warning';
 /** toast 附带的一键操作，后端/主窗口随 toast:show 下发 */
 export interface ToastAction {
   /** switch_theme：一键切换界面主题；open_url：用系统默认浏览器打开 url */
-  kind: 'switch_theme' | 'open_url';
+  kind: 'switch_theme' | 'open_url' | 'open_work_session';
+  sessionId?: string;
+  cancelLabel?: string;
   /** switch_theme 时的目标主题 */
   theme?: 'light' | 'dark';
   /** open_url 时的目标地址（仅允许 http(s)，打开前由处理方校验） */
@@ -184,6 +186,11 @@ const Toast: React.FC<ToastProps> = ({
             }}
           >
             {action.label}
+          </button>
+        )}
+        {action?.cancelLabel && (
+          <button type="button" onClick={onClose} style={{ marginLeft: 10, border: 'none', background: 'none', color: 'inherit', cursor: 'pointer', textDecoration: 'underline' }}>
+            {action.cancelLabel}
           </button>
         )}
       </span>

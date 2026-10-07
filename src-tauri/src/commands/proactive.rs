@@ -37,6 +37,10 @@ fn remember_delivered_channel(char_id: &str, action: &crate::proactive::Proactiv
 }
 
 fn deliverable_proactive_action(action: &crate::proactive::ProactiveAction) -> bool {
+    if action.work_notice_id.as_deref().is_some_and(|id| !crate::brain::work_notices::global().has_alert(id)) {
+        return false;
+    }
+
     !action.content.trim().is_empty()
         && (!matches!(action.content_type, crate::proactive::ContentType::Share)
             || action.value_score.unwrap_or(0.0) >= crate::proactive::SHARE_VALUE_THRESHOLD)
@@ -517,6 +521,8 @@ pub async fn proactive_tick(
     let instance = state.get_character(character_id.as_deref())?;
     let brain = instance.brain.clone();
     let state_arc = state.inner().clone();
+    let callback_due = crate::brain::work_notices::global().next_alert_for(&char_id)
+        .is_some_and(|notice| notice.required);
 
     // Renew liveness before cooldown/focus/other early exits. Speech eligibility is
     // evaluated later and must not determine whether a live window has a heartbeat.
@@ -619,7 +625,7 @@ pub async fn proactive_tick(
     // 冷却时长 = CROSS_ROLE_COOLDOWN_SECS × 动态 reluctance。
     // 动态调整：近 10 分钟发言比例 > 0.5（说得多）时 reluctance 上浮，让对方有更多机会接话；
     // 比例 < 0.5（说得少）时 reluctance 下调，让自己更容易开口。
-    {
+    if !callback_due {
         let now_ts = chrono::Local::now().timestamp() as f64;
         let last_spoken = LAST_SPOKEN.read();
         let behavior = crate::character_behavior::get_behavior(&char_id);
@@ -649,7 +655,7 @@ pub async fn proactive_tick(
 
     // 策略 D：仲裁让步延迟 —— 被仲裁抑制的角色在 yield_delay_secs 内不得发言
     // 动态调整：发言比例高的一方让步延迟更长，给对方更多发言空间
-    {
+    if !callback_due {
         let now_ts = chrono::Local::now().timestamp() as f64;
         let suppression = YIELD_SUPPRESSION.read();
         if let Some(&suppressed_at) = suppression.get(&char_id) {
@@ -733,7 +739,7 @@ pub async fn proactive_tick(
     // 会话状态检查：若 User↔Agent 会话已关闭（GoodNight/NoResponse/Timeout 等），
     // 跳过本次主动搭话。只有会话 Active/Cooling 或无会话时才允许主动。
     // 注意：close_reason 为 GoodNight 时，整个睡眠时段都不应主动搭话。
-    if crate::conversation::CONVERSATION_MANAGER.is_user_session_closed(&char_id) {
+    if !callback_due && crate::conversation::CONVERSATION_MANAGER.is_user_session_closed(&char_id) {
         let reason = crate::conversation::CONVERSATION_MANAGER
             .user_session_close_reason(&char_id);
         // GoodNight/NoResponse/Timeout → 跳过主动搭话
@@ -1102,7 +1108,7 @@ pub async fn proactive_tick(
 
     // 非 leader：跳过发言预占与 turn 登记，直接执行状态维护 tick
     // 但仍处理 CrossCharacterReply 产出的跨角色消息（发给室友，不发给用户）
-    if !is_speaking_leader {
+    if !is_speaking_leader && !callback_due {
         let _ = brain
             .proactive_tick(&ctx)
             .await
@@ -1174,10 +1180,11 @@ pub async fn proactive_tick(
         }
     };
 
-    let produced = brain
-        .proactive_tick(&ctx)
-        .await
-        .map_err(|e| e.to_string())?;
+    let produced = if callback_due && brain.proactive.relay_work_notice(&ctx) {
+        true
+    } else {
+        brain.proactive_tick(&ctx).await.map_err(|e| e.to_string())?
+    };
 
     // 清理流式回调
     brain.proactive.set_stream_emitter(None);
@@ -1317,6 +1324,9 @@ pub async fn proactive_tick(
             let mut m = ChatMessage::assistant(&clean_content);
             m.meta = Some(MessageMeta::new(MessageSource::Assistant).with_channel("proactive"));
             brain.dialogue.add_message_with_metadata(m, json!({ "session_id": session_id, "speaker": brain.char_id, "listener": "user" }));
+        }
+        if let Some(notice_id) = &action.work_notice_id {
+            crate::brain::work_notices::global().acknowledge_alert(notice_id);
         }
     }
 
@@ -1582,6 +1592,9 @@ pub async fn drain_proactive_messages(
             let mut m = ChatMessage::assistant(&clean_content);
             m.meta = Some(MessageMeta::new(MessageSource::Assistant).with_channel("proactive"));
             brain.dialogue.add_message_with_metadata(m, json!({ "session_id": session_id, "speaker": brain.char_id, "listener": "user" }));
+        }
+        if let Some(notice_id) = &action.work_notice_id {
+            crate::brain::work_notices::global().acknowledge_alert(notice_id);
         }
     }
 

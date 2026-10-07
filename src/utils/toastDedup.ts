@@ -48,8 +48,8 @@ export function winsOver(a: string, b: string): boolean {
  * 指纹不同，互不影响。类型参与指纹，是因为同一句话以 warning / error 出现
  * 属于两次不同语义的提示。
  */
-export function toastFingerprint(message: string, type: string): string {
-  return `${type}\u0000${message}`;
+export function toastFingerprint(message: string, type: string, sessionId?: string): string {
+  return `${type}\u0000${message}${sessionId ? `\u0000${sessionId}` : ''}`;
 }
 
 /** 跨窗口内容去重的时间窗（毫秒）：窗口期内同一内容只呈现一次 */

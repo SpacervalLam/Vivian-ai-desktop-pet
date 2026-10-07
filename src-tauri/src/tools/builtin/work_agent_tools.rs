@@ -214,6 +214,12 @@ impl Tool for DelegateToWorkAgentTool {
                         "delegated_by_companion": true,
                     }),
                 );
+                let _ = tauri::Emitter::emit(&app, "toast:show", json!({
+                    "message": "任务已经开始，是否打开办公页？", "type": "info", "duration": 0,
+                    "key": format!("delegated-start:{session_id}"), "character_id": context.char_id,
+                    "action": { "kind": "open_work_session", "sessionId": session_id,
+                        "label": "打开", "cancelLabel": "取消" }
+                }));
                 ToolResult::standard_success(
                     &format!("任务已派发给工作智能体（会话 {session_id}），正在后台执行。可用 get_work_status 查询进度。"),
                     Some(json!({
@@ -446,13 +452,13 @@ impl Tool for NotifyCompanionTool {
     }
 
     fn description(&self) -> &str {
-        "Hand something to your companion persona so it tells the user in the character's own voice. Use it for things the user should know but cannot see in the work panel — a key finding, a blocker, a decision they need to make. Do NOT use it for routine progress the panel already shows: if the user is looking at this session's work page, the message will not be repeated out loud."
+        "Hand something to your companion persona so it tells the user in the character's own voice. Use it for key findings, real blockers and decisions the user needs to make. Use it once per key milestone or real blocker. For every user office session, including manually started sessions, its companion proactively relays key callbacks even when the work page is visible. Do not send routine per-step chatter."
     }
 
     fn description_in(&self, lang: &str) -> &str {
         match lang {
-            "zh" => "把需要用户知道的事交给你的陪伴人格，由 TA 以角色口吻转告用户。用于用户在工作面板上看不到、但应该知道的信息——关键发现、卡点、需要他拍板的事。不要用来说面板上本来就显示着的常规进度：用户正看着本会话的工作页时，这条不会再重复说。",
-            "ja" => "ユーザーが知っておくべきことをコンパニオンペルソナに渡し、キャラ口調で伝えてもらう。作業パネルでは見えないが知っておくべき情報——重要な発見、詰まり、判断を仰ぐ事柄——に使う。パネルに既に表示されている通常の進捗には使わない：ユーザーがこのセッションの作業ページを見ている場合は口頭で繰り返されない。",
+            "zh" => "把需要用户知道的事交给你的陪伴人格，由 TA 以角色口吻转告用户。用于用户应该知道的关键发现、卡点和需要拍板的事。每个关键节点或真实阻塞通知一次。所有用户办公会话（含手动发起）的关键回调都会主动转达，即使用户已打开办公页；不要每小步播报常规进度。",
+            "ja" => "ユーザーが知っておくべきことをコンパニオンペルソナに渡し、キャラ口調で伝えてもらう。重要な発見、実際の障害、判断を仰ぐ事柄に使う。重要な節目や実際の障害ごとに一度通知する。手動開始も含むすべてのユーザー作業セッションの重要な通知を、画面が見えていても能動的に伝える。細かい定型の進捗は通知しない。",
             _ => self.description(),
         }
     }
@@ -511,14 +517,6 @@ impl Tool for NotifyCompanionTool {
     }
 
     async fn call(&self, args: Value, context: &ToolUseContext) -> ToolResult {
-        let char_id = context.char_id.clone();
-        if char_id.is_empty() {
-            return ToolResult::standard_error(
-                "缺少角色上下文，无法转达",
-                Some("NoCharacter"),
-                None,
-            );
-        }
         let title = args
             .get("title")
             .and_then(|v| v.as_str())
@@ -533,22 +531,17 @@ impl Tool for NotifyCompanionTool {
             return ToolResult::standard_error("message 不能为空", Some("EmptyMessage"), None);
         }
 
-        let ok = crate::brain::work_notices::global().push_alert(
-            &char_id,
-            &context.session_id,
-            title,
-            &message,
-        );
+        let ok = CODING_AGENT.report_work_progress(&context.session_id, title, &message);
         if !ok {
             return ToolResult::standard_error(
-                "登记失败（角色或内容为空）",
+                "登记失败（工作会话不存在、所属角色或内容为空）",
                 Some("NotifyFailed"),
                 None,
             );
         }
         ToolResult::standard_success(
             "已登记，陪伴角色会用自己的口吻转告用户。\
-             若用户此刻正开着这个会话的工作页，就不会再重复说一遍——他已经看到了。",
+             所有办公会话的关键回调均会主动转达，包括用户手动发起的会话。",
             None,
         )
     }

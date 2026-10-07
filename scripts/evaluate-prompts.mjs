@@ -251,6 +251,7 @@ if (liveReady) {
   const userFor = (scenario) => {
     const lines = [scenario.input];
     const state = scenario.state ?? {};
+    if (state.memory) lines.unshift(`[Memory context] ${state.memory}`);
     if (state.history?.length) lines.unshift(`[Earlier short replies] ${state.history.join(' / ')}`);
     if (state.tool_results?.length) lines.push(`[Tool results] ${JSON.stringify(state.tool_results)}`);
     if (state.result) lines.push(`[Background result] ${JSON.stringify(state.result)}`);

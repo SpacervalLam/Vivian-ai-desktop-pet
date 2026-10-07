@@ -1649,8 +1649,8 @@ impl FastSemanticAnalyzer {
         // 按标签聚合最高相似度
         let mut label_best: std::collections::HashMap<&str, f32> = std::collections::HashMap::new();
         for (idx, sim) in &sims {
-            if *sim < min_sim { break; }
-            let label = corpus[*idx].label;
+            let Some(entry) = corpus.get(*idx) else { continue; };
+            let label = entry.label;
             let entry = label_best.entry(label).or_insert(0.0);
             if *sim > *entry { *entry = *sim; }
         }
@@ -1658,14 +1658,7 @@ impl FastSemanticAnalyzer {
         let mut sorted: Vec<(&str, f32)> = label_best.into_iter().collect();
         sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-        sorted
-            .into_iter()
-            .take(max_labels)
-            .map(|(label, sim)| DimensionResult {
-                label: label.to_string(),
-                confidence: sim as f64,
-            })
-            .collect()
+        select_topic_labels(&sorted, max_labels, min_sim)
     }
 
     /// 启动预加载：立即完成所有语义维度语料嵌入初始化（阻塞）。
@@ -2037,8 +2030,33 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     }
 }
 
+const TOPIC_MIN_MARGIN: f32 = 0.03;
+
+/// Abstain on an ambiguous winner; stop adding labels at the first ambiguous tail.
+/// Keep the existing absolute floor while similarity distributions are evaluated.
+fn select_topic_labels(sorted: &[(&str, f32)], max_labels: usize, min_sim: f32) -> Vec<DimensionResult> {
+    let mut labels = Vec::new();
+    for (index, &(label, sim)) in sorted.iter().take(max_labels).enumerate() {
+        let runner_up = sorted.get(index + 1).map(|(_, score)| *score).unwrap_or(0.0);
+        if !sim.is_finite() || sim < min_sim || sim - runner_up < TOPIC_MIN_MARGIN { break; }
+        labels.push(DimensionResult { label: label.to_string(), confidence: sim as f64 });
+    }
+    labels
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn topic_margin_abstains_and_preserves_clear_health_matches() {
+        assert!(super::select_topic_labels(&[("health", 0.38), ("life_event", 0.37), ("technology", 0.36)], 3, 0.3).is_empty());
+        assert!(super::select_topic_labels(&[("health", 0.31), ("daily_life", 0.29)], 3, 0.3).is_empty());
+        assert!(super::select_topic_labels(&[("health", 0.29)], 3, 0.3).is_empty());
+        let labels = super::select_topic_labels(&[("health", 0.75), ("daily_life", 0.36), ("technology", 0.35)], 3, 0.3);
+        assert_eq!(labels.len(), 1);
+        assert_eq!(labels[0].label, "health");
+        assert_eq!(super::select_topic_labels(&[("health", 0.8), ("work_study", 0.6), ("daily_life", 0.4)], 2, 0.3).len(), 2);
+    }
+
     #[test]
     fn ambiguous_labels_abstain_even_at_high_similarity() {
         assert!(super::dimension_confidence(0.9, 0.89) < super::PROMPT_ROUTING_CONFIDENCE);

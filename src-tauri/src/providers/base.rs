@@ -188,23 +188,14 @@ pub struct ToolDefinition {
 /// - temperature / max_tokens 运行时覆盖优先使用请求级字段,无则沿用 ModelRouter setter
 ///   (保持现有 emotion→temperature 机制)
 ///
-/// 工作智能体（编程智能体）专属任务类型
-///
-/// ## 为什么它不能复用 `reasoning`
-///
-/// `reasoning` 原本有两个语义完全不同的使用方：
-/// - 陪伴对话：携带工具定义时从 `chat` 自动升级而来（`generation.rs`）
-/// - 工作智能体：`coding_agent` / `coding_subagent` / `task_service` / `action_planner`
-///
-/// 两者共用同一个任务类型字符串，于是任何"按任务类型生效"的路由规则
-/// 都无法区分它们——工作智能体覆盖模型（`override_provider_for` 只认
-/// `reasoning`）因此接管了角色的每一句台词，连带把该 provider 的
-/// `omit_temperature` 也套上去，情绪驱动的温度被静默丢弃。
-///
-/// 让工作智能体走自己的任务类型，"按任务类型分流"才重新成立，
-/// 不需要在陪伴侧挂"绕过覆盖"这类补丁。
+/// Character dialogue keeps its voice model even for long inputs and tool calls.
+/// Missing routes fall back to the main provider, including existing configurations.
+pub const TASK_COMPANION: &str = "companion";
+
+/// Complex workspace execution. Work-model overrides apply only to this task;
+/// companion speech and read-only reasoning plans keep their own routes.
 pub const TASK_WORK_AGENT: &str = "work_agent";
-/// Isolated companion tool execution, independently routed from spoken replies.
+/// Legacy isolated executor route. Desktop-pet execution uses reasoning; replies use chat.
 pub const TASK_TOOL_EXECUTION: &str = "tool_execution";
 
 /// 不包含 `previous_response_id`:Vivian 已有完整记忆架构(MemoryManager +

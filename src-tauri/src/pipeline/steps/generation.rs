@@ -51,9 +51,6 @@ pub(crate) fn push_stream_chunk(emitter: &SharedStreamEmitter, text: &str) {
     }
 }
 
-/// 长输入阈值（字符数），超过此值触发特殊处理路径
-const LONG_INPUT_THRESHOLD: usize = 100;
-
 // ============================================================================
 // AIResponseGenerationRunnable：智能路由 + 故障降级 + graceful_exit
 // ============================================================================
@@ -236,7 +233,7 @@ impl AIResponseGenerationRunnable {
         };
 
         match router
-            .generate(LLMRequest::new("chat", messages))
+            .generate(LLMRequest::new(crate::providers::base::TASK_COMPANION, messages))
             .await
         {
             Ok(text) => {
@@ -332,15 +329,15 @@ impl AIResponseGenerationRunnable {
         crate::pipeline::message_context::ensure_speaker_prefix(content)
     }
 
-    /// 构造 LLMRequest，对主对话路径（chat/reasoning/vision_describe）注入 Vivian 通用响应 Schema
+    /// 构造 LLMRequest，仅对陪伴及兼容聊天路径注入 Vivian 通用响应 Schema
     ///
     /// 通过 Structured Outputs / JSON Mode 通道下发 schema 约束，让 LLM 按结构化 JSON 返回。
-    /// 非主对话任务（reflection/consolidation/farewell 等）不注入 schema，保持纯文本。
+    /// 后台及感知任务不注入对话 schema，沿用各自调用协议。
     pub(crate) fn build_chat_request(task_type: &str, messages: Vec<ChatMessage>) -> LLMRequest {
         let companion = messages.iter().any(|m| m.role == "system" && m.content.contains("[COMPANION DIALOGUE]"));
         let mut req = LLMRequest::new(task_type, messages);
         if companion { req = req.without_framework_instructions(); }
-        if matches!(task_type, "chat" | "reasoning" | "vision_describe") {
+        if matches!(task_type, crate::providers::base::TASK_COMPANION | "chat") {
             req = req.with_json_schema(vivian_response_schema());
         }
         req
@@ -825,7 +822,7 @@ impl AIResponseGenerationRunnable {
 
             // 首次尝试实时推送文本到前端；重试时仅缓冲（避免重复推送）
             // With delegation available, buffer the draft until execution is verified.
-            let emit_text = attempt == 1 && !Self::needs_execution_audit(&tools);
+            let emit_text = attempt == 1 && tools.is_empty();
 
             while let Some(ev) = rx.recv().await {
                 match ev {
@@ -1000,7 +997,7 @@ impl AIResponseGenerationRunnable {
         let (final_first_text, first_round_calls) = Self::verify_execution_draft(
             router, &messages, &tools, task_type, final_first_text, first_round_calls, fallback,
         ).await?;
-        if Self::needs_execution_audit(&tools) && !final_first_text.is_empty() {
+        if !tools.is_empty() && first_round_calls.is_empty() && !final_first_text.is_empty() {
             push_stream_chunk(emitter, &final_first_text);
         }
         // 首轮到此为止：无工具调用则由共享骨架直接以首轮文本收场；
@@ -1062,18 +1059,9 @@ impl Runnable for AIResponseGenerationRunnable {
         }
 
         let stream = Self::is_streaming(&config);
-        let mut task_type = Self::task_type(&config);
+        let task_type = Self::task_type(&config);
 
-        // 自动升级到 reasoning 模型的条件：
-        // 1. 用户输入较长（>100字），需要更强的理解与组织能力
-        // 2. 本次请求携带工具定义（需要 function calling / JSON 结构化输出 / 多轮推理）
-        if task_type == "chat" {
-            let long_input = state.user_input.chars().count() > LONG_INPUT_THRESHOLD;
-            let has_tools = !state.tool_definitions.is_empty();
-            if long_input || has_tools {
-                task_type = "reasoning".to_string();
-            }
-        }
+        // Task ownership is chosen by the caller, never by prompt length or tool presence.
 
         // ── graceful_exit：生成告别 ──
         if state.graceful_exit {
@@ -1200,6 +1188,11 @@ impl Runnable for AIResponseGenerationRunnable {
                     state.response_json = None;
 
                     if !all_results.is_empty() {
+                        if matches!(state.current_channel.as_str(), "direct" | "proactive" | "wechat" | "cross_character")
+                            && all_results.iter().any(|r| r.tool_name != "continue_thinking") {
+                            state.metadata["tool_execution_route"] = json!("reasoning");
+                            state.metadata["tool_reply_route"] = json!("chat");
+                        }
                         state.tool_call_executed = true;
                         state.metadata["verified_tool_receipts"] = json!(&all_results);
                         state.metadata["tool_call_count"] = json!(all_results.len());
@@ -1305,7 +1298,7 @@ impl Runnable for AIResponseGenerationRunnable {
         }
 
         // 主路径：LLM 生成 → ToolCallManager 执行工具调用（如有）
-        let audit_text = self.tool_call_manager.is_some() && Self::needs_execution_audit(&state.tool_definitions);
+        let audit_text = self.tool_call_manager.is_some() && !state.tool_definitions.is_empty();
         let text_emitter = if audit_text { new_shared_stream_emitter() } else { self.stream_emitter.clone() };
         match Self::call_llm(&router, messages_vec.clone(), &task_type, stream, &text_emitter).await {
             Ok(text) => {
@@ -1318,7 +1311,7 @@ impl Runnable for AIResponseGenerationRunnable {
                         TextPathFallback { tools_text: None, output_format: None },
                     ).await?;
                     let speech = JsonParser::extract_text(&draft).unwrap_or_else(|| draft.clone());
-                    if !speech.is_empty() { push_stream_chunk(&self.stream_emitter, &speech); }
+                    if calls.is_empty() && !speech.is_empty() { push_stream_chunk(&self.stream_emitter, &speech); }
                     if calls.is_empty() { draft } else {
                         json!({"text": speech, "tool_calls": calls.iter().map(|call| json!({"tool":call.name,"arguments":call.arguments})).collect::<Vec<_>>()}).to_string()
                     }
@@ -1375,6 +1368,11 @@ impl Runnable for AIResponseGenerationRunnable {
                         .await };
 
                     if !all_results.is_empty() {
+                        if matches!(state.current_channel.as_str(), "direct" | "proactive" | "wechat" | "cross_character")
+                            && all_results.iter().any(|r| r.tool_name != "continue_thinking") {
+                            state.metadata["tool_execution_route"] = json!("reasoning");
+                            state.metadata["tool_reply_route"] = json!("chat");
+                        }
                         state.tool_call_executed = true;
                         state.metadata["verified_tool_receipts"] = json!(&all_results);
                         state.metadata["tool_call_count"] = json!(all_results.len());
@@ -2015,12 +2013,21 @@ mod tests {
             "name":"fixture", "description":"fixture", "parameters":{"type":"object","properties":{}}
         })).unwrap();
         let messages = vec![ChatMessage::system("[COMPANION DIALOGUE] character")];
-        let native = AIResponseGenerationRunnable::build_native_chat_request("chat", messages.clone(), vec![tool]);
+        let native = AIResponseGenerationRunnable::build_native_chat_request(crate::providers::base::TASK_COMPANION, messages.clone(), vec![tool]);
         assert!(!native.wants_json());
         assert!(native.wants_tools());
         assert_eq!(native.include_framework_instructions, Some(false));
-        assert!(AIResponseGenerationRunnable::build_chat_request("chat", messages).wants_json());
+        assert!(AIResponseGenerationRunnable::build_chat_request(crate::providers::base::TASK_COMPANION, messages).wants_json());
         assert!(AIResponseGenerationRunnable::build_native_chat_request("chat", vec![ChatMessage::system("legacy")], vec![]).wants_json());
+    }
+
+    #[test]
+    fn private_and_perception_tasks_never_receive_the_speech_schema() {
+        for task in ["reasoning", "vision_describe", "reflection", "context_compress", "memory", "tool_execution"] {
+            let request = AIResponseGenerationRunnable::build_chat_request(task, vec![ChatMessage::system("private protocol")]);
+            assert!(!request.wants_json(), "{task} must retain its own output protocol");
+            assert_eq!(request.task_type, task);
+        }
     }
 
     #[tokio::test]

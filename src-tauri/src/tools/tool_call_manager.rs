@@ -989,7 +989,7 @@ impl ToolListTool {
     ///   引导 LLM 自主判断；危险操作由 `check_permissions` 在执行时确认
     pub fn get_tools_for_ai_with_scene(&self, scene: ToolScene, hidden: &HashSet<String>, recalled: Option<&HashSet<String>>, lang: &str) -> String {
         let tools = self.tool_system.list_tools_for_scene(scene);
-        let tools: Vec<_> = tools.into_iter().filter(|t| !hidden.contains(t.name())).collect();
+        let tools: Vec<_> = tools.into_iter().filter(|t| t.name() == "tool_search" || !hidden.contains(t.name())).collect();
         if tools.is_empty() {
             return match crate::pipeline::prompt_modules::normalize_lang(lang) {
                 "en" => "No tools available".to_string(),
@@ -1010,6 +1010,10 @@ impl ToolListTool {
                 crate::tools::types::ToolVisibility::Deferred => deferred.push(t),
             }
         }
+
+        // Semantic selection keeps only the floor and top-k schemas in the prompt.
+        // Other tools remain discoverable by name through tool_search.
+        if recalled.is_some() { deferred.append(&mut lazy); }
 
         // share_link 是网络检索专用工具：在 Chat/Idle 闲聊/后台场景下完全不注入。
         // 召回模式下它可能落入任意桶，故三桶都剔除（保持既有隐藏语义）。
@@ -1286,7 +1290,7 @@ impl ToolListTool {
         self.tool_system
             .list_tools_for_scene(scene)
             .iter()
-            .filter(|t| !hidden.contains(t.name()))
+            .filter(|t| t.name() == "tool_search" || !hidden.contains(t.name()))
             .filter(|t| {
                 matches!(
                     resolve_visibility_with_recall(t, scene, recalled),
@@ -1302,18 +1306,8 @@ impl ToolListTool {
     }
 }
 
-/// 语义裁剪下的保底集：无论召回结果如何，这些工具都给完整 schema
-///
-/// 选得很窄是故意的——它是"最坏情况下也不能没有"的最小集：
-/// - `tool_search`：召回失败时模型靠它取回任何工具的 schema，是整套延迟加载的逃生口
-/// - `search_memory` / `talk_to_character`：陪伴场景的基本盘，每轮都可能用到
-/// - `wallpaper_*`：桌宠的在场感，与用户说了什么无关
-///
-/// 其余工具即便被漏召，模型仍能在 `<available-deferred-tools>` 里看到名字，
-/// 需要时用 tool_search 取回——能力不会丢，只多一轮往返。
-fn is_floor_tool(tool: &Arc<dyn Tool>) -> bool {
-    tool.name().starts_with("wallpaper_") || is_core_tool(tool.name()) || tool.always_load()
-}
+/// Discovery is the only fixed schema during semantic selection. Other tools must be recalled.
+fn is_floor_tool(tool: &Arc<dyn Tool>) -> bool { tool.name() == "tool_search" }
 
 /// 场景的人类可读标签（给 LLM 看的提示）
 fn scene_label(scene: ToolScene) -> &'static str {
@@ -1580,10 +1574,14 @@ impl ToolSearchTool {
 
         // 2. 关键词 / 自然语言搜索：BM25 多字段加权 + jieba 中英分词（tools::discovery 索引），
         //    在全量工具中检索，按相关性降序取 top max_results。索引每次实时构建，含运行时注册的自建工具。
-        let descriptors: Vec<DiscoverableTool> = all_tools
-            .iter()
-            .map(|t| DiscoverableTool::from_tool(t.as_ref()))
-            .collect();
+        let corpus = crate::tools::usage_corpus::ToolUsageCorpus::shared(
+            crate::utils::path::get_user_data_dir().join("memory/tool_usage_corpus.json"));
+        let descriptors: Vec<DiscoverableTool> = all_tools.iter().map(|tool| {
+            let mut descriptor = DiscoverableTool::from_tool(tool.as_ref());
+            let learned = corpus.search_hints(tool.as_ref());
+            if !learned.is_empty() { descriptor.search_hint.push_str(&format!("\n{learned}")); }
+            descriptor
+        }).collect();
         let index = ToolSearchIndex::build(descriptors);
         let matches: Vec<String> = index
             .search(query, max_results)
@@ -1814,6 +1812,29 @@ mod tests {
         }
         (ToolCallManager::new(system,ToolUseContext::default()),peak,total)
     }
+    #[test]
+    fn semantic_tools_keep_floor_recall_and_discovery_without_lazy_schemas() {
+        let system = Arc::new(ToolSystem::new());
+        let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        for name in ["tool_search", "wallpaper_list", "wallpaper_set", "search_memory", "talk_to_character", "web_search", "receipt_read", "receipt_write"] {
+            system.register_tool(Arc::new(ReceiptProbe { name, read_only: true,
+                active: counter.clone(), peak: counter.clone(), total: counter.clone() }));
+        }
+        let list = ToolListTool::new(system.clone());
+        let recalled = HashSet::from(["receipt_read".to_string()]);
+        let hidden = HashSet::new();
+        let defs = list.get_tool_definitions_for_scene(ToolScene::Chat, &hidden, Some(&recalled));
+        assert_eq!(defs.len(), 2);
+        assert!(defs.iter().any(|d| d.name == "tool_search"));
+        assert!(!defs.iter().any(|d| d.name == "wallpaper_set"));
+        assert!(!defs.iter().any(|d| d.name == "receipt_write"));
+        let text = list.get_tools_for_ai_with_scene(ToolScene::Chat, &hidden, Some(&recalled), "en");
+        assert!(!text.contains("- receipt_write"));
+        assert!(text.split("<available-deferred-tools>").nth(1).unwrap().contains("receipt_write"));
+        let hidden = system.list_tool_names().into_iter().collect();
+        assert_eq!(list.get_tool_definitions_for_scene(ToolScene::Chat, &hidden, Some(&recalled)).iter().map(|t|t.name.as_str()).collect::<Vec<_>>(), ["tool_search"]);
+    }
+
     fn probe_call(id: &str, name: &str, args: Value) -> crate::providers::base::StructuredToolCall {
         crate::providers::base::StructuredToolCall {id:id.into(),name:name.into(),arguments:args}
     }
@@ -2092,13 +2113,13 @@ mod tests {
     }
 
     #[test]
-    fn foreground_app_is_visible_even_when_semantic_recall_misses_it() {
+    fn foreground_app_schema_is_dynamic_and_requires_a_semantic_hit() {
         let tool: Arc<dyn Tool> = Arc::new(
             crate::tools::builtin::perception_tools::GetForegroundAppContextTool::new());
         let recalled = HashSet::new();
         for scene in [ToolScene::Chat, ToolScene::LowTrust, ToolScene::Idle] {
             assert!(matches!(resolve_visibility_with_recall(&tool, scene, Some(&recalled)),
-                crate::tools::types::ToolVisibility::Always));
+                crate::tools::types::ToolVisibility::Lazy));
         }
     }
 
@@ -2186,12 +2207,20 @@ mod tests {
         let mut recalled = HashSet::new();
         recalled.insert("recalled_tool".to_string());
 
-        // 保底集（always_load=true）→ Always，即使未被召回
-        let floor = mock("some_floor", ToolCategory::System, true, false);
+        // Explicit companion floor stays available even without a semantic hit.
+        let floor = mock("tool_search", ToolCategory::System, true, false);
         assert!(matches!(
             resolve_visibility_with_recall(&floor, ToolScene::Chat, Some(&recalled)),
             ToolVisibility::Always
         ));
+
+        // Work-oriented always_load flags must not expand the companion floor.
+        let work_core = mock("run_job", ToolCategory::System, true, false);
+        assert!(matches!(
+            resolve_visibility_with_recall(&work_core, ToolScene::Chat, Some(&recalled)),
+            ToolVisibility::Lazy
+        ));
+        assert!(matches!(resolve_visibility_with_recall(&work_core, ToolScene::Chat, None), ToolVisibility::Always));
 
         // 被召回的非保底工具 → Always
         let hit = mock("recalled_tool", ToolCategory::System, false, false);

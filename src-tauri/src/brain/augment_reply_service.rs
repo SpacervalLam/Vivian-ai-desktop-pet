@@ -65,6 +65,9 @@ pub struct MemoryEntry {
     /// 记忆创建时间戳（Unix 秒），用于 prompt 时间感知
     #[serde(default)]
     pub timestamp: f64,
+    /// Authored character context must never become a recalled user interaction.
+    #[serde(default)]
+    pub source: String,
 }
 
 impl MemoryEntry {
@@ -75,7 +78,14 @@ impl MemoryEntry {
             content: item.content.clone(),
             importance: item.importance,
             timestamp: item.timestamp,
+            source: item.metadata.get("source").and_then(serde_json::Value::as_str)
+                .unwrap_or_default().to_owned(),
         }
+    }
+
+    fn is_authored_context(&self) -> bool {
+        self.id.starts_with("seed_")
+            || matches!(self.source.as_str(), "system_seed" | "environment_preset")
     }
 }
 
@@ -532,6 +542,8 @@ impl AugmentReplyService {
         let filtered: Vec<_> = items
             .into_iter()
             .filter(|m| {
+                let entry = MemoryEntry::from_memory_item(m);
+                if entry.is_authored_context() { return false; }
                 let stripped = parse_any_speaker_prefix(&m.content).0;
                 stripped.trim() != user_trimmed
             })
@@ -565,7 +577,7 @@ impl AugmentReplyService {
                 ChatMessage::system(system_prompt),
                 ChatMessage::user(user_prompt),
             ];
-            match router.generate(LLMRequest::new("chat", messages)
+            match router.generate(LLMRequest::new(crate::providers::base::TASK_COMPANION, messages)
                 .with_character_id(req.char_id.clone())).await {
                 Ok(raw) => {
                     return Self::decode_augment_decision(&raw, req);
@@ -593,7 +605,7 @@ impl AugmentReplyService {
         } else { trimmed };
         let Ok(decision) = serde_json::from_str::<Decision>(json) else { return String::new() };
         if !decision.needed || decision.memory_ids.is_empty()
-            || decision.memory_ids.iter().any(|id| !req.new_memories.iter().any(|mem| &mem.id == id)) {
+            || decision.memory_ids.iter().any(|id| !req.new_memories.iter().any(|mem| &mem.id == id && !mem.is_authored_context())) {
             return String::new();
         }
         Self::cleanup_augment_text(&decision.text, 200)
@@ -663,6 +675,7 @@ impl AugmentReplyService {
             .iter()
             .take(5)
             .filter_map(|mem| {
+                if mem.is_authored_context() { return None; }
                 let content = mem.content.trim();
                 if content.is_empty() {
                     None
@@ -937,6 +950,7 @@ pub fn diff_slow_vs_fast(
 
     let mut new_memories: Vec<MemoryEntry> = Vec::new();
     for mem in slow {
+        if mem.is_authored_context() { continue; }
         // id 已在 fast 中
         if fast_ids.contains(mem.id.as_str()) {
             continue;
@@ -1090,6 +1104,42 @@ mod tests {
     use super::*;
 
     #[test]
+    fn authored_memories_cannot_authorize_an_augmentation() {
+        for (id, source) in [("seed_legacy", ""), ("imported", "system_seed"), ("background", "environment_preset")] {
+            let authored = MemoryEntry {
+                id: id.into(), source: source.into(), content: "他说：慢慢来，不着急。".into(),
+                importance: 1.0, timestamp: 0.0,
+            };
+            let real = MemoryEntry {
+                id: "real".into(), source: "direct".into(), content: "用户对小麦过敏".into(),
+                importance: 0.9, timestamp: 0.0,
+            };
+            let (new, _) = diff_slow_vs_fast(&[authored.clone(), real], &[], 0.4);
+            assert_eq!(new.len(), 1);
+            assert_eq!(new[0].id, "real");
+            // Also reject a queued/loaded request that bypasses retrieval filtering.
+            let mut req = AugmentRequest::new("你好", "你好");
+            req.new_memories.push(authored);
+            let decision = serde_json::json!({"needed":true,"memory_ids":[id],"text":"你之前说过慢慢来"});
+            assert!(AugmentReplyService::decode_augment_decision(&decision.to_string(), &req).is_empty());
+            assert!(!AugmentReplyService::build_augment_prompt(&req).contains("他说：慢慢来"));
+        }
+    }
+
+    #[test]
+    fn memory_source_survives_conversion_and_legacy_json() {
+        let mut item = MemoryItem::new("背景".into(), crate::memory::types::Granularity::Turn, 0.9);
+        item.metadata = serde_json::json!({"source":"system_seed"});
+        let entry = MemoryEntry::from_memory_item(&item);
+        assert_eq!(entry.source, "system_seed");
+        assert!(entry.is_authored_context());
+        let legacy: MemoryEntry = serde_json::from_value(serde_json::json!({
+            "id":"real", "content":"用户原话", "importance":0.8
+        })).unwrap();
+        assert!(!legacy.is_authored_context());
+    }
+
+    #[test]
     fn test_diff_empty_slow() {
         let (new, reason) = diff_slow_vs_fast(&[], &[], 0.4);
         assert!(new.is_empty());
@@ -1104,12 +1154,14 @@ mod tests {
                 content: "用户喜欢咖啡".to_string(),
                 importance: 0.8,
                 timestamp: 0.0,
+                source: String::new(),
             },
             MemoryEntry {
                 id: "s2".to_string(),
                 content: "无关紧要".to_string(),
                 importance: 0.1,
                 timestamp: 0.0,
+                source: String::new(),
             },
         ];
         let fast = vec![MemoryEntry {
@@ -1117,6 +1169,7 @@ mod tests {
             content: "其他".to_string(),
             importance: 0.5,
             timestamp: 0.0,
+            source: String::new(),
         }];
 
         let (new, reason) = diff_slow_vs_fast(&slow, &fast, 0.4);
@@ -1132,12 +1185,14 @@ mod tests {
             content: "重复内容".to_string(),
             importance: 0.8,
             timestamp: 0.0,
+            source: String::new(),
         }];
         let fast = vec![MemoryEntry {
             id: "f1".to_string(),
             content: "重复内容".to_string(),
             importance: 0.5,
             timestamp: 0.0,
+            source: String::new(),
         }];
 
         let (new, reason) = diff_slow_vs_fast(&slow, &fast, 0.4);
@@ -1157,12 +1212,14 @@ mod tests {
             content: slow_content,
             importance: 0.8,
             timestamp: 0.0,
+            source: String::new(),
         }];
         let fast = vec![MemoryEntry {
             id: "f1".to_string(),
             content: fast_content,
             importance: 0.5,
             timestamp: 0.0,
+            source: String::new(),
         }];
         let (new, reason) = diff_slow_vs_fast(&slow, &fast, 0.4);
         assert!(new.is_empty());
@@ -1195,6 +1252,7 @@ mod tests {
         let mut req = AugmentRequest::new("今天吃什么", "试试意大利面？");
         req.new_memories.push(MemoryEntry {
             id: "allergy".into(), content: "用户对小麦过敏".into(), importance: 0.9, timestamp: 0.0,
+            source: String::new(),
         });
         for raw in [
             "哦对了，内存快满了，关几个标签吧。",
@@ -1218,6 +1276,7 @@ mod tests {
         let mut req = AugmentRequest::new("我修一下工具吧，你先别急", "好，等你弄完。");
         req.new_memories.push(MemoryEntry {
             id: "old-memory".into(), content: "电脑曾经内存紧张".into(), importance: 0.9, timestamp: 0.0,
+            source: String::new(),
         });
         assert!(service.generate_augment_text(&req).await.is_empty());
     }
@@ -1252,6 +1311,7 @@ mod tests {
             content: "用户对小麦过敏".to_string(),
             importance: 0.9,
             timestamp: 0.0,
+            source: String::new(),
         }];
         let prompt = AugmentReplyService::build_augment_prompt(&req);
         assert!(prompt.contains("用户对小麦过敏"));
@@ -1280,6 +1340,7 @@ mod tests {
                 content: "test".to_string(),
                 importance: 0.5,
                 timestamp: 0.0,
+                source: String::new(),
             }],
             None,
             "vivian",

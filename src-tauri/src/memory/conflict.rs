@@ -571,7 +571,7 @@ impl ConflictLlmArbiter for DefaultConflictArbiter {
         use crate::providers::base::LLMRequest;
         use crate::types::response::ChatMessage;
 
-        if let Some(decision) = self.router.choose_simple(
+        if let Some(decision) = self.router.choose_simple_for("consolidation",
             serde_json::json!({
                 "old_memory": old_content, "new_memory": new_content,
                 "vector_similarity": similarity,

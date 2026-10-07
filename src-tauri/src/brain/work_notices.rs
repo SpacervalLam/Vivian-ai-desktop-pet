@@ -2,7 +2,7 @@
 //!
 //! 两条产品线各有独立循环与模型路由，彼此没有共享上下文。陪伴角色要知道工作侧
 //! 发生了什么，只能经由这里——而这里**只存事实，不存文案、不做决策**：要不要说、
-//! 什么时候说、用什么口吻说，一概由陪伴侧自己的提示词与门控决定。
+//! 所有用户办公会话（手动发起或桌宠委派）的关键回调必须主动转达。
 //!
 //! 两类通知的事实源头不同，实现方式因此也不同：
 //!
@@ -16,7 +16,8 @@
 //! |---|---|---|---|
 //! | 完成报告 | `coding_agent` 自动登记 | 用户看不见工作页时补一次 | 提示词段落 + 转达检查点 |
 //! | 等你拍板 | 问题注册表派生 | 用户看不见**那条**提问时必须说 | 提示词段落 + 转达检查点（可重复催） |
-//! | 必须转达 | `notify_companion` 工具 | 用户看不见该会话时必须说 | 只走转达检查点 |
+//! | 必须转达 | `notify_companion` 工具 | 普通任务按可见性门控 | 只走转达检查点 |
+//! | 桌宠任务回调 | 阶段/阻塞/最终结果 | 必须主动转达，不受可见性和普通冷却抑制 | 转达检查点，实际投递后按事件确认 |
 //!
 //! 前两类同时进提示词段落：用户主动找角色说话时素材就在上下文里，不必干等
 //! 下一个 tick。第三类刻意不进——它的语义纯粹是"主动说出去"，放进段落只会让
@@ -66,9 +67,18 @@ pub struct WorkReport {
 /// 这里是"必须说"，因为工作智能体已经显式要求过了。
 #[derive(Debug, Clone)]
 pub struct WorkAlert {
+    pub notice_id: String,
+    /// Key callbacks for all user office sessions bypass discretionary gates.
+    pub required: bool,
     pub session_id: String,
     pub title: String,
     pub body: String,
+}
+
+impl WorkAlert {
+    pub fn should_relay(&self, visible_session: Option<&str>, cooled: bool) -> bool {
+        self.required || (!cooled && visible_session != Some(self.session_id.as_str()))
+    }
 }
 
 struct Entry {
@@ -172,6 +182,14 @@ impl WorkNoticeStore {
     ///
     /// 同一会话的旧条目会被顶掉：同一会话连续要求转达时，最新那条才代表现状。
     pub fn push_alert(&self, char_id: &str, session_id: &str, title: &str, body: &str) -> bool {
+        self.push_alert_inner(char_id, session_id, title, body, false)
+    }
+
+    pub fn push_callback(&self, char_id: &str, session_id: &str, title: &str, body: &str) -> bool {
+        self.push_alert_inner(char_id, session_id, title, body, true)
+    }
+
+    fn push_alert_inner(&self, char_id: &str, session_id: &str, title: &str, body: &str, required: bool) -> bool {
         let body = body.trim();
         if char_id.is_empty() || body.is_empty() {
             return false;
@@ -181,10 +199,13 @@ impl WorkNoticeStore {
 
         let mut alerts = self.alerts.write();
         Self::prune_alerts_locked(&mut alerts, now);
-        alerts.retain(|a| !(a.char_id == char_id && a.alert.session_id == session_id));
+        if alerts.iter().any(|a| a.char_id == char_id && a.alert.session_id == session_id
+            && a.alert.title == title && a.alert.body == body) { return true; }
+        if !required { alerts.retain(|a| !(a.char_id == char_id && a.alert.session_id == session_id && !a.alert.required)); }
         alerts.push(AlertEntry {
             char_id: char_id.to_string(),
             alert: WorkAlert {
+                notice_id: uuid::Uuid::new_v4().to_string(), required,
                 session_id: session_id.to_string(),
                 title: title.to_string(),
                 body: body.to_string(),
@@ -220,11 +241,26 @@ impl WorkNoticeStore {
         let now = chrono::Local::now().timestamp() as f64;
         let mut alerts = self.alerts.write();
         Self::prune_alerts_locked(&mut alerts, now);
-        alerts
-            .iter()
-            .filter(|a| a.char_id == char_id)
-            .min_by(|a, b| a.at.total_cmp(&b.at))
+        alerts.iter().find(|a| a.char_id == char_id && a.alert.required)
+            .or_else(|| alerts.iter().find(|a| a.char_id == char_id))
             .map(|a| a.alert.clone())
+    }
+
+    pub fn has_alert(&self, notice_id: &str) -> bool {
+        let now = chrono::Local::now().timestamp() as f64;
+        let mut alerts = self.alerts.write();
+        Self::prune_alerts_locked(&mut alerts, now);
+        alerts.iter().any(|a| a.alert.notice_id == notice_id)
+    }
+
+    /// A resolved question must not be announced later as a current blocker.
+    pub fn clear_attention_callback(&self, session_id: &str) {
+        self.alerts.write().retain(|a| !(a.alert.session_id == session_id && a.alert.title == "任务等待你的决定"));
+    }
+
+    /// Acknowledge only the delivered event, preserving callbacks arriving during generation.
+    pub fn acknowledge_alert(&self, notice_id: &str) {
+        self.alerts.write().retain(|a| a.alert.notice_id != notice_id);
     }
 
     /// 一条「必须转达」已成功说出去，移除它。
@@ -320,4 +356,57 @@ pub fn pending_attention_for(char_id: &str) -> Vec<WorkQuestionRequest> {
     let ids: Vec<u64> = pendings.iter().map(|p| p.question_id).collect();
     global().prune_reminded(&ids);
     pendings
+}
+
+#[cfg(test)]
+mod callback_tests {
+    use super::*;
+
+    #[test]
+    fn callbacks_are_required_owned_and_acknowledged_individually() {
+        let store = WorkNoticeStore::new();
+        assert!(store.push_alert("vivian", "other", "普通提醒", "普通办公任务"));
+        assert!(store.push_callback("vivian", "task", "阶段完成", "资料收集完毕"));
+        let first = store.next_alert_for("vivian").unwrap();
+        assert!(first.required);
+        assert!(first.should_relay(Some("task"), true));
+        assert_eq!(first.session_id, "task");
+        assert!(store.next_alert_for("nana").is_none());
+        // Duplicate queued facts are suppressed, but a new callback during generation survives.
+        store.push_callback("vivian", "task", "阶段完成", "资料收集完毕");
+        store.push_callback("vivian", "task", "工作结果已返回", "报告已生成并验证");
+        assert!(store.has_alert(&first.notice_id));
+        store.acknowledge_alert(&first.notice_id);
+        assert!(!store.has_alert(&first.notice_id));
+        let next = store.next_alert_for("vivian").unwrap();
+        assert_eq!(next.title, "工作结果已返回");
+        assert_ne!(first.notice_id, next.notice_id);
+        store.drop_session("task");
+        let ordinary = store.next_alert_for("vivian").unwrap();
+        assert!(!ordinary.required);
+        assert!(!ordinary.should_relay(Some("other"), false));
+        assert!(!ordinary.should_relay(None, true));
+        assert!(ordinary.should_relay(None, false));
+    }
+
+    #[test]
+    fn resolved_questions_do_not_leave_stale_blocker_callbacks() {
+        let store = WorkNoticeStore::new();
+        store.push_callback("vivian", "task", "任务等待你的决定", "选择输出格式");
+        let question = store.next_alert_for("vivian").unwrap();
+        store.push_callback("vivian", "task", "阶段完成", "资料已准备好");
+        store.clear_attention_callback("task");
+        assert!(!store.has_alert(&question.notice_id));
+        assert_eq!(store.next_alert_for("vivian").unwrap().title, "阶段完成");
+    }
+
+    #[test]
+    fn callbacks_reject_empty_facts_and_bound_each_character_queue() {
+        let store = WorkNoticeStore::new();
+        assert!(!store.push_callback("", "task", "完成", "真实结果"));
+        assert!(!store.push_callback("nana", "task", "完成", "  "));
+        for i in 0..20 { store.push_callback("nana", "task", "进展", &format!("阶段 {i}")); }
+        assert_eq!(store.alerts.read().len(), MAX_ALERTS_PER_CHAR);
+        assert!(store.next_alert_for("vivian").is_none());
+    }
 }

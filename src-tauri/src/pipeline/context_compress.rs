@@ -540,7 +540,7 @@ pub fn compress_conversation(
 /// 返回 `None` 表示失败/超时，由调用方回退到确定性摘要。
 async fn llm_summarize_bundle(
     router: &ModelRouter,
-    task_type: &str,
+    _task_type: &str,
     query: &str,
     tool_names: &str,
     content: &str,
@@ -577,7 +577,7 @@ async fn llm_summarize_bundle(
         ChatMessage::system(system),
         ChatMessage::user(&user),
     ];
-    let fut = router.generate(LLMRequest::new(task_type, messages));
+    let fut = router.generate(LLMRequest::new("context_compress", messages));
     match tokio::time::timeout(TIMEOUT, fut).await {
         Ok(Ok(s)) if !s.trim().is_empty() => Some(s.trim().to_string()),
         _ => None,

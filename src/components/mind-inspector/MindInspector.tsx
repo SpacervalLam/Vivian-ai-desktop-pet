@@ -7,7 +7,7 @@
 
 import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
-import { listen } from '@tauri-apps/api/event';
+import { listen, emit } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { BookOpen, House, LayoutGrid, Menu } from 'lucide-react';
@@ -202,20 +202,22 @@ const MindInspector: React.FC = () => {
         notebookCharacter: (nbChar as 'vivian' | 'nana') || 'vivian',
       });
     } else if (navParam && (['overview', 'journal', 'code', 'mind', 'graph', 'profile', 'diary', 'notebook', 'planner', 'todo', 'scheduler']).includes(navParam)) {
-      navigateTo(navParam as NavKey, {});
+      navigateTo(navParam as NavKey, { workSessionId: params.get('work_session') || undefined });
     }
     void (async () => {
-      unlisten = await listen<{ page: string; notebookId?: string; notebookCharacter?: string; diaryId?: string; diaryCharacter?: string }>(
+      unlisten = await listen<{ page: string; workSessionId?: string; requestId?: string; notebookId?: string; notebookCharacter?: string; diaryId?: string; diaryCharacter?: string }>(
         'memory:navigate',
         (e) => {
           const p = e.payload;
           if (['mind', 'graph', 'profile', 'diary', 'notebook', 'planner', 'todo', 'scheduler', 'code', 'overview', 'journal'].includes(p.page)) {
             navigateTo(p.page as NavKey, {
+              workSessionId: p.workSessionId,
               notebookId: p.notebookId,
               notebookCharacter: (p.notebookCharacter as 'vivian' | 'nana') || 'vivian',
               diaryId: p.diaryId,
               diaryCharacter: (p.diaryCharacter as 'vivian' | 'nana') || 'vivian',
             });
+            if (p.requestId) void emit('memory:navigation-accepted', { requestId: p.requestId });
           }
         },
       );

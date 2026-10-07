@@ -881,10 +881,24 @@ pub fn render_dialogue_preferences(config: &PersonaConfig, mode: SceneMode) -> S
 /// A small stable voice anchor when no scene example matches. Whole fictional
 /// contexts are retained; learned scene replacements and authored examples win.
 pub fn render_dialogue_seed_examples(config: &PersonaConfig, learned: &[String]) -> Option<String> {
+    render_dialogue_seed_examples_for_contact(config, learned, false)
+}
+
+pub fn render_dialogue_seed_examples_for_contact(config: &PersonaConfig, learned: &[String], first_contact: bool) -> Option<String> {
     if !config.few_shot_examples.examples.is_empty() { return None; }
     let source = default_section_for(&config.identity.name, CharacterSection::Examples);
     let offsets: Vec<_> = source.match_indices("**Example ").map(|(offset, _)| offset).collect();
     let mut references = Vec::new();
+    if first_contact {
+        for (index, start) in offsets.iter().enumerate() {
+            let end = offsets.get(index + 1).copied().unwrap_or(source.len());
+            let block = source[*start..end].trim();
+            if block.lines().next().unwrap_or_default().contains("[first-contact]") {
+                references.push(block);
+            }
+        }
+        return (!references.is_empty()).then(|| references.into_iter().take(2).collect::<Vec<_>>().join("\n\n"));
+    }
     for (index, start) in offsets.iter().take(2).enumerate() {
         let scope = if index == 0 && config.identity.name == "Vivian" { "play" } else { "sharing" };
         if learned.iter().any(|item| item == scope) { continue; }

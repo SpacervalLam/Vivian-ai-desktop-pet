@@ -1637,29 +1637,8 @@ impl Default for AppConfig {
                 let mut m = HashMap::new();
                 // 路由矩阵任务键预注册（配置留空，由用户填写）
                 // 空配置的任务在 ModelRouter 中跳过构建 provider，运行时回退到主 LLM API
-                for task_type in [
-                    "chat",
-                    "reasoning",
-                    // 工作智能体专属任务类型：与陪伴对话的 reasoning 分开，
-                    // 让"按任务类型分流"能区分二者（见 TASK_WORK_AGENT 的说明）
-                    crate::providers::base::TASK_WORK_AGENT,
-                    crate::providers::base::TASK_TOOL_EXECUTION,
-                    "text_rewrite",
-                    "diary",
-                    "memory",
-                    "consolidation",
-                    "reflection",
-                    "inner_monologue",
-                    "emotion_analysis",
-                    "vision_describe",
-                    "knowledge_acquisition",
-                    "translation",
-                    "bystander_judge",
-                    "simple_judge",
-                    "intent_judge",
-                    "asr_polish",
-                ] {
-                    m.insert(task_type.to_string(), TaskRouteConfig::default());
+                for spec in crate::providers::task_catalog::TASK_ROUTES.iter() {
+                    m.insert(spec.id.clone(), TaskRouteConfig::default());
                 }
                 m
             },

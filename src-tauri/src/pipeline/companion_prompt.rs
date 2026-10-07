@@ -256,6 +256,10 @@ mod tests {
             let seed = crate::persona::prompt_render::render_dialogue_seed_examples(&config, &[]).unwrap();
             assert_eq!(example_blocks(&seed).len(), 2);
             assert!(seed.contains("Context:"));
+            let first = crate::persona::prompt_render::render_dialogue_seed_examples_for_contact(&config, &[], true).unwrap();
+            assert_eq!(example_blocks(&first).len(), 2);
+            assert!(first.contains("[first-contact]"));
+            assert!(!seed.contains("[first-contact]"));
             assert!(crate::persona::prompt_render::render_dialogue_seed_examples(&config, &["play".into(), "sharing".into()]).is_none());
         }
     }

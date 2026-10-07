@@ -22,6 +22,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow, currentMonitor, LogicalPosition, LogicalSize } from '@tauri-apps/api/window';
 import { open as shellOpen } from '@tauri-apps/plugin-shell';
 import { stackRank, toastFingerprint, ToastDedupGate, ToastKeyTracker } from '../utils/toastDedup';
+import { openWorkSession } from '../utils/workSessionWindow';
 import Toast, { type ToastAction, type ToastType } from './Toast';
 import ConfirmToast, {
   type AllowAlwaysScope,
@@ -492,7 +493,7 @@ export default function ToastWindow() {
           // `key: Date.now()`）一律参与去重——这是"同一内容在屏幕上只存在一条"的前提。
           const refresh = keyTrackerRef.current.isRepeat(p.key, now);
           const dedupable = !refresh;
-          const fp = dedupable ? toastFingerprint(p.message, toastType) : '';
+          const fp = dedupable ? toastFingerprint(p.message, toastType, p.action?.kind === 'open_work_session' ? p.action.sessionId : undefined) : '';
           if (dedupable && owned) {
             const gate = dedupGateRef.current;
             gate.prune(now);
@@ -528,7 +529,7 @@ export default function ToastWindow() {
             if (dedupable) {
               for (const it of prev) {
                 if (it.inplace) continue;
-                if (toastFingerprint(it.message, it.type) === fp) return prev;
+                if (toastFingerprint(it.message, it.type, it.action?.kind === 'open_work_session' ? it.action.sessionId : undefined) === fp) return prev;
               }
             }
             return [
@@ -569,7 +570,7 @@ export default function ToastWindow() {
           if (!yieldToPeer) return; // 对方优先级更低 → 保留本窗口那条
           setItems((prev) => {
             const next = prev.filter(
-              (it) => it.inplace || toastFingerprint(it.message, it.type) !== fp,
+              (it) => it.inplace || toastFingerprint(it.message, it.type, it.action?.kind === 'open_work_session' ? it.action.sessionId : undefined) !== fp,
             );
             return next.length === prev.length ? prev : next;
           });
@@ -860,7 +861,12 @@ export default function ToastWindow() {
     const action = it.action;
     if (!action) return;
     removeItem(it.id);
-    if (action.kind === 'switch_theme') {
+    if (action.kind === 'open_work_session' && action.sessionId) {
+      void openWorkSession(action.sessionId).catch(error => {
+        console.warn('[ToastWindow] 打开办公会话失败:', error);
+        void emit('toast:show', { message: `打开办公页失败：${String(error)}`, type: 'error', duration: 8000, key: Date.now() });
+      });
+    } else if (action.kind === 'switch_theme') {
       const theme = action.theme;
       if (theme !== 'light' && theme !== 'dark') return;
       void (async () => {

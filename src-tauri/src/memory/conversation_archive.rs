@@ -281,7 +281,7 @@ pub async fn compress_merge_with_llm(
 
     match router
         .generate(LLMRequest::new(
-            "memory",
+            "context_compress",
             vec![ChatMessage::system(system), ChatMessage::user(&prompt)],
         ))
         .await

@@ -25,16 +25,25 @@ use crate::resilience::{classify_llm_error_from_str, error_kind_to_message_key, 
 use crate::types::response::ChatMessage;
 
 enum RouteProvider<'a> {
-    Configured(&'a Box<dyn BaseProvider>),
+    Task { route: &'a str, provider: &'a Box<dyn BaseProvider> },
+    Main(&'a Box<dyn BaseProvider>),
     Override(Arc<Box<dyn BaseProvider>>),
 }
 
 impl RouteProvider<'_> {
     fn provider(&self) -> &Box<dyn BaseProvider> {
         match self {
-            Self::Configured(provider) => provider,
+            Self::Task { provider, .. } | Self::Main(provider) => provider,
             Self::Override(provider) => provider.as_ref(),
         }
+    }
+
+    fn source(&self) -> &'static str {
+        match self { Self::Task { .. } => "task", Self::Main(_) => "main", Self::Override(_) => "work_override" }
+    }
+
+    fn route(&self) -> &str {
+        match self { Self::Task { route, .. } => route, Self::Main(_) => "main", Self::Override(_) => TASK_WORK_AGENT }
     }
 }
 
@@ -125,23 +134,9 @@ pub struct ModelRouter {
     frequency_penalty: f64,
 }
 
-/// 需要注入惩罚参数的"角色说话"任务类型。
-///
-/// 与 `generation.rs::build_chat_request` 注入响应 Schema 的集合保持一致——
-/// 那三个类型就是角色真正产出台词的路径（`reasoning` 是携带工具定义时
-/// 由 `chat` 升级而来，见 `TASK_WORK_AGENT` 的文档）。
-///
-/// **不含 `work_agent`**：编程任务要的是确定性，惩罚参数只会让代码措辞发散；
-/// 也不含 reflection / consolidation / memory 等结构化抽取任务——它们的输出
-/// 是 JSON，抑制重复没有意义，反而可能影响字段复现的稳定性。
-const CONVERSATIONAL_TASK_TYPES: &[&str] = &["chat", "reasoning", "vision_describe"];
-
-/// 该任务类型是否属于"角色正在说话"（需要注入采样惩罚）。
-///
-/// 独立成自由函数是为了可测：`ModelRouter` 的构造需要完整 `AppConfig`
-/// 与真实网络客户端，而这里的判据本身是纯字符串匹配。
+/// Only spoken outputs receive character repetition penalties.
 fn is_conversational_task(task_type: &str) -> bool {
-    CONVERSATIONAL_TASK_TYPES.contains(&task_type)
+    super::task_catalog::find(task_type).map(|spec| spec.spoken).unwrap_or(false)
 }
 
 /// 任务 → 信号量分组的并发上限
@@ -161,26 +156,10 @@ const ROUTE_FALLBACK_COOLDOWN_SECS: u64 = 120;
 ///
 /// 返回 (组名, 并发上限)，由 `ModelRouter::new` 在构造时据此创建 Semaphore
 fn semaphore_for_task(task_type: &str) -> (&'static str, usize) {
-    match task_type {
-        "chat" | "reasoning" | "vision_describe" => {
-            ("chat_reasoning", SEMAPHORE_GROUP_CHAT_REASONING)
-        }
-        // 工作智能体单列一组：它的单次调用耗时长、并发量与陪伴对话不是一个量级，
-        // 此前挤在 chat_reasoning 组里会互相抢占额度
-        TASK_WORK_AGENT => ("work_agent", SEMAPHORE_GROUP_WORK_AGENT),
-        "memory" | "reflection" | "consolidation" => {
-            ("memory_reflection", SEMAPHORE_GROUP_MEMORY_REFLECTION)
-        }
-        "emotion_analysis"
-        | "inner_monologue"
-        | "diary"
-        | "knowledge_acquisition"
-        | "translation"
-        | "bystander_judge"
-        | "simple_judge"
-        | "intent_judge"
-        | "asr_polish"
-        | "text_rewrite" => ("auxiliary", SEMAPHORE_GROUP_AUXILIARY),
+    match super::task_catalog::find(task_type).map(|spec| spec.concurrency.as_str()) {
+        Some("memory") => ("memory_reflection", SEMAPHORE_GROUP_MEMORY_REFLECTION),
+        Some("work") => ("work_agent", SEMAPHORE_GROUP_WORK_AGENT),
+        Some("auxiliary") => ("auxiliary", SEMAPHORE_GROUP_AUXILIARY),
         _ => ("chat_reasoning", SEMAPHORE_GROUP_CHAT_REASONING),
     }
 }
@@ -516,9 +495,8 @@ impl ModelRouter {
                     return pref;
                 }
             }
-            self.task_reasoning
-                .get(task_type)
-                .copied()
+            super::task_catalog::route_keys(task_type).into_iter()
+                .find_map(|key| self.task_reasoning.get(key).copied())
                 .unwrap_or(self.default_reasoning)
         } else {
             requested
@@ -541,6 +519,7 @@ impl ModelRouter {
 
     fn call_options(&self, request: &LLMRequest) -> ProviderCallOptions {
         let fingerprint_source = serde_json::json!({
+            "task_type": request.task_type,
             "tools": request.tools,
             "json_schema": request.json_schema,
             "stream": request.stream,
@@ -723,17 +702,41 @@ impl ModelRouter {
             candidates.push(RouteProvider::Override(provider));
         }
         if self.enable_routing_matrix {
-            if let Some(provider) = self.task_providers.get(task_type) {
-                candidates.push(RouteProvider::Configured(provider));
+            for key in super::task_catalog::route_keys(task_type) {
+                if let Some((route, provider)) = self.task_providers.get_key_value(key) {
+                    candidates.push(RouteProvider::Task { route, provider });
+                }
             }
         }
         if let Some(provider) = self.main_provider.as_ref() {
-            candidates.push(RouteProvider::Configured(provider));
+            candidates.push(RouteProvider::Main(provider));
         }
         candidates.retain(|candidate| {
-            !require_tools || candidate.provider().supports_native_function_calling()
+            let supported = !require_tools || candidate.provider().supports_native_function_calling();
+            if !supported {
+                tracing::info!(task = task_type, route = candidate.route(), model = candidate.provider().get_model(),
+                    "Route candidate does not support native tools; text transport remains available");
+            }
+            supported
         });
         candidates
+    }
+
+    fn record_route_attempt(&self, task_type: &str, candidate: &RouteProvider<'_>) {
+        tracing::info!(task = task_type, resolved_route = candidate.route(), source = candidate.source(),
+            model = candidate.provider().get_model(), prompt_contract = task_type, "Model route resolved");
+        if let Some(handle) = self.app_handle.read().as_ref() {
+            let _ = handle.emit("chat:route_resolved", json!({ "task_type": task_type,
+                "resolved_route": candidate.route(), "source": candidate.source(),
+                "model": candidate.provider().get_model(), "prompt_contract": task_type }));
+        }
+    }
+
+    fn route_success(&self, candidate: &RouteProvider<'_>) {
+        // A successful main fallback must not paint a failed task provider green.
+        if !matches!(candidate, RouteProvider::Main(_)) {
+            self.emit_route_status(candidate.route(), "ok");
+        }
     }
 
     async fn acquire_route_permit(
@@ -771,11 +774,15 @@ impl ModelRouter {
     fn route_failure(
         &self,
         task_type: &str,
+        candidate: &RouteProvider<'_>,
         error: &VivianError,
         character_id: &str,
         has_next: bool,
     ) {
         self.emit_route_status(task_type, "error");
+        if candidate.route() != task_type && !matches!(candidate, RouteProvider::Main(_)) {
+            self.emit_route_status(candidate.route(), "error");
+        }
         if has_next {
             self.emit_route_fallback(task_type, &error.to_string(), character_id);
         }
@@ -803,6 +810,7 @@ impl ModelRouter {
         let mut endpoint = String::new();
         for (index, candidate) in candidates.iter().enumerate() {
             let provider = candidate.provider();
+            self.record_route_attempt(task_type, candidate);
             endpoint = provider.get_endpoint().to_string();
             let result = self
                 .with_candidate_schema(provider, json_schema.clone(), |schema| {
@@ -823,13 +831,14 @@ impl ModelRouter {
             match result {
                 Ok(content) => {
                     Self::log_text_response(task_type, &content);
-                    self.emit_route_status(task_type, "ok");
+                    self.route_success(candidate);
                     return Ok(content);
                 }
                 Err(error) => {
                     let failover = crate::providers::transport::may_failover(&error);
                     self.route_failure(
                         task_type,
+                        candidate,
                         &error,
                         character_id,
                         failover && index + 1 < candidates.len(),
@@ -860,6 +869,7 @@ impl ModelRouter {
         let mut endpoint = String::new();
         for (index, candidate) in candidates.iter().enumerate() {
             let provider = candidate.provider();
+            self.record_route_attempt(task_type, candidate);
             endpoint = provider.get_endpoint().to_string();
             let result = self
                 .with_candidate_schema(provider, json_schema.clone(), |schema| {
@@ -872,7 +882,7 @@ impl ModelRouter {
                 .await;
             match result {
                 Ok(source) => {
-                    self.emit_route_status(task_type, "ok");
+                    self.route_success(candidate);
                     return Ok(Self::hold_text_stream_permit(
                         source,
                         permit,
@@ -885,6 +895,7 @@ impl ModelRouter {
                     let failover = crate::providers::transport::may_failover(&error);
                     self.route_failure(
                         task_type,
+                        candidate,
                         &error,
                         character_id,
                         failover && index + 1 < candidates.len(),
@@ -1097,6 +1108,15 @@ impl ModelRouter {
         }
     }
 
+    pub async fn choose_simple_for(
+        &self, task_type: &str, state: serde_json::Value, instructions: &str,
+        choices: &[(&str, &str)], character_id: &str,
+    ) -> Option<String> {
+        if self.has_task_provider(task_type) { return None; }
+        let contract = super::task_catalog::find(task_type).map(super::task_catalog::prompt).unwrap_or_default();
+        self.choose_simple(state, &format!("{contract}\n{instructions}"), choices, character_id).await
+    }
+
     /// Batch independent yes/no judgments. Values are probabilities of `true`.
     /// Returns None when the route is unconfigured or the response is invalid.
     pub async fn judge_noul_batch(
@@ -1162,6 +1182,14 @@ impl ModelRouter {
         Some(answers)
     }
 
+    pub async fn judge_noul_batch_for(
+        &self, task_type: &str, state: serde_json::Value,
+        questions: &[(&str, &str, &str, &str)], character_id: &str,
+    ) -> Option<HashMap<String, f64>> {
+        if self.has_task_provider(task_type) { return None; }
+        self.judge_noul_batch(state, questions, character_id).await
+    }
+
     /// Mixed Choice + Score route for emotion classification. A normal chat
     /// provider keeps using the existing emotion_analysis prompt as fallback.
     pub async fn classify_emotion_simple(
@@ -1169,6 +1197,7 @@ impl ModelRouter {
         text: &str,
         labels: &[&str],
     ) -> Option<(String, f64)> {
+        if self.has_task_provider("emotion_analysis") { return None; }
         let jev = self.jev_decision.as_ref()?;
         match jev.classify_emotion(text, labels).await {
             Ok(result) => {
@@ -1184,6 +1213,7 @@ impl ModelRouter {
     }
 
     pub async fn generate(&self, mut request: LLMRequest) -> VivianResult<String> {
+        self.prepare_request(&mut request)?;
         Self::repair_request_history(&mut request);
         let options = self.call_options(&request);
         let usage_tag = request
@@ -1249,6 +1279,7 @@ impl ModelRouter {
         &self,
         mut request: LLMRequest,
     ) -> VivianResult<tokio::sync::mpsc::Receiver<StreamEvent>> {
+        self.prepare_request(&mut request)?;
         Self::repair_request_history(&mut request);
         let options = self.call_options(&request);
         let usage_tag = request
@@ -1289,6 +1320,7 @@ impl ModelRouter {
     /// 内部转调 `query_with_tools`。调用方应先通过 `supports_native_function_calling`
     /// 确认 provider 支持,否则应回退到文本路径。
     pub async fn generate_with_tools(&self, mut request: LLMRequest) -> VivianResult<ChatResponse> {
+        self.prepare_request(&mut request)?;
         Self::repair_request_history(&mut request);
         let options = self.call_options(&request);
         let usage_tag = request
@@ -1328,6 +1360,7 @@ impl ModelRouter {
         &self,
         mut request: LLMRequest,
     ) -> VivianResult<tokio::sync::mpsc::Receiver<crate::providers::base::StreamEvent>> {
+        self.prepare_request(&mut request)?;
         Self::repair_request_history(&mut request);
         let options = self.call_options(&request);
         let usage_tag = request
@@ -1355,6 +1388,23 @@ impl ModelRouter {
         )
         .await;
         rx
+    }
+
+    fn prepare_request(&self, request: &mut LLMRequest) -> VivianResult<()> {
+        if let Some(spec) = super::task_catalog::find(&request.task_type) {
+            let prompt = super::task_catalog::prompt(spec);
+            if !request.messages.iter().any(|message| message.role == "system" && message.content == prompt) {
+                request.messages.insert(0, ChatMessage::system(prompt));
+            }
+        } else if !self.has_task_provider(&request.task_type)
+            || !request.messages.iter().any(|message| message.role == "system" && !message.content.trim().is_empty()) {
+            return Err(VivianError::Config(format!(
+                "Unknown task route '{}': use a registered task, or configure a custom route with explicit system instructions",
+                request.task_type)));
+        }
+        // Provider fallback must not inject the main desktop-pet framework into a private task.
+        request.include_framework_instructions = Some(false);
+        Ok(())
     }
 
     /// 四个请求入口统一治理历史，文本收尾请求也可能携带此前的工具调用。
@@ -1452,14 +1502,11 @@ impl ModelRouter {
 
     fn resolve_provider(&self, task_type: &str) -> Option<&Box<dyn BaseProvider>> {
         if self.enable_routing_matrix {
-            if let Some(p) = self.task_providers.get(task_type) {
-                return Some(p);
+            for key in super::task_catalog::route_keys(task_type) {
+                if let Some(provider) = self.task_providers.get(key) { return Some(provider); }
             }
         }
-        if let Some(p) = self.main_provider.as_ref() {
-            return Some(p);
-        }
-        None
+        self.main_provider.as_ref().as_ref()
     }
 
     /// 带原生 function calling 的对话查询
@@ -1488,6 +1535,7 @@ impl ModelRouter {
         let mut endpoint = String::new();
         for (index, candidate) in candidates.iter().enumerate() {
             let provider = candidate.provider();
+            self.record_route_attempt(task_type, candidate);
             endpoint = provider.get_endpoint().to_string();
             let result = self
                 .with_candidate_schema(provider, ProviderCallOptions::current_json_schema(), |_| {
@@ -1499,13 +1547,14 @@ impl ModelRouter {
             match result {
                 Ok(response) => {
                     Self::log_llm_response(task_type, &response);
-                    self.emit_route_status(task_type, "ok");
+                    self.route_success(candidate);
                     return Ok(response);
                 }
                 Err(error) => {
                     let failover = crate::providers::transport::may_failover(&error);
                     self.route_failure(
                         task_type,
+                        candidate,
                         &error,
                         character_id,
                         failover && index + 1 < candidates.len(),
@@ -1627,6 +1676,7 @@ impl ModelRouter {
         let mut endpoint = String::new();
         for (index, candidate) in candidates.iter().enumerate() {
             let provider = candidate.provider();
+            self.record_route_attempt(task_type, candidate);
             endpoint = provider.get_endpoint().to_string();
             let result = self
                 .with_candidate_schema(provider, ProviderCallOptions::current_json_schema(), |_| {
@@ -1640,7 +1690,7 @@ impl ModelRouter {
                 .await;
             match result {
                 Ok(source) => {
-                    self.emit_route_status(task_type, "ok");
+                    self.route_success(candidate);
                     return Ok(Self::hold_text_stream_permit(
                         source,
                         permit,
@@ -1653,6 +1703,7 @@ impl ModelRouter {
                     let failover = crate::providers::transport::may_failover(&error);
                     self.route_failure(
                         task_type,
+                        candidate,
                         &error,
                         character_id,
                         failover && index + 1 < candidates.len(),
@@ -1675,11 +1726,11 @@ mod conversational_penalty_tests {
 
     /// 惩罚参数只应注入"角色正在说话"的任务。
     ///
-    /// 三个正例与 `generation.rs::build_chat_request` 注入响应 Schema 的集合一致
+    /// 正例与 `generation.rs::build_chat_request` 注入响应 Schema 的集合一致
     /// ——`reasoning` 是携带工具定义时由 `chat` 升级而来。
     #[test]
     fn only_spoken_output_tasks_get_penalties() {
-        for task in ["chat", "reasoning", "vision_describe"] {
+        for task in [crate::providers::base::TASK_COMPANION, "chat", "pet_reaction"] {
             assert!(is_conversational_task(task), "{task} 应注入采样惩罚");
         }
     }
@@ -1694,6 +1745,9 @@ mod conversational_penalty_tests {
     fn structured_and_work_tasks_are_excluded() {
         for task in [
             "work_agent",
+            "reasoning",
+            "vision_describe",
+            "context_compress",
             "reflection",
             "consolidation",
             "memory",
@@ -1767,6 +1821,17 @@ mod route_tests {
         router.enable_routing_matrix = true;
         router.strict_broken = Arc::new(RwLock::new(HashSet::new()));
         (router, calls)
+    }
+
+    #[test]
+    fn companion_missing_route_uses_main_and_explicit_route_wins() {
+        let (mut router, _) = router(vec![], vec![]);
+        let task = crate::providers::base::TASK_COMPANION;
+        assert_eq!(router.resolve_provider(task).unwrap().get_model(), "fallback");
+        router.task_providers = Arc::new(HashMap::from([(task.into(), Box::new(MockProvider {
+            model: "character", events: vec![], calls: Arc::new(AtomicUsize::new(0)),
+        }) as Box<dyn BaseProvider>)]));
+        assert_eq!(router.resolve_provider(task).unwrap().get_model(), "character");
     }
 
     #[tokio::test]
@@ -1909,5 +1974,134 @@ mod route_tests {
             .unwrap();
         assert_eq!(attempts, 2);
         assert!(router.strict_broken.read().is_empty());
+    }
+}
+
+
+#[cfg(test)]
+mod task_contract_tests {
+    use super::*;
+    use parking_lot::Mutex;
+
+    #[derive(Clone)]
+    struct Probe {
+        model: String,
+        failed: bool,
+        calls: Arc<Mutex<Vec<(String, Vec<ChatMessage>, Option<bool>)>>>,
+    }
+    impl Probe {
+        fn record(&self, messages: Vec<ChatMessage>) -> VivianResult<String> {
+            self.calls.lock().push((self.model.clone(), messages,
+                ProviderCallOptions::current().include_framework_instructions));
+            if self.failed { return Err(VivianError::Provider("upstream unavailable".into())); }
+            Ok(self.model.clone())
+        }
+        fn stream(&self, messages: Vec<ChatMessage>) -> VivianResult<mpsc::Receiver<StreamEvent>> {
+            let content = self.record(messages)?;
+            let (tx, rx) = mpsc::channel(2);
+            tx.try_send(StreamEvent::Text { content }).unwrap();
+            tx.try_send(StreamEvent::Done { finish_reason: None }).unwrap();
+            Ok(rx)
+        }
+    }
+    #[async_trait::async_trait]
+    impl BaseProvider for Probe {
+        async fn call_chat(&self, messages: Vec<ChatMessage>) -> VivianResult<String> { self.record(messages) }
+        async fn call_stream_chat(&self, messages: Vec<ChatMessage>, _: Option<serde_json::Value>) -> VivianResult<mpsc::Receiver<StreamEvent>> { self.stream(messages) }
+        async fn invoke(&self, messages: Vec<ChatMessage>) -> VivianResult<ChatResponse> { self.record(messages).map(ChatResponse::from_text) }
+        async fn stream_with_tools(&self, messages: Vec<ChatMessage>, _: Vec<ToolDefinition>) -> VivianResult<mpsc::Receiver<StreamEvent>> { self.stream(messages) }
+        fn bind_tools(&self, _: Vec<ToolDefinition>) -> VivianResult<Box<dyn BaseProvider>> { Ok(Box::new(self.clone())) }
+        fn supports_native_function_calling(&self) -> bool { true }
+        fn get_model(&self) -> &str { &self.model }
+        fn get_circuit_breaker_stats(&self) -> serde_json::Value { json!({}) }
+    }
+    fn fixture() -> (ModelRouter, Probe) {
+        let mut router = ModelRouter::new(&AppConfig::default()).unwrap();
+        let probe = Probe { model: "main".into(), failed: false, calls: Arc::new(Mutex::new(vec![])) };
+        router.main_provider = Arc::new(Some(Box::new(probe.clone())));
+        router.task_providers = Arc::new(super::super::task_catalog::TASK_ROUTES.iter().map(|spec| {
+            let mut provider = probe.clone(); provider.model = spec.id.clone();
+            (spec.id.clone(), Box::new(provider) as Box<dyn BaseProvider>)
+        }).collect());
+        router.enable_routing_matrix = true;
+        (router, probe)
+    }
+    fn request(task: &str) -> LLMRequest {
+        LLMRequest::new(task, vec![ChatMessage::system("Caller-specific output protocol"), ChatMessage::user("input")])
+    }
+    async fn drain(mut rx: mpsc::Receiver<StreamEvent>, expected: &str) {
+        let mut text = String::new();
+        while let Some(event) = rx.recv().await { if let StreamEvent::Text { content } = event { text.push_str(&content); } }
+        assert_eq!(text, expected);
+    }
+    #[tokio::test]
+    async fn every_task_reaches_its_provider_with_a_distinct_prompt_in_all_four_modes() {
+        let (router, probe) = fixture();
+        for spec in super::super::task_catalog::TASK_ROUTES.iter() {
+            assert_eq!(router.generate(request(&spec.id)).await.unwrap(), spec.id);
+            drain(router.generate_stream(request(&spec.id)).await.unwrap(), &spec.id).await;
+            let tools = vec![ToolDefinition { name: "probe".into(), description: "test".into(), parameters: json!({"type":"object","properties":{}}) }];
+            let mut req = request(&spec.id); req.tools = tools.clone();
+            assert_eq!(router.generate_with_tools(req).await.unwrap().content, spec.id);
+            let mut req = request(&spec.id); req.tools = tools;
+            drain(router.generate_stream_with_tools(req).await.unwrap(), &spec.id).await;
+        }
+        let captures = probe.calls.lock();
+        assert_eq!(captures.len(), super::super::task_catalog::TASK_ROUTES.len() * 4);
+        for (model, messages, framework) in captures.iter() {
+            assert_eq!(framework, &Some(false));
+            let contract = super::super::task_catalog::prompt(super::super::task_catalog::find(model).unwrap());
+            assert_eq!(messages[0].content, contract);
+            assert_eq!(messages[1].content, "Caller-specific output protocol");
+            assert_eq!(messages[2].content, "input");
+        }
+    }
+    #[tokio::test]
+    async fn inherited_routes_and_failed_providers_preserve_the_logical_task_prompt() {
+        let (mut router, probe) = fixture();
+        let mut memory = probe.clone(); memory.model = "memory".into();
+        let mut companion = probe.clone(); companion.model = "companion".into(); companion.failed = true;
+        router.task_providers = Arc::new(HashMap::from([
+            ("memory".into(), Box::new(memory) as Box<dyn BaseProvider>),
+            ("companion".into(), Box::new(companion) as Box<dyn BaseProvider>),
+        ]));
+        assert_eq!(router.generate(request("query_rewrite")).await.unwrap(), "memory");
+        assert_eq!(router.generate(request("context_compress")).await.unwrap(), "memory");
+        assert_eq!(router.generate(request("pet_reaction")).await.unwrap(), "main");
+        let calls = probe.calls.lock();
+        assert_eq!(calls.len(), 4);
+        for (i, task) in ["query_rewrite", "context_compress", "pet_reaction", "pet_reaction"].iter().enumerate() {
+            assert_eq!(calls[i].1[0].content, super::super::task_catalog::prompt(super::super::task_catalog::find(task).unwrap()));
+            assert_eq!(calls[i].2, Some(false));
+        }
+    }
+    #[tokio::test]
+    async fn disabled_matrix_uses_main_and_unknown_task_is_rejected() {
+        let (mut router, probe) = fixture(); router.enable_routing_matrix = false;
+        assert_eq!(router.generate(request("reflection")).await.unwrap(), "main");
+        assert!(router.generate(request("refelction")).await.is_err());
+        assert_eq!(probe.calls.lock().len(), 1);
+    }
+    #[tokio::test]
+    async fn work_override_never_intercepts_companion_or_read_only_planning() {
+        let (router, probe) = fixture();
+        let mut work = probe.clone(); work.model = "work_override".into();
+        router.set_reasoning_override(Some(Box::new(work)));
+        assert_eq!(router.generate(request("work_agent")).await.unwrap(), "work_override");
+        assert_eq!(router.generate(request("reasoning")).await.unwrap(), "reasoning");
+        assert_eq!(router.generate(request("companion")).await.unwrap(), "companion");
+        assert_eq!(router.generate(request("tool_execution")).await.unwrap(), "tool_execution");
+        let captures = probe.calls.lock();
+        for (i, task) in ["work_agent", "reasoning", "companion", "tool_execution"].iter().enumerate() {
+            assert_eq!(captures[i].1[0].content, super::super::task_catalog::prompt(super::super::task_catalog::find(task).unwrap()));
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_specialist_configuration_prevents_generic_judge_shortcuts() {
+        let (router, probe) = fixture();
+        assert!(router.choose_simple_for("intent_judge", json!({}), "question", &[("yes", "yes"), ("no", "no")], "").await.is_none());
+        assert!(router.classify_emotion_simple("input", &["neutral"]).await.is_none());
+        assert!(probe.calls.lock().is_empty());
     }
 }

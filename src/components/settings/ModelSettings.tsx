@@ -3,54 +3,17 @@ import { invoke } from '@tauri-apps/api/core';
 import { open as openShell } from '@tauri-apps/plugin-shell';
 import { ExternalLink } from 'lucide-react';
 import { createAsyncCache } from './asyncCache';
+import taskCatalog from '../../../src-tauri/prompts/routing/task_catalog.json';
 import { fieldStyle, labelStyle, inputStyle, selectStyle } from './SettingsFields';
 export type ConfigValue = string | number | boolean | ConfigObject | string[] | null;
 export interface ConfigObject {
   [key: string]: ConfigValue;
 }
 
-/**
- * 路由矩阵任务定义 - 各任务可独立配置模型或判断接口
- *
- * 任务职责说明：
- * - chat:                日常对话与问答（高频，人格核心，可用便宜模型）
- * - reasoning:           主对话输入超过阈值或需要工具时升级使用；需可靠的长上下文理解与 function calling
- * - work_agent:          编程/复杂工作任务（工作模型配置优先，路由矩阵作为默认与回退）
- * - vision_describe:     图片理解（用户发图时使用，必须配置支持视觉的多模态模型）
- * - diary:               智能日记内容生成
- * - memory:              写入时记忆抽取、检索改写、记忆路由/校验与用户画像复用；高频结构化任务
- * - consolidation:       离线记忆巩固与精修（三阶段流水线、相似记忆精修、冲突仲裁，低频，需深度推理模型）
- * - reflection:          异步反思（每5轮或30分钟触发，合并意识更新与活动抽取，fire-and-forget，失败静默）
- * - inner_monologue:     离线内心独白（用户不交互时自主思考，含兴趣话题联网搜索，建议廉价快速模型）
- * - emotion_analysis:    情绪分类（用户/角色情绪效价与唤醒度，LLM 分类器，建议便宜快速模型）
- * - knowledge_acquisition: 空闲时知识搜索学习（后台低频，建议便宜模型）
- * - translation:         跨语言 TTS 文本翻译（仅翻译服务选 LLM 时使用，简单任务，便宜模型即可）
- * - bystander_judge:     旁观插话判断（用户对话时轻量判断旁观者是否插话，建议便宜快速模型）
- * - simple_judge:        选择渠道、旁观插话、会话结束原因等简短判断；Jev 专用新话题判断
- * - intent_judge:        会话关闭意图判断 + 桌宠反应（每轮对话后判断是否应关闭及关闭原因；用户摸头/双击/长按/拖拽/甩飞桌宠时生成一句短反应。极高频，建议最便宜的快速模型）
- * - asr_polish:          语音识别结果整理（识别结束后修正同音字/语气词/标点，建议便宜快速模型）
- * - text_rewrite:        工作区选中文本改写，按编辑要求最小幅度重写，不参与工作智能体的代码执行
- */
-export const ROUTING_TASKS: { groupKey: string; labelKey: string; taskType: string; helpKey: string }[] = [
-  { groupKey: 'config.routing_group_conversation', labelKey: 'config.routing_chat', taskType: 'chat', helpKey: 'config.routing_chat_help' },
-  { groupKey: 'config.routing_group_conversation', labelKey: 'config.routing_reasoning', taskType: 'reasoning', helpKey: 'config.routing_reasoning_help' },
-  { groupKey: 'config.routing_group_conversation', labelKey: 'config.routing_vision_describe', taskType: 'vision_describe', helpKey: 'config.routing_vision_describe_help' },
-  { groupKey: 'config.routing_group_background', labelKey: 'config.routing_tool_execution', taskType: 'tool_execution', helpKey: 'config.routing_tool_execution_help' },
-  { groupKey: 'config.routing_group_background', labelKey: 'config.routing_memory', taskType: 'memory', helpKey: 'config.routing_memory_help' },
-  { groupKey: 'config.routing_group_background', labelKey: 'config.routing_reflection', taskType: 'reflection', helpKey: 'config.routing_reflection_help' },
-  { groupKey: 'config.routing_group_background', labelKey: 'config.routing_consolidation', taskType: 'consolidation', helpKey: 'config.routing_consolidation_help' },
-  { groupKey: 'config.routing_group_background', labelKey: 'config.routing_diary', taskType: 'diary', helpKey: 'config.routing_diary_help' },
-  { groupKey: 'config.routing_group_background', labelKey: 'config.routing_inner_monologue', taskType: 'inner_monologue', helpKey: 'config.routing_inner_monologue_help' },
-  { groupKey: 'config.routing_group_background', labelKey: 'config.routing_knowledge_acquisition', taskType: 'knowledge_acquisition', helpKey: 'config.routing_knowledge_acquisition_help' },
-  { groupKey: 'config.routing_group_decisions', labelKey: 'config.routing_simple_judge', taskType: 'simple_judge', helpKey: 'config.routing_simple_judge_help' },
-  { groupKey: 'config.routing_group_decisions', labelKey: 'config.routing_bystander_judge', taskType: 'bystander_judge', helpKey: 'config.routing_bystander_judge_help' },
-  { groupKey: 'config.routing_group_decisions', labelKey: 'config.routing_intent_judge', taskType: 'intent_judge', helpKey: 'config.routing_intent_judge_help' },
-  { groupKey: 'config.routing_group_decisions', labelKey: 'config.routing_emotion_analysis', taskType: 'emotion_analysis', helpKey: 'config.routing_emotion_analysis_help' },
-  { groupKey: 'config.routing_group_decisions', labelKey: 'config.routing_asr_polish', taskType: 'asr_polish', helpKey: 'config.routing_asr_polish_help' },
-  { groupKey: 'config.routing_group_work', labelKey: 'config.routing_work_agent', taskType: 'work_agent', helpKey: 'config.routing_work_agent_help' },
-  { groupKey: 'config.routing_group_work', labelKey: 'config.routing_text_rewrite', taskType: 'text_rewrite', helpKey: 'config.routing_text_rewrite_help' },
-  { groupKey: 'config.routing_group_work', labelKey: 'config.routing_translation', taskType: 'translation', helpKey: 'config.routing_translation_help' },
-];
+/** Shared with Rust defaults, routing semantics, and task-specific prompt contracts. */
+export const ROUTING_TASKS = taskCatalog.map(({ groupKey, labelKey, id, helpKey }) => ({
+  groupKey, labelKey, taskType: id, helpKey,
+}));
 
 /** 厂商下的一个嵌入模型（插件 llm-providers 的 embedding-providers.json） */
 interface EmbeddingProviderModelPreset {

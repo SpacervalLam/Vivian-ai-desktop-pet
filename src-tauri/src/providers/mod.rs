@@ -10,6 +10,7 @@ pub mod openai_responses;
 pub mod openai_agents;
 pub mod reasoning;
 pub mod router;
+pub mod task_catalog;
 pub mod routing;
 pub mod schema;
 pub mod spark;

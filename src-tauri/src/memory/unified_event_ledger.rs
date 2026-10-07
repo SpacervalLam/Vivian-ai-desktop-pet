@@ -413,7 +413,7 @@ impl UnifiedEventLedger {
         let prompt = build_compaction_prompt(&batch);
         let summary_text = match router
             .generate(crate::providers::base::LLMRequest::new(
-                "reflection",
+                "context_compress",
                 vec![crate::types::response::ChatMessage::user(prompt)],
             ))
             .await

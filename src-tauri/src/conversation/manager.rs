@@ -705,7 +705,7 @@ async fn summarize_conversation_topic(
     };
 
     let messages = vec![ChatMessage::user(&prompt)];
-    match router.generate(LLMRequest::new("chat", messages)).await {
+    match router.generate(LLMRequest::new("context_compress", messages)).await {
         Ok(text) => {
             let cleaned = text.trim().trim_matches(|c: char| c == '"' || c == '「' || c == '」').to_string();
             if cleaned.is_empty() {

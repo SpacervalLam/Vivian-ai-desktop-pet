@@ -283,8 +283,13 @@ impl Tool for WorkAskUserTool {
             );
         }
 
+        crate::commands::coding_agent::CODING_AGENT.report_work_progress(&session_id,
+            "任务等待你的决定", &format!("工作任务正在等待用户拍板：{}。请提醒用户查看该任务的办公会话，不要代替用户决定。", request.question));
+
         // 挂起等待。等待期间不产生 token、不消耗轮次预算。
-        match tokio::time::timeout(WAIT_TIMEOUT, rx).await {
+        let answer = tokio::time::timeout(WAIT_TIMEOUT, rx).await;
+        crate::brain::work_notices::global().clear_attention_callback(&session_id);
+        match answer {
             Ok(Ok(answer)) => {
                 let text = answer.render();
                 ToolResult::standard_success(

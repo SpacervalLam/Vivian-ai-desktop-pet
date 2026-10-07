@@ -16,9 +16,8 @@
 //!
 //! # 模型档位
 //!
-//! 路由走 `intent_judge` 任务标签 —— 即路由矩阵里那档「极高频、建议用最便宜的
-//! 快速模型」的配置。复用而非新增标签，桌宠反应与意图判定共用同一份 flash 模型，
-//! 以后要整体调档只改一处。
+//! 使用独立的 pet_reaction 路由，避免关闭会话分类模型接管角色的即时台词。
+//! 未配置时继承 companion provider；反应提示词与输出约束仍保持独立。
 //!
 //! # 失败策略：完全静默
 //!
@@ -446,7 +445,7 @@ async fn generate_reaction(
 
 fn build_reaction_request(messages: Vec<crate::types::response::ChatMessage>, char_id: &str) -> LLMRequest {
     use crate::providers::reasoning::{ReasoningPreference, ReasoningMode, ReasoningEffort};
-    LLMRequest::new("intent_judge", messages)
+    LLMRequest::new("pet_reaction", messages)
         .with_max_tokens(REACTION_MAX_TOKENS)
         .with_temperature(REACTION_TEMPERATURE)
         // with_reasoning(false) 在此仓库代表 Auto，必须显式 Off。

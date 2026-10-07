@@ -29,7 +29,7 @@ impl MemoryRecall {
     ) -> Option<String> {
         let messages =
             Self::build_messages(recent_memory, system_prompt, lang, char_id, idle_seconds)?;
-        let raw = match router.generate(LLMRequest::new("chat", messages)
+        let raw = match router.generate(LLMRequest::new(crate::providers::base::TASK_COMPANION, messages)
             .with_character_id(char_id.to_string())).await {
             Ok(r) => r,
             Err(e) => {

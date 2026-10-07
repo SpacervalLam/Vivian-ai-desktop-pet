@@ -127,6 +127,7 @@ impl BehaviorContent {
     /// 转换为 ProactiveAction（保留所有扩展字段）
     pub fn into_action(self, trigger: ProactiveTrigger, now: f64) -> ProactiveAction {
         ProactiveAction {
+            work_notice_id: None,
             trigger: trigger.as_str().to_string(),
             content: self.text,
             timestamp: now,
@@ -230,7 +231,7 @@ impl BehaviorDecider {
         let messages = Self::build_messages(
             trigger, ctx, system_prompt, lang, char_id, None, "", "", &[], "", 0,
         )?;
-        let response = match router.generate(LLMRequest::new("chat", messages)
+        let response = match router.generate(LLMRequest::new(crate::providers::base::TASK_COMPANION, messages)
             .with_character_id(char_id.to_string())).await {
             Ok(r) => r,
             Err(e) => {

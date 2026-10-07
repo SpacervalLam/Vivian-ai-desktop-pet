@@ -575,7 +575,7 @@ impl ActionExecutor {
             char_id, action_id, tool_name, rationale, user_emotion, idle_seconds, user_present
         ));
         let messages = vec![system, user];
-        let req = LLMRequest::new(crate::providers::base::TASK_WORK_AGENT, messages)
+        let req = LLMRequest::new("simple_judge", messages)
             .with_character_id(char_id.to_string());
         let resp = router.generate(req).await?;
         let text = resp.trim().to_lowercase();

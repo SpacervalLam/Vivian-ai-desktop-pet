@@ -293,7 +293,7 @@ impl TimeStampedMemory {
 
         match router
             .generate(LLMRequest::new(
-                "memory",
+                "context_compress",
                 vec![ChatMessage::user(&prompt)],
             ))
             .await

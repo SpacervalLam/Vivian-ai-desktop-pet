@@ -53,7 +53,7 @@ pub fn set_app_handle(handle: AppHandle) {
     *APP_HANDLE.write() = Some(handle);
 }
 
-/// LLM 直调（经 ModelRouter 的 chat 路由）；无路由 / 失败返回 None
+/// LLM 直调（经 ModelRouter 的 knowledge_acquisition 路由）；无路由 / 失败返回 None
 pub async fn llm_complete(system: &str, user: &str, temperature: Option<f64>) -> Option<String> {
     let handle = APP_HANDLE.read().clone()?;
     use tauri::Manager;
@@ -64,7 +64,7 @@ pub async fn llm_complete(system: &str, user: &str, temperature: Option<f64>) ->
         ChatMessage::system(system.to_string()),
         ChatMessage::user(user.to_string()),
     ];
-    let mut req = crate::providers::base::LLMRequest::new("chat", messages);
+    let mut req = crate::providers::base::LLMRequest::new("knowledge_acquisition", messages);
     if let Some(t) = temperature {
         req = req.with_temperature(t);
     }

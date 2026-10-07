@@ -1,3 +1,4 @@
+import { useNavigation } from '../NavigationContext';
 /**
  * CodeAgentPage — Codex 布局 + 手账风格
  *
@@ -3600,6 +3601,10 @@ const CodeAgentPage: React.FC = () => {
   /** 后台子任务的运行计数（work_delegate 的 background 模式）。 */
   const [sessions, setSessions] = useState<CodingSession[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
+  const navigation = useNavigation();
+  const requestedSession = typeof navigation?.pageParams.workSessionId === 'string' ? navigation.pageParams.workSessionId : undefined;
+  const requestedSessionRef = useRef(requestedSession);
+  requestedSessionRef.current = requestedSession;
   const [messages, setMessages] = useState<CodingMessage[]>([]);
   const [running, setRunning] = useState(false);
   const [summarizing, setSummarizing] = useState(false);
@@ -4233,7 +4238,7 @@ const CodeAgentPage: React.FC = () => {
     void (async () => {
       setDefaultWorkspace(await refreshDefaultWorkspace());
       const list = await refreshSessions();
-      if (list.length > 0 && !activeIdRef.current) {
+      if (list.length > 0 && !activeIdRef.current && !requestedSessionRef.current) {
         const latest = [...list].sort((a, b) => b.updated_at - a.updated_at)[0];
         setActiveId(latest.session_id);
         setRunning(latest.status === 'running');
@@ -4270,13 +4275,28 @@ const CodeAgentPage: React.FC = () => {
     void loadFileTree(s.working_directory);
   }, [loadFileTree]);
 
+  useEffect(() => {
+    if (!requestedSession) return;
+    let canceled = false;
+    void refreshSessions().then(list => {
+      if (canceled) return;
+      const target = list.find(session => session.session_id === requestedSession);
+      if (target) {
+        switchSession(target);
+        navigation?.clearPageParams();
+      } else { setPageError('找不到这个工作会话，可能已被删除。'); }
+    }).catch(error => { if (!canceled) setPageError(String(error)); });
+    return () => { canceled = true; };
+  }, [requestedSession, refreshSessions, switchSession]);
+
   /** 在指定目录新建会话并切过去。返回新建会话，失败返回 null（错误已页内提示）。 */
   const createSessionInWorkspace = useCallback(async (dir: string): Promise<CodingSession | null> => {
     if (creating) return null;
     setCreating(true);
     try {
+      const active = await invoke<{ character_id: string }>('get_active_character');
       const session = await invoke<CodingSession>('coding_new_session', {
-        charId: 'vivian',
+        charId: active.character_id,
         workingDirectory: dir,
       });
       const list = await refreshSessions();

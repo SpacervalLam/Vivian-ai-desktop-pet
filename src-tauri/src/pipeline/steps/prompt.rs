@@ -199,8 +199,8 @@ pub struct PromptBuildingStep {
     pub episode_store: Option<Arc<crate::memory::episode::EpisodeStore>>,
     /// 场景语气注入器：注入后每轮对话匹配用户输入场景，命中后注入参考台词
     pub tone_injector: Option<Arc<crate::persona::ToneInjector>>,
-    /// 工具语义筛选器：注入后在 intent=tool_request/request 时对工具做语义粗筛，
-    /// 将 Top-N 最相关工具作为"推荐工具"注入 prompt（不改变现有 visibility 分流）
+    /// 工具语义筛选器：本轮消息高权重、近期上下文低权重，决定两种通道的 Top-K schema。
+    /// tool_search 始终保留；学习语料补充内置描述的语义匹配。
     pub tool_semantic_filter: Option<Arc<crate::tools::ToolSemanticFilter>>,
     /// Topic 驱动背景知识注入器：扫描用户输入命中关键词后，在 prompt 中注入对应背景知识段落
     pub topic_injection: Option<Arc<crate::pipeline::topic_injection::TopicInjectionManager>>,
@@ -267,6 +267,18 @@ fn proposal_followup_query(state: &PipelineState) -> Option<String> {
         crate::utils::truncate_chars(&last.content, 1200)))
 }
 
+/// Only recent dialogue and bounded environment context participate; no long-term memories.
+fn recent_tool_context(state: &PipelineState) -> Option<String> {
+    let mut turns = state.messages.iter().rev()
+        .filter(|m| matches!(m.role.as_str(), "user" | "assistant") && m.content != state.user_input)
+        .take(4).map(|m| format!("{}: {}", m.role, crate::utils::truncate_chars(&m.content, 300)))
+        .collect::<Vec<_>>();
+    turns.reverse();
+    if !state.context_text.trim().is_empty() { turns.push(crate::utils::truncate_chars(&state.context_text, 240)); }
+    let text = turns.join("\n");
+    (!text.trim().is_empty()).then_some(text)
+}
+
 /// 各场景下语义召回的工具数量上限
 ///
 /// 闲聊场景工具需求稀疏，给少；任务场景用户明确在做事，给足，
@@ -275,8 +287,8 @@ fn semantic_recall_top_n(scene: ToolScene) -> usize {
     match scene {
         ToolScene::Chat | ToolScene::Idle | ToolScene::LowTrust => 4,
         ToolScene::Focus => 6,
-        ToolScene::Default => 8,
-        ToolScene::Task => 10,
+        // One discovery schema plus up to seven recalled schemas.
+        ToolScene::Default | ToolScene::Task => 7,
     }
 }
 
@@ -569,48 +581,50 @@ impl PromptBuildingStep {
     ///
     /// 语义召回只在此处算一次：召回的工具名同时写入 `recalled`（供可见性判定，
     /// 完整 schema = 保底集 ∪ 召回集）与 `recalled_order`（按相似度降序，供"仅名称
-    /// 一行"推荐提示）。取不到嵌入（主动开场 / 感知被跳过 / 嵌入服务不可用）时
-    /// `recalled=None`，回退纯场景可见性，不丢能力。
-    fn compute_tool_scope(&self, ts: &ToolSystem, state: &PipelineState, followup_embedding: Option<&[f32]>) -> ToolScope {
-        let (scene, hidden) = self.resolve_tool_scope(ts, state);
+    /// 一行"推荐提示）。配置筛选器后嵌入不可用时只保留搜索入口；未配置筛选器的
+    /// 兼容调用继续沿用场景规则。
+    fn compute_tool_scope(&self, ts: &ToolSystem, state: &PipelineState, context_embedding: Option<&[f32]>) -> ToolScope {
+        let (scene, mut hidden) = self.resolve_tool_scope(ts, state);
+        hidden.remove("tool_search");
 
-        // 角色间的闲聊不应获得控制用户设备、工作流或记忆的工具；这些工具会让普通接话
-        // 变成“代理任务”，也会把几十个无关工具塞进推理上下文。跨角色回复只需说话/沉默。
-        if state.current_channel == "cross_character" {
+        // 开场和跨角色交流默认只有固定搜索入口，不预载业务工具 schema。
+        if state.current_channel == "cross_character"
+            || state.metadata.get("proactive_greeting").and_then(serde_json::Value::as_bool).unwrap_or(false) {
             let hidden = hidden
                 .into_iter()
-                .chain(ts.list_tool_names())
+                .chain(ts.list_tool_names().into_iter().filter(|name| name != "tool_search"))
                 .collect();
             return ToolScope {
                 scene,
                 hidden,
-                recalled: None,
+                recalled: Some(HashSet::new()),
                 recalled_order: Vec::new(),
             };
         }
 
-        let recalled_order: Vec<String> = self
-            .tool_semantic_filter
-            .as_ref()
-            .zip(state.fast_perception.as_ref())
-            .map(|(filter, fp)| {
-                let emb = followup_embedding.unwrap_or(fp.query_embedding.as_slice());
-                if emb.is_empty() {
-                    return Vec::new();
-                }
-                filter
-                    .filter(ts, emb, semantic_recall_top_n(scene), TOOL_RECALL_MIN_SIM)
-                    .into_iter()
-                    .map(|r| r.name)
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        let recalled = if recalled_order.is_empty() {
-            None
-        } else {
-            Some(recalled_order.iter().cloned().collect::<HashSet<_>>())
-        };
+        let recall = self.tool_semantic_filter.as_ref().and_then(|filter| {
+            let (input, _) = crate::cross_character::parse_speaker_prefix(&state.user_input);
+            if input.trim().is_empty() && state.fast_perception.as_ref().is_none_or(|fp| fp.query_embedding.is_empty()) { return Some(Vec::new()); }
+            let owned = if state.fast_perception.as_ref().is_none_or(|fp| fp.query_embedding.is_empty()) {
+                filter.embed_query(&input).ok()
+            } else { None };
+            let current = owned.as_deref().or_else(|| state.fast_perception.as_ref().map(|fp| fp.query_embedding.as_slice()));
+            let Some(embedding) = current.filter(|v| !v.is_empty()) else { return Some(Vec::new()); };
+            let names = filter.filter_weighted(ts, embedding, context_embedding,
+                semantic_recall_top_n(scene), TOOL_RECALL_MIN_SIM, proposal_followup_query(state).is_some())
+                .into_iter().map(|r| r.name).collect::<Vec<_>>();
+            // An unavailable index falls back to discovery, never the entire schema registry.
+            Some(names)
+        });
+        let recalled = recall.as_ref().map(|names| names.iter().cloned().collect::<HashSet<_>>());
+        let recalled_order = recall.unwrap_or_default();
+        let quiet_chat = state.fast_perception.as_ref().map(|fp| {
+            fp.intent.confidence >= PROMPT_ROUTING_CONFIDENCE
+                && !crate::tools::should_filter_tools(&fp.intent.label)
+        }).unwrap_or(false);
+        let hidden = if quiet_chat && recalled.as_ref().map(|hits| hits.is_empty()).unwrap_or(false) {
+            hidden.into_iter().chain(ts.list_tool_names().into_iter().filter(|name| name != "tool_search")).collect()
+        } else { hidden };
 
         ToolScope {
             scene,
@@ -698,10 +712,14 @@ impl PromptBuildingStep {
     }
 
     pub(crate) fn voice_seed_examples(&self) -> Option<String> {
+        self.voice_seed_examples_for_contact(false)
+    }
+
+    fn voice_seed_examples_for_contact(&self, first_contact: bool) -> Option<String> {
         self.persona.as_ref().and_then(|persona| {
             let learned: Vec<_> = persona.evolution_entries().into_iter().filter(|entry| entry.active())
                 .map(|entry| entry.scope).collect();
-            crate::persona::prompt_render::render_dialogue_seed_examples(&persona.get_config(), &learned)
+            crate::persona::prompt_render::render_dialogue_seed_examples_for_contact(&persona.get_config(), &learned, first_contact)
         })
     }
 
@@ -1055,33 +1073,19 @@ impl PromptBuildingStep {
         // 推荐工具提示：复用同一份语义召回结果（ToolScope.recalled_order），仅列名称一行。
         // 不再重列描述/分数——完整 schema 已在「可用工具」主列表注入，重复描述只会浪费 token。
         // 仅在高置信路由启用 tools 模块时显示，避免模糊意图污染普通对话。
-        let recommended_tools = tool_scope.and_then(|scope| {
-            if scope.recalled_order.is_empty() {
-                return None;
-            }
-            let intent_ok = state
-                .fast_perception
-                .as_ref()
-                .map(|fp| fp.suggested_modules.iter().any(|module| module == "tools"))
-                .unwrap_or(false);
-            if !intent_ok {
-                return None;
-            }
+        let recommended_tools = tool_scope.map(|scope| {
             let lang = crate::pipeline::prompt_modules::normalize_lang(&self.language);
-            let heading =
-                crate::pipeline::prompt_modules::section_heading("recommended_tools", lang);
-            let line = match lang {
-                "en" => format!(
-                    "Most likely needed this turn: {}",
-                    scope.recalled_order.join(", ")
-                ),
-                "ja" => format!(
-                    "今回使う可能性が高いツール：{}",
-                    scope.recalled_order.join("、")
-                ),
-                _ => format!("本轮最可能用到：{}", scope.recalled_order.join("、")),
+            let discovery = match lang {
+                "en" => "tool_search is always available: search the full permitted registry by meaning/keyword or load exact names with select:. The initial shortlist is not the full capability set. Search when a needed tool is missing; retrieval does not authorize execution.",
+                "ja" => "tool_search は常に利用可能です。許可された全ツールを検索し、select: で名前指定できます。初期候補に必要なツールがなければ検索してください。取得は実行許可ではありません。",
+                _ => "tool_search 始终可见：可搜索完整的可用工具库，或用 select: 按名称加载。初始候选不是全部能力；缺少所需工具时先搜索，取得定义不等于获得执行授权。",
             };
-            Some(format!("{}\n{}", heading, line))
+            let names = scope.recalled_order.join(", ");
+            let selected = if names.is_empty() { String::new() } else {
+                match lang { "en" => format!("\nMost likely needed this turn: {names}"),
+                    "ja" => format!("\n今回の候補: {names}"), _ => format!("\n本轮优先候选：{names}") }
+            };
+            format!("{}\n{discovery}{selected}", crate::pipeline::prompt_modules::section_heading("recommended_tools", lang))
         });
 
         // Topic 驱动背景知识注入：扫描用户输入，命中关键词则激活对应 topic，
@@ -1290,12 +1294,16 @@ fn build_background_tasks_section(char_id: &str, language: &str) -> String {
     // 工作智能体的完成报告：取走即消费（每份只说一次）
     let notices = crate::brain::work_notices::global();
     let work_reports = notices.take_reports_for(char_id);
+    let work_running: Vec<_> = crate::commands::coding_agent::CODING_AGENT.list_sessions()
+        .into_iter().filter(|session| session.char_id == char_id
+            && session.status == crate::brain::coding_agent::CodingStatus::Running).take(5).collect();
     // 工作智能体卡在用户拍板上的提问：用户没回答前，每轮都该被看见
     let attentions = crate::brain::work_notices::pending_attention_for(char_id);
 
     if running.is_empty()
         && pending.is_empty()
         && work_reports.is_empty()
+        && work_running.is_empty()
         && attentions.is_empty()
     {
         return String::new();
@@ -1325,6 +1333,13 @@ fn build_background_tasks_section(char_id: &str, language: &str) -> String {
         let body: String = body.chars().take(400).collect();
         let status = if t.status == "failed" { l.failed } else { "" };
         lines.push(format!("- [{}{status}] {d}\n  {}：{body}", l.done, l.report));
+    }
+    for session in &work_running {
+        let task: String = session.title.chars().take(120).collect();
+        let step = session.work_todos.iter().find(|t| t.status == "in_progress")
+            .map(|t| t.content.chars().take(120).collect::<String>()).unwrap_or_default();
+        lines.push(format!("- [{} | 工作会话 {}] {}；当前步骤：{}。任务仍在后台执行，不能宣称完成。",
+            l.running, short_id(&session.session_id), task, step));
     }
     for r in work_reports.iter().take(3) {
         // 这是工作侧返回给陪伴侧的正式总结，不应压成一句状态。单份限制 1200 字，
@@ -1515,22 +1530,22 @@ impl PromptBuildingStep {
 
         state.metadata["semantic_prompt_selection"] = json!(OptionalContextSelection::for_state(&state));
 
-        let followup_embedding = if let (Some(filter), Some(query)) =
-            (self.tool_semantic_filter.clone(), proposal_followup_query(&state))
-        {
-            tokio::task::spawn_blocking(move || filter.embed_query(&query))
-                .await.ok().and_then(Result::ok).filter(|embedding| !embedding.is_empty())
-        } else {
-            None
-        };
-
-        // 工具范围只算一次：场景 + 隐藏集 + 语义召回。文本通道（build_parts）与
-        // 原生 FC 通道（下方 tool_definitions）共享同一份，杜绝此前两条路各算一遍、
-        // 参数不一致、以及推荐段与主列表重复注入的问题。
-        let tool_scope: Option<ToolScope> = self
-            .tool_system
-            .as_ref()
-            .map(|ts| self.compute_tool_scope(ts, &state, followup_embedding.as_deref()));
+        // Context embedding, lazy tool indexing and learned-vector rebuilding all perform
+        // blocking I/O. Compute the one shared scope off the async executor.
+        let tool_scope = if let Some(ts) = self.tool_system.clone() {
+            let step = self.clone();
+            let snapshot = state.clone();
+            let scope = tokio::task::spawn_blocking(move || {
+                let context = if snapshot.current_channel == "cross_character"
+                    || snapshot.metadata.get("proactive_greeting").and_then(Value::as_bool) == Some(true) { None }
+                else { recent_tool_context(&snapshot).and_then(|text|
+                    step.tool_semantic_filter.as_ref().and_then(|filter| filter.embed_query(&text).ok())) };
+                step.compute_tool_scope(&ts, &snapshot, context.as_deref())
+            }).await.map_err(|e| crate::error::VivianError::Other(format!("Tool retrieval worker failed: {e}")))?;
+            state.metadata["tool_semantic_selection"] = json!({"current_weight":0.8,"context_weight":0.2,
+                "selected":scope.recalled_order,"discovery":"tool_search"});
+            Some(scope)
+        } else { None };
 
         // 使用模块化提示词构建器 + 模板引擎元数据（Section Schema 驱动）
         if let Some(psy) = &self.psychology {
@@ -1555,7 +1570,10 @@ impl PromptBuildingStep {
             }
         }
         if parts.examples_block.is_none() {
-            parts.examples_block = self.voice_seed_examples();
+            parts.examples_block = self.voice_seed_examples_for_contact(
+                state.metadata.get("first_contact_greeting").or_else(|| state.metadata.get("first_contact"))
+                    .and_then(serde_json::Value::as_bool).unwrap_or(false)
+            );
         }
         let task_type = config.as_ref().map(RunnableConfig::task_type)
             .unwrap_or_else(|| "chat".to_string());
@@ -1866,6 +1884,44 @@ fn format_schedule_signals(assessment: &ScheduleAssessment) -> Option<String> {
 mod component_selection_tests {
     use super::*;
     use crate::emotion::{DimensionResult, FastPerceptionResult};
+
+    struct ToolEmbeddingFixture { unavailable: bool }
+    impl crate::memory::embedding::MemoryEmbeddingProvider for ToolEmbeddingFixture {
+        fn dimension(&self) -> usize { 2 }
+        fn embed(&self, _: &str) -> VivianResult<Vec<f32>> {
+            if self.unavailable { Err(crate::error::VivianError::Other("offline".into())) }
+            else { Ok(vec![1.0, 0.0]) }
+        }
+    }
+
+    #[test]
+    fn discovery_stays_visible_for_quiet_chat_requests_greetings_and_embedding_failures() {
+        let ts = Arc::new(ToolSystem::new());
+        ts.register_tool(Arc::new(crate::tools::tool_call_manager::ToolSearchTool::new(
+            Arc::new(vec![]), Arc::downgrade(&ts))));
+        let mut step = PromptBuildingStep::new();
+        step.tool_semantic_filter = Some(Arc::new(crate::tools::ToolSemanticFilter::new(
+            Arc::new(ToolEmbeddingFixture { unavailable: false }), "en".into())));
+        let mut state = PipelineState { fast_perception: Some(FastPerceptionResult {
+            intent: DimensionResult { label: "chat".into(), confidence: 0.9 },
+            query_embedding: vec![-1.0, 0.0].into(), ..Default::default()
+        }), ..Default::default() };
+        let list = ToolListTool::new(ts.clone());
+        let scope = step.compute_tool_scope(&ts, &state, None);
+        assert!(scope.recalled.as_ref().unwrap().is_empty());
+        assert_eq!(list.get_tool_definitions_for_scene(scope.scene, &scope.hidden, scope.recalled.as_ref()).iter().map(|d| d.name.as_str()).collect::<Vec<_>>(), ["tool_search"]);
+        state.fast_perception.as_mut().unwrap().intent.label = "tool_request".into();
+        let scope = step.compute_tool_scope(&ts, &state, None);
+        assert!(list.get_tool_definitions_for_scene(scope.scene, &scope.hidden, scope.recalled.as_ref()).iter().any(|d| d.name == "tool_search"));
+        step.tool_semantic_filter = Some(Arc::new(crate::tools::ToolSemanticFilter::new(
+            Arc::new(ToolEmbeddingFixture { unavailable: true }), "en".into())));
+        state.fast_perception.as_mut().unwrap().intent.label = "chat".into();
+        let scope = step.compute_tool_scope(&ts, &state, None);
+        assert!(scope.recalled.as_ref().unwrap().is_empty());
+        assert!(!scope.hidden.contains("tool_search"));
+        state.metadata["proactive_greeting"] = json!(true);
+        assert!(!step.compute_tool_scope(&ts, &state, None).hidden.contains("tool_search"));
+    }
 
     #[tokio::test]
     async fn companion_prompt_reaches_generation_metadata_and_inspector() {

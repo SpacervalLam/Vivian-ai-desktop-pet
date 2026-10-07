@@ -264,7 +264,7 @@ impl MemoryConsolidator {
                 .count();
             let entries = router
                 .generate(LLMRequest::new(
-                    "memory",
+                    "consolidation",
                     vec![
                         ChatMessage::system(MEMORY_MD_INCREMENTAL_SYSTEM_PROMPT),
                         ChatMessage::user(format!(
@@ -302,7 +302,7 @@ impl MemoryConsolidator {
         // ── 全量压缩（兜底 / 文件逼近上限）──────────────────────────────────
         let rewritten = router
             .generate(LLMRequest::new(
-                "memory",
+                "consolidation",
                 vec![
                     ChatMessage::system(MEMORY_MD_TIDY_SYSTEM_PROMPT),
                     ChatMessage::user(format!("（当前 memory.md 全文，需整理合并）\n{existing}")),

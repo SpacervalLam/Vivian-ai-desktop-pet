@@ -23,6 +23,13 @@ use crate::pipeline::state::PipelineState;
 /// 记忆重要度引导阈值：importance 不低于该值的关键记忆在注入时打上 [重点] 标记。
 const IMPORTANCE_EMPHASIS_THRESHOLD: f64 = 0.7;
 
+fn is_authored_context(memory: &crate::memory::MemoryItem) -> bool {
+    memory.id.starts_with("seed_") || matches!(
+        memory.metadata.get("source").and_then(Value::as_str),
+        Some("system_seed" | "environment_preset")
+    )
+}
+
 // ============================================================================
 // MemoryRetrievalStep：原有检索步骤（保留，扩展 MemoryFilter 接入点）
 // ============================================================================
@@ -504,7 +511,10 @@ impl Runnable for MemoryRetrievalStep {
             } else {
                 ""
             };
-            let type_label = if mem
+            let authored_context = is_authored_context(mem);
+            let type_label = if authored_context {
+                "角色预设；非真实共同经历"
+            } else if mem
                 .tags
                 .iter()
                 .any(|t| t.eq_ignore_ascii_case("long_term"))
@@ -521,9 +531,13 @@ impl Runnable for MemoryRetrievalStep {
             } else {
                 "已读"
             };
-            let time = chrono::DateTime::from_timestamp(mem.timestamp as i64, 0)
-                .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
-                .unwrap_or_else(|| "unknown".to_string());
+            let time = if authored_context {
+                "预置背景".to_owned()
+            } else {
+                chrono::DateTime::from_timestamp(mem.timestamp as i64, 0)
+                    .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
+                    .unwrap_or_else(|| "unknown".to_string())
+            };
             let stale_hint = staleness_text(mem.timestamp, now)
                 .map(|s| format!(" [{}]", s))
                 .unwrap_or_default();
@@ -613,25 +627,23 @@ impl Runnable for MemoryRetrievalStep {
             filtered_items.truncate(kept_count);
         }
         state.memory_text = memory_parts.join("\n");
+        if filtered_items.iter().any(is_authored_context) {
+            state.memory_text = format!("Authored character/background entries are fictional context, not evidence of this user's identity, words, past interactions or current environment. Their timestamps mark initialization, not an event. Use real dialogue and observations for shared history; never tell the user they said or did something based only on a preset.\n{}", state.memory_text);
+        }
 
-        // 强相关记忆命中判定：重要度足够高，或为种子记忆（system_seed）且重要度不低。
+        // 仅真实记忆可触发强命中；预置角色剧情不能抑制事实核验。
         // 命中时向主 prompt 注入"优先用记忆回答"引导，并标记 memory_strong_hit，
         // 供 prompt 构建阶段抑制本轮无谓的 web_search —— 避免角色为了"查询"去外部
         // 搜索自己本该记得的内容（如用户、创造者等）。
         let strong_hit = filtered_items.iter().any(|m| {
+            if is_authored_context(m) { return false; }
             let relevance = m
                 .metadata
                 .get("fused_score")
                 .or_else(|| m.metadata.get("combined_score"))
                 .and_then(|v| v.as_f64())
                 .unwrap_or(0.0);
-            relevance >= 0.45
-                && (m.importance >= 0.75
-                || (m.importance >= 0.6
-                    && m.metadata
-                        .get("source")
-                        .and_then(|v| v.as_str())
-                        .is_some_and(|s| s == "system_seed")))
+            relevance >= 0.45 && m.importance >= 0.75
         });
         if strong_hit {
             state.metadata["memory_strong_hit"] = json!(true);
@@ -657,6 +669,7 @@ impl Runnable for MemoryRetrievalStep {
                     "timestamp": m.timestamp,
                     "tags": m.tags,
                     "granularity": m.granularity,
+                    "source": m.metadata.get("source").and_then(Value::as_str).unwrap_or_default(),
                 })
             })
             .collect();
@@ -1151,6 +1164,23 @@ impl Runnable for MemorySavingRunnable {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn authored_context_is_distinct_from_user_history() {
+        let mut memory = crate::memory::MemoryItem::new(
+            "用户说慢慢来".into(), crate::memory::types::Granularity::Turn, 0.9,
+        );
+        assert!(!is_authored_context(&memory));
+        memory.id = "seed_legacy".into();
+        assert!(is_authored_context(&memory));
+        memory.id = "imported".into();
+        for source in ["system_seed", "environment_preset"] {
+            memory.metadata = json!({"source":source});
+            assert!(is_authored_context(&memory));
+        }
+        memory.metadata = json!({"source":"direct", "speaker":"user"});
+        assert!(!is_authored_context(&memory));
+    }
 
     #[test]
     fn test_strip_json_extracts_text() {
