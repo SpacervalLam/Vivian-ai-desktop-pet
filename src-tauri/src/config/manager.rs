@@ -59,7 +59,7 @@ pub struct AppConfig {
     /// 当前选中的工作智能体模型 id（None 表示未切换，走默认路由）
     #[serde(default)]
     pub active_work_model: Option<String>,
-    /// 工作页「新建任务」的默认工作区目录（None/空串表示未设置，此时由用户每次选择）。
+    /// 工作页「新建任务」的默认工作区目录（None/空串使用系统文档目录下的 Vivian 文件夹）。
     #[serde(default)]
     pub default_workspace: Option<String>,
 }

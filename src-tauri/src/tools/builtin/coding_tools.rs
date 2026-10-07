@@ -671,6 +671,7 @@ impl Tool for RunCommandTool {
             "type": "object",
             "properties": {
                 "command": { "type": "string", "description": "要执行的命令（PowerShell 语法）" },
+                "description": { "type": "string", "description": "用用户的语言简述命令目的和影响；不要粘贴代码，不得掩盖删除、安装或外部操作。仅用于确认卡片展示，不影响权限判定。" },
                 "timeout_secs": { "type": "integer", "description": "超时秒数（默认 120，上限 600）" }
             },
             "required": ["command"]

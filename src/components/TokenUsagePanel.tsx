@@ -3,7 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { useTranslation } from 'react-i18next';
 import { Activity, ArrowUpRight, BarChart3, Check, ChevronRight, Cpu, Info, Layers3, RefreshCw, Search, Waypoints, X } from 'lucide-react';
 import { usageCopy } from './usage/usageCopy';
-import { compactCount, CompositionChart, DailyUsageChart, formatCount, TokenBreakdown } from './usage/UsageCharts';
+import { compactCount as compactUsageCount, CompositionChart, DailyUsageChart, formatCount as formatUsageCount, TokenBreakdown } from './usage/UsageCharts';
 import { dimensionRows, LEGACY_KEY, metricValue, routeLabelKeys, selectedDays, sumUsage, tokenTotal, type UsageMetric, type UsageReport, type UsageSelection, type UsageView } from './usage/usageData';
 import './usage/TokenUsagePanel.css';
 
@@ -12,6 +12,8 @@ const views = [{ key: 'trend', icon: BarChart3 }, { key: 'models', icon: Cpu }, 
 export default function TokenUsagePanel() {
   const { t, i18n } = useTranslation();
   const copy = usageCopy[i18n.language.startsWith('zh') ? 'zh' : i18n.language.startsWith('ja') ? 'ja' : 'en'];
+  const formatCount = (value: number) => formatUsageCount(value, copy.locale);
+  const compactCount = (value: number) => compactUsageCount(value, copy.locale);
   const [period, setPeriod] = useState(7);
   const [report, setReport] = useState<UsageReport | null>(null);
   const [loadedPeriod, setLoadedPeriod] = useState<number | null>(null);
@@ -52,7 +54,7 @@ export default function TokenUsagePanel() {
     if (key === LEGACY_KEY) return copy.legacy;
     if (key === 'unattributed' || key === '未归类') return dimension === 'models' ? copy.unknownModel : dimension === 'tasks' ? copy.unknownTask : copy.unknownRoute;
     if (dimension === 'models') return key;
-    if (routeLabelKeys[key]) return t(`config.routing_${routeLabelKeys[key]}`);
+    if (routeLabelKeys[key]) return t(routeLabelKeys[key]);
     return copy.purpose[key] ?? key;
   };
   const rows = data && view !== 'trend' ? dimensionRows(data, view, metric) : [];
@@ -68,7 +70,7 @@ export default function TokenUsagePanel() {
     current?.dimension === next.dimension && current.key === next.key && current.model === next.model ? null : next);
   const inlineDetail = selection && <section id="usage-inline-detail" className="usage-selection" aria-label={copy.detail}>
     <div className="usage-selection-heading"><h3>{rowLabel(selection.key, selection.dimension)}{selection.model && <span> / {selection.model}</span>}</h3></div>
-    <div className="usage-selected-totals"><strong>{formatCount(tokenTotal(detailTotals))} Token</strong><span>{formatCount(detailTotals.requests)} {copy.calls}</span></div>
+    <div className="usage-selected-totals"><strong>{formatCount(tokenTotal(detailTotals))} {copy.tokenUnit}</strong><span>{formatCount(detailTotals.requests)} {copy.calls}</span></div>
     <TokenBreakdown usage={detailTotals} copy={copy} />
     <DailyUsageChart key={`${selection.dimension}/${selection.key}/${selection.model ?? ''}`} days={detailDays} metric={metric} copy={copy} />
   </section>;
@@ -124,7 +126,7 @@ export default function TokenUsagePanel() {
               <progress max={Math.max(1, totals.requests)} value={view === 'routes' ? routeCalls : taskCalls} />
               <p>{view === 'routes' ? copy.coverageHelp : copy.taskCoverageHelp}</p>
             </div>}
-            <div className="usage-search"><Search size={14} /><input aria-label={searchLabel} placeholder={searchLabel} value={query} onChange={(event) => setQuery(event.target.value)} />{query && <button type="button" onClick={() => setQuery('')} aria-label={copy.back}><X size={13} /></button>}</div>
+            <div className="usage-search"><Search size={14} /><input aria-label={searchLabel} placeholder={searchLabel} value={query} onChange={(event) => setQuery(event.target.value)} />{query && <button type="button" onClick={() => setQuery('')} aria-label={copy.clearSearch}><X size={13} /></button>}</div>
             <div className="usage-ranking">
               {filteredRows.map((row) => {
                 const value = metricValue(row, metric);
@@ -133,9 +135,9 @@ export default function TokenUsagePanel() {
                 const expanded = selection?.dimension === view && selection.key === row.key;
                 return <div key={row.key} className="usage-rank-item">
                   <button type="button" className="usage-rank-row" aria-expanded={expanded} aria-controls={expanded ? 'usage-inline-detail' : undefined} onClick={() => toggleSelection({ dimension: view, key: row.key })}>
-                  <span className="usage-rank-title"><span title={row.key}>{rowLabel(row.key, view)}</span><strong>{formatCount(value)} <small>{metric === 'tokens' ? 'Token' : copy.calls}</small></strong><ChevronRight size={14} /></span>
+                  <span className="usage-rank-title"><span title={row.key}>{rowLabel(row.key, view)}</span><strong>{formatCount(value)} <small>{metric === 'tokens' ? copy.tokenUnit : copy.calls}</small></strong><ChevronRight size={14} /></span>
                   <span className="usage-rank-track"><span style={{ width: `${Math.min(100, share)}%` }} /></span>
-                  <span className="usage-rank-meta"><span>{metric === 'tokens' ? `${formatCount(row.requests)} ${copy.calls}` : `${formatCount(tokenTotal(row))} Token`}</span><span>{share.toFixed(1)}% {copy.share}</span></span>
+                  <span className="usage-rank-meta"><span>{metric === 'tokens' ? `${formatCount(row.requests)} ${copy.calls}` : `${formatCount(tokenTotal(row))} ${copy.tokenUnit}`}</span><span>{share.toFixed(1)}% {copy.share}</span></span>
                   </button>
                   {expanded && inlineDetail}
                 </div>;
@@ -150,7 +152,7 @@ export default function TokenUsagePanel() {
                 const observed = route.models.find((row) => row.model === model);
                 const value = observed ? metricValue(observed, metric) : null;
                 return <td key={model}>{value !== null ? <button type="button" style={{ background: `color-mix(in srgb, var(--usage-input) ${12 + value / matrixMax * 50}%, var(--panel-surface))` }}
-                  aria-label={`${rowLabel(route.route, 'routes')} / ${model}: ${formatCount(value)} ${metric === 'tokens' ? 'Token' : copy.calls}`} aria-expanded={selection?.dimension === 'route-model' && selection.key === route.route && selection.model === model}
+                  aria-label={`${rowLabel(route.route, 'routes')} / ${model}: ${formatCount(value)} ${metric === 'tokens' ? copy.tokenUnit : copy.calls}`} aria-expanded={selection?.dimension === 'route-model' && selection.key === route.route && selection.model === model}
                   aria-controls={selection?.dimension === 'route-model' && selection.key === route.route && selection.model === model ? 'usage-inline-detail' : undefined}
                   onClick={() => toggleSelection({ dimension: 'route-model', key: route.route, model })}>{compactCount(value)}</button> : <span className="usage-no-cell">—</span>}</td>;
               })}</tr>{selection?.dimension === 'route-model' && selection.key === route.route && <tr className="usage-matrix-detail"><td colSpan={matrixModels.length + 1}>{inlineDetail}</td></tr>}</Fragment>)}

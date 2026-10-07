@@ -319,24 +319,17 @@ pub fn section_schema() -> PromptSectionSchema {
             section_type: SectionType::Dynamic,
             optional: true,
         },
+        // ── 室友组（合并）：在场状态 + 行为印象 + 我对她的印象 + 三方关系 ──
         SectionDef {
-            id: "roommate_status",
-            name: "Roommate Status",
-            i18n_key: "roommate_status",
-            layer: SectionLayer::World,
-            section_type: SectionType::Dynamic,
-            optional: true,
-        },
-        SectionDef {
-            id: "roommate_cognitive",
-            name: "Roommate Cognitive",
-            i18n_key: "roommate_cognitive",
+            id: "who_else",
+            name: "Who Else",
+            i18n_key: "who_else",
             layer: SectionLayer::World,
             section_type: SectionType::Dynamic,
             optional: true,
         },
 
-        // ── 社交关系：关系定义、社交状态、关系事实、共享世界 ──
+        // ── 社交关系：关系定义、共享世界 ──
         SectionDef {
             id: "relationship",
             name: "Relationship",
@@ -345,22 +338,8 @@ pub fn section_schema() -> PromptSectionSchema {
             section_type: SectionType::Static,
             optional: true,
         },
-        SectionDef {
-            id: "social_state",
-            name: "Social State",
-            i18n_key: "social_state",
-            layer: SectionLayer::Relationship,
-            section_type: SectionType::Dynamic,
-            optional: true,
-        },
-        SectionDef {
-            id: "relationship_facts",
-            name: "Relationship Facts",
-            i18n_key: "relationship_facts",
-            layer: SectionLayer::Relationship,
-            section_type: SectionType::Dynamic,
-            optional: true,
-        },
+
+        // ── 社交关系：共享世界（讲的是世界，不是"谁在场"，不并入 who_else）──
         SectionDef {
             id: "shared_world",
             name: "Shared World",
@@ -621,22 +600,7 @@ fn extract_section_content(id: &str, parts: &PromptParts, lang: &str) -> String 
                 format!("{}\n{}", section_heading("the_person", lang), user_parts.join("\n\n"))
             }
         },
-        "roommate_status" => parts
-            .roommate_status
-            .as_deref()
-            .map(|s| {
-                format!(
-                    "{}\n{}",
-                    section_heading("who_else", lang),
-                    s
-                )
-            })
-            .unwrap_or_default(),
-        "roommate_cognitive" => parts
-            .roommate_cognitive_section
-            .as_deref()
-            .unwrap_or("")
-            .to_string(),
+        "who_else" => build_who_else_section(parts),
         "environment_events" => parts
             .environment_events
             .as_deref()
@@ -652,18 +616,8 @@ fn extract_section_content(id: &str, parts: &PromptParts, lang: &str) -> String 
                 )
             })
             .unwrap_or_default(),
-        "relationship_facts" => parts
-            .relationship_facts_section
-            .as_deref()
-            .unwrap_or("")
-            .to_string(),
         "shared_world" => parts
             .shared_world_section
-            .as_deref()
-            .unwrap_or("")
-            .to_string(),
-        "social_state" => parts
-            .social_state_section
             .as_deref()
             .unwrap_or("")
             .to_string(),
@@ -723,6 +677,7 @@ fn extract_section_content(id: &str, parts: &PromptParts, lang: &str) -> String 
             .unwrap_or("")
             .to_string(),
         "tools" => build_tools_block(parts.tools.as_deref(), parts.enable_native_fc, &parts.language),
+        "deferred_tools" => parts.deferred_tools_section.clone().unwrap_or_default(),
         "user_input" => {
             if parts.user_input.is_empty() {
                 String::new()
@@ -743,14 +698,14 @@ mod tests {
     #[test]
     fn schema_has_expected_counts() {
         let schema = section_schema();
-        // 32 = 9 static + 23 dynamic
+        // 29 = 9 static + 20 dynamic (four roommate blocks merged into who_else)
         // static: framework, output_format, character, style, examples,
         //         response_decision, channel_guide, inline_tag_format（伪静态归位）, relationship
         // 动态区合并组：memory_group（episode+log+memory+规则）、user_profile_group（facts+model+behavior）
-        assert_eq!(schema.total_count, 32);
+        assert_eq!(schema.total_count, 29);
         assert_eq!(schema.static_count, 9);
-        assert_eq!(schema.dynamic_count, 23);
-        assert_eq!(schema.optional_count, 26);
+        assert_eq!(schema.dynamic_count, 20);
+        assert_eq!(schema.optional_count, 23);
     }
 
     #[test]

@@ -219,6 +219,24 @@ fn compact_args_preview(args: &serde_json::Value, max_len: usize) -> String {
     joined
 }
 
+fn command_operation_summary(command: &str) -> String {
+    let lower = command.to_ascii_lowercase();
+    let mut actions = Vec::new();
+    for (needles, label) in [
+        (&["remove-item", "del ", "rm "][..], "删除文件或目录"),
+        (&["pip install", "npm install", "pnpm install"][..], "安装依赖"),
+        (&["python", " py "][..], "运行 Python 代码或脚本"),
+        (&["npm test", "cargo test", "pytest"][..], "运行测试"),
+        (&["get-childitem", "get-content", "get-process"][..], "查看文件或运行环境"),
+        (&["start-process"][..], "启动程序"),
+        (&["set-content", "out-file", "new-item", "copy-item", "move-item"][..], "创建、写入或整理文件"),
+    ] {
+        if needles.iter().any(|needle| lower.contains(needle)) { actions.push(label); }
+    }
+    if actions.is_empty() { "运行系统命令以继续任务（可能读取或修改文件）".into() }
+    else { actions.join("；") }
+}
+
 /// 根据工具名和参数推断风险等级与确认原因
 ///
 /// 用于在无 `can_use_tool` 回调时，通过 Tauri 事件向前端请求确认。
@@ -268,7 +286,15 @@ pub fn confirmation_info(tool_name: &str, args: &serde_json::Value) -> (Confirma
         }
         "run_command" => {
             let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("?");
-            (ConfirmationRisk::High, format!("将执行命令：{}", cmd))
+            let operation = command_operation_summary(cmd);
+            let purpose = args.get("description").and_then(serde_json::Value::as_str)
+                .map(|text| text.split_whitespace().collect::<Vec<_>>().join(" "))
+                .filter(|text| !text.is_empty());
+            let text = match purpose {
+                Some(purpose) => format!("目的：{}\n操作：{operation}", purpose.chars().take(180).collect::<String>()),
+                None => format!("操作：{operation}"),
+            };
+            (ConfirmationRisk::High, text)
         }
         "create_tool" => {
             // 自建工具创建确认：前端（ConfirmToast）按 arguments 渲染专用预览卡片
@@ -406,6 +432,17 @@ pub fn confirmation_info(tool_name: &str, args: &serde_json::Value) -> (Confirma
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn command_confirmation_explains_operations_without_dumping_code() {
+        let command = "python make_ppt.py; Remove-Item old.png";
+        let (_, text) = confirmation_info("run_command", &serde_json::json!({"command": command, "description": "生成演示文稿并清理预览图片"}));
+        assert!(text.contains("生成演示文稿"));
+        assert!(text.contains("Python"));
+        assert!(text.contains("删除"));
+        assert!(!text.contains(command));
+        assert!(!command_operation_summary("unknown-script").contains("只读"));
+    }
+
 
     #[tokio::test]
     async fn configured_confirmation_window_survives_default_ttl_then_expires() {

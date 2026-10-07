@@ -1965,8 +1965,9 @@ pub fn start_side_chat_left_watcher(app: AppHandle) -> Result<(), String> {
     let stop_c = Arc::clone(&stop);
     let thread = thread::spawn(move || {
         tracing::info!("[side_chat_left] 线程启动");
-        const GRACE_TICKS: u32 = 7; // 7 * 60ms ≈ 420ms 自动收回宽限
+        const GRACE_TICKS: u32 = 4; // 4 * 60ms ≈ 240ms 离开停靠带后的收起延时（60ms 帧粒度下最接近 250ms 的档）
         const EDGE_PX: i32 = 12; // 左缘触发宽度（物理像素）
+        const KEEP_STRIP_PX: i32 = 15; // 停靠带宽度：窗口最左侧这么宽内视为"仍在使用"
         const MONITOR_REFRESH_TICKS: u32 = 30;
         // 隐藏态延迟冻结：等前端预创建后的初始化完成再挂起（50 * 60ms = 3s）
         const FREEZE_DELAY_TICKS: u32 = 50;
@@ -2044,6 +2045,18 @@ pub fn start_side_chat_left_watcher(app: AppHandle) -> Result<(), String> {
                 _ => false,
             };
 
+            // 停靠带：窗口最左侧 KEEP_STRIP_PX 竖条（全高）。未锁定时只有停在这条带内
+            // 才保持展开，光标移到窗口其余位置也视为离开，宽限后收回。
+            let in_keep_strip = match (win.outer_position(), win.outer_size()) {
+                (Ok(pos), Ok(size)) => {
+                    cx >= pos.x
+                        && cx < pos.x + KEEP_STRIP_PX
+                        && cy >= pos.y
+                        && cy < pos.y + size.height as i32
+                }
+                _ => false,
+            };
+
             if !in_edge_zone {
                 edge_armed = true;
             }
@@ -2097,15 +2110,19 @@ pub fn start_side_chat_left_watcher(app: AppHandle) -> Result<(), String> {
                 }
             } else {
                 freeze_delay = 0;
-                // 锁定或光标在窗内 → 保持；解锁后移出窗口则宽限后收回
-                if locked || in_window {
+                // 锁定、或光标停在窗口最左侧停靠带内 → 保持；否则宽限 ~0.5s 后收回。
+                // 输入框打开期间只要光标还在窗内也保持：此时用户正在交互，收走会连带丢掉草稿。
+                let holding = locked
+                    || in_keep_strip
+                    || (SIDE_CHAT_LEFT_INPUT_OPEN.load(Ordering::SeqCst) && in_window);
+                if holding {
                     hide_countdown = 0;
                 } else {
                     hide_countdown += 1;
                     if hide_countdown >= GRACE_TICKS {
                         hide_countdown = 0;
                         side_chat_left_hide(&win);
-                        tracing::info!("[side_chat_left] 光标离开，自动收回");
+                        tracing::info!("[side_chat_left] 光标离开停靠带，自动收回");
                     }
                 }
             }

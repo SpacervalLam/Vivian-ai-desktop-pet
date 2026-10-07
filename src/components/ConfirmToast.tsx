@@ -21,22 +21,12 @@ export interface ConfirmToastProps {
   onDone: () => void;
 }
 
-/** 将参数对象格式化为多行 key: value 预览（单值截断，超限折叠） */
+/** Keep the complete command available for inspection. */
 function formatArgs(args: unknown): string {
   if (!args || typeof args !== 'object' || Array.isArray(args)) return '';
-  const entries = Object.entries(args as Record<string, unknown>);
-  if (entries.length === 0) return '';
-  const lines = entries.map(([k, v]) => {
-    let val: string;
-    if (v == null) val = String(v);
-    else if (typeof v === 'string') val = v;
-    else val = JSON.stringify(v);
-    val = val.replace(/\s+/g, ' ').trim();
-    if (val.length > 80) val = val.slice(0, 80) + '…';
-    return `${k}: ${val}`;
-  });
-  const shown = lines.slice(0, 6).join('\n');
-  return lines.length > 6 ? `${shown}\n… +${lines.length - 6} 项` : shown;
+  return Object.entries(args as Record<string, unknown>)
+    .map(([key, value]) => `${key}: ${typeof value === 'string' ? value : JSON.stringify(value, null, 2)}`)
+    .join('\n\n');
 }
 
 /** 角色 ID → 显示名（未收录的 ID 首字母大写兜底） */
@@ -105,7 +95,7 @@ const previewCode: React.CSSProperties = {
 };
 
 /** 无操作自动视为拒绝的倒计时秒数 */
-const COUNTDOWN_SECONDS = 30;
+const COUNTDOWN_SECONDS = 120;
 
 /**
  * 风险等级配色。
@@ -137,19 +127,31 @@ const ConfirmToast: React.FC<ConfirmToastProps> = ({
   const [visible, setVisible] = useState(false);
   const [remaining, setRemaining] = useState(COUNTDOWN_SECONDS);
   const respondedRef = useRef(false);
+  const [inspecting, setInspecting] = useState(false);
+  const [submissionError, setSubmissionError] = useState('');
 
   const respond = useCallback(
     (action: ConfirmAction) => {
       if (respondedRef.current) return;
       respondedRef.current = true;
-      void invoke('confirm_tool_execution', { requestId, action }).catch((err) => {
-        console.warn('[ConfirmToast] 确认结果回传失败:', err);
-      });
-      void emit('toast:confirm_done', { request_id: requestId });
-      setVisible(false);
-      window.setTimeout(onDone, 250);
+      setSubmissionError('');
+      void (async () => {
+        try {
+          await invoke<boolean>('confirm_tool_execution', { requestId, action });
+          await emit('toast:confirm_done', { request_id: requestId }).catch(err => {
+            console.warn('[ConfirmToast] 确认已提交，但移除通知发送失败:', err);
+          });
+          setVisible(false);
+          window.setTimeout(onDone, 250);
+        } catch (err) {
+          respondedRef.current = false;
+          setRemaining(value => Math.max(value, 30));
+          setSubmissionError(t('tool_confirm.submit_failed'));
+          console.warn('[ConfirmToast] 确认结果回传失败:', err);
+        }
+      })();
     },
-    [requestId, onDone],
+    [requestId, onDone, t],
   );
 
   useEffect(() => {
@@ -157,9 +159,10 @@ const ConfirmToast: React.FC<ConfirmToastProps> = ({
   }, []);
 
   useEffect(() => {
+    if (inspecting) return;
     const timer = window.setInterval(() => setRemaining((r) => r - 1), 1000);
     return () => window.clearInterval(timer);
-  }, []);
+  }, [inspecting]);
 
   useEffect(() => {
     if (remaining <= 0) respond('deny');
@@ -198,6 +201,10 @@ const ConfirmToast: React.FC<ConfirmToastProps> = ({
 
   return (
     <div
+      onMouseEnter={() => setInspecting(true)}
+      onMouseLeave={() => setInspecting(false)}
+      onFocusCapture={() => setInspecting(true)}
+      onBlurCapture={event => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setInspecting(false); }}
       style={{
         position: 'relative',
         overflow: 'hidden',
@@ -292,7 +299,7 @@ const ConfirmToast: React.FC<ConfirmToastProps> = ({
       <div style={{ wordBreak: 'break-word', whiteSpace: 'pre-wrap', marginBottom: 4 }}>
         {reason}
       </div>
-      <div style={{ fontSize: 11, color: 'var(--panel-text-tertiary)', marginBottom: 8 }}>{tool}</div>
+
       {isCreateTool ? (
         <div style={{ marginBottom: 10 }}>
           <div style={previewLabel}>{t('tool_confirm.field_name')}</div>
@@ -373,22 +380,12 @@ const ConfirmToast: React.FC<ConfirmToastProps> = ({
         </div>
       ) : (
         argsText && (
-          <div
-            style={{
-              fontSize: 11,
-              lineHeight: 1.45,
-              color: 'var(--panel-text-tertiary)',
-              background: 'var(--panel-bg-surface)',
-              borderRadius: 6,
-              padding: '6px 8px',
-              marginBottom: 10,
-              whiteSpace: 'pre-wrap',
-              wordBreak: 'break-all',
-              fontFamily: 'Consolas, "Courier New", monospace',
-            }}
-          >
-            {argsText}
-          </div>
+          <details style={{ marginBottom: 10 }}>
+            <summary style={{ cursor: 'pointer', color: 'var(--panel-text-tertiary)', fontSize: 12 }}>
+              {t(tool === 'run_command' ? 'tool_confirm.command_details' : 'tool_confirm.operation_details')}
+            </summary>
+            <pre style={{ ...previewCode, whiteSpace: 'pre-wrap', maxHeight: 180, marginTop: 6 }}>{`${tool}\n\n${argsText}`}</pre>
+          </details>
         )
       )}
 
@@ -411,6 +408,7 @@ const ConfirmToast: React.FC<ConfirmToastProps> = ({
         />
       </div>
 
+      {submissionError && <div role="alert" style={{ color: 'var(--panel-danger)', marginBottom: 8 }}>{submissionError}</div>}
       <div style={{ display: 'flex', gap: 8 }}>
         <button
           type="button"

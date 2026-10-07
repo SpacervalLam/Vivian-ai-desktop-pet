@@ -3,14 +3,14 @@ import { metricValue, sumUsage, tokenFields, tokenTotal, type Usage, type UsageD
 import type { UsageCopy } from './usageCopy';
 
 export const seriesColors = ['var(--usage-input)', 'var(--usage-output)', 'var(--usage-hit)', 'var(--usage-write)'];
-export const formatCount = (value: number) => value.toLocaleString();
-export const compactCount = (value: number) => value < 1000 ? String(value) : new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 }).format(value);
+export const formatCount = (value: number, locale?: string) => value.toLocaleString(locale);
+export const compactCount = (value: number, locale = 'en-US') => new Intl.NumberFormat(locale, { notation: value < 1000 ? 'standard' : 'compact', maximumFractionDigits: 1 }).format(value);
 
 export function TokenBreakdown({ usage, copy }: { usage: Usage; copy: UsageCopy }) {
   return <div className="usage-breakdown">
     {tokenFields.map((field, index) => <div key={field}>
       <span className="usage-series-name"><i style={{ background: seriesColors[index] }} />{copy[field]}</span>
-      <strong>{formatCount(usage[field])}</strong>
+      <strong>{formatCount(usage[field], copy.locale)}</strong>
     </div>)}
   </div>;
 }
@@ -19,10 +19,10 @@ export function CompositionChart({ usage, copy }: { usage: Usage; copy: UsageCop
   const total = tokenTotal(usage);
   let offset = 0;
   return <section className="usage-card">
-    <div className="usage-card-heading"><h3>{copy.composition}</h3><span>Token</span></div>
+    <div className="usage-card-heading"><h3>{copy.composition}</h3><span>{copy.tokenUnit}</span></div>
     <div className="usage-composition">
       <div className="usage-donut">
-        <svg viewBox="0 0 160 160" role="img" aria-label={`${copy.composition}: ${tokenFields.map((field) => `${copy[field]} ${formatCount(usage[field])}`).join(', ')}`}>
+        <svg viewBox="0 0 160 160" role="img" aria-label={`${copy.composition}: ${tokenFields.map((field) => `${copy[field]} ${formatCount(usage[field], copy.locale)}`).join(', ')}`}>
           <circle cx="80" cy="80" r="60" fill="none" stroke="var(--panel-border)" strokeWidth="19" />
           {tokenFields.map((field, index) => {
             const percent = total ? usage[field] / total * 100 : 0;
@@ -31,16 +31,16 @@ export function CompositionChart({ usage, copy }: { usage: Usage; copy: UsageCop
             return percent > 0 && <circle key={field} cx="80" cy="80" r="60" pathLength="100"
               fill="none" stroke={seriesColors[index]} strokeWidth="19" strokeDasharray={`${percent} ${100 - percent}`}
               strokeDashoffset={-start} transform="rotate(-90 80 80)">
-              <title>{copy[field]}: {formatCount(usage[field])} · {percent.toFixed(1)}%</title>
+              <title>{copy[field]}: {formatCount(usage[field], copy.locale)} · {percent.toFixed(1)}%</title>
             </circle>;
           })}
         </svg>
-        <div className="usage-donut-center"><strong title={formatCount(total)}>{compactCount(total)}</strong><span>Token</span></div>
+        <div className="usage-donut-center"><strong title={formatCount(total, copy.locale)}>{compactCount(total, copy.locale)}</strong><span>{copy.tokenUnit}</span></div>
       </div>
       <div className="usage-composition-legend">
         {tokenFields.map((field, index) => <div key={field}>
           <span className="usage-series-name"><i style={{ background: seriesColors[index] }} />{copy[field]}</span>
-          <strong>{formatCount(usage[field])}</strong><small>{total ? (usage[field] / total * 100).toFixed(1) : '0'}%</small>
+          <strong>{formatCount(usage[field], copy.locale)}</strong><small>{total ? (usage[field] / total * 100).toFixed(1) : '0'}%</small>
         </div>)}
       </div>
     </div>
@@ -59,13 +59,13 @@ export function DailyUsageChart({ days, metric, copy, title }: { days: UsageDay[
     <svg className="usage-trend-svg" viewBox="0 0 700 220" role="group" aria-label={title ?? copy.daily}>
       {[0, .5, 1].map((ratio) => <g key={ratio}>
         <line x1="60" x2="676" y1={172 - ratio * chartHeight} y2={172 - ratio * chartHeight} stroke="var(--panel-border)" strokeDasharray="3 5" />
-        <text x="49" y={176 - ratio * chartHeight} textAnchor="end" className="usage-axis">{compactCount(max * ratio)}</text>
+        <text x="49" y={176 - ratio * chartHeight} textAnchor="end" className="usage-axis">{compactCount(max * ratio, copy.locale)}</text>
       </g>)}
       {days.map((day, index) => {
         const x = 60 + step * index + (step - barWidth) / 2;
         const value = metricValue(day, metric);
         let top = 172;
-        const accessible = `${day.date}: ${day.requests || tokenTotal(day) ? `${copy.tokens} ${formatCount(tokenTotal(day))}, ${copy.requests} ${formatCount(day.requests)}` : copy.noDay}`;
+        const accessible = `${day.date}: ${day.requests || tokenTotal(day) ? `${copy.tokens} ${formatCount(tokenTotal(day), copy.locale)}, ${copy.requests} ${formatCount(day.requests, copy.locale)}` : copy.noDay}`;
         return <g key={day.date} role="button" tabIndex={active?.date === day.date ? 0 : -1} aria-label={accessible} aria-pressed={active?.date === day.date}
           className="usage-day-bar" onMouseEnter={() => setActiveDate(day.date)} onFocus={() => setActiveDate(day.date)}
           onClick={() => setActiveDate(day.date)} onKeyDown={(event) => {
@@ -92,7 +92,7 @@ export function DailyUsageChart({ days, metric, copy, title }: { days: UsageDay[
     </svg>
     {active && <div className="usage-day-detail" aria-live="polite">
       <span>{active.date}</span>
-      {active.requests || tokenTotal(active) ? <><strong>{formatCount(tokenTotal(active))} Token</strong><span>{formatCount(active.requests)} {copy.calls}</span></>
+      {active.requests || tokenTotal(active) ? <><strong>{formatCount(tokenTotal(active), copy.locale)} {copy.tokenUnit}</strong><span>{formatCount(active.requests, copy.locale)} {copy.calls}</span></>
         : <span>{copy.noDay}</span>}
     </div>}
     {active && (active.requests || tokenTotal(active)) ? <TokenBreakdown usage={sumUsage([active])} copy={copy} /> : null}

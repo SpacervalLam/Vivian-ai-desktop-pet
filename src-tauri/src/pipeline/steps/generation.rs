@@ -16,6 +16,7 @@ use crate::brain::json_parser::{
     StreamEvent as JsonStreamEvent,
 };
 use crate::error::{VivianError, VivianResult};
+use crate::emotion::fast_semantic::PROMPT_ROUTING_CONFIDENCE;
 use crate::pipeline::base::{Runnable, RunnableConfig};
 use crate::pipeline::decorators::is_retryable;
 use crate::pipeline::state::PipelineState;
@@ -268,6 +269,9 @@ impl AIResponseGenerationRunnable {
         if parsed.is_none() {
             return true;
         }
+        // A tool-only text response is valid. Requiring speech would discard the
+        // selected operation and ask the model to produce a different response.
+        if !ToolCallManager::parse_tool_calls(text).is_empty() { return false; }
         if let Some(map) = parsed.unwrap().as_object() {
             // Explicit silence is a valid response, not a reason to force another turn.
             if map.get("intent").and_then(Value::as_str) == Some("no_reply")
@@ -489,8 +493,9 @@ impl AIResponseGenerationRunnable {
         content: String,
         calls: Vec<crate::providers::base::StructuredToolCall>,
         fallback: TextPathFallback<'_>,
+        requests_execution: bool,
     ) -> VivianResult<(String, Vec<crate::providers::base::StructuredToolCall>)> {
-        if !calls.is_empty() || !Self::needs_execution_audit(tools) {
+        if !calls.is_empty() || !Self::needs_execution_audit(tools, requests_execution) {
             return Ok((content, calls));
         }
         // 守卫自己的兜底文案不再送审。它本来就是"没有执行"的诚实陈述，而审计规则会
@@ -610,8 +615,62 @@ impl AIResponseGenerationRunnable {
         Some((JsonParser::extract_text(&text).unwrap_or(text), calls))
     }
 
-    fn needs_execution_audit(tools: &[ToolDefinition]) -> bool {
-        tools.iter().any(|tool| tool.name == "delegate_to_work_agent")
+    /// 本轮是否需要"零工具调用审计"。
+    ///
+    /// 旧实现只看 `delegate_to_work_agent` 在不在工具数组里——而这个数组恰好是
+    /// 召回失败时会残缺的那一份，于是审计开关和它要兜住的故障挂在同一个条件上：
+    /// 工具没注入 → 审计不跑 → 没人把模型推回去动手。改成以**意图**为主判据，
+    /// 工具存在只作为附加触发。
+    fn needs_execution_audit(_tools: &[ToolDefinition], requests_execution: bool) -> bool {
+        requests_execution
+    }
+
+    /// 本轮用户请求是否指向"必须落到工具/执行侧才可能完成"的任务。
+    ///
+    /// 这是**显式判定**，不依赖模型行为：旧流程里进入执行侧的唯一入口是
+    /// "模型首轮自己先发出工具调用"，等于把能不能干活押在模型恰好愿意动手上。
+    /// 判据用两个都很便宜的信号：
+    /// - 语义意图命中 `request` / `tool_request`（embedding 语料表，非 LLM）
+    /// - 用户输入命中三语任务关键词（与 `ToolScene` 选 Task 用的是同一张表）
+    ///
+    /// 普通知识提问不升级；“能帮我做 PPT 吗”这类请求不受 question 误分类影响。
+    ///
+    /// 跨角色互聊与主动开场一律不升级：这两种通道的 `user_input` 不是用户请求
+    /// （前者带说话人前缀，后者是系统触发的寒暄），升级会让角色之间的闲聊跑进执行器。
+    /// 条件与 `compute_tool_scope` 里"只留搜索入口"的旁路判定保持一致。
+    pub(crate) fn requests_execution(state: &PipelineState) -> bool {
+        if state.current_channel == "cross_character"
+            || state.metadata.get("system_directive").and_then(Value::as_bool) == Some(true)
+            || state.metadata.get("proactive_greeting").and_then(Value::as_bool) == Some(true)
+        {
+            return false;
+        }
+        // Capability questions such as “can you make a PPT?” are requests too.
+        // This lexical fallback must also work when embeddings are unavailable.
+        let input = state.user_input.to_lowercase();
+        let explicit = ["帮我", "帮忙", "请帮", "做一个", "做一份", "制作一", "生成一", "整理一下",
+            "作って", "作成して"].iter().any(|word| input.contains(word))
+            || (["can you", "could you", "please"].iter().any(|word| input.contains(word))
+                && (crate::tools::types::contains_task_keyword(&input)
+                    || ["ppt", "presentation", "slides", "document", "spreadsheet"].iter().any(|word| input.contains(word))));
+        if explicit { return true; }
+        let Some(perception) = state.fast_perception.as_ref() else {
+            return crate::tools::types::contains_task_keyword(&state.user_input);
+        };
+        let confident = perception.intent.confidence >= PROMPT_ROUTING_CONFIDENCE;
+        match perception.intent.label.as_str() {
+            "tool_request" | "request" => confident
+                || crate::tools::types::contains_task_keyword(&state.user_input),
+            _ => false,
+        }
+    }
+
+    /// Decide before prompt budgeting, schema selection and the first model call.
+    /// Explicit caller routes for background/work tasks remain authoritative.
+    pub(crate) fn generation_task(state: &PipelineState, caller: &str) -> String {
+        if matches!(caller, "chat" | crate::providers::base::TASK_COMPANION)
+            && Self::requests_execution(state)
+        { "reasoning".into() } else { caller.into() }
     }
 
     /// 执行受阻时拼进提示词的"受阻原因"。措辞面向模型，不是给用户看的文案。
@@ -717,6 +776,7 @@ impl AIResponseGenerationRunnable {
         memory_text: &str,
         user_request: &str,
         fallback: TextPathFallback<'_>,
+        requests_execution: bool,
     ) -> VivianResult<(String, Vec<ToolCallResult>, usize, Option<f64>)> {
         // 首轮（完整人设轮）响应
         let first = router
@@ -728,9 +788,13 @@ impl AIResponseGenerationRunnable {
         let first_content = JsonParser::extract_text(&first.content).unwrap_or(first.content);
         let (first_content, first_calls) = Self::verify_execution_draft(
             router, &messages, &tools, task_type, first_content, first.tool_calls, fallback,
+            requests_execution,
         ).await?;
-        // 首轮文本直接推送（对齐流式入口的首轮流式推送；中间轮文本不推送）
-        if !first_content.is_empty() {
+        // 首轮文本直接推送——但如果本轮会交给执行会话接管，就不要抢先把这段
+        // 首轮草稿推给用户：执行完还会由 chat 路由生成正式回复，两段会撞车。
+        if !first_content.is_empty()
+            && !crate::pipeline::react::takes_over_execution(channel, &first_calls, requests_execution)
+        {
             push_stream_chunk(emitter, &first_content);
         }
 
@@ -747,6 +811,7 @@ impl AIResponseGenerationRunnable {
                 channel: channel.to_string(),
                 memory_text: memory_text.to_string(),
                 user_request: user_request.to_string(),
+                executable_intent: requests_execution,
                 max_rounds,
                 compress_threshold_tokens,
                 compress_keep_recent,
@@ -782,6 +847,7 @@ impl AIResponseGenerationRunnable {
         memory_text: &str,
         user_request: &str,
         fallback: TextPathFallback<'_>,
+        requests_execution: bool,
     ) -> VivianResult<(String, Vec<ToolCallResult>, usize, Option<f64>)> {
         // === 第一轮：流式获取 LLM 响应（带重试机制）===
         // DeepSeek V4 Flash 流式 native function calling 偶发失效：
@@ -921,7 +987,7 @@ impl AIResponseGenerationRunnable {
                 first_round_calls = calls;
 
                 // 重试成功时补发缓冲文本到前端（首次尝试已实时推送，无需补发）
-                if attempt > 1 && !Self::needs_execution_audit(&tools) && !final_first_text.is_empty() {
+                if attempt > 1 && !Self::needs_execution_audit(&tools, requests_execution) && !final_first_text.is_empty() {
                     push_stream_chunk(emitter, &final_first_text);
                 }
 
@@ -962,7 +1028,7 @@ impl AIResponseGenerationRunnable {
                     if !resp.content.is_empty() {
                         final_first_text =
                             JsonParser::extract_text(&resp.content).unwrap_or(resp.content);
-                        if !Self::needs_execution_audit(&tools) { push_stream_chunk(emitter, &final_first_text); }
+                        if !Self::needs_execution_audit(&tools, requests_execution) { push_stream_chunk(emitter, &final_first_text); }
                     }
                     first_round_calls = resp
                         .tool_calls
@@ -982,7 +1048,7 @@ impl AIResponseGenerationRunnable {
                     if !resp.content.is_empty() {
                         final_first_text =
                             JsonParser::extract_text(&resp.content).unwrap_or(resp.content);
-                        if !Self::needs_execution_audit(&tools) { push_stream_chunk(emitter, &final_first_text); }
+                        if !Self::needs_execution_audit(&tools, requests_execution) { push_stream_chunk(emitter, &final_first_text); }
                     }
                 }
                 Err(e) => {
@@ -996,8 +1062,14 @@ impl AIResponseGenerationRunnable {
 
         let (final_first_text, first_round_calls) = Self::verify_execution_draft(
             router, &messages, &tools, task_type, final_first_text, first_round_calls, fallback,
+            requests_execution,
         ).await?;
-        if !tools.is_empty() && first_round_calls.is_empty() && !final_first_text.is_empty() {
+        // 若本轮会交给执行会话接管，这段首轮草稿不推送——执行完会由 chat 路由
+        // 生成正式回复，提前推会把两段发言撞在一起。
+        if !tools.is_empty() && first_round_calls.is_empty() && !final_first_text.is_empty()
+            && !crate::pipeline::react::takes_over_execution(
+                channel, &first_round_calls, requests_execution)
+        {
             push_stream_chunk(emitter, &final_first_text);
         }
         // 首轮到此为止：无工具调用则由共享骨架直接以首轮文本收场；
@@ -1015,6 +1087,7 @@ impl AIResponseGenerationRunnable {
                 channel: channel.to_string(),
                 memory_text: memory_text.to_string(),
                 user_request: user_request.to_string(),
+                executable_intent: requests_execution,
                 max_rounds,
                 compress_threshold_tokens,
                 compress_keep_recent,
@@ -1059,9 +1132,13 @@ impl Runnable for AIResponseGenerationRunnable {
         }
 
         let stream = Self::is_streaming(&config);
-        let task_type = Self::task_type(&config);
-
-        // Task ownership is chosen by the caller, never by prompt length or tool presence.
+        let caller_task = Self::task_type(&config);
+        let task_type = Self::generation_task(&state, &caller_task);
+        state.metadata["generation_route"] = json!(task_type);
+        tracing::debug!(caller_route = %caller_task, generation_route = %task_type,
+            executable_intent = Self::requests_execution(&state), tools = state.tool_definitions.len(),
+            native_fc = self.enable_native_fc && router.supports_native_function_calling(&task_type),
+            "[AIResponse] task routing");
 
         // ── graceful_exit：生成告别 ──
         if state.graceful_exit {
@@ -1139,6 +1216,9 @@ impl Runnable for AIResponseGenerationRunnable {
 
         if use_native_fc {
             let tcm = self.tool_call_manager.as_ref().unwrap();
+            // 显式判定本轮是否指向可执行任务：这个结论同时决定"要不要跑零调用审计"
+            // 和"要不要把执行权交给 reasoning 侧"，两条路径必须用同一个值。
+            let requests_execution = Self::requests_execution(&state);
             // prompt 阶段预存的文本回退材料：原生 FC 拿不到工具调用时改走文本路径用
             let text_fallback = TextPathFallback {
                 tools_text: state.tools_text_fallback.as_deref(),
@@ -1159,6 +1239,7 @@ impl Runnable for AIResponseGenerationRunnable {
                     &state.memory_text,
                     &state.user_input,
                     text_fallback,
+                    requests_execution,
                 )
                 .await
             } else {
@@ -1176,6 +1257,7 @@ impl Runnable for AIResponseGenerationRunnable {
                     &state.memory_text,
                     &state.user_input,
                     text_fallback,
+                    requests_execution,
                 )
                 .await
             };
@@ -1188,7 +1270,7 @@ impl Runnable for AIResponseGenerationRunnable {
                     state.response_json = None;
 
                     if !all_results.is_empty() {
-                        if matches!(state.current_channel.as_str(), "direct" | "proactive" | "wechat" | "cross_character")
+                        if crate::pipeline::react::keeps_companion_persona(&state.current_channel)
                             && all_results.iter().any(|r| r.tool_name != "continue_thinking") {
                             state.metadata["tool_execution_route"] = json!("reasoning");
                             state.metadata["tool_reply_route"] = json!("chat");
@@ -1309,9 +1391,13 @@ impl Runnable for AIResponseGenerationRunnable {
                     let (draft, calls) = Self::verify_execution_draft(
                         &router, &messages_vec, &state.tool_definitions, &task_type, text, calls,
                         TextPathFallback { tools_text: None, output_format: None },
+                        Self::requests_execution(&state),
                     ).await?;
                     let speech = JsonParser::extract_text(&draft).unwrap_or_else(|| draft.clone());
-                    if calls.is_empty() && !speech.is_empty() { push_stream_chunk(&self.stream_emitter, &speech); }
+                    if calls.is_empty() && !speech.is_empty()
+                        && !crate::pipeline::react::takes_over_execution(
+                            &state.current_channel, &calls, Self::requests_execution(&state))
+                    { push_stream_chunk(&self.stream_emitter, &speech); }
                     if calls.is_empty() { draft } else {
                         json!({"text": speech, "tool_calls": calls.iter().map(|call| json!({"tool":call.name,"arguments":call.arguments})).collect::<Vec<_>>()}).to_string()
                     }
@@ -1339,13 +1425,16 @@ impl Runnable for AIResponseGenerationRunnable {
                     let messages_clone = messages_vec.clone();
 
                     let initial_calls = crate::pipeline::tool_execution::calls_from_text(&text);
-                    let (final_response, iterations, all_results, first_tool_ts) = if matches!(state.current_channel.as_str(), "direct" | "proactive" | "wechat" | "cross_character") && !initial_calls.is_empty() {
+                    let (final_response, iterations, all_results, first_tool_ts) = if crate::pipeline::react::takes_over_execution(
+                        &state.current_channel, &initial_calls, Self::requests_execution(&state)) {
                         let (reply, results, iterations, timestamp) = crate::pipeline::react::run_react_loop(
                             &router, tcm, &self.stream_emitter, crate::pipeline::react::ReactParams {
                                 first_content: JsonParser::extract_text(&text).unwrap_or_default(),
                                 first_calls: initial_calls, messages: messages_vec.clone(), tools: state.tool_definitions.clone(),
                                 task_type: task_type.clone(), channel: state.current_channel.clone(), memory_text: state.memory_text.clone(),
-                                user_request: state.user_input.clone(), max_rounds: self.max_rounds,
+                                user_request: state.user_input.clone(),
+                                executable_intent: Self::requests_execution(&state),
+                                max_rounds: self.max_rounds,
                                 compress_threshold_tokens: self.compress_threshold_tokens, compress_keep_recent: self.compress_keep_recent,
                             }).await?;
                         (Some(reply), iterations, results, timestamp)
@@ -1368,7 +1457,7 @@ impl Runnable for AIResponseGenerationRunnable {
                         .await };
 
                     if !all_results.is_empty() {
-                        if matches!(state.current_channel.as_str(), "direct" | "proactive" | "wechat" | "cross_character")
+                        if crate::pipeline::react::keeps_companion_persona(&state.current_channel)
                             && all_results.iter().any(|r| r.tool_name != "continue_thinking") {
                             state.metadata["tool_execution_route"] = json!("reasoning");
                             state.metadata["tool_reply_route"] = json!("chat");
@@ -1705,6 +1794,129 @@ impl Runnable for ResponseParsingRunnable {
 mod tests {
     use super::*;
 
+    /// 审计开关旧实现只看"`delegate_to_work_agent` 在不在工具数组里"，而那个数组
+    /// 恰好是语义召回失败时会残缺的那一份——开关和它要兜住的故障挂在同一个条件上。
+    #[test]
+    fn execution_audit_triggers_on_intent_without_delegation_tool() {
+        let no_tools: Vec<ToolDefinition> = vec![];
+        assert!(AIResponseGenerationRunnable::needs_execution_audit(&no_tools, true));
+        let with_delegate = vec![ToolDefinition {
+            name: "delegate_to_work_agent".into(),
+            description: String::new(),
+            parameters: json!({}),
+        }];
+        assert!(!AIResponseGenerationRunnable::needs_execution_audit(&with_delegate, false));
+        assert!(!AIResponseGenerationRunnable::needs_execution_audit(&no_tools, false));
+    }
+
+    /// 显式请求优先于意图分类；普通提问和闲聊不升级。
+    #[test]
+    fn executable_intent_accepts_requests_and_rejects_chatter() {
+        use crate::emotion::{DimensionResult, FastPerceptionResult};
+        let state = |label: &str, confidence: f64, input: &str| PipelineState {
+            fast_perception: Some(FastPerceptionResult {
+                intent: DimensionResult { label: label.into(), confidence },
+                ..Default::default()
+            }),
+            user_input: input.into(),
+            ..Default::default()
+        };
+        assert!(AIResponseGenerationRunnable::requests_execution(&state("tool_request", 0.9, "查一下天气")));
+        assert!(AIResponseGenerationRunnable::requests_execution(&state("request", 0.9, "帮我整理一下")));
+        // 一般请求：置信度不足时由三语任务关键词兜底（嵌入不可用也不能整体失效）
+        assert!(AIResponseGenerationRunnable::requests_execution(&state("request", 0.1, "帮我查一下今天的新闻")));
+        assert!(!AIResponseGenerationRunnable::requests_execution(&state("request", 0.1, "今天天气不错")));
+        // 能力问句中的显式执行请求不能被 question 误分类挡住
+        assert!(AIResponseGenerationRunnable::requests_execution(&state("question", 0.95, "帮我查一下这个是什么")));
+        assert!(!AIResponseGenerationRunnable::requests_execution(&state("chat", 0.95, "你好呀")));
+        // 无语义结果且没有任务信号时不升级
+        assert!(!AIResponseGenerationRunnable::requests_execution(&PipelineState::default()));
+    }
+
+    #[test]
+    fn task_route_is_selected_before_first_call_without_embeddings() {
+        for input in ["你能帮我查一下今天的新闻，然后做一个ppt吗？",
+            "can you make a presentation with five news items?", "PPTを作って"] {
+            let mut state = PipelineState { user_input: input.into(), ..Default::default() };
+            assert_eq!(AIResponseGenerationRunnable::generation_task(&state, "companion"), "reasoning");
+            assert_eq!(AIResponseGenerationRunnable::generation_task(&state, "work_agent"), "work_agent");
+            state.current_channel = "cross_character".into();
+            assert_eq!(AIResponseGenerationRunnable::generation_task(&state, "companion"), "companion");
+            state.current_channel = "direct".into();
+            state.metadata["system_directive"] = json!(true);
+            assert_eq!(AIResponseGenerationRunnable::generation_task(&state, "companion"), "companion");
+        }
+        for input in ["你好呀", "can you feel happy?", "PPT是什么？", "生成机制是什么？"] {
+            let state = PipelineState { user_input: input.into(), ..Default::default() };
+            assert_eq!(AIResponseGenerationRunnable::generation_task(&state, "companion"), "companion");
+        }
+    }
+
+    #[tokio::test]
+    async fn ppt_request_uses_reasoning_first_with_native_and_text_protocols() {
+        use axum::{Router, Json, extract::State, routing::post};
+        type Captured = Arc<parking_lot::Mutex<Vec<Value>>>;
+        async fn handle(State(captured): State<Captured>, Json(body): Json<Value>) -> Json<Value> {
+            let index = { let mut requests = captured.lock(); let i = requests.len(); requests.push(body.clone()); i };
+            let message = match index {
+                0 if body.get("tools").is_some() => json!({"role":"assistant","content":null,
+                    "tool_calls":[{"id":"first-search","type":"function","function":{
+                        "name":"tool_search","arguments":"{\"query\":\"nonexistent_fixture_tool\"}"}}]}),
+                0 => json!({"role":"assistant","content":json!({"text":"", "tool_calls":[{
+                    "tool":"tool_search","arguments":{"query":"nonexistent_fixture_tool"}}]}).to_string()}),
+                1 => json!({"role":"assistant","content":"PRIVATE_EXECUTOR_DRAFT"}),
+                _ => json!({"role":"assistant","content":"ROLE_REPLY_SENTINEL"}),
+            };
+            Json(json!({"id":"mock","object":"chat.completion","choices":[{"index":0,
+                "message":message,"finish_reason":if index == 0 && body.get("tools").is_some() {"tool_calls"} else {"stop"}}],
+                "usage":{"prompt_tokens":1,"completion_tokens":1}}))
+        }
+        for (native, channel) in [(true, "direct"), (false, "direct"), (true, "broadcast"), (false, "broadcast")] {
+            let captured: Captured = Arc::new(parking_lot::Mutex::new(vec![]));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
+            let app = Router::new().route("/v1/chat/completions", post(handle)).with_state(captured.clone());
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+            let mut cfg = crate::config::manager::AppConfig::default();
+            cfg.ai.provider = "chat_completions".into(); cfg.ai.endpoint = Some(endpoint.clone());
+            cfg.ai.api_key = Some("local-test-key".into()); cfg.ai.model = format!("main-{}", uuid::Uuid::new_v4());
+            cfg.network.proxy_mode = "direct".into(); cfg.enable_routing_matrix = true;
+            for (task, model) in [("reasoning", "task-reasoner"), ("chat", "character-reply")] {
+                cfg.routing_matrix.insert(task.into(), crate::config::manager::TaskRouteConfig {
+                    provider_type:"chat_completions".into(), model:model.into(), endpoint:endpoint.clone(),
+                    api_key:"local-test-key".into(), ..Default::default()
+                });
+            }
+            let router = Arc::new(ModelRouter::new(&cfg).unwrap());
+            let ts = Arc::new(crate::tools::registry::ToolSystem::new());
+            ts.register_tool(Arc::new(crate::tools::tool_call_manager::ToolSearchTool::new(
+                Arc::new(vec![]), Arc::downgrade(&ts))));
+            ts.register_tool(Arc::new(crate::tools::builtin::file_tools::ReadFileTool));
+            let prompt = crate::pipeline::steps::prompt::PromptBuildingStep::new()
+                .with_tool_system(ts.clone()).with_native_fc(native);
+            let mut config = RunnableConfig::default(); config.metadata["task_type"] = json!("companion");
+            let state = PipelineState { should_respond:true, current_channel:channel.into(),
+                user_input:"你能帮我查一下今天的新闻，然后做一个ppt吗？".into(), ..Default::default() };
+            let prepared = prompt.ainvoke(state.to_json(), Some(config.clone())).await.unwrap();
+            let manager = Arc::new(ToolCallManager::new(ts, crate::tools::types::ToolUseContext::default()));
+            let runnable = AIResponseGenerationRunnable::with_tool_call_manager(
+                router, manager, new_shared_stream_emitter(), native, 3, 100000, 20);
+            let state = PipelineState::from_json(tokio::time::timeout(std::time::Duration::from_secs(20),
+                runnable.ainvoke(prepared, Some(config))).await.unwrap().unwrap());
+            server.abort();
+            assert_eq!(state.metadata["generation_route"], "reasoning");
+            assert!(state.response_text.contains("ROLE_REPLY_SENTINEL"));
+            let requests = captured.lock();
+            assert_eq!(requests.len(), 3, "native={native}: {requests:?}");
+            assert_eq!(requests[0]["model"], "task-reasoner");
+            assert_eq!(requests[1]["model"], "task-reasoner");
+            assert_eq!(requests[2]["model"], "character-reply");
+            if native { assert!(requests[0]["tools"].as_array().unwrap().iter()
+                .any(|tool| tool["function"]["name"] == "read_file")); }
+            assert!(!requests[2].to_string().contains("PRIVATE_EXECUTOR_DRAFT"));
+        }
+    }
+
     #[tokio::test]
     async fn execution_audit_repairs_promises_and_preserves_non_actions() {
         use axum::{Router, Json, extract::State, routing::post};
@@ -1783,7 +1995,7 @@ mod tests {
             let user_task = format!("Find today's news and create a two-slide PPT. Test case {}", uuid::Uuid::new_v4());
             let fallback = TextPathFallback { tools_text: case.tools_text, output_format: None };
             let result = tokio::time::timeout(std::time::Duration::from_secs(20), AIResponseGenerationRunnable::verify_execution_draft(
-                &router, &[ChatMessage::user(user_task)], &tools, "reasoning", case.draft.to_string(), vec![], fallback,
+                &router, &[ChatMessage::user(user_task)], &tools, "reasoning", case.draft.to_string(), vec![], fallback, true,
             )).await.unwrap().unwrap();
             server.abort();
             assert_eq!(result.1.len(), case.expected_calls, "{label}");
@@ -2005,6 +2217,8 @@ mod tests {
         assert!(!AIResponseGenerationRunnable::is_json_parse_failed(r#"{"text":"","intent":"short_reply","sticker_id":"vivian_happy_01"}"#));
         assert!(AIResponseGenerationRunnable::is_json_parse_failed("   "));
         assert!(AIResponseGenerationRunnable::is_json_parse_failed(r#"{"text":"","intent":"reply"}"#));
+        assert!(!AIResponseGenerationRunnable::is_json_parse_failed(
+            r#"{"text":"","tool_calls":[{"tool":"tool_search","arguments":{"query":"ppt"}}]}"#));
     }
 
     #[test]

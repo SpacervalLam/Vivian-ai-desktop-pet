@@ -44,14 +44,12 @@ export type WorkChatRenderItem<T> =
   | { kind: 'group'; msgs: T[]; index: number; settled: boolean };
 
 /**
- * 把消息列表切分为渲染项：连续的工具消息、过程说明和思考文本聚为一组，
- * 其余消息原样透传，最终回复保留在分组之外。
+ * 只合并连续的工具消息。过程说明和思考文本单独展示，并分隔前后的工具组。
  *
- * `settled`（组已收尾）判定：组后出现了总结（assistant）/下一轮 user 消息，
- * 或会话已不在运行态——此时分组自动折叠成一行摘要。
+ * 组后出现任何非工具消息，或会话已不在运行态时，该组收尾。
  */
-function isWorkProcessMessage(msg: { role: string }): boolean {
-  return ['tool_use', 'tool_result', 'commentary', 'thinking'].includes(msg.role);
+function isToolMessage(msg: { role: string }): boolean {
+  return msg.role === 'tool_use' || msg.role === 'tool_result';
 }
 
 export function groupWorkMessages<T extends { role: string; tool_name?: string | null; tool_call_id?: string | null; tool_arguments?: unknown }>(messages: T[], running: boolean): WorkChatRenderItem<T>[] {
@@ -59,21 +57,16 @@ export function groupWorkMessages<T extends { role: string; tool_name?: string |
   let i = 0;
   while (i < messages.length) {
     const m = messages[i];
-    if (isWorkProcessMessage(m)) {
+    if (isToolMessage(m)) {
       let j = i;
       const group: T[] = [];
-      while (j < messages.length && isWorkProcessMessage(messages[j])) {
+      while (j < messages.length && isToolMessage(messages[j])) {
         group.push(messages[j]);
         j += 1;
       }
       const rows = reconcileToolMessages(group);
       if (rows.length >= 1) {
-        const followed = messages
-          .slice(j)
-          .some((x) => x.role === 'assistant' || x.role === 'user');
-        items.push({ kind: 'group', msgs: rows, index: i, settled: followed || !running });
-      } else {
-        rows.forEach((msg, k) => items.push({ kind: 'msg', msg, index: i + k }));
+        items.push({ kind: 'group', msgs: rows, index: i, settled: j < messages.length || !running });
       }
       i = j;
     } else {

@@ -1,7 +1,7 @@
 //! 渲染引擎 - 将 NoteBook JSON + 预设 CSS 主题合成为自包含 HTML 页面
 //!
 //! 设计要点：
-//! - CSS 主题预设卡片风格（圆角卡片 / 暖色调 / 标签胶囊）
+//! - CSS 主题采用纸页排版（阅读字体 / 克制配色 / 清晰层级）
 //! - 6 套配色方案（warm/fresh/elegant/cute/cool/nature）
 //! - 4 种布局模板（cover_flow/article/gallery/simple）
 //! - 可选的自定义 CSS（`NoteBook::custom_css`）：与 palette **互斥**，
@@ -22,11 +22,11 @@ mod chart_id_counter {
     }
 }
 
-/// 配色方案对应的 CSS 变量（编辑式玻璃拟态风格）
+/// 配色方案对应的 CSS 变量（低饱和纸页风格）
 struct PaletteColors {
-    /// 主强调色（暖橙风格）
+    /// 主强调色（标题、标签、重点）
     primary: &'static str,
-    /// 次要强调色（青绿风格，与主色互补）
+    /// 次要强调色（供自定义主题使用）
     secondary: &'static str,
     /// 主色浅底（用于分隔线/表格头）
     primary_light: &'static str,
@@ -42,83 +42,83 @@ struct PaletteColors {
     text_secondary: &'static str,
     /// 封面渐变
     accent_gradient: &'static str,
-    /// 柔和彩色投影
+    /// 纸页投影
     shadow: &'static str,
 }
 
 fn palette_colors(p: &Palette) -> PaletteColors {
     match p {
         Palette::Warm => PaletteColors {
-            primary: "#E25B2A",
-            secondary: "#2B7F8B",
-            primary_light: "#FCE4D8",
-            primary_soft: "rgba(226,91,42,0.10)",
-            secondary_soft: "rgba(43,127,139,0.10)",
-            bg: "#FBF7F0",
-            text: "#2C2A27",
-            text_secondary: "#776F63",
-            accent_gradient: "linear-gradient(135deg, #E25B2A 0%, #F08A5D 100%)",
-            shadow: "0 12px 40px rgba(226,91,42,0.08)",
+            primary: "#9C4F35",
+            secondary: "#53766F",
+            primary_light: "#E5DDD2",
+            primary_soft: "#F5EBE1",
+            secondary_soft: "#EBF0EC",
+            bg: "#F1EEE8",
+            text: "#302B26",
+            text_secondary: "#756C61",
+            accent_gradient: "linear-gradient(120deg, #F4E9DB, #FBF6ED)",
+            shadow: "0 8px 36px rgba(66,48,28,0.045)",
         },
         Palette::Fresh => PaletteColors {
-            primary: "#2BA39B",
-            secondary: "#5B8DEF",
-            primary_light: "#D9F0ED",
-            primary_soft: "rgba(43,163,155,0.10)",
-            secondary_soft: "rgba(91,141,239,0.10)",
-            bg: "#F4FBF9",
-            text: "#1A3A3A",
-            text_secondary: "#5A8080",
-            accent_gradient: "linear-gradient(135deg, #2BA39B 0%, #45B7D1 100%)",
-            shadow: "0 12px 40px rgba(43,163,155,0.08)",
+            primary: "#277268",
+            secondary: "#536D89",
+            primary_light: "#D7E3DD",
+            primary_soft: "#E9F3ED",
+            secondary_soft: "#EAF0F5",
+            bg: "#ECF1ED",
+            text: "#24352F",
+            text_secondary: "#63756C",
+            accent_gradient: "linear-gradient(120deg, #E6F0E8, #F5F8F2)",
+            shadow: "0 8px 36px rgba(29,61,45,0.045)",
         },
         Palette::Elegant => PaletteColors {
-            primary: "#9B59B6",
-            secondary: "#6C5CE7",
-            primary_light: "#F0E4F6",
-            primary_soft: "rgba(155,89,182,0.10)",
-            secondary_soft: "rgba(108,92,231,0.10)",
-            bg: "#FAF7FC",
-            text: "#2D2438",
-            text_secondary: "#6B5C7B",
-            accent_gradient: "linear-gradient(135deg, #9B59B6 0%, #6C5CE7 100%)",
-            shadow: "0 12px 40px rgba(155,89,182,0.08)",
+            primary: "#655477",
+            secondary: "#7A6454",
+            primary_light: "#E0DCE5",
+            primary_soft: "#F0EBF3",
+            secondary_soft: "#F2EDE7",
+            bg: "#EFECF2",
+            text: "#302C37",
+            text_secondary: "#706877",
+            accent_gradient: "linear-gradient(120deg, #EDE7F1, #FAF7FA)",
+            shadow: "0 8px 36px rgba(51,35,67,0.045)",
         },
         Palette::Cute => PaletteColors {
-            primary: "#FF8FB1",
-            secondary: "#FFC75F",
-            primary_light: "#FFE4EC",
-            primary_soft: "rgba(255,143,177,0.12)",
-            secondary_soft: "rgba(255,199,95,0.14)",
-            bg: "#FFF9FB",
-            text: "#3D2030",
-            text_secondary: "#8B5A75",
-            accent_gradient: "linear-gradient(135deg, #FF8FB1 0%, #FFC75F 100%)",
-            shadow: "0 12px 40px rgba(255,143,177,0.12)",
+            primary: "#A4546C",
+            secondary: "#786644",
+            primary_light: "#E9DCE0",
+            primary_soft: "#F8ECF0",
+            secondary_soft: "#F4F0E5",
+            bg: "#F5EEF0",
+            text: "#3B2D32",
+            text_secondary: "#7D6870",
+            accent_gradient: "linear-gradient(120deg, #F5E5E9, #FFF6EE)",
+            shadow: "0 8px 36px rgba(86,36,55,0.045)",
         },
         Palette::Cool => PaletteColors {
-            primary: "#5B8DEF",
-            secondary: "#6C5CE7",
-            primary_light: "#E3ECFB",
-            primary_soft: "rgba(91,141,239,0.10)",
-            secondary_soft: "rgba(108,92,231,0.10)",
-            bg: "#F6F8FF",
-            text: "#1E2A47",
-            text_secondary: "#5A6B8C",
-            accent_gradient: "linear-gradient(135deg, #5B8DEF 0%, #6C5CE7 100%)",
-            shadow: "0 12px 40px rgba(91,141,239,0.08)",
+            primary: "#3F6593",
+            secondary: "#567A76",
+            primary_light: "#DCE3EB",
+            primary_soft: "#EAF0F7",
+            secondary_soft: "#EAF1EE",
+            bg: "#EDF0F4",
+            text: "#293441",
+            text_secondary: "#667280",
+            accent_gradient: "linear-gradient(120deg, #E5EDF5, #F4F7FB)",
+            shadow: "0 8px 36px rgba(32,50,73,0.045)",
         },
         Palette::Nature => PaletteColors {
-            primary: "#6B9E3F",
-            secondary: "#C19A6B",
-            primary_light: "#E7F1DC",
-            primary_soft: "rgba(107,158,63,0.10)",
-            secondary_soft: "rgba(193,154,107,0.12)",
-            bg: "#F8FBF4",
-            text: "#2A3820",
-            text_secondary: "#5A7048",
-            accent_gradient: "linear-gradient(135deg, #6B9E3F 0%, #C19A6B 100%)",
-            shadow: "0 12px 40px rgba(107,158,63,0.08)",
+            primary: "#596D44",
+            secondary: "#88684C",
+            primary_light: "#DFE3D5",
+            primary_soft: "#EDF1E5",
+            secondary_soft: "#F3EDE3",
+            bg: "#EFF0E9",
+            text: "#30362A",
+            text_secondary: "#6A7260",
+            accent_gradient: "linear-gradient(120deg, #E9EDDC, #F7F7EC)",
+            shadow: "0 8px 36px rgba(46,57,31,0.045)",
         },
     }
 }
@@ -210,7 +210,7 @@ fn build_chart_option(chart_type: &str, categories: &[String], series: &[ChartSe
     };
 
     let option = json!({
-        "color": ["#FF6B6B", "#4ECDC4", "#9B59B6", "#FFC75F", "#5B8DEF", "#6B9E3F"],
+        "color": ["#9C4F35", "#277268", "#655477", "#B28B50", "#3F6593", "#596D44"],
         "title": { "text": "", "show": false },
         "tooltip": { "trigger": tooltip_trigger },
         "legend": { "bottom": 0, "textStyle": { "fontFamily": "inherit" } },
@@ -226,466 +226,33 @@ fn build_chart_option(chart_type: &str, categories: &[String], series: &[ChartSe
     serde_json::to_string(&option).unwrap_or_default()
 }
 
-/// 生成完整 CSS（编辑式玻璃拟态风格，参考落地页设计语言）
+/// 当前模板标记。旧的结构化笔记读取时据此重新生成 HTML。
+pub const TEMPLATE_MARKER: &str = r#"<meta name="vivian-notebook-template" content="2">"#;
+
+/// 配色与布局参数 + 共用纸页样式，自定义 CSS 仍在其后注入。
 fn build_css(palette: &PaletteColors, layout: &Layout) -> String {
-    let layout_max_width = match layout {
-        Layout::Simple => "560px",
-        Layout::Article => "760px",
-        _ => "720px",
+    let page_width = match layout {
+        Layout::Simple => "600px",
+        Layout::Article => "780px",
+        Layout::Gallery => "880px",
+        Layout::CoverFlow => "820px",
     };
-
     format!(
-        r#"/* ===== 本地中文手写字体（随笔记目录复制，离线可用） ===== */
-@font-face {{
-    font-family: 'Ma Shan Zheng';
-    font-style: normal;
-    font-weight: 400;
-    font-display: swap;
-    src: url('fonts/ma-shan-zheng.woff2') format('woff2');
-}}
-* {{ margin: 0; padding: 0; box-sizing: border-box; }}
-html {{ scroll-behavior: smooth; }}
-:root {{
-    --accent: {primary};
-    --secondary: {secondary};
-    --accent-soft: {primary_soft};
-    --secondary-soft: {secondary_soft};
-    --ink: {text};
-    --muted: {text_secondary};
-    --rule: {primary_light};
-    --glass: rgba(255,255,255,0.72);
-    --glass-hi: rgba(255,255,255,0.88);
-    --shadow: {shadow};
-    --accent-grad: {accent_gradient};
-}}
-body {{
-    font-family: "Ma Shan Zheng", "PingFang SC", "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
-    background: {bg};
-    background-image:
-        radial-gradient(60% 40% at 12% 8%, var(--accent-soft), transparent 60%),
-        radial-gradient(50% 40% at 88% 18%, var(--secondary-soft), transparent 60%),
-        radial-gradient(70% 50% at 50% 100%, var(--accent-soft), transparent 72%);
-    background-attachment: fixed;
-    color: {text};
-    line-height: 1.75;
-    -webkit-font-smoothing: antialiased;
-    text-rendering: optimizeLegibility;
-}}
-.container {{
-    max-width: {layout_max_width};
-    margin: 0 auto;
-    padding: 40px 20px 64px;
-    position: relative;
-}}
-
-/* === 封面（渐变横幅） === */
-.cover {{
-    border-radius: 18px;
-    padding: 52px 28px 44px;
-    margin-bottom: 34px;
-    /* --cover-bg 由内联 style 提供（仅当笔记显式设了自定义背景），
-       缺省回落到配色渐变。用变量而非内联 background，让自定义 CSS 也能覆盖。 */
-    background: var(--cover-bg, var(--accent-grad));
-    color: #fff;
-    text-align: center;
-    position: relative;
-    overflow: hidden;
-    box-shadow: var(--shadow);
-}}
-.cover::before {{
-    content: "";
-    position: absolute;
-    top: -60px; right: -60px;
-    width: 200px; height: 200px;
-    border-radius: 50%;
-    background: rgba(255,255,255,0.10);
-}}
-.cover::after {{
-    content: "";
-    position: absolute;
-    bottom: -80px; left: -40px;
-    width: 220px; height: 220px;
-    border-radius: 50%;
-    background: rgba(255,255,255,0.07);
-}}
-.cover-title {{
-    font-family: "Ma Shan Zheng", "Caveat", sans-serif;
-    font-size: 34px;
-    font-weight: 700;
-    line-height: 1.35;
-    margin-bottom: 8px;
-    letter-spacing: 2px;
-    text-shadow: 0 2px 10px rgba(0,0,0,0.18);
-    position: relative;
-    z-index: 1;
-}}
-.cover-subtitle {{
-    font-size: 17px;
-    opacity: 0.92;
-    font-weight: 400;
-    position: relative;
-    z-index: 1;
-}}
-
-/* === 内容块通用 === */
-.block {{ margin-bottom: 18px; position: relative; z-index: 1; }}
-.block:last-child {{ margin-bottom: 0; }}
-
-/* === 标题（装饰符号 + 渐变线） === */
-.heading {{
-    display: flex;
-    align-items: baseline;
-    gap: 12px;
-    font-family: "Ma Shan Zheng", "Caveat", sans-serif;
-    font-weight: 700;
-    color: {text};
-    margin: 34px 0 16px;
-    line-height: 1.4;
-    letter-spacing: 1px;
-}}
-.heading::before {{
-    content: "";
-    width: 7px;
-    height: 7px;
-    background: {primary};
-    border-radius: 2px;
-    flex-shrink: 0;
-}}
-.heading::after {{
-    content: "";
-    flex: 1;
-    height: 2px;
-    background: linear-gradient(90deg, {primary}, transparent);
-    margin-left: 4px;
-}}
-.heading-1 {{ font-size: 26px; }}
-.heading-2 {{ font-size: 22px; }}
-.heading-3 {{ font-size: 19px; }}
-
-/* === 段落 === */
-.paragraph {{
-    font-size: 15px;
-    color: {text};
-    line-height: 1.9;
-    margin: 12px 0;
-    word-break: break-word;
-}}
-
-/* === 卡片（玻璃卡片） === */
-.card {{
-    background: var(--glass);
-    backdrop-filter: blur(10px);
-    border: 1px solid var(--rule);
-    border-radius: 14px;
-    padding: 20px 22px;
-    margin: 22px 0;
-    box-shadow: var(--shadow);
-}}
-.card-header {{ display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }}
-.card-title {{
-    font-family: "Ma Shan Zheng", "Caveat", sans-serif;
-    font-size: 19px;
-    font-weight: 700;
-    color: {primary};
-    letter-spacing: 0.5px;
-}}
-.card-body {{ font-size: 15px; color: {text}; line-height: 1.85; }}
-
-/* === 引用（左强调线） === */
-.quote {{
-    background: var(--glass);
-    border-left: 4px solid {primary};
-    border-radius: 12px;
-    padding: 17px 20px;
-    margin: 22px 0;
-    font-size: 15px;
-    color: {text_secondary};
-    font-style: italic;
-    line-height: 1.8;
-    position: relative;
-    box-shadow: var(--shadow);
-}}
-.quote::before {{
-    content: "“";
-    position: absolute;
-    top: -6px;
-    left: 10px;
-    font-size: 44px;
-    color: {primary};
-    opacity: 0.22;
-    font-family: Georgia, serif;
-    line-height: 1;
-    font-style: normal;
-}}
-.quote-author {{
-    display: block;
-    margin-top: 10px;
-    font-size: 13px;
-    font-weight: 600;
-    color: {primary};
-    font-style: normal;
-}}
-.quote-author::before {{ content: "— "; }}
-
-/* === 列表 === */
-.list {{ margin: 16px 0; padding-left: 2px; list-style: none; }}
-.list-item {{
-    position: relative;
-    padding: 9px 0 9px 30px;
-    font-size: 15px;
-    color: {text};
-    line-height: 1.75;
-    border-bottom: 1px dashed var(--rule);
-}}
-.list-item:last-child {{ border-bottom: none; }}
-.list-item::before {{
-    content: "•";
-    position: absolute;
-    left: 4px; top: 9px;
-    color: {primary};
-    font-size: 18px;
-}}
-.list.ordered {{ counter-reset: list-counter; }}
-.list.ordered .list-item {{ counter-increment: list-counter; padding-left: 34px; }}
-.list.ordered .list-item::before {{
-    content: counter(list-counter) ".";
-    left: 0; top: 6px;
-    font-weight: 700;
-    font-size: 18px;
-    color: {primary};
-}}
-
-/* === 标签（胶囊） === */
-.tags {{ display: flex; flex-wrap: wrap; gap: 8px; margin: 20px 0; }}
-.tag {{
-    background: var(--accent-soft);
-    color: {primary};
-    font-size: 12px;
-    font-weight: 700;
-    padding: 3px 12px;
-    border-radius: 999px;
-    line-height: 1.5;
-    white-space: nowrap;
-}}
-.tag:nth-child(even) {{
-    background: var(--secondary-soft);
-    color: {secondary};
-}}
-
-/* === 图片（圆角玻璃卡片） === */
-.image-wrap {{
-    margin: 24px auto;
-    text-align: center;
-    max-width: 92%;
-    background: var(--glass);
-    padding: 10px 10px 14px;
-    box-shadow: var(--shadow);
-    border-radius: 12px;
-    border: 1px solid var(--rule);
-}}
-.image-wrap img {{ max-width: 100%; border-radius: 8px; display: block; }}
-.image-caption {{
-    font-size: 13px;
-    color: {text_secondary};
-    margin-top: 8px;
-    font-style: italic;
-}}
-
-/* === 分割线 === */
-.divider {{
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    margin: 34px 0;
-    color: {primary};
-    font-size: 20px;
-    gap: 14px;
-}}
-.divider::before, .divider::after {{
-    content: "";
-    flex: 1;
-    height: 1px;
-    background: linear-gradient(90deg, transparent, var(--rule), transparent);
-    max-width: 140px;
-}}
-
-/* === 提示框（左强调线） === */
-.callout {{
-    background: var(--glass);
-    border: 1px solid var(--rule);
-    border-left: 4px solid {primary};
-    border-radius: 12px;
-    padding: 16px 18px;
-    margin: 22px 0;
-    box-shadow: var(--shadow);
-}}
-.callout-text {{ font-size: 15px; color: {text}; line-height: 1.8; }}
-
-/* === 自定义 HTML === */
-.custom {{ margin: 16px 0; border-radius: 12px; overflow: hidden; }}
-
-/* === 数据表格（玻璃容器） === */
-.nb-table-wrap {{
-    margin: 24px 0;
-    background: var(--glass);
-    border: 1px solid var(--rule);
-    border-radius: 14px;
-    padding: 16px 16px 12px;
-    overflow-x: auto;
-    box-shadow: var(--shadow);
-}}
-.nb-table-caption {{
-    font-size: 16px;
-    font-weight: 700;
-    color: {primary};
-    margin-bottom: 12px;
-    letter-spacing: 0.5px;
-}}
-.nb-table {{
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 14px;
-    color: {text};
-    line-height: 1.6;
-}}
-.nb-table th {{
-    background: var(--accent-soft);
-    color: {primary};
-    font-weight: 700;
-    text-align: left;
-    padding: 10px 14px;
-    font-size: 13px;
-    letter-spacing: 0.5px;
-    white-space: nowrap;
-}}
-.nb-table th:first-child {{ border-radius: 8px 0 0 8px; }}
-.nb-table th:last-child {{ border-radius: 0 8px 8px 0; }}
-.nb-table td {{
-    padding: 9px 14px;
-    border-bottom: 1px solid var(--rule);
-    vertical-align: top;
-}}
-.nb-table tr:last-child td {{ border-bottom: none; }}
-.nb-table tbody tr:nth-child(even) td {{ background: rgba(255,255,255,0.4); }}
-.nb-table tbody tr:hover td {{ background: var(--accent-soft); }}
-
-/* === 图表（ECharts） === */
-.nb-chart-wrap {{
-    margin: 24px 0;
-    background: var(--glass);
-    border: 1px solid var(--rule);
-    border-radius: 14px;
-    padding: 16px 16px 12px;
-    box-shadow: var(--shadow);
-}}
-.nb-chart-title {{
-    font-size: 16px;
-    font-weight: 700;
-    color: {primary};
-    margin-bottom: 10px;
-    letter-spacing: 0.5px;
-}}
-.nb-chart {{ width: 100%; height: 320px; }}
-.nb-chart-fallback {{
-    font-size: 14px;
-    color: {text_secondary};
-    text-align: center;
-    padding: 60px 20px;
-    line-height: 1.8;
-}}
-
-/* === Mermaid 流程图 === */
-.nb-mermaid-wrap {{
-    margin: 24px 0;
-    background: var(--glass);
-    border: 1px solid var(--rule);
-    border-radius: 14px;
-    padding: 18px 16px 12px;
-    box-shadow: var(--shadow);
-    overflow-x: auto;
-}}
-.nb-mermaid {{ display: flex; justify-content: center; }}
-.nb-mermaid svg {{ max-width: 100%; }}
-.nb-mermaid-caption {{
-    font-size: 13px;
-    color: {text_secondary};
-    text-align: center;
-    margin-top: 10px;
-    font-style: italic;
-}}
-.nb-mermaid-error {{
-    font-size: 14px;
-    color: {text_secondary};
-    text-align: center;
-    padding: 40px 20px;
-    line-height: 1.8;
-}}
-
-/* === 底部 === */
-.footer {{
-    text-align: center;
-    margin-top: 48px;
-    padding: 26px 20px 0;
-    font-size: 14px;
-    color: {text_secondary};
-    position: relative;
-}}
-.footer::before {{
-    content: "";
-    position: absolute;
-    top: 0;
-    left: 12%;
-    right: 12%;
-    height: 2px;
-    background: linear-gradient(90deg, transparent, {primary}, transparent);
-    border-radius: 2px;
-}}
-.footer-tags {{
-    display: flex;
-    flex-wrap: wrap;
-    justify-content: center;
-    gap: 8px;
-    margin-bottom: 16px;
-}}
-
-/* === 响应式 === */
-@media (max-width: 640px) {{
-    .container {{ padding: 26px 14px 48px; }}
-    .cover {{ padding: 40px 18px 34px; }}
-    .cover-title {{ font-size: 28px; }}
-    .paragraph {{ font-size: 14.5px; }}
-    .nb-table {{ font-size: 13px; }}
-    .nb-table th, .nb-table td {{ padding: 8px 10px; }}
-    .nb-chart {{ height: 260px; }}
-    .card {{ padding: 16px 16px; }}
-}}
-
-/* === 打印样式 === */
-@media print {{
-    body {{
-        background: #fff !important;
-        background-image: none !important;
-        color: #222 !important;
-    }}
-    .container {{ max-width: 100%; padding: 0; }}
-    .cover, .card, .quote, .callout, .nb-table-wrap, .nb-chart-wrap, .nb-mermaid-wrap {{
-        box-shadow: none !important;
-        background: #fff !important;
-        break-inside: avoid;
-    }}
-    .nb-chart {{ page-break-inside: avoid; }}
-}}"#,
-        bg = palette.bg,
-        text = palette.text,
-        text_secondary = palette.text_secondary,
+        ":root {{ --accent: {primary}; --secondary: {secondary}; --accent-soft: {primary_soft}; \
+         --secondary-soft: {secondary_soft}; --ink: {text}; --muted: {text_secondary}; \
+         --rule: {primary_light}; --canvas: {bg}; --shadow: {shadow}; \
+         --accent-grad: {accent_gradient}; --page-width: {page_width}; }}\n{template}",
         primary = palette.primary,
         secondary = palette.secondary,
-        primary_light = palette.primary_light,
         primary_soft = palette.primary_soft,
         secondary_soft = palette.secondary_soft,
-        accent_gradient = palette.accent_gradient,
+        text = palette.text,
+        text_secondary = palette.text_secondary,
+        primary_light = palette.primary_light,
+        bg = palette.bg,
         shadow = palette.shadow,
-        layout_max_width = layout_max_width,
+        accent_gradient = palette.accent_gradient,
+        template = include_str!("templates.css"),
     )
 }
 
@@ -713,8 +280,12 @@ fn render_block(block: &Block) -> String {
                 3 => "heading-3",
                 _ => "heading-2",
             };
+            let tag = match level {
+                3 => "h3",
+                _ => "h2",
+            };
             format!(
-                r#"<div class="block"><h2 class="heading {}"{style}>{}</h2></div>"#,
+                r#"<div class="block"><{tag} class="heading {}"{style}>{}</{tag}></div>"#,
                 cls,
                 escape_html(text),
                 style = style_attr(style)
@@ -736,7 +307,7 @@ fn render_block(block: &Block) -> String {
                 None => String::new(),
             };
             format!(
-                r#"<div class="block"><div class="card">{}<div class="card-body"{style}>{}</div></div></div>"#,
+                r#"<div class="block block-card"><div class="card">{}<div class="card-body"{style}>{}</div></div></div>"#,
                 header,
                 escape_html(body).replace('\n', "<br>"),
                 style = style_attr(style)
@@ -745,10 +316,10 @@ fn render_block(block: &Block) -> String {
         Block::Quote { text, author, style } => {
             let author_html = author
                 .as_ref()
-                .map(|a| format!(r#"<span class="quote-author">— {}</span>"#, escape_html(a)))
+                .map(|a| format!(r#"<span class="quote-author">{}</span>"#, escape_html(a)))
                 .unwrap_or_default();
             format!(
-                r#"<div class="block"><div class="quote"{style}>{}{}</div></div>"#,
+                r#"<div class="block"><blockquote class="quote"{style}>{}{}</blockquote></div>"#,
                 escape_html(text).replace('\n', "<br>"),
                 author_html,
                 style = style_attr(style)
@@ -756,6 +327,7 @@ fn render_block(block: &Block) -> String {
         }
         Block::List { items, ordered, style } => {
             let ordered_cls = if *ordered { " ordered" } else { "" };
+            let tag = if *ordered { "ol" } else { "ul" };
             let items_html: String = items
                 .iter()
                 .map(|item| {
@@ -766,7 +338,7 @@ fn render_block(block: &Block) -> String {
                 })
                 .collect();
             format!(
-                r#"<div class="block"><ul class="list{}"{style}>{}</ul></div>"#,
+                r#"<div class="block"><{tag} class="list{}"{style}>{}</{tag}></div>"#,
                 ordered_cls,
                 items_html,
                 style = style_attr(style)
@@ -782,10 +354,10 @@ fn render_block(block: &Block) -> String {
         Block::Image { url, caption } => {
             let caption_html = caption
                 .as_ref()
-                .map(|c| format!(r#"<div class="image-caption">{}</div>"#, escape_html(c)))
+                .map(|c| format!(r#"<figcaption class="image-caption">{}</figcaption>"#, escape_html(c)))
                 .unwrap_or_default();
             format!(
-                r#"<div class="block"><div class="image-wrap"><img src="{}" alt="{}" loading="lazy">{}</div></div>"#,
+                r#"<div class="block block-image"><figure class="image-wrap"><img src="{}" alt="{}" loading="lazy">{}</figure></div>"#,
                 escape_html(url),
                 escape_html(caption.as_deref().unwrap_or("")),
                 caption_html
@@ -871,12 +443,16 @@ fn render_cover(cover: &Cover) -> String {
     // 背景走**内联 style**时优先级高于任何样式表，智能体的自定义 CSS 就覆盖不了它。
     // 所以显式自定义背景时改写成 CSS 变量，由 .cover 规则消费——
     // 这样预设 CSS 与自定义 CSS 都能通过 `.cover { background: ... }` 正常覆盖。
-    let bg_var = cover
+    let background = cover
         .background
-        .as_ref()
-        .map(|b| format!(" style=\"--cover-bg: {b};\""))
+        .as_deref()
+        .map(str::trim)
+        .filter(|b| !b.is_empty());
+    let bg_var = background
+        .map(|b| format!(" style=\"--cover-bg: {};\"", escape_html(b)))
         .unwrap_or_default();
 
+    let custom_class = if background.is_some() { " cover-custom" } else { "" };
     let subtitle_html = cover
         .subtitle
         .as_ref()
@@ -884,7 +460,7 @@ fn render_cover(cover: &Cover) -> String {
         .unwrap_or_default();
 
     format!(
-        r#"<div class="cover"{bg_var}><div class="cover-title">{}</div>{}</div>"#,
+        r#"<header class="cover{custom_class}"{bg_var}><h1 class="cover-title">{}</h1>{}</header>"#,
         escape_html(&cover.title),
         subtitle_html
     )
@@ -903,10 +479,21 @@ pub fn render_html(note: &NoteBook) -> String {
     };
     let css = format!("{base_css}{custom_css}");
 
+    let fallback_cover = Cover {
+        title: note.title.clone(),
+        subtitle: note.cover.as_ref().and_then(|c| c.subtitle.clone()),
+        background: None,
+    };
     let cover_html = match (&note.layout, &note.cover) {
-        (Layout::Article, _) | (Layout::Simple, _) => String::new(),
+        (Layout::Article, _) | (Layout::Simple, _) => render_cover(&fallback_cover),
         (_, Some(cover)) => render_cover(cover),
-        (_, None) => String::new(),
+        (_, None) => render_cover(&fallback_cover),
+    };
+    let layout_class = match note.layout {
+        Layout::CoverFlow => "layout-cover-flow",
+        Layout::Article => "layout-article",
+        Layout::Gallery => "layout-gallery",
+        Layout::Simple => "layout-simple",
     };
 
     // Meta 块不渲染：它只进note.json 与知识库检索，页面上不出现。
@@ -948,6 +535,16 @@ pub fn render_html(note: &NoteBook) -> String {
         date_str.clone()
     };
 
+    let author = match note.char_id.as_str() {
+        "vivian" => "Vivian",
+        "nana" => "Nana",
+        other => other,
+    };
+    let meta_html = format!(
+        r#"<div class="note-meta"><span class="note-author">{}</span><time datetime="{}">{}</time></div>"#,
+        escape_html(author), date_str, date_line,
+    );
+
     let footer_html = format!(
         r#"<div class="footer">{}<span>{}</span></div>"#,
         footer_tags, date_line
@@ -959,18 +556,22 @@ pub fn render_html(note: &NoteBook) -> String {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+{template_marker}
 <title>{title}</title>
 <style>{css}</style>
 {head_scripts}
 </head>
-<body>
-<div class="container">
+<body class="{layout_class}">
+<main class="container">
+{meta}
 {cover}
-{blocks}
+<div class="note-content">{blocks}</div>
 {footer}
-</div>
+</main>
 </body>
 </html>"#,
+        template_marker = TEMPLATE_MARKER,
+        meta = meta_html,
         title = escape_html(&note.title),
         css = css,
         head_scripts = head_scripts,
@@ -1187,7 +788,7 @@ mod tests {
         assert!(html.contains("#123456"), "自定义 CSS 应被注入");
         // 注入在预设 CSS 之后：同优先级下后写先生效
         let custom_at = html.find("/* === 自定义 CSS").expect("应有自定义段标记");
-        let preset_var_at = html.find("--accent: #2BA39B").expect("预设变量应仍在");
+        let preset_var_at = html.find("--accent: #277268").expect("预设变量应仍在");
         assert!(
             custom_at > preset_var_at,
             "自定义 CSS 必须排在预设 CSS 之后才能覆盖"

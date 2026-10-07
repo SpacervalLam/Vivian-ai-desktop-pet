@@ -9,7 +9,7 @@
 /// 真实存在的选择器，避免它去改`.nb-chart-inner` 这类不存在的类。
 pub const CSS_SELECTORS_HINT: &str = "\
 可用选择器（覆盖预设主题，写在预设 CSS 之后生效）：
-布局：.container（内容宽度与外边距）
+布局：.container（纸页宽度与内边距）.note-content .note-meta
 封面：.cover .cover-title .cover-subtitle（封面背景用 .cover { background: ... }）
 卡片：.card .card-title .card-body
 文字：.heading .heading-1/2/3 .paragraph .quote .quote-author
@@ -22,7 +22,8 @@ pub const CSS_SELECTORS_HINT: &str = "\
 pub const CSS_VARS_HINT: &str = "\
 --accent 主强调色 --secondary 次强调色 --ink 正文墨色 --muted 次要文字色 \
 --rule 分隔线色 --accent-grad 封面渐变 --accent-soft/--secondary-soft 浅底 \
---glass/--glass-hi 玻璃底 --shadow 投影";
+--canvas 页面底色 --paper 纸页底色 --surface 卡片底色 \
+--glass/--glass-hi 内容底色（兼容旧主题） --shadow 投影 --font-display 标题字体";
 
 /// 完整范式：变量优先、选择器兜底，并给出反例。
 pub const CSS_GUIDE: &str = "\
@@ -37,6 +38,6 @@ body { background: #FAFBFC; }
 
 注意：
 - 不要写 <style> 标签，直接给纯 CSS 片段（渲染器会自己包进 <style>）
-- 不要重置 body 字号或字体族，笔记正文默认用中文手写字体（Ma Shan Zheng），换掉会失去手账质感
-- .container 的 max-width 决定整页宽度（560/720/760px 随布局而定），改它会影响所有块的排版
+- 正文默认用清晰的系统无衬线字体，封面用衬线字体；优先调整 --font-display，保持正文可读
+- .container 的 max-width 决定整页宽度（600/780/820/880px 随布局而定），改它会影响所有块的排版
 - 需要完全自由排版（Grid、复杂布局、多页）时改用 create_html_note 自己写整份HTML";

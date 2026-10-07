@@ -35,6 +35,38 @@ fn meta_str<'a>(entry: &'a HistoryEntry, key: &str) -> Option<&'a str> {
         .filter(|v| !v.trim().is_empty())
 }
 
+/// Legacy reverse deliveries saved one brain record and one bus mirror with
+/// different UUIDs. Only collapse that adjacent, same-session provenance pair.
+fn legacy_cross_mirror(previous: &HistoryEntry, entry: &HistoryEntry) -> bool {
+    if meta_str(previous, "utterance_id").is_some() || meta_str(entry, "utterance_id").is_some() {
+        return false;
+    }
+    let session = |e: &HistoryEntry| meta_str(e, "session_id").map(str::to_string)
+        .or_else(|| e.session_id.clone());
+    let origin = |e: &HistoryEntry| {
+        if meta_str(e, "content_type") == Some("dialogue_turn")
+            && meta_str(e, "conversation_id").is_some() { 1 }
+        else if meta_str(e, "content_type").is_none()
+            && meta_str(e, "knowledge_source") == Some("heard") { 2 }
+        else { 0 }
+    };
+    let a = origin(previous);
+    let b = origin(entry);
+    a != 0 && b != 0 && a != b
+        && meta_str(previous, "channel") == Some("cross_character")
+        && meta_str(entry, "channel") == Some("cross_character")
+        && session(previous).is_some() && session(previous) == session(entry)
+        && previous.role == entry.role
+        && meta_str(previous, "speaker").is_some()
+        && meta_str(previous, "speaker") == meta_str(entry, "speaker")
+        && meta_str(previous, "listener").is_some()
+        && meta_str(previous, "listener") == meta_str(entry, "listener")
+        && crate::cross_character::parse_any_speaker_prefix(&previous.content).0
+            == crate::cross_character::parse_any_speaker_prefix(&entry.content).0
+        && previous.metadata.get("sticker") == entry.metadata.get("sticker")
+        && (0.0..=30.0).contains(&(entry.timestamp - previous.timestamp))
+}
+
 /// Runtime session IDs describe response scheduling, not human conversation episodes.
 pub fn build_conversations(history: &[HistoryEntry], character: &str) -> Vec<ConversationRecord> {
     project_conversations(history, character, &HashMap::new()).0
@@ -57,9 +89,10 @@ pub fn project_conversations(
     let mut lanes: HashMap<String, Vec<ConversationTurn>> = HashMap::new();
     let mut candidates = Vec::new();
     let mut candidate_positions = Vec::new();
+    let mut previous_entry = None;
     for entry in entries {
         if !matches!(entry.role.as_str(), "user" | "assistant")
-            || !seen.insert(entry.id.clone())
+            || !seen.insert(meta_str(entry, "utterance_id").unwrap_or(&entry.id).to_string())
             || matches!(
                 meta_str(entry, "content_type"),
                 Some("response_status" | "exchange_record" | "internal_directive")
@@ -69,6 +102,8 @@ pub fn project_conversations(
         {
             continue;
         }
+        if previous_entry.is_some_and(|previous| legacy_cross_mirror(previous, entry)) { continue; }
+        previous_entry = Some(entry);
         let (text, _, _) = crate::cross_character::parse_any_speaker_prefix(&entry.content);
         let normalize_person = |person: &str| match person.to_lowercase().as_str() {
             "i" | "me" => character.to_string(),
@@ -279,6 +314,32 @@ mod tests {
             metadata: meta,
         }
     }
+    #[test]
+    fn legacy_reverse_delivery_collapses_only_the_mirror_pair() {
+        let brain = entry("brain", 10.0, "assistant", serde_json::json!({
+            "channel":"cross_character","speaker":"nana","listener":"vivian","knowledge_source":"heard"}));
+        let mirror = entry("mirror", 13.0, "assistant", serde_json::json!({
+            "channel":"cross_character","speaker":"nana","listener":"vivian",
+            "session_id":"same-session","conversation_id":"same-session","content_type":"dialogue_turn"}));
+        let answer = entry("answer", 13.1, "user", serde_json::json!({
+            "channel":"cross_character","speaker":"vivian","listener":"nana","content_type":"dialogue_turn"}));
+        let groups = build_conversations(&[brain.clone(), mirror.clone(), answer.clone()], "nana");
+        assert_eq!(groups[0].turns.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), ["brain", "answer"]);
+        // An intervening reply or another session makes it a separate utterance.
+        let mut repeated = brain.clone(); repeated.id = "repeat".into(); repeated.timestamp = 14.0;
+        assert_eq!(build_conversations(&[brain.clone(), answer, repeated], "nana")[0].turns.len(), 3);
+        let mut other_session = mirror.clone(); other_session.metadata["session_id"] = serde_json::json!("other");
+        assert!(!legacy_cross_mirror(&brain, &other_session));
+        let mut other_listener = mirror.clone(); other_listener.metadata["listener"] = serde_json::json!("user");
+        assert!(!legacy_cross_mirror(&brain, &other_listener));
+        // Explicit new identities never use legacy text/provenance matching.
+        let mut original = brain; original.metadata["utterance_id"] = serde_json::json!("new-one");
+        let mut distinct = mirror; distinct.metadata["utterance_id"] = serde_json::json!("new-two");
+        assert_eq!(build_conversations(&[original.clone(), distinct.clone()], "nana")[0].turns.len(), 2);
+        distinct.metadata["utterance_id"] = serde_json::json!("new-one");
+        assert_eq!(build_conversations(&[original, distinct], "nana")[0].turns.len(), 1);
+    }
+
     #[test]
     fn independent_social_floors_do_not_mix() {
         let a = entry("a", 10.0, "user", serde_json::json!({"channel":"direct"}));

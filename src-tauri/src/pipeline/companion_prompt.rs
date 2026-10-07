@@ -69,7 +69,6 @@ impl CompanionPrompt {
         prompt.push("memory_group", build_memory_group_section(parts), Memory, Context, 0);
         prompt.push("user_profile", build_user_profile_group_section(parts), UserProfile, Context, 1);
         prompt.push("relationship", parts.relationship_section.clone().unwrap_or_default(), Relationship, Context, 1);
-        prompt.push("relationship_facts", parts.relationship_facts_section.clone().unwrap_or_default(), Relationship, Context, 1);
         prompt.push("shared_world", parts.shared_world_section.clone().unwrap_or_default(), Relationship, Context, 1);
         prompt.push("background_tasks", parts.background_tasks_section.clone().unwrap_or_default(), Mind, Context, 0);
         prompt.push("verified_search", parts.proactive_search_section.clone().unwrap_or_default(), World, Context, 0);
@@ -82,9 +81,13 @@ impl CompanionPrompt {
         prompt.push("environment", build_context_block(&parts.environment_context.clone().unwrap_or_else(EnvironmentContext::now), &parts.language), World, Context, 2);
         for (id, value) in [
             ("user_presence", &parts.user_entity_section), ("observation", &parts.observation_section),
-            ("activity", &parts.activity_brief), ("roommate", &parts.roommate_status),
-            ("roommate_context", &parts.roommate_cognitive_section), ("events", &parts.environment_events),
-            ("social_state", &parts.social_state_section), ("research", &parts.user_research),
+            ("activity", &parts.activity_brief),
+        ] { prompt.push(id, value.clone().unwrap_or_default(), World, Context, 2); }
+        // 室友组合并段（在场状态 + 行为印象 + 我对她的印象 + 三方关系）。
+        // 在场状态本身只在首次观测/状态切换时才有值，稳态这段只剩关系知识。
+        prompt.push("who_else", build_who_else_section(parts), World, Context, 1);
+        for (id, value) in [
+            ("events", &parts.environment_events), ("research", &parts.user_research),
         ] { prompt.push(id, value.clone().unwrap_or_default(), World, Context, 2); }
 
         // Capability guides remain system instructions, separate from evidence and speech.
@@ -94,6 +97,11 @@ impl CompanionPrompt {
         }
         if parts.tools.as_deref().is_some_and(|tools| !tools.trim().is_empty()) {
             prompt.push("tools", build_tools_block(parts.tools.as_deref(), parts.enable_native_fc, &parts.language), Generation, Main, 0);
+        }
+        // native FC 下上面那段渲染为空串（工具走 API tools 字段），未召回工具的名字
+        // 只能靠这一段送达——否则模型连 tool_search 该搜什么都不知道。
+        if let Some(index) = parts.deferred_tools_section.as_deref().filter(|s| !s.trim().is_empty()) {
+            prompt.push("deferred_tools", index, Generation, Main, 0);
         }
         if !parts.presence_state.is_empty() {
             prompt.push("presence_guide", build_presence_guide(&parts.presence_state), Generation, Main, 1);

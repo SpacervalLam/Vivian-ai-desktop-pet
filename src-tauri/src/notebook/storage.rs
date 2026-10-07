@@ -227,10 +227,21 @@ pub fn load(char_id: &str, note_id: &str) -> Result<NoteBook, String> {
 }
 
 /// 读取笔记 HTML 内容
+/// 旧模板只刷新派生 HTML，不改笔记正文、时间或知识库关联；原生 HTML 原样读取。
 pub fn load_html(char_id: &str, note_id: &str) -> Result<String, String> {
-    let html_path = note_dir(char_id, note_id).join("note.html");
-    std::fs::read_to_string(&html_path)
-        .map_err(|e| format!("读取笔记 HTML 失败: {}", e))
+    let dir = note_dir(char_id, note_id);
+    let html_path = dir.join("note.html");
+    let cached = std::fs::read_to_string(&html_path);
+    if dir.join("note.json").exists()
+        && !cached.as_ref().is_ok_and(|html| html.contains(super::renderer::TEMPLATE_MARKER))
+    {
+        let note = load(char_id, note_id)?;
+        let html = super::renderer::render_html(&note);
+        std::fs::write(&html_path, &html)
+            .map_err(|e| format!("更新笔记模板失败: {}", e))?;
+        return Ok(html);
+    }
+    cached.map_err(|e| format!("读取笔记 HTML 失败: {}", e))
 }
 
 /// 笔记渲染 HTML 文件的绝对路径（不存在时返回 None）。
@@ -297,7 +308,7 @@ pub fn list(char_id: &str) -> Result<Vec<NoteSummary>, String> {
             updated_at: note.updated_at,
             tags: note.tags.clone(),
             palette: format!("{:?}", note.palette).to_lowercase(),
-            layout: format!("{:?}", note.layout).to_lowercase(),
+            layout: note.layout.as_str().to_string(),
             block_count: note.blocks.len(),
             render_type: "structured".to_string(),
         });
@@ -358,7 +369,7 @@ fn update_index(char_id: &str, note: &NoteBook) -> Result<(), String> {
         updated_at: note.updated_at,
         tags: note.tags.clone(),
         palette: format!("{:?}", note.palette).to_lowercase(),
-        layout: format!("{:?}", note.layout).to_lowercase(),
+        layout: note.layout.as_str().to_string(),
         block_count: note.blocks.len(),
         render_type: "structured".to_string(),
     });

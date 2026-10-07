@@ -14,13 +14,16 @@ use crate::tools::builtin::notebook_tools::{
     sync_raw_html_to_knowledge,
 };
 
-/// 列出角色的笔记摘要
+/// 列出心智观察器中的笔记摘要，排除知识采集的自动归档。
 #[tauri::command]
 pub async fn list_notebooks(
     char_id: String,
     _state: State<'_, Arc<AppState>>,
 ) -> Result<Value, String> {
-    let summaries = storage::list(&char_id)?;
+    let summaries: Vec<_> = storage::list(&char_id)?
+        .into_iter()
+        .filter(|note| !crate::notebook::collected::is_collected_note(&note.id))
+        .collect();
     Ok(json!(summaries))
 }
 

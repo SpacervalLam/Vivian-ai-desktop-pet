@@ -171,6 +171,23 @@ pub fn parse_speaker_prefix(user_input: &str) -> (String, String) {
     (user_input.to_string(), "user".to_string())
 }
 
+/// One utterance keeps its identity when a reply becomes the next delivery.
+struct CrossUtteranceIds {
+    source: String,
+    target: String,
+    input: String,
+    reply: String,
+}
+tokio::task_local! { static CROSS_UTTERANCES: CrossUtteranceIds; }
+
+pub(crate) fn current_utterance_id(speaker: &str) -> Option<String> {
+    CROSS_UTTERANCES.try_with(|ids| {
+        if speaker == ids.source { Some(ids.input.clone()) }
+        else if speaker == ids.target { Some(ids.reply.clone()) }
+        else { None }
+    }).ok().flatten()
+}
+
 /// 跨角色消息请求
 pub struct CrossCharacterRequest {
     /// 源角色 ID（发起方）
@@ -179,6 +196,8 @@ pub struct CrossCharacterRequest {
     pub target_id: String,
     /// 源角色要说的话
     pub message: String,
+    /// Existing reply identity for a continuation; None starts a new utterance.
+    pub source_message_id: Option<String>,
     /// 流式 ID（用于前端路由 chunk 事件）
     pub stream_id: String,
 }
@@ -191,6 +210,8 @@ pub struct CrossCharacterRequest {
 pub struct CrossCharacterReply {
     /// 目标角色回复文本（仅 `response_mode="speak"` 时非空）
     pub reply: String,
+    /// Stable identity of a spoken reply, reused by reverse continuations.
+    pub message_id: Option<String>,
     /// 目标角色本轮响应模式：speak / non_verbal / internal / ignore
     pub response_mode: String,
     /// 会话状态：active / cooling / closed
@@ -349,6 +370,14 @@ pub static CROSS_CHARACTER_BUS: Lazy<Arc<CrossCharacterBus>> = Lazy::new(|| {
 static RELATIONSHIP_FACTS_COUNTER: Lazy<RwLock<std::collections::HashMap<String, u32>>> =
     Lazy::new(|| RwLock::new(std::collections::HashMap::new()));
 
+/// 已注入过的室友在场快照：key = "{观察者}:{室友名}"。
+///
+/// `None` 值表示"观测到对方不在桌面上"。表里**没有**该 key 才是"从未观测过"——
+/// 这两种状态必须区分，否则每次调用都会被当成首次观测而反复注入基线。
+static LAST_OBSERVED_PRESENCE: Lazy<
+    RwLock<std::collections::HashMap<String, Option<crate::presence::PresenceState>>>,
+> = Lazy::new(|| RwLock::new(std::collections::HashMap::new()));
+
 pub struct CrossCharacterBus {
     /// Tauri AppHandle，由 lib.rs 启动时注入，用于 emit 事件和获取 AppState
     app_handle: RwLock<Option<AppHandle>>,
@@ -373,79 +402,144 @@ impl CrossCharacterBus {
         self.send(&handle, &state, req).await
     }
 
-    /// 生成室友的 Public State prompt 段落（共享世界，不共享心智）
+    /// 生成室友的 Public State 一句话描述（共享世界，不共享心智）
     ///
-    /// 只暴露 Public 信息：在线状态、在场状态、主导情绪、最近发言时间。
+    /// 只暴露 Public 信息：是否在桌面上、在场状态、共处时长**档位**。
     /// **绝对不暴露** Thought / Belief / Memory / Attention / Goal —— 这些是 Private Mind。
+    ///
+    /// ## 措辞约定（踩过的坑，别退回去）
+    /// - **不写"她是用户的另一个桌面宠物"**。角色不需要知道自己或对方是产品；
+    ///   这类高显著度的元信息对当前对话毫无用处，却会变成模型想"该怎么用"的新事实。
+    /// - **不写逐秒时长**（"已经在桌面上呆了13分12秒"）。逐秒变化的段落每轮都不同，
+    ///   模型会把它读成"刚发生的变化"而不是稳定背景，于是开口就播报。
+    ///   共处时长一律走 [`duration_phrase`] 的档位。
+    ///
+    /// 这是**纯函数**，可重复调用（按需查询工具、inspection 面板都走它）。
+    /// 需要"只在变化时注入"的 prompt 路径请用 [`Self::observe_roommate_presence`]。
     pub fn roommate_status_text(&self, source_id: &str, lang: &str) -> Option<String> {
+        let (name, online, presence, elapsed) = self.roommate_snapshot(source_id)?;
+        let lang = crate::pipeline::prompt_modules::normalize_lang(lang);
+
+        // 窗口未启动与"她把自己的窗口收起来了"对外是同一件事：找不到人
+        if !online || presence == crate::presence::PresenceState::Offline {
+            return Some(match lang {
+                "en" => format!("{} is not on the desktop right now — you can't reach her.", name),
+                "ja" => format!("{}は今デスクトップにいない——連絡できない。", name),
+                _ => format!("{}现在不在桌面上，你联系不到她。", name),
+            });
+        }
+
+        let duration = duration_phrase(elapsed, lang);
+        Some(match lang {
+            "en" => format!(
+                "{} is online — {}, {}.",
+                name,
+                presence_phrase(presence, lang),
+                duration
+            ),
+            "ja" => format!(
+                "{}はオンライン——{}。{}。",
+                name,
+                presence_phrase(presence, lang),
+                duration
+            ),
+            _ => format!(
+                "{}现在在线——{}，{}。",
+                name,
+                presence_phrase(presence, lang),
+                duration
+            ),
+        })
+    }
+
+    /// 变化驱动的室友在场观测：**仅当状态相对上次观测发生变化（含首次观测）时返回提示**，
+    /// 否则返回 `None`（稳态不注入）。
+    ///
+    /// ## 为什么必须这么做
+    /// 世界状态的价值在**变化**，不在当前值。每轮复述"她还在线、还在桌面上"等于
+    /// 把"谁在场"变成每轮都新鲜的谈资——模型于是把它当成本轮要表达的要点，
+    /// 开口就是"Nana 也在呢"。稳态不注入后，模型只在真的发生切换时才有话可说。
+    ///
+    /// 首次观测（本进程内该角色对第一次构造 prompt）视为变化，注入一次基线，
+    /// 让模型知道"此刻谁在"；此后仅在状态真正切换时再注入。
+    ///
+    /// 按需查询（用户直接问"娜娜在吗"）走 [`Self::roommate_status_text`]，不经过这里——
+    /// 显式查询不应该被"没变化"吞掉。
+    pub fn observe_roommate_presence(&self, source_id: &str, lang: &str) -> Option<String> {
+        let (name, online, presence, _) = self.roommate_snapshot(source_id)?;
+        let lang = crate::pipeline::prompt_modules::normalize_lang(lang);
+
+        // 窗口未启动与 Offline 合成一个观测值：两者对"她在不在桌面上"是同一件事。
+        // 观测口径必须与 roommate_status_text 的措辞口径一致，否则会出现
+        // "状态没变"却每轮都换一句话说的漂移。
+        let observed = if online && presence != crate::presence::PresenceState::Offline {
+            Some(presence)
+        } else {
+            None
+        };
+        let key = format!("{source_id}:{name}");
+        let previous = {
+            let mut seen = LAST_OBSERVED_PRESENCE.write();
+            seen.insert(key, observed)
+        };
+
+        match classify_presence(previous, observed) {
+            // 首次观测：给一次基线，让模型知道"此刻谁在"
+            PresenceDelta::First => self.roommate_status_text(source_id, lang),
+            // 稳态：不注入
+            PresenceDelta::Steady => None,
+            PresenceDelta::Changed(from, to) => Some(match lang {
+                "en" => format!(
+                    "{} just changed: {} → {}.",
+                    name,
+                    presence_phrase(from, lang),
+                    presence_phrase(to, lang)
+                ),
+                "ja" => format!(
+                    "{}の状態が変わった：{} → {}。",
+                    name,
+                    presence_phrase(from, lang),
+                    presence_phrase(to, lang)
+                ),
+                _ => format!(
+                    "{}的状态刚变了：{} → {}。",
+                    name,
+                    presence_phrase(from, lang),
+                    presence_phrase(to, lang)
+                ),
+            }),
+            PresenceDelta::LeftDesktop => Some(match lang {
+                "en" => format!("{} is no longer on the desktop.", name),
+                "ja" => format!("{}はデスクトップからいなくなった。", name),
+                _ => format!("{}已经不在桌面上了。", name),
+            }),
+            PresenceDelta::Returned(to) => Some(match lang {
+                "en" => format!("{} is back on the desktop — {}.", name, presence_phrase(to, lang)),
+                "ja" => format!("{}がデスクトップに戻ってきた——{}。", name, presence_phrase(to, lang)),
+                _ => format!("{}回到桌面上了——{}。", name, presence_phrase(to, lang)),
+            }),
+        }
+    }
+
+    /// 读取室友的最小快照：(名字, 窗口是否在线, 在场状态, 处于当前状态多久)
+    fn roommate_snapshot(
+        &self,
+        source_id: &str,
+    ) -> Option<(String, bool, crate::presence::PresenceState, f64)> {
         let handle = self.app_handle.read().clone()?;
         let state = handle.state::<Arc<AppState>>().inner().clone();
         let characters = state.characters.read();
         // 只有一个室友：找除自己外的第一个角色
         let roommate = characters.values().find(|c| c.id != source_id)?;
-
-        let lang = crate::pipeline::prompt_modules::normalize_lang(lang);
-        let name = &roommate.name;
-
-        let online = *roommate.online.read();
-        if !online {
-            return Some(match lang {
-                "en" => format!(
-                    "Your roommate {} is offline (resting) right now. You can't reach her.",
-                    name
-                ),
-                "ja" => format!(
-                    "ルームメイトの{}は今オフライン（休憩中）で、連絡できない。",
-                    name
-                ),
-                _ => format!(
-                    "你的室友{}现在离线（休息中），你无法联系她。",
-                    name
-                ),
-            });
-        }
-
-        // ── 拼装自然语言叙述 ──
-        let presence_elapsed = roommate.brain.presence.elapsed_seconds();
-        let duration = format_duration_short(presence_elapsed);
-
-        // 主导情绪强度 → 关系描述（不暴露 7 维详情）
-        let emotion = roommate.brain.psychology.emotion();
-        let (_, intensity) = emotion.dominant();
-        let emotion_desc: &str = if intensity > 0.7 {
-            match lang {
-                "en" => "very close",
-                "ja" => "とても親密",
-                _ => "十分亲近",
-            }
-        } else if intensity > 0.4 {
-            match lang {
-                "en" => "fairly close",
-                "ja" => "まあ親密",
-                _ => "比较亲近",
-            }
-        } else {
-            match lang {
-                "en" => "not particularly close",
-                "ja" => "あまり親密ではない",
-                _ => "关系一般",
-            }
-        };
-
-        Some(match lang {
-            "en" => format!(
-                "Your roommate {} is the user's other desktop pet. She's online right now, been on the desktop for {}. You two are {}. You can reach her via the talk_to_character tool.",
-                name, duration, emotion_desc
-            ),
-            "ja" => format!(
-                "ルームメイトの{}はユーザーのもう一つのデスクトップペットで、今オンラインだ。デスクトップに{}いる。二人は{}。talk_to_character ツールで連絡できる。",
-                name, duration, emotion_desc
-            ),
-            _ => format!(
-                "你的室友{}是用户的另一个桌面宠物，她现在在线。已经在桌面上呆了{}了，你们{}，你可以通过 talk_to_character 工具联系她。",
-                name, duration, emotion_desc
-            ),
-        })
+        // 先把快照落到局部变量再返回：直接 `Some((...))` 会把 read guard 的析构
+        // 拖到最后，编译器会判定 state/characters 借用在块尾仍然存活
+        let snapshot = (
+            roommate.name.clone(),
+            *roommate.online.read(),
+            roommate.brain.presence.current(),
+            roommate.brain.presence.elapsed_seconds(),
+        );
+        Some(snapshot)
     }
 
     /// 查询室友的 ID 和名称（供 prompt 注入层获取室友信息）
@@ -641,6 +735,7 @@ impl CrossCharacterBus {
             Some(c) => c,
             None => {
                 return Ok(CrossCharacterReply {
+                    message_id: None,
                     reply: String::new(),
                     response_mode: "ignore".to_string(),
                     conv_state: "cooling".to_string(),
@@ -732,6 +827,7 @@ impl CrossCharacterBus {
                 }),
             );
             return Ok(CrossCharacterReply {
+                    message_id: None,
                 reply: format!("{}也在回应用户，你们各自回应就好，不用专门叫她", target_name),
                 response_mode: "ignore".to_string(),
                 conv_state: "peer_busy".to_string(),
@@ -760,6 +856,7 @@ impl CrossCharacterBus {
                     }),
                 );
                 return Ok(CrossCharacterReply {
+                    message_id: None,
                     reply: format!("{}现在在忙，暂时没空回应", target_name),
                     response_mode: "ignore".to_string(),
                     conv_state: "target_busy".to_string(),
@@ -797,6 +894,7 @@ impl CrossCharacterBus {
                 }),
             );
             return Ok(CrossCharacterReply {
+                    message_id: None,
                 reply: format!("{}刚收到用户消息，先让她回应用户", target_name),
                 response_mode: "ignore".to_string(),
                 conv_state: "peer_busy".to_string(),
@@ -834,6 +932,7 @@ impl CrossCharacterBus {
                     }),
                 );
                 return Ok(CrossCharacterReply {
+                    message_id: None,
                     reply: format!("{}正在和用户说话，我先不打扰了", target_name),
                     response_mode: "ignore".to_string(),
                     conv_state: "user_input_pending".to_string(),
@@ -941,7 +1040,12 @@ impl CrossCharacterBus {
 
         // 获取目标角色的焦点租约：跨角色 think 期间屏蔽其他角色的主动打断
         let _focus_lease = crate::commands::proactive::FocusLeaseGuard::acquire(&req.target_id);
-        let result = brain.think_cross_character(&synthesized_input, true).await;
+        let input_id = req.source_message_id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let reply_id = uuid::Uuid::new_v4().to_string();
+        let result = CROSS_UTTERANCES.scope(CrossUtteranceIds {
+            source: req.source_id.clone(), target: req.target_id.clone(),
+            input: input_id.clone(), reply: reply_id.clone(),
+        }, brain.think_cross_character(&synthesized_input, true)).await;
         drop(_focus_lease);
 
         // 恢复原 channel
@@ -1010,6 +1114,7 @@ impl CrossCharacterBus {
                         crate::messages::MessageMeta::assistant().with_channel("cross_character"),
                     );
                     let source_meta = json!({
+                        "utterance_id": input_id,
                         "conversation_id": conv.id,
                         "session_id": conv.id,
                         "content_type": "dialogue_turn",
@@ -1043,6 +1148,7 @@ impl CrossCharacterBus {
                         crate::messages::MessageMeta::user().with_channel("cross_character"),
                     );
                     let target_meta = json!({
+                        "utterance_id": reply_id,
                         "conversation_id": conv.id,
                         "session_id": conv.id,
                         "content_type": if response_mode.needs_speech() { "dialogue_turn" } else { "response_status" },
@@ -1059,11 +1165,15 @@ impl CrossCharacterBus {
                     let source_id = req.source_id.clone();
                     let target_id = req.target_id.clone();
                     let session_id = conv.id.clone();
-                    let spoken_input = req.message.clone();
+                    let spoken_input = req.source_message_id.is_none().then(|| req.message.clone());
                     let spoken_reply = if response_mode.needs_speech() { Some(final_text.clone()) } else { None };
                     tokio::spawn(async move {
                         use crate::memory::types::MemoryType;
-                        let mut turns = vec![(source_id.clone(), target_id.clone(), spoken_input)];
+                        let mut turns = Vec::new();
+                        // A reverse delivery forwards a reply already saved by this Brain.
+                        if let Some(input) = spoken_input {
+                            turns.push((source_id.clone(), target_id.clone(), input));
+                        }
                         if let Some(reply) = spoken_reply.filter(|text| !text.trim().is_empty()) {
                             turns.push((target_id.clone(), source_id.clone(), reply));
                         }
@@ -1186,6 +1296,7 @@ impl CrossCharacterBus {
                 }
 
                 Ok(CrossCharacterReply {
+                    message_id: if response_mode.needs_speech() && !final_text.is_empty() { Some(reply_id) } else { None },
                     reply: final_text,
                     response_mode: response_mode.as_str().to_string(),
                     conv_state: conv_state_str,
@@ -1219,39 +1330,85 @@ pub fn generate_cross_stream_id() -> String {
     )
 }
 
-/// 将秒数格式化为简短的中文时长（如 "3分20秒"、"1小时5分"、"刚刚"）
-fn format_duration_short(secs: f64) -> String {
-    let s = secs.max(0.0) as u64;
-    if s < 5 {
-        return "刚刚".to_string();
+/// 一次室友在场观测相对上一次的结果。
+///
+/// `Steady` 是这套机制存在的原因：稳态必须什么都不给。缺了它，
+/// prompt 就会每轮复述"她还在线"，模型于是把它当成本轮的谈资。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PresenceDelta {
+    /// 本进程内第一次观测到 —— 给一次基线
+    First,
+    /// 与上次相同 —— 不注入
+    Steady,
+    /// 在桌面上换了状态
+    Changed(crate::presence::PresenceState, crate::presence::PresenceState),
+    /// 离开桌面（窗口关闭或声明 Offline）
+    LeftDesktop,
+    /// 回到桌面
+    Returned(crate::presence::PresenceState),
+}
+
+/// 纯判定：给定"上次观测"与"本次观测"，决定要不要注入。
+///
+/// 抽成纯函数是为了可测 —— 这段逻辑的全部价值就是"稳态绝不返回 `Steady` 以外的东西"，
+/// 而那恰恰是最容易在后续改动里悄悄退化的一点。
+///
+/// 参数里的 `Option<Option<_>>`：外层 `None` = 从未观测过，内层 `None` = 观测到"不在桌面上"。
+/// 两者必须区分，否则每次调用都会被当成首次观测而反复注入基线。
+fn classify_presence(
+    previous: Option<Option<crate::presence::PresenceState>>,
+    observed: Option<crate::presence::PresenceState>,
+) -> PresenceDelta {
+    match previous {
+        None => PresenceDelta::First,
+        Some(previous) => match (previous, observed) {
+            (Some(a), Some(b)) if a == b => PresenceDelta::Steady,
+            (None, None) => PresenceDelta::Steady,
+            (Some(from), Some(to)) => PresenceDelta::Changed(from, to),
+            (Some(_), None) => PresenceDelta::LeftDesktop,
+            (None, Some(to)) => PresenceDelta::Returned(to),
+        },
     }
-    if s < 60 {
-        return format!("{}秒", s);
+}
+
+/// 把室友的在场状态翻成一句自然描述（只描述可观察到的公开状态，不推断她在做什么）
+fn presence_phrase(state: crate::presence::PresenceState, lang: &str) -> &'static str {
+    use crate::presence::PresenceState::*;
+    match (state, lang) {
+        (Online, "en") => "here on the desktop",
+        (Online, "ja") => "デスクトップにいる",
+        (Online, _) => "就在桌面上",
+        (Busy, "en") => "around, but busy with her own thing",
+        (Busy, "ja") => "いるが自分の用事で忙しい",
+        (Busy, _) => "在，但正忙着自己的事",
+        (Rest, "en") => "around, but resting",
+        (Rest, "ja") => "いるが休んでいる",
+        (Rest, _) => "在，不过正在休息",
+        (Offline, "en") => "away from the desktop",
+        (Offline, "ja") => "デスクトップから離れている",
+        (Offline, _) => "暂时不在桌面上",
     }
-    let m = s / 60;
-    let remain_s = s % 60;
-    if m < 60 {
-        return if remain_s == 0 {
-            format!("{}分", m)
-        } else {
-            format!("{}分{}秒", m, remain_s)
-        };
-    }
-    let h = m / 60;
-    let remain_m = m % 60;
-    if h < 24 {
-        return if remain_m == 0 {
-            format!("{}小时", h)
-        } else {
-            format!("{}小时{}分", h, remain_m)
-        };
-    }
-    let d = h / 24;
-    let remain_h = h % 24;
-    if remain_h == 0 {
-        format!("{}天", d)
-    } else {
-        format!("{}天{}小时", d, remain_h)
+}
+
+/// 共处时长档位。
+///
+/// 刻意不给秒级/分钟级精度：逐轮变化的数字会让模型把这段读成"刚发生的变化"
+/// 而不是稳定背景。档位同样够用，且稳态时逐字不变。
+fn duration_phrase(secs: f64, lang: &str) -> &'static str {
+    let mins = (secs.max(0.0) / 60.0) as u64;
+    match (lang, mins) {
+        ("en", 0..=4) => "just arrived",
+        ("en", 5..=59) => "a little while",
+        ("en", 60..=239) => "a good while",
+        ("en", _) => "quite a long time",
+        ("ja", 0..=4) => "来たばかり",
+        ("ja", 5..=59) => "少しの間",
+        ("ja", 60..=239) => "しばらく",
+        ("ja", _) => "かなり長く",
+        (_, 0..=4) => "刚来",
+        (_, 5..=59) => "有一会儿了",
+        (_, 60..=239) => "有一阵子了",
+        (_, _) => "挺久了",
     }
 }
 
@@ -1469,6 +1626,105 @@ fn strip_code_fence(s: &str) -> String {
         }
     }
     s.to_string()
+}
+
+#[cfg(test)]
+mod utterance_identity_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn reverse_continuation_reuses_reply_identity_in_both_histories() {
+        let nana = crate::dialogue::DialogueManager::new(10, "identity-nana-test");
+        let vivian = crate::dialogue::DialogueManager::new(10, "identity-vivian-test");
+        CROSS_UTTERANCES.scope(CrossUtteranceIds {
+            source:"vivian".into(), target:"nana".into(), input:"opening".into(), reply:"nana-reply".into(),
+        }, async {
+            nana.add_message_with_metadata(crate::types::response::ChatMessage::user("开场"), json!({"speaker":"vivian"}));
+            nana.add_message_with_metadata(crate::types::response::ChatMessage::assistant("回应"), json!({"speaker":"nana"}));
+        }).await;
+        vivian.add_message_with_metadata(crate::types::response::ChatMessage::user("回应"), json!({"utterance_id":"nana-reply"}));
+        CROSS_UTTERANCES.scope(CrossUtteranceIds {
+            source:"nana".into(), target:"vivian".into(), input:"nana-reply".into(), reply:"vivian-reply".into(),
+        }, async {
+            vivian.add_message_with_metadata(crate::types::response::ChatMessage::user("回应"), json!({"speaker":"nana"}));
+            vivian.add_message_with_metadata(crate::types::response::ChatMessage::assistant("接话"), json!({"speaker":"vivian"}));
+        }).await;
+        nana.add_message_with_metadata(crate::types::response::ChatMessage::assistant("回应"), json!({"utterance_id":"nana-reply"}));
+        assert_eq!(nana.get_history().len(), 2);
+        assert_eq!(vivian.get_history().len(), 2);
+        assert_eq!(current_utterance_id("nana"), None, "identity must not escape the delivery scope");
+    }
+}
+
+#[cfg(test)]
+mod presence_delta_tests {
+    use super::*;
+    use crate::presence::PresenceState::{Busy, Offline, Online, Rest};
+
+    /// 核心不变量：状态没变就什么都不注入。
+    ///
+    /// 这是"她也在场"被反复播报的直接成因——回到 `Steady` 会立刻退回旧行为。
+    #[test]
+    fn steady_state_never_injects() {
+        for observed in [Some(Online), Some(Busy), Some(Rest), None] {
+            assert_eq!(
+                classify_presence(Some(observed), observed),
+                PresenceDelta::Steady,
+                "稳态 {observed:?} 必须返回 Steady"
+            );
+        }
+    }
+
+    /// 从未观测过 = 注入一次基线（外层 None），
+    /// 观测到"不在桌面上" = 稳态（外层 Some(None)）。两者不能混。
+    #[test]
+    fn never_observed_differs_from_observed_absence() {
+        assert_eq!(classify_presence(None, None), PresenceDelta::First);
+        assert_eq!(classify_presence(None, Some(Online)), PresenceDelta::First);
+        assert_eq!(
+            classify_presence(Some(None), None),
+            PresenceDelta::Steady,
+            "两次都观测到她不在，不应反复注入"
+        );
+    }
+
+    #[test]
+    fn real_transitions_are_classified_distinctly() {
+        assert_eq!(
+            classify_presence(Some(Some(Online)), Some(Busy)),
+            PresenceDelta::Changed(Online, Busy)
+        );
+        assert_eq!(
+            classify_presence(Some(Some(Online)), None),
+            PresenceDelta::LeftDesktop
+        );
+        assert_eq!(
+            classify_presence(Some(None), Some(Rest)),
+            PresenceDelta::Returned(Rest)
+        );
+    }
+
+    /// 所有分支都必须有解，且 Offline 与"窗口关闭"在这套口径下等价——
+    /// 观测值由 `observe_roommate_presence` 归一化，这里只验证分类不会被 Offline 打乱。
+    #[test]
+    fn offline_is_a_plain_onset_state() {
+        assert_eq!(
+            classify_presence(Some(Some(Busy)), Some(Offline)),
+            PresenceDelta::Changed(Busy, Offline)
+        );
+    }
+
+    /// 措辞约定：时长必须走档位，不能出现秒级数字（逐轮变化的数字会被读成"刚发生的变化"）。
+    #[test]
+    fn duration_phrase_stays_coarse() {
+        for lang in ["zh", "en", "ja"] {
+            assert_eq!(duration_phrase(3.0, lang), duration_phrase(299.0, lang));
+            assert_eq!(duration_phrase(600.0, lang), duration_phrase(3599.0, lang));
+            assert!(!duration_phrase(90_000.0, lang).contains('0'));
+        }
+        assert_eq!(duration_phrase(3.0, "zh"), "刚来");
+        assert_eq!(duration_phrase(90_000.0, "zh"), "挺久了");
+    }
 }
 
 #[cfg(test)]

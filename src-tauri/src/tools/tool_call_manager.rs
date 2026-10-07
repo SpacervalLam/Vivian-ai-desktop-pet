@@ -988,42 +988,23 @@ impl ToolListTool {
     /// - 场景不再硬屏蔽工具，改为在头部注入 `ToolScene::soft_hint()` 软提示，
     ///   引导 LLM 自主判断；危险操作由 `check_permissions` 在执行时确认
     pub fn get_tools_for_ai_with_scene(&self, scene: ToolScene, hidden: &HashSet<String>, recalled: Option<&HashSet<String>>, lang: &str) -> String {
-        let tools = self.tool_system.list_tools_for_scene(scene);
-        let tools: Vec<_> = tools.into_iter().filter(|t| t.name() == "tool_search" || !hidden.contains(t.name())).collect();
-        if tools.is_empty() {
-            return match crate::pipeline::prompt_modules::normalize_lang(lang) {
+        let lang_norm = crate::pipeline::prompt_modules::normalize_lang(lang);
+        // 三层可见性分离：Always（完整 schema）/ Lazy（名称+描述）/ Deferred（仅名称）
+        // 可见性按场景 + 语义召回动态判定（与原生 FC 通道共用 resolve_visibility_with_recall）
+        let (always, lazy, deferred) = self.bucket_tools_for_scene(scene, hidden, recalled);
+        if always.is_empty() && lazy.is_empty() && deferred.is_empty() {
+            return match lang_norm {
                 "en" => "No tools available".to_string(),
                 "ja" => "利用可能なツールなし".to_string(),
                 _ => "无可用工具".to_string(),
             };
         }
+        let total = always.len() + lazy.len() + deferred.len();
 
-        // 三层可见性分离：Always（完整 schema）/ Lazy（名称+描述）/ Deferred（仅名称）
-        // 可见性按场景 + 语义召回动态判定（与原生 FC 通道共用 resolve_visibility_with_recall）
-        let mut always: Vec<_> = Vec::new();
-        let mut lazy: Vec<_> = Vec::new();
-        let mut deferred: Vec<_> = Vec::new();
-        for t in &tools {
-            match resolve_visibility_with_recall(t, scene, recalled) {
-                crate::tools::types::ToolVisibility::Always => always.push(t),
-                crate::tools::types::ToolVisibility::Lazy => lazy.push(t),
-                crate::tools::types::ToolVisibility::Deferred => deferred.push(t),
-            }
-        }
+        // 召回模式下 Lazy 档降级为仅名称：完整 schema 只留给保底集 ∪ 常驻集 ∪ 召回集，
+        // 所以名称+描述的「精简工具」块不再渲染（工具名仍会出现在末尾索引里）。
+        let compact_visible = recalled.is_none();
 
-        // Semantic selection keeps only the floor and top-k schemas in the prompt.
-        // Other tools remain discoverable by name through tool_search.
-        if recalled.is_some() { deferred.append(&mut lazy); }
-
-        // share_link 是网络检索专用工具：在 Chat/Idle 闲聊/后台场景下完全不注入。
-        // 召回模式下它可能落入任意桶，故三桶都剔除（保持既有隐藏语义）。
-        if matches!(scene, ToolScene::Chat | ToolScene::Idle) {
-            always.retain(|t| t.name() != "share_link");
-            lazy.retain(|t| t.name() != "share_link");
-            deferred.retain(|t| t.name() != "share_link");
-        }
-
-        let lang_norm = crate::pipeline::prompt_modules::normalize_lang(lang);
         let (perm_mark_str, perm_notice, total_label, full_label, compact_label, deferred_label,
              compact_count_label, deferred_count_label, extra_label, schema_hint) = match lang_norm {
             "en" => (
@@ -1050,7 +1031,7 @@ impl ToolListTool {
         };
 
         let mut lines = vec!["# Available Tools\n".to_string()];
-        lines.push(format!("{}: {} tools", total_label, tools.len()));
+        lines.push(format!("{}: {} tools", total_label, total));
         lines.push(format!(
             "  ({}: {}, {}: {}, {}: {})\n",
             full_label, always.len(),
@@ -1086,7 +1067,7 @@ impl ToolListTool {
         }
 
         for tool in &always {
-            let schema = tool.parameters_schema();
+            let schema = tool.parameters_schema_in(lang_norm);
             let params = schema.get("properties").and_then(Value::as_object);
             let required: Vec<String> = schema
                 .get("required")
@@ -1099,7 +1080,7 @@ impl ToolListTool {
                 .unwrap_or_default();
 
             let name = tool.name();
-            let desc = tool.description();
+            let desc = tool.description_in(lang_norm);
             // 权限标注：destructive 工具或在确认列表中的工具标记
             let perm_mark = if tool.is_destructive() || is_confirmation_required_tool(name) {
                 perm_mark_str
@@ -1190,13 +1171,13 @@ impl ToolListTool {
         }
 
         // Lazy 工具：仅名称+一行描述（节省 token，完整 schema 通过 tool_search 加载）
-        if !lazy.is_empty() {
+        if compact_visible && !lazy.is_empty() {
             lines.push(String::new());
-            let compact_header = crate::pipeline::prompt_modules::section_heading("compact_tools", lang);
+            let compact_header = crate::pipeline::prompt_modules::section_heading("compact_tools", lang_norm);
             lines.push(format!("{}\n", compact_header));
             for tool in &lazy {
                 let name = tool.name();
-                let desc = tool.description();
+                let desc = tool.description_in(lang_norm);
                 let perm_mark = if tool.is_destructive() || is_confirmation_required_tool(name) {
                     perm_mark_str
                 } else {
@@ -1208,24 +1189,90 @@ impl ToolListTool {
             }
         }
 
-        // 末尾追加延迟/精简工具列表（仅工具名，供 tool_search 搜索）
-        if !deferred.is_empty() || !lazy.is_empty() {
+        // 末尾追加延迟/精简工具索引（仅工具名，供 tool_search 搜索）
+        let index = Self::render_deferred_index(
+            &deferred.iter().map(|t| t.name()).chain(lazy.iter().map(|t| t.name())).collect::<Vec<_>>(),
+            lang_norm,
+        );
+        if !index.is_empty() {
             lines.push(String::new());
-            lines.push("<available-deferred-tools>".to_string());
-            for t in &deferred {
-                lines.push(t.name().to_string());
-            }
-            for t in &lazy {
-                lines.push(t.name().to_string());
-            }
-            lines.push("</available-deferred-tools>".to_string());
-            lines.push(String::new());
-            lines.push(
-                "这些工具未在上方列出完整 schema。若需调用，先调用 tool_search 拿到 schema。"
-                    .to_string(),
-            );
+            lines.push(index);
         }
 
+        lines.join("\n")
+    }
+
+    /// 按场景 / 隐藏集 / 语义召回把工具分成三档：(Always, Lazy, Deferred)。
+    ///
+    /// 两条注入通道（API `tools` 字段 / prompt 工具清单）与延迟工具索引共用此函数，
+    /// 保证三处对"谁能拿完整 schema"的判断永不发散。
+    fn bucket_tools_for_scene(
+        &self,
+        scene: ToolScene,
+        hidden: &HashSet<String>,
+        recalled: Option<&HashSet<String>>,
+    ) -> (Vec<Arc<dyn Tool>>, Vec<Arc<dyn Tool>>, Vec<Arc<dyn Tool>>) {
+        let mut always: Vec<Arc<dyn Tool>> = Vec::new();
+        let mut lazy: Vec<Arc<dyn Tool>> = Vec::new();
+        let mut deferred: Vec<Arc<dyn Tool>> = Vec::new();
+        for tool in self.tool_system.list_tools_for_scene(scene) {
+            if tool.name() != "tool_search" && hidden.contains(tool.name()) {
+                continue;
+            }
+            match resolve_visibility_with_recall(&tool, scene, recalled) {
+                crate::tools::types::ToolVisibility::Always => always.push(tool),
+                crate::tools::types::ToolVisibility::Lazy => lazy.push(tool),
+                crate::tools::types::ToolVisibility::Deferred => deferred.push(tool),
+            }
+        }
+        // share_link 是网络检索专用工具：在 Chat/Idle 闲聊/后台场景下完全不注入。
+        // 召回模式下它可能落入任意桶，故三桶都剔除（保持既有隐藏语义）。
+        if matches!(scene, ToolScene::Chat | ToolScene::Idle) {
+            always.retain(|t| t.name() != "share_link");
+            lazy.retain(|t| t.name() != "share_link");
+            deferred.retain(|t| t.name() != "share_link");
+        }
+        (always, lazy, deferred)
+    }
+
+    /// 仅名称的延迟工具索引块（`<available-deferred-tools>`）。
+    ///
+    /// 存在的理由：native FC 通道下 prompt 里的工具清单会被 `build_tools_block`
+    /// 丢弃（避免与 API `tools` 字段重复），如果索引也一并丢掉，模型就既拿不到
+    /// 未召回工具的 schema，也不知道它们**叫什么名字**，`tool_search` 无从搜起。
+    /// 所以这条通道必须单独把索引注入回去。
+    pub fn get_deferred_tools_index(
+        &self,
+        scene: ToolScene,
+        hidden: &HashSet<String>,
+        recalled: Option<&HashSet<String>>,
+        lang: &str,
+    ) -> String {
+        let (_, lazy, deferred) = self.bucket_tools_for_scene(scene, hidden, recalled);
+        let names: Vec<&str> = deferred
+            .iter()
+            .chain(lazy.iter())
+            .map(|t| t.name())
+            .collect();
+        Self::render_deferred_index(&names, crate::pipeline::prompt_modules::normalize_lang(lang))
+    }
+
+    /// 渲染 `<available-deferred-tools>` 块。`names` 为空时返回空串。
+    fn render_deferred_index(names: &[&str], lang: &str) -> String {
+        if names.is_empty() {
+            return String::new();
+        }
+        let hint = match crate::pipeline::prompt_modules::normalize_lang(lang) {
+            "en" => "These tools are registered and permitted, but only their names are listed above. To call one, first use tool_search to load its schema (`select:name` loads by exact name).",
+            "ja" => "これらのツールは登録・許可済みだが、上には名前のみが並んでいる。呼び出す前に tool_search で schema を取得すること（`select:名前` で名前指定ロード可）。",
+            _ => "这些工具已注册且被允许，但此处只列名称。需要调用时先用 tool_search 取回 schema（可用 `select:工具名` 按名称精确加载）。",
+        };
+        let mut lines = Vec::with_capacity(names.len() + 5);
+        lines.push("<available-deferred-tools>".to_string());
+        lines.extend(names.iter().map(|name| name.to_string()));
+        lines.push("</available-deferred-tools>".to_string());
+        lines.push(String::new());
+        lines.push(hint.to_string());
         lines.join("\n")
     }
 
@@ -1281,26 +1328,24 @@ impl ToolListTool {
     /// 的嵌入与工具描述嵌入做相似度检索得到）。传入 Some 时启用语义裁剪——
     /// 工具是否能拿到完整 schema 由"保底集 ∪ 召回集"决定，不再由场景一刀切。
     /// 传 None 时保持原行为（场景可见性），用于嵌入不可用时的安全回退。
+    ///
+    /// `lang`：界面语言（BCP-47 或裸语言码均可，内部归一）。工具描述与参数说明按该
+    /// 语言下发——这几条 schema 是 native FC 通道下模型唯一能看到的工具语义，
+    /// 中文对话配英文 schema 会让工具选择明显变差。
     pub fn get_tool_definitions_for_scene(
         &self,
         scene: ToolScene,
         hidden: &HashSet<String>,
         recalled: Option<&HashSet<String>>,
+        lang: &str,
     ) -> Vec<crate::providers::base::ToolDefinition> {
-        self.tool_system
-            .list_tools_for_scene(scene)
-            .iter()
-            .filter(|t| t.name() == "tool_search" || !hidden.contains(t.name()))
-            .filter(|t| {
-                matches!(
-                    resolve_visibility_with_recall(t, scene, recalled),
-                    crate::tools::types::ToolVisibility::Always
-                )
-            })
+        let lang = crate::pipeline::prompt_modules::normalize_lang(lang);
+        let (always, _, _) = self.bucket_tools_for_scene(scene, hidden, recalled);
+        always.iter()
             .map(|t| crate::providers::base::ToolDefinition {
                 name: t.name().to_string(),
-                description: t.description().to_string(),
-                parameters: t.parameters_schema(),
+                description: t.description_in(lang).to_string(),
+                parameters: t.parameters_schema_in(lang),
             })
             .collect()
     }
@@ -1321,13 +1366,18 @@ fn scene_label(scene: ToolScene) -> &'static str {
     }
 }
 
-/// 判断工具是否属于"核心三件套"（search_memory / talk_to_character）
+/// 判断工具是否属于"核心陪伴集"（search_memory / talk_to_character / get_roommate_status）
 ///
-/// 这三个工具在所有场景下都保持 Always 可见：
+/// 这几个工具在所有场景下都保持 Always 可见：
 /// - `tool_search` 通过 `always_load()=true` 自动保留
-/// - `search_memory` / `talk_to_character` 通过此函数显式识别
+/// - 其余通过此函数显式识别
+///
+/// `get_roommate_status` 与 `talk_to_character` 必须同档：prompt 侧的室友在场状态
+/// 是变化驱动注入的（稳态不注入），按需查询是它留下的唯一缺口。若查询工具只在
+/// Chat 场景降级为 Lazy，模型就得先 `tool_search` 再调用——一个无参数查询走两步，
+/// 结果多半是模型放弃查询直接猜。
 fn is_core_tool(name: &str) -> bool {
-    matches!(name, "search_memory" | "talk_to_character")
+    matches!(name, "search_memory" | "talk_to_character" | "get_roommate_status")
 }
 
 /// 推断工具的有效可见性层级
@@ -1419,7 +1469,8 @@ fn resolve_visibility(
 /// 两条注入通道（Markdown 文本 / 原生 FC tools 字段）共用的可见性判定，
 /// 保证选择逻辑永不发散。
 ///
-/// - `recalled=Some`：完整 schema（`Always`）= 保底集 [`is_floor_tool`] ∪ 语义召回集；
+/// - `recalled=Some`：完整 schema（`Always`）= 保底集 [`is_floor_tool`]
+///   ∪ 声明的常驻集（`always_load()=true`）∪ 语义召回集；
 ///   其余按 `should_defer` 降级为 `Deferred`（仅名）/ `Lazy`（名+描述），
 ///   仍可在 `<available-deferred-tools>` 里被 `tool_search` 取回。
 /// - `recalled=None`：回退纯场景可见性 [`resolve_visibility`]（嵌入不可用时安全降级）。
@@ -1431,7 +1482,11 @@ fn resolve_visibility_with_recall(
     use crate::tools::types::ToolVisibility;
     match recalled {
         Some(hits) => {
-            if is_floor_tool(tool) || hits.contains(tool.name()) {
+            // `always_load()=true` 是工具作者声明的「本工具必须带完整 schema 注入」契约。
+            // 语义召回只应决定**其余工具**的档位，不能推翻它：否则一次没召回到，
+            // 声明了 always_load 的工具就彻底拿不到 schema，而调用方（以及工具自己的
+            // 触发逻辑）仍然按「它一定在」写，形成静默失效。
+            if is_floor_tool(tool) || is_core_tool(tool.name()) || tool.always_load() || hits.contains(tool.name()) {
                 ToolVisibility::Always
             } else if tool.should_defer() {
                 ToolVisibility::Deferred
@@ -1823,8 +1878,10 @@ mod tests {
         let list = ToolListTool::new(system.clone());
         let recalled = HashSet::from(["receipt_read".to_string()]);
         let hidden = HashSet::new();
-        let defs = list.get_tool_definitions_for_scene(ToolScene::Chat, &hidden, Some(&recalled));
-        assert_eq!(defs.len(), 2);
+        let defs = list.get_tool_definitions_for_scene(ToolScene::Chat, &hidden, Some(&recalled), "en");
+        assert_eq!(defs.len(), 4);
+        assert!(defs.iter().any(|d| d.name == "search_memory"));
+        assert!(defs.iter().any(|d| d.name == "talk_to_character"));
         assert!(defs.iter().any(|d| d.name == "tool_search"));
         assert!(!defs.iter().any(|d| d.name == "wallpaper_set"));
         assert!(!defs.iter().any(|d| d.name == "receipt_write"));
@@ -1832,7 +1889,7 @@ mod tests {
         assert!(!text.contains("- receipt_write"));
         assert!(text.split("<available-deferred-tools>").nth(1).unwrap().contains("receipt_write"));
         let hidden = system.list_tool_names().into_iter().collect();
-        assert_eq!(list.get_tool_definitions_for_scene(ToolScene::Chat, &hidden, Some(&recalled)).iter().map(|t|t.name.as_str()).collect::<Vec<_>>(), ["tool_search"]);
+        assert_eq!(list.get_tool_definitions_for_scene(ToolScene::Chat, &hidden, Some(&recalled), "en").iter().map(|t|t.name.as_str()).collect::<Vec<_>>(), ["tool_search"]);
     }
 
     fn probe_call(id: &str, name: &str, args: Value) -> crate::providers::base::StructuredToolCall {
@@ -2113,13 +2170,13 @@ mod tests {
     }
 
     #[test]
-    fn foreground_app_schema_is_dynamic_and_requires_a_semantic_hit() {
+    fn foreground_app_always_load_contract_survives_missed_recall() {
         let tool: Arc<dyn Tool> = Arc::new(
             crate::tools::builtin::perception_tools::GetForegroundAppContextTool::new());
         let recalled = HashSet::new();
         for scene in [ToolScene::Chat, ToolScene::LowTrust, ToolScene::Idle] {
             assert!(matches!(resolve_visibility_with_recall(&tool, scene, Some(&recalled)),
-                crate::tools::types::ToolVisibility::Lazy));
+                crate::tools::types::ToolVisibility::Always));
         }
     }
 
@@ -2214,11 +2271,11 @@ mod tests {
             ToolVisibility::Always
         ));
 
-        // Work-oriented always_load flags must not expand the companion floor.
+        // An explicit always_load contract survives a missing semantic hit.
         let work_core = mock("run_job", ToolCategory::System, true, false);
         assert!(matches!(
             resolve_visibility_with_recall(&work_core, ToolScene::Chat, Some(&recalled)),
-            ToolVisibility::Lazy
+            ToolVisibility::Always
         ));
         assert!(matches!(resolve_visibility_with_recall(&work_core, ToolScene::Chat, None), ToolVisibility::Always));
 

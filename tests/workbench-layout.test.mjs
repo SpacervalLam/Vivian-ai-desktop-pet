@@ -34,13 +34,27 @@ const thought = { role: 'thinking', content: '检查工作目录与错误原因'
 const commentary = { role: 'commentary', content: '先读取配置，然后修复构建脚本。' };
 const user = { role: 'user', content: '修复项目' };
 const live = groupWorkMessages([user, thought, commentary, intent], true);
-assert.equal(live[1].kind, 'group');
-assert.equal(live[1].settled, false);
-assert.deepEqual(live[1].msgs.slice(0, 2), [thought, commentary]);
+assert.deepEqual(live.slice(1, 3).map(item => item.msg), [thought, commentary]);
+assert.equal(live[3].kind, 'group');
+assert.equal(live[3].settled, false);
 const completed = [user, thought, commentary, intent, outcome, { role: 'assistant', content: '修复完成' }];
 const restored = groupWorkMessages(JSON.parse(JSON.stringify(completed)), false);
-assert.equal(restored[1].settled, true);
-assert.deepEqual(restored[1].msgs.slice(0, 2), [thought, commentary]);
-assert.equal(restored[1].msgs[2].role, 'tool_result');
-assert.equal(restored[2].msg.role, 'assistant', 'final reply stays outside the work process');
+assert.deepEqual(restored.slice(1, 3).map(item => item.msg), [thought, commentary]);
+assert.equal(restored[3].settled, true);
+assert.equal(restored[3].msgs[0].role, 'tool_result');
+assert.equal(restored[4].msg.role, 'assistant', 'final reply stays outside the work process');
+const secondIntent = { ...intent, tool_call_id: 'b' };
+const secondOutcome = { ...outcome, tool_call_id: 'b' };
+for (const prose of [commentary, thought, { role: 'assistant', content: '继续检查' }]) {
+  const history = [intent, outcome, prose, secondIntent, secondOutcome];
+  for (const running of [true, false]) {
+    const groups = groupWorkMessages(JSON.parse(JSON.stringify(history)), running);
+    assert.deepEqual(groups.map(item => item.kind), ['group', 'msg', 'group']);
+    assert.equal(groups[0].settled, true);
+    assert.equal(groups[2].settled, !running);
+    assert.deepEqual(groups[1].msg, prose, 'process text remains outside collapsed tools');
+    assert.deepEqual(groups.filter(item => item.kind === 'group').map(item => item.msgs.map(msg => msg.tool_call_id)), [['a'], ['b']]);
+  }
+}
+assert.equal(groupWorkMessages([intent, outcome, secondIntent, secondOutcome], true).length, 1, 'consecutive tools still share one block');
 console.log('Work process text survives tool completion and reload.');

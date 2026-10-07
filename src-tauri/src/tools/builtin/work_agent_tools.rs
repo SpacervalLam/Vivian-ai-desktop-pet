@@ -102,7 +102,7 @@ impl Tool for DelegateToWorkAgentTool {
             "type": "object",
             "properties": {
                 "task": {"type": "string", "description": "Self-contained task prompt written on the user's behalf. Include objective, constraints, relevant context, expected deliverable, and verification criteria; do not invent authorization."},
-                "working_directory": {"type": "string", "description": "Optional working directory for the task. Omit to reuse the most recent work session's directory."},
+                "working_directory": {"type": "string", "description": "Optional working directory for the task. Omit to use the user's default workspace (Documents/Vivian when not customized)."},
                 "mode": {"type": "string", "enum": ["standard", "code", "minimal"], "description": "Work agent mode (default standard)"}
             },
             "required": ["task"]
@@ -115,7 +115,7 @@ impl Tool for DelegateToWorkAgentTool {
                 "type": "object",
                 "properties": {
                     "task": {"type": "string", "description": "以用户身份写给工作智能体的自包含提示词：包含目标、约束、相关上下文、预期交付物和验证标准，不得虚构授权。"},
-                    "working_directory": {"type": "string", "description": "可选的工作目录。省略则复用最近一次工作会话的目录。"},
+                    "working_directory": {"type": "string", "description": "可选的工作目录。省略则使用用户默认工作区，未自定义时为系统文档目录下的 Vivian。"},
                     "mode": {"type": "string", "enum": ["standard", "code", "minimal"], "description": "工作智能体模式（默认 standard）"}
                 },
                 "required": ["task"]
@@ -124,7 +124,7 @@ impl Tool for DelegateToWorkAgentTool {
                 "type": "object",
                 "properties": {
                     "task": {"type": "string", "description": "作業エージェントへの完全なタスク指示（ユーザー口調で記述）"},
-                    "working_directory": {"type": "string", "description": "任意の作業ディレクトリ。省略時は直近の作業セッションのディレクトリを再利用。"},
+                    "working_directory": {"type": "string", "description": "任意の作業ディレクトリ。省略時は既定のワークスペースを使用（未設定ならドキュメント内の Vivian）。"},
                     "mode": {"type": "string", "enum": ["standard", "code", "minimal"], "description": "作業エージェントのモード（デフォルト standard）"}
                 },
                 "required": ["task"]
@@ -160,21 +160,14 @@ impl Tool for DelegateToWorkAgentTool {
             .unwrap_or("standard")
             .to_string();
 
-        // 工作目录：显式指定 > 最近一次工作会话目录 > 用户主目录
-        let working_directory = match args.get("working_directory").and_then(|v| v.as_str()) {
-            Some(d) if !d.is_empty() => d.to_string(),
-            _ => {
-                let sessions = CODING_AGENT.list_sessions();
-                sessions
-                    .iter()
-                    .filter(|s| s.char_id == context.char_id)
-                    .max_by_key(|s| s.updated_at)
-                    .map(|s| s.working_directory.clone())
-                    .unwrap_or_default()
-            }
+        let state = app.state::<Arc<AppState>>();
+        let configured = state.config.read().get_all().default_workspace;
+        let working_directory = match crate::utils::workspace::resolve_workspace(
+            args.get("working_directory").and_then(Value::as_str).unwrap_or(""), configured.as_deref()) {
+            Ok(directory) => directory,
+            Err(error) => return ToolResult::standard_error(&error, Some("WorkspaceUnavailable"), None),
         };
 
-        let state = app.state::<Arc<AppState>>();
         let router = match state.model_router.read().clone() {
             Some(r) => r,
             None => {

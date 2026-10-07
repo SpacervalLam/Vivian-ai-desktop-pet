@@ -1,8 +1,11 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { buildSync } from 'esbuild';
 
 const bundle = buildSync({ entryPoints: ['src/components/usage/usageData.ts'], bundle: true, format: 'esm', platform: 'node', write: false });
-const { sumUsage, tokenTotal, dimensionRows, selectedDays, LEGACY_KEY } = await import(`data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString('base64')}`);
+const { sumUsage, tokenTotal, dimensionRows, selectedDays, LEGACY_KEY, routeLabelKeys } = await import(`data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString('base64')}`);
+const catalog = JSON.parse(readFileSync('src-tauri/prompts/routing/task_catalog.json', 'utf8'));
+assert.deepEqual(routeLabelKeys, Object.fromEntries(catalog.map(({ id, labelKey }) => [id, labelKey])), 'Every task route uses the shared translated label, including newly added routes');
 const primary = { input: 10, output: 2, hit: 100, cache_creation: 5, requests: 1, model: 'primary' };
 const fallback = { input: 20, output: 3, hit: 40, cache_creation: 6, requests: 1, model: 'fallback' };
 const chat = { ...sumUsage([primary, fallback]), route: 'chat', models: [primary, fallback] };

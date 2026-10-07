@@ -935,6 +935,7 @@ export default function App() {
     }
     const toastHeight = screenH > 0 ? Math.round(screenH / 2) : TOAST_WINDOW_HEIGHT;
     // 直接使用构造函数返回的实例（getByLabel 在窗口未完全创建时可能返回 null）
+    toastReadyRef.current = false;
     const win = new WebviewWindow(toastLabel, {
       url: `/?view=toast&character_id=${getCharacterId() ?? ''}`,
       title: 'Vivian Toast',
@@ -2154,6 +2155,34 @@ export default function App() {
       safeUnlisten(unlisten);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ensureToastWindow]);
+
+  // Recover confirmations lost while the toast window is closing or its listeners reload.
+  // The backend registry, rather than successful event emission, owns pending requests.
+  useEffect(() => {
+    let cancelled = false;
+    let busy = false;
+    const recover = async () => {
+      if (busy || cancelled) return;
+      busy = true;
+      try {
+        const requests = await invoke<ToolConfirmPayload[]>('get_pending_tool_confirmations');
+        if (cancelled) return;
+        const mine = requests.filter(p => !p.char_id || p.char_id === getCharacterId());
+        pendingConfirmRef.current = mine;
+        if (mine.length === 0) return;
+        await ensureToastWindow();
+        if (cancelled || !toastReadyRef.current) return;
+        for (const request of mine) await emit('toast:confirm', request);
+      } catch (error) {
+        console.warn('[ToolConfirm] pending request recovery failed:', error);
+      } finally {
+        busy = false;
+      }
+    };
+    void recover();
+    const timer = window.setInterval(() => { void recover(); }, 2000);
+    return () => { cancelled = true; window.clearInterval(timer); };
   }, [ensureToastWindow]);
 
   // 主动对话流式 chunk 监听：后端生成期间推送 proactive:chunk 事件

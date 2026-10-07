@@ -258,3 +258,5 @@ pub fn strip_markdown_syntax(text: &str) -> String {
     }
     out.trim().to_string()
 }
+
+pub mod workspace;

@@ -65,7 +65,12 @@ impl ToolSemanticFilter {
     pub fn new(provider: Arc<dyn MemoryEmbeddingProvider>, language: String) -> Self {
         Self {
             provider,
-            language,
+            // 工具 i18n 分支（`description_in` / `usage_corpus`）只认 "zh" / "ja" / "en"
+            // 三个字面量，而 `config.base.language` 是 BCP-47 的 "zh-CN"。
+            // 不在此归一，92 个工具里 84 个会落进 `_ =>` 英文回退分支：描述被换成英文
+            // （中文提问变成跨语言匹配，相似度骤降），`usage_corpus` 直接变空串
+            // （"用户说法 ↔ 用户说法"的高分命中彻底消失）。归一后缓存 key 也随之一致。
+            language: crate::pipeline::prompt_modules::normalize_lang(&language).to_string(),
             corpus: Arc::new(super::usage_corpus::ToolUsageCorpus::new(None)),
             embeddings: Mutex::new(HashMap::new()),
         }
@@ -168,7 +173,9 @@ impl ToolSemanticFilter {
         let cache = self.embeddings.lock();
         let mut scored = Vec::new();
         for tool in tool_system.list_tools() {
-            if tool.name() == "tool_search" || crate::tools::registry::is_work_agent_only(tool.name()) { continue; }
+            // 常驻工具（含 tool_search）本来就以完整 schema 注入，不该再占用召回槽位：
+            // 槽位数固定，被已经到手的工具吃掉一个，就少一个**未注入**工具被带进上下文。
+            if tool.always_load() || crate::tools::registry::is_work_agent_only(tool.name()) { continue; }
             let Some((_, vector)) = cache.get(&(tool.name().to_string(), self.language.clone())) else { continue; };
             if vector.len() != current.len() || !valid_query(vector) { continue; }
             let mut current_sim = cosine_similarity(current, vector).max(0.0);

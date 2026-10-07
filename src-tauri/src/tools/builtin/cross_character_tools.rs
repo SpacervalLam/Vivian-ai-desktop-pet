@@ -164,6 +164,7 @@ impl Tool for TalkToCharacterTool {
             source_id: ctx.char_id.clone(),
             target_id: target_id.clone(),
             message: message.clone(),
+            source_message_id: None,
             stream_id,
         };
 
@@ -217,6 +218,113 @@ impl Tool for TalkToCharacterTool {
     }
 
     /// 权限风险等级：跨角色对话仅为角色间传话，无进程/系统副作用
+    fn risk(&self) -> ToolRiskTier {
+        ToolRiskTier::Safe
+    }
+}
+
+// ===== get_roommate_status =====
+
+/// 查询室友当前在场的只读工具。
+///
+/// 存在的理由：prompt 里的室友在场状态改成**变化驱动**注入（稳态不注入，见
+/// `CrossCharacterBus::observe_roommate_presence`），所以稳态下模型手上没有
+/// "她此刻在不在"的信息。用户在平峰期问"娜娜在吗"时，模型需要一个按需通道，
+/// 否则只剩两条路：凭空编，或者发一条真实的 `talk_to_character` 去打扰她。
+pub struct GetRoommateStatusTool;
+
+impl GetRoommateStatusTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for GetRoommateStatusTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl Tool for GetRoommateStatusTool {
+    fn name(&self) -> &str {
+        "get_roommate_status"
+    }
+
+    fn description(&self) -> &str {
+        "Check whether your roommate is currently on the desktop and whether she is available, \
+         busy or resting. Read-only and instant: no message is sent and she is not disturbed. \
+         Call this when the user asks where she is, whether she is around, or what she is up to, \
+         so you answer from her actual state instead of guessing. To actually say something to \
+         her, use talk_to_character instead."
+    }
+
+    fn description_in(&self, lang: &str) -> &str {
+        match lang {
+            "zh" => "查看室友此刻是否在桌面上、是空闲还是在忙/休息。只读且即时：不会给她发消息，也不会打扰她。\
+            当用户问她在哪、在不在、在做什么时调用，用她的真实状态回答，而不是猜。\
+            要真正对她说点什么，请改用 talk_to_character。",
+            "ja" => "ルームメイトが今デスクトップにいるか、手が空いているか・忙しいか・休んでいるかを確認する。\
+            読み取り専用で即時——メッセージは送られず、彼女を邪魔しない。\
+            ユーザーが彼女の居場所や在席、何をしているかを尋ねたときに呼び出し、推測ではなく実際の状態で答えること。\
+            実際に何か伝えたい場合は talk_to_character を使う。",
+            _ => self.description(),
+        }
+    }
+
+    fn usage_corpus(&self, lang: &str) -> &'static str {
+        match lang {
+            "zh" => "娜娜在吗\n她在干嘛\n室友在不在\n薇薇安现在忙吗",
+            "en" => "is she around\nwhere is the other one\nis she busy right now",
+            "ja" => "彼女いる\n今何してる\n忙しいかな",
+            _ => "",
+        }
+    }
+
+    fn parameters_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {},
+            "required": []
+        })
+    }
+
+    async fn validate_input(&self, input: &Value, _ctx: &ToolUseContext) -> ValidationResult {
+        ValidationResult::success(Some(input.clone()))
+    }
+
+    async fn check_permissions(
+        &self,
+        _input: &Value,
+        _ctx: &ToolUseContext,
+    ) -> PermissionResult {
+        PermissionResult::allow()
+    }
+
+    async fn call(&self, _args: Value, ctx: &ToolUseContext) -> ToolResult {
+        // 只读查询，不走变化检测——显式询问不应该被"状态没变"吞掉。
+        match CROSS_CHARACTER_BUS.roommate_status_text(&ctx.char_id, "zh") {
+            Some(status) => ToolResult::standard_success(
+                &status,
+                Some(json!({ "status": status })),
+            ),
+            None => ToolResult::standard_error(
+                "当前没有可查询的室友",
+                Some("NoRoommate"),
+                None,
+            ),
+        }
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::Pet
+    }
+
+    /// 只读查询，无副作用
     fn risk(&self) -> ToolRiskTier {
         ToolRiskTier::Safe
     }

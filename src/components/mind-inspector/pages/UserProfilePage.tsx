@@ -6,15 +6,17 @@
  *
  * 分层展示：
  * - 身份卡 Hero：姓名 + 关键标签（年龄/性别/职业/所在地）— 角色主题渐变
- * - L0 基础身份（姓名/年龄/性别/职业/所在地）— 可编辑、可锁定
- * - L0.5 结构化偏好（生日/作息/常用网站/喜欢的游戏/兴趣爱好）— 可编辑、可锁定
+ * - L0 基础身份（姓名/年龄/性别/职业/所在地/生日）— 两列排版，可编辑、可锁定
  * - L1 近期状态（最近目标/当前项目/近期偏好）— 只读，由对话中自动抽取
  * - L2 自由事实 — 可新增/删除
+ *
+ * L0.5 结构化偏好（作息/常用网站/喜欢的游戏/兴趣爱好）仍由后端抽取并注入 prompt，
+ * 但不在本页面展示 —— 属于 agent 内部认知，不需要暴露给用户。
  *
  * 视觉风格：iOS 面板（磨砂玻璃 + continuous corners）。
  */
 
-import React, { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 import { invoke } from '@tauri-apps/api/core';
@@ -117,18 +119,15 @@ interface DiscoveryProfileView {
 
 type CharacterId = 'vivian' | 'nana';
 
-// L0 + L0.5 字段定义（顺序与后端 ordered_types 一致）
-const BASIC_FIELD_DEFS: Array<{ type: string; layer: 'L0' | 'L0.5' }> = [
-  { type: 'name', layer: 'L0' },
-  { type: 'age', layer: 'L0' },
-  { type: 'gender', layer: 'L0' },
-  { type: 'occupation', layer: 'L0' },
-  { type: 'location', layer: 'L0' },
-  { type: 'birthday', layer: 'L0.5' },
-  { type: 'sleep_schedule', layer: 'L0.5' },
-  { type: 'favorite_website', layer: 'L0.5' },
-  { type: 'favorite_game', layer: 'L0.5' },
-  { type: 'hobby', layer: 'L0.5' },
+// L0 基础身份字段（顺序与后端 ordered_types 一致）
+// 生日属于基础身份而非偏好资料；L0.5 偏好字段不在本页面展示。
+const BASIC_FIELD_DEFS: string[] = [
+  'name',
+  'age',
+  'gender',
+  'occupation',
+  'location',
+  'birthday',
 ];
 
 // 入场揭示动画关键帧（一次性注入，并尊重系统“减弱动态效果”设置）
@@ -245,23 +244,6 @@ const CharacterTabs: React.FC<CharacterTabsProps> = ({ character, setCharacter, 
     </div>
   );
 };
-
-// ============================================================
-// RowDivider — 详情列表行之间的细分割线
-// ============================================================
-
-const RowDivider: React.FC = () => (
-  <div
-    aria-hidden
-    className="profile-row-divider"
-    style={{
-      height: 1,
-      marginLeft: 122,
-      marginRight: SPACING.cardPadding,
-      background: COLORS.border,
-    }}
-  />
-);
 
 // ============================================================
 // IdentityRow — 单条资料字段（详情列表行：标签 + 值 + 内联编辑 + 锁定）
@@ -1399,9 +1381,6 @@ const UserProfilePage: React.FC<{ characterId?: CharacterId; embedded?: boolean 
     return m;
   }, [profile]);
 
-  const l0Fields = BASIC_FIELD_DEFS.filter((d) => d.layer === 'L0');
-  const l05Fields = BASIC_FIELD_DEFS.filter((d) => d.layer === 'L0.5');
-
   const accent = embedded ? CLAUDE_ACCENT : CHARACTER_ACCENT[character];
   const l1 = profile?.recent_state;
   const hasL1Data =
@@ -1461,7 +1440,7 @@ const UserProfilePage: React.FC<{ characterId?: CharacterId; embedded?: boolean 
             <p>{character === 'vivian' ? 'Vivian' : 'Nana'} 从相处中慢慢认识的你。双击字段即可修改，锁定后不会被自动覆盖。</p>
           </div>
           <dl className="profile-hero-stats" aria-label="画像概览">
-            <div><dt>已了解的资料</dt><dd>{BASIC_FIELD_DEFS.filter((def) => basicMap.get(def.type)?.content).length}<small> / {BASIC_FIELD_DEFS.length}</small></dd></div>
+            <div><dt>已了解的资料</dt><dd>{BASIC_FIELD_DEFS.filter((type) => basicMap.get(type)?.content).length}<small> / {BASIC_FIELD_DEFS.length}</small></dd></div>
             <div><dt>补充事实</dt><dd>{profile?.custom_facts.length ?? 0}</dd></div>
             <div><dt>近期线索</dt><dd>{(l1?.recent_goals.length ?? 0) + (l1?.current_projects.length ?? 0) + (l1?.recent_preferences.length ?? 0)}</dd></div>
           </dl>
@@ -1483,7 +1462,7 @@ const UserProfilePage: React.FC<{ characterId?: CharacterId; embedded?: boolean 
         </div>
       </Reveal>
 
-      {/* === L0 基础身份 === */}
+      {/* === L0 基础身份（两列） === */}
       <Reveal delay={0.12} className="profile-basic-reveal">
         <section className="profile-section profile-identity-section">
           <SectionTitle style={{ marginBottom: SPACING.sm }}>
@@ -1493,46 +1472,19 @@ const UserProfilePage: React.FC<{ characterId?: CharacterId; embedded?: boolean 
             </span>
           </SectionTitle>
           <Card className="profile-card profile-list-card" style={{ padding: 0, overflow: 'hidden' }}>
-            {l0Fields.map((def, idx) => (
-              <Fragment key={def.type}>
-                {idx > 0 && <RowDivider />}
+            <div className="profile-identity-grid">
+              {BASIC_FIELD_DEFS.map((type) => (
                 <IdentityRow
-                  fact={basicMap.get(def.type) ?? null}
-                  label={t(`mind_inspector.profile.field_${def.type}`)}
-                  placeholder={t(`mind_inspector.profile.placeholder_${def.type}`)}
-                  onSave={(content) => handleSaveFact(def.type, content)}
-                  onTogglePin={() => handleTogglePin(def.type, basicMap.get(def.type)?.is_pinned ?? false)}
-                  saving={busyField === def.type}
+                  key={type}
+                  fact={basicMap.get(type) ?? null}
+                  label={t(`mind_inspector.profile.field_${type}`)}
+                  placeholder={t(`mind_inspector.profile.placeholder_${type}`)}
+                  onSave={(content) => handleSaveFact(type, content)}
+                  onTogglePin={() => handleTogglePin(type, basicMap.get(type)?.is_pinned ?? false)}
+                  saving={busyField === type}
                 />
-              </Fragment>
-            ))}
-          </Card>
-        </section>
-      </Reveal>
-
-      {/* === L0.5 结构化偏好 === */}
-      <Reveal delay={0.18} className="profile-preferences-reveal">
-        <section className="profile-section profile-identity-section">
-          <SectionTitle style={{ marginBottom: SPACING.sm }}>
-            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-              <Heart size={14} />
-              {t('mind_inspector.profile.section_preferences')}
-            </span>
-          </SectionTitle>
-          <Card className="profile-card profile-list-card" style={{ padding: 0, overflow: 'hidden' }}>
-            {l05Fields.map((def, idx) => (
-              <Fragment key={def.type}>
-                {idx > 0 && <RowDivider />}
-                <IdentityRow
-                  fact={basicMap.get(def.type) ?? null}
-                  label={t(`mind_inspector.profile.field_${def.type}`)}
-                  placeholder={t(`mind_inspector.profile.placeholder_${def.type}`)}
-                  onSave={(content) => handleSaveFact(def.type, content)}
-                  onTogglePin={() => handleTogglePin(def.type, basicMap.get(def.type)?.is_pinned ?? false)}
-                  saving={busyField === def.type}
-                />
-              </Fragment>
-            ))}
+              ))}
+            </div>
           </Card>
         </section>
       </Reveal>

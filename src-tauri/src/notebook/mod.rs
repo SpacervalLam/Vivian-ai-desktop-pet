@@ -1,7 +1,7 @@
-//! 笔记本模块 - 卡片风格的 HTML 页面生成与管理
+//! 笔记本模块 - 纸页风格的 HTML 页面生成与管理
 //!
 //! 智能体根据搜集到的信息，通过结构化 JSON 描述内容编排，
-//! 后端渲染引擎将 JSON + 预设 CSS 主题合成为漂亮的卡片风格 HTML 页面。
+//! 后端渲染引擎将 JSON + 预设 CSS 主题合成为排版清晰的纸页风格 HTML 页面。
 //!
 //! 架构：
 //! - 数据结构：NoteBook（元数据 + 内容块）
@@ -54,33 +54,45 @@ pub struct NoteBook {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum Layout {
-    /// 封面 + 卡片流（经典卡片风格）
+    /// 封面手册（封面 + 单栏内容）
     #[default]
     CoverFlow,
-    /// 纯文章流（无封面，适合长文）
+    /// 阅读文章（简洁标题 + 连续正文，适合长文）
     Article,
-    /// 图文混排（适合图多文少的场景）
+    /// 图文画册（图片和卡片双栏，窄窗口自动单栏）
     Gallery,
-    /// 简洁卡片（单卡片，适合短消息）
+    /// 轻量短笺（紧凑纸页，适合短消息）
     Simple,
+}
+
+impl Layout {
+    /// 与 serde 的布局键一致，供摘要与前端布局标签使用。
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::CoverFlow => "cover_flow",
+            Self::Article => "article",
+            Self::Gallery => "gallery",
+            Self::Simple => "simple",
+        }
+    }
 }
 
 /// 配色方案
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum Palette {
-    /// 暖色：珊瑚粉 / 暖黄 / 米白
+    /// 暖色：陶棕 / 米白
     #[default]
     Warm,
-    /// 清新：薄荷绿 / 天蓝 / 冰白
+    /// 清新：青绿 / 浅鼠尾草
     Fresh,
-    /// 优雅：紫罗兰 / 深灰蓝 / 淡紫
+    /// 优雅：雾紫 / 浅丁香
     Elegant,
-    /// 可爱：粉色 / 橙黄 / 粉白
+    /// 可爱：柔粉 / 玫瑰灰
     Cute,
-    /// 冷色：天蓝 / 薰衣草紫 / 雾蓝
+    /// 冷色：灰蓝 / 雾白
     Cool,
-    /// 自然：橄榄绿 / 棕褐 / 嫩绿
+    /// 自然：苔绿 / 浅草色
     Nature,
 }
 

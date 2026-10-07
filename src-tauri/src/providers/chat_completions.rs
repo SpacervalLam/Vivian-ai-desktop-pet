@@ -130,9 +130,7 @@ impl ChatCompletionsProvider {
                     }
                     // 回传 reasoning_content（DeepSeek / Qwen 风格）
                     if let Some(reasoning) = &m.reasoning {
-                        if !reasoning.is_empty() {
-                            msg["reasoning_content"] = json!(reasoning);
-                        }
+                        msg["reasoning_content"] = json!(reasoning);
                     }
                     result.push(msg);
                 }

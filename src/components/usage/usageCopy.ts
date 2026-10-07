@@ -1,6 +1,6 @@
 const zh = {
   title: '本地调用用量', source: 'API 返回 · 本地记录', subtitle: '从真实响应出发，了解用量花在了哪里。',
-  days: '天', today: '今天', refresh: '刷新', refreshing: '读取中…', updated: '更新于',
+  locale: 'zh-CN', tokenUnit: 'Token', clearSearch: '清空搜索', days: '天', today: '今天', refresh: '刷新', refreshing: '读取中…', updated: '更新于',
   trend: '趋势总览', models: '模型', routes: '任务路由', tasks: '用途分类',
   tokens: 'Token', requests: '已记录调用', total: '记录 Token 总量', calls: '已记录调用', cacheShare: '缓存读取占输入', activeModels: '使用过的模型',
   tokenNote: '含输入、输出与缓存', callsNote: '仅统计返回非零用量的调用', cacheNote: '按已记录输入 Token 计算', modelNote: '按响应对应的模型名称',
@@ -25,7 +25,7 @@ const zh = {
 };
 const en: typeof zh = {
   title: 'Local API usage', source: 'API-reported · local records', subtitle: 'See where your recorded model usage goes.',
-  days: 'days', today: 'Today', refresh: 'Refresh', refreshing: 'Refreshing…', updated: 'Updated',
+  locale: 'en-US', tokenUnit: 'Tokens', clearSearch: 'Clear search', days: 'days', today: 'Today', refresh: 'Refresh', refreshing: 'Refreshing…', updated: 'Updated',
   trend: 'Overview', models: 'Models', routes: 'Routes', tasks: 'Purposes',
   tokens: 'Tokens', requests: 'Recorded calls', total: 'Recorded tokens', calls: 'Recorded calls', cacheShare: 'Cached share of input', activeModels: 'Models used',
   tokenNote: 'Input, output and cache included', callsNote: 'Calls reporting nonzero usage only', cacheNote: 'Based on recorded input tokens', modelNote: 'Grouped by model name',
@@ -50,7 +50,7 @@ const en: typeof zh = {
 };
 const ja: typeof zh = { ...en,
   title: 'ローカル API 使用量', source: 'API の報告値 · ローカル記録', subtitle: '記録されたモデル使用量の内訳を確認できます。',
-  days: '日', today: '今日', refresh: '更新', refreshing: '読込中…', updated: '更新時刻',
+  locale: 'ja-JP', tokens: 'トークン', tokenUnit: 'トークン', clearSearch: '検索をクリア', days: '日', today: '今日', refresh: '更新', refreshing: '読込中…', updated: '更新時刻',
   trend: '概要', models: 'モデル', routes: 'ルート', tasks: '用途',
   total: '記録トークン数', calls: '記録された呼び出し', requests: '記録された呼び出し', cacheShare: '入力のキャッシュ割合', activeModels: '使用モデル数',
   input: '非キャッシュ入力', output: '出力', hit: 'キャッシュ読取', cache_creation: 'キャッシュ作成',

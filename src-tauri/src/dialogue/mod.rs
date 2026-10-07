@@ -122,6 +122,8 @@ pub struct DialogueManager {
     /// 已落盘消息的尾部缓存（最近 20 条），供 flush 时重复检测，
     /// 避免每次刷新全量读文件
     written_tail: Mutex<Vec<HistoryEntry>>,
+    /// Cross-character utterances already recorded in this character's history.
+    recorded_utterances: Mutex<std::collections::HashSet<String>>,
     /// JSONL 就绪标志：首次 flush 前恢复尾部缓存
     jsonl_ready: Mutex<bool>,
     /// 串行化追加、清空和元数据修补，避免整文件重写覆盖新消息。
@@ -142,6 +144,7 @@ impl DialogueManager {
             current_channel: Mutex::new("wechat".to_string()),
             current_session_id: Mutex::new(None),
             written_tail: Mutex::new(Vec::new()),
+            recorded_utterances: Mutex::new(std::collections::HashSet::new()),
             jsonl_ready: Mutex::new(false),
             history_io: Mutex::new(()),
             conversation_boundaries: crate::memory::conversation_semantics::ConversationBoundaryStore::new(
@@ -293,7 +296,15 @@ impl DialogueManager {
     ///
     /// 用于图片消息等需要在 HistoryEntry.metadata 中附加 `kind`/`image_path` 的场景。
     /// 自定义字段会合并到默认 `{"source":"chat"}` 之上（同名键覆盖）。
-    pub fn add_message_with_metadata(&self, msg: ChatMessage, metadata: serde_json::Value) {
+    pub fn add_message_with_metadata(&self, msg: ChatMessage, mut metadata: serde_json::Value) {
+        let utterance_id = metadata.get("utterance_id").and_then(|id| id.as_str()).filter(|id| !id.is_empty())
+            .map(str::to_string).or_else(|| metadata.get("speaker").and_then(|speaker| speaker.as_str())
+                .and_then(crate::cross_character::current_utterance_id));
+        if let Some(id) = &utterance_id {
+            // Deduplicate before updating working memory, persistence, UI or the event ledger.
+            if !self.recorded_utterances.lock().insert(id.clone()) { return; }
+            metadata["utterance_id"] = serde_json::json!(id);
+        }
         // 1. 注入当前渠道标记到 ChatMessage.meta（用于工作记忆通道隔离过滤）
         let default_channel = self.current_channel.lock().clone();
         let session_id = self.current_session_id.lock().clone();
@@ -324,6 +335,7 @@ impl DialogueManager {
 
         // 3. 构造 HistoryEntry 并合并自定义 metadata + 最终渠道标记 + 会话 ID
         let mut entry = Self::message_to_entry(&msg_with_channel, &session_id);
+        if let Some(id) = utterance_id { entry.id = id; }
         if let (Some(target), Some(patch)) =
             (entry.metadata.as_object_mut(), metadata.as_object())
         {
@@ -558,7 +570,9 @@ impl DialogueManager {
         for msg in recent {
             let existing_ts = msg.timestamp as i64;
             let existing_content = msg.content.trim();
-            if existing_ts == new_ts_key
+            if new_msg.metadata.get("utterance_id").is_none()
+                && msg.metadata.get("utterance_id").is_none()
+                && existing_ts == new_ts_key
                 && existing_content == new_content_key
                 && msg.role == new_msg.role
                 && msg.metadata.get("sticker") == new_msg.metadata.get("sticker")
@@ -688,6 +702,7 @@ impl DialogueManager {
         fs::write(&path, "")?;
         self.buffer.lock().clear();
         self.messages.lock().clear();
+        self.recorded_utterances.lock().clear();
         self.conversation_boundaries.clear()?;
         *self.written_tail.lock() = Vec::new();
         Ok(())
@@ -713,6 +728,8 @@ impl DialogueManager {
     /// 从磁盘加载历史到内存（用于上下文构建，截断到 max_history_len）
     pub fn load_history(&mut self) -> VivianResult<()> {
         let entries = self.read_all_messages();
+        self.recorded_utterances.lock().extend(entries.iter().filter_map(|entry|
+            entry.metadata.get("utterance_id").and_then(|id| id.as_str()).map(str::to_string)));
         let chat_messages: Vec<ChatMessage> = entries
             .into_iter()
             .map(|e| {
@@ -802,7 +819,9 @@ impl DialogueManager {
             let entry_content = entry.content.trim();
             let entry_role = entry.role.as_str();
             let dup = merged.iter().any(|m| {
-                m.content.trim() == entry_content
+                entry.metadata.get("utterance_id").is_none()
+                    && m.metadata.get("utterance_id").is_none()
+                    && m.content.trim() == entry_content
                     && (m.timestamp as i64) == entry_ts
                     && m.role == entry_role
             });
@@ -1125,6 +1144,22 @@ impl ChatMessageHistory for DialogueManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stable_utterance_is_saved_once_and_distinct_repeats_survive() {
+        let mgr = DialogueManager::new(10, "utterance-test");
+        let meta = |id: &str| serde_json::json!({"utterance_id":id,"channel":"cross_character"});
+        mgr.add_message_with_metadata(ChatMessage::assistant("同一句话"), meta("one"));
+        mgr.add_message_with_metadata(ChatMessage::assistant("同一句话"), meta("one"));
+        mgr.add_message_with_metadata(ChatMessage::assistant("同一句话"), meta("two"));
+        assert_eq!(mgr.get_history().len(), 2);
+        let entries = mgr.buffer.lock();
+        assert_eq!(entries.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(), ["one", "two"]);
+        let mut second = entries[1].clone();
+        second.timestamp = entries[0].timestamp;
+        assert!(!DialogueManager::is_duplicate(&second, &entries[..1]));
+        assert!(DialogueManager::is_duplicate(&entries[0], &entries[..1]));
+    }
 
     #[test]
     fn test_add_and_truncate() {

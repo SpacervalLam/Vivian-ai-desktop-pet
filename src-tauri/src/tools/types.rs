@@ -218,7 +218,10 @@ impl ToolScene {
 ///
 /// 覆盖常见任务动词：帮助/查找/打开/执行/搜索/读写/启动/关闭/运行/播放/创建/删除/修改/复制/移动/下载/上传
 /// 中文 / 英文 / 日文 三语支持
-fn contains_task_keyword(text: &str) -> bool {
+///
+/// `pub(crate)`：除场景判定外，generation 侧判断「本轮是否指向可执行任务」
+/// 也用这张表，避免同一概念出现第二份词表。
+pub(crate) fn contains_task_keyword(text: &str) -> bool {
     use once_cell::sync::Lazy;
     use regex::Regex;
 

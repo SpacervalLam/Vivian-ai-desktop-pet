@@ -69,12 +69,12 @@ interface NoteSummary {
 // ============================================================
 
 const PALETTE_COLORS: Record<string, string> = {
-  warm: 'linear-gradient(135deg, #FF6B6B 0%, #FFA07A 100%)',
-  fresh: 'linear-gradient(135deg, #4ECDC4 0%, #45B7D1 100%)',
-  elegant: 'linear-gradient(135deg, #9B59B6 0%, #6C5CE7 100%)',
-  cute: 'linear-gradient(135deg, #FF8FB1 0%, #FFC75F 100%)',
-  cool: 'linear-gradient(135deg, #5B8DEF 0%, #6C5CE7 100%)',
-  nature: 'linear-gradient(135deg, #6B9E3F 0%, #C19A6B 100%)',
+  warm: 'linear-gradient(135deg, #9C4F35, #D5B79B)',
+  fresh: 'linear-gradient(135deg, #277268, #A3C4AF)',
+  elegant: 'linear-gradient(135deg, #655477, #BEAEC9)',
+  cute: 'linear-gradient(135deg, #A4546C, #E1B5BF)',
+  cool: 'linear-gradient(135deg, #3F6593, #AAC1D8)',
+  nature: 'linear-gradient(135deg, #596D44, #B7C49A)',
 };
 
 const PALETTE_KEYS = Object.keys(PALETTE_COLORS);
@@ -108,9 +108,9 @@ const LAYOUT_OPTIONS: { value: string; labelKey: string }[] = [
 ];
 
 const LAYOUT_LABELS: Record<string, Record<string, string>> = {
-  'zh-CN': { cover_flow: '封面卡片', article: '文章流', gallery: '图文混排', simple: '简洁卡片' },
-  en: { cover_flow: 'Cover Flow', article: 'Article', gallery: 'Gallery', simple: 'Simple' },
-  ja: { cover_flow: 'カバー', article: '記事', gallery: 'ギャラリー', simple: 'シンプル' },
+  'zh-CN': { cover_flow: '封面手册', article: '阅读文章', gallery: '图文画册', simple: '轻量短笺' },
+  en: { cover_flow: 'Handbook', article: 'Article', gallery: 'Journal', simple: 'Short Note' },
+  ja: { cover_flow: 'ハンドブック', article: '読みもの', gallery: '画帳', simple: '短いメモ' },
 };
 
 const BLOCK_TYPES: AddableBlockType[] = [
@@ -334,6 +334,11 @@ const NotebookPage: React.FC = () => {
   // 从 pageParams 获取笔记 ID 并定位
   useEffect(() => {
     if (nav?.pageParams?.notebookId) {
+      // 采集归档保留在知识库中，不通过跳转在笔记页打开。
+      if (String(nav.pageParams.notebookId).startsWith('note_collected_')) {
+        nav.clearPageParams();
+        return;
+      }
       const nbChar = nav.pageParams.notebookCharacter as CharacterId | undefined;
       if (nbChar) setCharacter(nbChar);
       setSelectedId(nav.pageParams.notebookId as string);

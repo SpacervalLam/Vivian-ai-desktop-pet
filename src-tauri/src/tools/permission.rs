@@ -571,6 +571,17 @@ pub async fn check_tool_permission(
         ));
     }
 
+    // Selected workspaces are already authorized. Keep explicit Ask/Deny and read-only
+    // checks above, but do not ask again for every bounded file operation.
+    if let Some(operation) = file_operation_for(tool_name) {
+        let paths = extract_file_paths(tool_name, args);
+        if context.is_work_agent() && !context.working_directory.is_empty()
+            && !paths.is_empty() && paths.iter().all(|path| context.is_path_authorized(path)
+                && check_file_permission(path, operation, permission_context).is_allowed()) {
+            return tool.check_permissions(args, context).await;
+        }
+    }
+
     // 5.5 矩阵判定 Ask：风险等级超出访问级别直接允许范围，向用户请求确认
     //     （always_allow 显式规则已在步骤 4 返回，优先级高于矩阵判定）
     if matrix_ask {
@@ -920,6 +931,22 @@ mod tests {
         assert_eq!(confirmation_tier("run_command", &json!({"command": "Get-Date"})),
             ToolConfirmationTier::ConfirmAtAction);
         assert!(is_confirmation_required_tool("run_command"));
+    }
+
+    #[tokio::test]
+    async fn workspace_file_approval_honors_boundaries_and_explicit_ask() {
+        let tool = crate::tools::builtin::coding_tools::EditFileTool::new();
+        let context = ToolUseContext::default().with_working_directory("C:/work").with_agent_kind("work");
+        let permissions = PermissionContextBuilder::new(PermissionMode::Default)
+            .with_access_level(AgentAccessLevel::FsWrite).with_working_directory("C:/work", false).build();
+        assert!(check_tool_permission(&tool, &json!({"path": "C:/work/report.txt"}), &context, &permissions).await.is_allowed());
+        assert!(check_tool_permission(&tool, &json!({"path": "C:/outside/report.txt"}), &context, &permissions).await.requires_confirmation());
+        let explicit = PermissionContextBuilder::new(PermissionMode::Default)
+            .with_access_level(AgentAccessLevel::FsWrite).with_working_directory("C:/work", false).ask("edit_file").build();
+        assert!(check_tool_permission(&tool, &json!({"path": "C:/work/report.txt"}), &context, &explicit).await.requires_confirmation());
+        let read_only = PermissionContextBuilder::new(PermissionMode::Default)
+            .with_access_level(AgentAccessLevel::ReadOnly).with_working_directory("C:/work", true).build();
+        assert!(check_tool_permission(&tool, &json!({"path": "C:/work/report.txt"}), &context, &read_only).await.is_denied());
     }
 
     struct TestTool;

@@ -1,3 +1,5 @@
+import taskCatalog from '../../../src-tauri/prompts/routing/task_catalog.json';
+
 export interface Usage {
   input: number;
   output: number;
@@ -69,10 +71,6 @@ export function selectedDays(report: UsageReport, selection: UsageSelection | nu
 }
 
 /** Names match the routing matrix. Purpose tags are a separate perspective. */
-export const routeLabelKeys: Record<string, string> = {
-  chat: 'chat', reasoning: 'reasoning', work_agent: 'work_agent', vision_describe: 'vision_describe',
-  diary: 'diary', memory: 'memory', consolidation: 'consolidation', reflection: 'reflection',
-  inner_monologue: 'inner_monologue', emotion_analysis: 'emotion_analysis', knowledge_acquisition: 'knowledge_acquisition',
-  translation: 'translation', bystander_judge: 'bystander_judge', simple_judge: 'simple_judge', intent_judge: 'intent_judge',
-  asr_polish: 'asr_polish', text_rewrite: 'text_rewrite',
-};
+export const routeLabelKeys: Record<string, string> = Object.fromEntries(
+  taskCatalog.map(({ id, labelKey }) => [id, labelKey]),
+);

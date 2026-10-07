@@ -1215,6 +1215,11 @@ pub struct PromptParts {
     pub worldbook_block: Option<String>,
     /// 工具描述文本（None 时使用默认工具列表）
     pub tools: Option<String>,
+    /// 延迟工具索引（`<available-deferred-tools>`，仅名称）。
+    ///
+    /// 仅 native FC 通道需要：那条通道下 `tools` 整块会被 `build_tools_block` 丢弃，
+    /// 未召回工具的 schema 与名称都到不了模型手上。这里单独留一份索引注入回去。
+    pub deferred_tools_section: Option<String>,
     /// 情绪上下文（可选）
     pub emotion_context: Option<String>,
     /// 内心反应（可选，从心理状态合成的第一人称内心感受，让 LLM 带着"刚在想什么"说话）
@@ -1415,6 +1420,73 @@ pub fn build_memory_group_section(parts: &PromptParts) -> String {
     format!(
         "{}\n{}",
         section_heading("memory_group", lang),
+        subs.join("\n\n")
+    )
+}
+
+/// 室友组 section："还有谁在"
+///
+/// 把原先四个各自带标题、互相分流的段落合并为单一主题：
+/// 在场状态（`roommate_status`）+ 行为印象（`roommate_cognitive`）
+/// + 我对她的印象（`relationship_facts`）+ 三方关系（`social_state`）。
+///
+/// ## 为什么要合并
+/// 同一个事实（"还有另一个角色存在"）被拆进四个 section 各自强调一遍，
+/// 重复本身就是显著性放大器——模型看到同一件事被反复摆到眼前，自然会认为
+/// 这是本轮要表达的要点，于是开口就是"Nana 也在呢"。合并后只有一处提到她，
+/// 层级由 ### 子标题承载。
+///
+/// ## 为什么带门禁
+/// 这一段全部是**背景状态**，不是谈资。`social_state` 早就带了同类提示
+/// （"不要向用户提及关系分数、指标或阶段"），而室友在场状态一直没有——
+/// 同一份代码里已经知道这个模式，只是没套过来。这里统一补上。
+pub fn build_who_else_section(parts: &PromptParts) -> String {
+    let lang = &parts.language;
+    let mut subs: Vec<String> = Vec::new();
+
+    // 在场状态：只在首次观测 / 状态切换时才有值（见 cross_character.rs
+    // `observe_roommate_presence`）。稳态为空 → 整个段落可能只剩关系知识。
+    if let Some(status) = parts.roommate_status.as_deref() {
+        if !status.trim().is_empty() {
+            subs.push(status.to_string());
+        }
+    }
+    // 行为印象：仅跨角色会话注入（调用侧控制），主对话不给
+    if let Some(cog) = parts.roommate_cognitive_section.as_deref() {
+        if !cog.trim().is_empty() {
+            subs.push(demote_heading_level(cog));
+        }
+    }
+    if let Some(facts) = parts.relationship_facts_section.as_deref() {
+        if !facts.trim().is_empty() {
+            subs.push(demote_heading_level(facts));
+        }
+    }
+    if let Some(social) = parts.social_state_section.as_deref() {
+        if !social.trim().is_empty() {
+            subs.push(demote_heading_level(social));
+        }
+    }
+
+    if subs.is_empty() {
+        return String::new();
+    }
+
+    let gate = match normalize_lang(lang) {
+        "en" => "(Background state, not material for this turn. Unless the user just asked about her, \
+                 or a change actually bears on this exchange, do not restate or report her presence, \
+                 do not open or close with it, and do not speak for her.)",
+        "ja" => "（これは背景状態であり、今回の話題ではない。ユーザーが彼女について尋ねた場合や、\
+                 変化が今回のやり取りに関わる場合を除き、彼女の在席を復唱・報告したり、\
+                 それで話を始めたり締めたり、彼女の代わりに発言したりしないこと。）",
+        _ => "（以上是背景状态，不是本轮的谈资。除非用户这轮正好问到她、或某个变化确实与本次交流相关，\
+               否则不要复述、不要播报她在不在，不要用它开场或收尾，也不要替她说话。）",
+    };
+
+    format!(
+        "{}\n{}\n{}",
+        section_heading("who_else", lang),
+        gate,
         subs.join("\n\n")
     )
 }
@@ -1827,24 +1899,17 @@ impl PromptBuilder {
             }
         }
 
-        // 室友在线状态：自然叙述谁在家/在线（世界快照的一部分）
-        push!(1, "roommate_status", parts
-            .roommate_status
-            .as_deref()
-            .map(|s| format!("{}\n{}", section_heading("who_else", &parts.language), s))
-            .unwrap_or_default());
-
-        // 室友认知印象：从室友 Private Mind 派生的行为印象（跨角色认知传播）
-        push!(2, "roommate_cognitive", parts.roommate_cognitive_section.clone().unwrap_or_default());
+        // 室友组：在场状态 + 行为印象 + 我对她的印象 + 三方关系，合并为单一 `## 还有谁在`
+        push!(1, "who_else", build_who_else_section(parts));
 
         // 近期环境事件：来自统一事件账本，世界刚发生的事
         // 提到 rank=1：这是"刚刚发生了什么"的唯一来源，是开口就能说的具体素材。
         push!(1, "environment_events", parts.environment_events.clone().unwrap_or_default());
 
-        // ── 社交关系：关系认知事实、共享世界、社交状态 ──
-        push!(2, "relationship_facts", parts.relationship_facts_section.clone().unwrap_or_default());
+        // 共享世界知识：两角色共同知晓的世界事实。
+        // 不并入 who_else——它讲的是"世界是什么样"，不是"谁在场"，
+        // 硬塞进同一段会让两个不相干的主题互相分流注意力。
         push!(2, "shared_world", parts.shared_world_section.clone().unwrap_or_default());
-        push!(1, "social_state", parts.social_state_section.clone().unwrap_or_default());
 
         // ── 画像组：用户事实 + 认知模型 + 动态行为合并为单一 section ──
         push!(2, "user_profile_group", build_user_profile_group_section(parts));
@@ -1919,6 +1984,8 @@ impl PromptBuilder {
         // 工具列表（放最后，让 LLM 先进入意识状态再看可用工具）
         // 原生 FC 路径下工具描述通过 API 的 tools 参数传递，不在 prompt 中注入
         push!(0, "tools", build_tools_block(parts.tools.as_deref(), parts.enable_native_fc, &parts.language));
+        // 原生 FC 路径下上面那段为空串，未召回工具的名单由这一段补上
+        push!(0, "deferred_tools", parts.deferred_tools_section.clone().unwrap_or_default());
 
         // 在本轮输入附近保留简短的交流焦点，防止远处的角色标签抢占接话目的。
         push!(0, "conversation_focus", include_str!("../../prompts/framework/conversation_focus.en.md").to_string());
@@ -2310,6 +2377,59 @@ pub fn build_inner_reaction(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 室友组：四个来源合并为单一顶层 section，子块降级为 ###。
+    ///
+    /// 合并的全部意义是"同一个事实只出现一处"——回到四个带 ## 的独立段落，
+    /// 就等于把"她也在场"重新变成每轮最显著的信息。
+    #[test]
+    fn who_else_merges_roommate_sources_under_one_heading() {
+        let parts = PromptParts {
+            language: "zh".into(),
+            roommate_status: Some("Nana 现在在线——就在桌面上，有一阵子了。".into()),
+            roommate_cognitive_section: Some("## 室友认知印象\n- 似乎在关注：聊天".into()),
+            relationship_facts_section: Some("## 我对Nana的印象\n- [风格] 她说话慢".into()),
+            social_state_section: Some("## 社交状态\n你 ↔ 用户: 好朋友".into()),
+            // 共享世界知识属于"世界是什么样"，不应被卷进这一组
+            shared_world_section: Some("## 共享世界知识\n- [环境] 桌子靠窗".into()),
+            ..Default::default()
+        };
+        let section = build_who_else_section(&parts);
+
+        assert_eq!(section.matches("## 还有谁在").count(), 1, "只能有一个顶层标题");
+        assert!(!section.contains("\n## "), "子块必须降级为 ###，不能另有顶层标题");
+        assert_eq!(section.matches("\n### ").count(), 3, "三个子块应各自降级一级");
+        assert!(section.contains("Nana 现在在线"), "在场状态原文保留");
+        assert!(!section.contains("共享世界知识"), "共享世界知识不属于 who_else");
+
+        // 门禁必须随段落在场——它是对"不要播报她在不在"的唯一显式约束
+        assert!(section.contains("不要复述"), "中文门禁缺失");
+        for (lang, marker) in [("en", "do not restate"), ("ja", "復唱")] {
+            let localized = build_who_else_section(&PromptParts { language: lang.into(), ..parts.clone() });
+            assert!(localized.contains(marker), "{lang} 门禁缺失");
+        }
+    }
+
+    /// 稳态（在场状态为空）时这一组只剩关系知识，不产生"她在场"的任何暗示。
+    #[test]
+    fn who_else_without_presence_carries_no_presence_line() {
+        let parts = PromptParts {
+            language: "zh".into(),
+            roommate_status: None,
+            social_state_section: Some("## 社交状态\n你 ↔ 用户: 好朋友".into()),
+            ..Default::default()
+        };
+        let section = build_who_else_section(&parts);
+        assert!(section.contains("还有谁在"));
+        assert!(section.contains("社交状态"));
+        assert!(!section.contains("在线") && !section.contains("桌面上"));
+    }
+
+    #[test]
+    fn who_else_is_absent_when_every_source_is_empty() {
+        let parts = PromptParts { language: "zh".into(), ..Default::default() };
+        assert!(build_who_else_section(&parts).is_empty());
+    }
 
     #[test]
     fn natural_delivery_references_survive_full_and_compact_prompt_assembly() {

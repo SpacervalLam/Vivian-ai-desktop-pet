@@ -117,8 +117,27 @@ fn persona_reply_was_already_streamed(rounds: usize) -> bool {
     rounds == 1
 }
 
-fn keeps_companion_persona(channel: &str) -> bool {
-    matches!(channel, "direct" | "proactive" | "wechat" | "cross_character")
+pub(crate) fn keeps_companion_persona(channel: &str) -> bool {
+    matches!(channel, "direct" | "broadcast" | "proactive" | "wechat" | "cross_character")
+}
+
+/// 本轮是否由 reasoning 执行会话接管（而非直接以首轮草稿收场）。
+///
+/// 这是**唯一**的接管判据，generation 侧推送首轮文本前也用它，两条路径不能各判一次。
+///
+/// 旧判据只有 `!first_calls.is_empty()`：等于"能不能干活"完全取决于模型首轮是否
+/// 恰好愿意动手。当工具注入残缺（召回没命中）时它连可用的工具都没有，自然不动手，
+/// 于是永远进不了执行侧——而零调用审计的开关又挂在同一个条件上，形成闭环。
+/// 现在补上显式意图判据：用户明确提出可执行请求时，即便首轮没动手，也把执行权
+/// 交给 reasoning 侧，由它来决定要做什么，而不是让主对话模型自己反问。
+pub(crate) fn takes_over_execution(
+    channel: &str,
+    first_calls: &[StructuredToolCall],
+    executable_intent: bool,
+) -> bool {
+    keeps_companion_persona(channel)
+        && (!first_calls.is_empty() || executable_intent)
+        && !is_deliberation_only(first_calls)
 }
 
 /// 工具查到信息后，提醒角色用自己的语气转述关键内容（三语言 + 渠道感知）。
@@ -364,6 +383,10 @@ pub(crate) struct ReactParams {
     pub(crate) memory_text: String,
     /// 原始请求；执行代理不接收角色提示或主对话历史。
     pub(crate) user_request: String,
+    /// 本轮用户请求是否指向可执行任务（由 generation 侧显式判定，见
+    /// `AIResponseGenerationRunnable::requests_execution`）。为 true 时即便首轮
+    /// 没有工具调用，也由执行会话接管。
+    pub(crate) executable_intent: bool,
     /// 轮次上限（0 = 无限，由终止条件自然结束）
     pub(crate) max_rounds: u32,
     pub(crate) compress_threshold_tokens: usize,
@@ -712,10 +735,7 @@ pub(crate) async fn run_react_loop(
     emitter: &SharedStreamEmitter,
     params: ReactParams,
 ) -> crate::error::VivianResult<(String, Vec<ToolCallResult>, usize, Option<f64>)> {
-    if keeps_companion_persona(&params.channel)
-        && !params.first_calls.is_empty()
-        && !is_deliberation_only(&params.first_calls)
-    {
+    if takes_over_execution(&params.channel, &params.first_calls, params.executable_intent) {
         return super::tool_execution::run_companion_tools(router, tool_call_manager, emitter, params).await;
     }
     let ReactParams {
@@ -727,6 +747,7 @@ pub(crate) async fn run_react_loop(
         channel,
         memory_text,
         user_request: _,
+        executable_intent: _,
         max_rounds,
         compress_threshold_tokens,
         compress_keep_recent,

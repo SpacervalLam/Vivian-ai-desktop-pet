@@ -14,6 +14,28 @@
   transition: background .15s ease, color .15s ease;
 }
 .settings-minimize-button:hover { background: var(--panel-bg-hover); color: var(--panel-text); }
+.settings-routing-group {
+  margin-top: 12px; border: 1px solid var(--panel-border); border-radius: 10px;
+  background: var(--panel-surface); overflow: hidden;
+}
+.settings-routing-group > summary {
+  display: flex; align-items: center; gap: 10px; padding: 14px 16px;
+  cursor: pointer; list-style: none; color: var(--panel-text-secondary); font-weight: 600;
+}
+.settings-routing-group > summary::-webkit-details-marker { display: none; }
+.settings-routing-group > summary::before {
+  content: ''; width: 6px; height: 6px; flex-shrink: 0;
+  border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg);
+}
+.settings-routing-group[open] > summary::before { transform: rotate(45deg); }
+.settings-routing-group > summary:hover { background: var(--panel-bg-hover); }
+.settings-routing-group > summary:focus-visible { outline: 2px solid var(--panel-accent); outline-offset: -3px; }
+.settings-routing-group-count {
+  margin-left: auto; padding: 1px 7px; border-radius: 6px;
+  background: var(--panel-accent-soft); color: var(--panel-accent); font-size: 11px;
+}
+.settings-routing-group-body { padding: 4px 16px 12px; border-top: 1px solid var(--panel-border); }
 .settings-layout { display: flex; flex: 1; min-height: 0; overflow: hidden; }
 .settings-sidebar {
   width: 208px;

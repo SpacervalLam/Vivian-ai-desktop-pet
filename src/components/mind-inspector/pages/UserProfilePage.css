@@ -10,7 +10,10 @@
 }
 
 .profile-root-embedded > [data-reveal] { min-width: 0; }
+/* 偏好资料区块已移除，基础身份是唯一需要自身内部两列排版的区块，
+   因此跨满整行，避免右侧留出空列。 */
 .profile-intro-reveal,
+.profile-basic-reveal,
 .profile-discovery-reveal,
 .profile-recent-reveal,
 .profile-custom-reveal { grid-column: 1 / -1; }
@@ -72,7 +75,20 @@
   background: var(--codex-paper-card, #fffaf0) !important;
   box-shadow: var(--codex-shadow-sm, 0 2px 8px #342b2510) !important;
 }
-.profile-root-embedded .profile-row-divider { margin-left: 16px !important; margin-right: 16px !important; background: var(--memory-line, #e8ddd0) !important; }
+.profile-root-embedded input::placeholder { color: #96938e; opacity: 1; }
+
+/* 基础身份两列网格：靠 cell 边框做分割线，不再使用独立 divider 行 */
+.profile-identity-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.profile-identity-grid > .profile-identity-row { border-color: var(--panel-border); }
+.profile-identity-grid > .profile-identity-row:nth-child(odd) { border-right: 1px solid var(--panel-border); }
+.profile-identity-grid > .profile-identity-row:nth-child(-n + 4) { border-bottom: 1px solid var(--panel-border); }
+.profile-root-embedded .profile-identity-grid > .profile-identity-row { border-color: var(--memory-line, #e8ddd0); }
+.profile-root-embedded .profile-identity-grid > .profile-identity-row:nth-child(odd) { border-right-color: var(--memory-line, #e8ddd0); }
+.profile-root-embedded .profile-identity-grid > .profile-identity-row:nth-child(-n + 4) { border-bottom-color: var(--memory-line, #e8ddd0); }
+
 .profile-root-embedded .profile-identity-row {
   min-height: 48px !important;
   padding: 9px 14px !important;
@@ -98,11 +114,20 @@
 
 @media (max-width: 940px) {
   .profile-root-embedded { grid-template-columns: 1fr; }
-  .profile-basic-reveal, .profile-preferences-reveal { grid-column: 1 / -1; }
 }
 @media (max-width: 650px) {
   .profile-hero { flex-direction: column; align-items: flex-start; padding: 20px; }
   .profile-hero-stats { width: 100%; }
   .profile-hero-stats span { flex: 1; }
   .profile-root-embedded .profile-identity-row { flex-wrap: wrap; }
+}
+
+/* 窄容器下基础身份退回单列，避免标签与值互相挤压 */
+@media (max-width: 700px) {
+  .profile-identity-grid { grid-template-columns: 1fr; }
+  .profile-identity-grid > .profile-identity-row:nth-child(odd) { border-right: none; }
+  .profile-identity-grid > .profile-identity-row:not(:last-child) { border-bottom: 1px solid var(--panel-border); }
+  .profile-identity-grid > .profile-identity-row:nth-child(n + 5) { border-bottom: none; }
+  .profile-root-embedded .profile-identity-grid > .profile-identity-row:not(:last-child) { border-bottom-color: var(--memory-line, #e8ddd0); }
+  .profile-root-embedded .profile-identity-grid > .profile-identity-row:nth-child(n + 5) { border-bottom-color: transparent; }
 }

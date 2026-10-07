@@ -358,6 +358,14 @@ fn resolve_context_window(cfg: &crate::config::manager::AppConfig, model_id: Opt
     crate::providers::capabilities::default_context_window(&cfg.ai.model)
 }
 
+/// Effective default without creating directories; shared with the work page.
+#[tauri::command]
+pub fn coding_default_workspace(state: State<'_, Arc<AppState>>) -> Result<String, String> {
+    let cfg = state.config.read().get_all();
+    crate::utils::workspace::default_workspace(cfg.default_workspace.as_deref())
+        .map(|path| path.to_string_lossy().into_owned())
+}
+
 /// 新建编程会话。
 #[tauri::command]
 pub fn coding_new_session(
@@ -370,14 +378,11 @@ pub fn coding_new_session(
         "[CodingAgent] 新建会话请求: char_id={char_id}, working_directory={working_directory}, mode={}",
         mode.as_deref().unwrap_or("standard")
     );
-    // 工作目录必须存在
-    if !working_directory.is_empty() && !std::path::Path::new(&working_directory).is_dir() {
-        tracing::warn!("[CodingAgent] 新建会话被拒: 工作目录不存在: {working_directory}");
-        return Err(format!("工作目录不存在: {working_directory}"));
-    }
+    let cfg = state.config.read().get_all();
+    let working_directory = crate::utils::workspace::resolve_workspace(
+        &working_directory, cfg.default_workspace.as_deref())?;
     let session = CODING_AGENT.create_session(&char_id, &working_directory, mode.as_deref().unwrap_or("standard"));
     // 按当前配置解析会话上下文窗口（active 工作模型 → 主配置 → 厂商默认）
-    let cfg = state.config.read().get_all();
     let active_id = cfg.active_work_model.as_deref();
     let window = resolve_context_window(&cfg, active_id);
     CODING_AGENT.set_context_window(&session.session_id, window);
@@ -512,6 +517,11 @@ pub fn coding_send_message(
     interjected: Option<bool>,
     guided: Option<bool>,
 ) -> Result<(), String> {
+    if CODING_AGENT.get_session(&session_id).is_some_and(|session| session.working_directory.trim().is_empty()) {
+        let cfg = state.config.read().get_all();
+        let directory = crate::utils::workspace::resolve_workspace("", cfg.default_workspace.as_deref())?;
+        CODING_AGENT.set_workspace(&session_id, &directory)?;
+    }
     let router = state
         .model_router
         .read()

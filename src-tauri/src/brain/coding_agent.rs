@@ -409,6 +409,9 @@ pub struct CodingSession {
     /// 压缩后的旧对话摘要（/compact 生成，注入上下文）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compacted: Option<String>,
+    /// Prefix represented by compacted in model context; full UI history remains intact.
+    #[serde(default)]
+    pub context_start: usize,
     /// 会话产物文件（write_file / edit_file 成功写入的绝对路径，去重）
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deliverables: Vec<String>,
@@ -590,15 +593,9 @@ pub fn workspace_key(path: &str) -> String {
 ///
 /// 落在被裁区间内的条目直接丢弃（对应消息已经不在），其余下标减去 `removed`。
 /// 用于 `message_feedback` / `message_changes` 这类以下标为键的元数据。
-fn reindex_message_meta<T>(map: HashMap<usize, T>, removed: usize) -> HashMap<usize, T> {
-    map.into_iter()
-        .filter_map(|(k, v)| k.checked_sub(removed).map(|nk| (nk, v)))
-        .collect()
-}
-
 /// 调整裁剪边界，避免把一次结构化工具调用与其结果拆开。
 /// `ToolUse` 后可跟多个 `ToolResult`；落在结果中间时退回调用之前。
-fn intact_history_boundary(messages: &[CodingMessage], mut split: usize) -> usize {
+fn tool_history_boundary(messages: &[CodingMessage], mut split: usize) -> usize {
     // 用户插话、send_image 等可插入调用和结果之间，不能只看相邻 role。
     let mut group_start = None;
     let mut pending = std::collections::HashSet::new();
@@ -640,6 +637,16 @@ fn intact_history_boundary(messages: &[CodingMessage], mut split: usize) -> usiz
     }
 }
 
+fn intact_history_boundary(messages: &[CodingMessage], split: usize) -> usize {
+    let mut boundary = tool_history_boundary(messages, split);
+    // Thinking and commentary belong to the following assistant tool call.
+    while boundary > 0 && boundary < messages.len()
+        && matches!(messages[boundary - 1].role, CodingRole::Thinking | CodingRole::Commentary) {
+        boundary -= 1;
+    }
+    boundary
+}
+
 /// 只提交生成摘要时确实看到的前缀。LLM 运行期间新增的插话/工具结果必须留下。
 fn commit_compaction(
     session: &mut CodingSession,
@@ -647,17 +654,16 @@ fn commit_compaction(
     previous_summary: &Option<String>,
     summary: String,
 ) -> Result<(), String> {
-    let prefix_unchanged = session.messages.len() >= old.len()
-        && serde_json::to_value(&session.messages[..old.len()])
+    let end = session.context_start.saturating_add(old.len());
+    let prefix_unchanged = session.messages.len() >= end
+        && serde_json::to_value(&session.messages[session.context_start..end])
             .and_then(|current| serde_json::to_value(old).map(|snapshot| current == snapshot))
             .unwrap_or(false);
     if session.compacted != *previous_summary || !prefix_unchanged {
         return Err("压缩期间会话历史已变化，请重试".into());
     }
     session.compacted = Some(summary);
-    session.messages.drain(..old.len());
-    session.message_feedback = reindex_message_meta(std::mem::take(&mut session.message_feedback), old.len());
-    session.message_changes = reindex_message_meta(std::mem::take(&mut session.message_changes), old.len());
+    session.context_start = end;
     Ok(())
 }
 
@@ -864,6 +870,7 @@ impl CodingAgentService {
             plan: None,
             feedback: Vec::new(),
             compacted: None,
+            context_start: 0,
             deliverables: Vec::new(),
             file_changes: Vec::new(),
             message_feedback: HashMap::new(),
@@ -2010,9 +2017,10 @@ impl CodingAgentService {
         let (old, existing, wd) = {
             let guard = self.sessions.read();
             let s = guard.get(session_id).ok_or("会话不存在")?;
-            let total = s.messages.len();
+            let active = &s.messages[s.context_start.min(s.messages.len())..];
+            let total = active.len();
             let split = intact_history_boundary(
-                &s.messages,
+                active,
                 total.saturating_sub(COMPACT_KEEP_MESSAGES).min(COMPACT_MAX_MESSAGES),
             );
             if split < COMPACT_MIN_MESSAGES {
@@ -2022,7 +2030,7 @@ impl CodingAgentService {
                 });
             }
             (
-                s.messages[..split].to_vec(),
+                active[..split].to_vec(),
                 s.compacted.clone(),
                 s.working_directory.clone(),
             )
@@ -2935,7 +2943,7 @@ impl CodingAgentService {
                         .await;
                 let duration_ms = tool_start.elapsed().as_millis() as u64;
                 self.stats_tool_done(session_id, duration_ms);
-                let (ok, summary, observation) = if result.success {
+                let (ok, summary, observation) = if tool_execution_succeeded(&result) {
                     // write_file 的 diff 只服务界面「变更」页：内容本就是模型刚写出的，
                     // 再作为工具结果回传纯属重复计费 → 回传前摘掉（edit_file 的 diff 照旧保留）。
                     let data = match &result.data {
@@ -2965,7 +2973,7 @@ impl CodingAgentService {
                 if ok {
                     // 任何成功都是进展：清空失败停滞计数
                     fail_counts.clear();
-                    if is_substantive_progress(&call.name, result.success, &result) {
+                    if is_substantive_progress(&call.name, tool_execution_succeeded(&result), &result) {
                         made_progress = true;
                         round_progress = true;
                     }
@@ -3093,7 +3101,7 @@ impl CodingAgentService {
         };
         let (prompt, fallback) = stopped_turn_report(&history, reason, suggestion);
         let request = LLMRequest::new(crate::providers::base::TASK_WORK_AGENT, vec![
-            ChatMessage::system("你处于任务最终总结阶段。任务已停止且未完成，禁止调用工具、继续执行或宣称任务成功。仅根据给出的执行记录，用用户的语言说明已完成工作、未完成事项、具体失败原因及可操作的修复建议。区分已验证事实与建议，不要虚构修改或检查结果。"),
+            ChatMessage::system("你处于任务最终总结阶段。执行已中断。禁止调用工具或继续执行。根据事实区分已生成产物、已验证部分与尚未完成事项；不得把模型请求失败等同于产物失败，也不得预报整个目标成功。仅根据给出的执行记录，用用户的语言说明已完成工作、未完成事项、具体失败原因及可操作的修复建议。区分已验证事实与建议，不要虚构修改或检查结果。"),
             ChatMessage::user(&prompt),
         ]).with_character_id(char_id).with_max_tokens(1400);
         let started = std::time::Instant::now();
@@ -3111,7 +3119,7 @@ impl CodingAgentService {
         self.stats_step_done(session_id, started.elapsed().as_millis() as u64, None);
         let text = match result {
             Ok(Ok(report)) if !report.trim().is_empty() => {
-                format!("任务未完成。{reason}\n\n{}", report.trim())
+                format!("执行已中断。{reason}\n\n{}", report.trim())
             }
             _ => fallback,
         };
@@ -3123,7 +3131,7 @@ impl CodingAgentService {
         let _ = app.emit("coding:assistant_message", serde_json::json!({
             "session_id": session_id, "content": text,
         }));
-        self.report_work_completion(session_id, "任务未完成", &text.chars().take(1600).collect::<String>());
+        self.report_work_completion(session_id, "执行已中断", &text.chars().take(1600).collect::<String>());
         self.finish_turn(app.clone(), session_id, CodingStatus::Idle);
     }
 
@@ -3358,7 +3366,7 @@ impl CodingAgentService {
             self.stats_tool_done(session_id, duration_ms);
             // 与标准循环共用同一份改动登记：code 模式不改的话，「变更」面板与回复末尾的
             // 「修改文件」清单都会漏掉编排模式做出的改动。
-            if result.success {
+            if tool_execution_succeeded(&result) {
                 self.record_tool_file_change(
                     Some(&app),
                     session_id,
@@ -3367,7 +3375,7 @@ impl CodingAgentService {
                     &result,
                 );
             }
-            let (ok, text) = if result.success {
+            let (ok, text) = if tool_execution_succeeded(&result) {
                 let data = serde_json::to_string(
                     result.data.as_ref().unwrap_or(&serde_json::Value::Null),
                 )
@@ -3575,8 +3583,12 @@ impl CodingAgentService {
             let start = session.messages.iter().rposition(|m| m.role == CodingRole::User).unwrap_or(0);
             session.messages[start..].to_vec()
         }).unwrap_or_default();
-        let (_, report) = stopped_turn_report(&history, &class.user_message,
-            "按上述原因检查模型配置、账户配额与网络连接；修复后继续未完成的步骤。模型当前不可用，此报告依据已有执行记录生成。");
+        let suggestion = if class.error_type == "reasoning_history" {
+            "修复思考历史回传协议后继续收尾；不要因此重做已生成的文件。本报告依据已有执行记录生成。"
+        } else {
+            "按上述具体原因检查请求协议、模型配置、账户或网络；恢复后继续剩余步骤。本报告依据已有执行记录生成。"
+        };
+        let (_, report) = stopped_turn_report(&history, &class.user_message, suggestion);
         let _ = app.emit("coding:summary_started", serde_json::json!({"session_id": session_id}));
         self.push_host_message(session_id, CodingRole::Assistant, &report);
         let _ = app.emit("coding:assistant_message", serde_json::json!({
@@ -3620,7 +3632,7 @@ impl CodingAgentService {
     /// 用于压缩预检，补上「只看上一轮上报值」的滞后。
     fn estimate_pending_context(s: &CodingSession) -> u64 {
         let [system_tokens, tools_tokens, _] = s.last_context_breakdown;
-        let start = s.messages.len().saturating_sub(MAX_HISTORY_MESSAGES);
+        let start = s.messages.len().saturating_sub(MAX_HISTORY_MESSAGES).max(s.context_start.min(s.messages.len()));
         let history_tokens: usize = s.messages[start..]
             .iter()
             .map(|m| crate::utils::token_estimate::estimate_tokens(&m.content))
@@ -3654,8 +3666,8 @@ impl CodingAgentService {
                 .get(session_id)
                 .map(|s| {
                     (
-                        s.messages.len() > COMPACT_KEEP_MESSAGES + COMPACT_MIN_MESSAGES,
-                        s.messages.len(),
+                        s.messages.len().saturating_sub(s.context_start) > COMPACT_KEEP_MESSAGES + COMPACT_MIN_MESSAGES,
+                        s.messages.len().saturating_sub(s.context_start),
                         s.last_context_tokens,
                         Self::estimate_pending_context(s),
                         s.context_window,
@@ -3798,18 +3810,20 @@ impl CodingAgentService {
         // 历史裁剪：保留最近 MAX_HISTORY_MESSAGES 条。
         // 正常路径下超限会先被 maybe_auto_compact 归档成摘要，这里不该真的裁掉东西；
         // 一旦裁了说明压缩没生效（失败或未触发），留 warning 便于定位。
-        let start = intact_history_boundary(
-            &session.messages,
-            session.messages.len().saturating_sub(MAX_HISTORY_MESSAGES),
+        let active = &session.messages[session.context_start.min(session.messages.len())..];
+        let start = session.context_start.min(session.messages.len()) + intact_history_boundary(
+            active, active.len().saturating_sub(MAX_HISTORY_MESSAGES),
         );
-        if start > 0 {
+        if start > session.context_start {
             tracing::warn!(
                 "[CodingAgent] 会话历史超出 {MAX_HISTORY_MESSAGES} 条上限，兜底裁掉最早 {start} 条（未经摘要）"
             );
         }
+        let mut pending_reasoning = String::new();
         for msg in &session.messages[start..] {
             match msg.role {
                 CodingRole::User => {
+                    pending_reasoning.clear();
                     // @-mention 文件引用：把引用的文件内容追加到用户消息（含读取失败提示）
                     let mut user_text = if let Some(refs) = &msg.file_refs {
                         if refs.is_empty() {
@@ -3870,7 +3884,9 @@ impl CodingAgentService {
                     } else {
                         msg.content.as_str()
                     };
-                    messages.push(ChatMessage::assistant(text));
+                    let mut assistant = ChatMessage::assistant(text);
+                    assistant.reasoning = Some(pending_reasoning.clone());
+                    messages.push(assistant);
                 }
                 CodingRole::ToolUse => {
                     // 结构化工具调用：还原为带 tool_calls 的 assistant 消息
@@ -3880,12 +3896,13 @@ impl CodingAgentService {
                         .and_then(|v| serde_json::from_value(v.clone()).ok())
                         .unwrap_or_default();
                     if calls.is_empty() {
-                        messages.push(ChatMessage::assistant(&msg.content));
+                        let mut assistant = ChatMessage::assistant(&msg.content);
+                        assistant.reasoning = Some(std::mem::take(&mut pending_reasoning));
+                        messages.push(assistant);
                     } else {
-                        messages.push(ChatMessage::assistant_with_tool_calls(
-                            msg.content.clone(),
-                            calls,
-                        ));
+                        let mut assistant = ChatMessage::assistant_with_tool_calls(msg.content.clone(), calls);
+                        assistant.reasoning = Some(std::mem::take(&mut pending_reasoning));
+                        messages.push(assistant);
                     }
                 }
                 CodingRole::ToolResult => {
@@ -3901,7 +3918,8 @@ impl CodingAgentService {
                 }
                 // Notice 只面向用户界面，不回传 LLM：压缩结果已通过
                 // `session.compacted` 注入 system prompt，重复回传纯属噪声
-                CodingRole::Notice | CodingRole::Thinking => {}
+                CodingRole::Thinking => { pending_reasoning = msg.content.clone(); }
+                CodingRole::Notice => {}
             }
         }
         messages
@@ -4130,7 +4148,9 @@ fn classify_llm_failure(raw: &str) -> ClassifiedLlmError {
             "permission_denied",
             "没有访问该服务的权限，请检查账户配置。".into(),
         ),
-        LlmErrorKind::BadRequest => ("bad_request", "请求参数有误，请检查模型配置。".into()),
+        LlmErrorKind::BadRequest if raw.contains("reasoning_text") || raw.contains("reasoning_content") => (
+            "reasoning_history", "模型拒绝了请求：思考模式的历史推理内容未正确回传，属于会话协议错误。已有执行结果仍保留。".into()),
+        LlmErrorKind::BadRequest => ("bad_request", "模型拒绝了请求参数，需检查请求协议与模型配置。".into()),
         _ if raw.contains("MAIN_API_NOT_CONFIGURED") => (
             "no_main_api",
             "尚未配置主模型 API，请先在设置中完成配置。".into(),
@@ -4543,6 +4563,14 @@ fn resolve_file_refs(
 fn tool_failure_text(result: &crate::tools::types::ToolResult) -> String {
     let message = result.data.as_ref().and_then(|data| data.get("message"))
         .and_then(serde_json::Value::as_str).filter(|message| !message.trim().is_empty());
+    if result.success && !tool_execution_succeeded(result) {
+        let data = result.data.as_ref().unwrap();
+        let payload = data.get("data").unwrap_or(data);
+        return format!("{}\n{}\n{}", message.unwrap_or("命令执行失败"),
+            payload.get("stderr").and_then(serde_json::Value::as_str).unwrap_or(""),
+            payload.get("stdout").and_then(serde_json::Value::as_str).unwrap_or(""))
+            .chars().take(TOOL_RESULT_MAX_CHARS).collect();
+    }
     match (message, result.error.as_deref()) {
         (Some(message), Some(code)) if message != code => format!("[{code}] {message}"),
         (Some(message), _) => message.to_string(),
@@ -4593,18 +4621,34 @@ fn research_delivery_hint(messages: &[CodingMessage]) -> Option<String> {
 }
 
 /// 总结只消费本轮真实记录；限制上下文，并在模型不可用时保留失败与执行事实。
+fn tool_execution_succeeded(result: &crate::tools::types::ToolResult) -> bool {
+    result.success && !result.data.as_ref().is_some_and(|data| {
+        let data = data.get("data").filter(|value| value.is_object()).unwrap_or(data);
+        data.get("success").and_then(serde_json::Value::as_bool) == Some(false)
+            || data.get("exit_code").and_then(serde_json::Value::as_i64).is_some_and(|code| code != 0)
+    })
+}
+
 fn stopped_turn_report(history: &[CodingMessage], reason: &str, suggestion: &str) -> (String, String) {
     let goal = history.iter().find(|m| m.role == CodingRole::User)
         .map(|m| m.content.chars().take(4000).collect::<String>()).unwrap_or_default();
     let results: Vec<_> = history.iter().filter(|m| m.role == CodingRole::ToolResult).collect();
     let succeeded = results.iter().filter(|m| m.tool_success == Some(true)).count();
     let failed = results.iter().filter(|m| m.tool_success == Some(false)).count();
-    let completed = results.iter().rev().filter(|m| m.tool_success == Some(true)).take(4)
+    let completed = results.iter().rev().filter(|m| m.tool_success == Some(true)).take(8)
         .map(|m| format!("- {}：{}", m.tool_name.as_deref().unwrap_or("工具"), readable_tool_record(m)))
         .collect::<Vec<_>>().join("\n");
     let failures = results.iter().rev().filter(|m| m.tool_success == Some(false)).take(4)
         .map(|m| format!("- {}：{}", m.tool_name.as_deref().unwrap_or("工具"), readable_tool_record(m)))
         .collect::<Vec<_>>().join("\n");
+    let artifact_evidence = results.iter().filter(|m| m.tool_name.as_deref() == Some("run_command") && m.tool_success == Some(true))
+        .filter_map(|m| serde_json::from_str::<serde_json::Value>(&m.content).ok())
+        .flat_map(|value| {
+            let payload = value.get("data").unwrap_or(&value);
+            payload.get("stdout").and_then(serde_json::Value::as_str).unwrap_or("")
+                .lines().filter(|line| line.to_lowercase().contains(".pptx") || line.starts_with("SAVED:"))
+                .map(|line| line.chars().take(500).collect::<String>()).collect::<Vec<_>>()
+        }).take(8).collect::<Vec<_>>().join("\n");
     let mut remaining = 24000;
     let mut records = Vec::new();
     for message in history.iter().rev().filter(|m| m.role != CodingRole::User && m.role != CodingRole::ToolUse) {
@@ -4619,9 +4663,12 @@ fn stopped_turn_report(history: &[CodingMessage], reason: &str, suggestion: &str
     }
     records.reverse();
     let prompt = format!("用户目标：{goal}\n停止原因：{reason}\n建议方向：{suggestion}\n执行记录（可能截断，仅按记录报告）：\n{}", records.join("\n"));
-    let fallback = format!("任务未完成。{reason}\n\n本轮记录了 {succeeded} 次成功的工具执行、{failed} 次失败的工具执行；这些执行记录不代表目标已完成，剩余工作仍需核验。{}{}\n\n修复建议：{suggestion}",
+    let fallback = format!("执行已中断。{reason}\n\n本轮记录了 {succeeded} 次成功的工具执行、{failed} 次失败的工具执行。已有产物和成功执行记录仍保留；本次中断不代表这些产物失败，目标完成情况与剩余事项需依据下方记录核验。{}{}\n\n修复建议：{suggestion}",
         if completed.is_empty() { String::new() } else { format!("\n\n最近已执行的工作：\n{completed}") },
         if failures.is_empty() { String::new() } else { format!("\n\n最近的失败记录：\n{failures}") });
+    let fallback = if artifact_evidence.is_empty() { fallback } else {
+        format!("{fallback}\n\n已有命令输出中的产物记录（不代表全部验证已完成）：\n{artifact_evidence}")
+    };
     (prompt, fallback)
 }
 
@@ -4743,6 +4790,8 @@ mod compaction_boundary_tests {
         );
         assert_eq!(tool_failure_text(&failure), "[FetchFailed] 抓取失败：HTTP 403 Forbidden");
         assert!(classify_llm_failure("error decoding response body").user_message.contains("模型服务"));
+        let protocol = classify_llm_failure("AI 上游 HTTP 请求失败 (400): The reasoning_text in thinking mode must be passed back to the API");
+        assert!(protocol.user_message.contains("协议错误"));
     }
 
     #[test]
@@ -4779,6 +4828,15 @@ mod compaction_boundary_tests {
         assert!(!should_retry_work_stream("invalid_api_key", 3, 4));
     }
     #[test]
+    fn command_exit_failure_retains_diagnostics() {
+        let failed = crate::tools::types::ToolResult::standard_success("命令退出码 1", Some(serde_json::json!({"exit_code": 1, "success": false, "stderr": "missing module"})));
+        assert!(!tool_execution_succeeded(&failed));
+        assert!(tool_failure_text(&failed).contains("missing module"));
+        let ok = crate::tools::types::ToolResult::standard_success("命令退出码 0", Some(serde_json::json!({"exit_code": 0, "success": true})));
+        assert!(tool_execution_succeeded(&ok));
+    }
+
+    #[test]
     fn stopped_turn_report_preserves_failure_and_real_results() {
         let user = message(CodingRole::User, "修复项目");
         let mut success = message(CodingRole::ToolResult, "文件已写入");
@@ -4790,17 +4848,22 @@ mod compaction_boundary_tests {
         let (prompt, fallback) = stopped_turn_report(&[user, success, failure], "连续三轮无进展", "检查构建配置");
         assert!(prompt.contains("修复项目"));
         assert!(prompt.contains("文件已写入"));
-        assert!(fallback.starts_with("任务未完成。连续三轮无进展"));
+        assert!(fallback.starts_with("执行已中断。连续三轮无进展"));
         assert!(fallback.contains("1 次成功"));
+        assert!(fallback.contains("本次中断不代表这些产物失败"));
         assert!(fallback.contains("1 次失败"));
         assert!(fallback.contains("run_command：找不到构建命令"));
         assert!(fallback.contains("修复建议：检查构建配置"));
+        let mut artifact = message(CodingRole::ToolResult, r#"{"data":{"stdout":"SAVED: C:\\Desktop\\news.pptx"}}"#);
+        artifact.tool_name = Some("run_command".into());
+        artifact.tool_success = Some(true);
+        assert!(stopped_turn_report(&[artifact], "模型请求中断", "继续汇报").1.contains("news.pptx"));
     }
 
     #[test]
     fn stopped_turn_report_handles_empty_and_bounds_context() {
         let (_, fallback) = stopped_turn_report(&[], "配额不足", "补充配额");
-        assert!(fallback.contains("任务未完成。配额不足"));
+        assert!(fallback.contains("执行已中断。配额不足"));
         let history = vec![message(CodingRole::ToolResult, &"长".repeat(5000)); 100];
         let (prompt, _) = stopped_turn_report(&history, "轮数耗尽", "缩小下一轮目标");
         assert!(prompt.chars().count() < 24500);
@@ -4929,13 +4992,60 @@ mod compaction_boundary_tests {
     }
 
     #[test]
+    fn reasoning_roundtrip_and_repeated_compaction_keep_full_history() {
+        let mut session = CodingSession {
+            session_id: "test".into(), char_id: "vivian".into(), delegated_by_companion: false,
+            working_directory: String::new(), extra_workspaces: Vec::new(), title: String::new(),
+            mode: "standard".into(), permission: "workspace_write".into(), model_id: None,
+            reasoning_level: "low".into(), goal: None, plan_mode: false, plan: None,
+            feedback: Vec::new(), compacted: None, context_start: 0, deliverables: Vec::new(),
+            file_changes: Vec::new(), message_feedback: HashMap::new(),
+            message_changes: HashMap::new(), messages: vec![message(CodingRole::User, "old")],
+            status: CodingStatus::Idle, updated_at: 0, stats: CodingStats::default(),
+            last_context_tokens: 0, last_context_breakdown: [0, 0, 0], context_window: 128_000,
+            work_todos: Vec::new(), turn_changed_paths: Vec::new(),
+        };
+        let initial = session.messages.clone();
+        session.messages.push(message(CodingRole::Thinking, "reasoning for file creation"));
+        session.messages.push(message(CodingRole::Commentary, "writing the file"));
+        let mut call = message(CodingRole::ToolUse, "tool intent");
+        call.tool_arguments = Some(serde_json::json!([{
+            "id": "call-1", "name": "write_file", "arguments": {"path": "result.pptx", "content": "test"}
+        }]));
+        session.messages.push(call);
+        let mut result = message(CodingRole::ToolResult, "file created");
+        result.tool_call_id = Some("call-1".into());
+        session.messages.push(result);
+        assert_eq!(intact_history_boundary(&session.messages, 3), 1);
+        commit_compaction(&mut session, &initial, &None, "original task".into()).unwrap();
+        let service = CodingAgentService { sessions: RwLock::new(BTreeMap::from([("test".into(), session.clone())])) };
+        let outgoing = service.build_llm_messages("test", "vivian", "standard");
+        let call = outgoing.iter().find(|m| m.tool_calls.as_ref().is_some_and(|calls| !calls.is_empty())).unwrap();
+        assert_eq!(call.reasoning.as_deref(), Some("reasoning for file creation"));
+        assert_eq!(outgoing.iter().filter(|m| m.role == "tool").count(), 1);
+        let serialized = crate::providers::message_format::serialize(
+            crate::providers::spec::MessageFormat::ChatCompletions, &outgoing, &None);
+        assert!(serialized.to_string().contains("reasoning for file creation"));
+        assert_eq!(session.messages[0].content, "old");
+        let previous = session.compacted.clone();
+        let active = session.messages[session.context_start..].to_vec();
+        commit_compaction(&mut session, &active, &previous, "merged history".into()).unwrap();
+        assert_eq!(session.context_start, session.messages.len());
+        assert_eq!(session.messages.len(), 5);
+        assert_eq!(session.messages[0].role, CodingRole::User);
+        let restored: CodingSession = serde_json::from_value(serde_json::to_value(&session).unwrap()).unwrap();
+        assert_eq!(restored.context_start, 5);
+        assert_eq!(restored.messages[0].content, "old");
+    }
+
+    #[test]
     fn compaction_preserves_messages_appended_during_summary() {
         let mut session = CodingSession {
             session_id: "test".into(), char_id: "vivian".into(), delegated_by_companion: false,
             working_directory: String::new(), extra_workspaces: Vec::new(), title: String::new(),
             mode: "standard".into(), permission: "workspace_write".into(), model_id: None,
             reasoning_level: "low".into(), goal: None, plan_mode: false, plan: None,
-            feedback: Vec::new(), compacted: None, deliverables: Vec::new(),
+            feedback: Vec::new(), compacted: None, context_start: 0, deliverables: Vec::new(),
             file_changes: Vec::new(), message_feedback: HashMap::new(),
             message_changes: HashMap::new(), messages: vec![message(CodingRole::User, "old")],
             status: CodingStatus::Idle, updated_at: 0, stats: CodingStats::default(),
@@ -4946,9 +5056,11 @@ mod compaction_boundary_tests {
         session.messages.push(message(CodingRole::User, "new instruction"));
         session.message_feedback.insert(1, "up".into());
         commit_compaction(&mut session, &snapshot, &None, "old summary".into()).unwrap();
-        assert_eq!(session.messages.len(), 1);
-        assert_eq!(session.messages[0].content, "new instruction");
-        assert_eq!(session.message_feedback.get(&0).map(String::as_str), Some("up"));
+        assert_eq!(session.messages.len(), 2);
+        assert_eq!(session.messages[0].content, "old");
+        assert_eq!(session.messages[1].content, "new instruction");
+        assert_eq!(session.context_start, 1);
+        assert_eq!(session.message_feedback.get(&1).map(String::as_str), Some("up"));
         assert_eq!(session.compacted.as_deref(), Some("old summary"));
     }
 }

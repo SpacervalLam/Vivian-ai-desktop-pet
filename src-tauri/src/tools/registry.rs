@@ -317,6 +317,10 @@ impl ToolSystem {
             request.clone(), std::time::Duration::from_secs(timeout_secs));
         let request = ConfirmationRequest { request_id: id, ..request };
 
+        tracing::info!(request_id = id, tool = tool, char_id = char_id,
+            path = ?arguments.get("path").and_then(|value| value.as_str()),
+            "[ToolSystem] waiting for confirmation");
+
         // emit 给发起角色对应的主窗口（label = char_id），避免广播到其他角色窗口
         // 导致多角色同时使用工具时 suspend/resume 计数器失配
         let emit_result = if request.char_id.is_empty() {

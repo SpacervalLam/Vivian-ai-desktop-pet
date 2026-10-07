@@ -62,6 +62,14 @@ pub fn get_tool_history(state: State<'_, Arc<AppState>>) -> Result<Value, String
     }))
 }
 
+/// Pending confirmations are authoritative; UI events may be lost during window recreation.
+#[tauri::command]
+pub fn get_pending_tool_confirmations(
+    state: State<'_, Arc<AppState>>,
+) -> Vec<crate::tools::confirmation::ConfirmationRequest> {
+    state.tool_system.confirmation.list_pending()
+}
+
 /// After user confirms tool execution request on frontend, return result via this command
 ///
 /// When tool requires user confirmation (e.g. file operations, screenshots, launching apps),

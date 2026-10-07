@@ -1516,6 +1516,7 @@ async fn deliver_cross_character_messages(
                 source_id: char_id.to_string(),
                 target_id: target_id.clone(),
                 message: msg.content.clone(),
+                source_message_id: None,
                 stream_id,
             };
             match CROSS_CHARACTER_BUS.send(app, state, req).await {
@@ -1535,12 +1536,14 @@ async fn deliver_cross_character_messages(
                         let source_id_for_followup = target_id.clone();
                         let target_id_for_followup = char_id.to_string();
                         let reply_text = reply.reply.clone();
+                        let reply_message_id = reply.message_id.clone();
                         tokio::spawn(async move {
                             let followup_stream_id = generate_cross_stream_id();
                             let followup_req = CrossCharacterRequest {
                                 source_id: source_id_for_followup,
                                 target_id: target_id_for_followup,
                                 message: reply_text,
+                                source_message_id: reply_message_id,
                                 stream_id: followup_stream_id,
                             };
                             // 续聊不关心回复，仅投递

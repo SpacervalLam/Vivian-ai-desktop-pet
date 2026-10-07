@@ -62,9 +62,7 @@ pub fn chat_completions(messages: &[ChatMessage], instructions: &Option<String>)
                     msg["tool_calls"] = Value::Array(tc_arr);
                 }
                 if let Some(reasoning) = &m.reasoning {
-                    if !reasoning.is_empty() {
-                        msg["reasoning_content"] = json!(reasoning);
-                    }
+                    msg["reasoning_content"] = json!(reasoning);
                 }
                 result.push(msg);
             }

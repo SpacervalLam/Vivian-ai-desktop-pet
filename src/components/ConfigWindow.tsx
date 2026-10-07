@@ -3221,7 +3221,14 @@ const ConfigWindow: React.FC = () => {
             {Object.keys(llmTestResults).length > 0 && (
               <LlmProbeResults targets={collectLlmTestTargets()} results={llmTestResults} testing={llmTesting} />
             )}
-            {ROUTING_TASKS.map((task, index) => {
+            {[...new Set(ROUTING_TASKS.map((task) => task.groupKey))].map((groupKey) => (
+              <details className="settings-routing-group" key={groupKey}>
+                <summary>
+                  <span>{t(groupKey)}</span>
+                  <span className="settings-routing-group-count">{ROUTING_TASKS.filter((task) => task.groupKey === groupKey).length}</span>
+                </summary>
+                <div className="settings-routing-group-body">
+            {ROUTING_TASKS.filter((task) => task.groupKey === groupKey).map((task) => {
               const prefix = `routing_matrix.${task.taskType}`;
               const providerType = get(`${prefix}.provider_type`, '') as string;
               const modelVal = (get(`${prefix}.model`, '') as string).trim();
@@ -3238,11 +3245,6 @@ const ConfigWindow: React.FC = () => {
                 && (!needsAppId || !!appIdVal);
               return (
               <React.Fragment key={task.taskType}>
-              {index === 0 || ROUTING_TASKS[index - 1].groupKey !== task.groupKey ? (
-                <div style={{ margin: '20px 0 8px', color: 'var(--panel-text-secondary)', fontSize: 12, fontWeight: 700, letterSpacing: 0.2 }}>
-                  {t(task.groupKey)}
-                </div>
-              ) : null}
               <CollapsibleSection
                 title={t(task.labelKey)}
                 subtitle={t(task.helpKey)}
@@ -3346,6 +3348,9 @@ const ConfigWindow: React.FC = () => {
               </React.Fragment>
               );
             })}
+                </div>
+              </details>
+            ))}
 
           </>
         );

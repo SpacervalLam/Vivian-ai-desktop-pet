@@ -282,11 +282,14 @@ fn recent_tool_context(state: &PipelineState) -> Option<String> {
 /// 各场景下语义召回的工具数量上限
 ///
 /// 闲聊场景工具需求稀疏，给少；任务场景用户明确在做事，给足，
-/// 避免因召回不全打断操作流程。
+/// 避免因召回不全打断操作流程。偏高的一档还要覆盖"同族工具霸榜"：
+/// MCP 浏览器的 back/reload/forward 描述近乎同义，容易一次吃掉多个槽位
+/// （旧值 4 时实测被 3 个 browser + type_text 占满），留出余量才能让
+/// 真正相关的工具挤进来。
 fn semantic_recall_top_n(scene: ToolScene) -> usize {
     match scene {
-        ToolScene::Chat | ToolScene::Idle | ToolScene::LowTrust => 4,
-        ToolScene::Focus => 6,
+        ToolScene::Chat | ToolScene::Idle | ToolScene::LowTrust => 6,
+        ToolScene::Focus => 7,
         // One discovery schema plus up to seven recalled schemas.
         ToolScene::Default | ToolScene::Task => 7,
     }
@@ -561,6 +564,9 @@ impl PromptBuildingStep {
         // 若目标角色再调用此工具回复源角色，会因源角色持 think_lock 等待工具返回而形成死锁
         if state.current_channel == "cross_character" {
             hidden.insert("talk_to_character".to_string());
+            // 同理隐藏 get_roommate_status：这一轮说话的对象就是她本人，
+            // "她此刻在不在"没有意义；她的行为印象在同模式下已由 who_else 段落给出。
+            hidden.insert("get_roommate_status".to_string());
         }
         // 强相关记忆命中时抑制 web_search：本轮记忆区块已注入"优先用记忆回答"
         // 引导（MemoryRetrievalStep 写入 memory_strong_hit），对外隐藏 web_search，
@@ -616,14 +622,20 @@ impl PromptBuildingStep {
             // An unavailable index falls back to discovery, never the entire schema registry.
             Some(names)
         });
-        let recalled = recall.as_ref().map(|names| names.iter().cloned().collect::<HashSet<_>>());
+        let mut recalled = recall.as_ref().map(|names| names.iter().cloned().collect::<HashSet<_>>());
+        if super::generation::AIResponseGenerationRunnable::requests_execution(state) {
+            let mut expanded = Vec::new();
+            crate::pipeline::tool_execution::widen_executor_tools(ts, &mut expanded);
+            recalled.get_or_insert_with(HashSet::new).extend(expanded.into_iter()
+                .map(|tool| tool.name).filter(|name| !hidden.contains(name)));
+        }
         let recalled_order = recall.unwrap_or_default();
         let quiet_chat = state.fast_perception.as_ref().map(|fp| {
             fp.intent.confidence >= PROMPT_ROUTING_CONFIDENCE
                 && !crate::tools::should_filter_tools(&fp.intent.label)
         }).unwrap_or(false);
-        let hidden = if quiet_chat && recalled.as_ref().map(|hits| hits.is_empty()).unwrap_or(false) {
-            hidden.into_iter().chain(ts.list_tool_names().into_iter().filter(|name| name != "tool_search")).collect()
+        let hidden = if quiet_chat && !super::generation::AIResponseGenerationRunnable::requests_execution(state) && recalled.as_ref().map(|hits| hits.is_empty()).unwrap_or(false) {
+            hidden.into_iter().chain(ts.list_tool_names().into_iter().filter(|name| name != "tool_search" && name != "get_roommate_status")).collect()
         } else { hidden };
 
         ToolScope {
@@ -845,16 +857,24 @@ impl PromptBuildingStep {
         // 用户研究：活跃观察课题 + 已确认的行为习惯
         let user_research = self.research.as_ref().and_then(|r| r.build_prompt_section(&self.language));
 
-        // 室友在线状态：一句话提示，让 LLM 知道是否可用 talk_to_character
-        // 通过 CROSS_CHARACTER_BUS 查询 AppState.characters（bus 已持有 AppHandle）
+        // 室友在场状态：**变化驱动**——只在首次观测或状态真正切换时注入一句，
+        // 稳态返回 None。世界状态的价值在"变化"而非当前值；每轮复述"她还在线"
+        // 等于把它变成每轮都新鲜的谈资，模型于是开口就播报"Nana 也在呢"。
+        // 用户主动问"娜娜在吗"走 get_roommate_status 工具，不依赖这一段。
         let roommate_status = if !self.char_id.is_empty() {
-            crate::cross_character::CROSS_CHARACTER_BUS.roommate_status_text(&self.char_id, &self.language)
+            crate::cross_character::CROSS_CHARACTER_BUS
+                .observe_roommate_presence(&self.char_id, &self.language)
         } else {
             None
         };
 
-        // 室友认知印象：从室友 Private Mind 派生的行为印象（注意力/活动/目标/社交意愿）
-        let roommate_cognitive_section = if !self.char_id.is_empty() {
+        // 室友认知印象：从室友 Private Mind 派生的行为印象（注意力/活动/目标/社交意愿）。
+        // **仅跨角色会话注入**——对方就是室友本人时，知道她在忙什么才有意义。
+        // 主对话里 pet_identity 的 ROOMMATE_SAME_BOUNDARY 规定只能从
+        // online / mood / quiet 推断她；每轮塞进注意力焦点与活跃目标，等于授权越界读心
+        // （实测输出："我这就查~对了，Nana 肯定也知道。"）。
+        let is_cross_character_turn = state.current_channel == "cross_character";
+        let roommate_cognitive_section = if !self.char_id.is_empty() && is_cross_character_turn {
             crate::cross_character::CROSS_CHARACTER_BUS.roommate_cognitive_text(&self.char_id, &self.language)
         } else {
             None
@@ -1142,6 +1162,8 @@ impl PromptBuildingStep {
             social_state_section,
             worldbook_block,
             tools,
+            // native FC 通道下由 ainvoke 末尾补齐（延迟工具索引）
+            deferred_tools_section: None,
             emotion_context,
             inner_reaction,
             environment_context: Some(env_ctx),
@@ -1544,6 +1566,8 @@ impl PromptBuildingStep {
             }).await.map_err(|e| crate::error::VivianError::Other(format!("Tool retrieval worker failed: {e}")))?;
             state.metadata["tool_semantic_selection"] = json!({"current_weight":0.8,"context_weight":0.2,
                 "selected":scope.recalled_order,"discovery":"tool_search"});
+            tracing::debug!(scene = ?scope.scene, recalled = ?scope.recalled_order,
+                loaded = ?scope.recalled, hidden = ?scope.hidden, "[PromptBuilder] tool selection");
             Some(scope)
         } else { None };
 
@@ -1575,8 +1599,9 @@ impl PromptBuildingStep {
                     .and_then(serde_json::Value::as_bool).unwrap_or(false)
             );
         }
-        let task_type = config.as_ref().map(RunnableConfig::task_type)
+        let caller_task = config.as_ref().map(RunnableConfig::task_type)
             .unwrap_or_else(|| "chat".to_string());
+        let task_type = super::generation::AIResponseGenerationRunnable::generation_task(&state, &caller_task);
         parts.model_context_window = Some(self.task_context_windows.get(&task_type)
             .copied().unwrap_or(self.default_context_window));
         parts.user_level = self.psychology.as_ref()
@@ -1593,6 +1618,29 @@ impl PromptBuildingStep {
                 .collect();
             if !ids.is_empty() {
                 state.metadata["bg_report_task_ids"] = serde_json::json!(ids);
+            }
+        }
+
+        // 同步生成结构化工具定义（原生 function calling 路径用；文本路径忽略此字段）。
+        // 直接复用 ainvoke 开头算好的共享 ToolScope——场景/隐藏集/语义召回与文本通道
+        // 完全一致：完整 schema = 保底集 ∪ 常驻集 ∪ 召回集，其余降级为仅名称（可用 tool_search 取回）。
+        if let (Some(ts), Some(scope)) = (self.tool_system.as_ref(), tool_scope.as_ref()) {
+            state.tool_definitions = ToolListTool::new(Arc::clone(ts))
+                .get_tool_definitions_for_scene(scope.scene, &scope.hidden, scope.recalled.as_ref(), &self.language);
+        }
+
+        // 延迟工具索引：native FC 下 `parts.tools` 渲染出的整块工具清单会被
+        // `build_tools_block` 丢弃（避免与 API tools 字段重复），于是模型既看不到
+        // 完整 schema 也看不到工具名，tool_search 无从搜起。这里单独留一份"仅名称"
+        // 索引，由 prompt 侧作为独立段落注入。文本路径已经把索引含在 `parts.tools` 里，
+        // 不需要重复注入。
+        if self.enable_native_fc {
+            if let (Some(ts), Some(scope)) = (self.tool_system.as_ref(), tool_scope.as_ref()) {
+                let index = ToolListTool::new(Arc::clone(ts)).get_deferred_tools_index(
+                    scope.scene, &scope.hidden, scope.recalled.as_ref(), &self.language);
+                if !index.is_empty() {
+                    parts.deferred_tools_section = Some(index);
+                }
             }
         }
 
@@ -1646,14 +1694,6 @@ impl PromptBuildingStep {
             }
             sections.push(fallback_output_rules().to_string());
             prompt = sections.join("\n\n");
-        }
-
-        // 同步生成结构化工具定义（原生 function calling 路径用；文本路径忽略此字段）。
-        // 直接复用 ainvoke 开头算好的共享 ToolScope——场景/隐藏集/语义召回与文本通道
-        // 完全一致：完整 schema = 保底集 ∪ 召回集，其余降级为仅名称（可用 tool_search 取回）。
-        if let (Some(ts), Some(scope)) = (self.tool_system.as_ref(), tool_scope.as_ref()) {
-            state.tool_definitions = ToolListTool::new(Arc::clone(ts))
-                .get_tool_definitions_for_scene(scope.scene, &scope.hidden, scope.recalled.as_ref());
         }
 
         // 预存文本回退内容：当 native FC 或 JSON Schema 启用时，prompt 中工具区段和输出格式均为空。
@@ -1909,10 +1949,10 @@ mod component_selection_tests {
         let list = ToolListTool::new(ts.clone());
         let scope = step.compute_tool_scope(&ts, &state, None);
         assert!(scope.recalled.as_ref().unwrap().is_empty());
-        assert_eq!(list.get_tool_definitions_for_scene(scope.scene, &scope.hidden, scope.recalled.as_ref()).iter().map(|d| d.name.as_str()).collect::<Vec<_>>(), ["tool_search"]);
+        assert_eq!(list.get_tool_definitions_for_scene(scope.scene, &scope.hidden, scope.recalled.as_ref(), "en").iter().map(|d| d.name.as_str()).collect::<Vec<_>>(), ["tool_search"]);
         state.fast_perception.as_mut().unwrap().intent.label = "tool_request".into();
         let scope = step.compute_tool_scope(&ts, &state, None);
-        assert!(list.get_tool_definitions_for_scene(scope.scene, &scope.hidden, scope.recalled.as_ref()).iter().any(|d| d.name == "tool_search"));
+        assert!(list.get_tool_definitions_for_scene(scope.scene, &scope.hidden, scope.recalled.as_ref(), "en").iter().any(|d| d.name == "tool_search"));
         step.tool_semantic_filter = Some(Arc::new(crate::tools::ToolSemanticFilter::new(
             Arc::new(ToolEmbeddingFixture { unavailable: true }), "en".into())));
         state.fast_perception.as_mut().unwrap().intent.label = "chat".into();
@@ -1921,6 +1961,47 @@ mod component_selection_tests {
         assert!(!scope.hidden.contains("tool_search"));
         state.metadata["proactive_greeting"] = json!(true);
         assert!(!step.compute_tool_scope(&ts, &state, None).hidden.contains("tool_search"));
+    }
+
+    #[test]
+    fn task_schemas_survive_failed_recall_and_status_stays_core() {
+        let ts = Arc::new(ToolSystem::new());
+        ts.register_tool(Arc::new(crate::tools::builtin::file_tools::ReadFileTool));
+        ts.register_tool(Arc::new(crate::tools::builtin::cross_character_tools::GetRoommateStatusTool::new()));
+        let mut step = PromptBuildingStep::new();
+        step.tool_semantic_filter = Some(Arc::new(crate::tools::ToolSemanticFilter::new(
+            Arc::new(ToolEmbeddingFixture { unavailable: true }), "en".into())));
+        let state = PipelineState { user_input: "帮我制作一份新闻PPT".into(), ..Default::default() };
+        let scope = step.compute_tool_scope(&ts, &state, None);
+        let list = ToolListTool::new(ts.clone());
+        let defs = list.get_tool_definitions_for_scene(scope.scene, &scope.hidden, scope.recalled.as_ref(), "zh-CN");
+        assert!(defs.iter().any(|tool| tool.name == "read_file"));
+        assert!(defs.iter().any(|tool| tool.name == "get_roommate_status"));
+        let quiet = PipelineState { fast_perception: Some(FastPerceptionResult {
+            intent: DimensionResult { label: "chat".into(), confidence: 0.95 }, ..Default::default()
+        }), user_input: "你好".into(), ..Default::default() };
+        let scope = step.compute_tool_scope(&ts, &quiet, None);
+        assert!(list.get_tool_definitions_for_scene(scope.scene, &scope.hidden, scope.recalled.as_ref(), "en")
+            .iter().any(|tool| tool.name == "get_roommate_status"));
+    }
+
+    #[tokio::test]
+    async fn deferred_index_is_in_actual_prompt_before_rendering() {
+        let ts = Arc::new(ToolSystem::new());
+        ts.register_tool(Arc::new(crate::tools::tool_call_manager::ToolSearchTool::new(
+            Arc::new(vec![]), Arc::downgrade(&ts))));
+        ts.register_tool(Arc::new(crate::tools::builtin::file_tools::ReadFileTool));
+        let mut step = PromptBuildingStep::new().with_tool_system(ts);
+        step.enable_native_fc = true;
+        step.tool_semantic_filter = Some(Arc::new(crate::tools::ToolSemanticFilter::new(
+            Arc::new(ToolEmbeddingFixture { unavailable: true }), "en".into())));
+        let state = PipelineState { should_respond: true, user_input: "PPT是什么？".into(), ..Default::default() };
+        let state = PipelineState::from_json(step.ainvoke(state.to_json(), None).await.unwrap());
+        assert!(state.system_prompt.contains("<available-deferred-tools>"));
+        let companion: crate::pipeline::companion_prompt::CompanionPrompt =
+            serde_json::from_value(state.metadata["companion_prompt"].clone()).unwrap();
+        assert!(companion.messages(&[], "test", false, None).iter()
+            .any(|message| message.content.contains("<available-deferred-tools>")));
     }
 
     #[tokio::test]

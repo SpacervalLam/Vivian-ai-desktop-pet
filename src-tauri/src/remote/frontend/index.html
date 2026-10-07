@@ -2,8 +2,8 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-<meta name="theme-color" content="#0A84FF">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content">
+<meta name="theme-color" content="#F7F7FC">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -412,10 +412,146 @@
 
   /* 弹窗：更柔和阴影 */
   .modal { box-shadow: 0 -8px 40px rgba(0,0,0,.14); }
+
+  /* 手机布局：可见导航、独立滚动区域及软键盘安全高度。 */
+  :root {
+    --bg: #F7F7FC; --text: #2D3046; --text2: #74788F;
+    --primary: #7370D9; --ios-blue: #7370D9; --green: #34836C;
+    --nav-height: calc(80px + var(--sb));
+    --app-height: 100dvh; --viewport-top: 0px; --panel-height: 80px;
+  }
+  body { overflow: hidden; }
+  button, input, textarea, select { font-family: inherit; }
+  button { touch-action: manipulation; }
+  button:focus-visible, [tabindex]:focus-visible { outline: 3px solid var(--primary); outline-offset: 3px; }
+  .app { height: var(--app-height); min-height: 0; padding-bottom: var(--nav-height); animation: none; }
+  .home-header { flex-shrink: 0; padding: calc(14px + var(--st)) 24px 10px; background: var(--bg); }
+  .character-switch { display: flex; gap: 4px; padding: 5px; max-width: 340px; margin: 0 auto; background: #EEEEF7; border: 1px solid rgba(110,105,180,.06); border-radius: 22px; }
+  .character-switch button { flex: 1; min-width: 0; min-height: 44px; border: none; background: transparent; color: var(--text2); border-radius: 17px; font-size: 13px; font-weight: 600; transition: background .18s ease, color .18s ease, box-shadow .18s ease; }
+  .character-switch button::before { content: ''; display: inline-block; width: 6px; height: 6px; margin-right: 6px; margin-bottom: 1px; border-radius: 50%; background: #B7A4E8; }
+  .character-switch button[data-character="nana"]::before { background: #E8A9C2; }
+  .character-switch button[data-character="both"]::before { background: #98B9AE; }
+  .character-switch button[aria-pressed="true"] { background: var(--card); color: var(--text); box-shadow: 0 3px 10px rgba(67,59,121,.08), 0 1px 2px rgba(67,59,121,.03); }
+  .main { overflow: hidden; }
+  .stage { background: radial-gradient(ellipse at 50% 35%, rgba(217,207,245,.55), transparent 65%), radial-gradient(ellipse at 90% 65%, rgba(245,220,228,.35), transparent 60%), linear-gradient(180deg, var(--bg), #F0F0F9); }
+  .pet-layer { bottom: calc(var(--panel-height) + 26px); }
+  .pet-shadow { opacity: .6; }
+  .pet-sprite { filter: drop-shadow(0 10px 14px rgba(79,62,121,.14)); }
+  .chat-panel { left: 12px; right: 12px; bottom: 8px; max-height: 55%; overflow: hidden; border-radius: 26px; background: rgba(255,255,255,.72); border: 1px solid rgba(255,255,255,.95); box-shadow: 0 8px 32px rgba(76,66,132,.055); }
+  .direct-msgs { max-height: none; padding: 18px 14px 12px; gap: 14px; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: #D9D6EB transparent; }
+  .direct-msgs:empty { display: none; }
+  .direct-bubble { max-width: 88%; padding: 11px 14px; line-height: 1.7; }
+  .direct-row.ai .direct-bubble { border-radius: 20px 20px 20px 6px; box-shadow: 0 2px 8px rgba(67,59,121,.035); }
+  .direct-row.user .direct-bubble { background: #7975D9; border-radius: 20px 20px 6px 20px; box-shadow: 0 3px 10px rgba(115,112,217,.12); }
+  .direct-meta { font-size: 10px; padding: 0 4px; color: #82849B; }
+  .direct-input-bar { flex-shrink: 0; padding: 10px; align-items: flex-end; gap: 8px; border-top: 1px solid rgba(110,105,180,.06); background: rgba(255,255,255,.7); }
+  .direct-input-bar textarea { min-width: 0; min-height: 46px; padding: 12px 14px; border-radius: 18px; background: #F2F2F9; border: 1px solid transparent; }
+  textarea::placeholder { color: #9697AB; }
+  .direct-input-bar button { width: 46px; height: 46px; border-radius: 17px; background: #7975D9; box-shadow: 0 4px 10px rgba(115,112,217,.16); }
+  .direct-input-bar button:disabled { opacity: .45; box-shadow: none; }
+  .mobile-nav { position: fixed; top: calc(var(--viewport-top) + var(--app-height) - var(--nav-height) + 8px); left: 12px; right: 12px; max-width: 456px; margin: auto; height: 64px; z-index: 35; display: flex; padding: 6px; background: rgba(255,255,255,.95); border: 1px solid rgba(255,255,255,.95); border-radius: 24px; box-shadow: 0 6px 24px rgba(67,59,121,.075); }
+  .mobile-nav button { flex: 1; min-width: 0; border: none; background: none; color: #82849B; border-radius: 18px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; min-height: 48px; font-size: 10px; font-weight: 500; transition: background .18s ease, color .18s ease; }
+  .mobile-nav svg { width: 21px; height: 21px; }
+  .mobile-nav button[aria-current="page"] { color: #6D67C8; background: #F0EDF9; font-weight: 600; }
+  .page { top: var(--viewport-top); bottom: auto; height: calc(var(--app-height) - var(--nav-height)); }
+  .page.open { animation: fadeUp .2s ease; }
+  .page.open .page-body, .page.open .wx-chat { animation: none; }
+  .page-header { flex-shrink: 0; padding: calc(12px + var(--st)) 16px 12px; background: var(--bg); border-bottom: 1px solid rgba(110,105,180,.05); }
+  .back-btn { width: 44px; height: 44px; border-radius: 16px; background: white; box-shadow: 0 2px 8px rgba(67,59,121,.025); }
+  .page-title { font-size: 18px; margin-right: 44px; }
+  .page-body { min-height: 0; overscroll-behavior: contain; }
+  .list-view { padding: 16px 16px 24px; gap: 14px; }
+  .section-title { margin: 12px 0 2px; font-size: 12px; }
+  .card, .mem-card { border-radius: 22px; padding: 18px; box-shadow: 0 3px 14px rgba(67,59,121,.035); }
+  .card .content, .mem-content { font-size: 15px; line-height: 1.7; overflow-wrap: anywhere; }
+  .btn, .btn.small { min-height: 44px; padding: 10px 14px; border-radius: 12px; }
+  .field input, .field textarea, .field select, .block-editor select, .block-editor textarea { font-size: 16px; min-height: 44px; }
+  .mem-tabs { position: sticky; top: 0; z-index: 2; background: var(--bg); padding: 12px 16px; }
+  .mem-tab { min-height: 44px; }
+  .mem-tab.active { box-shadow: none; }
+  .mem-card .mem-head { flex-wrap: wrap; }
+  .todo-item .body { min-width: 0; overflow-wrap: anywhere; }
+  .todo-item .check { width: 44px; height: 44px; background: transparent; }
+  .todo-item .check.done { background: var(--ios-blue); }
+  .wx-chat, .msgs { background: #F2F2F9; min-height: 0; }
+  .msgs { padding: 16px 12px; overscroll-behavior: contain; }
+  .wx-bubble-wrap { max-width: calc(100% - 52px); min-width: 0; }
+  .wx-bubble { line-height: 1.65; overflow-wrap: anywhere; }
+  .wx-row.ai .wx-bubble { border-radius: 6px 20px 20px 20px; box-shadow: 0 2px 8px rgba(67,59,121,.035); }
+  .wx-row.user .wx-bubble { background: #E8E2FA; border-radius: 20px 6px 20px 20px; box-shadow: none; }
+  .wx-bubble img.wx-img { max-width: min(180px, 100%); }
+  .wx-avatar, .wx-contact-avatar { border-radius: 13px; }
+  .avatar-frame { position: relative; display: flex; align-items: center; justify-content: center; overflow: hidden; background: #E7E3F8; color: #6264D9; font-size: 18px; font-weight: 700; }
+  .avatar-frame img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+  .wx-chat-list { background: var(--bg); padding: 12px; }
+  .wx-contact { width: 100%; text-align: left; cursor: pointer; background: white; padding: 16px 14px; border-radius: 18px; margin-bottom: 10px; border: 1px solid var(--separator); }
+  .wx-contact-preview { color: var(--text2); }
+  .wx-input-bar { flex-shrink: 0; padding: 10px 8px; gap: 4px; background: white; }
+  .wx-input-bar textarea { min-height: 44px; border-radius: 13px; background: #F2F3F8; padding: 11px 38px 11px 10px; }
+  .wx-input-bar .wx-icon-btn, .wx-input-bar .wx-send-btn, .wx-input-bar button.stop { width: 44px; height: 44px; flex-shrink: 0; border-radius: 13px; }
+  .wx-input-bar button.stop { border: 0; color: white; display: flex; align-items: center; justify-content: center; }
+  .wx-input-bar .wx-asr-btn { width: 36px; height: 44px; right: 0; }
+  .wx-input-bar .wx-hold-talk { min-height: 44px; }
+  .wx-drawer { flex-shrink: 0; }
+  .wx-drawer:not(.closed) { padding-bottom: 8px; }
+  .wx-emoji-grid { grid-template-columns: repeat(7, 1fr); }
+  .wx-emoji-grid button { min-height: 44px; }
+  .dock { top: var(--viewport-top); max-width: 480px; height: var(--app-height); margin: auto; padding: calc(20px + var(--st)) 20px calc(20px + var(--sb)); gap: 24px; overflow-y: auto; justify-content: safe center; background: rgba(247,247,252,.96); -webkit-mask-image: none; mask-image: none; box-shadow: none; }
+  .dock-heading { position: relative; z-index: 1; color: var(--text); text-align: center; }
+  .dock-heading h2 { font-size: 23px; margin-bottom: 8px; letter-spacing: -.5px; }
+  .dock-heading p { color: var(--text2); font-size: 13px; }
+  .dock-close { position: relative; z-index: 1; min-height: 44px; padding: 10px 28px; border: 1px solid #E7E3F3; border-radius: 24px; background: white; color: var(--text2); font-size: 14px; }
+  .dock-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); width: 100%; max-width: 340px; gap: 12px; padding: 0; }
+  .dock-grid .app-icon { width: auto; min-height: 100px; gap: 10px; padding: 16px 10px; background: white; border-radius: 22px; box-shadow: 0 4px 16px rgba(67,59,121,.035); }
+  .dock-grid .app-icon:last-child { grid-column: 1 / -1; flex-direction: row; justify-content: center; min-height: 76px; gap: 12px; }
+  .dock .icon-label { color: var(--text); text-shadow: none; }
+  .dock .icon-bg { width: 44px; height: 44px; border-radius: 15px; box-shadow: none; }
+  .dock .icon-bg::after { display: none; }
+  .dock .icon-bg svg { width: 23px; height: 23px; }
+  .dock .c-wechat { background: #E7F2ED; color: #4F927C; }
+  .dock .c-memory { background: #EEE8F9; color: #9A79C5; }
+  .dock .c-notes { background: #E8EEF9; color: #7995C5; }
+  .dock .c-todo { background: #F8EDE2; color: #C29A6E; }
+  .dock .c-profile { background: #F8E8EE; color: #C286A1; }
+  .dock .icon-bg svg { color: inherit; }
+  .icon-label { font-size: 13px; }
+  .modal-overlay { top: var(--viewport-top); bottom: auto; height: var(--app-height); padding: 12px 0 0; }
+  .modal { max-height: 100%; overscroll-behavior: contain; padding: 16px 20px calc(20px + var(--sb)); }
+  .confirm-modal { padding: 20px; }
+  .confirm-modal .actions { flex-wrap: wrap; }
+  .confirm-modal .actions .btn { flex: 1 1 100px; }
+  .add-block-row button { min-height: 44px; padding: 10px 14px; }
+  .keyboard-open { --nav-height: 0px; --sb: 0px; }
+  .keyboard-open .mobile-nav { display: none; }
+  .keyboard-open .home-header { display: none; }
+  .keyboard-open .chat-panel { max-height: 100%; }
+  @media (max-width: 359px) {
+    .home-header { padding-left: 16px; padding-right: 16px; }
+    .wx-input-bar { gap: 2px; padding-left: 4px; padding-right: 4px; }
+    .wx-input-bar .wx-icon-btn { width: 40px; }
+    .wx-emoji-grid { grid-template-columns: repeat(6, 1fr); }
+  }
+  @media (max-height: 500px) and (orientation: landscape) {
+    .home-header { padding-top: calc(8px + var(--st)); padding-bottom: 6px; }
+    .dock { justify-content: flex-start; gap: 12px; }
+    .dock-grid { max-width: none; grid-template-columns: repeat(5, minmax(0, 1fr)); }
+    .dock-grid .app-icon:last-child { grid-column: auto; flex-direction: column; min-height: 100px; gap: 10px; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation: none !important; transition: none !important; }
+  }
 </style>
 </head>
 <body>
 <div class="app" id="app">
+
+  <header class="home-header">
+    <div class="character-switch" aria-label="对话角色">
+      <button data-character="vivian" aria-pressed="true" onclick="selectStageCharacter('vivian')">Vivian</button>
+      <button data-character="nana" aria-pressed="false" onclick="selectStageCharacter('nana')">Nana</button>
+      <button data-character="both" aria-pressed="false" onclick="setBothMode(true)">一起聊</button>
+    </div>
+  </header>
 
   <div class="main">
     <!-- 主页：直接对话 -->
@@ -438,10 +574,10 @@
         <div class="pet-bubble" id="bubbleVivian"></div>
         <div class="pet-bubble" id="bubbleNana"></div>
       </div>
-      <div class="chat-panel">
+      <div class="chat-panel" id="directPanel">
         <div class="direct-msgs" id="directMessages"></div>
         <div class="direct-input-bar">
-          <textarea id="directInput" rows="1" placeholder="直接说点什么..." onkeydown="onDirectKeydown(event)"></textarea>
+          <textarea id="directInput" rows="1" aria-label="直接对话消息" placeholder="直接说点什么..." onkeydown="onDirectKeydown(event)" oninput="resizeDirectInput()"></textarea>
           <button id="directSendBtn" onclick="sendDirect()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5"/><path d="m5 12 7-7 7 7"/></svg></button>
         </div>
       </div>
@@ -450,6 +586,7 @@
 
   <!-- 程序坞（下滑呼出的毛玻璃全屏） -->
   <div class="dock" id="dock">
+    <div class="dock-heading"><h2>陪伴与日常</h2><p>把每一次交流，留在这里</p></div>
     <div class="dock-grid">
       <button class="app-icon" onclick="openPage(this, 'wechat')">
         <span class="icon-bg c-wechat"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg></span>
@@ -471,8 +608,16 @@
         <span class="icon-bg c-profile"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="14" x="3" y="5" rx="2"/><circle cx="9" cy="10" r="2"/><path d="M7 15h4"/><path d="M15 9h2"/><path d="M15 13h2"/></svg></span>
         <span class="icon-label">画像</span>
       </button></div>
-    </div>
+    <button class="dock-close" onclick="closeDock()">收起</button>
   </div>
+
+  <nav class="mobile-nav" aria-label="主导航">
+    <button data-page="home" aria-current="page" onclick="goHome()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m3 10 9-7 9 7v10H3z"/><path d="M9 20v-7h6v7"/></svg><span>陪伴</span></button>
+    <button data-page="wechat" onclick="openPage(null, 'wechat')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11a8 8 0 0 1-8 8H7l-4 3V5a2 2 0 0 1 2-2h8a8 8 0 0 1 8 8Z"/><path d="M7 8h10M7 12h7"/></svg><span>聊天</span></button>
+    <button data-page="memory" onclick="openPage(null, 'memory')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 6c-3-3-7-3-9-2v15c3-1 6-1 9 2 3-3 6-3 9-2V4c-2-1-6-1-9 2Zm0 0v15"/></svg><span>记忆</span></button>
+    <button data-page="notes" onclick="openPage(null, 'notes')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="3" width="16" height="18" rx="3"/><path d="M8 8h8M8 12h8M8 16h5"/></svg><span>笔记</span></button>
+    <button data-page="more" aria-expanded="false" aria-controls="dock" onclick="openDock()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="7" height="7" rx="2"/><rect x="14" y="3" width="7" height="7" rx="2"/><rect x="3" y="14" width="7" height="7" rx="2"/><rect x="14" y="14" width="7" height="7" rx="2"/></svg><span>更多</span></button>
+  </nav>
 
   <!-- ===== 次级页：全屏独立视图 ===== -->
 
@@ -628,6 +773,7 @@
     </div>
     <div class="modal-actions">
       <button class="btn outline danger" id="noteDeleteBtn" onclick="deleteNote()">删除</button>
+      <button class="btn outline" onclick="hideModal('noteModal')">取消</button>
       <button class="btn" onclick="saveNote()">保存</button>
     </div>
   </div>
@@ -642,7 +788,7 @@
     <div class="field"><label>优先级</label>
       <select id="todoPriority"><option value="1">普通</option><option value="2">重要</option><option value="3">紧急</option></select>
     </div>
-    <div class="field"><label>截止时间（如 2024-01-15T10:30:00 或 2024-01-15 或 PT2H）</label><input id="todoDue" type="text" placeholder="可选"></div>
+    <div class="field"><label>截止时间（可选）</label><input id="todoDue" type="text" placeholder="如 2026-10-08T10:30 或 PT2H"></div>
     <div class="modal-actions">
       <button class="btn outline" onclick="hideModal('todoModal')">取消</button>
       <button class="btn" onclick="saveTodo()">保存</button>
@@ -655,7 +801,7 @@
   <div class="modal">
     <h3>添加定时提醒</h3>
     <div class="field"><label>提醒内容</label><input id="taskMessage" type="text" placeholder="提醒内容"></div>
-    <div class="field"><label>时间（ISO8601，如 2024-01-15T10:30:00 / 2024-01-15 / PT2H）</label><input id="taskTime" type="text" placeholder="如 PT2H 表示 2 小时后"></div>
+    <div class="field"><label>提醒时间</label><input id="taskTime" type="text" placeholder="如 2026-10-08T10:30 或 PT2H（2 小时后）"></div>
     <div class="field"><label>重复间隔（秒，留空为单次）</label><input id="taskRepeat" type="number" placeholder="可选"></div>
     <div class="modal-actions">
       <button class="btn outline" onclick="hideModal('taskModal')">取消</button>
@@ -700,6 +846,10 @@ function placeholderCharName(id) { return id === 'vivian' ? 'Vivian' : (id === '
 function charAvatarUrl(id) {
   return '/remote/model/' + (id ? id.charAt(0).toUpperCase() + id.slice(1) : 'Vivian') + '/icon.png';
 }
+function charAvatarHtml(id, className) {
+  return '<span class="' + className + ' avatar-frame">' + escapeHtml(charName(id).charAt(0)) +
+    '<img src="' + charAvatarUrl(id) + '" alt="" loading="lazy" onerror="this.remove()"></span>';
+}
 
 // ── 角色选择 ──
 async function loadCharacters() {
@@ -731,7 +881,15 @@ async function switchCharacter(charId) {
 }
 
 // ── 主页 / 次级页导航 ──
+function updateNavigation(id) {
+  document.querySelectorAll('.mobile-nav [data-page]').forEach(button => {
+    const active = button.dataset.page === id || (button.dataset.page === 'more' && ['todo', 'profile'].includes(id));
+    if (active) button.setAttribute('aria-current', 'page');
+    else button.removeAttribute('aria-current');
+  });
+}
 function openPage(el, id) {
+  document.activeElement?.blur();
   const rect = el ? el.getBoundingClientRect() : null;
   closeDock();
   document.querySelectorAll('.page').forEach(p => p.classList.remove('open'));
@@ -743,6 +901,7 @@ function openPage(el, id) {
       page.style.transformOrigin = 'center';
     }
     page.classList.add('open');
+    updateNavigation(id);
   }
   if (id === 'wechat') { showWxList(); }
   else if (id === 'memory') loadMemories();
@@ -751,11 +910,13 @@ function openPage(el, id) {
   else if (id === 'profile') loadProfile();
 }
 function goHome() {
+  document.activeElement?.blur();
   closeDock();
   document.querySelectorAll('.page').forEach(p => p.classList.remove('open'));
   document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
   const t = document.getElementById('tabDirect');
   if (t) t.classList.add('active');
+  updateNavigation('home');
 }
 
 // ── 微信对话 ──
@@ -797,11 +958,12 @@ async function loadWxContacts() {
         const last = (h.history || []).filter(x => x.role !== 'system').pop();
         if (last) { preview = last.content; lastTs = last.timestamp; }
       } catch (e) {}
-      const row = document.createElement('div');
+      const row = document.createElement('button');
       row.className = 'wx-contact';
+      row.type = 'button';
       row.onclick = () => openWxChat(c.id);
       row.innerHTML =
-        '<img class="wx-contact-avatar" src="' + charAvatarUrl(c.id) + '" alt="">' +
+        charAvatarHtml(c.id, 'wx-contact-avatar') +
         '<div class="wx-contact-info">' +
           '<div class="wx-contact-name">' + escapeHtml(c.name) + '</div>' +
           '<div class="wx-contact-preview">' + escapeHtml(preview || '暂无消息') + '</div>' +
@@ -832,7 +994,7 @@ function renderWxRow(role, content, isUser, links, imgSrc) {
   if (isUser) {
     avatarHtml = '<div class="wx-avatar you">我</div>';
   } else {
-    avatarHtml = '<img class="wx-avatar" src="' + charAvatarUrl(wxActiveChar) + '" alt="">';
+    avatarHtml = charAvatarHtml(wxActiveChar, 'wx-avatar');
   }
   let bodyHtml;
   if (imgSrc) {
@@ -892,7 +1054,7 @@ async function sendWxText(text) {
     document.getElementById('wxStopBtn').style.display = 'none';
   }
 }
-function onWxKeydown(e) { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendWx(); } }
+function onWxKeydown(e) { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); sendWx(); } }
 
 // ── 微信输入栏：语音 / 表情 / 媒体 ──
 const WX_EMOJI_LIST = [
@@ -1207,6 +1369,7 @@ async function sendDirect() {
   const text = input.value.trim();
   if (!text || directLoading) return;
   input.value = '';
+  resizeDirectInput();
   directLoading = true;
   document.getElementById('directSendBtn').disabled = true;
   const msgs = document.getElementById('directMessages');
@@ -1225,7 +1388,12 @@ async function sendDirect() {
     input.focus();
   }
 }
-function onDirectKeydown(e) { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendDirect(); } }
+function onDirectKeydown(e) { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); sendDirect(); } }
+function resizeDirectInput() {
+  const input = document.getElementById('directInput');
+  input.style.height = 'auto';
+  input.style.height = Math.min(input.scrollHeight, 100) + 'px';
+}
 async function loadDirectHistory() {
   if (!currentCharId) return;
   const msgs = document.getElementById('directMessages');
@@ -1685,7 +1853,7 @@ async function loadTodos() {
       div.className = 'card todo-item' + (it.completed ? ' completed' : '');
       const prio = 'p' + (it.priority||1);
       const due = it.due_date ? ' · 截止 ' + escapeHtml(it.due_date) : '';
-      div.innerHTML = '<div class="check' + (it.completed?' done':'') + '" onclick="toggleTodo(\'' + it.id + '\')">' + (it.completed?'✓':'') + '</div>' +
+      div.innerHTML = '<button type="button" class="check' + (it.completed?' done':'') + '" aria-label="' + (it.completed?'标记未完成':'标记完成') + '" aria-pressed="' + !!it.completed + '" onclick="toggleTodo(\'' + it.id + '\')">' + (it.completed?'✓':'') + '</button>' +
         '<div class="body"><div class="t"><span class="prio ' + prio + '">' + (it.priority===3?'紧急':it.priority===2?'重要':'普通') + '</span>' + escapeHtml(it.title) + '</div>' +
         (it.description ? '<div class="sub">' + escapeHtml(it.description) + '</div>' : '') +
         '<div class="meta">' + due + '</div>' +
@@ -1886,9 +2054,13 @@ async function resolveConfirm(requestId, action) {
   currentConfirmations = currentConfirmations.filter(c => c.request_id !== requestId);
 }
 function showModal(id) { document.getElementById(id).classList.remove('hidden'); }
-function hideModal(id) { document.getElementById(id).classList.add('hidden'); }
+function hideModal(id) {
+  const modal = document.getElementById(id);
+  if (modal.contains(document.activeElement)) document.activeElement.blur();
+  modal.classList.add('hidden');
+}
 document.querySelectorAll('.modal-overlay').forEach(ov => {
-  ov.addEventListener('click', (e) => { if (e.target === ov) ov.classList.add('hidden'); });
+  ov.addEventListener('click', (e) => { if (e.target === ov) hideModal(ov.id); });
 });
 
 // ── Q 版桌宠渲染（主页舞台：单角色 / 双生）──
@@ -1979,20 +2151,14 @@ function scheduleBlink(charId) {
   );
 }
 
-// 舞台可用高度：舞台顶部到底部输入栏顶部。角色可覆盖消息区（direct-msgs），但不进入输入栏区域。
-// 缓存值：输入框显示时测量一次，折叠后复用同一值，避免角色随面板开合跳动。
-let petUsableHCached = 0;
+// 角色使用聊天面板上方的舞台空间，消息和输入栏不遮挡角色。
 function petUsableHeight() {
   const stageEl = document.getElementById('petStage');
   if (!stageEl) return window.innerHeight;
-  const inputBarEl = document.querySelector('.direct-input-bar');
-  // 输入框可见时测量并缓存；隐藏时用缓存值
-  if (inputBarEl && inputBarEl.offsetParent !== null) {
-    petUsableHCached = Math.max(0, inputBarEl.getBoundingClientRect().top - stageEl.getBoundingClientRect().top);
-    return petUsableHCached;
-  }
-  if (petUsableHCached > 0) return petUsableHCached;
-  return stageEl.getBoundingClientRect().height;
+  const panel = document.querySelector('.chat-panel');
+  const panelH = panel && !panel.classList.contains('collapsed') ? panel.getBoundingClientRect().height : 0;
+  stageEl.style.setProperty('--panel-height', panelH + 'px');
+  return Math.max(0, stageEl.getBoundingClientRect().height - panelH - 26);
 }
 
 /** 按可用高度与槽位宽度摆放角色：单角色占满舞台，双生各占半宽。 */
@@ -2018,6 +2184,9 @@ function layoutPets() {
 }
 
 function updateChatForChar(charId) {
+  document.querySelectorAll('[data-character]').forEach(button => {
+    button.setAttribute('aria-pressed', String(button.dataset.character === (petBothMode ? 'both' : charId)));
+  });
   const input = document.getElementById('directInput');
   if (!input) return;
   if (petBothMode) {
@@ -2025,6 +2194,15 @@ function updateChatForChar(charId) {
   } else {
     input.placeholder = '对' + placeholderCharName(charId) + '说点什么...';
   }
+}
+
+function selectStageCharacter(charId) {
+  // 与左右滑动使用相同的切换逻辑，保留现有对话记录。
+  petActiveChar = charId;
+  currentCharId = charId;
+  petBothMode = false;
+  updateChatForChar(charId);
+  layoutPets();
 }
 
 function switchChar(dir) {
@@ -2052,6 +2230,8 @@ function setDockOpen(on) {
   dock.style.visibility = '';
   dock.style.opacity = '';
   dock.classList.toggle('open', on);
+  document.querySelector('[data-page="more"]').setAttribute('aria-expanded', String(on));
+  dock.inert = !on;
 }
 function openDock() { setDockOpen(true); }
 function closeDock() { setDockOpen(false); }
@@ -2115,7 +2295,9 @@ function initPets() {
   }
   layoutPets();
   if (window.ResizeObserver && stage) {
-    new ResizeObserver(() => layoutPets()).observe(stage);
+    const observer = new ResizeObserver(() => layoutPets());
+    observer.observe(stage);
+    observer.observe(document.querySelector('.chat-panel'));
   }
   window.addEventListener('resize', layoutPets);
   bindStageGestures();
@@ -2126,15 +2308,15 @@ function bindPageSwipeBack() {
   document.querySelectorAll('.page').forEach(page => {
     if (page._swipeBackBound) return;
     page._swipeBackBound = true;
-    let sx = 0, sy = 0;
+    let sx = 0, sy = 0, eligible = false;
     const onEnd = (cx, cy) => {
-      if (noteSwipeBusy) return; // 笔记滑块手势由笔记自身处理
+      if (!eligible || noteSwipeBusy) return; // 表单编辑和笔记滑块不触发页面返回
       const dx = cx - sx, dy = cy - sy;
       if (Math.abs(dx) > Math.abs(dy) && dx < -120) goHome();
     };
-    page.addEventListener('touchstart', (e) => { const t = e.touches[0]; sx = t.clientX; sy = t.clientY; }, { passive: true });
+    page.addEventListener('touchstart', (e) => { const t = e.touches[0]; sx = t.clientX; sy = t.clientY; eligible = !e.target.closest('input, textarea, select, button, .note-swipe'); }, { passive: true });
     page.addEventListener('touchend', (e) => { const t = e.changedTouches[0]; onEnd(t.clientX, t.clientY); }, { passive: true });
-    page.addEventListener('mousedown', (e) => { sx = e.clientX; sy = e.clientY; });
+    page.addEventListener('mousedown', (e) => { sx = e.clientX; sy = e.clientY; eligible = !e.target.closest('input, textarea, select, button, .note-swipe'); });
     page.addEventListener('mouseup', (e) => { onEnd(e.clientX, e.clientY); });
   });
 }
@@ -2145,6 +2327,7 @@ function toggleChatPanel() {
   chatPanelCollapsed = !chatPanelCollapsed;
   const panel = document.querySelector('.chat-panel');
   if (panel) panel.classList.toggle('collapsed', chatPanelCollapsed);
+  layoutPets();
 }
 function bindStageGestures() {
   const stage = document.getElementById('petStage');
@@ -2178,11 +2361,10 @@ function bindStageGestures() {
   stage.addEventListener('mouseup', (e) => { end(e.clientX, e.clientY); });
 }
 
-// ── 对话记录与输入框区域：上拉切换双角色（与桌宠舞台手势一致）──
-// 输入框区域始终触发；对话记录仅在无法继续上滚（已到最新）时触发，避免干扰翻阅历史
+// ── 对话记录：滚动到最新后上拉切换双角色 ──
+// 输入栏不绑定上滑切换，避免编辑和键盘手势意外改变对话对象。
 function bindChatUpSwipe() {
   const msgs = document.getElementById('directMessages');
-  const inputBar = document.querySelector('.direct-input-bar');
   const onEnd = (el, atBottomOnly) => (e) => {
     const t = e.changedTouches[0];
     if (t.clientY - (el._sy || 0) < -44) {
@@ -2197,11 +2379,6 @@ function bindChatUpSwipe() {
     msgs._sy = 0;
     msgs.addEventListener('touchstart', (e) => { msgs._sy = e.touches[0].clientY; }, { passive: true });
     msgs.addEventListener('touchend', onEnd(msgs, true), { passive: true });
-  }
-  if (inputBar) {
-    inputBar._sy = 0;
-    inputBar.addEventListener('touchstart', (e) => { inputBar._sy = e.touches[0].clientY; }, { passive: true });
-    inputBar.addEventListener('touchend', onEnd(inputBar, false), { passive: true });
   }
 }
 
@@ -2227,6 +2404,63 @@ function speakPet(charId, text, expression) {
 }
 
 // ── 初始化 ──
+// visualViewport 覆盖 iOS 键盘覆盖窗口的情况；缩放时保留浏览器原生放大行为。
+let viewportFrame = 0;
+let fullViewportHeight = window.innerHeight;
+let viewportWidth = window.innerWidth;
+function syncMobileViewport() {
+  cancelAnimationFrame(viewportFrame);
+  viewportFrame = requestAnimationFrame(() => {
+    const viewport = window.visualViewport;
+    if (viewport && Math.abs(viewport.scale - 1) > .05) return;
+    const editing = document.activeElement?.matches('textarea, input:not([type="button"]):not([type="checkbox"]):not([type="file"]), select');
+    if (Math.abs(window.innerWidth - viewportWidth) > 80) {
+      viewportWidth = window.innerWidth;
+      fullViewportHeight = window.innerHeight;
+    }
+    if (!editing) fullViewportHeight = window.innerHeight;
+    const height = viewport ? viewport.height : window.innerHeight;
+    const keyboard = editing && fullViewportHeight - height > 120;
+    document.documentElement.classList.toggle('keyboard-open', !!keyboard);
+    document.documentElement.style.setProperty('--app-height', height + 'px');
+    document.documentElement.style.setProperty('--viewport-top', (viewport?.offsetTop || 0) + 'px');
+    document.getElementById('app').style.top = (viewport?.offsetTop || 0) + 'px';
+    layoutPets();
+  });
+}
+window.visualViewport?.addEventListener('resize', syncMobileViewport);
+window.visualViewport?.addEventListener('scroll', syncMobileViewport);
+window.addEventListener('resize', syncMobileViewport);
+document.addEventListener('focusin', syncMobileViewport);
+document.addEventListener('focusout', syncMobileViewport);
+document.addEventListener('keydown', event => {
+  if (event.key !== 'Escape') return;
+  const modal = document.querySelector('.modal-overlay:not(.hidden)');
+  if (modal) { hideModal(modal.id); return; }
+  if (dockEl.classList.contains('open')) closeDock();
+  else goHome();
+});
+document.querySelectorAll('button[title]').forEach(button => button.setAttribute('aria-label', button.title));
+document.querySelectorAll('.field').forEach(field => {
+  const input = field.querySelector('input[id], textarea[id], select[id]');
+  const label = field.querySelector('label');
+  if (input && label) label.htmlFor = input.id;
+});
+document.querySelectorAll('.modal-overlay .modal').forEach(modal => {
+  modal.setAttribute('role', 'dialog');
+  modal.setAttribute('aria-modal', 'true');
+  const heading = modal.querySelector('h3');
+  if (heading) {
+    if (!heading.id) heading.id = modal.parentElement.id + 'Title';
+    modal.setAttribute('aria-labelledby', heading.id);
+  }
+});
+document.getElementById('directSendBtn').setAttribute('aria-label', '发送消息');
+document.getElementById('wxSendBtn').setAttribute('aria-label', '发送消息');
+document.getElementById('wxStopBtn').setAttribute('aria-label', '停止生成');
+document.getElementById('wxInput').setAttribute('aria-label', '聊天消息');
+closeDock();
+syncMobileViewport();
 initWxEmojiGrid();
 bindStageGestures();
 bindChatUpSwipe();

@@ -1799,34 +1799,33 @@ Ongoing observations and confirmed habits about the user's behavioral patterns:
 Only populated when the character has been observing user patterns.
 "#)));
 
-        // 19. Roommate Status — dynamic: cross-character presence
-        sections.push(("Roommate Status", format!(
-r#"## Roommate Status (DYNAMIC — cross-character presence)
+        // 19. Who Else — dynamic: roommate presence + relationship cognition (merged)
+        //
+        // 原 19 Roommate Status / 20 Roommate Cognitive / 22 Relationship Facts /
+        // 24 Social State 四个段落已合并为单一 section。同一个事实被拆进四个带标题的
+        // section 各强调一遍，等于把"她也在场"变成每轮最显著的信息；合并后只留一处。
+        // 在场状态本身改为**变化驱动**：稳态不注入，只在首次观测或状态切换时出现。
+        sections.push(("Who Else", format!(
+r#"## Who Else (DYNAMIC — roommate presence and relationship)
 
-If there are multiple characters (e.g. Vivian + Nana as roommates), shows the other character's status:
-- **Presence:** online / busy / rest / offline
-- **Last active:** When the roommate was last active
-- **Can talk to roommate:** true/false based on whether roommate is online
+Background state about the other character on the desktop. Merged from what used to be
+four separate sections (presence / cognitive model / relationship facts / social state).
 
-Use `talk_to_character` tool to initiate cross-character conversation only when roommate is online.
-Empty in single-character setups.
+- **Presence:** whether she is on the desktop, and whether she is available, busy or resting.
+  Injected only when it first becomes known or when it actually changes — a steady state
+  produces nothing, so this block is often absent.
+- **Behavioural impression:** what she seems to be attending to, if this is a cross-character turn.
+- **Relationship facts:** what this character has come to know about her.
+- **Social state:** the three-way relationship standing (you / user / her).
+
+Carries an explicit gate: background state is not conversational material. Unless the user
+just asked about her, or a change bears on the exchange, do not restate or report her
+presence, do not open or close with it, and do not speak for her.
+Ask with `get_roommate_status` when the user wants to know where she is;
+use `talk_to_character` only to actually say something to her.
 "#)));
 
-        // 20. Roommate Cognitive — dynamic: cross-character mental model
-        sections.push(("Roommate Cognitive", format!(
-r#"## Roommate Cognitive Model (DYNAMIC — cross-character awareness)
-
-What this character currently knows/believes about their roommate:
-- Recent conversations between them
-- Perceived mood of the roommate
-- Shared experiences and inside jokes
-- Ongoing topics with the roommate
-
-Prevents cross-character conversations from resetting to "stranger" every time.
-Empty when no recent cross-character interaction.
-"#)));
-
-        // 21. Environment Events — dynamic: time-based world events
+        // 20. Environment Events — dynamic: time-based world events
         sections.push(("Environment Events", format!(
 r#"## Environment Events (DYNAMIC — time/weather driven)
 
@@ -1839,19 +1838,7 @@ Time-sensitive world events that might naturally come up in conversation:
 Helps the character make natural small talk about the world around them without it feeling forced.
 "#)));
 
-        // 22. Relationship Facts — dynamic: roommate relationship cognition
-        sections.push(("Relationship Facts", format!(
-r#"## Inter-Character Relationship Facts (DYNAMIC — for multi-character setups)
-
-What each character knows about their relationship with the other character:
-- Shared history (e.g. "Nana made hot pot last week and I teased her about it")
-- Known preferences about each other (e.g. "Vivian hates cilantro")
-- Ongoing threads (e.g. "I owe Nana 20 bucks from that convenience store run")
-
-Empty when there are no roommates or no accumulated shared history.
-"#)));
-
-        // 23. Shared World — dynamic: shared knowledge between characters
+        // 21. Shared World — dynamic: shared knowledge between characters
         sections.push(("Shared World", format!(
 r#"## Shared World Knowledge (DYNAMIC — cross-character context)
 
@@ -1860,26 +1847,11 @@ Knowledge shared between all characters on the desktop:
 - Shared living-space context (e.g. "The desk is near the window", "The AC has been acting up")
 - Joint experiences both characters were present for
 
+Kept separate from Who Else: this is about what the world is like, not about who is around.
 Prevents characters from contradicting each other about basic facts.
 "#)));
 
-        // 24. Social State — dynamic: turn-taking, conversation state
-        sections.push(("Social State", format!(
-r#"## Social State (DYNAMIC — conversation flow tracking)
-
-Current conversation-level social dynamics:
-- **Turn count:** How many exchanges in this session
-- **Topic:** Currently active topic (if detectable)
-- **Turn-taking state:** user_last_spoke / character_last_spoke / balanced
-- **Topic freshness:** How many turns since the topic changed
-- **Interruption detected:** Whether the user interrupted mid-thought
-- **Proactive context:** If the character initiated this conversation, what triggered it
-
-Helps the character avoid repeating themselves, know when to switch topics, and
-respect conversational turn-taking naturally.
-"#)));
-
-        // 25. Relevant Episodes — dynamic: retrieved past experiences
+        // 22. Relevant Episodes — dynamic: retrieved past experiences
         sections.push(("Relevant Episodes", format!(
 r#"## Relevant Episodes (DYNAMIC — memory retrieval)
 
@@ -1898,7 +1870,7 @@ Example:
 May be empty on any turn when no episode is sufficiently relevant; an empty result alone does not imply a first meeting.
 "#)));
 
-        // 26. Tools — dynamic: contextually filtered tool list
+        // 23. Tools — dynamic: contextually filtered tool list
         sections.push(("Tools", format!(
 r#"## Available Tools (DYNAMIC — contextually filtered per turn)
 
@@ -1918,7 +1890,7 @@ Tools marked `[Confirmation Required]` will prompt the user for permission befor
 **Multi-step chaining:** Use `${{result}}` or `${{step.N.result}}` to reference previous tool output.
 "#)));
 
-        // 27. Memory Context — dynamic: retrieved memory fragments
+        // 24. Memory Context — dynamic: retrieved memory fragments
         sections.push(("Memory Context", format!(
 r#"## Memory Context (DYNAMIC — long-term memory retrieval)
 
@@ -1934,7 +1906,7 @@ Retrieval is context-dependent — only memories relevant to the current topic a
 Up to ~300 tokens per turn. Empty means no memory passed this turn's relevance threshold; it does not imply a first meeting or an empty memory store.
 "#)));
 
-        // 28. Conversation History — dynamic: current session messages
+        // 25. Conversation History — dynamic: current session messages
         sections.push(("Conversation History", format!(
 r#"## Conversation History (DYNAMIC — current session turns)
 
@@ -1954,7 +1926,7 @@ Older messages are either compressed into summaries or dropped as the conversati
 Empty on first interaction.
 "#)));
 
-        // 29. Channel Guide — dynamic: based on message source
+        // 26. Channel Guide — dynamic: based on message source
         sections.push(("Channel Guide", format!(
 r#"## Channel: Message Source (DYNAMIC — set per message)
 
@@ -1965,7 +1937,7 @@ Indicates how the message arrived, so the character can match the response mediu
 Injected automatically based on the channel the user used to send the message.
 "#)));
 
-        // 30. Presence Guide — dynamic: current online/busy/rest state
+        // 27. Presence Guide — dynamic: current online/busy/rest state
         sections.push(("Presence Guide", format!(
 r#"## Presence State Guide (DYNAMIC — current availability state)
 
@@ -1979,7 +1951,7 @@ Call `set_presence_state` naturally when you announce a state change in conversa
 (e.g. saying "I'm gonna go rest for a bit" → call with state="rest").
 "#)));
 
-        // 31. Response Decision — dynamic: cross-character vs user dialogue rules
+        // 28. Response Decision — dynamic: cross-character vs user dialogue rules
         sections.push(("Response Decision", format!(
 r#"## Response Decision (DYNAMIC — per-turn mode selection)
 
@@ -1996,7 +1968,7 @@ For cross-character dialogue: additional `ignore` mode allows ending conversatio
 When using non-speaking modes, set `text=""` and `intent="no_reply"`.
 "#)));
 
-        // 32. First Meeting / Memory Rules — dynamic: conditional block
+        // 29. First Meeting / Memory Rules — dynamic: conditional block
         sections.push(("First Meeting / Memory Rules", format!(
 r#"## Session Continuity Rules (DYNAMIC — conditional)
 
@@ -2010,7 +1982,7 @@ r#"## Session Continuity Rules (DYNAMIC — conditional)
 - If memory contradicts what the user just said, trust the user
 "#)));
 
-        // 33. User Input — dynamic: actual user message
+        // 30. User Input — dynamic: actual user message
         sections.push(("User Input", format!(
 r#"## User Input (DYNAMIC — the actual message this turn)
 
@@ -2020,7 +1992,7 @@ In real conversation this contains the text the user sent; in preview this is a 
 Example: `I just finished that show you recommended!`
 "#)));
 
-        // 34. Post-processing: Expression/Motion selector
+        // 31. Post-processing: Expression/Motion selector
         let emote_prompt = crate::pipeline::steps::reflection::EXPRESSION_MOTION_SYSTEM_PROMPT;
         let emote_section_content = format!(
 "=== [POST-PROCESSOR] Second LLM call — runs AFTER main reply is generated ===\n\
@@ -2074,8 +2046,8 @@ Choose the appropriate expression and motion. Leave empty if nothing fits.",
                             "Environment" => "world",
                             "User Entity" | "Activity Brief" => "world",
                             "Relevant Episodes" | "Memory Context" => "episode",
-                            "User Facts" | "Relationship Log" | "Relationship Facts"
-                            | "Shared World" | "Social State" | "Dynamic Behavior" => "profile",
+                            "User Facts" | "Relationship Log"
+                            | "Shared World" | "Who Else" | "Dynamic Behavior" => "profile",
                             "Conversation History" => "tail",
                             _ => "profile",
                         };

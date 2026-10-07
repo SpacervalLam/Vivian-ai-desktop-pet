@@ -126,6 +126,8 @@ pub fn register_builtin_tools(tool_system: &Arc<ToolSystem>) {
         Arc::new(research_tool::ObserveUserTool::new()),
         // 跨角色对话工具
         Arc::new(cross_character_tools::TalkToCharacterTool::new()),
+        // 室友在场查询（只读；补上 prompt 侧"变化驱动注入"留下的按需缺口）
+        Arc::new(cross_character_tools::GetRoommateStatusTool::new()),
         // 媒体控制工具（合并播放/暂停/上下首/音量/静音为单工具）
         Arc::new(media_tools::MediaControlTool::new()),
         // 音乐（读当前播放 / 按名字找歌并播放；不单独暴露「搜索」工具，

@@ -1750,6 +1750,14 @@ const MessageBubble: React.FC<{
   const { t } = useTranslation();
   const [errorDetailsOpen, setErrorDetailsOpen] = useState(false);
   const errorDetailsId = React.useId();
+  if (msg.role === 'commentary' || msg.role === 'thinking') {
+    return (
+      <div className="codex-msg-assistant codex-msg-process">
+        {msg.role === 'thinking' && <div className="codex-tool-group-meta">{t('workbench.workThinking')}</div>}
+        <MarkdownText text={msg.content} />
+      </div>
+    );
+  }
   if (msg.role === 'user') {
     const imgs = msg.images ?? [];
     const refs = msg.file_refs ?? [];
@@ -4193,10 +4201,10 @@ const CodeAgentPage: React.FC = () => {
     }
   }, []);
 
-  /** 读取设置中的默认工作区（未配置时后端返回 null/空串）。 */
+  /** 读取实际默认工作区（未配置时为系统文档目录下的 Vivian）。 */
   const refreshDefaultWorkspace = useCallback(async (): Promise<string> => {
     try {
-      const v = await invoke<string | null>('get_config', { key: 'default_workspace' });
+      const v = await invoke<string>('coding_default_workspace');
       return typeof v === 'string' ? v : '';
     } catch {
       return '';
@@ -4324,22 +4332,14 @@ const CodeAgentPage: React.FC = () => {
     }
   }, [t, notifyError]);
 
-  /**
-   * 新建会话的默认路径，全程不弹目录选择框：
-   * - 配置了默认工作区 → 建在该目录；
-   * - 未配置 → 建成「无工作区模式」会话（后端一等公民：不绑定目录、文件操作走绝对路径、
-   *   写入前请求用户确认），把「点一下就新建」做成不被打断的行为。
-   * 例外：默认目录已失效（被删除/改名）属于配置过期，此时退回手动选择让用户重新指向，
-   * 而不是静默降级成一个没有沙箱的会话。
-   */
+  /** Backend resolves the configured default or the system Documents/Vivian folder. */
   const createSessionByDefault = useCallback(async (): Promise<CodingSession | null> => {
-    if (!defaultWorkspace) return createSessionInWorkspace('');
-    const created = await createSessionInWorkspace(defaultWorkspace);
+    const created = await createSessionInWorkspace('');
     if (created) return created;
     const dir = await pickDirectory();
     if (!dir) return null;
     return createSessionInWorkspace(dir);
-  }, [defaultWorkspace, createSessionInWorkspace, pickDirectory]);
+  }, [createSessionInWorkspace, pickDirectory]);
 
   /** 保证存在一个可用会话：已有则复用，无则按默认工作区新建。返回会话 id，取消/失败返回 null。 */
   const ensureSession = useCallback(async (): Promise<string | null> => {

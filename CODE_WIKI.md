@@ -987,6 +987,8 @@ Prompt 使用总量软预算：`resolve_prompt_budget` 根据模型窗口、用�
 
 生成时原生工具请求清除文本 JSON schema，由工具结构化接口承载调用、普通文本承载角色发言；普通文本路径保留 JSON 协议。格式重试提示使用 system 消息，明确 `no_reply` 不因空文本被误判为格式失败，流式纯空白响应进入已有生成失败回退流程。请求级选项关闭陪伴聊天的旧 provider 框架，避免叠加助手口吻。
 
+**室友组是单一 section（`who_else`）**：在场状态、行为印象、"我眼中的她"、三方社交状态原先各占一个带 `##` 标题的段落，同一个事实被四处强调——重复本身就是显著性放大器，模型于是把"她也在场"当成本轮要点。四者合并为 `## 还有谁在`，子块降级为 `###`，段首带门禁（背景状态不是谈资：除非用户正好问到她或某个变化与本次交流相关，否则不复述、不播报、不用它开场收尾、不替她说话）。在场状态本身改由 `observe_roommate_presence` **变化驱动**注入（稳态无内容），按需查询走 `get_roommate_status`；行为印象只在跨角色会话注入，与 `pet_identity` 的 `[ROOMMATE_SAME_BOUNDARY]`（只能从供给上下文或查询工具了解她）保持一致。共享世界知识讲的是"世界是什么样"而非"谁在场"，保持独立段落，不并入该组。
+
 **准备与最终选择分离**：[`PreparedPromptPipeline`](src-tauri/src/pipeline/steps/prompt.rs) 用 `spawn_blocking` 预取人格、关系、示例、语气、记忆笔记、用户事实及技能等稳定快照，与查询重写、快速分类和检索上下文链并行；检索与搜索完成后才最终组装 Prompt。准备失败可在最终阶段重建，`metadata.timings` 分别记录 `prompt_preparation` 和 `prompt_building`。
 
 **语义路由**：本轮共享一次查询嵌入，供意图、话题、记忆需求、关系需求、工具选择与语气示例复用。可选段落由分类结果筛选，记录于 `metadata.semantic_prompt_selection`；用户原输入仍按原文保存。无分类结果时使用保守回退，不能凭空补记忆。关系需求为 none 时可省略可选关系日志，核心身份与关系背景仍保留。
@@ -1070,7 +1072,7 @@ pub async fn compress_conversation_context_aware(
 
 #### ReAct 工具调用循环（react.rs）
 
-主智能体保留人设、记忆和对话，首轮决定工具及参数。陪伴渠道 `direct`、`proactive`、`wechat`、`cross_character` 的外部调用交给 [`tool_execution.rs`](src-tauri/src/pipeline/tool_execution.rs)，其消息列表与主对话隔离；原生 function calling 与文本 JSON 调用共享边界。
+主智能体保留人设、记忆和对话，首轮决定工具及参数。陪伴渠道 `direct`、`broadcast`、`proactive`、`wechat`、`cross_character` 的外部调用交给 [`tool_execution.rs`](src-tauri/src/pipeline/tool_execution.rs)，其消息列表与主对话隔离；原生 function calling 与文本 JSON 调用共享边界。
 
 ```text
 主智能体选择工具 → 私有执行器 → 实际 ToolCallResult
@@ -1239,8 +1241,10 @@ pub struct CrossCharacterReply {
 | `build_speaker_prefix(speaker, listener, char_id)` | 构造 `[I say to User]` / `[User says to me]` 前缀 |
 | `parse_any_speaker_prefix(text)` | 解析任意说话者前缀（支持第一/第三人称/旁观） |
 | `strip_memory_anchor(text)` | 剥离合成输入尾部的 `[近期你们的话题]` 等锚点脚手架 |
-| `roommate_status_text(source_id, lang)` | 生成室友 Public State prompt 段落 |
-| `roommate_cognitive_text(source_id, lang)` | 生成室友行为印象（注意力/活动/目标/社交意愿） |
+| `roommate_status_text(source_id, lang)` | 室友 Public State 一句话（是否在桌面上 / 在场状态 / 共处时长**档位**）；纯函数，供按需查询工具与 inspection 面板重复调用。措辞刻意不写"她是另一个桌面宠物"、不给秒级时长——前者是无用的高显著度元信息，后者每轮都变，会被模型读成"刚发生的变化" |
+| `observe_roommate_presence(source_id, lang)` | **变化驱动**的室友在场观测：只在首次观测或状态真正切换时返回一句，稳态返回 `None`。世界状态的价值在"变化"而非当前值——每轮复述会把"她也在场"变成每轮最显著的信息 |
+| `classify_presence(previous, observed)` | 上述判定的纯函数内核（`First` / `Steady` / `Changed` / `LeftDesktop` / `Returned`）；抽出来是为了让"稳态绝不注入"这条不变量可测 |
+| `roommate_cognitive_text(source_id, lang)` | 室友行为印象（注意力/活动/目标/社交意愿）；**仅跨角色会话注入**——主对话里给它等于授权越界读心 |
 
 ### conversation/ —— 会话生命周期
 
@@ -1693,11 +1697,44 @@ keywords: 同义词, 触发短语 相关词
 | [`observability.rs`](src-tauri/src/tools/observability.rs) | 工具调用可观测性 + 指标 |
 | [`cache.rs`](src-tauri/src/tools/cache.rs) | 工具结果缓存 |
 | [`discovery.rs`](src-tauri/src/tools/discovery.rs) | BM25 多字段加权检索索引（`ToolSearchIndex` + `DiscoverableTool`），`tool_search`（延迟工具）与 `skills::search_skills`（技能召回）共用的检索底座 |
-| [`semantic_filter.rs`](src-tauri/src/tools/semantic_filter.rs) | 语义过滤 |
+| [`semantic_filter.rs`](src-tauri/src/tools/semantic_filter.rs) | 语义过滤：把「用户输入嵌入」与「工具描述 + `usage_corpus` 嵌入」做余弦相似度召回 Top-N（`should_filter_tools` 决定是否触发）。构造时**必须**经 `normalize_lang` 归一语言码——工具 i18n 分支只认 `zh`/`ja`/`en` 字面量，而 `config.base.language` 是 BCP-47 的 `zh-CN`；不归一会有 84/91 个工具落进英文回退分支、`usage_corpus` 变空串，中文召回整体退化成跨语言匹配 |
 | [`trust.rs`](src-tauri/src/tools/trust.rs) | 信任列表管理 |
 | [`trusted_origins.rs`](src-tauri/src/tools/trusted_origins.rs) | 浏览器可信来源白名单（内置 BUILTIN + 用户 `trusted_origins.json` 两级合并，`exact:`/`*.` 通配，mtime 热重载） |
 | [`runnable_adapter.rs`](src-tauri/src/tools/runnable_adapter.rs) | Runnable 适配器 |
-| [`tool_call_manager.rs`](src-tauri/src/tools/tool_call_manager.rs) | 原生与文本调用共用执行批次、依赖与回执；最多 8 个只读调用并发，保留原始 ID 和调用顺序，异常返回失败，不留下独立读取任务 |
+| [`tool_call_manager.rs`](src-tauri/src/tools/tool_call_manager.rs) | 原生与文本调用共用执行批次、依赖与回执；最多 8 个只读调用并发，保留原始 ID 和调用顺序，异常返回失败，不留下独立读取任务。另含**工具可见性分档与两条注入通道**（见下文「工具注入链路」） |
+
+#### 工具注入链路（2026-10-07）
+
+两条通道共用同一份可见性判定，任一环失效都会表现为「模型就是不调用某个工具」，而且不报错。
+
+**分档**（`resolve_visibility_with_recall`）——`recalled=Some` 时能拿到完整 schema 的只有三类：
+
+1. 保底集：`tool_search`（`is_floor_tool`）
+2. **常驻集：`always_load()=true` 的工具**（32 个，含 `delegate_to_work_agent` / `web_search` / todo / 记忆 / 计划 / 子代理）。这是工具作者声明的显式契约——语义召回只应决定**其余工具**的档位，不能推翻它，否则一次没召回到就等于该工具彻底不存在
+3. 语义召回集：本轮命中 Top-N（`semantic_recall_top_n`：Chat / Idle / LowTrust 6，Focus / Default / Task 7）
+
+其余按 `should_defer` 降级为 `Deferred`（仅名）/ `Lazy`（名+描述）；`recalled=None`（嵌入不可用）时回退纯场景矩阵。
+
+**共用分桶**：`ToolListTool::bucket_tools_for_scene` 是唯一分桶实现，两条通道与延迟索引用同一份结果，杜绝判定发散。
+
+- API `tools` 字段 ← `get_tool_definitions_for_scene`（只发 `Always` 档；描述与参数按 `normalize_lang(language)` 本地化——这几条 schema 是 native FC 下模型能看到的全部工具语义）
+- prompt 工具清单 ← `get_tools_for_ai_with_scene`
+
+**native FC 下必须单独注入延迟工具索引**：`build_tools_block` 在 `enable_native_fc=true` 时返回空串（避免与 API `tools` 字段重复）。若索引也被一并丢弃，模型既没有未召回工具的 schema，也不知道它们**叫什么名字**，`tool_search` 无从搜起。因此 `PromptParts::deferred_tools_section` 把 `<available-deferred-tools>` 名称块单独渲染并作为一个独立段落注入（`deferred_tools`）。
+
+**执行侧升级**（`react::takes_over_execution`）——交给 reasoning 执行会话（`tool_execution.rs`，deepseek + native FC + 私有循环）的条件：
+
+```
+keeps_companion_persona(channel)
+  && (!first_calls.is_empty() || executable_intent)
+  && !is_deliberation_only(first_calls)
+```
+
+`executable_intent` 由 `AIResponseGenerationRunnable::requests_execution` 显式判定（意图 `request` / `tool_request` 置信度达 `PROMPT_ROUTING_CONFIDENCE`，或命中三语任务关键词）；跨角色互聊与主动开场一律不升级。**不能只靠 `!first_calls.is_empty()`**——那等于把"能不能干活"押在模型恰好愿意动手上，而工具注入残缺时它手里根本没有可用工具，于是永远不动手。
+
+进入执行会话后：`widen_executor_tools` 按能力类别（Web / File / Memory + 点名编排工具）补一档完整 schema，避免执行器还要先 `tool_search` 才有工具可用；首轮草稿在会接管时**不推送**，由执行完后的 `chat` 路由生成正式回复，防止两段发言撞车；`execute_session` 首轮调用为空时先让执行器自己决定要做什么（空集会被 `atomic_batch` 判成已完成而直接收场）。
+
+**零调用审计**（`needs_execution_audit`）只由 `requests_execution` 开启。常驻委派工具存在不代表用户这轮提出执行请求，否则普通闲聊也会触发审计。显式能力请求不受 question 误分类影响，无嵌入时保留词法兜底。
 
 #### 联网搜索与证据资料（2026-10-04）
 
@@ -1847,7 +1884,7 @@ tools::types::is_path_within_any(path, primary, extras)
 
 | 文件 | 工具类别 |
 |------|---------|
-| `cross_character_tools.rs` | 跨角色对话（`talk_to_character`，60s 超时；会拉起室友角色的独立 agent 循环，`Shell`） |
+| `cross_character_tools.rs` | 跨角色对话（`talk_to_character`，60s 超时；会拉起室友角色的独立 agent 循环，`Shell`）+ 室友在场查询（`get_roommate_status`，只读 `Safe`，无参数，属核心陪伴集故在 Chat/Idle 场景仍保持 Always 可见——prompt 侧的在场状态是变化驱动注入的，稳态下查询工具是唯一的按需通道；跨角色会话中与 `talk_to_character` 一同隐藏） |
 | `diary_tools.rs` | 日记（`write_diary`，基于当日对话与情绪状态生成，落盘 `FsWrite`） |
 | `discovery_tools.rs` | 兴趣探针与内容推荐（`get_interest_probes` / `answer_interest_probe` / `recommend_content` / `submit_content_feedback`，均 `Safe`，只动应用内偏好数据） |
 | `extended_system_ops.rs` | 扩展系统操作（`open_url` 仅 http/https，`Network` + 需确认；`get_active_window` / **`get_memory_usage`**——系统内存占用概况 + Top 进程明细：总览走 10s 轮询缓存，进程明细按需枚举并按可执行名聚合，只读 `Safe` 免确认、`should_defer=true` 经 tool_search 唤起） |
@@ -3303,3 +3340,33 @@ DialogueManager 通过 history_io 串行化追加、清空及元数据修补；�
 - `npm run test:desktop`：需要已启动的本机前端及 Chrome，只验证角色动画；`npm run test:windows-integration` 需要可创建受限令牌进程的 Windows 环境。
 
 [CI](.github/workflows/ci.yml) 在 Windows 运行主程序测试，在 Windows/Linux/macOS 运行前端及契约测试，不代表完整原生应用已跨平台适配。2026-10-05 本机验收：主程序 Rust 1802 项通过、9 项显式跳过；27 个 Node 测试脚本、76 项可移植契约测试、类型检查及前端构建通过。四项受限令牌沙箱测试需具备对应 Windows 权限，其余跳过项沿用原有标记；真实模型质量、多屏 DPI 与原生桌面输入仍需对应环境验收。
+
+
+### 执行请求的首轮路由与工具装配
+
+`AIResponseGenerationRunnable::generation_task` 在提示词预算和首次模型调用前统一判定路由：陪伴/chat 的显式执行请求使用配置中的 reasoning 模型，普通聊天保留调用方路由；跨角色、主动问候和系统指令不因此升级。“能帮我做 PPT 吗”即使被语义分类为 question 或嵌入不可用，也按执行请求处理。首轮与执行侧都支持 native FC；执行完成后的角色转述使用 chat，只消费真实回执。
+
+执行请求的首轮 schema 预载 Web / File / Memory 及委派和编排工具，与执行器共用 `widen_executor_tools`；文本和 native 两条通道共用场景分桶。延迟索引在 `CompanionPrompt::build` 前装配，Inspector 和实际消息同步。文本回退同样使用 `takes_over_execution`，零调用也能进入执行侧；合法的纯工具 JSON 不再因为 `text` 为空被重试并丢弃。私聊与 broadcast 使用同一渠道判据。零回执时停止原因和错误仍传给回复侧。debug 日志记录场景、召回/预载/隐藏工具、首轮路由与 native FC 能力，`generation_route` 记入 metadata。
+
+
+### 跨角色续聊的发言身份
+
+跨角色发言携带 `utterance_id`；回复的 `message_id` 在反向续聊时作为 `source_message_id` 传递。总线用 task-local 上下文给目标 Brain 的正常历史写入分配相同身份，两侧镜像写入显式携带该身份。DialogueManager 在更新工作记忆、历史缓冲和事件账本前按身份幂等写入，落盘 ID 与发言 ID 一致；新身份即使文字和秒级时间戳相同也保留。续聊转交的上一轮回复不再重复写入源角色短期发言记忆。
+
+旧 JSONL 保留原始数据；会话投影仅合并相邻的、30 秒内、同一会话和角色方向的 Brain/heard 与 bus/dialogue_turn 镜像记录。带新身份的记录不使用这条历史兼容规则。UI 与会话巩固共用该投影。
+
+### 工具确认弹窗投递恢复
+
+`get_pending_tool_confirmations` 读取后台确认注册表作为待审批请求的事实来源。角色主窗口每 2 秒核对一次，仅为本角色的请求确保 Toast 窗口存在并重放确认；Toast 按 request_id 去重，不会因补发重置卡片倒计时。新建窗口时复位 ready 标志，等待监听器注册后的 ready 事件再发送。这样窗口异步销毁、重建和监听器重载期间丢失的事件可以恢复。后台开始等待时记录 request_id、tool、char_id、path，便于关联后续放行或超时。
+
+### 工作会话压缩、推理回传和中断报告
+
+`CodingSession.context_start` 表示已由摘要覆盖的前缀；压缩只推进该游标，完整 `messages`、用户输入、单条反馈和变更索引保持不变。模型组装、压缩触发和上下文估算使用未归档尾部。裁剪边界同时保留工具调用之前的 Thinking/Commentary，工作侧将 Thinking 原文回填到对应 assistant 的 reasoning 字段；OpenAI 兼容序列化保留显式空 reasoning_content，支持宿主插入的图片说明等消息。停止报告使用“执行已中断”，分别报告已有成功结果、失败步骤和未核验事项，不根据模型请求失败推断交付文件失败。思考历史协议错误单独提示；命令返回的非零 exit_code 或 data.success=false 不计为成功。
+
+### 默认工作区
+
+手动新建与桌宠委派共用 `utils::workspace::resolve_workspace`：显式工作目录优先，其次 `default_workspace` 配置，未配置或空白时用系统文档目录下的 `Vivian`。Windows 使用 Documents Known Folder API，支持 OneDrive 或用户迁移后的文档目录。默认目录首次使用时自动创建，显式目录仍须存在；创建失败返回清晰错误，不降级成无工作区。旧的空目录会话在下次发送任务前补上默认目录。设置中可更改路径，清空即恢复系统默认；工作页通过 `coding_default_workspace` 展示实际默认路径。
+
+### 操作确认的可读展示与工作区授权
+
+工作侧已授权工作区内的文件操作在权限网关中免逐次确认；显式 Ask/Deny、只读限制、越界和风险矩阵的 Deny 优先。run_command 可提供仅用于展示的 description，宿主同时根据命令中可观察的操作生成说明；该描述不参与权限判定。确认卡片正文不显示原始命令，完整命令与参数在默认折叠的详情中查看。无操作倒计时为 120 秒，鼠标悬停或键盘焦点在卡片内时暂停；决策等待后台调用完成后再移除卡片，提交失败保留卡片并提示重试。
