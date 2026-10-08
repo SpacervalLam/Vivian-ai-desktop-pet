@@ -40,6 +40,11 @@ const speakerName = (value: string, character: Character) => {
 
 export const isMemoryFact = (item: MemoryRecord): boolean => item.metadata?.record_kind === 'fact';
 export const isMemorySummary = (item: MemoryRecord): boolean => item.metadata?.record_kind === 'session_summary';
+export const isVisibleMemoryFact = (item: MemoryRecord): boolean =>
+  !['system_seed', 'environment_preset'].includes(String(item.metadata?.source ?? ''))
+  && !!item.content.trim() && !item.consolidated
+  && !['subjective', 'observation', 'internal'].includes(String(item.metadata?.record_kind ?? ''))
+  && isMemoryFact(item);
 
 export type EventProgress = {
   id: string; title: string; phase: 'planned' | 'started' | 'progressed' | 'completed' | 'cancelled';

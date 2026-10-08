@@ -1115,7 +1115,7 @@ impl EnvironmentContext {
             self.solar_term = Some(st.as_str().to_string());
         }
         if let Some(w) = &snap.weather {
-            self.weather = Some(format!("{} {:.0}℃", w.description, w.temperature));
+            self.weather = Some(w.context_summary());
             self.is_precipitating = Some(w.is_precipitating);
         }
         if let Some(ss) = snap.sunrise_sunset {

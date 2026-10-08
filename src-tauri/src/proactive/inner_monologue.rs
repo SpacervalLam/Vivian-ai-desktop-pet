@@ -442,6 +442,7 @@ impl InnerMonologueGenerator {
             lines.push(format!("{}{}", labels.festival, f.as_str()));
         }
         if let Some(w) = &snap.weather {
+            lines.push(w.context_summary());
             let line = match lang_norm {
                 "en" => format!("- Weather here: {}, {:.0}°C, feels like {:.0}°C", w.description, w.temperature, w.feels_like),
                 "ja" => format!("- ここ天気：{}、{:.0}℃、体感 {:.0}℃", w.description, w.temperature, w.feels_like),

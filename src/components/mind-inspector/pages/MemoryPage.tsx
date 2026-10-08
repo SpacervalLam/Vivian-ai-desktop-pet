@@ -5,7 +5,7 @@ import { listen } from '@tauri-apps/api/event';
 import { BookOpen, Clock3, Heart, MessageCircle, RefreshCw, Search, UserCircle, Sparkles, ArrowUpRight } from 'lucide-react';
 import UserProfilePage from './UserProfilePage';
 import StickerImage from '../../stickers/StickerImage';
-import { conversationThreads, sharedEventTimeline, isMemoryFact, isMemorySummary, type Character, type MemoryRecord, type ConversationRecord } from './memoryPresentation';
+import { conversationThreads, sharedEventTimeline, isVisibleMemoryFact, isMemorySummary, type Character, type MemoryRecord, type ConversationRecord } from './memoryPresentation';
 import './MemoryPage.css';
 import './ClaudeTheme.css';
 
@@ -35,12 +35,7 @@ const TABS = [
 ] as const;
 
 const layerOf = (item: MemoryRecord): Layer | null => {
-  if (['system_seed', 'environment_preset'].includes(String(item.metadata?.source ?? ''))) return null;
-  if (!item.content.trim() || ['subjective', 'observation', 'internal'].includes(String(item.metadata?.record_kind ?? ''))) return null;
-  if (item.consolidated) return null;
-  if (isMemoryFact(item)) return 'facts';
-  if (item.metadata?.perspective === 'observer') return null;
-  return null;
+  return isVisibleMemoryFact(item) ? 'facts' : null;
 };
 
 const dateText = (value: number) => {

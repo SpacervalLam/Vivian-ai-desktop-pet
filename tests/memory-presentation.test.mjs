@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
-import { conversationThreads, sharedEventTimeline, isMemoryFact, isMemorySummary } from '../src/components/mind-inspector/pages/memoryPresentation.ts';
+import { conversationThreads, sharedEventTimeline, isMemoryFact, isMemorySummary, isVisibleMemoryFact } from '../src/components/mind-inspector/pages/memoryPresentation.ts';
+import { readFileSync } from 'node:fs';
+import { runInNewContext } from 'node:vm';
+const mobile = runInNewContext(readFileSync(new URL('../src-tauri/src/remote/frontend/memory-presentation.js', import.meta.url), 'utf8') + '; MemoryPresentation;');
 const base = { id: 'old', content: '原文', memory_type: 'long_term', importance: .7, created_at: 1, tags: ['topic_summary'] };
 assert.equal(isMemoryFact(base), false);
 assert.equal(isMemorySummary(base), false);
@@ -36,3 +39,17 @@ assert.equal(sharedEventTimeline([{...base, metadata:{record_kind:'session_summa
 const similarOther = summary('other', [{...progress('m2', '桌宠项目今天完成了', 'completed'), id:'different-project'}]);
 assert.equal(sharedEventTimeline([events[0], similarOther], originals).length, 2);
 console.log('event timeline: cross-session progress, deduplication, exact evidence, distinct events');
+// Both clients must render canonical turns and evidence-backed event progress identically.
+assert.equal(JSON.stringify(mobile.conversationThreads(originals,'vivian')),JSON.stringify(conversationThreads(originals,'vivian')));
+assert.equal(JSON.stringify(mobile.sharedEventTimeline(events,originals)),JSON.stringify(timeline));
+for (const item of [
+  {...base,metadata:{record_kind:'fact'}},
+  {...base,metadata:{record_kind:'fact',source:'system_seed'}},
+  {...base,metadata:{record_kind:'fact',source:'environment_preset'}},
+  {...base,consolidated:true,metadata:{record_kind:'fact'}},
+  {...base,metadata:{record_kind:'subjective'}},
+  {...base,content:' ',metadata:{record_kind:'fact'}},
+]) assert.equal(mobile.isVisibleMemoryFact(item),isVisibleMemoryFact(item));
+assert.equal(isVisibleMemoryFact({...base,metadata:{record_kind:'fact',source:'system_seed'}}),false);
+assert.equal(isVisibleMemoryFact({...base,metadata:{record_kind:'fact'}}),true);
+console.log('desktop/mobile memory projections agree');

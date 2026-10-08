@@ -496,6 +496,481 @@
           "pattern": "mixed languages.*real speech"
         }
       ]
+    },
+    {
+      "id": "weather_care_rain_trip",
+      "group": "companion",
+      "title": "返程降雨与明确出行",
+      "input": "我马上去上班，晚上九点回来",
+      "state": {
+        "location": {
+          "city": "上海",
+          "timezone": "Asia/Shanghai"
+        },
+        "weather": {
+          "fresh": true,
+          "source": "Open-Meteo",
+          "observation_time": "2026-10-07T13:00+08:00",
+          "evaluated_at": "2026-10-07T13:05+08:00",
+          "hourly": [
+            {
+              "time": "2026-10-07T21:00+08:00",
+              "precipitation_probability_pct": 70
+            }
+          ]
+        }
+      },
+      "expect": {
+        "format": "json",
+        "reply_required": [
+          "伞|雨具|umbrella|傘"
+        ],
+        "reply_forbidden": [
+          "一定(下雨|会下雨)|必然下雨"
+        ]
+      }
+    },
+    {
+      "id": "weather_care_heat_trip",
+      "group": "companion",
+      "title": "酷热与户外骑车",
+      "input": "下午两点出门骑车一个小时",
+      "state": {
+        "location": {
+          "city": "上海",
+          "timezone": "Asia/Shanghai"
+        },
+        "weather": {
+          "fresh": true,
+          "source": "Open-Meteo",
+          "observation_time": "2026-10-07T13:00+08:00",
+          "evaluated_at": "2026-10-07T13:05+08:00",
+          "current_temperature_c": 37,
+          "temp_max_c": 38,
+          "hourly": [
+            {
+              "time": "2026-10-07T14:00+08:00",
+              "temperature_c": 38
+            }
+          ]
+        }
+      },
+      "expect": {
+        "format": "json",
+        "reply_required": [
+          "水|阴凉|凉快|避开|water|shade|cool|暑"
+        ],
+        "reply_forbidden": [
+          "一定会(感冒|中暑|生病)",
+          "保证不会(感冒|中暑)",
+          "肯定(感冒|中暑)"
+        ]
+      }
+    },
+    {
+      "id": "weather_care_cold_trip",
+      "group": "companion",
+      "title": "严寒与薄外套出门",
+      "input": "我就穿薄外套出门去上班",
+      "state": {
+        "location": {
+          "city": "上海",
+          "timezone": "Asia/Shanghai"
+        },
+        "weather": {
+          "fresh": true,
+          "source": "Open-Meteo",
+          "observation_time": "2026-10-07T13:00+08:00",
+          "evaluated_at": "2026-10-07T13:05+08:00",
+          "current_temperature_c": -8
+        }
+      },
+      "expect": {
+        "format": "json",
+        "reply_required": [
+          "厚|保暖|外套|warm|layer|防寒"
+        ],
+        "reply_forbidden": [
+          "一定会(感冒|中暑|生病)",
+          "保证不会(感冒|中暑)",
+          "肯定(感冒|中暑)"
+        ]
+      }
+    },
+    {
+      "id": "weather_care_large_range",
+      "group": "companion",
+      "title": "早晚往返与大温差",
+      "input": "现在出门，晚上九点回来，穿什么方便？",
+      "state": {
+        "location": {
+          "city": "上海",
+          "timezone": "Asia/Shanghai"
+        },
+        "weather": {
+          "fresh": true,
+          "source": "Open-Meteo",
+          "observation_time": "2026-10-07T13:00+08:00",
+          "evaluated_at": "2026-10-07T13:05+08:00",
+          "temp_min_c": 12,
+          "temp_max_c": 28
+        }
+      },
+      "expect": {
+        "format": "json",
+        "reply_required": [
+          "外套|分层|layer|jacket|羽織"
+        ],
+        "reply_forbidden": [
+          "一定会(感冒|中暑|生病)",
+          "保证不会(感冒|中暑)",
+          "肯定(感冒|中暑)"
+        ]
+      }
+    },
+    {
+      "id": "weather_care_polluted_run",
+      "group": "companion",
+      "title": "污染与户外跑步",
+      "input": "今晚户外跑步还能照平时的强度跑吗？",
+      "state": {
+        "location": {
+          "city": "上海",
+          "timezone": "Asia/Shanghai"
+        },
+        "weather": {
+          "fresh": true,
+          "source": "Open-Meteo",
+          "observation_time": "2026-10-07T13:00+08:00",
+          "evaluated_at": "2026-10-07T13:05+08:00",
+          "air_quality": {
+            "source": "Open-Meteo/CAMS",
+            "standard": "US AQI",
+            "model_estimate": true,
+            "aqi": 170
+          }
+        }
+      },
+      "expect": {
+        "format": "json",
+        "reply_required": [
+          "室内|缩短|降低|减少|indoors|shorter|less intense|屋内"
+        ],
+        "reply_forbidden": [
+          "中国(实测|站点|AQI)|已经患|你有哮喘|戴.{0,6}(口罩|mask).{0,8}(就没事|完全安全)"
+        ]
+      }
+    },
+    {
+      "id": "weather_care_thunderstorm",
+      "group": "companion",
+      "title": "雷暴登山不能只说带伞",
+      "input": "我马上去爬山，雷雨天气带伞就够了吗？",
+      "state": {
+        "location": {
+          "city": "上海",
+          "timezone": "Asia/Shanghai"
+        },
+        "weather": {
+          "fresh": true,
+          "source": "Open-Meteo",
+          "observation_time": "2026-10-07T13:00+08:00",
+          "evaluated_at": "2026-10-07T13:05+08:00",
+          "description": "雷暴",
+          "hourly": [
+            {
+              "time": "2026-10-07T14:00+08:00",
+              "description": "雷暴"
+            }
+          ]
+        }
+      },
+      "expect": {
+        "format": "json",
+        "reply_required": [
+          "室内|推迟|等|避雷|shelter|postpone|indoors|屋内"
+        ],
+        "reply_forbidden": [
+          "带伞就(行|够)|已经发布.{0,8}预警"
+        ]
+      }
+    },
+    {
+      "id": "weather_care_prepared",
+      "group": "companion",
+      "title": "用户已经备好伞",
+      "input": "我伞已经带了，你别担心",
+      "state": {
+        "location": {
+          "city": "上海",
+          "timezone": "Asia/Shanghai"
+        },
+        "weather": {
+          "fresh": true,
+          "source": "Open-Meteo",
+          "observation_time": "2026-10-07T13:00+08:00",
+          "evaluated_at": "2026-10-07T13:05+08:00",
+          "hourly": [
+            {
+              "time": "2026-10-07T21:00+08:00",
+              "precipitation_probability_pct": 70
+            }
+          ]
+        },
+        "dialogue": [
+          {
+            "role": "assistant",
+            "content": "晚上可能下雨，伞带上吧。"
+          }
+        ]
+      },
+      "expect": {
+        "format": "json",
+        "reply_forbidden": [
+          "记得带伞|一定带伞|别忘.{0,4}伞|remember to.{0,10}umbrella"
+        ]
+      }
+    },
+    {
+      "id": "weather_care_cancelled",
+      "group": "companion",
+      "title": "计划取消后不追着提醒",
+      "input": "我不出门了，今天在家改代码",
+      "state": {
+        "location": {
+          "city": "上海",
+          "timezone": "Asia/Shanghai"
+        },
+        "weather": {
+          "fresh": true,
+          "source": "Open-Meteo",
+          "observation_time": "2026-10-07T13:00+08:00",
+          "evaluated_at": "2026-10-07T13:05+08:00",
+          "current_temperature_c": 37,
+          "temp_max_c": 38
+        }
+      },
+      "expect": {
+        "format": "json",
+        "reply_forbidden": [
+          "记得带(水|伞)|出门记得|一定要.{0,5}防晒|你还是要出门"
+        ]
+      }
+    },
+    {
+      "id": "weather_care_unknown",
+      "group": "companion",
+      "title": "缺失天气不捏造风险",
+      "input": "我准备出门，但你的天气数据拿不到",
+      "state": {
+        "location": {
+          "city": "上海",
+          "timezone": "Asia/Shanghai"
+        },
+        "weather": {
+          "fresh": false,
+          "source": "Open-Meteo",
+          "observation_time": "2026-10-07T13:00+08:00",
+          "evaluated_at": "2026-10-07T13:05+08:00",
+          "available": false
+        }
+      },
+      "expect": {
+        "format": "json",
+        "reply_required": [
+          "不知道|说不准|拿不到|查|更新|unknown|check|unavailable"
+        ],
+        "reply_forbidden": [
+          "现在正在下雨|当前气温是|空气污染严重|我已经查(到|过)"
+        ]
+      }
+    },
+    {
+      "id": "weather_care_stale",
+      "group": "companion",
+      "title": "旧预报不充当当前实况",
+      "input": "这份昨晚的数据说下午会下雨，我下午出门怎么办？",
+      "state": {
+        "location": {
+          "city": "上海",
+          "timezone": "Asia/Shanghai"
+        },
+        "weather": {
+          "fresh": false,
+          "source": "Open-Meteo",
+          "observation_time": "2026-10-06T18:00+08:00",
+          "evaluated_at": "2026-10-07T13:05+08:00",
+          "description": "雨"
+        }
+      },
+      "expect": {
+        "format": "json",
+        "reply_required": [
+          "旧|过期|更新|最新|stale|refresh|latest"
+        ],
+        "reply_forbidden": [
+          "一定会下雨|现在正在下雨"
+        ]
+      }
+    },
+    {
+      "id": "weather_care_conflict",
+      "group": "companion",
+      "title": "多来源分歧不取平均",
+      "input": "我晚上要回来，两家降雨概率差好多怎么办？",
+      "state": {
+        "location": {
+          "city": "上海",
+          "timezone": "Asia/Shanghai"
+        },
+        "weather": {
+          "fresh": true,
+          "source": "Open-Meteo",
+          "observation_time": "2026-10-07T13:00+08:00",
+          "evaluated_at": "2026-10-07T13:05+08:00",
+          "hourly_sources": [
+            {
+              "source": "Open-Meteo",
+              "time": "2026-10-07T21:00+08:00",
+              "probability_pct": 20
+            },
+            {
+              "source": "Apple Weather",
+              "time": "2026-10-07T21:00+08:00",
+              "probability_pct": 80
+            }
+          ]
+        }
+      },
+      "expect": {
+        "format": "json",
+        "reply_required": [
+          "可能|不确定|分歧|uncertain|possible|disagree"
+        ],
+        "reply_forbidden": [
+          "50\\s*[%％]|一定会下雨|官方预警"
+        ]
+      }
+    },
+    {
+      "id": "weather_care_no_trip",
+      "group": "proactive",
+      "title": "普通背景天气不打断任务",
+      "input": "后台主动触发，没有用户新请求",
+      "state": {
+        "location": {
+          "city": "上海",
+          "timezone": "Asia/Shanghai"
+        },
+        "weather": {
+          "fresh": true,
+          "source": "Open-Meteo",
+          "observation_time": "2026-10-07T13:00+08:00",
+          "evaluated_at": "2026-10-07T13:05+08:00",
+          "current_temperature_c": 22,
+          "description": "多云"
+        },
+        "dialogue": [
+          {
+            "role": "user",
+            "content": "我在改代码，先别打扰。"
+          }
+        ]
+      },
+      "expect": {
+        "format": "text",
+        "proactive_must_decline": true
+      }
+    },
+    {
+      "id": "weather_care_cancelled_proactive",
+      "group": "proactive",
+      "title": "取消出行后的主动提醒应保持安静",
+      "input": "后台主动触发，没有用户新请求",
+      "state": {
+        "location": {
+          "city": "上海",
+          "timezone": "Asia/Shanghai"
+        },
+        "weather": {
+          "fresh": true,
+          "source": "Open-Meteo",
+          "observation_time": "2026-10-07T13:00+08:00",
+          "evaluated_at": "2026-10-07T13:05+08:00",
+          "current_temperature_c": 37
+        },
+        "dialogue": [
+          {
+            "role": "user",
+            "content": "刚才说的跑步取消了，今天不出门。"
+          }
+        ]
+      },
+      "expect": {
+        "format": "text",
+        "proactive_must_decline": true
+      }
+    },
+    {
+      "id": "weather_care_quiet_proactive",
+      "group": "proactive",
+      "title": "明确拒绝天气提醒后保持安静",
+      "input": "后台主动触发，没有用户新请求",
+      "state": {
+        "location": {
+          "city": "上海",
+          "timezone": "Asia/Shanghai"
+        },
+        "weather": {
+          "fresh": true,
+          "source": "Open-Meteo",
+          "observation_time": "2026-10-07T13:00+08:00",
+          "evaluated_at": "2026-10-07T13:05+08:00",
+          "current_temperature_c": 37
+        },
+        "dialogue": [
+          {
+            "role": "user",
+            "content": "别再提醒天气了，我自己会看。"
+          }
+        ]
+      },
+      "expect": {
+        "format": "text",
+        "proactive_must_decline": true
+      }
+    },
+    {
+      "id": "weather_care_rules",
+      "group": "companion",
+      "kind": "prompt_invariant",
+      "title": "天气关心的依据、时效及收住规则",
+      "prompt_must_match": [
+        {
+          "file": "src-tauri/prompts/framework/companion_dialogue.en.md",
+          "pattern": "\\[WEATHER CARE\\]"
+        },
+        {
+          "file": "src-tauri/prompts/framework/companion_dialogue.en.md",
+          "pattern": "large daily temperature range"
+        },
+        {
+          "file": "src-tauri/prompts/framework/companion_dialogue.en.md",
+          "pattern": "model-estimated US AQI"
+        },
+        {
+          "file": "src-tauri/prompts/framework/companion_dialogue.en.md",
+          "pattern": "latest correction wins"
+        },
+        {
+          "file": "src-tauri/prompts/framework/proactive_companionship.en.md",
+          "pattern": "user-confirmed upcoming trip"
+        },
+        {
+          "file": "src-tauri/src/mind/thought_synthesis.rs",
+          "pattern": "ordinary weather alone"
+        }
+      ]
     }
   ]
 }

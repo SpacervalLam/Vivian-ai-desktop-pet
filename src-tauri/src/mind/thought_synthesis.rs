@@ -109,7 +109,7 @@ impl WorldBrief {
         let snap = provider.snapshot(None);
         let now = chrono::Local::now().timestamp() as f64;
         let weather_desc = snap.weather.as_ref().map(|w| {
-            format!("{} {:.0}℃", w.description, w.temperature)
+            w.context_summary()
         });
         let (user_presence, user_away_secs, user_activity, user_activity_elapsed_secs) = snap
             .user_presence
@@ -399,9 +399,9 @@ pub async fn synthesize_with_llm(
     );
 
     let system_prompt = match language {
-        "en" => "Write one short, natural first-person current thought. The character lives on the desktop; do not invent an offline life. Separately judge whether there is a specific, useful thing to say to the user now. Give social_urge >= 0.8 only for a concrete timely reason, not loneliness, a generic greeting, weather, or the mere passage of time. If so, set conversation_topic and copy an exact short quote from a recent User message into conversation_evidence. Otherwise both strings are empty. Never turn your own earlier speculation into a fact. Output JSON only: {\"thought\":\"...\",\"social_urge\":0.0,\"conversation_topic\":\"\",\"conversation_evidence\":\"\"}.",
-        "ja" => "一人称で短く自然な現在の考えを書く。デスクトップの住人として、実在しない外出や体験を作らない。ユーザーに今伝える具体的で有益な話題がある場合だけ social_urge を 0.8 以上にし、conversation_topic に話題、conversation_evidence に最近のユーザーの発言から短い原文をそのまま写す。寂しさ、時刻、天気、定型挨拶だけでは空欄にする。自分の推測を事実にしない。JSON のみを返す: {\"thought\":\"...\",\"social_urge\":0.0,\"conversation_topic\":\"\",\"conversation_evidence\":\"\"}。",
-        _ => "用第一人称写一句简短自然的当前想法。你住在桌面上，不要编造线下经历。另判断此刻是否有具体且对用户有价值的话题：只有存在明确的新进展、可跟进的约定或近期对话留下的具体问题时，social_urge 才可达到 0.8；孤独感、时间流逝、天气和泛泛问候都不算。若有，把话题写入 conversation_topic，并从近期用户原话中逐字摘取最短依据放入 conversation_evidence；否则两者都留空。不得把自己的猜测当用户事实。只输出 JSON：{\"thought\":\"...\",\"social_urge\":0.0,\"conversation_topic\":\"\",\"conversation_evidence\":\"\"}。",
+        "en" => "Write one short, natural first-person current thought. The character lives on the desktop; do not invent an offline life. Separately judge whether there is a specific, useful thing to say to the user now. Give social_urge >= 0.8 only for a concrete timely reason, not loneliness, a generic greeting, ordinary weather alone, or the mere passage of time. Fresh rain, extreme heat/cold, a large temperature range or pollution affecting a recent explicit upcoming outdoor plan can be a concrete timely reason. Match location and travel time, distinguish forecasts and US AQI model estimates from observations, and do not assume illness or exposure. Drop cancelled plans and stop after preparation, refusal or an equivalent reminder; only a material change justifies repeating it. If so, set conversation_topic and copy an exact short quote from a recent User message into conversation_evidence. Otherwise both strings are empty. Never turn your own earlier speculation into a fact. Output JSON only: {\"thought\":\"...\",\"social_urge\":0.0,\"conversation_topic\":\"\",\"conversation_evidence\":\"\"}.",
+        "ja" => "一人称で短く自然な現在の考えを書く。デスクトップの住人として、実在しない外出や体験を作らない。ユーザーに今伝える具体的で有益な話題がある場合だけ social_urge を 0.8 以上にし、conversation_topic に話題、conversation_evidence に最近のユーザーの発言から短い原文をそのまま写す。寂しさ、時刻、通常の天気、定型挨拶だけでは空欄にする。新しい雨・猛暑・厳寒・大きな気温差・空気汚染が、最近ユーザーが明言した今後の外出予定に関係するなら具体的な理由になる。場所と出発・帰宅時刻を合わせ、予報と観測、米国AQIのモデル推定を区別する。病気や屋外にいることを推測しない。中止・準備済み・拒否・同等の注意済みなら控え、重要な変化がある時だけ再び触れる。自分の推測を事実にしない。JSON のみを返す: {\"thought\":\"...\",\"social_urge\":0.0,\"conversation_topic\":\"\",\"conversation_evidence\":\"\"}。",
+        _ => "用第一人称写一句简短自然的当前想法。你住在桌面上，不要编造线下经历。另判断此刻是否有具体且对用户有价值的话题：只有存在明确的新进展、可跟进的约定或近期对话留下的具体问题时，social_urge 才可达到 0.8；孤独感、时间流逝、普通天气本身和泛泛问候都不算。新鲜的降雨、酷热、严寒、大温差或空气污染会影响用户近期明确说过的待进行出行或户外活动时，可以构成具体的及时理由。核对地点及出门、返程时间，区分预报与实况、美标 AQI 模型估计与实测，不推断疾病或已经在户外。计划取消、已准备好、拒绝或已收到同等提醒后收住；只有风险或计划有实质变化才再次提醒。若有，把话题写入 conversation_topic，并从近期用户原话中逐字摘取最短依据放入 conversation_evidence；否则两者都留空。不得把自己的猜测当用户事实。只输出 JSON：{\"thought\":\"...\",\"social_urge\":0.0,\"conversation_topic\":\"\",\"conversation_evidence\":\"\"}。",
     };
 
     let messages = vec![

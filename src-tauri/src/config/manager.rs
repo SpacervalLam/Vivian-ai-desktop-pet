@@ -417,6 +417,8 @@ pub struct WorldConfig {
     /// 天气缓存 TTL（秒），默认 3600（1 小时）
     #[serde(default = "default_weather_cache_ttl")]
     pub weather_cache_ttl_secs: u64,
+    #[serde(default)]
+    pub apple_weather: AppleWeatherConfig,
     /// 纬度（度，北正南负）—— 用于天气获取与日出日落计算
     #[serde(default)]
     pub latitude: Option<f64>,
@@ -456,6 +458,7 @@ impl Default for WorldConfig {
             inject_into_prompt: true,
             enable_weather: true,
             weather_cache_ttl_secs: default_weather_cache_ttl(),
+            apple_weather: AppleWeatherConfig::default(),
             latitude: None,
             longitude: None,
             city: None,
@@ -466,6 +469,32 @@ impl Default for WorldConfig {
             sleep_start_hour: default_sleep_start_hour(),
             sleep_end_hour: default_sleep_end_hour(),
         }
+    }
+}
+
+/// User-owned WeatherKit credentials; never include the private key in diagnostics.
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AppleWeatherConfig {
+    pub enabled: bool,
+    pub team_id: String,
+    pub service_id: String,
+    pub key_id: String,
+    /// Optional IANA timezone override; otherwise use Open-Meteo's coordinate timezone.
+    pub timezone: String,
+    /// PKCS#8 PEM (.p8), protected by the configuration secret store.
+    pub api_secret: String,
+}
+
+impl std::fmt::Debug for AppleWeatherConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AppleWeatherConfig")
+            .field("enabled", &self.enabled)
+            .field("team_id", &self.team_id)
+            .field("service_id", &self.service_id)
+            .field("key_id", &self.key_id)
+            .field("api_secret", &"[redacted]")
+            .finish()
     }
 }
 

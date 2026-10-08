@@ -33,6 +33,7 @@ import { settingsPages as tabs, settingsGroups, settingsCopy, findSettingsPages,
 import SettingsSections from './settings/SettingsSections';
 import SchemaSettings from './settings/SchemaSettings';
 import './settings/SettingsWindow.css';
+import WeatherKitPrivateKeyField from './settings/WeatherKitPrivateKeyField';
 
 interface TtsConfigState {
   enabled: boolean;
@@ -2821,6 +2822,35 @@ const ConfigWindow: React.FC = () => {
               step={300}
               help={t('config.world_weather_ttl_help')}
             />
+            <div style={{ fontSize: 12, color: 'var(--panel-text-secondary)', marginBottom: 18 }}>
+              {t('config.world_weather_details_help')}
+            </div>
+            <ToggleField
+              label={t('config.world_apple_weather_enabled')}
+              help={t('config.world_apple_weather_help')}
+              value={get('world.apple_weather.enabled', false)}
+              onChange={(v) => setNested('world.apple_weather.enabled', v)}
+            />
+            {get('world.apple_weather.enabled', false) && (
+              <>
+                <TextField label="Apple Team ID" value={get('world.apple_weather.team_id', '')}
+                  onChange={(v) => setNested('world.apple_weather.team_id', v)} />
+                <TextField label="WeatherKit Service ID" value={get('world.apple_weather.service_id', '')}
+                  onChange={(v) => setNested('world.apple_weather.service_id', v)} placeholder="com.example.weather" />
+                <TextField label="Apple Key ID" value={get('world.apple_weather.key_id', '')}
+                  onChange={(v) => setNested('world.apple_weather.key_id', v)} />
+                <TextField label={t('config.world_apple_weather_timezone')}
+                  value={get('world.apple_weather.timezone', '')}
+                  onChange={(v) => setNested('world.apple_weather.timezone', v)}
+                  placeholder="Asia/Shanghai" help={t('config.world_apple_weather_timezone_help')} />
+                <WeatherKitPrivateKeyField
+                  value={get('world.apple_weather.api_secret', '')}
+                  onChange={(v) => setNested('world.apple_weather.api_secret', v)} />
+                <a href="https://developer.apple.com/weatherkit/" target="_blank" rel="noreferrer">WeatherKit</a>
+                {' · '}
+                <a href="https://weatherkit.apple.com/legal-attribution.html" target="_blank" rel="noreferrer">Apple Weather · {t('config.world_weather_attribution')}</a>
+              </>
+            )}
             <NumberField
               label={t('config.field_world_latitude')}
               value={get('world.latitude', 0)}

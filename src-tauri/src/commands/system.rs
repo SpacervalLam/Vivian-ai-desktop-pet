@@ -107,6 +107,7 @@ const SHARED_MEMORY_RESET_PATHS: &[&str] = &[
     "common/memory", "common/diary/diaries.json", "diary/diaries.json",
     "companion-v2/memory", "companion-v2/common/memory", "companion-v2/psychology", "shared/memory",
     "persona/evolution.json", "persona/dynamic_profile.json", "persona/persona_events.jsonl",
+    "token_usage.json",
 ];
 
 /// 记忆目录内也保留配置，避免删除混存的设置；不跟随符号链接。
@@ -274,7 +275,7 @@ mod reset_tests {
             "plugins/plugin.json", "mcp/config.json", "todo/tasks.json", "notebook/note.json"] {
             assert_eq!(std::fs::read_to_string(root.join(name)).unwrap(), "preserve exactly");
         }
-        assert_eq!(std::fs::read_to_string(root.join("token_usage.json")).unwrap(), "42");
+        assert!(!root.join("token_usage.json").exists());
 
     }
 
@@ -356,7 +357,7 @@ pub fn exit_app(app: tauri::AppHandle) {
 /// 3. 等待 grace period（500ms），让已 spawn 的 LLM/记忆任务跑完或检测到标志。
 /// 4. 执行数据清空：每个角色 clear_all_memories + 全局 clear_common_memories。
 /// 5. 写入清扫标记并重启，在数据模块打开前清理明确的记忆路径。
-///    保留角色配置、声音配置、插件/MCP、待办、笔记与使用统计。
+///    保留角色配置、声音配置、插件/MCP、待办与笔记；用量统计一并重置。
 #[tauri::command]
 pub async fn factory_reset(
     app: tauri::AppHandle,
@@ -429,7 +430,13 @@ pub async fn factory_reset(
     // 清空应用解析缓存（避免历史错误映射残留影响后续 open_application 调用）
     // 应用解析配置与缓存不属于记忆，保留。
 
-    // ===== 5. 写入清扫标记并重启应用 =====
+    // ===== 5. 重置用量统计 =====
+    // 内存缓存立即清零（避免退出时的 flush 把旧数据写回磁盘），
+    // 磁盘文件由重启后的清扫阶段删除。
+    crate::providers::usage_store::clear();
+    tracing::info!("[factory_reset] 用量统计已重置");
+
+    // ===== 6. 写入清扫标记并重启应用 =====
     tracing::info!("[factory_reset] 数据清空完成，准备重启应用");
     // 重启后在 AppState 构造前只清理明确的记忆路径，保留配置与内容资产，
     // 覆盖内存清空未触达的文件（screenshots / images / discovery / 历史遗留目录等）。

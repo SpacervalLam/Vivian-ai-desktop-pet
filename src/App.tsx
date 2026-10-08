@@ -2566,18 +2566,31 @@ export default function App() {
               BubbleController.closeAll();
               continue;
             }
-            // bubble 渠道：喂 TTS 并等待播放完成，再显示气泡
-            if (ttsConfigRef.current?.enabled) {
-              TtsStreamQueue.feedSync(msg.content, {});
-              await TtsStreamQueue.flushSync();
+            // bubble 渠道：首段语音开始时逐字显示，播放结束后解除气泡保留。
+            let shown = false;
+            let release: (() => void) | undefined;
+            const show = () => {
+              if (shown || cancelled) return;
+              shown = true;
+              BubbleController.showBubble(msg.content);
+              if (TtsStreamQueue.isEnabled()) release = BubbleController.holdForSpeech();
+              void emit('chat:assistant_message', {
+                content: msg.content,
+                timestamp: new Date(msg.timestamp * 1000 || Date.now()).toISOString(),
+                character_id: getCharacterId() ?? undefined,
+                channel: 'proactive',
+              });
+            };
+            try {
+              if (TtsStreamQueue.isEnabled()) {
+                TtsStreamQueue.feedSync(msg.content, { onFirstAudioStart: show });
+                await TtsStreamQueue.flushSync();
+              }
+            } finally {
+              // 未启用语音或播放失败时仍显示文字；回调已显示时不会重复。
+              show();
+              release?.();
             }
-            BubbleController.showBubble(msg.content);
-            void emit('chat:assistant_message', {
-              content: msg.content,
-              timestamp: new Date(msg.timestamp * 1000 || Date.now()).toISOString(),
-              character_id: getCharacterId() ?? undefined,
-              channel: 'proactive',
-            });
           }
           lastBubbleFromProactiveRef.current = now;
         } else if (proactiveStreamTextRef.current) {

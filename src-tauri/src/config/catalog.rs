@@ -693,6 +693,30 @@ pub fn build_catalog() -> Vec<SettingEntry> {
             default_value: serde_json::json!(30),
         },
         SettingEntry {
+            key: "world.apple_weather.enabled".into(), label: "同时比对 Apple 天气".into(), description: "启用 Apple WeatherKit，与 Open-Meteo 分别呈现".into(),
+            layer: SettingLayer::Advanced, group: "世界".into(), control: SettingControl::Boolean, default_value: serde_json::json!(false),
+        },
+        SettingEntry {
+            key: "world.apple_weather.team_id".into(), label: "Apple Team ID".into(), description: "Apple Developer Team ID".into(),
+            layer: SettingLayer::Advanced, group: "世界".into(), control: SettingControl::String, default_value: serde_json::json!(""),
+        },
+        SettingEntry {
+            key: "world.apple_weather.service_id".into(), label: "WeatherKit Service ID".into(), description: "已启用 WeatherKit 的 Service ID".into(),
+            layer: SettingLayer::Advanced, group: "世界".into(), control: SettingControl::String, default_value: serde_json::json!(""),
+        },
+        SettingEntry {
+            key: "world.apple_weather.key_id".into(), label: "Apple Key ID".into(), description: "WeatherKit .p8 密钥的 Key ID".into(),
+            layer: SettingLayer::Advanced, group: "世界".into(), control: SettingControl::String, default_value: serde_json::json!(""),
+        },
+        SettingEntry {
+            key: "world.apple_weather.timezone".into(), label: "Apple 预报时区".into(), description: "可选 IANA 时区；留空自动使用位置时区".into(),
+            layer: SettingLayer::Advanced, group: "世界".into(), control: SettingControl::String, default_value: serde_json::json!(""),
+        },
+        SettingEntry {
+            key: "world.apple_weather.api_secret".into(), label: "WeatherKit 私钥".into(), description: "用户自己的 PKCS#8 PEM .p8 私钥；Windows DPAPI 加密落盘".into(),
+            layer: SettingLayer::Advanced, group: "世界".into(), control: SettingControl::Password, default_value: serde_json::json!(""),
+        },
+        SettingEntry {
             key: "world.weather_cache_ttl_secs".into(),
             label: "天气缓存TTL".into(),
             description: "天气数据缓存过期时间（秒）".into(),

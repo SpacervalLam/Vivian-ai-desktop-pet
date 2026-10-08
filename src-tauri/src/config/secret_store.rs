@@ -5,6 +5,21 @@
 
 const PREFIX: &str = "dpapi:v1:";
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn weatherkit_private_key_roundtrips_through_secret_store() {
+        let original: serde_yaml::Value = serde_yaml::from_str("world:\n  apple_weather:\n    api_secret: test-weather-key\n").unwrap();
+        let mut protected=original.clone();
+        protect_yaml(&mut protected).unwrap();
+        #[cfg(windows)]
+        assert!(protected["world"]["apple_weather"]["api_secret"].as_str().unwrap().starts_with(PREFIX));
+        unprotect_yaml(&mut protected).unwrap();
+        assert_eq!(protected, original);
+    }
+}
+
 fn is_secret_key(key: &str) -> bool {
     matches!(
         key.to_ascii_lowercase().as_str(),

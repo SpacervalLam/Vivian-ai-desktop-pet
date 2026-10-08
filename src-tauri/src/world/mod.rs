@@ -23,6 +23,7 @@ pub mod time_perception;
 pub mod user_behavior;
 pub mod volume;
 pub mod weather;
+pub mod weather_data;
 
 pub use entity_state::{
     ExpectationEngine, ExpectationSource, ExpectedReturn, ReturnClassification, ReturnEvent,
@@ -171,6 +172,7 @@ pub struct WorldStateProvider {
     weather_source: RwLock<Option<Arc<WeatherSource>>>,
     /// 缓存的世界快照（每次 snapshot() 时若过期则刷新天气）
     cached_weather: RwLock<Option<WeatherSnapshot>>,
+    weather_refresh_lock: tokio::sync::Mutex<()>,
     /// 音乐数据源（SMTC 读取系统当前播放）
     music_source: RwLock<Option<Arc<MusicSource>>>,
     /// 缓存的音乐快照
@@ -209,6 +211,7 @@ impl WorldStateProvider {
             config: RwLock::new(config),
             weather_source: RwLock::new(None),
             cached_weather: RwLock::new(None),
+            weather_refresh_lock: tokio::sync::Mutex::new(()),
             music_source: RwLock::new(None),
             cached_music: RwLock::new(None),
             music_polling_started: AtomicBool::new(false),
@@ -271,7 +274,13 @@ impl WorldStateProvider {
 
     /// 更新配置（设置窗口保存后调用）
     pub fn update_config(&self, config: WorldConfig) {
-        *self.config.write() = config;
+        let mut previous = self.config.write();
+        if previous.latitude != config.latitude || previous.longitude != config.longitude
+            || previous.apple_weather != config.apple_weather || previous.enable_weather != config.enable_weather
+        {
+            *self.cached_weather.write() = None;
+        }
+        *previous = config;
     }
 
     /// 读取当前配置快照
@@ -340,6 +349,7 @@ impl WorldStateProvider {
 
     /// 异步刷新天气缓存（由后台定时调用）
     pub async fn refresh_weather(&self) {
+        let Ok(_refresh_guard) = self.weather_refresh_lock.try_lock() else { return; };
         let config = self.config.read().clone();
         if !config.enable_weather {
             tracing::debug!("[WorldStateProvider] 天气功能未启用，跳过刷新");
@@ -383,8 +393,11 @@ impl WorldStateProvider {
                 lat,
                 lon
             );
-            match src.fetch(lat, lon).await {
+            match src.fetch_with_config(lat, lon, &config).await {
                 Ok(w) => {
+                    let latest = self.config.read();
+                    if !latest.enable_weather || latest.latitude != config.latitude || latest.longitude != config.longitude
+                        || latest.apple_weather != config.apple_weather { return; }
                     tracing::info!(
                         "[WorldStateProvider] 天气刷新成功: {} {}°C",
                         w.description,
@@ -753,6 +766,27 @@ impl Default for WorldStateProvider {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn weather_cache_is_invalidated_when_location_or_apple_credentials_change() {
+        let provider = WorldStateProvider::default();
+        let weather: WeatherSnapshot = serde_json::from_value(serde_json::json!({
+            "temperature":20,"feels_like":19,"weather_code":3,"description":"阴","is_precipitating":false,
+            "wind_speed":7,"humidity":60,"weather_source":"Open-Meteo","cached_at":1234,
+        })).unwrap();
+        *provider.cached_weather.write()=Some(weather.clone());
+        provider.update_config(provider.config());
+        assert!(provider.cached_weather.read().is_some());
+        let mut config=provider.config();
+        config.latitude=Some(31.2);
+        provider.update_config(config);
+        assert!(provider.cached_weather.read().is_none());
+        *provider.cached_weather.write()=Some(weather);
+        let mut config=provider.config();
+        config.apple_weather.key_id="new-key".into();
+        provider.update_config(config);
+        assert!(provider.cached_weather.read().is_none());
+    }
 
     #[test]
     fn foreground_listener_is_replaced_per_character_and_removed_when_inactive() {

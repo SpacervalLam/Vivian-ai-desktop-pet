@@ -43,4 +43,22 @@ for (const scenario of scenarios) {
 const failed = report.checks.filter((check) => !check.passed);
 assert.equal(failed.length, 0, `offline checks failed: ${failed.map((check) => check.name).join(', ')}`);
 
+// The retriever deserializes both libraries at runtime. Keep every weather
+// example usable, and preserve the stop-reminding cases alongside hazard care.
+const weatherCases = ['departure-check', 'rain', 'heat', 'cold', 'range', 'pollution', 'storm', 'necessary-trip', 'prepared', 'cancelled', 'unknown', 'conflict', 'stale', 'quiet'];
+for (const character of ['vivian', 'nana']) {
+  const library = JSON.parse(readFileSync(`src-tauri/prompts/characters/${character}/example_library.json`, 'utf8'));
+  assert.equal(new Set(library.map((entry) => entry.id)).size, library.length, `${character}: example IDs must be unique`);
+  for (const name of weatherCases) {
+    const entry = library.find((item) => item.id === `weather-care-${name}`);
+    assert.ok(entry, `${character}: missing weather case ${name}`);
+    assert.ok(entry.cues.length > 0 && entry.cues.every((cue) => typeof cue === 'string' && cue.trim()), `${character}/${name}: retrievable cues`);
+    assert.ok(Array.isArray(entry.context_cues), `${character}/${name}: context cues schema`);
+    assert.match(entry.situation, /虚构/, `${character}/${name}: sample facts must be explicitly fictional`);
+    assert.ok(entry.response.text.trim(), `${character}/${name}: usable response`);
+    assert.ok(['reply', 'short_reply'].includes(entry.response.intent), `${character}/${name}: valid reply intent`);
+    assert.match(entry.attention, /不可借来当事实/, `${character}/${name}: prevent borrowing sample weather as live evidence`);
+  }
+}
+
 console.log(`Prompt scenarios: ${scenarios.length} acceptance cases, ${report.checks.length} offline checks, report shape and offline-only guarantees verified.`);

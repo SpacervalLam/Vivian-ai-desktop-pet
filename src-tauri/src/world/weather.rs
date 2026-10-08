@@ -1,4 +1,4 @@
-//! 天气数据源 —— Open-Meteo 免费 API（无需 key）
+//! 天气摘要 —— Open-Meteo + 可选 Apple WeatherKit + 空气质量。
 //!
 //! 失败即"不知道"：网络错误/超时/解析失败均返回 Err，由调用方保留旧缓存或 None，
 //! 不做任何时间推断兜底（用户明确要求）。
@@ -7,8 +7,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::weather_data::{fetch_reports, AirQuality, SourceStatus, WeatherSummary};
 use crate::error::{VivianError, VivianResult};
-use crate::network::http_client::get_global_client;
 
 /// 天气快照
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -38,122 +38,166 @@ pub struct WeatherSnapshot {
     pub weather_source: String,
     /// 缓存时间戳（UTC 秒）
     pub cached_at: i64,
+    #[serde(default)]
+    pub sources: Vec<WeatherSummary>,
+    #[serde(default)]
+    pub air_quality: Option<AirQuality>,
+    #[serde(default)]
+    pub source_status: Vec<SourceStatus>,
 }
 
 /// 天气数据源
-pub struct WeatherSource {
-    endpoint: String,
-}
+pub struct WeatherSource;
 
 impl WeatherSource {
     pub fn new() -> Self {
-        Self {
-            endpoint: "https://api.open-meteo.com/v1/forecast".to_string(),
-        }
+        Self
     }
 
-    /// 获取指定经纬度的天气
-    ///
-    /// 失败返回 Err，由调用方决定是否保留旧缓存。
-    pub async fn fetch(&self, lat: f64, lon: f64) -> VivianResult<WeatherSnapshot> {
-        tracing::info!("[WeatherSource] 开始获取天气，经纬度: ({}, {})", lat, lon);
-        let client = get_global_client();
-
-        // timezone=auto 按坐标解析本地时区；坐标此前已修正为真实位置，
-        // 时区与系统本地一致，sunrise/sunset 与本地小时同口径。
-        // 不传固定偏移（如 +08:00）：Open-Meteo 仅接受 IANA 时区名/auto/GMT。
-        let url = format!(
-            "{}?latitude={lat}&longitude={lon}&current=temperature_2m,relative_humidity_2m,apparent_temperature,is_day,weather_code,wind_speed_10m&daily=sunrise,sunset&timezone=auto",
-            self.endpoint
-        );
-        tracing::debug!("[WeatherSource] 请求 URL: {}", url);
-
-        let resp = client
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| {
-                tracing::warn!("[WeatherSource] 天气请求失败: {}", e);
-                VivianError::Network(format!("天气请求失败: {e}"))
-            })?
-            .error_for_status()
-            .map_err(|e| {
-                tracing::warn!("[WeatherSource] 天气响应状态错误: {}", e);
-                VivianError::Network(format!("天气响应状态错误: {e}"))
-            })?;
-        tracing::info!("[WeatherSource] 天气请求成功，状态码: {}", resp.status());
-
-        let body: OpenMeteoResponse = resp
-            .json()
-            .await
-            .map_err(|e| {
-                tracing::warn!("[WeatherSource] 天气 JSON 解析失败: {}", e);
-                VivianError::Network(format!("天气 JSON 解析失败: {e}"))
-            })?;
-
-        let current = body.current.ok_or_else(|| {
-            tracing::warn!("[WeatherSource] 天气响应缺少 current 字段");
-            VivianError::Network("天气响应缺少 current 字段".to_string())
-        })?;
-
-        let weather_code = current.weather_code;
-        let description = weather_code_to_desc(weather_code);
-        let is_precipitating = is_precipitating(weather_code);
-
-        // 解析日出日落（daily=sunrise,sunset），API 异常/缺失时保持 None
-        let (sunrise_hour, sunset_hour) = parse_sun_times(&body.daily);
-
-        tracing::debug!(
-            is_day = current.is_day,
-            sunrise_hour = ?sunrise_hour,
-            sunset_hour = ?sunset_hour,
-            "[WeatherSource] Open-Meteo is_day 标记与日出日落"
-        );
-
-        tracing::info!(
-            "[WeatherSource] 天气获取成功: {}°C, 体感 {}°C, {}, 湿度 {}%, 风速 {}km/h, 描述: {}",
-            current.temperature_2m,
-            current.apparent_temperature,
-            weather_code,
-            current.relative_humidity_2m,
-            current.wind_speed_10m,
-            description
-        );
-
+    pub async fn fetch_with_config(
+        &self,
+        lat: f64,
+        lon: f64,
+        config: &crate::config::WorldConfig,
+    ) -> VivianResult<WeatherSnapshot> {
+        let reports = fetch_reports(lat, lon, config, 1, 12).await;
+        let primary = reports
+            .providers
+            .iter()
+            .find(|p| {
+                let c = &p.current;
+                c.temperature.is_some()
+                    && c.feels_like.is_some()
+                    && c.humidity_pct.is_some()
+                    && c.wind_speed_kmh.is_some()
+            })
+            .ok_or_else(|| VivianError::Network("所有天气来源均不可用或当前数据不完整".into()))?;
+        let c = &primary.current;
+        let temperature = c
+            .temperature
+            .ok_or_else(|| VivianError::Network("当前气温缺失".into()))?;
+        let feels_like = c
+            .feels_like
+            .ok_or_else(|| VivianError::Network("当前体感气温缺失".into()))?;
+        let humidity = c
+            .humidity_pct
+            .ok_or_else(|| VivianError::Network("当前湿度缺失".into()))?;
+        let wind_speed = c
+            .wind_speed_kmh
+            .ok_or_else(|| VivianError::Network("当前风速缺失".into()))?;
+        let code = c.weather_code.unwrap_or(999);
+        let sun = primary.daily.first();
+        let parse_hour = |s: &str| {
+            // Apple timestamps are UTC; convert to the system timezone used by the room.
+            if let Ok(t) = chrono::DateTime::parse_from_rfc3339(s) {
+                use chrono::Timelike;
+                let t = t.with_timezone(&chrono::Local);
+                return Some(t.hour() as f64 + t.minute() as f64 / 60.0);
+            }
+            let local = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M").ok()?;
+            use chrono::Timelike;
+            Some(local.hour() as f64 + local.minute() as f64 / 60.0)
+        };
         Ok(WeatherSnapshot {
-            temperature: current.temperature_2m,
-            feels_like: current.apparent_temperature,
-            weather_code,
-            description,
-            is_precipitating,
-            wind_speed: current.wind_speed_10m,
-            humidity: current.relative_humidity_2m,
-            sunrise_hour,
-            sunset_hour,
-            is_day: Some(current.is_day == 1),
-            weather_source: "Open-Meteo".to_string(),
+            temperature,
+            feels_like,
+            weather_code: code,
+            description: c.description.clone().unwrap_or_else(|| "未知".into()),
+            is_precipitating: c.weather_code.map(is_precipitating).unwrap_or_else(|| {
+                c.condition_code.as_deref().is_some_and(|d| {
+                    matches!(
+                        d,
+                        "Rain"
+                            | "Drizzle"
+                            | "HeavyRain"
+                            | "Snow"
+                            | "HeavySnow"
+                            | "Thunderstorms"
+                            | "Sleet"
+                            | "FreezingRain"
+                            | "FreezingDrizzle"
+                            | "Hail"
+                            | "Blizzard"
+                            | "ScatteredThunderstorms"
+                            | "StrongStorms"
+                            | "IsolatedThunderstorms"
+                            | "Flurries"
+                    )
+                })
+            }),
+            wind_speed,
+            humidity,
+            sunrise_hour: sun.and_then(|d| d.sunrise.as_deref()).and_then(parse_hour),
+            sunset_hour: sun.and_then(|d| d.sunset.as_deref()).and_then(parse_hour),
+            is_day: c.is_day,
+            weather_source: primary.source.clone(),
             cached_at: chrono::Utc::now().timestamp(),
+            sources: reports.providers.iter().map(|p| p.summary()).collect(),
+            air_quality: reports.air_quality,
+            source_status: reports.source_status,
         })
     }
 }
 
-/// 从 Open-Meteo daily 响应解析日出/日落小时（本地时区）
-///
-/// API 返回 ISO 8601 字符串（如 "2026-08-22T05:42"），解析为小时浮点（5.7 表示 5:42）。
-fn parse_sun_times(daily: &Option<DailyWeather>) -> (Option<f64>, Option<f64>) {
-    fn parse_iso_hour(s: &str) -> Option<f64> {
-        let time = s.rsplit('T').next()?;
-        let mut parts = time.split(':');
-        let h: f64 = parts.next()?.parse().ok()?;
-        let m: f64 = parts.next()?.parse().ok()?;
-        Some(h + m / 60.0)
-    }
-    match daily {
-        Some(d) => (
-            d.sunrise.as_ref().and_then(|v| v.first()).and_then(|s| parse_iso_hour(s)),
-            d.sunset.as_ref().and_then(|v| v.first()).and_then(|s| parse_iso_hour(s)),
-        ),
-        None => (None, None),
+impl WeatherSnapshot {
+    pub fn context_summary(&self) -> String {
+        let number = |n: Option<f64>| {
+            n.map(|n| format!("{n:.0}"))
+                .unwrap_or_else(|| "unknown".into())
+        };
+        let mut lines = Vec::new();
+        for s in &self.sources {
+            let mut line = format!(
+                "{}: {} {}°C, at {} (daily timezone {}); humidity {}%, sea-level pressure {}hPa",
+                s.source,
+                s.description.as_deref().unwrap_or("unknown"),
+                number(s.temperature),
+                s.observed_at.as_deref().unwrap_or("unknown"),
+                s.timezone,
+                number(s.humidity_pct),
+                number(s.pressure_hpa)
+            );
+            if let (Some(low), Some(high)) = (s.temp_min, s.temp_max) {
+                line.push_str(&format!(
+                    "; today {low:.0}–{high:.0}°C, range {:.0}°C",
+                    high - low
+                ));
+            }
+            if let (Some(time), Some(prob)) = (
+                &s.next_precipitation_time,
+                s.next_precipitation_probability_pct,
+            ) {
+                line.push_str(&format!(
+                    "; next {}h precipitation forecast {time}: {prob:.0}%",
+                    s.precipitation_window_hours
+                ));
+            } else if s.precipitation_probability_hours == 12 {
+                line.push_str("; next 12h: precipitation probability below 30%");
+            } else {
+                line.push_str("; next 12h precipitation forecast incomplete/unknown");
+            }
+            lines.push(line);
+        }
+        if lines.is_empty() {
+            lines.push(format!("{} {:.0}°C", self.description, self.temperature));
+        }
+        if let Some(q) = &self.air_quality {
+            lines.push(format!(
+                "{}: {} {}, PM2.5 {}µg/m³, at {}",
+                q.source,
+                q.standard,
+                number(q.aqi),
+                number(q.pm2_5_ug_m3),
+                q.time.as_deref().unwrap_or("unknown")
+            ));
+        }
+        for status in &self.source_status {
+            if status.status == "error" {
+                lines.push(format!("{} unavailable", status.source));
+            }
+        }
+        lines.push(format!("Fetched at UTC unix {}. Compare sources at matching times; do not average. Full hourly / 10-day forecasts: get_weather_forecast.", self.cached_at));
+        lines.join(" | ")
     }
 }
 
@@ -207,27 +251,31 @@ pub fn is_precipitating(code: u32) -> bool {
         || (95..=99).contains(&code)
 }
 
-#[derive(Debug, Deserialize)]
-struct OpenMeteoResponse {
-    current: Option<CurrentWeather>,
-    daily: Option<DailyWeather>,
-}
-
-#[derive(Debug, Deserialize)]
-struct DailyWeather {
-    /// 日出时刻列表（ISO 8601，本地时区，每日一条）
-    sunrise: Option<Vec<String>>,
-    /// 日落时刻列表（ISO 8601，本地时区，每日一条）
-    sunset: Option<Vec<String>>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CurrentWeather {
-    temperature_2m: f64,
-    relative_humidity_2m: f64,
-    apparent_temperature: f64,
-    /// 是否白天（1=白天，0=夜晚），API 按坐标时刻计算的权威昼夜标记
-    is_day: u8,
-    weather_code: u32,
-    wind_speed_10m: f64,
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn weather_context_is_compact_and_does_not_claim_missing_rain_data_is_dry() {
+        let mut w: WeatherSnapshot = serde_json::from_value(serde_json::json!({
+            "temperature":20,"feels_like":19,"weather_code":3,"description":"阴","is_precipitating":false,
+            "wind_speed":7,"humidity":60,"weather_source":"Open-Meteo","cached_at":1234,
+        })).unwrap();
+        w.sources.push(WeatherSummary {
+            source: "Open-Meteo".into(),
+            temperature: Some(20.0),
+            temp_max: Some(25.0),
+            temp_min: Some(15.0),
+            observed_at: Some("2026-10-07T23:45".into()),
+            timezone: "Asia/Shanghai".into(),
+            ..WeatherSummary::default()
+        });
+        let text = w.context_summary();
+        assert!(text.contains("range 10°C"));
+        assert!(text.contains("incomplete/unknown"));
+        assert!(!text.contains("Some("));
+        assert!(text.len() < 1500);
+        let value = serde_json::to_value(w).unwrap();
+        assert!(value.get("hourly").is_none());
+        assert!(value.get("daily").is_none());
+    }
 }

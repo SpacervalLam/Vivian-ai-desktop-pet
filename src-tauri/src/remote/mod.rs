@@ -17,6 +17,10 @@
 //! | `/api/characters/:id/mind` | GET | 心智快照 |
 //! | `/api/characters/:id/history` | GET | 聊天历史 |
 //! | `/api/characters/:id/memories` | GET | 记忆列表 |
+//! | `/api/characters/:id/memory` | GET | 与桌面一致的完整记忆和原始会话 |
+//! | `/api/characters/:id/memory/conversations/:conversation_id/summarize` | POST | 整理或继续整理会话 |
+//! | `/api/characters/:id/profile/discovery` | GET/POST | 兴趣画像与确认/移除/导入 |
+//! | `/api/characters/:id/stickers/:sticker_id/:version` | GET | 版本化贴纸资源 |
 //! | `/api/characters/:id/diary` | GET | 日记列表 |
 //! | `/api/chat` | POST | 发送消息（非流式，含渠道参数） |
 //! | `/api/asr` | POST | 语音转文字（base64 f32 PCM） |
@@ -511,6 +515,92 @@ async fn get_memories(
         })
         .collect();
     Ok(Json(serde_json::json!({ "memories": values })))
+}
+
+/// Desktop-aligned full view: facts and summaries retain their evidence and hook fields.
+/// Conversations come from original history, including messages not flushed to disk yet.
+async fn get_memory_view(
+    State(state): State<RemoteAppState>,
+    Path(char_id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let instance = state.app_state.get_character(Some(&char_id))
+        .map_err(|e| (StatusCode::NOT_FOUND, e))?;
+    let items = instance.brain.memory.get_all_memories().await.map_err(err_status)?;
+    let memories: Vec<_> = items.into_iter().filter(|m| {
+        !matches!(m.metadata.get("source").and_then(|v| v.as_str()), Some("system_seed" | "environment_preset"))
+    }).map(|mut m| { m.embedding = None; m }).collect();
+    let conversations = instance.brain.dialogue.memory_conversations().map_err(err_status)?;
+    Ok(Json(serde_json::json!({ "memories": memories, "conversations": conversations })))
+}
+
+async fn summarize_memory_conversation(
+    State(state): State<RemoteAppState>,
+    Path((char_id, conversation_id)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let instance = state.app_state.get_character(Some(&char_id))
+        .map_err(|e| (StatusCode::NOT_FOUND, e))?;
+    let chain = instance.brain.chat_chain.as_ref()
+        .ok_or((StatusCode::SERVICE_UNAVAILABLE, "记忆整理尚未初始化".to_string()))?;
+    let item = chain.pipeline.summarize_session(&instance.brain.memory, &conversation_id)
+        .await.map_err(err_status)?;
+    Ok(Json(serde_json::to_value(item).map_err(err_status)?))
+}
+
+async fn get_discovery_profile(
+    State(state): State<RemoteAppState>,
+    Path(char_id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    state.app_state.get_character(Some(&char_id)).map_err(|e| (StatusCode::NOT_FOUND, e))?;
+    let profile = crate::commands::discovery::get_discovery_profile(char_id).map_err(err_status)?;
+    Ok(Json(serde_json::to_value(profile).map_err(err_status)?))
+}
+
+async fn get_memory_sticker(
+    State(state): State<RemoteAppState>,
+    Path((char_id, sticker_id, version)): Path<(String, String, String)>,
+) -> Result<Response, (StatusCode, String)> {
+    state.app_state.get_character(Some(&char_id)).map_err(|e| (StatusCode::NOT_FOUND, e))?;
+    let sticker = crate::stickers::StickerRef {
+        id: sticker_id, character_id: char_id, version, label: String::new(), meaning: String::new(),
+    };
+    let source = crate::stickers::get_sticker_data_url(sticker)
+        .map_err(|e| (StatusCode::NOT_FOUND, e))?;
+    if let Some(path) = source.strip_prefix('/') {
+        return Ok(get_model_asset(Path(path.to_string())).await);
+    }
+    let encoded = source.strip_prefix("data:image/png;base64,")
+        .ok_or((StatusCode::NOT_FOUND, "贴纸资源不可用".to_string()))?;
+    let bytes = base64::engine::general_purpose::STANDARD.decode(encoded).map_err(err_status)?;
+    Response::builder().header("Content-Type", "image/png")
+        .header("Cache-Control", "private, max-age=86400")
+        .body(Body::from(bytes)).map_err(err_status)
+}
+
+#[derive(Deserialize)]
+struct DiscoveryActionRequest {
+    action: String,
+    #[serde(default)]
+    value: String,
+    #[serde(default)]
+    response: String,
+}
+
+async fn update_discovery_profile(
+    State(state): State<RemoteAppState>,
+    Path(char_id): Path<String>,
+    Json(req): Json<DiscoveryActionRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    state.app_state.get_character(Some(&char_id)).map_err(|e| (StatusCode::NOT_FOUND, e))?;
+    use crate::commands::discovery;
+    let result = match req.action.as_str() {
+        "remove_interest" => discovery::remove_discovery_interest(char_id, req.value).map(|_| String::new()),
+        "remove_dislike" => discovery::remove_discovery_dislike(char_id, req.value).map(|_| String::new()),
+        "add_dislike" => discovery::add_discovery_dislike(char_id, req.value).map(|_| String::new()),
+        "respond_probe" => discovery::respond_interest_probe(char_id, req.value, req.response),
+        "import_bangumi" => discovery::bootstrap_from_bangumi(char_id, req.value).await.map(|domains| format!("已导入 {} 个兴趣域", domains.len())),
+        _ => return Err((StatusCode::BAD_REQUEST, "未知的兴趣画像操作".to_string())),
+    }.map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    Ok(Json(serde_json::json!({ "ok": true, "result": result })))
 }
 
 /// 获取日记列表
@@ -1241,12 +1331,16 @@ pub struct NoteWriteRequest {
     pub cover: Option<serde_json::Value>,
 }
 
-/// 列出笔记摘要
+/// 列出手机端笔记摘要，排除知识采集的自动归档。
 async fn list_notes(
     State(_state): State<RemoteAppState>,
     Path(char_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let summaries = crate::notebook::storage::list(&char_id).map_err(err_status)?;
+    let summaries: Vec<_> = crate::notebook::storage::list(&char_id)
+        .map_err(err_status)?
+        .into_iter()
+        .filter(|note| !crate::notebook::collected::is_collected_note(&note.id))
+        .collect();
     Ok(Json(serde_json::json!({ "notes": summaries })))
 }
 
@@ -1951,6 +2045,10 @@ pub async fn start_server(app_state: Arc<AppState>, port: u16) {
         .route("/api/characters/:id/mind", get(get_mind))
         .route("/api/characters/:id/history", get(get_history))
         .route("/api/characters/:id/memories", get(get_memories))
+        .route("/api/characters/:id/memory", get(get_memory_view))
+        .route("/api/characters/:id/memory/conversations/:conversation_id/summarize", post(summarize_memory_conversation))
+        .route("/api/characters/:id/profile/discovery", get(get_discovery_profile).post(update_discovery_profile))
+        .route("/api/characters/:id/stickers/:sticker_id/:version", get(get_memory_sticker))
         .route("/api/characters/:id/diary", get(get_diary))
         .route("/api/characters/:id/presence", post(set_presence))
         .route("/api/characters/:id/stop", post(stop_generation))

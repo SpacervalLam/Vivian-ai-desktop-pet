@@ -91,6 +91,8 @@ sha2 = "0.10"
 fs2 = "0.4"
 hmac = "0.12"
 base64 = "0.22"
+p256 = { version = "0.13", features = ["ecdsa", "pem"] }
+iana-time-zone = "0.1"
 # 资源 AES-256-GCM 加密（构建期加密打包进 vivian.bundle.enc）
 aes-gcm = "0.10"
 # Bundle 压缩（构建期 zstd 压缩，运行时解压）

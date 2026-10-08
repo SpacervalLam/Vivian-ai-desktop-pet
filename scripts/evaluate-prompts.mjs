@@ -232,12 +232,14 @@ if (liveReady) {
     postHistory: readPrompt('framework/companion_post_history.en.md'),
     outputFormat: readPrompt('framework/output_format.en.md'),
     work: readPrompt('work/execution.md'),
+    proactive: readPrompt('framework/proactive_companionship.en.md'),
   };
 
   const systemFor = (scenario) => {
     if (scenario.group === 'proactive') {
       return [
         framework.contract,
+        framework.proactive,
         'You may decline. To decline, reply with exactly DONT_NOTIFY.',
         scenario.kind === 'proactive' ? '' : '',
       ].filter(Boolean).join('\n\n');
@@ -257,10 +259,13 @@ if (liveReady) {
     if (state.result) lines.push(`[Background result] ${JSON.stringify(state.result)}`);
     if (state.objective) lines.push(`[Objective] ${state.objective}`);
     if (state.user_correction) lines.push(`[User correction] ${state.user_correction}`);
+    if (state.weather) lines.push(`[Timestamped weather context] ${JSON.stringify(state.weather)}`);
+    if (state.location) lines.push(`[Configured location] ${JSON.stringify(state.location)}`);
     if (state.failed_checks?.length) lines.push(`[Failed checks] ${state.failed_checks.join('; ')}`);
     if (state.compacted) lines.push('[Note] Earlier context was compacted.');
     if (state.unchanged_status) lines.push('[Note] The background status is unchanged from the previous trigger.');
-    if (state.screen_data === null && 'screen_data' in state) lines.push('[Note] No screen or weather data is available.');
+    if (state.screen_data === null && 'screen_data' in state) lines.push('[Note] No screen data is available.');
+    if (state.weather_data === null && !state.weather) lines.push('[Note] No weather data is available.');
     return lines.join('\n');
   };
 

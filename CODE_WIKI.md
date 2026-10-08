@@ -1921,7 +1921,7 @@ tools::types::is_path_within_any(path, primary, extras)
 | `work_question_tools.rs` | 工作侧方向询问（`work_ask_user`：编程会话内 2-4 选项提问，挂起等待 TTL 30 分钟，`Safe`） |
 | `work_subagent_tools.rs` | 工作侧子任务（`work_delegate` 委派独立上下文子 agent `Shell`、`work_job` 取回/取消/列表后台子任务 `Safe`） |
 | `work_todo_tools.rs` | 工作待办清单（`work_todo_write`：整表替换的编程计划清单，注入每轮 system prompt，落盘 `FsWrite`） |
-| `weather_tools.rs` | 天气（`get_weather_forecast`，只读 `Network`） |
+| `weather_tools.rs` | 多来源天气（`get_weather_forecast`，Open-Meteo + 可选 Apple WeatherKit、逐小时／每日预报、US AQI；只读 `Network`；配置与口径见 [`WEATHER.md`](src-tauri/src/world/WEATHER.md)） |
 | `web_search_tool.rs` | 多查询搜索与时间、域名、语言过滤，fast/research 策略、来源去重与明确的失败/部分结果；自动结果数陪伴 5、工作 10，详见 network/ |
 | `skill_tools.rs` | 技能（`use_skill` 按名激活，返回完整正文指引，正文不常驻上下文；限定当前角色可见范围，未命中附可用列表）+ `search_skill`（按自然语言 BM25 召回可见技能的名称/描述/关键词，不含正文，选定后再 use_skill 加载——与 tool_search 两段式同构）+ `create_skill`（智能体沉淀复用做法，可带 keywords 检索线索，写入即注册） |
 | `tool_tools.rs` | 工具创建元工具（`create_tool`）：智能体把「PowerShell 脚本 + JSON Schema」封装为可执行新工具，创建走预览卡片授权 |
@@ -2421,7 +2421,8 @@ score ≥ 0.5 入库（cap 60）｜≥ 0.75 惊喜队列 → Busy 分享竞争�
 | [`state.rs`](src-tauri/src/world/state.rs) | `EnvironmentContext` 世界快照 |
 | [`mod.rs`](src-tauri/src/world/mod.rs) | `WorldStateProvider` 世界快照组装 + `build_sunrise_sunset`（`is_daytime` 昼夜判定按系统本地小时与日出/日落小时实时比较，不直接用天气 API 的 `is_day` 快照，避免随天气缓存刷新的滞后误判） |
 | [`time_perception.rs`](src-tauri/src/world/time_perception.rs) | 时间/节气/节日/日出日落（本地 NOAA 简化算法，作为天气 API 不可用时的回退，同样按日出/日落小时实时判定昼夜） |
-| [`weather.rs`](src-tauri/src/world/weather.rs) | Open-Meteo 天气（`daily=sunrise,sunset` 同时返回当日日出/日落小时，写入 `WeatherSnapshot.sunrise_hour` / `sunset_hour`） |
+| [`weather.rs`](src-tauri/src/world/weather.rs) | 多来源天气摘要（当前天气／今日温差／近期降水／空气质量；常驻快照不带预报数组；保留日出日落兼容字段） |
+| [`weather_data.rs`](src-tauri/src/world/weather_data.rs) | Open-Meteo + 可选 Apple WeatherKit 共用查询、ES256 鉴权、逐小时／十日预报、单独空气质量、来源状态与口径归一化；失败与缺失值保留未知 |
 | [`volume.rs`](src-tauri/src/world/volume.rs) | 系统音量（Windows Core Audio） |
 | [`music.rs`](src-tauri/src/world/music.rs) | 媒体播放检测（SMTC 事件） |
 | [`foreground_window.rs`](src-tauri/src/world/foreground_window.rs) | 原始前台读数与过滤后的外部活动观察分离；WinEvent 使用事件 HWND 记录最近外部窗口，保留标题、进程与时间，不因聊天窗口抢焦点返回空白 |
@@ -2810,6 +2811,14 @@ LLM 输出含标记的 text
 |------|------|
 | [`mod.rs`](src-tauri/src/remote/mod.rs) | axum 路由 + 全部 handler + 服务器生命周期管理 + toast 通知队列 + 模型资源路由 |
 | [`frontend/index.html`](src-tauri/src/remote/frontend/index.html) | 手机端单页前端（纯静态 HTML+JS，自包含，无外部库依赖） |
+| [`frontend/memory-ui.js`](src-tauri/src/remote/frontend/memory-ui.js) / [`memory-ui.css`](src-tauri/src/remote/frontend/memory-ui.css) | 手机记忆页四层内容、搜索、原话追溯、逐卡片原文/摘要切换与角色隔离的画像操作 |
+| [`src/mobileMemory.ts`](src/mobileMemory.ts) | 将桌面 `memoryPresentation.ts` 和 `ActionText.ts` 打包成手机端 `memory-presentation.js`；`npm run build:mobile` 生成，开发/正式构建会自动运行 |
+
+手机记忆页使用 `/api/characters/{id}/memory` 的完整记忆与原始会话快照，不受旧记忆接口默认条数限制。长期记忆只展示未巩固的明确事实；共同经历复用桌面证据验证与跨会话归组；对话不按正文去重，也不从旧对白记忆回填。`POST /api/characters/{id}/memory/conversations/{conversation_id}/summarize` 调用与桌面相同的整理流水线，保留阶段摘要与继续整理语义。画像和兴趣接口按记忆页选择的角色请求，快速切换后的旧响应不会覆盖新角色；左侧导航的“用户画像”也进入记忆页的画像层。
+
+手机导航由 `frontend/navigation.js` 与 `navigation.css` 管理：移除底部栏，在任意页面或表单中右滑打开左侧抽屉，左滑、遮罩、关闭按钮或 Escape 收起；识别水平意图后才拦截滚动，取消或多指手势不触发导航。抽屉展开时隔离背景焦点，选择目标后收起，并保留角色仅通过按钮切换的规则。
+
+静态前端目录作为 Tauri 资源安装到 `remote/frontend/`，包含记忆页样式、模块和共享逻辑产物。浏览器验收：`node tests/mobile-memory-ui.test.mjs`（Windows Chrome，独立模拟服务，不调用真实模型或用户数据）；共享投影/桌面渲染：`node tests/memory-presentation.test.mjs` 和 `node tests/memory-page-render.test.mjs`。
 
 **配置**（`config.yaml` 的 `network.remote_access`）：
 - `enabled`：是否启用远程访问（默认关闭）
@@ -2848,15 +2857,14 @@ LLM 输出含标记的 text
 
 **工具确认联动**：`tools/confirmation.rs` 的 `ToolConfirmationRegistry` 新增 `list_pending()`（pending 条目存请求负载），并通过 `/api/confirmations` 暴露给手机端，手机可三态（拒绝 / 允许一次 / 始终允许）解决确认请求。
 
-**手机端前端**（`frontend/index.html`）：底部导航 6 项——微信 / 直接 / 记忆 / 笔记 / 待办 / 画像。
+**手机端前端**（`frontend/index.html`）：屏幕内右滑呼出左侧导航，包含首页 / 微信 / 记忆 / 笔记 / 待办。用户画像统一放在记忆页；下滑程序坞及其遮罩已移除。
 - **微信对话界面**：复刻桌面 ChatWindow 视觉（灰底 `#e9e9eb`、用户 WeChat 绿气泡 `#95ec69` 靠右、AI 白色气泡靠左带头像、绿色发送键），智能体发送的链接渲染为微信风格卡片
 - **直接对话界面**：复刻桌面 SideChatPanel 视觉（浅紫渐变底、AI 深色半透明圆角气泡靠左），顶部为桌宠舞台，**Vivian + Nana 双角色同屏渲染**，说话时对应角色上方弹出气泡并触发表情
 - **桌宠渲染**：CSS 雪碧图，与桌面端共用同一套资源——3×2 六态主图集（`idle` / `happy` / `drag` / `dizzy` / `talk` / `listen`，各态配独立 CSS keyframes：待机呼吸 / 开心弹跳 / 拎起摆动 / 晕眩摇晃 / 说话起伏 / 倾听侧身）+ 3×2 眨眼序列，经 `/remote/model/` 路由加载（dev 从 `public/` 读，release 从 bundle 读）。表情名经 `expressionToPose` 正则归一化到六态（pout/angry→drag、dizzy/sad/sleep→dizzy、talk/speak→talk、listen/focus→listen、happy/love/star/shy→happy）；眨眼切到眨眼图集逐帧播完（帧距 55/48/58/78/70/105ms，随机 3.2-7.5s 间隔），仅 idle 态播放、被其他姿态接管即中断（`petBlinkToken` 令牌 + 清行内样式交回姿态控制）
 - **单/双生布局**：单角色槽宽 ×0.88、可用高 ×0.90 缩放上限；双生模式两槽各占舞台半宽（×0.96），激活角色经 `data-active` 高亮，切换发言对象即切换高亮
 - **输入栏**：`align-items: center` + 文本框/发送按钮均 38px，中轴水平对齐；发送按钮旁边不再显示红色停止按钮；空状态不显示「暂无直接对话记录」占位文本
-- **程序坞**：全屏深度优先为 `100dvh`，高度再超出屏幕底部 `96px`，背景用 `linear-gradient` + `mask-image` 在底部 96px 做模糊渐隐到全透明，完全下拉时过渡区顶部位于屏幕底部以下，消除硬边的明显界限；`html`/`body` 背景设为应用底色铺满包含安全区的整个屏幕
 - **记忆页过滤**：三类不渲染节点——旁观插话的内部系统指令（`isInterjectionPrompt`，如"现在你想插话…"）、跨角色话题总结记忆（`isCrossCharTopicSummary`，如"我和Nana聊了聊：我对她说…"）；广播群发去重（同一用户消息的直接对话与旁观节点相同正文时只保留对话节点）；记忆卡片不再显示底部重要性百分比条
-- **记忆 / 笔记 / 待办+定时 / 画像**：对应后端 API 的移动端管理界面
+- **记忆 / 笔记 / 待办+定时**：对应后端 API 的移动端管理界面，用户画像归入记忆页。
 
 ### persona/ —— 人格定义与场景
 
