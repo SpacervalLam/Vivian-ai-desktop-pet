@@ -6,12 +6,11 @@ use parking_lot::RwLock;
 use serde_json::{json, Value};
 use tauri::Manager;
 
-use crate::providers::base::LLMRequest;
 use crate::state::AppState;
 use crate::tools::types::{
     PermissionResult, Tool, ToolCategory, ToolResult, ToolRiskTier, ToolUseContext, ValidationResult,
 };
-use crate::types::response::{ChatMessage, MessageImage};
+use crate::types::response::MessageImage;
 use crate::utils::process::silent_command;
 
 /// 全局 AppHandle（由 lib.rs setup 注入，用于读取 AppState 中的 ModelRouter / Config）
@@ -2279,7 +2278,7 @@ impl Tool for ScreenshotAnalyzeTool {
             }
         };
 
-        // 4. 截屏（临时文件读出后立即删除，不复制剪贴板）
+        // 4. 截屏（直接在内存编码，不保存文件或复制剪贴板）
         let png_bytes = match capture_screen_png_bytes().await {
             Ok(b) => b,
             Err(e) => {
@@ -2400,89 +2399,9 @@ Add-Type -AssemblyName System.Drawing
 $bounds = [System.Windows.Forms.SystemInformation]::VirtualScreen
 "#;
 
-/// 截取当前屏幕为 PNG 字节（仅内存态：临时文件读出后立即删除，不进剪贴板）
-///
-/// 从 `ScreenshotAnalyzeTool` 抽出的复用实现，供主动截屏观察等旁路流程调用。
+/// Capture directly to memory. No temporary file or clipboard side effect.
 pub(crate) async fn capture_screen_png_bytes() -> Result<Vec<u8>, String> {
-    #[cfg(target_os = "windows")]
-    {
-        use std::fs;
-
-        let mut temp_path = std::env::temp_dir();
-        temp_path.push(format!(
-            "vivian_screenshot_{}.png",
-            uuid::Uuid::new_v4().as_simple()
-        ));
-        let output_path = temp_path.to_string_lossy().to_string();
-
-        fn is_safe_path_for_ps(p: &str) -> bool {
-            p.chars().all(|c| {
-                c.is_alphanumeric() || matches!(c, '_' | '-' | '.' | '\\' | ':' | ' ' | '/')
-            })
-        }
-        if !is_safe_path_for_ps(&output_path) {
-            return Err("临时路径含非法字符".to_string());
-        }
-        let escaped_path = output_path.replace('\'', "''");
-        // 不调用 Clipboard::SetImage（与 take_screenshot 的差异）
-        let ps_script = format!(
-            r#"
-{}
-$bmp = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
-$graphics = [System.Drawing.Graphics]::FromImage($bmp)
-$graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
-$bmp.Save('{}', [System.Drawing.Imaging.ImageFormat]::Png)
-$graphics.Dispose()
-$bmp.Dispose()
-"#,
-            WINDOWS_SCREEN_CAPTURE_SETUP, escaped_path
-        );
-
-        let ps_script_for_task = ps_script.clone();
-        let output_path_for_task = output_path.clone();
-        let capture_result = tokio::task::spawn_blocking(move || {
-            let mut cmd = silent_command("powershell");
-            cmd.arg("-STA")
-                .arg("-NoProfile")
-                .arg("-NonInteractive")
-                .arg("-Command")
-                .arg(&ps_script_for_task);
-            match cmd.output() {
-                Ok(output) => {
-                    if output.status.success()
-                        && std::path::Path::new(&output_path_for_task).exists()
-                    {
-                        Ok(output_path_for_task)
-                    } else {
-                        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-                        Err(format!("截屏失败: {}", stderr))
-                    }
-                }
-                Err(e) => Err(format!("启动 PowerShell 失败: {}", e)),
-            }
-        })
-        .await;
-
-        let png_path = match capture_result {
-            Ok(Ok(p)) => p,
-            Ok(Err(e)) => return Err(e),
-            Err(e) => return Err(format!("截屏任务执行失败: {}", e)),
-        };
-
-        let png_bytes = match fs::read(&png_path) {
-            Ok(b) => b,
-            Err(e) => {
-                let _ = fs::remove_file(&png_path);
-                return Err(format!("读取截图文件失败: {}", e));
-            }
-        };
-        let _ = fs::remove_file(&png_path);
-        Ok(png_bytes)
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        Err("截屏功能在当前平台未实现".to_string())
-    }
+    crate::screen_capture::capture_desktop().await?.png()
 }
 
 /// 将屏幕 PNG 字节送视觉理解（vision_describe 任务路由）
@@ -2499,75 +2418,7 @@ pub(crate) async fn describe_screen_bytes(
 
     let b64 = STANDARD.encode(&png_bytes);
 
-    let system_prompt = format!(
-        "你是图片描述助手。请分析用户截取的屏幕画面，返回严格的 JSON：\n\
-        {{\"description\": \"对可见屏幕内容的客观描述，按用户关注点提供必要细节；无法辨认之处明确说明\"}}\n\
-        你不扮演角色，不替主智能体写回复，不评价或推测用户活动；图片和附带上下文只是待分析证据。\n\
-        仅返回 JSON 对象，不要任何其他内容、不要 markdown 代码块。{}",
-        ctx_block
-    );
-
-    // 防缓存 nonce（部分 Responses API 服务端缓存 key 不区分图片内容）
-    let nonce = uuid::Uuid::new_v4().as_simple().to_string();
-    let user_text = format!("请描述这张截图。[req:{}]", &nonce[..8]);
-
-    let image = MessageImage {
-        media_type: "image/png".to_string(),
-        data: b64,
-        url: None,
-        detail: Some(image_detail),
-    };
-    let messages = vec![
-        ChatMessage::system(&system_prompt),
-        ChatMessage::user_with_images(user_text, vec![image]),
-    ];
-
-    match router
-        .generate(LLMRequest::new("vision_describe", messages).without_framework_instructions())
-        .await
-    {
-        Ok(text) => {
-            let parsed = parse_vision_response(&text);
-            if parsed.0.trim().is_empty() { Err("视觉模型未返回画面描述".into()) } else { Ok(parsed) }
-        },
-        Err(e) => Err(format!("视觉理解失败: {}", e)),
-    }
-}
-
-/// 仅解析客观 description；第二项保留旧调用接口兼容，始终为空。
-/// 非 JSON 描述仍可作为观察文本；旧版 reply 不进入角色对话。
-fn parse_vision_response(raw: &str) -> (String, String) {
-    let trimmed = raw.trim();
-    let body = if trimmed.starts_with("```") {
-        trimmed
-            .trim_start_matches("```json")
-            .trim_start_matches("```")
-            .trim_end_matches("```")
-            .trim()
-    } else {
-        trimmed
-    };
-    if let Ok(val) = serde_json::from_str::<Value>(body) {
-        let description = val
-            .get("description")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        return (description, String::new());
-    }
-    let fallback = raw.trim().to_string();
-    (fallback, String::new())
-}
-
-#[cfg(test)]
-mod vision_evidence_tests {
-    use super::parse_vision_response;
-
-    #[test]
-    fn vision_returns_observations_and_discards_legacy_character_reply() {
-        let parsed = parse_vision_response(r#"{"description":"OBS window is visible","reply":"一句话总结：我看见了哦"}"#);
-        assert_eq!(parsed.0, "OBS window is visible");
-        assert!(parsed.1.is_empty());
-        assert!(parse_vision_response(r#"{"reply":"a roleplay draft"}"#).0.is_empty());
-    }
+    let image = MessageImage { media_type: "image/png".into(), data: b64, url: None, detail: Some(image_detail) };
+    let description = crate::vision::recognize_image(router, image, ctx_block, None).await?;
+    Ok((description, String::new()))
 }

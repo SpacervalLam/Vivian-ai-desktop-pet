@@ -25,6 +25,7 @@ export interface ShortcutRecorderProps {
   onChange: (shortcut: string) => Promise<ConflictResult>;
   /** 是否禁用 */
   disabled?: boolean;
+  distinguishAltSides?: boolean;
   /** 标签 i18n key（默认 config.field_shortcut） */
   labelKey?: string;
   /** 帮助文案 i18n key（默认 config.shortcut_help） */
@@ -37,12 +38,12 @@ export interface ConflictResult {
 }
 
 /** 将 KeyboardEvent 转换为 Tauri accelerator 字符串 */
-function eventToAccelerator(e: KeyboardEvent): string | null {
+function eventToAccelerator(e: KeyboardEvent, altSide = 'Alt'): string | null {
   const parts: string[] = [];
 
   if (e.ctrlKey) parts.push('Control');
   if (e.shiftKey) parts.push('Shift');
-  if (e.altKey) parts.push('Alt');
+  if (e.altKey) parts.push(altSide);
   if (e.metaKey) parts.push('Super');
 
   // 修饰键单独按下不构成快捷键
@@ -120,7 +121,7 @@ function isValidShortcut(shortcut: string): boolean {
   if (!shortcut) return false;
   const parts = shortcut.split('+');
   if (parts.length < 2) return false;
-  const modifiers = ['Control', 'Shift', 'Alt', 'Super', 'Command', 'CommandOrControl'];
+  const modifiers = ['Control', 'Shift', 'Alt', 'LeftAlt', 'RightAlt', 'Super', 'Command', 'CommandOrControl'];
   const hasModifier = parts.some((p) => modifiers.includes(p));
   const hasMain = parts.some((p) => !modifiers.includes(p));
   return hasModifier && hasMain;
@@ -133,6 +134,8 @@ function formatForDisplay(shortcut: string): string {
     .replace(/CommandOrControl/gi, 'Ctrl')
     .replace(/Control/g, 'Ctrl')
     .replace(/Super/g, 'Win')
+    .replace(/LeftAlt/g, 'Left Alt')
+    .replace(/RightAlt/g, 'Right Alt')
     .replace(/\+/g, ' + ');
 }
 
@@ -141,6 +144,7 @@ const ShortcutRecorder: React.FC<ShortcutRecorderProps> = ({
   defaultValue,
   onChange,
   disabled,
+  distinguishAltSides = false,
   labelKey = 'config.field_shortcut',
   helpKey = 'config.shortcut_help',
 }) => {
@@ -158,7 +162,11 @@ const ShortcutRecorder: React.FC<ShortcutRecorderProps> = ({
   useEffect(() => {
     if (!recording) return;
 
+    let altSide = 'Alt';
+    const handleKeyUp = (e: KeyboardEvent) => { if (!e.altKey) altSide = 'Alt'; };
     const handleKeyDown = async (e: KeyboardEvent) => {
+      if (e.code === 'AltLeft') altSide = 'LeftAlt';
+      if (e.code === 'AltRight') altSide = 'RightAlt';
       e.preventDefault();
       e.stopPropagation();
 
@@ -177,7 +185,7 @@ const ShortcutRecorder: React.FC<ShortcutRecorderProps> = ({
         return;
       }
 
-      const accelerator = eventToAccelerator(e);
+      const accelerator = eventToAccelerator(e, distinguishAltSides ? altSide : 'Alt');
       if (!accelerator) return; // 仅修饰键，等待更多按键
 
       if (!isValidShortcut(accelerator)) {
@@ -193,7 +201,7 @@ const ShortcutRecorder: React.FC<ShortcutRecorderProps> = ({
 
       // 冲突检测：尝试注册
       try {
-        const alreadyRegistered = await isRegistered(accelerator);
+        const alreadyRegistered = await isRegistered(accelerator.replace(/LeftAlt|RightAlt/g, 'Alt'));
         if (alreadyRegistered) {
           // 已被本应用注册（可能是当前快捷键自己），视为有效
           const result = await onChange(accelerator);
@@ -208,8 +216,8 @@ const ShortcutRecorder: React.FC<ShortcutRecorderProps> = ({
         }
         // 尝试临时注册以检测系统级冲突
         try {
-          await register(accelerator, () => {});
-          await unregister(accelerator);
+          await register(accelerator.replace(/LeftAlt|RightAlt/g, 'Alt'), () => {});
+          await unregister(accelerator.replace(/LeftAlt|RightAlt/g, 'Alt'));
         } catch {
           // 注册失败 = 被其他程序占用
           setError(t('toast.shortcut_conflict', { shortcut: formatForDisplay(accelerator) }));
@@ -231,10 +239,12 @@ const ShortcutRecorder: React.FC<ShortcutRecorderProps> = ({
 
     // 捕获阶段最高优先级拦截
     window.addEventListener('keydown', handleKeyDown, true);
+    window.addEventListener('keyup', handleKeyUp, true);
     return () => {
       window.removeEventListener('keydown', handleKeyDown, true);
+      window.removeEventListener('keyup', handleKeyUp, true);
     };
-  }, [recording, value, onChange, t]);
+  }, [recording, value, onChange, t, distinguishAltSides]);
 
   // 点击组件外部退出录制模式
   useEffect(() => {

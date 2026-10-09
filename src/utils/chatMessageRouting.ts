@@ -1,6 +1,6 @@
 /** Decide where an incoming message belongs without mixing private conversations. */
 export function routeAssistantMessage(
-  view: 'home' | 'private' | 'group' | 'details',
+  view: 'home' | 'private' | 'group' | 'details' | 'assistant',
   privateCharacter: string | null | undefined,
   character: string | undefined,
   channel: string | undefined,

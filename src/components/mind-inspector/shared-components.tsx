@@ -7,13 +7,11 @@
 
 import React, { useState } from 'react';
 import {
-  COLORS,
   TYPO,
   SPACING,
   RADIUS,
   EASE,
   DURATION,
-  SHADOW,
 } from './design-system';
 
 type CSSProperties = React.CSSProperties;

@@ -90,10 +90,8 @@ class TtsStreamQueueClass {
   private prewarmed = false;
   /** 当前表达层信息(由 ChatController 的 chat:meta 事件设置,随 speak_text 传入后端) */
   private currentPresentation: Presentation | null = null;
-  /** tts:started 事件监听器清理函数 */
-  private unlistenStarted?: () => void;
-  private unlistenError?: () => void;
-  private unlistenFinished?: () => void;
+  private unlisteners: Array<() => void> = [];
+  private disposed = false;
   /** 等待 tts:started 的 Promise resolve 回调队列（每次 speak_text 入队一个） */
   private startResolvers: Array<() => void> = [];
   /** 同步模式回调 */
@@ -109,10 +107,10 @@ class TtsStreamQueueClass {
 
   /** 初始化 tts 事件监听（懒加载，首次构造时注册一次） */
   private async initEvents(): Promise<void> {
-    if (this.eventsInitialized) return;
+    if (this.eventsInitialized || this.disposed) return;
     this.eventsInitialized = true;
     try {
-      this.unlistenStarted = await listen<{ character_id?: string }>('tts:started', (event) => {
+      this.trackListener(await listen<{ character_id?: string }>('tts:started', (event) => {
         const cid = getCharacterId();
         if (event.payload?.character_id && cid && event.payload.character_id !== cid) return;
         this.speaking = true;
@@ -122,8 +120,8 @@ class TtsStreamQueueClass {
           this.firstAudioFired = true;
           this.streamCbs?.onFirstAudioStart?.();
         }
-      });
-      this.unlistenError = await listen<{ character_id?: string }>('tts:error', (event) => {
+      }));
+      this.trackListener(await listen<{ character_id?: string }>('tts:error', (event) => {
         const cid = getCharacterId();
         if (event.payload?.character_id && cid && event.payload.character_id !== cid) return;
         while (this.startResolvers.length > 0) {
@@ -135,10 +133,10 @@ class TtsStreamQueueClass {
           this.firstAudioFired = true;
           this.streamCbs?.onFirstAudioStart?.();
         }
-      });
+      }));
       // Playback events update audio state; the awaited command owns queue serialization.
       // A stalled command is bounded by waitForDrain's timeout.
-      this.unlistenFinished = await listen<{ character_id?: string }>('tts:finished', (event) => {
+      this.trackListener(await listen<{ character_id?: string }>('tts:finished', (event) => {
         const cid = getCharacterId();
         if (event.payload?.character_id && cid && event.payload.character_id !== cid) return;
         this.speaking = false;
@@ -146,10 +144,28 @@ class TtsStreamQueueClass {
           const resolve = this.startResolvers.shift();
           if (resolve) resolve();
         }
-      });
+      }));
     } catch {
-      /* ignore - events may not be available in test environments */
+      for (const unlisten of this.unlisteners.splice(0)) unlisten();
+      this.eventsInitialized = false;
+      /* events may not be available in test environments */
     }
+  }
+
+  private trackListener(unlisten: () => void): void {
+    if (this.disposed) unlisten();
+    else this.unlisteners.push(unlisten);
+  }
+
+  /** 热重载时释放监听器；迟到的注册也会立即解绑。 */
+  dispose(): void {
+    this.disposed = true;
+    this.playbackEpoch++;
+    this.queue = [];
+    this.buffer = '';
+    this.streamCbs = null;
+    for (const resolve of this.startResolvers.splice(0)) resolve();
+    for (const unlisten of this.unlisteners.splice(0)) unlisten();
   }
 
   /** 设置是否启用流式 TTS（镜像后端 `TtsConfig.enabled`） */
@@ -437,5 +453,7 @@ class TtsStreamQueueClass {
 
 /** 流式 TTS 队列单例 */
 export const TtsStreamQueue = new TtsStreamQueueClass();
+
+import.meta.hot?.dispose(() => TtsStreamQueue.dispose());
 
 export default TtsStreamQueue;

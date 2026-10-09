@@ -187,7 +187,7 @@ pub fn plan_chunks(session: &ConversationRecord) -> Vec<SummaryChunk> {
         if let Some(sticker) = &turn.sticker {
             let line = format!(
                 "[{} | {} → {} | {}] 发送贴纸：{}\n",
-                turn.id, turn.speaker, turn.listener, turn.timestamp, sticker
+                turn.id, turn.speaker, turn.listener, crate::utils::prompt_time::format_prompt_time(turn.timestamp), sticker
             );
             if !slices.is_empty() && transcript.chars().count() + line.chars().count() > CHUNK_CHARS
             {
@@ -206,8 +206,8 @@ pub fn plan_chunks(session: &ConversationRecord) -> Vec<SummaryChunk> {
             let end = (start + SLICE_CHARS).min(chars.len());
             let body: String = chars[start..end].iter().collect();
             let line = format!(
-                "[{} | {} → {} | {} | 字符 {}..{}]\n{}\n",
-                turn.id, turn.speaker, turn.listener, turn.timestamp, start, end, body
+                "[{} | {} → {} | {} | 获知方式：{}；旁观者：{} | 字符 {}..{}]\n{}\n",
+                turn.id, turn.speaker, turn.listener, crate::utils::prompt_time::format_prompt_time(turn.timestamp), turn.knowledge_source, turn.observer_id.as_deref().unwrap_or("未记录"), start, end, body
             );
             if !slices.is_empty() && transcript.chars().count() + line.chars().count() > CHUNK_CHARS
             {
@@ -336,6 +336,8 @@ mod tests {
                 text,
                 timestamp: 1.0,
                 channel: "direct".into(),
+                knowledge_source: "direct".into(),
+                observer_id: None,
                 sticker: None,
             }],
         }

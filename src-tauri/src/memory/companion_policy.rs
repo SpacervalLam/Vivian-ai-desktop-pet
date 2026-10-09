@@ -33,9 +33,9 @@ pub fn dedup_recall(items: Vec<MemoryItem>, now: f64, limit: usize) -> Vec<Memor
         if !is_recallable(item, now) {
             return false;
         }
-        let plain = crate::cross_character::parse_any_speaker_prefix(&item.content).0;
-        let key: String = plain.chars().filter(|c| !c.is_whitespace() && !c.is_ascii_punctuation())
-            .flat_map(char::to_lowercase).collect();
+        let plain = if item.metadata["utterance_format"] == "plain" { item.content.clone() }
+            else { crate::cross_character::parse_any_speaker_prefix(&item.content).0 };
+        let key = super::provenance::recall_key(&item.metadata, &plain);
         !key.is_empty() && seen.insert(key)
     }).take(limit).collect()
 }

@@ -28,6 +28,9 @@ pub fn start_asr_event_forwarder(app: AppHandle, manager: AsrManager) {
             if matches!(event, AsrEvent::Stopped) {
                 manager.mark_stopped();
             }
+            if matches!(event, AsrEvent::FinalResult { .. }) {
+                crate::voice_diagnostics::finish("asr", "microphone", "stop_to_final_result");
+            }
             // AsrEvent 已派生 Serialize 且带 `#[serde(tag = "type")]`，可直接 emit
             let _ = app.emit("asr:event", &event);
             if matches!(event, AsrEvent::Error { .. }) {
@@ -62,6 +65,7 @@ pub async fn start_recognition(
 /// 停止语音识别
 #[tauri::command]
 pub async fn stop_recognition(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    crate::voice_diagnostics::begin("asr", "microphone", "stop_to_final_result");
     state.asr.stop_recognition().await.map_err(|e| e.to_string())
 }
 
@@ -206,7 +210,7 @@ pub fn register_text_shortcuts(app: AppHandle, state: &Arc<AppState>) {
         if sc.is_empty() {
             continue;
         }
-        if let Err(e) = app.global_shortcut().register(sc) {
+        if let Err(e) = app.global_shortcut().register(crate::shortcut::normalize(sc).as_str()) {
             tracing::warn!("[text_shortcut] 注册 {} 快捷键 {} 失败: {}", role, sc, e);
         } else {
             tracing::info!("[text_shortcut] 已注册 {} 快捷键: {}", role, sc);
@@ -216,7 +220,8 @@ pub fn register_text_shortcuts(app: AppHandle, state: &Arc<AppState>) {
     drop(text_map);
 
     // 窗口快捷键
-    let win_entries: [(&str, &str); 4] = [
+    let win_entries: [(&str, &str); 5] = [
+        ("screen_analyze", &base.shortcut_screen_analyze),
         ("chat", &base.shortcut_chat),
         ("settings", &base.shortcut_settings),
         ("memory", &base.shortcut_memory),
@@ -227,7 +232,7 @@ pub fn register_text_shortcuts(app: AppHandle, state: &Arc<AppState>) {
         if sc.is_empty() {
             continue;
         }
-        if let Err(e) = app.global_shortcut().register(sc) {
+        if let Err(e) = app.global_shortcut().register(crate::shortcut::normalize(sc).as_str()) {
             tracing::warn!("[window_shortcut] 注册 {} 快捷键 {} 失败: {}", action, sc, e);
         } else {
             tracing::info!("[window_shortcut] 已注册 {} 快捷键: {}", action, sc);
@@ -244,55 +249,42 @@ pub fn update_text_shortcuts(
     app: AppHandle,
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), String> {
-    // 先解绑所有旧文字快捷键
     let old_text = state.text_shortcuts.lock().clone();
-    for (_role, sc) in &old_text {
-        let _ = app.global_shortcut().unregister(sc.as_str());
-    }
-    // 先解绑所有旧窗口快捷键
     let old_win = state.window_shortcuts.lock().clone();
-    for (_action, sc) in &old_win {
-        let _ = app.global_shortcut().unregister(sc.as_str());
-    }
-
-    // 从配置读取新值重新注册
     let base = state.config.read().get_all().base.clone();
-
-    // 文字快捷键
-    let text_entries: [(&str, &str); 3] = [
-        ("vivian", &base.shortcut),
-        ("nana", &base.shortcut_nana),
-        ("broadcast", &base.shortcut_broadcast),
-    ];
-    let mut new_text = std::collections::HashMap::new();
-    for (role, sc) in text_entries {
-        if sc.is_empty() {
-            continue;
+    let new_text: std::collections::HashMap<String, String> = [
+        ("vivian", base.shortcut), ("nana", base.shortcut_nana), ("broadcast", base.shortcut_broadcast),
+    ].into_iter().filter(|(_, sc)| !sc.is_empty()).map(|(k,v)| (k.into(),v)).collect();
+    let new_win: std::collections::HashMap<String, String> = [
+        ("chat", base.shortcut_chat), ("settings", base.shortcut_settings), ("memory", base.shortcut_memory),
+        ("screen_analyze", base.shortcut_screen_analyze),
+        ("room", if crate::commands::apartment::enabled(state.inner()) { base.shortcut_room } else { String::new() }),
+    ].into_iter().filter(|(_, sc)| !sc.is_empty()).map(|(k,v)| (k.into(),v)).collect();
+    let mut unique = std::collections::HashSet::new();
+    for sc in new_text.values().chain(new_win.values()) {
+        let normalized = crate::shortcut::normalize(sc);
+        use std::str::FromStr;
+        let parsed = tauri_plugin_global_shortcut::Shortcut::from_str(&normalized).map_err(|e| e.to_string())?;
+        if !unique.insert(parsed) { return Err("快捷键与其他功能冲突".into()); }
+    }
+    for sc in old_text.values().chain(old_win.values()) {
+        let _ = app.global_shortcut().unregister(crate::shortcut::normalize(sc).as_str());
+    }
+    let mut registered: Vec<String> = Vec::new();
+    for sc in new_text.values().chain(new_win.values()) {
+        let normalized = crate::shortcut::normalize(sc);
+        if let Err(error) = app.global_shortcut().register(normalized.as_str()) {
+            for sc in &registered { let _ = app.global_shortcut().unregister(sc.as_str()); }
+            for sc in old_text.values().chain(old_win.values()) {
+                if let Err(restore_error) = app.global_shortcut().register(crate::shortcut::normalize(sc).as_str()) {
+                    tracing::error!("恢复快捷键失败: {}", restore_error);
+                }
+            }
+            return Err(format!("注册快捷键失败: {}", error));
         }
-        app.global_shortcut()
-            .register(sc)
-            .map_err(|e| format!("注册快捷键失败: {}", e))?;
-        new_text.insert(role.to_string(), sc.to_string());
+        registered.push(normalized);
     }
     *state.text_shortcuts.lock() = new_text;
-
-    // 窗口快捷键
-    let win_entries: [(&str, &str); 4] = [
-        ("chat", &base.shortcut_chat),
-        ("settings", &base.shortcut_settings),
-        ("memory", &base.shortcut_memory),
-        ("room", if crate::commands::apartment::enabled(state.inner()) { &base.shortcut_room } else { "" }),
-    ];
-    let mut new_win = std::collections::HashMap::new();
-    for (action, sc) in win_entries {
-        if sc.is_empty() {
-            continue;
-        }
-        app.global_shortcut()
-            .register(sc)
-            .map_err(|e| format!("注册快捷键失败: {}", e))?;
-        new_win.insert(action.to_string(), sc.to_string());
-    }
     *state.window_shortcuts.lock() = new_win;
 
     tracing::info!("[shortcut] 文字快捷键与窗口快捷键已更新");

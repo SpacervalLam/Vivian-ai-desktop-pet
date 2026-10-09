@@ -44,6 +44,9 @@ pub struct MusicSnapshot {
     pub status: PlaybackStatus,
     /// 播放来源应用（如 "Spotify"/"网易云音乐"，可能为空）
     pub source_app: String,
+    /// UI-only media thumbnail; never serialize image bytes into model context.
+    #[serde(default, skip_serializing)]
+    pub artwork_data_url: Option<String>,
 }
 
 /// 音乐数据源 —— 通过 Windows SMTC 读取系统当前播放
@@ -187,12 +190,31 @@ fn snapshot_of(
         title: props.Title().unwrap_or_default().to_string(),
         artist: props.Artist().unwrap_or_default().to_string(),
         album: props.AlbumTitle().unwrap_or_default().to_string(),
+        artwork_data_url: media_artwork(&props),
         status,
         source_app: session
             .SourceAppUserModelId()
             .unwrap_or_default()
             .to_string(),
     })
+}
+
+#[cfg(windows)]
+fn media_artwork(props: &windows::Media::Control::GlobalSystemMediaTransportControlsSessionMediaProperties) -> Option<String> {
+    use base64::Engine;
+    use windows::Storage::Streams::DataReader;
+    let stream = props.Thumbnail().ok()?.OpenReadAsync().ok()?.get().ok()?;
+    let size = stream.Size().ok()?;
+    if size == 0 || size > 1024 * 1024 { return None; }
+    let mime = stream.ContentType().ok()?.to_string().to_lowercase();
+    if !matches!(mime.as_str(), "image/png" | "image/jpeg" | "image/jpg" | "image/webp" | "image/gif" | "image/bmp") { return None; }
+    let input = stream.GetInputStreamAt(0).ok()?;
+    let reader = DataReader::CreateDataReader(&input).ok()?;
+    let loaded = reader.LoadAsync(size as u32).ok()?.get().ok()?;
+    if loaded != size as u32 { return None; }
+    let mut bytes = vec![0; loaded as usize];
+    reader.ReadBytes(&mut bytes).ok()?;
+    Some(format!("data:{mime};base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes)))
 }
 
 /// 打开 SMTC 会话管理器（需在 spawn_blocking 中调用）

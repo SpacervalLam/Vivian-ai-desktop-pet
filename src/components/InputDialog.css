@@ -1,0 +1,72 @@
+.quick-compose-shell {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  box-sizing: border-box;
+  background: transparent;
+  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', 'Microsoft YaHei', sans-serif;
+}
+.quick-compose {
+  --compose-accent: #a58236;
+  --compose-tint: #fbf2d7;
+  --compose-bg: #fffdf3;
+  --compose-text: #302a2e;
+  --compose-muted: #999099;
+  --compose-line: #eae3e8;
+  width: 100%;
+  max-width: 528px;
+  box-sizing: border-box;
+  padding: 13px 14px 14px;
+  border: 1px solid var(--compose-line);
+  border-radius: 24px;
+  background: var(--compose-bg);
+  color: var(--compose-text);
+  box-shadow: 0 8px 22px rgb(34 24 43 / 12%), 0 2px 5px rgb(34 24 43 / 4%);
+  animation: quick-compose-enter 180ms cubic-bezier(.2, .8, .2, 1);
+}
+.quick-compose--nana { --compose-accent: #8370b7; --compose-tint: #f1edf9; --compose-bg: #fcfaff; }
+.quick-compose--broadcast { --compose-accent: #8c76ad; --compose-tint: rgb(255 255 255 / 65%); --compose-bg: linear-gradient(115deg, #fff8dc 0%, #faf5eb 40%, #f0eaff 100%); }
+.quick-compose-header { display: flex; align-items: center; gap: 9px; padding: 0 2px 11px; }
+.quick-compose-identity {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 10px;
+  color: var(--compose-accent);
+  background: var(--compose-tint);
+  font-size: 13px;
+  font-weight: 700;
+}
+.quick-compose-name { font-size: 13px; font-weight: 600; letter-spacing: .1px; }
+.quick-compose button { display: inline-flex; align-items: center; justify-content: center; border: 0; cursor: pointer; font-family: inherit; transition: background 150ms, color 150ms, transform 150ms; }
+.quick-compose button:focus-visible { outline: 2px solid var(--compose-accent); outline-offset: 3px; }
+.quick-compose-whisper { gap: 5px; color: var(--compose-muted); background: transparent; border-radius: 8px; min-height: 26px; padding: 0 7px; font-size: 11px; }
+.quick-compose-whisper[aria-pressed='true'] { background: var(--compose-tint); color: var(--compose-accent); }
+.quick-compose-close { margin-left: auto; width: 26px; height: 26px; border-radius: 50%; background: transparent; color: var(--compose-muted); }
+.quick-compose-close:hover, .quick-compose-whisper:hover { background: var(--compose-tint); }
+.quick-compose-row { display: flex; gap: 6px; align-items: center; min-height: 48px; padding: 4px 6px 4px 13px; border-radius: 16px; background: var(--compose-tint); box-sizing: border-box; }
+.quick-compose-row input { min-width: 0; flex: 1; width: 0; padding: 8px 0; background: transparent; border: 0; outline: 0; color: var(--compose-text); font: inherit; font-size: 14px; caret-color: var(--compose-accent); }
+.quick-compose-row input::placeholder { color: var(--compose-muted); }
+.quick-compose-voice { width: 34px; height: 34px; flex: 0 0 auto; border-radius: 50%; background: transparent; color: var(--compose-accent); }
+.quick-compose-voice:hover { background: var(--compose-bg); }
+.quick-compose-voice.is-recording { color: #d25465; background: #fbe5e9; }
+.quick-compose-send { width: 34px; height: 34px; flex: 0 0 auto; border-radius: 50%; color: #fff; background: var(--compose-accent); }
+.quick-compose-send:disabled { background: var(--compose-bg); color: var(--compose-muted); cursor: default; }
+.quick-compose-send:not(:disabled):hover { filter: brightness(1.08); }
+.quick-compose button:active:not(:disabled) { transform: scale(.94); }
+.quick-compose-drafts { display: flex; gap: 8px; overflow-x: auto; margin: 0 2px 10px; padding-top: 2px; }
+.quick-compose-drafts button { flex: 0 0 auto; position: relative; padding: 0; background: transparent; }
+.quick-compose-drafts img { display: block; width: 44px; height: 44px; object-fit: cover; border-radius: 9px; }
+.quick-compose-drafts span { position: absolute; right: 2px; top: 2px; display: grid; place-items: center; width: 15px; height: 15px; border-radius: 50%; background: rgb(0 0 0 / 50%); color: white; }
+@keyframes quick-compose-enter { from { opacity: 0; transform: translateY(5px) scale(.985); } to { opacity: 1; transform: none; } }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) .quick-compose { --compose-bg: #26242c; --compose-tint: #343039; --compose-text: #f0edf4; --compose-muted: #a49aab; --compose-line: #48414d; }
+  :root:not([data-theme='light']) .quick-compose--broadcast { --compose-bg: linear-gradient(115deg, #302d23, #29262c 40%, #2e263c); --compose-tint: rgb(255 255 255 / 5%); }
+}
+:root[data-theme='dark'] .quick-compose { --compose-bg: #26242c; --compose-tint: #343039; --compose-text: #f0edf4; --compose-muted: #a49aab; --compose-line: #48414d; }
+:root[data-theme='dark'] .quick-compose--broadcast { --compose-bg: linear-gradient(115deg, #302d23, #29262c 40%, #2e263c); --compose-tint: rgb(255 255 255 / 5%); }
+@media (prefers-reduced-motion: reduce) { .quick-compose { animation: none; } .quick-compose button { transition: none; } }

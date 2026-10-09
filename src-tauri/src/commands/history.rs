@@ -8,19 +8,29 @@ use tauri::State;
 use crate::dialogue::DialogueManager;
 use crate::state::AppState;
 
+// Mode transitions remain in the pets' context, but are not chat messages.
+// Filter by source as older entries may have inherited a chat channel.
+fn visible_in_chat(metadata: &Value) -> bool {
+    metadata.get("source").and_then(Value::as_str) != Some("quiet_control")
+}
+
 #[tauri::command]
 pub async fn get_chat_history(
     state: State<'_, Arc<AppState>>,
     character_id: Option<String>,
+    limit: Option<usize>, before_id: Option<String>, channel: Option<String>,
 ) -> Result<Vec<Value>, String> {
     let instance = state.get_character(character_id.as_deref())?;
     let dialogue = instance.brain.dialogue.clone();
-    let entries = tokio::task::spawn_blocking(move || dialogue.get_all_history())
+    let entries = tokio::task::spawn_blocking(move || if let Some(limit) = limit {
+        dialogue.history_page_before(before_id.as_deref(), limit, channel.as_deref()).map(|(rows, _)| rows)
+    } else { dialogue.get_all_history() })
         .await
         .map_err(|e| format!("任务执行失败: {}", e))?
         .map_err(|e| e.to_string())?;
     let values: Vec<Value> = entries
         .into_iter()
+        .filter(|e| visible_in_chat(&e.metadata))
         .map(|e| {
             serde_json::json!({
                 "id": e.id,
@@ -74,6 +84,7 @@ pub async fn get_chat_history_all(
         for (dialogue, cid, cname) in chars {
             let history = dialogue.get_all_history().map_err(|e| e.to_string())?;
             for e in history {
+                if !visible_in_chat(&e.metadata) { continue; }
                 entries.push(serde_json::json!({
                     "id": e.id,
                     "role": e.role,
@@ -135,7 +146,7 @@ pub async fn search_chat_history(
         for (dialogue, cid, cname) in chars {
             let entries = dialogue.get_all_history().map_err(|e| e.to_string())?;
             for e in entries {
-                if e.role == "system" {
+                if e.role == "system" || !visible_in_chat(&e.metadata) {
                     continue;
                 }
                 let content = e.content.as_str();
@@ -220,59 +231,20 @@ pub async fn get_latest_previews(
         let mut unread: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
 
         for (dialogue, cid, cname) in chars {
-            let entries = dialogue.get_all_history().map_err(|e| e.to_string())?;
-            let mut char_latest_ts: f64 = 0.0;
-            for e in entries {
-                if e.role == "system" {
-                    continue;
-                }
-                let ch = e
-                    .metadata
-                    .get("channel")
-                    .and_then(|v| v.as_str())
-                    .map(String::from);
-                let ts = e.timestamp as f64;
-                if ch.as_deref() == Some("wechat") {
-                    if ts > char_latest_ts {
-                        char_latest_ts = ts;
-                        private_latest.insert(cid.clone(), serde_json::json!({
-                            "id": e.id,
-                            "role": e.role,
-                            "content": e.content,
-                            "timestamp": e.timestamp,
-                            "metadata": e.metadata,
-                            "character_id": cid,
-                            "character_name": cname,
-                        }));
-                    }
-                    if !is_first_load && e.role == "assistant" {
-                        let watermark = seen.get(&cid).copied().unwrap_or(0.0);
-                        if ts > watermark {
-                            *unread.entry(cid.clone()).or_insert(0) += 1;
-                        }
-                    }
-                }
-                if ch.as_deref() == Some("wechat_group") {
-                    if ts > group_latest_ts {
-                        group_latest_ts = ts;
-                        group_latest = Some(serde_json::json!({
-                            "id": e.id,
-                            "role": e.role,
-                            "content": e.content,
-                            "timestamp": e.timestamp,
-                            "metadata": e.metadata,
-                            "character_id": cid,
-                            "character_name": cname,
-                        }));
-                    }
-                    if !is_first_load && e.role == "assistant" {
-                        let watermark = seen.get("group").copied().unwrap_or(0.0);
-                        if ts > watermark {
-                            *unread.entry("group".to_string()).or_insert(0) += 1;
-                        }
-                    }
-                }
+            let to_value = |e: crate::dialogue::HistoryEntry| serde_json::json!({
+                "id": e.id, "role": e.role, "content": e.content, "timestamp": e.timestamp,
+                "metadata": e.metadata, "character_id": cid, "character_name": cname,
+            });
+            let watermark = if is_first_load { None } else { Some(seen.get(&cid).copied().unwrap_or(0.0)) };
+            let (latest, count) = dialogue.history_preview("wechat", watermark).map_err(|e| e.to_string())?;
+            if let Some(latest) = latest { private_latest.insert(cid.clone(), to_value(latest)); }
+            if count > 0 { *unread.entry(cid.clone()).or_insert(0) += count.min(u32::MAX as usize) as u32; }
+            let watermark = if is_first_load { None } else { Some(seen.get("group").copied().unwrap_or(0.0)) };
+            let (latest, count) = dialogue.history_preview("wechat_group", watermark).map_err(|e| e.to_string())?;
+            if let Some(latest) = latest {
+                if latest.timestamp > group_latest_ts { group_latest_ts = latest.timestamp; group_latest = Some(to_value(latest)); }
             }
+            if count > 0 { *unread.entry("group".into()).or_insert(0) += count.min(u32::MAX as usize) as u32; }
         }
         let mut previews: Vec<Value> = private_latest.into_values().collect();
         if let Some(g) = group_latest {

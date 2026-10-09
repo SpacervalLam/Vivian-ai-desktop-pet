@@ -56,6 +56,8 @@ pub struct ConversationArchive {
     index_path: PathBuf,
     /// 明文镜像目录
     plain_dir: PathBuf,
+    summary_serial: Arc<tokio::sync::Mutex<()>>,
+    disk_version: Option<Vec<u8>>,
 }
 
 impl ConversationArchive {
@@ -72,13 +74,18 @@ impl ConversationArchive {
             entries: Vec::new(),
             index_path,
             plain_dir,
+            summary_serial: Arc::new(tokio::sync::Mutex::new(())),
+            disk_version: None,
         };
         archive.load();
         archive
     }
 
     fn load(&mut self) {
-        if let Ok(content) = std::fs::read_to_string(&self.index_path) {
+        self.entries.clear();
+        self.disk_version = std::fs::read(&self.index_path).ok();
+        if let Some(bytes) = &self.disk_version {
+            let content = String::from_utf8_lossy(bytes);
             for line in content.lines() {
                 let line = line.trim();
                 if line.is_empty() {
@@ -101,52 +108,30 @@ impl ConversationArchive {
     }
 
     /// 新增一条 L1 存档（对话窗口溢出压缩产物），追加持久化
-    pub fn add_l1(&mut self, summary: String, start: DateTime<Local>, end: DateTime<Local>) {
-        self.insert_entry(1, summary, start, end);
+    pub fn serial(&self) -> Arc<tokio::sync::Mutex<()>> { self.summary_serial.clone() }
+    pub fn add_l1(&mut self, summary: String, start: DateTime<Local>, end: DateTime<Local>) -> bool {
+        let entry = Self::make_entry(1, summary, start, end);
+        let mut next = self.entries.clone();
+        next.push(entry.clone()); next.sort_by_key(|e| e.start_time);
+        if !self.persist_entries(&next) { return false; }
+        self.entries = next; self.write_mirror(&entry); true
     }
 
     /// 插入条目并持久化（追加 JSONL 行 + 明文镜像）
     ///
     /// 摘要源自原始对话的 LLM 压缩，可能携带凭据/个人标识；
     /// 存档每轮注入 prompt 且有明文镜像，落盘前统一脱敏。
-    fn insert_entry(&mut self, level: u8, summary: String, start: DateTime<Local>, end: DateTime<Local>) {
-        let (safe_summary, _, status) = crate::memory::redact::redact_content(&summary);
-        if status == crate::memory::redact::RedactStatus::Redacted {
-            tracing::info!("[ConversationArchive] 存档摘要含敏感信息，已脱敏（level={level}）");
-        }
-        let summary = safe_summary;
-        let id = format!(
-            "L{level}-{}-{}",
-            start.format("%Y%m%d%H%M%S"),
-            end.format("%Y%m%d%H%M%S")
-        );
-        let entry = ArchiveEntry {
-            id: id.clone(),
-            level,
-            summary,
-            start_time: start,
-            end_time: end,
-            created_at: crate::memory::types::current_timestamp(),
-        };
+    fn make_entry(level: u8, summary: String, start: DateTime<Local>, end: DateTime<Local>) -> ArchiveEntry {
+        let (summary, _, _) = crate::memory::redact::redact_content(&summary);
+        ArchiveEntry { id: format!("L{level}-{}", uuid::Uuid::new_v4()), level, summary, start_time: start, end_time: end,
+            created_at: crate::memory::types::current_timestamp() }
+    }
+    fn write_mirror(&self, entry: &ArchiveEntry) {
         if plain_mirror_enabled() {
-            let text = format!(
-                "压缩级别：{}\n时间范围：{} 到 {}\n\n{}",
-                entry.level,
-                entry.start_time.format("%Y-%m-%d %H:%M"),
-                entry.end_time.format("%Y-%m-%d %H:%M"),
-                entry.summary,
-            );
-            let _ = crate::utils::fs::write_atomic(
-                &self.plain_dir.join(format!("{id}.txt")),
-                &text,
-            );
+            let text = format!("压缩级别：{}\n时间范围：{} 到 {}\n\n{}", entry.level,
+                entry.start_time.format("%Y-%m-%d %H:%M"), entry.end_time.format("%Y-%m-%d %H:%M"), entry.summary);
+            let _ = crate::utils::fs::write_atomic(&self.plain_dir.join(format!("{}.txt", entry.id)), &text);
         }
-        // 按时间插入保持有序
-        let pos = self
-            .entries
-            .partition_point(|e| e.start_time <= entry.start_time);
-        self.entries.insert(pos, entry);
-        self.rewrite_index();
     }
 
     /// 检查是否存在待合并的层级：某层条数 ≥ MERGE_THRESHOLD 且低于最高层
@@ -163,30 +148,44 @@ impl ConversationArchive {
     }
 
     /// 提交合并：移除被合并条目，插入高一层的合并产物；整文件重写（低频）
-    pub fn commit_merge(&mut self, consumed: &[ArchiveEntry], merged_summary: String) {
-        let consumed_ids: std::collections::HashSet<&str> =
-            consumed.iter().map(|e| e.id.as_str()).collect();
-        self.entries.retain(|e| !consumed_ids.contains(e.id.as_str()));
-        // 移除对应明文镜像
-        for e in consumed {
-            let _ = std::fs::remove_file(self.plain_dir.join(format!("{}.txt", e.id)));
-        }
-        let start = consumed.first().map(|e| e.start_time).unwrap_or_else(Local::now);
-        let end = consumed.last().map(|e| e.end_time).unwrap_or_else(Local::now);
-        let new_level = consumed.first().map(|e| e.level + 1).unwrap_or(2);
-        self.insert_entry(new_level, merged_summary, start, end);
+    pub fn commit_merge(&mut self, consumed: &[ArchiveEntry], merged_summary: String) -> bool {
+        if !super::summary_commit::sources_current(&self.entries, consumed) { return false; }
+        let ids: std::collections::HashSet<_> = consumed.iter().map(|e| e.id.as_str()).collect();
+        let entry = Self::make_entry(consumed[0].level + 1, merged_summary, consumed[0].start_time, consumed.last().unwrap().end_time);
+        let mut next: Vec<_> = self.entries.iter().filter(|e| !ids.contains(e.id.as_str())).cloned().collect();
+        next.push(entry.clone()); next.sort_by_key(|e| e.start_time);
+        // Persist the complete replacement before mutating memory or deleting mirrors.
+        if !self.persist_entries(&next) { return false; }
+        self.entries = next;
+        for source in consumed { let _ = std::fs::remove_file(self.plain_dir.join(format!("{}.txt", source.id))); }
+        self.write_mirror(&entry); true
     }
 
-    fn rewrite_index(&mut self) {
-        let mut content = String::new();
-        for entry in &self.entries {
-            if let Ok(line) = serde_json::to_string(entry) {
-                content.push_str(&line);
-                content.push('\n');
-            }
+    fn persist_entries(&mut self, entries: &[ArchiveEntry]) -> bool {
+        let mut text = String::new();
+        for entry in entries {
+            let Ok(line) = serde_json::to_string(entry) else { return false; };
+            text.push_str(&line); text.push('\n');
         }
-        if let Err(e) = crate::utils::fs::write_atomic(&self.index_path, &content) {
-            tracing::warn!("[ConversationArchive] 原子重写索引失败: {e}");
+        let result = crate::brain::coding_memory_persistence::transaction(&self.index_path, || {
+            let current = match std::fs::read(&self.index_path) {
+                Ok(bytes) => Some(bytes),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => return Err(error.to_string()),
+            };
+            if current != self.disk_version { return Ok(false); }
+            crate::utils::fs::write_atomic(&self.index_path, &text).map_err(|error| error.to_string())?;
+            Ok(true)
+        });
+        match result {
+            Ok(true) => { self.disk_version = Some(text.into_bytes()); true }
+            Ok(false) => {
+                tracing::warn!("[ConversationArchive] disk version changed; summary rejected and archive reloaded");
+                self.load(); false
+            }
+            Err(error) => {
+                tracing::warn!("[ConversationArchive] commit failed; sources retained: {error}"); false
+            }
         }
     }
 
@@ -243,6 +242,7 @@ impl ConversationArchive {
     pub fn clear(&mut self) {
         self.entries.clear();
         let _ = std::fs::remove_file(&self.index_path);
+        self.disk_version = std::fs::read(&self.index_path).ok();
         if self.plain_dir.exists() {
             if let Ok(files) = std::fs::read_dir(&self.plain_dir) {
                 for f in files.filter_map(|e| e.ok()) {
@@ -338,6 +338,8 @@ mod tests {
             ],
             index_path: PathBuf::from("unused.jsonl"),
             plain_dir: PathBuf::from("unused_dir"),
+            summary_serial: Arc::new(tokio::sync::Mutex::new(())),
+            disk_version: None,
         };
         // 4 条 L1 → 触发合并，取最旧 3 条
         let pending = archive.pending_merge().unwrap();
@@ -357,6 +359,8 @@ mod tests {
             ],
             index_path: PathBuf::from("unused.jsonl"),
             plain_dir: PathBuf::from("unused_dir"),
+            summary_serial: Arc::new(tokio::sync::Mutex::new(())),
+            disk_version: None,
         };
         let block = archive.render_block().unwrap();
         let high_pos = block.find("高层存档").unwrap();
@@ -371,8 +375,43 @@ mod tests {
             entries: vec![],
             index_path: PathBuf::from("unused.jsonl"),
             plain_dir: PathBuf::from("unused_dir"),
+            summary_serial: Arc::new(tokio::sync::Mutex::new(())),
+            disk_version: None,
         };
         assert!(archive.render_block().is_none());
         assert!(archive.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod companion_optimization_tests {
+    use super::*;
+    fn archive(dir:&std::path::Path) -> ConversationArchive { ConversationArchive {entries:Vec::new(),index_path:dir.join("index.jsonl"),plain_dir:dir.join("plain"),summary_serial:Arc::new(tokio::sync::Mutex::new(())),disk_version:None} }
+    #[test]
+    fn merge_rejects_consumed_versions_and_keeps_newly_added_sources() {
+        let dir=tempfile::tempdir().unwrap();let mut archive=archive(dir.path());let now=Local::now();
+        for i in 0..4 {assert!(archive.add_l1(format!("source {i}"),now+chrono::Duration::minutes(i),now+chrono::Duration::minutes(i+1)));}
+        let sources=archive.pending_merge().unwrap();assert!(archive.add_l1("new during LLM".into(),now+chrono::Duration::minutes(10),now+chrono::Duration::minutes(11)));
+        assert!(archive.commit_merge(&sources,"merged".into()));assert!(!archive.commit_merge(&sources,"duplicate".into()));
+        assert!(archive.entries.iter().any(|e|e.summary=="new during LLM"));assert_eq!(archive.entries.iter().filter(|e|e.level==2).count(),1);
+        let mut restored=ConversationArchive {entries:Vec::new(),index_path:dir.path().join("index.jsonl"),plain_dir:dir.path().join("plain"),summary_serial:Arc::new(tokio::sync::Mutex::new(())),disk_version:None};restored.load();assert_eq!(restored.entries.len(),3);
+    }
+    #[test]
+    fn failed_atomic_summary_write_keeps_all_original_sources() {
+        let dir=tempfile::tempdir().unwrap();let mut archive=archive(dir.path());let now=Local::now();
+        for i in 0..4 {assert!(archive.add_l1(format!("source {i}"),now+chrono::Duration::minutes(i),now+chrono::Duration::minutes(i+1)));}
+        let sources=archive.pending_merge().unwrap();std::fs::remove_file(&archive.index_path).unwrap();std::fs::create_dir(&archive.index_path).unwrap();
+        assert!(!archive.commit_merge(&sources,"must not remove sources".into()));assert_eq!(archive.entries.len(),4);
+    }
+    #[test]
+    fn independent_archive_writers_reject_stale_disk_versions() {
+        let dir=tempfile::tempdir().unwrap();let mut first=archive(dir.path());let now=Local::now();
+        for i in 0..4 {assert!(first.add_l1(format!("source {i}"),now+chrono::Duration::minutes(i),now+chrono::Duration::minutes(i+1)));}
+        let sources=first.pending_merge().unwrap();let mut second=archive(dir.path());second.load();
+        assert!(second.add_l1("other session during LLM".into(),now+chrono::Duration::minutes(10),now+chrono::Duration::minutes(11)));
+        let disk=std::fs::read(&first.index_path).unwrap();
+        assert!(!first.commit_merge(&sources,"stale".into()));assert_eq!(std::fs::read(&first.index_path).unwrap(),disk);
+        assert_eq!(first.len(),5);assert!(first.commit_merge(&sources,"retry after reload".into()));
+        first.load();assert_eq!(first.len(),3);assert!(first.entries.iter().any(|e|e.summary=="other session during LLM"));
     }
 }

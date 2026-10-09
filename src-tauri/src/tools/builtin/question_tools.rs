@@ -3,7 +3,6 @@
 //! 模型调用 `ask_user` → 后端广播 `chat:question` 事件（携带 question_id + 问题）→
 //! 前端弹输入框 → 用户回答经 `respond_question` 命令回传 → 工具返回答案文本。
 
-use std::sync::Arc;
 
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
@@ -188,7 +187,3 @@ impl Tool for AskUserTool {
         "ask user question clarification"
     }
 }
-
-// 保持 Arc 导入使用（供将来若需要返回 Arc<Self> 时复用）
-#[allow(dead_code)]
-fn _keep_arc(_: Arc<AskUserTool>) {}

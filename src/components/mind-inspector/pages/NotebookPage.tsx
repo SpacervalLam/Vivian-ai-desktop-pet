@@ -38,10 +38,8 @@ import { useNavigation } from '../NavigationContext';
 import {
   AddableBlockType,
   Block,
-  Cover,
   NoteBook,
   CharacterId,
-  BlockType,
 } from './notebook-types';
 import { WysiwygEditor } from './NoteWysiwyg';
 import './RecordTheme.css';

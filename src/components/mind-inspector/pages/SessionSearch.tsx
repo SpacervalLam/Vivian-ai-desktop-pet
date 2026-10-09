@@ -20,7 +20,8 @@ function Highlight({ text, query }: { text: string; query: string }) {
   return <>{parts}</>;
 }
 
-export default function SessionSearch<T extends SearchableSession>({ sessions, onSelect, onClose }: {
+export default function SessionSearch<T extends SearchableSession>({ sessions, onSelect, onClose, loadMatches }: {
+  loadMatches?: (query: string) => Promise<T[]>;
   sessions: T[]; onSelect: (session: T) => void; onClose: () => void;
 }) {
   const { t } = useTranslation();
@@ -28,7 +29,22 @@ export default function SessionSearch<T extends SearchableSession>({ sessions, o
   const [selected, setSelected] = useState(0);
   const dialog = useRef<HTMLDialogElement>(null);
   const list = useRef<HTMLDivElement>(null);
-  const index = useMemo(() => indexSessions(sessions), [sessions]);
+  const [matches, setMatches] = useState<T[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  useEffect(() => {
+    setMatches([]); setError(''); setLoading(false);
+    if (!query.trim() || !loadMatches) return;
+    let canceled = false;
+    const timer = setTimeout(() => {
+      setLoading(true);
+      void loadMatches(query).then(rows => { if (!canceled) setMatches(rows); })
+        .catch(error => { if (!canceled) setError(String(error)); })
+        .finally(() => { if (!canceled) setLoading(false); });
+    }, 200);
+    return () => { canceled = true; clearTimeout(timer); };
+  }, [query, loadMatches]);
+  const index = useMemo(() => indexSessions([...new Map([...sessions, ...matches].map(s => [s.session_id, s])).values()]), [sessions, matches]);
   const results = useMemo(() => searchSessions(index, query), [index, query]);
   const active = Math.min(selected, Math.max(0, results.length - 1));
   const choose = (position: number) => { if (results[position]) { onSelect(results[position].session); onClose(); } };
@@ -55,6 +71,8 @@ export default function SessionSearch<T extends SearchableSession>({ sessions, o
       aria-label={t('workbench.searchTitle')} placeholder={t('workbench.searchPlaceholder')} />
       <button type="button" aria-label={t('workbench.dismiss')} onClick={onClose}><X size={18} /></button></div>
     <div className="work-search-section" aria-live="polite">{t(query.trim() ? 'workbench.searchResults' : 'workbench.searchRecent', { count: results.length })}</div>
+    {loading && <div role="status"><Loader2 size={15} className="codex-spin" /></div>}
+    {error && <div role="alert">{error}</div>}
     <div ref={list} id="work-search-results" role="listbox" aria-label={t('workbench.searchTitle')} className="work-search-results">
       {!results.length && <div className="work-search-empty">{t(sessions.length ? 'workbench.searchNoResults' : 'workbench.searchNoSessions')}</div>}
       {results.map(({ session, snippet }, position) => <button type="button" role="option" tabIndex={-1} aria-selected={active === position}

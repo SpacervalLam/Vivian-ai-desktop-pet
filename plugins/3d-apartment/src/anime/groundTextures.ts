@@ -39,7 +39,7 @@ function prng(seed: number) {
  * 不可能与画布相交，跳过。
  */
 function stamp(
-  ctx: CanvasRenderingContext2D, size: number, x: number, y: number, r: number,
+  _ctx: CanvasRenderingContext2D, size: number, x: number, y: number, r: number,
   draw: (px: number, py: number) => void,
 ) {
   for (const dx of [-size, 0, size]) {

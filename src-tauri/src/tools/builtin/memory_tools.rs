@@ -431,6 +431,8 @@ impl Tool for SearchMemoryTool {
             {
                 Ok(items) => {
                     let mut filtered = items;
+                    filtered.retain(|item| !item.tags.iter().any(|tag| tag == "quick_note")
+                        && crate::memory::provenance::visible_to(&item.metadata, mgr.char_id()));
                     if let Some(cat) = category {
                         if !cat.is_empty() {
                             let cat_type = parse_memory_type(cat);
@@ -453,11 +455,18 @@ impl Tool for SearchMemoryTool {
                                 "content": item.content,
                                 "importance": item.importance,
                                 "tags": item.tags,
-                                "timestamp": item.timestamp,
+                                "timestamp": crate::utils::prompt_time::format_prompt_time(item.timestamp),
+                                "record_type": crate::memory::provenance::recall_label(&item.metadata),
+                                "attribution": crate::memory::provenance::attribution(&item.metadata),
+                                "source_time": item.metadata["source_timestamp"].as_f64().filter(|t| t.is_finite() && *t > 0.0).map(crate::utils::prompt_time::format_prompt_time),
                             })
                         })
                         .collect();
 
+                    let query_owned = query.to_owned();
+                    let embedding = mgr.embedding();
+                    let user_notes = tokio::task::spawn_blocking(move || crate::user_quick_notes::search(&query_owned, 3, Some(embedding)))
+                        .await.ok().and_then(Result::ok).unwrap_or_default();
                     return ToolResult::standard_success(
                         &format!("找到 {} 条记忆", total),
                         Some(json!({
@@ -465,6 +474,7 @@ impl Tool for SearchMemoryTool {
                             "category": category,
                             "results": serialized,
                             "total": total,
+                            "user_quick_notes": crate::user_quick_notes::context(&user_notes),
                         })),
                     );
                 }

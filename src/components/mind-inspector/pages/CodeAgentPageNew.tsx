@@ -22,7 +22,7 @@ import { reportInspectorSession } from '../../../utils/inspectorAttention';
 import {
   Plus, Trash2, ChevronDown, ChevronRight, Loader2,
   FileText, FilePlus, FileEdit, Terminal as TerminalIcon, Search, FolderTree,
-  Wrench, FolderOpen, Braces, XCircle, X, Image as ImageIcon,
+  Wrench, FolderOpen, Braces, XCircle, X,
   Folder, Lock, Shield, Sparkles, Check, Cpu, Zap, Code2,
   Activity, Send, Square, ArrowDown, ArrowUp, List,
   PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, SlidersHorizontal, Ellipsis,
@@ -39,8 +39,9 @@ import TrajectoryPanel from './TrajectoryPanel';
 import TurnRail, { buildTurns } from './TurnRail';
 import ComposerEditor, { type ComposerEditorHandle } from './ComposerEditor';
 import PinnedSummary from './PinnedSummary';
-import { MarkdownFileContext, MarkdownText, FileChip, renderMarkdownBlocks } from './codeMarkdown';
+import { MarkdownFileContext, MarkdownText, renderMarkdownBlocks } from './codeMarkdown';
 import { StreamFadeContext, StreamFadeText } from './StreamFadeText';
+import { readWorkbenchSnapshot, WORKBENCH_SNAPSHOT_KEY, SNAPSHOT_SCROLL_SELECTORS, type WorkbenchSnapshot } from './workbenchSnapshot';
 import { SourceFileView } from './SourceFileView';
 import OfficePreview from './OfficePreview';
 import { PreviewEditCard, SelectionBubble, resolveSelectionTarget, type PendingEdit, type SelectionTarget } from './PreviewSelectionEdit';
@@ -182,6 +183,8 @@ interface ExtraWorkspace {
 }
 
 interface CodingSession {
+  history_loaded?: boolean;
+  stored_message_count?: number;
   session_id: string;
   char_id: string;
   /** 主工作区：决定相对路径、项目记忆、终端 cwd 与提示词环境块；空串表示无工作区模式 */
@@ -2180,124 +2183,6 @@ const PermissionDropdown: React.FC<{
   );
 };
 
-/**
- * 工作区芯片 + 管理菜单。
- *
- * 主工作区决定相对路径、项目记忆、终端 cwd 与提示词环境块；附加工作区只扩大可访问范围
- * （可逐个设为只读）。会话运行中不改工作区，与后端「运行中拒绝」保持一致。
- */
-const WorkspaceDropdown: React.FC<{
-  workingDirectory: string;
-  extraWorkspaces: ExtraWorkspace[];
-  disabled: boolean;
-  onAdd: () => void;
-  onRemove: (path: string) => void;
-  onToggleReadOnly: (path: string, readOnly: boolean) => void;
-  onSetPrimary: () => void;
-}> = ({ workingDirectory, extraWorkspaces, disabled, onAdd, onRemove, onToggleReadOnly, onSetPrimary }) => {
-  const { t } = useTranslation();
-  const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement | null>(null);
-
-  useEffect(() => {
-    const onDocDown = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
-    };
-    window.addEventListener('mousedown', onDocDown);
-    return () => window.removeEventListener('mousedown', onDocDown);
-  }, []);
-
-  /** 目录名（芯片上只展示 basename，完整路径放 title / 菜单里）。 */
-  const folderName = (p: string) => p.split(/[\\/]/).filter(Boolean).pop() || p;
-
-  return (
-    <div ref={ref} className="codex-dropdown codex-ws-dropdown">
-      <button
-        type="button"
-        disabled={disabled}
-        onClick={() => setOpen((o) => !o)}
-        className="codex-workspace-chip"
-        title={workingDirectory || t('mind_inspector.code_no_workspace')}
-      >
-        <FolderOpen size={11} style={{ flexShrink: 0 }} />
-        <span className="codex-workspace-name">
-          {workingDirectory ? folderName(workingDirectory) : t('mind_inspector.code_no_workspace')}
-        </span>
-        {extraWorkspaces.length > 0 && (
-          <span className="codex-workspace-badge">+{extraWorkspaces.length}</span>
-        )}
-        <ChevronDown size={11} style={{ flexShrink: 0, color: 'var(--codex-ink-faint)' }} />
-      </button>
-      {open && (
-        <div className="codex-dropdown-menu codex-ws-menu">
-          <div className="codex-dropdown-label">{t('mind_inspector.code_workspaces')}</div>
-          {/* 主工作区：不可移除（移除后会话就变成无工作区模式，属于语义跳变，要换用下面的「更换」） */}
-          <div className="codex-ws-row">
-            <span className="codex-ws-badge">{t('mind_inspector.code_workspace_primary')}</span>
-            <span className="codex-ws-path" title={workingDirectory}>
-              {workingDirectory || t('mind_inspector.code_workspace_none')}
-            </span>
-          </div>
-          {extraWorkspaces.map((w) => (
-            <div key={w.path} className="codex-ws-row">
-              <span className="codex-ws-badge codex-ws-badge-extra">
-                {t('mind_inspector.code_workspace_extra')}
-              </span>
-              <span className="codex-ws-path" title={w.path}>{w.path}</span>
-              <button
-                type="button"
-                className={`codex-ws-toggle ${w.read_only ? 'ro' : 'rw'}`}
-                onClick={() => onToggleReadOnly(w.path, !w.read_only)}
-                title={w.read_only
-                  ? t('mind_inspector.code_workspace_make_writable')
-                  : t('mind_inspector.code_workspace_make_readonly')}
-              >
-                {w.read_only
-                  ? t('mind_inspector.code_workspace_readonly')
-                  : t('mind_inspector.code_workspace_writable')}
-              </button>
-              <button
-                type="button"
-                className="codex-ws-remove"
-                onClick={() => onRemove(w.path)}
-                title={t('mind_inspector.code_workspace_remove')}
-              >
-                <X size={12} />
-              </button>
-            </div>
-          ))}
-          <div className="codex-dropdown-sep" />
-          <button
-            type="button"
-            className="codex-dropdown-item"
-            onClick={() => { setOpen(false); onAdd(); }}
-          >
-            <span style={{ display: 'inline-flex', color: 'var(--codex-ink-faint)' }}><Plus size={13} /></span>
-            <span style={{ flex: 1 }}>{t('mind_inspector.code_workspace_add')}</span>
-          </button>
-          <button
-            type="button"
-            className="codex-dropdown-item"
-            onClick={() => { setOpen(false); onSetPrimary(); }}
-          >
-            <span style={{ display: 'inline-flex', color: 'var(--codex-ink-faint)' }}><FolderTree size={13} /></span>
-            <span style={{ flex: 1 }}>
-              {workingDirectory
-                ? t('mind_inspector.code_workspace_change_primary')
-                : t('mind_inspector.code_workspace_pick_primary')}
-            </span>
-          </button>
-          {workingDirectory && (
-            <div className="codex-new-menu-hint">
-              {t('mind_inspector.code_workspace_change_primary_hint')}
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  );
-};
-
 const ModelDropdown: React.FC<{
   model: string;
   reasoningLevel: string;
@@ -2828,6 +2713,8 @@ function collectChatDocs(messages: CodingMessage[] | undefined | null): string[]
 }
 
 const PreviewPanel: React.FC<{
+  fullView: boolean;
+  onToggleFullView: () => void;
   tabs: { path: string; key: string }[];
   activePath: string | null;
   onSelect: (path: string) => void;
@@ -2842,7 +2729,7 @@ const PreviewPanel: React.FC<{
   onAddToConversation?: (text: string) => void;
   /** 页内错误提示（由 CodeAgentPage 注入，用于右键菜单动作失败时的反馈） */
   onNotifyError?: (msg: string) => void;
-}> = ({ tabs, activePath, onSelect, onClose, onCloseAll, onOpenFromChat, messages, baseKey, target, onAddToConversation, onNotifyError }) => {
+}> = ({ fullView, onToggleFullView, tabs, activePath, onSelect, onClose, onCloseAll, onOpenFromChat, messages, baseKey, target, onAddToConversation, onNotifyError }) => {
   const { t } = useTranslation();
   const tabsRef = useWheelHorizontalScroll<HTMLDivElement>();
   // path → 预览状态缓存（按会话隔离，切换会话自动重建）
@@ -2868,7 +2755,7 @@ const PreviewPanel: React.FC<{
   }, [cache]);
 
   // 懒加载：当前激活 tab 第一次渲染时触发读取
-  const [bump, setBump] = useState(0);
+  const [, setBump] = useState(0);
   const rerender = useRef(0);
   const activeItem = activePath ? ensure(activePath) : null;
 
@@ -3262,6 +3149,7 @@ const PreviewPanel: React.FC<{
   return (
     <div className="codex-preview">
       {/* 顶部多页签（无上限，横向滚动） */}
+      <div className="codex-preview-tabbar">
       <div className="codex-preview-tabs" ref={tabsRef} role="tablist">
         {tabs.length === 0 ? (
           <div className="codex-preview-no-tab">{t('mind_inspector.code_preview_no_tab')}</div>
@@ -3303,6 +3191,10 @@ const PreviewPanel: React.FC<{
             );
           })
         )}
+      </div>
+      <button type="button" className="codex-preview-full-toggle" aria-pressed={fullView} title={t(fullView ? 'workbench.previewFullExit' : 'workbench.previewFullEnter')} aria-label={t(fullView ? 'workbench.previewFullExit' : 'workbench.previewFullEnter')} onClick={onToggleFullView}>
+        {fullView ? <Minimize2 size={14} strokeWidth={1.8} aria-hidden /> : <Maximize2 size={14} strokeWidth={1.8} aria-hidden />}
+      </button>
       </div>
       {/* 内容区 */}
       <div className="codex-preview-body" ref={bodyRef}>{renderContent(activeItem)}</div>
@@ -3599,6 +3491,7 @@ const WorkQuestionCard: React.FC<{ question: WorkQuestionRequest; onDone: () => 
 };
 
 const CodeAgentPage: React.FC = () => {
+  const [initialSnapshot] = useState(readWorkbenchSnapshot);
   const { t } = useTranslation();
   /** 工作智能体挂起中的提问；非空时在输入区上方显示待答卡片。 */
   const [ask, setAsk] = useState<WorkQuestionRequest | null>(null);
@@ -3608,6 +3501,11 @@ const CodeAgentPage: React.FC = () => {
   const [bgJobs, setBgJobs] = useState(0);
   /** 后台子任务的运行计数（work_delegate 的 background 模式）。 */
   const [sessions, setSessions] = useState<CodingSession[]>([]);
+  const sessionWindow = useRef(30);
+  const sessionRefresh = useRef(0);
+  const sessionSelection = useRef(0);
+  const [hasOlderSessions, setHasOlderSessions] = useState(false);
+  const [loadingOlderSessions, setLoadingOlderSessions] = useState(false);
   const [activeId, setActiveId] = useState<string | null>(null);
   const navigation = useNavigation();
   const requestedSession = typeof navigation?.pageParams.workSessionId === 'string' ? navigation.pageParams.workSessionId : undefined;
@@ -3618,7 +3516,7 @@ const CodeAgentPage: React.FC = () => {
   const [summarizing, setSummarizing] = useState(false);
   useEffect(() => { setSummarizing(false); }, [activeId]);
   useEffect(() => { if (!running) setSummarizing(false); }, [running]);
-  const [input, setInput] = useState('');
+  const [input, setInput] = useState(initialSnapshot.input);
   const [creating, setCreating] = useState(false);
 
   // 页内错误提示：memory 窗口不承载 ToastWindow，跨窗口 toast 事件可能丢失，
@@ -3630,10 +3528,6 @@ const CodeAgentPage: React.FC = () => {
     if (pageErrorTimerRef.current) window.clearTimeout(pageErrorTimerRef.current);
     pageErrorTimerRef.current = window.setTimeout(() => setPageError(null), 8000);
   }, []);
-
-  const [fileTree, setFileTree] = useState<FileNode[]>([]);
-  const [fileTreeLoading, setFileTreeLoading] = useState(false);
-  const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set());
   const [thinking, setThinking] = useState(false);
   const [thinkingText, setThinkingText] = useState('');
   /** 正在自动压缩上下文：仅在 thinking 期间有意义，用于把「正在思考」换成「正在压缩上下文」 */
@@ -3690,9 +3584,37 @@ const CodeAgentPage: React.FC = () => {
   const [focusMode, setFocusMode] = useState(initialLayout.focus);
   const [rootWidth, setRootWidth] = useState(() => window.innerWidth - 16);
   const [leftDrawerOpen, setLeftDrawerOpen] = useState(false);
-  const layout = workbenchLayout(rootWidth, leftWidth, rightWidth, leftCollapsed, rightCollapsed, focusMode);
+  const [previewFullView, setPreviewFullView] = useState(initialSnapshot.previewFullView);
+  const normalLayout = workbenchLayout(rootWidth, leftWidth, rightWidth, leftCollapsed, rightCollapsed, focusMode);
+  const layout = previewFullView ? { ...normalLayout, rightCollapsed: false, rightDrawer: false } : normalLayout;
   const leftDrawer = layout.autoLeft && leftDrawerOpen && !focusMode;
-  const shownLeftCollapsed = layout.leftCollapsed && !leftDrawer;
+  const [leftPeekOpen, setLeftPeekOpen] = useState(false);
+  const leftPeekTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const leftPeekAvailable = layout.leftCollapsed && !leftDrawer;
+  const leftPeekVisible = leftPeekAvailable && leftPeekOpen;
+  const shownLeftCollapsed = layout.leftCollapsed && !leftDrawer && !leftPeekVisible;
+  const cancelLeftPeekClose = useCallback(() => {
+    if (leftPeekTimer.current !== null) clearTimeout(leftPeekTimer.current);
+    leftPeekTimer.current = null;
+  }, []);
+  const openLeftPeek = useCallback(() => {
+    cancelLeftPeekClose();
+    if (leftPeekAvailable) setLeftPeekOpen(true);
+  }, [cancelLeftPeekClose, leftPeekAvailable]);
+  const closeLeftPeekLater = useCallback(() => {
+    cancelLeftPeekClose();
+    leftPeekTimer.current = setTimeout(() => {
+      setLeftPeekOpen(false);
+      leftPeekTimer.current = null;
+    }, 180);
+  }, [cancelLeftPeekClose]);
+  useEffect(() => {
+    if (!leftPeekAvailable) {
+      cancelLeftPeekClose();
+      setLeftPeekOpen(false);
+    }
+  }, [leftPeekAvailable, cancelLeftPeekClose]);
+  useEffect(() => cancelLeftPeekClose, [cancelLeftPeekClose]);
   /** 工作区根节点：右侧栏拖动上限要按它的实际宽度算（窗口尺寸可变，不能写死） */
   const rootRef = useRef<HTMLDivElement | null>(null);
   useLayoutEffect(() => {
@@ -3705,10 +3627,12 @@ const CodeAgentPage: React.FC = () => {
     return () => observer.disconnect();
   }, []);
   const toggleLeftSidebar = useCallback(() => {
+    cancelLeftPeekClose();
+    setLeftPeekOpen(false);
     setFocusMode(false);
     if (layout.autoLeft) { setRightCollapsed(true); setLeftDrawerOpen((open) => !open); }
     else setLeftCollapsed((collapsed) => !collapsed);
-  }, [layout.autoLeft]);
+  }, [layout.autoLeft, cancelLeftPeekClose]);
   useEffect(() => { setLeftDrawerOpen(false); }, [activeId]);
   useEffect(() => {
     if (!layout.rightDrawer && !leftDrawer) return;
@@ -3826,14 +3750,14 @@ const CodeAgentPage: React.FC = () => {
   }, [mainBodyW]);
 
   // 会话列表视图
-  const [sessionView, setSessionView] = useState<'workspace' | 'flat'>('workspace');
-  const [sessionSort, setSessionSort] = useState<'manual' | 'recent'>('recent');
+  const [sessionView, setSessionView] = useState<'workspace' | 'flat'>(initialSnapshot.sessionView);
+  const [sessionSort, setSessionSort] = useState<'manual' | 'recent'>(initialSnapshot.sessionSort);
   const [sessionSearchOpen, setSessionSearchOpen] = useState(false);
   const [sessionToolsOpen, setSessionToolsOpen] = useState(false);
   const [manualOrder, setManualOrder] = useState<string[]>([]);
   const [workspaceTitles, setWorkspaceTitles] = useState<Record<string, string>>({});
   const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState<string | null>(null);
-  const [workspaceTreeOpen, setWorkspaceTreeOpen] = useState(true);
+  const [workspaceTreeOpen, setWorkspaceTreeOpen] = useState(initialSnapshot.workspaceTreeOpen);
   const [renamingWorkspace, setRenamingWorkspace] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState('');
   const [sessionMenu, setSessionMenu] = useState<{ id: string; x: number; y: number } | null>(null);
@@ -3850,7 +3774,10 @@ const CodeAgentPage: React.FC = () => {
   const newMenuRef = useRef<HTMLDivElement | null>(null);
 
   // 右侧检查器：概览 / 轨迹 / 变更 / 预览 / 终端（待办清单已并入概览页）
-  const [rightTab, setRightTab] = useState<'overview' | 'trajectory' | 'changes' | 'preview' | 'terminal'>('overview');
+  const [rightTab, setRightTab] = useState<'overview' | 'trajectory' | 'changes' | 'preview' | 'terminal'>(initialSnapshot.rightTab);
+  useEffect(() => {
+    if (rightTab !== 'preview') setPreviewFullView(false);
+  }, [rightTab]);
   const [termTabs, setTermTabs] = useState<{ id: string; label: string; workingDirectory: string }[]>([]);
   const [activeTermTab, setActiveTermTab] = useState<string | null>(null);
   const termTabCounter = useRef(0);
@@ -3859,8 +3786,8 @@ const CodeAgentPage: React.FC = () => {
   const termTabsRef = useWheelHorizontalScroll<HTMLDivElement>();
 
   // 预览：多页签（无上限）打开的文件
-  const [previewTabs, setPreviewTabs] = useState<{ path: string; key: string }[]>([]);
-  const [activePreview, setActivePreview] = useState<string | null>(null);
+  const [previewTabs, setPreviewTabs] = useState<{ path: string; key: string }[]>(initialSnapshot.previewTabs);
+  const [activePreview, setActivePreview] = useState<string | null>(initialSnapshot.activePreview);
   const [previewTarget, setPreviewTarget] = useState<{ path: string; line: number; revision: number } | null>(null);
   const previewCounter = useRef(0);
 
@@ -3943,7 +3870,49 @@ const CodeAgentPage: React.FC = () => {
   const asrBaseLenRef = useRef(0);
 
   const activeSession = sessions.find((s) => s.session_id === activeId) ?? null;
-  const termOpen = rightTab === 'terminal';
+  const snapshotRef = useRef<WorkbenchSnapshot>(initialSnapshot);
+  snapshotRef.current = { activeId, input, rightTab, previewTabs, activePreview, previewFullView, sessionView, sessionSort, workspaceTreeOpen, scroll: snapshotRef.current.scroll };
+  const saveSnapshot = useCallback(() => {
+    // Do not overwrite the previous session while its backend state is loading.
+    if (!snapshotRef.current.activeId && initialSnapshot.activeId) return;
+    const scroll = { ...snapshotRef.current.scroll };
+    for (const selector of SNAPSHOT_SCROLL_SELECTORS) {
+      const node = rootRef.current?.querySelector<HTMLElement>(selector);
+      if (node) scroll[selector] = node.scrollTop;
+    }
+    snapshotRef.current.scroll = scroll;
+    try { localStorage.setItem(WORKBENCH_SNAPSHOT_KEY, JSON.stringify(snapshotRef.current)); } catch { /* storage disabled/full */ }
+  }, [initialSnapshot.activeId]);
+  useEffect(() => {
+    saveSnapshot();
+  }, [activeId, input, rightTab, previewTabs, activePreview, previewFullView, sessionView, sessionSort, workspaceTreeOpen, saveSnapshot]);
+  useLayoutEffect(() => {
+    window.addEventListener('pagehide', saveSnapshot);
+    return () => { saveSnapshot(); window.removeEventListener('pagehide', saveSnapshot); };
+  }, [saveSnapshot]);
+  const snapshotRestoredRef = useRef(false);
+  useEffect(() => {
+    if (!activeSession || snapshotRestoredRef.current) return;
+    snapshotRestoredRef.current = true;
+    if (activeId !== initialSnapshot.activeId || requestedSession) return;
+    const pending = new Map(Object.entries(initialSnapshot.scroll));
+    if (pending.has('.codex-chat')) atBottomRef.current = false;
+    const restore = () => {
+      for (const [selector, top] of pending) {
+        const node = rootRef.current?.querySelector<HTMLElement>(selector);
+        if (!node) continue;
+        // Preview file content arrives asynchronously; wait for its scrollable content.
+        if (top > 0 && node.scrollHeight <= node.clientHeight) continue;
+        node.scrollTop = top;
+        pending.delete(selector);
+      }
+    };
+    restore();
+    const observer = new MutationObserver(restore);
+    if (rootRef.current) observer.observe(rootRef.current, { childList: true, subtree: true });
+    const timer = window.setTimeout(() => observer.disconnect(), 10000);
+    return () => { observer.disconnect(); window.clearTimeout(timer); };
+  }, [activeId, Boolean(activeSession), initialSnapshot, requestedSession]);
 
   /** markdown 回复里的文件链接：相对路径按会话工作区补全后送预览面板 */
   const openFileFromMarkdown = useCallback((path: string, line?: number) => {
@@ -3969,7 +3938,8 @@ const CodeAgentPage: React.FC = () => {
   useEffect(() => {
     setManualOrder((prev) => {
       const ids = sessions.map((s) => s.session_id);
-      const next = prev.filter((id) => ids.includes(id));
+      // A recent page is only a subset; keep ordering for unloaded old sessions.
+      const next = [...prev];
       for (const id of ids) {
         if (!next.includes(id)) next.push(id);
       }
@@ -4164,33 +4134,50 @@ const CodeAgentPage: React.FC = () => {
     };
   }, [addFilePaths, notifyError]);
 
-  const loadFileTree = useCallback(async (wd: string, expandRoot = true) => {
-    if (!wd) { setFileTree([]); return; }
-    setFileTreeLoading(true);
-    try {
-      const result = await invoke<FileNode[]>('coding_list_dir_tree', {
-        directory: wd, maxDepth: 1,
-      });
-      setFileTree(result || []);
-      if (expandRoot) {
-        setExpandedDirs(new Set([wd]));
-      }
-    } catch {
-      setFileTree([]);
-    } finally {
-      setFileTreeLoading(false);
-    }
+  const loadSessionMatches = useCallback((query: string) => invoke<CodingSession[]>('coding_list_sessions', { query }), []);
+
+  const hydrateSession = useCallback(async (session: CodingSession): Promise<CodingSession> => {
+    if (session.history_loaded === undefined) return session;
+    const detail = (await invoke<CodingSession[]>('coding_list_sessions', { sessionId: session.session_id }))[0];
+    if (!detail || detail.history_loaded === false) throw new Error('无法读取会话历史');
+    return detail;
   }, []);
 
   const refreshSessions = useCallback(async () => {
+    const generation = ++sessionRefresh.current;
     try {
-      const list = await invoke<CodingSession[]>('coding_list_sessions');
-      setSessions(list);
+      const list: CodingSession[] = [];
+      let hasMore = false;
+      for (let offset = 0; offset < sessionWindow.current; offset += 30) {
+        const page = await invoke<CodingSession[]>('coding_list_sessions', { offset, limit: 31 });
+        list.push(...page.slice(0, 30));
+        hasMore = page.length > 30;
+        if (!hasMore) break;
+      }
+      if (generation === sessionRefresh.current) {
+        setSessions(previous => {
+          const rows = [...new Map(list.map(s => {
+            const opened = previous.find(old => old.session_id === s.session_id && old.history_loaded !== false);
+            return [s.session_id, opened ? { ...opened, title: s.title, status: s.status, updated_at: s.updated_at } : s] as const;
+          })).values()];
+          const active = previous.find(s => s.session_id === activeIdRef.current);
+          if (active && !rows.some(s => s.session_id === active.session_id)) rows.push(active);
+          return rows;
+        });
+        setHasOlderSessions(hasMore);
+      }
       return list;
     } catch {
       return [];
     }
   }, []);
+
+  const loadOlderSessions = useCallback(async () => {
+    if (loadingOlderSessions) return;
+    setLoadingOlderSessions(true);
+    sessionWindow.current += 30;
+    try { await refreshSessions(); } finally { setLoadingOlderSessions(false); }
+  }, [loadingOlderSessions, refreshSessions]);
 
   const loadActiveModelId = useCallback(async (): Promise<string | null> => {
     try {
@@ -4247,7 +4234,18 @@ const CodeAgentPage: React.FC = () => {
       setDefaultWorkspace(await refreshDefaultWorkspace());
       const list = await refreshSessions();
       if (list.length > 0 && !activeIdRef.current && !requestedSessionRef.current) {
-        const latest = [...list].sort((a, b) => b.updated_at - a.updated_at)[0];
+        let latest = list.find(session => session.session_id === initialSnapshot.activeId);
+        if (!latest && initialSnapshot.activeId) {
+          latest = (await invoke<CodingSession[]>('coding_list_sessions', { sessionId: initialSnapshot.activeId }))[0];
+          if (latest) { const restored = latest; setSessions(previous => [...previous, restored]); }
+        }
+        latest ??= [...list].sort((a, b) => b.updated_at - a.updated_at)[0];
+        if (initialSnapshot.activeId && latest.session_id !== initialSnapshot.activeId) { setPreviewTabs([]); setActivePreview(null); setInput(''); setPreviewFullView(false); }
+        const selection = sessionSelection.current;
+        latest = await hydrateSession(latest);
+        if (selection !== sessionSelection.current || activeIdRef.current || requestedSessionRef.current) return;
+        const restored = latest;
+        setSessions(previous => previous.map(s => s.session_id === restored.session_id ? restored : s));
         setActiveId(latest.session_id);
         setRunning(latest.status === 'running');
         setMessages(latest.messages ?? []);
@@ -4255,17 +4253,23 @@ const CodeAgentPage: React.FC = () => {
         setStats(latest.stats ?? null);
         setReasoningLevel(latest.reasoning_level ?? 'high');
         setModelName(latest.model_id ?? (await loadActiveModelId()) ?? '');
-        void loadFileTree(latest.working_directory);
       } else if (list.length === 0) {
         // 无任何会话（未选择工作区）时也要加载全局激活工作模型，让模型下拉框显示正确
         const active = await loadActiveModelId();
         if (active) setModelName(active);
       }
-    })();
+    })().catch(error => setPageError(String(error)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const switchSession = useCallback((s: CodingSession) => {
+  const switchSession = useCallback(async (s: CodingSession) => {
+    const selection = ++sessionSelection.current;
+    try { s = await hydrateSession(s); }
+    catch (error) { if (selection === sessionSelection.current) notifyError(String(error)); return false; }
+    if (selection !== sessionSelection.current) return false;
+    const detail = s;
+    setSessions(previous => previous.some(item => item.session_id === detail.session_id)
+      ? previous.map(item => item.session_id === detail.session_id ? detail : item) : [...previous, detail]);
     setActiveId(s.session_id);
     setMessages(s.messages ?? []);
     setRunning(s.status === 'running');
@@ -4280,17 +4284,20 @@ const CodeAgentPage: React.FC = () => {
     setPermission(s.permission ?? 'workspace_write');
     setReasoningLevel(s.reasoning_level ?? 'high');
     if (s.model_id) setModelName(s.model_id);
-    void loadFileTree(s.working_directory);
-  }, [loadFileTree]);
+    return true;
+  }, [hydrateSession, notifyError]);
 
   useEffect(() => {
     if (!requestedSession) return;
     let canceled = false;
-    void refreshSessions().then(list => {
+    void refreshSessions().then(async list => {
       if (canceled) return;
-      const target = list.find(session => session.session_id === requestedSession);
+      const target = list.find(session => session.session_id === requestedSession)
+        ?? (await invoke<CodingSession[]>('coding_list_sessions', { sessionId: requestedSession }))[0];
+      if (canceled) return;
       if (target) {
-        switchSession(target);
+        setSessions(previous => previous.some(s => s.session_id === target.session_id) ? previous : [...previous, target]);
+        if (await switchSession(target) === false) return;
         navigation?.clearPageParams();
       } else { setPageError('找不到这个工作会话，可能已被删除。'); }
     }).catch(error => { if (!canceled) setPageError(String(error)); });
@@ -4376,10 +4383,11 @@ const CodeAgentPage: React.FC = () => {
     }
     try {
       await invoke('coding_delete_session', { sessionId: id });
+      setManualOrder(previous => previous.filter(item => item !== id));
       const list = await refreshSessions();
       if (activeIdRef.current === id) {
         if (list.length > 0) switchSession(list[0]);
-        else { setActiveId(null); setMessages([]); setFileTree([]); }
+        else { setActiveId(null); setMessages([]); }
       }
     } catch { /* ignore */ }
   }, [sessions, refreshSessions, switchSession, t]);
@@ -4400,15 +4408,15 @@ const CodeAgentPage: React.FC = () => {
     } else if (action === 'delete') {
       setDeleteSessionId(id);
     } else if (action === 'fork') {
-      switchSession(target);
-      const index = Math.max(0, messages.length - 1);
       try {
+        const detail = await hydrateSession(target);
+        const index = Math.max(0, detail.messages.length - 1);
         const fork = await invoke<CodingSession>('coding_fork_session', { sessionId: id, messageIndex: index });
         await refreshSessions();
         switchSession(fork);
       } catch (e) { notifyError(t('mind_inspector.code_fork_failed', { e: String(e) })); }
     }
-  }, [sessionMenu, sessions, handleDelete, switchSession, messages.length, refreshSessions, notifyError, t]);
+  }, [sessionMenu, sessions, handleDelete, switchSession, hydrateSession, refreshSessions, notifyError, t]);
 
   /**
    * 提交会话重命名：写回后端并同步本地列表。
@@ -4636,96 +4644,6 @@ const CodeAgentPage: React.FC = () => {
     }
   }, [activeId, refreshSessions, switchSession, t, notifyError]);
 
-  // ===== 工作区管理（主工作区 + 附加工作区）=====
-  /** 只更新本地会话记录：工作区命令都返回最新列表，不必整表刷新。 */
-  const patchSessionWorkspaces = useCallback(
-    (sessionId: string, patch: Partial<CodingSession>) => {
-      setSessions((prev) => prev.map((s) => (s.session_id === sessionId ? { ...s, ...patch } : s)));
-    },
-    [],
-  );
-
-  /** 挂载附加工作区（默认可写：多挂一个目录即多一个可写根，用户可在菜单里改成只读）。 */
-  const handleAddWorkspace = useCallback(async () => {
-    if (!activeId || running) return;
-    const dir = await pickDirectory();
-    if (!dir) return;
-    try {
-      const list = await invoke<ExtraWorkspace[]>('coding_add_workspace', {
-        sessionId: activeId, path: dir, readOnly: false,
-      });
-      patchSessionWorkspaces(activeId, { extra_workspaces: list });
-    } catch (e) {
-      notifyError(t('mind_inspector.code_workspace_add_failed', { e: String(e) }));
-    }
-  }, [activeId, running, pickDirectory, patchSessionWorkspaces, t, notifyError]);
-
-  const handleRemoveWorkspace = useCallback(async (path: string) => {
-    if (!activeId || running) return;
-    try {
-      const list = await invoke<ExtraWorkspace[]>('coding_remove_workspace', {
-        sessionId: activeId, path,
-      });
-      patchSessionWorkspaces(activeId, { extra_workspaces: list });
-    } catch (e) {
-      notifyError(t('mind_inspector.code_workspace_remove_failed', { e: String(e) }));
-    }
-  }, [activeId, running, patchSessionWorkspaces, t, notifyError]);
-
-  const handleToggleWorkspaceReadOnly = useCallback(async (path: string, readOnly: boolean) => {
-    if (!activeId || running) return;
-    try {
-      const list = await invoke<ExtraWorkspace[]>('coding_set_workspace_read_only', {
-        sessionId: activeId, path, readOnly,
-      });
-      patchSessionWorkspaces(activeId, { extra_workspaces: list });
-    } catch (e) {
-      notifyError(t('mind_inspector.code_workspace_readonly_failed', { e: String(e) }));
-    }
-  }, [activeId, running, patchSessionWorkspaces, t, notifyError]);
-
-  /**
-   * 更换主工作区。
-   *
-   * 原主工作区**降级为附加工作区**而不是直接丢弃：换主目录不该让 agent 静默失去对原目录的
-   * 访问权（可能正要跨目录改东西）。真不想要了，可以在菜单里手动移除那个附加目录。
-   */
-  const handleSetPrimaryWorkspace = useCallback(async () => {
-    if (!activeId || running) return;
-    const dir = await pickDirectory();
-    if (!dir) return;
-    const previousPrimary = activeSession?.working_directory ?? '';
-    try {
-      await invoke('coding_set_workspace', { sessionId: activeId, workspace: dir });
-      let extras = activeSession?.extra_workspaces ?? [];
-      if (previousPrimary && previousPrimary !== dir) {
-        try {
-          extras = await invoke<ExtraWorkspace[]>('coding_add_workspace', {
-            sessionId: activeId, path: previousPrimary, readOnly: false,
-          });
-        } catch {
-          // 原目录已不存在 / 与新主工作区重复：保持附加列表不变即可
-        }
-      }
-      patchSessionWorkspaces(activeId, { working_directory: dir, extra_workspaces: extras });
-      void loadFileTree(dir);
-      inputRef.current?.focus();
-    } catch (e) {
-      notifyError(t('mind_inspector.code_workspace_set_failed', { e: String(e) }));
-    }
-  }, [
-    activeId, running, activeSession, patchSessionWorkspaces,
-    loadFileTree, pickDirectory, t, notifyError,
-  ]);
-
-  const toggleDir = useCallback((path: string) => {
-    setExpandedDirs((prev) => {
-      const n = new Set(prev);
-      if (n.has(path)) { n.delete(path); } else { n.add(path); }
-      return n;
-    });
-  }, []);
-
   // 切换会话 / 任务结束时同步挂起中的提问：面板重挂载或刷新后卡片不能凭空消失
   useEffect(() => {
     if (!activeId) {
@@ -4930,15 +4848,18 @@ const CodeAgentPage: React.FC = () => {
         const turnStats = (p as { stats?: CodingStats | null }).stats;
         if (turnStats) setStats(turnStats);
         void (async () => {
-          const list = await refreshSessions();
-          const cur = list.find((s) => s.session_id === activeIdRef.current);
-          if (cur) {
+          const id = activeIdRef.current;
+          const selection = sessionSelection.current;
+          await refreshSessions();
+          if (!id) return;
+          const cur = (await invoke<CodingSession[]>('coding_list_sessions', { sessionId: id }))[0];
+          if (cur && activeIdRef.current === id && selection === sessionSelection.current) {
+            setSessions(previous => previous.map(s => s.session_id === id ? cur : s));
             setMessages(cur.messages ?? []);
             setStats(cur.stats ?? turnStats ?? null);
             setDeliverables(cur.deliverables ?? []);
-            void loadFileTree(cur.working_directory, false);
           }
-        })();
+        })().catch(error => notifyError(String(error)));
       });
       // 运行中写入文件成功 → 增量追加到产物面板
       await add('coding:deliverable', (p) => {
@@ -4948,7 +4869,7 @@ const CodeAgentPage: React.FC = () => {
       });
     })();
     return () => { cancelled = true; unlistens.forEach((fn) => fn()); };
-  }, [refreshSessions, loadFileTree, refreshDefaultWorkspace]);
+  }, [refreshSessions, refreshDefaultWorkspace, notifyError]);
 
   // Ctrl+B：切换左侧边栏（工作页快捷键）。
   //
@@ -5314,24 +5235,25 @@ const CodeAgentPage: React.FC = () => {
 
   // 删除工作区（删除该工作区下的所有会话）
   const deleteWorkspace = useCallback(async (dir: string) => {
-    const ids = sessions
-      .filter((s) => s.working_directory === dir)
-      .map((s) => s.session_id);
+    let all: CodingSession[];
+    try { all = await invoke<CodingSession[]>('coding_list_sessions', { workspace: dir }); }
+    catch (error) { notifyError(String(error)); return; }
+    const ids = all.map(s => s.session_id);
     for (const id of ids) {
       try {
         await invoke('coding_delete_session', { sessionId: id });
       } catch { /* ignore */ }
     }
+    setManualOrder(previous => previous.filter(id => !ids.includes(id)));
     const list = await refreshSessions();
-    if (activeIdRef.current && !list.some((s) => s.session_id === activeIdRef.current)) {
+    if (activeIdRef.current && ids.includes(activeIdRef.current)) {
       if (list.length > 0) switchSession(list[0]);
       else {
         setActiveId(null);
         setMessages([]);
-        setFileTree([]);
       }
     }
-  }, [sessions, refreshSessions, switchSession]);
+  }, [refreshSessions, switchSession, notifyError]);
 
   // 工作区管理菜单（重命名 / 删除工作区）：点菜单外部或按 Esc 关闭
   const workspaceMenuRef = useRef<HTMLDivElement | null>(null);
@@ -5549,12 +5471,16 @@ const CodeAgentPage: React.FC = () => {
 
   return (
     <MarkdownFileContext.Provider value={mdFileCtx}>
-    <div className={`codex-theme workbench-root${focusMode ? ' focus-mode' : ''}`} ref={rootRef} data-right-drawer={layout.rightDrawer || undefined}>
+    <div className={`codex-theme workbench-root${focusMode ? ' focus-mode' : ''}${previewFullView ? ' preview-full-view' : ''}`} ref={rootRef} onScrollCapture={saveSnapshot} data-right-drawer={layout.rightDrawer || undefined}>
       {(layout.rightDrawer || leftDrawer) && <button type="button" className="codex-drawer-backdrop" aria-label={t('workbench.dismiss')} onClick={() => { setLeftDrawerOpen(false); if (layout.rightDrawer) setRightCollapsed(true); }} />}
       {/* ===== 左侧：任务会话栏 ===== */}
+      {leftPeekAvailable && <div className="codex-sidebar-peek-spacer" aria-hidden />}
       <aside
-        className={`codex-sidebar ${shownLeftCollapsed ? 'collapsed' : ''}${layout.autoLeft && !leftDrawer ? ' auto-collapsed' : ''}${leftDrawer ? ' drawer' : ''}${resizing === 'left' ? ' resizing' : ''}`}
+        className={`codex-sidebar ${shownLeftCollapsed ? 'collapsed' : ''}${layout.autoLeft && !leftDrawer && !leftPeekVisible ? ' auto-collapsed' : ''}${leftDrawer ? ' drawer' : ''}${leftPeekAvailable ? ' hover-peek' : ''}${leftPeekVisible ? ' peek-open' : ''}${resizing === 'left' ? ' resizing' : ''}`}
         style={{ width: shownLeftCollapsed ? 54 : Math.min(leftWidth, rootWidth - 20) }}
+        onMouseEnter={cancelLeftPeekClose}
+        onMouseLeave={() => { if (leftPeekAvailable) closeLeftPeekLater(); }}
+        onKeyDown={(event) => { if (event.key === 'Escape' && leftPeekVisible) { cancelLeftPeekClose(); setLeftPeekOpen(false); } }}
         role={leftDrawer ? 'dialog' : 'complementary'}
         aria-label={t('mind_inspector.code_expand_left')}
         aria-modal={leftDrawer || undefined}
@@ -5569,13 +5495,15 @@ const CodeAgentPage: React.FC = () => {
           <button
             type="button"
             onClick={toggleLeftSidebar}
+            onMouseEnter={openLeftPeek}
+            aria-expanded={!shownLeftCollapsed}
             className="codex-sidebar-collapse-btn"
             /* 提示里带上快捷键，否则 Ctrl+B 没人发现得了。
                本工程为 Windows 目标，直接写 Ctrl+B，不做平台判定。 */
-            title={`${shownLeftCollapsed ? t('mind_inspector.code_expand_left') : t('mind_inspector.code_collapse_left')} (Ctrl+B)`}
-            aria-label={`${shownLeftCollapsed ? t('mind_inspector.code_expand_left') : t('mind_inspector.code_collapse_left')} (Ctrl+B)`}
+            title={`${layout.leftCollapsed && !leftDrawer ? t('mind_inspector.code_expand_left') : t('mind_inspector.code_collapse_left')} (Ctrl+B)`}
+            aria-label={`${layout.leftCollapsed && !leftDrawer ? t('mind_inspector.code_expand_left') : t('mind_inspector.code_collapse_left')} (Ctrl+B)`}
           >
-            {shownLeftCollapsed ? <PanelLeftOpen size={16} /> : <PanelLeftClose size={16} />}
+            {layout.leftCollapsed && !leftDrawer ? <PanelLeftOpen size={16} /> : <PanelLeftClose size={16} />}
           </button>
         </div>
         {/* 会话列表与新建按钮同样常驻渲染，收起时由 CSS 淡出 + 收掉占位，
@@ -5885,6 +5813,9 @@ const CodeAgentPage: React.FC = () => {
                       })}
                     </div>
                   ))}
+              {hasOlderSessions && <button type="button" className="codex-session-item" disabled={loadingOlderSessions} onClick={() => void loadOlderSessions()}>
+                {loadingOlderSessions ? t('workbench.loadingOlderSessions', { defaultValue: '正在加载…' }) : t('workbench.loadOlderSessions', { defaultValue: '加载更多历史会话' })}
+              </button>}
             </div>
           </div>
 
@@ -6263,9 +6194,9 @@ const CodeAgentPage: React.FC = () => {
         role={layout.rightDrawer ? 'dialog' : 'complementary'}
         aria-modal={layout.rightDrawer || undefined}
         {...(layout.rightCollapsed ? { inert: '' } : {})}
-        style={{ width: layout.rightCollapsed ? 0 : layout.rightWidth }}
+        style={{ width: previewFullView ? undefined : layout.rightCollapsed ? 0 : layout.rightWidth }}
       >
-        <div className="codex-inspector-inner" style={{ width: layout.rightWidth }}>
+        <div className="codex-inspector-inner" style={{ width: previewFullView ? '100%' : layout.rightWidth }}>
           <div className="codex-inspector-tabs" ref={inspectorTabsRef}>
             <select className="codex-inspector-tab-select" value={rightTab} aria-label={t('mind_inspector.code_expand_right')} onChange={(event) => setRightTab(event.target.value as typeof rightTab)}>
               <option value="overview">{t('mind_inspector.code_inspector_overview')}</option>
@@ -6379,6 +6310,8 @@ const CodeAgentPage: React.FC = () => {
           ) : rightTab === 'preview' ? (
             <div className="codex-inspector-pane codex-preview-pane">
               <PreviewPanel
+                fullView={previewFullView}
+                onToggleFullView={() => setPreviewFullView(value => !value)}
                 baseKey={activeId ?? 'none'}
                 tabs={previewTabs}
                 activePath={activePreview}
@@ -6445,7 +6378,7 @@ const CodeAgentPage: React.FC = () => {
       </aside>
 
       {/* ===== 覆盖层 ===== */}
-      {sessionSearchOpen && <SessionSearch sessions={searchSessionsData} onSelect={session => { switchSession(session); setLeftDrawerOpen(false); }} onClose={() => setSessionSearchOpen(false)} />}
+      {sessionSearchOpen && <SessionSearch loadMatches={loadSessionMatches} sessions={searchSessionsData} onSelect={session => { switchSession(session); setLeftDrawerOpen(false); }} onClose={() => setSessionSearchOpen(false)} />}
       {dragActive && <DropOverlay />}
       {lightbox && (
         <ImageLightbox

@@ -27,6 +27,7 @@ sha2="0.10"
 tracing="0.1"
 tokio={version="1",features=["macros","rt-multi-thread","sync"]}
 parking_lot="0.12"
+chrono="0.4"
 `);
 let source = String.raw`
 #![allow(dead_code)]
@@ -37,7 +38,7 @@ pub mod error {
     impl From<std::io::Error> for VivianError { fn from(e:std::io::Error)->Self{Self::Memory(e.to_string())} }
     pub type VivianResult<T> = Result<T,VivianError>;
 }
-pub mod utils { pub mod fs {
+pub mod utils { __PROMPT_TIME__ pub mod fs {
     pub fn load_json_or_backup<T:serde::de::DeserializeOwned>(p:&std::path::Path)->Option<T>{std::fs::read_to_string(p).ok().and_then(|s|serde_json::from_str(&s).ok())}
     pub fn write_atomic(p:&std::path::Path,text:&str)->std::io::Result<()>{if let Some(parent)=p.parent(){std::fs::create_dir_all(parent)?;}std::fs::write(p,text)}
 } }
@@ -206,8 +207,9 @@ pub mod memory {
     }
 }
 `;
-const modules = ['types', 'kinds', 'conversations', 'conversation_semantics', 'session_summary', 'companion_policy', 'pipeline'];
+const modules = ['types', 'kinds', 'provenance', 'conversations', 'conversation_semantics', 'session_summary', 'companion_policy', 'pipeline'];
 source = source.replace('__HISTORY_ENTRY__', entry).replace('__STRIP__', strip).replace('__PREFIX__', prefix)
+  .replace('__PROMPT_TIME__', `#[path="${rustPath('src-tauri/src/utils/prompt_time.rs')}"] pub mod prompt_time;`)
   .replace('__MODULES__', modules.map((name) => `#[path="${rustPath(`src-tauri/src/memory/${name}.rs`)}"] pub mod ${name};`).join('\n'));
 source += `
 #[cfg(test)] mod golden_companion_policy {

@@ -45,10 +45,8 @@ import {
   DURATION,
   CLAUDE_ACCENT,
 } from '../design-system';
-import { useNavigation } from '../NavigationContext';
 import {
   Card,
-  MetricBar,
   EmptyState,
   SectionTitle,
   TwinView,
@@ -194,18 +192,6 @@ const extractThoughtText = (raw: string): string => {
   return trimmed;
 };
 
-// ============================================================
-// 子视图 1：Live Mind（实时心智快照，Twin View，5 秒轮询）
-// ============================================================
-
-/** 根据 valence/arousal 返回当前所处象限的标签 */
-const quadrantLabel = (valence: number, arousal: number, t: TFunction): string => {
-  if (valence >= 0 && arousal >= 0) return t('mind_inspector.mind.quad_excited_short');
-  if (valence < 0 && arousal >= 0) return t('mind_inspector.mind.quad_tense_short');
-  if (valence >= 0 && arousal < 0) return t('mind_inspector.mind.quad_calm_short');
-  return t('mind_inspector.mind.quad_depressed_short');
-};
-
 interface CharacterMindPanelProps {
   characterId: CharacterId;
   mind: MindState | null;
@@ -320,7 +306,6 @@ const CharacterMindPanel: React.FC<CharacterMindPanelProps> = ({
   presenceSince,
 }) => {
   const { t } = useTranslation();
-  const nav = useNavigation();
   const accent = CLAUDE_ACCENT;
   const label = t(`mind_inspector.common.char_${characterId}`);
   const emotionKey = mood?.primary_emotion ?? '';
@@ -376,25 +361,6 @@ const CharacterMindPanel: React.FC<CharacterMindPanelProps> = ({
     const m = Math.floor((secs % 3600) / 60);
     return t('mind_inspector.mind.dur_hr', { h, m });
   })();
-
-  // 心理学全维度条形图行
-  const MetricRow: React.FC<{ label: string; value: number; color?: string }> = ({ label: lbl, value, color: c }) => (
-    <div style={{ display: 'flex', alignItems: 'center', gap: SPACING.sm }}>
-      <span style={{ ...TYPO.micro, color: COLORS.textTertiary, minWidth: 72 }}>{lbl}</span>
-      <MetricBar value={value} color={c ?? accent} style={{ flex: 1 }} />
-      <span
-        style={{
-          ...TYPO.micro,
-          color: COLORS.textSecondary,
-          minWidth: 36,
-          textAlign: 'right',
-          fontVariantNumeric: 'tabular-nums',
-        }}
-      >
-        {value.toFixed(2)}
-      </span>
-    </div>
-  );
 
   // 心情象限图（Apple 风格：渐变暗底 + 网格 + screen 混合光晕）—— 放大到 120px
   const MoodQuadrant: React.FC<{ valence: number; arousal: number; accent: string }> = ({
@@ -1096,7 +1062,6 @@ const CharacterMindPanel: React.FC<CharacterMindPanelProps> = ({
 const MemoCharacterMindPanel = React.memo(CharacterMindPanel);
 
 const LiveMindView: React.FC = () => {
-  const { t } = useTranslation();
   const [vivianMind, setVivianMind] = useState<MindState | null>(null);
   const [nanaMind, setNanaMind] = useState<MindState | null>(null);
   const [vivianMood, setVivianMood] = useState<MoodData | null>(null);

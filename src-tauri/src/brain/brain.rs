@@ -616,7 +616,7 @@ impl Brain {
         stream: bool,
         skip_dialogue_write: bool,
     ) -> VivianResult<AiResponse> {
-        self.think_inner(user_input, stream, skip_dialogue_write, true).await
+        self.think_inner(user_input, stream, skip_dialogue_write, true, None).await
     }
 
     /// 跨角色对话专用 think：跳过异步反思（跨角色闲聊场景反思价值有限，节省 LLM 配额）。
@@ -626,7 +626,12 @@ impl Brain {
         user_input: &str,
         stream: bool,
     ) -> VivianResult<AiResponse> {
-        self.think_inner(user_input, stream, false, false).await
+        self.think_inner(user_input, stream, false, false, None).await
+    }
+
+    /// Full companion/chat generation with request-local image evidence.
+    pub async fn think_with_visual_evidence(&self, user_input: &str, stream: bool, evidence: &str) -> VivianResult<AiResponse> {
+        self.think_inner(user_input, stream, false, true, Some(evidence)).await
     }
 
     async fn think_inner(
@@ -635,6 +640,7 @@ impl Brain {
         stream: bool,
         skip_dialogue_write: bool,
         run_reflection: bool,
+        visual_evidence: Option<&str>,
     ) -> VivianResult<AiResponse> {
         // 入口打点：此前从进入 think 到 pipeline 打印第一行日志之间是完全的观测盲区，
         // 一旦在这段区间卡住（例如抢不到 Mind 的锁），日志上会表现为「什么都没有发生」，
@@ -702,7 +708,7 @@ impl Brain {
         let result = match &self.chat_chain {
             Some(chain) => match tokio::time::timeout(
                 std::time::Duration::from_secs(300),
-                chain.ainvoke_with_options(user_input, stream, skip_dialogue_write),
+                chain.ainvoke_with_visual_evidence(user_input, stream, skip_dialogue_write, visual_evidence),
             ).await {
                 Ok(result) => result,
                 Err(_) => Err(VivianError::Timeout("本轮对话处理超过 300 秒，已停止等待；已完成的工具操作不会自动重试".into())),

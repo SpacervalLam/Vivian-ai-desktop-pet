@@ -12,7 +12,7 @@ voice_message  OPTIONAL  default false | wechat channel only: true = front-end s
 sticker_id     OPTIONAL  one ID from the supplied local sticker catalog; omit unless a sticker fits; never invent an ID
 memory_used    OPTIONAL  array of memory ids this reply actually leaned on, e.g. ["m_8f21","m_3a07"]
                          | ONLY for attribution/debugging — never rendered, never mentioned, never hinted at
-                         | do NOT write citations into `text`; do NOT say "I remember" / "根据记忆"
+                         | do NOT write citations into `text`; do not announce retrieval machinery unasked; explain the actual source when the user asks about it
                          | omit the field entirely when the reply didn't use memory; never invent ids
 [/OUTPUT_FIELDS]
 

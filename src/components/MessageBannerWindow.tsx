@@ -4,7 +4,7 @@
  * 后端通过 `wechat:message_banner` 事件触发：
  * - payload: { character_id, preview, kind?, timestamp? }
  *
- * 横幅显示头像 + 角色昵称 + 消息预览，点击后调用 show_side_chat_animated 打开微信窗口。
+ * 横幅显示头像 + 角色昵称 + 消息预览，点击后调用 show_chat_animated 打开微信窗口。
  * 同一角色的多条消息合并到单个横幅，预览前加 [x条] 计数前缀；链接消息加 [Link] 前缀。
  */
 
@@ -265,7 +265,7 @@ export default function MessageBannerWindow() {
     if (existingWin) {
       try {
         // 同 App.tsx openChat：右缘三态展开微信抽屉（不居中，不销毁）
-        await invoke('show_side_chat_animated', { label: 'chat' });
+        await invoke('show_chat_animated');
         await existingWin.setFocus();
       } catch {
         /* ignore */
@@ -291,14 +291,14 @@ export default function MessageBannerWindow() {
         transparent: true,
         shadow: false,
         visible: false,
-        // 默认收纳在屏幕右缘之外，由 show_side_chat_animated 滑入
+        // 默认收纳在屏幕右缘之外，由 show_chat_animated 滑入
         x: await getCurrentWindow().outerSize().catch(() => ({ width: 1920, height: 1080 })).then((s) => s.width),
         alwaysOnTop: true,
         skipTaskbar: true,
         focus: false,
       });
       win.once('tauri://created', () => {
-        void invoke('show_side_chat_animated', { label: 'chat' }).catch(() => {});
+        void invoke('show_chat_animated').catch(() => {});
         void win.setFocus().catch(() => {});
       });
     } catch {

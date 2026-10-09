@@ -22,8 +22,9 @@ import { prepareSharedFile, fileMessage, fileMetadata } from '../utils/sharedFil
 import { stripActions } from '../utils/ActionText';
 import { routeAssistantMessage } from '../utils/chatMessageRouting';
 import { hasVisibleChatText, isVisibleChatMessage } from '../utils/chatMessageContent';
-import type { AiResponse } from '../types';
-
+import { assistantPanelTitle, isAssistantOverview } from './assistantPanels';
+import DynamicIsland from './DynamicIsland';
+const DesktopAssistantPanel = React.lazy(() => import('./DesktopAssistantWindow'));
 type Role = 'user' | 'assistant';
 
 interface ChatMessage {
@@ -1499,9 +1500,9 @@ type RenderItem =
 
 const ChatWindow: React.FC = () => {
   const { t } = useTranslation();
-  // ===== 三视图状态 =====
-  /** 当前视图：home（角色选择）/ private（单角色私聊）/ group（群聊）/ details（聊天详情） */
-  const [view, setView] = useState<'home' | 'private' | 'group' | 'details'>('home');
+  /** 当前视图包含聊天首页、私聊、群聊、详情和桌面助手。 */
+  const [view, setView] = useState<'home' | 'private' | 'group' | 'details' | 'assistant'>(() => new URLSearchParams(window.location.search).get('assistant') === '1' ? 'assistant' : 'home');
+  const [assistantTarget, setAssistantTarget] = useState(() => ({ character: new URLSearchParams(window.location.search).get('assistant_character') ?? 'vivian', panel: new URLSearchParams(window.location.search).get('assistant_panel') ?? 'daily' }));
   /** 在线角色列表 */
   const [characters, setCharacters] = useState<Array<{ id: string; name: string; online: boolean }>>([]);
   // characters 的 ref 镜像，供 setInterval 等闭包读取最新值，避免在 state 更新器内执行副作用
@@ -1636,19 +1637,6 @@ const ChatWindow: React.FC = () => {
   const bottomPanelTriggersRef = useRef<HTMLDivElement>(null);
   const bottomPanelDrawerRef = useRef<HTMLDivElement>(null);
   const [isClosing, setIsClosing] = useState(false);
-  /**
-   * 入场是否已完成。
-   *
-   * 根节点的「入场前」隐藏样式（opacity:0 + 缩小下坠）以前挂在 `!isClosing` 上，
-   * 于是「没在关窗」和「还没入场」被同一个布尔量绑死：入场动画的 fill:forwards
-   * 一旦被撤掉（关窗动画就是后创建、按 WAAPI 顺序覆盖它），根节点就永久停在
-   * opacity:0。而 chat 是**复用同一个窗口**的右缘三态侧边栏——下次 peek 露出的
-   * 那 10px 探出条就是这块 DOM，内容透明 = 窗口在但看不见（探出条一起消失）。
-   *
-   * 拆出独立标志后：入场动画播完即 entered=true，此后根节点不再依赖任何动画
-   * 覆盖即可见；关窗动画结束时把 isClosing 复位也不会把窗口留在透明态。
-   */
-  const [entered, setEntered] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   /** 各会话未读消息数（键：角色 ID 或 'group'） */
   const [unreadCounts, setUnreadCounts] = useState<Record<string, number>>({});
@@ -1818,11 +1806,16 @@ const ChatWindow: React.FC = () => {
     let cancelled = false;
     void (async () => {
       try {
-        unlisten = await listen<{ character_id?: string; view?: 'home' | 'private' | 'group' }>(
+        unlisten = await listen<{ character_id?: string; view?: 'home' | 'private' | 'group' | 'assistant'; panel?: string }>(
           'chatwindow:navigate',
           (e) => {
             if (cancelled || !e.payload) return;
             const p = e.payload;
+            if (p.view === 'assistant') {
+              setAssistantTarget({ character: p.character_id ?? 'vivian', panel: p.panel ?? 'daily' });
+              setView('assistant');
+              return;
+            }
             if (p.view === 'group') {
               setView('group');
               return;
@@ -1839,6 +1832,10 @@ const ChatWindow: React.FC = () => {
             markConversationRead(p.character_id);
           },
         );
+        if (cancelled) { unlisten(); return; }
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          if (!cancelled) void invoke('chat_window_ready').catch(() => {});
+        }));
       } catch { /* ignore */ }
     })();
     return () => { cancelled = true; unlisten?.(); };
@@ -1852,12 +1849,6 @@ const ChatWindow: React.FC = () => {
   // 窗口聚焦/可见时清除当前查看会话的未读并刷新预览
   // 用户切回 ChatWindow 时，正在查看的会话消息已可见，红点应立即清除
   //
-  // 关于「退出后再次显示」：这里只做**锦上添花**的重播入场动画，不能当兜底。
-  // 该窗口由 Rust 侧 show()/hide() 控制，而 Tauri 的 WebviewWindow::show/hide
-  // 只动窗口（ShowWindow），不会同步 WebView2 controller 的 IsVisible
-  // （wry 仅在创建时 SetIsVisible 一次）——所以 document.visibilityState 恒为
-  // 'visible'，visibilitychange 永不触发；show() 也不聚焦，focus 同样不可靠。
-  // 真正保证「退出后窗口仍可见」的是 closeWindow 自己的 settle（见下方注释）。
   const isClosingRef = useRef(false);
   useEffect(() => { isClosingRef.current = isClosing; }, [isClosing]);
   useEffect(() => {
@@ -1870,7 +1861,9 @@ const ChatWindow: React.FC = () => {
       // 从隐藏 → 可见（被边缘看护/横幅再次显示）：复位退出态
       if (isClosingRef.current) {
         setIsClosing(false);
-        playEnter();
+        isClosingRef.current = false;
+        // Focus restores a reused window without replaying an entrance animation.
+        try { rootRef.current?.getAnimations().forEach(animation => animation.cancel()); } catch { /* ignore */ }
       }
     };
     window.addEventListener('focus', handleVisible);
@@ -1879,7 +1872,6 @@ const ChatWindow: React.FC = () => {
       window.removeEventListener('focus', handleVisible);
       document.removeEventListener('visibilitychange', handleVisible);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [markConversationRead, refreshLastPreviews]);
 
   // 加载在线角色列表（挂载时 + 角色上下线事件时刷新）
@@ -2015,6 +2007,10 @@ const ChatWindow: React.FC = () => {
   const listRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const historyCacheRef = useRef<ChatMessage[]>([]);
+  const historyEntriesRef = useRef<HistoryEntry[]>([]);
+  const historyHasMoreRef = useRef(false);
+  const historyMoreBusyRef = useRef(false);
+  const historyRefreshSeqRef = useRef(0);
   /** 竞态保护：记录最新一次 loadHistory 请求的 charId，丢弃过期的异步结果 */
   const loadHistorySeqRef = useRef(0);
   const preserveScrollRef = useRef<{ oldScrollHeight: number; oldScrollTop: number } | null>(null);
@@ -2096,6 +2092,9 @@ const ChatWindow: React.FC = () => {
   }, []);
 
   const loadHistory = useCallback(async (charId: string | null) => {
+    const seq = ++loadHistorySeqRef.current;
+    historyEntriesRef.current = []; historyHasMoreRef.current = false;
+    historyMoreBusyRef.current = false; setLoadingMore(false);
     if (!charId) {
       setMessages([]);
       historyCacheRef.current = [];
@@ -2103,30 +2102,33 @@ const ChatWindow: React.FC = () => {
       setHasMore(false);
       return;
     }
-    const seq = ++loadHistorySeqRef.current;
     setInitialLoading(true);
     // 安全兜底：如果 invoke 挂起超过 5s，强制关闭加载指示器
     const safetyTimer = window.setTimeout(() => {
-      console.warn('[loadHistory] 安全超时（5s），强制关闭加载指示器');
-      setInitialLoading(false);
+      if (loadHistorySeqRef.current === seq) {
+        console.warn('[loadHistory] 安全超时（5s），强制关闭加载指示器');
+        setInitialLoading(false);
+      }
     }, 5000);
     try {
       const t0 = performance.now();
-      const entries = await invoke<HistoryEntry[]>('get_chat_history', { characterId: charId });
+      const entries = await invoke<HistoryEntry[]>('get_chat_history', { characterId: charId, limit: PAGE_SIZE + 1, channel: 'wechat' });
       const elapsed = performance.now() - t0;
       // 竞态保护：如果在 await 期间又触发了新的 loadHistory，丢弃本次过期结果
       if (loadHistorySeqRef.current !== seq) return;
-      const filtered = entries.filter((e) => {
+      const page = entries.slice(-PAGE_SIZE);
+      historyEntriesRef.current = page;
+      const filtered = page.filter((e) => {
         if (e.role === 'system') return false;
         const ch = e.metadata?.channel;
         return ch === 'wechat' || ch === undefined;
       }).flatMap(toChatMessages).sort((a, b) => a.timestamp - b.timestamp);
       console.log(`[loadHistory] charId=${charId} invoke=${elapsed.toFixed(0)}ms total=${entries.length} filtered=${filtered.length}`);
       historyCacheRef.current = filtered;
-      const count = Math.min(PAGE_SIZE, filtered.length);
-      setMessages(filtered.slice(filtered.length - count));
-      setHistoryLoadedCount(count);
-      setHasMore(count < filtered.length);
+      setMessages(filtered);
+      setHistoryLoadedCount(filtered.length);
+      historyHasMoreRef.current = entries.length > PAGE_SIZE;
+      setHasMore(historyHasMoreRef.current);
     } catch (e) {
       if (loadHistorySeqRef.current !== seq) return;
       console.error('加载历史消息失败:', e);
@@ -2136,7 +2138,7 @@ const ChatWindow: React.FC = () => {
       setHasMore(false);
     } finally {
       window.clearTimeout(safetyTimer);
-      setInitialLoading(false);
+      if (loadHistorySeqRef.current === seq) setInitialLoading(false);
     }
   }, []);
 
@@ -2154,6 +2156,8 @@ const ChatWindow: React.FC = () => {
       void loadHistory(privateCharId);
     } else if (view !== 'private') {
       // 离开私聊视图时清空，避免下次进入时闪现旧消息
+      ++loadHistorySeqRef.current;
+      historyEntriesRef.current = []; historyHasMoreRef.current = false;
       setMessages([]);
       historyCacheRef.current = [];
       setHistoryLoadedCount(0);
@@ -2166,16 +2170,25 @@ const ChatWindow: React.FC = () => {
   // 否则每次条数变化都会重建 refreshHistory → 重新注册 dialogue:changed 监听器
   const refreshHistory = useCallback(async () => {
     if (!privateCharId) return;
+    const seq = loadHistorySeqRef.current;
+    const refresh = ++historyRefreshSeqRef.current;
     try {
-      const entries = await invoke<HistoryEntry[]>('get_chat_history', { characterId: privateCharId });
-      const filtered = entries.filter((e) => {
+      const entries = await invoke<HistoryEntry[]>('get_chat_history', { characterId: privateCharId, limit: PAGE_SIZE + 1, channel: 'wechat' });
+      if (seq !== loadHistorySeqRef.current || refresh !== historyRefreshSeqRef.current || privateCharIdRef.current !== privateCharId) return;
+      const latest = entries.slice(-PAGE_SIZE);
+      const old = historyEntriesRef.current;
+      const connected = old.length > 0 && latest.some(entry => old.some(previous => previous.id === entry.id));
+      const page = connected ? [...new Map([...old, ...latest].map(entry => [entry.id, entry])).values()].sort((a,b) => normalizeTimestamp(a.timestamp)-normalizeTimestamp(b.timestamp)) : latest;
+      historyEntriesRef.current = page;
+      if (!connected) historyHasMoreRef.current = entries.length > PAGE_SIZE;
+      const filtered = page.filter((e) => {
         if (e.role === 'system') return false;
         const ch = e.metadata?.channel;
         return ch === 'wechat' || ch === undefined;
       }).flatMap(toChatMessages).sort((a, b) => a.timestamp - b.timestamp);
       historyCacheRef.current = filtered;
-      const currentCount = Math.min(Math.max(historyLoadedCountRef.current, PAGE_SIZE), filtered.length);
-      const historySlice = filtered.slice(filtered.length - currentCount);
+      const currentCount = filtered.length;
+      const historySlice = filtered;
 
       setMessages((prev) => {
         // 保留当前显示中比历史最新记录更新的消息（如刚通过事件追加的用户消息和分段气泡）
@@ -2214,7 +2227,7 @@ const ChatWindow: React.FC = () => {
         return [...historySlice, ...newerMsgs];
       });
       setHistoryLoadedCount(currentCount);
-      setHasMore(currentCount < filtered.length);
+      setHasMore(historyHasMoreRef.current);
     } catch (e) {
       console.error('刷新历史消息失败:', e);
     }
@@ -2279,6 +2292,9 @@ const ChatWindow: React.FC = () => {
           if (cancelled) return;
           // 仅私聊视图下，非当前对象的清空事件才跳过；主页预览刷新始终执行
           if (viewRef.current === 'private' && event.payload?.character_id && privateCharIdRef.current && event.payload.character_id !== privateCharIdRef.current) return;
+          ++loadHistorySeqRef.current;
+          historyEntriesRef.current = []; historyHasMoreRef.current = false;
+          historyMoreBusyRef.current = false; setLoadingMore(false);
           historyCacheRef.current = [];
           setMessages([]);
           setHistoryLoadedCount(0);
@@ -2544,11 +2560,15 @@ const ChatWindow: React.FC = () => {
       });
       if (cancelled) { unlistenUserImage(); return; }
       // chat:start：初始化流式缓冲区，不创建占位气泡，标题显示"对方正在输入..."
-      unlistenStart = await listen<{ message: string; stream_id: string; character_id?: string; channel?: string }>('chat:start', (event) => {
+      unlistenStart = await listen<{ message: string; stream_id: string; character_id?: string; channel?: string; source?: string }>('chat:start', (event) => {
         const sid = event.payload.stream_id;
         if (!sid) return;
         const cid = event.payload.character_id ?? '';
         const ch = event.payload.channel;
+        // Image turns receive their stream ID from the backend, rather than handleSend.
+        if (event.payload.source === 'image' && ch === 'wechat_group' && cid) {
+          groupStreamCharMapRef.current.set(sid, cid);
+        }
         // 群聊流：stream_id 在 groupStreamCharMapRef 中预注册（由 handleSend 群发时写入）
         if (groupStreamCharMapRef.current.has(sid)) {
           if (ch && ch !== 'wechat_group') return;
@@ -2932,22 +2952,29 @@ const ChatWindow: React.FC = () => {
     return () => { cancelled = true; unlistenUser?.(); unlistenUserImage?.(); unlistenStart?.(); unlistenChunk?.(); unlistenDone?.(); unlistenError?.(); unlistenCancelled?.(); unlistenYielded?.(); if (typingDelayTimerRef.current !== null) { window.clearTimeout(typingDelayTimerRef.current); typingDelayTimerRef.current = null; } if (typingSafetyTimerRef.current !== null) { window.clearTimeout(typingSafetyTimerRef.current); typingSafetyTimerRef.current = null; } };
   }, []);
 
-  const loadMore = useCallback(() => {
-    const cache = historyCacheRef.current;
-    if (!cache.length || loadingMore || !hasMore) return;
-    const el = listRef.current;
-    if (el) preserveScrollRef.current = { oldScrollHeight: el.scrollHeight, oldScrollTop: el.scrollTop };
-    const prevCount = historyLoadedCount;
-    const newCount = Math.min(prevCount + PAGE_SIZE, cache.length);
-    const olderSlice = cache.slice(Math.max(0, cache.length - newCount), Math.max(0, cache.length - prevCount));
+  const loadMore = useCallback(async () => {
+    const charId = privateCharIdRef.current;
+    const beforeId = historyEntriesRef.current[0]?.id;
+    if (!charId || !beforeId || historyMoreBusyRef.current || !historyHasMoreRef.current) return;
+    const seq = loadHistorySeqRef.current;
+    historyMoreBusyRef.current = true;
     setLoadingMore(true);
-    window.setTimeout(() => {
-      setMessages((prev) => [...olderSlice, ...prev]);
-      setHistoryLoadedCount(newCount);
-      setHasMore(newCount < cache.length);
-      setLoadingMore(false);
-    }, 0);
-  }, [historyLoadedCount, hasMore, loadingMore]);
+    try {
+      const entries = await invoke<HistoryEntry[]>('get_chat_history', { characterId: charId, beforeId, limit: PAGE_SIZE + 1, channel: 'wechat' });
+      if (seq !== loadHistorySeqRef.current || privateCharIdRef.current !== charId || historyEntriesRef.current[0]?.id !== beforeId) return;
+      const page = entries.slice(-PAGE_SIZE);
+      const el = listRef.current;
+      if (el) preserveScrollRef.current = { oldScrollHeight: el.scrollHeight, oldScrollTop: el.scrollTop };
+      historyEntriesRef.current = [...new Map([...page, ...historyEntriesRef.current].map(entry => [entry.id, entry])).values()].sort((a,b) => normalizeTimestamp(a.timestamp)-normalizeTimestamp(b.timestamp));
+      const older = page.flatMap(toChatMessages).sort((a,b) => normalizeTimestamp(a.timestamp)-normalizeTimestamp(b.timestamp));
+      setMessages(previous => [...older.filter(item => !previous.some(p => p.id === item.id)), ...previous]);
+      historyCacheRef.current = [...older, ...historyCacheRef.current];
+      setHistoryLoadedCount(historyCacheRef.current.length);
+      historyHasMoreRef.current = entries.length > PAGE_SIZE;
+      setHasMore(historyHasMoreRef.current);
+    } catch (error) { console.error('加载旧历史失败，保留已显示消息:', error); }
+    finally { if (seq === loadHistorySeqRef.current) { historyMoreBusyRef.current = false; setLoadingMore(false); } }
+  }, []);
 
   const handleScroll = useCallback(() => {
     const el = listRef.current;
@@ -3381,11 +3408,12 @@ const ChatWindow: React.FC = () => {
   };
 
   const closeWindow = useCallback(async () => {
-    if (isClosing) return;
+    if (isClosingRef.current) return;
+    isClosingRef.current = true;
     setIsClosing(true);
     const el = rootRef.current;
     if (el) {
-      // 先撤掉在跑的动画（入场动画的 fill:forwards 会和关窗动画抢 opacity/transform）
+      // 撤销尚未结束的根节点动画，避免与这次关窗效果叠加。
       try { el.getAnimations().forEach((a) => a.cancel()); } catch { /* ignore */ }
       // 时长压到 200ms：Rust 侧的收回滑动是 220ms，400ms 的关窗动画后 180ms 本来
       // 就发生在窗口滑出屏幕之后（白播），压短后动画保证在窗口仍可见时跑完，
@@ -3408,57 +3436,16 @@ const ChatWindow: React.FC = () => {
         settled = true;
         // 兜底路径可能早于动画自然结束：必须撤销它，否则 fill:forwards 继续压住 opacity
         try { exit.cancel(); } catch { /* ignore */ }
-        setEntered(true);
+        isClosingRef.current = false;
         setIsClosing(false);
       };
-      exit.finished.then(settle).catch(() => { /* 被新的入场动画取代 */ });
+      exit.finished.then(settle).catch(() => { /* 被聚焦恢复取消 */ });
       // 兜底：窗口隐藏期间计时器会被节流，但 1s 内必定跑到；此时窗口早在屏外，复位不可见
       window.setTimeout(settle, 1000);
     }
     // 微信窗口为右缘抽屉：点击退出 → 动画收回屏幕右侧并隐藏（保留窗口复用）
-    void invoke('collapse_side_chat', { label: 'chat' }).catch(() => {});
+    void invoke('close_chat_window').catch(() => {});
   }, [isClosing]);
-
-  useEffect(() => {
-    let cancelled = false;
-    let started = false;
-    const startEnter = () => {
-      if (cancelled || started) return;
-      started = true;
-      playEnter();
-    };
-    window.addEventListener('window-shown', startEnter, { once: true });
-    const timer = setTimeout(startEnter, 500);
-    return () => {
-      cancelled = true;
-      window.removeEventListener('window-shown', startEnter);
-      clearTimeout(timer);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  /** 播放进入动画（初次显示与退出后再次显示复用）：取消旧动画并重置根节点样式后淡入 */
-  const playEnter = useCallback(() => {
-    const el = rootRef.current;
-    if (!el) return;
-    try { el.getAnimations().forEach((a) => a.cancel()); } catch { /* ignore */ }
-    el.style.opacity = '';
-    el.style.transform = '';
-    const enter = el.animate(
-      [
-        { opacity: 0, transform: 'translateY(40px) scale(0.85)' },
-        { opacity: 1, transform: 'translateY(-6px) scale(1.02)', offset: 0.5 },
-        { opacity: 1, transform: 'translateY(2px) scale(0.995)', offset: 0.7 },
-        { opacity: 1, transform: 'translateY(0) scale(1)' },
-      ],
-      { duration: 600, easing: 'cubic-bezier(0.34, 1.56, 0.64, 1)', fill: 'forwards' },
-    );
-    // 入场完成即撤掉「入场前隐藏」的内联样式：之后根节点的可见性不再依赖
-    // 这条 fill:forwards 动画存在（被关窗动画覆盖/撤销后仍回到可见静止态）
-    enter.finished
-      .then(() => setEntered(true))
-      .catch(() => { /* 被新的关窗动画取代：由 closeWindow 收尾 */ });
-  }, []);
 
   /** 切换底部面板（emoji/media），点击同一按钮则收起 */
   const togglePanel = useCallback((panel: 'emoji' | 'media') => {
@@ -4280,7 +4267,6 @@ const ChatWindow: React.FC = () => {
       fontFamily: '-apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif',
       color: 'var(--wx-text)',
       position: 'relative',
-      ...(!entered ? { opacity: 0, transform: 'translateY(40px) scale(0.85)' } : {}),
     }}
     >
       {mdStyles}
@@ -4304,17 +4290,11 @@ const ChatWindow: React.FC = () => {
         </div>
       )}
 
-      {/* ===== Dynamic Island（始终黑色，不随主题变化） ===== */}
-      <div style={{
-        position: 'absolute', top: 10, left: '50%', transform: 'translateX(-50%)',
-        width: 126, height: 36, borderRadius: 20,
-        background: '#000',
-        zIndex: 100,
-        pointerEvents: 'none',
-      }} />
+      {/* ===== Dynamic Island：媒体紧凑态，悬停展开 ===== */}
+      <DynamicIsland />
 
       {/* ===== 第一行：iOS 状态栏 ===== */}
-      <div data-tauri-drag-region style={{
+      <div className="chat-phone-status" data-tauri-drag-region style={{
         display: 'flex', alignItems: 'center', justifyContent: 'space-between',
         padding: '0 36px', flexShrink: 0, userSelect: 'none', height: 54,
         background: 'var(--wx-bg)',
@@ -4336,15 +4316,19 @@ const ChatWindow: React.FC = () => {
         background: 'var(--wx-bg)',
         borderBottom: '0.5px solid var(--wx-border)',
       }}>
-        {/* 左：返回按钮（home 关闭窗口，details 返回 private，private/group 返回 home）+ 未读总数气泡 */}
+        {/* 左：返回按钮（home 关闭窗口，details 返回 private，助手子页退回助手总览，
+            private/group 返回 home）。助手的页签由这里持有，所以返回层级也由这里判。 */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
           <button
             onClick={() => {
               if (view === 'home') void closeWindow();
               else if (view === 'details') { setView('private'); setDetailsSubView('main'); }
+              else if (view === 'assistant' && !isAssistantOverview(assistantTarget.panel)) setAssistantTarget((target) => ({ ...target, panel: 'daily' }));
               else setView('home');
             }}
-            title={view === 'home' ? t('chat.btn_back') : t('chat.back_to_home')}
+            title={view === 'home' ? t('chat.btn_back')
+              : view === 'assistant' && !isAssistantOverview(assistantTarget.panel) ? t('chat.back_to_assistant', { defaultValue: '返回助手' })
+              : t('chat.back_to_home')}
             style={navBtn}
             onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--wx-bg-active)')}
             onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
@@ -4374,17 +4358,19 @@ const ChatWindow: React.FC = () => {
             fontSize: 17, fontWeight: 600, letterSpacing: -0.2, color: 'var(--wx-text)',
           }}>
             {view === 'home' ? t('chat.home_title')
+              : view === 'assistant' ? (assistantPanelTitle(assistantTarget.panel, i18n.language) ?? t('chat.desktop_assistant', { defaultValue: '桌面助手' }))
               : view === 'group' ? t('chat.group_title')
               : view === 'details' ? t('chat.details_title')
               : (privateTyping ? t('chat.typing') : (charRemarks[privateCharId ?? ''] || privateCharName || t('chat.title')))}
           </span>
         </div>
 
-        {/* 右：三点按钮（仅 private 视图显示，点击进入 details 聊天详情界面） */}
-        {view === 'private' && (
+        {/* 首页三点进入桌面助手，私聊三点仍进入聊天详情。 */}
+        {(view === 'private' || view === 'home') && (
           <button
-            onClick={() => setView('details')}
-            title={t('chat.btn_more')}
+            onClick={() => { if (view === 'home') void invoke('set_chat_close_policy', { origin: 'header' }).then(() => setView('assistant')); else setView('details'); }}
+            title={view === 'home' ? t('chat.desktop_assistant', { defaultValue: '桌面助手' }) : t('chat.btn_more')}
+            aria-label={view === 'home' ? t('chat.desktop_assistant', { defaultValue: '桌面助手' }) : t('chat.btn_more')}
             style={navBtn}
             onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--wx-bg-active)')}
             onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
@@ -4396,8 +4382,21 @@ const ChatWindow: React.FC = () => {
             </svg>
           </button>
         )}
-        {view !== 'private' && <div style={{ width: 36 }} />}
+        {view !== 'private' && view !== 'home' && <div style={{ width: 36 }} />}
       </div>
+
+      {view === 'assistant' && <React.Suspense fallback={<div role="status" style={{ padding: 24, color: 'var(--wx-text-secondary)' }}>{t('chat.loading_more')}</div>}>
+        {/* key 只跟角色走：页签现在是受控的，把 panel 放进 key 会在每次切页时整树重挂，
+            随手记的草稿、剪贴板内容、骰子结果全丢。 */}
+        <DesktopAssistantPanel
+          key={assistantTarget.character}
+          embedded
+          initialCharacter={assistantTarget.character}
+          initialPanel={assistantTarget.panel}
+          panel={assistantTarget.panel}
+          onPanelChange={(panel) => setAssistantTarget((target) => (target.panel === panel ? target : { ...target, panel }))}
+        />
+      </React.Suspense>}
 
       {/* ===== Home 视图：微信风格聊天列表 + 搜索栏 ===== */}
       {view === 'home' && (
@@ -5123,8 +5122,8 @@ const ChatWindow: React.FC = () => {
                   const el = e.currentTarget;
                   detectMention(el.value, el.selectionStart ?? el.value.length);
                 }}
-                onFocus={() => void invoke('set_side_chat_input_open', { open: true, label: 'chat' }).catch(() => {})}
-                onBlur={() => void invoke('set_side_chat_input_open', { open: false, label: 'chat' }).catch(() => {})}
+                onFocus={() => void invoke('ensure_chat_interactive').catch(() => {})}
+                onBlur={() => void invoke('ensure_chat_interactive').catch(() => {})}
                 placeholder={view === 'group' ? t('chat.group_input_placeholder') : t('chat.input_placeholder')}
                 rows={1}
                 className="vivian-chat-input"

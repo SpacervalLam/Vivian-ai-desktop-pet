@@ -91,6 +91,7 @@ sha2 = "0.10"
 fs2 = "0.4"
 hmac = "0.12"
 base64 = "0.22"
+png = "0.18"
 p256 = { version = "0.13", features = ["ecdsa", "pem"] }
 iana-time-zone = "0.1"
 # 资源 AES-256-GCM 加密（构建期加密打包进 vivian.bundle.enc）
@@ -129,9 +130,10 @@ rodio = "0.19"
 winreg = "0.55"
 windows = { version = "0.61", features = [
     "Win32_Foundation",
-    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_WindowsAndMessaging", "Win32_UI_HiDpi",
     "Win32_UI_Shell",
     "Win32_Graphics_Gdi",
+    "Win32_Graphics_Dwm",
     "Win32_Media_Multimedia",
     "Win32_System_Com",
     # 交互终端: ConPTY 伪控制台 + 匿名管道 + 文件读写 + 属性列表
@@ -184,6 +186,10 @@ windows = { version = "0.61", features = [
 
 [features]
 default = []
+
+# Backport the Windows parent-subclass teardown fix; see vendor/wry/PATCH.md.
+[patch.crates-io]
+wry = { path = "vendor/wry" }
 
 [dev-dependencies]
 tempfile = "3"

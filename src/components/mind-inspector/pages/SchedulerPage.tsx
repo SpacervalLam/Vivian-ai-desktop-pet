@@ -41,7 +41,7 @@ interface ScheduledTask {
   repeat_interval?: number | null;
   status: TaskStatus;
   created_at: number;
-  metadata?: { recovery_error?: string };
+  metadata?: { recovery_error?: string; advance_minutes?: number };
   delivery?: { confirmed_count: number; next_attempt_at?: number | null; last_delivered_at?: number | null };
 }
 
@@ -101,6 +101,9 @@ const SchedulerPage: React.FC = () => {
   const [formMessage, setFormMessage] = useState('');
   const [formTime, setFormTime] = useState('');
   const [formRepeat, setFormRepeat] = useState('');
+  const [formImportant, setFormImportant] = useState(false);
+  const [formAdvance, setFormAdvance] = useState(0);
+  const [formError, setFormError] = useState('');
   const [saving, setSaving] = useState(false);
 
   const loadTasks = useCallback(async () => {
@@ -171,27 +174,29 @@ const SchedulerPage: React.FC = () => {
     setFormMessage('');
     setFormTime(timestampToLocalDateTime(defaultTs));
     setFormRepeat('');
+    setFormImportant(false); setFormAdvance(0); setFormError('');
     setShowForm(true);
   }, []);
 
   const handleSave = useCallback(async () => {
     const message = formMessage.trim();
     if (!message || !formTime || saving) return;
-    setSaving(true);
+    setSaving(true); setFormError('');
     try {
       const ts = localDateTimeToTimestamp(formTime);
       await invoke('add_scheduled_reminder', {
         message,
         scheduledTime: ts,
         repeatInterval: formRepeat ? Number(formRepeat) : null,
+        important: formImportant, advanceMinutes: formAdvance,
       });
       setShowForm(false);
     } catch (e) {
-      console.error('添加定时任务失败:', e);
+      setFormError(String(e));
     } finally {
       setSaving(false);
     }
-  }, [formMessage, formTime, formRepeat, saving]);
+  }, [formMessage, formTime, formRepeat, formImportant, formAdvance, saving]);
 
   const handleCancel = useCallback(
     async (id: string) => {
@@ -340,7 +345,7 @@ const SchedulerPage: React.FC = () => {
                   )}
                   <span className="record-plan-badge">
                     <Clock size={12} />
-                    {formatDateTime(task.scheduled_time)}
+                    {formatDateTime(task.scheduled_time + (task.metadata?.advance_minutes ?? 0) * 60)}
                   </span>
                   {task.repeat_interval && (
                     <span className="record-plan-badge">
@@ -410,11 +415,20 @@ const SchedulerPage: React.FC = () => {
                   type="number"
                   value={formRepeat}
                   onChange={(e) => setFormRepeat(e.target.value)}
-                  min={1}
+                  min={60}
                   placeholder="0"
                 />
               </div>
             </div>
+            <label className="rec-label">{zh ? '提前提醒' : ja ? '事前通知' : 'Remind ahead'}
+              <select className="rec-input" value={formAdvance} onChange={e => setFormAdvance(Number(e.target.value))}>
+                {[0, 5, 10, 30].map(minutes => <option key={minutes} value={minutes}>{minutes} {zh ? '分钟' : ja ? '分' : 'min'}</option>)}
+              </select>
+            </label>
+            <label className="rec-label"><input type="checkbox" checked={formImportant} onChange={e => setFormImportant(e.target.checked)} />
+              {zh ? '重要提醒（允许在免打扰时置顶）' : ja ? '重要（通知オフでも最前面に表示）' : 'Important (show on top during quiet mode)'}
+            </label>
+            {formError && <p role="alert">{formError}</p>}
             <div className="rec-dialog-foot">
               <button type="button" onClick={() => setShowForm(false)} className="rec-btn">
                 {t('todo_window.btn_cancel')}

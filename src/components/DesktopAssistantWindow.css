@@ -1,0 +1,594 @@
+/* 桌面助手 — 轻质感玻璃系统。
+   自下而上四层：aurora 环境色 → 玻璃面 → 内高光 → 凹陷井。
+   玻璃面只有在它背后有东西时才读得出玻璃感，aurora 就是那层东西；两者缺一，
+   卡片就会渲染成一块死黑（这正是之前暗色下发糊的原因）。
+
+   所有颜色都走 token，一个主题 = 一个覆盖块，下面的规则里不写任何字面量。
+   浅色块写了两遍（media 查询管 `data-theme=system`，属性选择器管显式浅色），
+   因为 CSS 没法跨 media 边界共享声明列表 —— 两处必须同步修改。 */
+.desktop-assistant {
+  /* --- 表面 --- */
+  --a-base: #05070b;
+  --a-aurora-a: rgba(72, 214, 232, .20);
+  --a-aurora-b: rgba(126, 109, 248, .22);
+  --a-aurora-c: rgba(255, 128, 172, .11);
+
+  --a-surface: linear-gradient(180deg, rgba(255, 255, 255, .095), rgba(255, 255, 255, .042));
+  --a-surface-soft: linear-gradient(180deg, rgba(255, 255, 255, .062), rgba(255, 255, 255, .028));
+  --a-surface-raised: linear-gradient(180deg, rgba(255, 255, 255, .115), rgba(255, 255, 255, .068));
+  --a-rim: rgba(255, 255, 255, .115);
+  --a-rim-strong: rgba(255, 255, 255, .20);
+  --a-hairline: rgba(255, 255, 255, .075);
+  --a-inset: inset 0 1px 0 rgba(255, 255, 255, .11);
+
+  --a-well: rgba(0, 0, 0, .34);
+  --a-well-soft: rgba(0, 0, 0, .20);
+  --a-well-rim: rgba(255, 255, 255, .06);
+  /* 容器面板（列表区这类"装着别的东西"的底）。方向和凹陷井相反：暗色下提亮，
+     浅色下压暗。凹陷井在暗色里会把几百像素的列表区做成一个黑洞。 */
+  --a-panel: rgba(255, 255, 255, .032);
+
+  /* --- 文字 --- */
+  --a-text: #eef3fa;
+  --a-dim: #9aa7ba;
+  --a-faint: #6d798b;
+  --a-ghost: #4e586a;
+
+  /* --- 强调 --- */
+  --a-accent: linear-gradient(135deg, #45d8e8, #7d6df8);
+  --a-accent-ink: #05121b;
+  --a-accent-tint: linear-gradient(160deg, rgba(69, 216, 232, .13), rgba(125, 109, 248, .15));
+  --a-accent-rim: rgba(140, 160, 255, .28);
+  --a-accent-glow: rgba(92, 124, 242, .34);
+
+  /* --- 语义色 --- */
+  --a-ok: #4ddcae;
+  --a-ok-tint: rgba(77, 220, 174, .12);
+  --a-ok-rim: rgba(77, 220, 174, .26);
+  --a-warn: #ffb454;
+  --a-danger: #ff8b8b;
+  --a-danger-tint: rgba(255, 122, 122, .12);
+  --a-danger-rim: rgba(255, 122, 122, .28);
+
+  /* 图标色相。图标块本身是中性玻璃，只有字形上色 —— 这样一套色相就能同时
+     喂给深浅两套主题，不用给每种语义色各写一份背景/边框/文字三元组。 */
+  --a-hue-amber: #ffc46b;
+  --a-hue-cyan: #5cdcec;
+  --a-hue-mint: #5fdcb4;
+  --a-hue-rose: #ff9aa8;
+
+  /* --- 形状与投影 --- */
+  --a-r-sm: 10px;
+  --a-r-md: 14px;
+  --a-r-lg: 18px;
+  --a-r-xl: 22px;
+  --a-shadow-1: 0 1px 2px rgba(0, 0, 0, .34);
+  --a-shadow-2: 0 10px 26px -10px rgba(0, 0, 0, .58);
+  --a-shadow-3: 0 20px 44px -16px rgba(0, 0, 0, .62);
+
+  --a-mono: ui-monospace, 'SF Mono', 'JetBrains Mono', 'Cascadia Mono', Consolas, monospace;
+  --a-sans: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+
+  display: flex; flex-direction: column; min-height: 100vh; box-sizing: border-box;
+  position: relative; isolation: isolate;
+  background: var(--a-base); color: var(--a-text);
+  font: 15px/1.5 var(--a-sans);
+  -webkit-font-smoothing: antialiased;
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme=dark]) .desktop-assistant {
+    --a-base: #eceff6;
+    --a-aurora-a: rgba(56, 190, 214, .34);
+    --a-aurora-b: rgba(118, 104, 236, .30);
+    --a-aurora-c: rgba(255, 122, 160, .22);
+
+    --a-surface: linear-gradient(180deg, rgba(255, 255, 255, .94), rgba(255, 255, 255, .76));
+    --a-surface-soft: linear-gradient(180deg, rgba(255, 255, 255, .82), rgba(255, 255, 255, .64));
+    --a-surface-raised: linear-gradient(180deg, #ffffff, rgba(255, 255, 255, .88));
+    --a-rim: rgba(15, 23, 42, .08);
+    --a-rim-strong: rgba(15, 23, 42, .15);
+    --a-hairline: rgba(15, 23, 42, .085);
+    --a-inset: inset 0 1px 0 rgba(255, 255, 255, .95);
+
+    --a-well: rgba(15, 23, 42, .05);
+    --a-well-soft: rgba(15, 23, 42, .032);
+    --a-well-rim: rgba(15, 23, 42, .075);
+    --a-panel: rgba(15, 23, 42, .035);
+
+    --a-text: #10141d;
+    --a-dim: #556072;
+    --a-faint: #7b8595;
+    --a-ghost: #a8b1c0;
+
+    --a-accent: linear-gradient(135deg, #0fb6cf, #6350e6);
+    --a-accent-ink: #ffffff;
+    --a-accent-tint: linear-gradient(160deg, rgba(15, 182, 207, .11), rgba(99, 80, 230, .12));
+    --a-accent-rim: rgba(99, 80, 230, .22);
+    --a-accent-glow: rgba(99, 80, 230, .26);
+
+    --a-ok: #0d9370;
+    --a-ok-tint: rgba(13, 147, 112, .1);
+    --a-ok-rim: rgba(13, 147, 112, .22);
+    --a-warn: #b8720c;
+    --a-danger: #d33c4c;
+    --a-danger-tint: rgba(211, 60, 76, .09);
+    --a-danger-rim: rgba(211, 60, 76, .22);
+
+    --a-hue-amber: #b06a05;
+    --a-hue-cyan: #0a8fa6;
+    --a-hue-mint: #0d8f68;
+    --a-hue-rose: #d33f5c;
+
+    --a-shadow-1: 0 1px 2px rgba(15, 23, 42, .07);
+    --a-shadow-2: 0 10px 24px -12px rgba(15, 23, 42, .20);
+    --a-shadow-3: 0 20px 40px -18px rgba(15, 23, 42, .24);
+  }
+}
+:root[data-theme=light] .desktop-assistant {
+  --a-base: #eceff6;
+  --a-aurora-a: rgba(56, 190, 214, .34);
+  --a-aurora-b: rgba(118, 104, 236, .30);
+  --a-aurora-c: rgba(255, 122, 160, .22);
+
+  --a-surface: linear-gradient(180deg, rgba(255, 255, 255, .94), rgba(255, 255, 255, .76));
+  --a-surface-soft: linear-gradient(180deg, rgba(255, 255, 255, .82), rgba(255, 255, 255, .64));
+  --a-surface-raised: linear-gradient(180deg, #ffffff, rgba(255, 255, 255, .88));
+  --a-rim: rgba(15, 23, 42, .08);
+  --a-rim-strong: rgba(15, 23, 42, .15);
+  --a-hairline: rgba(15, 23, 42, .085);
+  --a-inset: inset 0 1px 0 rgba(255, 255, 255, .95);
+
+  --a-well: rgba(15, 23, 42, .05);
+  --a-well-soft: rgba(15, 23, 42, .032);
+  --a-well-rim: rgba(15, 23, 42, .075);
+  --a-panel: rgba(15, 23, 42, .035);
+
+  --a-text: #10141d;
+  --a-dim: #556072;
+  --a-faint: #7b8595;
+  --a-ghost: #a8b1c0;
+
+  --a-accent: linear-gradient(135deg, #0fb6cf, #6350e6);
+  --a-accent-ink: #ffffff;
+  --a-accent-tint: linear-gradient(160deg, rgba(15, 182, 207, .11), rgba(99, 80, 230, .12));
+  --a-accent-rim: rgba(99, 80, 230, .22);
+  --a-accent-glow: rgba(99, 80, 230, .26);
+
+  --a-ok: #0d9370;
+  --a-ok-tint: rgba(13, 147, 112, .1);
+  --a-ok-rim: rgba(13, 147, 112, .22);
+  --a-warn: #b8720c;
+  --a-danger: #d33c4c;
+  --a-danger-tint: rgba(211, 60, 76, .09);
+  --a-danger-rim: rgba(211, 60, 76, .22);
+
+  --a-hue-amber: #b06a05;
+  --a-hue-cyan: #0a8fa6;
+  --a-hue-mint: #0d8f68;
+  --a-hue-rose: #d33f5c;
+
+  --a-shadow-1: 0 1px 2px rgba(15, 23, 42, .07);
+  --a-shadow-2: 0 10px 24px -12px rgba(15, 23, 42, .20);
+  --a-shadow-3: 0 20px 40px -18px rgba(15, 23, 42, .24);
+}
+.desktop-assistant-embedded { flex: 1; min-height: 0; overflow: hidden; }
+.desktop-assistant *, .desktop-assistant *::before, .desktop-assistant *::after { box-sizing: border-box; }
+/*
+ * 重置一律用 :where() 把特异度压到 0。
+ *
+ * `.desktop-assistant button` 是 (0,1,1)，而 `.assistant-tile` / `.assistant-row` /
+ * `.assistant-primary` 这些组件规则是 (0,1,0) —— 重置会
+ * **整批压过**它们，padding / background / border 被静默吃掉。症状极具误导性：
+ * 源码里 padding 写着 15px，DevTools 里那条声明也在，但 computed 是 0px，
+ * 于是"左边距怎么调都不够"。同一个坑还让 label 的 margin、状态卡的 margin-top、
+ * 主按钮的强调色底一起失效过。
+ *
+ * :where() 的参数不计入特异度，所以 `.desktop-assistant :where(button)` 回到 (0,1,0)，
+ * 和组件规则同级、靠书写顺序决胜负 —— 组件规则在后面，正常胜出。
+ */
+.desktop-assistant :where(button, input, textarea, select) { font: inherit; color: inherit; }
+.desktop-assistant :where(button) { border: 0; background: transparent; padding: 0; cursor: pointer; -webkit-tap-highlight-color: transparent; }
+.desktop-assistant :where(button):disabled { opacity: .38; cursor: default; }
+.desktop-assistant :where(button, input, textarea, select):focus-visible { outline: 2px solid var(--a-accent-rim); outline-offset: 2px; }
+.desktop-assistant :where(h1, h2, p) { margin: 0; }
+.desktop-assistant svg { flex-shrink: 0; }
+.desktop-assistant ::selection { background: var(--a-accent-rim); }
+
+/* aurora 固定在面板上不随内容滚动，这样整页共享同一片环境色。 */
+.assistant-aurora {
+  position: absolute; inset: 0; pointer-events: none; z-index: 0;
+  background:
+    radial-gradient(92% 44% at 50% -10%, var(--a-aurora-a), transparent 62%),
+    radial-gradient(74% 40% at 108% 4%, var(--a-aurora-b), transparent 64%),
+    radial-gradient(96% 46% at -12% 106%, var(--a-aurora-c), transparent 62%);
+}
+
+/* 滚动容器同时是页面骨架：开 flex 列，子页才能把主体撑到满高。 */
+.assistant-scroll {
+  position: relative; z-index: 1; flex: 1; min-height: 0;
+  display: flex; flex-direction: column;
+  overflow-y: auto; overflow-x: hidden;
+  padding: 0 14px 22px;
+  overscroll-behavior: contain;
+  scrollbar-width: thin; scrollbar-color: var(--a-ghost) transparent;
+}
+.assistant-scroll > * { position: relative; }
+.desktop-assistant::after { content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 26px; pointer-events: none; background: linear-gradient(180deg, transparent, var(--a-base)); z-index: 2; }
+
+/* --- 页面骨架 --- */
+.assistant-page { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.assistant-page-overview { padding-top: 18px; gap: 16px; }
+/* 子页不再自带标题栏和返回键：返回与标题都由 chat window 头部承担（那里才有
+   真正的导航层级），这里只留正文，顶部间距自己给。 */
+.assistant-body { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 12px; padding-top: 18px; }
+
+/* --- 共用原子 --- */
+.assistant-label { margin: 0 0 8px; font-size: 11px; font-weight: 600; letter-spacing: .09em; color: var(--a-faint); }
+.assistant-card {
+  padding: 14px; border-radius: var(--a-r-lg);
+  background: var(--a-surface); border: 1px solid var(--a-rim);
+  box-shadow: var(--a-inset), var(--a-shadow-1);
+}
+.assistant-card + .assistant-card { margin-top: 0; }
+/* 卡片只有背后有东西才读得出玻璃。aurora 提供那层颜色，blur 让它别糊成一片平涂。 */
+.assistant-count { font: 400 11px/1 var(--a-mono); font-variant-numeric: tabular-nums; color: var(--a-faint); }
+.assistant-count b { font-weight: 400; color: var(--a-ghost); }
+.assistant-muted { font-size: 11.5px; color: var(--a-faint); }
+
+.assistant-primary {
+  display: inline-flex; justify-content: center; align-items: center; gap: 6px;
+  min-height: 36px; border-radius: var(--a-r-sm); padding: 0 18px;
+  background: var(--a-accent); color: var(--a-accent-ink);
+  font-size: 13px; font-weight: 600; letter-spacing: .02em;
+  box-shadow: 0 6px 16px -6px var(--a-accent-glow);
+  transition: filter .16s ease, transform .12s ease, box-shadow .16s ease;
+}
+/* 变淡的强调色读起来像"坏了"而不是"不可用"，所以禁用态落回描边形态，
+   把强调色留在文字上。 */
+.assistant-primary:disabled { opacity: 1; background: var(--a-well-soft); color: var(--a-ghost); box-shadow: none; border: 1px solid var(--a-rim); }
+.assistant-primary:hover:not(:disabled) { filter: brightness(1.08); }
+.assistant-primary:active:not(:disabled) { transform: translateY(1px); box-shadow: 0 2px 8px -4px var(--a-accent-glow); }
+.assistant-ghost-button {
+  display: inline-flex; justify-content: center; align-items: center; gap: 6px;
+  min-height: 36px; border-radius: var(--a-r-sm); padding: 0 14px;
+  font-size: 13px; font-weight: 500; color: var(--a-dim);
+  background: var(--a-well-soft); border: 1px solid var(--a-rim); box-shadow: var(--a-inset);
+}
+.assistant-ghost-button:hover:not(:disabled) { color: var(--a-text); background: var(--a-surface-soft); }
+/* 图标一律裸用，不套圆角方形外壳 —— 外壳只是给字形加了一圈没有信息量的框，
+   小尺寸下反而把整行压得发闷。语义只靠字形的色相区分：一套色相同时喂深浅两套主题，
+   也比"每个语义色配一套渐变底"稳，浅色主题不会糊成一片看不见。 */
+.assistant-hue-amber { color: var(--a-hue-amber); }
+.assistant-hue-cyan { color: var(--a-hue-cyan); }
+.assistant-hue-mint { color: var(--a-hue-mint); }
+.assistant-hue-rose { color: var(--a-hue-rose); }
+
+/* 空态：撑满剩余高度并居中。不画边框 —— 虚框在几百像素高的区域里会放大成一个
+   明晃晃的"空盒子"，比留白本身更难看。 */
+.assistant-empty {
+  flex: 1; min-height: 140px; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 8px; text-align: center;
+  padding: 24px 18px; color: var(--a-faint);
+}
+.assistant-empty svg { color: var(--a-ghost); }
+.assistant-empty p { font-size: 13px; font-weight: 500; color: var(--a-dim); }
+.assistant-empty small { font-size: 11.5px; line-height: 1.6; color: var(--a-ghost); max-width: 220px; }
+
+/* --- 提示条 --- */
+/* 间距交给父级 flex 的 gap：flex 列里 margin 不塌陷，自己再带一份就是双倍。 */
+.assistant-notice {
+  display: flex; align-items: flex-start; gap: 8px; font-size: 13px; line-height: 1.6;
+  padding: 11px 13px; border-radius: var(--a-r-md); margin: 0;
+  white-space: pre-wrap; overflow-wrap: anywhere; max-height: 220px; overflow: auto;
+  color: var(--a-dim); background: var(--a-surface-soft);
+  border: 1px solid var(--a-rim); box-shadow: var(--a-inset), var(--a-shadow-1);
+}
+.assistant-error { color: var(--a-danger); border-color: var(--a-danger-rim); background: var(--a-danger-tint); }
+.assistant-working { flex-shrink: 0; width: 6px; height: 6px; margin-top: 6px; border-radius: 50%; background: var(--a-hue-cyan); animation: assistant-pulse 1.4s ease-in-out infinite; }
+@keyframes assistant-pulse { 0%, 100% { opacity: .35; transform: scale(.82); } 50% { opacity: 1; transform: scale(1); } }
+.assistant-footnote { display: flex; align-items: center; gap: 7px; margin: 12px 2px 0; font-size: 11.5px; color: var(--a-ghost); }
+
+/* --- 概览 --- */
+.assistant-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
+/* 裸图标宽度不一（笔比显示器窄），不给固定槽宽的话每行文字左边缘都会错开。
+   左边距也一并加大：图标贴边时，视觉上的"窄"其实来自图形自身的留白被吃掉了。 */
+.assistant-icon { flex: 0 0 22px; }
+.assistant-tile {
+  display: flex; align-items: center; gap: 11px; min-height: 62px; padding: 13px 15px;
+  border-radius: var(--a-r-lg); text-align: left; color: var(--a-text);
+  background: var(--a-surface); border: 1px solid var(--a-rim);
+  box-shadow: var(--a-inset), var(--a-shadow-1);
+  transition: transform .16s ease, box-shadow .16s ease, border-color .16s ease;
+}
+.assistant-tile:hover:not(:disabled) { transform: translateY(-1px); border-color: var(--a-rim-strong); box-shadow: var(--a-inset), var(--a-shadow-2); }
+.assistant-tile:active:not(:disabled) { transform: translateY(0); }
+.assistant-tile-wide { grid-column: 1 / -1; }
+.assistant-tile-label { flex: 1; min-width: 0; font-size: 14px; font-weight: 500; }
+.assistant-stack { display: grid; gap: 9px; }
+.assistant-row {
+  display: flex; align-items: center; gap: 11px; width: 100%; min-height: 58px; padding: 12px 15px;
+  border-radius: var(--a-r-lg); text-align: left; color: var(--a-text);
+  background: var(--a-surface); border: 1px solid var(--a-rim);
+  box-shadow: var(--a-inset), var(--a-shadow-1);
+  transition: transform .16s ease, box-shadow .16s ease, border-color .16s ease;
+}
+.assistant-row:hover:not(:disabled) { transform: translateY(-1px); border-color: var(--a-rim-strong); box-shadow: var(--a-inset), var(--a-shadow-2); }
+.assistant-row-label { flex: 1; min-width: 0; font-size: 14px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.assistant-row-value { min-width: 0; font-size: 12px; color: var(--a-dim); text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 58%; }
+.assistant-chevron { color: var(--a-ghost); }
+
+/* --- 编辑器（随手记 / 偏好）---
+   编辑器吃掉剩余高度：852px 的画布上留一片空黑是最明显的"没做完"。
+   填充只给到 --a-panel 那一档：这个面积上 9.5% 的普通卡面会变成一块水泥板，
+   而降 alpha 又会让它塌回纯黑（暗色底 #05070b 上，没有面就等于没有边界）。
+   一档最轻的面 + 一根描边，是唯一能让"可以写的地方"和"没画完的黑洞"分开的量。 */
+.desktop-assistant .assistant-editor {
+  flex: 1; min-height: 240px; display: flex; flex-direction: column;
+  padding: 14px; background: var(--a-panel); border: 1px solid var(--a-rim);
+  border-radius: var(--a-r-lg); box-shadow: var(--a-inset);
+}
+/* 选择器要带 .desktop-assistant 才压得住下面那条更靠后的通用 textarea 规则，
+   否则凹陷井的背景/边框会在层叠里反超（同特异度、后写的赢）。 */
+.desktop-assistant .assistant-editor textarea {
+  flex: 1; min-height: 150px; line-height: 1.75; resize: none;
+  font-size: 15px; background: transparent; border: 0; padding: 0;
+}
+.desktop-assistant .assistant-editor textarea::placeholder { color: var(--a-ghost); }
+.desktop-assistant .assistant-editor textarea:focus-visible { outline: none; }
+.assistant-editor-footer {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  margin-top: 13px; padding-top: 12px; border-top: 1px solid var(--a-hairline);
+}
+.assistant-card-title { font-size: 12px; font-weight: 600; letter-spacing: .04em; color: var(--a-dim); margin-bottom: 10px; }
+/* 带图标的卡片小标题（语音诊断那种单分组卡片）。 */
+.assistant-card-title-row { display: flex; align-items: center; gap: 7px; }
+.assistant-card-title-row svg { color: var(--a-ghost); }
+
+.desktop-assistant input, .desktop-assistant select {
+  display: block; width: 100%; height: 40px; padding: 0 12px;
+  border-radius: var(--a-r-sm); font-size: 13.5px;
+  background: var(--a-well); border: 1px solid var(--a-well-rim);
+  transition: border-color .16s ease, background .16s ease;
+}
+.desktop-assistant input::placeholder { color: var(--a-ghost); }
+.desktop-assistant input:focus, .desktop-assistant select:focus { border-color: var(--a-accent-rim); }
+.desktop-assistant input + input, .desktop-assistant select + input, .desktop-assistant input + .assistant-kind-switch { margin-top: 8px; }
+.desktop-assistant select {
+  appearance: none; padding-right: 30px;
+  background-image: linear-gradient(45deg, transparent 50%, var(--a-faint) 50%), linear-gradient(135deg, var(--a-faint) 50%, transparent 50%);
+  background-position: right 14px center, right 9px center;
+  background-size: 5px 5px, 5px 5px; background-repeat: no-repeat;
+}
+.desktop-assistant textarea { width: 100%; max-width: 100%; padding: 12px; border-radius: var(--a-r-md); font: inherit; color: var(--a-text); background: var(--a-well); border: 1px solid var(--a-well-rim); }
+.assistant-review { display: flex; gap: 8px; }
+.assistant-review select { flex: 1; min-width: 0; }
+.assistant-review .assistant-primary { flex: 0 0 auto; padding: 0 14px; }
+.assistant-review-error { margin-top: 9px; font-size: 12px; color: var(--a-danger); }
+.assistant-review-empty { color: var(--a-ghost); }
+
+/* --- 分段开关 --- */
+.assistant-kind-switch { display: flex; gap: 3px; padding: 3px; border-radius: 12px; background: var(--a-well); border: 1px solid var(--a-well-rim); margin-bottom: 10px; }
+.assistant-kind-switch button { flex: 1; min-height: 30px; border-radius: 9px; font-size: 12.5px; font-weight: 500; color: var(--a-dim); transition: color .16s ease, background .16s ease; }
+.assistant-kind-switch button[aria-pressed=true] { color: var(--a-accent-ink); background: var(--a-accent); box-shadow: 0 4px 12px -5px var(--a-accent-glow); }
+
+/* --- 小游戏 --- */
+.assistant-hands { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 9px; }
+.assistant-rps-cell { display: grid; gap: 7px; justify-items: center; }
+.assistant-rps {
+  display: grid; place-items: center; width: 100%; padding: 18px 0;
+  border-radius: var(--a-r-lg); color: var(--a-text);
+  background: var(--a-surface-raised); border: 1px solid var(--a-rim);
+  box-shadow: var(--a-inset), var(--a-shadow-1);
+  transition: transform .16s ease, box-shadow .16s ease, border-color .16s ease;
+}
+.assistant-rps:hover:not(:disabled) { transform: translateY(-2px); border-color: var(--a-accent-rim); box-shadow: var(--a-inset), var(--a-shadow-2); }
+.assistant-rps:active:not(:disabled) { transform: translateY(0) scale(.97); }
+/* 裸表情，不套外壳：外壳在同一个 tile 里等于把"框套框"叠了两层。 */
+.assistant-rps-glyph { font-size: 32px; line-height: 1; }
+.assistant-rps-caption { font-size: 12px; color: var(--a-dim); }
+/* 骰子卡吃掉剩余高度，大数字居中，掷骰按钮做大 —— 这是本页唯一的主视觉。
+   强调色只出现在按钮和中心那圈柔光上：整块铺 --a-accent-tint 的话，500px 的
+   面积会把 13% 的青色放大成一大片色块，两种主题下都压不住。 */
+.assistant-dice {
+  flex: 1; min-height: 300px; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 16px;
+  padding: 24px; text-align: center; position: relative; overflow: hidden;
+  background: var(--a-surface-soft);
+}
+.assistant-dice::before {
+  content: ''; position: absolute; inset: 0; pointer-events: none;
+  background: radial-gradient(46% 24% at 50% 50%, var(--a-accent-glow), transparent 70%);
+  opacity: .45;
+}
+.assistant-dice > * { position: relative; z-index: 1; }
+.assistant-dice-read { display: flex; flex-direction: column; align-items: center; gap: 6px; }
+.assistant-dice-value { font: 400 64px/1 var(--a-mono); font-variant-numeric: tabular-nums; letter-spacing: -3px; color: var(--a-text); }
+.assistant-dice-value-empty { font-size: 44px; color: var(--a-ghost); letter-spacing: 0; }
+.assistant-dice-caption { font-size: 12px; color: var(--a-dim); }
+.assistant-dice button {
+  display: grid; place-items: center; width: 66px; height: 66px; border-radius: 20px;
+  font-size: 30px; line-height: 1; color: var(--a-accent-ink);
+  background: var(--a-accent); border: 1px solid var(--a-rim-strong);
+  box-shadow: 0 10px 26px -10px var(--a-accent-glow);
+  transition: transform .18s cubic-bezier(.34, 1.56, .64, 1);
+}
+.assistant-dice button:hover:not(:disabled) { transform: rotate(-14deg) scale(1.05); }
+.assistant-dice button:active:not(:disabled) { transform: rotate(-180deg) scale(.94); }
+
+/* --- 快捷启动 ---
+   行式条目而不是双列小卡：344px 的宽度下双列塞不下 target，全被截成空串。
+   列表区做成有边界的面板 —— 条目少的时候，剩下的空档有面板托着才是"列表还空着"，
+   没面板托着就只是"这块没画完"（上一版就是后者）。 */
+.assistant-shortcut-list {
+  flex: 1; min-height: 120px; display: flex; flex-direction: column; gap: 8px;
+  padding: 8px; overflow-y: auto; border-radius: var(--a-r-lg);
+  background: var(--a-panel);
+  border: 1px solid var(--a-rim);
+}
+.assistant-shortcut {
+  position: relative; display: flex; align-items: center; gap: 11px;
+  padding: 12px 13px; border-radius: var(--a-r-md);
+  background: var(--a-surface-raised); border: 1px solid var(--a-rim);
+  box-shadow: var(--a-inset), var(--a-shadow-1);
+  transition: transform .16s ease, box-shadow .16s ease, border-color .16s ease;
+}
+.assistant-shortcut:hover { transform: translateY(-1px); border-color: var(--a-rim-strong); box-shadow: var(--a-inset), var(--a-shadow-2); }
+/* WEB / APP 是一枚纯文字标签，不做方块：定宽让同列的名字左边缘对齐。 */
+.assistant-shortcut-kind {
+  flex-shrink: 0; width: 32px;
+  font: 600 10px/1 var(--a-mono); letter-spacing: .08em;
+}
+.assistant-shortcut-kind.is-web { color: var(--a-hue-cyan); }
+.assistant-shortcut-kind.is-app { color: var(--a-hue-amber); }
+.assistant-shortcut-text { flex: 1; min-width: 0; }
+.assistant-shortcut-name { font-size: 13.5px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.assistant-shortcut-target { margin-top: 2px; font: 400 10.5px/1.3 var(--a-mono); color: var(--a-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.assistant-shortcut-go { color: var(--a-ghost); }
+.assistant-shortcut-open { position: absolute; inset: 0; z-index: 1; border-radius: var(--a-r-md); }
+.assistant-shortcut-remove {
+  position: relative; z-index: 2; display: grid; place-items: center;
+  width: 26px; height: 26px; border-radius: 9px; flex-shrink: 0;
+  color: var(--a-danger); background: var(--a-danger-tint); border: 1px solid var(--a-danger-rim);
+  opacity: .55; transition: opacity .16s ease;
+}
+.assistant-shortcut:hover .assistant-shortcut-remove { opacity: 1; }
+.assistant-shortcut-remove:hover { opacity: 1; filter: brightness(1.15); }
+.assistant-shortcut-form { flex-shrink: 0; }
+
+/* --- 语音诊断 --- */
+.assistant-voice-groups { display: grid; gap: 8px; margin: 12px 0; }
+.assistant-voice-group {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 10px;
+  padding: 11px 12px; border-radius: 12px; font: 400 12px/1.4 var(--a-mono);
+  color: var(--a-dim); background: var(--a-well); border: 1px solid var(--a-well-rim);
+}
+.assistant-voice-group strong { font-weight: 500; color: var(--a-text); }
+.assistant-voice-group span { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.assistant-voice-samples { display: grid; gap: 4px; margin-top: 13px; font: 400 11px/1.5 var(--a-mono); font-variant-numeric: tabular-nums; color: var(--a-ghost); }
+.assistant-details { margin-top: 14px; font-size: 12px; color: var(--a-faint); }
+.assistant-details summary { cursor: pointer; color: var(--a-dim); }
+.assistant-details p { margin-top: 7px; line-height: 1.65; }
+
+@media (max-width: 344px) {
+  .assistant-scroll { padding-left: 12px; padding-right: 12px; }
+  .assistant-grid { gap: 7px; }
+  .assistant-tile { padding: 10px; gap: 8px; }
+  .assistant-shortcut-kind { width: 28px; }
+  .assistant-dice-value { font-size: 52px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .desktop-assistant *, .desktop-assistant *::before, .desktop-assistant *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition-duration: .001ms !important; }
+}
+
+/* Focused utility pages: neutral surfaces, one quiet accent. */
+:root .desktop-assistant:is([data-panel=notes], [data-panel=shortcuts], [data-panel=games]) {
+  color-scheme: dark;
+  --a-base: light-dark(#f7f8fa, #15171c);
+  --a-text: light-dark(#282d36, #eceef3);
+  --a-dim: light-dark(#626b78, #afb6c3);
+  --a-faint: light-dark(#707887, #949dad);
+  --a-ghost: light-dark(#8992a0, #7c8596);
+  --a-surface: light-dark(#fff, #1d2027);
+  --a-surface-soft: light-dark(#f0f2f5, #242832);
+  --a-surface-raised: var(--a-surface);
+  --a-panel: var(--a-surface);
+  --a-rim: light-dark(#e4e7ec, #333844);
+  --a-hairline: var(--a-rim);
+  --a-well: light-dark(#f8f9fb, #171a21);
+  --a-well-rim: var(--a-rim);
+  --a-accent: light-dark(#566989, #b6c8e7);
+  --a-accent-ink: light-dark(#fff, #202936);
+  --a-accent-rim: light-dark(#7085a8, #9ab1d5);
+  --a-inset: 0 0 transparent;
+  --a-shadow-1: 0 2px 8px #00000003;
+  --a-accent-glow: transparent;
+}
+:root[data-theme=light] .desktop-assistant { color-scheme: light; }
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme=dark]) .desktop-assistant { color-scheme: light; }
+}
+.desktop-assistant:is([data-panel=notes], [data-panel=shortcuts], [data-panel=games]) .assistant-aurora { display: none; }
+.desktop-assistant:is([data-panel=notes], [data-panel=shortcuts]) .assistant-body { gap: 18px; }
+.assistant-intro { display: flex; align-items: flex-start; gap: 11px; padding: 4px 2px 2px; }
+.assistant-intro > svg { color: var(--a-dim); margin-top: 3px; }
+.assistant-intro > div { flex: 1; min-width: 0; }
+.assistant-intro h2 { font-size: 15px; font-weight: 600; letter-spacing: .02em; }
+.assistant-intro p { margin-top: 5px; font-size: 12px; line-height: 1.7; color: var(--a-faint); }
+.assistant-intro > .assistant-count { padding-top: 6px; }
+.desktop-assistant[data-panel=notes] .assistant-editor { flex: 0 0 auto; min-height: 230px; padding: 18px; border-radius: 14px; }
+.desktop-assistant[data-panel=notes] .assistant-editor:focus-within { border-color: var(--a-accent-rim); }
+.desktop-assistant[data-panel=notes] .assistant-editor textarea { min-height: 170px; font-size: 14px; line-height: 1.9; }
+.assistant-notes-archive { padding: 16px 4px; background: transparent; border: 0; box-shadow: none; }
+.assistant-notes-list > .assistant-muted { padding: 24px 0; text-align: center; }
+.assistant-notes-list .assistant-details { margin: 0; padding: 14px 0; border-bottom: 1px solid var(--a-rim); }
+.assistant-notes-list summary { font-size: 13px; font-weight: 500; color: var(--a-text); overflow-wrap: anywhere; line-height: 1.7; }
+.assistant-notes-list .assistant-details p { margin-top: 12px; font-size: 13px; line-height: 1.9; }
+.assistant-notes-list .assistant-icon-button { display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; margin-top: 8px; margin-left: auto; border-radius: 8px; color: var(--a-faint); }
+.assistant-notes-list .assistant-icon-button:hover { color: var(--a-danger); background: var(--a-danger-tint); }
+.desktop-assistant[data-panel=shortcuts] .assistant-shortcut-list { flex: 0 0 auto; padding: 0; gap: 0; min-height: 160px; overflow: visible; }
+.desktop-assistant[data-panel=shortcuts] .assistant-shortcut { padding: 16px 12px; border: 0; border-bottom: 1px solid var(--a-rim); border-radius: 0; box-shadow: none; background: transparent; }
+.desktop-assistant[data-panel=shortcuts] .assistant-shortcut:last-child { border-bottom: 0; }
+.desktop-assistant[data-panel=shortcuts] .assistant-shortcut:hover { transform: none; background: var(--a-surface-soft); }
+.desktop-assistant[data-panel=shortcuts] .assistant-shortcut-kind { color: var(--a-dim); font-size: 9px; }
+.desktop-assistant[data-panel=shortcuts] .assistant-shortcut-remove { width: 30px; height: 30px; color: var(--a-faint); background: transparent; border: 0; opacity: 1; }
+.desktop-assistant[data-panel=shortcuts] .assistant-shortcut-remove:hover { color: var(--a-danger); background: var(--a-danger-tint); }
+.desktop-assistant[data-panel=shortcuts] .assistant-shortcut-form { padding: 16px; border-radius: 14px; }
+.desktop-assistant[data-panel=shortcuts] .assistant-kind-switch { background: var(--a-well); border: 0; border-radius: 9px; }
+.desktop-assistant[data-panel=shortcuts] .assistant-kind-switch button[aria-pressed=true] { color: var(--a-text); background: var(--a-surface); box-shadow: 0 1px 4px #00000012; border: 1px solid var(--a-rim); border-radius: 7px; }
+
+/* Play journal: squared paper, washi tape, and the companion's own sticker. */
+:root .desktop-assistant[data-panel=games] {
+  --a-base: light-dark(#fbf5ec, #241f2a);
+  --a-text: light-dark(#514451, #f0e4ef);
+  --a-dim: light-dark(#826b7b, #cbb3c5);
+  --a-faint: light-dark(#937b88, #b59aaa);
+  --a-ghost: light-dark(#ae92a2, #977f94);
+  --a-surface: light-dark(#fffdf8, #302936);
+  --a-surface-soft: var(--a-surface);
+  --a-surface-raised: var(--a-surface);
+  --a-rim: light-dark(#e7d7d9, #514152);
+  --a-accent: light-dark(#eab2c4, #c990b5);
+  --a-accent-ink: #4e3448;
+  --a-accent-rim: light-dark(#b67c9f, #d6a7ce);
+  --journal-grid: light-dark(#bb9ba41a, #d7adcd0c);
+  --journal-tape: light-dark(#dcd2eeaa, #80689180);
+  background-image: linear-gradient(var(--journal-grid) 1px, transparent 1px), linear-gradient(90deg, var(--journal-grid) 1px, transparent 1px);
+  background-size: 20px 20px;
+}
+.desktop-assistant[data-panel=games] .assistant-body { gap: 16px; padding-top: 12px; }
+.assistant-game-intro { display: flex; align-items: center; gap: 4px; min-height: 126px; padding: 4px 2px; }
+.assistant-game-intro > div { flex: 1; min-width: 0; }
+.assistant-game-tag { display: inline-block; font: 600 9px/1.4 var(--a-mono); letter-spacing: .16em; padding: 4px 9px; color: var(--a-dim); border: 1px solid var(--a-rim); border-radius: 5px; transform: rotate(-3deg); }
+.assistant-game-intro h2 { margin-top: 12px; font-size: 20px; font-weight: 600; letter-spacing: .04em; line-height: 1.5; }
+.assistant-game-intro p { margin-top: 5px; font-size: 11px; line-height: 1.8; color: var(--a-dim); }
+.assistant-game-sticker { width: 100px; height: 114px; object-fit: contain; transform: rotate(7deg); filter: drop-shadow(0 3px 0 var(--a-rim)); }
+.desktop-assistant[data-panel=games] .assistant-label { display: flex; align-items: center; gap: 8px; margin: 0; color: var(--a-dim); letter-spacing: .06em; }
+.desktop-assistant[data-panel=games] .assistant-label::before { content: '✦'; color: var(--a-faint); }
+.desktop-assistant[data-panel=games] .assistant-hands { gap: 12px; padding: 3px 2px 8px; }
+.desktop-assistant[data-panel=games] .assistant-rps { padding: 21px 0; border-radius: 13px 13px 18px 12px; box-shadow: 2px 3px 0 var(--a-rim); }
+.desktop-assistant[data-panel=games] .assistant-rps-cell:first-child { transform: rotate(-4deg); }
+.desktop-assistant[data-panel=games] .assistant-rps-cell:last-child { transform: rotate(4deg); }
+.desktop-assistant[data-panel=games] .assistant-rps-caption { font-size: 11px; }
+.desktop-assistant[data-panel=games] .assistant-dice { flex: 1 0 auto; min-height: 230px; margin-top: 5px; padding: 28px 16px 20px; border-radius: 7px 16px 16px 7px; overflow: visible; box-shadow: 3px 4px 0 var(--a-rim); background: var(--a-surface); }
+.desktop-assistant[data-panel=games] .assistant-dice::before { inset: -9px auto auto 50%; width: 76px; height: 22px; background: var(--journal-tape); opacity: 1; transform: translateX(-50%) rotate(-5deg); }
+.desktop-assistant[data-panel=games] .assistant-dice::after { content: '✧'; position: absolute; right: 20px; top: 25px; font-size: 29px; color: var(--a-faint); transform: rotate(12deg); pointer-events: none; }
+.desktop-assistant[data-panel=games] .assistant-dice-value { font-size: 56px; letter-spacing: -2px; }
+.desktop-assistant[data-panel=games] .assistant-dice-value-empty { font-size: 40px; }
+.desktop-assistant[data-panel=games] .assistant-dice button { width: 58px; height: 54px; border-radius: 15px; border-color: var(--a-rim); box-shadow: 2px 3px 0 var(--a-rim); }
+.desktop-assistant[data-panel=games] .assistant-footnote { justify-content: center; margin: 2px 0 0; font-size: 11px; color: var(--a-faint); text-align: center; }
+@media (max-width: 344px) {
+  .assistant-game-sticker { width: 76px; height: 98px; }
+  .assistant-game-intro h2 { font-size: 18px; }
+}
+
+.assistant-shortcut-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 2px; }
+.assistant-add-shortcut { display: grid; place-items: center; width: 36px; height: 36px; border-radius: 50%; color: var(--a-accent-ink); background: var(--a-accent); }
+.assistant-add-shortcut:hover { filter: brightness(1.1); }
+.assistant-shortcut-icon { display: grid; place-items: center; flex: 0 0 36px; height: 36px; border-radius: 10px; background: var(--a-well); color: var(--a-dim); overflow: hidden; font-size: 17px; font-weight: 600; }
+.assistant-shortcut-icon img { width: 26px; height: 26px; object-fit: contain; }
+.desktop-assistant .assistant-shortcut-dialog { position: fixed; inset: 0; margin: auto; padding: 0; width: min(360px, calc(100% - 40px)); max-height: calc(100% - 48px); overflow: auto; border: 1px solid var(--a-rim); border-radius: 18px; color: var(--a-text); background: var(--a-surface); box-shadow: 0 20px 70px #00000030; }
+.assistant-shortcut-dialog::backdrop { background: #15192340; backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); }
+.desktop-assistant .assistant-shortcut-dialog .assistant-shortcut-form { margin: 0; padding: 22px; border: 0; background: transparent; box-shadow: none; }
+.assistant-shortcut-dialog .assistant-card-title { font-size: 16px; color: var(--a-text); margin-bottom: 20px; }
+.assistant-modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 22px; }
+.assistant-modal-actions button { min-width: 74px; }

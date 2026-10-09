@@ -187,10 +187,9 @@ impl TimeStampedMemory {
         self.messages.iter().map(Self::token_count).sum()
     }
 
-    /// 触发摘要：保留最近 `retain_recent` 条，其余移除并返回待压缩消息。
+    /// 返回待压缩前缀的快照；成功提交摘要后才移除原始消息。
     ///
-    /// 注意：本方法只做"切割"，不调用 LLM。调用方拿到 `removed` 后，
-    /// 在锁外调用 `compress_with_llm` 生成摘要，再调用 `commit_summary` 写回。
+    /// 调用方在锁外生成摘要，再由 `commit_summary` 校验前缀版本并缩减窗口。
     /// 这样避免在持有 RwLock 期间 await LLM（导致 future 不是 Send）。
     pub fn summarize(&mut self) -> Vec<ChatMessage> {
         if !self.should_summarize() {
@@ -198,18 +197,18 @@ impl TimeStampedMemory {
         }
         let retain = self.retain_recent.min(self.messages.len());
         let split = self.messages.len() - retain;
-        let removed: Vec<ChatMessage> = self.messages.drain(..split).collect();
-        self.timestamps.drain(..split);
-        removed
+        self.messages[..split].to_vec()
     }
 
     /// 把压缩后的摘要写入 summaries 列表（配合 `summarize` 使用）。
     ///
     /// 摘要源自原始对话的 LLM 压缩，会以 RECAP 形式注入 prompt，落盘前脱敏。
-    pub fn commit_summary(&mut self, content: String, removed: &[ChatMessage]) {
-        if removed.is_empty() {
-            return;
-        }
+    pub fn can_commit_summary(&self, source: &[ChatMessage]) -> bool {
+        super::summary_commit::prefix_current(&self.messages, source)
+    }
+    pub fn commit_summary(&mut self, content: String, removed: &[ChatMessage]) -> bool {
+        if !self.can_commit_summary(removed) { return false; }
+        self.messages.drain(..removed.len()); self.timestamps.drain(..removed.len());
         let (safe_content, _, status) =
             crate::memory::redact::redact_content(&content);
         if status == crate::memory::redact::RedactStatus::Redacted {
@@ -228,6 +227,7 @@ impl TimeStampedMemory {
             start_time,
             end_time,
         });
+        true
     }
 
     /// LLM 窗口压缩：把待压缩消息喂给 LLM，输出自包含的语义摘要。
@@ -424,12 +424,27 @@ mod tests {
         // 11 - 8 = 3 条被移除
         assert_eq!(removed.len(), 3);
         // 保留最近 8 条
-        assert_eq!(mem.get_messages().len(), 8);
+        assert_eq!(mem.get_messages().len(), 11);
         // 摘要列表此时为空（未调用 commit_summary）
         assert_eq!(mem.get_summaries().len(), 0);
         // 手动 commit 摘要
-        mem.commit_summary("test summary".to_string(), &removed);
+        assert!(mem.commit_summary("test summary".to_string(), &removed));
+        assert_eq!(mem.get_messages().len(), 8);
         assert_eq!(mem.get_summaries().len(), 1);
         assert_eq!(mem.recent_summary(), "test summary");
+    }
+}
+
+#[cfg(test)]
+mod companion_optimization_tests {
+    use super::*;
+    #[test]
+    fn summary_commit_keeps_new_turns_and_rejects_a_stale_prefix() {
+        let mut memory=TimeStampedMemory::new();memory.retain_recent=1;
+        memory.add_message(ChatMessage::user("这是一段很长的文本用于测试 token 阈值触发摘要。".repeat(2000)));memory.add_message(ChatMessage::assistant("保留"));
+        assert!(memory.should_summarize());
+        let snapshot=memory.summarize();assert_eq!(snapshot.len(),1);assert_eq!(memory.get_messages().len(),2);
+        memory.add_message(ChatMessage::user("整理期间的新增消息"));assert!(memory.commit_summary("摘要".into(),&snapshot));
+        assert_eq!(memory.get_messages().last().unwrap().content,"整理期间的新增消息");assert!(!memory.commit_summary("重复摘要".into(),&snapshot));assert_eq!(memory.get_summaries().len(),1);
     }
 }

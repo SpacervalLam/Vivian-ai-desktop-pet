@@ -269,7 +269,7 @@ impl Tool for ShareLinkTool {
 /// 发送内容：
 /// 1. 写入对话历史（character.brain.dialogue）— 链接卡片 + 跟进评论
 /// 2. emit `chat:link_card`：前端实时插入链接卡片
-/// 3. 若 side_chat 窗口未打开，emit `wechat:message_banner` 横幅提示
+/// 3. 若 聊天窗口 窗口未打开，emit `wechat:message_banner` 横幅提示
 /// 4. emit `chat:assistant_message`：跟进评论
 ///
 /// 写入对话历史并 emit 事件。在记忆图谱中作为 wechat 节点（信封图标）出现：
@@ -302,6 +302,7 @@ pub async fn share_link_to_wechat(
                 reasoning: None,
                 images: None,
                 meta: Some(MessageMeta {
+                    communication: None,
                     sticker: None,
                     source: MessageSource::Assistant,
                     is_memory_disabled: false,
@@ -331,6 +332,7 @@ pub async fn share_link_to_wechat(
                     reasoning: None,
                     images: None,
                     meta: Some(MessageMeta {
+                    communication: None,
                     sticker: None,
                         source: MessageSource::Assistant,
                         is_memory_disabled: false,
@@ -381,7 +383,7 @@ pub async fn share_link_to_wechat(
         );
     }
 
-    // 发送跟进评论（SideChatPanel 和 ChatWindow 实时显示）
+    // 发送跟进评论（ChatWindow 和 ChatWindow 实时显示）
     if !follow_up.is_empty() {
         let _ = app_handle.emit(
             "chat:assistant_message",

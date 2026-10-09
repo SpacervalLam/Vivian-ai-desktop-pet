@@ -239,13 +239,6 @@ const subHeaderStyle: React.CSSProperties = {
   marginBottom: 9,
 };
 
-const subHeaderLeftStyle: React.CSSProperties = {
-  display: 'flex',
-  alignItems: 'baseline',
-  gap: 8,
-  minWidth: 0,
-};
-
 /** 弱化后的长说明文字（凭据区等），降低视觉重量而非删信息 */
 const hintTextStyle: React.CSSProperties = {
   fontSize: 11.5,

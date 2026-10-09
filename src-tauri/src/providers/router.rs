@@ -1391,6 +1391,9 @@ impl ModelRouter {
     }
 
     fn prepare_request(&self, request: &mut LLMRequest) -> VivianResult<()> {
+        if crate::companion_quiet::blocks_route(&request.task_type) {
+            return Err(VivianError::Provider("陪伴侧发言已因勿扰模式暂停".into()));
+        }
         if let Some(spec) = super::task_catalog::find(&request.task_type) {
             let prompt = super::task_catalog::prompt(spec);
             if !request.messages.iter().any(|message| message.role == "system" && message.content == prompt) {

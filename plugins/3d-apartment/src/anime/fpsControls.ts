@@ -120,8 +120,6 @@ const BOB_LATERAL_MAX = 0.017;
 const EYE_PUSH = 0.08;
 /** 眼位到「眼高阻挡盒」的保证距离（米）= 身体净距 + 外推 */
 const EYE_STANDOFF = PLAYER_RADIUS + EYE_PUSH;
-/** 贴墙时相机到阻挡盒的真实最小距离（外推之后再扣掉 bob） */
-const CLEAR_EFF = EYE_STANDOFF - BOB_LATERAL_MAX;
 /**
  * 相机与「可见面」之间恒定保证的距离（米）。near 按「相机到碰撞盒的距离减去它」
  * 来算，所以这个值直接就是「多厚的饰面/线脚还能保证不被切」。

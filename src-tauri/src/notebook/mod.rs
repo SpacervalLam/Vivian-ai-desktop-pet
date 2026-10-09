@@ -1,15 +1,19 @@
 //! 笔记本模块 - 纸页风格的 HTML 页面生成与管理
 //!
-//! 智能体根据搜集到的信息，通过结构化 JSON 描述内容编排，
-//! 后端渲染引擎将 JSON + 预设 CSS 主题合成为排版清晰的纸页风格 HTML 页面。
+//! 两条成文路径：
+//! - **结构化内容块**：智能体用 JSON 描述内容编排，渲染引擎合成为纸页风格 HTML；
+//! - **自由 HTML**：整份文档由智能体自己写（`create_html_note`），其中 `paper` 模式
+//!   的样式表由后端持有（见 `doc_style.rs`），智能体只写正文片段。
 //!
 //! 架构：
 //! - 数据结构：NoteBook（元数据 + 内容块）
 //! - 渲染引擎：renderer.rs（CSS 主题 + HTML 生成）
+//! - 纸面范式：doc_style.rs（分析型笔记的样式表与写作契约）
 //! - 存储层：storage.rs（按角色隔离的文件 CRUD）
 
 pub mod collected;
 pub mod css_guide;
+pub mod doc_style;
 pub mod persona_brief;
 pub mod renderer;
 pub mod storage;

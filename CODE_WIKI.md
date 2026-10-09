@@ -136,7 +136,9 @@ pub struct AppState {
 
 ### 前端构建（多窗口按需加载）
 
-桌宠由多个 Tauri 窗口组成（桌宠角色窗口 / Chat / Memory / Config / Bubble / Toast / SideChat / MessageBanner 等），每个窗口通过 `?view=` 参数加载不同的 React 组件。
+桌宠由多个 Tauri 窗口组成（桌宠角色窗口 / Chat / Memory / Config / Bubble / Toast / QuickInput / MessageBanner 等），每个窗口通过 `?view=` 参数加载不同的 React 组件。
+
+内置供应商预设与端点匹配位于纯数据模块 [`providerPresets.ts`](src/components/settings/providerPresets.ts)，`App.tsx` 直接导入该模块，避免通过设置窗口加载整个设置 UI。依赖边界由 `provider-presets.test.mjs` 验证。`npm run typecheck` 对主前端与公寓插件同时启用未使用局部声明和参数检查；TTS 单例在热重载时释放监听器，注册部分失败时回滚已注册项。
 
 - **逐窗口动态 import**（[`src/main.tsx`](src/main.tsx)）：`main.tsx` 不再静态导入全部窗口组件，而是按 `view` 参数对各自组件做 `await import(...)`。主窗口（无 view）只加载 App，不再打包 Chat / Memory / MindInspector / Config 等它用不到的代码，显著降低主窗口首帧解析量。
 - **vendor 拆包**（[`vite.config.ts`](vite.config.ts)）：`build.rollupOptions.output.manualChunks` 将稳定依赖拆成独立 chunk —— `react`（react/react-dom/zustand）、`tauri`（@tauri-apps）、`i18n`（i18next/react-i18next）。多窗口共享这些 chunk 的高效缓存、并行加载。
@@ -1893,7 +1895,7 @@ tools::types::is_path_within_any(path, primary, extras)
 | `media_tools.rs` | 媒体控制（`media_control`：播放/暂停/切歌/音量/静音，`InputControl`）。**播放类动作优先走 SMTC**（`world::MusicSource::control`）——可经 `target_app` 定向到具体播放器、有成功回执、能读回曲名校验；失败降级媒体键，但**指定了 `target_app` 就不降级**（媒体键全局无定向，降级会误控另一个播放器）。音量/静音无 SMTC API，始终用媒体键 |
 | `music_tools.rs` | 音乐（`music_now_playing` 读 SMTC `Safe` / `music_play` 按名字找歌并播放 `Shell` 需确认）。不单独暴露「搜索」工具——检索内嵌在 `music_play` 里，多结果时把候选清单附在返回里。桌宠内置能力，无设置开关，开箱即用 |
 | `memory_tools.rs` | 记忆操作与 `memory_md` 长期笔记；日常 `memory_note` 由独立精简反思协议沉淀，不复用主对话 system prompt，写入与睡眠整理仍由原笔记路径处理 |
-| `notebook_tools.rs` | 笔记（create/list/get_detail/update/share/create_html_note，均 `should_defer=true` 按需加载；落盘类 `FsWrite`、读取类 `FsRead`、`share_notebook` 仅推前端卡片故 `Safe`；`list_notebooks` 枚举已有笔记定位 note_id，分享时防止"为分享重建笔记"；`create_html_note` 的 validate 用 `sanitize_html` 前后对比拒绝含 script/on*/iframe 的输入，约束文案禁 script 并引导 nb-chart / mermaid 约定） |
+| `notebook_tools.rs` | 笔记（create/list/get_detail/update/share/create_html_note，均 `should_defer=true` 按需加载；落盘类 `FsWrite`、读取类 `FsRead`、`share_notebook` 仅推前端卡片故 `Safe`；`list_notebooks` 枚举已有笔记定位 note_id，分享时防止"为分享重建笔记"；`create_html_note` 的 validate 用 `sanitize_html` 前后对比拒绝含 script/on*/iframe 的输入，并按 `style` 区分两种成文路径——`free` 由模型写整份文档，`paper` 由后端注入样式表、模型只写正文片段，见「纸面范式」一节） |
 | `file_tools.rs` | `read_file` 与 `read_spilled_result`，支持 Unicode 字符 offset、返回长度与 next_offset；尊重小页预算并适配上下文裁剪阈值，受原沙箱与权限限制 |
 | `coding_tools.rs` | 编程智能体工具集（`write_file` / `edit_file` `FsWrite`、`run_command` `Shell`、`grep_search` / `list_dir` `FsRead`，读改跑闭环，供 Coding Agent 使用） |
 | `perception_tools.rs` | `get_foreground_app_context` 区分 foreground 与 running_apps；包含真实前台（含自身窗口）、最近外部窗口及其观测年龄，超过 300 秒标记陈旧；应用存在不证明正在录屏 |
@@ -2090,8 +2092,44 @@ pub struct CustomToolDef {
 |------|------|
 | [`renderer.rs`](src-tauri/src/notebook/renderer.rs) | HTML 渲染器，手账风格 CSS |
 | [`storage.rs`](src-tauri/src/notebook/storage.rs) | 笔记存储（按 char_id 隔离） |
+| [`doc_style.rs`](src-tauri/src/notebook/doc_style.rs) | 纸面范式：分析型笔记的样式表与写作契约（后端持有，模型只写正文片段） |
 | [`collected.rs`](src-tauri/src/notebook/collected.rs) | 采集资料 → 笔记的反向同步（`ingest_collected` 统一入口） |
 | [`mod.rs`](src-tauri/src/notebook/mod.rs) | 模块入口 |
+
+#### 纸面范式（`create_html_note` 的 `paper` 模式）
+
+`create_html_note` 有两条成文路径，由 `style` 参数区分——解析收敛在
+`HtmlNoteStyle` 一处（范式同时决定「`html` 字段装的是整份文档还是正文片段」与
+「样式表由谁负责」，多一处判定就会出现「校验按 free、渲染按 paper」的错配）：
+
+- **free**（默认，缺字段即此）：模型写完整 HTML 文档，系统原样保存。
+- **paper**：样式表归后端（`doc_style::PAPER_CSS`），模型只写 `.wrap` 内部的正文片段，
+  `doc_style::compose_document` 合成整份文档后仍走 `storage::save_raw_html`。
+
+**为什么样式表不交给模型写。** 整份约 7KB：写进工具 schema 就每次召回都随 prompt 付一遍；
+交给模型每次重写还会漏行、改色值，几十篇笔记长得各不相同。放进 Rust 常量后两件事同时消失。
+代价是**已生成的笔记不跟随样式表升级**——要跟随就得把存储格式改成「范式名 + 片段」，
+那是另一件事，别顺手做。
+
+**契约只在召回时付费。** 构件清单与写作纪律（三种语义色、两种形态骨架、数字口径单独成节、
+不复述材料、表内不塞长段落）拼在 `style` 参数的描述里，随工具 schema 按需加载；
+工具描述正文只留「什么时候用哪种模式」，不重复一份。
+
+**误传整份文档不报错。** `normalize_fragment` 取 `<body>` 内部、剥掉 `<head>` 与外壳标签：
+这种情形的正确解释唯一无歧义，报错只会白付一次模型往返。脚本体与事件属性不在这里拦，
+仍由 `sanitize_html` 统一负责（`validate_input` 比对拒绝）。
+
+**样式表不进检索文本。** `raw_html_to_searchable_text` 先摘掉 `<style>` / `<script>` 块
+再去标签——自由 HTML 笔记常自带整份样式表，不摘的话每篇入库的检索文本九成是 CSS，
+向量被 CSS 术语主导，笔记等于搜不到（`stylesheets_stay_out_of_the_retrieval_text` 守着）。
+
+**视觉基线。** `export_the_paper_paradigm_sample_for_visual_review` 把范式里每个构件都用
+一遍（三种 callout、pitfall、fig、cards、rank、details、`.hl` 行、`.num` 列）导出到
+`previews/paper-paradigm.html`，版式改动后过一眼有没有塌版。
+
+**与结构化路径的边界。** `create_notebook` 的 `callout` 没有 key/warn/ok 语义，也没有
+`details` / `pitfall` / `rank` 这些构件——「事实与判断分开」是纸面范式的分界，不是通用笔记的要求。
+叙事型、日记型内容不该套这个范式（`anti_use_cases` 里写明了）。
 
 #### 采集资料归档为笔记
 
@@ -2273,7 +2311,7 @@ persona.json，所以这条回退路径是主路径而非边缘情况）。
 #### 两种笔记形态
 
 - **结构化笔记**（`note.json` + `renderer.rs` 渲染的 `note.html`）：LLM 输出结构化 JSON 描述内容编排，经 `create_notebook` 生成，后端渲染成手账风格 HTML
-- **raw_html 笔记**（`storage.rs::save_raw_html`）：仅有 `note.html`（无 `note.json`，由索引文件补全到列表，`render_type="raw_html"`），保存完整 HTML 文档。由 LLM 经 `create_html_note` 撰写，或用户经 `import_html_note` 命令 / 文件选择器 / 拖放导入；前端经 iframe（`sandbox="allow-same-origin"`，不带 allow-scripts）渲染，支持自由排版
+- **raw_html 笔记**（`storage.rs::save_raw_html`）：仅有 `note.html`（无 `note.json`，由索引文件补全到列表，`render_type="raw_html"`），保存完整 HTML 文档。由 LLM 经 `create_html_note`（`free` 模式自己写整份，或 `paper` 模式由后端注入样式表）撰写，或用户经 `import_html_note` 命令 / 文件选择器 / 拖放导入；前端经 iframe（`sandbox="allow-same-origin"`，不带 allow-scripts）渲染，支持自由排版。**因此笔记内脚本不执行、图表库不可用**——数据可视化只能用表格与内联 SVG；要渲染出来的柱状/折线/饼图得用 `create_notebook` 的 `table`/`chart` 块（图表脚本由 `renderer.rs` 注入）
 - **笔记 HTML 安全（黑名单 sanitize + sandbox 双保险）**：`storage.rs::sanitize_html` 做黑名单式消毒（移除 `<script>` / `on*` 事件属性带引号+无引号 / 嵌套 `<iframe>` / `javascript:` 协议，其余 HTML 原样保留——笔记需完整表达能力不用全量白名单）；`save_raw_html` 是 `create_html_note` 与 `import_html_note` 的**单一写入口**，写入前统一 sanitize。前端 iframe `sandbox` 是浏览器级脚本隔离（主防线），sanitize 是纵深防御兜底。`renderer.rs` 的 Custom 块复用同一 `sanitize_html`（原私有 `sanitize_custom_html` 已删除合并）
 
 > 工具可见性：`create_html_note` / `read_file` / `list_notebooks` / `get_notebook_detail` 等笔记与文件类工具均标记 `should_defer=true`（`Deferred`），按需增量加载，不常驻 LLM 上下文。
@@ -2782,7 +2820,7 @@ LLM 输出含标记的 text
 | [`plugins.rs`](src-tauri/src/commands/plugins.rs) | 插件清单与运行时装卸（`list_plugins` / `plugin_paths` / `list_skills` 技能管理面板（不展示内置风格预设）/ `reload_plugin` 重载单个插件（撤销旧贡献 + 按磁盘重装 + 连接 MCP）/ `unload_plugin` 卸载运行时贡献不动磁盘 / `delete_plugin` 删除插件目录——内置插件禁删） |
 | [`tasks.rs`](src-tauri/src/commands/tasks.rs) | 自治任务查询与取消（`list_agent_tasks` / `get_agent_task`（含后代谱系树）/ `cancel_agent_task`） |
 | [`terminal.rs`](src-tauri/src/commands/terminal.rs) | 内嵌终端（ConPTY 会话：`terminal_create` / `terminal_write` / `terminal_resize` / `terminal_kill` / `terminal_list`，供编程页 TerminalPanel 消费） |
-| [`window.rs`](src-tauri/src/commands/window.rs) | 窗口管理；含 `chat` 窗口右缘三态侧边栏（Hidden/Peek/Expanded，边缘检测线程 + WH_MOUSE_LL Hook + ease-out cubic 220ms 滑动动画 + 状态化鼠标穿透，`show_side_chat_animated`/`expand_side_chat`/`collapse_side_chat` 等命令带 `label` 参数）+ 拖拽惯性甩飞与屏幕边缘回弹（见 [engine/ 章节](#engine--桌宠表现层)）+ WebView 冻结/恢复（`freeze_webview`/`thaw_webview`，窗口隐藏时通过 WebView2 `TrySuspend`/`Resume` 挂起/恢复渲染进程，配合 `visibilitychange` 事件补拉隐藏期间的数据）。**消息横幅窗口**（`message_banner`，低频隐藏 WebView）空闲即冻结：4 个发送点（proactive/notebook_tools/send_image_tool/share_link_tool）统一走 `emit_message_banner`（先 `thaw_webview` 再 emit，防冻结期间事件丢失），前端横幅清空后经 `freeze_window_webview` 命令自冻结 |
+| [`window.rs`](src-tauri/src/commands/window.rs) | 窗口管理；含独立右缘菜单和按需聊天窗口（`show_chat_animated`/`close_chat_window`、外部点击看护）+ 鼠标附近快捷输入窗口（`open_quick_input`）+ 拖拽惯性甩飞与屏幕边缘回弹（见 [engine/ 章节](#engine--桌宠表现层)）+ WebView 冻结/恢复（`freeze_webview`/`thaw_webview`，窗口隐藏时通过 WebView2 `TrySuspend`/`Resume` 挂起/恢复渲染进程，配合 `visibilitychange` 事件补拉隐藏期间的数据）。**消息横幅窗口**（`message_banner`，低频隐藏 WebView）空闲即冻结：4 个发送点（proactive/notebook_tools/send_image_tool/share_link_tool）统一走 `emit_message_banner`（先 `thaw_webview` 再 emit，防冻结期间事件丢失），前端横幅清空后经 `freeze_window_webview` 命令自冻结 |
 | [`speech.rs`](src-tauri/src/commands/speech.rs) | 语音 |
 | [`tts.rs`](src-tauri/src/commands/tts.rs) | TTS |
 | [`realtime_voice.rs`](src-tauri/src/commands/realtime_voice.rs) | 实时语音 |
@@ -2859,7 +2897,7 @@ LLM 输出含标记的 text
 
 **手机端前端**（`frontend/index.html`）：屏幕内右滑呼出左侧导航，包含首页 / 微信 / 记忆 / 笔记 / 待办。用户画像统一放在记忆页；下滑程序坞及其遮罩已移除。
 - **微信对话界面**：复刻桌面 ChatWindow 视觉（灰底 `#e9e9eb`、用户 WeChat 绿气泡 `#95ec69` 靠右、AI 白色气泡靠左带头像、绿色发送键），智能体发送的链接渲染为微信风格卡片
-- **直接对话界面**：复刻桌面 SideChatPanel 视觉（浅紫渐变底、AI 深色半透明圆角气泡靠左），顶部为桌宠舞台，**Vivian + Nana 双角色同屏渲染**，说话时对应角色上方弹出气泡并触发表情
+- **直接对话界面**：采用桌面消息气泡视觉（浅紫渐变底、AI 深色半透明圆角气泡靠左），顶部为桌宠舞台，**Vivian + Nana 双角色同屏渲染**，说话时对应角色上方弹出气泡并触发表情
 - **桌宠渲染**：CSS 雪碧图，与桌面端共用同一套资源——3×2 六态主图集（`idle` / `happy` / `drag` / `dizzy` / `talk` / `listen`，各态配独立 CSS keyframes：待机呼吸 / 开心弹跳 / 拎起摆动 / 晕眩摇晃 / 说话起伏 / 倾听侧身）+ 3×2 眨眼序列，经 `/remote/model/` 路由加载（dev 从 `public/` 读，release 从 bundle 读）。表情名经 `expressionToPose` 正则归一化到六态（pout/angry→drag、dizzy/sad/sleep→dizzy、talk/speak→talk、listen/focus→listen、happy/love/star/shy→happy）；眨眼切到眨眼图集逐帧播完（帧距 55/48/58/78/70/105ms，随机 3.2-7.5s 间隔），仅 idle 态播放、被其他姿态接管即中断（`petBlinkToken` 令牌 + 清行内样式交回姿态控制）
 - **单/双生布局**：单角色槽宽 ×0.88、可用高 ×0.90 缩放上限；双生模式两槽各占舞台半宽（×0.96），激活角色经 `data-active` 高亮，切换发言对象即切换高亮
 - **输入栏**：`align-items: center` + 文本框/发送按钮均 38px，中轴水平对齐；发送按钮旁边不再显示红色停止按钮；空状态不显示「暂无直接对话记录」占位文本
@@ -3378,3 +3416,58 @@ DialogueManager 通过 history_io 串行化追加、清空及元数据修补；�
 ### 操作确认的可读展示与工作区授权
 
 工作侧已授权工作区内的文件操作在权限网关中免逐次确认；显式 Ask/Deny、只读限制、越界和风险矩阵的 Deny 优先。run_command 可提供仅用于展示的 description，宿主同时根据命令中可观察的操作生成说明；该描述不参与权限判定。确认卡片正文不显示原始命令，完整命令与参数在默认折叠的详情中查看。无操作倒计时为 120 秒，鼠标悬停或键盘焦点在卡片内时暂停；决策等待后台调用完成后再移除卡片，提交失败保留卡片并提示重试。
+
+
+### 陪伴节奏与持久化提醒（2026-10-08）
+
+`companion_policy` 管理专注、夜间和前台游戏白名单的免打扰规则，以及整点去重、持续资源压力和恢复阈值。`companion_runtime` 复用 Scheduler 的每秒心跳，只读世界感知层的缓存，不新增采样线程或模型请求。报时默认关闭，错过的整点不补播；CPU 超过 85% / 内存超过 90% 持续 20 秒才提示，恢复阈值为 70% / 80%，提醒冷却 30 分钟。资源反馈同时遵循原有系统压力触发开关。网络反馈默认关闭，只反映系统连接状态，不据此断言模型服务或公网延迟。配置入口：设置 → 陪伴 → 陪伴节奏。
+
+普通主动消息和日程受免打扰约束，普通到期日程保留 Pending，结束免打扰后补发；重要提醒允许置顶。该规则不阻止定时工具执行。用户手动对话不受新增策略影响。夜间只请求入睡表现，点击或新交互仍可唤醒，不强制锁定对话。
+
+Scheduler 的每个提醒出现实例携带持久化 `notices`，独立记录显示回执和用户确认。`reminders` 共享窗口提供「知道了」「5 分钟后提醒」「打开日程」，普通提醒不抢焦点，隐藏不视为确认。确认与稍后提醒在同一持久化事务中完成，写盘失败回滚；重复点击只产生一个稍后任务。未确认实例不受历史清理时限影响，重启后恢复。重试复用同一实例，已经确认的实例不会再次通知。
+
+动画词表新增两角色 `remind` / `tired` / `umbrella`，Nana 补齐 `sleep` / `wake`。睡眠尊重 `hold` 停在末帧，唤醒沿用状态机序列令牌，不与新的对话动作并发；`sweat` 保留映射 `dizzy`。运行时使用透明 WebP 图集，素材测试逐格验证尺寸、透明和非空，额外检查留存的原始 PNG。
+
+### 桌面助手与语音测量（2026-10-08）
+
+提示词中的普通召回、经历起止时间和用户随手记时间统一通过 `utils/prompt_time.rs` 转为系统本地时间，格式为 `YYYY-MM-DD HH:mm（UTC+8）`（按当地实际偏移，非整点时区如 `UTC+5:30`），明确时区，避免无时区 UTC 或 Unix 数字引发误读。用户随手记以单次归属说明、每条可读记录时间和引用正文呈现，不输出 author/id/source/created_at JSON 字段；内部持久化及检索元数据仍保留原始字段。读取随手记和 search_memory 的随手记工具结果使用同一文本格式。
+
+用户随手记使用 `user_quick_notes.rs` 独立 JSON 存储，用户页面保存、浏览和删除不携带角色 ID，保存不触发桌宠发言。旧 `quick_note` 标签记录按角色和旧 ID 幂等导入，保留原文件备份；导入清单防止删除后的用户记录再次从备份复活，角色笔记列表及旧知识索引排除这些记录。主对话 RAG 以关键词与现有嵌入提供者的余弦相似度检索，单独注入带用户作者、来源、时间和归属说明的有界证据；不进入角色 memories/raw_semantic_memory、热度计数或事实抽取。`search_memory` 在单独的 `user_quick_notes` 字段返回命中及归属说明，`read_user_quick_notes` 供角色主动只读浏览与搜索；角色不能通过该工具写入、修改或删除用户记录。
+
+右缘快捷菜单由 `edge_menu.rs` 启动时创建，主题和首帧就绪后移至所有显示器最右边界之外并显示，保留 WebView 与原生合成窗口；收起只移到屏外，不 hide、不 TrySuspend，呼出直接进行 220ms 原生滑入，避免 Resume/show 首帧闪烁。是否展开由 `MENU_OPEN` 独立管理，触发区域取目标显示器几何而非屏外停放位置；截图期间仍执行原生隐藏屏障，结束后先回到屏外。动画帧在 UI 线程校验代号，收起后迟到的动画不得把菜单移回屏内。聊天窗口仍按需创建并在关闭时销毁。
+
+快捷菜单的 Tauri 命令只保存轻量参数；含截图/视觉/聊天链的分支任务通过不可内联的 boxed future 工厂在运行时首次 poll 后构造，避免在 WebView UI 回调中构造巨大状态机导致 Windows `0xc00000fd` 栈溢出。Rust 回归测试约束按钮命令 future 小于 4KB。
+
+聊天首页标题「聊天」右侧三点按钮进入「桌面助手」内页，返回按钮回到聊天列表；私聊三点仍进入聊天详情。助手采用 iOS 风格的分组列表、彩色图标和内嵌分隔线，不显示角色选择块，沿用打开助手时传入的角色上下文，首页只显示天气/音乐状态及功能名称，不包含插画、问候、副标题或底部标签栏；笔记、偏好、快捷启动、小游戏与语音诊断进入专用内页，支持浅色/深色主题。助手使用独立内容滚动布局，在整个助手页生命周期内保留侧栏并关闭整窗鼠标穿透，离开时只释放保持状态，后端按 Peek 状态决定穿透，返回聊天主页仍可点击；输入框或按钮失焦不再切换穿透，StrictMode 重挂载后仍保持可交互。系统托盘和角色菜单统一跳转到该内页，携带角色及分页；先展开并恢复隐藏的 ChatWindow，再发送导航事件，避免冻结 WebView 丢失跳转。首次创建窗口通过 URL 初始化目标页，复用已打开窗口时保留其尺寸和位置。独立助手窗口路由和权限标签已移除。
+
+日常页可记一笔、选择笔记复习、管理软件与网站入口、查看缓存天气和当前曲目，以及主动点击「截图分析」。随手记独立存放于用户数据目录的 user/quick_notes，每条均标注 source=user_quick_note、author=user，与角色 notebook 和长期记忆库分开；明确保存的偏好复用现有长期记忆和检索，不新建第二套存储。截图分析通过按钮或可配置的 Ctrl + 左 Alt + A 触发冻结屏幕的框选遮罩，支持拖动选区、Enter 分析、Esc/右键取消，以及“分析 / 保存 / 保存并分析 / 取消”四个操作；分析时仅将选区 PNG 发送到识图路由；截图、桌面发图与手机发图共用两阶段处理：vision_describe 先给出完整客观分析，再将完整分析作为本轮证据注入正常 companion/chat 对话链，由角色生成回复、表情和语音，不直接展示识图报告或识图模型生成的角色回复。GDI 捕获、PNG 编码与裁剪均在内存完成，不保存临时文件或修改剪贴板；仅明确选择保存时写入 Windows Screenshots 已知文件夹（兼容重定向及 OneDrive）；保留视觉功能与工具禁用检查。软件和网站入口调用现有工具执行器，保留禁用和拒绝规则。
+
+剪贴板提示默认关闭；启用后后台仅检查 Windows 序号，变化事件广播给两个桌宠，各自显示发送按钮。点击时读取当前文本，包装为用户主动分享的外部资料，再走对应角色的正常对话流程；正文做边界转义，连续点击被拦截。旧剪贴板内页、侧栏入口、本地固定短评及清空命令已删除。天气和曲目提示默认关闭，复用缓存并遵循专注、夜间、游戏、离开及冷却规则；降水变化使用两角色雨伞动画。启用本地曲目提示后，同类模型主动点评不会重复触发。猜拳和 1–100 骰子使用本地无偏随机数。
+
+语音诊断按模式及阶段分别显示 p50 / p95，最多保留 200 条不含对话内容的进程内样本，可导出 JSON。普通语音记录手动停止识别到最终结果、生成到首个模型输出块、TTS 请求到播放 Started；实时通话记录最后服务端识别结果到非空音频输出回调。后者不含完整 VAD 等待和声卡物理输出延迟，不能称为完整端到端延迟。当前已实现测量与去重、超时、边界测试，尚未完成真实语音样本的前后对比优化；原生窗口置顶、提示音及多屏 DPI 也需要运行应用验收。
+
+两角色的 `music`（8 帧循环）和 `clipboard`（单帧）素材已注册：曲目变化提示播放 5 秒打拍子；纸条素材保留供角色表情使用，旧剪贴板查看动作已删除。单帧动画尊重调用方停留时长；这些动作与其他状态反馈一样，不抢占拖拽、忙碌、逃跑和自主移动。渲染器实际校验 `characters`，`gift` 限定 Vivian，避免 Nana 请求不存在的图集。
+
+猜拳新增两角色的 `rps-rock` / `rps-scissors` / `rps-paper`，共 6 张透明单帧图，角色展示随机结果中实际选择的手势，文字同时呈现双方出拳和胜负；骰子沿用通用表情。素材由内置 image_gen 重新生成，原始 PNG、提示词及生成记录保存于 `assets/chibi/rps`，512×512 PNG 和无损 WebP 位于角色 motion 目录，统一角色内缩放并对齐脚底基线。素材检查覆盖 18 组图集、112 个透明非空格位、可用角色、脚底基线和 PNG/WebP 可见像素一致性。
+
+### 近期互动参考的提示词格式
+
+关系日志由 `psychology/relationship_log.rs::build_context` 格式化。用户互动字段标注为系统解读、推测用户情绪和回应参考（非用户要求），不是用户原话或已确认事实。逐轮时间复用 `format_prompt_time`；缺失具体时间或参与角色时明确标注未记录。跨角色主动联系保存可选 `source_agent_id`，兼容旧日志，摘要以联系记录摘要呈现。每日摘要可能涉及不同角色；情绪聚合只计入非空的用户互动情绪。历史正文转义并放在 `relationship_history_data trust="untrusted"` 内。当前没有新增用户互动日志的生成管道。验证：`node tests/relationship-context-prompt.test.mjs`。
+
+### 消息身份与旁观上下文
+
+普通用户 `user.content` 保留原文，不再添加 `[User says to me]`。`MessageMeta.communication` 保存真实 speaker、listener、knowledge_source 和 current_character；DialogueManager 从持久化元数据恢复这些字段。API 组装由 message_context 统一提供独立身份说明；第三方发言作为历史资料发送，不作为当前角色的 assistant 回复。旁观插话仍经 think_system_directive，不伪装成用户要求。跨角色内部递送新增任务局部 CROSS_DELIVERY（真实发起角色、原话、补充上下文），API 将原话与话题/记忆/交接信息分开，旧调用兼容原有解析。普通用户文本不再被解析成角色身份。验证：`node tests/communication-context.test.mjs`。
+
+### 记忆来源与角色知情边界
+
+原始发言仍由 DialogueManager 历史保存，会话投影和事实通过 source_message_ids 追溯。新发言标记 utterance_format=plain，原话不会被前缀解析；旧数据按原有规则兼容。ConversationTurn 增加 knowledge_source/observer_id，摘要保存 source_attributions 与 known_by。旁观者不再被虚构成发言参与者，广播不再硬编码角色名单。memory/provenance 统一来源展示、知情边界与召回去重，MemoryManager 在候选检索前筛选可知记录；direct 不能绕过明确的参与者信息。不同说话者、主语、资料类别的相同文字不再混为一条；明确相同 utterance_id 的副本去重。事实抽取核对真实说话者，事实合并/更新限定同一 subject，evidence_sources 保留逐份原话的说话者、接收者、获知方式和来源时间。RAG 与检索工具区分原话、摘要、旁观、参考资料和记忆结论，原话来源时间用本地可读时间格式展示。用户随手记继续独立存储。验证：runtime-contracts 的 memory_ 测试及 tests/memory-evidence-attribution.test.mjs。
+
+### 陪伴提示词编排与自然语言说明
+
+主请求顺序为固定规则/人设、明确为虚构的示例、带资料边界的动态上下文、真实近期消息、本轮原话、短轮末提醒。兼容请求的动态上下文也放在近期历史前。交流归属使用简短自然语言，字段语义由固定 Who is speaking 规则解释一次；第三方历史发言以带归属的引用资料展示。旧前缀不能作为用户身份依据。不存在结构化画像不等于没有对话记忆；角色笔记允许按用户要求说明来源，并转义资料标签。普通无工具回复只保留主输出格式，非原生工具路径仍保留必要 JSON 协议。提示词预算按实际渲染的历史（含身份说明/贴纸）计算。对白规则不要求强制情绪、玩笑或追问；天气依据/时效规则保留。render 预览保留实际资料边界。验证：tests/prompt-orchestration.test.mjs、tests/communication-context.test.mjs、tests/memory-evidence-attribution.test.mjs、tests/prompt-scenarios.test.mjs；离线测试不代表真实模型质量已经测量。
+
+### 鼠标附近快捷输入
+
+已删除左侧对话面板及其预创建、左缘轮询、滑动、锁定、输入区域穿透、路由和权限，右侧菜单不再有对话按钮。右侧菜单和聊天窗口外部点击看护以独立名称保留。文字/长按语音快捷键通过 open_quick_input 打开共享轻量输入窗口，按鼠标所在显示器的工作区和 DPI 使用物理坐标定位，靠近边缘时自动夹紧；QuickInputWindow 在订阅完成后通知 ready，避免首次打开丢失配置。私聊与群发保持原消息发送渠道，输入框保留图片草稿和悄悄话。
+
+快捷输入采用统一圆角卡片：Vivian 淡黄、Nana 淡紫、广播淡黄与淡紫渐变；支持浅色/深色、图片草稿、语音和悄悄话。三组默认快捷键分别为 Ctrl+Shift+V / N / B，旧默认自动迁移；笔记本旧 Ctrl+Shift+N 改为 Ctrl+Shift+M，避免与 Nana 冲突。右键单击桌宠打开对应输入框，右键不触发左键的按压/拖拽动作。

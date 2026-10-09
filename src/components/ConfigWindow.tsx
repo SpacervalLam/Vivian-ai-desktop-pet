@@ -1,12 +1,11 @@
-import { TextField, BrowseTextField, SelectField, NumberField, SliderField, ToggleField, subsectionTitleStyle, fieldStyle, labelStyle, inputStyle, selectStyle, sectionTitleStyle } from './settings/SettingsFields';
-import { ROUTING_TASKS, normalizeEmbeddingEndpoint, presetMatches, useProviderPresets, needsSecretFor, needsAppIdFor, ProviderSelector, WorkModelProviderSelector, invalidateProviderPresetsCache, type ConfigValue, type ConfigObject, type EmbeddingProviderPreset } from './settings/ModelSettings';
+import { TextField, BrowseTextField, SelectField, NumberField, SliderField, ToggleField, subsectionTitleStyle, fieldStyle, labelStyle, inputStyle, sectionTitleStyle } from './settings/SettingsFields';
+import { ROUTING_TASKS, normalizeEmbeddingEndpoint, presetMatches, useProviderPresets, needsSecretFor, needsAppIdFor, ProviderSelector, WorkModelProviderSelector, type ConfigValue, type ConfigObject, type EmbeddingProviderPreset } from './settings/ModelSettings';
 export { PROVIDER_PRESETS, invalidateProviderPresetsCache } from './settings/ModelSettings';
 import StickerSettings from './stickers/StickerSettings';
 import ReasoningPrefField, { type ReasoningPref } from './settings/ReasoningConfigField';
 import LlmProbeResults from './settings/LlmProbeResults';
 import { runProbeBatch, type ProbeResult } from './settings/llmProbe';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import ReactDOM from 'react-dom';
 import { invoke } from '@tauri-apps/api/core';
 import { getVersion } from '@tauri-apps/api/app';
 import { platform, version as osVersion, arch } from '@tauri-apps/plugin-os';
@@ -24,7 +23,7 @@ import ShortcutRecorder, { type ConflictResult, formatForDisplay } from './Short
 import ClearConfirmDialog from './ClearConfirmDialog';
 import NetworkDiagnosisDialog from './NetworkDiagnosisDialog';
 import SetupGuideModal from './SetupGuideModal';
-import type { FishSpeechServiceState, GptSoVitsServiceState, GptSoVitsServiceStatus, OllamaServiceState, WhisperServiceState } from '../types';
+import type { FishSpeechServiceState, GptSoVitsServiceState, OllamaServiceState, WhisperServiceState } from '../types';
 import PluginsPanel from './plugins/PluginsPanel';
 import ConnectionsPanel from './ConnectionsPanel';
 import TokenUsagePanel from './TokenUsagePanel';
@@ -32,6 +31,7 @@ import { Search, X, Minus, Trash2, Sparkles, ExternalLink, Activity, Download, U
 import { settingsPages as tabs, settingsGroups, settingsCopy, findSettingsPages, type SettingsPageKey as TabKey } from './settings/navigation';
 import SettingsSections from './settings/SettingsSections';
 import SchemaSettings from './settings/SchemaSettings';
+import CompanionSettings from './settings/CompanionSettings';
 import './settings/SettingsWindow.css';
 import WeatherKitPrivateKeyField from './settings/WeatherKitPrivateKeyField';
 
@@ -2251,6 +2251,21 @@ const ConfigWindow: React.FC = () => {
     }
   }, [t]);
 
+  const handleScreenAnalyzeShortcutChange = useCallback(async (shortcut: string): Promise<ConflictResult> => {
+    const previous = get<string>('base.shortcut_screen_analyze', 'Control+LeftAlt+A');
+    try {
+      await invoke('set_config', { key: 'base.shortcut_screen_analyze', value: shortcut });
+      await invoke('update_text_shortcuts');
+      await invoke('save_config');
+      setNested('base.shortcut_screen_analyze', shortcut);
+      return { ok: true };
+    } catch {
+      await invoke('set_config', { key: 'base.shortcut_screen_analyze', value: previous });
+      await invoke('update_text_shortcuts');
+      return { ok: false, reason: 'conflict' };
+    }
+  }, [get, setNested]);
+
   /** 公寓快捷键变化处理 */
   const handleRoomShortcutChange = useCallback(async (shortcut: string): Promise<ConflictResult> => {
     setNested('base.shortcut_room', shortcut);
@@ -2734,24 +2749,25 @@ const ConfigWindow: React.FC = () => {
                 get<string>('base.shortcut_chat', ''),
                 get<string>('base.shortcut_settings', ''),
                 get<string>('base.shortcut_memory', ''),
+                get<string>('base.shortcut_screen_analyze', 'Control+LeftAlt+A'),
                 apartmentInstalled && get('base.apartment_enabled', true) ? get<string>('base.shortcut_room', '') : '',
               ].filter((v) => !!v).length}
             >
               <ShortcutRecorder
-                value={get<string>('base.shortcut', 'CommandOrControl+Shift+A')}
-                defaultValue="CommandOrControl+Shift+A"
+                value={get<string>('base.shortcut', 'CommandOrControl+Shift+V')}
+                defaultValue="CommandOrControl+Shift+V"
                 onChange={handleShortcutChange}
               />
               <ShortcutRecorder
-                value={get<string>('base.shortcut_nana', 'CommandOrControl+Shift+Q')}
-                defaultValue="CommandOrControl+Shift+Q"
+                value={get<string>('base.shortcut_nana', 'CommandOrControl+Shift+N')}
+                defaultValue="CommandOrControl+Shift+N"
                 onChange={handleNanaShortcutChange}
                 labelKey="config.field_shortcut_nana"
                 helpKey="config.shortcut_nana_help"
               />
               <ShortcutRecorder
-                value={get<string>('base.shortcut_broadcast', 'CommandOrControl+Shift+Z')}
-                defaultValue="CommandOrControl+Shift+Z"
+                value={get<string>('base.shortcut_broadcast', 'CommandOrControl+Shift+B')}
+                defaultValue="CommandOrControl+Shift+B"
                 onChange={handleBroadcastShortcutChange}
                 labelKey="config.field_shortcut_broadcast"
                 helpKey="config.shortcut_broadcast_help"
@@ -2771,8 +2787,8 @@ const ConfigWindow: React.FC = () => {
                 helpKey="config.shortcut_settings_help"
               />
               <ShortcutRecorder
-                value={get<string>('base.shortcut_memory', 'CommandOrControl+Shift+N')}
-                defaultValue="CommandOrControl+Shift+N"
+                value={get<string>('base.shortcut_memory', 'CommandOrControl+Shift+M')}
+                defaultValue="CommandOrControl+Shift+M"
                 onChange={handleMemoryShortcutChange}
                 labelKey="config.field_shortcut_memory"
                 helpKey="config.shortcut_memory_help"
@@ -2784,6 +2800,14 @@ const ConfigWindow: React.FC = () => {
                 labelKey="config.field_shortcut_room"
                 helpKey="config.shortcut_room_help"
               />}
+              <ShortcutRecorder
+                value={get<string>('base.shortcut_screen_analyze', 'Control+LeftAlt+A')}
+                defaultValue="Control+LeftAlt+A"
+                onChange={handleScreenAnalyzeShortcutChange}
+                distinguishAltSides
+                labelKey="config.field_shortcut_screen_analyze"
+                helpKey="config.shortcut_screen_analyze_help"
+              />
             </ShortcutsDrawer>
 
           </>
@@ -2889,6 +2913,7 @@ const ConfigWindow: React.FC = () => {
       case 'companion':
         return (
           <>
+            <CompanionSettings language={i18n.language} get={get} set={setNested} />
             {/* ── 内心独白 + 主动问候（合并分组，便于联动）── */}
             <div style={{ ...sectionTitleStyle, marginTop: 24 }}>
               {t('config.section_world_monologue')}
@@ -6858,7 +6883,7 @@ const ConfigWindow: React.FC = () => {
                 )},
                 { label: t('config.about_contact'), value: 'spacervallam@gmail.com' },
                 ...(osInfo ? [{ label: t('config.about_os'), value: osInfo }] : []),
-              ].map((row, i) => (
+              ].map((row) => (
                 <div key={row.label} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 0', borderBottom: '1px solid var(--panel-border)' }}>
                   <span style={{ fontSize: 13, color: 'var(--panel-text-secondary)' }}>{row.label}</span>
                   <span style={{ fontSize: 13, color: 'var(--panel-text)', textAlign: 'right' }}>{row.value}</span>

@@ -212,16 +212,18 @@ impl Runnable for MemoryRetrievalStep {
             return Ok(state.to_json());
         }
 
+        let mut retrieval_budget = crate::memory::retrieval_budget::Budget::new(std::time::Duration::from_millis(1800));
         let retrieval_query = Self::build_retrieval_query(&state);
 
         let strategy = self.strategy.unwrap_or(RetrievalStrategy::Auto);
         let strategy_name = format!("{:?}", strategy);
         // 兼容旧库：原先的 OS/话题/工具记录可能占据候选位，先多取再按陪伴记忆边界过滤。
         let limit = 24;
-        let items = self
-            .memory
-            .search_memories(&retrieval_query, strategy, limit)
-            .await?;
+        let items = match retrieval_budget.run("base", std::time::Duration::from_millis(900),
+            || self.memory.search_memories(&retrieval_query, strategy, limit)).await {
+            Some(Ok(items)) => items,
+            result => { tracing::warn!(?result, "[MemoryRetrieval] base arm unavailable; continuing without fabricated recall"); Vec::new() }
+        };
 
         // 过滤掉与当前用户输入相同的记忆条目：
         // UserMemorySaving（步骤2）刚将当前输入写入 ShortTerm，
@@ -284,11 +286,8 @@ impl Runnable for MemoryRetrievalStep {
                     let query = format!("关联话题：{}", expanded.join("、"));
                     // 控制补充量：多跳结果追加在基础结果之后，限制条数避免挤占 token 预算，
                     // 且能让这些关联记忆自然进入后续截断窗口（总条数 ≤ 5 + 4）。
-                    let extra = self
-                        .memory
-                        .search_memories(&query, strategy, 4)
-                        .await
-                        .unwrap_or_default();
+                    let extra = retrieval_budget.run("query_expansion", std::time::Duration::from_millis(200),
+                        || self.memory.search_memories(&query, strategy, 4)).await.and_then(Result::ok).unwrap_or_default();
                     // 按 id 去重合并，避免与基础检索结果重复
                     let existing: std::collections::HashSet<&str> =
                         filtered_items.iter().map(|m| m.id.as_str()).collect();
@@ -360,11 +359,8 @@ impl Runnable for MemoryRetrievalStep {
             .collect();
         if !reexpand_seeds.is_empty() {
             let query = format!("关联主题：{}", reexpand_seeds.join("、"));
-            let extra = self
-                .memory
-                .search_memories(&query, strategy, 4)
-                .await
-                .unwrap_or_default();
+            let extra = retrieval_budget.run("result_expansion", std::time::Duration::from_millis(200),
+                || self.memory.search_memories(&query, strategy, 4)).await.and_then(Result::ok).unwrap_or_default();
             let existing: std::collections::HashSet<&str> =
                 filtered_items.iter().map(|m| m.id.as_str()).collect();
             let to_add: Vec<_> = extra
@@ -426,13 +422,9 @@ impl Runnable for MemoryRetrievalStep {
         if let Some(router) = &self.router {
             if filtered_items.len() > 2 {
                 let llm_ref: Arc<dyn crate::memory::verifier::VerifierLlmClient> = router.clone();
-                let result = crate::memory::verifier::verify_retrieval(
-                    &filtered_items,
-                    &state.user_input,
-                    Some(&llm_ref),
-                )
-                .await;
-                if !result.skipped {
+                let result = retrieval_budget.run("verifier", std::time::Duration::from_millis(400), ||
+                    crate::memory::verifier::verify_retrieval(&filtered_items, &state.user_input, Some(&llm_ref))).await;
+                if let Some(result) = result.filter(|result| !result.skipped) {
                     tracing::debug!(
                         "[MemoryRetrievalStep] verifier 过滤：{} → {} 条",
                         filtered_items.len(),
@@ -491,52 +483,23 @@ impl Runnable for MemoryRetrievalStep {
         for (index, mem) in filtered_items.iter().enumerate() {
             // Give the strongest two episodes room for context, while retaining the total budget.
             let content = crate::utils::truncate_chars(&mem.content, if index < 2 { 800 } else { 180 });
-            // 如果内容已有 [X says to Y] 说话者前缀，则不再额外添加 "User: "/"AI: " 标签
-            let (_, has_spk_prefix, _) = parse_any_speaker_prefix(&content);
-            let has_speaker_prefix = has_spk_prefix.is_some();
-            // 遍历 tags 查找角色归属（兼容 LongTerm 的 [mem_type, subject] 与 ShortTerm 的 [short_term, user/assistant, emo]）
-            let role_prefix = if !has_speaker_prefix
-                && mem.tags.iter().any(|t| t.eq_ignore_ascii_case("user"))
-                && !content.starts_with("User: ")
-            {
-                "User: "
-            } else if !has_speaker_prefix
-                && mem
-                    .tags
-                    .iter()
-                    .any(|t| t.eq_ignore_ascii_case("assistant") || t.eq_ignore_ascii_case("vivian"))
-                && !content.starts_with("AI: ")
-            {
-                "AI: "
-            } else {
-                ""
-            };
             let authored_context = is_authored_context(mem);
-            let type_label = if authored_context {
-                "角色预设；非真实共同经历"
-            } else if mem
-                .tags
-                .iter()
-                .any(|t| t.eq_ignore_ascii_case("long_term"))
-                || mem.granularity.eq_ignore_ascii_case("LongTerm")
-            {
-                "印象"
-            } else if mem
-                .tags
-                .iter()
-                .any(|t| t.eq_ignore_ascii_case("short_term"))
-                || mem.granularity.eq_ignore_ascii_case("ShortTerm")
-            {
-                "近期"
-            } else {
-                "已读"
+            let type_label = if authored_context { "角色预设；非真实共同经历" }
+                else { crate::memory::provenance::recall_label(&mem.metadata) };
+            let mut attribution = crate::memory::provenance::attribution(&mem.metadata);
+            if let Some(timestamp) = mem.metadata["source_timestamp"].as_f64().filter(|t| t.is_finite() && *t > 0.0) {
+                attribution.push_str(&format!("；原话时间：{}", crate::utils::prompt_time::format_prompt_time(timestamp)));
+            }
+            let content = if mem.metadata["utterance_format"] == "plain" { content } else {
+                parse_any_speaker_prefix(&content).0
             };
+            let role_prefix = if attribution.is_empty() { String::new() } else { format!("{}：", attribution) };
+            // Escape retrieved text; it remains evidence inside the retrieval data boundary.
+            let content = content.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
             let time = if authored_context {
                 "预置背景".to_owned()
             } else {
-                chrono::DateTime::from_timestamp(mem.timestamp as i64, 0)
-                    .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
-                    .unwrap_or_else(|| "unknown".to_string())
+                crate::utils::prompt_time::format_prompt_time(mem.timestamp)
             };
             let stale_hint = staleness_text(mem.timestamp, now)
                 .map(|s| format!(" [{}]", s))
@@ -685,6 +648,21 @@ impl Runnable for MemoryRetrievalStep {
         state.metadata["memory_graph_concept"] = json!(graph_concept_applied);
         state.metadata["memory_result_reexpand"] = json!(result_reexpand_applied);
 
+        // Separate external user evidence: never feed these into the character's
+        // episodic memories, attention history, visit counters or fact extraction.
+        let embedding = self.memory.embedding();
+        let query = retrieval_query.clone();
+        match retrieval_budget.run("quick_notes", std::time::Duration::from_millis(150), ||
+            tokio::task::spawn_blocking(move || crate::user_quick_notes::search(&query, 3, Some(embedding)))).await {
+            Some(Ok(Ok(notes))) => {
+                state.memory_text.push_str(&crate::user_quick_notes::context(&notes));
+                state.memory_vars["_user_quick_notes"] = json!(notes);
+            }
+            result => tracing::debug!(?result, "用户随手记检索跳过或失败，继续角色记忆检索结果"),
+        }
+
+        state.metadata["memory_retrieval_timing"] = retrieval_budget.report();
+        tracing::debug!(timing=?state.metadata["memory_retrieval_timing"], "[MemoryRetrieval] stage timing");
         Ok(state.to_json())
     }
 }

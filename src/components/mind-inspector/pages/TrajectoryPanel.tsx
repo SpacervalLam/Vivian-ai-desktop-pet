@@ -152,7 +152,7 @@ export class TrajectorySearchIndex {
   private readonly entries = new Map<number, SearchEntry>();
 
   /** 增量同步当前记录流，返回索引是否发生变化。 */
-  update(records: readonly TrajectoryRecord[], toolLabel: (name: string) => string): boolean {
+  update(records: readonly TrajectoryRecord[], _toolLabel: (name: string) => string): boolean {
     const seen = new Set<number>();
     let changed = false;
     for (const record of records) {

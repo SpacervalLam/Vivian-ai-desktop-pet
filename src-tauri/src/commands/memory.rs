@@ -274,6 +274,15 @@ pub async fn clear_all_memories(
     let char_id = character.id.clone();
     let char_data_dir = path::get_character_data_dir(&char_id);
 
+    // Stop queued extraction throughout reset so pending work cannot restore cleared facts.
+    let _extraction_guard = if let Some(chain) = &character.brain.chat_chain {
+        let guard = chain.auto_extractor.pause_queue().await;
+        chain.auto_extractor.clear_pending()?;
+        guard
+    } else { None };
+    let summary_serial = character.brain.chat_chain.as_ref().map(|chain| chain.conversation_archive.read().serial());
+    let _summary_guard = if let Some(serial) = &summary_serial { Some(serial.lock().await) } else { None };
+
     // ===== 1. 记忆-关系层（原有清空逻辑）=====
     character
         .brain

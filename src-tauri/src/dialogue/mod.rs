@@ -7,6 +7,7 @@
 //!   不再全量重写整个文件；只读取当前 JSONL 存储
 
 pub mod history;
+pub mod jsonl_index;
 pub mod intent_judge;
 pub mod strategy;
 
@@ -128,6 +129,7 @@ pub struct DialogueManager {
     jsonl_ready: Mutex<bool>,
     /// 串行化追加、清空和元数据修补，避免整文件重写覆盖新消息。
     history_io: Mutex<()>,
+    history_index: Mutex<Option<jsonl_index::HistoryIndex>>,
     pub conversation_boundaries: crate::memory::conversation_semantics::ConversationBoundaryStore,
 }
 
@@ -147,6 +149,7 @@ impl DialogueManager {
             recorded_utterances: Mutex::new(std::collections::HashSet::new()),
             jsonl_ready: Mutex::new(false),
             history_io: Mutex::new(()),
+            history_index: Mutex::new(None),
             conversation_boundaries: crate::memory::conversation_semantics::ConversationBoundaryStore::new(
                 crate::utils::path::get_companion_data_dir(char_id).join("history").join("conversation_boundaries.json")),
         }
@@ -297,6 +300,7 @@ impl DialogueManager {
     /// 用于图片消息等需要在 HistoryEntry.metadata 中附加 `kind`/`image_path` 的场景。
     /// 自定义字段会合并到默认 `{"source":"chat"}` 之上（同名键覆盖）。
     pub fn add_message_with_metadata(&self, msg: ChatMessage, mut metadata: serde_json::Value) {
+        if metadata.is_object() { metadata["utterance_format"] = serde_json::json!("plain"); }
         let utterance_id = metadata.get("utterance_id").and_then(|id| id.as_str()).filter(|id| !id.is_empty())
             .map(str::to_string).or_else(|| metadata.get("speaker").and_then(|speaker| speaker.as_str())
                 .and_then(crate::cross_character::current_utterance_id));
@@ -321,6 +325,7 @@ impl DialogueManager {
             }
         }
         if let Some(sticker)=metadata.get("sticker").and_then(|s|serde_json::from_value(s.clone()).ok()){meta.sticker=Some(sticker);}
+        meta.communication = Some(crate::messages::CommunicationContext::from_metadata(&metadata, &self.char_id));
         // 最终生效的 channel：优先用 msg 自带的，否则用 current_channel
         let effective_channel = meta.channel.clone().unwrap_or_else(|| default_channel.clone());
 
@@ -524,6 +529,7 @@ impl DialogueManager {
         }
         let mut file = fs::OpenOptions::new()
             .create(true)
+            .read(true)
             .append(true)
             .open(&path)?;
         let mut buf = String::with_capacity(lines.iter().map(|l| l.len() + 1).sum());
@@ -532,6 +538,12 @@ impl DialogueManager {
             buf.push('\n');
         }
         let original_len = file.metadata()?.len();
+        let original_modified = jsonl_index::file_modified(&path);
+        if original_len > 0 {
+            file.seek(SeekFrom::End(-1))?;
+            let mut last = [0u8; 1]; file.read_exact(&mut last)?;
+            if last[0] != b'\n' { buf.insert(0, '\n'); }
+        }
         if let Err(e) = file.write_all(buf.as_bytes()).and_then(|_| file.sync_all()) {
             tracing::error!("刷新缓冲区失败: {}", e);
             // 回滚部分写入；缓冲区及去重缓存只在成功后提交。
@@ -540,6 +552,10 @@ impl DialogueManager {
         }
         *self.written_tail.lock() = tail;
         pending.clear();
+        let mut index = self.history_index.lock();
+        if let Some(index) = index.as_mut() {
+            if let Err(error) = index.appended(&path, original_len, original_modified) { tracing::warn!("[Dialogue] append index update failed: {error}"); }
+        } else { *index = Some(jsonl_index::HistoryIndex::restore(&path)); }
         tracing::debug!("已追加 {} 条消息到磁盘", messages_to_write.len());
         Ok(())
     }
@@ -703,6 +719,8 @@ impl DialogueManager {
         self.buffer.lock().clear();
         self.messages.lock().clear();
         self.recorded_utterances.lock().clear();
+        *self.history_index.lock() = None;
+        let _ = std::fs::remove_file(self.history_jsonl_file().with_extension("offsets.json"));
         self.conversation_boundaries.clear()?;
         *self.written_tail.lock() = Vec::new();
         Ok(())
@@ -727,12 +745,36 @@ impl DialogueManager {
 
     /// 从磁盘加载历史到内存（用于上下文构建，截断到 max_history_len）
     pub fn load_history(&mut self) -> VivianResult<()> {
-        let entries = self.read_all_messages();
-        self.recorded_utterances.lock().extend(entries.iter().filter_map(|entry|
-            entry.metadata.get("utterance_id").and_then(|id| id.as_str()).map(str::to_string)));
+        let entries = self.get_recent_messages(self.max_history_len);
+        {
+            let index = self.history_index.lock();
+            if let Some(index) = index.as_ref() { self.recorded_utterances.lock().extend(index.utterances().map(str::to_owned)); }
+        }
         let chat_messages: Vec<ChatMessage> = entries
             .into_iter()
-            .map(|e| {
+            .map(|e| self.restore_message(e))
+            .collect();
+
+        let len = chat_messages.len();
+        let mut msgs = self.messages.lock();
+        if len > self.max_history_len {
+            *msgs = chat_messages[len - self.max_history_len..].to_vec();
+        } else {
+            *msgs = chat_messages;
+        }
+        // 修复从磁盘加载的对话中可能存在的孤立 tool_call
+        let repairs = crate::conversation::integrity::ConversationIntegrity::repair(&mut msgs);
+        if !repairs.is_empty() {
+            tracing::info!(
+                "[DialogueManager] 加载历史时对话完整性修复：修复了 {} 个孤立的 tool_call",
+                repairs.len()
+            );
+        }
+        tracing::debug!("已加载 {} 条对话历史", msgs.len());
+        Ok(())
+    }
+
+    fn restore_message(&self, e: HistoryEntry) -> ChatMessage {
                 let ts = chrono::DateTime::from_timestamp(e.timestamp as i64, 0)
                     .map(|dt| dt.with_timezone(&chrono::Local));
                 // 从 HistoryEntry.metadata 恢复消息标记（channel + kind）
@@ -754,6 +796,9 @@ impl DialogueManager {
                     (None, Some(k)) => Some(crate::messages::MessageMeta::user().with_kind(k)),
                     (None, None) => None,
                 };
+                let mut meta = meta.unwrap_or_default();
+                meta.communication = Some(crate::messages::CommunicationContext::from_metadata(&e.metadata, &self.char_id));
+                let meta = Some(meta);
                 let sticker = e.metadata.get("sticker").and_then(|s|serde_json::from_value(s.clone()).ok());
                 let meta = if sticker.is_some() {let mut m=meta.unwrap_or_default();m.sticker=sticker;Some(m)}else{meta};
                 ChatMessage {
@@ -766,25 +811,37 @@ impl DialogueManager {
                     reasoning: None,
                     meta,
                 }
-            })
-            .collect();
+    }
 
-        let len = chat_messages.len();
-        let mut msgs = self.messages.lock();
-        if len > self.max_history_len {
-            *msgs = chat_messages[len - self.max_history_len..].to_vec();
-        } else {
-            *msgs = chat_messages;
+    /// A queued turn may have survived the last two seconds of buffered history.
+    /// Restore only IDs absent from both the JSONL index and the unflushed buffer.
+    pub fn recover_extraction_sources(&self, sources: &[crate::memory::extraction_queue::SourceTurn]) -> VivianResult<()> {
+        let mut restored = Vec::new();
+        {
+            let _io = self.history_io.lock();
+            let path = self.history_jsonl_file();
+            let mut cached = self.history_index.lock();
+            let index = cached.get_or_insert_with(|| jsonl_index::HistoryIndex::restore(&path)); index.refresh(&path)?;
+            let mut pending = self.buffer.lock();
+            for source in sources {
+                if index.contains(&source.id) || pending.iter().any(|entry| entry.id == source.id) { continue; }
+                let entry = HistoryEntry { id: source.id.clone(), role: source.role.clone(), content: source.content.clone(), timestamp: source.timestamp,
+                    session_id: source.session_id.clone(), metadata: source.metadata.clone() };
+                pending.push(entry.clone()); restored.push(entry);
+            }
         }
-        // 修复从磁盘加载的对话中可能存在的孤立 tool_call
-        let repairs = crate::conversation::integrity::ConversationIntegrity::repair(&mut msgs);
-        if !repairs.is_empty() {
-            tracing::info!(
-                "[DialogueManager] 加载历史时对话完整性修复：修复了 {} 个孤立的 tool_call",
-                repairs.len()
-            );
+        if !restored.is_empty() {
+            self.flush_buffer()?;
+            let mut messages = self.messages.lock();
+            for entry in restored {
+                self.recorded_utterances.lock().insert(entry.id.clone());
+                messages.push(self.restore_message(entry));
+            }
+            messages.sort_by_key(|message| message.timestamp);
+            let excess = messages.len().saturating_sub(self.max_history_len); messages.drain(..excess);
+            drop(messages);
+            if let Some(app) = self.app_handle.lock().as_ref() { let _ = app.emit("dialogue:changed", serde_json::json!({"character_id": self.char_id})); }
         }
-        tracing::debug!("已加载 {} 条对话历史", msgs.len());
         Ok(())
     }
 
@@ -847,30 +904,45 @@ impl DialogueManager {
     /// 数据源与 get_all_history 一致：磁盘 + 未落盘 buffer 合并去重，
     /// 避免 2s 缓冲窗口内主页/会话视图预览落后于真实最新一条。
     pub fn get_messages_paginated(&self, offset: usize, limit: usize) -> (Vec<HistoryEntry>, bool) {
-        let all = self.get_all_history().unwrap_or_default();
-        let total = all.len();
-        if offset >= total {
-            return (Vec::new(), false);
-        }
-        let end = (offset + limit).min(total);
-        let result = all[offset..end].to_vec();
-        let has_more = end < total;
-        (result, has_more)
+        self.indexed_page(offset, limit, false)
     }
 
-    /// 检查指定偏移之后是否还有更多消息
+    fn indexed_page(&self, offset: usize, limit: usize, recent: bool) -> (Vec<HistoryEntry>, bool) {
+        let _io = self.history_io.lock();
+        self.ensure_jsonl_ready();
+        let pending = self.buffer.lock().clone();
+        let path = self.history_jsonl_file();
+        let mut cached = self.history_index.lock();
+        let index = cached.get_or_insert_with(|| jsonl_index::HistoryIndex::restore(&path));
+        if let Err(error) = index.refresh(&path) { tracing::warn!("[Dialogue] history index refresh failed: {error}"); return (Vec::new(), false); }
+        match index.page(&path, &pending, offset, limit, recent) {
+            Ok((rows, more, bytes)) => { tracing::debug!(rows=rows.len(), body_bytes=bytes, "[Dialogue] indexed history page"); (rows, more) }
+            Err(error) => { tracing::warn!("[Dialogue] history page failed: {error}"); (Vec::new(), false) }
+        }
+    }
+
+    pub fn history_page_before(&self, before: Option<&str>, limit: usize, channel: Option<&str>) -> VivianResult<(Vec<HistoryEntry>, bool)> {
+        let _io = self.history_io.lock(); let pending = self.buffer.lock().clone(); let path = self.history_jsonl_file();
+        let mut cached = self.history_index.lock(); let index = cached.get_or_insert_with(|| jsonl_index::HistoryIndex::restore(&path)); index.refresh(&path)?;
+        let (rows, more, _) = index.page_scoped(&path, &pending, 0, limit.min(1000), true, before, channel)?;
+        Ok((rows, more))
+    }
+    pub fn history_preview(&self, channel: &str, watermark: Option<f64>) -> VivianResult<(Option<HistoryEntry>, usize)> {
+        let _io = self.history_io.lock(); let pending = self.buffer.lock().clone(); let path = self.history_jsonl_file();
+        let mut cached = self.history_index.lock(); let index = cached.get_or_insert_with(|| jsonl_index::HistoryIndex::restore(&path)); index.refresh(&path)?;
+        let count = watermark.map_or(0, |t| index.unread(&pending,channel,t));
+        let scope = format!("{channel}_exact");
+        let (mut rows, _, _) = index.page_scoped(&path, &pending, 0, 1, true, None, Some(&scope))?;
+        Ok((rows.pop(), count))
+    }
+
     pub fn has_more_messages(&self, offset: usize) -> bool {
-        let all = self.get_all_history().unwrap_or_default();
-        offset < all.len()
+        !self.indexed_page(offset, 1, false).0.is_empty()
     }
 
-    /// 获取最近 N 条消息（窗口打开时加载）
+    /// Read only the recent bodies, merging unflushed entries in timestamp order.
     pub fn get_recent_messages(&self, n: usize) -> Vec<HistoryEntry> {
-        let all = self.get_all_history().unwrap_or_default();
-        if all.len() <= n {
-            return all;
-        }
-        all[all.len() - n..].to_vec()
+        self.indexed_page(0, n, true).0
     }
 
     /// 获取历史消息总数
@@ -1247,5 +1319,28 @@ mod tests {
         mgr.add_message(ChatMessage::user("buffer test"));
         let buf = mgr.buffer.lock();
         assert_eq!(buf.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod companion_optimization_tests {
+    use super::*;
+    #[test]
+    fn queued_source_recovery_keeps_ids_and_previews_include_unflushed_turns() {
+        let id=format!("history-optimization-{}",uuid::Uuid::new_v4()); let mut dialogue=DialogueManager::new(3,&id);
+        let source=crate::memory::extraction_queue::SourceTurn {id:"original-source".into(),role:"user".into(),content:"崩溃前的原话".into(),timestamp:1.0,session_id:Some("session".into()),metadata:serde_json::json!({"utterance_id":"original-source","speaker":"user","channel":"wechat"})};
+        dialogue.recover_extraction_sources(&[source.clone()]).unwrap(); dialogue.recover_extraction_sources(&[source]).unwrap();
+        assert_eq!(dialogue.get_all_history().unwrap().len(),1);
+        dialogue.add_message_with_metadata(ChatMessage::assistant("还没刷新到磁盘的回复"),serde_json::json!({"utterance_id":"reply","speaker":id,"channel":"wechat"}));
+        let (latest,unread)=dialogue.history_preview("wechat",Some(0.0)).unwrap(); assert_eq!(latest.unwrap().id,"reply");assert_eq!(unread,1);
+        dialogue.force_flush().unwrap(); dialogue.load_history().unwrap(); assert_eq!(dialogue.get_history().len(),2);
+        let (rows,more)=dialogue.history_page_before(Some("reply"),20,Some("wechat")).unwrap(); assert_eq!(rows[0].id,"original-source");assert!(!more);
+    }
+    #[test]
+    fn append_after_damaged_tail_does_not_lose_new_turns() {
+        let id=format!("history-tail-{}",uuid::Uuid::new_v4()); let dialogue=DialogueManager::new(3,&id);
+        std::fs::write(dialogue.history_jsonl_file(),"broken partial line").unwrap();
+        dialogue.add_message(ChatMessage::user("新的消息"));dialogue.force_flush().unwrap();
+        assert_eq!(dialogue.get_recent_messages(3)[0].content,"新的消息");
     }
 }

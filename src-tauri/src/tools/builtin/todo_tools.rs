@@ -494,11 +494,24 @@ pub async fn handle_task_trigger(task: ScheduledTask, tool_system: Arc<ToolSyste
             let character_id = if task.char_id.is_empty() { state.active_character_id.read().clone() } else { task.char_id.clone() };
             let language = state.config.read().get_all().base.language;
             let context = crate::brain::reminder_delivery::ReminderContext::new(task.scheduled_time, crate::brain::scheduler::now_ts_public(), &task.delivery);
-            let text = context.wording(task.message.as_deref().unwrap_or("定时提醒"), &character_id, &language);
+            let mut text = context.wording(task.message.as_deref().unwrap_or("定时提醒"), &character_id, &language);
+            if let Some(advance) = task.metadata["advance_minutes"].as_u64().filter(|n| *n > 0) {
+                text.push_str(&if language.starts_with("zh") { format!("（提前 {advance} 分钟提醒）") }
+                    else if language.starts_with("ja") { format!("（{advance}分前のお知らせ）") }
+                    else { format!(" ({advance} minutes ahead)") });
+            }
             let (delivery_id, receipt) = crate::brain::reminder_delivery::register_receipt();
+            let notice = match state.scheduler.record_reminder_notice(&task, character_id.clone(), text.clone(), delivery_id.clone()) {
+                Ok(notice) => notice,
+                Err(error) => { crate::brain::reminder_delivery::discard_receipt(&delivery_id); return Err(error); }
+            };
+            if notice.acknowledged_at.is_some() {
+                crate::brain::reminder_delivery::discard_receipt(&delivery_id);
+                return Ok(text);
+            }
             let emitted = app_handle.emit("reminder:deliver", json!({
                 "delivery_id":delivery_id, "task_id":task.id, "character_id":character_id,
-                "content":text, "context":context,
+                "content":text, "context":context, "notice":notice,
             }));
             let accepted = if emitted.is_ok() {
                 matches!(tokio::time::timeout(std::time::Duration::from_secs(8), receipt).await, Ok(Ok(())))

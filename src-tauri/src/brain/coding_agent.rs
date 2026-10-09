@@ -50,7 +50,7 @@ pub const CODING_CONTEXT_WINDOW: usize = 1_000_000;
 /// - `standard`：功能完整档，逐轮 LLM 决策调用 6 个编程工具（默认）
 /// - `code`：程序化编排档（Code Mode 精髓），模型一次输出多步"程序"
 ///   （JSON 步骤序列），Rust 顺序执行不再逐步回询 LLM，末尾总结
-/// - `minimal`：极简档（仅 run_command + edit_file，读取用 Get-Content）
+/// - `minimal`：精简执行档，支持本地读写、记忆检索和联网查证
 pub const CODING_MODES: &[&str] = &["standard", "code", "minimal"];
 
 /// 编程智能体可用的工具白名单（LLM 每轮只看到这些工具）。
@@ -100,15 +100,10 @@ pub const WORK_WEB_BROWSER_TOOLS: &[&str] = &["mcp__browser__task_tab","mcp__bro
 pub const CODE_MODE_MAX_STEPS: usize = 16;
 
 /// /compact 压缩后保留的最近消息条数（其余部分被摘要替换进上下文）。
-const COMPACT_KEEP_MESSAGES: usize = 24;
-/// 单次摘要最多处理这么多旧消息，避免异常长的持久化历史塞进一次摘要请求。
-const COMPACT_MAX_MESSAGES: usize = 24;
+const COMPACT_KEEP_MESSAGES: usize = super::coding_compaction::KEEP_RECENT;
 /// /compact 可压缩的最小消息条数（不足则提示无需压缩）。
-const COMPACT_MIN_MESSAGES: usize = 8;
-/// 上下文占用达到窗口上限的该百分比时，自动压缩早期历史（防止请求超窗失败）。
-const AUTO_COMPACT_THRESHOLD_PCT: u64 = 75;
+const COMPACT_MIN_MESSAGES: usize = super::coding_compaction::MIN_ARCHIVE;
 /// 持久化时保留的会话数量上限（按最近更新排序后取前 N 个）。
-const PERSIST_MAX_SESSIONS: usize = 30;
 /// /compact 旧历史摘要的系统提示词。
 const COMPACT_SYSTEM_PROMPT: &str = "你是对话历史压缩器。把下面这段编程会话历史压缩成一份简洁但信息完整的中文摘要，保留：已解决的问题、关键文件路径、做出的改动、当前任务进展、遗留待办。不要复述每条工具输出细节，优先保留原始目标、最新纠正、权限边界、未完成项、阻塞原因、已运行的验证及结果、下一步；区分事实和计划，不将未完成工作写成完成。简洁但不为字数丢掉这些关键信息，直接输出摘要正文。";
 
@@ -118,19 +113,15 @@ const PROJECT_MEMORY_FILE: &str = "memory.md";
 const PROJECT_MEMORY_DIR: &str = ".vivian";
 /// 旧版项目记忆在应用数据目录下的存储目录（仅迁移用，不再新写）。
 const CODING_MEMORY_DIR: &str = "coding_memory";
-/// 项目记忆注入 system prompt 的最大字符数（超长保留尾部——最新沉淀的条目）。
-const PROJECT_MEMORY_MAX_CHARS: usize = 8000;
 /// memory.md 首次创建时写入的文件头（说明用途与维护方式）。
 const PROJECT_MEMORY_HEADER: &str = "# 项目记忆\n\n\
     > 本文件由桌面编程智能体跨会话自动维护，沉淀对应工作目录项目的约定、结构与经验教训。\n\
-    > 存储在工作区 `.vivian/` 目录（项目级，随项目走）；每次新会话自动注入上下文。\n\
+    > 存储在工作区 `.vivian/` 目录（项目级，随项目走）；模型先看导航，再按需读取原文。\n\
     > 可用 /memory 查看、/memory 提炼 归纳、/memory <内容> 手动追加。\n";
 /// 项目记忆提炼的 system prompt（/memory 提炼 与 /compact 归档沉淀共用）。
-const MEMORY_DISTILL_SYSTEM_PROMPT: &str = "你是项目记忆沉淀模块。从一段编程会话历史中提炼**跨会话仍然有效**的项目知识：项目结构与关键路径、构建/测试命令、代码约定、踩过的坑与解法、用户偏好。只输出新增条目（markdown 无序列表，每条一行、简洁具体），只保留用户明确表达或工具证实的信息，不把猜测或一次性任务当长期偏好；密码、Token、密钥等秘密一律替换为 [REDACTED_SECRET]，不要保存其片段。与已有记忆重复的不要输出；发现旧条目冲突时明确指出被纠正的旧事实及新事实，不伪装成两条并存的约定；没有值得沉淀的内容就输出空。不要输出标题、前言或总结。";
-/// 项目记忆超过该行数时，提炼改为全文重写合并去重（防追加式无限膨胀）。
+const MEMORY_DISTILL_SYSTEM_PROMPT: &str = "你是项目记忆沉淀模块。从一段编程会话历史中提炼**跨会话仍然有效**的项目知识：项目结构与关键路径、构建/测试命令、代码约定、踩过的坑与解法、用户偏好。按指定 JSON 结构输出新增条目，每条简洁具体，只保留用户明确表达或工具证实的信息，不把猜测或一次性任务当长期偏好；密码、Token、密钥等秘密一律替换为 [REDACTED_SECRET]，不要保存其片段。与已有记忆重复的不要输出；发现旧条目冲突时明确指出被纠正的旧事实及新事实，不伪装成两条并存的约定；没有值得沉淀的内容就输出 []。不要输出标题、前言或总结。";
+/// 超过该行数时由程序去除同分节内完全相同的普通条目，保留约定和来源。
 const PROJECT_MEMORY_MERGE_LINES: usize = 100;
-/// 项目记忆全文重写的 system prompt（超阈值合并去重）。
-const MEMORY_REWRITE_SYSTEM_PROMPT: &str = "你是项目记忆整理模块。当前项目记忆过长，请把它与会话历史中的新知识合并，重写为一份精简的记忆文件：合并重复条目、删除过时或一次性内容、按主题分节组织（如 项目结构 / 构建与命令 / 代码约定 / 经验教训 / 用户偏好）。以最新明确纠正替换旧结论；不确定的冲突标为待核实，不擅自择一。只保留有依据且仍然有效的信息，删除猜测和一次性状态；密码、Token、密钥等秘密一律替换为 [REDACTED_SECRET]，不保留片段。每条一行、简洁具体。直接输出重写后的 markdown 正文，不要输出文件标题、前言或总结。";
 /// /plan 开启计划模式时注入的上下文策略。
 const PLAN_MODE_POLICY: &str = "\n# 计划模式（当前已开启）\n\
     你现在处于**计划模式**：先用只读研究（list_dir / grep_search / read_file）理解问题并制定方案。\
@@ -159,7 +150,7 @@ const SCOPE_DISCIPLINE: &str = "\n\n# 范围纪律（不要缩小交付）\n\
 /// 按模式过滤工具集。
 fn tools_for_mode(mode: &str) -> Vec<&'static str> {
     match mode {
-        "minimal" => vec!["run_command", "edit_file", "web_search", "web_fetch"],
+        "minimal" => vec!["run_command", "edit_file", "read_file", "grep_search", "web_search", "web_fetch"],
         _ => CODING_TOOLS.to_vec(),
     }
 }
@@ -432,6 +423,14 @@ pub struct CodingSession {
     /// 列出文件名可靠得多。这份数据只面向界面，不进 LLM 上下文。
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub message_changes: HashMap<usize, Vec<CodingFileChangeView>>,
+    #[serde(default = "default_history_loaded")]
+    pub history_loaded: bool,
+    #[serde(default)]
+    pub stored_message_count: usize,
+    #[serde(default)]
+    pub last_reply_preview: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search_excerpt: Option<String>,
     pub messages: Vec<CodingMessage>,
     pub status: CodingStatus,
     /// 最近更新时间，**毫秒**时间戳（与 `CodingMessage.timestamp` 一致）。
@@ -664,6 +663,8 @@ fn commit_compaction(
     }
     session.compacted = Some(summary);
     session.context_start = end;
+    // The previous API usage describes the pre-compaction request.
+    session.last_context_tokens = 0;
     Ok(())
 }
 
@@ -789,15 +790,126 @@ pub fn permission_to_access_level(permission: &str) -> crate::tools::types::Agen
 // 服务
 // ============================================================================
 
-/// 编程智能体服务：会话注册表 + agent loop 执行器。
+fn default_history_loaded() -> bool { true }
+impl CodingSession {
+    pub fn message_count(&self) -> usize { if self.history_loaded { self.messages.len() } else { self.stored_message_count } }
+}
+fn normalize_session(session: &mut CodingSession) {
+    if session.updated_at > 0 && session.updated_at < 100_000_000_000 { session.updated_at *= 1000; }
+    session.status = CodingStatus::Idle;
+}
+fn restored_session(mut session: CodingSession) -> CodingSession {
+    normalize_session(&mut session);
+    session.history_loaded = true;
+    session.stored_message_count = session.messages.len();
+    session
+}
+fn coding_session_head(session: &CodingSession) -> CodingSession {
+    let preview = session.messages.iter().rev().find(|message| message.role == CodingRole::Assistant && !message.content.trim().is_empty())
+        .map(|message| message.content.chars().take(1000).collect::<String>()).or_else(|| session.last_reply_preview.clone());
+    serde_json::from_value(serde_json::json!({
+        "session_id": session.session_id, "char_id": session.char_id, "delegated_by_companion": session.delegated_by_companion,
+        "working_directory": session.working_directory, "extra_workspaces": session.extra_workspaces,
+        "title": session.title, "mode": session.mode, "permission": session.permission,
+        "model_id": session.model_id, "reasoning_level": session.reasoning_level,
+        "messages": [], "history_loaded": false, "stored_message_count": session.message_count(),
+        "last_reply_preview": preview, "status": session.status, "updated_at": session.updated_at, "stats": session.stats
+    })).expect("valid session header")
+}
+fn session_cache_from_heads(heads: Vec<(String, CodingSession)>) -> super::coding_session_cache::Catalog<CodingSession> {
+    let dir = get_user_data_dir().join("coding_sessions");
+    super::coding_session_cache::Catalog::new(heads, move |id| super::coding_session_store::read_one(&dir, id).map(restored_session), coding_session_head)
+}
+fn session_cache_from_loaded(sessions: BTreeMap<String, CodingSession>) -> super::coding_session_cache::Catalog<CodingSession> {
+    let mut cache = session_cache_from_heads(Vec::new());
+    for (id, session) in sessions { cache.insert(id, session); }
+    cache
+}
+
+/// 编程智能体服务：轻量会话注册表 + 按需历史 + agent loop。
 pub struct CodingAgentService {
-    sessions: RwLock<BTreeMap<String, CodingSession>>,
+    sessions: RwLock<super::coding_session_cache::Catalog<CodingSession>>,
 }
 
 impl CodingAgentService {
+    /// One scheduler survives idle periods; up to two independent projects run
+    /// concurrently. Retry state is durable and project queues remain FIFO.
+    fn resume_project_memory_jobs(router: &ModelRouter) {
+        *PROJECT_MEMORY_ROUTER.write() = Some(router.clone());
+        PROJECT_MEMORY_WAKE.notify_one();
+        let router = router.clone();
+        tauri::async_runtime::spawn(async move {
+            let Ok(_worker) = PROJECT_MEMORY_WORKER.try_lock() else { return; };
+            let mut tasks = tokio::task::JoinSet::new();
+            let mut active = std::collections::HashSet::new();
+            let mut task_projects = HashMap::new();
+            loop {
+                let jobs = super::coding_memory_persistence::pending::<ProjectMemoryJob>(&project_memory_queue_dir());
+                let scheduling: Vec<_> = jobs.iter().map(|(_, job)|
+                    (project_memory_key(&job.working_directory), job.next_attempt_at, job.failed)).collect();
+                let now = chrono::Utc::now().timestamp_millis();
+                for index in super::coding_memory_queue::ready(&scheduling, &active, now, 2_usize.saturating_sub(tasks.len())) {
+                    let (path, mut job) = jobs[index].clone();
+                    let root = project_memory_key(&job.working_directory);
+                    active.insert(root.clone());
+                    let router = PROJECT_MEMORY_ROUTER.read().clone().unwrap_or_else(|| router.clone());
+                    let task = tasks.spawn(async move {
+                        let model = project_memory_model_lock(&job.working_directory);
+                        let _model = model.lock().await;
+                        if !path.exists() { return; }
+                        if !super::coding_memory_records::valid_id(&job.job_id) {
+                            job.job_id = memory_job_id(&job.working_directory, job.session_id.as_deref(), &job.messages);
+                        }
+                        let result = Self::distill_project_memory(&job.working_directory, &router, &job.messages,
+                            job.session_id.as_deref(), Some(&job.job_id)).await;
+                        match result {
+                            Ok(_) => {
+                                if let Err(e) = std::fs::remove_file(&path) {
+                                    tracing::warn!("[CodingAgent] 已提交记忆的队列收据清理失败: {e}");
+                                    // The in-memory delay prevents a busy loop if queue cleanup cannot write.
+                                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                                }
+                            }
+                            Err(e) => {
+                                job.failures = job.failures.saturating_add(1);
+                                job.failed = job.failures >= 8;
+                                job.next_attempt_at = super::coding_memory_records::retry_at(chrono::Utc::now().timestamp_millis(), job.failures);
+                                let ranges = crate::memory::redact::detect_pii(&e).into_iter().map(|s| (s.start, s.end)).collect();
+                                job.last_error = Some(truncate_chars(&super::coding_memory_navigation::redact_ranges(&e, ranges), 500));
+                                tracing::warn!("[CodingAgent] 记忆提炼失败，次数={}，暂停={}：{}", job.failures, job.failed, job.last_error.as_deref().unwrap_or(""));
+                                // Clear and retry commands use this same project lock.
+                                if path.exists() {
+                                    if let Err(e) = super::coding_memory_persistence::write_snapshot(&path, || &job) {
+                                        tracing::warn!("[CodingAgent] 保存记忆重试状态失败: {e}");
+                                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                                    }
+                                }
+                            }
+                        }
+                    });
+                    task_projects.insert(task.id(), root);
+                }
+                let delay = jobs.iter().filter(|(_, j)| !j.failed && j.next_attempt_at > now)
+                    .map(|(_, j)| j.next_attempt_at.saturating_sub(now)).min().unwrap_or(30_000).clamp(100, 30_000);
+                tokio::select! {
+                    result = tasks.join_next_with_id(), if !tasks.is_empty() => {
+                        let id = match result {
+                            Some(Ok((id, ()))) => Some(id),
+                            Some(Err(error)) => { tracing::warn!("[CodingAgent] 记忆任务异常退出: {error}"); Some(error.id()) },
+                            None => None,
+                        };
+                        if let Some(project) = id.and_then(|id| task_projects.remove(&id)) { active.remove(&project); }
+                    },
+                    _ = PROJECT_MEMORY_WAKE.notified() => {},
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(delay as u64)) => {},
+                }
+            }
+        });
+    }
+
     pub fn new() -> Self {
         let mut svc = Self {
-            sessions: RwLock::new(BTreeMap::new()),
+            sessions: RwLock::new(session_cache_from_loaded(BTreeMap::new())),
         };
         svc.load_from_disk();
         svc
@@ -808,48 +920,34 @@ impl CodingAgentService {
     }
 
     fn load_from_disk(&mut self) {
-        // 统一走 utils::fs —— 文件损坏时会把现场改名保留成 `.corrupt-<ts>` 再按
-        // 空态继续，而不是只打一行日志：否则用户看到的是「会话凭空全没了」，
-        // 现场也一并被下次写盘覆盖掉，无从排查。全项目其他状态文件都走这条路。
-        let path = Self::store_path();
-        let Some(mut list) = crate::utils::fs::load_json_or_backup::<Vec<CodingSession>>(&path) else {
-            return;
-        };
-        // 兼容早期数据：`updated_at` 曾经秒/毫秒混用。秒级值（当前约 1.8e9）比毫秒级
-        // 小三个数量级，不归一化的话它们会在排序里全部落到 1970 年附近，把「最近使用」
-        // 彻底排错。1e11 毫秒 ≈ 1973 年，能干净地把两种单位分开。
-        for s in list.iter_mut() {
-            if s.updated_at > 0 && s.updated_at < 100_000_000_000 {
-                s.updated_at *= 1000;
+        let dir = get_user_data_dir().join("coding_sessions");
+        let heads = match super::coding_session_store::load_heads::<CodingSession>(&dir) {
+            Ok(Some(heads)) => heads,
+            Ok(None) => {
+                let Some(list) = crate::utils::fs::load_json_or_backup::<Vec<CodingSession>>(&Self::store_path()) else { return; };
+                let mut cache = session_cache_from_loaded(BTreeMap::new());
+                for session in list { let session = restored_session(session); cache.insert(session.session_id.clone(), session); }
+                *self.sessions.write() = cache;
+                self.persist();
+                return;
             }
-        }
-        // 启动恢复时所有会话重置为 Idle（上次运行中断的 Running 会话也回到空闲）
-        let mut map = BTreeMap::new();
-        for mut s in list {
-            s.status = CodingStatus::Idle;
-            map.insert(s.session_id.clone(), s);
-        }
-        *self.sessions.write() = map;
+            Err(error) => { tracing::warn!("[CodingAgent] 会话索引恢复失败: {error}"); return; }
+        };
+        let mut heads: Vec<_> = heads.into_iter().map(|(id, mut session)| {
+            normalize_session(&mut session); (id, session)
+        }).collect();
+        heads.sort_by(|a, b| b.1.updated_at.cmp(&a.1.updated_at).then_with(|| a.0.cmp(&b.0)));
+        let recent: Vec<_> = heads.iter().take(30).map(|(id, _)| id.clone()).collect();
+        let cache = session_cache_from_heads(heads);
+        for id in recent { cache.get(&id); }
+        *self.sessions.write() = cache;
     }
 
     fn persist(&self) {
-        // 按最近更新取前 N 个。`sessions` 是 BTreeMap，键是随机会话 id
-        // （`code-<uuid>`），直接按容器顺序截断等于**随机**丢弃会话，
-        // 与「保留最近 30 个」的意图不符。
-        let mut sessions: Vec<CodingSession> = self.sessions.read().values().cloned().collect();
-        sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-        sessions.truncate(PERSIST_MAX_SESSIONS);
-
-        let Ok(text) = serde_json::to_string_pretty(&sessions) else {
-            tracing::warn!("[CodingAgent] 会话序列化失败，跳过本次持久化");
-            return;
-        };
-        // 原子写（同目录临时文件 + fsync + rename 替换）：进程崩溃或断电最多
-        // 留下一个 `.tmp` 残骸，目标文件要么是旧内容要么是完整新内容，
-        // 不会被截成半截 JSON 而丢掉全部会话。
-        if let Err(e) = crate::utils::fs::write_atomic(&Self::store_path(), &text) {
-            tracing::warn!("[CodingAgent] 会话持久化失败: {e}");
-        }
+        if let Err(e) = super::coding_session_store::save_cached(&get_user_data_dir().join("coding_sessions"), || {
+            let sessions = self.sessions.read();
+            (sessions.loaded(), sessions.heads(), sessions.removed())
+        }) { tracing::warn!("[CodingAgent] 会话持久化失败: {e}"); }
     }
 
     /// 新建会话。
@@ -875,6 +973,9 @@ impl CodingAgentService {
             file_changes: Vec::new(),
             message_feedback: HashMap::new(),
             message_changes: HashMap::new(),
+            history_loaded: true,
+            stored_message_count: 0,
+            last_reply_preview: None, search_excerpt: None,
             messages: Vec::new(),
             status: CodingStatus::Idle,
             updated_at: chrono::Utc::now().timestamp_millis(),
@@ -1204,11 +1305,59 @@ impl CodingAgentService {
 
     /// 会话简表（列表页用）。
     pub fn list_sessions(&self) -> Vec<CodingSession> {
-        self.sessions.read().values().cloned().collect()
+        self.sessions.read().heads().into_iter().map(|(_, head)| head).collect()
+    }
+
+    pub fn list_sessions_page(&self, offset: usize, limit: usize) -> Vec<CodingSession> {
+        let mut sessions = self.list_sessions();
+        sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at).then_with(|| a.session_id.cmp(&b.session_id)));
+        sessions.into_iter().skip(offset).take(limit.min(1000)).collect()
+    }
+
+    /// Explicit search reads archives transiently; paging never reads them.
+    pub fn search_sessions(&self, query: &str) -> Vec<CodingSession> {
+        let terms: Vec<_> = query.split_whitespace().take(20).map(str::to_lowercase).collect();
+        if terms.is_empty() { return self.list_sessions_page(0, 50); }
+        let mut heads = self.list_sessions();
+        heads.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        let dir = get_user_data_dir().join("coding_sessions");
+        let mut result = Vec::new();
+        for mut head in heads {
+            let metadata = format!("{}\n{}", head.title, head.working_directory).to_lowercase();
+            if terms.iter().all(|term| metadata.contains(term)) { result.push(head); }
+            else {
+                // Borrow cached bodies; only an unopened archive is read into a temporary value.
+                let guard = self.sessions.read();
+                let cached = guard.values().find(|s| s.session_id == head.session_id && s.history_loaded);
+                let archived = if cached.is_none() { super::coding_session_store::read_one::<CodingSession>(&dir, &head.session_id) } else { None };
+                if let Some(session) = cached.or(archived.as_ref()) {
+                    let text = session.messages.iter().filter(|m| matches!(m.role, CodingRole::User | CodingRole::Assistant))
+                        .map(|m| m.content.split_whitespace().collect::<Vec<_>>().join(" ")).collect::<Vec<_>>().join("\n");
+                    let lower = text.to_lowercase();
+                    if terms.iter().all(|term| metadata.contains(term) || lower.contains(term)) {
+                        // Character positions avoid slicing a Unicode string at byte offsets.
+                        let chars: Vec<_> = text.chars().collect();
+                        let mut excerpts = Vec::new();
+                        for term in &terms {
+                            if let Some(byte) = lower.find(term) {
+                                let position = lower[..byte].chars().count().min(chars.len());
+                                let start = position.saturating_sub(35);
+                                excerpts.push(chars[start..(position + term.chars().count() + 125).min(chars.len())].iter().collect::<String>());
+                            }
+                        }
+                        head.search_excerpt = Some(excerpts.join(" … "));
+                        result.push(head);
+                    }
+                }
+            }
+            if result.len() >= 50 { break; }
+        }
+        result
     }
 
     /// 取完整会话。
     pub fn get_session(&self, session_id: &str) -> Option<CodingSession> {
+        self.sessions.write().retry_failed(session_id);
         self.sessions.read().get(session_id).cloned()
     }
 
@@ -1982,7 +2131,7 @@ impl CodingAgentService {
         session_id: &str,
         router: &ModelRouter,
     ) -> Result<String, String> {
-        let outcome = self.compact_history(session_id, router).await?;
+        let outcome = self.compact_history(session_id, router, false).await?;
         if outcome.archived == 0 {
             let total = {
                 self.sessions
@@ -2004,26 +2153,26 @@ impl CodingAgentService {
         ))
     }
 
-    /// 压缩核心：每次最多归档 [`COMPACT_MAX_MESSAGES`] 条较早消息，且至少保留最近
-    /// [`COMPACT_KEEP_MESSAGES`] 条，并对被归档消息做项目记忆沉淀。
-    /// 旧消息不足 [`COMPACT_MIN_MESSAGES`] 条时返回 `archived = 0`（无需压缩）。
+    /// 每次最多归档 24 条消息；通常保留最近 24 条，Token 压力下保留最后完整消息组。
+    /// 项目经验后台提炼，压缩提交不等待记忆模型。
     /// 手动 `/compact` 与上下文占用触发的自动压缩共用本入口。
     async fn compact_history(
         &self,
         session_id: &str,
         router: &ModelRouter,
+        pressure: bool,
     ) -> Result<CompactOutcome, String> {
         // 取待压缩的旧消息、既有摘要与工作目录
-        let (old, existing, wd) = {
+        let (old, existing, wd, window) = {
             let guard = self.sessions.read();
             let s = guard.get(session_id).ok_or("会话不存在")?;
             let active = &s.messages[s.context_start.min(s.messages.len())..];
             let total = active.len();
             let split = intact_history_boundary(
                 active,
-                total.saturating_sub(COMPACT_KEEP_MESSAGES).min(COMPACT_MAX_MESSAGES),
+                super::coding_compaction::archive_target(total, pressure),
             );
-            if split < COMPACT_MIN_MESSAGES {
+            if split == 0 || (!pressure && split < COMPACT_MIN_MESSAGES) {
                 return Ok(CompactOutcome {
                     archived: 0,
                     memory_note: String::new(),
@@ -2033,25 +2182,32 @@ impl CodingAgentService {
                 active[..split].to_vec(),
                 s.compacted.clone(),
                 s.working_directory.clone(),
+                s.context_window,
             )
         };
 
+        // Leave room for instructions/output, even for a small work-model window.
+        // The compression route can use another model; also cap input independently.
+        let input_chars = window.saturating_sub(3_072).min(20_000) as usize;
+        if input_chars < 512 {
+            return Err("上下文窗口过小，无法为压缩摘要预留空间".into());
+        }
         let mut user_prompt = String::new();
         if let Some(prev) = &existing {
             user_prompt.push_str("（此前已压缩的旧摘要，请与新历史合并成一份完整摘要）\n");
-            user_prompt.push_str(prev);
+            user_prompt.push_str(&truncate_chars(prev, input_chars / 2));
             user_prompt.push_str("\n\n");
         }
-        user_prompt.push_str(&build_turn_transcript_with_limit(&old, &wd, 60_000));
+        let remaining = input_chars.saturating_sub(user_prompt.chars().count());
+        user_prompt.push_str(&build_turn_transcript_with_limit(&old, &wd, remaining));
 
+        let mut request = LLMRequest::new(
+            "context_compress",
+            vec![ChatMessage::system(COMPACT_SYSTEM_PROMPT), ChatMessage::user(&user_prompt)],
+        );
+        request.max_tokens_override = Some(2_048);
         let summary = router
-            .generate(LLMRequest::new(
-                "context_compress",
-                vec![
-                    ChatMessage::system(COMPACT_SYSTEM_PROMPT),
-                    ChatMessage::user(&user_prompt),
-                ],
-            ))
+            .generate(request)
             .await
             .map_err(|e| format!("历史压缩失败：{e}"))?;
         let summary = summary.trim().to_string();
@@ -2066,110 +2222,101 @@ impl CodingAgentService {
         }
         self.persist();
 
-        // 项目记忆沉淀：被归档的旧消息即将脱离上下文，先提炼跨会话教训
-        // （尽力而为，LLM/写入失败仅记日志，不影响压缩结果本身）
-        let mut memory_note = String::new();
-        match self.distill_project_memory(&wd, router, &old).await {
-            Ok(Some(_)) => memory_note.push_str("已把可沉淀的教训写入项目记忆。"),
-            Ok(None) => {}
-            Err(e) => tracing::warn!("[CodingAgent] 压缩时的项目记忆沉淀失败: {e}"),
-        }
+        // Persist materials before dispatch; no memory-model request on this path.
+        let memory_note = match enqueue_project_memory(&wd, session_id, &old) {
+            Ok(()) => {
+                Self::resume_project_memory_jobs(router);
+                "项目经验已排入后台提炼。".to_string()
+            }
+            Err(e) => {
+                tracing::warn!("[CodingAgent] 项目记忆入队失败: {e}");
+                "项目经验未能排入后台提炼，原始历史仍保留。".to_string()
+            }
+        };
         Ok(CompactOutcome {
             archived: old.len(),
             memory_note,
         })
     }
 
-    /// 从一段会话历史提炼跨会话教训写入项目记忆
-    /// （`/memory 提炼` 与 `/compact` 归档沉淀共用）。
-    ///
-    /// 文件未超阈值时增量追加；超过 [`PROJECT_MEMORY_MERGE_LINES`] 行时改为
-    /// 全文重写合并去重（防追加式无限膨胀）。
-    /// 返回 `Ok(Some(消息))` 表示已沉淀（含用户可读结果）；`Ok(None)` 表示无事可沉淀。
+    /// Every textual message is processed in bounded batches. Host-owned receipts,
+    /// citations and rules are committed together after a complete successful pass.
     async fn distill_project_memory(
-        &self,
         working_directory: &str,
         router: &ModelRouter,
         messages: &[CodingMessage],
+        session_id: Option<&str>,
+        job_id: Option<&str>,
     ) -> Result<Option<String>, String> {
+        use super::coding_memory_records as records;
+        if !std::path::Path::new(working_directory).is_dir() { return Err("项目工作目录不存在，未写入记忆".into()); }
+        let id = job_id.map(str::to_string).unwrap_or_else(|| memory_job_id(working_directory, session_id, messages));
         let existing = read_project_memory_raw(working_directory);
-        // 超阈值：全文重写合并去重
-        if existing.as_deref().map(|m| m.lines().count()).unwrap_or(0) > PROJECT_MEMORY_MERGE_LINES
-        {
-            return self
-                .rewrite_project_memory(working_directory, router, existing.as_deref(), messages)
-                .await;
+        let old = existing.as_deref().unwrap_or("");
+        if records::committed(old, &id) { return Ok(Some("这份会话材料已提炼，未重复写入。".into())); }
+        let transcript: Vec<_> = messages.iter().enumerate()
+            .filter(|(_, m)| !matches!(m.role, CodingRole::Notice | CodingRole::Thinking))
+            .map(|(i, m)| {
+                let mut material = serde_json::json!({
+                    "role": m.role, "content": m.content, "file_refs": m.file_refs, "timestamp_ms": m.timestamp,
+                    "tool_name": m.tool_name, "tool_arguments": m.tool_arguments,
+                    "tool_success": m.tool_success, "tool_call_id": m.tool_call_id,
+                });
+                redact_memory_material(&mut material);
+                (i, material.to_string())
+            }).collect();
+        let batches = records::batches(&transcript, 6_000);
+        let mut candidates = Vec::new();
+        let source = persist_project_memory_source(working_directory, session_id, messages)?;
+        let mut staged = String::new();
+        let system = format!("{MEMORY_DISTILL_SYSTEM_PROMPT}\n输出严格 JSON 数组，每项包含 text（单行正文，不带列表符号）、topic（40字符内主题，不能使用常驻约定/关键约定/权限边界）、source_messages（本批材料中支持该条目的 message 索引数组）、supersedes（被明确纠正的已有条目 ID 数组，无则空）。没有新知识输出 []。全文按顺序分批提供；不能忽略晚出现的纠正或失败结果。新发现和关键约定冲突时标记正文待核实，不覆盖用户约定。来源必须在当前批次内，不生成来源文件名或验证时间；工具成功不代表结论经过验证。分片材料不完整时不要推断缺失内容。");
+        for (batch, indices) in batches {
+            let recent: String = staged.chars().rev().take(4_000).collect::<Vec<_>>().into_iter().rev().collect();
+            let prompt = format!("受程序保护的用户约定：\n{}\n已有经验（仅供去重，可能未完整展示）：\n{}\n前面批次的近期候选（尚未提交，可用条目 ID 明确纠正）：\n{recent}\n\n本批原始材料（零基 message 索引）：\n{batch}",
+                records::pinned_rules(old), truncate_chars(old, 4_000));
+            let response = router.generate(LLMRequest::new("memory", vec![ChatMessage::system(&system), ChatMessage::user(prompt)]))
+                .await.map_err(|e| format!("分批提炼失败，未提交: {e}"))?;
+            for mut candidate in records::parse_candidates(&response, &indices)? {
+                for prior in &candidate.supersedes {
+                    let marker = format!("<!-- memory-entry: memory_entries/{prior}.json -->");
+                    if records::pinned_rules(old).contains(&marker) { return Err("模型不能替代受保护的用户约定，未提交".into()); }
+                    if !old.contains(&marker) && !staged.contains(&marker) {
+                        return Err("纠正引用了不存在的记忆条目，未提交".into());
+                    }
+                }
+                let ranges = crate::memory::redact::detect_pii(&candidate.text).into_iter().map(|s| (s.start, s.end)).collect();
+                candidate.text = super::coding_memory_navigation::redact_ranges(&candidate.text, ranges);
+                let entry = persist_project_memory_entry(working_directory, session_id, messages, &source, &candidate)?;
+                staged.push_str(&format!("{entry}\n- {}\n", candidate.text));
+                candidates.push((candidate, entry));
+            }
         }
-
-        let mut user_prompt = String::new();
-        if let Some(prev) = &existing {
-            user_prompt.push_str("（已有项目记忆，提炼时请与已有条目去重）\n");
-            user_prompt.push_str(prev);
-            user_prompt.push_str("\n\n");
+        let mut body = String::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut superseded = std::collections::HashSet::new();
+        if !candidates.is_empty() {
+            for (candidate, entry) in candidates {
+                if old.contains(&entry) || !seen.insert(entry.clone()) { continue; }
+                superseded.extend(candidate.supersedes);
+                body.push_str(&format!("\n## {}\n{entry}\n- {}\n", candidate.topic.trim(), candidate.text));
+            }
         }
-        user_prompt.push_str("（会话历史）\n");
-        user_prompt.push_str(&build_turn_transcript(messages, working_directory));
-
-        let distilled = router
-            .generate(LLMRequest::new(
-                "memory",
-                vec![
-                    ChatMessage::system(MEMORY_DISTILL_SYSTEM_PROMPT),
-                    ChatMessage::user(&user_prompt),
-                ],
-            ))
-            .await
-            .map_err(|e| format!("提炼失败：{e}"))?;
-        let distilled = distilled.trim().to_string();
-        if distilled.is_empty() {
-            return Ok(None);
-        }
-        append_project_memory(working_directory, &distilled)?;
-        Ok(Some(format!("已沉淀到项目记忆：\n\n{distilled}")))
-    }
-
-    /// 全文重写项目记忆：合并已有条目与会话新知，去重压缩后整文件替换。
-    /// LLM 返回空内容视为失败（保留原记忆，不写文件）。
-    async fn rewrite_project_memory(
-        &self,
-        working_directory: &str,
-        router: &ModelRouter,
-        existing: Option<&str>,
-        messages: &[CodingMessage],
-    ) -> Result<Option<String>, String> {
-        let mut user_prompt = String::new();
-        if let Some(prev) = existing {
-            user_prompt.push_str("（当前项目记忆全文，过长需要整理）\n");
-            user_prompt.push_str(prev);
-            user_prompt.push_str("\n\n");
-        }
-        user_prompt.push_str("（会话历史，可能包含需要沉淀的新知识）\n");
-        user_prompt.push_str(&build_turn_transcript(messages, working_directory));
-
-        let rewritten = router
-            .generate(LLMRequest::new(
-                "consolidation",
-                vec![
-                    ChatMessage::system(MEMORY_REWRITE_SYSTEM_PROMPT),
-                    ChatMessage::user(&user_prompt),
-                ],
-            ))
-            .await
-            .map_err(|e| format!("重写失败：{e}"))?;
-        let rewritten = rewritten.trim().to_string();
-        if rewritten.is_empty() {
-            return Err("重写失败：模型返回空内容（已保留原记忆）".into());
-        }
-        write_project_memory(working_directory, &rewritten)?;
-        Ok(Some(format!(
-            "项目记忆已超过 {PROJECT_MEMORY_MERGE_LINES} 行，合并重写为 {} 行。",
-            rewritten.lines().count()
-        )))
+        let has_entries = !body.is_empty();
+        // CAS covers both the entries and their replay receipt. If removal of the
+        // queue file fails or the process crashes afterwards, replay skips the LLM.
+        super::coding_memory_persistence::commit_once(&project_memory_path(working_directory), existing.as_deref(), &id, |current| {
+            let mut result = current.filter(|s| !s.trim().is_empty()).unwrap_or(PROJECT_MEMORY_HEADER).to_string();
+            result = mark_superseded_entries(&result, &superseded);
+            if has_entries { result.push_str(&mark_superseded_entries(&body, &superseded)); }
+            if result.lines().count() > PROJECT_MEMORY_MERGE_LINES { records::consolidate(&result) } else { result }
+        })?;
+        if has_entries { Ok(Some("已完成全部会话材料提炼；新增条目附来源索引，未经验证的结论已明确标记。".into())) }
+        else { Ok(None) }
     }
 
     /// /memory：项目记忆管理（存储在工作区 `.vivian/memory.md`，项目级随项目走）。
     /// - 无参：查看当前项目记忆
-    /// - `提炼`：LLM 从会话历史提炼教训；文件超阈值时转为全文合并重写
+    /// - `提炼`：按完整文字材料分批提炼，逐条记录来源；`状态` / `重试` 管理后台任务
     /// - `清除`：清空项目记忆
     /// - 其他文本：作为一条手动笔记追加
     async fn cmd_memory(
@@ -2187,7 +2334,7 @@ impl CodingAgentService {
 
         // 无参：查看（附实际存储路径，便于用户直接编辑文件）
         if arg.is_empty() {
-            return match read_project_memory(&wd) {
+            return match read_project_memory_raw(&wd) {
                 Some(m) => Ok(format!(
                     "当前项目记忆（{}）：\n\n{m}",
                     project_memory_path(&wd).display()
@@ -2199,8 +2346,35 @@ impl CodingAgentService {
             };
         }
 
+        if arg == "状态" {
+            let jobs: Vec<_> = super::coding_memory_persistence::pending::<ProjectMemoryJob>(&project_memory_queue_dir())
+                .into_iter().filter(|(_, j)| project_memory_key(&j.working_directory) == project_memory_key(&wd)).collect();
+            if jobs.is_empty() { return Ok("没有待提炼的项目记忆任务。".into()); }
+            return Ok(jobs.iter().map(|(_, j)| format!("失败次数={}，状态={}，下次重试 Unix 毫秒={}，原因={}",
+                j.failures, if j.failed { "已暂停，可用 /memory 重试 恢复" } else { "等待或处理中" },
+                j.next_attempt_at, j.last_error.as_deref().unwrap_or("无"))).collect::<Vec<_>>().join("\n"));
+        }
+        if arg == "重试" {
+            let model = project_memory_model_lock(&wd);
+            let _model = model.lock().await;
+            for (path, mut job) in super::coding_memory_persistence::pending::<ProjectMemoryJob>(&project_memory_queue_dir()) {
+                if project_memory_key(&job.working_directory) == project_memory_key(&wd) {
+                    job.failed = false; job.failures = 0; job.next_attempt_at = 0; job.last_error = None;
+                    super::coding_memory_persistence::write_snapshot(&path, || &job)?;
+                }
+            }
+            Self::resume_project_memory_jobs(router);
+            return Ok("项目记忆任务已恢复重试。".into());
+        }
         // 清除
         if arg.eq_ignore_ascii_case("清除") || arg.eq_ignore_ascii_case("-clear") {
+            let model = project_memory_model_lock(&wd);
+            let _model = model.lock().await;
+            for (pending, job) in super::coding_memory_persistence::pending::<ProjectMemoryJob>(&project_memory_queue_dir()) {
+                if project_memory_key(&job.working_directory) == project_memory_key(&wd) {
+                    std::fs::remove_file(pending).map_err(|e| format!("清除待提炼记忆失败: {e}"))?;
+                }
+            }
             let path = project_memory_path(&wd);
             if !path.exists() {
                 return Ok("尚无项目记忆，无需清除。".into());
@@ -2209,8 +2383,10 @@ impl CodingAgentService {
             return Ok("项目记忆已清空。".into());
         }
 
-        // 提炼：LLM 从会话历史抽取教训（文件超阈值时自动转为全文合并重写）
+        // 提炼：分批读取原始材料；程序保护约定、来源与提交收据。
         if arg.eq_ignore_ascii_case("提炼") || arg.eq_ignore_ascii_case("-distill") {
+            let model = project_memory_model_lock(&wd);
+            let _model = model.lock().await;
             let messages = {
                 let guard = self.sessions.read();
                 let s = guard.get(session_id).ok_or("会话不存在")?;
@@ -2219,7 +2395,7 @@ impl CodingAgentService {
             if !messages.iter().any(|m| m.role == CodingRole::User) {
                 return Err("会话还没有实质内容，先聊几轮再提炼。".into());
             }
-            return match self.distill_project_memory(&wd, router, &messages).await {
+            return match Self::distill_project_memory(&wd, router, &messages, Some(session_id), None).await {
                 Ok(Some(msg)) => Ok(msg),
                 Ok(None) => Ok("会话中没有值得新沉淀的项目知识（或与已有记忆重复）。".into()),
                 Err(e) => Err(e),
@@ -2327,6 +2503,7 @@ impl CodingAgentService {
         if let Some(c) = &session.compacted {
             md.push_str(&format!("- 历史摘要：{}\n", c));
         }
+
         if !session.feedback.is_empty() {
             md.push_str("\n## 反馈\n\n");
             for f in &session.feedback {
@@ -2387,6 +2564,7 @@ impl CodingAgentService {
         tool_system: Arc<ToolSystem>,
         max_rounds: usize,
     ) {
+        Self::resume_project_memory_jobs(router);
         self.run_loop_inner(app.clone(), session_id, router, tool_system, max_rounds)
             .await;
 
@@ -2579,7 +2757,13 @@ impl CodingAgentService {
             let llm_start = std::time::Instant::now();
             // 智能压缩：上轮请求真实上下文接近窗口上限时自动归档早期历史为摘要，
             // 防止多轮工具调用的历史累积超出模型上下文窗口
-            let _ = self.maybe_auto_compact(&app, session_id, router).await;
+            // A single 24-message batch may not free enough space. Refresh the
+            // system estimate after each commit and stop when no prefix remains.
+            for _ in 0..MAX_HISTORY_MESSAGES {
+                let preview = self.build_llm_messages(session_id, &char_id, &mode);
+                self.update_context_breakdown(session_id, &preview, &definitions);
+                if !self.maybe_auto_compact(&app, session_id, router).await { break; }
+            }
             let mut messages = self.build_llm_messages(session_id, &char_id, &mode);
             // 上下文构成估算：写会话供前端「上下文空间」展示 system/工具/对话 占比
             self.update_context_breakdown(session_id, &messages, &definitions);
@@ -3642,7 +3826,7 @@ impl CodingAgentService {
 
     /// 智能压缩入口：取「上一次 LLM 请求 API 上报的真实输入侧 token」与
     /// 「本轮即将发送内容的估算 token」的较大值为依据，达到会话窗口上限的
-    /// [`AUTO_COMPACT_THRESHOLD_PCT`]% 时把早期历史归档为摘要，
+    /// 75% 时把早期历史归档为摘要，
     /// 防止多轮工具调用的历史累积超出模型上下文窗口。
     ///
     /// 只看上报值会滞后一轮：单轮内新增超大内容（例如一次读入大文件）时，
@@ -3660,22 +3844,21 @@ impl CodingAgentService {
         router: &ModelRouter,
     ) -> bool {
         // 消息量不足时必然无法压缩，直接跳过
-        let (enough, count, last_ctx, estimated, window) = {
+        let (count, last_ctx, estimated, window) = {
             let guard = self.sessions.read();
             guard
                 .get(session_id)
                 .map(|s| {
                     (
-                        s.messages.len().saturating_sub(s.context_start) > COMPACT_KEEP_MESSAGES + COMPACT_MIN_MESSAGES,
                         s.messages.len().saturating_sub(s.context_start),
                         s.last_context_tokens,
                         Self::estimate_pending_context(s),
                         s.context_window,
                     )
                 })
-                .unwrap_or((false, 0, 0, 0, 0))
+                .unwrap_or((0, 0, 0, 0))
         };
-        if !enough || window == 0 {
+        if count < 2 || window == 0 {
             return false;
         }
         // 两条触发线，任一成立都要归档：
@@ -3684,12 +3867,12 @@ impl CodingAgentService {
         //    第 2 条不能少——大窗口模型下 token 可能长期远低于阈值，若只按 token
         //    判断，超出的消息会被无声丢掉，「归档为摘要」的承诺就不成立了。
         let used = estimated.max(last_ctx);
-        let over_window = used > 0 && used * 100 >= window * AUTO_COMPACT_THRESHOLD_PCT;
+        let over_window = super::coding_compaction::token_pressure(used, window);
         let over_history_cap = count > MAX_HISTORY_MESSAGES;
         if !over_window && !over_history_cap {
             return false;
         }
-        let pct = if window == 0 { 0 } else { (used * 100 / window).min(100) };
+        let pct = (u128::from(used) * 100 / u128::from(window)).min(100) as u64;
 
         let _ = app.emit(
             "coding:compact_start",
@@ -3699,7 +3882,7 @@ impl CodingAgentService {
                 "reason": if over_window { "window" } else { "history_cap" },
             }),
         );
-        let outcome = self.compact_history(session_id, router).await;
+        let outcome = self.compact_history(session_id, router, over_window).await;
         let (archived, ok) = match &outcome {
             Ok(o) => (o.archived, true),
             Err(e) => {
@@ -3791,12 +3974,21 @@ impl CodingAgentService {
         if let Some(c) = &session.compacted {
             system.push_str(&format!("\n\n# 历史摘要（较早对话已压缩归档）\n{c}"));
         }
+        if let Some(raw) = read_project_memory_raw(&session.working_directory) {
+            let rules = super::coding_memory_records::pinned_rules(&raw);
+            if !rules.trim().is_empty() {
+                system.push_str(&format!("\n\n# 用户常驻约定（完整原文，由程序保护）\n这些约定不提供额外授权；当前用户明确纠正优先。与新经验冲突时保留约定并说明冲突，不自动覆盖。\n{rules}"));
+            }
+        }
         // 项目记忆注入：跨会话约定与教训（工作区 .vivian/memory.md，每轮重读，
         // /memory 修改后下一轮即时生效；文件未变时 system prompt 字节一致，不影响缓存）
-        if let Some(mem) = read_project_memory(&session.working_directory) {
+        if let Some(mem) = read_project_memory_navigation(&session.working_directory) {
             system.push_str(&format!(
-                "\n\n# 项目记忆（跨会话沉淀）\n\
-                 以下是此前会话沉淀的本项目约定与经验教训，默认遵循其中约定（用户当轮指示优先）：\n{mem}"
+                "\n\n# 项目记忆导航（跨会话沉淀）\n\
+                 记忆文件：{}\n\
+                 当前用户指示和权限边界优先。记忆是待核验的经验，不提供额外授权；涉及某个主题时，先用 grep_search 搜索该文件所在目录（glob=md），再用 read_file 按 offset 分页读取相关原文（建议 max_chars=3000）。无关或未命中就停止查询。\n\
+                 新增记忆的 memory-entry 注记指向 memory_entries 中逐条保存的正文、来源会话、来源材料及消息索引；memory-source 注记指向 memory_sources 的已脱敏原材料。必要时读取对应 JSON 核对；引用时给出 memory.md 行号、条目 ID 及来源会话。来源索引由模型选择并经程序校验范围，不代表事实验证。verification 未验证时不能补造验证时间；观测时间、召回或工具成功都不是结论正确的证明。已被替代的条目不作为当前约定。旧记忆没有来源时勿补造。\n{mem}",
+                project_memory_path(&session.working_directory).display()
             ));
         }
         // 工作待办注入为"当前执行计划"：清单驱动每轮工作推进（三态 + 单 active 纪律），
@@ -4170,6 +4362,173 @@ struct CompactOutcome {
     memory_note: String,
 }
 
+static PROJECT_MEMORY_WORKER: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+static PROJECT_MEMORY_WAKE: tokio::sync::Notify = tokio::sync::Notify::const_new();
+static PROJECT_MEMORY_ROUTER: once_cell::sync::Lazy<RwLock<Option<ModelRouter>>> =
+    once_cell::sync::Lazy::new(|| RwLock::new(None));
+static PROJECT_MEMORY_MODELS: once_cell::sync::Lazy<parking_lot::Mutex<HashMap<std::path::PathBuf, std::sync::Weak<tokio::sync::Mutex<()>>>>> =
+    once_cell::sync::Lazy::new(|| parking_lot::Mutex::new(HashMap::new()));
+
+fn project_memory_model_lock(wd: &str) -> Arc<tokio::sync::Mutex<()>> {
+    let root = project_memory_key(wd);
+    let mut locks = PROJECT_MEMORY_MODELS.lock();
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(&root).and_then(std::sync::Weak::upgrade) { return lock; }
+    let lock = Arc::new(tokio::sync::Mutex::new(()));
+    locks.insert(root, Arc::downgrade(&lock));
+    lock
+}
+
+fn project_memory_key(wd: &str) -> std::path::PathBuf {
+    std::fs::canonicalize(wd).unwrap_or_else(|_| std::path::PathBuf::from(wd))
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct ProjectMemoryJob {
+    working_directory: String,
+    messages: Vec<CodingMessage>,
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    job_id: String,
+    #[serde(default)]
+    failures: u32,
+    #[serde(default)]
+    next_attempt_at: i64,
+    #[serde(default)]
+    last_error: Option<String>,
+    #[serde(default)]
+    failed: bool,
+}
+
+fn memory_job_id(wd: &str, session: Option<&str>, messages: &[CodingMessage]) -> String {
+    use sha2::{Digest, Sha256};
+    let records: Vec<_> = messages.iter().map(|m| serde_json::json!({
+        "role": m.role, "content": m.content, "timestamp": m.timestamp, "file_refs": m.file_refs,
+        "tool_name": m.tool_name, "tool_arguments": m.tool_arguments, "tool_success": m.tool_success,
+        "tool_call_id": m.tool_call_id,
+    })).collect();
+    let value = serde_json::json!({ "project": project_memory_key(wd), "session": session, "messages": records });
+    format!("{:x}", Sha256::digest(value.to_string().as_bytes()))
+}
+
+fn project_memory_queue_dir() -> std::path::PathBuf {
+    get_user_data_dir().join("coding_memory_pending")
+}
+
+fn enqueue_project_memory(wd: &str, session_id: &str, messages: &[CodingMessage]) -> Result<(), String> {
+    if wd.trim().is_empty() { return Err("会话没有有效的工作目录".into()); }
+    let mut text_messages = messages.to_vec();
+    for message in &mut text_messages { message.images = None; message.widgets = None; }
+    super::coding_memory_persistence::enqueue(&project_memory_queue_dir(), &ProjectMemoryJob {
+        working_directory: wd.to_string(), messages: text_messages,
+        session_id: Some(session_id.to_string()),
+        job_id: memory_job_id(wd, Some(session_id), messages),
+        failures: 0, next_attempt_at: 0, last_error: None, failed: false,
+    })
+}
+
+fn persist_project_memory_entry(
+    wd: &str, session: Option<&str>, messages: &[CodingMessage], source: &str,
+    candidate: &super::coding_memory_records::Candidate,
+) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+    if candidate.source_messages.is_empty() || candidate.source_messages.iter().any(|i| *i >= messages.len()) {
+        return Err("记忆来源消息索引无效".into());
+    }
+    let source_file = source.strip_prefix("<!-- memory-source: ").and_then(|s| s.strip_suffix(" -->"))
+        .ok_or("记忆来源标记无效")?;
+    let observed_at = candidate.source_messages.iter().filter_map(|i| messages.get(*i))
+        .map(|m| m.timestamp).filter(|t| *t > 0).max();
+    let evidence = serde_json::json!({
+        "text": candidate.text, "source_session": session, "source_file": source_file,
+        "topic": candidate.topic,
+        "source_message_indices": candidate.source_messages,
+        "source_selection": "model_cited_host_checked_indices",
+        "observed_at_timestamp_ms": observed_at,
+        "verification": { "status": "unverified", "verified_at_timestamp_ms": null },
+        "supersedes": candidate.supersedes,
+    });
+    let text = serde_json::to_string_pretty(&evidence).map_err(|e| e.to_string())?;
+    let id = format!("{:x}", Sha256::digest(text.as_bytes()));
+    let path = project_memory_path(wd).parent().ok_or("项目记忆目录无效")?
+        .join("memory_entries").join(format!("{id}.json"));
+    if !path.exists() { crate::utils::fs::write_atomic(&path, &text).map_err(|e| e.to_string())?; }
+    Ok(format!("<!-- memory-entry: memory_entries/{id}.json -->"))
+}
+
+fn mark_superseded_entries(raw: &str, ids: &std::collections::HashSet<String>) -> String {
+    let mut replace_next = false;
+    let mut protected = false;
+    let mut out = String::new();
+    for line in raw.split_inclusive('\n') {
+        if let Some(title) = line.trim().strip_prefix("## ") {
+            protected = ["常驻约定", "关键约定", "权限边界"].contains(&title);
+            replace_next = false;
+        }
+        if protected { out.push_str(line); continue; }
+        if line.trim().starts_with("<!-- memory-entry:") {
+            replace_next = ids.iter().any(|id| line.contains(&format!("memory_entries/{id}.json")));
+        }
+        if replace_next && line.trim().starts_with("- ") {
+            out.push_str(&format!("- [已被后续条目替代，勿作为当前约定] {}\n", line.trim().trim_start_matches("- ")));
+            replace_next = false;
+        } else { out.push_str(line); }
+    }
+    out
+}
+
+fn redact_memory_material(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::String(text) => {
+                let ranges = crate::memory::redact::detect_pii(text).into_iter().map(|s| (s.start, s.end)).collect();
+                *text = super::coding_memory_navigation::redact_ranges(text, ranges);
+            }
+            serde_json::Value::Array(items) => items.iter_mut().for_each(redact_memory_material),
+            serde_json::Value::Object(fields) => for (key, value) in fields {
+                if ["api_key", "apikey", "token", "access_token", "refresh_token", "secret", "password", "authorization", "private_key"]
+                    .contains(&key.to_ascii_lowercase().as_str()) {
+                    *value = serde_json::Value::String("[REDACTED_SECRET]".into());
+                } else { redact_memory_material(value); }
+            },
+            _ => {}
+        }
+    }
+
+/// Save the source independently of the model's claims. Binary images/widgets are
+/// excluded; text and structured arguments go through the existing PII redactor.
+fn persist_project_memory_source(
+    wd: &str, session_id: Option<&str>, messages: &[CodingMessage],
+) -> Result<String, String> {
+    if wd.trim().is_empty() { return Err("会话没有有效的工作目录".into()); }
+    use sha2::{Digest, Sha256};
+    let records: Vec<_> = messages.iter().map(|message| {
+        serde_json::json!({
+            "role": message.role, "timestamp": message.timestamp,
+            "content": message.content, "file_refs": message.file_refs, "tool_name": message.tool_name,
+            "tool_arguments": message.tool_arguments, "tool_success": message.tool_success,
+            "tool_call_id": message.tool_call_id,
+        })
+    }).collect();
+    let mut evidence = serde_json::json!({
+        "session_id": session_id, "messages": records,
+        "observed_from_timestamp_ms": messages.iter().map(|m| m.timestamp).filter(|t| *t > 0).min(),
+        "observed_until_timestamp_ms": messages.iter().map(|m| m.timestamp).filter(|t| *t > 0).max(),
+        "verification": { "status": "unverified", "verified_at_timestamp_ms": null },
+        "note": "会话材料用于核对记忆来源；工具执行成功不代表目标已验证。",
+    });
+    // Structural IDs remain exact so the user can locate the source session.
+    if let Some(records) = evidence.get_mut("messages") { redact_memory_material(records); }
+    let text = serde_json::to_string_pretty(&evidence).map_err(|e| e.to_string())?;
+    let id = format!("{:x}", Sha256::digest(text.as_bytes()));
+    let path = project_memory_path(wd).parent().ok_or("项目记忆目录无效")?
+        .join("memory_sources").join(format!("{id}.json"));
+    if !path.exists() {
+        crate::utils::fs::write_atomic(&path, &text).map_err(|e| format!("保存记忆来源失败: {e}"))?;
+    }
+    Ok(super::coding_memory_navigation::source_marker(&id))
+}
+
 /// 本轮摘要的 system prompt。
 const TURN_SUMMARY_SYSTEM_PROMPT: &str = "你是记忆归档模块。把用户与桌面编程智能体的一轮会话记录压缩成 2-4 句中文摘要，必须涵盖：用户请求了什么、执行了哪些关键操作（读/写/改了哪些文件、跑了什么命令）、最终结果与遗留问题。直接输出摘要正文，不要前缀、标题或 markdown。";
 
@@ -4323,7 +4682,7 @@ fn migrate_legacy_project_memory(working_directory: &str) {
             return;
         }
     }
-    if std::fs::write(&new_path, text).is_ok() {
+    if super::coding_memory_persistence::update(&new_path, Some(None), |_| text).is_ok() {
         tracing::info!(
             "[CodingAgent] 项目记忆已从应用数据目录迁移到工作区: {}",
             new_path.display()
@@ -4337,72 +4696,56 @@ fn read_project_memory_raw(working_directory: &str) -> Option<String> {
         return None;
     }
     migrate_legacy_project_memory(working_directory);
-    let text = std::fs::read_to_string(project_memory_path(working_directory)).ok()?;
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
-    }
+    std::fs::read_to_string(project_memory_path(working_directory)).ok()
 }
 
-/// 读取项目记忆（注入/去重上下文用）。超长保留尾部——最新沉淀的条目。
-fn read_project_memory(working_directory: &str) -> Option<String> {
-    let full = read_project_memory_raw(working_directory)?;
-    let chars: Vec<char> = full.chars().collect();
-    if chars.len() <= PROJECT_MEMORY_MAX_CHARS {
-        return Some(full);
-    }
-    let tail: String = chars[chars.len() - PROJECT_MEMORY_MAX_CHARS..].iter().collect();
-    Some(format!("（较早内容已截断）\n{tail}"))
+/// Navigation is derived from exact file bytes, preserving offsets for read_file.
+fn read_project_memory_navigation(working_directory: &str) -> Option<String> {
+    if working_directory.trim().is_empty() { return None; }
+    migrate_legacy_project_memory(working_directory);
+    let full = std::fs::read_to_string(project_memory_path(working_directory)).ok()?;
+    super::coding_memory_navigation::navigation(&full)
 }
 
 /// 全量写入项目记忆文件（文件头 + 正文，正文为空时只写文件头）。
 fn write_project_memory(working_directory: &str, body: &str) -> Result<(), String> {
-    if working_directory.trim().is_empty() {
-        return Err("会话没有有效的工作目录".into());
-    }
-    let path = project_memory_path(working_directory);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("创建记忆目录失败：{e}"))?;
-    }
-    let mut content = PROJECT_MEMORY_HEADER.to_string();
-    let body = body.trim();
-    if !body.is_empty() {
-        content.push('\n');
-        content.push_str(body);
-        content.push('\n');
-    }
-    std::fs::write(&path, content).map_err(|e| format!("写入 {PROJECT_MEMORY_FILE} 失败：{e}"))
+    update_project_memory(working_directory, body, false, None)
 }
 
-/// 追加一段内容到项目记忆文件（不存在则带说明头创建，按日期分节）。
+fn write_project_memory_checked(wd: &str, body: &str, expected: Option<&str>) -> Result<(), String> {
+    update_project_memory(wd, body, false, Some(expected))
+}
+
+/// Manual appends and model-generated updates share atomic, serialized commits.
 fn append_project_memory(working_directory: &str, body: &str) -> Result<(), String> {
-    if working_directory.trim().is_empty() {
-        return Err("会话没有有效的工作目录".into());
-    }
+    // Explicit user additions remain visible independently of newer learned notes.
+    update_project_memory(working_directory, &format!("## 常驻约定\n{body}"), true, None)
+}
+
+fn append_project_memory_checked(wd: &str, body: &str, expected: Option<&str>) -> Result<(), String> {
+    update_project_memory(wd, body, true, Some(expected))
+}
+
+fn update_project_memory(
+    wd: &str, body: &str, append: bool, expected: Option<Option<&str>>,
+) -> Result<(), String> {
+    if wd.trim().is_empty() { return Err("会话没有有效的工作目录".into()); }
     let body = body.trim();
-    if body.is_empty() {
-        return Ok(());
-    }
-    let path = project_memory_path(working_directory);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("创建记忆目录失败：{e}"))?;
-    }
-    let mut content = std::fs::read_to_string(&path).unwrap_or_default();
-    if content.trim().is_empty() {
-        content = PROJECT_MEMORY_HEADER.to_string();
-    }
-    if !content.ends_with('\n') {
-        content.push('\n');
-    }
-    content.push_str(&format!(
-        "\n## {}\n",
-        chrono::Local::now().format("%Y-%m-%d %H:%M")
-    ));
-    content.push_str(body);
-    content.push('\n');
-    std::fs::write(&path, content).map_err(|e| format!("写入 {PROJECT_MEMORY_FILE} 失败：{e}"))
+    if append && body.is_empty() { return Ok(()); }
+    super::coding_memory_persistence::update(&project_memory_path(wd), expected, |old| {
+        let mut content = if append {
+            old.filter(|s| !s.trim().is_empty()).unwrap_or(PROJECT_MEMORY_HEADER).to_string()
+        } else { PROJECT_MEMORY_HEADER.to_string() };
+        if !body.is_empty() {
+            if !content.ends_with('\n') { content.push('\n'); }
+            if append {
+                content.push_str(&format!("\n## {}\n", chrono::Local::now().format("%Y-%m-%d %H:%M")));
+            } else { content.push('\n'); }
+            content.push_str(body);
+            content.push('\n');
+        }
+        content
+    })
 }
 
 /// 判断一次成功调用是否构成「实质进展」。
@@ -4920,6 +5263,166 @@ mod compaction_boundary_tests {
         }
     }
 
+    fn test_session(id: &str, wd: &str, updated_at: i64) -> CodingSession {
+        serde_json::from_value(serde_json::json!({
+            "session_id": id, "char_id": "vivian", "working_directory": wd, "title": id,
+            "messages": [message(CodingRole::User, "request")], "status": "idle", "updated_at": updated_at,
+        })).unwrap()
+    }
+
+    #[test]
+    fn all_sessions_survive_independent_files_and_old_sessions_are_pageable() {
+        let directory = tempfile::tempdir().unwrap();
+        let sessions: BTreeMap<_, _> = (0..45).map(|i| {
+            let id = format!("session-{i:02}");
+            (id.clone(), test_session(&id, "", i))
+        }).collect();
+        let service = CodingAgentService { sessions: RwLock::new(session_cache_from_loaded(sessions)) };
+        super::super::coding_session_store::save(directory.path(), || service.sessions.read().loaded()).unwrap();
+        let restored = super::super::coding_session_store::load::<CodingSession>(directory.path()).unwrap();
+        assert_eq!(restored.len(), 45);
+        assert_eq!(service.list_sessions_page(0, 30)[0].session_id, "session-44");
+        let older = service.list_sessions_page(30, 30);
+        assert_eq!(older.len(), 15);
+        assert_eq!(older.last().unwrap().session_id, "session-00");
+        assert!(restored.iter().all(|s| s.messages[0].content == "request"));
+    }
+
+    #[test]
+    fn archived_session_details_restore_goal_summary_and_context_on_demand() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let reads = Arc::new(AtomicUsize::new(0));
+        let counter = reads.clone();
+        let mut full = test_session("old", "", 1);
+        full.goal = Some("original goal".into()); full.compacted = Some("summary".into()); full.context_start = 1;
+        let cache = super::super::coding_session_cache::Catalog::new(vec![("old".into(), coding_session_head(&full))],
+            move |_| { counter.fetch_add(1, Ordering::SeqCst); Some(restored_session(full.clone())) }, coding_session_head);
+        let service = CodingAgentService { sessions: RwLock::new(cache) };
+        assert!(!service.list_sessions_page(0, 30)[0].history_loaded);
+        assert_eq!(reads.load(Ordering::SeqCst), 0);
+        let restored = service.get_session("old").unwrap();
+        assert_eq!(restored.goal.as_deref(), Some("original goal"));
+        assert_eq!(restored.compacted.as_deref(), Some("summary")); assert_eq!(restored.context_start, 1);
+        assert_eq!(restored.messages[0].content, "request");
+        service.get_session("old");
+        assert_eq!(reads.load(Ordering::SeqCst), 1);
+        assert!(service.list_sessions()[0].messages.is_empty());
+    }
+
+    #[test]
+    fn every_user_rule_is_injected_even_when_navigation_pin_budget_is_exceeded() {
+        let directory = tempfile::tempdir().unwrap();
+        let wd = directory.path().to_str().unwrap();
+        let mut rules = "约定内容".repeat(500);
+        rules.push_str("最后一条：禁止自动发布");
+        append_project_memory(wd, &rules).unwrap();
+        let session = test_session("rules", wd, 1);
+        let service = CodingAgentService { sessions: RwLock::new(session_cache_from_loaded(BTreeMap::from([("rules".into(), session)]))) };
+        let messages = service.build_llm_messages("rules", "vivian", "standard");
+        assert!(messages[0].content.contains(&rules));
+    }
+
+    #[test]
+    fn entries_link_only_selected_messages_and_corrections_keep_source_history() {
+        let directory = tempfile::tempdir().unwrap();
+        let wd = directory.path().to_str().unwrap();
+        let mut first = message(CodingRole::User, "old rule"); first.timestamp = 100;
+        let mut second = message(CodingRole::User, "explicit correction"); second.timestamp = 200;
+        let messages = vec![first, second];
+        let source = persist_project_memory_source(wd, Some("real-session"), &messages).unwrap();
+        let candidate = super::super::coding_memory_records::Candidate {
+            text: "corrected rule".into(), topic: "构建".into(), source_messages: vec![1], supersedes: Vec::new(),
+        };
+        let marker = persist_project_memory_entry(wd, Some("real-session"), &messages, &source, &candidate).unwrap();
+        let file = std::fs::read_dir(directory.path().join(".vivian/memory_entries")).unwrap().next().unwrap().unwrap().path();
+        let metadata: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(file).unwrap()).unwrap();
+        assert_eq!(metadata["source_session"], "real-session");
+        assert_eq!(metadata["source_message_indices"], serde_json::json!([1]));
+        assert_eq!(metadata["observed_at_timestamp_ms"], 200);
+        assert!(metadata["verification"]["verified_at_timestamp_ms"].is_null());
+        let id = marker.strip_prefix("<!-- memory-entry: memory_entries/").unwrap().strip_suffix(".json -->").unwrap();
+        let raw = format!("## 常驻约定\n- user rule\n## 构建\n{marker}\n- old fact\n");
+        let corrected = mark_superseded_entries(&raw, &std::collections::HashSet::from([id.to_string()]));
+        assert!(corrected.contains("已被后续条目替代") && corrected.contains(&marker));
+        assert_eq!(super::super::coding_memory_records::pinned_rules(&raw), super::super::coding_memory_records::pinned_rules(&corrected));
+        let protected = format!("## 常驻约定\n{marker}\n- user rule\n");
+        assert_eq!(mark_superseded_entries(&protected, &std::collections::HashSet::from([id.to_string()])), protected);
+    }
+
+    #[test]
+    fn source_snapshot_is_stable_redacted_and_linked_to_the_real_session() {
+        let directory = tempfile::tempdir().unwrap();
+        let wd = directory.path().to_str().unwrap();
+        let secret = "sk-abcdefghijklmnopqrstuvwxyz1234567890";
+        let mut record = message(CodingRole::ToolResult, &format!("api_key={secret}; result: verified build output"));
+        record.timestamp = 1_700_000_000_123;
+        record.tool_success = Some(true);
+        record.tool_arguments = Some(serde_json::json!({"token":"bare-secret-without-prefix", "command":"cargo test"}));
+        let messages = vec![record];
+        let marker = persist_project_memory_source(wd, Some("actual-session"), &messages).unwrap();
+        assert_eq!(marker, persist_project_memory_source(wd, Some("actual-session"), &messages).unwrap());
+        let sources = directory.path().join(".vivian/memory_sources");
+        let files: Vec<_> = std::fs::read_dir(sources).unwrap().collect();
+        assert_eq!(files.len(), 1);
+        let text = std::fs::read_to_string(files[0].as_ref().unwrap().path()).unwrap();
+        assert!(text.contains("actual-session") && text.contains("cargo test"));
+        assert!(text.contains("REDACTED_SECRET"));
+        assert!(!text.contains(secret) && !text.contains("bare-secret-without-prefix"));
+        assert!(!text.contains("images"));
+        let evidence: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(evidence["observed_until_timestamp_ms"], 1_700_000_000_123_i64);
+        assert_eq!(evidence["verification"]["status"], "unverified");
+        assert!(evidence["verification"]["verified_at_timestamp_ms"].is_null());
+    }
+
+    #[test]
+    fn exact_memory_snapshot_rejects_an_external_newline_edit() {
+        let directory = tempfile::tempdir().unwrap();
+        let wd = directory.path().to_str().unwrap();
+        append_project_memory(wd, "约定").unwrap();
+        let old = read_project_memory_raw(wd).unwrap();
+        let edited = format!("{old}\n");
+        std::fs::write(project_memory_path(wd), &edited).unwrap();
+        assert!(write_project_memory_checked(wd, "模型旧结果", Some(&old)).is_err());
+        assert_eq!(read_project_memory_raw(wd).unwrap(), edited);
+    }
+
+    #[test]
+    fn model_gets_navigation_while_manual_view_keeps_full_memory() {
+        let directory = tempfile::tempdir().unwrap();
+        let wd = directory.path().to_str().unwrap();
+        append_project_memory(wd, "- 禁止自动发布").unwrap();
+        let mut body = String::new();
+        for i in 0..100 { body.push_str(&format!("## 经验{i}\n- {}\n", "长篇细节".repeat(100))); }
+        append_project_memory_checked(wd, &body, read_project_memory_raw(wd).as_deref()).unwrap();
+        let nav = read_project_memory_navigation(wd).unwrap();
+        assert!(nav.chars().count() <= super::super::coding_memory_navigation::NAVIGATION_MAX_CHARS);
+        assert!(nav.contains("禁止自动发布") && nav.contains("经验99"));
+        let full = read_project_memory_raw(wd).unwrap();
+        assert!(full.chars().count() > 8_000 && full.contains("经验0"));
+        assert!(tools_for_mode("minimal").contains(&"read_file"));
+        assert!(tools_for_mode("minimal").contains(&"grep_search"));
+    }
+
+    #[test]
+    fn pressure_compaction_keeps_latest_tool_group_intact() {
+        let history = vec![
+            message(CodingRole::User, "large original request"),
+            message(CodingRole::Assistant, "completed first step"),
+            message(CodingRole::Thinking, "reasoning for latest call"),
+            message(CodingRole::ToolUse, "latest batch"),
+            message(CodingRole::ToolResult, "first result"),
+            message(CodingRole::ToolResult, "second result"),
+        ];
+        let target = super::super::coding_compaction::archive_target(history.len(), true);
+        let split = intact_history_boundary(&history, target);
+        assert_eq!(split, 2);
+        assert_eq!(history[split].role, CodingRole::Thinking);
+        assert_eq!(history[split + 1].role, CodingRole::ToolUse);
+        // Without pressure this short history would remain untouched.
+        assert_eq!(super::super::coding_compaction::archive_target(history.len(), false), 0);
+    }
+
     #[test]
     fn canceled_batch_closes_only_unstarted_calls() {
         let calls = vec![
@@ -5000,7 +5503,7 @@ mod compaction_boundary_tests {
             reasoning_level: "low".into(), goal: None, plan_mode: false, plan: None,
             feedback: Vec::new(), compacted: None, context_start: 0, deliverables: Vec::new(),
             file_changes: Vec::new(), message_feedback: HashMap::new(),
-            message_changes: HashMap::new(), messages: vec![message(CodingRole::User, "old")],
+            message_changes: HashMap::new(), history_loaded: true, stored_message_count: 0, last_reply_preview: None, search_excerpt: None, messages: vec![message(CodingRole::User, "old")],
             status: CodingStatus::Idle, updated_at: 0, stats: CodingStats::default(),
             last_context_tokens: 0, last_context_breakdown: [0, 0, 0], context_window: 128_000,
             work_todos: Vec::new(), turn_changed_paths: Vec::new(),
@@ -5018,7 +5521,7 @@ mod compaction_boundary_tests {
         session.messages.push(result);
         assert_eq!(intact_history_boundary(&session.messages, 3), 1);
         commit_compaction(&mut session, &initial, &None, "original task".into()).unwrap();
-        let service = CodingAgentService { sessions: RwLock::new(BTreeMap::from([("test".into(), session.clone())])) };
+        let service = CodingAgentService { sessions: RwLock::new(session_cache_from_loaded(BTreeMap::from([("test".into(), session.clone())]))) };
         let outgoing = service.build_llm_messages("test", "vivian", "standard");
         let call = outgoing.iter().find(|m| m.tool_calls.as_ref().is_some_and(|calls| !calls.is_empty())).unwrap();
         assert_eq!(call.reasoning.as_deref(), Some("reasoning for file creation"));
@@ -5047,7 +5550,7 @@ mod compaction_boundary_tests {
             reasoning_level: "low".into(), goal: None, plan_mode: false, plan: None,
             feedback: Vec::new(), compacted: None, context_start: 0, deliverables: Vec::new(),
             file_changes: Vec::new(), message_feedback: HashMap::new(),
-            message_changes: HashMap::new(), messages: vec![message(CodingRole::User, "old")],
+            message_changes: HashMap::new(), history_loaded: true, stored_message_count: 0, last_reply_preview: None, search_excerpt: None, messages: vec![message(CodingRole::User, "old")],
             status: CodingStatus::Idle, updated_at: 0, stats: CodingStats::default(),
             last_context_tokens: 0, last_context_breakdown: [0, 0, 0], context_window: 128_000,
             work_todos: Vec::new(), turn_changed_paths: Vec::new(),
@@ -5055,7 +5558,9 @@ mod compaction_boundary_tests {
         let snapshot = session.messages.clone();
         session.messages.push(message(CodingRole::User, "new instruction"));
         session.message_feedback.insert(1, "up".into());
+        session.last_context_tokens = 100_000;
         commit_compaction(&mut session, &snapshot, &None, "old summary".into()).unwrap();
+        assert_eq!(session.last_context_tokens, 0);
         assert_eq!(session.messages.len(), 2);
         assert_eq!(session.messages[0].content, "old");
         assert_eq!(session.messages[1].content, "new instruction");
@@ -5070,7 +5575,7 @@ mod manual_work_callback_tests {
     use super::*;
 
     fn manual_session() -> (CodingAgentService, CodingSession) {
-        let service = CodingAgentService { sessions: RwLock::new(BTreeMap::new()) };
+        let service = CodingAgentService { sessions: RwLock::new(session_cache_from_loaded(BTreeMap::new())) };
         let owner = format!("manual-work-{}", uuid::Uuid::new_v4());
         let session = service.create_session(&owner, "", "standard");
         assert!(!session.delegated_by_companion);

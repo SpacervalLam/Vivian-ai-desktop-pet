@@ -18,3 +18,7 @@ assert.deepEqual(searchSessions(data, '').map(result => result.session.session_i
 assert.equal(searchSessions(indexSessions(Array.from({ length: 60 }, (_, i) => session(String(i), '任务', [], i))), '').length, 50);
 assert.equal(searchSessions(indexSessions([]), '').length, 0);
 console.log('Session search: title/message/workspace matching, ranking, snippets and result limits passed.');
+
+const archived = { ...session('archived', '旧任务', [], 0), search_excerpt: '早期关键约定：禁止自动发布' };
+assert.equal(searchSessions(indexSessions([archived]), '禁止 发布')[0].session.session_id, 'archived');
+assert.equal(archived.messages.length, 0, 'search snippets do not need full message histories');

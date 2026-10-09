@@ -12,6 +12,8 @@ pub struct ConversationTurn {
     pub text: String,
     pub timestamp: f64,
     pub channel: String,
+    #[serde(default)] pub knowledge_source: String,
+    #[serde(default)] pub observer_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sticker: Option<serde_json::Value>,
 }
@@ -104,7 +106,8 @@ pub fn project_conversations(
         }
         if previous_entry.is_some_and(|previous| legacy_cross_mirror(previous, entry)) { continue; }
         previous_entry = Some(entry);
-        let (text, _, _) = crate::cross_character::parse_any_speaker_prefix(&entry.content);
+        let text = if meta_str(entry, "utterance_format") == Some("plain") { entry.content.clone() }
+            else { crate::cross_character::parse_any_speaker_prefix(&entry.content).0 };
         let normalize_person = |person: &str| match person.to_lowercase().as_str() {
             "i" | "me" => character.to_string(),
             "everyone" => "all".into(),
@@ -123,15 +126,15 @@ pub fn project_conversations(
             } else {
                 "user"
             }));
-        let mut participants = BTreeSet::from([speaker.clone(), character.to_string()]);
+        let mut participants = BTreeSet::from([speaker.clone()]);
         if listener == "all" {
-            participants.extend(["user".into(), "vivian".into(), "nana".into()]);
+            if let Some(audience) = entry.metadata["audience"].as_array() { participants.extend(audience.iter().filter_map(|v| v.as_str()).map(str::to_owned)); }
         } else {
             participants.insert(listener.clone());
         }
         // One social floor includes direct speech, group speech and interjections.
         // An independent private roommate exchange has a separate floor, even when interleaved.
-        let lane = if participants.contains("user") {
+        let lane = if participants.contains("user") || listener == "all" {
             "user".to_string()
         } else {
             participants.iter().cloned().collect::<Vec<_>>().join(",")
@@ -144,6 +147,8 @@ pub fn project_conversations(
             timestamp: entry.timestamp,
             channel: meta_str(entry, "channel").unwrap_or("direct").into(),
             sticker: entry.metadata.get("sticker").cloned(),
+            knowledge_source: meta_str(entry, "knowledge_source").unwrap_or("unspecified").into(),
+            observer_id: meta_str(entry, "observer_id").map(str::to_owned),
         };
         let context = lanes.entry(lane.clone()).or_default();
         let explicit_new = entry.metadata["conversation_boundary"] == "new";
@@ -315,6 +320,24 @@ mod tests {
         }
     }
     #[test]
+    fn plain_user_text_keeps_literal_prefix_and_observer_is_not_a_speaker() {
+        let mut e = entry("original", 10.0, "user", serde_json::json!({
+            "speaker":"user","listener":"nana","knowledge_source":"observed","observer_id":"vivian","utterance_format":"plain"}));
+        e.content = "[Nana says to me] 这是用户原文".into();
+        let groups = build_conversations(&[e], "vivian");
+        assert_eq!(groups[0].turns[0].text, "[Nana says to me] 这是用户原文");
+        assert_eq!(groups[0].turns[0].observer_id.as_deref(), Some("vivian"));
+        assert!(!groups[0].participants.contains(&"vivian".to_string()));
+        assert!(groups[0].participants.contains(&"nana".to_string()));
+    }
+    #[test]
+    fn public_speech_does_not_invent_attendees() {
+        let e = entry("broadcast", 10.0, "user", serde_json::json!({"speaker":"user","listener":"all","knowledge_source":"broadcast"}));
+        let groups = build_conversations(&[e], "vivian");
+        assert!(!groups[0].participants.contains(&"nana".to_string()));
+        assert_eq!(groups[0].participants, vec!["user"]);
+    }
+    #[test]
     fn legacy_reverse_delivery_collapses_only_the_mirror_pair() {
         let brain = entry("brain", 10.0, "assistant", serde_json::json!({
             "channel":"cross_character","speaker":"nana","listener":"vivian","knowledge_source":"heard"}));
@@ -402,8 +425,8 @@ mod tests {
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].id, initial[0].id);
         assert_eq!(groups[0].turns.len(), 4);
-        assert_eq!(groups[0].participants, vec!["nana", "user", "vivian"]);
-        assert_eq!(groups[0].title, "与你、Vivian的对话");
+        assert_eq!(groups[0].participants, vec!["nana", "user"]);
+        assert_eq!(groups[0].title, "与你的对话");
         assert_eq!(groups[0].turns[1].listener, "all");
     }
     #[test]

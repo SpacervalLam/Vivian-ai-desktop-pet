@@ -104,6 +104,7 @@ pub fn initialize_record(item: &mut MemoryItem) {
 /// 知识。它不进入长期记忆展示，也不参与事实合并，靠类别而非可达性区分。
 pub fn recallable(item: &MemoryItem) -> bool {
     !item.content.trim().is_empty()
+        && !item.tags.iter().any(|tag| tag == "quick_note")
         && !item.consolidated
         && item.metadata["index_active"] != false
         && matches!(
@@ -175,7 +176,11 @@ pub fn with_evidence(
             .filter(|q| !q.trim().is_empty())
         {
             let source = serde_json::json!({"quote":quote, "conversation_id":meta["conversation_id"],
-                "message_ids":meta["source_message_ids"], "subject":meta["subject"]});
+                "message_ids":meta["source_message_ids"], "subject":meta["subject"],
+                "session_id":meta["source_session_id"], "channel":meta["channel"], "role":meta["source_role"],
+                "speaker":meta["speaker"], "listener":meta["listener"],
+                "knowledge_source":meta["knowledge_source"], "observer_id":meta["observer_id"],
+                "timestamp":meta["source_timestamp"], "known_by":meta["known_by"]});
             if !sources.contains(&source) {
                 sources.push(source);
             }
@@ -194,6 +199,24 @@ mod tests {
         m.memory_type = t.into();
         initialize_record(&mut m);
         m
+    }
+    #[test]
+    fn merged_quotes_preserve_each_speakers_source_and_time() {
+        let old = serde_json::json!({"source_quote":"不吃辣", "speaker":"user", "listener":"nana", "source_timestamp":10, "source_message_ids":["a"], "known_by":["nana"]});
+        let new = serde_json::json!({"source_quote":"我也不吃辣", "speaker":"vivian", "listener":"nana", "source_timestamp":20, "source_message_ids":["b"], "known_by":["nana"]});
+        let merged = with_evidence(new, &old);
+        let sources = merged["evidence_sources"].as_array().unwrap();
+        assert_eq!(sources.len(), 2);
+        assert_eq!(sources[0]["speaker"], "user");
+        assert_eq!(sources[1]["speaker"], "vivian");
+        assert_eq!(sources[0]["timestamp"], 10);
+        assert_eq!(sources[1]["message_ids"], serde_json::json!(["b"]));
+    }
+    #[test]
+    fn legacy_quick_note_is_not_character_recall() {
+        let mut note = item("knowledge");
+        note.tags.push("quick_note".into());
+        assert!(!recallable(&note));
     }
     #[test]
     fn stored_labels_are_not_inferred_or_migrated() {

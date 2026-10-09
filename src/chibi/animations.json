@@ -69,6 +69,7 @@
       "label": "开心",
       "category": "emotion",
       "promptable": true,
+      "characters": ["vivian"],
       "sheet": "/chibi/motion/{character}/{character}-happy-sheet.webp",
       "cols": 4,
       "rows": 3,
@@ -126,7 +127,7 @@
     },
     {
       "name": "sleep",
-      "characters": ["vivian"],
+      "characters": ["vivian", "nana"],
       "label": "入睡",
       "category": "state",
       "promptable": true,
@@ -202,7 +203,7 @@
     },
     {
       "name": "wake",
-      "characters": ["vivian"],
+      "characters": ["vivian", "nana"],
       "label": "睡醒起身",
       "category": "state",
       "promptable": true,
@@ -215,6 +216,7 @@
     },
     {
       "name": "gift",
+      "characters": ["vivian"],
       "label": "害羞递显卡",
       "category": "emote",
       "promptable": true,
@@ -224,6 +226,94 @@
       "frames": 12,
       "loop": false,
       "durations": [100,110,120,120,130,130,140,150,160,160,160,160]
+    },
+    {
+      "name": "remind",
+      "label": "温和提醒",
+      "category": "emote",
+      "promptable": true,
+      "sheet": "/chibi/motion/{character}/{character}-remind-sheet.webp",
+      "cols": 4,
+      "rows": 3,
+      "frames": 12,
+      "loop": false,
+      "durations": [120,130,140,150,160,160,150,140,130,120,110,110]
+    },
+    {
+      "name": "tired",
+      "label": "吃力擦汗",
+      "category": "state",
+      "promptable": true,
+      "sheet": "/chibi/motion/{character}/{character}-tired-sheet.webp",
+      "cols": 4,
+      "rows": 2,
+      "frames": 8,
+      "loop": true,
+      "durations": [160,160,160,160,160,160,160,160]
+    },
+    {
+      "name": "umbrella",
+      "label": "撑伞",
+      "category": "state",
+      "promptable": false,
+      "characters": ["vivian", "nana"],
+      "sheet": "/chibi/motion/{character}/{character}-umbrella-sheet.webp",
+      "cols": 4,
+      "rows": 2,
+      "frames": 8,
+      "loop": true,
+      "durations": [160,160,160,160,160,160,160,160]
+    },
+    {
+      "name": "music",
+      "label": "听歌打拍子",
+      "category": "emote",
+      "promptable": true,
+      "sheet": "/chibi/motion/{character}/{character}-music-sheet.webp",
+      "cols": 4,
+      "rows": 2,
+      "frames": 8,
+      "loop": true,
+      "durations": [160,160,160,160,160,160,160,160]
+    },
+    {
+      "name": "clipboard",
+      "label": "好奇看纸条",
+      "category": "emote",
+      "promptable": true,
+      "sheet": "/chibi/motion/{character}/{character}-clipboard-sheet.webp",
+      "cols": 1,
+      "rows": 1,
+      "frames": 1,
+      "loop": false,
+      "durations": [120]
+    },
+    {
+      "name": "rps-rock",
+      "label": "猜拳石头",
+      "category": "emote",
+      "promptable": false,
+      "characters": ["vivian", "nana"],
+      "sheet": "/chibi/motion/{character}/{character}-rps-rock-sheet.webp",
+      "cols": 1, "rows": 1, "frames": 1, "loop": false, "durations": [2500]
+    },
+    {
+      "name": "rps-scissors",
+      "label": "猜拳剪刀",
+      "category": "emote",
+      "promptable": false,
+      "characters": ["vivian", "nana"],
+      "sheet": "/chibi/motion/{character}/{character}-rps-scissors-sheet.webp",
+      "cols": 1, "rows": 1, "frames": 1, "loop": false, "durations": [2500]
+    },
+    {
+      "name": "rps-paper",
+      "label": "猜拳布",
+      "category": "emote",
+      "promptable": false,
+      "characters": ["vivian", "nana"],
+      "sheet": "/chibi/motion/{character}/{character}-rps-paper-sheet.webp",
+      "cols": 1, "rows": 1, "frames": 1, "loop": false, "durations": [2500]
     }
   ],
   "expression_aliases": {

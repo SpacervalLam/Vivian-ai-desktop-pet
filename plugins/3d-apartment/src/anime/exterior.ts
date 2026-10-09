@@ -424,36 +424,8 @@ function buildShrub(
  * Stage 2 — 近景街道层（路灯 + 湿地）
  * ========================================================================== */
 
-/**
- * 近景街道层：对面楼群 + 路灯 + 街道湿地反光。
- *
- * 这是窗外景收益的大头——六个窗四个朝向，每个朝向望出去都得有真东西。
- * 整层返回后由调用方走标准装配（合批 → 描边 → add → 冻结），不进 FPS
- * 碰撞（阳台栏杆拦着，玩家本来就出不去，碰撞盒纯浪费）。
- *
- * 路灯三盏全在南街：南街是主景观面，灯是"房间里看出去唯一的暖光"。
- * 光晕不靠 Sprite（要守住"零新增透明"预算），灯头 emissive 过 bloom
- * threshold 自然起晕；灯下湿地光斑走 buildWetGround 那套现成画法。
- */
-/* ============================================================================
- * 街道断面常量：建筑 → 人行道 → 路缘 → 车行道 → 排水篦 → 便利店侧人行道
- * 断面几何已由程序化街区（urbanStreets）铺出；这里只保留本模块共用的边界值。
- * ========================================================================== */
-
-/**
- * 街道剖面（沿 +Z，复用本文件顶部的常量与便利店 z 段，单一事实源）：
- *   APT_ZB(6.3) .. 7.6   公寓侧人行道（路灯 LAMP_Z=7.4 在这条上）
- *   7.6 .. 12.6          车行道
- *   12.6 .. 14.0         便利店侧人行道
- * 见 buildStreetscape 顶部注释里的完整剖面；这里只给本模块要用的几个边界。
- * x 取 ±16：覆盖可见视窗（灯列 ±21 之间），更远处由远处地面改成的冷灰沥青兜底。
- */
-const STREET_X0 = -16;
-const STREET_X1 = 16;
 const ROAD_Z0 = 7.6;
 const ROAD_Z1 = 12.6;
-const SIDE_B_Z1 = 14.0;        // 便利店侧人行道外缘（前厅从 14.0 起）
-const CURB_H = 0.14;
 const SURF_Y = -0.008;          // 略高于远处地面(-0.012)，压住它
 
 
@@ -1231,15 +1203,6 @@ function shopSignAtlas(): THREE.Texture {
   return _shopSignAtlas;
 }
 
-/** 给招牌 PlaneGeometry 设置 UV，让它只显示 atlas 的第 kind 行 */
-function shopSignUV(geo: THREE.PlaneGeometry, kind: number) {
-  const rowH = 1 / SHOP_SIGN_COUNT;
-  const y0 = 1 - (kind + 1) * rowH;
-  const y1 = 1 - kind * rowH;
-  const uv = geo.getAttribute('uv') as THREE.BufferAttribute;
-  uv.setXY(0, 0, y1); uv.setXY(1, 1, y1); uv.setXY(2, 0, y0); uv.setXY(3, 1, y0);
-  uv.needsUpdate = true;
-}
 
 /** 一扇窗的状态。夜里一栋楼里这些状态必须混着出现，全亮就假了。 */
 export type WinState =
@@ -2032,51 +1995,6 @@ export function buildApartmentShell(opts?: ApartmentShellOptions): ApartmentShel
     }
   };
 
-  /**
-   * 1F 一户的低模家具。
-   *
-   * 与楼上不同：1F 每户只在正中开一扇 1.15m 宽的窗（窗台压到 0.53m，
-   * 一半还带防盗格栅），从街上能扫到的横向范围就是窗后那三四米。
-   * 所以家具只摆窗后这一段——摆在窗间墙背后的等于白给，不如省下来。
-   * 单间户型：全屋一个亮暗档（bed 区参数忽略）。
-   */
-  const furnishGroundUnit = (
-    cx: number, F: number, zc: number, seed: number, _H: number,
-    liv: ZoneState, _bed: ZoneState,
-    m: RmMats, _mBed: RmMats,
-    cloth: THREE.Material,
-  ) => {
-    void _bed; void _mBed; void _H;
-    const r = makeRng(seed);
-    const O = (dx: number) => cx + dx;
-    const at = (dx: number, dy: number, dz: number) => [O(dx), F + dy, zc + dz] as const;
-    const lc = liv.lit ? cloth : m.cloth;
-    const sofaX = (r() - 0.5) * 0.5;
-
-    // 客厅：沙发 + 茶几 + 电视柜（电视柜正对窗，从街上第一眼看到的是它）
-    put(gbox(1.4 + r() * 0.6, 0.30, 0.74), lc, ...at(sofaX, 0.15, 0.18));
-    put(gbox(1.4 + r() * 0.6, 0.42, 0.14), lc, ...at(sofaX, 0.48, -0.19));
-    put(gbox(0.8 + r() * 0.3, 0.05, 0.46), m.wood, ...at(sofaX, 0.34, 0.2));   // 茶几
-    if (r() < 0.5) {
-      put(gbox(1.5, 0.34, 0.42), m.wood, ...at(0, 0.17, -0.28));   // 电视柜贴后壁
-    } else {
-      put(gbox(1.1, 0.6, 0.38), m.wood, ...at(0, 0.30, -0.26));    // 矮边柜
-      if (r() < 0.6) put(gbox(0.85, 0.5, 0.05), M.dark, ...at(0, 0.63, -0.43));
-    }
-    if (r() < 0.7) put(gbox(1.9 + r() * 0.4, 0.02, 0.76), lc, ...at(sofaX, 0.02, 0.06));
-    // 窗侧一角：书架或餐柜，二选一
-    if (r() < 0.5) {
-      put(gbox(0.5, 1.5, 0.34), m.wood, ...at(1.65, 0.75, -0.26));
-    } else {
-      put(gbox(1.0, 0.85, 0.40), m.wood, ...at(1.6, 0.43, -0.24));
-      put(gbox(0.26, 0.3, 0.26), lc, ...at(1.6, 1.0, -0.24));     // 柜上摆件
-    }
-    if (r() < 0.55) put(new THREE.IcosahedronGeometry(0.22, 0), M.leaf, ...at(-1.7, 0.34, 0.1));
-    if (liv.lit) {
-      if (r() < 0.75) put(gbox(0.34, 0.06, 0.34), M.warmPale, ...at(0, 2.86, 0));      // 吸顶灯（1F 净高 3.36）
-      if (r() < 0.5) put(gbox(0.22, 0.34, 0.22), M.warmPale, ...at(sofaX - 1.3, 1.05, -0.1));  // 落地灯
-    }
-  };
 
   /**
    * 一间能看进去的屋子：结构板 + 室盒内衬 + 低模家具。
@@ -2113,7 +2031,6 @@ export function buildApartmentShell(opts?: ApartmentShellOptions): ApartmentShel
     const { ux0, ux1, F, holes, lit } = o;
     const H = o.h ?? LVL;
     const y0 = F + GAP, y1 = F + H - GAP;
-    const uw = ux1 - ux0;
     const cx = (ux0 + ux1) / 2;
     const livLit = lit;
     const bedLit = o.bedLit ?? livLit;
@@ -2406,7 +2323,7 @@ export function buildApartmentShell(opts?: ApartmentShellOptions): ApartmentShel
   };
 
   /** 阳台盆栽：陶盆 + 一丛叶簇。`dense` 见 `balconyTuft`。 */
-  const potted = (x: number, y: number, z: number, seed: number, dense = false) => {
+  const potted = (x: number, y: number, z: number, _seed: number, dense = false) => {
     put(new THREE.CylinderGeometry(0.105, 0.085, 0.16, 8), toon('#8d7159'), x, y + 0.08, z);
     // 盆土：叶簇是面片，盆口空着会直接看穿到盆底
     put(new THREE.CylinderGeometry(0.095, 0.095, 0.03, 8), toon('#4b3f34'), x, y + 0.155, z);
@@ -2675,8 +2592,6 @@ export function buildApartmentShell(opts?: ApartmentShellOptions): ApartmentShel
    * 外轮廓仍收在 z=ZF 这条线上（结构板补位），所以楼的体量分毫不变，
    * 碰撞盒（APT_WALL_BOXES 里的 apt-south-* 也按 APT_ZF 算）不需要跟着动。 */
   const ROOM_D = APT_ROOM_D;   // 模块级常量（APT_WALL_BOXES 要用同一条）
-  const DEPTHB = DEPTH - ROOM_D;   // 只退南端时的进深
-  const CZB = CZ - ROOM_D / 2;     // 只退南端时的新中心
   /* 住宅层（2~4F）南北两端各退 ROOM_D：外廊侧那三扇窗（卧室大窗 / 洗面所 /
    * 浴室）后面同样要是能看进去的真屋子，北端不退就只能是实心素面 + 贴片玻璃。
    * 两端退的量相同 → 实心块中心不动（仍是 CZ），只改进深。
@@ -3685,11 +3600,6 @@ function signTexture(): THREE.Texture {
   return _sign;
 }
 
-/** 平滑起停：开门/关门都用它，避免线性运动的机械感。 */
-function smoothstep(x: number): number {
-  const t = Math.min(1, Math.max(0, x));
-  return t * t * (3 - 2 * t);
-}
 
 /**
  * 公寓楼体四壁的碰撞盒（外壳 mesh 之外的那部分实心体块）。
@@ -5166,7 +5076,6 @@ export function buildConvenienceStore(): StoreHandle {
 export function buildSubwayEntrance(): THREE.Group {
   const g = new THREE.Group();
   g.name = 'subway-entrance';
-  const r = makeRng(40000);
 
   // 局部工具（与 buildConvenienceStore 同模式）
   const put = (geo: THREE.BufferGeometry, mat: THREE.Material, x: number, y: number, z: number, ry = 0) => {
@@ -5212,7 +5121,7 @@ export function buildSubwayEntrance(): THREE.Group {
   // 位置：街沿南侧建筑带，入口北面正对主街。
   // 东缘 x=-20 与停车场（LOT x0=-19）留 1m，西侧 x=-28 是空地/人行道。
   // 203 阳台（x0,z5.5）→ 本口的视线走廊 z=5.5-0.4375x，沿线上只有平地停车场，畅通。
-  const CX = -24.0, CZ = 16.5;
+  const CX = -24.0;
   const ENTRY_Z = 14.0;          // 入口线（街沿），开口朝 -z
   const W = 8.0;                 // 整口宽度
 
@@ -5519,7 +5428,6 @@ export function buildIzakaya(): {
 } {
   const g = new THREE.Group();
   g.name = 'izakaya';
-  const r = makeRng(41000);
 
   // 局部工具与材质
   const put = (geo: THREE.BufferGeometry, mat: THREE.Material, x: number, y: number, z: number, ry = 0) => {
@@ -7125,7 +7033,7 @@ export function buildSmallPark(): THREE.Group {
   g.add(parkLeaf.build('park-planting-leaves'));
 
   // ---- 5) 长椅（2 张）----
-  for (const [bx, bz, by] of [[PCX - 2, PCZ + 2.5, 0], [PCX + 3.5, PCZ - 2, 0]] as Array<[number, number, number]>) {
+  for (const [bx, bz] of [[PCX - 2, PCZ + 2.5, 0], [PCX + 3.5, PCZ - 2, 0]] as Array<[number, number, number]>) {
     // 座板
     put(gbox(1.2, 0.06, 0.42), PM.wood, bx, 0.42, bz);
     // 靠背

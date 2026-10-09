@@ -1,0 +1,11 @@
+.pet-clipboard { position: absolute; left: 50%; top: 28%; z-index: 50; pointer-events: auto; max-width: 48%; }
+.pet-clipboard-send { display: flex; align-items: center; gap: 6px; padding: 9px 11px; border-radius: 18px; border: 1px solid rgba(170,140,70,.24); background: rgba(255,249,224,.97); color: #806328; box-shadow: 0 4px 14px #30261920, inset 0 1px 0 #ffffffcc; font: 500 12px/1.2 system-ui,sans-serif; white-space: nowrap; cursor: pointer; transition: transform .16s, box-shadow .16s; }
+.is-nana .pet-clipboard-send { background: rgba(246,237,255,.97); color: #7955a3; border-color: #ad8cc33d; }
+.pet-clipboard-send:hover:not(:disabled) { transform: translateY(-2px); box-shadow: 0 6px 18px #30261928; }
+.pet-clipboard-send:active:not(:disabled) { transform: scale(.96); }
+.pet-clipboard-send:focus-visible { outline: 2px solid currentColor; outline-offset: 3px; }
+.pet-clipboard-send:disabled { opacity: .7; cursor: wait; }
+.pet-clipboard-error { display: block; margin-top: 6px; padding: 7px 9px; border-radius: 10px; background: #fff9f5; color: #a34936; font: 12px/1.4 system-ui; overflow-wrap: anywhere; }
+.pet-clipboard-spinner { animation: clipboard-spin 1s linear infinite; }
+@keyframes clipboard-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .pet-clipboard-send { transition: none; } .pet-clipboard-spinner { animation: none; } }

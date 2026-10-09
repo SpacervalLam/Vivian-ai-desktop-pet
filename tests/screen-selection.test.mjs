@@ -1,0 +1,13 @@
+import assert from 'node:assert/strict';
+import { build } from 'esbuild';
+const bundle = await build({ entryPoints: ['src/utils/screenSelection.ts'], bundle: true, write: false, platform: 'node', format: 'esm' });
+const { selectionRect, captureRegion } = await import('data:text/javascript;base64,' + Buffer.from(bundle.outputFiles[0].text).toString('base64'));
+const viewport = { width: 1280, height: 720 };
+assert.deepEqual(selectionRect({x:800,y:600},{x:200,y:100},viewport), {x:200,y:100,width:600,height:500});
+assert.deepEqual(selectionRect({x:10,y:20},{x:-30,y:900},viewport), {x:0,y:20,width:10,height:700});
+assert.deepEqual(captureRegion({x:100,y:50,width:200,height:100},viewport,{width:2560,height:1440}), {x:200,y:100,width:400,height:200});
+assert.deepEqual(captureRegion({x:0.5,y:0.5,width:2,height:2},{width:100,height:100},{width:150,height:150}), {x:0,y:0,width:4,height:4});
+assert.deepEqual(captureRegion({x:1200,y:650,width:1000,height:1000},viewport,viewport), {x:1200,y:650,width:80,height:70});
+assert.equal(captureRegion({x:0,y:0,width:1,height:1},viewport,viewport), null);
+assert.equal(captureRegion({x:0,y:0,width:10,height:10},{width:0,height:0},viewport), null);
+console.log('Screen selection: reverse drag, edge clamping, fractional and mixed DPI pixel mapping passed');

@@ -600,7 +600,7 @@ export function createSakuraStation(scene: THREE.Scene) {
        * 粉带 / 薄荷带）都画在 CAR_HW+.014 处，外皮 84.604；车号原来也在
        * +.014，等于埋在线条实体里面，数字被黑线横切一刀。改 +.034 后车号
        * 浮在线条外 5mm，完整可读。 */
-      decal('num-'+num,256,80,.66,.20,trackX+sx*(CAR_HW+.034),CAR_Y0+.20,cz+cabAt*6.6,sx>0?Math.PI/2:-Math.PI/2,.06,(c,w,h)=>{
+      decal('num-'+num,256,80,.66,.20,trackX+sx*(CAR_HW+.034),CAR_Y0+.20,cz+cabAt*6.6,sx>0?Math.PI/2:-Math.PI/2,.06,(c,w,_h)=>{
         c.fillStyle='#2b3339';c.textAlign='center';c.font='bold 46px "Microsoft YaHei", sans-serif';
         c.fillText(num,w/2,56,w-8);
       });

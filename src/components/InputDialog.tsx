@@ -4,6 +4,8 @@ import { listen, emit, type UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useTranslation } from 'react-i18next';
 import { getCharacterId } from '../characterContext';
+import { ArrowUp, LockKeyhole, Mic, Square, Users, X } from 'lucide-react';
+import './InputDialog.css';
 
 export interface InputDialogProps {
   onSend?: (text: string, whisper?: boolean) => void;
@@ -15,51 +17,11 @@ export interface InputDialogProps {
   autoStartVoice?: boolean;
   /** 群发模式：居中显示，发送时同时向所有角色发送消息 */
   broadcast?: boolean;
-  /** 侧边栏模式：在 SideChat 窗口内渲染，跳过点击穿透管理，关闭时不隐藏窗口 */
-  sideChat?: boolean;
+  /** Independent cursor-positioned input window. */
+  standalone?: boolean;
   /** 显式指定目标角色 ID（共享窗口场景，覆盖 getCharacterId()） */
   characterId?: string;
-  /** 广播模式是否激活（sideChat 切换用） */
-  broadcastActive?: boolean;
-  /** 切换广播模式回调（sideChat 用） */
-  onToggleBroadcast?: () => void;
 }
-
-const ChatIcon: React.FC = () => (
-  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-  </svg>
-);
-
-const MicIcon: React.FC<{ recording: boolean }> = ({ recording }) => (
-  <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
-    <path
-      d="M12 15a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3z"
-      fill={recording ? '#E53935' : '#6B6B6B'}
-    />
-    <path
-      d="M6 12a6 6 0 0 0 12 0M12 18v3"
-      stroke={recording ? '#E53935' : '#6B6B6B'}
-      strokeWidth="1.6"
-      strokeLinecap="round"
-    />
-    {recording && (
-      <circle cx="12" cy="12" r="11" stroke="#E53935" strokeWidth="1" opacity="0.5">
-        <animate attributeName="r" values="11;13;11" dur="1.2s" repeatCount="indefinite" />
-        <animate attributeName="opacity" values="0.5;0;0.5" dur="1.2s" repeatCount="indefinite" />
-      </circle>
-    )}
-  </svg>
-);
-
-const SendIcon: React.FC<{ disabled: boolean }> = ({ disabled }) => (
-  <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
-    <path
-      d="M4 12l16-8-6 16-3-7-7-1z"
-      fill={disabled ? '#9E9E9E' : '#ffffff'}
-    />
-  </svg>
-);
 
 const InputDialog: React.FC<InputDialogProps> = ({
   onSend,
@@ -68,7 +30,7 @@ const InputDialog: React.FC<InputDialogProps> = ({
   visible = true,
   autoStartVoice = false,
   broadcast = false,
-  sideChat = false,
+  standalone = false,
   characterId: characterIdProp,
 }) => {
   const { t } = useTranslation();
@@ -104,32 +66,6 @@ const InputDialog: React.FC<InputDialogProps> = ({
       ? (charId === 'nana' ? 'input_dialog.whisper_nana' : 'input_dialog.whisper_vivian')
       : (charId === 'nana' ? 'input_dialog.placeholder_nana' : 'input_dialog.placeholder_vivian');
 
-  // 计算输入框宽度：
-  // - broadcast 模式：固定 560px（独立窗口居中）
-  // - sideChat 模式：胶囊按容器宽度自适应（width: 100%），不设固定值
-  // - 角色私聊模式：按窗口宽度自适应，Nana 窗口较宽，缩小到窗口宽度的 1/1.3
-  const [dialogWidth, setDialogWidth] = useState<number>(560);
-  useEffect(() => {
-    if (broadcast) {
-      setDialogWidth(560);
-      return;
-    }
-    if (sideChat) {
-      // sideChat 分支使用宽度 100% 的胶囊，此处仅占位
-      setDialogWidth(0);
-      return;
-    }
-    const charId = getCharacterId();
-    // Nana 窗口宽度 422px，输入框宽度 = 422 / 1.3 ≈ 325px
-    // Vivian 窗口宽度 355.33px，输入框宽度 = 355.33 / 1.0 = 355.33px（兜底 560 被 maxWidth 夹住）
-    if (charId === 'nana') {
-      const winWidth = 422;
-      setDialogWidth(Math.round(winWidth / 1.3));
-    } else {
-      setDialogWidth(560);
-    }
-  }, [broadcast, sideChat]);
-
   useEffect(() => {
     setShow(visible);
   }, [visible]);
@@ -158,32 +94,14 @@ const InputDialog: React.FC<InputDialogProps> = ({
     };
   }, [broadcast]);
 
-  // sideChat 模式：窗口失焦时关闭输入框（用户点击了侧边栏窗口外部）
-  useEffect(() => {
-    if (!sideChat) return;
-    let unlistenFocus: UnlistenFn | undefined;
-    let cancelled = false;
-    void (async () => {
-      const win = getCurrentWindow();
-      unlistenFocus = await win.onFocusChanged(({ payload: focused }) => {
-        if (!focused) handleClose();
-      });
-      if (cancelled) { unlistenFocus?.(); unlistenFocus = undefined; }
-    })();
-    return () => {
-      cancelled = true;
-      unlistenFocus?.();
-      unlistenFocus = undefined;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sideChat]);
+
 
   // 组件卸载时自动停止录音，防止 AsrManager.is_recording 状态泄漏到其他窗口
   // （如 ChatWindow 调用 start_recognition 时会因 "已在进行中" 而失败）
   useEffect(() => {
     return () => {
       if (recordingRef.current) {
-        void invoke('stop_recognition', { characterId: getCharacterId() ?? undefined }).catch(() => {});
+        void invoke('stop_recognition', { characterId: charId ?? undefined }).catch(() => {});
       }
     };
   }, []);
@@ -231,7 +149,7 @@ const InputDialog: React.FC<InputDialogProps> = ({
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !sideChat) {
+      if (e.key === 'Escape') {
         e.preventDefault();
         onEscape?.();
         handleClose();
@@ -247,8 +165,8 @@ const InputDialog: React.FC<InputDialogProps> = ({
     stopRecording();
     window.setTimeout(() => {
       onClose?.();
-      // broadcast 独立窗口模式：ESC/发送后隐藏窗口（sideChat 模式窗口常驻，不隐藏）
-      if (broadcast && !sideChat) {
+      // 共享快捷输入窗口由宿主负责关闭。
+      if (broadcast && !standalone) {
         void getCurrentWindow().hide().catch(() => {});
       }
     }, 200);
@@ -330,10 +248,6 @@ const InputDialog: React.FC<InputDialogProps> = ({
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     // Tab 键切换悄悄话模式（仅私聊模式可用）
-    if (e.key === 'Tab' && sideChat) {
-      e.preventDefault();
-      return;
-    }
     if (e.key === 'Tab' && !broadcast) {
       e.preventDefault();
       setWhisper((w) => !w);
@@ -371,7 +285,7 @@ const InputDialog: React.FC<InputDialogProps> = ({
       userStoppedRef.current = false;
       manualStopRef.current = false;
       asrBaseLenRef.current = inputRef.current?.value.length ?? 0;
-      await invoke('start_recognition', { characterId: getCharacterId() ?? undefined });
+      await invoke('start_recognition', { characterId: charId ?? undefined });
       setRecording(true);
     } catch (e) {
       const msg = typeof e === 'string' ? e : (e instanceof Error ? e.message : String(e));
@@ -387,7 +301,7 @@ const InputDialog: React.FC<InputDialogProps> = ({
     userStoppedRef.current = !silent;
     manualStopRef.current = !silent;
     try {
-      await invoke('stop_recognition', { characterId: getCharacterId() ?? undefined });
+      await invoke('stop_recognition', { characterId: charId ?? undefined });
     } catch (e) {
       const msg = typeof e === 'string' ? e : (e instanceof Error ? e.message : String(e));
       console.warn('语音识别停止失败:', e);
@@ -535,283 +449,45 @@ const InputDialog: React.FC<InputDialogProps> = ({
   if (!show) return null;
 
   const canSend = value.trim().length > 0 || draftImages.length > 0;
-  // 悄悄话模式：深色配色，仅私聊模式生效（broadcast 永远 false）
-  const isWhisper = whisper && !broadcast;
-  // 深色外观：悄悄话 或 sideChat（匹配深色消息气泡）
-  const isDark = isWhisper || sideChat;
 
-  // === sideChat 模式：iOS iMessage 风格 ===
-  if (sideChat) {
-    return (
-      <div
-        style={{
-          flexShrink: 0,
-          alignSelf: 'center',
-          width: '100%',
-          display: 'flex',
-          flexDirection: 'column',
-          alignItems: 'center',
-          gap: 6,
-          background: 'transparent',
-          animation: 'vivian-input-fade 0.2s ease',
-        }}
-      >
-        <style>{`
-          @keyframes vivian-input-fade {
-            from { opacity: 0; }
-            to { opacity: 1; }
-          }
-          @keyframes vivian-input-rise {
-            from { opacity: 0; transform: translateY(8px); }
-            to { opacity: 1; transform: translateY(0); }
-          }
-        `}</style>
-        {/* 图片草稿栏（sideChat 深色风） */}
-        {draftImages.length > 0 && (
-          <div style={{
-            display: 'flex', gap: 6,
-            background: 'rgba(45, 45, 55, 0.75)',
-            backdropFilter: 'blur(20px) saturate(180%)',
-            WebkitBackdropFilter: 'blur(20px) saturate(180%)',
-            padding: '6px 8px', borderRadius: 14,
-            border: '1px solid rgba(255,255,255,0.12)',
-            overflowX: 'auto', scrollbarWidth: 'none', msOverflowStyle: 'none',
-            maxWidth: '100%', animation: 'vivian-input-rise 0.2s ease',
-          }}>
-            {draftImages.map((img) => (
-              <div key={img.id} style={{ position: 'relative', flexShrink: 0, width: 44, height: 44 }}>
-                <img src={img.dataUrl} alt={img.name}
-                  style={{ width: '100%', height: '100%', objectFit: 'cover', borderRadius: 8, border: '1px solid rgba(255,255,255,0.15)' }} />
-                <button type="button" title="移除"
-                  onClick={() => setDraftImages((prev) => prev.filter((d) => d.id !== img.id))}
-                  style={{
-                    position: 'absolute', top: -4, right: -4, width: 15, height: 15, borderRadius: '50%',
-                    border: 'none', background: 'rgba(0,0,0,0.7)', color: '#fff',
-                    display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    cursor: 'pointer', fontSize: 10, lineHeight: 1, padding: 0,
-                  }}
-                >✕</button>
-              </div>
-            ))}
-          </div>
-        )}
-        <div
-          style={{
-            width: '100%',
-            display: 'flex',
-            alignItems: 'center',
-            gap: 8,
-            padding: '7px 8px 7px 14px',
-            background: 'rgba(45, 45, 55, 0.75)',
-            backdropFilter: 'blur(20px) saturate(180%)',
-            WebkitBackdropFilter: 'blur(20px) saturate(180%)',
-            borderRadius: 22,
-            border: '1px solid rgba(255, 255, 255, 0.12)',
-            boxShadow: '0 1px 4px rgba(0, 0, 0, 0.3)',
-            animation: 'vivian-input-rise 0.2s ease',
-          }}
-          onMouseDown={(e) => e.stopPropagation()}
-        >
-          <input
-            ref={inputRef}
-            type="text"
-            value={value}
-            placeholder={t(placeholderKey)}
-            onChange={(e) => setValue(e.target.value)}
-            onPaste={(e) => {
-              const files = Array.from(e.clipboardData?.files ?? []);
-              const imgs = files.filter((f) => f.type.startsWith('image/'));
-              if (imgs.length > 0) { e.preventDefault(); addDraftImages(imgs); }
-            }}
-            onKeyDown={handleKeyDown}
-            style={{
-              flex: 1,
-              border: 'none',
-              outline: 'none',
-              background: 'transparent',
-              color: '#F0F0F0',
-              fontSize: 14,
-              fontFamily: 'inherit',
-              padding: '6px 0',
-              minWidth: 0,
-              caretColor: '#0A84FF',
-            }}
-          />
-          <button
-            onClick={toggleRecording}
-            aria-label="voice"
-            title={recording ? t('input_dialog.stop_recording') : t('input_dialog.voice_input')}
-            style={{
-              width: 28,
-              height: 28,
-              display: 'inline-flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              border: 'none',
-              borderRadius: '50%',
-              background: recording ? 'rgba(229, 57, 53, 0.15)' : 'transparent',
-              cursor: 'pointer',
-              flexShrink: 0,
-            }}
-          >
-            <MicIcon recording={recording} />
-          </button>
-          <button
-            onClick={handleSend}
-            disabled={!canSend}
-            aria-label="send"
-            title={t('input_dialog.send')}
-            style={{
-              width: 30,
-              height: 30,
-              display: 'inline-flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              border: 'none',
-              borderRadius: '50%',
-              background: canSend ? '#0A84FF' : 'rgba(255, 255, 255, 0.08)',
-              cursor: canSend ? 'pointer' : 'default',
-              flexShrink: 0,
-              transition: 'background 0.2s ease',
-            }}
-          >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
-              <path
-                d="M12 19V5M5 12l7-7 7 7"
-                stroke={canSend ? '#fff' : '#666'}
-                strokeWidth="2.2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
-            </svg>
-          </button>
-        </div>
-      </div>
-    );
-  }
-
-  // === 默认模式（角色私聊 / broadcast） ===
+  const mode = broadcast ? 'broadcast' : charId === 'nana' ? 'nana' : 'vivian';
+  const name = broadcast ? t('input_dialog.broadcast_label', { defaultValue: '广播' }) : mode === 'nana' ? 'Nana' : 'Vivian';
   return (
-    <div
-      style={{
-        position: 'fixed',
-        inset: 0,
-        display: 'flex',
-        alignItems: broadcast ? 'center' : 'flex-end',
-        justifyContent: 'center',
-        paddingBottom: broadcast ? 0 : 80,
-        zIndex: 9000,
-        background: 'transparent',
-        animation: 'vivian-input-fade 0.2s ease',
+    <div className={'quick-compose-shell' + (standalone ? ' is-standalone' : '')}
+      onPaste={(event) => {
+        const files = Array.from(event.clipboardData.files).filter(file => file.type.startsWith('image/'));
+        if (files.length) { event.preventDefault(); addDraftImages(files); }
       }}
-      onMouseDown={(e) => {
-        if (e.target === e.currentTarget) handleClose();
-      }}
-    >
-      <style>{`
-        @keyframes vivian-input-fade {
-          from { opacity: 0; }
-          to { opacity: 1; }
-        }
-        @keyframes vivian-input-rise {
-          from { opacity: 0; transform: translateY(12px) scale(0.98); }
-          to { opacity: 1; transform: translateY(0) scale(1); }
-        }
-      `}</style>
-      <div
-        style={{
-          width: dialogWidth,
-          maxWidth: '90vw',
-          display: 'flex',
-          alignItems: 'center',
-          gap: 6,
-          padding: '8px 10px 8px 14px',
-          background: isDark ? 'rgba(38, 38, 44, 0.98)' : 'rgba(255,255,255,0.98)',
-          backdropFilter: 'blur(20px) saturate(180%)',
-          WebkitBackdropFilter: 'blur(20px) saturate(180%)',
-          borderRadius: 16,
-          boxShadow: isDark ? '0 8px 24px rgba(0, 0, 0, 0.45)' : '0 8px 24px rgba(0, 0, 0, 0.12)',
-          border: isDark ? '1.5px solid #4A4A55' : '1.5px solid #E0DCD6',
-          animation: 'vivian-input-rise 0.22s cubic-bezier(0.2, 0.8, 0.2, 1)',
-          fontFamily: 'inherit',
-        }}
-        onMouseDown={(e) => e.stopPropagation()}
-      >
-        <span
-          style={{
-            color: isDark ? '#8A8A95' : '#9E9E9E',
-            display: 'flex',
-            alignItems: 'center',
-            flexShrink: 0,
-            marginRight: 4,
-          }}
-        >
-          <ChatIcon />
-        </span>
-        <input
-          ref={inputRef}
-          type="text"
-          value={value}
-          placeholder={t(placeholderKey)}
-          onChange={(e) => setValue(e.target.value)}
-          onKeyDown={handleKeyDown}
-          title={!whisper && !broadcast ? t('input_dialog.whisper_hint') : undefined}
-          style={{
-            flex: 1,
-            border: 'none',
-            outline: 'none',
-            background: 'transparent',
-            color: isDark ? '#EAEAEA' : '#2C2C2C',
-            fontSize: 15,
-            fontFamily: 'inherit',
-            padding: '8px 4px',
-            minWidth: 0,
-            caretColor: isDark ? '#B0B0C0' : '#2C2C2C',
-          }}
-        />
-        <button
-          onClick={toggleRecording}
-          aria-label="voice"
-          title={recording ? t('input_dialog.stop_recording') : t('input_dialog.voice_input')}
-          style={{
-            width: 32,
-            height: 32,
-            display: 'inline-flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            border: 'none',
-            borderRadius: 10,
-            background: recording ? 'rgba(229, 57, 53, 0.10)' : 'transparent',
-            cursor: 'pointer',
-            flexShrink: 0,
-            transition: 'background 0.2s ease',
-          }}
-        >
-          <MicIcon recording={recording} />
-        </button>
-        <button
-          onClick={handleSend}
-          disabled={!canSend}
-          aria-label="send"
-          title={t('input_dialog.send')}
-          style={{
-            width: 36,
-            height: 32,
-            display: 'inline-flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            border: 'none',
-            borderRadius: 10,
-            background: canSend ? (isDark ? '#5C5C8A' : '#2C2C2C') : 'transparent',
-            cursor: canSend ? 'pointer' : 'not-allowed',
-            flexShrink: 0,
-            transition: 'all 0.2s ease',
-            marginLeft: 2,
-          }}
-        >
-          <SendIcon disabled={!canSend} />
-        </button>
-      </div>
+      onMouseDown={(event) => { if (event.target === event.currentTarget) handleClose(); }}>
+      <section className={`quick-compose quick-compose--${mode}${whisper && !broadcast ? ' is-whisper' : ''}`}
+        aria-label={name} onMouseDown={event => event.stopPropagation()}>
+        <header className="quick-compose-header">
+          <span className="quick-compose-identity" aria-hidden>{broadcast ? <Users size={18} /> : mode === 'nana' ? 'N' : 'V'}</span>
+          <span className="quick-compose-name">{name}</span>
+          {!broadcast && <button className="quick-compose-whisper" type="button" aria-pressed={whisper}
+            title={t('input_dialog.whisper_hint')} onClick={() => setWhisper(previous => !previous)}>
+            <LockKeyhole size={13} />{whisper ? t('input_dialog.whisper_label', { defaultValue: '悄悄话' }) : null}
+          </button>}
+          <button className="quick-compose-close" type="button" aria-label={t('input_dialog.close', { defaultValue: '关闭' })} title="Esc" onClick={handleClose}><X size={17} /></button>
+        </header>
+        {draftImages.length > 0 && <div className="quick-compose-drafts">
+          {draftImages.map(image => <button type="button" key={image.id} title={t('input_dialog.remove_image', { defaultValue: '移除图片' })}
+            onClick={() => setDraftImages(images => images.filter(item => item.id !== image.id))}>
+            <img src={image.dataUrl} alt={image.name} /><span><X size={10} /></span>
+          </button>)}
+        </div>}
+        <div className="quick-compose-row">
+          <input ref={inputRef} type="text" value={value} placeholder={t(placeholderKey)} aria-label={t(placeholderKey)}
+            onChange={event => setValue(event.target.value)} onKeyDown={handleKeyDown} />
+          <button className={`quick-compose-voice${recording ? ' is-recording' : ''}`} type="button" onClick={toggleRecording}
+            aria-label={recording ? t('input_dialog.stop_recording') : t('input_dialog.voice_input')} aria-pressed={recording}
+            title={recording ? t('input_dialog.stop_recording') : t('input_dialog.voice_input')}>
+            {recording ? <Square size={15} fill="currentColor" /> : <Mic size={19} />}
+          </button>
+          <button className="quick-compose-send" type="button" onClick={() => void handleSend()} disabled={!canSend}
+            aria-label={t('input_dialog.send')} title={t('input_dialog.send')}><ArrowUp size={20} strokeWidth={2.4} /></button>
+        </div>
+      </section>
     </div>
   );
 };

@@ -4,6 +4,7 @@ export interface SearchableSession {
   working_directory: string;
   updated_at: number;
   status: string;
+  search_excerpt?: string;
   messages?: { role: string; content: string }[];
 }
 
@@ -11,6 +12,7 @@ export function indexSessions<T extends SearchableSession>(sessions: T[]) {
   return sessions.map(session => {
     const messages = (session.messages ?? []).filter(message => ['user', 'assistant'].includes(message.role))
       .map(message => message.content.replace(/\s+/g, ' ').trim()).filter(Boolean);
+    if (session.search_excerpt) messages.push(session.search_excerpt);
     return { session, messages, text: [session.title, session.working_directory, ...messages].join('\n').toLocaleLowerCase() };
   });
 }

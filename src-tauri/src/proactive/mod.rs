@@ -2153,6 +2153,7 @@ impl ProactiveOrchestrator {
     ///   （持续高位只提醒一次，降回正常后再次升高才会重新提醒）
     /// - 冷却兜底（默认 30 分钟），防止指标在阈值附近抖动导致反复提醒
     fn maybe_system_pressure_reminder(&self, context: &TickContext, now: f64) -> bool {
+        if crate::companion_runtime::resource_feedback_enabled() { return false; }
         // 无论开关如何都跟踪转换状态，避免配置中途开启时误把存量高位当转换
         let metrics = self
             .world_provider
@@ -2603,7 +2604,7 @@ impl ProactiveOrchestrator {
             }
         }
 
-        if !self.config.read().enable_music_trigger {
+        if !self.config.read().enable_music_trigger || crate::companion_runtime::music_feedback_enabled() {
             return false;
         }
 

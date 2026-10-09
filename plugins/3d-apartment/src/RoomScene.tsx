@@ -31,7 +31,7 @@ import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { FPSControls, Collider, FPS_NEAR_MIN, FPS_NEAR_MAX } from './anime/fpsControls';
-import { buildFurnitureColliders, buildWallColliders, buildSceneColliders, buildBoxColliders, pickOverheadSlabs } from './anime/collider';
+import { buildFurnitureColliders, buildWallColliders, buildSceneColliders, buildBoxColliders } from './anime/collider';
 import { PetAgent } from './agents/usePetAgent';
 import { buildNavWorld } from './agents/navWorld';
 import { buildObstacles } from './agents/navGrid';
@@ -1949,12 +1949,7 @@ export function RoomScene({ onDisposeReady }: RoomSceneProps = {}) {
 
     const P = layout.props;
 
-    /**
-     * 天花板挂件组：天花板也是朝内的单面（法线朝下），相机升到天花板上方向下
-     * 俯视时它被背面剔除，吊灯/吸顶灯这种实体必须跟着一起让开。阳台露天无天花，
-     * 不受影响。
-     */
-    const ceilingY = layout.room.height;
+    /** 天花板挂件随天花板一起让开，阳台露天区域不受影响。 */
     const ceilingDecor = new THREE.Group();
     unitGroup.add(ceilingDecor);
 

@@ -180,8 +180,8 @@ fn matches_entity_scope(m: &MemoryItem, scope: &EntityScope) -> bool {
 ///
 /// 相关性定义（满足任一即相关）：
 /// - 无 metadata 的记忆（普通 ShortTerm/LongTerm）：视为相关
-/// - `knowledge_source == "direct"`：用户直接对话，相关
-/// - `knowledge_source == "broadcast"`：用户当众说的，自己是被搭话的听众之一，相关
+/// - `known_by` 明确列出当前角色时相关；否则遵循实际参与者和旁观者
+/// - 旧广播没有完整听众名单时，兼容当前角色独立记忆库中的广播记录
 /// - `speaker == char_id || listener == char_id`：自己参与的跨角色对话，相关
 /// - `observer_id == char_id`：自己旁观到的，相关
 /// - 其他情况（如另一对角色之间的对话）：不相关，过滤掉
@@ -193,50 +193,7 @@ fn matches_entity_scope(m: &MemoryItem, scope: &EntityScope) -> bool {
 /// speaker 是 "user"，两个 ID 都不等于 char_id。漏掉这一条会让广播内容被当成
 /// "与我无关的别人的对话"整体过滤掉——修好了语义却想不起来，等于没修。
 pub fn is_relevant_to_entity(m: &MemoryItem, char_id: &str) -> bool {
-    // 无 metadata 或非对象：视为普通记忆，保留
-    let obj = match m.metadata.as_object() {
-        Some(o) => o,
-        None => return true,
-    };
-
-    // 无 speaker/listener/observer_id 字段：视为普通记忆，保留
-    let has_entity_fields = obj.contains_key("speaker")
-        || obj.contains_key("listener")
-        || obj.contains_key("observer_id")
-        || obj.contains_key("knowledge_source");
-    if !has_entity_fields {
-        return true;
-    }
-
-    // knowledge_source == "direct"（用户直接对话）或 "broadcast"（用户当众对所有人说）：相关
-    if obj
-        .get("knowledge_source")
-        .and_then(|v| v.as_str())
-        .map(|s| s == "direct" || s == "broadcast")
-        .unwrap_or(false)
-    {
-        return true;
-    }
-
-    // speaker 或 listener == char_id：自己参与的对话，相关
-    let speaker = obj.get("speaker").and_then(|v| v.as_str()).unwrap_or("");
-    let listener = obj.get("listener").and_then(|v| v.as_str()).unwrap_or("");
-    if speaker == char_id || listener == char_id {
-        return true;
-    }
-
-    // observer_id == char_id：自己旁观的，相关
-    if obj
-        .get("observer_id")
-        .and_then(|v| v.as_str())
-        .map(|s| s == char_id)
-        .unwrap_or(false)
-    {
-        return true;
-    }
-
-    // 其他情况：不相关（如另一对角色之间的对话）
-    false
+    super::provenance::visible_to(&m.metadata, char_id)
 }
 
 fn matches_keywords(m: &MemoryItem, keywords: &[String]) -> bool {
@@ -563,13 +520,9 @@ mod tests {
         );
     }
 
-    /// 既有行为不能被这次改动带偏：`knowledge_source == "direct"` 是短路判定。
-    ///
-    /// 记忆库是**每角色独立**的，所以 direct 记忆落在谁的库里就是"用户跟谁说的"，
-    /// listener 校验对它是冗余的。这里把它钉住，避免有人"顺手"收紧成
-    /// `knowledge_source == "direct" && listener == char_id` 而误伤所有私聊记忆。
+    /// Explicit participants are authoritative even for direct speech.
     #[test]
-    fn test_direct_source_short_circuits_listener_check() {
+    fn test_direct_source_respects_listener() {
         let mut m = make_item("d1", "[User says to me] 只跟Vivian说的话", 0.6);
         m.metadata = serde_json::json!({
             "channel": "direct",
@@ -580,8 +533,8 @@ mod tests {
         });
         assert!(is_relevant_to_entity(&m, "vivian"));
         assert!(
-            is_relevant_to_entity(&m, "nana"),
-            "direct 是短路判定，listener 不参与——这是既有约定，改动前请先确认原因"
+            !is_relevant_to_entity(&m, "nana"),
+            "direct 不能让未参与、未旁观的角色知道这条记忆"
         );
     }
 }

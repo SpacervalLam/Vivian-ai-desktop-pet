@@ -8,13 +8,11 @@ use chrono::Timelike;
 use serde_json::json;
 use tauri::{Emitter, Manager, State};
 
-use crate::cross_character::build_speaker_prefix;
 use crate::error::VivianResult;
 use crate::memory::types::MemoryType;
-use crate::providers::base::LLMRequest;
 use crate::resilience::classify_llm_error_from_str;
 use crate::state::AppState;
-use crate::types::response::{AiResponse, ChatMessage, MessageImage};
+use crate::types::response::{AiResponse, MessageImage};
 
 fn err_str(e: impl std::fmt::Display) -> String {
     e.to_string()
@@ -77,7 +75,7 @@ fn seal_episode_on_close(
 ///
 /// 主 LLM API（`config.ai` 的 api_key / endpoint / model）是必须配置的；
 /// 未配置时返回 false，调用方应发送 `chat:config_error` 事件并终止流程。
-fn main_api_configured(state: &State<'_, Arc<AppState>>) -> bool {
+fn main_api_configured(state: &AppState) -> bool {
     if let Some(router) = state.model_router.read().as_ref() {
         return router.has_main_provider();
     }
@@ -299,12 +297,24 @@ pub async fn send_message_stream(
     file_metadata: Option<serde_json::Value>,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
+    send_message_stream_impl(state.inner(), message, stream_id, character_id, channel, whisper, file_metadata, app, None).await.map(|_| ())
+}
+
+async fn send_message_stream_impl(
+    state: &Arc<AppState>, message: String, stream_id: String, character_id: Option<String>,
+    channel: Option<String>, whisper: Option<bool>, file_metadata: Option<serde_json::Value>,
+    app: tauri::AppHandle, visual_evidence: Option<&str>,
+) -> Result<Option<AiResponse>, String> {
     let char_id = character_id
         .clone()
         .unwrap_or_else(|| state.active_character_id.read().clone());
     let channel_str = channel.clone().unwrap_or_else(|| "wechat".to_string());
     let is_whisper = whisper.unwrap_or(false);
 
+    if crate::companion_quiet::active() {
+        let _ = app.emit("chat:cancelled", json!({"stream_id":stream_id,"character_id":char_id,"channel":channel_str}));
+        return Ok(None);
+    }
     if message.trim().is_empty() {
         return Err("消息不能为空".to_string());
     }
@@ -319,7 +329,7 @@ pub async fn send_message_stream(
             "chat:config_error",
             json!({ "reason": "no_main_api", "stream_id": &stream_id, "character_id": &char_id, "channel": &channel_str }),
         );
-        return Ok(());
+        return Ok(None);
     }
 
     let instance = match state.get_character(character_id.as_deref()) {
@@ -363,7 +373,7 @@ pub async fn send_message_stream(
                 "channel": &channel_str,
             }),
         );
-        return Ok(());
+        return Ok(None);
     }
 
     // Busy 状态下微信消息延后处理：角色正在忙，不会立即看到微信
@@ -394,7 +404,7 @@ pub async fn send_message_stream(
     // 当前角色让位：不生成回复、不唤醒、不写对话历史，仅以旁观视角记录消息后静默结束。
     // 用户 @ 提及的路由由前端完成，这里补足"裸名点名"（如"Nana你觉得呢"）的场景。
     if channel_str == "wechat_group" {
-        let (self_named, other_named) = scan_group_addressing(state.inner(), &char_id, &message);
+        let (self_named, other_named) = scan_group_addressing(state, &char_id, &message);
         if other_named && !self_named {
             tracing::info!(
                 "[GroupYield:{}] 消息点名了其他角色，让位跳过回复",
@@ -423,14 +433,16 @@ pub async fn send_message_stream(
                 "chat:yielded",
                 json!({ "stream_id": &stream_id, "character_id": &char_id, "channel": &channel_str }),
             );
-            return Ok(());
+            return Ok(None);
         }
     }
 
-    let _ = app.emit(
-        "chat:start",
-        json!({ "message": &message, "stream_id": &stream_id, "character_id": &char_id, "channel": &channel_str }),
-    );
+    if visual_evidence.is_none() {
+        let _ = app.emit(
+            "chat:start",
+            json!({ "message": &message, "stream_id": &stream_id, "character_id": &char_id, "channel": &channel_str }),
+        );
+    }
 
     // ── 用户交互唤醒：从 Rest/Offline 回到 Online ──
     // 用户发起对话视为唤醒行为，角色恢复在线。
@@ -482,6 +494,8 @@ pub async fn send_message_stream(
     // 旁观记忆需要同时包含用户消息和 AI 回复，必须在 think 完成后才能写入。
 
     let app_for_emitter = app.clone();
+    crate::voice_diagnostics::begin("chat", &stream_id, "request_to_first_model_chunk");
+    let timing_pending = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let sid_for_emitter = stream_id.clone();
     let cid_for_emitter = char_id.clone();
     let channel_for_emitter = channel_str.clone();
@@ -533,6 +547,7 @@ pub async fn send_message_stream(
             let buf_for_chunk = buffer.clone();
             paren_buffer = Some(buffer);
             Arc::new(move |chunk: &str| {
+                if !chunk.is_empty() && timing_pending.swap(false, std::sync::atomic::Ordering::Relaxed) { crate::voice_diagnostics::finish("chat", &sid_for_emitter, "request_to_first_model_chunk"); }
                 let mut s = scanner_for_chunk.lock();
                 let after_inline = s.feed(chunk);
                 if !after_inline.is_empty() {
@@ -549,6 +564,7 @@ pub async fn send_message_stream(
             })
         } else {
             Arc::new(move |chunk: &str| {
+                if !chunk.is_empty() && timing_pending.swap(false, std::sync::atomic::Ordering::Relaxed) { crate::voice_diagnostics::finish("chat", &sid_for_emitter, "request_to_first_model_chunk"); }
                 let mut s = scanner_for_chunk.lock();
                 let clean = s.feed(chunk);
                 if !clean.is_empty() {
@@ -564,6 +580,7 @@ pub async fn send_message_stream(
         let buf_for_chunk = buffer.clone();
         paren_buffer = Some(buffer);
         Arc::new(move |chunk: &str| {
+            if !chunk.is_empty() && timing_pending.swap(false, std::sync::atomic::Ordering::Relaxed) { crate::voice_diagnostics::finish("chat", &sid_for_emitter, "request_to_first_model_chunk"); }
             let mut buf = buf_for_chunk.lock();
             let (clean, remaining) = crate::utils::filter_parentheses(chunk, &buf);
             *buf = remaining;
@@ -576,6 +593,7 @@ pub async fn send_message_stream(
         })
     } else {
         Arc::new(move |chunk: &str| {
+            if !chunk.is_empty() && timing_pending.swap(false, std::sync::atomic::Ordering::Relaxed) { crate::voice_diagnostics::finish("chat", &sid_for_emitter, "request_to_first_model_chunk"); }
             let _ = app_for_emitter.emit(
                 "chat:chunk",
                 json!({ "text": chunk, "stream_id": sid_for_emitter, "character_id": &cid_for_emitter, "channel": &channel_for_emitter }),
@@ -611,7 +629,7 @@ pub async fn send_message_stream(
                     "channel": &channel_str,
                 }),
             );
-            return Ok(());
+            return Ok(None);
         }
     };
     // 排队耗时打点：定位「发出去后久久没有反应」是卡在排队还是卡在 think 内部
@@ -621,6 +639,10 @@ pub async fn send_message_stream(
         stream_id,
         (chrono::Local::now() - queued_at).num_milliseconds()
     );
+    if visual_evidence.is_some() && state.is_generation_cancelled(&char_id) {
+        let _ = app.emit("chat:cancelled", json!({"stream_id":stream_id,"character_id":char_id,"channel":channel_str}));
+        return Ok(None);
+    }
     state.reset_generation_cancel(&char_id);
 
     // 设置消息渠道标记（影响 dialogue 写入的 metadata.channel）
@@ -660,7 +682,10 @@ pub async fn send_message_stream(
     } else {
         message.clone()
     };
-    let result: VivianResult<AiResponse> = brain.think(&think_input, true).await;
+    let result: VivianResult<AiResponse> = match visual_evidence {
+        Some(evidence) => brain.think_with_visual_evidence(&think_input, true, evidence).await,
+        None => brain.think(&think_input, true).await,
+    };
     drop(_focus_lease);
     // 修正用户消息 timestamp 为排队时刻：brain.think 在完成后才写入用户消息，
     // 默认 timestamp 是 think 完成时刻，并发发送时会导致顺序错乱
@@ -846,11 +871,12 @@ pub async fn send_message_stream(
 
     if state.is_generation_cancelled(&char_id) {
         let _ = app.emit("chat:cancelled", json!({ "stream_id": &stream_id, "character_id": &char_id, "channel": &channel_str }));
-        return Ok(());
+        return Ok(None);
     }
 
     match result {
         Ok(response) => {
+            let completed_response = response.clone();
             // ignore 模式不展示；空文本仍结算流，允许纯贴纸并清理前端 typing 状态。
             if response.response_mode == "ignore" {
                 tracing::info!(
@@ -859,7 +885,7 @@ pub async fn send_message_stream(
                     stream_id
                 );
                 let _ = app.emit("chat:cancelled", json!({ "stream_id": &stream_id, "character_id": &char_id, "channel": &channel_str }));
-                return Ok(());
+                return Ok(None);
             }
             // 推送 meta 事件：expression/motion（前端提前播放 桌宠 动画）
             if !response.expression.is_empty() || response.motion != "idle" {
@@ -938,7 +964,7 @@ pub async fn send_message_stream(
             // 用户与角色 A 对话时，如果角色 B 在线，B 以旁观者视角记录对话。
             // 设计原则：
             // - 用户消息和角色回复分别写入独立记忆条目，而非机械拼接
-            // - 每条记忆带第三人称前缀（如 "[User says to Vivian]", "[Vivian says to User]"）
+            // - 新记忆保存原话，交流双方和旁观来源通过结构化元数据标注
             // - importance = 原对话 importance × 0.6（旁观价值低于参与）
             // - metadata 标记 perspective=observer + speaker + listener
             // - 前端通过 perspective=observer 识别为旁观对话，用说话者主题色半透明节点显示
@@ -953,6 +979,17 @@ pub async fn send_message_stream(
                 let speaker_id = char_id.clone();
                 let user_msg_full = message.trim().to_string();
                 let agent_reply_full = response.text.trim().to_string();
+                // Link observations to the actual adjacent turn pair; never invent source IDs.
+                let observed_sources = brain.dialogue.get_all_history().ok().and_then(|history| {
+                    history.windows(2).rev().find(|pair| {
+                        pair[0].role == "user" && pair[1].role == "assistant"
+                            && pair[0].content.trim() == user_msg_full
+                            && pair[1].content.trim() == agent_reply_full
+                            && pair[0].session_id == pair[1].session_id
+                            && pair[0].metadata["speaker"] == "user"
+                            && pair[1].metadata["speaker"].as_str() == Some(speaker_id.as_str())
+                    }).map(|pair| ((pair[0].id.clone(), pair[0].timestamp), (pair[1].id.clone(), pair[1].timestamp)))
+                });
                 let channel_clone = channel_str.clone();
                 let app_clone = app.clone();
                 // 原对话 importance（取 user/ai 较大值）× 0.6 折扣
@@ -997,9 +1034,8 @@ pub async fn send_message_stream(
                             continue;
                         }
                         // 旁观者视角：用户对说话角色说的话
-                        let user_prefix = build_speaker_prefix("user", &speaker_id, &other_id);
-                        let user_observation = format!("{} {}", user_prefix, user_msg_full);
-                        let user_meta = json!({
+                        let user_observation = user_msg_full.clone();
+                        let mut user_meta = json!({
                             "channel": channel_clone,
                             "speaker": "user",
                             "listener": speaker_id,
@@ -1007,7 +1043,13 @@ pub async fn send_message_stream(
                             "knowledge_source": "observed",
                             "reliability": "second_hand",
                             "observer_id": other_id,
+                            "known_by": [other_id],
+                            "utterance_format": "plain",
                         });
+                        if let Some((source, _)) = &observed_sources {
+                            user_meta["source_message_ids"] = json!([source.0]);
+                            user_meta["source_timestamp"] = json!(source.1);
+                        }
                         if let Err(e) = observer_memory
                             .add_memory_with_metadata(
                                 &user_observation,
@@ -1025,9 +1067,8 @@ pub async fn send_message_stream(
                             );
                         }
                         // 旁观者视角：说话角色回复用户的话
-                        let agent_prefix = build_speaker_prefix(&speaker_id, "user", &other_id);
-                        let agent_observation = format!("{} {}", agent_prefix, agent_reply_full);
-                        let agent_meta = json!({
+                        let agent_observation = agent_reply_full.clone();
+                        let mut agent_meta = json!({
                             "channel": channel_clone,
                             "speaker": speaker_id,
                             "listener": "user",
@@ -1035,7 +1076,13 @@ pub async fn send_message_stream(
                             "knowledge_source": "observed",
                             "reliability": "second_hand",
                             "observer_id": other_id,
+                            "known_by": [other_id],
+                            "utterance_format": "plain",
                         });
+                        if let Some((_, source)) = &observed_sources {
+                            agent_meta["source_message_ids"] = json!([source.0]);
+                            agent_meta["source_timestamp"] = json!(source.1);
+                        }
                         if let Err(e) = observer_memory
                             .add_memory_with_metadata(
                                 &agent_observation,
@@ -1255,7 +1302,7 @@ pub async fn send_message_stream(
                 });
             }
 
-            Ok(())
+            Ok(Some(completed_response))
         }
         Err(e) => {
             let msg = e.to_string();
@@ -1584,40 +1631,43 @@ pub async fn wake_from_presence(
     }
 }
 
-/// 从 LLM 返回中解析图片描述 JSON
-///
-/// 约定 LLM 返回 `{"description":"...","reply":"..."}`。
-/// 解析失败时退化为：description 与 reply 均使用原始文本。
-pub(crate) fn parse_image_description_response(raw: &str) -> (String, String) {
-    let trimmed = raw.trim();
-    // 尝试剥离 markdown 代码块围栏
-    let body = if trimmed.starts_with("```") {
-        let inner = trimmed
-            .trim_start_matches("```json")
-            .trim_start_matches("```")
-            .trim_end_matches("```")
-            .trim();
-        inner
-    } else {
-        trimmed
+use crate::visual_evidence::ImageTurnResult;
+
+/// Recognize once, then pass complete evidence to the normal companion/chat stream.
+pub(crate) async fn respond_to_image(
+    state: &Arc<AppState>, app: &tauri::AppHandle, character_id: &str, channel: &str,
+    image: MessageImage, user_message: &str, image_path: Option<&str>, source: &str,
+) -> Result<ImageTurnResult, String> {
+    if crate::companion_quiet::active() { return Err("勿扰模式下已暂停陪伴分析，请先关闭勿扰".into()); }
+    let instance = state.get_character(Some(character_id))?;
+    if !state.is_initialized() { return Err("智能体正在初始化，请稍候...".into()); }
+    if !main_api_configured(state) { return Err("MAIN_API_NOT_CONFIGURED".into()); }
+    if !state.config.read().get_typed::<bool>("ai.enable_vision", false) { return Err("VISION_NOT_ENABLED".into()); }
+    let router = state.model_router.read().as_ref().cloned().ok_or("模型路由未初始化")?;
+    let stream_id = uuid::Uuid::new_v4().to_string();
+    state.reset_generation_cancel(character_id);
+    let _ = app.emit("chat:start", json!({"message":user_message,"stream_id":stream_id,"character_id":character_id,"channel":channel,"source":"image"}));
+    let recent = instance.brain.dialogue.get_history().into_iter().rev().take(6)
+        .map(|m| format!("{}: {}", m.role, m.content)).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n");
+    let context = format!("最近对话（仅用于理解图片意图）：\n{recent}");
+    let reply_stream_id = stream_id.clone();
+    let recognition = async {
+        crate::vision::recognize_image(&router, image, &context, Some(character_id)).await.map_err(|error| {
+            let _ = app.emit("chat:error", json!({"error":error,"stream_id":stream_id,"character_id":character_id,"channel":channel}));
+            error
+        })
     };
-    if let Ok(val) = serde_json::from_str::<serde_json::Value>(body) {
-        let description = val
-            .get("description")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let reply = val
-            .get("reply")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        if !description.is_empty() || !reply.is_empty() {
-            return (description, reply);
+    crate::visual_evidence::complete_image_turn(recognition, |description| async move {
+        if state.is_generation_cancelled(character_id) {
+            let _ = app.emit("chat:cancelled", json!({"stream_id":reply_stream_id,"character_id":character_id,"channel":channel}));
+            return Ok(String::new());
         }
-    }
-    let fallback = raw.trim().to_string();
-    (fallback.clone(), fallback)
+        let mut metadata = json!({"kind":"image","source":source,"channel":channel,"visual_description":description});
+        if let Some(path) = image_path { metadata["image_path"] = json!(path); }
+        let response = send_message_stream_impl(state, user_message.into(), reply_stream_id.clone(), Some(character_id.into()), Some(channel.into()),
+            None, Some(metadata), app.clone(), Some(&description)).await?;
+        Ok(response.map(|r| r.text).unwrap_or_default())
+    }).await
 }
 
 /// 发送本地图片消息
@@ -1625,9 +1675,9 @@ pub(crate) fn parse_image_description_response(raw: &str) -> (String, String) {
 /// 流程：
 /// 1. 读取图片 → base64 data URL，副本保存到 `<user_data_dir>/images/`。
 /// 2. 立即 emit `chat:user_image`，前端渲染用户图片气泡。
-/// 3. 把用户图片消息写入对话历史（metadata 标记 kind=image + image_path）。
-/// 4. 调用多模态 LLM（主 API）生成图片描述 + 对用户的回应。
-/// 5. emit `chat:start` / `chat:done`，前端渲染 AI 文字回复气泡。
+/// 3. vision_describe 识图路由生成完整客观分析（不生成角色回复）。
+/// 4. 完整分析作为本轮证据注入普通对话链，由 companion/chat 生成角色回复。
+/// 5. 正常流式事件、表情、语音和历史落账；图片 metadata 保存完整识别结果。
 /// 6. 把图片描述写入记忆系统（content=description，metadata 携带 image_path）。
 #[tauri::command]
 pub async fn send_image_message(
@@ -1653,14 +1703,6 @@ pub async fn send_image_message(
         let _ = app.emit("chat:error", json!({ "reason": "vision_disabled", "character_id": &char_id, "channel": &channel_str }));
         return Err("VISION_NOT_ENABLED".to_string());
     }
-
-    let router = {
-        let guard = state.model_router.read();
-        guard
-            .as_ref()
-            .ok_or_else(|| "模型路由未初始化".to_string())?
-            .clone()
-    };
 
     let src = std::path::PathBuf::from(&source_path);
     // 图片读取/复制 + base64 编码均为阻塞操作，移入 spawn_blocking 避免卡住 tokio 工作线程
@@ -1689,7 +1731,7 @@ pub async fn send_image_message(
                 .to_lowercase();
             let saved_name = format!("{}.{}", uuid::Uuid::new_v4(), ext);
             let saved_path = images_dir.join(&saved_name);
-            std::fs::copy(&src, &saved_path).map_err(|e| format!("保存图片失败: {}", e))?;
+            std::fs::write(&saved_path, &bytes).map_err(|e| format!("保存图片失败: {}", e))?;
             let rel_path = format!("images/{}", saved_name);
             Ok((mime, b64, rel_path))
         },
@@ -1712,133 +1754,15 @@ pub async fn send_image_message(
         }),
     );
 
-    // 2. 写入对话历史：用户图片消息（content 占位，metadata 标记图片）
-    {
-        let brain = state.get_character(character_id.as_deref())?.brain;
-        let mut user_msg = ChatMessage::user("📷 [图片]");
-        user_msg.meta = Some(crate::messages::MessageMeta::user().with_channel(&channel_str));
-        brain.dialogue.add_message_with_metadata(
-            user_msg,
-            json!({
-                "source": "chat",
-                "kind": "image",
-                "image_path": rel_path,
-                "channel": channel_str,
-            }),
-        );
-    }
-
-    // 3. 调用多模态 LLM 生成图片描述 + 回应
-    let stream_id = uuid::Uuid::new_v4().to_string();
-    let _ = app.emit(
-        "chat:start",
-        json!({ "message": "[图片]", "stream_id": &stream_id, "character_id": &char_id, "channel": &channel_str }),
-    );
-
-    // 注意：此处不启用 emit，避免 LLM 原始 JSON 输出泄露到前端。
-    // 仅通过 chat:done 发送解析后的 reply 文本。
-
-    // 提取最近对话历史，注入到 vision_describe 的 system prompt 中，
-    // 让 LLM 能结合上下文理解图片（例如用户说"给你们拍照片"后发了一张角色截图）。
-    let recent_context = {
-        let brain = state.get_character(character_id.as_deref())?.brain;
-        let history = brain.dialogue.get_history();
-        let recent: Vec<String> = history
-            .iter()
-            .rev()
-            .take(6) // 最近 3 轮对话（user + assistant 各 3 条）
-            .map(|m| {
-                let role = if m.role == "user" { "User" } else { "AI" };
-                format!("{}: {}", role, m.content)
-            })
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect();
-        if recent.is_empty() {
-            String::new()
-        } else {
-            format!("\n## 最近对话上下文\n{}\n\n请结合以上对话理解用户发送这张图片的意图。", recent.join("\n"))
-        }
-    };
-
-    let system_prompt = format!(
-        "你是图片描述助手。请分析用户发送的图片，返回严格的 JSON：\n\
-        {{\"description\": \"对图片内容的客观、详细的中文描述（用于记忆存档，50-150字）\", \
-        \"reply\": \"以角色口吻对这张图片给出自然的中文回应（20-60字）\"}}\n\
-        仅返回 JSON 对象，不要任何其他内容、不要 markdown 代码块。\
-        {}",
-        recent_context
-    );
     let image_detail = state.config.read().get_typed::<String>("ai.image_detail", "auto".to_string());
-    let image = MessageImage {
-        media_type: mime.clone(),
-        data: b64,
-        url: None,
-        detail: Some(image_detail),
-    };
-    // 每次请求附加唯一 nonce，防止豆包 Responses API 服务端缓存命中
-    // （其缓存 key 不区分 input_image 内容，相同文本会返回旧结果）
-    let nonce = uuid::Uuid::new_v4().as_simple().to_string();
-    let user_text = format!("请描述这张图片。[req:{}]", &nonce[..8]);
-    let messages = vec![
-        ChatMessage::system(&system_prompt),
-        ChatMessage::user_with_images(user_text, vec![image]),
-    ];
-
-    let llm_result = router
-        .generate(LLMRequest::new("vision_describe", messages)
-            .with_character_id(char_id.clone()))
-        .await;
-
-    let (description, reply) = match llm_result {
-        Ok(text) => parse_image_description_response(&text),
-        Err(e) => {
-            let msg = e.to_string();
-            let _ = app.emit(
-                "chat:error",
-                json!({ "error": &msg, "stream_id": &stream_id, "character_id": &char_id, "channel": &channel_str }),
-            );
-            return Err(msg);
-        }
-    };
-
-    // 4. 推送 AI 回复完成事件（前端渲染 AI 文字气泡）
-    let _ = app.emit(
-        "chat:done",
-        json!({
-            "text": reply,
-            "motion": "idle",
-            "expression": "",
-            "emotion_score": 0,
-            "voice_message": false,
-            "voice_audio_path": null,
-            "voice_duration": null,
-            "stream_id": &stream_id,
-            "character_id": &char_id,
-            "channel": &channel_str,
-        }),
-    );
-
-    // 5. AI 回复写入对话历史
-    {
-        let brain = match state.get_character(character_id.as_deref()) {
-            Ok(inst) => inst.brain,
-            Err(_) => return Ok(reply),
-        };
-        let mut ai_msg = ChatMessage::assistant(&reply);
-        ai_msg.meta = Some(crate::messages::MessageMeta::assistant().with_channel(&channel_str));
-        brain.dialogue.add_message(ai_msg);
-    }
+    let image = MessageImage { media_type: mime, data: b64, url: None, detail: Some(image_detail) };
+    let result = respond_to_image(state.inner(), &app, &char_id, &channel_str, image,
+        "📷 [图片]", Some(&rel_path), "chat").await?;
 
     // 6. 图片描述写入记忆系统（content=description，metadata 携带 image_path）
-    let description_for_memory = if description.is_empty() {
-        reply.clone()
-    } else {
-        description
-    };
+    let description_for_memory = result.description.clone();
     let memory_mgr = state
-        .get_character(character_id.as_deref())
+        .get_character(Some(&char_id))
         .ok()
         .map(|inst| inst.brain.memory.clone());
     if let Some(memory_mgr) = memory_mgr {
@@ -1886,7 +1810,7 @@ pub async fn send_image_message(
         }
     }
 
-    Ok(reply)
+    Ok(result.reply)
 }
 
 /// Open Loop 检测的调用包装：从 brain 取出 router 后转发到 conversation 模块

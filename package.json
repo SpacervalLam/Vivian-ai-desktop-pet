@@ -13,7 +13,7 @@
     "eval:companion": "node scripts/evaluate-companion.mjs",
     "eval:prompts": "node scripts/evaluate-prompts.mjs",
     "eval:prompts:live": "node scripts/evaluate-prompts.mjs --live",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p plugins/3d-apartment/tsconfig.json",
     "check": "npm run typecheck && npm test && npm run test:contracts",
     "predev": "npm run build:mobile",
     "dev": "vite",

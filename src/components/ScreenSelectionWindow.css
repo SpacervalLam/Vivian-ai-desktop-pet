@@ -1,0 +1,25 @@
+.screen-selection { position: fixed; inset: 0; overflow: hidden; cursor: crosshair; user-select: none; touch-action: none; color: #fff; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif; }
+.screen-selection-image { position: absolute; inset: 0; width: 100%; height: 100%; max-width: none; object-fit: fill; pointer-events: none; }
+.screen-selection-shade { position: absolute; inset: 0; background: rgba(12, 18, 28, .42); pointer-events: none; }
+.screen-selection-hint, .screen-selection-toolbar { position: absolute; display: flex; align-items: center; background: rgba(27, 31, 39, .88); border: 1px solid rgba(255,255,255,.16); border-radius: 15px; box-shadow: 0 8px 32px rgba(0,0,0,.24); backdrop-filter: blur(20px) saturate(140%); cursor: default; }
+.screen-selection-hint { top: 28px; left: 50%; transform: translateX(-50%); gap: 12px; padding: 11px 12px 11px 17px; white-space: nowrap; font-size: 13px; font-weight: 500; }
+.screen-selection-hint > svg { color: #a5c8ff; }
+.screen-selection-hint button { display: flex; gap: 7px; align-items: center; padding: 5px 6px 5px 12px; margin-left: 10px; border-left: 1px solid rgba(255,255,255,.18); color: #d1d5dc; }
+.screen-selection kbd { font: 11px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; opacity: .65; }
+.screen-selection-box { position: absolute; border: 1px solid rgba(255,255,255,.95); box-shadow: 0 0 0 99999px rgba(12,18,28,.42), 0 0 0 2px rgba(80,150,255,.35); pointer-events: none; }
+.selection-corner { position: absolute; width: 13px; height: 13px; border: 2px solid #fff; filter: drop-shadow(0 1px 2px rgba(0,0,0,.35)); }
+.corner-tl { top: -2px; left: -2px; border-right: 0; border-bottom: 0; }
+.corner-tr { top: -2px; right: -2px; border-left: 0; border-bottom: 0; }
+.corner-bl { bottom: -2px; left: -2px; border-right: 0; border-top: 0; }
+.corner-br { bottom: -2px; right: -2px; border-left: 0; border-top: 0; }
+.screen-selection-size { position: absolute; left: 0; padding: 4px 8px; border-radius: 6px; background: rgba(22,27,35,.82); color: rgba(255,255,255,.94); font: 11px "Segoe UI", sans-serif; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.screen-selection-toolbar { width: max-content; max-width: calc(100vw - 32px); box-sizing: border-box; flex-wrap: wrap; justify-content: center; transform: translateX(-50%); gap: 4px; padding: 6px; }
+.selection-text-button { display: flex; align-items: center; justify-content: center; gap: 7px; height: 34px; padding: 0 11px; border-radius: 9px; color: #ebedf2; font-size: 13px; font-weight: 500; white-space: nowrap; }
+.selection-text-button:hover { background: rgba(255,255,255,.12); }
+.selection-toolbar-divider { height: 19px; width: 1px; margin: 0 5px; background: rgba(255,255,255,.15); }
+.selection-confirm { display: flex; align-items: center; gap: 8px; height: 34px; padding: 0 12px; background: #007aff; color: #fff; border-radius: 10px; font-size: 13px; font-weight: 600; }
+.selection-confirm:hover { background: #1887ff; }
+.selection-confirm kbd { padding-left: 5px; }
+.screen-selection button:focus-visible { outline: 2px solid #a5c8ff; outline-offset: 2px; }
+.screen-selection button:disabled { opacity: .5; cursor: default; }
+.screen-selection-error { position: absolute; bottom: 24px; left: 50%; transform: translateX(-50%); padding: 11px 16px; border-radius: 12px; background: rgba(60,25,30,.92); font-size: 13px; }

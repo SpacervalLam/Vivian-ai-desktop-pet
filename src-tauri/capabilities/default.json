@@ -5,6 +5,7 @@
   "windows": [
     "main",
     "chat",
+    "edge_menu",
     "config",
     "memory",
     "diary",
@@ -22,9 +23,10 @@
     "nana_status",
     "nana_bubble",
     "nana_toast",
-    "side_chat",
     "message_banner",
-    "startup_toast"
+    "startup_toast",
+    "reminders",
+    "screen_selection"
   ],
   "permissions": [
     "core:default",

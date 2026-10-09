@@ -163,8 +163,6 @@ export function createPropKit(root: THREE.Group, colliders: Collider[]): PropKit
     root.add(o);
     return o;
   }
-  /** 轴对齐盒（在已旋转的父级里用）。 */
-  const box = (m: THREE.Material, x: number, y: number, z: number, w: number, h: number, d: number, shadow = false) => add(cube, m, x, y, z, w, h, d, shadow);
 
   /**
    * 道具在**本地坐标系**里造，最后整体绕 y 旋转。

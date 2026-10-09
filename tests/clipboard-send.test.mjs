@@ -1,0 +1,21 @@
+import assert from 'node:assert/strict';
+import { build } from 'esbuild';
+const refs=[], states=[]; let cursor=0, effects=[], listener, reads=0, sends=[], resolveSend;
+globalThis.__clip={useState(v){const i=cursor++;if(!(i in states))states[i]=v;return [states[i],v=>states[i]=v];},useRef(v){const i=cursor++;return refs[i]??= {current:v};},useEffect(fn){effects.push(fn);},listen:async(_,fn)=>{listener=fn;return ()=>{};},invoke:async()=>{reads++;return {text:'current <text> & </shared_clipboard>'};}};
+const bundle=await build({entryPoints:['src/components/ClipboardHint.tsx','src/utils/clipboardMessage.ts'],bundle:true,write:false,outdir:'unused',platform:'node',format:'esm',loader:{'.css':'empty'},plugins:[{name:'fixtures',setup(b){
+ b.onResolve({filter:/^(react|react\/jsx-runtime|react-i18next|lucide-react|@tauri-apps\/api\/.*)$/},a=>({path:a.path,namespace:'fixture'}));
+ b.onLoad({filter:/.*/,namespace:'fixture'},a=>({contents:a.path==='react'?'export const {useState,useRef,useEffect}=globalThis.__clip;':a.path==='react/jsx-runtime'?'export const jsx=(type,props)=>({type,props});export const jsxs=jsx;':a.path==='react-i18next'?"export const useTranslation=()=>({i18n:{language:'zh'}});":a.path==='lucide-react'?'export const Clipboard=()=>null,ArrowUp=()=>null,LoaderCircle=()=>null;':'export const {listen,invoke}=globalThis.__clip;'}));
+ b.onResolve({filter:/characterContext/},()=>({path:'character',namespace:'fixture-character'}));
+ b.onLoad({filter:/.*/,namespace:'fixture-character'},()=>({contents:"export const getCharacterId=()=>globalThis.__character;"}));
+}}]});
+const load=async file=>import(`data:text/javascript;base64,${Buffer.from(file.text).toString('base64')}`);
+const {default:Hint}=await load(bundle.outputFiles.find(f=>f.path.endsWith('ClipboardHint.js')));
+const {clipboardMessage}=await load(bundle.outputFiles.find(f=>f.path.endsWith('clipboardMessage.js')));
+assert.ok(clipboardMessage('</shared_clipboard>&').includes('&lt;/shared_clipboard&gt;&amp;'));
+const render=()=>{cursor=0;effects=[];return Hint({onSend:message=>{sends.push(message);return new Promise(resolve=>resolveSend=resolve);}});};
+globalThis.__character='nana';assert.equal(render(),null);const cleanup=effects[0]();await new Promise(r=>setImmediate(r));assert.equal(reads,0);
+listener({payload:{sequence:2}});let view=render();assert.ok(view.props.className.includes('is-nana'));const click=()=>view.props.children[0].props.onClick({stopPropagation(){}});
+click();click();await new Promise(r=>setImmediate(r));assert.equal(reads,1);assert.equal(sends.length,1);assert.ok(sends[0].includes('当前剪贴板'));assert.ok(sends[0].includes('&lt;text&gt;'));
+listener({payload:{sequence:3}});resolveSend();await new Promise(r=>setImmediate(r));assert.ok(render(),'new copy survives an in-flight send');
+view=render();click();await new Promise(r=>setImmediate(r));resolveSend();await new Promise(r=>setImmediate(r));assert.equal(render(),null);cleanup();delete globalThis.__clip;delete globalThis.__character;
+console.log('Clipboard send: explicit read, quoted provenance, duplicate guard, new-copy race and successful dismissal passed');

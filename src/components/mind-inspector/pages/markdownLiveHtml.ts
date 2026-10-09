@@ -20,6 +20,7 @@
  */
 
 import { localFileTarget, parseBlocks, type Block } from './codeMarkdown';
+import { markdownImageSrc, parseMarkdownImage } from './markdownImages';
 
 // ============ 行内 ============
 
@@ -46,7 +47,7 @@ export const UI = 'data-md-ui="1" contenteditable="false"';
 export type LiveListNode = { text: string; checked: boolean | null; children: LiveListNode[] };
 
 /** 行内 markdown → HTML（含 md-mark 标记） */
-export function inlineHtml(text: string, onOpenFile?: (path: string) => void): string {
+export function inlineHtml(text: string, onOpenFile?: (path: string) => void, documentPath?: string): string {
   let out = '';
   let buf = '';
   let i = 0;
@@ -60,6 +61,33 @@ export function inlineHtml(text: string, onOpenFile?: (path: string) => void): s
   while (i < text.length) {
     const ch = text[i];
     const prevChar = i === 0 ? '' : text[i - 1];
+
+    // Keep source newlines/entities in hidden markers, and exclude their visual
+    // replacements from source extraction so editing remains lossless.
+    if (ch === '\n') {
+      flush();
+      out += `${mark('\n')}<br ${UI}>`;
+      i++;
+      continue;
+    }
+    const spaceEntity = ch === '&' && /^(?:&#x20;|&#32;)/i.exec(text.slice(i));
+    if (spaceEntity) {
+      flush();
+      out += `${mark(spaceEntity[0])}<span ${UI}> </span>`;
+      i += spaceEntity[0].length;
+      continue;
+    }
+
+    if (ch === '!') {
+      const image = parseMarkdownImage(text.slice(i));
+      const src = image && markdownImageSrc(image.href, documentPath);
+      if (image && src) {
+        flush();
+        out += `${mark(image.raw)}<img class="codex-md-image" src="${escapeHtml(src)}" alt="${escapeHtml(image.alt)}" loading="lazy" ${UI}>`;
+        i += image.raw.length;
+        continue;
+      }
+    }
 
     // 行内代码
     if (ch === '`') {
@@ -80,7 +108,7 @@ export function inlineHtml(text: string, onOpenFile?: (path: string) => void): s
         const opLike = two === '**' && looksLikeOperator(prevChar, text[i + 2] ?? '');
         if (close > i + 2 && !opLike) {
           flush();
-          const inner = inlineHtml(text.slice(i + 2, close), onOpenFile);
+          const inner = inlineHtml(text.slice(i + 2, close), onOpenFile, documentPath);
           const tag = two === '**' ? 'strong' : 'del';
           out += `${mark(two)}<${tag}>${inner}</${tag}>${mark(two)}`;
           i = close + 2;
@@ -103,7 +131,7 @@ export function inlineHtml(text: string, onOpenFile?: (path: string) => void): s
         && !looksLikeOperator(prevChar, text[i + 1])
       ) {
         flush();
-        out += `${mark('*')}<em>${inlineHtml(text.slice(i + 1, close), onOpenFile)}</em>${mark('*')}`;
+        out += `${mark('*')}<em>${inlineHtml(text.slice(i + 1, close), onOpenFile, documentPath)}</em>${mark('*')}`;
         i = close + 1;
         continue;
       }
@@ -146,6 +174,7 @@ export function listHtml(
   ordered: boolean,
   depth: number,
   onOpenFile?: (p: string) => void,
+  documentPath?: string,
 ): string {
   const tag = ordered ? 'ol' : 'ul';
   const cls = ordered ? 'codex-md-ol' : 'codex-md-ul';
@@ -158,9 +187,9 @@ export function listHtml(
       ? `<span class="codex-md-taskbox" ${UI}>${it.checked ? '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6 9 17l-5-5"></path></svg>' : ''}</span>`
       : '';
     const sub = it.children.length
-      ? `${mark('\n')}${listHtml(it.children, false, depth + 1, onOpenFile)}`
+      ? `${mark('\n')}${listHtml(it.children, false, depth + 1, onOpenFile, documentPath)}`
       : '';
-    const body = `${inlineHtml(it.text, onOpenFile)}${sub}`;
+    const body = `${inlineHtml(it.text, onOpenFile, documentPath)}${sub}`;
     // 任务条目要挂 `codex-md-task`（CSS 的 flex 布局与勾选框底色都挂在它上面），
     // 正文另外包一层 `codex-md-task-body`，否则文字不参与 flex、会被挤成一列
     const itemCls = `codex-md-li${isItemTask ? ' codex-md-task' : ''}`;
@@ -171,11 +200,11 @@ export function listHtml(
 }
 
 /** 单个块 → HTML（含块级前缀标记，如 `## `、`> `、``` 围栏） */
-export function blockHtml(b: Block, onOpenFile?: (p: string) => void): string {
+export function blockHtml(b: Block, onOpenFile?: (p: string) => void, documentPath?: string): string {
   switch (b.kind) {
     case 'h': {
       const lvl = Math.min(b.level, 6);
-      return `<h${lvl} class="codex-md-h codex-md-h${b.level}">${mark(`${'#'.repeat(b.level)} `)}${inlineHtml(b.text, onOpenFile)}</h${lvl}>`;
+      return `<h${lvl} class="codex-md-h codex-md-h${b.level}">${mark(`${'#'.repeat(b.level)} `)}${inlineHtml(b.text, onOpenFile, documentPath)}</h${lvl}>`;
     }
     case 'hr':
       return `${mark('---')}<hr class="codex-md-hr" ${UI}>`;
@@ -185,10 +214,10 @@ export function blockHtml(b: Block, onOpenFile?: (p: string) => void): string {
       // 任何断行，多行引用会挤成一行（聊天区没这问题，因为那边是把引用内容重新
       // parseBlocks 成块来渲染的）。换行标记仍留在行内，只为让 textContent 还原出原文。
       return `<blockquote class="codex-md-quote">${b.lines
-        .map((ln, idx) => `<span class="md-line">${mark('> ')}${inlineHtml(ln, onOpenFile)}${idx < b.lines.length - 1 ? mark('\n') : ''}</span>`)
+        .map((ln, idx) => `<span class="md-line">${mark('> ')}${inlineHtml(ln, onOpenFile, documentPath)}${idx < b.lines.length - 1 ? mark('\n') : ''}</span>`)
         .join('')}</blockquote>`;
     case 'list':
-      return listHtml(b.items as unknown as LiveListNode[], b.ordered, 0, onOpenFile);
+      return listHtml(b.items as unknown as LiveListNode[], b.ordered, 0, onOpenFile, documentPath);
     case 'code':
       return (
         `<div class="codex-md-codeblock">`
@@ -212,7 +241,7 @@ export function blockHtml(b: Block, onOpenFile?: (p: string) => void): string {
         arr.map((c, j) => {
           const last = j === arr.length - 1;
           const tail = last ? `${mark('|')}${isLastRow ? '' : mark('\n')}` : '';
-          return `<${tag} class="codex-md-${tag}">${mark('| ')}${inlineHtml(c, onOpenFile)}${mark(' ')}${tail}</${tag}>`;
+          return `<${tag} class="codex-md-${tag}">${mark('| ')}${inlineHtml(c, onOpenFile, documentPath)}${mark(' ')}${tail}</${tag}>`;
         }).join('');
       // 分隔行的换行也要补，否则它会和第一个数据行粘成一行，重解析时表格退化成段落
       const sep = `${mark(`|${b.header.map(() => '---').join('|')}|`)}${bodyRows ? mark('\n') : ''}`;
@@ -225,7 +254,7 @@ export function blockHtml(b: Block, onOpenFile?: (p: string) => void): string {
       );
     }
     default:
-      return `<p class="codex-md-p">${inlineHtml(b.text, onOpenFile)}</p>`;
+      return `<p class="codex-md-p">${inlineHtml(b.text, onOpenFile, documentPath)}</p>`;
   }
 }
 
@@ -237,10 +266,10 @@ export function blockHtml(b: Block, onOpenFile?: (p: string) => void): string {
  * （见 `PreviewSelectionEdit.resolveSelectionTarget`）。块顺序与 `parseBlocks` 一致，
  * 所以下标能对上。
  */
-export function docHtml(src: string, onOpenFile?: (p: string) => void): string {
+export function docHtml(src: string, onOpenFile?: (p: string) => void, documentPath?: string): string {
   const blocks = parseBlocks(src);
   if (blocks.length === 0) return `<p class="codex-md-p"><br></p>`;
   return blocks
-    .map((b, i) => `<div class="md-live-block" data-md-block="${i}">${blockHtml(b, onOpenFile)}</div>`)
+    .map((b, i) => `<div class="md-live-block" data-md-block="${i}">${blockHtml(b, onOpenFile, documentPath)}</div>`)
     .join(mark('\n\n'));
 }

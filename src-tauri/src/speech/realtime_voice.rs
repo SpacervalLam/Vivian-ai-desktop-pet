@@ -7,7 +7,7 @@ use std::collections::VecDeque;
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -156,6 +156,8 @@ pub struct RealtimeVoiceManager {
     speaker_thread: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
     ws_writer_tx: Arc<Mutex<Option<mpsc::Sender<Vec<u8>>>>>,
     audio_out_buffer: Arc<RwLock<VecDeque<f32>>>,
+    diagnostic_asr_at: Arc<AtomicU64>,
+    diagnostic_playback_at: Arc<AtomicU64>,
     session_id: Arc<RwLock<String>>,
     dialog_id: Arc<RwLock<String>>,
     call_start: Arc<Mutex<Option<std::time::Instant>>>,
@@ -193,6 +195,8 @@ impl RealtimeVoiceManager {
             speaker_thread: Arc::new(Mutex::new(None)),
             ws_writer_tx: Arc::new(Mutex::new(None)),
             audio_out_buffer: Arc::new(RwLock::new(VecDeque::with_capacity(24000 * 5))),
+            diagnostic_asr_at: Arc::new(AtomicU64::new(0)),
+            diagnostic_playback_at: Arc::new(AtomicU64::new(0)),
             session_id: Arc::new(RwLock::new(String::new())),
             dialog_id: Arc::new(RwLock::new(String::new())),
             call_start: Arc::new(Mutex::new(None)),
@@ -244,6 +248,7 @@ impl RealtimeVoiceManager {
 
     /// 启动实时语音通话
     pub async fn start_call(&self, app: AppHandle, config: RealtimeVoiceConfig, persona: RealtimePersona) -> VivianResult<()> {
+        if crate::companion_quiet::active() { return Err(crate::error::VivianError::Provider("勿扰模式下已暂停语音对话".into())); }
         if *self.state.read() != CallState::Idle {
             return Err(VivianError::Speech("通话已在进行中".to_string()));
         }
@@ -254,6 +259,8 @@ impl RealtimeVoiceManager {
         }
 
         self.stop_flag.store(false, Ordering::SeqCst);
+        self.diagnostic_asr_at.store(0, Ordering::Relaxed);
+        self.diagnostic_playback_at.store(0, Ordering::Relaxed);
         self.mic_stop_flag.store(false, Ordering::SeqCst);
         self.speaker_stop_flag.store(false, Ordering::SeqCst);
         *self.last_ai_audio_at.lock() = None;
@@ -464,6 +471,8 @@ impl RealtimeVoiceManager {
         let state_read = self.state.clone();
         let state_for_stop = self.state.clone();
         let audio_buf = self.audio_out_buffer.clone();
+        let diagnostic_asr = self.diagnostic_asr_at.clone();
+        let diagnostic_playback = self.diagnostic_playback_at.clone();
         let dialog_id_ref = self.dialog_id.clone();
         let dialog_id_path_ref = self.dialog_id_path.clone();
         let memory_ref = self.memory.clone();
@@ -491,6 +500,10 @@ impl RealtimeVoiceManager {
                                         .and_then(|a| a.get("text"))
                                         .and_then(|t| t.as_str())
                                         .unwrap_or("");
+                                    if !asr_text.is_empty() && audio_buf.read().is_empty() {
+                                        diagnostic_asr.store(crate::voice_diagnostics::now_ms(), Ordering::Relaxed);
+                                        diagnostic_playback.store(0, Ordering::Relaxed);
+                                    }
                                     if !asr_text.is_empty() {
                                         // 1. 先消费上一轮遗留的 RAG 结果（上一轮超时但后台跑完的）
                                         //    相邻两轮语义相关性高，上一轮的 RAG 对本轮仍有价值
@@ -642,6 +655,8 @@ impl RealtimeVoiceManager {
             }
         }
         self.stop_flag.store(true, Ordering::SeqCst);
+        self.diagnostic_asr_at.store(0, Ordering::Relaxed);
+        self.diagnostic_playback_at.store(0, Ordering::Relaxed);
         self.mic_stop_flag.store(true, Ordering::SeqCst);
         self.speaker_stop_flag.store(true, Ordering::SeqCst);
         *self.last_ai_audio_at.lock() = None;
@@ -910,6 +925,10 @@ impl RealtimeVoiceManager {
         let stop_for_thread = stop_flag.clone();
         let stop_for_loop = stop_flag.clone();
         let buffer = self.audio_out_buffer.clone();
+        let diagnostic_asr = self.diagnostic_asr_at.clone();
+        let diagnostic_playback = self.diagnostic_playback_at.clone();
+        let diagnostic_asr_monitor = diagnostic_asr.clone();
+        let diagnostic_playback_monitor = diagnostic_playback.clone();
         let sr_in = 24000f32;
         let sr_out = actual_rate as f32;
 
@@ -929,6 +948,9 @@ impl RealtimeVoiceManager {
                             return;
                         }
                         let mut buf = buffer.write();
+                        if !buf.is_empty() && diagnostic_asr.load(Ordering::Relaxed) != 0 {
+                            let _ = diagnostic_playback.compare_exchange(0, crate::voice_diagnostics::now_ms(), Ordering::Relaxed, Ordering::Relaxed);
+                        }
                         let ratio = sr_out / sr_in;
                         for (i, out_s) in out.iter_mut().enumerate() {
                             let in_idx = (i as f32 / ratio) as usize;
@@ -959,6 +981,9 @@ impl RealtimeVoiceManager {
                             return;
                         }
                         let mut buf = buffer.write();
+                        if !buf.is_empty() && diagnostic_asr.load(Ordering::Relaxed) != 0 {
+                            let _ = diagnostic_playback.compare_exchange(0, crate::voice_diagnostics::now_ms(), Ordering::Relaxed, Ordering::Relaxed);
+                        }
                         let ratio = sr_out / sr_in;
                         for (i, out_s) in out.iter_mut().enumerate() {
                             let in_idx = (i as f32 / ratio) as usize;
@@ -998,6 +1023,11 @@ impl RealtimeVoiceManager {
                 return;
             }
             while !stop_for_loop.load(Ordering::SeqCst) {
+                let end = diagnostic_playback_monitor.swap(0, Ordering::Relaxed);
+                if end != 0 {
+                    let start = diagnostic_asr_monitor.swap(0, Ordering::Relaxed);
+                    crate::voice_diagnostics::record("realtime", "last_asr_result_to_audio_callback", start, end);
+                }
                 std::thread::sleep(std::time::Duration::from_millis(20));
             }
             drop(stream);

@@ -194,6 +194,9 @@ fn upsert_index(char_id: &str, summary: NoteSummary) -> Result<(), String> {
     let mut summaries = list_index(char_id).unwrap_or_default();
     summaries.retain(|s| s.id != summary.id);
     summaries.push(summary);
+    // Legacy user quick notes are imported into the independent user store;
+    // retain original files as backups, but never present them as pet notebooks.
+    summaries.retain(|note| !note.tags.iter().any(|tag| tag == "quick_note"));
     summaries.sort_by(|a, b| b.updated_at.partial_cmp(&a.updated_at).unwrap_or(std::cmp::Ordering::Equal));
     write_index(char_id, &summaries)
 }
@@ -222,8 +225,11 @@ pub fn load(char_id: &str, note_id: &str) -> Result<NoteBook, String> {
     let json_path = note_dir(char_id, note_id).join("note.json");
     let json_str = std::fs::read_to_string(&json_path)
         .map_err(|e| format!("读取笔记失败: {}", e))?;
-    serde_json::from_str(&json_str)
-        .map_err(|e| format!("解析笔记失败: {}", e))
+    let note: NoteBook = serde_json::from_str(&json_str).map_err(|e| format!("解析笔记失败: {}", e))?;
+    if note.tags.iter().any(|tag| tag == "quick_note") {
+        return Err("这是用户随手记的旧备份，请通过用户随手记页面或 read_user_quick_notes 读取，不属于角色笔记。".into());
+    }
+    Ok(note)
 }
 
 /// 读取笔记 HTML 内容

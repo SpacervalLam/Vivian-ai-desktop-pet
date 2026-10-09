@@ -25,7 +25,7 @@ tracing="0.1"
 `);
 let types = await readFile(path.join(notebook, 'mod.rs'), 'utf8');
 // Replace only module locations; use the complete production type definitions.
-for (const name of ['collected', 'css_guide', 'renderer', 'storage']) {
+for (const name of ['collected', 'css_guide', 'doc_style', 'renderer', 'storage']) {
   types = types.replace(`pub mod ${name};`, `#[path="${rustPath(path.join(notebook, name + '.rs'))}"] pub mod ${name};`);
 }
 types = types.replace('pub mod persona_brief;', '');

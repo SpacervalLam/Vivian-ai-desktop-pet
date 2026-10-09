@@ -32,6 +32,7 @@ export type TrayMenuAction =
   | 'memory'
   | 'settings'
   | 'chat'
+  | 'desktop_assistant'
   | 'smart_positioning'
   | 'quit';
 
@@ -42,6 +43,7 @@ export interface SystemTrayProps {
   onOpenSettings?: () => void;
   /** 打开微信（AI Chat）子窗口 */
   onOpenChat?: () => void;
+  onOpenDesktop?: () => void;
   /** 切换智能避让开关 */
   onToggleSmartPositioning?: () => void;
   /** 退出应用 */
@@ -102,6 +104,9 @@ async function routeMenuAction(action: string, props: SystemTrayProps): Promise<
         break;
       case 'settings':
         props.onOpenSettings?.();
+        break;
+      case 'desktop_assistant':
+        props.onOpenDesktop?.();
         break;
       case 'chat':
         props.onOpenChat?.();

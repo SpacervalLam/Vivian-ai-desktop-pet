@@ -1319,6 +1319,46 @@
 }
 
 /* 页签栏：无上限、横向滚动（缩窄不换行） */
+.codex-preview-tabbar {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  min-width: 0;
+  background: var(--codex-paper);
+  border-bottom: 1px solid var(--codex-line-light);
+}
+.codex-preview-tabbar .codex-preview-tabs {
+  flex: 1;
+  min-width: 0;
+  border-bottom: 0;
+}
+.codex-preview-full-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  margin: 4px 8px;
+  padding: 0;
+  border: 1px solid rgba(178, 130, 42, .2);
+  border-radius: 50%;
+  background: var(--codex-tape-yellow);
+  color: var(--codex-ink);
+  box-shadow: 0 2px 4px rgba(59, 52, 40, .12);
+  cursor: pointer;
+  transition: box-shadow .15s ease, transform .15s ease;
+}
+.codex-preview-full-toggle:hover { box-shadow: 0 3px 6px rgba(59, 52, 40, .18); }
+.codex-preview-full-toggle:active { transform: scale(.96); }
+.codex-preview-full-toggle:focus-visible { outline: 2px solid var(--codex-accent); outline-offset: 2px; }
+.workbench-root.preview-full-view > .codex-main,
+.workbench-root.preview-full-view > .codex-resize-handle.right { display: none; }
+.workbench-root.preview-full-view > .codex-inspector {
+  flex: 1;
+  min-width: 0;
+  transition: none;
+}
 .codex-preview-tabs {
   display: flex;
   flex-wrap: nowrap;
@@ -3490,6 +3530,14 @@
 .codex-md > *:first-child { margin-top: 0; }
 .codex-md > *:last-child { margin-bottom: 0; }
 
+.codex-md-image {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 12px 0;
+  border-radius: 8px;
+}
+
 /* 新到达的文字渐显；只改透明度，保持光标、换行和滚动位置稳定。 */
 .codex-stream-fade {
   animation: codex-stream-fade 420ms cubic-bezier(.2, .65, .3, 1) both;
@@ -3509,6 +3557,11 @@
 .codex-md-ol,
 .codex-md-quote {
   max-width: var(--md-measure);
+}
+
+/* 文件预览使用整个面板宽度，包括就地编辑和分页只读视图。 */
+.codex-src .codex-md {
+  --md-measure: none;
 }
 
 .codex-md-p { margin: 0 0 10px; }
@@ -3539,7 +3592,8 @@
   width: fit-content;
   padding: 0 2px;
   background-image: linear-gradient(transparent 62%, var(--codex-tape-yellow) 62%);
-  background-repeat: no-repeat;
+  background-size: 100% 1lh;
+  background-repeat: repeat-y;
 }
 
 .codex-md-ul, .codex-md-ol { margin: 0 0 10px; padding-inline-start: 22px; }

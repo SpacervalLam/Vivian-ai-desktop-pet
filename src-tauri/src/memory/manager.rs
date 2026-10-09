@@ -1,5 +1,4 @@
 use crate::config::manager::AppConfig;
-use crate::cross_character::{build_speaker_prefix, parse_any_speaker_prefix};
 use crate::error::{VivianError, VivianResult};
 use crate::utils::path;
 use parking_lot::{Mutex, RwLock};
@@ -910,6 +909,11 @@ impl MemoryManager {
             .collect()
     }
 
+    /// Durable operation receipts remain discoverable after a fact is archived.
+    pub fn extraction_receipt(&self, operation_id: &str) -> Option<MemoryItem> {
+        self.inner.read().data.entries.iter().find(|item| item.metadata["extraction_operation_id"].as_str() == Some(operation_id)).cloned()
+    }
+
     pub async fn get_all_memories(&self) -> VivianResult<Vec<MemoryItem>> {
         let inner = self.inner.read();
         Ok(inner
@@ -1245,6 +1249,7 @@ impl MemoryManager {
         let emb_body = safe_emb_text.as_deref().unwrap_or(content);
         // 上下文感知检索前缀：拼接时间 + 说话者/听者背景，让向量检索感知"何时谁对谁说了什么"
         super::kinds::initialize_record(&mut item);
+        item.metadata["memory_owner"] = serde_json::json!(self.char_id());
         let context_prefix = build_context_prefix(&item);
         let emb_source = if context_prefix.is_empty() {
             emb_body.to_string()
@@ -1583,28 +1588,12 @@ impl MemoryManager {
             "knowledge_source": "direct",
         });
 
-        // 为内容添加说话者前缀（如果尚未有前缀且 metadata 包含 speaker/listener）
-        let add_prefix_if_needed = |content: &str, meta: &serde_json::Value| -> String {
-            let trimmed = content.trim();
-            // 检查是否已有说话者前缀
-            let (_, existing_speaker, _) = parse_any_speaker_prefix(trimmed);
-            if existing_speaker.is_some() {
-                return trimmed.to_string();
-            }
-            // 从 metadata 中提取 speaker 和 listener
-            let speaker = meta.get("speaker").and_then(|v| v.as_str());
-            let listener = meta.get("listener").and_then(|v| v.as_str());
-            if let (Some(spk), Some(lst)) = (speaker, listener) {
-                let prefix = build_speaker_prefix(spk, lst, &char_id);
-                format!("{} {}", prefix, trimmed)
-            } else {
-                trimmed.to_string()
-            }
-        };
-
-        // 合并 metadata：调用方提供的覆盖默认值
-        let effective_user_meta = user_metadata.unwrap_or(default_user_meta);
-        let effective_ai_meta = ai_metadata.unwrap_or(default_ai_meta);
+        // New dialogue indexes preserve speech; identity lives in metadata.
+        let add_prefix_if_needed = |content: &str, _meta: &serde_json::Value| content.to_owned();
+        let mut effective_user_meta = user_metadata.unwrap_or(default_user_meta);
+        let mut effective_ai_meta = ai_metadata.unwrap_or(default_ai_meta);
+        effective_user_meta["utterance_format"] = serde_json::json!("plain");
+        effective_ai_meta["utterance_format"] = serde_json::json!("plain");
 
         // 1. 用户消息 → ShortTerm 缓冲（不走 LLM enrich，由 Stage 1 统一摘要）
         if let Some(input) = user_input {
@@ -2521,14 +2510,14 @@ impl MemoryManager {
             .data
             .entries
             .iter()
-            .any(|e| !super::kinds::recallable(e));
+            .any(|e| !super::kinds::recallable(e) || !super::provenance::visible_to(&e.metadata, &self.char_id));
         let all_entries: Cow<[MemoryItem]> = if needs_filter {
             Cow::Owned(
                 inner
                     .data
                     .entries
                     .iter()
-                    .filter(|e| super::kinds::recallable(e))
+                    .filter(|e| super::kinds::recallable(e) && super::provenance::visible_to(&e.metadata, &self.char_id))
                     .cloned()
                     .collect(),
             )
@@ -2596,14 +2585,14 @@ impl MemoryManager {
             .data
             .entries
             .iter()
-            .any(|e| !super::kinds::recallable(e) || !filter.matches(e));
+            .any(|e| !super::kinds::recallable(e) || !super::provenance::visible_to(&e.metadata, &self.char_id) || !filter.matches(e));
         let all_entries: Cow<[MemoryItem]> = if needs_filter {
             Cow::Owned(
                 inner
                     .data
                     .entries
                     .iter()
-                    .filter(|e| super::kinds::recallable(e))
+                    .filter(|e| super::kinds::recallable(e) && super::provenance::visible_to(&e.metadata, &self.char_id))
                     .filter(|e| filter.matches(e))
                     .cloned()
                     .collect(),
@@ -2661,7 +2650,7 @@ impl MemoryManager {
             }
             // Step 1: 基础检索（扩大候选集到 limit * 3，给后续过滤留余量）
             let candidate_limit = (limit * 3).max(10);
-            let recall_entries: Vec<_> = inner.data.entries.iter().filter(|e| super::kinds::recallable(e)).cloned().collect();
+            let recall_entries: Vec<_> = inner.data.entries.iter().filter(|e| super::kinds::recallable(e) && super::provenance::visible_to(&e.metadata, &self.char_id)).cloned().collect();
             let ctx = RetrievalContext {
                 entries: &recall_entries,
                 vector_store: &inner.vector_store,

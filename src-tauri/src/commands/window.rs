@@ -8,7 +8,7 @@ use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
 
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -21,9 +21,9 @@ fn err_str(e: impl std::fmt::Display) -> String {
 
 // ============ WebView 冻结（隐藏窗口渲染进程挂起省内存） ============
 //
-// chat / side_chat 隐藏期间用 WebView2 TrySuspend 冻结渲染进程：JS 暂停执行、
-// 渲染停止，进程工作集可被系统回收。三态交互（边缘检测/单击展开/收回动画）
-// 全部由本文件的原生线程承担，WebView 冻结不影响功能；仅隐藏期间发往前端的
+// 隐藏窗口用 WebView2 TrySuspend 冻结渲染进程；chat 关闭即销毁。
+// edge_menu 常驻屏外并保持渲染，避免边缘呼出时恢复合成造成闪烁。
+// 边缘触发由原生线程承担，WebView 冻结不影响功能；仅隐藏期间发往前端的
 // 事件投递会丢失，由前端在 visibilitychange（恢复+show 触发）时刷新消息兜底。
 //
 // 时序契约：suspend 在 hide() 之后调用（即发即忘），resume 在 show() 之前
@@ -159,7 +159,7 @@ mod freeze_state_tests {
 //
 // message_banner 只在收到微信类消息时短暂显示，其余时间一直是隐藏的
 // WebView，却常驻一个完整的渲染进程（约 50-120MB）。空闲时把它冻结，
-// 与 chat / side_chat 同等处理。
+// 与 chat / 聊天窗口 同等处理。
 //
 // 冻结期间 JS 挂起、投递的事件会丢失，所以所有发送点统一走
 // [`emit_message_banner`]：先解冻再 emit，避免每个调用方各自处理时序。
@@ -1171,386 +1171,64 @@ pub fn set_window_rect(
 // 旧实现的副作用：每次状态翻转都会改写 GWL_EXSTYLE 并触发
 // SetWindowPos(SWP_FRAMECHANGED)，使透明窗口整块重绘 —— 桌宠持续闪烁的根因。
 
-// ============ side_chat 右缘三态侧边栏 ============
-//
-// side_chat 侧边栏停靠屏幕右缘，默认完全隐藏（窗口整体位于屏外右侧）。
-// 三态流转（全部带滑动动画）：
-//   Hidden   完全隐藏：窗口 x = 显示器右缘，整体在屏外
-//   Peek     探出：鼠标靠近屏幕右缘（EDGE_PX 内、垂直中间 2/5）→ 滑出 PEEK_PX 像素
-//            探出条保持鼠标穿透，由全局鼠标 Hook 检测单击命中 → 展开
-//   Expanded 展开：点击探出条 → 整窗滑入；锁定/输入框打开时常驻；
-//            光标离开宽限后自动收回；退出按钮立即收回
-//
-// 可见性的唯一权威是本 Rust 线程，直接调用 win.show()/hide()。原因：WebView2
-// 在窗口隐藏/失焦时会节流前端 setInterval 与 emit+listen IPC（见本文件顶部注释），
-// 前端事件驱动不可靠。锁定/输入框状态由前端通过原子量告知线程。
-
-/// 边缘检测线程幂等守卫：双角色窗口都会调用 start，仅首个生效
-static SIDE_CHAT_EDGE_RUNNING: AtomicBool = AtomicBool::new(false);
-/// 锁定标志：true 时窗口常驻不自动隐藏（双击或快捷键设置）
-static SIDE_CHAT_LOCKED: AtomicBool = AtomicBool::new(false);
-/// 输入框打开标志：true 时禁止自动隐藏，避免打字途中窗口被收回
-static SIDE_CHAT_INPUT_OPEN: AtomicBool = AtomicBool::new(false);
-/// Peek 态标志：true = 仅探出 PEEK_PX 像素（单击展开），false = 展开或隐藏
-static SIDE_CHAT_PEEK: AtomicBool = AtomicBool::new(false);
-/// Peek 探出宽度（物理像素）
-const SIDE_CHAT_PEEK_PX: i32 = 10;
-/// 边缘检测线程停止标志与句柄
-static SIDE_CHAT_EDGE_STOP: Lazy<Mutex<Option<(Arc<AtomicBool>, JoinHandle<()>)>>> =
-    Lazy::new(|| Mutex::new(None));
-
-/// 滑动动画时长与步长（物理像素位移，ease-out cubic）
-const SIDE_CHAT_ANIM_MS: u64 = 220;
-const SIDE_CHAT_ANIM_STEP_MS: u64 = 8;
-/// 滑动动画进行中标志：true 时边缘循环跳过 show/hide 决策，避免与位移竞争
-static SIDE_CHAT_ANIMATING: AtomicBool = AtomicBool::new(false);
-/// 动画代号：每次启动自增，被新动画取代的旧动画自行终止（防止快速进出边缘时叠加）
-static SIDE_CHAT_ANIM_GEN: AtomicU32 = AtomicU32::new(0);
-/// 窗口展开静止位的物理 x 坐标（展开动画目标 / 收回动画起点）
-static SIDE_CHAT_REST_X: AtomicI32 = AtomicI32::new(0);
-
-// ---- 状态化鼠标穿透 + 全局 WH_MOUSE_LL 双击检测 ----
-//
-// 被动展示态（输入框关闭）：side_chat 设为鼠标穿透不挡桌面，webview 收不到鼠标事件，
-// 由全局低级鼠标 Hook 识别双击并切换锁定；交互态（输入框打开）：关闭穿透可打字，
-// 双击交给前端 React onDoubleClick。两条路径靠 SIDE_CHAT_CLICK_THROUGH 互斥，不会双触发。
-
-/// 穿透态唯一权威标志：true=被动穿透（Hook 负责双击），false=可交互（React 负责双击）
-static SIDE_CHAT_CLICK_THROUGH: AtomicBool = AtomicBool::new(false);
-/// 鼠标 Hook 线程幂等守卫
-static SIDE_CHAT_HOOK_RUNNING: AtomicBool = AtomicBool::new(false);
-/// 回调→消费线程的非阻塞转发通道（无界 channel，send 永不阻塞，满足回调快返回约束）
-static SIDE_CHAT_HOOK_TX: std::sync::OnceLock<std::sync::mpsc::Sender<(u8, i32, i32)>> =
-    std::sync::OnceLock::new();
-/// 上次左键按下时间（MSLLHOOKSTRUCT.time 硬件事件时间戳）与位置，供回调内双击检测
-static SIDE_CHAT_LAST_CLICK_TIME: AtomicU32 = AtomicU32::new(0);
-static SIDE_CHAT_LAST_CLICK_X: AtomicI32 = AtomicI32::new(i32::MIN);
-static SIDE_CHAT_LAST_CLICK_Y: AtomicI32 = AtomicI32::new(i32::MIN);
-/// 双击阈值：时间（GetDoubleClickTime）与位移矩形（SM_CXDOUBLECLK/SM_CYDOUBLECLK），
-/// 装钩子时一次性写入，回调内只 load，避免在回调里调 Win32
-static SIDE_CHAT_DBLCLK_TIME: AtomicU32 = AtomicU32::new(500);
-static SIDE_CHAT_DBLCLK_CX: AtomicI32 = AtomicI32::new(4);
-static SIDE_CHAT_DBLCLK_CY: AtomicI32 = AtomicI32::new(4);
-
-/// 鼠标 Hook 两个线程的停止标志、hook 线程 id 与句柄，供退出守卫限时 join
-struct SideChatHookThreads {
-    stop: Arc<AtomicBool>,
-    hook_tid: Arc<AtomicU32>,
-    hook_handle: JoinHandle<()>,
-    consumer_handle: JoinHandle<()>,
+// ============ 独立右缘菜单 / 按需聊天窗口 / 外部点击 ============
+static CHAT_OUTSIDE_HOOK_RUNNING: AtomicBool = AtomicBool::new(false);
+static CHAT_OUTSIDE_HOOK_TX: std::sync::OnceLock<std::sync::mpsc::Sender<(u8, i32, i32)>> = std::sync::OnceLock::new();
+struct ChatOutsideHookThreads {
+    stop: Arc<AtomicBool>, hook_tid: Arc<AtomicU32>, hook_handle: JoinHandle<()>, consumer_handle: JoinHandle<()>,
 }
-/// 鼠标 Hook 线程停止守卫
-static SIDE_CHAT_HOOK_STOP: Lazy<Mutex<Option<SideChatHookThreads>>> =
-    Lazy::new(|| Mutex::new(None));
+static CHAT_OUTSIDE_HOOK_STOP: Lazy<Mutex<Option<ChatOutsideHookThreads>>> = Lazy::new(|| Mutex::new(None));
 
-/// 在独立线程上把 side_chat 窗口的物理 x 从 from_x 平滑移动到 to_x（ease-out cubic）。
-/// then_hide=true 时移动到位后调用 hide()。动画期间置 SIDE_CHAT_ANIMATING，
-/// 被更新代号取代或应用退出时提前终止并让出标志。
-fn spawn_side_chat_slide(win: WebviewWindow, from_x: i32, to_x: i32, y: i32, then_hide: bool) {
-    let gen = SIDE_CHAT_ANIM_GEN.fetch_add(1, Ordering::SeqCst) + 1;
-    SIDE_CHAT_ANIMATING.store(true, Ordering::SeqCst);
-    thread::spawn(move || {
-        let steps = (SIDE_CHAT_ANIM_MS / SIDE_CHAT_ANIM_STEP_MS).max(1) as i32;
-        let mut superseded = false;
-        for i in 1..=steps {
-            if APP_EXITING.load(Ordering::SeqCst)
-                || SIDE_CHAT_ANIM_GEN.load(Ordering::SeqCst) != gen
-            {
-                superseded = true;
-                break;
-            }
-            let t = i as f64 / steps as f64;
-            let eased = 1.0 - (1.0 - t).powi(3); // ease-out cubic
-            let x = from_x + ((to_x - from_x) as f64 * eased).round() as i32;
-            let _ = win.set_position(tauri::PhysicalPosition::new(x, y));
-            thread::sleep(Duration::from_millis(SIDE_CHAT_ANIM_STEP_MS));
-        }
-        // 仅当代号仍为最新才收尾并释放标志（被取代则由新动画负责）
-        if !superseded && SIDE_CHAT_ANIM_GEN.load(Ordering::SeqCst) == gen {
-            let _ = win.set_position(tauri::PhysicalPosition::new(to_x, y));
-            if then_hide {
-                let _ = win.hide();
-                freeze_webview(&win);
-            }
-            SIDE_CHAT_ANIMATING.store(false, Ordering::SeqCst);
-        }
-    });
-}
-
-/// 右缘三态的窗口矩形信息。
-/// 返回 `(right_x, win_top_y, win_height)`：
-/// - `right_x`：显示器右缘（x 锚点）
-/// - `win_top_y / win_height`：窗口在显示器上的「垂直中段位置与高度」，
-///   用于将 Peek/Expand/Hide 动画与命中检测锚定到窗口自身 y 区间，
-///   避免窗口高度 < 屏幕高度（iPhone 比例）时判定落在屏高 2/5 之外导致识别错位。
-fn side_chat_right_frame(win: &WebviewWindow) -> Option<(i32, i32, i32)> {
-    let m = win.current_monitor().ok().flatten()?;
-    let mp = m.position();
-    let ms = m.size();
-    let right_x = mp.x + ms.width as i32;
-    match (win.outer_position(), win.outer_size()) {
-        (Ok(pos), Ok(size)) => {
-            // 已创建：用实际位置/尺寸（可能居中垂直或已被用户摆放）
-            Some((right_x, pos.y, size.height as i32))
-        }
-        _ => {
-            // 未知尺寸：退化为显示器中间 2/5 区间作虚拟矩形（iPhone 比例）
-            let mh = ms.height as i32;
-            let h = (mh * 2) / 5;
-            let y = mp.y + (mh - h) / 2;
-            Some((right_x, y, h))
-        }
-    }
-}
-
-/// Hidden → Peek：瞬移到屏外右侧（显示器右缘、当前 y 位置），show 后滑入探出 PEEK_PX。
-fn peek_side_chat_slide(win: &WebviewWindow) {
-    SIDE_CHAT_CLICK_THROUGH.store(true, Ordering::SeqCst);
-    let _ = win.set_ignore_cursor_events(true);
-    let Some((right, y, _)) = side_chat_right_frame(win) else { return };
-    let peek_x = right - SIDE_CHAT_PEEK_PX;
-    let _ = win.set_position(tauri::PhysicalPosition::new(right, y));
-    thaw_webview(win);
-    if let Err(e) = win.show() {
-        tracing::warn!("[side_chat_edge] show 失败: {e}");
-        return;
-    }
-    SIDE_CHAT_PEEK.store(true, Ordering::SeqCst);
-    spawn_side_chat_slide(win.clone(), right, peek_x, y, false);
-}
-
-/// Peek → Expanded：从当前位置滑入展开静止位（显示器右缘 − 窗口宽）。
-fn expand_side_chat_slide(win: &WebviewWindow) {
-    let Some((right, y, _)) = side_chat_right_frame(win) else { return };
-    let width = win.outer_size().map(|s| s.width as i32).unwrap_or(0);
-    let from_x = win.outer_position().map(|p| p.x).unwrap_or(right - SIDE_CHAT_PEEK_PX);
-    let rest_x = right - width;
-    SIDE_CHAT_REST_X.store(rest_x, Ordering::SeqCst);
-    SIDE_CHAT_PEEK.store(false, Ordering::SeqCst);
-    SIDE_CHAT_CLICK_THROUGH.store(false, Ordering::SeqCst);
-    let _ = win.set_ignore_cursor_events(false);
-    if !win.is_visible().ok().unwrap_or(false) {
-        let _ = win.set_position(tauri::PhysicalPosition::new(from_x, y));
-        thaw_webview(win);
-        if let Err(e) = win.show() {
-            tracing::warn!("[side_chat_expand] show 失败: {e}");
-            return;
-        }
-    }
-    spawn_side_chat_slide(win.clone(), from_x, rest_x, y, false);
-}
-
-/// Expanded/Peek → Hidden：滑出到屏外右侧后 hide。
-fn hide_side_chat_slide(win: &WebviewWindow) {
-    let Some((right, y, _)) = side_chat_right_frame(win) else { return };
-    let pos = win.outer_position().ok();
-    let from_x = pos.map(|p| p.x).unwrap_or_else(|| SIDE_CHAT_REST_X.load(Ordering::SeqCst));
-    SIDE_CHAT_PEEK.store(false, Ordering::SeqCst);
-    spawn_side_chat_slide(win.clone(), from_x, right, y, true);
-}
-
-/// 展开 side_chat（快捷键 / Hook 单击探出条路径）。
-/// Peek 态 → 展开动画；隐藏态 → 从探出位直接滑入展开；已展开时不重复动画。
-fn show_or_expand_side_chat(win: &WebviewWindow) {
-    if SIDE_CHAT_PEEK.load(Ordering::SeqCst) || !win.is_visible().ok().unwrap_or(false) {
-        expand_side_chat_slide(win);
-    }
-}
-
-/// 以滑动动画展开侧边栏窗口（供前端快捷键路径调用，与探出条点击展开动画一致）。
-/// `label` 缺省为 `chat`（微信窗口，本机制的主要目标）。
-#[tauri::command]
-pub fn show_side_chat_animated(app: AppHandle, label: Option<String>) -> Result<(), String> {
-    let label = label.unwrap_or_else(|| "chat".to_string());
-    let win = app
-        .get_webview_window(&label)
-        .ok_or(format!("{label} 窗口不存在"))?;
-    // 直接对话侧边栏（side_chat）停靠屏幕左缘：位置由前端预置，仅需直接显示，
-    // 不参与 chat 的右缘三态边缘机制。
-    if label == "side_chat" {
-        if !win.is_visible().ok().unwrap_or(false) {
-            // 每次重新打开默认未锁定、无输入：光标离开自动隐藏（调用方可随后显式 set locked）
-            SIDE_CHAT_LEFT_LOCKED.store(false, Ordering::SeqCst);
-            SIDE_CHAT_LEFT_INPUT_OPEN.store(false, Ordering::SeqCst);
-            let _ = app.emit_to("side_chat", "sidechat:lock_changed", json!({ "locked": false, "label": "side_chat" }));
-            side_chat_left_show(&win);
-        }
-        return Ok(());
-    }
-    if win.is_visible().ok().unwrap_or(false) && !SIDE_CHAT_PEEK.load(Ordering::SeqCst) {
-        return Ok(());
-    }
-    show_or_expand_side_chat(&win);
-    Ok(())
-}
-
-/// 点击探出条：Peek → Expanded（前端不直接调用，由全局鼠标 Hook 消费线程触发）。
-#[tauri::command]
-pub fn expand_side_chat(app: AppHandle, label: Option<String>) -> Result<(), String> {
-    let label = label.unwrap_or_else(|| "chat".to_string());
-    let win = app
-        .get_webview_window(&label)
-        .ok_or(format!("{label} 窗口不存在"))?;
-    show_or_expand_side_chat(&win);
-    Ok(())
-}
-
-/// 点击退出按钮：立即收回屏幕右侧（滑动动画），到位后完全隐藏。
-/// 同时复位锁定/输入标志并广播，前端清理残留输入态。
-/// `label` 缺省为 `chat`（微信窗口）。
-#[tauri::command]
-pub fn collapse_side_chat(app: AppHandle, label: Option<String>) -> Result<(), String> {
-    let label = label.unwrap_or_else(|| "chat".to_string());
-    let win = app
-        .get_webview_window(&label)
-        .ok_or(format!("{label} 窗口不存在"))?;
-    if !win.is_visible().ok().unwrap_or(false) {
-        return Ok(());
-    }
-    // 直接对话侧边栏（side_chat）停靠屏幕左缘：不参与三态全局状态，直接隐藏。
-    if label == "side_chat" {
-        SIDE_CHAT_LEFT_LOCKED.store(false, Ordering::SeqCst);
-        SIDE_CHAT_LEFT_INPUT_OPEN.store(false, Ordering::SeqCst);
-        *SIDE_CHAT_LEFT_INPUT_REGION.lock() = None;
-        let _ = win.emit_to("side_chat", "sidechat:lock_changed", json!({ "locked": false, "label": "side_chat" }));
-        let _ = win.emit_to("side_chat", "sidechat:input_reset", json!({ "label": "side_chat" }));
-        let _ = win.hide();
-        freeze_webview(&win);
-        return Ok(());
-    }
-    SIDE_CHAT_LOCKED.store(false, Ordering::SeqCst);
-    SIDE_CHAT_INPUT_OPEN.store(false, Ordering::SeqCst);
-    let _ = app.emit("sidechat:lock_changed", json!({ "locked": false }));
-    let _ = app.emit("sidechat:input_reset", json!({}));
-    hide_side_chat_slide(&win);
-    Ok(())
-}
-
-// ============ chat 右侧抽屉全局鼠标 Hook（Peek 单击展开 + 穿透态双击锁定） ============
-
-/// Hook 事件类别：0 = Peek 态单击探出条（展开），1 = 穿透态双击（切换锁定）
-const SIDE_CHAT_HOOK_CLICK: u8 = 0;
-const SIDE_CHAT_HOOK_DBLCLK: u8 = 1;
-
-/// WH_MOUSE_LL 回调：Peek 态检测单击命中探出条 → 展开；穿透展开态检测双击 → 锁定切换。
-/// 命中后非阻塞转发给消费线程。
-/// 回调必须微秒级返回（否则触发 LowLevelHooksTimeout 被系统静默移除），故只做原子操作 + channel send。
 #[cfg(windows)]
-unsafe extern "system" fn side_chat_mouse_ll_proc(
-    code: i32,
-    wparam: windows::Win32::Foundation::WPARAM,
-    lparam: windows::Win32::Foundation::LPARAM,
-) -> windows::Win32::Foundation::LRESULT {
+unsafe extern "system" fn chat_outside_mouse_ll_proc(code: i32, wparam: windows::Win32::Foundation::WPARAM, lparam: windows::Win32::Foundation::LPARAM) -> windows::Win32::Foundation::LRESULT {
     use windows::Win32::UI::WindowsAndMessaging::{CallNextHookEx, MSLLHOOKSTRUCT, WM_LBUTTONDOWN};
-
-    // nCode < 0 必须原样传递，不做任何处理
-    if code < 0 {
-        return CallNextHookEx(None, code, wparam, lparam);
+    if code >= 0 && wparam.0 as u32 == WM_LBUTTONDOWN {
+        let event = &*(lparam.0 as *const MSLLHOOKSTRUCT);
+        if let Some(tx) = CHAT_OUTSIDE_HOOK_TX.get() { let _ = tx.send((0, event.pt.x, event.pt.y)); }
     }
-    if (wparam.0 as u32) == WM_LBUTTONDOWN {
-        // lparam 指向 MSLLHOOKSTRUCT，仅回调期间有效 → 立即拷出 pt/time 值
-        let ms = &*(lparam.0 as *const MSLLHOOKSTRUCT);
-        let now = ms.time;
-        let (x, y) = (ms.pt.x, ms.pt.y);
-        if SIDE_CHAT_PEEK.load(Ordering::SeqCst) {
-            // Peek 态：单击探出条 → 展开请求（消费线程复检窗口矩形）
-            if let Some(tx) = SIDE_CHAT_HOOK_TX.get() {
-                let _ = tx.send((SIDE_CHAT_HOOK_CLICK, x, y));
-            }
-            // 复位双击序列：避免快速双击探出条时第二击误判为"锁定切换"
-            SIDE_CHAT_LAST_CLICK_TIME.store(0, Ordering::SeqCst);
-        } else if SIDE_CHAT_CLICK_THROUGH.load(Ordering::SeqCst) {
-            // 穿透展开态：双击检测 → 锁定切换（交互态由前端 React onDoubleClick 处理）
-            let last_t = SIDE_CHAT_LAST_CLICK_TIME.load(Ordering::SeqCst);
-        let dx = ((x as i64) - (SIDE_CHAT_LAST_CLICK_X.load(Ordering::SeqCst) as i64)).abs();
-        let dy = ((y as i64) - (SIDE_CHAT_LAST_CLICK_Y.load(Ordering::SeqCst) as i64)).abs();
-        let is_dbl = last_t != 0
-            && now.wrapping_sub(last_t) <= SIDE_CHAT_DBLCLK_TIME.load(Ordering::SeqCst)
-            && dx <= SIDE_CHAT_DBLCLK_CX.load(Ordering::SeqCst) as i64
-            && dy <= SIDE_CHAT_DBLCLK_CY.load(Ordering::SeqCst) as i64;
-        if is_dbl {
-            if let Some(tx) = SIDE_CHAT_HOOK_TX.get() {
-                let _ = tx.send((SIDE_CHAT_HOOK_DBLCLK, x, y)); // 无界 channel，非阻塞
-            }
-            SIDE_CHAT_LAST_CLICK_TIME.store(0, Ordering::SeqCst); // 复位防三连击歧义
-        } else {
-            SIDE_CHAT_LAST_CLICK_TIME.store(now, Ordering::SeqCst);
-            SIDE_CHAT_LAST_CLICK_X.store(x, Ordering::SeqCst);
-            SIDE_CHAT_LAST_CLICK_Y.store(y, Ordering::SeqCst);
-        }
-        }
-    }
-    // 永不吞事件：始终调用 CallNextHookEx 并返回其结果
     CallNextHookEx(None, code, wparam, lparam)
 }
-
-/// 消费线程命中处理：按事件类别分流（复检窗口可见性与落点矩形）。
-fn handle_side_chat_hook_event(app: &AppHandle, kind: u8, x: i32, y: i32) {
-    // 微信抽屉（chat）：既有右缘逻辑
-    let win = match app.get_webview_window("chat") {
-        Some(w) => w,
-        None => return,
-    };
-    if !win.is_visible().ok().unwrap_or(false) {
-        return;
-    }
-    let (pos, size) = match (win.outer_position(), win.outer_size()) {
-        (Ok(p), Ok(s)) => (p, s),
-        _ => return,
-    };
-    // 物理像素直接比较：MSLLHOOKSTRUCT.pt 与 outer_position/outer_size 同为物理屏幕坐标
-    let inside = x >= pos.x
-        && x <= pos.x + size.width as i32
-        && y >= pos.y
-        && y <= pos.y + size.height as i32;
-
-    match kind {
-        SIDE_CHAT_HOOK_CLICK => {
-            // Peek 单击：复检 Peek 态仍有效 + 落点在探出条窗口内 → 展开
-            if SIDE_CHAT_PEEK.load(Ordering::SeqCst) && inside {
-                tracing::info!("[side_chat_hook] 单击探出条，展开侧边栏");
-                expand_side_chat_slide(&win);
-            }
-        }
-        _ => {
-            // 穿透展开态双击：切换锁定（复检穿透态 + 落点命中）
-            if !SIDE_CHAT_CLICK_THROUGH.load(Ordering::SeqCst) || !inside {
-                return;
-            }
-            let new_locked = !SIDE_CHAT_LOCKED.load(Ordering::SeqCst);
-            SIDE_CHAT_LOCKED.store(new_locked, Ordering::SeqCst);
-            let _ = app.emit("sidechat:lock_changed", json!({ "locked": new_locked }));
-            tracing::info!("[side_chat_hook] 双击切换锁定 → {new_locked}");
-            // 解锁时立即收起隐藏（锁定时不动作）
-            if !new_locked {
-                hide_side_chat_slide(&win);
-            }
-        }
-    }
+fn handle_chat_outside_hook_event(app: &AppHandle, _kind: u8, x: i32, y: i32) {
+    crate::edge_menu::outside_pointer_down(app, x, y);
 }
 
-/// 启动 side_chat 全局鼠标 Hook（hook 线程 + 消费线程，幂等）。
-/// 穿透态下识别双击切换锁定；交互态由前端 React onDoubleClick 处理。
 #[tauri::command]
-pub fn start_side_chat_mouse_hook(app: AppHandle) -> Result<(), String> {
-    start_side_chat_mouse_hook_internal(app)
+pub fn show_chat_animated(app: AppHandle) -> Result<(), String> {
+    let win = app.get_webview_window("chat").ok_or("窗口不存在")?;
+    crate::edge_menu::show_chat(&win)
+}
+
+#[tauri::command]
+pub fn close_chat_window(app: AppHandle) -> Result<(), String> {
+    if let Some(win) = app.get_webview_window("chat") { win.destroy().map_err(err_str)?; }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn start_edge_menu_watcher(app: AppHandle) -> Result<(), String> { crate::edge_menu::start(app); Ok(()) }
+pub(crate) fn stop_edge_menu_watcher_internal() { crate::edge_menu::stop(); }
+
+/// 启动 聊天窗口 全局鼠标 Hook（hook 线程 + 消费线程，幂等）。
+/// 转发全局鼠标按下位置，供快捷工具窗口判断外部点击。
+#[tauri::command]
+pub fn start_chat_outside_click_hook(app: AppHandle) -> Result<(), String> {
+    start_chat_outside_click_hook_internal(app)
 }
 
 #[cfg(windows)]
-fn start_side_chat_mouse_hook_internal(app: AppHandle) -> Result<(), String> {
+fn start_chat_outside_click_hook_internal(app: AppHandle) -> Result<(), String> {
     use windows::Win32::System::Threading::GetCurrentThreadId;
-    use windows::Win32::UI::Input::KeyboardAndMouse::GetDoubleClickTime;
     use windows::Win32::UI::WindowsAndMessaging::{
-        DispatchMessageW, GetMessageW, GetSystemMetrics, SetWindowsHookExW, TranslateMessage,
-        UnhookWindowsHookEx, SM_CXDOUBLECLK, SM_CYDOUBLECLK, WH_MOUSE_LL,
+        DispatchMessageW, GetMessageW, SetWindowsHookExW, TranslateMessage,
+        UnhookWindowsHookEx, WH_MOUSE_LL,
     };
 
-    if SIDE_CHAT_HOOK_RUNNING.swap(true, Ordering::SeqCst) {
+    if CHAT_OUTSIDE_HOOK_RUNNING.swap(true, Ordering::SeqCst) {
         return Ok(()); // 已在运行
     }
 
     let (tx, rx) = std::sync::mpsc::channel::<(u8, i32, i32)>();
-    let _ = SIDE_CHAT_HOOK_TX.set(tx); // OnceLock；忽略 Err（仅重启场景，此处不发生）
+    let _ = CHAT_OUTSIDE_HOOK_TX.set(tx); // OnceLock；忽略 Err（仅重启场景，此处不发生）
 
     let stop = Arc::new(AtomicBool::new(false));
     let hook_tid = Arc::new(AtomicU32::new(0));
@@ -1559,23 +1237,19 @@ fn start_side_chat_mouse_hook_internal(app: AppHandle) -> Result<(), String> {
     let stop_h = Arc::clone(&stop);
     let tid_h = Arc::clone(&hook_tid);
     let hook_handle = thread::Builder::new()
-        .name("sidechat-mouse-hook".into())
+        .name("chat-outside-mouse-hook".into())
         .spawn(move || unsafe {
             tid_h.store(GetCurrentThreadId(), Ordering::SeqCst);
-            // 阈值一次性写入静态量，回调内只 load
-            SIDE_CHAT_DBLCLK_TIME.store(GetDoubleClickTime(), Ordering::SeqCst);
-            SIDE_CHAT_DBLCLK_CX.store(GetSystemMetrics(SM_CXDOUBLECLK), Ordering::SeqCst);
-            SIDE_CHAT_DBLCLK_CY.store(GetSystemMetrics(SM_CYDOUBLECLK), Ordering::SeqCst);
 
-            let hook = match SetWindowsHookExW(WH_MOUSE_LL, Some(side_chat_mouse_ll_proc), None, 0)
+            let hook = match SetWindowsHookExW(WH_MOUSE_LL, Some(chat_outside_mouse_ll_proc), None, 0)
             {
                 Ok(h) if !h.0.is_null() => h,
                 _ => {
-                    tracing::warn!("[side_chat_hook] SetWindowsHookExW 失败");
+                    tracing::warn!("[chat_outside_hook] SetWindowsHookExW 失败");
                     return;
                 }
             };
-            tracing::info!("[side_chat_hook] WH_MOUSE_LL 已安装");
+            tracing::info!("[chat_outside_hook] WH_MOUSE_LL 已安装");
 
             let mut msg = std::mem::zeroed();
             while !stop_h.load(Ordering::SeqCst) {
@@ -1587,19 +1261,19 @@ fn start_side_chat_mouse_hook_internal(app: AppHandle) -> Result<(), String> {
                 DispatchMessageW(&msg);
             }
             let _ = UnhookWindowsHookEx(hook); // 在持有 hook 的本线程卸载
-            tracing::info!("[side_chat_hook] WH_MOUSE_LL 已卸载");
+            tracing::info!("[chat_outside_hook] WH_MOUSE_LL 已卸载");
         })
         .map_err(err_str)?;
 
-    // 消费线程：收双击点 → 切换锁定（重逻辑在此，不在回调）
+    // 消费线程处理窗口关闭，鼠标钩子只投递坐标。
     let stop_c = Arc::clone(&stop);
     let app_c = app.clone();
     let consumer_handle = thread::Builder::new()
-        .name("sidechat-mouse-consumer".into())
+        .name("chat-outside-mouse-consumer".into())
         .spawn(move || {
             while !stop_c.load(Ordering::SeqCst) && !APP_EXITING.load(Ordering::SeqCst) {
                 match rx.recv_timeout(Duration::from_millis(200)) {
-                    Ok((kind, x, y)) => handle_side_chat_hook_event(&app_c, kind, x, y),
+                    Ok((kind, x, y)) => handle_chat_outside_hook_event(&app_c, kind, x, y),
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
                     Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
                 }
@@ -1607,7 +1281,7 @@ fn start_side_chat_mouse_hook_internal(app: AppHandle) -> Result<(), String> {
         })
         .map_err(err_str)?;
 
-    *SIDE_CHAT_HOOK_STOP.lock() = Some(SideChatHookThreads {
+    *CHAT_OUTSIDE_HOOK_STOP.lock() = Some(ChatOutsideHookThreads {
         stop,
         hook_tid,
         hook_handle,
@@ -1617,15 +1291,15 @@ fn start_side_chat_mouse_hook_internal(app: AppHandle) -> Result<(), String> {
 }
 
 #[cfg(not(windows))]
-fn start_side_chat_mouse_hook_internal(_app: AppHandle) -> Result<(), String> {
+fn start_chat_outside_click_hook_internal(_app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// 停止 side_chat 全局鼠标 Hook 线程（内部实现，应用退出时调用）。
+/// 停止 聊天窗口 全局鼠标 Hook 线程（内部实现，应用退出时调用）。
 /// 置停止标志 + PostThreadMessageW(WM_QUIT) 唤醒消息泵，限时 1s join 两线程，避免退出死锁。
 #[cfg(windows)]
-pub(crate) fn stop_side_chat_mouse_hook_internal() {
-    let entry = SIDE_CHAT_HOOK_STOP.lock().take();
+pub(crate) fn stop_chat_outside_click_hook_internal() {
+    let entry = CHAT_OUTSIDE_HOOK_STOP.lock().take();
     if let Some(threads) = entry {
         threads.stop.store(true, Ordering::SeqCst);
         let tid = threads.hook_tid.load(Ordering::SeqCst);
@@ -1646,558 +1320,19 @@ pub(crate) fn stop_side_chat_mouse_hook_internal() {
             let _ = done_tx.send(());
         });
         if done_rx.recv_timeout(Duration::from_millis(1000)).is_err() {
-            tracing::warn!("[side_chat_hook] 线程未在 1s 内退出，放弃等待");
+            tracing::warn!("[chat_outside_hook] 线程未在 1s 内退出，放弃等待");
         }
     }
-    SIDE_CHAT_HOOK_RUNNING.store(false, Ordering::SeqCst);
+    CHAT_OUTSIDE_HOOK_RUNNING.store(false, Ordering::SeqCst);
 }
 
 #[cfg(not(windows))]
-pub(crate) fn stop_side_chat_mouse_hook_internal() {}
+pub(crate) fn stop_chat_outside_click_hook_internal() {}
 
-/// 启动 side_chat 边缘检测线程（每 ~60ms 一帧，幂等）。
-///
-/// 线程职责（右缘三态）：
-/// - 隐藏态：光标进入右缘 zone → Peek 探出（重置锁定/输入标志，通知前端清理残留输入态）
-/// - Peek 态：光标离开右缘 zone / 探出条 → 宽限后收回完全隐藏；
-///   单击探出条由全局鼠标 Hook 检测并展开（不经本线程）
-/// - 展开态：锁定或输入框打开 → 常驻；光标在窗口/右缘 zone 内 → 保持；
-///   否则宽限 GRACE_TICKS 后收回隐藏
+/// Full chat windows always accept pointer input.
 #[tauri::command]
-pub fn start_side_chat_edge_watcher(app: AppHandle) -> Result<(), String> {
-    if SIDE_CHAT_EDGE_RUNNING.swap(true, Ordering::SeqCst) {
-        return Ok(()); // 已有线程在运行
-    }
-
-    let stop_flag = Arc::new(AtomicBool::new(false));
-    let stop_flag_clone = Arc::clone(&stop_flag);
-
-    let thread = thread::spawn(move || {
-        tracing::info!("[side_chat_edge] 线程启动");
-
-        const EDGE_PX: i32 = 12; // 右缘触发宽度（物理像素）
-        const GRACE_TICKS: u32 = 7; // 自动隐藏宽限（7 * 60ms ≈ 420ms）
-        const MONITOR_REFRESH_TICKS: u32 = 30; // 显示器缓存刷新周期
-        // 隐藏态延迟冻结：等前端预创建后的初始化（React 挂载/历史加载）完成再挂起
-        const FREEZE_DELAY_TICKS: u32 = 50; // 50 * 60ms = 3s
-
-        let mut hide_countdown: u32 = 0;
-        let mut freeze_delay: u32 = 0;
-        let mut tick: u32 = 0;
-        // ESC 下降沿跟踪：仅在 false→true 跳变时触发解锁，避免按住时重复触发
-        let mut esc_prev = false;
-        // 缓存窗口所在显示器的原点与尺寸（物理像素）
-        let mut mon: Option<(i32, i32, i32, i32)> = None;
-
-        while !stop_flag_clone.load(Ordering::SeqCst) && !APP_EXITING.load(Ordering::SeqCst) {
-            let win = match app.get_webview_window("chat") {
-                Some(w) => w,
-                None => {
-                    // 窗口尚未预创建/已销毁：空闲等待
-                    thread::sleep(Duration::from_millis(60));
-                    continue;
-                }
-            };
-
-            let c = match app.cursor_position() {
-                Ok(c) => c,
-                Err(_) => {
-                    thread::sleep(Duration::from_millis(60));
-                    continue;
-                }
-            };
-            let cx = c.x as i32;
-            let cy = c.y as i32;
-
-            // 定期刷新显示器缓存（窗口可能被重新定位到其他显示器）
-            tick += 1;
-            if mon.is_none() || tick % MONITOR_REFRESH_TICKS == 0 {
-                if let Ok(Some(m)) = win.current_monitor() {
-                    let mp = m.position();
-                    let ms = m.size();
-                    mon = Some((mp.x, mp.y, ms.width as i32, ms.height as i32));
-                }
-            }
-
-            let visible = win.is_visible().ok().unwrap_or(false);
-
-            // 滑动动画进行中：跳过本帧 show/hide 决策，避免与原生位移竞争
-            if SIDE_CHAT_ANIMATING.load(Ordering::SeqCst) {
-                thread::sleep(Duration::from_millis(60));
-                continue;
-            }
-
-            // 边缘 zone：显示器右缘 EDGE_PX 内；垂直判定改为窗口自身 y 区间
-            // （当窗口按 iPhone 比例缩小时，不再与屏高 2/5 强绑定），
-            // 同时向上下各扩张 EDGE_PX 以方便鼠标靠近。
-            let in_edge_zone = match (mon, side_chat_right_frame(&win)) {
-                (Some((_mx, my, _mw, mh)), Some((right, win_y, win_h))) => {
-                    let lo = (win_y - EDGE_PX).max(my);
-                    let hi = (win_y + win_h + EDGE_PX).min(my + mh);
-                    cx >= right - EDGE_PX
-                        && cx <= right
-                        && cy >= lo
-                        && cy <= hi
-                }
-                _ => false,
-            };
-
-            // 光标是否在窗口矩形内（含 4px 容差）：展开态保持/Peek 态判定共用
-            let in_window = if let (Ok(pos), Ok(size)) = (win.outer_position(), win.outer_size()) {
-                cx >= pos.x - 4
-                    && cx <= pos.x + size.width as i32 + 4
-                    && cy >= pos.y - 4
-                    && cy <= pos.y + size.height as i32 + 4
-            } else {
-                false
-            };
-
-            let peek = SIDE_CHAT_PEEK.load(Ordering::SeqCst);
-
-            if !visible {
-                // 隐藏态延迟冻结（幂等：每轮隐藏只触发一次，后续 hide 动画收尾也会冻结）
-                freeze_delay += 1;
-                if freeze_delay == FREEZE_DELAY_TICKS {
-                    freeze_webview(&win);
-                }
-                if in_edge_zone {
-                    // 右缘悬停 → Peek：重置锁定/输入标志（本次为未锁定悬停）
-                    SIDE_CHAT_LOCKED.store(false, Ordering::SeqCst);
-                    SIDE_CHAT_INPUT_OPEN.store(false, Ordering::SeqCst);
-                    hide_countdown = 0;
-                    peek_side_chat_slide(&win);
-                    tracing::info!("[side_chat_edge] 右缘悬停探出");
-                    // 通知前端同步锁图标 + 清理上次残留的输入态
-                    let _ = app.emit("sidechat:lock_changed", json!({ "locked": false }));
-                    let _ = app.emit("sidechat:input_reset", json!({}));
-                }
-            } else if peek {
-                freeze_delay = 0;
-                // Peek 态：光标仍在右缘 zone / 探出条附近保持，离开宽限后收回完全隐藏
-                if in_edge_zone || in_window {
-                    hide_countdown = 0;
-                } else {
-                    hide_countdown += 1;
-                    if hide_countdown >= GRACE_TICKS {
-                        hide_countdown = 0;
-                        hide_side_chat_slide(&win);
-                        tracing::info!("[side_chat_edge] 光标离开探出条，收回隐藏");
-                    }
-                }
-            } else {
-                freeze_delay = 0;
-                let locked = SIDE_CHAT_LOCKED.load(Ordering::SeqCst);
-                let input_open = SIDE_CHAT_INPUT_OPEN.load(Ordering::SeqCst);
-                if locked || input_open {
-                    hide_countdown = 0; // 锁定/输入中：常驻
-                } else if in_window || in_edge_zone {
-                    hide_countdown = 0; // 光标仍在窗口 / 屏幕右缘：保持
-                } else {
-                    hide_countdown += 1;
-                    if hide_countdown >= GRACE_TICKS {
-                        hide_countdown = 0;
-                        hide_side_chat_slide(&win);
-                        tracing::info!("[side_chat_edge] 光标离开，自动收回隐藏");
-                    }
-                }
-
-                // 鼠标悬浮在窗口上 + ESC 下降沿：锁定→解锁并立即收起隐藏
-                let esc_now = is_escape_down();
-                if esc_now && !esc_prev && locked && in_window {
-                    SIDE_CHAT_LOCKED.store(false, Ordering::SeqCst);
-                    let _ = app.emit("sidechat:lock_changed", json!({ "locked": false }));
-                    hide_side_chat_slide(&win);
-                    tracing::info!("[side_chat_edge] 悬浮时按 ESC 解锁并隐藏");
-                }
-                esc_prev = esc_now;
-            }
-
-            thread::sleep(Duration::from_millis(60));
-        }
-
-        // 线程退出：清空句柄并释放幂等守卫
-        *SIDE_CHAT_EDGE_STOP.lock() = None;
-        SIDE_CHAT_EDGE_RUNNING.store(false, Ordering::SeqCst);
-        tracing::info!("[side_chat_edge] 线程已退出");
-    });
-
-    *SIDE_CHAT_EDGE_STOP.lock() = Some((stop_flag, thread));
-    Ok(())
-}
-
-/// 停止 side_chat 边缘检测线程（内部实现，应用退出时调用）。
-///
-/// 设停止标志后在有界时间内等待退出，避免卡在阻塞式窗口调用导致退出死锁。
-pub(crate) fn stop_side_chat_edge_watcher_internal() {
-    let entry = SIDE_CHAT_EDGE_STOP.lock().take();
-    if let Some((flag, handle)) = entry {
-        flag.store(true, Ordering::SeqCst);
-        let (done_tx, done_rx) = std::sync::mpsc::channel();
-        thread::spawn(move || {
-            let _ = handle.join();
-            let _ = done_tx.send(());
-        });
-        if done_rx.recv_timeout(Duration::from_millis(1000)).is_err() {
-            tracing::warn!("[side_chat_edge] 线程未在 1s 内退出，放弃等待");
-        }
-    }
-}
-
-// ============ side_chat 左缘看护线程（直接对话侧边栏：自动隐藏 + Tab 锁定 + Esc 收回） ============
-//
-// side_chat 停靠左缘：悬浮按 Tab 切换锁定，Esc 收回；未锁定时光标离开自动隐藏。
-// 仅输入区域接收鼠标事件，其他区域保持原生穿透。
-
-/// side_chat 独立锁定标志（不共享 chat 的三态 SIDE_CHAT_LOCKED）
-static SIDE_CHAT_LEFT_LOCKED: AtomicBool = AtomicBool::new(false);
-/// side_chat 输入框打开标志：仅输入区域可交互
-static SIDE_CHAT_LEFT_INPUT_OPEN: AtomicBool = AtomicBool::new(false);
-/// 输入区域在 WebView 中的逻辑坐标；看护线程换算为物理屏幕坐标。
-static SIDE_CHAT_LEFT_INPUT_REGION: Lazy<Mutex<Option<[f64; 4]>>> =
-    Lazy::new(|| Mutex::new(None));
-
-#[tauri::command]
-pub fn set_side_chat_input_region(window: WebviewWindow, rect: Option<[f64; 4]>) -> Result<bool, String> {
-    if window.label() != "side_chat" {
-        return Err("仅 side_chat 可设置输入区域".into());
-    }
-    *SIDE_CHAT_LEFT_INPUT_REGION.lock() = rect.filter(|r| {
-        r.iter().all(|v| v.is_finite()) && r[2] > r[0] && r[3] > r[1]
-    });
-    Ok(SIDE_CHAT_LEFT_LOCKED.load(Ordering::SeqCst))
-}
-
-#[cfg(windows)]
-fn is_tab_down() -> bool {
-    use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_TAB};
-    unsafe { GetAsyncKeyState(VK_TAB.0 as i32) as u16 & 0x8000 != 0 }
-}
-
-#[cfg(not(windows))]
-fn is_tab_down() -> bool {
-    false
-}
-
-/// 左缘看护线程幂等守卫
-static SIDE_CHAT_LEFT_WATCH_RUNNING: AtomicBool = AtomicBool::new(false);
-/// 左缘看护线程停止标志与句柄
-static SIDE_CHAT_LEFT_WATCH_STOP: Lazy<Mutex<Option<(Arc<AtomicBool>, JoinHandle<()>)>>> =
-    Lazy::new(|| Mutex::new(None));
-
-/// 左缘滑动动画独立标志（不与 chat 右缘的 SIDE_CHAT_ANIM_* 共享，避免两窗互相争抢）
-static SIDE_CHAT_LEFT_ANIMATING: AtomicBool = AtomicBool::new(false);
-static SIDE_CHAT_LEFT_ANIM_GEN: AtomicU32 = AtomicU32::new(0);
-
-/// 取窗口所在显示器的左缘物理 x 坐标（左缘呼出/收回的锚点）。
-fn side_chat_left_edge(win: &WebviewWindow) -> Option<i32> {
-    win.current_monitor().ok().flatten().map(|m| m.position().x)
-}
-
-/// 左缘滑动动画：物理 x 从 from_x 平滑移动到 to_x（ease-out cubic）。
-/// then_hide=true 时移动到位后调用 hide()。动画期间置左缘独立 ANIMATING，被更新代号
-/// 取代或应用退出时提前终止并释放标志。
-fn spawn_side_chat_left_slide(win: WebviewWindow, from_x: i32, to_x: i32, y: i32, then_hide: bool) {
-    let gen = SIDE_CHAT_LEFT_ANIM_GEN.fetch_add(1, Ordering::SeqCst) + 1;
-    SIDE_CHAT_LEFT_ANIMATING.store(true, Ordering::SeqCst);
-    thread::spawn(move || {
-        let steps = (SIDE_CHAT_ANIM_MS / SIDE_CHAT_ANIM_STEP_MS).max(1) as i32;
-        let mut superseded = false;
-        for i in 1..=steps {
-            if APP_EXITING.load(Ordering::SeqCst)
-                || SIDE_CHAT_LEFT_ANIM_GEN.load(Ordering::SeqCst) != gen
-            {
-                superseded = true;
-                break;
-            }
-            let t = i as f64 / steps as f64;
-            let eased = 1.0 - (1.0 - t).powi(3); // ease-out cubic
-            let x = from_x + ((to_x - from_x) as f64 * eased).round() as i32;
-            let _ = win.set_position(tauri::PhysicalPosition::new(x, y));
-            thread::sleep(Duration::from_millis(SIDE_CHAT_ANIM_STEP_MS));
-        }
-        if !superseded && SIDE_CHAT_LEFT_ANIM_GEN.load(Ordering::SeqCst) == gen {
-            let _ = win.set_position(tauri::PhysicalPosition::new(to_x, y));
-            if then_hide {
-                let _ = win.hide();
-                freeze_webview(&win);
-            }
-            SIDE_CHAT_LEFT_ANIMATING.store(false, Ordering::SeqCst);
-        }
-    });
-}
-
-/// Hidden → 呼出：瞬移到屏外左侧（显示器左缘 − 窗口宽），show 后滑入左缘静止位。
-fn side_chat_left_show(win: &WebviewWindow) {
-    let Some(left) = side_chat_left_edge(win) else { return };
-    let width = win.outer_size().map(|s| s.width as i32).unwrap_or(0);
-    let y = win.outer_position().map(|p| p.y).unwrap_or(0);
-    let from_x = left - width;
-    let _ = win.set_position(tauri::PhysicalPosition::new(from_x, y));
-    thaw_webview(win);
-    if let Err(e) = win.show() {
-        tracing::warn!("[side_chat_left] show 失败: {e}");
-        return;
-    }
-    spawn_side_chat_left_slide(win.clone(), from_x, left, y, false);
-}
-
-/// Expanded → 收回：从当前位置滑出到屏外左侧后 hide。
-fn side_chat_left_hide(win: &WebviewWindow) {
-    SIDE_CHAT_LEFT_INPUT_OPEN.store(false, Ordering::SeqCst);
-    *SIDE_CHAT_LEFT_INPUT_REGION.lock() = None;
-    let _ = win.emit_to("side_chat", "sidechat:input_reset", json!({ "label": "side_chat" }));
-    let Some(left) = side_chat_left_edge(win) else { return };
-    let width = win.outer_size().map(|s| s.width as i32).unwrap_or(0);
-    let pos = win.outer_position().ok();
-    let from_x = pos.map(|p| p.x).unwrap_or(left);
-    let y = pos.map(|p| p.y).unwrap_or(0);
-    let to_x = left - width;
-    spawn_side_chat_left_slide(win.clone(), from_x, to_x, y, true);
-}
-
-/// 启动 side_chat 左缘看护线程（每 ~60ms 一帧，幂等）。
-#[tauri::command]
-pub fn start_side_chat_left_watcher(app: AppHandle) -> Result<(), String> {
-    if SIDE_CHAT_LEFT_WATCH_RUNNING.swap(true, Ordering::SeqCst) {
-        return Ok(()); // 已有线程在运行
-    }
-    let stop = Arc::new(AtomicBool::new(false));
-    let stop_c = Arc::clone(&stop);
-    let thread = thread::spawn(move || {
-        tracing::info!("[side_chat_left] 线程启动");
-        const GRACE_TICKS: u32 = 4; // 4 * 60ms ≈ 240ms 离开停靠带后的收起延时（60ms 帧粒度下最接近 250ms 的档）
-        const EDGE_PX: i32 = 12; // 左缘触发宽度（物理像素）
-        const KEEP_STRIP_PX: i32 = 15; // 停靠带宽度：窗口最左侧这么宽内视为"仍在使用"
-        const MONITOR_REFRESH_TICKS: u32 = 30;
-        // 隐藏态延迟冻结：等前端预创建后的初始化完成再挂起（50 * 60ms = 3s）
-        const FREEZE_DELAY_TICKS: u32 = 50;
-        let mut hide_countdown: u32 = 0;
-        let mut freeze_delay: u32 = 0;
-        let mut esc_prev = is_escape_down();
-        let mut tab_prev = is_tab_down();
-        let mut click_through: Option<bool> = None;
-        let mut edge_armed = true;
-        let mut tick: u32 = 0;
-        let mut mon: Option<(i32, i32, i32, i32)> = None; // (left, top, w, h)
-
-        while !stop_c.load(Ordering::SeqCst) && !APP_EXITING.load(Ordering::SeqCst) {
-            let win = match app.get_webview_window("side_chat") {
-                Some(w) => w,
-                None => {
-                    thread::sleep(Duration::from_millis(60));
-                    continue;
-                }
-            };
-
-            let c = match app.cursor_position() {
-                Ok(c) => c,
-                Err(_) => {
-                    thread::sleep(Duration::from_millis(60));
-                    continue;
-                }
-            };
-            let cx = c.x as i32;
-            let cy = c.y as i32;
-
-            // 定期刷新显示器缓存（窗口可能被重新定位到其他显示器）
-            tick += 1;
-            if mon.is_none() || tick % MONITOR_REFRESH_TICKS == 0 {
-                if let Ok(Some(m)) = win.current_monitor() {
-                    let mp = m.position();
-                    let ms = m.size();
-                    mon = Some((mp.x, mp.y, ms.width as i32, ms.height as i32));
-                }
-            }
-
-            let visible = win.is_visible().ok().unwrap_or(false);
-            let esc_now = is_escape_down();
-            let tab_now = is_tab_down();
-            let esc_pressed = esc_now && !esc_prev;
-            let tab_pressed = tab_now && !tab_prev;
-            esc_prev = esc_now;
-            tab_prev = tab_now;
-
-            // 左缘滑动动画进行中：跳过本帧 show/hide 决策，避免与原生位移竞争
-            if SIDE_CHAT_LEFT_ANIMATING.load(Ordering::SeqCst) {
-                thread::sleep(Duration::from_millis(60));
-                continue;
-            }
-
-            // 左缘 zone：显示器左缘 EDGE_PX 内、垂直中间 2/5（与窗口高度一致）
-            let in_edge_zone = match mon {
-                Some((mx, my, _mw, mh)) => {
-                    cx >= mx
-                        && cx <= mx + EDGE_PX
-                        && cy >= my + (mh * 3) / 10
-                        && cy <= my + (mh * 7) / 10
-                }
-                None => false,
-            };
-
-            // 光标是否在窗口矩形内（原生穿透不影响悬浮检测）
-            let in_window = match (win.outer_position(), win.outer_size()) {
-                (Ok(pos), Ok(size)) => {
-                    cx >= pos.x
-                        && cx < pos.x + size.width as i32
-                        && cy >= pos.y
-                        && cy < pos.y + size.height as i32
-                }
-                _ => false,
-            };
-
-            // 停靠带：窗口最左侧 KEEP_STRIP_PX 竖条（全高）。未锁定时只有停在这条带内
-            // 才保持展开，光标移到窗口其余位置也视为离开，宽限后收回。
-            let in_keep_strip = match (win.outer_position(), win.outer_size()) {
-                (Ok(pos), Ok(size)) => {
-                    cx >= pos.x
-                        && cx < pos.x + KEEP_STRIP_PX
-                        && cy >= pos.y
-                        && cy < pos.y + size.height as i32
-                }
-                _ => false,
-            };
-
-            if !in_edge_zone {
-                edge_armed = true;
-            }
-            // 原生穿透按输入区域切换，不依赖穿透态下无法接收的 DOM 鼠标事件。
-            let input_hit = visible && SIDE_CHAT_LEFT_INPUT_OPEN.load(Ordering::SeqCst)
-                && match (win.outer_position(), win.scale_factor(), *SIDE_CHAT_LEFT_INPUT_REGION.lock()) {
-                    (Ok(pos), Ok(scale), Some(r)) => {
-                        let x = (c.x - pos.x as f64) / scale;
-                        let y = (c.y - pos.y as f64) / scale;
-                        x >= r[0] && x < r[2] && y >= r[1] && y < r[3]
-                    }
-                    _ => false,
-                };
-            let ignore = !input_hit;
-            if click_through != Some(ignore) {
-                if win.set_ignore_cursor_events(ignore).is_ok() {
-                    click_through = Some(ignore);
-                }
-            }
-
-            if visible && in_window && esc_pressed {
-                SIDE_CHAT_LEFT_LOCKED.store(false, Ordering::SeqCst);
-                let _ = win.emit_to("side_chat", "sidechat:lock_changed", json!({ "locked": false, "label": "side_chat" }));
-                side_chat_left_hide(&win);
-                edge_armed = false; // Esc 后须离开左缘再悬停，避免立即重新呼出。
-                hide_countdown = 0;
-                thread::sleep(Duration::from_millis(60));
-                continue;
-            }
-            if visible && in_window && tab_pressed {
-                let locked = !SIDE_CHAT_LEFT_LOCKED.fetch_xor(true, Ordering::SeqCst);
-                let _ = win.emit_to("side_chat", "sidechat:lock_changed", json!({ "locked": locked, "label": "side_chat" }));
-            }
-            let locked = SIDE_CHAT_LEFT_LOCKED.load(Ordering::SeqCst);
-
-            if !visible {
-                // 隐藏态延迟冻结（幂等：每轮隐藏只触发一次）
-                freeze_delay += 1;
-                if freeze_delay == FREEZE_DELAY_TICKS {
-                    freeze_webview(&win);
-                }
-                // 隐藏态：鼠标靠近左缘 → 呼出（复位锁定/输入，未锁定状态）
-                if in_edge_zone && edge_armed {
-                    SIDE_CHAT_LEFT_LOCKED.store(false, Ordering::SeqCst);
-                    SIDE_CHAT_LEFT_INPUT_OPEN.store(false, Ordering::SeqCst);
-                    hide_countdown = 0;
-                    side_chat_left_show(&win);
-                    tracing::info!("[side_chat_left] 左缘悬停呼出");
-                    let _ = win.emit_to("side_chat", "sidechat:lock_changed", json!({ "locked": false, "label": "side_chat" }));
-                    let _ = win.emit_to("side_chat", "sidechat:input_reset", json!({ "label": "side_chat" }));
-                }
-            } else {
-                freeze_delay = 0;
-                // 锁定、或光标停在窗口最左侧停靠带内 → 保持；否则宽限 ~0.5s 后收回。
-                // 输入框打开期间只要光标还在窗内也保持：此时用户正在交互，收走会连带丢掉草稿。
-                let holding = locked
-                    || in_keep_strip
-                    || (SIDE_CHAT_LEFT_INPUT_OPEN.load(Ordering::SeqCst) && in_window);
-                if holding {
-                    hide_countdown = 0;
-                } else {
-                    hide_countdown += 1;
-                    if hide_countdown >= GRACE_TICKS {
-                        hide_countdown = 0;
-                        side_chat_left_hide(&win);
-                        tracing::info!("[side_chat_left] 光标离开停靠带，自动收回");
-                    }
-                }
-            }
-
-            thread::sleep(Duration::from_millis(60));
-        }
-
-        // 线程退出：清空句柄并释放幂等守卫
-        *SIDE_CHAT_LEFT_WATCH_STOP.lock() = None;
-        SIDE_CHAT_LEFT_WATCH_RUNNING.store(false, Ordering::SeqCst);
-        tracing::info!("[side_chat_left] 线程已退出");
-    });
-    *SIDE_CHAT_LEFT_WATCH_STOP.lock() = Some((stop, thread));
-    Ok(())
-}
-
-/// 停止 side_chat 左缘看护线程（应用退出时调用）。
-pub(crate) fn stop_side_chat_left_watcher_internal() {
-    let entry = SIDE_CHAT_LEFT_WATCH_STOP.lock().take();
-    if let Some((flag, handle)) = entry {
-        flag.store(true, Ordering::SeqCst);
-        let (done_tx, done_rx) = std::sync::mpsc::channel();
-        thread::spawn(move || {
-            let _ = handle.join();
-            let _ = done_tx.send(());
-        });
-        if done_rx.recv_timeout(Duration::from_millis(1000)).is_err() {
-            tracing::warn!("[side_chat_left] 线程未在 1s 内退出，放弃等待");
-        }
-    }
-}
-
-/// 设置侧边栏锁定状态（左侧栏使用悬浮 Tab 或快捷键调用）。
-///
-/// 锁定后边缘检测线程不会自动隐藏窗口；同时广播 `sidechat:lock_changed`
-/// 供前端同步锁图标。
-#[tauri::command]
-pub fn set_side_chat_locked(app: AppHandle, locked: bool, label: Option<String>) -> Result<(), String> {
-    if label.as_deref().map_or(true, |l| l == "chat") {
-        // 状态化三态仅作用于微信抽屉（chat）
-        SIDE_CHAT_LOCKED.store(locked, Ordering::SeqCst);
-    } else {
-        // 直接对话侧边栏（side_chat）使用左缘独立锁定状态
-        SIDE_CHAT_LEFT_LOCKED.store(locked, Ordering::SeqCst);
-    }
-    let target = if label.as_deref().map_or(true, |l| l == "chat") { "chat" } else { "side_chat" };
-    let _ = app.emit_to(target, "sidechat:lock_changed", json!({ "locked": locked, "label": target }));
-    Ok(())
-}
-
-/// 设置侧边栏输入框打开状态（前端 InputDialog 显隐时调用）。
-///
-/// chat 输入期间保持展开，并切换整窗穿透。
-/// side_chat 由左缘看护线程按输入区域切换穿透，自动收回只取决于锁定与悬浮状态。
-#[tauri::command]
-pub fn set_side_chat_input_open(app: AppHandle, open: bool, label: Option<String>) -> Result<(), String> {
-    let is_chat = label.as_deref().map_or(true, |l| l == "chat");
-    if is_chat {
-        SIDE_CHAT_INPUT_OPEN.store(open, Ordering::SeqCst);
-    } else {
-        SIDE_CHAT_LEFT_INPUT_OPEN.store(open, Ordering::SeqCst);
-        if !open {
-            *SIDE_CHAT_LEFT_INPUT_REGION.lock() = None;
-        }
-        return Ok(());
-    }
-    if let Some(win) = app.get_webview_window(if is_chat { "chat" } else { "side_chat" }) {
-        if open {
-            SIDE_CHAT_CLICK_THROUGH.store(false, Ordering::SeqCst);
-            let _ = win.set_ignore_cursor_events(false);
-        } else {
-            SIDE_CHAT_CLICK_THROUGH.store(true, Ordering::SeqCst);
-            let _ = win.set_ignore_cursor_events(true);
-        }
-    }
+pub fn ensure_chat_interactive(app: AppHandle) -> Result<(), String> {
+    if let Some(win) = app.get_webview_window("chat") { win.set_ignore_cursor_events(false).map_err(err_str)?; }
     Ok(())
 }
 
@@ -2247,6 +1382,9 @@ pub fn set_window_opacity(window: tauri::WebviewWindow, opacity: f64) -> Result<
 /// 显示窗口
 #[tauri::command]
 pub fn show_window(window: tauri::WebviewWindow) -> Result<(), String> {
+    if crate::companion_quiet::active() && window.app_handle().state::<std::sync::Arc<crate::state::AppState>>().characters.read().contains_key(window.label()) {
+        return Ok(());
+    }
     window.show().map_err(err_str)?;
     window.set_focus().map_err(err_str)
 }
@@ -2879,10 +2017,10 @@ pub fn find_safe_position(
                     .map(|&(_, px, py, pw, ph)| (px + pw / 3, py, (pw / 3).max(1), ph))
                     .collect();
 
-                // 追加 ChatWindow（微信聊天窗口）和 SideChatPanel（侧边聊天面板）
+                // 追加 ChatWindow（微信聊天窗口）和 聊天面板
                 // 的完整矩形作为避让区域，防止桌宠移动到这些窗口上方遮挡用户视图。
                 // 桌宠窗口用中央 1/3 足迹，但这些聊天窗口整体都有可见内容，用完整矩形。
-                for win_label in ["chat", "side_chat"] {
+                for win_label in ["chat"] {
                     if let Some(ui_win) = app.get_webview_window(win_label) {
                         if let (Ok(pos), Ok(size)) = (ui_win.outer_position(), ui_win.outer_size()) {
                             if size.width > 0 && size.height > 0 {

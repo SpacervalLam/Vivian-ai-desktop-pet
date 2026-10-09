@@ -152,6 +152,21 @@
 .mind-inspector-root.is-work-page .codex-sidebar.drawer { position: absolute; top: 0; bottom: 0; z-index: 50; box-shadow: var(--codex-shadow-lg); transition: none; }
 .mind-inspector-root.is-work-page .codex-inspector.drawer { right: 0; }
 .mind-inspector-root.is-work-page .codex-sidebar.drawer { left: 0; }
+.codex-sidebar-peek-spacer { width: 54px; flex: 0 0 54px; }
+.mind-inspector-root.is-work-page .codex-sidebar.hover-peek {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 48;
+  transition: width 220ms cubic-bezier(.2, .65, .3, 1), box-shadow 220ms ease;
+}
+.mind-inspector-root.is-work-page .codex-sidebar.hover-peek.peek-open {
+  box-shadow: 8px 0 24px rgba(0, 0, 0, .12);
+}
+@media (prefers-reduced-motion: reduce) {
+  .mind-inspector-root.is-work-page .codex-sidebar.hover-peek { transition: none; }
+}
 .mind-inspector-root.is-work-page .codex-inspector-inner { container-type: inline-size; container-name: inspector; }
 .codex-inspector-tab-select { display: none; min-width: 0; font: inherit; font-size: 13px; padding: 7px 10px; border: 1px solid var(--codex-line); border-radius: 7px; color: var(--codex-ink); background: var(--codex-paper-card); }
 .mind-inspector-root.is-work-page .codex-inspector-tabs { overflow: visible; min-height: 54px; align-items: center; padding: 7px 10px; gap: 3px; }

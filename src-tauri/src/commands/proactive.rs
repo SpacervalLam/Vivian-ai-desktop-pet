@@ -527,6 +527,15 @@ pub async fn proactive_tick(
     // Renew liveness before cooldown/focus/other early exits. Speech eligibility is
     // evaluated later and must not determine whether a live window has a heartbeat.
     renew_proactive_heartbeat(&state, &char_id)?;
+    if crate::companion_quiet::active() {
+        brain.proactive.drain_messages();
+        return Ok(json!({"produced":false,"messages":[],"skipped":true,"reason":"do_not_disturb"}));
+    }
+    if !callback_due {
+        if let Some(reason) = crate::companion_runtime::quiet_reason(&state) {
+            return Ok(json!({"produced":false,"messages":[],"skipped":true,"reason":reason}));
+        }
+    }
 
     // 优先使用系统级空闲时间（跨应用，权威）；失败时回退到前端 webview 信号
     let system_idle_seconds = crate::utils::get_system_idle_seconds().unwrap_or_else(|| {
@@ -1575,6 +1584,10 @@ pub async fn drain_proactive_messages(
     state: State<'_, Arc<AppState>>,
 ) -> Result<Value, String> {
     let brain = state.get_character(character_id.as_deref())?.brain;
+    if crate::companion_quiet::active() {
+        brain.drain_proactive_messages();
+        return Ok(json!({"messages":[],"produced":false,"reason":"do_not_disturb"}));
+    }
     let mut messages = brain.drain_proactive_messages();
     messages.retain(deliverable_proactive_action);
     let cross_messages: Vec<_> = messages.iter()

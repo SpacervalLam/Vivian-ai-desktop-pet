@@ -96,6 +96,17 @@ class ChatControllerClass {
   /** 初始化事件监听（应在 App 启动时调用一次） */
   async init(): Promise<void> {
     this.cleanup();
+    // Backend-owned image turns share the same bubble, expression and TTS stream lifecycle.
+    this.unlisteners.push(await listen<{ stream_id: string; character_id?: string; channel?: string; source?: string }>('chat:start', event => {
+      const { stream_id: id, character_id: characterId, channel, source } = event.payload;
+      if (source !== 'image' || !id || characterId !== getCharacterId() || this.sessions.has(id)) return;
+      this.sessions.set(id, {
+        id, characterId, channel: channel ?? 'wechat', text: '', streamParser: new StreamController(),
+        resolve: () => {}, reject: () => {}, instantReactLayer2Fired: false, bubbleStarted: false,
+      });
+      this.armWatchdog(id);
+      this.handlers.onThinkingStarted?.(id);
+    }));
     // chat:meta 事件在 chat:chunk 之前到达，用于提前播放 桌宠动画
     this.unlisteners.push(
       await listen<{ expression?: string; expression_duration_ms?: number; motion?: string; stream_id?: string; character_id?: string }>('chat:meta', (event) => {
@@ -473,7 +484,7 @@ class ChatControllerClass {
     });
     // 正常情况下 chunk 已创建流式气泡，这里只需结算并启动自动关闭。
     // 但某些模型会只回传 chat:done，或首个 chunk 在子窗口初始化期间丢失；此前
-    // 这种回复仍会进入 side_chat，却没有任何 currentBubble 可供结算，因而桌宠沉默。
+    // 这种回复仍会进入 聊天窗口，却没有任何 currentBubble 可供结算，因而桌宠沉默。
     // 用最终文本补建气泡，保证 done 是气泡展示的可靠兜底。
     if (session.bubbleStarted) {
       BubbleController.finishStreaming(finalText, { sticker: response.sticker ?? undefined });

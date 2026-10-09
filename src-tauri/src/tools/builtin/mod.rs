@@ -19,6 +19,7 @@ pub mod media_tools;
 pub mod memory_tools;
 pub mod music_tools;
 pub mod notebook_tools;
+pub mod user_quick_notes;
 pub mod perception_tools;
 pub mod pet_tools;
 pub mod plan_tools;
@@ -72,6 +73,7 @@ pub fn register_builtin_tools(tool_system: &Arc<ToolSystem>) {
         // 记忆工具
         Arc::new(memory_tools::SaveMemoryTool::new()),
         Arc::new(memory_tools::SearchMemoryTool::new()),
+        Arc::new(user_quick_notes::ReadUserQuickNotes),
         Arc::new(memory_tools::MemoryMdTool::new()),
         Arc::new(memory_tools::GetRecentInteractionsTool::new()),
         Arc::new(memory_tools::SummarizeTodayContextTool::new()),
@@ -172,7 +174,7 @@ pub fn register_builtin_tools(tool_system: &Arc<ToolSystem>) {
         Arc::new(notebook_tools::GetNotebookDetailTool::new()),
         Arc::new(notebook_tools::UpdateNotebookTool::new()),
         Arc::new(notebook_tools::ShareNotebookTool::new()),
-        // 完整 HTML 笔记（LLM 直接撰写自包含 HTML，经 Shadow DOM 渲染）
+        // 完整 HTML 笔记（LLM 直接撰写自包含 HTML；paper 范式由后端注入样式表，前端以 iframe 渲染）
         Arc::new(notebook_tools::CreateHtmlNoteTool::default()),
         // 文件系统读取（按路径读本地文本/代码/HTML，受沙箱路径校验约束）
         Arc::new(file_tools::ReadFileTool::default()),

@@ -214,12 +214,12 @@ export const MarkdownLiveEditor: React.FC<{
     const host = hostRef.current;
     if (!host) return;
     const scrollTop = host.scrollTop;
-    host.innerHTML = docHtml(srcRef.current, onOpenFile);
+    host.innerHTML = docHtml(srcRef.current, onOpenFile, mdCtx.documentPath);
     host.scrollTop = scrollTop;
     const els = Array.from(host.querySelectorAll(':scope > [data-md-block]')) as HTMLElement[];
     blockTextsRef.current = els.map((el) => extractSource(el));
     if (caret !== null) setCaretAtOffset(host, caret);
-  }, [onOpenFile]);
+  }, [onOpenFile, mdCtx.documentPath]);
 
   /** 让重置逻辑始终拿到最新的 paint，又不把它的身份写进依赖里 */
   const paintRef = useRef(paint);
@@ -285,7 +285,7 @@ export const MarkdownLiveEditor: React.FC<{
       const host = hostRef.current;
       if (!host || composingRef.current) return;
       const probe = document.createElement('div');
-      probe.innerHTML = docHtml(srcRef.current, onOpenFile);
+      probe.innerHTML = docHtml(srcRef.current, onOpenFile, mdCtx.documentPath);
       if (host.innerHTML === probe.innerHTML) return;
       const sel = window.getSelection();
       const range = sel && sel.rangeCount > 0 ? sel.getRangeAt(0) : null;
@@ -390,7 +390,7 @@ export const MarkdownLiveEditor: React.FC<{
     }
     const path = el.dataset.filePath;
     if (path) onOpenFile?.(path);
-  }, [onOpenFile]);
+  }, [onOpenFile, mdCtx.documentPath]);
 
   const isEmpty = useMemo(() => parseBlocks(content).length === 0, [content]);
 

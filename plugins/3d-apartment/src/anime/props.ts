@@ -27,7 +27,6 @@ import {
   rainStreakTexture,
   rainBlobTexture,
   doorGrainMap,
-  rainGlassTexture,
   puddleRippleTexture,
   dripTexture,
   curtainTexture,
@@ -1997,7 +1996,7 @@ export function buildTV(spec: { pos: [number, number, number]; size: [number, nu
 }
 
 /** 落地灯。 */
-export function buildFloorLamp(spec: { pos: [number, number, number] }): THREE.Group {
+export function buildFloorLamp(_spec: { pos: [number, number, number] }): THREE.Group {
   const g = new THREE.Group();
   const metalMat = toon(C('metal', '#b9bcc4'), { finish: 'metal' });
   g.add(m(cyl(0.11, 0.13, 0.02, 16), metalMat, [0, 0.01, 0], 'cast'));
@@ -2214,7 +2213,7 @@ export function buildBathroom(spec: { pos: [number, number, number]; size: [numb
 }
 
 /** 和室小物件：挂轴（床之间墙上）+ 矮桌上不需要，桌复用 buildLowTable。 */
-export function buildScroll(spec: { pos: [number, number, number] }): THREE.Group {
+export function buildScroll(_spec: { pos: [number, number, number] }): THREE.Group {
   const g = new THREE.Group();
   // 挂轴：面朝 +X（挂 -X 墙）
   g.add(m(box(0.03, 0.72, 0.30), toon('#f2ecdc'), [0, 0, 0], 'cast'));
@@ -2697,7 +2696,7 @@ export function buildFusuma(spec: { pos: [number, number, number]; size: [number
 }
 
 /** 阳台小件：晾衣杆 + 晾着的衣物 + 花箱 + 空调外机 + 咖啡桌椅。 */
-export function buildBalconyProps(spec: { pos: [number, number, number] }): THREE.Group {
+export function buildBalconyProps(_spec: { pos: [number, number, number] }): THREE.Group {
   const g = new THREE.Group();
   const metalMat = toon(C('metal', '#b9bcc4'), { finish: 'metal' });
   const woodMat = toon('#ffffff', { map: furnitureWoodTexture() });
@@ -4788,7 +4787,6 @@ export function buildJpToilet(spec: { pos: [number, number, number]; size: [numb
 export function buildJpBath(spec: { pos: [number, number, number]; size: [number, number, number] }): THREE.Group {
   const g = new THREE.Group();
   const W = spec.size[0], D = spec.size[2];
-  const H = spec.size[1] > 0.1 ? spec.size[1] : 2.2;
   const white = jpFixture();
   const tile = jpBathTile();
   const metal = jpMetal();

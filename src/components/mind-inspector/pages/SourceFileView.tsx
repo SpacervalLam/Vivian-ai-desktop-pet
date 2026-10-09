@@ -134,7 +134,8 @@ export const SourceFileView: React.FC<{
   const gutterRef = useRef<HTMLDivElement | null>(null);
   const editHighlightRef = useRef<HTMLPreElement | null>(null);
   const readonlyScrollRef = useRef<HTMLDivElement | null>(null);
-  const mdCtx = useContext(MarkdownFileContext);
+  const parentMdCtx = useContext(MarkdownFileContext);
+  const mdCtx = useMemo(() => ({ ...parentMdCtx, documentPath: data.path }), [parentMdCtx, data.path]);
 
   const lang = useMemo(() => langForPath(data.path), [data.path]);
   const isMarkdown = lang === 'markdown';
@@ -333,7 +334,9 @@ export const SourceFileView: React.FC<{
           </div>
         ) : (
           /* 渲染态直接就是编辑区：没有铅笔按钮，点进去就能打字 */
-          <MarkdownLiveEditor content={content} onSave={saveRenderedContent} />
+          <MarkdownFileContext.Provider value={mdCtx}>
+            <MarkdownLiveEditor content={content} onSave={saveRenderedContent} />
+          </MarkdownFileContext.Provider>
         )
       ) : (
         <div className="codex-src-scroll" ref={readonlyScrollRef}>

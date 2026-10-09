@@ -4,6 +4,21 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
+/// Explicit user acknowledgement is independent of a transport receipt.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReminderNotice {
+    pub id: String,
+    pub task_id: String,
+    pub scheduled_time: f64,
+    pub character_id: String,
+    pub content: String,
+    pub delivery_id: String,
+    pub important: bool,
+    pub created_at: f64,
+    pub acknowledged_at: Option<f64>,
+    pub snoozed_task_id: Option<String>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DeliveryState {
     #[serde(default)]

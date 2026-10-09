@@ -1,3 +1,5 @@
+import ClipboardHint from './components/ClipboardHint';
+import { useCompanionFeedback } from './hooks/useCompanionFeedback';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { getCurrentWindow, currentMonitor, LogicalSize, LogicalPosition, PhysicalPosition, PhysicalSize } from '@tauri-apps/api/window';
 import type { Effect } from '@tauri-apps/api/window';
@@ -21,7 +23,7 @@ import type { ChibiInteraction, PetInteractionMetrics } from './components/Chibi
 import VideoAnimationLayer from './components/VideoAnimationLayer';
 import SystemTray, { syncTrayMenuCheck } from './components/SystemTray';
 import type { ToastType, ToastAction } from './components/Toast';
-import { PROVIDER_PRESETS } from './components/ConfigWindow';
+import { findProviderPresetByEndpoint } from './components/settings/providerPresets';
 import { ChatController } from './controllers/ChatController';
 import { BubbleController } from './controllers/BubbleController';
 import { TtsStreamQueue } from './controllers/TtsStreamQueue';
@@ -47,19 +49,6 @@ const ENVIRONMENT_UPDATE_INTERVAL_MS = 30_000;
 const PET_ACTION_DRAIN_INTERVAL_MS = 2500;
 const IDLE_AWAY_THRESHOLD_SECONDS = 300;
 
-/**
- * 按厂商 endpoint 反查预设（忽略结尾斜杠与大小写，前缀匹配以兼容用户
- * 在 endpoint 后追加路径的写法，如 `https://api.deepseek.com/v1`）。
- * 找不到（custom endpoint）返回 undefined，错误 toast 就不挂控制台动作。
- */
-function findProviderPresetByEndpoint(endpoint: string) {
-  const norm = endpoint.replace(/\/+$/, '').toLowerCase();
-  if (!norm) return undefined;
-  return PROVIDER_PRESETS.find((p) => {
-    const urls = [p.endpoint, ...(p.protocols ?? []).map((pr) => pr.endpoint)];
-    return urls.some((u) => u && norm.startsWith(u.replace(/\/+$/, '').toLowerCase()));
-  });
-}
 /** 等待 Brain 初始化的超时（毫秒），超时后用兜底问候
  *  预加载流程包含种子记忆注入与情绪/语义语料嵌入，远程嵌入可能需要较长时间，
  *  因此超时放宽到 120s；后端 `send_message` 在初始化完成前也会拒绝请求作为双保险。 */
@@ -72,7 +61,6 @@ const BUBBLE_WINDOW_HEIGHT = 140;
 const BUBBLE_WINDOW_MIN_HEIGHT = 100;
 const BUBBLE_WINDOW_MAX_HEIGHT = 420;
 
-const SIDE_CHAT_WIDTH = 320;
 
 /** 长按桌宠打开心智观察器：显示环形进度前的静默期（毫秒） */
 const HOLD_RING_DELAY_MS = 200;
@@ -673,7 +661,6 @@ export default function App() {
   const settledBubbles = useAppStore((s) => s.settledBubbles);
   const bubbleCrossCharacter = useAppStore((s) => s.bubbleCrossCharacter);
   const bubbleListenerName = useAppStore((s) => s.bubbleListenerName);
-  const ttsEnabled = useAppStore((s) => s.ttsEnabled);
   // 桌宠自身心情状态（energy=精力 0-100，focus=专注力 0-100，由后端 3s 心跳刷新）
   const currentMood = useAppStore((s) => s.currentMood);
   const { t } = useTranslation();
@@ -734,6 +721,7 @@ export default function App() {
   }, []);
 
   const petRef = useRef<ModelRendererHandle | null>(null);
+  useCompanionFeedback(petRef);
   const [modelReady, setModelReady] = useState(false);
 
   // 当前角色的在场状态（online/busy/rest/offline），驱动 桌宠行为（表情/闭眼/鼠标跟随/隐藏到角落）+ tick 降频
@@ -749,8 +737,6 @@ export default function App() {
   const windowScaleRef = useRef(1.0);
   /** 缩放目标值（滚轮事件同步写入，异步循环读取） */
   const targetScaleRef = useRef(1.0);
-  /** 缩放循环是否运行中（存储 requestAnimationFrame ID） */
-  const scaleRafRef = useRef<number | null>(null);
   /** 缓存的窗口中心点（物理像素），滚动会话期间不重新读取 */
   const scaleCenterRef = useRef<{ cx: number; cy: number; factor: number } | null>(null);
   /** 滚动停止后清除中心缓存 */
@@ -761,6 +747,7 @@ export default function App() {
   const [videoActive, setVideoActive] = useState(false);
   /** Ollama 就绪 toast 是否已弹出（每个应用生命周期只弹一次） */
   const ollamaToastedRef = useRef(false);
+  const quietModeRef = useRef(false);
   /**
    * 最近一次 LLM 错误 toast 的时间戳。
    *
@@ -797,8 +784,34 @@ export default function App() {
     restoreFromSleep,
     hideForOffline,
     restoreFromOffline,
-  } = useHiding(petRef, modelReady, smartPositioningEnabled, petHideHookRef);
+  } = useHiding(petRef, modelReady, smartPositioningEnabled, petHideHookRef, quietModeRef);
   useSmartPositioning(petRef, modelReady, smartPositioningEnabled);
+
+  useEffect(() => {
+    let disposed = false;
+    let cleanup: (() => void) | undefined;
+    let revision = 0;
+    const apply = (active: boolean) => {
+      quietModeRef.current = active;
+      document.documentElement.style.visibility = active ? 'hidden' : '';
+      if (active) {
+        BubbleController.closeAll();
+        void getCurrentWindow().hide().catch(() => {});
+        void invoke('stop_speaking', { characterId: getCharacterId() }).catch(() => {});
+      }
+    };
+    void (async () => {
+      const stop = await listen<{ active: boolean }>('companion:quiet-changed', event => {
+        if (!disposed) { revision++; apply(event.payload.active); }
+      });
+      if (disposed) { stop(); return; }
+      cleanup = stop;
+      const before = revision;
+      const current = await invoke<{ active: boolean }>('companion_quiet_status');
+      if (!disposed && revision === before) apply(current.active);
+    })().catch(() => {});
+    return () => { disposed = true; cleanup?.(); document.documentElement.style.visibility = ''; };
+  }, []);
 
   // 活动追踪 refs
   const lastActivityRef = useRef<number>(Date.now());
@@ -1123,6 +1136,10 @@ export default function App() {
 
   /** Serialize layout writes and coalesce updates to the latest store snapshot. */
   const emitBubbleShow = useCallback(async () => {
+    if (quietModeRef.current) {
+      void WebviewWindow.getByLabel(charScopedLabel('bubble')).then(window => window?.hide()).catch(() => {});
+      return;
+    }
     const sync = bubbleSyncRef.current;
     sync.dirty = true;
     if (sync.busy || !bubbleReadyRef.current) return;
@@ -1166,7 +1183,7 @@ export default function App() {
           cross_character: state.bubbleCrossCharacter,
           listener_name: state.bubbleListenerName,
         });
-        await bubbleWin.show();
+        if (!quietModeRef.current) await bubbleWin.show();
       }
     } catch (error) {
       console.warn('[BubbleWindow] sync failed', error);
@@ -1175,78 +1192,8 @@ export default function App() {
     }
   }, [computeBubbleWindowPosition]);
 
-  const ensureSideChatWindow = useCallback(async (opts?: { show?: boolean; lock?: boolean; showInput?: boolean; autoVoice?: boolean }): Promise<void> => {
-    const label = 'side_chat';
-    const shouldShow = opts?.show !== false;
-
-    const win = getCurrentWindow();
-    const [monitor, factor] = await Promise.all([
-      currentMonitor(),
-      win.scaleFactor(),
-    ]);
-    const screenH = (monitor?.size.height ?? 1080) / factor;
-    const screenW = (monitor?.size.width ?? 1920) / factor;
-    const windowHeight = Math.max(340, Math.round((screenH * 2) / 5));
-    // 直接对话侧边栏停靠屏幕左缘：静止位为显示器左缘（位置由前端设定，显隐由 Rust 控制）
-    const x = Math.round((monitor?.position.x ?? 0) / factor);
-    const y = Math.round((screenH - windowHeight) / 2);
-
-    const existing = await WebviewWindow.getByLabel(label);
-    if (existing) {
-      try {
-        await existing.setSize(new LogicalSize(SIDE_CHAT_WIDTH, windowHeight));
-        await existing.setPosition(new LogicalPosition(x, y));
-      } catch {
-        /* ignore */
-      }
-      if (shouldShow) {
-        await invoke('show_side_chat_animated', { label: 'side_chat' }).catch(() => {});
-      }
-      if (opts?.lock) {
-        await invoke('set_side_chat_locked', { locked: true, label: 'side_chat' }).catch(() => {});
-      }
-      // 窗口已存在：通过事件通知显示 InputDialog（携带角色 ID 用于发送路由）
-      if (opts?.showInput) {
-        void emit('sidechat:show_input', {
-          character_id: getCharacterId(),
-          auto_start_voice: opts?.autoVoice ?? false,
-        });
-      }
-      return;
-    }
-
-    // 新建窗口：URL 参数传递 show_input，避免页面加载延迟导致事件丢失
-    const params = new URLSearchParams();
-    params.set('view', 'side_chat');
-    if (getCharacterId()) params.set('active_character', getCharacterId()!);
-    if (opts?.showInput) params.set('show_input', '1');
-    if (opts?.autoVoice) params.set('auto_voice', '1');
-
-    const sideWin = new WebviewWindow(label, {
-      url: `/?${params.toString()}`,
-      title: 'Side Chat',
-      width: SIDE_CHAT_WIDTH,
-      height: windowHeight,
-      x,
-      y,
-      resizable: false,
-      decorations: false,
-      transparent: true,
-      alwaysOnTop: true,
-      skipTaskbar: true,
-      shadow: false,
-      focus: false,
-      visible: false,
-    });
-
-    sideWin.once('tauri://created', () => {
-      if (shouldShow) {
-        void invoke('show_side_chat_animated', { label: 'side_chat' }).catch(() => {});
-      }
-      if (opts?.lock) {
-        void invoke('set_side_chat_locked', { locked: true, label: 'side_chat' }).catch(() => {});
-      }
-    });
+  const openQuickInput = useCallback(async (opts?: { broadcast?: boolean; autoVoice?: boolean }): Promise<void> => {
+    await invoke('open_quick_input', { characterId: getCharacterId(), broadcast: opts?.broadcast ?? false, autoVoice: opts?.autoVoice ?? false });
   }, []);
 
   /**
@@ -1300,70 +1247,11 @@ export default function App() {
     requestPetReaction(interaction, undefined, metrics);
   }, [requestPetReaction]);
 
-  /** 确保/展开微信窗口（label='chat'，右缘三态侧边栏）。
-   *  创建为屏幕右缘屏外隐藏，由 Rust 三态机制（edge watcher + mouse hook +
-   *  expand/collapse）驱动往复滑动。已存在时直接展开（透视其当前屏外/peek 状态）。 */
-  const ensureWechatWindow = useCallback(async (opts?: { show?: boolean }): Promise<void> => {
-    const label = 'chat';
-    const shouldShow = opts?.show !== false;
-
-    // iPhone 17 真实比例（393 × 852 逻辑点，1:2.1679）。
-    // 宽度固定 390，高度按 852/393 ≈ 2.1679 推导出 ≈ 845。
-    // 避免随屏幕高度扩展导致内部元素/长宽比变形。
-    const IPHONE17_ASPECT = 852 / 393;
-    const windowWidth = 390;
-    const windowHeight = Math.round(windowWidth * IPHONE17_ASPECT); // ≈ 845
-
-    const [monitor, factor] = await Promise.all([
-      currentMonitor(),
-      getCurrentWindow().scaleFactor(),
-    ]);
-    const screenH = (monitor?.size.height ?? 1080) / factor;
-    const screenW = (monitor?.size.width ?? 1920) / factor;
-    // 垂直居中（屏幕过高时避免贴顶），过小的屏幕则压缩高度但保持整高比的下限 568 (iPhone SE)
-    const maxHeight = Math.max(568, Math.min(windowHeight, Math.round(screenH - 24)));
-    const fittedWidth = Math.round(maxHeight / IPHONE17_ASPECT);
-    const finalW = maxHeight < windowHeight ? fittedWidth : windowWidth;
-    const finalH = maxHeight;
-    const x = Math.round(screenW); // 屏幕右缘之外（hidden / peek 起始）
-    const y = Math.max(0, Math.round((screenH - finalH) / 2));
-
-    const existing = await WebviewWindow.getByLabel(label);
-    if (existing) {
-      try {
-        await existing.setSize(new LogicalSize(finalW, finalH));
-        await existing.setPosition(new LogicalPosition(x, y));
-      } catch {
-        /* ignore */
-      }
-      if (shouldShow) {
-        await invoke('show_side_chat_animated', { label }).catch(() => {});
-      }
-      return;
-    }
-
-    const win = new WebviewWindow(label, {
-      url: `/?view=${label}`,
-      title: '微信',
-      width: finalW,
-      height: finalH,
-      x,
-      y,
-      resizable: false,
-      decorations: false,
-      transparent: true,
-      alwaysOnTop: true,
-      skipTaskbar: true,
-      shadow: false,
-      focus: false,
-      visible: false,
-    });
-
-    win.once('tauri://created', () => {
-      if (shouldShow) {
-        void invoke('show_side_chat_animated', { label }).catch(() => {});
-      }
-    });
+  /** Chat is created on demand by the shared native window owner. */
+  const ensureWechatWindow = useCallback(async (opts?: { show?: boolean; assistant?: { panel?: string; characterId?: string } }): Promise<void> => {
+    if (opts?.show === false) return;
+    await invoke('open_chat_window', { origin: 'chat', panel: opts?.assistant?.panel ?? null,
+      characterId: opts?.assistant?.characterId ?? getCharacterId() ?? null });
   }, []);
   const ensureBubbleWindow = useCallback(async (): Promise<void> => {
     if (bubbleCreatingRef.current) return;
@@ -1498,7 +1386,7 @@ export default function App() {
 
   useEffect(() => {
     const timer = setTimeout(() => {
-      void getCurrentWindow().show().catch(() => {});
+      if (!quietModeRef.current) void getCurrentWindow().show().catch(() => {});
     }, 5000);
     return () => clearTimeout(timer);
   }, []);
@@ -1543,8 +1431,6 @@ export default function App() {
       await waitForAppReady();
       console.log(`[DIAG] init: waitForAppReady returned, char=${getCharacterId()}, time=${Date.now()}`);
 
-      // 创建左侧对话面板窗口
-      void ensureSideChatWindow();
 
       // 启动预检未通过（主 LLM / 嵌入服务未配置或本地服务未就绪）时，
       // 直接打开设置窗口并展示配置说明，不进入问候/主动对话。
@@ -1630,6 +1516,7 @@ export default function App() {
     void (async () => {
       try {
         unlistenFn = await listen('tray:show', () => {
+          if (quietModeRef.current) return;
           void getCurrentWindow().show();
           positioningCoordinator.triggerSmartCheck?.();
         });
@@ -2206,34 +2093,6 @@ export default function App() {
     };
   }, []);
 
-  // Reminder delivery acknowledgement follows actual local presentation, not a backend attempt.
-  useEffect(() => {
-    let cancelled = false;
-    let unlisten: (() => void) | undefined;
-    const displayed = new Set<string>();
-    void listen<{ delivery_id: string; task_id: string; character_id: string; content: string; context: { scheduled_time: number; current_time: number; confirmed_delivery_count: number } }>('reminder:deliver', event => {
-      const payload = event.payload;
-      if (cancelled || payload.character_id !== getCharacterId() || !payload.content.trim()) return;
-      void (async () => {
-        const key = `${payload.task_id}:${payload.context.scheduled_time}`;
-        if (!displayed.has(key)) {
-          BubbleController.showBubble(payload.content);
-          displayed.add(key);
-          if (displayed.size > 200) displayed.delete(displayed.values().next().value!);
-          if (TtsStreamQueue.isEnabled()) {
-            TtsStreamQueue.beginStream(`reminder-${payload.delivery_id}`, payload.character_id);
-            TtsStreamQueue.speak(payload.content);
-            const release = BubbleController.holdForSpeech();
-            void TtsStreamQueue.waitForDrain().finally(release);
-          }
-          await emit('chat:assistant_message', { content: payload.content, timestamp: new Date().toISOString(), character_id: payload.character_id, channel: 'proactive' });
-        }
-        await invoke('acknowledge_reminder_delivery', { deliveryId: payload.delivery_id });
-      })().catch(error => console.warn('[Reminder] presentation/ack failed:', error));
-    }).then(un => { if (cancelled) safeUnlisten(un); else unlisten = un; }).catch(() => {});
-    return () => { cancelled = true; safeUnlisten(unlisten); };
-  }, []);
-
   // 主动旁观插话监听：用户与角色 A 对话时，旁观者 B 经 LLM 判断后主动插话
   // 后端 emit proactive:bubble 事件，前端负责 showBubble + TTS + 写入 chat:assistant_message
   useEffect(() => {
@@ -2299,7 +2158,6 @@ export default function App() {
     const crossStreamTextRef = { current: '' };
     const crossStreamIdRef = { current: '' };
     const crossStreamRoleRef = { current: '' as 'source' | 'target' | '' };
-    let crossSyncStarted = false;
     const crossListenerNameRef = { current: '' };
     void (async () => {
       try {
@@ -2312,7 +2170,6 @@ export default function App() {
           crossStreamIdRef.current = event.payload.stream_id;
           crossStreamRoleRef.current = 'source';
           crossStreamTextRef.current = '';
-          crossSyncStarted = false;
           crossListenerNameRef.current = event.payload.listener_name;
           TtsStreamQueue.resetBuffer();
           // listener_name为User时，这是对用户说话，不应标记为跨角色
@@ -2349,7 +2206,6 @@ export default function App() {
           if (crossStreamRoleRef.current !== 'target') {
             crossStreamTextRef.current = '';
             crossListenerNameRef.current = '';
-            crossSyncStarted = false;
             TtsStreamQueue.resetBuffer();
           }
           crossStreamIdRef.current = event.payload.stream_id;
@@ -2365,7 +2221,6 @@ export default function App() {
             TtsStreamQueue.feedSync(event.payload.text, {
               onFirstAudioStart: () => {
                 if (cancelled) return;
-                crossSyncStarted = true;
                 const cleanText = stripActions(crossStreamTextRef.current);
                 BubbleController.showStreamingBubble(cleanText, crossOpts);
               },
@@ -2413,7 +2268,6 @@ export default function App() {
             crossStreamTextRef.current = '';
             crossStreamIdRef.current = '';
             crossStreamRoleRef.current = '';
-            crossSyncStarted = false;
             crossListenerNameRef.current = '';
           })();
         });
@@ -2440,7 +2294,6 @@ export default function App() {
             crossStreamIdRef.current = '';
             crossStreamRoleRef.current = '';
             crossListenerNameRef.current = '';
-            crossSyncStarted = false;
             return;
           }
           const targetName = event.payload.target_id === 'nana' ? 'Nana' : 'Vivian';
@@ -2941,7 +2794,7 @@ export default function App() {
   // 三个快捷键：vivian 私聊、nana 私聊、broadcast 群发总框。
   // 配置变更由 ConfigWindow 直接调用 update_text_shortcuts 命令重新注册。
 
-  // 监听 Vivian 私聊快捷键事件：确保 SideChat 窗口存在并显示 InputDialog
+  // 监听 Vivian 私聊快捷键事件：确保 快捷输入 窗口存在并显示 InputDialog
   useEffect(() => {
     let cancelled = false;
     let unlisten: (() => void) | undefined;
@@ -2955,8 +2808,8 @@ export default function App() {
             void invoke('set_presence_state', { target: 'online', characterId: getCharacterId() ?? undefined }).catch(() => {});
             void triggerWakeGreetingRef.current?.();
           }
-          // 确保 SideChat 窗口存在，并通过 URL 参数或事件通知显示 InputDialog
-          void ensureSideChatWindow({ showInput: true, show: true, lock: true });
+          // 确保 快捷输入 窗口存在，并通过 URL 参数或事件通知显示 InputDialog
+          void openQuickInput();
         });
         if (cancelled) { safeUnlisten(unlisten); return; }
         console.log(`[DIAG] listen registered: input:shortcut:vivian, char=${getCharacterId()}`);
@@ -2971,7 +2824,7 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 监听 Nana 私聊快捷键事件：确保 SideChat 窗口存在并显示 InputDialog
+  // 监听 Nana 私聊快捷键事件：确保 快捷输入 窗口存在并显示 InputDialog
   useEffect(() => {
     let cancelled = false;
     let unlisten: (() => void) | undefined;
@@ -2985,7 +2838,7 @@ export default function App() {
             void invoke('set_presence_state', { target: 'online', characterId: getCharacterId() ?? undefined }).catch(() => {});
             void triggerWakeGreetingRef.current?.();
           }
-          void ensureSideChatWindow({ showInput: true, show: true, lock: true });
+          void openQuickInput();
         });
         if (cancelled) { safeUnlisten(unlisten); return; }
         console.log(`[DIAG] listen registered: input:shortcut:nana, char=${getCharacterId()}`);
@@ -3000,31 +2853,23 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 启动微信窗口（chat）右缘三态边缘检测线程并预创建隐藏窗口：
-  // Rust 线程幂等（双角色窗口重复调用无害），chat 窗口预创建后保持屏外隐藏，
-  // 由右缘悬停 peek 或托盘「微信」展开，避免首次呼出冷启动 WebView2 的延迟。
+  // Only the independent lightweight menu is resident. Chat loads on demand.
   useEffect(() => {
-    void invoke('start_side_chat_edge_watcher').catch(() => {});
-    void invoke('start_side_chat_mouse_hook').catch(() => {});
-    void invoke('start_side_chat_left_watcher').catch(() => {});
-    void ensureWechatWindow({ show: false });
-    void ensureSideChatWindow({ show: false });
+    void invoke('start_edge_menu_watcher').catch(() => {});
+    void invoke('start_chat_outside_click_hook').catch(() => {});
     // 预创建微信消息横幅窗口（常驻隐藏，由后端事件触发显示）
     void ensureMessageBannerWindow();
-  }, [ensureWechatWindow, ensureSideChatWindow, ensureMessageBannerWindow]);
+  }, [ensureMessageBannerWindow]);
 
-  // 监听群发快捷键事件：打开 SideChat 广播模式
+  // 监听群发快捷键事件：打开 快捷输入 广播模式
   useEffect(() => {
     let cancelled = false;
     let unlisten: (() => void) | undefined;
     void (async () => {
       try {
         unlisten = await listen('input:shortcut:broadcast', async () => {
-          await ensureSideChatWindow({ showInput: true, show: true, lock: true });
-          void emit('sidechat:show_input', {
-            broadcast: true,
-            auto_start_voice: false,
-          });
+          if (getCharacterId() !== 'vivian') return;
+          await openQuickInput({ broadcast: true });
         });
         if (cancelled) { safeUnlisten(unlisten); return; }
       } catch {
@@ -3038,8 +2883,8 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 监听后端语音输入快捷键事件：确保 SideChat 窗口存在，
-  // InputDialog 由 SideChatPanel 监听同一事件呼出并自动启动语音
+  // 监听后端语音输入快捷键事件：确保 快捷输入 窗口存在，
+  // 将自动录音配置交给 QuickInputWindow；首次加载也不会丢失。
   useEffect(() => {
     let cancelled = false;
     let unlisten: (() => void) | undefined;
@@ -3047,13 +2892,9 @@ export default function App() {
       try {
         unlisten = await listen<{ character_id?: string }>('input:voice_shortcut', (event) => {
           const cid = event.payload?.character_id;
-          // broadcast：群发语音，所有角色窗口都响应
+          // 群发输入窗口只由 Vivian 创建，发送事件仍由各角色处理。
           if (cid === 'broadcast') {
-            void ensureSideChatWindow({ showInput: true, autoVoice: true, show: true, lock: true });
-            void emit('sidechat:show_input', {
-              broadcast: true,
-              auto_start_voice: true,
-            });
+            if (getCharacterId() === 'vivian') void openQuickInput({ broadcast: true, autoVoice: true });
             return;
           }
           // 多角色过滤：仅活跃角色窗口响应全局语音快捷键
@@ -3065,7 +2906,7 @@ export default function App() {
             void invoke('set_presence_state', { target: 'online', characterId: getCharacterId() ?? undefined }).catch(() => {});
             void triggerWakeGreetingRef.current?.();
           }
-          void ensureSideChatWindow({ showInput: true, autoVoice: true, show: true, lock: true });
+          void openQuickInput({ autoVoice: true });
         });
         if (cancelled) { safeUnlisten(unlisten); return; }
         console.log(`[DIAG] listen registered: input:voice_shortcut, char=${getCharacterId()}`);
@@ -3715,11 +3556,13 @@ export default function App() {
     };
   }, [requestPetReaction]);
 
-  // 右键：桌宠窗口不弹菜单（统一从系统托盘菜单访问），仅拦截默认行为
+  // 右键单击桌宠，在鼠标附近打开该角色输入框。
   const handleContextMenu = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
-  }, []);
+    lastActivityRef.current = Date.now();
+    void openQuickInput().catch(console.warn);
+  }, [openQuickInput]);
 
   // 初始化 ChatController + 设置 onMeta 回调（在 text 流式之前提前播放 桌宠动画）
   useEffect(() => {
@@ -3750,7 +3593,7 @@ export default function App() {
     };
   }, []);
 
-  // SideChat 窗口发送消息：SideChatPanel 是独立 WebviewWindow，持有自己的
+  // 快捷输入 窗口发送消息：QuickInputWindow 是独立 WebviewWindow，持有自己的
   // ChatController 单例（未 init），无法直接处理流式回复。改为 emit 事件，
   // 由主窗口统一调用 ChatController.sendMessage，走 direct 渠道。
   useEffect(() => {
@@ -3758,7 +3601,7 @@ export default function App() {
     let cancelled = false;
     void (async () => {
       unlisten = await listen<{ text: string; character_id?: string; whisper?: boolean }>(
-        'sidechat:send_message',
+        'quick_input:send_message',
         (e) => {
           if (e.payload?.character_id && e.payload.character_id !== getCharacterId()) return;
           const text = e.payload?.text;
@@ -3778,7 +3621,7 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 用户从 SideChat 窗口发送消息时同步活跃时间戳，保持 idle/away 检测准确
+  // 用户从 快捷输入 窗口发送消息时同步活跃时间戳，保持 idle/away 检测准确
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     let cancelled = false;
@@ -3850,7 +3693,7 @@ export default function App() {
    *  返回窗口句柄，预热会话作废时要靠它把自己建的那个销毁掉。
    */
   const openMemoryWindow = useCallback(
-    (prewarmSession?: number): Promise<WebviewWindow | null> => {
+    (prewarmSession?: number, nav?: string): Promise<WebviewWindow | null> => {
       // 心智观察器默认全屏大小（CSS 逻辑像素，Tauri 窗口尺寸同单位）
       const fullW = window.screen.width;
       const fullH = window.screen.height;
@@ -3867,7 +3710,7 @@ export default function App() {
           minWidth: 1260,
           minHeight: 896,
           prewarm: prewarmSession !== undefined,
-          extraQuery:
+          extraQuery: nav ? `nav=${encodeURIComponent(nav)}` :
             prewarmSession !== undefined
               ? buildPrewarmQuery(rect, prewarmSession)
               : rect
@@ -3884,6 +3727,15 @@ export default function App() {
     },
     [t],
   );
+
+  useEffect(() => {
+    let cancelled = false;
+    let cleanup: (() => void) | undefined;
+    void listen('companion:open-scheduler', () => {
+      void openMemoryWindow(undefined, 'scheduler').then(win => win?.emit('memory:navigate', { page: 'scheduler' }));
+    }).then(unlisten => { if (cancelled) unlisten(); else cleanup = unlisten; });
+    return () => { cancelled = true; cleanup?.(); };
+  }, [openMemoryWindow]);
 
   const openMemory = useCallback(() => {
     void openMemoryWindow();
@@ -4016,6 +3868,25 @@ export default function App() {
     })();
     return () => { cancelled = true; safeUnlisten(unlisten); unlisten = undefined; };
   }, [openChat, openConfig, openMemory, openRoom]);
+
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    void listen<{ character_id: string; result?: { saved_path?: string; handled?: boolean }; error?: string }>('screen:analysis', (event) => {
+      if (event.payload.character_id !== getCharacterId()) return;
+      const { result, error } = event.payload;
+      if (result?.handled) {
+        if (result.saved_path) void emit('toast:show', { message: t('toast.screenshot_saved'), type: 'success', duration: 2500, key: Date.now() });
+        return;
+      }
+      if (result?.saved_path) {
+        BubbleController.showBubble(t('toast.screenshot_saved'), 4000);
+      } else if (error) {
+        BubbleController.showBubble(error, 4000);
+      }
+    }).then(fn => { if (cancelled) safeUnlisten(fn); else unlisten = fn; });
+    return () => { cancelled = true; safeUnlisten(unlisten); };
+  }, [t]);
 
   // 后端启动预检未通过时，打开设置窗口并展示配置说明
   useEffect(() => {
@@ -4155,6 +4026,7 @@ export default function App() {
         onOpenMemory={openMemory}
         onOpenSettings={openConfig}
         onOpenChat={openChat}
+        onOpenDesktop={() => void ensureWechatWindow({ assistant: {} })}
         onToggleSmartPositioning={() => {
           const next = !smartPositioningEnabled;
           setSmartPositioningEnabled(next);
@@ -4192,12 +4064,12 @@ export default function App() {
           onOpenQuickChat={() => {
             lastActivityRef.current = Date.now();
             lastBubbleFromProactiveRef.current = 0;
-            void ensureSideChatWindow({ show: true, showInput: true });
+            void openQuickInput();
           }}
           onReady={() => {
             setModelReady(true);
             // 按角色模型画布比例设置窗口尺寸
-            const showMainWindow = () => { void getCurrentWindow().show().catch(() => {}); };
+            const showMainWindow = () => { if (!quietModeRef.current) void getCurrentWindow().show().catch(() => {}); };
             const winSize = getWindowSize(getCharacterId());
             baseWindowSizeRef.current = winSize;
             windowScaleRef.current = 1.0;
@@ -4239,6 +4111,7 @@ export default function App() {
         />
       </div>
 
+      <ClipboardHint onSend={async message => { await ChatController.sendMessage(message, getCharacterId() ?? undefined, 'direct'); }} />
       {/* 视频动画演出层：监听 video:animation 事件播放透明动画素材（缺素材优雅跳过） */}
       <VideoAnimationLayer
         characterId={getCharacterId() ?? undefined}

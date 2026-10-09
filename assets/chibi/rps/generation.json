@@ -1,0 +1,55 @@
+{
+  "tool": "built-in image_gen",
+  "date": "2026-10-08",
+  "transparent_background": true,
+  "records": [
+    {
+      "character": "vivian",
+      "hand": "rock",
+      "source": "assets/chibi/rps/vivian-rock-source.png",
+      "sheet": "public/chibi/motion/vivian/vivian-rps-rock-sheet.webp",
+      "foot_baseline": 507,
+      "method": "Uniform scale and transparent padding with shared bounds per character; no chroma key"
+    },
+    {
+      "character": "vivian",
+      "hand": "scissors",
+      "source": "assets/chibi/rps/vivian-scissors-source.png",
+      "sheet": "public/chibi/motion/vivian/vivian-rps-scissors-sheet.webp",
+      "foot_baseline": 507,
+      "method": "Uniform scale and transparent padding with shared bounds per character; no chroma key"
+    },
+    {
+      "character": "vivian",
+      "hand": "paper",
+      "source": "assets/chibi/rps/vivian-paper-source.png",
+      "sheet": "public/chibi/motion/vivian/vivian-rps-paper-sheet.webp",
+      "foot_baseline": 507,
+      "method": "Uniform scale and transparent padding with shared bounds per character; no chroma key"
+    },
+    {
+      "character": "nana",
+      "hand": "rock",
+      "source": "assets/chibi/rps/nana-rock-source.png",
+      "sheet": "public/chibi/motion/nana/nana-rps-rock-sheet.webp",
+      "foot_baseline": 502,
+      "method": "Uniform scale and transparent padding with shared bounds per character; no chroma key"
+    },
+    {
+      "character": "nana",
+      "hand": "scissors",
+      "source": "assets/chibi/rps/nana-scissors-source.png",
+      "sheet": "public/chibi/motion/nana/nana-rps-scissors-sheet.webp",
+      "foot_baseline": 502,
+      "method": "Uniform scale and transparent padding with shared bounds per character; no chroma key"
+    },
+    {
+      "character": "nana",
+      "hand": "paper",
+      "source": "assets/chibi/rps/nana-paper-source.png",
+      "sheet": "public/chibi/motion/nana/nana-rps-paper-sheet.webp",
+      "foot_baseline": 502,
+      "method": "Uniform scale and transparent padding with shared bounds per character; no chroma key"
+    }
+  ]
+}

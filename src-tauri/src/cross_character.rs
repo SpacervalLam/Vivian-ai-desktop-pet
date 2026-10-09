@@ -179,6 +179,12 @@ struct CrossUtteranceIds {
     reply: String,
 }
 tokio::task_local! { static CROSS_UTTERANCES: CrossUtteranceIds; }
+// Trusted delivery envelope; never infer identity from speech text.
+tokio::task_local! { static CROSS_DELIVERY: (String, String, String); }
+pub(crate) fn current_delivery() -> Option<(String, String, String)> {
+    CROSS_DELIVERY.try_with(Clone::clone).ok()
+}
+
 
 pub(crate) fn current_utterance_id(speaker: &str) -> Option<String> {
     CROSS_UTTERANCES.try_with(|ids| {
@@ -1045,7 +1051,9 @@ impl CrossCharacterBus {
         let result = CROSS_UTTERANCES.scope(CrossUtteranceIds {
             source: req.source_id.clone(), target: req.target_id.clone(),
             input: input_id.clone(), reply: reply_id.clone(),
-        }, brain.think_cross_character(&synthesized_input, true)).await;
+        }, CROSS_DELIVERY.scope((req.source_id.clone(), req.message.clone(),
+            format!("{}{}{}{}", topic_context, memory_anchor, handoff_text, round_directive)),
+            brain.think_cross_character(&synthesized_input, true))).await;
         drop(_focus_lease);
 
         // 恢复原 channel
@@ -1219,6 +1227,7 @@ impl CrossCharacterBus {
                         direction:
                             crate::psychology::relationship_log::RelationshipDirection::AgentAgent,
                         target_agent_id: Some(req.target_id.clone()),
+                        source_agent_id: Some(req.source_id.clone()),
                     };
                     if let Err(e) = rel_log.append_entry(rel_entry) {
                         tracing::warn!("[CrossCharacter] 写入 AgentAgent 关系日志失败: {}", e);

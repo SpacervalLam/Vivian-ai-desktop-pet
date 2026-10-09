@@ -14,11 +14,12 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use parking_lot::RwLock;
+use regex::Regex;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::messages::{MessageMeta, MessageSource};
-use crate::notebook::{css_guide, storage, Block, Cover, Layout, NoteBook, Palette};
+use crate::notebook::{css_guide, doc_style, storage, Block, Cover, Layout, NoteBook, Palette};
 use crate::state::AppState;
 use crate::tools::types::{
     PermissionResult, Tool, ToolCategory, ToolResult, ToolRiskTier, ToolUseContext, ValidationResult,
@@ -140,10 +141,23 @@ impl Tool for CreateNotebookTool {
             "笔记标题（简洁吸引人，建议15字以内）。\n\n{}",
             crate::pipeline::prompt_modules::build_notebook_persona_brief_all("zh")
         );
+        // style 描述承载整个纸面范式的契约（构件清单 + 写作纪律）。放这里而不是
+        // 工具描述正文：这份契约只在工具被语义召回时随 schema 一起进 prompt，
+        // 不用每轮都付；而样式表本身留在 Rust 常量里，一次 token 都不付。
+        let style_desc = format!(
+            "笔记范式。free=你撰写完整自包含 HTML 文档（默认）：版式完全自由，适合数据大屏、精美报告、落地页式笔记；paper=纸面范式：系统注入整份文档与样式表，你只写 .wrap 内部的正文片段，适合精读、速查表/对照表、学习材料消化、汇报材料等「事实与判断必须在版面上分开」的分析型文档。填 paper 时 html 字段给的是正文片段而非完整文档。\n\n{}",
+            doc_style::guide("zh")
+        );
         json!({
             "type": "object",
             "properties": {
                 "title": { "type": "string", "description": title_desc },
+                "style": {
+                    "type": "string",
+                    "enum": ["free", "paper"],
+                    "description": style_desc,
+                    "default": "free"
+                },
                 "layout": {
                     "type": "string",
                     "enum": ["cover_flow", "article", "gallery", "simple"],
@@ -1062,6 +1076,7 @@ async fn share_notebook_to_wechat(
                 reasoning: None,
                 images: None,
                 meta: Some(MessageMeta {
+                    communication: None,
                     sticker: None,
                     source: MessageSource::Assistant,
                     is_memory_disabled: false,
@@ -1093,6 +1108,7 @@ async fn share_notebook_to_wechat(
                     reasoning: None,
                     images: None,
                     meta: Some(MessageMeta {
+                    communication: None,
                     sticker: None,
                         source: MessageSource::Assistant,
                         is_memory_disabled: false,
@@ -1354,12 +1370,38 @@ async fn remove_notebook_from_knowledge(memory: &Arc<crate::memory::MemoryManage
 // CreateHtmlNoteTool
 // ============================================================================
 
+/// `create_html_note` 的成文范式。
+///
+/// 收敛成一个枚举而不是在 `call` 里散落 `if style == "paper"`：范式同时决定
+/// 「html 字段装的是整份文档还是正文片段」与「样式表由谁负责」——判定点只能有一个，
+/// 多一处判定就会出现「校验按 free、渲染按 paper」的错配。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HtmlNoteStyle {
+    /// 模型撰写完整 HTML 文档，系统原样保存
+    Free,
+    /// 系统注入整份文档与样式表，模型只写 `.wrap` 内部片段
+    Paper,
+}
+
+/// 从入参解析范式。缺省与不认识的值都退回 `Free`——历史调用没有这个字段。
+fn parse_html_note_style(args: &Value) -> HtmlNoteStyle {
+    match args.get("style").and_then(|v| v.as_str()) {
+        Some("paper") => HtmlNoteStyle::Paper,
+        _ => HtmlNoteStyle::Free,
+    }
+}
+
 /// 让 LLM 直接撰写完整自包含 HTML 笔记（不经过结构化内容块渲染引擎）
 ///
 /// 与 create_notebook（结构化 blocks → 预设主题渲染）互补：当内容需要完全自由的
 /// 版式、配色与可视化控制时（数据大屏、精美报告、落地页式笔记、复杂图文混排等），
-/// 由 LLM 直接产出完整 HTML 文档，系统原样保存。渲染链路由前端 Shadow DOM 承接，
-/// 样式经 :host 适配，图表/流程图由前端懒加载初始化。
+/// 由 LLM 直接产出完整 HTML 文档，系统原样保存。渲染链路由前端 iframe（asset 协议
+/// URL，跨源隔离）承接，`:root` / `body` 选择器天然生效，但脚本不执行——图表库
+/// 在这里不可用，数据可视化走表格与内联 SVG。
+///
+/// `style="paper"` 是同一工具的第二条路径：**样式表由后端持有**，模型只写正文片段，
+/// 由 `doc_style` 合成整份文档。分析型文档（精读、速查表、对照表、汇报材料）用它——
+/// 既省掉每次重写 7KB 样式表的 token，也保证几十篇笔记长得是同一套版式。
 pub struct CreateHtmlNoteTool;
 
 impl CreateHtmlNoteTool {
@@ -1381,22 +1423,22 @@ impl Tool for CreateHtmlNoteTool {
     }
 
     fn description(&self) -> &str {
-        "Create a fully self-contained HTML note where YOU write the complete HTML/CSS directly — not the block-based renderer. Ideal when the content needs full layout and visual freedom: data dashboards, polished reports, landing-page style notes, complex mixed media. Provide the complete HTML document (with <style>), and the system saves it as-is and renders it in the Notebook tab. Reuse the same authoring discipline as a polished HTML report: design a coherent visual system via CSS variables on :root (colors, fonts, spacing); use font-size/weight/whitespace for hierarchy, not font families; keep layouts responsive; ensure ink-on-bg contrast ≥ 4.5:1; structure with proper headings; use a BODY-level or :host-compatible background rather than relying on a <body> element (the document is rendered inside a shadow root, so :root and body selectors are rewritten to :host automatically). For data, use ECharts via <div class=\"nb-chart\" data-option='{...}'> (bar/line/pie supported, lazy-loaded by the frontend) or Mermaid via <pre class=\"mermaid\">...</pre> — every chart must have a visible title and be referenced by adjacent prose. Never use <script>, on* event attributes, nested <iframe>, or javascript: URLs — scripts do not run and will be stripped; use the nb-chart / mermaid conventions for any visualization. Use tables wrapped in a scrollable container for discrete comparisons. Cite sources when facts come from search. Keep the tone natural and consistent with your personality. Write in first person like your own diary, not as a report: open straight into the content, no 「this document will」 phrasing, sentences may carry mood and preference, and say looked-up facts naturally (「I just found」). Do not use emoji anywhere - not in text, headings, or decorative markup. For tags, call list_notebooks first and reuse an existing tag whenever the meaning matches; only create a new one when nothing fits. \nPrefer this tool over create_notebook when you need fine-grained visual control; use create_notebook for simpler card-style notes."
+        "Create an HTML note rendered in the Notebook tab, in one of two modes selected by the `style` parameter. style=\"free\" (default): YOU write the complete HTML document (with <style>) and the system saves it as-is — ideal when the content needs full layout and visual freedom: data dashboards, polished reports, landing-page style notes, complex mixed media. style=\"paper\": the system injects the whole document and the stylesheet, and you write only the fragment that goes inside .wrap — the paradigm for analysis-type documents where facts and judgement must be separated on the page: close readings, quick-reference and comparison sheets, digesting study material, briefing notes. The component vocabulary and authoring discipline for each mode are in the style parameter's description. In free mode, reuse the same authoring discipline as a polished HTML report: design a coherent visual system via CSS variables on :root (colors, fonts, spacing); use font-size/weight/whitespace for hierarchy, not font families; keep layouts responsive; ensure ink-on-bg contrast ≥ 4.5:1; structure with proper headings; write the page background on body — the note is loaded as a complete document in its own iframe (cross-origin from the app), so :root / body / html selectors work normally. Never use <script>, on* event attributes, nested <iframe>, or javascript: URLs — scripts do not run, they are stripped when the note is saved, and the note document itself runs in a scripts-disabled sandbox, so chart libraries are unavailable here: express data with tables and inline SVG, and reach for create_notebook's table/chart blocks when you need an actually rendered bar/line/pie chart. Use tables wrapped in a scrollable container for discrete comparisons. Cite sources when facts come from search. Keep the tone natural and consistent with your personality. Write in first person like your own diary, not as a report: open straight into the content, no 「this document will」 phrasing, sentences may carry mood and preference, and say looked-up facts naturally (「I just found」). Do not use emoji anywhere - not in text, headings, or decorative markup. For tags, call list_notebooks first and reuse an existing tag whenever the meaning matches; only create a new one when nothing fits. \nPrefer this tool over create_notebook when you need fine-grained visual control; use create_notebook for simpler card-style notes."
     }
 
     fn description_in(&self, lang: &str) -> &str {
         match lang {
-            "zh" => "制作一篇由你直接撰写完整 HTML/CSS 的自包含笔记（不经过结构化内容块渲染）。适合需要完全自由版式与视觉控制的场景：数据大屏、精美报告、落地页式笔记、复杂图文混排等。你提供完整的 HTML 文档（含 <style>），系统原样保存并在笔记 tab 中原样渲染。请遵循与精美 HTML 报告一致的撰写纪律：用 :root 上的 CSS 变量（颜色/字体/间距）建立统一视觉系统；用字号粗细与留白建立层级，而非换字体家族；保持响应式布局；正文与背景对比度 ≥ 4.5:1；用规范标题组织结构；背景建议写在 body/{:host 兼容} 上——文档在 Shadow DOM 内渲染，:root 与 body 选择器会被自动改写为 :host。数据可视化用 ECharts（<div class=\"nb-chart\" data-option='{...}'>，支持柱状/折线/饼图，前端懒加载）或 Mermaid（<pre class=\"mermaid\">…</pre>），每个图表必须有可见标题并被相邻正文引用解释。禁止 <script>、on* 事件属性、嵌套 <iframe> 与 javascript: 协议——脚本不执行且会被移除，可视化一律用 nb-chart / mermaid 约定。离散数据对比优先用可横向滚动的表格容器。检索得来的事实要自然说明是查到的，不假装本来就知道，并区分「搜索事实」「你的推断」「用户原话」。保持语气自然，符合你的性格。像写自己的日记那样用第一人称，不要写成报告——开头直接切进内容，别用「本文将」「以下是」；句子可以有情绪和偏好，不必客观中立；检索来的事实用「我刚查到」这类自然说法带过。\n不要用 emoji——正文、标题与装饰标记里都不放。标签同样先 list_notebooks 看已有标签、能复用就复用，确实无匹配才新建。需要精细视觉控制时优先用本工具；简单卡片风格笔记用 create_notebook。",
-            "ja" => "完全自己でHTML/CSSを書く自己完結型HTMLノートを作成する（構造化コンテンツブロックのレンダラーは使わない）。自由なレイアウトと視覚制御が必要な場面に最適：データダッシュボード、洗練されたレポート、ランディングページ風ノート、複雑なメディア混在など。完全なHTML文書（<style>含む）を提供すると、システムがそのまま保存し、ノートタブでそのままレンダリングする。洗練されたHTMLレポートと同じ執筆規律に従うこと：:root上のCSS変数（色/フォント/間隔）で一貫したビジュアルシステムを確立；フォントファミリーではなくフォントサイズ/太さ/空白で階層を作る；レスポンシブレイアウトを維持；本文と背景のコントラスト比は4.5:1以上；見出しで構造化；背景はbody/{:host}互換で書く——文書はShadow DOM内でレンダリングされ、:rootとbodyセレクタは自動的に:hostへ書き換えられる。データ可視化はECharts（<div class=\"nb-chart\" data-option='{...}'>、棒/折れ線/円対応、フロントエンドで遅延ロード）またはMermaid（<pre class=\"mermaid\">…</pre>）を使い、各チャートには可視タイトルを付け、隣接する本文で参照・説明すること。離散データ比較は横スクロール可能なテーブルコンテナを優先。検索で得た事実は自然に「調べた」と述べ、元から知っていたように振る舞わない。「検索で得た事実」「自分の推測」「ユーザーの言葉」を区別する。口調は自然に、性格に合わせる。\nemoji は使わない——本文・見出し・装飾マークアップすべてに入れない。タグもまず list_notebooks で既存タグを確認し、意味が同じなら再利用する——本当に該当するものがないときだけ新規作成する。\n細かい視覚制御が必要な場合は本ツールを、簡単なカード風ノートはcreate_notebookを使うこと。",
+            "zh" => "制作一篇在笔记 tab 中渲染的 HTML 笔记。按 style 参数分两种模式：style=\"free\"（默认）由你撰写完整的 HTML/CSS 文档、系统原样保存——适合需要完全自由版式与视觉控制的场景：数据大屏、精美报告、落地页式笔记、复杂图文混排等；style=\"paper\" 由系统注入整份文档与样式表，你只写 .wrap 内部的正文片段——这是分析型文档的范式，适合「事实与判断必须在版面上物理分开」的材料：精读、速查表/对照表、学习材料消化、汇报材料。两种模式各自可用的构件与写作纪律都写在 style 参数的描述里。\n\nfree 模式请遵循与精美 HTML 报告一致的撰写纪律：用 :root 上的 CSS 变量（颜色/字体/间距）建立统一视觉系统；用字号粗细与留白建立层级，而非换字体家族；保持响应式布局；正文与背景对比度 ≥ 4.5:1；用规范标题组织结构。笔记以完整文档在独立 iframe 中加载（与应用窗口跨源隔离），:root / body / html 选择器正常生效。禁止 <script>、on* 事件属性、嵌套 <iframe> 与 javascript: 协议——脚本不执行且会在保存时被移除，笔记文档本身也跑在禁用脚本的沙箱里，图表库在这里不可用：数据用表格与内联 SVG 表达，需要真正渲染出来的柱状/折线/饼图就用 create_notebook 的 table/chart 块。宽表格请套一层可横向滚动的容器。检索得来的事实要自然说明是查到的，不假装本来就知道，并区分「搜索事实」「你的推断」「用户原话」。保持语气自然，符合你的性格。像写自己的日记那样用第一人称，不要写成报告——开头直接切进内容，别用「本文将」「以下是」；句子可以有情绪和偏好，不必客观中立；检索来的事实用「我刚查到」这类自然说法带过。\n不要用 emoji——正文、标题与装饰标记里都不放。标签同样先 list_notebooks 看已有标签、能复用就复用，确实无匹配才新建。需要精细视觉控制时优先用本工具；简单卡片风格笔记用 create_notebook。",
+            "ja" => "ノートタブでレンダリングされるHTMLノートを作成する。style パラメータで二つのモードに分かれる：style=\"free\"（既定）は完全なHTML/CSS文書をあなたが書き、システムがそのまま保存する——自由なレイアウトと視覚制御が必要な場面（データダッシュボード、洗練されたレポート、ランディングページ風ノート、複雑なメディア混在）に最適；style=\"paper\" は文書全体とスタイルシートをシステムが注入し、あなたは .wrap 内部の本文断片だけを書く——「事実と判断を紙面上で分ける」分析型文書（精読、速査表・対照表、学習資料の消化、報告資料）のためのパラダイム。両モードで使える部品と執筆規律は style パラメータの説明に書いてある。\n\nfree モードでは洗練されたHTMLレポートと同じ執筆規律に従うこと：:root上のCSS変数（色/フォント/間隔）で一貫したビジュアルシステムを確立；フォントファミリーではなくフォントサイズ/太さ/空白で階層を作る；レスポンシブレイアウトを維持；本文と背景のコントラスト比は4.5:1以上；見出しで構造化する。ノートは独立したiframe内で完全な文書として読み込まれる（アプリウィンドウとはクロスオリジンで隔離）ため、:root / body / html セレクタはそのまま機能する。<script>、on* イベント属性、ネストした <iframe>、javascript: プロトコルは禁止——スクリプトは実行されず保存時に除去され、ノート文書自体もスクリプト無効のサンドボックスで動くためチャートライブラリは使えない：データは表とインラインSVGで表現し、実際に描画される棒/折れ線/円グラフが必要なら create_notebook の table/chart ブロックを使うこと。横長の表は横スクロール可能なコンテナで包むこと。検索で得た事実は自然に「調べた」と述べ、元から知っていたように振る舞わない。「検索で得た事実」「自分の推測」「ユーザーの言葉」を区別する。口調は自然に、性格に合わせる。\nemoji は使わない——本文・見出し・装飾マークアップすべてに入れない。タグもまず list_notebooks で既存タグを確認し、意味が同じなら再利用する——本当に該当するものがないときだけ新規作成する。\n細かい視覚制御が必要な場合は本ツールを、簡単なカード風ノートはcreate_notebookを使うこと。",
             _ => self.description(),
         }
     }
 
     fn usage_corpus(&self, lang: &str) -> &'static str {
         match lang {
-            "zh" => "做个好看的笔记\n生成个网页笔记\n排版一下",
-            "en" => "make a formatted note\ncreate an html note\nlay it out nicely",
-            "ja" => "見栄えの良いノートを\nHTMLノートを作って\nレイアウトして",
+            "zh" => "做个好看的笔记\n生成个网页笔记\n排版一下\n精读一下这份材料\n整理成速查表\n这堆笔记帮我理一理",
+            "en" => "make a formatted note\ncreate an html note\nlay it out nicely\nclose-read this paper\nmake a quick reference sheet\ndigest these notes",
+            "ja" => "見栄えの良いノートを\nHTMLノートを作って\nレイアウトして\nこの資料を精読して\n速査表にまとめて\nノートを整理して",
             _ => "",
         }
     }
@@ -1406,7 +1448,7 @@ impl Tool for CreateHtmlNoteTool {
             "type": "object",
             "properties": {
                 "title": { "type": "string", "description": "笔记标题（简洁吸引人，建议15字以内）" },
-                "html": { "type": "string", "description": "完整的自包含 HTML 文档（含 <style>，可含 <div class=\"nb-chart\" data-option='...'> 图表与 <pre class=\"mermaid\"> 流程图）。系统原样保存。禁止 <script>、on* 事件属性、嵌套 <iframe> 与 javascript: 协议——脚本不执行且会被移除，可视化一律用 nb-chart / mermaid 约定。" },
+                "html": { "type": "string", "description": "style=free 时必填：完整的自包含 HTML 文档（含 <style>），系统原样保存。style=paper 时必填：只含 .wrap 内部内容的正文片段（不要写 <!DOCTYPE>/<html>/<head>/<body>/<style>，样式表由系统注入；误传整份文档时系统会取 <body> 内部内容）。两种模式都禁止 <script>、on* 事件属性、嵌套 <iframe> 与 javascript: 协议——脚本不执行且会在保存时被移除，笔记内图表库不可用，数据用表格与内联 SVG 表达。" },
                 "tags": {
                     "type": "array",
                     "items": { "type": "string" },
@@ -1423,7 +1465,13 @@ impl Tool for CreateHtmlNoteTool {
                 "type": "object",
                 "properties": {
                     "title": { "type": "string", "description": "笔记标题（简洁吸引人，建议15字以内）" },
-                    "html": { "type": "string", "description": "完整自包含 HTML 文档（含 <style>）。可含 <div class=\"nb-chart\" data-option='...> 图表（柱状/折线/饼图）与 <pre class=\"mermaid\"> 流程图，前端会懒加载渲染。禁止 <script>、on* 事件属性、嵌套 <iframe> 与 javascript: 协议——脚本不执行且会被移除。样式用 :root 上的 CSS 变量统一，背景写在 body（会被自动改写为 :host）。" },
+                    "style": {
+                        "type": "string",
+                        "enum": ["free", "paper"],
+                        "description": format!("笔记范式。free=你撰写完整自包含 HTML 文档（默认）；paper=纸面范式：系统注入整份文档与样式表，你只写 .wrap 内部正文片段。\n\n{}", doc_style::guide("zh")),
+                        "default": "free"
+                    },
+                    "html": { "type": "string", "description": "style=free 时必填：完整自包含 HTML 文档（含 <style>），系统原样保存。style=paper 时必填：只含 .wrap 内部内容的正文片段（不要写 <!DOCTYPE>/<html>/<head>/<body>/<style>；误传整份文档时系统会取 <body> 内部内容）。样式用 CSS 变量统一；禁用 <script>、on* 事件属性、嵌套 <iframe> 与 javascript: 协议——脚本不执行且会被移除，笔记内图表库不可用，数据用表格与内联 SVG 表达。" },
                     "meta_note": { "type": "string", "description": "数据来源说明等「不渲染但参与检索」的元数据：会存进笔记目录供后续 RAG 召回，但页面上看不到。把「整理自哪几个来源」「可靠性如何」「哪些结果没收录」这类交代写在这里，不要写进正文。" },
                     "tags": {
                         "type": "array",
@@ -1437,7 +1485,13 @@ impl Tool for CreateHtmlNoteTool {
                 "type": "object",
                 "properties": {
                     "title": { "type": "string", "description": "ノートタイトル（簡潔で魅力的、15文字以内推奨）" },
-                    "html": { "type": "string", "description": "完全自己完結のHTML文書（<style>含む）。<div class=\"nb-chart\" data-option='...> チャート（棒/折れ線/円）と <pre class=\"mermaid\"> フローチャートを含められ、フロントエンドで遅延ロードされる。<script>タグは書かないこと——実行されない。スタイルは:root上のCSS変数で統一し、背景はbodyに書く（自動的に:hostへ書き換えられる）。" },
+                    "style": {
+                        "type": "string",
+                        "enum": ["free", "paper"],
+                        "description": format!("ノートのパラダイム。free=完全なHTML文書をあなたが書く（既定）；paper=紙面パラダイム：文書全体とスタイルシートはシステムが注入し、あなたは .wrap 内部の本文断片だけを書く。\n\n{}", doc_style::guide("ja")),
+                        "default": "free"
+                    },
+                    "html": { "type": "string", "description": "style=free なら必須：完全自己完結のHTML文書（<style>含む）。style=paper なら必須：.wrap 内部の本文断片のみ（<!DOCTYPE>/<html>/<head>/<body>/<style> は書かないこと；文書全体を渡した場合は <body> 内部が使われる）。<script>タグは書かないこと——実行されず保存時に除去される。ノート内ではチャートライブラリが使えないため、データは表とインラインSVGで表現する。" },
                     "tags": {
                         "type": "array",
                         "items": { "type": "string" },
@@ -1455,14 +1509,20 @@ impl Tool for CreateHtmlNoteTool {
         if title.is_empty() {
             return ValidationResult::failure("title 不能为空", 2);
         }
+        let style = parse_html_note_style(input);
         let html = input.get("html").and_then(|v| v.as_str()).unwrap_or("").trim();
         if html.is_empty() {
-            return ValidationResult::failure("html 不能为空（需要提供完整的 HTML 文档）", 2);
+            let hint = if style == HtmlNoteStyle::Paper {
+                "html 不能为空（paper 模式需要 .wrap 内部的正文片段）"
+            } else {
+                "html 不能为空（需要提供完整的 HTML 文档）"
+            };
+            return ValidationResult::failure(hint, 2);
         }
         // 危险内容检查：sanitize 前后不一致说明含脚本/事件/iframe/javascript: 协议，
         // 直接拒绝给模型明确反馈（save_raw_html 仍会兜底 sanitize，双保险）。
         if storage::sanitize_html(html) != html {
-            return ValidationResult::failure("html 中不允许包含 <script>、on* 事件属性、嵌套 <iframe> 或 javascript: 协议——脚本不会执行且会被移除，可视化请用 nb-chart / mermaid 约定", 2);
+            return ValidationResult::failure("html 中不允许包含 <script>、on* 事件属性、嵌套 <iframe> 或 javascript: 协议——脚本不会执行且会被移除，数据请用表格或内联 SVG 表达", 2);
         }
         ValidationResult::success(None)
     }
@@ -1479,7 +1539,16 @@ impl Tool for CreateHtmlNoteTool {
         };
 
         let title = args.get("title").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
-        let html = args.get("html").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+        let style = parse_html_note_style(&args);
+        let content = args.get("html").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+        // paper 模式的样式表归后端：模型给的是正文片段，这里合成整份文档。
+        // 归一化容忍「误传整份文档」（取 <body> 内部），见 doc_style::normalize_fragment。
+        let html = match style {
+            HtmlNoteStyle::Paper => {
+                doc_style::compose_document(&title, &doc_style::normalize_fragment(&content))
+            }
+            HtmlNoteStyle::Free => content,
+        };
         let tags: Vec<String> = args.get("tags")
             .and_then(|v| v.as_array())
             .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
@@ -1520,6 +1589,10 @@ impl Tool for CreateHtmlNoteTool {
                 "title": &title,
                 "char_id": &char_id,
                 "render_type": "raw_html",
+                "style": match style {
+                    HtmlNoteStyle::Paper => "paper",
+                    HtmlNoteStyle::Free => "free",
+                },
             })),
         )
     }
@@ -1545,24 +1618,36 @@ impl Tool for CreateHtmlNoteTool {
     }
 
     fn search_hint(&self) -> &str {
-        "create html note page self-contained dashboard report custom html css"
+        "create html note page self-contained dashboard report custom html css paper paradigm close reading quick reference comparison sheet study digest"
     }
 
     fn anti_use_cases(&self) -> &[&str] {
         &[
             "Using it for simple card-style notes that create_notebook can handle — prefer that tool for basic content",
-            "Including <script> tags — they do not execute in the shadow-root renderer; use nb-chart / mermaid conventions instead",
+            "Choosing style=paper for a casual or diary-style note — paper separates facts from judgement and is meant for analysis (close reading, comparison sheets, briefings), not for telling a story",
+            "Including <script> tags — they do not execute and are stripped; chart libraries are unavailable inside a note, so use tables or inline SVG (create_notebook's chart blocks for rendered charts)",
             "Recreating a note that already exists — use list_notebooks to find note_id and share_notebook instead",
         ]
     }
 }
 
+/// raw_html 笔记里「不是正文、却会被朴素去标签法当成正文」的块。
+///
+/// `<style>` 是最大的一头：自由 HTML 笔记常自带整份样式表，paper 范式的更是约 7KB——
+/// 不剥掉的话，每篇笔记入库的检索文本九成是 CSS，既稀释语义相似度又白付嵌入开销。
+/// `<script>` 在保存时已被 `sanitize_html` 移除，这里再拦一次是因为知识库同步拿到的
+/// 是消毒前的原文（`regex` 不支持反向引用，两个标签用非捕获组并列匹配即可）。
+static RAW_HTML_NOISE_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?is)<(?:style|script)\b[^>]*>.*?</(?:style|script)\s*>").unwrap()
+});
+
 /// 将 raw_html 笔记中的可见文本提取出来，供知识库 RAG 检索
 fn raw_html_to_searchable_text(html: &str) -> String {
-    // 粗略剥离 HTML 标签，保留文本；同时保留 nb-chart / mermaid 的图表标题与流程说明
+    // 粗略剥离 HTML 标签，保留文本；先摘掉样式/脚本块，再逐字符去标签
+    let body = RAW_HTML_NOISE_RE.replace_all(html, " ");
     let mut text = String::new();
     let mut in_tag = false;
-    for c in html.chars() {
+    for c in body.chars() {
         match c {
             '<' => in_tag = true,
             '>' => in_tag = false,
@@ -1681,5 +1766,19 @@ mod tests {
         let html = crate::notebook::renderer::render_html(&note_with_meta());
         assert!(!html.contains("可靠性中等"), "Meta 不该出现在 HTML 里");
         assert!(html.contains("班味"), "正文应渲染");
+    }
+
+    /// 样式表不能被当成正文入库：paper 范式的 CSS 约 7KB，混进检索文本会把
+    /// 真正的语义淹掉（向量被 CSS 术语主导，笔记就等于搜不到了）。
+    #[test]
+    fn stylesheets_stay_out_of_the_retrieval_text() {
+        let html = doc_style::compose_document(
+            "速查表",
+            "<h2>口径</h2><p>相对方案 A 提升 13.6</p>",
+        );
+        let text = raw_html_to_searchable_text(&html);
+        assert!(text.contains("相对方案 A 提升 13.6"), "正文应留下");
+        assert!(!text.contains("--accent"), "CSS 变量不该进检索文本");
+        assert!(!text.contains("border-collapse"), "CSS 规则不该进检索文本");
     }
 }

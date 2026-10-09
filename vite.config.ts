@@ -131,7 +131,7 @@ export default defineConfig(async () => ({
         }
       : undefined,
     watch: {
-      ignored: ["**/src-tauri/**"],
+      ignored: ["**/src-tauri/**", "**/tmp/**", "**/temp/**", "**/.webview-data/**"],
     },
   },
   build: {

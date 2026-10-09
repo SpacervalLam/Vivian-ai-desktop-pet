@@ -48,11 +48,6 @@ const BLOCK_CHOICES: { type: BlockType; key: string }[] = [
   { type: 'ul', key: 'ul' },
 ];
 
-const BLOCK_TAGS: Record<BlockType, string> = {
-  p: 'p', h1: 'h1', h2: 'h2', h3: 'h3', h4: 'h4', h5: 'h5', h6: 'h6',
-  ul: 'ul', ol: 'ol', quote: 'blockquote', code: 'pre', table: 'table', hr: 'hr',
-};
-
 /** 从元素标签反推块类型（浏览器可能在编辑中造出新元素，读回时按标签兜底） */
 function typeFromTag(el: HTMLElement): BlockType {
   const tag = el.tagName.toLowerCase();

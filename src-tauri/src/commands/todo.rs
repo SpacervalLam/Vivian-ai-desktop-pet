@@ -94,13 +94,22 @@ pub fn add_scheduled_reminder(
     message: String,
     scheduled_time: f64,
     repeat_interval: Option<u64>,
+    important: Option<bool>,
+    advance_minutes: Option<u32>,
 ) -> Result<Value, String> {
-    let id = if let Some(interval) = repeat_interval {
-        let task = crate::brain::scheduler::ScheduledTask::new_reminder(&message, scheduled_time);
-        state.scheduler.schedule_repeat(task, interval)
-    } else {
-        state.scheduler.schedule_reminder(&message, scheduled_time)
-    };
+    let message = message.trim().to_string();
+    let advance = advance_minutes.unwrap_or(0);
+    let fire_at = scheduled_time - f64::from(advance) * 60.0;
+    if message.is_empty() || message.chars().count() > 2000 || !scheduled_time.is_finite()
+        || fire_at <= crate::brain::scheduler::now_ts_public() || advance > 60
+        || repeat_interval.is_some_and(|interval| interval < 60) {
+        return Err("请填写有效事项和未来的提醒时间；提前量不超过 60 分钟，重复间隔至少 60 秒。".into());
+    }
+    let mut task = crate::brain::scheduler::ScheduledTask::new_reminder(&message, fire_at);
+    task.repeat_interval = repeat_interval;
+    if important.unwrap_or(false) { task.priority = crate::brain::scheduler::Priority::Urgent; }
+    task.metadata = json!({"advance_minutes":advance});
+    let id = state.scheduler.insert_reminder_checked(task)?;
     // 手动 UI 创建的任务无角色归属（char_id 为空），前端据此不弹 toast
     let character_id = state
         .scheduler
@@ -208,4 +217,17 @@ pub fn resume_scheduled_task(
 #[tauri::command]
 pub fn acknowledge_reminder_delivery(delivery_id: String) -> bool {
     crate::brain::reminder_delivery::acknowledge(&delivery_id)
+}
+
+#[tauri::command]
+pub fn pending_reminder_notices(state: State<'_, Arc<AppState>>) -> Vec<crate::brain::reminder_delivery::ReminderNotice> {
+    state.scheduler.pending_reminder_notices()
+}
+
+#[tauri::command]
+pub fn acknowledge_reminder_notice(app: AppHandle, state: State<'_, Arc<AppState>>, notice_id: String, snooze: bool) -> Result<Option<String>, String> {
+    let result = state.scheduler.acknowledge_reminder_notice(&notice_id, snooze)?;
+    let _ = app.emit("reminder:changed", json!({"notice_id":notice_id}));
+    let _ = app.emit("scheduler:changed", json!({"action":"notice_acknowledged","source":"manual"}));
+    Ok(result)
 }

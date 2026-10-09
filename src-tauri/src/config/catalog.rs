@@ -73,7 +73,7 @@ pub fn build_catalog() -> Vec<SettingEntry> {
             layer: SettingLayer::Basic,
             group: "基础".into(),
             control: SettingControl::String,
-            default_value: serde_json::json!("Ctrl+Shift+A"),
+            default_value: serde_json::json!("Ctrl+Shift+V"),
         },
         SettingEntry {
             key: "base.shortcut_nana".into(),
@@ -82,7 +82,7 @@ pub fn build_catalog() -> Vec<SettingEntry> {
             layer: SettingLayer::Basic,
             group: "基础".into(),
             control: SettingControl::String,
-            default_value: serde_json::json!("Ctrl+Shift+Q"),
+            default_value: serde_json::json!("Ctrl+Shift+N"),
         },
         SettingEntry {
             key: "base.shortcut_broadcast".into(),
@@ -91,7 +91,7 @@ pub fn build_catalog() -> Vec<SettingEntry> {
             layer: SettingLayer::Basic,
             group: "基础".into(),
             control: SettingControl::String,
-            default_value: serde_json::json!("Ctrl+Shift+Z"),
+            default_value: serde_json::json!("Ctrl+Shift+B"),
         },
         SettingEntry {
             key: "base.shortcut_chat".into(),
@@ -118,7 +118,7 @@ pub fn build_catalog() -> Vec<SettingEntry> {
             layer: SettingLayer::Basic,
             group: "基础".into(),
             control: SettingControl::String,
-            default_value: serde_json::json!("Ctrl+Shift+N"),
+            default_value: serde_json::json!("Ctrl+Shift+M"),
         },
         SettingEntry {
             key: "base.shortcut_room".into(),
@@ -157,6 +157,15 @@ pub fn build_catalog() -> Vec<SettingEntry> {
             group: "AI 模型".into(),
             control: SettingControl::String,
             default_value: serde_json::json!("gpt-4o"),
+        },
+        SettingEntry {
+            key: "base.shortcut_screen_analyze".into(),
+            label: "截图分析快捷键".into(),
+            description: "默认 Ctrl + 左 Alt + A".into(),
+            layer: SettingLayer::Basic,
+            group: "基础".into(),
+            control: SettingControl::String,
+            default_value: serde_json::json!("Control+LeftAlt+A"),
         },
         SettingEntry {
             key: "ai.api_key".into(),

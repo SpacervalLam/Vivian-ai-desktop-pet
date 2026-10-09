@@ -393,6 +393,11 @@ impl SpeechPlanner {
         let (tx, rx) = oneshot::channel();
         let handle = SubmitHandle { done: rx };
 
+        if crate::companion_quiet::active() {
+            let _ = tx.send(SubmitResult::Dropped);
+            return Ok(handle);
+        }
+
         tracing::info!(
             "[SpeechPlanner] submit: speaker={} priority={:?} interruptible={} text_len={}",
             intent.speaker_id,

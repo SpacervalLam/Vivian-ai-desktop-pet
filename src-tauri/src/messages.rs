@@ -58,6 +58,21 @@ impl MessageSource {
     }
 }
 
+/// Trusted routing metadata, kept separate from utterance text.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CommunicationContext {
+    #[serde(default)] pub speaker: Option<String>,
+    #[serde(default)] pub listener: Option<String>,
+    #[serde(default)] pub knowledge_source: Option<String>,
+    #[serde(default)] pub current_character: Option<String>,
+}
+impl CommunicationContext {
+    pub fn from_metadata(value: &serde_json::Value, owner: &str) -> Self {
+        let field = |key| value.get(key).and_then(|v| v.as_str()).map(str::to_owned);
+        Self { speaker: field("speaker"), listener: field("listener"), knowledge_source: field("knowledge_source"), current_character: Some(owner.to_owned()) }
+    }
+}
+
 /// 消息元数据 — 标记内容来源与记忆策略
 ///
 /// 外部控制器在聊天气泡位置注入内容时，标记为非 LLM 生成，
@@ -82,6 +97,8 @@ pub struct MessageMeta {
     pub kind: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sticker: Option<crate::stickers::StickerRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub communication: Option<CommunicationContext>,
 }
 
 impl MessageMeta {
@@ -94,6 +111,7 @@ impl MessageMeta {
             channel: None,
             kind: None,
             sticker: None,
+            communication: None,
         }
     }
 

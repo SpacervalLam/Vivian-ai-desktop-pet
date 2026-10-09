@@ -64,10 +64,8 @@ use tracing::info;
 use crate::conversation::{CONVERSATION_MANAGER, ResponseMode};
 use crate::cross_character;
 use crate::memory::types::MemoryType;
-use crate::messages::MessageMeta;
-use crate::providers::base::LLMRequest;
 use crate::state::AppState;
-use crate::types::response::{ChatMessage, MessageImage};
+use crate::types::response::MessageImage;
 
 /// base64 编解码（与 commands/speech.rs 使用方式一致）
 use base64::Engine as _;
@@ -1051,8 +1049,8 @@ async fn asr_handler(
 
 /// 发送图片消息（手机端发图）
 ///
-/// 接收 base64 data URL 图片，保存副本、写入对话历史、调用多模态 LLM 生成
-/// 图片描述与回应，返回 `reply`（前端渲染 AI 文字气泡）与 `image_path`。
+/// 接收图片并保存副本，经共享识图路由完整分析后走普通角色对话链。
+/// 返回主对话生成的 `reply`、完整 `description` 与 `image_path`。
 async fn image_chat_handler(
     State(state): State<RemoteAppState>,
     Path(char_id): Path<String>,
@@ -1131,105 +1129,13 @@ async fn image_chat_handler(
     let data_url = format!("data:{};base64,{}", mime, b64);
     let now_ts = chrono::Local::now().timestamp_millis() as f64 / 1000.0;
 
-    // 写入对话历史：用户图片消息
-    {
-        let instance = state
-            .app_state
-            .get_character(Some(&char_id))
-            .map_err(|e| (StatusCode::NOT_FOUND, e))?;
-        let mut user_msg = ChatMessage::user("📷 [图片]");
-        user_msg.meta = Some(MessageMeta::user().with_channel(&channel_str));
-        instance.brain.dialogue.add_message_with_metadata(
-            user_msg,
-            serde_json::json!({
-                "source": "chat",
-                "kind": "image",
-                "image_path": rel_path,
-                "channel": channel_str,
-            }),
-        );
-    }
-
-    // 提取最近对话上下文，帮助理解图片意图
-    let recent_context = {
-        let instance = state
-            .app_state
-            .get_character(Some(&char_id))
-            .map_err(|e| (StatusCode::NOT_FOUND, e))?;
-        let history = instance.brain.dialogue.get_history();
-        let recent: Vec<String> = history
-            .iter()
-            .rev()
-            .take(6)
-            .map(|m| {
-                let role = if m.role == "user" { "User" } else { "AI" };
-                format!("{}: {}", role, m.content)
-            })
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect();
-        if recent.is_empty() {
-            String::new()
-        } else {
-            format!("\n## 最近对话上下文\n{}\n\n请结合以上对话理解用户发送这张图片的意图。", recent.join("\n"))
-        }
-    };
-
-    let system_prompt = format!(
-        "你是图片描述助手。请分析用户发送的图片，返回严格的 JSON：\n\
-        {{\"description\": \"对图片内容的客观、详细的中文描述（用于记忆存档，50-150字）\", \
-        \"reply\": \"以角色口吻对这张图片给出自然的中文回应（20-60字）\"}}\n\
-        仅返回 JSON 对象，不要任何其他内容、不要 markdown 代码块。\
-        {}",
-        recent_context
-    );
-
-    let router = {
-        let guard = state.app_state.model_router.read();
-        guard
-            .as_ref()
-            .ok_or_else(|| (StatusCode::INTERNAL_SERVER_ERROR, "模型路由未初始化".to_string()))?
-            .clone()
-    };
-    let image_detail = state
-        .app_state
-        .config
-        .read()
-        .get_typed::<String>("ai.image_detail", "auto".to_string());
-    let image = MessageImage {
-        media_type: mime.clone(),
-        data: b64,
-        url: None,
-        detail: Some(image_detail),
-    };
-    let nonce = uuid::Uuid::new_v4().as_simple().to_string();
-    let user_text = format!("请描述这张图片。[req:{}]", &nonce[..8]);
-    let messages = vec![
-        ChatMessage::system(&system_prompt),
-        ChatMessage::user_with_images(user_text, vec![image]),
-    ];
-
-    let llm_result = router
-        .generate(LLMRequest::new("vision_describe", messages)
-            .with_character_id(char_id.clone()))
-        .await;
-
-    let (description, reply) = match llm_result {
-        Ok(text) => crate::commands::chat::parse_image_description_response(&text),
-        Err(e) => return Err(err_status(e)),
-    };
-
-    // AI 回复写入对话历史
-    {
-        let instance = state
-            .app_state
-            .get_character(Some(&char_id))
-            .map_err(|e| (StatusCode::NOT_FOUND, e))?;
-        let mut ai_msg = ChatMessage::assistant(&reply);
-        ai_msg.meta = Some(MessageMeta::assistant().with_channel(&channel_str));
-        instance.brain.dialogue.add_message(ai_msg);
-    }
+    let app = APP_HANDLE.get().ok_or_else(|| (StatusCode::SERVICE_UNAVAILABLE, "应用尚未初始化".to_string()))?;
+    let image_detail = state.app_state.config.read().get_typed::<String>("ai.image_detail", "auto".into());
+    let image = MessageImage { media_type: mime, data: b64, url: None, detail: Some(image_detail) };
+    let result = crate::commands::chat::respond_to_image(&state.app_state, app, &char_id, &channel_str,
+        image, "📷 [图片]", Some(&rel_path), "remote_image").await.map_err(err_status)?;
+    let description = result.description;
+    let reply = result.reply;
 
     // 图片描述写入记忆系统（fire-and-forget）
     {
@@ -1957,7 +1863,7 @@ async fn list_work_sessions(
                 "status": s.status,
                 "working_directory": s.working_directory,
                 "updated_at": s.updated_at,
-                "message_count": s.messages.len(),
+                "message_count": s.message_count(),
             })
         })
         .collect();
@@ -1973,7 +1879,7 @@ async fn get_work_session(
     match CODING_AGENT.get_session(&id) {
         Some(s) => {
             // 只返回最近 50 条消息摘要，避免超大响应
-            let start = s.messages.len().saturating_sub(50);
+            let start = s.message_count().saturating_sub(50);
             let msgs: Vec<serde_json::Value> = s.messages[start..]
                 .iter()
                 .map(|m| {

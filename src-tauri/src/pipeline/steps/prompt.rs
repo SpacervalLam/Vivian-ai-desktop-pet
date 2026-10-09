@@ -1502,12 +1502,8 @@ fn build_episode_section(
     lines.push(section_heading("relevant_episodes", lang).to_string());
 
     for ep in &episodes {
-        let start = chrono::DateTime::from_timestamp(ep.started_at as i64, 0)
-            .map(|dt| dt.format("%m-%d %H:%M").to_string())
-            .unwrap_or_else(|| "?".to_string());
-        let end = chrono::DateTime::from_timestamp(ep.ended_at as i64, 0)
-            .map(|dt| dt.format("%H:%M").to_string())
-            .unwrap_or_else(|| "?".to_string());
+        let start = crate::utils::prompt_time::format_prompt_time(ep.started_at);
+        let end = crate::utils::prompt_time::format_prompt_time(ep.ended_at);
 
         let topic = ep.topic.as_deref().unwrap_or(section_heading("casual_chat", lang));
         let summary = ep.summary.as_deref().unwrap_or("");
@@ -1646,7 +1642,7 @@ impl PromptBuildingStep {
 
         // Actual retained companion blocks drive both API assembly and Inspector.
         state.metadata["sticker_character_id"] = json!(parts.char_id);
-        let companion = crate::pipeline::companion_prompt::CompanionPrompt::build(&parts, &state.messages);
+        let companion = crate::pipeline::companion_prompt::CompanionPrompt::build_with_visual_evidence(&parts, &state.messages, state.metadata.get("visual_evidence").and_then(serde_json::Value::as_str));
         let prompt_text = companion.render();
         let enriched = crate::pipeline::template_engine::PromptRenderResult {
             total_chars: prompt_text.chars().count(),

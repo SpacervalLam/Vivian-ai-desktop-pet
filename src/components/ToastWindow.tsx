@@ -310,7 +310,7 @@ export default function ToastWindow() {
    * 只参与布局计算，不该让整棵子树重渲染；需要依据它重算时 bump layoutTick。
    */
   const heightsRef = useRef<Map<string, number>>(new Map());
-  const [layoutTick, setLayoutTick] = useState(0);
+  const [, setLayoutTick] = useState(0);
   /**
    * 视口高度，即窗口高度（二者恒等）。
    *

@@ -40,3 +40,7 @@ pub mod user_facts;
 pub mod window;
 
 pub mod apartment_host;
+
+pub mod desktop_assistant;
+
+pub mod media;

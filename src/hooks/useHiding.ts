@@ -124,6 +124,7 @@ export function useHiding(
   modelReady: boolean,
   fullscreenHideEnabled: boolean,
   onPetHideRef?: RefObject<(() => void) | null>,
+  quietRef?: RefObject<boolean>,
 ): UseHidingResult {
   /** 当前是否处于隐藏状态（任一原因） */
   const isHiddenRef = useRef(false);
@@ -212,6 +213,7 @@ export function useHiding(
 
     /** 实际执行隐藏动画（全屏/睡眠共用） */
     const doHide = async (reason: HideReason) => {
+      if (quietRef?.current) return;
       if (isHiddenRef.current || inFlightRef.current) return;
       if (!modelReadyRef.current || !petRef.current) return;
       inFlightRef.current = true;
@@ -259,6 +261,7 @@ export function useHiding(
 
     /** 实际执行恢复动画 */
     const doRestore = async () => {
+      if (quietRef?.current) return;
       if (!isHiddenRef.current || inFlightRef.current) return;
       const saved = savedStateRef.current;
       if (!saved) {
@@ -295,6 +298,7 @@ export function useHiding(
 
     /** 检查是否应该退出隐藏（仅全屏触发时自动退出；睡眠需显式唤醒） */
     const checkFullscreen = async () => {
+      if (quietRef?.current) return;
       const label = getCurrentWindow().label;
       // 仅在状态变化时打日志，避免 1.5s 轮询刷屏
       const logOnce = (msg: string) => {
@@ -371,7 +375,7 @@ export function useHiding(
       if (cancelPosAnim) { cancelPosAnim(); cancelPosAnim = null; }
 
       const win = getCurrentWindow();
-      const [pos, size] = await Promise.all([win.outerPosition(), win.outerSize()]);
+      const pos = await win.outerPosition();
       const monitor = await currentMonitor();
       if (!monitor) {
         offlineInFlightRef.current = false;
@@ -408,6 +412,7 @@ export function useHiding(
 
     // Offline 上升入场动画：先把窗口移到屏幕下方并显示，然后上升到原位
     const doOfflineRestore = async () => {
+      if (quietRef?.current) return;
       if (offlineInFlightRef.current) return;
       offlineInFlightRef.current = true;
       positioningCoordinator.fullscreenInFlight = true;

@@ -34,6 +34,10 @@ impl CompanionPrompt {
     }
 
     pub fn build(parts: &PromptParts, history: &[ChatMessage]) -> Self {
+        Self::build_with_visual_evidence(parts, history, None)
+    }
+
+    pub fn build_with_visual_evidence(parts: &PromptParts, history: &[ChatMessage], visual_evidence: Option<&str>) -> Self {
         use Position::*;
         use SectionLayer::*;
         let mut prompt = Self::default();
@@ -108,12 +112,18 @@ impl CompanionPrompt {
         }
         // Automated intent/emotion labels still route retrieval/tools upstream. They no
         // longer prescribe a response script to the speaking character. Real state wins.
-        let native_tools = parts.enable_native_fc && parts.tools.as_deref().is_some_and(|t| !t.trim().is_empty());
-        prompt.push("post_history", if native_tools { POST_HISTORY.to_string() }
+        let has_tools = parts.tools.as_deref().is_some_and(|t| !t.trim().is_empty());
+        prompt.push("post_history", if parts.enable_native_fc || !has_tools { POST_HISTORY.to_string() }
             else { format!("{POST_HISTORY}\n{JSON_PROTOCOL}") }, Generation, PostHistory, 0);
 
+        if let Some(evidence) = visual_evidence.filter(|s| !s.trim().is_empty()) {
+            // Priority 0 protects the full report from optional-context budget pruning.
+            prompt.push("visual_evidence", crate::visual_evidence::context_block(evidence), World, Context, 0);
+        }
         let estimate = crate::memory::time_stamped::estimate_tokens;
-        let history_tokens: usize = history.iter().map(|m| estimate(&m.content) + 8).sum();
+        let mut rendered_history = Vec::new();
+        message_context::append_history(&mut rendered_history, history);
+        let history_tokens: usize = rendered_history.iter().map(|m| estimate(&m.content) + 8).sum();
         let native_tools = if parts.enable_native_fc { parts.tools.as_deref().map(estimate).unwrap_or(0) } else { 0 };
         let window = parts.model_context_window.unwrap_or(DEFAULT_PROMPT_BUDGET_TOKENS * 8);
         let budget = resolve_prompt_budget(parts).min(window.saturating_sub(
@@ -132,23 +142,27 @@ impl CompanionPrompt {
         prompt
     }
 
-    /// Stable prefix → fictional references → real history → evidence → actual turn
+    /// Stable prefix → fictional references → evidence → real history → actual turn
     /// → brief post-history direction. Synthetic content never takes user identity.
     pub fn messages(&self, history: &[ChatMessage], input: &str, internal: bool,
         status: Option<&str>) -> Vec<ChatMessage> {
+        self.messages_with_communication(history, input, internal, status, None)
+    }
+
+    pub fn messages_with_communication(&self, history: &[ChatMessage], input: &str, internal: bool,
+        status: Option<&str>, communication: Option<&crate::messages::CommunicationContext>) -> Vec<ChatMessage> {
         let mut messages = Vec::new();
         let main = self.contents(Position::Main).join("\n\n");
         if !main.is_empty() { messages.push(ChatMessage::system(main)); }
         for block in self.contents(Position::Example) { messages.push(ChatMessage::system(block)); }
-        message_context::append_history(&mut messages, history);
         let context = self.contents(Position::Context).join("\n\n");
         if !context.is_empty() { messages.push(ChatMessage::system(format!("{DATA_BOUNDARY}{context}\n[END CONTEXT DATA]"))); }
+        message_context::append_history(&mut messages, history);
         if let Some(status) = status.filter(|s| !s.trim().is_empty()) {
             messages.push(ChatMessage::system(format!("[INTERNAL STATUS — NOT A USER REQUEST]\n{status}")));
         }
         if !input.trim().is_empty() {
-            messages.push(if internal { ChatMessage::system(input) }
-                else { ChatMessage::user(message_context::ensure_speaker_prefix(input)) });
+            message_context::append_current_turn(&mut messages, input, internal, communication);
         }
         let direction = self.contents(Position::PostHistory).join("\n\n");
         if !direction.is_empty() { messages.push(ChatMessage::system(direction)); }
@@ -161,7 +175,12 @@ impl CompanionPrompt {
 
     pub fn render(&self) -> String {
         [Position::Main, Position::Example, Position::Context, Position::PostHistory].into_iter()
-            .map(|p| self.contents(p).join("\n\n")).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("\n\n")
+            .map(|position| {
+                let text = self.contents(position).join("\n\n");
+                if position == Position::Context && !text.is_empty() {
+                    format!("{DATA_BOUNDARY}{text}\n[END CONTEXT DATA]")
+                } else { text }
+            }).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("\n\n")
     }
 
     pub fn sections(&self) -> Vec<SectionRenderInfo> {
@@ -285,7 +304,8 @@ mod tests {
         let messages = restored.messages(&[], "hello", false, None);
         let request = crate::pipeline::steps::generation::AIResponseGenerationRunnable::build_chat_request("chat", messages);
         assert_eq!(request.include_framework_instructions, Some(false));
-        assert!(request.messages.last().unwrap().content.contains("[ACTIVE RESPONSE PROTOCOL]"));
+        assert!(request.messages.iter().any(|m| m.content.contains("## Output Format")));
+        assert!(!request.messages.last().unwrap().content.contains("[ACTIVE RESPONSE PROTOCOL]"));
         let native = PromptParts { enable_native_fc: true, tools: Some("native_tools".into()), ..Default::default() };
         assert!(!CompanionPrompt::build(&native, &[]).contents(Position::PostHistory)[0].contains("[ACTIVE RESPONSE PROTOCOL]"));
     }

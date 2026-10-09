@@ -5,6 +5,9 @@
 
 pub mod age;
 pub mod auto_extractor;
+pub mod extraction_queue;
+pub mod retrieval_budget;
+pub mod summary_commit;
 pub mod conflict;
 pub mod consolidation;
 pub mod conversation_archive;
@@ -31,6 +34,7 @@ pub mod memory_router;
 pub mod ollama_service;
 pub mod pipeline;
 pub mod precision_filter;
+pub mod provenance;
 pub mod qdrant;
 pub mod redact;
 pub mod recycle_bin;

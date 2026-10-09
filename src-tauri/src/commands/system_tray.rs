@@ -38,6 +38,7 @@ mod menu_id {
     pub const MEMORY: &str = "memory";
     pub const SETTINGS: &str = "settings";
     pub const CHAT: &str = "chat";
+    pub const DESKTOP: &str = "desktop_assistant";
     pub const VOICE: &str = "voice";
     pub const SMART_POSITIONING: &str = "smart_positioning";
     pub const QUIT: &str = "quit";
@@ -80,6 +81,7 @@ pub fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
     let memory = MenuItem::with_id(app, menu_id::MEMORY, "详情", true, None::<&str>)?;
     let settings = MenuItem::with_id(app, menu_id::SETTINGS, "设置", true, None::<&str>)?;
     let chat = MenuItem::with_id(app, menu_id::CHAT, "聊天", true, None::<&str>)?;
+    let desktop = MenuItem::with_id(app, menu_id::DESKTOP, "桌面助手", true, None::<&str>)?;
     let sep1 = PredefinedMenuItem::separator(app)?;
     let voice = CheckMenuItem::with_id(app, menu_id::VOICE, "语音开关", true, true, None::<&str>)?;
     let smart_positioning = CheckMenuItem::with_id(
@@ -105,6 +107,7 @@ pub fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
             &memory,
             &settings,
             &chat,
+            &desktop,
             &sep1,
             &voice,
             &smart_positioning,

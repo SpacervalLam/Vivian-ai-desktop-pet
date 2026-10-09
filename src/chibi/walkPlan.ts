@@ -101,7 +101,7 @@ function clamp(value: number, min: number, max: number): number {
  * 两个入口的差别只在 slideMs 怎么来（避让按速度上限推、漫步按原生步速推），
  * 从这一步往后完全一样——步数、帧间隔、总时长的收敛规则只写在这里一份。
  */
-function composeWalkPlan(dx: number, dy: number, slideMs: number): SmartMovePlan {
+function composeWalkPlan(dx: number, _dy: number, slideMs: number): SmartMovePlan {
   const direction: ChibiDirection = dx <= 0 ? 'left' : 'right';
   const horizontal = Math.abs(dx);
 

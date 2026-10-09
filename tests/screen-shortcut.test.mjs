@@ -1,0 +1,16 @@
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { transform } from 'esbuild';
+const source = readFileSync(new URL('../src/components/ShortcutRecorder.tsx', import.meta.url), 'utf8');
+const helpers = source.slice(source.indexOf('function eventToAccelerator'), source.indexOf('const ShortcutRecorder:'));
+const { code } = await transform(helpers + '\nexport { eventToAccelerator, isValidShortcut, formatForDisplay };', { loader: 'ts', format: 'esm' });
+const { eventToAccelerator, isValidShortcut, formatForDisplay } = await import('data:text/javascript;base64,' + Buffer.from(code).toString('base64'));
+const key = { code: 'KeyA', ctrlKey: true, altKey: true, shiftKey: false, metaKey: false };
+assert.equal(eventToAccelerator(key, 'LeftAlt'), 'Control+LeftAlt+A');
+assert.equal(eventToAccelerator(key, 'RightAlt'), 'Control+RightAlt+A');
+assert.equal(eventToAccelerator(key), 'Control+Alt+A');
+assert.equal(eventToAccelerator({ ...key, code: 'AltLeft' }), null);
+assert.equal(isValidShortcut('LeftAlt+A'), true);
+assert.equal(isValidShortcut('LeftAlt'), false);
+assert.equal(formatForDisplay('Control+LeftAlt+A'), 'Ctrl + Left Alt + A');
+console.log('Screen shortcut recording: physical Alt sides, validation and display passed');

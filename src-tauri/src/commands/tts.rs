@@ -192,6 +192,7 @@ pub async fn speak_text(
     );
     let character = state.get_character(character_id.as_deref())?;
     let speaker_id = character.id.clone();
+    crate::voice_diagnostics::begin("tts", &speaker_id, "request_to_playback_started");
     let tts = character.brain.tts.clone();
     let config_snapshot = tts.get_config();
     tracing::info!(
@@ -280,6 +281,7 @@ pub async fn speak_text(
         }
         match event {
             TtsEvent::Started { .. } => {
+                crate::voice_diagnostics::finish("tts", &sid_for_cb, "request_to_playback_started");
                 gate_for_cb.mark_started();
                 let _ = app_for_cb.emit("tts:started", payload);
             }

@@ -70,20 +70,34 @@ if (!isTauri && initialParams.get('view') === 'rig_preview') {
 
       let element: React.ReactElement;
       switch (view) {
+        case 'screen_selection': {
+          const ScreenSelectionWindow = (await import('./components/ScreenSelectionWindow')).default;
+          element = <ScreenSelectionWindow />;
+          break;
+        }
+        case 'edge_menu': {
+          const EdgeMenuWindow = (await import('./components/EdgeMenuWindow')).default;
+          element = <EdgeMenuWindow />;
+          break;
+        }
         case 'chat': {
           const ChatWindow = (await import('./components/ChatWindow')).default;
           element = <ChatWindow />;
           break;
         }
         case 'input': {
-          // 群发总框：独立窗口，居中显示，broadcast 模式
-          const InputDialog = (await import('./components/InputDialog')).default;
-          element = <InputDialog broadcast visible />;
+          const QuickInputWindow = (await import('./components/QuickInputWindow')).default;
+          element = <QuickInputWindow />;
           break;
         }
         case 'config': {
           const ConfigWindow = (await import('./components/ConfigWindow')).default;
           element = <ConfigWindow />;
+          break;
+        }
+        case 'reminders': {
+          const ReminderWindow = (await import('./components/ReminderWindow')).default;
+          element = <ReminderWindow />;
           break;
         }
         case 'memory': {
@@ -99,11 +113,6 @@ if (!isTauri && initialParams.get('view') === 'rig_preview') {
         case 'toast': {
           const ToastWindow = (await import('./components/ToastWindow')).default;
           element = <ToastWindow />;
-          break;
-        }
-        case 'side_chat': {
-          const SideChatPanel = (await import('./components/SideChatPanel')).default;
-          element = <SideChatPanel />;
           break;
         }
         case 'message_banner': {
@@ -125,7 +134,7 @@ if (!isTauri && initialParams.get('view') === 'rig_preview') {
         : element;
       createRoot(container).render(tree);
 
-      if (view && view !== 'chat' && view !== 'bubble' && view !== 'toast' && view !== 'input' && view !== 'side_chat' && view !== 'message_banner' && !hidden) {
+      if (view && view !== 'chat' && view !== 'bubble' && view !== 'toast' && view !== 'input' && view !== 'message_banner' && view !== 'reminders' && !hidden) {
         // 子窗口 UI 渲染完成后显示窗口，避免空白窗口闪烁。
         // bubble/toast/input 为常驻隐藏窗口，由调用方主动 show，不自动显示。
         const showWindow = () => {

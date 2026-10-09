@@ -113,14 +113,16 @@ function fuzzyResolve(raw: string): ChibiMotionSpec {
 }
 
 /** 解析动作名：精确名 → 别名表 → 旧词汇模糊兜底。永远有结果（兜底为 idle）。 */
-export function resolveMotion(raw: string | undefined | null): ChibiMotionSpec {
+export function resolveMotion(raw: string | undefined | null, character?: string): ChibiMotionSpec {
   const name = (raw ?? '').trim().toLowerCase();
   if (!name) return BY_NAME.get('idle')!;
   const direct = BY_NAME.get(name);
-  if (direct) return direct;
   const aliased = ALIASES[name];
-  if (aliased) return BY_NAME.get(aliased) ?? fuzzyResolve(aliased);
-  return fuzzyResolve(name);
+  const spec = direct ?? (aliased ? BY_NAME.get(aliased) ?? fuzzyResolve(aliased) : fuzzyResolve(name));
+  if (character && spec.kind === 'animation' && spec.characters && !spec.characters.includes(character)) {
+    return BY_NAME.get('idle')!;
+  }
+  return spec;
 }
 
 export function getMotion(name: string): ChibiMotionSpec | null {

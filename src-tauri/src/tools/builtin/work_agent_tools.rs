@@ -50,7 +50,7 @@ fn latest_work_summary(session: &CodingSession) -> Option<String> {
         .find(|message| {
             message.role == CodingRole::Assistant && !message.content.trim().is_empty()
         })
-        .map(|message| message.content.trim().chars().take(4000).collect())
+        .map(|message| message.content.trim().chars().take(4000).collect()).or_else(|| session.last_reply_preview.clone())
 }
 
 // ===== delegate_to_work_agent =====
@@ -340,7 +340,8 @@ impl Tool for GetWorkStatusTool {
         // 陪伴侧只读取绑定到自身角色的工作会话，避免跨角色串任务或拿错总结。
         sessions.retain(|session| session.char_id == context.char_id);
         if let Some(sid) = args.get("session_id").and_then(|v| v.as_str()) {
-            match sessions.iter().find(|s| s.session_id == sid) {
+            let detail = sessions.iter().find(|s| s.session_id == sid).and_then(|s| CODING_AGENT.get_session(&s.session_id));
+            match detail.as_ref() {
                 Some(s) => {
                     let final_summary = latest_work_summary(s);
                     let message = match &final_summary {
@@ -365,7 +366,7 @@ impl Tool for GetWorkStatusTool {
                             "mode": s.mode,
                             "working_directory": s.working_directory,
                             "updated_at": s.updated_at,
-                            "message_count": s.messages.len(),
+                            "message_count": s.message_count(),
                             "delegated_by_companion": s.delegated_by_companion,
                             "final_summary": final_summary,
                         })),

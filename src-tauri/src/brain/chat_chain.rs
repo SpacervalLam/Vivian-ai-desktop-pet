@@ -88,61 +88,6 @@ const CONSOLIDATOR_INTERVAL: u64 = 10;
 /// - 达到阈值时返回所有累积消息
 /// - 调用方获取累积消息后一次性调用 LLM 处理
 ///
-/// 设计原则：累积全部轮次内容，不丢失任何信息，仅减少 API 调用次数。
-struct BatchAccumulator {
-    /// 累积的对话消息缓冲区（user + assistant 交替）
-    buffer: parking_lot::Mutex<Vec<ChatMessage>>,
-    /// 累积轮次计数器
-    turn_count: std::sync::atomic::AtomicU64,
-    /// 触发阈值（累积多少轮后触发）
-    threshold: u64,
-    /// 首条消息入库时间（用于时间窗口过期检测）
-    first_turn_at: parking_lot::Mutex<Option<std::time::Instant>>,
-}
-
-const BATCH_TIME_WINDOW_SECS: u64 = 600;
-
-impl BatchAccumulator {
-    fn new(threshold: u64) -> Self {
-        Self {
-            buffer: parking_lot::Mutex::new(Vec::new()),
-            turn_count: std::sync::atomic::AtomicU64::new(0),
-            threshold,
-            first_turn_at: parking_lot::Mutex::new(None),
-        }
-    }
-
-    /// 记录一轮对话（user_msg + ai_msg），达到阈值时返回累积的所有消息。
-    ///
-    /// 返回 `Some(batch)` 当累积轮次达到阈值，包含全部累积的对话消息。
-    /// 返回 `None` 表示继续累积。
-    fn record_turn(&self, user_msg: &ChatMessage, ai_msg: &ChatMessage) -> Option<Vec<ChatMessage>> {
-        let mut buf = self.buffer.lock();
-        let mut first_at = self.first_turn_at.lock();
-        let now = std::time::Instant::now();
-        if first_at.is_none() {
-            *first_at = Some(now);
-        } else if let Some(at) = *first_at {
-            if at.elapsed().as_secs() >= BATCH_TIME_WINDOW_SECS {
-                self.turn_count.store(0, std::sync::atomic::Ordering::Relaxed);
-                buf.clear();
-                *first_at = Some(now);
-            }
-        }
-        buf.push(user_msg.clone());
-        buf.push(ai_msg.clone());
-        let count = self.turn_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-        if count >= self.threshold {
-            self.turn_count.store(0, std::sync::atomic::Ordering::Relaxed);
-            *first_at = None;
-            let batch = std::mem::take(&mut *buf);
-            Some(batch)
-        } else {
-            None
-        }
-    }
-}
-
 /// BrainChatChain —— 完整对话链，集成 Memory 子系统。
 ///
 /// 步骤顺序（顺序模式）：
@@ -223,7 +168,6 @@ pub struct BrainChatChain {
     /// 对话调用计数（用于定期触发 Consolidator）
     invoke_count: AtomicU64,
     /// 批量累积器：累积 3 轮对话后一次性触发 AutoExtractor 和心理学批量分析
-    batch_accumulator: BatchAccumulator,
     /// 话题信号缓冲：检测话题切换 + 稳定后慢存储到记忆
     pub topic_signal_buffer: Arc<super::topic_signal::TopicSignalBuffer>,
     /// 用户认知模型管理器：将散落的记忆证据组织成"对这个人的理解"
@@ -270,6 +214,7 @@ impl BrainChatChain {
                 .with_memory(memory.clone())
                 .with_dialogue(dialogue.clone()),
         );
+        auto_extractor.start_worker();
         let consolidator = Arc::new(MemoryRetentionGuard::new());
         let pipeline = Arc::new(ConsolidationPipeline::new(
             router.clone(),
@@ -563,7 +508,6 @@ impl BrainChatChain {
             tool_semantic_filter,
             prompt_step: prompt_step_shared,
             invoke_count: AtomicU64::new(0),
-            batch_accumulator: BatchAccumulator::new(3),
             topic_signal_buffer: Arc::new(super::topic_signal::TopicSignalBuffer::new()),
             user_model,
         }
@@ -927,7 +871,10 @@ Choose the appropriate expression and motion. Leave empty if nothing fits.",
     ///
     /// speaker is normalized to char_id (lowercase), listener is always the current character.
     fn parse_speaker_prefix(&self, user_input: &str) -> (String, String, String) {
-        let (text, speaker) = crate::cross_character::parse_speaker_prefix(user_input);
+        let (text, speaker) = if self.dialogue.get_channel() == "cross_character" {
+            crate::cross_character::current_delivery().map(|(speaker, text, _)| (text, speaker))
+                .unwrap_or_else(|| crate::cross_character::parse_speaker_prefix(user_input))
+        } else { (user_input.to_owned(), "user".to_owned()) };
         (text, speaker, self.char_id.clone())
     }
 
@@ -944,6 +891,21 @@ Choose the appropriate expression and motion. Leave empty if nothing fits.",
         // 视为同一对话，切换入口时上下文连续。
         tracing::debug!("[ChatState:{}] reading dialogue", self.char_id);
         let current_ch = self.dialogue.get_channel();
+        let (turn_text, speaker) = if current_ch == "cross_character" {
+            crate::cross_character::current_delivery().map(|(speaker, text, _)| (text, speaker))
+                .unwrap_or_else(|| crate::cross_character::parse_speaker_prefix(user_input))
+        } else { (user_input.to_owned(), "user".to_owned()) };
+        state.metadata["communication_context"] = serde_json::json!({
+            "speaker": speaker, "listener": if current_ch == "broadcast" { "all" } else { self.char_id.as_str() },
+            "knowledge_source": if current_ch == "cross_character" { "heard" } else if current_ch == "broadcast" { "broadcast" } else { "direct" },
+            "current_character": self.char_id,
+        });
+        state.metadata["api_turn_text"] = serde_json::json!(turn_text);
+        if current_ch == "cross_character" {
+            if let Some((_, _, context)) = crate::cross_character::current_delivery() {
+                state.metadata["cross_delivery_context"] = serde_json::json!(context);
+            }
+        }
         state.messages = if current_ch == "cross_character" {
             self.dialogue.get_history_filtered_by_channel(Some("cross_character"))
         } else {
@@ -1181,7 +1143,16 @@ Choose the appropriate expression and motion. Leave empty if nothing fits.",
         stream: bool,
         skip_dialogue_write: bool,
     ) -> VivianResult<AiResponse> {
-        let state = self.prepare_pipeline_state(user_input).await?;
+        self.ainvoke_with_visual_evidence(user_input, stream, skip_dialogue_write, None).await
+    }
+
+    pub async fn ainvoke_with_visual_evidence(
+        &self, user_input: &str, stream: bool, skip_dialogue_write: bool, visual_evidence: Option<&str>,
+    ) -> VivianResult<AiResponse> {
+        let mut state = self.prepare_pipeline_state(user_input).await?;
+        if let Some(evidence) = visual_evidence {
+            state.metadata["visual_evidence"] = serde_json::json!(evidence);
+        }
 
         let (final_state, response) = self
             .execute_pipeline_and_build_response(state, stream, user_input)
@@ -1294,7 +1265,7 @@ Choose the appropriate expression and motion. Leave empty if nothing fits.",
             let user_model = self.user_model.clone();
             let user_emotion = final_state.user_emotion.clone();
             let ai_emotion = self.emotion_bridge.get_current_emotion().emotion;
-            // 记忆系统存原文（剥离 [X 对你说] 前缀），LLM 可见的前缀已在 generation 层处理
+            // 普通用户存原文；仅跨角色内部传输解析前缀，API 身份说明由独立元数据提供。
             let (raw_input_for_memory, speaker, _) = self.parse_speaker_prefix(user_input);
             let is_cross_character = speaker != "user";
             let user_input_owned = raw_input_for_memory;
@@ -1329,6 +1300,7 @@ Choose the appropriate expression and motion. Leave empty if nothing fits.",
 
         // ── 后处理：将当前轮次写入对话管理器，确保下一次调用时历史会累积。
         // skip_dialogue_write 时跳过：插话等内部指令不应作为用户消息出现在对话历史和记忆图谱中。
+        let mut extraction_sources = Vec::new();
         if final_state.should_respond && !skip_dialogue_write {
             let clean_ai = MemorySavingRunnable::strip_json_if_any(&response.text);
             let channel = self.dialogue.get_channel();
@@ -1349,7 +1321,7 @@ Choose the appropriate expression and motion. Leave empty if nothing fits.",
             } else {
                 "direct"
             };
-            let user_metadata = serde_json::json!({
+            let mut user_metadata = serde_json::json!({
                 "channel": channel,
                 "speaker": speaker,
                 "listener": if is_broadcast { "all" } else { listener.as_str() },
@@ -1379,6 +1351,17 @@ Choose the appropriate expression and motion. Leave empty if nothing fits.",
             if let Some(sticker) = &response.sticker {
                 ai_metadata["sticker"] = serde_json::json!(sticker);
                 if let Some(meta)=ai_msg.meta.as_mut(){meta.sticker=Some(sticker.clone());}
+            }
+            // The same immutable IDs are written to history and the extraction queue.
+            for (message, metadata) in [(&user_msg, &mut user_metadata), (&ai_msg, &mut ai_metadata)] {
+                let id = metadata["speaker"].as_str().and_then(crate::cross_character::current_utterance_id)
+                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+                metadata["utterance_id"] = serde_json::json!(id);
+                extraction_sources.push(crate::memory::extraction_queue::SourceTurn {
+                    id, role: message.role.clone(), content: message.content.clone(),
+                    timestamp: message.timestamp.map(|t| t.timestamp_millis() as f64 / 1000.0).unwrap_or_else(crate::memory::types::current_timestamp),
+                    session_id: self.dialogue.get_session_id(), metadata: metadata.clone(),
+                });
             }
             self.dialogue.add_message_with_metadata(user_msg, user_metadata);
             self.dialogue.add_message_with_metadata(ai_msg, ai_metadata);
@@ -1430,37 +1413,12 @@ Choose the appropriate expression and motion. Leave empty if nothing fits.",
             }
         }
 
-        // ── 批量累积后处理：累积 3 轮对话后一次性触发 AutoExtractor 和心理学分析 ──
-        // 将本轮对话消息累积到 BatchAccumulator，达到 3 轮阈值时获取全部累积消息，
-        // 在 spawn 中一次性调用 AutoExtractor 进行处理，减少 LLM 调用次数。
-        // 同时将累积的对话传递到 post_process_memory_async 中做批量抽取。
-        // 注意：此处的 batch 数据仅用于 AutoExtractor 批量分析，
-        // TimeStampedMemory 写入、动态行为画像等每轮单独执行的操作不受影响。
+        // Each turn is persisted before background extraction; incomplete batches
+        // flush after idle time and remain queued across errors or restarts.
         if !final_state.is_command && final_state.should_respond && !skip_dialogue_write
             && !final_state.metadata.get("skip_memory_save").and_then(serde_json::Value::as_bool).unwrap_or(false)
             && self.parse_speaker_prefix(user_input).1 == "user" {
-            let (raw_input, _, _) = self.parse_speaker_prefix(user_input);
-            let clean_ai = MemorySavingRunnable::strip_json_if_any(&response.text);
-            let user_msg = ChatMessage::user(&raw_input);
-            let ai_msg = ChatMessage::assistant(&clean_ai);
-            
-            if let Some(batch) = self.batch_accumulator.record_turn(&user_msg, &ai_msg) {
-                // 达到阈值，在后台一次性批量处理所有累积的对话
-                let auto_extractor = self.auto_extractor.clone();
-                tokio::spawn(async move {
-                    // 一次性调用 AutoExtractor 分析全部 3 轮对话
-                    // AutoExtractor 内部有并发控制（extraction_in_progress），
-                    // 且支持接收多轮对话作为输入 -> extract_memories(&batch)
-                    let extracted = auto_extractor.extract_memories(&batch, None).await;
-                    if !extracted.is_empty() {
-                        tracing::info!(
-                            "[BrainChatChain][Batch] AutoExtractor 从累积的 {} 轮对话中批量抽取 {} 条长期记忆",
-                            batch.len() / 2,
-                            extracted.len()
-                        );
-                    }
-                });
-            }
+            self.auto_extractor.enqueue_sources(extraction_sources);
         }
 
         // 在场状态切换已迁移至 set_presence_state 工具（presence_tools.rs），
@@ -1523,7 +1481,9 @@ Choose the appropriate expression and motion. Leave empty if nothing fits.",
         invoke_count: u64,
         is_cross_character: bool,
     ) {
-        // 1. 写入 TimeStampedMemory 容器（40 阈值摘要，保留最近 8 条）
+        let serial = conversation_archive.read().serial();
+        let summary_guard = serial.lock().await;
+        // Snapshot old messages without removing them before the durable summary commit.
         let pending_summary: Option<Vec<ChatMessage>> = {
             let mut tsm = time_stamped.write();
             tsm.add_message(ChatMessage::user(user_input));
@@ -1554,7 +1514,9 @@ Choose the appropriate expression and motion. Leave empty if nothing fits.",
                     .unwrap_or_else(chrono::Local::now);
                 let retained_count = {
                     let mut tsm = time_stamped.write();
-                    tsm.commit_summary(summary.clone(), &removed);
+                    if tsm.can_commit_summary(&removed) && conversation_archive.write().add_l1(summary.clone(), archive_start, archive_end) {
+                        tsm.commit_summary(summary.clone(), &removed);
+                    }
                     tsm.get_messages().len()
                 };
                 tracing::info!(
@@ -1563,10 +1525,7 @@ Choose the appropriate expression and motion. Leave empty if nothing fits.",
                     retained_count
                 );
 
-                // L1 存档写入（压缩经历伪常驻，持久化跨重启）
-                conversation_archive
-                    .write()
-                    .add_l1(summary, archive_start, archive_end);
+                // L1 was durably committed together with the validated window above.
 
                 // L1 满 4 条 → 合并最旧 3 条为 L2（锁外 LLM 调用）
                 let pending_l2 = { conversation_archive.read().pending_merge() };
@@ -1575,7 +1534,8 @@ Choose the appropriate expression and motion. Leave empty if nothing fits.",
                         &router, &group,
                     )
                     .await;
-                    conversation_archive.write().commit_merge(&group, merged);
+                    let committed = conversation_archive.write().commit_merge(&group, merged);
+                    tracing::debug!(committed, "[ConversationArchive] version-checked merge");
                     tracing::info!(
                         "[BrainChatChain] 对话存档层级合并：{} 条 L{} → 1 条 L{}",
                         group.len(),
@@ -1586,17 +1546,8 @@ Choose the appropriate expression and motion. Leave empty if nothing fits.",
             }
         }
 
-        // 2. 此处的单轮 AutoExtractor 调用已由主流程中的 batch_accumulator 替代
-        //    当 batch_accumulator 未达到阈值时，本轮不会触发 AutoExtractor；
-        //    达到阈值时由 batch 路径一次性处理全部累积的对话。
-        //    跨角色对话场景仍然跳过 AutoExtractor。
-        if !is_cross_character {
-            // 这里不再每轮都调用 extract_memories，交由 batch_accumulator 控制
-            tracing::debug!(
-                "[BrainChatChain] AutoExtractor 已迁移到 batch_accumulator 调度，跳过单轮提取"
-            );
-        }
-
+        drop(summary_guard);
+        // Durable extraction runs independently; this path handles retention and profile updates.
         // 结构化画像在主流程独立更新；AutoExtractor 继续负责长期记忆。
         let clean_ai_text = MemorySavingRunnable::strip_json_if_any(&response.text);
 

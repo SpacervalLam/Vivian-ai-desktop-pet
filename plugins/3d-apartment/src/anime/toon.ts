@@ -638,18 +638,6 @@ export function nightHorizonTexture(): THREE.Texture {
   return _nightHorizon;
 }
 
-function petal(ctx: CanvasRenderingContext2D, x: number, y: number, r: number, rot: number, fill: string) {
-  ctx.save();
-  ctx.translate(x, y);
-  ctx.rotate(rot);
-  ctx.beginPath();
-  ctx.moveTo(0, -r);
-  ctx.quadraticCurveTo(r * 0.9, -r * 0.15, 0, r);
-  ctx.quadraticCurveTo(-r * 0.9, -r * 0.15, 0, -r);
-  ctx.fillStyle = fill;
-  ctx.fill();
-  ctx.restore();
-}
 
 /* ---------------- 地板：暖色木地板 ---------------- */
 

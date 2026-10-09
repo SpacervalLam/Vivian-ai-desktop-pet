@@ -189,6 +189,7 @@ impl CognitiveTickRunner {
         brain: &Brain,
         context: &TickContext,
     ) -> VivianResult<CognitiveTickResult> {
+        if crate::companion_quiet::active() { return Ok(CognitiveTickResult::default()); }
         let now = context.now;
         let mut result = CognitiveTickResult::default();
 

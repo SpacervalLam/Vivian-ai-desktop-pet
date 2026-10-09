@@ -17,6 +17,7 @@ pub mod session_coordinator;
 pub mod system_idle;
 pub mod token_estimate;
 pub mod watchdog;
+pub mod prompt_time;
 
 pub use environment::{CurrentState, EnvironmentInfo, EnvironmentManager, UserActivity};
 pub use path::get_user_data_dir;

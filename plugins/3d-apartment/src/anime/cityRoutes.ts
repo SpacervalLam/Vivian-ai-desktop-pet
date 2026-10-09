@@ -32,7 +32,7 @@ export function buildCityRoutes(root:THREE.Group,colliders:Collider[],routes:Cit
   for(const route of routes){
     const curve=new THREE.CatmullRomCurve3(route.points.map(([x,z])=>new THREE.Vector3(x,0,z)),false,'centripetal');
     const length=curve.getLength(),count=Math.max(12,Math.ceil(length/.9));
-    const samples=curve.getSpacedPoints(count),normals=samples.map((p,i)=>{const v=samples[Math.min(i+1,count)].clone().sub(samples[Math.max(i-1,0)]).normalize();return new THREE.Vector3(-v.z,0,v.x);});
+    const samples=curve.getSpacedPoints(count),normals=samples.map((_p,i)=>{const v=samples[Math.min(i+1,count)].clone().sub(samples[Math.max(i-1,0)]).normalize();return new THREE.Vector3(-v.z,0,v.x);});
     function ribbon(name:string,left:number,right:number,y:number,mat:THREE.Material){
       const positions:number[]=[],uv:number[]=[],indices:number[]=[];
       for(let i=0;i<=count;i++){for(const offset of [left,right]){const p=samples[i].clone().addScaledVector(normals[i],offset);positions.push(p.x,y,p.z);uv.push(p.x/2,p.z/2);}if(i<count){const a=i*2;indices.push(a,a+1,a+2,a+1,a+3,a+2);}}

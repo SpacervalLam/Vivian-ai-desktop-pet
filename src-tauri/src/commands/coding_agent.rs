@@ -481,8 +481,11 @@ pub fn coding_list_available_models(
 
 /// 会话简表（含完整消息，供列表与恢复）。
 #[tauri::command]
-pub fn coding_list_sessions() -> Vec<CodingSession> {
-    CODING_AGENT.list_sessions()
+pub fn coding_list_sessions(offset: Option<usize>, limit: Option<usize>, session_id: Option<String>, workspace: Option<String>, query: Option<String>) -> Vec<CodingSession> {
+    if let Some(id) = session_id { return CODING_AGENT.get_session(&id).into_iter().collect(); }
+    if let Some(query) = query { return CODING_AGENT.search_sessions(&query); }
+    if let Some(workspace) = workspace { return CODING_AGENT.list_sessions().into_iter().filter(|s| s.working_directory == workspace).collect(); }
+    CODING_AGENT.list_sessions_page(offset.unwrap_or(0), limit.unwrap_or(30))
 }
 
 /// 删除会话。

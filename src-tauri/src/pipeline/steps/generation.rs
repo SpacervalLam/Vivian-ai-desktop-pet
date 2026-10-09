@@ -323,16 +323,6 @@ impl AIResponseGenerationRunnable {
         calls
     }
 
-    /// Add speaker prefix for user role messages so the LLM can clearly distinguish message sources.
-    ///
-    /// - Already has any speaker prefix (cross-character / bystander / first-person): keep as-is
-    /// - No prefix (normal user message): prepend `[User says to me]`
-    ///
-    /// Only called when building the LLM messages array; does not modify conversation history/memory storage.
-    fn ensure_speaker_prefix(content: &str) -> String {
-        crate::pipeline::message_context::ensure_speaker_prefix(content)
-    }
-
     /// 构造 LLMRequest，仅对陪伴及兼容聊天路径注入 Vivian 通用响应 Schema
     ///
     /// 通过 Structured Outputs / JSON Mode 通道下发 schema 约束，让 LLM 按结构化 JSON 返回。
@@ -1161,20 +1151,27 @@ impl Runnable for AIResponseGenerationRunnable {
             crate::pipeline::prompt_modules::build_agent_status_bar(
                 &state.messages, &state.user_input)
         };
+        let communication = state.metadata.get("communication_context").cloned()
+            .and_then(|v| serde_json::from_value::<crate::messages::CommunicationContext>(v).ok());
+        let api_input = if system_directive { state.user_input.as_str() } else {
+            state.metadata.get("api_turn_text").and_then(|v| v.as_str()).unwrap_or(&state.user_input)
+        };
         let mut messages_vec = if let Some(prompt) = &companion {
-            prompt.messages(&state.messages, &state.user_input, system_directive, status.as_deref())
+            prompt.messages_with_communication(&state.messages, api_input, system_directive, status.as_deref(), communication.as_ref())
         } else {
             let context = crate::pipeline::message_context::split_prompt_context(
                 &state.system_prompt, &state.user_input, &crate::i18n::get_language());
             let mut messages = Vec::new();
             if !context.system.is_empty() { messages.push(ChatMessage::system(context.system)); }
-            crate::pipeline::message_context::append_history(&mut messages, &state.messages);
             if let Some(note) = context.dynamic { messages.push(ChatMessage::system(note)); }
+            crate::pipeline::message_context::append_history(&mut messages, &state.messages);
             if let Some(status) = &status { messages.push(ChatMessage::system(status)); }
-            messages.push(if system_directive { ChatMessage::system(&state.user_input) }
-                else { ChatMessage::user(Self::ensure_speaker_prefix(&state.user_input)) });
+            crate::pipeline::message_context::append_current_turn(&mut messages, api_input, system_directive, communication.as_ref());
             messages
         };
+        if let Some(context) = state.metadata.get("cross_delivery_context").and_then(|v| v.as_str()).filter(|s| !s.trim().is_empty()) {
+            messages_vec.push(ChatMessage::system(format!("[Cross-character conversation context; not spoken by the sender]\n{}", context)));
+        }
         // 后台任务报告已随本次请求注入（便签或整体 system 两条路径均覆盖）
         // → 标记消费，后续轮次不再重复注入
         if let Some(ids) = state

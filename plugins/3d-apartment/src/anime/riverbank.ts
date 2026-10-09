@@ -3,7 +3,7 @@ import { toon, makeRng } from './toon';
 import { buildStreetLamp } from './props';
 import { mergeByMaterial } from './merge';
 import { createBlossomField, createLeafField, createFallenPetals, createTrunkField, plantTree, type TreeKit } from './foliage';
-import { RIVER_Z_S, RIVER_Z_N, RIVER_SURFACE_Y, RIVER_BED_Y } from './river';
+import { RIVER_Z_S, RIVER_Z_N, RIVER_BED_Y } from './river';
 import { TRACK_GAP } from './districtArt';
 
 /**

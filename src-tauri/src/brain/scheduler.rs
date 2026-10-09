@@ -132,6 +132,8 @@ pub struct ScheduledTask {
     pub pre_triggered: bool,
     #[serde(default)]
     pub delivery: super::reminder_delivery::DeliveryState,
+    #[serde(default)]
+    pub notices: Vec<super::reminder_delivery::ReminderNotice>,
 }
 
 impl ScheduledTask {
@@ -162,6 +164,7 @@ impl ScheduledTask {
             char_id: String::new(),
             pre_triggered: false,
             delivery: Default::default(),
+            notices: Vec::new(),
         }
     }
 
@@ -186,6 +189,7 @@ impl ScheduledTask {
             char_id: String::new(),
             pre_triggered: false,
             delivery: Default::default(),
+            notices: Vec::new(),
         }
     }
 
@@ -226,6 +230,8 @@ pub struct Scheduler {
     persistence_path: Option<PathBuf>,
     persistence_gate: Arc<Mutex<()>>,
     shutdown: Arc<tokio::sync::Notify>,
+    heartbeat: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    dispatch_gate: Mutex<Option<Arc<dyn Fn(&ScheduledTask) -> bool + Send + Sync>>>,
 }
 
 struct SchedulerInner {
@@ -253,6 +259,8 @@ impl Scheduler {
             persistence_path,
             persistence_gate: Arc::new(Mutex::new(())),
             shutdown: Arc::new(tokio::sync::Notify::new()),
+            heartbeat: Mutex::new(None),
+            dispatch_gate: Mutex::new(None),
         };
         if let Some(path) = scheduler.persistence_path.clone() {
             scheduler.load_tasks_from(&path);
@@ -434,6 +442,79 @@ impl Scheduler {
         tasks
     }
 
+    pub fn set_heartbeat(&self, callback: Arc<dyn Fn() + Send + Sync>) { *self.heartbeat.lock() = Some(callback); }
+    pub fn set_dispatch_gate(&self, callback: Arc<dyn Fn(&ScheduledTask) -> bool + Send + Sync>) { *self.dispatch_gate.lock() = Some(callback); }
+
+    fn update_persisted<T>(&self, update: impl FnOnce(&mut HashMap<String, ScheduledTask>) -> Result<T, String>) -> Result<T, String> {
+        let _write = self.persistence_gate.lock();
+        let mut inner = self.inner.lock();
+        let previous = inner.tasks.clone();
+        let result = match update(&mut inner.tasks) {
+            Ok(result) => result,
+            Err(error) => { inner.tasks = previous; return Err(error); }
+        };
+        if let Some(path) = &self.persistence_path {
+            if let Err(error) = save_tasks_to(path, &inner.tasks) {
+                inner.tasks = previous;
+                return Err(error.to_string());
+            }
+        }
+        Ok(result)
+    }
+
+    pub fn record_reminder_notice(&self, task: &ScheduledTask, character_id: String, content: String, delivery_id: String)
+        -> Result<super::reminder_delivery::ReminderNotice, String> {
+        self.update_persisted(|tasks| {
+            let stored = tasks.get_mut(&task.id).ok_or("Reminder no longer exists")?;
+            if stored.status != TaskStatus::Running || stored.delivery.attempts != task.delivery.attempts {
+                return Err("Stale reminder attempt".into());
+            }
+            if let Some(notice) = stored.notices.iter_mut().find(|n| n.scheduled_time == task.scheduled_time) {
+                notice.delivery_id = delivery_id;
+                return Ok(notice.clone());
+            }
+            // Discard old acknowledged occurrences, never unread ones.
+            stored.notices.retain(|n| n.acknowledged_at.is_none());
+            let notice = super::reminder_delivery::ReminderNotice {
+                id: uuid::Uuid::new_v4().to_string(), task_id: task.id.clone(),
+                scheduled_time: task.scheduled_time, character_id, content, delivery_id,
+                important: task.priority == Priority::Urgent, created_at: now_ts(),
+                acknowledged_at: None, snoozed_task_id: None,
+            };
+            stored.notices.push(notice.clone());
+            Ok(notice)
+        })
+    }
+
+    pub fn pending_reminder_notices(&self) -> Vec<super::reminder_delivery::ReminderNotice> {
+        let mut notices: Vec<_> = self.inner.lock().tasks.values().flat_map(|t| t.notices.iter())
+            .filter(|n| n.acknowledged_at.is_none()).cloned().collect();
+        notices.sort_by(|a,b| a.created_at.total_cmp(&b.created_at).then_with(|| a.id.cmp(&b.id)));
+        notices
+    }
+
+    pub fn acknowledge_reminder_notice(&self, notice_id: &str, snooze: bool) -> Result<Option<String>, String> {
+        self.update_persisted(|tasks| {
+            let task = tasks.values_mut().find(|t| t.notices.iter().any(|n| n.id == notice_id))
+                .ok_or("Reminder notice no longer exists")?;
+            let mut next = ScheduledTask::new_reminder(task.message.clone().unwrap_or_default(), now_ts() + 300.0);
+            next.char_id = task.char_id.clone();
+            next.priority = task.priority;
+            let notice = task.notices.iter_mut().find(|n| n.id == notice_id).unwrap();
+            if notice.acknowledged_at.is_some() { return Ok(notice.snoozed_task_id.clone()); }
+            next.char_id = notice.character_id.clone();
+            notice.acknowledged_at = Some(now_ts());
+            let id = if snooze { notice.snoozed_task_id = Some(next.id.clone()); Some(next.id.clone()) } else { None };
+            if snooze { tasks.insert(next.id.clone(), next); }
+            Ok(id)
+        })
+    }
+
+    pub fn insert_reminder_checked(&self, task: ScheduledTask) -> Result<String, String> {
+        let id = task.id.clone();
+        self.update_persisted(|tasks| { tasks.insert(id.clone(), task); Ok(id) })
+    }
+
     /// 启动后台调度循环（每秒检查一次）。
     ///
     /// 返回一个 `JoinHandle`，调用方可用于取消。
@@ -449,6 +530,8 @@ impl Scheduler {
                 }
                 _ = tokio::time::sleep(Duration::from_secs(1)) => {
                     crate::utils::watchdog::beat("scheduler");
+                    let heartbeat = self.heartbeat.lock().clone();
+                    if let Some(heartbeat) = heartbeat { heartbeat(); }
                     self.tick().await;
                 }
             }
@@ -482,6 +565,8 @@ impl Scheduler {
             .then_with(|| a.id.cmp(&b.id)));
 
         for task in due_tasks {
+            let gate = self.dispatch_gate.lock().clone();
+            if gate.is_some_and(|gate| !gate(&task)) { continue; }
             // 打扰检查：将任务优先级映射到 InterruptPriority
             let interrupt_priority = match task.priority {
                 Priority::Urgent => {
@@ -603,6 +688,7 @@ impl Scheduler {
         let mut inner = self.inner.lock();
         let before = inner.tasks.len();
         inner.tasks.retain(|_, t| {
+            if t.notices.iter().any(|n| n.acknowledged_at.is_none()) { return true; }
             match t.status {
                 TaskStatus::Completed | TaskStatus::Cancelled | TaskStatus::Failed => {
                     // 有 completed_at 时按保留期判断；无 completed_at（旧数据）也清理
@@ -679,6 +765,7 @@ impl Scheduler {
                         }
                     }
                     if matches!(task.status, TaskStatus::Pending | TaskStatus::Paused)
+                        || task.notices.iter().any(|n| n.acknowledged_at.is_none())
                         || task.completed_at.is_some_and(|at| now_ts() - at < SCHEDULER_COMPLETED_RETENTION_SECS as f64) {
                         inner.tasks.insert(task.id.clone(), task);
                     }
@@ -816,6 +903,70 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn reminder_inbox_survives_restart_and_snoozes_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tasks.json");
+        let scheduler = Scheduler::with_persistence_path(Some(path.clone()));
+        scheduler.set_callback(Arc::new(|_| {}));
+        let id = scheduler.schedule_reminder("meeting", now_ts() - 1.0);
+        scheduler.tick().await;
+        let task = scheduler.get_task(&id).unwrap();
+        let notice = scheduler.record_reminder_notice(&task, "nana".into(), "meeting".into(), "receipt1".into()).unwrap();
+        let duplicate = scheduler.record_reminder_notice(&task, "nana".into(), "meeting".into(), "receipt2".into()).unwrap();
+        assert_eq!(notice.id, duplicate.id);
+        scheduler.complete_attempt(&id, task.delivery.attempts, Ok("meeting".into()));
+        // History retention must never remove an unread notice, even across restart.
+        scheduler.inner.lock().tasks.get_mut(&id).unwrap().completed_at = Some(now_ts() - 86400.0);
+        scheduler.persist();
+        scheduler.cleanup_terminal_tasks();
+        drop(scheduler);
+        let restored = Scheduler::with_persistence_path(Some(path.clone()));
+        assert_eq!(restored.pending_reminder_notices().len(), 1);
+        assert_eq!(restored.pending_reminder_notices()[0].delivery_id, "receipt2");
+        let snoozed = restored.acknowledge_reminder_notice(&notice.id, true).unwrap().unwrap();
+        assert_eq!(restored.acknowledge_reminder_notice(&notice.id, true).unwrap(), Some(snoozed.clone()));
+        assert!(restored.pending_reminder_notices().is_empty());
+        assert_eq!(restored.list_tasks().len(), 2);
+        let next = restored.get_task(&snoozed).unwrap();
+        assert!((next.scheduled_time - now_ts() - 300.0).abs() < 5.0);
+        assert_eq!(next.repeat_interval, None);
+        assert_eq!(next.char_id, "nana");
+        let restarted = Scheduler::with_persistence_path(Some(path));
+        assert!(restarted.pending_reminder_notices().is_empty());
+        assert!(restarted.get_task(&snoozed).is_some());
+    }
+
+    #[test]
+    fn reminder_ack_failure_does_not_drop_unread_card() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tasks.json");
+        let scheduler = Scheduler::with_persistence_path(Some(path.clone()));
+        let mut task = ScheduledTask::new_reminder("test", now_ts());
+        task.status = TaskStatus::Running;
+        scheduler.insert_reminder_checked(task.clone()).unwrap();
+        let notice = scheduler.record_reminder_notice(&task, "vivian".into(), "test".into(), "receipt".into()).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(scheduler.acknowledge_reminder_notice(&notice.id, true).is_err());
+        assert_eq!(scheduler.pending_reminder_notices().len(), 1);
+        assert_eq!(scheduler.list_tasks().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn dispatch_gate_defers_and_releases_due_tasks() {
+        let scheduler = Scheduler::new(false);
+        scheduler.set_callback(Arc::new(|_| {}));
+        scheduler.set_dispatch_gate(Arc::new(|_| false));
+        let id = scheduler.schedule_reminder("quiet", now_ts() - 1.0);
+        scheduler.tick().await;
+        assert_eq!(scheduler.get_task(&id).unwrap().status, TaskStatus::Pending);
+        assert_eq!(scheduler.get_task(&id).unwrap().delivery.attempts, 0);
+        scheduler.set_dispatch_gate(Arc::new(|_| true));
+        scheduler.tick().await;
+        assert_eq!(scheduler.get_task(&id).unwrap().status, TaskStatus::Running);
+    }
+
+    #[tokio::test]
     async fn delayed_receipt_cannot_complete_the_next_repeat_attempt() {
         let scheduler=Scheduler::new(false);
         scheduler.set_callback(Arc::new(|_|{}));
@@ -883,14 +1034,14 @@ mod tests {
 
     #[test]
     fn test_schedule_reminder() {
-        let mut scheduler = Scheduler::new(false);
+        let scheduler = Scheduler::new(false);
         let id = scheduler.schedule_reminder("test", now_ts() + 60.0);
         assert!(scheduler.get_task(&id).is_some());
     }
 
     #[test]
     fn test_cancel_task() {
-        let mut scheduler = Scheduler::new(false);
+        let scheduler = Scheduler::new(false);
         let id = scheduler.schedule_reminder("test", now_ts() + 60.0);
         assert!(scheduler.cancel_task(&id));
         let task = scheduler.get_task(&id).unwrap();
@@ -899,7 +1050,7 @@ mod tests {
 
     #[test]
     fn test_list_pending_sorted_by_priority() {
-        let mut scheduler = Scheduler::new(false);
+        let scheduler = Scheduler::new(false);
         let now = now_ts();
         let _ = scheduler.schedule_reminder("low", now + 60.0);
         // 手动插入高优先级
@@ -998,7 +1149,7 @@ mod tests {
         }));
 
         // 调度一个立即到期的任务
-        let mut scheduler = scheduler;
+        let scheduler = scheduler;
         let _id = scheduler.schedule_reminder("test", now_ts() - 1.0);
         scheduler.tick().await;
         // 给异步任务一点时间

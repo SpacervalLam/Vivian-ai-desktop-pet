@@ -112,7 +112,7 @@ const EditableText: React.FC<{
           el.textContent = '\u200b';
         }
       }}
-      onBlur={(e) => {
+      onBlur={() => {
         setFocused(false);
         let v = ref.current?.textContent ?? '';
         v = v.replace(/\u200b/g, '').trimEnd();
@@ -620,7 +620,7 @@ export const WysiwygEditor: React.FC<{
   // 用 AddableBlockType：meta 块不渲染也不提供新增入口
   onAddBlock: (type: AddableBlockType) => void;
   t: (key: string, opts?: Record<string, unknown>) => string;
-}> = ({ blocks, onUpdateBlock, onRemoveBlock, onMoveBlock, onAddBlock, t }) => {
+}> = ({ blocks, onUpdateBlock, onRemoveBlock, onMoveBlock, t }) => {
   const [selectedIdx, setSelectedIdx] = useState<number | null>(null);
   const selected = selectedIdx !== null ? blocks[selectedIdx] : null;
 

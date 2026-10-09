@@ -9,6 +9,19 @@ pub mod character_behavior;
 pub mod character_registry;
 pub mod commands;
 pub mod config;
+pub mod companion_policy;
+pub mod companion_runtime;
+pub mod desktop_clipboard;
+pub mod media_focus;
+pub mod shortcut;
+pub mod screen_capture;
+pub mod screen_selection;
+pub mod visual_evidence;
+pub mod edge_menu;
+pub mod desktop_menu_policy;
+pub mod companion_quiet;
+pub mod vision;
+pub mod voice_diagnostics;
 pub mod stickers;
 pub mod conversation;
 pub mod cordis;
@@ -30,6 +43,7 @@ pub mod metrics;
 pub mod music;
 pub mod network;
 pub mod notebook;
+pub mod user_quick_notes;
 pub mod persona;
 pub mod self_state;
 pub mod pet_controller;
@@ -205,7 +219,7 @@ pub fn run() {
                     // 避免 voice_shortcut_timer 单槽位被覆盖导致旧计时器无法 abort。
                     let text_map = state.text_shortcuts.lock().clone();
                     for (role, sc) in &text_map {
-                        if let Ok(parsed) = tauri_plugin_global_shortcut::Shortcut::from_str(sc) {
+                        if let Ok(parsed) = tauri_plugin_global_shortcut::Shortcut::from_str(&crate::shortcut::normalize(sc)) {
                             if shortcut == &parsed {
                                 if pressed {
                                     // 互斥检查：已有其他角色按住则忽略本次按下
@@ -261,8 +275,18 @@ pub fn run() {
                     if pressed {
                         let win_map = state.window_shortcuts.lock().clone();
                         for (action, sc) in &win_map {
-                            if let Ok(parsed) = tauri_plugin_global_shortcut::Shortcut::from_str(sc) {
-                                if shortcut == &parsed {
+                            if let Ok(parsed) = tauri_plugin_global_shortcut::Shortcut::from_str(&crate::shortcut::normalize(sc)) {
+                                if shortcut == &parsed && crate::shortcut::physical_modifiers_match(sc) {
+                                    if action == "screen_analyze" {
+                                        let app = app.clone();
+                                        let state = state.inner().clone();
+                                        tauri::async_runtime::spawn(async move {
+                                            let character_id = state.active_character_id.read().clone();
+                                            let result = crate::commands::desktop_assistant::analyze_screen(&app, &state, &character_id).await;
+                                            let _ = app.emit("screen:analysis", serde_json::json!({"character_id":character_id,"result":result.as_ref().ok(),"error":result.as_ref().err()}));
+                                        });
+                                        return;
+                                    }
                                     let _ = app.emit(
                                         "window:shortcut",
                                         serde_json::json!({ "action": action }),
@@ -440,8 +464,7 @@ pub fn run() {
             commands::window::stop_cursor_tracking,
             commands::window::start_window_drag,
             commands::window::stop_window_drag,
-            commands::window::start_side_chat_edge_watcher,
-            commands::window::start_side_chat_left_watcher,
+            commands::window::start_edge_menu_watcher,
             commands::coding_agent::coding_new_session,
             commands::coding_agent::coding_default_workspace,
             commands::coding_agent::coding_set_mode,
@@ -501,18 +524,26 @@ pub fn run() {
             commands::terminal::terminal_resize,
             commands::terminal::terminal_kill,
             commands::terminal::terminal_list,
-            commands::window::set_side_chat_locked,
-            commands::window::set_side_chat_input_open,
-            commands::window::set_side_chat_input_region,
+            commands::window::ensure_chat_interactive,
             commands::window::freeze_window_webview,
             commands::apartment_host::set_room_mode,
             commands::apartment_host::watch_room_escape,
             commands::apartment_host::stop_room_escape_watcher,
             commands::apartment_host::set_room_escape_suppressed,
-            commands::window::show_side_chat_animated,
-            commands::window::expand_side_chat,
-            commands::window::collapse_side_chat,
-            commands::window::start_side_chat_mouse_hook,
+            commands::window::show_chat_animated,
+            edge_menu::edge_menu_ready,
+            edge_menu::edge_menu_status,
+            edge_menu::edge_menu_action,
+            edge_menu::hide_edge_menu,
+            edge_menu::open_chat_window,
+            edge_menu::open_quick_input,
+            edge_menu::quick_input_ready,
+            edge_menu::chat_window_ready,
+            edge_menu::set_chat_close_policy,
+            companion_quiet::set_companion_quiet,
+            companion_quiet::companion_quiet_status,
+            commands::window::close_chat_window,
+            commands::window::start_chat_outside_click_hook,
             commands::toast_hit::set_toast_hit_regions,
             commands::window::toggle_always_on_top,
             commands::window::set_window_size,
@@ -627,6 +658,26 @@ pub fn run() {
             commands::config::select_work_model,
             commands::config::clear_work_model,
             commands::todo::acknowledge_reminder_delivery,
+            companion_runtime::companion_status,
+            commands::desktop_assistant::companion_voice_diagnostics,
+            commands::desktop_assistant::companion_desktop_context,
+            commands::desktop_assistant::user_quick_notes_list,
+            commands::desktop_assistant::user_quick_notes_save,
+            commands::desktop_assistant::user_quick_notes_delete,
+            commands::desktop_assistant::companion_save_shortcuts,
+            commands::desktop_assistant::companion_shortcut_icon,
+            commands::desktop_assistant::companion_launch_shortcut,
+            commands::desktop_assistant::companion_screen_analyze,
+            screen_selection::screen_selection_frame,
+            screen_selection::screen_selection_ready,
+            screen_selection::screen_selection_present,
+            screen_selection::screen_selection_finish,
+            commands::desktop_assistant::companion_read_clipboard,
+            commands::media::companion_now_playing,
+            commands::media::companion_focus_media_source,
+            commands::desktop_assistant::companion_remember_preference,
+            commands::todo::pending_reminder_notices,
+            commands::todo::acknowledge_reminder_notice,
             commands::todo::list_todos,
             commands::todo::add_todo_item,
             commands::todo::update_todo_item,
@@ -691,6 +742,14 @@ pub fn run() {
                 let state = app.state::<Arc<AppState>>();
                 state.tool_system.set_app_handle(app.handle().clone());
                 crate::tools::builtin::todo_tools::set_app_handle(app.handle().clone());
+                let feedback_app = app.handle().clone();
+                state.scheduler.set_heartbeat(Arc::new(move || crate::companion_runtime::tick(&feedback_app)));
+                let gate_app = app.handle().clone();
+                state.scheduler.set_dispatch_gate(Arc::new(move |task| {
+                    task.task_type != crate::brain::scheduler::TaskType::Reminder
+                        || task.priority == crate::brain::scheduler::Priority::Urgent
+                        || crate::companion_runtime::quiet_reason(&gate_app.state::<Arc<AppState>>()).is_none()
+                }));
                 crate::tools::builtin::work_todo_tools::set_app_handle(app.handle().clone());
                 crate::tools::builtin::work_question_tools::set_app_handle(app.handle().clone());
                 crate::tools::builtin::work_subagent_tools::set_app_handle(app.handle().clone());
@@ -1507,12 +1566,10 @@ pub fn run() {
                                     app_handle,
                                     state.inner(),
                                 );
-                                // 停止 side_chat 边缘检测线程
-                                commands::window::stop_side_chat_edge_watcher_internal();
-                                // 停止 side_chat 全局鼠标 Hook 线程
-                                commands::window::stop_side_chat_mouse_hook_internal();
-                                // 停止 side_chat 左缘看护线程
-                                commands::window::stop_side_chat_left_watcher_internal();
+                                // 停止 聊天窗口 边缘检测线程
+                                commands::window::stop_edge_menu_watcher_internal();
+                                // 停止 聊天窗口 全局鼠标 Hook 线程
+                                commands::window::stop_chat_outside_click_hook_internal();
                                 // 停止 room 窗口的 ESC 看护线程
                                 commands::apartment_host::stop_room_escape_watcher();
                             }

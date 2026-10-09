@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { routeAssistantMessage } from '../src/utils/chatMessageRouting.ts';
 
-for (const view of ['home', 'group', 'details']) {
+for (const view of ['home', 'group', 'details', 'assistant']) {
   const route = routeAssistantMessage(view, 'vivian', 'nana', 'wechat');
   assert.equal(route.append, null);
   assert.equal(route.unread, 'nana');

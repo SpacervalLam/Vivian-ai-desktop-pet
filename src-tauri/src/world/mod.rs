@@ -524,6 +524,28 @@ impl WorldStateProvider {
         self.cached_system.read().clone()
     }
 
+    /// Lightweight cached observations for the scheduler heartbeat; no collection or prompt context.
+    pub fn companion_observation(&self) -> (String, Option<bool>, Option<SystemMetrics>) {
+        let process = self.cached_foreground_window.read().as_ref()
+            .map(|window| window.process.clone()).unwrap_or_default();
+        let connected = self.cached_network_status.read().as_ref().map(|status| status.connected);
+        (process, connected, self.cached_system.read().clone())
+    }
+    pub fn companion_scene(&self) -> (Option<WeatherSnapshot>, Option<MusicSnapshot>) {
+        let config = self.config.read();
+        if !config.enable { return (None, None); }
+        (if config.enable_weather { self.cached_weather.read().clone() } else { None },
+            self.cached_music.read().clone())
+    }
+
+    /// 当前正在播放的媒体快照（供 chat window 灵动岛展示）。
+    ///
+    /// 只读缓存，不触发 SMTC 读取。与 [`Self::companion_scene`] 的区别是**不**受
+    /// `world.enable` 开关影响：灵动岛是纯展示，不该因为用户关掉「世界感知」就整个黑掉。
+    pub fn now_playing(&self) -> Option<MusicSnapshot> {
+        self.cached_music.read().clone()
+    }
+
     /// 按需采集内存占用最高的前 `n` 组进程（按可执行名聚合，排除自身）。
     ///
     /// 内部全量枚举进程，成本约几十到几百毫秒，只允许在系统压力提醒等

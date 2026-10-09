@@ -14,6 +14,7 @@
 
 import React, { useCallback, useContext, useState } from 'react';
 import { StreamFadeContext, StreamFadeText } from './StreamFadeText';
+import { markdownImageSrc, parseMarkdownImage } from './markdownImages';
 import {
   Braces, Check, File as FileIcon, FileCode, FileText, Hash, Image as ImageIcon,
 } from 'lucide-react';
@@ -33,6 +34,7 @@ export interface MarkdownFileTarget {
  * （打开面板时按会话工作目录还原），这里不做路径拼接。
  */
 export const MarkdownFileContext = React.createContext<{
+  documentPath?: string;
   onOpenFile?: (path: string, line?: number, column?: number) => void;
 }>({});
 
@@ -142,6 +144,30 @@ function renderInline(text: string, kp: string, ctx: InlineCtx): React.ReactNode
   while (i < text.length) {
     const ch = text[i];
     const prevChar = i === 0 ? '' : text[i - 1];
+
+    if (ch === '\n') {
+      flush();
+      out.push(<br key={`br${kp}${n++}`} />);
+      i++;
+      continue;
+    }
+    const spaceEntity = ch === '&' && /^(?:&#x20;|&#32;)/i.exec(text.slice(i));
+    if (spaceEntity) {
+      buf += ' ';
+      i += spaceEntity[0].length;
+      continue;
+    }
+
+    if (ch === '!') {
+      const image = parseMarkdownImage(text.slice(i));
+      const src = image && markdownImageSrc(image.href, ctx.documentPath);
+      if (image && src) {
+        flush();
+        out.push(<img key={`img${kp}${n++}`} className="codex-md-image" src={src} alt={image.alt} loading="lazy" />);
+        i += image.raw.length;
+        continue;
+      }
+    }
 
     // 行内代码
     if (ch === '`') {

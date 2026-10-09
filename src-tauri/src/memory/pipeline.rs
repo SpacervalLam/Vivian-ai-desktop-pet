@@ -405,6 +405,8 @@ impl ConsolidationPipeline {
         let metadata = json!({ "record_kind":"session_summary", "content_type":"session_summary",
             "conversation_id":session.id, "source_session_id":session.source_session_id,
             "participants":session.participants, "channels":session.channels,
+            "known_by":[memory.char_id()],
+            "source_attributions":session.turns.iter().filter(|t| source_ids.contains(&t.id)).map(|t| json!({"message_id":t.id,"speaker":t.speaker,"listener":t.listener,"knowledge_source":t.knowledge_source,"observer_id":t.observer_id,"timestamp":t.timestamp})).collect::<Vec<_>>(),
             "started_at":session.started_at, "ended_at":session.ended_at,
             "source_message_ids":source_ids, "source_message_count":session.turns.len(),
             "summary_parts":ordered, "event_schema_version":1, "completed_parts":ordered.len(), "total_parts":chunks.len(),

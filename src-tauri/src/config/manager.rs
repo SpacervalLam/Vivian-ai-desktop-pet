@@ -13,6 +13,8 @@ use crate::utils::path;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
+    #[serde(default)]
+    pub companion: crate::companion_policy::CompanionConfig,
     pub base: BaseConfig,
     pub window: WindowConfig,
     /// 桌宠渲染表现配置。
@@ -558,6 +560,8 @@ pub struct BaseConfig {
     /// 打开 3D 公寓窗口快捷键
     #[serde(default = "default_shortcut_room")]
     pub shortcut_room: String,
+    #[serde(default = "default_shortcut_screen_analyze")]
+    pub shortcut_screen_analyze: String,
     /// 已安装 3D 公寓插件的运行时开关。
     #[serde(default = "default_true")]
     pub apartment_enabled: bool,
@@ -571,7 +575,7 @@ pub struct BaseConfig {
 }
 
 fn default_shortcut() -> String {
-    "CommandOrControl+Shift+A".to_string()
+    "CommandOrControl+Shift+V".to_string()
 }
 
 fn default_theme() -> String {
@@ -579,11 +583,11 @@ fn default_theme() -> String {
 }
 
 fn default_shortcut_nana() -> String {
-    "CommandOrControl+Shift+Q".to_string()
+    "CommandOrControl+Shift+N".to_string()
 }
 
 fn default_shortcut_broadcast() -> String {
-    "CommandOrControl+Shift+Z".to_string()
+    "CommandOrControl+Shift+B".to_string()
 }
 
 fn default_shortcut_chat() -> String {
@@ -595,8 +599,10 @@ fn default_shortcut_settings() -> String {
 }
 
 fn default_shortcut_memory() -> String {
-    "CommandOrControl+Shift+N".to_string()
+    "CommandOrControl+Shift+M".to_string()
 }
+
+fn default_shortcut_screen_analyze() -> String { "Control+LeftAlt+A".into() }
 
 fn default_shortcut_room() -> String {
     "CommandOrControl+Shift+R".to_string()
@@ -1615,6 +1621,7 @@ impl Default for InlineExpressionConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
+            companion: Default::default(),
             base: BaseConfig {
                 language: "zh-CN".to_string(),
                 theme: default_theme(),
@@ -1625,6 +1632,7 @@ impl Default for AppConfig {
                 shortcut_settings: default_shortcut_settings(),
                 shortcut_memory: default_shortcut_memory(),
                 shortcut_room: default_shortcut_room(),
+                shortcut_screen_analyze: default_shortcut_screen_analyze(),
                 apartment_enabled: true,
                 auto_start: false,
                 user_avatar_path: None,
@@ -1819,6 +1827,18 @@ impl ConfigManager {
             .map_err(|e| VivianError::Config(format!("配置密钥解密失败: {}", e)))?;
         let mut config: AppConfig = serde_yaml::from_value(value)
             .map_err(|e| VivianError::Config(format!("YAML 结构无效: {}", e)))?;
+
+        // Upgrade the previous input defaults; retain other custom bindings.
+        for (shortcut, previous, next) in [
+            (&mut config.base.shortcut, "A", "V"),
+            (&mut config.base.shortcut_nana, "Q", "N"),
+            (&mut config.base.shortcut_broadcast, "Z", "B"),
+            (&mut config.base.shortcut_memory, "N", "M"),
+        ] {
+            if ["CommandOrControl", "Control", "Ctrl"].iter().any(|modifier| shortcut == &format!("{modifier}+Shift+{previous}")) {
+                *shortcut = format!("CommandOrControl+Shift+{next}");
+            }
+        }
 
         // ── 配置迁移：ai.enable_native_function_calling → tools.enable_native_function_calling ──
         // 旧版本中开关存于 ai 下；新版本统一到 tools 下。
