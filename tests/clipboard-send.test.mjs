@@ -7,7 +7,7 @@ globalThis.document={addEventListener(name,fn,capture){assert.equal(capture,true
 globalThis.__clip={useState(v){const i=cursor++;if(!(i in states))states[i]=v;return [states[i],v=>states[i]=v];},useRef(v){const i=cursor++;return refs[i]??= {current:v};},useEffect(fn){effects.push(fn);},getCurrentWindow:()=>({label:'nana'}),listen:async(name,fn,options)=>{assert.equal(options.target,'nana','dismiss events must target this pet, so another window cannot dismiss a feed-button press');listeners.set(name,fn);if(name==='companion:clipboard-hint')listener=fn;return ()=>listeners.delete(name);},invoke:async(name)=>{if(name==='start_chat_outside_click_hook'){hookStarts++;return;}assert.equal(name,'companion_read_clipboard');reads++;if(readError)throw new Error(readError);return {text:'current <text> & </shared_clipboard>'};}};
 const bundle=await build({entryPoints:['src/components/ClipboardHint.tsx','src/utils/clipboardMessage.ts'],bundle:true,write:false,outdir:'unused',platform:'node',format:'esm',loader:{'.css':'empty'},plugins:[{name:'fixtures',setup(b){
  b.onResolve({filter:/^(react|react\/jsx-runtime|react-i18next|lucide-react|@tauri-apps\/api\/.*)$/},a=>({path:a.path,namespace:'fixture'}));
- b.onLoad({filter:/.*/,namespace:'fixture'},a=>({contents:a.path==='react'?'export const {useState,useRef,useEffect}=globalThis.__clip;':a.path==='react/jsx-runtime'?'export const jsx=(type,props)=>({type,props});export const jsxs=jsx;':a.path==='react-i18next'?"export const useTranslation=()=>({i18n:{language:'zh'}});":a.path==='lucide-react'?'export const Clipboard=()=>null,ArrowUp=()=>null,LoaderCircle=()=>null,X=()=>null;':'export const {listen,invoke,getCurrentWindow}=globalThis.__clip;'}));
+ b.onLoad({filter:/.*/,namespace:'fixture'},a=>({contents:a.path==='react'?'export const {useState,useRef,useEffect}=globalThis.__clip;':a.path==='react/jsx-runtime'?'export const jsx=(type,props)=>({type,props});export const jsxs=jsx;':a.path==='react-i18next'?"export const useTranslation=()=>({i18n:{language:globalThis.__clipLanguage??'zh'}});":a.path==='lucide-react'?'export const Clipboard=()=>null,ArrowUp=()=>null,LoaderCircle=()=>null,X=()=>null;':'export const {listen,invoke,getCurrentWindow}=globalThis.__clip;'}));
  b.onResolve({filter:/characterContext/},()=>({path:'character',namespace:'fixture-character'}));
  b.onLoad({filter:/.*/,namespace:'fixture-character'},()=>({contents:"export const getCharacterId=()=>globalThis.__character;"}));
 }}]});
@@ -23,12 +23,17 @@ const render=()=>{cursor=0;effects=[];return Hint({onSend:message=>{sends.push(m
 globalThis.__character='nana';assert.equal(render(),null);const cleanup=effects[0]();await new Promise(r=>setImmediate(r));assert.equal(reads,0);
 listener({payload:{sequence:2}});let view=render();assert.ok(view.props.className.includes('is-nana'));const click=()=>view.props.children[0].props.onClick({stopPropagation(){}});
 assert.equal(reads,0,'a clipboard change must never read its contents');assert.equal(sends.length,0);
-assert.equal(view.props.children[0].props['aria-label'],'喂给桌宠');assert.ok(view.props.children[0].props.title.includes('不点击不读取、不提交'));
+assert.equal(view.props.children[0].props['aria-label'],'分享剪贴板');assert.ok(view.props.children[0].props.title.includes('不点击不读取、不提交'));
+assert.equal(view.props.children.filter(child=>child?.type==='button').length,1,'only the share button remains');
+for(const [language,label] of [['en','Share clipboard'],['ja','コピーを共有'],['zh-CN','分享剪贴板']]){
+ globalThis.__clipLanguage=language;view=render();assert.equal(view.props.children[0].props['aria-label'],label);
+}
+delete globalThis.__clipLanguage;view=render();
 click();click();await new Promise(r=>setImmediate(r));assert.equal(reads,1);assert.equal(sends.length,1);assert.ok(sends[0].includes('当前剪贴板'));assert.ok(sends[0].includes('&lt;text&gt;'));
 listener({payload:{sequence:3}});resolveSend();await new Promise(r=>setImmediate(r));assert.ok(render(),'new copy survives an in-flight send');
 view=render();click();await new Promise(r=>setImmediate(r));resolveSend();await new Promise(r=>setImmediate(r));assert.equal(render(),null);
-listener({payload:{sequence:4}});view=render();view.props.children[1].props.onClick({stopPropagation(){}});assert.equal(render(),null);assert.equal(reads,2,'dismiss never reads clipboard');assert.equal(sends.length,2,'dismiss never sends clipboard');
-listener({payload:{sequence:5}});view=render();readError='剪贴板没有可读取的文本。';click();await new Promise(r=>setImmediate(r));view=render();assert.ok(view);assert.equal(view.props.children[2].props.role,'alert');assert.equal(sends.length,2,'read failure never submits');assert.equal(view.props.children[0].props.disabled,false,'read failure allows retry');
+listener({payload:{sequence:4}});listeners.get('companion:clipboard-outside-press')({payload:null});assert.equal(render(),null);assert.equal(reads,2,'dismiss never reads clipboard');assert.equal(sends.length,2,'dismiss never sends clipboard');
+listener({payload:{sequence:5}});view=render();readError='剪贴板没有可读取的文本。';click();await new Promise(r=>setImmediate(r));view=render();assert.ok(view);assert.equal(view.props.children[1].props.role,'alert');assert.equal(sends.length,2,'read failure never submits');assert.equal(view.props.children[0].props.disabled,false,'read failure allows retry');
 const readCount=reads,sendCount=sends.length;
 listener({payload:{sequence:6}});view=render();
 const child=new Node();view.props.children[0].props.ref.current={contains:target=>target===child};

@@ -1,4 +1,4 @@
-.pet-clipboard { position: absolute; left: 50%; top: 28%; z-index: 50; pointer-events: auto; max-width: 48%; }
+.pet-clipboard { position: absolute; right: 16px; top: 28%; z-index: 50; pointer-events: auto; width: max-content; max-width: calc(100% - 32px); }
 .pet-clipboard-send { display: flex; align-items: center; gap: 6px; padding: 9px 11px; border-radius: 18px; border: 1px solid rgba(170,140,70,.24); background: rgba(255,249,224,.97); color: #806328; box-shadow: 0 4px 14px #30261920, inset 0 1px 0 #ffffffcc; font: 500 12px/1.2 system-ui,sans-serif; white-space: nowrap; cursor: pointer; transition: transform .16s, box-shadow .16s; }
 .is-nana .pet-clipboard-send { background: rgba(246,237,255,.97); color: #7955a3; border-color: #ad8cc33d; }
 .pet-clipboard-send:hover:not(:disabled) { transform: translateY(-2px); box-shadow: 0 6px 18px #30261928; }
@@ -7,8 +7,8 @@
 .pet-clipboard-send:disabled { opacity: .7; cursor: wait; }
 .pet-clipboard-error { display: block; margin-top: 6px; padding: 7px 9px; border-radius: 10px; background: #fff9f5; color: #a34936; font: 12px/1.4 system-ui; overflow-wrap: anywhere; }
 .pet-clipboard-spinner { animation: clipboard-spin 1s linear infinite; }
-.pet-clipboard-dismiss { position: absolute; top: -7px; right: -7px; display: grid; place-items: center; width: 20px; height: 20px; padding: 0; border: 1px solid #d8cbb0; border-radius: 50%; background: #fff9ec; color: #806328; cursor: pointer; }
-.pet-clipboard-dismiss:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
-.pet-clipboard-dismiss:disabled { opacity: .7; cursor: wait; }
+.pet-clipboard-send { box-sizing: border-box; max-width: 100%; }
+.pet-clipboard-send svg { flex-shrink: 0; }
+.pet-clipboard-send span { min-width: 0; white-space: normal; overflow-wrap: anywhere; }
 @keyframes clipboard-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .pet-clipboard-send { transition: none; } .pet-clipboard-spinner { animation: none; } }

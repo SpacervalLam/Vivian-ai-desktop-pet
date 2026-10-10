@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { Clipboard, ArrowUp, LoaderCircle, X } from 'lucide-react';
+import { Clipboard, ArrowUp, LoaderCircle } from 'lucide-react';
 import { getCharacterId } from '../characterContext';
 import { useTranslation } from 'react-i18next';
 import { clipboardMessage } from '../utils/clipboardMessage';
@@ -10,11 +10,10 @@ import './ClipboardHint.css';
 export default function ClipboardHint({ onSend }: { onSend: (message: string) => Promise<void> }) {
   const { i18n } = useTranslation();
   const zh = i18n.language.startsWith('zh'), ja = i18n.language.startsWith('ja');
-  const label = zh ? '喂给桌宠' : ja ? 'ペットに渡す' : 'Feed to pet';
+  const label = zh ? '分享剪贴板' : ja ? 'コピーを共有' : 'Share clipboard';
   const privacy = zh ? '点击才读取当前剪贴板文本并发送给桌宠；不点击不读取、不提交。'
     : ja ? 'クリックした時だけ現在のクリップボードのテキストを読み取り、ペットに送ります。'
     : 'Only clicking reads and sends the current clipboard text to your pet.';
-  const dismiss = zh ? '忽略这次剪贴板变化' : ja ? '今回の更新を無視' : 'Dismiss this clipboard change';
   const [visible, setVisible] = useState(false), [busy, setBusy] = useState(false), [error, setError] = useState('');
   const sending = useRef(false), revision = useRef(0), mounted = useRef(false);
   const sendButton = useRef<HTMLButtonElement>(null);
@@ -67,8 +66,6 @@ export default function ClipboardHint({ onSend }: { onSend: (message: string) =>
       {busy ? <LoaderCircle size={15} className="pet-clipboard-spinner" /> : <Clipboard size={15} />}
       <span>{label}</span><ArrowUp size={13} />
     </button>
-    <button className="pet-clipboard-dismiss" title={dismiss} aria-label={dismiss}
-      onClick={e => { e.stopPropagation(); close(); }}><X size={12} /></button>
     {error && <span className="pet-clipboard-error" role="alert">{error}</span>}
   </div> : null;
 }
