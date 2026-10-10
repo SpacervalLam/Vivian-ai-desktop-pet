@@ -49,6 +49,17 @@ impl DesktopFrame {
         }
         encode_png(region.width, region.height, &pixels)
     }
+
+    /// Crop using the physical virtual-desktop coordinates exposed to desktop tools.
+    pub fn crop_physical_png(&self, x: i64, y: i64, width: u32, height: u32) -> Result<Vec<u8>, String> {
+        let local_x = x.checked_sub(self.left as i64)
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or("观察区域超出屏幕范围")?;
+        let local_y = y.checked_sub(self.top as i64)
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or("观察区域超出屏幕范围")?;
+        self.crop_png(CaptureRegion { x: local_x, y: local_y, width, height })
+    }
 }
 fn encode_png(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
     let mut bytes = Vec::new();
@@ -194,5 +205,14 @@ mod tests {
         let info = reader.next_frame(&mut pixels).unwrap();
         assert_eq!((info.width, info.height), (2, 2));
         assert_eq!(&pixels[..info.buffer_size()], &[5,0,0,255, 6,0,0,255, 9,0,0,255, 10,0,0,255]);
+    }
+    #[test]
+    fn physical_crop_handles_negative_monitor_origin() {
+        let rgba: Vec<u8> = (0..16).flat_map(|v| [v, 0, 0, 255]).collect();
+        let frame = DesktopFrame { left: -4, top: -4, width: 4, height: 4, rgba };
+        assert_eq!(frame.crop_physical_png(-3, -3, 2, 2).unwrap(),
+            frame.crop_png(CaptureRegion { x: 1, y: 1, width: 2, height: 2 }).unwrap());
+        assert!(frame.crop_physical_png(-5, -3, 2, 2).is_err());
+        assert!(frame.crop_physical_png(i64::MAX, -3, 2, 2).is_err());
     }
 }

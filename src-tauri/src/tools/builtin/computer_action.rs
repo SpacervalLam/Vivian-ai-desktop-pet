@@ -19,11 +19,11 @@ fn legacy_tool(action:&str) -> Option<Box<dyn Tool>> {
 impl Tool for ComputerActionTool {
     fn name(&self)->&str { "computer_action" }
     fn description(&self)->&str {
-        "Perform one desktop action (click, key, type, move, drag, scroll), then observe the screen by default. Coordinates are physical virtual-desktop pixels, including negative monitor origins. Input success does not prove the goal was achieved. Read observation before choosing the next action; an observation failure must not cause automatic replay."
+        "Perform one desktop action (click, key, type, move, drag, scroll), then observe the screen by default. Optionally focus the observation on a physical-pixel region and a specific visual question. Coordinates are physical virtual-desktop pixels, including negative monitor origins. Input success does not prove the goal was achieved. Read observation before choosing the next action; an observation failure must not cause automatic replay."
     }
     fn description_in(&self,lang:&str)->&str {
         match lang {
-            "zh"=>"执行一次桌面操作（click/key/type/move/drag/scroll），默认随后截屏识别。坐标使用虚拟桌面物理像素，副屏可为负数。操作成功不等于目标完成；根据观察结果决定下一步，观察失败时不能自动重复操作。",
+            "zh"=>"执行一次桌面操作（click/key/type/move/drag/scroll），默认随后截屏识别；可指定观察区域与具体问题。坐标使用虚拟桌面物理像素，副屏可为负数。操作成功不等于目标完成；根据观察结果决定下一步，观察失败时不能自动重复操作。",
             _=>self.description(),
         }
     }
@@ -35,11 +35,30 @@ impl Tool for ComputerActionTool {
             "button":{"type":"string","enum":["left","right","double"]},
             "keys":{"type":"string"},"text":{"type":"string","maxLength":4000},
             "steps":{"type":"integer","minimum":-30,"maximum":30,"description":"Vertical wheel notches; positive scrolls down"},
-            "observe_after":{"type":"boolean","default":true}
+            "observe_after":{"type":"boolean","default":true},
+            "observe_region":{"type":"object","description":"Optional post-action crop in physical virtual-desktop coordinates.","properties":{"x":{"type":"integer"},"y":{"type":"integer"},"width":{"type":"integer","minimum":2},"height":{"type":"integer","minimum":2}},"required":["x","y","width","height"],"additionalProperties":false},
+            "observe_question":{"type":"string","minLength":1,"maxLength":500,"description":"Specific visual result to check after the action."}
         },"required":["action"]})
     }
     async fn validate_input(&self,input:&Value,ctx:&ToolUseContext)->ValidationResult {
         if input.get("observe_after").is_some_and(|v|!v.is_boolean()) {return ValidationResult::failure("observe_after must be a boolean",2);}
+        let mut inspection=serde_json::Map::new();
+        if let Some(region)=input.get("observe_region") {inspection.insert("region".into(),region.clone());}
+        if let Some(question)=input.get("observe_question") {inspection.insert("question".into(),question.clone());}
+        let inspection=Value::Object(inspection);
+        let inspection_valid=ScreenshotAnalyzeTool::new().validate_input(&inspection,ctx).await;
+        if !inspection_valid.result {return inspection_valid;}
+        if let Some(region)=input.get("observe_region") {
+            let x=region["x"].as_i64().unwrap();
+            let y=region["y"].as_i64().unwrap();
+            let width=region["width"].as_u64().unwrap() as i64;
+            let height=region["height"].as_u64().unwrap() as i64;
+            let Some(right)=x.checked_add(width-1) else {return ValidationResult::failure("Observation region is outside the desktop",2);};
+            let Some(bottom)=y.checked_add(height-1) else {return ValidationResult::failure("Observation region is outside the desktop",2);};
+            if desktop_runtime::validate_point(x,y).is_err() || desktop_runtime::validate_point(right,bottom).is_err() {
+                return ValidationResult::failure("Observation region is outside the desktop",2);
+            }
+        }
         let action=input["action"].as_str().unwrap_or("");
         if let Some(tool)=legacy_tool(action) { return tool.validate_input(input,ctx).await; }
         if !matches!(action,"move"|"drag"|"scroll") {return ValidationResult::failure("Unknown desktop action",2);}
@@ -83,7 +102,10 @@ impl Tool for ComputerActionTool {
         Ok(result.data)
         };
         let observe=async {
-            let result=ScreenshotAnalyzeTool::new().call(json!({}),ctx).await;
+            let mut inspection=serde_json::Map::new();
+            if let Some(region)=args.get("observe_region") {inspection.insert("region".into(),region.clone());}
+            if let Some(question)=args.get("observe_question") {inspection.insert("question".into(),question.clone());}
+            let result=ScreenshotAnalyzeTool::new().call(Value::Object(inspection),ctx).await;
             if result.success {Ok(result.data)} else {Err(result.error.unwrap_or_else(||"Observation failed".into()))}
         };
         match crate::desktop_contract::run_observed_operation(perform,observe,args["observe_after"].as_bool().unwrap_or(true)).await {

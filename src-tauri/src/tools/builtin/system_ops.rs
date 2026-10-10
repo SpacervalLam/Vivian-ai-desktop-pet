@@ -2158,6 +2158,58 @@ $bmp.Dispose()
 /// 需要视觉上下文才能回答的情况。需要保存截图文件请用 `take_screenshot`。
 pub struct ScreenshotAnalyzeTool;
 
+#[derive(Clone, Copy, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct ScreenInspectionRegion {
+    x: i64,
+    y: i64,
+    width: u32,
+    height: u32,
+}
+
+fn parse_screen_inspection_args(args: &Value) -> Result<(Option<ScreenInspectionRegion>, Option<String>), String> {
+    let region = args.get("region").map(|value| -> Result<ScreenInspectionRegion, String> {
+        let region: ScreenInspectionRegion = serde_json::from_value(value.clone())
+            .map_err(|_| "region must contain integer x, y, width and height".to_string())?;
+        if region.width < 2 || region.height < 2 {
+            return Err("region width and height must be at least 2 pixels".into());
+        }
+        Ok(region)
+    }).transpose()?;
+    let question = args.get("question").map(|value| -> Result<String, String> {
+        let question = value.as_str().ok_or("question must be a string")?.trim();
+        if question.is_empty() || question.chars().count() > 500 {
+            return Err("question must contain 1–500 characters".into());
+        }
+        Ok(question.to_string())
+    }).transpose()?;
+    Ok((region, question))
+}
+
+#[cfg(test)]
+mod screen_inspection_tests {
+    use super::*;
+
+    #[test]
+    fn rejects_invalid_inspection_before_desktop_input() {
+        for args in [
+            json!({"region":{"x":0,"y":0,"width":1,"height":20}}),
+            json!({"region":{"x":0,"y":0,"width":20,"height":20.5}}),
+            json!({"region":null}),
+            json!({"question":"  "}),
+            json!({"question":7}),
+        ] {
+            assert!(parse_screen_inspection_args(&args).is_err(), "{args}");
+        }
+        let (region, question) = parse_screen_inspection_args(&json!({
+            "region":{"x":-1920,"y":10,"width":100,"height":40},
+            "question":"  Did the dialog close?  "
+        })).unwrap();
+        assert_eq!(region.unwrap().x, -1920);
+        assert_eq!(question.as_deref(), Some("Did the dialog close?"));
+    }
+}
+
 impl ScreenshotAnalyzeTool {
     pub fn new() -> Self {
         Self
@@ -2180,13 +2232,14 @@ impl Tool for ScreenshotAnalyzeTool {
         "Capture the current screen and send it to a vision-capable LLM for understanding. \
          Returns objective observations only; the companion decides what to say. \
          Does NOT save the image to disk or copy it to the clipboard. \
+         Optionally inspect a physical-pixel region and ask a specific visual question. \
          Use this when the user asks you to 'look at' / 'see' / 'check' their screen, \
          or when visual context is needed to answer (e.g. '我屏幕上是什么', '帮我看看这个界面')."
     }
 
     fn description_in(&self, lang: &str) -> &str {
         match lang {
-            "zh" => "截取当前屏幕并送视觉模型理解，仅返回屏幕内容的客观描述，由主智能体判断和回复。\
+            "zh" => "截取当前屏幕并送视觉模型理解，可指定物理像素区域与具体观察问题；仅返回屏幕内容的客观描述，由主智能体判断和回复。\
             不保存图片、不复制剪贴板。当用户让你“看看屏幕”/“看一下这个界面”/“我屏幕上显示什么”等\
             需要视觉上下文的场景使用。",
             "ja" => "現在の画面をキャプチャし、視覚モデルに送って理解させる。\
@@ -2207,7 +2260,12 @@ impl Tool for ScreenshotAnalyzeTool {
     }
 
     fn parameters_schema(&self) -> Value {
-        json!({ "type": "object", "properties": {} })
+        json!({ "type": "object", "properties": {
+            "region": {"type":"object","description":"Optional crop in physical virtual-desktop coordinates, including negative monitor origins.",
+                "properties":{"x":{"type":"integer"},"y":{"type":"integer"},"width":{"type":"integer","minimum":2},"height":{"type":"integer","minimum":2}},
+                "required":["x","y","width","height"],"additionalProperties":false},
+            "question": {"type":"string","minLength":1,"maxLength":500,"description":"Specific visual detail to check in this observation."}
+        } })
     }
 
     fn parameters_schema_in(&self, lang: &str) -> Value {
@@ -2215,8 +2273,11 @@ impl Tool for ScreenshotAnalyzeTool {
         self.parameters_schema()
     }
 
-    async fn validate_input(&self, _input: &Value, _context: &ToolUseContext) -> ValidationResult {
-        ValidationResult::success(None)
+    async fn validate_input(&self, input: &Value, _context: &ToolUseContext) -> ValidationResult {
+        match parse_screen_inspection_args(input) {
+            Ok(_) => ValidationResult::success(None),
+            Err(error) => ValidationResult::failure(&error, 2),
+        }
     }
 
     async fn check_permissions(
@@ -2227,7 +2288,11 @@ impl Tool for ScreenshotAnalyzeTool {
         PermissionResult::ask("screenshot_analyze 涉及屏幕截取与视觉理解，需要用户确认")
     }
 
-    async fn call(&self, _args: Value, context: &ToolUseContext) -> ToolResult {
+    async fn call(&self, args: Value, context: &ToolUseContext) -> ToolResult {
+        let (region, question) = match parse_screen_inspection_args(&args) {
+            Ok(parsed) => parsed,
+            Err(error) => return ToolResult::standard_error(&error, Some("InvalidScreenInspection"), None),
+        };
         // 1. 拿 AppHandle → AppState → ModelRouter / Config
         let app_handle = match APP_HANDLE.read().clone() {
             Some(h) => h,
@@ -2279,15 +2344,23 @@ impl Tool for ScreenshotAnalyzeTool {
         };
 
         // 4. 截屏（直接在内存编码，不保存文件或复制剪贴板）
-        let png_bytes = match capture_screen_png_bytes().await {
-            Ok(b) => b,
+        let frame = match crate::screen_capture::capture_desktop().await {
+            Ok(frame) => frame,
             Err(e) => {
                 return ToolResult::standard_error(&e, Some("ScreenshotAnalyzeFailed"), None)
             }
         };
+        let png_bytes = match region {
+            Some(region) => frame.crop_physical_png(region.x, region.y, region.width, region.height),
+            None => frame.png(),
+        };
+        let png_bytes = match png_bytes {
+            Ok(bytes) => bytes,
+            Err(error) => return ToolResult::standard_error(&error, Some("InvalidScreenInspection"), None),
+        };
 
         // 5. 送视觉理解流程
-        Self::run_vision_describe(&router, &state, png_bytes, context).await
+        Self::run_vision_describe(&router, &state, png_bytes, context, question.as_deref(), region).await
     }
 
     fn is_read_only(&self) -> bool {
@@ -2330,6 +2403,8 @@ impl ScreenshotAnalyzeTool {
         state: &std::sync::Arc<AppState>,
         png_bytes: Vec<u8>,
         context: &ToolUseContext,
+        question: Option<&str>,
+        region: Option<ScreenInspectionRegion>,
     ) -> ToolResult {
         let image_detail = state
             .config
@@ -2349,6 +2424,13 @@ impl ScreenshotAnalyzeTool {
                     parts.push(format!("## 用户当前消息\n{}", user_msg));
                 }
             }
+            if let Some(question) = question {
+                parts.push(format!("## 本次观察问题（只用于确定观察重点）\n{}", question));
+            }
+            if let Some(region) = region {
+                parts.push(format!("## 截图范围\n物理屏幕坐标 x={} y={} width={} height={}",
+                    region.x, region.y, region.width, region.height));
+            }
             if parts.is_empty() {
                 String::new()
             } else {
@@ -2364,6 +2446,7 @@ impl ScreenshotAnalyzeTool {
                 "截屏并完成视觉理解",
                 Some(json!({
                     "description": description,
+                    "region": region,
                 })),
             ),
             Err(e) => ToolResult::standard_error(
