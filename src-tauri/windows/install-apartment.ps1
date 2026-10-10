@@ -6,8 +6,14 @@ param(
 $ErrorActionPreference = 'Stop'
 $stagePath = $null
 $backupPath = $null
+function Get-ApartmentHash([string]$Path) {
+  $stream = [IO.File]::OpenRead($Path)
+  $algorithm = [Security.Cryptography.SHA256]::Create()
+  try { return [BitConverter]::ToString($algorithm.ComputeHash($stream)).Replace('-', '') }
+  finally { $stream.Dispose(); $algorithm.Dispose() }
+}
 try {
-  if ((Get-FileHash -LiteralPath $Package -Algorithm SHA256).Hash -ne $ExpectedHash) {
+  if ((Get-ApartmentHash $Package) -ne $ExpectedHash) {
     throw 'Apartment package checksum mismatch'
   }
   Add-Type -AssemblyName System.IO.Compression.FileSystem

@@ -21,7 +21,7 @@ import type { ProactiveMessage, ProactiveTickContext, TtsConfig } from './types'
 import { ModelCanvas, type ModelRendererHandle } from './components/ModelCanvas';
 import type { ChibiInteraction, PetInteractionMetrics } from './components/ChibiPetCanvas';
 import VideoAnimationLayer from './components/VideoAnimationLayer';
-import SystemTray, { syncTrayMenuCheck } from './components/SystemTray';
+import SystemTray from './components/SystemTray';
 import type { ToastType, ToastAction } from './components/Toast';
 import { findProviderPresetByEndpoint } from './components/settings/providerPresets';
 import { ChatController } from './controllers/ChatController';
@@ -761,6 +761,7 @@ export default function App() {
   // hideForOffline / restoreFromOffline（Offline 时真正 hide_window，从托盘/快捷键唤回）
   // 智能避让：检测纯色区域，移动桌宠避免遮挡内容 + 全屏应用时退到角落（受 window.smart_positioning_enabled 控制）
   const [smartPositioningEnabled, setSmartPositioningEnabled] = useState(true);
+  const [desktopPhysicsEnabled, setDesktopPhysicsEnabled] = useState(false);
   // 心情注意力联动总开关（pet_render.always_follow_mouse）
   const [alwaysFollowMouse, setAlwaysFollowMouse] = useState(true);
   // 心情驱动的注视激活态：精力与专注力同时高于阈值时激活（实时看鼠标），回落则关闭
@@ -785,7 +786,7 @@ export default function App() {
     hideForOffline,
     restoreFromOffline,
   } = useHiding(petRef, modelReady, smartPositioningEnabled, petHideHookRef, quietModeRef);
-  useSmartPositioning(petRef, modelReady, smartPositioningEnabled);
+  useSmartPositioning(petRef, modelReady, smartPositioningEnabled && !desktopPhysicsEnabled);
 
   useEffect(() => {
     let disposed = false;
@@ -1566,6 +1567,7 @@ export default function App() {
           .get<boolean>('window.smart_positioning_enabled')
           .catch(() => true);
         setSmartPositioningEnabled(enabled);
+        setDesktopPhysicsEnabled(await configApi.get<boolean>('window.desktop_physics_enabled').catch(() => false));
       } catch {
         /* ignore */
       }
@@ -1576,6 +1578,7 @@ export default function App() {
               .get<boolean>('window.smart_positioning_enabled')
               .catch(() => true);
             setSmartPositioningEnabled(enabled);
+            setDesktopPhysicsEnabled(await configApi.get<boolean>('window.desktop_physics_enabled').catch(() => false));
           } catch {
             /* ignore */
           }
@@ -4027,23 +4030,8 @@ export default function App() {
         onOpenSettings={openConfig}
         onOpenChat={openChat}
         onOpenDesktop={() => void ensureWechatWindow({ assistant: {} })}
-        onToggleSmartPositioning={() => {
-          const next = !smartPositioningEnabled;
-          setSmartPositioningEnabled(next);
-          void configApi
-            .set('window.smart_positioning_enabled', next)
-            .then(() => configApi.save())
-            .then(() => emit('config:saved', {}))
-            .catch(() => {
-              /* ignore */
-            });
-        }}
         onQuit={() => void handleQuit()}
       />
-
-      {/* 托盘菜单勾选状态同步：smartPositioningEnabled 变化时通知后端更新原生
-          CheckMenuItem 的勾选标记。多角色窗口都会同步，最后一次写入覆盖前面，无害。 */}
-      <TrayCheckSync smartPositioningChecked={smartPositioningEnabled} />
 
       {/* Q 版桌宠主内容（透明窗口；智能避让与窗口定位仍沿用原后端） */}
       <div
@@ -4060,6 +4048,7 @@ export default function App() {
           mouseFollowMode={mouseFollowMode}
           onScaleChange={handleScaleChange}
           ambientMotionEnabled={presenceState === 'online'}
+          desktopPhysicsEnabled={desktopPhysicsEnabled}
           onInteraction={handleChibiInteraction}
           onOpenQuickChat={() => {
             lastActivityRef.current = Date.now();
@@ -4142,14 +4131,6 @@ export default function App() {
 }
 
 /* ============ 托盘菜单勾选状态同步组件 ============ */
-
-/** 把前端的 smart_positioning 勾选状态同步到后端原生 CheckMenuItem */
-function TrayCheckSync({ smartPositioningChecked }: { smartPositioningChecked: boolean }) {
-  useEffect(() => {
-    void syncTrayMenuCheck('smart_positioning', smartPositioningChecked);
-  }, [smartPositioningChecked]);
-  return null;
-}
 
 /* ============ 角落感知按钮（全屏隐藏时显示，悬停可见，点击召回）============ */
 

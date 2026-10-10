@@ -4712,6 +4712,7 @@ fn write_project_memory(working_directory: &str, body: &str) -> Result<(), Strin
     update_project_memory(working_directory, body, false, None)
 }
 
+#[cfg(test)]
 fn write_project_memory_checked(wd: &str, body: &str, expected: Option<&str>) -> Result<(), String> {
     update_project_memory(wd, body, false, Some(expected))
 }
@@ -4722,6 +4723,7 @@ fn append_project_memory(working_directory: &str, body: &str) -> Result<(), Stri
     update_project_memory(working_directory, &format!("## 常驻约定\n{body}"), true, None)
 }
 
+#[cfg(test)]
 fn append_project_memory_checked(wd: &str, body: &str, expected: Option<&str>) -> Result<(), String> {
     update_project_memory(wd, body, true, Some(expected))
 }

@@ -37,12 +37,41 @@ impl QuietTransitions {
 pub fn dismiss_on_outside_click(origin: &str) -> bool { origin == "menu_tool" }
 
 pub fn menu_panel(action: &str) -> Option<&str> {
-    match action { "notes" | "games" | "shortcuts" => Some(action), _ => None }
+    match action { "notes" | "shortcuts" => Some(action), _ => None }
+}
+
+/// The last enabled movement mode wins; disabling one never enables the other.
+pub fn enforce_movement_exclusion(smart: &mut bool, gravity: &mut bool, changed_key: &str) {
+    if *smart && *gravity {
+        if changed_key == "window.smart_positioning_enabled" { *gravity = false; }
+        else { *smart = false; }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn movement_switches_are_exclusive_and_can_both_be_off() {
+        for initial in [(false, false), (true, false), (false, true)] {
+            for (key, enabled) in [("window.smart_positioning_enabled", true), ("window.smart_positioning_enabled", false),
+                ("window.desktop_physics_enabled", true), ("window.desktop_physics_enabled", false)] {
+                let (mut smart, mut gravity) = initial;
+                if key == "window.smart_positioning_enabled" { smart = enabled; } else { gravity = enabled; }
+                enforce_movement_exclusion(&mut smart, &mut gravity, key);
+                assert!(!(smart && gravity));
+                if key == "window.smart_positioning_enabled" { assert_eq!(smart, enabled); }
+                else { assert_eq!(gravity, enabled); }
+                if !enabled {
+                    if key == "window.smart_positioning_enabled" { assert_eq!(gravity, initial.1); }
+                    else { assert_eq!(smart, initial.0); }
+                }
+            }
+        }
+        let (mut smart, mut gravity) = (true, true);
+        enforce_movement_exclusion(&mut smart, &mut gravity, "window");
+        assert_eq!((smart, gravity), (false, true), "legacy conflicts keep gravity");
+    }
     #[test]
     fn menu_slides_from_outside_the_right_edge_without_overshooting() {
         for (from, to) in [(1920, 1860), (2560, 2500), (0, -60), (-1920, -1980)] {
@@ -94,7 +123,7 @@ mod tests {
         for origin in ["chat", "header", "shortcut", "tray", "", "menu"] {
             assert!(!dismiss_on_outside_click(origin));
         }
-        for action in ["notes", "games", "shortcuts"] { assert_eq!(menu_panel(action), Some(action)); }
+        for action in ["notes", "shortcuts"] { assert_eq!(menu_panel(action), Some(action)); }
         assert_eq!(menu_panel("clipboard"), None);
         for action in ["chat", "office", "dnd", "dialogue", "screen"] { assert_eq!(menu_panel(action), None); }
     }

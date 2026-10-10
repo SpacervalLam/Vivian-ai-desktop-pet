@@ -5,6 +5,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import { invoke } from '@tauri-apps/api/core';
 import { setCharacterId } from './characterContext';
 import { mountApartment } from './utils/apartmentLoader';
+import { initializeOptionalResources } from './utils/optionalResources';
 
 
 const root = document.getElementById('root');
@@ -59,6 +60,7 @@ if (!isTauri && initialParams.get('view') === 'rig_preview') {
   // 各窗口按需动态加载，主桌宠使用轻量 Q 版图集，不再预载 Cubism SDK。
   void (async () => {
     try {
+      await initializeOptionalResources();
       if (view === 'room') {
         await mountApartment(container);
         return;

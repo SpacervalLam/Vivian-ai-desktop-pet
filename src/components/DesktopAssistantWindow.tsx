@@ -3,9 +3,8 @@ import { invoke } from '@tauri-apps/api/core';
 import { emit, listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useTranslation } from 'react-i18next';
-import { ArrowUpRight, ChevronRight, Dice5, Settings, Mic, Monitor, NotebookPen, Plus, Rocket, Trash2 } from 'lucide-react';
+import { ArrowUpRight, ChevronRight, Settings, Mic, Monitor, NotebookPen, Plus, Rocket, Trash2 } from 'lucide-react';
 import { getCharacterId } from '../characterContext';
-import { playRps, rollDice, type Hand } from '../utils/companionGames';
 import { isAssistantOverview, isAssistantPanel, assistantPanelTitle } from './assistantPanels';
 import './DesktopAssistantWindow.css';
 
@@ -44,7 +43,6 @@ export default function DesktopAssistantWindow({ embedded = false, initialCharac
   const [shortcutName, setShortcutName] = useState('');
   const [shortcutTarget, setShortcutTarget] = useState('');
   const [shortcutKind, setShortcutKind] = useState<Shortcut['kind']>('website');
-  const [roll, setRoll] = useState<{ player: number; companion: number; outcome: string } | null>(null);
   const [shortcutFormOpen, setShortcutFormOpen] = useState(false);
   const shortcutDialog = useRef<HTMLDialogElement>(null);
   useEffect(() => {
@@ -115,12 +113,6 @@ export default function DesktopAssistantWindow({ embedded = false, initialCharac
     if (result.copied) setMessage(label('已复制到剪贴板', 'クリップボードにコピーしました', 'Copied to clipboard'));
     if (result.saved_path) await feedback(saved, 'happy');
   };
-  const gameResult = async (game: ReturnType<typeof rollDice> | ReturnType<typeof playRps>) => {
-    const outcome = game.outcome === 'draw' ? label('平局', '引き分け', 'Draw') : game.outcome === 'win' ? label('你赢了', 'あなたの勝ち', 'You win') : label('角色赢了', 'キャラの勝ち', 'Companion wins');
-    const handLabel = (value: number | string) => typeof value === 'number' ? value : ({ rock: '✊', paper: '✋', scissors: '✌️' })[value as Hand];
-    const motion = typeof game.companion === 'string' ? `rps-${game.companion}` : game.outcome === 'draw' ? 'think' : 'happy';
-    await feedback(`${handLabel(game.player)} vs ${handLabel(game.companion)} · ${outcome}`, motion);
-  };
   useEffect(() => {
     if (!embedded) return;
     // Keep the full chat window interactive across page transitions and StrictMode.
@@ -129,11 +121,6 @@ export default function DesktopAssistantWindow({ embedded = false, initialCharac
       void invoke('ensure_chat_interactive').catch(() => {});
     };
   }, [embedded]);
-  const hands = (['rock', 'scissors', 'paper'] as const).map(hand => ({
-    hand,
-    glyph: ({ rock: '✊', paper: '✋', scissors: '✌️' })[hand],
-    name: label(({ rock: '石头', scissors: '剪刀', paper: '布' })[hand], hand, hand),
-  }));
   const overview = isAssistantOverview(tab);
   // 分区名走共享目录：chat 头部的标题用的是同一份，两处各写一遍必然漂移。
   const panelName = (id: string) => assistantPanelTitle(id, i18n.language) ?? id;
@@ -143,7 +130,6 @@ export default function DesktopAssistantWindow({ embedded = false, initialCharac
     setNote(''); setMessage(label('已保存。', '保存しました。', 'Saved.'));
   };
   const shortcutCount = context?.shortcuts.length ?? 0;
-  const rollOutcome = roll ? (roll.outcome === 'draw' ? label('平局', '引き分け', 'Draw') : roll.outcome === 'win' ? label('你赢了', 'あなたの勝ち', 'You win') : label('角色赢了', 'キャラの勝ち', 'Companion wins')) : '';
   // 提示条放在页面内部，不是滚动容器顶部：放外面会把 sticky 页头连同返回键一起推下去，
   // 一条转瞬即逝的"处理中"不该挪动整个页面骨架。
   const notices = <>
@@ -161,7 +147,6 @@ export default function DesktopAssistantWindow({ embedded = false, initialCharac
           <button className="assistant-tile" data-action="notes" disabled={busy} onClick={() => navigate('notes')}><NotebookPen size={20} className="assistant-icon assistant-hue-amber" /><span className="assistant-tile-label">{panelName('notes')}</span><ChevronRight size={15} className="assistant-chevron" /></button>
           <button className="assistant-tile" data-action="screen" title={label('框选屏幕区域并分析', 'スクリーンショットを視覚モデルへ送信', 'Send a screenshot to your vision model')} disabled={busy} onClick={() => void run(look)}><Monitor size={20} className="assistant-icon assistant-hue-cyan" /><span className="assistant-tile-label">{label('截图分析', '画面分析', 'Analyze screen')}</span></button>
           <button className="assistant-tile" disabled={busy} onClick={() => navigate('shortcuts')}><Rocket size={20} className="assistant-icon assistant-hue-mint" /><span className="assistant-tile-label">{panelName('shortcuts')}</span><ChevronRight size={15} className="assistant-chevron" /></button>
-          <button className="assistant-tile" disabled={busy} onClick={() => navigate('games')}><Dice5 size={20} className="assistant-icon assistant-hue-rose" /><span className="assistant-tile-label">{panelName('games')}</span><ChevronRight size={15} className="assistant-chevron" /></button>
         </div>
         <div className="assistant-stack">
           <button className="assistant-row" disabled={busy} onClick={() => void run(() => emit('tray:menu_action', { action: 'settings', character_id: character }))}><Settings size={20} className="assistant-icon assistant-hue-cyan" /><span className="assistant-row-label">{label('设置', '設定', 'Settings')}</span><ChevronRight size={16} className="assistant-chevron" /></button>
@@ -173,26 +158,6 @@ export default function DesktopAssistantWindow({ embedded = false, initialCharac
             <div className="assistant-intro"><NotebookPen size={19} /><div><h2>{label('留住此刻的想法', '今のひらめきを残そう', 'A little space for your thoughts')}</h2><p>{label('灵感、琐事，或一句想记住的话。', 'ひらめきも、日々の小さなことも。', 'Ideas, little things, and words to keep.')}</p></div></div>
             <section className="assistant-card assistant-editor"><textarea aria-label="Note" placeholder={label('想到什么就写下来，不用整理。', '思いついたことをそのまま書いて。', 'Write it down as it comes.')} value={note} maxLength={10_000} onChange={e => setNote(e.target.value)} /><div className="assistant-editor-footer"><span className="assistant-count">{[...note].length}<b> / 10,000</b></span><button className="assistant-primary" disabled={busy || !note.trim()} onClick={() => void run(saveNote)}>{label('保存', '保存', 'Save')}</button></div></section>
             <section className="assistant-card assistant-notes-archive"><p className="assistant-card-title">{label('已记录', '保存したメモ', 'Saved notes')}</p><UserQuickNotes /></section>
-          </>}
-          {tab === 'games' && <>
-            <div className="assistant-game-intro">
-              <div><span className="assistant-game-tag">PLAY TIME</span><h2>{label('一起玩一会儿', 'ちょっと遊ぼう', 'Let’s take a play break')}</h2><p>{label('把快乐，贴进今天的手账。', '今日のノートに、小さな楽しさを。', 'A little happiness for today’s journal.')}</p></div>
-              <img className="assistant-game-sticker" src={`/stickers/${character === 'nana' ? 'nana' : 'vivian'}_cheer_01-v2.webp`} alt="" aria-hidden="true" />
-            </div>
-            <p className="assistant-label">{label('猜拳', 'じゃんけん', 'Rock, paper, scissors')}</p>
-            <div className="assistant-hands">{hands.map(({ hand, glyph, name }) => <div className="assistant-rps-cell" key={hand}>
-              <button className="assistant-rps" disabled={busy} aria-label={name} onClick={() => void run(() => gameResult(playRps(hand)))}><span className="assistant-rps-glyph">{glyph}</span></button>
-              <span className="assistant-rps-caption">{name}</span>
-            </div>)}</div>
-            <p className="assistant-label">{label('掷骰子', 'サイコロ', 'Roll dice')} · 1–100</p>
-            <section className="assistant-card assistant-dice">
-              <div className="assistant-dice-read">
-                <p className={'assistant-dice-value' + (roll ? '' : ' assistant-dice-value-empty')}>{roll ? roll.player : '—'}</p>
-                <p className="assistant-dice-caption">{roll ? label(`你 ${roll.player} · 我 ${roll.companion} · ${rollOutcome}`, `あなた ${roll.player} · 私 ${roll.companion} · ${rollOutcome}`, `You ${roll.player} · me ${roll.companion} · ${rollOutcome}`) : label('还没掷过骰子', 'まだ振っていない', 'Not rolled yet')}</p>
-              </div>
-              <button disabled={busy} aria-label={label('掷骰子', 'サイコロを振る', 'Roll dice')} onClick={() => void run(async () => { const next = rollDice(); setRoll(next); await gameResult(next); })}>🎲</button>
-            </section>
-            <p className="assistant-footnote">{label('再来一局？今天的好运还在继续。', 'もう一回？今日の幸運はまだ続くよ。', 'One more round? There’s more luck to come.')}</p>
           </>}
           {tab === 'preferences' && <section className="assistant-card assistant-editor"><textarea aria-label="Preference" placeholder={label('她应该记住的事，写在这里。', '覚えてほしいことをここに。', 'What she should remember.')} maxLength={1000} value={preference} onChange={e => setPreference(e.target.value)} /><div className="assistant-editor-footer"><span className="assistant-count">{[...preference].length}<b> / 1,000</b></span><button className="assistant-primary" disabled={busy || !preference.trim()} onClick={() => void run(async () => { await invoke('companion_remember_preference', { characterId: character, content: preference }); setPreference(''); await feedback(label('已记住。', '覚えました。', 'Remembered.')); })}>{label('记住', '保存', 'Remember')}</button></div></section>}
           {tab === 'shortcuts' && <>

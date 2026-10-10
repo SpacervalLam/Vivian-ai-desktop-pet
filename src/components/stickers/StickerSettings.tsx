@@ -5,9 +5,11 @@ import {useTranslation} from 'react-i18next';
 import StickerImage from './StickerImage';
 import {stickerLabel} from './stickers';
 import type {StickerRef} from '../../types';
+import {resourcePackInstalled} from '../../utils/optionalResources';
 export default function StickerSettings(){
  const {i18n}=useTranslation();const zh=i18n.language.startsWith('zh');
  return <>
+  {!resourcePackInstalled('stickers') && <p role="status">{zh?'内置贴纸资源包未安装，可通过安装程序添加。仍可导入和使用自定义贴纸。':'Built-in stickers are not installed. Add the sticker pack in Setup; custom stickers remain available.'}</p>}
   <p style={{fontSize:12,color:'var(--panel-text-secondary)',lineHeight:1.6,margin:'0 0 16px'}}>{zh?'角色自主选择表情包，用于聊天窗口和桌面气泡。设置即时生效。偶尔：间隔五轮；正常：间隔三轮。明确要求发送时可跳过冷却，关闭时始终不发。':'Characters choose stickers for chat windows and desktop bubbles. Changes apply immediately. Occasional: five replies apart; normal: three. Explicit requests bypass cooldown; Off always disables stickers.'}</p>
   <CharacterStickerSettings character="vivian" />
   <CharacterStickerSettings character="nana" />

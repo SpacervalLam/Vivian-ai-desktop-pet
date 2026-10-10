@@ -2,7 +2,7 @@
  * 窗口滑动的时间轴：把「起点 → 终点 + 总时长」拆成一串等时采样点。
  *
  * 采样密度只决定滑动看起来连不连续，不参与走动节奏的推导（那是 walkPlan 的事）：
- * 采样间隔固定、步数随时长增长，于是最短的挪动也至少有 MIN_POSITION_STEPS 次定位，
+ * 计划采样间隔由总时长和步数推导；忙时跳过错过的采样，不补发积压的位置请求。
  * 长距离靠更多采样点覆盖，而不是把单步拉粗。
  *
  * 智能避让与自主漫步共用这一条时间轴。
@@ -29,8 +29,8 @@ export interface SlideTrackOptions {
   toY: number;
   /** 权威时长（ms）：一般来自 walkPlan，走动与滑动据此收尾同时发生。 */
   durationMs: number;
-  /** 下发一个采样点（含终点）。IPC 失败由实现方自行处理。 */
-  apply: (x: number, y: number) => void;
+  /** 下发一个采样点（含终点）；等待 IPC 完成再继续，失败交给调用方处理。 */
+  apply: (x: number, y: number) => void | Promise<unknown>;
   /** 每一帧下发前问一次；返回 true 表示当帧中止。省略则永不主动中止。 */
   shouldAbort?: () => boolean;
 }
@@ -41,16 +41,29 @@ export interface SlideTrackOptions {
  */
 export async function runSlide(options: SlideTrackOptions): Promise<boolean> {
   const { fromX, fromY, toX, toY, durationMs, apply, shouldAbort } = options;
+  if (![fromX, fromY, toX, toY, durationMs].every(Number.isFinite) || durationMs < 0) {
+    throw new RangeError('Slide coordinates and duration must be finite; duration must be nonnegative');
+  }
   const steps = Math.max(MIN_POSITION_STEPS, Math.round(durationMs / MOVE_STEP_MS));
   const stepMs = durationMs / steps;
-  for (let i = 1; i <= steps; i += 1) {
+  const started = performance.now();
+  while (true) {
+    // Use elapsed time rather than accumulating timer delays. A busy WebView skips
+    // missed samples instead of moving after its walking animation has ended.
+    const elapsed = performance.now() - started;
+    if (elapsed < durationMs) {
+      const nextSampleAt = Math.min(durationMs, (Math.floor(elapsed / stepMs) + 1) * stepMs);
+      await wait(Math.max(1, nextSampleAt - elapsed));
+    }
     if (shouldAbort?.()) return false;
-    const eased = easeInOutCubic(i / steps);
-    apply(
+    const progress = durationMs === 0 ? 1 : Math.min(1, (performance.now() - started) / durationMs);
+    const eased = easeInOutCubic(progress);
+    await apply(
       Math.round(fromX + (toX - fromX) * eased),
       Math.round(fromY + (toY - fromY) * eased),
     );
-    if (i < steps) await wait(stepMs);
+    // Cancellation during the final IPC is still an interrupted movement.
+    if (shouldAbort?.()) return false;
+    if (progress >= 1) return true;
   }
-  return true;
 }

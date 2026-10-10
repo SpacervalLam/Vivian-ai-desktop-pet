@@ -9,7 +9,7 @@ export default function CompanionSettings({ language, get, set }: {
   const zh = language.startsWith('zh'), ja = language.startsWith('ja');
   const text = (cn: string, jp: string, en: string) => zh ? cn : ja ? jp : en;
   const toggles: Array<[string, boolean, string]> = [
-    ['clipboard_hint', false, text('剪贴板变化图标（不读取正文）', 'クリップボード更新アイコン', 'Clipboard change icon (no text read)')],
+    ['clipboard_hint', true, text('剪贴板投喂按钮（点击才读取并分享文本）', 'クリップボードを渡すボタン（クリック時のみテキストを共有）', 'Clipboard feed button (read and share text only on click)')],
     ['weather_feedback', false, text('天气变化提醒', '天気変化のお知らせ', 'Weather change feedback')],
     ['music_feedback', false, text('曲目变化陪伴', '曲の変化をお知らせ', 'Music change companionship')],
     ['focus_mode', false, text('专注模式', '集中モード', 'Focus mode')],

@@ -146,6 +146,7 @@ export function useSmartPositioning(
        */
       const shouldAbort = () =>
         cancelled ||
+        positioningCoordinator.physicsEnabled ||
         token !== moveTokenRef.current ||
         userInteractingRef.current ||
         focusedRef.current;
@@ -182,9 +183,7 @@ export function useSmartPositioning(
         toX: targetX,
         toY: targetY,
         durationMs: plan.durationMs,
-        apply: (x, y) => {
-          void invoke('set_window_position', { x, y });
-        },
+        apply: (x, y) => invoke('set_window_position', { x, y }),
         shouldAbort,
       });
       if (!completed) return abortToRest();
@@ -223,7 +222,7 @@ export function useSmartPositioning(
       if (userInteractingRef.current) return;
       // 逃离（戳烦了）与自主漫步都在用窗口：前者是用户戳出来的当场反应，谁都不许跟它抢。
       if (
-        positioningCoordinator.ambientMoveInFlight ||
+        positioningCoordinator.physicsEnabled || positioningCoordinator.ambientMoveInFlight ||
         positioningCoordinator.fleeInFlight ||
         (!force &&
           (positioningCoordinator.fullscreenInFlight ||
@@ -240,7 +239,7 @@ export function useSmartPositioning(
         const [pos, size] = await Promise.all([win.outerPosition(), win.outerSize()]);
         if (cancelled) return;
         // 截图/规划期间用户可能已经按下桌宠，重新确认再继续
-        if (userInteractingRef.current || focusedRef.current) return;
+        if (userInteractingRef.current || focusedRef.current || positioningCoordinator.physicsEnabled || token !== moveTokenRef.current) return;
 
         const result = await invoke<FindSafePositionResult>('find_safe_position', {
           petX: pos.x,
@@ -251,7 +250,7 @@ export function useSmartPositioning(
         });
         if (cancelled) return;
         // 同上：截图是异步的，落点判断前再确认一次交互状态
-        if (userInteractingRef.current || focusedRef.current) return;
+        if (userInteractingRef.current || focusedRef.current || positioningCoordinator.physicsEnabled || token !== moveTokenRef.current) return;
 
         if (result.unchanged) {
           currentIntervalRef.current = Math.min(

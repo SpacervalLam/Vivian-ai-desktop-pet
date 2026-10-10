@@ -164,6 +164,9 @@ pub fn emit_progress(current: usize, total: usize, stage: &str) {
     let clamped = current.max(LAST_PERCENT.load(Ordering::SeqCst)).min(ceiling);
     LAST_PERCENT.store(clamped, Ordering::SeqCst);
     let mut progress = LAST_PROGRESS.write();
+    if progress.as_ref().map(|p| p.stage.as_str()) != Some(stage) {
+        tracing::info!("[Startup] progress={}/{} stage={}", clamped, total, stage);
+    }
     *progress = Some(ProgressState {
         current: clamped,
         total,

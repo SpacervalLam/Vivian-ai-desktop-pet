@@ -39,17 +39,21 @@ assert.equal(manifest.animations.find(s => s.name === 'tired').loop, true);
 assert.equal(manifest.animations.find(s => s.name === 'umbrella').loop, true);
 assert.equal(manifest.animations.find(s => s.name === 'music').loop, true);
 assert.equal(manifest.animations.find(s => s.name === 'clipboard').loop, false);
-assert.deepEqual(manifest.animations.find(s => s.name === 'gift').characters, ['vivian']);
+assert.equal(manifest.animations.find(s => s.name === 'gift'), undefined);
 assert.equal(manifest.expression_aliases.sweat, 'dizzy');
 const bundle = await build({ entryPoints: ['src/chibi/motionRegistry.ts'], bundle: true, write: false, platform: 'node', format: 'esm' });
 const { resolveMotion } = await import(`data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString('base64')}`);
 assert.equal(resolveMotion('gift', 'nana').name, 'idle');
-assert.equal(resolveMotion('gift', 'vivian').name, 'gift');
+assert.equal(resolveMotion('gift', 'vivian').name, 'idle');
 assert.equal(resolveMotion('tend', 'vivian').name, 'idle');
 assert.equal(resolveMotion('happy', 'nana').name, 'idle');
 assert.equal(resolveMotion('happy', 'vivian').name, 'happy');
 for (const character of ['nana', 'vivian']) {
   for (const name of ['music', 'clipboard', 'umbrella', 'rps-rock', 'rps-scissors', 'rps-paper']) assert.equal(resolveMotion(name, character).name, name);
+  for (const [alias, name] of [['reach-out','rps-paper'],['伸手','rps-paper'],['cheer','rps-rock'],['加油打气','rps-rock'],['victory','rps-scissors'],['比耶','rps-scissors']]) {
+    assert.equal(resolveMotion(alias, character).name, name);
+    assert.equal(resolveMotion(alias, character).promptable, true);
+  }
 }
 const provenance = JSON.parse(await readFile('assets/chibi/rps/generation.json', 'utf8'));
 assert.equal(provenance.records.length, 6);

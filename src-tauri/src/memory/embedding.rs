@@ -394,6 +394,8 @@ impl OpenAIEmbedding {
         let body = self.build_body(inputs);
         let url = self.embeddings_url();
         for attempt in 1..=3 {
+            let started = std::time::Instant::now();
+            tracing::debug!("[MemoryEmbedding] 请求开始 model={} attempt={}", self.model, attempt);
             let response = self
                 .client
                 .post(&url)
@@ -404,13 +406,21 @@ impl OpenAIEmbedding {
             let resp = match response {
                 Ok(resp) => resp,
                 Err(error) if attempt < 3 && (error.is_connect() || error.is_timeout()) => {
+                    tracing::warn!("[MemoryEmbedding] 请求连接/超时失败 model={} attempt={} elapsed_ms={}，准备重试: {}",
+                        self.model, attempt, started.elapsed().as_millis(), error);
                     tokio::time::sleep(Duration::from_millis(250 * attempt as u64)).await;
                     continue;
                 }
-                Err(error) => return Err(error.into()),
+                Err(error) => {
+                    tracing::warn!("[MemoryEmbedding] 请求失败 model={} attempt={} elapsed_ms={}: {}",
+                        self.model, attempt, started.elapsed().as_millis(), error);
+                    return Err(error.into());
+                }
             };
             let status = resp.status();
             let response_body = resp.text().await?;
+            tracing::debug!("[MemoryEmbedding] 请求完成 model={} attempt={} status={} elapsed_ms={}",
+                self.model, attempt, status.as_u16(), started.elapsed().as_millis());
             if status.is_success() {
                 return serde_json::from_str(&response_body).map_err(Into::into);
             }

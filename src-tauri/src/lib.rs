@@ -12,6 +12,8 @@ pub mod config;
 pub mod companion_policy;
 pub mod companion_runtime;
 pub mod desktop_clipboard;
+pub mod drag_motion;
+pub mod desktop_terrain;
 pub mod media_focus;
 pub mod shortcut;
 pub mod screen_capture;
@@ -303,6 +305,7 @@ pub fn run() {
         .manage(Arc::new(app_state))
         .invoke_handler(tauri::generate_handler![
             commands::characters::list_characters,
+            desktop_terrain::get_desktop_terrain,
             commands::characters::set_character_online,
             commands::characters::set_character_offline,
             commands::characters::set_active_character,
@@ -499,6 +502,7 @@ pub fn run() {
             commands::tasks::cancel_agent_task,
             commands::plugins::list_plugins,
             commands::apartment::apartment_plugin_status,
+            commands::optional_resources::optional_resource_status,
             commands::plugins::plugin_paths,
             commands::plugins::plugin_diagnostics,
             commands::plugins::list_skills,

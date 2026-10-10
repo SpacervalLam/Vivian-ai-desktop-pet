@@ -233,7 +233,9 @@ pub fn hide_edge_menu(app: AppHandle) {
 #[tauri::command]
 pub fn edge_menu_status(app: AppHandle) -> Value {
     let state = app.state::<Arc<AppState>>();
+    let window = state.config.read().get_all().window;
     json!({"quiet":crate::companion_quiet::active(),
+        "smart_positioning":window.smart_positioning_enabled, "desktop_physics":window.desktop_physics_enabled,
         "character_id":state.active_character_id.read().clone()})
 }
 
@@ -413,6 +415,7 @@ fn edge_menu_action_task(app: AppHandle, action: String, enabled: Option<bool>)
         "chat" => open_chat(&app, "menu_chat", None, None).await?,
         "office" => { open_office(&app)?; hide_edge_menu(app.clone()); },
         "dnd" => return crate::companion_quiet::set_companion_quiet(app.clone(), app.state(), enabled.unwrap_or(!crate::companion_quiet::active())).await,
+        "smart_positioning" | "desktop_physics" => { crate::commands::system_tray::toggle_movement(&app, &action)?; },
         "screen" => {
             let state = app.state::<Arc<AppState>>();
             let character = state.active_character_id.read().clone();

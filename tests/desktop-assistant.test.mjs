@@ -18,7 +18,7 @@ const bundle=await build({entryPoints:['src/components/DesktopAssistantWindow.ts
   `export const useState=value=>[globalThis.__desktopStates.length?globalThis.__desktopStates.shift():value,value=>globalThis.__desktopUpdates.push(value)]; export const useRef=value=>({current:value}); export const useEffect=effect=>globalThis.__desktopEffects.push(effect); export const useCallback=fn=>fn;`
   :`export const jsx=(type,props)=>({type,props});export const jsxs=jsx;export const Fragment='fragment';`}));
  b.onResolve({filter:/^@tauri-apps\/api\//},a=>({path:a.path,namespace:'native'}));
- b.onLoad({filter:/.*/,namespace:'native'},()=>({contents:`export const invoke=(...args)=>globalThis.__desktopInvoke(...args);export const emit=async(...args)=>{globalThis.__desktopCalls.push({name:'emit',args});};export const listen=async()=>()=>{};export const getCurrentWindow=()=>({hide:async()=>{globalThis.__desktopCalls.push({name:'hide'});},show:async()=>{globalThis.__desktopCalls.push({name:'show'});}});`}));
+ b.onLoad({filter:/.*/,namespace:'native'},()=>({contents:`export const convertFileSrc=p=>p;export const invoke=(...args)=>globalThis.__desktopInvoke(...args);export const emit=async(...args)=>{globalThis.__desktopCalls.push({name:'emit',args});};export const listen=async()=>()=>{};export const getCurrentWindow=()=>({hide:async()=>{globalThis.__desktopCalls.push({name:'hide'});},show:async()=>{globalThis.__desktopCalls.push({name:'show'});}});`}));
  b.onResolve({filter:/^react-i18next$/},a=>({path:a.path,namespace:'i18n'}));
  b.onLoad({filter:/.*/,namespace:'i18n'},()=>({contents:`export const useTranslation=()=>({i18n:{language:'zh-CN'}});`}));
  b.onResolve({filter:/^lucide-react$/},a=>({path:a.path,namespace:'icons'}));
@@ -58,19 +58,6 @@ await new Promise(resolve=>setImmediate(resolve));
 assert.deepEqual(calls.find(c=>c.name==='user_quick_notes_delete').args,{id:'user-note'});
 assert.equal(calls.filter(c=>c.name==='list_notebooks'||c.name==='get_notebook_detail').length,0);
 notesCleanup();
-calls.length=0;
-page=render('games');
-await find(page,n=>n.type==='button'&&text(n)==='🎲').props.onClick();
-await new Promise(resolve=>setImmediate(resolve));
-assert.equal(calls.filter(c=>c.name.startsWith('companion_')).length,0,'games never invoke models');
-calls.length=0;
-page=render('games');
-await find(page,n=>n.type==='button'&&text(n)==='✊').props.onClick();
-await new Promise(resolve=>setImmediate(resolve));
-const rps = calls.find(c=>c.name==='emit' && c.args[0]==='companion:interaction').args[1];
-const companionHand = rps.content.split(' vs ')[1].split(' · ')[0];
-assert.equal(rps.motion, {'✊':'rps-rock','✋':'rps-paper','✌️':'rps-scissors'}[companionHand]);
-assert.equal(calls.filter(c=>c.name.startsWith('companion_')).length,0,'RPS never invokes models');
 calls.length=0;
 page=render('daily');
 assert.equal(calls.length,0,'rendering does not capture the screen');
@@ -128,8 +115,9 @@ page=render('tools');
 assert.equal(find(page,n=>n.type==='button'&&text(n)==='偏好'),null);
 assert.equal(find(page,n=>n.type==='button'&&text(n)==='语音诊断'),null);
 const grid=find(page,n=>n.props?.className==='assistant-grid');
-assert.deepEqual(grid.props.children.map(text),['随手记','截图分析','快捷启动','小游戏']);
-assert.equal(grid.props.children[3].props.className,'assistant-tile');
+assert.deepEqual(grid.props.children.map(text),['随手记','截图分析','快捷启动']);
+assert.equal(grid.props.children.length,3);
+assert.ok(grid.props.children.every(child=>child.props.className==='assistant-tile'));
 calls.length=0;
 await find(page,n=>n.type==='button'&&text(n)==='设置').props.onClick();
 await new Promise(resolve=>setImmediate(resolve));
@@ -137,4 +125,4 @@ assert.deepEqual(calls.find(c=>c.name==='emit').args,['tray:menu_action',{action
 
 globalThis.window=oldWindow;if(oldCrypto)Object.defineProperty(globalThis,'crypto',oldCrypto);else delete globalThis.crypto;
 delete globalThis.__desktopStates;delete globalThis.__desktopEffects;delete globalThis.__desktopUpdates;delete globalThis.__desktopCalls;delete globalThis.__desktopInvoke;
-console.log('Desktop actions: click-only screenshot, user-owned quick notes, character preferences, local games and failed vision window recovery passed');
+console.log('Desktop actions: click-only screenshot, user-owned quick notes, character preferences and failed vision window recovery passed');

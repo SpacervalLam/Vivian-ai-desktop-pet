@@ -139,6 +139,15 @@ pub fn build_catalog() -> Vec<SettingEntry> {
             default_value: serde_json::json!(false),
         },
         SettingEntry {
+            key: "window.desktop_physics_enabled".into(),
+            label: "桌面物理".into(),
+            description: "窗口地形、惯性重力、侧边碰撞与窗口容器；开启后暂停纯色避让".into(),
+            layer: SettingLayer::Basic,
+            group: "基础".into(),
+            control: SettingControl::Boolean,
+            default_value: serde_json::json!(false),
+        },
+        SettingEntry {
             key: "ai.provider".into(),
             label: "AI 提供商".into(),
             description: "主对话 LLM 的提供商类型".into(),

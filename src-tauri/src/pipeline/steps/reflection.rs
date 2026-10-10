@@ -429,7 +429,11 @@ impl ReflectionRunnable {
         // 最近对话：取末 6 条消息（约 3 轮），让 LLM 判断情绪趋势
         let recent_section = build_recent_conversation_section(&state.messages);
 
-        let expr_hint_section = self.build_expression_hint_section(&state.user_emotion);
+        let mut expr_hint_section = self.build_expression_hint_section(&state.user_emotion);
+        if let Some(manifest) = self.manifest.as_deref() {
+            // Shared vocabulary explains multi-purpose gestures for both user and roommate replies.
+            expr_hint_section.push_str(&format!("\nExpression meanings: {}\n", manifest.expression_semantics_context()));
+        }
 
         let growth_candidates = self.persona.as_ref().map(|p| {
             let items: Vec<_> = p.evolution_candidates().into_iter().map(|c|

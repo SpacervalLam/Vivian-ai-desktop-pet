@@ -1,19 +1,21 @@
 import { useLayoutEffect, useRef, useState, type RefObject } from 'react';
 import { emit } from '@tauri-apps/api/event';
-import { BriefcaseBusiness, Dice5, MessageCircle, Moon, NotebookPen, Rocket, ScanLine } from 'lucide-react';
+import { BriefcaseBusiness, MessageCircle, Moon, NotebookPen, Rocket, ScanLine, Move, ArrowDown } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import './ChatEdgeMenu.css';
 
-export type EdgeMenuAction = 'screen' | 'notes' | 'games' | 'shortcuts' | 'chat' | 'office' | 'dnd';
+export type EdgeMenuAction = 'screen' | 'notes' | 'shortcuts' | 'chat' | 'office' | 'dnd' | 'smart_positioning' | 'desktop_physics';
 interface Props {
   edge: { mode: 'menu' | 'folding'; width: number };
   target: RefObject<HTMLButtonElement>;
   onAction: (action: EdgeMenuAction) => Promise<void>;
   onFoldEnd: () => void;
   quiet?: boolean;
+  smartPositioning?: boolean;
+  gravity?: boolean;
 }
 
-export default function ChatEdgeMenu({ edge, target, onAction, onFoldEnd, quiet = false }: Props) {
+export default function ChatEdgeMenu({ edge, target, onAction, onFoldEnd, quiet = false, smartPositioning = false, gravity = false }: Props) {
   const rail = useRef<HTMLDivElement>(null);
   const busyRef = useRef(false);
   const [busy, setBusy] = useState(false);
@@ -24,8 +26,9 @@ export default function ChatEdgeMenu({ edge, target, onAction, onFoldEnd, quiet 
     { id: 'screen', icon: ScanLine, text: label('截屏', '画面', 'Scan'), title: label('截屏分析', '画面分析', 'Analyze screen') },
     { id: 'office', icon: BriefcaseBusiness, text: label('办公', '仕事', 'Work') },
     { id: 'dnd', icon: Moon, text: label('勿扰', '集中', 'Quiet') },
+    { id: 'smart_positioning', icon: Move, text: label('避让', '自動回避', 'Avoid') },
+    { id: 'desktop_physics', icon: ArrowDown, text: label('重力', '重力', 'Gravity') },
     { id: 'notes', icon: NotebookPen, text: label('随手记', 'メモ', 'Notes') },
-    { id: 'games', icon: Dice5, text: label('小游戏', 'ゲーム', 'Games') },
     { id: 'shortcuts', icon: Rocket, text: label('启动', '起動', 'Launch'), title: label('快捷启动', 'クイック起動', 'Quick launch') },
   ] as const;
 
@@ -69,7 +72,7 @@ export default function ChatEdgeMenu({ edge, target, onAction, onFoldEnd, quiet 
   };
   return <div className="chat-edge-layer" style={{ width: edge.width }}>
     <div ref={rail} className={`chat-edge-rail${edge.mode === 'folding' ? ' is-folding' : ''}`} role="toolbar" aria-label={label('桌面快捷菜单', 'クイックメニュー', 'Desktop shortcuts')} aria-orientation="vertical">
-      {items.map(({ id, icon: Icon, text, ...item }) => <button key={id} type="button" className={`chat-edge-button${id === 'dnd' && quiet ? ' is-active' : ''}`} title={'title' in item ? item.title : text} aria-label={'title' in item ? item.title : text} aria-pressed={id === 'dnd' ? quiet : undefined} disabled={(busy && id === 'screen') || edge.mode !== 'menu'} onClick={() => void run(id)}>
+      {items.map(({ id, icon: Icon, text, ...item }) => <button key={id} type="button" className={`chat-edge-button${((id === 'dnd' && quiet) || (id === 'smart_positioning' && smartPositioning) || (id === 'desktop_physics' && gravity)) ? ' is-active' : ''}`} title={'title' in item ? item.title : text} aria-label={'title' in item ? item.title : text} aria-pressed={id === 'dnd' ? quiet : id === 'smart_positioning' ? smartPositioning : id === 'desktop_physics' ? gravity : undefined} disabled={(busy && id === 'screen') || edge.mode !== 'menu'} onClick={() => void run(id)}>
         <Icon size={20} strokeWidth={1.8} /><span>{text}</span>
       </button>)}
     </div>

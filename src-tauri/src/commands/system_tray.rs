@@ -3,12 +3,12 @@
 //! 托盘行为：
 //! - **左键单击**：不响应（避免打乱离线状态，参见 useHiding::hideForOffline）
 //! - **右键单击**：弹出原生右键菜单，内容与 桌宠 窗口内 ContextMenu 一致
-//!   - 详情 / 设置 / 聊天 / 分隔 / 语音开关● / 智能避让● / 分隔 / 退出
+//!   - 详情 / 设置 / 聊天 / 分隔 / 语音开关● / 智能避让● / 重力● / 分隔 / 退出
 //!
 //! 多角色架构下，托盘事件 payload 携带活跃角色 character_id，
 //! 由前端 SystemTray 组件按角色过滤后响应（活跃角色在 active_character_id 中维护）。
 //!
-//! **语音开关是唯一的后端直控项**：托盘作为全局入口不依赖窗口在线，
+//! **语音和运动开关由后端直接处理**：托盘作为全局入口不依赖窗口在线，
 //! 点击后由 `toggle_voice` 直接改写所有角色的 `TtsConfig.enabled`，
 //! 用户无需再进设置窗口启用/禁用。
 //!
@@ -20,7 +20,7 @@ use once_cell::race::OnceBox;
 use parking_lot::Mutex;
 use serde_json::json;
 use tauri::{
-    AppHandle, Emitter, Manager,
+    AppHandle, Emitter, Listener, Manager,
     menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
@@ -41,6 +41,7 @@ mod menu_id {
     pub const DESKTOP: &str = "desktop_assistant";
     pub const VOICE: &str = "voice";
     pub const SMART_POSITIONING: &str = "smart_positioning";
+    pub const DESKTOP_PHYSICS: &str = "desktop_physics";
     pub const QUIT: &str = "quit";
 }
 
@@ -50,6 +51,7 @@ mod menu_id {
 struct CheckItems {
     voice: CheckMenuItem<tauri::Wry>,
     smart_positioning: CheckMenuItem<tauri::Wry>,
+    desktop_physics: CheckMenuItem<tauri::Wry>,
 }
 
 static CHECK_ITEMS: OnceBox<Mutex<CheckItems>> = OnceBox::new();
@@ -92,6 +94,7 @@ pub fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
         true,
         None::<&str>,
     )?;
+    let desktop_physics = CheckMenuItem::with_id(app, menu_id::DESKTOP_PHYSICS, "重力", true, false, None::<&str>)?;
     let sep2 = PredefinedMenuItem::separator(app)?;
     let quit = MenuItem::with_id(app, menu_id::QUIT, "退出", true, None::<&str>)?;
 
@@ -99,6 +102,7 @@ pub fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
     let _ = CHECK_ITEMS.set(Box::new(Mutex::new(CheckItems {
         voice: voice.clone(),
         smart_positioning: smart_positioning.clone(),
+        desktop_physics: desktop_physics.clone(),
     })));
 
     let menu = Menu::with_items(
@@ -111,6 +115,7 @@ pub fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
             &sep1,
             &voice,
             &smart_positioning,
+            &desktop_physics,
             &sep2,
             &quit,
         ],
@@ -138,6 +143,9 @@ pub fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
         })
         .build(app)?;
 
+    sync_movement_checks(app);
+    let movement_app = app.clone();
+    app.listen("config:saved", move |_| sync_movement_checks(&movement_app));
     tracing::info!("系统托盘已创建 (id={}, 含右键菜单)", TRAY_ID);
     Ok(())
 }
@@ -145,10 +153,9 @@ pub fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
 /// 处理菜单项点击 → emit `tray:menu_action` 事件给前端 SystemTray 组件
 ///
 /// 前端根据 action id 路由到 openStatus / openMemory / openChat 等回调。
-/// voice / smart_positioning 是 CheckMenuItem，前端需自行 toggle 状态后再 invoke
-/// `set_tray_menu_check` 同步勾选标记（避免后端重复维护前端状态）。
+/// 语音和运动 CheckMenuItem 在后端切换并同步，其他入口通过事件路由至前端。
 ///
-/// 例外：**voice 在后端直接处理**。托盘是全局入口，不应依赖某个角色窗口是否在线；
+/// 例外：**voice 和运动开关在后端直接处理**。托盘是全局入口，不应依赖某个角色窗口是否在线；
 /// 且语音朗读的真相源在后端 `TtsConfig.enabled`，走前端会形成第二条状态链。
 fn handle_menu_event(app: &AppHandle, event: &MenuEvent) {
     let id = event.id().as_ref();
@@ -170,6 +177,12 @@ fn handle_menu_event(app: &AppHandle, event: &MenuEvent) {
         return;
     }
 
+    if id == menu_id::SMART_POSITIONING || id == menu_id::DESKTOP_PHYSICS {
+        if let Err(error) = toggle_movement(app, id) { tracing::warn!("[tray] 运动模式切换失败: {error}"); }
+        sync_movement_checks(app);
+        return;
+    }
+
     tracing::debug!(
         "[tray] 菜单点击：{} (active_character={})",
         id,
@@ -180,6 +193,39 @@ fn handle_menu_event(app: &AppHandle, event: &MenuEvent) {
         "tray:menu_action",
         json!({ "action": id, "character_id": character_id }),
     );
+}
+
+fn sync_movement_checks(app: &AppHandle) {
+    let state = app.state::<std::sync::Arc<AppState>>();
+    let window = state.config.read().get_all().window;
+    if let Some(items) = CHECK_ITEMS.get() {
+        let items = items.lock();
+        let _ = items.smart_positioning.set_checked(window.smart_positioning_enabled);
+        let _ = items.desktop_physics.set_checked(window.desktop_physics_enabled);
+    }
+}
+
+/// Shared by the edge menu and tray. Read and toggle under one lock, then notify every window.
+pub(crate) fn toggle_movement(app: &AppHandle, action: &str) -> Result<(), String> {
+    let key = match action {
+        "smart_positioning" => "window.smart_positioning_enabled",
+        "desktop_physics" => "window.desktop_physics_enabled",
+        _ => return Err("未知运动模式".into()),
+    };
+    let state = app.state::<std::sync::Arc<AppState>>();
+    {
+        let config = state.config.write();
+        let old = config.get_all().window;
+        let next = !config.get_typed(key, false);
+        config.set_no_save(key, json!(next)).map_err(err_str)?;
+        if let Err(error) = config.save() {
+            let _ = config.set_no_save("window.smart_positioning_enabled", json!(old.smart_positioning_enabled));
+            let _ = config.set_no_save("window.desktop_physics_enabled", json!(old.desktop_physics_enabled));
+            return Err(err_str(error));
+        }
+    }
+    sync_movement_checks(app);
+    app.emit("config:saved", ()).map_err(err_str)
 }
 
 /// 切换全局语音朗读开关

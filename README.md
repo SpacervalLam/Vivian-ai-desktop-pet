@@ -19,7 +19,7 @@ Vivian 是面向 Windows 的多角色桌面陪伴应用。Vivian 与 Nana 可以
 | 多角色陪伴 | 流式私聊、群聊、跨角色对话、主动开口；支持中文、英文和日文界面。 |
 | 记忆与成长 | 跨会话记忆、用户画像、关系、日记与笔记；相处方式可从真实用户记忆中逐步调整，保留来源并支持撤回。 |
 | 情绪与感知 | 时间、天气、媒体、前台应用与活动观察参与回复；心情影响表达，并在对话后更新。 |
-| 桌面互动 | 拖动、轻触反馈、长按互动、动作与表情、鼠标跟随；角色贴纸可用于聊天窗口及桌面方形气泡。 |
+| 桌面互动 | 拖动、轻触反馈、长按互动、动作与表情、鼠标跟随；可选桌面物理支持窗口顶边落脚、侧边撞飞、窗口容器和惯性抛掷。 |
 | 工具协作 | 文件、应用、媒体、截图识别、待办、提醒、搜索和网页读取；按权限执行，由角色根据实际结果回复。 |
 | 工作智能体 | 代码阅读与修改、命令执行、工作区、终端、计划、子任务和成果回流；工作模型独立配置；工作页支持会话全文搜索与键盘快速切换。 |
 | 扩展能力 | 插件声明可执行能力或配置数据，技能仅提供按需加载的使用指导；支持自建工具、MCP 与真实浏览器标签页桥接。 |
@@ -52,13 +52,17 @@ Vivian 是面向 Windows 的多角色桌面陪伴应用。Vivian 与 Nana 可以
 
 发送消息后，桌宠会播放「思考中」循环，收到首个可见回复文字后转入说话动作；取消、失败或没有回复时结束等待。
 
+猜拳图集也用于日常交流：布可表达伸手、邀请或提供帮助，石头可表达握拳加油，剪刀可表达比耶和庆祝。普通聊天与双宠对话会按语境选择这些手势，并在对白显示期间保留动作。
+
 ## 快速开始
 
 ### 使用安装包
 
-从 [Releases](https://github.com/SpacervalLam/Vivian-ai-desktop-pet/releases) 获取对应发行包。基础安装程序使用 NSIS；如需 3D 公寓，将配套公寓 ZIP 与 setup 放在同一目录，并在安装时勾选。安装后可在「设置 → 通用」启用或禁用公寓。
+从 [Releases](https://github.com/SpacervalLam/Vivian-ai-desktop-pet/releases) 获取对应发行包。基础安装程序使用 NSIS；3D 公寓、手写字体和内置贴纸分别为可选 ZIP。将需要的配套 ZIP 与 setup 放在同一目录，并在安装时勾选对应组件，安装后重启应用。可在「设置 → 通用」查看资源包状态及启用或禁用公寓。未安装字体时中文回退到系统字体，自定义贴纸仍可使用。追加字体和贴纸时不会移除未勾选的已安装资源。
 
 首次运行，在设置中配置模型端点、模型名和 API Key，使用一键检测检查连接。再按需要配置工作模型、语音、搜索和外部连接。当前支持 Windows 10 / 11，需要 WebView2。
+
+在「设置 → 通用」打开「桌面物理」（默认关闭），Q 版角色会受重力影响，在普通应用窗口顶边或显示器工作区底边落脚；拖进窗口内部再松手，可让四壁成为容器，移动窗口会传递惯性。落脚后可沿平台漫步。该模式暂停智能颜色避让，保留全屏隐藏；任务栏边界采用 Windows 工作区，碰撞范围按当前角色图集估算。同页的登录启动选项仅作用于当前 Windows 用户，无需管理员权限。
 
 ### 从源码运行
 
@@ -99,11 +103,17 @@ npm run tauri:build
 # 独立构建公寓插件 ZIP
 npm run build:apartment
 
-# 生成基础 setup、配套公寓 ZIP 和校验信息
+# 生成基础 setup、四类可选 ZIP 和校验信息
 npm run package:small
 ```
 
 基础安装包位于 `src-tauri/target/release/bundle/nsis/`，配套发行文件位于 `release/`。主程序的 `npm run build` 不构建公寓，Three.js 和场景资源由插件独立管理；安装与预览方式见 [公寓插件说明](plugins/3d-apartment/README.md)。
+
+主程序构建在白名单资源复制后评估所有 `*-sheet.webp` 动作图集（当前 45 张），默认角色图和道具保持原文件。`public/chibi` 保留原图，发布候选依次尝试 WebP Q90、Q95、Q98，透明度质量 100，帧数和尺寸不变。构建会检查透明通道逐像素一致、RGB 均方根误差不超过 5、整体及浅色材质各通道平均偏移不超过 1/255；候选颜色超限或节省不足 5% 时保留原文件，尺寸和透明度异常则终止构建。当前 31 张采用压缩版本，另 14 张保留原文件。编码缓存和体积报告位于 `tmp/chibi-release-cache/`、`tmp/chibi-release-report.json`，不进入安装包。缓存随原图、参数和编码器版本自动失效。
+
+随后构建按 `src/optional-resources.json` 将本地 Ma Shan Zheng 中文手写字体及 24 张内置贴纸打包到 `release/Vivian-{fonts,stickers}-1.0.0.zip`，从 `dist` 移除相应文件。资源安装到程序旁的 `optional/<包名>/`，安装器检查 ZIP 及每个文件的 SHA-256，并使用暂存目录替换。相同输入会生成相同 ZIP。源图、缓存和暂存文件不进入基础安装包。静默安装默认只安装基础程序，`/FONTS`、`/STICKERS` 分别添加配套 ZIP，`/NOFONTS`、`/NOSTICKERS` 跳过。公寓继续使用 `/APARTMENT` 和 `/NOAPARTMENT`。发布检查运行 `node tests/optional-resources.test.mjs --dist`、`node tests/chibi-release-compression.test.mjs --dist`；Windows 安装检查运行 `node tests/optional-resource-install.test.mjs`。
+
+Rust 重型依赖和默认功能的检查结果见 [依赖检查](assets/build-size/RUST_DEPENDENCIES.md)，可运行 `npm run audit:rust-size` 复现。
 
 CI 在 Windows 验证主程序 Rust，在 Windows/Linux/macOS 验证前端与可移植契约；原生桌面输入目前仅支持 Windows。离线评估不调用模型，不代表对话质量测试。原生沙箱与角色动画检查使用独立入口，命令及验收范围见 [代码 Wiki](CODE_WIKI.md)。
 

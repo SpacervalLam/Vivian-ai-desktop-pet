@@ -6,7 +6,7 @@ import ChatEdgeMenu, { type EdgeMenuAction } from './ChatEdgeMenu';
 
 export default function EdgeMenuWindow() {
   const [mode, setMode] = useState<'menu' | 'folding'>('menu');
-  const [status, setStatus] = useState({ quiet: false });
+  const [status, setStatus] = useState({ quiet: false, smart_positioning: false, desktop_physics: false });
   const quiet = useRef(false);
   const target = useRef<HTMLButtonElement>(null);
   const { i18n } = useTranslation();
@@ -19,8 +19,8 @@ export default function EdgeMenuWindow() {
       if (disposed) cleanup(); else cleanups.push(cleanup);
     };
     const refresh = async () => {
-      const before = revision;
-      const next = await invoke<{ quiet: boolean }>('edge_menu_status');
+      const before = ++revision;
+      const next = await invoke<{ quiet: boolean; smart_positioning: boolean; desktop_physics: boolean }>('edge_menu_status');
       if (!disposed && revision === before) { quiet.current = next.quiet; setStatus(next); }
     };
     const applyTheme = (theme: unknown) => {
@@ -37,7 +37,7 @@ export default function EdgeMenuWindow() {
       });
       await register('edge_menu:fold', () => setMode('folding'));
       await register('config:theme-changed', ({ theme }: { theme: string }) => { themeRevision++; applyTheme(theme); });
-      await register('config:saved', () => { void refreshTheme().catch(console.warn); });
+      await register('config:saved', () => { void refreshTheme().catch(console.warn); void refresh().catch(console.warn); });
       await register('edge_menu:shown', ({ theme }: { theme?: string }) => {
         setMode('menu');
         if (theme !== undefined) { themeRevision++; applyTheme(theme); }
@@ -70,6 +70,6 @@ export default function EdgeMenuWindow() {
     });
   };
   return <div style={{ position: 'relative', height: '100vh', fontFamily: '-apple-system, BlinkMacSystemFont, "SF Pro Text", "Microsoft YaHei", sans-serif' }}>
-    <ChatEdgeMenu edge={{ mode, width: window.innerWidth }} target={target} quiet={status.quiet} onAction={run} onFoldEnd={onFoldEnd} />
+    <ChatEdgeMenu edge={{ mode, width: window.innerWidth }} target={target} quiet={status.quiet} smartPositioning={status.smart_positioning} gravity={status.desktop_physics} onAction={run} onFoldEnd={onFoldEnd} />
   </div>;
 }

@@ -438,6 +438,9 @@ fn describe_emotion_semantics(names: &[String]) -> String {
         ("pupil_color", "mood-based eye color shift"),
         ("dizzy", "dazed/confused (spiral eyes)"),
         ("blindfold", "mysterious/tired (eye mask)"),
+        ("rps-paper", "open hand / reaching out to offer help or invite someone; also paper in rock-paper-scissors"),
+        ("rps-rock", "raised fist to encourage or cheer someone on; also rock in rock-paper-scissors"),
+        ("rps-scissors", "V / peace sign for playful celebration or posing; also scissors in rock-paper-scissors"),
     ]);
     let parts: Vec<String> = names
         .iter()
@@ -531,6 +534,11 @@ impl ResourceManifest {
     /// 表情列表（注册名，只读）
     pub fn expressions(&self) -> &[String] {
         &self.expressions
+    }
+
+    /// Explain the same expression vocabulary in reflection and inline prompts.
+    pub fn expression_semantics_context(&self) -> String {
+        describe_emotion_semantics(&self.expressions)
     }
 
     /// 动作列表（只读）

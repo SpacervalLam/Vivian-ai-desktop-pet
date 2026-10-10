@@ -9,6 +9,7 @@ export class SheetLoader {
   }
 
   load(source: string): Promise<boolean> {
+    if (!source) return Promise.resolve(false);
     if (this.failed.has(source)) return Promise.resolve(false);
     const cached = this.images.get(source);
     if (cached) {

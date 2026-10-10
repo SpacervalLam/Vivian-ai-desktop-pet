@@ -2,6 +2,7 @@ import { TextField, BrowseTextField, SelectField, NumberField, SliderField, Togg
 import { ROUTING_TASKS, normalizeEmbeddingEndpoint, presetMatches, useProviderPresets, needsSecretFor, needsAppIdFor, ProviderSelector, WorkModelProviderSelector, type ConfigValue, type ConfigObject, type EmbeddingProviderPreset } from './settings/ModelSettings';
 export { PROVIDER_PRESETS, invalidateProviderPresetsCache } from './settings/ModelSettings';
 import StickerSettings from './stickers/StickerSettings';
+import OptionalResourceSettings from './settings/OptionalResourceSettings';
 import ReasoningPrefField, { type ReasoningPref } from './settings/ReasoningConfigField';
 import LlmProbeResults from './settings/LlmProbeResults';
 import { runProbeBatch, type ProbeResult } from './settings/llmProbe';
@@ -1868,6 +1869,7 @@ const ConfigWindow: React.FC = () => {
               key: 'window.smart_positioning_enabled',
             }).catch(() => true);
             setNested('window.smart_positioning_enabled', enabled);
+            setNested('window.desktop_physics_enabled', await invoke<boolean>('get_config', { key: 'window.desktop_physics_enabled' }));
           } catch {
             /* ignore */
           }
@@ -2714,7 +2716,13 @@ const ConfigWindow: React.FC = () => {
               label={t('config.field_smart_positioning')}
               help={t('config.smart_positioning_help')}
               value={get('window.smart_positioning_enabled', true)}
-              onChange={(v) => setNested('window.smart_positioning_enabled', v)}
+              onChange={(v) => { setNested('window.smart_positioning_enabled', v); if (v) setNested('window.desktop_physics_enabled', false); }}
+            />
+            <ToggleField
+              label={t('config.field_desktop_physics')}
+              help={t('config.desktop_physics_help')}
+              value={get('window.desktop_physics_enabled', false)}
+              onChange={(v) => { setNested('window.desktop_physics_enabled', v); if (v) setNested('window.smart_positioning_enabled', false); }}
             />
             <ToggleField
               label={t('config.field_mouse_follow')}
@@ -2738,6 +2746,7 @@ const ConfigWindow: React.FC = () => {
             ) : (
               <div style={{ opacity: 0.65, padding: '8px 0' }}>{t('config.apartment_not_installed')}</div>
             )}
+            <OptionalResourceSettings />
             <ShortcutsDrawer
               label={t('config.section_shortcuts')}
               expanded={shortcutsExpanded}

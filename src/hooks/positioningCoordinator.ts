@@ -16,6 +16,9 @@
  */
 
 export interface PositioningCoordinator {
+  physicsEnabled: boolean;
+  physicsInFlight: boolean;
+  physicsLane: { minX: number; maxX: number } | null;
   /** 桌宠当前是否处于全屏隐藏状态（已退到角落） */
   fullscreenHidden: boolean;
   /** 全屏隐藏 hook 是否正在执行 hide/restore 动画 */
@@ -57,6 +60,9 @@ export interface PositioningCoordinator {
 }
 
 export const positioningCoordinator: PositioningCoordinator = {
+  physicsEnabled: false,
+  physicsInFlight: false,
+  physicsLane: null,
   fullscreenHidden: false,
   fullscreenInFlight: false,
   ambientMoveInFlight: false,

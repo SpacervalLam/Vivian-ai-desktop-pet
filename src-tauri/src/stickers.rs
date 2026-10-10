@@ -23,7 +23,7 @@ fn builtin_resource_url(id:&str,version:&str)->Option<String>{
  builtins().into_iter().find(|row|row.id==id).map(|row|format!("/stickers/{}",row.filename))
 }
 pub fn catalog(char_id:&str)->Vec<StickerEntry>{
- let mut rows=builtins();
+ let mut rows=if crate::commands::optional_resources::installed("stickers"){builtins()}else{Vec::new()};
  for row in custom(){if let Some(old)=rows.iter_mut().find(|r|r.id==row.id){*old=row;}else{rows.push(row);}}
  rows.into_iter().filter(|s|s.character_id==char_id && valid_id(&s.id)).take(40).collect()
 }
@@ -37,7 +37,11 @@ pub fn frequency(char_id:&str)->String {preferences().get(char_id).cloned().unwr
 }
 #[tauri::command] pub fn get_sticker_data_url(sticker:StickerRef)->Result<String,String>{
  character(&sticker.character_id)?;if !sticker.id.starts_with(&format!("{}_",sticker.character_id))||!valid_id(&sticker.id)||!valid_id(&sticker.version){return Err("无效贴纸 ID 或版本".into());}
- if let Some(url)=builtin_resource_url(&sticker.id,&sticker.version){return Ok(url);}
+ if let Some(url)=builtin_resource_url(&sticker.id,&sticker.version){
+   let path=crate::commands::optional_resources::resource_path("stickers",url.trim_start_matches('/')).ok_or("内置贴纸资源包未安装")?;
+   let data=std::fs::read(path).map_err(|_|"贴纸资源已缺失".to_string())?;
+   return Ok(format!("data:image/webp;base64,{}",base64::engine::general_purpose::STANDARD.encode(data)));
+ }
  let path=dir().join(format!("{}-{}.png",sticker.id,sticker.version));
  let data=std::fs::read(path).map_err(|_|"贴纸资源已缺失".to_string())?;
  Ok(format!("data:image/png;base64,{}",base64::engine::general_purpose::STANDARD.encode(data)))

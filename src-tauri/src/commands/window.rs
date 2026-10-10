@@ -14,6 +14,9 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crate::utils::fnv1a_64_bytes;
+use crate::drag_motion::{release_velocity, FLING_SAMPLE_WINDOW_MS};
+#[cfg(test)]
+use crate::drag_motion::FLING_MAX_VELOCITY;
 
 fn err_str(e: impl std::fmt::Display) -> String {
     e.to_string()
@@ -269,13 +272,13 @@ fn update_drag_position(label: &str, cursor_x: i32, cursor_y: i32, move_to: impl
 /// 用于拖动 watchdog：当窗口追逐延迟导致 mouseup 无法到达 WebView 时，
 /// 前端无法感知拖动已结束，只有硬件状态能作为最终裁决。
 #[cfg(windows)]
-fn is_left_mouse_button_down() -> bool {
+pub(crate) fn is_left_mouse_button_down() -> bool {
     use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
     unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) as u16 & 0x8000 != 0 }
 }
 
 #[cfg(not(windows))]
-fn is_left_mouse_button_down() -> bool {
+pub(crate) fn is_left_mouse_button_down() -> bool {
     false
 }
 
@@ -482,7 +485,11 @@ pub fn start_cursor_tracking(
             // 拖拽结束瞬间：按松手前的光标轨迹计算初速度，触发惯性甩飞。
             // 覆盖正常 mouseup（前端 stop_window_drag）和 watchdog 兜底两条路径。
             if prev_is_dragging && !is_dragging {
-                let v = fling_velocity_from_samples(&drag_samples);
+                let v = release_velocity(
+                    &drag_samples,
+                    (Instant::now(), c.x, c.y),
+                    win.scale_factor().unwrap_or(1.0),
+                );
                 if let Some((started, _, _, distance, peak)) = drag_observation.take() {
                     // Ignore click jitter, holds and reactions already covered by dizzy/fling.
                     if distance >= 20.0 && last_dizzy_emit.is_none() && v.is_none() {
@@ -499,7 +506,11 @@ pub fn start_cursor_tracking(
                 last_dizzy_emit = None;
                 fast_drag_streak = 0;
                 fast_drag_peak = 0.0;
-                if let Some((fvx, fvy)) = v {
+                let physics_enabled = app_clone.state::<Arc<crate::state::AppState>>().config.read().get_all().window.desktop_physics_enabled;
+                if physics_enabled {
+                    let (vx, vy) = v.unwrap_or((0.0, 0.0));
+                    let _ = win.emit_to(&label, "drag:released", json!({ "vx": vx * 1000.0, "vy": vy * 1000.0 }));
+                } else if let Some((fvx, fvy)) = v {
                     start_fling(win.clone(), &label, fvx, fvy);
                 }
             }
@@ -686,10 +697,6 @@ pub fn stop_window_drag(window: tauri::WebviewWindow) -> Result<(), String> {
 //   视觉上是角色本体撞到屏幕边缘被弹回
 // - 碰撞法向速度乘回弹系数（restitution）损失能量，配合摩擦衰减，几次反弹后静止
 
-/// 触发甩飞的最小释放速度（物理像素/ms，约 500px/s）
-const FLING_MIN_VELOCITY: f64 = 0.5;
-/// 甩飞初速度上限（物理像素/ms），防止极端甩动瞬间横穿整屏
-const FLING_MAX_VELOCITY: f64 = 4.0;
 /// 速度指数摩擦系数（每 ms）：v *= exp(-k·dt)，0.002 ≈ 350ms 半衰期
 const FLING_FRICTION: f64 = 0.002;
 /// 边缘碰撞的法向速度保留系数（能量损失后的反弹速度）
@@ -698,10 +705,6 @@ const FLING_RESTITUTION: f64 = 0.6;
 const FLING_STOP_VELOCITY: f64 = 0.06;
 /// 物理帧间隔（ms）
 const FLING_TICK_MS: u64 = 12;
-/// 松手前速度采样窗口长度（ms）
-const FLING_SAMPLE_WINDOW_MS: u64 = 120;
-/// 采样跨度低于该值（ms）时速度不可信，不触发甩飞
-const FLING_MIN_SAMPLE_SPAN_MS: f64 = 40.0;
 
 // ---------- 晕乎乎临时表情 ----------
 //
@@ -744,29 +747,6 @@ const FLING_BOUNCE_DIZZY_MAX_MS: u64 = 2400;
 /// 每窗口甩飞代号：新一轮甩飞开始时自增，被取代的旧线程检测到代号变化后自行退出
 static FLING_GEN: Lazy<Mutex<std::collections::HashMap<String, u64>>> =
     Lazy::new(|| Mutex::new(std::collections::HashMap::new()));
-
-/// 由松手前的光标采样轨迹计算甩飞初速度，速度过小 / 采样过短时返回 None
-fn fling_velocity_from_samples(
-    samples: &std::collections::VecDeque<(std::time::Instant, f64, f64)>,
-) -> Option<(f64, f64)> {
-    let first = *samples.front()?;
-    let last = *samples.back()?;
-    let span_ms = last.0.duration_since(first.0).as_secs_f64() * 1000.0;
-    if span_ms < FLING_MIN_SAMPLE_SPAN_MS {
-        return None;
-    }
-    let vx = (last.1 - first.1) / span_ms;
-    let vy = (last.2 - first.2) / span_ms;
-    let speed = vx.hypot(vy);
-    if speed < FLING_MIN_VELOCITY {
-        return None;
-    }
-    if speed > FLING_MAX_VELOCITY {
-        let scale = FLING_MAX_VELOCITY / speed;
-        return Some((vx * scale, vy * scale));
-    }
-    Some((vx, vy))
-}
 
 /// 由相邻两帧全局光标采样估计瞬时速度（物理像素/ms）。
 ///
@@ -1173,7 +1153,7 @@ pub fn set_window_rect(
 
 // ============ 独立右缘菜单 / 按需聊天窗口 / 外部点击 ============
 static CHAT_OUTSIDE_HOOK_RUNNING: AtomicBool = AtomicBool::new(false);
-static CHAT_OUTSIDE_HOOK_TX: std::sync::OnceLock<std::sync::mpsc::Sender<(u8, i32, i32)>> = std::sync::OnceLock::new();
+static CHAT_OUTSIDE_HOOK_TX: std::sync::OnceLock<std::sync::mpsc::Sender<(u8, i32, i32, isize)>> = std::sync::OnceLock::new();
 struct ChatOutsideHookThreads {
     stop: Arc<AtomicBool>, hook_tid: Arc<AtomicU32>, hook_handle: JoinHandle<()>, consumer_handle: JoinHandle<()>,
 }
@@ -1181,15 +1161,27 @@ static CHAT_OUTSIDE_HOOK_STOP: Lazy<Mutex<Option<ChatOutsideHookThreads>>> = Laz
 
 #[cfg(windows)]
 unsafe extern "system" fn chat_outside_mouse_ll_proc(code: i32, wparam: windows::Win32::Foundation::WPARAM, lparam: windows::Win32::Foundation::LPARAM) -> windows::Win32::Foundation::LRESULT {
-    use windows::Win32::UI::WindowsAndMessaging::{CallNextHookEx, MSLLHOOKSTRUCT, WM_LBUTTONDOWN};
-    if code >= 0 && wparam.0 as u32 == WM_LBUTTONDOWN {
+    use windows::Win32::UI::WindowsAndMessaging::{CallNextHookEx, GetAncestor, WindowFromPoint, GA_ROOT, MSLLHOOKSTRUCT, WM_LBUTTONDOWN, WM_RBUTTONDOWN, WM_MBUTTONDOWN, WM_XBUTTONDOWN};
+    let message = wparam.0 as u32;
+    if code >= 0 && matches!(message, WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_XBUTTONDOWN) {
         let event = &*(lparam.0 as *const MSLLHOOKSTRUCT);
-        if let Some(tx) = CHAT_OUTSIDE_HOOK_TX.get() { let _ = tx.send((0, event.pt.x, event.pt.y)); }
+        // Capture the actual window under this press, including overlapping windows.
+        // The hook only queues metadata; all Tauri calls stay on the consumer thread.
+        let target = GetAncestor(WindowFromPoint(event.pt), GA_ROOT).0 as isize;
+        if let Some(tx) = CHAT_OUTSIDE_HOOK_TX.get() { let _ = tx.send((u8::from(message != WM_LBUTTONDOWN), event.pt.x, event.pt.y, target)); }
     }
     CallNextHookEx(None, code, wparam, lparam)
 }
-fn handle_chat_outside_hook_event(app: &AppHandle, _kind: u8, x: i32, y: i32) {
-    crate::edge_menu::outside_pointer_down(app, x, y);
+fn handle_chat_outside_hook_event(app: &AppHandle, kind: u8, x: i32, y: i32, target: isize) {
+    if kind == 0 { crate::edge_menu::outside_pointer_down(app, x, y); }
+    #[cfg(windows)]
+    for (label, window) in app.webview_windows() {
+        if window.hwnd().is_ok_and(|hwnd| hwnd.0 as isize != target) {
+            let _ = app.emit_to(&label, "companion:clipboard-outside-press", ());
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = target;
 }
 
 #[tauri::command]
@@ -1227,7 +1219,7 @@ fn start_chat_outside_click_hook_internal(app: AppHandle) -> Result<(), String> 
         return Ok(()); // 已在运行
     }
 
-    let (tx, rx) = std::sync::mpsc::channel::<(u8, i32, i32)>();
+    let (tx, rx) = std::sync::mpsc::channel::<(u8, i32, i32, isize)>();
     let _ = CHAT_OUTSIDE_HOOK_TX.set(tx); // OnceLock；忽略 Err（仅重启场景，此处不发生）
 
     let stop = Arc::new(AtomicBool::new(false));
@@ -1273,7 +1265,7 @@ fn start_chat_outside_click_hook_internal(app: AppHandle) -> Result<(), String> 
         .spawn(move || {
             while !stop_c.load(Ordering::SeqCst) && !APP_EXITING.load(Ordering::SeqCst) {
                 match rx.recv_timeout(Duration::from_millis(200)) {
-                    Ok((kind, x, y)) => handle_chat_outside_hook_event(&app_c, kind, x, y),
+                    Ok((kind, x, y, target)) => handle_chat_outside_hook_event(&app_c, kind, x, y, target),
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
                     Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
                 }

@@ -1,16 +1,49 @@
 {
   "version": 1,
-  "characters": ["vivian", "nana"],
+  "characters": [
+    "vivian",
+    "nana"
+  ],
   "atlas": {
     "cols": 3,
     "rows": 2,
     "poses": [
-      { "name": "idle", "label": "待机", "category": "state", "promptable": false },
-      { "name": "happy", "label": "开心", "category": "emotion", "promptable": false },
-      { "name": "drag", "label": "被拎起", "category": "state", "promptable": false },
-      { "name": "dizzy", "label": "晕乎乎", "category": "emotion", "promptable": true },
-      { "name": "talk", "label": "说话", "category": "state", "promptable": false },
-      { "name": "listen", "label": "聆听", "category": "state", "promptable": false }
+      {
+        "name": "idle",
+        "label": "待机",
+        "category": "state",
+        "promptable": false
+      },
+      {
+        "name": "happy",
+        "label": "开心",
+        "category": "emotion",
+        "promptable": false
+      },
+      {
+        "name": "drag",
+        "label": "被拎起",
+        "category": "state",
+        "promptable": false
+      },
+      {
+        "name": "dizzy",
+        "label": "晕乎乎",
+        "category": "emotion",
+        "promptable": true
+      },
+      {
+        "name": "talk",
+        "label": "说话",
+        "category": "state",
+        "promptable": false
+      },
+      {
+        "name": "listen",
+        "label": "聆听",
+        "category": "state",
+        "promptable": false
+      }
     ]
   },
   "animations": [
@@ -20,12 +53,30 @@
       "category": "action",
       "promptable": false,
       "sheet": "/chibi/walk/{character}/{character}-walk-{direction}-sheet.webp",
-      "directions": ["left", "right"],
+      "directions": [
+        "left",
+        "right"
+      ],
       "cols": 4,
       "rows": 4,
       "frames": 14,
       "loop": true,
-      "durations": [90, 82, 76, 72, 68, 84, 78, 72, 82, 82, 72, 68, 88, 76]
+      "durations": [
+        90,
+        82,
+        76,
+        72,
+        68,
+        84,
+        78,
+        72,
+        82,
+        82,
+        72,
+        68,
+        88,
+        76
+      ]
     },
     {
       "name": "turn",
@@ -33,12 +84,21 @@
       "category": "action",
       "promptable": false,
       "sheet": "/chibi/motion/{character}/{character}-turn-{direction}-sheet.webp",
-      "directions": ["left", "right"],
+      "directions": [
+        "left",
+        "right"
+      ],
       "cols": 4,
       "rows": 2,
       "frames": 5,
       "loop": false,
-      "durations": [53, 40, 35, 38, 78]
+      "durations": [
+        53,
+        40,
+        35,
+        38,
+        78
+      ]
     },
     {
       "name": "blink",
@@ -50,7 +110,14 @@
       "rows": 2,
       "frames": 6,
       "loop": false,
-      "durations": [55, 48, 58, 78, 70, 105]
+      "durations": [
+        55,
+        48,
+        58,
+        78,
+        70,
+        105
+      ]
     },
     {
       "name": "cast",
@@ -62,20 +129,48 @@
       "rows": 3,
       "frames": 12,
       "loop": false,
-      "durations": [70, 80, 80, 80, 85, 85, 85, 85, 85, 90, 90, 95]
+      "durations": [
+        70,
+        80,
+        80,
+        80,
+        85,
+        85,
+        85,
+        85,
+        85,
+        90,
+        90,
+        95
+      ]
     },
     {
       "name": "happy",
       "label": "开心",
       "category": "emotion",
       "promptable": true,
-      "characters": ["vivian"],
+      "characters": [
+        "vivian"
+      ],
       "sheet": "/chibi/motion/{character}/{character}-happy-sheet.webp",
       "cols": 4,
       "rows": 3,
       "frames": 12,
       "loop": false,
-      "durations": [70, 80, 80, 80, 85, 85, 85, 85, 85, 90, 90, 95]
+      "durations": [
+        70,
+        80,
+        80,
+        80,
+        85,
+        85,
+        85,
+        85,
+        85,
+        90,
+        90,
+        95
+      ]
     },
     {
       "name": "angry",
@@ -87,7 +182,20 @@
       "rows": 3,
       "frames": 12,
       "loop": false,
-      "durations": [70, 80, 80, 80, 85, 85, 85, 85, 85, 90, 90, 95]
+      "durations": [
+        70,
+        80,
+        80,
+        80,
+        85,
+        85,
+        85,
+        85,
+        85,
+        90,
+        90,
+        95
+      ]
     },
     {
       "name": "thinking",
@@ -99,7 +207,20 @@
       "rows": 3,
       "frames": 12,
       "loop": true,
-      "durations": [100, 100, 140, 180, 260, 280, 320, 280, 240, 180, 140, 100]
+      "durations": [
+        100,
+        100,
+        140,
+        180,
+        260,
+        280,
+        320,
+        280,
+        240,
+        180,
+        140,
+        100
+      ]
     },
     {
       "name": "think",
@@ -111,7 +232,20 @@
       "rows": 3,
       "frames": 12,
       "loop": false,
-      "durations": [70, 80, 80, 80, 85, 85, 85, 85, 85, 90, 90, 95]
+      "durations": [
+        70,
+        80,
+        80,
+        80,
+        85,
+        85,
+        85,
+        85,
+        85,
+        90,
+        90,
+        95
+      ]
     },
     {
       "name": "smug",
@@ -123,11 +257,27 @@
       "rows": 3,
       "frames": 12,
       "loop": false,
-      "durations": [70, 80, 80, 80, 85, 85, 85, 85, 85, 90, 90, 95]
+      "durations": [
+        70,
+        80,
+        80,
+        80,
+        85,
+        85,
+        85,
+        85,
+        85,
+        90,
+        90,
+        95
+      ]
     },
     {
       "name": "sleep",
-      "characters": ["vivian", "nana"],
+      "characters": [
+        "vivian",
+        "nana"
+      ],
       "label": "入睡",
       "category": "state",
       "promptable": true,
@@ -137,7 +287,32 @@
       "frames": 24,
       "loop": false,
       "hold": true,
-      "durations": [120,120,130,140,150,160,170,170,160,150,150,160,170,180,180,170,160,150,140,130,130,120,120,120]
+      "durations": [
+        120,
+        120,
+        130,
+        140,
+        150,
+        160,
+        170,
+        170,
+        160,
+        150,
+        150,
+        160,
+        170,
+        180,
+        180,
+        170,
+        160,
+        150,
+        140,
+        130,
+        130,
+        120,
+        120,
+        120
+      ]
     },
     {
       "name": "busy-in",
@@ -149,7 +324,20 @@
       "rows": 3,
       "frames": 12,
       "loop": false,
-      "durations": [70,80,85,90,95,95,90,85,80,80,85,90]
+      "durations": [
+        70,
+        80,
+        85,
+        90,
+        95,
+        95,
+        90,
+        85,
+        80,
+        80,
+        85,
+        90
+      ]
     },
     {
       "name": "busy-loop",
@@ -161,7 +349,16 @@
       "rows": 2,
       "frames": 8,
       "loop": true,
-      "durations": [110,110,110,110,110,110,110,110]
+      "durations": [
+        110,
+        110,
+        110,
+        110,
+        110,
+        110,
+        110,
+        110
+      ]
     },
     {
       "name": "busy-out",
@@ -173,11 +370,26 @@
       "rows": 3,
       "frames": 12,
       "loop": false,
-      "durations": [90,85,85,80,80,85,90,95,95,90,85,80]
+      "durations": [
+        90,
+        85,
+        85,
+        80,
+        80,
+        85,
+        90,
+        95,
+        95,
+        90,
+        85,
+        80
+      ]
     },
     {
       "name": "tend",
-      "characters": ["nana"],
+      "characters": [
+        "nana"
+      ],
       "label": "浇花",
       "category": "state",
       "promptable": true,
@@ -186,11 +398,38 @@
       "rows": 6,
       "frames": 24,
       "loop": false,
-      "durations": [120,120,130,140,150,160,160,160,150,150,160,170,170,160,150,150,160,160,150,150,140,140,140,140]
+      "durations": [
+        120,
+        120,
+        130,
+        140,
+        150,
+        160,
+        160,
+        160,
+        150,
+        150,
+        160,
+        170,
+        170,
+        160,
+        150,
+        150,
+        160,
+        160,
+        150,
+        150,
+        140,
+        140,
+        140,
+        140
+      ]
     },
     {
       "name": "tend-out",
-      "characters": ["nana"],
+      "characters": [
+        "nana"
+      ],
       "label": "浇花-起身",
       "category": "state",
       "promptable": true,
@@ -199,11 +438,23 @@
       "rows": 2,
       "frames": 8,
       "loop": false,
-      "durations": [100,120,130,130,120,110,100,90]
+      "durations": [
+        100,
+        120,
+        130,
+        130,
+        120,
+        110,
+        100,
+        90
+      ]
     },
     {
       "name": "wake",
-      "characters": ["vivian", "nana"],
+      "characters": [
+        "vivian",
+        "nana"
+      ],
       "label": "睡醒起身",
       "category": "state",
       "promptable": true,
@@ -212,20 +463,16 @@
       "rows": 2,
       "frames": 8,
       "loop": false,
-      "durations": [100,120,130,130,120,110,100,90]
-    },
-    {
-      "name": "gift",
-      "characters": ["vivian"],
-      "label": "害羞递显卡",
-      "category": "emote",
-      "promptable": true,
-      "sheet": "/chibi/motion/{character}/{character}-gift-sheet.webp",
-      "cols": 4,
-      "rows": 3,
-      "frames": 12,
-      "loop": false,
-      "durations": [100,110,120,120,130,130,140,150,160,160,160,160]
+      "durations": [
+        100,
+        120,
+        130,
+        130,
+        120,
+        110,
+        100,
+        90
+      ]
     },
     {
       "name": "remind",
@@ -237,7 +484,20 @@
       "rows": 3,
       "frames": 12,
       "loop": false,
-      "durations": [120,130,140,150,160,160,150,140,130,120,110,110]
+      "durations": [
+        120,
+        130,
+        140,
+        150,
+        160,
+        160,
+        150,
+        140,
+        130,
+        120,
+        110,
+        110
+      ]
     },
     {
       "name": "tired",
@@ -249,20 +509,41 @@
       "rows": 2,
       "frames": 8,
       "loop": true,
-      "durations": [160,160,160,160,160,160,160,160]
+      "durations": [
+        160,
+        160,
+        160,
+        160,
+        160,
+        160,
+        160,
+        160
+      ]
     },
     {
       "name": "umbrella",
       "label": "撑伞",
       "category": "state",
       "promptable": false,
-      "characters": ["vivian", "nana"],
+      "characters": [
+        "vivian",
+        "nana"
+      ],
       "sheet": "/chibi/motion/{character}/{character}-umbrella-sheet.webp",
       "cols": 4,
       "rows": 2,
       "frames": 8,
       "loop": true,
-      "durations": [160,160,160,160,160,160,160,160]
+      "durations": [
+        160,
+        160,
+        160,
+        160,
+        160,
+        160,
+        160,
+        160
+      ]
     },
     {
       "name": "music",
@@ -274,7 +555,16 @@
       "rows": 2,
       "frames": 8,
       "loop": true,
-      "durations": [160,160,160,160,160,160,160,160]
+      "durations": [
+        160,
+        160,
+        160,
+        160,
+        160,
+        160,
+        160,
+        160
+      ]
     },
     {
       "name": "clipboard",
@@ -286,37 +576,75 @@
       "rows": 1,
       "frames": 1,
       "loop": false,
-      "durations": [120]
+      "durations": [
+        120
+      ]
     },
     {
       "name": "rps-rock",
-      "label": "猜拳石头",
+      "label": "握拳加油 / 猜拳石头",
       "category": "emote",
-      "promptable": false,
-      "characters": ["vivian", "nana"],
+      "promptable": true,
+      "characters": [
+        "vivian",
+        "nana"
+      ],
       "sheet": "/chibi/motion/{character}/{character}-rps-rock-sheet.webp",
-      "cols": 1, "rows": 1, "frames": 1, "loop": false, "durations": [2500]
+      "cols": 1,
+      "rows": 1,
+      "frames": 1,
+      "loop": false,
+      "durations": [
+        2500
+      ]
     },
     {
       "name": "rps-scissors",
-      "label": "猜拳剪刀",
+      "label": "比耶剪刀手 / 猜拳剪刀",
       "category": "emote",
-      "promptable": false,
-      "characters": ["vivian", "nana"],
+      "promptable": true,
+      "characters": [
+        "vivian",
+        "nana"
+      ],
       "sheet": "/chibi/motion/{character}/{character}-rps-scissors-sheet.webp",
-      "cols": 1, "rows": 1, "frames": 1, "loop": false, "durations": [2500]
+      "cols": 1,
+      "rows": 1,
+      "frames": 1,
+      "loop": false,
+      "durations": [
+        2500
+      ]
     },
     {
       "name": "rps-paper",
-      "label": "猜拳布",
+      "label": "伸手 / 猜拳布",
       "category": "emote",
-      "promptable": false,
-      "characters": ["vivian", "nana"],
+      "promptable": true,
+      "characters": [
+        "vivian",
+        "nana"
+      ],
       "sheet": "/chibi/motion/{character}/{character}-rps-paper-sheet.webp",
-      "cols": 1, "rows": 1, "frames": 1, "loop": false, "durations": [2500]
+      "cols": 1,
+      "rows": 1,
+      "frames": 1,
+      "loop": false,
+      "durations": [
+        2500
+      ]
     }
   ],
   "expression_aliases": {
+    "reach-out": "rps-paper",
+    "伸手": "rps-paper",
+    "cheer": "rps-rock",
+    "加油": "rps-rock",
+    "加油打气": "rps-rock",
+    "victory": "rps-scissors",
+    "peace-sign": "rps-scissors",
+    "比耶": "rps-scissors",
+    "剪刀手": "rps-scissors",
     "star_eyes": "happy",
     "star_aura": "happy",
     "love_eyes": "happy",
@@ -357,25 +685,98 @@
     "loneliness": "dizzy"
   },
   "idle_triggers": {
-    "idle_short": { "threshold_secs": 45, "expression": "", "motion": "think", "duration_ms": 2600, "probability": 0.4 },
-    "idle_medium": { "threshold_secs": 150, "expression": "", "motion": "think", "duration_ms": 3200, "probability": 0.6 },
-    "idle_long": { "threshold_secs": 360, "expression": "", "motion": "smug", "duration_ms": 3000, "probability": 0.8 },
-    "idle_asleep": { "threshold_secs": 720, "expression": "", "motion": "sleep", "duration_ms": 4000, "probability": 0.95 }
+    "idle_short": {
+      "threshold_secs": 45,
+      "expression": "",
+      "motion": "think",
+      "duration_ms": 2600,
+      "probability": 0.4
+    },
+    "idle_medium": {
+      "threshold_secs": 150,
+      "expression": "",
+      "motion": "think",
+      "duration_ms": 3200,
+      "probability": 0.6
+    },
+    "idle_long": {
+      "threshold_secs": 360,
+      "expression": "",
+      "motion": "smug",
+      "duration_ms": 3000,
+      "probability": 0.8
+    },
+    "idle_asleep": {
+      "threshold_secs": 720,
+      "expression": "",
+      "motion": "sleep",
+      "duration_ms": 4000,
+      "probability": 0.95
+    }
   },
   "event_triggers": {
-    "user_return": { "expression": "", "motion": "happy", "duration_ms": 2400, "probability": 0.85 },
-    "chat_end": { "expression": "", "motion": "happy", "duration_ms": 2000, "probability": 0.5 },
-    "music_start": { "expression": "", "motion": "happy", "duration_ms": 2200, "probability": 0.6 },
-    "battery_low": { "expression": "", "motion": "angry", "duration_ms": 2600, "probability": 0.7 }
+    "user_return": {
+      "expression": "",
+      "motion": "happy",
+      "duration_ms": 2400,
+      "probability": 0.85
+    },
+    "chat_end": {
+      "expression": "",
+      "motion": "happy",
+      "duration_ms": 2000,
+      "probability": 0.5
+    },
+    "music_start": {
+      "expression": "",
+      "motion": "happy",
+      "duration_ms": 2200,
+      "probability": 0.6
+    },
+    "battery_low": {
+      "expression": "",
+      "motion": "angry",
+      "duration_ms": 2600,
+      "probability": 0.7
+    }
   },
   "mood_idle_expressions": {
-    "joy": { "expression": "happy", "priority": 10 },
-    "closeness": { "expression": "happy", "priority": 8 },
-    "anger": { "expression": "angry", "priority": 12 },
-    "curiosity": { "expression": "think", "priority": 6 },
-    "fear": { "expression": "dizzy", "priority": 5 },
-    "sadness": { "expression": "dizzy", "priority": 5 },
-    "loneliness": { "expression": "dizzy", "priority": 4 }
+    "joy": {
+      "expression": "happy",
+      "priority": 10
+    },
+    "closeness": {
+      "expression": "happy",
+      "priority": 8
+    },
+    "anger": {
+      "expression": "angry",
+      "priority": 12
+    },
+    "curiosity": {
+      "expression": "think",
+      "priority": 6
+    },
+    "fear": {
+      "expression": "dizzy",
+      "priority": 5
+    },
+    "sadness": {
+      "expression": "dizzy",
+      "priority": 5
+    },
+    "loneliness": {
+      "expression": "dizzy",
+      "priority": 4
+    }
   },
-  "smug_cues": ["得意", "傲娇", "嘴硬", "本小姐", "被夸", "赢了", "炫耀"]
+  "smug_cues": [
+    "得意",
+    "傲娇",
+    "嘴硬",
+    "本小姐",
+    "被夸",
+    "赢了",
+    "炫耀"
+  ]
 }

@@ -1,0 +1,41 @@
+[
+  {
+    "id": "fonts",
+    "label": "手写字体",
+    "version": "1.0.0",
+    "files": [
+      "fonts/ma-shan-zheng.woff2"
+    ]
+  },
+  {
+    "id": "stickers",
+    "label": "内置贴纸",
+    "version": "1.0.0",
+    "files": [
+      "stickers/vivian_happy_01-v2.webp",
+      "stickers/vivian_shy_01-v2.webp",
+      "stickers/vivian_curious_01-v2.webp",
+      "stickers/vivian_proud_01-v2.webp",
+      "stickers/vivian_thanks_01-v2.webp",
+      "stickers/vivian_cheer_01-v2.webp",
+      "stickers/vivian_laugh_01-v2.webp",
+      "stickers/vivian_okay_01-v2.webp",
+      "stickers/vivian_wave_01-v2.webp",
+      "stickers/vivian_sleepy_01-v2.webp",
+      "stickers/vivian_surprise_01-v2.webp",
+      "stickers/vivian_heart_01-v2.webp",
+      "stickers/nana_happy_01-v2.webp",
+      "stickers/nana_shy_01-v2.webp",
+      "stickers/nana_curious_01-v2.webp",
+      "stickers/nana_proud_01-v2.webp",
+      "stickers/nana_thanks_01-v2.webp",
+      "stickers/nana_cheer_01-v2.webp",
+      "stickers/nana_laugh_01-v2.webp",
+      "stickers/nana_okay_01-v2.webp",
+      "stickers/nana_wave_01-v2.webp",
+      "stickers/nana_sleepy_01-v2.webp",
+      "stickers/nana_surprise_01-v2.webp",
+      "stickers/nana_heart_01-v2.webp"
+    ]
+  }
+]

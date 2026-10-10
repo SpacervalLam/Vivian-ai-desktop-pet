@@ -1,5 +1,6 @@
 import { ReplyWaiting } from '../chibi/replyWaiting';
-import { speechDisplayMotion } from '../chibi/speechPose';
+import { CrossPresentation, type CrossPresentationEvent } from '../chibi/crossPresentation';
+import { speechDisplayMotion, CONVERSATION_GESTURES } from '../chibi/speechPose';
 import {
   forwardRef,
   useCallback,
@@ -11,12 +12,14 @@ import {
 } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-import { currentMonitor, getCurrentWindow } from '@tauri-apps/api/window';
+import { currentMonitor, getCurrentWindow, getAllWindows } from '@tauri-apps/api/window';
 import { getCharacterId } from '../characterContext';
 import { useAppStore } from '../stores/useAppStore';
 import { positioningCoordinator } from '../hooks/positioningCoordinator';
+import { useDesktopPhysics } from '../hooks/useDesktopPhysics';
 import {
   animation,
+  CHIBI_CHARACTER_IDS,
   frameDurationMs,
   frameStyle,
   getMotion,
@@ -30,6 +33,7 @@ import {
   type ChibiMotionSpec,
 } from '../chibi/motionRegistry';
 import { planAmbientWalk } from '../chibi/walkPlan';
+import { ambientLane, type PetRect } from '../chibi/ambientLane';
 import { runSlide } from '../chibi/slideTrack';
 import { runFlee, FLEE_TAKEOVER_HOLD_MS, type FleeEnv } from '../chibi/fleeTrack';
 import type { FleeGeometry } from '../chibi/fleePlan';
@@ -296,6 +300,7 @@ export interface ChibiPetCanvasProps {
   onOpenQuickChat?: () => void;
   /** Kept compatible with ModelCanvas while stage walking is coordinated above the renderer. */
   ambientMotionEnabled?: boolean;
+  desktopPhysicsEnabled?: boolean;
   /** Browser-only visual QA route; avoids subscribing to unavailable Tauri events. */
   previewMode?: boolean;
 }
@@ -323,15 +328,20 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
       onInteraction,
       onOpenQuickChat,
       ambientMotionEnabled = true,
+      desktopPhysicsEnabled = false,
       previewMode = false,
     },
     ref,
   ) {
     const characterId = normalizeCharacterId();
     const stageRef = useRef<HTMLDivElement | null>(null);
+    const physicsLayerRef = useRef<HTMLDivElement | null>(null);
+    const physics = useDesktopPhysics(desktopPhysicsEnabled && !previewMode, physicsLayerRef);
     const [poseName, setPoseName] = useState<ChibiPose>('idle');
     const poseNameRef = useRef<ChibiPose>('idle');
     const waitingForReplyRef = useRef(false);
+    const crossPresentationRef = useRef(new CrossPresentation(characterId));
+    const [, setCrossVersion] = useState(0);
     const [audioPlaying, setAudioPlaying] = useState(false);
     const visibleSpeech = useAppStore(state => !!state.currentBubble?.trim()
       || state.settledBubbles.some(bubble => !!bubble.text.trim()));
@@ -428,7 +438,7 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
      * 骗人，还会因为姿态不是 `idle` 把自主漫步冻住）。现在所有表情都是限时的，
      * 播完必然回到这里。
      */
-    const isAtRest = useCallback(() => poseNameRef.current === 'idle' && !speakingRef.current, []);
+    const isAtRest = useCallback(() => poseNameRef.current === 'idle' && !speakingRef.current && !crossPresentationRef.current.motion, []);
 
     /**
      * 回到基准姿态：等待首字时回「思考中」，忙碌中回「看手机」循环，否则回 `idle`。
@@ -657,6 +667,8 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
       const frames = Array.from({ length: spec.frames }, (_, index) => index);
       // Single-frame illustrations should remain visible for the requested interaction duration.
       const durations = spec.frames === 1 && durationMs && durationMs > 0 ? [durationMs] : spec.durations;
+      // Reserve the selected gesture while its sheet loads, before later text/done events arrive.
+      if (CONVERSATION_GESTURES.has(spec.name)) setActivePose(spec.name);
       void (async () => {
         const completed = await playFrames(spec, frames, durations, token, spec.name);
         // hold 动作（如睡觉）播完停在末帧，不回基调。
@@ -839,11 +851,11 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
 
     useImperativeHandle(ref, () => ({
       setExpression: (name, durationMs) => {
-        if ((['remind', 'tired', 'umbrella', 'music', 'clipboard'].includes(name) || name.startsWith('rps-')) && (pressedRef.current
-          || busyPhaseRef.current !== 'idle' || positioningCoordinator.fleeInFlight
-          || positioningCoordinator.ambientMoveInFlight)) return;
-        if (waitingForReplyRef.current && resolveMotion(name, characterId).name !== 'drag') return;
         const spec = resolveMotion(name, characterId);
+        if ((['remind', 'tired', 'umbrella', 'music', 'clipboard'].includes(spec.name) || CONVERSATION_GESTURES.has(spec.name)) && (pressedRef.current
+          || busyPhaseRef.current !== 'idle' || positioningCoordinator.fleeInFlight
+          || positioningCoordinator.ambientMoveInFlight || positioningCoordinator.dragInFlight || positioningCoordinator.physicsInFlight)) return;
+        if (waitingForReplyRef.current && resolveMotion(name, characterId).name !== 'drag') return;
         if (spec.kind === 'animation' && spec.directions) {
           setWalkDirection(/right|east|右/i.test(name) ? 'right' : 'left');
         }
@@ -1028,22 +1040,39 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
         else unlisteners.push(unlisten);
       };
 
+      const mayShowSpeechFeedback = () => !waitingForReplyRef.current && !pressAliveRef.current &&
+        !positioningCoordinator.dragInFlight && speechDisplayMotion(poseNameRef.current, true, false) === 'talk';
       void add<{ character_id?: string }>('tts:started', (p) => {
         if (mine(p.character_id)) setAudioPlaying(true);
-        if (mine(p.character_id) && !waitingForReplyRef.current) applyMotion('talk');
+        // Audio is a display overlay; it must not cancel dragging, sleep or walking.
       });
       void add<{ character_id?: string }>('tts:finished', (p) => {
         if (mine(p.character_id)) setAudioPlaying(false);
-        if (mine(p.character_id) && !waitingForReplyRef.current) applyMotion('happy', 700);
+        if (mine(p.character_id) && mayShowSpeechFeedback()) applyMotion('happy', 700);
       });
       void add<{ character_id?: string }>('tts:error', (p) => {
         if (mine(p.character_id)) setAudioPlaying(false);
-        if (mine(p.character_id) && !waitingForReplyRef.current) applyMotion('idle');
+        if (mine(p.character_id) && mayShowSpeechFeedback()) applyMotion('idle');
       });
       void add<{ speaker_id?: string }>('presentation:stop', p => {
         if (mine(p.speaker_id)) setAudioPlaying(false);
       });
       const waiting = new ReplyWaiting();
+      const cross = crossPresentationRef.current;
+      let crossWatchdog: number | null = null;
+      const clearCrossWatchdog = () => {
+        if (crossWatchdog !== null) window.clearTimeout(crossWatchdog);
+        crossWatchdog = null;
+      };
+      const refreshCross = () => {
+        setCrossVersion(version => version + 1);
+        clearCrossWatchdog();
+        if (cross.motion) crossWatchdog = window.setTimeout(() => {
+          crossWatchdog = null;
+          cross.clear();
+          setCrossVersion(version => version + 1);
+        }, REPLY_THINKING_TIMEOUT_MS);
+      };
       type ReplyEvent = { character_id?: string; stream_id?: string; text?: string };
       // 思考看门狗：进入「等待回复」后若长时间没有任何终态事件，强制退出思考循环。
       // 后端卡死（抢不到 think_lock、或 think 内部死锁）时不会有任何 chat:* 事件到达，
@@ -1074,6 +1103,9 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
       };
       const startReply = (p: ReplyEvent) => {
         if (!mine(p.character_id)) return;
+        // Direct user conversation takes over; late peer chunks cannot reclaim it.
+        cross.clear();
+        refreshCross();
         waiting.start(p.stream_id ?? '');
         updateWaiting();
       };
@@ -1082,29 +1114,43 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
       void add<ReplyEvent>('chat:chunk', (p) => {
         if (!mine(p.character_id) || !waiting.text(p.stream_id ?? '', p.text ?? '')) return;
         updateWaiting();
-        applyMotion('talk');
+        if (!CONVERSATION_GESTURES.has(poseNameRef.current)) applyMotion('talk');
       });
       const finishReply = (p: ReplyEvent, success = false) => {
         if (!mine(p.character_id)) return;
         waiting.finish(p.stream_id ?? '');
         updateWaiting();
-        if (success && !waiting.thinking) applyMotion('happy', 850);
+        if (success && !waiting.thinking && mayShowSpeechFeedback()) applyMotion('happy', 850);
       };
       void add<ReplyEvent>('chat:done', p => finishReply(p, true));
       for (const event of ['chat:error', 'chat:cancelled', 'chat:config_error', 'chat:presence_blocked', 'chat:yielded', 'chat:waiting-ended']) {
         void add<ReplyEvent>(event, p => finishReply(p));
       }
-      void add<{ speaker_id?: string; listener_id?: string }>('cross:start', (p) => {
-        if (p.speaker_id?.toLowerCase() === characterId) applyMotion('talk');
-        else if (p.listener_id?.toLowerCase() === characterId) applyMotion('listen');
+      void add<CrossPresentationEvent>('cross:start', p => {
+        if (cross.update(p)) refreshCross();
       });
-      void add<{ speaker_id?: string; listener_id?: string }>('cross:chunk', (p) => {
-        if (p.speaker_id?.toLowerCase() === characterId) applyMotion('talk');
-        else if (p.listener_id?.toLowerCase() === characterId) applyMotion('listen');
+      void add<CrossPresentationEvent>('cross:chunk', p => {
+        if (cross.update(p, true)) refreshCross();
       });
-      void add<{ speaker_id?: string; listener_id?: string }>('cross:done', (p) => {
-        if (p.speaker_id?.toLowerCase() === characterId || p.listener_id?.toLowerCase() === characterId) {
-          applyMotion('happy', 700);
+      for (const event of ['cross:done', 'cross:error']) {
+        void add<CrossPresentationEvent>(event, p => {
+          const finished = cross.finish(p.stream_id);
+          if (finished) refreshCross();
+          // Only the matching speaker may express a completed social reply.
+          if (event !== 'cross:done' || !finished || !mine(p.speaker_id) || cross.motion || waitingForReplyRef.current ||
+              pressedRef.current || positioningCoordinator.dragInFlight || positioningCoordinator.physicsInFlight ||
+              positioningCoordinator.fleeInFlight || positioningCoordinator.ambientMoveInFlight || busyPhaseRef.current !== 'idle' ||
+              (speechDisplayMotion(poseNameRef.current, true, false) !== 'talk' && !CONVERSATION_GESTURES.has(poseNameRef.current))) return;
+          const gesture = [p.motion, p.expression].map(name => resolveMotion(name, characterId).name)
+            .find(name => CONVERSATION_GESTURES.has(name));
+          if (gesture) applyMotion(gesture, 2500);
+        });
+      }
+      void add<{ character_id: string; online: boolean }>('character:online_changed', p => {
+        if (!p.online) {
+          if (mine(p.character_id)) cross.clear();
+          else cross.removePeer(p.character_id);
+          refreshCross();
         }
       });
 
@@ -1112,6 +1158,8 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
         cancelled = true;
         unlisteners.forEach((unlisten) => unlisten());
         clearThinkingWatchdog();
+        clearCrossWatchdog();
+        cross.clear();
         waitingForReplyRef.current = false;
       };
     }, [characterId, previewMode, applyMotion]);
@@ -1148,9 +1196,10 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
         // fleeInFlight 也在列：生气脸一播完桌宠就回到 idle，而逃离的位移可能还在跑
         // （逃离不播舞台动作，所以「姿态不是 idle」不再能替我们挡住这一趟）。
         if (
-          cancelled || pressedRef.current || speakingRef.current || poseNameRef.current !== 'idle' ||
+          cancelled || pressedRef.current || speakingRef.current || crossPresentationRef.current.motion || poseNameRef.current !== 'idle' ||
           positioningCoordinator.fullscreenHidden || positioningCoordinator.fullscreenInFlight ||
           positioningCoordinator.smartPositioningInFlight || positioningCoordinator.ambientMoveInFlight ||
+          (positioningCoordinator.physicsEnabled && (!positioningCoordinator.physicsLane || positioningCoordinator.physicsInFlight)) ||
           positioningCoordinator.fleeInFlight
         ) {
           scheduleRetry();
@@ -1159,7 +1208,9 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
         positioningCoordinator.ambientMoveInFlight = true;
         // 只有「被占用」才值得重试；能走到判断这一步说明是主动决定不走，按静息期处理。
         let retry = false;
-        try {          const windowHandle = getCurrentWindow();
+        let walkToken: number | undefined;
+        try {
+          const windowHandle = getCurrentWindow();
           const [position, size, monitor] = await Promise.all([
             windowHandle.outerPosition(),
             windowHandle.outerSize(),
@@ -1171,8 +1222,30 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
             return;
           }
 
-          const minX = monitor.position.x + EDGE_MARGIN_PX;
-          const maxX = monitor.position.x + monitor.size.width - size.width - EDGE_MARGIN_PX;
+          // Read visible peers only when planning a walk, without another polling timer.
+          const peerWindows = (await getAllWindows()).filter(peer =>
+            peer.label !== windowHandle.label && CHIBI_CHARACTER_IDS.includes(peer.label));
+          const peers = (await Promise.all(peerWindows.map(async (peer): Promise<PetRect | null> => {
+            try {
+              if (!await peer.isVisible()) return null;
+              const [pos, bounds] = await Promise.all([peer.outerPosition(), peer.outerSize()]);
+              return { id: peer.label, x: pos.x, y: pos.y, width: bounds.width, height: bounds.height };
+            } catch { return null; } // A peer may close while its geometry is being read.
+          }))).filter((peer): peer is PetRect => peer !== null);
+          if (cancelled || positioningCoordinator.dragInFlight || crossPresentationRef.current.motion || !isAtRest()) {
+            retry = true;
+            return;
+          }
+          const margin = EDGE_MARGIN_PX * monitor.scaleFactor;
+          const area = monitor.workArea;
+          const physicsLane = positioningCoordinator.physicsLane;
+          const { minX, maxX } = ambientLane(
+            { id: characterId, x: position.x, y: position.y, width: size.width, height: size.height },
+            peers,
+            Math.max(area.position.x + margin, physicsLane?.minX ?? -Infinity),
+            Math.min(area.position.x + area.size.width - size.width - margin, physicsLane?.maxX ?? Infinity),
+            margin,
+          );
           /** 朝这个方向还剩多少可走空间（可能为负：桌宠已在边界外）。 */
           const roomFor = (dir: number) => (dir > 0 ? maxX - position.x : position.x - minX);
 
@@ -1205,28 +1278,38 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
 
           const turned = await playTurn(nextDirection);
           if (!turned || cancelled) return;
+          if (crossPresentationRef.current.motion || positioningCoordinator.dragInFlight) {
+            if (!positioningCoordinator.dragInFlight) returnToTone();
+            return;
+          }
 
           // 走动与窗口滑动并行、共用同一条时长轴（frames × frameDelayMs === durationMs）。
           const walk = beginWalk(nextDirection, plan.frames, plan.frameDelayMs);
+          walkToken = walk.token;
           const slid = await runSlide({
             fromX: position.x,
             fromY: position.y,
             toX: targetX,
             toY: position.y,
             durationMs: plan.durationMs,
-            apply: (x, y) => {
-              void invoke('set_window_position', { x, y }).catch(() => {});
-            },
+            apply: (x, y) => invoke('set_window_position', { x, y }),
             shouldAbort: () =>
-              cancelled || pressedRef.current || sequenceTokenRef.current !== walk.token,
+              cancelled || pressedRef.current || positioningCoordinator.dragInFlight ||
+              speakingRef.current || positioningCoordinator.fullscreenHidden || positioningCoordinator.fullscreenInFlight ||
+              positioningCoordinator.physicsInFlight ||
+              !!crossPresentationRef.current.motion || sequenceTokenRef.current !== walk.token,
           });
           // 被打断：窗口停在半途，姿态交给接管者，不再插手。
-          if (!slid) return;
+          if (!slid) {
+            if (!cancelled && !positioningCoordinator.dragInFlight) returnToTone(walk.token);
+            return;
+          }
           if (!(await walk.done)) return;
           await playTurnBack();
         } catch {
           // 智能避让仍是权威；自主漫步只是可选的舞台调度，出错就安静跳过这一趟。
           retry = true;
+          if (walkToken !== undefined && !cancelled && !positioningCoordinator.dragInFlight) returnToTone(walkToken);
         } finally {
           positioningCoordinator.ambientMoveInFlight = false;
           if (retry) scheduleRetry();
@@ -1244,7 +1327,7 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
         if (timer !== null) window.clearTimeout(timer);
         positioningCoordinator.ambientMoveInFlight = false;
       };
-    }, [ambientMotionEnabled, beginWalk, playTurn, playTurnBack, previewMode]);
+    }, [ambientMotionEnabled, beginWalk, characterId, isAtRest, playTurn, playTurnBack, previewMode, returnToTone]);
 
     useEffect(() => () => {
       clearPoseTimer();
@@ -1468,7 +1551,7 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
      * 帧序列图集可用时按帧序列取格；不可用时退回主图集的 `idle` 格位——帧序列的
      * `frame` 序号在主图集里没有意义，拿它去定位只会取到无关的一格。
      */
-    const displayMotion = speechDisplayMotion(poseName, speakingRef.current, pressed);
+    const displayMotion = speechDisplayMotion(physics.airborne && !positioningCoordinator.dragInFlight ? 'drag' : poseName, speakingRef.current, pressed, crossPresentationRef.current.motion);
     const activeSpec = resolveMotion(displayMotion, characterId);
     const activeSheet =
       activeSpec.kind === 'animation'
@@ -1485,11 +1568,13 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
         onWheel={handleWheel}
         aria-label={`${characterId} desktop pet`}
       >
+        {physics.error && <span role="status" className="chibi-physics-error" title="Desktop physics unavailable">⚠</span>}
         <div
           ref={stageRef}
           className={`chibi-pet-stage pose-${displayMotion}${pressed ? ' is-pressed' : ''}`}
         >
           <div className="chibi-pet-shadow" />
+          <div ref={physicsLayerRef} className="chibi-pet-physics-feedback">
           <div ref={tapFeedbackRef} className="chibi-pet-tap-feedback">
             <div
               className="chibi-pet-sprite"
@@ -1555,6 +1640,7 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
                 }
               }}
             />
+          </div>
           </div>
         </div>
       </div>

@@ -1728,7 +1728,13 @@ impl FastSemanticAnalyzer {
                             &format!("正在嵌入语义理解语料（{}）… {} 条", $name, $corpus.len()),
                         );
                         let embs = self.provider
-                            .embed_batch_chunked(&texts, SEMANTIC_EMBED_CHUNK_SIZE, &|_, _| {})
+                            .embed_batch_chunked(&texts, SEMANTIC_EMBED_CHUNK_SIZE, &|done, total| {
+                                crate::startup::emit_progress(
+                                    base + $offset,
+                                    100,
+                                    &format!("正在嵌入语义理解语料（{}）… {}/{}", $name, done, total),
+                                );
+                            })
                             .map_err(|e| format!("嵌入语料失败 ({}): {}", $name, e))?;
                         if use_cache {
                             super::corpus_cache::save(

@@ -23,10 +23,11 @@ for (const row of rows) {
   assert.ok(clearPixels>512*512*0.2, `${row.id}: transparent canvas`);
   totalBytes += (await fs.stat(file)).size;
   if (process.argv.includes('--dist')) {
-    assert.deepEqual(await fs.readFile(path.join('dist/stickers', row.filename)), await fs.readFile(file));
+    assert.deepEqual(await fs.readFile(path.join('tmp/optional-resources/stickers/stickers', row.filename)), await fs.readFile(file));
+    await assert.rejects(fs.access(path.join('dist/stickers', row.filename)), {code:'ENOENT'});
   }
 }
 assert.ok(totalBytes<3*1024*1024, 'Builtin sticker artwork must fit a 3 MB package budget');
 assert.ok((await fs.readdir(dir)).every(file => file==='catalog.json' || /-v2\.webp$/.test(file)), 'No source sheets or legacy images');
-if (process.argv.includes('--dist')) assert.equal((await fs.readdir('dist/stickers')).length, rows.length);
+if (process.argv.includes('--dist')) assert.equal((await fs.readdir('tmp/optional-resources/stickers/stickers')).length, rows.length);
 console.log(`Sticker assets: ${rows.length} transparent WebPs, ${(totalBytes/1024/1024).toFixed(2)} MB; ${process.argv.includes('--dist')?'production assets verified':'source assets verified'}.`);

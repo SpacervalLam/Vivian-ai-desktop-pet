@@ -10,7 +10,6 @@ export interface AssistantPanelMeta { zh: string; ja: string; en: string }
 export const ASSISTANT_PANELS: Record<string, AssistantPanelMeta> = {
   notes: { zh: '随手记', ja: 'メモ', en: 'Notes' },
   shortcuts: { zh: '快捷启动', ja: 'クイック起動', en: 'Shortcuts' },
-  games: { zh: '小游戏', ja: 'ゲーム', en: 'Games' },
   preferences: { zh: '偏好', ja: '好み', en: 'Preferences' },
   voice: { zh: '语音诊断', ja: '音声診断', en: 'Voice diagnostics' },
 };

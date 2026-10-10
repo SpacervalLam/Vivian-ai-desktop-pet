@@ -1,5 +1,7 @@
 //! Test the application's actual portable modules without starting Tauri or accessing user data.
 #![allow(dead_code)]
+#[path = "../src/drag_motion.rs"]
+pub mod drag_motion;
 #[path = "../src/brain/coding_compaction.rs"]
 pub mod coding_compaction;
 #[path = "../src/brain/coding_memory_persistence.rs"]

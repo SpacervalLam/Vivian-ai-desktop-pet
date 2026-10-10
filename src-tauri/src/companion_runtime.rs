@@ -5,14 +5,14 @@ use chrono::Timelike;
 use parking_lot::Mutex;
 use serde_json::json;
 use tauri::{Emitter, Manager};
-use crate::companion_policy::{HourlyClock, PressureState};
+use crate::companion_policy::{ClipboardChanges, HourlyClock, PressureState};
 use crate::state::AppState;
 
 #[derive(Default)]
 struct FeedbackState {
     clock: HourlyClock, cpu: PressureState, memory: PressureState,
     network: Option<bool>, last_pressure_notice: Option<i64>, last_network_notice: Option<i64>,
-    clipboard_sequence: Option<u32>, rain: Option<bool>, song: Option<String>, music_initialized: bool,
+    clipboard: ClipboardChanges, rain: Option<bool>, song: Option<String>, music_initialized: bool,
     last_weather_notice: Option<i64>, last_music_notice: Option<i64>,
 }
 static FEEDBACK: LazyLock<Mutex<FeedbackState>> = LazyLock::new(Default::default);
@@ -34,6 +34,15 @@ pub fn tick(app: &tauri::AppHandle) {
     let cfg = state.config.read().get_all();
     RESOURCE_FEEDBACK.store(cfg.companion.resource_feedback && cfg.proactive.enable_system_pressure_trigger, Ordering::Relaxed);
     MUSIC_FEEDBACK.store(cfg.companion.music_feedback, Ordering::Relaxed);
+    // Detect changes independently of the pet's online/busy state. Never read content here.
+    {
+        let mut feedback = FEEDBACK.lock();
+        let sequence = crate::desktop_clipboard::sequence();
+        let changed = feedback.clipboard.observe(sequence);
+        if cfg.companion.clipboard_hint && changed {
+            let _ = app.emit("companion:clipboard-hint", json!({"sequence":sequence}));
+        }
+    }
     let now = chrono::Local::now();
     let (_process, connected, metrics) = state.world_provider.companion_observation();
     let quiet = quiet_reason(&state);
@@ -55,12 +64,6 @@ pub fn tick(app: &tauri::AppHandle) {
     let zh = cfg.base.language.starts_with("zh");
     let ja = cfg.base.language.starts_with("ja");
     let mut messages = Vec::new();
-    let sequence = crate::desktop_clipboard::sequence();
-    let clipboard_changed = sequence != 0 && feedback.clipboard_sequence.is_some_and(|old| old != sequence);
-    feedback.clipboard_sequence = Some(sequence);
-    if cfg.companion.clipboard_hint && clipboard_changed {
-        let _ = app.emit("companion:clipboard-hint", json!({"sequence":sequence}));
-    }
     let (weather, music) = state.world_provider.companion_scene();
     if let Some(weather) = weather.filter(|w| now.timestamp() - w.cached_at < 7200) {
         let changed = feedback.rain.is_some_and(|old| old != weather.is_precipitating);

@@ -614,6 +614,9 @@ fn default_character_model_dir() -> String {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WindowConfig {
+    /// Optional terrain/gravity mode; otherwise retain free desktop placement.
+    #[serde(default)]
+    pub desktop_physics_enabled: bool,
     /// 智能避让：实时检测屏幕纯色区域，将桌宠移动到不遮挡内容的位置。
     /// 默认启用；用户可在设置面板的通用页签关闭。
     #[serde(default = "default_true")]
@@ -1638,6 +1641,7 @@ impl Default for AppConfig {
                 user_avatar_path: None,
             },
             window: WindowConfig {
+                desktop_physics_enabled: false,
                 smart_positioning_enabled: true,
             },
             pet_render: PetRenderConfig {
@@ -1794,8 +1798,11 @@ impl ConfigManager {
         let mut config_value = serde_json::to_value(&*config)
             .map_err(|e| VivianError::Serialization(e.to_string()))?;
         Self::set_nested(&mut config_value, key, value)?;
-        *config = serde_json::from_value(config_value)
+        let mut next: AppConfig = serde_json::from_value(config_value)
             .map_err(|e| VivianError::Serialization(e.to_string()))?;
+        crate::desktop_menu_policy::enforce_movement_exclusion(
+            &mut next.window.smart_positioning_enabled, &mut next.window.desktop_physics_enabled, key);
+        *config = next;
         Ok(())
     }
 
@@ -1839,6 +1846,10 @@ impl ConfigManager {
                 *shortcut = format!("CommandOrControl+Shift+{next}");
             }
         }
+
+        // Legacy configurations could enable both; preserve the previously effective gravity mode.
+        crate::desktop_menu_policy::enforce_movement_exclusion(
+            &mut config.window.smart_positioning_enabled, &mut config.window.desktop_physics_enabled, "window");
 
         // ── 配置迁移：ai.enable_native_function_calling → tools.enable_native_function_calling ──
         // 旧版本中开关存于 ai 下；新版本统一到 tools 下。

@@ -371,50 +371,6 @@
 .assistant-kind-switch button { flex: 1; min-height: 30px; border-radius: 9px; font-size: 12.5px; font-weight: 500; color: var(--a-dim); transition: color .16s ease, background .16s ease; }
 .assistant-kind-switch button[aria-pressed=true] { color: var(--a-accent-ink); background: var(--a-accent); box-shadow: 0 4px 12px -5px var(--a-accent-glow); }
 
-/* --- 小游戏 --- */
-.assistant-hands { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 9px; }
-.assistant-rps-cell { display: grid; gap: 7px; justify-items: center; }
-.assistant-rps {
-  display: grid; place-items: center; width: 100%; padding: 18px 0;
-  border-radius: var(--a-r-lg); color: var(--a-text);
-  background: var(--a-surface-raised); border: 1px solid var(--a-rim);
-  box-shadow: var(--a-inset), var(--a-shadow-1);
-  transition: transform .16s ease, box-shadow .16s ease, border-color .16s ease;
-}
-.assistant-rps:hover:not(:disabled) { transform: translateY(-2px); border-color: var(--a-accent-rim); box-shadow: var(--a-inset), var(--a-shadow-2); }
-.assistant-rps:active:not(:disabled) { transform: translateY(0) scale(.97); }
-/* 裸表情，不套外壳：外壳在同一个 tile 里等于把"框套框"叠了两层。 */
-.assistant-rps-glyph { font-size: 32px; line-height: 1; }
-.assistant-rps-caption { font-size: 12px; color: var(--a-dim); }
-/* 骰子卡吃掉剩余高度，大数字居中，掷骰按钮做大 —— 这是本页唯一的主视觉。
-   强调色只出现在按钮和中心那圈柔光上：整块铺 --a-accent-tint 的话，500px 的
-   面积会把 13% 的青色放大成一大片色块，两种主题下都压不住。 */
-.assistant-dice {
-  flex: 1; min-height: 300px; display: flex; flex-direction: column;
-  align-items: center; justify-content: center; gap: 16px;
-  padding: 24px; text-align: center; position: relative; overflow: hidden;
-  background: var(--a-surface-soft);
-}
-.assistant-dice::before {
-  content: ''; position: absolute; inset: 0; pointer-events: none;
-  background: radial-gradient(46% 24% at 50% 50%, var(--a-accent-glow), transparent 70%);
-  opacity: .45;
-}
-.assistant-dice > * { position: relative; z-index: 1; }
-.assistant-dice-read { display: flex; flex-direction: column; align-items: center; gap: 6px; }
-.assistant-dice-value { font: 400 64px/1 var(--a-mono); font-variant-numeric: tabular-nums; letter-spacing: -3px; color: var(--a-text); }
-.assistant-dice-value-empty { font-size: 44px; color: var(--a-ghost); letter-spacing: 0; }
-.assistant-dice-caption { font-size: 12px; color: var(--a-dim); }
-.assistant-dice button {
-  display: grid; place-items: center; width: 66px; height: 66px; border-radius: 20px;
-  font-size: 30px; line-height: 1; color: var(--a-accent-ink);
-  background: var(--a-accent); border: 1px solid var(--a-rim-strong);
-  box-shadow: 0 10px 26px -10px var(--a-accent-glow);
-  transition: transform .18s cubic-bezier(.34, 1.56, .64, 1);
-}
-.assistant-dice button:hover:not(:disabled) { transform: rotate(-14deg) scale(1.05); }
-.assistant-dice button:active:not(:disabled) { transform: rotate(-180deg) scale(.94); }
-
 /* --- 快捷启动 ---
    行式条目而不是双列小卡：344px 的宽度下双列塞不下 target，全被截成空串。
    列表区做成有边界的面板 —— 条目少的时候，剩下的空档有面板托着才是"列表还空着"，
@@ -474,14 +430,13 @@
   .assistant-grid { gap: 7px; }
   .assistant-tile { padding: 10px; gap: 8px; }
   .assistant-shortcut-kind { width: 28px; }
-  .assistant-dice-value { font-size: 52px; }
 }
 @media (prefers-reduced-motion: reduce) {
   .desktop-assistant *, .desktop-assistant *::before, .desktop-assistant *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition-duration: .001ms !important; }
 }
 
 /* Focused utility pages: neutral surfaces, one quiet accent. */
-:root .desktop-assistant:is([data-panel=notes], [data-panel=shortcuts], [data-panel=games]) {
+:root .desktop-assistant:is([data-panel=notes], [data-panel=shortcuts]) {
   color-scheme: dark;
   --a-base: light-dark(#f7f8fa, #15171c);
   --a-text: light-dark(#282d36, #eceef3);
@@ -507,7 +462,7 @@
 @media (prefers-color-scheme: light) {
   :root:not([data-theme=dark]) .desktop-assistant { color-scheme: light; }
 }
-.desktop-assistant:is([data-panel=notes], [data-panel=shortcuts], [data-panel=games]) .assistant-aurora { display: none; }
+.desktop-assistant:is([data-panel=notes], [data-panel=shortcuts]) .assistant-aurora { display: none; }
 .desktop-assistant:is([data-panel=notes], [data-panel=shortcuts]) .assistant-body { gap: 18px; }
 .assistant-intro { display: flex; align-items: flex-start; gap: 11px; padding: 4px 2px 2px; }
 .assistant-intro > svg { color: var(--a-dim); margin-top: 3px; }
@@ -535,51 +490,6 @@
 .desktop-assistant[data-panel=shortcuts] .assistant-shortcut-form { padding: 16px; border-radius: 14px; }
 .desktop-assistant[data-panel=shortcuts] .assistant-kind-switch { background: var(--a-well); border: 0; border-radius: 9px; }
 .desktop-assistant[data-panel=shortcuts] .assistant-kind-switch button[aria-pressed=true] { color: var(--a-text); background: var(--a-surface); box-shadow: 0 1px 4px #00000012; border: 1px solid var(--a-rim); border-radius: 7px; }
-
-/* Play journal: squared paper, washi tape, and the companion's own sticker. */
-:root .desktop-assistant[data-panel=games] {
-  --a-base: light-dark(#fbf5ec, #241f2a);
-  --a-text: light-dark(#514451, #f0e4ef);
-  --a-dim: light-dark(#826b7b, #cbb3c5);
-  --a-faint: light-dark(#937b88, #b59aaa);
-  --a-ghost: light-dark(#ae92a2, #977f94);
-  --a-surface: light-dark(#fffdf8, #302936);
-  --a-surface-soft: var(--a-surface);
-  --a-surface-raised: var(--a-surface);
-  --a-rim: light-dark(#e7d7d9, #514152);
-  --a-accent: light-dark(#eab2c4, #c990b5);
-  --a-accent-ink: #4e3448;
-  --a-accent-rim: light-dark(#b67c9f, #d6a7ce);
-  --journal-grid: light-dark(#bb9ba41a, #d7adcd0c);
-  --journal-tape: light-dark(#dcd2eeaa, #80689180);
-  background-image: linear-gradient(var(--journal-grid) 1px, transparent 1px), linear-gradient(90deg, var(--journal-grid) 1px, transparent 1px);
-  background-size: 20px 20px;
-}
-.desktop-assistant[data-panel=games] .assistant-body { gap: 16px; padding-top: 12px; }
-.assistant-game-intro { display: flex; align-items: center; gap: 4px; min-height: 126px; padding: 4px 2px; }
-.assistant-game-intro > div { flex: 1; min-width: 0; }
-.assistant-game-tag { display: inline-block; font: 600 9px/1.4 var(--a-mono); letter-spacing: .16em; padding: 4px 9px; color: var(--a-dim); border: 1px solid var(--a-rim); border-radius: 5px; transform: rotate(-3deg); }
-.assistant-game-intro h2 { margin-top: 12px; font-size: 20px; font-weight: 600; letter-spacing: .04em; line-height: 1.5; }
-.assistant-game-intro p { margin-top: 5px; font-size: 11px; line-height: 1.8; color: var(--a-dim); }
-.assistant-game-sticker { width: 100px; height: 114px; object-fit: contain; transform: rotate(7deg); filter: drop-shadow(0 3px 0 var(--a-rim)); }
-.desktop-assistant[data-panel=games] .assistant-label { display: flex; align-items: center; gap: 8px; margin: 0; color: var(--a-dim); letter-spacing: .06em; }
-.desktop-assistant[data-panel=games] .assistant-label::before { content: '✦'; color: var(--a-faint); }
-.desktop-assistant[data-panel=games] .assistant-hands { gap: 12px; padding: 3px 2px 8px; }
-.desktop-assistant[data-panel=games] .assistant-rps { padding: 21px 0; border-radius: 13px 13px 18px 12px; box-shadow: 2px 3px 0 var(--a-rim); }
-.desktop-assistant[data-panel=games] .assistant-rps-cell:first-child { transform: rotate(-4deg); }
-.desktop-assistant[data-panel=games] .assistant-rps-cell:last-child { transform: rotate(4deg); }
-.desktop-assistant[data-panel=games] .assistant-rps-caption { font-size: 11px; }
-.desktop-assistant[data-panel=games] .assistant-dice { flex: 1 0 auto; min-height: 230px; margin-top: 5px; padding: 28px 16px 20px; border-radius: 7px 16px 16px 7px; overflow: visible; box-shadow: 3px 4px 0 var(--a-rim); background: var(--a-surface); }
-.desktop-assistant[data-panel=games] .assistant-dice::before { inset: -9px auto auto 50%; width: 76px; height: 22px; background: var(--journal-tape); opacity: 1; transform: translateX(-50%) rotate(-5deg); }
-.desktop-assistant[data-panel=games] .assistant-dice::after { content: '✧'; position: absolute; right: 20px; top: 25px; font-size: 29px; color: var(--a-faint); transform: rotate(12deg); pointer-events: none; }
-.desktop-assistant[data-panel=games] .assistant-dice-value { font-size: 56px; letter-spacing: -2px; }
-.desktop-assistant[data-panel=games] .assistant-dice-value-empty { font-size: 40px; }
-.desktop-assistant[data-panel=games] .assistant-dice button { width: 58px; height: 54px; border-radius: 15px; border-color: var(--a-rim); box-shadow: 2px 3px 0 var(--a-rim); }
-.desktop-assistant[data-panel=games] .assistant-footnote { justify-content: center; margin: 2px 0 0; font-size: 11px; color: var(--a-faint); text-align: center; }
-@media (max-width: 344px) {
-  .assistant-game-sticker { width: 76px; height: 98px; }
-  .assistant-game-intro h2 { font-size: 18px; }
-}
 
 .assistant-shortcut-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 2px; }
 .assistant-add-shortcut { display: grid; place-items: center; width: 36px; height: 36px; border-radius: 50%; color: var(--a-accent-ink); background: var(--a-accent); }

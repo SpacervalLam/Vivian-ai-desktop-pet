@@ -7,5 +7,8 @@
 .pet-clipboard-send:disabled { opacity: .7; cursor: wait; }
 .pet-clipboard-error { display: block; margin-top: 6px; padding: 7px 9px; border-radius: 10px; background: #fff9f5; color: #a34936; font: 12px/1.4 system-ui; overflow-wrap: anywhere; }
 .pet-clipboard-spinner { animation: clipboard-spin 1s linear infinite; }
+.pet-clipboard-dismiss { position: absolute; top: -7px; right: -7px; display: grid; place-items: center; width: 20px; height: 20px; padding: 0; border: 1px solid #d8cbb0; border-radius: 50%; background: #fff9ec; color: #806328; cursor: pointer; }
+.pet-clipboard-dismiss:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
+.pet-clipboard-dismiss:disabled { opacity: .7; cursor: wait; }
 @keyframes clipboard-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .pet-clipboard-send { transition: none; } .pet-clipboard-spinner { animation: none; } }

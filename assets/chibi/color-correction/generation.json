@@ -1,0 +1,15 @@
+{
+  "tool": "built-in image_gen",
+  "prompts": {
+    "walk": "COLOR CORRECTION ONLY. Image 1 is an existing exact production sprite atlas: 4 columns x 4 rows, 14 walking frames, last two cells EMPTY transparent. Image 2 is the same character's authoritative default-state palette. Repair the exposure/color mismatch of image 1: first frame is correctly bright white/lavender, frames 2 through 14 are incorrectly darker gray/lavender. Match ALL 14 frames to the bright white/lavender hair, white clothing, pastel purple shadows, pale pink skin and purple accessories of image 2. Keep shadows and crisp dark-purple outlines, avoid blown highlights. Absolutely preserve the exact fourteen poses, gait, limb positions, tail, hair shapes, face, boots, character scale, pixel-cell alignment, 4x4 grid, padding and foot locations of image 1. Do not redesign, redraw anatomy, simplify, change expressions, add new frames, invent poses, crop or shift characters. Empty bottom-right 2 cells must stay transparent. Only harmonize color and tonal values. Output the SAME SQUARE atlas arrangement on transparent alpha, no background, checkerboard, labels or numbers. Prefer original 2048x2048 dimensions.",
+    "legacy": "COLOR CORRECTION ONLY. Image 1 is an exact existing 12-frame character animation atlas, FOUR columns and THREE rows (landscape canvas 4:3), cells square. Image 2 is the authoritative default-state palette. The first and final frames are correctly bright white/lavender, the TEN MIDDLE frames have an incorrect dark grey veil. Correct the ten middle frames to the same bright white/lavender hair, pastel purple shading, pale skin, white clothing and dark-purple outlines as the first/final frames and image 2. Preserve shadow detail, no white clipping. Absolutely preserve all 12 original poses, facial expressions, tail shapes, limb positions, character size, foot baselines, square cell geometry and cell order of image 1. Do not redesign or invent anything. Do not turn angry expressions into smiling or change gestures. First and final frames should be unchanged. Output exactly 4 columns x 3 rows, original 4:3 LANDSCAPE canvas, transparent alpha, no text, borders, background, grids, extra frames. Prefer original 2048x1536 dimensions. Only fix color and exposure."
+  },
+  "processing": "Generated colour edits used as palette guides only. Guide targets bounded by original default-state light palette. Piecewise monotonic RGB transfer maps original pixels, preserving original alpha exactly, dark outline channels <=96, endpoint frames, empty cells and 512px grid. Original lossless decoded images retained as backups. No generated silhouettes replace original geometry.",
+  "targets": [
+    "nana-walk-left",
+    "nana-walk-right",
+    "nana-angry",
+    "nana-think",
+    "nana-smug"
+  ]
+}

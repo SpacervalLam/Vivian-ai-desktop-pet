@@ -11,6 +11,9 @@
  */
 
 import vocab from './animations.json';
+import { optionalAssetSource } from '../utils/optionalResources';
+
+export const CHIBI_CHARACTER_IDS: readonly string[] = vocab.characters;
 
 export type ChibiDirection = 'left' | 'right';
 
@@ -201,7 +204,8 @@ export function sheetUrl(
   character: string,
   direction: ChibiDirection,
 ): string {
-  return fillTemplate(spec.sheet, character, direction);
+  const source = fillTemplate(spec.sheet, character, direction);
+  return optionalAssetSource(source) ?? '';
 }
 
 /**

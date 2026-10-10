@@ -1,5 +1,6 @@
 pub mod characters;
 pub mod apartment;
+pub mod optional_resources;
 pub mod backup;
 pub mod browser;
 pub mod chat;

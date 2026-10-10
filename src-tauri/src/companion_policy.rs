@@ -26,7 +26,7 @@ impl Default for CompanionConfig {
         Self { hourly_chime: false, focus_mode: false, quiet_hours: false,
             quiet_start: 23, quiet_end: 7, game_quiet: true,
             game_processes: vec!["League of Legends.exe".into(), "GenshinImpact.exe".into()],
-            sound: true, resource_feedback: true, network_feedback: false, clipboard_hint: false, weather_feedback: false,
+            sound: true, resource_feedback: true, network_feedback: false, clipboard_hint: true, weather_feedback: false,
             music_feedback: false, shortcuts: vec![
                 DesktopShortcut { id: "github".into(), name: "GitHub".into(), kind: "website".into(), target: "https://github.com".into() },
                 DesktopShortcut { id: "chatgpt".into(), name: "ChatGPT".into(), kind: "website".into(), target: "https://chatgpt.com".into() },
@@ -46,6 +46,16 @@ impl CompanionConfig {
             return Some("game");
         }
         None
+    }
+}
+
+/// Track only an OS revision, never the clipboard contents. Zero means unavailable.
+#[derive(Default)]
+pub struct ClipboardChanges { last_sequence: Option<u32> }
+impl ClipboardChanges {
+    pub fn observe(&mut self, sequence: u32) -> bool {
+        if sequence == 0 { return false; }
+        self.last_sequence.replace(sequence).is_some_and(|old| old != sequence)
     }
 }
 
@@ -80,6 +90,19 @@ impl HourlyClock {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn clipboard_hints_require_a_change_and_ignore_unavailable_samples() {
+        assert!(CompanionConfig::default().clipboard_hint);
+        let mut changes = ClipboardChanges::default();
+        assert!(!changes.observe(0));
+        assert!(!changes.observe(10)); // Startup establishes a baseline, without prompting.
+        assert!(!changes.observe(10));
+        assert!(!changes.observe(0));
+        assert!(!changes.observe(10));
+        assert!(changes.observe(11));
+        assert!(!changes.observe(11));
+        assert!(changes.observe(1)); // Sequence wrap is still a change.
+    }
     #[test]
     fn quiet_windows_and_only_the_actual_foreground_game() {
         let mut c = CompanionConfig { quiet_hours: true, ..Default::default() };
