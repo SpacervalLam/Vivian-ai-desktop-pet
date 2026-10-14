@@ -118,6 +118,58 @@ async fn ensure_window(app: &AppHandle) -> Result<WebviewWindow, String> {
     Ok(window)
 }
 
+/// Grow the WebView2 host child window to the overlay's client area.
+///
+/// wry hosts the WebView2 surface in a `WRY_WEBVIEW` child window that it creates
+/// at the host window's *initial* size. The vendored wry patch
+/// (`vendor/wry/PATCH.md`) removed the `SetWindowPos` that used to bring that child
+/// along from `WM_SIZE`, so a window grown after creation keeps its webview clipped
+/// to the original rectangle: the overlay renders as a small block in the top-left
+/// corner (measured 800x600 inside a 2560x1440 window).
+///
+/// Restoring the resize from the application is safe, because it never runs inside
+/// a `WM_SIZE` handler and therefore cannot re-enter and reproduce the recursion
+/// (0xc00000fd) that the patch avoids.
+#[cfg(windows)]
+fn fill_webview_host(window: &WebviewWindow, left: i32, top: i32, width: u32, height: u32) -> Result<(), String> {
+    use windows::core::w;
+    use windows::Win32::Foundation::{HWND, RECT};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        FindWindowExW, GetClientRect, SetWindowPos, SWP_NOACTIVATE, SWP_NOZORDER,
+    };
+    let host = HWND(window.hwnd().map_err(|e| e.to_string())?.0);
+    unsafe {
+        // Tauri applies `set_position` / `set_size` asynchronously, so the host rect
+        // may still hold the previous geometry; re-apply it synchronously to read a
+        // settled client rect. The overlay is undecorated, so client area == size.
+        SetWindowPos(
+            host,
+            None,
+            left,
+            top,
+            width as i32,
+            height as i32,
+            SWP_NOACTIVATE | SWP_NOZORDER,
+        )
+        .map_err(|e| e.to_string())?;
+        let mut client = RECT::default();
+        GetClientRect(host, &mut client).map_err(|e| e.to_string())?;
+        let child = FindWindowExW(Some(host), None, w!("WRY_WEBVIEW"), None)
+            .map_err(|e| format!("未找到截图 WebView 宿主窗口: {e}"))?;
+        SetWindowPos(
+            child,
+            None,
+            0,
+            0,
+            client.right - client.left,
+            client.bottom - client.top,
+            SWP_NOACTIVATE | SWP_NOZORDER,
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 pub fn prewarm(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         if let Err(error) = ensure_window(&app).await { tracing::warn!(%error, "截图选区预热失败"); }
@@ -191,6 +243,8 @@ pub async fn select_region(app: &AppHandle) -> Result<Option<SelectedCapture>, S
     }).await.map_err(|_| "截图遮罩加载超时，请重试".to_string())?;
     window.set_position(tauri::PhysicalPosition::new(frame.left, frame.top)).map_err(|e| e.to_string())?;
     window.set_size(tauri::PhysicalSize::new(frame.width, frame.height)).map_err(|e| e.to_string())?;
+    #[cfg(windows)]
+    fill_webview_host(&window, frame.left, frame.top, frame.width, frame.height)?;
     window.emit("screen_selection:start", json!({"session_id":id,"width":frame.width,"height":frame.height})).map_err(|e| e.to_string())?;
     let region = tokio::time::timeout(std::time::Duration::from_secs(180), receiver).await
         .map_err(|_| "截图框选已超时，请重试".to_string())?

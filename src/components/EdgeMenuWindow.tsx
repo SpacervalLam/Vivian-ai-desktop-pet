@@ -2,11 +2,12 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { emit, listen } from '@tauri-apps/api/event';
 import { useTranslation } from 'react-i18next';
-import ChatEdgeMenu, { type EdgeMenuAction } from './ChatEdgeMenu';
+import ChatEdgeMenu, { type EdgeMenuAction, type MovementMode } from './ChatEdgeMenu';
+import { synchronizeWindowLanguage } from '../utils/windowLanguage';
 
 export default function EdgeMenuWindow() {
   const [mode, setMode] = useState<'menu' | 'folding'>('menu');
-  const [status, setStatus] = useState({ quiet: false, smart_positioning: false, desktop_physics: false });
+  const [status, setStatus] = useState<{ quiet: boolean; movement_mode: MovementMode }>({ quiet: false, movement_mode: 'still' });
   const quiet = useRef(false);
   const target = useRef<HTMLButtonElement>(null);
   const { i18n } = useTranslation();
@@ -14,13 +15,15 @@ export default function EdgeMenuWindow() {
     let disposed = false, revision = 0, themeRevision = 0;
     let firstPaint = 0, secondPaint = 0;
     const cleanups: Array<() => void> = [];
+    const languageSync = synchronizeWindowLanguage(language => i18n.changeLanguage(language));
+    cleanups.push(languageSync.dispose);
     const register = async (name: string, callback: (payload: any) => void) => {
       const cleanup = await listen(name, event => { if (!disposed) callback(event.payload); });
       if (disposed) cleanup(); else cleanups.push(cleanup);
     };
     const refresh = async () => {
       const before = ++revision;
-      const next = await invoke<{ quiet: boolean; smart_positioning: boolean; desktop_physics: boolean }>('edge_menu_status');
+      const next = await invoke<{ quiet: boolean; movement_mode: MovementMode }>('edge_menu_status');
       if (!disposed && revision === before) { quiet.current = next.quiet; setStatus(next); }
     };
     const applyTheme = (theme: unknown) => {
@@ -46,6 +49,7 @@ export default function EdgeMenuWindow() {
       });
       await refreshTheme();
       await refresh();
+      await languageSync.ready;
       if (disposed) return;
       // The first entrance must wait for event subscriptions and the chosen palette.
       firstPaint = requestAnimationFrame(() => {
@@ -65,11 +69,11 @@ export default function EdgeMenuWindow() {
   const run = async (action: EdgeMenuAction) => {
     const result = await invoke<{ saved_path?: string }>('edge_menu_action', { action, enabled: action === 'dnd' ? !quiet.current : null });
     if (result.saved_path) void emit('toast:show', {
-      message: i18n.language.startsWith('zh') ? '已保存至系统截图目录' : 'Screenshot saved',
+      message: i18n.language.startsWith('zh') ? '已保存至系统截图目录' : i18n.language.startsWith('ja') ? 'システムのスクリーンショットフォルダーに保存しました' : 'Saved to the system screenshots folder',
       type: 'success', duration: 2500, key: Date.now(),
     });
   };
   return <div style={{ position: 'relative', height: '100vh', fontFamily: '-apple-system, BlinkMacSystemFont, "SF Pro Text", "Microsoft YaHei", sans-serif' }}>
-    <ChatEdgeMenu edge={{ mode, width: window.innerWidth }} target={target} quiet={status.quiet} smartPositioning={status.smart_positioning} gravity={status.desktop_physics} onAction={run} onFoldEnd={onFoldEnd} />
+    <ChatEdgeMenu edge={{ mode, width: window.innerWidth }} target={target} quiet={status.quiet} movement={status.movement_mode} onAction={run} onFoldEnd={onFoldEnd} />
   </div>;
 }

@@ -426,7 +426,9 @@ fn render_block(block: &Block) -> String {
                 code = sanitize_mermaid_code(code),
             )
         }
-        Block::Custom { html } => {
+        Block::Custom { html, .. } => {
+            // Source-only carrier before a chart must not create an empty visual block.
+            if html.is_empty() { return String::new(); }
             format!(
                 r#"<div class="block"><div class="custom">{}</div></div>"#,
                 super::storage::sanitize_html(html)

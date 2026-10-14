@@ -7,10 +7,18 @@ use tauri::{AppHandle, Emitter, Manager};
 use crate::{desktop_menu_policy::QuietTransitions, state::AppState};
 
 static ACTIVE: AtomicBool = AtomicBool::new(false);
+static RESTORED: AtomicBool = AtomicBool::new(false);
 static TRANSITIONS: Lazy<Mutex<QuietTransitions>> = Lazy::new(Default::default);
 static RESTORE: Lazy<Mutex<Vec<String>>> = Lazy::new(Default::default);
 
 pub fn active() -> bool { ACTIVE.load(Ordering::Acquire) }
+
+/// Restore the gate before any windows or background work start; no transition/model calls.
+pub fn restore(enabled: bool) {
+    *TRANSITIONS.lock() = QuietTransitions::restored(enabled);
+    RESTORED.store(enabled, Ordering::Release);
+    ACTIVE.store(enabled, Ordering::Release);
+}
 
 pub fn blocks_route(task: &str) -> bool {
     active() && crate::providers::task_catalog::find(task).is_some_and(|spec| spec.spoken)
@@ -23,9 +31,18 @@ pub fn companion_quiet_status() -> Value { json!({"active":active()}) }
 pub async fn set_companion_quiet(app: AppHandle, state: tauri::State<'_, Arc<AppState>>, enabled: bool) -> Result<Value, String> {
     let (revision, characters, notice) = {
         let mut transitions = TRANSITIONS.lock();
-        let changed = transitions.set(enabled, Instant::now())
+        let mut next = transitions.clone();
+        let changed = next.set(enabled, Instant::now())
             .map_err(|remaining| format!("请在 {} 秒后再次开启勿扰", remaining.as_secs() + 1))?;
         if !changed { return Ok(json!({"active":transitions.active,"changed":false})); }
+        let config = state.config.read();
+        let previous = config.get_all().companion.do_not_disturb;
+        if let Err(error) = config.set("companion.do_not_disturb", json!(enabled)) {
+            let _ = config.set_no_save("companion.do_not_disturb", json!(previous));
+            return Err(error.to_string());
+        }
+        drop(config);
+        *transitions = next;
         ACTIVE.store(enabled, Ordering::Release);
         let revision = transitions.revision;
     let characters: Vec<_> = state.characters.read().values().cloned().collect();
@@ -44,6 +61,9 @@ pub async fn set_companion_quiet(app: AppHandle, state: tauri::State<'_, Arc<App
             }
         }
     } else {
+        if RESTORED.swap(false, Ordering::AcqRel) {
+            RESTORE.lock().extend(characters.iter().filter(|c| *c.online.read()).map(|c| c.id.clone()));
+        }
         for label in RESTORE.lock().drain(..) {
             if let Some(window) = app.get_webview_window(&label) {
                 // Old speech bubbles are never replayed on returning from quiet mode.

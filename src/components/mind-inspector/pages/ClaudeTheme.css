@@ -14,9 +14,19 @@
    ============================================================ */
 
 /* 调色盘同时落在内容页作用域与窗口根：内容页激活时（is-claude）整窗换纸，
-   外壳与内容才是同一张纸、同一支强调色，不会出现两截底色。 */
+   外壳与内容才是同一张纸、同一支强调色，不会出现两截底色。
+
+   第三处 `.unified-comic-book.record-scope` 是「书」（心智观察器 · 记忆页）的根。
+   书是「画」不是「界面」，深浅两套主题下都必须是这张浅色纸，所以这里把整套令牌
+   （原始调色盘 + --codex-* / --panel-* / --graph-* 派生别名）在书根上重新声明一遍。
+   这一条是必须的，不能只靠下面 UnifiedComicBook.css 里钉 --claude-* ——
+   派生别名是在**窗口根**上求值完再继承下来的（`--codex-paper: var(--claude-bg)`
+   在那里就解析成了深色），只改书根的 --claude-* 追不回那些已经变成字面量的别名。
+   实测漏掉它时：画格里的对白气泡 .voice 读到深色 --comic-paper，
+   变成「深字压深底」1.28:1，整段日记/笔记台词看不见。 */
 .claude-theme,
-.mind-inspector-root.is-claude {
+.mind-inspector-root.is-claude,
+.unified-comic-book.record-scope {
   --claude-bg: #faf9f5;
   --claude-surface: #ffffff;
   --claude-sunken: #f0eee6;
@@ -280,7 +290,7 @@
 .claude-theme .memory-layer-grid { gap: 10px; margin-bottom: 30px; }
 .claude-theme .memory-layer-card { padding: 14px 15px; border-radius: 12px; border-color: var(--claude-line); background: var(--claude-surface); box-shadow: none; transition: border-color .15s, background .15s, box-shadow .15s; }
 .claude-theme .memory-layer-card:hover { transform: none; border-color: var(--claude-line-strong); background: var(--claude-surface); }
-.claude-theme .memory-layer-card.active { border-color: var(--claude-clay); background: var(--claude-surface); box-shadow: 0 0 0 3px color-mix(in srgb, var(--claude-clay) 12%, transparent); }
+.claude-theme .memory-layer-card.active { border-color: var(--claude-clay); background: var(--claude-clay-soft); box-shadow: 0 0 0 3px color-mix(in srgb, var(--claude-clay) 12%, transparent); }
 .claude-theme .memory-layer-icon { width: 34px; height: 34px; border-radius: 9px; color: var(--claude-muted); background: var(--claude-sunken); transition: color .15s, background .15s; }
 .claude-theme .memory-layer-card.active .memory-layer-icon { color: var(--claude-clay); background: var(--claude-clay-soft); }
 .claude-theme .memory-layer-copy { gap: 3px; }

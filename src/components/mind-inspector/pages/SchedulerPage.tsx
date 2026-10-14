@@ -13,6 +13,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { useTranslation } from 'react-i18next';
+import { createPortal } from 'react-dom';
 import {
   AlarmClock,
   Bell,
@@ -383,10 +384,10 @@ const SchedulerPage: React.FC = () => {
       </div>
 
       {/* 表单弹窗 */}
-      {showForm && (
-        <div className="rec-overlay" onClick={() => setShowForm(false)}>
-          <div className="rec-dialog" onClick={(e) => e.stopPropagation()}>
-            <h3 className="rec-dialog-title">{t('scheduler_window.btn_add')}</h3>
+      {showForm && createPortal(
+        <div className="rec-overlay record-scope claude-theme planner-modal-overlay" onClick={() => setShowForm(false)}>
+          <div className="rec-dialog" role="dialog" aria-modal="true" aria-labelledby="planner-form-title" onClick={(e) => e.stopPropagation()}>
+            <h3 id="planner-form-title" className="rec-dialog-title">{t('scheduler_window.btn_add')}</h3>
             <div className="rec-dialog-body">
               <div className="rec-field">
                 <label className="rec-label">{t('scheduler_window.field_message')}</label>
@@ -425,8 +426,9 @@ const SchedulerPage: React.FC = () => {
                 {[0, 5, 10, 30].map(minutes => <option key={minutes} value={minutes}>{minutes} {zh ? '分钟' : ja ? '分' : 'min'}</option>)}
               </select>
             </label>
-            <label className="rec-label"><input type="checkbox" checked={formImportant} onChange={e => setFormImportant(e.target.checked)} />
-              {zh ? '重要提醒（允许在免打扰时置顶）' : ja ? '重要（通知オフでも最前面に表示）' : 'Important (show on top during quiet mode)'}
+            <label className="rec-label planner-important-toggle"><span>
+              {zh ? '重要提醒（允许在免打扰时置顶）' : ja ? '重要（通知オフでも最前面に表示）' : 'Important (show on top during quiet mode)'}</span>
+              <input type="checkbox" role="switch" checked={formImportant} onChange={e => setFormImportant(e.target.checked)} />
             </label>
             {formError && <p role="alert">{formError}</p>}
             <div className="rec-dialog-foot">
@@ -444,7 +446,7 @@ const SchedulerPage: React.FC = () => {
             </div>
           </div>
         </div>
-      )}
+      , document.body)}
     </div>
   );
 };

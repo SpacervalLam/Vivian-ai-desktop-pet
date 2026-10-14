@@ -1,0 +1,370 @@
+@import "./ComicFrames.css";
+@font-face{font-family:"Mind Comic";src:url("/fonts/ma-shan-zheng.woff2") format("woff2");font-weight:400;font-style:normal;font-display:swap}
+
+/* Keep the new morning page's exact framing; the slow push would crop her hand. */
+.mind-comic-book .shot.morning-panel img{animation:none;transform:none}
+
+
+/* ==========================================================================
+   漫画书基础：舞台、分镜格、气泡、旁白、便签
+   ========================================================================== */
+.mind-comic-book .comic{position:relative;aspect-ratio:1.5;container-type:inline-size;margin:18px 0 12px;isolation:isolate}
+.mind-comic-book .shot,.mind-comic-book .voice,.mind-comic-book .narration,.mind-comic-book .page-title,.mind-comic-book .margin-line{position:absolute;animation:mind-comic-appear 1.15s both;animation-delay:var(--delay)}
+.mind-comic-book .shot{background:#e3eaf0;overflow:hidden}
+.mind-comic-book .image-wrap{width:100%;height:100%;overflow:hidden}
+.mind-comic-book .shot img{display:block;width:100%;height:100%;object-fit:cover;object-position:var(--focus,50% 50%);animation:mind-comic-push 17s ease-out both;animation-delay:var(--delay)}
+.mind-comic-book .shot.mirror .image-wrap{scale:-1 1}
+.mind-comic-book .scene-2 #platform-light img{height:var(--rain-image-height);animation:none;transform:none;transform-origin:top left}
+@media(prefers-reduced-motion:no-preference){
+ .mind-comic-book .comic.entering.scene-2 .panel-shadow:has(>#platform-light){animation:rain-search-crop 1.15s cubic-bezier(.22,.61,.36,1) 1380ms both}
+ .mind-comic-book .comic.entering.scene-2 #rain-soaked-detail{animation:mind-comic-appear 1.15s cubic-bezier(.22,.61,.36,1) 1380ms both}
+ .mind-comic-book .comic.entering.scene-2 #platform-light img{animation:rain-search-image-scale 1.15s cubic-bezier(.22,.61,.36,1) 1380ms both}
+}
+@keyframes rain-search-crop{from{height:var(--rain-full-panel-height)}to{height:var(--rain-final-panel-height)}}
+@keyframes rain-search-image-scale{from{transform:scale(1.04)}to{transform:scale(1)}}
+.mind-comic-book :is(.scene-2,.scene-9) .rain-type-character{opacity:0;animation:rain-type-letter 55ms steps(1,start) forwards}
+.mind-comic-book .comic.entering.scene-9 .narration{animation:none}
+@keyframes rain-type-letter{from,to{opacity:1}}
+.mind-comic-book .scene-2 .narration.rain-poem{writing-mode:vertical-lr;text-orientation:upright;background:none;border:none;box-shadow:none;padding:0;max-width:none;color:#29262e;font:clamp(14px,1.65cqw,23px)/1.45 "Mind Comic",serif;letter-spacing:1px;-webkit-text-stroke:3px #fff;paint-order:stroke fill}
+.mind-comic-book .scene-2 .rain-poem .rain-type-character{paint-order:stroke fill}
+.mind-comic-book .shot.clean-frame img{width:111%;height:111%;margin:-5.5%}
+.mind-comic-book .shot .edge{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+.mind-comic-book .edge polygon{fill:none;stroke:var(--comic-frame-ink);stroke-width:var(--comic-frame-width);vector-effect:non-scaling-stroke}
+.mind-comic-book .voice{z-index:3;padding:19px 22px 18px;background:#fff;border:1.4px solid #4a4550;border-radius:43% 46% 42% 44%;text-align:center;display:flex;flex-direction:column;justify-content:center;box-shadow:0 0 0 5px white}
+.mind-comic-book .voice:after,.mind-comic-book .voice:before{content:'';position:absolute;background:white;border:1px solid #4a4550;border-radius:50%;width:8px;height:8px;top:-18px;left:67%}
+.mind-comic-book .voice:before{width:4px;height:4px;top:-29px;left:71%}
+.mind-comic-book .voice small{font-size:clamp(9px,1cqw,12px);color:var(--comic-label,#6a6376);line-height:1.5;letter-spacing:.5px}
+.mind-comic-book .voice.n small{color:var(--comic-accent-n,#6a5a8f)}
+.mind-comic-book .voice p{font:clamp(19px,2.45cqw,33px)/1.4 "Mind Comic",serif;margin:8px 0}
+.mind-comic-book .voice.compact{padding:16px 17px}
+.mind-comic-book .voice.compact p{font-size:clamp(18px,2cqw,27px);margin:7px 0}
+.mind-comic-book .narration{z-index:4;max-width:45%;padding:8px 11px;background:#ffffffee;border:1px solid #534c58;font-size:clamp(10px,1.25cqw,16px);line-height:1.6;letter-spacing:1px}
+.mind-comic-book .narration.vertical{writing-mode:vertical-rl;max-width:none;padding:11px 8px;font:clamp(16px,2.1cqw,28px)/1.5 "Mind Comic"}
+.mind-comic-book .page-title{font:clamp(29px,4.7cqw,65px)/1.2 "Mind Comic"}
+.mind-comic-book .page-title small{display:block;font:10px/2 sans-serif;color:var(--comic-label,#6a6376);letter-spacing:3px;margin-bottom:6px}
+.mind-comic-book .margin-line{font:clamp(17px,2.6cqw,34px)/1.6 "Mind Comic";color:#6c6473}
+.mind-comic-book .margin-line small{font:10px/1.5 sans-serif;display:block;color:var(--comic-label,#6a6376);margin-bottom:9px}
+.mind-comic-book .margin-line b{font-weight:400;color:var(--comic-accent,#8a4f66)}
+.mind-comic-book .margin-line.n b{color:var(--comic-accent-n,#6a5a8f)}
+.mind-comic-book .scene-3 .voice p,.mind-comic-book .scene-5 .voice p{font-size:clamp(18px,2.1cqw,28px)}
+.mind-comic-book .scene-6 .margin-line{font-size:clamp(20px,2.4cqw,32px)}
+.mind-comic-book .scene-1 .presence{position:absolute;bottom:12px;left:12px;background:#ffffffea;padding:5px 8px;font-size:10px;letter-spacing:1px;z-index:2}
+.mind-comic-book .scene-4 .voice.compact p{font-size:clamp(18px,2cqw,27px)}
+@keyframes mind-comic-appear{from{opacity:0;translate:var(--enter-x,0px) var(--enter-y,10px)}to{opacity:1;translate:0 0}}
+.mind-comic-book .scene-5 #together{--enter-x:12px;--enter-y:0px}
+.mind-comic-book .scene-5 #hands{--enter-x:0px;--enter-y:-12px}
+.mind-comic-book .scene-5 #door-smile{--enter-x:0px;--enter-y:12px}
+.mind-comic-book .scene-9 #daily-pole{--enter-x:12px;--enter-y:0px}
+.mind-comic-book .scene-9 #daily-arrival{--enter-x:0px;--enter-y:-12px}
+.mind-comic-book .scene-4 :is(#cafe-exterior,#cafe-interior) img{object-fit:cover;animation:none;transform:none;background:var(--comic-paper,#faf9f5)}
+/* Page 07: subdued saturation and a grey-blue tint, preserving luminance. */
+.mind-comic-book .scene-4 :is(#cafe-exterior,#cafe-interior) .image-wrap{position:relative;isolation:isolate}
+.mind-comic-book .scene-4 :is(#cafe-exterior,#cafe-interior) img{filter:saturate(.75)}
+.mind-comic-book .scene-4 :is(#cafe-exterior,#cafe-interior) .image-wrap::after{content:'';position:absolute;inset:0;background:rgb(103 128 149 / .16);mix-blend-mode:color;pointer-events:none}
+@media(prefers-reduced-motion:no-preference){
+ .mind-comic-book .comic.entering.scene-5 #together{--enter-x:0px;animation:mind-comic-appear .6s both}
+ .mind-comic-book .comic.entering.scene-5 .comic-sfx{animation:mind-comic-sfx-appear .45s var(--delay) both}
+ .mind-comic-book .comic.entering .late-sound{animation:mind-comic-sfx-appear .45s var(--delay) both}
+}
+.mind-comic-book .scene-3 #emotion-v{--enter-x:12px;--enter-y:0px}
+.mind-comic-book .scene-3 #emotion-n{--enter-x:-12px;--enter-y:0px}
+@keyframes mind-comic-expand-left{from{width:49%}to{width:51%}}
+@keyframes mind-comic-expand-right{from{left:51.918%;width:48.082%}to{left:49.918%;width:50.082%}}
+@media(prefers-reduced-motion:no-preference){
+ @container mind-comic (min-width:601px){
+  .mind-comic-book .comic.entering.scene-3 .panel-shadow:has(>#emotion-v){animation:mind-comic-expand-right 1.15s ease-out 460ms both}
+  .mind-comic-book .comic.entering.scene-3 .panel-shadow:has(>#emotion-n){animation:mind-comic-expand-left 1.15s ease-out 1035ms both}
+ }
+}
+@keyframes mind-comic-push{from{transform:scale(1)}to{transform:scale(1.03)}}
+@container mind-comic (max-width:600px){
+ .mind-comic-book .comic{aspect-ratio:auto;height:1040px;margin-top:14px}
+ .mind-comic-book .voice{padding:15px 13px}
+ .mind-comic-book .voice p,.mind-comic-book .voice.compact p{font-size:23px}
+ .mind-comic-book .voice small{font-size:10px}
+ .mind-comic-book .narration{font-size:11px;max-width:75%}
+ .mind-comic-book .narration.vertical{font-size:20px}
+ .mind-comic-book .margin-line{font-size:22px}
+ .mind-comic-book .page-title{font-size:37px}
+ .mind-comic-book .scene-3 .voice p,.mind-comic-book .scene-5 .voice p,.mind-comic-book .scene-4 .voice.compact p{font-size:22px}
+ .mind-comic-book .scene-6 .margin-line{font-size:24px}
+ .mind-comic-book .scene-1 .presence{font-size:9px;padding:4px}
+}
+@media(prefers-reduced-motion:reduce){.mind-comic-book .shot,.mind-comic-book .shot img,.mind-comic-book .voice,.mind-comic-book .narration,.mind-comic-book .page-title,.mind-comic-book .margin-line{animation:none}}
+
+/* ==========================================================================
+   第 1 页「等你出现」：画格外裁切 + 心声气泡尾巴指向各自角色
+   ========================================================================== */
+.mind-comic-book #waiting-v .image-wrap{position:relative}
+.mind-comic-book #waiting-v.clean-frame img{position:absolute;width:112%;height:118%;left:-6%;top:-8%;margin:0}
+.mind-comic-book .scene-1 .voice.tail-to-vivian:after{left:-19px;right:auto;top:60%;width:9px;height:9px}
+.mind-comic-book .scene-1 .voice.tail-to-vivian:before{left:-38px;right:auto;top:68%;width:5px;height:5px}
+.mind-comic-book .scene-1 .voice.tail-to-nana:after{left:auto;right:-19px;top:18%;width:9px;height:9px}
+.mind-comic-book .scene-1 .voice.tail-to-nana:before{left:auto;right:-38px;top:7%;width:5px;height:5px}
+@container mind-comic (max-width:600px){
+ .mind-comic-book .scene-1 .voice.tail-to-vivian:after{left:-16px;top:60%}
+ .mind-comic-book .scene-1 .voice.tail-to-vivian:before{left:-29px;top:68%}
+ .mind-comic-book .scene-1 .voice.tail-to-nana:after{right:-15px;top:18%}
+ .mind-comic-book .scene-1 .voice.tail-to-nana:before{right:-28px;top:7%}
+}
+
+/* ==========================================================================
+   第 2 页「车门打开」：进站远景用静态大图，不做 17s 推移动画
+   ========================================================================== */
+.mind-comic-book #arrival .image-wrap{position:relative}
+.mind-comic-book #arrival img{display:block;animation:none}
+
+/* Same geometry in both files: only the phone display wakes on hover. */
+.mind-comic-book #line-phone .image-wrap{position:relative}
+.mind-comic-book #line-phone img{position:absolute;inset:0;animation:none;transform:none}
+.mind-comic-book #line-phone .phone-screen-on{opacity:0;transition:opacity .24s ease;pointer-events:none}
+.mind-comic-book #line-phone:hover .phone-screen-on{opacity:1}
+.unified-comic-book[data-touring="true"] .mind-comic-book .comic.entering #line-phone .phone-screen-on{animation:comic-phone-wake .24s ease calc(var(--delay) + 1150ms + 300ms) both}
+@keyframes comic-phone-wake{from{opacity:0}to{opacity:1}}
+@media(prefers-reduced-motion:reduce){.mind-comic-book #line-phone .phone-screen-on{transition:none}}
+
+/* ==========================================================================
+   第 3 页「晃动的心情」：画格灰度悬停复色；画框不动，只放大 artwork 并漂浮
+   ========================================================================== */
+.mind-comic-book .scene-3 .shot .image-wrap{width:calc(100% + 24px);height:calc(100% + 24px);margin:-12px;translate:0 0;filter:grayscale(1);transition:filter .6s ease}
+.mind-comic-book .scene-3 .shot:hover .image-wrap{filter:grayscale(0)}
+@media(prefers-reduced-motion:reduce){.mind-comic-book .scene-3 .shot .image-wrap{translate:0 0!important;transition:none}}
+
+/* ==========================================================================
+   第 6 页「下一站晴天」：对话框页标题更大
+   ========================================================================== */
+.mind-comic-book .scene-6 .page-title{font-size:clamp(24px,3cqw,42px)}
+
+/* ==========================================================================
+   第 7 页「消息里的约定」：聊天气泡；竖排旁白移动端转横排
+   ========================================================================== */
+@container mind-comic (max-width:600px){
+ .mind-comic-book .line-chat{font-size:15px;gap:8px}
+ .mind-comic-book .line-chat p{padding:7px 12px}
+ .mind-comic-book .scene-7 .page-title{font-size:23px}
+ .mind-comic-book .scene-8 .narration.vertical{writing-mode:horizontal-tb}
+}
+@media(prefers-reduced-motion:reduce){.mind-comic-book .line-chat{animation:none}.mind-comic-book .comic{transition:none}}
+
+/* ==========================================================================
+   第 8 页「雨里的停顿」：大手绘格 + 可交互小手插页
+   插页是 L 形遮罩——大图整格绘制，左下角挖出小窗放帧动画小手；
+   所以 #skirt-hand 里的 <img> 常驻 display:none，可见的是 .hand-frames 精灵图。
+   ========================================================================== */
+.mind-comic-book .scene-8 .voice.tail-to-nana:after{left:auto;right:22%;top:-17px}
+.mind-comic-book .scene-8 .voice.tail-to-nana:before{left:auto;right:19%;top:-31px}
+.mind-comic-book .scene-8 .quiet-caption{color:#514653;font-size:clamp(23px,3cqw,40px);line-height:1.65}
+.mind-comic-book .scene-8 .voice p{font-size:clamp(20px,2.4cqw,32px);margin:5px 0}
+.mind-comic-book .scene-8 .voice{padding:12px 22px;border:2.5px solid #34323a}
+.mind-comic-book .scene-8 .voice:before,.mind-comic-book .scene-8 .voice:after{border:2.5px solid #34323a}
+
+
+/* 大格：整格绘制，进场后向镜头缓慢靠近 */
+.mind-comic-book .scene-8 #skirt-full{background:var(--comic-paper,#fff);animation:mind-comic-appear .8s 1.15s both,mind-comic-cautious-approach 1.1s cubic-bezier(.25,.1,.25,1) 1.95s both}
+.mind-comic-book .scene-8 #skirt-full img{width:100%;height:100%;margin:0;object-fit:cover;animation:none}
+.mind-comic-book .comic:not(.entering) #skirt-full{animation:none}
+
+/* 插页：遮罩与画框固定，只有里面的画在动；L 形缺口用 :before 描边 */
+.mind-comic-book .scene-8 #skirt-hand{--hand-gutter:9px;overflow:visible;background:var(--comic-paper,#fff);box-shadow:0 0 0 var(--hand-gutter) var(--comic-paper,#fff);z-index:2;animation:mind-comic-hand-reveal 1.15s cubic-bezier(.2,.7,.25,1) 3.15s both}
+.mind-comic-book .comic:not(.entering) #skirt-hand{animation:none}
+.mind-comic-book .scene-8 #skirt-hand .image-wrap{position:relative;overflow:hidden;animation:none;transform:none}
+.mind-comic-book .scene-8 #skirt-hand img{display:none}
+/* Ordinary SVG frames expose only the inner half of their centered stroke.
+   Match that visible width and meet the full-height main panel exactly. */
+.mind-comic-book .scene-8 #skirt-hand:before{content:'';position:absolute;right:calc(-1 * var(--hand-gutter));top:calc(-1 * var(--hand-gutter));width:calc(var(--hand-corner-width,17.5676%) + var(--hand-gutter));height:calc(var(--hand-corner-height,100%) + var(--hand-gutter));border-top:calc(var(--comic-frame-width) / 2) solid var(--comic-frame-ink);border-right:calc(var(--comic-frame-width) / 2) solid var(--comic-frame-ink);pointer-events:none;z-index:3;animation:mind-comic-corner-line 0s 4.31s both}
+.mind-comic-book .comic:not(.entering) #skirt-hand:before{animation:none}
+.mind-comic-book .scene-8.inset-crop #skirt-hand{animation:none}
+.mind-comic-book .scene-8.inset-crop #skirt-hand:before{display:none}
+.mind-comic-book .scene-8.inset-crop .panel-shadow:has(>#skirt-hand){z-index:2}
+
+
+/* 小手帧动画：hover 握持 .72s → 保持 6s → 松开 .72s；小窗推入稳定后自动演示一次 */
+.mind-comic-book .scene-8 #skirt-hand .hand-frames{width:100%;height:100%;background-size:300% 200%;background-position:0% 0%;background-repeat:no-repeat}
+.mind-comic-book #skirt-hand.hand-playing .hand-frames{animation:mind-comic-hand-six-frame-grip 7.2s steps(1,end) 1 both}
+.mind-comic-book #skirt-hand.hand-held .hand-frames{background-position:50% 100%;animation:none}
+.mind-comic-book #skirt-hand.hand-gripping .hand-frames{animation:mind-comic-hand-grip .72s steps(1,end) 1 both}
+.mind-comic-book #skirt-hand.hand-releasing .hand-frames{animation:mind-comic-hand-release .72s steps(1,end) 1 both}
+
+@keyframes mind-comic-hand-reveal{from{opacity:0;transform:translate(-26px,24px) scale(.95)}to{opacity:1;transform:translate(0,0) scale(1)}}
+@keyframes mind-comic-corner-line{from{visibility:hidden}to{visibility:visible}}
+@keyframes mind-comic-cautious-approach{from{transform:translateX(-4cqw)}to{transform:translateX(0)}}
+@keyframes mind-comic-mobile-approach{from{transform:translateX(-10px)}to{transform:translateX(0)}}
+/* Pan the artwork inside its fixed frame alongside the middle panel. */
+.mind-comic-book .scene-8 #hold-n img{object-position:100% 22%;animation:none;transition:object-position 1.1s cubic-bezier(.25,.1,.25,1)}
+.mind-comic-book .comic.entering.scene-8 #hold-n img{animation:mind-comic-nana-pan 1.1s cubic-bezier(.25,.1,.25,1) 1.95s backwards}
+.mind-comic-book .scene-8 #hold-n.crop-ready:hover img{object-position:0% 22%}
+@keyframes mind-comic-nana-pan{from{object-position:0% 22%}to{object-position:100% 22%}}
+@media(prefers-reduced-motion:reduce){
+ .mind-comic-book .comic.entering.scene-8 #hold-n img{animation:none;transition:none}
+}
+@keyframes mind-comic-hand-six-frame-grip{0.000000%{background-position:0% 0%}1.666667%{background-position:100% 100%}3.333333%{background-position:0% 100%}5.000000%{background-position:50% 0%}6.666667%{background-position:100% 0%}8.333333%{background-position:50% 100%}91.666000%{background-position:50% 100%}91.666667%{background-position:100% 0%}93.333333%{background-position:50% 0%}95.000000%{background-position:0% 100%}96.666667%{background-position:100% 100%}98.333333%{background-position:0% 0%}100%{background-position:0% 0%}}
+@keyframes mind-comic-hand-grip{0.000000%{background-position:0% 0%}16.666667%{background-position:100% 100%}33.333333%{background-position:0% 100%}50.000000%{background-position:50% 0%}66.666667%{background-position:100% 0%}83.333333%{background-position:50% 100%}100%{background-position:50% 100%}}
+@keyframes mind-comic-hand-release{0.000000%{background-position:50% 100%}16.666667%{background-position:100% 0%}33.333333%{background-position:50% 0%}50.000000%{background-position:0% 100%}66.666667%{background-position:100% 100%}83.333333%{background-position:0% 0%}100%{background-position:0% 0%}}
+
+@media(prefers-reduced-motion:reduce){
+ .mind-comic-book .scene-8 #skirt-full,.mind-comic-book .scene-8 #skirt-hand,.mind-comic-book .scene-8 #skirt-hand .hand-frames,.mind-comic-book .scene-8 #skirt-hand:before{animation:none}
+}
+@container mind-comic (max-width:600px){
+ .mind-comic-book .scene-8 #skirt-full{animation:mind-comic-appear .8s 1.15s both,mind-comic-mobile-approach 1.1s ease 1.95s both}
+ .mind-comic-book .scene-8 #skirt-hand:before{display:none}
+}
+
+/* ==========================================================================
+   心智观察器内的整页嵌入（mind-overview-surface）
+   ========================================================================== */
+.mind-page-content:has(.mind-overview-surface){padding:12px 16px;overflow:hidden;min-height:0}
+.mind-overview-surface{height:100%;min-height:0;min-width:0;display:flex;flex-direction:column}
+.mind-overview-surface .mind-comic-book{--comic-paper:var(--codex-paper,#faf8f5);height:100%;min-height:0;max-width:none;margin:0;padding:0;background:var(--comic-paper);display:flex;align-items:center;justify-content:center}
+.mind-comic-book .voice{background:var(--comic-paper,#fff);box-shadow:0 0 0 5px var(--comic-paper,#fff)}
+.mind-comic-book .voice:before,.mind-comic-book .voice:after{background:var(--comic-paper,#fff)}
+.mind-comic-book .narration,.mind-comic-book .line-chat p{background:var(--comic-paper,#fff)}
+.mind-comic-book .comic{flex:none;max-width:100%;margin:0}
+@container mind-comic (max-width:600px){.mind-comic-book .comic{height:1040px}}
+
+/* ==========================================================================
+   书册容器、翻页交互与文本裁剪策略
+   ========================================================================== */
+.mind-comic-book{box-sizing:border-box;container-type:inline-size;container-name:mind-comic;width:100%;max-width:1420px;margin:auto;background:white;color:#403e49;padding:16px 24px;font-family:"Microsoft YaHei",sans-serif;overflow:hidden}
+.mind-comic-book *{box-sizing:border-box}
+.mind-comic-book .comic{margin:0;min-width:0;touch-action:pan-y;cursor:default;transition:transform .22s ease-out;outline:none}
+.mind-comic-book .comic.dragging{cursor:default;transition:none;user-select:none}
+.mind-comic-book .comic img{-webkit-user-drag:none;user-select:none;pointer-events:none}
+.mind-comic-book .comic:focus-visible{outline:1px dashed #b4a6be;outline-offset:8px}
+.mind-comic-book .comic:not(.entering) .shot,.mind-comic-book .comic:not(.entering) .shot img,.mind-comic-book .comic:not(.entering) .voice,.mind-comic-book .comic:not(.entering) .narration,.mind-comic-book .comic:not(.entering) .page-title,.mind-comic-book .comic:not(.entering) .margin-line,.mind-comic-book .comic:not(.entering) .line-chat{animation:none}
+.mind-comic-book .voice p,.mind-comic-book .margin-line,.mind-comic-book .line-chat p{overflow-wrap:anywhere}
+/* 心声长短由后端决定，气泡尺寸是手调的分镜坐标——放不下就缩字号/截断，不出滚动条 */
+.mind-comic-book .voice p{max-height:72%;overflow:hidden}
+.mind-comic-book .line-chat p{max-height:45%;overflow:hidden}
+/* 移动布局（≤600px）：注意容器查询选不中容器自身——.mind-comic-book 自己就是
+   mind-comic 容器，所以这里不能写成 @container mind-comic{.mind-comic-book{...}}，
+   那条规则从未生效（遗留 bug：1040px 画格被 overflow:hidden 裁死、滚不动）。
+   改由 arrange() 里按 book.clientWidth  toggle 的 .is-mobile 类经 :has() 驱动，
+   与画格改用 data-m 坐标的判定条件同源。横向维持全出血裁切，纵向放开滚动。 */
+.mind-comic-book:has(.comic.is-mobile){overflow-y:auto;overflow-x:hidden;align-items:flex-start;padding:10px}
+
+/* Fine black panel ink and a restrained paper lift, matched across the comic. */
+.mind-comic-book .shot{filter:drop-shadow(var(--comic-frame-shadow))}
+
+
+.mind-comic-book .narration.ink-inset{background:transparent;border:0;box-shadow:none;padding:0;color:#19171d;font-family:"Mind Comic",serif;font-size:clamp(18px,2.1cqw,29px);line-height:1.5;letter-spacing:1px;-webkit-text-stroke:5px white;paint-order:stroke fill;text-shadow:0 1px 2px rgb(0 0 0 / .15);pointer-events:none}
+.mind-comic-book .narration.ink-inset.vertical{padding:0;font-size:clamp(20px,2.2cqw,31px);line-height:1.5}
+.mind-comic-book .narration.ink-inset.continued-caption{display:flex;align-items:center;justify-content:flex-end;font-size:clamp(24px,3cqw,42px);white-space:nowrap;-webkit-text-stroke:4px white;z-index:4}
+@media(prefers-reduced-motion:reduce){.mind-comic-book .narration.ink-inset{animation:none}}
+
+.mind-comic-book .panel-shadow{position:absolute;filter:drop-shadow(var(--comic-frame-shadow))}
+.mind-comic-book .panel-shadow>.shot{inset:0;width:100%;height:100%;filter:none}
+
+/* The white gutter is flat paper; the artwork alone casts the inset shadow. */
+.mind-comic-book .panel-shadow:has(>#skirt-hand){filter:none}
+.mind-comic-book .scene-8 #skirt-hand .image-wrap{box-shadow:var(--comic-frame-shadow)}
+.mind-comic-book #skirt-hand{cursor:pointer}
+
+/* Full speech uses measured font fitting, never clipping or ellipsis. */
+.mind-comic-book .voice p,.mind-comic-book .voice.compact p{max-height:none;overflow:visible;margin:0;flex-shrink:0;white-space:pre-wrap}
+.mind-comic-book .narration.boxed-narration{background:#fff;color:#19171d;border:var(--comic-frame-visible-width) solid var(--comic-frame-ink);border-radius:0;padding:10px 14px;font:clamp(16px,1.8cqw,25px)/1.5 "Mind Comic",serif;letter-spacing:0;-webkit-text-stroke:0;box-shadow:0 2px 3px rgb(25 22 30 / .08)}
+.mind-comic-book .narration.boxed-narration.time-caption{display:flex;align-items:center;justify-content:center;writing-mode:vertical-rl;max-width:none;padding:12px 6px;font-size:clamp(20px,2cqw,28px);line-height:1;letter-spacing:.2em;white-space:nowrap}
+.mind-comic-book .comic[data-language^="en"] .time-caption{writing-mode:horizontal-tb;font-size:clamp(11px,1cqw,15px);letter-spacing:0}
+.mind-comic-book .comic[data-language^="en"] .narration.vertical{writing-mode:horizontal-tb;text-orientation:mixed;line-height:1.4;letter-spacing:0;white-space:normal;overflow-wrap:anywhere;font-size:clamp(12px,1.3cqw,18px)}
+.mind-comic-book .comic.scene-2[data-language^="en"] .narration.rain-poem{width:16%!important;font-size:clamp(18px,1.8cqw,26px);line-height:1.45;letter-spacing:0;-webkit-text-stroke:2px #fff}
+.mind-comic-book .comic.scene-2[data-language^="zh"] .narration.rain-poem{font-size:clamp(18px,1.8cqw,26px)}
+.mind-comic-book .comic.is-mobile.scene-2[data-language^="en"] .narration.rain-poem{width:40%!important}
+
+/* Vivian & Nana — a book of everyday fragments. Chapter typography belongs to
+   the paper; thin ink, generous gutters and staggered frames carry the rhythm. */
+.mind-comic-book .chapter-title{font-size:clamp(26px,3.8cqw,53px);line-height:1.12;color:#39323c;letter-spacing:.025em}
+.mind-comic-book .chapter-title small{font:clamp(8px,.8cqw,11px)/1.4 sans-serif;letter-spacing:.23em;margin-bottom:14px}
+.mind-comic-book .scene-1 .chapter-title{font:clamp(44px,7cqw,96px)/.88 Georgia,'Times New Roman',serif;letter-spacing:-.055em}
+.mind-comic-book .scene-1 .chapter-title span{display:block}
+.mind-comic-book .scene-1 .chapter-title span:last-child{text-align:right;padding-right:3%}
+.mind-comic-book .scene-1 .chapter-title i{position:absolute;left:47%;top:49%;font-size:.46em;font-weight:400;color:var(--comic-accent-n);letter-spacing:0}
+.mind-comic-book .scene-1 .chapter-title small{letter-spacing:.25em;font-family:sans-serif;margin-bottom:13px}
+.mind-comic-book .opening-note{font-size:clamp(17px,2.1cqw,29px);line-height:1.65;color:#5e5261}
+.mind-comic-book .intimate-note{font-size:clamp(20px,2.8cqw,38px);line-height:1.65;color:#514453}
+.mind-comic-book .presence{position:absolute;bottom:12px;left:12px;background:var(--comic-paper,#faf9f5);padding:5px 8px;font-size:10px;letter-spacing:.7px;z-index:2;color:#514653}
+.mind-comic-book .goal-line{display:flex;flex-direction:column;justify-content:center;font-size:clamp(22px,2.7cqw,37px);line-height:1.45;color:#51424d}
+.mind-comic-book .goal-line small{margin-bottom:8px;color:var(--comic-accent)}
+.mind-comic-book .goal-line p{margin:0;flex-shrink:0;white-space:pre-wrap;overflow-wrap:anywhere}
+.mind-comic-book .voice{border-width:1.8px;border-color:#39323e;box-shadow:0 0 0 6px var(--comic-paper,#fff)}
+.mind-comic-book .voice.tail-left:after{left:-18px;top:45%}
+.mind-comic-book .voice.tail-left:before{left:-32px;top:39%}
+.mind-comic-book .voice.tail-right:after{left:auto;right:-18px;top:45%}
+.mind-comic-book .voice.tail-right:before{left:auto;right:-32px;top:39%}
+.mind-comic-book .voice.tail-up-left:after{left:27%;top:-18px}
+.mind-comic-book .voice.tail-up-left:before{left:22%;top:-31px}
+.mind-comic-book .voice.tail-up-right:after{left:71%;top:-18px}
+.mind-comic-book .voice.tail-up-right:before{left:76%;top:-31px}
+.mind-comic-book .scene-7 .chapter-title{font-size:clamp(26px,3.8cqw,53px)}
+.mind-comic-book #duo-home img{animation:none}
+.mind-comic-book .folio-label{position:absolute;font:clamp(9px,.9cqw,12px)/1.5 sans-serif;letter-spacing:.1em;color:var(--comic-accent-n);text-align:center}
+@container mind-comic (max-width:600px){
+ .mind-comic-book .chapter-title{font-size:35px}
+ .mind-comic-book .chapter-title small{font-size:9px;margin-bottom:9px}
+ .mind-comic-book .scene-1 .chapter-title{font-size:76px;line-height:.84;padding:0 8%}
+ .mind-comic-book .scene-1 .chapter-title i{left:48%;top:49%}
+ .mind-comic-book .opening-note{font-size:24px}
+ .mind-comic-book .intimate-note{font-size:30px}
+ .mind-comic-book .intimate-note br{display:none}
+ .mind-comic-book .presence{font-size:9px;padding:4px;left:8px;bottom:8px}
+}
+
+/* Hand-lettered balloons: decorative ink stays outside text measurement. */
+.mind-comic-book .voice.drawn-bubble{border:0;background:none;box-shadow:none;border-radius:0;padding:22px 28px;isolation:isolate}
+.mind-comic-book .bubble-outline{position:absolute;inset:0;width:100%;height:100%;overflow:visible;z-index:-1;pointer-events:none}
+.mind-comic-book .bubble-outline path{fill:var(--comic-paper,#faf9f5);stroke:#39323e;stroke-width:1.8px;vector-effect:non-scaling-stroke;stroke-linejoin:round}
+.mind-comic-book .voice.drawn-bubble:not(.cloud):before{display:none}
+.mind-comic-book .voice.drawn-bubble:not(.cloud):after{content:'';position:absolute;width:25px;height:22px;background:var(--comic-paper,#faf9f5);border:0;clip-path:polygon(0 0,100% 100%,30% 0);filter:drop-shadow(1px 1px 0 #39323e);border-radius:0;top:-15px;left:25%;transform:rotate(180deg)}
+.mind-comic-book .voice.drawn-bubble.tail-left:not(.cloud):after{left:-17px;top:46%;transform:rotate(90deg)}
+.mind-comic-book .voice.drawn-bubble.tail-right:not(.cloud):after{left:auto;right:-17px;top:46%;transform:rotate(-90deg)}
+.mind-comic-book .voice.drawn-bubble.tail-up-right:not(.cloud):after{left:73%}
+.mind-comic-book .voice.cloud{padding:25px 32px}
+.mind-comic-book .voice.current-thought small{display:block;margin-bottom:8px;font-family:system-ui,sans-serif;font-size:clamp(10px,1cqw,13px);font-style:normal}
+.mind-comic-book .comic-sfx{position:absolute;z-index:5;pointer-events:none;font:italic clamp(22px,3.2cqw,44px)/1.2 'Mind Comic',serif;color:#534c55;letter-spacing:.14em;transform:rotate(-13deg);-webkit-text-stroke:3px var(--comic-paper,#faf9f5);paint-order:stroke fill;text-shadow:1px 2px 0 #fff}
+.mind-comic-book .scene-3 .gutter-sound{display:flex;align-items:center;justify-content:center;white-space:nowrap;animation:mind-comic-sfx-appear .45s both;animation-delay:var(--delay)}
+@keyframes mind-comic-sfx-appear{from{opacity:0}to{opacity:1}}
+.mind-comic-book .comic:not(.entering) .gutter-sound{animation:none}
+@media(prefers-reduced-motion:reduce){.mind-comic-book .scene-3 .gutter-sound{animation:none}}
+.mind-comic-book .scene-2 .chapter-title,.mind-comic-book .scene-3 .chapter-title{z-index:3;font-size:clamp(22px,2.6cqw,36px);-webkit-text-stroke:5px var(--comic-paper,#faf9f5);paint-order:stroke fill}
+.mind-comic-book .scene-2 .chapter-title small,.mind-comic-book .scene-3 .chapter-title small{display:none}
+
+.mind-comic-book .voice.drawn-bubble:not(.cloud):after{display:none}
+
+/* Morning sequence: curtains, clock reveal, one second of ringing, then wake. */
+.mind-comic-book .scene-10 {
+  --alarm-ring-start: 1610ms; /* Clock's 460ms delay + 1150ms reveal. */
+  --alarm-ring-duration: 1000ms;
+  --morning-wake-start: calc(var(--alarm-ring-start) + var(--alarm-ring-duration));
+}
+.mind-comic-book #morning-alarm img{transform:scale(1.015)}
+.mind-comic-book .morning-alarm-sfx {
+  opacity:0;white-space:nowrap;color:var(--comic-frame-ink);
+  font-size:clamp(22px,3.9cqw,54px);letter-spacing:.08em;
+  -webkit-text-stroke:3px var(--comic-paper,#faf9f5);
+}
+.mind-comic-book .morning-alarm-sfx span{display:inline-block}
+.mind-comic-book .morning-panel .image-wrap{position:relative}
+.mind-comic-book .morning-panel .morning-color-layer{position:absolute;inset:0;filter:none;pointer-events:none}
+.mind-comic-book .comic.entering.scene-10 .morning-alarm-sfx {
+  animation:morning-alarm-sound var(--alarm-ring-duration) steps(1,end) var(--alarm-ring-start) forwards;
+}
+.mind-comic-book .comic.entering.scene-10 #morning-waking{animation-delay:var(--morning-wake-start)}
+@keyframes morning-alarm-sound{0%,99.99%{opacity:1}100%{opacity:0}}
+@keyframes morning-alarm-shake{
+  0%,100%{translate:0 0}
+  25%{translate:-2px 1px}
+  50%{translate:2px -1px}
+  75%{translate:-1px -1px}
+}
+@media(prefers-reduced-motion:no-preference){
+  .mind-comic-book .comic.entering.scene-10 #morning-alarm img,
+  .mind-comic-book .comic.entering.scene-10 .morning-alarm-sfx span {
+    animation:morning-alarm-shake 100ms linear var(--alarm-ring-start) 10 forwards;
+  }
+}
+@media(prefers-reduced-motion:reduce){
+  .mind-comic-book .comic.entering.scene-10 .morning-alarm-sfx{animation:none}
+}
+
+
+/* Hidden prewarming keeps the entrance at its first frame until reveal finishes. */
+[data-presentation-ready="false"] .mind-comic-book .comic,
+[data-presentation-ready="false"] .mind-comic-book .comic * { animation: none !important; }

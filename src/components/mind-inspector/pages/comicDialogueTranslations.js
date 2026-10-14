@@ -1,0 +1,77 @@
+// Four authored variants per state/intensity, matching the Chinese dialogue bank.
+const rows = {
+  vivian: {
+    emotions: {
+      喜悦: [["Today isn't bad.",'Something small made me smile.','I want to share this happiness with you.','Hey, today deserves a little star!'],['今日は悪くないね。','小さなことで、笑いたくなった。','この嬉しさ、半分あげたい。','ねえ、今日は心に星を描こう！']],
+      悲伤: [['The rain inside me is lighter now.','A little disappointed. Give me a moment.','I want to tell you what hurt today.',"I'm sad. Could you sit quietly with me?"],['心の小雨は、もう弱くなった。','少し寂しいから、ひと息つかせて。','今日のつらさ、ゆっくり話したい。','悲しいの。少し静かにそばにいてくれる？']],
+      愤怒: [["I've let some of it go.",'I want to explain what was wrong.',"I'm still angry. Don't rush to explain it away.",'Let me calm down before we talk.'],['少しは気持ちを手放せた。','おかしいところは、ちゃんと伝えたい。','まだ怒っているの。急いで理由をつけないで。','落ち着いてから、きちんと話すね。']],
+      恐惧: [["It isn't as scary as I imagined.","I'm nervous, but I want to try.",'My heart is pounding. Can we look together?',"I'm scared this time. Stay with me a moment."],['思ったほど怖くなさそう。','少し不安だけど、試してみたい。','胸がどきどきする。一緒に見てくれる？','今回は怖いの。まずそばにいて。']],
+      亲近: [['We can talk even with a little distance.',"I'm more comfortable talking with you.",'I want to come a little closer.',"I don't want to rush this walk today."],['少し離れていても、ちゃんと話せる。','君と話すのが、だんだん楽になった。','もう少し近づきたい。','今日はこの道を、急いで歩きたくないの。']],
+      孤独: [['Being alone has its little pleasures.',"It's been quiet. I want to talk to you.",'I want to save an empty seat for you.','Today I really want someone to hear me.'],['ひとりでも、小さな楽しみはある。','静かな時間が続くと、君と話したくなる。','空いた席を、君に残しておきたい。','今日は特に、言葉を受け止めてほしいの。']],
+      好奇: [["I'll keep that question in my pocket.",'Oh, that detail is interesting.','Wait, I want to know how it works!','That works too? Let me look again!'],['この疑問は、ポケットにしまっておこう。','あれ、この細部は面白いね。','待って、どうできているのか知りたい！','それもできるの？もう一度見せて！']],
+    },
+    needs: {
+      归属: [['A little time alone is nice.','If you have time, sit beside me.','I want to finish this ride with you.','Today I want to know someone is listening.'],['ひとりで過ごす時間もいいね。','よかったら、隣に座って。','この道のりを、君と最後まで乗っていたい。','今日は、誰かが聞いてくれていると知りたいの。']],
+      自主: [["I'm fine deciding together.",'I want this little choice to be mine.','Let me try, then tell you how it went.','I want to keep this decision my own.'],['今回は一緒に決めてもいいよ。','小さな選択は、自分の考えで決めたい。','自分で試して、結果を伝えたいの。','このことは、自分で決めておきたい。']],
+      安全: [['I feel steady right now.','Knowing the situation helps me relax.','I want to know what happens next.',"I'm uneasy. Help me sort it out?"],['今は心が落ち着いている。','状況が見えたら、もう少し安心できる。','次に何が起こるか、確かめたいの。','少し不安だから、一緒に整理してくれる？']],
+      新奇: [['The familiar road feels nice today.','What might another path show us?','I want to find something new!','My curiosity ran out the door before me.'],['いつもの道も、今日は心地いい。','別の小道なら、何が見えるかな？','見たことのないものを探したい！','今日は好奇心が、先に外へ飛び出した。']],
+      表达: [["You first. I'm not in a hurry.",'I have something small to tell you.',"I've collected little discoveries to share.",'Wait, I really want to finish this thought.'],['先に君の話を聞くよ。急いでいないから。','隙を見つけて、伝えたい言葉がある。','小さな発見がいっぱい。君に話したい。','待って、この話は最後まで伝えたいの。']],
+    },
+    relations: {
+      信任: [["Let's get to know each other slowly.",'I want your thoughts on this little thing.',"Being honest with you feels easier.",'I feel safe sharing this with you.'],['ゆっくり知り合ってから、心を開こう。','この小さなこと、君の考えを聞きたい。','君には、本音を話しやすくなった。','この想いは、君に安心して話せる。']],
+      亲密: [['A little space is fine.',"I'm less nervous when you come closer.",'Some thoughts are just for you.',"I don't have to pretend to be composed with you."],['少し距離があっても大丈夫。','近づかれても、もうあまり緊張しない。','君だけに、そっと話したいことがある。','君の前では、ずっと平気なふりをしなくていい。']],
+      尊重: [['I want to hear more of your view.',"It's different from mine, but makes sense.",'I see what you care about.','Even when we disagree, I want to listen.'],['君の考えを、もう少し聞きたい。','私とは違っても、君なりの理由があるね。','大切にしていること、ちゃんと見えている。','意見が違っても、最後まで聞きたい。']],
+      依赖: [['I can take this little step myself.',"When I'm stuck, I want your advice.",'Thinking together makes me feel steadier.',"I'm unsure. May I lean on you?"],['この小さな一歩は、自分で歩ける。','困ったら、君の意見を聞きたい。','一緒に考えてくれると、心強い。','今は迷っているから、少し肩を貸して。']],
+      熟悉: [["There's still so much to learn about you.","I'm starting to know what you notice.",'Some things need no explanation now.','We have a little rhythm of our own.'],['君のこと、まだ知りたいことがいっぱい。','どこに目を留めるのか、分かってきた。','説明しなくても、伝わる言葉が増えた。','君といる時間には、ふたりのリズムがある。']],
+    },
+    mood: {
+      joyful: [["I can't quite hide my happiness!",'Even the rain seems to keep time.','If happiness had a tail, it would be raised.','I want to collect more happy moments.'],['今日の嬉しさは、隠しきれない！','窓の外の雨も、拍子を刻んでいるみたい。','嬉しさにしっぽがあったら、今はぴんとしているね。','この道で、嬉しいことをもっと集めたい。']],
+      excited: [['The little train inside me is speeding up.','Hold on, I have another idea!','Even my fingers feel eager.','I wonder what surprise comes next.'],['心の小さな電車が、少し速く走っている。','つかまってね。また新しい考えが浮かんだ！','楽しみで、指先まで動きたくなる。','次はどんな小さな驚きがあるかな。']],
+      tender: [["It's nice being here with you.",'I want this comfort to last.','We can speak a little more softly today.','The rain and the company feel just right.'],['君といるの、いいね。','この心地よさを、もう少し残したい。','今日は、言葉を少し柔らかくしてもいい。','雨音も、隣の人も、ちょうどいい。']],
+      content: [['No hurry. It feels nice.','I like our pace right now.','Small things feel settled, and that is enough.','We can slow down and smile today.'],['急がなくて、いい感じ。','今のこのペース、好きだな。','小さなことが穏やかなら、それでいい。','今日はゆっくりでも、笑ってもいいね。']],
+      tired: [['Feeling a little low. Shall we sit?','I might say less today.','I want somewhere quiet to rest my head.','Give me a moment. We can talk later.'],['少し気分が沈んでいるから、座ろう。','今日は、言葉が少なくなるかも。','静かな場所に、頭を預けたい。','少し休ませて。あとで続きを話そう。']],
+      uneasy: [['A little knot is still in my heart.',"I'm annoyed and unsure what to do.","Don't rush me. I want to sort my thoughts.",'I want this uneasiness to settle gently.'],['心の小さな結び目が、まだほどけない。','少し苛立って、どうしたらいいか迷っている。','急かさないで。考えを整えたいの。','この胸騒ぎを、ゆっくり下ろしたい。']],
+      restless: [["The wheels inside me haven't stopped.","I want to speak, but don't know where to start.",'Sitting still, my thoughts have wandered far.','Feeling restless. Shall we change the subject?'],['心の車輪が、まだ止まっていない。','何か話したいけど、始め方が決まらない。','座っているのに、考えは遠くへ行ってしまう。','少し落ち着かないから、話題を変えてみようか。']],
+      quiet: [['A little quiet is nice right now.',"I'll look outside before the next thought.",'Not much stirs inside, only the rain.','Let this panel stay empty for now.'],['今は少し静かでも、いいね。','次の言葉の前に、窓の外を見よう。','心は穏やかで、雨音だけが聞こえる。','このコマは、しばらく空白にしよう。']],
+    },
+  },
+  nana: {
+    emotions: {
+      喜悦: [['An ordinary moment can still be lovely.','A little happiness to keep gently.','I want you to know this good feeling.','I am happy. I want to remember this time.'],['普通のひとときも、大切に過ごせる。','小さな嬉しさを、そっとしまいたい。','このいい気分を、君にも伝えたい。','嬉しいの。この時間を覚えておきたい。']],
+      悲伤: [['The rain inside is slowly stopping.','A little regret can stay awhile.','This made me sad. I want to tell you.','Today feels heavy. I want company too.'],['心の雨は、ゆっくり止みかけている。','小さな心残りは、少し置いておこう。','悲しくなったこと、君に話したい。','今日は重たくて、私もそばにいてほしい。']],
+      愤怒: [['That unhappiness has faded a little.','This bothers me. I want to explain why.','I am angry, and want the full explanation.',"Let's pause until my feelings settle."],['あの不快な気持ちは、少し薄れた。','気になる理由を、きちんと伝えたい。','確かに怒っているけれど、説明も最後まで聞きたい。','少し止まろう。落ち着いてから話したい。']],
+      恐惧: [['I feel safer now.','I worry, and want to understand first.','I get scared too. Will you think with me?',"I'm a little panicked. Let's slow down."],['今は、少し安心できている。','心配だから、まず事情を確かめたい。','私も怖くなるの。一緒に考えてくれる？','少し慌てているから、ゆっくり進もう。']],
+      亲近: [['There is no rush to become familiar.','I am growing comfortable beside you.','I like this little closeness.','I can offer you this warmth openly now.'],['急いで親しくならなくてもいい。','君といると、少しずつ自然になれる。','この少しの近さが、好き。','今は、素直に優しさを渡したい。']],
+      孤独: [['Alone, I can hear my own thoughts.','After a long quiet, I miss conversation.','I want to leave a seat beside me for you.','I want to be heard today, too.'],['ひとりの時間には、自分の声が聞こえる。','静かな時間が長くて、話すことが恋しい。','君が座れるよう、隣を空けておきたい。','今日は私も、ちゃんと聞いてほしい。']],
+      好奇: [['We can return to this detail later.','This turn makes me want to linger.','Tell me why this part matters to you.','I want to hear this story to the end.'],['この細部は、あとで見てもいい。','この展開には、もう少し留まりたい。','この部分を大切にする理由を、聞きたい。','この物語は、最後まで聞いていたい。']],
+    },
+    needs: {
+      归属: [['Being alone feels peaceful now.','If you like, let us sit together.','I want to share this ordinary day with you.','I want to be remembered and cared for, too.'],['今はひとりでも、穏やかでいられる。','よかったら、一緒に少し座ろう。','この日常を、君と一緒に過ごしたい。','私も、気にかけて大切にしてほしい。']],
+      自主: [['Deciding together suits this moment.','I want to keep this little preference.','Let me take this step at my own pace.','Gently said, but I want to decide this myself.'],['今回は、一緒に相談するのがいいね。','小さな好みは、残しておきたい。','この一歩は、自分のペースで歩かせて。','優しく伝えたいけれど、これは自分で決めたいの。']],
+      安全: [['This calm helps me relax.','Knowing the way ahead is reassuring.','I want to untangle this uncertainty with you.','Today I need some steady company.'],['今の穏やかさに、ほっとしている。','次の道が分かれば、安心できる。','曖昧なところを、君と整理したい。','今日は、心強い付き添いが少しほしい。']],
+      新奇: [['Familiar scenery is worth another look.','Another angle might show us something new.','I want a story that makes me linger.','Today I want to see beyond the ordinary.'],['見慣れた景色も、もう一度見る価値がある。','角度を変えたら、新しい発見があるかも。','少し考えたくなる物語に、出会いたい。','今日は、日常の向こう側を見てみたい。']],
+      表达: [['I will listen first. There is no rush.','I want to share a thought gently.','I have something to say about this part too.','Please leave a little time for my thoughts.'],['まず君の話を聞くよ。急いで返さなくてもいい。','ひとつの考えを、そっと分け合いたい。','この部分は、私にも話したいことがある。','心の言葉を伝えきる時間を、少し残してほしい。']],
+    },
+    relations: {
+      信任: [['We can learn the unfamiliar parts slowly.','I am starting to trust you with little things.','Your care makes honesty easier.','It feels safe telling you this.'],['まだ知らないところは、ゆっくり知っていこう。','小さなことを、君に任せられるようになった。','君の真剣さに、素直に話したくなる。','この想いは、君に安心して伝えられる。']],
+      亲密: [['A little space can feel comfortable.','We need no forced words to feel at ease.','I want you to know my little whims.','Being close to you feels warm.'],['少し余白があるのも、心地いい。','無理に話題を探さなくても、自然でいられる。','小さなわがままも、君に知ってほしい。','君に近づくと、私も温かくなる。']],
+      尊重: [['I want to hear your whole reason.','Our different views deserve a careful talk.','I admire how seriously you take things.','I care for you and your own judgment.'],['君の理由を、まず最後まで聞きたい。','違う考えも、きちんと話す価値がある。','物事に真剣に向き合う姿が、素敵だと思う。','君が好きだから、自分の判断も大切にしたい。']],
+      依赖: [['I can sort this out myself, slowly.','How would you see this little step?','Talking it over with you reassures me.','Let me borrow a little strength this time.'],['これは、自分でゆっくり整理できる。','この一歩を、君ならどう考えるかな。','一緒に相談できると、もっと安心できる。','今回は私にも、少し力を貸してね。']],
+      熟悉: [['There are still many details to learn about you.','A little understanding is growing between us.','I understand your words more and more.','Familiarity lives in little everyday things.'],['君のこと、知りたい細部がまだたくさんある。','一緒にいるうちに、少し通じ合うようになった。','君の言葉を、前より受け止められる。','親しさは、日常の小さなところに宿っている。']],
+    },
+    mood: {
+      joyful: [['Today is brighter than I expected.','I feel good; even the pauses hold a smile.','No need to hide this happiness.','I wish this ride would last a little longer.'],['今日の嬉しさは、思ったより明るい。','気分がよくて、間にも笑みがこぼれる。','この嬉しさは、深く隠さなくてもいい。','この道のりを、すぐ終わらせたくない。']],
+      excited: [['A little eager to see what comes next.','My heart is light; I want to say more.','The days ahead may hold things to remember.','Even calm can carry a little excitement.'],['少し楽しみで、次を見てみたい。','心が軽くなって、もう少し話したくなる。','これからの日々に、覚えておきたいことがあるかも。','落ち着いた心にも、小さなときめきはあっていい。']],
+      tender: [['This moment is just warm enough.','I like being here with you.','No need to finish speaking; silence is warm too.','Today I want to be honest about my fondness.'],['今は、ちょうどいい温かさ。','こうして君といられるのが好き。','話しきらなくても、静けさには温度がある。','今日は、好きな気持ちに少し素直でいたい。']],
+      content: [['This pace feels comfortable.','Let us keep this peace a little longer.','An ordinary day can still be a good one.',"Let's look outside and talk slowly."],['今のペースは、心地いい。','この穏やかさを、少し大切に残そう。','特別なことがなくても、いい一日になる。','窓の外を見て、ゆっくり話そう。']],
+      tired: [['Feeling low today; let me rest too.','No explanations for now. Sitting is enough.','My heart is heavy. I want some quiet.','We can continue when this weariness passes.'],['今日は少し沈んでいるから、私も休ませて。','今は説明しなくても、座っているだけでいい。','心が重たくて、静けさを少し残したい。','この疲れが過ぎたら、また歩こう。']],
+      uneasy: [['My feelings are tangled; no rush to decide.','A little uneasy. I want to understand why.','I am still sorting things out. Let me go slowly.','Steady the breath, then share the thoughts.'],['気持ちが乱れているから、急いで決めないでおこう。','少し不安で、その理由を知りたい。','まだ整理できていないから、ゆっくり進ませて。','呼吸を落ち着けてから、想いを話そう。']],
+      restless: [['My thoughts run fast. I want to sort them out.','Some ideas are looking for a way out.','No need to force quiet on this moment.','My mind is busy. I will choose one thought.'],['考えが速く走るから、まず整理したい。','いくつかの想いが、出口を探している。','今は静かでなくても、無理をしなくていい。','心が忙しいから、ひとつずつ考えたい。']],
+      quiet: [['A little silence is enough now.','The rain is soft. I want to be gentle too.','Without answers, we can still sit together.','There is no hurry to fill this page.'],['今は、少し静かでいられればいい。','雨音が優しいから、私も柔らかくいたい。','答えがなくても、一緒に座っていられる。','このページの空白は、急いで埋めなくていい。']],
+    },
+  },
+};
+export const localizedDialogueBanks = Object.fromEntries(['en','ja'].map((language,index) => [language,
+  Object.fromEntries(Object.entries(rows).map(([role,categories]) => [role,
+    Object.fromEntries(Object.entries(categories).map(([category,states]) => [category,
+      Object.fromEntries(Object.entries(states).map(([state,variants]) => [state,variants[index]]))]))]))]));

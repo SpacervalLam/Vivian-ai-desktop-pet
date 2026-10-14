@@ -1,0 +1,16 @@
+/* Shared frame treatment for every illustrated panel and paper surface.
+   --comic-frame-width 是**分镜描边唯一的宽度来源**：画格的 .edge 轮廓、
+   章节分隔线（--chapter-line）、scene-8 那个手部角线、以及功能面板的 .panel-outline
+   全都读它。改这一个值就是「统一加粗」，别再往别处写 1.8px 之类的字面量。
+   注意描边一律带 vector-effect: non-scaling-stroke，所以这个 px 是屏幕像素，
+   不随 SVG viewBox 缩放。 */
+.unified-comic-book,
+.mind-comic-book,
+.comic-chapter {
+  --comic-frame-ink: #29262e;
+  /* 原为 1.8px。分镜框在全宽书页上偏细，统一加倍；矢量描边不吃抗锯齿，加倍后不糊。 */
+  --comic-frame-width: 3.6px;
+  /* SVG 分镜裁掉外侧半条描边；完整显示的 CSS 边框用同等可见宽度。 */
+  --comic-frame-visible-width: calc(var(--comic-frame-width) / 2);
+  --comic-frame-shadow: 0 2px 2px rgb(25 22 30 / .12);
+}

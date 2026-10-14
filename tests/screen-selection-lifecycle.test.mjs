@@ -5,17 +5,18 @@ let cursor=0, refCursor=0, firstRender=true, frameId=0;
 const fixtures={
  react:`export const useState=v=>globalThis.__selector.state(v),useRef=v=>globalThis.__selector.ref(v),useCallback=f=>f,useEffect=f=>globalThis.__selector.effect(f);`,
  'react/jsx-runtime':`export const jsx=(type,props)=>({type,props}),jsxs=jsx;`,
- 'react-i18next':`export const useTranslation=()=>({i18n:{language:'zh'}});`,
+ 'react-i18next':`export const useTranslation=()=>({i18n:globalThis.__selector.language});`,
  'lucide-react':`export const Copy=()=>null,Download=()=>null,ScanLine=()=>null,Sparkles=()=>null,X=()=>null;`,
  '@tauri-apps/api/core':`export const invoke=(...args)=>globalThis.__selector.invoke(...args);`,
  '@tauri-apps/api/event':`export const listen=(name,fn)=>globalThis.__selector.listen(name,fn);`,
 };
 const prior={window:globalThis.window,requestAnimationFrame:globalThis.requestAnimationFrame,cancelAnimationFrame:globalThis.cancelAnimationFrame,create:URL.createObjectURL,revoke:URL.revokeObjectURL};
 globalThis.__selector={
+ language:{language:'zh',async changeLanguage(language){this.language=language;}},
  state(v){const index=cursor++;if(firstRender)states[index]=v;return [states[index],value=>states[index]=typeof value==='function'?value(states[index]):value];},
  ref(v){const index=refCursor++;if(firstRender)refs[index]={current:v};return refs[index];},
  effect(f){effects.push(f);},
- invoke(name,args){calls.push({name,args});if(name==='screen_selection_frame')return new Promise(resolve=>requests.set(args.sessionId,resolve));return Promise.resolve();},
+ invoke(name,args){calls.push({name,args});if(name==='get_config')return Promise.resolve('ja');if(name==='screen_selection_frame')return new Promise(resolve=>requests.set(args.sessionId,resolve));return Promise.resolve();},
  async listen(name,fn){events.set(name,fn);return ()=>{if(events.get(name)===fn)events.delete(name);};},
 };
 globalThis.window={addEventListener(name,fn){keys.set(name,fn);},removeEventListener(name){keys.delete(name);}};
@@ -33,6 +34,12 @@ try{
  render();const cleanup=effects[0]();await flush();
  assert.ok(events.has('screen_selection:start')&&events.has('screen_selection:reset'));
  assert.equal(calls.at(-1).name,'screen_selection_ready','listeners installed before ready acknowledgement');
+ assert.equal(globalThis.__selector.language.language,'ja','initial language comes from saved settings');
+ assert.equal(find(render(),n=>n.type==='span').props.children,'ドラッグで選択');
+ events.get('config:language-changed')({payload:{language:'en'}});
+ assert.equal(find(render(),n=>n.type==='span').props.children,'Drag to select');
+ events.get('config:language-changed')({payload:{language:'zh-CN'}});
+ assert.equal(find(render(),n=>n.type==='span').props.children,'拖动选择区域');
  const begin=id=>events.get('screen_selection:start')({payload:{session_id:id,width:1920,height:1080}});
  begin('old');begin('current');requests.get('old')(new Uint8Array([1,2,3]).buffer);await flush();
  assert.equal(urls.length,0,'stale preview never replaces current session');
@@ -48,6 +55,14 @@ try{
  tree=render();effects[1]();
  keys.get('keydown')({key:'Enter',preventDefault(){}});await flush();
  assert.deepEqual(calls.at(-1).args,{sessionId:'current',region:{x:20,y:30,width:200,height:100},action:'copy_and_analyze'});
+ const nodeText=node=>node==null?'':Array.isArray(node)?node.map(nodeText).join(''):typeof node==='object'?nodeText(node.props?.children):String(node);
+ for(const [language,expected] of [['en',['Analyze','Copy to clipboard','Copy & analyze↵','Save','Save & analyze','Cancel']],['ja',['分析','クリップボードにコピー','コピーして分析↵','保存','保存して分析','キャンセル']],['zh-CN',['分析','复制到剪贴板','复制并分析↵','保存','保存并分析','取消']]]){
+   events.get('config:language-changed')({payload:{language}});
+   tree=render();
+   const toolbar=find(tree,n=>n.props?.className==='screen-selection-toolbar');
+   assert.deepEqual(toolbar.props.children.filter(n=>n.type==='button').map(nodeText),expected);
+   assert.equal(find(tree,n=>n.type==='img').props.src,'blob:selector-0','language switching preserves the current screenshot');
+ }
  const oldSessionTree=tree;
  events.get('screen_selection:reset')({payload:{session_id:'old'}});assert.equal(revoked.length,0,'old reset cannot clear new preview');
  events.get('screen_selection:reset')({payload:{session_id:'current'}});assert.deepEqual(revoked,['blob:selector-0']);

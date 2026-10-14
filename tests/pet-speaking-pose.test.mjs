@@ -15,12 +15,13 @@ const flush=()=>new Promise(resolve=>setImmediate(resolve));
 const find=(tree,predicate)=>{if(!tree||typeof tree!=='object')return null;if(predicate(tree))return tree;for(const child of [tree.props?.children].flat(Infinity)){const found=find(child,predicate);if(found)return found;}return null;};
 try{
  const bundle=await build({entryPoints:['src/components/ChibiPetCanvas.tsx'],bundle:true,write:false,platform:'node',format:'esm',loader:{'.css':'empty'},plugins:[{name:'speech-pet-fixtures',setup(b){
- b.onResolve({filter:/^react$|^react\/jsx-runtime$|^@tauri-apps\/api\/|\/characterContext$|\/useAppStore$|\/sheetLoader$/},({path})=>({path,namespace:'fixture'}));
+ b.onResolve({filter:/^react$|^react\/jsx-runtime$|^@tauri-apps\/api\/|\/characterContext$|\/useAppStore$|\/sheetLoader$|\/useDesktopPhysics$/},({path})=>({path,namespace:'fixture'}));
  b.onLoad({filter:/.*/,namespace:'fixture'},({path})=>({contents:
  path==='react'?`export const forwardRef=fn=>fn,useState=v=>globalThis.__speechPet.state(v),useRef=v=>globalThis.__speechPet.ref(v),useCallback=f=>f,useEffect=f=>globalThis.__speechPet.effect(f),useImperativeHandle=(ref,create)=>globalThis.__speechPet.setHandle(create());`:
  path==='react/jsx-runtime'?`export const jsx=(type,props)=>({type,props}),jsxs=jsx;`:
  path.endsWith('characterContext')?`export const getCharacterId=()=>"nana";`:
  path.endsWith('useAppStore')?`export const useAppStore=selector=>selector(globalThis.__speechPet.store);useAppStore.getState=()=>globalThis.__speechPet.store;`:
+ path.endsWith('useDesktopPhysics')?`export const useDesktopPhysics=()=>({airborne:Boolean(globalThis.__speechPet.airborne),error:false});`:
  path.endsWith('sheetLoader')?`export class SheetLoader{load(){return globalThis.__speechPet.pendingSheet??Promise.resolve(true)}isReady(){return !globalThis.__speechPet.pendingSheet}clear(){}}`:
  path.endsWith('/event')?`export const listen=(...args)=>globalThis.__speechPet.listen(...args);`:
  path.endsWith('/window')?`export const currentMonitor=async()=>null,getCurrentWindow=()=>({}),getAllWindows=async()=>[];`:
@@ -71,6 +72,10 @@ try{
  send('cross:start',{stream_id:'listener-gesture',speaker_id:'vivian',listener_id:'nana'});send('cross:done',{stream_id:'listener-gesture',speaker_id:'vivian',listener_id:'nana',expression:'victory'});await flush();tree=render();assert.match(stage(tree).props.className,/pose-idle/,'listener does not copy speaker gestures');
  send('cross:start',{stream_id:'old-gesture',speaker_id:'nana',listener_id:'vivian'});send('cross:start',{stream_id:'new-gesture',speaker_id:'vivian',listener_id:'nana'});send('cross:done',{stream_id:'old-gesture',speaker_id:'nana',listener_id:'vivian',expression:'cheer'});await flush();tree=render();assert.match(stage(tree).props.className,/pose-listen/,'older completion cannot interrupt a newer stream');send('cross:error',{stream_id:'new-gesture'});
  send('cross:start',{stream_id:'drag-gesture',speaker_id:'nana',listener_id:'vivian'});handle.setExpression('drag');send('cross:done',{stream_id:'drag-gesture',speaker_id:'nana',listener_id:'vivian',expression:'reach-out'});await flush();tree=render();assert.match(stage(tree).props.className,/pose-drag/,'completed social gesture respects dragging');
+ handle.resetExpression();globalThis.__speechPet.airborne=true;handle.setExpression('dizzy',1800);
+ tree=render();assert.match(stage(tree).props.className,/pose-dizzy/,'ceiling dizziness remains visible while airborne');
+ send('tts:started',{character_id:'nana'});tree=render();assert.match(stage(tree).props.className,/pose-dizzy/,'spoken collision reaction cannot replace dizzy with talk');
+ globalThis.__speechPet.airborne=false;
  cleanup();assert.equal(listeners.size,0);
  console.log('Pet speaking sprites: actual atlas cell, silent/proactive bubbles, ongoing audio after chat done, settled/sticker distinction, thinking priority, role isolation and physical actions passed');
 }finally{for(const name of names){if(prior[name]===undefined)delete globalThis[name];else globalThis[name]=prior[name];}delete globalThis.__speechPet;}

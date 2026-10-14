@@ -1,0 +1,35 @@
+import assert from 'node:assert/strict';
+import { createPanelFloat } from '../src/components/mind-inspector/pages/panelFloat.js';
+
+let clock = 0, nextId = 0;
+const pending = new Map();
+globalThis.performance = { now: () => clock };
+globalThis.requestAnimationFrame = fn => { pending.set(++nextId, fn); return nextId; };
+globalThis.cancelAnimationFrame = id => pending.delete(id);
+const step = ms => {
+  clock += ms;
+  const callbacks = [...pending.values()];
+  pending.clear();
+  callbacks.forEach(fn => fn(clock));
+};
+const bounds = { minX: -12, maxX: 12, minY: -12, maxY: 12 };
+const float = createPanelFloat(() => {});
+float.start(0, bounds);
+step(2000);
+assert.equal(float.position.x, 2.4);
+float.stop();
+const stopped = float.position;
+step(5000);
+assert.deepEqual(float.position, stopped);
+float.start(Math.PI / 2, bounds);
+step(1000);
+assert.equal(float.position.x, stopped.x);
+assert.equal(float.position.y, 1.2);
+step(100000);
+assert.equal(float.position.y, 12);
+float.start(Math.PI, bounds);
+step(100000);
+assert.equal(float.position.x, -12);
+assert.equal(float.position.y, 12);
+assert.equal(pending.size, 0);
+console.log('Comic float: immediate stop, retained position, continuation and no-white boundary limit passed');

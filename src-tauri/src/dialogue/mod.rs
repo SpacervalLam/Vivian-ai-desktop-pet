@@ -732,6 +732,16 @@ impl DialogueManager {
         Ok(crate::memory::conversations::project_conversations(&self.get_all_history()?, &self.char_id, &decisions).0)
     }
 
+    /// UI projection; internal memory processing continues to use the complete history.
+    pub fn visible_memory_conversations(&self) -> VivianResult<Vec<crate::memory::conversations::ConversationRecord>> {
+        let (_, decisions) = self.conversation_boundaries.snapshot();
+        // Quiet-mode notices remain in storage for internal context, but are not user dialogue.
+        let history: Vec<_> = self.get_all_history()?.into_iter()
+            .filter(|entry| entry.metadata["source"] != "quiet_control")
+            .collect();
+        Ok(crate::memory::conversations::project_conversations(&history, &self.char_id, &decisions).0)
+    }
+
     pub fn notify_conversation_grouping_changed(&self) {
         if let Some(app) = self.app_handle.lock().as_ref() {
             let _ = app.emit("dialogue:changed", serde_json::json!({"character_id": self.char_id}));

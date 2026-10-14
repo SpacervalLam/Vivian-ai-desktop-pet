@@ -67,15 +67,19 @@ async fn explicit_tool(state: &AppState, character_id: &str, name: &str, args: V
 #[tauri::command]
 pub async fn companion_launch_shortcut(state: State<'_, Arc<AppState>>, shortcut_id: String, character_id: String) -> Result<Value, String> {
     let shortcut = state.config.read().get_all().companion.shortcuts.into_iter().find(|item| item.id == shortcut_id).ok_or("快捷入口不存在")?;
-    let (name, args) = if shortcut.kind == "website" { ("open_url", json!({"url":shortcut.target})) }
+    // open_url 工具要求带协议头，而用户经常只填 `bilibili.com`：这里和图标那条路径
+    // 用同一份补全规则，免得出现「图标能取到但点了打不开」。
+    let (name, args) = if shortcut.kind == "website" { ("open_url", json!({"url": shortcut_icons::normalize_target(&shortcut.target)})) }
         else if shortcut.kind == "application" { ("open_application", json!({"application":shortcut.target})) }
         else { return Err("快捷入口类型无效".into()); };
     explicit_tool(&state, &character_id, name, args).await
 }
 
 #[tauri::command]
-pub async fn companion_screen_analyze(app: AppHandle, state: State<'_, Arc<AppState>>, character_id: String) -> Result<Value, String> {
-    analyze_screen(&app, &state, &character_id).await
+pub async fn companion_screen_analyze(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<Value, String> {
+    // 归因到当前活跃角色：聊天窗口没有「当前会话角色」这个概念，后端才是活跃角色的真源。
+    let character = state.active_character_id.read().clone();
+    analyze_screen(&app, &state, &character).await
 }
 
 static SCREEN_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -128,10 +132,32 @@ pub async fn analyze_screen(app: &AppHandle, state: &Arc<AppState>, character_id
         crate::commands::chat::respond_to_image(state, app, character_id, "wechat", image,
             "📷 [图片]", None, "screen_selection").await
     }.await;
-    analysis.map_err(|error| if saved_path.is_some() {
+    let turn = analysis.map_err(|error| if saved_path.is_some() {
         format!("截图已保存至系统截图目录，但分析失败：{error}")
     } else { error })?;
+    // 识图结果由桌宠用自己的口吻转述（气泡），不再由前端弹 toast —— 桌宠才是桌面上的
+    // 那个「说话的人」，而且角色回复只落在微信窗口里，窗口收起时用户根本看不到。
+    relay_visual_description(app, state, character_id, turn.description);
     Ok(json!({"handled":true,"saved_path":saved_path,"copied":copied}))
+}
+
+/// 把识图模型的客观分析交给桌宠转述（`companion:interaction` → 气泡 + 表情）。
+///
+/// **不 await**：识图加角色回复已经让用户等了几秒，转述再串在后面就成了
+/// 「截完图半天没动静」。spawn 出去，生成完直接 emit；生成失败静默，不弹任何提示。
+fn relay_visual_description(app: &AppHandle, state: &Arc<AppState>, character_id: &str, description: String) {
+    let (app, state, character) = (app.clone(), state.clone(), character_id.to_string());
+    tauri::async_runtime::spawn(async move {
+        let Some(line) = crate::commands::pet_reaction::relay_screen_analysis(&state, &character, &description).await else { return; };
+        let _ = app.emit("companion:interaction", json!({
+            "character_id": character,
+            "content": line,
+            "motion": "happy",
+            // 图片轮的回复气泡/朗读通常还在进行，前端那道 `currentBubble` 门会把这句
+            // 悄悄吃掉；标 replace 让它替换掉旧气泡，保证「用户要的结果」一定说得出来。
+            "replace": true,
+        }));
+    });
 }
 
 #[tauri::command]
@@ -139,18 +165,6 @@ pub fn companion_read_clipboard() -> Result<Value, String> {
     let (sequence, text) = crate::desktop_clipboard::read()?;
     Ok(json!({"sequence":sequence,"text":text}))
 }
-#[tauri::command]
-pub async fn companion_remember_preference(state: State<'_, Arc<AppState>>, character_id: String, content: String) -> Result<String, String> {
-    let content = content.trim();
-    if content.is_empty() || content.chars().count() > 1000 { return Err("请填写 1–1000 字的偏好。".into()); }
-    let character = state.get_character(Some(&character_id))?;
-    let memory = character.brain.memory.add_memory_with_metadata(content, crate::memory::types::MemoryType::Preference,
-        0.8, vec!["desktop_preference".into()], json!({"source":"user_desktop_preferences","source_text":content,"user_confirmed":true})).await.map_err(|e| e.to_string())?;
-    Ok(memory.id)
-}
-
-#[tauri::command]
-pub fn companion_voice_diagnostics() -> Value { crate::voice_diagnostics::report() }
 
 #[path = "shortcut_icons.rs"]
 mod shortcut_icons;
@@ -159,9 +173,23 @@ mod shortcut_icons;
 pub async fn companion_shortcut_icon(state: State<'_, Arc<AppState>>, shortcut_id: String) -> Result<String, String> {
     let shortcut = state.config.read().get_all().companion.shortcuts.into_iter()
         .find(|item| item.id == shortcut_id).ok_or("快捷入口不存在")?;
-    match shortcut.kind.as_str() {
-        "website" => shortcut_icons::website(&shortcut.target).await,
-        "application" => tokio::task::spawn_blocking(move || shortcut_icons::application(&shortcut.target)).await.map_err(|e| e.to_string())?,
+    // 代理必须显式解析后传进去：环境变量里的 HTTP_PROXY/HTTPS_PROXY 会指向一个
+    // 代理软件关掉后的死端口，裸客户端被带偏后所有站点都取不到图标。
+    let proxy_url = {
+        let config = state.config.read();
+        crate::network::proxy::ProxyConfig::from_app_config(&config.get_all()).effective_proxy_url()
+    };
+    let (name, kind, target) = (shortcut.name.clone(), shortcut.kind.clone(), shortcut.target.clone());
+    let result = match kind.as_str() {
+        "website" => shortcut_icons::website(&target, proxy_url.as_deref()).await,
+        "application" => {
+            let path = target.clone();
+            tokio::task::spawn_blocking(move || shortcut_icons::application(&path)).await.map_err(|e| e.to_string())?
+        }
         _ => Err("快捷入口类型无效".into()),
+    };
+    if let Err(error) = &result {
+        tracing::warn!(target: "shortcut_icon", name = %name, kind = %kind, url = %target, error = %error, "shortcut_icon_failed");
     }
+    result
 }

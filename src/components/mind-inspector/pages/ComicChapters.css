@@ -1,0 +1,217 @@
+@import "./ComicFrames.css";
+@font-face {
+  font-family: 'Mind Comic';
+  src: url('/fonts/ma-shan-zheng.woff2') format('woff2');
+  font-display: swap;
+}
+
+/* These four chapters use the same ink/paper as the overview. Reading and
+   editing surfaces scroll independently; there is deliberately no page timer. */
+.comic-chapter {
+  --chapter-ink: var(--claude-ink, #37323d);
+  --chapter-paper: var(--codex-paper, #faf8f5);
+  --chapter-line: var(--comic-frame-visible-width) solid var(--comic-frame-ink);
+  --chapter-shadow: var(--comic-frame-shadow);
+  --claude-clay: #947181;
+  --claude-clay-soft: #eee3e8;
+  --rec-line: var(--chapter-line);
+  --rec-line-strong: var(--chapter-line);
+  --rec-radius: 2px;
+  --rec-radius-sm: 2px;
+  --rec-radius-lg: 2px;
+  --rec-surface: var(--chapter-paper);
+  --memory-ink: var(--chapter-ink);
+  --memory-line: var(--chapter-ink);
+  color: var(--chapter-ink);
+  background: var(--chapter-paper);
+  min-width: 0;
+  min-height: 0;
+  box-sizing: border-box;
+  padding: clamp(12px, 1.7vw, 26px);
+  font-family: 'Mind Comic', 'Microsoft YaHei', sans-serif;
+}
+.mind-page-content:has(.comic-chapter) { padding: 0; }
+.record-scope:has(.comic-chapter) { padding: 0; background: var(--codex-paper); }
+.comic-chapter *, .comic-chapter *::before, .comic-chapter *::after { box-sizing: border-box; }
+.claude-theme .comic-chapter-title-panel h2,
+.claude-theme .comic-chapter-ink,
+.claude-theme .comic-chapter-inset figcaption,
+.claude-theme .comic-chapter .record-diary-date,
+.claude-theme .comic-chapter .record-plan-title,
+.claude-theme .comic-chapter .memory-thread-title,
+.claude-theme .comic-chapter .memory-session-title {
+  font-family: 'Mind Comic', 'Microsoft YaHei', sans-serif !important;
+}
+.comic-chapter-heading {
+  display: grid;
+  grid-template-columns: minmax(230px, 35%) minmax(0, 1fr);
+  gap: 14px;
+  height: clamp(140px, 18vh, 180px);
+  margin-bottom: 20px;
+  flex-shrink: 0;
+}
+.comic-chapter-shot { position: relative; min-width: 0; overflow: hidden; border: var(--chapter-line); box-shadow: var(--chapter-shadow); transform: skewX(-5deg); margin-left: 8px; }
+.comic-chapter-shot img { width: 100%; height: 100%; object-fit: cover; display: block; transform: skewX(5deg) scale(1.1); }
+.comic-chapter-ink {
+  position: absolute; bottom: 12px; right: 14px; left: 14px;
+  font-size: clamp(19px, 1.6vw, 26px); line-height: 1.5; color: #28232d;
+  -webkit-text-stroke: 4px #fffdf9; paint-order: stroke fill;
+  filter: drop-shadow(0 1px 1px #ffffff60); transform: skewX(5deg);
+}
+.comic-chapter-title-panel {
+  position: relative; display: flex; flex-direction: column; justify-content: center;
+  border-bottom: var(--chapter-line); padding: 4px 24px 14px; min-width: 0;
+}
+.comic-chapter-title-panel::before { content: ''; position: absolute; inset: 0 auto 0 0; border-left: var(--chapter-line); transform: skewX(-5deg); pointer-events: none; }
+.comic-chapter-number { letter-spacing: .2em; font: 10px/1.5 sans-serif; color: var(--claude-muted); }
+.comic-chapter-title-panel h2 { font-size: clamp(27px, 2.5vw, 38px); line-height: 1.25; font-weight: 400; margin: 7px 0 12px; }
+.comic-chapter-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; min-width: 0; }
+.comic-chapter-inset { position: relative; border: var(--chapter-line); box-shadow: var(--chapter-shadow); margin: 0; overflow: hidden; height: 140px; flex-shrink: 0; }
+.comic-chapter-inset img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.comic-chapter-inset figcaption { position: absolute; bottom: 9px; left: 10px; right: 10px; font-size: 20px; color: #28232d; -webkit-text-stroke: 4px #fffdf9; paint-order: stroke fill; }
+.comic-chapter :is(button, input, select, textarea):focus-visible { outline: 2px solid var(--claude-clay, #936678); outline-offset: 3px; }
+.comic-chapter :is(.rec-seg, .rec-cast, .memory-character-switch) { background: transparent; border: var(--chapter-line); border-radius: 3px; }
+.comic-chapter :is(.rec-seg-item, .rec-cast-item, .memory-character-switch button) { border-radius: 1px; }
+.comic-chapter :is(.rec-seg-item.is-active, .rec-cast-item.is-active, .memory-character-switch button.active) { background: var(--claude-clay-soft); box-shadow: none; }
+.comic-chapter .rec-btn { border-radius: 2px; border: 1.3px solid var(--chapter-ink); box-shadow: 1px 2px 0 #28212c0a; }
+.comic-chapter :is(.rec-input, .rec-textarea, .rec-select) { border-radius: 2px; }
+.comic-chapter .rec-dialog { border: var(--chapter-line); border-radius: 3px; background: var(--chapter-paper); }
+
+/* Memory: facts are narration panels; actual dialogue is a bubble sequence.
+   Evidence retains its separate label and source links. */
+.memory-page.comic-chapter { padding-bottom: 32px; }
+.comic-chapter .memory-page-actions { flex-wrap: wrap; }
+.comic-chapter .memory-layer-grid { gap: 12px; margin-bottom: 20px; }
+.comic-chapter .memory-page-intro { margin: 0 0 18px; }
+.comic-chapter .memory-layer-card { border: var(--chapter-line); border-radius: 0; box-shadow: var(--chapter-shadow); background: var(--chapter-paper); padding: 16px 14px; }
+.comic-chapter .memory-layer-card:nth-child(even) { margin-top: 10px; margin-bottom: -10px; }
+.comic-chapter .memory-layer-card.active { background: var(--claude-clay-soft); }
+.claude-theme.comic-chapter .memory-layer-card.active { border-color: var(--chapter-ink) !important; }
+.comic-chapter .memory-layer-icon { background: transparent; border-radius: 0; }
+.comic-chapter .memory-list-toolbar { margin-top: 28px; }
+.comic-chapter .memory-search { border: 1.3px solid var(--chapter-ink); border-radius: 2px; background: var(--chapter-paper); }
+.comic-chapter :is(.memory-entry, .memory-thread, .memory-event-card, .memory-profile-panel, .memory-empty) { border: var(--chapter-line); border-radius: 1px; background: var(--chapter-paper); box-shadow: var(--chapter-shadow); }
+.comic-chapter .memory-entry-grid { columns: 2; column-gap: 22px; }
+.comic-chapter .memory-entry { margin-bottom: 22px; padding: 20px; }
+.comic-chapter .memory-entry.memory-opening-panel {
+  column-span: all; display: grid; grid-template-columns: minmax(180px, 32%) minmax(0, 1fr);
+  padding: 0; gap: 0; min-height: 240px; margin-bottom: 24px;
+}
+.comic-chapter .memory-opening-panel .comic-chapter-inset { border: 0; border-right: var(--chapter-line); height: auto; min-height: 240px; box-shadow: none; }
+.comic-chapter .memory-opening-panel .comic-chapter-inset img { position: absolute; inset: 0; }
+.comic-chapter .memory-opening-panel .memory-narration-body { align-self: center; padding: 24px 30px; }
+.comic-chapter .memory-opening-panel .memory-entry-content { font-size: 22px; }
+.comic-chapter .memory-entry-kind { border-radius: 0; border: 1px solid var(--chapter-ink); background: transparent; }
+.comic-chapter .memory-entry-content { line-height: 1.85; font-size: 15px; }
+.comic-chapter .memory-thread-list { gap: 22px; }
+.comic-chapter .memory-thread { padding: 22px; }
+.comic-chapter .memory-thread-header { flex-wrap: wrap; border-bottom: 1px solid var(--chapter-ink); }
+.comic-chapter .memory-thread-turn { align-items: start; padding: 8px 0; border: 0; }
+.comic-chapter .memory-thread-turn > div { position: relative; max-width: 85%; border: 1.2px solid var(--chapter-ink); border-radius: 16px 16px 16px 3px; background: var(--chapter-paper); padding: 10px 16px; }
+.comic-chapter .memory-thread-turn:nth-child(even) { padding-left: min(12%, 90px); }
+.comic-chapter .memory-thread-turn-plain > div { max-width: 100%; border-radius: 0; }
+.comic-chapter .memory-thread-turn p { line-height: 1.8; }
+.comic-chapter .memory-event-card { padding: 20px; margin-bottom: 20px; }
+.comic-chapter .memory-event-progress li { padding: 15px 18px; border: 1px solid var(--chapter-ink); margin: 14px 0; background: var(--chapter-paper); }
+.comic-chapter .memory-profile-panel { padding: 18px; margin-top: 18px; }
+.claude-theme.comic-chapter .profile-root-embedded .profile-card,
+.claude-theme.comic-chapter .profile-root-embedded .profile-interest-row,
+.claude-theme.comic-chapter .profile-root-embedded .profile-custom-fact {
+  border: var(--chapter-line) !important; border-radius: 1px !important;
+  background: var(--chapter-paper) !important; box-shadow: var(--chapter-shadow) !important;
+}
+.claude-theme.comic-chapter .profile-root-embedded .profile-hero { border-bottom: var(--chapter-line) !important; }
+
+/* Diary: index and complete prose are the two main story panels, with a
+   smaller author shot inside the index rather than a paired character card. */
+.comic-chapter .record-diary-bar { border: 0; padding: 0; margin: 0; width: 100%; }
+.comic-chapter .record-diary-body { grid-template-columns: minmax(200px, 24%) minmax(0, 1fr); gap: 24px; }
+.comic-chapter .record-diary-index { border: 0; border-right: var(--chapter-line); padding: 12px 22px 12px 0; gap: 16px; box-shadow: none; }
+.comic-chapter .record-diary-index-scroll { flex: 1; }
+.comic-chapter .record-diary-month-label { background: var(--chapter-paper); color: var(--chapter-ink); }
+.comic-chapter .record-diary-link { border-radius: 0; border-bottom: 1px solid color-mix(in srgb, var(--chapter-ink) 20%, transparent); }
+.comic-chapter .record-diary-reader { border: 0; padding: 0 8px 12px 0; box-shadow: none; background: var(--chapter-paper); }
+.comic-chapter .record-diary-head { border: var(--chapter-line); padding: 18px 24px; margin-bottom: 20px; width: 82%; }
+.comic-diary-montage { display: grid; grid-template-columns: minmax(200px, 40%) minmax(0, 1fr); gap: 20px; margin-bottom: 24px; }
+.comic-diary-montage > .comic-chapter-inset { height: clamp(210px, 28vh, 300px); }
+.comic-diary-montage > .record-diary-section { padding: 12px 0 0; margin: 0; }
+.comic-chapter .record-diary-events { border: 0; padding: 0; gap: 12px; }
+.comic-chapter .record-diary-event { border: 1.2px solid var(--chapter-ink); padding: 12px 16px; border-radius: 20px 20px 20px 2px; }
+.comic-chapter .record-diary-event:nth-child(even) { margin-left: 28px; }
+.comic-chapter .record-diary-prose { font-size: 17px; line-height: 2; }
+.comic-chapter .record-diary-prose p { white-space: pre-wrap; border: 1.3px solid var(--chapter-ink); padding: 18px 24px; background: var(--chapter-paper); box-shadow: var(--chapter-shadow); margin: 16px 0; }
+.comic-chapter .record-diary-prose p:nth-child(3n + 2) { margin-left: 38px; margin-right: 14px; }
+.comic-chapter .record-diary-prose.is-spaced p + p { margin-top: 18px; }
+
+/* Notebook: keep the entire editable / isolated HTML document as a panel.
+   CSS never reaches into the iframe or changes a note's own styling. */
+.comic-notebook { display: flex; flex-direction: column; flex: 1; }
+.comic-notebook .record-note { gap: 24px; }
+.comic-chapter .record-note-index { width: clamp(240px, 24vw, 330px); min-width: 0; border: var(--chapter-line); padding: 12px; box-shadow: var(--chapter-shadow); }
+.comic-chapter .record-note-index-head { flex-wrap: wrap; }
+.comic-chapter .record-note-index-scroll { flex: 1; gap: 12px; }
+.comic-chapter .record-note-row { padding: 14px 12px; border: 1.2px solid var(--chapter-ink); border-radius: 1px; background: var(--chapter-paper); }
+.comic-chapter .record-note-row::before { display: none; }
+.comic-chapter .record-note-row.is-active { background: var(--claude-clay-soft); box-shadow: inset 3px 0 0 var(--chapter-ink); }
+.comic-chapter .record-note-row-title { white-space: normal; overflow-wrap: anywhere; }
+.comic-chapter .record-note-row-del { opacity: 1; }
+.comic-chapter .record-note-work { border: var(--chapter-line); border-radius: 0; box-shadow: var(--chapter-shadow); }
+.comic-chapter .record-note-work-head { flex-wrap: wrap; }
+.comic-chapter .record-note-block { border: 1.2px solid var(--chapter-ink); border-radius: 1px; }
+.comic-chapter .record-note-frame { flex: 1; min-height: 0; }
+
+/* Plans: a quiet scene beside a sequence of actionable promise panels.
+   Dates, statuses, filters, and action buttons remain precise. */
+.comic-planner { display: flex; flex-direction: column; flex: 1; }
+.comic-plan-spread { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(180px, 23%) minmax(0, 1fr); gap: 24px; }
+.comic-plan-aside { min-height: 0; display: flex; flex-direction: column; gap: 18px; }
+.comic-plan-aside .comic-chapter-inset { height: 100%; flex: 1; min-height: 100px; }
+.comic-plan-aside .comic-chapter-inset:nth-child(2) { flex: .65; margin-left: 26px; }
+.comic-plan-content { min-height: 0; min-width: 0; display: flex; flex-direction: column; }
+.comic-chapter .record-plan-bar { border: var(--chapter-line); padding: 12px; margin-bottom: 18px; }
+.comic-chapter .record-plan-list { gap: 18px; padding: 2px 8px 12px 2px; }
+.comic-chapter .record-plan-row, .comic-chapter .record-plan-row:last-child { border: var(--chapter-line); border-radius: 0; padding: 20px; box-shadow: var(--chapter-shadow); background: var(--chapter-paper); }
+.comic-chapter .record-plan-row:nth-child(even) { margin-left: 20px; }
+.comic-chapter .record-plan-row:first-child { border-radius: 32px 32px 32px 2px; padding: 24px 28px; }
+.comic-chapter .record-plan-row::before { left: 7px; top: 14px; bottom: 14px; width: 3px; border-radius: 0; opacity: 1; }
+.comic-chapter .record-plan-title { font-size: 24px; line-height: 1.5; }
+.comic-chapter .record-plan-desc { font-size: 15px; color: var(--chapter-ink); }
+.comic-chapter .record-plan-foot { padding-top: 10px; border-top: 1px solid color-mix(in srgb, var(--chapter-ink) 20%, transparent); }
+.comic-chapter .rec-blank { border: 1.4px solid var(--chapter-ink); margin: 8px; background: var(--chapter-paper); }
+@media (max-width: 1080px) {
+  .comic-chapter-heading { grid-template-columns: minmax(180px, 30%) minmax(0, 1fr); height: auto; min-height: 140px; }
+  .comic-chapter .record-diary-body { grid-template-columns: 210px minmax(0, 1fr); }
+  .comic-chapter .record-diary-index { max-height: none; }
+  .comic-chapter .record-diary-index-scroll { flex-direction: column; overflow-x: hidden; overflow-y: auto; }
+  .comic-chapter .record-diary-month { flex-direction: column; align-items: stretch; }
+  .comic-chapter .record-diary-month-label { position: sticky; top: 0; border: 0; padding: 8px 0; }
+  .comic-plan-spread { grid-template-columns: 160px minmax(0, 1fr); gap: 16px; }
+}
+@media (max-width: 760px) {
+  .comic-chapter-heading { grid-template-columns: minmax(0, 1fr); }
+  .comic-chapter-shot { height: 120px; }
+  .comic-chapter-title-panel::before { display: none; }
+  .comic-chapter-title-panel { padding: 8px 0 14px; }
+  .comic-chapter .memory-layer-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .comic-chapter .memory-entry-grid { columns: 1; }
+  .comic-chapter .memory-entry.memory-opening-panel { grid-template-columns: minmax(0, 1fr); }
+  .comic-chapter .memory-opening-panel .comic-chapter-inset { height: 150px; min-height: 150px; border-right: 0; border-bottom: var(--chapter-line); }
+  .comic-chapter .memory-list-toolbar { flex-wrap: wrap; }
+  .comic-chapter .memory-search { width: 100%; }
+  .comic-chapter .record-diary-body { grid-template-columns: minmax(0, 1fr); overflow-y: auto; }
+  .comic-chapter .record-diary-index { max-height: 230px; min-height: 180px; }
+  .comic-chapter .record-diary-index .comic-chapter-inset { display: none; }
+  .comic-chapter .record-diary-reader { overflow: visible; }
+  .comic-diary-montage { grid-template-columns: minmax(0, 1fr); }
+  .comic-notebook .record-note { flex-direction: column; overflow-y: auto; }
+  .comic-chapter .record-note-index { width: 100%; max-height: 260px; min-height: 200px; }
+  .comic-chapter .record-note-index .comic-chapter-inset { display: none; }
+  .comic-chapter .record-note-work { min-height: 430px; flex-shrink: 0; }
+  .comic-plan-spread { grid-template-columns: minmax(0, 1fr); }
+  .comic-plan-aside { display: none; }
+  .comic-chapter .record-plan-row-top { flex-wrap: wrap; }
+  .comic-chapter .record-plan-actions { margin-left: auto; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .comic-chapter *, .comic-chapter *::before, .comic-chapter *::after { animation: none !important; transition: none !important; }
+}

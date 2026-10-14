@@ -22,7 +22,9 @@ import { prepareSharedFile, fileMessage, fileMetadata } from '../utils/sharedFil
 import { stripActions } from '../utils/ActionText';
 import { routeAssistantMessage } from '../utils/chatMessageRouting';
 import { hasVisibleChatText, isVisibleChatMessage } from '../utils/chatMessageContent';
-import { assistantPanelTitle, isAssistantOverview } from './assistantPanels';
+import { analyzeScreen } from '../utils/companionScreenAnalyze';
+import { NotebookPen, Rocket, ScanLine, Settings } from 'lucide-react';
+import { assistantPanelTitle, isAssistantPanel } from './assistantPanels';
 import DynamicIsland from './DynamicIsland';
 const DesktopAssistantPanel = React.lazy(() => import('./DesktopAssistantWindow'));
 type Role = 'user' | 'assistant';
@@ -1500,9 +1502,49 @@ type RenderItem =
 
 const ChatWindow: React.FC = () => {
   const { t } = useTranslation();
-  /** 当前视图包含聊天首页、私聊、群聊、详情和桌面助手。 */
-  const [view, setView] = useState<'home' | 'private' | 'group' | 'details' | 'assistant'>(() => new URLSearchParams(window.location.search).get('assistant') === '1' ? 'assistant' : 'home');
-  const [assistantTarget, setAssistantTarget] = useState(() => ({ character: new URLSearchParams(window.location.search).get('assistant_character') ?? 'vivian', panel: new URLSearchParams(window.location.search).get('assistant_panel') ?? 'daily' }));
+  /** 当前视图包含聊天首页、私聊、群聊、详情和工具子页（随手记 / 快捷启动）。 */
+  const [view, setView] = useState<'home' | 'private' | 'group' | 'details' | 'assistant'>(() => isAssistantPanel(new URLSearchParams(window.location.search).get('assistant_panel')) ? 'assistant' : 'home');
+  const [assistantTarget, setAssistantTarget] = useState(() => ({ character: new URLSearchParams(window.location.search).get('assistant_character') ?? 'vivian', panel: new URLSearchParams(window.location.search).get('assistant_panel') ?? 'notes' }));
+  /** 头部三点下拉（仅首页）。私聊的三点仍是「进聊天详情」，不弹菜单。 */
+  const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
+  const headerMenuRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!headerMenuOpen) return;
+    const onDown = (event: MouseEvent) => {
+      if (!headerMenuRef.current?.contains(event.target as Node)) setHeaderMenuOpen(false);
+    };
+    const onKey = (event: KeyboardEvent) => { if (event.key === 'Escape') setHeaderMenuOpen(false); };
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [headerMenuOpen]);
+  // 换页就收起：否则菜单会浮在下一页上，且遮住那里的点击。
+  useEffect(() => { setHeaderMenuOpen(false); }, [view]);
+  /** 切到工具子页。总览层已移除，所以这里直接指定要进的那一页。 */
+  const openToolPanel = (panel: 'notes' | 'shortcuts') => {
+    setAssistantTarget((target) => ({ ...target, panel }));
+    setView('assistant');
+  };
+  /** 头部三点下拉的四个入口。 */
+  const headerTools = [
+    { id: 'notes', Icon: NotebookPen, label: t('chat.tool_notes', { defaultValue: '随手记' }), run: () => openToolPanel('notes') },
+    { id: 'shortcuts', Icon: Rocket, label: t('chat.tool_shortcuts', { defaultValue: '快捷启动' }), run: () => openToolPanel('shortcuts') },
+    {
+      id: 'screen',
+      Icon: ScanLine,
+      label: t('chat.tool_screen', { defaultValue: '截屏分析' }),
+      run: () => {
+        void analyzeScreen({
+          saved: t('chat.screen_saved', { defaultValue: '已保存至系统截图目录' }),
+          copied: t('chat.screen_copied', { defaultValue: '已复制到剪贴板' }),
+        });
+      },
+    },
+    { id: 'settings', Icon: Settings, label: t('chat.tool_settings', { defaultValue: '设置' }), run: () => { void emit('tray:menu_action', { action: 'settings' }); } },
+  ];
   /** 在线角色列表 */
   const [characters, setCharacters] = useState<Array<{ id: string; name: string; online: boolean }>>([]);
   // characters 的 ref 镜像，供 setInterval 等闭包读取最新值，避免在 state 更新器内执行副作用
@@ -1812,7 +1854,9 @@ const ChatWindow: React.FC = () => {
             if (cancelled || !e.payload) return;
             const p = e.payload;
             if (p.view === 'assistant') {
-              setAssistantTarget({ character: p.character_id ?? 'vivian', panel: p.panel ?? 'daily' });
+              // 工具子页没有总览层：认不出分区就退回首页，别把视图停在一个空壳上。
+              if (!isAssistantPanel(p.panel)) { setView('home'); return; }
+              setAssistantTarget({ character: p.character_id ?? 'vivian', panel: p.panel! });
               setView('assistant');
               return;
             }
@@ -4316,19 +4360,16 @@ const ChatWindow: React.FC = () => {
         background: 'var(--wx-bg)',
         borderBottom: '0.5px solid var(--wx-border)',
       }}>
-        {/* 左：返回按钮（home 关闭窗口，details 返回 private，助手子页退回助手总览，
-            private/group 返回 home）。助手的页签由这里持有，所以返回层级也由这里判。 */}
+        {/* 左：返回按钮（home 关闭窗口，details 返回 private，工具子页 / private / group 返回 home）。
+            工具子页没有上一层总览，所以返回键只有「回首页」一个语义。 */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
           <button
             onClick={() => {
               if (view === 'home') void closeWindow();
               else if (view === 'details') { setView('private'); setDetailsSubView('main'); }
-              else if (view === 'assistant' && !isAssistantOverview(assistantTarget.panel)) setAssistantTarget((target) => ({ ...target, panel: 'daily' }));
               else setView('home');
             }}
-            title={view === 'home' ? t('chat.btn_back')
-              : view === 'assistant' && !isAssistantOverview(assistantTarget.panel) ? t('chat.back_to_assistant', { defaultValue: '返回助手' })
-              : t('chat.back_to_home')}
+            title={view === 'home' ? t('chat.btn_back') : t('chat.back_to_home')}
             style={navBtn}
             onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--wx-bg-active)')}
             onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
@@ -4358,43 +4399,81 @@ const ChatWindow: React.FC = () => {
             fontSize: 17, fontWeight: 600, letterSpacing: -0.2, color: 'var(--wx-text)',
           }}>
             {view === 'home' ? t('chat.home_title')
-              : view === 'assistant' ? (assistantPanelTitle(assistantTarget.panel, i18n.language) ?? t('chat.desktop_assistant', { defaultValue: '桌面助手' }))
+              : view === 'assistant' ? (assistantPanelTitle(assistantTarget.panel, i18n.language) ?? t('chat.title'))
               : view === 'group' ? t('chat.group_title')
               : view === 'details' ? t('chat.details_title')
               : (privateTyping ? t('chat.typing') : (charRemarks[privateCharId ?? ''] || privateCharName || t('chat.title')))}
           </span>
         </div>
 
-        {/* 首页三点进入桌面助手，私聊三点仍进入聊天详情。 */}
+        {/* 首页三点呼出工具下拉（随手记 / 快捷启动 / 截屏分析 / 设置）；私聊三点仍直接进聊天详情。
+            下拉锚在这个 36px 的包装层上，而不是给整条导航栏加 position:relative ——
+            中间标题是绝对定位的，改动它的包含块会让标题横向漂几个像素。 */}
         {(view === 'private' || view === 'home') && (
-          <button
-            onClick={() => { if (view === 'home') void invoke('set_chat_close_policy', { origin: 'header' }).then(() => setView('assistant')); else setView('details'); }}
-            title={view === 'home' ? t('chat.desktop_assistant', { defaultValue: '桌面助手' }) : t('chat.btn_more')}
-            aria-label={view === 'home' ? t('chat.desktop_assistant', { defaultValue: '桌面助手' }) : t('chat.btn_more')}
-            style={navBtn}
-            onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--wx-bg-active)')}
-            onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
-          >
-            <svg width="22" height="22" viewBox="0 0 24 24">
-              <circle cx="6" cy="12" r="1.8" fill="currentColor" />
-              <circle cx="12" cy="12" r="1.8" fill="currentColor" />
-              <circle cx="18" cy="12" r="1.8" fill="currentColor" />
-            </svg>
-          </button>
+          <div ref={headerMenuRef} style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
+            <button
+              onClick={() => { if (view === 'home') setHeaderMenuOpen((open) => !open); else setView('details'); }}
+              title={t('chat.btn_more')}
+              aria-label={t('chat.btn_more')}
+              aria-haspopup={view === 'home' ? 'menu' : undefined}
+              aria-expanded={view === 'home' ? headerMenuOpen : undefined}
+              style={navBtn}
+              onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--wx-bg-active)')}
+              onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
+            >
+              <svg width="22" height="22" viewBox="0 0 24 24">
+                <circle cx="6" cy="12" r="1.8" fill="currentColor" />
+                <circle cx="12" cy="12" r="1.8" fill="currentColor" />
+                <circle cx="18" cy="12" r="1.8" fill="currentColor" />
+              </svg>
+            </button>
+
+            {/* 深色半透明面板，贴着按钮右下角（与截图里的微信一致）。
+                点外部或 Esc 关闭，见上面的 document 监听。 */}
+            {headerMenuOpen && view === 'home' && (
+              <div role="menu" style={{
+                position: 'absolute', top: '100%', right: 0, marginTop: 6,
+                zIndex: 300, minWidth: 158, padding: 5,
+                borderRadius: 12,
+                background: 'var(--wx-menu-bg)',
+                backdropFilter: 'blur(20px)', WebkitBackdropFilter: 'blur(20px)',
+                border: '1px solid var(--wx-border)',
+                boxShadow: '0 12px 32px var(--wx-menu-shadow)',
+              }}>
+                {headerTools.map(({ id, Icon, label, run }) => (
+                  <button
+                    key={id}
+                    role="menuitem"
+                    onClick={() => { setHeaderMenuOpen(false); run(); }}
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: 11, width: '100%',
+                      padding: '10px 12px', border: 'none', borderRadius: 8,
+                      background: 'transparent', color: 'var(--wx-text)',
+                      fontSize: 14.5, fontFamily: 'inherit', textAlign: 'left', cursor: 'pointer',
+                      transition: 'background 0.15s ease',
+                    }}
+                    onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--wx-bg-active)')}
+                    onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
+                  >
+                    <Icon size={18} strokeWidth={1.9} />
+                    <span>{label}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
         )}
         {view !== 'private' && view !== 'home' && <div style={{ width: 36 }} />}
       </div>
 
       {view === 'assistant' && <React.Suspense fallback={<div role="status" style={{ padding: 24, color: 'var(--wx-text-secondary)' }}>{t('chat.loading_more')}</div>}>
-        {/* key 只跟角色走：页签现在是受控的，把 panel 放进 key 会在每次切页时整树重挂，
-            随手记的草稿、剪贴板内容、骰子结果全丢。 */}
+        {/* key 只跟角色走：把 panel 放进 key 会在切工具页时整树重挂，
+            随手记的草稿、快捷启动的表单全丢。 */}
         <DesktopAssistantPanel
           key={assistantTarget.character}
           embedded
           initialCharacter={assistantTarget.character}
-          initialPanel={assistantTarget.panel}
           panel={assistantTarget.panel}
-          onPanelChange={(panel) => setAssistantTarget((target) => (target.panel === panel ? target : { ...target, panel }))}
         />
       </React.Suspense>}
 

@@ -3,9 +3,10 @@ import type { PointerEvent } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { useTranslation } from 'react-i18next';
-import { Copy, Download, ScanLine, Sparkles, X } from 'lucide-react';
+import { Copy, Download, ScanLine, Sparkles } from 'lucide-react';
 import { captureRegion, selectionRect } from '../utils/screenSelection';
 import type { SelectionPoint, SelectionRect } from '../utils/screenSelection';
+import { synchronizeWindowLanguage } from '../utils/windowLanguage';
 import './ScreenSelectionWindow.css';
 
 interface Frame { image: string; width: number; height: number }
@@ -14,10 +15,13 @@ type SelectionAction = 'analyze' | 'save' | 'save_and_analyze' | 'copy' | 'copy_
 export default function ScreenSelectionWindow() {
   const { i18n } = useTranslation();
   const language = i18n.language.startsWith('zh') ? 'zh' : i18n.language.startsWith('ja') ? 'ja' : 'en';
+  // The hint pill is a single centred row, so `select` / `cancel` are kept short
+  // and close in rendered width across languages: 6 / 14 / 7 characters for
+  // `select` (CJK glyphs are ~2x a Latin glyph) and 2 / 6 / 5 for `cancel`.
   const copy = {
     zh: { select: '拖动选择区域', cancel: '取消', save: '保存', saveAnalyze: '保存并分析', analyze: '分析', copy: '复制到剪贴板', copyAnalyze: '复制并分析', screen: '屏幕快照' },
-    en: { select: 'Drag to select an area', cancel: 'Cancel', save: 'Save', saveAnalyze: 'Save & analyze', analyze: 'Analyze', copy: 'Copy to clipboard', copyAnalyze: 'Copy & analyze', screen: 'Screen snapshot' },
-    ja: { select: 'ドラッグして範囲を選択', cancel: 'キャンセル', save: '保存', saveAnalyze: '保存して分析', analyze: '分析', copy: 'クリップボードにコピー', copyAnalyze: 'コピーして分析', screen: '画面のスナップショット' },
+    en: { select: 'Drag to select', cancel: 'Cancel', save: 'Save', saveAnalyze: 'Save & analyze', analyze: 'Analyze', copy: 'Copy to clipboard', copyAnalyze: 'Copy & analyze', screen: 'Screen snapshot' },
+    ja: { select: 'ドラッグで選択', cancel: 'キャンセル', save: '保存', saveAnalyze: '保存して分析', analyze: '分析', copy: 'クリップボードにコピー', copyAnalyze: 'コピーして分析', screen: '画面のスナップショット' },
   }[language];
   const [sessionId, setSessionId] = useState<string | null>(null);
   const activeSession = useRef<string | null>(null);
@@ -55,6 +59,8 @@ export default function ScreenSelectionWindow() {
     mounted.current = true;
     let disposed = false;
     const cleanups: Array<() => void> = [];
+    const languageSync = synchronizeWindowLanguage(language => i18n.changeLanguage(language));
+    cleanups.push(languageSync.dispose);
     const reset = () => {
       activeSession.current = null;
       if (previewUrl.current) URL.revokeObjectURL(previewUrl.current);
@@ -85,6 +91,8 @@ export default function ScreenSelectionWindow() {
       });
       if (disposed) { onReset(); return; }
       cleanups.push(onReset);
+      await languageSync.ready;
+      if (disposed) return;
       await invoke('screen_selection_ready');
     })().catch(console.warn);
     return () => {
@@ -148,7 +156,7 @@ export default function ScreenSelectionWindow() {
     {frame && <img className="screen-selection-image" src={frame.image} alt={copy.screen} draggable={false} onLoad={reveal} onError={() => void finish('cancel')} />}
     {!rect && <div className="screen-selection-shade" />}
     {!rect && <div className="screen-selection-hint" onPointerDown={event => event.stopPropagation()}>
-      <ScanLine size={19} /><span>{copy.select}</span><button aria-label={copy.cancel} onClick={() => void finish('cancel')}><kbd>esc</kbd><X size={16} /></button>
+      <ScanLine size={19} /><span>{copy.select}</span><button onClick={() => void finish('cancel')}>{copy.cancel}</button>
     </div>}
     {rect && <div className="screen-selection-box" style={{ left: rect.x, top: rect.y, width: rect.width, height: rect.height }}>
       <i className="selection-corner corner-tl" /><i className="selection-corner corner-tr" /><i className="selection-corner corner-bl" /><i className="selection-corner corner-br" />

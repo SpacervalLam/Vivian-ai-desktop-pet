@@ -21,6 +21,7 @@
     "build": "npm run build:mobile && tsc && vite build && npm run compress:chibi && npm run package:resources && node scripts/check-apartment-plugin.mjs --core",
     "package:resources": "node scripts/package-resources.mjs",
     "audit:rust-size": "node scripts/audit-rust-size.mjs",
+    "audit:comic-assets": "node scripts/audit-mind-comic-assets.mjs",
     "compress:chibi": "node scripts/compress-chibi.mjs",
     "preview": "vite preview",
     "tauri": "tauri",

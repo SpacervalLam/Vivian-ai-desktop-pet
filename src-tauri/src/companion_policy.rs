@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CompanionConfig {
+    pub do_not_disturb: bool,
     pub hourly_chime: bool,
     pub focus_mode: bool,
     pub quiet_hours: bool,
@@ -23,7 +24,7 @@ pub struct CompanionConfig {
 pub struct DesktopShortcut { pub id: String, pub name: String, pub kind: String, pub target: String }
 impl Default for CompanionConfig {
     fn default() -> Self {
-        Self { hourly_chime: false, focus_mode: false, quiet_hours: false,
+        Self { do_not_disturb: false, hourly_chime: false, focus_mode: false, quiet_hours: false,
             quiet_start: 23, quiet_end: 7, game_quiet: true,
             game_processes: vec!["League of Legends.exe".into(), "GenshinImpact.exe".into()],
             sound: true, resource_feedback: true, network_feedback: false, clipboard_hint: true, weather_feedback: false,
@@ -102,6 +103,17 @@ mod tests {
         assert!(changes.observe(11));
         assert!(!changes.observe(11));
         assert!(changes.observe(1)); // Sequence wrap is still a change.
+    }
+    #[test]
+    fn quiet_state_survives_serialization_and_old_configs_default_to_off() {
+        let old: CompanionConfig = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(!old.do_not_disturb);
+        for enabled in [true, false] {
+            let config = CompanionConfig { do_not_disturb: enabled, ..Default::default() };
+            let saved = serde_json::to_value(config).unwrap();
+            let loaded: CompanionConfig = serde_json::from_value(saved).unwrap();
+            assert_eq!(loaded.do_not_disturb, enabled);
+        }
     }
     #[test]
     fn quiet_windows_and_only_the_actual_foreground_game() {

@@ -51,6 +51,12 @@ pub async fn get_notebook_detail(
     serde_json::to_value(&note).map_err(|e| format!("序列化失败: {}", e))
 }
 
+/// 预览使用与保存相同的渲染器，不写入磁盘或知识库。
+#[tauri::command]
+pub fn render_notebook_preview(note: NoteBook) -> String {
+    crate::notebook::renderer::render_html(&note)
+}
+
 /// 创建笔记（前端编辑器入口）
 #[tauri::command]
 pub async fn create_notebook(

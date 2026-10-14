@@ -1,7 +1,7 @@
 /**
  * Diary 页 — 日记阅读视图
  *
- * 数据源：invoke('get_diary_entries', { characterId })
+ * 数据源：并行读取 Vivian/Nana 的 get_diary_entries，合并为作者可辨的时间线。
  * 刷新：监听 'diary:written' 事件
  *
  * 布局（阅读型）：左索引栏按月分组列出日期，右阅读面展示正文。
@@ -15,24 +15,24 @@ import type { TFunction } from 'i18next';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import {
-  BookHeart,
   CalendarDays,
   Check,
   ChevronLeft,
   ChevronRight,
-  ListChecks,
-  PenLine,
   Search,
   X,
 } from 'lucide-react';
 import { useNavigation } from '../NavigationContext';
 import './RecordTheme.css';
+import { ComicChapterHeading, ComicChapterInset } from './ComicChapter';
 
 // ============================================================
 // 类型定义
 // ============================================================
 
 interface DiaryEntry {
+  character: CharacterId;
+  sourceId: string;
   id: string;
   date: string;
   start_time: number;
@@ -144,62 +144,10 @@ const highlightText = (text: string, query: string): React.ReactNode => {
 // 共用片段
 // ============================================================
 
-/** 区块标题：陶土标记 + 文字 + 一条发丝线延到右端 */
-const SectionTitle: React.FC<{
-  icon: React.ElementType;
-  title: React.ReactNode;
-  aside?: React.ReactNode;
-}> = ({ icon: Icon, title, aside }) => (
-  <div className="rec-sec">
-    <span className="rec-sec-mark">
-      <Icon size={15} strokeWidth={1.9} />
-    </span>
-    <span className="rec-sec-text">{title}</span>
-    <span className="rec-sec-line" />
-    {aside ? <span className="rec-sec-aside">{aside}</span> : null}
-  </div>
-);
-
-const Blank: React.FC<{
-  icon: React.ElementType;
-  title: string;
-  hint?: string;
-  children?: React.ReactNode;
-}> = ({ icon: Icon, title, hint, children }) => (
-  <div className="rec-blank">
-    <span className="rec-blank-icon">
-      <Icon size={30} strokeWidth={1.2} />
-    </span>
-    <span className="rec-blank-title">{title}</span>
-    {hint ? <span className="rec-blank-hint">{hint}</span> : null}
-    {children}
-  </div>
-);
-
 // ============================================================
 // 角色切换
 // ============================================================
 
-const CastSwitch: React.FC<{
-  value: CharacterId;
-  onChange: (c: CharacterId) => void;
-  t: TFunction;
-}> = ({ value, onChange, t }) => (
-  <div className="rec-cast" role="group">
-    {CHARACTERS.map((id) => (
-      <button
-        key={id}
-        type="button"
-        onClick={() => onChange(id)}
-        className={`rec-cast-item${value === id ? ' is-active' : ''}`}
-        aria-pressed={value === id}
-      >
-        <span className="rec-cast-dot" />
-        {t(`mind_inspector.common.char_${id}`)}
-      </button>
-    ))}
-  </div>
-);
 
 // ============================================================
 // 月历弹层
@@ -393,7 +341,7 @@ const DiaryToolbar: React.FC<{
               onSearchQuery('');
               if (inputRef.current) inputRef.current.value = '';
             }}
-            aria-label="clear search"
+            aria-label={t('comic.clearSearch')}
             className="rec-icon-btn"
             style={{ width: 20, height: 20 }}
           >
@@ -465,24 +413,17 @@ const DiaryIndex: React.FC<{
   entries: DiaryEntry[];
   selectedId: string | null;
   onSelect: (id: string) => void;
+  hasFilter: boolean;
   t: TFunction;
-}> = ({ entries, selectedId, onSelect, t }) => {
+}> = ({ entries, selectedId, onSelect, hasFilter, t }) => {
   const groups = useMemo(() => groupByMonth(entries, t), [entries, t]);
-
-  if (entries.length === 0) {
-    return (
-      <div className="record-diary-index">
-        <Blank
-          icon={Search}
-          title={t('mind_inspector.diary.no_match')}
-        />
-      </div>
-    );
-  }
 
   return (
     <div className="record-diary-index">
       <div className="record-diary-index-scroll">
+        {entries.length === 0 && hasFilter && (
+          <span className="record-diary-month-empty" role="status">{t('mind_inspector.diary.no_match')}</span>
+        )}
         {groups.map((group) => (
           <div key={group.key} className="record-diary-month">
             <div className="record-diary-month-label">{group.label}</div>
@@ -497,6 +438,7 @@ const DiaryIndex: React.FC<{
                   className={`record-diary-link${entry.id === selectedId ? ' is-active' : ''}`}
                 >
                   <span className="record-diary-link-date">{formatLinkDate(entry.date)}</span>
+                  <span className={`record-diary-author is-${entry.character}`}>{t(`mind_inspector.common.char_${entry.character}`)}</span>
                   <span className="record-diary-link-weekday">
                     {d ? t(`mind_inspector.diary.${WEEKDAY_KEYS[d.getDay()]}`) : ''}
                     {' · '}
@@ -521,7 +463,7 @@ const DiaryIndex: React.FC<{
 // 阅读面
 // ============================================================
 
-const DiaryReader: React.FC<{ entry: DiaryEntry; query: string }> = ({ entry, query }) => {
+const DiaryReader: React.FC<{ entry: DiaryEntry; query: string; character: CharacterId; embedded?: boolean }> = ({ entry, query, character, embedded }) => {
   const { t } = useTranslation();
   const d = parseDate(entry.date);
   const moodColor = MOOD_COLORS[entry.mood_tag] ?? 'var(--rec-muted)';
@@ -551,12 +493,18 @@ const DiaryReader: React.FC<{ entry: DiaryEntry; query: string }> = ({ entry, qu
                 entry.date
               )}
             </h2>
+            {/* 互动次数原先挂在「今日要事」标题的右端。标题拿掉后它没了落脚点，
+                而它本来就和字数、写作时间一样是「这一篇」的统计，所以并进这行。 */}
             <div className="record-diary-date-weekday">
               {d ? t(`mind_inspector.diary.${WEEKDAY_KEYS[d.getDay()]}`) : ''}
               {' · '}
               {t('mind_inspector.diary.created_at', { time: formatCreated(entry.created_at, t) })}
               {' · '}
               {t('mind_inspector.diary.word_count_suffix', { n: entry.word_count })}
+              {' · '}
+              {t('mind_inspector.diary.metric_interaction_label')}
+              {' '}
+              {t('mind_inspector.diary.metric_interaction_value', { n: entry.interaction_count })}
             </div>
           </div>
           <div className="record-diary-mood" style={{ color: moodColor }}>
@@ -565,12 +513,10 @@ const DiaryReader: React.FC<{ entry: DiaryEntry; query: string }> = ({ entry, qu
           </div>
         </header>
 
+        <div className="comic-diary-montage">
+          {!embedded && <ComicChapterInset image={character === 'nana' ? 'nana-diary-writing-v31' : 'vivian-thought-v01'}
+            caption={character === 'nana' ? '慢慢写下，今天的事。' : '这一天，值得记下来。'} position={character === 'nana' ? '30% 50%' : '50% 35%'} />}
         <section className="record-diary-section">
-          <SectionTitle
-            icon={ListChecks}
-            title={t('mind_inspector.diary.detail_key_events')}
-            aside={t('mind_inspector.diary.metric_interaction_value', { n: entry.interaction_count })}
-          />
           {entry.key_events.length === 0 ? (
             <p className="record-diary-muted" style={{ marginTop: 'var(--rec-gap-3)' }}>
               {t('mind_inspector.diary.detail_no_key_events')}
@@ -588,12 +534,15 @@ const DiaryReader: React.FC<{ entry: DiaryEntry; query: string }> = ({ entry, qu
             </div>
           )}
         </section>
+        </div>
+
+        {/* 两个区块不再各有标题，靠一条手绘接缝把「要事清单」和「正文」分开。
+            两边都有内容时才画，免得空段落之间浮一条莫名其妙的线。 */}
+        {entry.key_events.length > 0 && entry.content.trim().length > 0 && (
+          <div className="record-diary-seam" aria-hidden="true" />
+        )}
 
         <section className="record-diary-section">
-          <SectionTitle
-            icon={PenLine}
-            title={t('mind_inspector.diary.detail_content')}
-          />
           {entry.content.trim().length === 0 ? (
             <p className="record-diary-muted" style={{ marginTop: 'var(--rec-gap-3)' }}>
               {t('mind_inspector.diary.detail_no_content')}
@@ -620,10 +569,13 @@ const DiaryReader: React.FC<{ entry: DiaryEntry; query: string }> = ({ entry, qu
 // DiaryPage
 // ============================================================
 
-const DiaryPage: React.FC = () => {
+const DiaryPage: React.FC<{ embedded?: boolean; expanded?: boolean }> = ({ embedded = false, expanded = false }) => {
+  const [emptyOwner, setEmptyOwner] = useState<CharacterId>(() => Math.random() < .5 ? 'vivian' : 'nana');
+  useEffect(() => {
+    if (expanded) setEmptyOwner(Math.random() < .5 ? 'vivian' : 'nana');
+  }, [expanded]);
   const { t } = useTranslation();
   const nav = useNavigation();
-  const [character, setCharacter] = useState<CharacterId>('vivian');
   const [entries, setEntries] = useState<DiaryEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -635,23 +587,26 @@ const DiaryPage: React.FC = () => {
   const requestSeq = useRef(0);
 
   // === 数据加载 ===
-  const loadEntries = useCallback((charId: CharacterId) => {
+  const loadEntries = useCallback(() => {
     const seq = ++requestSeq.current;
     setLoading(true);
     setError(null);
 
-    invoke<DiaryEntry[]>('get_diary_entries', { characterId: charId, dateFilter: null })
-      .then((res) => {
+    Promise.all(CHARACTERS.map(async character => {
+      const res = await invoke<DiaryEntry[]>('get_diary_entries', { characterId: character, dateFilter: null });
+      return (res ?? []).map(entry => ({ ...entry, character, sourceId: entry.id, id: `${character}:${entry.id}` }));
+    }))
+      .then((groups) => {
         if (seq !== requestSeq.current) return;
         const seen = new Set<string>();
         const deduped: DiaryEntry[] = [];
-        for (const e of res ?? []) {
+        for (const e of groups.flat()) {
           if (!seen.has(e.id)) {
             seen.add(e.id);
             deduped.push(e);
           }
         }
-        const list = deduped.sort((a, b) => b.date.localeCompare(a.date));
+        const list = deduped.sort((a, b) => b.date.localeCompare(a.date) || b.created_at - a.created_at || a.id.localeCompare(b.id));
         setEntries(list);
         setSelectedId((prev) =>
           prev && list.some((e) => e.id === prev) ? prev : list[0]?.id ?? null,
@@ -665,12 +620,12 @@ const DiaryPage: React.FC = () => {
       });
   }, []);
 
-  // === 切换角色：清空旧列表后重新加载 ===
+  // === 首次加载两位作者 ===
   useEffect(() => {
     setEntries([]);
     setSelectedId(null);
-    loadEntries(character);
-  }, [character, loadEntries]);
+    loadEntries();
+  }, [loadEntries]);
 
   // === 日记写入事件刷新 ===
   useEffect(() => {
@@ -679,8 +634,8 @@ const DiaryPage: React.FC = () => {
     void (async () => {
       try {
         unlisten = await listen<{ character_id?: string }>('diary:written', (event) => {
-          if (!event.payload?.character_id || event.payload.character_id === character) {
-            loadEntries(character);
+          if (!event.payload?.character_id || CHARACTERS.includes(event.payload.character_id as CharacterId)) {
+            loadEntries();
           }
         });
         if (cancelled) unlisten();
@@ -692,25 +647,23 @@ const DiaryPage: React.FC = () => {
       cancelled = true;
       unlisten?.();
     };
-  }, [character, loadEntries]);
+  }, [loadEntries]);
 
-  // === 响应导航参数：自动切换角色并选中日记 ===
+  // === 响应导航参数：按原始 ID 和作者定位日记 ===
   useEffect(() => {
     if (!nav?.pageParams?.diaryId) return;
     const { diaryId, diaryCharacter } = nav.pageParams;
 
-    if (diaryCharacter && diaryCharacter !== character) {
-      setCharacter(diaryCharacter);
-    }
-
-    const matched = entries.find((e) => e.id === diaryId);
+    const matched = entries.find((e) => (e.sourceId === diaryId || e.id === diaryId) && (!diaryCharacter || e.character === diaryCharacter));
     if (matched) {
-      setSelectedId(diaryId);
+      setDateFilter(null);
+      setSearchQuery('');
+      setSelectedId(matched.id);
       nav.clearPageParams();
     } else if (!loading) {
       nav.clearPageParams();
     }
-  }, [nav?.pageParams?.diaryId, nav?.pageParams?.diaryCharacter, character, entries, loading, nav]);
+  }, [nav?.pageParams?.diaryId, nav?.pageParams?.diaryCharacter, entries, loading, nav]);
 
   // === 日期 + 内容关键词筛选 ===
   const filteredEntries = useMemo(() => {
@@ -727,7 +680,7 @@ const DiaryPage: React.FC = () => {
 
   // 当前选中项被筛掉时，自动选中第一个匹配项
   useEffect(() => {
-    if (filteredEntries.length === 0) return;
+    if (filteredEntries.length === 0) { setSelectedId(null); return; }
     if (!filteredEntries.some((e) => e.id === selectedId)) {
       setSelectedId(filteredEntries[0].id);
     }
@@ -735,39 +688,15 @@ const DiaryPage: React.FC = () => {
 
   const selectedEntry = useMemo(() => {
     if (!selectedId) return null;
-    return entries.find((e) => e.id === selectedId) ?? null;
-  }, [selectedId, entries]);
+    return filteredEntries.find((e) => e.id === selectedId) ?? null;
+  }, [selectedId, filteredEntries]);
+  const backdropOwner = selectedEntry?.character ?? (!loading && entries.length === 0 && expanded ? emptyOwner : undefined);
 
-  // === 渲染：整页状态（未拿到任何数据时不渲染两栏骨架） ===
-  if (entries.length === 0) {
-    return (
-      <div className="record-diary">
-        <div className="record-diary-bar">
-          <CastSwitch value={character} onChange={setCharacter} t={t} />
-        </div>
-        {loading && (
-          <Blank icon={BookHeart} title={t('mind_inspector.diary.loading')} />
-        )}
-        {!loading && error && (
-          <Blank
-            icon={BookHeart}
-            title={t('mind_inspector.common.load_failed', { error })}
-          />
-        )}
-        {!loading && !error && (
-          <Blank
-            icon={BookHeart}
-            title={t(`mind_inspector.diary.no_diary_${character}`)}
-          />
-        )}
-      </div>
-    );
-  }
-
+  // 无日记时也保留工具条、日期索引和阅读面。
   return (
-    <div className="record-diary">
+    <div className="record-diary comic-chapter comic-diary" data-owner={backdropOwner}>
+      {!embedded && <ComicChapterHeading number="02" title="把今天留下来" caption="翻到那一天，就又想起了你。" image="train-tickets-v20">
       <div className="record-diary-bar">
-        <CastSwitch value={character} onChange={setCharacter} t={t} />
         <DiaryToolbar
           dateFilter={dateFilter}
           onDateFilter={setDateFilter}
@@ -778,22 +707,33 @@ const DiaryPage: React.FC = () => {
           totalCount={entries.length}
         />
       </div>
+      </ComicChapterHeading>}
+      {embedded && <div className="record-diary-bar">
+        <DiaryToolbar dateFilter={dateFilter} onDateFilter={setDateFilter} searchQuery={searchQuery} onSearchQuery={setSearchQuery}
+          entryDates={entryDates} shownCount={filteredEntries.length} totalCount={entries.length} />
+      </div>}
 
       <div className="record-diary-body">
+        {/* 底纹跟随正文作者；列表和正文的名字标签明确区分归属。 */}
+        {backdropOwner && <img
+          className="record-diary-backdrop"
+          src={`${import.meta.env.BASE_URL}mind-comic/${backdropOwner === 'nana' ? 'nana-train-diary-v32' : 'vivian-message-read-v32'}.webp`}
+          alt=""
+          aria-hidden="true"
+        />}
         <DiaryIndex
           entries={filteredEntries}
           selectedId={selectedId}
           onSelect={setSelectedId}
+          hasFilter={!!dateFilter || !!searchQuery.trim()}
           t={t}
         />
         {selectedEntry ? (
-          <DiaryReader entry={selectedEntry} query={searchQuery} />
+          <DiaryReader entry={selectedEntry} query={searchQuery} character={selectedEntry.character} embedded={embedded} />
         ) : (
           <div className="record-diary-reader">
-            <Blank
-              icon={BookHeart}
-              title={t('mind_inspector.diary.select_hint')}
-            />
+            {loading && <span role="status">{t('mind_inspector.diary.loading')}</span>}
+            {!loading && error && <span role="alert">{t('mind_inspector.common.load_failed', { error })}</span>}
           </div>
         )}
       </div>

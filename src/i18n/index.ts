@@ -2,12 +2,22 @@ import i18n from 'i18next';
 import { initReactI18next } from 'react-i18next';
 import { stickerTranslations } from './stickers';
 import { speechSettingsTranslations } from './speechSettings';
+import { comicTranslations } from './comic';
 
 const resources = {
   'zh-CN': {
     translation: {
       stickers: stickerTranslations['zh-CN'],
       speechSettings: speechSettingsTranslations['zh-CN'],
+      comic: comicTranslations['zh-CN'],
+      comic_vivian_current_thought: 'Vivian 当前想法',
+      comic_nana_current_thought: 'Nana 当前想法',
+      comic_nav_memory: '记忆与对话',
+      comic_nav_diary: '日记本',
+      comic_nav_notebook: '笔记本',
+      comic_nav_planner: '待办与提醒',
+      comic_notebook_traces: '留下的足迹',
+      comic_diary_empty: '还没有日记',
       // ===== 保留原有扁平键（供 App.tsx / ContextMenu / SystemTray 使用） =====
       say_something: '想和Vivian说点什么吗？',
       settings: '设置',
@@ -1189,8 +1199,8 @@ const resources = {
         btn_clear_all: '清空全部',
         btn_refresh_diary: '刷新日记配置',
         // Routing task labels
-        routing_pet_reaction: '桌宠触碰反应',
-        routing_pet_reaction_help: '触碰、拖拽等短台词；未配置时继承陪伴模型，再回退主模型。',
+        routing_pet_reaction: '桌宠即时台词',
+        routing_pet_reaction_help: '触碰、拖拽等短反应，以及截屏分析结果的转述（桌宠用自己的口吻说明画面）；未配置时继承陪伴模型，再回退主模型。',
         routing_query_rewrite: '记忆检索查询改写',
         routing_query_rewrite_help: '只改写检索查询，不回答用户；未配置时继承记忆模型，再回退主模型。',
         routing_context_compress: '上下文压缩与摘要',
@@ -1548,6 +1558,9 @@ const resources = {
       mind_inspector: {
         title: '笔记本',
         nav_mind: '心智',
+        // 「心智漫画」已改名为「记忆」：这一页就是记忆本身（漫画只是呈现形式）。
+        // 保留 nav_mind 供深链接/兼容使用，导航与封面条统一读 nav_memory。
+        nav_memory: '记忆',
         nav_events: '事件',
         nav_attention: '注意力',
         nav_graph: '记忆',
@@ -2652,6 +2665,12 @@ const resources = {
         btn_minimize: '最小化',
         btn_close: '关闭',
         btn_more: '更多',
+        tool_notes: '随手记',
+        tool_shortcuts: '快捷启动',
+        tool_screen: '截屏分析',
+        tool_settings: '设置',
+        screen_saved: '已保存至系统截图目录',
+        screen_copied: '已复制到剪贴板',
         send_failed: '⚠️ 发送失败：{{error}}',
         time_yesterday: '昨天 {{time}}',
         time_before_yesterday: '前天 {{time}}',
@@ -2903,6 +2922,15 @@ const resources = {
     translation: {
       stickers: stickerTranslations.en,
       speechSettings: speechSettingsTranslations.en,
+      comic: comicTranslations.en,
+      comic_vivian_current_thought: "Vivian’s current thought",
+      comic_nana_current_thought: "Nana’s current thought",
+      comic_nav_memory: 'Memories & Conversations',
+      comic_nav_diary: 'Diary',
+      comic_nav_notebook: 'Notebook',
+      comic_nav_planner: 'Tasks & Reminders',
+      comic_notebook_traces: 'Footprints We Leave',
+      comic_diary_empty: 'No diary entries yet',
       // ===== Existing flat keys (kept for App.tsx / ContextMenu / SystemTray) =====
       say_something: 'Want to say something to Vivian?',
       settings: 'Settings',
@@ -4063,8 +4091,8 @@ const resources = {
         btn_reset_relationship: 'Reset Relationship',
         btn_clear_all: 'Clear All',
         btn_refresh_diary: 'Refresh Diary Config',
-        routing_pet_reaction: 'Pet Interaction Reaction',
-        routing_pet_reaction_help: 'Short touch and drag reactions; falls back to Companion Dialogue, then the main API.',
+        routing_pet_reaction: 'Pet Reaction Lines',
+        routing_pet_reaction_help: 'Short touch and drag reactions, plus the pet relaying screen-analysis results in its own voice; falls back to Companion Dialogue, then the main API.',
         routing_query_rewrite: 'Memory Query Rewrite',
         routing_query_rewrite_help: 'Rewrites search queries without answering; falls back to Memory Extraction, then the main API.',
         routing_context_compress: 'Context Compression',
@@ -4404,6 +4432,7 @@ const resources = {
       mind_inspector: {
         title: 'Notebook',
         nav_mind: 'Mind',
+        nav_memory: 'Memory',
         nav_events: 'Events',
         nav_attention: 'Attention',
         nav_graph: 'Memory',
@@ -5497,6 +5526,12 @@ const resources = {
         btn_minimize: 'Minimize',
         btn_close: 'Close',
         btn_more: 'More',
+        tool_notes: 'Notes',
+        tool_shortcuts: 'Quick Launch',
+        tool_screen: 'Analyze Screen',
+        tool_settings: 'Settings',
+        screen_saved: 'Saved to your system Screenshots folder',
+        screen_copied: 'Copied to clipboard',
         send_failed: '⚠️ Send failed: {{error}}',
         time_yesterday: 'Yesterday {{time}}',
         time_before_yesterday: 'The day before yesterday {{time}}',
@@ -5748,6 +5783,15 @@ const resources = {
     translation: {
       stickers: stickerTranslations.ja,
       speechSettings: speechSettingsTranslations.ja,
+      comic: comicTranslations.ja,
+      comic_vivian_current_thought: 'Vivian の今の想い',
+      comic_nana_current_thought: 'Nana の今の想い',
+      comic_nav_memory: '記憶と会話',
+      comic_nav_diary: '日記帳',
+      comic_nav_notebook: 'ノート',
+      comic_nav_planner: 'やること・リマインダー',
+      comic_notebook_traces: '残した足跡',
+      comic_diary_empty: '日記はまだありません',
       // ===== 既存のフラットキー（App.tsx / ContextMenu / SystemTray 用） =====
       say_something: 'Vivianに話しかけますか？',
       settings: '設定',
@@ -6903,8 +6947,8 @@ const resources = {
         btn_reset_relationship: '関係システムをリセット',
         btn_clear_all: '全て消去',
         btn_refresh_diary: '日記設定を更新',
-        routing_pet_reaction: 'ペット操作への反応',
-        routing_pet_reaction_help: '操作への短い台詞。会話モデル、次にメイン API にフォールバックします。',
+        routing_pet_reaction: 'ペットの即時台詞',
+        routing_pet_reaction_help: '操作への短い反応と、画面分析の結果を自分の口調で言い換える役割。会話モデル、次にメイン API にフォールバックします。',
         routing_query_rewrite: '記憶検索文の書換',
         routing_query_rewrite_help: '検索文のみを変換。記憶抽出、次にメイン API にフォールバックします。',
         routing_context_compress: '文脈圧縮・要約',
@@ -7242,6 +7286,7 @@ const resources = {
       mind_inspector: {
         title: 'ノート',
         nav_mind: 'マインド',
+        nav_memory: '記憶',
         nav_events: 'イベント',
         nav_attention: 'アテンション',
         nav_graph: '記憶',
@@ -8333,6 +8378,12 @@ const resources = {
         btn_minimize: '最小化',
         btn_close: '閉じる',
         btn_more: 'その他',
+        tool_notes: 'メモ',
+        tool_shortcuts: 'クイック起動',
+        tool_screen: '画面分析',
+        tool_settings: '設定',
+        screen_saved: 'システムのスクリーンショットフォルダーに保存しました',
+        screen_copied: 'クリップボードにコピーしました',
         send_failed: '⚠️ 送信失敗：{{error}}',
         time_yesterday: '昨日 {{time}}',
         time_before_yesterday: '一昨日 {{time}}',

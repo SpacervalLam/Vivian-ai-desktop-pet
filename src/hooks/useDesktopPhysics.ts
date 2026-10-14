@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState, type RefObject } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { type UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { DesktopPhysics, petFootprint, type TerrainWorld } from '../chibi/desktopPhysics';
+import { DesktopPhysics, petFootprint, ceilingDizzyMs, type TerrainWorld } from '../chibi/desktopPhysics';
 import { positioningCoordinator as coordinator } from './positioningCoordinator';
 
 /** A single serialized movement loop; user input and hiding always take precedence. */
@@ -29,7 +29,8 @@ export function useDesktopPhysics(enabled: boolean, layer: RefObject<HTMLDivElem
     window.addEventListener('mousedown', begin, true);
     window.addEventListener('mouseup', end, true);
     window.addEventListener('blur', end);
-    void listen<{ vx: number; vy: number }>('drag:released', event => {
+    // Release momentum belongs only to this pet window, never to the other character.
+    void win.listen<{ vx: number; vy: number }>('drag:released', event => {
       releaseRef.current = event.payload;
       paused = true;
       held = false;
@@ -50,21 +51,24 @@ export function useDesktopPhysics(enabled: boolean, layer: RefObject<HTMLDivElem
             const support = engine.support;
             const old = [...engine.world.windows, ...engine.world.floors].find(rect => rect.id === support);
             const next = [...world.windows, ...world.floors].find(rect => rect.id === support);
-            if (!old || !next || old.x !== next.x || old.y !== next.y || old.width !== next.width || old.height !== next.height) {
+            if (!old || !next || old.x !== next.x || old.y !== next.y || old.width !== next.width || old.height !== next.height || !engine.hasVisibleSupport(world, position.x + offset.left)) {
               coordinator.physicsInFlight = true;
             }
             // Cancel walking before taking over a changed platform; never issue competing writes.
             paused = true; frameAt = performance.now(); return;
           }
           const footprint = petFootprint(size.width, size.height);
+          const bottomOffset = size.height - footprint.top - footprint.height;
           offset = footprint;
           const body = { id: win.label, x: position.x + offset.left, y: position.y + offset.top,
             width: footprint.width, height: footprint.height };
-          if (!engine || paused || engine.scale !== scale || engine.body.width !== body.width || engine.body.height !== body.height) {
-            engine = new DesktopPhysics(body, scale);
+          if (!engine || paused || engine.scale !== scale || engine.body.width !== body.width || engine.body.height !== body.height || engine.windowTopOffset !== offset.top || engine.windowBottomOffset !== bottomOffset) {
+            const priorEnclosure = engine?.enclosure;
+            engine = new DesktopPhysics(body, scale, offset.top, bottomOffset);
             engine.updateWorld(world, .1);
             const release = releaseRef.current;
-            engine.release(release?.vx ?? 0, release?.vy ?? 0);
+            if (release) engine.release(release.vx, release.vy);
+            else if (priorEnclosure && world.windows.some(rect => rect.id === priorEnclosure && rect.landable !== false && rect.width > body.width + 8 * scale && rect.height > body.height + 8 * scale)) engine.enclosure = priorEnclosure;
             releaseRef.current = null;
             paused = false;
           } else {
@@ -87,6 +91,12 @@ export function useDesktopPhysics(enabled: boolean, layer: RefObject<HTMLDivElem
         coordinator.physicsLane = lane ? { minX: lane.minX - offset.left, maxX: lane.maxX - offset.left } : null;
         if (result.airborne !== lastAirborne) { lastAirborne = result.airborne; setAirborne(result.airborne); }
         if (busy()) { paused = true; return; }
+        const dizzyMs = ceilingDizzyMs(result.ceilingImpact, engine.scale);
+        if (dizzyMs !== null) {
+          void win.emitTo(win.label, 'drag:dizzy', {
+            duration_ms: dizzyMs, reason: 'edge_bounce', impact: result.ceilingImpact / (1000 * engine.scale),
+          }).catch(() => {});
+        }
         const position = { x: Math.round(engine.body.x - offset.left), y: Math.round(engine.body.y - offset.top) };
         if (!lastPosition || position.x !== lastPosition.x || position.y !== lastPosition.y) {
           await invoke('set_window_position', position);

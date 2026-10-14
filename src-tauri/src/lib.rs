@@ -128,6 +128,7 @@ pub fn run() {
     commands::backup::restore_pending_if_any();
 
     let app_state = AppState::new();
+    companion_quiet::restore(app_state.config.read().get_all().companion.do_not_disturb);
 
     tauri::Builder::default()
         .register_asynchronous_uri_scheme_protocol("model", |_app, request, responder| {
@@ -570,6 +571,7 @@ pub fn run() {
             commands::window::find_safe_position,
             commands::window::debug_log,
             commands::inspector::report_inspector_attention,
+            commands::inspector::lock_inspector_fullscreen,
             commands::system_tray::set_tray_tooltip,
             commands::system_tray::update_tray_icon,
             commands::system_tray::show_tray_message,
@@ -663,7 +665,6 @@ pub fn run() {
             commands::config::clear_work_model,
             commands::todo::acknowledge_reminder_delivery,
             companion_runtime::companion_status,
-            commands::desktop_assistant::companion_voice_diagnostics,
             commands::desktop_assistant::companion_desktop_context,
             commands::desktop_assistant::user_quick_notes_list,
             commands::desktop_assistant::user_quick_notes_save,
@@ -679,7 +680,6 @@ pub fn run() {
             commands::desktop_assistant::companion_read_clipboard,
             commands::media::companion_now_playing,
             commands::media::companion_focus_media_source,
-            commands::desktop_assistant::companion_remember_preference,
             commands::todo::pending_reminder_notices,
             commands::todo::acknowledge_reminder_notice,
             commands::todo::list_todos,
@@ -694,6 +694,7 @@ pub fn run() {
             commands::todo::resume_scheduled_task,
             commands::notebook::list_notebooks,
             commands::notebook::get_notebook_html,
+            commands::notebook::render_notebook_preview,
             commands::notebook::get_notebook_detail,
             commands::notebook::create_notebook,
             commands::notebook::update_notebook,
@@ -1480,6 +1481,7 @@ pub fn run() {
             // 触发停止的时机：任一角色窗口 CloseRequested 后检查是否还有其他
             // 在线角色窗口；若全部关闭才停线程。
             move |window, event| {
+                commands::inspector::enforce_inspector_fullscreen(window, event);
                 // 公寓窗口关闭：兜底退出房间模式，把角色窗口和心智观察器放回来。
                 //
                 // 前端 RoomWindow 卸载时会 invoke set_room_mode(false)，但那条路径

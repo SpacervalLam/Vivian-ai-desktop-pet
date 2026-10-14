@@ -1,3 +1,5 @@
+import { comicLocale, comicText } from '../../../i18n/comic.js';
+
 export type MemoryRecord = {
   id: string;
   content: string;
@@ -89,10 +91,18 @@ export const sharedEventTimeline = (items: MemoryRecord[], records: Conversation
 };
 
 /** Canonical original history has stable message IDs; never deduplicate repeated speech by content. */
-export const conversationThreads = (records: ConversationRecord[], character: Character): RecentThread[] => records.map((record) => ({
-  id: record.id, title: record.title, time: record.ended_at, startedAt: record.started_at, canonical: true,
+export function conversationTitle(record: ConversationRecord, character: Character, language = 'zh-CN'): string {
+  const others = record.participants.filter(name => name !== character);
+  const originalNames = others.map(name => name === 'user' ? '你' : name === 'vivian' ? 'Vivian' : name === 'nana' ? 'Nana' : name);
+  // Only the server-generated default is localized; custom titles remain original.
+  if (record.title !== `与${originalNames.join('、')}的对话`) return record.title;
+  const names = others.map(name => name === 'user' ? comicText('conversationYou', language) : name === 'vivian' ? 'Vivian' : name === 'nana' ? 'Nana' : name);
+  return comicText('conversationTitle', language).replace('{{names}}', names.join(comicLocale(language) === 'en' ? ', ' : '、'));
+}
+export const conversationThreads = (records: ConversationRecord[], character: Character, language = 'zh-CN'): RecentThread[] => records.map((record) => ({
+  id: record.id, title: conversationTitle(record, character, language), time: record.ended_at, startedAt: record.started_at, canonical: true,
   turns: record.turns.map((turn) => ({ id: turn.id, speaker: speakerName(turn.speaker, character),
     audience: speakerName(turn.listener === 'all' ? '大家' : turn.listener, character),
     text: turn.text, timestamp: turn.timestamp, sticker: turn.sticker })),
-  items: [], searchText: `${record.title} ${record.turns.map((turn) => turn.text).join(' ')}`,
+  items: [], searchText: `${[...new Set([conversationTitle(record, character, language), record.title])].join(' ')} ${record.turns.map((turn) => turn.text).join(' ')}`,
 })).sort((a, b) => b.time - a.time);

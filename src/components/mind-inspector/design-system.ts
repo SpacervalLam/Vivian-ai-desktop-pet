@@ -7,7 +7,7 @@
 
 import type { LucideIcon } from 'lucide-react';
 import {
-  Brain,
+  Library,
   Network,
   BookHeart,
   CalendarClock,
@@ -207,7 +207,9 @@ export interface NavItem {
 }
 
 export const NAV_ITEMS: NavItem[] = [
-  { key: 'mind', icon: Brain, labelKey: 'mind_inspector.nav_mind' },
+  // 「记忆」页（原「心智漫画」）：漫画只是呈现形式，入口名字就叫记忆。
+  // 图标用 Library（记忆库）而不是 Brain —— 免得和「心智/思考」混淆。
+  { key: 'mind', icon: Library, labelKey: 'mind_inspector.nav_memory' },
   { key: 'graph', icon: Network, labelKey: 'mind_inspector.nav_graph' },
   { key: 'diary', icon: BookHeart, labelKey: 'mind_inspector.nav_diary' },
   { key: 'notebook', icon: NotebookPen, labelKey: 'mind_inspector.nav_notebook' },

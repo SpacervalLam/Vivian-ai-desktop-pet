@@ -292,6 +292,7 @@ export interface ChibiPetCanvasProps {
   onModelClick?: () => void;
   mouseFollowMode?: 'always' | 'window' | 'off';
   onScaleChange?: (scale: number) => void;
+  onResetScale?: () => void;
   /**
    * 一次点击手势的结果：单击、双击，或「戳烦了」（{@link TAP_ANNOY_THRESHOLD}）。
    * 前两者由点击节奏区分，`rough_click` 由画布内的戳烦了账本判定，三者互斥。
@@ -325,6 +326,7 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
       onModelClick,
       mouseFollowMode = 'window',
       onScaleChange,
+      onResetScale,
       onInteraction,
       onOpenQuickChat,
       ambientMotionEnabled = true,
@@ -398,6 +400,30 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
     /** 一趟逃离是否还在跑：期间点击一律不改动作，免得把正在跑的位移打断在半路。 */
     const fleeingRef = useRef(false);
     const scaleRef = useRef(1);
+    const scaleHoldRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const scalePressRef = useRef(false);
+    const scalePressPositionRef = useRef({ x: 0, y: 0 });
+    const cancelScaleHold = useCallback(() => {
+      if (scaleHoldRef.current !== null) clearTimeout(scaleHoldRef.current);
+      scaleHoldRef.current = null;
+    }, []);
+    useEffect(() => {
+      const release = () => {
+        cancelScaleHold();
+        if (scalePressRef.current) suppressClickUntilRef.current = Date.now() + 300;
+        scalePressRef.current = false;
+      };
+      const keyUp = (event: KeyboardEvent) => { if (event.key === 'Control') cancelScaleHold(); };
+      window.addEventListener('mouseup', release);
+      window.addEventListener('blur', release);
+      window.addEventListener('keyup', keyUp);
+      return () => {
+        cancelScaleHold();
+        window.removeEventListener('mouseup', release);
+        window.removeEventListener('blur', release);
+        window.removeEventListener('keyup', keyUp);
+      };
+    }, [cancelScaleHold]);
     const suppressClickUntilRef = useRef(0);
     /**
      * 忙碌走到哪一步了。
@@ -1480,6 +1506,7 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
      * 从第 0 帧重播生气脸——脸于是永远停在第 0 帧，看起来就是「等用户停手才开始播」。
      */
     const handleClick = () => {
+      if (scalePressRef.current || Date.now() < suppressClickUntilRef.current) return;
       wakeUp();
       // 窗口发生过实际拖动时，mouseup 后浏览器仍可能补发 click；该 click 不应触发台词。
       if (Date.now() < suppressClickUntilRef.current) return;
@@ -1539,6 +1566,7 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
     const handleWheel = (event: ReactWheelEvent<HTMLDivElement>) => {
       if (!event.ctrlKey) return;
       event.preventDefault();
+      cancelScaleHold();
       const delta = event.deltaY < 0 ? 0.08 : -0.08;
       const next = Math.max(0.6, Math.min(1.8, scaleRef.current + delta));
       scaleRef.current = next;
@@ -1551,7 +1579,7 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
      * 帧序列图集可用时按帧序列取格；不可用时退回主图集的 `idle` 格位——帧序列的
      * `frame` 序号在主图集里没有意义，拿它去定位只会取到无关的一格。
      */
-    const displayMotion = speechDisplayMotion(physics.airborne && !positioningCoordinator.dragInFlight ? 'drag' : poseName, speakingRef.current, pressed, crossPresentationRef.current.motion);
+    const displayMotion = speechDisplayMotion(physics.airborne && poseName !== 'dizzy' && !positioningCoordinator.dragInFlight ? 'drag' : poseName, speakingRef.current, pressed, crossPresentationRef.current.motion);
     const activeSpec = resolveMotion(displayMotion, characterId);
     const activeSheet =
       activeSpec.kind === 'animation'
@@ -1583,6 +1611,19 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
               tabIndex={0}
               onMouseDown={(event) => {
                 if (event.button !== 0) return;
+                if (event.ctrlKey) {
+                  event.preventDefault();
+                  scalePressRef.current = true;
+                  scalePressPositionRef.current = { x: event.clientX, y: event.clientY };
+                  takePendingClick();
+                  cancelScaleHold();
+                  scaleHoldRef.current = setTimeout(() => {
+                    scaleHoldRef.current = null;
+                    scaleRef.current = 1;
+                    onResetScale?.();
+                  }, 1000);
+                  return;
+                }
                 // 按下这件事先记下来，再谈它要不要打断当前姿态：逃离问的是「按了多久」，
                 // 与这一按落在格位上还是帧序列上无关（见 pressAliveRef 的说明）。
                 pressAliveRef.current = true;
@@ -1625,7 +1666,13 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
                 pressedRef.current = false;
                 setPressed(false);
               }}
+              onMouseMove={(event) => {
+                if (!scalePressRef.current) return;
+                const start = scalePressPositionRef.current;
+                if (Math.hypot(event.clientX - start.x, event.clientY - start.y) > 6) cancelScaleHold();
+              }}
               onMouseLeave={() => {
+                cancelScaleHold();
                 lastPressDurationRef.current = undefined;
                 pressAliveRef.current = false;
                 pressedRef.current = false;

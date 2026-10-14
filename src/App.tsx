@@ -563,7 +563,7 @@ async function openWindow(
   // 3. 创建新窗口
   const resizable = options.resizable ?? true;
   const transparent = options.transparent ?? false;
-  const isFullscreen = options.fullscreen ?? false;
+  const isFullscreen = label === 'memory' || (options.fullscreen ?? false);
   try {
     let creationFailed = false;
     const win = new WebviewWindow(fullLabel, {
@@ -572,6 +572,8 @@ async function openWindow(
         ? `/?view=${view}${options.extraQuery ? `&${options.extraQuery}` : ''}`
         : `/?view=${view}&character_id=${getCharacterId() ?? ''}${options.extraQuery ? `&${options.extraQuery}` : ''}`,
       title,
+      fullscreen: label === 'memory',
+      maximizable: label !== 'memory',
       width: isFullscreen ? screen.width : width,
       height: isFullscreen ? screen.height : height,
       resizable: isFullscreen ? false : resizable,
@@ -1249,10 +1251,10 @@ export default function App() {
   }, [requestPetReaction]);
 
   /** Chat is created on demand by the shared native window owner. */
-  const ensureWechatWindow = useCallback(async (opts?: { show?: boolean; assistant?: { panel?: string; characterId?: string } }): Promise<void> => {
+  const ensureWechatWindow = useCallback(async (opts?: { show?: boolean }): Promise<void> => {
     if (opts?.show === false) return;
-    await invoke('open_chat_window', { origin: 'chat', panel: opts?.assistant?.panel ?? null,
-      characterId: opts?.assistant?.characterId ?? getCharacterId() ?? null });
+    await invoke('open_chat_window', { origin: 'chat', panel: null,
+      characterId: getCharacterId() ?? null });
   }, []);
   const ensureBubbleWindow = useCallback(async (): Promise<void> => {
     if (bubbleCreatingRef.current) return;
@@ -3399,6 +3401,7 @@ export default function App() {
   const handleBackgroundMouseDown = useCallback(async (e: React.MouseEvent) => {
     console.log(`[DIAG] mousedown (drag), char=${getCharacterId()}, button=${e.button}, x=${e.clientX}, y=${e.clientY}`);
     if (e.button !== 0) return;
+    if (e.ctrlKey && (e.target as HTMLElement).closest('.chibi-pet-sprite')) return;
     // 左键按住期间启动长按检测：不松手、不拖动满 1s 打开心智观察器
     startHold(e.clientX, e.clientY);
     dragPressAliveRef.current = true;
@@ -3427,7 +3430,7 @@ export default function App() {
   }, [beginWindowDrag, startHold]);
 
   // 拖拽表情联动：窗口实际移动时切到 drag 格位（被拎起），松手时重置。
-  // 另外接管后端 `drag:dizzy` 事件——拖动过快或甩飞撞到屏幕边缘时，
+  // 另外接管后端 `drag:dizzy` 事件——甩飞高速撞到顶部边界时，
   // 按后端给出的时长临时切到 dizzy 格位（晕乎乎），到点再回落。
   useEffect(() => {
     const win = getCurrentWindow();
@@ -3917,7 +3920,41 @@ export default function App() {
   //    立即 RedrawWindow 强制同步重绘，让几何更新与纹理更新落在同一帧
   // 3. resize 完成后前端同步触发 app.renderer.resize + fitModel，
   //    不等待 Tauri 的 resize 事件（避免跨帧延迟）
+  const scaleAnimationTokenRef = useRef(0);
+  useEffect(() => () => { scaleAnimationTokenRef.current += 1; }, []);
+  const handleResetScale = useCallback(async () => {
+    const token = ++scaleAnimationTokenRef.current;
+    if (scaleDebounceRef.current) clearTimeout(scaleDebounceRef.current);
+    scaleDebounceRef.current = null;
+    if (scaleIdleTimerRef.current) clearTimeout(scaleIdleTimerRef.current);
+    scaleIdleTimerRef.current = null;
+    scaleCenterRef.current = null;
+    targetScaleRef.current = 1;
+    windowScaleRef.current = 1;
+    try {
+      const win = getCurrentWindow();
+      const [pos, size, factor] = await Promise.all([win.outerPosition(), win.outerSize(), win.scaleFactor()]);
+      if (token !== scaleAnimationTokenRef.current) return;
+      const base = baseWindowSizeRef.current;
+      if (base.w <= 0 || base.h <= 0) return;
+      const width = Math.max(150, Math.round(base.w * factor));
+      const height = Math.max(150, Math.round(base.h * factor));
+      const cx = pos.x + size.width / 2;
+      const cy = pos.y + size.height / 2;
+      const start = performance.now();
+      while (token === scaleAnimationTokenRef.current) {
+        const progress = Math.min(1, (performance.now() - start) / 350);
+        const eased = progress * progress * (3 - 2 * progress);
+        const w = Math.round(size.width + (width - size.width) * eased);
+        const h = Math.round(size.height + (height - size.height) * eased);
+        await invoke('set_window_rect', { x: Math.round(cx - w / 2), y: Math.round(cy - h / 2), width: w, height: h });
+        if (progress === 1) break;
+        await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+      }
+    } catch { /* 窗口已销毁或尺寸更新失败 */ }
+  }, []);
   const handleScaleChange = useCallback((scale: number) => {
+    const token = ++scaleAnimationTokenRef.current;
     const base = baseWindowSizeRef.current;
     if (base.w <= 0 || base.h <= 0) return;
     // 同步更新目标值
@@ -3941,6 +3978,7 @@ export default function App() {
       const s = targetScaleRef.current;
 
       const applyResize = () => {
+        if (token !== scaleAnimationTokenRef.current) return;
         const cur = scaleCenterRef.current;
         if (!cur) return;
         const { cx, cy, factor } = cur;
@@ -3962,6 +4000,7 @@ export default function App() {
           win.outerSize(),
           win.scaleFactor(),
         ]).then(([pos, size, factor]) => {
+          if (token !== scaleAnimationTokenRef.current) return;
           scaleCenterRef.current = {
             cx: pos.x + size.width / 2,
             cy: pos.y + size.height / 2,
@@ -4029,7 +4068,6 @@ export default function App() {
         onOpenMemory={openMemory}
         onOpenSettings={openConfig}
         onOpenChat={openChat}
-        onOpenDesktop={() => void ensureWechatWindow({ assistant: {} })}
         onQuit={() => void handleQuit()}
       />
 
@@ -4047,6 +4085,7 @@ export default function App() {
           ref={petRef}
           mouseFollowMode={mouseFollowMode}
           onScaleChange={handleScaleChange}
+          onResetScale={() => { void handleResetScale(); }}
           ambientMotionEnabled={presenceState === 'online'}
           desktopPhysicsEnabled={desktopPhysicsEnabled}
           onInteraction={handleChibiInteraction}

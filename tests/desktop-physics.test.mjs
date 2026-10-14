@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { build } from 'esbuild';
 const result = await build({entryPoints:['src/chibi/desktopPhysics.ts'],bundle:true,write:false,platform:'node',format:'esm'});
-const {DesktopPhysics:Physics,petFootprint} = await import(`data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString('base64')}`);
+const {DesktopPhysics:Physics,petFootprint,ceilingDizzyMs} = await import(`data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString('base64')}`);
 const floor={id:'floor',x:0,y:0,width:1000,height:600};
 const roof={id:'roof',x:100,y:250,width:300,height:250};
 const create=(body={id:'pet',x:160,y:0,width:40,height:60},windows=[],scale=1)=>{
@@ -31,4 +31,64 @@ for(const scale of [1,1.25,1.5,2]){
  pet=new Physics(scaled({id:'pet',x:-800,y:0,width:40,height:60}),scale);pet.updateWorld({windows:[scaled({...roof,x:-900})],floors:[scaled({...floor,x:-1000})]},.1);advance(pet);assert.equal(pet.support,'roof');assert.ok(Math.abs(pet.body.y/scale-190)<1e-6);
 }
 for(const [width,height] of [[300,300],[400,300],[200,400]]){const f=petFootprint(width,height);assert.ok(f.left>=0&&f.top>=0&&f.left+f.width<=width&&f.top+f.height<=height);}
+pet=create({id:'pet',x:200,y:10,width:40,height:60});pet.release(0,-900);
+let hit=pet.step(.016);assert.ok(hit.ceilingImpact>600);assert.ok(pet.vy>0,'top collision still bounces');assert.ok(ceilingDizzyMs(hit.ceilingImpact,1)>=1400);
+pet=create({id:'pet',x:200,y:1,width:40,height:60});pet.release(0,-100);hit=pet.step(.016);
+assert.ok(hit.ceilingImpact>0);assert.equal(ceilingDizzyMs(hit.ceilingImpact,1),null,'gentle top collision is not dizzy');
+for(const [body,vx,vy] of [[{x:1,y:200},-1500,0],[{x:950,y:200},1500,0],[{x:200,y:530},0,1500],[{x:200,y:-10},0,-1500]]){
+ pet=create({id:'pet',...body,width:40,height:60});pet.release(vx,vy);hit=pet.step(.016);
+ assert.equal(hit.ceilingImpact,0,'side/bottom collision or out-of-bounds correction cannot trigger dizzy');
+}
+pet=create({id:'pet',x:200,y:260,width:40,height:60},[roof]);pet.release(0,-900);hit=pet.step(.016);
+assert.ok(hit.ceilingImpact>600,'an upward collision with an enclosing window ceiling also counts');
+for(const scale of [1,1.25,1.5,2]){
+ assert.equal(ceilingDizzyMs(599*scale,scale),null);assert.equal(ceilingDizzyMs(600*scale,scale),1400);
+ assert.equal(ceilingDizzyMs(1600*scale,scale),2400);
+}
+for(const bad of [NaN,Infinity,-1])assert.equal(ceilingDizzyMs(bad,1),null);
+assert.equal(ceilingDizzyMs(1000,0),null);
+// A body fits on these roofs, but its window extends above the screen on the upper one.
+for(const scale of [1,1.25,1.5,2]) {
+ const scaled=r=>({...r,x:r.x*scale,y:r.y*scale,width:r.width*scale,height:r.height*scale});
+ const area=scaled({id:'screen',x:-1000,y:-300,width:1000,height:900});
+ const high=scaled({id:'too-high',x:-900,y:-220,width:300,height:30});
+ const lower=scaled({id:'lower',x:-900,y:-120,width:300,height:100});
+ pet=new Physics(scaled({id:'pet',x:-850,y:-270,width:40,height:60}),scale,30*scale);
+ pet.updateWorld({windows:[high,lower],floors:[area]},.1);advance(pet);
+ assert.equal(pet.support,'lower','skip the roof that would hide the top of the pet window');
+ assert.ok(pet.body.y-pet.windowTopOffset>=area.y,'full window remains on-screen');
+ pet.updateWorld({windows:[high,{...lower,y:area.y+70*scale}],floors:[area]},.1);advance(pet);
+ assert.equal(pet.support,'screen','a supported window moved too high releases the pet to the next safe floor');
+}
+pet=new Physics({id:'pet',x:160,y:30,width:40,height:60},1,30);
+pet.updateWorld({windows:[{id:'exact',x:100,y:90,width:300,height:100}],floors:[floor]},.1);advance(pet);
+assert.equal(pet.support,'exact');assert.equal(pet.body.y-pet.windowTopOffset,0,'exactly flush with the screen top remains a valid roof');
+for(const scale of [1,1.25,1.5,2]) {
+ const area={id:'screen',x:-1000*scale,y:-300*scale,width:1000*scale,height:900*scale};
+ pet=new Physics({id:'pet',x:-850*scale,y:-200*scale,width:40*scale,height:60*scale},scale,30*scale,20*scale);
+ pet.updateWorld({windows:[{id:'offscreen-roof',x:-900*scale,y:590*scale,width:300*scale,height:100*scale}],floors:[area]},.1);advance(pet);
+ assert.equal(pet.support,'screen');assert.equal(pet.body.y+pet.body.height+pet.windowBottomOffset,600*scale);
+ assert.equal(pet.lane.groundY,580*scale,'walking uses the same screen-bottom landing baseline');
+}
+pet=new Physics({id:'pet',x:160,y:300,width:40,height:60},1,30,20);
+pet.updateWorld({windows:[{id:'container',x:100,y:250,width:300,height:500}],floors:[floor]},.1);pet.release(0,0);advance(pet);
+assert.equal(pet.body.y+pet.body.height+pet.windowBottomOffset,600,'an off-screen container cannot lower the pet beyond the screen');
+assert.equal(pet.lane.groundY,580);
+const partial={id:'partial-cover',x:195,y:220,width:100,height:180};
+pet=create({id:'pet',x:160,y:0,width:40,height:60},[partial,roof]);advance(pet);
+assert.equal(pet.support,'floor','an uncovered center point cannot support feet that overlap a hidden edge');
+pet=create({id:'pet',x:120,y:0,width:40,height:60},[partial,roof]);advance(pet);
+assert.equal(pet.support,'roof');assert.equal(pet.lane.minX,100);assert.equal(pet.lane.maxX,155,'walking stops before the occluded segment');
+const supportedX=pet.body.x;
+pet.updateWorld({windows:[roof,partial],floors:[floor]},.1);
+assert.equal(pet.body.x,supportedX);assert.equal(pet.lane.maxX,360,'a window behind the support does not occlude its edge');
+const cover={id:'cover',x:100,y:220,width:300,height:180};
+const lowerEdge={id:'lower-edge',x:100,y:520,width:300,height:70};
+pet.updateWorld({windows:[cover,roof,lowerEdge],floors:[floor]},.1);
+assert.equal(pet.support,null,'covering a stationary platform releases its support immediately');assert.equal(pet.lane,null);
+advance(pet);assert.equal(pet.support,'lower-edge','fall through the hidden roof to the next visible edge');
+pet=create({id:'pet',x:120,y:0,width:40,height:60},[roof]);advance(pet);
+assert.equal(pet.hasVisibleSupport({windows:[cover,roof],floors:[floor]}),false,'walking detects Z-order occlusion even when the platform geometry is unchanged');
+pet=create({id:'pet',x:160,y:0,width:40,height:60},[{...cover,landable:false},roof]);advance(pet);
+assert.equal(pet.support,'floor','borderless foreground windows obscure roofs without creating landing platforms');
 console.log('Desktop physics: floor/roof landings, platform motion/removal, container shake/shrink, both moving sides/resize, throw directions, occlusion, resume bounds, negative monitors and DPI passed');

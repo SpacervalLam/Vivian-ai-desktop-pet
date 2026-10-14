@@ -62,8 +62,16 @@ export function useCompanionFeedback(pet: RefObject<ModelRendererHandle | null>)
           }
         }).catch(error => console.warn('[Reminder] window failed:', error));
       });
-      await add<{ character_id: string; content: string; motion: string }>('companion:interaction', p => {
+      await add<{ character_id: string; content: string; motion: string; replace?: boolean }>('companion:interaction', p => {
         if (p.character_id !== getCharacterId() || !p.content) return;
+        // replace：用户主动要的结果（目前只有截屏分析的转述）。这类气泡必须说得出来 ——
+        // 图片轮的回复气泡/朗读往往还在进行，被 `currentBubble` 那道门挡掉就等于没反应。
+        // showBubble 内部先 closeAll，所以是替换而不是叠加。
+        if (p.replace) {
+          pet.current?.setExpression(p.motion, 2500);
+          BubbleController.showBubble(p.content);
+          return;
+        }
         if (!useAppStore.getState().currentBubble && !TtsStreamQueue.isSpeaking()) {
           pet.current?.setExpression(p.motion, 2500);
           BubbleController.showBubble(p.content);

@@ -342,8 +342,12 @@ impl WhisperBackend {
             ));
         }
         let base = self.whisper_cfg.server_url.trim_end_matches('/').to_string();
+        // Whisper 服务通常是本机/内网部署，必须显式 `no_proxy()`：否则 reqwest 会读取
+        // `HTTP_PROXY` / `HTTPS_PROXY` 环境变量，把 127.0.0.1 的请求也塞进代理（若代理
+        // 端口未监听则一律超时）。与 `whisper_service.rs` / `gpt_sovits_service.rs` 保持一致。
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(60))
+            .no_proxy()
             .build()
             .map_err(|e| VivianError::Network(format!("构建 HTTP 客户端失败: {e}")))?;
 
@@ -455,8 +459,10 @@ impl WhisperBackend {
             return Err(VivianError::Speech("Whisper 服务地址未配置".to_string()));
         }
         let base = self.whisper_cfg.server_url.trim_end_matches('/').to_string();
+        // 同 `recognize()`：本机 Whisper 服务不能走环境变量代理。
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(120))
+            .no_proxy()
             .build()
             .map_err(|e| VivianError::Network(format!("构建 HTTP 客户端失败: {e}")))?;
 

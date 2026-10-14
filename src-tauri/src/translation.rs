@@ -29,21 +29,29 @@ pub async fn translation_service() -> &'static TranslationService {
         .await
 }
 
+/// 单次翻译请求超时（翻译按句拆分，单句请求应当快速返回）
+const TRANSLATE_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+
 pub struct TranslationService {
-    client: reqwest::Client,
     cache: Arc<RwLock<HashMap<String, String>>>,
 }
 
 impl TranslationService {
     fn new() -> Self {
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(5))
-            .build()
-            .unwrap_or_default();
         Self {
-            client,
             cache: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    /// 翻译请求使用的 HTTP 客户端。
+    ///
+    /// 这里刻意走全局客户端（`network::http_client`）而不是自建 `Client::builder()`：
+    /// 自建且不显式 `no_proxy()` 时，reqwest 会自动读取 `HTTP_PROXY` / `HTTPS_PROXY`
+    /// 环境变量（`hyper-util` 的 `Matcher::from_env()`）。本机曾出现这两个环境变量
+    /// 长期指向一个**未监听**的端口，导致所有外呼被塞进死端口而全部超时。
+    /// 全局客户端在直连模式下已显式 `no_proxy()`，并会随配置热重载。
+    fn http_client(&self) -> reqwest::Client {
+        crate::network::http_client::get_global_client()
     }
 
     /// 翻译文本：按句切分，逐句翻译（带缓存 + 上下文），拼接返回
@@ -166,8 +174,9 @@ impl TranslationService {
         }
 
         let resp = self
-            .client
+            .http_client()
             .post(url)
+            .timeout(TRANSLATE_REQUEST_TIMEOUT)
             .header("Authorization", format!("DeepL-Auth-Key {api_key}"))
             .form(&form)
             .send()
@@ -216,8 +225,9 @@ impl TranslationService {
         });
 
         let resp = self
-            .client
+            .http_client()
             .post(&url)
+            .timeout(TRANSLATE_REQUEST_TIMEOUT)
             .json(&body)
             .send()
             .await

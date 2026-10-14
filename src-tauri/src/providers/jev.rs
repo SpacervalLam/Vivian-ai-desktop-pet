@@ -7,6 +7,12 @@ use serde_json::{json, Value};
 use crate::config::manager::TaskRouteConfig;
 use crate::error::{VivianError, VivianResult};
 
+/// 单次 Jev 决策请求超时。
+///
+/// 原先由 `JevClient` 自建的 client 承担；改用全局客户端后改为按请求覆盖，
+/// 以免把 15s 的快速失败放宽成全局客户端的 30s。
+const JEV_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
 /// The System One response shape from TypeSafe's OpenAPI specification.
 /// The discriminator keeps `choice`, `noul`, and `score` answers distinct.
 #[derive(Debug, Deserialize)]
@@ -93,10 +99,9 @@ impl JevClient {
         } else {
             format!("{endpoint}/v1/systemone")
         };
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(15))
-            .build()
-            .map_err(|e| VivianError::Provider(e.to_string()))?;
+        // 走全局客户端（`network::http_client`）以遵循应用内代理配置：直连模式下它已
+        // 显式 `no_proxy()`，不会被 `HTTP_PROXY` / `HTTPS_PROXY` 环境变量劫持。
+        let client = crate::network::http_client::get_global_client();
         Ok(Self {
             client,
             endpoint,
@@ -129,6 +134,7 @@ impl JevClient {
             }
         });
         let response = self.client.post(&self.endpoint)
+            .timeout(JEV_REQUEST_TIMEOUT)
             .bearer_auth(&self.api_key)
             .json(&request)
             .send().await
@@ -170,6 +176,7 @@ impl JevClient {
             "model": self.model, "state": state, "questions": body_questions
         });
         let response = self.client.post(&self.endpoint)
+            .timeout(JEV_REQUEST_TIMEOUT)
             .bearer_auth(&self.api_key)
             .json(&request)
             .send().await
@@ -218,7 +225,7 @@ impl JevClient {
                 ]}
             }
         });
-        let response = self.client.post(&self.endpoint).bearer_auth(&self.api_key)
+        let response = self.client.post(&self.endpoint).timeout(JEV_REQUEST_TIMEOUT).bearer_auth(&self.api_key)
             .json(&request).send().await
             .map_err(|e| VivianError::Provider(format!("Jev request failed: {e}")))?;
         let status = response.status();

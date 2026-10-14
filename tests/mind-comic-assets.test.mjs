@@ -1,0 +1,12 @@
+import assert from 'node:assert/strict';
+import {execFileSync} from 'node:child_process';
+import {readFileSync,existsSync} from 'node:fs';
+const audit=JSON.parse(execFileSync(process.execPath,['scripts/audit-mind-comic-assets.mjs'],{encoding:'utf8'}));
+const manifest=JSON.parse(readFileSync('public/mind-comic/assets.json','utf8'));
+assert.deepEqual(audit.missing,[], 'all comic runtime references must exist');
+assert.deepEqual(audit.unused,[], 'discarded comic assets must stay outside public');
+assert.deepEqual(manifest.assets,audit.assets,'build whitelist must match runtime references');
+for (const retired of ['vivian-thought-v01.webp','nana-gallery-light-v42.webp']) assert(!manifest.assets.includes(retired), 'retired cover art is not a runtime dependency');
+assert.ok(manifest.assets.includes('vivian-hand-tremble-sheet-v26.webp'),'CSS background animation atlas stays packaged');
+assert.ok(existsSync('public/fonts/ma-shan-zheng.woff2'),'shared handwriting font exists in the packaged fonts directory');
+for (const style of ['ComicOverview.css','ComicChapters.css']) assert.ok(readFileSync(`src/components/mind-inspector/pages/${style}`,'utf8').includes('/fonts/ma-shan-zheng.woff2'),'comic styles use the shared handwriting font');

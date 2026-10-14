@@ -1259,7 +1259,7 @@ fn note_to_searchable_text(note: &NoteBook) -> String {
                     parts.push(text);
                 }
             }
-            Block::Custom { html } => {
+            Block::Custom { html, .. } => {
                 // 粗略剥离 HTML 标签，保留文本
                 let text: String = html
                     .chars()

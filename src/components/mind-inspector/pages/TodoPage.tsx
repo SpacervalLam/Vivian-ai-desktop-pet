@@ -14,6 +14,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { useTranslation } from 'react-i18next';
+import { createPortal } from 'react-dom';
 import {
   Bell,
   Check,
@@ -321,10 +322,10 @@ const TodoPage: React.FC = () => {
       </div>
 
       {/* 表单弹窗 */}
-      {showForm && (
-        <div className="rec-overlay" onClick={() => setShowForm(false)}>
-          <div className="rec-dialog" onClick={(e) => e.stopPropagation()}>
-            <h3 className="rec-dialog-title">
+      {showForm && createPortal(
+        <div className="rec-overlay record-scope claude-theme planner-modal-overlay" onClick={() => setShowForm(false)}>
+          <div className="rec-dialog" role="dialog" aria-modal="true" aria-labelledby="planner-form-title" onClick={(e) => e.stopPropagation()}>
+            <h3 id="planner-form-title" className="rec-dialog-title">
               {editing ? t('todo_window.btn_edit') : t('todo_window.btn_add')}
             </h3>
             <div className="rec-dialog-body">
@@ -394,7 +395,7 @@ const TodoPage: React.FC = () => {
             </div>
           </div>
         </div>
-      )}
+      , document.body)}
     </div>
   );
 };

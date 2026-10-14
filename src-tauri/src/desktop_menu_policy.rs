@@ -11,7 +11,7 @@ pub fn menu_slide_x(from: i32, to: i32, elapsed: Duration) -> i32 {
     (f64::from(from) + (f64::from(to) - f64::from(from)) * eased).round() as i32
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct QuietTransitions {
     pub active: bool,
     pub revision: u64,
@@ -19,6 +19,8 @@ pub struct QuietTransitions {
 }
 
 impl QuietTransitions {
+    pub fn restored(active: bool) -> Self { Self { active, ..Self::default() } }
+
     pub fn set(&mut self, active: bool, now: Instant) -> Result<bool, Duration> {
         if self.active == active { return Ok(false); }
         if active {
@@ -48,6 +50,53 @@ pub fn enforce_movement_exclusion(smart: &mut bool, gravity: &mut bool, changed_
     }
 }
 
+/// 桌宠运动模式。两个配置开关（智能避让 / 桌面物理）本就可同时关闭，
+/// 因此实际只有三种组合；侧边栏把原本两个独立按钮合成一个三态按钮，
+/// 按 `重力 → 避让 → 静止` 循环。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MovementMode {
+    Gravity,
+    Avoid,
+    Still,
+}
+
+impl MovementMode {
+    /// 从两个配置位推断当前模式。冲突（同时为真）时以重力为准，
+    /// 与 `enforce_movement_exclusion` 对历史脏数据的处理保持一致。
+    pub fn from_flags(smart_positioning: bool, desktop_physics: bool) -> Self {
+        if desktop_physics { Self::Gravity }
+        else if smart_positioning { Self::Avoid }
+        else { Self::Still }
+    }
+
+    /// 下一次点击后应处于的模式。
+    pub fn next(self) -> Self {
+        match self {
+            Self::Gravity => Self::Avoid,
+            Self::Avoid => Self::Still,
+            Self::Still => Self::Gravity,
+        }
+    }
+
+    /// 写回配置的两个开关位；三态之间不会出现「同时为真」。
+    pub fn flags(self) -> (bool, bool) {
+        match self {
+            Self::Gravity => (false, true),
+            Self::Avoid => (true, false),
+            Self::Still => (false, false),
+        }
+    }
+
+    /// 稳定的线上标识，供前端三态按钮与日志使用。
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Gravity => "gravity",
+            Self::Avoid => "avoid",
+            Self::Still => "still",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -72,6 +121,34 @@ mod tests {
         enforce_movement_exclusion(&mut smart, &mut gravity, "window");
         assert_eq!((smart, gravity), (false, true), "legacy conflicts keep gravity");
     }
+    #[test]
+    fn movement_mode_cycles_gravity_avoid_still_without_ever_enabling_both() {
+        // 三种合法组合各自映射到唯一模式，且回写后仍是同一模式（幂等）。
+        for (mode, (smart, gravity)) in [
+            (MovementMode::Gravity, (false, true)),
+            (MovementMode::Avoid, (true, false)),
+            (MovementMode::Still, (false, false)),
+        ] {
+            assert_eq!(MovementMode::from_flags(smart, gravity), mode);
+            assert_eq!(mode.flags(), (smart, gravity));
+            assert_eq!(MovementMode::from_flags(mode.flags().0, mode.flags().1), mode);
+        }
+        // 轮换顺序固定为 重力 → 避让 → 静止 → 重力，且永不产生「同时为真」。
+        let mut mode = MovementMode::Gravity;
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            mode = mode.next();
+            let (smart, gravity) = mode.flags();
+            assert!(!(smart && gravity), "{mode:?} 同时开启了避让与重力");
+            seen.push(mode.id());
+        }
+        assert_eq!(seen, vec!["avoid", "still", "gravity"]);
+        assert_eq!(mode, MovementMode::Gravity, "三次点击后回到起点");
+        // 历史脏数据（两个都为真）按重力处理，不会卡死在冲突态。
+        assert_eq!(MovementMode::from_flags(true, true), MovementMode::Gravity);
+        assert_eq!(MovementMode::from_flags(true, true).next(), MovementMode::Avoid);
+    }
+
     #[test]
     fn menu_slides_from_outside_the_right_edge_without_overshooting() {
         for (from, to) in [(1920, 1860), (2560, 2500), (0, -60), (-1920, -1980)] {
@@ -116,6 +193,18 @@ mod tests {
         assert_eq!(state.set(true, start + REENTER_COOLDOWN), Ok(true));
         assert_eq!(state.set(false, start + REENTER_COOLDOWN), Ok(true));
         assert_eq!(state.revision, 4);
+    }
+
+    #[test]
+    fn restored_quiet_state_does_not_count_as_a_new_transition() {
+        let now = Instant::now();
+        let mut state = QuietTransitions::restored(true);
+        assert!(state.active);
+        assert_eq!(state.revision, 0);
+        assert_eq!(state.set(true, now), Ok(false));
+        assert_eq!(state.set(false, now), Ok(true));
+        assert_eq!(state.set(true, now), Ok(true));
+        assert!(!QuietTransitions::restored(false).active);
     }
     #[test]
     fn only_menu_tools_dismiss_on_outside_click() {

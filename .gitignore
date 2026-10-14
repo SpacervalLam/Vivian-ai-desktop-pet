@@ -47,7 +47,6 @@ __pycache__/
 *.pyc
 *.tmp
 *.bak
-# 备份残留：带时间戳后缀的编辑器/手工备份（*.bak 匹配不到 .bak_20260904_120722 这类）
 *.bak_*
 *.bak.*
 *.old
@@ -98,6 +97,9 @@ src/*Preview.tsx
 /src-tauri/prompts/PROMPT_EVALUATION.md
 
 # 美术工程与发布产物
+/output/
+# Keep the runtime asset audit alongside packaging scripts.
+!/scripts/audit-mind-comic-assets.mjs
 /blender/
 /plugins/3d-apartment/art/
 /release/

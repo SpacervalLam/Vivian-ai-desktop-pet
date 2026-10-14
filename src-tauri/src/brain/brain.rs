@@ -1032,8 +1032,15 @@ impl Brain {
                     }
                 }
                 Err(e) => {
-                    tracing::warn!("[startup_greeting] 完整流水线生成问候失败: {}", e);
-                    *self.last_greeting_error.lock().await = Some(format!("LLM 调用失败: {}", e));
+                    if crate::companion_quiet::active() {
+                        // 勿扰模式会拦截陪伴侧发言（启动问候属于陪伴发言）：这是用户主动开启的
+                        // 「预期内静默」，不是故障，不写入 last_greeting_error，前端据此不会弹出
+                        // 「启动问候生成失败」提示。原始错误仍记录到日志，便于排查。
+                        tracing::info!("[startup_greeting] 启动问候被勿扰模式抑制（预期内静默），不记录错误: {}", e);
+                    } else {
+                        tracing::warn!("[startup_greeting] 完整流水线生成问候失败: {}", e);
+                        *self.last_greeting_error.lock().await = Some(format!("LLM 调用失败: {}", e));
+                    }
                     None
                 }
             },
@@ -1082,8 +1089,14 @@ impl Brain {
                         }
                     }
                     Err(e) => {
-                        tracing::warn!("[startup_greeting] LLM 生成启动问候失败: {}", e);
-                        *self.last_greeting_error.lock().await = Some(format!("LLM 调用失败: {}", e));
+                        if crate::companion_quiet::active() {
+                            // 勿扰模式下陪伴侧发言被主动暂停，启动问候属于陪伴发言，属预期内静默，
+                            // 不作为故障提示（前端不弹 toast）。原始错误仍记录到日志。
+                            tracing::info!("[startup_greeting] 启动问候被勿扰模式抑制（预期内静默），不记录错误: {}", e);
+                        } else {
+                            tracing::warn!("[startup_greeting] LLM 生成启动问候失败: {}", e);
+                            *self.last_greeting_error.lock().await = Some(format!("LLM 调用失败: {}", e));
+                        }
                         None
                     }
                 }

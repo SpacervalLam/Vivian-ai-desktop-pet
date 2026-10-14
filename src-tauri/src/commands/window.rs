@@ -14,9 +14,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crate::utils::fnv1a_64_bytes;
-use crate::drag_motion::{release_velocity, FLING_SAMPLE_WINDOW_MS};
-#[cfg(test)]
-use crate::drag_motion::FLING_MAX_VELOCITY;
+use crate::drag_motion::{bounce_dizzy_ms, ceiling_impact, release_velocity, FLING_SAMPLE_WINDOW_MS};
 
 fn err_str(e: impl std::fmt::Display) -> String {
     e.to_string()
@@ -334,15 +332,6 @@ pub fn start_cursor_tracking(
         // 上一帧是否处于拖拽状态，用于检测拖拽结束的瞬间
         let mut prev_is_dragging = false;
         let mut drag_observation: Option<(Instant, f64, f64, f64, f64)> = None;
-        // 上次发出「拖太快 → 晕乎乎」事件的时刻，用于节流（每次新拖拽会话重置）
-        let mut last_dizzy_emit: Option<Instant> = None;
-        // 连续超速帧计数：仅当连续 DRAG_FAST_MIN_STREAK 帧都在阈值之上才判「拖太快」，
-        // 单帧速度尖峰（手抖、采样抖动）不计入，避免缓慢挪动被误判晕眩
-        let mut fast_drag_streak: usize = 0;
-        // 当前超速连续段内的峰值速度：连续帧都超阈值还不够，还要这段里确实冲到过
-        // DRAG_FAST_PEAK_VELOCITY，把「稳定快拖」挡在门外，只留爆发甩动
-        let mut fast_drag_peak: f64 = 0.0;
-
         while !stop_flag_clone.load(Ordering::SeqCst) && !APP_EXITING.load(Ordering::SeqCst) {
             // 获取本角色窗口
             let win = match app_clone.get_webview_window(&char_id_for_thread) {
@@ -366,8 +355,6 @@ pub fn start_cursor_tracking(
                 }
                 // 拖拽会话随隐藏终止：丢弃轨迹采样，避免恢复显示后用陈旧速度触发甩飞
                 drag_samples.clear();
-                fast_drag_streak = 0;
-                fast_drag_peak = 0.0;
                 prev_is_dragging = false;
                 drag_observation = None;
                 thread::sleep(Duration::from_millis(60));
@@ -433,51 +420,12 @@ pub fn start_cursor_tracking(
                     drag_samples.pop_front();
                 }
 
-                // 拖得太快 → 临时晕乎乎：用相邻两帧全局光标采样估计瞬时速度，
-                // 需同时满足两个条件才认定「极端疯狂甩动」：
-                //   1. 连续 DRAG_FAST_MIN_STREAK 帧都超过 DRAG_FAST_VELOCITY；
-                //   2. 这段连续区间里峰值冲到过 DRAG_FAST_PEAK_VELOCITY。
-                // 任一不满足都只算「快」不算「疯狂」，缓慢拖动更是完全不会触发。
-                // 采样是全局物理坐标，不受窗口追逐延迟影响，所以量的是手速本身。
+                // Track interaction speed, but dizziness requires an actual top collision.
                 if drag_samples.len() >= 2 {
                     let prev = drag_samples[drag_samples.len() - 2];
                     let last = *drag_samples.back().unwrap();
-                    let speed = drag_speed(prev, last);
-                    if let (Some(observation), Some(speed)) = (drag_observation.as_mut(), speed) {
+                    if let (Some(observation), Some(speed)) = (drag_observation.as_mut(), drag_speed(prev, last)) {
                         observation.4 = observation.4.max(speed);
-                    }
-                    if speed.is_some_and(|v| v >= DRAG_FAST_VELOCITY) {
-                        let v = speed.unwrap_or(0.0);
-                        fast_drag_streak = fast_drag_streak.saturating_add(1);
-                        fast_drag_peak = fast_drag_peak.max(v);
-                    } else {
-                        fast_drag_streak = 0;
-                        fast_drag_peak = 0.0;
-                    }
-                    if fast_drag_streak >= DRAG_FAST_MIN_STREAK
-                        && fast_drag_peak >= DRAG_FAST_PEAK_VELOCITY
-                    {
-                        let due = last_dizzy_emit
-                            .map(|t| t.elapsed().as_millis() as u64 >= DRAG_FAST_EMIT_INTERVAL_MS)
-                            .unwrap_or(true);
-                        if due {
-                            last_dizzy_emit = Some(Instant::now());
-                            // 触发后清空连续段：下一次触发需重新累计一整段疯狂甩动，
-                            // 避免持续超速时峰值一旦达标就永远保有资格
-                            let reaction_peak = fast_drag_peak;
-                            fast_drag_streak = 0;
-                            fast_drag_peak = 0.0;
-                            // emit_to：晕乎乎是「这一只被抓着甩懵了」，广播会让另一只也晕
-                            let _ = win.emit_to(
-                                &label,
-                                "drag:dizzy",
-                                json!({
-                                    "duration_ms": DRAG_FAST_DIZZY_MS,
-                                    "reason": "fast_drag",
-                                    "speed_px_per_ms": reaction_peak,
-                                }),
-                            );
-                        }
                     }
                 }
             }
@@ -491,8 +439,8 @@ pub fn start_cursor_tracking(
                     win.scale_factor().unwrap_or(1.0),
                 );
                 if let Some((started, _, _, distance, peak)) = drag_observation.take() {
-                    // Ignore click jitter, holds and reactions already covered by dizzy/fling.
-                    if distance >= 20.0 && last_dizzy_emit.is_none() && v.is_none() {
+                    // Ignore click jitter, holds and reactions already covered by fling.
+                    if distance >= 20.0 && v.is_none() {
                         let _ = win.emit_to(&label, "drag:interaction", json!({
                             "duration_ms": started.elapsed().as_millis() as u64,
                             "distance_px": distance,
@@ -501,11 +449,6 @@ pub fn start_cursor_tracking(
                     }
                 }
                 drag_samples.clear();
-                // 拖拽会话结束，晕眩节流窗口与连续超速计数一并作废：
-                // 下一次拖拽可以立即触发
-                last_dizzy_emit = None;
-                fast_drag_streak = 0;
-                fast_drag_peak = 0.0;
                 let physics_enabled = app_clone.state::<Arc<crate::state::AppState>>().config.read().get_all().window.desktop_physics_enabled;
                 if physics_enabled {
                     let (vx, vy) = v.unwrap_or((0.0, 0.0));
@@ -706,43 +649,8 @@ const FLING_STOP_VELOCITY: f64 = 0.06;
 /// 物理帧间隔（ms）
 const FLING_TICK_MS: u64 = 12;
 
-// ---------- 晕乎乎临时表情 ----------
-//
-// 两种「被甩晕」的情形共用 `drag:dizzy` 事件，前端收到后把桌宠切到 dizzy 格位
-// `duration_ms` 毫秒：
-// - 拖动过快：拖动期间相邻两帧全局光标采样估计的瞬时速度超过阈值，
-//   且需连续多帧超阈值 + 区间峰值达标，只有**极端疯狂甩动**才触发
-// - 甩飞撞边：惯性甩飞线程检测到屏幕边缘碰撞，撞击越重晕得越久
-//
-// 时长由后端给出，前端只负责按给定毫秒数播放与回落，不再自行判定。
-
-/// 拖动过程中判定「拖得太快」的光标速度阈值（物理像素/ms，约 3200px/s）
-///
-/// 该值需明显高于日常「缓慢摆弄」的手速：阈值定得偏低时，正常挪动桌宠
-/// 也会被判为快速拖动而触发晕眩，表情变成噪声。约 3200px/s 只有**整条手臂
-/// 猛地甩动**才够得到（普通人日常拖动多在 300–800px/s，用力甩也就 1500–2500px/s），
-/// 因此定在这里意味着「只有极端疯狂甩动才切换晕乎乎」。
-const DRAG_FAST_VELOCITY: f64 = 3.2;
-/// 超速判定所需的连续超速帧数：仅当连续多帧都在阈值之上才认定「确实很快」，
-/// 单帧抖动（手抖、采样时序抖动）不计入。光标线程约 60ms 一帧，4 帧 ≈ 240ms，
-/// 要求疯狂甩动**持续**这么久，而非一个瞬时尖峰。
-const DRAG_FAST_MIN_STREAK: usize = 4;
-/// 超速连续帧内必须出现过的峰值速度（物理像素/ms，约 4200px/s）。
-///
-/// 光靠「连续 N 帧都 > 阈值」还不够：贴着阈值（3.2）连续几帧也算数，但那更接近
-/// 「快」而非「疯狂」。这里再要求这只手在窗口内确实冲到过 4200px/s 以上，
-/// 把「稳定快拖」挡在门外，只留真正的爆发甩动。
-const DRAG_FAST_PEAK_VELOCITY: f64 = 4.2;
-/// 快速拖动晕眩事件的最小间隔（ms）：持续超速拖动也只按此频率刷新表情
-const DRAG_FAST_EMIT_INTERVAL_MS: u64 = 450;
-/// 快速拖动触发的晕眩持续时长（ms）
-const DRAG_FAST_DIZZY_MS: u64 = 1200;
-/// 甩飞撞边触发晕眩的最小法向撞击速度（物理像素/ms），轻贴边缘不触发
-const FLING_BOUNCE_MIN_IMPACT: f64 = 0.25;
-/// 甩飞撞边晕眩的基准时长（ms）
-const FLING_BOUNCE_DIZZY_BASE_MS: u64 = 1400;
-/// 甩飞撞边晕眩的时长上限（ms）
-const FLING_BOUNCE_DIZZY_MAX_MS: u64 = 2400;
+// Dizziness requires a fast upward collision with the top boundary.
+// Gravity uses the same duration policy and targets only the affected pet window.
 
 /// 每窗口甩飞代号：新一轮甩飞开始时自增，被取代的旧线程检测到代号变化后自行退出
 static FLING_GEN: Lazy<Mutex<std::collections::HashMap<String, u64>>> =
@@ -752,27 +660,12 @@ static FLING_GEN: Lazy<Mutex<std::collections::HashMap<String, u64>>> =
 ///
 /// 两帧间隔太短（≤1ms）时速度不可信，返回 `None`。
 ///
-/// 注意：本函数只回答「这一帧有多快」，是否真的判定「拖得太快」还需调用方
-/// 累计连续超速帧数（见 `DRAG_FAST_MIN_STREAK`）并核对峰值（见
-/// `DRAG_FAST_PEAK_VELOCITY`），避免缓慢挪动被单帧抖动带出晕眩。
 fn drag_speed(prev: (Instant, f64, f64), last: (Instant, f64, f64)) -> Option<f64> {
     let dt_ms = last.0.duration_since(prev.0).as_secs_f64() * 1000.0;
     if dt_ms <= 1.0 {
         return None;
     }
     Some((last.1 - prev.1).hypot(last.2 - prev.2) / dt_ms)
-}
-
-/// 拖动过快判定：由相邻两帧全局光标采样估计瞬时速度，是否达到 `DRAG_FAST_VELOCITY`。
-///
-/// 两帧间隔太短（≤1ms）时速度不可信，一律返回 false。
-///
-/// 注意：本函数只回答「这一帧快不快」，是否真的判定「拖得太快」还需调用方
-/// 累计连续超速帧数（见 `DRAG_FAST_MIN_STREAK`）并核对峰值，避免缓慢挪动
-/// 被单帧抖动带出晕眩。
-#[cfg(test)]
-fn is_drag_too_fast(prev: (Instant, f64, f64), last: (Instant, f64, f64)) -> bool {
-    drag_speed(prev, last).is_some_and(|v| v >= DRAG_FAST_VELOCITY)
 }
 
 /// 单轴边缘碰撞求解：把 `p` 夹紧到 `[min, max]`，并对朝外的法向速度做反弹。
@@ -818,22 +711,6 @@ fn resolve_axis_collision(
     (p, v, 0.0)
 }
 
-/// 撞边晕眩时长：撞击越重晕得越久；轻贴边缘（法向速度低于阈值）返回 `None` 不触发。
-///
-/// 注意：本函数只做「给定时长」的换算，**是否构成撞击**由调用方判定。
-/// 调用方只把「甩飞速度把窗口从界内推出界」的撞击记进 `impact`，
-/// 智能避让等外部移动把桌宠摆到墙边不算撞击（`impact` 保持 0，这里自然返回 `None`）。
-fn bounce_dizzy_ms(impact: f64) -> Option<u64> {
-    // 用 `!(x >= min)` 而非 `x < min`，顺带把 NaN 归入「不触发」
-    if !(impact >= FLING_BOUNCE_MIN_IMPACT) {
-        return None;
-    }
-    let extra = ((impact - FLING_BOUNCE_MIN_IMPACT) * 1200.0).min(
-        (FLING_BOUNCE_DIZZY_MAX_MS - FLING_BOUNCE_DIZZY_BASE_MS) as f64,
-    );
-    Some(FLING_BOUNCE_DIZZY_BASE_MS + extra as u64)
-}
-
 /// 启动惯性甩飞物理线程（Windows：以虚拟屏幕为碰撞边界）
 ///
 /// 线程在下列任一情况下退出：
@@ -843,7 +720,7 @@ fn bounce_dizzy_ms(impact: f64) -> Option<u64> {
 ///
 /// 每帧重读窗口实际位置作为积分基点，智能避让等外部移动不会被甩飞覆盖。
 ///
-/// 「撞边晕乎乎」仅在**甩飞速度本帧把窗口从界内推出边界**时触发；
+/// 「撞边晕乎乎」仅在**甩飞速度本帧把窗口从界内推出顶部边界**时触发；
 /// 窗口本来就在墙边（被智能避让/环境走动/全屏隐藏挪过去）时，边缘夹紧只是
 /// 几何修正，不触发晕眩——避免桌宠自己走到墙边也晕乎乎。
 fn start_fling(win: WebviewWindow, label: &str, vx: f64, vy: f64) {
@@ -887,6 +764,7 @@ fn start_fling(win: WebviewWindow, label: &str, vx: f64, vy: f64) {
         let min_y = (vs_y - body_t) as f64;
         let max_y = ((vs_y + vs_h - body_t - body_h).max(vs_y - body_t)) as f64;
 
+        let scale = win.scale_factor().unwrap_or(1.0).max(0.75);
         let label = label.to_string();
         let gen = {
             let mut gens = FLING_GEN.lock();
@@ -944,7 +822,8 @@ fn start_fling(win: WebviewWindow, label: &str, vx: f64, vy: f64) {
                     // 若积分前窗口已经在边界上/界外（智能避让、环境走动、全屏隐藏等
                     // 外部移动把它摆到了墙边），那这一帧的夹紧只是几何修正，不是撞击，
                     // 不记 impact——否则桌宠自己走到墙边也会「晕乎乎」。
-                    let (nx, nvx, ix) = resolve_axis_collision(
+                    let impact = ceiling_impact(pos_y, y, vy, min_y, max_y);
+                    let (nx, nvx, _ix) = resolve_axis_collision(
                         pos_x,
                         x,
                         vx,
@@ -954,7 +833,7 @@ fn start_fling(win: WebviewWindow, label: &str, vx: f64, vy: f64) {
                     );
                     x = nx;
                     vx = nvx;
-                    let (ny, nvy, iy) = resolve_axis_collision(
+                    let (ny, nvy, _iy) = resolve_axis_collision(
                         pos_y,
                         y,
                         vy,
@@ -964,19 +843,18 @@ fn start_fling(win: WebviewWindow, label: &str, vx: f64, vy: f64) {
                     );
                     y = ny;
                     vy = nvy;
-                    let impact = ix.max(iy);
 
-                    // 撞上屏幕边缘 → 临时晕乎乎：撞得越狠晕得越久。
+                    // 只有撞到顶部且超过按 DPI 归一化的速度阈值才晕眩。
                     // 法向速度低于阈值的轻贴边缘不触发，避免贴边滑行时抖出表情。
                     // emit_to：撞边晕的是这一只，别把另一只也叫醒（见本子系统顶部说明）
-                    if let Some(dizzy_ms) = bounce_dizzy_ms(impact) {
+                    if let Some(dizzy_ms) = bounce_dizzy_ms(impact / scale) {
                         let _ = win.emit_to(
                             &label,
                             "drag:dizzy",
                             json!({
                                 "duration_ms": dizzy_ms,
                                 "reason": "edge_bounce",
-                                "impact": impact,
+                                "impact": impact / scale,
                             }),
                         );
                     }
@@ -2376,32 +2254,9 @@ mod dizzy_tests {
         (Instant::now() + Duration::from_millis(ms), x, y)
     }
 
-    #[test]
-    fn drag_too_fast_needs_speed_above_threshold() {
-        // 阈值 3.2 px/ms。正向用例留足够余量，避免 Instant 纳秒抖动让跨度略大于
-        // 名义 60ms 而把速度压到阈值之下：60ms 内 240px → 4.0 px/ms（余量 25%）
-        assert!(is_drag_too_fast(at(0, 0.0, 0.0), at(60, 240.0, 0.0)));
-        // 60ms 内移动 60px → 1.0 px/ms：早期阈值 0.9 会误判为「快」，
-        // 这正是「缓慢拖动也晕乎乎」的成因，现在必须不触发
-        assert!(!is_drag_too_fast(at(0, 0.0, 0.0), at(60, 60.0, 0.0)));
-        // 旧阈值 1.8 下的「快拖」现在也算慢：60ms 内 120px → 2.0 px/ms（用力甩动量级）不触发
-        assert!(!is_drag_too_fast(at(0, 0.0, 0.0), at(60, 120.0, 0.0)));
-        // 即使冲到 3.0 px/ms（≈3000px/s）也仍在逐帧门槛之下
-        assert!(!is_drag_too_fast(at(0, 0.0, 0.0), at(60, 180.0, 0.0)));
-        // 斜向移动同样按合速度判定：60ms 内 (144, 192) → 240px → 4.0 px/ms
-        assert!(is_drag_too_fast(at(0, 0.0, 0.0), at(60, 144.0, 192.0)));
-    }
 
-    #[test]
-    fn drag_too_fast_ignores_unreliable_time_span() {
-        // 同一时刻（跨度 0ms）：速度不可信，不触发。
-        // 用**同一个** Instant 保证跨度恰好 0——两个独立 Instant::now() 之间有
-        // 调度抖动，不适合构造「恰好 1ms」这种贴边用例
-        let same = Instant::now();
-        assert!(!is_drag_too_fast((same, 0.0, 0.0), (same, 999.0, 999.0)));
-        // 跨度足够（≥2ms）时同样的位移可信：999px/2ms 远超阈值
-        assert!(is_drag_too_fast(at(0, 0.0, 0.0), at(2, 999.0, 999.0)));
-    }
+
+
 
     #[test]
     fn drag_speed_reports_magnitude() {
@@ -2425,55 +2280,15 @@ mod dizzy_tests {
         assert!(drag_speed((same, 0.0, 0.0), (same, 999.0, 999.0)).is_none());
     }
 
-    #[test]
-    fn drag_fast_streak_requires_multiple_frames() {
-        // 连续超速帧数门槛：只有极端疯狂甩动能连续这么多帧，越高越保守
-        assert!(
-            DRAG_FAST_MIN_STREAK >= 4,
-            "连续超速帧数门槛过低: {DRAG_FAST_MIN_STREAK}"
-        );
-    }
 
-    #[test]
-    fn drag_fast_peak_must_exceed_streak_threshold() {
-        // 峰值门槛必须严格高于逐帧门槛，否则「贴着阈值连超几帧」也会触发，
-        // 就失去了「只认爆发甩动」的意义
-        assert!(
-            DRAG_FAST_PEAK_VELOCITY > DRAG_FAST_VELOCITY,
-            "峰值门槛 {DRAG_FAST_PEAK_VELOCITY} 必须高于逐帧门槛 {DRAG_FAST_VELOCITY}"
-        );
-    }
 
-    #[test]
-    fn drag_fast_threshold_is_far_above_normal_hand_speed() {
-        // 日常拖动 300–800px/s、用力甩 1500–2500px/s（= 1.5–2.5 px/ms）都不该触发；
-        // 逐帧门槛至少要高过「用力甩」的上沿
-        assert!(
-            DRAG_FAST_VELOCITY >= 3.0,
-            "逐帧门槛 {DRAG_FAST_VELOCITY} 仍会让日常用力甩动触发晕眩"
-        );
-    }
 
-    #[test]
-    fn bounce_dizzy_skips_gentle_touch() {
-        assert_eq!(bounce_dizzy_ms(0.0), None);
-        assert_eq!(bounce_dizzy_ms(0.24), None);
-        assert_eq!(bounce_dizzy_ms(-1.0), None);
-        assert_eq!(bounce_dizzy_ms(f64::NAN), None);
-    }
 
-    #[test]
-    fn bounce_dizzy_grows_with_impact_and_is_capped() {
-        let base = bounce_dizzy_ms(FLING_BOUNCE_MIN_IMPACT).unwrap();
-        assert_eq!(base, FLING_BOUNCE_DIZZY_BASE_MS);
 
-        let medium = bounce_dizzy_ms(0.75).unwrap();
-        assert!(medium > base, "撞击更重应当晕更久: {medium} <= {base}");
 
-        // 极端撞击（甩飞初速度上限 4.0 px/ms）封顶
-        let hardest = bounce_dizzy_ms(FLING_MAX_VELOCITY).unwrap();
-        assert_eq!(hardest, FLING_BOUNCE_DIZZY_MAX_MS);
-    }
+
+
+
 
     // ---------- 单轴边缘碰撞：区分「甩飞撞墙」与「被摆到墙边」 ----------
 

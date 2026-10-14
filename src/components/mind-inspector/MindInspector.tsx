@@ -22,11 +22,7 @@ import {
 } from './design-system';
 import { NavigationProvider } from './NavigationContext';
 import type { PageParams } from './NavigationContext';
-import MindPage from './pages/MindPage';
-import MemoryPage from './pages/MemoryPage';
-import DiaryPage from './pages/DiaryPage';
-import NotebookPage from './pages/NotebookPage';
-import PlannerPage from './pages/PlannerPage';
+import UnifiedComicBook from './pages/UnifiedComicBook';
 import CodeAgentPage from './pages/CodeAgentPageNew';
 import PageErrorBoundary from './PageErrorBoundary';
 import './MindInspector.css';
@@ -63,26 +59,28 @@ const NavButton: React.FC<{
   item: NavItem;
   active: boolean;
   onClick: () => void;
-}> = ({ item, active, onClick }) => {
+  label?: string;
+}> = ({ item, active, onClick, label }) => {
   const { t } = useTranslation();
   const Icon = item.icon;
   return (
     <button
       type="button"
-      title={t(item.labelKey)}
+      title={label ?? t(item.labelKey)}
       onClick={onClick}
       className={`mind-nav-btn ${active ? 'active' : ''}`}
     >
       {active && <span className="mind-nav-active-bar" />}
       <Icon size={20} strokeWidth={active ? 2.2 : 1.8} />
-      <span className="mind-nav-label">{t(item.labelKey)}</span>
+      <span className="mind-nav-label">{label ?? t(item.labelKey)}</span>
     </button>
   );
 };
 
-const MindInspector: React.FC = () => {
+const MindInspector: React.FC<{ presentationReady?: boolean }> = ({ presentationReady = true }) => {
   const { t } = useTranslation();
   const [activeNav, setActiveNav] = useState<NavKey>('mind');
+  const [touring, setTouring] = useState(false);
   const [navRevealed, setNavRevealed] = useState(false);
   const [navPinned, setNavPinned] = useState(false);
   const navRef = useRef<HTMLDivElement>(null);
@@ -149,12 +147,6 @@ const MindInspector: React.FC = () => {
     return () => document.body.removeAttribute('data-ui-style');
   }, [effectiveUiStyle]);
 
-  // 切换页面时刷新动画 key
-  const [animKey, setAnimKey] = useState(0);
-  useEffect(() => {
-    setAnimKey((k) => k + 1);
-  }, [activeNav]);
-
   // 把当前页签上报给后端：工作智能体卡在等用户拍板时，靠它判断用户看不看得见
   // 那条提问——用户停在别的页签时，工作页的 coding:question 监听器压根没挂载。
   // 这里必须挂在窗口级组件上（而非工作页组件），否则离开工作页就再也没人上报了。
@@ -185,7 +177,7 @@ const MindInspector: React.FC = () => {
   const navigateTo = (page: NavKey, params?: PageParams) => {
     const { key, params: resolved } = resolveNav(page, params);
     setActiveNav(key);
-    setPageParams(resolved);
+    setPageParams(key === 'code' ? resolved : { ...resolved, comicNavigation: Date.now() });
   };
 
   // 读取 URL 参数（首次打开窗口时定位笔记/日记/子视图）+ 监听 memory:navigate 事件
@@ -232,7 +224,8 @@ const MindInspector: React.FC = () => {
   };
 
   // 封面条副标题：跟随当前主导航，显示具体页面名
-  const coverLabelKey = NAV_ITEMS.find((item) => item.key === activeNav)?.labelKey ?? 'mind_inspector.nav_mind';
+  // （「记忆」页的 labelKey 已改成 nav_memory，这里跟着走，别再写死 nav_comic。）
+  const coverLabel = isWorkPage ? t('mind_inspector.nav_code') : t('mind_inspector.nav_memory');
 
   // 窗口控制（封面条右侧按钮）：本组件仅用于 MemoryWindow，操作当前窗口
   const minimizeWindow = useCallback(async () => {
@@ -299,24 +292,7 @@ const MindInspector: React.FC = () => {
   );
 
   const renderPage = (): React.ReactNode => {
-    switch (activeNav) {
-      case 'mind':
-        return <div className="claude-theme claude-surface" style={{ minWidth: 0 }}><MindPage /></div>;
-      case 'graph':
-        return <MemoryPage initialLayer={pageParams.sub === 'profile' ? 'profile' : undefined} />;
-      case 'diary':
-      case 'notebook':
-      case 'planner':
-        return (
-          <div className="claude-theme record-scope" style={{ minWidth: 0, display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
-            {activeNav === 'diary' ? <DiaryPage /> : activeNav === 'notebook' ? <NotebookPage /> : <PlannerPage />}
-          </div>
-        );
-      case 'code':
-        return <CodeAgentPage />;
-      default:
-        return null;
-    }
+    return isWorkPage ? <CodeAgentPage /> : <UnifiedComicBook presentationReady={presentationReady} onTourChange={setTouring} destination={activeNav} params={pageParams} />;
   };
 
   return (
@@ -332,18 +308,18 @@ const MindInspector: React.FC = () => {
           其他页这三处标记一律写回 "scrapbook"（含 `<body>` 那处，共三处标记），
           于是整窗（外壳 + 内容 + 弹层）一起回到手账，不存在「一半极简一半手账」。 */}
       <div
-        className={`codex-theme mind-inspector-root mind-scrapbook-window${isWorkPage ? ' is-work-page' : ' is-claude'}`}
+        className={`codex-theme mind-inspector-root mind-scrapbook-window${isWorkPage ? ' is-work-page' : ' is-claude'}${touring && !isWorkPage ? ' is-touring' : ''}`}
         data-ui-style={effectiveUiStyle}
         data-nav-revealed={navOpen ? 'true' : 'false'}
       >
         {/* 手账本封面条（全局标题 + 窗口拖拽区 + 最小化/关闭按钮） */}
         <header className="mind-sb-cover">
           <button ref={navToggleRef} type="button" className="mind-sb-menu-btn" aria-label={t('workbench.navigation')} title={t('workbench.navigation')} aria-controls="mind-page-navigation" aria-expanded={navOpen} onClick={() => { setNavRevealed(false); setNavPinned((open) => !open); }}><Menu size={17} /></button>
-          <div className="mind-sb-cover-title" data-tauri-drag-region>
+          <div className="mind-sb-cover-title">
             <span className="mind-sb-cover-dot" />
             {t('workbench.inspector')}
             <span className="mind-sb-cover-divider" />
-            <span className="mind-sb-cover-sub">{t(coverLabelKey)}</span>
+            <span className="mind-sb-cover-sub">{coverLabel}</span>
           </div>
           <div className="mind-sb-cover-extra">
             {headerExtra}
@@ -442,11 +418,12 @@ const MindInspector: React.FC = () => {
             <div className="mind-nav-hotspot" aria-hidden="true" />
             <aside id="mind-page-navigation" className="mind-nav-rail" aria-label={t('workbench.navigation')}>
               <div className="mind-nav-card">
-                {NAV_ITEMS.map((item) => (
+                {NAV_ITEMS.filter(item => item.key === 'mind' || item.key === 'code').map((item) => (
                   <NavButton
                     key={item.key}
                     item={item}
-                    active={item.key === activeNav}
+                    active={item.key === 'mind' ? !isWorkPage : isWorkPage}
+                    label={item.key === 'mind' ? t('mind_inspector.nav_memory') : undefined}
                     onClick={() => { navigateTo(item.key); setNavPinned(false); setNavRevealed(false); }}
                   />
                 ))}
@@ -460,13 +437,13 @@ const MindInspector: React.FC = () => {
             data-ui-style={effectiveUiStyle}
           >
               <div
-                key={animKey}
+                key={isWorkPage ? 'office' : 'comic'}
                 className="mind-page-content"
                 style={{ animation: `mind-inspector-page-enter ${DURATION.slow}s ${EASE.ios}` }}
               >
                 {/* 页面级错误边界：单页渲染崩溃时只显示兜底，不让整窗透明空白
                     （见 PageErrorBoundary）。key 随主导航变化，切页即重置崩溃态。 */}
-                <PageErrorBoundary key={activeNav}>
+                <PageErrorBoundary key={isWorkPage ? 'office' : 'comic'}>
                   {renderPage()}
                 </PageErrorBoundary>
               </div>

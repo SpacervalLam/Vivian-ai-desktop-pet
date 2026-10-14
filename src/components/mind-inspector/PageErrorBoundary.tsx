@@ -1,4 +1,15 @@
 import React from 'react';
+import { useTranslation } from 'react-i18next';
+
+function PageError({ error, retry }: { error: Error; retry: () => void }) {
+  const { t } = useTranslation();
+  return <div className="mind-page-error" role="alert">
+    <div className="mind-page-error-icon">!</div>
+    <p className="mind-page-error-title">{t('comic.pageFailed')}</p>
+    <p className="mind-page-error-msg">{error.message}</p>
+    <button type="button" className="mind-page-error-retry" onClick={retry}>{t('comic.pageRetry')}</button>
+  </div>;
+}
 
 interface Props {
   children: React.ReactNode;
@@ -37,18 +48,7 @@ export default class PageErrorBoundary extends React.Component<Props, State> {
     if (this.state.error) {
       return (
         this.props.fallback ?? (
-          <div className="mind-page-error" role="alert">
-            <div className="mind-page-error-icon">!</div>
-            <p className="mind-page-error-title">这一页加载失败了</p>
-            <p className="mind-page-error-msg">{this.state.error.message}</p>
-            <button
-              type="button"
-              className="mind-page-error-retry"
-              onClick={() => this.setState({ error: null })}
-            >
-              重试
-            </button>
-          </div>
+          <PageError error={this.state.error} retry={() => this.setState({ error: null })} />
         )
       );
     }

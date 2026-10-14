@@ -97,3 +97,25 @@ fn inspector_window_visible_and_front(app: &AppHandle) -> bool {
     }
     super::window::is_window_foreground(&win)
 }
+
+/// Keep the inspector fullscreen while still allowing minimize and close.
+#[tauri::command]
+pub fn lock_inspector_fullscreen(window: tauri::Window) -> Result<(), String> {
+    if window.label() != INSPECTOR_WINDOW_LABEL {
+        return Err("This command only applies to the mind inspector".into());
+    }
+    window.set_resizable(false).map_err(|e| e.to_string())?;
+    window.set_maximizable(false).map_err(|e| e.to_string())?;
+    window.set_decorations(false).map_err(|e| e.to_string())?;
+    window.set_fullscreen(true).map_err(|e| e.to_string())
+}
+
+pub fn enforce_inspector_fullscreen(window: &tauri::Window, event: &tauri::WindowEvent) {
+    if window.label() != INSPECTOR_WINDOW_LABEL { return; }
+    if matches!(event, tauri::WindowEvent::Resized(_) | tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Focused(true) | tauri::WindowEvent::ScaleFactorChanged { .. })
+        && !window.is_minimized().unwrap_or(false)
+        && !window.is_fullscreen().unwrap_or(true)
+    {
+        let _ = window.set_fullscreen(true);
+    }
+}

@@ -22,10 +22,16 @@ pub fn build_search_client(
     if let Some(ua) = user_agent {
         builder = builder.user_agent(ua);
     }
-    if let Some(url) = proxy_url {
-        if let Ok(proxy) = reqwest::Proxy::all(url) {
-            builder = builder.proxy(proxy);
-        }
+    // `proxy_url` 由调用方传 `ProxyConfig::effective_proxy_url()`，`None` 即配置为直连。
+    // 直连必须显式 `no_proxy()`：否则 reqwest 仍会读取 `HTTP_PROXY` / `HTTPS_PROXY`
+    // 环境变量，把搜索请求送进（可能未监听的）代理而全部超时。
+    match proxy_url {
+        Some(url) => match reqwest::Proxy::all(url) {
+            Ok(proxy) => builder = builder.proxy(proxy),
+            // 代理 URL 无效 → 退回直连，同样要禁用环境变量代理
+            Err(_) => builder = builder.no_proxy(),
+        },
+        None => builder = builder.no_proxy(),
     }
     builder.build().unwrap_or_else(|_| reqwest::Client::new())
 }

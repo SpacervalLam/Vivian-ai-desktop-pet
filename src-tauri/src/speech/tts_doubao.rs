@@ -213,8 +213,12 @@ impl TtsBackend for DoubaoBackend {
         let body = Self::build_http_body(config, text, emotion)?;
         let (_, audio_format) = Self::format(config);
 
+        // 豆包 openspeech 是国内域名，直连可达；显式 `no_proxy()` 避免被
+        // `HTTP_PROXY` / `HTTPS_PROXY` 环境变量劫持（代理端口未监听时会一律超时）。
+        // 与 `aliyun_backend.rs` / `azure_backend.rs` 的处理保持一致。
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
+            .no_proxy()
             .build()
             .map_err(|e| VivianError::Speech(format!("创建 HTTP 客户端失败: {e}")))?;
 

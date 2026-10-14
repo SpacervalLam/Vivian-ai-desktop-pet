@@ -29,9 +29,24 @@
   box-shadow: var(--codex-shadow-md);
   z-index: 5;
   gap: 10px;
-  transition: box-shadow 0.2s ease;
+  transition: box-shadow 0.2s ease,
+    transform .42s cubic-bezier(.22, 1, .36, 1),
+    margin-bottom .42s cubic-bezier(.22, 1, .36, 1),
+    opacity .28s ease, visibility 0s;
   box-sizing: border-box;
   height: 54px;
+}
+
+/* Keep the cover mounted: its 78px footprint collapses gradually while it
+   slides above the window. ResizeObserver then resizes the comic in step. */
+.mind-scrapbook-window.is-touring .mind-sb-cover {
+  transform: translateY(calc(-100% - 12px));
+  margin-bottom: -64px;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition-duration: .2s, .9s, .9s, .65s, 0s;
+  transition-delay: 0s, 0s, 0s, 0s, .9s;
 }
 
 .mind-sb-cover:hover {
@@ -187,7 +202,18 @@
   width: 24px;
   z-index: 40;
   pointer-events: auto;
+  transition: opacity .28s ease, transform .42s cubic-bezier(.22, 1, .36, 1), visibility 0s;
 }
+
+.mind-scrapbook-window.is-touring .mind-nav-dock {
+  opacity: 0;
+  transform: translateX(-24px);
+  visibility: hidden;
+  pointer-events: none;
+  transition-duration: .65s, .9s, 0s;
+  transition-delay: 0s, 0s, .9s;
+}
+.mind-scrapbook-window.is-touring .mind-nav-dock * { pointer-events: none; }
 
 .mind-nav-dock.is-revealed {
   width: 122px;
@@ -314,6 +340,11 @@
 /* 导航展开时为主内容让出空间，避免导航卡片覆盖页面内容 */
 .mind-inspector-root[data-nav-revealed='true'] .mind-main {
   margin-left: 80px;
+}
+.mind-inspector-root.is-touring[data-nav-revealed='true'] .mind-main { margin-left: 0; }
+
+@media (prefers-reduced-motion: reduce) {
+  .mind-scrapbook-window :is(.mind-sb-cover, .mind-nav-dock) { transition: none; }
 }
 
 /* 页面内容滚动区 */
@@ -478,3 +509,17 @@
 :root[data-theme="dark"] .codex-theme .mind-nav-card { background: rgba(43, 36, 30, 0.92); }
 :root[data-theme="dark"] .codex-theme .mind-sb-cover { background: rgba(43, 36, 30, 0.9); }
 :root[data-theme="dark"] .codex-theme .mind-tabs { background: rgba(43, 36, 30, 0.92); }
+
+/* Selected navigation uses light ink on a muted blue surface at night. */
+:root[data-theme="dark"] .mind-inspector-root .mind-nav-btn.active {
+  background: #34454f;
+  color: #d5e7f2;
+  box-shadow: 0 2px 6px #0003, 0 0 0 2px #8fb4cc55;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .mind-inspector-root .mind-nav-btn.active {
+    background: #34454f;
+    color: #d5e7f2;
+    box-shadow: 0 2px 6px #0003, 0 0 0 2px #8fb4cc55;
+  }
+}

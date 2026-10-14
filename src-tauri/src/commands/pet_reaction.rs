@@ -100,6 +100,12 @@ const HISTORY_WINDOW: usize = 6;
 const HISTORY_ENTRY_MAX_CHARS: usize = 60;
 /// 模型输出清洗后的最大字符数（超出直接截断，避免长段落糊在气泡里）
 const REPLY_MAX_CHARS: usize = 60;
+/// 截图转述的输出上限：用户点了「截屏分析」就是在等结果，60 字说不清画面里有什么
+const VISUAL_RELAY_MAX_CHARS: usize = 140;
+/// 截图转述的 token 上限（140 个汉字要留足余量）
+const VISUAL_RELAY_MAX_TOKENS: u32 = 512;
+/// 截图转述超时：识图本身已经花了几秒，转述只做一次调用，不能再让用户干等
+const VISUAL_RELAY_TIMEOUT_SECS: u64 = 10;
 
 // ============ 节流 ============
 
@@ -443,6 +449,65 @@ async fn generate_reaction(
     }
 }
 
+/// 截图转述：把识图模型的客观分析交给桌宠，用角色自己的口吻说明画面内容。
+///
+/// 与 [`react_to_user_action`] 的三点区别，都是刻意的：
+/// - **不掷概率、不节流**：用户主动点了「截屏分析」就是在等结果，吞掉等于没反应；
+/// - **不写事件账本**：这一轮本身已经作为一次完整对话回合落进 dialogue 与记忆，
+///   再记一条 `user_pet_action` 是重复记账；
+/// - **输出预算更宽**：60 字说不清画面里有什么，见 `VISUAL_RELAY_MAX_CHARS`。
+///
+/// 失败一律静默返回 `None`（无 router / 超时 / 空输出），不回退到写死文案。
+pub async fn relay_screen_analysis(state: &AppState, char_id: &str, description: &str) -> Option<String> {
+    let description = description.trim();
+    if description.is_empty() || state.factory_reset_in_progress.load(std::sync::atomic::Ordering::SeqCst) {
+        return None;
+    }
+    let router = state.model_router.read().as_ref().cloned()?;
+
+    // 先取出需要的东西再 await，避免跨 await 持 parking_lot guard。
+    let history = state
+        .characters
+        .read()
+        .get(char_id)
+        .map(|c| c.brain.dialogue.get_user_visible_history())
+        .unwrap_or_default();
+
+    let lang = crate::i18n::get_language();
+    let messages = build_visual_relay_messages(char_id, &lang, description, &history);
+    let request = build_visual_relay_request(messages, char_id);
+
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(VISUAL_RELAY_TIMEOUT_SECS),
+        router.generate(request),
+    )
+    .await;
+
+    match outcome {
+        Ok(Ok(raw)) => {
+            let cleaned = clean_relay(&raw);
+            if cleaned.is_empty() || cleaned.eq_ignore_ascii_case("[SILENT]") {
+                tracing::debug!("[PetReaction] {char_id} 截图转述为空，静默跳过");
+                None
+            } else {
+                tracing::debug!("[PetReaction] {char_id} 截图转述 → {cleaned}");
+                Some(cleaned)
+            }
+        }
+        Ok(Err(e)) => {
+            tracing::debug!("[PetReaction] {char_id} 截图转述失败，静默跳过: {e}");
+            None
+        }
+        Err(_) => {
+            tracing::debug!(
+                "[PetReaction] {char_id} 截图转述超时 ({}s)，静默跳过",
+                VISUAL_RELAY_TIMEOUT_SECS
+            );
+            None
+        }
+    }
+}
+
 fn build_reaction_request(messages: Vec<crate::types::response::ChatMessage>, char_id: &str) -> LLMRequest {
     use crate::providers::reasoning::{ReasoningPreference, ReasoningMode, ReasoningEffort};
     LLMRequest::new("pet_reaction", messages)
@@ -455,6 +520,11 @@ fn build_reaction_request(messages: Vec<crate::types::response::ChatMessage>, ch
         })
         .with_character_id(char_id)
         .without_framework_instructions()
+}
+
+/// 截图转述与触碰反应共用同一档模型与采样参数，只有输出预算更宽。
+fn build_visual_relay_request(messages: Vec<crate::types::response::ChatMessage>, char_id: &str) -> LLMRequest {
+    build_reaction_request(messages, char_id).with_max_tokens(VISUAL_RELAY_MAX_TOKENS)
 }
 
 /// 只对真实空响应重试一次；调用方的总 timeout 包含两次请求。
@@ -540,6 +610,65 @@ fn build_reaction_messages(
     vec![ChatMessage::system(system), ChatMessage::user(user)]
 }
 
+/// 组装「转述截图分析」的极简 prompt：精简人设 + 低权重历史 + 识图客观分析。
+///
+/// 与 `build_reaction_messages` 同构，只是把「用户刚对你做了什么」换成「识图模型看到了什么」，
+/// 并额外要求**照内容说、不照抄句子** —— 客观分析是给模型看的证据，不是给用户看的台词。
+fn build_visual_relay_messages(
+    char_id: &str,
+    lang: &str,
+    description: &str,
+    history: &[ChatMessage],
+) -> Vec<ChatMessage> {
+    let lang_norm = crate::pipeline::prompt_modules::normalize_lang(lang);
+    let (task_heading, limit_rule, history_heading, history_note, analysis_heading, tail) = match lang_norm {
+        "en" => (
+            "## What just happened",
+            "Explain the picture in your own voice, 2 to 3 sentences, under 140 characters; leave out details that do not matter.",
+            "## Recent chat (very low weight)",
+            "This is only so you remember the tone and what was being talked about. Do NOT repeat or summarize it.",
+            "## What the vision model saw on the user's screen",
+            "Output that explanation only: no quotes, no stage directions, no parentheses, no Markdown.",
+        ),
+        "ja" => (
+            "## いま起きたこと",
+            "自分の口調で画面の内容を2〜3文、140文字以内で説明すること。重要でない細部は省いてよい。",
+            "## 最近の会話（重みはごく低い）",
+            "口調と思い出すためだけの参考。復唱・要約はしないこと。",
+            "## 画面を認識したモデルが見た内容",
+            "説明そのものだけを出力すること：引用符・動作描写・括弧の補足・Markdown は不要。",
+        ),
+        _ => (
+            "## 刚刚发生了什么",
+            "用你自己的口吻向用户说明这张图里有什么，2~3 句、140 字以内；次要细节可以略过。",
+            "## 最近的聊天（权重很低）",
+            "只是让你记得刚才的语气和在聊什么，不要复述、不要总结。",
+            "## 识图模型在用户屏幕上看到的内容",
+            "只输出这段话本身：不要引号、不要动作描写、不要括号旁白、不要 Markdown。",
+        ),
+    };
+
+    let persona = build_tool_minimal_identity(char_id, lang);
+    let voice = reaction_voice(char_id);
+    let system = format!(
+        "{persona}\n\n{task_heading}\n\
+        用户刚刚让你看了他的屏幕截图，识图模型已经给出客观分析。\n\
+        - {limit_rule}\n\
+        - {voice}\n\
+        - 客观分析只是事实依据：照它的内容说，但不要照抄句子，也不要提「识图模型」「分析结果」这类词。\n\
+        - 那是用户自己的屏幕，用「你」指代用户；分析里没写的内容不要编。\n\
+        - 不要客服腔，不要客套开场白。"
+    );
+
+    let history_block = build_history_block(history, lang_norm, history_heading, history_note);
+    let user = match history_block {
+        Some(block) => format!("{block}\n\n{analysis_heading}\n{description}\n\n{tail}"),
+        None => format!("{analysis_heading}\n{description}\n\n{tail}"),
+    };
+
+    vec![ChatMessage::system(system), ChatMessage::user(user)]
+}
+
 /// 把最近若干条对话渲染成「低权重参考」段落；没有历史时返回 `None`。
 fn build_history_block(
     history: &[ChatMessage],
@@ -585,13 +714,20 @@ fn build_history_block(
     Some(lines.join("\n"))
 }
 
-/// 清洗模型输出：去掉引号/换行/Markdown 痕迹，截断到合理长度。
-fn clean_reply(raw: &str) -> String {
+/// 清洗模型输出：剥协议文本、去成对引号/旁白括号、按字符截断。
+///
+/// `first_line_only` 是两条通路唯一的形状差异：触碰反应只要一句（模型偶尔多写一段，
+/// 取首行最稳），截图转述本来就不止一句，折行成一段而不是砍掉后面的句子。
+fn clean_reply_inner(raw: &str, max_chars: usize, first_line_only: bool) -> String {
     let mut text = crate::utils::protocol_text::strip_protocol_text(raw).trim().to_string();
 
-    // 只取第一行非空内容，避免模型输出多段
-    if let Some(first) = text.lines().map(str::trim).find(|l| !l.is_empty()) {
-        text = first.to_string();
+    if first_line_only {
+        // 只取第一行非空内容，避免模型输出多段
+        if let Some(first) = text.lines().map(str::trim).find(|l| !l.is_empty()) {
+            text = first.to_string();
+        }
+    } else {
+        text = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect::<Vec<_>>().join(" ");
     }
 
     // 去掉成对包裹的引号（中英文都覆盖）
@@ -618,8 +754,18 @@ fn clean_reply(raw: &str) -> String {
         }
     }
 
-    let cleaned: String = text.chars().take(REPLY_MAX_CHARS).collect();
+    let cleaned: String = text.chars().take(max_chars).collect();
     cleaned.trim().to_string()
+}
+
+/// 触碰反应：一句话，60 字封顶。
+fn clean_reply(raw: &str) -> String {
+    clean_reply_inner(raw, REPLY_MAX_CHARS, true)
+}
+
+/// 截图转述：保留多句，140 字封顶。
+fn clean_relay(raw: &str) -> String {
+    clean_reply_inner(raw, VISUAL_RELAY_MAX_CHARS, false)
 }
 
 #[cfg(test)]
@@ -853,6 +999,38 @@ mod tests {
         assert_eq!(action_tag(ACTION_ROUGH_CLICK), "pet_rough_click");
         // 狂戳时不该跟着每次点击烧一次 token
         assert!(throttle_secs(ACTION_ROUGH_CLICK) > throttle_secs(ACTION_SINGLE_CLICK));
+    }
+
+    #[test]
+    fn visual_relay_prompt_carries_the_analysis_without_parroting_it() {
+        let messages = build_visual_relay_messages("nana", "zh-CN", "屏幕上是 VS Code 里的 Rust 代码", &[]);
+        assert_eq!(messages.len(), 2);
+        let (system, user) = (&messages[0].content, &messages[1].content);
+        assert!(system.contains("不要照抄句子"), "客观分析只能当依据，不能当台词");
+        assert!(system.contains("识图模型"));
+        assert!(user.contains("屏幕上是 VS Code 里的 Rust 代码"), "客观分析必须原样进 user 段");
+        assert!(!system.contains("屏幕上是 VS Code 里的 Rust 代码"), "分析不该混进 system 段");
+        assert!(!user.contains("最近的聊天"), "没有历史时不该留一个空的历史段");
+    }
+
+    #[test]
+    fn visual_relay_keeps_every_sentence_while_reactions_take_one_line() {
+        let relay = clean_relay("屏幕上是一个编辑器。\n里面开着 Rust 代码。");
+        assert!(relay.contains("编辑器"));
+        assert!(relay.contains("Rust 代码"));
+        assert!(!relay.contains('\n'), "多句折成一段，气泡自己按句切段");
+        assert_eq!(clean_reply("屏幕上是一个编辑器。\n里面开着 Rust 代码。"), "屏幕上是一个编辑器。");
+        assert_eq!(clean_relay("[SILENT]"), "[SILENT]");
+        assert_eq!(clean_relay(&"啊".repeat(400)).chars().count(), VISUAL_RELAY_MAX_CHARS);
+    }
+
+    #[test]
+    fn visual_relay_reuses_the_reaction_tier_with_a_wider_budget() {
+        let request = build_visual_relay_request(vec![], "nana");
+        assert_eq!(request.task_type, "pet_reaction");
+        assert_eq!(request.max_tokens_override, Some(VISUAL_RELAY_MAX_TOKENS));
+        assert!(VISUAL_RELAY_MAX_TOKENS > REACTION_MAX_TOKENS);
+        assert_eq!(request.reasoning.mode, crate::providers::reasoning::ReasoningMode::Off);
     }
 
     #[test]

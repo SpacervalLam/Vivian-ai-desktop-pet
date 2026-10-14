@@ -17,6 +17,11 @@ assert.equal(threads.length, 1);
 assert.deepEqual(threads[0].turns.map(t => t.id), ['a', 'b']);
 assert.equal(threads[0].turns[0].text, '你好（挥手）');
 assert.equal(conversationThreads([], 'vivian').length, 0);
+for (const [language, expected] of [['en', 'Conversation with you'], ['ja', 'あなたとの会話']]) {
+  const original = { id: 'localized', title: '与你的对话', started_at: 1, ended_at: 2, participants: ['user','vivian'], channels: ['direct'], turns: [] };
+  assert.equal(conversationThreads([original], 'vivian', language)[0].title, expected);
+  assert.equal(conversationThreads([{ ...original, title: '我自己写的标题' }], 'vivian', language)[0].title, '我自己写的标题');
+}
 console.log('memory presentation: explicit categories and original history only');
 
 const record = (id, messageId, text, time) => ({ id, title: '会话', started_at: time, ended_at: time,

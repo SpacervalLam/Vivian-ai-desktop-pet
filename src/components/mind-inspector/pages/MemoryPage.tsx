@@ -1,4 +1,5 @@
 import { splitActionText } from '../../../utils/ActionText';
+import { useTranslation } from 'react-i18next';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
@@ -8,6 +9,9 @@ import StickerImage from '../../stickers/StickerImage';
 import { conversationThreads, sharedEventTimeline, isVisibleMemoryFact, isMemorySummary, type Character, type MemoryRecord, type ConversationRecord } from './memoryPresentation';
 import './MemoryPage.css';
 import './ClaudeTheme.css';
+import { ComicChapterHeading, ComicChapterInset } from './ComicChapter';
+import ComicConversation from './ComicConversation';
+import { comicKeyForText } from '../../../i18n/comic';
 
 type Layer = 'facts' | 'episodes' | 'recent' | 'profile';
 
@@ -38,10 +42,10 @@ const layerOf = (item: MemoryRecord): Layer | null => {
   return isVisibleMemoryFact(item) ? 'facts' : null;
 };
 
-const dateText = (value: number) => {
+const memoryDateText = (value: number, language: string) => {
   const millis = value < 1e12 ? value * 1000 : value;
   return Number.isFinite(millis) && millis > 0
-    ? new Date(millis).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+    ? new Date(millis).toLocaleString(language, { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })
     : '时间未知';
 };
 
@@ -57,13 +61,18 @@ const categoryName = (item: MemoryRecord) => {
 const topicName = (topic: string) => ({ preference: '偏好', identity: '身份', user_profile: '关于你',
   project_context: '项目', relationship: '关系', health: '健康', reference: '参考', knowledge: '知识' }[topic] ?? topic);
 
-const MemoryPage: React.FC<{ initialLayer?: Layer }> = ({ initialLayer = 'facts' }) => {
-  const [character, setCharacter] = useState<Character>('vivian');
+const MemoryPage: React.FC<{ initialLayer?: Layer; embedded?: boolean; latestOnly?: boolean; active?: boolean; refreshToken?: number; onLoadingChange?: (loading: boolean) => void }> = ({ initialLayer = 'facts', embedded = false, latestOnly = false, active = true, refreshToken = 0, onLoadingChange }) => {
+  const { t, i18n } = useTranslation();
+  const localize = (value: string) => { const key = comicKeyForText(value); return key ? t(`comic.${key}`) : value; };
+  const displaySpeaker = (value: string) => value === '用户' ? t('comic.user') : value === '大家' ? t('comic.everyone') : value;
+  const dateText = (value: number) => localize(memoryDateText(value, i18n.resolvedLanguage ?? i18n.language));
+  const character: Character = 'vivian';
   const [layer, setLayer] = useState<Layer>(initialLayer);
   useEffect(() => { setLayer(initialLayer); }, [initialLayer]);
   const [query, setQuery] = useState('');
   const [items, setItems] = useState<MemoryRecord[]>([]);
   const [conversations, setConversations] = useState<ConversationRecord[]>([]);
+  const [otherConversations, setOtherConversations] = useState<ConversationRecord[]>([]);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [focused, setFocused] = useState('');
   const [organizing, setOrganizing] = useState('');
@@ -77,44 +86,61 @@ const MemoryPage: React.FC<{ initialLayer?: Layer }> = ({ initialLayer = 'facts'
     return next;
   });
   const requestId = useRef(0);
-  const ownerRef = useRef(character);
-  ownerRef.current = character;
 
   const load = useCallback(async () => {
-    if (ownerRef.current !== character) return;
     const request = ++requestId.current;
     setLoading(true);
     setError('');
     try {
-      const [result, records] = await Promise.all([
-        invoke<MemoryRecord[]>('get_memories', { characterId: character }),
-        invoke<ConversationRecord[]>('get_memory_conversations', { characterId: character }),
-      ]);
-      if (request === requestId.current) { setItems(result ?? []); setConversations(records ?? []); }
+      const results = await Promise.all((['vivian', 'nana'] as const).map(async (owner) => {
+        const [memories, records] = await Promise.all([
+          invoke<MemoryRecord[]>('get_memories', { characterId: owner }),
+          invoke<ConversationRecord[]>('get_memory_conversations', { characterId: owner }),
+        ]);
+        const conversationKey = (id: unknown) => id ? `${owner}:${id}` : '';
+        return {
+          items: (memories ?? []).map(item => ({ ...item, id: `${owner}:${item.id}`, metadata: {
+            ...item.metadata, conversation_id: conversationKey(item.metadata?.conversation_id),
+            evidence_sources: Array.isArray(item.metadata?.evidence_sources)
+              ? item.metadata.evidence_sources.map(source => ({ ...source, conversation_id: conversationKey(source.conversation_id) })) : [],
+          } })),
+          records: (records ?? []).map(record => ({ ...record, id: conversationKey(record.id) })),
+        };
+      }));
+      if (request === requestId.current) {
+        setItems(results.flatMap(result => result.items));
+        setConversations(results[0].records);
+        setOtherConversations(results[1].records);
+      }
     } catch (e) {
       if (request === requestId.current) setError(String(e));
     } finally {
       if (request === requestId.current) setLoading(false);
     }
-  }, [character]);
+  }, []);
 
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => { void load(); }, [load, refreshToken]);
+  useEffect(() => { onLoadingChange?.(loading); }, [loading, onLoadingChange]);
   useEffect(() => {
     let cancelled = false;
     const unlisten: Array<() => void> = [];
     let timer: ReturnType<typeof setTimeout> | undefined;
     for (const event of ['memory:updated', 'dialogue:changed', 'chat:history-cleared']) {
       void listen<{ character_id?: string | null }>(event, ({ payload }) => {
-        if (!payload?.character_id || payload.character_id === character) {
+        if (!payload?.character_id || ['vivian', 'nana'].includes(payload.character_id)) {
           clearTimeout(timer); timer = setTimeout(() => void load(), 350);
         }
       }).then((cleanup) => { if (cancelled) cleanup(); else unlisten.push(cleanup); }).catch(() => {});
     }
     return () => { cancelled = true; clearTimeout(timer); unlisten.forEach((cleanup) => cleanup()); };
-  }, [character, load]);
+  }, [load]);
 
-  const recentThreads = useMemo(() => conversationThreads(conversations, character), [conversations, character]);
-  const events = useMemo(() => sharedEventTimeline(items, conversations), [items, conversations]);
+  const recentThreads = useMemo(() => [
+    ...conversationThreads(conversations, 'vivian', i18n.resolvedLanguage ?? i18n.language).map(thread => ({ ...thread, owner: 'vivian' as const })),
+    ...conversationThreads(otherConversations, 'nana', i18n.resolvedLanguage ?? i18n.language).map(thread => ({ ...thread, owner: 'nana' as const })),
+  ].sort((a, b) => b.time - a.time), [conversations, otherConversations, i18n.resolvedLanguage]);
+  const latestThread = recentThreads[0];
+  const events = useMemo(() => sharedEventTimeline(items, [...conversations, ...otherConversations]), [items, conversations, otherConversations]);
   const summaries = useMemo(() => new Map(items.filter((item) => isMemorySummary(item) && !item.consolidated && item.metadata?.index_active !== false).map((item) => [String(item.metadata?.conversation_id ?? ''), item])), [items]);
   const showOriginal = (id: string) => {
     setExpanded((value) => new Set(value).add(id)); setFocused(id); setQuery(''); setLayer('recent');
@@ -124,16 +150,14 @@ const MemoryPage: React.FC<{ initialLayer?: Layer }> = ({ initialLayer = 'facts'
     const frame = requestAnimationFrame(() => document.getElementById(`memory-conversation-${encodeURIComponent(focused)}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }));
     return () => cancelAnimationFrame(frame);
   }, [focused, layer, loading]);
-  const organize = async (id: string) => {
-    const owner = character;
+  const organize = async (id: string, owner: Character) => {
     setOrganizing(`${owner}:${id}`); setNotice(''); setError('');
     try {
-      const summary = await invoke<MemoryRecord>('summarize_memory_conversation', { characterId: owner, conversationId: id });
-      if (ownerRef.current !== owner) return;
-      setNotice(summary.metadata?.summary_status === 'no_content' ? '这次交流无需额外摘要，原始消息已保留。'
-        : summary.metadata?.summary_status === 'partial' ? '已保存阶段摘要，剩余内容可继续整理。' : '会话摘要已更新，有依据的事件进展会进入共同经历。');
+      const summary = await invoke<MemoryRecord>('summarize_memory_conversation', { characterId: owner, conversationId: id.startsWith(`${owner}:`) ? id.slice(owner.length + 1) : id });
+      setNotice(summary.metadata?.summary_status === 'no_content' ? t('comic.memoryNoSummary')
+        : summary.metadata?.summary_status === 'partial' ? t('comic.memoryPartial') : t('comic.memoryUpdated'));
       await load();
-    } catch (e) { if (ownerRef.current === owner) setError(String(e)); }
+    } catch (e) { setError(String(e)); }
     finally { setOrganizing(''); }
   };
   const counts = useMemo(() => items.reduce((acc, item) => {
@@ -153,63 +177,64 @@ const MemoryPage: React.FC<{ initialLayer?: Layer }> = ({ initialLayer = 'facts'
 
   const activeTab = TABS.find((tab) => tab.key === layer)!;
 
-  return <section className="memory-page claude-theme claude-page-memory">
-    <header className="memory-page-header">
-      <div>
-        <p className="memory-eyebrow"><span className="claude-spark" aria-hidden="true">✻</span>Memory · {character === 'vivian' ? 'Vivian' : 'Nana'}</p>
-        <h2>记得的事</h2>
-        <p className="memory-page-intro">原始交流、会话脉络，以及有依据的事实与约定。</p>
-      </div>
+  // The compact manga spread is always the latest original exchange, regardless
+  // of the saved history filters. Expansion returns to those same filters.
+  return <section className={`memory-page claude-theme claude-page-memory comic-chapter comic-memory${latestOnly ? ' is-latest-conversation' : ''}`}>
+    {embedded && <div className="comic-latest-view" hidden={!latestOnly}>
+      <ComicConversation thread={latestThread} active={active && latestOnly} loading={loading} error={error}
+        renderText={text => <DialogueHighlightedText text={text} query="" />} />
+    </div>}
+    <div className="memory-history-view" hidden={latestOnly}>
+    {!embedded && <ComicChapterHeading number="01" title={t('comic.memoryHeading')} caption={t('comic.memoryCaption')}
+      image="train-straps-v20" position="50% 50%">
       <div className="memory-page-actions">
-        <div className="memory-character-switch" aria-label="选择角色">
-          {(['vivian', 'nana'] as const).map((id) => <button key={id} type="button" aria-pressed={character === id} className={character === id ? 'active' : ''} onClick={() => setCharacter(id)}>{id === 'vivian' ? 'Vivian' : 'Nana'}</button>)}
-        </div>
-        <button className="memory-refresh" type="button" onClick={() => void load()} title="刷新记忆" aria-label="刷新记忆"><RefreshCw size={17} className={loading ? 'spinning' : ''} /></button>
+        <button className="memory-refresh" type="button" onClick={() => void load()} title={t('comic.refresh')} aria-label={t('comic.refresh')}><RefreshCw size={17} className={loading ? 'spinning' : ''} /></button>
       </div>
-    </header>
+    </ComicChapterHeading>}
+    <p className="memory-page-intro">{t('comic.memoryIntro')}</p>
 
-    <nav className="memory-layer-grid" aria-label="记忆分类">
+    <nav className="memory-layer-grid" aria-label={t('comic.memoryCategories')}>
       {TABS.map((tab) => <button key={tab.key} type="button" className={`memory-layer-card ${layer === tab.key ? 'active' : ''}`} aria-pressed={layer === tab.key} onClick={() => setLayer(tab.key)}>
         <span className="memory-layer-icon"><tab.icon size={19} strokeWidth={1.7} /></span>
-        <span className="memory-layer-copy"><strong>{tab.title}</strong><small>{tab.subtitle}</small></span>
+        <span className="memory-layer-copy"><strong>{localize(tab.title)}</strong><small>{localize(tab.subtitle)}</small></span>
         <span className="memory-layer-count">{tab.key === 'profile' ? '↗' : counts[tab.key]}</span>
       </button>)}
     </nav>
 
-    {layer === 'profile' ? <div className="memory-profile-panel"><UserProfilePage characterId={character} embedded /></div> : <><div className="memory-list-toolbar">
-      <div className="memory-list-heading"><activeTab.icon size={17} /><strong>{activeTab.title}</strong><span>{counts[layer]} {layer === 'recent' ? '组' : '条'}</span></div>
-      <label className="memory-search"><Search size={16} /><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索这里的记忆" aria-label="搜索记忆" /></label>
+    {layer === 'profile' ? <div className="memory-profile-panel">{(['vivian', 'nana'] as const).map(owner => <div key={owner}><h3>{t('comic.memoryProfileUnderstanding', { name: owner === 'vivian' ? 'Vivian' : 'Nana' })}</h3><UserProfilePage characterId={owner} embedded /></div>)}</div> : <><div className="memory-list-toolbar">
+      <div className="memory-list-heading"><activeTab.icon size={17} /><strong>{localize(activeTab.title)}</strong><span>{counts[layer]} {layer === 'recent' ? t('comic.memoryGroup') : t('comic.memoryItem')}</span></div>
+      <label className="memory-search"><Search size={16} /><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder={t('comic.memorySearchPlaceholder')} aria-label={t('comic.memorySearch')} /></label>
     </div>
-    {layer === 'recent' && <p className="memory-list-note">每张卡片保留一次交流的原始消息和会话摘要；具体事件的进展单独汇入共同经历。</p>}
-    {layer === 'episodes' && <p className="memory-list-note">同一事件在不同会话中的计划、进展与结果串成一条时间线。时间表示原话记录时间，计划不代表已经发生。</p>}
+    {layer === 'recent' && <p className="memory-list-note">{t('comic.memoryRecentNote')}</p>}
+    {layer === 'episodes' && <p className="memory-list-note">{t('comic.memoryEventNote')}</p>}
     {error && <p className="memory-error" role="alert">{error}</p>}
     {notice && <p className="memory-list-note" role="status">{notice}</p>}
-    {loading ? <div className="memory-empty">正在读取记忆…</div> : (layer === 'recent' ? visibleThreads.length === 0 : layer === 'episodes' ? visibleEvents.length === 0 : visible.length === 0) ? <div className="memory-empty"><Clock3 size={24} /><strong>{query ? '没有找到匹配的记忆' : `还没有${activeTab.title}的记录`}</strong><span>{query ? '试试其他关键词' : layer === 'episodes' ? '整理对话后，有原话依据的事件会出现在这里；普通聊天不会成为事件。' : '有新的交流时，这里会慢慢丰富起来'}</span></div> : layer === 'episodes' ? <div className="memory-event-list">
+    {loading ? <div className="memory-empty">{t('comic.memoryLoading')}</div> : (layer === 'recent' ? visibleThreads.length === 0 : layer === 'episodes' ? visibleEvents.length === 0 : visible.length === 0) ? <div className="memory-empty"><Clock3 size={24} /><strong>{query ? t('comic.memoryNoMatch') : t('comic.memoryEmpty', { name: localize(activeTab.title) })}</strong><span>{query ? t('comic.memoryTryKeywords') : layer === 'episodes' ? t('comic.memoryEmptyEvents') : t('comic.memoryEmptyHint')}</span></div> : layer === 'episodes' ? <div className="memory-event-list">
       {visibleEvents.map((event) => <article key={event.id} className="memory-event-card">
-        <div className="memory-thread-header"><span className="memory-thread-title"><BookOpen size={15} /><SearchHighlightedText text={event.title} query={query} /></span><span className="memory-thread-count">{event.conversationIds.length} 次会话 · {event.progress.length} 条进展</span></div>
+        <div className="memory-thread-header"><span className="memory-thread-title"><BookOpen size={15} /><SearchHighlightedText text={event.title} query={query} /></span><span className="memory-thread-count">{t('comic.memoryEventCounts', { conversations: event.conversationIds.length, progress: event.progress.length })}</span></div>
         <ol className="memory-event-progress">{event.progress.map((progress) => <li key={progress.source_message_id}>
-          <div className="memory-entry-top"><span className={`memory-event-phase phase-${progress.phase}`}>{({ planned: '计划与约定', started: '开始', progressed: '进展', completed: '已完成', cancelled: '已取消' })[progress.phase]}</span><time>记录于 {dateText(progress.recorded_at)}</time></div>
+          <div className="memory-entry-top"><span className={`memory-event-phase phase-${progress.phase}`}>{({ planned: t('comic.memoryPlanned'), started: t('comic.memoryStarted'), progressed: t('comic.memoryProgress'), completed: t('comic.memoryComplete'), cancelled: t('comic.memoryCancel') })[progress.phase]}</span><time>{t('comic.memoryRecorded')}{dateText(progress.recorded_at)}</time></div>
           <p className="memory-entry-content"><SearchHighlightedText text={progress.detail} query={query} /></p>
-          <details className="memory-entry-evidence"><summary>原话依据</summary><p>「<SearchHighlightedText text={progress.source_quote} query={query} />」</p><button className="memory-evidence-link" type="button" onClick={() => showOriginal(progress.conversationId)}>查看来源会话<ArrowUpRight size={13} /></button></details>
+          <details className="memory-entry-evidence"><summary>{t('comic.memoryEvidence')}</summary><p>「<SearchHighlightedText text={progress.source_quote} query={query} />」</p><button className="memory-evidence-link" type="button" onClick={() => showOriginal(progress.conversationId)}>{t('comic.memorySource')}<ArrowUpRight size={13} /></button></details>
         </li>)}</ol>
       </article>)}
     </div> : layer === 'recent' ? <div className="memory-thread-list">
       {visibleThreads.map((thread) => <article className={`memory-thread${focused === thread.id ? ' memory-thread-focused' : ''}`} id={`memory-conversation-${encodeURIComponent(thread.id)}`} key={thread.id}>
-        <div className="memory-thread-header"><span className="memory-thread-title"><MessageCircle size={15} />{thread.title}</span><span className="memory-thread-count">{thread.turns.length} 条消息</span><time>{dateText(thread.startedAt ?? thread.time)}{thread.startedAt !== thread.time && thread.startedAt ? ` — ${dateText(thread.time)}` : ''}</time></div>
-        {cardViews.has(`${character}:thread:${thread.id}`) && summaries.get(thread.id)?.content ? <p className="memory-entry-content"><SearchHighlightedText text={summaries.get(thread.id)!.content} query={query} /></p> : <div className="memory-thread-turns">{(expanded.has(thread.id) || query.trim() ? thread.turns : thread.turns.slice(0, 6)).map((turn, index) => <div className={`memory-thread-turn${turn.speaker ? '' : ' memory-thread-turn-plain'}`} key={turn.id ?? `${thread.id}-${index}`}>
-          {turn.speaker && <span className="memory-thread-speaker" title={turn.audience ? `对 ${turn.audience} 说` : undefined}>{turn.speaker}</span>}
+        <div className="memory-thread-header"><span className="memory-thread-title"><MessageCircle size={15} />{thread.title}</span><span className="memory-thread-count">{t('comic.memoryMessages', { n: thread.turns.length })}</span><time>{dateText(thread.startedAt ?? thread.time)}{thread.startedAt !== thread.time && thread.startedAt ? ` — ${dateText(thread.time)}` : ''}</time></div>
+        {cardViews.has(`${thread.owner}:thread:${thread.id}`) && summaries.get(thread.id)?.content ? <p className="memory-entry-content"><SearchHighlightedText text={summaries.get(thread.id)!.content} query={query} /></p> : <div className="memory-thread-turns">{(expanded.has(thread.id) || query.trim() ? thread.turns : thread.turns.slice(0, 6)).map((turn, index) => <div className={`memory-thread-turn${turn.speaker ? '' : ' memory-thread-turn-plain'}`} key={turn.id ?? `${thread.id}-${index}`}>
+          {turn.speaker && <span className="memory-thread-speaker" title={turn.audience ? t('comic.audience', { name: displaySpeaker(turn.audience) }) : undefined}>{displaySpeaker(turn.speaker)}</span>}
           <div><p><DialogueHighlightedText text={turn.text} query={query} /></p>{turn.sticker && <StickerImage sticker={turn.sticker} size={96} />}</div>
         </div>)}</div>}
         <div className="memory-session-actions">
-          {!cardViews.has(`${character}:thread:${thread.id}`) && thread.turns.length > 6 && !query.trim() && <button type="button" onClick={() => setExpanded((value) => {
+          {!cardViews.has(`${thread.owner}:thread:${thread.id}`) && thread.turns.length > 6 && !query.trim() && <button type="button" onClick={() => setExpanded((value) => {
             const next = new Set(value); if (next.has(thread.id)) next.delete(thread.id); else next.add(thread.id); return next;
-          })}>{expanded.has(thread.id) ? '收起' : `展开全部 ${thread.turns.length} 条消息`}</button>}
-          {thread.canonical && <button type="button" disabled={!!organizing} onClick={() => void organize(thread.id)}><Sparkles size={14} />{organizing === `${character}:${thread.id}` ? '正在整理…' : summaries.get(thread.id)?.metadata?.summary_status === 'partial' ? '继续整理' : summaries.has(thread.id) ? '更新摘要' : '整理这次对话'}</button>}
-          {summaries.get(thread.id)?.content && <button type="button" onClick={() => toggleCardView(`${character}:thread:${thread.id}`)}>{cardViews.has(`${character}:thread:${thread.id}`) ? '查看原始会话' : '查看会话摘要'}<ArrowUpRight size={13} /></button>}
+          })}>{expanded.has(thread.id) ? t('comic.memoryCollapse') : t('comic.memoryExpandMessages', { n: thread.turns.length })}</button>}
+          {thread.canonical && <button type="button" disabled={!!organizing} onClick={() => void organize(thread.id, thread.owner)}><Sparkles size={14} />{organizing === `${thread.owner}:${thread.id}` ? t('comic.memoryOrganizing') : summaries.get(thread.id)?.metadata?.summary_status === 'partial' ? t('comic.memoryContinue') : summaries.has(thread.id) ? t('comic.memoryUpdateSummary') : t('comic.memoryOrganize')}</button>}
+          {summaries.get(thread.id)?.content && <button type="button" onClick={() => toggleCardView(`${thread.owner}:thread:${thread.id}`)}>{cardViews.has(`${thread.owner}:thread:${thread.id}`) ? t('comic.memoryOriginal') : t('comic.memoryViewSummary')}<ArrowUpRight size={13} /></button>}
         </div>
       </article>)}
     </div> : <div className="memory-entry-grid">
-      {visible.map((item) => {
+      {visible.map((item, index) => {
         const rawQuote = typeof item.metadata?.source_quote === 'string' ? item.metadata.source_quote : '';
         const quote = rawQuote;
         const hooks = (item.open_hooks ?? []).filter((hook) => hook.closed_at == null);
@@ -219,24 +244,29 @@ const MemoryPage: React.FC<{ initialLayer?: Layer }> = ({ initialLayer = 'facts'
         const topics = Array.isArray(item.metadata?.topics) ? item.metadata.topics.filter((topic): topic is string => typeof topic === 'string').slice(0, 5) : [];
         const evidence = Array.isArray(item.metadata?.evidence_sources) ? item.metadata.evidence_sources.filter((source): source is { quote: string; conversation_id?: string } =>
           typeof source === 'object' && source !== null && typeof source.quote === 'string' && source.quote !== rawQuote) : [];
-        return <article key={item.id} className={`memory-entry memory-entry-${layer}`}>
-          <div className="memory-entry-top"><span className="memory-entry-kind">{categoryName(item)}</span><time>{dateText(typeof item.metadata?.started_at === 'number' ? item.metadata.started_at : item.created_at)}</time></div>
+        return <article key={item.id} className={`memory-entry memory-entry-${layer}${index === 0 ? ' memory-opening-panel' : ''}`}>
+          {index === 0 && !embedded && <ComicChapterInset image={character === 'vivian' ? 'vivian-seat-selected-v24' : 'nana-nai-face-adjusted-v19'}
+            caption={t('comic.memoryKept')} position={character === 'vivian' ? '50% 30%' : '50% 35%'} />}
+          <div className="memory-narration-body">
+          <div className="memory-entry-top"><span className="memory-entry-kind">{localize(categoryName(item))}</span><time>{dateText(typeof item.metadata?.started_at === 'number' ? item.metadata.started_at : item.created_at)}</time></div>
           {typeof item.metadata?.title === 'string' && <h3 className="memory-session-title">{item.metadata.title}</h3>}
           <p className="memory-entry-content"><SearchHighlightedText text={body} query={query} /></p>
-          {topics.length > 0 && <div className="memory-topic-tags">{topics.map((topic) => <span key={topic}>{topicName(topic)}</span>)}</div>}
-          {quote && quote !== body && <div className="memory-entry-evidence"><span>来自原话</span>「<SearchHighlightedText text={quote} query={query} />」</div>}
-          {hooks.map((hook, index) => <div className="memory-entry-hook" key={index}><span>待跟进</span><SearchHighlightedText text={hook.condition} query={query} /></div>)}
-          {evidence.length > 0 && <details className="memory-entry-evidence"><summary>更多原话证据 · {evidence.length} 条</summary>{evidence.map((source, index) => <p key={index}>「<SearchHighlightedText text={source.quote} query={query} />」{recentThreads.some((thread) => thread.id === source.conversation_id && thread.canonical) && <button className="memory-evidence-link" type="button" onClick={() => showOriginal(source.conversation_id!)}>查看会话</button>}</p>)}</details>}
+          {topics.length > 0 && <div className="memory-topic-tags">{topics.map((topic) => <span key={topic}>{topicName(topic) === topic ? topic : localize(topicName(topic))}</span>)}</div>}
+          {quote && quote !== body && <div className="memory-entry-evidence"><span>{t('comic.memoryQuote')}</span>「<SearchHighlightedText text={quote} query={query} />」</div>}
+          {hooks.map((hook, index) => <div className="memory-entry-hook" key={index}><span>{t('comic.memoryFollowUp')}</span><SearchHighlightedText text={hook.condition} query={query} /></div>)}
+          {evidence.length > 0 && <details className="memory-entry-evidence"><summary>{t('comic.memoryMoreEvidence', { n: evidence.length })}</summary>{evidence.map((source, index) => <p key={index}>「<SearchHighlightedText text={source.quote} query={query} />」{recentThreads.some((thread) => thread.id === source.conversation_id && thread.canonical) && <button className="memory-evidence-link" type="button" onClick={() => showOriginal(source.conversation_id!)}>{t('comic.memoryView')}</button>}</p>)}</details>}
           <div className="memory-session-actions">
-            {hasOriginal ? <button type="button" onClick={() => showOriginal(conversationId)}>查看原始会话<ArrowUpRight size={13} /></button>
-              : <span>{quote ? '原话提取' : '未标注证据'}</span>}
-            {item.metadata?.summary_status === 'partial' && <span>阶段摘要 · {String(item.metadata.completed_parts)}/{String(item.metadata.total_parts)} 段</span>}
-            {isMemorySummary(item) && Array.isArray(item.metadata?.source_message_ids) && <span>覆盖 {item.metadata.source_message_ids.length} 条原消息</span>}
-            {item.metadata?.important_event === true && <span>重要事件</span>}
+            {hasOriginal ? <button type="button" onClick={() => showOriginal(conversationId)}>{t('comic.memoryOriginal')}<ArrowUpRight size={13} /></button>
+              : <span>{quote ? t('comic.memoryExtracted') : t('comic.memoryNoEvidence')}</span>}
+            {item.metadata?.summary_status === 'partial' && <span>{t('comic.memoryPartialCount', { done: String(item.metadata.completed_parts), total: String(item.metadata.total_parts) })}</span>}
+            {isMemorySummary(item) && Array.isArray(item.metadata?.source_message_ids) && <span>{t('comic.memoryCoverage', { n: item.metadata.source_message_ids.length })}</span>}
+            {item.metadata?.important_event === true && <span>{t('comic.memoryImportant')}</span>}
+          </div>
           </div>
         </article>;
       })}
     </div>}</>}
+    </div>
   </section>;
 };
 

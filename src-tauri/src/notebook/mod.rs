@@ -244,6 +244,12 @@ pub enum Block {
     /// 自定义 HTML 片段（经沙箱清理，禁止 script/on*/javascript:）
     Custom {
         html: String,
+        /// 用户编辑的 Markdown 原文；HTML 为可独立分享的渲染结果。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        markdown: Option<String>,
+        /// HTML 页面的包装语法原文；编辑器的唯一可编辑来源。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        page_source: Option<String>,
     },
     /// **不渲染的元数据**（存于 note.json，参与知识库检索，但页面上看不到）
     ///

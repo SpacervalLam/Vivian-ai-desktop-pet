@@ -1279,7 +1279,17 @@ const UserProfilePage: React.FC<{ characterId?: CharacterId; embedded?: boolean 
     invoke<UserProfileView>('get_user_facts', { characterId: charId })
       .then((res) => {
         if (seq !== requestSeq.current) return;
-        setProfile(res);
+        setProfile({
+          basic_facts: Array.isArray(res?.basic_facts) ? res.basic_facts : [],
+          custom_facts: Array.isArray(res?.custom_facts) ? res.custom_facts : [],
+          recent_state: {
+            recent_goals: Array.isArray(res?.recent_state?.recent_goals) ? res.recent_state.recent_goals : [],
+            current_projects: Array.isArray(res?.recent_state?.current_projects) ? res.recent_state.current_projects : [],
+            recent_preferences: Array.isArray(res?.recent_state?.recent_preferences) ? res.recent_state.recent_preferences : [],
+            generated_at: res?.recent_state?.generated_at ?? 0,
+            round_count: res?.recent_state?.round_count ?? 0,
+          },
+        });
       })
       .catch((e) => {
         if (seq === requestSeq.current) setError(String(e));
@@ -1435,14 +1445,14 @@ const UserProfilePage: React.FC<{ characterId?: CharacterId; embedded?: boolean 
       <Reveal delay={0} className="profile-intro-reveal">
         {embedded && <div className="profile-hero">
           <div className="profile-hero-copy">
-            <span className="profile-hero-eyebrow"><span className="claude-spark" aria-hidden="true">✻</span>Personal profile · {character === 'vivian' ? 'Vivian' : 'Nana'}</span>
-            <h3>{basicMap.get('name')?.content || '关于你'}</h3>
-            <p>{character === 'vivian' ? 'Vivian' : 'Nana'} 从相处中慢慢认识的你。双击字段即可修改，锁定后不会被自动覆盖。</p>
+            <span className="profile-hero-eyebrow"><span className="claude-spark" aria-hidden="true">✻</span>{t('comic.profileEyebrow')} · {character === 'vivian' ? 'Vivian' : 'Nana'}</span>
+            <h3>{basicMap.get('name')?.content || t('comic.memoryAbout')}</h3>
+            <p>{t('comic.profileDescription', { name: character === 'vivian' ? 'Vivian' : 'Nana' })}</p>
           </div>
-          <dl className="profile-hero-stats" aria-label="画像概览">
-            <div><dt>已了解的资料</dt><dd>{BASIC_FIELD_DEFS.filter((type) => basicMap.get(type)?.content).length}<small> / {BASIC_FIELD_DEFS.length}</small></dd></div>
-            <div><dt>补充事实</dt><dd>{profile?.custom_facts.length ?? 0}</dd></div>
-            <div><dt>近期线索</dt><dd>{(l1?.recent_goals.length ?? 0) + (l1?.current_projects.length ?? 0) + (l1?.recent_preferences.length ?? 0)}</dd></div>
+          <dl className="profile-hero-stats" aria-label={t('comic.profileOverview')}>
+            <div><dt>{t('comic.profileKnown')}</dt><dd>{BASIC_FIELD_DEFS.filter((type) => basicMap.get(type)?.content).length}<small> / {BASIC_FIELD_DEFS.length}</small></dd></div>
+            <div><dt>{t('comic.profileFacts')}</dt><dd>{profile?.custom_facts.length ?? 0}</dd></div>
+            <div><dt>{t('comic.profileClues')}</dt><dd>{(l1?.recent_goals.length ?? 0) + (l1?.current_projects.length ?? 0) + (l1?.recent_preferences.length ?? 0)}</dd></div>
           </dl>
         </div>}
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: SPACING.md }}>

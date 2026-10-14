@@ -20,8 +20,8 @@ const bundled = await build({
     builder.onLoad({ filter: /.*/, namespace: 'fixture' }, ({ path }) => ({ contents:
       path === 'react' ? `export const useRef=value=>({current:value}), useState=value=>[value,v=>globalThis.__edgeUpdates.push(v)], useCallback=fn=>fn, useEffect=fn=>globalThis.__edgeEffects.push(fn), useLayoutEffect=useEffect;` :
       path === 'react/jsx-runtime' ? `export const jsx=(type,props)=>({type,props}),jsxs=jsx;` :
-      path === 'lucide-react' ? `export const MessageCircle=()=>null,NotebookPen=()=>null,Rocket=()=>null,ScanLine=()=>null,BriefcaseBusiness=()=>null,Moon=()=>null,Move=()=>null,ArrowDown=()=>null;` :
-      path === 'react-i18next' ? `export const useTranslation=()=>({i18n:{language:'zh'}});` :
+      path === 'lucide-react' ? `export const MessageCircle=()=>null,NotebookPen=()=>null,Rocket=()=>null,ScanLine=()=>null,BriefcaseBusiness=()=>null,Moon=()=>null,Move=()=>null,ArrowDown=()=>null,Pin=()=>null;` :
+      path === 'react-i18next' ? `export const useTranslation=()=>({i18n:{language:globalThis.__edgeLanguage??'zh'}});` :
       `export const invoke=async(...args)=>{globalThis.__edgeCalls.push(args);},emit=async(...args)=>{globalThis.__edgeCalls.push(args);},listen=async()=>()=>{};`
     }));
   } }],
@@ -34,12 +34,20 @@ try {
   const rendered = Menu({ edge: menuState, target: { current: null }, onAction: async value => { action = value; }, onFoldEnd() {} });
   assert.equal(rendered.props.style.width, 48, 'physical 60px maps to logical 48px at 125% DPI');
   const buttons = rendered.props.children.props.children;
+  const labels = { 打开聊天窗口: 'chat', 截屏分析: 'screen', 办公: 'office', 勿扰: 'dnd', 随手记: 'notes', 快捷启动: 'shortcuts' };
   for (const button of buttons) {
     button.props.onClick();
     await new Promise(resolve => setImmediate(resolve));
-    assert.equal(action, button.props.title === '截屏分析' ? 'screen' : ({ 避让: 'smart_positioning', 重力: 'desktop_physics', 办公: 'office', 勿扰: 'dnd', 随手记: 'notes', 快捷启动: 'shortcuts', 打开聊天窗口: 'chat' })[button.props.title]);
+    const title = button.props.title;
+    assert.equal(action, title.includes('· 点击切换为') ? 'movement_mode' : labels[title], `按钮「${title}」`);
   }
   assert.equal(calls.length, 0, 'the window shell owns readiness after theme initialization');
+  for (const [language, expected] of [['zh-CN',['手机','截屏','办公','勿扰','静止','随手记','启动']], ['ja',['スマホ','画面','仕事','集中','静止','メモ','起動']], ['en',['Phone','Scan','Work','Quiet','Still','Notes','Launch']]]) {
+    globalThis.__edgeLanguage=language;
+    const view=Menu({edge:menuState,target:{current:null},onAction:async()=>{},onFoldEnd(){}});
+    assert.deepEqual(view.props.children.props.children.map(button=>button.props.children[1].props.children),expected);
+  }
+  delete globalThis.__edgeLanguage;
   effects.length = 0;
   let finished = 0, keyframes;
   let completeAnimation;
@@ -58,16 +66,21 @@ try {
   effects.length = 0;
   const active = Menu({ edge: menuState, target: { current: null }, quiet: true, onAction: async () => {}, onFoldEnd() {} });
   const activeButtons = active.props.children.props.children;
-  assert.equal(activeButtons.length, 8);
+  assert.equal(activeButtons.length, 7, '避让 / 重力已合并为一个三态按钮');
   assert.deepEqual(activeButtons.filter(button => button.props.className.includes('is-active')).map(button => button.props.title), ['勿扰']);
   assert.equal(activeButtons[0].props['aria-pressed'], undefined, 'chat is an action, never a selected toggle');
-  for (const [smartPositioning, gravity] of [[false, false], [true, false], [false, true]]) {
-    const view = Menu({ edge: menuState, target: { current: null }, smartPositioning, gravity, onAction: async () => {}, onFoldEnd() {} });
-    const toggles = view.props.children.props.children.filter(button => ['避让', '重力'].includes(button.props.title));
-    assert.deepEqual(toggles.map(button => button.props['aria-pressed']), [smartPositioning, gravity]);
-    assert.deepEqual(toggles.map(button => button.props.className.includes('is-active')), [smartPositioning, gravity]);
+  const movementTitles = [];
+  for (const movement of ['gravity', 'avoid', 'still']) {
+    const view = Menu({ edge: menuState, target: { current: null }, movement, onAction: async () => {}, onFoldEnd() {} });
+    const slots = view.props.children.props.children.filter(button => button.props.title.includes('· 点击切换为'));
+    assert.equal(slots.length, 1, '三态按钮只占一个槽位');
+    const button = slots[0];
+    const highlighted = movement !== 'still';
+    assert.deepEqual([button.props.className.includes('is-active'), button.props['aria-pressed']], [highlighted, highlighted], `${movement} 的高亮/按下态`);
+    movementTitles.push(button.props.title);
   }
-  console.log('Edge menu: shortcuts, DPI width, exact fold target, reduced motion and shared screenshot flow passed');
+  assert.deepEqual(movementTitles, ['重力 · 点击切换为避让', '避让 · 点击切换为静止', '静止 · 点击切换为重力'], '轮换顺序与后端 cycle_movement 一致');
+  console.log('Edge menu: shortcuts, DPI width, exact fold target, reduced motion, tri-state movement and shared screenshot flow passed');
 } finally {
   for (const name of globals) { if (previous[name] === undefined) delete globalThis[name]; else globalThis[name] = previous[name]; }
   for (const name of ['__edgeEffects', '__edgeUpdates', '__edgeCalls']) delete globalThis[name];

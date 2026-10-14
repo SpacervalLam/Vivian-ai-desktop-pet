@@ -5,7 +5,7 @@
  * Tab 切换与页面渲染全部由内部 <MindInspector /> 负责。
  */
 
-import React, { useEffect, useLayoutEffect, useRef } from 'react';
+import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
@@ -23,6 +23,9 @@ import {
 import { isWindowOnScreen } from '../utils/windowRaiser';
 
 const MemoryWindow: React.FC = () => {
+  // Prewarming must not consume the comic's entrance before the window appears.
+  const [presentationReady, setPresentationReady] = useState(() =>
+    parsePrewarmSession(window.location.search) === null && !parsePetRect(window.location.search));
   const rootRef = useRef<HTMLDivElement>(null);
   /** 入场动画是否已启动（子窗口在 StrictMode 下 effect 会双执行，必须只播一次） */
   const revealStartedRef = useRef(false);
@@ -30,6 +33,15 @@ const MemoryWindow: React.FC = () => {
   const replayBusyRef = useRef(false);
   /** 本次是不是「预热窗口」（长按 0.1s 就建出来、等长按成立才显形的那种） */
   const prewarmSessionRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    void invoke('lock_inspector_fullscreen').catch(error => console.warn('Inspector fullscreen lock:', error));
+    const preventFullscreenToggle = (event: KeyboardEvent) => {
+      if (event.key === 'F11') { event.preventDefault(); event.stopImmediatePropagation(); }
+    };
+    window.addEventListener('keydown', preventFullscreenToggle, true);
+    return () => window.removeEventListener('keydown', preventFullscreenToggle, true);
+  }, []);
 
   // 入场动画：从桌宠矩形「长」到全屏。
   // 用 useLayoutEffect（首次绘制前同步执行）先把根节点藏起来——playPetReveal
@@ -65,6 +77,7 @@ const MemoryWindow: React.FC = () => {
     // 期间收到的重播通知必须丢弃，否则两段 transform 会互相踩踏
     replayBusyRef.current = true;
     void playPetReveal(root, pet).finally(() => {
+      setPresentationReady(true);
       replayBusyRef.current = false;
     });
   }, []);
@@ -100,6 +113,7 @@ const MemoryWindow: React.FC = () => {
               await playPetReveal(root, pet);
             }
           })().finally(() => {
+            setPresentationReady(true);
             replayBusyRef.current = false;
           });
         });
@@ -138,6 +152,7 @@ const MemoryWindow: React.FC = () => {
     const t = window.setTimeout(() => {
       if (root.style.opacity === '0') {
         root.style.opacity = '';
+        setPresentationReady(true);
         void (async () => {
           const win = getCurrentWindow();
           await win.show().catch(() => {});
@@ -199,13 +214,13 @@ const MemoryWindow: React.FC = () => {
 
   return (
     <div
-      ref={rootRef}
+      ref={rootRef} data-presentation-ready={presentationReady}
       className="codex-theme mind-memory-window"
       onContextMenu={(event) => event.preventDefault()}
     >
       {/* 内容区 */}
       <div style={{ flex: 1, minHeight: 0 }}>
-        <MindInspector />
+        <MindInspector presentationReady={presentationReady} />
       </div>
     </div>
   );

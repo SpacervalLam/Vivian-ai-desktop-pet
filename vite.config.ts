@@ -1,7 +1,7 @@
 import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import { resolve, join, dirname, basename, relative } from "node:path";
-import { cpSync, existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readdirSync, statSync, readFileSync } from "node:fs";
 
 const host = process.env.TAURI_DEV_HOST;
 
@@ -47,6 +47,7 @@ function copyPublicAssets(): Plugin {
     { path: "chibi/motion", match: /-sheet\.webp$/ },
     // Only individual runtime stickers; no source art or preview sheets in the bundle.
     { path: "stickers", match: /-v2\.webp$/ },
+    // Comic assets are copied from the runtime manifest below, not by extension.
     { path: "fonts" },
     { path: "icons" },
     { path: "favicon.ico" },
@@ -70,6 +71,19 @@ function copyPublicAssets(): Plugin {
     closeBundle() {
       const publicDir = resolve(process.cwd(), "public");
       const outDir = resolve(process.cwd(), "dist");
+      const comicRoot = join(publicDir, "mind-comic");
+      const comicManifest = JSON.parse(readFileSync(join(comicRoot, "assets.json"), "utf8")) as { assets: string[] };
+      for (const asset of comicManifest.assets) {
+        if (!/^[\w/-]+\.(webp|woff2)$/.test(asset) || asset.split("/").includes("..")) {
+          throw new Error(`Invalid comic asset path: ${asset}`);
+        }
+        const source = join(comicRoot, asset);
+        if (!existsSync(source)) throw new Error(`Missing runtime comic asset: ${asset}`);
+        const destination = join(outDir, "mind-comic", asset);
+        mkdirSync(dirname(destination), { recursive: true });
+        cpSync(source, destination);
+      }
+      console.log(`[copy-public-assets] Comic runtime assets: ${comicManifest.assets.length}`);
       const missing: string[] = [];
       const empty: string[] = [];
       for (const entry of KEEP) {
@@ -131,7 +145,7 @@ export default defineConfig(async () => ({
         }
       : undefined,
     watch: {
-      ignored: ["**/src-tauri/**", "**/tmp/**", "**/temp/**", "**/.webview-data/**"],
+      ignored: ["**/src-tauri/**", "**/tmp/**", "**/temp/**", "**/output/**", "**/.webview-data/**"],
     },
   },
   build: {

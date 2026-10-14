@@ -648,6 +648,12 @@ impl ModelRouter {
         endpoint: &str,
         character_id: &str,
     ) {
+        // 勿扰模式下陪伴侧（spoken）发言被主动暂停：被拦截的 spoken 路由「失败」就是这条
+        // 预期内的抑制，而非真实 API 故障。不向用户弹错误 toast（仍照常记录到日志），避免误导。
+        if crate::companion_quiet::blocks_route(task_type) {
+            return;
+        }
+
         let error_kind = classify_llm_error_from_str(error);
 
         if matches!(error_kind, LlmErrorKind::CircuitBreakerOpen) {

@@ -11,7 +11,7 @@ globalThis.document={documentElement:{dataset:{}}};globalThis.window={innerWidth
 globalThis.__edgeTheme={
  effects,
  async listen(name,callback){events.set(name,callback);return ()=>events.delete(name);},
- invoke(name,args){calls.push({name,args});if(name==='get_config')return new Promise(resolve=>pending.push(resolve));return Promise.resolve({quiet:false,dialogue:false});},
+ invoke(name,args){calls.push({name,args});if(name==='get_config'&&args.key==='base.language')return Promise.resolve('zh');if(name==='get_config')return new Promise(resolve=>pending.push(resolve));return Promise.resolve({quiet:false,dialogue:false});},
 };
 const flush=()=>new Promise(resolve=>setImmediate(resolve));
 const send=(name,payload)=>events.get(name)({payload});
@@ -19,7 +19,7 @@ try{
  const fixtures={
   react:`export const useRef=v=>({current:v}),useState=v=>[v,()=>{}],useCallback=f=>f,useEffect=f=>globalThis.__edgeTheme.effects.push(f);`,
   'react/jsx-runtime':`export const jsx=(type,props)=>({type,props}),jsxs=jsx;`,
-  'react-i18next':`export const useTranslation=()=>({i18n:{language:'zh'}});`,
+  'react-i18next':`export const useTranslation=()=>({i18n:{language:'zh',changeLanguage:async()=>{}}});`,
   '@tauri-apps/api/core':`export const invoke=(...args)=>globalThis.__edgeTheme.invoke(...args);`,
   '@tauri-apps/api/event':`export const listen=(...args)=>globalThis.__edgeTheme.listen(...args),emit=async()=>{};`,
   './ChatEdgeMenu':`export default function Menu(){return null;}`,
@@ -36,7 +36,7 @@ try{
  send('config:saved',{});send('config:theme-changed',{theme:'light'});pending.shift()('dark');await flush();assert.equal(document.documentElement.dataset.theme,'light');
  send('edge_menu:shown',{});pending.shift()('dark');await flush();assert.equal(document.documentElement.dataset.theme,'dark');
  send('config:saved',{});const late=pending.shift();cleanup();late('light');await flush();assert.equal(document.documentElement.dataset.theme,'dark');assert.equal(events.size,0,'all subscriptions are disposed');
- assert.ok(calls.filter(call=>call.name==='get_config').every(call=>call.args.key==='base.theme'));
+ assert.ok(calls.filter(call=>call.name==='get_config').every(call=>['base.theme','base.language'].includes(call.args.key)));
  console.log('Edge menu theme: correct config key, live light/dark/system, reopen after suspension, stale responses and listener cleanup passed');
 }finally{
  if(oldDocument===undefined)delete globalThis.document;else globalThis.document=oldDocument;

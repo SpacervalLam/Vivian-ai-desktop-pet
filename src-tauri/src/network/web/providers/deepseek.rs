@@ -62,10 +62,14 @@ pub fn deepseek_factory(
     let mut builder = reqwest::Client::builder()
         .timeout(options.timeout)
         .redirect(reqwest::redirect::Policy::none());
-    if let Some(url) = proxy_url {
-        if let Ok(proxy) = reqwest::Proxy::all(url) {
-            builder = builder.proxy(proxy);
-        }
+    // `proxy_url` 为 `None` 表示配置为直连，必须显式 `no_proxy()`，否则 reqwest 会
+    // 读取 `HTTP_PROXY` / `HTTPS_PROXY` 环境变量（本机曾出现环境变量指向未监听端口）。
+    match proxy_url {
+        Some(url) => match reqwest::Proxy::all(url) {
+            Ok(proxy) => builder = builder.proxy(proxy),
+            Err(_) => builder = builder.no_proxy(),
+        },
+        None => builder = builder.no_proxy(),
     }
     let client = builder.build().unwrap_or_else(|_| reqwest::Client::new());
     Arc::new(DeepSeekProvider { options, client })

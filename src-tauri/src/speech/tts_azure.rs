@@ -18,8 +18,6 @@
 //! - https://learn.microsoft.com/azure/ai-services/speech-service/speech-synthesis-markup
 //! - https://learn.microsoft.com/azure/ai-services/speech-service/speech-synthesis-markup-voice
 
-use std::time::Duration;
-
 use async_trait::async_trait;
 use serde::Deserialize;
 
@@ -93,10 +91,10 @@ pub struct AzureTtsBackend {
 impl AzureTtsBackend {
     pub fn new() -> Self {
         Self {
-            client: reqwest::Client::builder()
-                .timeout(Duration::from_secs(30))
-                .build()
-                .unwrap_or_else(|_| reqwest::Client::new()),
+            // 走全局客户端（`network::http_client`）以遵循应用内配置的代理策略：
+            // Azure 是境外端点，用户可能需要在配置里挂代理；而直连模式下全局客户端
+            // 已显式 `no_proxy()`，不会再被 `HTTP_PROXY` / `HTTPS_PROXY` 环境变量劫持。
+            client: crate::network::http_client::get_global_client(),
         }
     }
 

@@ -1,0 +1,700 @@
+@import "./ComicFrames.css";
+.record-diary-author{display:inline-block;padding:2px 8px;border-radius:10px;font:12px/1.5 system-ui,sans-serif;white-space:nowrap}
+.record-diary-author.is-vivian{color:#68521f;background:#f5ebc8}
+.record-diary-author.is-nana{color:#554876;background:#e7e1f0}
+.record-diary-link .record-diary-author{margin-left:8px}
+/* A single physical book. Its four functional sources are persistent panels;
+   only their placement / visibility changes. Never clip controls or dialogs. */
+.mind-page-content:has(.unified-comic-book) { padding: 0; overflow: hidden; min-height: 0; }
+.unified-comic-book.record-scope {
+  --book-paper: var(--codex-paper, #faf8f5);
+  --book-ink: var(--claude-ink, #37323d);
+  --claude-clay: #947181;
+  --claude-clay-soft: #eee3e8;
+  /* 画格里的「小字」：气泡署名 / 页面日期 / 旁白标签 / 强调词。
+     这些位置原本是硬编码的浅色（#908997 / #a295a5 / #a7748d / #8471a4），
+     实测在**浅色**纸上就已经只有 2.7–3.6:1（margin-line small 只有 2.7:1，
+     连浅色模式都不合格），盖上深色的调暗薄幕再掉一档 → 深色模式 2.48:1。
+     收进令牌是为了让「调暗补偿」只写一处（见下方深色块），而不是到处追字面量。
+     取值按「浅色 ≥ 4.5:1、深色（过幕）≥ 4.5:1」两套分别定：
+       --comic-label     中性灰紫：署名 / 日期 / 标签
+       --comic-accent    玫瑰：Vivian 侧强调词
+       --comic-accent-n  紫罗兰：Nana 侧强调词
+     气泡底色就是 --comic-paper（和书纸同一个值），所以同一令牌在气泡里、
+     在纸面上量到的对比度是同一个数 —— 预览里渲染不出气泡时也能据此判定。 */
+  --comic-label: #6a6376;
+  --comic-accent: #8a4f66;
+  --comic-accent-n: #6a5a8f;
+  position: relative; isolation: isolate; height: 100%; min-height: 0; min-width: 0;
+  padding: 0; background: var(--book-paper); overflow: hidden; outline: none;
+}
+
+/* 书是「画」，不是「界面」：整本书（画格 + 四个功能面板）在深浅两套主题下都用同一套
+   浅色纸墨，深色模式只把整本书调暗，既不换纸也不反色。
+   两个理由都是漫画阅读器踩过的坑（MochiDim / 各大漫画 App 的深色模式适配）：
+     · 反色会毁掉线稿。实测：正文墨 #403e49 落到深色纸 #262624 上只有 1.45:1，
+       页面标题「见面之前，已经开始想你。」直接看不见；
+     · 界面跟着主题走、画不跟，就会出现「亮插图浮在深色底上」的割裂感 ——
+       漫画的纸面和插画是作品本身，不该跟界面一起换肤。
+
+   书根上的整套令牌由 ClaudeTheme.css 那条浅色块负责（它的选择器里带了
+   .unified-comic-book.record-scope），原始调色盘与 --codex-* / --panel-* / --graph-*
+   派生别名都在书根上重算一遍 —— 这是必须的：派生别名在**窗口根**上就求值完再继承，
+   只改书根的 --claude-* 追不回那些已经变成字面量的别名（漏掉时画格里的对白气泡
+   .voice 会读到深色 --comic-paper，变成深字压深底 1.28:1，台词整段看不见）。
+
+   这里只补面板：面板 article 自己挂着 .claude-theme，会被
+   `:root[data-theme="dark"] .claude-theme`（权重 (0,3,0)）重新声明成深色，
+   盖掉从书根继承来的浅色值，所以必须 !important 顶回去。
+   --book-paper / --book-ink 不在这里钉死：它们分别是 var(--codex-paper) /
+   var(--claude-ink)，书根令牌一变就跟着变，硬写字面量反而会和浅色模式对不上。 */
+.unified-comic-book .claude-theme {
+  --claude-bg: #faf9f5 !important;
+  --claude-surface: #ffffff !important;
+  --claude-sunken: #f0eee6 !important;
+  --claude-ink: #141413 !important;
+  --claude-ink-soft: #3d3d3a !important;
+  --claude-muted: #73726c !important;
+  --claude-faint: #a3a198 !important;
+  --claude-line: #e8e6dc !important;
+  --claude-line-strong: #d6d3c6 !important;
+  --claude-clay: #c96442 !important;
+  --claude-clay-bright: #d97757 !important;
+  --claude-clay-soft: #f6e9e2 !important;
+  --claude-sage: #788c5d !important;
+  --claude-sage-soft: #e8ecdf !important;
+  --claude-amber: #b8823c !important;
+  --claude-amber-soft: #f6eddc !important;
+  --claude-shadow: 0 1px 2px rgba(20, 20, 19, .04), 0 2px 10px rgba(20, 20, 19, .035) !important;
+  --claude-tape-1: #e7cdb7 !important;
+  --claude-tape-2: #edd3cb !important;
+  --claude-tape-3: #dbe3d2 !important;
+  --claude-tape-4: #d8dfe0 !important;
+  --claude-tape-5: #e2dbcf !important;
+}
+
+/* 深色模式下的「调暗」：中性 multiply 薄幕盖住整本书，保留原图色相。
+   用 multiply 而不是平铺一层半透明黑 —— multiply 按底色比例压暗，纸和墨一起等比例
+   下来，对比度基本保住；平铺灰会把墨也一起提亮，字先糊（这正是通用调暗扩展被诟病的点）。
+   也不能只压暗纸、不压暗字（darken / 单纯换深色纸）：纸暗了字没暗，对比度反而掉得更多。
+   刻意不用 filter: brightness()：filter 会让祖先变成 position: fixed 的包含块，
+   面板里的 .rec-overlay 全屏弹窗会缩成面板大小（和 transform 是同一个坑）。
+   mix-blend-mode 只建层叠上下文，不产生包含块，是安全的。
+   RGB 三通道同乘 0.76，不另染暖色或单独反转文字/画面。 */
+:root[data-theme="dark"] .unified-comic-book::after {
+  content: ''; position: absolute; inset: 0; z-index: 80; pointer-events: none;
+  background: rgb(0 0 0 / .24); mix-blend-mode: multiply;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .unified-comic-book::after {
+    content: ''; position: absolute; inset: 0; z-index: 80; pointer-events: none;
+    background: rgb(0 0 0 / .24); mix-blend-mode: multiply;
+  }
+}
+
+/* 调暗必然压低对比度：纸和字一起变暗，但纸（高亮度）掉的绝对亮度更多，
+   比值会缩水。实测 --claude-muted 从浅色的 4.55:1 掉到 3.92:1。
+   次级文字（时间戳 / 说明 / 空态）在书里单独压深一档补回来 ——
+   压深后 5.1:1，比浅色模式还稳，夜里读小字更省力。
+   只动次级色，正文 --claude-ink 保持与浅色一致。 */
+:root[data-theme="dark"] .unified-comic-book.record-scope,
+:root[data-theme="dark"] .unified-comic-book .claude-theme {
+  --claude-muted: #61605b !important;
+  --claude-faint: #8a8880 !important;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .unified-comic-book.record-scope,
+  :root:not([data-theme="light"]) .unified-comic-book .claude-theme {
+    --claude-muted: #61605b !important;
+    --claude-faint: #8a8880 !important;
+  }
+}
+
+/* 画格里小字的调暗补偿：同一层薄幕下，浅色那套取值会掉到 2.48–3.54:1。
+   这里只压深「小字」三类令牌，画格正文（--book-ink / page-title）不动，
+   保持「纸暗、墨也暗」的整体观感。深色取值同样按过幕 ≥ 4.5:1 定，
+   实测：--comic-label 5.27:1、--comic-accent 5.47:1、--comic-accent-n 5.52:1。 */
+:root[data-theme="dark"] .unified-comic-book.record-scope {
+  --comic-label: #5c5666;
+  --comic-accent: #7a4460;
+  --comic-accent-n: #5b4d7e;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .unified-comic-book.record-scope {
+    --comic-label: #5c5666;
+    --comic-accent: #7a4460;
+    --comic-accent-n: #5b4d7e;
+  }
+}
+.unified-comic-book [hidden] { display: none !important; }
+.unified-comic-book button { cursor: pointer; }
+.unified-comic-book button:focus-visible { outline: 2px solid #947181; outline-offset: 3px; }
+.unified-book-corner {
+  position: absolute; top: 6px; right: 13px; z-index: 30;
+  display: flex; gap: 10px; align-items: center; padding: 3px 5px;
+  color: var(--claude-muted); font: 11px/1.5 sans-serif; background: var(--book-paper);
+}
+.unified-book-corner button, .unified-panel-heading button, .unified-book-contents header button {
+  display: grid; place-items: center; width: 28px; height: 28px; border: 0; background: transparent; color: var(--book-ink);
+}
+.unified-mind-spread { position: absolute; inset: 34px 20px 16px; }
+.unified-mind-spread.mind-overview-surface { height: auto; }
+.unified-book-imprint{position:absolute;top:12px;left:22px;z-index:29;font:11px/1.4 Georgia,serif;letter-spacing:.16em;color:var(--comic-label);pointer-events:none}
+.unified-book-imprint span{color:var(--comic-accent-n);font-style:italic;margin:0 4px}
+.unified-book-imprint i{font:10px/1.4 'Mind Comic',serif;letter-spacing:.15em;margin-left:14px}
+.unified-mind-spread .mind-comic-book { background: var(--book-paper); }
+.unified-comic-book .mind-comic-book .scene-7 .page-title { font-size: clamp(24px, 3.2cqw, 44px); }
+.unified-function-slots { position: absolute; inset: 0; z-index: 22; pointer-events: none; }
+.unified-functional-panel {
+  position: absolute; pointer-events: auto; display: flex; flex-direction: column; min-width: 0; min-height: 0;
+  border: 0; background: transparent; box-shadow: none;
+}
+/* 面板横向位置 = 量出来的槽位（--panel-left）+ 拖拽偏移（--comic-drag-x），两个变量都由
+   书根 UnifiedComicBook 写。两者之和才是面板该在的地方，否则拖拽时画格在动、面板不动。
+   拖拽通路就挂在书根上（画格与面板的公共祖先），所以从面板上按下去也能把整页拖走。
+   这里刻意用 left 而不是 transform：面板里挂着 .rec-overlay（position: fixed 的全屏
+   弹窗），祖先一旦有 transform / translate，fixed 就会改挂到那个祖先上，
+   弹窗会缩成面板大小。left 只改布局位置，不产生包含块。 */
+.unified-functional-panel:not(.is-expanded) {
+  left: calc(var(--panel-left, 0px) + var(--comic-drag-x, 0px));
+}
+.unified-panel-ink, .unified-panel-gutter { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
+.unified-panel-ink { filter: drop-shadow(var(--comic-frame-shadow)); }
+.unified-panel-ink polygon, .unified-panel-gutter polygon { vector-effect: non-scaling-stroke; stroke-linejoin: miter; }
+.unified-panel-gutter .panel-gutter { fill: var(--book-paper); stroke: var(--book-paper); stroke-width: 12px; }
+.unified-panel-ink .panel-outline { fill: var(--book-paper); stroke: var(--comic-frame-ink); stroke-width: var(--comic-frame-width); }
+.unified-functional-panel:not(.is-expanded) { box-sizing: border-box; padding: 10px calc(var(--panel-width, 300px) * .05); }
+.unified-functional-panel.source-notebook:not(.is-expanded) { padding: 24px 12px 12px calc(var(--panel-width, 300px) * .07); }
+.unified-functional-panel.source-planner:not(.is-expanded) { padding-inline: calc(var(--panel-width, 600px) * .06); }
+.unified-functional-panel.source-diary:not(.is-expanded){padding:18px calc(var(--panel-width,600px) * .075) 18px calc(var(--panel-width,600px) * .085)}
+.unified-functional-panel.source-memory:not(.is-expanded) { padding: 0; }
+.unified-functional-panel.source-memory:not(.is-expanded) .unified-panel-heading { display: none; }
+.unified-functional-panel:not(.is-expanded) .unified-panel-heading,
+.unified-functional-panel:not(.is-expanded) .unified-panel-content { position: relative; }
+.unified-functional-panel:not(.is-expanded) .unified-panel-heading { border: 0; padding: 0 0 6px; gap: 4px; }
+.unified-functional-panel:not(.is-expanded) .unified-panel-heading h2 { font-size: 22px !important; font-weight: 400; -webkit-text-stroke: 3px var(--book-paper); paint-order: stroke fill; }
+.unified-functional-panel.source-diary:not(.is-expanded) .unified-panel-heading h2,
+.unified-functional-panel.source-planner:not(.is-expanded) .unified-panel-heading h2{font-size:28px!important}
+.unified-functional-panel.source-diary:not(.is-expanded) .unified-panel-heading,
+.unified-functional-panel.source-planner:not(.is-expanded) .unified-panel-heading{padding-bottom:12px;margin-bottom:6px;border-bottom:1px solid #51465325}
+.unified-functional-panel:not(.is-expanded) .comic-chapter { padding: 0; background: transparent; }
+.unified-functional-panel.source-memory:not(.is-expanded) .unified-panel-heading h2 { font-size: 24px !important; }
+.unified-functional-panel.source-memory:not(.is-expanded) .unified-panel-content { overflow: hidden; }
+.unified-functional-panel.source-memory:not(.is-expanded) .memory-page.comic-chapter { flex: 1; padding: 0; }
+.unified-functional-panel.is-expanded :is(.unified-panel-ink, .unified-panel-gutter) { display: none; }
+.unified-functional-panel.source-memory { --slot-delay: .46s; }
+.unified-functional-panel.source-diary { --slot-delay: 2.3s; }
+.unified-functional-panel.source-planner { --slot-delay: 1.38s; }
+.unified-functional-panel.source-notebook { --slot-delay: 3.15s; }
+.unified-panel-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 38px; flex-shrink: 0; padding: 5px 12px; border-bottom: 1px solid var(--book-ink); }
+.claude-theme .unified-panel-heading h2 { font: 20px/1.4 'Mind Comic', sans-serif !important; margin: 0; color: var(--book-ink); }
+.unified-panel-heading h2 { flex: 1; }
+.unified-panel-heading .spinning { animation: memory-spin 1s linear infinite; }
+.unified-panel-content { flex: 1; display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+.source-memory .unified-panel-content { overflow: auto; }
+.unified-functional-panel .comic-chapter { padding: 12px; flex: 1; min-width: 0; min-height: 0; background: var(--book-paper); }
+.unified-functional-panel .memory-page.comic-chapter { flex: none; padding: 12px 14px 24px; }
+.unified-functional-panel .memory-page-intro { font-size: 11px; margin: 12px 0; }
+.unified-functional-panel .memory-layer-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-bottom: 14px; }
+.unified-functional-panel .memory-layer-card { margin: 0 !important; padding: 10px; }
+.unified-functional-panel .memory-layer-icon { width: 25px; }
+.unified-functional-panel .memory-layer-copy small { font-size: 10px; }
+.unified-functional-panel .memory-list-toolbar { margin-top: 12px; flex-wrap: wrap; gap: 8px; }
+.unified-functional-panel .memory-search { width: 100%; min-width: 0; }
+.unified-functional-panel .memory-entry-grid { columns: 1; }
+.unified-functional-panel .memory-entry { padding: 14px; margin-bottom: 15px; }
+.unified-functional-panel .memory-entry.memory-opening-panel { display: block; min-height: 0; padding: 14px; }
+.unified-functional-panel .memory-opening-panel .memory-narration-body { padding: 0; }
+.unified-functional-panel .memory-opening-panel .memory-entry-content { font-size: 16px; }
+.unified-functional-panel .memory-thread { padding: 14px; }
+.unified-functional-panel .memory-thread-turn { flex-wrap: wrap; gap: 7px; }
+.unified-functional-panel .memory-thread-turn > div { max-width: 100%; }
+.unified-functional-panel .record-diary-bar { gap: 8px; margin-bottom: 12px; }
+.unified-functional-panel .record-diary-bar .rec-search { flex: 1 1 150px; width: auto !important; min-width: 120px; }
+.unified-functional-panel .record-diary-body { grid-template-columns: minmax(0, 1fr); grid-template-rows: 76px minmax(0, 1fr); gap: 12px; }
+.unified-functional-panel .record-diary-index { border: 0; border-bottom: 1px solid var(--book-ink); padding: 0 0 8px; max-height: 76px; min-height: 0; }
+.unified-functional-panel .record-diary-index-scroll { flex-direction: row; overflow-x: auto; overflow-y: hidden; gap: 14px; }
+.unified-functional-panel .record-diary-month { flex-shrink: 0; min-width: 115px; }
+.unified-functional-panel .record-diary-month-label { position: static; font-size: 11px; padding: 0; }
+.unified-functional-panel .record-diary-link { padding: 3px 6px; gap: 7px; }
+.unified-functional-panel .record-diary-reader { overflow-y: auto; padding: 0 4px 10px 0; }
+.unified-functional-panel .record-diary-head { width: 100%; padding: 12px; margin-bottom: 12px; flex-wrap: wrap; gap: 8px; }
+.unified-functional-panel .comic-diary-montage { display: block; margin-bottom: 16px; }
+.unified-functional-panel .record-diary-event { padding: 9px 12px; font-size: 14px; }
+.unified-functional-panel .record-diary-event:nth-child(even) { margin-left: 15px; }
+.unified-functional-panel .record-diary-prose { font-size: 15px; line-height: 1.85; }
+.unified-functional-panel .record-diary-prose p { padding: 12px 16px; }
+.unified-functional-panel .record-diary-prose p:nth-child(3n + 2) { margin-left: 14px; margin-right: 0; }
+.unified-functional-panel .record-note { flex-direction: column; gap: 12px; min-height: 0; overflow: hidden; }
+.unified-functional-panel .record-note-index { width: 100%; min-height: 165px; height: 170px; max-height: 180px; border: 0; border-bottom: 1px solid var(--book-ink); box-shadow: none; padding: 0 0 10px; gap: 6px; }
+.unified-functional-panel .record-note-index-scroll { flex-direction: row; overflow-x: auto; overflow-y: hidden; gap: 10px; }
+.unified-functional-panel .record-note-row { flex: 0 0 210px; padding: 8px 10px; min-height: 48px; }
+.unified-functional-panel .record-note-row-title { flex-shrink: 0; }
+.unified-functional-panel .record-note-row-tags { display: none; }
+.unified-functional-panel .record-note-tagbar { max-height: 30px; }
+.unified-functional-panel .record-note-work { min-height: 0; flex: 1; flex-shrink: 1; }
+.unified-functional-panel .record-note-work-head { gap: 7px; padding: 8px; }
+.unified-functional-panel .record-note-work-title { flex-basis: 120px; }
+.unified-functional-panel .comic-plan-spread { display: flex; gap: 0; }
+.unified-functional-panel .comic-plan-content { flex: 1; }
+.unified-functional-panel .comic-planner-modes { align-self: flex-start; margin-bottom: 12px; flex-shrink: 0; }
+.unified-functional-panel .record-plan-bar { padding: 8px; gap: 7px; margin-bottom: 12px; }
+.unified-functional-panel .record-plan-bar .rec-seg { flex-wrap: wrap; }
+.unified-functional-panel .record-plan-list { gap: 12px; }
+.unified-functional-panel .record-plan-row, .unified-functional-panel .record-plan-row:last-child { padding: 15px 15px 15px 20px; margin: 0; }
+.unified-functional-panel .record-plan-row:first-child { border-radius: 24px 24px 24px 2px; }
+.unified-functional-panel .record-plan-title { font-size: 21px; }
+.unified-functional-panel .record-plan-row-top { flex-wrap: wrap; }
+.unified-functional-panel .record-plan-actions { margin-left: auto; }
+.unified-functional-panel .record-plan-foot { gap: 8px; }
+.unified-functional-panel .rec-overlay { z-index: 60; }
+
+/* The reading spread shows content, not four management toolbars. Expanding a panel
+   exposes everything. There used to be a per-source "filter/action" toggle that added
+   .tools-visible to reveal these rows in a slot — but the toggle only ever rendered
+   while `is-expanded` (see UnifiedComicBook.tsx), and every rule here is guarded by
+   :not(.is-expanded), so the class could never land where it mattered. Dead chain,
+   removed; these selectors are now plain :not(.is-expanded). */
+.unified-functional-panel:not(.is-expanded) :is(.memory-page-actions, .memory-page-intro, .memory-layer-grid, .memory-list-toolbar, .record-diary-bar, .record-diary-index, .comic-planner-modes, .record-plan-bar) { display: none; }
+.unified-functional-panel:not(.is-expanded) .record-diary-body { grid-template-rows: minmax(0, 1fr); }
+.unified-functional-panel:not(.is-expanded) :is(.record-note-index-head, .record-note-tagbar, .record-note-row-foot) { display: none; }
+.unified-functional-panel:not(.is-expanded) .record-note-index { height: 62px; min-height: 62px; max-height: 62px; }
+.unified-functional-panel:not(.is-expanded) .record-note-row { min-height: 42px; }
+
+/* Full reading/editing mode moves the SAME mounted panel, not a second copy. */
+.unified-functional-panel.is-expanded { position: absolute; inset: 36px 20px 16px; z-index: 35; }
+.unified-functional-panel.is-expanded .record-diary-body { grid-template-rows: minmax(0, 1fr); }
+.unified-functional-panel.is-expanded .record-diary-index { height: auto; max-height: none; border: 0; border-right: 1px solid var(--book-ink); padding: 8px 14px 0 0; }
+.unified-functional-panel.is-expanded .record-diary-index-scroll { flex-direction: column; overflow-y: auto; overflow-x: hidden; }
+.unified-functional-panel.is-expanded .record-diary-reader { padding: 12px 24px; }
+.unified-functional-panel.is-expanded .record-diary-prose { font-size: 17px; }
+.unified-functional-panel.is-expanded .record-note { flex-direction: row; gap: 24px; }
+.unified-functional-panel.is-expanded .record-note-index { width: 280px; height: auto; max-height: none; border: 0; border-right: 1px solid var(--book-ink); padding-right: 14px; }
+.unified-functional-panel.is-expanded .record-note-index-scroll { flex-direction: column; overflow-y: auto; overflow-x: hidden; }
+.unified-functional-panel.is-expanded .record-note-row { flex: 0 0 auto; }
+.unified-functional-panel.is-expanded .record-note-row-tags { display: flex; }
+.unified-functional-panel.is-expanded .record-note-tagbar { max-height: 84px; }
+.unified-functional-panel.is-expanded .memory-entry-grid { columns: 2; }
+.unified-functional-panel.is-expanded .memory-layer-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.unified-functional-panel.source-diary:not(.is-expanded) .comic-diary-montage { display: none; }
+.unified-functional-panel.source-diary:not(.is-expanded) .record-diary-head { padding: 3px 8px; margin-bottom: 6px; }
+.unified-functional-panel.source-diary:not(.is-expanded) .record-diary-date-weekday { display: none; }
+.unified-functional-panel.source-diary:not(.is-expanded) .record-diary-date-md { font-size: 23px; }
+.unified-functional-panel.source-diary:not(.is-expanded) .record-diary-prose { margin-top: 4px; }
+.unified-functional-panel.source-diary:not(.is-expanded) .record-diary-prose p { border: 0; box-shadow: none; padding: 5px 8px; margin: 0 0 6px; }
+.unified-functional-panel.source-diary:not(.is-expanded) .record-diary-section > .rec-section-title { display: none; }
+/* One frame per functional shot; no inset dashboard cards or header strips. */
+.unified-functional-panel:not(.is-expanded) :is(.record-note-work, .record-note-index, .record-note-work-head, .record-diary-head, .record-plan-row, .record-plan-row:last-child) {
+  border: 0; border-radius: 0; box-shadow: none; background: transparent;
+}
+.unified-functional-panel:not(.is-expanded) .record-note-work-head { padding: 4px 0 8px; }
+.unified-functional-panel.source-notebook:not(.is-expanded) .record-note-work-head { display: none; }
+.unified-functional-panel:not(.is-expanded) .record-note-index { padding-bottom: 4px; }
+.unified-functional-panel:not(.is-expanded) .record-note-row { border: 0; border-radius: 0; padding: 5px 6px; background: transparent; }
+.unified-functional-panel:not(.is-expanded) .record-note-row.is-active { background: #94718113; box-shadow: none; text-decoration: underline; text-underline-offset: 5px; }
+.unified-functional-panel:not(.is-expanded) .record-plan-list { gap: 5px; }
+.unified-functional-panel:not(.is-expanded) .record-plan-row { padding: 9px 8px; }
+.unified-functional-panel:not(.is-expanded) .record-plan-title { font-size: 22px; }
+.unified-functional-panel:not(.is-expanded) .record-plan-row::before { display: none; }
+.unified-functional-panel:not(.is-expanded) .record-diary-reader { background: transparent; }
+.unified-functional-panel:not(.is-expanded) .record-diary-prose { font-family: 'Mind Comic', sans-serif !important; font-size: 20px; }
+.unified-functional-panel:not(.is-expanded) .record-diary-head { padding: 3px 0 !important; }
+.unified-functional-panel:not(.is-expanded) .record-note-frame { border: 0; }
+.unified-functional-panel:is(.source-diary, .source-planner, .source-notebook) .rec-blank {
+  border: 0; background: transparent; box-shadow: none; margin: 0;
+}
+.unified-functional-panel.is-expanded { border: 1.8px solid var(--book-ink); background: var(--book-paper); box-shadow: 2px 3px 6px #28212c12; }
+
+/* LINE-like original messages float directly on the same paper as the art. */
+.comic-conversation { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.memory-page.is-latest-conversation { display: flex; flex-direction: column; min-height: 0; }
+.comic-latest-view { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+.memory-history-view { display: contents; }
+.memory-page [hidden] { display: none !important; }
+.comic-conversation-viewport { flex: 1; min-height: 0; overflow: hidden; touch-action: none; scrollbar-width: none; padding: 0 12px 20px; }
+.comic-conversation-viewport::-webkit-scrollbar { display: none; }
+.comic-conversation-messages { display: flex; flex-direction: column; gap: 17px; }
+.comic-message { display: flex; align-items: flex-start; gap: 10px; padding-right: 10%; }
+.comic-message.is-sent { justify-content: flex-end; padding: 0 0 0 14%; }
+.comic-message-avatar { flex: 0 0 30px; width: 30px; height: 30px; display: grid; place-items: center; border-radius: 50%; color: #8c753c; background: #f5ebc8; font-size: 14px; }
+.comic-message.is-nana .comic-message-avatar { color: #81708f; background: #e9e3f1; }
+.comic-message-body { min-width: 0; max-width: 100%; }
+.comic-message-speaker { display: block; margin: 0 4px 5px; color: var(--claude-muted); font-size: 11px; }
+.comic-message.is-sent .comic-message-speaker { text-align: right; }
+.comic-message-bubble { position: relative; padding: 10px 16px; background: #f7efd4; border-radius: 3px 17px 17px 17px; }
+.comic-message.is-nana .comic-message-bubble { background: #e9e5f0; }
+.comic-message.is-sent .comic-message-bubble { background: #e4ecdf; border-radius: 17px 3px 17px 17px; }
+.comic-message-bubble::before { content: ''; position: absolute; width: 12px; height: 14px; left: -7px; top: 0; background: inherit; clip-path: polygon(0 0,100% 0,100% 100%); }
+.comic-message.is-sent .comic-message-bubble::before { left: auto; right: -7px; transform: scaleX(-1); }
+.claude-theme .comic-message-bubble p { margin: 0; font: 22px/1.65 'Mind Comic', 'Microsoft YaHei', sans-serif !important; white-space: pre-wrap; overflow-wrap: anywhere; }
+.comic-message time { display: block; margin: 5px 5px 0; color: var(--claude-muted); font-size: 10px; }
+.comic-message.is-sent time { text-align: right; }
+.comic-conversation-empty { color: var(--claude-muted); font: 20px/1.8 'Mind Comic', sans-serif !important; }
+.unified-turn { position: absolute; top: 0; height: 100%; z-index: 28; display: flex; align-items: center; justify-content: center; padding: 0; border: 0; background: transparent; color: var(--book-ink); opacity: .3; }
+.unified-turn svg { flex-shrink: 0; pointer-events: none; }
+.unified-turn:hover, .unified-turn:focus-visible { opacity: 1; }
+.unified-turn.is-back { left: 0; }
+.unified-turn.is-next { right: 0; }
+.unified-menu-dock { position: absolute; z-index: 70; top: 6px; right: 13px; bottom: 16px; width: min(340px, calc(100% - 32px)); pointer-events: none; transform: none; opacity: 1; visibility: visible; transition: transform .42s cubic-bezier(.22, 1, .36, 1), opacity .28s ease, visibility 0s; }
+.unified-menu-dock.is-open { pointer-events: auto; }
+.unified-contents-backdrop { position:absolute; inset:0; z-index:65; pointer-events:none; background:#f8f5ef18; backdrop-filter:blur(8px); -webkit-backdrop-filter:blur(8px); }
+.unified-menu-dock .unified-book-corner { top: 0; right: 0; pointer-events: auto; }
+.unified-menu-dock.is-touring { transform: translateX(54px); opacity: 0; visibility: hidden; pointer-events: none; transition-duration: .9s, .65s, 0s; transition-delay: 0s, 0s, .9s; }
+.unified-menu-dock.is-touring .unified-book-corner { pointer-events: none; }
+@media (prefers-reduced-motion: reduce) { .unified-menu-dock { transition: none; } }
+.unified-book-contents {
+  position: absolute; top: 32px; right: 3px; bottom: 0; box-sizing: border-box;
+  width: calc(100% - 3px); display: flex; flex-direction: column; gap: 12px;
+  overflow: hidden; padding: 22px 18px 16px; border: 1px solid #b8a58e55;
+  border-radius: 18px 6px 18px 18px; color: var(--book-ink);
+  background: linear-gradient(145deg, #fffdf744, transparent 55%), var(--book-paper);
+  box-shadow: 0 18px 48px #30251b24, 0 3px 10px #30251b12, inset 0 0 0 4px #fffdf730;
+}
+.unified-book-contents header { display: flex; align-items: center; gap: 12px; padding-bottom: 15px; border-bottom: 1px solid #b8a58e33; flex-shrink: 0; }
+.unified-contents-mark { display: grid; place-items: center; width: 44px; height: 44px; border-radius: 13px; color: #8b7545; background: #e9d79a40; }
+.unified-book-contents header small { display: block; color: var(--comic-label); font: 10px/1.5 Georgia, serif; letter-spacing: .12em; }
+.unified-book-contents header strong { display: block; font: 26px/1.4 'Mind Comic', sans-serif !important; font-weight: 400; }
+.unified-contents-caption { flex-shrink: 0; padding: 0 4px; color: var(--comic-label); font: 11px/1.5 'Microsoft YaHei', sans-serif; letter-spacing: .1em; }
+.unified-source-links { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; flex-shrink: 0; margin-bottom: 5px; }
+.unified-source-links button { display: flex; align-items: center; gap: 7px; padding: 9px; border: 1px solid #b8a58e33; border-radius: 9px; background: #ffffff18; color: var(--book-ink); font-size: 12px; text-align: left; cursor: pointer; }
+.unified-source-links button svg { flex-shrink: 0; color: var(--comic-label); }
+.unified-book-contents ol { flex: 1; min-height: 0; overflow-y: auto; scrollbar-width: thin; scrollbar-color: #b8a58e66 transparent; list-style: none; padding: 0 3px 0 0; margin: 0; }
+.unified-book-contents li + li { margin-top: 4px; }
+.unified-book-contents li button { display: flex; align-items: center; gap: 11px; width: 100%; text-align: left; border: 1px solid transparent; border-radius: 10px; padding: 10px 9px; background: transparent; color: var(--book-ink); cursor: pointer; }
+.unified-contents-number { display: grid; place-items: center; flex: 0 0 28px; height: 28px; border-radius: 8px; color: var(--comic-label); background: #b8a58e12; font: 12px/1 Georgia, serif; }
+.unified-contents-title { flex: 1; min-width: 0; font: 18px/1.4 'Mind Comic', 'Microsoft YaHei', sans-serif !important; }
+.unified-book-contents li button > svg { flex-shrink: 0; color: var(--comic-label); opacity: .4; }
+.unified-book-contents li button[aria-current='page'] { border-color: #b89b4b35; background: #e9d79a38; }
+.unified-book-contents li button[aria-current='page'] .unified-contents-number { color: #80642c; background: #e9d79a66; }
+.unified-book-contents li button[aria-current='page'] > svg { opacity: 1; }
+.unified-book-contents button { transition: background .16s ease, border-color .16s ease; }
+.unified-book-contents button:hover { background: #b8a58e20; border-color: #b8a58e44; }
+.unified-book-contents :is(button, input):focus-visible { outline: 2px solid #a38b53; outline-offset: 2px; }
+.unified-menu-dock .unified-book-corner { border: 1px solid #b8a58e33; border-radius: 10px; padding: 2px; }
+.unified-menu-dock.is-open .unified-book-corner { color: #80642c; background: #e9d79a38; }
+@media (prefers-reduced-motion: no-preference) {
+  .unified-book-contents { animation: contents-unfold .18s ease-out; transform-origin: top right; }
+  @keyframes contents-unfold { from { opacity: 0; transform: translateY(-5px) scale(.985); } to { opacity: 1; transform: none; } }
+}
+@media (prefers-reduced-motion: no-preference) {
+  /* fill-mode 用 backwards 而不是 both：both 会让动画结束后仍然「填充」终态，
+     Chrome 把 translateY(8px)→none 的终态算成 identity matrix（不是 none），
+     于是一个 matrix(1,0,0,1,0,0) 的 transform 永久挂在面板上 ——
+     transform 会让面板变成 position: fixed 的包含块，面板里的 .rec-overlay
+     全屏弹窗会被压成面板大小（紧凑态面板 699x278，弹窗只剩这么点）。
+     backwards 只让动画在延迟期填充起始态（面板先隐形），结束后回落到元素自身样式
+     （opacity: 1 / 无 transform），入场观感完全一样。
+     实测见 scripts/mind-book-shot.mjs 的「fixed 包含块检查」。 */
+  .unified-functional-panel:not(.is-expanded) { animation: comic-functional-enter .65s ease-out var(--slot-delay, .46s) backwards; }
+  /* Opacity alone leaves the delayed, invisible expand button clickable.
+     Visibility also removes the whole paper and its controls from hit testing
+     and keyboard navigation until the entrance actually starts. */
+  @keyframes comic-functional-enter { from { opacity: 0; visibility: hidden; transform: translateY(8px); } to { opacity: 1; visibility: visible; transform: none; } }
+}
+@media (max-width: 850px) {
+  .unified-functional-panel.is-expanded { position: fixed; inset: 38px 20px 14px; }
+  .unified-functional-panel.is-expanded .record-note { flex-direction: column; }
+  .unified-functional-panel.is-expanded .record-note-index { width: 100%; height: 130px; max-height: 130px; border-right: 0; border-bottom: 1px solid var(--book-ink); }
+  .unified-functional-panel.is-expanded .record-diary-body { grid-template-columns: minmax(0, 1fr); grid-template-rows: 80px minmax(0, 1fr); }
+  .unified-functional-panel.is-expanded .record-diary-index-scroll { flex-direction: row; }
+  .unified-functional-panel.is-expanded .memory-entry-grid { columns: 1; }
+  .unified-functional-panel.is-expanded .memory-layer-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+/* Actual illustrated stationery carries live, editable content on its paper. */
+.unified-panel-ink .illustrated-outline{fill:none}
+.unified-functional-panel.source-diary:not(.is-expanded){padding:12% 17% 10% 19%;padding:calc(var(--panel-width) * .13) calc(var(--panel-width) * .17) calc(var(--panel-width) * .10) calc(var(--panel-width) * .19)}
+.unified-functional-panel.source-planner:not(.is-expanded){padding:calc(var(--panel-width) * .08) calc(var(--panel-width) * .17) calc(var(--panel-width) * .08) calc(var(--panel-width) * .19)}
+.unified-functional-panel.source-notebook:not(.is-expanded){padding:calc(var(--panel-width) * .25) calc(var(--panel-width) * .13) calc(var(--panel-width) * .15) calc(var(--panel-width) * .22)}
+.unified-functional-panel:not(.is-expanded) .unified-panel-heading h2{-webkit-text-stroke:0;font-size:clamp(17px,1.7vw,26px)!important}
+.unified-functional-panel:not(.is-expanded) :is(.record-note-frame,.record-note-work-body){background:transparent;mix-blend-mode:multiply}
+.unified-functional-panel:not(.is-expanded) .record-diary-prose{font-size:18px}
+.unified-functional-panel:not(.is-expanded) .record-plan-title{font-size:19px}
+
+.unified-functional-panel.source-diary:not(.is-expanded) .record-diary-prose p{background:transparent!important}
+
+.unified-paper-writing { display: contents; }
+.unified-writing-mask { display: contents; }
+.source-notebook:not(.is-expanded) .unified-writing-mask {
+  display: block; position: absolute; inset: 0; clip-path: var(--notebook-crop, none);
+}
+.source-notebook:not(.is-expanded) .unified-panel-open { clip-path: var(--notebook-crop, none); }
+.unified-paper-writing.is-projected {
+  position: absolute; left: 0; top: 0; display: flex; flex-direction: column;
+  min-width: 0; min-height: 0; transform-origin: 0 0;
+}
+.unified-paper-writing.is-projected .unified-panel-content { min-height: 0; }
+.unified-paper-writing.is-projected .record-diary-prose p { margin-inline: 0; }
+
+.unified-functional-panel:is(.source-diary,.source-planner,.source-notebook),
+.unified-functional-panel:is(.source-diary,.source-planner,.source-notebook) * {
+  scrollbar-width: none;
+}
+.unified-functional-panel:is(.source-diary,.source-planner,.source-notebook)::-webkit-scrollbar,
+.unified-functional-panel:is(.source-diary,.source-planner,.source-notebook) *::-webkit-scrollbar { display: none; }
+.unified-functional-panel .unified-panel-open {
+  position: absolute; inset: 0; z-index: 4; width: 100%; height: 100%;
+  border: 0; padding: 0; background: transparent; cursor: default; touch-action: pan-y;
+}
+.unified-functional-panel .unified-panel-open:focus-visible {
+  outline: 2px dashed var(--book-ink); outline-offset: -4px;
+}
+.unified-functional-panel.source-notebook .unified-paper-writing.is-projected { mix-blend-mode: multiply; }
+.unified-paper-writing.is-projected :is(.record-plan-actions,.record-note-work-head button) { display: none; }
+
+/* Expanded spreads read like a desk journal, with complete editing controls. */
+.unified-functional-panel.is-expanded {
+  inset: 40px 38px 28px; padding: clamp(16px,2vw,30px);
+  border: 1.8px solid #514653; border-radius: 5px 14px 9px 5px;
+  background: linear-gradient(110deg,#f4eee2 0,#fffdf7 8%,#faf6ee 100%);
+  box-shadow: 0 10px 36px #3c2c3a20, 3px 4px 0 #ece4d8, 5px 6px 0 #84717b40;
+  --rec-accent: #927085; --rec-accent-soft: #efe4eb;
+  --rec-line: 1px solid #a8959a35; --rec-line-strong: 1px solid #a8959a60;
+  --rec-surface: #fffcf4; --rec-sunken: #f1eadf;
+}
+.unified-expanded-decoration { position: absolute; right: 0; bottom: 0; width: 32%; height: 82%; object-fit: cover; opacity: .09; pointer-events: none; }
+/* memory 展开页的满幅底纹。和上面那张角标不同，它铺满整个面板，靠一个很低的
+   opacity 退成水印——文字仍读在纸色上，插画只是把这块「共同记忆」的版面认出来。
+   圆角用 inherit 跟住面板，免得两边各写一遍四个角的值再走神。
+   注意它必须排在 .unified-paper-writing 之前：两者都是 z-index:auto 的定位元素，
+   后画的在上，内容才压得住底纹。 */
+.unified-expanded-backdrop {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  object-fit: cover; object-position: 50% 26%;
+  border-radius: inherit; opacity: .16; pointer-events: none;
+}
+/* 底纹只从卡片缝里露是不够的——记忆页「有内容的组件」也得透一点，整张插画才连得起来。
+   两个刻意的取舍：
+
+   ① 只降底色的 alpha，不写成整块 `opacity`。组件一设 opacity，里面的字跟着一起淡，
+      拿可读性换通透；改 background-color 则字还是满墨，页面照样透。
+
+   ② 逐个列类名，不改 --claude-surface 令牌。记忆页的卡片底色其实来自两条独立声明：
+      `.memory-layer-card / .memory-search / .memory-thread` 走 --claude-surface
+      （ClaudeTheme.css 覆盖过的），而 `.memory-entry / .memory-event-card /
+      .memory-character-switch / .memory-refresh` 还走 MemoryPage.css 里的
+      --codex-paper-card。后者是「在窗口根上就求值完再继承」的派生别名，只降
+      --claude-surface 追不回来（同一个坑本文件上面那大段注释记过一次）；
+      而 --claude-surface 本身是 30 处在用的通用令牌，把它在面板上改掉，
+      会连带 --panel-* / --rec-* / --graph-* 一堆别名一起透，弹窗和菜单都会跟着变。
+      列清单范围可控，代价是以后新增内容组件要记得加进来。
+
+   选择器权重 (0,5,0)，压过 ClaudeTheme.css 那几条 (0,2,0)，所以不必 !important。 */
+.unified-comic-book .unified-functional-panel.source-memory.is-expanded :is(
+  .memory-character-switch, .memory-refresh, .memory-layer-card,
+  .memory-search, .memory-thread, .memory-event-card, .memory-entry
+) { background-color: rgba(255, 255, 255, .68); }
+.unified-comic-book .unified-functional-panel.source-memory.is-expanded .memory-layer-card.active {
+  background-color: var(--claude-clay-soft);
+}
+.unified-functional-panel.is-expanded .unified-paper-writing { position: relative; display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.unified-functional-panel.is-expanded .unified-panel-heading {
+  position: relative; padding: 0 0 20px; margin-bottom: 22px;
+  border-bottom: 1px solid #92708555; gap: 12px;
+}
+.claude-theme.unified-functional-panel.is-expanded .unified-panel-heading h2 { font-size: 30px!important; line-height: 1.35; }
+.unified-reading-kicker { display: block; margin-bottom: 8px; color: #8c7381; font: 10px/1.5 sans-serif!important; letter-spacing: .16em; }
+.unified-functional-panel.is-expanded .unified-panel-heading button { width: 36px; height: 36px; border: 1px solid #a8959a55; border-radius: 50%; background: #fffdf5; transition: background .16s, box-shadow .16s; }
+.unified-functional-panel.is-expanded .unified-panel-heading button:hover { background: #efe4eb; box-shadow: 0 2px 7px #92708525; }
+.unified-functional-panel.is-expanded .comic-chapter { position: relative; padding: 0; background: transparent; }
+.unified-functional-panel.is-expanded :is(.rec-btn,.rec-search,.rec-input,.rec-select,.rec-seg) { border-color: #ad969c55; border-radius: 8px; }
+.unified-functional-panel.is-expanded .rec-btn { background: #fffcf6; padding: 8px 12px; }
+.unified-functional-panel.is-expanded .rec-btn.is-primary { background: #8e6b80; color: #fffdf6; }
+.unified-functional-panel.is-expanded :is(.record-diary-bar,.record-plan-bar) { padding: 10px 12px; background: #f0e9dfaa; border: 1px solid #bca7ac35; border-radius: 9px; margin-bottom: 20px; }
+.unified-functional-panel.is-expanded :is(.record-diary-index,.record-note-index) { background: #f1eade99; border: 1px solid #baa5aa40; border-radius: 5px 13px 6px 8px; padding: 14px; }
+/* 左栏（日期索引）与右栏（正文）之间不留间隔：两栏的纸色拼成一整张。
+   注意这里曾经和上面「Full reading/editing mode」那块重复声明过 columns/gap，
+   后写的赢，前一条的 210px/24px 是死值——合并到这一条，别再写第二遍。 */
+.unified-functional-panel.is-expanded .record-diary-body { grid-template-columns: 230px minmax(0,1fr); gap: 0; }
+.unified-functional-panel.is-expanded .record-diary-month-label { font: 18px/1.5 'Mind Comic',serif; color: #88677d; padding: 8px 4px; }
+.unified-functional-panel.is-expanded .record-diary-link { padding: 12px 10px; border-radius: 4px 10px 5px 8px; margin-bottom: 5px; }
+.unified-functional-panel.is-expanded .record-diary-link.is-active { background: #e7d8e0; box-shadow: inset 3px 0 #987289; }
+.unified-functional-panel.is-expanded .record-diary-reader { padding: 8px clamp(12px,3vw,42px) 28px; background: #fffdf5b8; border-radius: 5px; }
+.unified-functional-panel.is-expanded .record-diary-head { padding: 10px 0 18px!important; border: 0; border-bottom: 1px solid #b79d9e55; margin-bottom: 24px; }
+.unified-functional-panel.is-expanded .record-diary-date-md { font-size: 38px; color: #68525d; }
+/* 正文：段落节奏交回给模式本身。原先这里另加了 padding + margin，
+   把中日文那套「首行缩进 2em、不加段距」的断句方式顶掉了，
+   而 is-spaced 又同时吃 margin-top 与 margin-bottom，段间被撑到两倍行距。 */
+.unified-functional-panel.is-expanded .record-diary-prose { font: 19px/1.95 'Mind Comic',serif!important; max-width: 760px; margin: 12px auto 0; }
+.unified-functional-panel.is-expanded .record-diary-prose p { border: 0; padding: 0; margin: 0; background: transparent; box-shadow: none; }
+.unified-functional-panel.is-expanded .record-diary-prose.is-spaced p + p { margin-top: 1.05em; }
+/* 槽位那套「隔段错位」在这里要收掉：本文件上面有 `p:nth-child(3n+2){margin-left:14px}`，
+   权重 (0,3,1)，光靠上面 `p{margin:0}` 那句 (0,3,0) 压不住。 */
+.unified-functional-panel.is-expanded .record-diary-prose p:nth-child(3n+2) { margin-inline: 0; }
+.unified-functional-panel.is-expanded .record-diary-prose p:last-child { margin-bottom: 0; }
+/* 要事：陶土左边 + 整条浅填充 + 右侧圆角，就是「便签条」的样子。这层底色别去掉——
+   行与行之间的错落（偶数列 15px 缩进，见本文件 219 行）是靠这两条底色的左缘位移读出来的，
+   底色一没，光剩勾选和文字挪 15px，错落基本看不见了。 */
+.unified-functional-panel.is-expanded .record-diary-event { border: 0; box-shadow: none; border-left: 2px solid #ad879b; padding: 10px 16px; background: #f5ece6; border-radius: 0 7px 7px 0; }
+.unified-functional-panel.is-expanded .record-diary-seam { margin: 24px 0 20px; }
+.unified-functional-panel.is-expanded .record-note { gap: 24px; }
+.unified-functional-panel.is-expanded .record-note-row { padding: 12px 10px; border: 0; border-bottom: 1px dashed #bca7ac66; border-radius: 4px 9px 3px 7px; background: transparent; }
+.unified-functional-panel.is-expanded .record-note-row.is-active { background: #f4e4d6; box-shadow: inset 3px 0 #c67449; }
+.record-note-library-title { display:flex; align-items:center; gap:9px; font-weight:600; color:#68534d; }
+.record-note-library-title > span { font-size:12px; font-weight:400; color:#9a8378; }
+.unified-functional-panel.is-expanded .record-note-index { width:310px; gap:16px; }
+.unified-functional-panel.is-expanded .record-note-row { padding:16px 12px; transition:background .18s ease; }
+.unified-functional-panel.is-expanded .record-note-row:hover { background:#f4e4d680; }
+.unified-functional-panel.is-expanded .record-note-row-title { line-height:1.6; }
+@media(max-width:700px){.unified-functional-panel.is-expanded .record-note-index{width:100%;}}
+.unified-functional-panel.is-expanded .record-note-work { border: 1px solid #bca7ac50; border-radius: 7px; box-shadow: 0 4px 14px #6c526314; background: #fffdf8; }
+.unified-functional-panel.is-expanded .record-note-work-head { padding: 16px 20px; border-bottom: 1px solid #bca7ac50; background: #f8f0e7; }
+.unified-functional-panel.is-expanded .record-note-work-title { font-size: 23px; }
+.unified-functional-panel.is-expanded .record-plan-list { gap: 16px; padding: 4px 8px 20px 2px; }
+.unified-functional-panel.is-expanded .record-plan-row { border: 1px solid #bca7ac50; border-radius: 4px 12px 5px 8px; padding: 20px 24px; background: #fffdf6e8; box-shadow: 2px 3px 0 #d8c6ce45; }
+.unified-functional-panel.is-expanded .record-plan-row:first-child { border-radius: 4px 12px 5px 8px; }
+.unified-functional-panel.is-expanded .record-plan-title { font: 24px/1.5 'Mind Comic',serif; }
+.unified-functional-panel.is-expanded .record-plan-foot { margin-top: 12px; }
+.claude-theme.unified-functional-panel.is-expanded .unified-reading-kicker { font-family: sans-serif!important; }
+.unified-functional-panel.is-expanded .rec-seg { padding: 4px; border: 1px solid #bca7ac50; background: #fffaf3; }
+.unified-functional-panel.is-expanded .rec-seg button { border: 0; border-radius: 5px; padding: 7px 12px; }
+.unified-functional-panel.is-expanded .rec-seg button:is(.is-active,[aria-pressed="true"]) { background: #e9dce3; color: #6e4f64; box-shadow: 0 1px 3px #6e4f6415; }
+@media(min-width:1100px) {
+  .unified-functional-panel.is-expanded .record-plan-list { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); align-content: start; }
+  .unified-functional-panel.is-expanded .record-plan-row:nth-child(even) { margin-top: 8px; }
+}
+@media(max-width:850px) {
+  .unified-functional-panel.is-expanded { inset: 38px 16px 20px; padding: 16px; }
+  .unified-functional-panel.is-expanded .unified-panel-heading { margin-bottom: 14px; padding-bottom: 12px; }
+  .unified-functional-panel.is-expanded .record-diary-body { grid-template-columns: minmax(0,1fr); }
+  .unified-functional-panel.is-expanded .record-diary-index { padding: 6px; }
+  .unified-functional-panel.is-expanded .record-note-index { padding: 8px; }
+}
+
+.unified-comic-book, .unified-comic-book * { user-select: none; -webkit-user-select: none; }
+.unified-comic-book :is(input,textarea,[contenteditable="true"]),
+.unified-comic-book [contenteditable="true"] * { user-select: text; -webkit-user-select: text; }
+.unified-functional-panel:not(.is-expanded) :is(.record-diary-reader,.record-plan-list,.record-note-compact-preview) {
+  position: relative; overflow: hidden; scroll-behavior: auto;
+}
+.record-note-compact-preview { height: 100%; width: 100%; min-height: 0; }
+.record-note-compact-document { padding: 6px 2px 24px; font: 19px/1.9 'Mind Comic',serif; }
+.record-note-compact-document h3 { font: 25px/1.5 'Mind Comic',serif; margin: 10px 0 20px; }
+.record-note-compact-document p { margin: 0 0 20px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.comic-loop-copy { pointer-events: none; }
+
+/* The reader's selected author owns the diary's whole UI palette. */
+.comic-diary[data-owner],
+.source-diary:has(.comic-diary[data-owner]) {
+  --diary-accent: #665280;
+  --diary-soft: #e9e2f2;
+  --diary-paper: #faf7fd;
+  --diary-line: #b6a5c8;
+  --rec-accent: var(--diary-accent);
+  --rec-accent-soft: var(--diary-soft);
+  --rec-line: 1px solid var(--diary-line);
+  --rec-line-strong: 1px solid var(--diary-line);
+}
+.comic-diary[data-owner="vivian"],
+.source-diary:has(.comic-diary[data-owner="vivian"]) {
+  --diary-accent: #756024;
+  --diary-soft: #f5ebc8;
+  --diary-paper: #fffdf4;
+  --diary-line: #c6b676;
+}
+.source-diary:has(.comic-diary[data-owner]) .unified-panel-heading{border-color:var(--diary-line)}
+.source-diary:has(.comic-diary[data-owner]) :is(.unified-panel-heading h2,.unified-reading-kicker,.record-diary-month-label,.record-diary-date-md){color:var(--diary-accent)}
+.source-diary:has(.comic-diary[data-owner]) :is(.record-diary-bar,.record-diary-index){border-color:var(--diary-line)}
+.source-diary:has(.comic-diary[data-owner]) :is(.rec-btn,.rec-search,.rec-input,.rec-select,.rec-seg,.unified-panel-heading button){border-color:var(--diary-line)}
+.source-diary:has(.comic-diary[data-owner]) .record-diary-link.is-active{background:var(--diary-soft);color:var(--diary-accent);box-shadow:inset 3px 0 var(--diary-accent)}
+.source-diary:has(.comic-diary[data-owner]) .record-diary-event{border-color:var(--diary-accent);background:color-mix(in srgb,var(--diary-soft) 60%,transparent)}
+.source-diary:has(.comic-diary[data-owner]) :is(.record-diary-event-mark,.rec-sec-mark){color:var(--diary-accent)}
+.source-diary:has(.comic-diary[data-owner]) .unified-panel-heading button:hover{background:var(--diary-soft)}
+
+/* Make the author illustration legible beneath the neutral diary paper. */
+.source-diary.is-expanded .record-diary-backdrop {
+  opacity:.66;
+  -webkit-mask-image:linear-gradient(90deg,#000 0%,#000 60%,transparent 100%);
+  mask-image:linear-gradient(90deg,#000 0%,#000 60%,transparent 100%);
+}
+.source-diary.is-expanded .record-diary-index{background:#f1eade4d}
+.source-diary:not(.is-expanded) .record-diary-backdrop{display:none}
+
+/* Keep the planner controls together on the sky side of the illustration. */
+.unified-functional-panel.source-planner.is-expanded .unified-panel-heading {
+  border-bottom:0; margin-bottom:18px; padding-bottom:0;
+}
+.unified-functional-panel.source-planner.is-expanded .unified-panel-content { overflow:hidden; }
+.unified-functional-panel.source-planner.is-expanded .comic-planner {
+  align-self:flex-end; width:58%; max-width:880px; flex:1; min-height:0;
+  padding:24px; border:1px solid #b8adb14d; border-radius:18px;
+  background:rgba(255,253,248,.86); box-shadow:0 8px 32px #535a6812;
+}
+.unified-functional-panel.source-planner.is-expanded .comic-planner-modes {
+  background:transparent; border:0; border-radius:0; padding:0 0 16px;
+  margin:0 0 18px; width:100%; border-bottom:1px solid #c2b6bd55; gap:8px;
+}
+.unified-functional-panel.source-planner.is-expanded .comic-planner-modes button {
+  padding:10px 18px; border-radius:9px; font-size:15px;
+}
+.unified-functional-panel.source-planner.is-expanded .comic-planner-modes button.is-active {
+  background:#e9e2ef; color:#695478; box-shadow:none;
+}
+.unified-functional-panel.source-planner.is-expanded .comic-plan-spread { flex:1; min-height:0; }
+.unified-functional-panel.source-planner.is-expanded .record-plan-bar {
+  background:transparent; border:0; padding:0; gap:12px; margin-bottom:20px;
+}
+.unified-functional-panel.source-planner.is-expanded .record-plan-bar .rec-seg {
+  background:#f0ece8; border:0; border-radius:9px; padding:3px;
+}
+.unified-functional-panel.source-planner.is-expanded .record-plan-bar .rec-seg-item {
+  padding:8px 12px; font-size:13px; border-radius:7px;
+}
+.unified-functional-panel.source-planner.is-expanded .record-plan-bar .rec-seg-item.is-active {
+  background:#fffdf9; color:#705a7c; box-shadow:0 1px 4px #55455512;
+}
+.unified-functional-panel.source-planner.is-expanded .record-plan-bar .rec-btn.is-primary {
+  background:#806a91; border-radius:9px; padding:10px 16px; box-shadow:none;
+}
+.unified-functional-panel.source-planner.is-expanded .record-plan-list {
+  display:flex; gap:12px; padding:0 4px 8px 0;
+}
+.unified-functional-panel.source-planner.is-expanded .record-plan-list > .rec-blank {
+  flex:1; width:100%; min-height:220px; margin:0; padding:32px 24px;
+  border:1px dashed #bdb1c055; border-radius:12px; background:#f6f2f640;
+  justify-content:center; text-align:center; gap:14px;
+}
+.unified-functional-panel.source-planner.is-expanded .rec-blank-icon {
+  padding:14px; border-radius:50%; background:#e9e2ef; color:#867095; opacity:1;
+}
+.unified-functional-panel.source-planner.is-expanded .record-plan-row {
+  margin:0; padding:18px 20px; border-radius:11px; background:#fffdfbe0;
+  border:1px solid #c3b7bf55; box-shadow:0 2px 8px #62546c08;
+}
+.unified-functional-panel.source-planner.is-expanded .record-plan-title { font:600 17px/1.6 sans-serif; }
+.unified-functional-panel.source-planner.is-expanded .comic-planner.planner-sliding {
+  position:relative; width:100%; max-width:none; padding:0; border:0; border-radius:0;
+  background:transparent; box-shadow:none;
+}
+.planner-sliding-card {
+  position:relative; left:0; width:56%; height:100%; box-sizing:border-box;
+  padding:24px; display:flex; flex-direction:column; min-height:0;
+  border:1px solid #b8adb14d; border-radius:18px; background:rgba(255,253,248,.88);
+  box-shadow:0 8px 32px #535a6812; transition:left .75s cubic-bezier(.22,.61,.36,1);
+}
+.planner-sliding[data-mode="scheduler"] .planner-sliding-card { left:44%; }
+.planner-mode-title { display:flex; align-items:center; gap:10px; font-size:17px; font-weight:600; color:#776080; padding-bottom:18px; margin-bottom:20px; border-bottom:1px solid #c2b6bd55; }
+.planner-morph-content { position:relative; flex:1; min-height:0; }
+.planner-mode-content { position:absolute; inset:0; display:flex; flex-direction:column; opacity:0; visibility:hidden; pointer-events:none; transition:opacity .3s ease,visibility 0s .3s; }
+.planner-mode-content.is-active { opacity:1; visibility:visible; pointer-events:auto; transition:opacity .45s ease .2s,visibility 0s; }
+.planner-switch-space {
+  position:absolute; top:0; bottom:0; right:0; width:44%; border:0; background:transparent;
+  cursor:pointer; display:flex; align-items:center; justify-content:center; color:#7e708a;
+}
+.planner-sliding[data-mode="scheduler"] .planner-switch-space { right:auto; left:0; }
+.planner-switch-space > span { display:flex; align-items:center; gap:12px; opacity:0; padding:14px 18px; border-radius:30px; background:#fffdf54d; transition:opacity .2s,background .2s; font-size:14px; }
+.planner-switch-space:hover > span { opacity:1; background:#fffdf5b3; }
+.planner-switch-space:focus-visible { outline:2px solid #9d83ac; outline-offset:-6px; border-radius:18px; }
+@media(prefers-reduced-motion:reduce){.planner-sliding-card,.planner-mode-content,.planner-mode-content.is-active{transition:none;}}
+@media(max-width:1000px){
+  .unified-functional-panel.source-planner.is-expanded .comic-planner { width:100%; max-width:none; padding:18px; }
+}
+@media(max-width:600px){
+  .unified-functional-panel.source-planner.is-expanded .comic-planner { padding:14px; border-radius:12px; }
+  .unified-functional-panel.source-planner.is-expanded .record-plan-bar-spacer { display:none; }
+  .unified-functional-panel.source-planner.is-expanded .record-plan-bar .rec-btn.is-primary { margin-left:auto; }
+  .planner-sliding-card { padding:14px; width:78%; }
+  .planner-sliding[data-mode="scheduler"] .planner-sliding-card { left:22%; }
+  .planner-switch-space { width:22%; }
+  .planner-switch-space > span { flex-direction:column; padding:10px; gap:8px; font-size:12px; text-align:center; }
+}

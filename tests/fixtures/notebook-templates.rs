@@ -279,3 +279,39 @@ fn export_production_previews_for_visual_review() {
     });
     std::fs::write(dir.join("narrow-stress.html"), renderer::render_html(&stress)).unwrap();
 }
+#[test]
+fn markdown_custom_block_roundtrips_and_renders() {
+    let source = "## 标题\n\n**正文**\n- [ ] 待办\n";
+    let block: Block = serde_json::from_value(serde_json::json!({
+        "type": "custom", "html": "<h2>标题</h2><p><strong>正文</strong></p>", "markdown": source
+    })).unwrap();
+    let value = serde_json::to_value(&block).unwrap();
+    assert_eq!(value["markdown"], source);
+    let legacy: Block = serde_json::from_value(serde_json::json!({"type":"custom", "html":"<p>旧笔记</p>"})).unwrap();
+    assert!(serde_json::to_value(legacy).unwrap().get("markdown").is_none());
+    let mut note = sample("vivian");
+    note.blocks = vec![block];
+    let html = renderer::render_html(&note);
+    assert!(html.contains("<strong>正文</strong>"));
+    assert!(!html.contains("- [ ] 待办"));
+}
+
+#[test]
+fn page_source_survives_storage_and_does_not_leak_into_the_page() {
+    let source = ":::row columns=2\n:::card title=\"左栏\"\n正文\n:::\n:::column\n右栏\n:::\n:::";
+    let block: Block = serde_json::from_value(serde_json::json!({
+        "type": "custom", "html": "<section class=\"card\"><h2>左栏</h2><p>正文</p></section>", "page_source": source
+    })).unwrap();
+    assert_eq!(serde_json::to_value(&block).unwrap()["page_source"], source);
+    let mut note = sample("vivian");
+    note.id = "page-source-storage-test".into();
+    note.blocks = vec![block];
+    storage::save(&note).unwrap();
+    let loaded = storage::load("vivian", &note.id).unwrap();
+    assert_eq!(serde_json::to_value(&loaded.blocks[0]).unwrap()["page_source"], source);
+    let html = renderer::render_html(&loaded);
+    assert!(html.contains("<h2>左栏</h2>"));
+    assert!(!html.contains(":::row"));
+    assert!(!html.contains("page_source"));
+    assert!(serde_json::to_value(&loaded.blocks[0]).unwrap().get("markdown").is_none());
+}

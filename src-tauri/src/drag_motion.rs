@@ -8,6 +8,34 @@ pub const FLING_MAX_VELOCITY: f64 = 4.0;
 const MIN_SPAN_MS: f64 = 40.0;
 const MAX_SAMPLE_AGE_MS: u128 = 100;
 
+/// Physical px/ms, only when an upward throw crosses the top from inside the bounds.
+pub fn ceiling_impact(from: f64, next: f64, vy: f64, min: f64, max: f64) -> f64 {
+    if from > min && from < max && next < min && vy < 0.0 && vy.is_finite() { -vy } else { 0.0 }
+}
+
+/// 甩飞撞边触发晕眩的最小法向撞击速度（逻辑像素/ms），轻贴边缘不触发
+const FLING_BOUNCE_MIN_IMPACT: f64 = 0.6;
+/// 甩飞撞边晕眩的基准时长（ms）
+const FLING_BOUNCE_DIZZY_BASE_MS: u64 = 1400;
+/// 甩飞撞边晕眩的时长上限（ms）
+const FLING_BOUNCE_DIZZY_MAX_MS: u64 = 2400;
+
+/// 撞边晕眩时长：撞击越重晕得越久；轻贴边缘（法向速度低于阈值）返回 `None` 不触发。
+///
+/// 注意：本函数只做「给定时长」的换算，**是否构成撞击**由调用方判定。
+/// 调用方只把「甩飞速度把窗口从界内推出界」的撞击记进 `impact`，
+/// 智能避让等外部移动把桌宠摆到墙边不算撞击（`impact` 保持 0，这里自然返回 `None`）。
+pub fn bounce_dizzy_ms(impact: f64) -> Option<u64> {
+    // 用 `!(x >= min)` 而非 `x < min`，顺带把 NaN 归入「不触发」
+    if !(impact >= FLING_BOUNCE_MIN_IMPACT) {
+        return None;
+    }
+    let extra = ((impact - FLING_BOUNCE_MIN_IMPACT) * 1200.0).min(
+        (FLING_BOUNCE_DIZZY_MAX_MS - FLING_BOUNCE_DIZZY_BASE_MS) as f64,
+    );
+    Some(FLING_BOUNCE_DIZZY_BASE_MS + extra as u64)
+}
+
 pub fn release_velocity(
     samples: &VecDeque<(Instant, f64, f64)>,
     release: (Instant, f64, f64),
@@ -41,6 +69,17 @@ pub fn release_velocity(
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn only_upward_top_crossings_count_as_ceiling_impacts() {
+        assert_eq!(ceiling_impact(100.0, -10.0, -1.2, 0.0, 600.0), 1.2);
+        for (from, next, speed) in [(500.0, 610.0, 2.0), (100.0, 90.0, -2.0),
+            (0.0, -10.0, -2.0), (-20.0, -10.0, -2.0), (100.0, -10.0, 2.0),
+            (100.0, -10.0, f64::NAN)] {
+            assert_eq!(ceiling_impact(from, next, speed, 0.0, 600.0), 0.0);
+        }
+        assert_eq!(ceiling_impact(-500.0, -610.0, -1.2, -600.0, 0.0), 1.2);
+    }
 
     fn at(base: Instant, ms: u64, x: f64, y: f64) -> (Instant, f64, f64) {
         (base + Duration::from_millis(ms), x, y)
@@ -82,5 +121,24 @@ mod tests {
         assert_eq!(release_velocity(&samples, at(base, 80, 100.0, 0.0), 1.0), None);
         assert_eq!(release_velocity(&samples, at(base, 120, f64::NAN, 0.0), 1.0), None);
         assert_eq!(release_velocity(&samples, at(base, 120, 100.0, 0.0), 0.0), None);
+    }
+    #[test]
+    fn bounce_dizzy_skips_gentle_touch() {
+        assert_eq!(bounce_dizzy_ms(0.0), None);
+        assert_eq!(bounce_dizzy_ms(0.24), None);
+        assert_eq!(bounce_dizzy_ms(-1.0), None);
+        assert_eq!(bounce_dizzy_ms(f64::NAN), None);
+    }
+    #[test]
+    fn bounce_dizzy_grows_with_impact_and_is_capped() {
+        let base = bounce_dizzy_ms(FLING_BOUNCE_MIN_IMPACT).unwrap();
+        assert_eq!(base, FLING_BOUNCE_DIZZY_BASE_MS);
+
+        let medium = bounce_dizzy_ms(0.75).unwrap();
+        assert!(medium > base, "撞击更重应当晕更久: {medium} <= {base}");
+
+        // 极端撞击（甩飞初速度上限 4.0 px/ms）封顶
+        let hardest = bounce_dizzy_ms(FLING_MAX_VELOCITY).unwrap();
+        assert_eq!(hardest, FLING_BOUNCE_DIZZY_MAX_MS);
     }
 }

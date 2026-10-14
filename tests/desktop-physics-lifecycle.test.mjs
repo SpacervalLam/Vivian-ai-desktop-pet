@@ -1,14 +1,14 @@
 import assert from 'node:assert/strict';
 import {build} from 'esbuild';
 const originals=Object.fromEntries(['window','performance'].map(key=>[key,globalThis[key]]));
-const effects=[],events=new Map(),dom=new Map(),timers=new Map();
+const effects=[],events=new Map(),dom=new Map(),timers=new Map(),emitted=[];
 let clock=0,timerId=0,position={x:200,y:30},writes=[],inFlight=0,maxInFlight=0,terrainGate=null;
 const coordinator={physicsEnabled:false,physicsInFlight:false,physicsLane:null,dragInFlight:false,fullscreenHidden:false,fullscreenInFlight:false,fleeInFlight:false,smartPositioningInFlight:false,ambientMoveInFlight:false,abortSmartMove:()=>{}};
 const world={windows:[],floors:[{id:'floor',x:0,y:0,width:1200,height:800}]};
 globalThis.__physicsFixture={effects,coordinator,
  async invoke(name,args){if(name==='get_desktop_terrain'){if(terrainGate)await terrainGate;return world;}if(name==='set_window_position'){maxInFlight=Math.max(maxInFlight,++inFlight);await Promise.resolve();writes.push(args);position={...args};inFlight--; }},
- listen:async(name,callback)=>{events.set(name,callback);return()=>events.delete(name);},
- win:{label:'nana',isVisible:async()=>true,outerPosition:async()=>position,outerSize:async()=>({width:300,height:300}),scaleFactor:async()=>1},
+ listen:async(name,callback,target)=>{events.set(name,event=>{if(!target||event.windowLabel===target)callback(event);});return()=>events.delete(name);},
+ win:{label:'nana',emitTo:async(...args)=>emitted.push(args),listen:(name,callback)=>globalThis.__physicsFixture.listen(name,callback,'nana'),isVisible:async()=>true,outerPosition:async()=>position,outerSize:async()=>({width:300,height:300}),scaleFactor:async()=>1},
 };
 globalThis.performance={now:()=>clock};
 globalThis.window={setTimeout:(fn,ms)=>{const id=++timerId;timers.set(id,{fn,ms});return id;},clearTimeout:id=>timers.delete(id),
@@ -32,9 +32,22 @@ try{
  for(let i=0;i<180;i++)await tick();
  assert.equal(coordinator.physicsInFlight,false);assert.ok(coordinator.physicsLane);assert.equal(maxInFlight,1,'only one native positioning request is pending');
  const restingWrites=writes.length;for(let i=0;i<20;i++)await tick();assert.equal(writes.length,restingWrites,'resting pet does not issue redundant native moves');
+ assert.equal(position.y+300,800,'the full pet window rests flush with the screen bottom');
+ events.get('drag:released')({windowLabel:'vivian',payload:{vx:1400,vy:-1600}});
+ for(let i=0;i<20;i++)await tick();
+ assert.equal(writes.length,restingWrites,'throwing Vivian must not reset or launch resting Nana');
+ coordinator.fullscreenHidden=true;await tick();
+ position={x:200,y:200};world.windows=[{id:'foreground-cover',x:0,y:100,width:1200,height:650}];
+ coordinator.fullscreenHidden=false;for(let i=0;i<180;i++)await tick();
+ assert.equal(position.y+300,800,'resuming behind a covering window must not invent a container floor');
+ world.windows=[];
  dom.get('mousedown')();const before=writes.length;for(let i=0;i<4;i++)await tick();assert.equal(writes.length,before,'pointer input suspends physics');
  coordinator.dragInFlight=true;dom.get('mouseup')();await tick();assert.equal(writes.length,before,'native drag keeps ownership after WebView mouseup');
- coordinator.dragInFlight=false;position={x:300,y:200};events.get('drag:released')({payload:{vx:400,vy:-400}});await tick();await tick();assert.ok(position.x>300&&position.y<200,'release momentum reaches the actual native movement loop');
+ coordinator.dragInFlight=false;position={x:300,y:200};events.get('drag:released')({windowLabel:'nana',payload:{vx:400,vy:-400}});await tick();await tick();assert.ok(position.x>300&&position.y<200,'release momentum reaches the actual native movement loop');
+ assert.equal(emitted.length,0,'a throw without a ceiling collision never emits dizzy');
+ position={x:300,y:10};events.get('drag:released')({windowLabel:'nana',payload:{vx:0,vy:-1800}});await tick();await tick();
+ assert.equal(emitted.length,1);assert.equal(emitted[0][0],'nana');assert.equal(emitted[0][1],'drag:dizzy');
+ assert.equal(emitted[0][2].reason,'edge_bounce');assert.ok(emitted[0][2].duration_ms>=1400,'a hard ceiling hit reaches the pet expression listener');
  coordinator.fullscreenHidden=true;const hiddenWrites=writes.length;await tick();await tick();assert.equal(writes.length,hiddenWrites,'fullscreen hiding wins');coordinator.fullscreenHidden=false;
  coordinator.fleeInFlight=true;await tick();assert.equal(writes.length,hiddenWrites,'fleeing wins');coordinator.fleeInFlight=false;
  coordinator.ambientMoveInFlight=true;await tick();assert.equal(writes.length,hiddenWrites,'frontend walking receives no competing physics moves');coordinator.ambientMoveInFlight=false;

@@ -11,6 +11,7 @@
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import { invoke, convertFileSrc } from '@tauri-apps/api/core';
 import { listen, emit, type UnlistenFn } from '@tauri-apps/api/event';
@@ -18,14 +19,12 @@ import { open } from '@tauri-apps/plugin-dialog';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import {
   Check,
-  ChevronDown,
-  ChevronUp,
   Code,
   FileText,
   LayoutTemplate,
-  ListChecks,
-  MousePointerClick,
   NotebookPen,
+  Maximize,
+  Minimize,
   Palette,
   Pencil,
   Plus,
@@ -36,13 +35,14 @@ import {
 } from 'lucide-react';
 import { useNavigation } from '../NavigationContext';
 import {
-  AddableBlockType,
-  Block,
   NoteBook,
   CharacterId,
 } from './notebook-types';
-import { WysiwygEditor } from './NoteWysiwyg';
+
+import { NotebookPageEditor } from './NotebookPageEditor';
 import './RecordTheme.css';
+import { comicText } from '../../../i18n/comic';
+import { ComicChapterHeading, ComicChapterInset } from './ComicChapter';
 
 // ============================================================
 // 类型定义
@@ -111,34 +111,11 @@ const LAYOUT_LABELS: Record<string, Record<string, string>> = {
   ja: { cover_flow: 'ハンドブック', article: '読みもの', gallery: '画帳', simple: '短いメモ' },
 };
 
-const BLOCK_TYPES: AddableBlockType[] = [
-  'heading',
-  'paragraph',
-  'card',
-  'quote',
-  'list',
-  'tags',
-  'image',
-  'divider',
-  'callout',
-  'table',
-  'chart',
-  'mermaid',
-  'custom',
-];
-
-const CHAR_LABEL: Record<CharacterId, string> = {
-  vivian: 'Vivian',
-  nana: 'Nana',
-};
-
-const CHARACTERS: CharacterId[] = ['vivian', 'nana'];
-
 // ============================================================
 // 工具函数
 // ============================================================
 
-function formatTime(ts: number): string {
+function formatTime(ts: number, language: string): string {
   const d = new Date(ts * 1000);
   const now = new Date();
   const diff = now.getTime() - d.getTime();
@@ -146,58 +123,16 @@ function formatTime(ts: number): string {
   const hours = Math.floor(diff / 3600000);
   const days = Math.floor(diff / 86400000);
 
-  if (mins < 1) return '刚刚';
-  if (mins < 60) return `${mins}分钟前`;
-  if (hours < 24) return `${hours}小时前`;
-  if (days < 7) return `${days}天前`;
-  return d.toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' });
+  if (mins < 1) return comicText('justNow', language);
+  if (mins < 60) return new Intl.RelativeTimeFormat(language, { numeric: 'always' }).format(-mins, 'minute');
+  if (hours < 24) return new Intl.RelativeTimeFormat(language, { numeric: 'always' }).format(-hours, 'hour');
+  if (days < 7) return new Intl.RelativeTimeFormat(language, { numeric: 'always' }).format(-days, 'day');
+  return d.toLocaleDateString(language, { month: 'short', day: 'numeric' });
 }
 
 function layoutLabel(value: string, lang: string): string {
   const table = LAYOUT_LABELS[lang] || LAYOUT_LABELS['zh-CN'];
   return table[value] || value;
-}
-
-// 只接受 AddableBlockType：meta 块由采集链路写入，不提供新增入口
-function defaultBlock(type: AddableBlockType): Block {
-  switch (type) {
-    case 'heading':
-      return { type: 'heading', text: '', level: 2 };
-    case 'paragraph':
-      return { type: 'paragraph', text: '' };
-    case 'card':
-      return { type: 'card', title: '', body: '' };
-    case 'quote':
-      return { type: 'quote', text: '', author: '' };
-    case 'list':
-      return { type: 'list', items: [''], ordered: false };
-    case 'tags':
-      return { type: 'tags', items: [''] };
-    case 'image':
-      return { type: 'image', url: '', caption: '' };
-    case 'divider':
-      return { type: 'divider' };
-    case 'callout':
-      return { type: 'callout', text: '' };
-    case 'table':
-      return { type: 'table', headers: [''], rows: [['']], caption: '' };
-    case 'chart':
-      return {
-        type: 'chart',
-        chart_type: 'bar',
-        title: '',
-        categories: ['类别 A', '类别 B'],
-        series: [{ name: '系列 1', data: [10, 20] }],
-      };
-    case 'mermaid':
-      return {
-        type: 'mermaid',
-        code: 'graph TD\n  A[开始] --> B[过程]\n  B --> C[结束]',
-        caption: '',
-      };
-    case 'custom':
-      return { type: 'custom', html: '' };
-  }
 }
 
 function emptyDraft(charId: CharacterId): NoteBook {
@@ -209,10 +144,10 @@ function emptyDraft(charId: CharacterId): NoteBook {
     created_at: now,
     updated_at: now,
     tags: [],
-    layout: 'cover_flow',
+    layout: 'article',
     palette: 'warm',
     cover: null,
-    blocks: [defaultBlock('paragraph')],
+    blocks: [{ type: 'paragraph', text: '' }],
   };
 }
 
@@ -236,31 +171,13 @@ const Blank: React.FC<{
   </div>
 );
 
-const CastSwitch: React.FC<{
-  value: CharacterId;
-  onChange: (c: CharacterId) => void;
-}> = ({ value, onChange }) => (
-  <div className="rec-cast" role="group">
-    {CHARACTERS.map((id) => (
-      <button
-        key={id}
-        type="button"
-        onClick={() => onChange(id)}
-        className={`rec-cast-item${value === id ? ' is-active' : ''}`}
-        aria-pressed={value === id}
-      >
-        <span className="rec-cast-dot" />
-        {CHAR_LABEL[id]}
-      </button>
-    ))}
-  </div>
-);
-
 // ============================================================
 // NotebookPage 主组件
 // ============================================================
 
-const NotebookPage: React.FC = () => {
+const CHARACTER_IDS: CharacterId[] = ['vivian', 'nana'];
+
+const NotebookPage: React.FC<{ embedded?: boolean; compact?: boolean }> = ({ embedded = false, compact = false }) => {
   const { t, i18n } = useTranslation();
   const nav = useNavigation();
   const [character, setCharacter] = useState<CharacterId>('vivian');
@@ -271,6 +188,18 @@ const NotebookPage: React.FC = () => {
   const [html, setHtml] = useState<string>('');
   const [loading, setLoading] = useState(false);
   const [loadingHtml, setLoadingHtml] = useState(false);
+  const [readingFullscreen, setReadingFullscreen] = useState(false);
+  const readingRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!readingFullscreen) return;
+    const previousFocus = document.activeElement as HTMLElement | null;
+    readingRef.current?.focus();
+    const escape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') { event.preventDefault(); setReadingFullscreen(false); }
+    };
+    window.addEventListener('keydown', escape, true);
+    return () => { window.removeEventListener('keydown', escape, true); previousFocus?.focus(); };
+  }, [readingFullscreen]);
   // 预览宿主：用 iframe（src = asset 协议 URL）渲染完整 HTML 文档。renderer/LLM 输出
   // 的笔记是自包含完整文档（html/body/:root 及各种复合选择器）。以 asset URL 加载使
   // 笔记文档与应用窗口跨源隔离——笔记内的脚本/按钮只能作用于笔记自身文档，无法影响
@@ -287,11 +216,11 @@ const NotebookPage: React.FC = () => {
   const [editError, setEditError] = useState<string | null>(null);
 
   // 加载笔记列表
-  const loadNotes = useCallback(async (charId: string) => {
+  const loadNotes = useCallback(async (_charId: string) => {
     setLoading(true);
     try {
-      const list = await invoke<NoteSummary[]>('list_notebooks', { charId });
-      setNotes(list);
+      const lists = await Promise.all(CHARACTER_IDS.map(charId => invoke<NoteSummary[]>('list_notebooks', { charId })));
+      setNotes(lists.flat().sort((a, b) => b.updated_at - a.updated_at || a.id.localeCompare(b.id)));
     } catch (e) {
       console.error('加载笔记列表失败:', e);
       setNotes([]);
@@ -314,11 +243,11 @@ const NotebookPage: React.FC = () => {
       //   为跨源（cross-origin），笔记内脚本只能作用于笔记自身文档，实现隔离。
       // - 笔记内相对路径（如 fonts/ma-shan-zheng.woff2）相对 note.html 解析，
       //   与笔记文档同源，字体无需改写即可加载。
-      setHtml(result.html_path ? convertFileSrc(result.html_path) : '');
+      setHtml(result.html_path ? convertFileSrc(result.html_path) : `data:text/html;charset=utf-8,${encodeURIComponent(result.html)}`);
     } catch (e) {
       console.error('加载笔记 HTML 失败:', e);
       // html 现为 asset URL（iframe src），加载失败时以 data URL 呈现错误提示
-      setHtml('data:text/html;charset=utf-8,' + encodeURIComponent('<div style="padding:40px;text-align:center;color:#999;font-family:sans-serif;">加载失败</div>'));
+      setHtml('data:text/html;charset=utf-8,' + encodeURIComponent(`<div style="padding:40px;text-align:center;color:#999;font-family:sans-serif;">${t('comic.readFailed')}</div>`));
     } finally {
       setLoadingHtml(false);
     }
@@ -379,7 +308,7 @@ const NotebookPage: React.FC = () => {
     let cancelled = false;
     const unlistens: (() => void)[] = [];
     const refresh = (charId?: string) => {
-      if (!charId || charId === character) {
+      if (!charId || CHARACTER_IDS.includes(charId as CharacterId)) {
         void loadNotes(character);
       }
     };
@@ -456,7 +385,7 @@ const NotebookPage: React.FC = () => {
     async (noteId: string, e: React.MouseEvent) => {
       e.stopPropagation();
       try {
-        await invoke('delete_notebook', { charId: character, noteId });
+        await invoke('delete_notebook', { charId: notes.find(note => note.id === noteId)?.char_id ?? character, noteId });
         if (selectedId === noteId) {
           setSelectedId(null);
           setHtml('');
@@ -465,7 +394,7 @@ const NotebookPage: React.FC = () => {
         console.error('删除笔记失败:', err);
       }
     },
-    [character, selectedId],
+    [character, selectedId, notes],
   );
 
   // ===== 编辑相关 =====
@@ -576,13 +505,13 @@ const NotebookPage: React.FC = () => {
   }, [dirty, t]);
 
   const saveEdit = useCallback(async () => {
-    if (!draft) return;
+    if (!draft || saving) return;
     if (!draft.title.trim()) {
       setEditError(t('notebook.title') + ' ?');
       return;
     }
     if (draft.blocks.length === 0) {
-      setEditError(t('notebook.add_block'));
+      setEditError(t('notebook.content_required', { defaultValue: '请先写一点页面正文' }));
       return;
     }
     setSaving(true);
@@ -628,66 +557,29 @@ const NotebookPage: React.FC = () => {
     } finally {
       setSaving(false);
     }
-  }, [draft, isNew, character, t, loadNotes]);
-
-  // 块操作
-  const updateBlock = useCallback(
-    (idx: number, patch: Partial<Block>) => {
-      patchDraft((d) => ({
-        ...d,
-        blocks: d.blocks.map((b, i) => (i === idx ? ({ ...b, ...patch } as Block) : b)),
-      }));
-    },
-    [patchDraft],
-  );
-
-  const removeBlock = useCallback(
-    (idx: number) => {
-      patchDraft((d) => ({ ...d, blocks: d.blocks.filter((_, i) => i !== idx) }));
-    },
-    [patchDraft],
-  );
-
-  const moveBlock = useCallback(
-    (idx: number, dir: -1 | 1) => {
-      patchDraft((d) => {
-        const next = idx + dir;
-        if (next < 0 || next >= d.blocks.length) return d;
-        const blocks = [...d.blocks];
-        [blocks[idx], blocks[next]] = [blocks[next], blocks[idx]];
-        return { ...d, blocks };
-      });
-    },
-    [patchDraft],
-  );
-
-  const addBlock = useCallback(
-    // 用 AddableBlockType：meta 块只能由采集链路写入，用户不提供新增入口
-    (type: AddableBlockType) => {
-      patchDraft((d) => ({ ...d, blocks: [...d.blocks, defaultBlock(type)] }));
-    },
-    [patchDraft],
-  );
+  }, [draft, saving, isNew, character, t, loadNotes]);
 
   const selectedNote = notes.find((n) => n.id === selectedId);
+  // A reading panel in the shared book opens with actual content. Never replace
+  // an explicit deep link or an in-progress new note / edit.
+  useEffect(() => {
+    if (embedded && !selectedId && !editing && notes.length) { setCharacter(notes[0].char_id as CharacterId); setSelectedId(notes[0].id); }
+  }, [embedded, selectedId, editing, notes]);
 
   // ============================================================
   // 渲染
   // ============================================================
 
   return (
+    <section className={`comic-chapter comic-notebook${editing ? ' is-editing' : ''}`}>
+    {!embedded && <ComicChapterHeading number="03" title={editing ? '写到这一格' : '还没说完的话'} caption="灵感、摘录，还有想留下的片段。" image="notebook-letter-v31" position="50% 50%" />}
     <div className="record-note">
       {/* === 左：笔记索引 === */}
-      <div className="record-note-index">
+      <div className="record-note-index" hidden={compact}>
+        {!embedded && <ComicChapterInset image={character === 'vivian' ? 'vivian-line-phone-v25' : 'nana-listening-v22'}
+          caption={character === 'vivian' ? '先记住，再慢慢想。' : '把喜欢的片段收好。'} />}
         <div className="record-note-index-head">
-          <CastSwitch
-            value={character}
-            onChange={(id) => {
-              setCharacter(id);
-              setSelectedId(null);
-              setHtml('');
-            }}
-          />
+          <span className="record-note-library-title"><NotebookPen size={18} />{t('notebook.tag_all')}<span>{notes.length}</span></span>
           <span className="record-note-index-head-spacer" />
           <button
             type="button"
@@ -754,7 +646,7 @@ const NotebookPage: React.FC = () => {
                 key={note.id}
                 note={note}
                 active={note.id === selectedId}
-                onClick={() => setSelectedId(note.id)}
+                onClick={() => { setCharacter(note.char_id as CharacterId); setSelectedId(note.id); }}
                 onDelete={(e) => void handleDelete(note.id, e)}
               />
             ))
@@ -775,10 +667,6 @@ const NotebookPage: React.FC = () => {
             lang={i18n.language}
             t={t}
             onPatch={patchDraft}
-            onUpdateBlock={updateBlock}
-            onRemoveBlock={removeBlock}
-            onMoveBlock={moveBlock}
-            onAddBlock={addBlock}
             onSave={() => void saveEdit()}
             onCancel={cancelEdit}
           />
@@ -790,7 +678,7 @@ const NotebookPage: React.FC = () => {
                 <span className="record-note-work-title-text">{selectedNote.title}</span>
               </div>
               <div className="rec-meta">
-                <span>{formatTime(selectedNote.updated_at)}</span>
+                <span>{formatTime(selectedNote.updated_at, i18n.resolvedLanguage ?? i18n.language)}</span>
                 <span>
                   {selectedNote.render_type === 'raw_html'
                     ? 'HTML'
@@ -809,10 +697,14 @@ const NotebookPage: React.FC = () => {
                   <Pencil size={13} /> {t('notebook.edit')}
                 </button>
               )}
+              {!compact && <button type="button" className="rec-icon-btn" onClick={() => setReadingFullscreen(true)}
+                title={t('comic.noteFullscreen')} aria-label={t('comic.noteFullscreen')} disabled={loadingHtml || !html}>
+                <Maximize size={16} />
+              </button>}
             </div>
             {/* 笔记预览（iframe src = asset URL 渲染完整文档，跨源隔离） */}
             <div className="record-note-work-body">
-              {loadingHtml && (
+              {loadingHtml && !compact && (
                 <div
                   style={{
                     position: 'absolute',
@@ -836,12 +728,13 @@ const NotebookPage: React.FC = () => {
                 src={html}
                 sandbox="allow-same-origin"
                 className="record-note-frame"
+                scrolling={compact ? 'no' : undefined}
               />
             </div>
           </>
         ) : (
           <div className="record-note-work-body">
-            <Blank
+            {!compact && <Blank
               icon={NotebookPen}
               title={t('notebook.select_hint')}
               hint={t('notebook.import_drop_hint', { defaultValue: '或将 .html 文件拖入此窗口' })}
@@ -850,11 +743,19 @@ const NotebookPage: React.FC = () => {
                 <Upload size={14} />
                 {t('notebook.import_html', { defaultValue: '导入 HTML 文件' })}
               </button>
-            </Blank>
+            </Blank>}
           </div>
         )}
       </div>
     </div>
+    {readingFullscreen && selectedNote && createPortal(
+      <div className="notebook-fullscreen-reader" ref={readingRef} tabIndex={-1} role="dialog" aria-modal="true" aria-label={selectedNote.title}>
+        <header><span>{selectedNote.title}</span><button type="button" className="rec-icon-btn" title={t('comic.noteExitFullscreen')} aria-label={t('comic.noteExitFullscreen')} onClick={() => setReadingFullscreen(false)}>
+          <Minimize size={16} />
+        </button></header>
+        <iframe title={selectedNote.title} src={html} sandbox="allow-same-origin" />
+      </div>, document.body)}
+    </section>
   );
 };
 
@@ -868,7 +769,7 @@ const NoteRow: React.FC<{
   onClick: () => void;
   onDelete: (e: React.MouseEvent) => void;
 }> = ({ note, active, onClick, onDelete }) => {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   return (
     <div
       role="button"
@@ -898,7 +799,7 @@ const NoteRow: React.FC<{
         </span>
       )}
       <span className="record-note-row-foot">
-        <span>{formatTime(note.updated_at)}</span>
+        <span>{formatTime(note.updated_at, i18n.resolvedLanguage ?? i18n.language)}</span>
         <span className="record-note-row-foot-spacer" />
         <button
           type="button"
@@ -928,10 +829,6 @@ const NoteEditor: React.FC<{
   lang: string;
   t: (key: string, opts?: Record<string, unknown>) => string;
   onPatch: (updater: (d: NoteBook) => NoteBook) => void;
-  onUpdateBlock: (idx: number, patch: Partial<Block>) => void;
-  onRemoveBlock: (idx: number) => void;
-  onMoveBlock: (idx: number, dir: -1 | 1) => void;
-  onAddBlock: (type: AddableBlockType) => void;
   onSave: () => void;
   onCancel: () => void;
 }> = ({
@@ -944,15 +841,10 @@ const NoteEditor: React.FC<{
   lang,
   t,
   onPatch,
-  onUpdateBlock,
-  onRemoveBlock,
-  onMoveBlock,
-  onAddBlock,
   onSave,
   onCancel,
 }) => {
-  const [addType, setAddType] = useState<AddableBlockType>('paragraph');
-  const [mode, setMode] = useState<'form' | 'wysiwyg'>('wysiwyg');
+  const [sourceError, setSourceError] = useState(false);
   const showCover = draft.layout === 'cover_flow' || draft.layout === 'gallery';
   const cover = draft.cover;
   // 自定义 CSS 与palette 互斥：开启时 palette 选择器要禁用（后端会忽略它）
@@ -985,29 +877,10 @@ const NoteEditor: React.FC<{
           )}
         </div>
 
-        <div className="rec-seg">
-          <button
-            type="button"
-            onClick={() => setMode('wysiwyg')}
-            title={t('notebook.mode_wysiwyg')}
-            className={`rec-seg-item${mode === 'wysiwyg' ? ' is-active' : ''}`}
-          >
-            <MousePointerClick size={13} /> {t('notebook.mode_wysiwyg')}
-          </button>
-          <button
-            type="button"
-            onClick={() => setMode('form')}
-            title={t('notebook.mode_form')}
-            className={`rec-seg-item${mode === 'form' ? ' is-active' : ''}`}
-          >
-            <ListChecks size={13} /> {t('notebook.mode_form')}
-          </button>
-        </div>
-
         <button type="button" onClick={onCancel} disabled={saving} className="rec-btn">
           <X size={13} /> {t('common.cancel')}
         </button>
-        <button type="button" onClick={onSave} disabled={saving} className="rec-btn is-primary">
+        <button type="button" onClick={onSave} disabled={saving || sourceError} className="rec-btn is-primary">
           <Check size={13} /> {saving ? t('common.saving') : t('common.save')}
         </button>
       </div>
@@ -1026,6 +899,8 @@ const NoteEditor: React.FC<{
             />
           </div>
 
+          <details className="note-page-settings">
+            <summary>{lang.startsWith('zh') ? '外观与属性 · 配色、布局、标签、封面、CSS' : 'Appearance & properties · palette, layout, tags, cover, CSS'}</summary>
           <div className="rec-field">
             <label className="rec-label">
               <span style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
@@ -1153,7 +1028,7 @@ const NoteEditor: React.FC<{
             <input
               className="rec-input"
               value={tagsText}
-              placeholder="美食, 旅行, 攻略"
+              placeholder={t('comic.noteTagsExample')}
               onChange={(e) =>
                 onPatch((d) => ({
                   ...d,
@@ -1240,72 +1115,11 @@ const NoteEditor: React.FC<{
             </div>
           )}
 
-          {/* 内容块：可视化编辑 / 表单编辑 */}
-          {mode === 'wysiwyg' ? (
-            <WysiwygEditor
-              blocks={draft.blocks}
-              onUpdateBlock={onUpdateBlock}
-              onRemoveBlock={onRemoveBlock}
-              onMoveBlock={onMoveBlock}
-              onAddBlock={onAddBlock}
-              t={t}
-            />
-          ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--rec-gap-3)' }}>
-              <div className="rec-label">
-                <span style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
-                  <ListChecks size={13} /> {t('notebook.blocks')}
-                  <span className="rec-label-hint">({draft.blocks.length})</span>
-                </span>
-              </div>
-              {draft.blocks.map((block, idx) => (
-                <BlockEditor
-                  key={idx}
-                  block={block}
-                  index={idx}
-                  total={draft.blocks.length}
-                  t={t}
-                  onUpdate={(patch) => onUpdateBlock(idx, patch)}
-                  onRemove={() => onRemoveBlock(idx)}
-                  onMove={(dir) => onMoveBlock(idx, dir)}
-                />
-              ))}
-              {draft.blocks.length === 0 && (
-                <div
-                  style={{
-                    padding: 'var(--rec-gap-5)',
-                    textAlign: 'center',
-                    border: 'var(--rec-line)',
-                    borderRadius: 'var(--rec-radius)',
-                    color: 'var(--rec-faint)',
-                    fontSize: 'var(--rec-fs-meta)',
-                  }}
-                >
-                  {t('notebook.add_block')}
-                </div>
-              )}
-            </div>
-          )}
+          </details>
 
-          {/* 添加块 */}
-          <div style={{ display: 'flex', gap: 'var(--rec-gap-2)', paddingTop: 'var(--rec-gap-2)' }}>
-            <select
-              value={addType}
-              onChange={(e) => setAddType(e.target.value as AddableBlockType)}
-              className="rec-select"
-              style={{ flex: 1 }}
-            >
-              {BLOCK_TYPES.map((bt) => (
-                <option key={bt} value={bt}>
-                  {bt}
-                </option>
-              ))}
-            </select>
-            <button type="button" onClick={() => onAddBlock(addType)} className="rec-btn is-primary">
-              <Plus size={14} /> {t('notebook.add_block')}
-            </button>
-          </div>
-
+          <NotebookPageEditor note={draft} lang={lang} onSave={onSave} saving={saving}
+            onValidityChange={setSourceError}
+            onChange={blocks => onPatch(d => blocks === null ? { ...d } : { ...d, blocks })} />
           {/* 错误提示 */}
           {error && (
             <div
@@ -1322,392 +1136,6 @@ const NoteEditor: React.FC<{
             </div>
           )}
         </div>
-      </div>
-    </div>
-  );
-};
-
-// ============================================================
-// BlockEditor 子组件（单块编辑器）
-// ============================================================
-
-const BlockEditor: React.FC<{
-  block: Block;
-  index: number;
-  total: number;
-  t: (key: string, opts?: Record<string, unknown>) => string;
-  onUpdate: (patch: Partial<Block>) => void;
-  onRemove: () => void;
-  onMove: (dir: -1 | 1) => void;
-}> = ({ block, index, total, t, onUpdate, onRemove, onMove }) => {
-  const { type } = block;
-
-  // 各类型字段的文本化取值。Block 是判别联合，字段挂在具体成员上，
-  // 所以这里按 type 收窄后取，而不是在联合上直接读（那会编译不过）。
-  const itemsText = type === 'list' || type === 'tags' ? (block.items || []).join('\n') : '';
-  const tagsValue = type === 'tags' ? (block.items || []).join(', ') : '';
-  const tableHeadersText = type === 'table' ? (block.headers || []).join('\n') : '';
-  const tableRowsText =
-    type === 'table' ? (block.rows || []).map((r: string[]) => r.join('\t')).join('\n') : '';
-  const chartCatsText = type === 'chart' ? (block.categories || []).join('\n') : '';
-  const chartSeriesText =
-    type === 'chart'
-      ? (block.series || [])
-          .map((s: { name: string; data: number[] }) => `${s.name}\t${s.data.join(',')}`)
-          .join('\n')
-      : '';
-
-  return (
-    <div className="record-note-block">
-      <div className="record-note-block-head">
-        <span className="rec-tag is-accent">{type}</span>
-        <span className="record-note-block-head-spacer" />
-        <button
-          type="button"
-          disabled={index === 0}
-          title={t('notebook.move_up')}
-          onClick={() => onMove(-1)}
-          className="rec-icon-btn"
-        >
-          <ChevronUp size={14} />
-        </button>
-        <button
-          type="button"
-          disabled={index === total - 1}
-          title={t('notebook.move_down')}
-          onClick={() => onMove(1)}
-          className="rec-icon-btn"
-        >
-          <ChevronDown size={14} />
-        </button>
-        <button
-          type="button"
-          title={t('notebook.delete_block')}
-          onClick={onRemove}
-          className="rec-icon-btn is-danger"
-        >
-          <Trash2 size={14} />
-        </button>
-      </div>
-
-      <div className="record-note-block-fields">
-        {type === 'heading' && (
-          <div className="record-note-block-row">
-            <div style={{ flex: '0 0 90px' }}>
-              <label className="rec-label">{t('notebook.level')}</label>
-              <select
-                className="rec-select"
-                value={block.level}
-                onChange={(e) => onUpdate({ level: Number(e.target.value) } as Partial<Block>)}
-              >
-                <option value={1}>H1</option>
-                <option value={2}>H2</option>
-                <option value={3}>H3</option>
-              </select>
-            </div>
-            <div style={{ flex: 1 }}>
-              <label className="rec-label">{t('notebook.text')}</label>
-              <input
-                className="rec-input"
-                value={block.text}
-                onChange={(e) => onUpdate({ text: e.target.value } as Partial<Block>)}
-              />
-            </div>
-          </div>
-        )}
-
-        {type === 'paragraph' && (
-          <div className="rec-field">
-            <label className="rec-label">{t('notebook.text')}</label>
-            <textarea
-              className="rec-textarea"
-              value={block.text}
-              onChange={(e) => onUpdate({ text: e.target.value } as Partial<Block>)}
-            />
-          </div>
-        )}
-
-        {type === 'card' && (
-          <>
-            <div className="rec-field">
-              <label className="rec-label">{t('notebook.cover_title')}</label>
-              <input
-                className="rec-input"
-                value={block.title || ''}
-                onChange={(e) => onUpdate({ title: e.target.value } as Partial<Block>)}
-              />
-            </div>
-            <div className="rec-field">
-              <label className="rec-label">{t('notebook.body')}</label>
-              <textarea
-                className="rec-textarea"
-                value={block.body}
-                onChange={(e) => onUpdate({ body: e.target.value } as Partial<Block>)}
-              />
-            </div>
-                      </>
-        )}
-
-        {type === 'quote' && (
-          <>
-            <div className="rec-field">
-              <label className="rec-label">{t('notebook.text')}</label>
-              <textarea
-                className="rec-textarea"
-                value={block.text}
-                onChange={(e) => onUpdate({ text: e.target.value } as Partial<Block>)}
-              />
-            </div>
-            <div className="rec-field">
-              <label className="rec-label">{t('notebook.author')}</label>
-              <input
-                className="rec-input"
-                value={block.author || ''}
-                onChange={(e) => onUpdate({ author: e.target.value } as Partial<Block>)}
-              />
-            </div>
-          </>
-        )}
-
-        {type === 'list' && (
-          <>
-            <label className="record-note-block-check">
-              <input
-                type="checkbox"
-                checked={block.ordered || false}
-                onChange={(e) => onUpdate({ ordered: e.target.checked } as Partial<Block>)}
-              />
-              {t('notebook.ordered')}
-            </label>
-            <div className="rec-field">
-              <label className="rec-label">
-                {t('notebook.text')}{' '}
-                <span className="rec-label-hint">{t('notebook.items_hint')}</span>
-              </label>
-              <textarea
-                className="rec-textarea"
-                value={itemsText}
-                onChange={(e) =>
-                  onUpdate({ items: e.target.value.split('\n') } as Partial<Block>)
-                }
-              />
-            </div>
-          </>
-        )}
-
-        {type === 'tags' && (
-          <div className="rec-field">
-            <label className="rec-label">
-              {t('notebook.tags')}{' '}
-              <span className="rec-label-hint">{t('notebook.items_hint')}</span>
-            </label>
-            <textarea
-              className="rec-textarea"
-              value={tagsValue}
-              onChange={(e) =>
-                onUpdate({
-                  items: e.target.value.split(',').map((s) => s.trim()).filter(Boolean),
-                } as Partial<Block>)
-              }
-            />
-          </div>
-        )}
-
-        {type === 'image' && (
-          <>
-            <div className="rec-field">
-              <label className="rec-label">{t('notebook.url')}</label>
-              <input
-                className="rec-input"
-                value={block.url}
-                onChange={(e) => onUpdate({ url: e.target.value } as Partial<Block>)}
-              />
-            </div>
-            <div className="rec-field">
-              <label className="rec-label">{t('notebook.caption')}</label>
-              <input
-                className="rec-input"
-                value={block.caption || ''}
-                onChange={(e) => onUpdate({ caption: e.target.value } as Partial<Block>)}
-              />
-            </div>
-          </>
-        )}
-
-        {type === 'divider' && (
-          <div className="rec-field">
-            <p className="rec-label-hint">
-              {t('notebook.divider_hint', { defaultValue: '分割线（无线可设置）' })}
-            </p>
-          </div>
-        )}
-
-        {type === 'callout' && (
-          <>
-            <div className="rec-field">
-              <label className="rec-label">{t('notebook.text')}</label>
-              <textarea
-                className="rec-textarea"
-                value={block.text}
-                onChange={(e) => onUpdate({ text: e.target.value } as Partial<Block>)}
-              />
-            </div>
-                      </>
-        )}
-
-        {type === 'table' && (
-          <>
-            <div className="rec-field">
-              <label className="rec-label">
-                {t('notebook.table_headers')}{' '}
-                <span className="rec-label-hint">{t('notebook.items_hint')}</span>
-              </label>
-              <textarea
-                className="rec-textarea"
-                value={tableHeadersText}
-                placeholder={'城市\t人均预算'}
-                onChange={(e) =>
-                  onUpdate({
-                    headers: e.target.value.split('\n').filter(Boolean),
-                  } as Partial<Block>)
-                }
-              />
-            </div>
-            <div className="rec-field">
-              <label className="rec-label">
-                {t('notebook.table_rows')}{' '}
-                <span className="rec-label-hint">{t('notebook.table_rows_hint')}</span>
-              </label>
-              <textarea
-                className="rec-textarea"
-                style={{ minHeight: 100, fontFamily: 'var(--claude-sans)', fontSize: 12 }}
-                value={tableRowsText}
-                placeholder={'成都\t1200\n重庆\t800'}
-                onChange={(e) =>
-                  onUpdate({
-                    rows: e.target.value
-                      .split('\n')
-                      .filter((line) => line.trim() !== '')
-                      .map((line) => line.split('\t')),
-                  } as Partial<Block>)
-                }
-              />
-            </div>
-            <div className="rec-field">
-              <label className="rec-label">{t('notebook.caption')}</label>
-              <input
-                className="rec-input"
-                value={block.caption || ''}
-                onChange={(e) => onUpdate({ caption: e.target.value } as Partial<Block>)}
-              />
-            </div>
-          </>
-        )}
-
-        {type === 'chart' && (
-          <>
-            <div className="record-note-block-row">
-              <div style={{ flex: '0 0 110px' }}>
-                <label className="rec-label">{t('notebook.chart_type')}</label>
-                <select
-                  className="rec-select"
-                  value={block.chart_type}
-                  onChange={(e) => onUpdate({ chart_type: e.target.value } as Partial<Block>)}
-                >
-                  <option value="bar">柱状图</option>
-                  <option value="line">折线图</option>
-                  <option value="pie">饼图</option>
-                </select>
-              </div>
-              <div style={{ flex: 1 }}>
-                <label className="rec-label">{t('notebook.chart_title')}</label>
-                <input
-                  className="rec-input"
-                  value={block.title || ''}
-                  onChange={(e) => onUpdate({ title: e.target.value } as Partial<Block>)}
-                />
-              </div>
-            </div>
-            <div className="rec-field">
-              <label className="rec-label">
-                {t('notebook.chart_categories')}{' '}
-                <span className="rec-label-hint">{t('notebook.items_hint')}</span>
-              </label>
-              <textarea
-                className="rec-textarea"
-                value={chartCatsText}
-                placeholder={'季度1\n季度2\n季度3'}
-                onChange={(e) =>
-                  onUpdate({
-                    categories: e.target.value.split('\n').filter(Boolean),
-                  } as Partial<Block>)
-                }
-              />
-            </div>
-            <div className="rec-field">
-              <label className="rec-label">
-                {t('notebook.chart_series')}{' '}
-                <span className="rec-label-hint">{t('notebook.chart_series_hint')}</span>
-              </label>
-              <textarea
-                className="rec-textarea"
-                style={{ minHeight: 90, fontFamily: 'var(--claude-sans)', fontSize: 12 }}
-                value={chartSeriesText}
-                placeholder={'销售额\t120,180,240'}
-                onChange={(e) =>
-                  onUpdate({
-                    series: e.target.value
-                      .split('\n')
-                      .filter((line) => line.trim() !== '')
-                      .map((line) => {
-                        const [name, dataStr] = line.split('\t');
-                        const data = (dataStr || '')
-                          .split(',')
-                          .map((v) => Number(v.trim()))
-                          .filter((n) => !Number.isNaN(n));
-                        return { name: name || '系列', data };
-                      }),
-                  } as Partial<Block>)
-                }
-              />
-            </div>
-          </>
-        )}
-
-        {type === 'mermaid' && (
-          <>
-            <div className="rec-field">
-              <label className="rec-label">{t('notebook.mermaid_code')}</label>
-              <textarea
-                className="rec-textarea"
-                style={{ minHeight: 140, fontFamily: 'var(--claude-sans)', fontSize: 12 }}
-                value={block.code}
-                placeholder={'graph TD\n  A[开始] --> B[过程]\n  B --> C[结束]'}
-                onChange={(e) => onUpdate({ code: e.target.value } as Partial<Block>)}
-              />
-            </div>
-            <div className="rec-field">
-              <label className="rec-label">{t('notebook.caption')}</label>
-              <input
-                className="rec-input"
-                value={block.caption || ''}
-                onChange={(e) => onUpdate({ caption: e.target.value } as Partial<Block>)}
-              />
-            </div>
-          </>
-        )}
-
-        {type === 'custom' && (
-          <div className="rec-field">
-            <label className="rec-label">{t('notebook.html')}</label>
-            <textarea
-              className="rec-textarea"
-              style={{ minHeight: 100, fontFamily: 'var(--claude-sans)', fontSize: 12 }}
-              value={block.html}
-              onChange={(e) => onUpdate({ html: e.target.value } as Partial<Block>)}
-            />
-          </div>
-        )}
       </div>
     </div>
   );

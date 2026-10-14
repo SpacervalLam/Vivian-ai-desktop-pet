@@ -3471,3 +3471,9 @@ Scheduler 的每个提醒出现实例携带持久化 `notices`，独立记录显
 已删除左侧对话面板及其预创建、左缘轮询、滑动、锁定、输入区域穿透、路由和权限，右侧菜单不再有对话按钮。右侧菜单和聊天窗口外部点击看护以独立名称保留。文字/长按语音快捷键通过 open_quick_input 打开共享轻量输入窗口，按鼠标所在显示器的工作区和 DPI 使用物理坐标定位，靠近边缘时自动夹紧；QuickInputWindow 在订阅完成后通知 ready，避免首次打开丢失配置。私聊与群发保持原消息发送渠道，输入框保留图片草稿和悄悄话。
 
 快捷输入采用统一圆角卡片：Vivian 淡黄、Nana 淡紫、广播淡黄与淡紫渐变；支持浅色/深色、图片草稿、语音和悄悄话。三组默认快捷键分别为 Ctrl+Shift+V / N / B，旧默认自动迁移；笔记本旧 Ctrl+Shift+N 改为 Ctrl+Shift+M，避免与 Nana 冲突。右键单击桌宠打开对应输入框，右键不触发左键的按压/拖拽动作。
+
+### 右缘快捷菜单的运动模式三态按钮
+
+原本并排的「避让」与「重力」两个独立按钮合并为一个三态按钮，点击按 `重力 → 避让 → 静止` 轮换，图标与文案始终显示**当前**态，tooltip 预告下一次点击的结果。两个开关本就有「同时关闭」这一合法组合（`enforce_movement_exclusion` 只保证不同时为真、不要求必有一个开启），所以三态才是完整状态空间，而不是从两个开关里硬挤出来的。
+
+状态与轮换顺序由 `desktop_menu_policy::MovementMode` 单独承载（`from_flags` / `next` / `flags` / `id`），前后端共用同一份语义：`edge_menu_status` 额外下发 `movement_mode` 字段，前端不再自己从两个布尔值推断；点击发 `movement_mode` 动作，服务端 `system_tray::cycle_movement` 在同一把配置写锁内同时写回两个开关位并整体回滚，避免出现「避让与重力同时为真」的中间态，随后照常广播 `config:saved` 触发菜单刷新。系统托盘仍保留两个独立的单模式勾选项（`toggle_movement`），只有侧边栏做了合并。高亮沿用旧语义：`重力` / `避让` 为选中态（蓝底），`静止` 不高亮。验证：tests/chat-edge-menu.test.mjs（三态槽位数、高亮/`aria-pressed`、轮换顺序）与 `desktop_menu_policy` 的 `movement_mode_cycles_*` 用例。

@@ -23,7 +23,7 @@ fn item_to_value(item: &crate::memory::types::MemoryItem) -> Value {
 pub async fn get_memory_conversations(state: State<'_, Arc<AppState>>, character_id: Option<String>)
     -> Result<Vec<crate::memory::conversations::ConversationRecord>, String> {
     let character = state.get_character(character_id.as_deref())?;
-    character.brain.dialogue.memory_conversations().map_err(err_str)
+    character.brain.dialogue.visible_memory_conversations().map_err(err_str)
 }
 
 #[tauri::command]
@@ -56,7 +56,7 @@ pub async fn get_memories(
             m.metadata
                 .get("source")
                 .and_then(|v| v.as_str())
-                .map_or(true, |s| s != "system_seed" && s != "environment_preset")
+                .map_or(true, |s| s != "system_seed" && s != "environment_preset" && s != "quiet_control")
         })
         .map(|mut m| {
             m.embedding = None;

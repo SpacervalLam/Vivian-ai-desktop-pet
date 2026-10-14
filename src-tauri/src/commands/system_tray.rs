@@ -38,7 +38,6 @@ mod menu_id {
     pub const MEMORY: &str = "memory";
     pub const SETTINGS: &str = "settings";
     pub const CHAT: &str = "chat";
-    pub const DESKTOP: &str = "desktop_assistant";
     pub const VOICE: &str = "voice";
     pub const SMART_POSITIONING: &str = "smart_positioning";
     pub const DESKTOP_PHYSICS: &str = "desktop_physics";
@@ -83,7 +82,6 @@ pub fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
     let memory = MenuItem::with_id(app, menu_id::MEMORY, "详情", true, None::<&str>)?;
     let settings = MenuItem::with_id(app, menu_id::SETTINGS, "设置", true, None::<&str>)?;
     let chat = MenuItem::with_id(app, menu_id::CHAT, "聊天", true, None::<&str>)?;
-    let desktop = MenuItem::with_id(app, menu_id::DESKTOP, "桌面助手", true, None::<&str>)?;
     let sep1 = PredefinedMenuItem::separator(app)?;
     let voice = CheckMenuItem::with_id(app, menu_id::VOICE, "语音开关", true, true, None::<&str>)?;
     let smart_positioning = CheckMenuItem::with_id(
@@ -111,7 +109,6 @@ pub fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
             &memory,
             &settings,
             &chat,
-            &desktop,
             &sep1,
             &voice,
             &smart_positioning,
@@ -218,6 +215,30 @@ pub(crate) fn toggle_movement(app: &AppHandle, action: &str) -> Result<(), Strin
         let old = config.get_all().window;
         let next = !config.get_typed(key, false);
         config.set_no_save(key, json!(next)).map_err(err_str)?;
+        if let Err(error) = config.save() {
+            let _ = config.set_no_save("window.smart_positioning_enabled", json!(old.smart_positioning_enabled));
+            let _ = config.set_no_save("window.desktop_physics_enabled", json!(old.desktop_physics_enabled));
+            return Err(err_str(error));
+        }
+    }
+    sync_movement_checks(app);
+    app.emit("config:saved", ()).map_err(err_str)
+}
+
+/// 侧边栏三态按钮：按 `重力 → 避让 → 静止` 循环运动模式。
+///
+/// 与 `toggle_movement` 一样在同一把锁内同时读写两个开关位，
+/// 因此不会出现「重力与避让同时为真」的中间态；失败时整体回滚。
+pub(crate) fn cycle_movement(app: &AppHandle) -> Result<(), String> {
+    use crate::desktop_menu_policy::MovementMode;
+    let state = app.state::<std::sync::Arc<AppState>>();
+    {
+        let config = state.config.write();
+        let old = config.get_all().window;
+        let next = MovementMode::from_flags(old.smart_positioning_enabled, old.desktop_physics_enabled).next();
+        let (smart, gravity) = next.flags();
+        config.set_no_save("window.smart_positioning_enabled", json!(smart)).map_err(err_str)?;
+        config.set_no_save("window.desktop_physics_enabled", json!(gravity)).map_err(err_str)?;
         if let Err(error) = config.save() {
             let _ = config.set_no_save("window.smart_positioning_enabled", json!(old.smart_positioning_enabled));
             let _ = config.set_no_save("window.desktop_physics_enabled", json!(old.desktop_physics_enabled));
