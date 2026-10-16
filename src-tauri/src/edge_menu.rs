@@ -24,6 +24,7 @@ static CHAT_GENERATION: AtomicU64 = AtomicU64::new(0);
 static MENU_MOTION_GENERATION: AtomicU64 = AtomicU64::new(0);
 static CHAT_MOTION_GENERATION: AtomicU64 = AtomicU64::new(0);
 static CHAT_ENTERING: AtomicBool = AtomicBool::new(false);
+static CHAT_CLOSING: AtomicBool = AtomicBool::new(false);
 
 fn geometry(app: &AppHandle) -> Result<(f64, f64, f64, f64, f64), String> {
     let active = app.state::<Arc<AppState>>().active_character_id.read().clone();
@@ -273,6 +274,7 @@ pub async fn open_chat(app: &AppHandle, origin: &str, panel: Option<&str>, chara
         if matches!(event, tauri::WindowEvent::Destroyed) && CHAT_GENERATION.load(Ordering::Acquire) == generation {
             CHAT_READY.store(false, Ordering::Release);
             CHAT_ENTERING.store(false, Ordering::Release);
+            CHAT_CLOSING.store(false, Ordering::Release);
             CHAT_MOTION_GENERATION.fetch_add(1, Ordering::AcqRel);
         }
     });
@@ -289,19 +291,56 @@ pub fn show_chat(window: &WebviewWindow) -> Result<(), String> {
     crate::commands::window::thaw_webview(window);
     window.set_ignore_cursor_events(false).map_err(|e| e.to_string())?;
     // Focus and navigation of an already visible chat never replay its entrance.
-    if window.is_visible().map_err(|e| e.to_string())? || CHAT_ENTERING.load(Ordering::Acquire) { return Ok(()); }
+    let reopening = CHAT_CLOSING.swap(false, Ordering::AcqRel);
+    if reopening {
+        CHAT_MOTION_GENERATION.fetch_add(1, Ordering::AcqRel);
+        CHAT_ENTERING.store(false, Ordering::Release);
+    }
+    if !reopening && (window.is_visible().map_err(|e| e.to_string())? || CHAT_ENTERING.load(Ordering::Acquire)) { return Ok(()); }
     let (right, _, _, _, scale) = geometry(window.app_handle())?;
     let size = window.outer_size().map_err(|e| e.to_string())?;
     let position = window.outer_position().map_err(|e| e.to_string())?;
     let right = (right * scale).round() as i32;
+    let from = if reopening { position.x } else { right };
     if CHAT_ENTERING.swap(true, Ordering::AcqRel) { return Ok(()); }
     let window = window.clone();
     let generation = CHAT_GENERATION.load(Ordering::Acquire);
     thread::spawn(move || {
-        slide_window_in(&window, right, right - size.width as i32, position.y, &CHAT_MOTION_GENERATION);
+        slide_window_in(&window, from, right - size.width as i32, position.y, &CHAT_MOTION_GENERATION);
         if CHAT_GENERATION.load(Ordering::Acquire) == generation { CHAT_ENTERING.store(false, Ordering::Release); }
     });
     Ok(())
+}
+
+/// Reverse the native entrance, destroying the WebView only after it leaves the screen.
+/// Run on a worker: each frame and the final destruction are dispatched to the UI thread.
+pub fn close_chat(window: &WebviewWindow) -> Result<(), String> {
+    let (right, _, _, _, scale) = geometry(window.app_handle())?;
+    let position = window.outer_position().map_err(|e| e.to_string())?;
+    if CHAT_CLOSING.swap(true, Ordering::AcqRel) { return Ok(()); }
+    let generation = CHAT_MOTION_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
+    CHAT_ENTERING.store(false, Ordering::Release);
+    let right = (right * scale).round() as i32;
+    let started = Instant::now();
+    loop {
+        if CHAT_MOTION_GENERATION.load(Ordering::Acquire) != generation { return Ok(()); }
+        if STOP.load(Ordering::Acquire) || crate::commands::desktop_assistant::screen_capture_in_progress() { break; }
+        let elapsed = started.elapsed();
+        let x = crate::desktop_menu_policy::menu_slide_x(position.x, right, elapsed);
+        if !move_slide_frame(window, x, position.y, generation, &CHAT_MOTION_GENERATION) { break; }
+        if elapsed >= crate::desktop_menu_policy::MENU_SLIDE_DURATION { break; }
+        thread::sleep(Duration::from_millis(8));
+    }
+    let closing = window.clone();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    window.app_handle().run_on_main_thread(move || {
+        let result = if CHAT_MOTION_GENERATION.load(Ordering::Acquire) == generation {
+            CHAT_CLOSING.store(false, Ordering::Release);
+            closing.destroy().map_err(|e| e.to_string())
+        } else { Ok(()) };
+        let _ = sender.send(result);
+    }).map_err(|e| e.to_string())?;
+    receiver.recv_timeout(Duration::from_secs(1)).map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -396,7 +435,7 @@ fn open_office(app: &AppHandle) -> Result<(), String> {
         return window.emit("memory:navigate", json!({"page":"code"})).map_err(|e| e.to_string());
     }
     WebviewWindowBuilder::new(app, "memory", WebviewUrl::App("index.html?view=memory&nav=code".into()))
-        .title("心智观察器").inner_size(1260.0, 896.0).min_inner_size(900.0, 600.0).center()
+        .title("房间").inner_size(1260.0, 896.0).min_inner_size(900.0, 600.0).center()
         .decorations(false).fullscreen(true).visible(false).build().map_err(|e| e.to_string())?;
     Ok(())
 }

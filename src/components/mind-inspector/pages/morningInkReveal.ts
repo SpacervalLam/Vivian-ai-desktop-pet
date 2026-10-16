@@ -1,7 +1,5 @@
 /** One shared ink front in page coordinates, clipped separately inside each shot. */
 export function startMorningInkReveal(stage: HTMLElement) {
-  const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-  if (reduced) return { stop() {} };
   const layers = [...stage.querySelectorAll<HTMLElement>('.morning-panel .image-wrap')].map(wrap => {
     const original = wrap.querySelector<HTMLImageElement>('img')!;
     const color = original.cloneNode() as HTMLImageElement;
@@ -15,7 +13,7 @@ export function startMorningInkReveal(stage: HTMLElement) {
   });
   let frame = 0;
   const started = performance.now();
-  const revealAt = 3110; // Wake entrance at 2610ms, then wait 500ms.
+  const revealAt = 3800; // Wake entrance at 3300ms, then wait 500ms.
   const duration = 2000;
   function clean() {
     layers.forEach(({ original, color }) => { original.style.removeProperty('filter'); color.remove(); });

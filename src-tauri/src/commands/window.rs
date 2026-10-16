@@ -332,6 +332,7 @@ pub fn start_cursor_tracking(
         // 上一帧是否处于拖拽状态，用于检测拖拽结束的瞬间
         let mut prev_is_dragging = false;
         let mut drag_observation: Option<(Instant, f64, f64, f64, f64)> = None;
+        let mut drag_session_id: Option<String> = None;
         while !stop_flag_clone.load(Ordering::SeqCst) && !APP_EXITING.load(Ordering::SeqCst) {
             // 获取本角色窗口
             let win = match app_clone.get_webview_window(&char_id_for_thread) {
@@ -357,6 +358,7 @@ pub fn start_cursor_tracking(
                 drag_samples.clear();
                 prev_is_dragging = false;
                 drag_observation = None;
+                drag_session_id = None;
                 thread::sleep(Duration::from_millis(60));
                 continue;
             }
@@ -402,6 +404,7 @@ pub fn start_cursor_tracking(
             //   导致桌宠持续闪烁。）
 
             if is_dragging {
+                if drag_observation.is_none() { drag_session_id = Some(uuid::Uuid::new_v4().to_string()); }
                 update_drag_position(&label, c.x as i32, c.y as i32, |x, y| {
                     move_window(&win, x, y);
                 });
@@ -433,18 +436,22 @@ pub fn start_cursor_tracking(
             // 拖拽结束瞬间：按松手前的光标轨迹计算初速度，触发惯性甩飞。
             // 覆盖正常 mouseup（前端 stop_window_drag）和 watchdog 兜底两条路径。
             if prev_is_dragging && !is_dragging {
+                let session_id = drag_session_id.take();
                 let v = release_velocity(
                     &drag_samples,
                     (Instant::now(), c.x, c.y),
                     win.scale_factor().unwrap_or(1.0),
                 );
                 if let Some((started, _, _, distance, peak)) = drag_observation.take() {
-                    // Ignore click jitter, holds and reactions already covered by fling.
-                    if distance >= 20.0 && v.is_none() {
+                    // Observe all real drags, including flings. Rebounds share the session ID.
+                    let scale = win.scale_factor().unwrap_or(1.0).max(0.5);
+                    if distance / scale >= 20.0 {
                         let _ = win.emit_to(&label, "drag:interaction", json!({
                             "duration_ms": started.elapsed().as_millis() as u64,
-                            "distance_px": distance,
-                            "speed_px_per_ms": peak,
+                            "distance_px": distance / scale,
+                            "speed_px_per_ms": peak / scale,
+                            "session_id": &session_id,
+                            "flung": v.is_some(),
                         }));
                     }
                 }
@@ -452,9 +459,9 @@ pub fn start_cursor_tracking(
                 let physics_enabled = app_clone.state::<Arc<crate::state::AppState>>().config.read().get_all().window.desktop_physics_enabled;
                 if physics_enabled {
                     let (vx, vy) = v.unwrap_or((0.0, 0.0));
-                    let _ = win.emit_to(&label, "drag:released", json!({ "vx": vx * 1000.0, "vy": vy * 1000.0 }));
+                    let _ = win.emit_to(&label, "drag:released", json!({ "vx": vx * 1000.0, "vy": vy * 1000.0, "session_id": &session_id }));
                 } else if let Some((fvx, fvy)) = v {
-                    start_fling(win.clone(), &label, fvx, fvy);
+                    start_fling(win.clone(), &label, fvx, fvy, session_id);
                 }
             }
             prev_is_dragging = is_dragging;
@@ -723,7 +730,7 @@ fn resolve_axis_collision(
 /// 「撞边晕乎乎」仅在**甩飞速度本帧把窗口从界内推出顶部边界**时触发；
 /// 窗口本来就在墙边（被智能避让/环境走动/全屏隐藏挪过去）时，边缘夹紧只是
 /// 几何修正，不触发晕眩——避免桌宠自己走到墙边也晕乎乎。
-fn start_fling(win: WebviewWindow, label: &str, vx: f64, vy: f64) {
+fn start_fling(win: WebviewWindow, label: &str, vx: f64, vy: f64, session_id: Option<String>) {
     #[cfg(windows)]
     {
         use windows::Win32::UI::WindowsAndMessaging::{
@@ -855,6 +862,7 @@ fn start_fling(win: WebviewWindow, label: &str, vx: f64, vy: f64) {
                                 "duration_ms": dizzy_ms,
                                 "reason": "edge_bounce",
                                 "impact": impact / scale,
+                                "session_id": &session_id,
                             }),
                         );
                     }
@@ -876,7 +884,7 @@ fn start_fling(win: WebviewWindow, label: &str, vx: f64, vy: f64) {
 
     #[cfg(not(windows))]
     {
-        let _ = (win, label, vx, vy);
+        let _ = (win, label, vx, vy, session_id);
     }
 }
 
@@ -1069,8 +1077,11 @@ pub fn show_chat_animated(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn close_chat_window(app: AppHandle) -> Result<(), String> {
-    if let Some(win) = app.get_webview_window("chat") { win.destroy().map_err(err_str)?; }
+pub async fn close_chat_window(app: AppHandle) -> Result<(), String> {
+    if let Some(win) = app.get_webview_window("chat") {
+        tauri::async_runtime::spawn_blocking(move || crate::edge_menu::close_chat(&win))
+            .await.map_err(err_str)??;
+    }
     Ok(())
 }
 

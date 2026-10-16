@@ -58,7 +58,7 @@ export default function ComicOverview({ data, pageIndex, onTurn, active = true, 
     }
   }
   function startHand(direction: 'gripping' | 'releasing') {
-    if (!stage.current?.querySelector('#skirt-hand') || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    if (!stage.current?.querySelector('#skirt-hand')) return;
     window.clearTimeout(handTimer.current);
     window.clearTimeout(handHoldTimer.current);
     handState.current = direction;
@@ -122,7 +122,7 @@ export default function ComicOverview({ data, pageIndex, onTurn, active = true, 
     const entering = active && animatedRevision.current !== animationKey;
     handReady.current = !entering;
     if (entering) {
-      node.dataset.scriptAnimationEnd = String(performance.now() + comicScriptDuration(page, window.matchMedia('(prefers-reduced-motion: reduce)').matches));
+      node.dataset.scriptAnimationEnd = String(performance.now() + comicScriptDuration(page));
     }
     if (entering) {
       // Returning from the office remounts the book. Reset CSS playback too,
@@ -204,13 +204,13 @@ export default function ComicOverview({ data, pageIndex, onTurn, active = true, 
     arrange();
     const stopTypewriter = entering && (page === 1 || page === 8) ? startRainTypewriter(node, page === 8 ? 0 : 350) : undefined;
     const inkReveal = entering && page === 9 ? startMorningInkReveal(node) : undefined;
-    if (entering && page === 4 && !mobileRef.current && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    if (entering && page === 4 && !mobileRef.current) {
       const panel = node.querySelector<HTMLElement>('#together')?.parentElement;
       if (panel) fullPanelReveal = startFullPanelReveal(panel, () => !mobileRef.current);
     }
     if (page === 7) {
       insetPanelReveal = startInsetPanelReveal(node, () => !mobileRef.current,
-        entering && !mobileRef.current && !window.matchMedia('(prefers-reduced-motion: reduce)').matches,
+        entering && !mobileRef.current,
         () => {
           const alreadyReady = handReady.current;
           handReady.current = true;
@@ -223,7 +223,7 @@ export default function ComicOverview({ data, pageIndex, onTurn, active = true, 
     nanaPanel?.classList.remove('crop-ready');
     const cropReadyTimer = nanaPanel ? window.setTimeout(() => {
       nanaPanel.classList.add('crop-ready');
-    }, entering && !window.matchMedia('(prefers-reduced-motion: reduce)').matches ? handInsetSettledAt : 0) : undefined;
+    }, entering ? handInsetSettledAt : 0) : undefined;
     const resize = new ResizeObserver(arrange);
     resize.observe(node.parentElement!);
     return () => {
@@ -246,7 +246,7 @@ export default function ComicOverview({ data, pageIndex, onTurn, active = true, 
   useEffect(() => () => window.clearTimeout(wheelIdle.current), []);
 
   useEffect(() => {
-    // Desktop starts from the crop's final painted frame; mobile uses its CSS entrance duration.
+    // Without the animated desktop crop, wait for the same story cue explicitly.
     const initial = active && page === 7 && mobileRef.current ? window.setTimeout(() => {
       handReady.current = true;
       playHand();
@@ -305,7 +305,7 @@ export default function ComicOverview({ data, pageIndex, onTurn, active = true, 
     }} onPointerUp={e => finish(e)} onPointerCancel={e => finish(e, true)} onPointerOver={e => {
       const shot = (e.target as Element).closest<HTMLElement>('.scene-3 .shot');
       if (shot && !(e.relatedTarget instanceof Node && shot.contains(e.relatedTarget))) {
-        if (!window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+        {
           let float = hoverFloats.current.get(shot.id);
           if (!float) {
             const id = shot.id;

@@ -893,7 +893,7 @@ const TrajectoryPanel: React.FC<TrajectoryPanelProps> = ({ messages, running, to
   if (records.length === 0) {
     return (
       <div className="codex-info-card">
-        <div className="codex-info-title"><GitFork size={13} /> {t('mind_inspector.code_inspector_trajectory')}</div>
+        <div className="codex-info-title"><GitFork size={13} /> {t('workflow.events')}</div>
         <div className="codex-empty-note">
           {running ? t('mind_inspector.code_traj_running') : t('mind_inspector.code_traj_empty')}
         </div>
@@ -954,7 +954,7 @@ const TrajectoryPanel: React.FC<TrajectoryPanelProps> = ({ messages, running, to
         // 可聚焦：方向键 / PageUp / PageDown / Home / End 直接滚动列表
         tabIndex={0}
         role="list"
-        aria-label={t('mind_inspector.code_inspector_trajectory')}
+        aria-label={t('workflow.events')}
         onScroll={onTableScroll}
       >
         {virtualizationEnabled ? (

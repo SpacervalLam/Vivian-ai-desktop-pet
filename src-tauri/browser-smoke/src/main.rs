@@ -1,0 +1,839 @@
+#[path = "../../../src-tauri/src/embedded_browser/mod.rs"]
+mod embedded_browser;
+#[path = "../../../src-tauri/src/browser_bridge/service.rs"]
+mod native_browser_service;
+static BROWSER_SERVICE: once_cell::sync::OnceCell<
+    std::sync::Arc<native_browser_service::BridgeState>,
+> = once_cell::sync::OnceCell::new();
+#[path = "../../../src-tauri/src/utils/fs.rs"]
+pub mod fs;
+pub mod utils {
+    pub use crate::fs;
+    pub mod path {
+        pub fn get_user_data_dir() -> std::path::PathBuf {
+            std::path::PathBuf::from(std::env::var_os("VIVIAN_BROWSER_TEST_DIR").unwrap())
+        }
+    }
+}
+use embedded_browser::{model::*, native};
+use std::{
+    io::{Read, Write},
+    net::TcpListener,
+};
+static EXIT_CODE: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(1);
+
+async fn wait(
+    app: &tauri::AppHandle,
+    predicate: impl Fn(&BrowserSnapshot) -> bool,
+) -> BrowserSnapshot {
+    let mut last = None;
+    for _ in 0..300 {
+        let state = native::request(app.clone(), "memory".into(), BrowserRequest::Init)
+            .await
+            .unwrap();
+        if let Some(error) = &state.error {
+            panic!("Native browser error: {error}");
+        }
+        if predicate(&state) {
+            return state;
+        }
+        last = Some(state);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!("Timed out waiting for browser state: {last:?}");
+}
+async fn smoke(app: tauri::AppHandle, base: String) {
+    println!("Checking navigation and profile isolation...");
+    let state = wait(&app, |s| s.tabs.first().is_some_and(|t| !t.loading)).await;
+    let first = state.active.unwrap();
+    native::layout(
+        app.clone(),
+        "memory".into(),
+        BrowserBounds {
+            x: 10.0,
+            y: 100.0,
+            width: 800.0,
+            height: 500.0,
+        },
+        true,
+        1,
+    )
+    .await
+    .unwrap();
+    native::request(
+        app.clone(),
+        "memory".into(),
+        BrowserRequest::Navigate {
+            id: first.clone(),
+            input: format!("{base}/one"),
+        },
+    )
+    .await
+    .unwrap();
+    wait(&app, |s| {
+        s.tabs
+            .iter()
+            .any(|t| t.id == first && !t.loading && t.title == "one")
+    })
+    .await;
+    println!("Checking native viewport capture for browser overlays...");
+    let frame = native::automation::capture_viewport(&app, &first).await.unwrap();
+    assert!(frame.starts_with("data:image/png;base64,iVBOR"));
+    assert!(frame.len() > 512, "capture must contain viewport pixels");
+    std::fs::write(crate::utils::path::get_user_data_dir().join("overlay-frame.json"), serde_json::to_string(&frame).unwrap()).unwrap();
+    let state = native::request(app.clone(), "memory".into(), BrowserRequest::Init).await.unwrap();
+    assert_eq!(state.active.as_deref(), Some(first.as_str()));
+    assert_eq!(state.tabs.iter().find(|tab| tab.id == first).unwrap().url, format!("{base}/one"), "capture must not navigate or replace the live page");
+    println!("Checking bookmark rename and saved metadata...");
+    for page in ["bookmarks", "downloads", "history", "extensions"] {
+        let url = format!("about:blank#vivian-{page}");
+        let internal = native::request(app.clone(), "memory".into(), BrowserRequest::NewTab { input:url.clone(), private:false }).await.unwrap();
+        let id = internal.active.unwrap();
+        let internal = wait(&app, |state| state.tabs.iter().any(|tab| tab.id == id && tab.url == url && !tab.loading)).await;
+        assert!(internal.tabs.iter().find(|tab| tab.id == id).unwrap().start, "internal page must keep the native viewport hidden");
+        assert!(!internal.history.iter().any(|entry| entry.url == url), "management pages are not web history");
+        assert!(internal.saved().tabs.iter().any(|tab| tab.url == url), "management tabs survive session restoration");
+        native::request(app.clone(), "memory".into(), BrowserRequest::Close { id }).await.unwrap();
+    }
+    native::request(app.clone(), "memory".into(), BrowserRequest::Select { id:first.clone() }).await.unwrap();
+    let original = native::request(app.clone(), "memory".into(), BrowserRequest::Bookmark { id:first.clone() }).await.unwrap().bookmarks[0].clone();
+    let renamed = native::request(app.clone(), "memory".into(), BrowserRequest::RenameBookmark { url:original.url.clone(), title:"  Custom bookmark  ".into() }).await.unwrap();
+    assert_eq!(renamed.bookmarks[0].title, "Custom bookmark");
+    assert_eq!(renamed.bookmarks[0].url, original.url);
+    assert_eq!(renamed.bookmarks[0].at, original.at);
+    assert_eq!(renamed.saved().bookmarks[0].title, "Custom bookmark");
+    assert!(native::request(app.clone(), "memory".into(), BrowserRequest::RenameBookmark { url:original.url.clone(), title:"   ".into() }).await.is_err());
+    native::request(app.clone(), "memory".into(), BrowserRequest::RemoveBookmark { url:original.url }).await.unwrap();
+    if std::env::var_os("VIVIAN_BROWSER_OVERLAY_ONLY").is_some() {
+        assert!(native::automation::capture_viewport(&app, "inactive-tab").await.is_err());
+        native::request(app.clone(), "memory".into(), BrowserRequest::Navigate { id:first.clone(), input:format!("{base}/overlay") }).await.unwrap();
+        wait(&app, |state| state.tabs.iter().any(|tab| tab.id == first && !tab.loading && tab.title == "overlay fixture")).await;
+        native::layout(app.clone(), "memory".into(), BrowserBounds { x:10.0, y:100.0, width:800.0, height:500.0 }, false, 2).await.unwrap();
+        native::layout(app.clone(), "memory".into(), BrowserBounds { x:10.0, y:100.0, width:800.0, height:500.0 }, true, 3).await.unwrap();
+        let restored = native::automation::capture_viewport(&app, &first).await.unwrap();
+        assert!(restored.starts_with("data:image/png;base64,iVBOR"));
+        assert!(restored.len() > 512);
+        std::fs::write(crate::utils::path::get_user_data_dir().join("overlay-frame.json"), serde_json::to_string(&restored).unwrap()).unwrap();
+        let state = native::request(app.clone(), "memory".into(), BrowserRequest::Init).await.unwrap();
+        assert_eq!(state.tabs.iter().find(|tab| tab.id == first).unwrap().url, format!("{base}/overlay"));
+        println!("PASS: real WebView2 viewport capture, active-tab guard, hide/restore and page preservation.");
+        EXIT_CODE.store(0, std::sync::atomic::Ordering::Relaxed); app.exit(0); return;
+    }
+    native::request(
+        app.clone(),
+        "memory".into(),
+        BrowserRequest::Navigate {
+            id: first.clone(),
+            input: format!("{base}/two"),
+        },
+    )
+    .await
+    .unwrap();
+    wait(&app, |s| {
+        s.tabs
+            .iter()
+            .any(|t| t.id == first && !t.loading && t.title == "storage-retained" && t.can_back)
+    })
+    .await;
+    native::request(
+        app.clone(),
+        "memory".into(),
+        BrowserRequest::Action {
+            id: first.clone(),
+            name: "back".into(),
+            text: String::new(),
+        },
+    )
+    .await
+    .unwrap();
+    wait(&app, |s| {
+        s.tabs
+            .iter()
+            .any(|t| t.id == first && !t.loading && t.title == "one" && t.can_forward)
+    })
+    .await;
+    native::request(
+        app.clone(),
+        "memory".into(),
+        BrowserRequest::Action {
+            id: first.clone(),
+            name: "forward".into(),
+            text: String::new(),
+        },
+    )
+    .await
+    .unwrap();
+    wait(&app, |s| {
+        s.tabs
+            .iter()
+            .any(|t| t.id == first && !t.loading && t.title == "storage-retained")
+    })
+    .await;
+    let state = native::request(
+        app.clone(),
+        "memory".into(),
+        BrowserRequest::Bookmark { id: first.clone() },
+    )
+    .await
+    .unwrap();
+    assert_eq!(state.bookmarks.len(), 1);
+    let state = native::request(
+        app.clone(),
+        "memory".into(),
+        BrowserRequest::Action {
+            id: first.clone(),
+            name: "zoom_in".into(),
+            text: String::new(),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(state.tabs.iter().find(|t| t.id == first).unwrap().zoom > 1.0);
+    native::request(
+        app.clone(),
+        "memory".into(),
+        BrowserRequest::NewTab {
+            input: format!("{base}/two"),
+            private: true,
+        },
+    )
+    .await
+    .unwrap();
+    let state = wait(&app, |s| {
+        s.tabs
+            .iter()
+            .any(|t| t.private && !t.loading && t.title == "private-isolated")
+    })
+    .await;
+    assert!(state.saved().tabs.iter().all(|t| !t.private));
+    let private = state.tabs.iter().find(|t| t.private).unwrap().id.clone();
+    agent_smoke(&app, &base, &first, &private).await;
+    native::request(
+        app.clone(),
+        "memory".into(),
+        BrowserRequest::Navigate {
+            id: first.clone(),
+            input: format!("{base}/open-popup"),
+        },
+    )
+    .await
+    .unwrap();
+    let state = wait(&app, |s| {
+        s.tabs.iter().any(|t| t.title == "popup-has-opener")
+    })
+    .await;
+    let popup = state
+        .tabs
+        .iter()
+        .find(|t| t.title == "popup-has-opener")
+        .unwrap()
+        .id
+        .clone();
+    println!("Checking popup close...");
+    native::request(
+        app.clone(),
+        "memory".into(),
+        BrowserRequest::Navigate {
+            id: popup.clone(),
+            input: format!("{base}/close"),
+        },
+    )
+    .await
+    .unwrap();
+    wait(&app, |s| s.tabs.iter().all(|t| t.id != popup)).await;
+    native::request(
+        app.clone(),
+        "memory".into(),
+        BrowserRequest::Navigate {
+            id: first.clone(),
+            input: format!("{base}/open-blank"),
+        },
+    )
+    .await
+    .unwrap();
+    let state = wait(&app, |s| s.tabs.iter().any(|t| t.title == "blank-popup")).await;
+    let blank = state
+        .tabs
+        .iter()
+        .find(|t| t.title == "blank-popup")
+        .unwrap();
+    assert_eq!(blank.url, "about:blank");
+    assert!(
+        !blank.start,
+        "script-created about:blank pages must use the native surface"
+    );
+    native::request(
+        app.clone(),
+        "memory".into(),
+        BrowserRequest::Close {
+            id: blank.id.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    println!("Checking find and site data cleanup...");
+    native::request(
+        app.clone(),
+        "memory".into(),
+        BrowserRequest::Select { id: first.clone() },
+    )
+    .await
+    .unwrap();
+    native::request(
+        app.clone(),
+        "memory".into(),
+        BrowserRequest::Navigate {
+            id: first.clone(),
+            input: format!("{base}/two"),
+        },
+    )
+    .await
+    .unwrap();
+    wait(&app, |s| {
+        s.tabs
+            .iter()
+            .any(|t| t.id == first && t.title == "storage-retained")
+    })
+    .await;
+    native::request(
+        app.clone(),
+        "memory".into(),
+        BrowserRequest::Action {
+            id: first.clone(),
+            name: "find".into(),
+            text: "two".into(),
+        },
+    )
+    .await
+    .unwrap();
+    native::request(
+        app.clone(),
+        "memory".into(),
+        BrowserRequest::Action {
+            id: first.clone(),
+            name: "find_stop".into(),
+            text: String::new(),
+        },
+    )
+    .await
+    .unwrap();
+    native::request(
+        app.clone(),
+        "memory".into(),
+        BrowserRequest::Action {
+            id: first.clone(),
+            name: "clear_data".into(),
+            text: String::new(),
+        },
+    )
+    .await
+    .unwrap();
+    wait(&app, |s| {
+        s.tabs
+            .iter()
+            .any(|t| t.id == first && t.title == "private-isolated")
+    })
+    .await;
+    let extension = utils::path::get_user_data_dir().join("fixture-extension");
+    println!("Checking unpacked extension lifecycle...");
+    std::fs::create_dir_all(&extension).unwrap();
+    std::fs::write(extension.join("manifest.json"), r#"{"manifest_version":3,"name":"Vivian smoke extension","version":"1.0","content_scripts":[{"matches":["http://127.0.0.1/*"],"js":["content.js"]}]}"#).unwrap();
+    std::fs::write(
+        extension.join("content.js"),
+        "if(location.pathname==='/extension')document.title='extension-active'",
+    )
+    .unwrap();
+    native::request(
+        app.clone(),
+        "memory".into(),
+        BrowserRequest::Extension {
+            id: String::new(),
+            name: "install".into(),
+            path: extension.to_string_lossy().into(),
+        },
+    )
+    .await
+    .unwrap();
+    let state = wait(&app, |s| {
+        s.extensions
+            .iter()
+            .any(|ext| ext.name == "Vivian smoke extension")
+    })
+    .await;
+    let extension_id = state
+        .extensions
+        .iter()
+        .find(|ext| ext.name == "Vivian smoke extension")
+        .unwrap()
+        .id
+        .clone();
+    native::request(
+        app.clone(),
+        "memory".into(),
+        BrowserRequest::Navigate {
+            id: first.clone(),
+            input: format!("{base}/extension"),
+        },
+    )
+    .await
+    .unwrap();
+    wait(&app, |s| {
+        s.tabs
+            .iter()
+            .any(|t| t.id == first && t.title == "extension-active")
+    })
+    .await;
+    native::request(
+        app.clone(),
+        "memory".into(),
+        BrowserRequest::Extension {
+            id: extension_id.clone(),
+            name: "disable".into(),
+            path: String::new(),
+        },
+    )
+    .await
+    .unwrap();
+    wait(&app, |s| {
+        s.extensions
+            .iter()
+            .any(|ext| ext.id == extension_id && !ext.enabled)
+    })
+    .await;
+    native::request(
+        app.clone(),
+        "memory".into(),
+        BrowserRequest::Extension {
+            id: extension_id.clone(),
+            name: "remove".into(),
+            path: String::new(),
+        },
+    )
+    .await
+    .unwrap();
+    wait(&app, |s| {
+        s.extensions.iter().all(|ext| ext.id != extension_id)
+    })
+    .await;
+    agent_lifecycle(&app, &base, &first).await;
+    native::layout(
+        app.clone(),
+        "memory".into(),
+        BrowserBounds::default(),
+        false,
+        100,
+    )
+    .await
+    .unwrap();
+    native::layout(
+        app.clone(),
+        "memory".into(),
+        BrowserBounds {
+            width: 500.0,
+            height: 300.0,
+            ..Default::default()
+        },
+        true,
+        99,
+    )
+    .await
+    .unwrap();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.run_on_main_thread(move || {
+        native::destroy("memory");
+        let _ = tx.send(());
+    })
+    .unwrap();
+    rx.await.unwrap();
+    println!("PASS: real WebView2 navigation, history, cookies/storage, private isolation, bookmarks, zoom, popup opener/close, native find, clear site data, extensions and ordered layout.");
+    EXIT_CODE.store(0, std::sync::atomic::Ordering::Relaxed);
+    app.exit(0);
+}
+
+async fn browser_tool(
+    app: &tauri::AppHandle,
+    name: &str,
+    args: serde_json::Value,
+    timeout_ms: u64,
+) -> Result<String, String> {
+    let _ = app;
+    BROWSER_SERVICE
+        .get()
+        .unwrap()
+        .request_tool(
+            name,
+            &args,
+            std::time::Duration::from_millis(timeout_ms),
+            Some("smoke-agent"),
+        )
+        .await
+}
+async fn agent_smoke(app: &tauri::AppHandle, base: &str, first: &str, private: &str) {
+    use serde_json::json;
+    println!("Checking authenticated native agent reads, isolated scripts and target affinity...");
+    native::request(
+        app.clone(),
+        "memory".into(),
+        BrowserRequest::Navigate {
+            id: first.into(),
+            input: format!("{base}/account"),
+        },
+    )
+    .await
+    .unwrap();
+    wait(app, |s| {
+        s.tabs
+            .iter()
+            .any(|t| t.id == first && !t.loading && t.title == "fixture account")
+    })
+    .await;
+    let snapshot = browser_tool(app, "browser_snapshot", json!({"tab_id":first}), 10000)
+        .await
+        .unwrap();
+    assert!(snapshot.contains("Logged in as fixture-user"));
+    for secret in [
+        "synthetic-session",
+        "synthetic-password",
+        "synthetic-api-key",
+    ] {
+        assert!(
+            !snapshot.contains(secret),
+            "snapshot exposed a sensitive field"
+        );
+    }
+    let page_text = browser_tool(app, "browser_get_text", json!({}), 10000)
+        .await
+        .unwrap();
+    assert!(page_text.contains("Logged in as fixture-user"));
+    assert!(!page_text.contains("synthetic-api-key"));
+    let credentials = native::automation::credentials(app.clone()).await.unwrap();
+    assert_eq!(credentials.status.len(), 10);
+    assert!(credentials.status.values().all(|logged_in| !*logged_in));
+    assert!(credentials.x.is_none() && credentials.reddit.is_none());
+    let index = snapshot
+        .lines()
+        .find(|line| line.contains("input \"Comment\""))
+        .and_then(|line| line.split('[').nth(1))
+        .and_then(|part| part.split(']').next())
+        .unwrap()
+        .parse::<u64>()
+        .unwrap();
+    native::request(
+        app.clone(),
+        "memory".into(),
+        BrowserRequest::Select { id: private.into() },
+    )
+    .await
+    .unwrap();
+    browser_tool(
+        app,
+        "browser_type",
+        json!({"index":index,"text":"native agent typed","replace":true}),
+        10000,
+    )
+    .await
+    .unwrap();
+    assert!(
+        browser_tool(app, "browser_get_text", json!({"selector":"#typed"}), 10000)
+            .await
+            .unwrap()
+            .contains("native agent typed")
+    );
+    browser_tool(app, "browser_press", json!({"key":"Enter"}), 10000)
+        .await
+        .unwrap();
+    let pressed = browser_tool(app, "browser_get_text", json!({"selector":"#key"}), 10000)
+        .await
+        .unwrap();
+    if !pressed.contains("native-enter") {
+        browser_tool(app, "browser_wait", json!({"ms":100}), 10000)
+            .await
+            .unwrap();
+        let after_wait = browser_tool(app, "browser_get_text", json!({}), 10000)
+            .await
+            .unwrap();
+        panic!("Native key was not observed immediately: {pressed}; after waiting: {after_wait}");
+    }
+    browser_tool(app, "browser_press", json!({"key":"Backspace"}), 10000)
+        .await
+        .unwrap();
+    assert!(
+        browser_tool(app, "browser_get_text", json!({"selector":"#typed"}), 10000)
+            .await
+            .unwrap()
+            .contains("native agent type\n")
+    );
+    assert_eq!(
+        native::request(app.clone(), "memory".into(), BrowserRequest::Init)
+            .await
+            .unwrap()
+            .active
+            .as_deref(),
+        Some(private)
+    );
+    let before = native::request(app.clone(), "memory".into(), BrowserRequest::Init)
+        .await
+        .unwrap();
+    let background = browser_tool(
+        app,
+        "browser_task_tab",
+        json!({"url":format!("{base}/account"),"waitMs":0}),
+        10000,
+    )
+    .await
+    .unwrap();
+    assert!(background.contains("Logged in as fixture-user"));
+    let after = wait(app, |s| s.background_tasks == 0).await;
+    assert_eq!(before.active, after.active);
+    assert_eq!(before.tabs.len(), after.tabs.len());
+    assert_eq!(before.history.len(), after.history.len());
+    assert!(browser_tool(
+        app,
+        "browser_task_tab",
+        json!({"url":format!("{base}/account"),"waitMs":10000}),
+        250
+    )
+    .await
+    .is_err());
+    wait(app, |s| s.background_tasks == 0).await;
+    let handle = app.clone();
+    let url = format!("{base}/account");
+    let cancelled = tauri::async_runtime::spawn(async move {
+        browser_tool(
+            &handle,
+            "browser_task_tab",
+            json!({"url":url,"waitMs":10000}),
+            15000,
+        )
+        .await
+    });
+    wait(app, |s| s.background_tasks == 1).await;
+    cancelled.abort();
+    wait(app, |s| s.background_tasks == 0).await;
+    for invalid in [
+        json!({"url":"javascript:alert(1)"}),
+        json!({"url":"https://user:pass@example.com"}),
+        json!({"url":format!("{base}/account"),"code":"document.cookie"}),
+        json!({"url":format!("{base}/account"),"waitMs":-1}),
+    ] {
+        assert!(browser_tool(app, "browser_task_tab", invalid, 10000)
+            .await
+            .is_err());
+    }
+    native::request(
+        app.clone(),
+        "memory".into(),
+        BrowserRequest::Navigate {
+            id: first.into(),
+            input: format!("{base}/one"),
+        },
+    )
+    .await
+    .unwrap();
+    wait(app, |s| {
+        s.tabs
+            .iter()
+            .any(|t| t.id == first && !t.loading && t.title == "one")
+    })
+    .await;
+    assert!(browser_tool(
+        app,
+        "browser_type",
+        json!({"index":index,"text":"stale action"}),
+        10000
+    )
+    .await
+    .unwrap_err()
+    .contains("snapshot"));
+    native::request(
+        app.clone(),
+        "memory".into(),
+        BrowserRequest::Select { id: first.into() },
+    )
+    .await
+    .unwrap();
+}
+async fn agent_lifecycle(app: &tauri::AppHandle, base: &str, first: &str) {
+    use tauri::Manager;
+    println!("Checking browser session survives inspector closure...");
+    native::request(
+        app.clone(),
+        "memory".into(),
+        BrowserRequest::Navigate {
+            id: first.into(),
+            input: format!("{base}/one"),
+        },
+    )
+    .await
+    .unwrap();
+    wait(app, |s| {
+        s.tabs
+            .iter()
+            .any(|t| t.id == first && !t.loading && t.title == "one")
+    })
+    .await;
+    let handle = app.clone();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.run_on_main_thread(move || {
+        tauri::WebviewWindowBuilder::new(
+            &handle,
+            "keepalive",
+            tauri::WebviewUrl::External("about:blank".parse().unwrap()),
+        )
+        .visible(false)
+        .build()
+        .unwrap();
+        handle
+            .get_webview_window("memory")
+            .unwrap()
+            .close()
+            .unwrap();
+        let _ = tx.send(());
+    })
+    .unwrap();
+    rx.await.unwrap();
+    let text = browser_tool(
+        app,
+        "browser_task_tab",
+        serde_json::json!({"url":format!("{base}/account"),"waitMs":0}),
+        10000,
+    )
+    .await
+    .unwrap();
+    assert!(text.contains("Logged in as fixture-user"));
+    assert!(
+        native::request(app.clone(), "memory".into(), BrowserRequest::Init)
+            .await
+            .unwrap()
+            .tabs
+            .iter()
+            .all(|t| !t.private)
+    );
+    let handle = app.clone();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.run_on_main_thread(move || {
+        tauri::WebviewWindowBuilder::new(
+            &handle,
+            "memory",
+            tauri::WebviewUrl::External("about:blank".parse().unwrap()),
+        )
+        .visible(false)
+        .build()
+        .unwrap();
+        let _ = tx.send(());
+    })
+    .unwrap();
+    rx.await.unwrap();
+    native::layout(
+        app.clone(),
+        "memory".into(),
+        BrowserBounds {
+            width: 800.0,
+            height: 500.0,
+            ..Default::default()
+        },
+        true,
+        1000,
+    )
+    .await
+    .unwrap();
+    assert!(browser_tool(
+        app,
+        "browser_snapshot",
+        serde_json::json!({"tab_id":first}),
+        10000
+    )
+    .await
+    .unwrap()
+    .contains("one"));
+}
+fn main() {
+    let directory =
+        std::env::temp_dir().join(format!("vivian-browser-smoke-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&directory).unwrap();
+    std::env::set_var("VIVIAN_BROWSER_TEST_DIR", &directory);
+    println!("Isolated browser data: {}", directory.display());
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let mut stream = stream.unwrap();
+            let mut buffer = [0; 8192];
+            let n = stream.read(&mut buffer).unwrap();
+            let input = String::from_utf8_lossy(&buffer[..n]);
+            let path = input
+                .lines()
+                .next()
+                .unwrap_or("")
+                .split_whitespace()
+                .nth(1)
+                .unwrap_or("/");
+            let body = match path {
+            "/one" => "<title>one</title><script>localStorage.setItem('browser-smoke','yes');document.cookie='smoke=yes;path=/'</script>one",
+            "/overlay" => "<title>overlay fixture</title><style>body{margin:0;padding:32px;font:16px system-ui;background:#f3f6fb;color:#23334d}h1{font-size:32px}p{color:#61738a}.cards{display:grid;grid-template-columns:repeat(3,1fr);gap:18px;margin-top:28px}.card{height:210px;padding:22px;border-radius:20px;background:#d9e7fa}.card:nth-child(2){background:#e8dff7}.card:nth-child(3){background:#f8ecc6}b{font-size:38px;display:block;margin:25px 0}footer{margin-top:28px;background:white;border-radius:14px;padding:24px}</style><h1>Native browser test page</h1><p>Isolated local fixture - no account or external website data</p><div class=cards><div class=card>Viewport<b>800 x 500</b>Keep the current page</div><div class=card>Browser overlays<b>Menu</b>Downloads and extensions</div><div class=card>Page session<b>Retained</b>No reload or navigation</div></div><footer>Visible page content remains behind the browser controls.</footer>",
+            "/two" => "<script>function check(){document.title=localStorage.getItem('browser-smoke')==='yes'&&document.cookie.includes('smoke=yes')?'storage-retained':'private-isolated'}check();setInterval(check,100)</script>two",
+            "/open-popup" => "<title>opener</title><script>setTimeout(()=>window.open('/popup','smoke-popup'),250)</script>",
+            "/popup" => "<script>document.title=window.opener?'popup-has-opener':'popup-lost-opener'</script>",
+            "/open-blank" => "<title>blank opener</title><script>setTimeout(()=>{const popup=window.open('','blank-popup');popup.document.write('<title>blank-popup</title>script-created page');popup.document.close()},250)</script>",
+            "/close" => "<script>window.close()</script>",
+            "/extension" => "<title>extension-base</title>",
+            "/account" if input.contains("login-session=synthetic-session") => "<title>fixture account</title><main><p>Logged in as fixture-user</p><label for=comment>Comment</label><input id=comment oninput=\"document.getElementById('typed').textContent=this.value\" onkeydown=\"if(event.key==='Enter')document.getElementById('key').textContent='native-enter'\"><input type=password value=synthetic-password><textarea name=api_key>synthetic-api-key</textarea><p id=typed></p><p id=key></p></main><script>globalThis.vivianCreatePage=()=>()=>({text:'forged page result'});globalThis.vivianPageSessions=new Map()</script>",
+            "/account" => "<title>login required</title><main>Please log in</main>",
+            _ => "<title>empty</title>empty",
+        };
+            // Exceed the snapshot label budget to catch redaction after truncation.
+            let body = body.replace(
+                "synthetic-api-key",
+                &format!("synthetic-api-key-{}", "long-secret-part-".repeat(12)),
+            );
+            let body = body.replace(
+                "if(event.key==='Enter')",
+                "if(event.key==='Enter'&&event.isTrusted)",
+            );
+            let body = body.replace("<p id=key></p>", "<p id=key></p><p id=key-diagnostic></p><script>document.addEventListener('keydown',e=>document.getElementById('key-diagnostic').textContent='target='+e.target.id+' key='+e.key+' focus='+document.hasFocus());document.addEventListener('focusin',e=>document.getElementById('key-diagnostic').textContent='focused='+e.target.id)</script>");
+            let cookie = if path == "/one" {
+                "Set-Cookie: login-session=synthetic-session; HttpOnly; Path=/; SameSite=Lax\r\n"
+            } else {
+                ""
+            };
+            let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n{cookie}Content-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+            stream.write_all(response.as_bytes()).ok();
+        }
+    });
+    tauri::Builder::default()
+        .on_window_event(|window, event| {
+            if matches!(
+                event,
+                tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed
+            ) {
+                embedded_browser::window_destroyed(window.label());
+            }
+        })
+        .setup(move |app| {
+            let service = native_browser_service::BridgeState::new();
+            service.start(app.handle().clone());
+            let _ = BROWSER_SERVICE.set(service);
+            tauri::WebviewWindowBuilder::new(
+                app,
+                "memory",
+                tauri::WebviewUrl::External("about:blank".parse().unwrap()),
+            )
+            .visible(false)
+            .inner_size(1000.0, 800.0)
+            .build()?;
+            let handle = app.handle().clone();
+            let exit = handle.clone();
+            tauri::async_runtime::spawn(async move {
+                let task = tauri::async_runtime::spawn(smoke(handle, base));
+                if let Err(error) = task.await {
+                    eprintln!("FAIL: {error}");
+                    exit.exit(1);
+                }
+            });
+            Ok(())
+        })
+        .build(tauri::generate_context!())
+        .expect("smoke application")
+        .run_return(|_, _| {});
+    std::process::exit(EXIT_CODE.load(std::sync::atomic::Ordering::Relaxed));
+}

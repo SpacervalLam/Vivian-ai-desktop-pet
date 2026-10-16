@@ -1,4 +1,4 @@
-//! MCP (Model Context Protocol) 原生集成 — 轻量级 stdio 客户端
+//! MCP (Model Context Protocol) 原生集成 — stdio 与 Streamable HTTP 客户端
 //!
 //! 设计目标：
 //! - 不引入外部 MCP SDK，手写 JSON-RPC 2.0 over stdio（tokio::process）
@@ -8,9 +8,15 @@
 //! - 外部工具不可信：`is_read_only=false` + `check_permissions` 返回 `ask`
 //!
 //! 协议参考：https://spec.modelcontextprotocol.io/
-//! 仅实现 stdio 传输 + tools 能力（resources/prompts 暂不支持）。
+//! 实现 tools 能力、分页发现及 JSON/SSE HTTP 回执；resources/prompts 暂不支持。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+
+#[path = "mcp_protocol.rs"]
+mod protocol;
+#[path = "mcp_http.rs"]
+mod http;
+use protocol::McpToolInfo;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -144,7 +150,12 @@ pub struct McpServerConfig {
     #[serde(default = "default_transport")]
     pub transport: String,
     /// stdio：可执行文件路径或命令名（如 "npx" / "uvx" / "node"）
+    #[serde(default)]
     pub command: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub headers: HashMap<String, String>,
     /// 命令参数
     #[serde(default)]
     pub args: Vec<String>,
@@ -166,22 +177,35 @@ pub struct McpServerConfig {
     pub source_plugin: Option<String>,
 }
 
+impl McpServerConfig {
+    pub fn validate(&self) -> VivianResult<()> {
+        if self.id.is_empty() || self.id.len() > 32 || self.id == "browser" || self.id.contains("__") || !self.id.chars().all(|c|c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+            return Err(VivianError::Tool("MCP ID 需为 1–32 位字母、数字、- 或 _，不能使用 browser 或连续下划线".into()));
+        }
+        match self.transport.as_str() {
+            "stdio" => {
+                if self.command.trim().is_empty() { return Err(VivianError::Tool("MCP 启动命令不能为空".into())); }
+                if self.cwd.as_ref().is_some_and(|p|!std::path::Path::new(p).is_dir()) { return Err(VivianError::Tool("MCP 工作目录不存在".into())); }
+            },
+            "http" => {
+                let url = self.url.as_deref().and_then(|s|reqwest::Url::parse(s).ok()).ok_or_else(||VivianError::Tool("请输入有效的 MCP HTTP 地址".into()))?;
+                if !["http", "https"].contains(&url.scheme()) || !url.username().is_empty() || url.password().is_some() { return Err(VivianError::Tool("MCP 地址需使用 http(s)，认证凭据请填写在请求头中".into())); }
+                for (name, value) in &self.headers {
+                    if reqwest::header::HeaderName::from_bytes(name.as_bytes()).is_err() || reqwest::header::HeaderValue::from_str(value).is_err() { return Err(VivianError::Tool("MCP HTTP 请求头格式无效".into())); }
+                }
+            },
+            _ => return Err(VivianError::Tool("仅支持 stdio 或 Streamable HTTP 传输".into())),
+        }
+        Ok(())
+    }
+}
+
 fn default_transport() -> String {
     "stdio".to_string()
 }
 
 fn default_enabled() -> bool {
     true
-}
-
-/// MCP server 返回的工具描述（listTools 结果项）
-#[derive(Debug, Clone, Deserialize)]
-struct McpToolInfo {
-    name: String,
-    #[serde(default)]
-    description: Option<String>,
-    #[serde(default)]
-    input_schema: Option<Value>,
 }
 
 /// JSON-RPC 2.0 请求
@@ -212,16 +236,27 @@ struct JsonRpcError {
 /// MCP 客户端:stdin/pending/child 跨 await 持有用 AsyncMutex,tools 同步访问用 Mutex
 struct McpClient {
     stdin: AsyncMutex<Option<ChildStdin>>,
-    pending: AsyncMutex<HashMap<u64, oneshot::Sender<JsonRpcResponse>>>,
+    pending: Mutex<HashMap<u64, oneshot::Sender<JsonRpcResponse>>>,
     next_id: AtomicU64,
     child: AsyncMutex<Option<Child>>,
     tools: Mutex<Vec<McpToolInfo>>,
     config: McpServerConfig,
     exited: AtomicBool,
+    http: Option<http::HttpTransport>,
 }
+
+struct PendingGuard<'a> { pending: &'a Mutex<HashMap<u64, oneshot::Sender<JsonRpcResponse>>>, id: u64 }
+impl Drop for PendingGuard<'_> { fn drop(&mut self) { self.pending.lock().remove(&self.id); } }
 
 impl McpClient {
     async fn start(config: McpServerConfig) -> VivianResult<Arc<Self>> {
+        config.validate()?;
+        if config.transport == "http" {
+            let client = Arc::new(Self { stdin: AsyncMutex::new(None), pending: Mutex::new(HashMap::new()), next_id: AtomicU64::new(1), child: AsyncMutex::new(None), tools: Mutex::new(Vec::new()), config, exited: AtomicBool::new(false), http: Some(http::HttpTransport::new()?) });
+            if let Err(error) = client.initialize().await { client.shutdown().await; return Err(error); }
+            if let Err(error) = client.discover_tools().await { client.shutdown().await; return Err(error); }
+            return Ok(client);
+        }
         let mut cmd = silent_command_async(&config.command);
         cmd.args(&config.args);
         for (k, v) in &config.env {
@@ -258,12 +293,13 @@ impl McpClient {
 
         let client = Arc::new(Self {
             stdin: AsyncMutex::new(Some(stdin)),
-            pending: AsyncMutex::new(HashMap::new()),
+            pending: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
             child: AsyncMutex::new(Some(child)),
             tools: Mutex::new(Vec::new()),
             config,
             exited: AtomicBool::new(false),
+            http: None,
         });
 
         let stderr_id = client.config.id.clone();
@@ -284,10 +320,10 @@ impl McpClient {
         });
 
         // 发送 initialize 握手
-        client.initialize().await?;
+        if let Err(error) = client.initialize().await { client.shutdown().await; return Err(error); }
 
         // 发现工具
-        client.discover_tools().await?;
+        if let Err(error) = client.discover_tools().await { client.shutdown().await; return Err(error); }
 
         Ok(client)
     }
@@ -313,7 +349,27 @@ impl McpClient {
             if trimmed.is_empty() {
                 continue;
             }
-            let resp: JsonRpcResponse = match serde_json::from_str(trimmed) {
+            let message: Value = match serde_json::from_str(trimmed) {
+                Ok(message) => message,
+                Err(_) => continue,
+            };
+            if message.get("method").is_some() {
+                if let Some(id) = message.get("id") {
+                    let reply = if message["method"] == "ping" { json!({"jsonrpc":"2.0","id":id,"result":{}}) }
+                        else { json!({"jsonrpc":"2.0","id":id,"error":{"code":-32601,"message":"Client method not supported"}}) };
+                    let _ = tokio::time::timeout(Duration::from_secs(5), async {
+                        let mut guard = client.stdin.lock().await;
+                        if let Some(stdin) = guard.as_mut() {
+                            let bytes = format!("{reply}\n");
+                            stdin.write_all(bytes.as_bytes()).await?;
+                            stdin.flush().await?;
+                        }
+                        Ok::<_, std::io::Error>(())
+                    }).await;
+                }
+                continue;
+            }
+            let resp: JsonRpcResponse = match serde_json::from_value(message) {
                 Ok(r) => r,
                 Err(e) => {
                     tracing::debug!("[MCP] 非 JSON-RPC 行 [{}]: {e}", client.config.id);
@@ -322,7 +378,7 @@ impl McpClient {
             };
             // 取出 pending sender 并发送
             let sender = {
-                let mut pending = client.pending.lock().await;
+                let mut pending = client.pending.lock();
                 pending.remove(&resp.id)
             };
             if let Some(tx) = sender {
@@ -331,12 +387,12 @@ impl McpClient {
         }
         // stdout 关闭后，清理所有 pending sender（让等待者收到错误）
         client.exited.store(true, Ordering::Relaxed);
-        let mut pending = client.pending.lock().await;
+        let mut pending = client.pending.lock();
         pending.clear();
     }
 
     fn has_exited(&self) -> bool {
-        self.exited.load(Ordering::Relaxed)
+        self.exited.load(Ordering::Relaxed) || self.http.as_ref().is_some_and(|http|http.has_expired())
     }
 
     /// 发送 JSON-RPC 请求并等待响应（带超时）
@@ -348,14 +404,20 @@ impl McpClient {
             method: method.to_string(),
             params,
         };
+        if let Some(http) = &self.http {
+            let response = http.send(&self.config, serde_json::to_value(&req).map_err(|e|VivianError::Tool(e.to_string()))?).await?;
+            if let Some(error) = response.get("error").filter(|e|!e.is_null()) { return Err(VivianError::Tool(format!("MCP 错误 [{}]: {}", method, error.get("message").and_then(Value::as_str).unwrap_or("unknown error")))); }
+            return response.get("result").cloned().ok_or_else(||VivianError::Tool("MCP 响应无 result".into()));
+        }
         let serialized = serde_json::to_string(&req)
             .map_err(|e| VivianError::Tool(format!("JSON-RPC 序列化失败: {e}")))?;
 
         let (tx, rx) = oneshot::channel();
         {
-            let mut pending = self.pending.lock().await;
+            let mut pending = self.pending.lock();
             pending.insert(id, tx);
         }
+        let _pending_guard = PendingGuard { pending: &self.pending, id };
 
         {
             let mut stdin_guard = self.stdin.lock().await;
@@ -378,7 +440,7 @@ impl McpClient {
         let resp = match tokio::time::timeout(Duration::from_secs(60), rx).await {
             Ok(r) => r.map_err(|_| VivianError::Tool("MCP 响应通道关闭".into()))?,
             Err(_) => {
-                let _ = self.pending.lock().await.remove(&id);
+                let _ = self.pending.lock().remove(&id);
                 return Err(VivianError::Tool(format!("MCP 请求超时 [{}]", method)));
             }
         };
@@ -394,56 +456,9 @@ impl McpClient {
 
     /// 发送 ping 请求（带短超时），用于健康检查
     async fn ping(&self) -> VivianResult<()> {
-        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        let req = JsonRpcRequest {
-            jsonrpc: "2.0",
-            id,
-            method: "ping".to_string(),
-            params: None,
-        };
-        let serialized = serde_json::to_string(&req)
-            .map_err(|e| VivianError::Tool(format!("JSON-RPC 序列化失败: {e}")))?;
-
-        let (tx, rx) = oneshot::channel();
-        {
-            let mut pending = self.pending.lock().await;
-            pending.insert(id, tx);
-        }
-
-        {
-            let mut stdin_guard = self.stdin.lock().await;
-            let stdin = stdin_guard
-                .as_mut()
-                .ok_or_else(|| VivianError::Tool("MCP server stdin 已关闭".into()))?;
-            stdin
-                .write_all(serialized.as_bytes())
-                .await
-                .map_err(|e| VivianError::Tool(format!("写入 MCP stdin 失败: {e}")))?;
-            stdin
-                .write_all(b"\n")
-                .await
-                .map_err(|e| VivianError::Tool(format!("写入 MCP stdin 换行失败: {e}")))?;
-            stdin.flush().await.map_err(|e| {
-                VivianError::Tool(format!("flush MCP stdin 失败: {e}"))
-            })?;
-        }
-
-        match tokio::time::timeout(Duration::from_secs(PING_TIMEOUT_SECS), rx).await {
-            Ok(Ok(resp)) => {
-                if let Some(err) = resp.error {
-                    return Err(VivianError::Tool(format!("MCP ping 错误: {}", err.message)));
-                }
-                Ok(())
-            }
-            Ok(Err(_)) => {
-                let _ = self.pending.lock().await.remove(&id);
-                Err(VivianError::Tool("MCP ping 响应通道关闭".into()))
-            }
-            Err(_) => {
-                let _ = self.pending.lock().await.remove(&id);
-                Err(VivianError::Tool("MCP ping 超时".into()))
-            }
-        }
+        tokio::time::timeout(Duration::from_secs(PING_TIMEOUT_SECS), self.request("ping", None)).await
+            .map_err(|_|VivianError::Tool("MCP ping 超时".into()))??;
+        Ok(())
     }
 
     /// 发送 initialize 握手 + initialized 通知
@@ -452,11 +467,11 @@ impl McpClient {
             .request(
                 "initialize",
                 Some(json!({
-                    "protocolVersion": "2024-11-05",
+                    "protocolVersion": "2025-11-25",
                     "capabilities": {},
                     "clientInfo": {
                         "name": "vivian",
-                        "version": "1.0.0"
+                        "version": env!("CARGO_PKG_VERSION")
                     }
                 })),
             )
@@ -466,6 +481,10 @@ impl McpClient {
             self.config.id,
             result.get("serverInfo")
         );
+        if let Some(version) = result.get("protocolVersion").and_then(Value::as_str) {
+            if !["2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"].contains(&version) { return Err(VivianError::Tool(format!("MCP 协议版本不兼容: {version}"))); }
+            if let Some(http) = &self.http { http.set_version(version); }
+        }
         // 发送 initialized 通知（id 为 null 的通知，无需等待响应）
         self.notify("notifications/initialized", None).await?;
         Ok(())
@@ -473,11 +492,12 @@ impl McpClient {
 
     /// 发送通知（不等待响应）
     async fn notify(&self, method: &str, params: Option<Value>) -> VivianResult<()> {
-        let notification = json!({
+        let mut notification = json!({
             "jsonrpc": "2.0",
             "method": method,
-            "params": params.unwrap_or(Value::Null)
         });
+        if let Some(params) = params { notification["params"] = params; }
+        if let Some(http) = &self.http { http.send(&self.config, notification).await?; return Ok(()); }
         let serialized = serde_json::to_string(&notification)
             .map_err(|e| VivianError::Tool(format!("通知序列化失败: {e}")))?;
         let mut stdin_guard = self.stdin.lock().await;
@@ -495,53 +515,29 @@ impl McpClient {
 
     /// 发现工具（listTools）
     async fn discover_tools(&self) -> VivianResult<()> {
-        let result = self.request("tools/list", None).await?;
-        let tools: Vec<McpToolInfo> = result
-            .get("tools")
-            .cloned()
-            .and_then(|t| serde_json::from_value(t).ok())
-            .unwrap_or_default();
-        tracing::info!(
-            "[MCP] server [{}] 发现 {} 个工具",
-            self.config.id,
-            tools.len()
-        );
+        let mut tools = Vec::new();
+        let mut cursor: Option<String> = None;
+        let mut seen = HashSet::new();
+        loop {
+            let result = self.request("tools/list", cursor.as_ref().map(|c|json!({"cursor":c}))).await?;
+            let page: Vec<McpToolInfo> = serde_json::from_value(result.get("tools").cloned().ok_or_else(||VivianError::Tool("MCP tools/list 缺少 tools".into()))?)
+                .map_err(|e|VivianError::Tool(format!("MCP 工具清单无效: {e}")))?;
+            for tool in page {
+                if !tool.name.is_empty() && !tools.iter().any(|t: &McpToolInfo|t.name == tool.name) { tools.push(tool); }
+            }
+            cursor = result.get("nextCursor").and_then(Value::as_str).map(str::to_string);
+            match &cursor {
+                Some(c) if seen.insert(c.clone()) && seen.len() <= 100 => {},
+                Some(_) => return Err(VivianError::Tool("MCP 工具分页游标重复或超过 100 页".into())),
+                None => break,
+            }
+        }
         *self.tools.lock() = tools;
         Ok(())
     }
 
-    /// 调用工具
-    async fn call_tool(&self, name: &str, arguments: Value) -> VivianResult<String> {
-        let result = self
-            .request(
-                "tools/call",
-                Some(json!({
-                    "name": name,
-                    "arguments": arguments
-                })),
-            )
-            .await?;
-        // 提取文本内容
-        let content = result.get("content").and_then(|c| c.as_array());
-        let texts: Vec<String> = content
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|block| {
-                        if block.get("type").and_then(|t| t.as_str()) == Some("text") {
-                            block.get("text").and_then(|t| t.as_str()).map(String::from)
-                        } else {
-                            None
-                        }
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        if texts.is_empty() {
-            // 无文本块，返回原始 JSON
-            Ok(serde_json::to_string_pretty(&result).unwrap_or_default())
-        } else {
-            Ok(texts.join("\n"))
-        }
+    async fn call_tool(&self, name: &str, arguments: Value) -> VivianResult<Value> {
+        self.request("tools/call", Some(json!({"name": name, "arguments": arguments}))).await
     }
 
     /// 获取已发现的工具信息
@@ -555,7 +551,8 @@ impl McpClient {
     /// 任何后续 `request` / `notify` 调用都会通过 `as_mut().ok_or_else(...)`
     /// 返回 `VivianError::Tool("MCP stdin 已关闭")`，不会 panic。
     async fn shutdown(&self) {
-        let _ = self.notify("shutdown", None).await;
+        self.exited.store(true, Ordering::Relaxed);
+        if let Some(http) = &self.http { http.shutdown(&self.config).await; return; }
         let mut child_guard = self.child.lock().await;
         if let Some(mut child) = child_guard.take() {
             let _ = child.kill().await;
@@ -566,6 +563,8 @@ impl McpClient {
     }
 
     fn is_alive(&self) -> bool {
+        if self.has_exited() { return false; }
+        if self.http.is_some() { return true; }
         let child_guard = self.child.try_lock();
         if let Ok(guard) = child_guard {
             guard.is_some()
@@ -606,7 +605,7 @@ impl McpTool {
         health: Arc<ServerHealthTracker>,
         eviction_callback: EvictionCallback,
     ) -> Self {
-        let tool_name = format!("mcp__{}__{}", server_id, info.name);
+        let tool_name = protocol::tool_name(server_id, &info.name);
         let tool_desc = info.description.clone().unwrap_or_else(|| info.name.clone());
         let schema = info.input_schema.clone().unwrap_or_else(|| {
             json!({"type": "object", "properties": {}})
@@ -642,11 +641,10 @@ impl Tool for McpTool {
 
     async fn validate_input(
         &self,
-        _input: &Value,
+        input: &Value,
         _context: &ToolUseContext,
     ) -> ValidationResult {
-        // MCP 工具的 schema 由 server 定义，这里不做额外校验，交给 server 处理
-        ValidationResult::success(None)
+        crate::tools::custom_tools::validate_tool_input(&self.schema, input)
     }
 
     async fn check_permissions(
@@ -666,9 +664,15 @@ impl Tool for McpTool {
             ));
         }
         match self.client.call_tool(&self.mcp_tool_name, args).await {
-            Ok(text) => {
+            Ok(result) => {
                 self.health.record_success();
-                ToolResult::success(json!({ "output": text }))
+                let failed = result.get("isError").and_then(Value::as_bool).unwrap_or(false);
+                let payload = protocol::result_payload(result);
+                if failed {
+                    let mut error = ToolResult::error(payload["output"].as_str().unwrap_or("MCP 工具执行失败"));
+                    error.data = Some(payload);
+                    error
+                } else { ToolResult::success(payload) }
             }
             Err(e) => {
                 let msg = e.to_string();
@@ -704,7 +708,7 @@ impl Tool for McpTool {
 /// 已连接的 MCP server 状态
 struct ServerState {
     config: McpServerConfig,
-    client: Arc<McpClient>,
+    client: Option<Arc<McpClient>>,
     /// 已注册到 ToolSystem 的工具名列表
     registered_tools: Vec<String>,
     /// 健康追踪器
@@ -719,6 +723,7 @@ pub struct McpManager {
     config_lock: Mutex<()>,
     /// 健康检查循环是否已启动
     health_loop_started: AtomicBool,
+    lifecycle_lock: AsyncMutex<()>,
 }
 
 impl McpManager {
@@ -735,6 +740,7 @@ impl McpManager {
             tool_system,
             config_lock: Mutex::new(()),
             health_loop_started: AtomicBool::new(false),
+            lifecycle_lock: AsyncMutex::new(()),
         })
     }
 
@@ -756,6 +762,7 @@ impl McpManager {
             tool_system,
             config_lock: Mutex::new(()),
             health_loop_started: AtomicBool::new(false),
+            lifecycle_lock: AsyncMutex::new(()),
         }
     }
 
@@ -779,6 +786,39 @@ impl McpManager {
         Ok(())
     }
 
+    fn load_plugin_overrides(&self) -> VivianResult<HashMap<String, McpServerConfig>> {
+        let path = self.config_path.with_file_name("overrides.json");
+        if !path.exists() { return Ok(HashMap::new()); }
+        let bytes = std::fs::read(path).map_err(|e|VivianError::Tool(format!("读取 MCP 用户覆盖配置失败: {e}")))?;
+        serde_json::from_slice(&bytes).map_err(|e|VivianError::Tool(format!("MCP 用户覆盖配置无效: {e}")))
+    }
+
+    /// Settings edits to a plugin connection survive reloads and app restarts.
+    pub async fn save_user_server(&self, mut config: McpServerConfig) -> VivianResult<Vec<String>> {
+        config.validate()?;
+        {
+            let _guard = self.config_lock.lock();
+            let owner = self.load_configs().into_iter().find(|c|c.id == config.id).and_then(|c|c.source_plugin);
+            config.source_plugin = owner;
+            if let Some(plugin) = &config.source_plugin {
+                let mut overrides = self.load_plugin_overrides()?;
+                overrides.insert(format!("{plugin}:{}",config.id),config.clone());
+                let json = serde_json::to_string_pretty(&overrides).map_err(|e|VivianError::Tool(e.to_string()))?;
+                crate::utils::fs::write_atomic(&self.config_path.with_file_name("overrides.json"),&json).map_err(|e|VivianError::Tool(e.to_string()))?;
+            }
+        }
+        self.add_server(config).await
+    }
+
+    pub fn clear_plugin_overrides(&self, plugin: &str, server_id: Option<&str>) -> VivianResult<()> {
+        let _guard = self.config_lock.lock();
+        let mut overrides = self.load_plugin_overrides()?;
+        let prefix = format!("{plugin}:");
+        overrides.retain(|key,_| !(key.starts_with(&prefix) && server_id.is_none_or(|id|key == &format!("{prefix}{id}"))));
+        let json = serde_json::to_string_pretty(&overrides).map_err(|e|VivianError::Tool(e.to_string()))?;
+        crate::utils::fs::write_atomic(&self.config_path.with_file_name("overrides.json"),&json).map_err(|e|VivianError::Tool(e.to_string()))
+    }
+
     /// 合并插件声明的 MCP server 配置（只持久化，不连接）
     ///
     /// 供插件贡献点体系装载用，语义按 id 分三种情形：
@@ -790,10 +830,11 @@ impl McpManager {
     /// 返回本次落盘后处于本插件名下、待连接的 server id 列表。
     pub fn merge_plugin_servers(&self, incoming: &[McpServerConfig], plugin_name: &str) -> Vec<String> {
         let _guard = self.config_lock.lock();
+        let overrides = match self.load_plugin_overrides() { Ok(values) => values, Err(error) => { crate::plugins::push_diag_event(error.to_string()); return Vec::new(); } };
         let mut configs = self.load_configs();
         let mut added = Vec::new();
         for cfg in incoming {
-            let mut cfg = cfg.clone();
+            let mut cfg = overrides.get(&format!("{plugin_name}:{}",cfg.id)).cloned().unwrap_or_else(||cfg.clone());
             cfg.source_plugin = Some(plugin_name.to_string());
             match configs.iter().position(|c| c.id == cfg.id) {
                 None => {
@@ -862,403 +903,211 @@ impl McpManager {
         victims
     }
 
-    /// 连接 MCP server 并注册工具
+    /// Save even disabled or failed connections, so they remain editable.
     pub async fn add_server(&self, config: McpServerConfig) -> VivianResult<Vec<String>> {
-        if !config.enabled {
-            return Ok(Vec::new());
-        }
-        let client = McpClient::start(config.clone()).await?;
-        let tools = client.get_tools();
-
-        let health = Arc::new(ServerHealthTracker::new(config.id.clone()));
-        let tool_system = Arc::clone(&self.tool_system);
-        let health_for_cb = Arc::clone(&health);
-        let server_id_for_cb = config.id.clone();
-        let eviction_callback: EvictionCallback = Arc::new(move || {
-            if health_for_cb.mark_evicted() {
-                let prefix = format!("mcp__{}__", server_id_for_cb);
-                let names: Vec<String> = tool_system
-                    .list_tool_names()
-                    .into_iter()
-                    .filter(|n| n.starts_with(&prefix))
-                    .collect();
-                for name in &names {
-                    tool_system.unregister_tool(name);
-                }
-                tracing::warn!(
-                    "[MCP] server [{}] 连续失败达阈值，触发反应式驱逐，注销 {} 个工具",
-                    server_id_for_cb,
-                    names.len()
-                );
-            }
-        });
-
-        let mut registered = Vec::new();
-        for info in &tools {
-            let tool = Arc::new(McpTool::new(
-                Arc::clone(&client),
-                &config.id,
-                info,
-                Arc::clone(&health),
-                Arc::clone(&eviction_callback),
-            )) as Arc<dyn Tool>;
-            let name = tool.name().to_string();
-            self.tool_system.register_tool(tool);
-            registered.push(name);
-        }
-        let state = ServerState {
-            config: config.clone(),
-            client,
-            registered_tools: registered.clone(),
-            health,
-        };
-        self.servers.lock().await.insert(config.id.clone(), state);
+        config.validate()?;
+        let _operation = self.lifecycle_lock.lock().await;
         {
             let _guard = self.config_lock.lock();
             let mut configs = self.load_configs();
             configs.retain(|c| c.id != config.id);
-            configs.push(config);
+            configs.push(config.clone());
             self.save_configs_unlocked(&configs)?;
         }
-        Ok(registered)
+        self.disconnect(&config.id).await;
+        if !config.enabled { return Ok(Vec::new()); }
+        self.connect(config, Arc::new(ServerHealthTracker::new(String::new()))).await
     }
 
-    /// 断开 MCP server 并注销工具
-    pub async fn remove_server(&self, server_id: &str) -> VivianResult<()> {
-        let mut servers = self.servers.lock().await;
-        if let Some(state) = servers.remove(server_id) {
-            for name in &state.registered_tools {
-                self.tool_system.unregister_tool(name);
-            }
-            state.client.shutdown().await;
+    async fn disconnect(&self, id: &str) {
+        let old = self.servers.lock().await.remove(id);
+        if let Some(state) = old {
+            for name in state.registered_tools { self.tool_system.unregister_tool_if_owner(&name, &format!("mcp:{id}")); }
+            if let Some(client) = state.client { client.shutdown().await; }
         }
-        drop(servers);
+    }
+
+    async fn connect(&self, config: McpServerConfig, mut health: Arc<ServerHealthTracker>) -> VivianResult<Vec<String>> {
+        if health.server_id().is_empty() { health = Arc::new(ServerHealthTracker::new(config.id.clone())); }
+        if let Some(plugin) = &config.source_plugin {
+            if !crate::plugins::is_plugin_name_trusted(plugin) {
+                return Err(VivianError::Tool(format!("来源插件 {plugin} 未启用或未信任")));
+            }
+        }
+        match McpClient::start(config.clone()).await {
+            Ok(client) => {
+                let tools = client.get_tools();
+                let system = Arc::clone(&self.tool_system);
+                let health_for_cb = Arc::clone(&health);
+                let owner = format!("mcp:{}", config.id);
+                let callback_owner = owner.clone();
+                let callback: EvictionCallback = Arc::new(move || {
+                    if health_for_cb.mark_evicted() {
+                        for name in system.list_tool_names() { system.unregister_tool_if_owner(&name, &callback_owner); }
+                    }
+                });
+                let mut registered = Vec::new();
+                for info in &tools {
+                    let tool = Arc::new(McpTool::new(client.clone(), &config.id, info, health.clone(), callback.clone())) as Arc<dyn Tool>;
+                    let name = tool.name().to_string();
+                    if self.tool_system.has_tool(&name) {
+                        tracing::warn!("[MCP] 工具名称冲突，跳过 {name}");
+                        continue;
+                    }
+                    self.tool_system.register_tool_with_owner(tool, Some(owner.clone()));
+                    registered.push(name);
+                }
+                health.reset_evicted();
+                health.record_success();
+                *health.last_error.lock() = None;
+                self.servers.lock().await.insert(config.id.clone(), ServerState { config, client: Some(client), registered_tools: registered.clone(), health });
+                Ok(registered)
+            }
+            Err(error) => {
+                health.record_failure(error.to_string());
+                health.mark_evicted();
+                self.servers.lock().await.insert(config.id.clone(), ServerState { config, client: None, registered_tools: Vec::new(), health });
+                Err(error)
+            }
+        }
+    }
+
+    pub async fn remove_server(&self, server_id: &str) -> VivianResult<()> {
+        let _operation = self.lifecycle_lock.lock().await;
         {
             let _guard = self.config_lock.lock();
             let mut configs = self.load_configs();
             configs.retain(|c| c.id != server_id);
             self.save_configs_unlocked(&configs)?;
         }
+        self.disconnect(server_id).await;
         Ok(())
     }
 
-    /// 启动时自动连接所有已保存的 enabled server。
-    ///
-    /// 插件贡献的 server（`source_plugin` 非空）须通过信任复核才连接：
-    /// 来源插件被卸载/未信任/清单已变更时跳过——上次运行留下的持久化配置
-    /// 不能绕过本次启动的信任门禁。用户手配（`source_plugin` 为空）不受影响。
+    pub async fn reconnect_server(&self, server_id: &str) -> VivianResult<Vec<String>> {
+        let config = self.load_configs().into_iter().find(|c|c.id == server_id)
+            .ok_or_else(||VivianError::Tool("MCP 配置不存在".into()))?;
+        self.add_server(config).await
+    }
+
+    pub async fn test_connection(&self, mut config: McpServerConfig) -> VivianResult<Value> {
+        config.enabled = true;
+        let client = McpClient::start(config).await?;
+        let tools = client.get_tools();
+        let result = json!({"tool_count":tools.len(), "tools":tools.iter().map(|t|json!({"name":t.name,"description":t.description,"inputSchema":t.input_schema})).collect::<Vec<_>>()});
+        client.shutdown().await;
+        Ok(result)
+    }
+
     pub async fn init_all(&self) {
-        let mut configs = self.load_configs();
-
-        // 孤儿回收：source_plugin 指向已不存在的插件目录时移除条目
-        let plugins_root = crate::plugins::plugins_dir();
-        let existing_keys: std::collections::HashSet<String> = std::fs::read_dir(&plugins_root)
-            .map(|entries| {
-                entries
-                    .flatten()
-                    .filter(|e| e.path().is_dir() && e.path().join("plugin.json").exists())
-                    .filter_map(|e| {
-                        e.path().file_name().and_then(|s| s.to_str()).map(String::from)
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        let mut orphan_ids: Vec<String> = Vec::new();
-        for config in &configs {
-            if let Some(plugin) = &config.source_plugin {
-                if !existing_keys.contains(plugin) {
-                    tracing::info!(
-                        "[MCP] server [{}] 的来源插件 {plugin} 目录已不存在，移除孤儿条目",
-                        config.id
-                    );
-                    orphan_ids.push(config.id.clone());
-                }
-            }
-        }
-        if !orphan_ids.is_empty() {
-            for id in &orphan_ids {
-                // remove_server 幂等：不存在时静默通过
-                let _ = self.remove_server(id).await;
-            }
-            configs.retain(|c| !orphan_ids.contains(&c.id));
-        }
-
-        for config in configs {
-            if !config.enabled {
-                continue;
-            }
-            if let Some(plugin) = &config.source_plugin {
-                if !crate::plugins::is_plugin_name_trusted(plugin) {
-                    tracing::warn!(
-                        "[MCP] server [{}] 来自插件 {plugin}（未信任或已卸载），跳过连接",
-                        config.id
-                    );
-                    continue;
-                }
-            }
-            let id = config.id.clone();
-            match self.add_server(config).await {
-                Ok(tools) => {
-                    tracing::info!("[MCP] server [{}] 已连接，注册 {} 个工具", id, tools.len())
-                }
-                Err(e) => {
-                    tracing::warn!("[MCP] server [{}] 连接失败: {e}", id)
-                }
-            }
+        for config in self.load_configs() {
+            if !config.enabled || config.source_plugin.as_deref().is_some_and(|p|!crate::plugins::is_plugin_name_trusted(p)) { continue; }
+            if let Err(error) = self.add_server(config).await { tracing::warn!("[MCP] 启动连接失败: {error}"); }
         }
     }
 
-    /// 启动后台健康检查循环（仅启动一次）
-    ///
-    /// 每 `HEALTH_CHECK_INTERVAL_SECS` 秒对所有存活 server 执行 ping：
-    /// - ping 成功 → 重置失败计数
-    /// - ping 失败 → 递增失败计数，达阈值后驱逐该 server（注销工具 + 标记 evicted）
-    /// - 已驱逐的 server 在 `EVICT_RECONNECT_DELAY_SECS` 后尝试自动重连
     pub fn start_health_check_loop(self: Arc<Self>) {
-        if self.health_loop_started.swap(true, Ordering::SeqCst) {
-            return;
-        }
+        if self.health_loop_started.swap(true, Ordering::SeqCst) { return; }
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(HEALTH_CHECK_INTERVAL_SECS));
-            loop {
-                interval.tick().await;
-                self.run_health_checks().await;
-            }
+            loop { interval.tick().await; self.run_health_checks().await; }
         });
     }
 
     async fn run_health_checks(&self) {
-        let checks: Vec<(String, Arc<McpClient>, Arc<ServerHealthTracker>)> = {
-            let servers = self.servers.lock().await;
-            servers
-                .values()
-                .filter(|s| s.client.is_alive())
-                .map(|s| {
-                    (
-                        s.config.id.clone(),
-                        Arc::clone(&s.client),
-                        Arc::clone(&s.health),
-                    )
-                })
-                .collect()
-        };
-
+        // Failed starts have no client, but must still take part in recovery.
+        let checks: Vec<_> = self.servers.lock().await.values()
+            .map(|s|(s.config.id.clone(), s.client.clone(), s.health.clone())).collect();
         for (id, client, health) in checks {
-            if client.has_exited() && !health.is_evicted() {
-                tracing::warn!(
-                    "[MCP] server [{}] 子进程已退出，立即驱逐",
-                    id
-                );
-                health.record_failure("process exited".to_string());
-                self.evict_server(&id).await;
-                continue;
-            }
-
             if health.is_evicted() {
-                if health.is_circuit_open() {
-                    continue;
-                }
-                let should_reconnect = {
-                    let guard = health.last_failure_at.lock();
-                    match guard.as_ref() {
-                        Some(evicted_at) => {
-                            evicted_at.elapsed().as_secs() >= health.next_reconnect_delay()
-                        }
-                        None => false,
-                    }
-                };
-                if should_reconnect {
+                let retry_due = !health.is_circuit_open() && health.last_failure_at.lock().as_ref()
+                    .is_some_and(|t|t.elapsed().as_secs() >= health.next_reconnect_delay());
+                if retry_due {
                     self.try_reconnect(&id).await;
                 }
                 continue;
             }
-
-            match client.ping().await {
-                Ok(()) => {
-                    health.record_success();
-                }
-                Err(e) => {
-                    let failures = health.record_failure(e.to_string());
-                    tracing::warn!(
-                        "[MCP] server [{}] ping 失败（连续 {} 次）: {}",
-                        id,
-                        failures,
-                        e
-                    );
-                    if failures >= MAX_CONSECUTIVE_FAILURES as u64 {
-                        self.evict_server(&id).await;
-                    }
-                }
+            if client.as_ref().is_some_and(|c| c.has_exited()) {
+                health.record_failure("MCP 服务进程已退出".into());
+                self.evict_server(&id).await;
+                continue;
             }
+            let result = match client {
+                Some(client) if client.is_alive() => client.ping().await,
+                _ => Err(VivianError::Tool("MCP 服务进程已退出".into())),
+            };
+            if let Err(error) = result {
+                if health.record_failure(error.to_string()) >= MAX_CONSECUTIVE_FAILURES as u64 {
+                    self.evict_server(&id).await;
+                }
+            } else { health.record_success(); }
         }
     }
 
-    /// 驱逐指定 server：注销其全部工具并标记为 evicted
-    async fn evict_server(&self, server_id: &str) {
-        let server_id = server_id.to_string();
-        let prefix = format!("mcp__{}__", server_id);
-        let names: Vec<String> = self
-            .tool_system
-            .list_tool_names()
-            .into_iter()
-            .filter(|n| n.starts_with(&prefix))
-            .collect();
+    async fn evict_server(&self, id: &str) {
+        let _operation = self.lifecycle_lock.lock().await;
+        let mut servers = self.servers.lock().await;
+        if let Some(state) = servers.get_mut(id) {
+            state.health.mark_evicted();
+            for name in state.registered_tools.drain(..) { self.tool_system.unregister_tool_if_owner(&name, &format!("mcp:{id}")); }
+        }
+    }
 
+    async fn try_reconnect(&self, id: &str) {
+        let _operation = self.lifecycle_lock.lock().await;
+        let Some(config) = self.load_configs().into_iter().find(|c|c.id == id && c.enabled) else { return };
+        if config.source_plugin.as_deref().is_some_and(|p|!crate::plugins::is_plugin_name_trusted(p)) { return; }
         let health = {
             let servers = self.servers.lock().await;
-            servers.get(&server_id).map(|s| Arc::clone(&s.health))
+            let Some(state) = servers.get(id) else { return };
+            if !state.health.is_evicted() || state.health.is_circuit_open() { return; }
+            state.health.clone()
         };
-
-        if let Some(health) = &health {
-            if !health.mark_evicted() {
-                return;
-            }
-        }
-
-        for name in &names {
-            self.tool_system.unregister_tool(name);
-        }
-        tracing::warn!(
-            "[MCP] server [{}] 健康检查连续失败，执行驱逐，注销 {} 个工具",
-            server_id,
-            names.len()
-        );
-    }
-
-    async fn try_reconnect(&self, server_id: &str) {
-        let server_id = server_id.to_string();
-        let (config, health) = {
-            let servers = self.servers.lock().await;
-            match servers.get(&server_id) {
-                Some(state) if state.health.is_evicted() && !state.health.is_circuit_open() => {
-                    (state.config.clone(), Arc::clone(&state.health))
-                }
-                _ => return,
-            }
-        };
-
         let attempt = health.increment_reconnect_attempt();
-        let delay = health.next_reconnect_delay();
-        tracing::info!(
-            "[MCP] server [{}] 尝试自动重连（第 {} 次，下次退避 {}s）",
-            server_id,
-            attempt,
-            delay
-        );
-
-        {
-            let servers = self.servers.lock().await;
-            if let Some(state) = servers.get(&server_id) {
-                state.client.shutdown().await;
-            }
-        }
-
-        match McpClient::start(config.clone()).await {
-            Ok(new_client) => {
-                let tools = new_client.get_tools();
-                let tool_system = Arc::clone(&self.tool_system);
-                let health_for_cb = Arc::clone(&health);
-                let server_id_for_cb = server_id.clone();
-                let eviction_callback: EvictionCallback = Arc::new(move || {
-                    if health_for_cb.mark_evicted() {
-                        let prefix = format!("mcp__{}__", server_id_for_cb);
-                        let names: Vec<String> = tool_system
-                            .list_tool_names()
-                            .into_iter()
-                            .filter(|n| n.starts_with(&prefix))
-                            .collect();
-                        for name in &names {
-                            tool_system.unregister_tool(name);
-                        }
-                        tracing::warn!(
-                            "[MCP] server [{}] 重连后再次连续失败，触发反应式驱逐，注销 {} 个工具",
-                            server_id_for_cb,
-                            names.len()
-                        );
-                    }
-                });
-
-                let mut registered = Vec::new();
-                for info in &tools {
-                    let tool = Arc::new(McpTool::new(
-                        Arc::clone(&new_client),
-                        &server_id,
-                        info,
-                        Arc::clone(&health),
-                        Arc::clone(&eviction_callback),
-                    )) as Arc<dyn Tool>;
-                    let name = tool.name().to_string();
-                    self.tool_system.register_tool(tool);
-                    registered.push(name);
-                }
-
-                {
-                    let mut servers = self.servers.lock().await;
-                    if let Some(state) = servers.get_mut(&server_id) {
-                        state.client = new_client;
-                        state.registered_tools = registered.clone();
-                        state.health.reset_evicted();
-                    }
-                }
-                tracing::info!(
-                    "[MCP] server [{}] 重连成功，重新注册 {} 个工具",
-                    server_id,
-                    registered.len()
-                );
-            }
-            Err(e) => {
-                tracing::warn!("[MCP] server [{}] 重连失败: {}", server_id, e);
-                *health.last_failure_at.lock() = Some(Instant::now());
-                if attempt >= MAX_RECONNECT_ATTEMPTS as u64 {
-                    health.open_circuit();
-                    tracing::error!(
-                        "[MCP] server [{}] 连续 {} 次重连失败，熔断器已开启，停止自动重连",
-                        server_id,
-                        attempt
-                    );
-                }
-            }
-        }
+        self.disconnect(id).await;
+        if self.connect(config, health.clone()).await.is_err() && attempt >= MAX_RECONNECT_ATTEMPTS as u64 { health.open_circuit(); }
     }
 
-    /// 列出所有已连接 server 的状态
     pub async fn list_servers(&self) -> Vec<McpServerStatus> {
+        let configs = self.load_configs();
         let servers = self.servers.lock().await;
-        servers
-            .values()
-            .map(|s| McpServerStatus {
-                id: s.config.id.clone(),
-                name: s.config.name.clone(),
-                enabled: s.config.enabled,
-                tool_count: s.registered_tools.len(),
-                alive: s.client.is_alive(),
-                evicted: s.health.is_evicted(),
-                consecutive_failures: s.health.failure_count(),
-                circuit_open: s.health.is_circuit_open(),
-                reconnect_attempts: s.health.reconnect_attempt_count(),
-                process_exited: s.client.has_exited(),
-            })
-            .collect()
+        let mut rows = Vec::new();
+        for config in configs {
+            let state = servers.get(&config.id);
+            let blocked = config.source_plugin.as_deref().is_some_and(|p|!crate::plugins::is_plugin_name_trusted(p));
+            let alive = state.and_then(|s|s.client.as_ref()).is_some_and(|c|c.is_alive())
+                && state.is_some_and(|s|!s.health.is_evicted()) && !blocked && config.enabled;
+            let evicted = state.is_some_and(|s|s.health.is_evicted());
+            let circuit_open = state.is_some_and(|s|s.health.is_circuit_open());
+            let status = if !config.enabled { "disabled" } else if blocked { "blocked" } else if alive { "connected" } else if circuit_open { "failed" } else if evicted { "reconnecting" } else { "disconnected" };
+            rows.push(McpServerStatus {
+                id:config.id, name:config.name, enabled:config.enabled, transport:config.transport,
+                tool_count:if alive { state.map_or(0,|s|s.registered_tools.len()) } else { 0 }, alive, evicted, circuit_open,
+                consecutive_failures:state.map_or(0,|s|s.health.failure_count()),
+                reconnect_attempts:state.map_or(0,|s|s.health.reconnect_attempt_count()),
+                process_exited:state.and_then(|s|s.client.as_ref()).is_some_and(|c|c.has_exited()),
+                last_error:if blocked {Some("来源插件未启用或未信任".into())} else {state.and_then(|s|s.health.last_error.lock().clone())},
+                status:status.into(), source_plugin:config.source_plugin,
+                tools:if alive {state.map(|s|s.registered_tools.clone()).unwrap_or_default()} else {Vec::new()},
+            });
+        }
+        rows.sort_by(|a,b|a.id.cmp(&b.id));
+        rows
     }
 
-    /// 停止所有 server
     pub async fn shutdown_all(&self) {
-        let mut servers = self.servers.lock().await;
-        for (_, state) in servers.drain() {
-            for name in &state.registered_tools {
-                self.tool_system.unregister_tool(name);
-            }
-            state.client.shutdown().await;
-        }
+        let _operation = self.lifecycle_lock.lock().await;
+        let ids:Vec<_> = self.servers.lock().await.keys().cloned().collect();
+        for id in ids { self.disconnect(&id).await; }
     }
 }
 
-/// MCP server 运行时状态
 #[derive(Debug, Clone, Serialize)]
 pub struct McpServerStatus {
     pub id: String,
     pub name: String,
     pub enabled: bool,
+    pub transport: String,
     pub tool_count: usize,
     pub alive: bool,
     pub evicted: bool,
@@ -1266,11 +1115,150 @@ pub struct McpServerStatus {
     pub circuit_open: bool,
     pub reconnect_attempts: u64,
     pub process_exited: bool,
+    pub last_error: Option<String>,
+    pub status: String,
+    pub source_plugin: Option<String>,
+    pub tools: Vec<String>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn manager_at(dir: &std::path::Path) -> McpManager {
+        McpManager {
+            servers: Arc::new(AsyncMutex::new(HashMap::new())),
+            config_path: dir.join("servers.json"),
+            tool_system: Arc::new(crate::tools::ToolSystem::new()),
+            config_lock: Mutex::new(()), health_loop_started: AtomicBool::new(false), lifecycle_lock: AsyncMutex::new(()),
+        }
+    }
+
+    fn config_for(command: &str) -> McpServerConfig {
+        serde_json::from_value(json!({"id":"fixture","name":"Fixture","command":command})).unwrap()
+    }
+
+    #[tokio::test]
+    async fn extension_disabled_and_failed_connections_remain_editable() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = manager_at(dir.path());
+        let mut config = config_for("node"); config.enabled = false;
+        manager.add_server(config).await.unwrap();
+        assert_eq!(manager.list_servers().await[0].status, "disabled");
+        let config = config_for(&dir.path().join("missing-executable.exe").display().to_string());
+        assert!(manager.add_server(config).await.is_err());
+        assert_eq!(manager.load_configs().len(), 1);
+        assert!(manager.list_servers().await[0].last_error.is_some());
+        manager.remove_server("fixture").await.unwrap();
+        assert!(manager.list_servers().await.is_empty());
+        let default = config_for("node");
+        manager.merge_plugin_servers(std::slice::from_ref(&default), "fixture-plugin");
+        let mut custom = manager.load_configs()[0].clone();
+        custom.enabled = false; custom.env.insert("TOKEN".into(),"synthetic".into());
+        manager.save_user_server(custom).await.unwrap();
+        manager.remove_server("fixture").await.unwrap();
+        manager.merge_plugin_servers(std::slice::from_ref(&default), "fixture-plugin");
+        assert!(!manager.load_configs()[0].enabled);
+        assert_eq!(manager.load_configs()[0].env["TOKEN"],"synthetic");
+        manager.clear_plugin_overrides("fixture-plugin",Some("fixture")).unwrap();
+        manager.merge_plugin_servers(std::slice::from_ref(&default),"fixture-plugin");
+        assert!(manager.load_configs()[0].enabled);
+        assert!(manager.load_configs()[0].env.is_empty());
+    }
+
+    #[tokio::test]
+    async fn extension_failed_reconnects_continue_without_a_live_client_and_stop_at_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = manager_at(dir.path());
+        let config = config_for(&dir.path().join("missing-executable.exe").display().to_string());
+        assert!(manager.add_server(config).await.is_err());
+        for attempt in 1..=MAX_RECONNECT_ATTEMPTS {
+            let health = manager.servers.lock().await["fixture"].health.clone();
+            *health.last_failure_at.lock() = Some(Instant::now() - Duration::from_secs(1000));
+            manager.run_health_checks().await;
+            assert_eq!(manager.list_servers().await[0].reconnect_attempts, attempt as u64);
+        }
+        manager.run_health_checks().await;
+        let row = &manager.list_servers().await[0];
+        assert!(row.circuit_open); assert!(!row.alive); assert_eq!(row.tool_count, 0);
+        let mut disabled = manager.load_configs()[0].clone(); disabled.enabled = false;
+        manager.add_server(disabled).await.unwrap();
+        assert_eq!(manager.list_servers().await[0].status, "disabled");
+    }
+
+    #[tokio::test]
+    async fn extension_stdio_roundtrip_keeps_schema_pagination_errors_and_mixed_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = dir.path().join("server.mjs");
+        std::fs::write(&server, r#"
+import readline from 'node:readline';
+for await (const line of readline.createInterface({input:process.stdin})) {
+ const r=JSON.parse(line); if(r.method==='notifications/initialized' && r.params===null)throw Error('notification params must be omitted');if(r.id===undefined||!r.method)continue;
+ let result={};
+ if(r.method==='initialize'){console.log(JSON.stringify({jsonrpc:'2.0',id:r.id,method:'ping'}));result={protocolVersion:'2025-06-18',capabilities:{tools:{}},serverInfo:{name:'fixture',version:'1'}};}
+ if(r.method==='tools/list') result=r.params?.cursor?{tools:[{name:'second',inputSchema:{type:'object'}}]}:{tools:[{name:'first',inputSchema:{type:'object',properties:{path:{type:'string'}},required:['path']}}],nextCursor:'page2'};
+ if(r.method==='tools/call') result={isError:!!r.params.arguments.fail,content:[{type:'text',text:process.env.MCP_TEST_VALUE},{type:'image',data:'abc',mimeType:'image/png'}],structuredContent:{cwd:process.cwd()}};
+ console.log(JSON.stringify({jsonrpc:'2.0',id:r.id,result}));
+}
+"#).unwrap();
+        let mut config = config_for("node");
+        config.args = vec![server.display().to_string()];
+        config.cwd = Some(dir.path().display().to_string());
+        config.env.insert("MCP_TEST_VALUE".into(), "with spaces = value".into());
+        let client = McpClient::start(config).await.unwrap();
+        let tools = client.get_tools();
+        assert_eq!(tools.len(), 2);
+        assert_eq!(tools[0].input_schema.as_ref().unwrap()["required"], json!(["path"]));
+        let health = Arc::new(ServerHealthTracker::new("fixture".into()));
+        let tool = McpTool::new(client.clone(), "fixture", &tools[0], health.clone(), Arc::new(||{}));
+        let result = tool.call(json!({"path":"G:/My Files","fail":true}), &ToolUseContext::default()).await;
+        assert!(!result.success);
+        assert_eq!(result.data.as_ref().unwrap()["content"].as_array().unwrap().len(), 2);
+        assert_eq!(result.data.as_ref().unwrap()["output"], "with spaces = value");
+        assert!(result.data.unwrap()["structuredContent"]["cwd"].is_string());
+        assert_eq!(health.failure_count(), 0, "business errors must not evict a healthy server");
+        let success = tool.call(json!({"path":"x"}), &ToolUseContext::default()).await;
+        assert!(success.success);
+        client.shutdown().await;
+        assert!(!client.is_alive());
+    }
+
+    #[tokio::test]
+    async fn extension_streamable_http_negotiates_session_and_accepts_sse_results() {
+        use axum::{extract::State, response::IntoResponse, routing::post, Json, Router};
+        let requests = Arc::new(Mutex::new(Vec::<(reqwest::header::HeaderMap, Value)>::new()));
+        async fn handle(State(log): State<Arc<Mutex<Vec<(reqwest::header::HeaderMap, Value)>>>>, headers: reqwest::header::HeaderMap, Json(request): Json<Value>) -> axum::response::Response {
+            log.lock().push((headers, request.clone()));
+            let id = request["id"].clone();
+            match request["method"].as_str().unwrap_or("") {
+                "initialize" => ([("mcp-session-id","fixture-session")], Json(json!({"jsonrpc":"2.0","id":id,"result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{}}}}))).into_response(),
+                "notifications/initialized" => if request.get("params").is_none() { axum::http::StatusCode::ACCEPTED.into_response() } else { axum::http::StatusCode::BAD_REQUEST.into_response() },
+                "tools/list" => ([("content-type","text/event-stream")], format!("data: {}\r\n\r\ndata: {}\n\n",json!({"jsonrpc":"2.0","id":id,"method":"ping"}),json!({"jsonrpc":"2.0","id":id,"result":{"tools":[{"name":"remote","inputSchema":{"type":"object","properties":{}}}]}}))).into_response(),
+                "tools/call" => axum::http::StatusCode::NOT_FOUND.into_response(),
+                "" => axum::http::StatusCode::ACCEPTED.into_response(),
+                _ => Json(json!({"jsonrpc":"2.0","id":id,"result":{},"error":null})).into_response(),
+            }
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let router = Router::new().route("/mcp", post(handle).delete(||async{axum::http::StatusCode::NO_CONTENT})).with_state(requests.clone());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap(); });
+        let mut config = config_for(""); config.transport = "http".into(); config.url = Some(format!("http://{address}/mcp"));
+        config.headers.insert("Authorization".into(), "Bearer synthetic".into());
+        let client = McpClient::start(config).await.unwrap();
+        assert_eq!(client.get_tools().len(), 1);
+        client.ping().await.unwrap();
+        assert!(client.call_tool("remote",json!({})).await.is_err());
+        assert!(client.has_exited(), "Expired sessions must enter recovery without replaying tool calls");
+        client.shutdown().await;
+        let rows = requests.lock();
+        assert_eq!(rows[0].0["authorization"], "Bearer synthetic");
+        for (headers, _) in rows.iter().skip(1) {
+            assert_eq!(headers["mcp-session-id"], "fixture-session");
+            assert_eq!(headers["mcp-protocol-version"], "2025-06-18");
+        }
+        server.abort();
+    }
 
     #[test]
     fn test_config_serde() {
@@ -1281,6 +1269,8 @@ mod tests {
             command: "echo".into(),
             args: vec!["hello".into()],
             env: HashMap::new(),
+            url: None,
+            headers: HashMap::new(),
             cwd: None,
             enabled: true,
             source_plugin: None,
@@ -1316,6 +1306,8 @@ mod tests {
             command: "node".into(),
             args: vec!["server.js".into()],
             env: HashMap::new(),
+            url: None,
+            headers: HashMap::new(),
             cwd: None,
             enabled: false,
             source_plugin: Some("p1-plugin".into()),

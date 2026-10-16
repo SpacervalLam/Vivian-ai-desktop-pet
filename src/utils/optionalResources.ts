@@ -26,7 +26,13 @@ export async function initializeOptionalResources(): Promise<void> {
   }
   const font = optionalAssetSource('/fonts/ma-shan-zheng.woff2');
   if (font) {
-    void new FontFace('Ma Shan Zheng', `url("${font}")`, { weight: '400', style: 'normal', display: 'swap' })
-      .load().then(face => document.fonts.add(face)).catch(() => { /* System font fallback. */ });
+    // Both the room theme and comic lettering use the installed resource pack.
+    // Finish loading before mounting the room so its entrance uses this font.
+    await Promise.all(['Ma Shan Zheng', 'Mind Comic'].map(async family => {
+      try {
+        const face = await new FontFace(family, `url("${font}")`, { weight: '400', style: 'normal', display: 'swap' }).load();
+        document.fonts.add(face);
+      } catch { /* System font fallback when the optional pack is unavailable. */ }
+    }));
   }
 }

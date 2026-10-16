@@ -25,8 +25,8 @@ const bundle=await build({entryPoints:['src/components/DesktopAssistantWindow.ts
 }}]});
 const {default:Page}=await import(`data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString('base64')}`);
 // 状态槽顺序必须和组件里的 useState 声明顺序一致：
-// character / context / busy / message / error / note / shortcutName / shortcutTarget / shortcutKind / shortcutFormOpen
-const states=()=>['nana',{shortcuts:[],quiet_reason:null},false,'','','note text','','','website',false];
+// character / context / busy / note / shortcutName / shortcutTarget / shortcutKind / shortcutFormOpen
+const states=()=>['nana',{shortcuts:[],quiet_reason:null},false,'note text','','','website',false];
 function render(panel,props={},slots){
  globalThis.__desktopEffects=[];
  globalThis.__desktopUpdates=[];
@@ -46,7 +46,7 @@ assert.equal(calls.filter(c=>c.name==='create_notebook'||(c.name==='emit'&&c.arg
 
 const noteList = find(page,n=>typeof n.type==='function'&&n.type.name==='UserQuickNotes');
 assert.ok(noteList);
-globalThis.__desktopStates=[[{id:'user-note',title:'灵感',content:'我的灵感',created_at:1}],false,''];
+globalThis.__desktopStates=[[{id:'user-note',title:'灵感',content:'我的灵感',created_at:1}],false];
 globalThis.__desktopEffects=[];
 const notesView=noteList.type();
 const notesCleanup=globalThis.__desktopEffects[0]();
@@ -62,15 +62,15 @@ calls.length=0;
 
 for (const [language, empty, remove] of [['zh-CN','暂无随手记','删除随手记'], ['ja','メモはまだありません','メモを削除'], ['en','No notes yet','Delete note']]) {
   globalThis.__desktopLanguage=language;
-  globalThis.__desktopStates=[[],false,''];
+  globalThis.__desktopStates=[[],false];
   assert.equal(text(noteList.type()),empty);
-  globalThis.__desktopStates=[[{id:'n',title:'User title',content:'User content',created_at:1}],false,''];
+  globalThis.__desktopStates=[[{id:'n',title:'User title',content:'User content',created_at:1}],false];
   assert.ok(find(noteList.type(),n=>n.type==='button'&&n.props['aria-label']===remove));
 }
 delete globalThis.__desktopLanguage;
 
 // —— 快捷启动：条目由共享配置驱动，点开走 companion_launch_shortcut ——
-page=render('shortcuts',{},['nana',{shortcuts:[{id:'s1',name:'B站',kind:'website',target:'https://bilibili.com'}],quiet_reason:null},false,'','','','','','website',false]);
+page=render('shortcuts',{},['nana',{shortcuts:[{id:'s1',name:'B站',kind:'website',target:'https://bilibili.com'}],quiet_reason:null},false,'','','','website',false]);
 assert.ok(find(page,n=>n.props?.['aria-label']==='添加快捷方式'),'the shortcuts page keeps its add button');
 await find(page,n=>n.type==='button'&&n.props['aria-label']==='打开 B站').props.onClick();
 await new Promise(resolve=>setImmediate(resolve));

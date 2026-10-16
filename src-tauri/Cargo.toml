@@ -55,7 +55,6 @@ reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls", "http2
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 
 # HTTP server (remote access via Tailscale)
-# ws: 浏览器自动化桥（/ext/bridge）的 WebSocket 通道
 axum = { version = "0.7", features = ["ws"] }
 tower-http = { version = "0.5", features = ["cors", "fs"] }
 
@@ -79,6 +78,7 @@ scraper = "0.27"
 tiktoken-rs = "0.12"
 # JavaScript 插件宿主（boa_engine 0.21）——让插件贡献任意可执行 JS 代码
 boa_engine = { version = "0.21", features = [] }
+zip = { version = "2.4", default-features = false, features = ["deflate"] }
 # 随机数（TTS 口型同步随机开合值）
 rand = "0.9"
 # 非 UTF-8（GBK 等）文本检测与解码（encoding_rs 由 chardetng 自带，不直接声明）

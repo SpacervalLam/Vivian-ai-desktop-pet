@@ -5,7 +5,7 @@ use serde_json::json;
 use tauri::{AppHandle, Emitter, Manager, WebviewWindow, WebviewWindowBuilder, WebviewUrl, WindowEvent};
 use tokio::sync::{oneshot, Notify};
 use crate::screen_capture::{CaptureRegion, SelectionAction};
-pub struct SelectedCapture { pub png: Vec<u8>, pub action: SelectionAction }
+pub struct SelectedCapture { pub png: Vec<u8>, pub action: SelectionAction, pub region: CaptureRegion, pub left: i32, pub top: i32, pub(crate) overlay: Option<SelectionGuard> }
 struct SelectedArea { region: CaptureRegion, action: SelectionAction }
 const WINDOW_LABEL: &str = "screen_selection";
 struct SelectionSession {
@@ -92,7 +92,12 @@ fn finish(id: &str, region: Option<CaptureRegion>, action: SelectionAction) -> R
     let _ = current.sender.send(selected);
     Ok(())
 }
-struct SelectionGuard { id: String, window: WebviewWindow }
+pub(crate) struct SelectionGuard { id: String, window: WebviewWindow }
+impl SelectionGuard {
+    pub(crate) async fn dismiss(self, app: &AppHandle) -> Result<(), String> {
+        hide_capture_windows(app, vec![self.window.clone()]).await
+    }
+}
 impl Drop for SelectionGuard {
     fn drop(&mut self) {
         let _ = finish(&self.id, None, SelectionAction::Cancel);
@@ -131,7 +136,7 @@ async fn ensure_window(app: &AppHandle) -> Result<WebviewWindow, String> {
 /// a `WM_SIZE` handler and therefore cannot re-enter and reproduce the recursion
 /// (0xc00000fd) that the patch avoids.
 #[cfg(windows)]
-fn fill_webview_host(window: &WebviewWindow, left: i32, top: i32, width: u32, height: u32) -> Result<(), String> {
+pub(crate) fn fill_webview_host(window: &WebviewWindow, left: i32, top: i32, width: u32, height: u32) -> Result<(), String> {
     use windows::core::w;
     use windows::Win32::Foundation::{HWND, RECT};
     use windows::Win32::UI::WindowsAndMessaging::{
@@ -249,8 +254,12 @@ pub async fn select_region(app: &AppHandle) -> Result<Option<SelectedCapture>, S
     let region = tokio::time::timeout(std::time::Duration::from_secs(180), receiver).await
         .map_err(|_| "截图框选已超时，请重试".to_string())?
         .map_err(|_| "截图窗口已关闭".to_string())?;
-    hide_capture_windows(app, vec![window]).await?;
-    drop(guard);
-    tokio::task::spawn_blocking(move || region.map(|selected| frame.crop_png(selected.region).map(|png| SelectedCapture { png, action: selected.action })).transpose())
-        .await.map_err(|e| e.to_string())?
+    let freezing = region.as_ref().is_some_and(|selected| selected.action == SelectionAction::Freeze);
+    if !freezing { hide_capture_windows(app, vec![window]).await?; }
+    let mut selected = tokio::task::spawn_blocking(move || region.map(|selected| frame.crop_png(selected.region).map(|png| SelectedCapture { png, action: selected.action, region: selected.region, left: frame.left, top: frame.top, overlay: None })).transpose())
+        .await.map_err(|e| e.to_string())??;
+    if freezing {
+        if let Some(selected) = selected.as_mut() { selected.overlay = Some(guard); }
+    } else { drop(guard); }
+    Ok(selected)
 }

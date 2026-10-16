@@ -19,6 +19,8 @@ const sources: ComicSource[] = ['memory', 'diary', 'notebook', 'planner'];
 const panelLabelKeys = { memory: 'panelMemory', diary: 'panelDiary', notebook: 'panelNotebook', planner: 'panelPlanner' };
 const sourceLabelKeys: Record<ComicSource, string> = { memory: 'comic_nav_memory', diary: 'comic_nav_diary', notebook: 'comic_nav_notebook', planner: 'comic_nav_planner' };
 const sourceIcons = { memory: MessageCircle, diary: BookOpen, notebook: NotebookPen, planner: CalendarDays };
+const entryHintKeys = { memory: 'viewConversation', diary: 'openDiary', notebook: 'openNotebook', planner: 'openPlanner' };
+const entryUsedKey = (source: ComicSource) => `vivian.room.entry-used.${source}`;
 const readingLabelKeys = { memory: 'readingMemory', diary: 'readingDiary', notebook: 'readingNotebook', planner: 'readingPlanner' };
 /* 展开态的底纹美术，按源声明而不是靠文件名拼出来：另外三个源用的是一张「信纸」
    纸质图，压在右下角当档案装饰；memory 没有信纸，改用一整张插画铺满面板当底纹。
@@ -38,6 +40,10 @@ export default function UnifiedComicBook({ destination, params, presentationRead
   const initial = bookDestination(destination, params);
   const [page, setPage] = useState(initial.spread);
   const [expanded, setExpanded] = useState<ComicSource | null>(initial.focus);
+  const [usedEntries, setUsedEntries] = useState<ComicSource[]>(() => {
+    try { return sources.filter(source => localStorage.getItem(entryUsedKey(source)) === '1'); }
+    catch { return []; }
+  });
   const [memoryRefreshToken, setMemoryRefreshToken] = useState(0);
   const [memoryLoading, setMemoryLoading] = useState(false);
   const [contentsOpen, setContentsOpen] = useState(false);
@@ -241,6 +247,12 @@ export default function UnifiedComicBook({ destination, params, presentationRead
     setExpanded(source);
     lastInteraction.current = Date.now();
   };
+  const openIllustratedEntry = (source: ComicSource) => {
+    expand(source);
+    setUsedEntries(previous => previous.includes(source) ? previous : [...previous, source]);
+    try { localStorage.setItem(entryUsedKey(source), '1'); }
+    catch { /* Keep the session preference when storage is unavailable. */ }
+  };
   useLayoutEffect(() => {
     const motion = pendingPanelMotion.current;
     pendingPanelMotion.current = null;
@@ -248,7 +260,7 @@ export default function UnifiedComicBook({ destination, params, presentationRead
     panelMotion.current?.cancel();
     writingMotion.current?.cancel();
     const panel = root.current.querySelector<HTMLElement>(`.source-${motion.source}`);
-    if (!panel || panel.hidden || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    if (!panel || panel.hidden) return;
     const phone = !expanded && motion.source === 'memory' ? root.current.querySelector<HTMLElement>('#line-phone') : null;
     const to = (phone ?? panel).getBoundingClientRect();
     const outer = getComputedStyle(panel).position === 'fixed' ? { left: 0, top: 0 } : root.current.getBoundingClientRect();
@@ -289,11 +301,11 @@ export default function UnifiedComicBook({ destination, params, presentationRead
   }, []);
   const activeSources = new Set(scene.sources ?? []);
 
-  return <div ref={root} className={`unified-comic-book record-scope${expanded ? ' has-expanded-panel' : ''}`} data-spread={page} data-touring={touring} tabIndex={0}
+  return <div ref={root} className={`unified-comic-book record-scope${expanded ? ' has-expanded-panel' : ''}`} data-spread={page} data-touring={touring} data-used-entries={usedEntries.join(' ')} tabIndex={0}
     aria-label={t('comic.pageLabel', { title: t(`comic.title${scene.mind}`), page: page + 1, total: bookSpreads.length })}
     onKeyDown={event => {
       if ((event.target as Element).closest('#line-phone') && (event.key === 'Enter' || event.key === ' ')) {
-        event.preventDefault(); expand('memory'); return;
+        event.preventDefault(); openIllustratedEntry('memory'); return;
       }
       if (event.key === 'Escape') { setContentsOpen(false); expand(null); return; }
       if (event.defaultPrevented || (event.target as Element).closest('input,textarea,select,button,a,[contenteditable],.unified-functional-panel')) return;
@@ -313,7 +325,7 @@ export default function UnifiedComicBook({ destination, params, presentationRead
         state.lockedUntil = now + 620;
       }
     }} onClick={event => {
-      if (!expanded && (event.target as Element).closest('#line-phone')) expand('memory');
+      if (!expanded && (event.target as Element).closest('#line-phone')) openIllustratedEntry('memory');
     }} onClickCapture={event => {
       // 翻页那次拖拽结束时浏览器还会补一个 click，别让它再点到底下的东西。
       if (Date.now() - suppressClick.current > 400) return;
@@ -372,8 +384,9 @@ export default function UnifiedComicBook({ destination, params, presentationRead
         <svg className="unified-panel-ink" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
           <defs><clipPath id={`paper-cut-${source}`}><polygon points={frame} /></clipPath></defs>
           <image href={`${import.meta.env.BASE_URL}mind-comic/${paperArtwork[source]}`} {...paperImage} preserveAspectRatio={source === 'notebook' ? 'none' : 'xMidYMid slice'} clipPath={`url(#paper-cut-${source})`} />
-          {/* Match ordinary shots: their polygon crop hides the outer half of the stroke. */}
-          <polygon className="panel-outline illustrated-outline" points={frame} clipPath={`url(#paper-cut-${source})`} />
+        </svg>
+        <svg className="unified-panel-outline" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+          <polygon className="panel-outline" points={frame} clipPath={`url(#paper-cut-${source})`} />
         </svg>
         </>}
         {expanded === source && <img className={expandedArtwork[source].className} src={`${import.meta.env.BASE_URL}mind-comic/${expandedArtwork[source].file}`} alt="" aria-hidden="true" />}
@@ -398,7 +411,9 @@ export default function UnifiedComicBook({ destination, params, presentationRead
         </div>
         </div>
         </div>
-        {projected && <button className="unified-panel-open" type="button" aria-label={t('comic.expand', { name: labels[source] })} onClick={() => expand(source)} />}
+        {projected && <button className="unified-panel-open" type="button" aria-label={t(`comic.${entryHintKeys[source]}`)} onClick={() => openIllustratedEntry(source)}>
+          <span className="comic-entry-hint" aria-hidden="true">{!usedEntries.includes(source) && <span className="comic-entry-caption">{t(`comic.${entryHintKeys[source]}`)}</span>}<span className="comic-entry-corner">↗</span></span>
+        </button>}
       </article>;
       })}
     </div>

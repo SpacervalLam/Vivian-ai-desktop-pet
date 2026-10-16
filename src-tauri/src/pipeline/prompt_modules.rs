@@ -1191,6 +1191,8 @@ pub struct PromptParts {
     /// Character 块（identity+personality+background+interests+appearance+speech+relationships，
     /// 由 PersonaEngine.render_character_block 渲染，支持用户覆盖）
     pub character_block: Option<String>,
+    /// Compact configured voice reminder near the latest turn, separate from memories.
+    pub character_note_section: Option<String>,
     /// Few-shot examples 块（由 PersonaEngine.render_examples_block 渲染，角色专属示例）
     pub examples_block: Option<String>,
     /// 风格约束块（PersonaEngine.build_style_prompt 渲染，None 时为空）

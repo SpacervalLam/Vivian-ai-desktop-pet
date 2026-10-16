@@ -476,6 +476,7 @@
   }
 </style>
 <link rel="stylesheet" href="/navigation.css">
+<link rel="stylesheet" href="/companion-ui.css">
 </head>
 <body>
 <div class="app" id="app">
@@ -564,17 +565,17 @@
         </div>
         <div class="wx-drawer closed" id="wxMediaDrawer">
           <div class="wx-media-grid">
-            <button class="wx-media-item" onclick="wxMediaNotSupported()">
+            <button class="wx-media-item" onclick="wxAsrToText(); closeWxDrawers()">
               <div class="wx-media-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.91.34 1.85.57 2.81.7A2 2 0 0 1 22 16.92z"/></svg></div>
-              <span class="wx-media-label">语音通话</span>
+              <span class="wx-media-label">语音转文字</span>
             </button>
             <button class="wx-media-item" onclick="wxPickImage(false)">
               <div class="wx-media-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></svg></div>
               <span class="wx-media-label">图片</span>
             </button>
-            <button class="wx-media-item" onclick="wxMediaNotSupported()">
-              <div class="wx-media-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg></div>
-              <span class="wx-media-label">文件</span>
+            <button class="wx-media-item" onclick="toggleWxDrawer('emoji')">
+              <div class="wx-media-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M8 14s1 3 4 3 4-3 4-3M8 9h.01M16 9h.01"/></svg></div>
+              <span class="wx-media-label">表情</span>
             </button>
             <button class="wx-media-item" onclick="wxPickImage(true)">
               <div class="wx-media-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3"/></svg></div>
@@ -591,7 +592,7 @@
   <div class="page" id="pageMemory">
     <div class="page-header"><button class="back-btn" onclick="goHome()" aria-label="返回主页">‹</button><div class="page-title">记忆</div></div>
     <div class="page-body memory-body">
-      <div class="memory-intro"><h2>记得的事</h2><p>原始交流、会话脉络，以及有依据的事实与约定。</p></div>
+
       <div class="memory-controls"><div class="mem-tabs" id="memTabs"></div><button class="memory-refresh" id="memoryRefresh" aria-label="刷新记忆" onclick="loadMemories()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M6 6a8 8 0 0 1 14 6M18 18a8 8 0 0 1-14-6"/></svg></button></div>
       <nav class="memory-layers" id="memoryLayers" aria-label="记忆分类"></nav>
       <div class="memory-toolbar"><h3 id="memoryLayerTitle">长期记忆</h3><span id="memoryCount"></span></div>
@@ -607,6 +608,9 @@
     <div class="page-header"><button class="back-btn" onclick="goHome()" aria-label="返回主页">‹</button><div class="page-title">笔记</div></div>
     <div class="page-body">
       <div class="list-view">
+
+        <div id="noteOwners" class="mobile-segments" aria-label="笔记所属角色"></div>
+        <label class="mobile-search"><span aria-hidden="true">⌕</span><input id="noteSearch" type="search" aria-label="搜索笔记" placeholder="搜索标题或标签"></label>
         <button class="btn" onclick="newNote()">新建笔记</button>
         <div id="noteList"></div>
       </div>
@@ -618,6 +622,10 @@
     <div class="page-header"><button class="back-btn" onclick="goHome()" aria-label="返回主页">‹</button><div class="page-title">待办</div></div>
     <div class="page-body">
       <div class="list-view">
+
+        <div class="mobile-segments" id="planFilters" aria-label="筛选待办"><button data-filter="pending" aria-pressed="true">待完成</button><button data-filter="completed" aria-pressed="false">已完成</button><button data-filter="all" aria-pressed="false">全部</button></div>
+        <label class="mobile-search"><span aria-hidden="true">⌕</span><input id="planSearch" type="search" aria-label="搜索待办" placeholder="搜索事项或描述"></label>
+        <div id="planSummary" class="mobile-caption" role="status"></div>
         <div class="section-title">待办事项</div>
         <button class="btn outline" onclick="newTodo()">添加待办</button>
         <div id="todoList"></div>
@@ -628,18 +636,41 @@
     </div>
   </div>
 
+  <section class="page" id="pageMind" aria-label="房间">
+    <div class="page-header"><button class="back-btn" onclick="goHome()" aria-label="返回主页">‹</button><div class="page-title">房间</div></div>
+    <div class="page-body mobile-content"><div class="mobile-toolbar"><div id="mindOwners" class="mobile-segments" aria-label="观察角色"></div><button class="mobile-icon-button" data-mobile-action="refresh-mind" aria-label="刷新心智状态">↻</button></div><div id="mindStatus" class="mobile-caption" role="status"></div><div id="mindContent" class="mobile-stack"></div></div>
+  </section>
+
+  <section class="page" id="pageDiary" aria-label="日记本">
+    <div class="page-header"><button class="back-btn" onclick="MobileUI.diaryBack()" aria-label="返回日记列表或主页">‹</button><div class="page-title">日记本</div></div>
+    <div class="page-body mobile-content" id="diaryBody"><div id="diaryIndex"><div class="mobile-toolbar"><div id="diaryOwners" class="mobile-segments" aria-label="日记作者"></div><button class="mobile-icon-button" data-mobile-action="refresh-diary" aria-label="刷新日记">↻</button></div><label class="mobile-search"><span aria-hidden="true">⌕</span><input id="diarySearch" type="search" aria-label="搜索日记" placeholder="搜索正文或发生的事"></label><div class="diary-date-filter"><label for="diaryDate">选择日期</label><input id="diaryDate" type="date"><button class="mobile-text-button" data-mobile-action="clear-diary-date">全部日期</button></div><div id="diaryCount" class="mobile-caption" role="status"></div><div id="diaryList" class="mobile-stack"></div></div><article id="diaryReader" class="mobile-diary-reader" hidden></article></div>
+  </section>
+
+  <section class="page" id="pageWork" aria-label="工作台">
+    <div class="page-header"><button class="back-btn" onclick="MobileUI.workBack()" aria-label="返回会话列表或主页">‹</button><div class="page-title" id="workPageTitle">工作台</div></div>
+    <div class="page-body mobile-content" id="workIndex"><div class="mobile-toolbar"><button class="btn" data-mobile-action="new-work">新建工作会话</button><button class="mobile-icon-button" data-mobile-action="refresh-work" aria-label="刷新工作会话">↻</button></div><label class="mobile-search"><span aria-hidden="true">⌕</span><input id="workSearch" type="search" aria-label="搜索工作会话" placeholder="搜索会话或工作目录"></label><div id="workList" class="mobile-stack"></div></div>
+    <div id="workDetail" class="mobile-work-detail" hidden><div id="workMeta" class="mobile-work-meta"></div><div id="workMessages" class="mobile-work-messages" tabindex="0" aria-label="工作会话消息"></div><div id="workQuestion" class="mobile-work-question" hidden></div><div id="workError" class="mobile-inline-error" role="status"></div><form id="workComposer" class="mobile-work-composer"><label class="sr-only" for="workInput">工作消息</label><textarea id="workInput" rows="2" placeholder="继续描述任务，或补充你的想法…"></textarea><div><span class="mobile-caption" id="workSendHint">消息发送给当前工作会话</span><button type="button" class="btn outline" id="workStop" data-mobile-action="stop-work" hidden>停止</button><button type="submit" class="btn" id="workSend">发送</button></div></form></div>
+  </section>
+
 </div>
 
-<div class="navigation-drawer" id="navigationDrawer" role="dialog" aria-modal="true" aria-label="导航" aria-hidden="true" inert><button class="navigation-backdrop" aria-label="关闭导航" tabindex="-1"></button>  <nav class="mobile-nav" aria-label="主导航"><div class="nav-heading"><div><h2>陪伴与日常</h2><p>你想去哪里？</p></div></div>
+<div class="navigation-drawer" id="navigationDrawer" role="dialog" aria-modal="true" aria-label="导航" aria-hidden="true" inert><button class="navigation-backdrop" aria-label="关闭导航" tabindex="-1"></button>  <nav class="mobile-nav" aria-label="主导航"><div class="nav-heading"><div><h2>导航</h2></div></div>
     <button data-page="home" aria-current="page" onclick="navigateMobile('home')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m3 10 9-7 9 7v10H3z"/><path d="M9 20v-7h6v7"/></svg><span>陪伴</span></button>
     <button data-page="wechat" onclick="navigateMobile('wechat')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11a8 8 0 0 1-8 8H7l-4 3V5a2 2 0 0 1 2-2h8a8 8 0 0 1 8 8Z"/><path d="M7 8h10M7 12h7"/></svg><span>聊天</span></button>
     <button data-page="memory" onclick="navigateMobile('memory')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 6c-3-3-7-3-9-2v15c3-1 6-1 9 2 3-3 6-3 9-2V4c-2-1-6-1-9 2Zm0 0v15"/></svg><span>记忆</span></button>
+    <button data-page="mind" onclick="navigateMobile('mind')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M9 18h6M10 22h4M8 14a7 7 0 1 1 8 0c-1 1-1 2-1 4H9c0-2 0-3-1-4Z"/></svg><span>房间</span></button>
+    <button data-page="diary" onclick="navigateMobile('diary')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M5 3h14v18H5zM9 3v18M12 8h4M12 12h4"/></svg><span>日记本</span></button>
     <button data-page="notes" onclick="navigateMobile('notes')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="3" width="16" height="18" rx="3"/><path d="M8 8h8M8 12h8M8 16h5"/></svg><span>笔记</span></button>
     <button data-page="todo" onclick="navigateMobile('todo')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="3" width="16" height="18" rx="3"/><path d="m8 8 2 2 4-4M8 15h8"/></svg><span>待办与提醒</span></button>
+    <button data-page="work" onclick="navigateMobile('work')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="3" y="7" width="18" height="14" rx="3"/><path d="M8 7V3h8v4M3 12h18M10 12v3h4v-3"/></svg><span>工作台</span></button>
+    <div class="mobile-connection" id="mobileConnection" role="status">正在连接电脑…</div>
   <p class="nav-hint">右滑打开导航 · 左滑收起</p></nav></div>
 
 <!-- Toast 容器 -->
+<div id="connectionBanner" class="mobile-connection-banner" role="status" hidden><span>暂时连接不上电脑</span><button data-mobile-action="reconnect">重新连接</button></div>
 <div class="toast-container" id="toastContainer"></div>
+
+<div class="modal-overlay hidden" id="workNewModal"><form class="modal" id="workNewForm"><h3 id="workNewTitle">新建工作会话</h3><div class="field"><label for="workCharacter">角色</label><select id="workCharacter"></select></div><div class="field"><label for="workDirectory">电脑上的工作目录（可选）</label><input id="workDirectory" placeholder="留空使用电脑端默认目录" autocomplete="off"></div><p class="mobile-caption">新会话使用标准模式和默认工作权限。</p><div id="workNewError" class="mobile-inline-error" role="status"></div><div class="modal-actions"><button type="button" class="btn outline" onclick="hideModal('workNewModal')">取消</button><button type="submit" class="btn" id="workCreate">创建会话</button></div></form></div>
 
 <!-- 确认弹窗 -->
 <div class="modal-overlay confirm-modal hidden" id="confirmModal">
@@ -673,7 +704,7 @@
     <div class="modal-actions">
       <button class="btn outline danger" id="noteDeleteBtn" onclick="deleteNote()">删除</button>
       <button class="btn outline" onclick="hideModal('noteModal')">取消</button>
-      <button class="btn" onclick="saveNote()">保存</button>
+      <button class="btn" id="noteSaveBtn" onclick="saveNote()">保存</button>
     </div>
   </div>
 </div>
@@ -687,7 +718,7 @@
     <div class="field"><label>优先级</label>
       <select id="todoPriority"><option value="1">普通</option><option value="2">重要</option><option value="3">紧急</option></select>
     </div>
-    <div class="field"><label>截止时间（可选）</label><input id="todoDue" type="text" placeholder="如 2026-10-08T10:30 或 PT2H"></div>
+    <div class="field"><label>截止时间（可选）</label><input id="todoDue" type="datetime-local"></div>
     <div class="modal-actions">
       <button class="btn outline" onclick="hideModal('todoModal')">取消</button>
       <button class="btn" onclick="saveTodo()">保存</button>
@@ -700,8 +731,8 @@
   <div class="modal">
     <h3>添加定时提醒</h3>
     <div class="field"><label>提醒内容</label><input id="taskMessage" type="text" placeholder="提醒内容"></div>
-    <div class="field"><label>提醒时间</label><input id="taskTime" type="text" placeholder="如 2026-10-08T10:30 或 PT2H（2 小时后）"></div>
-    <div class="field"><label>重复间隔（秒，留空为单次）</label><input id="taskRepeat" type="number" placeholder="可选"></div>
+    <div class="field"><label>提醒时间</label><input id="taskTime" type="datetime-local"><div class="mobile-time-presets"><button type="button" data-reminder-minutes="30">半小时后</button><button type="button" data-reminder-minutes="60">一小时后</button><button type="button" data-reminder-tomorrow>明天上午</button></div></div>
+    <div class="field"><label>重复</label><select id="taskRepeat"><option value="">仅这一次</option><option value="300">每五分钟</option><option value="3600">每小时</option><option value="86400">每天</option><option value="604800">每周</option></select></div>
     <div class="modal-actions">
       <button class="btn outline" onclick="hideModal('taskModal')">取消</button>
       <button class="btn" onclick="saveTask()">保存</button>
@@ -725,6 +756,7 @@ let currentConfirmId = null;
 let currentNoteId = null;
 let noteBlocksDirty = [];
 let wxLoading = false, directLoading = false;
+let noteOwnerId = '', noteEditingOwnerId = '', noteLoadRequest = 0, noteEditRequest = 0;
 
 async function api(path, opts = {}) {
   const res = await fetch(path, { headers: { 'Content-Type': 'application/json' }, ...opts });
@@ -769,6 +801,7 @@ async function loadCharacters() {
     initPets();
     updateChatForChar(currentCharId);
     if (document.getElementById('pageMemory').classList.contains('open')) loadMemories();
+    document.dispatchEvent(new Event('mobile:characters-ready'));
   } catch (e) { console.error('加载角色失败:', e); }
 }
 async function switchCharacter(charId) {
@@ -810,6 +843,7 @@ function openPage(el, id) {
   else if (id === 'memory') loadMemories();
   else if (id === 'notes') loadNotes();
   else if (id === 'todo') { loadTodos(); loadTasks(); }
+  if (page) document.dispatchEvent(new CustomEvent('mobile:pagechange', { detail: id }));
 }
 function goHome() {
   document.activeElement?.blur();
@@ -819,6 +853,7 @@ function goHome() {
   const t = document.getElementById('tabDirect');
   if (t) t.classList.add('active');
   updateNavigation('home');
+  document.dispatchEvent(new CustomEvent('mobile:pagechange', { detail: 'home' }));
 }
 
 // ── 微信对话 ──
@@ -1177,7 +1212,6 @@ async function wxHoldEnd() {
 function wxHoldCancel() { if (wxHoldActive) wxHoldEnd(); }
 
 // ── 媒体抽屉：图片 / 拍照 ──
-function wxMediaNotSupported() { toast('该功能暂未开放'); closeWxDrawers(); }
 let wxImageCapture = false;
 function wxPickImage(capture) {
   wxImageCapture = !!capture;
@@ -1320,11 +1354,13 @@ async function stopGeneration(charId) { try { await api('/api/characters/' + (ch
 
 // ── 笔记 ──
 async function loadNotes() {
-  if (!currentCharId) return;
+  const owner = noteOwnerId || currentCharId, request = ++noteLoadRequest;
+  if (!owner) return;
   const el = document.getElementById('noteList');
   el.innerHTML = '<div class="loading">加载中...</div>';
   try {
-    const data = await api('/api/characters/' + currentCharId + '/notes');
+    const data = await api('/api/characters/' + encodeURIComponent(owner) + '/notes');
+    if (request !== noteLoadRequest) return;
     el.innerHTML = '';
     if (!data.notes || data.notes.length === 0) { el.innerHTML = '<div class="empty">暂无笔记</div>'; return; }
     data.notes.forEach(n => {
@@ -1353,7 +1389,8 @@ async function loadNotes() {
       bindNoteSwipe(wrap);
       el.appendChild(wrap);
     });
-  } catch (e) { el.innerHTML = '<div class="error">加载失败: ' + escapeHtml(e.message) + '</div>'; }
+    window.MobileUI?.decorateNotes();
+  } catch (e) { if (request === noteLoadRequest) el.innerHTML = '<div class="error">加载失败: ' + escapeHtml(e.message) + '</div><button class="btn outline" onclick="loadNotes()">重新加载</button>'; }
 }
 // 笔记左滑手势（触摸 + 鼠标），并避免触发页面返回手势
 let noteSwipeBusy = false;
@@ -1410,32 +1447,39 @@ function bindNoteSwipe(wrap) {
 async function deleteNoteById(noteId) {
   if (!confirm('确定删除该笔记？')) return;
   try {
-    await api('/api/characters/' + currentCharId + '/notes/' + noteId, { method: 'DELETE' });
+    await api('/api/characters/' + encodeURIComponent(noteOwnerId || currentCharId) + '/notes/' + encodeURIComponent(noteId), { method: 'DELETE' });
     loadNotes();
   } catch (e) { alert('删除失败: ' + e.message); }
 }
 function newNote() {
+  noteEditRequest++;
+  noteEditingOwnerId = noteOwnerId || currentCharId;
   currentNoteId = null;
   document.getElementById('noteTitle').value = '';
   noteBlocksDirty = [{ type: 'paragraph', text: '' }];
   renderNoteBlocks();
   document.getElementById('noteModalTitle').textContent = '新建笔记';
   document.getElementById('noteDeleteBtn').style.display = 'none';
+  window.MobileUI?.restoreNoteDraft();
   showModal('noteModal');
 }
 // 在新页面打开笔记的渲染 HTML
 function viewNoteHtml(noteId) {
-  window.open('/api/characters/' + currentCharId + '/notes/' + noteId + '/html', '_blank');
+  window.open('/api/characters/' + encodeURIComponent(noteOwnerId || currentCharId) + '/notes/' + encodeURIComponent(noteId) + '/html', '_blank', 'noopener');
 }
 async function openNote(noteId) {
+  const owner = noteOwnerId || currentCharId, request = ++noteEditRequest;
   try {
-    const note = await api('/api/characters/' + currentCharId + '/notes/' + noteId);
+    const note = await api('/api/characters/' + encodeURIComponent(owner) + '/notes/' + encodeURIComponent(noteId));
+    if (request !== noteEditRequest) return;
+    noteEditingOwnerId = owner;
     currentNoteId = noteId;
     document.getElementById('noteTitle').value = note.title || '';
     noteBlocksDirty = normalizeBlocks(note.blocks || []);
     renderNoteBlocks();
     document.getElementById('noteModalTitle').textContent = '编辑笔记';
     document.getElementById('noteDeleteBtn').style.display = 'inline-block';
+    window.MobileUI?.restoreNoteDraft();
     showModal('noteModal');
   } catch (e) { alert('加载笔记失败: ' + e.message); }
 }
@@ -1449,11 +1493,14 @@ function normalizeBlocks(blocks) {
     if (b.type === 'divider') return { type: 'divider', emoji: b.emoji || '' };
     if (b.type === 'image') return { type: 'image', url: b.url || '', caption: b.caption || '' };
     if (b.type === 'tags') return { type: 'tags', items: (b.items||[]).join('\n') };
+    if (b.type !== 'paragraph') return { type: b.type, readonly: true };
     return { type: 'paragraph', text: b.text || '' };
-  });
+  }).map((block, index) => ({ ...block, original: blocks[index] }));
 }
 function buildBlocks() {
   return noteBlocksDirty.map(b => {
+    if (b.readonly) return b.original;
+    const block = (() => {
     switch (b.type) {
       case 'paragraph': return { type: 'paragraph', text: b.text };
       case 'heading': return { type: 'heading', level: Math.min(Math.max(parseInt(b.level)||1,1),3), text: b.text };
@@ -1466,6 +1513,8 @@ function buildBlocks() {
       case 'tags': return { type:'tags', items:(b.items||'').split('\n').filter(x=>x) };
       default: return { type:'paragraph', text:b.text };
     }
+    })();
+    return { ...(b.original?.type === b.type ? b.original : {}), ...block };
   });
 }
 function renderNoteBlocks() {
@@ -1476,9 +1525,20 @@ function renderNoteBlocks() {
     wrap.style.cssText = 'border:1px solid var(--border);border-radius:8px;padding:8px;';
     const sel = document.createElement('select');
     const opts = { paragraph:'段落', heading:'标题', list:'列表', quote:'引用', callout:'提示', divider:'分隔线', card:'卡片', image:'图片', tags:'标签' };
+    if (b.readonly) opts[b.type] = ({ table:'表格', chart:'图表', mermaid:'流程图', custom:'完整文稿', meta:'附加资料' })[b.type] || '完整内容';
     Object.keys(opts).forEach(k => { const o=document.createElement('option'); o.value=k; o.textContent=opts[k]; o.selected=(b.type===k); sel.appendChild(o); });
     sel.onchange = (e) => { noteBlocksDirty[i].type = e.target.value; renderNoteBlocks(); };
     wrap.appendChild(sel);
+    if (b.readonly) {
+      sel.disabled = true;
+      const hint = document.createElement('p');
+      hint.className = 'mobile-caption';
+      hint.style.marginTop = '10px';
+      hint.textContent = '此内容在阅读全文中查看，保存时会保留原有内容和样式。';
+      wrap.appendChild(hint);
+      el.appendChild(wrap);
+      return;
+    }
     const textarea = document.createElement('textarea');
     textarea.rows = 2;
     textarea.placeholder = '内容';
@@ -1491,6 +1551,7 @@ function renderNoteBlocks() {
       if (t==='heading') { const m=v.match(/^#(\d)\s*(.*)$/); noteBlocksDirty[i].level=m?m[1]:''; noteBlocksDirty[i].text=m?m[2]:v; }
       else if (t==='list'||t==='tags') noteBlocksDirty[i].items=v;
       else if (t==='card') { const idx=v.indexOf('\n'); if(idx>=0){noteBlocksDirty[i].title=v.slice(0,idx);noteBlocksDirty[i].body=v.slice(idx+1);} else {noteBlocksDirty[i].title=v;noteBlocksDirty[i].body='';} }
+      else if (t==='image') noteBlocksDirty[i].url=v;
       else noteBlocksDirty[i].text=v; };
     wrap.appendChild(textarea);
     const del = document.createElement('button');
@@ -1504,22 +1565,28 @@ function renderNoteBlocks() {
 }
 function addBlock(type) { noteBlocksDirty.push({ type, text:'', items:'', level:1, title:'', body:'', url:'', emoji:'' }); renderNoteBlocks(); }
 async function saveNote() {
+  const button = document.getElementById('noteSaveBtn');
+  if (button.disabled) return;
   const title = document.getElementById('noteTitle').value.trim();
   if (!title) { alert('标题不能为空'); return; }
   const blocks = buildBlocks();
   if (blocks.length === 0) { alert('内容块不能为空'); return; }
+  const owner = noteEditingOwnerId || noteOwnerId || currentCharId, request = noteEditRequest, noteId = currentNoteId;
+  button.disabled = true;
   try {
-    if (currentNoteId) { await api('/api/characters/' + currentCharId + '/notes/' + currentNoteId, { method: 'PUT', body: JSON.stringify({ title, blocks, layout: 'simple', palette: 'warm' }) }); }
-    else { await api('/api/characters/' + currentCharId + '/notes', { method: 'POST', body: JSON.stringify({ title, blocks, layout: 'simple', palette: 'warm' }) }); }
-    hideModal('noteModal');
+    if (currentNoteId) { await api('/api/characters/' + encodeURIComponent(owner) + '/notes/' + encodeURIComponent(currentNoteId), { method: 'PUT', body: JSON.stringify({ title, blocks }) }); }
+    else { await api('/api/characters/' + encodeURIComponent(owner) + '/notes', { method: 'POST', body: JSON.stringify({ title, blocks, layout: 'simple', palette: 'warm' }) }); }
+    window.MobileUI?.clearNoteDraft(owner, noteId);
+    if (request === noteEditRequest) hideModal('noteModal');
     loadNotes();
   } catch (e) { alert('保存失败: ' + e.message); }
+  finally { button.disabled = false; }
 }
 async function deleteNote() {
   if (!currentNoteId) return;
   if (!confirm('确定删除该笔记？')) return;
   try {
-    await api('/api/characters/' + currentCharId + '/notes/' + currentNoteId, { method: 'DELETE' });
+    await api('/api/characters/' + encodeURIComponent(noteEditingOwnerId || noteOwnerId || currentCharId) + '/notes/' + encodeURIComponent(currentNoteId), { method: 'DELETE' });
     hideModal('noteModal');
     loadNotes();
   } catch (e) { alert('删除失败: ' + e.message); }
@@ -1532,7 +1599,7 @@ async function loadTodos() {
   try {
     const data = await api('/api/todos?include_completed=true');
     el.innerHTML = '';
-    if (!data.items || data.items.length === 0) { el.innerHTML = '<div class="empty">暂无待办</div>'; return; }
+    if (!data.items || data.items.length === 0) { el.innerHTML = '<div class="empty">暂无待办</div>'; window.MobileUI?.filterPlans(); return; }
     data.items.forEach(it => {
       const div = document.createElement('div');
       div.className = 'card todo-item' + (it.completed ? ' completed' : '');
@@ -1545,6 +1612,7 @@ async function loadTodos() {
         '<div class="actions"><button class="btn small outline" onclick="editTodo(\'' + it.id + '\')">编辑</button><button class="btn small danger" onclick="removeTodo(\'' + it.id + '\')">删除</button></div></div>';
       el.appendChild(div);
     });
+    window.MobileUI?.filterPlans();
   } catch (e) { el.innerHTML = '<div class="error">加载失败: ' + escapeHtml(e.message) + '</div>'; }
 }
 let editingTodoId = null;
@@ -1554,7 +1622,7 @@ function editTodo(id) {
   document.getElementById('todoModalTitle').textContent='编辑待办';
   api('/api/todos?include_completed=true').then(d => {
     const it = d.items.find(x => x.id === id);
-    if (it) { document.getElementById('todoTitle').value=it.title; document.getElementById('todoDesc').value=it.description||''; document.getElementById('todoPriority').value=String(it.priority||1); document.getElementById('todoDue').value=it.due_date||''; }
+    if (it) { document.getElementById('todoTitle').value=it.title; document.getElementById('todoDesc').value=it.description||''; document.getElementById('todoPriority').value=String(it.priority||1); document.getElementById('todoDue').value=window.MobileUI?.inputDateTime(it.due_date)||''; }
     showModal('todoModal');
   });
 }
@@ -1568,7 +1636,7 @@ async function saveTodo() {
     hideModal('todoModal'); loadTodos();
   } catch (e) { alert('保存失败: ' + e.message); }
 }
-async function toggleTodo(id) { try { await api('/api/todos/' + id + '/complete', { method: 'POST' }); loadTodos(); } catch (e) {} }
+async function toggleTodo(id) { try { await api('/api/todos/' + id + '/complete', { method: 'POST' }); loadTodos(); } catch (e) { toast('更新失败：' + e.message); } }
 async function removeTodo(id) { if(!confirm('确定删除该待办？')) return; try { await api('/api/todos/' + id, { method: 'DELETE' }); loadTodos(); } catch (e) { alert('删除失败: ' + e.message); } }
 
 // ── 定时任务 ──
@@ -1585,7 +1653,7 @@ async function loadTasks() {
       const st = t.status || 'pending';
       const msg = t.message || (t.tool_name ? '工具任务: ' + t.tool_name : '');
       const repeat = t.repeat_interval ? ' · 每 ' + Math.round(t.repeat_interval/60) + ' 分钟' : '';
-      div.innerHTML = '<div class="title">' + escapeHtml(msg || '(无内容)') + ' <span class="status st-' + st + '">' + st + '</span></div>' +
+      div.innerHTML = '<div class="title">' + escapeHtml(msg || '(无内容)') + ' <span class="status st-' + st + '">' + escapeHtml(({pending:'待提醒',paused:'已暂停',running:'执行中',completed:'已完成',cancelled:'已取消',failed:'未成功'})[st] || st) + '</span></div>' +
         '<div class="sub">' + formatDateTime(t.scheduled_time) + repeat + '</div>' +
         '<div class="actions">' +
         (st === 'paused' ? '<button class="btn small outline" onclick="resumeTask(\'' + t.id + '\')">恢复</button>' : (st === 'pending' ? '<button class="btn small outline" onclick="pauseTask(\'' + t.id + '\')">暂停</button>' : '')) +
@@ -1602,6 +1670,8 @@ async function saveTask() {
   const ts = parseTimeSpec(timeSpec);
   if (ts === null) { alert('时间格式无法解析'); return; }
   const repeat = parseInt(document.getElementById('taskRepeat').value) || null;
+  if (ts <= Date.now()/1000) { alert('请选择一个未来的提醒时间'); return; }
+  if (repeat !== null && repeat < 1) { alert('重复间隔必须大于零'); return; }
   try {
     await api('/api/tasks', { method: 'POST', body: JSON.stringify({ message, scheduled_time: ts, repeat_interval: repeat }) });
     hideModal('taskModal'); loadTasks();
@@ -1624,9 +1694,9 @@ function parseTimeSpec(spec) {
   }
   return null;
 }
-async function cancelTask(id) { try { await api('/api/tasks/' + id, { method: 'DELETE' }); loadTasks(); } catch (e) {} }
-async function pauseTask(id) { try { await api('/api/tasks/' + id + '/pause', { method: 'POST' }); loadTasks(); } catch (e) {} }
-async function resumeTask(id) { try { await api('/api/tasks/' + id + '/resume', { method: 'POST' }); loadTasks(); } catch (e) {} }
+async function cancelTask(id) { try { await api('/api/tasks/' + id, { method: 'DELETE' }); loadTasks(); } catch (e) { toast('取消失败：' + e.message); } }
+async function pauseTask(id) { try { await api('/api/tasks/' + id + '/pause', { method: 'POST' }); loadTasks(); } catch (e) { toast('暂停失败：' + e.message); } }
+async function resumeTask(id) { try { await api('/api/tasks/' + id + '/resume', { method: 'POST' }); loadTasks(); } catch (e) { toast('恢复失败：' + e.message); } }
 
 // ── Toast / 确认 ──
 function showToast(t) {
@@ -1945,5 +2015,6 @@ loadCharacters();
 setInterval(pollToasts, 5000);
 setInterval(pollConfirmations, 3000);
 </script>
+<script src="/companion-ui.js"></script>
 </body>
 </html>

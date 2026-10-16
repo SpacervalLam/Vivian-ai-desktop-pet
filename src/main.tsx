@@ -72,6 +72,11 @@ if (!isTauri && initialParams.get('view') === 'rig_preview') {
 
       let element: React.ReactElement;
       switch (view) {
+        case 'screen_freeze': {
+          const ScreenFreezeWindow = (await import('./components/ScreenFreezeWindow')).default;
+          element = <ScreenFreezeWindow />;
+          break;
+        }
         case 'screen_selection': {
           const ScreenSelectionWindow = (await import('./components/ScreenSelectionWindow')).default;
           element = <ScreenSelectionWindow />;

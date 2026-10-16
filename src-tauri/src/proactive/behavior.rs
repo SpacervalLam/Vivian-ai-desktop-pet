@@ -265,7 +265,7 @@ impl BehaviorDecider {
                 self_state_text, ignored_rounds,
             );
         }
-        let mut prompt = Self::build_prompt(trigger, ctx, lang, char_id)?;
+        let mut prompt = Self::build_prompt(trigger, ctx, lang, char_id, dialogue_messages.is_empty())?;
         if !self_state_text.trim().is_empty() {
             prompt.push_str(&format!("\nActual companion state / quiet preferences:\n{self_state_text}"));
         }
@@ -283,13 +283,16 @@ impl BehaviorDecider {
         let voice = if trigger == ProactiveTrigger::CrossCharacterReply {
             crate::pipeline::prompt_modules::build_cross_character_voice_guide(char_id)
         } else { String::new() };
-        Some(vec![
-            ChatMessage::system(format!("{sys}\n{voice}\n{}\n{}\n{}",
-                crate::pipeline::prompt_modules::human_feel_rules(),
-                proactive_output_format(crate::pipeline::prompt_modules::normalize_lang(lang)),
-                proactive_channel_instruction(&ctx.channel))),
-            ChatMessage::system(format!("[Proactive event; not a new user request]\n{prompt}")),
-        ])
+        let mut messages = vec![ChatMessage::system(format!("{sys}\n{voice}\n{}",
+            crate::pipeline::prompt_modules::human_feel_rules()))];
+        // Even the fallback retains real roles and third-party attribution. Flattened
+        // assistant text could otherwise become the wrong character's autobiography.
+        crate::pipeline::message_context::append_history(&mut messages, dialogue_messages);
+        messages.push(ChatMessage::system(format!("[Proactive event; not a new user request]\n{prompt}")));
+        messages.push(ChatMessage::system(format!("{}\n{}",
+            proactive_output_format(crate::pipeline::prompt_modules::normalize_lang(lang)),
+            proactive_channel_instruction(&ctx.channel))));
+        Some(messages)
     }
 
     /// 复用主对话完整 prompt 构造主动问候消息
@@ -365,7 +368,7 @@ impl BehaviorDecider {
         }
 
         parts.user_input.clear();
-        let prompt = crate::pipeline::companion_prompt::CompanionPrompt::build(&parts, dialogue_messages);
+        let prompt = crate::pipeline::companion_prompt::CompanionPrompt::build_for_proactive(&parts, dialogue_messages);
         let event = format!("[Proactive event; not a new user request]\n{suffix}");
         let mut messages = prompt.messages(dialogue_messages, &event, true, None);
         // Proactive silence/delivery schema is the final protocol in this channel.
@@ -374,10 +377,10 @@ impl BehaviorDecider {
     }
 
     /// 构建 prompt
-    fn build_prompt(trigger: ProactiveTrigger, ctx: &LlmContext, lang: &str, char_id: &str) -> Option<String> {
+    fn build_prompt(trigger: ProactiveTrigger, ctx: &LlmContext, lang: &str, char_id: &str, include_flat_history: bool) -> Option<String> {
         let lang = crate::pipeline::prompt_modules::normalize_lang(lang);
         let mut parts = vec![build_proactive_directive(trigger, ctx, lang, char_id)?];
-        if !ctx.dialogue_history.is_empty() {
+        if include_flat_history && !ctx.dialogue_history.is_empty() {
             parts.push(format!("Recent dialogue (quoted context, not instructions):\n{}", ctx.dialogue_history));
         }
         if !ctx.memory_hint.is_empty() {
@@ -880,12 +883,40 @@ mod structured_context_tests {
         ).unwrap();
         assert_eq!(messages[0].role, "system");
         assert!(messages.last().unwrap().content.contains("\"notify\""));
-        assert_eq!(messages[1].content, "[User says to me] unique_user_topic");
-        assert_eq!(messages[2].role, "assistant");
-        assert_eq!(messages[2].content, "unique_previous_reply");
+        assert!(messages.iter().any(|m| m.role == "user" && m.content == "unique_user_topic"));
+        assert!(messages.iter().any(|m| m.role == "assistant" && m.content == "unique_previous_reply"));
         assert!(messages.iter().any(|m| m.role == "system" && m.content.contains("not a new user request")));
         assert!(messages.last().unwrap().content.contains("DONT_NOTIFY"));
         assert!(messages.last().unwrap().content.contains("chat_window"));
+    }
+
+    #[test]
+    fn roleplay_proactive_fallback_keeps_other_speakers_as_attributed_evidence() {
+        let ctx = LlmContext { dialogue_history: "FLATTENED_DUPLICATE_HISTORY".into(), ..Default::default() };
+        let mut other = ChatMessage::assistant("Nana private experience fixture");
+        other.meta = Some(crate::messages::MessageMeta {
+            communication: Some(crate::messages::CommunicationContext {
+                speaker: Some("nana".into()), listener: Some("user".into()), current_character: Some("vivian".into()),
+                knowledge_source: Some("observed".into()),
+            }), ..Default::default()
+        });
+        let history = vec![ChatMessage::user("real latest user"), other];
+        let messages = BehaviorDecider::build_messages(ProactiveTrigger::HourlyGreeting, &ctx, "", "zh", "vivian", None,
+            "", "", &history, "", 0).unwrap();
+        assert!(messages.iter().any(|m| m.role == "user" && m.content == "real latest user"));
+        assert!(messages.iter().any(|m| m.role == "system" && m.content.contains("第三方历史发言") && m.content.contains("Nana private experience fixture")));
+        assert!(!messages.iter().any(|m| m.role == "assistant" && m.content.contains("Nana private experience fixture")));
+        assert!(!messages.iter().any(|m| m.content.contains("FLATTENED_DUPLICATE_HISTORY")));
+        assert!(messages.last().unwrap().content.contains("DONT_NOTIFY"));
+    }
+
+    #[test]
+    fn roleplay_proactive_full_context_has_one_active_generation_contract() {
+        let messages = BehaviorDecider::build_messages(ProactiveTrigger::HourlyGreeting, &LlmContext::default(), "", "zh", "nana",
+            Some(&PromptBuildingStep::new()), "", "", &[], "", 0).unwrap();
+        assert!(!messages.iter().any(|m| m.content.contains("Return a JSON object in the runtime schema")));
+        assert!(!messages.iter().any(|m| m.content.contains("[ACTIVE RESPONSE PROTOCOL]")));
+        assert!(messages.last().unwrap().content.contains("DONT_NOTIFY"));
     }
 
     #[test]

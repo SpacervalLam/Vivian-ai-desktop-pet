@@ -8,6 +8,13 @@ import { getCharacterId } from '../characterContext';
 import { isAssistantPanel } from './assistantPanels';
 import './DesktopAssistantWindow.css';
 
+const showErrorToast = (error: unknown) => {
+  void emit('toast:show', {
+    message: error instanceof Error ? error.message : String(error),
+    type: 'error', duration: 5000, key: Date.now(),
+  }).catch(error => console.warn('[DesktopAssistantWindow] 显示错误提示失败:', error));
+};
+
 interface Shortcut { id: string; name: string; kind: 'application' | 'website'; target: string }
 /** 只填 `bilibili.com` 时补上 https://：后端取图标和 open_url 工具都要求带协议头。 */
 const normalizeShortcutTarget = (kind: Shortcut['kind'], target: string) => {
@@ -39,8 +46,6 @@ export default function DesktopAssistantWindow({ embedded = false, initialCharac
   const tab = isAssistantPanel(requestedPanel) ? requestedPanel! : 'notes';
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
-  const [message, setMessage] = useState('');
-  const [error, setError] = useState('');
   const [note, setNote] = useState('');
   const [shortcutName, setShortcutName] = useState('');
   const [shortcutTarget, setShortcutTarget] = useState('');
@@ -70,7 +75,7 @@ export default function DesktopAssistantWindow({ embedded = false, initialCharac
     const update = async () => {
       if (!active || inFlight) return;
       inFlight = true;
-      try { await refresh(); } catch (e) { if (active) setError(String(e)); }
+      try { await refresh(); } catch (e) { if (active) showErrorToast(e); }
       finally { inFlight = false; }
     };
     void (async () => {
@@ -79,20 +84,19 @@ export default function DesktopAssistantWindow({ embedded = false, initialCharac
         if (!active) unlisten(); else cleanup.push(unlisten);
       }
       await update();
-    })().catch(e => { if (active) setError(String(e)); });
+    })().catch(e => { if (active) showErrorToast(e); });
     const timer = window.setInterval(() => {
       void getCurrentWindow().isVisible().then(visible => { if (visible) void update(); }).catch(() => {});
     }, 30_000);
     return () => { mounted.current = false; active = false; clearInterval(timer); cleanup.forEach(unlisten => unlisten()); };
   }, [refresh]);
   const feedback = async (content: string, motion = 'remind') => {
-    if (mounted.current) setMessage(content);
     await emit('companion:interaction', { character_id: character, content, motion });
   };
   const run = async (action: () => Promise<void>) => {
     if (busyRef.current) return;
-    busyRef.current = true; setBusy(true); setError(''); setMessage('');
-    try { await action(); } catch (e) { if (mounted.current) setError(String(e)); }
+    busyRef.current = true; setBusy(true);
+    try { await action(); } catch (e) { if (mounted.current) showErrorToast(e); }
     finally { busyRef.current = false; if (mounted.current) setBusy(false); }
   };
   const saveShortcuts = async (shortcuts: Shortcut[]) => {
@@ -109,29 +113,21 @@ export default function DesktopAssistantWindow({ embedded = false, initialCharac
   const saveNote = async () => {
     const value = note.trim();
     await invoke('user_quick_notes_save', { content: value });
-    setNote(''); setMessage(label('已保存。', '保存しました。', 'Saved.'));
+    setNote('');
   };
   const shortcutCount = context?.shortcuts.length ?? 0;
-  // 提示条放在页面内部，不是滚动容器顶部：放外面会把 sticky 页头连同返回键一起推下去，
-  // 一条转瞬即逝的"处理中"不该挪动整个页面骨架。
-  const notices = <>
-    {busy && <div className="assistant-notice" role="status"><span className="assistant-working" />{label('处理中', '処理中', 'Working')}</div>}
-    {error && <p className="assistant-notice assistant-error" role="alert">{error}</p>}
-    {message && <p className="assistant-notice" role="status">{message}</p>}
-  </>;
   return <main data-panel={tab} className={'desktop-assistant' + (embedded ? ' desktop-assistant-embedded' : '')}>
     <div className="assistant-aurora" aria-hidden />
     <div className="assistant-scroll">
       <div className="assistant-page">
         <div className="assistant-body">
-          {notices}
           {tab === 'notes' && <>
             <div className="assistant-intro"><NotebookPen size={19} /><div><h2>{label('留住此刻的想法', '今のひらめきを残そう', 'A little space for your thoughts')}</h2><p>{label('灵感、琐事，或一句想记住的话。', 'ひらめきも、日々の小さなことも。', 'Ideas, little things, and words to keep.')}</p></div></div>
             <section className="assistant-card assistant-editor"><textarea aria-label={label('随手记', 'メモ', 'Note')} placeholder={label('想到什么就写下来，不用整理。', '思いついたことをそのまま書いて。', 'Write it down as it comes.')} value={note} maxLength={10_000} onChange={e => setNote(e.target.value)} /><div className="assistant-editor-footer"><span className="assistant-count">{[...note].length}<b> / 10,000</b></span><button className="assistant-primary" disabled={busy || !note.trim()} onClick={() => void run(saveNote)}>{label('保存', '保存', 'Save')}</button></div></section>
             <section className="assistant-card assistant-notes-archive"><p className="assistant-card-title">{label('已记录', '保存したメモ', 'Saved notes')}</p><UserQuickNotes /></section>
           </>}
           {tab === 'shortcuts' && <>
-            <div className="assistant-shortcut-toolbar"><span className="assistant-muted">{label('共 ' + shortcutCount + ' 个快捷方式', shortcutCount + ' 件のショートカット', shortcutCount + ' shortcuts')}</span><button className="assistant-add-shortcut" aria-label={label('添加快捷方式', 'ショートカットを追加', 'Add shortcut')} onClick={() => { setError(''); setShortcutFormOpen(true); }}><Plus size={20} /></button></div>
+            <div className="assistant-shortcut-toolbar"><span className="assistant-muted">{label('共 ' + shortcutCount + ' 个快捷方式', shortcutCount + ' 件のショートカット', shortcutCount + ' shortcuts')}</span><button className="assistant-add-shortcut" aria-label={label('添加快捷方式', 'ショートカットを追加', 'Add shortcut')} onClick={() => setShortcutFormOpen(true)}><Plus size={20} /></button></div>
             <div className="assistant-shortcut-list">
               {context?.shortcuts.map(item => <div className="assistant-shortcut" key={item.id}>
                 <ShortcutIcon key={item.kind + item.target} shortcut={item} />
@@ -160,7 +156,6 @@ export default function DesktopAssistantWindow({ embedded = false, initialCharac
               <div className="assistant-kind-switch">{(['website', 'application'] as const).map(kind => <button type="button" key={kind} disabled={busy} aria-pressed={shortcutKind === kind} onClick={() => setShortcutKind(kind)}>{kind === 'website' ? label('网站', 'サイト', 'Website') : label('应用', 'アプリ', 'App')}</button>)}</div>
               <input autoFocus required maxLength={80} aria-label={label('快捷方式名称', 'ショートカット名', 'Shortcut name')} placeholder={label('名称', '名前', 'Name')} value={shortcutName} onChange={e => setShortcutName(e.target.value)} />
               <input required aria-label={label('快捷方式目标', 'ショートカットのリンク先', 'Shortcut target')} placeholder={shortcutKind === 'website' ? 'https://…' : 'C:\\…\\app.exe'} value={shortcutTarget} onChange={e => setShortcutTarget(e.target.value)} />
-              {error && <p className="assistant-review-error" role="alert">{error}</p>}
               <div className="assistant-modal-actions"><button type="button" className="assistant-ghost-button" disabled={busy} onClick={() => setShortcutFormOpen(false)}>{label('取消', 'キャンセル', 'Cancel')}</button><button type="submit" className="assistant-primary" disabled={busy || !context || !shortcutName.trim() || !shortcutTarget.trim()}>{busy ? label('添加中…', '追加中…', 'Adding…') : label('添加', '追加', 'Add')}</button></div>
             </form>
     </dialog>
@@ -172,17 +167,15 @@ function UserQuickNotes() {
   const label = (zh: string, ja: string, en: string) => i18n.language.startsWith('zh') ? zh : i18n.language.startsWith('ja') ? ja : en;
   const [notes, setNotes] = useState<Array<{ id: string; title: string; content: string; created_at: number }>>([]);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
   useEffect(() => {
     let active = true, revision = 0;
     let cleanup: (() => void) | undefined;
     const update = () => {
       const request = ++revision;
       void invoke<typeof notes>('user_quick_notes_list')
-        .then(next => { if (active && request === revision) setNotes(next); }).catch(e => { if (active && request === revision) setError(String(e)); });
+        .then(next => { if (active && request === revision) setNotes(next); }).catch(e => { if (active && request === revision) showErrorToast(e); });
     };
-    setError('');
-    void listen('user_quick_notes:changed', update).then(unlisten => { if (active) { cleanup = unlisten; update(); } else unlisten(); }).catch(e => { if (active) setError(String(e)); });
+    void listen('user_quick_notes:changed', update).then(unlisten => { if (active) { cleanup = unlisten; update(); } else unlisten(); }).catch(e => { if (active) showErrorToast(e); });
     return () => { active = false; cleanup?.(); };
   }, []);
   return <div className="assistant-notes-list">
@@ -191,12 +184,11 @@ function UserQuickNotes() {
       <summary>{note.title}</summary>
       <p style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{note.content}</p>
       <button className="assistant-icon-button" aria-label={label('删除随手记', 'メモを削除', 'Delete note')} disabled={busy} onClick={() => {
-        setBusy(true); setError('');
+        setBusy(true);
         void invoke('user_quick_notes_delete', { id: note.id }).then(() => setNotes(previous => previous.filter(item => item.id !== note.id)))
-          .catch(e => setError(String(e))).finally(() => setBusy(false));
+          .catch(showErrorToast).finally(() => setBusy(false));
       }}><Trash2 size={16} /></button>
     </details>)}
-    {error && <p role="alert" className="assistant-review-error">{error}</p>}
   </div>;
 }
 

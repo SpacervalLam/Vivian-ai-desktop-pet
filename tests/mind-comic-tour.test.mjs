@@ -10,9 +10,9 @@ assert.equal(hasRunningComicAnimation([animation('running', 17000)]), true);
 assert.equal(hasRunningComicAnimation([animation('finished', 17000)]), false);
 assert.equal(hasRunningComicAnimation([animation('running', Infinity)]), false, 'perpetual ambient motion cannot block a tour');
 assert.equal(hasRunningComicAnimation([animation('idle', 2000, true)]), true, 'pending entrances must finish');
-assert.equal(comicScriptDuration(9, false), 5110);
-assert.equal(comicScriptDuration(7, false), 11740, 'page 09 waits for the inset to settle before grip/hold/release');
-assert.equal(comicScriptDuration(9, true), 0);
+assert.equal(comicScriptDuration(9), 5800);
+assert.equal(comicScriptDuration(7), 12890, 'page 09 waits for the inset to settle before grip/hold/release');
+assert.equal(comicScriptDuration(7), 12890, 'the tour always waits for the complete hand performance');
 assert.equal(nextTourPage(8, 9), 0);
 
 // Execute the real activity and scheduling effects with a controllable clock.

@@ -1,6 +1,4 @@
 @import "./ComicFrames.css";
-@font-face{font-family:"Mind Comic";src:url("/fonts/ma-shan-zheng.woff2") format("woff2");font-weight:400;font-style:normal;font-display:swap}
-
 /* Keep the new morning page's exact framing; the slow push would crop her hand. */
 .mind-comic-book .shot.morning-panel img{animation:none;transform:none}
 
@@ -15,11 +13,9 @@
 .mind-comic-book .shot img{display:block;width:100%;height:100%;object-fit:cover;object-position:var(--focus,50% 50%);animation:mind-comic-push 17s ease-out both;animation-delay:var(--delay)}
 .mind-comic-book .shot.mirror .image-wrap{scale:-1 1}
 .mind-comic-book .scene-2 #platform-light img{height:var(--rain-image-height);animation:none;transform:none;transform-origin:top left}
-@media(prefers-reduced-motion:no-preference){
- .mind-comic-book .comic.entering.scene-2 .panel-shadow:has(>#platform-light){animation:rain-search-crop 1.15s cubic-bezier(.22,.61,.36,1) 1380ms both}
- .mind-comic-book .comic.entering.scene-2 #rain-soaked-detail{animation:mind-comic-appear 1.15s cubic-bezier(.22,.61,.36,1) 1380ms both}
- .mind-comic-book .comic.entering.scene-2 #platform-light img{animation:rain-search-image-scale 1.15s cubic-bezier(.22,.61,.36,1) 1380ms both}
-}
+.mind-comic-book .comic.entering.scene-2 .panel-shadow:has(>#platform-light){animation:rain-search-crop 1.15s cubic-bezier(.22,.61,.36,1) 1380ms both}
+.mind-comic-book .comic.entering.scene-2 #rain-soaked-detail{animation:mind-comic-appear 1.15s cubic-bezier(.22,.61,.36,1) 1380ms both}
+.mind-comic-book .comic.entering.scene-2 #platform-light img{animation:rain-search-image-scale 1.15s cubic-bezier(.22,.61,.36,1) 1380ms both}
 @keyframes rain-search-crop{from{height:var(--rain-full-panel-height)}to{height:var(--rain-final-panel-height)}}
 @keyframes rain-search-image-scale{from{transform:scale(1.04)}to{transform:scale(1)}}
 .mind-comic-book :is(.scene-2,.scene-9) .rain-type-character{opacity:0;animation:rain-type-letter 55ms steps(1,start) forwards}
@@ -61,21 +57,17 @@
 .mind-comic-book .scene-4 :is(#cafe-exterior,#cafe-interior) .image-wrap{position:relative;isolation:isolate}
 .mind-comic-book .scene-4 :is(#cafe-exterior,#cafe-interior) img{filter:saturate(.75)}
 .mind-comic-book .scene-4 :is(#cafe-exterior,#cafe-interior) .image-wrap::after{content:'';position:absolute;inset:0;background:rgb(103 128 149 / .16);mix-blend-mode:color;pointer-events:none}
-@media(prefers-reduced-motion:no-preference){
- .mind-comic-book .comic.entering.scene-5 #together{--enter-x:0px;animation:mind-comic-appear .6s both}
- .mind-comic-book .comic.entering.scene-5 .comic-sfx{animation:mind-comic-sfx-appear .45s var(--delay) both}
- .mind-comic-book .comic.entering .late-sound{animation:mind-comic-sfx-appear .45s var(--delay) both}
-}
+.mind-comic-book .comic.entering.scene-5 #together{--enter-x:0px;animation:mind-comic-appear .6s both}
+.mind-comic-book .comic.entering.scene-5 .comic-sfx{animation:mind-comic-sfx-appear .45s var(--delay) both}
+.mind-comic-book .comic.entering .late-sound{animation:mind-comic-sfx-appear .45s var(--delay) both}
 .mind-comic-book .scene-3 #emotion-v{--enter-x:12px;--enter-y:0px}
 .mind-comic-book .scene-3 #emotion-n{--enter-x:-12px;--enter-y:0px}
 @keyframes mind-comic-expand-left{from{width:49%}to{width:51%}}
 @keyframes mind-comic-expand-right{from{left:51.918%;width:48.082%}to{left:49.918%;width:50.082%}}
-@media(prefers-reduced-motion:no-preference){
- @container mind-comic (min-width:601px){
-  .mind-comic-book .comic.entering.scene-3 .panel-shadow:has(>#emotion-v){animation:mind-comic-expand-right 1.15s ease-out 460ms both}
-  .mind-comic-book .comic.entering.scene-3 .panel-shadow:has(>#emotion-n){animation:mind-comic-expand-left 1.15s ease-out 1035ms both}
+@container mind-comic (min-width:601px){
+  .mind-comic-book .comic.entering.scene-3 .panel-shadow:has(>#emotion-v){animation:mind-comic-expand-right 1.15s ease-out 1150ms both}
+  .mind-comic-book .comic.entering.scene-3 .panel-shadow:has(>#emotion-n){animation:mind-comic-expand-left 1.15s ease-out 2300ms both}
  }
-}
 @keyframes mind-comic-push{from{transform:scale(1)}to{transform:scale(1.03)}}
 @container mind-comic (max-width:600px){
  .mind-comic-book .comic{aspect-ratio:auto;height:1040px;margin-top:14px}
@@ -90,7 +82,6 @@
  .mind-comic-book .scene-6 .margin-line{font-size:24px}
  .mind-comic-book .scene-1 .presence{font-size:9px;padding:4px}
 }
-@media(prefers-reduced-motion:reduce){.mind-comic-book .shot,.mind-comic-book .shot img,.mind-comic-book .voice,.mind-comic-book .narration,.mind-comic-book .page-title,.mind-comic-book .margin-line{animation:none}}
 
 /* ==========================================================================
    第 1 页「等你出现」：画格外裁切 + 心声气泡尾巴指向各自角色
@@ -121,14 +112,12 @@
 .mind-comic-book #line-phone:hover .phone-screen-on{opacity:1}
 .unified-comic-book[data-touring="true"] .mind-comic-book .comic.entering #line-phone .phone-screen-on{animation:comic-phone-wake .24s ease calc(var(--delay) + 1150ms + 300ms) both}
 @keyframes comic-phone-wake{from{opacity:0}to{opacity:1}}
-@media(prefers-reduced-motion:reduce){.mind-comic-book #line-phone .phone-screen-on{transition:none}}
 
 /* ==========================================================================
    第 3 页「晃动的心情」：画格灰度悬停复色；画框不动，只放大 artwork 并漂浮
    ========================================================================== */
 .mind-comic-book .scene-3 .shot .image-wrap{width:calc(100% + 24px);height:calc(100% + 24px);margin:-12px;translate:0 0;filter:grayscale(1);transition:filter .6s ease}
 .mind-comic-book .scene-3 .shot:hover .image-wrap{filter:grayscale(0)}
-@media(prefers-reduced-motion:reduce){.mind-comic-book .scene-3 .shot .image-wrap{translate:0 0!important;transition:none}}
 
 /* ==========================================================================
    第 6 页「下一站晴天」：对话框页标题更大
@@ -144,12 +133,11 @@
  .mind-comic-book .scene-7 .page-title{font-size:23px}
  .mind-comic-book .scene-8 .narration.vertical{writing-mode:horizontal-tb}
 }
-@media(prefers-reduced-motion:reduce){.mind-comic-book .line-chat{animation:none}.mind-comic-book .comic{transition:none}}
 
 /* ==========================================================================
    第 8 页「雨里的停顿」：大手绘格 + 可交互小手插页
    插页是 L 形遮罩——大图整格绘制，左下角挖出小窗放帧动画小手；
-   所以 #skirt-hand 里的 <img> 常驻 display:none，可见的是 .hand-frames 精灵图。
+   普通静态插图隐藏，.hand-frames 图片图集裁出逐帧小手。
    ========================================================================== */
 .mind-comic-book .scene-8 .voice.tail-to-nana:after{left:auto;right:22%;top:-17px}
 .mind-comic-book .scene-8 .voice.tail-to-nana:before{left:auto;right:19%;top:-31px}
@@ -165,13 +153,13 @@
 .mind-comic-book .comic:not(.entering) #skirt-full{animation:none}
 
 /* 插页：遮罩与画框固定，只有里面的画在动；L 形缺口用 :before 描边 */
-.mind-comic-book .scene-8 #skirt-hand{--hand-gutter:9px;overflow:visible;background:var(--comic-paper,#fff);box-shadow:0 0 0 var(--hand-gutter) var(--comic-paper,#fff);z-index:2;animation:mind-comic-hand-reveal 1.15s cubic-bezier(.2,.7,.25,1) 3.15s both}
+.mind-comic-book .scene-8 #skirt-hand{--hand-gutter:9px;overflow:visible;background:var(--comic-paper,#fff);box-shadow:0 0 0 var(--hand-gutter) var(--comic-paper,#fff);z-index:2;animation:mind-comic-hand-reveal 1.15s cubic-bezier(.2,.7,.25,1) 4.3s both}
 .mind-comic-book .comic:not(.entering) #skirt-hand{animation:none}
 .mind-comic-book .scene-8 #skirt-hand .image-wrap{position:relative;overflow:hidden;animation:none;transform:none}
-.mind-comic-book .scene-8 #skirt-hand img{display:none}
+.mind-comic-book .scene-8 #skirt-hand img:not(.hand-frames){display:none}
 /* Ordinary SVG frames expose only the inner half of their centered stroke.
    Match that visible width and meet the full-height main panel exactly. */
-.mind-comic-book .scene-8 #skirt-hand:before{content:'';position:absolute;right:calc(-1 * var(--hand-gutter));top:calc(-1 * var(--hand-gutter));width:calc(var(--hand-corner-width,17.5676%) + var(--hand-gutter));height:calc(var(--hand-corner-height,100%) + var(--hand-gutter));border-top:calc(var(--comic-frame-width) / 2) solid var(--comic-frame-ink);border-right:calc(var(--comic-frame-width) / 2) solid var(--comic-frame-ink);pointer-events:none;z-index:3;animation:mind-comic-corner-line 0s 4.31s both}
+.mind-comic-book .scene-8 #skirt-hand:before{content:'';position:absolute;right:calc(-1 * var(--hand-gutter));top:calc(-1 * var(--hand-gutter));width:calc(var(--hand-corner-width,17.5676%) + var(--hand-gutter));height:calc(var(--hand-corner-height,100%) + var(--hand-gutter));border-top:calc(var(--comic-frame-width) / 2) solid var(--comic-frame-ink);border-right:calc(var(--comic-frame-width) / 2) solid var(--comic-frame-ink);pointer-events:none;z-index:3;animation:mind-comic-corner-line 0s 5.46s both}
 .mind-comic-book .comic:not(.entering) #skirt-hand:before{animation:none}
 .mind-comic-book .scene-8.inset-crop #skirt-hand{animation:none}
 .mind-comic-book .scene-8.inset-crop #skirt-hand:before{display:none}
@@ -179,9 +167,9 @@
 
 
 /* 小手帧动画：hover 握持 .72s → 保持 6s → 松开 .72s；小窗推入稳定后自动演示一次 */
-.mind-comic-book .scene-8 #skirt-hand .hand-frames{width:100%;height:100%;background-size:300% 200%;background-position:0% 0%;background-repeat:no-repeat}
+.mind-comic-book .scene-8 #skirt-hand .hand-frames{display:block;width:300%;height:200%;max-width:none;margin:0;object-fit:fill;transform:translate(0,0);animation:none}
 .mind-comic-book #skirt-hand.hand-playing .hand-frames{animation:mind-comic-hand-six-frame-grip 7.2s steps(1,end) 1 both}
-.mind-comic-book #skirt-hand.hand-held .hand-frames{background-position:50% 100%;animation:none}
+.mind-comic-book #skirt-hand.hand-held .hand-frames{transform:translate(-33.333333%,-50%);animation:none}
 .mind-comic-book #skirt-hand.hand-gripping .hand-frames{animation:mind-comic-hand-grip .72s steps(1,end) 1 both}
 .mind-comic-book #skirt-hand.hand-releasing .hand-frames{animation:mind-comic-hand-release .72s steps(1,end) 1 both}
 
@@ -194,16 +182,9 @@
 .mind-comic-book .comic.entering.scene-8 #hold-n img{animation:mind-comic-nana-pan 1.1s cubic-bezier(.25,.1,.25,1) 1.95s backwards}
 .mind-comic-book .scene-8 #hold-n.crop-ready:hover img{object-position:0% 22%}
 @keyframes mind-comic-nana-pan{from{object-position:0% 22%}to{object-position:100% 22%}}
-@media(prefers-reduced-motion:reduce){
- .mind-comic-book .comic.entering.scene-8 #hold-n img{animation:none;transition:none}
-}
-@keyframes mind-comic-hand-six-frame-grip{0.000000%{background-position:0% 0%}1.666667%{background-position:100% 100%}3.333333%{background-position:0% 100%}5.000000%{background-position:50% 0%}6.666667%{background-position:100% 0%}8.333333%{background-position:50% 100%}91.666000%{background-position:50% 100%}91.666667%{background-position:100% 0%}93.333333%{background-position:50% 0%}95.000000%{background-position:0% 100%}96.666667%{background-position:100% 100%}98.333333%{background-position:0% 0%}100%{background-position:0% 0%}}
-@keyframes mind-comic-hand-grip{0.000000%{background-position:0% 0%}16.666667%{background-position:100% 100%}33.333333%{background-position:0% 100%}50.000000%{background-position:50% 0%}66.666667%{background-position:100% 0%}83.333333%{background-position:50% 100%}100%{background-position:50% 100%}}
-@keyframes mind-comic-hand-release{0.000000%{background-position:50% 100%}16.666667%{background-position:100% 0%}33.333333%{background-position:50% 0%}50.000000%{background-position:0% 100%}66.666667%{background-position:100% 100%}83.333333%{background-position:0% 0%}100%{background-position:0% 0%}}
-
-@media(prefers-reduced-motion:reduce){
- .mind-comic-book .scene-8 #skirt-full,.mind-comic-book .scene-8 #skirt-hand,.mind-comic-book .scene-8 #skirt-hand .hand-frames,.mind-comic-book .scene-8 #skirt-hand:before{animation:none}
-}
+@keyframes mind-comic-hand-six-frame-grip{0.000000%{transform:translate(0,0)}1.666667%{transform:translate(-66.666667%,-50%)}3.333333%{transform:translate(0,-50%)}5.000000%{transform:translate(-33.333333%,0)}6.666667%{transform:translate(-66.666667%,0)}8.333333%{transform:translate(-33.333333%,-50%)}91.666000%{transform:translate(-33.333333%,-50%)}91.666667%{transform:translate(-66.666667%,0)}93.333333%{transform:translate(-33.333333%,0)}95.000000%{transform:translate(0,-50%)}96.666667%{transform:translate(-66.666667%,-50%)}98.333333%{transform:translate(0,0)}100%{transform:translate(0,0)}}
+@keyframes mind-comic-hand-grip{0.000000%{transform:translate(0,0)}16.666667%{transform:translate(-66.666667%,-50%)}33.333333%{transform:translate(0,-50%)}50.000000%{transform:translate(-33.333333%,0)}66.666667%{transform:translate(-66.666667%,0)}83.333333%{transform:translate(-33.333333%,-50%)}100%{transform:translate(-33.333333%,-50%)}}
+@keyframes mind-comic-hand-release{0.000000%{transform:translate(-33.333333%,-50%)}16.666667%{transform:translate(-66.666667%,0)}33.333333%{transform:translate(-33.333333%,0)}50.000000%{transform:translate(0,-50%)}66.666667%{transform:translate(-66.666667%,-50%)}83.333333%{transform:translate(0,0)}100%{transform:translate(0,0)}}
 @container mind-comic (max-width:600px){
  .mind-comic-book .scene-8 #skirt-full{animation:mind-comic-appear .8s 1.15s both,mind-comic-mobile-approach 1.1s ease 1.95s both}
  .mind-comic-book .scene-8 #skirt-hand:before{display:none}
@@ -249,7 +230,6 @@
 .mind-comic-book .narration.ink-inset{background:transparent;border:0;box-shadow:none;padding:0;color:#19171d;font-family:"Mind Comic",serif;font-size:clamp(18px,2.1cqw,29px);line-height:1.5;letter-spacing:1px;-webkit-text-stroke:5px white;paint-order:stroke fill;text-shadow:0 1px 2px rgb(0 0 0 / .15);pointer-events:none}
 .mind-comic-book .narration.ink-inset.vertical{padding:0;font-size:clamp(20px,2.2cqw,31px);line-height:1.5}
 .mind-comic-book .narration.ink-inset.continued-caption{display:flex;align-items:center;justify-content:flex-end;font-size:clamp(24px,3cqw,42px);white-space:nowrap;-webkit-text-stroke:4px white;z-index:4}
-@media(prefers-reduced-motion:reduce){.mind-comic-book .narration.ink-inset{animation:none}}
 
 .mind-comic-book .panel-shadow{position:absolute;filter:drop-shadow(var(--comic-frame-shadow))}
 .mind-comic-book .panel-shadow>.shot{inset:0;width:100%;height:100%;filter:none}
@@ -322,7 +302,6 @@
 .mind-comic-book .scene-3 .gutter-sound{display:flex;align-items:center;justify-content:center;white-space:nowrap;animation:mind-comic-sfx-appear .45s both;animation-delay:var(--delay)}
 @keyframes mind-comic-sfx-appear{from{opacity:0}to{opacity:1}}
 .mind-comic-book .comic:not(.entering) .gutter-sound{animation:none}
-@media(prefers-reduced-motion:reduce){.mind-comic-book .scene-3 .gutter-sound{animation:none}}
 .mind-comic-book .scene-2 .chapter-title,.mind-comic-book .scene-3 .chapter-title{z-index:3;font-size:clamp(22px,2.6cqw,36px);-webkit-text-stroke:5px var(--comic-paper,#faf9f5);paint-order:stroke fill}
 .mind-comic-book .scene-2 .chapter-title small,.mind-comic-book .scene-3 .chapter-title small{display:none}
 
@@ -330,7 +309,7 @@
 
 /* Morning sequence: curtains, clock reveal, one second of ringing, then wake. */
 .mind-comic-book .scene-10 {
-  --alarm-ring-start: 1610ms; /* Clock's 460ms delay + 1150ms reveal. */
+  --alarm-ring-start: 2300ms; /* Clock enters after curtains, then finishes its 1150ms reveal. */
   --alarm-ring-duration: 1000ms;
   --morning-wake-start: calc(var(--alarm-ring-start) + var(--alarm-ring-duration));
 }
@@ -354,17 +333,19 @@
   50%{translate:2px -1px}
   75%{translate:-1px -1px}
 }
-@media(prefers-reduced-motion:no-preference){
-  .mind-comic-book .comic.entering.scene-10 #morning-alarm img,
+.mind-comic-book .comic.entering.scene-10 #morning-alarm img,
   .mind-comic-book .comic.entering.scene-10 .morning-alarm-sfx span {
     animation:morning-alarm-shake 100ms linear var(--alarm-ring-start) 10 forwards;
   }
-}
-@media(prefers-reduced-motion:reduce){
-  .mind-comic-book .comic.entering.scene-10 .morning-alarm-sfx{animation:none}
-}
 
 
 /* Hidden prewarming keeps the entrance at its first frame until reveal finishes. */
 [data-presentation-ready="false"] .mind-comic-book .comic,
 [data-presentation-ready="false"] .mind-comic-book .comic * { animation: none !important; }
+
+
+
+/* Reduced motion removes movement, not the storyboard's reading order. */
+
+/* Keep sprite frame timing independent of unrelated document animations. */
+.mind-comic-book #skirt-hand:is(.hand-gripping,.hand-releasing) .hand-frames { animation-duration:.72s !important; }

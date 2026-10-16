@@ -1,3 +1,4 @@
+import { openWebsite } from '../utils/openWebsite';
 import StickerImage from './stickers/StickerImage';
 import { parseSticker, stickerLabel } from './stickers/stickers';
 import type { StickerRef } from '../types';
@@ -26,6 +27,8 @@ import { analyzeScreen } from '../utils/companionScreenAnalyze';
 import { NotebookPen, Rocket, ScanLine, Settings } from 'lucide-react';
 import { assistantPanelTitle, isAssistantPanel } from './assistantPanels';
 import DynamicIsland from './DynamicIsland';
+import './ChatWindow.css';
+import ChatPageTransition from './ChatPageTransition';
 const DesktopAssistantPanel = React.lazy(() => import('./DesktopAssistantWindow'));
 type Role = 'user' | 'assistant';
 
@@ -824,7 +827,7 @@ const Bubble = React.memo(function Bubble({ message, onOpenImage, senderName, ch
       return;
     }
     try {
-      await openShell(url);
+      await openWebsite(url);
     } catch {
       window.open(url, '_blank', 'noopener,noreferrer');
     }
@@ -3455,41 +3458,17 @@ const ChatWindow: React.FC = () => {
     if (isClosingRef.current) return;
     isClosingRef.current = true;
     setIsClosing(true);
-    const el = rootRef.current;
-    if (el) {
-      // 撤销尚未结束的根节点动画，避免与这次关窗效果叠加。
-      try { el.getAnimations().forEach((a) => a.cancel()); } catch { /* ignore */ }
-      // 时长压到 200ms：Rust 侧的收回滑动是 220ms，400ms 的关窗动画后 180ms 本来
-      // 就发生在窗口滑出屏幕之后（白播），压短后动画保证在窗口仍可见时跑完，
-      // finished 一定会到 —— 不依赖「窗口隐藏期间时间线是否还在推进」。
-      const exit = el.animate(
-        [
-          { opacity: 1, transform: 'translateY(0) scale(1)' },
-          { opacity: 0, transform: 'translateY(80px) scale(0.78)' },
-        ],
-        { duration: 200, easing: 'cubic-bezier(0.65, 0, 1, 1)', fill: 'forwards' },
-      );
-      // 关窗动画不能以 fill:forwards 永久把根节点钉在 opacity:0：chat 是**复用**的
-      // 右缘三态窗口，下次 peek 露出的探出条就是这块 DOM，残留动画会让窗口
-      // 「在但看不见」（连 10px 探出条一起消失）。动画一结束就复位；
-      // 顺带放掉 isClosing，否则退出按钮第二次点击会被 `if (isClosing) return` 吃掉。
-      // 用标志位保证 finished 与兜底定时器只生效一次。
-      let settled = false;
-      const settle = () => {
-        if (settled) return;
-        settled = true;
-        // 兜底路径可能早于动画自然结束：必须撤销它，否则 fill:forwards 继续压住 opacity
-        try { exit.cancel(); } catch { /* ignore */ }
-        isClosingRef.current = false;
-        setIsClosing(false);
-      };
-      exit.finished.then(settle).catch(() => { /* 被聚焦恢复取消 */ });
-      // 兜底：窗口隐藏期间计时器会被节流，但 1s 内必定跑到；此时窗口早在屏外，复位不可见
-      window.setTimeout(settle, 1000);
+    // Native exit mirrors the entrance, moving the complete phone offscreen
+    // before destruction. Await it so repeated back presses cannot restart it.
+    try {
+      await invoke('close_chat_window');
+    } catch (error) {
+      console.warn('[ChatWindow] 关闭窗口失败:', error);
+    } finally {
+      isClosingRef.current = false;
+      setIsClosing(false);
     }
-    // 微信窗口为右缘抽屉：点击退出 → 动画收回屏幕右侧并隐藏（保留窗口复用）
-    void invoke('close_chat_window').catch(() => {});
-  }, [isClosing]);
+  }, []);
 
   /** 切换底部面板（emoji/media），点击同一按钮则收起 */
   const togglePanel = useCallback((panel: 'emoji' | 'media') => {
@@ -4303,14 +4282,20 @@ const ChatWindow: React.FC = () => {
   }, [searchQuery]);
 
   return (
-    <div ref={rootRef} style={{
-      display: 'flex', flexDirection: 'column', height: '100vh',
-      background: 'var(--wx-bg)', overflow: 'hidden',
-      borderRadius: 44,
-      border: '1px solid var(--wx-phone-border)',
+    <div ref={rootRef} className="chat-device" data-tauri-drag-region>
+      <div className="chat-device-hardware" aria-hidden="true">
+        <i className="chat-device-key chat-device-key-action" />
+        <i className="chat-device-key chat-device-key-volume-up" />
+        <i className="chat-device-key chat-device-key-volume-down" />
+        <i className="chat-device-key chat-device-key-power" />
+        <i className="chat-device-antenna chat-device-antenna-top-left" />
+        <i className="chat-device-antenna chat-device-antenna-top-right" />
+        <i className="chat-device-antenna chat-device-antenna-bottom-left" />
+        <i className="chat-device-antenna chat-device-antenna-bottom-right" />
+      </div>
+      <div className="chat-device-screen" style={{
       fontFamily: '-apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif',
       color: 'var(--wx-text)',
-      position: 'relative',
     }}
     >
       {mdStyles}
@@ -4353,6 +4338,12 @@ const ChatWindow: React.FC = () => {
         </div>
       </div>
 
+      <ChatPageTransition
+        pageKey={view === 'private' ? `private:${privateCharId}`
+          : view === 'details' ? `details:${privateCharId}:${detailsSubView}`
+          : view === 'assistant' ? `assistant:${assistantTarget.character}:${assistantTarget.panel}` : view}
+        depth={view === 'home' ? 0 : view === 'details' ? (detailsSubView === 'search' ? 3 : 2) : 1}
+      >
       {/* ===== 第二行：导航栏 ===== */}
       <div style={{
         display: 'flex', alignItems: 'center', justifyContent: 'space-between',
@@ -4366,6 +4357,7 @@ const ChatWindow: React.FC = () => {
           <button
             onClick={() => {
               if (view === 'home') void closeWindow();
+              else if (view === 'details' && detailsSubView === 'search') setDetailsSubView('main');
               else if (view === 'details') { setView('private'); setDetailsSubView('main'); }
               else setView('home');
             }}
@@ -4737,12 +4729,13 @@ const ChatWindow: React.FC = () => {
         </>
       )}
 
+      {/* 背景锚定消息列表的可视区域（scroll），避免 fixed 在切页 transform 清除后改用窗口定位而跳变。 */}
       {/* ===== Private 视图：私聊消息列表 ===== */}
       {view === 'private' && (
         <div ref={listRef} className="vivian-scroll" onScroll={handleScroll} style={{
           flex: 1, overflowY: 'auto', padding: '12px 14px 8px',
           background: chatBackgrounds[privateCharId ?? '']
-            ? `url("${convertFileSrc(chatBackgrounds[privateCharId!])}") center / cover no-repeat fixed, var(--wx-bg)`
+            ? `url("${convertFileSrc(chatBackgrounds[privateCharId!])}") center / cover no-repeat scroll, var(--wx-bg)`
             : 'var(--wx-bg)',
         }}>
           {initialLoading ? (
@@ -5401,6 +5394,8 @@ const ChatWindow: React.FC = () => {
         </div>
       )}
 
+      </ChatPageTransition>
+
       {/* ===== Home Indicator（底部居中圆角条） ===== */}
       <div style={{
         flexShrink: 0, height: 24,
@@ -5433,6 +5428,7 @@ const ChatWindow: React.FC = () => {
         onClose={() => setCameraOpen(false)}
         onCaptured={handlePhotoCaptured}
       />
+      </div>
     </div>
   );
 };

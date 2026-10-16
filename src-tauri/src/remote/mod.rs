@@ -44,6 +44,11 @@
 //! | `/api/toasts` | GET | 拉取通知（增量） |
 //! | `/api/confirmations` | GET | pending 工具确认列表 |
 //! | `/api/confirmations/:id` | POST | 解决工具确认 |
+//! | `/api/work/sessions` | GET/POST | 工作会话列表 / 新建标准会话 |
+//! | `/api/work/sessions/:id` | GET | 工作消息、进度、产物与待回答问题 |
+//! | `/api/work/sessions/:id/send` | POST | 继续工作会话 |
+//! | `/api/work/sessions/:id/stop` | POST | 停止工作会话 |
+//! | `/api/work/sessions/:id/answer` | POST | 回答当前会话的问题 |
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -1851,7 +1856,6 @@ async fn list_work_sessions(
     use crate::commands::coding_agent::CODING_AGENT;
     let mut sessions = CODING_AGENT.list_sessions();
     sessions.sort_by_key(|s| std::cmp::Reverse(s.updated_at));
-    sessions.truncate(20);
     let arr: Vec<serde_json::Value> = sessions
         .iter()
         .map(|s| {
@@ -1864,6 +1868,7 @@ async fn list_work_sessions(
                 "working_directory": s.working_directory,
                 "updated_at": s.updated_at,
                 "message_count": s.message_count(),
+                "pending_question": crate::brain::work_question::global_work_question_registry().pending_for(&s.session_id),
             })
         })
         .collect();
@@ -1901,6 +1906,9 @@ async fn get_work_session(
                 "working_directory": s.working_directory,
                 "updated_at": s.updated_at,
                 "messages": msgs,
+                "pending_question": crate::brain::work_question::global_work_question_registry().pending_for(&s.session_id),
+                "deliverables": s.deliverables,
+                "work_todos": s.work_todos,
             })))
         }
         None => Err((StatusCode::NOT_FOUND, format!("会话不存在: {id}"))),
@@ -1913,12 +1921,67 @@ pub struct WorkMessageRequest {
     pub message: String,
 }
 
+#[derive(Deserialize)]
+pub struct NewWorkSessionRequest {
+    pub character_id: String,
+    #[serde(default)]
+    pub working_directory: String,
+}
+
+async fn create_work_session(
+    State(state): State<RemoteAppState>,
+    Json(req): Json<NewWorkSessionRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    use crate::commands::coding_agent::CODING_AGENT;
+    state.app_state.get_character(Some(&req.character_id)).map_err(err_status)?;
+    let config = state.app_state.config.read().get_all();
+    let directory = crate::utils::workspace::resolve_workspace(
+        &req.working_directory, config.default_workspace.as_deref(),
+    ).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let session = CODING_AGENT.create_session(&req.character_id, &directory, "standard");
+    let window = crate::commands::coding_agent::resolve_context_window(&config, config.active_work_model.as_deref());
+    CODING_AGENT.set_context_window(&session.session_id, window);
+    Ok(Json(serde_json::json!({ "session_id": session.session_id })))
+}
+
+async fn stop_work_session(
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    use crate::commands::coding_agent::CODING_AGENT;
+    if !CODING_AGENT.has_session(&id) {
+        return Err((StatusCode::NOT_FOUND, "会话不存在".into()));
+    }
+    let canceled = CODING_AGENT.cancel(&id);
+    Ok(Json(serde_json::json!({ "canceled": canceled })))
+}
+
+#[derive(Deserialize)]
+pub struct WorkAnswerRequest {
+    pub question_id: u64,
+    pub answer: crate::brain::work_question::WorkQuestionAnswer,
+}
+
+async fn answer_work_question(
+    Path(id): Path<String>,
+    Json(req): Json<WorkAnswerRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let registry = crate::brain::work_question::global_work_question_registry();
+    if registry.pending_for(&id).is_none_or(|question| question.question_id != req.question_id) {
+        return Err((StatusCode::CONFLICT, "这个问题已失效，请刷新会话".into()));
+    }
+    registry.respond(req.question_id, req.answer).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    Ok(Json(serde_json::json!({ "answered": true })))
+}
+
 async fn send_work_message(
     State(state): State<RemoteAppState>,
     Path(id): Path<String>,
     Json(req): Json<WorkMessageRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     use crate::commands::coding_agent::CODING_AGENT;
+    if req.message.trim().is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "消息不能为空".into()));
+    }
     let Some(app) = APP_HANDLE.get().cloned() else {
         return Err((StatusCode::INTERNAL_SERVER_ERROR, "AppHandle 未注入".into()));
     };
@@ -1986,9 +2049,11 @@ pub async fn start_server(app_state: Arc<AppState>, port: u16) {
         .route("/api/toasts", get(get_toasts))
         .route("/api/confirmations", get(get_confirmations))
         .route("/api/confirmations/:request_id", post(resolve_confirmation))
-        .route("/api/work/sessions", get(list_work_sessions))
+        .route("/api/work/sessions", get(list_work_sessions).post(create_work_session))
         .route("/api/work/sessions/:id", get(get_work_session))
         .route("/api/work/sessions/:id/send", post(send_work_message))
+        .route("/api/work/sessions/:id/stop", post(stop_work_session))
+        .route("/api/work/sessions/:id/answer", post(answer_work_question))
         .route("/remote/model/*path", get(get_model_asset))
         .route("/remote/image/*path", get(get_user_image))
         .nest_service(

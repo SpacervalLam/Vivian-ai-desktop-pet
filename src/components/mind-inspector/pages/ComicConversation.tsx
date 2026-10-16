@@ -36,7 +36,6 @@ export default function ComicConversation({ thread, active, loading, error, rend
     let frame = 0;
     let last = 0;
     let position = node.scrollTop;
-    const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
     const step = (now: number) => {
       const selection = window.getSelection();
       if (document.hidden || (selection && !selection.isCollapsed && node.contains(selection.anchorNode))) {
@@ -44,7 +43,6 @@ export default function ComicConversation({ thread, active, loading, error, rend
       } else {
         const remaining = node.scrollHeight - node.clientHeight - node.scrollTop;
         if (remaining <= 1) return;
-        if (reduced) { node.scrollTop = node.scrollHeight; return; }
         // Cap time deltas so restoring the window never jumps down the thread.
         // Some WebViews quantize scrollTop to whole CSS pixels. Accumulate the
         // fractional distance separately so slow movement cannot round to zero.
@@ -65,6 +63,12 @@ export default function ComicConversation({ thread, active, loading, error, rend
 
   const isUser = (turn: MemoryTurn) => turn.speaker === '用户';
   return <div className="comic-conversation">
+    {thread && <div className="comic-record-stamp">
+      <span>{t('comic.historicalConversation')}</span>
+      {thread.time > 0 && <time dateTime={new Date(thread.time < 1e12 ? thread.time * 1000 : thread.time).toISOString()}>
+        {new Date(thread.time < 1e12 ? thread.time * 1000 : thread.time).toLocaleDateString(i18n.resolvedLanguage ?? i18n.language, { month: 'long', day: 'numeric' })}
+      </time>}
+    </div>}
     {error && <p className="memory-error" role="alert">{error}</p>}
     <div ref={viewport} className="comic-conversation-viewport" aria-label={t('comic.conversationViewport')}>
       <div className="comic-conversation-messages" role="log" aria-label={t('comic.conversationLog')} aria-live="off">

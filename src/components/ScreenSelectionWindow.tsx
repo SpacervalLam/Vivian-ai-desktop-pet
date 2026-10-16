@@ -10,7 +10,7 @@ import { synchronizeWindowLanguage } from '../utils/windowLanguage';
 import './ScreenSelectionWindow.css';
 
 interface Frame { image: string; width: number; height: number }
-type SelectionAction = 'analyze' | 'save' | 'save_and_analyze' | 'copy' | 'copy_and_analyze' | 'cancel';
+type SelectionAction = 'analyze' | 'save' | 'save_and_analyze' | 'copy' | 'copy_and_analyze' | 'freeze' | 'cancel';
 
 export default function ScreenSelectionWindow() {
   const { i18n } = useTranslation();
@@ -19,9 +19,9 @@ export default function ScreenSelectionWindow() {
   // and close in rendered width across languages: 6 / 14 / 7 characters for
   // `select` (CJK glyphs are ~2x a Latin glyph) and 2 / 6 / 5 for `cancel`.
   const copy = {
-    zh: { select: '拖动选择区域', cancel: '取消', save: '保存', saveAnalyze: '保存并分析', analyze: '分析', copy: '复制到剪贴板', copyAnalyze: '复制并分析', screen: '屏幕快照' },
-    en: { select: 'Drag to select', cancel: 'Cancel', save: 'Save', saveAnalyze: 'Save & analyze', analyze: 'Analyze', copy: 'Copy to clipboard', copyAnalyze: 'Copy & analyze', screen: 'Screen snapshot' },
-    ja: { select: 'ドラッグで選択', cancel: 'キャンセル', save: '保存', saveAnalyze: '保存して分析', analyze: '分析', copy: 'クリップボードにコピー', copyAnalyze: 'コピーして分析', screen: '画面のスナップショット' },
+    zh: { freeze: '定格画面', select: '拖动选择区域', cancel: '取消', save: '保存', saveAnalyze: '保存并分析', analyze: '分析', copy: '复制到剪贴板', copyAnalyze: '复制并分析', screen: '屏幕快照' },
+    en: { freeze: 'Freeze', select: 'Drag to select', cancel: 'Cancel', save: 'Save', saveAnalyze: 'Save & analyze', analyze: 'Analyze', copy: 'Copy to clipboard', copyAnalyze: 'Copy & analyze', screen: 'Screen snapshot' },
+    ja: { freeze: '画面を固定', select: 'ドラッグで選択', cancel: 'キャンセル', save: '保存', saveAnalyze: '保存して分析', analyze: '分析', copy: 'クリップボードにコピー', copyAnalyze: 'コピーして分析', screen: '画面のスナップショット' },
   }[language];
   const [sessionId, setSessionId] = useState<string | null>(null);
   const activeSession = useRef<string | null>(null);
@@ -108,7 +108,7 @@ export default function ScreenSelectionWindow() {
     const key = (event: KeyboardEvent) => {
       if (event.key === 'Escape' || event.key === 'Enter') {
         event.preventDefault();
-        if (event.key === 'Escape' || !start.current) void finish(event.key === 'Escape' ? 'cancel' : 'copy_and_analyze');
+        if (event.key === 'Escape' || !start.current) void finish(event.key === 'Escape' ? 'cancel' : 'freeze');
       }
     };
     window.addEventListener('keydown', key);
@@ -133,7 +133,7 @@ export default function ScreenSelectionWindow() {
   const reset = () => { selection.current = null; setRect(null); setError(''); };
   const bounds = root.current?.getBoundingClientRect();
   const region = rect && bounds && frame ? captureRegion(rect, bounds, frame) : null;
-  const toolbarTop = rect && bounds ? Math.max(16, rect.y + rect.height + 58 < bounds.height ? rect.y + rect.height + 14 : rect.y - 58) : 0;
+  const toolbarTop = rect && bounds ? Math.max(16, rect.y + rect.height + 100 < bounds.height ? rect.y + rect.height + 14 : rect.y - 100) : 0;
   const toolbarLeft = rect && bounds ? (bounds.width < 720 ? bounds.width / 2 : Math.max(360, Math.min(bounds.width - 360, rect.x + rect.width / 2))) : 0;
 
   return <div ref={root} className="screen-selection" role="application" aria-label={copy.select}
@@ -163,9 +163,10 @@ export default function ScreenSelectionWindow() {
       {region && <span className="screen-selection-size" style={{ top: rect.y < 34 ? 10 : -30 }}>{region.width} × {region.height}</span>}
     </div>}
     {region && !dragging && <div className="screen-selection-toolbar" style={{ left: toolbarLeft, top: toolbarTop }} onPointerDown={event => event.stopPropagation()}>
+      <button className="selection-text-button" onClick={() => void finish('freeze')} disabled={submitting}><ScanLine size={16} /><span>{copy.freeze}</span><kbd>↵</kbd></button>
       <button className="selection-confirm" onClick={() => void finish('analyze')} disabled={submitting}><Sparkles size={16} /><span>{copy.analyze}</span></button>
       <button className="selection-text-button" onClick={() => void finish('copy')} disabled={submitting}><Copy size={16} /><span>{copy.copy}</span></button>
-      <button className="selection-text-button" onClick={() => void finish('copy_and_analyze')} disabled={submitting}>{copy.copyAnalyze}<kbd>↵</kbd></button>
+      <button className="selection-text-button" onClick={() => void finish('copy_and_analyze')} disabled={submitting}>{copy.copyAnalyze}</button>
       <button className="selection-text-button" onClick={() => void finish('save')} disabled={submitting}><Download size={16} /><span>{copy.save}</span></button>
       <button className="selection-text-button" onClick={() => void finish('save_and_analyze')} disabled={submitting}>{copy.saveAnalyze}</button>
       <span className="selection-toolbar-divider" />

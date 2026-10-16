@@ -60,7 +60,7 @@ pub(crate) fn push_stream_chunk(emitter: &SharedStreamEmitter, text: &str) {
 ///
 /// 流程：
 /// 1. 命令或不应答时直接返回（不调用 LLM）
-/// 2. `graceful_exit=true` 时生成轻量告别消息（调用 LLM，失败返回 None）
+/// 2. `graceful_exit=true` 时生成轻量告别消息（调用 LLM，失败返回 Err 由前端 toast 提示）
 /// 3. 主路径：调用 `router.generate` / `generate_stream`，
 ///    解析 JSON 提取 `tool_calls`，设置 `response_text` / `response_json` /
 ///    `tool_calls` / `immediate_response_text`
@@ -175,8 +175,8 @@ impl AIResponseGenerationRunnable {
 
     /// 生成轻量告别消息（graceful_exit 路径）
     ///
-    /// 调用 LLM 生成 1-2 句告别；失败时返回兜底文案。
-    async fn generate_farewell(router: &ModelRouter, state: &PipelineState) -> String {
+    /// 失败向上传递，由 chat:error 显示 toast，不生成角色兜底台词。
+    async fn generate_farewell(router: &ModelRouter, state: &PipelineState) -> VivianResult<String> {
         let lang = crate::i18n::get_language();
         let context = if state.system_prompt.is_empty() {
             String::new()
@@ -225,31 +225,16 @@ impl AIResponseGenerationRunnable {
         };
         let messages = vec![ChatMessage::user(&prompt)];
 
-        let fallback = if lang.starts_with("en") {
-            "Okay, I won't bother you for now~"
-        } else if lang.starts_with("ja") {
-            "じゃあ、今は邪魔しないね〜"
-        } else {
-            "好的，那我先不打扰你啦~"
-        };
-
-        match router
+        let text = router
             .generate(LLMRequest::new(crate::providers::base::TASK_COMPANION, messages))
-            .await
-        {
-            Ok(text) => {
-                let trimmed = text.trim().trim_matches('"').trim_matches('\'').to_string();
-                let cleaned: String = trimmed.chars().take(200).collect();
-                if cleaned.len() >= 5 {
-                    cleaned
-                } else {
-                    fallback.to_string()
-                }
-            }
-            Err(e) => {
-                tracing::warn!("[AIResponse] 生成告别失败: {}", e);
-                fallback.to_string()
-            }
+            .await?;
+        let trimmed = text.trim().trim_matches('"').trim_matches('\'');
+        let cleaned = crate::utils::protocol_text::strip_protocol_text(trimmed);
+        let cleaned: String = cleaned.trim().chars().take(200).collect();
+        if cleaned.is_empty() {
+            Err(VivianError::Provider("告别生成失败：模型未返回有效文本".into()))
+        } else {
+            Ok(cleaned)
         }
     }
 
@@ -1132,7 +1117,7 @@ impl Runnable for AIResponseGenerationRunnable {
 
         // ── graceful_exit：生成告别 ──
         if state.graceful_exit {
-            let farewell = Self::generate_farewell(&router, &state).await;
+            let farewell = Self::generate_farewell(&router, &state).await?;
             state.response_text = farewell.clone();
             state.generation_status = "graceful_exit_farewell".to_string();
             // 同步 ai_response 字段以兼容下游

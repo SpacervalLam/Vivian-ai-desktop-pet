@@ -5,6 +5,21 @@ import { selectComicDialogue } from '../src/components/mind-inspector/pages/comi
 
 const character = name => ({ name, primaryEmotion: '悲伤', presence: '在线 · 3秒', thought: '<img src=x onerror=alert(1)>', goal: '<script>bad()</script>', mood: '<b>真实心情</b>', valence: -.27, arousal: .13, emotions: ['喜悦','悲伤','愤怒','恐惧','亲近','孤独','好奇'].map(k => [k,k === '悲伤' ? 83 : 0]), needs: ['归属','自主','安全','新奇','表达'].map(k => [k,0]), relations: ['信任','亲密','尊重','依赖','熟悉'].map(k => [k,'—']) });
 const data = { vivian: character('Vivian'), nana: character('Nana') };
+// User-facing reading order: a later panel waits for the previous entrance.
+const orderedShots = (page, ids) => {
+  const html = comicMarkup(data, page, '/mind-comic/', 0, true);
+  const starts = ids.map(id => Number(html.match(new RegExp(`id="${id}"[^>]*--delay:([\\d.]+)ms`))?.[1]));
+  assert(starts.every(Number.isFinite));
+  for (let index = 1; index < starts.length; index++) {
+    assert(starts[index] >= starts[index - 1] + 1150, `${ids[index]} must wait for ${ids[index - 1]} to finish`);
+  }
+};
+orderedShots(9, ['morning-curtains', 'morning-alarm', 'morning-waking']);
+orderedShots(6, ['line-v', 'line-phone']);
+orderedShots(8, ['daily-arrival', 'daily-straps', 'daily-tickets', 'daily-pole']);
+orderedShots(1, ['platform-light', 'rain-soaked-detail', 'waiting-n']);
+orderedShots(4, ['together', 'hands', 'door-smile']);
+assert.doesNotMatch(comicMarkup(data, 6, '/mind-comic/', 0, true), /comic-source-stamp|此刻状态/);
 const assets = [];
 for (let page = 0; page < comicTitles.length; page++) {
   const html = comicMarkup(data,page,'/mind-comic/');
@@ -34,7 +49,7 @@ missing.nana.arousal = null;
 assert(selectComicDialogue('nana', 'mood', missing.nana).includes('心绪暂时未明'));
 const train = comicMarkup(data, 8, '/mind-comic/');
 assert.doesNotMatch(train, /把平常的日子/);
-for (const [id, delay] of [['daily-arrival', 0], ['daily-straps', 1600], ['daily-pole', 2750], ['daily-tickets', 3900]]) {
+for (const [id, delay] of [['daily-arrival', 0], ['daily-straps', 1600], ['daily-pole', 3900], ['daily-tickets', 2750]]) {
   const match = train.match(new RegExp(`id="${id}"[^>]*--delay:([\\d.]+)ms`));
   assert.ok(match, `${id} has an entrance delay`);
   assert.ok(Math.abs(Number(match[1]) - delay) < .001, `${id} follows the preceding entrance`);

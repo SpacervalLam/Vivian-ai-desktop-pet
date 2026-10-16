@@ -481,6 +481,7 @@ const DiaryReader: React.FC<{ entry: DiaryEntry; query: string; character: Chara
       <article key={entry.id} className="record-diary-article">
         <header className="record-diary-head">
           <div style={{ minWidth: 0 }}>
+            <div className="comic-record-stamp">{t('comic.historicalRecord')}</div>
             <h2 className="record-diary-date">
               {d ? (
                 <span className="record-diary-date-ymd">

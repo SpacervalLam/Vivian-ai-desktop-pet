@@ -20,7 +20,7 @@ import React, { useCallback, useEffect, useRef, useState, type ReactNode } from 
 import { listen, emit } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow, currentMonitor, LogicalPosition, LogicalSize } from '@tauri-apps/api/window';
-import { open as shellOpen } from '@tauri-apps/plugin-shell';
+import { openWebsite } from '../utils/openWebsite';
 import { stackRank, toastFingerprint, ToastDedupGate, ToastKeyTracker } from '../utils/toastDedup';
 import { openWorkSession } from '../utils/workSessionWindow';
 import Toast, { type ToastAction, type ToastType } from './Toast';
@@ -879,9 +879,7 @@ export default function ToastWindow() {
         }
       })();
     } else if (action.kind === 'open_url' && action.url) {
-      // shell.open 走系统默认浏览器（capability 已放行 shell:allow-open）；
-      // URL 由下发方保证为 http(s)。厂商控制台页面无需保持登录态，无 Chrome 限定需求。
-      void shellOpen(action.url).catch((e) => console.warn('[ToastWindow] 打开链接失败:', e));
+      void openWebsite(action.url).catch((e) => console.warn('[ToastWindow] 打开链接失败:', e));
     }
   };
 

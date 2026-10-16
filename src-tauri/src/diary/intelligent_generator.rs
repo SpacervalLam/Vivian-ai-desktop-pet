@@ -715,6 +715,14 @@ pub(crate) fn calculate_trigger_score(
     interactions: &[InteractionRecord],
     mood: Option<&Value>,
 ) -> u32 {
+    calculate_trigger_score_with_floor(interactions, mood, diary_time_floor())
+}
+
+fn calculate_trigger_score_with_floor(
+    interactions: &[InteractionRecord],
+    mood: Option<&Value>,
+    time_floor: u32,
+) -> u32 {
     let mut score: u32 = 0;
 
     let interaction_count = interactions.len() as u32;
@@ -733,7 +741,6 @@ pub(crate) fn calculate_trigger_score(
     }
 
     // 时间兜底：20:00-24:00 二次曲线升高，23:59 达满分
-    let time_floor = diary_time_floor();
     score.max(time_floor)
 }
 
@@ -1377,9 +1384,12 @@ mod tests {
     }
 
     #[test]
-    fn test_calculate_trigger_score_empty() {
-        let score = calculate_trigger_score(&[], None);
-        assert_eq!(score, 0);
+    fn test_calculate_trigger_score_empty_uses_time_floor() {
+        // Empty days still receive the intended evening fallback. Fix the clock
+        // input so this test also passes when run after 20:00 or near midnight.
+        for floor in [0, 19, 25, 56, 100] {
+            assert_eq!(calculate_trigger_score_with_floor(&[], None, floor), floor);
+        }
     }
 
     #[test]

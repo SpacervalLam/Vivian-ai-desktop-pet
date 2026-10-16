@@ -58,6 +58,7 @@
 //! ToolSystem（JsPluginTool 适配器）/ SkillService / McpManager。
 
 pub mod js_host;
+pub mod package;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -106,6 +107,21 @@ struct PluginManifest {
     /// 声明后由 js_host 创建独立 JS 运行时装载（ctx.skill/tool/provider/mcp 贡献面）
     #[serde(default)]
     js: Vec<String>,
+    #[serde(default, skip_serializing_if = "PluginRequirements::is_empty")]
+    requirements: PluginRequirements,
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+struct PluginRequirements {
+    #[serde(default)]
+    commands: Vec<String>,
+    /// Required plugin directory keys and minimum versions (empty = any version).
+    #[serde(default)]
+    plugins: HashMap<String, String>,
+}
+
+impl PluginRequirements {
+    fn is_empty(&self) -> bool { self.commands.is_empty() && self.plugins.is_empty() }
 }
 
 /// 供应商预设的协议变体（对齐前端 `ProviderProtocol`，camelCase 序列化）
@@ -256,6 +272,8 @@ pub fn find_embedding_preset_by_model(model: &str) -> Option<EmbeddingProviderPr
 /// 插件清单条目（设置窗口「插件」页只读盘点用）
 #[derive(Debug, Clone, Serialize)]
 pub struct PluginInventoryEntry {
+    pub enabled: bool,
+    pub requirements: Vec<String>,
     /// 插件目录 key（运行时装卸载的稳定主键）
     pub key: String,
     /// 插件名（命名空间前缀，允许与目录 key 不同）
@@ -368,6 +386,59 @@ pub fn diag_events() -> Vec<String> {
 /// 插件根目录：`<用户数据目录>/plugins`
 pub fn plugins_dir() -> PathBuf {
     crate::utils::path::get_user_data_dir().join("plugins")
+}
+
+fn preferences_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn lifecycle_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(||tokio::sync::Mutex::new(()))
+}
+
+fn disabled_plugins() -> Result<std::collections::HashSet<String>, String> {
+    let path = plugins_dir().join(".disabled.json");
+    if !path.exists() { return Ok(Default::default()); }
+    serde_json::from_str(&std::fs::read_to_string(path).map_err(|e|e.to_string())?).map_err(|e|e.to_string())
+}
+
+pub fn is_plugin_enabled(key: &str) -> bool {
+    BUILTIN_PLUGIN_DIRS.contains(&key) || disabled_plugins().is_ok_and(|disabled|!disabled.contains(key))
+}
+
+pub fn set_plugin_enabled(key: &str, enabled: bool) -> Result<(), String> {
+    if !valid_plugin_dir_name(key) { return Err("插件目录名无效".into()); }
+    if BUILTIN_PLUGIN_DIRS.contains(&key) { return Err("内置配置插件不可禁用".into()); }
+    let _guard = preferences_lock().lock().unwrap();
+    let mut disabled = disabled_plugins()?;
+    if enabled { disabled.remove(key); } else { disabled.insert(key.to_string()); }
+    crate::utils::fs::write_atomic(&plugins_dir().join(".disabled.json"), &serde_json::to_string_pretty(&disabled).map_err(|e|e.to_string())?).map_err(|e|e.to_string())
+}
+
+fn missing_requirements(pdir: &Path, manifest: &PluginManifest) -> Vec<String> {
+    let mut missing = Vec::new();
+    for command in &manifest.requirements.commands {
+        let direct = Path::new(command);
+        let found = if direct.is_absolute() { direct.is_file() } else if command.contains('/') || command.contains('\\') {
+            is_safe_manifest_path(command) && pdir.join(command).is_file() && is_safe_plugin_path(pdir, &pdir.join(command))
+        } else {
+            let extensions = if cfg!(windows) { vec!["", ".exe", ".cmd", ".bat", ".com"] } else { vec![""] };
+            std::env::var_os("PATH").is_some_and(|value|std::env::split_paths(&value).any(|dir|extensions.iter().any(|ext|dir.join(format!("{command}{ext}")).is_file())))
+        };
+        if !found { missing.push(format!("缺少运行命令：{command}")); }
+    }
+    for (key, minimum) in &manifest.requirements.plugins {
+        if !valid_plugin_dir_name(key) { missing.push(format!("依赖插件目录名无效：{key}")); continue; }
+        let root = plugins_dir().join(key);
+        let available = read_manifest(&root).ok().is_some_and(|(_, dependency)| {
+            is_plugin_enabled(key) && trust_status_of(key, &cached_fingerprint(&root, &dependency)) == "trusted"
+                && (minimum.is_empty() || parse_version(&dependency.version).zip(parse_version(minimum)).is_some_and(|(actual,min)|actual >= min))
+        });
+        if !available { missing.push(format!("需要已启用且受信的插件：{key} >= {minimum}")); }
+    }
+    missing
 }
 
 // ============================================================================
@@ -598,8 +669,9 @@ pub(crate) fn is_plugin_dir_trusted(pdir: &Path) -> bool {
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or_default();
+    if !is_plugin_enabled(key) { return false; }
     match read_manifest(pdir) {
-        Ok((_, manifest)) => trust_status_of(key, &cached_fingerprint(pdir, &manifest)) == "trusted",
+        Ok((_, manifest)) => missing_requirements(pdir, &manifest).is_empty() && trust_status_of(key, &cached_fingerprint(pdir, &manifest)) == "trusted",
         Err(_) => false,
     }
 }
@@ -627,7 +699,7 @@ pub fn is_plugin_name_trusted(name: &str) -> bool {
         }
         if let Ok((manifest_name, manifest)) = read_manifest(&pdir) {
             if manifest_name == name {
-                return trust_status_of(key, &cached_fingerprint(&pdir, &manifest)) == "trusted";
+                return is_plugin_enabled(key) && missing_requirements(&pdir, &manifest).is_empty() && trust_status_of(key, &cached_fingerprint(&pdir, &manifest)) == "trusted";
             }
         }
     }
@@ -990,6 +1062,7 @@ pub fn load_provider_presets() -> Vec<ProviderPresetData> {
         let Ok((name, manifest)) = read_manifest(&pdir) else {
             continue;
         };
+        if !is_plugin_enabled(&dir_key) || !missing_requirements(&pdir, &manifest).is_empty() { continue; }
         // 信任门禁：未信任插件的供应商预设不合并（内置插件豁免）
         if !BUILTIN_PLUGIN_DIRS.contains(&dir_key.as_str())
             && trust_status_of(&dir_key, &cached_fingerprint(&pdir, &manifest)) != "trusted"
@@ -1101,6 +1174,7 @@ pub fn load_embedding_provider_presets() -> Vec<EmbeddingProviderPresetData> {
     for pdir in dirs {
         let key = pdir.file_name().and_then(|s| s.to_str()).unwrap_or_default();
         let Ok((name, manifest)) = read_manifest(&pdir) else { continue };
+        if !is_plugin_enabled(key) || !missing_requirements(&pdir, &manifest).is_empty() { continue; }
         if !BUILTIN_PLUGIN_DIRS.contains(&key)
             && trust_status_of(key, &cached_fingerprint(&pdir, &manifest)) != "trusted"
         {
@@ -1539,21 +1613,26 @@ pub fn scan_inventory() -> Vec<PluginInventoryEntry> {
                     .and_then(|s| s.to_str())
                     .unwrap_or_default()
                     .to_string();
+                let enabled = is_plugin_enabled(&key);
+                let trust = trust_status_of(&key, &fingerprint);
+                let requirements = missing_requirements(&pdir, &manifest);
+                let snapshot = read_snapshot(&key);
+                let js_missing = !manifest.js.is_empty() && !js_host::is_loaded(&key);
+                let tools_missing = snapshot.as_ref().is_some_and(|snap|expanded_tools(&pdir, &manifest.tools).iter().any(|t|!snap.tools.contains(&t.name)));
+                let status = if !enabled { "disabled" } else if trust != "trusted" { "untrusted" } else if !requirements.is_empty() { "blocked" } else if snapshot.is_none() { "installed" } else if js_missing || tools_missing { "partial" } else { "loaded" };
+                let reason = if !requirements.is_empty() { Some(requirements.join("；")) } else if status == "partial" { Some("部分贡献未装载，请查看诊断后重载".into()) } else { None };
+                let mut skill_names: Vec<_> = expanded_skills(&pdir, &name, &manifest.skills).into_iter().map(|(n,_,_,_)|n).collect();
+                let mut tool_names: Vec<_> = expanded_tools(&pdir, &manifest.tools).into_iter().map(|d|d.name).collect();
+                let mut server_ids: Vec<_> = manifest.mcp_servers.iter().map(|s|s.id.clone()).collect();
+                if let Some(snapshot) = &snapshot { skill_names.extend(snapshot.skills.clone()); tool_names.extend(snapshot.tools.clone()); server_ids.extend(snapshot.mcp_ids.clone()); }
+                skill_names.sort(); skill_names.dedup(); tool_names.sort(); tool_names.dedup(); server_ids.sort(); server_ids.dedup();
                 out.push(PluginInventoryEntry {
+                    enabled,
+                    requirements,
                     capability_kind: crate::plugin_contributions::contribution_kind(!manifest.tools.is_empty() || !manifest.mcp_servers.is_empty() || !manifest.js.is_empty(), manifest.providers.is_some() || manifest.embeddings.is_some(), !manifest.skills.is_empty()).into(),
-                    skills: expanded_skills(&pdir, &name, &manifest.skills)
-                        .into_iter()
-                        .map(|(n, _, _, _)| n)
-                        .collect(),
-                    tools: expanded_tools(&pdir, &manifest.tools)
-                        .into_iter()
-                        .map(|d| d.name)
-                        .collect(),
-                    mcp_servers: manifest
-                        .mcp_servers
-                        .iter()
-                        .map(|s| s.id.clone())
-                        .collect(),
+                    skills: skill_names,
+                    tools: tool_names,
+                    mcp_servers: server_ids,
                     providers: read_provider_presets(&pdir, &manifest)
                         .into_iter()
                         .map(|p| p.id)
@@ -1565,14 +1644,16 @@ pub fn scan_inventory() -> Vec<PluginInventoryEntry> {
                     name: name.clone(),
                     version: manifest.version,
                     description: manifest.description,
-                    status: "loaded".into(),
-                    trust: trust_status_of(&key, &fingerprint).to_string(),
-                    reason: None,
+                    status: status.into(),
+                    trust: trust.to_string(),
+                    reason,
                     dir: dir_str,
                     key,
                 })
             }
             Err((name, reason)) => out.push(PluginInventoryEntry {
+                enabled: false,
+                requirements: Vec::new(),
                 key: pdir
                     .file_name()
                     .and_then(|s| s.to_str())
@@ -1645,6 +1726,9 @@ pub fn load_all(skill_service: &SkillService, mcp_manager: &McpManager) -> Plugi
             .unwrap_or_default()
             .to_string();
 
+        if !is_plugin_enabled(&dir_key) { continue; }
+        let missing = missing_requirements(&pdir, &manifest);
+        if !missing.is_empty() { report.skipped.push(format!("{plugin_name}: {}", missing.join("；"))); continue; }
         // 信任门禁：未信任/清单已变更的插件不装载任何贡献（MCP 声明会执行
         // 本地命令、工具会执行 PowerShell——投放文件不等于授权执行）
         let fingerprint = cached_fingerprint(&pdir, &manifest);
@@ -1772,7 +1856,7 @@ pub fn load_all_tools(tool_system: &ToolSystem) -> Vec<String> {
             .and_then(|s| s.to_str())
             .unwrap_or_default()
             .to_string();
-        if trust_status_of(&dir_key, &cached_fingerprint(&pdir, &manifest)) != "trusted" {
+        if !is_plugin_enabled(&dir_key) || !missing_requirements(&pdir, &manifest).is_empty() || trust_status_of(&dir_key, &cached_fingerprint(&pdir, &manifest)) != "trusted" {
             tracing::warn!(
                 "[Plugins] 插件 {plugin_name} 未信任（清单可能已变更），工具未注册"
             );
@@ -2006,6 +2090,8 @@ pub async fn load_one(
     key: &str,
     authorized: bool,
 ) -> Result<PluginLoadReport, String> {
+    let _operation = lifecycle_lock().lock().await;
+    invalidate_fingerprint_cache();
     let pdir = plugins_dir().join(key);
     if !valid_plugin_dir_name(key) {
         return Err(format!("插件目录名非法（仅允许字母/数字/-/_）: {key}"));
@@ -2026,6 +2112,23 @@ pub async fn load_one(
         ));
     }
 
+    if !is_plugin_enabled(key) { return Err("插件已禁用，请先启用".into()); }
+    let missing = missing_requirements(&pdir, &manifest);
+    if !missing.is_empty() { return Err(missing.join("；")); }
+    let defs = expanded_tools(&pdir, &manifest.tools);
+    let scripts: Vec<String> = defs.iter().map(|d| d.script.clone()).collect();
+    let scripts_clone = scripts.clone();
+    let audits = tokio::task::spawn_blocking(move || {
+        crate::tools::ps_audit::audit_scripts_blocking(&scripts_clone)
+    })
+    .await
+    .map_err(|e| format!("审计任务执行失败: {e}"))?
+    .map_err(|e| format!("工具脚本审计不可用: {e}"))?;
+    for (def, audit) in defs.iter().zip(&audits) {
+        if let Some(summary) = audit.summary() { return Err(format!("插件工具 {} 脚本审计未通过：{summary}", def.name)); }
+    }
+    // The user has approved this exact fingerprint; JS checks must see it now.
+    if authorized { record_trust(key, &fingerprint)?; invalidate_fingerprint_cache(); }
     // 重载语义：先撤销旧贡献（含 manifest 已损坏的情况——尽力按目录布局卸载）
     unload_contributions(skill_service, mcp_manager, tool_system, &pdir).await;
 
@@ -2048,15 +2151,6 @@ pub async fn load_one(
     // 工具：防影子化（重载路径上旧贡献已卸载，has_tool 命中的只可能是
     // 内置/自建/其他插件的工具）+ AST 审计批量过检
     let mut registered_tools = Vec::new();
-    let defs = expanded_tools(&pdir, &manifest.tools);
-    let scripts: Vec<String> = defs.iter().map(|d| d.script.clone()).collect();
-    let scripts_clone = scripts.clone();
-    let audits = tokio::task::spawn_blocking(move || {
-        crate::tools::ps_audit::audit_scripts_blocking(&scripts_clone)
-    })
-    .await
-    .map_err(|e| format!("审计任务执行失败: {e}"))?
-    .map_err(|e| format!("工具脚本审计不可用: {e}"))?;
     for (def, audit) in defs.into_iter().zip(audits) {
         if tool_system.has_tool(&def.name) {
             tracing::warn!(
@@ -2106,6 +2200,7 @@ pub async fn load_one(
                 report.mcp_servers.push(id.clone());
             }
             Err(e) => {
+                report.skipped.push(format!("MCP {id}: {e}"));
                 tracing::warn!("[Plugins] 插件 {} 的 MCP server [{}] 连接失败: {e}", plugin_name, id)
             }
         }
@@ -2190,10 +2285,7 @@ pub async fn load_one(
             js: !js_report.plugins.is_empty(),
         },
     );
-    if authorized {
-        record_trust(key, &fingerprint)?;
-        invalidate_fingerprint_cache();
-    }
+
 
     tracing::info!(
         "[Plugins] 插件 {} v{} 已装载：{} 条技能、{} 个工具、{} 个 MCP server、{} 个 JS 协议",
@@ -2215,6 +2307,7 @@ pub async fn unload_one(
     tool_system: &ToolSystem,
     key: &str,
 ) -> Result<(), String> {
+    let _operation = lifecycle_lock().lock().await;
     let pdir = plugins_dir().join(key);
     if !valid_plugin_dir_name(key) || !pdir.is_dir() {
         return Err(format!("插件目录不存在: {key}"));
@@ -2235,7 +2328,9 @@ pub async fn delete_plugin(
     tool_system: &ToolSystem,
     key: &str,
 ) -> Result<(), String> {
+    let _operation = lifecycle_lock().lock().await;
     let pdir = plugins_dir().join(key);
+    let plugin_name = read_manifest(&pdir).map(|(name,_)|name).unwrap_or_else(|_|key.to_string());
     if !valid_plugin_dir_name(key) || !pdir.is_dir() {
         return Err(format!("插件目录不存在: {key}"));
     }
@@ -2249,6 +2344,8 @@ pub async fn delete_plugin(
     drop_snapshot(key);
     std::fs::remove_dir_all(&pdir)
         .map_err(|e| format!("删除插件目录 {} 失败: {e}", pdir.display()))?;
+    mcp_manager.clear_plugin_overrides(key, None).map_err(|e|e.to_string())?;
+    if plugin_name != key { mcp_manager.clear_plugin_overrides(&plugin_name,None).map_err(|e|e.to_string())?; }
     tracing::info!("[Plugins] 插件 {key} 已删除");
     Ok(())
 }
@@ -2364,9 +2461,7 @@ pub fn write_plugin_files(draft: &PluginDraft) -> Result<PathBuf, String> {
         if !mcp_ids.insert(cfg.id.clone()) {
             return Err(format!("草稿内 MCP server id 重复: {}", cfg.id));
         }
-        if cfg.command.trim().is_empty() {
-            return Err(format!("MCP server {} 缺 command", cfg.id));
-        }
+        cfg.validate().map_err(|e|e.to_string())?;
     }
     // 供应商预设：id/provider_type 校验对齐 upsert 规则
     for preset in &draft.providers {
@@ -2524,6 +2619,47 @@ fn collect_md(base: &Path, dir: &Path, recursive: bool, out: &mut Vec<PathBuf>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extension_legacy_manifests_do_not_gain_empty_fingerprint_fields() {
+        let manifest: PluginManifest = serde_json::from_value(serde_json::json!({"name":"legacy","version":"1.0.0","mcp_servers":[{"id":"legacy","name":"Legacy","command":"node"}]})).unwrap();
+        let value = serde_json::to_value(&manifest).unwrap();
+        assert!(value.get("requirements").is_none());
+        assert!(value["mcp_servers"][0].get("url").is_none());
+        assert!(value["mcp_servers"][0].get("headers").is_none());
+    }
+
+    #[tokio::test]
+    async fn extension_first_js_trust_and_persistent_disable_follow_actual_runtime() {
+        assert!(std::env::var_os("VIVIAN_TEST_DATA_DIR").is_some(), "Run via the isolated Rust test runner");
+        let key = format!("lifecycle-{}", uuid::Uuid::new_v4().simple());
+        let pdir = plugins_dir().join(&key);
+        std::fs::create_dir_all(pdir.join("js")).unwrap();
+        std::fs::write(pdir.join("plugin.json"), serde_json::json!({"name":key,"version":"1.0.0","js":["js/*.js"]}).to_string()).unwrap();
+        let tool_name = format!("test_{}", uuid::Uuid::new_v4().simple());
+        std::fs::write(pdir.join("js/main.js"), format!("ctx.tool('{}','fixture',{{type:'object',properties:{{}}}},function(){{return 'ok';}});",tool_name)).unwrap();
+        let skills = SkillService::new();
+        let tools = std::sync::Arc::new(ToolSystem::new());
+        let mcp = McpManager::new(tools.clone()).unwrap();
+        let report = load_one(&skills, &mcp, &tools, &key, true).await.unwrap();
+        assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+        assert!(tools.has_tool(&tool_name));
+        assert!(js_host::is_loaded(&key));
+        assert_eq!(scan_inventory().into_iter().find(|p|p.key == key).unwrap().status, "loaded");
+        set_plugin_enabled(&key, false).unwrap();
+        unload_one(&skills, &mcp, &tools, &key).await.unwrap();
+        assert!(!tools.has_tool(&tool_name));
+        assert!(!js_host::is_loaded(&key));
+        assert!(!is_plugin_name_trusted(&key));
+        assert_eq!(scan_inventory().into_iter().find(|p|p.key == key).unwrap().status, "disabled");
+        assert!(load_one(&skills, &mcp, &tools, &key, false).await.is_err());
+        set_plugin_enabled(&key, true).unwrap();
+        load_one(&skills, &mcp, &tools, &key, false).await.unwrap();
+        assert!(tools.has_tool(&tool_name));
+        std::fs::write(pdir.join("js/main.js"), "throw Error('changed');").unwrap();
+        assert!(load_one(&skills, &mcp, &tools, &key, false).await.is_err(), "Changed source requires fresh trust without waiting for cache expiry");
+        delete_plugin(&skills, &mcp, &tools, &key).await.unwrap();
+    }
 
     #[test]
     fn manifest_api_is_checked_before_plugin_code_or_contributions_load() {

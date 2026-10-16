@@ -21,7 +21,7 @@ pub fn set_app_handle(handle: AppHandle) {
     *APP_HANDLE.write() = Some(handle);
 }
 
-/// open_url 工具 - 用默认浏览器打开 URL
+/// open_url 工具 - 优先使用内置浏览器，并将对应页面带到前台。
 pub struct OpenUrlTool;
 
 impl OpenUrlTool {
@@ -43,13 +43,13 @@ impl Tool for OpenUrlTool {
     }
 
     fn description(&self) -> &str {
-        "Open the specified URL in the default browser."
+        "Open the URL in the embedded browser and bring its page to the foreground; use the system browser only if the embedded browser is unavailable."
     }
 
     fn description_in(&self, lang: &str) -> &str {
         match lang {
-            "zh" => "在默认浏览器中打开指定的 URL。",
-            "ja" => "デフォルトブラウザで指定された URL を開く。",
+            "zh" => "优先在内置浏览器中打开网址，并将对应页面显示到前台；内置浏览器不可用时使用系统浏览器。",
+            "ja" => "内蔵ブラウザーでURLを開いて前面に表示する。利用できない場合はシステムブラウザーを使う。",
             _ => self.description(),
         }
     }
@@ -106,8 +106,8 @@ impl Tool for OpenUrlTool {
             Some(u) if !u.is_empty() => u.to_string(),
             _ => return ValidationResult::failure("url 是必填项且不能为空", 2),
         };
-        if !url.starts_with("http://") && !url.starts_with("https://") {
-            return ValidationResult::failure("url 必须以 http:// 或 https:// 开头", 2);
+        if let Err(error) = crate::commands::browser::browser_page_url(&url) {
+            return ValidationResult::failure(&error, 2);
         }
         ValidationResult::success(None)
     }
@@ -117,15 +117,32 @@ impl Tool for OpenUrlTool {
     }
 
     async fn call(&self, args: Value, _context: &ToolUseContext) -> ToolResult {
-        let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("");
+        let url = match crate::commands::browser::browser_page_url(args.get("url").and_then(Value::as_str).unwrap_or("")) {
+            Ok(url) => url,
+            Err(error) => return ToolResult::standard_error(&error, None, None),
+        };
+        let app = APP_HANDLE.read().clone();
+        let mut fallback_reason = "内置浏览器尚未初始化".to_string();
+        if let Some(app) = app {
+            let state = app.try_state::<Arc<AppState>>().map(|state| state.inner().clone());
+            if let Some(state) = state {
+                match crate::commands::browser::open_browser_page(app, &state, Some(url.clone())).await {
+                    Ok(()) => return ToolResult::standard_success(
+                        &format!("已在内置浏览器打开并前台显示: {url}"),
+                        Some(json!({"url":url,"browser":"embedded","foreground":true})),
+                    ),
+                    Err(error) => fallback_reason = error,
+                }
+            }
+        }
 
         #[cfg(target_os = "windows")]
         {
-            match silent_command("explorer").arg(url).spawn() {
+            match silent_command("explorer").arg(&url).spawn() {
                 Ok(_) => {
                     return ToolResult::standard_success(
-                        &format!("已打开 URL: {url}"),
-                        Some(json!({ "url": url })),
+                        &format!("内置浏览器不可用，已使用系统浏览器打开: {url}"),
+                        Some(json!({ "url": url, "browser":"system", "fallback_reason":fallback_reason })),
                     );
                 }
                 Err(e) => {
@@ -139,7 +156,7 @@ impl Tool for OpenUrlTool {
         }
         #[cfg(not(target_os = "windows"))]
         {
-            let _ = url;
+            let _ = (url, fallback_reason);
             ToolResult::standard_error("当前平台不支持打开 URL", None, None)
         }
     }

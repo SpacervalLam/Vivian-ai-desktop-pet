@@ -9,7 +9,7 @@ import { positioningCoordinator as coordinator } from './positioningCoordinator'
 export function useDesktopPhysics(enabled: boolean, layer: RefObject<HTMLDivElement>) {
   const [airborne, setAirborne] = useState(false);
   const [error, setError] = useState(false);
-  const releaseRef = useRef<{ vx: number; vy: number } | null>(null);
+  const releaseRef = useRef<{ vx: number; vy: number; session_id?: string } | null>(null);
   useEffect(() => {
     if (!enabled) return;
     let cancelled = false, held = false, paused = true, frameAt = performance.now(), sampledAt = 0;
@@ -18,20 +18,22 @@ export function useDesktopPhysics(enabled: boolean, layer: RefObject<HTMLDivElem
     let timer: number | undefined, unlisten: UnlistenFn | undefined;
     let animation: Animation | undefined;
     let lastAirborne = false;
+    let dragSessionId: string | undefined;
     let lastPosition: { x: number; y: number } | null = null;
     const win = getCurrentWindow();
     coordinator.physicsEnabled = true;
     coordinator.abortSmartMove?.();
     const busy = () => cancelled || held || coordinator.dragInFlight || coordinator.fullscreenHidden ||
       coordinator.fullscreenInFlight || coordinator.fleeInFlight || coordinator.smartPositioningInFlight;
-    const begin = () => { held = true; coordinator.physicsInFlight = false; };
+    const begin = () => { held = true; dragSessionId = undefined; coordinator.physicsInFlight = false; };
     const end = () => { held = false; };
     window.addEventListener('mousedown', begin, true);
     window.addEventListener('mouseup', end, true);
     window.addEventListener('blur', end);
     // Release momentum belongs only to this pet window, never to the other character.
-    void win.listen<{ vx: number; vy: number }>('drag:released', event => {
+    void win.listen<{ vx: number; vy: number; session_id?: string }>('drag:released', event => {
       releaseRef.current = event.payload;
+      dragSessionId = event.payload.session_id;
       paused = true;
       held = false;
     }).then(fn => { if (cancelled) fn(); else unlisten = fn; }).catch(() => {});
@@ -95,6 +97,7 @@ export function useDesktopPhysics(enabled: boolean, layer: RefObject<HTMLDivElem
         if (dizzyMs !== null) {
           void win.emitTo(win.label, 'drag:dizzy', {
             duration_ms: dizzyMs, reason: 'edge_bounce', impact: result.ceilingImpact / (1000 * engine.scale),
+            session_id: dragSessionId,
           }).catch(() => {});
         }
         const position = { x: Math.round(engine.body.x - offset.left), y: Math.round(engine.body.y - offset.top) };

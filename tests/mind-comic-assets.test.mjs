@@ -9,4 +9,8 @@ assert.deepEqual(manifest.assets,audit.assets,'build whitelist must match runtim
 for (const retired of ['vivian-thought-v01.webp','nana-gallery-light-v42.webp']) assert(!manifest.assets.includes(retired), 'retired cover art is not a runtime dependency');
 assert.ok(manifest.assets.includes('vivian-hand-tremble-sheet-v26.webp'),'CSS background animation atlas stays packaged');
 assert.ok(existsSync('public/fonts/ma-shan-zheng.woff2'),'shared handwriting font exists in the packaged fonts directory');
-for (const style of ['ComicOverview.css','ComicChapters.css']) assert.ok(readFileSync(`src/components/mind-inspector/pages/${style}`,'utf8').includes('/fonts/ma-shan-zheng.woff2'),'comic styles use the shared handwriting font');
+for (const style of ['ComicOverview.css','ComicChapters.css']) {
+  const css = readFileSync(`src/components/mind-inspector/pages/${style}`,'utf8');
+  assert.ok(css.includes('Mind Comic'), 'comic styles use the shared handwriting family');
+  assert.ok(!css.includes('/fonts/ma-shan-zheng.woff2'), 'comic CSS must not request the font removed from core during packaging');
+}

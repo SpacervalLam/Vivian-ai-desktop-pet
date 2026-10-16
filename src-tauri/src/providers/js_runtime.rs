@@ -389,6 +389,7 @@ impl Worker {
             .build();
 
         let ctx_obj = ObjectInitializer::new(&mut self.ctx)
+            .property(js_string!("apiVersion"), JsValue::from(crate::plugin_contract::PLUGIN_API_VERSION), Attribute::READONLY)
             .property(js_string!("plugin"), JsValue::from(plugin_obj), Attribute::READONLY)
             // SAFETY: 各闭包仅捕获 `Arc<HostState>` / `String` 等纯 Rust 数据，
             // 不含 boa GC 可追踪类型（JsObject / JsValue 等），满足 from_closure 的
@@ -539,6 +540,9 @@ impl Worker {
             .map_err(|e| format!("js 工具参数反序列化失败: {e}"))?;
         match fn_obj.call(&JsValue::undefined(), &[arg_val], &mut self.ctx) {
             Ok(result) => {
+                if result.as_object().is_some_and(|object|boa_engine::object::builtins::JsPromise::from_object(object).is_ok()) {
+                    return Err("JS 工具处理函数必须同步返回；外部 I/O 请通过 MCP 或声明式工具注册，不能返回 Promise".into());
+                }
                 let json = result
                     .to_json(&mut self.ctx)
                     .map_err(|e| format!("js 工具返回值不可序列化: {e}"))?;
@@ -721,6 +725,16 @@ fn collect_js(dir: &PathBuf) -> Vec<JsSourceFile> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extension_api_version_and_async_handler_failures_are_explicit() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = JsRuntime::new(dir.path().to_path_buf(), "fixture".into(), "1".into(), false);
+        rt.reload_with(vec![JsSourceFile { path:dir.path().join("main.js"), source:"ctx.tool('version','version',{type:'object'},function(){return ctx.apiVersion;});ctx.tool('async','async',{type:'object'},async function(){return 'hidden';});".into() }]).unwrap();
+        assert_eq!(rt.call_tool("version",serde_json::json!({})).unwrap(),crate::plugin_contract::PLUGIN_API_VERSION.to_string());
+        assert!(rt.call_tool("async",serde_json::json!({})).unwrap_err().contains("Promise"));
+        rt.shutdown();
+    }
 
     fn probe_script() -> String {
         r#"

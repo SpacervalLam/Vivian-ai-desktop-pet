@@ -87,6 +87,7 @@ fn fallback_label(id: &str, lang: &str) -> &'static str {
 /// Reports, topic counters, current mind state and tool scope are intentionally finalized later.
 struct PreparedPromptContext {
     character_block: Option<String>,
+    character_note_section: Option<String>,
     examples_block: Option<String>,
     style_block: Option<String>,
     style_preset_block: Option<String>,
@@ -719,7 +720,9 @@ impl PromptBuildingStep {
             .map(|svc| svc.prompt_section(&self.char_id))
             .flatten();
 
-        PreparedPromptContext { character_block, examples_block, style_block, style_preset_block,
+        let character_note_section = self.persona.as_ref().map(|persona|
+            crate::persona::prompt_render::render_dialogue_note(&persona.get_config(), &self.language));
+        PreparedPromptContext { character_block, character_note_section, examples_block, style_block, style_preset_block,
             memory_md_section, user_facts_section, skill_section }
     }
 
@@ -737,7 +740,7 @@ impl PromptBuildingStep {
 
     fn build_parts_prepared(&self, state: &PipelineState, tool_scope: Option<&ToolScope>, prepared: Option<PreparedPromptContext>) -> PromptParts {
         let selection = OptionalContextSelection::for_state(state);
-        let PreparedPromptContext { character_block, examples_block, style_block, style_preset_block,
+        let PreparedPromptContext { character_block, character_note_section, examples_block, style_block, style_preset_block,
             memory_md_section, user_facts_section, skill_section } = prepared.unwrap_or_else(|| self.prepare_context());
         // 关系段落：当前亲密度 + 阶段 + 策略（由 PsychologyManager 提供）
         let relationship_section = self
@@ -837,13 +840,10 @@ impl PromptBuildingStep {
             }
         }
 
-        // Worldbook 背景知识：动态激活 — 先更新状态，再渲染
+        // Worldbook selection is read-only and scoped to this conversation. Prompt
+        // previews, retries and proactive preparation must not advance global state.
         let worldbook_block = {
-            let last_assistant = state.messages.iter().rev()
-                .find(|m| m.role == "assistant")
-                .map(|m| m.content.as_str());
-            crate::persona::worldbook::update_activation(&state.user_input, last_assistant);
-            let block = crate::persona::worldbook::render_worldbook_block(&state.user_input, &self.language);
+            let block = crate::persona::worldbook::render_worldbook_for_turn(&state.user_input, &state.messages, &self.language);
             if block.is_empty() { None } else { Some(block) }
         };
 
@@ -1150,6 +1150,7 @@ impl PromptBuildingStep {
             memory_text: state.memory_text.clone(),
             memory_md_section,
             character_block,
+            character_note_section,
             examples_block,
             style_block,
             style_preset_block,
@@ -2074,7 +2075,7 @@ mod component_selection_tests {
         assert!(!selection.random_echo);
         assert!(selection.relationship_log);
         let prepared = PreparedPromptContext { character_block: Some("core_identity".into()),
-            examples_block: None, style_block: None, style_preset_block: None,
+            character_note_section: None, examples_block: None, style_block: None, style_preset_block: None,
             memory_md_section: Some("durable_notes".into()), user_facts_section: Some("user_facts".into()), skill_section: None };
         let parts = PromptBuildingStep::new().build_parts_prepared(&state, None, Some(prepared));
         assert_eq!(parts.character_block.as_deref(), Some("core_identity"));

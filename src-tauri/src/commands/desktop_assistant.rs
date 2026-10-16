@@ -105,9 +105,15 @@ pub async fn analyze_screen(app: &AppHandle, state: &Arc<AppState>, character_id
     guard.0 = crate::screen_selection::hide_capture_entry(app).await?;
     tracing::info!(hide_ms = hide_started.elapsed().as_millis(), "截图入口窗口已隐藏并完成合成");
     state.get_character(Some(character_id))?;
-    let Some(selected) = crate::screen_selection::select_region(app).await? else {
+    let Some(mut selected) = crate::screen_selection::select_region(app).await? else {
         return Ok(json!({"cancelled":true}));
     };
+    if selected.action == crate::screen_capture::SelectionAction::Freeze {
+        let overlay = selected.overlay.take();
+        crate::screen_freeze::open(app, &selected, character_id).await?;
+        if let Some(overlay) = overlay { overlay.dismiss(app).await?; }
+        return Ok(json!({"frozen":true}));
+    }
     for window in guard.0.drain(..) { let _ = window.show(); }
     SCREEN_CAPTURING.store(false, std::sync::atomic::Ordering::Release);
     let copied = selected.action.copies();
@@ -118,34 +124,44 @@ pub async fn analyze_screen(app: &AppHandle, state: &Arc<AppState>, character_id
     if !selected.action.analyzes() {
         return Ok(json!({"saved_path":saved_path,"copied":copied}));
     }
-    let analysis = async {
-        if crate::companion_quiet::active() { return Err("勿扰模式下已暂停陪伴分析，请先关闭勿扰".into()); }
-        if state.tool_system.is_tool_disabled("screenshot_analyze", crate::tools::registry::AgentSide::Companion) {
-            return Err("截图分析已在工具设置中禁用".to_string());
-        }
-        if !state.config.read().get_typed::<bool>("ai.enable_vision", false) {
-            return Err("请先在设置中启用视觉功能".to_string());
-        }
-        use base64::{engine::general_purpose::STANDARD, Engine as _};
-        let image_detail = state.config.read().get_typed::<String>("ai.image_detail", "auto".into());
-        let image = crate::types::response::MessageImage { media_type: "image/png".into(), data: STANDARD.encode(selected.png), url: None, detail: Some(image_detail) };
-        crate::commands::chat::respond_to_image(state, app, character_id, "wechat", image,
-            "📷 [图片]", None, "screen_selection").await
-    }.await;
+    let analysis = analyze_snapshot(app, state, character_id, selected.png).await;
     let turn = analysis.map_err(|error| if saved_path.is_some() {
         format!("截图已保存至系统截图目录，但分析失败：{error}")
     } else { error })?;
-    // 识图结果由桌宠用自己的口吻转述（气泡），不再由前端弹 toast —— 桌宠才是桌面上的
-    // 那个「说话的人」，而且角色回复只落在微信窗口里，窗口收起时用户根本看不到。
     relay_visual_description(app, state, character_id, turn.description);
     Ok(json!({"handled":true,"saved_path":saved_path,"copied":copied}))
+}
+
+pub(crate) async fn analyze_snapshot(app: &AppHandle, state: &Arc<AppState>, character_id: &str, png: Vec<u8>) -> Result<crate::visual_evidence::ImageTurnResult, String> {
+    if crate::companion_quiet::active() { return Err("勿扰模式下已暂停陪伴分析，请先关闭勿扰".into()); }
+    if state.tool_system.is_tool_disabled("screenshot_analyze", crate::tools::registry::AgentSide::Companion) {
+        return Err("截图分析已在工具设置中禁用".to_string());
+    }
+    if !state.config.read().get_typed::<bool>("ai.enable_vision", false) {
+        return Err("请先在设置中启用视觉功能".to_string());
+    }
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    let image_detail = state.config.read().get_typed::<String>("ai.image_detail", "auto".into());
+    let image = crate::types::response::MessageImage { media_type: "image/png".into(), data: STANDARD.encode(png), url: None, detail: Some(image_detail) };
+    crate::commands::chat::respond_to_image(state, app, character_id, "wechat", image,
+        "📷 [图片]", None, "screen_selection").await
+}
+
+pub(crate) async fn analyze_frozen_snapshot(app: &AppHandle, state: &Arc<AppState>, character_id: &str, png: Vec<u8>) -> Result<(), String> {
+    if SCREEN_BUSY.compare_exchange(false, true, std::sync::atomic::Ordering::AcqRel, std::sync::atomic::Ordering::Acquire).is_err() {
+        return Err("截图分析正在进行中".into());
+    }
+    let _guard = ScreenGuard(Vec::new());
+    let turn = analyze_snapshot(app, state, character_id, png).await?;
+    relay_visual_description(app, state, character_id, turn.description);
+    Ok(())
 }
 
 /// 把识图模型的客观分析交给桌宠转述（`companion:interaction` → 气泡 + 表情）。
 ///
 /// **不 await**：识图加角色回复已经让用户等了几秒，转述再串在后面就成了
 /// 「截完图半天没动静」。spawn 出去，生成完直接 emit；生成失败静默，不弹任何提示。
-fn relay_visual_description(app: &AppHandle, state: &Arc<AppState>, character_id: &str, description: String) {
+pub(crate) fn relay_visual_description(app: &AppHandle, state: &Arc<AppState>, character_id: &str, description: String) {
     let (app, state, character) = (app.clone(), state.clone(), character_id.to_string());
     tauri::async_runtime::spawn(async move {
         let Some(line) = crate::commands::pet_reaction::relay_screen_analysis(&state, &character, &description).await else { return; };
@@ -167,7 +183,7 @@ pub fn companion_read_clipboard() -> Result<Value, String> {
 }
 
 #[path = "shortcut_icons.rs"]
-mod shortcut_icons;
+pub(crate) mod shortcut_icons;
 
 #[tauri::command]
 pub async fn companion_shortcut_icon(state: State<'_, Arc<AppState>>, shortcut_id: String) -> Result<String, String> {

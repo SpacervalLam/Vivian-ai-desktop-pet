@@ -52,7 +52,7 @@ export function startInsetPanelReveal(stage: HTMLElement, enabled: () => boolean
   let geometry: { width: number; height: number; left: number; right: number; top: number; travel: number };
   const cropNotebook = (shape: number[][] | null) => {
     if (!notebook || notebook.classList.contains('is-expanded')) return;
-    notebook.querySelectorAll<SVGPolygonElement>('.unified-panel-ink polygon, .unified-panel-gutter polygon')
+    notebook.querySelectorAll<SVGPolygonElement>('.unified-panel-ink polygon, .unified-panel-gutter polygon, .unified-panel-outline polygon')
       .forEach(polygon => polygon.setAttribute('points', (shape ?? [[0,0],[100,0],[100,100],[0,100]]).map(point => point.join(',')).join(' ')));
     if (shape) notebook.style.setProperty('--notebook-crop', `polygon(${shape.map(point => `${point[0]}% ${point[1]}%`).join(',')})`);
     else notebook.style.removeProperty('--notebook-crop');

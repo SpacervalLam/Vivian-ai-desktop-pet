@@ -47,8 +47,7 @@
     ],
     "resources": {
       "src/remote/frontend": "remote/frontend/",
-      "vivian.bundle.enc": "vivian.bundle.enc",
-      "../browser-extension": "browser-extension/"
+      "vivian.bundle.enc": "vivian.bundle.enc"
     },
     "copyright": "Copyright © 2026 Vivian",
     "category": "Entertainment",

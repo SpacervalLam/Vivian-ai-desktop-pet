@@ -1,0 +1,17 @@
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+const selection=await readFile('src-tauri/src/screen_selection.rs','utf8');
+const entry=await readFile('src-tauri/src/commands/desktop_assistant.rs','utf8');
+const freeze=await readFile('src-tauri/src/screen_freeze.rs','utf8');
+assert.match(selection,/if !freezing \{ hide_capture_windows/,'freeze keeps its overlay visible while cropping');
+assert.match(selection,/selected\.overlay = Some\(guard\)/,'overlay lifetime transfers to the handoff');
+const handoff=entry.slice(entry.indexOf('let overlay = selected.overlay.take()'),entry.indexOf('return Ok(json!({"frozen":true}))'));
+assert.ok(handoff.indexOf('open(app, &selected, character_id).await?')<handoff.indexOf('overlay.dismiss(app).await?'),'show acknowledgement precedes overlay dismissal');
+const frame=freeze.slice(freeze.indexOf('pub async fn screen_freeze_frame'),freeze.indexOf('pub async fn screen_freeze_present'));
+assert.match(frame,/set_geometry\(&window, geometry.left, geometry.top, geometry.width, geometry.height\)/);
+assert.ok(frame.indexOf('receiver.await')<frame.indexOf('Response::new'),'native geometry settles before image delivery');
+const present=freeze.slice(freeze.indexOf('pub async fn screen_freeze_present'),freeze.indexOf('pub async fn screen_freeze_resize'));
+assert.ok(present.indexOf('window.show()')<present.indexOf('DwmFlush()'));
+assert.ok(present.indexOf('DwmFlush()')<present.indexOf('presented.send(result.clone())'),'composition completes before open resolves');
+assert.match(freeze,/timeout\(std::time::Duration::from_secs\(15\), receiver\)/,'failed startup cannot leave the overlay stuck');
+console.log('Snapshot handoff: exact physical geometry, retained overlay, presentation acknowledgement and timeout cleanup passed');

@@ -2,6 +2,7 @@ import i18n from 'i18next';
 
 const strings = {
   'zh-CN': {
+    pages: '页面', newPage: '新建页面',
     workThinking: '工作思考',
     summarizing: '正在整理最终报告…',
     liveTurn: '本轮实时统计', tokensEstimated: '本轮生成 token 的估算值，包含可见思考；收到模型用量后校准', tokensReported: '模型返回的本轮输出 token 数', awaitAnswer: '等待你的回答…', replyStreaming: '正在回复…', taskRunning: '正在执行…',
@@ -16,6 +17,7 @@ const strings = {
     failed: '有失败步骤', stopped: '已停止', pending: '等待结果', currentTool: '当前：{{tool}}', settings: '输入设置', summarySpace: '展开摘要需要更宽的阅读空间',
   },
   en: {
+    pages: 'Pages', newPage: 'New page',
     workThinking: 'Work reasoning',
     summarizing: 'Preparing the final report…',
     liveTurn: 'Live turn statistics', tokensEstimated: 'Estimated generated tokens including visible reasoning; corrected when usage arrives', tokensReported: 'Output tokens reported by the model for this turn', awaitAnswer: 'Waiting for your answer…', replyStreaming: 'Replying…', taskRunning: 'Working…',
@@ -30,6 +32,7 @@ const strings = {
     failed: 'Some steps failed', stopped: 'Stopped', pending: 'Awaiting result', currentTool: 'Current: {{tool}}', settings: 'Composer settings', summarySpace: 'Widen the reading area to show the summary',
   },
   ja: {
+    pages: 'ページ', newPage: '新しいページ',
     workThinking: '作業中の思考',
     summarizing: '最終レポートをまとめています…',
     liveTurn: '今回のリアルタイム統計', tokensEstimated: '思考を含む生成トークンの推定値。使用量取得後に補正', tokensReported: 'モデルが返した今回の出力トークン数', awaitAnswer: '回答を待っています…', replyStreaming: '返信中…', taskRunning: '実行中…',

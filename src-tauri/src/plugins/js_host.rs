@@ -70,6 +70,8 @@ fn host() -> &'static Mutex<Host> {
     HOST.get_or_init(|| Mutex::new(Host::empty()))
 }
 
+pub fn is_loaded(key: &str) -> bool { host().lock().unwrap().runtimes.contains_key(key) }
+
 impl Host {
     fn empty() -> Self {
         Host {

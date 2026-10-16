@@ -1,7 +1,7 @@
 //! Reddit 源 — rdt-cli 登录态路径优先，匿名 .json 端点回退
 //!
-//! 登录态路径：扩展回传 reddit.com 整罐 Cookie（bridge.reportRedditCookie，
-//! 需含 reddit_session），服务端同步进 rdt-cli 凭据文件后调用外部 `rdt`
+//! 登录态路径：从内嵌浏览器普通配置的 CookieManager 读取 reddit.com Cookie
+//! （需含 reddit_session），同步进 rdt-cli 凭据文件后调用外部 `rdt`
 //! CLI（`uv tool install rdt-cli`）执行只读发现：
 //! - `rdt search <query> -n N --json`：搜索
 //! - `rdt popular -n N --json`：热门
@@ -62,13 +62,21 @@ fn parse_cookie_header(cookie: &str) -> std::collections::BTreeMap<String, Strin
     pairs
 }
 
-/// 把扩展回传的 Reddit Cookie 同步进 rdt-cli 凭据文件（仅当比现有凭据新）。
+/// 把内嵌浏览器回传的 Reddit Cookie 同步进 rdt-cli 凭据文件（仅当比现有凭据新）。
 /// 无桥/无 Cookie/缺 reddit_session 时静默跳过（用户可自行 `rdt login`）。
 fn sync_rdt_credential_from_bridge() {
     let Some(bridge) = crate::browser_bridge::tools::global_bridge() else {
         return;
     };
     let Some((epoch_ms, header)) = bridge.reddit_cookie() else {
+        // Revoke only credentials previously written by Vivian after a confirmed logout.
+        if bridge.platform_status().is_some_and(|(_,status)|status.get("reddit")==Some(&false)) {
+            if let Some(path)=rdt_credential_path() {
+                if let Ok(body)=std::fs::read_to_string(&path) {
+                    if serde_json::from_str::<Value>(&body).ok().and_then(|v|v.get("source").and_then(Value::as_str).map(str::to_owned)).is_some_and(|s|matches!(s.as_str(),"vivian:extension"|"vivian:embedded-browser")) { let _=std::fs::remove_file(path); }
+                }
+            }
+        }
         return;
     };
     let pairs = parse_cookie_header(&header);
@@ -96,7 +104,7 @@ fn sync_rdt_credential_from_bridge() {
         .cloned();
     let payload = serde_json::json!({
         "cookies": pairs,
-        "source": "vivian:extension",
+        "source": "vivian:embedded-browser",
         "username": null,
         "modhash": modhash,
         "saved_at": epoch_ms as f64 / 1000.0,
@@ -139,7 +147,7 @@ async fn run_rdt_cli(args: &[&str]) -> Option<Vec<Value>> {
     if cli_available_cached() == Some(false) {
         return None;
     }
-    // 顺带把扩展回传的 Cookie 同步进凭据文件（无则依赖用户既有凭据）
+    // 顺带把内嵌浏览器回传的 Cookie 同步进凭据文件（无则依赖用户既有凭据）
     sync_rdt_credential_from_bridge();
 
     let output = tokio::time::timeout(

@@ -45,9 +45,10 @@ try{
  coordinator.dragInFlight=true;dom.get('mouseup')();await tick();assert.equal(writes.length,before,'native drag keeps ownership after WebView mouseup');
  coordinator.dragInFlight=false;position={x:300,y:200};events.get('drag:released')({windowLabel:'nana',payload:{vx:400,vy:-400}});await tick();await tick();assert.ok(position.x>300&&position.y<200,'release momentum reaches the actual native movement loop');
  assert.equal(emitted.length,0,'a throw without a ceiling collision never emits dizzy');
- position={x:300,y:10};events.get('drag:released')({windowLabel:'nana',payload:{vx:0,vy:-1800}});await tick();await tick();
+ position={x:300,y:10};events.get('drag:released')({windowLabel:'nana',payload:{vx:0,vy:-1800,session_id:'drag-session'}});await tick();await tick();
  assert.equal(emitted.length,1);assert.equal(emitted[0][0],'nana');assert.equal(emitted[0][1],'drag:dizzy');
  assert.equal(emitted[0][2].reason,'edge_bounce');assert.ok(emitted[0][2].duration_ms>=1400,'a hard ceiling hit reaches the pet expression listener');
+ assert.equal(emitted[0][2].session_id,'drag-session','rebound evidence stays attached to the original drag gesture');
  coordinator.fullscreenHidden=true;const hiddenWrites=writes.length;await tick();await tick();assert.equal(writes.length,hiddenWrites,'fullscreen hiding wins');coordinator.fullscreenHidden=false;
  coordinator.fleeInFlight=true;await tick();assert.equal(writes.length,hiddenWrites,'fleeing wins');coordinator.fleeInFlight=false;
  coordinator.ambientMoveInFlight=true;await tick();assert.equal(writes.length,hiddenWrites,'frontend walking receives no competing physics moves');coordinator.ambientMoveInFlight=false;

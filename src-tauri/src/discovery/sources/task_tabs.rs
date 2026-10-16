@@ -1,12 +1,12 @@
 //! 隔离任务 tab 自动发现 — 小红书 / 抖音 / 知乎（非 LLM 驱动的后台采集）
 //!
 //! 模型：经浏览器桥的 `browser_task_tab` 工具在后台静默创建 inactive 标签
-//! （不抢占用户焦点、立即静音），加载平台页面后在页面上下文执行同源
-//! fetch / DOM 提取，完成后自动关闭标签。标签与浏览器同 profile，天然
+//! （不抢占用户焦点、立即静音），加载平台页面后执行内嵌浏览器预置的 DOM
+//! 提取器，完成后自动关闭标签。标签与浏览器同 profile，天然
 //! 携带平台登录 Cookie，实现需登录态平台的后台发现。
 //!
 //! 采集本身为纯脚本（无 LLM 参与），候选仍走引擎统一 LLM 评估入库。
-//! 每平台按角色独立冷却（默认 3 小时），且要求扩展已上报该平台登录态。
+//! 每平台按角色独立冷却（默认 3 小时），且要求内嵌浏览器已上报该平台登录态。
 
 use serde_json::Value;
 
@@ -27,76 +27,9 @@ struct TaskTabPlan {
     url: &'static str,
     /// 页面加载后的额外渲染等待（毫秒）
     wait_ms: u64,
-    /// 页面上下文执行的提取脚本（返回 JSON 字符串）
-    code: &'static str,
-    /// 是否要求扩展上报该平台已登录
+    /// 是否要求内嵌浏览器上报该平台已登录
     needs_login: bool,
 }
-
-const ZHIHU_CODE: &str = r#"(async () => {
-  try {
-    const r = await fetch('/api/v3/feed/topstory/hot-lists/total?limit=20', { credentials: 'include' });
-    const j = await r.json();
-    const list = (j && j.data) || [];
-    return JSON.stringify(list.map((x, i) => {
-      const t = x.target || {};
-      return {
-        id: 'zhihu-hot-' + (x.id || i),
-        title: x.title || '',
-        desc: (t.excerpt_area && t.excerpt_area.text) || x.detail_text || '',
-        url: t.url || '',
-        author: (t.author && t.author.name) || '',
-        cover: (t.thumbnail || (t.excerpt_area && t.excerpt_area.thumbnail)) || '',
-        views: 0,
-        likes: 0,
-      };
-    }).filter(x => x.title));
-  } catch (e) { return JSON.stringify([]); }
-})()"#;
-
-const XHS_CODE: &str = r#"(() => {
-  const seen = new Set();
-  const items = [];
-  document.querySelectorAll('a[href*="/explore/"], a[href*="/search_result/"]').forEach((a) => {
-    const href = a.getAttribute('href') || '';
-    const m = href.match(/\/(?:explore|search_result)\/([0-9a-f]{8,})/);
-    if (!m) return;
-    const id = m[1];
-    if (seen.has(id)) return;
-    const img = a.querySelector('img');
-    const title = ((a.getAttribute('title') || a.textContent || (img && img.alt) || '') + '').trim().slice(0, 80);
-    if (!title) return;
-    seen.add(id);
-    items.push({
-      id, title, desc: title,
-      url: 'https://www.xiaohongshu.com/explore/' + id,
-      author: '', cover: (img && img.src) || '', views: 0, likes: 0,
-    });
-  });
-  return JSON.stringify(items.slice(0, 20));
-})()"#;
-
-const DOUYIN_CODE: &str = r#"(() => {
-  const seen = new Set();
-  const items = [];
-  document.querySelectorAll('a[href*="/video/"]').forEach((a) => {
-    const href = a.getAttribute('href') || '';
-    const m = href.match(/\/video\/(\d+)/);
-    if (!m) return;
-    const id = m[1];
-    if (seen.has(id)) return;
-    const img = a.querySelector('img');
-    const title = ((a.textContent || (img && img.alt) || '') + '').trim().slice(0, 80);
-    if (!title) return;
-    seen.add(id);
-    items.push({
-      id, title, desc: title,
-      url: 'https://www.douyin.com/video/' + id,
-      author: '', cover: (img && img.src) || '', views: 0, likes: 0,
-    });
-  });
-  return JSON.stringify(items.slice(0, 20));
-})()"#;
 
 fn task_tab_plans() -> Vec<TaskTabPlan> {
     vec![
@@ -104,21 +37,18 @@ fn task_tab_plans() -> Vec<TaskTabPlan> {
             platform: "zhihu",
             url: "https://www.zhihu.com/hot",
             wait_ms: 1200,
-            code: ZHIHU_CODE,
             needs_login: false,
         },
         TaskTabPlan {
             platform: "xiaohongshu",
             url: "https://www.xiaohongshu.com/explore",
             wait_ms: 3000,
-            code: XHS_CODE,
             needs_login: true,
         },
         TaskTabPlan {
             platform: "douyin",
             url: "https://www.douyin.com/?recommend=1",
             wait_ms: 3000,
-            code: DOUYIN_CODE,
             needs_login: true,
         },
     ]
@@ -214,19 +144,20 @@ fn raw_to_candidate(platform: &str, item: &Value, source: &str) -> Option<Conten
 
 /// 知识采集维护顺带的隔离任务 tab 自动发现（小红书/抖音/知乎）
 ///
-/// 每平台独立冷却 + 登录态门槛；扩展未连接 / 平台未登录 / 冷却未到时静默跳过。
+/// 每平台独立冷却 + 登录态门槛；内嵌浏览器未连接 / 平台未登录 / 冷却未到时静默跳过。
 /// 采集为纯脚本驱动（无 LLM），候选统一走引擎评估入库。
 pub async fn refresh_from_task_tabs(char_id: &str) {
     let Some(bridge) = crate::browser_bridge::tools::global_bridge() else {
         return;
     };
+    if !bridge.is_connected() { return; }
     let platform_status = bridge.platform_status().map(|(_, m)| m);
 
     for plan in task_tab_plans() {
         if !task_tab_due(char_id, plan.platform) {
             continue;
         }
-        // 登录态门槛：需登录平台在扩展上报未登录时跳过（不打开必然空白的任务 tab）
+        // 登录态门槛：需登录平台在内嵌浏览器上报未登录时跳过（不打开必然空白的任务 tab）
         if plan.needs_login {
             let logged_in = platform_status
                 .as_ref()
@@ -239,7 +170,7 @@ pub async fn refresh_from_task_tabs(char_id: &str) {
 
         let args = serde_json::json!({
             "url": plan.url,
-            "code": plan.code,
+            "extractor": plan.platform,
             "waitMs": plan.wait_ms,
         });
         let result = bridge

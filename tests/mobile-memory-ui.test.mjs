@@ -27,13 +27,34 @@ function memoryFixture(owner) {
 }
 const requests=[];
 let memoryFailure=false, emptyMemory=false;
+let companionFixtures=false, workFailure=false, workStatus='running', questionPending=true, connectionFailure=false;
+const noteBlocks=[{type:'paragraph',text:'保留原有笔记样式',style:{color:'#876543',bold:true}},{type:'image',url:'https://example.com/old.png',caption:'原图说明'},{type:'table',headers:['项目'],rows:[['原始数据']],caption:'原始表格'}];
+const workQuestion={question_id:42,session_id:'work-fixture',question:'下一步想先做哪件事？',context:'两种方案都已经准备好。',multi_select:false,options:[{label:'完善手机界面',description:'继续补上手机端体验'},{label:'先检查数据同步',description:'确认电脑和手机的一致性'}]};
 const server = createServer((req, res) => {
   const path = new URL(req.url, 'http://localhost').pathname;
   if (path.startsWith('/api/')) {
     const entry={path,method:req.method,body:''};requests.push(entry);req.on('data',chunk=>entry.body+=chunk);
     let data = {};
     const owner=path.includes('/nana/')?'nana':'vivian';
-    if (path === '/api/characters') data = {characters: [{id:'vivian',name:'Vivian'}, {id:'nana',name:'Nana'}], active_id:'vivian'};
+    if (path === '/api/health') {if(connectionFailure){res.statusCode=503;res.end('电脑离线');return;}data={status:'ok',initialized:true};}
+    else if (companionFixtures && path.startsWith('/api/work/')) {
+      if(path.endsWith('/send')&&workFailure){res.statusCode=503;res.end('临时发送失败');return;}
+      if(path==='/api/work/sessions')data=req.method==='POST'?{session_id:'work-created'}:{sessions:[{session_id:'work-fixture',char_id:'vivian',title:'完善手机端体验',working_directory:'G:\\vivian-rs',updated_at:1792026000000,message_count:3,status:workStatus,pending_question:questionPending?workQuestion:null}]};
+      else if(path.endsWith('/stop')){workStatus='canceled';data={canceled:true};}
+      else if(path.endsWith('/answer')){questionPending=false;data={answered:true};}
+      else if(path.endsWith('/send')){workStatus='running';data={sent:true};}
+      else data={session_id:path.split('/').at(-1),char_id:'vivian',title:'完善手机端体验',working_directory:'G:\\vivian-rs',status:workStatus,pending_question:questionPending?workQuestion:null,messages:[{role:'user',content:'让手机端更完整一些。',timestamp:1792026000000},{role:'tool',tool_name:'read_file',content:'<script>window.unsafeWork=true</script>',tool_success:true,timestamp:1792026001000},{role:'assistant',content:'**界面已经准备好。**\n\n接下来检查小屏幕和键盘遮挡。\n\n```js\nconst message = "你好";\n```',timestamp:1792026002000}],deliverables:['G:\\vivian-rs\\mobile.html'],work_todos:[{content:'完成手机布局',status:'completed'}]};
+    }
+    else if (companionFixtures && path.endsWith('/mind'))data={current_thought:owner==='nana'?'想把今天的小事写下来。':'窗边的阳光很好，想再陪你坐一会儿。',inner_monologue_enabled:true,attention_top:[{entity:'一起散步',weight:.8}],goals:[{description:'把今天的约定完成'}]};
+    else if (companionFixtures && path.endsWith('/mood'))data={primary_emotion:'curiosity',arousal:.4,fatigue:0,stress:.12};
+    else if (companionFixtures && path.endsWith('/relationship'))data={trust:86,intimacy:70,familiarity:74,interaction_count:128};
+    else if (companionFixtures && path.endsWith('/presence'))data={state:'online',display_zh:'在你身边'};
+    else if (companionFixtures && path.endsWith('/diary'))data={diaries:[{id:owner+'-today',date:'2026-10-15',content:'今天和你一起散步。\n\n<script>window.unsafeDiary=true</script>\n\n路边的小花开得很好看。',key_events:['一起沿河散步','约好了周末再见'],word_count:86,mood_tag:'happy',created_at:1792026000},{id:owner+'-yesterday',date:'2026-10-14',content:'昨天在窗边读了半本书。',key_events:['一起读书'],word_count:18,mood_tag:'neutral',created_at:1791939600}]};
+    else if (companionFixtures && path.endsWith('/notes'))data={notes:[{id:'note-fixture',title:owner==='nana'?'Nana 的灵感手记':'Vivian 的灵感手记',updated_at:1792026000,block_count:3,tags:['灵感','散步']}]};
+    else if (companionFixtures && path.includes('/notes/'))data={id:'note-fixture',title:'散步的小记',blocks:noteBlocks,layout:'magazine',palette:'lavender',tags:['灵感']};
+    else if (companionFixtures && path==='/api/todos')data={items:[{id:'todo-open',title:'把沿途的照片整理好',description:'挑选三张喜欢的照片',priority:2,completed:false},{id:'todo-done',title:'一起出门散步',priority:1,completed:true}]};
+    else if (companionFixtures && path==='/api/tasks')data={tasks:[{id:'task-fixture',message:'记得喝水',scheduled_time:1792036000,status:'paused',repeat_interval:3600}]};
+    else if (path === '/api/characters') data = {characters: [{id:'vivian',name:'Vivian'}, {id:'nana',name:'Nana'}], active_id:'vivian'};
     else if (path.endsWith('/memory')) {
       if(memoryFailure){res.statusCode=500;res.end('临时连接错误');return;}
       data=emptyMemory?{memories:[],conversations:[]}:memoryFixture(owner);
@@ -213,6 +234,90 @@ try {
     assert.equal(await evaluate(`document.getElementById('directInput').value`),'正在选词');
     console.log(`PASS ${w}x${h}: four memory views, evidence, search, summary, profile ownership, navigation, IME`);
   }
+  companionFixtures=true;
+  await send('Emulation.setDeviceMetricsOverride',{width:390,height:844,deviceScaleFactor:1,mobile:true});
+  await send('Page.navigate',{url});await delay(700);
+  await evaluate(`document.querySelector('.home-header .mobile-navigation-button').click()`);
+  assert.equal(await evaluate(`document.getElementById('navigationDrawer').classList.contains('open')`),true);
+  await evaluate(`navigateMobile('mind')`);await delay(400);
+  assert(await evaluate(`document.getElementById('mindContent').textContent.includes('窗边的阳光')`));
+  assert.equal(await evaluate(`document.querySelector('[role="meter"][aria-label="疲倦程度"]').getAttribute('aria-valuenow')`),'0');
+  await shot('mind');
+  await evaluate(`document.querySelector('#mindOwners [data-owner="nana"]').click();document.querySelector('#mindOwners [data-owner="vivian"]').click()`);await delay(350);
+  assert(await evaluate(`document.getElementById('mindContent').textContent.includes('窗边的阳光')`));
+  await evaluate(`navigateMobile('diary')`);await delay(300);
+  assert.equal(await evaluate(`document.querySelectorAll('[data-diary-id]').length`),2);
+  await shot('diary-list');
+  await evaluate(`document.getElementById('diarySearch').value='读书';document.getElementById('diarySearch').dispatchEvent(new Event('input'))`);
+  assert.equal(await evaluate(`document.querySelectorAll('[data-diary-id]').length`),1);
+  await evaluate(`document.getElementById('diarySearch').value='';document.getElementById('diarySearch').dispatchEvent(new Event('input'));document.getElementById('diaryDate').value='2026-10-15';document.getElementById('diaryDate').dispatchEvent(new Event('change'));document.querySelector('[data-diary-id]').click()`);
+  assert(await evaluate(`document.getElementById('diaryReader').textContent.includes('周末再见')`));
+  assert.equal(await evaluate(`window.unsafeDiary`),undefined);
+  assert.equal(await evaluate(`document.querySelector('#diaryReader script')`),null);
+  await shot('diary-reader');await evaluate(`MobileUI.diaryBack();document.querySelector('#diaryOwners [data-owner="nana"]').click()`);await delay(250);
+  assert(await evaluate(`document.querySelector('[data-diary-id]').dataset.diaryId.startsWith('nana')`));
+  await evaluate(`navigateMobile('notes')`);await delay(250);
+  assert(await evaluate(`document.getElementById('noteList').textContent.includes('编辑笔记')`));await shot('notes');
+  await evaluate(`document.querySelector('#noteOwners [data-owner="nana"]').click()`);await delay(200);
+  assert(await evaluate(`document.getElementById('noteList').textContent.includes('Nana')`));
+  await evaluate(`openNote('note-fixture')`);
+  assert.equal(await evaluate(`buildBlocks()[0].style.color`),'#876543');
+  assert.equal(await evaluate(`JSON.stringify(buildBlocks()[2])`),JSON.stringify(noteBlocks[2]));
+  await evaluate(`document.getElementById('noteTitle').value='手机上的草稿';document.getElementById('noteTitle').dispatchEvent(new Event('input',{bubbles:true}));hideModal('noteModal');openNote('note-fixture')`);
+  assert.equal(await evaluate(`document.getElementById('noteTitle').value`),'手机上的草稿');
+  await evaluate(`(() => {const input=document.querySelectorAll('#noteBlocks textarea')[1];input.value='https://example.com/new.png';input.dispatchEvent(new Event('input',{bubbles:true}));})()`);
+  assert.equal(await evaluate(`buildBlocks()[1].url`),'https://example.com/new.png');
+  await evaluate(`saveNote()`);await delay(150);
+  const savedNote=requests.findLast(r=>r.method==='PUT'&&r.path==='/api/characters/nana/notes/note-fixture');assert(savedNote);
+  assert.equal(JSON.parse(savedNote.body).palette,undefined);assert.equal(JSON.parse(savedNote.body).layout,undefined);
+  assert.deepEqual(JSON.parse(savedNote.body).blocks[2],noteBlocks[2]);
+  await evaluate(`navigateMobile('todo')`);await delay(200);
+  assert.equal(await evaluate(`document.querySelectorAll('#todoList .todo-item:not([hidden])').length`),1);
+  await evaluate(`document.querySelector('#planFilters [data-filter="completed"]').click()`);
+  assert(await evaluate(`document.querySelector('#todoList .todo-item:not([hidden])').textContent.includes('一起出门散步')`));await shot('plans');
+  await evaluate(`navigateMobile('work')`);await delay(250);await shot('work-sessions');
+  await evaluate(`document.getElementById('toastContainer').replaceChildren()`);
+  await evaluate(`document.querySelector('[data-work-id]').click()`);await delay(250);
+  assert(await evaluate(`document.getElementById('workQuestion').textContent.includes('下一步')`));
+  assert.equal(await evaluate(`window.unsafeWork`),undefined);
+  await shot('work-question');
+  await evaluate(`document.querySelector('#workAnswerForm input').checked=true;document.getElementById('workAnswerForm').requestSubmit()`);await delay(250);
+  const answer=requests.findLast(r=>r.path==='/api/work/sessions/work-fixture/answer');assert.equal(JSON.parse(answer.body).question_id,42);assert.deepEqual(JSON.parse(answer.body).answer.selected,['完善手机界面']);
+  await evaluate(`document.getElementById('workStop').click()`);await delay(200);
+  assert(requests.some(r=>r.path==='/api/work/sessions/work-fixture/stop'&&r.method==='POST'));
+  workFailure=true;
+  await evaluate(`document.getElementById('workInput').value='继续完成手机界面';document.getElementById('workInput').dispatchEvent(new Event('input'));document.getElementById('workComposer').requestSubmit()`);await delay(200);
+  assert.equal(await evaluate(`document.getElementById('workInput').value`),'继续完成手机界面');
+  assert(await evaluate(`document.getElementById('workError').textContent.includes('内容已保留')`));
+  await evaluate(`MobileUI.workBack();document.querySelector('[data-mobile-action="new-work"]').click();document.getElementById('workCharacter').value='nana';document.getElementById('workDirectory').value='G:\\vivian-rs';document.getElementById('workNewForm').requestSubmit()`);await delay(250);
+  const created=requests.findLast(r=>r.path==='/api/work/sessions'&&r.method==='POST');assert.equal(JSON.parse(created.body).character_id,'nana');
+  assert.equal(await evaluate(`document.getElementById('workDetail').hidden`),false);
+  await evaluate(`MobileUI.workBack()`);await delay(150);await evaluate(`document.querySelector('[data-work-id]').click()`);await delay(150);
+  assert.equal(await evaluate(`document.getElementById('workInput').value`),'继续完成手机界面');
+  workFailure=false;
+  await evaluate(`document.getElementById('workComposer').requestSubmit()`);await delay(250);
+  assert.equal(await evaluate(`document.getElementById('workInput').value`),'');
+  await shot('work');
+  for(const [w,h] of [[320,568],[844,390]]){
+    await send('Emulation.setDeviceMetricsOverride',{width:w,height:h,deviceScaleFactor:1,mobile:true});await delay(200);
+    const bounds=await evaluate(`(() => {const input=document.getElementById('workComposer').getBoundingClientRect();return {overflow:document.documentElement.scrollWidth>innerWidth,bottom:input.bottom};})()`);assert(!bounds.overflow&&bounds.bottom<=h+1,JSON.stringify(bounds));
+  }
+  await send('Emulation.setDeviceMetricsOverride',{width:390,height:844,deviceScaleFactor:1,mobile:true});
+  await send('Emulation.setEmulatedMedia',{features:[{name:'prefers-color-scheme',value:'dark'}]});await evaluate(`navigateMobile('mind')`);await delay(250);await shot('mind-dark');
+  assert.equal(await evaluate(`getComputedStyle(document.documentElement).getPropertyValue('--bg').trim()`),'#211f28');
+  await send('Emulation.setEmulatedMedia',{features:[{name:'prefers-color-scheme',value:'light'}]});await evaluate(`navigateMobile('diary')`);await delay(250);await shot('diary-light');
+  await evaluate(`navigateMobile('mind')`);await delay(250);await shot('mind-light');
+  await evaluate(`navigateMobile('todo');newTask();document.querySelector('[data-reminder-minutes="30"]').click()`);
+  assert.equal(await evaluate(`document.getElementById('taskTime').type`),'datetime-local');
+  assert(await evaluate(`Math.abs(new Date(document.getElementById('taskTime').value).getTime()-Date.now()-1800000)<61000`));
+  await evaluate(`document.getElementById('taskMessage').value='半小时后喝水';document.getElementById('taskRepeat').value='3600';saveTask()`);await delay(150);
+  const reminder=requests.findLast(r=>r.path==='/api/tasks'&&r.method==='POST');assert(reminder);assert.equal(JSON.parse(reminder.body).repeat_interval,3600);
+  connectionFailure=true;await evaluate(`document.getElementById('mobileConnection').click()`);await delay(150);
+  assert.equal(await evaluate(`document.getElementById('connectionBanner').hidden`),false);
+  connectionFailure=false;await evaluate(`document.querySelector('[data-mobile-action="reconnect"]').click()`);await delay(250);
+  assert.equal(await evaluate(`document.getElementById('connectionBanner').hidden`),true);
+  await send('Emulation.setEmulatedMedia',{features:[]});
+  console.log('PASS mobile mind, diary, note preservation/drafts, plan filters, work create/send/stop/questions, failure recovery, small/landscape layout and dark theme');
   await send('Emulation.setDeviceMetricsOverride',{width:390,height:844,deviceScaleFactor:1,mobile:true});
   await send('Page.navigate',{url});await delay(600);
   await evaluate(`document.getElementById('directInput').focus();Object.defineProperty(window.visualViewport,'height',{configurable:true,value:400});window.visualViewport.dispatchEvent(new Event('resize'));`);await delay(200);
@@ -221,6 +326,13 @@ try {
   await shot('keyboard');
   await evaluate(`delete window.visualViewport.height;document.getElementById('directInput').blur();syncMobileViewport()`);await delay(200);
   assert.equal(await evaluate(`document.documentElement.classList.contains('keyboard-open')`),false);
+  await evaluate(`navigateMobile('work')`);await delay(200);
+  await evaluate(`document.querySelector('[data-work-id]').click()`);await delay(200);
+  await evaluate(`document.getElementById('workInput').focus();Object.defineProperty(window.visualViewport,'height',{configurable:true,value:400});window.visualViewport.dispatchEvent(new Event('resize'));`);await delay(150);
+  assert(await evaluate(`document.getElementById('workComposer').getBoundingClientRect().bottom<=400`));
+  assert(await evaluate(`document.getElementById('workMessages').clientHeight>0`));
+  await shot('work-keyboard');
+  await evaluate(`delete window.visualViewport.height;document.getElementById('workInput').blur();syncMobileViewport()`);await delay(100);
   assert.equal(errors.length,0,JSON.stringify(errors));
   console.log('PASS simulated visual viewport keyboard, restoration; no JS exceptions');
   socket.send(JSON.stringify({id:9999,method:'Browser.close'}));await delay(300);

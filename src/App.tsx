@@ -2302,7 +2302,13 @@ export default function App() {
             return;
           }
           const targetName = event.payload.target_id === 'nana' ? 'Nana' : 'Vivian';
-          BubbleController.showBubble(t('chat.cross_character_unavailable', { name: targetName }), 3800);
+          TtsStreamQueue.resetBuffer();
+          BubbleController.closeAll();
+          crossStreamTextRef.current = '';
+          crossStreamIdRef.current = '';
+          crossStreamRoleRef.current = '';
+          crossListenerNameRef.current = '';
+          showToast(t('chat.cross_character_unavailable', { name: targetName }), 'error', 3800);
         });
         unlisteners.push(unError);
 
@@ -2317,7 +2323,7 @@ export default function App() {
       cancelled = true;
       unlisteners.forEach(u => { try { u(); } catch { /* ignore */ } });
     };
-  }, [t]);
+  }, [t, showToast]);
 
   // 跨角色发言通知监听：其他角色发言后广播 proactive:spoken 事件，
   // 本角色记录时间戳，在下次 tick 时延迟执行，避免同时或连续发言
@@ -3506,12 +3512,14 @@ export default function App() {
     // 晕乎乎触发：拖动过快（拖动中）或甩飞撞到屏幕边缘（松手后）
     let unlistenDragInteraction: (() => void) | undefined;
     let dragInteractionDisposed = false;
-    void win.listen<{ duration_ms: number; distance_px: number; speed_px_per_ms: number }>(
+    void win.listen<{ duration_ms: number; distance_px: number; speed_px_per_ms: number; session_id?: string; flung?: boolean }>(
       'drag:interaction', event => {
         requestPetReaction('drag', undefined, {
           pressDurationMs: event.payload.duration_ms,
           dragSpeedPxPerMs: event.payload.speed_px_per_ms,
           dragDistancePx: event.payload.distance_px,
+          dragSessionId: event.payload.session_id,
+          flung: event.payload.flung,
         });
       },
     ).then(unlisten => {
@@ -3526,6 +3534,7 @@ export default function App() {
           reason?: string;
           impact?: number;
           speed_px_per_ms?: number;
+          session_id?: string;
         }>('drag:dizzy', (event) => {
           applyDizzy(event.payload?.duration_ms ?? 0);
           // 「被甩懵了」是一次实打实的用户动作：除了切表情，也让桌宠反应一句
@@ -3534,7 +3543,7 @@ export default function App() {
           if (reason === 'fast_drag') {
             requestPetReaction('fast_drag', undefined, { dragSpeedPxPerMs: event.payload?.speed_px_per_ms });
           } else if (reason === 'edge_bounce') {
-            requestPetReaction('edge_bounce', event.payload?.impact);
+            requestPetReaction('edge_bounce', event.payload?.impact, { dragSessionId: event.payload?.session_id });
           }
         });
       } catch {
@@ -3882,17 +3891,17 @@ export default function App() {
       if (event.payload.character_id !== getCharacterId()) return;
       const { result, error } = event.payload;
       if (result?.handled) {
-        if (result.saved_path) void emit('toast:show', { message: t('toast.screenshot_saved'), type: 'success', duration: 2500, key: Date.now() });
+        if (result.saved_path) showToast(t('toast.screenshot_saved'), 'success', 2500);
         return;
       }
       if (result?.saved_path) {
-        BubbleController.showBubble(t('toast.screenshot_saved'), 4000);
+        showToast(t('toast.screenshot_saved'), 'success', 2500);
       } else if (error) {
-        BubbleController.showBubble(error, 4000);
+        showToast(error, 'error', 4000);
       }
     }).then(fn => { if (cancelled) safeUnlisten(fn); else unlisten = fn; });
     return () => { cancelled = true; safeUnlisten(unlisten); };
-  }, [t]);
+  }, [t, showToast]);
 
   // 后端启动预检未通过时，打开设置窗口并展示配置说明
   useEffect(() => {

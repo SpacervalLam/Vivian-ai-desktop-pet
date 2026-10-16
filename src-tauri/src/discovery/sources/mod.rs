@@ -3,9 +3,9 @@
 //! 适配器分层：
 //! - 匿名公开 API（后端直连，零登录）：bilibili（搜索/热门）、bangumi（v0 搜索/榜单）、
 //!   v2ex（官方 API 热门/最新）、weibo（游客态热搜/搜索）、reddit（匿名 JSON，rdt-cli 优先）
-//! - 登录态被动采集（browser_signals）：经浏览器桥在用户已登录页面同源 fetch，
+//! - 登录态被动采集（browser_signals）：内嵌浏览器使用普通配置请求固定历史 API，
 //!   读取观看历史等画像信号（不导航、不劫持标签页）
-//! - 登录态 cookie 重放（x）：扩展回传 auth_token/ct0，服务端驱动 twitter-cli
+//! - 登录态 cookie 重放（x）：普通配置提供 auth_token/ct0，服务端驱动 twitter-cli
 //! - 隔离任务 tab 自动发现（task_tabs）：小红书/抖音/知乎后台静默采集
 //!   （inactive 标签 + 自动关闭，不触碰用户正在看的标签页）
 

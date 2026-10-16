@@ -18,6 +18,11 @@ struct FeedbackState {
 static FEEDBACK: LazyLock<Mutex<FeedbackState>> = LazyLock::new(Default::default);
 static RESOURCE_FEEDBACK: AtomicBool = AtomicBool::new(false);
 static MUSIC_FEEDBACK: AtomicBool = AtomicBool::new(false);
+static FEEDBACK_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+struct FeedbackPermit;
+impl Drop for FeedbackPermit {
+    fn drop(&mut self) { FEEDBACK_IN_FLIGHT.store(false, Ordering::Release); }
+}
 pub fn resource_feedback_enabled() -> bool { RESOURCE_FEEDBACK.load(Ordering::Relaxed) }
 pub fn music_feedback_enabled() -> bool { MUSIC_FEEDBACK.load(Ordering::Relaxed) }
 
@@ -31,6 +36,7 @@ pub fn quiet_reason(state: &AppState) -> Option<&'static str> {
 pub fn tick(app: &tauri::AppHandle) {
     let state = app.state::<Arc<AppState>>();
     if !state.initialized.load(Ordering::Relaxed) || state.is_factory_reset_in_progress() { return; }
+    flush_interaction_episodes(&state);
     let cfg = state.config.read().get_all();
     RESOURCE_FEEDBACK.store(cfg.companion.resource_feedback && cfg.proactive.enable_system_pressure_trigger, Ordering::Relaxed);
     MUSIC_FEEDBACK.store(cfg.companion.music_feedback, Ordering::Relaxed);
@@ -60,7 +66,8 @@ pub fn tick(app: &tauri::AppHandle) {
     let memory_entered = feedback.memory.sample(now.timestamp(), metrics.as_ref().map(|m| m.memory_usage_pct), 90.0, 80.0);
     let network_changed = connected.is_some() && feedback.network.is_some() && connected != feedback.network;
     if connected.is_some() { feedback.network = connected; }
-    let eligible = quiet.is_none() && !busy && crate::utils::get_system_idle_seconds().is_some_and(|s| s < 300.0);
+    let eligible = quiet.is_none() && !busy && !FEEDBACK_IN_FLIGHT.load(Ordering::Acquire)
+        && crate::utils::get_system_idle_seconds().is_some_and(|s| s < 300.0);
     let zh = cfg.base.language.starts_with("zh");
     let ja = cfg.base.language.starts_with("ja");
     let mut messages = Vec::new();
@@ -119,8 +126,60 @@ pub fn tick(app: &tauri::AppHandle) {
     drop(feedback);
     // One presentation per heartbeat. Don't stack several simultaneous status bubbles.
     if let Some((kind, content, motion)) = messages.into_iter().next() {
-        let _ = app.emit("companion:feedback", json!({"character_id":character.id,
-            "kind":kind,"content":content,"motion":motion,"sound":cfg.companion.sound && kind == "hourly"}));
+        if FEEDBACK_IN_FLIGHT.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() { return; }
+        let permit = FeedbackPermit;
+        let app = app.clone();
+        let state = Arc::clone(&state);
+        tauri::async_runtime::spawn(async move {
+            let _permit = permit;
+            let content = crate::commands::pet_reaction::generate_environment_feedback(&state, &character.id, &content)
+                .await;
+            // 模型返回时可能已进入对话、休息、勿扰或重置；过期反馈不再上屏。
+            if state.is_factory_reset_in_progress() || !*character.online.read()
+                || !state.characters.read().get(&character.id)
+                    .is_some_and(|current| Arc::ptr_eq(&current.think_lock, &character.think_lock))
+                || quiet_reason(&state).is_some() || character.think_lock.try_lock().is_err()
+                || state.playback_gate.is_playing()
+                || !crate::utils::get_system_idle_seconds().is_some_and(|s| s < 300.0) { return; }
+            let _ = app.emit("companion:feedback", json!({"character_id":character.id,
+                "kind":kind,"content":content,"motion":motion,"sound":cfg.companion.sound && kind == "hourly"}));
+        });
+    }
+}
+
+/// An idle burst becomes one factual episode, not a per-frame memory or user profile.
+fn flush_interaction_episodes(state: &Arc<AppState>) {
+    let now = crate::memory::types::current_timestamp();
+    let characters: Vec<_> = state.characters.read().values().cloned().collect();
+    for character in characters {
+        let episodes = character.brain.psychology.take_pet_interaction_episodes(now);
+        for episode in episodes {
+            let state = state.clone();
+            let character = character.clone();
+            tauri::async_runtime::spawn(async move {
+                if state.is_factory_reset_in_progress()
+                    || !state.characters.read().get(&character.id)
+                        .is_some_and(|current| Arc::ptr_eq(&current.think_lock, &character.think_lock)) { return; }
+                let text = episode.summary(&character.name);
+                let metadata = json!({
+                    "kind": "pet_interaction_episode", "episode_id": episode.id,
+                    "speaker": "user", "listener": character.id, "perspective": "observer",
+                    "knowledge_source": "direct", "source": "local_interaction_observations",
+                    "started_at": episode.started_at, "ended_at": episode.ended_at,
+                    "observations": { "drags": episode.drags, "flings": episode.flings,
+                        "collisions": episode.collisions, "peak_speed": episode.peak_speed,
+                        "distance": episode.distance, "duration_ms": episode.duration_ms },
+                    // The character's words are context, never evidence of the user's emotion.
+                    "character_replies": episode.replies,
+                });
+                if let Err(error) = character.brain.memory.add_memory_with_metadata(
+                    &text, crate::memory::types::MemoryType::ShortTerm, 0.35,
+                    vec!["pet_interaction_episode".into(), "observed_behavior".into()], metadata,
+                ).await {
+                    tracing::warn!("[PetInteraction] episode memory failed for {}: {error}", character.id);
+                }
+            });
+        }
     }
 }
 

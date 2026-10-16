@@ -1,9 +1,13 @@
 //! Test the application's actual portable modules without starting Tauri or accessing user data.
 #![allow(dead_code)]
+#[path = "../src/brain/work_question.rs"]
+pub mod work_question;
 #[path = "../src/drag_motion.rs"]
 pub mod drag_motion;
 #[path = "../src/brain/coding_compaction.rs"]
 pub mod coding_compaction;
+#[path = "../src/brain/coding_workflow.rs"]
+pub mod coding_workflow;
 #[path = "../src/brain/coding_memory_persistence.rs"]
 pub mod coding_memory_persistence;
 #[path = "../src/brain/coding_memory_navigation.rs"]
@@ -67,6 +71,8 @@ pub mod shortcut;
 
 #[path = "../src/screen_capture.rs"]
 pub mod screen_capture;
+#[path = "../src/screen_freeze_geometry.rs"]
+pub mod screen_freeze_geometry;
 
 #[path = "../src/visual_evidence.rs"]
 pub mod visual_evidence;

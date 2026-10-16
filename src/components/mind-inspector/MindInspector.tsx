@@ -194,16 +194,17 @@ const MindInspector: React.FC<{ presentationReady?: boolean }> = ({ presentation
         notebookCharacter: (nbChar as 'vivian' | 'nana') || 'vivian',
       });
     } else if (navParam && (['overview', 'journal', 'code', 'mind', 'graph', 'profile', 'diary', 'notebook', 'planner', 'todo', 'scheduler']).includes(navParam)) {
-      navigateTo(navParam as NavKey, { workSessionId: params.get('work_session') || undefined });
+      navigateTo(navParam as NavKey, { workSessionId: params.get('work_session') || undefined, browserRequest: params.get('browser') === '1' ? Date.now() : undefined });
     }
     void (async () => {
-      unlisten = await listen<{ page: string; workSessionId?: string; requestId?: string; notebookId?: string; notebookCharacter?: string; diaryId?: string; diaryCharacter?: string }>(
+      unlisten = await listen<{ page: string; workSessionId?: string; browserRequest?: number; requestId?: string; notebookId?: string; notebookCharacter?: string; diaryId?: string; diaryCharacter?: string }>(
         'memory:navigate',
         (e) => {
           const p = e.payload;
           if (['mind', 'graph', 'profile', 'diary', 'notebook', 'planner', 'todo', 'scheduler', 'code', 'overview', 'journal'].includes(p.page)) {
             navigateTo(p.page as NavKey, {
               workSessionId: p.workSessionId,
+              browserRequest: p.browserRequest,
               notebookId: p.notebookId,
               notebookCharacter: (p.notebookCharacter as 'vivian' | 'nana') || 'vivian',
               diaryId: p.diaryId,

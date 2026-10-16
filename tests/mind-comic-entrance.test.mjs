@@ -23,7 +23,7 @@ const context = {
   animatedRevision: { current: '' }, handReady: { current: false }, mobileRef: { current: false },
   hoverFloats: { current: new Map() }, performance: { now: () => 100 },
   window: { matchMedia: () => ({ matches: false }), setTimeout, clearTimeout },
-  comicScriptDuration: () => 5110, syncHand() {}, fitComicText() {},
+  comicScriptDuration: () => 5800, syncHand() {}, fitComicText() {},
   startMorningInkReveal: () => { inkStarts++; return { stop: () => inkStops++ }; },
   ResizeObserver: class { observe() {} disconnect() {} },
   useLayoutEffect: callback => { cleanup = callback(); },

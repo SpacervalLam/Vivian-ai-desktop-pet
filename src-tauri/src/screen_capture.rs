@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum SelectionAction { Analyze, Save, SaveAndAnalyze, Copy, CopyAndAnalyze, Cancel }
+pub enum SelectionAction { Analyze, Save, SaveAndAnalyze, Copy, CopyAndAnalyze, Freeze, Cancel }
 impl SelectionAction {
     pub fn copies(self) -> bool { matches!(self, Self::Copy | Self::CopyAndAnalyze) }
     pub fn saves(self) -> bool { matches!(self, Self::Save | Self::SaveAndAnalyze) }
@@ -170,6 +170,9 @@ mod tests {
     use super::*;
     #[test]
     fn only_explicit_save_actions_write_files() {
+        assert!(!SelectionAction::Freeze.copies());
+        assert!(!SelectionAction::Freeze.saves());
+        assert!(!SelectionAction::Freeze.analyzes());
         assert!(SelectionAction::Copy.copies());
         assert!(SelectionAction::CopyAndAnalyze.copies());
         assert!(!SelectionAction::Copy.saves());

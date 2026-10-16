@@ -6,6 +6,7 @@ import { spawnSync } from 'node:child_process';
 const source=await readFile('src-tauri/src/edge_menu.rs','utf8');
 const body=source.match(/fn slide_window_in\([\s\S]*?\n\}/)?.[0];assert.ok(body);
 const showChat=source.match(/pub fn show_chat\([\s\S]*?\n\}/)?.[0];assert.ok(showChat);
+const closeChat=source.match(/pub fn close_chat\([\s\S]*?\n\}/)?.[0];assert.ok(closeChat);
 const moveFrame=source.match(/fn move_slide_frame\([\s\S]*?\n\}/)?.[0];assert.ok(moveFrame);
 const parkMenu=source.match(/fn park_menu\([\s\S]*?\n\}/)?.[0];assert.ok(parkMenu);
 const dir=await mkdtemp(path.join(tmpdir(),'vivian-menu-slide-'));
@@ -21,13 +22,14 @@ static MENU_MOTION_GENERATION:AtomicU64=AtomicU64::new(0);
 static CHAT_GENERATION:AtomicU64=AtomicU64::new(0);
 static CHAT_MOTION_GENERATION:AtomicU64=AtomicU64::new(0);
 static CHAT_ENTERING:AtomicBool=AtomicBool::new(false);
+static CHAT_CLOSING:AtomicBool=AtomicBool::new(false);
 static CAPTURING:AtomicBool=AtomicBool::new(false);
 mod commands{pub mod desktop_assistant{pub fn screen_capture_in_progress()->bool{crate::CAPTURING.load(std::sync::atomic::Ordering::Acquire)}}pub mod window{pub fn thaw_webview(_: &crate::WebviewWindow){}}}
 mod tauri{pub struct PhysicalPosition{pub x:i32,pub y:i32}impl PhysicalPosition{pub fn new(x:i32,y:i32)->Self{Self{x,y}}}}
 struct AppHandle{capture_at_dispatch:bool,right:f64,scale:f64}
 impl AppHandle{fn run_on_main_thread(&self,f:impl FnOnce()+Send+'static)->Result<(),String>{if self.capture_at_dispatch{CAPTURING.store(true,Ordering::Release);}f();Ok(())}}
 struct Monitor{x:i32,width:u32}impl Monitor{fn position(&self)->tauri::PhysicalPosition{tauri::PhysicalPosition::new(self.x,0)}fn size(&self)->Size{Size{width:self.width}}}
-#[derive(Default)]struct State{position:i32,moves:Vec<i32>,first_visible:Option<i32>,shows:u32,visible:bool}
+#[derive(Default)]struct State{position:i32,moves:Vec<i32>,first_visible:Option<i32>,shows:u32,visible:bool,destroyed_at:Option<i32>}
 #[derive(Clone)]struct WebviewWindow{state:Arc<Mutex<State>>,app:Arc<AppHandle>,cancel_on_show:bool}
 impl WebviewWindow{
  fn available_monitors(&self)->Result<Vec<Monitor>,String>{Ok(vec![Monitor{x:-1920,width:1920},Monitor{x:0,width:1920},Monitor{x:1920,width:1280}])}
@@ -38,11 +40,13 @@ impl WebviewWindow{
  fn app_handle(&self)->&AppHandle{&self.app}
  fn set_position(&self,p:tauri::PhysicalPosition)->Result<(),String>{assert_eq!(p.y,100);let mut state=self.state.lock().unwrap();state.position=p.x;state.moves.push(p.x);Ok(())}
  fn show(&self)->Result<(),String>{let mut state=self.state.lock().unwrap();state.first_visible=Some(state.position);state.shows+=1;state.visible=true;if self.cancel_on_show{MENU_MOTION_GENERATION.fetch_add(1,Ordering::AcqRel);}Ok(())}
+ fn destroy(&self)->Result<(),String>{let mut state=self.state.lock().unwrap();state.destroyed_at=Some(state.position);state.visible=false;Ok(())}
 }
 ${moveFrame}
 ${body}
 ${parkMenu}
 ${showChat}
+${closeChat}
 struct Size{width:u32}
 fn geometry(app:&AppHandle)->Result<(f64,f64,f64,f64,f64),String>{Ok((app.right,100.,390.,800.,app.scale))}
 fn window(capture_at_dispatch:bool,cancel_on_show:bool)->WebviewWindow{WebviewWindow{state:Arc::new(Mutex::new(State::default())),app:Arc::new(AppHandle{capture_at_dispatch,right:1920.,scale:1.}),cancel_on_show}}
@@ -51,6 +55,9 @@ fn main(){
  let until=Instant::now()+Duration::from_secs(2);while CHAT_ENTERING.load(Ordering::Acquire)&&Instant::now()<until{thread::sleep(Duration::from_millis(10));}
  assert!(!CHAT_ENTERING.load(Ordering::Acquire));assert_eq!(chat.state.lock().unwrap().first_visible,Some(1920));assert_eq!(chat.state.lock().unwrap().position,1530);assert_eq!(chat.state.lock().unwrap().shows,1,"repeated navigation during entry does not start another animation");
  let count=chat.state.lock().unwrap().moves.len();show_chat(&chat).unwrap();assert_eq!(chat.state.lock().unwrap().moves.len(),count,"focusing visible chat never moves it");
+ close_chat(&chat).unwrap();let state=chat.state.lock().unwrap();assert_eq!(state.destroyed_at,Some(1920),"destroy only after sliding entirely beyond the entrance edge");assert!(state.moves[count..].len()>4);assert!(state.moves[count..].windows(2).all(|p|p[1]>=p[0]),"exit moves right without shrinking or jumping back");drop(state);
+ let mut negative_chat=window(false,false);negative_chat.app=Arc::new(AppHandle{capture_at_dispatch:false,right:0.,scale:1.});negative_chat.state.lock().unwrap().position=-390;close_chat(&negative_chat).unwrap();assert_eq!(negative_chat.state.lock().unwrap().destroyed_at,Some(0),"exit handles negative monitor coordinates");
+ let interrupted=window(false,false);{let mut state=interrupted.state.lock().unwrap();state.position=1700;state.visible=true;}let closing=interrupted.clone();let task=thread::spawn(move||close_chat(&closing).unwrap());let until=Instant::now()+Duration::from_secs(2);while interrupted.state.lock().unwrap().moves.len()<3&&Instant::now()<until{thread::sleep(Duration::from_millis(2));}show_chat(&interrupted).unwrap();task.join().unwrap();let until=Instant::now()+Duration::from_secs(2);while CHAT_ENTERING.load(Ordering::Acquire)&&Instant::now()<until{thread::sleep(Duration::from_millis(10));}let state=interrupted.state.lock().unwrap();assert_eq!(state.destroyed_at,None,"reopening cancels pending destruction");assert_eq!(state.position,1530,"reopening restores the fully visible position");drop(state);
  let mut hidpi=window(false,false);hidpi.app=Arc::new(AppHandle{capture_at_dispatch:false,right:1536.,scale:1.25});show_chat(&hidpi).unwrap();let until=Instant::now()+Duration::from_secs(2);while CHAT_ENTERING.load(Ordering::Acquire)&&Instant::now()<until{thread::sleep(Duration::from_millis(10));}assert_eq!(hidpi.state.lock().unwrap().first_visible,Some(1920));assert_eq!(hidpi.state.lock().unwrap().position,1530,"DPI-scaled geometry maps to physical right edge");
  let menu=window(false,false);slide_window_in(&menu,1920,1860,100,&MENU_MOTION_GENERATION);
  let state=menu.state.lock().unwrap();assert_eq!(state.first_visible,Some(1920),"first visible frame must be outside the screen");assert_eq!(state.position,1860);assert_eq!(state.shows,1);assert!(state.moves.len()>4);assert!(state.moves.windows(2).all(|pair|pair[1]<=pair[0]));drop(state);
@@ -66,5 +73,5 @@ fn main(){
 `);
  const compiled=spawnSync('rustc',['--edition=2021',input,'-o',exe],{encoding:'utf8'});assert.equal(compiled.status,0,compiled.stderr||String(compiled.error));
  const result=spawnSync(exe,[],{encoding:'utf8'});assert.equal(result.status,0,result.stderr);
- console.log('Native chat/menu slide, chat focus/DPI: offscreen first frame, monotonic entry, negative monitor, screenshot race, cancellation and shutdown passed');
+ console.log('Native chat/menu slide: mirrored exit, delayed destruction, reopen cancellation, focus/DPI, negative monitors, screenshot race and shutdown passed');
 }finally{await rm(dir,{recursive:true,force:true});}

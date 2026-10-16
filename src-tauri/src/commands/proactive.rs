@@ -505,6 +505,19 @@ pub async fn proactive_tick(
     app: tauri::AppHandle,
     context: Value,
 ) -> Result<Value, String> {
+    // Tauri constructs and spawns this command future on the WebView UI thread.
+    // Keep its inline state small: the full tick made dispatch + spawn frames
+    // exceed Windows' 1 MB UI stack (WER 0xc00000fd, 2026-10-16).
+    // Construct the boxed tick only when this small outer future is polled.
+    Box::pin(proactive_tick_inner(character_id, state, app, context)).await
+}
+
+async fn proactive_tick_inner(
+    character_id: Option<String>,
+    state: State<'_, Arc<AppState>>,
+    app: tauri::AppHandle,
+    context: Value,
+) -> Result<Value, String> {
     // 恢复出厂设置 / 记忆向量重建进行中：立即跳过，避免产生新数据干扰
     if state.is_factory_reset_in_progress() || state.is_rebuild_in_progress() {
         return Ok(json!({
@@ -839,7 +852,17 @@ pub async fn proactive_tick(
                 target,
                 crate::presence::PresenceState::Rest | crate::presence::PresenceState::Offline
             ) {
-                brain.generate_farewell_greeting(target, reason.clone()).await
+                match brain.generate_farewell_greeting(target, reason.clone()).await {
+                    Ok(text) => text,
+                    Err(error) => {
+                        tracing::warn!("[farewell_greeting] {char_id}: {error}");
+                        let _ = app.emit("toast:show", serde_json::json!({
+                            "character_id": &char_id, "message": error.to_string(),
+                            "type": "error", "duration": 5000
+                        }));
+                        None
+                    }
+                }
             } else {
                 None
             };
@@ -1799,6 +1822,22 @@ async fn maybe_mark_open_loop(
 mod topic_transport_tests {
     use super::*;
     use crate::proactive::{DeliveryChannel, ProactiveAction, ProactiveTrigger};
+    #[test]
+    fn proactive_command_future_fits_ui_stack() {
+        // Infer the returned future type without constructing application state
+        // or executing a tick (which would touch user data and model APIs).
+        fn future_size<F: std::future::Future>(
+            _: impl FnOnce(Option<String>, State<'static, Arc<AppState>>, tauri::AppHandle, Value) -> F,
+        ) -> usize {
+            std::mem::size_of::<F>()
+        }
+        let command_bytes = future_size(proactive_tick);
+        let tick_bytes = future_size(proactive_tick_inner);
+        assert!(command_bytes < 4096, "UI command future grew to {command_bytes} bytes");
+        assert!(command_bytes < tick_bytes, "tick state must stay outside the IPC future");
+        println!("proactive_tick IPC future: {command_bytes} bytes; inner tick: {tick_bytes} bytes");
+    }
+
     #[test]
     fn queued_text_cannot_switch_a_spoken_topic() {
         let id = "channel-queue-test";

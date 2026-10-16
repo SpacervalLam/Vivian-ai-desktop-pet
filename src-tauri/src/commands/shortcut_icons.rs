@@ -1,4 +1,4 @@
-//! Icons are read only for shortcuts the user has already saved.
+//! Shared icon resolver for saved shortcuts and embedded browser sites.
 //!
 //! 网站图标按成本从低到高尝试三条来源：
 //!   1. 站点根目录的 `/favicon.ico`（绝大多数站点都有，一次请求）

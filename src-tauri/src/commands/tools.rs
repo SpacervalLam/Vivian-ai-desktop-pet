@@ -157,26 +157,17 @@ pub fn plan_decision(plan_id: String, decision: String) -> Result<bool, String> 
 pub async fn list_mcp_servers(
     state: State<'_, Arc<AppState>>,
 ) -> Result<Vec<Value>, String> {
-    let servers = state.mcp_manager.list_servers().await;
-    Ok(servers
-        .into_iter()
-        .map(|s| {
-            json!({
-                "id": s.id,
-                "name": s.name,
-                "enabled": s.enabled,
-                "tool_count": s.tool_count,
-                "alive": s.alive,
-            })
-        })
-        .collect())
+    state.mcp_manager.list_servers().await.into_iter()
+        .map(|s| serde_json::to_value(s).map_err(|e|e.to_string())).collect()
 }
 
 /// 读取已持久化的 MCP server 配置（含未连接的）
 #[tauri::command]
 pub fn list_mcp_server_configs(
+    window: tauri::WebviewWindow,
     state: State<'_, Arc<AppState>>,
 ) -> Result<Vec<Value>, String> {
+    ensure_mcp_settings_window(&window)?;
     let configs = state.mcp_manager.load_configs();
     Ok(configs
         .into_iter()
@@ -188,12 +179,14 @@ pub fn list_mcp_server_configs(
 /// 添加并连接 MCP server
 #[tauri::command]
 pub async fn add_mcp_server(
+    window: tauri::WebviewWindow,
     state: State<'_, Arc<AppState>>,
     config: crate::tools::McpServerConfig,
 ) -> Result<Vec<String>, String> {
+    ensure_mcp_settings_window(&window)?;
     state
         .mcp_manager
-        .add_server(config)
+        .save_user_server(config)
         .await
         .map_err(|e| e.to_string())
 }
@@ -201,12 +194,41 @@ pub async fn add_mcp_server(
 /// 断开并移除 MCP server
 #[tauri::command]
 pub async fn remove_mcp_server(
+    window: tauri::WebviewWindow,
     state: State<'_, Arc<AppState>>,
     server_id: String,
 ) -> Result<(), String> {
+    ensure_mcp_settings_window(&window)?;
     state
         .mcp_manager
         .remove_server(&server_id)
         .await
         .map_err(|e| e.to_string())
+}
+
+fn ensure_mcp_settings_window(window: &tauri::WebviewWindow) -> Result<(), String> {
+    if window.label() == "config" { Ok(()) } else { Err("MCP 连接管理仅允许设置窗口调用".into()) }
+}
+
+#[tauri::command]
+pub async fn test_mcp_server(window: tauri::WebviewWindow, state: State<'_, Arc<AppState>>, config: crate::tools::McpServerConfig) -> Result<Value, String> {
+    ensure_mcp_settings_window(&window)?;
+    state.mcp_manager.test_connection(config).await.map_err(|e|e.to_string())
+}
+
+#[tauri::command]
+pub async fn reconnect_mcp_server(window: tauri::WebviewWindow, state: State<'_, Arc<AppState>>, server_id: String) -> Result<Vec<String>, String> {
+    ensure_mcp_settings_window(&window)?;
+    state.mcp_manager.reconnect_server(&server_id).await.map_err(|e|e.to_string())
+}
+
+#[tauri::command]
+pub async fn reset_mcp_server_override(window: tauri::WebviewWindow, state: State<'_, Arc<AppState>>, server_id: String) -> Result<(), String> {
+    ensure_mcp_settings_window(&window)?;
+    let config = state.mcp_manager.load_configs().into_iter().find(|c|c.id == server_id).ok_or("MCP 配置不存在")?;
+    let plugin = config.source_plugin.ok_or("此连接不是插件提供的连接")?;
+    let key = crate::plugins::scan_inventory().into_iter().find(|p|p.name == plugin || p.key == plugin).map(|p|p.key).ok_or("来源插件不存在")?;
+    state.mcp_manager.clear_plugin_overrides(&plugin,Some(&server_id)).map_err(|e|e.to_string())?;
+    crate::plugins::load_one(&state.skill_service,&state.mcp_manager,&state.tool_system,&key,false).await?;
+    Ok(())
 }

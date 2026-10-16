@@ -32,6 +32,8 @@ pub mod reminder_delivery;
 pub mod smart_app_classifier;
 pub mod subagent_context;
 pub mod coding_agent;
+pub mod coding_workflow;
+pub mod coding_workflow_capture;
 pub mod coding_compaction;
 pub mod coding_memory_persistence;
 pub mod coding_memory_navigation;

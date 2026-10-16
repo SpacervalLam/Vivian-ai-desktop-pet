@@ -11,6 +11,7 @@ import { emit } from '@tauri-apps/api/event';
 export interface ScreenAnalyzeResult {
   cancelled?: boolean;
   handled?: boolean;
+  frozen?: boolean;
   saved_path?: string;
   copied?: boolean;
 }

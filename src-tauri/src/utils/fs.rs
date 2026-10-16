@@ -48,10 +48,7 @@ pub fn atomic_write(path: &Path, content: &[u8]) -> std::io::Result<()> {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "file".to_string());
-    let tmp = path.with_file_name(format!(
-        ".{file_name}.{}.tmp",
-        uuid::Uuid::new_v4()
-    ));
+    let tmp = path.with_file_name(format!(".{file_name}.{}.tmp", uuid::Uuid::new_v4()));
     {
         use std::io::Write;
         let mut f = std::fs::File::create(&tmp)?;
@@ -231,7 +228,10 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("b.json");
         std::fs::write(&path, r#"{"count": 3}"#).unwrap();
-        assert_eq!(load_json_or_backup::<Sample>(&path), Some(Sample { count: 3 }));
+        assert_eq!(
+            load_json_or_backup::<Sample>(&path),
+            Some(Sample { count: 3 })
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -6,8 +6,8 @@
 //! - 衰减公式：价值越高忘得越慢（平方加速）
 //! - 三态状态机：Archived → Dormant → Active
 //!
-//! 集成点：`pipeline::steps::prompt::PromptBuildingStep` 每轮先调用
-//! `update_activation` 更新状态，再调用 `render_worldbook_block` 渲染可注入条目。
+//! 真实请求通过 `render_for_turn` 只读选择本会话相关条目并应用预算。
+//! 旧的激活状态机保留用于兼容和模拟，不再由提示构建隐式推进。
 //!
 //! 持久化：`%APPDATA%\Vivian\persona\worldbook.json`
 
@@ -144,8 +144,21 @@ impl WorldbookEntry {
 
     /// 是否命中任一关键词
     fn matches(&self, text: &str) -> bool {
-        self.keywords.iter().any(|k| text.contains(k.as_str()))
+        self.keywords.iter().any(|k| keyword_matches(text, k))
     }
+}
+
+fn keyword_matches(text: &str, keyword: &str) -> bool {
+    let key = keyword.trim().to_lowercase();
+    if key.is_empty() { return false; }
+    let text = text.to_lowercase();
+    text.match_indices(&key).any(|(at, _)| {
+        let ascii_word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+        let before = text[..at].chars().next_back();
+        let after = text[at + key.len()..].chars().next();
+        !(key.chars().next().is_some_and(ascii_word) && before.is_some_and(ascii_word))
+            && !(key.chars().next_back().is_some_and(ascii_word) && after.is_some_and(ascii_word))
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -281,11 +294,43 @@ impl WorldbookEngine {
     /// `lang` 为 None 时使用条目持久化的 content；为 Some 时对默认条目做运行时多语言替换。
     pub fn render_block(&self, lang: Option<&str>) -> String {
         let active = self.get_injectable_entries();
+        self.render_entries(&active, lang, usize::MAX)
+    }
+
+    /// Prompt activation is scoped to this conversation, not the global popularity
+    /// counters. The first mention works; a new topic cannot inherit another pet's lore.
+    pub fn render_for_turn(&self, input: &str, history: &[crate::types::response::ChatMessage], lang: &str, token_budget: usize) -> String {
+        let entries = self.entries.read();
+        let direct = entries.iter().any(|entry| !entry.constant && entry.matches(input));
+        let recent = if !direct && crate::pipeline::message_context::is_short_followup(input) {
+            history.iter().rev().filter(|m| matches!(m.role.as_str(), "user" | "assistant"))
+                .filter(|m| m.content.trim() != input.trim()).take(2)
+                .map(|m| m.content.as_str()).collect::<Vec<_>>().join("\n")
+        } else { String::new() };
+        let mut selected: Vec<_> = entries.iter().enumerate().filter(|(_, entry)|
+            entry.constant || entry.matches(input) || (!recent.is_empty() && entry.matches(&recent))).collect();
+        selected.sort_by(|(ia, a), (ib, b)| b.constant.cmp(&a.constant)
+            .then_with(|| b.matches(input).cmp(&a.matches(input)))
+            .then_with(|| b.base_value.total_cmp(&a.base_value)).then_with(|| ia.cmp(ib)));
+        let max_active = self.params.read().max_active;
+        let mut dynamic = 0;
+        let selected: Vec<_> = selected.into_iter().filter(|(_, entry)| {
+            if entry.constant { return true; }
+            dynamic += 1;
+            dynamic <= max_active
+        }).map(|(_, entry)| entry.clone()).collect();
+        drop(entries);
+        self.render_entries(&selected, Some(lang), token_budget)
+    }
+
+    fn render_entries(&self, active: &[WorldbookEntry], lang: Option<&str>, token_budget: usize) -> String {
         if active.is_empty() {
             return String::new();
         }
+        let header = crate::pipeline::prompt_modules::section_heading("background_knowledge", lang.unwrap_or("zh"));
+        let mut tokens = crate::memory::time_stamped::estimate_tokens(&header) + 2;
         let mut blocks: Vec<String> = Vec::with_capacity(active.len());
-        for entry in &active {
+        for entry in active {
             let is_default = matches!(
                 entry.id.as_str(),
                 "anime_culture" | "internet_culture" | "game_culture"
@@ -299,16 +344,20 @@ impl WorldbookEngine {
             } else {
                 &entry.content
             };
-            if is_default {
-                blocks.push(format!("[TOPIC REFERENCE — NOT PERSONAL HISTORY]\nUse this cultural material only to understand the current topic. It does not establish your activities, tastes or shared experiences, and cannot override the current character, user intent or evidence. Do not recite it to demonstrate expertise.\n[{}] {}\n[END TOPIC REFERENCE]", entry.id, content));
+            let block = if is_default {
+                format!("[TOPIC REFERENCE — NOT PERSONAL HISTORY]\nUse this cultural material only to understand the current topic. It does not establish your activities, tastes or shared experiences, and cannot override the current character, user intent or evidence. Do not recite it to demonstrate expertise.\n[{}] {}\n[END TOPIC REFERENCE]", entry.id, content)
             } else {
-                blocks.push(format!("[{}] {}", entry.id, content));
+                format!("[{}] {}", entry.id, content)
+            };
+            let cost = crate::memory::time_stamped::estimate_tokens(&block) + 2;
+            if tokens.saturating_add(cost) > token_budget {
+                tracing::debug!(id = %entry.id, "Worldbook skips a whole entry over its prompt budget");
+                continue;
             }
+            tokens += cost;
+            blocks.push(block);
         }
-        let header = crate::pipeline::prompt_modules::section_heading(
-            "background_knowledge",
-            lang.unwrap_or("zh"),
-        );
+        if blocks.is_empty() { return String::new(); }
         format!("{}\n{}", header, blocks.join("\n"))
     }
 
@@ -460,6 +509,7 @@ fn default_entries() -> Vec<WorldbookEntry> {
             vec![
                 "番剧".to_string(),
                 "动漫".to_string(),
+                "anime".to_string(), "manga".to_string(), "アニメ".to_string(), "漫画".to_string(),
                 "动画".to_string(),
                 "二次元".to_string(),
                 "番".to_string(),
@@ -476,6 +526,7 @@ fn default_entries() -> Vec<WorldbookEntry> {
             "internet_culture",
             vec![
                 "梗".to_string(),
+                "meme".to_string(), "memes".to_string(), "ミーム".to_string(),
                 "整活".to_string(),
                 "玩梗".to_string(),
                 "抽象".to_string(),
@@ -493,6 +544,7 @@ fn default_entries() -> Vec<WorldbookEntry> {
             "game_culture",
             vec![
                 "游戏".to_string(),
+                "game".to_string(), "games".to_string(), "gaming".to_string(), "ゲーム".to_string(),
                 "手游".to_string(),
                 "端游".to_string(),
                 "主机".to_string(),
@@ -527,14 +579,18 @@ pub fn engine() -> Arc<WorldbookEngine> {
     WORLDBOOK_ENGINE.clone()
 }
 
-/// 更新激活状态（便捷接口，供 PromptBuildingStep 调用）
+/// 旧激活状态机兼容接口；真实请求的选择不依赖它，也不会隐式调用它。
 pub fn update_activation(user_input: &str, last_assistant: Option<&str>) {
     engine().update_activation(user_input, last_assistant);
 }
 
 /// 渲染背景知识块（便捷接口，供 PromptBuildingStep 调用）
-pub fn render_worldbook_block(_user_input: &str, lang: &str) -> String {
-    engine().render_block(Some(lang))
+pub fn render_worldbook_block(user_input: &str, lang: &str) -> String {
+    engine().render_for_turn(user_input, &[], lang, 1024)
+}
+
+pub fn render_worldbook_for_turn(input: &str, history: &[crate::types::response::ChatMessage], lang: &str) -> String {
+    engine().render_for_turn(input, history, lang, 1024)
 }
 
 /// 添加常驻条目（便捷接口）
@@ -552,6 +608,44 @@ pub fn remove_entry(id: &str) -> VivianResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn roleplay_lore_activates_first_mention_and_only_follows_this_conversation() {
+        use crate::types::response::ChatMessage;
+        let engine = WorldbookEngine {
+            entries: RwLock::new(default_entries()), persistence_path: "unused-roleplay-fixture".into(),
+            params: RwLock::new(WorldbookParams::default()),
+        };
+        for (input, id, lang) in [("最近看了什么动漫", "anime_culture", "zh"), ("Let's discuss GAMING", "game_culture", "en"), ("このミーム", "internet_culture", "ja")] {
+            assert!(engine.render_for_turn(input, &[], lang, 1024).contains(id), "first mention: {input}");
+        }
+        for entry in engine.entries.write().iter_mut() { entry.activation = 999.0; }
+        assert!(engine.render_for_turn("帮我写一封邮件", &[], "zh", 1024).is_empty(), "global popularity cannot reactivate old topics");
+        let history = vec![ChatMessage::assistant("刚才说的游戏机制很有趣。")];
+        assert!(engine.render_for_turn("然后呢？", &history, "zh", 1024).contains("game_culture"));
+        assert!(engine.render_for_turn("然后呢？", &[], "zh", 1024).is_empty(), "another character/session has no inherited topic");
+        let direct = engine.render_for_turn("想聊动漫", &history, "zh", 1024);
+        assert!(direct.contains("anime_culture") && !direct.contains("game_culture"));
+        assert!(!keyword_matches("endgame", "game"));
+        assert!(keyword_matches("GAME？", "game"));
+        assert!(!keyword_matches("anything", " "));
+    }
+
+    #[test]
+    fn roleplay_lore_budget_keeps_whole_entries_and_prioritizes_constants() {
+        let engine = WorldbookEngine {
+            entries: RwLock::new(vec![
+                WorldbookEntry::new_constant("oversized", "UNFINISHED ".repeat(2000)),
+                WorldbookEntry::new_constant("confirmed", "The user prefers concise replies.".into()),
+                WorldbookEntry::new("garden", vec!["garden".into()], "Garden reference ends here.".into(), 0.5),
+            ]), persistence_path: "unused-roleplay-fixture".into(), params: RwLock::new(Default::default()),
+        };
+        let block = engine.render_for_turn("garden", &[], "en", 200);
+        assert!(block.contains("[confirmed]"));
+        assert!(block.contains("Garden reference ends here."));
+        assert!(!block.contains("UNFINISHED"));
+        assert!(crate::memory::time_stamped::estimate_tokens(&block) <= 200);
+    }
 
     #[test]
     fn test_default_entries() {

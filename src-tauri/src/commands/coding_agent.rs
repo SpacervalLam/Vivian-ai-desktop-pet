@@ -343,7 +343,7 @@ pub static CODING_AGENT: Lazy<Arc<CodingAgentService>> =
     Lazy::new(|| Arc::new(CodingAgentService::new()));
 
 /// 解析会话的上下文窗口：工作模型显式配置 → 主配置 → 厂商默认窗口。
-fn resolve_context_window(cfg: &crate::config::manager::AppConfig, model_id: Option<&str>) -> u64 {
+pub(crate) fn resolve_context_window(cfg: &crate::config::manager::AppConfig, model_id: Option<&str>) -> u64 {
     if let Some(mid) = model_id {
         if let Some(m) = cfg.work_models.iter().find(|m| m.id == mid) {
             if let Some(w) = m.route.context_window {
@@ -486,6 +486,28 @@ pub fn coding_list_sessions(offset: Option<usize>, limit: Option<usize>, session
     if let Some(query) = query { return CODING_AGENT.search_sessions(&query); }
     if let Some(workspace) = workspace { return CODING_AGENT.list_sessions().into_iter().filter(|s| s.working_directory == workspace).collect(); }
     CODING_AGENT.list_sessions_page(offset.unwrap_or(0), limit.unwrap_or(30))
+}
+
+/// Small request summaries; message bodies are fetched only when opened.
+#[tauri::command]
+pub async fn coding_workflow_list(session_id: String) -> Result<Vec<crate::brain::coding_workflow::WorkflowRequestSummary>, String> {
+    let running = CODING_AGENT.session_status(&session_id).ok_or("会话不存在")? == crate::brain::coding_agent::CodingStatus::Running;
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut requests = crate::brain::coding_workflow::list(&crate::utils::path::get_user_data_dir().join("coding_workflow"), &session_id)?;
+        for request in &mut requests { crate::brain::coding_workflow::recover_summary(request, running); }
+        Ok(requests)
+    }).await.map_err(|e| e.to_string())?
+}
+
+/// Read a single agent-input snapshot, without exposing an arbitrary filesystem path.
+#[tauri::command]
+pub async fn coding_workflow_detail(session_id: String, request_id: String) -> Result<crate::brain::coding_workflow::WorkflowRequestDetail, String> {
+    let running = CODING_AGENT.session_status(&session_id).ok_or("会话不存在")? == crate::brain::coding_agent::CodingStatus::Running;
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut detail = crate::brain::coding_workflow::detail(&crate::utils::path::get_user_data_dir().join("coding_workflow"), &session_id, &request_id)?;
+        crate::brain::coding_workflow::recover_summary(&mut detail.summary, running);
+        Ok(detail)
+    }).await.map_err(|e| e.to_string())?
 }
 
 /// 删除会话。

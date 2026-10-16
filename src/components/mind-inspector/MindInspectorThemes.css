@@ -1196,14 +1196,3 @@ body[data-ui-style="minimal"] :is(.codex-selbubble, .codex-editcard-overlay, .co
   .mind-inspector-root.is-work-page .workbench-root .codex-chat { --codex-chat-pad-x: 14px; }
   .mind-inspector-root.is-work-page .workbench-root .codex-composer-wrap { --codex-composer-pad-x: 10px; }
 }
-
-@media (prefers-reduced-motion: reduce) {
-  .mind-inspector-root *,
-  .mind-inspector-root *::before,
-  .mind-inspector-root *::after {
-    scroll-behavior: auto !important;
-    animation-duration: .01ms !important;
-    animation-iteration-count: 1 !important;
-    transition-duration: .01ms !important;
-  }
-}

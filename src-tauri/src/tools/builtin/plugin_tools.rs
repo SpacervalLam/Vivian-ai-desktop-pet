@@ -197,17 +197,20 @@ fn parse_mcp_servers(input: &Value) -> Result<Vec<McpServerConfig>, String> {
             if id.is_empty() {
                 return Err("MCP server 条目缺 id".into());
             }
-            if command.is_empty() {
+            let transport = m.get("transport").and_then(Value::as_str).unwrap_or("stdio").to_string();
+            if command.is_empty() && transport == "stdio" {
                 return Err(format!("MCP server {id} 缺 command"));
             }
             Ok(McpServerConfig {
+                url: m.get("url").and_then(Value::as_str).map(str::to_string),
+                headers: m.get("headers").cloned().map(serde_json::from_value).transpose().map_err(|e|format!("MCP headers 无效: {e}"))?.unwrap_or_default(),
                 name: m
                     .get("name")
                     .and_then(|v| v.as_str())
                     .unwrap_or(&id)
                     .to_string(),
                 id,
-                transport: "stdio".into(),
+                transport,
                 command,
                 args: m
                     .get("args")
@@ -487,12 +490,15 @@ impl Tool for CreatePluginTool {
                             "id": { "type": "string" },
                             "name": { "type": "string" },
                             "command": { "type": "string" },
+                            "transport": { "type": "string", "enum": ["stdio", "http"] },
+                            "url": { "type": "string" },
+                            "headers": { "type": "object", "additionalProperties": { "type": "string" } },
                             "args": { "type": "array", "items": { "type": "string" } },
                             "env": { "type": "object" },
                             "cwd": { "type": "string" },
                             "enabled": { "type": "boolean" }
                         },
-                        "required": ["id", "command"]
+                        "required": ["id"]
                     }
                 },
                 "providers": {
@@ -563,12 +569,15 @@ impl Tool for CreatePluginTool {
                                 "id": { "type": "string" },
                                 "name": { "type": "string" },
                                 "command": { "type": "string" },
+                            "transport": { "type": "string", "enum": ["stdio", "http"] },
+                            "url": { "type": "string" },
+                            "headers": { "type": "object", "additionalProperties": { "type": "string" } },
                                 "args": { "type": "array", "items": { "type": "string" } },
                                 "env": { "type": "object" },
                                 "cwd": { "type": "string" },
                                 "enabled": { "type": "boolean" }
                             },
-                            "required": ["id", "command"]
+                            "required": ["id"]
                         }
                     },
                     "providers": {

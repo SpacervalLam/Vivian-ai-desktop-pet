@@ -4,6 +4,7 @@ pub mod asset_crypto;
 pub mod audio_react;
 pub mod brain;
 pub mod browser_bridge;
+pub mod embedded_browser;
 pub mod bundle_reader;
 pub mod character_behavior;
 pub mod character_registry;
@@ -18,6 +19,8 @@ pub mod media_focus;
 pub mod shortcut;
 pub mod screen_capture;
 pub mod screen_selection;
+pub mod screen_freeze;
+mod screen_freeze_geometry;
 pub mod visual_evidence;
 pub mod edge_menu;
 pub mod desktop_menu_policy;
@@ -305,6 +308,9 @@ pub fn run() {
         .plugin(tauri_plugin_os::init())
         .manage(Arc::new(app_state))
         .invoke_handler(tauri::generate_handler![
+            embedded_browser::embedded_browser_request,
+            embedded_browser::embedded_browser_layout,
+            embedded_browser::embedded_browser_capture,
             commands::characters::list_characters,
             desktop_terrain::get_desktop_terrain,
             commands::characters::set_character_online,
@@ -344,6 +350,7 @@ pub fn run() {
             commands::mind::get_memory_health,
             commands::mind_inspector::get_recent_reasoning_traces,
             commands::mind_inspector::get_last_prompt_breakdown,
+            commands::mind_inspector::get_usage_prompt_snapshots,
             commands::mind_inspector::get_prompt_template_preview,
             commands::mind_inspector::get_sessions,
             commands::mind_inspector::get_prompt_section_schema,
@@ -360,9 +367,9 @@ pub fn run() {
             commands::discovery::respond_interest_probe,
             commands::discovery::bootstrap_from_bangumi,
             commands::browser::get_browser_platforms,
-            commands::browser::open_extension_folder,
-            commands::browser::open_chrome_extensions,
-            commands::browser::open_url_in_chrome,
+            commands::browser::verify_browser_page,
+            commands::browser::open_embedded_browser,
+            commands::browser::browser_site_icon,
             commands::tools::list_tools,
             commands::tools::get_tool_history,
             commands::tools::confirm_tool_execution,
@@ -373,6 +380,9 @@ pub fn run() {
             commands::tools::list_mcp_server_configs,
             commands::tools::add_mcp_server,
             commands::tools::remove_mcp_server,
+            commands::tools::test_mcp_server,
+            commands::tools::reconnect_mcp_server,
+            commands::tools::reset_mcp_server_override,
             commands::config::get_config,
             commands::config::set_config,
             commands::config::report_effective_theme,
@@ -482,6 +492,8 @@ pub fn run() {
             commands::coding_agent::coding_set_reasoning_level,
             commands::coding_agent::coding_list_available_models,
             commands::coding_agent::coding_list_sessions,
+            commands::coding_agent::coding_workflow_list,
+            commands::coding_agent::coding_workflow_detail,
             commands::coding_agent::coding_delete_session,
             commands::coding_agent::coding_rename_session,
             commands::coding_agent::coding_cancel_session,
@@ -516,6 +528,9 @@ pub fn run() {
             commands::plugins::trust_plugin,
             commands::plugins::reload_plugin,
             commands::plugins::unload_plugin,
+            commands::plugins::set_plugin_enabled,
+            commands::plugins::inspect_plugin_package,
+            commands::plugins::install_plugin_package,
             commands::plugins::delete_plugin,
             commands::git::git_repo_status,
             commands::git::git_list_branches,
@@ -677,6 +692,11 @@ pub fn run() {
             screen_selection::screen_selection_ready,
             screen_selection::screen_selection_present,
             screen_selection::screen_selection_finish,
+            screen_freeze::screen_freeze_frame,
+            screen_freeze::screen_freeze_present,
+            screen_freeze::screen_freeze_resize,
+            screen_freeze::screen_freeze_save,
+            screen_freeze::screen_freeze_analyze,
             commands::desktop_assistant::companion_read_clipboard,
             commands::media::companion_now_playing,
             commands::media::companion_focus_media_source,
@@ -807,12 +827,10 @@ pub fn run() {
                 commands::speech::register_text_shortcuts(app.handle().clone(), &state);
             }
 
-            // 启动浏览器自动化桥（独立回环 WS 服务），供精简 Chrome 扩展连接。
+            // 内嵌浏览器直接提供工具及登录态检测，无扩展和本地监听端口。
             {
                 let bridge = app.state::<Arc<AppState>>().browser_bridge.clone();
-                tauri::async_runtime::spawn(async move {
-                    crate::browser_bridge::serve(bridge).await;
-                });
+                bridge.start(app.handle().clone());
             }
 
             // 异步初始化所有角色实例（不阻塞 setup）
@@ -1481,6 +1499,7 @@ pub fn run() {
             // 触发停止的时机：任一角色窗口 CloseRequested 后检查是否还有其他
             // 在线角色窗口；若全部关闭才停线程。
             move |window, event| {
+                if matches!(event, tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed) { embedded_browser::window_destroyed(window.label()); }
                 commands::inspector::enforce_inspector_fullscreen(window, event);
                 // 公寓窗口关闭：兜底退出房间模式，把角色窗口和心智观察器放回来。
                 //

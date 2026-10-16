@@ -185,6 +185,7 @@ const MemoryPage: React.FC<{ initialLayer?: Layer; embedded?: boolean; latestOnl
         renderText={text => <DialogueHighlightedText text={text} query="" />} />
     </div>}
     <div className="memory-history-view" hidden={latestOnly}>
+    {embedded && <div className="comic-record-stamp">{t('comic.historicalRecord')}</div>}
     {!embedded && <ComicChapterHeading number="01" title={t('comic.memoryHeading')} caption={t('comic.memoryCaption')}
       image="train-straps-v20" position="50% 50%">
       <div className="memory-page-actions">
@@ -211,6 +212,7 @@ const MemoryPage: React.FC<{ initialLayer?: Layer; embedded?: boolean; latestOnl
     {notice && <p className="memory-list-note" role="status">{notice}</p>}
     {loading ? <div className="memory-empty">{t('comic.memoryLoading')}</div> : (layer === 'recent' ? visibleThreads.length === 0 : layer === 'episodes' ? visibleEvents.length === 0 : visible.length === 0) ? <div className="memory-empty"><Clock3 size={24} /><strong>{query ? t('comic.memoryNoMatch') : t('comic.memoryEmpty', { name: localize(activeTab.title) })}</strong><span>{query ? t('comic.memoryTryKeywords') : layer === 'episodes' ? t('comic.memoryEmptyEvents') : t('comic.memoryEmptyHint')}</span></div> : layer === 'episodes' ? <div className="memory-event-list">
       {visibleEvents.map((event) => <article key={event.id} className="memory-event-card">
+        <div className="comic-record-stamp"><span>{t('comic.sharedExperience')}</span>{event.time > 0 && <time>{dateText(event.time)}</time>}</div>
         <div className="memory-thread-header"><span className="memory-thread-title"><BookOpen size={15} /><SearchHighlightedText text={event.title} query={query} /></span><span className="memory-thread-count">{t('comic.memoryEventCounts', { conversations: event.conversationIds.length, progress: event.progress.length })}</span></div>
         <ol className="memory-event-progress">{event.progress.map((progress) => <li key={progress.source_message_id}>
           <div className="memory-entry-top"><span className={`memory-event-phase phase-${progress.phase}`}>{({ planned: t('comic.memoryPlanned'), started: t('comic.memoryStarted'), progressed: t('comic.memoryProgress'), completed: t('comic.memoryComplete'), cancelled: t('comic.memoryCancel') })[progress.phase]}</span><time>{t('comic.memoryRecorded')}{dateText(progress.recorded_at)}</time></div>

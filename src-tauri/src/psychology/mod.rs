@@ -32,6 +32,7 @@ pub mod appraisal;
 pub mod behavior_drive;
 pub mod emotion;
 pub mod homeostasis;
+pub mod interaction;
 pub mod manager;
 pub mod mood;
 pub mod mood_cue;

@@ -5,7 +5,7 @@ export type ToastType = 'info' | 'success' | 'error' | 'warning';
 
 /** toast 附带的一键操作，后端/主窗口随 toast:show 下发 */
 export interface ToastAction {
-  /** switch_theme：一键切换界面主题；open_url：用系统默认浏览器打开 url */
+  /** switch_theme：一键切换界面主题；open_url：优先用内置浏览器前台打开 url */
   kind: 'switch_theme' | 'open_url' | 'open_work_session';
   sessionId?: string;
   cancelLabel?: string;

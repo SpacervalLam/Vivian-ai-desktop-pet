@@ -1,7 +1,7 @@
-//! 登录态被动信号采集 — 经浏览器桥在用户已登录页面同源 fetch
+//! 登录态被动信号采集 — 经浏览器桥执行固定平台请求
 //!
 //! 模型：不导航、不劫持标签页。仅当受控标签页**正好停在**目标平台域名时，
-//! 在页面上下文执行同源 fetch（content script 同源请求自动携带登录 Cookie），
+//! 由内嵌浏览器执行固定历史 API 请求（凭据保留在浏览器），
 //! 读取观看历史等画像信号（登录态被动采集路径）。
 //!
 //! 采集到的历史标题经 LLM 提炼为兴趣域，写回兴趣画像（登录态画像初始化）。
@@ -9,62 +9,27 @@
 
 use crate::discovery::profile::InterestProfile;
 
-/// 桥是否已连接且受控标签页停在 bilibili 域（是则返回 hostname）
-async fn eval_on_bilibili(
-    bridge: &std::sync::Arc<crate::browser_bridge::server::BridgeState>,
-) -> Option<String> {
-    let probe = bridge
-        .request_tool(
-            "browser_eval_js",
-            &serde_json::json!({ "code": "location.hostname" }),
-            std::time::Duration::from_secs(8),
-            Some("discovery-passive"),
-        )
-        .await
-        .ok()?;
-    let hostname = probe.trim().trim_matches('"').to_lowercase();
-    if !hostname.contains("bilibili.com") {
-        return None;
-    }
-    Some(hostname)
-}
-
-/// 读取 B 站观看历史（登录态；受控标签页不在 B 站时静默跳过）
-///
-/// 返回最近观看的视频标题列表（最多 `limit` 条）。
+/// 读取 B站观看历史：内嵌浏览器验证当前标签域名后执行固定请求，不运行动态 JS。
 pub async fn collect_bilibili_history(limit: usize) -> Vec<String> {
-    let Some(bridge) = crate::browser_bridge::tools::global_bridge() else {
-        return Vec::new();
-    };
-    if eval_on_bilibili(&bridge).await.is_none() {
-        return Vec::new();
-    }
-    // 同源 fetch 历史 API：content script 请求自动携带登录 Cookie
-    let code = format!(
-        r#"(async () => {{
-            const r = await fetch('/x/web-interface/history?pn=1&ps={}', {{ credentials: 'include' }});
-            const j = await r.json();
-            const list = (j && j.data && j.data.list) || [];
-            return JSON.stringify(list.map(x => ({{ title: x.title, author: (x.owner && x.owner.name) || '' }})));
-        }})()"#,
-        limit.min(100)
-    );
-    let Ok(text) = bridge
-        .request_tool(
-            "browser_eval_js",
-            &serde_json::json!({ "code": code }),
-            std::time::Duration::from_secs(15),
-            Some("discovery-passive"),
-        )
-        .await
-    else {
-        return Vec::new();
-    };
+    let Some(bridge) = crate::browser_bridge::tools::global_bridge() else { return Vec::new(); };
+    if !bridge.is_connected() { return Vec::new(); }
+    let Ok(text) = bridge.request_tool(
+        "browser_bilibili_history",
+        &serde_json::json!({ "limit": limit.clamp(1, 100) }),
+        std::time::Duration::from_secs(15), Some("discovery-passive"),
+    ).await else { return Vec::new(); };
     parse_history_titles(&text)
 }
 
 fn parse_history_titles(text: &str) -> Vec<String> {
-    // eval 返回的是 JSON 序列化字符串（可能被双引号包裹）
+    // Extension results use the same untrusted wrapper as page extraction.
+    let text = text.trim();
+    let text = if text.starts_with("<UNTRUSTED_PAGE_CONTENT") {
+        match (text.find('>'), text.rfind("</UNTRUSTED_PAGE_CONTENT>")) {
+            (Some(start), Some(end)) if start < end => text[start + 1..end].trim(),
+            _ => return Vec::new(),
+        }
+    } else { text };
     let Some(parsed) = crate::discovery::parse_json_tolerant(text) else { return Vec::new(); };
     parsed
         .as_array()
@@ -167,5 +132,11 @@ mod tests {
         let wrapped = serde_json::to_string(&inner).unwrap();
         let titles = parse_history_titles(&wrapped);
         assert_eq!(titles, vec!["量子物理科普".to_string()]);
+    }
+
+    #[test]
+    fn test_parse_history_titles_untrusted_page_wrapper() {
+        let text = "<UNTRUSTED_PAGE_CONTENT nonce=\"test\">\n[{\"title\":\"视频标题\"}]\n</UNTRUSTED_PAGE_CONTENT>";
+        assert_eq!(parse_history_titles(text), vec!["视频标题"]);
     }
 }

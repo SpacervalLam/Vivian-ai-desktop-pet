@@ -8,6 +8,7 @@ const root = fileURLToPath(new URL('../', import.meta.url));
 const data = await mkdtemp(path.join(tmpdir(), 'vivian-rust-tests-'));
 const args = ['test', '--locked', '--manifest-path', 'src-tauri/Cargo.toml', '--lib', '-j', '1'];
 if (process.argv.includes('--windows-integration')) args.push('utils::sandbox::tests', '--', '--ignored', '--test-threads=1');
+else if (process.argv.includes('--extensions')) args.push('extension_', '--', '--test-threads=1');
 else args.push('--', '--test-threads=1');
 console.log(`Isolated Rust test data: ${data}`);
 const child = spawn('cargo', args, { cwd: root, stdio: 'inherit', env: { ...process.env, VIVIAN_TEST_DATA_DIR: data } });

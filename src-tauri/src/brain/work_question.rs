@@ -176,11 +176,8 @@ impl WorkQuestionRegistry {
     /// 单选模式下 `custom` 与 `selected` 互斥（自由输入即"我不选你给的"）。
     /// 两者都空视为跳过——合法的收尾方式，让模型自己拍板继续。
     pub fn respond(&self, question_id: u64, answer: WorkQuestionAnswer) -> Result<(), String> {
-        let entry = {
-            let mut pending = self.pending.lock();
-            pending.remove(&question_id)
-        };
-        let Some(entry) = entry else {
+        let mut pending = self.pending.lock();
+        let Some(entry) = pending.get(&question_id) else {
             return Err("该提问已失效（已被回答、取消或超时）".to_string());
         };
         let labels: Vec<&str> = entry
@@ -215,6 +212,9 @@ impl WorkQuestionRegistry {
             selected: answer.selected,
             custom: if custom.is_empty() { None } else { Some(custom) },
         };
+        // A rejected answer must leave the question and its waiting receiver intact.
+        let entry = pending.remove(&question_id).ok_or_else(|| "该提问已失效".to_string())?;
+        drop(pending);
         let _ = entry.sender.send(normalized);
         Ok(())
     }
@@ -255,4 +255,30 @@ static WORK_QUESTION_REGISTRY: once_cell::sync::Lazy<Arc<WorkQuestionRegistry>> 
 /// 全局注册表访问器（工具与命令共用同一实例）。
 pub fn global_work_question_registry() -> Arc<WorkQuestionRegistry> {
     Arc::clone(&WORK_QUESTION_REGISTRY)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn invalid_answers_preserve_the_pending_question_and_waiter() {
+        let registry = WorkQuestionRegistry::new();
+        let (id, mut receiver) = registry.create_question(
+            "vivian".into(), "mobile-session".into(), "下一步？".into(), None,
+            vec![WorkQuestionOption { label: "继续".into(), description: None }], false,
+        );
+        for answer in [
+            WorkQuestionAnswer { selected: vec!["无效选项".into()], custom: None },
+            WorkQuestionAnswer { selected: vec!["继续".into(), "继续".into()], custom: None },
+            WorkQuestionAnswer { selected: vec!["继续".into()], custom: Some("另一个方向".into()) },
+        ] {
+            assert!(registry.respond(id, answer).is_err());
+            assert_eq!(registry.pending_for("mobile-session").unwrap().question_id, id);
+            assert!(matches!(receiver.try_recv(), Err(oneshot::error::TryRecvError::Empty)));
+        }
+        registry.respond(id, WorkQuestionAnswer { selected: vec!["继续".into()], custom: None }).unwrap();
+        assert_eq!(receiver.await.unwrap().selected, vec!["继续"]);
+        assert!(registry.pending_for("mobile-session").is_none());
+    }
 }

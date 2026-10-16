@@ -31,10 +31,19 @@ use crate::skills::BUILTIN_SKILL_NAMES;
 
 /// 插件清单（盘点插件目录，只读不装载；附带信任状态供设置页展示）。
 #[tauri::command]
-pub fn list_plugins() -> Vec<crate::plugins::PluginInventoryEntry> {
+pub async fn list_plugins(state: State<'_, Arc<AppState>>) -> Result<Vec<crate::plugins::PluginInventoryEntry>, String> {
     let mut entries = crate::plugins::scan_inventory();
+    let servers = state.mcp_manager.list_servers().await;
+    for entry in &mut entries {
+        if entry.status == "loaded" && entry.mcp_servers.iter().any(|id| !servers.iter().any(|s|s.id == *id && s.alive)) {
+            entry.status = "partial".into();
+            entry.reason = Some(entry.mcp_servers.iter().filter_map(|id| servers.iter().find(|s|s.id == *id).and_then(|s|s.last_error.clone())).collect::<Vec<_>>().join("；"));
+        }
+    }
     if crate::commands::apartment::installed() {
         entries.push(crate::plugins::PluginInventoryEntry {
+            enabled: state.config.read().get_all().base.apartment_enabled,
+            requirements: Vec::new(),
             key: "3d-apartment".into(),
             name: "3d-apartment".into(),
             version: "1.1.0".into(),
@@ -45,14 +54,14 @@ pub fn list_plugins() -> Vec<crate::plugins::PluginInventoryEntry> {
             mcp_servers: Vec::new(),
             providers: Vec::new(),
             embeddings: Vec::new(),
-            status: "loaded".into(),
+            status: if state.config.read().get_all().base.apartment_enabled { "loaded" } else { "disabled" }.into(),
             trust: "trusted".into(),
             reason: None,
             dir: crate::commands::apartment::plugin_dir()
                 .map(|path| path.display().to_string()).unwrap_or_default(),
         });
     }
-    entries
+    Ok(entries)
 }
 
 /// 敏感插件管理命令的调用边界：只允许设置窗口（label=config）发起。
@@ -68,6 +77,32 @@ fn ensure_config_window(window: &tauri::WebviewWindow) -> Result<(), String> {
             window.label()
         ))
     }
+}
+
+#[tauri::command]
+pub async fn set_plugin_enabled(window: tauri::WebviewWindow, state: State<'_, Arc<AppState>>, key: String, enabled: bool) -> Result<(), String> {
+    ensure_config_window(&window)?;
+    crate::plugins::set_plugin_enabled(&key, enabled)?;
+    if enabled {
+        if crate::plugins::is_plugin_name_trusted(&key) {
+            crate::plugins::load_one(&state.skill_service, &state.mcp_manager, &state.tool_system, &key, false).await?;
+        }
+    } else {
+        crate::plugins::unload_one(&state.skill_service, &state.mcp_manager, &state.tool_system, &key).await?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn inspect_plugin_package(window: tauri::WebviewWindow, source: String) -> Result<serde_json::Value, String> {
+    ensure_config_window(&window)?;
+    tokio::task::spawn_blocking(move ||crate::plugins::package::inspect(std::path::Path::new(&source))).await.map_err(|e|e.to_string())?
+}
+
+#[tauri::command]
+pub async fn install_plugin_package(window: tauri::WebviewWindow, state: State<'_, Arc<AppState>>, source: String, fingerprint: String) -> Result<serde_json::Value, String> {
+    ensure_config_window(&window)?;
+    crate::plugins::package::install(source.into(), fingerprint, &state.skill_service, &state.mcp_manager, &state.tool_system).await
 }
 
 /// 信任插件：记录当前清单指纹并立即装载（设置页信任按钮的后端入口）。

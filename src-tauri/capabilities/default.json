@@ -26,7 +26,8 @@
     "message_banner",
     "startup_toast",
     "reminders",
-    "screen_selection"
+    "screen_selection",
+    "screen_freeze_*"
   ],
   "permissions": [
     "core:default",

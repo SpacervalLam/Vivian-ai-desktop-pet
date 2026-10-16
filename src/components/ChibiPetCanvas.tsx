@@ -51,6 +51,8 @@ import './ChibiPetCanvas.css';
 const REPLY_THINKING_TIMEOUT_MS = 180_000;
 
 export interface PetInteractionMetrics {
+  dragSessionId?: string;
+  flung?: boolean;
   clickCount?: number;
   windowMs?: number;
   intervalMs?: number;
@@ -1621,7 +1623,7 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
                     scaleHoldRef.current = null;
                     scaleRef.current = 1;
                     onResetScale?.();
-                  }, 1000);
+                  }, 500);
                   return;
                 }
                 // 按下这件事先记下来，再谈它要不要打断当前姿态：逃离问的是「按了多久」，

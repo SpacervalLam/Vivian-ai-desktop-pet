@@ -14,6 +14,54 @@ use crate::conversation::CONVERSATION_MANAGER;
 use crate::mind::reasoning_trace::{PromptBreakdown, ReasoningTrace, SessionView};
 use crate::state::AppState;
 
+#[derive(serde::Serialize)]
+pub struct UsagePromptSnapshot {
+    character_id: String,
+    character_name: String,
+    timestamp: f64,
+    total_tokens: usize,
+    total_chars: usize,
+    sections: usize,
+}
+
+/// Latest observed assembly metadata only. Prompt bodies are loaded on demand
+/// through get_last_prompt_breakdown, never reconstructed from current templates.
+#[tauri::command]
+pub fn get_usage_prompt_snapshots(state: State<'_, Arc<AppState>>) -> Vec<UsagePromptSnapshot> {
+    let characters: Vec<_> = state
+        .characters
+        .read()
+        .values()
+        .map(|character| (character.id.clone(), character.name.clone()))
+        .collect();
+    let traces = state.reasoning_traces.read();
+    let mut snapshots: Vec<_> = characters
+        .into_iter()
+        .filter_map(|(id, name)| {
+            traces
+                .get_last_prompt(&id)
+                .map(|prompt| UsagePromptSnapshot {
+                    character_id: id,
+                    character_name: name,
+                    timestamp: prompt.timestamp,
+                    total_tokens: prompt.total_tokens,
+                    total_chars: prompt.total_chars,
+                    sections: prompt
+                        .sections
+                        .iter()
+                        .filter(|section| section.present || section.char_count > 0)
+                        .count(),
+                })
+        })
+        .collect();
+    snapshots.sort_by(|a, b| {
+        b.timestamp
+            .total_cmp(&a.timestamp)
+            .then(a.character_id.cmp(&b.character_id))
+    });
+    snapshots
+}
+
 /// 获取最近的推理轨迹列表
 ///
 /// - `character_id`：角色 ID

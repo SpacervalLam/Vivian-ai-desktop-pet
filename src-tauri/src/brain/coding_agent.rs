@@ -94,7 +94,7 @@ pub const CODING_TOOLS: &[&str] = &[
     "manage_provider_preset",
 ];
 /// Connected browsing tools exposed for evidence retrieval, with normal permissions.
-pub const WORK_WEB_BROWSER_TOOLS: &[&str] = &["mcp__browser__task_tab","mcp__browser__navigate","mcp__browser__snapshot","mcp__browser__get_text","mcp__browser__scroll","mcp__browser__wait","mcp__browser__back"];
+pub const WORK_WEB_BROWSER_TOOLS: &[&str] = &["mcp__browser__task_tab","mcp__browser__extract","mcp__browser__navigate","mcp__browser__snapshot","mcp__browser__get_text","mcp__browser__scroll","mcp__browser__wait","mcp__browser__back"];
 
 /// Code 模式单次程序的最大步骤数。
 pub const CODE_MODE_MAX_STEPS: usize = 16;
@@ -832,6 +832,20 @@ pub struct CodingAgentService {
 }
 
 impl CodingAgentService {
+    fn workflow_capture(&self, app: &tauri::AppHandle, session_id: &str, router: &ModelRouter,
+        request: &LLMRequest, step: usize, attempt: usize, purpose: &str) -> super::coding_workflow_capture::Capture {
+        let anchors: Vec<usize> = self.sessions.read().get(session_id).map(|s| s.messages.iter().enumerate()
+            .filter(|(_, m)| m.role == CodingRole::User && m.interjected != Some(true) && m.guided != Some(true))
+            .map(|(index, _)| index).collect()).unwrap_or_default();
+        let anchor = anchors.last().copied().unwrap_or(0);
+        let turn = anchors.len().saturating_sub(1);
+        let model = if request.task_type == crate::providers::base::TASK_WORK_AGENT {
+            router.reasoning_override_provider().map(|p| p.get_model().to_string())
+                .unwrap_or_else(|| router.dialogue_model_name(&request.task_type))
+        } else { router.dialogue_model_name(&request.task_type) };
+        super::coding_workflow_capture::Capture::start(app, session_id, anchor, turn, step, attempt, purpose, model, request)
+    }
+
     /// One scheduler survives idle periods; up to two independent projects run
     /// concurrently. Retry state is durable and project queues remain FIFO.
     fn resume_project_memory_jobs(router: &ModelRouter) {
@@ -1298,6 +1312,9 @@ impl CodingAgentService {
             crate::brain::work_question::global_work_question_registry()
                 .cancel_session(session_id);
             crate::brain::work_notices::global().drop_session(session_id);
+            if let Err(error) = super::coding_workflow::remove_session(&get_user_data_dir().join("coding_workflow"), session_id) {
+                tracing::error!("Workflow snapshot cleanup: {error}");
+            }
             self.persist();
         }
         removed
@@ -1359,6 +1376,11 @@ impl CodingAgentService {
     pub fn get_session(&self, session_id: &str) -> Option<CodingSession> {
         self.sessions.write().retry_failed(session_id);
         self.sessions.read().get(session_id).cloned()
+    }
+
+    /// Read lifecycle state without hydrating or cloning message history.
+    pub fn session_status(&self, session_id: &str) -> Option<CodingStatus> {
+        self.sessions.read().values().find(|session| session.session_id == session_id).map(|session| session.status)
     }
 
     // ===== 工作智能体待办（独立于陪伴 todo 系统） =====
@@ -2580,7 +2602,7 @@ impl CodingAgentService {
 
     /// Direct work-page tasks select an execution strategy without a user mode picker.
     /// Companion-delegated tasks already carry the companion agent's chosen strategy.
-    async fn select_work_mode(&self, session_id: &str, router: &ModelRouter) -> String {
+    async fn select_work_mode(&self, app: &tauri::AppHandle, session_id: &str, router: &ModelRouter) -> String {
         let (char_id, task, delegated, current_mode) = {
             let guard = self.sessions.read();
             let Some(session) = guard.get(session_id) else { return default_mode(); };
@@ -2598,7 +2620,13 @@ impl CodingAgentService {
         request.reasoning = reasoning_level_to_pref("low");
         request.max_tokens_override = Some(32);
         let start = std::time::Instant::now();
+        let mut workflow = self.workflow_capture(app, session_id, router, &request, 0, 1, "routing");
         let result = tokio::time::timeout(std::time::Duration::from_secs(15), router.generate(request)).await;
+        match &result {
+            Ok(Ok(text)) => workflow.finish(serde_json::json!({"content":text}), None, None),
+            Ok(Err(error)) => workflow.finish(serde_json::Value::Null, None, Some(error.to_string())),
+            Err(error) => workflow.finish(serde_json::Value::Null, None, Some(error.to_string())),
+        }
         self.stats_step_done(session_id, start.elapsed().as_millis() as u64, None);
         let mode = match result {
             Ok(Ok(response)) if valid_mode(response.trim()) => response.trim().to_string(),
@@ -2635,7 +2663,7 @@ impl CodingAgentService {
         };
         self.stats_turn_started(session_id);
         let turn_output_baseline = self.stats_snapshot(session_id).map(|stats| stats.usage.output_tokens).unwrap_or(0);
-        let mode = self.select_work_mode(session_id, router).await;
+        let mode = self.select_work_mode(&app, session_id, router).await;
         if self.is_canceled(session_id) {
             self.finish_turn(app, session_id, CodingStatus::Canceled);
             return;
@@ -2658,7 +2686,6 @@ impl CodingAgentService {
         }
 
         let allowed = tools_for_mode(&mode);
-        let definitions = Self::coding_definitions(&tool_system, &allowed);
         let tool_ctx = ToolUseContext {
             char_id: char_id.clone(),
             // session_id 供 send_image 等工具路由回本会话（编程页图片消息推送）
@@ -2754,6 +2781,7 @@ impl CodingAgentService {
             let _ = app.emit("coding:thinking", serde_json::json!({
                 "session_id": session_id, "thinking": true,
             }));
+            let definitions = Self::coding_definitions(&tool_system, &allowed);
             let llm_start = std::time::Instant::now();
             // 智能压缩：上轮请求真实上下文接近窗口上限时自动归档早期历史为摘要，
             // 防止多轮工具调用的历史累积超出模型上下文窗口
@@ -2836,6 +2864,7 @@ impl CodingAgentService {
                     .with_character_id(char_id.clone());
                 // 推理等级：low 关闭思维链，medium/high 按档位开启（按模型能力映射 wire 字段）
                 attempt_req.reasoning = reasoning_level_to_pref(&reasoning_level);
+                let mut workflow = self.workflow_capture(&app, session_id, router, &attempt_req, rounds_used, attempt, "assistant");
                 // SSE 连续中断后只尝试一次非流式原生工具调用。
                 // 当前请求的工具尚未执行，恢复不会重放此前已执行的步骤。
                 if attempt > MAX_STREAM_ATTEMPTS {
@@ -2863,12 +2892,19 @@ impl CodingAgentService {
                                 id: call.id, name: call.name, arguments: call.arguments,
                             }).collect();
                             done_finish_reason = response.finish_reason;
+                            workflow.finish(serde_json::json!({"content":streamed_text,"reasoning":streamed_thinking,"tool_calls":calls,"finish_reason":done_finish_reason}), None, None);
                             // 丢弃失败流的 token 用量，不能当作本次响应的已确认用量。
                             step_usage = None;
                             break 'stream_attempt;
                         }
-                        Ok(Err(error)) => self.report_llm_error(&app, session_id, "LLM 非流式恢复", &error.to_string()),
-                        Err(_) => self.report_llm_error(&app, session_id, "LLM 非流式恢复", "request timed out"),
+                        Ok(Err(error)) => {
+                            workflow.finish(serde_json::Value::Null, None, Some(error.to_string()));
+                            self.report_llm_error(&app, session_id, "LLM 非流式恢复", &error.to_string());
+                        }
+                        Err(_) => {
+                            workflow.finish(serde_json::Value::Null, None, Some("request timed out".into()));
+                            self.report_llm_error(&app, session_id, "LLM 非流式恢复", "request timed out");
+                        }
                     }
                     self.finish_turn(app.clone(), session_id, CodingStatus::Idle);
                     return;
@@ -2876,6 +2912,7 @@ impl CodingAgentService {
                 let mut event_rx = match router.generate_stream_with_tools(attempt_req).await {
                     Ok(rx) => rx,
                     Err(e) => {
+                        workflow.finish(serde_json::Value::Null, None, Some(e.to_string()));
                         if should_retry_work_stream(&e.to_string(), attempt, MAX_STREAM_ATTEMPTS + 1) {
                             tracing::warn!("[CodingAgent] 流式请求失败，重试 {attempt}/{MAX_STREAM_ATTEMPTS}: {e}");
                             tokio::time::sleep(std::time::Duration::from_secs(attempt as u64)).await;
@@ -2980,6 +3017,8 @@ impl CodingAgentService {
                 }
                 if !stream_completed {
                     let message = stream_error.unwrap_or_else(|| "stream ended before completion".into());
+                    workflow.finish(serde_json::json!({"content":streamed_text,"reasoning":streamed_thinking}),
+                        serde_json::to_value(attempt_usage).ok().filter(|v| !v.is_null()), Some(message.clone()));
                     // 工具仅在完整响应后执行；重放当前请求不会重复执行前面轮次的命令。
                     if should_retry_work_stream(&message, attempt, MAX_STREAM_ATTEMPTS + 1) {
                         tracing::warn!("[CodingAgent] 流式响应中断，重试 {attempt}/{MAX_STREAM_ATTEMPTS}: {message}");
@@ -3006,6 +3045,9 @@ impl CodingAgentService {
                     .collect();
 
                 // 重试判定：声明要调用工具却收不到任何调用数据 → 换消息重试
+                workflow.finish(serde_json::json!({"content":streamed_text,"reasoning":streamed_thinking,"tool_calls":calls,"finish_reason":done_finish_reason}),
+                    serde_json::to_value(attempt_usage).ok().filter(|v| !v.is_null()),
+                    (calls.is_empty() && done_finish_reason.as_deref() == Some("tool_calls")).then(|| "missing tool calls".into()));
                 if calls.is_empty()
                     && done_finish_reason.as_deref() == Some("tool_calls")
                     && attempt < MAX_STREAM_ATTEMPTS
@@ -3289,6 +3331,7 @@ impl CodingAgentService {
             ChatMessage::user(&prompt),
         ]).with_character_id(char_id).with_max_tokens(1400);
         let started = std::time::Instant::now();
+        let mut workflow = self.workflow_capture(app, session_id, router, &request, 0, 1, "summary");
         let result = tokio::select! {
             result = tokio::time::timeout(std::time::Duration::from_secs(45), router.generate(request)) => result,
             _ = async {
@@ -3300,6 +3343,11 @@ impl CodingAgentService {
                 return;
             }
         };
+        match &result {
+            Ok(Ok(text)) => workflow.finish(serde_json::json!({"content":text}), None, None),
+            Ok(Err(error)) => workflow.finish(serde_json::Value::Null, None, Some(error.to_string())),
+            Err(error) => workflow.finish(serde_json::Value::Null, None, Some(error.to_string())),
+        }
         self.stats_step_done(session_id, started.elapsed().as_millis() as u64, None);
         let text = match result {
             Ok(Ok(report)) if !report.trim().is_empty() => {
@@ -3430,20 +3478,27 @@ impl CodingAgentService {
         // 智能压缩：以上一请求的真实上下文为依据（code 模式走非流式 generate，
         // 无 usage 上报，跨轮次沿用历史记录值）
         let _ = self.maybe_auto_compact(&app, session_id, router).await;
-        let messages = self.build_llm_messages(session_id, char_id, "code");
+        let mut messages = self.build_llm_messages(session_id, char_id, "code");
+        let extensions: Vec<_> = Self::coding_definitions(tool_system, &[]);
+        if !extensions.is_empty() {
+            messages.push(ChatMessage::system(&format!("可在程序步骤中使用以下已注册扩展工具（每步仍经过权限检查）：{}", serde_json::to_string(&extensions).unwrap_or_default())));
+        }
         let mut req = LLMRequest::new(crate::providers::base::TASK_WORK_AGENT, messages)
             .with_character_id(char_id.to_string());
         // 推理等级：low 关闭思维链，medium/high 按档位开启（按模型能力映射 wire 字段）
         req.reasoning = reasoning_level_to_pref(&reasoning_level);
         let llm_start = std::time::Instant::now();
+        let mut workflow = self.workflow_capture(&app, session_id, router, &req, 1, 1, "code");
         let resp = match router.generate(req).await {
             Ok(t) => t,
             Err(e) => {
+                workflow.finish(serde_json::Value::Null, None, Some(e.to_string()));
                 self.report_llm_error(&app, session_id, "LLM 调用", &e.to_string());
                 self.finish_turn(app, session_id, CodingStatus::Idle);
                 return;
             }
         };
+        workflow.finish(serde_json::json!({"content":resp}), None, None);
         self.stats_step_done(session_id, llm_start.elapsed().as_millis() as u64, None);
         // Non-streaming code mode has no provider usage payload; keep the estimate explicit.
         let _ = app.emit("coding:turn_tokens", serde_json::json!({
@@ -4258,6 +4313,11 @@ impl CodingAgentService {
         if crate::browser_bridge::tools::global_bridge().is_some_and(|b|b.is_connected()) {
             for name in WORK_WEB_BROWSER_TOOLS {
                 if let Some(definition)=schemas.get(*name) {definitions.push(definition.clone());}
+            }
+        }
+        for name in tool_system.work_extension_names() {
+            if !definitions.iter().any(|d| d.name == name) {
+                if let Some(definition) = schemas.get(&name) { definitions.push(definition.clone()); }
             }
         }
         definitions
@@ -5246,6 +5306,24 @@ mod compaction_boundary_tests {
             let definitions=CodingAgentService::coding_definitions(&tools,&tools_for_mode(mode));
             assert!(definitions.iter().any(|d|d.name=="web_search"));assert!(definitions.iter().any(|d|d.name=="web_fetch"));
         }
+    }
+
+    #[test]
+    fn extension_tools_refresh_and_respect_work_side_disable() {
+        use crate::tools::custom_tools::{CustomToolDef, DynamicTool};
+        let tools = ToolSystem::new();
+        assert!(CodingAgentService::coding_definitions(&tools, &[]).is_empty());
+        tools.register_tool(Arc::new(DynamicTool::new(CustomToolDef {
+            name:"fixture_extension".into(), description:"Extension fixture".into(),
+            parameters:serde_json::json!({"type":"object","properties":{"path":{"type":"string"}}}),
+            script:"Write-Output 'fixture'".into(), deferred:true, created_at:0.,
+        })));
+        for mode in ["standard","code","minimal"] {
+            let definitions = CodingAgentService::coding_definitions(&tools, &tools_for_mode(mode));
+            assert!(definitions.iter().any(|d|d.name == "fixture_extension"));
+        }
+        tools.set_disabled_tools(Vec::new(), vec!["fixture_extension".into()]);
+        assert!(CodingAgentService::coding_definitions(&tools, &[]).is_empty());
     }
 
     fn message(role: CodingRole, content: &str) -> CodingMessage {

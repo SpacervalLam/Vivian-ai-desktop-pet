@@ -861,6 +861,14 @@ pub fn render_dialogue_card(
     sections.into_iter().filter(|s| !s.trim().is_empty()).collect::<Vec<_>>().join("\n\n")
 }
 
+/// A bounded, configured character note near the current turn (SillyTavern-style
+/// depth note). No invented scene, relationship event or compulsory catchphrase.
+pub fn render_dialogue_note(config: &PersonaConfig, lang: &str) -> String {
+    let clip = |section, limit| resolve_section(config, section, lang).chars().take(limit).collect::<String>();
+    format!("[CURRENT CHARACTER NOTE]\nThe selected speaker is {}. Keep this character's identity and voice separate from other participants; never borrow their private experiences or speak their next turn.\nConfigured temperament reference:\n{}\nConfigured speech reference:\n{}\nThese are voice references, not lines to recite or new events. Current explicit corrections and the active output protocol still apply.\n[/CURRENT CHARACTER NOTE]",
+        config.identity.name, clip(CharacterSection::Personality, 180), clip(CharacterSection::Speech, 260))
+}
+
 /// Keep explicit scene edits without repeating factory response scripts.
 pub fn render_dialogue_preferences(config: &PersonaConfig, mode: SceneMode) -> String {
     let mut lines = Vec::new();

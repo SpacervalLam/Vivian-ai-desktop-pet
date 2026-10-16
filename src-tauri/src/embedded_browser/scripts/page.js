@@ -1,5 +1,5 @@
 /**
- * Vivian 浏览器桥 content script。
+ * Packaged page actions, instantiated per agent session in a CDP isolated world.
  *
  * 在受控标签页内运行（每份文档一个实例），把页面渲染成结构化文本快照，并按
  * 稳定编号在真实页面里执行点击 / 输入 / 按键 / 滚动 / 导航等动作，保留登录态。
@@ -9,7 +9,7 @@
  * actions（页面动作）/ privacy（敏感字段掩码）。
  */
 
-(() => {
+globalThis.vivianCreatePage = () => {
   'use strict';
 
   // ── extract ───────────────────────────────────────────────
@@ -66,34 +66,35 @@
   }
 
   function accessibleName(el) {
+    const shortName = (text) => truncate(clean(redactFields(text)), MAX_ITEM_NAME_CHARS).text;
     const ariaLabel = el.getAttribute('aria-label');
-    if (ariaLabel !== null && ariaLabel.trim() !== '') return truncate(clean(ariaLabel), MAX_ITEM_NAME_CHARS).text;
+    if (ariaLabel !== null && ariaLabel.trim() !== '') return shortName(ariaLabel);
 
     const labelledBy = el.getAttribute('aria-labelledby');
     if (labelledBy !== null) {
       const ref = document.getElementById(labelledBy.split(/\s+/)[0] ?? '');
-      if (ref?.textContent?.trim()) return truncate(clean(ref.textContent), MAX_ITEM_NAME_CHARS).text;
+      if (ref?.textContent?.trim()) return shortName(ref.textContent);
     }
 
     const labelable = el instanceof HTMLInputElement || el instanceof HTMLSelectElement || el instanceof HTMLTextAreaElement;
     if (labelable) {
       if (el.id !== '') {
         const label = el.ownerDocument.querySelector(`label[for="${cssEscape(el.id)}"]`);
-        if (label?.textContent?.trim()) return truncate(clean(label.textContent), MAX_ITEM_NAME_CHARS).text;
+        if (label?.textContent?.trim()) return shortName(label.textContent);
       }
       const wrapping = el.closest('label');
-      if (wrapping?.textContent?.trim()) return truncate(clean(wrapping.textContent), MAX_ITEM_NAME_CHARS).text;
+      if (wrapping?.textContent?.trim()) return shortName(wrapping.textContent);
     }
 
     const ownText = el instanceof HTMLInputElement ? '' : el.textContent;
-    if (ownText?.trim()) return truncate(clean(ownText), MAX_ITEM_NAME_CHARS).text;
+    if (ownText?.trim()) return shortName(ownText);
 
     if (el instanceof HTMLInputElement) {
       const buttonLike = el.type === 'submit' || el.type === 'button' || el.type === 'reset';
-      if (buttonLike && el.value !== '') return truncate(clean(el.value), MAX_ITEM_NAME_CHARS).text;
-      if (el.placeholder !== '') return truncate(clean(el.placeholder), MAX_ITEM_NAME_CHARS).text;
-      if (el.alt !== '') return truncate(clean(el.alt), MAX_ITEM_NAME_CHARS).text;
-      return truncate(clean(el.type), MAX_ITEM_NAME_CHARS).text;
+      if (buttonLike && el.value !== '') return shortName(el.value);
+      if (el.placeholder !== '') return shortName(el.placeholder);
+      if (el.alt !== '') return shortName(el.alt);
+      return shortName(el.type);
     }
     return el.tagName.toLowerCase();
   }
@@ -176,7 +177,7 @@
 
   // ── privacy：敏感字段绝不回传 ─────────────────────────────
 
-  const SENSITIVE_PATTERNS = [/password/i, /passwd/i, /credit/i, /card/i, /cvv/i, /cvc/i, /secret/i, /pwd/i];
+  const SENSITIVE_PATTERNS = [/password/i, /passwd/i, /credit/i, /card/i, /cvv/i, /cvc/i, /secret/i, /pwd/i, /token/i, /api.?key/i, /otp/i, /密码|验证码/];
 
   function isSensitiveField(el) {
     if (el instanceof HTMLInputElement) {
@@ -191,6 +192,19 @@
 
   function maskValue(value) {
     return value.length === 0 ? '' : '••••';
+  }
+
+  function redactFields(text) {
+    let result = String(text);
+    for (const field of document.querySelectorAll('input, textarea, select')) {
+      if (!isSensitiveField(field)) continue;
+      const value = field.value;
+      if (typeof value !== 'string') continue;
+      for (const secret of new Set([value, clean(value)])) {
+        if (secret.length > 0) result = result.split(secret).join('••••');
+      }
+    }
+    return result;
   }
 
   // ── snapshot ──────────────────────────────────────────────
@@ -287,7 +301,7 @@
     const regionEl = options.region !== undefined && options.region !== ''
       ? document.querySelector(options.region)
       : null;
-    const mainSource = regionEl !== null ? pageText(regionEl) : mainText(document);
+    const mainSource = redactFields(regionEl !== null ? pageText(regionEl) : mainText(document));
     const mainBudget = Math.floor(options.budget.maxChars * 0.5);
     const main = truncate(mainSource, mainBudget);
 
@@ -529,7 +543,7 @@
 
   function elementOrThrow(index) {
     const el = ids.elementByIndex(index);
-    if (el === undefined) {
+    if (el === undefined || !el.isConnected || !isVisible(el)) {
       throw new ActionError('action-failed', `Element [${index}] does not exist; the page may have changed. Call browser_snapshot again to get current indices.`);
     }
     return el;
@@ -548,7 +562,7 @@
     const region = typeof args.region === 'string' && args.region !== '' ? args.region : undefined;
     const view = buildSnapshot(ids, { delta, region, budget: SNAPSHOT_BUDGET }, lastSnapshot);
     lastSnapshot = view;
-    return { text: renderSnapshot(view, delta) };
+    return { text: redactFields(renderSnapshot(view, delta)) };
   }
 
   function withPageDelta(text) {
@@ -557,7 +571,7 @@
     lastSnapshot = view;
     return {
       text,
-      pageContent: renderSnapshot(view, true, Math.min(SNAPSHOT_BUDGET.maxChars, 4000)),
+      pageContent: redactFields(renderSnapshot(view, true, Math.min(SNAPSHOT_BUDGET.maxChars, 4000))),
     };
   }
 
@@ -623,6 +637,7 @@
     if (!(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || contentEditable)) {
       throw new ActionError('action-failed', `Element [${index}] is not editable (${el.tagName.toLowerCase()}).`);
     }
+    el.focus();
     if (contentEditable) {
       if (replace) el.textContent = '';
       el.textContent = `${el.textContent ?? ''}${text}`;
@@ -700,12 +715,13 @@
     const selector = typeof args.selector === 'string' && args.selector !== '' ? args.selector : undefined;
     const source = selector !== undefined ? document.querySelector(selector) : null;
     const text = source !== null ? pageText(source) : selector !== undefined ? `No element matched selector: ${selector}` : pageText();
-    const truncated = truncate(text, 8000);
+    const offset = Number.isInteger(args.offset) && args.offset >= 0 ? args.offset : 0;
+    const truncated = truncate(redactFields(text).slice(offset), 16000);
     return { text: truncated.text + (truncated.truncated > 0 ? `\n(Truncated ${truncated.truncated} characters.)` : '') };
   }
 
   async function waitAction(args) {
-    const ms = typeof args.ms === 'number' && args.ms > 0 ? args.ms : 0;
+    const ms = typeof args.ms === 'number' && args.ms > 0 ? Math.min(args.ms, 10000) : 0;
     await waitForPageSettled(EXPLICIT_WAIT_SETTLE);
     if (ms > 0) await sleep(ms);
     return withPageDelta(`The page is stable${ms > 0 ? ` after an additional ${ms}ms wait` : ''}.`);
@@ -725,50 +741,30 @@
       case 'browser_get_text': return getTextAction(args);
       case 'browser_wait': return waitAction(args);
       case 'browser_eval_js': return evalJsAction(args);
+      case 'browser_extract': return extractAction(args);
+      case 'browser_bilibili_history': {
+        if (location.hostname !== 'api.bilibili.com' || location.pathname !== '/x/web-interface/history/cursor') throw new ActionError('wrong-platform', 'Not a Bilibili history endpoint');
+        const body = JSON.parse(document.body.textContent);
+        if (body.code !== 0) throw new ActionError('login-required', 'B站会话无效或需要验证，请在内嵌浏览器确认。');
+        const limit = Math.max(1, Math.min(100, Number(args.limit) || 50));
+        return { text: JSON.stringify((body.data?.list || []).slice(0, limit).map(item => ({ title: String(item.title || '').slice(0, 200) }))) };
+      }
       default: throw new ActionError('bad-args', `Unknown action: ${action}`);
     }
   }
 
-  // ── eval：在页面上下文求值 JS 表达式（高权限动作，宿主侧已要求用户确认） ──
-  function evalJsAction(args) {
-    const code = typeof args.code === 'string' ? args.code : '';
-    if (!code) throw new ActionError('bad-args', 'code is required');
+  // Legacy calls fail explicitly; platform extraction uses packaged functions.
+  function evalJsAction() {
+    throw new ActionError('unsupported-action', 'Use browser_snapshot, browser_get_text or browser_extract; arbitrary code is not a browser tool.');
+  }
+
+  function extractAction(args) {
     try {
-      // 表达式语义：包进 IIFE 使语句（return ...）与表达式都可用
-      const fn = new Function(`"use strict"; return (async () => { ${code.includes('return') || code.trim().startsWith('(') ? code : `return (${code})`} })()`);
-      const value = fn();
-      if (value && typeof value.then === 'function') {
-        return value
-          .then((v) => ({ text: safeSerialize(v) }))
-          .catch((e) => { throw new ActionError('action-failed', `eval rejected: ${e && e.message ? e.message : e}`); });
-      }
-      return { text: safeSerialize(value) };
-    } catch (e) {
-      throw new ActionError('action-failed', `eval threw: ${e && e.message ? e.message : e}`);
+      return { text: JSON.stringify(globalThis.vivianExtractPlatform(args.extractor)) };
+    } catch (error) {
+      throw new ActionError('extraction-failed', error.message);
     }
   }
 
-  function safeSerialize(v) {
-    try {
-      if (v === undefined) return 'undefined';
-      return typeof v === 'string' ? v : JSON.stringify(v, null, 1);
-    } catch (_) {
-      return String(v);
-    }
-  }
-
-  // ── 消息入口 ──────────────────────────────────────────────
-
-  chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-    if (!msg || msg.type !== 'vivian_browser_action') return;
-    runAction(msg.action, msg.args || {})
-      .then((res) => sendResponse(res))
-      .catch((err) => sendResponse({
-        error: {
-          code: err.code || 'action-failed',
-          message: err.message || String(err),
-        },
-      }));
-    return true; // 异步响应
-  });
-})();
+  return runAction;
+};

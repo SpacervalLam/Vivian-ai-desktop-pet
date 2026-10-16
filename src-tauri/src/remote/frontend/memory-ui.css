@@ -1,8 +1,5 @@
 /* Mobile memory workspace: the desktop's four views, with one-column reading. */
-.memory-body { padding: 0 16px 24px; }
-.memory-intro { padding: 10px 2px 18px; }
-.memory-intro h2 { font-size: 26px; font-weight: 650; letter-spacing: -.8px; margin-bottom: 6px; }
-.memory-intro p { color: var(--text2); font-size: 13px; line-height: 1.7; }
+.memory-body { padding: 12px 16px 24px; }
 .memory-controls { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }
 .memory-controls .mem-tabs { position: static; flex: 1; padding: 4px; gap: 4px; background: #EBEAF5; border-radius: 18px; }
 .memory-controls .mem-tab { min-height: 40px; font-size: 13px; border-radius: 14px; background: none; }

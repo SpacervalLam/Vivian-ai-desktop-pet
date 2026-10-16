@@ -1322,7 +1322,7 @@ impl Brain {
         }
     }
 
-    /// 生成状态切换告别语（通过 LLM 生成，失败返回 None）
+    /// 生成状态切换告别语；失败由调用方 toast 报错，仍继续状态切换。
     ///
     /// 当智能体自动切换到 Rest/Offline 状态时，先生成一句告别语告知用户。
     /// 调用方负责通过气泡显示 + TTS 朗读，然后再执行状态切换（隐藏窗口）。
@@ -1330,7 +1330,7 @@ impl Brain {
         &self,
         target_state: PresenceState,
         reason: PresenceChangeReason,
-    ) -> Option<String> {
+    ) -> VivianResult<Option<String>> {
         let rel = self.psychology.relationship();
         let hour = chrono::Local::now().format("%H").to_string().parse::<u32>().unwrap_or(12);
         let intimacy = rel.intimacy * 100.0;
@@ -1370,7 +1370,7 @@ impl Brain {
             _ => match target_state {
                 PresenceState::Rest => ("going to rest", "You're going to take a short rest."),
                 PresenceState::Offline => ("going offline", "You're going offline for a while."),
-                _ => return None,
+                _ => return Ok(None),
             },
         };
 
@@ -1414,20 +1414,14 @@ impl Brain {
             ChatMessage::user(user_prompt),
         ];
 
-        match self.router.generate(LLMRequest::new(crate::providers::base::TASK_COMPANION, messages)
-            .with_character_id(self.char_id.clone())).await {
-            Ok(text) => {
-                let farewell = text.trim().trim_matches('"').trim_matches('「').trim_matches('」').to_string();
-                if farewell.is_empty() {
-                    None
-                } else {
-                    Some(farewell)
-                }
-            }
-            Err(e) => {
-                tracing::warn!("[farewell_greeting] LLM 生成告别语失败: {}", e);
-                None
-            }
+        let text = self.router.generate(LLMRequest::new(crate::providers::base::TASK_COMPANION, messages)
+            .with_character_id(self.char_id.clone())).await?;
+        let farewell = crate::utils::protocol_text::strip_protocol_text(&text);
+        let farewell = farewell.trim().trim_matches('"').trim_matches('「').trim_matches('」').trim();
+        if farewell.is_empty() {
+            Err(crate::error::VivianError::Provider("告别生成失败：模型未返回有效文本".into()))
+        } else {
+            Ok(Some(farewell.to_string()))
         }
     }
 

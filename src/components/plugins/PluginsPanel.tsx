@@ -1,9 +1,12 @@
 import React, { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { invoke } from '@tauri-apps/api/core';
+import PluginInstallPanel from './PluginInstallPanel';
 
 /** 插件清单条目（对齐后端 plugins::PluginInventoryEntry） */
 interface PluginEntry {
+  enabled: boolean;
+  requirements: string[];
   /** 稳定的插件目录 key，供后端重载/删除使用 */
   key: string;
   name: string;
@@ -72,6 +75,7 @@ const PluginsPanel: React.FC = () => {
   const [paths, setPaths] = useState<{ plugins_dir: string; skills_dir: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [confirm, setConfirm] = useState<ConfirmState | null>(null);
+  const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -115,13 +119,14 @@ const PluginsPanel: React.FC = () => {
   };
 
   const onReload = async (key: string) => {
+    setBusy(true);
     setError(null);
     try {
       await invoke('reload_plugin', { name: key });
       await refresh();
     } catch (e) {
       setError(t('config.plugins.reload_failed', { error: String(e) }));
-    }
+    } finally { setBusy(false); }
   };
 
   /** 信任插件：记录清单指纹并立即装载（未信任插件的贡献不装载） */
@@ -132,6 +137,7 @@ const PluginsPanel: React.FC = () => {
   const executeTrust = async () => {
     if (!confirm) return;
     const plugin = confirm.plugin;
+    setBusy(true);
     setConfirm(null);
     setError(null);
     try {
@@ -139,7 +145,7 @@ const PluginsPanel: React.FC = () => {
       await refresh();
     } catch (e) {
       setError(t('config.plugins.trust_failed', { error: String(e) }));
-    }
+    } finally { setBusy(false); }
   };
 
   const trustLabel = (trust: string): string => {
@@ -156,6 +162,7 @@ const PluginsPanel: React.FC = () => {
   const executeDelete = async () => {
     if (!confirm) return;
     const plugin = confirm.plugin;
+    setBusy(true);
     setConfirm(null);
     setError(null);
     try {
@@ -163,8 +170,23 @@ const PluginsPanel: React.FC = () => {
       await refresh();
     } catch (e) {
       setError(t('config.plugins.delete_failed', { error: String(e) }));
-    }
+    } finally { setBusy(false); }
   };
+
+  const onToggle = async (plugin: PluginEntry) => {
+    setBusy(true); setError(null);
+    try { await invoke('set_plugin_enabled', { key: plugin.key, enabled: !plugin.enabled }); await refresh(); }
+    catch (e) { setError(String(e)); await refresh(); }
+    finally { setBusy(false); }
+  };
+  const statusLabel = (status: string) => ({
+    loaded: t('config.plugins.status_loaded'), skipped: t('config.plugins.status_skipped'),
+    disabled: zh ? '已禁用' : ja ? '無効' : 'Disabled',
+    untrusted: zh ? '等待信任' : ja ? '信頼が必要' : 'Awaiting trust',
+    installed: zh ? '已安装，未装载' : ja ? '未ロード' : 'Installed, inactive',
+    blocked: zh ? '缺少依赖' : ja ? '依存関係が必要' : 'Missing requirements',
+    partial: zh ? '部分可用' : ja ? '一部利用可能' : 'Partially loaded',
+  }[status] ?? status);
 
   const originLabel = (origin: string): string => {
     if (origin === 'plugin') return t('config.plugins.origin_plugin');
@@ -173,6 +195,7 @@ const PluginsPanel: React.FC = () => {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 22 }}>
+      <PluginInstallPanel onInstalled={refresh} />
       {/* 内联确认栏 */}
       {confirm && (
         <div
@@ -224,9 +247,8 @@ const PluginsPanel: React.FC = () => {
       )}
 
       <div style={sectionTitle}>{t('config.plugins.section_plugins')}</div><p style={{fontSize:12,color:'var(--panel-text-secondary)'}}>{zh ? '插件注册可执行能力、服务或配置数据；技能只提供按需读取的使用指导，不执行操作或授予权限。附带指导在下面的技能清单单独列出。' : ja ? 'プラグインは機能やデータを登録し、スキルは利用ガイドだけを提供します。' : 'Plugins register capabilities or data. Skills provide usage guidance and cannot execute operations or grant permissions. Bundled guidance is listed separately below.'}</p>
-      {error ? (
-        <div style={{ fontSize: 13, color: '#E53935' }}>{error}</div>
-      ) : plugins === null ? (
+      {error && <div role="alert" style={{ fontSize: 13, color: '#E53935' }}>{error}</div>}
+      {plugins === null ? (
         <div style={{ fontSize: 13, color: 'var(--panel-text-secondary)' }}>{t('mind_inspector.common.loading')}</div>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -250,7 +272,7 @@ const PluginsPanel: React.FC = () => {
                 boxShadow: 'var(--panel-shadow-subtle)',
               }}
             >
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 2 }}>
+              <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 8, marginBottom: 2 }}>
                 <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--panel-text)' }}>{p.name}</span>
                 <span style={{ fontSize: 11, color: 'var(--panel-text-tertiary)' }}>v{p.version}</span>
                 {p.capability_kind && <span style={{fontSize:11,color:'var(--panel-accent)'}}>{kindLabels[p.capability_kind]}</span>}
@@ -267,7 +289,7 @@ const PluginsPanel: React.FC = () => {
                     {t('config.plugins.builtin')}
                   </span>
                 )}
-                {trustLabel(p.trust) && (
+                {trustLabel(p.trust) && (p.status !== 'untrusted' || p.trust === 'changed') && (
                   <span
                     style={{
                       fontSize: 11,
@@ -289,11 +311,13 @@ const PluginsPanel: React.FC = () => {
                     border: `1px solid ${p.status === 'loaded' ? 'var(--panel-border-strong)' : 'var(--panel-border)'}`,
                   }}
                 >
-                  {p.status === 'loaded' ? t('config.plugins.status_loaded') : t('config.plugins.status_skipped')}
+                  {statusLabel(p.status)}
                 </span>
                 <div style={{ flex: 1 }} />
-                {!BUILTIN_PLUGIN_NAMES.includes(p.name) && p.trust !== 'trusted' && (
+                {!BUILTIN_PLUGIN_NAMES.includes(p.key) && <button disabled={busy} onClick={() => void onToggle(p)} style={{ fontSize: 11, padding: '3px 10px', borderRadius: 6, border: '1px solid var(--panel-border)', background: 'var(--panel-surface)', color: 'var(--panel-text)' }}>{p.enabled ? (zh ? '禁用' : ja ? '無効化' : 'Disable') : (zh ? '启用' : ja ? '有効化' : 'Enable')}</button>}
+                {!BUILTIN_PLUGIN_NAMES.includes(p.key) && p.enabled && p.trust !== 'trusted' && (
                   <button
+                    disabled={busy}
                     onClick={() => onTrust(p)}
                     style={{
                       fontSize: 11,
@@ -309,6 +333,7 @@ const PluginsPanel: React.FC = () => {
                   </button>
                 )}
                 {p.name !== '3d-apartment' && <button
+                  disabled={busy || !p.enabled || p.trust !== 'trusted'}
                   onClick={() => onReload(p.key)}
                   style={{
                     fontSize: 11,
@@ -324,6 +349,7 @@ const PluginsPanel: React.FC = () => {
                 </button>}
                 {!BUILTIN_PLUGIN_NAMES.includes(p.name) && (
                   <button
+                    disabled={busy}
                     onClick={() => onDelete(p)}
                     style={{
                       fontSize: 11,

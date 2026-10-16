@@ -182,10 +182,10 @@
 .unified-functional-panel.source-memory:not(.is-expanded) .unified-panel-content { overflow: hidden; }
 .unified-functional-panel.source-memory:not(.is-expanded) .memory-page.comic-chapter { flex: 1; padding: 0; }
 .unified-functional-panel.is-expanded :is(.unified-panel-ink, .unified-panel-gutter) { display: none; }
-.unified-functional-panel.source-memory { --slot-delay: .46s; }
+.unified-functional-panel.source-memory { --slot-delay: 2.3s; }
 .unified-functional-panel.source-diary { --slot-delay: 2.3s; }
-.unified-functional-panel.source-planner { --slot-delay: 1.38s; }
-.unified-functional-panel.source-notebook { --slot-delay: 3.15s; }
+.unified-functional-panel.source-planner { --slot-delay: 1.15s; }
+.unified-functional-panel.source-notebook { --slot-delay: 3.05s; }
 .unified-panel-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 38px; flex-shrink: 0; padding: 5px 12px; border-bottom: 1px solid var(--book-ink); }
 .claude-theme .unified-panel-heading h2 { font: 20px/1.4 'Mind Comic', sans-serif !important; margin: 0; color: var(--book-ink); }
 .unified-panel-heading h2 { flex: 1; }
@@ -341,7 +341,6 @@
 .unified-menu-dock .unified-book-corner { top: 0; right: 0; pointer-events: auto; }
 .unified-menu-dock.is-touring { transform: translateX(54px); opacity: 0; visibility: hidden; pointer-events: none; transition-duration: .9s, .65s, 0s; transition-delay: 0s, 0s, .9s; }
 .unified-menu-dock.is-touring .unified-book-corner { pointer-events: none; }
-@media (prefers-reduced-motion: reduce) { .unified-menu-dock { transition: none; } }
 .unified-book-contents {
   position: absolute; top: 32px; right: 3px; bottom: 0; box-sizing: border-box;
   width: calc(100% - 3px); display: flex; flex-direction: column; gap: 12px;
@@ -372,12 +371,9 @@
 .unified-book-contents :is(button, input):focus-visible { outline: 2px solid #a38b53; outline-offset: 2px; }
 .unified-menu-dock .unified-book-corner { border: 1px solid #b8a58e33; border-radius: 10px; padding: 2px; }
 .unified-menu-dock.is-open .unified-book-corner { color: #80642c; background: #e9d79a38; }
-@media (prefers-reduced-motion: no-preference) {
-  .unified-book-contents { animation: contents-unfold .18s ease-out; transform-origin: top right; }
-  @keyframes contents-unfold { from { opacity: 0; transform: translateY(-5px) scale(.985); } to { opacity: 1; transform: none; } }
-}
-@media (prefers-reduced-motion: no-preference) {
-  /* fill-mode 用 backwards 而不是 both：both 会让动画结束后仍然「填充」终态，
+.unified-book-contents { animation: contents-unfold .18s ease-out; transform-origin: top right; }
+@keyframes contents-unfold { from { opacity: 0; transform: translateY(-5px) scale(.985); } to { opacity: 1; transform: none; } }
+/* fill-mode 用 backwards 而不是 both：both 会让动画结束后仍然「填充」终态，
      Chrome 把 translateY(8px)→none 的终态算成 identity matrix（不是 none），
      于是一个 matrix(1,0,0,1,0,0) 的 transform 永久挂在面板上 ——
      transform 会让面板变成 position: fixed 的包含块，面板里的 .rec-overlay
@@ -385,12 +381,11 @@
      backwards 只让动画在延迟期填充起始态（面板先隐形），结束后回落到元素自身样式
      （opacity: 1 / 无 transform），入场观感完全一样。
      实测见 scripts/mind-book-shot.mjs 的「fixed 包含块检查」。 */
-  .unified-functional-panel:not(.is-expanded) { animation: comic-functional-enter .65s ease-out var(--slot-delay, .46s) backwards; }
-  /* Opacity alone leaves the delayed, invisible expand button clickable.
+.unified-functional-panel:not(.is-expanded) { animation: comic-functional-enter 1.15s ease-out var(--slot-delay, .46s) backwards; }
+/* Opacity alone leaves the delayed, invisible expand button clickable.
      Visibility also removes the whole paper and its controls from hit testing
      and keyboard navigation until the entrance actually starts. */
-  @keyframes comic-functional-enter { from { opacity: 0; visibility: hidden; transform: translateY(8px); } to { opacity: 1; visibility: visible; transform: none; } }
-}
+@keyframes comic-functional-enter { from { opacity: 0; visibility: hidden; transform: translateY(8px); } to { opacity: 1; visibility: visible; transform: none; } }
 @media (max-width: 850px) {
   .unified-functional-panel.is-expanded { position: fixed; inset: 38px 20px 14px; }
   .unified-functional-panel.is-expanded .record-note { flex-direction: column; }
@@ -512,6 +507,12 @@
 .unified-functional-panel.is-expanded .record-diary-reader { padding: 8px clamp(12px,3vw,42px) 28px; background: #fffdf5b8; border-radius: 5px; }
 .unified-functional-panel.is-expanded .record-diary-head { padding: 10px 0 18px!important; border: 0; border-bottom: 1px solid #b79d9e55; margin-bottom: 24px; }
 .unified-functional-panel.is-expanded .record-diary-date-md { font-size: 38px; color: #68525d; }
+.unified-comic-book .unified-functional-panel.source-diary :is(.record-diary-mood-label,.record-diary-date-year,.record-diary-link-weekday,.record-plan-count) {
+  color: var(--claude-muted);
+}
+.unified-comic-book .source-diary .record-diary-link.is-active :is(.record-diary-link-date,.record-diary-link-weekday) {
+  color: var(--claude-ink-soft);
+}
 /* 正文：段落节奏交回给模式本身。原先这里另加了 padding + margin，
    把中日文那套「首行缩进 2em、不加段距」的断句方式顶掉了，
    而 is-spaced 又同时吃 margin-top 与 margin-bottom，段间被撑到两倍行距。 */
@@ -554,7 +555,7 @@
   .unified-functional-panel.is-expanded .record-plan-row:nth-child(even) { margin-top: 8px; }
 }
 @media(max-width:850px) {
-  .unified-functional-panel.is-expanded { inset: 38px 16px 20px; padding: 16px; }
+  .unified-functional-panel.is-expanded { position: absolute; inset: 38px 16px 20px; padding: 16px; }
   .unified-functional-panel.is-expanded .unified-panel-heading { margin-bottom: 14px; padding-bottom: 12px; }
   .unified-functional-panel.is-expanded .record-diary-body { grid-template-columns: minmax(0,1fr); }
   .unified-functional-panel.is-expanded .record-diary-index { padding: 6px; }
@@ -685,7 +686,6 @@
 .planner-switch-space > span { display:flex; align-items:center; gap:12px; opacity:0; padding:14px 18px; border-radius:30px; background:#fffdf54d; transition:opacity .2s,background .2s; font-size:14px; }
 .planner-switch-space:hover > span { opacity:1; background:#fffdf5b3; }
 .planner-switch-space:focus-visible { outline:2px solid #9d83ac; outline-offset:-6px; border-radius:18px; }
-@media(prefers-reduced-motion:reduce){.planner-sliding-card,.planner-mode-content,.planner-mode-content.is-active{transition:none;}}
 @media(max-width:1000px){
   .unified-functional-panel.source-planner.is-expanded .comic-planner { width:100%; max-width:none; padding:18px; }
 }
@@ -698,3 +698,53 @@
   .planner-switch-space { width:22%; }
   .planner-switch-space > span { flex-direction:column; padding:10px; gap:8px; font-size:12px; text-align:center; }
 }
+
+/* Persistent panels restart their original stagger only when revealed. */
+.unified-functional-panel[hidden],
+[data-presentation-ready="false"] .unified-functional-panel { animation: none !important; }
+
+/* Keep discovery cues on the illustrated object, without a separate toolbar. */
+.comic-entry-hint {
+  position:absolute; right:10%; bottom:9%; z-index:6;
+  display:flex; align-items:center; gap:6px; pointer-events:none;
+  color:var(--comic-label,#6a6376); font:13px/1.4 'Mind Comic',serif;
+}
+.comic-entry-corner {
+  display:grid; place-items:center; width:22px; height:22px;
+  border:1px solid #94718170; border-radius:3px 7px 3px 3px;
+  background:var(--book-paper,#faf8f5); box-shadow:0 1px 3px #51465312;
+}
+.comic-entry-caption {
+  padding:3px 7px; border:1px solid #94718150; border-radius:4px;
+  background:var(--book-paper,#faf8f5); opacity:0; visibility:hidden;
+  transition:opacity .16s ease,visibility .16s ease;
+}
+.unified-comic-book[data-used-entries~='memory'] #line-phone .comic-entry-caption { display:none; }
+.unified-panel-open:is(:hover,:focus-visible) .comic-entry-caption,
+#line-phone[role='button']:is(:hover,:focus-visible) .comic-entry-caption { opacity:1; visibility:visible; }
+.unified-functional-panel:has(>.unified-panel-open:is(:hover,:focus-visible)) .panel-outline,
+#line-phone[role='button']:is(:hover,:focus-visible) .edge polygon { stroke:#947181; stroke-width:2.5px; }
+.unified-functional-panel .unified-panel-open, #line-phone[role='button'] { cursor:pointer; }
+.unified-functional-panel .unified-panel-open:focus-visible { outline:2px solid #947181; outline-offset:-3px; }
+.source-notebook .comic-entry-hint { top:12%; bottom:auto; right:12%; }
+#line-phone[role='button']:focus-visible .phone-screen-on { opacity:1; }
+@media(max-width:850px) {
+  #line-phone .comic-entry-caption {
+    position:absolute; right:0; bottom:calc(100% + 5px);
+    width:max-content; max-width:clamp(52px,14cqw,150px); box-sizing:border-box;
+  }
+}
+.unified-comic-book[data-touring='true'] .comic-entry-hint { visibility:hidden; }
+.unified-comic-book[data-touring='true'] .comic-entry-caption { visibility:hidden; }
+.comic-record-stamp {
+  display:flex; align-items:center; flex-wrap:wrap; gap:6px;
+  margin:0 0 10px; color:var(--comic-label,#6a6376);
+  font:12px/1.5 'Mind Comic',serif; letter-spacing:.04em;
+}
+.comic-record-stamp time::before { content:'·'; margin-right:6px; }
+.comic-conversation > .comic-record-stamp { flex-shrink:0; padding:3px 6px; border-bottom:1px solid #94718130; }
+
+/* Draw ink above the notebook document, including its moving L-shaped cutout. */
+.unified-panel-outline { position:absolute; inset:0; width:100%; height:100%; overflow:visible; z-index:3; pointer-events:none; }
+.unified-panel-outline polygon { fill:none; stroke:var(--comic-frame-ink); stroke-width:var(--comic-frame-width); vector-effect:non-scaling-stroke; stroke-linejoin:miter; }
+.unified-functional-panel.is-expanded .unified-panel-outline { display:none; }

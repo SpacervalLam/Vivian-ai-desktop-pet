@@ -82,6 +82,8 @@ pub struct PsychologyManager {
     micro_tick_count: parking_lot::Mutex<u32>,
     /// 当前角色的 ResourceManifest（用于交互反馈表情映射）
     manifest: Option<Arc<crate::engine::manifest::ResourceManifest>>,
+    /// Per-character interaction evidence; reset with the character, never an identity profile.
+    pet_interactions: parking_lot::Mutex<super::interaction::InteractionTracker>,
 }
 
 /// micro_tick 每累积 N 次才持久化一次（默认 1 分钟：3s × 20）
@@ -124,6 +126,7 @@ impl PsychologyManager {
             persist_lock: Mutex::new(()),
             micro_tick_count: parking_lot::Mutex::new(0),
             manifest: None,
+            pet_interactions: parking_lot::Mutex::new(Default::default()),
         }
     }
 
@@ -665,6 +668,30 @@ impl PsychologyManager {
         feedback
     }
 
+    /// Local rhythm changes only short-lived emotion. No needs, appraisal or relationship update.
+    pub fn observe_pet_interaction(&self, action: &str, metrics: Option<&super::interaction::PetInteractionMetrics>, impact: Option<f64>, now: f64) -> super::interaction::InteractionContext {
+        let context = self.pet_interactions.lock().observe(action, metrics, impact, now);
+        if let Some(delta) = &context.mood_delta {
+            let mut state = self.state.write();
+            let sensitivity = state.persona.traits.sensitivity_multiplier();
+            // At most three updates/minute; each update's total absolute change <= 0.02.
+            state.emotion.apply_delta(&delta.bounded(sensitivity, 0.012, 0.02), 1.0);
+            state.last_interaction_time = now;
+            let emotion = state.emotion.clone();
+            state.add_event(emotion);
+            // Normal micro_tick persists these small changes and restores homeostasis.
+        }
+        context
+    }
+
+    pub fn record_pet_reaction(&self, episode_id: &str, reply: &str) {
+        self.pet_interactions.lock().record_reply(episode_id, reply);
+    }
+
+    pub fn take_pet_interaction_episodes(&self, now: f64) -> Vec<super::interaction::InteractionEpisode> {
+        self.pet_interactions.lock().take_completed(now)
+    }
+
     /// 规则层"被冷落→情绪映射"：连续主动搭话未获回应时累积负面情绪。
     ///
     /// `severity` ∈[0,1]，反映冷落程度（例如由连续 ignored_count 归一化）。
@@ -1149,6 +1176,7 @@ impl PsychologyManager {
     /// PersonaEngine 重新推导角色特定的 persona，所以安全。
     /// 运行时的 manifest（表情映射）不持久化，保留不影响。
     pub fn reset_to_initial(&self) -> Result<(), String> {
+        *self.pet_interactions.lock() = Default::default();
         {
             let mut state = self.state.write();
             *state = PsychologySnapshot::default();
@@ -1202,6 +1230,29 @@ pub fn default_psychology_path(data_dir: &std::path::Path) -> std::path::PathBuf
 #[cfg(test)]
 mod feedback_tests {
     use super::*;
+
+    #[test]
+    fn interaction_changes_only_bounded_short_term_emotion_and_reset_clears_evidence() {
+        use super::super::interaction::PetInteractionMetrics;
+        let path = std::env::temp_dir().join(format!("pet-interaction-{}.json", uuid::Uuid::new_v4()));
+        let manager = PsychologyManager::load_or_init(path.clone());
+        let before = manager.snapshot();
+        for index in 0..500 {
+            manager.observe_pet_interaction("drag", Some(&PetInteractionMetrics {
+                drag_session_id: Some(index.to_string()), drag_speed_px_per_ms: Some(3.0),
+                drag_distance_px: Some(600.0), press_duration_ms: Some(500.0), ..Default::default()
+            }), None, 100.0 + index as f64 / 10.0);
+        }
+        let after = manager.snapshot();
+        assert!(after.emotion.curiosity > before.emotion.curiosity);
+        let net: f64 = serde_json::to_value(&after.emotion).unwrap().as_object().unwrap().iter()
+            .map(|(key, value)| (value.as_f64().unwrap() - serde_json::to_value(&before.emotion).unwrap()[key].as_f64().unwrap()).abs()).sum();
+        assert!(net <= 0.06 + 1e-9);
+        assert_eq!(serde_json::to_value(after.relationship).unwrap(), serde_json::to_value(before.relationship).unwrap());
+        assert_eq!(serde_json::to_value(after.needs).unwrap(), serde_json::to_value(before.needs).unwrap());
+        manager.reset_to_initial().unwrap();
+        assert!(manager.take_pet_interaction_episodes(500.0).is_empty());
+    }
 
     #[test]
     fn direct_feedback_replaces_appraisal_emotion_mapping_even_when_zero() {

@@ -312,9 +312,11 @@ Memory 窗口内嵌 [`MindInspector.tsx`](src/components/mind-inspector/MindInsp
 
 设置页的「外部连接」页（`src/components/ConnectionsPanel.tsx`）合并了原先分散的两处入口：独立的「浏览器」页 + 工具页里的 MCP 区块。合并依据是两者同属「给 AI 接外部能力的连接」，只是方向相反——内置连接器由扩展反向连入，MCP server 由 app 拉起子进程。
 
-- **内置连接器区**：浏览器桥卡片（连接状态 + 从 `list_tools` 实时取 `mcp__browser__*` 工具清单 + 扩展安装引导），未连接时展开三步引导
-- **凭据状态子区**（卡片内，不与 MCP Servers 并列）：平台登录态网格。**它不是连接、也不提供任何工具**——只是扩展 Cookie 哨兵探测出的 `HashMap<String, bool>`（`server.rs::report_platform_status`），唯一消费方是 `discovery/sources/*` 的被动采集器。放在桥卡片内可避免用户误以为「登录某平台即获得该平台工具」
-- **MCP Servers 区**：原工具页的 MCP 增删改 UI，状态与加载逻辑一并从 `ConfigWindow` 迁入本组件（`ConfigWindow` 不再持有 `mcpServers` / `mcpEditing` / `mcpSaving`）
+- **内置浏览器区**：展示 WebView2 状态、从 `list_tools` 获取 `mcp__browser__*` 工具清单，并可打开内嵌浏览器或验证当前页面。Chrome 扩展安装引导和回环服务已移除。
+- **平台登录状态**：展示普通浏览器配置中的平台 Cookie 存在状态，供既有内容发现复用；存在 Cookie 不代表账号会话仍有效，也不会自动增加平台工具。
+- **MCP Servers 区**：由 [`McpConnections.tsx`](src/components/connections/McpConnections.tsx) 独立管理，支持 stdio／Streamable HTTP、环境变量、工作目录、HTTP 请求头、无持久化连接测试、编辑、启停和重连；每四秒刷新连接状态，失败配置始终保留。后端区分业务错误和连接错误，保留混合内容与结构化结果，完整读取工具分页；失败客户端仍参加有上限的重连流程。
+- **插件交付**：[`plugins/package.rs`](src-tauri/src/plugins/package.rs) 检查目录／ZIP、依赖及源包和当前安装版本的指纹，再暂存替换；安装不自动信任或执行。禁用状态保存在 `plugins/.disabled.json`，加载状态来自实际贡献快照和连接状态。JS 首次授权在装载前写入对应指纹。接口边界与示例见 [`plugins/README.md`](plugins/README.md)。
+- **工作侧扩展**：`coding_definitions` 在每轮请求前合并当前注册的 MCP／自建／插件工具，按名称排序并遵守工作侧禁用清单；code 模式也获得扩展参数定义。`npm run test:extensions` 使用独立用户目录验证协议与生命周期。
 
 ### ToastWindow.tsx —— Toast 通知窗口
 
@@ -2426,29 +2428,21 @@ score ≥ 0.5 入库（cap 60）｜≥ 0.75 惊喜队列 → Busy 分享竞争�
 
 外部采集统一入库入口：`admit_candidates(char_id, candidates)` — 任务 tab / 引擎外采集路径复用同一套准入门槛（跨源去重 → LLM 评估 → 入库 + 探针），返回入库条数。
 
-### browser_bridge/ —— 浏览器自动化桥
+### browser_bridge/ 与 embedded_browser/ —— 内嵌浏览器与智能体
 
-[`browser_bridge/`](src-tauri/src/browser_bridge) + 配套 [`browser-extension/`](browser-extension) Chrome 扩展构成「把真实浏览器交给角色」的通道：模型侧工具派发给扩展在受控/隔离标签页执行。
-
-**命名空间**：桥工具在模型侧注册为 `mcp__browser__{action}`（`ToolCategory::Mcp`），与外部 MCP server 同处一个命名空间——桥本质上就是一个「连接」，只是方向相反（扩展反向连入 app，而非 app 拉起子进程）。扩展派发仍用线名 `browser_*`，两者由 `BrowserTool` 的 `name`（线名）/ `mcp_name`（模型可见名）成对维护，`wire_name()` / `to_mcp_name()` / `action_of()` 提供双向换算。
+工作台右侧「页面」并列浏览器、文件预览和终端页签，其中浏览器使用独立 WebView2 原生页面。桌宠、工作智能体和已有内容发现直接复用其普通配置登录状态；Chrome 桥扩展、安装资源和回环 WS 服务已移除。`browser_bridge` 模块名与 `mcp__browser__*` 工具名保留以兼容权限、禁用配置和既有会话，实际不使用 MCP 协议。
 
 | 文件 | 职责 |
 |------|------|
-| [`protocol.rs`](src-tauri/src/browser_bridge/protocol.rs) | WS 线协议帧契约（hello / tool.call / tool.result / rpc / ping / error）+ 常量与 RPC 方法名 |
-| [`server.rs`](src-tauri/src/browser_bridge/server.rs) | token 认证 WS 服务（axum 仅回环 :3080）+ 工具派发 + 平台状态 / X cookie / Reddit cookie 内存存储 |
-| [`tools.rs`](src-tauri/src/browser_bridge/tools.rs) | `browser_*` 工具（navigate/click/type/eval_js/snapshot/task_tab 等）经桥派发；模型侧名 `mcp__browser__*`，`BRIDGE_SERVER_ID` / `wire_name` / `to_mcp_name` / `action_of` 为命名空间换算入口 |
+| [`service.rs`](src-tauri/src/browser_bridge/service.rs) | 进程内调用门面、每 5 秒检测普通配置的十个平台登录哨兵、已有 X/Reddit CLI 凭据通道 |
+| [`tools.rs`](src-tauri/src/browser_bridge/tools.rs) | 保留 snapshot/get_text/extract/click/type/press/scroll/navigate/back/forward/reload/wait/task_tab 工具及原确认策略，加入会话标识、可选 tab_id 与文本 offset |
+| [`native.rs`](src-tauri/src/embedded_browser/native.rs) | STA 线程上的独立环境、多标签、原生浏览能力、DPI 布局；关闭检查器后普通标签交给隐藏原生宿主，无痕标签结束会话 |
+| [`automation.rs`](src-tauri/src/embedded_browser/native/automation.rs) | 进程内 CDP 隔离上下文、实际页面读取、导航代次与会话标签绑定、后台静音任务及取消清理、仅限内部的 Cookie 检测 |
+| [`scripts/`](src-tauri/src/embedded_browser/scripts) | 每会话的 DOM 编号、增量快照、表单掩码、页面动作、B站/小红书/抖音/知乎固定提取器；不接受任意脚本 |
 
-**命名空间换算的必改点**（工具名从线名变为 MCP 名后，按名字做字符串分支的逻辑会静默失效）：[`confirmation.rs`](src-tauri/src/tools/confirmation.rs) 的 `confirmation_info` 在 match 前经 `wire_name()` 归一化；[`permission.rs`](src-tauri/src/tools/permission.rs) 的可信来源免确认改按 `action_of(name) == Some("navigate")` 判定；[`config/manager.rs`](src-tauri/src/config/manager.rs) 加载配置时把 `disabled_tools` 里的旧线名迁移为 MCP 名（幂等，无需迁移标记），否则用户已禁用的桥工具会被静默重新启用。经 `BridgeState::request_tool` 直接派发的调用方（`discovery/sources/*`）用线名，不受影响。
+页面不注入 Tauri IPC，不开放远程调试端口。工具结果标记为不可信数据，原始 Cookie 和密码字段值不作为网页工具结果返回。X/Reddit 的已有本机 CLI 凭据链路保留；Reddit 在确认退出登录后、下次发现使用前撤回应用写入的凭据，保留用户独立配置。后台任务共享 Default 配置的 HttpOnly Cookie，成功、失败、超时或取消均关闭，不抢当前标签、不写浏览历史，也不读取无痕配置的登录状态。
 
-- **协议**：每个 WS 消息一个 JSON 帧，按 `t` 字段判别；工具调用带 `id` + `expiresAt`（过期不执行），支持 `tool.cancel` 撤回；新连接 `hello` 需在 5s 内提交 token 与 caps，顶替旧连接；服务端每 20s `ping` 探活（`PING_INTERVAL_MS=20s`，刻意低于 Chrome MV3 service worker 约 30s 的空闲终止阈值，留出余量防连接周期性掉线）
-- **扩展 RPC 上报**（扩展 background 主动推送）：
-  - `bridge.injectBrowserSnapshot`：用户显式选择跟随的标签页快照注入（服务端缓存，无参 `browser_snapshot` 优先返回）
-  - `bridge.reportPlatformStatus`：平台登录态哨兵（Cookie 名探测，只回传布尔值，Cookie 值不离开浏览器）
-  - `bridge.reportXCookie`：x.com `auth_token`+`ct0` → 服务端 twitter-cli cookie 重放（唯一真实 Cookie 离开浏览器的通道之一）
-  - `bridge.reportRedditCookie`：reddit.com 整罐 Cookie（含 reddit_session）→ 服务端同步 rdt-cli 凭据文件
-- **工具派发**：`BridgeState::request_tool` 登记挂起调用并派发 `tool.call`，扩展回传 `tool.result` 按 correlation id 唤醒等待方；`browser_task_tab` 不经受控标签页，直接在 background 层创建 inactive+静音的隔离任务标签执行（脚本在同 profile 下天然携带平台登录 Cookie），完成后自动关闭，用于需登录态平台的后台发现
-- **扩展**（[`browser-extension/`](browser-extension)）：manifest v3，权限 `tabs`/`activeTab`/`storage`/`cookies`/`alarms` + `<all_urls>`；background service worker 负责 cookie 哨兵探测、X/Reddit cookie 回传、工具分派与任务 tab；content script 在页面上下文执行动作（同源 fetch 自动携带登录 Cookie）
-- **连接稳定性（防 MV3 service worker 空闲终止掉线）**：Chrome MV3 的 SW 约 30s 无活动即被终止，而 WS 消息交换（Chrome 116+）会重置该计时器。三道保活互相兜底——服务端每 20s `ping`；扩展侧另以 20s 间隔主动发送 `pong` 心跳帧（服务端对主动 pong 静默忽略，无契约变更）；manifest `alarms` 权限下 1 分钟周期 alarm 唤醒 SW 重建断开的连接（断线状态下纯 `setTimeout` 链无法唤醒 SW，会永久失联）。被顶替的旧 socket 迟到的 `close` 事件不再清理新连接状态（否则误杀新连接上的 in-flight 工具调用）
+配置迁移与确认仍通过 `wire_name()` / `to_mcp_name()` / `action_of()` 兼容旧工具名；读取请求始终访问实际页面。设置里的 `get_browser_platforms` 返回引擎状态、登录哨兵与错误，`open_embedded_browser` 打开工作台浏览器或登录页，`verify_browser_page` 返回当前页面诊断。原生登录态、跨标签操作、取消及关闭窗口后的行为由独立 [Windows 烟雾测试](src-tauri/browser-smoke/src/main.rs) 验证。数据位置、完整能力与限制见 [说明](src-tauri/src/embedded_browser/README.md)。
 
 ### world/ —— 真实世界感知
 
@@ -2809,7 +2803,7 @@ LLM 输出含标记的 text
 | [`mind.rs`](src-tauri/src/commands/mind.rs) | 心智查询 |
 | [`emotion.rs`](src-tauri/src/commands/emotion.rs) | 情绪/表情 |
 | [`config.rs`](src-tauri/src/commands/config.rs) | 配置管理（工作智能体模型命令 `get_work_models` / `select_work_model` / `clear_work_model` 持久化 `active_work_model`，其 override 仅用于 `TASK_WORK_AGENT`；`get_token_usage` / `clear_token_usage` 提供用量查询与清空；LLM API 检测见 [providers/ —— 多 Provider 路由](#providers--多-provider-路由)）。`save_config` 后将 `config.tools.disabled_tools` 热同步到 `ToolSystem` |
-| [`browser.rs`](src-tauri/src/commands/browser.rs) | 外部连接页的内置连接器数据源：`get_browser_platforms`（桥状态 + 平台登录态 + 扩展目录）；`open_extension_folder`（文件管理器打开扩展目录）；`open_chrome_extensions`（打开扩展管理页）+ `open_url_in_chrome`（登录页强制用 Chrome 打开）。`chrome://` 非系统注册协议，两处打开一律定位 Chrome 可执行文件带参启动（Windows 走 App Paths 注册表 + 标准安装目录兜底），与系统默认浏览器无关——登录必须发生在扩展所在的 Chrome，Cookie 哨兵才能识别 |
+| [`browser.rs`](src-tauri/src/commands/browser.rs) | 内嵌浏览器状态与平台登录检测；打开工作台浏览器或登录页，诊断实际页面读取。 |
 | [`notebook.rs`](src-tauri/src/commands/notebook.rs) | 笔记命令（含 `import_html_note` 直接读完整 HTML 存为 raw_html 笔记） |
 | [`diary.rs`](src-tauri/src/commands/diary.rs) | 日记 |
 | [`tools.rs`](src-tauri/src/commands/tools.rs) | 工具管理（`list_tools` 返回全部注册工具含 `is_custom` 字段供设置页区分自进化工具，不过滤禁用项；`get_tool_history` / `confirm_tool_execution`） |

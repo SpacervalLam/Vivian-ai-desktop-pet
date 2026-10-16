@@ -22,7 +22,7 @@ import { reportInspectorSession } from '../../../utils/inspectorAttention';
 import {
   Plus, Trash2, ChevronDown, ChevronRight, Loader2,
   FileText, FilePlus, FileEdit, Terminal as TerminalIcon, Search, FolderTree,
-  Wrench, FolderOpen, Braces, XCircle, X,
+  Wrench, FolderOpen, Braces, XCircle, X, Globe,
   Folder, Lock, Shield, Sparkles, Check, Cpu, Zap, Code2,
   Activity, Send, Square, ArrowDown, ArrowUp, List,
   PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, SlidersHorizontal, Ellipsis,
@@ -31,11 +31,12 @@ import {
 } from 'lucide-react';
 import './CodeAgentPage.css';
 import './workbenchStrings';
+import './workflowStrings';
+import './browserStrings';
 import SessionSearch from './SessionSearch';
 import WebEvidenceCard from './WebEvidenceCard';
 import { parseWebEvidence } from './webEvidence';
 import { workbenchLayout, groupWorkMessages as groupChatMessages, WORKBENCH_READING_WIDTH } from './workbenchLayout';
-import TrajectoryPanel from './TrajectoryPanel';
 import TurnRail, { buildTurns } from './TurnRail';
 import ComposerEditor, { type ComposerEditorHandle } from './ComposerEditor';
 import PinnedSummary from './PinnedSummary';
@@ -48,6 +49,8 @@ import { PreviewEditCard, SelectionBubble, resolveSelectionTarget, type PendingE
 import DOMPurify from 'dompurify';
 
 const TerminalPanel = lazy(() => import('./TerminalPanel'));
+const WorkflowPanel = lazy(() => import('./WorkflowPanel'));
+const BrowserPanel = lazy(() => import('./BrowserPanel'));
 
 /**
  * 把 markdown 文件链接补成绝对路径。
@@ -2713,6 +2716,8 @@ function collectChatDocs(messages: CodingMessage[] | undefined | null): string[]
 }
 
 const PreviewPanel: React.FC<{
+  tabHost?: HTMLElement | null;
+  panelActive?: boolean;
   fullView: boolean;
   onToggleFullView: () => void;
   tabs: { path: string; key: string }[];
@@ -2729,7 +2734,7 @@ const PreviewPanel: React.FC<{
   onAddToConversation?: (text: string) => void;
   /** 页内错误提示（由 CodeAgentPage 注入，用于右键菜单动作失败时的反馈） */
   onNotifyError?: (msg: string) => void;
-}> = ({ fullView, onToggleFullView, tabs, activePath, onSelect, onClose, onCloseAll, onOpenFromChat, messages, baseKey, target, onAddToConversation, onNotifyError }) => {
+}> = ({ tabHost, panelActive = true, fullView, onToggleFullView, tabs, activePath, onSelect, onClose, onCloseAll, onOpenFromChat, messages, baseKey, target, onAddToConversation, onNotifyError }) => {
   const { t } = useTranslation();
   const tabsRef = useWheelHorizontalScroll<HTMLDivElement>();
   // path → 预览状态缓存（按会话隔离，切换会话自动重建）
@@ -3146,20 +3151,19 @@ const PreviewPanel: React.FC<{
     );
   };
 
-  return (
-    <div className="codex-preview">
-      {/* 顶部多页签（无上限，横向滚动） */}
-      <div className="codex-preview-tabbar">
-      <div className="codex-preview-tabs" ref={tabsRef} role="tablist">
+  const tabBar = (<div className="codex-preview-tabbar">
+      <div className="codex-preview-tabs" ref={tabsRef} role={tabHost ? undefined : "tablist"}>
         {tabs.length === 0 ? (
-          <div className="codex-preview-no-tab">{t('mind_inspector.code_preview_no_tab')}</div>
+          tabHost ? null : <div className="codex-preview-no-tab">{t('mind_inspector.code_preview_no_tab')}</div>
         ) : (
           tabs.map((tab) => {
-            const active = tab.path === activePath;
+            const active = panelActive && tab.path === activePath;
             return (
               <div
                 key={tab.key}
                 role="tab"
+                tabIndex={0}
+                onKeyDown={event => { if (event.target !== event.currentTarget) return; if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onSelect(tab.path); } }}
                 aria-selected={active}
                 className={`codex-preview-tab ${active ? 'active' : ''}${tabMenu?.path === tab.path ? ' menu-open' : ''}`}
                 onClick={() => onSelect(tab.path)}
@@ -3195,12 +3199,16 @@ const PreviewPanel: React.FC<{
       <button type="button" className="codex-preview-full-toggle" aria-pressed={fullView} title={t(fullView ? 'workbench.previewFullExit' : 'workbench.previewFullEnter')} aria-label={t(fullView ? 'workbench.previewFullExit' : 'workbench.previewFullEnter')} onClick={onToggleFullView}>
         {fullView ? <Minimize2 size={14} strokeWidth={1.8} aria-hidden /> : <Maximize2 size={14} strokeWidth={1.8} aria-hidden />}
       </button>
-      </div>
+      </div>);
+  return (
+    <div className="codex-preview">
+      {/* 顶部多页签（无上限，横向滚动） */}
+      {tabHost ? createPortal(tabBar, tabHost) : tabBar}
       {/* 内容区 */}
       <div className="codex-preview-body" ref={bodyRef}>{renderContent(activeItem)}</div>
 
       {/* diff 也走 portal：它是预览页上一层的浮卡，不插入任何 markdown 块之间。 */}
-      {pending && pending.path === activePath && (
+      {panelActive && pending && pending.path === activePath && (
         <PreviewEditCard
           edit={pending}
           busy={pendingBusy || rewriting}
@@ -3212,7 +3220,7 @@ const PreviewPanel: React.FC<{
       )}
 
       {/* 抹黑选中后的浮卡：portal 到 body，fixed 定位 */}
-      {bubble && (
+      {panelActive && bubble && (
         <SelectionBubble
           x={bubble.x}
           y={bubble.y}
@@ -3773,10 +3781,14 @@ const CodeAgentPage: React.FC = () => {
   const [newMenuOpen, setNewMenuOpen] = useState(false);
   const newMenuRef = useRef<HTMLDivElement | null>(null);
 
-  // 右侧检查器：概览 / 轨迹 / 变更 / 预览 / 终端（待办清单已并入概览页）
-  const [rightTab, setRightTab] = useState<'overview' | 'trajectory' | 'changes' | 'preview' | 'terminal'>(initialSnapshot.rightTab);
+  // 右侧检查器：概览 / 工作流 / 页面 / 变更；页面内并列网页、文件和终端页签。
+  const [rightTab, setRightTab] = useState<WorkbenchSnapshot['rightTab']>(initialSnapshot.rightTab);
   useEffect(() => {
-    if (rightTab !== 'preview') setPreviewFullView(false);
+    if (navigation?.pageParams.browserRequest) { setRightTab('browser'); setRightCollapsed(false); setFocusMode(false); setLeftDrawerOpen(false); }
+  }, [navigation?.pageParams.browserRequest]);
+  const [workflowView, setWorkflowView] = useState<WorkbenchSnapshot['workflowView']>(initialSnapshot.workflowView);
+  useEffect(() => {
+    if (!['preview', 'browser', 'terminal'].includes(rightTab)) setPreviewFullView(false);
   }, [rightTab]);
   const [termTabs, setTermTabs] = useState<{ id: string; label: string; workingDirectory: string }[]>([]);
   const [activeTermTab, setActiveTermTab] = useState<string | null>(null);
@@ -3784,12 +3796,27 @@ const CodeAgentPage: React.FC = () => {
   // 横向页签栏滚轮左右滑动
   const inspectorTabsRef = useWheelHorizontalScroll<HTMLDivElement>();
   const termTabsRef = useWheelHorizontalScroll<HTMLDivElement>();
+  const [newPageRequest, setNewPageRequest] = useState(0);
+  const [browserTabHost, setBrowserTabHost] = useState<HTMLDivElement | null>(null);
+  const [previewTabHost, setPreviewTabHost] = useState<HTMLDivElement | null>(null);
+  const pageGroup = ['browser', 'preview', 'terminal'].includes(rightTab);
+  const pagesOpened = useRef(pageGroup);
+  if (pageGroup) pagesOpened.current = true;
+  const lastPage = useRef<'browser' | 'preview' | 'terminal'>('browser');
+  if (pageGroup) lastPage.current = rightTab as typeof lastPage.current;
+  const activateBrowser = useCallback(() => setRightTab('browser'), []);
 
   // 预览：多页签（无上限）打开的文件
   const [previewTabs, setPreviewTabs] = useState<{ path: string; key: string }[]>(initialSnapshot.previewTabs);
   const [activePreview, setActivePreview] = useState<string | null>(initialSnapshot.activePreview);
   const [previewTarget, setPreviewTarget] = useState<{ path: string; line: number; revision: number } | null>(null);
   const previewCounter = useRef(0);
+  useLayoutEffect(() => {
+    if (!pageGroup) return;
+    const frame = requestAnimationFrame(() => termTabsRef.current?.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: 'nearest', inline: 'nearest' }));
+    return () => cancelAnimationFrame(frame);
+  }, [rightTab, activePreview, activeTermTab, pageGroup, termTabsRef]);
+
 
   /** 打开一个文件到预览页：已开则切换过去，未开则新增页签。 */
   const openPreview = useCallback((path: string, line?: number) => {
@@ -3871,7 +3898,7 @@ const CodeAgentPage: React.FC = () => {
 
   const activeSession = sessions.find((s) => s.session_id === activeId) ?? null;
   const snapshotRef = useRef<WorkbenchSnapshot>(initialSnapshot);
-  snapshotRef.current = { activeId, input, rightTab, previewTabs, activePreview, previewFullView, sessionView, sessionSort, workspaceTreeOpen, scroll: snapshotRef.current.scroll };
+  snapshotRef.current = { activeId, input, rightTab, workflowView, previewTabs, activePreview, previewFullView, sessionView, sessionSort, workspaceTreeOpen, scroll: snapshotRef.current.scroll };
   const saveSnapshot = useCallback(() => {
     // Do not overwrite the previous session while its backend state is loading.
     if (!snapshotRef.current.activeId && initialSnapshot.activeId) return;
@@ -3885,7 +3912,7 @@ const CodeAgentPage: React.FC = () => {
   }, [initialSnapshot.activeId]);
   useEffect(() => {
     saveSnapshot();
-  }, [activeId, input, rightTab, previewTabs, activePreview, previewFullView, sessionView, sessionSort, workspaceTreeOpen, saveSnapshot]);
+  }, [activeId, input, rightTab, workflowView, previewTabs, activePreview, previewFullView, sessionView, sessionSort, workspaceTreeOpen, saveSnapshot]);
   useLayoutEffect(() => {
     window.addEventListener('pagehide', saveSnapshot);
     return () => { saveSnapshot(); window.removeEventListener('pagehide', saveSnapshot); };
@@ -4045,7 +4072,7 @@ const CodeAgentPage: React.FC = () => {
     setTermTabs((prev) => {
       const next = prev.filter((t) => t.id !== id);
       setActiveTermTab((cur) => (cur === id ? (next.length > 0 ? next[next.length - 1].id : null) : cur));
-      if (next.length === 0) setRightTab('overview');
+      if (next.length === 0) setRightTab(current => current === 'terminal' ? 'browser' : current);
       return next;
     });
   }, []);
@@ -5482,6 +5509,7 @@ const CodeAgentPage: React.FC = () => {
         onMouseLeave={() => { if (leftPeekAvailable) closeLeftPeekLater(); }}
         onKeyDown={(event) => { if (event.key === 'Escape' && leftPeekVisible) { cancelLeftPeekClose(); setLeftPeekOpen(false); } }}
         role={leftDrawer ? 'dialog' : 'complementary'}
+        data-browser-overlay={leftPeekVisible || leftDrawer || undefined}
         aria-label={t('mind_inspector.code_expand_left')}
         aria-modal={leftDrawer || undefined}
       >
@@ -6184,7 +6212,7 @@ const CodeAgentPage: React.FC = () => {
         onMouseDown={(e) => startResize(e, 'right')}
       />
 
-      {/* ===== 右侧：检查器（概览 / 轨迹 / 终端） ===== */}
+      {/* ===== 右侧：检查器（概览 / 工作流 / 页面 / 变更） ===== */}
       {/* 收起时宽度收到 0（而不是 display:none）——display 不可过渡，只能做宽度动画。
           内层固定为展开宽度，由外层的 overflow:hidden 裁切：这样动画期间内容是
           「整块滑出去」，不会被逐帧压窄重排（终端和代码预览一旦重排会明显抖动）。 */}
@@ -6198,12 +6226,11 @@ const CodeAgentPage: React.FC = () => {
       >
         <div className="codex-inspector-inner" style={{ width: previewFullView ? '100%' : layout.rightWidth }}>
           <div className="codex-inspector-tabs" ref={inspectorTabsRef}>
-            <select className="codex-inspector-tab-select" value={rightTab} aria-label={t('mind_inspector.code_expand_right')} onChange={(event) => setRightTab(event.target.value as typeof rightTab)}>
+            <select className="codex-inspector-tab-select" value={pageGroup ? 'pages' : rightTab} aria-label={t('mind_inspector.code_expand_right')} onChange={(event) => setRightTab(event.target.value === 'pages' ? lastPage.current : event.target.value as typeof rightTab)}>
               <option value="overview">{t('mind_inspector.code_inspector_overview')}</option>
-              <option value="trajectory">{t('mind_inspector.code_inspector_trajectory')}</option>
+              <option value="workflow">{t('workflow.title')}</option>
+              <option value="pages">{t('workbench.pages')}</option>
               <option value="changes">{t('mind_inspector.code_tab_changes')}{activeSession?.file_changes?.length ? ` (${activeSession.file_changes.length})` : ''}</option>
-              <option value="preview">{t('mind_inspector.code_tab_preview')}</option>
-              <option value="terminal">{t('mind_inspector.code_tab_terminal')}</option>
             </select>
             {layout.rightDrawer && <button type="button" className="codex-icon-btn codex-drawer-close" aria-label={t('workbench.dismiss')} title={t('workbench.dismiss')} onClick={() => setRightCollapsed(true)}><X size={15} /></button>}
             <button
@@ -6215,14 +6242,14 @@ const CodeAgentPage: React.FC = () => {
               <Activity size={14} />
               <span className="codex-inspector-tab-label">{t('mind_inspector.code_inspector_overview')}</span>
             </button>
-            <button
-              type="button"
-              onClick={() => setRightTab('trajectory')}
-              className={`codex-inspector-tab ${rightTab === 'trajectory' ? 'active' : ''}`}
-              title={t('mind_inspector.code_inspector_trajectory')}
-            >
-              <GitFork size={14} />
-              <span className="codex-inspector-tab-label">{t('mind_inspector.code_inspector_trajectory')}</span>
+            <button type="button" onClick={() => setRightTab('workflow')}
+              className={`codex-inspector-tab ${rightTab === 'workflow' ? 'active' : ''}`} title={t('workflow.title')}>
+              <GitFork size={14} /><span className="codex-inspector-tab-label">{t('workflow.title')}</span>
+            </button>
+            <button type="button" onClick={() => setRightTab(lastPage.current)}
+              className={`codex-inspector-tab ${pageGroup ? 'active' : ''}`} title={t('workbench.pages')}>
+              <Globe size={14} /><span className="codex-inspector-tab-label">{t('workbench.pages')}</span>
+              {running && termTabs.length > 0 && <span className="codex-tab-dot" aria-label={t('mind_inspector.code_working')} />}
             </button>
             <button
               type="button"
@@ -6233,25 +6260,6 @@ const CodeAgentPage: React.FC = () => {
               <FileDiff size={14} />
               <span className="codex-inspector-tab-label">{t('mind_inspector.code_tab_changes')}</span>
               {!!activeSession?.file_changes?.length && <span className="codex-tab-count">{activeSession.file_changes.length}</span>}
-            </button>
-            <button
-              type="button"
-              onClick={() => setRightTab('preview')}
-              className={`codex-inspector-tab ${rightTab === 'preview' ? 'active' : ''}`}
-              title={t('mind_inspector.code_tab_preview')}
-            >
-              <FileText size={14} />
-              <span className="codex-inspector-tab-label">{t('mind_inspector.code_tab_preview')}</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => setRightTab('terminal')}
-              className={`codex-inspector-tab ${rightTab === 'terminal' ? 'active' : ''}`}
-              title={t('mind_inspector.code_tab_terminal')}
-            >
-              <TerminalIcon size={14} />
-              <span className="codex-inspector-tab-label">{t('mind_inspector.code_tab_terminal')}</span>
-              {running && termTabs.length > 0 && <span className="codex-tab-dot" aria-label={t('mind_inspector.code_working')} />}
             </button>
           </div>
 
@@ -6294,29 +6302,47 @@ const CodeAgentPage: React.FC = () => {
                 </div>
               </div>
             </div>
-          ) : rightTab === 'trajectory' ? (
-            <div className="codex-inspector-pane codex-trajectory-pane">
-              <TrajectoryPanel
-                key={activeId ?? 'none'}
-                messages={messages}
-                running={running}
-                toolLabel={(name) => toolLabel(name, t)}
-              />
+          ) : rightTab === 'workflow' ? (
+            <div className="codex-inspector-pane codex-workflow-pane">
+              <Suspense fallback={<span>{t('workflow.loading')}</span>}>
+                <WorkflowPanel key={activeId ?? 'none'} sessionId={activeId} messages={messages} running={running}
+                  view={workflowView} onViewChange={setWorkflowView} toolLabel={name => toolLabel(name, t)} />
+              </Suspense>
             </div>
           ) : rightTab === 'changes' ? (
             <div className="codex-inspector-pane">
               <ChangeListCard changes={activeSession?.file_changes ?? []} />
             </div>
-          ) : rightTab === 'preview' ? (
-            <div className="codex-inspector-pane codex-preview-pane">
+          ) : null}
+          {pagesOpened.current && <div className="codex-unified-pages" style={{ display: pageGroup ? 'flex' : 'none' }}>
+            <div className="codex-unified-tabbar">
+            <div className="codex-unified-tabs" ref={termTabsRef} role="tablist" aria-label={t('workbench.pages')}>
+              <div className="embedded-browser codex-unified-tab-host" ref={setBrowserTabHost} />
+              <div className="codex-unified-tab-host" ref={setPreviewTabHost} />
+              {termTabs.map(tab => <div key={tab.id} className={`codex-unified-tab ${rightTab === 'terminal' && tab.id === activeTermTab ? 'active' : ''}`}>
+                <button type="button" role="tab" aria-selected={rightTab === 'terminal' && tab.id === activeTermTab} title={tab.workingDirectory || tab.label} onClick={() => { setActiveTermTab(tab.id); setRightTab('terminal'); }}><TerminalIcon size={12} /><span>{tab.label}</span></button>
+                <button type="button" title={t('mind_inspector.code_close_terminal')} onClick={() => handleCloseTermTab(tab.id)}><X size={12} /></button>
+              </div>)}
+              <button type="button" className="codex-icon-btn codex-unified-new-page" onClick={() => { setRightTab('browser'); setNewPageRequest(value => value + 1); }} title={t('workbench.newPage')} aria-label={t('workbench.newPage')}><Plus size={15} /></button>
+            </div>
+            <button type="button" className="codex-icon-btn" title={t(previewFullView ? 'workbench.previewFullExit' : 'workbench.previewFullEnter')} aria-label={t(previewFullView ? 'workbench.previewFullExit' : 'workbench.previewFullEnter')} onClick={() => setPreviewFullView(value => !value)}>{previewFullView ? <Minimize2 size={14} /> : <Maximize2 size={14} />}</button>
+            </div>
+            <div className="codex-inspector-pane codex-browser-pane" style={{ display: rightTab === 'browser' ? 'flex' : 'none' }}>
+              <Suspense fallback={<span>{t('embeddedBrowser.loading')}</span>}>
+                <BrowserPanel newPageRequest={newPageRequest} onNewTerminal={handleAddTermTab} tabHost={browserTabHost} onActivate={activateBrowser} visible={rightTab === 'browser' && !layout.rightCollapsed} fullView={previewFullView} onToggleFullView={() => setPreviewFullView(value => !value)} />
+              </Suspense>
+            </div>
+            <div className="codex-inspector-pane codex-preview-pane" style={{ display: rightTab === 'preview' ? 'flex' : 'none' }}>
               <PreviewPanel
+                tabHost={previewTabHost}
+                panelActive={rightTab === 'preview'}
                 fullView={previewFullView}
                 onToggleFullView={() => setPreviewFullView(value => !value)}
                 baseKey={activeId ?? 'none'}
                 tabs={previewTabs}
                 activePath={activePreview}
                 messages={messages}
-                onSelect={setActivePreview}
+                onSelect={path => { setActivePreview(path); setRightTab('preview'); }}
                 onClose={closePreview}
                 onCloseAll={closeAllPreview}
                 onOpenFromChat={openPreview}
@@ -6325,31 +6351,7 @@ const CodeAgentPage: React.FC = () => {
                 onNotifyError={notifyError}
               />
             </div>
-          ) : (
-            <div className="codex-inspector-pane codex-terminal-pane">
-              {termTabs.length > 0 ? (
-                <>
-                  <div className="codex-terminal-tabs" ref={termTabsRef}>
-                    {termTabs.map((tab) => {
-                      const active = tab.id === activeTermTab;
-                      return (
-                        <div key={tab.id} className={`codex-terminal-tab ${active ? 'active' : ''}`} onClick={() => setActiveTermTab(tab.id)}>
-                          <span>{tab.label}</span>
-                          <button
-                            type="button"
-                            title={t('mind_inspector.code_close_terminal')}
-                            onClick={(e) => { e.stopPropagation(); handleCloseTermTab(tab.id); }}
-                            className="codex-terminal-close"
-                          >
-                            <X size={11} />
-                          </button>
-                        </div>
-                      );
-                    })}
-                    <button type="button" onClick={handleAddTermTab} className="codex-icon-btn" style={{ width: 24, height: 24 }} title={t('mind_inspector.code_new_terminal')}>
-                      <Plus size={12} />
-                    </button>
-                  </div>
+            <div className="codex-inspector-pane codex-terminal-pane" style={{ display: rightTab === 'terminal' ? 'flex' : 'none' }}>
                   <div className="codex-terminal-body">
                     {termTabs.map((tab) => (
                       <div
@@ -6370,10 +6372,8 @@ const CodeAgentPage: React.FC = () => {
                       </div>
                     ))}
                   </div>
-                </>
-              ) : null}
             </div>
-          )}
+          </div>}
         </div>
       </aside>
 

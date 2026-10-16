@@ -28,3 +28,24 @@ viewing.current = null;
 focus();
 assert.deepEqual(events, ['refresh'], 'home view refreshes without marking another conversation read');
 console.log('ChatWindow focus: stable presentation, close/reopen recovery and read refresh passed');
+
+const closeBody = source.match(/const closeWindow = useCallback\(async \(\) => \{([\s\S]*?)\n  \}, \[\]\);/)?.[1];
+assert.ok(closeBody, 'ChatWindow delegates closure to the native animation');
+const closingState = { current: false }, changes = [], nativeCalls = [];
+let completeNativeExit;
+const nativeExit = new Promise(resolve => { completeNativeExit = resolve; });
+const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+const close = new AsyncFunction('isClosingRef', 'setIsClosing', 'invoke', closeBody).bind(
+  null, closingState, value => changes.push(value),
+  async name => { nativeCalls.push(name); await nativeExit; },
+);
+const pendingClose = close();
+assert.equal(closingState.current, true);
+await close();
+assert.deepEqual(nativeCalls, ['close_chat_window'], 'repeated back presses do not restart native exit');
+assert.deepEqual(changes, [true], 'closing remains active until native exit completes');
+completeNativeExit();
+await pendingClose;
+assert.equal(closingState.current, false);
+assert.deepEqual(changes, [true, false]);
+console.log('ChatWindow back: awaits native mirrored exit and suppresses repeated close requests passed');

@@ -28,6 +28,19 @@ await resources.initializeOptionalResources();
 assert.equal(resources.optionalAssetSource('/stickers/vivian_cheer_01-v2.webp'), 'asset:C:/Pets/optional/stickers/stickers/vivian_cheer_01-v2.webp');
 assert.equal(resources.resourcePackInstalled('stickers'), true);
 assert.equal(resources.resourcePackInstalled('fonts'), false);
+
+const loadedFaces = [];
+globalThis.FontFace = class {
+  constructor(family, source) { this.family = family; this.source = source; }
+  async load() { return this; }
+};
+globalThis.document = { fonts: { add: face => loadedFaces.push(face) } };
+statuses = [{ id: 'fonts', installed: true, root: 'C:/Pets/optional/fonts' }];
+await resources.initializeOptionalResources();
+assert.deepEqual(loadedFaces.map(face => face.family), ['Ma Shan Zheng', 'Mind Comic']);
+assert.ok(loadedFaces.every(face => face.source === 'url("asset:C:/Pets/optional/fonts/fonts/ma-shan-zheng.woff2")'), 'both font names load from the installed pack before initialization completes');
+delete globalThis.FontFace;
+delete globalThis.document;
 delete globalThis.__resourceStatus;
 
 if (process.argv.includes('--dist')) {

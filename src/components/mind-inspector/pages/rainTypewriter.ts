@@ -2,7 +2,6 @@ import { fitComicText } from './comicBind';
 
 /** Reveal narration glyphs without changing text metrics. */
 export function startRainTypewriter(root: HTMLElement, startOffset = 350): () => void {
-  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return () => {};
   const selector = '.narration';
   const seen = new WeakSet<HTMLElement>();
   const observer = new MutationObserver(wrap);

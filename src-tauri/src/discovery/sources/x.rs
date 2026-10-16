@@ -1,6 +1,6 @@
 //! X (Twitter) 源 — twitter-cli cookie 重放（服务端登录态发现）
 //!
-//! 模型：扩展回传 x.com 的 auth_token + ct0（bridge.reportXCookie），
+//! 模型：从内嵌浏览器普通配置的 CookieManager 读取 x.com 的 auth_token + ct0，
 //! 服务端把它们注入 `TWITTER_AUTH_TOKEN`/`TWITTER_CT0` 环境变量，调用外部
 //! `twitter` CLI（`uv tool install twitter-cli`）执行只读发现：
 //! - `twitter search <query> --max N --json`：搜索
@@ -10,7 +10,7 @@
 //! id / text / author{name, screenName} / metrics{likes, retweets, views, ...} /
 //! createdAtISO / media。
 //!
-//! 环境变量 `VIVIAN_X_COOKIE`（完整 Cookie 头）优先于扩展回传，供调试覆盖。
+//! 环境变量 `VIVIAN_X_COOKIE`（完整 Cookie 头）优先于内嵌浏览器回传，供调试覆盖。
 //! cookie 缺失或 CLI 未安装时静默返回空（源禁用，不阻断其它源）。
 
 use async_trait::async_trait;
@@ -49,7 +49,7 @@ fn parse_auth_pair(cookie: &str) -> Option<(String, String)> {
     }
 }
 
-/// 当前可用的 X 凭据（环境变量优先，其次扩展回传）
+/// 当前可用的 X 凭据（环境变量优先，其次内嵌浏览器回传）
 fn resolve_auth() -> Option<(String, String)> {
     if let Ok(env_cookie) = std::env::var("VIVIAN_X_COOKIE") {
         if let Some(pair) = parse_auth_pair(env_cookie.trim()) {

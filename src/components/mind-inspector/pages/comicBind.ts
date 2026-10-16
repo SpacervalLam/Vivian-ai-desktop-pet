@@ -25,6 +25,9 @@ export function translateComicLabels(root: HTMLElement | null, translate: (key: 
   root.querySelectorAll<HTMLImageElement>('[data-i18n-alt]').forEach(image => {
     image.alt = translate(image.dataset.i18nAlt!);
   });
+  root.querySelectorAll<HTMLElement>('[data-i18n-label]').forEach(control => {
+    control.setAttribute('aria-label', translate(control.dataset.i18nLabel!));
+  });
   fitComicText(root);
 }
 

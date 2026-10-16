@@ -11,10 +11,12 @@ export function comicMarkup(data, page, assetBase, visit = 0, functional = false
   const position = (r,m) => `data-r="${r.join(',')}" data-m="${m.join(',')}"`;
   function shot(id, asset, r, m, order = 0, points = rectangle, cls = '', extra = '', focus = '50% 50%') {
     const phone = id === 'line-phone' ? `<img class="phone-screen-on" src="${assetBase}line-phone-on-v33.webp" alt="" aria-hidden="true">` : '';
-    const hand = id === 'skirt-hand' ? `<div class="hand-frames" aria-hidden="true" style="background-image:url(${assetBase}vivian-hand-tremble-sheet-v26.webp)"></div>` : '';
-    return `<div class="panel-shadow" ${position(r,m)}><div class="shot ${cls}" id="${id}" data-points='${JSON.stringify(points)}' style="--delay:${order*460}ms;--focus:${focus}"><div class="image-wrap"><img src="${assetBase}${asset}.webp" data-i18n-alt="comic.alt_${id}" alt="${esc(comicText(`alt_${id}`, language))}">${phone}${hand}</div>${extra}<svg class="edge" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><polygon points="${points.map(p => p.join(',')).join(' ')}"/></svg></div></div>`;
+    const entry = id === 'line-phone' && functional ? `<span class="comic-entry-hint" aria-hidden="true"><span class="comic-entry-caption" data-i18n="comic.viewConversation">${esc(comicText('viewConversation', language))}</span><span class="comic-entry-corner">↗</span></span>` : '';
+    const control = id === 'line-phone' && functional ? ` role="button" tabindex="0" data-i18n-label="comic.viewConversation" aria-label="${esc(comicText('viewConversation', language))}"` : '';
+    const hand = id === 'skirt-hand' ? `<img class="hand-frames" src="${assetBase}vivian-hand-tremble-sheet-v26.webp" alt="" aria-hidden="true">` : '';
+    return `<div class="panel-shadow" ${position(r,m)}><div class="shot ${cls}" id="${id}"${control} data-points='${JSON.stringify(points)}' style="--delay:${Math.round(order*460)}ms;--focus:${focus}"><div class="image-wrap"><img src="${assetBase}${asset}.webp" data-i18n-alt="comic.alt_${id}" alt="${esc(comicText(`alt_${id}`, language))}">${phone}${hand}</div>${extra}${entry}<svg class="edge" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><polygon points="${points.map(p => p.join(',')).join(' ')}"/></svg></div></div>`;
   }
-  const box = (cls,r,m,html,order=0,key) => `<div class="${cls}" ${key ? `data-i18n="comic.${key}"` : ''} ${position(r,m)} style="--delay:${order*460}ms">${key ? esc(comicText(key,language)) : html}</div>`;
+  const box = (cls,r,m,html,order=0,key) => `<div class="${cls}" ${key ? `data-i18n="comic.${key}"` : ''} ${position(r,m)} style="--delay:${Math.round(order*460)}ms">${key ? esc(comicText(key,language)) : html}</div>`;
   const text = key => `<span data-i18n="comic.${key}" style="white-space:pre-line">${esc(comicText(key,language))}</span>`;
   const voice = (who,r,m,html,order=1,cls='') => {
     const cloud = cls.includes('cloud');
@@ -43,9 +45,9 @@ export function comicMarkup(data, page, assetBase, visit = 0, functional = false
     const waking = frame(91,706,1764,621);
     const ringing = frame(1090,585,680,125);
     return shot('morning-curtains','vivian-nana-day/page-01-morning-curtains-v02',curtains,curtains,0,rectangle,'morning-panel')
-      + shot('morning-alarm','vivian-nana-day/page-01-alarm-clock-v02',alarm,alarm,1,rectangle,'morning-panel')
+      + shot('morning-alarm','vivian-nana-day/page-01-alarm-clock-v02',alarm,alarm,1150/460,rectangle,'morning-panel')
       + sound('叮铃铃…',ringing,ringing,0,'morning-alarm-sfx')
-      + shot('morning-waking','vivian-nana-day/page-01-vivian-waking-v01',waking,waking,2,rectangle,'morning-panel');
+      + shot('morning-waking','vivian-nana-day/page-01-vivian-waking-v01',waking,waking,3300/460,rectangle,'morning-panel');
   }
 
   // Keep historical scene indices stable, but never render the retired cover.
@@ -54,42 +56,42 @@ export function comicMarkup(data, page, assetBase, visit = 0, functional = false
   if (page === 1) return shot('platform-light','vivian-nana-day/page-04-vivian-searching-v03',[0,0,58,62],[0,0,100,42],0,[[0,0],[100,0],[95.6976276,100],[0,100]],'rain-search-panel','','30% 0%')
     + box('narration boxed-narration',[3,3,38,0],[3,3,70,0],'',1,'rainArrival')
     + shot('rain-soaked-detail','vivian-nana-day/page-04-nana-rain-soaked-v02',[0,65,55.38388,35],[0,45,100,18],3,[[0,0],[100,0],[97.456565,100],[0,100]],'rain-detail-panel','','50% 50%')
-    + shot('waiting-n','nana-umbrella-v02',[57,0,43,100],[0,66,100,34],6,[[9.36,0],[100,0],[100,100],[0,100]],'mirror','','50% 40%')
+    + shot('waiting-n','nana-umbrella-v02',[57,0,43,100],[0,66,100,34],2530/460,[[9.36,0],[100,0],[100,100],[0,100]],'mirror','','50% 40%')
     + box('narration vertical rain-poem',[1,67,5,31],[1,46,7,16],'',4,'rainPoem')
     + voice('nana',[65,71,32,25],[47,79,50,19],`<small data-i18n="comic_nana_current_thought">${esc(comicText('nanaThoughtLabel',language))}</small>${thought('nana')}`,8,'compact cloud current-thought');
 
   if (page === 2) return shot('ripple','rain-clearing-v14',[0,0,100,20],[0,0,50,14],0,[[0,0],[100,0],[100,100],[0,100]])
     + title(text('feelings'),[54,2,42,15],[54,0,46,17],'FEELINGS / 03')
-    + shot('emotion-n','nana-nai-face-adjusted-v19',[0,23,51,77],[0,19,100,36],2.25,[[0,0],[100,0],[93.95686,100],[0,100]],'','','54% 25%')
-    + shot('emotion-v','vivian-rain-canonical-v14',[49.918,23,50.082,77],[0,59,100,38],1,[[6.153912,0],[100,0],[100,100],[0,100]],'','','48% 24%')
-    + voice('nana',[3,67,37,28],[42,31,55,22],line('nana','emotions'),3,'compact cloud tail-up-left')
-    + voice('vivian',[61,76,36,23],[41,73,56,24],line('vivian','emotions'),4,'compact tail-up-left')
+    + shot('emotion-n','nana-nai-face-adjusted-v19',[0,23,51,77],[0,19,100,36],2300/460,[[0,0],[100,0],[93.95686,100],[0,100]],'','','54% 25%')
+    + shot('emotion-v','vivian-rain-canonical-v14',[49.918,23,50.082,77],[0,59,100,38],1150/460,[[6.153912,0],[100,0],[100,100],[0,100]],'','','48% 24%')
+    + voice('nana',[3,67,37,28],[42,31,55,22],line('nana','emotions'),3450/460,'compact cloud tail-up-left')
+    + voice('vivian',[61,76,36,23],[41,73,56,24],line('vivian','emotions'),4600/460,'compact tail-up-left')
     + sound('怦…',[44.4793,44,13,9],[75,55,20,8],5,'gutter-sound');
 
   if (page === 3) return shot('cafe-exterior','vivian-nana-day/cafe-rain-exterior-v02',[0,0,46,49],[0,0,100,24],0,rectangle,'cafe-establishing','','50% 50%')
     + shot('cafe-interior','vivian-nana-day/duo-window-handdrawn-v02',[0,51,46,49],[0,27,100,24],1150/460,rectangle,'','','50% 45%')
     + (functional ? '' : box('margin-line',[52,10,44,80],[3,57,94,40],text('diaryCaption'),2300/460));
 
-  if (page === 4) return shot('hands','shared-handle-edit-v14a',[0,0,65,43],[0,13,100,27],4,[[0,0],[100,0],[97.354,100],[0,100]])
+  if (page === 4) return shot('hands','shared-handle-edit-v14a',[0,0,65,43],[0,13,100,27],1150/460,[[0,0],[100,0],[97.354,100],[0,100]])
     + shot('together','shared-umbrella-landscape-v41',[63,0,37,100],[58,43,42,57],0,[[10.81,0],[100,0],[100,100],[0,100]])
-    + shot('door-smile','shared-handle-corrected-v46',[0,46,63.16,54],[0,70,28,30],5,[[0,0],[100,0],[96.5801,100],[0,100]],'','','50% 50%');
+    + shot('door-smile','shared-handle-corrected-v46',[0,46,63.16,54],[0,70,28,30],2300/460,[[0,0],[100,0],[96.5801,100],[0,100]],'','','50% 50%');
 
   if (page === 5) return shot('letter-desk','notebook-letter-v31',[67,0,33,100],[61,21,39,28],0,[[12.12,0],[100,0],[100,100],[0,100]],'','','55% 48%')
-    + box('narration ink-inset continued-caption',[70,90,28,8],[56,91,42,8],'',2,'toBeContinued')
+    + box('narration ink-inset continued-caption',[70,90,28,8],[56,91,42,8],'',2300/460,'toBeContinued')
     + (functional ? '' : title(text('plansCaption'),[3,30,56,57],[3,54,94,45],'LITTLE PLANS / 06'));
 
   if (page === 6) return shot('line-v','vivian-nana-day/page-03-vivian-phone-pajamas-v01',[0,0,43,100],[0,0,100,52],0,[[0,0],[100,0],[90.697674,100],[0,100]],'','','42% 32%')
     + box('narration boxed-narration time-caption',[2,3,4.8,12],[3,3,8,10],'',1,'morning')
-    + shot('line-phone','line-phone-off-v33',[83,58,17,42],[80,34,20,20],2)
-    + voice('vivian',[47,65,30,27],[0,37,65,19],`<small data-i18n="comic_vivian_current_thought">${esc(comicText('vivianThoughtLabel',language))}</small>${thought('vivian')}`,3,'compact cloud tail-left current-thought')
-    + (functional ? '' : box('line-chat',[47,3,53,49],[3,57,94,40],`<p class="sent">${esc(data.vivian.thought)}</p><p class="received">${esc(data.nana.thought)}</p>`,1));
+    + shot('line-phone','line-phone-off-v33',[83,58,17,42],[80,34,20,20],1150/460)
+    + voice('vivian',[47,65,30,27],[0,37,65,19],`<small data-i18n="comic_vivian_current_thought">${esc(comicText('vivianThoughtLabel',language))}</small>${thought('vivian')}`,3450/460,'compact cloud tail-left current-thought')
+    + (functional ? '' : box('line-chat',[47,3,53,49],[3,57,94,40],`<p class="sent">${esc(data.vivian.thought)}</p><p class="received">${esc(data.nana.thought)}</p>`,2300/460));
 
   if (page === 8) return shot('daily-arrival','train-arrival-v20',[0,0,66,44],[0,0,100,26],0,[[0,0],[100,0],[97.333333,100],[0,100]],'','','54% 48%')
     // Each entrance waits for the preceding one: train (1150ms), sound
-    // (450ms), straps, Vivian, tickets, then the typed closing caption.
+    // (450ms), straps, tickets, Vivian, then the typed closing caption.
     + shot('daily-straps','train-straps-v20',[0,47,31,53],[0,29,48,31],1600/460,[[0,0],[100,0],[93.16129,100],[0,100]],'','','26% 35%')
-    + shot('daily-pole','vivian-train-pole-v23',[64,0,36,100],[52,29,48,71],2750/460,[[11.111111,0],[100,0],[100,100],[0,100]],'',presence('vivian'),'46% 35%')
-    + shot('daily-tickets','train-tickets-v20',[30.88,47,33.24,53],[0,63,48,37],3900/460,[[6.377858,0],[100,0],[93.622142,100],[0,100]],'','','22% 63%')
+    + shot('daily-pole','vivian-train-pole-v23',[64,0,36,100],[52,29,48,71],3900/460,[[11.111111,0],[100,0],[100,100],[0,100]],'',presence('vivian'),'46% 35%')
+    + shot('daily-tickets','train-tickets-v20',[30.88,47,33.24,53],[0,63,48,37],2750/460,[[6.377858,0],[100,0],[93.622142,100],[0,100]],'','','22% 63%')
     + caption('把约定带在身边。',[55,53,5,38],[37,67,7,29],5050/460,true)
     + sound('咔 哒',[42,39,17,9],[29,24,23,7],1150/460,'late-sound');
 
@@ -100,7 +102,7 @@ export function comicMarkup(data, page, assetBase, visit = 0, functional = false
   const middleBottom = 100 + (rightBottom - rightTop) * 35 / 36.5;
   return shot('skirt-full','vivian-skirt-hand-v25',[30.5,0,36.5,100],functional?[50,0,50,43]:[24,0,76,43],2.5,[[0,0],[100,0],[middleBottom,100],[0,100]],'full-drawing','','50% 50%')
     + shot('hold-n','nana-umbrella-hold-v25',[65,0,35,100],[50,47,50,53],0,[[rightTop,0],[100,0],[100,100],[rightBottom,100]],'','','50% 22%')
-    + shot('skirt-hand','vivian-skirt-hand-v25',[0,65,37,35],[0,66,44,34],4,rectangle,'hand-inset','','50% 83%')
-    + voice('nana',[42,78,54,21],[0,46,45,18],line('nana','needs'),10,'tail-to-nana cloud')
+    + shot('skirt-hand','vivian-skirt-hand-v25',[0,65,37,35],[0,66,44,34],4300/460,rectangle,'hand-inset','','50% 83%')
+    + voice('nana',[42,78,54,21],[0,46,45,18],line('nana','needs'),6170/460,'tail-to-nana cloud')
     + (functional ? '' : title(text('unfinished'),[1,7,26,42],[0,0,46,37],'TO BE CONTINUED / 08'));
 }

@@ -7,6 +7,23 @@ pub struct PromptContext<'a> {
     pub dynamic: Option<&'a str>,
 }
 
+/// Only an actual short follow-up may inherit a previous topic. A new short question
+/// or a product name containing a number is not automatically a continuation.
+pub fn is_short_followup(input: &str) -> bool {
+    let text = input.trim().trim_end_matches(['?', '？', '.', '。', '!', '！']).trim().to_lowercase();
+    if text.chars().count() > 40 || text.is_empty() { return false; }
+    if ["嗯", "嗯嗯", "好", "行", "可以", "对", "不是", "是吗", "为什么", "什么意思", "怎么说", "然后呢", "展开讲讲", "说说看",
+        "ok", "okay", "yes", "no", "why", "how so", "tell me more", "go on", "continue", "そう", "はい", "いいえ", "なぜ", "続けて"]
+        .contains(&text.as_str()) { return true; }
+    if ["刚才", "这个", "那个", "继续", "接着", "that ", "this ", "what about that", "それ", "その", "続き"]
+        .iter().any(|cue| text.starts_with(cue)) { return true; }
+    // Duration/quantity answers, but not unrelated names such as "iPhone 17".
+    text.chars().any(|c| c.is_ascii_digit())
+        && text.split(|c: char| !c.is_ascii_alphabetic()).filter(|word| !word.is_empty())
+            .all(|word| ["s", "sec", "seconds", "min", "mins", "minute", "minutes", "h", "hr", "hours", "day", "days", "week", "weeks", "month", "months", "year", "years"].contains(&word))
+        && text.chars().all(|c| c.is_ascii_alphanumeric() || c.is_whitespace() || ".-/，,、零一二三四五六七八九十百千万两半分钟小时天周个月年秒个次步以内左右大约".contains(c))
+}
+
 pub fn split_prompt_context<'a>(prompt: &'a str, user_input: &str, language: &str) -> PromptContext<'a> {
     let Some(after_open) = prompt.trim_start().strip_prefix(STATIC_OPEN) else {
         return PromptContext { system: prompt.trim(), dynamic: None };
@@ -87,6 +104,15 @@ pub fn append_history(messages: &mut Vec<ChatMessage>, history: &[ChatMessage]) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn roleplay_followups_do_not_reuse_topics_for_unrelated_numbered_names() {
+        for input in ["然后呢？", "继续", "tell me more", "that sounds good", "三天，8分钟", "3 days", "それは？"] {
+            assert!(is_short_followup(input), "{input}");
+        }
+        for input in ["iPhone 17 怎么样", "Python 3.14的新功能", "帮我写个邮件", "I dislike that old movie", "", "帮我解释这个名字很长而且是一个明确的独立新问题，不应该带入旧话题里的内容"] {
+            assert!(!is_short_followup(input), "{input}");
+        }
+    }
     #[test]
     fn strips_only_terminal_input_in_each_language() {
         for lang in ["zh", "en", "ja"] {

@@ -1,0 +1,122 @@
+/* The metal chassis stays the same material in both light and dark themes. */
+.chat-device {
+  --device-radius: 49px;
+  --device-bezel: 9px;
+  position: relative;
+  isolation: isolate;
+  width: calc(100% - 14px);
+  height: calc(100% - 12px);
+  margin: 6px 7px;
+  padding: var(--device-bezel);
+  border: 1px solid #777773;
+  border-radius: var(--device-radius);
+  background:
+    linear-gradient(112deg, #f0eeea 0%, #b6b4ae 8%, #747570 24%, #b4b2aa 47%, #e0ded7 67%, #858681 86%, #d2d0c9 100%);
+  box-shadow:
+    inset 0 0 0 1px #e6e3dc,
+    inset 0 0 0 2px #777873,
+    inset 0 0 0 3px #242523,
+    inset 0 0 0 8px #080909,
+    0 2px 3px rgb(0 0 0 / 35%),
+    0 0 5px rgb(0 0 0 / 22%);
+}
+
+/* Directional reflections follow the rounded metal rim, outside the glass. */
+.chat-device::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  border: 1px solid transparent;
+  background: linear-gradient(135deg,
+    rgb(255 255 255 / 90%), transparent 22%, rgb(255 255 255 / 14%) 46%,
+    rgb(0 0 0 / 45%) 72%, rgb(255 255 255 / 70%)) border-box;
+  -webkit-mask: linear-gradient(#fff 0 0) padding-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#fff 0 0) padding-box, linear-gradient(#fff 0 0);
+  mask-composite: exclude;
+  pointer-events: none;
+}
+
+.chat-device-screen {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border-radius: calc(var(--device-radius) - var(--device-bezel) - 1px);
+  background: var(--wx-bg);
+  box-shadow: 0 0 0 1px #000, 0 0 0 2px #242525;
+}
+
+.chat-device-hardware {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.chat-device-key {
+  position: absolute;
+  left: -4px;
+  width: 3px;
+  border: 1px solid #6d6e69;
+  border-radius: 2px 0 0 2px;
+  background: linear-gradient(90deg, #797a75, #dedbd4 65%, #8c8c86);
+  box-shadow: 0 1px 1px rgb(0 0 0 / 45%), inset 0 1px rgb(255 255 255 / 55%);
+}
+
+.chat-device-key-action { top: 15%; height: 24px; }
+.chat-device-key-volume-up { top: 23%; height: 46px; }
+.chat-device-key-volume-down { top: calc(23% + 60px); height: 46px; }
+.chat-device-key-power {
+  left: auto;
+  right: -4px;
+  top: 28%;
+  height: 72px;
+  border-radius: 0 2px 2px 0;
+  background: linear-gradient(90deg, #8c8c86, #dedbd4 35%, #797a75);
+}
+
+.chat-device-antenna {
+  position: absolute;
+  width: 3px;
+  height: 5px;
+  background: #585955;
+  box-shadow: inset 0 1px 1px rgb(0 0 0 / 40%), 0 1px rgb(255 255 255 / 35%);
+}
+
+.chat-device-antenna-top-left { top: 62px; left: 0; }
+.chat-device-antenna-top-right { top: 62px; right: 0; }
+.chat-device-antenna-bottom-left { bottom: 62px; left: 0; }
+.chat-device-antenna-bottom-right { bottom: 62px; right: 0; }
+
+/* Only page content and its navigation bar move; the device chrome stays still. */
+.chat-page-stage {
+  position: relative;
+  isolation: isolate;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--wx-bg);
+}
+
+.chat-page-content {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  background: var(--wx-bg);
+}
+
+.chat-page-departing {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  user-select: none;
+}

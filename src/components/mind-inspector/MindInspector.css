@@ -343,9 +343,11 @@
 }
 .mind-inspector-root.is-touring[data-nav-revealed='true'] .mind-main { margin-left: 0; }
 
-@media (prefers-reduced-motion: reduce) {
-  .mind-scrapbook-window :is(.mind-sb-cover, .mind-nav-dock) { transition: none; }
-}
+/* Expanded browser/file previews use the entire inspector, including its cover area.
+   Derive this from the existing view state so restoring or leaving it restores navigation. */
+.mind-inspector-root:has(.workbench-root.preview-full-view) > .mind-sb-cover,
+.mind-inspector-root:has(.workbench-root.preview-full-view) .mind-nav-dock { display: none; }
+.mind-inspector-root:has(.workbench-root.preview-full-view) .mind-main { margin-left: 0; }
 
 /* 页面内容滚动区 */
 .mind-page-content {

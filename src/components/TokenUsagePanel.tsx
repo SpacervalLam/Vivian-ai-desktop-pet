@@ -6,12 +6,19 @@ import { usageCopy } from './usage/usageCopy';
 import { compactCount as compactUsageCount, CompositionChart, DailyUsageChart, formatCount as formatUsageCount, TokenBreakdown } from './usage/UsageCharts';
 import { dimensionRows, LEGACY_KEY, metricValue, routeLabelKeys, selectedDays, sumUsage, tokenTotal, type UsageMetric, type UsageReport, type UsageSelection, type UsageView } from './usage/usageData';
 import './usage/TokenUsagePanel.css';
+import { UsageActivity, UsageCache, UsageRhythm } from './usage/UsageInsights';
+import { usageInsightsCopy } from './usage/usageInsightsCopy';
+import { reportForDays } from './usage/usageInsightsData';
+import UsageContextPanel from './usage/UsageContextPanel';
 
 const views = [{ key: 'trend', icon: BarChart3 }, { key: 'models', icon: Cpu }, { key: 'routes', icon: Waypoints }, { key: 'tasks', icon: Layers3 }] as const;
 
 export default function TokenUsagePanel() {
   const { t, i18n } = useTranslation();
   const copy = usageCopy[i18n.language.startsWith('zh') ? 'zh' : i18n.language.startsWith('ja') ? 'ja' : 'en'];
+  const insight = usageInsightsCopy[i18n.language.startsWith('zh') ? 'zh' : i18n.language.startsWith('ja') ? 'ja' : 'en'];
+  const [scope, setScope] = useState<'usage' | 'context'>('usage');
+  const [date, setDate] = useState<string | null>(null);
   const formatCount = (value: number) => formatUsageCount(value, copy.locale);
   const compactCount = (value: number) => compactUsageCount(value, copy.locale);
   const [period, setPeriod] = useState(7);
@@ -29,7 +36,7 @@ export default function TokenUsagePanel() {
     const request = ++sequence.current;
     setLoading(true); setError(false);
     try {
-      const next = await invoke<UsageReport>('get_token_usage', { days: period });
+      const next = await invoke<UsageReport>('get_token_usage', { days: Math.max(56, period) });
       if (next.read_error) throw new Error(next.read_error);
       if (request !== sequence.current) return;
       setReport(next); setLoadedPeriod(period); setUpdated(new Date());
@@ -40,9 +47,10 @@ export default function TokenUsagePanel() {
     }
   }, [period]);
   useEffect(() => { void refresh(); return () => { sequence.current++; }; }, [refresh]);
-  useEffect(() => { setSelection(null); setQuery(''); }, [view, period]);
+  useEffect(() => { setSelection(null); setQuery(''); }, [view, period, date]);
   // A response for an old period must never appear under a new range label.
-  const data = loadedPeriod === period ? report : null;
+  const raw = loadedPeriod === period ? report : null;
+  const data = useMemo(() => raw ? reportForDays(raw, date ? raw.days.filter(day => day.date === date) : raw.days.slice(-period)) : null, [raw, period, date]);
   const totals = useMemo(() => sumUsage(data?.days ?? []), [data]);
   const total = tokenTotal(totals);
   const hasRecords = !!(total || totals.requests);
@@ -75,12 +83,20 @@ export default function TokenUsagePanel() {
     <DailyUsageChart key={`${selection.dimension}/${selection.key}/${selection.model ?? ''}`} days={detailDays} metric={metric} copy={copy} />
   </section>;
 
-  return <section className="usage-dashboard" aria-label={copy.title} aria-busy={loading}>
+  return <section className="usage-dashboard" aria-label={insight.title} aria-busy={scope === 'usage' && loading}>
+    <div className="usage-insight-header"><div><h2>{insight.title}</h2><p>{copy.subtitle}</p></div>
+      <div className="usage-scope-tabs" role="group" aria-label={insight.switchView}>
+        <button type="button" aria-pressed={scope === 'usage'} onClick={() => setScope('usage')}>{insight.usage}</button>
+        <button type="button" aria-pressed={scope === 'context'} onClick={() => setScope('context')}>{insight.context}</button>
+      </div>
+    </div>
+    {scope === 'context' ? <UsageContextPanel copy={insight} locale={copy.locale} /> : <>
     <div className="usage-toolbar">
-      <div><span className="usage-source"><Check size={12} />{copy.source}</span><p>{copy.subtitle}</p></div>
+      <div><span className="usage-source"><Check size={12} />{copy.source}</span></div>
       <div className="usage-toolbar-controls">
-        <select aria-label={copy.date} value={period} onChange={(event) => setPeriod(Number(event.target.value))}>
-          {[1, 7, 30, 90].map((days) => <option key={days} value={days}>{days === 1 ? copy.today : `${days} ${copy.days}`}</option>)}
+        <select aria-label={copy.date} value={date ? 'selected-day' : String(period)} onChange={(event) => { if (event.target.value !== 'selected-day') { setDate(null); setPeriod(Number(event.target.value)); } }}>
+          {date && <option value="selected-day">{date}</option>}
+          {[1, 7, 30, 90, 365].map((days) => <option key={days} value={days}>{days === 1 ? copy.today : `${days} ${copy.days}`}</option>)}
         </select>
         <button type="button" className="usage-icon-button" onClick={() => void refresh()} disabled={loading} aria-label={copy.refresh} title={copy.refresh}>
           <RefreshCw size={15} className={loading ? 'usage-spinning' : ''} />
@@ -90,6 +106,7 @@ export default function TokenUsagePanel() {
     <div className="usage-source-note"><Info size={14} /><span>{copy.scopeHelp}</span></div>
     {loading && !data && <div className="usage-empty" role="status"><RefreshCw className="usage-spinning" size={24} /><h3>{copy.loading}</h3></div>}
     {error && <div className="usage-error" role="alert"><Info size={17} /><div><strong>{data ? copy.stale : copy.error}</strong><p>{copy.errorHelp}</p></div><button type="button" onClick={() => void refresh()} disabled={loading}>{copy.retry}</button></div>}
+    {raw && !hasRecords && <UsageActivity days={raw.days} metric={metric} date={date} onDate={setDate} copy={copy} insight={insight} />}
     {!loading && !error && data && !hasRecords && <div className="usage-empty"><Activity size={32} /><h3>{copy.empty}</h3><p>{copy.emptyHelp}</p></div>}
     {data && hasRecords && <>
       <div className="usage-kpis">
@@ -99,6 +116,11 @@ export default function TokenUsagePanel() {
           { label: copy.cacheShare, value: inputTotal ? `${(totals.hit / inputTotal * 100).toFixed(1)}%` : '—', note: copy.cacheNote, icon: Layers3 },
           { label: copy.activeModels, value: formatCount(modelCount), note: copy.modelNote, icon: Cpu },
         ].map((stat) => <div className="usage-kpi" key={stat.label}><div><span>{stat.label}</span><stat.icon size={15} /></div><strong title={stat.exact}>{stat.value}</strong><small>{stat.note}</small></div>)}
+      </div>
+      <UsageRhythm days={data.days} metric={metric} copy={copy} insight={insight} />
+      <div className="usage-insights-grid">
+        {raw && <UsageActivity days={raw.days} metric={metric} date={date} onDate={setDate} copy={copy} insight={insight} />}
+        <UsageCache report={data} copy={copy} insight={insight} onModels={() => changeView('models')} />
       </div>
       <div className="usage-view-controls">
         <div className="usage-view-tabs" role="tablist" aria-label={copy.title}>
@@ -168,5 +190,6 @@ export default function TokenUsagePanel() {
       </div>
     </>}
     {updated && data && <div className="usage-updated">{copy.updated} {updated.toLocaleTimeString(i18n.language, { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</div>}
+    </>}
   </section>;
 }

@@ -116,10 +116,7 @@ fn recent_context(user: &str, messages: &[ChatMessage]) -> String {
 }
 
 fn is_continuation(user: &str) -> bool {
-    let text = user.trim().to_lowercase();
-    matches!(text.as_str(), "嗯" | "好" | "行" | "可以" | "对" | "不是" | "ok" | "yes" | "no")
-        || (text.chars().count() <= 20 && text.chars().any(|c| c.is_ascii_digit()))
-        || ["刚才", "这个", "那个", "继续", "接着", "that", "this", "continue", "それ", "続き"].iter().any(|cue| text.contains(cue))
+    crate::pipeline::message_context::is_short_followup(user)
 }
 
 #[cfg(test)]

@@ -5,7 +5,6 @@ export function startComicPaperLoop(viewport: HTMLElement): () => void {
   let frame = 0, refreshFrame = 0, last = 0, position = 0, period = 0;
   const copies: HTMLElement[] = [];
   let observed: HTMLElement[] = [];
-  const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
   const removeCopies = () => { copies.splice(0).forEach(copy => copy.remove()); };
   const observer = new MutationObserver(() => {
     cancelAnimationFrame(refreshFrame);
@@ -29,7 +28,7 @@ export function startComicPaperLoop(viewport: HTMLElement): () => void {
     removeCopies();
     const originals = [...viewport.children].filter((node): node is HTMLElement => node instanceof HTMLElement && !node.hidden);
     period = 0;
-    if (!reduced && originals.length && viewport.scrollHeight > viewport.clientHeight + 2) {
+    if (originals.length && viewport.scrollHeight > viewport.clientHeight + 2) {
       originals.forEach(original => {
         const copy = original.cloneNode(true) as HTMLElement;
         copy.classList.add('comic-loop-copy');

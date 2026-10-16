@@ -589,6 +589,18 @@ impl ToolSystem {
     }
 
     /// 获取所有工具的 OpenAI 格式定义
+    pub fn work_extension_names(&self) -> Vec<String> {
+        let tools = self.tools.read();
+        let mut names: Vec<_> = tools.values()
+            .filter(|t| t.is_custom() || t.category() == ToolCategory::Mcp)
+            .filter(|t| !t.name().starts_with("mcp__browser__"))
+            .filter(|t| !self.is_tool_disabled(t.name(), AgentSide::Work))
+            .map(|t| t.name().to_string()).collect();
+        names.sort();
+        names
+    }
+
+    /// 获取所有工具的 OpenAI 格式定义
     pub fn get_openai_tools(&self) -> Vec<Value> {
         let tools = self.tools.read();
         tools.values().map(|t| t.to_openai_format()).collect()
