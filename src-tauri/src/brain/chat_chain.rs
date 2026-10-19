@@ -131,6 +131,7 @@ pub struct BrainChatChain {
     reflection: Arc<ReflectionRunnable>,
     reflection_gate: Arc<tokio::sync::Mutex<()>>,
     reflection_revision: Arc<AtomicU64>,
+    task_tracker: parking_lot::Mutex<crate::pipeline::task_continuity::TaskTracker>,
     /// 工具调用管理器：每次对话前刷新 context，让工具感知情绪/关系/记忆
     pub tool_call_manager: Option<Arc<ToolCallManager>>,
     /// 用户事实画像存储（name/age/gender/occupation/location + 自由事实）
@@ -492,6 +493,7 @@ impl BrainChatChain {
             reflection,
             reflection_gate: Arc::new(tokio::sync::Mutex::new(())),
             reflection_revision: Arc::new(AtomicU64::new(0)),
+            task_tracker: parking_lot::Mutex::new(crate::pipeline::task_continuity::TaskTracker::default()),
             tool_call_manager: tcm_handle,
             user_facts,
             hook_judge,
@@ -1150,6 +1152,18 @@ Choose the appropriate expression and motion. Leave empty if nothing fits.",
         &self, user_input: &str, stream: bool, skip_dialogue_write: bool, visual_evidence: Option<&str>,
     ) -> VivianResult<AiResponse> {
         let mut state = self.prepare_pipeline_state(user_input).await?;
+        if !skip_dialogue_write && state.current_channel != "cross_character" {
+            let request = AIResponseGenerationRunnable::requests_execution(&state);
+            let (revision, context) = self.task_tracker.lock().begin(user_input, request,
+                !state.messages.iter().any(|message| matches!(message.role.as_str(), "user" | "assistant")),
+                crate::memory::types::current_timestamp());
+            state.metadata["task_turn_revision"] = serde_json::json!(revision);
+            if let Some(context) = context {
+                tracing::debug!(character = %self.char_id, phase = ?context.task.phase,
+                    needs_clarification = context.needs_clarification, "[TaskContinuity] resuming task context");
+                state.metadata["task_continuation"] = serde_json::json!(context);
+            }
+        }
         if let Some(evidence) = visual_evidence {
             state.metadata["visual_evidence"] = serde_json::json!(evidence);
         }
@@ -1159,6 +1173,14 @@ Choose the appropriate expression and motion. Leave empty if nothing fits.",
             .await?;
 
         self.learn_tool_habits(user_input, &final_state, skip_dialogue_write);
+        if let Some(revision) = final_state.metadata["task_turn_revision"].as_u64() {
+            let receipts = final_state.metadata.get("verified_tool_receipts").and_then(serde_json::Value::as_array)
+                .map(Vec::as_slice).unwrap_or(&[]);
+            self.task_tracker.lock().observe(revision, user_input,
+                AIResponseGenerationRunnable::requests_execution(&final_state),
+                &MemorySavingRunnable::strip_json_if_any(&response.text), receipts,
+                crate::memory::types::current_timestamp());
+        }
 
         // 画像直接消费真实用户原话，不等待批量长期记忆抽取或会话压缩。
         let (fact_input, speaker, _) = self.parse_speaker_prefix(user_input);

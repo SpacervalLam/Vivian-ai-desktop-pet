@@ -611,14 +611,17 @@ impl PromptBuildingStep {
 
         let recall = self.tool_semantic_filter.as_ref().and_then(|filter| {
             let (input, _) = crate::cross_character::parse_speaker_prefix(&state.user_input);
+            let goal = state.metadata.get("task_continuation").and_then(|context| context["task"]["goal"].as_str())
+                .filter(|_| super::generation::AIResponseGenerationRunnable::requests_execution(state));
+            let input = goal.map(|goal| format!("{goal}\nCurrent selection: {input}")).unwrap_or(input);
             if input.trim().is_empty() && state.fast_perception.as_ref().is_none_or(|fp| fp.query_embedding.is_empty()) { return Some(Vec::new()); }
-            let owned = if state.fast_perception.as_ref().is_none_or(|fp| fp.query_embedding.is_empty()) {
+            let owned = if goal.is_some() || state.fast_perception.as_ref().is_none_or(|fp| fp.query_embedding.is_empty()) {
                 filter.embed_query(&input).ok()
             } else { None };
             let current = owned.as_deref().or_else(|| state.fast_perception.as_ref().map(|fp| fp.query_embedding.as_slice()));
             let Some(embedding) = current.filter(|v| !v.is_empty()) else { return Some(Vec::new()); };
             let names = filter.filter_weighted(ts, embedding, context_embedding,
-                semantic_recall_top_n(scene), TOOL_RECALL_MIN_SIM, proposal_followup_query(state).is_some())
+                semantic_recall_top_n(scene), TOOL_RECALL_MIN_SIM, goal.is_some() || proposal_followup_query(state).is_some())
                 .into_iter().map(|r| r.name).collect::<Vec<_>>();
             // An unavailable index falls back to discovery, never the entire schema registry.
             Some(names)

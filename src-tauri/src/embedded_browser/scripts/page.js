@@ -760,6 +760,26 @@ globalThis.vivianCreatePage = () => {
 
   function extractAction(args) {
     try {
+      if (args.extractor === 'images') {
+        const images = [];
+        const seen = new Set();
+        for (const img of document.querySelectorAll('img')) {
+          if (!isVisible(img)) continue;
+          const raw = img.currentSrc || img.getAttribute('src');
+          if (!raw) continue;
+          let url;
+          try { url = new URL(raw, location.href); } catch (_) { continue; }
+          if (!['http:', 'https:'].includes(url.protocol) || seen.has(url.href)) continue;
+          // Ignore loaded tracking pixels; keep lazy images whose dimensions are not known yet.
+          if (img.naturalWidth > 0 && img.naturalHeight > 0
+              && (img.naturalWidth < 32 || img.naturalHeight < 32)) continue;
+          seen.add(url.href);
+          images.push({ url: url.href, alt: clean(img.getAttribute('alt') || '').slice(0, 200),
+            source_url: location.href, width: img.naturalWidth || 0, height: img.naturalHeight || 0 });
+          if (images.length >= 30) break;
+        }
+        return { text: JSON.stringify(images) };
+      }
       return { text: JSON.stringify(globalThis.vivianExtractPlatform(args.extractor)) };
     } catch (error) {
       throw new ActionError('extraction-failed', error.message);

@@ -1267,9 +1267,7 @@ const ToolProcessGroup: React.FC<{
         {stats.failed > 0 && (
           <span className="codex-tool-group-fail">✕ {stats.failed}</span>
         )}
-        {stats.failed > 0 ? (
-          <span className="codex-tool-group-status codex-tool-status-err">{t('workbench.failed')}</span>
-        ) : settled ? (
+        {stats.failed > 0 ? null : settled ? (
           <span className="codex-tool-group-status codex-tool-group-status-ok">
             {stats.pending > 0 ? t('workbench.stopped') : t('mind_inspector.code_tool_group_done', { defaultValue: '已完成' })}
           </span>
@@ -5436,6 +5434,7 @@ const CodeAgentPage: React.FC = () => {
         onKeyDown={(event) => { if (event.key === 'Escape' && leftPeekVisible) { cancelLeftPeekClose(); setLeftPeekOpen(false); } }}
         role={leftDrawer ? 'dialog' : 'complementary'}
         data-browser-overlay={leftPeekVisible || leftDrawer || undefined}
+        data-browser-overlay-width={leftPeekVisible || leftDrawer ? Math.min(leftWidth, rootWidth - 20) : undefined}
         aria-label={t('mind_inspector.code_expand_left')}
         aria-modal={leftDrawer || undefined}
       >

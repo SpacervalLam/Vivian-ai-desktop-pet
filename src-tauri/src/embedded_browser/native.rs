@@ -9,11 +9,12 @@ use windows::{
     core::{Interface, BOOL, PCWSTR, PWSTR},
     Win32::{
         Foundation::{HWND, RECT},
+        Graphics::Gdi::{CreateRectRgn, CreateRoundRectRgn, CombineRgn, DeleteObject, SetWindowRgn, RGN_DIFF, RGN_AND},
         System::Com::CoTaskMemFree,
         UI::{
             Input::KeyboardAndMouse::{GetKeyState, VK_CONTROL, VK_SHIFT},
             WindowsAndMessaging::{
-                CreateWindowExW, DestroyWindow, GetClientRect, WINDOW_EX_STYLE, WS_POPUP,
+                CreateWindowExW, DestroyWindow, IsWindow, SetParent, SetWindowPos, ShowWindow, SW_HIDE, SW_SHOWNA, WINDOW_EX_STYLE, WS_POPUP, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, SWP_NOACTIVATE, SWP_NOZORDER,
             },
         },
     },
@@ -40,6 +41,8 @@ struct Host {
     owner: String,
     hwnd: HWND,
     parked_hwnd: HWND,
+    surface_hwnd: HWND,
+    clip: Option<BrowserClip>,
     state: BrowserSnapshot,
     environment: Option<ICoreWebView2Environment>,
     tabs: HashMap<String, NativeTab>,
@@ -81,6 +84,7 @@ impl Drop for Host {
             for (_, tab) in self.tabs.drain() {
                 let _ = tab.controller.Close();
             }
+            let _ = DestroyWindow(self.surface_hwnd);
             let _ = DestroyWindow(self.parked_hwnd);
         }
     }
@@ -138,15 +142,51 @@ fn fail(host: &HostRef, error: impl std::fmt::Display) {
     host.borrow_mut().state.error = Some(error.to_string());
     publish(host, false);
 }
+fn create_surface(parent: HWND) -> windows::core::Result<HWND> {
+    unsafe { CreateWindowExW(WINDOW_EX_STYLE(0), PCWSTR(wide("STATIC").as_ptr()),
+        PCWSTR(wide("Vivian browser viewport").as_ptr()),
+        WS_CHILD | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
+        0, 0, 1, 1, Some(parent), None, None, None) }
+}
+
+/// Window regions affect painting/hit testing, never the webpage's layout size.
+unsafe fn clip_surface(surface: HWND, rect: RECT, scale: f64, clip: Option<&BrowserClip>) -> windows::core::Result<()> {
+    let width = (rect.right - rect.left).max(0);
+    let height = (rect.bottom - rect.top).max(0);
+    let radius = clip.map_or(0, |c| (c.radius * scale).round() as i32);
+    let region = if radius > 0 { CreateRoundRectRgn(0, 0, width + 1, height + 1, radius * 2, radius * 2) }
+        else { CreateRectRgn(0, 0, width, height) };
+    if region.is_invalid() { return Err(windows::core::Error::from_win32()); }
+    if let Some(clip) = clip {
+        for (index, bounds) in std::iter::once(&clip.viewport).chain(clip.overlays.iter()).enumerate() {
+            let part = CreateRectRgn(
+                if index == 0 { (bounds.x * scale).ceil() as i32 - rect.left } else { (bounds.x * scale).floor() as i32 - rect.left },
+                if index == 0 { (bounds.y * scale).ceil() as i32 - rect.top } else { (bounds.y * scale).floor() as i32 - rect.top },
+                if index == 0 { ((bounds.x + bounds.width) * scale).floor() as i32 - rect.left } else { ((bounds.x + bounds.width) * scale).ceil() as i32 - rect.left },
+                if index == 0 { ((bounds.y + bounds.height) * scale).floor() as i32 - rect.top } else { ((bounds.y + bounds.height) * scale).ceil() as i32 - rect.top });
+            if part.is_invalid() { let _ = DeleteObject(region.into()); return Err(windows::core::Error::from_win32()); }
+            CombineRgn(Some(region), Some(region), Some(part), if index == 0 { RGN_AND } else { RGN_DIFF });
+            let _ = DeleteObject(part.into());
+        }
+    }
+    if SetWindowRgn(surface, Some(region), true) == 0 {
+        let _ = DeleteObject(region.into());
+        return Err(windows::core::Error::from_win32());
+    }
+    // Windows owns the region after SetWindowRgn succeeds.
+    Ok(())
+}
+
 fn apply_bounds(host: &HostRef) -> windows::core::Result<()> {
     unsafe {
-        let (rect, controllers) = {
+        let (rect, scale, surface, clip, controllers) = {
             let h = host.borrow();
             let scale = h
                 .app
                 .get_webview_window(&h.owner)
                 .and_then(|w| w.scale_factor().ok())
                 .unwrap_or(1.0);
+            let scale = h.clip.as_ref().map_or(scale, |clip| clip.pixel_ratio);
             let b = h.bounds;
             let mut rect = RECT {
                 left: (b.x * scale).round() as i32,
@@ -161,14 +201,6 @@ fn apply_bounds(host: &HostRef) -> windows::core::Result<()> {
                     right: 1280,
                     bottom: 900,
                 };
-            }
-            if h.state
-                .active
-                .as_ref()
-                .and_then(|id| h.tabs.get(id))
-                .is_some_and(|t| t.fullscreen)
-            {
-                GetClientRect(h.hwnd, &mut rect)?;
             }
             let controllers = h
                 .tabs
@@ -189,13 +221,20 @@ fn apply_bounds(host: &HostRef) -> windows::core::Result<()> {
                     )
                 })
                 .collect::<Vec<_>>();
-            (rect, controllers)
+            (rect, scale, h.surface_hwnd, h.clip.clone(), controllers)
         };
+        let surface_visible = controllers.iter().any(|(_, visible, active)| *visible && *active);
+        clip_surface(surface, rect, scale, clip.as_ref())?;
+        SetWindowPos(surface, None, rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top, SWP_NOACTIVATE | SWP_NOZORDER)?;
+        let _ = ShowWindow(surface, if surface_visible { SW_SHOWNA } else { SW_HIDE });
+        let local = RECT { left: 0, top: 0, right: rect.right - rect.left, bottom: rect.bottom - rect.top };
         // COM calls can dispatch events synchronously; never retain a RefCell borrow across them.
         for (controller, visible, active) in controllers {
             controller.SetIsVisible(visible)?;
             if active {
-                controller.SetBounds(rect)?;
+                let mut previous = RECT::default();
+                controller.Bounds(&mut previous)?;
+                if previous != local { controller.SetBounds(local)?; }
                 controller.NotifyParentWindowPositionChanged()?;
             }
         }
@@ -291,11 +330,14 @@ fn initialize(app: tauri::AppHandle, owner: String) -> Result<HostRef, String> {
         .get_webview_window(&owner)
         .and_then(|w| w.hwnd().ok())
         .unwrap_or(parked_hwnd);
+    let surface_hwnd = create_surface(hwnd).map_err(|e| e.to_string())?;
     let host = Rc::new(RefCell::new(Host {
         app,
         owner: owner.clone(),
         hwnd,
         parked_hwnd,
+        surface_hwnd,
+        clip: None,
         state,
         environment: None,
         tabs: HashMap::new(),
@@ -411,7 +453,7 @@ fn create_tab(
                         return Ok(());
                     }
                     let core = controller.CoreWebView2()?;
-                    let parent = host.borrow().hwnd;
+                    let parent = host.borrow().surface_hwnd;
                     controller.SetParentWindow(if host.borrow().tasks.contains_key(&id) {
                         host.borrow().parked_hwnd
                     } else {
@@ -1301,12 +1343,20 @@ pub async fn set_scrollbar_style(app: tauri::AppHandle, owner: String, css: Stri
     }).map_err(|e| e.to_string())?;
     rx.await.map_err(|e| e.to_string())
 }
+// Compatibility entry for the native browser smoke harness.
+#[allow(dead_code)]
 pub async fn layout(
     app: tauri::AppHandle,
     owner: String,
     bounds: BrowserBounds,
     visible: bool,
     sequence: u64,
+) -> Result<(), String> {
+    layout_clipped(app, owner, bounds, visible, sequence, None).await
+}
+pub async fn layout_clipped(
+    app: tauri::AppHandle, owner: String, bounds: BrowserBounds, visible: bool,
+    sequence: u64, clip: Option<BrowserClip>,
 ) -> Result<(), String> {
     let (tx, rx) = tokio::sync::oneshot::channel();
     app.run_on_main_thread(move || {
@@ -1330,6 +1380,7 @@ pub async fn layout(
                 let mut h = h.borrow_mut();
                 if sequence > h.last_layout {
                     h.bounds = bounds;
+                    h.clip = clip;
                     h.visible = visible;
                     h.last_layout = sequence;
                     true
@@ -1357,24 +1408,25 @@ pub fn destroy(owner: &str) {
 }
 
 fn attach(host: &HostRef, parent: HWND) -> Result<(), String> {
-    let controllers = {
-        let mut h = host.borrow_mut();
-        if h.hwnd == parent {
-            return Ok(());
-        }
-        h.hwnd = parent;
-        h.tabs
-            .iter()
+    let (previous_parent, old_surface, controllers) = {
+        let h = host.borrow();
+        (h.hwnd, h.surface_hwnd, h.tabs.iter()
             .filter(|(id, tab)| !tab.input_parked && !h.tasks.contains_key(*id))
-            .map(|(_, t)| t.controller.clone())
-            .collect::<Vec<_>>()
+            .map(|(_, t)| t.controller.clone()).collect::<Vec<_>>())
     };
+    let exists = unsafe { IsWindow(Some(old_surface)).as_bool() };
+    if previous_parent == parent && exists { return Ok(()); }
+    let surface = if exists {
+        unsafe { SetParent(old_surface, Some(parent)).map_err(|e| e.to_string())?; }
+        old_surface
+    } else { create_surface(parent).map_err(|e| e.to_string())? };
+    {
+        let mut h = host.borrow_mut();
+        h.hwnd = parent;
+        h.surface_hwnd = surface;
+    }
     for controller in controllers {
-        unsafe {
-            controller
-                .SetParentWindow(parent)
-                .map_err(|e| e.to_string())?;
-        }
+        unsafe { controller.SetParentWindow(surface).map_err(|e| e.to_string())?; }
     }
     Ok(())
 }
@@ -1399,5 +1451,44 @@ pub fn park(owner: &str) {
         };
         let _ = apply_bounds(&h);
         let _ = attach(&h, parent);
+    }
+}
+
+#[cfg(test)]
+mod viewport_clip_tests {
+    use super::*;
+    use windows::Win32::Graphics::Gdi::{GetWindowRgn, PtInRegion};
+    use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
+
+    #[test]
+    fn native_region_excludes_sidebar_without_resizing_page() {
+        unsafe {
+            let parent = CreateWindowExW(WINDOW_EX_STYLE(0), PCWSTR(wide("STATIC").as_ptr()),
+                PCWSTR(wide("viewport clip test").as_ptr()), WS_POPUP,
+                0, 0, 1200, 900, None, None, None, None).unwrap();
+            let surface = create_surface(parent).unwrap();
+            SetWindowPos(surface, None, 100, 120, 800, 600, SWP_NOACTIVATE | SWP_NOZORDER).unwrap();
+            let rect = RECT { left: 100, top: 120, right: 900, bottom: 720 };
+            let clip = BrowserClip {
+                pixel_ratio: 1.25, radius: 0.0,
+                viewport: BrowserBounds { x: 88.0, y: 96.0, width: 632.0, height: 480.0 },
+                overlays: vec![BrowserBounds { x: 0.0, y: 0.0, width: 268.0, height: 900.0 }],
+            };
+            clip_surface(surface, rect, 1.25, Some(&clip)).unwrap();
+            let region = CreateRectRgn(0, 0, 0, 0);
+            assert_ne!(GetWindowRgn(surface, region).0, 0);
+            assert!(!PtInRegion(region, 5, 100).as_bool(), "clip to the actual viewport left edge");
+            assert!(!PtInRegion(region, 100, 100).as_bool(), "sidebar reveals the HTML window beneath");
+            assert!(PtInRegion(region, 400, 100).as_bool(), "uncovered browser stays live");
+            let mut actual = RECT::default();
+            GetClientRect(surface, &mut actual).unwrap();
+            assert_eq!((actual.right, actual.bottom), (800, 600), "clipping preserves document bounds");
+            clip_surface(surface, rect, 1.25, None).unwrap();
+            GetWindowRgn(surface, region);
+            assert!(PtInRegion(region, 100, 100).as_bool(), "closing the sidebar restores the covered area");
+            let _ = DeleteObject(region.into());
+            DestroyWindow(surface).unwrap();
+            DestroyWindow(parent).unwrap();
+        }
     }
 }

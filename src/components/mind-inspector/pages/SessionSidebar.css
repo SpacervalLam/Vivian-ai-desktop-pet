@@ -1,6 +1,9 @@
 .session-sidebar { padding: 0 8px 12px; font-size: 13px; line-height: 1.5; }
 .session-sidebar header { display: flex; align-items: center; gap: 6px; padding-inline: 6px; }
-.session-sidebar header > span { flex: 1; }
+/* The shared label's trailing decorative line must not occupy action space. */
+.session-sidebar header.codex-sidebar-label::after { display: none; }
+.session-sidebar header > span { flex: 1; min-width: 0; }
+.session-sidebar header > button { flex-shrink: 0; }
 .session-sidebar button { display: inline-flex; align-items: center; justify-content: center; padding: 4px; border: 0; border-radius: 5px; color: inherit; background: transparent; font: inherit; cursor: pointer; }
 .session-sidebar button:hover { background: var(--codex-accent-soft); }
 .session-sidebar-section { margin: 10px 0 14px; }

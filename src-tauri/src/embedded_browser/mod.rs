@@ -37,17 +37,19 @@ pub async fn embedded_browser_layout(
     visible: bool,
     sequence: u64,
     scrollbar_css: Option<String>,
+    clip: Option<model::BrowserClip>,
 ) -> Result<(), String> {
     bounds.validate()?;
+    if let Some(clip) = &clip { clip.validate()?; }
     let owner = owner(&webview)?;
     #[cfg(windows)]
     {
         if let Some(css) = scrollbar_css { native::set_scrollbar_style(app.clone(), owner.clone(), css).await?; }
-        native::layout(app, owner, bounds, visible, sequence).await
+        native::layout_clipped(app, owner, bounds, visible, sequence, clip).await
     }
     #[cfg(not(windows))]
     {
-        let _ = (app, owner, bounds, visible, sequence, scrollbar_css);
+        let _ = (app, owner, bounds, visible, sequence, scrollbar_css, clip);
         Ok(())
     }
 }

@@ -297,7 +297,7 @@ struct FocusEmulation {
 fn restore_input_surface(h: &HostRef, id: &str) -> Result<(), String> {
     let target = {
         let mut host = h.borrow_mut();
-        let hwnd = host.hwnd;
+        let hwnd = host.surface_hwnd;
         let Some(tab) = host.tabs.get_mut(id) else {
             return Ok(());
         };
@@ -374,7 +374,7 @@ async fn task(
     if args.get("extractor").is_some()
         && !matches!(
             extractor,
-            Some("bilibili" | "xiaohongshu" | "douyin" | "zhihu")
+            Some("bilibili" | "xiaohongshu" | "douyin" | "zhihu" | "images")
         )
     {
         return Err("未知平台提取器".into());

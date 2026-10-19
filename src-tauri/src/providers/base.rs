@@ -32,6 +32,8 @@ pub struct ProviderCallOptions {
     pub enable_search: Option<bool>,
     pub temperature: Option<f64>,
     pub max_tokens: Option<u32>,
+    /// Omit output-token limits for this call, including provider defaults and body overrides.
+    pub omit_output_limit: bool,
     /// 存在惩罚：对本轮已出现过的 token 施加固定惩罚，抑制"同一句话/同一个词反复出现"。
     ///
     /// **协议支持面是不完整的**，因此按 provider 分别决定是否写入请求体：
@@ -67,6 +69,7 @@ impl ProviderCallOptions {
             enable_search: inner.enable_search.or(self.enable_search),
             temperature: inner.temperature.or(self.temperature),
             max_tokens: inner.max_tokens.or(self.max_tokens),
+            omit_output_limit: inner.omit_output_limit || self.omit_output_limit,
             presence_penalty: inner.presence_penalty.or(self.presence_penalty),
             frequency_penalty: inner.frequency_penalty.or(self.frequency_penalty),
             reasoning: inner.reasoning.or(self.reasoning),
@@ -221,6 +224,8 @@ pub struct LLMRequest {
     pub temperature_override: Option<f64>,
     /// 请求级 max_tokens 覆盖(None 表示沿用 ModelRouter 默认值)
     pub max_tokens_override: Option<u32>,
+    /// Let the service choose the output length instead of sending an application limit.
+    pub omit_output_limit: bool,
     /// 请求级存在惩罚覆盖（None 表示沿用 `ModelRouter` 按任务类型给出的默认值）。
     ///
     /// 协议支持面见 `ProviderCallOptions::presence_penalty`：只有 Chat Completions
@@ -255,6 +260,7 @@ impl LLMRequest {
             enable_search: false,
             temperature_override: None,
             max_tokens_override: None,
+            omit_output_limit: false,
             presence_penalty: None,
             frequency_penalty: None,
             json_schema: None,
@@ -301,6 +307,13 @@ impl LLMRequest {
     /// 设置请求级 max_tokens
     pub fn with_max_tokens(mut self, tokens: u32) -> Self {
         self.max_tokens_override = Some(tokens);
+        self.omit_output_limit = false;
+        self
+    }
+
+    pub fn without_output_limit(mut self) -> Self {
+        self.max_tokens_override = None;
+        self.omit_output_limit = true;
         self
     }
 
@@ -820,7 +833,7 @@ impl ProviderBase {
         crate::providers::reasoning_profiles::apply_sampling_switches(
             body,
             !self.should_omit_temperature() && self.send_temperature.load(Ordering::Relaxed),
-            self.send_max_tokens.load(Ordering::Relaxed),
+            self.send_max_tokens.load(Ordering::Relaxed) && !ProviderCallOptions::current().omit_output_limit,
             &sampling,
         );
     }
@@ -829,9 +842,20 @@ impl ProviderBase {
     /// Legacy parameter patches obey sampling switches; full-body customization runs last.
     pub fn finalize_body(&self, body: Value) -> Value {
         let customization = self.request_customization.read();
-        let body = customization.finalize(body, self.effective_reasoning(), &self.model,
+        let mut body = customization.finalize(body, self.effective_reasoning(), &self.model,
             !self.should_omit_temperature() && self.send_temperature.load(Ordering::Relaxed),
             self.send_max_tokens.load(Ordering::Relaxed));
+        // Explicitly unlimited calls must also override limits introduced by full-body patches.
+        if ProviderCallOptions::current().omit_output_limit {
+            crate::providers::reasoning_profiles::apply_sampling_switches(
+                &mut body, true, false, &customization.sampling(),
+            );
+            if let Some(agent) = body.get_mut("agent") {
+                crate::providers::reasoning_profiles::apply_sampling_switches(
+                    agent, true, false, &customization.sampling(),
+                );
+            }
+        }
         body
     }
 
@@ -1193,6 +1217,41 @@ mod usage_reporting_tests {
 #[cfg(test)]
 mod request_parameter_switch_tests {
     use super::*;
+    #[tokio::test]
+    async fn unlimited_output_removes_default_and_override_limits_only_for_this_call() {
+        let base = ProviderBase::new("dummy".into(), "https://example.test".into(),
+            "test-model".into(), 0.7, 1400);
+        base.request_customization.write().overrides = Some(serde_json::json!({
+            "$request":{"mode":"merge","body":{"max_tokens":1400,"max_output_tokens":2048}}
+        }));
+        let body = serde_json::json!({
+            "temperature":0.7,"max_tokens":1400,"max_output_tokens":1400,"max_completion_tokens":1400,
+            "generationConfig":{"maxOutputTokens":1400},
+            "parameter":{"chat":{"max_tokens":1400}},
+            "agent":{"max_output_tokens":1400},
+            "tools":[{"parameters":{"properties":{"max_tokens":{"type":"integer"}}}}]
+        });
+        let request = LLMRequest::new(TASK_WORK_AGENT, vec![]).with_max_tokens(1400).without_output_limit();
+        assert!(request.omit_output_limit);
+        assert!(request.max_tokens_override.is_none());
+        scope_provider_call(ProviderCallOptions { omit_output_limit: request.omit_output_limit,
+            ..Default::default() }, async {
+            // Nested route/schema scopes must not restore the configured limit.
+            scope_provider_call(ProviderCallOptions::default(), async {
+                let sent = base.finalize_body(body.clone());
+                for path in ["/max_tokens", "/max_output_tokens", "/max_completion_tokens",
+                    "/generationConfig/maxOutputTokens", "/parameter/chat/max_tokens", "/agent/max_output_tokens"] {
+                    assert!(sent.pointer(path).is_none(), "{path}");
+                }
+                assert_eq!(sent["temperature"], 0.7);
+                assert_eq!(sent["tools"][0]["parameters"]["properties"]["max_tokens"]["type"], "integer");
+            }).await;
+        }).await;
+        assert!(!ProviderCallOptions::current().omit_output_limit);
+        assert_eq!(base.finalize_body(body)["max_tokens"], 1400);
+        assert!(!LLMRequest::new(TASK_WORK_AGENT, vec![]).without_output_limit().with_max_tokens(64).omit_output_limit);
+    }
+
     #[tokio::test]
     async fn bound_provider_shares_health_but_does_not_capture_request_overrides() {
         let base = ProviderBase::new(

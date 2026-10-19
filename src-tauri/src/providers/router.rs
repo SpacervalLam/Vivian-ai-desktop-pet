@@ -524,6 +524,7 @@ impl ModelRouter {
             "json_schema": request.json_schema,
             "stream": request.stream,
             "include_framework_instructions": request.include_framework_instructions,
+            "omit_output_limit": request.omit_output_limit,
         })
         .to_string();
         let (presence_penalty, frequency_penalty) = self.conversational_penalties(request);
@@ -532,6 +533,7 @@ impl ModelRouter {
             enable_search: Some(request.enable_search),
             temperature: request.temperature_override,
             max_tokens: request.max_tokens_override,
+            omit_output_limit: request.omit_output_limit,
             presence_penalty,
             frequency_penalty,
             reasoning: Some(

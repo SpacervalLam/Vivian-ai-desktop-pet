@@ -600,6 +600,20 @@ impl AIResponseGenerationRunnable {
         requests_execution
     }
 
+    /// Short imperative selections still request execution even when the embedding
+    /// classifier calls them chat. Do not promote a mention, refusal or explanation.
+    fn explicit_action_followup(input: &str) -> bool {
+        use once_cell::sync::Lazy;
+        use regex::Regex;
+        static IMPERATIVE: Lazy<Regex> = Lazy::new(|| Regex::new(
+            r"^(?:请|麻烦你?|那就|那|现在|给我|再|就)*\s*(?:换(?:成|为|到|那|这|一张|张|个|一下|壁纸)|切换到|设置为|设置成|设为|设成|用(?:那|这|第)|选(?:那|这|第)|把.{1,60}?(?:换成|切换到|设为|设置为|设置成))"
+        ).expect("action followup regex"));
+        IMPERATIVE.is_match(input.trim())
+            && !["不要", "别换", "不用", "先不", "不想", "不需要", "是什么", "怎么", "为什么", "如果", "假如",
+                "会不会", "会怎样", "有什么", "的原理"]
+                .iter().any(|word| input.contains(word))
+    }
+
     /// 本轮用户请求是否指向"必须落到工具/执行侧才可能完成"的任务。
     ///
     /// 这是**显式判定**，不依赖模型行为：旧流程里进入执行侧的唯一入口是
@@ -620,6 +634,9 @@ impl AIResponseGenerationRunnable {
         {
             return false;
         }
+        if let Some(context) = state.metadata.get("task_continuation") {
+            return !crate::pipeline::task_continuity::reply_only(context);
+        }
         // Capability questions such as “can you make a PPT?” are requests too.
         // This lexical fallback must also work when embeddings are unavailable.
         let input = state.user_input.to_lowercase();
@@ -628,7 +645,7 @@ impl AIResponseGenerationRunnable {
             || (["can you", "could you", "please"].iter().any(|word| input.contains(word))
                 && (crate::tools::types::contains_task_keyword(&input)
                     || ["ppt", "presentation", "slides", "document", "spreadsheet"].iter().any(|word| input.contains(word))));
-        if explicit { return true; }
+        if explicit || Self::explicit_action_followup(&input) { return true; }
         let Some(perception) = state.fast_perception.as_ref() else {
             return crate::tools::types::contains_task_keyword(&state.user_input);
         };
@@ -1154,6 +1171,29 @@ impl Runnable for AIResponseGenerationRunnable {
             crate::pipeline::message_context::append_current_turn(&mut messages, api_input, system_directive, communication.as_ref());
             messages
         };
+        if let Some(context) = state.metadata.get("task_continuation") {
+            messages_vec.push(ChatMessage::system(crate::pipeline::task_continuity::prompt(context)));
+        }
+        let task_request = state.metadata.get("task_continuation")
+            .map(|context| format!("Latest user request: {}\n{}", state.user_input, crate::pipeline::task_continuity::prompt(context)))
+            .unwrap_or_else(|| state.user_input.clone());
+        if state.metadata.get("task_continuation").is_some_and(crate::pipeline::task_continuity::reply_only) {
+            // Ambiguity and terminal tasks are reply-only turns. Even a hallucinated
+            // text-protocol call must never reach either native or text execution.
+            messages_vec.push(ChatMessage::system("This turn is reply-only. Clarify the unresolved selection or acknowledge the task state. Do not perform operations, promise execution, or output tool calls."));
+            let content = router.generate(Self::build_native_chat_request(&task_type, messages_vec, vec![])).await?;
+            if !crate::pipeline::tool_execution::calls_from_text(&content).is_empty() || content.contains("DSML") {
+                return Err(VivianError::Engine("Task clarification returned tool protocol instead of a reply".into()));
+            }
+            let text = JsonParser::extract_text(&content).unwrap_or(content);
+            state.response_text = text.clone();
+            state.response_json = None;
+            state.tool_calls.clear();
+            state.ai_response = Some(AiResponse::new(text.clone()));
+            state.generation_status = "task_clarification".into();
+            if stream { push_stream_chunk(&self.stream_emitter, &text); }
+            return Ok(state.to_json());
+        }
         if let Some(context) = state.metadata.get("cross_delivery_context").and_then(|v| v.as_str()).filter(|s| !s.trim().is_empty()) {
             messages_vec.push(ChatMessage::system(format!("[Cross-character conversation context; not spoken by the sender]\n{}", context)));
         }
@@ -1219,7 +1259,7 @@ impl Runnable for AIResponseGenerationRunnable {
                     self.compress_keep_recent,
                     &state.current_channel,
                     &state.memory_text,
-                    &state.user_input,
+                    &task_request,
                     text_fallback,
                     requests_execution,
                 )
@@ -1237,7 +1277,7 @@ impl Runnable for AIResponseGenerationRunnable {
                     self.compress_keep_recent,
                     &state.current_channel,
                     &state.memory_text,
-                    &state.user_input,
+                    &task_request,
                     text_fallback,
                     requests_execution,
                 )
@@ -1414,7 +1454,7 @@ impl Runnable for AIResponseGenerationRunnable {
                                 first_content: JsonParser::extract_text(&text).unwrap_or_default(),
                                 first_calls: initial_calls, messages: messages_vec.clone(), tools: state.tool_definitions.clone(),
                                 task_type: task_type.clone(), channel: state.current_channel.clone(), memory_text: state.memory_text.clone(),
-                                user_request: state.user_input.clone(),
+                                user_request: task_request.clone(),
                                 executable_intent: Self::requests_execution(&state),
                                 max_rounds: self.max_rounds,
                                 compress_threshold_tokens: self.compress_threshold_tokens, compress_keep_recent: self.compress_keep_recent,
@@ -1813,6 +1853,138 @@ mod tests {
         assert!(!AIResponseGenerationRunnable::requests_execution(&state("chat", 0.95, "你好呀")));
         // 无语义结果且没有任务信号时不升级
         assert!(!AIResponseGenerationRunnable::requests_execution(&PipelineState::default()));
+    }
+
+    #[test]
+    fn imperative_selection_overrides_chat_classification() {
+        use crate::emotion::{DimensionResult, FastPerceptionResult};
+        for input in ["换那张伊雷娜的吧", "那就换这张吧", "换张壁纸", "换壁纸", "切换到第二张",
+            "设置为这张壁纸", "把壁纸换成那张", "就用那张", "选第二个吧"] {
+            for classified in [false, true] {
+                let mut state = PipelineState { user_input: input.into(), ..Default::default() };
+                if classified {
+                    state.fast_perception = Some(FastPerceptionResult {
+                        intent: DimensionResult { label: "chat".into(), confidence: 0.99 },
+                        ..Default::default()
+                    });
+                }
+                assert!(AIResponseGenerationRunnable::requests_execution(&state), "{input}");
+                assert_eq!(AIResponseGenerationRunnable::generation_task(&state, "companion"), "reasoning");
+                assert!(AIResponseGenerationRunnable::needs_execution_audit(&[], true));
+                state.current_channel = "cross_character".into();
+                assert!(!AIResponseGenerationRunnable::requests_execution(&state));
+                state.current_channel = "direct".into();
+                state.metadata["proactive_greeting"] = json!(true);
+                assert!(!AIResponseGenerationRunnable::requests_execution(&state));
+            }
+        }
+        for input in ["不要换那张", "先不用那张", "我刚换了壁纸", "换那张是什么意思", "如果换成这张呢",
+            "为什么要换那张", "换壁纸会不会很卡", "换壁纸的原理", "那张伊雷娜的很好看", "你没换啊"] {
+            assert!(!AIResponseGenerationRunnable::explicit_action_followup(input), "{input}");
+        }
+    }
+
+    #[tokio::test]
+    async fn wallpaper_selection_repairs_a_zero_call_promise() {
+        use axum::{Router, Json, extract::State, routing::post};
+        type Script = Arc<parking_lot::Mutex<(Vec<Value>, std::collections::VecDeque<Value>)>>;
+        async fn handle(State(script): State<Script>, Json(body): Json<Value>) -> Json<Value> {
+            let mut script = script.lock();
+            script.0.push(body);
+            let message = script.1.pop_front().expect("unexpected model call");
+            Json(json!({"id":"selection-test", "choices":[{"index":0,"message":message,"finish_reason":"stop"}]}))
+        }
+        let script: Script = Arc::new(parking_lot::Mutex::new((vec![], [
+            json!({"role":"assistant","content":"{\"needs_execution\":true}"}),
+            json!({"role":"assistant","content":null,"tool_calls":[{"id":"set-wallpaper","type":"function",
+                "function":{"name":"wallpaper_set","arguments":"{\"workshop_id\":\"3026477633\"}"}}]}),
+        ].into())));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut config = crate::config::manager::AppConfig::default();
+        config.enable_routing_matrix = false;
+        config.ai.provider = "chat_completions".into();
+        config.ai.endpoint = Some(format!("http://{}/v1", listener.local_addr().unwrap()));
+        config.ai.api_key = Some("local-test-key".into());
+        config.ai.model = format!("selection-{}", uuid::Uuid::new_v4());
+        config.network.proxy_mode = "direct".into();
+        let app = Router::new().route("/v1/chat/completions", post(handle)).with_state(script.clone());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+        let router = ModelRouter::new(&config).unwrap();
+        let mut tracker = crate::pipeline::task_continuity::TaskTracker::default();
+        let (revision, _) = tracker.begin("帮我换张壁纸", true, true, 100.0);
+        tracker.observe(revision, "帮我换张壁纸", true, "Blue Sky 或窗旁の伊蕾娜，你选哪个？", &[
+            json!({"tool_name":"wallpaper_list","success":true,"goal_completed":false,"result":{"data":{"wallpapers":[
+                {"title":"窗旁の伊蕾娜","workshop_id":"3026477633"}, {"title":"Blue Sky","workshop_id":"sky"}
+            ]}}})
+        ], 101.0);
+        let (_, context) = tracker.begin("第二个吧", false, false, 102.0);
+        let mut state = PipelineState { user_input: "第二个吧".into(), ..Default::default() };
+        state.metadata["task_continuation"] = json!(context.unwrap());
+        assert_eq!(AIResponseGenerationRunnable::generation_task(&state, "companion"), "reasoning");
+        let messages = vec![
+            ChatMessage::system(crate::pipeline::task_continuity::prompt(&state.metadata["task_continuation"])),
+            ChatMessage::assistant("你想设置哪一个为壁纸呢？"),
+            ChatMessage::user(&state.user_input),
+        ];
+        let tools = vec![ToolDefinition { name: "wallpaper_set".into(), description: "Set a selected wallpaper".into(),
+            parameters: json!({"type":"object","properties":{"workshop_id":{"type":"string"}},"required":["workshop_id"]}) }];
+        let (_, calls) = tokio::time::timeout(std::time::Duration::from_secs(20),
+            AIResponseGenerationRunnable::verify_execution_draft(&router, &messages, &tools, "reasoning",
+                "没问题！这就设置上啦。".into(), vec![], TextPathFallback { tools_text: None, output_format: None },
+                AIResponseGenerationRunnable::requests_execution(&state))).await.unwrap().unwrap();
+        server.abort();
+        assert_eq!(calls.len(), 1, "the promise must be repaired into a concrete tool call");
+        assert_eq!(calls[0].name, "wallpaper_set");
+        assert_eq!(calls[0].arguments["workshop_id"], "3026477633");
+        let script = script.lock();
+        assert_eq!(script.0.len(), 2);
+        assert!(script.1.is_empty());
+        assert!(script.0[1].to_string().contains("3026477633"), "repair retains the listed wallpaper identity");
+    }
+
+    #[test]
+    fn ambiguous_and_closed_task_context_does_not_authorize_execution() {
+        for (phase, clarification) in [("awaiting_selection", true), ("completed", false), ("cancelled", false)] {
+            let mut state = PipelineState { user_input: "就这个".into(), ..Default::default() };
+            state.metadata["task_continuation"] = json!({"task":{"phase":phase},"needs_clarification":clarification});
+            assert!(!AIResponseGenerationRunnable::requests_execution(&state));
+        }
+    }
+
+    #[tokio::test]
+    async fn ambiguous_followup_uses_a_reply_only_path() {
+        use axum::{Router, Json, extract::State, routing::post};
+        type Capture = Arc<parking_lot::Mutex<Vec<Value>>>;
+        async fn handle(State(capture): State<Capture>, Json(body): Json<Value>) -> Json<Value> {
+            capture.lock().push(body);
+            Json(json!({"id":"clarify", "choices":[{"index":0,"message":{"role":"assistant","content":"你指的是哪一张？"},"finish_reason":"stop"}]}))
+        }
+        let capture: Capture = Arc::new(parking_lot::Mutex::new(vec![]));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut cfg = crate::config::manager::AppConfig::default();
+        cfg.enable_routing_matrix = false;
+        cfg.ai.provider = "chat_completions".into();
+        cfg.ai.endpoint = Some(format!("http://{}/v1", listener.local_addr().unwrap()));
+        cfg.ai.api_key = Some("local-test-key".into());
+        cfg.ai.model = format!("clarify-{}", uuid::Uuid::new_v4());
+        cfg.network.proxy_mode = "direct".into();
+        let app = Router::new().route("/v1/chat/completions", post(handle)).with_state(capture.clone());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+        let router = Arc::new(ModelRouter::new(&cfg).unwrap());
+        let manager = Arc::new(ToolCallManager::new(Arc::new(crate::tools::registry::ToolSystem::new()), Default::default()));
+        let runnable = AIResponseGenerationRunnable::with_tool_call_manager(router, manager, new_shared_stream_emitter(), true, 3, 100000, 20);
+        let mut state = PipelineState { should_respond: true, user_input: "就这个".into(), ..Default::default() };
+        state.metadata["task_continuation"] = json!({"task":{"phase":"awaiting_selection","goal":"换张壁纸"},"needs_clarification":true});
+        state.tool_definitions = vec![ToolDefinition { name: "wallpaper_set".into(), description: "set wallpaper".into(), parameters: json!({}) }];
+        let result = tokio::time::timeout(std::time::Duration::from_secs(20), runnable.ainvoke(state.to_json(), None)).await.unwrap().unwrap();
+        server.abort();
+        let state = PipelineState::from_json(result);
+        assert_eq!(state.generation_status, "task_clarification");
+        assert!(state.response_text.contains("哪一张"));
+        assert!(state.tool_calls.is_empty());
+        let requests = capture.lock();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].get("tools").is_none_or(|tools| tools.is_null() || tools.as_array().is_some_and(Vec::is_empty)));
     }
 
     #[test]

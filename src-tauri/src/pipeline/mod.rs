@@ -27,6 +27,7 @@ pub mod prompt_modules;
 pub mod react;
 pub(crate) mod tool_execution;
 pub mod state;
+pub(crate) mod task_continuity;
 pub mod steps;
 pub mod template_engine;
 pub mod topic_injection;

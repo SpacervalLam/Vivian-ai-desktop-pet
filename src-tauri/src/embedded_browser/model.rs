@@ -140,6 +140,28 @@ impl BrowserBounds {
     }
 }
 
+/// CSS viewport clip, applied to the native host without resizing the document.
+#[derive(Clone, Debug, Deserialize)]
+pub struct BrowserClip {
+    pub pixel_ratio: f64,
+    pub viewport: BrowserBounds,
+    #[serde(default)]
+    pub overlays: Vec<BrowserBounds>,
+    #[serde(default)]
+    pub radius: f64,
+}
+impl BrowserClip {
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.pixel_ratio.is_finite() || !(0.25..=8.0).contains(&self.pixel_ratio)
+            || !self.radius.is_finite() || self.radius < 0.0 || self.overlays.len() > 128 {
+            return Err("Invalid browser clipping geometry".into());
+        }
+        self.viewport.validate()?;
+        for rect in &self.overlays { rect.validate()?; }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum BrowserRequest {

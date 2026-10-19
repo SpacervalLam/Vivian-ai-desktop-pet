@@ -9,7 +9,7 @@ import { browserBytes, browserEntries, browserLibraryPage, browserLibraryUrl, br
 import BrowserSiteIcon from './BrowserSiteIcon';
 import { browserSearchEngines, browserSearchEngine, browserSearchInput, BROWSER_SEARCH_ENGINE_KEY, type BrowserSearchEngine } from './browserModel';
 import { browserMenuLayout, browserSubmenuDelay } from './browserMenuLayout';
-import { BrowserOverlayCapture, unobscuredBrowserRect, type BrowserOverlayFrame } from './browserOverlayFrame';
+import { browserViewportClip } from './browserOverlayFrame';
 import './browserStrings';
 import './BrowserPanel.css';
 import { browserScrollbarCss } from './browserScrollbarStyle';
@@ -43,8 +43,6 @@ export default function BrowserPanel({ visible, fullView, tabHost, onActivate, n
   const bookmarkNameRef = useRef<HTMLInputElement>(null);
   const [findOpen, setFindOpen] = useState(false);
   const [find, setFind] = useState('');
-  const [overlayFrame, setOverlayFrame] = useState<BrowserOverlayFrame | null>(null);
-  const overlayCapture = useRef<BrowserOverlayCapture | null>(null);
   const addressRef = useRef<HTMLInputElement>(null);
   const findRef = useRef<HTMLInputElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -156,56 +154,43 @@ export default function BrowserPanel({ visible, fullView, tabHost, onActivate, n
 
   useEffect(() => {
     if (!ready) return;
-    setOverlayFrame(null);
     let frame = 0; let last = ''; let disposed = false;
-    let nativeShown = false; let layoutRequest = 0;
-    let requiredFrame: string | null = null;
-    const capture = new BrowserOverlayCapture(image => { if (!disposed) setOverlayFrame(image); });
-    overlayCapture.current = capture;
-    const hide = () => void invoke('embedded_browser_layout', { bounds: { x: 0, y: 0, width: 0, height: 0 }, visible: false, sequence: ++layoutSequence }).catch(() => { /* Parent teardown may already have destroyed the native controller. */ });
+    const hide = () => void invoke('embedded_browser_layout', { bounds: { x: 0, y: 0, width: 0, height: 0 }, visible: false, sequence: ++layoutSequence }).catch(() => {});
     const measure = () => {
       if (disposed) return;
-      const rect = viewport.current?.getBoundingClientRect();
-      if (rect) {
-        const overlays = [...document.querySelectorAll<HTMLElement>('dialog[open],[aria-modal="true"],[role="menu"],[data-browser-overlay="true"]')].filter(element => {
-          if (element.contains(viewport.current) || element.closest('[hidden],[aria-hidden="true"]')) return false;
-          const style = getComputedStyle(element);
+      cancelAnimationFrame(frame);
+      const element = viewport.current;
+      if (element) {
+        const rect = element.getBoundingClientRect();
+        const bounds = { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+        const overlays = [...document.querySelectorAll<HTMLElement>('dialog[open],[aria-modal="true"],[role="menu"],[data-browser-overlay="true"],.codex-sidebar.hover-peek')].filter(overlay => {
+          if (overlay.contains(element) || overlay.closest('[hidden],[aria-hidden="true"]')) return false;
+          const style = getComputedStyle(overlay);
           return style.visibility === 'visible' && style.opacity !== '0';
-        }).map(element => element.getBoundingClientRect()).filter(r => r.width > 0 && r.height > 0 && r.left < rect.right && r.right > rect.left && r.top < rect.bottom && r.bottom > rect.top);
-        const current = currentState.current;
-        const tab = current.tabs.find(tab => tab.id === current.active);
-        const key = tab && !tab.start ? `${tab.id}\n${tab.url}` : null;
-        requiredFrame = overlays.length ? key : null;
-        const pageVisible = visible && document.visibilityState === 'visible';
-        if (requiredFrame && pageVisible) capture.request(requiredFrame, () => invoke<string>('embedded_browser_capture', { id: tab!.id }));
-        // The native HWND must yield to HTML menus, but only after its replacement
-        // image is mounted and decoded. Keep the real page visible while capturing.
-        let show = pageVisible && (!overlays.length || (!!requiredFrame && !capture.ready(requiredFrame)));
-        let bounds = { x: Math.max(0, rect.x), y: Math.max(0, rect.y), width: Math.max(0, Math.min(rect.width, innerWidth - rect.x)), height: Math.max(0, Math.min(rect.height, innerHeight - rect.y)) };
-        if (requiredFrame && capture.hasFailed(requiredFrame)) {
-          bounds = unobscuredBrowserRect(bounds, overlays);
-          show = pageVisible && bounds.width > 0 && bounds.height > 0;
-        }
-        const style = getComputedStyle(viewport.current!);
+        }).map(overlay => {
+          const rect = overlay.getBoundingClientRect();
+          // Reserve the final sidebar width on the first animation frame. The
+          // webpage keeps its size and position throughout open/close animation.
+          return { x: rect.x, y: rect.y, width: Math.max(rect.width, Number(overlay.dataset.browserOverlayWidth) || 0), height: rect.height };
+        }).filter(r => r.width > 0 && r.height > 0 && r.x < rect.right && r.x + r.width > rect.left && r.y < rect.bottom && r.y + r.height > rect.top).slice(0, 128);
+        const style = getComputedStyle(element);
+        const clip = { pixel_ratio: devicePixelRatio, viewport: browserViewportClip(element), overlays, radius: parseFloat(style.borderTopLeftRadius) || 0 };
+        const show = visible && document.visibilityState === 'visible';
         const scrollbarCss = browserScrollbarCss(style.getPropertyValue('--panel-scrollbar').trim(), style.getPropertyValue('--panel-scrollbar-hover').trim());
-        const signature = JSON.stringify([bounds, show, scrollbarCss]);
-        if (!requiredFrame && nativeShown && signature === last && capture.active()) capture.clear();
-        if (signature !== last) { last = signature;
-          nativeShown = false;
-          const request = ++layoutRequest;
-          void invoke('embedded_browser_layout', { bounds, visible: show, sequence: ++layoutSequence, scrollbarCss }).then(() => {
-            // Retain the image until the live surface is visible again.
-            if (!disposed && request === layoutRequest) {
-              nativeShown = show;
-              if (show && !requiredFrame) capture.clear();
-            }
-          }).catch(cause => { if (!disposed) setError(String(cause)); });
+        const signature = JSON.stringify([bounds, show, scrollbarCss, clip]);
+        if (signature !== last) {
+          last = signature;
+          void invoke('embedded_browser_layout', { bounds, visible: show, sequence: ++layoutSequence, scrollbarCss, clip }).catch(cause => { if (!disposed) setError(String(cause)); });
         }
       }
       if (visible) frame = requestAnimationFrame(measure);
     };
-    if (visible) measure(); else hide();
-    return () => { disposed = true; cancelAnimationFrame(frame); capture.clear(); overlayCapture.current = null; hide(); };
+    const observer = new MutationObserver(() => { if (visible) measure(); });
+    if (visible) {
+      observer.observe(document.body, { subtree: true, childList: true, attributes: true, attributeFilter: ['data-browser-overlay', 'data-browser-overlay-width', 'aria-modal', 'open'] });
+      measure();
+    } else hide();
+    return () => { disposed = true; observer.disconnect(); cancelAnimationFrame(frame); hide(); };
   }, [ready, visible]);
 
   const navigate = () => { const input = browserSearchInput(address, searchEngine); setEditingAddress(false); setMenu(null); if (active) void send('navigate', { id: active.id, input }); else void send('new_tab', { input }); };
@@ -379,7 +364,6 @@ export default function BrowserPanel({ visible, fullView, tabHost, onActivate, n
       </div>}
     </div>, document.body)}
     <div ref={viewport} className="embedded-browser-viewport">
-      {overlayFrame && active && overlayFrame.key === `${active.id}\n${active.url}` && <img className="embedded-browser-overlay-frame" src={overlayFrame.image} alt="" aria-hidden="true" draggable={false} onLoad={() => { const capture = overlayCapture.current; requestAnimationFrame(() => capture?.markReady(overlayFrame.key, overlayFrame)); }} onError={() => overlayCapture.current?.fail(overlayFrame.key)} />}
       {internalPage && <section className="embedded-browser-library-page"><header><h1>{t(`embeddedBrowser.${internalPage}`)}</h1><nav>{browserLibraryPages.map(page => <button type="button" key={page} aria-current={internalPage === page ? 'page' : undefined} onClick={() => { setMenu(null); setQuery(''); void send('navigate', { id: active!.id, input: browserLibraryUrl(page) }); }}>{t(`embeddedBrowser.${page}`)}</button>)}</nav></header>{libraryContent(internalPage)}</section>}
       {(!active || (active.start && !internalPage)) && <div className="embedded-browser-start">
         {active?.private && <p className="embedded-browser-private-hint"><VenetianMask size={18} />{t('embeddedBrowser.privateHint')}</p>}
