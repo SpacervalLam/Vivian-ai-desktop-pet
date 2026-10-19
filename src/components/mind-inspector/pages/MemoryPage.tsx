@@ -6,7 +6,7 @@ import { listen } from '@tauri-apps/api/event';
 import { BookOpen, Clock3, Heart, MessageCircle, RefreshCw, Search, UserCircle, Sparkles, ArrowUpRight } from 'lucide-react';
 import UserProfilePage from './UserProfilePage';
 import StickerImage from '../../stickers/StickerImage';
-import { conversationThreads, sharedEventTimeline, isVisibleMemoryFact, isMemorySummary, type Character, type MemoryRecord, type ConversationRecord } from './memoryPresentation';
+import { unifiedConversationThreads, sharedEventTimeline, isVisibleMemoryFact, isMemorySummary, type Character, type MemoryRecord, type ConversationRecord } from './memoryPresentation';
 import './MemoryPage.css';
 import './ClaudeTheme.css';
 import { ComicChapterHeading, ComicChapterInset } from './ComicChapter';
@@ -135,15 +135,21 @@ const MemoryPage: React.FC<{ initialLayer?: Layer; embedded?: boolean; latestOnl
     return () => { cancelled = true; clearTimeout(timer); unlisten.forEach((cleanup) => cleanup()); };
   }, [load]);
 
-  const recentThreads = useMemo(() => [
-    ...conversationThreads(conversations, 'vivian', i18n.resolvedLanguage ?? i18n.language).map(thread => ({ ...thread, owner: 'vivian' as const })),
-    ...conversationThreads(otherConversations, 'nana', i18n.resolvedLanguage ?? i18n.language).map(thread => ({ ...thread, owner: 'nana' as const })),
-  ].sort((a, b) => b.time - a.time), [conversations, otherConversations, i18n.resolvedLanguage]);
+  const recentThreads = useMemo(() => unifiedConversationThreads(conversations, otherConversations,
+    i18n.resolvedLanguage ?? i18n.language), [conversations, otherConversations, i18n.resolvedLanguage, i18n.language]);
   const latestThread = recentThreads[0];
   const events = useMemo(() => sharedEventTimeline(items, [...conversations, ...otherConversations]), [items, conversations, otherConversations]);
-  const summaries = useMemo(() => new Map(items.filter((item) => isMemorySummary(item) && !item.consolidated && item.metadata?.index_active !== false).map((item) => [String(item.metadata?.conversation_id ?? ''), item])), [items]);
+  const summaries = useMemo(() => {
+    const bySource = new Map(items.filter((item) => isMemorySummary(item) && !item.consolidated && item.metadata?.index_active !== false).map((item) => [String(item.metadata?.conversation_id ?? ''), item]));
+    for (const thread of recentThreads) {
+      const summary = bySource.get(thread.id) ?? thread.sourceIds.map(id => bySource.get(id)).find(Boolean);
+      if (summary) bySource.set(thread.id, summary);
+    }
+    return bySource;
+  }, [items, recentThreads]);
   const showOriginal = (id: string) => {
-    setExpanded((value) => new Set(value).add(id)); setFocused(id); setQuery(''); setLayer('recent');
+    const target = recentThreads.find(thread => thread.sourceIds.includes(id))?.id ?? id;
+    setExpanded((value) => new Set(value).add(target)); setFocused(target); setQuery(''); setLayer('recent');
   };
   useEffect(() => {
     if (layer !== 'recent' || !focused || loading) return;
@@ -242,7 +248,7 @@ const MemoryPage: React.FC<{ initialLayer?: Layer; embedded?: boolean; latestOnl
         const hooks = (item.open_hooks ?? []).filter((hook) => hook.closed_at == null);
         const body = item.content;
         const conversationId = String(item.metadata?.conversation_id ?? '');
-        const hasOriginal = recentThreads.some((thread) => thread.id === conversationId && thread.canonical);
+        const hasOriginal = recentThreads.some((thread) => thread.sourceIds.includes(conversationId) && thread.canonical);
         const topics = Array.isArray(item.metadata?.topics) ? item.metadata.topics.filter((topic): topic is string => typeof topic === 'string').slice(0, 5) : [];
         const evidence = Array.isArray(item.metadata?.evidence_sources) ? item.metadata.evidence_sources.filter((source): source is { quote: string; conversation_id?: string } =>
           typeof source === 'object' && source !== null && typeof source.quote === 'string' && source.quote !== rawQuote) : [];
@@ -256,7 +262,7 @@ const MemoryPage: React.FC<{ initialLayer?: Layer; embedded?: boolean; latestOnl
           {topics.length > 0 && <div className="memory-topic-tags">{topics.map((topic) => <span key={topic}>{topicName(topic) === topic ? topic : localize(topicName(topic))}</span>)}</div>}
           {quote && quote !== body && <div className="memory-entry-evidence"><span>{t('comic.memoryQuote')}</span>「<SearchHighlightedText text={quote} query={query} />」</div>}
           {hooks.map((hook, index) => <div className="memory-entry-hook" key={index}><span>{t('comic.memoryFollowUp')}</span><SearchHighlightedText text={hook.condition} query={query} /></div>)}
-          {evidence.length > 0 && <details className="memory-entry-evidence"><summary>{t('comic.memoryMoreEvidence', { n: evidence.length })}</summary>{evidence.map((source, index) => <p key={index}>「<SearchHighlightedText text={source.quote} query={query} />」{recentThreads.some((thread) => thread.id === source.conversation_id && thread.canonical) && <button className="memory-evidence-link" type="button" onClick={() => showOriginal(source.conversation_id!)}>{t('comic.memoryView')}</button>}</p>)}</details>}
+          {evidence.length > 0 && <details className="memory-entry-evidence"><summary>{t('comic.memoryMoreEvidence', { n: evidence.length })}</summary>{evidence.map((source, index) => <p key={index}>「<SearchHighlightedText text={source.quote} query={query} />」{recentThreads.some((thread) => !!source.conversation_id && thread.sourceIds.includes(source.conversation_id) && thread.canonical) && <button className="memory-evidence-link" type="button" onClick={() => showOriginal(source.conversation_id!)}>{t('comic.memoryView')}</button>}</p>)}</details>}
           <div className="memory-session-actions">
             {hasOriginal ? <button type="button" onClick={() => showOriginal(conversationId)}>{t('comic.memoryOriginal')}<ArrowUpRight size={13} /></button>
               : <span>{quote ? t('comic.memoryExtracted') : t('comic.memoryNoEvidence')}</span>}

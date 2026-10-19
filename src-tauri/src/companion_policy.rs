@@ -21,7 +21,15 @@ pub struct CompanionConfig {
     pub shortcuts: Vec<DesktopShortcut>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DesktopShortcut { pub id: String, pub name: String, pub kind: String, pub target: String }
+pub struct DesktopShortcut {
+    pub id: String,
+    pub name: String,
+    pub kind: String,
+    pub target: String,
+    /// 分组名；空串即未分组。旧配置没有这个字段，`default` 保证反序列化不报错。
+    #[serde(default)]
+    pub group: String,
+}
 impl Default for CompanionConfig {
     fn default() -> Self {
         Self { do_not_disturb: false, hourly_chime: false, focus_mode: false, quiet_hours: false,
@@ -29,8 +37,8 @@ impl Default for CompanionConfig {
             game_processes: vec!["League of Legends.exe".into(), "GenshinImpact.exe".into()],
             sound: true, resource_feedback: true, network_feedback: false, clipboard_hint: true, weather_feedback: false,
             music_feedback: false, shortcuts: vec![
-                DesktopShortcut { id: "github".into(), name: "GitHub".into(), kind: "website".into(), target: "https://github.com".into() },
-                DesktopShortcut { id: "chatgpt".into(), name: "ChatGPT".into(), kind: "website".into(), target: "https://chatgpt.com".into() },
+                DesktopShortcut { id: "github".into(), name: "GitHub".into(), kind: "website".into(), target: "https://github.com".into(), group: "开发".into() },
+                DesktopShortcut { id: "chatgpt".into(), name: "ChatGPT".into(), kind: "website".into(), target: "https://chatgpt.com".into(), group: "AI".into() },
             ] }
     }
 }
@@ -114,6 +122,31 @@ mod tests {
             let loaded: CompanionConfig = serde_json::from_value(saved).unwrap();
             assert_eq!(loaded.do_not_disturb, enabled);
         }
+    }
+    #[test]
+    fn shortcuts_gained_groups_without_breaking_saved_configs() {
+        // 旧配置里的快捷方式没有 group 字段：必须仍然反序列化成功，并落到空串（未分组）
+        let legacy: CompanionConfig = serde_json::from_value(serde_json::json!({
+            "shortcuts": [
+                {"id": "old", "name": "旧书签", "kind": "website", "target": "https://example.com"}
+            ]
+        })).unwrap();
+        assert_eq!(legacy.shortcuts.len(), 1);
+        assert_eq!(legacy.shortcuts[0].group, "", "missing group must fall back to ungrouped");
+        assert_eq!(legacy.shortcuts[0].name, "旧书签");
+
+        // 分组要能存能取，且总会出现在序列化结果里（前端按字段名读取）
+        let saved = serde_json::to_value(DesktopShortcut {
+            id: "g".into(), name: "B站".into(), kind: "website".into(),
+            target: "https://bilibili.com".into(), group: "娱乐".into(),
+        }).unwrap();
+        assert_eq!(saved["group"], "娱乐");
+        assert_eq!(serde_json::from_value::<DesktopShortcut>(saved).unwrap().group, "娱乐");
+
+        // 默认种子自带分组：新用户打开页面就能看到分组是怎么用的
+        let seeds = CompanionConfig::default().shortcuts;
+        assert_eq!(seeds.len(), 2);
+        assert!(seeds.iter().all(|item| !item.group.is_empty()), "seed shortcuts ship grouped");
     }
     #[test]
     fn quiet_windows_and_only_the_actual_foreground_game() {

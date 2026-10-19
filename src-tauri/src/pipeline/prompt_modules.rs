@@ -1246,6 +1246,8 @@ pub struct PromptParts {
     pub roommate_cognitive_section: Option<String>,
     /// 近期环境事件（来自统一事件账本，让智能体感知多角色交互上下文），None 时不注入
     pub environment_events: Option<String>,
+    /// Recent observations of this character’s own pet, protected from optional pruning.
+    pub pet_action_section: Option<String>,
     /// Mind 段落（Belief / Goal / Attention 三合一序列化），None 时不注入
     pub mind_section: Option<String>,
     /// Working Memory 段落（30 秒级"正在想什么"缓冲区），None 时不注入
@@ -1906,6 +1908,7 @@ impl PromptBuilder {
 
         // 近期环境事件：来自统一事件账本，世界刚发生的事
         // 提到 rank=1：这是"刚刚发生了什么"的唯一来源，是开口就能说的具体素材。
+        push!(0, "pet_actions", parts.pet_action_section.clone().unwrap_or_default());
         push!(1, "environment_events", parts.environment_events.clone().unwrap_or_default());
 
         // 共享世界知识：两角色共同知晓的世界事实。

@@ -67,7 +67,9 @@ context.expandedRef.current = null; context.document.hidden = true; now += 11000
 cleanups.forEach(cleanup => cleanup()); assert.equal(listeners.size, 0);
 assert.doesNotMatch(source, /checked=\{auto\}|setAuto/);
 const css = await readFile('src/components/mind-inspector/pages/ComicOverview.css', 'utf8');
-assert.match(css, /comic-phone-wake.*calc\(var\(--delay\) \+ 1150ms \+ 300ms\)/);
+// 亮屏跟在手机分镜入场之后：入场时长走 --comic-enter-ms，与 markup 的 1.15s 同源。
+assert.match(css, /comic-phone-wake.*calc\(var\(--delay\) \+ var\(--comic-enter-ms\) \+ 300ms\)/);
+assert.match(css, /\.mind-comic-book\{--comic-enter-ms:1150ms\}/, 'the entrance duration lives in one variable');
 assert.match(source, /data-touring=\{touring\}/, 'the book exposes its live tour state');
 assert.match(css, /\.unified-comic-book\[data-touring="true"\][^{]+#line-phone \.phone-screen-on\{animation:comic-phone-wake/, 'automatic phone wake requires tour mode');
 assert.match(css, /#line-phone:hover \.phone-screen-on\{opacity:1\}/, 'manual browsing still lights the phone on hover');

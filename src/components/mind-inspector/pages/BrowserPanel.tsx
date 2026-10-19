@@ -4,9 +4,10 @@ import { useTranslation } from 'react-i18next';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { open } from '@tauri-apps/plugin-dialog';
-import { ArrowLeft, ArrowRight, RotateCw, X, Plus, Star, Ellipsis, Maximize2, Minimize2, Globe, Search, Terminal as TerminalIcon, VenetianMask, LoaderCircle, Puzzle, Download, History, ChevronRight, Minus } from 'lucide-react';
+import { ArrowLeft, ArrowRight, RotateCw, X, Plus, Star, Ellipsis, Globe, Search, Terminal as TerminalIcon, VenetianMask, LoaderCircle, Puzzle, Download, History, ChevronRight, Minus } from 'lucide-react';
 import { browserBytes, browserEntries, browserLibraryPage, browserLibraryUrl, browserLibraryPages, type BrowserLibraryPage, emptyBrowser, mergeBrowserState, type BrowserState } from './browserModel';
 import BrowserSiteIcon from './BrowserSiteIcon';
+import { browserSearchEngines, browserSearchEngine, browserSearchInput, BROWSER_SEARCH_ENGINE_KEY, type BrowserSearchEngine } from './browserModel';
 import { browserMenuLayout, browserSubmenuDelay } from './browserMenuLayout';
 import { BrowserOverlayCapture, unobscuredBrowserRect, type BrowserOverlayFrame } from './browserOverlayFrame';
 import './browserStrings';
@@ -17,10 +18,16 @@ let layoutSequence = Date.now() * 1000;
 type Menu = 'menu' | 'history' | 'bookmarks' | 'downloads' | 'extensions' | 'settings' | null;
 type Submenu = Exclude<Menu, 'menu' | null>;
 
-export default function BrowserPanel({ visible, fullView, onToggleFullView, tabHost, onActivate, newPageRequest = 0, onNewTerminal }: { newPageRequest?: number; onNewTerminal?: () => void; tabHost?: HTMLElement | null; onActivate?: () => void; visible: boolean; fullView: boolean; onToggleFullView: () => void }) {
+export default function BrowserPanel({ visible, fullView, tabHost, onActivate, newPageRequest = 0, onNewTerminal }: { newPageRequest?: number; onNewTerminal?: () => void; tabHost?: HTMLElement | null; onActivate?: () => void; visible: boolean; fullView: boolean; onToggleFullView: () => void }) {
   const { t, i18n } = useTranslation();
   const [state, setState] = useState<BrowserState>(emptyBrowser);
   const [error, setError] = useState('');
+  const [searchEngine, setSearchEngine] = useState<BrowserSearchEngine>(() => {
+    try { return browserSearchEngine(localStorage.getItem(BROWSER_SEARCH_ENGINE_KEY)); } catch { return 'bing'; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem(BROWSER_SEARCH_ENGINE_KEY, searchEngine); } catch { /* Browsing remains usable without preference storage. */ }
+  }, [searchEngine]);
   const [ready, setReady] = useState(false);
   const [address, setAddress] = useState('');
   const [editingAddress, setEditingAddress] = useState(false);
@@ -201,7 +208,7 @@ export default function BrowserPanel({ visible, fullView, onToggleFullView, tabH
     return () => { disposed = true; cancelAnimationFrame(frame); capture.clear(); overlayCapture.current = null; hide(); };
   }, [ready, visible]);
 
-  const navigate = () => { setEditingAddress(false); setMenu(null); if (active) void send('navigate', { id: active.id, input: address }); else void send('new_tab', { input: address }); };
+  const navigate = () => { const input = browserSearchInput(address, searchEngine); setEditingAddress(false); setMenu(null); if (active) void send('navigate', { id: active.id, input }); else void send('new_tab', { input }); };
   const panel = menu === 'menu' ? submenu : menu ?? internalPage;
   useEffect(() => { setBookmarkMenu(null); setRenamingBookmark(null); }, [panel, menu]);
   useLayoutEffect(() => { bookmarkMenuRef.current?.querySelector('button')?.focus(); }, [bookmarkMenu]);
@@ -311,7 +318,7 @@ export default function BrowserPanel({ visible, fullView, onToggleFullView, tabH
       {icon(active?.loading ? 'stop' : 'reload', active?.loading ? <LoaderCircle className="embedded-browser-spinner" size={16} /> : <RotateCw size={16} />, () => act(active?.loading ? 'stop' : 'reload'), !active || active.start)}
       </div>
       <form className={`embedded-browser-address ${!address ? 'is-empty' : ''}`} onSubmit={event => { event.preventDefault(); navigate(); }}>
-        <input ref={addressRef} aria-label={t('embeddedBrowser.address')} placeholder={t('embeddedBrowser.address')} value={address} spellCheck={false}
+        <input ref={addressRef} aria-label={t('embeddedBrowser.address')} placeholder={`${t('embeddedBrowser.address')} · ${t(`embeddedBrowser.searchEngine_${searchEngine}`)}`} value={address} spellCheck={false}
           onFocus={() => setEditingAddress(true)} onBlur={() => setEditingAddress(false)} onChange={event => setAddress(event.target.value)} onKeyDown={event => { if (event.key === 'Escape') { setAddress(active?.url === 'about:blank' ? '' : active?.url ?? ''); setEditingAddress(false); event.currentTarget.blur(); } }} />
         {active && !active.start && icon('bookmark', <Star size={14} fill={state.bookmarks.some(b => b.url === active.url) ? 'currentColor' : 'none'} />, () => void send('bookmark', { id: active.id }))}
       </form>
@@ -319,7 +326,6 @@ export default function BrowserPanel({ visible, fullView, onToggleFullView, tabH
         {icon('extensions', <Puzzle size={16} />, () => showMenu('extensions'))}
         {icon('downloads', <Download size={16} />, () => showMenu('downloads'))}
       </div>
-      {icon(fullView ? 'collapse' : 'expand', fullView ? <Minimize2 size={15} /> : <Maximize2 size={15} />, onToggleFullView)}
       <button ref={menuButtonRef} type="button" aria-label={t('embeddedBrowser.menu')} title={t('embeddedBrowser.menu')} aria-haspopup="menu" aria-expanded={menu !== null} aria-controls="embedded-browser-menu" onClick={() => showMenu('menu')}><Ellipsis size={19} /></button>
     </div>
     {state.background_tasks > 0 && <div className="embedded-browser-task-status" role="status">{t('embeddedBrowser.backgroundTasks', { count: state.background_tasks })}</div>}
@@ -362,7 +368,10 @@ export default function BrowserPanel({ visible, fullView, onToggleFullView, tabH
       {menu && panel && menuPosition && <div ref={submenuRef} data-submenu={panel} id={menu === 'menu' ? 'embedded-browser-submenu' : 'embedded-browser-menu'} role="menu" aria-label={t(`embeddedBrowser.${panel}`)} className="embedded-browser-menu embedded-browser-submenu" style={menu === 'menu' ? menuPosition.sub : { ...menuPosition.main, width: Math.min(340, innerWidth - 16), left: Math.max(8, menuPosition.main.left - 60) }} onKeyDown={menuKeys}>
       <header><span className="embedded-browser-menu-heading-icon">{panel === 'history' ? <History size={17} /> : panel === 'bookmarks' ? <Star size={17} /> : panel === 'downloads' ? <Download size={17} /> : panel === 'extensions' ? <Puzzle size={17} /> : <Globe size={17} />}</span><strong>{t(`embeddedBrowser.${panel}`)}</strong></header>
       {libraryContent(panel, true)}
-      {panel === 'settings' && <div className="embedded-browser-menu-settings"><p>{t('embeddedBrowser.clearDataHint')}</p>{button('clearData', () => { if (window.confirm(t('embeddedBrowser.clearDataConfirm'))) act('clear_data'); })}</div>}
+      {panel === 'settings' && <div className="embedded-browser-menu-settings">
+        <fieldset className="embedded-browser-search-engines"><legend>{t('embeddedBrowser.searchEngine')}</legend>
+          {browserSearchEngines.map(engine => <label key={engine}><input type="radio" name="browser-search-engine" value={engine} checked={searchEngine === engine} onChange={() => setSearchEngine(engine)} /><span>{t(`embeddedBrowser.searchEngine_${engine}`)}</span></label>)}
+        </fieldset><p>{t('embeddedBrowser.clearDataHint')}</p>{button('clearData', () => { if (window.confirm(t('embeddedBrowser.clearDataConfirm'))) act('clear_data'); })}</div>}
     </div>}
       {bookmarkMenu && panel === 'bookmarks' && <div ref={bookmarkMenuRef} role="menu" aria-label={t('embeddedBrowser.bookmarkActions')} className="embedded-browser-menu embedded-browser-bookmark-context" style={{ left: bookmarkMenu.x, top: bookmarkMenu.y }} onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); setBookmarkMenu(null); } else menuKeys(event); }}>
         {menuItem('deleteBookmark', () => { void send('remove_bookmark', { url: bookmarkMenu.url }); setBookmarkMenu(null); })}

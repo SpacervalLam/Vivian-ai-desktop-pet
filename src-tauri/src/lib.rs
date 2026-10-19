@@ -775,6 +775,7 @@ pub fn run() {
                         || task.priority == crate::brain::scheduler::Priority::Urgent
                         || crate::companion_runtime::quiet_reason(&gate_app.state::<Arc<AppState>>()).is_none()
                 }));
+                crate::brain::work_notices::set_app_handle(app.handle().clone());
                 crate::tools::builtin::work_todo_tools::set_app_handle(app.handle().clone());
                 crate::tools::builtin::work_question_tools::set_app_handle(app.handle().clone());
                 crate::tools::builtin::work_subagent_tools::set_app_handle(app.handle().clone());
@@ -1717,6 +1718,18 @@ pub(crate) fn create_character_windows_early(
         .skip_taskbar(true)
         .shadow(false)
         .visible(true);
+        // 诊断用：VIVIAN_CDP_PORT=9333 时给 WebView2 开调试端口。wry 自己总会传
+        // additional_browser_args（默认关掉 mini menu / smart screen），所以
+        // WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS 环境变量是无效的，只能从这里注入。
+        // 第一个 webview 建的 CoreWebView2Environment 会被后续窗口复用，所以只需要
+        // 在角色窗口（最早创建的那批）上设置。不设该环境变量时行为与原来完全一致。
+        let builder = match std::env::var("VIVIAN_CDP_PORT") {
+            Ok(port) if !port.trim().is_empty() => builder.additional_browser_args(&format!(
+                "--remote-debugging-port={} --disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection",
+                port.trim()
+            )),
+            _ => builder,
+        };
 
         match builder.build() {
             Ok(win) => {

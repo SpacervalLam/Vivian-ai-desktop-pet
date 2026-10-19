@@ -1,5 +1,7 @@
 //! Bounded, character-specific few-shot retrieval. Example facts never become memory.
-use std::sync::Arc;
+//! Context gates precede relevance ranking; conversation-local repetition only
+//! breaks near ties. Selection is deterministic and never mutates session state.
+use std::{collections::BTreeSet, sync::Arc};
 use parking_lot::Mutex;
 use serde::Deserialize;
 use crate::memory::{embedding::MemoryEmbeddingProvider, vector_search::cosine_similarity};
@@ -52,6 +54,13 @@ impl ExampleRetriever {
         if user.trim().is_empty() { return None; }
         self.preload();
         let history = recent_context(user, messages);
+        let normalized_user = user.trim().to_lowercase();
+        let normalized_history = history.to_lowercase();
+        // Derive recency from this conversation, not a shared mutable counter:
+        // previews, retries and other sessions must not consume one another's examples.
+        let recent_replies: Vec<_> = messages.iter().rev()
+            .filter(|m| m.role == "assistant" && !m.content.trim().is_empty())
+            .take(4).map(|m| response_terms(&m.content)).collect();
         let continuation = is_continuation(user);
         let valid = |v: &[f32]| v.len() == self.embedding.dimension() && v.iter().all(|x| x.is_finite()) && v.iter().any(|x| *x != 0.0);
         let has_vectors = self.vectors.lock().as_ref().is_some_and(|v| !v.is_empty());
@@ -66,10 +75,16 @@ impl ExampleRetriever {
         for (index, e) in self.entries.iter().enumerate() {
             if learned.contains(&e.scope) { continue; }
             // Generic confirmations/duration answers require the right ongoing scene.
-            if !e.context_cues.is_empty() && !e.context_cues.iter().any(|cue| history.to_lowercase().contains(&cue.to_lowercase())) { continue; }
-            let literal = e.cues.iter().any(|cue| if e.scope == "closure" {
-                user.trim().to_lowercase() == cue.to_lowercase()
-            } else { user.to_lowercase().contains(&cue.to_lowercase()) });
+            if !e.context_cues.is_empty() && !e.context_cues.iter().any(|cue| cue_matches(&normalized_history, &cue.trim().to_lowercase())) { continue; }
+            let literal_score = e.cues.iter().filter_map(|cue| {
+                let cue = cue.trim().to_lowercase();
+                if !cue_matches(&normalized_user, &cue) || (e.scope == "closure" && normalized_user != cue) { return None; }
+                // Prefer a specific phrase over a generic substring. Mere cue count
+                // would reward entries that happen to have more aliases.
+                let coverage = cue.chars().count() as f64 / normalized_user.chars().count().max(1) as f64;
+                Some(0.80 + 0.16 * coverage.min(1.0))
+            }).max_by(f64::total_cmp);
+            let literal = literal_score.is_some();
             // Closing a conversation is a decision, not a style similarity match.
             if e.scope == "closure" && !literal { continue; }
             let vector = vectors.as_ref().and_then(|v| v.get(index)).filter(|v| valid(v));
@@ -79,26 +94,37 @@ impl ExampleRetriever {
                     let context = contextual.as_ref().zip(vector).map(|(q,v)| cosine_similarity(q,v)).unwrap_or(now);
                     if !literal && ((!continuation && now < 0.55) || (continuation && (now < 0.45 || context < 0.65))) { continue; }
                     let mixed = if continuation { 0.35 * now + 0.65 * context } else { 0.85 * now + 0.15 * context };
-                    if literal { mixed.max(0.86) } else { mixed }
+                    if let Some(lexical) = literal_score { mixed.max(lexical) } else { mixed }
                 }
-                None if literal => 0.86,
+                None if literal => literal_score.unwrap(),
                 _ => continue,
             };
-            if score >= 0.65 { scored.push((index, score)); }
+            if score >= 0.65 {
+                let terms = response_terms(e.response["text"].as_str().unwrap_or_default());
+                let repeated = recent_replies.iter().enumerate().map(|(age, reply)|
+                    term_similarity(&terms, reply) / (age + 1) as f64).fold(0.0_f64, f64::max);
+                // A small penalty breaks near ties without admitting irrelevant examples.
+                scored.push((index, score - 0.06 * repeated, terms));
+            }
         }
-        scored.sort_by(|a,b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        scored.sort_by(|a,b| b.1.total_cmp(&a.1).then_with(||
+            tie_key(user, &history, &self.entries[a.0].id).cmp(&tie_key(user, &history, &self.entries[b.0].id))));
         let mut out = String::from("[RETRIEVED EXAMPLES — REFERENCE ONLY]\nThese are fictional examples of judgment and voice, never facts about this user or evidence of completed work. Infer the real scene from the current dialogue. Do not copy wording or assume example Context is true. Follow the current output schema and language.\n");
         let mut scopes = Vec::new();
         let mut ids = Vec::new();
-        for (index, score) in scored {
+        let mut selected_terms = Vec::new();
+        for (index, score, terms) in scored {
             let e = &self.entries[index];
             if scopes.contains(&e.scope) { continue; }
+            // Different scopes can still contain essentially the same line.
+            if selected_terms.iter().any(|chosen| term_similarity(&terms, chosen) >= 0.85) { continue; }
             let attention = if e.attention.is_empty() { String::new() } else {
                 format!("Attention (creative direction, not a reasoning transcript): {}\n", e.attention)
             };
             let block = format!("\nExample {}\nFictional context (not user history): {}\n{}Fictional user: {}\nExample response: {}\n", e.id, e.situation, attention, e.user, e.response);
             if out.chars().count() + block.chars().count() + 40 > MAX_CHARS { continue; }
             out.push_str(&block);
+            selected_terms.push(terms);
             scopes.push(e.scope.clone()); ids.push(format!("{}:{score:.2}", e.id));
             if ids.len() == MAX_EXAMPLES { break; }
         }
@@ -107,6 +133,50 @@ impl ExampleRetriever {
         tracing::debug!(examples = %ids.join(","), chars = out.chars().count(), continuation, "Persona example retrieval");
         Some(out)
     }
+}
+
+/// ASCII words/numbers require ASCII token boundaries ("hi" != "this").
+/// Chinese/Japanese phrases can occur within a sentence; a single non-ASCII
+/// character is too ambiguous unless it is the entire utterance.
+fn cue_matches(text: &str, cue: &str) -> bool {
+    if cue.is_empty() { return false; }
+    if text.trim() == cue { return true; }
+    if cue.chars().count() == 1 && !cue.is_ascii() { return false; }
+    let token = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    text.match_indices(cue).any(|(start, _)| {
+        let end = start + cue.len();
+        let left = !cue.chars().next().is_some_and(token)
+            || !text[..start].chars().next_back().is_some_and(token);
+        let right = !cue.chars().next_back().is_some_and(token)
+            || !text[end..].chars().next().is_some_and(token);
+        left && right
+    })
+}
+
+/// Bounded surface overlap for repetition, never used as semantic evidence.
+fn response_terms(text: &str) -> BTreeSet<String> {
+    let lower: String = text.chars().take(350).collect::<String>().to_lowercase();
+    let mut terms: BTreeSet<_> = lower.split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|word| !word.is_empty()).map(str::to_owned).collect();
+    let chars: Vec<_> = lower.chars().collect();
+    for pair in chars.windows(2) {
+        if pair.iter().all(|c| !c.is_ascii() && c.is_alphanumeric()) {
+            terms.insert(pair.iter().collect());
+        }
+    }
+    terms
+}
+
+fn term_similarity(a: &BTreeSet<String>, b: &BTreeSet<String>) -> f64 {
+    let union = a.union(b).count();
+    if union == 0 { 0.0 } else { a.intersection(b).count() as f64 / union as f64 }
+}
+
+fn tie_key(user: &str, history: &str, id: &str) -> u64 {
+    // Stable FNV-1a: reproducible within a turn, varied with the conversation.
+    [user, history, id].into_iter().fold(0xcbf29ce484222325_u64, |hash, part|
+        part.bytes().chain(std::iter::once(0)).fold(hash, |h, byte|
+            (h ^ byte as u64).wrapping_mul(0x100000001b3)))
 }
 
 fn recent_context(user: &str, messages: &[ChatMessage]) -> String {
@@ -124,6 +194,89 @@ mod tests {
     use super::*;
     use crate::memory::embedding::default_embedding;
     fn message(role: &str, content: &str) -> ChatMessage { serde_json::from_value(serde_json::json!({"role":role,"content":content})).unwrap() }
+    fn fixture(entries: serde_json::Value) -> ExampleRetriever {
+        let mut r = ExampleRetriever::new("test", default_embedding());
+        r.entries = serde_json::from_value(entries).unwrap();
+        r
+    }
+    fn example(id: &str, scope: &str, cue: &str, text: &str) -> serde_json::Value {
+        serde_json::json!({"id":id,"scope":scope,"cues":[cue],"situation":"Fictional scene",
+            "user":cue,"response":{"text":text,"intent":"reply"}})
+    }
+    #[test]
+    fn cues_respect_word_boundaries_and_single_character_ambiguity() {
+        let r = fixture(serde_json::json!([
+            example("hi", "hello", "hi", "Hello there"),
+            example("ok", "confirm", "ok", "All right"),
+            example("six", "slang", "6", "Nice work"),
+            example("grass", "slang", "草", "What a surprise")
+        ]));
+        for input in ["this is a book", "token lookup", "16分钟", "草率决定"] {
+            assert!(r.retrieve(input, &[], None, &[]).is_none(), "false cue in {input}");
+        }
+        for (input, id) in [("HI!", "hi"), ("OK，可以", "ok"), ("6!", "six"), ("草", "grass")] {
+            assert!(r.retrieve(input, &[], None, &[]).unwrap().contains(&format!("Example {id}\n")));
+        }
+        assert!(!cue_matches("anything", ""));
+        assert!(cue_matches("晚上下雨还得出门呢", "下雨还得出门"));
+    }
+    #[test]
+    fn specific_cue_beats_generic_cue_even_after_repetition() {
+        let r = fixture(serde_json::json!([
+            example("generic", "care", "出门", "Take care out there"),
+            example("rain", "care", "下雨还得出门", "Bring your umbrella")
+        ]));
+        let history = vec![message("assistant", "Bring your umbrella")];
+        let out = r.retrieve("下雨还得出门", &history, None, &[]).unwrap();
+        assert!(out.contains("Example rain\n"));
+        assert!(!out.contains("Example generic\n"));
+    }
+    #[test]
+    fn recent_reply_promotes_equally_relevant_alternative_without_shared_state() {
+        let entries = serde_json::json!([
+            example("a", "play", "猜猜", "Maybe a new game"),
+            example("b", "play", "猜猜", "I bet it is a drawing")
+        ]);
+        let r = fixture(entries.clone());
+        let first = r.retrieve("猜猜", &[], None, &[]).unwrap();
+        assert_eq!(first, r.retrieve("猜猜", &[], None, &[]).unwrap(), "retries stay stable");
+        let (used, alternative) = if first.contains("Example a\n") {
+            ("Maybe a new game", "b")
+        } else { ("I bet it is a drawing", "a") };
+        let history = vec![message("assistant", used)];
+        let next = r.retrieve("猜猜", &history, None, &[]).unwrap();
+        assert!(next.contains(&format!("Example {alternative}\n")));
+        assert_eq!(first, r.retrieve("猜猜", &[], None, &[]).unwrap(), "another session is independent");
+        assert_eq!(next, fixture(entries).retrieve("猜猜", &history, None, &[]).unwrap(), "restart is reproducible");
+    }
+    #[test]
+    fn repetition_never_removes_the_only_relevant_example_or_relaxes_gates() {
+        let r = fixture(serde_json::json!([example("only", "care", "下雨", "Take an umbrella")]));
+        let history = vec![message("assistant", "Take an umbrella")];
+        assert!(r.retrieve("下雨", &history, None, &[]).unwrap().contains("Example only\n"));
+        assert!(r.retrieve("新话题", &history, None, &[]).is_none());
+        assert!(r.retrieve("下雨", &history, None, &["care".into()]).is_none());
+    }
+    #[test]
+    fn duplicate_lines_across_scopes_do_not_fill_all_slots() {
+        let r = fixture(serde_json::json!([
+            example("a", "first", "猜猜", "Maybe a new game"),
+            example("b", "second", "猜猜", "Maybe a new game!"),
+            example("c", "third", "猜猜", "I bet it is a drawing")
+        ]));
+        let out = r.retrieve("猜猜", &[], None, &[]).unwrap();
+        assert_eq!(out.lines().filter(|l| l.starts_with("Example response:")).count(), 2);
+        assert!(out.contains("Example c\n"));
+        assert!(out.chars().count() <= MAX_CHARS);
+    }
+    #[test]
+    fn context_cues_also_respect_ascii_boundaries() {
+        let mut e = example("duration", "task", "8分钟", "Eight minutes works");
+        e["context_cues"] = serde_json::json!(["talk"]);
+        let r = fixture(serde_json::json!([e]));
+        assert!(r.retrieve("8分钟", &[message("assistant", "A stalk of celery")], None, &[]).is_none());
+        assert!(r.retrieve("8分钟", &[message("assistant", "How long is the talk?")], None, &[]).is_some());
+    }
     #[test]
     fn natural_delivery_social_references_are_bounded_and_obey_learned_scopes() {
         for name in ["nana", "vivian"] {

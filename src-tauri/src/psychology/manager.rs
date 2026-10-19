@@ -692,6 +692,14 @@ impl PsychologyManager {
         self.pet_interactions.lock().take_completed(now)
     }
 
+    pub fn pet_action_capsule(&self, now: f64) -> Option<String> {
+        self.pet_interactions.lock().capsule(now)
+    }
+
+    pub fn query_pet_interactions(&self, now: f64, lookback_seconds: u64, limit: usize) -> serde_json::Value {
+        self.pet_interactions.lock().query(now, lookback_seconds, limit)
+    }
+
     /// 规则层"被冷落→情绪映射"：连续主动搭话未获回应时累积负面情绪。
     ///
     /// `severity` ∈[0,1]，反映冷落程度（例如由连续 ignored_count 归一化）。
@@ -1252,6 +1260,8 @@ mod feedback_tests {
         assert_eq!(serde_json::to_value(after.needs).unwrap(), serde_json::to_value(before.needs).unwrap());
         manager.reset_to_initial().unwrap();
         assert!(manager.take_pet_interaction_episodes(500.0).is_empty());
+        assert!(manager.pet_action_capsule(151.0).is_none());
+        assert!(manager.query_pet_interactions(151.0, 120, 3)["episodes"].as_array().unwrap().is_empty());
     }
 
     #[test]

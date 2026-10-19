@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Vivian 帧动画预览</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
+    background: #f4f5f7;
+    color: #2b2f36;
+    padding: 28px 20px 60px;
+  }
+  header { max-width: 1200px; margin: 0 auto 20px; }
+  h1 { font-size: 24px; font-weight: 700; }
+  .sub { color: #6b7280; font-size: 13px; margin-top: 6px; }
+  .toolbar {
+    max-width: 1200px; margin: 0 auto 24px;
+    display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+    background: #fff; border: 1px solid #e5e7eb; border-radius: 12px;
+    padding: 12px 16px; box-shadow: 0 1px 3px rgba(0,0,0,.05);
+  }
+  .toolbar .spacer { flex: 1; }
+  button {
+    font: inherit; cursor: pointer; border: 1px solid #d1d5db; background: #fff;
+    color: #374151; border-radius: 8px; padding: 6px 14px; font-size: 13px;
+    transition: all .15s;
+  }
+  button:hover { background: #f3f4f6; }
+  button.primary { background: #4f46e5; border-color: #4f46e5; color: #fff; }
+  button.primary:hover { background: #4338ca; }
+  .speed-control { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #4b5563; }
+  .speed-control input { width: 140px; accent-color: #4f46e5; }
+  .speed-control .val { min-width: 42px; font-variant-numeric: tabular-nums; color: #111827; font-weight: 600; }
+  .grid {
+    max-width: 1200px; margin: 0 auto;
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 16px;
+  }
+  .card {
+    background: #fff; border: 1px solid #e5e7eb; border-radius: 14px;
+    padding: 14px; box-shadow: 0 1px 3px rgba(0,0,0,.05);
+    display: flex; flex-direction: column; gap: 10px;
+  }
+  .card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .card-head .name { font-size: 15px; font-weight: 700; }
+  .card-head .tag {
+    font-size: 11px; padding: 2px 8px; border-radius: 999px; font-weight: 600;
+    background: #eef2ff; color: #4338ca;
+  }
+  .sprite-wrap {
+    width: 100%; aspect-ratio: 1; border-radius: 10px; overflow: hidden;
+    background:
+      repeating-conic-gradient(#e8eaef 0% 25%, #f6f7f9 0% 50%) 0 0 / 22px 22px;
+    border: 1px solid #e5e7eb;
+  }
+  .sprite { width: 100%; height: 100%; background-repeat: no-repeat; }
+  .meta { font-size: 12px; color: #6b7280; display: flex; gap: 10px; flex-wrap: wrap; }
+  .meta b { color: #374151; font-weight: 600; }
+  .bar { height: 6px; border-radius: 3px; background: #eef0f3; overflow: hidden; }
+  .bar > div { height: 100%; width: 0; background: #4f46e5; transition: none; }
+  .controls { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .controls .frame-label { font-size: 11px; color: #9ca3af; font-variant-numeric: tabular-nums; }
+  .controls .btns { display: flex; gap: 6px; }
+  .controls button { padding: 4px 10px; font-size: 12px; border-radius: 7px; }
+  .badges { display: flex; gap: 4px; flex-wrap: wrap; }
+  .badge {
+    font-size: 10px; padding: 1px 7px; border-radius: 999px; font-weight: 600;
+  }
+  .badge.loop { background: #ecfdf5; color: #047857; }
+  .badge.pp { background: #fef3c7; color: #92400e; }
+  .badge.once { background: #f3f4f6; color: #6b7280; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Vivian 帧动画预览</h1>
+  <div class="sub">数据源：src/chibi/animations.json · 图集：public/chibi/motion/vivian/ · 播放引擎复刻桌宠的逐帧时长、循环与往返逻辑</div>
+</header>
+<div class="toolbar">
+  <button class="primary" id="toggle-all">⏸ 全部暂停</button>
+  <button id="replay-all">↺ 全部重播</button>
+  <div class="spacer"></div>
+  <div class="speed-control">
+    <span>全局速度</span>
+    <input type="range" id="speed" min="0.25" max="2" step="0.05" value="1">
+    <span class="val" id="speed-val">1.00x</span>
+  </div>
+</div>
+<div class="grid" id="grid"></div>
+<script>
+const DATA = [{"name": "turn-left", "label": "转身 (left)", "category": "action", "file": "vivian-turn-left-sheet.webp", "cols": 8, "rows": 2, "frames": 12, "loop": false, "pingpong": false, "durations": [33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33]}, {"name": "turn-right", "label": "转身 (right)", "category": "action", "file": "vivian-turn-right-sheet.webp", "cols": 8, "rows": 2, "frames": 12, "loop": false, "pingpong": false, "durations": [33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33]}, {"name": "blink", "label": "眨眼", "category": "action", "file": "vivian-blink-sheet.webp", "cols": 8, "rows": 2, "frames": 12, "loop": false, "pingpong": false, "durations": [33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33]}, {"name": "cast", "label": "施法", "category": "action", "file": "vivian-cast-sheet.webp", "cols": 8, "rows": 5, "frames": 36, "loop": false, "pingpong": false, "durations": [33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33]}, {"name": "happy", "label": "开心", "category": "emotion", "file": "vivian-happy-sheet.webp", "cols": 8, "rows": 5, "frames": 36, "loop": false, "pingpong": false, "durations": [33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33]}, {"name": "angry", "label": "生气", "category": "emotion", "file": "vivian-angry-sheet.webp", "cols": 8, "rows": 5, "frames": 36, "loop": false, "pingpong": false, "durations": [33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33]}, {"name": "thinking", "label": "思考中", "category": "state", "file": "vivian-think-sheet.webp", "cols": 8, "rows": 6, "frames": 48, "loop": true, "pingpong": false, "durations": [42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42]}, {"name": "think", "label": "思考", "category": "emotion", "file": "vivian-think-sheet.webp", "cols": 8, "rows": 6, "frames": 48, "loop": false, "pingpong": false, "durations": [42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42]}, {"name": "smug", "label": "得意", "category": "emotion", "file": "vivian-smug-sheet.webp", "cols": 8, "rows": 5, "frames": 36, "loop": false, "pingpong": false, "durations": [33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33]}, {"name": "sleep", "label": "入睡", "category": "state", "file": "vivian-sleep-sheet.webp", "cols": 8, "rows": 12, "frames": 96, "loop": false, "pingpong": false, "durations": [42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42]}, {"name": "busy-in", "label": "忙碌-掏出手机", "category": "state", "file": "vivian-busy-in-sheet.webp", "cols": 8, "rows": 4, "frames": 30, "loop": false, "pingpong": false, "durations": [33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33]}, {"name": "busy-loop", "label": "忙碌-看手机", "category": "state", "file": "vivian-busy-loop-sheet.webp", "cols": 8, "rows": 6, "frames": 48, "loop": true, "pingpong": false, "durations": [42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42]}, {"name": "busy-out", "label": "忙碌-收起手机", "category": "state", "file": "vivian-busy-out-sheet.webp", "cols": 8, "rows": 4, "frames": 30, "loop": false, "pingpong": false, "durations": [33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33]}, {"name": "wake", "label": "睡醒起身", "category": "state", "file": "vivian-wake-sheet.webp", "cols": 8, "rows": 4, "frames": 30, "loop": false, "pingpong": false, "durations": [33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33]}, {"name": "remind", "label": "温和提醒", "category": "emote", "file": "vivian-remind-sheet.webp", "cols": 8, "rows": 6, "frames": 48, "loop": false, "pingpong": false, "durations": [33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33]}, {"name": "tired", "label": "吃力擦汗", "category": "state", "file": "vivian-tired-sheet.webp", "cols": 8, "rows": 5, "frames": 40, "loop": true, "pingpong": true, "durations": [42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42]}, {"name": "umbrella", "label": "撑伞", "category": "state", "file": "vivian-umbrella-sheet.webp", "cols": 8, "rows": 9, "frames": 72, "loop": true, "pingpong": false, "durations": [42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42]}, {"name": "music", "label": "听歌打拍子", "category": "emote", "file": "vivian-music-sheet.webp", "cols": 8, "rows": 6, "frames": 48, "loop": true, "pingpong": false, "durations": [42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42]}, {"name": "clipboard", "label": "好奇看纸条", "category": "emote", "file": "vivian-clipboard-sheet.webp", "cols": 8, "rows": 8, "frames": 60, "loop": false, "pingpong": false, "durations": [33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33]}, {"name": "rps-rock", "label": "握拳加油 / 猜拳石头", "category": "emote", "file": "vivian-rps-rock-sheet.webp", "cols": 8, "rows": 9, "frames": 72, "loop": false, "pingpong": false, "durations": [33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33]}, {"name": "rps-scissors", "label": "比耶剪刀手 / 猜拳剪刀", "category": "emote", "file": "vivian-rps-scissors-sheet.webp", "cols": 8, "rows": 9, "frames": 72, "loop": false, "pingpong": false, "durations": [33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33]}, {"name": "rps-paper", "label": "伸手 / 猜拳布", "category": "emote", "file": "vivian-rps-paper-sheet.webp", "cols": 8, "rows": 9, "frames": 72, "loop": false, "pingpong": false, "durations": [33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33]}, {"name": "idle-breathe", "label": "呼吸", "category": "state", "file": "vivian-idle-breathe-sheet.webp", "cols": 8, "rows": 10, "frames": 80, "loop": true, "pingpong": true, "durations": [42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41]}, {"name": "idle-look", "label": "四处张望", "category": "state", "file": "vivian-idle-look-sheet.webp", "cols": 8, "rows": 10, "frames": 80, "loop": true, "pingpong": true, "durations": [42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41]}, {"name": "idle-stretch", "label": "伸懒腰", "category": "state", "file": "vivian-idle-stretch-sheet.webp", "cols": 8, "rows": 8, "frames": 60, "loop": true, "pingpong": true, "durations": [42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42]}, {"name": "idle-ears", "label": "耳朵轻动", "category": "state", "file": "vivian-idle-ears-sheet.webp", "cols": 8, "rows": 5, "frames": 40, "loop": true, "pingpong": true, "durations": [42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42]}, {"name": "idle-sway", "label": "轻摆尾巴", "category": "state", "file": "vivian-idle-sway-sheet.webp", "cols": 8, "rows": 10, "frames": 80, "loop": true, "pingpong": true, "durations": [42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41]}, {"name": "state-talk", "label": "说话循环", "category": "state", "file": "vivian-state-talk-sheet.webp", "cols": 8, "rows": 5, "frames": 40, "loop": true, "pingpong": true, "durations": [33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33]}, {"name": "state-listen", "label": "聆听循环", "category": "state", "file": "vivian-state-listen-sheet.webp", "cols": 8, "rows": 8, "frames": 60, "loop": true, "pingpong": true, "durations": [42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42]}, {"name": "state-drag", "label": "悬空轻晃", "category": "state", "file": "vivian-state-drag-sheet.webp", "cols": 8, "rows": 6, "frames": 48, "loop": true, "pingpong": false, "durations": [33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33]}, {"name": "state-dizzy", "label": "眩晕循环", "category": "state", "file": "vivian-state-dizzy-sheet.webp", "cols": 8, "rows": 5, "frames": 36, "loop": true, "pingpong": false, "durations": [33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33]}, {"name": "sleep-loop", "label": "睡眠呼吸", "category": "state", "file": "vivian-sleep-loop-sheet.webp", "cols": 8, "rows": 9, "frames": 72, "loop": false, "pingpong": false, "durations": [42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42]}, {"name": "wave", "label": "挥手", "category": "emote", "file": "vivian-wave-sheet.webp", "cols": 8, "rows": 8, "frames": 60, "loop": false, "pingpong": false, "durations": [33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33, 33, 34, 33]}, {"name": "groom", "label": "整理头发", "category": "emote", "file": "vivian-groom-sheet.webp", "cols": 8, "rows": 9, "frames": 72, "loop": false, "pingpong": false, "durations": [42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42, 42, 41, 42]}];
+
+function totalDur(spec) {
+  const fwd = spec.durations.reduce((a, b) => a + b, 0);
+  if (!spec.pingpong || spec.frames < 2) return fwd;
+  return 2 * fwd - spec.durations[0] - spec.durations[spec.frames - 1];
+}
+
+function buildSequence(spec) {
+  const n = spec.frames;
+  const last = spec.durations[n - 1] || 80;
+  const seq = [], dur = [];
+  for (let i = 0; i < n; i++) { seq.push(i); dur.push(spec.durations[i] ?? last); }
+  if (spec.pingpong) {
+    // 往返：正放 0..n-1 后倒放 n-2..1（回程不重复两端保持帧）
+    for (let i = n - 2; i >= 1; i--) { seq.push(i); dur.push(spec.durations[i] ?? last); }
+  }
+  return { seq, dur };
+}
+
+class SpritePlayer {
+  constructor(card, spec) {
+    this.spec = spec;
+    this.seq = buildSequence(spec);
+    this.i = 0; this.acc = 0; this.playing = false; this.speed = 1;
+    this.sprite = card.querySelector('.sprite');
+    this.sprite.style.backgroundImage = `url('${spec.file}')`;
+    this.bar = card.querySelector('.bar > div');
+    this.frameLabel = card.querySelector('.frame-label');
+    this.btn = card.querySelector('.play-btn');
+    this.btn.addEventListener('click', () => this.toggle());
+    card.querySelector('.replay-btn').addEventListener('click', () => this.restart());
+    this.render();
+  }
+  render() {
+    const f = this.seq.seq[this.i];
+    const { cols, rows } = this.spec;
+    const col = f % cols, row = Math.floor(f / cols) % rows;
+    const x = cols > 1 ? (col * 100) / (cols - 1) : 0;
+    const y = rows > 1 ? (row * 100) / (rows - 1) : 0;
+    this.sprite.style.backgroundSize = `${cols * 100}% ${rows * 100}%`;
+    this.sprite.style.backgroundPosition = `${x}% ${y}%`;
+    this.frameLabel.textContent = `第 ${this.i + 1}/${this.seq.seq.length} 帧`;
+    const total = this.seq.dur.reduce((a, b) => a + b, 0);
+    const done = this.seq.dur.slice(0, this.i).reduce((a, b) => a + b, 0) + this.acc;
+    this.bar.style.width = `${Math.min(100, (done / total) * 100)}%`;
+  }
+  toggle() { this.playing ? this.pause() : this.play(); }
+  play() {
+    if (this.playing) return;
+    this.playing = true;
+    this.btn.textContent = '⏸ 暂停';
+    this.last = performance.now();
+    this.loop();
+  }
+  pause() {
+    this.playing = false;
+    this.btn.textContent = '▶ 播放';
+    if (this.raf) cancelAnimationFrame(this.raf);
+  }
+  restart() {
+    this.i = 0; this.acc = 0;
+    if (!this.playing) this.play();
+    this.render();
+  }
+  loop() {
+    if (!this.playing) return;
+    const now = performance.now();
+    this.acc += (now - this.last) * this.speed;
+    this.last = now;
+    let guard = 0;
+    while (this.acc >= this.seq.dur[this.i] && guard++ < 5000) {
+      this.acc -= this.seq.dur[this.i];
+      this.i++;
+      if (this.i >= this.seq.seq.length) {
+        if (this.spec.loop) { this.i = 0; }
+        else {
+          this.i = this.seq.seq.length - 1;
+          this.acc = 0;
+          this.render();
+          this.pause();
+          return;
+        }
+      }
+    }
+    this.render();
+    this.raf = requestAnimationFrame(() => this.loop());
+  }
+}
+
+const grid = document.getElementById('grid');
+const players = [];
+for (const spec of DATA) {
+  const card = document.createElement('div');
+  card.className = 'card';
+  const ms = totalDur(spec);
+  const badges = [];
+  if (spec.loop && spec.pingpong) badges.push('<span class="badge pp">循环·往返</span>');
+  else if (spec.loop) badges.push('<span class="badge loop">循环</span>');
+  else badges.push('<span class="badge once">播一次</span>');
+  card.innerHTML = `
+    <div class="card-head">
+      <span class="name">${spec.label}</span>
+      <span class="tag">${spec.category}</span>
+    </div>
+    <div class="sprite-wrap"><div class="sprite"></div></div>
+    <div class="badges">${badges.join('')}</div>
+    <div class="meta">
+      <span>网格 <b>${spec.cols}×${spec.rows}</b></span>
+      <span>帧数 <b>${spec.frames}</b></span>
+      <span>时长 <b>${(ms / 1000).toFixed(2)}s</b></span>
+    </div>
+    <div class="bar"><div></div></div>
+    <div class="controls">
+      <span class="frame-label"></span>
+      <div class="btns">
+        <button class="play-btn">▶ 播放</button>
+        <button class="replay-btn">↺ 重播</button>
+      </div>
+    </div>`;
+  grid.appendChild(card);
+  players.push(new SpritePlayer(card, spec));
+}
+
+let globalSpeed = 1;
+document.getElementById('speed').addEventListener('input', (e) => {
+  globalSpeed = parseFloat(e.target.value);
+  document.getElementById('speed-val').textContent = globalSpeed.toFixed(2) + 'x';
+  players.forEach(p => p.speed = globalSpeed);
+});
+
+let allPlaying = true;
+document.getElementById('toggle-all').addEventListener('click', (e) => {
+  allPlaying = !allPlaying;
+  players.forEach(p => allPlaying ? p.play() : p.pause());
+  e.target.textContent = allPlaying ? '⏸ 全部暂停' : '▶ 全部播放';
+});
+document.getElementById('replay-all').addEventListener('click', () => {
+  players.forEach(p => p.restart());
+});
+
+players.forEach(p => p.play());
+</script>
+</body>
+</html>

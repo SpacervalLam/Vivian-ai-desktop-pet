@@ -22,7 +22,10 @@ controller messages on a real HWND and ten real WebView2 lifecycle cycles
 subclass was removed. The temporary
 manifest reuses the application lockfile and excludes upstream GPU examples.
 
-Screenshot overlay resize fix: WM_SIZE updates only the controller bounds.
-Calling SetWindowPos on Controller.ParentWindow from this callback resizes
-the same parent and recursively dispatches WM_SIZE, causing 0xc00000fd.
-The native regression now resizes a live WebView2 parent repeatedly.
+Resize handling: WM_SIZE updates both the controller bounds and its separate
+WRY_WEBVIEW container HWND. Updating only the controller leaves the container
+at its creation size, clipping fullscreen content to the top-left rectangle.
+SetWindowPos is guarded by `container != hwnd`: resizing the HWND currently
+dispatching WM_SIZE would recurse and cause 0xc00000fd. The native regression
+resizes a live WebView2 parent repeatedly and checks both container and
+controller dimensions, as well as teardown safety.

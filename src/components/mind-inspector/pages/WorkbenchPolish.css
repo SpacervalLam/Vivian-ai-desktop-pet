@@ -164,6 +164,16 @@
 .mind-inspector-root.is-work-page .codex-sidebar.hover-peek.peek-open {
   box-shadow: 8px 0 24px rgba(0, 0, 0, .12);
 }
+/* Keep the pin/expand target at the collapsed rail position throughout hover peek. */
+.mind-inspector-root.is-work-page .codex-sidebar.hover-peek .codex-brand {
+  padding-inline: 13px;
+  justify-content: flex-start;
+}
+.mind-inspector-root.is-work-page .codex-sidebar.hover-peek .codex-sidebar-collapse-btn {
+  order: -1;
+  margin-left: 0;
+  transform: none;
+}
 @media (prefers-reduced-motion: reduce) {
   .mind-inspector-root.is-work-page .codex-sidebar.hover-peek { transition: none; }
 }
@@ -188,26 +198,33 @@
 .mind-inspector-root.is-work-page .codex-stats-disclosure:hover .codex-stats-line,
 .mind-inspector-root.is-work-page .codex-stats-disclosure:focus-within .codex-stats-line { visibility: visible; }
 
-/* One concise row per tool; detail retains the full arguments/result. */
+/* Lightweight process rows; full arguments/results remain available on demand. */
 .mind-inspector-root.is-work-page .codex-tool-card,
-.mind-inspector-root.is-work-page .codex-tool-group { margin: 6px 0; border: 1px solid var(--codex-line-light); border-radius: 8px; background: transparent; box-shadow: none; overflow: hidden; }
-.mind-inspector-root.is-work-page .codex-tool-header { padding: 8px 10px; min-height: 36px; gap: 7px; flex-wrap: nowrap; width: 100%; }
+.mind-inspector-root.is-work-page .codex-tool-group { margin: 4px 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; overflow: hidden; }
+.mind-inspector-root.is-work-page .codex-tool-header { padding: 6px 4px; min-height: 32px; gap: 7px; flex-wrap: nowrap; width: 100%; border-radius: 5px; }
 .mind-inspector-root.is-work-page .codex-tool-label { flex: 0 0 auto; font-size: 12px; max-width: 35%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .codex-tool-target { flex: 1; min-width: 0; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--codex-mono); font-size: 11px; color: var(--codex-ink-soft); }
 .mind-inspector-root.is-work-page .codex-tool-duration { font-size: 10px; margin-left: 0; flex-shrink: 0; }
 .mind-inspector-root.is-work-page .codex-tool-status { font-size: 11px; white-space: nowrap; flex-shrink: 0; }
 .mind-inspector-root.is-work-page .codex-tool-header:hover,
 .mind-inspector-root.is-work-page .codex-tool-group-header:hover { background: var(--panel-bg-hover); }
-.mind-inspector-root.is-work-page .codex-tool-card.failed { border-color: color-mix(in srgb, var(--codex-danger) 35%, var(--codex-line-light)); }
-.mind-inspector-root.is-work-page .codex-tool-detail { border-top: 1px solid var(--codex-line-light); padding: 8px 10px; }
+.mind-inspector-root.is-work-page .codex-tool-header:focus-visible,
+.mind-inspector-root.is-work-page .codex-tool-group-header:focus-visible { outline: 2px solid var(--codex-accent); outline-offset: -2px; }
+.mind-inspector-root.is-work-page .codex-tool-card.failed .codex-tool-label { color: var(--codex-danger); }
+.mind-inspector-root.is-work-page .codex-tool-detail,
+.mind-inspector-root.is-work-page .codex-tool-body { border-top: 0; padding: 5px 4px 10px 25px; }
+.mind-inspector-root.is-work-page .codex-tool-card .codex-inout-box { border: 0; border-radius: 0; background: transparent; box-shadow: none; }
+.mind-inspector-root.is-work-page .codex-tool-card .codex-inout-row { padding: 5px 0; }
+.mind-inspector-root.is-work-page .codex-tool-card .codex-inout-divider { background: transparent; height: 6px; }
+.mind-inspector-root.is-work-page .codex-tool-card .codex-inout-badge { border: 0; background: transparent; padding-inline: 0; }
 .codex-tool-detail-name { font: 11px var(--codex-mono); color: var(--codex-ink-soft); margin-bottom: 7px; }
-.mind-inspector-root.is-work-page .codex-tool-summary { border-top: 0; padding: 0 10px 8px; }
+.mind-inspector-root.is-work-page .codex-tool-summary { border-top: 0; padding: 0 4px 6px 25px; }
 .mind-inspector-root.is-work-page .codex-inout-pre { max-height: 260px; overflow: auto; font-size: 11px; line-height: 1.6; }
-.mind-inspector-root.is-work-page .codex-tool-group-header { padding: 8px 10px; min-height: 36px; gap: 7px; flex-wrap: wrap; }
+.mind-inspector-root.is-work-page .codex-tool-group-header { padding: 6px 4px; min-height: 32px; gap: 7px; flex-wrap: wrap; border-radius: 5px; font-size: 12px; }
 .mind-inspector-root.is-work-page .codex-tool-group-meta { font-size: 11px; min-width: 0; }
-.mind-inspector-root.is-work-page .codex-tool-group-body { border-top: 1px solid var(--codex-line-light); padding: 0 10px; }
-.mind-inspector-root.is-work-page .codex-tool-group-body .codex-tool-card { border: 0; border-bottom: 1px solid var(--codex-line-light); border-radius: 0; margin: 0; }
-.mind-inspector-root.is-work-page .codex-tool-group-body .codex-tool-card:last-child { border-bottom: 0; }
+.mind-inspector-root.is-work-page .codex-tool-group-body { border: 0; border-left: 1px solid var(--codex-line-light); margin: 3px 0 5px 10px; padding: 0 0 0 12px; background: transparent; }
+.mind-inspector-root.is-work-page .codex-tool-group-body .codex-tool-card,
+.mind-inspector-root.is-work-page .codex-tool-group-body .codex-tool-card:hover { border: 0; border-radius: 0; margin: 1px 0; background: transparent; box-shadow: none; }
 .codex-tool-group-current { padding: 0 10px 8px 30px; font-size: 11px; color: var(--codex-ink-soft); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 @container work-main (max-width: 420px) {
   .mind-inspector-root.is-work-page .codex-tool-duration { display: none; }

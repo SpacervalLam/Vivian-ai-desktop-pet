@@ -5,30 +5,26 @@ import vm from 'node:vm';
 
 const office = (await readFile('src/components/mind-inspector/pages/CodeAgentPageNew.tsx', 'utf8')).replace(/\r\n/g, '\n');
 const start = office.indexOf('  const refreshSessions = useCallback(');
-const end = office.indexOf('  const loadActiveModelId', start);
+const end = office.indexOf('  // Metadata is shared', start);
 const code = (await transform(office.slice(start, end).replace('const refreshSessions', 'var refreshSessions').replace('const loadOlderSessions', 'var loadOlderSessions'), { loader: 'ts', format: 'cjs' })).code;
 const data = Array.from({ length: 75 }, (_, i) => ({ session_id: `session-${i}`, updated_at: 75 - i }));
-let visible, more, requestFailure = false;
+let visible, requestFailure = false;
 const context = {
-  useCallback: callback => callback, sessionWindow: { current: 30 }, sessionRefresh: { current: 0 },
+  useCallback: callback => callback, sessionRefresh: { current: 0 },
   activeIdRef: { current: null },
-  loadingOlderSessions: false, setLoadingOlderSessions: () => {},
-  setSessions: value => { visible = typeof value === 'function' ? value(visible ?? []) : value; }, setHasOlderSessions: value => { more = value; },
-  invoke: async (name, { offset, limit }) => { assert.equal(name, 'coding_list_sessions'); if (requestFailure) throw new Error('offline'); return data.slice(offset, offset + limit); },
+  setSessions: value => { visible = typeof value === 'function' ? value(visible ?? []) : value; },
+  invoke: async (name, { sidebar }) => { assert.equal(name, 'coding_list_sessions'); assert.equal(sidebar, true); if (requestFailure) throw new Error('offline'); return [...data].reverse(); },
 };
 vm.createContext(context); vm.runInContext(code, context);
 await context.refreshSessions();
-assert.equal(visible.length, 30); assert.equal(more, true);
-await context.loadOlderSessions();
-assert.equal(visible.length, 60); assert.equal(more, true);
-await context.loadOlderSessions();
-assert.equal(visible.length, 75); assert.equal(more, false);
+assert.equal(visible.length, 75);
+assert.equal(visible[0].session_id, 'session-0', 'global metadata stays sorted newest first');
 assert.equal(new Set(visible.map(s => s.session_id)).size, 75);
 assert.equal(visible[74].session_id, 'session-74');
 requestFailure = true; await context.refreshSessions();
 assert.equal(visible.length, 75, 'a failed refresh must not erase already loaded history');
 assert.ok(office.includes('{ sessionId: requestedSession }'), 'deep links can fetch a session outside the loaded page');
-console.log('Recent page, older history, exhaustion, deduplication and failed refresh preservation passed.');
+console.log('Global lightweight session metadata, stable recency, deduplication and failed refresh preservation passed.');
 
 const linkStart = office.indexOf('  useEffect(() => {\n    if (!requestedSession) return;');
 const linkEnd = office.indexOf('  /** 在指定目录新建会话', linkStart);
@@ -100,11 +96,10 @@ assert.equal(selectedMessages[0].content, 'updated history', 'reopening refreshe
 console.log('Lazy detail hydration, selection races, failed reads and refreshed cached histories passed.');
 
 requestFailure = false;
-context.sessionWindow.current = 30;
 context.activeIdRef.current = 'session-74';
 visible = [{ ...data[74], history_loaded: true, messages: [{ content: 'archive history' }] }];
 await context.refreshSessions();
-assert.equal(visible.length, 31);
+assert.equal(visible.length, 75);
 assert.equal(visible.find(s => s.session_id === 'session-74').messages[0].content, 'archive history', 'refresh keeps an active session outside the recent page');
 let unwantedSwitches = 0;
 deleteContext.activeIdRef.current = 'other-workspace-archive';

@@ -14,6 +14,17 @@ fn visible_in_chat(metadata: &Value) -> bool {
     metadata.get("source").and_then(Value::as_str) != Some("quiet_control")
 }
 
+/// 聊天窗口「查找聊天记录」的渠道白名单：私聊 `wechat`（含无 channel 标签的旧数据）
+/// 与群聊 `wechat_group`——即聊天窗口主页两个会话入口覆盖的范围。
+/// `proactive`（桌宠气泡）/ `presence` / `direct` / `cross_character` 等渠道的消息
+/// 不属于任何会话视图，搜索命中后点击也无法跳转到对应消息，必须排除。
+fn visible_in_chat_search(metadata: &Value) -> bool {
+    matches!(
+        metadata.get("channel").and_then(Value::as_str),
+        None | Some("wechat") | Some("wechat_group")
+    )
+}
+
 #[tauri::command]
 pub async fn get_chat_history(
     state: State<'_, Arc<AppState>>,
@@ -146,15 +157,16 @@ pub async fn search_chat_history(
         for (dialogue, cid, cname) in chars {
             let entries = dialogue.get_all_history().map_err(|e| e.to_string())?;
             for e in entries {
-                if e.role == "system" || !visible_in_chat(&e.metadata) {
+                if e.role == "system" || !visible_in_chat(&e.metadata) || !visible_in_chat_search(&e.metadata) {
                     continue;
                 }
                 let content = e.content.as_str();
                 if !content.to_lowercase().contains(&q) {
                     continue;
                 }
+                let channel = e.metadata.get("channel").and_then(Value::as_str).unwrap_or_default();
                 let ts = e.timestamp as f64;
-                let key = format!("{}|{}", content, ts);
+                let key = format!("{}|{}|{}", channel, content, ts);
                 if let Some(existing) = groups.get_mut(&key) {
                     if let Some(chars) = existing.get_mut("matched_chars") {
                         if let Some(arr) = chars.as_array_mut() {
@@ -173,6 +185,7 @@ pub async fn search_chat_history(
                         "timestamp": e.timestamp,
                         "character_id": cid,
                         "character_name": cname,
+                        "source": if channel == "wechat_group" { "group" } else { "private" },
                         "matched_chars": arr,
                     });
                     groups.insert(key.clone(), value);
@@ -186,11 +199,13 @@ pub async fn search_chat_history(
             .take(MAX_RESULTS)
             .filter_map(|(_, k)| {
                 let mut v = groups.remove(&k)?;
-                let is_group = v
-                    .get("matched_chars")
-                    .and_then(|c| c.as_array())
-                    .map(|a| a.len() > 1)
-                    .unwrap_or(false);
+                // 群聊来源：显式 channel 标记优先；无 channel 标签的旧数据退回多角色命中推断
+                let is_group = v.get("source").and_then(Value::as_str) == Some("group")
+                    || v
+                        .get("matched_chars")
+                        .and_then(|c| c.as_array())
+                        .map(|a| a.len() > 1)
+                        .unwrap_or(false);
                 v["source"] = if is_group {
                     serde_json::Value::String("group".to_string())
                 } else {
@@ -258,4 +273,30 @@ pub async fn get_latest_previews(
     .await
     .map_err(|e| format!("任务执行失败: {}", e))??;
     Ok(result)
+}
+
+#[cfg(test)]
+mod search_scope_tests {
+    use super::*;
+
+    fn searchable(channel: Option<&str>) -> bool {
+        let metadata = match channel {
+            Some(channel) => serde_json::json!({ "channel": channel }),
+            None => serde_json::json!({ "utterance_id": "legacy" }),
+        };
+        visible_in_chat_search(&metadata)
+    }
+
+    #[test]
+    fn search_scope_covers_chat_window_conversations_only() {
+        // 聊天窗口的两个会话入口：私聊 wechat 与群聊 wechat_group
+        assert!(searchable(Some("wechat")));
+        assert!(searchable(Some("wechat_group")));
+        // 无 channel 标签的旧数据按私聊兼容（与 get_chat_history 的 wechat scope 一致）
+        assert!(searchable(None));
+        // 桌宠气泡 / 在场状态 / 直连管道 / 跨角色传话等渠道不属于任何会话视图
+        for hidden in ["proactive", "presence", "direct", "cross_character", "inner", "broadcast"] {
+            assert!(!searchable(Some(hidden)), "{hidden} must not surface in chat search");
+        }
+    }
 }

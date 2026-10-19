@@ -17,3 +17,19 @@ const library = await import(`data:text/javascript;base64,${Buffer.from(outputFi
 for (const page of library.browserLibraryPages) assert.equal(library.browserLibraryPage(library.browserLibraryUrl(page)), page);
 for (const url of ['https://example.com/#vivian-bookmarks','about:blank','about:blank#vivian-unknown','about:blank#vivian-history?x=1']) assert.equal(library.browserLibraryPage(url), null);
 console.log('Browser library pages: exact internal routes and external URL isolation passed.');
+
+const { browserSearchEngine, browserSearchInput } = library;
+assert.equal(browserSearchEngine(null), 'bing');
+assert.equal(browserSearchEngine('untrusted'), 'bing');
+for (const [engine, host, parameter] of [['bing', 'www.bing.com', 'q'], ['google', 'www.google.com', 'q'], ['baidu', 'www.baidu.com', 'wd']]) {
+  assert.equal(browserSearchEngine(engine), engine);
+  const query = '中文搜索 C++ & Rust #教程';
+  const target = new URL(browserSearchInput(`  ${query}  `, engine));
+  assert.equal(target.hostname, host);
+  assert.equal(target.searchParams.get(parameter), query);
+  assert.equal(target.hash, '');
+  for (const address of ['', 'example.com/a', 'https://example.com?q=a&b=c', 'localhost:3000', '127.0.0.1:8080', '[::1]:8080', 'about:blank', 'data:text/plain,hello', 'C:/my files/demo.html', '//server/share/a.html']) {
+    assert.equal(browserSearchInput(address, engine), address, 'addresses and local files bypass keyword search');
+  }
+}
+console.log('Browser search: three engines, encoded queries, preference fallback and address preservation passed.');

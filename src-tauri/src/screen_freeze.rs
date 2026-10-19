@@ -178,5 +178,11 @@ pub async fn screen_freeze_save(window: WebviewWindow) -> Result<String, String>
 pub async fn screen_freeze_analyze(window: WebviewWindow, state: State<'_, Arc<AppState>>) -> Result<(), String> {
     let image = snapshot(&window)?;
     let app = window.app_handle();
-    crate::commands::desktop_assistant::analyze_frozen_snapshot(app, &state, &image.character, image.png.clone()).await
+    tracing::info!(window = window.label(), png_bytes = image.png.len(), "收到定格图片分析请求");
+    let result = Box::pin(crate::commands::desktop_assistant::analyze_frozen_snapshot(app, &state, &image.character, image.png.clone())).await;
+    match &result {
+        Ok(()) => tracing::info!(window = window.label(), "定格图片分析完成"),
+        Err(error) => tracing::warn!(window = window.label(), %error, "定格图片分析失败"),
+    }
+    result
 }

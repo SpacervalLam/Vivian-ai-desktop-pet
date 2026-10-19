@@ -20,6 +20,7 @@ import React, { useCallback, useEffect, useRef, useState, type ReactNode } from 
 import { listen, emit } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow, currentMonitor, LogicalPosition, LogicalSize } from '@tauri-apps/api/window';
+import { playCompanionTone } from '../utils/companionSound';
 import { openWebsite } from '../utils/openWebsite';
 import { stackRank, toastFingerprint, ToastDedupGate, ToastKeyTracker } from '../utils/toastDedup';
 import { openWorkSession } from '../utils/workSessionWindow';
@@ -305,6 +306,25 @@ export default function ToastWindow() {
 
   const [items, setItems] = useState<ToastItem[]>([]);
   const [confirms, setConfirms] = useState<ConfirmItem[]>([]);
+  // Sound follows actual admission, after routing/deduplication/capacity checks.
+  // Updating an existing progress toast or recovering a confirmation stays quiet.
+  const soundedEntries = useRef(new Set<string>());
+  useEffect(() => {
+    const present = new Set([
+      ...items.map(item => `t-${item.id}`),
+      ...confirms.map(item => `c-${item.requestId}`),
+    ]);
+    let added = false;
+    for (const id of [
+      ...items.filter(item => item.phase === 'live').map(item => `t-${item.id}`),
+      ...confirms.map(item => `c-${item.requestId}`),
+    ]) {
+      if (!soundedEntries.current.has(id)) { soundedEntries.current.add(id); added = true; }
+    }
+    for (const id of soundedEntries.current) if (!present.has(id)) soundedEntries.current.delete(id);
+    if (added) playCompanionTone();
+  }, [items, confirms]);
+
   /**
    * 每个堆叠条目的实测高度。放 ref 而非 state：高度变化来自 ResizeObserver，
    * 只参与布局计算，不该让整棵子树重渲染；需要依据它重算时 bump layoutTick。

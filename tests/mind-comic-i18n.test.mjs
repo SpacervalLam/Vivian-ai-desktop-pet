@@ -46,7 +46,16 @@ for (const language of ['en','ja']) {
 
 // Switch languages against the same mounted text/image nodes, never replacing markup.
 const bundle = await build({ entryPoints: ['src/components/mind-inspector/pages/comicBind.ts'], bundle: true, write: false, format: 'esm' });
-const { translateComicLabels, patchComicData, fitComicText } = await import(`data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString('base64')}`);
+const { applyComicPresentation, translateComicLabels, patchComicData, fitComicText } = await import(`data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString('base64')}`);
+// Model release WebView2 parsing with no inline styles retained in CSSOM.
+const delayedPanel = { dataset: { delay: '1150', focus: '30% 0%' }, style: new Map() };
+delayedPanel.style.setProperty = (key, value) => delayedPanel.style.set(key, value);
+const delayedBubble = { dataset: { delay: '3450' }, style: new Map() };
+delayedBubble.style.setProperty = (key, value) => delayedBubble.style.set(key, value);
+applyComicPresentation({ querySelectorAll: selector => selector === '[data-delay]' ? [delayedPanel, delayedBubble] : [delayedPanel] });
+assert.equal(delayedPanel.style.get('--delay'), '1150ms', 'release panels restore their entrance delay through CSSOM');
+assert.equal(delayedBubble.style.get('--delay'), '3450ms', 'thought bubbles preserve their own later entrance');
+assert.equal(delayedPanel.style.get('--focus'), '30% 0%', 'release framing restores the authored image focus');
 const narration = { style: { fontSize: '24px', removeProperty() {} }, classList: { contains: () => false },
   parentElement: { clientHeight: 30, children: [], classList: { contains: () => false } },
   clientWidth: 50, scrollWidth: 200, scrollHeight: 80 };

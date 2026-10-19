@@ -182,7 +182,10 @@
 .unified-functional-panel.source-memory:not(.is-expanded) .unified-panel-content { overflow: hidden; }
 .unified-functional-panel.source-memory:not(.is-expanded) .memory-page.comic-chapter { flex: 1; padding: 0; }
 .unified-functional-panel.is-expanded :is(.unified-panel-ink, .unified-panel-gutter) { display: none; }
-.unified-functional-panel.source-memory { --slot-delay: 2.3s; }
+/* 面板入场与所在页的分镜排队：记忆面板占的是聊天气泡那一拍（comicMarkup.js
+   第 6 页 line-chat 的 --delay），手机落定后它再进；日记同理（margin-line 拍）。
+   planner / notebook 是另外定的拍，不在这个约束里。 */
+.unified-functional-panel.source-memory { --slot-delay: 3.45s; }
 .unified-functional-panel.source-diary { --slot-delay: 2.3s; }
 .unified-functional-panel.source-planner { --slot-delay: 1.15s; }
 .unified-functional-panel.source-notebook { --slot-delay: 3.05s; }

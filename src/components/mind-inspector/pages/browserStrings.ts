@@ -1,6 +1,7 @@
 import i18n from 'i18next';
 const strings = {
   'zh-CN': {
+    searchEngine: '默认搜索引擎', searchEngine_bing: 'Bing', searchEngine_google: 'Google', searchEngine_baidu: '百度',
     bookmarkActions: '书签操作', deleteBookmark: '删除', rename: '重命名', bookmarkName: '书签名称', saveBookmarkName: '保存',
     navigation: '浏览器导航', zoom: '缩放', tools: '工具', searchWeb: '搜索网页', recommended: '推荐', recent: '最近', viewAll: '查看全部', noRecent: '浏览过的网站会显示在这里',
     siteBilibili: '哔哩哔哩', siteXiaohongshu: '小红书', siteZhihu: '知乎', siteDouyin: '抖音',
@@ -20,6 +21,7 @@ const strings = {
     settings: '浏览器设置', clearData: '清理当前配置的网站数据', clearDataHint: '清除当前普通或无痕配置的 Cookie、网站存储、缓存及网站权限。书签、浏览历史和已下载文件保留。', clearDataConfirm: '清理当前配置的网站数据？该配置中的网站会退出登录。',
   },
   en: {
+    searchEngine: 'Default search engine', searchEngine_bing: 'Bing', searchEngine_google: 'Google', searchEngine_baidu: 'Baidu',
     bookmarkActions: 'Bookmark actions', deleteBookmark: 'Delete', rename: 'Rename', bookmarkName: 'Bookmark name', saveBookmarkName: 'Save',
     navigation: 'Browser navigation', zoom: 'Zoom', tools: 'Tools', searchWeb: 'Search the web', recommended: 'Recommended', recent: 'Recent', viewAll: 'View all', noRecent: 'Sites you visit will appear here',
     siteBilibili: 'Bilibili', siteXiaohongshu: 'Xiaohongshu', siteZhihu: 'Zhihu', siteDouyin: 'Douyin',
@@ -38,6 +40,7 @@ const strings = {
     settings: 'Browser settings', clearData: 'Clear site data for this profile', clearDataHint: 'Clear cookies, site storage, cache and site permissions for the current normal or private profile. Bookmarks, browsing history and downloaded files remain.', clearDataConfirm: 'Clear site data for this profile? Sites in this profile will be signed out.',
   },
   ja: {
+    searchEngine: '既定の検索エンジン', searchEngine_bing: 'Bing', searchEngine_google: 'Google', searchEngine_baidu: 'Baidu',
     bookmarkActions: 'ブックマーク操作', deleteBookmark: '削除', rename: '名前を変更', bookmarkName: 'ブックマーク名', saveBookmarkName: '保存',
     navigation: 'ブラウザーナビゲーション', zoom: 'ズーム', tools: 'ツール', searchWeb: 'ウェブ検索', recommended: 'おすすめ', recent: '最近', viewAll: 'すべて表示', noRecent: '閲覧したサイトがここに表示されます',
     siteBilibili: 'Bilibili', siteXiaohongshu: '小紅書', siteZhihu: '知乎', siteDouyin: '抖音',

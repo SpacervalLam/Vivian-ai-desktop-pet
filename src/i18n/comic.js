@@ -6,6 +6,7 @@ const rows = {
   noteFullscreen: ['全屏阅读','Read fullscreen','全画面で読む'],
   noteExitFullscreen: ['退出全屏','Exit fullscreen','全画面を閉じる'],
   conversationTitle: ['与{{names}}的对话','Conversation with {{names}}','{{names}}との会話'],
+  conversationParticipants: ['{{first}}与{{others}}的对话','Conversation between {{first}} and {{others}}','{{first}}と{{others}}の会話'],
   conversationYou: ['你','you','あなた'],
   user: ['用户','You','ユーザー'], everyone: ['大家','Everyone','みんな'],
   pageFailed: ['这一页加载失败了','This page failed to load','このページを読み込めませんでした'], pageRetry: ['重试','Retry','再試行'],

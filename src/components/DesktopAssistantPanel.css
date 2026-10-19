@@ -1,7 +1,7 @@
 /* 聊天窗口工具子页（随手记 / 快捷启动）— 轻质感玻璃系统。
-   自下而上四层：aurora 环境色 → 玻璃面 → 内高光 → 凹陷井。
-   玻璃面只有在它背后有东西时才读得出玻璃感，aurora 就是那层东西；两者缺一，
-   卡片就会渲染成一块死黑（这正是之前暗色下发糊的原因）。
+   自下而上三层：玻璃面 → 内高光 → 凹陷井。
+   （曾经还有一层 aurora 环境色，是为已经删掉的独立窗口准备的；两个子页都会隐藏它，
+   于是整层连同 --a-aurora-* 一起移除。）
 
    所有颜色都走 token，一个主题 = 一个覆盖块，下面的规则里不写任何字面量。
    浅色块写了两遍（media 查询管 `data-theme=system`，属性选择器管显式浅色），
@@ -9,9 +9,6 @@
 .desktop-assistant {
   /* --- 表面 --- */
   --a-base: #05070b;
-  --a-aurora-a: rgba(72, 214, 232, .20);
-  --a-aurora-b: rgba(126, 109, 248, .22);
-  --a-aurora-c: rgba(255, 128, 172, .11);
 
   --a-surface: linear-gradient(180deg, rgba(255, 255, 255, .095), rgba(255, 255, 255, .042));
   --a-surface-soft: linear-gradient(180deg, rgba(255, 255, 255, .062), rgba(255, 255, 255, .028));
@@ -37,7 +34,6 @@
   /* --- 强调 --- */
   --a-accent: linear-gradient(135deg, #45d8e8, #7d6df8);
   --a-accent-ink: #05121b;
-  --a-accent-tint: linear-gradient(160deg, rgba(69, 216, 232, .13), rgba(125, 109, 248, .15));
   --a-accent-rim: rgba(140, 160, 255, .28);
   --a-accent-glow: rgba(92, 124, 242, .34);
 
@@ -59,7 +55,10 @@
   --a-mono: ui-monospace, 'SF Mono', 'JetBrains Mono', 'Cascadia Mono', Consolas, monospace;
   --a-sans: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'PingFang SC', 'Microsoft YaHei', sans-serif;
 
-  display: flex; flex-direction: column; min-height: 100vh; box-sizing: border-box;
+  /* 始终作为聊天窗口 assistant 视图的填充子节点：吃掉剩余高度、裁掉溢出。
+     独立窗口时代的 `min-height: 100vh` 已随宿主一起删除。 */
+  flex: 1; min-height: 0; overflow: hidden; box-sizing: border-box;
+  display: flex; flex-direction: column;
   position: relative; isolation: isolate;
   background: var(--a-base); color: var(--a-text);
   font: 15px/1.5 var(--a-sans);
@@ -68,9 +67,6 @@
 @media (prefers-color-scheme: light) {
   :root:not([data-theme=dark]) .desktop-assistant {
     --a-base: #eceff6;
-    --a-aurora-a: rgba(56, 190, 214, .34);
-    --a-aurora-b: rgba(118, 104, 236, .30);
-    --a-aurora-c: rgba(255, 122, 160, .22);
 
     --a-surface: linear-gradient(180deg, rgba(255, 255, 255, .94), rgba(255, 255, 255, .76));
     --a-surface-soft: linear-gradient(180deg, rgba(255, 255, 255, .82), rgba(255, 255, 255, .64));
@@ -92,7 +88,6 @@
 
     --a-accent: linear-gradient(135deg, #0fb6cf, #6350e6);
     --a-accent-ink: #ffffff;
-    --a-accent-tint: linear-gradient(160deg, rgba(15, 182, 207, .11), rgba(99, 80, 230, .12));
     --a-accent-rim: rgba(99, 80, 230, .22);
     --a-accent-glow: rgba(99, 80, 230, .26);
 
@@ -108,9 +103,6 @@
 }
 :root[data-theme=light] .desktop-assistant {
   --a-base: #eceff6;
-  --a-aurora-a: rgba(56, 190, 214, .34);
-  --a-aurora-b: rgba(118, 104, 236, .30);
-  --a-aurora-c: rgba(255, 122, 160, .22);
 
   --a-surface: linear-gradient(180deg, rgba(255, 255, 255, .94), rgba(255, 255, 255, .76));
   --a-surface-soft: linear-gradient(180deg, rgba(255, 255, 255, .82), rgba(255, 255, 255, .64));
@@ -132,7 +124,6 @@
 
   --a-accent: linear-gradient(135deg, #0fb6cf, #6350e6);
   --a-accent-ink: #ffffff;
-  --a-accent-tint: linear-gradient(160deg, rgba(15, 182, 207, .11), rgba(99, 80, 230, .12));
   --a-accent-rim: rgba(99, 80, 230, .22);
   --a-accent-glow: rgba(99, 80, 230, .26);
 
@@ -145,7 +136,6 @@
   --a-shadow-1: 0 1px 2px rgba(15, 23, 42, .07);
   --a-shadow-2: 0 10px 24px -12px rgba(15, 23, 42, .20);
 }
-.desktop-assistant-embedded { flex: 1; min-height: 0; overflow: hidden; }
 .desktop-assistant *, .desktop-assistant *::before, .desktop-assistant *::after { box-sizing: border-box; }
 /*
  * 重置一律用 :where() 把特异度压到 0。
@@ -167,15 +157,6 @@
 .desktop-assistant :where(h1, h2, p) { margin: 0; }
 .desktop-assistant svg { flex-shrink: 0; }
 .desktop-assistant ::selection { background: var(--a-accent-rim); }
-
-/* aurora 固定在面板上不随内容滚动，这样整页共享同一片环境色。 */
-.assistant-aurora {
-  position: absolute; inset: 0; pointer-events: none; z-index: 0;
-  background:
-    radial-gradient(92% 44% at 50% -10%, var(--a-aurora-a), transparent 62%),
-    radial-gradient(74% 40% at 108% 4%, var(--a-aurora-b), transparent 64%),
-    radial-gradient(96% 46% at -12% 106%, var(--a-aurora-c), transparent 62%);
-}
 
 /* 滚动容器同时是页面骨架：开 flex 列，子页才能把主体撑到满高。 */
 .assistant-scroll {
@@ -202,7 +183,6 @@
   box-shadow: var(--a-inset), var(--a-shadow-1);
 }
 .assistant-card + .assistant-card { margin-top: 0; }
-/* 卡片只有背后有东西才读得出玻璃。aurora 提供那层颜色，blur 让它别糊成一片平涂。 */
 .assistant-count { font: 400 11px/1 var(--a-mono); font-variant-numeric: tabular-nums; color: var(--a-faint); }
 .assistant-count b { font-weight: 400; color: var(--a-ghost); }
 .assistant-muted { font-size: 11.5px; color: var(--a-faint); }
@@ -332,6 +312,56 @@
 .assistant-shortcut-remove:hover { opacity: 1; filter: brightness(1.15); }
 .assistant-shortcut-form { flex-shrink: 0; }
 
+/* --- 快捷启动：搜索与分组 ---
+   344px 下工具栏只放得下「搜索框 + 加号」，条数挪到下面一行小字：
+   搜索框吃满宽度，分组名再长也不会把输入框挤没。 */
+.assistant-shortcut-toolbar, .assistant-shortcut-meta { flex-shrink: 0; }
+.assistant-shortcut-search {
+  display: flex; align-items: center; gap: 7px; flex: 1; min-width: 0;
+  height: 36px; padding: 0 10px; border-radius: 10px;
+  color: var(--a-ghost); background: var(--a-well); border: 1px solid var(--a-well-rim);
+  transition: border-color .16s ease;
+}
+.assistant-shortcut-search:focus-within { border-color: var(--a-accent-rim); }
+/* 要写成 .desktop-assistant 前缀才压得住上面那条 width/height 40 的通用 input 规则 */
+.desktop-assistant .assistant-shortcut-search input {
+  flex: 1; min-width: 0; height: 32px; padding: 0; font-size: 13px;
+  color: var(--a-text); background: transparent; border: 0;
+}
+.desktop-assistant .assistant-shortcut-search input:focus { border: 0; }
+.assistant-shortcut-search-clear {
+  display: grid; place-items: center; flex-shrink: 0; width: 18px; height: 18px;
+  border-radius: 50%; color: var(--a-faint); background: var(--a-surface-soft);
+}
+.assistant-shortcut-search-clear:hover { color: var(--a-text); }
+.assistant-shortcut-meta { padding: 0 3px; font-size: 11px; color: var(--a-ghost); }
+
+.assistant-shortcut-group { display: flex; flex-direction: column; }
+.assistant-shortcut-group + .assistant-shortcut-group { border-top: 1px solid var(--a-rim); }
+.assistant-shortcut-group-head {
+  display: flex; align-items: center; gap: 7px; width: 100%;
+  padding: 11px 12px 7px; text-align: left;
+  font-size: 11.5px; font-weight: 600; letter-spacing: .03em; color: var(--a-dim);
+}
+.assistant-shortcut-group-head:hover { color: var(--a-text); }
+.assistant-shortcut-group-chevron { flex-shrink: 0; color: var(--a-ghost); transition: transform .16s ease; }
+.assistant-shortcut-group[data-collapsed] .assistant-shortcut-group-chevron { transform: rotate(-90deg); }
+.assistant-shortcut-group-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.assistant-shortcut-group-count {
+  flex-shrink: 0; padding: 1px 7px; border-radius: 999px;
+  font-size: 10.5px; font-weight: 500; color: var(--a-faint); background: var(--a-surface-soft);
+}
+.assistant-shortcut-group-items { display: flex; flex-direction: column; }
+.assistant-shortcut-group:last-child .assistant-shortcut:last-child { border-bottom: 0; }
+.assistant-shortcut-edit {
+  position: relative; z-index: 2; display: grid; place-items: center; flex-shrink: 0;
+  width: 30px; height: 30px; border-radius: 9px;
+  color: var(--a-faint); background: transparent; border: 0;
+  transition: color .16s ease, background .16s ease;
+}
+.assistant-shortcut-edit:hover { color: var(--a-text); background: var(--a-surface-soft); }
+.assistant-shortcut-list .assistant-empty { min-height: 120px; }
+
 /* --- 折叠说明 --- */
 .assistant-details { margin-top: 14px; font-size: 12px; color: var(--a-faint); }
 .assistant-details summary { cursor: pointer; color: var(--a-dim); }
@@ -371,7 +401,6 @@
 @media (prefers-color-scheme: light) {
   :root:not([data-theme=dark]) .desktop-assistant { color-scheme: light; }
 }
-.desktop-assistant:is([data-panel=notes], [data-panel=shortcuts]) .assistant-aurora { display: none; }
 .desktop-assistant:is([data-panel=notes], [data-panel=shortcuts]) .assistant-body { gap: 18px; }
 .assistant-intro { display: flex; align-items: flex-start; gap: 11px; padding: 4px 2px 2px; }
 .assistant-intro > svg { color: var(--a-dim); margin-top: 3px; }

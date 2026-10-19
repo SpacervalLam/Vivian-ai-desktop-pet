@@ -112,6 +112,8 @@ impl CompanionPrompt {
             ("events", &parts.environment_events), ("research", &parts.user_research),
         ] { prompt.push(id, value.clone().unwrap_or_default(), World, Context, 2); }
 
+        prompt.push("pet_actions", parts.pet_action_section.clone().unwrap_or_default(), World, Context, 0);
+
         // Capability guides remain system instructions, separate from evidence and speech.
         prompt.push("skills", parts.skill_section.clone().unwrap_or_default(), Generation, Main, 2);
         if parts.tools.as_deref().is_some_and(|tools| !tools.trim().is_empty()) {
@@ -272,6 +274,21 @@ fn example_blocks(text: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pet_actions_survive_budget_pressure_as_system_evidence() {
+        let parts = PromptParts { model_context_window: Some(8192),
+            pet_action_section: Some("observed_release_flight".into()),
+            environment_events: Some("optional_events ".repeat(10000)), ..Default::default() };
+        let prompt = CompanionPrompt::build(&parts, &[]);
+        assert!(prompt.render().contains("observed_release_flight"));
+        assert!(!prompt.render().contains("optional_events"));
+        let messages = prompt.messages(&[], "飞的爽吗刚才", false, None);
+        let evidence = messages.iter().find(|m| m.content.contains("observed_release_flight")).unwrap();
+        assert_eq!(evidence.role, "system");
+        assert!(evidence.content.contains("CONTEXT DATA"));
+        assert_eq!(messages.iter().filter(|m| m.content == "飞的爽吗刚才").count(), 1);
+    }
 
     #[test]
     fn roleplay_authored_examples_follow_the_scene_not_answer_catchphrases() {

@@ -10,7 +10,7 @@ export async function openWorkSession(sessionId: string): Promise<void> {
     const win = new WebviewWindow('memory', {
       url: `/?view=memory&nav=code&work_session=${encodeURIComponent(sessionId)}`,
       title: '心智观察 · 办公', width: window.screen.width, height: window.screen.height,
-      minWidth: 1260, minHeight: 896, resizable: true, decorations: false,
+      fullscreen: true, maximizable: false, resizable: false, decorations: false,
       transparent: false, shadow: true, alwaysOnTop: false, visible: false, dragDropEnabled: true,
     });
     await new Promise<void>((resolve, reject) => {

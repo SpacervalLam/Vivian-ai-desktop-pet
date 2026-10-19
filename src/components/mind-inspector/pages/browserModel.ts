@@ -26,3 +26,20 @@ export function browserBytes(bytes: number): string {
   if (bytes < 1048576) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / 1048576).toFixed(1)} MB`;
 }
+
+export const browserSearchEngines = ['bing', 'google', 'baidu'] as const;
+export type BrowserSearchEngine = typeof browserSearchEngines[number];
+export const BROWSER_SEARCH_ENGINE_KEY = 'vivian-browser-search-engine';
+export function browserSearchEngine(value: string | null): BrowserSearchEngine {
+  return browserSearchEngines.find(engine => engine === value) ?? 'bing';
+}
+/** Resolve only keywords here; native navigation still validates all addresses. */
+export function browserSearchInput(input: string, engine: BrowserSearchEngine): string {
+  const text = input.trim();
+  const path = /^(?:[a-z]:[\\/]|\\\\|\/)/i.test(text);
+  const explicit = text.includes('://') || text.startsWith('about:') || text.startsWith('data:');
+  const host = !/\s/.test(text) && (text.includes('.') || text.startsWith('localhost') || text.startsWith('[::1]'));
+  if (!text || path || explicit || host) return text;
+  const endpoint = { bing: 'https://www.bing.com/search?q=', google: 'https://www.google.com/search?q=', baidu: 'https://www.baidu.com/s?wd=' }[engine];
+  return endpoint + encodeURIComponent(text);
+}

@@ -23,6 +23,10 @@ assert.doesNotMatch(comicMarkup(data, 6, '/mind-comic/', 0, true), /comic-source
 const assets = [];
 for (let page = 0; page < comicTitles.length; page++) {
   const html = comicMarkup(data,page,'/mind-comic/');
+  for (const element of html.matchAll(/<[^>]*style="[^"]*--delay:(\d+)ms[^"]*"[^>]*>/g)) {
+    assert.ok(element[0].includes(`data-delay="${element[1]}"`), 'release playback retains timing even when HTML inline styles are discarded');
+    if (element[0].includes('--focus:')) assert.ok(element[0].includes('data-focus='), 'release image framing retains its authored focus');
+  }
   assert(!html.includes('<script>') && !html.includes('<img src=x') && !html.includes('<b>真实心情</b>'));
   assert(!html.includes('undefined'));
   for (const bubble of html.matchAll(/<div class="voice [^>]*>(.*?)<\/div>/gs)) assert(!bubble[1].includes('<small>'), 'speech bubbles contain only speech');

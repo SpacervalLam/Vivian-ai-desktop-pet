@@ -1,0 +1,36 @@
+.session-sidebar { padding: 0 8px 12px; font-size: 13px; line-height: 1.5; }
+.session-sidebar header { display: flex; align-items: center; gap: 6px; padding-inline: 6px; }
+.session-sidebar header > span { flex: 1; }
+.session-sidebar button { display: inline-flex; align-items: center; justify-content: center; padding: 4px; border: 0; border-radius: 5px; color: inherit; background: transparent; font: inherit; cursor: pointer; }
+.session-sidebar button:hover { background: var(--codex-accent-soft); }
+.session-sidebar-section { margin: 10px 0 14px; }
+.session-sidebar summary { list-style: none; display: flex; align-items: center; gap: 6px; min-height: 30px; padding: 3px 8px; border-radius: 7px; color: var(--codex-ink-faint); font-size: 12px; font-weight: 600; line-height: 1.4; cursor: pointer; transition: background-color 120ms ease, color 120ms ease; }
+.session-sidebar summary:hover { color: var(--codex-ink); background: var(--codex-accent-soft); }
+.session-sidebar summary:focus-visible { outline: 2px solid var(--codex-accent); outline-offset: 2px; }
+.session-sidebar summary > svg { flex-shrink: 0; opacity: .75; }
+.session-sidebar summary::-webkit-details-marker { display: none; }
+.session-sidebar summary > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-sidebar summary > small { min-width: 18px; text-align: center; font-size: 10px; font-weight: 400; font-variant-numeric: tabular-nums; opacity: .7; }
+.session-sidebar details[open] > summary > svg:first-child { transform: rotate(90deg); }
+.session-sidebar-project > summary { color: var(--codex-ink); font-size: 12px; font-weight: 500; }
+.session-sidebar-project { padding-left: 6px; }
+.session-sidebar .codex-session-item { display: flex; align-items: center; gap: 5px; min-width: 0; padding: 7px 8px; margin: 2px 0; }
+.session-sidebar .codex-session-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-sidebar .session-sidebar-row-action { opacity: 0; flex-shrink: 0; }
+.session-sidebar .codex-session-item:is(:hover,:focus-within) .session-sidebar-row-action { opacity: 1; }
+.session-sidebar-empty { margin: 4px 10px 10px 27px; color: var(--codex-ink-faint); font-size: 11px; font-weight: 400; line-height: 1.7; }
+.session-sidebar .session-sidebar-more { color: var(--codex-ink-faint); margin-left: 12px; font-size: 12px; }
+.session-sidebar-editor { padding: 8px; border: 1px solid var(--codex-line-light); border-radius: 8px; }
+.session-sidebar-editor input { width: 100%; min-width: 0; padding: 7px; background: var(--codex-paper-card); color: var(--codex-ink); border: 1px solid var(--codex-line); border-radius: 5px; font: inherit; }
+.session-sidebar-editor > div { display: flex; gap: 6px; justify-content: flex-end; margin-top: 5px; }
+.session-sidebar-error { color: var(--codex-danger); font-size: 12px; }
+.session-sidebar-details, .session-sidebar-menu { position: fixed; z-index: 10020; box-sizing: border-box; width: min(360px, calc(100vw - 16px)); max-height: min(230px, calc(100vh - 16px)); overflow: auto; padding: 15px; border: 1px solid var(--codex-line-light, #8885); border-radius: 14px; color: var(--codex-ink, #e8e0d2); background: var(--codex-paper-card, #2b241e); box-shadow: 0 8px 28px #0003; font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+.session-sidebar-details > strong { display: block; font-size: 14px; white-space: normal; }
+.session-sidebar-details > div { display: flex; align-items: flex-start; gap: 9px; margin-top: 10px; }
+.session-sidebar-details svg { flex-shrink: 0; margin-top: 3px; color: var(--codex-ink-faint); }
+.session-sidebar-details p { margin: 8px 0; color: var(--codex-ink-faint); }
+.session-sidebar-menu { width: min(230px, calc(100vw - 16px)); padding: 6px; max-height: min(300px, calc(100vh - 16px)); }
+.session-sidebar-menu > button { display: block; width: 100%; padding: 8px 10px; text-align: left; color: inherit; font: inherit; border: 0; border-radius: 7px; background: transparent; cursor: pointer; overflow-wrap: anywhere; }
+.session-sidebar-menu > button:hover { background: var(--codex-accent-soft, #8882); }
+.session-sidebar-menu > strong, .session-sidebar-menu > small { display: block; padding: 8px 10px; color: var(--codex-ink-faint); }
+.codex-sidebar.collapsed .session-sidebar { display: none; }

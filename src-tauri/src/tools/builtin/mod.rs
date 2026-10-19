@@ -22,6 +22,7 @@ pub mod notebook_tools;
 pub mod user_quick_notes;
 pub mod perception_tools;
 pub mod pet_tools;
+pub mod pet_interaction_tools;
 pub mod plan_tools;
 pub mod plugin_tools;
 pub mod provider_preset_tools;
@@ -76,6 +77,7 @@ pub fn register_builtin_tools(tool_system: &Arc<ToolSystem>) {
         Arc::new(user_quick_notes::ReadUserQuickNotes),
         Arc::new(memory_tools::MemoryMdTool::new()),
         Arc::new(memory_tools::GetRecentInteractionsTool::new()),
+        Arc::new(pet_interaction_tools::GetPetInteractionsTool),
         Arc::new(memory_tools::SummarizeTodayContextTool::new()),
         Arc::new(memory_tools::ReadDiaryByDateTool::new()),
         Arc::new(memory_tools::RecallByDateTimeTool::new()),

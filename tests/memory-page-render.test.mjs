@@ -115,7 +115,7 @@ const combined = render(['recent', '', items, records,
 assert.match(combined, /Nana 的原话/);
 assert.match(combined, /明天见/);
 assert.equal((combined.match(/class="memory-thread"/g) ?? []).length, 2);
-assert.ok(combined.indexOf('Nana 的对话') < combined.indexOf('与你的对话'));
+assert.ok(combined.indexOf('Nana 的对话') < combined.indexOf('你与Vivian的对话'));
 assert.equal(combined.includes('memory-character-switch'), false);
 console.log('unified history: both characters render together in time order without a character switch');
 for (const [language, label] of [['en', 'View Summary'], ['ja', '会話の要約を見る']]) {
@@ -124,7 +124,30 @@ for (const [language, label] of [['en', 'View Summary'], ['ja', '会話の要約
   assert(localized.includes(label));
   assert(localized.includes('明天见'), 'original conversation content stays intact');
   assert(!localized.includes('查看会话摘要'), 'built-in memory actions follow the selected language');
-  assert(localized.includes(language === 'en' ? 'Conversation with you' : 'あなたとの会話'));
+  assert(localized.includes(language === 'en' ? 'Conversation between you and Vivian' : 'あなたとVivianの会話'));
   assert(!localized.includes('与你的对话'), 'server-generated conversation titles are localized too');
 }
 globalThis.__memoryLanguage = 'zh-CN';
+const petRecord = owner => ({ id: `${owner}:pet-session`, source_session_id: 'shared-session',
+  title: owner === 'vivian' ? '与Nana的对话' : '与Vivian的对话', participants: ['vivian', 'nana'],
+  channels: ['cross_character'], started_at: 1000, ended_at: 1010, turns: [
+    { id: `${owner}-opening`, utterance_id: 'opening', speaker: 'nana', listener: 'vivian', text: '一起喝茶吧', timestamp: 1000, channel: 'cross_character' },
+    { id: `${owner}-answer`, utterance_id: 'answer', speaker: 'vivian', listener: 'nana', text: '我来准备茶杯', timestamp: 1010, channel: 'cross_character' },
+  ] });
+const mirrorSummary = { ...items[1], metadata: { ...items[1].metadata, conversation_id: 'vivian:pet-session' } };
+const mergedHistory = render(['recent', '', [mirrorSummary], [petRecord('vivian')], [petRecord('nana')],
+  new Set(), '', '', '', false, '', new Set()]);
+assert.equal((mergedHistory.match(/class="memory-thread"/g) ?? []).length, 1);
+assert.match(mergedHistory, /Nana与Vivian的对话/);
+assert.equal((mergedHistory.match(/一起喝茶吧/g) ?? []).length, 1);
+assert.equal((mergedHistory.match(/我来准备茶杯/g) ?? []).length, 1);
+assert.match(mergedHistory, /2 条消息/);
+assert.match(mergedHistory, /查看会话摘要/, 'summary from the other history remains available');
+const mirrorFact = { ...items[0], metadata: { ...items[0].metadata, conversation_id: 'vivian:pet-session' } };
+const mergedFacts = render(['facts', '', [mirrorFact], [petRecord('vivian')], [petRecord('nana')],
+  new Set(), '', '', '', false, '', new Set()]);
+assert.match(mergedFacts, /查看原始会话/, 'evidence keeps its original-history link after merging');
+const titleSearch = render(['recent', 'Nana与Vivian', [], [petRecord('vivian')], [petRecord('nana')],
+  new Set(), '', '', '', false, '', new Set()]);
+assert.match(titleSearch, /Nana与Vivian的对话/);
+console.log('merged pet history: initiator title, unique turns, summary aliases, evidence links and title search passed');

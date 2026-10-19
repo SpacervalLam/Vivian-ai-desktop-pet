@@ -35,6 +35,33 @@ use parking_lot::RwLock;
 
 use super::work_question::WorkQuestionRequest;
 
+// Emit desktop notifications independently of companion generation and tick timing.
+static NOTIFICATION_APP: Lazy<RwLock<Option<tauri::AppHandle>>> = Lazy::new(|| RwLock::new(None));
+
+pub fn set_app_handle(app: tauri::AppHandle) {
+    *NOTIFICATION_APP.write() = Some(app);
+}
+
+fn desktop_attention_kind(title: &str) -> Option<&'static str> {
+    match title {
+        "工作结果已返回" | "任务完成" => Some("success"),
+        "任务等待你的决定" => Some("info"),
+        "任务未完成" | "遇到执行障碍" | "执行已中断" | "模型调用失败" => Some("warning"),
+        _ if title.contains("阻塞") || title.contains("受阻") => Some("warning"),
+        _ => None,
+    }
+}
+
+pub fn notify_desktop(char_id: &str, session_id: &str, title: &str) {
+    use tauri::Emitter;
+    let Some(kind) = desktop_attention_kind(title) else { return; };
+    let Some(app) = NOTIFICATION_APP.read().clone() else { return; };
+    if crate::commands::inspector::is_viewing_work_page(&app) { return; }
+    let _ = app.emit("work:attention", serde_json::json!({
+        "character_id": char_id, "session_id": session_id, "title": title, "kind": kind,
+    }));
+}
+
 /// 完成报告存活时长（秒）。过期的"活干完了"再播报只会突兀。
 const REPORT_TTL_SECS: f64 = 300.0;
 
@@ -227,6 +254,8 @@ impl WorkNoticeStore {
                 None => break,
             }
         }
+        drop(alerts);
+        if required { notify_desktop(char_id, session_id, title); }
         true
     }
 
@@ -408,5 +437,22 @@ mod callback_tests {
         for i in 0..20 { store.push_callback("nana", "task", "进展", &format!("阶段 {i}")); }
         assert_eq!(store.alerts.read().len(), MAX_ALERTS_PER_CHAR);
         assert!(store.next_alert_for("vivian").is_none());
+    }
+}
+
+#[cfg(test)]
+mod desktop_attention_tests {
+    use super::desktop_attention_kind;
+
+    #[test]
+    fn only_actionable_work_events_notify() {
+        assert_eq!(desktop_attention_kind("工作结果已返回"), Some("success"));
+        assert_eq!(desktop_attention_kind("任务等待你的决定"), Some("info"));
+        for title in ["任务未完成", "遇到执行障碍", "执行已中断", "模型调用失败", "任务受阻", "阻塞"] {
+            assert_eq!(desktop_attention_kind(title), Some("warning"));
+        }
+        for title in ["阶段完成", "工作进展", "验证通过"] {
+            assert_eq!(desktop_attention_kind(title), None);
+        }
     }
 }

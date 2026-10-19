@@ -1652,22 +1652,51 @@ pub(crate) async fn respond_to_image(
     let context = format!("最近对话（仅用于理解图片意图）：\n{recent}");
     let reply_stream_id = stream_id.clone();
     let recognition = async {
-        crate::vision::recognize_image(&router, image, &context, Some(character_id)).await.map_err(|error| {
+        Box::pin(crate::vision::recognize_image(&router, image, &context, Some(character_id))).await.map_err(|error| {
             let _ = app.emit("chat:error", json!({"error":error,"stream_id":stream_id,"character_id":character_id,"channel":channel}));
             error
         })
     };
-    crate::visual_evidence::complete_image_turn(recognition, |description| async move {
+    // Keep the recognition/chat state machines off the WebView IPC thread's
+    // small Windows stack (WER 0xc00000fd in __chkstk when constructing them).
+    Box::pin(crate::visual_evidence::complete_image_turn(recognition, |description| async move {
         if state.is_generation_cancelled(character_id) {
             let _ = app.emit("chat:cancelled", json!({"stream_id":reply_stream_id,"character_id":character_id,"channel":channel}));
             return Ok(String::new());
         }
         let mut metadata = json!({"kind":"image","source":source,"channel":channel,"visual_description":description});
         if let Some(path) = image_path { metadata["image_path"] = json!(path); }
-        let response = send_message_stream_impl(state, user_message.into(), reply_stream_id.clone(), Some(character_id.into()), Some(channel.into()),
-            None, Some(metadata), app.clone(), Some(&description)).await?;
+        let response = Box::pin(send_message_stream_impl(state, user_message.into(), reply_stream_id.clone(), Some(character_id.into()), Some(channel.into()),
+            None, Some(metadata), app.clone(), Some(&description))).await?;
         Ok(response.map(|r| r.text).unwrap_or_default())
-    }).await
+    })).await
+}
+
+/// 发送本地图片消息
+#[cfg(test)]
+mod image_future_stack_tests {
+    use super::*;
+    use std::future::Future;
+
+    // Inspect concrete production Future types without constructing app state or
+    // making a vision request. The old inline chain occupied hundreds of KB.
+    #[test]
+    fn image_ipc_futures_fit_small_stacks() {
+        fn image_size<F: Future>(_: impl FnOnce(&'static Arc<AppState>, &'static tauri::AppHandle, &'static str, &'static str,
+            MessageImage, &'static str, Option<&'static str>, &'static str) -> F) -> usize { std::mem::size_of::<F>() }
+        fn command_size<F: Future>(_: impl FnOnce(State<'static, Arc<AppState>>, String, Option<String>, Option<String>, tauri::AppHandle) -> F) -> usize { std::mem::size_of::<F>() }
+        fn frozen_size<F: Future>(_: impl FnOnce(tauri::WebviewWindow, State<'static, Arc<AppState>>) -> F) -> usize { std::mem::size_of::<F>() }
+        fn capture_size<F: Future>(_: impl FnOnce(tauri::AppHandle, State<'static, Arc<AppState>>) -> F) -> usize { std::mem::size_of::<F>() }
+        for (name, bytes) in [
+            ("respond_to_image", image_size(respond_to_image)),
+            ("send_image_message", command_size(send_image_message)),
+            ("screen_freeze_analyze", frozen_size(crate::screen_freeze::screen_freeze_analyze)),
+            ("companion_screen_analyze", capture_size(crate::commands::desktop_assistant::companion_screen_analyze)),
+        ] {
+            eprintln!("{name} Future: {bytes} bytes");
+            assert!(bytes < 32 * 1024, "{name} embeds a {bytes}-byte state machine in the IPC caller's stack");
+        }
+    }
 }
 
 /// 发送本地图片消息
@@ -1756,8 +1785,8 @@ pub async fn send_image_message(
 
     let image_detail = state.config.read().get_typed::<String>("ai.image_detail", "auto".to_string());
     let image = MessageImage { media_type: mime, data: b64, url: None, detail: Some(image_detail) };
-    let result = respond_to_image(state.inner(), &app, &char_id, &channel_str, image,
-        "📷 [图片]", Some(&rel_path), "chat").await?;
+    let result = Box::pin(respond_to_image(state.inner(), &app, &char_id, &channel_str, image,
+        "📷 [图片]", Some(&rel_path), "chat")).await?;
 
     // 6. 图片描述写入记忆系统（content=description，metadata 携带 image_path）
     let description_for_memory = result.description.clone();

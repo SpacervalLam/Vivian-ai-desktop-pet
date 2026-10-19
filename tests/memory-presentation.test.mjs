@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { conversationThreads, sharedEventTimeline, isMemoryFact, isMemorySummary, isVisibleMemoryFact } from '../src/components/mind-inspector/pages/memoryPresentation.ts';
+import { conversationThreads, unifiedConversationThreads, sharedEventTimeline, isMemoryFact, isMemorySummary, isVisibleMemoryFact } from '../src/components/mind-inspector/pages/memoryPresentation.ts';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 const mobile = runInNewContext(readFileSync(new URL('../src-tauri/src/remote/frontend/memory-presentation.js', import.meta.url), 'utf8') + '; MemoryPresentation;');
@@ -17,11 +17,44 @@ assert.equal(threads.length, 1);
 assert.deepEqual(threads[0].turns.map(t => t.id), ['a', 'b']);
 assert.equal(threads[0].turns[0].text, '你好（挥手）');
 assert.equal(conversationThreads([], 'vivian').length, 0);
-for (const [language, expected] of [['en', 'Conversation with you'], ['ja', 'あなたとの会話']]) {
+for (const [language, expected] of [['en', 'Conversation between you and Vivian'], ['ja', 'あなたとVivianの会話']]) {
   const original = { id: 'localized', title: '与你的对话', started_at: 1, ended_at: 2, participants: ['user','vivian'], channels: ['direct'], turns: [] };
   assert.equal(conversationThreads([original], 'vivian', language)[0].title, expected);
   assert.equal(conversationThreads([{ ...original, title: '我自己写的标题' }], 'vivian', language)[0].title, '我自己写的标题');
 }
+assert.equal(threads[0].title, '你与Vivian的对话');
+const userChat = (owner, speaker) => ({ id: `${owner}-chat`, title: '与你的对话', participants: ['user', owner],
+  channels: ['direct'], started_at: 1, ended_at: 1,
+  turns: [{ id: `${owner}-first`, speaker, listener: speaker === 'user' ? owner : 'user', text: '你好', timestamp: 1, channel: 'direct' }] });
+for (const [owner, name] of [['vivian', 'Vivian'], ['nana', 'Nana']]) {
+  assert.equal(conversationThreads([userChat(owner, owner)], owner)[0].title, `${name}与你的对话`);
+  assert.equal(conversationThreads([userChat(owner, 'user')], owner)[0].title, `你与${name}的对话`);
+}
+const petChat = (owner, first = 'vivian') => ({ id: `${owner}:pets`, source_session_id: 'shared-pet-session',
+  title: owner === 'vivian' ? '与Nana的对话' : '与Vivian的对话', participants: ['nana', 'vivian'],
+  channels: ['cross_character'], started_at: 10, ended_at: 20, turns: [
+    { id: `${owner}-a`, utterance_id: 'speech-a', speaker: first, listener: first === 'vivian' ? 'nana' : 'vivian', text: '你好', timestamp: 10, channel: 'cross_character' },
+    { id: `${owner}-b`, utterance_id: 'speech-b', speaker: first === 'vivian' ? 'nana' : 'vivian', listener: first, text: '你好', timestamp: 20, channel: 'cross_character' },
+  ] });
+for (const [first, title] of [['vivian', 'Vivian与Nana的对话'], ['nana', 'Nana与Vivian的对话']]) {
+  const joined = unifiedConversationThreads([petChat('vivian', first)], [petChat('nana', first)]);
+  assert.equal(joined.length, 1);
+  assert.equal(joined[0].title, title);
+  assert.equal(joined[0].owner, first);
+  assert.equal(joined[0].turns.length, 2);
+  assert.deepEqual(new Set(joined[0].sourceIds), new Set(['vivian:pets', 'nana:pets']));
+}
+const extra = { ...petChat('nana').turns[1], id: 'new-repeat', utterance_id: 'speech-c', timestamp: 21 };
+const partial = { ...petChat('nana'), ended_at: 21, turns: [...petChat('nana').turns.slice(1), extra] };
+const union = unifiedConversationThreads([petChat('vivian')], [partial]);
+assert.equal(union[0].turns.length, 3, 'partial histories contribute missing speech and preserve actual repeated words');
+assert.equal(union[0].time, 21);
+const separate = { ...petChat('nana'), source_session_id: 'different-session', turns: petChat('nana').turns.map(t => ({ ...t, utterance_id: `different-${t.utterance_id}` })) };
+assert.equal(unifiedConversationThreads([petChat('vivian')], [separate]).length, 2, 'matching text does not merge different conversations');
+const legacy = owner => ({ ...petChat(owner), turns: petChat(owner).turns.map(({ utterance_id, ...turn }) => turn) });
+assert.equal(unifiedConversationThreads([legacy('vivian')], [legacy('nana')])[0].turns.length, 2, 'legacy same-session mirrors merge one-for-one');
+assert.equal(unifiedConversationThreads([userChat('vivian', 'user')], [userChat('nana', 'user')]).length, 2, 'user conversations retain their own pet identity');
+console.log('unified conversations: initiator titles, mirrored IDs, partial histories, source aliases and repeated speech passed');
 console.log('memory presentation: explicit categories and original history only');
 
 const record = (id, messageId, text, time) => ({ id, title: '会话', started_at: time, ended_at: time,

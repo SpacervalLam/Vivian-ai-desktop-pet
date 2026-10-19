@@ -7,15 +7,22 @@
    漫画书基础：舞台、分镜格、气泡、旁白、便签
    ========================================================================== */
 .mind-comic-book .comic{position:relative;aspect-ratio:1.5;container-type:inline-size;margin:18px 0 12px;isolation:isolate}
-.mind-comic-book .shot,.mind-comic-book .voice,.mind-comic-book .narration,.mind-comic-book .page-title,.mind-comic-book .margin-line{position:absolute;animation:mind-comic-appear 1.15s both;animation-delay:var(--delay)}
+/* 分镜入场时长：comicMarkup.js 里每个分镜的 --delay 按这个步长排队，
+   二线特效（搜索裁切、亮屏等）用 calc(var(--delay) + var(--comic-enter-ms))
+   挂在「自己的分镜入场之后」，两边必须同步改。 */
+.mind-comic-book{--comic-enter-ms:1150ms}
+.mind-comic-book .shot,.mind-comic-book .voice,.mind-comic-book .narration,.mind-comic-book .page-title,.mind-comic-book .margin-line{position:absolute;animation:mind-comic-appear var(--comic-enter-ms) both;animation-delay:var(--delay)}
 .mind-comic-book .shot{background:#e3eaf0;overflow:hidden}
 .mind-comic-book .image-wrap{width:100%;height:100%;overflow:hidden}
 .mind-comic-book .shot img{display:block;width:100%;height:100%;object-fit:cover;object-position:var(--focus,50% 50%);animation:mind-comic-push 17s ease-out both;animation-delay:var(--delay)}
 .mind-comic-book .shot.mirror .image-wrap{scale:-1 1}
 .mind-comic-book .scene-2 #platform-light img{height:var(--rain-image-height);animation:none;transform:none;transform-origin:top left}
-.mind-comic-book .comic.entering.scene-2 .panel-shadow:has(>#platform-light){animation:rain-search-crop 1.15s cubic-bezier(.22,.61,.36,1) 1380ms both}
-.mind-comic-book .comic.entering.scene-2 #rain-soaked-detail{animation:mind-comic-appear 1.15s cubic-bezier(.22,.61,.36,1) 1380ms both}
-.mind-comic-book .comic.entering.scene-2 #platform-light img{animation:rain-search-image-scale 1.15s cubic-bezier(.22,.61,.36,1) 1380ms both}
+/* 搜索裁切与缩放是 #platform-light 的二线特效：等它自己的入场播完再开始，
+   正好在「淋湿的 Nana」进场那一刻收尾。--delay 在 panel-shadow 包裹层上
+   （comicMarkup.js 的 shot() 同时给孩子和包裹层各写一份）。 */
+.mind-comic-book .comic.entering.scene-2 .panel-shadow:has(>#platform-light){animation:rain-search-crop var(--comic-enter-ms) cubic-bezier(.22,.61,.36,1) calc(var(--delay) + var(--comic-enter-ms)) both}
+.mind-comic-book .comic.entering.scene-2 #rain-soaked-detail{animation:mind-comic-appear var(--comic-enter-ms) cubic-bezier(.22,.61,.36,1) var(--delay) both}
+.mind-comic-book .comic.entering.scene-2 #platform-light img{animation:rain-search-image-scale var(--comic-enter-ms) cubic-bezier(.22,.61,.36,1) calc(var(--delay) + var(--comic-enter-ms)) both}
 @keyframes rain-search-crop{from{height:var(--rain-full-panel-height)}to{height:var(--rain-final-panel-height)}}
 @keyframes rain-search-image-scale{from{transform:scale(1.04)}to{transform:scale(1)}}
 .mind-comic-book :is(.scene-2,.scene-9) .rain-type-character{opacity:0;animation:rain-type-letter 55ms steps(1,start) forwards}
@@ -110,7 +117,8 @@
 .mind-comic-book #line-phone img{position:absolute;inset:0;animation:none;transform:none}
 .mind-comic-book #line-phone .phone-screen-on{opacity:0;transition:opacity .24s ease;pointer-events:none}
 .mind-comic-book #line-phone:hover .phone-screen-on{opacity:1}
-.unified-comic-book[data-touring="true"] .mind-comic-book .comic.entering #line-phone .phone-screen-on{animation:comic-phone-wake .24s ease calc(var(--delay) + 1150ms + 300ms) both}
+/* 亮屏跟在手机分镜入场之后：先落定，再亮。 */
+.unified-comic-book[data-touring="true"] .mind-comic-book .comic.entering #line-phone .phone-screen-on{animation:comic-phone-wake .24s ease calc(var(--delay) + var(--comic-enter-ms) + 300ms) both}
 @keyframes comic-phone-wake{from{opacity:0}to{opacity:1}}
 
 /* ==========================================================================

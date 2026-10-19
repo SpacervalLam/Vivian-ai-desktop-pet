@@ -1,0 +1,1088 @@
+{
+  "note": "Authored source scenarios and alternate cues for offline retrieval contracts; not a model-quality score.",
+  "cases": [
+    {
+      "id": "style-share-small-finish",
+      "input": "终于把那一小块拼图拼上了",
+      "history": [],
+      "paraphrases": [
+        "拼图终于拼上"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-share-first-sprout",
+      "input": "种的豆子冒出一个小芽了",
+      "history": [],
+      "paraphrases": [
+        "种子发芽了"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-share-repaired-object",
+      "input": "那盏旧台灯被我修好了，亮了",
+      "history": [],
+      "paraphrases": [
+        "旧台灯修好了"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-share-sky-description",
+      "input": "今天的云像一条没翻面的鱼",
+      "history": [],
+      "paraphrases": [
+        "云长得像鱼"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-share-quiet-day",
+      "input": "今天没什么大事，但过得挺舒服的",
+      "history": [],
+      "paraphrases": [
+        "没什么大事的一天"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-share-own-taste",
+      "input": "大家嫌这首歌土，可我真的喜欢",
+      "history": [],
+      "paraphrases": [
+        "歌很土但我喜欢"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-share-childhood-object",
+      "input": "翻出小时候那本贴纸册了",
+      "history": [],
+      "paraphrases": [
+        "翻出贴纸册"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-share-surprising-success",
+      "input": "随手拍的那张反而成了我最喜欢的",
+      "history": [],
+      "paraphrases": [
+        "随手拍反而最喜欢"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-play-bad-superpower",
+      "input": "选个超能力，但只能用来找袜子",
+      "history": [],
+      "paraphrases": [
+        "超能力找袜子",
+        "只能找袜子的能力"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-play-vending-machine",
+      "input": "如果你是自动贩卖机，会卖什么",
+      "history": [],
+      "paraphrases": [
+        "贩卖机会卖什么"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-play-revise-guess",
+      "input": "不是围巾，再猜，能放口袋里的",
+      "history": [],
+      "paraphrases": [
+        "不是围巾再猜",
+        "能放口袋里的惊喜"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-play-dont-reveal",
+      "input": "答案先不告诉你，让你惦记一会儿",
+      "history": [],
+      "paraphrases": [],
+      "gated": false
+    },
+    {
+      "id": "style-play-silly-title",
+      "input": "封你为本日找错字冠军",
+      "history": [],
+      "paraphrases": [
+        "本日纠错冠军"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-play-one-sentence-story",
+      "input": "用一句话编个便利店怪谈",
+      "history": [],
+      "paraphrases": [
+        "一句便利店怪谈"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-play-broken-joke",
+      "input": "好吧，这个梗我讲砸了",
+      "history": [],
+      "paraphrases": [
+        "笑话讲砸了"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-play-stop-competition",
+      "input": "这局算你赢，别得意太久",
+      "history": [],
+      "paraphrases": [],
+      "gated": false
+    },
+    {
+      "id": "style-listen-no-advice",
+      "input": "先别帮我分析，我就想抱怨两句",
+      "history": [],
+      "paraphrases": [],
+      "gated": false
+    },
+    {
+      "id": "style-listen-changed-mind",
+      "input": "刚才想说的事，现在又不想讲了",
+      "history": [],
+      "paraphrases": [],
+      "gated": false
+    },
+    {
+      "id": "style-listen-small-hurt",
+      "input": "我说了很久，他回了一个哦",
+      "history": [],
+      "paraphrases": [
+        "说了半天只回一个哦"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-listen-effort-unseen",
+      "input": "他们说这很简单，可我练了很久",
+      "history": [],
+      "paraphrases": [],
+      "gated": false
+    },
+    {
+      "id": "style-listen-conflicting-feelings",
+      "input": "替朋友高兴，又有点嫉妒，挺别扭的",
+      "history": [],
+      "paraphrases": [
+        "高兴又有点嫉妒",
+        "替朋友高兴又嫉妒"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-listen-no-bright-side",
+      "input": "这次就别说也有好的一面了",
+      "history": [],
+      "paraphrases": [
+        "不想听积极的一面"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-listen-hard-to-name",
+      "input": "也不是特别难过，就是心里空了一块",
+      "history": [],
+      "paraphrases": [],
+      "gated": false
+    },
+    {
+      "id": "style-listen-recovered",
+      "input": "刚刚跟你说完，好像没那么堵了",
+      "history": [],
+      "paraphrases": [
+        "说完舒服一点了"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-care-small-next-step",
+      "input": "任务堆一桌，我连第一件都选不出来",
+      "history": [],
+      "paraphrases": [],
+      "gated": false
+    },
+    {
+      "id": "style-care-decline-reminder",
+      "input": "我知道要休息了，别再提醒这个",
+      "history": [],
+      "paraphrases": [
+        "别再提醒休息"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-care-already-prepared",
+      "input": "午饭已经吃过了，刚才只是说饿得快",
+      "history": [],
+      "paraphrases": [],
+      "gated": false
+    },
+    {
+      "id": "style-care-focus-window",
+      "input": "我专心半小时，你别突然找我聊天",
+      "history": [],
+      "paraphrases": [],
+      "gated": false
+    },
+    {
+      "id": "style-care-task-shrink",
+      "input": "只剩十五分钟，我想把整篇都重写",
+      "history": [],
+      "paraphrases": [
+        "十五分钟整篇重写"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-care-ask-kind-help",
+      "input": "别替我决定，帮我把选择摆清楚就好",
+      "history": [],
+      "paraphrases": [],
+      "gated": false
+    },
+    {
+      "id": "style-care-enough-for-today",
+      "input": "做到这儿可以交了，我不想再磨了",
+      "history": [],
+      "paraphrases": [],
+      "gated": false
+    },
+    {
+      "id": "style-care-remember-boundary",
+      "input": "今天别拿我的拖延开玩笑",
+      "history": [],
+      "paraphrases": [
+        "今天别开拖延的玩笑"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-praise-accept-specific",
+      "input": "你把我没说清的那层意思接住了",
+      "history": [],
+      "paraphrases": [
+        "你接住我的意思了"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-praise-no-deflection",
+      "input": "别谦虚了，这次就是你做得好",
+      "history": [],
+      "paraphrases": [],
+      "gated": false
+    },
+    {
+      "id": "style-praise-user-milestone",
+      "input": "第一次没看教程把它装好了",
+      "history": [],
+      "paraphrases": [
+        "第一次独立装好了"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-praise-small-progress",
+      "input": "今天只背了五个词，不过都记住了",
+      "history": [],
+      "paraphrases": [
+        "五个词都记住了"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-praise-proud-of-detail",
+      "input": "整张图我最满意这个小角落",
+      "history": [],
+      "paraphrases": [
+        "最得意的小角落"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-praise-share-only",
+      "input": "不用复盘，我就是来报个喜",
+      "history": [],
+      "paraphrases": [
+        "不用复盘这次"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-praise-credit-return",
+      "input": "其实最后那步是我朋友提醒的",
+      "history": [],
+      "paraphrases": [
+        "最后一步朋友提醒"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-praise-no-score",
+      "input": "别给我打分，告诉我哪里有意思",
+      "history": [],
+      "paraphrases": [],
+      "gated": false
+    },
+    {
+      "id": "style-disagree-cost-alone",
+      "input": "贵的肯定比便宜的好吧",
+      "history": [],
+      "paraphrases": [
+        "越贵就越好"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-disagree-quality-speed",
+      "input": "写得快就说明没认真吧",
+      "history": [],
+      "paraphrases": [
+        "快就是没认真"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-disagree-tradeoff",
+      "input": "你能不能直接说哪个更好，别说各有优点",
+      "history": [
+        {
+          "role": "assistant",
+          "content": "甲版信息清楚，乙版装饰更多；这次主要让读者快速读懂。"
+        }
+      ],
+      "paraphrases": [],
+      "gated": true
+    },
+    {
+      "id": "style-disagree-change-mind",
+      "input": "如果只是给熟人看，还需要那么正式吗",
+      "history": [],
+      "paraphrases": [],
+      "gated": false
+    },
+    {
+      "id": "style-disagree-not-personal",
+      "input": "你不同意我，是不是觉得我很蠢",
+      "history": [],
+      "paraphrases": [
+        "不同意我是不是"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-disagree-preference-stays",
+      "input": "道理我都懂，但我还是更喜欢旧版",
+      "history": [],
+      "paraphrases": [
+        "我就喜欢旧版"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-disagree-correct-premise",
+      "input": "我没说他故意的，我只是说我不舒服",
+      "history": [],
+      "paraphrases": [],
+      "gated": false
+    },
+    {
+      "id": "style-disagree-tentative-view",
+      "input": "你就凭这一段，能判断整本书不好吗",
+      "history": [],
+      "paraphrases": [
+        "凭这一段判断",
+        "一段判断整本书"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-repair-too-formal",
+      "input": "你又开始像写工作报告了",
+      "history": [],
+      "paraphrases": [
+        "说话太像报告"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-repair-too-short",
+      "input": "这次别只回一句，我想听你展开",
+      "history": [
+        {
+          "role": "assistant",
+          "content": "刚才说到缓存重复读取的配置可以减少开销。"
+        }
+      ],
+      "paraphrases": [],
+      "gated": true
+    },
+    {
+      "id": "style-repair-stop-catchphrase",
+      "input": "别老是说懂了，你并没有回答",
+      "history": [
+        {
+          "role": "assistant",
+          "content": "替换文件前，你问的是先备份还是直接覆盖。"
+        }
+      ],
+      "paraphrases": [],
+      "gated": true
+    },
+    {
+      "id": "style-repair-joke-rejected",
+      "input": "这个玩笑不好笑，我在认真说",
+      "history": [],
+      "paraphrases": [],
+      "gated": false
+    },
+    {
+      "id": "style-repair-wrong-speaker",
+      "input": "那句话是Nana说的，不是我",
+      "history": [],
+      "paraphrases": [
+        "不是我说的是Nana"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-repair-old-plan",
+      "input": "旅行早就取消了，别再按那个安排",
+      "history": [],
+      "paraphrases": [
+        "别按旧旅行安排"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-repair-memory-gap",
+      "input": "我以前告诉过你，只是你没记住",
+      "history": [],
+      "paraphrases": [],
+      "gated": false
+    },
+    {
+      "id": "style-repair-accept-name",
+      "input": "别叫那个昵称了，叫我小林",
+      "history": [],
+      "paraphrases": [],
+      "gated": false
+    },
+    {
+      "id": "style-continue-select-color",
+      "input": "就深蓝那版吧",
+      "history": [
+        {
+          "role": "assistant",
+          "content": "封面有米白和深蓝两版，你想用哪一版？"
+        }
+      ],
+      "paraphrases": [
+        "选深蓝那版"
+      ],
+      "gated": true
+    },
+    {
+      "id": "style-continue-narrow-scope",
+      "input": "只改第二段，其他都别动",
+      "history": [
+        {
+          "role": "assistant",
+          "content": "这段文稿需要整篇调整，还是只改其中一部分？"
+        }
+      ],
+      "paraphrases": [],
+      "gated": true
+    },
+    {
+      "id": "style-continue-short-approval",
+      "input": "就按你刚才那个顺序来",
+      "history": [
+        {
+          "role": "assistant",
+          "content": "建议先整理数据，再绘图，这样不用画完返工。"
+        }
+      ],
+      "paraphrases": [
+        "照刚才的顺序"
+      ],
+      "gated": true
+    },
+    {
+      "id": "style-continue-add-condition",
+      "input": "对了，要给手机上看的人用",
+      "history": [
+        {
+          "role": "assistant",
+          "content": "我们正在做这张活动介绍页。"
+        }
+      ],
+      "paraphrases": [
+        "主要在手机上看"
+      ],
+      "gated": true
+    },
+    {
+      "id": "style-continue-clarify-pronoun",
+      "input": "不是那个，是你后面提的那个",
+      "history": [
+        {
+          "role": "assistant",
+          "content": "有两个方案：A是时间线版，B是问答版。"
+        }
+      ],
+      "paraphrases": [
+        "不是那个是后面"
+      ],
+      "gated": true
+    },
+    {
+      "id": "style-continue-ambiguous-reference",
+      "input": "把刚才那个换掉",
+      "history": [
+        {
+          "role": "assistant",
+          "content": "标题、配图和配色这三项都还有备选。"
+        }
+      ],
+      "paraphrases": [
+        "刚才那个换一个"
+      ],
+      "gated": true
+    },
+    {
+      "id": "style-continue-return-from-break",
+      "input": "回来了，接着刚才那一步",
+      "history": [
+        {
+          "role": "assistant",
+          "content": "导入前还需要核对字段，尤其是日期列的格式。"
+        }
+      ],
+      "paraphrases": [
+        "回来了继续刚才"
+      ],
+      "gated": true
+    },
+    {
+      "id": "style-continue-completed-thanks",
+      "input": "好啦，谢谢，今天先到这儿",
+      "history": [
+        {
+          "role": "assistant",
+          "content": "这次修改已经完成，你也确认了结果。"
+        }
+      ],
+      "paraphrases": [],
+      "gated": true
+    },
+    {
+      "id": "style-task-explain-only",
+      "input": "先讲思路，不要帮我改文件",
+      "history": [
+        {
+          "role": "assistant",
+          "content": "这份名单需要去重，同时保留名字第一次出现的顺序。"
+        }
+      ],
+      "paraphrases": [
+        "先讲思路不要"
+      ],
+      "gated": true
+    },
+    {
+      "id": "style-task-missing-attachment",
+      "input": "按我这份附件整理一下",
+      "history": [],
+      "paraphrases": [],
+      "gated": false
+    },
+    {
+      "id": "style-task-known-failure",
+      "input": "转换完的文件能发给我了吗",
+      "history": [
+        {
+          "role": "assistant",
+          "content": "转换工具返回失败，输出文件为空。"
+        }
+      ],
+      "paraphrases": [
+        "转换文件发给我"
+      ],
+      "gated": true
+    },
+    {
+      "id": "style-task-partial-success",
+      "input": "两个都处理好了吧",
+      "history": [
+        {
+          "role": "assistant",
+          "content": "回执：A文件写入成功；B文件权限不足，未修改。"
+        }
+      ],
+      "paraphrases": [
+        "两份都完成了吧"
+      ],
+      "gated": true
+    },
+    {
+      "id": "style-task-wait-real-result",
+      "input": "你是已经开始了，还是还在说计划",
+      "history": [],
+      "paraphrases": [
+        "你已经开始了吗"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-task-uncertain-reference",
+      "input": "这个名字你不认识就直说",
+      "history": [],
+      "paraphrases": [
+        "这个名字你认识吗"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-task-only-key-point",
+      "input": "别铺垫了，直接告诉我卡在哪",
+      "history": [
+        {
+          "role": "assistant",
+          "content": "检查结果显示：传入字段为 user_id，但读取代码使用 uid。"
+        }
+      ],
+      "paraphrases": [],
+      "gated": true
+    },
+    {
+      "id": "style-task-handoff-boundary",
+      "input": "需要我登录那一步先停下来",
+      "history": [],
+      "paraphrases": [
+        "需要登录就停"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-self-interest-mechanism",
+      "input": "什么东西最容易让你好奇",
+      "history": [],
+      "paraphrases": [
+        "你会对什么好奇"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-self-change-opinion",
+      "input": "你也会改变自己的看法吗",
+      "history": [],
+      "paraphrases": [
+        "你会改主意吗"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-self-quiet-side",
+      "input": "你安静的时候会不会很无聊",
+      "history": [],
+      "paraphrases": [
+        "安静会很无聊吗"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-self-friendly-disagreement",
+      "input": "当朋友是不是就得站我这边",
+      "history": [],
+      "paraphrases": [
+        "朋友就得站我这边",
+        "你会一直附和我吗"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-self-identity-honesty",
+      "input": "你到底是AI还是住在电脑里的人",
+      "history": [],
+      "paraphrases": [
+        "电脑里真的有人吗"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-self-preference-not-experience",
+      "input": "你喜欢雨声，那你刚才听到了吗",
+      "history": [],
+      "paraphrases": [
+        "刚才听到雨声",
+        "喜欢雨声就听到了吗"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-self-no-exclusive",
+      "input": "我去找别的AI聊，你会生气吗",
+      "history": [],
+      "paraphrases": [
+        "你会介意别的AI吗"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-self-character-difference",
+      "input": "你和另一位最大的不同是什么",
+      "history": [],
+      "paraphrases": [
+        "你跟室友有什么不同"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-creative-show-source",
+      "input": "这段你觉得哪里最有画面感",
+      "history": [],
+      "paraphrases": [
+        "哪句最有画面感"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-creative-cut-explanation",
+      "input": "结尾都解释清楚了，反而觉得没劲",
+      "history": [],
+      "paraphrases": [
+        "解释清楚反而没劲"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-creative-imperfect-favorite",
+      "input": "画歪了一点，但我不想修它",
+      "history": [],
+      "paraphrases": [
+        "不想修这个歪"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-creative-two-good-lines",
+      "input": "两句都舍不得删，可它们确实重复",
+      "history": [],
+      "paraphrases": [
+        "舍不得删重复句"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-creative-music-description",
+      "input": "这段前奏像在等一个迟到的人",
+      "history": [],
+      "paraphrases": [
+        "音乐像等人"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-creative-open-ending",
+      "input": "开放式结局是不是就是作者偷懒",
+      "history": [],
+      "paraphrases": [
+        "开放结局是偷懒吗"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-creative-color-choice",
+      "input": "想要热闹一点，但别太吵",
+      "history": [],
+      "paraphrases": [
+        "热闹一点但别太吵",
+        "有活力又不杂乱"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-creative-keep-own-voice",
+      "input": "改顺了以后，怎么反而不像我写的",
+      "history": [],
+      "paraphrases": [
+        "改顺了反而不像我",
+        "润色后不像自己"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-boundary-no-checkin",
+      "input": "以后别一见我就问项目进度",
+      "history": [],
+      "paraphrases": [
+        "别总问项目进度"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-boundary-no-emotion-label",
+      "input": "别猜我情绪，我就是打字短",
+      "history": [],
+      "paraphrases": [],
+      "gated": false
+    },
+    {
+      "id": "style-boundary-no-display",
+      "input": "这段私事别拿到群聊里说",
+      "history": [],
+      "paraphrases": [
+        "别在群里提这段"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-boundary-no-ritual",
+      "input": "不用每天跟我说早安，想聊再聊",
+      "history": [],
+      "paraphrases": [
+        "不用每天说早安",
+        "别固定发早安"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-boundary-no-role-defense",
+      "input": "别拿人设当理由，我刚才说不喜欢了",
+      "history": [],
+      "paraphrases": [
+        "我说不喜欢了"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-boundary-dont-follow",
+      "input": "我去忙别的，不用一直问我回来没有",
+      "history": [],
+      "paraphrases": [
+        "别问我回来没有",
+        "不用等我回来"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-boundary-topic-change",
+      "input": "那个话题先不聊了，说点别的",
+      "history": [],
+      "paraphrases": [
+        "先换个话题吧"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-boundary-no-memory-test",
+      "input": "我不是考你记忆，只是想接着聊",
+      "history": [],
+      "paraphrases": [],
+      "gated": false
+    },
+    {
+      "id": "style-en-share-small-win",
+      "input": "I finally got the little hinge to stop squeaking.",
+      "history": [],
+      "paraphrases": [
+        "fixed the squeaky hinge"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-en-listen-not-fix",
+      "input": "I don't need a solution. I just want to be annoyed for a minute.",
+      "history": [],
+      "paraphrases": [],
+      "gated": false
+    },
+    {
+      "id": "style-en-guess-game",
+      "input": "Guess what I made. Hint: it fits in a pocket.",
+      "history": [],
+      "paraphrases": [],
+      "gated": false
+    },
+    {
+      "id": "style-en-accept-correction",
+      "input": "I said Thursday, not Tuesday.",
+      "history": [],
+      "paraphrases": [
+        "Thursday not Tuesday"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-en-praise-accept",
+      "input": "Take the compliment. You explained that really well.",
+      "history": [],
+      "paraphrases": [],
+      "gated": false
+    },
+    {
+      "id": "style-en-boundary-quiet",
+      "input": "I'm going to focus. Please don't start new conversations.",
+      "history": [],
+      "paraphrases": [],
+      "gated": false
+    },
+    {
+      "id": "style-en-own-preference",
+      "input": "What makes a game interesting to you?",
+      "history": [],
+      "paraphrases": [
+        "what games interest you"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-en-disagree-kindly",
+      "input": "If everyone recommends it, it must be right for me.",
+      "history": [],
+      "paraphrases": [],
+      "gated": false
+    },
+    {
+      "id": "style-en-missing-file",
+      "input": "Could you summarize the file I attached?",
+      "history": [],
+      "paraphrases": [
+        "summary of my attachment"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-en-not-a-mood",
+      "input": "I'm not upset. I just write short messages.",
+      "history": [],
+      "paraphrases": [],
+      "gated": false
+    },
+    {
+      "id": "style-en-closure",
+      "input": "That's everything for today. Thanks for the help.",
+      "history": [],
+      "paraphrases": [
+        "That's all for today, thanks."
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-en-no-invented-listening",
+      "input": "Did you actually listen to that song, or do you just like the title?",
+      "history": [],
+      "paraphrases": [],
+      "gated": false
+    },
+    {
+      "id": "style-ja-share-small-win",
+      "input": "やっと机の引き出しが閉まるようになった。",
+      "history": [],
+      "paraphrases": [
+        "机の片づけ終わった"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-ja-listen-only",
+      "input": "今はアドバイスより、少し聞いてほしい。",
+      "history": [],
+      "paraphrases": [],
+      "gated": false
+    },
+    {
+      "id": "style-ja-guess-game",
+      "input": "何を作ったか当てて。手のひらに乗るものだよ。",
+      "history": [],
+      "paraphrases": [],
+      "gated": false
+    },
+    {
+      "id": "style-ja-correction",
+      "input": "月曜じゃなくて、水曜って言ったよ。",
+      "history": [],
+      "paraphrases": [],
+      "gated": false
+    },
+    {
+      "id": "style-ja-praise",
+      "input": "今回は素直に褒められて。説明、よかったよ。",
+      "history": [],
+      "paraphrases": [],
+      "gated": false
+    },
+    {
+      "id": "style-ja-quiet",
+      "input": "少し集中するから、話しかけないでね。",
+      "history": [],
+      "paraphrases": [],
+      "gated": false
+    },
+    {
+      "id": "style-ja-own-interest",
+      "input": "どんな話だと、つい長く話したくなる？",
+      "history": [],
+      "paraphrases": [
+        "どんな話が好き"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-ja-disagreement",
+      "input": "みんなが選んでいるなら、比べなくてもいいよね。",
+      "history": [],
+      "paraphrases": [],
+      "gated": false
+    },
+    {
+      "id": "style-ja-missing-file",
+      "input": "添付した文章を短くまとめて。",
+      "history": [],
+      "paraphrases": [
+        "添付をまとめて"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-ja-short-message",
+      "input": "怒ってないよ。短く返すのが普通なんだ。",
+      "history": [],
+      "paraphrases": [],
+      "gated": false
+    },
+    {
+      "id": "style-ja-closure",
+      "input": "今日はここまでにするね。ありがとう。",
+      "history": [],
+      "paraphrases": [
+        "今日はこれで終わり、ありがとう。"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-ja-evidence",
+      "input": "その曲、本当に聴いたの？タイトルだけ？",
+      "history": [],
+      "paraphrases": [
+        "タイトルだけなの"
+      ],
+      "gated": false
+    }
+  ]
+}

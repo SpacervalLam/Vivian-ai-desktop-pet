@@ -537,13 +537,13 @@ impl Tool for GetRecentInteractionsTool {
     }
 
     fn description(&self) -> &str {
-        "Get recent interaction records between the user and Vivian within a specified time range."
+        "Get recent dialogue records within a specified time range. For physical pet dragging/flinging/edge-hit observations, use get_pet_interactions."
     }
 
     fn description_in(&self, lang: &str) -> &str {
         match lang {
-            "zh" => "获取指定时间范围内用户与 Vivian 的最近互动记录。",
-            "ja" => "指定された時間範囲内のユーザーと Vivian の最近のやり取り記録を取得する。",
+            "zh" => "获取指定时间范围内的最近对话记录；桌宠拖动、甩飞和碰撞的物理观测请用 get_pet_interactions。",
+            "ja" => "指定期間内の最近の会話記録を取得。ペットのドラッグ・投げ・衝突の観測は get_pet_interactions を使用。",
             _ => self.description(),
         }
     }

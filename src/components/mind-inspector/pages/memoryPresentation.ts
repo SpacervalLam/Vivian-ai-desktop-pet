@@ -18,7 +18,7 @@ export type MemoryTurn = { id?: string; speaker: string; audience?: string; text
 export type ConversationRecord = {
   id: string; source_session_id?: string; title: string; participants: string[]; channels: string[];
   started_at: number; ended_at: number;
-  turns: Array<{ id: string; speaker: string; listener: string; text: string; timestamp: number; channel: string; sticker?: StickerRef }>;
+  turns: Array<{ id: string; utterance_id?: string; speaker: string; listener: string; text: string; timestamp: number; channel: string; sticker?: StickerRef }>;
 };
 export type RecentThread = {
   id: string;
@@ -96,8 +96,13 @@ export function conversationTitle(record: ConversationRecord, character: Charact
   const originalNames = others.map(name => name === 'user' ? '你' : name === 'vivian' ? 'Vivian' : name === 'nana' ? 'Nana' : name);
   // Only the server-generated default is localized; custom titles remain original.
   if (record.title !== `与${originalNames.join('、')}的对话`) return record.title;
-  const names = others.map(name => name === 'user' ? comicText('conversationYou', language) : name === 'vivian' ? 'Vivian' : name === 'nana' ? 'Nana' : name);
-  return comicText('conversationTitle', language).replace('{{names}}', names.join(comicLocale(language) === 'en' ? ', ' : '、'));
+  const firstTurn = record.turns.reduce<ConversationRecord['turns'][number] | undefined>((first, turn) =>
+    !first || turn.timestamp < first.timestamp ? turn : first, undefined);
+  const first = firstTurn?.speaker ?? (record.participants.includes('user') ? 'user' : record.participants[0] ?? character);
+  const participants = [...new Set([first, ...record.participants])];
+  const name = (person: string) => person === 'user' ? comicText('conversationYou', language) : speakerName(person, character);
+  return comicText('conversationParticipants', language).replace('{{first}}', name(first))
+    .replace('{{others}}', participants.filter(person => person !== first).map(name).join(comicLocale(language) === 'en' ? ', ' : '、'));
 }
 export const conversationThreads = (records: ConversationRecord[], character: Character, language = 'zh-CN'): RecentThread[] => records.map((record) => ({
   id: record.id, title: conversationTitle(record, character, language), time: record.ended_at, startedAt: record.started_at, canonical: true,
@@ -106,3 +111,57 @@ export const conversationThreads = (records: ConversationRecord[], character: Ch
     text: turn.text, timestamp: turn.timestamp, sticker: turn.sticker })),
   items: [], searchText: `${[...new Set([conversationTitle(record, character, language), record.title])].join(' ')} ${record.turns.map((turn) => turn.text).join(' ')}`,
 })).sort((a, b) => b.time - a.time);
+
+export type UnifiedThread = RecentThread & { owner: Character; sourceIds: string[] };
+type OwnedConversation = { record: ConversationRecord; owner: Character };
+const privatePetConversation = (record: ConversationRecord) => record.participants.length === 2
+  && record.participants.includes('vivian') && record.participants.includes('nana');
+const sameSpeech = (a: ConversationRecord['turns'][number], b: ConversationRecord['turns'][number]) =>
+  a.speaker === b.speaker && a.listener === b.listener && a.text === b.text
+  && JSON.stringify(a.sticker) === JSON.stringify(b.sticker);
+const mirroredTurn = (a: ConversationRecord['turns'][number], b: ConversationRecord['turns'][number], sameSession: boolean) => {
+  if (a.utterance_id && b.utterance_id) return a.utterance_id === b.utterance_id;
+  return a.id === b.id || (sameSession && sameSpeech(a, b) && Math.abs(a.timestamp - b.timestamp) <= 30);
+};
+
+/** Merge the two histories by speech identity, keeping each original source addressable. */
+export function unifiedConversationThreads(vivian: ConversationRecord[], nana: ConversationRecord[], language = 'zh-CN'): UnifiedThread[] {
+  const groups: OwnedConversation[][] = [];
+  for (const entry of [...vivian.map(record => ({ record, owner: 'vivian' as const })),
+    ...nana.map(record => ({ record, owner: 'nana' as const }))]) {
+    const matches = privatePetConversation(entry.record) ? groups.filter(group => group.some(peer =>
+      peer.owner !== entry.owner && privatePetConversation(peer.record)
+      && peer.record.turns.some(a => entry.record.turns.some(b => mirroredTurn(a, b,
+        !!entry.record.source_session_id && entry.record.source_session_id === peer.record.source_session_id))))) : [];
+    if (!matches.length) groups.push([entry]);
+    else {
+      matches[0].push(entry);
+      for (const group of matches.slice(1)) { matches[0].push(...group); groups.splice(groups.indexOf(group), 1); }
+    }
+  }
+  return groups.map(group => {
+    // A mirror can be saved later than the original. Earliest occurrence owns timing.
+    const occurrences = group.flatMap(({ record, owner }) => record.turns.map(turn => ({ turn, record, owner })))
+      .sort((a, b) => a.turn.timestamp - b.turn.timestamp);
+    const kept: typeof occurrences = [];
+    const paired = new Set<string>();
+    for (const occurrence of occurrences) {
+      const mirror = kept.findIndex((peer, index) => {
+        if (peer.turn.utterance_id && occurrence.turn.utterance_id) return peer.turn.utterance_id === occurrence.turn.utterance_id;
+        // Match legacy mirrors one-for-one; repeated speech in one history is retained.
+        return peer.owner !== occurrence.owner && !paired.has(`${index}:${occurrence.owner}`)
+          && mirroredTurn(peer.turn, occurrence.turn, !!peer.record.source_session_id
+            && peer.record.source_session_id === occurrence.record.source_session_id);
+      });
+      if (mirror < 0) kept.push(occurrence);
+      else paired.add(`${mirror}:${occurrence.owner}`);
+    }
+    const initiator = kept[0]?.turn.speaker;
+    const primary = group.find(entry => entry.owner === initiator) ?? group[0];
+    const merged = { ...primary.record, turns: kept.map(entry => entry.turn),
+      started_at: Math.min(...group.map(entry => entry.record.started_at)),
+      ended_at: Math.max(...group.map(entry => entry.record.ended_at)) };
+    return { ...conversationThreads([merged], primary.owner, language)[0], owner: primary.owner,
+      sourceIds: group.map(entry => entry.record.id) };
+  }).sort((a, b) => b.time - a.time);
+}

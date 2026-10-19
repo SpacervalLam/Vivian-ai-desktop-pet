@@ -24,8 +24,8 @@ import {
   FileText, FilePlus, FileEdit, Terminal as TerminalIcon, Search, FolderTree,
   Wrench, FolderOpen, Braces, XCircle, X, Globe,
   Folder, Lock, Shield, Sparkles, Check, Cpu, Zap, Code2,
-  Activity, Send, Square, ArrowDown, ArrowUp, List,
-  PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, SlidersHorizontal, Ellipsis,
+  Activity, Send, Square, ArrowUp, List,
+  PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen,
   Goal, ClipboardList, History, MessageSquare, Download, Copy, ThumbsUp, ThumbsDown, GitFork, Mic, Brain,
   HelpCircle, FileDiff, Settings, File as FileIcon, Info, StickyNote, Maximize2, Minimize2,
 } from 'lucide-react';
@@ -34,6 +34,7 @@ import './workbenchStrings';
 import './workflowStrings';
 import './browserStrings';
 import SessionSearch from './SessionSearch';
+import SessionSidebar from './SessionSidebar';
 import WebEvidenceCard from './WebEvidenceCard';
 import { parseWebEvidence } from './webEvidence';
 import { workbenchLayout, groupWorkMessages as groupChatMessages, WORKBENCH_READING_WIDTH } from './workbenchLayout';
@@ -1197,12 +1198,12 @@ const ToolProcessGroup: React.FC<{
   // 执行中展示失败细节，进入最终报告时统一收起过程；仍可手动展开。
   const [expanded, setExpanded] = useState(!settled && msgs.some((m) => m.tool_success === false || m.role === 'commentary' || m.role === 'thinking'));
   const prevSettled = useRef(settled);
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!prevSettled.current && settled) {
       setExpanded(false);
     }
     prevSettled.current = settled;
-  }, [settled, msgs]);
+  }, [settled]);
   const failureCount = msgs.filter((m) => m.tool_success === false).length;
   const previousFailures = useRef(failureCount);
   useEffect(() => {
@@ -3509,11 +3510,8 @@ const CodeAgentPage: React.FC = () => {
   const [bgJobs, setBgJobs] = useState(0);
   /** 后台子任务的运行计数（work_delegate 的 background 模式）。 */
   const [sessions, setSessions] = useState<CodingSession[]>([]);
-  const sessionWindow = useRef(30);
   const sessionRefresh = useRef(0);
   const sessionSelection = useRef(0);
-  const [hasOlderSessions, setHasOlderSessions] = useState(false);
-  const [loadingOlderSessions, setLoadingOlderSessions] = useState(false);
   const [activeId, setActiveId] = useState<string | null>(null);
   const navigation = useNavigation();
   const requestedSession = typeof navigation?.pageParams.workSessionId === 'string' ? navigation.pageParams.workSessionId : undefined;
@@ -3758,13 +3756,10 @@ const CodeAgentPage: React.FC = () => {
   }, [mainBodyW]);
 
   // 会话列表视图
-  const [sessionView, setSessionView] = useState<'workspace' | 'flat'>(initialSnapshot.sessionView);
-  const [sessionSort, setSessionSort] = useState<'manual' | 'recent'>(initialSnapshot.sessionSort);
+  const sessionView = 'workspace' as const;
+  const sessionSort = 'recent' as const;
   const [sessionSearchOpen, setSessionSearchOpen] = useState(false);
-  const [sessionToolsOpen, setSessionToolsOpen] = useState(false);
-  const [manualOrder, setManualOrder] = useState<string[]>([]);
   const [workspaceTitles, setWorkspaceTitles] = useState<Record<string, string>>({});
-  const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState<string | null>(null);
   const [workspaceTreeOpen, setWorkspaceTreeOpen] = useState(initialSnapshot.workspaceTreeOpen);
   const [renamingWorkspace, setRenamingWorkspace] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState('');
@@ -3960,19 +3955,6 @@ const CodeAgentPage: React.FC = () => {
 
   // 宿主记录的本轮改动清单（消息下标 → 改动项），跟随活动会话
   const msgChanges = useMemo(() => activeSession?.message_changes ?? {}, [activeSession]);
-
-  // 手动排序：会话列表变化时同步 manualOrder
-  useEffect(() => {
-    setManualOrder((prev) => {
-      const ids = sessions.map((s) => s.session_id);
-      // A recent page is only a subset; keep ordering for unloaded old sessions.
-      const next = [...prev];
-      for (const id of ids) {
-        if (!next.includes(id)) next.push(id);
-      }
-      return next;
-    });
-  }, [sessions]);
 
   // 无工作区时 cwd 为空串，后端 ConPTY 以当前目录启动
   const ensureTermTab = useCallback((): string | null => {
@@ -4173,25 +4155,18 @@ const CodeAgentPage: React.FC = () => {
   const refreshSessions = useCallback(async () => {
     const generation = ++sessionRefresh.current;
     try {
-      const list: CodingSession[] = [];
-      let hasMore = false;
-      for (let offset = 0; offset < sessionWindow.current; offset += 30) {
-        const page = await invoke<CodingSession[]>('coding_list_sessions', { offset, limit: 31 });
-        list.push(...page.slice(0, 30));
-        hasMore = page.length > 30;
-        if (!hasMore) break;
-      }
+      const list = (await invoke<CodingSession[]>('coding_list_sessions', { sidebar: true })).sort((a, b) => b.updated_at - a.updated_at || a.session_id.localeCompare(b.session_id));
       if (generation === sessionRefresh.current) {
         setSessions(previous => {
+          const loaded = new Map(previous.filter(session => session.history_loaded !== false).map(session => [session.session_id, session]));
           const rows = [...new Map(list.map(s => {
-            const opened = previous.find(old => old.session_id === s.session_id && old.history_loaded !== false);
-            return [s.session_id, opened ? { ...opened, title: s.title, status: s.status, updated_at: s.updated_at } : s] as const;
+            const opened = loaded.get(s.session_id);
+            return [s.session_id, opened ? { ...opened, title: s.title, status: s.status, updated_at: s.updated_at, working_directory: s.working_directory, extra_workspaces: s.extra_workspaces } : s] as const;
           })).values()];
           const active = previous.find(s => s.session_id === activeIdRef.current);
           if (active && !rows.some(s => s.session_id === active.session_id)) rows.push(active);
           return rows;
         });
-        setHasOlderSessions(hasMore);
       }
       return list;
     } catch {
@@ -4199,12 +4174,14 @@ const CodeAgentPage: React.FC = () => {
     }
   }, []);
 
-  const loadOlderSessions = useCallback(async () => {
-    if (loadingOlderSessions) return;
-    setLoadingOlderSessions(true);
-    sessionWindow.current += 30;
-    try { await refreshSessions(); } finally { setLoadingOlderSessions(false); }
-  }, [loadingOlderSessions, refreshSessions]);
+
+  // Metadata is shared by desktop, companion-delegated and remote work sessions.
+  useEffect(() => {
+    const refresh = () => { if (document.visibilityState === 'visible') void refreshSessions(); };
+    const timer = window.setInterval(refresh, 5000);
+    document.addEventListener('visibilitychange', refresh); window.addEventListener('focus', refresh);
+    return () => { window.clearInterval(timer); document.removeEventListener('visibilitychange', refresh); window.removeEventListener('focus', refresh); };
+  }, [refreshSessions]);
 
   const loadActiveModelId = useCallback(async (): Promise<string | null> => {
     try {
@@ -4410,7 +4387,6 @@ const CodeAgentPage: React.FC = () => {
     }
     try {
       await invoke('coding_delete_session', { sessionId: id });
-      setManualOrder(previous => previous.filter(item => item !== id));
       const list = await refreshSessions();
       if (activeIdRef.current === id) {
         if (list.length > 0) switchSession(list[0]);
@@ -4746,7 +4722,10 @@ const CodeAgentPage: React.FC = () => {
       await add('coding:notice', (p) => {
         if (!isMine(p)) return;
         const { kind, message } = p as { kind?: string; message: string };
-        if (kind === 'compact') setCompacting(false);
+        if (kind === 'compact') {
+          setCompacting(false);
+          return;
+        }
         append({ role: 'notice', content: message, timestamp: Date.now() });
       });
       const countOutput = (content: string) => {
@@ -5241,19 +5220,6 @@ const CodeAgentPage: React.FC = () => {
   }, [activeId]);
 
   // 手动排序：上移/下移会话
-  const moveSession = useCallback((id: string, dir: -1 | 1) => {
-    setManualOrder((prev) => {
-      const idx = prev.indexOf(id);
-      if (idx < 0) return prev;
-      const target = idx + dir;
-      if (target < 0 || target >= prev.length) return prev;
-      const next = [...prev];
-      const [item] = next.splice(idx, 1);
-      next.splice(target, 0, item);
-      return next;
-    });
-  }, []);
-
   // 工作区标题（无工作区模式的会话 dir 为空串：取不到目录名，会给分组标题留一片空白，故显式兜底）
   const workspaceDisplayName = useCallback((dir: string) => {
     if (!dir) return t('mind_inspector.code_no_workspace');
@@ -5271,7 +5237,6 @@ const CodeAgentPage: React.FC = () => {
         await invoke('coding_delete_session', { sessionId: id });
       } catch { /* ignore */ }
     }
-    setManualOrder(previous => previous.filter(id => !ids.includes(id)));
     const list = await refreshSessions();
     if (activeIdRef.current && ids.includes(activeIdRef.current)) {
       if (list.length > 0) switchSession(list[0]);
@@ -5282,34 +5247,11 @@ const CodeAgentPage: React.FC = () => {
     }
   }, [refreshSessions, switchSession, notifyError]);
 
-  // 工作区管理菜单（重命名 / 删除工作区）：点菜单外部或按 Esc 关闭
-  const workspaceMenuRef = useRef<HTMLDivElement | null>(null);
-
-  useEffect(() => {
-    if (workspaceMenuOpen === null) return;
-    const onDocDown = (event: MouseEvent) => {
-      const target = event.target as Element | null;
-      if (workspaceMenuRef.current && target && workspaceMenuRef.current.contains(target)) return;
-      // 「⋯」按钮自己负责开合，这里放行；否则会先被关掉、再被它 toggle 开回来
-      if (target?.closest?.('.codex-group-more-btn')) return;
-      setWorkspaceMenuOpen(null);
-    };
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setWorkspaceMenuOpen(null);
-    };
-    window.addEventListener('mousedown', onDocDown);
-    window.addEventListener('keydown', onKey);
-    return () => {
-      window.removeEventListener('mousedown', onDocDown);
-      window.removeEventListener('keydown', onKey);
-    };
-  }, [workspaceMenuOpen]);
-
+  // 工作区管理菜单
   // 重命名工作区（本地显示标题）
   const startRenameWorkspace = useCallback((dir: string) => {
     setRenamingWorkspace(dir);
     setRenameDraft(workspaceDisplayName(dir));
-    setWorkspaceMenuOpen(null);
   }, [workspaceDisplayName]);
 
   const commitRenameWorkspace = useCallback(() => {
@@ -5325,22 +5267,6 @@ const CodeAgentPage: React.FC = () => {
 
   // 会话列表：搜索过滤 + 排序
   const searchSessionsData = useMemo<CodingSession[]>(() => sessions.map(session => session.session_id === activeId ? { ...session, messages, status: running ? 'running' : session.status === 'running' ? 'idle' : session.status } : session), [sessions, activeId, messages, running]);
-  const visibleSessions = sessions;
-
-  const orderedSessions = [...visibleSessions].sort((a, b) => {
-    if (sessionSort === 'recent') return b.updated_at - a.updated_at;
-    const ai = manualOrder.indexOf(a.session_id);
-    const bi = manualOrder.indexOf(b.session_id);
-    return (ai < 0 ? Number.MAX_SAFE_INTEGER : ai) - (bi < 0 ? Number.MAX_SAFE_INTEGER : bi);
-  });
-
-  const sessionGroups = new Map<string, CodingSession[]>();
-  for (const s of orderedSessions) {
-    const key = s.working_directory;
-    if (!sessionGroups.has(key)) sessionGroups.set(key, []);
-    sessionGroups.get(key)!.push(s);
-  }
-
   const quickStarts = (
     <div className="codex-quick-starts">
       {(['Project', 'Changes', 'Fix'] as const).map((kind) => (
@@ -5607,245 +5533,10 @@ const CodeAgentPage: React.FC = () => {
             </div>
           ) : null}
 
-          <div className="codex-sidebar-section">
-            <div className="codex-sidebar-label codex-session-label">
-              <FileText size={12} />
-              {t('mind_inspector.code_sessions', { defaultValue: '任务' })}
-              <div className="codex-session-tools">
-                <button
-                  type="button"
-                  className="codex-session-tool-btn"
-                  title={t('mind_inspector.code_search_sessions')}
-                  aria-label={t('workbench.searchTitle')}
-                  onClick={() => { setLeftDrawerOpen(false); setSessionSearchOpen(true); }}
-                >
-                  <Search size={12} />
-                </button>
-                <button
-                  type="button"
-                  className="codex-session-tool-btn"
-                  title={t('mind_inspector.code_view_sort')}
-                  onClick={() => setSessionToolsOpen((v) => !v)}
-                >
-                  <SlidersHorizontal size={12} />
-                </button>
-              </div>
-            </div>
-
-            {sessionToolsOpen && (
-              <div className="codex-session-tools-panel">
-                <div className="codex-session-tools-title">{t('mind_inspector.code_group_by')}</div>
-                <button
-                  type="button"
-                  className={`codex-session-tools-option ${sessionView === 'workspace' ? 'active' : ''}`}
-                  onClick={() => setSessionView('workspace')}
-                >
-                  <FolderTree size={13} />
-                  {t('mind_inspector.code_by_workspace')}
-                </button>
-                <button
-                  type="button"
-                  className={`codex-session-tools-option ${sessionView === 'flat' ? 'active' : ''}`}
-                  onClick={() => setSessionView('flat')}
-                >
-                  <List size={13} />
-                  {t('mind_inspector.code_flat_list')}
-                </button>
-                <div className="codex-session-tools-sep" />
-                <div className="codex-session-tools-title">{t('mind_inspector.code_sort_by')}</div>
-                <button
-                  type="button"
-                  className={`codex-session-tools-option ${sessionSort === 'recent' ? 'active' : ''}`}
-                  onClick={() => setSessionSort('recent')}
-                >
-                  <Activity size={13} />
-                  {t('mind_inspector.code_recent')}
-                </button>
-                <button
-                  type="button"
-                  className={`codex-session-tools-option ${sessionSort === 'manual' ? 'active' : ''}`}
-                  onClick={() => setSessionSort('manual')}
-                >
-                  <ArrowUp size={13} />
-                  {t('mind_inspector.code_manual')}
-                </button>
-              </div>
-            )}
-
-            <div className="codex-session-list">
-              {orderedSessions.length === 0 && (
-                <div className="codex-empty-note">
-                  {sessions.length === 0
-                    ? t('mind_inspector.code_no_sessions', { defaultValue: '暂无会话' })
-                    : t('mind_inspector.code_no_match_sessions')}
-                </div>
-              )}
-
-              {sessionView === 'flat'
-                ? orderedSessions.map((s) => {
-                    const active = s.session_id === activeId;
-                    return (
-                      <div
-                        key={s.session_id}
-                        onClick={() => switchSession(s)}
-                        role="button"
-                        tabIndex={0}
-                        aria-current={active ? 'true' : undefined}
-                        onKeyDown={(event) => { if (event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); switchSession(s); } }}
-                        onContextMenu={(e) => { e.preventDefault(); setSessionMenu({ id: s.session_id, x: e.clientX, y: e.clientY }); }}
-                        className={`codex-session-item ${active ? 'active' : ''}`}
-                        title={s.title || t('mind_inspector.code_untitled', { defaultValue: '未命名' })}
-                      >
-                        {sessionSort === 'manual' && (
-                          <div className="codex-session-manual">
-                            <button
-                              type="button"
-                              title={t('mind_inspector.code_move_up')}
-                              onClick={(e) => { e.stopPropagation(); moveSession(s.session_id, -1); }}
-                            >
-                              <ArrowUp size={10} />
-                            </button>
-                            <button
-                              type="button"
-                              title={t('mind_inspector.code_move_down')}
-                              onClick={(e) => { e.stopPropagation(); moveSession(s.session_id, 1); }}
-                            >
-                              <ArrowDown size={10} />
-                            </button>
-                          </div>
-                        )}
-                        <div style={{ minWidth: 0, flex: 1 }}>
-                          <div className="codex-session-title">
-                            {s.title || t('mind_inspector.code_untitled', { defaultValue: '未命名' })}
-                          </div>
-                          
-                        </div>
-                        {s.status === 'running' && <Loader2 className="codex-session-status-spinner codex-spin" size={13} aria-label={t('mind_inspector.code_working')} />}
-                        {s.session_id === activeId && ask && <HelpCircle className="codex-session-status-question" size={14} aria-label={t('mind_inspector.code_waiting_confirm')} />}
-                        {unreadSessions.has(s.session_id) && <span className="codex-session-unread-dot" aria-label={t('mind_inspector.code_unread_dot')} />}
-                      </div>
-                    );
-                  })
-                : [...sessionGroups.entries()].map(([dir, items]) => (
-                    <div key={dir} className="codex-session-group">
-                      <div className="codex-session-group-title">
-                        <FolderOpen size={11} />
-                        {renamingWorkspace === dir ? (
-                          <input
-                            autoFocus
-                            value={renameDraft}
-                            onChange={(e) => setRenameDraft(e.target.value)}
-                            onKeyDown={(e) => {
-                              if (e.key === 'Enter') commitRenameWorkspace();
-                              if (e.key === 'Escape') setRenamingWorkspace(null);
-                            }}
-                            onBlur={commitRenameWorkspace}
-                            className="codex-workspace-rename-input"
-                          />
-                        ) : (
-                          <span>{workspaceDisplayName(dir)}</span>
-                        )}
-                        <div className="codex-session-group-actions">
-                          <button
-                            type="button"
-                            className="codex-group-more-btn"
-                            title={t('mind_inspector.code_workspace_ops')}
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setWorkspaceMenuOpen((prev) => (prev === dir ? null : dir));
-                            }}
-                          >
-                            <Ellipsis size={13} />
-                          </button>
-                          <button
-                            type="button"
-                            className="codex-group-add-btn"
-                            title={t('mind_inspector.code_new_workspace_session')}
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              void createSessionInWorkspace(dir);
-                            }}
-                          >
-                            <Plus size={12} />
-                          </button>
-                        </div>
-                        {workspaceMenuOpen === dir && (
-                          <div ref={workspaceMenuRef} className="codex-group-menu" onClick={(e) => e.stopPropagation()}>
-                            <button
-                              type="button"
-                              onClick={() => startRenameWorkspace(dir)}
-                            >
-                              {t('mind_inspector.code_rename')}
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setWorkspaceMenuOpen(null);
-                                void (async () => {
-                                  const ok = await confirmDialog(
-                                    t('mind_inspector.code_delete_workspace_confirm', { name: workspaceDisplayName(dir) }),
-                                    { title: t('mind_inspector.code_delete_confirm_title', { defaultValue: '删除会话' }), kind: 'warning' },
-                                  );
-                                  if (ok) void deleteWorkspace(dir);
-                                })();
-                              }}
-                            >
-                              {t('mind_inspector.code_delete_workspace')}
-                            </button>
-                          </div>
-                        )}
-                      </div>
-                      {items.map((s) => {
-                        const active = s.session_id === activeId;
-                        return (
-                          <div
-                            key={s.session_id}
-                            onClick={() => switchSession(s)}
-                            role="button"
-                            tabIndex={0}
-                            aria-current={active ? 'true' : undefined}
-                            onKeyDown={(event) => { if (event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); switchSession(s); } }}
-                            onContextMenu={(e) => { e.preventDefault(); setSessionMenu({ id: s.session_id, x: e.clientX, y: e.clientY }); }}
-                            className={`codex-session-item ${active ? 'active' : ''}`}
-                            title={s.title || t('mind_inspector.code_untitled', { defaultValue: '未命名' })}
-                          >
-                            {sessionSort === 'manual' && (
-                              <div className="codex-session-manual">
-                                <button
-                                  type="button"
-                                  title={t('mind_inspector.code_move_up')}
-                                  onClick={(e) => { e.stopPropagation(); moveSession(s.session_id, -1); }}
-                                >
-                                  <ArrowUp size={10} />
-                                </button>
-                                <button
-                                  type="button"
-                                  title={t('mind_inspector.code_move_down')}
-                                  onClick={(e) => { e.stopPropagation(); moveSession(s.session_id, 1); }}
-                                >
-                                  <ArrowDown size={10} />
-                                </button>
-                              </div>
-                            )}
-                            <div style={{ minWidth: 0, flex: 1 }}>
-                              <div className="codex-session-title">
-                                {s.title || t('mind_inspector.code_untitled', { defaultValue: '未命名' })}
-                              </div>
-                              
-                            </div>
-                            {s.status === 'running' && <Loader2 className="codex-session-status-spinner codex-spin" size={13} aria-label={t('mind_inspector.code_working')} />}
-                            {s.session_id === activeId && ask && <HelpCircle className="codex-session-status-question" size={14} aria-label={t('mind_inspector.code_waiting_confirm')} />}
-                            {unreadSessions.has(s.session_id) && <span className="codex-session-unread-dot" aria-label={t('mind_inspector.code_unread_dot')} />}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  ))}
-              {hasOlderSessions && <button type="button" className="codex-session-item" disabled={loadingOlderSessions} onClick={() => void loadOlderSessions()}>
-                {loadingOlderSessions ? t('workbench.loadingOlderSessions', { defaultValue: '正在加载…' }) : t('workbench.loadOlderSessions', { defaultValue: '加载更多历史会话' })}
-              </button>}
-            </div>
-          </div>
+          <SessionSidebar sessions={searchSessionsData} activeId={activeId} unread={unreadSessions} waitingId={ask ? activeId : null}
+            onSelect={switchSession} onContextMenu={(session, event) => setSessionMenu({ id: session.session_id, x: event.clientX, y: event.clientY })}
+            onSearch={() => { setLeftDrawerOpen(false); setSessionSearchOpen(true); }} workspaceName={workspaceDisplayName}
+            onNewProjectSession={path => void createSessionInWorkspace(path)} onRenameProject={startRenameWorkspace} onDeleteProject={path => { void confirmDialog(t('mind_inspector.code_delete_workspace_confirm', { name: workspaceDisplayName(path) }), { title: t('mind_inspector.code_delete_confirm_title'), kind: 'warning' }).then(confirmed => { if (confirmed) void deleteWorkspace(path); }); }} onHoverStart={cancelLeftPeekClose} onHoverEnd={() => { if (leftPeekAvailable) closeLeftPeekLater(); }} />
 
         </div>
         {typeof document !== 'undefined' && createPortal(<>
@@ -5858,6 +5549,11 @@ const CodeAgentPage: React.FC = () => {
               <button type="button" className="danger" onClick={() => void handleSessionContextAction('delete')}>{t('mind_inspector.code_delete_forever')}</button>
             </div>
           )}
+          {renamingWorkspace && <div className="codex-session-modal-backdrop" onMouseDown={() => setRenamingWorkspace(null)}>
+            <form role="dialog" aria-modal="true" aria-label={t('mind_inspector.code_rename')} className="codex-theme codex-session-modal" onMouseDown={event => event.stopPropagation()} onSubmit={event => { event.preventDefault(); commitRenameWorkspace(); }}>
+              <h3>{t('mind_inspector.code_rename')}</h3><input autoFocus required aria-label={t('mind_inspector.code_rename')} value={renameDraft} onChange={event => setRenameDraft(event.target.value)} onKeyDown={event => { if (event.key === 'Escape') setRenamingWorkspace(null); }} />
+              <div className="codex-session-modal-actions"><button type="button" onClick={() => setRenamingWorkspace(null)}>{t('mind_inspector.code_cancel')}</button><button type="submit" className="primary">{t('mind_inspector.code_save')}</button></div>
+            </form></div>}
           {renameSessionId && (
             <div className="codex-session-modal-backdrop" onMouseDown={() => setRenameSessionId(null)}>
               <div className="codex-theme codex-session-modal" onMouseDown={(e) => e.stopPropagation()}>
@@ -5993,9 +5689,6 @@ const CodeAgentPage: React.FC = () => {
                     <div className="codex-hero">
                       <div className="codex-hero-title">
                         {t('mind_inspector.code_hero_title', { defaultValue: '你想让 Vivian & Nana 帮你做什么？' })}
-                      </div>
-                      <div className="codex-hero-sub">
-                        {defaultWorkspace ? t('mind_inspector.code_hero_sub_default') : t('mind_inspector.code_hero_sub')}
                       </div>
                     </div>
                     <div className="codex-composer-inner" style={{ width: '100%' }}>{composer}</div>

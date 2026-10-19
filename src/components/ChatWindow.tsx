@@ -29,7 +29,7 @@ import { assistantPanelTitle, isAssistantPanel } from './assistantPanels';
 import DynamicIsland from './DynamicIsland';
 import './ChatWindow.css';
 import ChatPageTransition from './ChatPageTransition';
-const DesktopAssistantPanel = React.lazy(() => import('./DesktopAssistantWindow'));
+const DesktopAssistantPanel = React.lazy(() => import('./DesktopAssistantPanel'));
 type Role = 'user' | 'assistant';
 
 interface ChatMessage {
@@ -810,13 +810,13 @@ const Bubble = React.memo(function Bubble({ message, onOpenImage, senderName, ch
             title: i18n.t('memory.title'),
             width: window.screen.width,
             height: window.screen.height,
-            resizable: true,
+            fullscreen: true,
+            maximizable: false,
+            resizable: false,
             decorations: false,
             transparent: false,
             alwaysOnTop: false,
             shadow: true,
-            minWidth: 1260,
-            minHeight: 896,
             visible: false,
             dragDropEnabled: true,
           });
@@ -1091,9 +1091,9 @@ const LinkageCard: React.FC<{ card: CardMessage; t: (k: string) => string; chara
       new WebviewWindow('memory', {
         url: `/?view=memory&nav=${page}`,
         title: i18n.t('memory.title'),
-        width: window.screen.width, height: window.screen.height, resizable: true, decorations: false, transparent: false, shadow: true,
+        width: window.screen.width, height: window.screen.height,
+        fullscreen: true, maximizable: false, resizable: false, decorations: false, transparent: false, shadow: true,
         alwaysOnTop: false,
-        minWidth: 1260, minHeight: 896,
         visible: false,
         dragDropEnabled: true,
       });
@@ -4268,7 +4268,9 @@ const ChatWindow: React.FC = () => {
           character_name: string;
           source: 'private' | 'group';
         }>>('search_chat_history', { query: q });
-        setSearchResults(result);
+        // 后端 timestamp 为 Unix 秒；formatSeparatorTime 与列表排序均按毫秒口径，
+        // 不换算会把秒数当作毫秒，渲染成 1970 年
+        setSearchResults(result.map((r) => ({ ...r, timestamp: normalizeTimestamp(r.timestamp) })));
       } catch (err) {
         console.warn('[ChatWindow] 搜索聊天记录失败:', err);
         setSearchResults([]);
@@ -4463,7 +4465,6 @@ const ChatWindow: React.FC = () => {
             随手记的草稿、快捷启动的表单全丢。 */}
         <DesktopAssistantPanel
           key={assistantTarget.character}
-          embedded
           initialCharacter={assistantTarget.character}
           panel={assistantTarget.panel}
         />

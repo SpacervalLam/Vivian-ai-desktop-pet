@@ -3706,6 +3706,7 @@ impl CodingAgentService {
                 serde_json::json!({ "session_id": session_id, "content": fallback }),
             );
         }
+        self.report_work_completion(session_id, "工作结果已返回", &format!("程序执行完成：共 {executed} 步。"));
         self.finish_turn(app, session_id, CodingStatus::Idle);
     }
 
@@ -3957,20 +3958,6 @@ impl CodingAgentService {
             return false;
         }
 
-        let notice = if over_window {
-            format!("上下文占用已达窗口的 {pct}%，已自动把 {archived} 条早期历史压缩为摘要。")
-        } else {
-            format!("历史消息已达 {count} 条，已自动把 {archived} 条早期历史压缩为摘要。")
-        };
-        self.push_notice(session_id, &notice);
-        let _ = app.emit(
-            "coding:notice",
-            serde_json::json!({
-                "session_id": session_id, "kind": "compact", "message": notice,
-                "archived": archived, "used": used, "window": window, "percent": pct,
-                "reason": if over_window { "window" } else { "history_cap" },
-            }),
-        );
         true
     }
 

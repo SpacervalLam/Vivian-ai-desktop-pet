@@ -36,6 +36,7 @@ var MemoryPresentation = (() => {
     noteFullscreen: ["\u5168\u5C4F\u9605\u8BFB", "Read fullscreen", "\u5168\u753B\u9762\u3067\u8AAD\u3080"],
     noteExitFullscreen: ["\u9000\u51FA\u5168\u5C4F", "Exit fullscreen", "\u5168\u753B\u9762\u3092\u9589\u3058\u308B"],
     conversationTitle: ["\u4E0E{{names}}\u7684\u5BF9\u8BDD", "Conversation with {{names}}", "{{names}}\u3068\u306E\u4F1A\u8A71"],
+    conversationParticipants: ["{{first}}\u4E0E{{others}}\u7684\u5BF9\u8BDD", "Conversation between {{first}} and {{others}}", "{{first}}\u3068{{others}}\u306E\u4F1A\u8A71"],
     conversationYou: ["\u4F60", "you", "\u3042\u306A\u305F"],
     user: ["\u7528\u6237", "You", "\u30E6\u30FC\u30B6\u30FC"],
     everyone: ["\u5927\u5BB6", "Everyone", "\u307F\u3093\u306A"],
@@ -314,11 +315,14 @@ var MemoryPresentation = (() => {
     return [...groups.values()].sort((a, b) => b.time - a.time || a.id.localeCompare(b.id));
   };
   function conversationTitle(record, character, language = "zh-CN") {
-    const others = record.participants.filter((name) => name !== character);
-    const originalNames = others.map((name) => name === "user" ? "\u4F60" : name === "vivian" ? "Vivian" : name === "nana" ? "Nana" : name);
+    const others = record.participants.filter((name2) => name2 !== character);
+    const originalNames = others.map((name2) => name2 === "user" ? "\u4F60" : name2 === "vivian" ? "Vivian" : name2 === "nana" ? "Nana" : name2);
     if (record.title !== `\u4E0E${originalNames.join("\u3001")}\u7684\u5BF9\u8BDD`) return record.title;
-    const names = others.map((name) => name === "user" ? comicText("conversationYou", language) : name === "vivian" ? "Vivian" : name === "nana" ? "Nana" : name);
-    return comicText("conversationTitle", language).replace("{{names}}", names.join(comicLocale(language) === "en" ? ", " : "\u3001"));
+    const firstTurn = record.turns.reduce((first2, turn) => !first2 || turn.timestamp < first2.timestamp ? turn : first2, void 0);
+    const first = firstTurn?.speaker ?? (record.participants.includes("user") ? "user" : record.participants[0] ?? character);
+    const participants = [.../* @__PURE__ */ new Set([first, ...record.participants])];
+    const name = (person) => person === "user" ? comicText("conversationYou", language) : speakerName(person, character);
+    return comicText("conversationParticipants", language).replace("{{first}}", name(first)).replace("{{others}}", participants.filter((person) => person !== first).map(name).join(comicLocale(language) === "en" ? ", " : "\u3001"));
   }
   var conversationThreads = (records, character, language = "zh-CN") => records.map((record) => ({
     id: record.id,

@@ -34,27 +34,18 @@ const thought = { role: 'thinking', content: '检查工作目录与错误原因'
 const commentary = { role: 'commentary', content: '先读取配置，然后修复构建脚本。' };
 const user = { role: 'user', content: '修复项目' };
 const live = groupWorkMessages([user, thought, commentary, intent], true);
-assert.deepEqual(live.slice(1, 3).map(item => item.msg), [thought, commentary]);
-assert.equal(live[3].kind, 'group');
-assert.equal(live[3].settled, false);
-const completed = [user, thought, commentary, intent, outcome, { role: 'assistant', content: '修复完成' }];
-const restored = groupWorkMessages(JSON.parse(JSON.stringify(completed)), false);
-assert.deepEqual(restored.slice(1, 3).map(item => item.msg), [thought, commentary]);
-assert.equal(restored[3].settled, true);
-assert.equal(restored[3].msgs[0].role, 'tool_result');
-assert.equal(restored[4].msg.role, 'assistant', 'final reply stays outside the work process');
-const secondIntent = { ...intent, tool_call_id: 'b' };
-const secondOutcome = { ...outcome, tool_call_id: 'b' };
-for (const prose of [commentary, thought, { role: 'assistant', content: '继续检查' }]) {
-  const history = [intent, outcome, prose, secondIntent, secondOutcome];
-  for (const running of [true, false]) {
-    const groups = groupWorkMessages(JSON.parse(JSON.stringify(history)), running);
-    assert.deepEqual(groups.map(item => item.kind), ['group', 'msg', 'group']);
-    assert.equal(groups[0].settled, true);
-    assert.equal(groups[2].settled, !running);
-    assert.deepEqual(groups[1].msg, prose, 'process text remains outside collapsed tools');
-    assert.deepEqual(groups.filter(item => item.kind === 'group').map(item => item.msgs.map(msg => msg.tool_call_id)), [['a'], ['b']]);
-  }
+assert.equal(live.length, 2);
+assert.deepEqual(live[1].msgs, [thought, commentary, intent]);
+assert.equal(live[1].settled, false);
+const final = { role: 'assistant', content: '修复完成' };
+for (const running of [true, false]) {
+  const history = [user, thought, intent, outcome, { role: 'notice', content: '历史消息已达 63 条，已自动把 23 条早期历史压缩为摘要。' }, commentary, { role: 'tool_use', content: '调用工具：read_file' }, final];
+  const restored = groupWorkMessages(JSON.parse(JSON.stringify(history)), running);
+  assert.equal(restored.length, 3);
+  assert.equal(restored[1].settled, true);
+  assert.deepEqual(restored[1].msgs, [thought, { ...intent, ...outcome }, commentary]);
+  assert.deepEqual(restored[2].msg, final);
 }
-assert.equal(groupWorkMessages([intent, outcome, secondIntent, secondOutcome], true).length, 1, 'consecutive tools still share one block');
-console.log('Work process text survives tool completion and reload.');
+assert.equal(groupWorkMessages([thought, commentary, intent, outcome], false)[0].settled, true, 'summary phase collapses the entire process before final text');
+assert.equal(groupWorkMessages([thought], false)[0].settled, true, 'text-only processes also collapse');
+console.log('Work process groups include prose and hide host diagnostics across reloads.');

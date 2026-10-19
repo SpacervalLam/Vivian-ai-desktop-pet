@@ -15,6 +15,18 @@ const DIALOGUE_CATEGORIES = ['mood', 'emotions', 'needs', 'relations'] as const;
 // must never send it through the speech-bubble shrinking algorithm.
 const FIT_SELECTOR = '.voice p, .line-chat p, .goal-line p';
 
+/** Release WebView2 may discard string-parsed inline styles. Restore the
+ * authored timeline through CSSOM before layout or entrance playback starts. */
+export function applyComicPresentation(root: HTMLElement): void {
+  root.querySelectorAll<HTMLElement>('[data-delay]').forEach(element => {
+    const delay = Number(element.dataset.delay);
+    if (Number.isFinite(delay) && delay >= 0) element.style.setProperty('--delay', `${delay}ms`);
+  });
+  root.querySelectorAll<HTMLElement>('[data-focus]').forEach(element => {
+    element.style.setProperty('--focus', element.dataset.focus!);
+  });
+}
+
 /** Language switches patch existing labels; panels and their animation state survive. */
 export function translateComicLabels(root: HTMLElement | null, translate: (key: string) => string): void {
   if (!root) return;

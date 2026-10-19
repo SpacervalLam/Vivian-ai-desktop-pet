@@ -44,33 +44,37 @@ export type WorkChatRenderItem<T> =
   | { kind: 'group'; msgs: T[]; index: number; settled: boolean };
 
 /**
- * 只合并连续的工具消息。过程说明和思考文本单独展示，并分隔前后的工具组。
+ * 将工具、过程说明和思考统一收纳，最终回复保留在分组之外。
  *
- * 组后出现任何非工具消息，或会话已不在运行态时，该组收尾。
+ * 进入总结或会话停止后收起整组，历史会话同样适用。
  */
-function isToolMessage(msg: { role: string }): boolean {
-  return msg.role === 'tool_use' || msg.role === 'tool_result';
+function isProcessMessage(msg: { role: string }): boolean {
+  return msg.role === 'tool_use' || msg.role === 'tool_result' || msg.role === 'commentary' || msg.role === 'thinking';
 }
 
-export function groupWorkMessages<T extends { role: string; tool_name?: string | null; tool_call_id?: string | null; tool_arguments?: unknown }>(messages: T[], running: boolean): WorkChatRenderItem<T>[] {
+export function groupWorkMessages<T extends { role: string; tool_name?: string | null; tool_call_id?: string | null; tool_arguments?: unknown; content?: string }>(messages: T[], running: boolean): WorkChatRenderItem<T>[] {
+  // Also hide persisted host diagnostics from older sessions before grouping.
+  const originalMessages = messages;
+  messages = messages.filter(m => !(m.role === 'tool_use' && !m.tool_name)
+    && !(m.role === 'notice' && /^(?:历史消息已达|上下文占用已达窗口的).*已自动把.*早期历史压缩为摘要/.test(m.content ?? '')));
   const items: WorkChatRenderItem<T>[] = [];
   let i = 0;
   while (i < messages.length) {
     const m = messages[i];
-    if (isToolMessage(m)) {
+    if (isProcessMessage(m)) {
       let j = i;
       const group: T[] = [];
-      while (j < messages.length && isToolMessage(messages[j])) {
+      while (j < messages.length && isProcessMessage(messages[j])) {
         group.push(messages[j]);
         j += 1;
       }
       const rows = reconcileToolMessages(group);
       if (rows.length >= 1) {
-        items.push({ kind: 'group', msgs: rows, index: i, settled: j < messages.length || !running });
+        items.push({ kind: 'group', msgs: rows, index: originalMessages.indexOf(m), settled: j < messages.length || !running });
       }
       i = j;
     } else {
-      items.push({ kind: 'msg', msg: m, index: i });
+      items.push({ kind: 'msg', msg: m, index: originalMessages.indexOf(m) });
       i += 1;
     }
   }

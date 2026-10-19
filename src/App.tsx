@@ -873,6 +873,8 @@ export default function App() {
   const pendingToastRef = useRef<Array<{ message: string; type: ToastType; duration: number; key?: number; action?: ToastAction; owner?: string }>>([]);
   // 窗口未就绪时缓存的工具确认请求（载荷原样转发给 toast 子窗口）
   const pendingConfirmRef = useRef<ToolConfirmPayload[]>([]);
+  // Keep completed IDs across toast window recreation and in-flight recovery snapshots.
+  const completedConfirmRef = useRef(new Set<number>());
 
   /** 把缓存的待发请求全部推给 toast 窗口，并清空缓存。
    *
@@ -889,7 +891,7 @@ export default function App() {
     const pendingConfirms = pendingConfirmRef.current;
     pendingConfirmRef.current = [];
     for (const c of pendingConfirms) {
-      void emit('toast:confirm', c);
+      if (!completedConfirmRef.current.has(c.request_id)) void emit('toast:confirm', c);
     }
   }, []);
 
@@ -2018,16 +2020,37 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [t, showToast]);
 
+  // Backend checks actual work-page visibility at the time of the task event.
+  useEffect(() => {
+    let cancelled = false;
+    let stop: (() => void) | undefined;
+    void listen<{ character_id: string; session_id: string; title: string; kind: ToastType }>('work:attention', ({ payload }) => {
+      if (cancelled || payload.character_id !== getCharacterId()) return;
+      showToast(payload.title, payload.kind, 8000, undefined, {
+        kind: 'open_work_session', sessionId: payload.session_id,
+        label: t('mind_inspector.code_open_session', { defaultValue: '查看任务' }),
+      }, payload.character_id);
+    }).then(unlisten => { if (cancelled) unlisten(); else stop = unlisten; }).catch(console.warn);
+    return () => { cancelled = true; stop?.(); };
+  }, [showToast, t]);
+
   // 监听工具执行确认请求（文件操作、屏幕截取等隐私敏感工具）
   // 后端 emit tool:confirmation_request → 转发给 toast 子窗口渲染三按钮确认卡片
   // （拒绝 / 放行一次 / 始终允许），由 toast 窗口 invoke confirm_tool_execution 回传结果
   useEffect(() => {
     let cancelled = false;
     let unlisten: (() => void) | undefined;
+    let unlistenDone: (() => void) | undefined;
     void (async () => {
       try {
+        unlistenDone = await listen<{ request_id: number }>('toast:confirm_done', ({ payload }) => {
+          completedConfirmRef.current.add(payload.request_id);
+          pendingConfirmRef.current = pendingConfirmRef.current.filter(p => p.request_id !== payload.request_id);
+        });
+        if (cancelled) { safeUnlisten(unlistenDone); return; }
         unlisten = await listen<ToolConfirmPayload>('tool:confirmation_request', (event) => {
           const payload = event.payload;
+          if (completedConfirmRef.current.has(payload.request_id)) return;
           // 仅处理本角色的确认请求（Tauri emit 广播到所有窗口，需按 char_id 过滤）
           if (payload.char_id && payload.char_id !== getCharacterId()) return;
           if (toastReadyRef.current) {
@@ -2045,6 +2068,7 @@ export default function App() {
     return () => {
       cancelled = true;
       safeUnlisten(unlisten);
+      safeUnlisten(unlistenDone);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ensureToastWindow]);
@@ -2060,12 +2084,17 @@ export default function App() {
       try {
         const requests = await invoke<ToolConfirmPayload[]>('get_pending_tool_confirmations');
         if (cancelled) return;
-        const mine = requests.filter(p => !p.char_id || p.char_id === getCharacterId());
+        const mine = requests.filter(p => (!p.char_id || p.char_id === getCharacterId())
+          && !completedConfirmRef.current.has(p.request_id));
         pendingConfirmRef.current = mine;
         if (mine.length === 0) return;
         await ensureToastWindow();
         if (cancelled || !toastReadyRef.current) return;
-        for (const request of mine) await emit('toast:confirm', request);
+        // Once delivered, these must not be replayed by a later toast:ready event.
+        pendingConfirmRef.current = [];
+        for (const request of mine) {
+          if (!completedConfirmRef.current.has(request.request_id)) await emit('toast:confirm', request);
+        }
       } catch (error) {
         console.warn('[ToolConfirm] pending request recovery failed:', error);
       } finally {

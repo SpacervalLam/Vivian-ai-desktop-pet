@@ -1240,9 +1240,18 @@ impl InnerWebView {
             bottom: height,
           });
 
-          // WM_SIZE already reflects the parent's new geometry. Resizing that
-          // same HWND here synchronously generates WM_SIZE again (stack overflow).
-
+          // The controller renders inside a separate WRY_WEBVIEW child HWND.
+          // Updating only SetBounds leaves that container at its creation size,
+          // clipping a fullscreen WebView to the old top-left rectangle.
+          let mut container = HWND::default();
+          if (*controller).ParentWindow(&mut container).is_ok()
+            && !container.is_invalid()
+            && container != hwnd
+          {
+            // Never resize the HWND dispatching WM_SIZE: that would recurse.
+            let _ = SetWindowPos(container, None, 0, 0, width, height,
+              SWP_NOACTIVATE | SWP_NOZORDER);
+          }
         }
       }
 
@@ -1874,11 +1883,17 @@ mod parent_subclass_tests {
         ).expect("create real WebView2 controller");
         // The screenshot overlay grows from its initial size to the virtual desktop.
         // Exercise native WM_SIZE with a live controller, including repeated sizes.
-        for size in [256, 512, 512, 32] {
-          SetWindowPos(hwnd, None, 0, 0, size, size,
+        for (width, height) in [(256, 256), (1920, 1080), (2560, 1440), (2560, 1440), (32, 32)] {
+          SetWindowPos(hwnd, None, 0, 0, width, height,
             SWP_NOACTIVATE | SWP_NOZORDER).expect("resize live WebView2 parent");
           let bounds = InnerWebView::parent_bounds(hwnd).unwrap();
-          assert_eq!((bounds.width, bounds.height), (size, size));
+          assert_eq!((bounds.width, bounds.height), (width, height));
+          let container = InnerWebView::parent_bounds(webview.hwnd).unwrap();
+          assert_eq!((container.width, container.height), (width, height),
+            "WebView container must fill the resized parent, otherwise content is clipped");
+          let mut controller_bounds = RECT::default();
+          webview.controller.Bounds(&mut controller_bounds).unwrap();
+          assert_eq!((controller_bounds.right, controller_bounds.bottom), (width, height));
         }
         drop(webview);
         assert!(!RemoveWindowSubclass(hwnd, Some(InnerWebView::parent_subclass_proc),

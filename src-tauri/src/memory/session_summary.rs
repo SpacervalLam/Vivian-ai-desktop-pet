@@ -331,6 +331,7 @@ mod tests {
             ended_at: 2.0,
             turns: vec![ConversationTurn {
                 id: "source".into(),
+                utterance_id: None,
                 speaker: "user".into(),
                 listener: "nana".into(),
                 text,

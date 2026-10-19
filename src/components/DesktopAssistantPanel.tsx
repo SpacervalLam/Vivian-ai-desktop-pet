@@ -3,40 +3,41 @@ import { invoke } from '@tauri-apps/api/core';
 import { emit, listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useTranslation } from 'react-i18next';
-import { ArrowUpRight, Monitor, NotebookPen, Plus, Rocket, Trash2 } from 'lucide-react';
+import { ArrowUpRight, ChevronDown, Monitor, NotebookPen, Pencil, Plus, Rocket, Search, Trash2, X } from 'lucide-react';
 import { getCharacterId } from '../characterContext';
 import { isAssistantPanel } from './assistantPanels';
-import './DesktopAssistantWindow.css';
+import { groupShortcuts, showsGroupHeaders, shortcutGroupNames } from '../utils/shortcutGroups';
+import './DesktopAssistantPanel.css';
 
 const showErrorToast = (error: unknown) => {
   void emit('toast:show', {
     message: error instanceof Error ? error.message : String(error),
     type: 'error', duration: 5000, key: Date.now(),
-  }).catch(error => console.warn('[DesktopAssistantWindow] 显示错误提示失败:', error));
+  }).catch(error => console.warn('[DesktopAssistantPanel] 显示错误提示失败:', error));
 };
 
-interface Shortcut { id: string; name: string; kind: 'application' | 'website'; target: string }
+interface Shortcut { id: string; name: string; kind: 'application' | 'website'; target: string; group: string }
 /** 只填 `bilibili.com` 时补上 https://：后端取图标和 open_url 工具都要求带协议头。 */
 const normalizeShortcutTarget = (kind: Shortcut['kind'], target: string) => {
   const trimmed = target.trim();
   if (kind !== 'website' || /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed)) return trimmed;
   return 'https://' + trimmed;
 };
+/** `companion_desktop_context` 只返回 shortcuts：分组归并与搜索都在前端完成。 */
 interface Context {
-  shortcuts: Shortcut[]; quiet_reason: string | null;
+  shortcuts: Shortcut[];
 }
 interface DesktopAssistantProps {
-  embedded?: boolean;
   initialCharacter?: string;
   /**
    * 要渲染的子页（`notes` / `shortcuts`）。
    *
-   * 这个组件没有总览层：入口是 chat 头部三点下拉与桌宠侧边栏，两边都直接指定一页，
-   * 所以页签由调用方决定，组件内不再有切页状态。
+   * 这个面板只有一个宿主：聊天窗口（`ChatWindow`）把它挂进 `assistant` 视图。
+   * 没有总览层、没有独立窗口，页签由调用方决定，组件内不保留切页状态。
    */
   panel?: string;
 }
-export default function DesktopAssistantWindow({ embedded = false, initialCharacter, panel }: DesktopAssistantProps = {}) {
+export default function DesktopAssistantPanel({ initialCharacter, panel }: DesktopAssistantProps = {}) {
   const { i18n } = useTranslation();
   const zh = i18n.language.startsWith('zh'), ja = i18n.language.startsWith('ja');
   const label = (cn: string, jp: string, en: string) => zh ? cn : ja ? jp : en;
@@ -51,6 +52,14 @@ export default function DesktopAssistantWindow({ embedded = false, initialCharac
   const [shortcutTarget, setShortcutTarget] = useState('');
   const [shortcutKind, setShortcutKind] = useState<Shortcut['kind']>('website');
   const [shortcutFormOpen, setShortcutFormOpen] = useState(false);
+  /** 表单里的分组名；空串即未分组。 */
+  const [shortcutGroup, setShortcutGroup] = useState('');
+  /** 非空表示弹窗处于编辑态，提交时按 id 覆盖而不是追加。 */
+  const [editingId, setEditingId] = useState<string | null>(null);
+  /** 列表搜索词：命中名称 / 目标 / 分组。 */
+  const [shortcutSearch, setShortcutSearch] = useState('');
+  /** 折叠的分组 key；只在非搜索态生效（搜索时全部展开，否则命中藏在折叠里等于没搜到）。 */
+  const [collapsedGroups, setCollapsedGroups] = useState<string[]>([]);
   const shortcutDialog = useRef<HTMLDialogElement>(null);
   useEffect(() => {
     const dialog = shortcutDialog.current;
@@ -102,22 +111,43 @@ export default function DesktopAssistantWindow({ embedded = false, initialCharac
   const saveShortcuts = async (shortcuts: Shortcut[]) => {
     await invoke('companion_save_shortcuts', { shortcuts }); await refresh();
   };
+  // 面板始终挂在聊天窗口里：进出子页都要把整窗恢复成可点击（StrictMode 会走 setup/cleanup/setup）。
   useEffect(() => {
-    if (!embedded) return;
-    // Keep the full chat window interactive across page transitions and StrictMode.
     void invoke('ensure_chat_interactive').catch(() => {});
     return () => {
       void invoke('ensure_chat_interactive').catch(() => {});
     };
-  }, [embedded]);
+  }, []);
   const saveNote = async () => {
     const value = note.trim();
     await invoke('user_quick_notes_save', { content: value });
     setNote('');
   };
   const shortcutCount = context?.shortcuts.length ?? 0;
-  return <main data-panel={tab} className={'desktop-assistant' + (embedded ? ' desktop-assistant-embedded' : '')}>
-    <div className="assistant-aurora" aria-hidden />
+  /** 打开弹窗：不带参数是新增，带条目是编辑（分组、名称、链接都能改）。 */
+  const openShortcutForm = (item?: Shortcut) => {
+    setShortcutName(item?.name ?? '');
+    setShortcutTarget(item?.target ?? '');
+    setShortcutKind(item?.kind ?? 'website');
+    setShortcutGroup(item?.group ?? '');
+    setEditingId(item?.id ?? null);
+    setShortcutFormOpen(true);
+  };
+  const closeShortcutForm = () => {
+    setShortcutFormOpen(false);
+    setEditingId(null);
+  };
+  const toggleGroup = (key: string) => {
+    setCollapsedGroups(previous => previous.includes(key)
+      ? previous.filter(item => item !== key)
+      : [...previous, key]);
+  };
+  const searching = shortcutSearch.trim().length > 0;
+  const sections = groupShortcuts<Shortcut>(context?.shortcuts ?? [], shortcutSearch);
+  const groupHeaders = showsGroupHeaders(sections);
+  const visibleCount = sections.reduce((sum, section) => sum + section.items.length, 0);
+  const groupCount = shortcutGroupNames(context?.shortcuts ?? []).length;
+  return <main data-panel={tab} className="desktop-assistant">
     <div className="assistant-scroll">
       <div className="assistant-page">
         <div className="assistant-body">
@@ -127,22 +157,50 @@ export default function DesktopAssistantWindow({ embedded = false, initialCharac
             <section className="assistant-card assistant-notes-archive"><p className="assistant-card-title">{label('已记录', '保存したメモ', 'Saved notes')}</p><UserQuickNotes /></section>
           </>}
           {tab === 'shortcuts' && <>
-            <div className="assistant-shortcut-toolbar"><span className="assistant-muted">{label('共 ' + shortcutCount + ' 个快捷方式', shortcutCount + ' 件のショートカット', shortcutCount + ' shortcuts')}</span><button className="assistant-add-shortcut" aria-label={label('添加快捷方式', 'ショートカットを追加', 'Add shortcut')} onClick={() => setShortcutFormOpen(true)}><Plus size={20} /></button></div>
+            <div className="assistant-shortcut-toolbar">
+              <label className="assistant-shortcut-search">
+                <Search size={14} aria-hidden />
+                <input value={shortcutSearch} maxLength={120} aria-label={label('搜索快捷方式', 'ショートカットを検索', 'Search shortcuts')} placeholder={label('搜索名称、网址或分组', '名前・URL・グループを検索', 'Search name, link or group')} onChange={e => setShortcutSearch(e.target.value)} />
+                {searching && <button type="button" className="assistant-shortcut-search-clear" aria-label={label('清空搜索', '検索をクリア', 'Clear search')} onClick={() => setShortcutSearch('')}><X size={11} /></button>}
+              </label>
+              <button className="assistant-add-shortcut" aria-label={label('添加快捷方式', 'ショートカットを追加', 'Add shortcut')} onClick={() => openShortcutForm()}><Plus size={20} /></button>
+            </div>
+            <p className="assistant-shortcut-meta">{searching
+              ? label('找到 ' + visibleCount + ' 个', visibleCount + ' 件見つかりました', visibleCount + ' found')
+              : label('共 ' + shortcutCount + ' 个快捷方式' + (groupCount ? ' · ' + groupCount + ' 个分组' : ''), '全 ' + shortcutCount + ' 件' + (groupCount ? ' · ' + groupCount + ' グループ' : ''), shortcutCount + ' shortcut' + (shortcutCount === 1 ? '' : 's') + (groupCount ? ' · ' + groupCount + ' group' + (groupCount === 1 ? '' : 's') : ''))}</p>
             <div className="assistant-shortcut-list">
-              {context?.shortcuts.map(item => <div className="assistant-shortcut" key={item.id}>
-                <ShortcutIcon key={item.kind + item.target} shortcut={item} />
-                <div className="assistant-shortcut-text">
-                  <p className="assistant-shortcut-name">{item.name}</p>
-                  <p className="assistant-shortcut-target" title={item.target}>{item.target}</p>
-                </div>
-                <ArrowUpRight size={14} className="assistant-shortcut-go" />
-                <button className="assistant-shortcut-open" title={item.target} aria-label={label('打开 ' + item.name, item.name + 'を開く', 'Open ' + item.name)} disabled={busy} onClick={() => void run(async () => { await invoke('companion_launch_shortcut', { shortcutId: item.id, characterId: character }); await feedback(label('已打开 ' + item.name + '。', item.name + 'を開きました。', 'Opened ' + item.name + '.')); })} />
-                <button className="assistant-shortcut-remove" aria-label={label('删除 ' + item.name, item.name + 'を削除', 'Remove ' + item.name)} disabled={busy} onClick={() => void run(() => saveShortcuts(context.shortcuts.filter(s => s.id !== item.id)))}><Trash2 size={13} /></button>
-              </div>)}
+              {sections.map(section => {
+                const collapsed = !searching && collapsedGroups.includes(section.key);
+                return <section className="assistant-shortcut-group" key={section.key} data-collapsed={collapsed ? '' : undefined}>
+                  {groupHeaders && <button type="button" className="assistant-shortcut-group-head" aria-expanded={!collapsed} onClick={() => toggleGroup(section.key)}>
+                    <ChevronDown size={14} className="assistant-shortcut-group-chevron" aria-hidden />
+                    <span className="assistant-shortcut-group-name">{section.name || label('未分组', '未分類', 'Ungrouped')}</span>
+                    <span className="assistant-shortcut-group-count">{section.items.length}</span>
+                  </button>}
+                  {!collapsed && <div className="assistant-shortcut-group-items">
+                    {section.items.map(item => <div className="assistant-shortcut" key={item.id}>
+                      <ShortcutIcon key={item.kind + item.target} shortcut={item} />
+                      <div className="assistant-shortcut-text">
+                        <p className="assistant-shortcut-name">{item.name}</p>
+                        <p className="assistant-shortcut-target" title={item.target}>{item.target}</p>
+                      </div>
+                      <ArrowUpRight size={14} className="assistant-shortcut-go" />
+                      <button className="assistant-shortcut-open" title={item.target} aria-label={label('打开 ' + item.name, item.name + 'を開く', 'Open ' + item.name)} disabled={busy} onClick={() => void run(async () => { await invoke('companion_launch_shortcut', { shortcutId: item.id, characterId: character }); await feedback(label('已打开 ' + item.name + '。', item.name + 'を開きました。', 'Opened ' + item.name + '.')); })} />
+                      <button className="assistant-shortcut-edit" aria-label={label('编辑 ' + item.name, item.name + 'を編集', 'Edit ' + item.name)} disabled={busy} onClick={() => openShortcutForm(item)}><Pencil size={13} /></button>
+                      <button className="assistant-shortcut-remove" aria-label={label('删除 ' + item.name, item.name + 'を削除', 'Remove ' + item.name)} disabled={busy} onClick={() => void run(() => saveShortcuts((context?.shortcuts ?? []).filter(s => s.id !== item.id)))}><Trash2 size={13} /></button>
+                    </div>)}
+                  </div>}
+                </section>;
+              })}
               {!shortcutCount && <div className="assistant-empty">
                 <Rocket size={26} />
                 <p>{label('还没有快捷方式', 'ショートカットがありません', 'No shortcuts yet')}</p>
                 <small>{label('点击右上角的加号，添加网站或应用。', '右上の＋からサイトやアプリを追加。', 'Use the plus button to add a site or app.')}</small>
+              </div>}
+              {!!shortcutCount && !visibleCount && <div className="assistant-empty">
+                <Search size={22} />
+                <p>{label('没有匹配的快捷方式', '一致するショートカットがありません', 'No matching shortcuts')}</p>
+                <small>{label('换个关键词，或换个分组名试试。', '別のキーワードを試してみて。', 'Try another keyword or group name.')}</small>
               </div>}
             </div>
 
@@ -150,13 +208,30 @@ export default function DesktopAssistantWindow({ embedded = false, initialCharac
         </div>
       </div>
     </div>
-    <dialog ref={shortcutDialog} className="assistant-shortcut-dialog" aria-labelledby="assistant-shortcut-dialog-title" onCancel={e => { e.preventDefault(); if (!busy) setShortcutFormOpen(false); }} onClick={e => { if (e.target === e.currentTarget && !busy) { const rect = e.currentTarget.getBoundingClientRect(); if (e.clientX < rect.left || e.clientX > rect.right || e.clientY < rect.top || e.clientY > rect.bottom) setShortcutFormOpen(false); } }}>
-            <form className="assistant-card assistant-shortcut-form" onSubmit={e => { e.preventDefault(); if (busy || !context || !shortcutName.trim() || !shortcutTarget.trim()) return; void run(async () => { await saveShortcuts([...(context?.shortcuts ?? []), { id: crypto.randomUUID(), name: shortcutName.trim(), kind: shortcutKind, target: normalizeShortcutTarget(shortcutKind, shortcutTarget) }]); setShortcutName(''); setShortcutTarget(''); setShortcutFormOpen(false); }); }}>
-              <p id="assistant-shortcut-dialog-title" className="assistant-card-title">{label('添加快捷方式', 'ショートカットを追加', 'Add shortcut')}</p>
+    <dialog ref={shortcutDialog} className="assistant-shortcut-dialog" aria-labelledby="assistant-shortcut-dialog-title" onCancel={e => { e.preventDefault(); if (!busy) closeShortcutForm(); }} onClick={e => { if (e.target === e.currentTarget && !busy) { const rect = e.currentTarget.getBoundingClientRect(); if (e.clientX < rect.left || e.clientX > rect.right || e.clientY < rect.top || e.clientY > rect.bottom) closeShortcutForm(); } }}>
+            <form className="assistant-card assistant-shortcut-form" onSubmit={e => {
+              e.preventDefault();
+              if (busy || !context || !shortcutName.trim() || !shortcutTarget.trim()) return;
+              void run(async () => {
+                const payload: Shortcut = {
+                  id: editingId ?? crypto.randomUUID(),
+                  name: shortcutName.trim(),
+                  kind: shortcutKind,
+                  target: normalizeShortcutTarget(shortcutKind, shortcutTarget),
+                  group: shortcutGroup.trim(),
+                };
+                const current = context.shortcuts ?? [];
+                await saveShortcuts(editingId ? current.map(item => item.id === editingId ? payload : item) : [...current, payload]);
+                setShortcutName(''); setShortcutTarget(''); setShortcutGroup(''); setEditingId(null); setShortcutFormOpen(false);
+              });
+            }}>
+              <p id="assistant-shortcut-dialog-title" className="assistant-card-title">{editingId ? label('编辑快捷方式', 'ショートカットを編集', 'Edit shortcut') : label('添加快捷方式', 'ショートカットを追加', 'Add shortcut')}</p>
               <div className="assistant-kind-switch">{(['website', 'application'] as const).map(kind => <button type="button" key={kind} disabled={busy} aria-pressed={shortcutKind === kind} onClick={() => setShortcutKind(kind)}>{kind === 'website' ? label('网站', 'サイト', 'Website') : label('应用', 'アプリ', 'App')}</button>)}</div>
               <input autoFocus required maxLength={80} aria-label={label('快捷方式名称', 'ショートカット名', 'Shortcut name')} placeholder={label('名称', '名前', 'Name')} value={shortcutName} onChange={e => setShortcutName(e.target.value)} />
               <input required aria-label={label('快捷方式目标', 'ショートカットのリンク先', 'Shortcut target')} placeholder={shortcutKind === 'website' ? 'https://…' : 'C:\\…\\app.exe'} value={shortcutTarget} onChange={e => setShortcutTarget(e.target.value)} />
-              <div className="assistant-modal-actions"><button type="button" className="assistant-ghost-button" disabled={busy} onClick={() => setShortcutFormOpen(false)}>{label('取消', 'キャンセル', 'Cancel')}</button><button type="submit" className="assistant-primary" disabled={busy || !context || !shortcutName.trim() || !shortcutTarget.trim()}>{busy ? label('添加中…', '追加中…', 'Adding…') : label('添加', '追加', 'Add')}</button></div>
+              <input list="assistant-shortcut-group-names" maxLength={40} aria-label={label('分组', 'グループ', 'Group')} placeholder={label('分组（可留空）', 'グループ（空でも可）', 'Group (optional)')} value={shortcutGroup} onChange={e => setShortcutGroup(e.target.value)} />
+              <datalist id="assistant-shortcut-group-names">{shortcutGroupNames(context?.shortcuts ?? []).map(name => <option key={name} value={name} />)}</datalist>
+              <div className="assistant-modal-actions"><button type="button" className="assistant-ghost-button" disabled={busy} onClick={closeShortcutForm}>{label('取消', 'キャンセル', 'Cancel')}</button><button type="submit" className="assistant-primary" disabled={busy || !context || !shortcutName.trim() || !shortcutTarget.trim()}>{busy ? label('保存中…', '保存中…', 'Saving…') : label('保存', '保存', 'Save')}</button></div>
             </form>
     </dialog>
   </main>;

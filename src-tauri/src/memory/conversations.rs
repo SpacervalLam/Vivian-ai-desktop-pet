@@ -7,6 +7,8 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConversationTurn {
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub utterance_id: Option<String>,
     pub speaker: String,
     pub listener: String,
     pub text: String,
@@ -141,6 +143,7 @@ pub fn project_conversations(
         };
         let turn = ConversationTurn {
             id: entry.id.clone(),
+            utterance_id: meta_str(entry, "utterance_id").map(str::to_owned),
             speaker,
             listener,
             text,
@@ -360,7 +363,10 @@ mod tests {
         let mut distinct = mirror; distinct.metadata["utterance_id"] = serde_json::json!("new-two");
         assert_eq!(build_conversations(&[original.clone(), distinct.clone()], "nana")[0].turns.len(), 2);
         distinct.metadata["utterance_id"] = serde_json::json!("new-one");
-        assert_eq!(build_conversations(&[original, distinct], "nana")[0].turns.len(), 1);
+        let merged = build_conversations(&[original, distinct], "nana");
+        assert_eq!(merged[0].turns.len(), 1);
+        assert_eq!(merged[0].turns[0].utterance_id.as_deref(), Some("new-one"));
+        assert_eq!(merged[0].turns[0].id, "brain", "keep evidence message IDs unchanged");
     }
 
     #[test]

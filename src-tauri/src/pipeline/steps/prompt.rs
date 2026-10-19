@@ -1142,6 +1142,14 @@ impl PromptBuildingStep {
             .unwrap_or(false)
             && state.messages.is_empty();
 
+        let pet_action_section = if self.char_id.is_empty() { None } else {
+            self.psychology.as_ref().and_then(|p| p.pet_action_capsule(crate::memory::types::current_timestamp()))
+                .or_else(|| crate::memory::unified_event_ledger::unified_event_ledger()
+                    .build_pet_action_section(&self.char_id))
+        };
+        if let Some(section) = &pet_action_section {
+            tracing::debug!("[PetActionContext] char={} injected_chars={}", self.char_id, section.chars().count());
+        }
         PromptParts {
             model_context_window: None,
             user_level: 0,
@@ -1183,6 +1191,7 @@ impl PromptBuildingStep {
             presence_state: state.presence_state.clone(),
             roommate_status,
             roommate_cognitive_section,
+            pet_action_section,
             environment_events,
             mind_section,
             working_memory_section,
@@ -1999,6 +2008,33 @@ mod component_selection_tests {
             serde_json::from_value(state.metadata["companion_prompt"].clone()).unwrap();
         assert!(companion.messages(&[], "test", false, None).iter()
             .any(|message| message.content.contains("<available-deferred-tools>")));
+    }
+
+    #[tokio::test]
+    async fn pet_action_capsule_reaches_chat_and_details_stay_deferred() {
+        let directory = tempfile::tempdir().unwrap();
+        let psychology = Arc::new(PsychologyManager::load_or_init(directory.path().join("psychology.json")));
+        let now = crate::memory::types::current_timestamp();
+        psychology.observe_pet_interaction("drag", Some(&crate::psychology::interaction::PetInteractionMetrics {
+            drag_session_id: Some("observed-quiet-flight".into()), flung: Some(true),
+            drag_distance_px: Some(600.0), press_duration_ms: Some(500.0), ..Default::default()
+        }), None, now);
+        assert!(psychology.take_pet_interaction_episodes(now + 21.0).is_empty());
+        let ts = Arc::new(ToolSystem::new());
+        ts.register_tool(Arc::new(crate::tools::builtin::pet_interaction_tools::GetPetInteractionsTool));
+        let mut step = PromptBuildingStep::new().with_char_id("pet-capsule-test")
+            .with_psychology(psychology).with_tool_system(ts);
+        step.enable_native_fc = true;
+        let state = PipelineState { should_respond: true, user_input: "飞得爽吗刚才".into(), ..Default::default() };
+        let state = PipelineState::from_json(step.ainvoke(state.to_json(), None).await.unwrap());
+        assert!(state.system_prompt.contains("flung after release"));
+        assert!(state.system_prompt.contains("get_pet_interactions"));
+        assert!(!state.system_prompt.contains("observed-quiet-flight"), "raw session IDs stay local");
+        let companion: crate::pipeline::companion_prompt::CompanionPrompt =
+            serde_json::from_value(state.metadata["companion_prompt"].clone()).unwrap();
+        let messages = companion.messages(&[], "飞得爽吗刚才", false, None);
+        assert!(messages.iter().any(|m| m.role == "system" && m.content.contains("flung after release")));
+        assert!(state.system_prompt.contains("<available-deferred-tools>"));
     }
 
     #[tokio::test]

@@ -3,7 +3,7 @@ import { comicMarkup } from './comicMarkup';
 import { bookSpreads, adjacentBookSpread } from './comicBookStructure';
 import './ComicOverview.css';
 import { createPanelFloat, type PanelFloat } from './panelFloat';
-import { fitComicText, patchComicData, translateComicLabels } from './comicBind';
+import { applyComicPresentation, fitComicText, patchComicData, translateComicLabels } from './comicBind';
 import { startFullPanelReveal, startInsetPanelReveal } from './comicPanelReveal';
 import { startMorningInkReveal } from './morningInkReveal';
 import { startRainTypewriter } from './rainTypewriter';
@@ -118,6 +118,7 @@ export default function ComicOverview({ data, pageIndex, onTurn, active = true, 
   useLayoutEffect(() => {
     const node = stage.current;
     if (!node) return;
+    applyComicPresentation(node);
     const animationKey = `${page}:${revision}:${active}`;
     const entering = active && animatedRevision.current !== animationKey;
     handReady.current = !entering;

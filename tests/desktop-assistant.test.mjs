@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { build } from 'esbuild';
 import { webcrypto } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 const calls=[];
 globalThis.__desktopCalls=calls;
 globalThis.__desktopInvoke=async(name,args)=>{
@@ -11,7 +12,7 @@ globalThis.__desktopInvoke=async(name,args)=>{
 const oldWindow=globalThis.window, oldCrypto=Object.getOwnPropertyDescriptor(globalThis,'crypto');
 globalThis.window={location:{search:''}};
 Object.defineProperty(globalThis,'crypto',{configurable:true,value:webcrypto});
-const bundle=await build({entryPoints:['src/components/DesktopAssistantWindow.tsx'],bundle:true,write:false,platform:'node',format:'esm',loader:{'.css':'empty'},plugins:[{name:'desktop-fixtures',setup(b){
+const bundle=await build({entryPoints:['src/components/DesktopAssistantPanel.tsx'],bundle:true,write:false,platform:'node',format:'esm',loader:{'.css':'empty'},plugins:[{name:'desktop-fixtures',setup(b){
  b.onResolve({filter:/^react$|^react\/jsx-runtime$/},a=>({path:a.path,namespace:'fixture'}));
  b.onLoad({filter:/.*/,namespace:'fixture'},a=>({contents:a.path==='react'?
   `export const useState=value=>[globalThis.__desktopStates.length?globalThis.__desktopStates.shift():value,value=>globalThis.__desktopUpdates.push(value)]; export const useRef=value=>({current:value}); export const useEffect=effect=>globalThis.__desktopEffects.push(effect); export const useCallback=fn=>fn;`
@@ -21,12 +22,13 @@ const bundle=await build({entryPoints:['src/components/DesktopAssistantWindow.ts
  b.onResolve({filter:/^react-i18next$/},a=>({path:a.path,namespace:'i18n'}));
  b.onLoad({filter:/.*/,namespace:'i18n'},()=>({contents:`export const useTranslation=()=>({i18n:{language:globalThis.__desktopLanguage??'zh-CN'}});`}));
  b.onResolve({filter:/^lucide-react$/},a=>({path:a.path,namespace:'icons'}));
- b.onLoad({filter:/.*/,namespace:'icons'},()=>({contents:`export const ArrowUpRight=()=>null, Monitor=()=>null, NotebookPen=()=>null, Plus=()=>null, Rocket=()=>null, Trash2=()=>null;`}));
+ b.onLoad({filter:/.*/,namespace:'icons'},()=>({contents:`export const ArrowUpRight=()=>null, ChevronDown=()=>null, Monitor=()=>null, NotebookPen=()=>null, Pencil=()=>null, Plus=()=>null, Rocket=()=>null, Search=()=>null, Trash2=()=>null, X=()=>null;`}));
 }}]});
 const {default:Page}=await import(`data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString('base64')}`);
 // 状态槽顺序必须和组件里的 useState 声明顺序一致：
-// character / context / busy / note / shortcutName / shortcutTarget / shortcutKind / shortcutFormOpen
-const states=()=>['nana',{shortcuts:[],quiet_reason:null},false,'note text','','','website',false];
+// character / context / busy / note / shortcutName / shortcutTarget / shortcutKind /
+// shortcutFormOpen / shortcutGroup / editingId / shortcutSearch / collapsedGroups
+const states=()=>['nana',{shortcuts:[],quiet_reason:null},false,'note text','','','website',false,'',null,'',[]];
 function render(panel,props={},slots){
  globalThis.__desktopEffects=[];
  globalThis.__desktopUpdates=[];
@@ -35,6 +37,7 @@ function render(panel,props={},slots){
 }
 const text=node=>node==null?'':Array.isArray(node)?node.map(text).join(''):typeof node==='object'?text(node.props?.children):String(node);
 function find(node,match){if(node==null)return null;if(Array.isArray(node)){for(const n of node){const found=find(n,match);if(found)return found;}return null;}if(typeof node==='object'){if(match(node))return node;return find(node.props?.children,match);}return null;}
+function collect(node,match,out=[]){if(node==null)return out;if(Array.isArray(node)){for(const n of node)collect(n,match,out);return out;}if(typeof node==='object'){if(match(node))out.push(node);collect(node.props?.children,match,out);}return out;}
 let page;
 
 // —— 随手记：保存只落到用户笔记，不变成宠物笔记本、也不触发说话 ——
@@ -70,11 +73,45 @@ for (const [language, empty, remove] of [['zh-CN','暂无随手记','删除随�
 delete globalThis.__desktopLanguage;
 
 // —— 快捷启动：条目由共享配置驱动，点开走 companion_launch_shortcut ——
-page=render('shortcuts',{},['nana',{shortcuts:[{id:'s1',name:'B站',kind:'website',target:'https://bilibili.com'}],quiet_reason:null},false,'','','','website',false]);
+page=render('shortcuts',{},['nana',{shortcuts:[{id:'s1',name:'B站',kind:'website',target:'https://bilibili.com'}],quiet_reason:null},false,'','','','website',false,'',null,'',[]]);
 assert.ok(find(page,n=>n.props?.['aria-label']==='添加快捷方式'),'the shortcuts page keeps its add button');
 await find(page,n=>n.type==='button'&&n.props['aria-label']==='打开 B站').props.onClick();
 await new Promise(resolve=>setImmediate(resolve));
 assert.deepEqual(calls.find(c=>c.name==='companion_launch_shortcut').args,{shortcutId:'s1',characterId:'nana'});
+// 旧配置没有 group 字段：按未分组渲染，且只有一个未分组时不画分组头
+assert.equal(find(page,n=>n.props?.className==='assistant-shortcut-group-head'),null,'未使用分组时不额外画一行标题');
+assert.ok(text(page).includes('共 1 个快捷方式'),'the meta line keeps the total count');
+calls.length=0;
+
+// —— 快捷启动：分组渲染（首次出现顺序，未分组最后）+ 搜索框 ——
+page=render('shortcuts',{},['nana',{shortcuts:[
+  {id:'s1',name:'B站',kind:'website',target:'https://bilibili.com',group:'视频'},
+  {id:'s2',name:'GitHub',kind:'website',target:'https://github.com',group:'开发'},
+  {id:'s3',name:'计算器',kind:'application',target:'C:\\Windows\\System32\\calc.exe',group:''},
+],quiet_reason:null},false,'','','','website',false,'',null,'',[]]);
+assert.deepEqual(collect(page,n=>n.props?.className==='assistant-shortcut-group-name').map(text),['视频','开发','未分组'],'groups keep first-seen order with ungrouped last');
+assert.deepEqual(collect(page,n=>n.props?.className==='assistant-shortcut-group-count').map(text),['1','1','1']);
+assert.ok(collect(page,n=>n.props?.className==='assistant-shortcut-group-head').every(n=>n.props['aria-expanded']===true),'groups start expanded');
+assert.ok(text(page).includes('共 3 个快捷方式 · 2 个分组'),'the meta line summarises groups');
+assert.ok(find(page,n=>n.props?.['aria-label']==='搜索快捷方式'),'the shortcuts page has a search field');
+assert.ok(find(page,n=>n.props?.['aria-label']==='清空搜索')===null,'the clear button only appears for an active query');
+
+// 编辑入口：回填名称/链接/类型/分组与 id，提交时按 id 覆盖（编辑态由 editingId 标记）
+const editButton=find(page,n=>n.type==='button'&&n.props['aria-label']==='编辑 B站');
+assert.ok(editButton,'every row can be edited so old entries become groupable');
+globalThis.__desktopUpdates=[];
+editButton.props.onClick();
+assert.deepEqual(globalThis.__desktopUpdates,['B站','https://bilibili.com','website','视频','s1',true],'edit prefills name, target, kind, group and the row id');
+const groupInput=find(page,n=>n.props?.['aria-label']==='分组');
+assert.ok(groupInput,'the form can assign a group');
+assert.equal(groupInput.props.placeholder,'分组（可留空）');
+assert.deepEqual(collect(page,n=>n.type==='option').map(n=>n.props.value),['视频','开发'],'group suggestions come from shortcuts already using one');
+
+// 英文复数
+globalThis.__desktopLanguage='en';
+page=render('shortcuts',{},['nana',{shortcuts:[{id:'s1',name:'B站',kind:'website',target:'https://bilibili.com',group:'视频'}],quiet_reason:null},false,'','','','website',false,'',null,'',[]]);
+assert.ok(text(page).includes('1 shortcut · 1 group'),'English meta line is pluralised');
+delete globalThis.__desktopLanguage;
 calls.length=0;
 
 // —— 总览层已移除：工具项（含截图分析 / 设置）不再出现在页面里 ——
@@ -91,10 +128,11 @@ page=render('daily');
 assert.ok(find(page,n=>n.type==='textarea'),'an unknown panel falls back to notes instead of rendering nothing');
 assert.equal(page.props['data-panel'],'notes');
 
-// —— 嵌入聊天窗口时的可点击性生命周期 ——
+// —— 面板只有聊天窗口这一个宿主：挂载即保证整窗可点击 ——
 calls.length=0;
-page=render('notes',{embedded:true,initialCharacter:'nana'});
-assert.ok(page.props.className.includes('desktop-assistant-embedded'));
+page=render('notes',{initialCharacter:'nana'});
+assert.equal(page.props.className,'desktop-assistant','没有独立窗口态，根节点类名恒定');
+assert.equal(find(page,n=>n.props?.className==='assistant-aurora'),null,'aurora 层随独立窗口一起移除');
 const interactionEffect=globalThis.__desktopEffects.at(-1);
 const release=interactionEffect();
 assert.deepEqual(calls.find(c=>c.name==='ensure_chat_interactive')?.args,undefined,'entering a tool page enables clicks before any field gets focus');
@@ -105,11 +143,17 @@ const releaseAgain=interactionEffect();
 assert.deepEqual(calls.filter(c=>c.name==='ensure_chat_interactive').length,3,'StrictMode setup/cleanup/setup ends with an interactive window');
 releaseAgain();
 assert.equal(calls.at(-1).name,'ensure_chat_interactive','leaving a tool page keeps chat interactive');
-calls.length=0;
-render('notes');
-globalThis.__desktopEffects.at(-1)()?.();
-assert.equal(calls.length,0,'standalone rendering does not alter the chat sidebar');
+
+// —— 后端 payload 只带面板真正读取的字段（防止把无人消费的快照塞回来）——
+const commandSource = await readFile('src-tauri/src/commands/desktop_assistant.rs','utf8');
+const contextBody = commandSource.slice(
+  commandSource.indexOf('pub fn companion_desktop_context'),
+  commandSource.indexOf('pub fn companion_save_shortcuts'),
+);
+assert.ok(contextBody.length > 0, 'companion_desktop_context 仍然存在');
+assert.deepEqual([...contextBody.matchAll(/"([a-z_]+)":/g)].map(match=>match[1]),['shortcuts'],
+  'companion_desktop_context only carries what the panel reads');
 
 globalThis.window=oldWindow;if(oldCrypto)Object.defineProperty(globalThis,'crypto',oldCrypto);else delete globalThis.crypto;
 delete globalThis.__desktopStates;delete globalThis.__desktopEffects;delete globalThis.__desktopUpdates;delete globalThis.__desktopCalls;delete globalThis.__desktopInvoke;
-console.log('Tool pages: user-owned quick notes, configured shortcuts, no overview layer and interactive window lifecycle passed');
+console.log('Tool pages: user-owned quick notes, grouped shortcuts, no overview layer or standalone window, interactive lifecycle passed');

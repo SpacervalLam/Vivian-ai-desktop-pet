@@ -22,16 +22,20 @@ pub async fn user_quick_notes_delete(app: AppHandle, id: String) -> Result<(), S
 
 #[tauri::command]
 pub fn companion_desktop_context(state: State<'_, Arc<AppState>>) -> Value {
-    let (weather, music) = state.world_provider.companion_scene();
-    json!({"weather":weather,"music":music,"shortcuts":state.config.read().get_all().companion.shortcuts,
-        "quiet_reason":crate::companion_runtime::quiet_reason(&state)})
+    // 面板只消费 shortcuts（分组与搜索都在前端做，条目上限也由保存侧校验）。
+    // weather / music / quiet_reason 是独立窗口时代的字段，宿主删除后无人读取，
+    // 这两个快照另有 companion_runtime 的消费点，不需要经由这个命令中转。
+    json!({"shortcuts": state.config.read().get_all().companion.shortcuts})
 }
 
 #[tauri::command]
-pub fn companion_save_shortcuts(app: AppHandle, state: State<'_, Arc<AppState>>, shortcuts: Vec<DesktopShortcut>) -> Result<(), String> {
+pub fn companion_save_shortcuts(app: AppHandle, state: State<'_, Arc<AppState>>, mut shortcuts: Vec<DesktopShortcut>) -> Result<(), String> {
     if shortcuts.len() > 30 { return Err("最多保存 30 个快捷入口。".into()); }
     let mut ids = std::collections::HashSet::new();
-    for shortcut in &shortcuts {
+    for shortcut in &mut shortcuts {
+        // 分组只是归并用的标签：去掉首尾空白，空串即未分组（旧配置本来就没有这个字段）
+        shortcut.group = shortcut.group.trim().to_string();
+        if shortcut.group.chars().count() > 40 { return Err("分组名称最多 40 个字符。".into()); }
         if shortcut.name.trim().is_empty() || shortcut.name.chars().count() > 80 || shortcut.id.is_empty() || !ids.insert(&shortcut.id) {
             return Err("快捷入口名称或 ID 无效。".into());
         }
@@ -79,7 +83,7 @@ pub async fn companion_launch_shortcut(state: State<'_, Arc<AppState>>, shortcut
 pub async fn companion_screen_analyze(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<Value, String> {
     // 归因到当前活跃角色：聊天窗口没有「当前会话角色」这个概念，后端才是活跃角色的真源。
     let character = state.active_character_id.read().clone();
-    analyze_screen(&app, &state, &character).await
+    Box::pin(analyze_screen(&app, &state, &character)).await
 }
 
 static SCREEN_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -143,8 +147,9 @@ pub(crate) async fn analyze_snapshot(app: &AppHandle, state: &Arc<AppState>, cha
     use base64::{engine::general_purpose::STANDARD, Engine as _};
     let image_detail = state.config.read().get_typed::<String>("ai.image_detail", "auto".into());
     let image = crate::types::response::MessageImage { media_type: "image/png".into(), data: STANDARD.encode(png), url: None, detail: Some(image_detail) };
-    crate::commands::chat::respond_to_image(state, app, character_id, "wechat", image,
-        "📷 [图片]", None, "screen_selection").await
+    tracing::info!(character_id, "开始分析截图快照");
+    Box::pin(crate::commands::chat::respond_to_image(state, app, character_id, "wechat", image,
+        "📷 [图片]", None, "screen_selection")).await
 }
 
 pub(crate) async fn analyze_frozen_snapshot(app: &AppHandle, state: &Arc<AppState>, character_id: &str, png: Vec<u8>) -> Result<(), String> {

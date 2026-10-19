@@ -163,14 +163,14 @@ export default function ScreenSelectionWindow() {
       {region && <span className="screen-selection-size" style={{ top: rect.y < 34 ? 10 : -30 }}>{region.width} × {region.height}</span>}
     </div>}
     {region && !dragging && <div className="screen-selection-toolbar" style={{ left: toolbarLeft, top: toolbarTop }} onPointerDown={event => event.stopPropagation()}>
-      <button className="selection-text-button" onClick={() => void finish('freeze')} disabled={submitting}><ScanLine size={16} /><span>{copy.freeze}</span><kbd>↵</kbd></button>
+      <button className="selection-text-button" onClick={() => void finish('cancel')} disabled={submitting}>{copy.cancel}</button>
+      <button className="selection-text-button" onClick={() => void finish('save')} disabled={submitting}><Download size={16} /><span>{copy.save}</span></button>
       <button className="selection-confirm" onClick={() => void finish('analyze')} disabled={submitting}><Sparkles size={16} /><span>{copy.analyze}</span></button>
       <button className="selection-text-button" onClick={() => void finish('copy')} disabled={submitting}><Copy size={16} /><span>{copy.copy}</span></button>
       <button className="selection-text-button" onClick={() => void finish('copy_and_analyze')} disabled={submitting}>{copy.copyAnalyze}</button>
-      <button className="selection-text-button" onClick={() => void finish('save')} disabled={submitting}><Download size={16} /><span>{copy.save}</span></button>
       <button className="selection-text-button" onClick={() => void finish('save_and_analyze')} disabled={submitting}>{copy.saveAnalyze}</button>
       <span className="selection-toolbar-divider" />
-      <button className="selection-text-button" onClick={() => void finish('cancel')} disabled={submitting}>{copy.cancel}</button>
+      <button className="selection-text-button" onClick={() => void finish('freeze')} disabled={submitting}><ScanLine size={16} /><span>{copy.freeze}</span><kbd>↵</kbd></button>
     </div>}
     {error && <div className="screen-selection-error" role="alert">{error}</div>}
   </div>;
