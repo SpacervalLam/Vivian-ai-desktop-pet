@@ -23,6 +23,7 @@ use crate::tools::executor::execute_tool_use;
 use crate::tools::types::{AgentAccessLevel, ToolUseContext, WorkingDirectoryPermission};
 use crate::tools::ToolSystem;
 use crate::types::response::{ChatMessage, MessageToolCall};
+use super::work_contract::{self, Evidence, TaskResult, TaskStatus};
 
 /// 委派深度上限：主 agent 为 0，最多再套这么多层子 agent。
 pub const SUBAGENT_MAX_DEPTH: usize = 2;
@@ -65,6 +66,7 @@ pub struct SubagentOutcome {
     /// 累计工具调用次数。
     pub tool_calls: usize,
     pub stop: SubagentStop,
+    pub result: TaskResult,
 }
 
 /// 启动一个子 agent 所需的全部信息。
@@ -208,10 +210,12 @@ pub async fn run_subagent(
     app: Option<&tauri::AppHandle>,
     req: SubagentRequest,
 ) -> Result<SubagentOutcome, String> {
-    let definitions = definitions_for(tool_system, &req.tools);
+    let mut definitions = definitions_for(tool_system, &req.tools);
     if definitions.is_empty() {
         return Err("没有可用的子 agent 工具（白名单为空或工具均未注册）".to_string());
     }
+    definitions.retain(|d| d.name != work_contract::RETURN_TOOL);
+    definitions.push(crate::brain::coding_agent::task_return_definition());
     let max_rounds = req.max_rounds.clamp(1, SUBAGENT_MAX_ROUNDS);
     // 子 agent 内发起的工具调用看到的是自己所在深度
     let child_depth = req.depth + 1;
@@ -239,13 +243,13 @@ pub async fn run_subagent(
     }
 
     let mut messages: Vec<ChatMessage> = vec![
-        ChatMessage::system(subagent_system_prompt(
+        ChatMessage::system(format!("{}\n\n{}", subagent_system_prompt(
             &req.working_directory,
             &req.extra_workspaces,
             req.workspaces_restricted,
             child_depth,
             max_rounds,
-        )),
+        ), work_contract::RETURN_INSTRUCTIONS)),
         ChatMessage::user(user_prompt),
     ];
 
@@ -264,8 +268,9 @@ pub async fn run_subagent(
     let mut rounds = 0usize;
     let mut tool_calls_total = 0usize;
     let mut last_text = String::new();
+    let mut receipts: Vec<Evidence> = Vec::new();
 
-    let outcome = loop {
+    let outcome = 'agent: loop {
         // 取消检查放在轮次边界：不打断正在执行的工具调用，避免留下半截写入
         if req.cancel.as_ref().map(|c| c.load(Ordering::SeqCst)).unwrap_or(false) {
             break SubagentOutcome {
@@ -273,6 +278,8 @@ pub async fn run_subagent(
                 rounds,
                 tool_calls: tool_calls_total,
                 stop: SubagentStop::Canceled,
+                result: work_contract::unvalidated_return(last_text.clone(), TaskStatus::Cancelled,
+                    vec!["Subtask cancelled before a validated return".into()], receipts.clone()),
             };
         }
         if rounds >= max_rounds {
@@ -281,6 +288,8 @@ pub async fn run_subagent(
                 rounds,
                 tool_calls: tool_calls_total,
                 stop: SubagentStop::MaxRounds,
+                result: work_contract::unvalidated_return(last_text.clone(), TaskStatus::Partial,
+                    vec!["Subtask exhausted its round budget".into()], receipts.clone()),
             };
         }
         rounds += 1;
@@ -295,10 +304,14 @@ pub async fn run_subagent(
             .map_err(|e| format!("子 agent LLM 调用失败：{e}"))?;
 
         let mut text = String::new();
+        let mut thinking = String::new();
+        let mut stream_done = false;
+        let mut finish_reason = None;
         let mut call_buf: BTreeMap<usize, (String, String, String)> = BTreeMap::new();
         while let Some(event) = rx.recv().await {
             match event {
                 StreamEvent::Text { content } => text.push_str(&content),
+                StreamEvent::Thinking { content } => thinking.push_str(&content),
                 StreamEvent::ToolCallDelta {
                     index,
                     id,
@@ -318,7 +331,8 @@ pub async fn run_subagent(
                         entry.2.push_str(&a);
                     }
                 }
-                StreamEvent::Done { .. } => break,
+                StreamEvent::Done { finish_reason: reason } => { stream_done = true; finish_reason = reason; break; }
+                StreamEvent::Error { message } => return Err(format!("子 agent 流式请求失败：{message}")),
                 _ => {}
             }
         }
@@ -332,6 +346,12 @@ pub async fn run_subagent(
             })
             .filter(|c| !c.name.is_empty())
             .collect();
+        if !stream_done || finish_reason.as_deref().is_some_and(|r| matches!(r, "length" | "max_tokens" | "content_filter")) {
+            return Err(format!("子 agent 响应未完整结束：{finish_reason:?}"));
+        }
+        if calls.is_empty() && (finish_reason.as_deref() == Some("tool_calls") || text.trim().is_empty()) {
+            return Err("子 agent 未返回有效文本或完整工具调用".into());
+        }
 
         // 没有工具调用 = 模型在给最终回复，子 agent 到此结束
         if calls.is_empty() {
@@ -340,11 +360,30 @@ pub async fn run_subagent(
                 rounds,
                 tool_calls: tool_calls_total,
                 stop: SubagentStop::Completed,
+                result: work_contract::unvalidated_return(text.trim().to_string(), TaskStatus::Partial,
+                    vec!["Subtask returned text without a validated task result".into()], receipts.clone()),
             };
         }
 
-        messages.push(ChatMessage::assistant_with_tool_calls(&text, calls.clone()));
+        let mut assistant = ChatMessage::assistant_with_tool_calls(&text, calls.clone());
+        assistant.reasoning = Some(thinking);
+        messages.push(assistant);
         for call in &calls {
+            if call.name == work_contract::RETURN_TOOL {
+                let returned = if calls.len() != 1 {
+                    Err("return_task_result must be called alone".into())
+                } else {
+                    work_contract::validate_return(call.arguments.clone(), &receipts, &[], &[], vec![])
+                };
+                match returned {
+                    Ok(result) => {
+                        break 'agent SubagentOutcome { output: result.summary.clone(), rounds,
+                            tool_calls: tool_calls_total, stop: SubagentStop::Completed, result };
+                    }
+                    Err(error) => { messages.push(ChatMessage::tool_result(error, &call.id)); }
+                }
+                continue;
+            }
             let result = execute_tool_use(
                 &call.name,
                 call.arguments.clone(),
@@ -356,9 +395,11 @@ pub async fn run_subagent(
             )
             .await;
             tool_calls_total += 1;
+            let succeeded = work_contract::execution_succeeded(result.success, result.data.as_ref());
+            receipts.push(Evidence { tool_call_id: call.id.clone(), tool: call.name.clone(), success: succeeded });
             // 子智能体改的文件也要记到父会话上：委托出去的改动正是模型最容易
             // 汇报不全的部分，而写工具执行成功的这一刻宿主是确切知道的。
-            if result.success {
+            if succeeded {
                 crate::commands::coding_agent::CODING_AGENT.record_tool_file_change(
                     app,
                     &req.parent_session_id,
@@ -367,17 +408,14 @@ pub async fn run_subagent(
                     &result,
                 );
             }
-            let content = if result.success {
+            let content = if succeeded {
                 let data = serde_json::to_string(
                     result.data.as_ref().unwrap_or(&Value::Null),
                 )
                 .unwrap_or_default();
                 summarize_result(&data)
             } else {
-                result
-                    .error
-                    .clone()
-                    .unwrap_or_else(|| "执行失败".to_string())
+                crate::brain::coding_agent::tool_failure_text(&result)
             };
             messages.push(ChatMessage::tool_result(&content, &call.id));
         }
@@ -393,6 +431,7 @@ pub async fn run_subagent(
                 "depth": child_depth,
                 "rounds": outcome.rounds,
                 "tool_calls": outcome.tool_calls,
+                "task_result": outcome.result,
                 "stop": match outcome.stop {
                     SubagentStop::Completed => "completed",
                     SubagentStop::MaxRounds => "max_rounds",

@@ -465,7 +465,9 @@ impl Tool for WorkDelegateTool {
                     Some(json!({
                         "rounds": outcome.rounds,
                         "tool_calls": outcome.tool_calls,
-                        "completed": outcome.stop == SubagentStop::Completed,
+                        "execution_ended": outcome.stop == SubagentStop::Completed,
+                        "completed": outcome.result.status == crate::brain::work_contract::TaskStatus::Completed,
+                        "task_result": outcome.result,
                     })),
                 )
             }
@@ -624,6 +626,7 @@ impl Tool for WorkJobTool {
                                 "status": "completed",
                                 "rounds": job.rounds,
                                 "tool_calls": job.tool_calls,
+                                "task_result": job.task_result,
                             })),
                         )
                     }

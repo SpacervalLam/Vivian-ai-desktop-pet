@@ -76,7 +76,8 @@ pub async fn run_workflow(
                 let idx = *idx;
                 futs.push(tokio::spawn(async move {
                     let result = execute_tool_use(&tool, args, &ts, &ctx, None).await;
-                    (idx, tool, result.success, summarize_result(&result))
+                    let success = super::work_contract::execution_succeeded(result.success, result.data.as_ref());
+                    (idx, tool, success, summarize_result(&result))
                 }));
             }
             let mut group_outcomes: Vec<StepOutcome> = Vec::with_capacity(futs.len());
@@ -93,7 +94,7 @@ pub async fn run_workflow(
             outcomes.push(StepOutcome {
                 index: i,
                 tool: step.tool.clone(),
-                success: result.success,
+                success: super::work_contract::execution_succeeded(result.success, result.data.as_ref()),
                 parallel: false,
                 summary: summarize_result(&result),
             });

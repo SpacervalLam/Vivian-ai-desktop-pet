@@ -42,6 +42,8 @@ pub mod coding_session_cache;
 pub mod coding_memory_records;
 pub mod coding_memory_queue;
 pub mod coding_subagent;
+pub mod work_contract;
+pub mod work_context;
 pub mod work_jobs;
 pub mod agent_presets;
 pub mod task_service;

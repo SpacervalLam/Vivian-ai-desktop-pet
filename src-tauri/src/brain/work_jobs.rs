@@ -74,6 +74,8 @@ pub struct WorkJob {
     pub tool_calls: usize,
     /// 用尽轮次预算而停止（结果可能不完整）。
     pub budget_exhausted: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_result: Option<super::work_contract::TaskResult>,
     /// 结算通知是否已被主循环取走。
     #[serde(skip)]
     pub notified: bool,
@@ -138,6 +140,7 @@ impl WorkJobRegistry {
                 rounds: 0,
                 tool_calls: 0,
                 budget_exhausted: false,
+                task_result: None,
                 notified: false,
                 finished_at: None,
                 cancel: Arc::new(AtomicBool::new(false)),
@@ -160,6 +163,7 @@ impl WorkJobRegistry {
             }
             job.status = WorkJobStatus::Completed;
             job.output = Some(outcome.output);
+            job.task_result = Some(outcome.result);
             job.rounds = outcome.rounds;
             job.tool_calls = outcome.tool_calls;
             job.budget_exhausted = budget_exhausted;
@@ -213,6 +217,16 @@ impl WorkJobRegistry {
             .collect();
         list.sort_by(|a, b| a.job_id.cmp(&b.job_id));
         list
+    }
+
+    /// Running and uncollected terminal jobs must be considered before completion.
+    pub fn pending_for(&self, session_id: &str) -> Vec<String> {
+        let jobs = self.jobs.read();
+        let mut pending: Vec<_> = jobs.values()
+            .filter(|j| j.session_id == session_id && (j.status == WorkJobStatus::Running || !j.notified))
+            .map(|j| format!("{} ({})", j.job_id, j.status.as_str())).collect();
+        pending.sort();
+        pending
     }
 
     /// 取消某会话仍在跑的全部任务（会话取消 / 重置时用）。
@@ -297,7 +311,7 @@ pub fn render_settlement(job: &WorkJob) -> String {
     let mut text = match job.status {
         WorkJobStatus::Completed => {
             let mut t = format!(
-                "[后台子任务结算] {} 已完成（{} 轮 / {} 次工具调用）\n任务：{}\n结果：\n{}",
+                "[后台子任务结算] {} 执行已结束（{} 轮 / {} 次工具调用）\n任务：{}\n结果：\n{}",
                 job.job_id,
                 job.rounds,
                 job.tool_calls,
@@ -306,6 +320,12 @@ pub fn render_settlement(job: &WorkJob) -> String {
             );
             if job.budget_exhausted {
                 t.push_str("\n注意：该任务用尽轮次预算才停下，结果可能不完整——如需继续，可以再派一个任务接手。");
+            }
+            if let Some(result) = &job.task_result {
+                t.push_str(&format!("\n结构化任务结算（不等同于事实验证）：{}", serde_json::json!({
+                    "status":result.status,"contract_validated":result.contract_validated,
+                    "remaining_work":result.remaining_work,"verification":result.verification,
+                })));
             }
             t
         }
@@ -332,4 +352,42 @@ pub fn render_settlement(job: &WorkJob) -> String {
          优先响应用户的最新指令。）",
     );
     text
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::brain::coding_subagent::SubagentStop;
+    use crate::brain::work_contract::{unvalidated_return, TaskStatus};
+
+    #[test]
+    fn completion_waits_for_running_and_uncollected_jobs_in_the_same_session() {
+        let registry = WorkJobRegistry::new();
+        let id = registry.create("parent".into(), "Inspect".into(), 1).unwrap();
+        registry.create("other".into(), "Unrelated task".into(), 1).unwrap();
+        assert_eq!(registry.pending_for("parent").len(), 1);
+        registry.complete(&id, SubagentOutcome {
+            output:"Partial findings".into(), rounds:1, tool_calls:0, stop:SubagentStop::MaxRounds,
+            result:unvalidated_return("Partial findings".into(), TaskStatus::Partial, vec!["Verify".into()], vec![]),
+        }, true);
+        assert_eq!(registry.pending_for("parent").len(), 1);
+        let settlements = registry.drain_settlements("parent");
+        assert_eq!(settlements[0].task_result.as_ref().unwrap().status, TaskStatus::Partial);
+        assert!(render_settlement(&settlements[0]).contains("partial"));
+        assert!(registry.pending_for("parent").is_empty());
+        assert_eq!(registry.pending_for("other").len(), 1);
+    }
+
+    #[test]
+    fn late_result_cannot_turn_a_cancelled_job_into_completion() {
+        let registry = WorkJobRegistry::new();
+        let id = registry.create("parent".into(), "Inspect".into(), 1).unwrap();
+        assert!(registry.cancel(&id));
+        registry.complete(&id, SubagentOutcome {
+            output:"Late answer".into(), rounds:1, tool_calls:0, stop:SubagentStop::Completed,
+            result:unvalidated_return("Late answer".into(), TaskStatus::Partial, vec![], vec![]),
+        }, false);
+        assert_eq!(registry.get(&id).unwrap().status, WorkJobStatus::Canceled);
+        assert!(registry.get(&id).unwrap().task_result.is_none());
+    }
 }

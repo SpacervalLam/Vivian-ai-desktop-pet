@@ -369,6 +369,7 @@ impl Tool for GetWorkStatusTool {
                             "message_count": s.message_count(),
                             "delegated_by_companion": s.delegated_by_companion,
                             "final_summary": final_summary,
+                            "task": s.task,
                         })),
                     )
                 }

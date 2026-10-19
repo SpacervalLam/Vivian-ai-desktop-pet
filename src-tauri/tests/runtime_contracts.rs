@@ -1,5 +1,9 @@
 //! Test the application's actual portable modules without starting Tauri or accessing user data.
 #![allow(dead_code)]
+#[path = "../src/brain/work_contract.rs"]
+pub mod work_contract;
+#[path = "../src/brain/work_context.rs"]
+pub mod work_context;
 #[path = "../src/brain/work_question.rs"]
 pub mod work_question;
 #[path = "../src/drag_motion.rs"]
