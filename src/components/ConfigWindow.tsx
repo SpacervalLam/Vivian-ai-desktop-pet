@@ -17,8 +17,8 @@ import { open as openShell } from '@tauri-apps/plugin-shell';
 import { useTranslation } from 'react-i18next';
 import { changeLanguage } from '../i18n';
 import { getCharacterId } from '../characterContext';
-import TtsHelpDrawer, { TtsBackendKey } from './TtsHelpDrawer';
-import AsrHelpDrawer, { AsrBackendKey } from './AsrHelpDrawer';
+import TtsHelpDialog, { TtsBackendKey } from './TtsHelpDialog';
+import AsrHelpDialog, { AsrBackendKey } from './AsrHelpDialog';
 import './settings/SpeechSettings.css';
 import ShortcutRecorder, { type ConflictResult, formatForDisplay } from './ShortcutRecorder';
 import ClearConfirmDialog from './ClearConfirmDialog';
@@ -43,8 +43,8 @@ interface TtsConfigState {
   rate: number;
   volume: number;
   voice_id: string | null;
-  engine: 'none' | 'edgetts' | 'azure' | 'gptsovits' | 'fishspeech' | 'bertvits2' | 'minimax' | 'doubao' | 'mimo';
-  fallback_engine: 'none' | 'edgetts' | 'azure' | 'gptsovits' | 'fishspeech' | 'bertvits2' | 'minimax' | 'doubao' | 'mimo' | null;
+  engine: 'none' | 'edgetts' | 'azure' | 'gptsovits' | 'fishspeech' | 'bertvits2' | 'minimax' | 'doubao' | 'mimo' | 'elevenlabs';
+  fallback_engine: 'none' | 'edgetts' | 'azure' | 'gptsovits' | 'fishspeech' | 'bertvits2' | 'minimax' | 'doubao' | 'mimo' | 'elevenlabs' | null;
   retry_count: number;
   // Azure
   azure_key: string | null;
@@ -118,6 +118,16 @@ interface TtsConfigState {
   mimo_model: string | null;
   mimo_endpoint: string | null;
   mimo_style_prompt: string | null;
+  // ElevenLabs（云端音色库/克隆）
+  elevenlabs_key: string | null;
+  elevenlabs_voice_id: string | null;
+  elevenlabs_model: string | null;
+  elevenlabs_output_format: string | null;
+  elevenlabs_endpoint: string | null;
+  elevenlabs_stability: number | null;
+  elevenlabs_similarity_boost: number | null;
+  elevenlabs_style: number | null;
+  elevenlabs_speaker_boost: boolean | null;
 }
 
 /**
@@ -862,6 +872,7 @@ const ConfigWindow: React.FC = () => {
   const [fishSpeechAdvancedOpen, setFishSpeechAdvancedOpen] = useState(false);
   const [minimaxAdvancedOpen, setMinimaxAdvancedOpen] = useState(false);
   const [doubaoAdvancedOpen, setDoubaoAdvancedOpen] = useState(false);
+  const [elevenlabsAdvancedOpen, setElevenlabsAdvancedOpen] = useState(false);
   // TTS 帮助说明书抽屉
   const [ttsHelpOpen, setTtsHelpOpen] = useState(false);
   const [ttsHelpBackend, setTtsHelpBackend] = useState<TtsBackendKey>('edgetts');
@@ -902,6 +913,7 @@ const ConfigWindow: React.FC = () => {
 
   // 数据备份与迁移
   const [backingUp, setBackingUp] = useState(false);
+  const [backupResult, setBackupResult] = useState<{ destination: string; error: string | null } | null>(null);
   const [restoreConfirmOpen, setRestoreConfirmOpen] = useState(false);
   const [restoreSource, setRestoreSource] = useState<string | null>(null);
   const [restoring, setRestoring] = useState(false);
@@ -2054,16 +2066,29 @@ const ConfigWindow: React.FC = () => {
     }
   }, [t]);
 
-  /** 一键备份：选择保存位置 → 后端复制用户数据目录（记忆/自进化/心理/配置等）到时间戳备份文件夹 */
+  useEffect(() => {
+    void invoke<{ destination: string; error: string | null } | null>('take_backup_result').then(result => {
+      if (!result) return;
+      setBackupResult(result);
+      setActiveTab('data');
+      void emit('toast:show', {
+        message: result.error ? `${t('config.backup_failed')}: ${result.error}` : `${t('config.backup_done')}: ${result.destination}`,
+        type: result.error ? 'error' : 'success', duration: 8000, key: Date.now(),
+      });
+    }).catch(error => console.warn('Backup result unavailable', error));
+  }, [t]);
+
+  /** 保存后重启到离线导出阶段；重启后读取真实完成结果。 */
   const handleBackup = useCallback(async () => {
     const dest = await open({ directory: true, multiple: false, title: t('config.backup_pick_folder') });
     if (!dest || typeof dest !== 'string') return;
     setBackingUp(true);
+    setBackupResult(null);
     try {
       const backupPath = await invoke<string>('backup_user_data', { destDir: dest });
       void emit('toast:show', {
-        message: `${t('config.backup_done')}: ${backupPath}`,
-        type: 'success',
+        message: `${t('config.backup_restarting')}: ${backupPath}`,
+        type: 'info',
         duration: 6000,
         key: Date.now(),
       });
@@ -3052,6 +3077,9 @@ const ConfigWindow: React.FC = () => {
           <>
             <div style={sectionTitleStyle}>{t('config.section_backup')}</div>
             <p className="settings-data-help">{t('config.backup_help')}</p>
+            {backupResult && <p role={backupResult.error ? 'alert' : 'status'} className="settings-data-help" style={{ overflowWrap: 'anywhere' }}>
+              {backupResult.error ? `${t('config.backup_failed')}: ${backupResult.error}` : `${t('config.backup_done')}: ${backupResult.destination}`}
+            </p>}
             <div className="settings-data-actions">
               <div className="settings-data-row">
                 <span className="settings-data-icon"><Download size={18} aria-hidden="true" /></span>
@@ -5090,47 +5118,51 @@ const ConfigWindow: React.FC = () => {
                     { value: 'minimax', label: t('config.opt_tts_minimax') },
                     { value: 'doubao', label: t('config.opt_tts_doubao') },
                     { value: 'mimo', label: t('config.opt_tts_mimo') },
+                    { value: 'elevenlabs', label: t('config.opt_tts_elevenlabs') },
                   ]}
-                  labelExtra={
-                    <button
-                      type="button"
-                      title={t('config.btn_tts_help')}
-                      onClick={() => {
-                        const engineToBackend: Record<string, TtsBackendKey> = {
-                          edgetts: 'edgetts',
-                          azure: 'azure',
-                          gptsovits: 'gptsovits',
-                          fishspeech: 'fishspeech',
-                          bertvits2: 'fishspeech',
-                          minimax: 'minimax',
-                          doubao: 'doubao',
-                        };
-                        const target = ttsConfig
-                          ? engineToBackend[ttsConfig.engine] ?? 'edgetts'
-                          : 'edgetts';
-                        openTtsHelp(target);
-                      }}
-                      style={{
-                        width: 16,
-                        height: 16,
-                        borderRadius: '50%',
-                        border: 'none',
-                        background: 'var(--panel-toggle-off)',
-                        color: 'var(--panel-text-secondary)',
-                        fontSize: 11,
-                        fontWeight: 600,
-                        lineHeight: 1,
-                        cursor: 'pointer',
-                        padding: 0,
-                        display: 'inline-flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        fontFamily: 'inherit',
-                      }}
-                    >
-                      ?
-                    </button>
-                  }
+                  labelExtra={(() => {
+                    // 只有写了说明书的后端才显示帮助按钮：
+                    // 缺少映射时返回 undefined，而不是错误地打开 EdgeTTS 的文档
+                    const engineToBackend: Record<string, TtsBackendKey> = {
+                      edgetts: 'edgetts',
+                      azure: 'azure',
+                      gptsovits: 'gptsovits',
+                      fishspeech: 'fishspeech',
+                      bertvits2: 'fishspeech',
+                      minimax: 'minimax',
+                      doubao: 'doubao',
+                      mimo: 'mimo',
+                      elevenlabs: 'elevenlabs',
+                    };
+                    const target = ttsConfig ? engineToBackend[ttsConfig.engine] : undefined;
+                    if (!target) return undefined;
+                    return (
+                      <button
+                        type="button"
+                        title={t('config.btn_tts_help')}
+                        onClick={() => openTtsHelp(target)}
+                        style={{
+                          width: 16,
+                          height: 16,
+                          borderRadius: '50%',
+                          border: 'none',
+                          background: 'var(--panel-toggle-off)',
+                          color: 'var(--panel-text-secondary)',
+                          fontSize: 11,
+                          fontWeight: 600,
+                          lineHeight: 1,
+                          cursor: 'pointer',
+                          padding: 0,
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          fontFamily: 'inherit',
+                        }}
+                      >
+                        ?
+                      </button>
+                    );
+                  })()}
                 />
                 <SelectField
                   label={t('config.field_tts_fallback_engine')}
@@ -5150,6 +5182,7 @@ const ConfigWindow: React.FC = () => {
                     { value: 'minimax', label: t('config.opt_tts_minimax') },
                     { value: 'doubao', label: t('config.opt_tts_doubao') },
                     { value: 'mimo', label: t('config.opt_tts_mimo') },
+                    { value: 'elevenlabs', label: t('config.opt_tts_elevenlabs') },
                   ]}
                 />
                 {/* 双实例并行模式：仅在所有角色都选择 GPT-SoVITS 引擎且配置了安装路径时显示 */}
@@ -6311,6 +6344,117 @@ const ConfigWindow: React.FC = () => {
                   </>
                 )}
 
+                {/* ElevenLabs（云端音色库/克隆）配置 */}
+                {ttsConfig.engine === 'elevenlabs' && (
+                  <>
+                    <div
+                      style={{
+                        ...sectionTitleStyle,
+                        marginTop: 16,
+                        fontSize: 12,
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                      }}
+                    >
+                      <span>{t('config.section_tts_elevenlabs')}</span>
+                      <GetApiKeyButton url="https://elevenlabs.io/app/settings/api-keys" />
+                    </div>
+                    <TextField
+                      label={t('config.field_tts_elevenlabs_key')}
+                      value={ttsConfig.elevenlabs_key ?? ''}
+                      onChange={(v) => setTtsConfig({ ...ttsConfig, elevenlabs_key: v || null })}
+                      placeholder="xi-api-key（控制台 → Settings → API Keys）"
+                      type="password"
+                    />
+                    <TextField
+                      label={t('config.field_tts_elevenlabs_voice_id')}
+                      value={ttsConfig.elevenlabs_voice_id ?? ''}
+                      onChange={(v) => setTtsConfig({ ...ttsConfig, elevenlabs_voice_id: v || null })}
+                      placeholder={t('config.ph_tts_elevenlabs_voice_id')}
+                      help={t('config.field_tts_elevenlabs_voice_id_help')}
+                    />
+                    <AdvancedToggle
+                      open={elevenlabsAdvancedOpen}
+                      onToggle={() => setElevenlabsAdvancedOpen((v) => !v)}
+                      label={t('config.section_advanced_settings')}
+                    />
+                    {elevenlabsAdvancedOpen && (
+                      <>
+                        <SelectField
+                          label={t('config.field_tts_elevenlabs_model')}
+                          value={ttsConfig.elevenlabs_model ?? 'eleven_multilingual_v2'}
+                          onChange={(v) => setTtsConfig({ ...ttsConfig, elevenlabs_model: v || null })}
+                          options={[
+                            { value: 'eleven_multilingual_v2', label: t('config.opt_tts_elevenlabs_model_multilingual') },
+                            { value: 'eleven_turbo_v2_5', label: t('config.opt_tts_elevenlabs_model_turbo') },
+                            { value: 'eleven_flash_v2_5', label: t('config.opt_tts_elevenlabs_model_flash') },
+                            { value: 'eleven_v3', label: t('config.opt_tts_elevenlabs_model_v3') },
+                          ]}
+                        />
+                        <SelectField
+                          label={t('config.field_tts_elevenlabs_output_format')}
+                          value={ttsConfig.elevenlabs_output_format ?? 'mp3_44100_128'}
+                          onChange={(v) =>
+                            setTtsConfig({ ...ttsConfig, elevenlabs_output_format: v || null })
+                          }
+                          options={[
+                            { value: 'mp3_44100_128', label: 'MP3 44.1kHz 128kbps（推荐）' },
+                            { value: 'mp3_22050_32', label: 'MP3 22.05kHz 32kbps（省带宽）' },
+                            { value: 'pcm_24000', label: 'PCM 24kHz（无压缩）' },
+                          ]}
+                        />
+                        <SliderField
+                          label={t('config.field_tts_elevenlabs_stability')}
+                          value={ttsConfig.elevenlabs_stability ?? 0.5}
+                          onChange={(v) => setTtsConfig({ ...ttsConfig, elevenlabs_stability: v })}
+                          min={0}
+                          max={1}
+                          step={0.05}
+                          format={(v) => v.toFixed(2)}
+                          help={t('config.field_tts_elevenlabs_stability_help')}
+                        />
+                        <SliderField
+                          label={t('config.field_tts_elevenlabs_similarity')}
+                          value={ttsConfig.elevenlabs_similarity_boost ?? 0.75}
+                          onChange={(v) =>
+                            setTtsConfig({ ...ttsConfig, elevenlabs_similarity_boost: v })
+                          }
+                          min={0}
+                          max={1}
+                          step={0.05}
+                          format={(v) => v.toFixed(2)}
+                          help={t('config.field_tts_elevenlabs_similarity_help')}
+                        />
+                        <SliderField
+                          label={t('config.field_tts_elevenlabs_style')}
+                          value={ttsConfig.elevenlabs_style ?? 0}
+                          onChange={(v) => setTtsConfig({ ...ttsConfig, elevenlabs_style: v })}
+                          min={0}
+                          max={1}
+                          step={0.05}
+                          format={(v) => v.toFixed(2)}
+                          help={t('config.field_tts_elevenlabs_style_help')}
+                        />
+                        <ToggleField
+                          label={t('config.field_tts_elevenlabs_speaker_boost')}
+                          value={ttsConfig.elevenlabs_speaker_boost ?? true}
+                          onChange={(v) =>
+                            setTtsConfig({ ...ttsConfig, elevenlabs_speaker_boost: v })
+                          }
+                          help={t('config.field_tts_elevenlabs_speaker_boost_help')}
+                        />
+                        <TextField
+                          label={t('config.field_tts_elevenlabs_endpoint')}
+                          value={ttsConfig.elevenlabs_endpoint ?? ''}
+                          onChange={(v) => setTtsConfig({ ...ttsConfig, elevenlabs_endpoint: v || null })}
+                          placeholder="https://api.elevenlabs.io（默认，可填自建反代）"
+                        />
+                      </>
+                    )}
+                  </>
+                )}
+
                 {/* ── 跨语言 TTS：显示语言与 TTS 语言不同时启用翻译 ── */}
                 <div style={subsectionTitleStyle}>
                   {t('config.section_tts_cross_lang')}
@@ -7218,15 +7362,15 @@ const ConfigWindow: React.FC = () => {
         </div>
       )}
 
-      {/* TTS 后端使用说明书抽屉 */}
-      <TtsHelpDrawer
+      {/* TTS 后端使用说明书弹窗 */}
+      <TtsHelpDialog
         open={ttsHelpOpen}
         initialBackend={ttsHelpBackend}
         onClose={() => setTtsHelpOpen(false)}
       />
 
-      {/* ASR 后端使用说明书抽屉 */}
-      <AsrHelpDrawer
+      {/* ASR 后端使用说明书弹窗 */}
+      <AsrHelpDialog
         open={asrHelpOpen}
         initialBackend={asrHelpBackend}
         onClose={() => setAsrHelpOpen(false)}

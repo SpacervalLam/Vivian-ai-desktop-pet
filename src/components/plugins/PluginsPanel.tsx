@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { invoke } from '@tauri-apps/api/core';
 import PluginInstallPanel from './PluginInstallPanel';
+import SkillsManager, { type SkillEntry } from './SkillsManager';
 
 /** 插件清单条目（对齐后端 plugins::PluginInventoryEntry） */
 interface PluginEntry {
@@ -26,15 +27,6 @@ interface PluginEntry {
 
 /** 内置插件（播种体系所有，禁删；改内置的正确方式是复制为新插件） */
 const BUILTIN_PLUGIN_NAMES = ['llm-providers', 'plugin-authoring', '3d-apartment'];
-
-/** 技能条目（对齐后端 commands::plugins::SkillEntryInfo） */
-interface SkillEntry {
-  name: string;
-  description: string;
-  scope: string | null;
-  origin: string; // user / plugin
-  body_len: number;
-}
 
 /** 插件运行时诊断（对齐后端 commands::plugins::plugin_diagnostics） */
 interface PluginDiagnostics {
@@ -187,11 +179,6 @@ const PluginsPanel: React.FC = () => {
     blocked: zh ? '缺少依赖' : ja ? '依存関係が必要' : 'Missing requirements',
     partial: zh ? '部分可用' : ja ? '一部利用可能' : 'Partially loaded',
   }[status] ?? status);
-
-  const originLabel = (origin: string): string => {
-    if (origin === 'plugin') return t('config.plugins.origin_plugin');
-    return t('config.plugins.origin_user');
-  };
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 22 }}>
@@ -450,51 +437,8 @@ const PluginsPanel: React.FC = () => {
       </div>
 
       <div style={sectionTitle}>{t('config.plugins.section_skills')}</div><p style={{fontSize:12,color:'var(--panel-text-secondary)'}}>{t('config.plugins.workflow_help')}</p>
-      {error ? null : skills === null ? (
-        <div style={{ fontSize: 13, color: 'var(--panel-text-secondary)' }}>{t('mind_inspector.common.loading')}</div>
-      ) : (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          {skills.length === 0 && (
-            <div style={{ fontSize: 13, color: 'var(--panel-text-secondary)' }}>
-              {t('config.plugins.no_skills')}
-              {paths && (
-                <span>{t('config.plugins.skills_dir_hint', { dir: paths.skills_dir })}</span>
-              )}
-            </div>
-          )}
-          {skills.map((s) => (
-            <div
-              key={s.name}
-              title={s.description || s.name}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 10,
-                padding: '6px 12px',
-                borderBottom: '1px solid var(--panel-border)',
-              }}
-            >
-              <span style={{ fontSize: 13, fontWeight: 500, color: 'var(--panel-text)', minWidth: 120 }}>
-                {s.name}
-              </span>
-              <span style={{ fontSize: 11, color: 'var(--panel-text-tertiary)', flexShrink: 0 }}>
-                {originLabel(s.origin)}{s.origin === 'plugin' ? ` · ${s.name.split('/')[0]}` : ''}
-              </span>
-              <span
-                style={{
-                  flex: 1,
-                  fontSize: 12,
-                  color: 'var(--panel-text-secondary)',
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  whiteSpace: 'nowrap',
-                }}
-              >
-                {s.description || '—'}
-              </span>
-            </div>
-          ))}
-        </div>
+      {error ? null : (
+        <SkillsManager skills={skills} skillsDir={paths?.skills_dir} onChanged={refresh} />
       )}
     </div>
   );

@@ -713,8 +713,6 @@ body[data-ui-style="minimal"] :is(.codex-selbubble, .codex-editcard-overlay, .co
 
 .mind-main[data-ui-style="minimal"] .codex-msg-act { border-radius: 5px; }
 
-.mind-main[data-ui-style="minimal"] .codex-tool-card,
-.mind-main[data-ui-style="minimal"] .codex-tool-group,
 .mind-main[data-ui-style="minimal"] .codex-info-card,
 .mind-main[data-ui-style="minimal"] .codex-budget-banner,
 .mind-main[data-ui-style="minimal"] .codex-ask-card {
@@ -902,13 +900,6 @@ body[data-ui-style="minimal"] :is(.codex-selbubble, .codex-editcard-overlay, .co
   opacity: .52;
 }
 
-.mind-main[data-ui-style="scrapbook"] .codex-tool-group-body,
-.mind-main[data-ui-style="scrapbook"] .codex-tool-body,
-.mind-main[data-ui-style="scrapbook"] .codex-tool-detail {
-  border-top-style: solid;
-}
-
-.mind-main[data-ui-style="scrapbook"] .codex-inout-box,
 .mind-main[data-ui-style="scrapbook"] .codex-pre {
   box-shadow: none;
 }
@@ -952,55 +943,6 @@ body[data-ui-style="minimal"] :is(.codex-selbubble, .codex-editcard-overlay, .co
   clip: rect(0, 0, 0, 0);
   white-space: nowrap;
   border: 0;
-}
-
-.mind-main[data-ui-style="minimal"] .codex-tool-group {
-  margin: 8px 0;
-  background: transparent;
-}
-
-.mind-main[data-ui-style="minimal"] .codex-tool-group-header,
-.mind-main[data-ui-style="minimal"] .codex-tool-header {
-  min-height: 36px;
-  padding: 7px 9px;
-  font-size: 12.5px;
-}
-
-.mind-main[data-ui-style="minimal"] .codex-tool-group-body,
-.mind-main[data-ui-style="minimal"] .codex-tool-body,
-.mind-main[data-ui-style="minimal"] .codex-tool-detail,
-.mind-main[data-ui-style="minimal"] .codex-tool-summary {
-  border-top: 1px solid var(--codex-line-light);
-}
-
-.mind-main[data-ui-style="minimal"] .codex-tool-group-body {
-  padding: 4px 6px;
-  background: var(--panel-bg-surface);
-}
-
-.mind-main[data-ui-style="minimal"] .codex-tool-group-body .codex-tool-card {
-  border-color: transparent;
-  background: transparent;
-}
-
-.mind-main[data-ui-style="minimal"] .codex-tool-group-body .codex-tool-card:hover {
-  border-color: var(--codex-line-light);
-  background: var(--codex-paper-card);
-}
-
-.mind-main[data-ui-style="minimal"] .codex-tool-badge,
-.mind-main[data-ui-style="minimal"] .codex-inout-badge {
-  border: 0;
-  border-radius: 4px;
-  background: var(--panel-bg-active);
-  letter-spacing: .2px;
-}
-
-.mind-main[data-ui-style="minimal"] .codex-inout-box,
-.mind-main[data-ui-style="minimal"] .codex-pre {
-  border-radius: 6px;
-  background: var(--panel-code-block);
-  box-shadow: none;
 }
 
 /* Office 预览（Word）：手账主题把文档渲染成**浮在桌面上的一页纸**

@@ -322,7 +322,17 @@ export interface AppConfig {
 }
 
 /** TTS 引擎 - 对应 backend `TtsEngine` */
-export type TtsEngine = 'none' | 'edgetts' | 'azure' | 'gptsovits' | 'fishspeech' | 'bertvits2' | 'minimax' | 'doubao';
+export type TtsEngine =
+  | 'none'
+  | 'edgetts'
+  | 'azure'
+  | 'gptsovits'
+  | 'fishspeech'
+  | 'bertvits2'
+  | 'minimax'
+  | 'doubao'
+  | 'mimo'
+  | 'elevenlabs';
 
 /** TTS 配置 - 对应 backend `TtsConfig` */
 export interface TtsConfig {
@@ -391,6 +401,22 @@ export interface TtsConfig {
   doubao_voice_type?: string | null;
   doubao_format?: string | null;
   doubao_sample_rate?: number | null;
+  // 小米 MiMo（语音克隆）
+  mimo_key?: string | null;
+  mimo_voice_audio_path?: string | null;
+  mimo_model?: string | null;
+  mimo_endpoint?: string | null;
+  mimo_style_prompt?: string | null;
+  // ElevenLabs（云端音色库/克隆）
+  elevenlabs_key?: string | null;
+  elevenlabs_voice_id?: string | null;
+  elevenlabs_model?: string | null;
+  elevenlabs_output_format?: string | null;
+  elevenlabs_endpoint?: string | null;
+  elevenlabs_stability?: number | null;
+  elevenlabs_similarity_boost?: number | null;
+  elevenlabs_style?: number | null;
+  elevenlabs_speaker_boost?: boolean | null;
 }
 
 /** GPT-SoVITS 服务运行状态 - 对应 backend `ServiceState` */

@@ -39,6 +39,8 @@ import {
   ThumbsUp,
   ThumbsDown,
   Clock,
+  Play,
+  FolderOpen,
 } from 'lucide-react';
 import {
   COLORS,
@@ -115,6 +117,16 @@ interface DiscoveryProfileView {
   store_available: number;
   store_total: number;
   store_recommended: number;
+}
+
+interface DiscoveryDutyView {
+  quota_per_day: number;
+  picked_today: number;
+  remaining_today: number;
+  report_path: string;
+  report_exists: boolean;
+  last_round_date: string;
+  last_digest_month: string;
 }
 
 type CharacterId = 'vivian' | 'nana';
@@ -872,6 +884,9 @@ const DiscoverySection: React.FC<{
   const [dislikeDraft, setDislikeDraft] = useState('');
   const [bangumiUser, setBangumiUser] = useState('');
   const [bangumiMsg, setBangumiMsg] = useState<string | null>(null);
+  const [duty, setDuty] = useState<DiscoveryDutyView | null>(null);
+  const [dutyBusy, setDutyBusy] = useState(false);
+  const [dutyMsg, setDutyMsg] = useState<string | null>(null);
 
   const load = useCallback(() => {
     setLoading(true);
@@ -882,10 +897,17 @@ const DiscoverySection: React.FC<{
       .finally(() => setLoading(false));
   }, [character]);
 
+  const loadDuty = useCallback(() => {
+    invoke<DiscoveryDutyView>('get_discovery_duty', { characterId: character })
+      .then((res) => setDuty(res))
+      .catch(() => setDuty(null));
+  }, [character]);
+
   useEffect(() => {
     setData(null);
     load();
-  }, [load]);
+    loadDuty();
+  }, [load, loadDuty]);
 
   const handleDeleteInterest = async (domain: string) => {
     setBusyKey(`interest-${domain}`);
@@ -958,6 +980,32 @@ const DiscoverySection: React.FC<{
       setBangumiMsg(String(e));
     } finally {
       setBusyKey(null);
+    }
+  };
+
+  const handleRunDuty = async () => {
+    setDutyBusy(true);
+    setDutyMsg(null);
+    try {
+      const outcome = await invoke<{ ran: boolean; reason: string }>('run_discovery_duty', {
+        characterId: character,
+      });
+      setDutyMsg(outcome.reason);
+      loadDuty();
+      load();
+    } catch (e) {
+      setDutyMsg(String(e));
+    } finally {
+      setDutyBusy(false);
+    }
+  };
+
+  const handleRevealReport = async () => {
+    if (!duty?.report_path) return;
+    try {
+      await invoke('coding_reveal_in_explorer', { path: duty.report_path });
+    } catch (e) {
+      setDutyMsg(String(e));
     }
   };
 
@@ -1092,6 +1140,61 @@ const DiscoverySection: React.FC<{
           <span style={{ ...TYPO.micro, color: COLORS.textQuaternary, flexShrink: 0 }}>
             {bangumiMsg}
           </span>
+        )}
+      </div>
+
+      {/* 每日刷B站值班 */}
+      <div
+        className="profile-add-row"
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: SPACING.sm,
+          flexWrap: 'wrap',
+          padding: `${SPACING.xs}px ${SPACING.sm}px`,
+          borderRadius: RADIUS.md,
+          border: `1px solid ${COLORS.subtleBorder}`,
+          marginBottom: SPACING.md,
+        }}
+      >
+        <Compass size={14} style={{ color: COLORS.textTertiary, flexShrink: 0 }} />
+        <span
+          style={{
+            ...TYPO.micro,
+            color: COLORS.textSecondary,
+            textTransform: 'none',
+            letterSpacing: 0,
+          }}
+        >
+          {t('mind_inspector.profile.discovery_duty_title')}
+          {duty
+            ? ` · ${t('mind_inspector.profile.discovery_duty_meta', {
+                picked: duty.picked_today,
+                quota: duty.quota_per_day,
+                remaining: duty.remaining_today,
+              })}`
+            : ''}
+        </span>
+        <IconButton
+          onClick={handleRunDuty}
+          disabled={dutyBusy}
+          title={t('mind_inspector.profile.discovery_duty_run')}
+        >
+          <Play size={14} />
+        </IconButton>
+        <IconButton
+          onClick={handleRevealReport}
+          disabled={!duty?.report_exists}
+          title={
+            duty?.report_exists
+              ? t('mind_inspector.profile.discovery_duty_report')
+              : t('mind_inspector.profile.discovery_duty_report_missing')
+          }
+        >
+          <FolderOpen size={14} />
+        </IconButton>
+        {dutyMsg && (
+          <span style={{ ...TYPO.micro, color: COLORS.textQuaternary }}>{dutyMsg}</span>
         )}
       </div>
 

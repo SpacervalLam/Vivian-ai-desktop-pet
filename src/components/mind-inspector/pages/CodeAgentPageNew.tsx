@@ -31,6 +31,7 @@ import {
 } from 'lucide-react';
 import './CodeAgentPage.css';
 import './workbenchStrings';
+import { workActivitySummary } from './workActivitySummary';
 import './workflowStrings';
 import './browserStrings';
 import SessionSearch from './SessionSearch';
@@ -911,7 +912,7 @@ function compactValue(v: unknown, max = 60): string {
   return s.length > max ? s.slice(0, max) + '…' : s;
 }
 
-const TOOL_ARG_KEY_ORDER = ['command', 'pattern', 'query', 'path', 'file_path', 'file', 'target', 'directory'];
+const TOOL_ARG_KEY_ORDER = ['description', 'url', 'command', 'pattern', 'query', 'path', 'file_path', 'file', 'target', 'directory'];
 
 /** 参数摘要：优先取关键字段（命令/模式/路径等）；空参数返回 ''（区别于"有参数但为空"） */
 function toolArgSummary(argsJson: string, tr?: (key: string, opts?: Record<string, unknown>) => string): string {
@@ -1091,16 +1092,17 @@ const InOutRow: React.FC<{ label: string; text: string; failed?: boolean }> = ({
   </div>
 );
 
-const ToolCallCard: React.FC<{
+const ToolCallRow: React.FC<{
   name: string;
   argumentsJson: string;
   result?: string;
   success?: boolean | null;
   running?: boolean;
+  stopped?: boolean;
   durationMs?: number | null;
-}> = ({ name, argumentsJson, result, success, running, durationMs }) => {
+}> = ({ name, argumentsJson, result, success, running, stopped, durationMs }) => {
   const { t } = useTranslation();
-  const [expanded, setExpanded] = useState(success === false);
+  const [expanded, setExpanded] = useState(false);
   const meta = toolMeta(name);
   const label = toolLabel(name, t);
   const tr = (key: string, opts?: Record<string, unknown>) => t(key, { ...opts, defaultValue: '' });
@@ -1112,19 +1114,11 @@ const ToolCallCard: React.FC<{
         ? 'var(--codex-danger)'
         : 'var(--codex-ink-faint)';
 
-  const prevSuccess = useRef(success);
-  useEffect(() => {
-    if (success === false && prevSuccess.current !== false) {
-      setExpanded(true);
-    }
-    prevSuccess.current = success;
-  }, [success]);
-
   const argSum = toolArgSummary(argumentsJson, tr);
   const resSum = toolResultSummary(name, result, success, tr);
 
   return (
-    <div className={`codex-tool-card${expanded ? ' expanded' : ''}${success === false ? ' failed' : ''}`}>
+    <div className={`codex-tool-row${expanded ? ' expanded' : ''}${success === false ? ' failed' : ''}`}>
       <button type="button" onClick={() => setExpanded((v) => !v)} className="codex-tool-header" aria-expanded={expanded} title={`${label} · ${name}${argSum ? ` · ${argSum}` : ''}`}>
         <span style={{ color: statusColor, display: 'inline-flex', flexShrink: 0 }}>{meta.icon}</span>
         <span className="codex-tool-label">{label}</span>
@@ -1141,7 +1135,7 @@ const ToolCallCard: React.FC<{
           <span className="codex-tool-status codex-tool-status-ok">{t('mind_inspector.code_tool_done')}</span>
         ) : success === false ? (
           <span className="codex-tool-status codex-tool-status-err">{t('mind_inspector.code_tool_failed')}</span>
-        ) : result === undefined ? <span className="codex-tool-status">{t('workbench.pending')}</span> : null}
+        ) : result === undefined ? <span className="codex-tool-status">{t(stopped ? 'workbench.stopped' : 'workbench.pending')}</span> : null}
         <span style={{ color: 'var(--codex-ink-soft)', display: 'inline-flex', flexShrink: 0 }}>
           {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
         </span>
@@ -1163,9 +1157,8 @@ const ToolCallCard: React.FC<{
           {/* 展开后的完整详情：IN/OUT（内容为空则该栏不显示；都空则整个详情不渲染） */}
           {expanded && (
             <div className="codex-tool-detail">
-              <div className="codex-tool-detail-name">{name}</div>
               {!isInOutEmpty(argumentsJson) || (result !== undefined && !isInOutEmpty(result)) ? (
-                <div className="codex-inout-box">
+                <div className="codex-tool-io">
                   {!isInOutEmpty(argumentsJson) && (
                     <InOutRow label={t('mind_inspector.code_inout_in')} text={argumentsJson.trim()} />
                   )}
@@ -1185,38 +1178,18 @@ const ToolCallCard: React.FC<{
   );
 };
 
-// ============ 单轮工作过程分组（连续工具卡片收纳） ============
+// ============ 工作过程（连续工具调用行） ============
 
-/** 工作过程分组容器：折叠时一行摘要（步数/文件/耗时），展开时逐步工具卡片。 */
-const ToolProcessGroup: React.FC<{
+/** 工具活动列表：摘要行展开后显示调用记录。 */
+const ToolActivity: React.FC<{
   msgs: CodingMessage[];
   settled: boolean;
   sessionRunning: boolean;
   cwd: string;
 }> = ({ msgs, settled, sessionRunning, cwd }) => {
   const { t } = useTranslation();
-  // 执行中展示失败细节，进入最终报告时统一收起过程；仍可手动展开。
-  const [expanded, setExpanded] = useState(!settled && msgs.some((m) => m.tool_success === false || m.role === 'commentary' || m.role === 'thinking'));
-  const prevSettled = useRef(settled);
-  useLayoutEffect(() => {
-    if (!prevSettled.current && settled) {
-      setExpanded(false);
-    }
-    prevSettled.current = settled;
-  }, [settled]);
-  const failureCount = msgs.filter((m) => m.tool_success === false).length;
-  const previousFailures = useRef(failureCount);
-  useEffect(() => {
-    if (!settled && failureCount > previousFailures.current) setExpanded(true);
-    previousFailures.current = failureCount;
-  }, [failureCount, settled]);
-
-  const textCount = msgs.filter((m) => m.role === 'commentary' || m.role === 'thinking').length;
-  const previousTextCount = useRef(textCount);
-  useEffect(() => {
-    if (!settled && textCount > previousTextCount.current) setExpanded(true);
-    previousTextCount.current = textCount;
-  }, [textCount, settled]);
+  // 展开状态只由用户操作决定，失败和结束都不改变它。
+  const [expanded, setExpanded] = useState(false);
 
   // 组统计：步数 / 失败数 / 涉及文件数 / 总耗时 / 未完成步骤
   const stats = useMemo(() => {
@@ -1250,51 +1223,48 @@ const ToolProcessGroup: React.FC<{
 
   const metaParts: string[] = [];
   if (stats.steps > 0) metaParts.push(t('mind_inspector.code_tool_group_steps', { n: stats.steps }));
-  if (stats.pending > 0) metaParts.push(t('mind_inspector.code_tool_group_pending', { n: stats.pending }));
+  if (stats.pending > 0) metaParts.push(t(settled ? 'workbench.toolsUnreturned' : 'mind_inspector.code_tool_group_pending', { n: stats.pending }));
   if (stats.files > 0) metaParts.push(t('mind_inspector.code_tool_group_files', { n: stats.files }));
   if (stats.ms > 0) metaParts.push(formatDuration(stats.ms));
 
   return (
-    <div className={`codex-tool-group${expanded ? ' expanded' : ''}`}>
-      <button type="button" className="codex-tool-group-header" aria-expanded={expanded} onClick={() => { setExpanded((v) => !v); }}>
+    <div className={`codex-tool-activity${expanded ? ' expanded' : ''}`}>
+      <button type="button" className="codex-tool-activity-header" aria-expanded={expanded} onClick={() => { setExpanded((v) => !v); }}>
         <List size={13} style={{ color: 'var(--codex-ink-faint)', flexShrink: 0 }} />
-        <span className="codex-tool-group-label">
-          {t('mind_inspector.code_tool_group_label', { defaultValue: '工作过程' })}
+        <span className="codex-tool-activity-label">
+          {workActivitySummary(msgs, t)}
         </span>
         {metaParts.length > 0 && (
-          <span className="codex-tool-group-meta">{metaParts.join(' · ')}</span>
+          <span className="codex-tool-activity-meta">{metaParts.join(' · ')}</span>
         )}
-        {stats.failed > 0 && (
-          <span className="codex-tool-group-fail">✕ {stats.failed}</span>
-        )}
-        {stats.failed > 0 ? null : settled ? (
-          <span className="codex-tool-group-status codex-tool-group-status-ok">
-            {stats.pending > 0 ? t('workbench.stopped') : t('mind_inspector.code_tool_group_done', { defaultValue: '已完成' })}
+        {stats.failed > 0 || stats.steps + stats.pending === 0 ? null : settled ? (
+          <span className="codex-tool-activity-status codex-tool-activity-status-ok">
+            {stats.pending > 0 ? t('workbench.stopped') : t('workbench.toolsReturned')}
           </span>
         ) : (
-          <span className="codex-tool-group-status codex-tool-group-status-run">
+          <span className="codex-tool-activity-status codex-tool-activity-status-run">
             <Loader2 size={12} className="codex-spin" />
             {t('mind_inspector.code_tool_group_running', { defaultValue: '进行中…' })}
           </span>
         )}
         <span
-          className="codex-tool-group-chevron"
+          className="codex-tool-activity-chevron"
           style={{ color: 'var(--codex-ink-soft)', display: 'inline-flex', flexShrink: 0 }}
         >
           <ChevronDown size={14} />
         </span>
       </button>
-      {!expanded && !settled && (
-        <div className="codex-tool-group-current">
+      {!expanded && !settled && stats.pending > 0 && (
+        <div className="codex-tool-activity-current">
           {t('workbench.currentTool', { tool: toolLabel(msgs.find((m) => m.role === 'tool_use')?.tool_name || msgs[msgs.length - 1]?.tool_name || '', t) })}
         </div>
       )}
-      <div className={`codex-tool-group-reveal${expanded ? ' open' : ''}`} {...(!expanded ? { inert: '' } : {})}>
-        <div className="codex-tool-group-body">
+      <div className={`codex-tool-activity-reveal${expanded ? ' open' : ''}`} {...(!expanded ? { inert: '' } : {})}>
+        <div className="codex-tool-activity-body">
           {msgs.map((msg, i) => {
             if (msg.role === 'commentary' || msg.role === 'thinking') {
               return <div className="codex-msg-assistant" key={`text-${i}`}>
-                {msg.role === 'thinking' && <div className="codex-tool-group-meta">{t('workbench.workThinking')}</div>}
+                {msg.role === 'thinking' && <div className="codex-tool-activity-meta">{t('workbench.workThinking')}</div>}
                 <MarkdownText text={msg.content} keyPrefix={`process-${i}`} />
               </div>;
             }
@@ -1321,7 +1291,7 @@ const ToolProcessGroup: React.FC<{
               );
             }
             return (
-              <ToolCallCard
+              <ToolCallRow
                 key={`${msg.tool_call_id ?? i}-${i}`}
                 name={msg.tool_name ?? ''}
                 argumentsJson={
@@ -1334,6 +1304,7 @@ const ToolProcessGroup: React.FC<{
                 result={msg.role === 'tool_result' ? msg.content : undefined}
                 success={msg.tool_success ?? null}
                 running={msg.role === 'tool_use' && sessionRunning && !settled}
+                stopped={msg.role === 'tool_use' && settled}
                 durationMs={msg.tool_duration_ms ?? null}
               />
             );
@@ -1758,7 +1729,7 @@ const MessageBubble: React.FC<{
   if (msg.role === 'commentary' || msg.role === 'thinking') {
     return (
       <div className="codex-msg-assistant codex-msg-process">
-        {msg.role === 'thinking' && <div className="codex-tool-group-meta">{t('workbench.workThinking')}</div>}
+        {msg.role === 'thinking' && <div className="codex-tool-activity-meta">{t('workbench.workThinking')}</div>}
         <MarkdownText text={msg.content} />
       </div>
     );
@@ -3241,6 +3212,7 @@ const PreviewPanel: React.FC<{
       {typeof document !== 'undefined' && tabMenu && createPortal(
         <div
           className="codex-theme codex-context-menu codex-preview-tab-menu"
+          role="menu" data-browser-overlay="true"
           style={{ left: tabMenu.x, top: tabMenu.y }}
           onMouseDown={(e) => e.stopPropagation()}
           onContextMenu={(e) => e.preventDefault()}
@@ -4584,8 +4556,8 @@ const CodeAgentPage: React.FC = () => {
   const handleCancel = useCallback(async () => {
     if (!activeId) return;
     try { await invoke('coding_cancel_session', { sessionId: activeId }); }
-    catch { /* ignore */ }
-  }, [activeId]);
+    catch (error) { notifyError(String(error)); }
+  }, [activeId, notifyError]);
 
   /** 引导：不打断当前任务，把该条标记为引导消息，待当前 run 结束后优先发送（后端加引导标注）。 */
   const handleGuideSend = useCallback((index: number) => {
@@ -5540,7 +5512,7 @@ const CodeAgentPage: React.FC = () => {
         </div>
         {typeof document !== 'undefined' && createPortal(<>
           {sessionMenu && (
-            <div className="codex-theme codex-session-context-menu" style={{ left: sessionMenu.x, top: sessionMenu.y }} onMouseDown={(e) => e.stopPropagation()} onContextMenu={(e) => e.preventDefault()}>
+            <div className="codex-theme codex-session-context-menu" role="menu" data-browser-overlay="true" style={{ left: sessionMenu.x, top: sessionMenu.y }} onMouseDown={(e) => e.stopPropagation()} onContextMenu={(e) => e.preventDefault()}>
               <button type="button" onClick={() => void handleSessionContextAction('rename')}>{t('mind_inspector.code_rename')}</button>
               <button type="button" onClick={() => void handleSessionContextAction('pin')}>{pinnedSessions.has(sessionMenu.id) ? t('mind_inspector.code_unpin') : t('mind_inspector.code_pin')}</button>
               <button type="button" onClick={() => void handleSessionContextAction('unread')}>{unreadSessions.has(sessionMenu.id) ? t('mind_inspector.code_mark_read') : t('mind_inspector.code_mark_unread')}</button>
@@ -5548,14 +5520,14 @@ const CodeAgentPage: React.FC = () => {
               <button type="button" className="danger" onClick={() => void handleSessionContextAction('delete')}>{t('mind_inspector.code_delete_forever')}</button>
             </div>
           )}
-          {renamingWorkspace && <div className="codex-session-modal-backdrop" onMouseDown={() => setRenamingWorkspace(null)}>
+          {renamingWorkspace && <div className="codex-session-modal-backdrop" data-browser-overlay="true" onMouseDown={() => setRenamingWorkspace(null)}>
             <form role="dialog" aria-modal="true" aria-label={t('mind_inspector.code_rename')} className="codex-theme codex-session-modal" onMouseDown={event => event.stopPropagation()} onSubmit={event => { event.preventDefault(); commitRenameWorkspace(); }}>
               <h3>{t('mind_inspector.code_rename')}</h3><input autoFocus required aria-label={t('mind_inspector.code_rename')} value={renameDraft} onChange={event => setRenameDraft(event.target.value)} onKeyDown={event => { if (event.key === 'Escape') setRenamingWorkspace(null); }} />
               <div className="codex-session-modal-actions"><button type="button" onClick={() => setRenamingWorkspace(null)}>{t('mind_inspector.code_cancel')}</button><button type="submit" className="primary">{t('mind_inspector.code_save')}</button></div>
             </form></div>}
           {renameSessionId && (
-            <div className="codex-session-modal-backdrop" onMouseDown={() => setRenameSessionId(null)}>
-              <div className="codex-theme codex-session-modal" onMouseDown={(e) => e.stopPropagation()}>
+            <div className="codex-session-modal-backdrop" data-browser-overlay="true" onMouseDown={() => setRenameSessionId(null)}>
+              <div className="codex-theme codex-session-modal" role="dialog" aria-modal="true" aria-label={t('mind_inspector.code_rename_session')} onMouseDown={(e) => e.stopPropagation()}>
                 <h3>{t('mind_inspector.code_rename_session')}</h3>
                 <input autoFocus value={renameSessionDraft} onChange={(e) => setRenameSessionDraft(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') void commitSessionRename(); else if (e.key === 'Escape') setRenameSessionId(null); }} />
                 <div className="codex-session-modal-actions"><button type="button" onClick={() => setRenameSessionId(null)}>{t('mind_inspector.code_cancel')}</button><button type="button" className="primary" onClick={() => void commitSessionRename()}>{t('mind_inspector.code_save')}</button></div>
@@ -5563,8 +5535,8 @@ const CodeAgentPage: React.FC = () => {
             </div>
           )}
           {deleteSessionId && (
-            <div className="codex-session-modal-backdrop" onMouseDown={() => setDeleteSessionId(null)}>
-              <div className="codex-theme codex-session-modal" onMouseDown={(e) => e.stopPropagation()}><h3>{t('mind_inspector.code_delete_session_title')}</h3><p>{t('mind_inspector.code_delete_session_note')}</p><div className="codex-session-modal-actions"><button type="button" onClick={() => setDeleteSessionId(null)}>{t('mind_inspector.code_cancel')}</button><button type="button" className="danger" onClick={() => { setDeleteSessionId(null); void handleDelete(deleteSessionId, true); }}>{t('mind_inspector.code_delete_forever')}</button></div></div>
+            <div className="codex-session-modal-backdrop" data-browser-overlay="true" onMouseDown={() => setDeleteSessionId(null)}>
+              <div className="codex-theme codex-session-modal" role="dialog" aria-modal="true" aria-label={t('mind_inspector.code_delete_session_title')} onMouseDown={(e) => e.stopPropagation()}><h3>{t('mind_inspector.code_delete_session_title')}</h3><p>{t('mind_inspector.code_delete_session_note')}</p><div className="codex-session-modal-actions"><button type="button" onClick={() => setDeleteSessionId(null)}>{t('mind_inspector.code_cancel')}</button><button type="button" className="danger" onClick={() => { setDeleteSessionId(null); void handleDelete(deleteSessionId, true); }}>{t('mind_inspector.code_delete_forever')}</button></div></div>
             </div>
           )}
         </>, document.body)}
@@ -5719,7 +5691,7 @@ const CodeAgentPage: React.FC = () => {
                       {groupChatMessages(messages, running && !summarizing).map((it) => {
                         if (it.kind === 'group') {
                           return (
-                            <ToolProcessGroup
+                            <ToolActivity
                               key={`grp-${it.index}`}
                               msgs={it.msgs}
                               settled={it.settled}
@@ -5755,7 +5727,7 @@ const CodeAgentPage: React.FC = () => {
                             );
                           }
                           return (
-                            <ToolCallCard
+                            <ToolCallRow
                               key={`${msg.tool_call_id ?? i}-${i}`}
                               name={msg.tool_name ?? ''}
                               argumentsJson={
@@ -5768,6 +5740,7 @@ const CodeAgentPage: React.FC = () => {
                               result={msg.role === 'tool_result' ? msg.content : undefined}
                               success={msg.tool_success ?? null}
                               running={msg.role === 'tool_use' && running}
+                              stopped={msg.role === 'tool_use' && !running}
                               durationMs={msg.tool_duration_ms ?? null}
                             />
                           );
@@ -5775,7 +5748,7 @@ const CodeAgentPage: React.FC = () => {
                         return (
                           <React.Fragment key={i}>
                             {/* 轮首锚点：定位轨据此判断当前停留在哪一轮、以及点击后滚到哪。
-                                轮首必然是用户消息（工具消息只会落进 ToolProcessGroup），
+                                轮首必然是用户消息（工具消息只会落进 ToolActivity），
                                 所以只需在这一支投放。 */}
                             {msg.role === 'user' && (
                               <div className="codex-turn-anchor" data-turn-anchor={i} />
@@ -5814,11 +5787,11 @@ const CodeAgentPage: React.FC = () => {
                             <span className="codex-dots"><i /><i /><i /></span>
                           </div>}
                           {thinkingText && !compacting && (
-                            <div className="codex-thinking-chain">
+                            <details className="codex-thinking-chain"><summary>{t('workbench.workThinking')}</summary>
                               <StreamFadeContext.Provider value={thinking}>
                                 <StreamFadeText text={thinkingText} />
                               </StreamFadeContext.Provider>
-                            </div>
+                            </details>
                           )}
                         </div>
                       )}

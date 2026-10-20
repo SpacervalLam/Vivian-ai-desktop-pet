@@ -20,63 +20,69 @@ export function workbenchLayout(width: number, leftWidth: number, rightWidth: nu
   };
 }
 
-/** A persisted intent and its result share one row. Never merge anonymous calls by name. */
-export function reconcileToolMessages<T extends { role: string; tool_name?: string | null; tool_call_id?: string | null; tool_arguments?: unknown }>(messages: T[]): T[] {
-  const rows: T[] = [];
+type WorkMessage = {
+  role: string;
+  tool_name?: string | null;
+  tool_call_id?: string | null;
+  tool_arguments?: unknown;
+  content?: string;
+  interjected?: boolean | null;
+  guided?: boolean | null;
+};
+
+/** Preserve invocation order and original indexes, even when results arrive after prose. */
+function reconcileRows<T extends WorkMessage>(messages: T[]) {
+  const rows: { message: T; index: number }[] = [];
   const calls = new Map<string, number>();
-  for (const message of messages) {
-    if (message.role === 'tool_use' && !message.tool_name) continue;
-    const id = message.tool_call_id;
+  messages.forEach((message, sourceIndex) => {
+    if (message.role === 'tool_use' && !message.tool_name) return;
+    if (message.role === 'user' && !message.interjected && !message.guided) calls.clear();
+    const id = message.role === 'tool_use' || message.role === 'tool_result' ? message.tool_call_id : undefined;
     const index = id ? calls.get(id) : undefined;
     if (index === undefined) {
       if (id) calls.set(id, rows.length);
-      rows.push(message);
-    } else if (message.role === 'tool_result' || rows[index].role !== 'tool_result') {
-      rows[index] = { ...rows[index], ...message, tool_name: message.tool_name ?? rows[index].tool_name, tool_arguments: message.tool_arguments ?? rows[index].tool_arguments };
+      rows.push({ message, index: sourceIndex });
+    } else if (message.role === 'tool_result' || rows[index].message.role !== 'tool_result') {
+      const previous = rows[index].message;
+      rows[index].message = { ...previous, ...message, tool_name: message.tool_name ?? previous.tool_name, tool_arguments: message.tool_arguments ?? previous.tool_arguments };
     }
-  }
+  });
   return rows;
 }
 
-/** 聊天流渲染项：普通消息 或 一组连续的工具调用消息 */
+export function reconcileToolMessages<T extends WorkMessage>(messages: T[]): T[] {
+  return reconcileRows(messages).map(row => row.message);
+}
+
 export type WorkChatRenderItem<T> =
   | { kind: 'msg'; msg: T; index: number }
   | { kind: 'group'; msgs: T[]; index: number; settled: boolean };
 
-/**
- * 将工具、过程说明和思考统一收纳，最终回复保留在分组之外。
- *
- * 进入总结或会话停止后收起整组，历史会话同样适用。
- */
-function isProcessMessage(msg: { role: string }): boolean {
-  return msg.role === 'tool_use' || msg.role === 'tool_result' || msg.role === 'commentary' || msg.role === 'thinking';
+function isProcessMessage(msg: WorkMessage): boolean {
+  return msg.role === 'tool_use' || msg.role === 'tool_result' || msg.role === 'thinking';
 }
 
-export function groupWorkMessages<T extends { role: string; tool_name?: string | null; tool_call_id?: string | null; tool_arguments?: unknown; content?: string }>(messages: T[], running: boolean): WorkChatRenderItem<T>[] {
-  // Also hide persisted host diagnostics from older sessions before grouping.
-  const originalMessages = messages;
-  messages = messages.filter(m => !(m.role === 'tool_use' && !m.tool_name)
-    && !(m.role === 'notice' && /^(?:历史消息已达|上下文占用已达窗口的).*已自动把.*早期历史压缩为摘要/.test(m.content ?? '')));
+/** Public progress stays visible; only tool details and reasoning collapse. */
+export function groupWorkMessages<T extends WorkMessage>(messages: T[], running: boolean): WorkChatRenderItem<T>[] {
+  const rows = reconcileRows(messages).filter(({ message }) => !(message.role === 'notice'
+    && /^(?:历史消息已达|上下文占用已达窗口的).*已自动把.*早期历史压缩为摘要/.test(message.content ?? '')));
   const items: WorkChatRenderItem<T>[] = [];
   let i = 0;
-  while (i < messages.length) {
-    const m = messages[i];
-    if (isProcessMessage(m)) {
-      let j = i;
-      const group: T[] = [];
-      while (j < messages.length && isProcessMessage(messages[j])) {
-        group.push(messages[j]);
-        j += 1;
-      }
-      const rows = reconcileToolMessages(group);
-      if (rows.length >= 1) {
-        items.push({ kind: 'group', msgs: rows, index: originalMessages.indexOf(m), settled: j < messages.length || !running });
-      }
-      i = j;
-    } else {
-      items.push({ kind: 'msg', msg: m, index: originalMessages.indexOf(m) });
-      i += 1;
+  while (i < rows.length) {
+    const row = rows[i];
+    if (!isProcessMessage(row.message)) {
+      items.push({ kind: 'msg', msg: row.message, index: row.index });
+      i++;
+      continue;
     }
+    let j = i;
+    const group: T[] = [];
+    while (j < rows.length && isProcessMessage(rows[j].message)) group.push(rows[j++].message);
+    const turnEnded = rows.slice(j).some(({ message }) => message.role === 'assistant'
+      || (message.role === 'user' && !message.interjected && !message.guided));
+    items.push({ kind: 'group', msgs: group, index: row.index,
+      settled: !running || !group.some(message => message.role === 'tool_use') || turnEnded });
+    i = j;
   }
   return items;
 }

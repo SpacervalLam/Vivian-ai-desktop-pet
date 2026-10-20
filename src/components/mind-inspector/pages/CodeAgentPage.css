@@ -4010,309 +4010,51 @@
   word-break: break-word;
   color: var(--codex-ink-soft);
   box-shadow: inset 0 1px 3px rgba(59, 52, 40, 0.06);
+}/* 工具活动采用无外框的摘要行与缩进详情；所有主题共用这一种结构。 */
+.codex-tool-row, .codex-tool-activity { margin: 4px 0; min-width: 0; }
+.codex-tool-header, .codex-tool-activity-header {
+  display: flex; align-items: center; gap: 7px; width: 100%; min-height: 32px;
+  padding: 6px 4px; border: 0; border-radius: 5px; background: transparent;
+  color: var(--codex-ink-soft); font: inherit; font-size: 12px; line-height: 20px;
+  text-align: left; cursor: pointer;
 }
-
-/* ===================== 工具卡片 ===================== */
-
-.codex-tool-card {
-  margin: 8px 0;
-  border: 1px solid var(--codex-line);
-  border-radius: 10px 12px 10px 12px;
-  background: var(--codex-paper-card);
-  box-shadow: var(--codex-shadow-sm);
-  overflow: hidden;
-}
-
-.codex-tool-header {
-  width: 100%;
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  padding: 7px 11px;
-  border: none;
-  background: transparent;
-  color: var(--codex-ink-soft);
-  cursor: pointer;
-  font-size: 13.5px;
-  text-align: left;
-}
-
-.codex-tool-header:hover {
-  background: rgba(83, 125, 150, 0.05);
-}
-
-.codex-tool-name {
-  font-family: var(--codex-mono);
-  font-size: 12px;
-  color: var(--codex-ink-faint);
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.codex-tool-label {
-  flex-shrink: 0;
-  color: var(--codex-ink);
-  font-weight: 400;
-  line-height: 20px;
-}
-
-.codex-tool-duration {
-  font-family: var(--codex-mono);
-  font-size: 11px;
-  color: var(--codex-ink-faint);
-  flex-shrink: 0;
-}
-
-/* ============ 单轮工作过程分组容器 ============ */
-
-/* 连续工具卡片收进一个可折叠区块：折叠时一行摘要，展开时逐步卡片 */
-.codex-tool-group {
-  margin: 10px 0;
-  border: 1px solid var(--codex-line);
-  border-radius: 10px 12px 10px 12px;
-  background: var(--codex-paper);
-  box-shadow: var(--codex-shadow-sm);
-  overflow: hidden;
-}
-
-.codex-tool-group-header {
-  width: 100%;
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  padding: 7px 11px;
-  border: none;
-  background: transparent;
-  color: var(--codex-ink-soft);
-  cursor: pointer;
-  font-size: 13.5px;
-  text-align: left;
-  line-height: 20px;
-}
-
-.codex-tool-group-header:hover {
-  background: rgba(83, 125, 150, 0.05);
-}
-
-.codex-tool-group-label {
-  font-weight: 400;
-  color: var(--codex-ink);
-  flex-shrink: 0;
-  line-height: 20px;
-}
-
-.codex-tool-group-meta {
-  flex: 1;
-  min-width: 0;
-  font-family: var(--codex-mono);
-  font-size: 12px;
-  color: var(--codex-ink-faint);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  line-height: 20px;
-}
-
-.codex-tool-group-fail {
-  flex-shrink: 0;
-  font-size: 11px;
-  color: var(--codex-danger);
-}
-
-.codex-tool-group-status {
-  flex-shrink: 0;
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 11px;
-}
-
-.codex-tool-group-status-run {
-  color: var(--codex-accent);
-}
-
-.codex-tool-group-status-ok {
-  color: var(--codex-success);
-}
-
-/* 箭头随开合旋转（折叠态指向右侧 -90°） */
-.codex-tool-group-chevron {
-  transition: transform 0.25s cubic-bezier(0.25, 0.6, 0.3, 1);
-  transform: rotate(-90deg);
-}
-
-.codex-tool-group.expanded .codex-tool-group-chevron {
-  transform: rotate(0deg);
-}
-
-/* 折叠/展开动画：grid-rows 0fr→1fr 过渡高度（无需测量实际高度），
-   配合内容 opacity 淡入；250ms + ease-out 短促丝滑 */
-.codex-tool-group-reveal {
-  display: grid;
-  grid-template-rows: 0fr;
-  opacity: 0;
-  transition:
-    grid-template-rows 0.25s cubic-bezier(0.25, 0.6, 0.3, 1),
-    opacity 0.2s ease-out;
-}
-
-.codex-tool-group-reveal.open {
-  grid-template-rows: 1fr;
-  opacity: 1;
-  transition:
-    grid-template-rows 0.25s cubic-bezier(0.25, 0.6, 0.3, 1),
-    opacity 0.22s ease-out 0.05s;
-}
-
-/* grid 行高的过渡目标是直接子元素：min-height 归零才能被压缩 */
-.codex-tool-group-reveal > .codex-tool-group-body {
-  min-height: 0;
-  overflow: hidden;
-}
-
-.codex-tool-group-body {
-  border-top: 1px dashed var(--codex-line-light);
-  padding: 6px 8px;
-}
-
-/* 展开态才有上边虚线；折叠收起时边线随高度一起消失 */
-.codex-tool-group-reveal:not(.open) > .codex-tool-group-body {
-  border-top-color: transparent;
-}
-
-/* 组内卡片收紧间距与阴影（层级归组，视觉上从属于容器） */
-.codex-tool-group-body .codex-tool-card {
-  margin: 4px 0;
-  box-shadow: none;
-}
-
-/* 工具调用类别徽标：明确标出"这一步是工具调用" */
-.codex-tool-badge {
-  flex-shrink: 0;
-  font-size: 10px;
-  line-height: 1;
-  padding: 3px 6px;
-  border: 1px solid var(--codex-line);
-  border-radius: 5px;
-  background: rgba(83, 125, 150, 0.06);
-  color: var(--codex-ink-faint);
-  letter-spacing: 0.5px;
-  user-select: none;
-}
-
-/* 头部状态文字：运行中 / 已完成 / 失败 */
-.codex-tool-status {
-  flex-shrink: 0;
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 11px;
-}
-
-.codex-tool-status-run {
-  color: var(--codex-accent);
-}
-
-.codex-tool-status-ok {
-  color: var(--codex-success);
-}
-
-.codex-tool-status-err {
-  color: var(--codex-danger);
-}
-
-.codex-tool-body {
-  border-top: 1px dashed var(--codex-line-light);
-  padding: 8px 10px;
-}
-
-/* 非文件工具展开态的 IN/OUT 详情容器：紧凑内边距，避免上下大片留白 */
-.codex-tool-detail {
-  border-top: 1px dashed var(--codex-line-light);
-  padding: 5px 10px 7px;
-}
-
-/* ===================== 工具调用 IN/OUT 展示（全新实现） ===================== */
-
-.codex-inout-box {
-  border: 1px solid var(--codex-line-light);
-  border-radius: 10px;
-  background: #fdf8ec;
-  overflow: hidden;
-}
-
-.codex-inout-row {
-  display: grid;
-  grid-template-columns: 1fr max-content;
-  column-gap: 8px;
-  align-items: start;
-  padding: 6px 10px;
-}
-
-/* 右上角「输入/输出」徽章：内容占主列，徽章靠右顶部 */
-.codex-inout-badge {
-  justify-self: end;
-  flex-shrink: 0;
-  font-size: 10px;
-  line-height: 1;
-  padding: 3px 7px;
-  border: 1px solid var(--codex-line);
-  border-radius: 5px;
-  background: rgba(83, 125, 150, 0.06);
-  color: var(--codex-ink-faint);
-  letter-spacing: 0.5px;
-  user-select: none;
-  margin-top: 2px;
-}
-
-.codex-inout-cell {
-  min-width: 0;
-}
-
-.codex-inout-divider {
-  height: 1px;
-  background: var(--codex-line-light);
-}
-
-/* 内容块：pre 保留换行/缩进，pre-wrap 让长行自动换行不横向撑破 */
-.codex-inout-pre {
-  margin: 0;
-  padding: 2px 0;
-  white-space: pre-wrap;
-  word-break: break-word;
-  font-family: var(--codex-mono);
-  font-size: 12px;
-  line-height: 18px;
-  color: var(--codex-ink-soft);
-}
-
-.codex-inout-pre-err {
-  color: var(--codex-danger);
-}
+.codex-tool-activity-header { flex-wrap: wrap; }
+.codex-tool-header:hover, .codex-tool-activity-header:hover { background: var(--panel-bg-hover, rgba(83,125,150,.05)); }
+.codex-tool-header:focus-visible, .codex-tool-activity-header:focus-visible { outline: 2px solid var(--codex-accent); outline-offset: -2px; }
+.codex-tool-label { flex: 0 0 auto; max-width: 35%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--codex-ink); }
+.codex-tool-target, .codex-tool-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 11px var(--codex-mono); color: var(--codex-ink-soft); }
+.codex-tool-duration { flex-shrink: 0; font: 10px var(--codex-mono); color: var(--codex-ink-faint); }
+.codex-tool-status, .codex-tool-activity-status { display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; font-size: 11px; white-space: nowrap; }
+.codex-tool-status-run, .codex-tool-activity-status-run { color: var(--codex-accent); }
+.codex-tool-status-ok, .codex-tool-activity-status-ok { color: var(--codex-success); }
+.codex-tool-status-err, .codex-tool-row.failed .codex-tool-label { color: var(--codex-danger); }
+.codex-tool-activity-label { min-width: 0; max-width: 70%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--codex-ink); }
+.codex-tool-activity-meta { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 11px var(--codex-mono); color: var(--codex-ink-faint); }
+.codex-tool-activity-chevron { transform: rotate(-90deg); transition: transform .2s ease; }
+.codex-tool-activity.expanded .codex-tool-activity-chevron { transform: rotate(0); }
+.codex-tool-activity-reveal { display: grid; grid-template-rows: 0fr; opacity: 0; transition: grid-template-rows .2s ease, opacity .2s ease; }
+.codex-tool-activity-reveal.open { grid-template-rows: 1fr; opacity: 1; }
+.codex-tool-activity-body { min-height: 0; overflow: hidden; border-left: 1px solid var(--codex-line-light); margin: 3px 0 5px 10px; padding-left: 12px; }
+.codex-tool-activity-body .codex-tool-row { margin: 1px 0; }
+.codex-tool-activity-current { padding: 0 10px 8px 30px; font-size: 11px; color: var(--codex-ink-soft); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.codex-tool-detail, .codex-tool-body { padding: 5px 4px 10px 25px; }
+.codex-tool-summary { padding: 0 4px 6px 25px; font-size: 12px; }
+.codex-tool-io { min-width: 0; overflow: hidden; }
+.codex-inout-row { display: grid; grid-template-columns: 1fr max-content; column-gap: 8px; align-items: start; padding: 5px 0; }
+.codex-inout-badge { justify-self: end; font-size: 10px; color: var(--codex-ink-faint); margin-top: 2px; user-select: none; }
+.codex-inout-cell { min-width: 0; }
+.codex-inout-divider { height: 6px; }
+.codex-inout-pre { margin: 0; padding: 2px 0; max-height: 260px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 11px/1.6 var(--codex-mono); }
+.codex-inout-pre-err { color: var(--codex-danger); }
 
 /* JSON 语法高亮配色（暖纸色系内取值） */
 .codex-inout-k { color: #7a5fa3; } /* 键 */
 .codex-inout-c { color: #9a8f7d; } /* 冒号 */
 .codex-inout-s { color: #8a6d3b; } /* 字符串 */
 .codex-inout-n { color: #3f6179; } /* 数字 */
-.codex-inout-w { color: #b2822a; } /* true/false/null */
+.codex-inout-w { color: #b2822a; }/* true/false/null */
+/* 工具调用紧凑摘要行（非文件工具默认可见，无需展开即可了解参数/结果要点） */
 
-/* 工具卡片紧凑摘要行（非文件工具默认可见，无需展开即可了解参数/结果要点） */
-.codex-tool-summary {
-  display: flex;
-  align-items: baseline;
-  gap: 12px;
-  padding: 3px 12px 8px;
-  border-top: 1px dashed var(--codex-line-light);
-  font-family: var(--codex-mono);
-  font-size: 12px;
-  line-height: 18px;
-  color: var(--codex-ink-soft);
-  overflow: hidden;
-}
 
 .codex-tool-summary-arg {
   color: var(--codex-ink-soft);
