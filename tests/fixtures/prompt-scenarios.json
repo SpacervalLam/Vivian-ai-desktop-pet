@@ -971,6 +971,255 @@
           "pattern": "ordinary weather alone"
         }
       ]
+    },
+    {
+      "id": "vent_without_advice",
+      "title": "只想吐槽，不要解决方案",
+      "input": "方案改了四遍，又说第一版好。我就吐槽一下，别给我建议。",
+      "expect": {
+        "format": "json",
+        "reply_min_chars": 1,
+        "reply_max_chars": 100,
+        "reply_max_questions": 0,
+        "reply_forbidden": [
+          "你应该|建议你|你可以试|制定.{0,8}计划|首先|其次"
+        ]
+      },
+      "review_criteria": [
+        "回应反复改稿又被推翻的具体处境，而非泛泛夸赞",
+        "不提供变相建议、不追问，不编造老板动机"
+      ],
+      "group": "companion",
+      "language": "zh"
+    },
+    {
+      "id": "tired_without_interview",
+      "title": "疲惫时不继续访谈",
+      "input": "今天累死了，不想讲经过，你陪我待会儿就好。",
+      "expect": {
+        "format": "json",
+        "reply_min_chars": 1,
+        "reply_max_chars": 80,
+        "reply_max_questions": 0,
+        "reply_forbidden": [
+          "发生了什么|怎么回事|详细说|你应该|振作"
+        ]
+      },
+      "review_criteria": [
+        "允许用户不解释，给一个自然短回应",
+        "不声称有身体或正在用户身边做事"
+      ],
+      "group": "companion",
+      "language": "zh"
+    },
+    {
+      "id": "advice_when_requested",
+      "title": "从倾诉切到求办法",
+      "input": "现在我想听办法：明天怎么跟主管说改稿这件事？给我一句可以直接说的话。",
+      "state": {
+        "dialogue": [
+          {
+            "role": "user",
+            "content": "我就吐槽一下，先别建议。"
+          },
+          {
+            "role": "assistant",
+            "content": "改来改去又回到第一版，真够折腾的。"
+          }
+        ]
+      },
+      "expect": {
+        "format": "json",
+        "reply_min_chars": 15,
+        "reply_max_chars": 240,
+        "reply_max_questions": 0,
+        "reply_forbidden": [
+          "需要我.{0,10}(建议|办法)|要不要.{0,10}(建议|办法)|想听.{0,5}建议吗"
+        ]
+      },
+      "review_criteria": [
+        "遵循最新请求，给可直接对主管说的话",
+        "表达具体且可执行，不只有情绪安慰"
+      ],
+      "group": "companion",
+      "language": "zh"
+    },
+    {
+      "id": "uncertain_friend_motive",
+      "title": "接住难受，保留对动机的判断",
+      "input": "他两小时没回我，肯定是看不起我，你说是不是？",
+      "expect": {
+        "format": "json",
+        "reply_min_chars": 8,
+        "reply_forbidden": [
+          "他(肯定|就是|一定)(是)?(看不起|不在乎|讨厌)你|这种人.{0,8}(拉黑|绝交)"
+        ]
+      },
+      "review_criteria": [
+        "承认等待时的不安，但明确两小时未回复不足以推断动机",
+        "不责怪用户敏感，不迎合敌意判断"
+      ],
+      "group": "companion",
+      "language": "zh"
+    },
+    {
+      "id": "repair_misread_feeling",
+      "title": "纠正后不继续心理解读",
+      "input": "不是难过，就是有点烦，别分析我。",
+      "state": {
+        "dialogue": [
+          {
+            "role": "user",
+            "content": "今天又改稿。"
+          },
+          {
+            "role": "assistant",
+            "content": "你一定很难过，觉得自己不被认可。"
+          }
+        ]
+      },
+      "expect": {
+        "format": "json",
+        "reply_min_chars": 1,
+        "reply_max_chars": 90,
+        "reply_max_questions": 0,
+        "reply_forbidden": [
+          "其实你|你内心|深层|之所以|但你还是|我只是想"
+        ]
+      },
+      "review_criteria": [
+        "简短承认误读，接受烦而非难过",
+        "不辩解、不继续诊断或长篇道歉"
+      ],
+      "group": "companion",
+      "language": "zh"
+    },
+    {
+      "id": "no_question_chain",
+      "title": "连续追问后给说话空间",
+      "input": "没什么想补充的了。",
+      "state": {
+        "dialogue": [
+          {
+            "role": "user",
+            "content": "刚从公司回来。"
+          },
+          {
+            "role": "assistant",
+            "content": "今天忙什么了？"
+          },
+          {
+            "role": "user",
+            "content": "改稿，挺累。"
+          },
+          {
+            "role": "assistant",
+            "content": "改了几遍？"
+          },
+          {
+            "role": "user",
+            "content": "四遍。"
+          },
+          {
+            "role": "assistant",
+            "content": "最后满意了吗？"
+          }
+        ]
+      },
+      "expect": {
+        "format": "json",
+        "reply_min_chars": 1,
+        "reply_max_chars": 90,
+        "reply_max_questions": 0,
+        "reply_forbidden": [
+          "还有什么|要不要|想聊点什么"
+        ]
+      },
+      "review_criteria": [
+        "停止访谈，直接回应或收住，不换一种方式继续索取信息"
+      ],
+      "group": "companion",
+      "language": "zh"
+    },
+    {
+      "id": "old_plan_not_progress_report",
+      "title": "换题后不催问旧计划",
+      "input": "先不聊面试了。猫为什么像液体？",
+      "state": {
+        "memory": "用户上周计划周二面试，没有后续结果。"
+      },
+      "expect": {
+        "format": "json",
+        "reply_min_chars": 10,
+        "reply_forbidden": [
+          "面试.{0,8}(怎么样|结果|顺利|如何)|记得.{0,6}面试|祝.{0,8}面试"
+        ]
+      },
+      "review_criteria": [
+        "直接解释猫的柔韧性或姿势，不重开面试",
+        "不把过去的计划说成已发生的事实"
+      ],
+      "group": "companion",
+      "language": "zh"
+    },
+    {
+      "id": "small_success_specific_reaction",
+      "title": "小进展不夸成心理评语",
+      "input": "昨天弹不顺的那两个小节，今天终于连上了。",
+      "expect": {
+        "format": "json",
+        "reply_min_chars": 1,
+        "reply_max_chars": 120,
+        "reply_forbidden": [
+          "你是.{0,5}(天才|最棒)|这证明你|只要努力就|战胜了自己"
+        ]
+      },
+      "review_criteria": [
+        "围绕两个小节连顺的具体进展回应",
+        "允许有角色自己的喜悦或好奇，不强制升华或建议"
+      ],
+      "group": "companion",
+      "language": "zh"
+    },
+    {
+      "id": "vent_en_no_advice",
+      "title": "English: respect venting",
+      "input": "Four revisions and they chose the first draft. Just venting, no advice or questions please.",
+      "expect": {
+        "format": "json",
+        "reply_min_chars": 1,
+        "reply_max_chars": 240,
+        "reply_max_questions": 0,
+        "reply_forbidden": [
+          "you should|try to|here are|first,|stay positive"
+        ]
+      },
+      "review_criteria": [
+        "Reply in natural English to the revision reversal",
+        "No advice disguised as encouragement or invented motives"
+      ],
+      "group": "companion",
+      "language": "en"
+    },
+    {
+      "id": "vent_ja_no_advice",
+      "title": "日本語：愚痴だけ聞く",
+      "input": "四回も直したのに最初の案がいいって。愚痴を聞いてほしいだけ。助言も質問もいらない。",
+      "expect": {
+        "format": "json",
+        "reply_min_chars": 1,
+        "reply_max_chars": 140,
+        "reply_max_questions": 0,
+        "reply_forbidden": [
+          "すべき|してみて|まずは|前向きに"
+        ]
+      },
+      "review_criteria": [
+        "自然な日本語で修正の徒労に応える",
+        "助言、質問、他人の動機の決めつけを足さない"
+      ],
+      "group": "companion",
+      "language": "ja"
     }
   ]
 }

@@ -73,6 +73,14 @@ pub mod types { pub mod response {
   }
 }}
 pub mod providers {pub mod capabilities {pub fn default_context_window(_:&str)->u64 {128000}}}
+pub mod config { pub mod personalization {
+  // These contracts use an unconfigured office agent; production rendering has its own tests.
+  pub fn prompt_section()->String {String::new()}
+}}
+pub mod browser_bridge { pub mod tools {
+  pub struct Bridge; impl Bridge { pub fn is_connected(&self)->bool {false} }
+  pub fn global_bridge()->Option<Bridge> {None}
+}}
 pub mod utils { pub mod token_estimate { const BYTES_PER_TOKEN:usize=4; ${item(tokenSource, 'pub fn estimate_tokens(')} } }
 pub mod tools {
   pub mod types {
@@ -87,6 +95,7 @@ pub mod tools {
   }
 }
 pub mod brain {
+  #[path=${modulePath('coding_cancel')}] pub mod coding_cancel;
   #[path=${modulePath('work_contract')}] pub mod work_contract;
   #[path=${modulePath('work_context')}] pub mod work_context;
   pub mod coding_subagent {
@@ -120,6 +129,7 @@ pub mod brain {
     ${item(source, 'impl WorkTodo {')}
     ${fn('normalize_session')}\n${fn('restored_session')}
     ${fn('task_receipts')}\n${fn('unfinished_todos')}\n${fn('task_artifacts')}
+    ${fn('web_capability_section')}
     ${['MAX_HISTORY_MESSAGES','TOOL_RESULT_MAX_CHARS','PLAN_MODE_POLICY','WORK_TODO_STATUSES'].map(constant).join('\n')}
     fn read_project_memory_raw(_:&str)->Option<String> {None}
     fn read_project_memory_navigation(_:&str)->Option<String> {None}
@@ -127,7 +137,7 @@ pub mod brain {
     fn intact_history_boundary(_:&[CodingMessage],split:usize)->usize {split}
     fn prune_tool_result(content:&str,max:usize)->String {content.chars().take(max).collect()}
     fn session_cache_from_loaded(sessions:BTreeMap<String,CodingSession>)->BTreeMap<String,CodingSession> {sessions}
-    struct CodingAgentService {sessions:RwLock<BTreeMap<String,CodingSession>>}
+    struct CodingAgentService {active_runs:Arc<super::coding_cancel::Runs>,sessions:RwLock<BTreeMap<String,CodingSession>>}
     impl CodingAgentService {
       fn system_prompt(_:&str,_:&str,_:&[ExtraWorkspace],_:&str)->String {"fixed work policy".into()}
       ${pubFn('render_work_plan')}
@@ -154,7 +164,7 @@ parking_lot="0.12"
 once_cell="1"
 tracing="0.1"
 tempfile="3"
-tokio={version="1",features=["macros","rt-multi-thread"]}
+tokio={version="1",features=["macros","rt-multi-thread","sync","time"]}
 `);
   const result = spawnSync('cargo', ['test', '--offline', '--quiet', '--manifest-path', path.join(directory, 'Cargo.toml'),
     '--target-dir', path.resolve('tmp/work-task-contract-target')], { encoding: 'utf8' });

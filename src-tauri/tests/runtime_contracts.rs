@@ -6,6 +6,10 @@ pub mod work_contract;
 pub mod work_context;
 #[path = "../src/brain/work_question.rs"]
 pub mod work_question;
+#[path = "../src/brain/reference_research.rs"]
+pub mod reference_research;
+#[path = "../src/brain/coding_event_log.rs"]
+pub mod coding_event_log;
 #[path = "../src/drag_motion.rs"]
 pub mod drag_motion;
 #[path = "../src/brain/coding_compaction.rs"]
@@ -57,6 +61,8 @@ pub mod utils {
             panic!("Runtime contract tests must supply isolated persistence paths")
         }
     }
+    #[path = "../../src/utils/sqlite.rs"]
+    pub mod sqlite;
     pub mod watchdog {
         pub fn register(_: &str, _: f64, _: Option<()>) {}
         pub fn beat(_: &str) {}
@@ -101,3 +107,6 @@ pub mod retrieval_budget;
 
 #[path = "../src/memory/summary_commit.rs"]
 pub mod summary_commit;
+
+#[path = "../src/brain/coding_cancel.rs"]
+pub mod coding_cancel;

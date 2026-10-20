@@ -12,12 +12,12 @@ try {
   await writeFile(input, `
 #![allow(dead_code)]
 use std::collections::HashMap;
-#[derive(Clone,Copy)] enum RecordKind { Fact, SessionSummary, Dialogue, Reference, Internal }
+#[derive(Clone,Copy)] enum RecordKind { Fact, SessionSummary, Dialogue, Reference, SelfState, Internal }
 struct MemoryItem { content:String, tags:Vec<String>, consolidated:bool, metadata:HashMap<&'static str,bool>, kind:RecordKind }
 fn kind(item:&MemoryItem)->RecordKind {item.kind}
 ${recall}
 fn main() {
-  for kind in [RecordKind::Fact,RecordKind::Reference,RecordKind::SessionSummary,RecordKind::Dialogue] {
+  for kind in [RecordKind::Fact,RecordKind::Reference,RecordKind::SessionSummary,RecordKind::Dialogue,RecordKind::SelfState] {
     let mut item=MemoryItem{content:"用户的灵感".into(),tags:vec!["notebook".into()],consolidated:false,metadata:HashMap::from([("index_active",true)]),kind};
     assert!(recallable(&item),"normal role memory remains available");
     item.tags.push("quick_note".into());

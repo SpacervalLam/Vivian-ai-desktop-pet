@@ -1083,6 +1083,222 @@
         "タイトルだけなの"
       ],
       "gated": false
+    },
+    {
+      "id": "style-late-still-awake",
+      "input": "三点多了我还醒着",
+      "history": [],
+      "paraphrases": [
+        "都三点多了我还醒着"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-win-streak",
+      "input": "今晚连赢五把，手感停不下来",
+      "history": [],
+      "paraphrases": [
+        "手气正旺，一连赢了五把"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-sore-loser",
+      "input": "就差一点赢了，最后手滑了一下",
+      "history": [],
+      "paraphrases": [
+        "最后手滑了一下，就差一点"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-caught-out",
+      "input": "你刚才明明说过不困的，别装没说过",
+      "history": [],
+      "paraphrases": [
+        "别装没说过啊，你刚才明明说过"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-open-banter",
+      "input": "来接一句，我嘴皮子等着呢",
+      "history": [],
+      "paraphrases": [
+        "我嘴皮子等着，快来接一句"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-hype-request",
+      "input": "快夸夸我今天的样子",
+      "history": [],
+      "paraphrases": [
+        "夸我一句吧，今天的样子"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-sudden-sincere",
+      "input": "正经说一句，不是开玩笑",
+      "history": [],
+      "paraphrases": [
+        "不是开玩笑，正经说一句"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-screen-overload",
+      "input": "刷了一晚上手机，眼睛都发干",
+      "history": [],
+      "paraphrases": [
+        "刷到眼睛发干，一晚上都在看屏幕"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-snack-craving",
+      "input": "馋得睡不着，想吃点东西",
+      "history": [],
+      "paraphrases": [
+        "想吃点东西，馋得睡不着"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-own-battery",
+      "input": "电量只剩百分之三，快要关机了",
+      "history": [],
+      "paraphrases": [
+        "快要关机了，电量只剩百分之三"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-quiet-presence",
+      "input": "不用说话，陪着我待会儿就行",
+      "history": [],
+      "paraphrases": [
+        "陪着我待会儿就行，不用说话"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-bed-ritual",
+      "input": "睡前那一步不做完，少一步都睡不着",
+      "history": [],
+      "paraphrases": [
+        "少一步都睡不着，就是睡前那一步"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-remembered-detail",
+      "input": "你还记得那件事，我以为你忘了",
+      "history": [],
+      "paraphrases": [
+        "你上次说的那个杯子，我以为你忘了"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-rely-on-me",
+      "input": "这次都靠你了，你可得兜住",
+      "history": [],
+      "paraphrases": [
+        "你可得兜住啊，这次都靠你了"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-no-sermon",
+      "input": "道理我都懂，你别跟我说教",
+      "history": [],
+      "paraphrases": [
+        "别跟我讲大道理，我都明白"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-gentle-no",
+      "input": "今天不行，改天再约吧",
+      "history": [],
+      "paraphrases": [
+        "改天再约，今天不行"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-slow-morning",
+      "input": "醒了也不想动，起不来床",
+      "history": [],
+      "paraphrases": [
+        "起不来床，醒了也不想动"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-shared-silence",
+      "input": "我们一起沉默一会儿吧，谁也别说话",
+      "history": [],
+      "paraphrases": [
+        "谁也别说话，我们一起沉默一会儿"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-tidy-reward",
+      "input": "桌面终于空了，屋子收拾完了",
+      "history": [],
+      "paraphrases": [
+        "屋子收拾完了，桌面终于空了"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-handmade-gift",
+      "input": "给他织的围巾织好了要送出去",
+      "history": [],
+      "paraphrases": [
+        "织好了要送出去，那条给他织的围巾"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-need-room",
+      "input": "想自己待一会儿，先别来找我",
+      "history": [],
+      "paraphrases": [
+        "先别来找我，想自己待一会儿"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-season-turn",
+      "input": "一夜之间就凉了，降温降得真快",
+      "history": [],
+      "paraphrases": [
+        "降温降得真快，一夜之间就凉了"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-tea-pause",
+      "input": "去泡杯茶，想歇一口气",
+      "history": [],
+      "paraphrases": [
+        "想歇一口气，去泡杯茶"
+      ],
+      "gated": false
+    },
+    {
+      "id": "style-wind-down",
+      "input": "今天到这儿吧，差不多可以收了",
+      "history": [],
+      "paraphrases": [
+        "差不多可以收了，今天到这儿吧"
+      ],
+      "gated": false
     }
   ]
 }

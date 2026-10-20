@@ -73,8 +73,14 @@ __pycache__/
 !/scripts/package-apartment.mjs
 !/scripts/run-tests.mjs
 !/scripts/run-rust-tests.mjs
+!/scripts/provider-core-tests.rs
+!/scripts/provider-core-modules.rs
+!/scripts/test-provider-core.ps1
 !/scripts/evaluate-companion.mjs
 !/scripts/evaluate-prompts.mjs
+!/scripts/prompt-reply-evaluation.mjs
+!/scripts/prompt-eval-support.mjs
+!/scripts/audit-companion-dialogue.mjs
 !/scripts/*.test.mjs
 !/scripts/*.test.ts
 *-preview.html
@@ -92,11 +98,17 @@ src/*Preview.tsx
 .workbuddy-ai/
 .codex/
 .claude/
+/.trae/
 /COMPANION_MEMORY.md
 /MEMORY_OPTIMIZATION.md
 /src-tauri/prompts/PROMPT_EVALUATION.md
 
 # 美术工程与发布产物
+# 仓库根目录的本地动画装配脚本与中间帧，不属于运行资源。
+/_*.py
+/_*.png
+/_*.mp4
+/_tmp_*/
 /output/
 # Keep the runtime asset audit alongside packaging scripts.
 !/scripts/audit-mind-comic-assets.mjs

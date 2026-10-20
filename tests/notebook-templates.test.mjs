@@ -22,6 +22,12 @@ chrono="0.4"
 once_cell="1"
 regex="1"
 tracing="0.1"
+parking_lot="0.12"
+sha2="0.10"
+uuid={version="1",features=["v4"]}
+tempfile="3"
+[target.'cfg(windows)'.dependencies]
+windows={version="0.61",features=["Win32_Storage_FileSystem"]}
 `);
 let types = await readFile(path.join(notebook, 'mod.rs'), 'utf8');
 // Replace only module locations; use the complete production type definitions.
@@ -31,9 +37,14 @@ for (const name of ['collected', 'css_guide', 'doc_style', 'renderer', 'storage'
 types = types.replace('pub mod persona_brief;', '');
 await writeFile(path.join(dir, 'src', 'notebook.rs'), types);
 await writeFile(path.join(dir, 'src', 'lib.rs'), `#![allow(dead_code)]
-pub mod utils { pub mod path {
+#[path="${rustPath(path.join(root, 'src-tauri', 'src', 'utils', 'fs.rs'))}"] pub mod fs;
+#[path="${rustPath(path.join(root, 'src-tauri', 'src', 'utils', 'assets.rs'))}"] pub mod assets;
+pub mod utils { pub use crate::{assets, fs}; pub mod path {
+    pub fn get_user_data_dir() -> std::path::PathBuf {
+        std::path::PathBuf::from(std::env::var("VIVIAN_TEST_DATA_DIR").unwrap())
+    }
     pub fn get_character_data_dir(id: &str) -> std::path::PathBuf {
-        std::path::PathBuf::from(std::env::var("VIVIAN_TEST_DATA_DIR").unwrap()).join(id)
+        get_user_data_dir().join(id)
     }
     pub fn ensure_dir(dir: &std::path::Path) -> Result<(), String> {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())

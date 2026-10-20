@@ -29,23 +29,35 @@ assert.equal(reconcileToolMessages([intent, { ...outcome, tool_name: null }])[0]
 assert.deepEqual(reconcileToolMessages([intent, { ...intent, tool_call_id: 'b' }, outcome, { ...outcome, tool_call_id: 'b' }]).map(row => row.tool_call_id), ['a', 'b'], 'parallel completion preserves invocation order');
 console.log(`Workbench: ${cases} width/panel combinations and tool reconciliation checks passed.`);
 
-// Process prose must survive tool completion and session reload without becoming a final reply.
+// Public progress remains visible, including after reload and final delivery.
 const thought = { role: 'thinking', content: '检查工作目录与错误原因' };
-const commentary = { role: 'commentary', content: '先读取配置，然后修复构建脚本。' };
+const commentary = { role: 'commentary', content: '已定位配置问题，接下来验证修复。' };
 const user = { role: 'user', content: '修复项目' };
-const live = groupWorkMessages([user, thought, commentary, intent], true);
-assert.equal(live.length, 2);
-assert.deepEqual(live[1].msgs, [thought, commentary, intent]);
-assert.equal(live[1].settled, false);
 const final = { role: 'assistant', content: '修复完成' };
+const live = groupWorkMessages([user, thought, commentary, intent], true);
+assert.deepEqual(live.map(item => item.kind), ['msg', 'group', 'msg', 'group']);
+assert.equal(live[2].msg, commentary);
+assert.equal(live[3].settled, false);
+assert.equal(groupWorkMessages([intent, commentary], true)[0].settled, false, 'progress is not a tool completion');
+assert.equal(groupWorkMessages([intent, commentary, { ...user, interjected: true }], true)[0].settled, false, 'interjection does not stop tools');
+assert.equal(groupWorkMessages([intent, commentary, final], true)[0].settled, true);
 for (const running of [true, false]) {
-  const history = [user, thought, intent, outcome, { role: 'notice', content: '历史消息已达 63 条，已自动把 23 条早期历史压缩为摘要。' }, commentary, { role: 'tool_use', content: '调用工具：read_file' }, final];
+  const history = [user, thought, intent, commentary, outcome, { role: 'notice', content: '历史消息已达 63 条，已自动把 23 条早期历史压缩为摘要。' }, final];
   const restored = groupWorkMessages(JSON.parse(JSON.stringify(history)), running);
-  assert.equal(restored.length, 3);
+  assert.equal(restored.length, 4);
+  assert.deepEqual(restored[1].msgs, [thought, { ...intent, ...outcome }]);
   assert.equal(restored[1].settled, true);
-  assert.deepEqual(restored[1].msgs, [thought, { ...intent, ...outcome }, commentary]);
-  assert.deepEqual(restored[2].msg, final);
+  assert.deepEqual(restored[2].msg, commentary);
+  assert.deepEqual(restored[3].msg, final);
 }
-assert.equal(groupWorkMessages([thought, commentary, intent, outcome], false)[0].settled, true, 'summary phase collapses the entire process before final text');
-assert.equal(groupWorkMessages([thought], false)[0].settled, true, 'text-only processes also collapse');
-console.log('Work process groups include prose and hide host diagnostics across reloads.');
+assert.equal(groupWorkMessages([intent], false)[0].settled, true, 'stopped pending tools remain stopped');
+const repeated = reconcileToolMessages([user, intent, outcome, user, intent, { ...outcome, content: 'new source' }]);
+assert.equal(repeated.length, 4, 'call IDs may repeat in a later turn');
+assert.equal(repeated[1].content, 'source');
+assert.equal(repeated[3].content, 'new source');
+assert.equal(reconcileToolMessages([commentary, { ...commentary, tool_call_id: 'a' }, intent]).length, 3, 'only tool rows participate in matching');
+console.log('Progress, reasoning, late results, reload, interruption and repeated IDs passed.');
+
+const acrossProgress = groupWorkMessages([user, intent, commentary, outcome], true);
+assert.equal(acrossProgress[1].index, 1, 'merged calls retain the original invocation anchor');
+assert.equal(reconcileToolMessages([intent, { ...user, interjected: true }, outcome]).length, 2, 'interjection preserves active call reconciliation');

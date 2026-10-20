@@ -38,4 +38,13 @@ assert.ok(requests > 30);
 assert.equal(catalog.find(task => task.id === 'pet_reaction').fallback, 'companion');
 assert.equal(catalog.find(task => task.id === 'query_rewrite').fallback, 'memory');
 assert.equal(catalog.find(task => task.id === 'context_compress').fallback, 'memory');
+// Optional coordination may inherit a model, but must keep its own local request budget.
+for (const id of ['environment_judge', 'bystander_judge']) {
+  const task = catalog.find(task => task.id === id);
+  assert.equal(task.concurrency, 'environment');
+  assert.equal(task.fallback, 'simple_judge');
+  for (const foreground of ['companion', 'reasoning', 'emotion_analysis', 'intent_judge']) {
+    assert.notEqual(task.concurrency, catalog.find(route => route.id === foreground).concurrency);
+  }
+}
 console.log(`Model routing: ${catalog.length} distinct contracts, multilingual settings, and ${requests} production call sites verified.`);

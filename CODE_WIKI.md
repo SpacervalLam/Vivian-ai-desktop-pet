@@ -1300,7 +1300,7 @@ pub enum ResponseMode {
 | 文件 | 职责 |
 |------|------|
 | [`manager.rs`](src-tauri/src/memory/manager.rs) | `MemoryManager` 主入口，按 char_id 路由；含种子记忆解析（`parse_seed_file` / `seed_from_file`）；`save_to_disk` 手指纹差异落盘（`persisted: HashMap<id, fingerprint>` 与当前条目比对，仅 upsert 变更行/删除移除行）；**检索零拷贝**：候选无过滤时直接借用 `data.entries` 切片（`Cow`），仅需过滤时才深拷贝；`search_memories_with_options` 的 Step 2~4 移入 `inner` 作用域内借用切片，省掉整表克隆；**常驻上限**：超过 `MAX_RESIDENT_ENTRIES=20000` 时 `evict_archived_from_memory` 卸载完全归档条目（`consolidated && !is_summarized`，检索候选都进不去的死重），只卸内存副本、磁盘行保留，且同步从 `persisted` 摘除指纹——否则下一次 `save_to_disk` 会把「内存无而磁盘有」误判为删除 |
-| [`entry_store.rs`](src-tauri/src/memory/entry_store.rs) | 记忆条目 SQLite canonical 存储（`memory/entries.db`）：行级 upsert/delete/clear，WAL 模式；只使用 SQLite，不导入旧 JSON。明文镜像默认关闭，`VIVIAN_MEMORY_PLAIN_MIRROR=1/true/yes` 才生成，并在事务提交后原子同步；WAL 定期 checkpoint 回收 |
+| [`entry_store.rs`](src-tauri/src/memory/entry_store.rs) | 记忆条目 SQLite canonical 存储（`memory/entries.db`）：行级 upsert/delete/clear，WAL + FULL 持久提交；`user_version=1` 标识当前 SQL schema，`meta.version` 保留业务版本；只初始化全新空库，既有旧库不在启动时自动升级。只使用 SQLite，不导入旧 JSON。明文镜像默认关闭，`VIVIAN_MEMORY_PLAIN_MIRROR=1/true/yes` 才生成，并在事务提交后原子同步；使用自动 checkpoint，不在启动/每批写后强制 TRUNCATE。数据库连接策略位于 `utils/sqlite.rs`，在线备份位于 `storage/backup.rs` |
 | [`conversation_archive.rs`](src-tauri/src/memory/conversation_archive.rs) | 多级对话存档：L1 满 4 条合并最旧 3 条，最高 L3；摘要写入前脱敏，索引为 `conversation_archive.jsonl` 并原子重写；明文 `archive_plain/` 仅在 `VIVIAN_MEMORY_PLAIN_MIRROR` 显式开启时生成；每轮最多注入 8 条 `[CONVERSATION ARCHIVE]` 摘要 |
 | [`memory_md.rs`](src-tauri/src/memory/memory_md.rs) | 角色长期记忆笔记（`characters/<char_id>/memory/memory.md`，与结构化记忆库互补——每轮全量注入的相处约定层）：只收相处约定/承诺/教训/梗四类；**两区模型**——按分节标题形态分已整理区（主题分节）与待整理区（日期分节 `## YYYY-MM-DD HH:MM`，原始沉淀）；**写侧字符预算硬不变量**——append 溢出时 `enforce_char_budget` 从最旧日期分节起整节驱逐（文件恒 ≤ cap 2000，注入侧永不截断），write 超 cap 直接 Err 拒绝（不静默截断），read 侧 cap 仅作手工编辑旁路安全网；`tidy_need`（`TidyNeed`：待整理区非空行数 ≥ 12 走 `Incremental` 只整理新增沉淀、由 `merge_entries` 机械并入，总字符 > 1700 走 `FullCompaction` 全文重排）供睡眠整理分派路径 |
 | [`pipeline.rs`](src-tauri/src/memory/pipeline.rs) | 从 DialogueManager 原始历史整理会话；一个会话一个稳定摘要节点，暂停后或达到增量阈值自动整理，每次自动最多两段，手动最多八段；成功分段即时提交，空白/格式错误不推进水位；不做跨会话相似合并，不从摘要抽取事实 |
@@ -1918,7 +1918,7 @@ tools::types::is_path_within_any(path, primary, extras)
 | `send_chat_message_tool.rs` | 应用内私聊发送（`send_chat_message`）：将角色消息写入 `wechat` 渠道历史、更新会话渠道并通知前端；供明确要求“发消息/发微信”等语义使用，不对接外部微信 |
 | `show_widget_tool.rs` | 可视化组件（`show_widget`）：把 SVG 流程图/图表渲染为编程页内联卡片，约束系统内嵌 `description`，call 先做防御性校验（`looks_like_svg` + `contains_forbidden`）再经 `push_agent_widget` 推前端，`should_defer=true` |
 | `share_link_tool.rs` | 分享链接（`share_link`：把搜索结果渲染为富卡片，仅 `app_handle.emit` 推前端、**不走网络**，故为 `Safe`） |
-| `system_ops.rs` | 应用开关与屏幕工具；截图在线程 DPI 上下文中按物理虚拟屏幕坐标捕获，等待保存/剪贴板实际结果；`screenshot_analyze` 返回客观 description，视觉调用失败单独说明 |
+| `system_ops.rs` | 应用开关与屏幕工具；截图在线程 DPI 上下文中按物理虚拟屏幕坐标捕获，等待保存/剪贴板实际结果；仅注册 `take_screenshot`：一次原生捕获，默认返回视觉分析的客观 description；`save`、`copy_to_clipboard` 显式控制输出，`analyze=false` 可仅保存或复制。`screenshot_analyze` 仅作历史调用别名，不再暴露第二个工具。权限不从用户消息关键词或参数字符串推断授权，统一走权限策略与确认结果 |
 | `todo_tools.rs` | 待办（add/list/complete/update/整表替换 + `manage_todo`；写入类 `FsWrite`、`list_todo` `FsRead`；**Scheduler 联动**：`due_date` 到点自动创建定时提醒、完成/删除自动取消、变更先取消旧提醒再建新；**`event_time` 记录事件本身的开始时间**，与 `due_date`（提醒触发时间）分离，供日程通知场景按路程/准备时间计算提前量） |
 | `wallpaper_tools.rs` | 壁纸（Wallpaper Engine；`wallpaper_list` 读列表 `FsRead`、`wallpaper_set` / `wallpaper_control` 切换与播放控制 `Shell`） |
 | `work_agent_tools.rs` | 工作智能体派活（`delegate_to_work_agent` 后台起工作会话 `Shell`、`get_work_status` 查会话状态 `FsRead`、`notify_companion` 阶段成果交陪伴人格播报 `Safe`） |
@@ -2703,12 +2703,18 @@ fn platforms_for(char_id) -> Vec<PlatformConfig>
 | `tts_fish_speech.rs` | Fish Speech |
 | `tts_minimax.rs` | MiniMax Speech |
 | `tts_doubao.rs` | 豆包 TTS |
+| `tts_mimo.rs` | 小米 MiMo（语音克隆，chat/completions 内联音频） |
+| `tts_elevenlabs.rs` | ElevenLabs（云端音色库/克隆；优先 `/with-timestamps` 取字符级时间轴驱动唇形，失败回退纯音频端点） |
 | `tts_cache.rs` | TTS 缓存 |
 | `realtime_voice.rs` | 实时语音会话 |
 | `realtime_protocol.rs` | 实时语音协议 |
 | `whisper_realtime.rs` | Whisper 实时 |
 | `planner.rs` | 语音规划 |
 | `speech_memory.rs` | 语音记忆 |
+
+**引擎说明书（TTS / ASR 共用弹窗）**：`components/EngineHelpDialog.tsx` 是说明书的外壳，负责遮罩、居中弹窗、左栏引擎列表、章节排版、ESC/←→ 键盘操作与深浅色适配（全部走 `--panel-*` 变量）；`TtsHelpDialog.tsx` / `AsrHelpDialog.tsx` 只把 `config.{tts,asr}_help_<engine>_*` 文案摊成 `EngineHelpDoc[]` （what / prep / fields / recommend / faq 五段）。设置页引擎下拉右侧的「?」按当前引擎打开对应页签。新增后端时必须同时补 `*BackendKey`、`BACKEND_KEYS`、`FIELD_KEYS`/`PREP_COUNTS`/`FAQ_COUNTS` 与三语文案，否则页签缺失或界面上直接渲染出原始 key；`ConfigWindow` 的 `engineToBackend` 映射决定是否显示「?」。
+
+排版约定：字段说明按「名称：正文」拆分，名称做小标题、字段 id 退化成 `code` 徽标（名称里若已含括号形式的 id 会被剥掉）；prep 文案自带的「1. 」前缀在渲染时剥掉，序号交给徽标，避免「1 1.」重复。
 
 #### ASR/TTS 生命周期与设置表单（2026-10-04）
 
@@ -3272,7 +3278,15 @@ lib.rs::setup
 
 保留角色、人设、日记和 ASR/TTS 配置（角色 `sound/` 内的启动 YAML、参考音频）、模型路径、凭据、插件/MCP、技能、待办、定时任务、笔记、截图/图片、编程会话和使用统计。记忆目录内混存的 config 文件、YAML 和触发偏好也保留。
 
-**备份与导入**：[`ConfigWindow.tsx`](src/components/ConfigWindow.tsx) 的「备份与恢复」独立设置页统一呈现导出、导入与恢复初始状态，侧栏搜索只筛选导航，不切换页面。`backup_user_data` 导出 `.altn`；`restore_user_data` 经用户二次确认后验证归档、写恢复标记并重启，启动时回填。导出/导入与重置按钮互斥禁用，静态图标和说明避免重排。重置保留自建能力与配置；清除记忆前仍建议导出备份。
+**备份与导入**：[`ConfigWindow.tsx`](src/components/ConfigWindow.tsx) 的「备份与恢复」独立设置页统一呈现导出、导入与恢复初始状态，侧栏搜索只筛选导航，不切换页面。`backup_user_data` 保存各管理器和浏览器、登记导出请求并重启；返回路径只表示排队，`take_backup_result` 返回重启后的实际结果。`restore_user_data` 经用户二次确认后验证归档、写恢复标记并重启，启动时回填。导出/导入与重置按钮互斥禁用。
+
+[`storage/export.rs`](src-tauri/src/storage/export.rs) 在创建任何管理器前取得数据根的进程级租约。正常运行持共享租约；待处理备份持独占租约，等待旧应用与 WebView2 进程退出后归档，完成后再构造 `AppState`。这提供跨管理器的静止落盘视图，不依赖 SQLite checkpoint。参与协议的应用进程受屏障约束；外部程序直接改写用户目录不在租约保护范围内。浏览器关闭流程排空状态保存队列，并阻止待处理备份期间的迟到初始化。
+
+[`storage/backup.rs`](src-tauri/src/storage/backup.rs) 预检目标卷空间，为归档、数据库快照和安全余量保留预算；归档写入临时文件，完成并同步后原子发布。失败不返回成功文件。浏览器分类由 [`storage/policy.rs`](src-tauri/src/storage/policy.rs) 管理：仅排除已知 Cache / GPUCache / Code Cache 等缓存，保留 Cookies、Local State、Local Storage、IndexedDB、Sessions、Service Worker 及未知路径，不删除运行目录中的文件。
+
+工作会话目录的 `index.json` 是检查点，`index-journal/` 原子追加变更头与删除墓碑；无变化不写入，达到 128 条或 2 MiB 活动日志时合并检查点，并保留前一个检查点恢复所需日志。会话正文继续独立存储，分页、按需加载和墓碑恢复规则不变；目录查询通过会话目录索引读取，不枚举已删除的孤立正文。
+
+[`storage.rs`](src-tauri/src/storage.rs) 的 `DomainStore` 尚无业务接入，接口统一返回 `Result`。每次操作在每域 OS 文件锁下重新读取，批量事务先原子持久化数据和递增 revision，再通知本实例订阅者；无变化不写盘、不发事件，损坏或落盘失败直接返回错误。独立实例的修改不会因旧内存快照而丢失；锁等待有 3 秒上限，跨域不提供事务，跨实例通知需由业务另行定义。
 
 ---
 
