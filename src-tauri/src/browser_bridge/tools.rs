@@ -255,11 +255,11 @@ fn tool_defs() -> Vec<BrowserTool> {
         BrowserTool {
             name: "browser_task_tab",
             mcp_name: "mcp__browser__task_tab",
-            description: format!("Read a URL in a muted background tab sharing the connected browser login profile, then close it. Defaults to a live snapshot; extractor=images returns actual image URLs and source pages, or select a packaged platform link extractor. Arbitrary code is unsupported. Login walls or challenges must be completed by the user. {}", untrusted),
-            description_zh: format!("在同一浏览器登录配置的后台静音标签页读取 URL，完成后关闭。默认返回实时页面快照；extractor=images 返回图片实际地址、alt 和来源页，也可选择平台链接提取器。不支持任意代码。遇到登录或验证页面应告知用户手动完成。{}", untrusted),
+            description: format!("Read a URL in a muted background tab sharing the connected browser login profile, then close it. Defaults to a live snapshot; extractor=images returns actual image URLs and source pages, or select a packaged platform link extractor. extractor=detail reads the body text and visible top comments of one Zhihu / Xiaohongshu / Douyin item page. Arbitrary code is unsupported. Login walls or challenges must be completed by the user. {}", untrusted),
+            description_zh: format!("在同一浏览器登录配置的后台静音标签页读取 URL，完成后关闭。默认返回实时页面快照；extractor=images 返回图片实际地址、alt 和来源页，也可选择平台链接提取器；extractor=detail 读取知乎/小红书/抖音单条内容的正文与可见热评。不支持任意代码。遇到登录或验证页面应告知用户手动完成。{}", untrusted),
             schema: json!({
                 "url": { "type": "string", "description": "Complete http or https URL to open in the background tab." },
-                "extractor": { "type": "string", "enum": ["bilibili", "xiaohongshu", "douyin", "zhihu", "images"], "description": "Use images for actual image URLs and source pages; omit for a live page snapshot." },
+                "extractor": { "type": "string", "enum": ["bilibili", "xiaohongshu", "douyin", "zhihu", "images", "detail"], "description": "Use images for actual image URLs and source pages; detail for one Zhihu/Xiaohongshu/Douyin item body + comments; omit for a live page snapshot." },
                 "waitMs": { "type": "integer", "minimum": 0, "maximum": 10000, "description": "Extra settle milliseconds after load (default 800)." },
             }),
             read_only: true,

@@ -46,6 +46,14 @@ pub struct MonologueEmotionDelta {
 pub struct MonologueResponse {
     /// 内心独白文本（40-100字，第一人称）
     pub monologue: String,
+    /// 可对用户说出口的「此刻状态」一句话（我此刻在做什么 / 在想什么）。
+    ///
+    /// 与 `monologue` 的分工：monologue 是私有内心 OS，永远不进检索；
+    /// presence 会被记成一条可召回的 `daily_presence` 记忆（24h 过期），
+    /// 作为"她今天也有自己的事"在对话里可以被引用。没有值得记的
+    /// 当下状态时留空——宁可空着，也不要为了填字段编一件事。
+    #[serde(default)]
+    pub presence: Option<String>,
     /// 情绪增量（每个值 -0.15 ~ +0.15，大部分应为 0 或很小值）
     #[serde(default)]
     pub emotion_delta: MonologueEmotionDelta,
@@ -67,6 +75,8 @@ pub fn monologue_response_schema() -> serde_json::Value {
 pub struct MonologueOutput {
     /// 独白文本
     pub text: String,
+    /// 可对用户说出口的「此刻状态」一句话（None/空表示本次没有值得记的当下）
+    pub presence: Option<String>,
     /// 情绪增量（应用于 PsychologyManager）
     pub emotion_delta: MonologueEmotionDelta,
     /// 兴趣话题搜索结果（如果本次触发了搜索）
@@ -328,7 +338,7 @@ impl InnerMonologueGenerator {
         };
         let depth = if is_deep_reflection { "You may reflect on the supplied events of today; do not invent a day to recap." } else { "A small present thought is enough." };
         format!("You are {name}, a desktop companion. {perspective} Write in {language}. {depth}\n{}",
-            include_str!("../../prompts/framework/inner_monologue.en.md"))
+            crate::pipeline::prompt_modules::inner_monologue_rules(lang))
     }
 
     fn build_user_prompt(
@@ -680,6 +690,7 @@ fn parse_monologue(raw: &str) -> MonologueOutput {
         if !text.is_empty() {
             return MonologueOutput {
                 text,
+                presence: normalize_presence(parsed.presence),
                 emotion_delta: parsed.emotion_delta,
                 interest_context: None,
             };
@@ -690,6 +701,7 @@ fn parse_monologue(raw: &str) -> MonologueOutput {
         tracing::debug!("[inner_monologue] 从非标准 JSON 中提取 monologue");
         return MonologueOutput {
             text: extracted,
+            presence: None,
             emotion_delta: MonologueEmotionDelta::default(),
             interest_context: None,
         };
@@ -708,6 +720,7 @@ fn parse_monologue(raw: &str) -> MonologueOutput {
                         .unwrap_or_default();
                     return MonologueOutput {
                         text,
+                        presence: None,
                         emotion_delta,
                         interest_context: None,
                     };
@@ -719,6 +732,7 @@ fn parse_monologue(raw: &str) -> MonologueOutput {
                     if !text.is_empty() {
                         return MonologueOutput {
                             text,
+                            presence: None,
                             emotion_delta: MonologueEmotionDelta::default(),
                             interest_context: None,
                         };
@@ -730,9 +744,16 @@ fn parse_monologue(raw: &str) -> MonologueOutput {
 
     MonologueOutput {
         text: raw.trim().to_string(),
+        presence: None,
         emotion_delta: MonologueEmotionDelta::default(),
         interest_context: None,
     }
+}
+
+/// presence 是"可选的一句话"：空串或纯空白一律归一为 None，
+/// 避免往记忆里写一条空白的当下状态。
+fn normalize_presence(raw: Option<String>) -> Option<String> {
+    raw.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
 }
 
 /// 从格式不完整的 JSON 中提取 monologue 字段值

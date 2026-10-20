@@ -1,13 +1,12 @@
 //! 权限系统 - 工具权限检查、文件路径权限和工作目录限制
 //!
-//! ## 确认档位（四档策略）
+//! ## 确认档位
 //!
-//! 执行前要不要停下来问用户，由 [`confirmation_tier`] 判定，四档由宽到严：
+//! 执行前要不要停下来问用户，由 [`confirmation_tier`] 判定，由宽到严：
 //!
 //! | 档位 | 语义 |
 //! |---|---|
 //! | [`ToolConfirmationTier::NotRequired`] | 直接做 |
-//! | [`ToolConfirmationTier::PreApprovalAllowed`] | 本轮用户消息里明确授权过 → 直接做；否则问 |
 //! | [`ToolConfirmationTier::ConfirmAtAction`] | 动手前必须确认 |
 //! | [`ToolConfirmationTier::HandOff`] | agent 不许执行，必须把控制权交回用户 |
 //!
@@ -37,12 +36,7 @@ use super::types::{
 pub enum ToolConfirmationTier {
     /// 直接做，不问。
     NotRequired,
-    /// 本轮用户消息里明确授权过目标 → 直接做；否则问。
-    ///
-    /// 用于"用户已经说清楚了要干什么"的低风险动作：说了"换成这张壁纸"就不该
-    /// 再弹一次窗问"要换壁纸吗"。
-    PreApprovalAllowed,
-    /// 动手前必须确认（预授权也要再问）。
+    /// 动手前必须确认。
     ConfirmAtAction,
     /// agent 不许执行，必须把控制权交回用户自己完成。
     ///
@@ -70,6 +64,8 @@ const CONFIRM_AT_ACTION_TOOLS: &[&str] = &[
     "delete_plugin",
     // 系统状态变更
     "media_control",
+    "open_application",
+    "close_application",
     "wallpaper_set",
     "wallpaper_control",
     // 浏览器任意脚本：在已登录会话执行任意 JS，等同代码执行。
@@ -93,20 +89,6 @@ const DISPATCHER_SAFE_ACTIONS: &[(&str, &[&str])] = &[
     ("manage_scheduled", &["list", "get", "pause", "resume"]),
 ];
 
-/// 允许预授权的工具：本轮用户消息点到具体目标时免确认。
-///
-/// 判据是"用户已经把这件事说清楚了"，不是"这个工具很安全"——
-/// 用户没说清楚时仍然照常询问。
-const PRE_APPROVAL_ALLOWED_TOOLS: &[&str] = &[
-    "wallpaper_set",
-    "wallpaper_control",
-    "media_control",
-    "open_application",
-    "close_application",
-    "take_screenshot",
-    "screenshot_analyze",
-];
-
 /// 免确认工具（**真实注册名**）：直接放行，不进入权限流程。
 ///
 /// 与 [`CONFIRM_AT_ACTION_TOOLS`] 语义相反。仅用于"写角色自身状态/内部数据、
@@ -117,53 +99,6 @@ const NEVER_CONFIRM_TOOLS: &[&str] = &[
     // 保存记忆：写入角色自己的记忆库（SQLite），内容来自本会话对话，
     // 属于陪伴流程内的隐性期望动作，用户不希望对每次保存弹窗确认。
     "save_memory",
-];
-
-/// 动作关键词 → 工具。用户本轮消息里出现这类词，视为对该工具目标的明确授权。
-///
-/// 三语齐备：命中判定是「消息包含关键词」，所以中英日都要列，否则英文/日文用户
-/// 永远拿不到预授权（这是"英文反例约束不了中文输出"的镜像问题）。
-const ACTION_KEYWORDS: &[(&str, &[&str])] = &[
-    (
-        "wallpaper_set",
-        &["壁纸", "桌面背景", "换张图", "wallpaper", "壁紙"],
-    ),
-    (
-        "wallpaper_control",
-        &["壁纸", "桌面背景", "wallpaper", "壁紙"],
-    ),
-    (
-        "media_control",
-        &[
-            "播放", "暂停", "下一首", "上一首", "切歌", "音量", "静音", "调小", "调大",
-            "play", "pause", "next track", "previous track", "volume", "mute",
-            "再生", "一時停止", "次の曲", "ミュート",
-        ],
-    ),
-    (
-        "open_application",
-        &["打开", "启动", "开一下", "帮我开", "open ", "launch", "開いて", "起動"],
-    ),
-    (
-        "close_application",
-        &["关闭", "关掉", "退出", "close ", "quit", "閉じて"],
-    ),
-    (
-        "take_screenshot",
-        &[
-            "截图", "看看我的屏幕", "看我屏幕", "看看我在干嘛", "看我在干嘛", "我屏幕上",
-            "screenshot", "look at my screen", "what am i doing",
-            "スクリーンショット", "画面を見て",
-        ],
-    ),
-    (
-        "screenshot_analyze",
-        &[
-            "截图", "看看我的屏幕", "看我屏幕", "看看我在干嘛", "看我在干嘛", "我屏幕上",
-            "screenshot", "look at my screen", "what am i doing",
-            "スクリーンショット", "画面を見て",
-        ],
-    ),
 ];
 
 /// 敏感域主机标记：agent 一律不许在这些站点执行脚本，必须交回用户。
@@ -291,17 +226,7 @@ pub fn confirmation_tier(tool_name: &str, args: &Value) -> ToolConfirmationTier 
     }
 
     if CONFIRM_AT_ACTION_TOOLS.contains(&name.as_str()) {
-        // 名单里同时允许预授权的工具（壁纸 / 媒体键 / 屏幕感知）走预授权档，
-        // 其余一律"动手前必问"。
-        return if PRE_APPROVAL_ALLOWED_TOOLS.contains(&name.as_str()) {
-            ToolConfirmationTier::PreApprovalAllowed
-        } else {
-            ToolConfirmationTier::ConfirmAtAction
-        };
-    }
-
-    if PRE_APPROVAL_ALLOWED_TOOLS.contains(&name.as_str()) {
-        return ToolConfirmationTier::PreApprovalAllowed;
+        return ToolConfirmationTier::ConfirmAtAction;
     }
 
     ToolConfirmationTier::NotRequired
@@ -337,66 +262,6 @@ pub fn is_sensitive_url(url: &str) -> bool {
     // 主机看不出来时再看路径
     let path = after_scheme.strip_prefix(host).unwrap_or("");
     SENSITIVE_PATH_MARKERS.iter().any(|m| path.contains(m))
-}
-
-/// 本轮用户消息里是否明确点到了这个工具的目标。
-///
-/// 判据（任一成立即可）：
-/// 1. 消息里出现了该工具的动作关键词（"换壁纸" "播放" "看看我的屏幕"）
-/// 2. 消息里出现了工具某个字符串参数的值或其文件名（用户直接给了路径/名称）
-///
-/// 刻意用"字符串包含"而不是 LLM 判定：这是热路径（每次工具调用都跑），
-/// 且误判的代价可控（多问一次 vs 少问一次，前者只是烦，后者才是事故）。
-fn user_authorized_target(tool_name: &str, args: &Value, user_input: &str) -> bool {
-    let input = user_input.trim().to_ascii_lowercase();
-    if input.is_empty() {
-        return false;
-    }
-    let name = canonical_tool_name(tool_name);
-
-    // 判据 1：动作关键词
-    for (tool, keywords) in ACTION_KEYWORDS {
-        if *tool == name && keywords.iter().any(|k| input.contains(&k.to_ascii_lowercase())) {
-            return true;
-        }
-    }
-
-    // 判据 2：参数值 / 文件名
-    for value in string_arg_values(args) {
-        let v = value.trim().to_ascii_lowercase();
-        // 太短的值（"a"、"1"）会在任意消息里误命中
-        if v.chars().count() < 3 {
-            continue;
-        }
-        if input.contains(&v) {
-            return true;
-        }
-        let file_name = v.rsplit(['/', '\\']).next().unwrap_or("").trim().to_string();
-        if file_name.chars().count() >= 3 && input.contains(&file_name) {
-            return true;
-        }
-    }
-    false
-}
-
-/// 收集参数里所有字符串值（含数组内元素）。
-fn string_arg_values(args: &Value) -> Vec<String> {
-    let mut out = Vec::new();
-    match args {
-        Value::String(s) => out.push(s.clone()),
-        Value::Array(items) => {
-            for item in items {
-                out.extend(string_arg_values(item));
-            }
-        }
-        Value::Object(map) => {
-            for value in map.values() {
-                out.extend(string_arg_values(value));
-            }
-        }
-        _ => {}
-    }
-    out
 }
 
 /// 当前工具是否与"已被拒绝的同簇工具"构成等价绕过。
@@ -456,7 +321,7 @@ fn extract_file_paths(tool_name: &str, args: &Value) -> Vec<String> {
 /// 检查工具权限
 ///
 /// 综合考虑：
-/// - 确认档位（Hand-off / 必问 / 可预授权 / 免问）
+/// - 确认档位（Hand-off / 必问 / 免问）
 /// - 权限模式（Bypass 直接放行，Ask 一律询问）
 /// - always_allow / always_deny / always_ask 规则
 /// - 等价能力簇（防换工具绕过拒绝）
@@ -607,22 +472,6 @@ pub async fn check_tool_permission(
             "工具 '{}' 需要用户确认后执行",
             tool_name
         )),
-        ToolConfirmationTier::PreApprovalAllowed => {
-            // 用户本轮已经把这件事说清楚了（"换成这张壁纸" / "看看我的屏幕"）
-            // → 不再重复问一遍。没说清楚时照常询问。
-            let authorized = permission_context
-                .current_user_input
-                .as_deref()
-                .is_some_and(|input| user_authorized_target(tool_name, args, input));
-            if authorized {
-                PermissionResult::allow()
-            } else {
-                PermissionResult::ask(format!(
-                    "工具 '{}' 需要用户确认后执行",
-                    tool_name
-                ))
-            }
-        }
         // 免问档：仍委托给工具自身的权限检查（个别工具有自己的附加规则）
         ToolConfirmationTier::NotRequired => tool.check_permissions(args, context).await,
     }
@@ -815,12 +664,6 @@ impl PermissionContextBuilder {
         self
     }
 
-    /// 注入本轮用户消息原文，供「预授权」档判定（用户已说清目标则免确认）。
-    pub fn with_user_input(mut self, user_input: impl Into<String>) -> Self {
-        self.context.current_user_input = Some(user_input.into());
-        self
-    }
-
     pub fn allow(mut self, tool: impl Into<String>) -> Self {
         self.context.always_allow.push(tool.into());
         self
@@ -893,14 +736,6 @@ pub fn requires_permission(
     match confirmation_tier(tool.name(), args) {
         // Hand-off / 动手前必问：都要进流程才能给出 deny / ask
         ToolConfirmationTier::HandOff | ToolConfirmationTier::ConfirmAtAction => return true,
-        // 预授权档：用户本轮已说清目标 → 不必进流程；没说清 → 进流程（要问）
-        ToolConfirmationTier::PreApprovalAllowed => {
-            let authorized = context
-                .current_user_input
-                .as_deref()
-                .is_some_and(|input| user_authorized_target(tool.name(), args, input));
-            return !authorized;
-        }
         // 免问档：继续走下面的通用判定
         ToolConfirmationTier::NotRequired => {}
     }
@@ -1149,11 +984,11 @@ mod tests {
         }
     }
 
-    /// 关键词表里的每个工具名、等价簇里的每个成员，都必须是"我们真的认识"的名字。
+    /// 等价簇里的每个成员，都必须是"我们真的认识"的名字。
     ///
     /// 用一张显式的真实名清单做锚点：改工具名时这里会红，逼人回来同步。
     #[test]
-    fn keyword_and_cluster_tables_reference_known_tools() {
+    fn equivalence_clusters_reference_known_tools() {
         // 与本仓库 `tools/builtin/**` 里 `fn name()` 的返回值对齐
         const KNOWN: &[&str] = &[
             "read_file",
@@ -1177,16 +1012,10 @@ mod tests {
             "browser_eval_js",
             "browser_task_tab",
         ];
-        for (tool, _) in ACTION_KEYWORDS {
-            assert!(KNOWN.contains(tool), "关键词表引用了未知工具 '{tool}'");
-        }
         for cluster in EQUIVALENCE_CLUSTERS {
             for member in cluster.iter() {
                 assert!(KNOWN.contains(member), "等价簇引用了未知工具 '{member}'");
             }
-        }
-        for name in PRE_APPROVAL_ALLOWED_TOOLS {
-            assert!(KNOWN.contains(name), "预授权表引用了未知工具 '{name}'");
         }
     }
 
@@ -1201,6 +1030,8 @@ mod tests {
             "grep_search",
             "run_command",
             "save_memory",
+            "open_application",
+            "close_application",
             "take_screenshot",
             "screenshot_analyze",
             "delete_plugin",
@@ -1271,29 +1102,6 @@ mod tests {
     }
 
     #[test]
-    fn screen_and_wallpaper_are_pre_approval_not_always_confirm() {
-        // 屏幕感知是桌面宠物的核心能力，不该每次都必须弹窗
-        assert_eq!(
-            confirmation_tier("take_screenshot", &json!({})),
-            ToolConfirmationTier::PreApprovalAllowed
-        );
-        assert_eq!(
-            confirmation_tier("wallpaper_set", &json!({})),
-            ToolConfirmationTier::PreApprovalAllowed
-        );
-        // 写文件这类没有"用户已说清目标"语义的，仍是动手前必问
-        assert_eq!(
-            confirmation_tier("write_file", &json!({})),
-            ToolConfirmationTier::ConfirmAtAction
-        );
-        // 未列入任何表的工具免问
-        assert_eq!(
-            confirmation_tier("web_search", &json!({})),
-            ToolConfirmationTier::NotRequired
-        );
-    }
-
-    #[test]
     fn mcp_browser_name_and_wire_name_land_on_same_tier() {
         // 名单里填线名，模型侧传 MCP 名，两者必须得出同一档位
         assert_eq!(
@@ -1346,84 +1154,29 @@ mod tests {
         assert!(!is_sensitive_url(""));
     }
 
-    // ========================================================================
-    // 预授权：用户说清目标才免问
-    // ========================================================================
-
-    #[test]
-    fn pre_approval_requires_explicit_user_authorization() {
-        // 用户说了具体目标 → 授权成立
-        assert!(user_authorized_target(
-            "wallpaper_set",
-            &json!({"path": "D:\\pics\\cat.png"}),
-            "帮我把壁纸换成这张"
-        ));
-        assert!(user_authorized_target(
-            "take_screenshot",
-            &json!({}),
-            "看看我在干嘛"
-        ));
-        assert!(user_authorized_target(
-            "media_control",
-            &json!({"action": "pause"}),
-            "暂停一下"
-        ));
-        // 英文用户同样拿得到授权（三语关键词都要在表里）
-        assert!(user_authorized_target(
-            "wallpaper_set",
-            &json!({}),
-            "change my wallpaper to this one"
-        ));
-        // 用户没提这件事 → 不授权
-        assert!(!user_authorized_target(
-            "wallpaper_set",
-            &json!({}),
-            "今天天气不错啊"
-        ));
-        // 空消息（主动触发、后台任务）→ 不授权
-        assert!(!user_authorized_target("take_screenshot", &json!({}), ""));
-        // 用户直接给了路径 → 授权成立
-        assert!(user_authorized_target(
-            "wallpaper_set",
-            &json!({"path": "D:\\pics\\cat.png"}),
-            "用 D:\\pics\\cat.png 这张"
-        ));
-        // 过短的参数值不得造成误命中
-        assert!(!user_authorized_target(
-            "wallpaper_set",
-            &json!({"path": "a"}),
-            "随便说点什么 a 都行"
-        ));
-    }
-
     #[tokio::test]
-    async fn authorized_pre_approval_skips_the_gate_entirely() {
-        let authorized = PermissionContextBuilder::new(PermissionMode::Default)
-            .with_user_input("帮我换个壁纸")
+    async fn confirmation_policy_requires_explicit_approval() {
+        let permissions = PermissionContextBuilder::new(PermissionMode::Default)
+            .with_access_level(AgentAccessLevel::FullControl)
             .build();
-        // 免问 ⇒ 不进权限流程
-        assert!(!requires_permission(
+        let tools: [&dyn Tool; 2] = [
             &WallpaperLikeTool,
-            &json!({}),
-            &authorized
-        ));
-
-        let unauthorized = PermissionContextBuilder::new(PermissionMode::Default)
-            .with_user_input("今天好累")
-            .build();
-        assert!(requires_permission(
-            &WallpaperLikeTool,
-            &json!({}),
-            &unauthorized
-        ));
-
-        // 没拿到用户原话（主动触发/后台任务）→ 一律照常询问
-        let no_input = PermissionContextBuilder::new(PermissionMode::Default).build();
-        assert!(requires_permission(
-            &WallpaperLikeTool,
-            &json!({}),
-            &no_input
-        ));
+            &crate::tools::builtin::system_ops::TakeScreenshotTool,
+        ];
+        for tool in tools {
+            let args = json!({});
+            assert_eq!(confirmation_tier(tool.name(), &args), ToolConfirmationTier::ConfirmAtAction);
+            assert!(requires_permission(tool, &args, &permissions));
+            assert!(check_tool_permission(tool, &args, &ToolUseContext::default(), &permissions)
+                .await.requires_confirmation());
+            let approved = PermissionContextBuilder::new(PermissionMode::Default)
+                .with_access_level(AgentAccessLevel::FullControl)
+                .allow(tool.name())
+                .build();
+            assert!(!requires_permission(tool, &args, &approved));
+            assert!(check_tool_permission(tool, &args, &ToolUseContext::default(), &approved)
+                .await.is_allowed());
+        }
     }
 
     // ========================================================================
@@ -1474,7 +1227,7 @@ mod tests {
         );
     }
 
-    /// 夹具：名字是 `wallpaper_set` 的"预授权档"工具（避免为测试引入真实工具依赖）
+    /// 夹具：需要确认的壁纸工具。
     struct WallpaperLikeTool;
 
     #[async_trait]
@@ -1504,7 +1257,6 @@ mod tests {
             _input: &Value,
             _context: &ToolUseContext,
         ) -> PermissionResult {
-            // 真实工具自身也会 ask —— 预授权必须能越过这一层
             PermissionResult::ask("wallpaper tool asks")
         }
 

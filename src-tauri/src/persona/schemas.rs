@@ -448,72 +448,6 @@ impl Default for IdentityLayer {
     }
 }
 
-/// Few-shot 示例的回复意图
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FewShotIntent {
-    Reply,
-    ShortReply,
-    NoReply,
-}
-
-impl FewShotIntent {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            FewShotIntent::Reply => "reply",
-            FewShotIntent::ShortReply => "short_reply",
-            FewShotIntent::NoReply => "no_reply",
-        }
-    }
-}
-
-impl Default for FewShotIntent {
-    fn default() -> Self {
-        FewShotIntent::ShortReply
-    }
-}
-
-/// 单条 Few-shot 对话示例
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FewShotExample {
-    /// 场景描述（如 "Acknowledgment (no content needed)"）
-    #[serde(default)]
-    pub scenario: String,
-    /// 用户输入
-    pub user_input: String,
-    /// 回复文本
-    pub response_text: String,
-    /// 回复意图
-    #[serde(default)]
-    pub intent: FewShotIntent,
-    /// 可选：工具名称
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool: Option<String>,
-    /// 可选：工具参数（JSON 对象字符串）
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub arguments: Option<serde_json::Value>,
-}
-
-/// Few-shot 示例集合
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FewShotExamplesConfig {
-    /// 引导说明文字
-    #[serde(default)]
-    pub intro: String,
-    /// 示例列表
-    #[serde(default)]
-    pub examples: Vec<FewShotExample>,
-}
-
-impl Default for FewShotExamplesConfig {
-    fn default() -> Self {
-        Self {
-            intro: String::new(),
-            examples: Vec::new(),
-        }
-    }
-}
-
 /// Vivian 完整人设配置（三层结构）
 ///
 /// 人设三层分层：
@@ -568,14 +502,6 @@ pub struct PersonaConfig {
     /// 关系设定覆盖文本 —— 非空时替代 characters/{id}/relationships.md 出厂内容。
     #[serde(default)]
     pub relationships_definition: String,
-
-    /// Few-shot 示例覆盖（结构化表单）—— examples 非空时替代出厂内容。
-    #[serde(default)]
-    pub few_shot_examples: FewShotExamplesConfig,
-
-    /// 迁移兼容：旧版 markdown 格式 examples_definition（仅反序列化时读取，不再写出）
-    #[serde(default, alias = "examples_definition", skip_serializing)]
-    pub(crate) _examples_definition_compat: String,
 
     /// 当前激活的风格预设名称（default / lively / healing / focused / sweet）。
     ///
@@ -675,8 +601,6 @@ impl Default for PersonaConfig {
             appearance_definition: String::new(),
             speech_definition: String::new(),
             relationships_definition: String::new(),
-            few_shot_examples: FewShotExamplesConfig::default(),
-            _examples_definition_compat: String::new(),
             style_preset: default_style_preset(),
             language: default_language(),
         }
@@ -863,8 +787,6 @@ pub static DEFAULT_NANA_PERSONA: once_cell::sync::Lazy<PersonaConfig> =
         appearance_definition: String::new(),
         speech_definition: String::new(),
         relationships_definition: String::new(),
-        few_shot_examples: FewShotExamplesConfig::default(),
-        _examples_definition_compat: String::new(),
         style_preset: "default".to_string(),
         language: default_language(),
     });

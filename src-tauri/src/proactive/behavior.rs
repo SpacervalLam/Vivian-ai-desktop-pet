@@ -153,10 +153,6 @@ pub(crate) fn default_persona_prompt(lang: &str, char_id: &str) -> String {
         default_section_for(&config.identity.name, CharacterSection::Speech))
 }
 
-fn proactive_companionship() -> &'static str {
-    include_str!("../../prompts/framework/proactive_companionship.en.md")
-}
-
 /// 触发类型字符串常量（与 `ProactiveTrigger::as_str` 对齐）
 pub mod trigger {
     pub const HOURLY_GREETING: &str = "hourly_greeting";
@@ -284,7 +280,7 @@ impl BehaviorDecider {
             crate::pipeline::prompt_modules::build_cross_character_voice_guide(char_id)
         } else { String::new() };
         let mut messages = vec![ChatMessage::system(format!("{sys}\n{voice}\n{}",
-            crate::pipeline::prompt_modules::human_feel_rules()))];
+            crate::pipeline::prompt_modules::human_feel_rules(lang)))];
         // Even the fallback retains real roles and third-party attribution. Flattened
         // assistant text could otherwise become the wrong character's autobiography.
         crate::pipeline::message_context::append_history(&mut messages, dialogue_messages);
@@ -718,7 +714,7 @@ fn build_proactive_directive(
         }
     }
     parts.push(constraint);
-    parts.push(proactive_companionship().to_string());
+    parts.push(crate::pipeline::prompt_modules::proactive_companionship_rules(lang_norm).to_string());
     Some(parts.join("\n"))
 }
 

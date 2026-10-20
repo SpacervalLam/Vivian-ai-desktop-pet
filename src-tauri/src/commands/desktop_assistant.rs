@@ -138,7 +138,7 @@ pub async fn analyze_screen(app: &AppHandle, state: &Arc<AppState>, character_id
 
 pub(crate) async fn analyze_snapshot(app: &AppHandle, state: &Arc<AppState>, character_id: &str, png: Vec<u8>) -> Result<crate::visual_evidence::ImageTurnResult, String> {
     if crate::companion_quiet::active() { return Err("勿扰模式下已暂停陪伴分析，请先关闭勿扰".into()); }
-    if state.tool_system.is_tool_disabled("screenshot_analyze", crate::tools::registry::AgentSide::Companion) {
+    if state.tool_system.is_tool_disabled("take_screenshot", crate::tools::registry::AgentSide::Companion) {
         return Err("截图分析已在工具设置中禁用".to_string());
     }
     if !state.config.read().get_typed::<bool>("ai.enable_vision", false) {

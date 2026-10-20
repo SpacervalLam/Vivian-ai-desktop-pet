@@ -32,6 +32,7 @@ pub mod reminder_delivery;
 pub mod smart_app_classifier;
 pub mod subagent_context;
 pub mod coding_agent;
+pub mod coding_cancel;
 pub mod coding_workflow;
 pub mod coding_workflow_capture;
 pub mod coding_compaction;
@@ -64,3 +65,6 @@ pub use work_question::{
     WorkQuestionAnswer, WorkQuestionOption, WorkQuestionRegistry, WorkQuestionRequest,
     global_work_question_registry,
 };
+pub mod reference_research;
+pub mod coding_event_log;
+pub mod coding_event_capture;

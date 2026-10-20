@@ -131,10 +131,33 @@ impl Tool for UseSkillTool {
         // 限定当前角色可见的技能（全局 + 该角色 scoped）
         let skill = svc.list_for(&char_id).into_iter().find(|s| s.name == name);
         match skill {
-            Some(s) => ToolResult::standard_success(
-                &format!("技能「{}」使用指导已加载；它不执行操作、不授予权限，也不安装工具。只使用已注册且获准的能力，缺少能力时说明限制：\n\n{}", s.name, s.body),
-                Some(json!({ "name": s.name, "activated": true, "kind": "usage_guidance", "executes": false })),
-            ),
+            Some(s) => {
+                let resources_hint = if s.resources.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        "\n\n该技能目录内还带有以下支撑资源（当前任务确实需要时再用 read_file 读取，不必全部预读）：\n{}",
+                        s.resources
+                            .iter()
+                            .map(|relative| format!("- {relative}"))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    )
+                };
+                ToolResult::standard_success(
+                    &format!(
+                        "技能「{}」使用指导已加载；它不执行操作、不授予权限，也不安装工具。只使用已注册且获准的能力，缺少能力时说明限制：\n\n{}{}",
+                        s.name, s.body, resources_hint
+                    ),
+                    Some(json!({
+                        "name": s.name,
+                        "activated": true,
+                        "kind": "usage_guidance",
+                        "executes": false,
+                        "resources": s.resources,
+                    })),
+                )
+            }
             None => {
                 // 附带可见技能列表，方便 LLM 纠正名称后重试
                 let available: Vec<String> =
@@ -186,17 +209,50 @@ impl Default for CreateSkillTool {
     }
 }
 
-/// 技能名合法性：字母 / 数字 / `_` / `-` / 中日韩表意文字，长度 ≤ 64。
-/// 拒绝空白与路径分隔符，防止写出技能目录或路径穿越。
-fn is_valid_skill_name(name: &str) -> bool {
-    !name.is_empty()
-        && name.chars().count() <= 64
-        && name.chars().all(|c| {
-            c.is_ascii_alphanumeric()
-                || c == '_'
-                || c == '-'
-                || ('\u{4e00}'..='\u{9fff}').contains(&c)
-        })
+/// 解析 `resources` 入参：接受 `[{path, content}]`，校验路径白名单与配额。
+///
+/// 路径只允许 `references/` 或 `scripts/` 下的一层普通文件名；单文件 ≤256 KiB、
+/// 合计 ≤1 MiB、条数 ≤20。
+fn parse_resource_inputs(value: Option<&Value>) -> Result<Vec<(String, String)>, String> {
+    const MAX_FILES: usize = 20;
+    const MAX_FILE_BYTES: usize = 256 * 1024;
+    const MAX_TOTAL_BYTES: usize = 1024 * 1024;
+    let Some(value) = value else { return Ok(Vec::new()) };
+    let Some(items) = value.as_array() else {
+        return Err("resources 必须是 [{path, content}] 数组".into());
+    };
+    if items.len() > MAX_FILES {
+        return Err(format!("resources 最多 {MAX_FILES} 个文件"));
+    }
+    let mut out: Vec<(String, String)> = Vec::with_capacity(items.len());
+    let mut total = 0usize;
+    for item in items {
+        let path = item
+            .get("path")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        let content = item
+            .get("content")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        if !crate::skills::is_safe_skill_rel_path(&path) {
+            return Err(format!(
+                "资源路径「{path}」不合法：仅允许 references/ 或 scripts/ 下的一层文件名"
+            ));
+        }
+        if content.len() > MAX_FILE_BYTES {
+            return Err(format!("资源「{path}」超过 256 KiB"));
+        }
+        total = total.saturating_add(content.len());
+        if total > MAX_TOTAL_BYTES {
+            return Err("resources 合计超过 1 MiB".into());
+        }
+        out.push((path, content));
+    }
+    Ok(out)
 }
 
 #[async_trait]
@@ -206,19 +262,19 @@ impl Tool for CreateSkillTool {
     }
 
     fn description(&self) -> &str {
-        "Create or update a reusable skill: a markdown instruction file saved to the skills \
-         directory and registered immediately. Use this to distill a reusable procedure \
-         (e.g. how you handled a multi-step task) into a named skill, so it appears in the \
-         '## 可用技能' list and can be activated later via use_skill. Provide keywords (synonyms, \
-         trigger phrases, related terms) so search_skill can recall it later by natural language. \
+        "Create or update a reusable skill and register it immediately. New skills are written \
+         as a folder `<name>/SKILL.md`; optional text resources go under `references/` or \
+         `scripts/`. Use this to distill a reusable procedure into a named skill, so it appears \
+         in the '## 可用技能' list and can be activated later via use_skill. Provide keywords \
+         (synonyms, trigger phrases, related terms) so search_skill can recall it later. \
          Same-name skills are overwritten."
     }
 
     fn description_in(&self, lang: &str) -> &str {
         match lang {
-            "zh" => "创建或更新一项可复用技能：以 Markdown 指引文件保存到技能目录并立即注册。\
-            当你总结出一套值得复用的做法（如某类多步骤任务的处理流程）时，把它沉淀为命名技能，\
-            技能会出现在「## 可用技能」列表中，之后通过 use_skill 激活。\
+            "zh" => "创建或更新一项可复用技能，并立即注册。新技能以目录形态写入 `<name>/SKILL.md`，\
+            可选文本资源放在 `references/` 或 `scripts/` 下。当你总结出一套值得复用的做法时，\
+            把它沉淀为命名技能，技能会出现在「## 可用技能」列表中，之后通过 use_skill 激活。\
             请提供 keywords（同义词、触发短语、相关词），以便之后 search_skill 能用自然语言召回它。\
             同名技能会被覆盖更新。",
             "ja" => "再利用可能なスキルを作成・更新する：Markdown 形式の指示ファイルとしてスキルディレクトリに保存し、即座に登録する。\
@@ -259,6 +315,23 @@ impl Tool for CreateSkillTool {
                     "type": "array",
                     "items": { "type": "string" },
                     "description": "Optional retrieval terms (synonyms, trigger phrases, related words) used by search_skill to recall this skill; not shown in the 可用技能 list"
+                },
+                "layout": {
+                    "type": "string",
+                    "enum": ["auto", "folder", "flat"],
+                    "description": "Storage layout. 'auto' (default) updates an existing flat file, otherwise creates a folder; 'folder' forces <name>/SKILL.md; 'flat' forces <name>.md"
+                },
+                "resources": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "path": { "type": "string", "description": "Relative path under references/ or scripts/, single level (e.g. references/notes.md)" },
+                            "content": { "type": "string" }
+                        },
+                        "required": ["path", "content"]
+                    },
+                    "description": "Optional text resources written alongside SKILL.md (folder layout only); existing files not mentioned are kept"
                 }
             },
             "required": ["name", "description", "body"]
@@ -286,6 +359,23 @@ impl Tool for CreateSkillTool {
                         "type": "array",
                         "items": { "type": "string" },
                         "description": "可选检索词（同义词、触发短语、相关词），供 search_skill 召回此技能；不显示在「可用技能」列表中"
+                    },
+                    "layout": {
+                        "type": "string",
+                        "enum": ["auto", "folder", "flat"],
+                        "description": "存储布局：auto（默认）已有单文件则续写、否则建目录；folder 强制 <名称>/SKILL.md；flat 强制 <名称>.md"
+                    },
+                    "resources": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "path": { "type": "string", "description": "references/ 或 scripts/ 下的一层相对路径（如 references/notes.md）" },
+                                "content": { "type": "string" }
+                            },
+                            "required": ["path", "content"]
+                        },
+                        "description": "可选文本资源，与 SKILL.md 一起写入（仅目录布局）；未提及的既有文件不会被删除"
                     }
                 },
                 "required": ["name", "description", "body"]
@@ -309,6 +399,23 @@ impl Tool for CreateSkillTool {
                         "type": "array",
                         "items": { "type": "string" },
                         "description": "任意の検索語（同義語・トリガー句・関連語）。search_skill がこのスキルを召回するのに使用、「可用技能」リストには表示されない"
+                    },
+                    "layout": {
+                        "type": "string",
+                        "enum": ["auto", "folder", "flat"],
+                        "description": "保存レイアウト：auto（既定）既存の単一ファイルを更新、無ければフォルダ作成；folder は <名前>/SKILL.md；flat は <名前>.md"
+                    },
+                    "resources": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "path": { "type": "string", "description": "references/ または scripts/ 直下の相対パス（例 references/notes.md）" },
+                                "content": { "type": "string" }
+                            },
+                            "required": ["path", "content"]
+                        },
+                        "description": "SKILL.md と一緒に書き込む任意のテキスト資源（フォルダレイアウトのみ）。未指定の既存ファイルは削除されない"
                     }
                 },
                 "required": ["name", "description", "body"]
@@ -328,7 +435,7 @@ impl Tool for CreateSkillTool {
         if name.is_empty() {
             return ValidationResult::failure("name 是必填项", 2);
         }
-        if !is_valid_skill_name(name) {
+        if !crate::skills::is_valid_skill_name(name) {
             return ValidationResult::failure(
                 "技能名仅允许字母、数字、下划线、连字符或中文（≤64 字符），禁止空白与路径分隔符",
                 2,
@@ -389,7 +496,7 @@ impl Tool for CreateSkillTool {
         };
 
         // 兜底校验（validate_input 已挡一道）
-        if !is_valid_skill_name(&name) || description.is_empty() || body.is_empty() {
+        if !crate::skills::is_valid_skill_name(&name) || description.is_empty() || body.is_empty() {
             return ToolResult::standard_error(
                 "参数不合法：name/description/body 均必填；name 仅允许字母、数字、下划线、连字符或中文",
                 None,
@@ -397,13 +504,23 @@ impl Tool for CreateSkillTool {
             );
         }
 
-        // 内置风格预设不可覆盖
+        // 内置技能不可覆盖
         if crate::skills::BUILTIN_SKILL_NAMES.contains(&name.as_str()) {
             return ToolResult::standard_error(
-                &format!("「{name}」是内置风格预设技能，不可覆盖。请换一个技能名。"),
+                &format!("「{name}」是内置技能，不可覆盖。请换一个技能名。"),
                 None,
                 None,
             );
+        }
+
+        // 可选资源：仅 references/ 或 scripts/ 下的一层文件
+        let resources = match parse_resource_inputs(args.get("resources")) {
+            Ok(resources) => resources,
+            Err(error) => return ToolResult::standard_error(&error, None, None),
+        };
+        let layout = args.get("layout").and_then(|v| v.as_str()).unwrap_or("auto");
+        if !matches!(layout, "auto" | "folder" | "flat") {
+            return ToolResult::standard_error("layout 只能是 auto / folder / flat", None, None);
         }
 
         let Some(svc) = crate::cordis::global_ctx()
@@ -413,11 +530,30 @@ impl Tool for CreateSkillTool {
         };
 
         let dir = crate::skills::SkillService::default_dir();
-        let file = dir.join(format!("{name}.md"));
-        let is_update = file.exists();
-
         if let Err(e) = std::fs::create_dir_all(&dir) {
             return ToolResult::standard_error(&format!("创建技能目录失败: {e}"), None, None);
+        }
+
+        // 布局决策：auto 续写已有单文件，否则建目录（避免同名 flat + folder 双份）
+        let flat_file = dir.join(format!("{name}.md"));
+        let use_flat = match layout {
+            "flat" => true,
+            "folder" => false,
+            _ => flat_file.is_file(),
+        };
+        if !use_flat && flat_file.is_file() {
+            return ToolResult::standard_error(
+                &format!("已存在单文件技能「{name}.md」，与目录布局冲突：请删除它，或改用 layout=\"flat\""),
+                None,
+                None,
+            );
+        }
+        if use_flat && !resources.is_empty() {
+            return ToolResult::standard_error(
+                "单文件布局不支持 resources；请改用 layout=\"folder\" 以获得技能目录",
+                None,
+                None,
+            );
         }
 
         // front-matter 要求单行，description 内的换行替换为空格；keywords 逗号连接
@@ -427,34 +563,86 @@ impl Tool for CreateSkillTool {
             "---\nname: {name}\ndescription: {desc_one_line}\nkeywords: {kw_line}\n---\n\n{body}\n"
         );
 
-        if let Err(e) = std::fs::write(&file, content) {
+        // 写入前自检：形态问题作为 warnings 回传，不阻断
+        let validation = crate::skills::validate::validate_skill_text(&name, &content);
+        let warnings: Vec<String> = validation
+            .issues
+            .iter()
+            .filter(|issue| issue.level == "warning")
+            .map(|issue| issue.message.clone())
+            .collect();
+
+        let base_dir = if use_flat { dir.clone() } else { dir.join(&name) };
+        let skill_file = if use_flat {
+            flat_file.clone()
+        } else {
+            base_dir.join("SKILL.md")
+        };
+        let is_update = skill_file.exists();
+        if let Err(e) = std::fs::create_dir_all(&base_dir) {
+            return ToolResult::standard_error(&format!("创建技能目录失败: {e}"), None, None);
+        }
+        if let Err(e) = std::fs::write(&skill_file, content) {
             return ToolResult::standard_error(&format!("写入技能文件失败: {e}"), None, None);
         }
 
+        // 资源 upsert：只写传入项，未提及的既有文件保留
+        for (relative, text) in &resources {
+            let target = base_dir.join(relative);
+            if let Some(parent) = target.parent() {
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    return ToolResult::standard_error(&format!("创建资源目录失败: {e}"), None, None);
+                }
+            }
+            if let Err(e) = std::fs::write(&target, text) {
+                return ToolResult::standard_error(
+                    &format!("写入资源「{relative}」失败: {e}"),
+                    None,
+                    None,
+                );
+            }
+        }
+
         // 立即注册（不等 30s 热重载），写入后即可 use_skill 激活
-        svc.replace_or_register(
-            crate::skills::Skill::global(name.clone(), desc_one_line.clone(), body)
-                .with_keywords(keywords.clone()),
-        );
+        let mut skill = crate::skills::Skill::global(name.clone(), desc_one_line.clone(), body)
+            .with_keywords(keywords.clone())
+            .with_path(if use_flat {
+                flat_file.display().to_string()
+            } else {
+                base_dir.display().to_string()
+            });
+        if !use_flat {
+            skill = skill.with_resources(crate::skills::collect_skill_resources(&base_dir));
+        }
+        svc.replace_or_register(skill);
 
         tracing::info!(
             "[create_skill] 技能「{}」已{}（{}）",
             name,
             if is_update { "更新" } else { "创建" },
-            file.display()
+            skill_file.display()
         );
 
+        let warnings_hint = if warnings.is_empty() {
+            String::new()
+        } else {
+            format!("；自检提示：{}", warnings.join("；"))
+        };
         ToolResult::standard_success(
             &format!(
-                "技能「{name}」已{}，立即生效（含 {} 个检索关键词）。之后可随时调用 use_skill(\"{name}\") 按其指引行动，或用 search_skill 按关键词召回。",
+                "技能「{name}」已{}，立即生效（含 {} 个检索关键词{}）。之后可随时调用 use_skill(\"{name}\") 按其指引行动，或用 search_skill 按关键词召回。",
                 if is_update { "更新" } else { "创建" },
-                keywords.len()
+                keywords.len(),
+                warnings_hint
             ),
             Some(json!({
                 "name": name,
-                "file": file.display().to_string(),
+                "file": skill_file.display().to_string(),
+                "layout": if use_flat { "flat" } else { "folder" },
                 "created": !is_update,
                 "keywords": keywords,
+                "resources": resources.iter().map(|(path, _)| path.clone()).collect::<Vec<_>>(),
+                "warnings": warnings,
             })),
         )
     }
@@ -688,5 +876,238 @@ impl Tool for SearchSkillTool {
             "搜索工具而非技能（改用 tool_search）",
             "搜索记忆事实（改用 memory_search）",
         ]
+    }
+}
+
+/// 解析已注册技能用于校验：内置技能与单文件技能返回正文，目录化技能返回其目录。
+fn resolve_skill_for_validation(name: &str) -> Option<Result<std::path::PathBuf, String>> {
+    let svc = crate::cordis::global_ctx()
+        .and_then(|ctx| ctx.get_service::<crate::skills::SkillService>())?;
+    let skill = svc.find(name)?;
+    let Some(path) = skill.path.clone() else {
+        return Some(Err(skill.body));
+    };
+    let candidate = std::path::PathBuf::from(&path);
+    if candidate.is_dir() {
+        Some(Ok(candidate))
+    } else {
+        Some(Err(skill.body))
+    }
+}
+
+/// validate_skill 工具 - 交付前校验技能形态：front-matter、命名、占位符与目录卫生。
+///
+/// 传 `name` 校验已注册技能（含内置技能与插件技能）；传 `content` 校验草稿文本。
+/// 两者都给出时以 `content` 为准，`name` 作兜底技能名。只读，无副作用。
+pub struct ValidateSkillTool;
+
+impl ValidateSkillTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for ValidateSkillTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl Tool for ValidateSkillTool {
+    fn name(&self) -> &str {
+        "validate_skill"
+    }
+
+    fn description(&self) -> &str {
+        "Validate a skill's shape before shipping it: front-matter, naming, unfinished placeholders \
+         and stray auxiliary docs. Pass `name` to check an existing skill, or `content` to check \
+         draft text (with `name` as the fallback skill name). Read-only."
+    }
+
+    fn description_in(&self, lang: &str) -> &str {
+        match lang {
+            "zh" => "交付前校验技能形态：front-matter 是否完整、命名是否合规、有没有未完成的占位符与多余附属文档。\
+            传 `name` 校验已注册技能（含内置与插件技能）；传 `content` 校验草稿文本（`name` 作兜底技能名）。\
+            只读，无副作用。",
+            "ja" => "納品前にスキルの形を検証する：front-matter・命名・未完成プレースホルダ・余計な付属文書。\
+            `name` で登録済みスキル、`content` で草稿テキスト（`name` をフォールバック名に）。読み取り専用。",
+            _ => self.description(),
+        }
+    }
+
+    fn usage_corpus(&self, lang: &str) -> &'static str {
+        match lang {
+            "zh" => "校验技能\n检查技能格式\n技能写对了吗",
+            "en" => "validate this skill\ncheck the skill format",
+            "ja" => "スキルを検証して\nスキルの形式を確認して",
+            _ => "",
+        }
+    }
+
+    fn parameters_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Existing skill name to validate (builtin and plugin skills included)"
+                },
+                "content": {
+                    "type": "string",
+                    "description": "Draft SKILL.md text to validate; when both are given, content wins and name is the fallback skill name"
+                }
+            }
+        })
+    }
+
+    fn parameters_schema_in(&self, lang: &str) -> Value {
+        match lang {
+            "zh" => json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "要校验的已注册技能名（含内置与插件技能）" },
+                    "content": { "type": "string", "description": "要校验的 SKILL.md 草稿文本；同时给出时以 content 为准，name 作兜底技能名" }
+                }
+            }),
+            "ja" => json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "検証する登録済みスキル名（組み込み・プラグイン含む）" },
+                    "content": { "type": "string", "description": "検証する SKILL.md 草稿。両方指定時は content 優先、name はフォールバック名" }
+                }
+            }),
+            _ => self.parameters_schema(),
+        }
+    }
+
+    async fn validate_input(&self, input: &Value, _context: &ToolUseContext) -> ValidationResult {
+        let has_name = input
+            .get("name")
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| !s.trim().is_empty());
+        let has_content = input
+            .get("content")
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| !s.trim().is_empty());
+        if !has_name && !has_content {
+            return ValidationResult::failure("name 与 content 至少给一项", 2);
+        }
+        ValidationResult::success(None)
+    }
+
+    async fn check_permissions(&self, _input: &Value, _context: &ToolUseContext) -> PermissionResult {
+        PermissionResult::allow()
+    }
+
+    async fn call(&self, args: Value, _context: &ToolUseContext) -> ToolResult {
+        let name = args
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        let content = args
+            .get("content")
+            .and_then(|v| v.as_str())
+            .filter(|c| !c.trim().is_empty());
+        let draft = content.map(|c| c.to_string());
+
+        let (validation, target) = if let Some(draft) = draft {
+            let fallback = if name.is_empty() { "skill".to_string() } else { name.clone() };
+            (
+                crate::skills::validate::validate_skill_text(&fallback, &draft),
+                format!("草稿文本（兜底名 {fallback}）"),
+            )
+        } else if !name.is_empty() {
+            match resolve_skill_for_validation(&name) {
+                Some(Ok(dir)) => (
+                    crate::skills::validate::validate_skill_dir(&dir),
+                    dir.display().to_string(),
+                ),
+                Some(Err(body)) => (
+                    crate::skills::validate::validate_skill_text(&name, &body),
+                    format!("技能「{name}」"),
+                ),
+                None => {
+                    return ToolResult::standard_error(&format!("未找到技能「{name}」"), None, None)
+                }
+            }
+        } else {
+            return ToolResult::standard_error("name 与 content 至少给一项", None, None);
+        };
+
+        let ok = validation.ok;
+        let lines: Vec<String> = validation
+            .issues
+            .iter()
+            .map(|issue| format!("[{}] {}：{}", issue.level, issue.code, issue.message))
+            .collect();
+        let summary = if lines.is_empty() {
+            format!("技能校验通过（{target}），未发现问题。")
+        } else {
+            format!(
+                "技能校验{}（{target}）：\n{}",
+                if ok { "通过（含提示）" } else { "未通过" },
+                lines.join("\n")
+            )
+        };
+        ToolResult::standard_success(
+            &summary,
+            Some(json!({ "ok": ok, "issues": validation.issues, "target": target })),
+        )
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::System
+    }
+
+    fn risk(&self) -> ToolRiskTier {
+        ToolRiskTier::FsRead
+    }
+
+    fn search_hint(&self) -> &str {
+        "validate skill 校验技能 检查技能格式 skill check lint 形态"
+    }
+
+    fn anti_use_cases(&self) -> &[&str] {
+        &[
+            "创建或更新技能（改用 create_skill）",
+            "加载技能正文（改用 use_skill）",
+        ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resource_inputs_enforce_path_whitelist_and_quota() {
+        let value = json!([{ "path": "references/a.md", "content": "x" }]);
+        let parsed = parse_resource_inputs(Some(&value)).unwrap();
+        assert_eq!(parsed, vec![("references/a.md".to_string(), "x".to_string())]);
+
+        for bad in ["../evil.md", "/abs.md", "assets/a.png", "references/a/b.md", "con.md"] {
+            let value = json!([{ "path": bad, "content": "x" }]);
+            assert!(parse_resource_inputs(Some(&value)).is_err(), "{bad}");
+        }
+
+        let too_many: Vec<Value> = (0..21)
+            .map(|i| json!({ "path": format!("references/{i}.md"), "content": "x" }))
+            .collect();
+        assert!(parse_resource_inputs(Some(&json!(too_many))).is_err());
+
+        assert!(parse_resource_inputs(None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn builtin_guard_blocks_guide_skills() {
+        assert!(crate::skills::BUILTIN_SKILL_NAMES.contains(&"review-agent"));
+        assert!(crate::skills::BUILTIN_SKILL_NAMES.contains(&"skill-creator"));
     }
 }

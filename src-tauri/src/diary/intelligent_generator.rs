@@ -70,6 +70,8 @@ pub struct LingeringThought {
 
 #[derive(Debug, Clone, Default)]
 pub struct InteractionRecord {
+    /// 来源记忆条目 ID：成长证据必须锚定到已保存的记录，模型给出的 ID 一律不采信。
+    pub memory_id: String,
     pub role: String,
     pub content: String,
     pub timestamp: f64,
@@ -173,6 +175,26 @@ pub async fn generate_intelligent_diary(
     {
         tracing::warn!("[DiaryGenerator] 日记索引到记忆失败: {e}");
     }
+
+    // 日记写完立刻做一次归纳：把当天的互动沉淀成场景化自我理解。
+    // 后台跑、失败只告警，不影响日记返回与前端。
+    let growth_brain = brain.clone();
+    let growth_context = ctx;
+    let growth_diary = saved.content.clone();
+    tokio::spawn(async move {
+        match tokio::time::timeout(
+            super::growth::GROWTH_TIMEOUT,
+            super::growth::run_diary_growth(&growth_brain, &growth_context, &growth_diary),
+        )
+        .await
+        {
+            Ok(Ok((submitted, promoted))) => tracing::info!(
+                "[DiaryGrowth] 归纳完成: 提交 {submitted} 条, 当场晋升 {promoted} 条"
+            ),
+            Ok(Err(e)) => tracing::warn!("[DiaryGrowth] 归纳失败: {e}"),
+            Err(_) => tracing::warn!("[DiaryGrowth] 归纳超时"),
+        }
+    });
 
     Ok(saved)
 }
@@ -588,6 +610,7 @@ fn extract_user_dialogue(memories: Vec<MemoryItem>) -> Vec<InteractionRecord> {
         };
 
         records.push(InteractionRecord {
+            memory_id: mem.id.clone(),
             role,
             content: mem.content.clone(),
             timestamp: mem.timestamp,
@@ -1263,7 +1286,7 @@ pub fn parse_diary_json(response: &str) -> DiaryContent {
 }
 
 /// 剥离 markdown 代码块围栏（```json ... ``` 或 ``` ... ```）
-fn strip_markdown_code_fence(s: &str) -> &str {
+pub(crate) fn strip_markdown_code_fence(s: &str) -> &str {
     let s = s.trim_start();
     if let Some(rest) = s.strip_prefix("```") {
         // 跳过语言标记（如 json）
@@ -1396,6 +1419,7 @@ mod tests {
     fn test_calculate_trigger_score_with_interactions() {
         let interactions = vec![
             InteractionRecord {
+                memory_id: "m-user".to_string(),
                 role: "user".to_string(),
                 content: "你好".to_string(),
                 timestamp: 0.0,
@@ -1404,6 +1428,7 @@ mod tests {
                 listener: "vivian".to_string(),
             },
             InteractionRecord {
+                memory_id: "m-character".to_string(),
                 role: "assistant".to_string(),
                 content: "你好呀".to_string(),
                 timestamp: 0.0,
@@ -1419,6 +1444,7 @@ mod tests {
     #[test]
     fn test_calculate_trigger_score_with_mood() {
         let interactions = vec![InteractionRecord {
+            memory_id: "m-user".to_string(),
             role: "user".to_string(),
             content: "今天天气真好啊我们一起出去玩吧".to_string(),
             timestamp: 0.0,
@@ -1460,6 +1486,7 @@ mod tests {
             char_name: "Vivian".to_string(),
             char_cn_name: "Vivian".to_string(),
             interactions: vec![InteractionRecord {
+                memory_id: "m-user".to_string(),
                 role: "user".to_string(),
                 content: "你好".to_string(),
                 timestamp: 0.0,

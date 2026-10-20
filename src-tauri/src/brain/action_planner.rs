@@ -652,6 +652,7 @@ mod tests {
             idle_seconds: 60.0,
             away_seconds: 0.0,
             user_present: true,
+            user_contact_blocked: false,
             interaction_count_today: 5,
             active_window: "VSCode".to_string(),
             window_changed: false,

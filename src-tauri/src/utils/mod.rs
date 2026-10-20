@@ -1,8 +1,11 @@
 pub mod protocol_text;
 pub mod autostart;
 pub mod cancel_token;
+pub mod background_priority;
 pub mod environment;
 pub mod fs;
+pub mod assets;
+pub mod sqlite;
 pub mod job_object;
 pub mod path;
 pub mod pid_file;
@@ -11,8 +14,11 @@ pub mod playback_gate;
 pub mod powershell;
 pub mod proactive_leader;
 pub mod process;
+pub mod sandbox_policy;
 #[cfg(windows)]
 pub mod sandbox;
+#[cfg(windows)]
+pub mod sandbox_workspace;
 pub mod session_coordinator;
 pub mod system_idle;
 pub mod token_estimate;

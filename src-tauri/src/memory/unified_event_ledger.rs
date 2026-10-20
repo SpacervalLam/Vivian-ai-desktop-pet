@@ -22,16 +22,18 @@
 //! - `commands/pet_reaction.rs` 用户对桌宠的物理动作注册为 `user_pet_action`
 //! - `PromptBuildingStep` 读取近期事件注入 prompt 的"环境事件"段落
 
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 
 use once_cell::sync::Lazy;
 use parking_lot::{Mutex, RwLock};
+use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
 use tauri::{AppHandle, Emitter};
 
-use crate::error::VivianResult;
+use crate::error::{VivianError, VivianResult};
 
 /// 事件内容预览的最大字符数
 const CONTENT_PREVIEW_MAX_CHARS: usize = 80;
@@ -191,10 +193,142 @@ impl LedgerInner {
     }
 }
 
+/// 共享桶在数据库中的 bucket 值：空串表示 Public 共享桶，非空为角色 ID。
+const PUBLIC_BUCKET: &str = "";
+
+/// 事件账本数据库初始化：事件表（id 主键 + 所属桶 + 事件 JSON）与桶索引。
+fn create_ledger_schema(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY, bucket TEXT NOT NULL, json TEXT NOT NULL);
+         CREATE INDEX IF NOT EXISTS idx_events_bucket ON events(bucket);",
+    )
+}
+
+/// 行级持久化封装：一条事件一行，`bucket` 记录归属桶（空串=共享桶）。
+///
+/// `persisted` 保存 `id -> (bucket, json)` 快照；每次保存只 upsert 新增/变化的事件行、
+/// 删除已移除的事件行，未变化的事件行不会被重写。
+struct LedgerDb {
+    conn: Connection,
+    persisted: HashMap<String, (String, String)>,
+}
+
+impl LedgerDb {
+    fn open(path: &Path) -> VivianResult<Self> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| VivianError::Memory(format!("创建事件账本目录失败: {e}")))?;
+        }
+        let mut conn = Connection::open(path)
+            .map_err(|e| VivianError::Memory(format!("打开事件账本数据库失败: {e}")))?;
+        Self::initialize(&mut conn)?;
+        Ok(Self {
+            conn,
+            persisted: HashMap::new(),
+        })
+    }
+
+    fn in_memory() -> VivianResult<Self> {
+        let mut conn = Connection::open_in_memory()
+            .map_err(|e| VivianError::Memory(format!("打开事件账本内存库失败: {e}")))?;
+        Self::initialize(&mut conn)?;
+        Ok(Self {
+            conn,
+            persisted: HashMap::new(),
+        })
+    }
+
+    fn initialize(conn: &mut Connection) -> VivianResult<()> {
+        crate::utils::sqlite::configure(conn, crate::utils::sqlite::DataClass::Authoritative)
+            .map_err(|e| VivianError::Memory(format!("设置事件账本库参数失败: {e}")))?;
+        create_ledger_schema(conn)
+            .map_err(|e| VivianError::Memory(format!("初始化事件账本库失败: {e}")))?;
+        conn.prepare("SELECT id, bucket, json FROM events LIMIT 0")
+            .map_err(|e| VivianError::Memory(format!("事件账本表结构无效: {e}")))?;
+        Ok(())
+    }
+
+    /// 是否为空库（用于判定是否需要导入旧 JSON）。
+    fn is_empty(&self) -> bool {
+        self.conn
+            .query_row("SELECT count(*) FROM events", [], |r| r.get::<_, i64>(0))
+            .map(|n| n == 0)
+            .unwrap_or(false)
+    }
+
+    fn read_rows(&self) -> VivianResult<Vec<(String, String, String)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, bucket, json FROM events")
+            .map_err(|e| VivianError::Memory(format!("查询事件失败: {e}")))?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(|e| VivianError::Memory(format!("遍历事件失败: {e}")))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(|e| VivianError::Memory(format!("读取事件行失败: {e}")))?);
+        }
+        Ok(out)
+    }
+
+    /// 单事务内执行行级 upsert/delete。
+    fn apply(&mut self, upserts: &[(String, String, String)], deletes: &[String]) -> VivianResult<()> {
+        if upserts.is_empty() && deletes.is_empty() {
+            return Ok(());
+        }
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|e| VivianError::Memory(format!("开启事务失败: {e}")))?;
+        {
+            let mut stmt = tx
+                .prepare(
+                    "INSERT INTO events(id, bucket, json) VALUES(?1, ?2, ?3)
+                     ON CONFLICT(id) DO UPDATE SET bucket = excluded.bucket, json = excluded.json",
+                )
+                .map_err(|e| VivianError::Memory(format!("准备写入语句失败: {e}")))?;
+            for (id, bucket, json) in upserts {
+                stmt.execute([id.as_str(), bucket.as_str(), json.as_str()])
+                    .map_err(|e| VivianError::Memory(format!("写入事件行失败: {e}")))?;
+            }
+        }
+        {
+            let mut stmt = tx
+                .prepare("DELETE FROM events WHERE id = ?1")
+                .map_err(|e| VivianError::Memory(format!("准备删除语句失败: {e}")))?;
+            for id in deletes {
+                stmt.execute([id.as_str()])
+                    .map_err(|e| VivianError::Memory(format!("删除事件行失败: {e}")))?;
+            }
+        }
+        tx.commit()
+            .map_err(|e| VivianError::Memory(format!("提交事务失败: {e}")))?;
+        Ok(())
+    }
+}
+
+/// 桶内事件排序键：时间升序 + id 稳定次级键。
+///
+/// 桶在内存中按写入顺序保持时间升序（append 追加、压缩摘要插到最前、回填按时间合并），
+/// 因此从数据库重建时按同一规则排序即可还原既有顺序与压缩语义。
+fn event_order(a: &UnifiedEvent, b: &UnifiedEvent) -> std::cmp::Ordering {
+    a.timestamp
+        .partial_cmp(&b.timestamp)
+        .unwrap_or(std::cmp::Ordering::Equal)
+        .then_with(|| a.id.cmp(&b.id))
+}
+
 /// 统一事件账本引擎
 pub struct UnifiedEventLedger {
     inner: RwLock<LedgerInner>,
-    persistence_path: PathBuf,
+    /// 行级 SQLite 存储；初始化失败时为 None（退化为纯内存态）
+    db: Option<Mutex<LedgerDb>>,
     /// Tauri AppHandle（注入后启用 `ledger:event-added` 事件通知）
     app_handle: Mutex<Option<AppHandle>>,
     /// 是否正在进行 LLM 摘要压缩（防止并发压缩）
@@ -208,7 +342,7 @@ static UNIFIED_EVENT_LEDGER: Lazy<Arc<UnifiedEventLedger>> = Lazy::new(|| {
         tracing::error!("[UnifiedEventLedger] 引擎初始化失败，使用空状态: {e}");
         UnifiedEventLedger {
             inner: RwLock::new(LedgerInner::default()),
-            persistence_path: PathBuf::from("unified_event_ledger.json"),
+            db: LedgerDb::in_memory().ok().map(Mutex::new),
             app_handle: Mutex::new(None),
             compacting: std::sync::atomic::AtomicBool::new(false),
             router: Mutex::new(None),
@@ -228,10 +362,16 @@ impl UnifiedEventLedger {
     fn new() -> VivianResult<Self> {
         let dir = crate::utils::path::get_companion_shared_dir().join("memory");
         std::fs::create_dir_all(&dir)?;
-        let path = dir.join("unified_event_ledger.json");
+        let legacy_json = dir.join("unified_event_ledger.json");
+        let db_path = dir.join("unified_event_ledger.db");
+        let mut db = LedgerDb::open(&db_path)?;
+        // 首次迁移：库为空且存在旧 JSON 时导入，成功后归档旧文件（不删除用户数据）
+        if db.is_empty() && legacy_json.exists() {
+            Self::import_legacy_json(&mut db, &legacy_json)?;
+        }
         let mut engine = Self {
             inner: RwLock::new(LedgerInner::default()),
-            persistence_path: path,
+            db: Some(Mutex::new(db)),
             app_handle: Mutex::new(None),
             compacting: std::sync::atomic::AtomicBool::new(false),
             router: Mutex::new(None),
@@ -240,30 +380,157 @@ impl UnifiedEventLedger {
         Ok(engine)
     }
 
-    fn load(&mut self) -> VivianResult<()> {
-        if !self.persistence_path.exists() {
+    /// 一次性迁移：把旧 `unified_event_ledger.json` 导入数据库，成功后归档为 `.json.migrated`。
+    ///
+    /// 兼容旧版单 Vec 格式（`events` 字段）——先经 `migrate_from_legacy` 分桶再入库。
+    /// 失败时不阻塞启动、不改动旧文件（下次启动可重试）。
+    fn import_legacy_json(db: &mut LedgerDb, json_path: &Path) -> VivianResult<()> {
+        let content = match std::fs::read_to_string(json_path) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!("[UnifiedEventLedger] 读取旧事件账本失败，跳过迁移: {e}");
+                return Ok(());
+            }
+        };
+        let file_name = json_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let migrated = json_path.with_file_name(format!("{file_name}.migrated"));
+        if content.trim().is_empty() {
+            // 空文件也归档，避免反复解析
+            let _ = std::fs::rename(json_path, &migrated);
             return Ok(());
         }
-        let Some(inner) = crate::utils::fs::load_json_or_backup::<LedgerInner>(&self.persistence_path) else {
-            return Ok(());
+        let mut inner: LedgerInner = match serde_json::from_str(&content) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("[UnifiedEventLedger] 解析旧事件账本失败，跳过迁移: {e}");
+                return Ok(());
+            }
         };
-        let mut inner = inner;
         // 旧格式迁移：单 Vec → 分桶
         if !inner.events.is_empty() {
             inner.migrate_from_legacy();
         }
-        let removed = inner.purge_expired(chrono::Utc::now().timestamp() as f64);
-        if removed > 0 {
-            Self::save_inner(&inner, &self.persistence_path)?;
+        let mut rows: Vec<(String, String, String)> = Vec::new();
+        for event in &inner.public_events {
+            rows.push((
+                event.id.clone(),
+                PUBLIC_BUCKET.to_string(),
+                serde_json::to_string(event)?,
+            ));
         }
-        *self.inner.write() = inner;
+        for (bucket, events) in &inner.character_events {
+            for event in events {
+                rows.push((
+                    event.id.clone(),
+                    bucket.clone(),
+                    serde_json::to_string(event)?,
+                ));
+            }
+        }
+        db.apply(&rows, &[])?;
+        for (id, bucket, json) in rows {
+            db.persisted.insert(id, (bucket, json));
+        }
+        tracing::info!(
+            "[UnifiedEventLedger] 旧 JSON 迁移完成: {} 条事件",
+            db.persisted.len()
+        );
+        if let Err(e) = std::fs::rename(json_path, &migrated) {
+            tracing::warn!("[UnifiedEventLedger] 归档旧事件账本失败: {e}");
+        }
         Ok(())
     }
 
-    fn save_inner(inner: &LedgerInner, path: &std::path::Path) -> VivianResult<()> {
-        let json = serde_json::to_string_pretty(inner)?;
-        // 原子写：自带 fsync + UUID 临时名，比手写 tmp + rename 多一层断电保护与并发安全
-        crate::utils::fs::write_atomic(path, &json)?;
+    fn load(&mut self) -> VivianResult<()> {
+        let now = chrono::Utc::now().timestamp() as f64;
+        let mut inner = LedgerInner::default();
+        let removed;
+        {
+            let Some(db_mutex) = self.db.as_ref() else {
+                *self.inner.write() = inner;
+                return Ok(());
+            };
+            let mut db = db_mutex.lock();
+            let rows = db.read_rows()?;
+            let mut snapshot: HashMap<String, (String, String)> = HashMap::with_capacity(rows.len());
+            for (id, bucket, json) in rows {
+                snapshot.insert(id, (bucket.clone(), json.clone()));
+                match serde_json::from_str::<UnifiedEvent>(&json) {
+                    Ok(event) => {
+                        if bucket.is_empty() {
+                            inner.public_events.push(event);
+                        } else {
+                            inner.character_events.entry(bucket).or_default().push(event);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("[UnifiedEventLedger] 单条事件解析失败，跳过: {e}")
+                    }
+                }
+            }
+            inner.public_events.sort_by(event_order);
+            for bucket in inner.character_events.values_mut() {
+                bucket.sort_by(event_order);
+            }
+            // 快照与已提交的数据库行一致；后续保存只写差异
+            db.persisted = snapshot;
+            removed = inner.purge_expired(now);
+            *self.inner.write() = inner;
+        }
+        if removed > 0 {
+            let inner = self.inner.read();
+            self.save(&inner)?;
+        }
+        Ok(())
+    }
+
+    /// 行级保存：只 upsert 新增/变化的事件行，删除已移除的事件行。
+    fn save(&self, inner: &LedgerInner) -> VivianResult<()> {
+        let Some(db_mutex) = self.db.as_ref() else {
+            return Ok(());
+        };
+        let capacity = inner.public_events.len()
+            + inner
+                .character_events
+                .values()
+                .map(|b| b.len())
+                .sum::<usize>();
+        let mut current: HashMap<String, (String, String)> = HashMap::with_capacity(capacity);
+        for event in &inner.public_events {
+            let json = serde_json::to_string(event)?;
+            current.insert(event.id.clone(), (PUBLIC_BUCKET.to_string(), json));
+        }
+        for (bucket, events) in &inner.character_events {
+            for event in events {
+                let json = serde_json::to_string(event)?;
+                current.insert(event.id.clone(), (bucket.clone(), json));
+            }
+        }
+        let mut db = db_mutex.lock();
+        let mut upserts: Vec<(String, String, String)> = Vec::new();
+        for (id, (bucket, json)) in &current {
+            let unchanged = db
+                .persisted
+                .get(id)
+                .is_some_and(|(pb, pj)| pb == bucket && pj == json);
+            if !unchanged {
+                upserts.push((id.clone(), bucket.clone(), json.clone()));
+            }
+        }
+        let deletes: Vec<String> = db
+            .persisted
+            .keys()
+            .filter(|id| !current.contains_key(*id))
+            .cloned()
+            .collect();
+        if upserts.is_empty() && deletes.is_empty() {
+            return Ok(());
+        }
+        db.apply(&upserts, &deletes)?;
+        db.persisted = current;
         Ok(())
     }
 
@@ -271,7 +538,7 @@ impl UnifiedEventLedger {
     fn purge_expired(&self) {
         let mut inner = self.inner.write();
         if inner.purge_expired(chrono::Utc::now().timestamp() as f64) > 0 {
-            if let Err(error) = Self::save_inner(&inner, &self.persistence_path) {
+            if let Err(error) = self.save(&inner) {
                 tracing::warn!("[UnifiedEventLedger] 保存过期事件清理失败: {error}");
             }
         }
@@ -285,7 +552,7 @@ impl UnifiedEventLedger {
             let mut inner = self.inner.write();
             inner.purge_expired(chrono::Utc::now().timestamp() as f64);
             if event_expired(&event, chrono::Utc::now().timestamp() as f64) {
-                Self::save_inner(&inner, &self.persistence_path)?;
+                self.save(&inner)?;
                 return Ok(());
             }
             // Re-delivery of the same event must not duplicate model context or compaction input.
@@ -312,7 +579,7 @@ impl UnifiedEventLedger {
                     }
                 }
             }
-            Self::save_inner(&inner, &self.persistence_path)?;
+            self.save(&inner)?;
         }
         self.emit_event_added();
         self.maybe_compact();
@@ -482,7 +749,7 @@ impl UnifiedEventLedger {
                 // 桶被清空了（如 clear_for_character）：丢弃摘要
             }
         }
-        let _ = Self::save_inner(&inner, &self.persistence_path);
+        let _ = self.save(&inner);
         drop(inner);
         self.emit_event_added();
     }
@@ -504,7 +771,7 @@ impl UnifiedEventLedger {
             });
             *target = merged;
         }
-        let _ = Self::save_inner(&inner, &self.persistence_path);
+        let _ = self.save(&inner);
     }
 
     /// 查询某角色可见的最近 N 条事件（按时间倒序）
@@ -774,7 +1041,7 @@ impl UnifiedEventLedger {
         inner.public_events.clear();
         inner.character_events.clear();
         inner.events.clear();
-        Self::save_inner(&inner, &self.persistence_path)?;
+        self.save(&inner)?;
         Ok(())
     }
 
@@ -808,7 +1075,7 @@ impl UnifiedEventLedger {
         }
         let dropped = dropped_bucket + dropped_pub + dropped_other;
         if dropped > 0 {
-            Self::save_inner(&inner, &self.persistence_path)?;
+            self.save(&inner)?;
             tracing::info!("[UnifiedEventLedger] 已清除 {} 相关事件 {} 条", char_id, dropped);
         }
         Ok(())
@@ -1167,15 +1434,22 @@ mod tests {
         }
     }
 
-    /// 构造一个只含内存态账本（不落盘、不压缩）
+    /// 构造一个仅含内存事件的账本（附带一次性内存库，便于纯查询测试）
     fn make_ledger(inner: LedgerInner) -> UnifiedEventLedger {
         UnifiedEventLedger {
             inner: RwLock::new(inner),
-            persistence_path: PathBuf::from("test.json"),
+            db: Some(Mutex::new(LedgerDb::in_memory().expect("内存事件账本库应可打开"))),
             app_handle: Mutex::new(None),
             compacting: std::sync::atomic::AtomicBool::new(false),
             router: Mutex::new(None),
         }
+    }
+
+    /// 把账本持久化切到指定目录下的文件库，用于重启/持久化测试。
+    fn attach_file_db(ledger: &mut UnifiedEventLedger, dir: &std::path::Path, name: &str) {
+        ledger.db = Some(Mutex::new(
+            LedgerDb::open(&dir.join(name)).expect("事件账本文件库应可打开"),
+        ));
     }
 
     #[test]
@@ -1232,19 +1506,95 @@ mod tests {
     fn repeated_event_delivery_is_idempotent_and_survives_restart() {
         let dir=tempfile::tempdir().unwrap();
         let mut ledger=make_ledger(LedgerInner::default());
-        ledger.persistence_path=dir.path().join("ledger.json");
+        attach_file_db(&mut ledger, dir.path(), "ledger.db");
         let ledger=Arc::new(ledger);
         let event=make_event("user","vivian",EventVisibility::Participants,chrono::Utc::now().timestamp() as f64);
         ledger.append(event.clone()).unwrap();
         ledger.append(event.clone()).unwrap();
         assert_eq!(ledger.recent_events_visible_to("vivian",10).len(),1);
         let mut restored=make_ledger(LedgerInner::default());
-        restored.persistence_path=ledger.persistence_path.clone();
+        attach_file_db(&mut restored, dir.path(), "ledger.db");
         restored.load().unwrap();
         let restored=Arc::new(restored);
         restored.append(event).unwrap();
         assert_eq!(restored.recent_events_visible_to("vivian",10).len(),1);
         assert!(restored.recent_events_visible_to("nana",10).is_empty());
+    }
+
+    #[test]
+    fn reopen_preserves_events_in_every_bucket() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = chrono::Utc::now().timestamp() as f64;
+        let mut ledger = make_ledger(LedgerInner::default());
+        attach_file_db(&mut ledger, dir.path(), "ledger.db");
+        let ledger = Arc::new(ledger);
+        ledger.append(make_event("vivian", "nana", EventVisibility::Public, now - 5.0)).unwrap();
+        ledger.append(make_event("user", "vivian", EventVisibility::Participants, now - 4.0)).unwrap();
+        ledger.append(make_event("user", "nana", EventVisibility::Participants, now - 3.0)).unwrap();
+        drop(ledger);
+
+        let mut restored = make_ledger(LedgerInner::default());
+        attach_file_db(&mut restored, dir.path(), "ledger.db");
+        restored.load().unwrap();
+        assert_eq!(restored.recent_public_events(10).len(), 1);
+        assert_eq!(restored.recent_events_visible_to("vivian", 10).len(), 2);
+        assert_eq!(restored.recent_events_visible_to("nana", 10).len(), 2);
+    }
+
+    #[test]
+    fn unchanged_events_are_not_rewritten_on_repeated_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut inner = LedgerInner::default();
+        inner.public_events.push(make_event("system", "all", EventVisibility::Public, 1.0));
+        inner.character_events.insert(
+            "vivian".into(),
+            vec![make_event("user", "vivian", EventVisibility::Participants, 2.0)],
+        );
+        let mut ledger = make_ledger(inner);
+        attach_file_db(&mut ledger, dir.path(), "ledger.db");
+        ledger.save(&ledger.inner.read()).unwrap();
+        let after_first = ledger.db.as_ref().unwrap().lock().conn.total_changes();
+        // 内容未变化：第二次保存不应产生任何行写入
+        ledger.save(&ledger.inner.read()).unwrap();
+        let after_second = ledger.db.as_ref().unwrap().lock().conn.total_changes();
+        assert_eq!(after_first, after_second, "未变化的事件行不应被重写");
+        // 新增一条事件只应写入这一行
+        ledger.inner.write().public_events.push(make_event("system", "all", EventVisibility::Public, 3.0));
+        ledger.save(&ledger.inner.read()).unwrap();
+        let after_add = ledger.db.as_ref().unwrap().lock().conn.total_changes();
+        assert_eq!(after_add - after_second, 1, "单条新增只应写一行");
+    }
+
+    #[test]
+    fn legacy_json_is_imported_and_archived_on_first_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("unified_event_ledger.db");
+        let json_path = dir.path().join("unified_event_ledger.json");
+        // 旧格式：单 events Vec，需经 migrate_from_legacy 分桶后入库
+        let legacy = serde_json::json!({
+            "events": [
+                {"id":"e1","timestamp":1.0,"sender":"vivian","receiver":"nana","event_type":"dialogue","content_preview":"a","context_tags":[],"visibility":"public"},
+                {"id":"e2","timestamp":2.0,"sender":"user","receiver":"vivian","event_type":"dialogue","content_preview":"b","context_tags":[],"visibility":"participants"}
+            ]
+        });
+        std::fs::write(&json_path, legacy.to_string()).unwrap();
+
+        let mut db = LedgerDb::open(&db_path).unwrap();
+        assert!(db.is_empty());
+        UnifiedEventLedger::import_legacy_json(&mut db, &json_path).unwrap();
+        assert!(!db.is_empty());
+        assert!(!json_path.exists());
+        assert!(dir.path().join("unified_event_ledger.json.migrated").exists());
+        drop(db);
+
+        // 再从库加载，验证分桶与可见性还原
+        let mut ledger = make_ledger(LedgerInner::default());
+        ledger.db = Some(Mutex::new(LedgerDb::open(&db_path).unwrap()));
+        ledger.load().unwrap();
+        assert_eq!(ledger.recent_public_events(10).len(), 1);
+        // vivian 可见：公开事件（e1）+ 其角色桶内的事件（e2）
+        assert_eq!(ledger.recent_events_visible_to("vivian", 10).len(), 2);
+        assert_eq!(ledger.recent_events_visible_to("nana", 10).len(), 1);
     }
 
     #[test]
@@ -1287,13 +1637,21 @@ mod tests {
             make_typed_event("user", "vivian", "dialogue", now - 600.0),
         ]);
         let mut ledger = make_ledger(inner);
-        ledger.persistence_path = dir.path().join("ledger.json");
-        UnifiedEventLedger::save_inner(&ledger.inner.read(), &ledger.persistence_path).unwrap();
+        attach_file_db(&mut ledger, dir.path(), "ledger.db");
+        ledger.save(&ledger.inner.read()).unwrap();
         assert_eq!(ledger.recent_events_visible_to("vivian", 10).len(), 1);
         assert_eq!(ledger.events_between("user", "vivian", 10).len(), 1);
         assert!(ledger.select_events_for_prompt("vivian", 10).iter().all(|e| e.event_type != "user_pet_action"));
-        let persisted: LedgerInner = serde_json::from_str(&std::fs::read_to_string(&ledger.persistence_path).unwrap()).unwrap();
-        assert_eq!(persisted.character_events["vivian"].len(), 1);
+        // 落盘后过期动作事件应从数据库删除，仅保留 1 条对话事件
+        let persisted: i64 = ledger
+            .db
+            .as_ref()
+            .unwrap()
+            .lock()
+            .conn
+            .query_row("SELECT count(*) FROM events WHERE bucket='vivian'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(persisted, 1);
         ledger.load().unwrap();
         assert_eq!(ledger.recent_events_visible_to("vivian", 10).len(), 1);
     }
@@ -1365,13 +1723,7 @@ mod tests {
             "vivian".to_string(),
             vec![make_event("user", "vivian", EventVisibility::Participants, 3.0)],
         );
-        let ledger = UnifiedEventLedger {
-            inner: RwLock::new(inner),
-            persistence_path: PathBuf::from("test.json"),
-            app_handle: Mutex::new(None),
-            compacting: std::sync::atomic::AtomicBool::new(false),
-            router: Mutex::new(None),
-        };
+        let ledger = make_ledger(inner);
         let between = ledger.events_between("vivian", "nana", 10);
         assert_eq!(between.len(), 2);
         let between_user = ledger.events_between("user", "vivian", 10);

@@ -33,13 +33,13 @@ impl Tool for GetForegroundAppContextTool {
     }
 
     fn description(&self) -> &str {
-        "Read app context. scope=foreground returns the actual focused window plus user_app_context: when the companion chat is focused, this is the last observed external app with its observation time and age. Describe it as the app used before chatting, never as still foreground or running; stale=true means over five minutes old. scope=running_apps lists current processes, including background recording apps. A running recording app does not prove recording is active. For screen contents use screenshot_analyze."
+        "Read app context. scope=foreground returns the actual focused window plus user_app_context: when the companion chat is focused, this is the last observed external app with its observation time and age. Describe it as the app used before chatting, never as still foreground or running; stale=true means over five minutes old. scope=running_apps lists current processes, including background recording apps. A running recording app does not prove recording is active. For screen contents use take_screenshot."
     }
 
     fn description_in(&self, lang: &str) -> &str {
         match lang {
-            "zh" => "读取应用上下文。scope=foreground 返回实际前台窗口及 user_app_context：桌宠聊天窗口位于前台时，后者为最近观察到的外部应用，附观察时间与距今秒数。回答为“切来聊天前使用的应用”，不能说它仍在前台或运行；stale=true 表示记录超过五分钟。scope=running_apps 查询当前运行进程，包括后台录屏应用，进程存在不证明正在录制。需要画面时用 screenshot_analyze。",
-            "ja" => "scope=foreground で実際の前面ウィンドウと user_app_context を取得する。チャットが前面の場合、後者は最後に観測した外部アプリであり、時刻・経過秒数・stale を確認して過去の観測として説明する。scope=running_apps で現在の実行中プロセスを取得する。録画アプリの存在だけでは録画中と断定できない。画面内容は screenshot_analyze で確認する。",
+            "zh" => "读取应用上下文。scope=foreground 返回实际前台窗口及 user_app_context：桌宠聊天窗口位于前台时，后者为最近观察到的外部应用，附观察时间与距今秒数。回答为“切来聊天前使用的应用”，不能说它仍在前台或运行；stale=true 表示记录超过五分钟。scope=running_apps 查询当前运行进程，包括后台录屏应用，进程存在不证明正在录制。需要画面时用 take_screenshot。",
+            "ja" => "scope=foreground で実際の前面ウィンドウと user_app_context を取得する。チャットが前面の場合、後者は最後に観測した外部アプリであり、時刻・経過秒数・stale を確認して過去の観測として説明する。scope=running_apps で現在の実行中プロセスを取得する。録画アプリの存在だけでは録画中と断定できない。画面内容は take_screenshot で確認する。",
             _ => self.description(),
         }
     }
@@ -142,7 +142,7 @@ async fn list_running_apps() -> ToolResult {
             Ok(Ok(output)) if output.status.success() => match serde_json::from_slice::<Value>(&output.stdout) {
                 Ok(processes) => ToolResult::standard_success("运行中的进程与窗口标题", Some(json!({
                     "scope": "running_apps", "processes": processes,
-                    "limitation": "进程存在只能证明程序运行，不能确认录屏正在进行；需要画面证据时使用 screenshot_analyze。"
+                    "limitation": "进程存在只能证明程序运行，不能确认录屏正在进行；需要画面证据时使用 take_screenshot。"
                 }))),
                 Err(e) => ToolResult::standard_error(&format!("解析进程列表失败: {e}"), Some("ProcessListFailed"), None),
             },

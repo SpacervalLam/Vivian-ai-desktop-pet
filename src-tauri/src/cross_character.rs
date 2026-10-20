@@ -724,6 +724,16 @@ impl CrossCharacterBus {
         state: &Arc<AppState>,
         req: CrossCharacterRequest,
     ) -> VivianResult<CrossCharacterReply> {
+        self.send_inner(app, state, req, false).await
+    }
+
+    pub async fn send_autonomous(&self, app: &AppHandle, state: &Arc<AppState>, req: CrossCharacterRequest)
+        -> VivianResult<CrossCharacterReply> {
+        self.send_inner(app, state, req, true).await
+    }
+
+    async fn send_inner(&self, app: &AppHandle, state: &Arc<AppState>, req: CrossCharacterRequest,
+        autonomous: bool) -> VivianResult<CrossCharacterReply> {
         if req.source_id == req.target_id {
             return Err(crate::error::VivianError::Engine(
                 "角色不能与自己对话".to_string(),
@@ -843,11 +853,14 @@ impl CrossCharacterBus {
             });
         }
 
-        // 获取目标角色的 think_lock：目标可能在旁观插话或跨角色对话中，最多等待 25 秒
-        // 超时后放弃，避免源角色 LLM 长时间阻塞，并返回友好提示让对方知道"她在忙"
-        // 超时预算：think_lock 25s + think 执行 ~30s ≈ 55s，工具超时 60s 留余量
+        // 自动互动不排队占用角色的思考锁；用户工具调用最多等待 25 秒。
         let think_lock = target_instance.think_lock.clone();
-        let _guard = match tokio::time::timeout(Duration::from_secs(25), think_lock.lock()).await {
+        let acquired = if autonomous {
+            think_lock.try_lock().map_err(|_| ())
+        } else {
+            tokio::time::timeout(Duration::from_secs(25), think_lock.lock()).await.map_err(|_| ())
+        };
+        let _guard = match acquired {
             Ok(guard) => guard,
             Err(_) => {
                 let _ = app.emit(
@@ -1048,12 +1061,15 @@ impl CrossCharacterBus {
         let _focus_lease = crate::commands::proactive::FocusLeaseGuard::acquire(&req.target_id);
         let input_id = req.source_message_id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let reply_id = uuid::Uuid::new_v4().to_string();
-        let result = CROSS_UTTERANCES.scope(CrossUtteranceIds {
+        let generation = CROSS_UTTERANCES.scope(CrossUtteranceIds {
             source: req.source_id.clone(), target: req.target_id.clone(),
             input: input_id.clone(), reply: reply_id.clone(),
         }, CROSS_DELIVERY.scope((req.source_id.clone(), req.message.clone(),
             format!("{}{}{}{}", topic_context, memory_anchor, handoff_text, round_directive)),
-            brain.think_cross_character(&synthesized_input, true))).await;
+            brain.think_cross_character(&synthesized_input, true)));
+        let result = if autonomous {
+            state.session_coordinator.background_priority().run(generation).await
+        } else { Some(generation.await) };
         drop(_focus_lease);
 
         // 恢复原 channel
@@ -1061,6 +1077,14 @@ impl CrossCharacterBus {
         drop(_session_guard);
         brain.set_stream_emitter(None);
         drop(_guard);
+
+        let Some(result) = result else {
+            let _ = app.emit("cross:done", json!({"stream_id":req.stream_id,
+                "speaker_id":req.target_id,"listener_id":req.source_id,
+                "response_mode":"ignore","conv_state":"user_input_pending","should_continue":false}));
+            return Ok(CrossCharacterReply { message_id:None, reply:String::new(), response_mode:"ignore".into(),
+                conv_state:"user_input_pending".into(), should_continue:false, expression:String::new(), motion:String::new() });
+        };
 
         match result {
             Ok(ai_response) => {

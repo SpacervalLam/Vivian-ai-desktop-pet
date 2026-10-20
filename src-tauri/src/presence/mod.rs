@@ -353,6 +353,8 @@ impl PresenceManager {
         }
     }
 
+    pub(crate) fn flush_for_backup(&self) -> VivianResult<()> { self.save_to() }
+
     fn save_to(&self) -> VivianResult<()> {
         let state = self.state.read().clone();
         let json = serde_json::to_string_pretty(&state)

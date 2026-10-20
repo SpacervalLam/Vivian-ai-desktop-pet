@@ -1,6 +1,8 @@
 //! Bounded, character-specific few-shot retrieval. Example facts never become memory.
 //! Context gates precede relevance ranking; conversation-local repetition only
 //! breaks near ties. Selection is deterministic and never mutates session state.
+//! Without a remote embedding, turns that miss every literal cue fall back to
+//! bounded surface overlap — capped at one example per turn.
 use std::{collections::BTreeSet, sync::Arc};
 use parking_lot::Mutex;
 use serde::Deserialize;
@@ -89,6 +91,7 @@ impl ExampleRetriever {
             if e.scope == "closure" && !literal { continue; }
             let vector = vectors.as_ref().and_then(|v| v.get(index)).filter(|v| valid(v));
             let semantic = current.as_ref().zip(vector).map(|(q,v)| cosine_similarity(q,v));
+            let mut from_fallback = false;
             let score = match semantic {
                 Some(now) => {
                     let context = contextual.as_ref().zip(vector).map(|(q,v)| cosine_similarity(q,v)).unwrap_or(now);
@@ -97,14 +100,20 @@ impl ExampleRetriever {
                     if let Some(lexical) = literal_score { mixed.max(lexical) } else { mixed }
                 }
                 None if literal => literal_score.unwrap(),
-                _ => continue,
+                // Offline with no literal cue hit: bounded surface overlap stands in
+                // for the missing semantic channel. Hash vectors are deliberately
+                // never treated as similarity evidence; see lexical_fallback_score.
+                None => match lexical_fallback_score(&normalized_user, e, continuation) {
+                    Some(fuzzy) => { from_fallback = true; fuzzy }
+                    None => continue,
+                },
             };
             if score >= 0.65 {
                 let terms = response_terms(e.response["text"].as_str().unwrap_or_default());
                 let repeated = recent_replies.iter().enumerate().map(|(age, reply)|
                     term_similarity(&terms, reply) / (age + 1) as f64).fold(0.0_f64, f64::max);
                 // A small penalty breaks near ties without admitting irrelevant examples.
-                scored.push((index, score - 0.06 * repeated, terms));
+                scored.push((index, score - 0.06 * repeated, terms, from_fallback));
             }
         }
         scored.sort_by(|a,b| b.1.total_cmp(&a.1).then_with(||
@@ -113,11 +122,16 @@ impl ExampleRetriever {
         let mut scopes = Vec::new();
         let mut ids = Vec::new();
         let mut selected_terms = Vec::new();
-        for (index, score, terms) in scored {
+        let mut fallback_used = false;
+        for (index, score, terms, from_fallback) in scored {
             let e = &self.entries[index];
             if scopes.contains(&e.scope) { continue; }
             // Different scopes can still contain essentially the same line.
             if selected_terms.iter().any(|chosen| term_similarity(&terms, chosen) >= 0.85) { continue; }
+            // A fuzzy match justifies one voice anchor, not a trio. Uncapped, it
+            // fills slots 2-3 and same-scope precision@3 drops ~26 points.
+            if from_fallback && fallback_used { continue; }
+            if from_fallback { fallback_used = true; }
             let attention = if e.attention.is_empty() { String::new() } else {
                 format!("Attention (creative direction, not a reasoning transcript): {}\n", e.attention)
             };
@@ -133,6 +147,55 @@ impl ExampleRetriever {
         tracing::debug!(examples = %ids.join(","), chars = out.chars().count(), continuation, "Persona example retrieval");
         Some(out)
     }
+}
+
+/// 离线模式下的表面重叠回退打分（无远程 embedding 且字面 cue 未命中时）。
+///
+/// 与 `response_terms` 的分工：那里要原始表面（重复惩罚），这里要内容词重叠
+/// （场景匹配），因此过滤功能字二元组——「了我你」不构成场景证据。
+///
+/// 约束（阈值经 `tmp/human_feel_probe.mjs` 全库实测标定）：
+/// - 准入线与语义通道对齐（0.55，continuation 0.62）：模糊证据不得比语义证据
+///   更易通关——早期 0.42 档把「好，我想聊新话题」误塞进 pause-conversation；
+/// - 分数区间 [0.60, 0.78]，恒低于字面命中下限 0.80，真实 cue 永远优先；
+/// - `retrieve` 另限制回退候选每轮最多贡献 1 个范例。
+fn lexical_fallback_score(user: &str, entry: &Example, continuation: bool) -> Option<f64> {
+    const OVERLAP_THRESHOLD: f64 = 0.55;
+    const CONTINUATION_OVERLAP_THRESHOLD: f64 = 0.62;
+    const BASE: f64 = 0.60;
+    const SPAN: f64 = 0.18;
+    let user_terms = content_terms(user);
+    if user_terms.len() < 3 { return None; }
+    let mut surface = String::new();
+    for cue in &entry.cues { surface.push_str(cue); surface.push('\n'); }
+    surface.push_str(&entry.situation);
+    surface.push('\n');
+    surface.push_str(&entry.user);
+    let entry_terms = content_terms(&surface);
+    if entry_terms.is_empty() { return None; }
+    let inter = user_terms.intersection(&entry_terms).count();
+    if inter < 2 { return None; }
+    let overlap = inter as f64 / user_terms.len().min(entry_terms.len()) as f64;
+    let threshold = if continuation { CONTINUATION_OVERLAP_THRESHOLD } else { OVERLAP_THRESHOLD };
+    if overlap < threshold { return None; }
+    Some(BASE + SPAN * overlap)
+}
+
+/// 内容词表面集合：ASCII 词（长 ≥2）+ 过滤功能字后的 CJK 二元组。
+fn content_terms(text: &str) -> BTreeSet<String> {
+    const FUNCTION_CHARS: &str = "的了是在我你他她它们吗呢吧啊嗯哦呀和跟也就都还又被把给对而且或因所以于不没别太很";
+    let lower: String = text.chars().take(350).collect::<String>().to_lowercase();
+    let mut terms: BTreeSet<_> = lower.split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|word| word.len() > 1).map(str::to_owned).collect();
+    let chars: Vec<_> = lower.chars().collect();
+    for pair in chars.windows(2) {
+        if pair.iter().all(|c| !c.is_ascii() && c.is_alphanumeric())
+            && !pair.iter().any(|c| FUNCTION_CHARS.contains(*c))
+        {
+            terms.insert(pair.iter().collect());
+        }
+    }
+    terms
 }
 
 /// ASCII words/numbers require ASCII token boundaries ("hi" != "this").
@@ -256,6 +319,59 @@ mod tests {
         assert!(r.retrieve("下雨", &history, None, &[]).unwrap().contains("Example only\n"));
         assert!(r.retrieve("新话题", &history, None, &[]).is_none());
         assert!(r.retrieve("下雨", &history, None, &["care".into()]).is_none());
+    }
+
+    fn scenario(id: &str, scope: &str, cue: &str, situation: &str, user: &str, text: &str) -> serde_json::Value {
+        serde_json::json!({"id":id,"scope":scope,"cues":[cue],"situation":situation,
+            "user":user,"response":{"text":text,"intent":"reply"}})
+    }
+
+    #[test]
+    fn offline_surface_overlap_recovers_paraphrase_and_yields_to_literal_cues() {
+        let r = fixture(serde_json::json!([
+            scenario("interview", "comfort", "怯场", "用户周三要面试，很紧张", "周三要面试了好紧张", "别慌，你准备得比你以为的充分。"),
+            scenario("rain", "care", "带伞", "用户下班时下雨，没带伞", "外面下雨了我没带伞", "那先找个地方躲一躲。")
+        ]));
+        // 与 situation 同措辞的 paraphrase：字面 cue 全部未命中，表面重叠接住
+        let out = r.retrieve("周三要面试，特别紧张", &[], None, &[]).unwrap();
+        assert!(out.contains("Example interview\n"), "{out}");
+        assert!(!out.contains("Example rain\n"), "{out}");
+        // 字面 cue 命中时优先，且回退分恒低于字面分
+        let out = r.retrieve("周三要面试，特别紧张，也没带伞", &[], None, &[]).unwrap();
+        assert!(out.find("Example rain\n") < out.find("Example interview\n"), "literal must outrank fallback: {out}");
+        // 纯字面场景不受影响
+        let out = r.retrieve("今天没带伞", &[], None, &[]).unwrap();
+        assert!(out.contains("Example rain\n") && !out.contains("Example interview\n"), "{out}");
+    }
+
+    #[test]
+    fn offline_surface_overlap_never_fills_two_slots_or_matches_thin_input() {
+        // 三条同表面、不同 scope：都能过回退线，但只允许入选一个
+        let r = fixture(serde_json::json!([
+            scenario("a", "comfort", "甲", "用户面试前紧张", "面试前紧张", "a"),
+            scenario("b", "care", "乙", "用户面试前紧张", "面试前紧张", "b"),
+            scenario("c", "daily", "丙", "用户面试前紧张", "面试前紧张", "c")
+        ]));
+        let out = r.retrieve("面试前紧张", &[], None, &[]).unwrap();
+        assert_eq!(out.lines().filter(|l| l.starts_with("Example ") && !l.starts_with("Example response:")).count(), 1, "{out}");
+        assert!(out.contains("Example a\n"), "{out}");
+        // 内容词不足或无重叠的输入不触发
+        assert!(r.retrieve("嗯", &[], None, &[]).is_none());
+        assert!(r.retrieve("去吃饭", &[], None, &[]).is_none());
+    }
+
+    #[test]
+    fn lexical_fallback_score_stays_below_literal_floor_and_respects_continuation() {
+        let entry: Example = serde_json::from_value(serde_json::json!({
+            "id":"y","scope":"comfort","cues":[],"situation":"aa bb cc dd ee ff gg","user":"aa bb cc dd ee ff gg",
+            "response":{"text":"ok","intent":"reply"}
+        })).unwrap();
+        // overlap = 4/7 ≈ 0.571：越过常规阈值、低于 continuation 阈值
+        let plain = lexical_fallback_score("aa bb cc dd hh ii jj kk", &entry, false).unwrap();
+        assert!((0.65..0.80).contains(&plain), "fallback must clear the 0.65 gate yet stay under the 0.80 literal floor: {plain}");
+        assert!(lexical_fallback_score("aa bb cc dd hh ii jj kk", &entry, true).is_none(),
+            "continuation inputs face the stricter threshold");
+        assert!(lexical_fallback_score("嗯", &entry, false).is_none(), "thin inputs never match");
     }
     #[test]
     fn duplicate_lines_across_scopes_do_not_fill_all_slots() {
@@ -428,6 +544,25 @@ mod tests {
                 assert!(e.context_cues.is_empty());
             }
         }
+    }
+    #[test]
+    fn supportive_examples_respect_user_needs_and_character_voice() {
+        let mut voices = Vec::new();
+        for name in ["vivian", "nana"] {
+            let r = ExampleRetriever::new(name, default_embedding());
+            for id in ["vent-no-advice", "tired-no-questions", "uncertain-motive", "repair-feeling"] {
+                let e = r.entries.iter().find(|e| e.id == id).unwrap();
+                let result = r.retrieve(&e.user, &[], None, &[]).unwrap();
+                assert!(result.contains(&format!("Example {id}\n")), "{name}/{id}");
+                assert!(result.chars().count() <= MAX_CHARS);
+                assert!(e.situation.contains("虚构"));
+                assert!(e.attention.contains("不可借来当事实"));
+                let learned = r.retrieve(&e.user, &[], None, &[e.scope.clone()]).unwrap_or_default();
+                assert!(!learned.contains(&format!("Example {id}\n")));
+                voices.push(e.response["text"].as_str().unwrap().to_string());
+            }
+        }
+        for i in 0..4 { assert_ne!(voices[i], voices[i + 4]); }
     }
     struct SemanticFixture(std::sync::atomic::AtomicUsize);
     impl MemoryEmbeddingProvider for SemanticFixture {

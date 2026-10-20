@@ -111,7 +111,7 @@ impl MemoryRecall {
             ),
         };
         Some(vec![
-            ChatMessage::system(format!("{sys}\n{}\n{}", crate::pipeline::prompt_modules::human_feel_rules(), include_str!("../../../prompts/framework/proactive_companionship.en.md"))),
+            ChatMessage::system(format!("{sys}\n{}\n{}", crate::pipeline::prompt_modules::human_feel_rules(lang_norm), crate::pipeline::prompt_modules::proactive_companionship_rules(lang_norm))),
             ChatMessage::user(prompt),
         ])
     }

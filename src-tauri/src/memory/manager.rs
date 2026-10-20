@@ -2471,6 +2471,19 @@ impl MemoryManager {
         strategy: RetrievalStrategy,
         limit: usize,
     ) -> VivianResult<Vec<MemoryItem>> {
+        // Strategy search may embed over synchronous HTTP; it must yield to peer gather tasks.
+        let memory = self.clone();
+        let query = query.to_owned();
+        tokio::task::spawn_blocking(move || memory.search_memories_sync(&query, strategy, limit))
+            .await.map_err(|error| VivianError::Memory(format!("Memory search worker failed: {error}")))?
+    }
+
+    fn search_memories_sync(
+        &self,
+        query: &str,
+        strategy: RetrievalStrategy,
+        limit: usize,
+    ) -> VivianResult<Vec<MemoryItem>> {
         // 单轮检索缓存：相同 (query, strategy, limit, model, dim) 在 5s 内返回缓存结果
         // 避免同轮内 MemoryRetrievalStep + MemoryTool + AugmentService 重复检索
         // 包含 model_id 和 dimension 防止向量索引重建后返回旧排名
@@ -3046,6 +3059,15 @@ impl MemoryManager {
     /// 强制将所有未落盘的脏数据写入磁盘（应用退出前调用）。
     ///
     /// 与 `save_throttled` 配合：节流期间仅标记 dirty，此方法确保最终落盘。
+    pub(crate) fn flush_for_backup(&self) -> Result<(), String> {
+        let mut inner = self.inner.write();
+        inner.flush_dirty().map_err(|e| e.to_string())?;
+        if self.knowledge_graph.is_dirty() {
+            self.knowledge_graph.save_to_disk().map_err(|e| e.to_string())?;
+        }
+        self.takes_fence.save_to_disk()
+    }
+
     pub fn flush(&self) -> VivianResult<()> {
         let mut inner = self.inner.write();
         inner.flush_dirty()?;
@@ -3854,6 +3876,11 @@ impl MemoryManagerInner {
     ///
     /// 当非种子记忆条数超过阈值时，逐步降低非 protected 种子记忆的 importance。
     /// 这样种子记忆不会被突然删除，而是在检索排序中自然被真实记忆替代。
+    ///
+    /// 例外：作者亲写的自我肌理（personal / daily_fragment / flaw）不参与衰减。
+    /// 真实记忆 100% 是「关于用户」的，而衰减是全表统一减同一个值——它会把
+    /// 0.25~0.65 的梯度压平成同一个下限，等于把「她是什么样的人」这层信息
+    /// 一起抹掉。让它们保号，梯度就还在。
     pub fn decay_seed_memories(&mut self) {
         let non_seed = self
             .data
@@ -3875,7 +3902,10 @@ impl MemoryManagerInner {
         let total_decay = (steps as f64) * DECAY_DELTA;
 
         for entry in &mut self.data.entries {
-            if entry.id.starts_with("seed_") && !entry.protected {
+            if entry.id.starts_with("seed_")
+                && !entry.protected
+                && !super::filter::MemoryFilter::is_authored_self_texture(entry)
+            {
                 let old = entry.importance;
                 entry.importance = (old - total_decay).max(MIN_IMPORTANCE);
                 if (old - entry.importance).abs() > 0.01 {

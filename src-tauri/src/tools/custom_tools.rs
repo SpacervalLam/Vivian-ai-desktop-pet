@@ -304,15 +304,18 @@ impl Tool for DynamicTool {
         // restricting SID + 低完整性级别，唯一可写面是 Low IL scratch 目录。
         // 建立失败即拒绝执行（不回退全权限）。非 Windows 无此威胁面，走普通 spawn。
         #[cfg(windows)]
-        {
+        if crate::tools::sandbox_env::enabled() {
+            let req = crate::tools::sandbox_env::request_for(context);
             let script = self.def.script.clone();
             let payload = serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string());
             let out =
                 match tokio::task::spawn_blocking(move || {
-                    crate::utils::sandbox::run_powershell_sandboxed(
+                    crate::utils::sandbox::run_powershell_sandboxed_with(
+                        &req,
                         &script,
                         &payload,
                         SCRIPT_TIMEOUT_SECS,
+                        None,
                     )
                 })
                 .await
@@ -361,7 +364,16 @@ impl Tool for DynamicTool {
             );
         }
 
-        #[cfg(not(windows))]
+        // 走到这里说明没有沙箱可用（非 Windows，或沙箱被关闭）。配置要求必须有
+        // 隔离时就地拒绝——宁可不跑，也不退回全权限子进程。
+        if crate::tools::sandbox_env::require_isolation() {
+            return ToolResult::standard_error(
+                "当前环境没有可用的 OS 级沙箱，已按配置拒绝执行脚本。若要执行请关闭「要求 OS 级隔离」。",
+                Some("SandboxRequired"),
+                None,
+            );
+        }
+
         {
             let cwd = if context.working_directory.is_empty() {
                 None

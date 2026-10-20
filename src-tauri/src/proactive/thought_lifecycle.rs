@@ -343,7 +343,10 @@ impl ThoughtLifecycle {
     pub fn pick_share_candidate(&self) -> Option<&ActiveThought> {
         self.thoughts
             .iter()
-            .filter(|t| t.should_share())
+            // Shared scene observations may nourish private thoughts, but the environment
+            // chooses their outward sharing once across characters.
+            .filter(|t| t.should_share() && !matches!(t.trigger_kind.as_str(),
+                "weather_shift" | "environmental_event" | "activity_pattern"))
             .max_by(|a, b| {
                 let sa = a.intensity * a.desire_to_share;
                 let sb = b.intensity * b.desire_to_share;
@@ -440,5 +443,21 @@ mod tests {
     fn high_priority_bypasses_age_gate() {
         let t = ActiveThought::new_seed("k", "d", "c", 0.5, 0.0, 0.3, "test", 1000.0, true);
         assert!(t.should_produce_monologue(1000.0 + 1.0));
+    }
+
+    #[test]
+    fn scene_observations_keep_private_life_without_duplicate_public_sharing() {
+        for kind in ["weather_shift", "environmental_event", "activity_pattern"] {
+            let mut lifecycle = ThoughtLifecycle::new();
+            let mut thought = ActiveThought::new_seed("scene", "rain", "observed rain", 0.9,
+                0.0, 0.3, kind, 1000.0, false);
+            thought.desire_to_share = 1.0;
+            thought.intensity = 0.9; // Simulate a mature, nourished thought.
+            lifecycle.thoughts.push(thought);
+            assert!(lifecycle.pick_monologue_candidate(1300.0).is_some());
+            assert!(lifecycle.pick_share_candidate().is_none());
+            lifecycle.thoughts[0].trigger_kind = "personal_reflection".into();
+            assert!(lifecycle.pick_share_candidate().is_some());
+        }
     }
 }

@@ -25,7 +25,10 @@ use crate::resilience::{classify_llm_error_from_str, error_kind_to_message_key, 
 use crate::types::response::ChatMessage;
 
 enum RouteProvider<'a> {
-    Task { route: &'a str, provider: &'a Box<dyn BaseProvider> },
+    Task {
+        route: &'a str,
+        provider: &'a Box<dyn BaseProvider>,
+    },
     Main(&'a Box<dyn BaseProvider>),
     Override(Arc<Box<dyn BaseProvider>>),
 }
@@ -39,11 +42,19 @@ impl RouteProvider<'_> {
     }
 
     fn source(&self) -> &'static str {
-        match self { Self::Task { .. } => "task", Self::Main(_) => "main", Self::Override(_) => "work_override" }
+        match self {
+            Self::Task { .. } => "task",
+            Self::Main(_) => "main",
+            Self::Override(_) => "work_override",
+        }
     }
 
     fn route(&self) -> &str {
-        match self { Self::Task { route, .. } => route, Self::Main(_) => "main", Self::Override(_) => TASK_WORK_AGENT }
+        match self {
+            Self::Task { route, .. } => route,
+            Self::Main(_) => "main",
+            Self::Override(_) => TASK_WORK_AGENT,
+        }
     }
 }
 
@@ -143,6 +154,7 @@ fn is_conversational_task(task_type: &str) -> bool {
 const SEMAPHORE_GROUP_CHAT_REASONING: usize = 3;
 const SEMAPHORE_GROUP_MEMORY_REFLECTION: usize = 3;
 const SEMAPHORE_GROUP_AUXILIARY: usize = 2;
+const SEMAPHORE_GROUP_ENVIRONMENT: usize = 1;
 /// 工作智能体并发额度：单列一组，避免它长时间占用陪伴对话的额度
 const SEMAPHORE_GROUP_WORK_AGENT: usize = 2;
 
@@ -160,6 +172,7 @@ fn semaphore_for_task(task_type: &str) -> (&'static str, usize) {
         Some("memory") => ("memory_reflection", SEMAPHORE_GROUP_MEMORY_REFLECTION),
         Some("work") => ("work_agent", SEMAPHORE_GROUP_WORK_AGENT),
         Some("auxiliary") => ("auxiliary", SEMAPHORE_GROUP_AUXILIARY),
+        Some("environment") => ("environment", SEMAPHORE_GROUP_ENVIRONMENT),
         _ => ("chat_reasoning", SEMAPHORE_GROUP_CHAT_REASONING),
     }
 }
@@ -419,6 +432,10 @@ impl ModelRouter {
         map.insert(
             "auxiliary".to_string(),
             Arc::new(Semaphore::new(SEMAPHORE_GROUP_AUXILIARY)),
+        );
+        map.insert(
+            "environment".to_string(),
+            Arc::new(Semaphore::new(SEMAPHORE_GROUP_ENVIRONMENT)),
         );
         map
     }
@@ -731,16 +748,36 @@ impl ModelRouter {
     }
 
     fn record_route_attempt(&self, task_type: &str, candidate: &RouteProvider<'_>) {
-        tracing::info!(task = task_type, resolved_route = candidate.route(), source = candidate.source(),
-            model = candidate.provider().get_model(), prompt_contract = task_type, "Model route resolved");
+        crate::brain::coding_event_log::current_record(
+            "model_route_attempt",
+            json!({
+                "task_type":task_type,"resolved_route":candidate.route(),"source":candidate.source(),
+                "model":candidate.provider().get_model(),
+            }),
+        );
+        tracing::info!(
+            task = task_type,
+            resolved_route = candidate.route(),
+            source = candidate.source(),
+            model = candidate.provider().get_model(),
+            prompt_contract = task_type,
+            "Model route resolved"
+        );
         if let Some(handle) = self.app_handle.read().as_ref() {
             let _ = handle.emit("chat:route_resolved", json!({ "task_type": task_type,
                 "resolved_route": candidate.route(), "source": candidate.source(),
-                "model": candidate.provider().get_model(), "prompt_contract": task_type }));
+                "model": candidate.provider().get_model(), "prompt_contract": task_type }),
+            );
         }
     }
 
     fn route_success(&self, candidate: &RouteProvider<'_>) {
+        crate::brain::coding_event_log::current_record(
+            "model_route_selected",
+            json!({
+                "resolved_route":candidate.route(),"source":candidate.source(),"model":candidate.provider().get_model(),
+            }),
+        );
         // A successful main fallback must not paint a failed task provider green.
         if !matches!(candidate, RouteProvider::Main(_)) {
             self.emit_route_status(candidate.route(), "ok");
@@ -752,6 +789,13 @@ impl ModelRouter {
         task_type: &str,
     ) -> VivianResult<Option<tokio::sync::OwnedSemaphorePermit>> {
         match self.get_semaphore(task_type) {
+            Some(semaphore) if semaphore_for_task(task_type).0 == "environment" => {
+                semaphore.try_acquire_owned().map(Some).map_err(|_| {
+                    VivianError::Other(
+                        "BACKGROUND_BUSY: optional environment request skipped".into(),
+                    )
+                })
+            }
             Some(semaphore) => Ok(Some(semaphore.acquire_owned().await.map_err(|_| {
                 VivianError::Provider("Provider concurrency queue closed".into())
             })?)),
@@ -787,6 +831,13 @@ impl ModelRouter {
         character_id: &str,
         has_next: bool,
     ) {
+        crate::brain::coding_event_log::current_record(
+            "model_route_failed",
+            json!({
+                "task_type":task_type,"resolved_route":candidate.route(),"model":candidate.provider().get_model(),
+                "error":error.to_string(),"will_fallback":has_next,
+            }),
+        );
         self.emit_route_status(task_type, "error");
         if candidate.route() != task_type && !matches!(candidate, RouteProvider::Main(_)) {
             self.emit_route_status(candidate.route(), "error");
@@ -1120,9 +1171,19 @@ impl ModelRouter {
         &self, task_type: &str, state: serde_json::Value, instructions: &str,
         choices: &[(&str, &str)], character_id: &str,
     ) -> Option<String> {
-        if self.has_task_provider(task_type) { return None; }
-        let contract = super::task_catalog::find(task_type).map(super::task_catalog::prompt).unwrap_or_default();
-        self.choose_simple(state, &format!("{contract}\n{instructions}"), choices, character_id).await
+        if self.has_task_provider(task_type) {
+            return None;
+        }
+        let contract = super::task_catalog::find(task_type)
+            .map(super::task_catalog::prompt)
+            .unwrap_or_default();
+        self.choose_simple(
+            state,
+            &format!("{contract}\n{instructions}"),
+            choices,
+            character_id,
+        )
+        .await
     }
 
     /// Batch independent yes/no judgments. Values are probabilities of `true`.
@@ -1220,7 +1281,16 @@ impl ModelRouter {
         }
     }
 
-    pub async fn generate(&self, mut request: LLMRequest) -> VivianResult<String> {
+    pub async fn generate(&self, request: LLMRequest) -> VivianResult<String> {
+        let info = crate::brain::coding_event_capture::request_info(&request);
+        crate::brain::coding_event_capture::response(
+            info,
+            self.generate_observed(request),
+            |text| json!({"chars":text.chars().count()}),
+        )
+        .await
+    }
+    async fn generate_observed(&self, mut request: LLMRequest) -> VivianResult<String> {
         self.prepare_request(&mut request)?;
         Self::repair_request_history(&mut request);
         let options = self.call_options(&request);
@@ -1285,6 +1355,14 @@ impl ModelRouter {
     /// 返回 chunk Receiver,调用方自行累积。
     pub async fn generate_stream(
         &self,
+        request: LLMRequest,
+    ) -> VivianResult<mpsc::Receiver<StreamEvent>> {
+        let info = crate::brain::coding_event_capture::request_info(&request);
+        crate::brain::coding_event_capture::stream(info, self.generate_stream_observed(request))
+            .await
+    }
+    async fn generate_stream_observed(
+        &self,
         mut request: LLMRequest,
     ) -> VivianResult<tokio::sync::mpsc::Receiver<StreamEvent>> {
         self.prepare_request(&mut request)?;
@@ -1327,7 +1405,17 @@ impl ModelRouter {
     ///
     /// 内部转调 `query_with_tools`。调用方应先通过 `supports_native_function_calling`
     /// 确认 provider 支持,否则应回退到文本路径。
-    pub async fn generate_with_tools(&self, mut request: LLMRequest) -> VivianResult<ChatResponse> {
+    pub async fn generate_with_tools(&self, request: LLMRequest) -> VivianResult<ChatResponse> {
+        let info = crate::brain::coding_event_capture::request_info(&request);
+        crate::brain::coding_event_capture::response(info, self.generate_with_tools_observed(request), |response| json!({
+            "chars":response.content.chars().count(),"usage":response.raw.get("usage"),"reported_model":response.raw.get("model"),"finish_reason":response.finish_reason,
+            "tool_calls":response.tool_calls.iter().map(|c|json!({"call_id":c.id,"name":c.name})).collect::<Vec<_>>(),
+        })).await
+    }
+    async fn generate_with_tools_observed(
+        &self,
+        mut request: LLMRequest,
+    ) -> VivianResult<ChatResponse> {
         self.prepare_request(&mut request)?;
         Self::repair_request_history(&mut request);
         let options = self.call_options(&request);
@@ -1365,6 +1453,17 @@ impl ModelRouter {
     ///
     /// 返回 StreamEvent Receiver,调用方按事件类型累积文本/工具调用。
     pub async fn generate_stream_with_tools(
+        &self,
+        request: LLMRequest,
+    ) -> VivianResult<mpsc::Receiver<StreamEvent>> {
+        let info = crate::brain::coding_event_capture::request_info(&request);
+        crate::brain::coding_event_capture::stream(
+            info,
+            self.generate_stream_with_tools_observed(request),
+        )
+        .await
+    }
+    async fn generate_stream_with_tools_observed(
         &self,
         mut request: LLMRequest,
     ) -> VivianResult<tokio::sync::mpsc::Receiver<crate::providers::base::StreamEvent>> {
@@ -1741,7 +1840,11 @@ mod conversational_penalty_tests {
     /// ——`reasoning` 是携带工具定义时由 `chat` 升级而来。
     #[test]
     fn only_spoken_output_tasks_get_penalties() {
-        for task in [crate::providers::base::TASK_COMPANION, "chat", "pet_reaction"] {
+        for task in [
+            crate::providers::base::TASK_COMPANION,
+            "chat",
+            "pet_reaction",
+        ] {
             assert!(is_conversational_task(task), "{task} 应注入采样惩罚");
         }
     }
@@ -1838,11 +1941,22 @@ mod route_tests {
     fn companion_missing_route_uses_main_and_explicit_route_wins() {
         let (mut router, _) = router(vec![], vec![]);
         let task = crate::providers::base::TASK_COMPANION;
-        assert_eq!(router.resolve_provider(task).unwrap().get_model(), "fallback");
-        router.task_providers = Arc::new(HashMap::from([(task.into(), Box::new(MockProvider {
-            model: "character", events: vec![], calls: Arc::new(AtomicUsize::new(0)),
-        }) as Box<dyn BaseProvider>)]));
-        assert_eq!(router.resolve_provider(task).unwrap().get_model(), "character");
+        assert_eq!(
+            router.resolve_provider(task).unwrap().get_model(),
+            "fallback"
+        );
+        router.task_providers = Arc::new(HashMap::from([(
+            task.into(),
+            Box::new(MockProvider {
+                model: "character",
+                events: vec![],
+                calls: Arc::new(AtomicUsize::new(0)),
+            }) as Box<dyn BaseProvider>,
+        )]));
+        assert_eq!(
+            router.resolve_provider(task).unwrap().get_model(),
+            "character"
+        );
     }
 
     #[tokio::test]
@@ -1964,6 +2078,33 @@ mod route_tests {
     }
 
     #[tokio::test]
+    async fn environment_requests_have_an_isolated_nonqueueing_budget() {
+        let router = ModelRouter::new(&AppConfig::default()).unwrap();
+        assert!(!Arc::ptr_eq(
+            &router.get_semaphore("environment_judge").unwrap(),
+            &router.get_semaphore("emotion_analysis").unwrap()
+        ));
+        let _environment = router
+            .acquire_route_permit("environment_judge")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(router
+            .acquire_route_permit("bystander_judge")
+            .await
+            .is_err());
+        for task in ["emotion_analysis", "intent_judge", "companion", "reasoning"] {
+            let _foreground = tokio::time::timeout(
+                std::time::Duration::from_millis(250),
+                router.acquire_route_permit(task),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        }
+    }
+
+    #[tokio::test]
     async fn invalid_schema_does_not_poison_model_capability_cache() {
         let (router, _) = router(vec![], vec![]);
         let provider = router.main_provider.as_ref().as_ref().unwrap();
@@ -2002,43 +2143,91 @@ mod task_contract_tests {
     }
     impl Probe {
         fn record(&self, messages: Vec<ChatMessage>) -> VivianResult<String> {
-            self.calls.lock().push((self.model.clone(), messages,
-                ProviderCallOptions::current().include_framework_instructions));
-            if self.failed { return Err(VivianError::Provider("upstream unavailable".into())); }
+            self.calls.lock().push((
+                self.model.clone(),
+                messages,
+                ProviderCallOptions::current().include_framework_instructions,
+            ));
+            if self.failed {
+                return Err(VivianError::Provider("upstream unavailable".into()));
+            }
             Ok(self.model.clone())
         }
         fn stream(&self, messages: Vec<ChatMessage>) -> VivianResult<mpsc::Receiver<StreamEvent>> {
             let content = self.record(messages)?;
             let (tx, rx) = mpsc::channel(2);
             tx.try_send(StreamEvent::Text { content }).unwrap();
-            tx.try_send(StreamEvent::Done { finish_reason: None }).unwrap();
+            tx.try_send(StreamEvent::Done {
+                finish_reason: None,
+            })
+            .unwrap();
             Ok(rx)
         }
     }
     #[async_trait::async_trait]
     impl BaseProvider for Probe {
-        async fn call_chat(&self, messages: Vec<ChatMessage>) -> VivianResult<String> { self.record(messages) }
-        async fn call_stream_chat(&self, messages: Vec<ChatMessage>, _: Option<serde_json::Value>) -> VivianResult<mpsc::Receiver<StreamEvent>> { self.stream(messages) }
-        async fn invoke(&self, messages: Vec<ChatMessage>) -> VivianResult<ChatResponse> { self.record(messages).map(ChatResponse::from_text) }
-        async fn stream_with_tools(&self, messages: Vec<ChatMessage>, _: Vec<ToolDefinition>) -> VivianResult<mpsc::Receiver<StreamEvent>> { self.stream(messages) }
-        fn bind_tools(&self, _: Vec<ToolDefinition>) -> VivianResult<Box<dyn BaseProvider>> { Ok(Box::new(self.clone())) }
-        fn supports_native_function_calling(&self) -> bool { true }
-        fn get_model(&self) -> &str { &self.model }
-        fn get_circuit_breaker_stats(&self) -> serde_json::Value { json!({}) }
+        async fn call_chat(&self, messages: Vec<ChatMessage>) -> VivianResult<String> {
+            self.record(messages)
+        }
+        async fn call_stream_chat(
+            &self,
+            messages: Vec<ChatMessage>,
+            _: Option<serde_json::Value>,
+        ) -> VivianResult<mpsc::Receiver<StreamEvent>> {
+            self.stream(messages)
+        }
+        async fn invoke(&self, messages: Vec<ChatMessage>) -> VivianResult<ChatResponse> {
+            self.record(messages).map(ChatResponse::from_text)
+        }
+        async fn stream_with_tools(
+            &self,
+            messages: Vec<ChatMessage>,
+            _: Vec<ToolDefinition>,
+        ) -> VivianResult<mpsc::Receiver<StreamEvent>> {
+            self.stream(messages)
+        }
+        fn bind_tools(&self, _: Vec<ToolDefinition>) -> VivianResult<Box<dyn BaseProvider>> {
+            Ok(Box::new(self.clone()))
+        }
+        fn supports_native_function_calling(&self) -> bool {
+            true
+        }
+        fn get_model(&self) -> &str {
+            &self.model
+        }
+        fn get_circuit_breaker_stats(&self) -> serde_json::Value {
+            json!({})
+        }
     }
     fn fixture() -> (ModelRouter, Probe) {
         let mut router = ModelRouter::new(&AppConfig::default()).unwrap();
-        let probe = Probe { model: "main".into(), failed: false, calls: Arc::new(Mutex::new(vec![])) };
+        let probe = Probe {
+            model: "main".into(),
+            failed: false,
+            calls: Arc::new(Mutex::new(vec![])),
+        };
         router.main_provider = Arc::new(Some(Box::new(probe.clone())));
-        router.task_providers = Arc::new(super::super::task_catalog::TASK_ROUTES.iter().map(|spec| {
-            let mut provider = probe.clone(); provider.model = spec.id.clone();
-            (spec.id.clone(), Box::new(provider) as Box<dyn BaseProvider>)
-        }).collect());
+        router.task_providers = Arc::new(
+            super::super::task_catalog::TASK_ROUTES
+                .iter()
+                .map(|spec| {
+                    let mut provider = probe.clone();
+                    provider.model = spec.id.clone();
+                    (spec.id.clone(), Box::new(provider) as Box<dyn BaseProvider>)
+                })
+                .collect(),
+        );
         router.enable_routing_matrix = true;
         (router, probe)
     }
     fn request(task: &str) -> LLMRequest {
-        LLMRequest::new(task, vec![ChatMessage::system("Caller-specific output protocol"), ChatMessage::user("input")])
+        LLMRequest::new(
+            task,
+            vec![
+                ChatMessage::system("Caller-specific output protocol"),
+                ChatMessage::user("input"),
+            ],
+        )
     }
     async fn drain(mut rx: mpsc::Receiver<StreamEvent>, expected: &str) {
         let mut text = String::new();
@@ -2050,18 +2239,37 @@ mod task_contract_tests {
         let (router, probe) = fixture();
         for spec in super::super::task_catalog::TASK_ROUTES.iter() {
             assert_eq!(router.generate(request(&spec.id)).await.unwrap(), spec.id);
-            drain(router.generate_stream(request(&spec.id)).await.unwrap(), &spec.id).await;
-            let tools = vec![ToolDefinition { name: "probe".into(), description: "test".into(), parameters: json!({"type":"object","properties":{}}) }];
-            let mut req = request(&spec.id); req.tools = tools.clone();
-            assert_eq!(router.generate_with_tools(req).await.unwrap().content, spec.id);
-            let mut req = request(&spec.id); req.tools = tools;
-            drain(router.generate_stream_with_tools(req).await.unwrap(), &spec.id).await;
+            drain(
+                router.generate_stream(request(&spec.id)).await.unwrap(),
+                &spec.id,
+            )
+            .await;
+            let tools = vec![ToolDefinition {
+                name: "probe".into(),
+                description: "test".into(),
+                parameters: json!({"type":"object","properties":{}}),
+            }];
+            let mut req = request(&spec.id);
+            req.tools = tools.clone();
+            assert_eq!(
+                router.generate_with_tools(req).await.unwrap().content,
+                spec.id
+            );
+            let mut req = request(&spec.id);
+            req.tools = tools;
+            drain(
+                router.generate_stream_with_tools(req).await.unwrap(),
+                &spec.id,
+            )
+            .await;
         }
         let captures = probe.calls.lock();
         assert_eq!(captures.len(), super::super::task_catalog::TASK_ROUTES.len() * 4);
         for (model, messages, framework) in captures.iter() {
             assert_eq!(framework, &Some(false));
-            let contract = super::super::task_catalog::prompt(super::super::task_catalog::find(model).unwrap());
+            let contract = super::super::task_catalog::prompt(
+                super::super::task_catalog::find(model).unwrap(),
+            );
             assert_eq!(messages[0].content, contract);
             assert_eq!(messages[1].content, "Caller-specific output protocol");
             assert_eq!(messages[2].content, "input");
@@ -2074,15 +2282,29 @@ mod task_contract_tests {
         let mut companion = probe.clone(); companion.model = "companion".into(); companion.failed = true;
         router.task_providers = Arc::new(HashMap::from([
             ("memory".into(), Box::new(memory) as Box<dyn BaseProvider>),
-            ("companion".into(), Box::new(companion) as Box<dyn BaseProvider>),
+            (
+                "companion".into(),
+                Box::new(companion) as Box<dyn BaseProvider>,
+            ),
         ]));
         assert_eq!(router.generate(request("query_rewrite")).await.unwrap(), "memory");
         assert_eq!(router.generate(request("context_compress")).await.unwrap(), "memory");
         assert_eq!(router.generate(request("pet_reaction")).await.unwrap(), "main");
         let calls = probe.calls.lock();
         assert_eq!(calls.len(), 4);
-        for (i, task) in ["query_rewrite", "context_compress", "pet_reaction", "pet_reaction"].iter().enumerate() {
-            assert_eq!(calls[i].1[0].content, super::super::task_catalog::prompt(super::super::task_catalog::find(task).unwrap()));
+        for (i, task) in [
+            "query_rewrite",
+            "context_compress",
+            "pet_reaction",
+            "pet_reaction",
+        ]
+        .iter()
+        .enumerate()
+        {
+            assert_eq!(
+                calls[i].1[0].content,
+                super::super::task_catalog::prompt(super::super::task_catalog::find(task).unwrap())
+            );
             assert_eq!(calls[i].2, Some(false));
         }
     }

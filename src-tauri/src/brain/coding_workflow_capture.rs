@@ -14,6 +14,7 @@ pub struct Capture {
 }
 
 impl Capture {
+    pub fn request_id(&self) -> &str { &self.detail.summary.id }
     pub fn start(app: &tauri::AppHandle, session_id: &str, turn_message_index: usize, turn: usize,
         step: usize, attempt: usize, purpose: &str, model: String, request: &LLMRequest) -> Self {
         let messages = serde_json::to_value(&request.messages).unwrap_or(Value::Null);

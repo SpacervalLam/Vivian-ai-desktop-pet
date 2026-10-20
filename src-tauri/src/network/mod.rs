@@ -1,8 +1,11 @@
 pub mod diagnose;
 pub mod http_client;
 pub mod http_retry;
+pub mod image_alpha;
+pub mod image_gen;
 pub mod proxy;
 pub mod request_utils;
+pub mod sandbox_proxy;
 pub mod url_fetcher;
 pub mod web;
 pub mod web_evidence;

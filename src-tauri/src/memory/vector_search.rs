@@ -116,8 +116,8 @@ impl MemoryVectorStore {
         )
         .map_err(|e| VivianError::Memory(format!("打开 SQLite 失败: {e}")))?;
 
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")
-            .map_err(|e| VivianError::Memory(format!("设置 WAL 模式失败: {e}")))?;
+        crate::utils::sqlite::configure(&conn, crate::utils::sqlite::DataClass::Derived)
+            .map_err(|e| VivianError::Memory(format!("设置向量数据库参数失败: {e}")))?;
 
         // 元数据表（始终存在，用于持久化 dimension/model 与模型切换检测）
         conn.execute_batch(

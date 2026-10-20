@@ -469,77 +469,8 @@ impl ThoughtTriggerEvaluator {
             self.last_companion_id = None;
         }
 
-        // ==== 分享诱因检测：值得主动找室友聊的事件 ====
-        // 与 cross_character_spoke（室友刚说话的被动响应）不同，
-        // 这是"发生了值得分享的事"的主动动机，驱动角色主动找室友聊天
-        if companion.is_some() && self.check_cooldown("want_share_roommate", now, 1800.0) {
-            let mut share_trigger: Option<(String, String, f32)> = None;
-
-            // 1. 用户行为类别切换：从 activity_snapshot 最近两条检测 category 变化
-            if activity_snapshot.len() >= 2 {
-                let latest = &activity_snapshot[activity_snapshot.len() - 1];
-                let prev = &activity_snapshot[activity_snapshot.len() - 2];
-                if let (Some(new_cat), Some(old_cat)) = (&latest.category, &prev.category) {
-                    if new_cat != old_cat
-                        && !matches!(new_cat.as_str(), "系统" | "其他" | "")
-                        && !matches!(old_cat.as_str(), "系统" | "其他" | "")
-                    {
-                        share_trigger = Some((
-                            format!("share_activity_{}", new_cat),
-                            format!("用户从{}切到了{}", old_cat, new_cat),
-                            0.55,
-                        ));
-                    }
-                }
-            }
-
-            // 2. 显著世界事件：RainStarted / FestivalArrived
-            if share_trigger.is_none() {
-                for ev in world_events {
-                    if matches!(
-                        ev.kind,
-                        WorldEventKind::RainStarted | WorldEventKind::FestivalArrived
-                    ) {
-                        share_trigger = Some((
-                            format!("share_event_{:?}", ev.kind),
-                            ev.description.clone(),
-                            0.60,
-                        ));
-                        break;
-                    }
-                }
-            }
-
-            // 3. 情绪累积：loneliness 高 + 有在线室友
-            if share_trigger.is_none()
-                && mood.primary_emotion == EmotionLabel::Loneliness
-                && mood.primary_intensity > 0.6
-            {
-                share_trigger = Some((
-                    "share_lonely".into(),
-                    "一个人待着有点孤单，想找室友说说话".into(),
-                    0.50,
-                ));
-            }
-
-            if let Some((key, hint, intensity)) = share_trigger {
-                seeds.push(ThoughtSeed {
-                    thought_key: format!("want_share_roommate_{}", key),
-                    description: format!("想和室友分享：{}", hint),
-                    context_hint: format!("你{}，想找室友聊聊这件事", hint),
-                    // 不乘 rel_weight：想和室友聊的动机不应被 user↔agent intimacy 抑制
-                    // intensity 0.50~0.60：单次诱因即可接近 PROACTIVE_SHARE_THRESHOLD(0.70)，
-                    // 一次 nourish 即可达到表达阈值，不再需要 3 次同类事件积累
-                    intensity,
-                    valence: 0.1,
-                    arousal: 0.3,
-                    base_desire: 0.5,
-                    trigger_kind: "want_to_share_with_roommate",
-                    high_priority: false,
-                });
-                self.last_event_ts_by_type.insert("want_share_roommate", now);
-            }
-        }
+        // Shared activity/weather/festival/solitude opportunities are selected once by
+        // WorldStateProvider.environment. Character-specific reflection remains here.
 
         // ==== 习惯偏离（用户当前活动与历史时段习惯不符）====
 

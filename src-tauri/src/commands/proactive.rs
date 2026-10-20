@@ -564,15 +564,9 @@ async fn proactive_tick_inner(
             .get("away_seconds")
             .and_then(|v| v.as_f64())
             .unwrap_or(0.0),
-        // 在场状态以系统级空闲为准（< 300s 视为在场），失败时回退到前端判定
-        user_present: crate::utils::get_system_idle_seconds()
-            .map(|idle| idle < 300.0)
-            .unwrap_or_else(|| {
-                context
-                    .get("user_present")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(true)
-            }),
+        // One absence boundary leaves an actionable interval for idle greetings.
+        user_present: system_idle_seconds <= brain.config.proactive.away_threshold_seconds as f64,
+        user_contact_blocked: false,
         interaction_count_today: context
             .get("interaction_count_today")
             .and_then(|v| v.as_u64())
@@ -604,14 +598,16 @@ async fn proactive_tick_inner(
             .unwrap_or("")
             .to_string(),
         // SelfState 防打扰决策：quiet_mode/今日主动次数上限/被忽略接近阈值/Rest/Offline 任一成立则跳过主动消息
-        lay_low: brain.self_state.snapshot().should_lay_low(),
+        lay_low: brain.self_state.snapshot().should_lay_low()
+            || state.world_provider.environment.contact_suppressed(chrono::Local::now().timestamp() as f64),
         // 用户是否正在与任意角色活跃对话：抑制打断性主动消息
         // 判定标准：会话 Active 且用户最近 90s 内有真实活跃（系统级空闲 < 90s）。
         // 之前仅判断 is_any_user_session_active()，但会话 Active 状态会持续到超时关闭（默认 30 分钟），
         // 导致用户只是发了一条消息就离开后，长达 30 分钟内 CrossCharacterReply 被误判为"用户正在聊天"而跳过，
         // 两个角色之间的跨角色交流几乎不发生。
-        is_user_chatting: crate::conversation::CONVERSATION_MANAGER.is_any_user_session_active()
-            && system_idle_seconds < 90.0,
+        is_user_chatting: state.session_coordinator.any_user_turn_active()
+            || (crate::conversation::CONVERSATION_MANAGER.is_any_user_session_active()
+                && system_idle_seconds < 90.0),
         is_speaking_leader: false,
         // 心智观察器注意力：窗口层现算，页签/会话取自前端上报。
         // 保守缺省——查不到就当作"用户看不见"，宁可多提醒一次。
@@ -780,11 +776,7 @@ async fn proactive_tick_inner(
                 char_id,
                 reason
             );
-            return Ok(json!({
-                "produced": false,
-                "messages": [],
-                "skipped": true,
-            }));
+            ctx.user_contact_blocked = true;
         }
     }
 
@@ -1137,6 +1129,11 @@ async fn proactive_tick_inner(
         )
     };
     ctx.is_speaking_leader = is_speaking_leader;
+    // Shared nomination can give this observed event to a character other than the leader.
+    if let Some(nominated) = state.world_provider.environment.nominated_user_speaker(&state, ctx.now) {
+        ctx.is_speaking_leader = nominated == char_id && !ctx.user_contact_blocked;
+    }
+    let is_speaking_leader = ctx.is_speaking_leader;
 
     // 非 leader：跳过发言预占与 turn 登记，直接执行状态维护 tick
     // 但仍处理 CrossCharacterReply 产出的跨角色消息（发给室友，不发给用户）
@@ -1526,15 +1523,23 @@ async fn deliver_cross_character_messages(
         return;
     }
     for msg in &cross_messages {
+        if crate::companion_runtime::quiet_reason(state).is_some() { break; }
+        if state.session_coordinator.any_user_turn_active() { break; }
+        let source_allowed = state.characters.read().get(char_id).is_some_and(|source|
+            *source.online.read() && source.brain.proactive.autonomous_contact_allowed()
+                && source.brain.presence.current() == crate::presence::PresenceState::Online);
+        if !source_allowed { break; }
         let target = {
             let characters = state.characters.read();
             // Never redirect a composed message to another character if the original leaves.
             characters.iter()
                 .find(|(id, inst)| *id != char_id && *inst.online.read()
+                    && inst.brain.presence.current() == crate::presence::PresenceState::Online
                     && msg.listener.as_deref().map_or(true, |listener| listener == id.as_str()))
                 .map(|(id, inst)| (id.clone(), inst.name.clone()))
         };
         if let Some((target_id, _)) = target {
+            if !crate::world::environment_agent::allows_peer_contact(state, char_id, &target_id) { continue; }
             if msg.content.trim().is_empty() {
                 tracing::info!(
                     "[Proactive:{}] 跨角色空文本消息，跳过发送: trigger={}",
@@ -1551,7 +1556,7 @@ async fn deliver_cross_character_messages(
                 source_message_id: None,
                 stream_id,
             };
-            match CROSS_CHARACTER_BUS.send(app, state, req).await {
+            match CROSS_CHARACTER_BUS.send_autonomous(app, state, req).await {
                 Ok(reply) => {
                     tracing::info!(
                         "[Proactive:{}] 跨角色对话 → {}: {:?} | 回复: {:?}",
@@ -1570,6 +1575,8 @@ async fn deliver_cross_character_messages(
                         let reply_text = reply.reply.clone();
                         let reply_message_id = reply.message_id.clone();
                         tokio::spawn(async move {
+                            if !crate::world::environment_agent::allows_peer_contact(
+                                &state_clone, &source_id_for_followup, &target_id_for_followup) { return; }
                             let followup_stream_id = generate_cross_stream_id();
                             let followup_req = CrossCharacterRequest {
                                 source_id: source_id_for_followup,
@@ -1579,7 +1586,7 @@ async fn deliver_cross_character_messages(
                                 stream_id: followup_stream_id,
                             };
                             // 续聊不关心回复，仅投递
-                            let _ = CROSS_CHARACTER_BUS.send(&app_clone, &state_clone, followup_req).await;
+                            let _ = CROSS_CHARACTER_BUS.send_autonomous(&app_clone, &state_clone, followup_req).await;
                         });
                     }
                 }

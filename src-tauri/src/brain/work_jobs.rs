@@ -391,3 +391,53 @@ mod tests {
         assert!(registry.get(&id).unwrap().task_result.is_none());
     }
 }
+
+// ============================================================================
+// 父 → 子 agent 的单向消息收件箱
+// ============================================================================
+
+/// 收件箱：job_id → 待投递消息。
+///
+/// 为什么不"立刻打断"：子 agent 可能正处在一次工具调用中间，硬插消息会撕裂上下文
+/// （半截写入、参数与结果错位）。消息在**轮次边界**被取走，作为一条普通 user 消息
+/// 进入下一轮——这也是协作式取消用同一套思路的原因。
+fn agent_inbox() -> &'static std::sync::Mutex<std::collections::HashMap<String, Vec<String>>> {
+    static INBOX: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, Vec<String>>>,
+    > = std::sync::OnceLock::new();
+    INBOX.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// 投递一条消息给运行中的后台子 agent。任务不存在或已结束时返回错误。
+pub fn push_agent_message(job_id: &str, text: &str) -> Result<(), String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Err("消息不能为空".to_string());
+    }
+    let registry = global_work_job_registry();
+    match registry.get(job_id) {
+        None => return Err(format!("找不到任务 {job_id}")),
+        Some(job) if job.status.is_terminal() => {
+            return Err(format!(
+                "任务 {job_id} 已结束（{}），消息无法送达；需要它继续工作就重新派发",
+                job.status.as_str()
+            ));
+        }
+        _ => {}
+    }
+    agent_inbox()
+        .lock()
+        .map_err(|_| "收件箱锁定失败".to_string())?
+        .entry(job_id.to_string())
+        .or_default()
+        .push(trimmed.to_string());
+    Ok(())
+}
+
+/// 取走该任务的待收消息（子 agent 在轮次边界调用）。
+pub fn drain_agent_messages(job_id: &str) -> Vec<String> {
+    agent_inbox()
+        .lock()
+        .map(|mut m| m.remove(job_id).unwrap_or_default())
+        .unwrap_or_default()
+}

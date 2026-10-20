@@ -183,14 +183,14 @@ impl Mind {
         // Attention 持久化
         {
             let att = self.attention.read();
-            let json = serde_json::to_string(&*att).unwrap_or_default();
-            let _ = std::fs::write(self.persistence_dir.join("attention.json"), json);
+            let json = serde_json::to_string(&*att)?;
+            crate::utils::fs::write_atomic(&self.persistence_dir.join("attention.json"), &json)?;
         }
         // WorkingMemory 持久化
         {
             let wm = self.working_memory.read();
-            let json = serde_json::to_string(&*wm).unwrap_or_default();
-            let _ = std::fs::write(self.persistence_dir.join("working_memory.json"), json);
+            let json = serde_json::to_string(&*wm)?;
+            crate::utils::fs::write_atomic(&self.persistence_dir.join("working_memory.json"), &json)?;
         }
         Ok(())
     }

@@ -26,6 +26,10 @@ fn main() {
     if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
         println!("cargo:rustc-link-arg=/DELAYLOAD:comctl32.dll");
         println!("cargo:rustc-link-arg=delayimp.lib");
+        // 主线程（窗口消息循环 / Tauri IPC 分发）默认只有 1 MB 栈。IPC 分发器把全部
+        // 命令内联成一个函数，栈帧接近 0.5 MB；叠加窗口创建链后会在启动后立刻
+        // 触发 0xC00000FD（栈溢出，表现为闪退）。这里把主线程栈保留区提到 8 MB。
+        println!("cargo:rustc-link-arg=/STACK:8388608");
     }
 
     let out_dir = env::var("OUT_DIR").expect("OUT_DIR not set");

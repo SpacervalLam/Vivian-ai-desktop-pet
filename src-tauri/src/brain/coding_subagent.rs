@@ -16,10 +16,9 @@ use std::sync::Arc;
 use serde_json::Value;
 use tauri::Emitter;
 
-use crate::brain::coding_agent::{coding_sandbox_confirm, summarize_result};
+use crate::brain::coding_agent::{coding_sandbox_confirm, summarize_result, execute_audited_tool_use};
 use crate::providers::base::{LLMRequest, StreamEvent, ToolDefinition};
 use crate::providers::router::ModelRouter;
-use crate::tools::executor::execute_tool_use;
 use crate::tools::types::{AgentAccessLevel, ToolUseContext, WorkingDirectoryPermission};
 use crate::tools::ToolSystem;
 use crate::types::response::{ChatMessage, MessageToolCall};
@@ -43,6 +42,11 @@ pub const SUBAGENT_DEFAULT_TOOLS: &[&str] = &[
     "list_dir",
     "run_command",
     "lsp_query",
+    // 队友之间互相传话：只给「看同伴」和「递一句话」两条。
+    // 委派 / 提问 / 结算仍归主 agent 所有——子 agent 面前没有人类应答者，
+    // 但同伴是有的，所以这两条不违背上面那条边界。
+    "list_agents",
+    "send_message",
 ];
 
 /// 子 agent 的终止原因。
@@ -98,6 +102,10 @@ pub struct SubagentRequest {
     pub char_id: String,
     /// 协作式取消标志（后台任务才有）。置位后在下一个轮次边界收手。
     pub cancel: Option<Arc<AtomicBool>>,
+    /// 后台任务号（与 `work_jobs` 注册表对应）。有值时父子之间多一条单向消息通道：
+    /// 主 agent 用 `send_message` 投递，子 agent 在**轮次边界**取走——不打断正在跑的
+    /// 工具调用，避免留下半截写入。
+    pub job_id: Option<String>,
 }
 
 /// 把注册表里的工具 schema 转成 provider 侧定义（按白名单顺序输出，
@@ -167,6 +175,9 @@ fn subagent_system_prompt(
         "- 工作目录：未选择（文件操作使用绝对路径）".to_string()
     };
     let env = format!("{env}{scope}");
+    // 联网能力随主进程状态变化（浏览器桥连没连），子 agent 同样要知道：
+    // 它是被派去「摸清一个模块/查一批资料」的那一方，最容易在同一类取法上反复换变体。
+    let env = format!("{env}{}", super::coding_agent::web_capability_section());
     let execution_contract = include_str!("../../prompts/work/execution.md");
     // 与主智能体一致：有工作目录走相对路径，没有才退回绝对路径
     let link_protocol = if has_wd {
@@ -210,6 +221,18 @@ pub async fn run_subagent(
     app: Option<&tauri::AppHandle>,
     req: SubagentRequest,
 ) -> Result<SubagentOutcome, String> {
+    let mut context = super::coding_event_log::context(&req.parent_session_id);
+    context.agent_id = Some(uuid::Uuid::new_v4().to_string());
+    let mut span = super::coding_event_log::Span::start(Some(context.clone()), None, "subagent",
+        serde_json::json!({"depth":req.depth + 1,"max_rounds":req.max_rounds}));
+    let result = super::coding_event_log::scope(context, run_subagent_inner(router, tool_system, app, req)).await;
+    span.finish(match &result {
+        Ok(outcome) => serde_json::json!({"status":format!("{:?}",outcome.stop),"rounds":outcome.rounds,"tool_calls":outcome.tool_calls}),
+        Err(error) => serde_json::json!({"status":"error","error":error}),
+    });
+    result
+}
+async fn run_subagent_inner(router: &ModelRouter, tool_system: &ToolSystem, app: Option<&tauri::AppHandle>, req: SubagentRequest) -> Result<SubagentOutcome, String> {
     let mut definitions = definitions_for(tool_system, &req.tools);
     if definitions.is_empty() {
         return Err("没有可用的子 agent 工具（白名单为空或工具均未注册）".to_string());
@@ -293,6 +316,21 @@ pub async fn run_subagent(
             };
         }
         rounds += 1;
+
+        // 父 agent 在本次执行期间投递的消息：只在轮次边界取走，不打断正在跑的工具调用。
+        if let Some(job_id) = req.job_id.as_deref() {
+            let inbox = crate::brain::work_jobs::drain_agent_messages(job_id);
+            if !inbox.is_empty() {
+                let mut note = String::from(
+                    "[来自上级的消息] 以下是你执行期间上级追加的指示。把它当作对当前任务范围的\
+                     补充或修正；与原始任务冲突时以这里最新的为准。不必专门回复，继续干活即可。\n",
+                );
+                for m in &inbox {
+                    note.push_str(&format!("- {m}\n"));
+                }
+                messages.push(ChatMessage::user(&note));
+            }
+        }
 
         let mut llm_req = LLMRequest::new(crate::providers::base::TASK_WORK_AGENT, messages.clone())
             .with_tools(definitions.clone())
@@ -384,7 +422,7 @@ pub async fn run_subagent(
                 }
                 continue;
             }
-            let result = execute_tool_use(
+            let result = execute_audited_tool_use(&call.id,
                 &call.name,
                 call.arguments.clone(),
                 tool_system,

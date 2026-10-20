@@ -981,6 +981,8 @@ impl ProactiveOrchestrator {
         }
     }
 
+    pub(crate) fn flush_for_backup(&self) -> VivianResult<()> { self.save_to() }
+
     fn save_to(&self) -> VivianResult<()> {
         let state = self.state.read().clone();
         let json = serde_json::to_string_pretty(&state)
@@ -1002,6 +1004,17 @@ impl ProactiveOrchestrator {
 
     pub fn is_running(&self) -> bool {
         self.running.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Common admission for every autonomous path, including event-driven interjections.
+    pub fn autonomous_contact_allowed(&self) -> bool {
+        self.is_running() && { let cfg = self.config.read(); cfg.enabled && cfg.proactivity > 0.0 }
+            && !crate::companion_quiet::active()
+            && !self.state.read().quiet_mode
+    }
+
+    pub fn seconds_since_user_interaction(&self) -> f64 {
+        (chrono::Local::now().timestamp() as f64 - self.state.read().last_interaction_time).max(0.0)
     }
 
     /// 注入 LLM 路由器（注入后 BehaviorDecider / IcebreakerGenerator / MemoryRecall
@@ -1227,21 +1240,10 @@ impl ProactiveOrchestrator {
         if !user_present {
             prob += 0.35;
         }
-        // 三人共处一室语义：用户和某角色聊天时，另一角色仍可旁听+插话
-        // 用时间衰减替代原 5min 硬屏蔽：
-        // - < 2min：用户真正在打字，几乎不打断（×0.0）
-        // - 2-5min：用户可能停顿，低概率接话（×0.4）
-        // - 5-15min：正常概率
-        // - >15min：用户实际离开，概率提升（+0.20）
         let now_ts = chrono::Local::now().timestamp() as f64;
         let secs_since_interaction = now_ts - self.state.read().last_interaction_time;
-        if secs_since_interaction < 120.0 {
-            prob *= 0.0;
-        } else if secs_since_interaction < 300.0 {
-            prob *= 0.4;
-        } else if secs_since_interaction > 900.0 {
-            prob += 0.20;
-        }
+        if secs_since_interaction < 120.0 { return 0.0; }
+        if secs_since_interaction > 900.0 { prob += 0.20; }
         // 关系状态差异化：A↔B intimacy 调节发起意愿
         // 关系近更想找对方聊，关系远不太主动
         if let Some(companion) = self.companions_snapshot() {
@@ -1256,7 +1258,7 @@ impl ProactiveOrchestrator {
         }
         // 用户离场时上限提升至 0.90，支持持续跨角色交流
         let max_prob = if !user_present { 0.90 } else { 0.75 };
-        prob.clamp(0.05, max_prob)
+        crate::world::environment_policy::interaction_probability(prob.clamp(0.05, max_prob), secs_since_interaction)
     }
 
     /// 计算旁观插话的基础概率（情绪驱动，不含时机衰减）
@@ -1521,32 +1523,20 @@ impl ProactiveOrchestrator {
         //      通过 Appraisal 机制隐式影响情绪/需求，不产生主动消息。
         if !prepared { self.detect_and_apply_world_events(context); }
 
-        // 6.6. 用户离设备门控
-        //      idle_seconds 已由命令层用系统级 GetLastInputInfo 覆盖（跨应用权威）。
-        //      超过 away_threshold_seconds 视为用户不在设备前：跳过所有主动消息触发，
-        //      避免对着空座位说话。Vivian 的内心独白不受影响（不打扰用户）。
-        //      用户回归后由 WelcomeBack 触发器自然接续。
-        let user_away = context.idle_seconds > self.config.read().away_threshold_seconds as f64;
-        if user_away {
-            // 内心独白仍可运行：让 Vivian 的内心生活继续，但不产生气泡
-            if think_allowed { let _ = self.maybe_spawn_inner_monologue(context); }
-            *self.last_tick.write() = Instant::now();
-            return Ok(false);
-        }
-
+        // Absence suppresses user-directed speech only. Peer contact and internal life continue.
         // 6.7. 能力规划：Drive → Capability 决策点
         //      根据当前主导驱动决定「是否行动」「按什么顺序尝试 Capability」。
         //      skip_action=true 时跳过主动消息触发（Observe/Rest/Avoid 主导），
         //      但内心独白仍由后续逻辑调度。
         let plan = CapabilityPlanner::plan(current_drive.as_ref());
 
-        let mut produced = false;
+        let mut produced = self.fire_environment_opportunity(context, &plan, now);
 
         // 6.8. 自主定点唤醒消费：角色先前通过 schedule_wakeup 工具给自己安排的
         //      "稍后再来"日程到期时，兑现为一条主动消息（带 purpose 上下文）。
         //      门控与特殊日期问候一致：lay_low / 非 leader 时跳过（下轮 tick 重试，
         //      任务未消费不会丢失——drain 只在成功生成后调用）。
-        if !context.lay_low && context.is_speaking_leader {
+        if !context.lay_low && context.is_speaking_leader && context.can_address_user() && !produced {
             produced |= self.consume_due_wakeups(context, now);
         }
 
@@ -1554,7 +1544,7 @@ impl ProactiveOrchestrator {
         //    SelfState 防打扰（lay_low=true）时跳过：用户已要求安静 / 今日主动次数达上限 /
         //    被忽略接近阈值 / Rest/Offline 在场状态，不应再产生任何用户可见消息。
         //    非 leader 时跳过：发言权由 leader 独占，避免多角色同时问候。
-        if !context.lay_low && context.is_speaking_leader && self.try_special_date_greeting(now) {
+        if !produced && !context.lay_low && context.can_address_user() && context.is_speaking_leader && self.try_special_date_greeting(now) {
             produced = true;
         }
 
@@ -1572,14 +1562,14 @@ impl ProactiveOrchestrator {
         // 8.5. 日出/日落提醒：检测到天亮/天黑转换瞬间时，
         //     用完整提示词生成一句自然提醒，并弹出推荐切换浅色/深色主题的 toast。
         //     仅在用户在场、非防打扰、且本角色持有发言权时触发（世界事件由 leader 统一表达）。
-        if !context.lay_low && context.is_speaking_leader && context.user_present {
+        if !produced && !context.lay_low && context.is_speaking_leader && context.can_address_user() {
             produced |= self.maybe_sunrise_sunset_reminder(context, now);
         }
 
         // 8.6. 系统资源压力提醒：内存占用越过阈值（normal→high 转换瞬间）时，
         //     生成一句关心的提醒（如"内存有点满了，要不要关几个小程序"）。
         //     与日出/日落同为事件驱动路径，不经 check_trigger 通用门控。
-        if !context.lay_low && context.is_speaking_leader && context.user_present {
+        if !produced && !context.lay_low && context.is_speaking_leader && context.can_address_user() {
             produced |= self.maybe_system_pressure_reminder(context, now);
         }
 
@@ -1587,9 +1577,9 @@ impl ProactiveOrchestrator {
         //     截屏 + 视觉理解，再基于屏幕内容生成角色口吻的搭话。
         //     未授权时先发言请求同意（气泡消息）并弹出确认 toast；
         //     被拒绝后 2 小时内不再请求。整个截屏流程异步执行，不阻塞 tick。
-        if !context.lay_low
+        if !produced && !context.lay_low
             && context.is_speaking_leader
-            && context.user_present
+            && context.can_address_user()
             && !context.is_user_chatting
         {
             produced |= Self::maybe_screen_peek(&self, context, now);
@@ -1598,7 +1588,7 @@ impl ProactiveOrchestrator {
         // 8.8. 应用持续使用超时 & 深夜未眠：健康关怀类提醒。
         //     两者共用一次发言机会（互斥短路），避免一次 tick 串行多次 LLM——
         //     熬夜写代码时两个条件同时成立，只发一条。
-        if !context.lay_low && context.is_speaking_leader && context.user_present {
+        if !produced && !context.lay_low && context.is_speaking_leader && context.can_address_user() {
             if !produced {
                 produced |= self.maybe_late_night(context, now);
             }
@@ -1609,9 +1599,9 @@ impl ProactiveOrchestrator {
 
         // 8.9. 音乐切换搭话：检测到播放/切歌变化时基于 SMTC 曲目信息自然搭话。
         //     内部每次 tick 都更新播放状态跟踪（无 LLM 成本），仅变化瞬间可能触发。
-        if !context.lay_low
+        if !produced && !context.lay_low
             && context.is_speaking_leader
-            && context.user_present
+            && context.can_address_user()
             && !context.is_user_chatting
         {
             produced |= self.maybe_music_changed(context, now);
@@ -1676,7 +1666,7 @@ impl ProactiveOrchestrator {
                 // 对用户分享刚学到的知识：要求 leader 身份 + 用户在场
                 // 标记 Share 内容类型，命令层在触发与生成后依据场景选择渠道。
                 // 分享冷却：30 分钟内已分享过则跳过，避免频繁推送链接给用户
-                if !context.lay_low && context.is_speaking_leader && context.user_present
+                if !context.lay_low && context.is_speaking_leader && context.can_address_user()
                     && !self.is_knowledge_share_in_cooldown()
                 {
                     let share_channel = crate::conversation::CONVERSATION_MANAGER.user_channel(&self.char_id)
@@ -1716,7 +1706,7 @@ impl ProactiveOrchestrator {
                         thought_key
                     );
                 }
-            } else if !context.lay_low && context.is_speaking_leader && context.user_present {
+            } else if !context.lay_low && context.is_speaking_leader && context.can_address_user() {
                 if let Some(content) = self.generate_thought_share_message(context, &thought_key, &context_hint) {
                     self.push_message(
                         ProactiveTrigger::Spontaneous,
@@ -1736,6 +1726,45 @@ impl ProactiveOrchestrator {
 
         *self.last_tick.write() = Instant::now();
         Ok(produced)
+    }
+
+    fn fire_environment_opportunity(&self, context: &TickContext, plan: &CapabilityPlan, now: f64) -> bool {
+        if context.lay_low || context.is_user_chatting || plan.skip_action || !self.autonomous_contact_allowed() {
+            return false;
+        }
+        let Some(wp) = self.world_provider.read().clone() else { return false; };
+        let Some(opportunity) = wp.environment.take_opportunity(&self.char_id, now) else { return false; };
+        let peer = opportunity.listener_id != "user";
+        if peer {
+            if now - self.state.read().last_interaction_time < 120.0 { return false; }
+            if !self.companions_snapshot().is_some_and(|c| c.id == opportunity.listener_id) { return false; }
+        } else if !context.can_address_user() || !context.is_speaking_leader {
+            return false;
+        }
+        // The coordinator can select only a native control-flow input, never prompt text.
+        let trigger = if peer { ProactiveTrigger::CrossCharacterReply } else {
+            match opportunity.stimulus {
+                crate::world::environment_policy::Stimulus::CharacterState => ProactiveTrigger::MoodDriven,
+                crate::world::environment_policy::Stimulus::UserDialogue => ProactiveTrigger::TopicExtension,
+                _ => ProactiveTrigger::Spontaneous,
+            }
+        };
+        {
+            let state = self.state.read();
+            if (!peer && state.last_proactive_speech_time > 0.0
+                && now - state.last_proactive_speech_time < OPTIONAL_PROACTIVE_SPEECH_GAP_SECS)
+                || state.last_trigger_times.get(trigger.as_str()).is_some_and(|at|
+                    now - *at < self.config.read().min_trigger_interval as f64) { return false; }
+        }
+        let Some(router) = self.model_router.read().clone() else { return false; };
+        let hour = chrono::Local::now().hour();
+        let Some(content) = self.try_llm_content(trigger, context, hour, &router, None) else { return false; };
+        if !self.autonomous_contact_allowed() { return false; }
+        let mut action = content.into_action(trigger, now);
+        action.listener = Some(opportunity.listener_id);
+        self.push_action(action, trigger);
+        self.update_trigger_time(trigger, now, hour, chrono::Local::now().minute(), true);
+        true
     }
 
     /// 计算当前 BehaviorDrive（一次 tick 内复用，避免 update_mind_state 与 planner 各算一次）
@@ -1796,7 +1825,7 @@ impl ProactiveOrchestrator {
         // - CrossCharacterReply 不再硬屏蔽，由 compute_cross_reply_probability 的时间衰减控制
         //   （< 2min ×0, 2-5min ×0.4, 5-15min 正常, >15min +0.15）
         //   三人共处一室语义：室友对用户说话时，本角色可以低概率接话
-        let user_away = !context.user_present;
+        let user_away = !context.can_address_user();
 
         let mut tick_msg_count: u32 = 0;
         let triggers = self.ordered_active_triggers(plan);
@@ -2221,7 +2250,7 @@ impl ProactiveOrchestrator {
     /// - 用户拒绝后的请求冷却（2 小时）未到期时不发起
     ///
     /// 权限流程：
-    /// - screenshot_analyze 已在会话放行列表 → 直接异步截屏
+    /// - take_screenshot 已在会话放行列表 → 直接异步截屏
     /// - 未放行 → 先推送一条"想看看你在干嘛"的气泡消息（本次 tick 即送达），
     ///   同时异步弹确认 toast；用户同意后截屏，拒绝则记录时间戳冷却 2 小时
     ///
@@ -2272,7 +2301,7 @@ impl ProactiveOrchestrator {
         }
 
         // 会话级授权：用户此前选过"始终允许"则直接截屏，否则先发言请求同意
-        let session_allowed = is_session_allowed_tool("screenshot_analyze");
+        let session_allowed = is_session_allowed_tool("take_screenshot");
         if !session_allowed {
             // 先发言（气泡渠道）：表达好奇并请求同意，本条消息随本次 tick 一起送达
             this.push_message(
@@ -2321,7 +2350,7 @@ impl ProactiveOrchestrator {
                 };
                 let response = tool_system
                     .request_confirmation(
-                        "screenshot_analyze",
+                        "take_screenshot",
                         &serde_json::json!({}),
                         screen_peek_ask_reason(&char_id),
                         ConfirmationRisk::Medium,
@@ -2333,7 +2362,7 @@ impl ProactiveOrchestrator {
                     Some(ConfirmationResponse::AllowOnce) => {}
                     Some(ConfirmationResponse::AllowAlways) => {
                         // 会话级记忆：本会话内后续主动截屏不再询问
-                        session_allow_tool("screenshot_analyze");
+                        session_allow_tool("take_screenshot");
                     }
                     _ => {
                         // 拒绝/超时/未响应：记录时间戳，2 小时内不再请求
@@ -3017,6 +3046,7 @@ impl ProactiveOrchestrator {
             let trigger_context = ctx.clone();
             let thought_key = key.clone();
             let lifecycle_for_mono = Arc::clone(&self.thought_lifecycle);
+            let memory_for_presence = Arc::clone(&memory);
 
             tracing::info!(
                 "[inner_monologue] 触发内心独白: thought={} (kind={}, deep={}), accumulated_thoughts={}",
@@ -3054,6 +3084,25 @@ impl ProactiveOrchestrator {
                         );
                         // 内心 OS 是当下主观活动，不是发生过的用户事件。
                         // Mind/情绪系统持有它的短暂影响，不再写入可检索记忆。
+
+                        // 但独白里的 `presence` 字段是"可以说出口的此刻"：单独记一条
+                        // 可召回的 daily_presence，作为她"今天也有自己的事"在对话里
+                        // 被引用的全部来源。先写进库再引用，保证经得起追问。
+                        if let Some(presence) = output.presence.as_deref() {
+                            let _ = memory_for_presence
+                                .add_memory_with_metadata(
+                                    presence,
+                                    crate::memory::types::MemoryType::DailyPresence,
+                                    0.5,
+                                    vec!["daily_presence".into(), char_id.clone()],
+                                    serde_json::json!({
+                                        "source": "daily_presence",
+                                        "speaker": char_id,
+                                        "private": false,
+                                    }),
+                                )
+                                .await;
+                        }
 
                         // interest_context 仅作为内心独白的素材（不分享、不入池）
                         // 分享类链接由知识采集（Busy 状态）直接通过微信面板发送，
@@ -3641,6 +3690,7 @@ impl ProactiveOrchestrator {
             .iter()
             .copied()
             .filter(|t| match t {
+                ProactiveTrigger::BystanderInterjection => false,
                 ProactiveTrigger::IdleGreeting => cfg.enable_idle_trigger,
                 ProactiveTrigger::WindowTrigger => cfg.enable_window_change_trigger,
                 ProactiveTrigger::WelcomeBack => cfg.enable_away_reminder,
@@ -3868,6 +3918,7 @@ impl ProactiveOrchestrator {
         hour: u32,
         minute: u32,
     ) -> bool {
+        if !ctx.can_address_user() && trigger != ProactiveTrigger::CrossCharacterReply { return false; }
         let state = self.state.read();
         let now = ctx.now;
         let throttle = TriggerThrottle::get(trigger);
@@ -4113,7 +4164,8 @@ impl ProactiveOrchestrator {
                 let min_idle = throttle
                     .min_idle_seconds
                     .max(orchestrator.config.read().idle_threshold);
-                ctx.idle_seconds >= min_idle as f64
+                ctx.idle_seconds >= crate::world::environment_policy::idle_threshold(
+                    min_idle, orchestrator.config.read().away_threshold_seconds)
             }
             ProactiveTrigger::Icebreaker => {
                 let level = IceBreakerLevel::from_idle(ctx.idle_seconds);
@@ -4136,7 +4188,8 @@ impl ProactiveOrchestrator {
                 let min_idle = throttle
                     .min_idle_seconds
                     .max(orchestrator.config.read().idle_threshold);
-                ctx.idle_seconds >= min_idle as f64
+                ctx.idle_seconds >= crate::world::environment_policy::idle_threshold(
+                    min_idle, orchestrator.config.read().away_threshold_seconds)
             }
             ProactiveTrigger::WelcomeBack => {
                 let was_away = *orchestrator.last_user_was_away.read();
@@ -4772,8 +4825,12 @@ impl ProactiveOrchestrator {
             self.stream_emitter.clone()
         };
 
+        let priority = if trigger == ProactiveTrigger::WorkNotice { None } else {
+            self.world_provider.read().as_ref().and_then(|world| world.environment.background_priority())
+        };
         tokio::task::block_in_place(|| {
             handle.block_on(async move {
+                let generation = async move {
                 // 记忆检索（含知识库：busy 状态网络搜索获得的信息），让主动问候有真实素材
                 // 每条记忆带相对时间标注（如"3小时前"），让 LLM 区分刚发生的事与旧记忆
                 let recall_query = proactive_recall_query(trigger, &llm_ctx, &dialogue_messages);
@@ -4963,6 +5020,12 @@ impl ProactiveOrchestrator {
                 content.listener = Some(recipient.0.clone());
                 tracing::debug!(character = %self.char_id, trigger = trigger.as_str(), planned, "主动回复解析完成");
                 Some(content)
+                };
+                if let Some(priority) = priority {
+                    priority.run(generation).await.flatten()
+                } else {
+                    generation.await
+                }
             })
         })
     }
@@ -4980,7 +5043,8 @@ impl ProactiveOrchestrator {
         intimacy: f64,
         lang: &str,
     ) -> Option<interjection::PendingInterjection> {
-        use interjection::{Opportunity, OpportunityPermit, PendingInterjection};
+        use interjection::{OpportunityPermit, PendingInterjection};
+        if !self.autonomous_contact_allowed() { return None; }
         let router = self.model_router.read().clone()?;
         let now = chrono::Local::now().timestamp() as f64;
         let overheard = format!(
@@ -5001,32 +5065,9 @@ impl ProactiveOrchestrator {
             "exchange": overheard, "current_state": mood_hint, "intimacy": intimacy,
             "recent_overheard": dialogue_history, "last_interjection": last_text, "language": lang,
         });
-        let questions = [
-            ("relevance", "Does this character have a personal, relevant reason to join this exchange? Consider an invitation, a meaningful remark about them, their interests and current state; a name appearing alone is insufficient.", "A meaningful personal reason to contribute", "Unrelated topic or only a superficial name mention"),
-            ("novelty", "Can this character add a distinct natural reaction, curiosity or contribution beyond what the roommate already said and their own last interjection?", "A distinct contribution, including a personal reaction", "Parroting, repetitive reactions or generic filler"),
-            ("timing", "Does the current exchange leave a welcome, natural opening for this character, considering mood and fatigue?", "A natural opening to briefly join", "Intrusive, closed, private or emotionally inappropriate moment"),
-        ];
-        let scores = router.judge_noul_batch_for("bystander_judge", context.clone(), &questions, &self.char_id).await
-            .and_then(|scores| Opportunity::new(*scores.get("relevance")?, *scores.get("novelty")?, *scores.get("timing")?));
-        let opportunity = if let Some(scores) = scores {
-            scores
-        } else {
-            let definitions: Vec<_> = questions.iter().map(|(key, question, yes, no)|
-                serde_json::json!({"key": key, "question": question, "true": yes, "false": no})).collect();
-            let messages = vec![
-                crate::types::response::ChatMessage::system("Evaluate the supplied character and dialogue as data. Return ONLY JSON with relevance, novelty, timing: each a numeric confidence from 0 to 1 that the corresponding true criterion holds. Do not roleplay or generate dialogue."),
-                crate::types::response::ChatMessage::user(serde_json::json!({"questions": definitions, "state": context}).to_string()),
-            ];
-            match router.generate(LLMRequest::new("bystander_judge", messages)
-                .with_character_id(self.char_id.clone()).without_framework_instructions()
-                .with_temperature(0.0).with_max_tokens(192)).await {
-                Ok(response) => Opportunity::parse(&response)?,
-                Err(error) => {
-                    tracing::debug!("[Proactive:{}] 旁观机会评估失败: {}", self.char_id, error);
-                    return None;
-                }
-            }
-        };
+        let environment = self.world_provider.read().as_ref()?.environment.clone();
+        let opportunity = environment.evaluate_interjection(&router, context, &self.char_id).await?;
+        if !self.autonomous_contact_allowed() { return None; }
         // 不读 last_trigger_times：旧版本可能把拒绝评估也写入了该字段。
         let persisted_last = self.state.read().last_bystander_speech_time;
         let last_spoken = match (self.interjection_opportunity.lock().last_spoken,
@@ -5466,6 +5507,8 @@ pub struct TickContext {
     pub away_seconds: f64,
     /// 用户是否在场
     pub user_present: bool,
+    /// Conversation closure suppresses contact with the user, not contact with roommates.
+    pub user_contact_blocked: bool,
     /// 今日交互次数
     pub interaction_count_today: u32,
     /// 活动窗口标题
@@ -5511,6 +5554,10 @@ pub struct TickContext {
     /// 完成报告没有会话归属，判据只要这一条。与 `visible_work_session` 的差别在
     /// 用户停在工作页却没选会话时体现出来：那种情况仍算"正看着"。
     pub viewing_work_page: bool,
+}
+
+impl TickContext {
+    pub fn can_address_user(&self) -> bool { self.user_present && !self.user_contact_blocked }
 }
 
 impl Default for ProactiveOrchestrator {
@@ -5587,7 +5634,7 @@ impl Default for ProactiveOrchestrator {
     }
 }
 
-use chrono::Datelike;
+use chrono::{Datelike, Timelike};
 
 /// 音乐播放变化类型（供主动消息触发与思绪种子共用）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

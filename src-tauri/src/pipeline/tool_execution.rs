@@ -21,7 +21,7 @@ fn primary_owned_tool(name: &str) -> bool {
 
 fn atomic_batch(calls: &[StructuredToolCall]) -> bool {
     calls.iter().all(|c| primary_owned_tool(&c.name) || matches!(c.name.as_str(),
-        "delegate_to_work_agent" | "get_foreground_app_context" | "get_active_window" | "take_screenshot" | "screenshot_analyze"))
+        "delegate_to_work_agent" | "get_foreground_app_context" | "get_active_window" | "take_screenshot"))
 }
 
 fn private_messages(task: &str) -> Vec<ChatMessage> {

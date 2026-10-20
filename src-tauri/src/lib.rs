@@ -110,6 +110,25 @@ fn percent_decode(s: &str) -> String {
 pub fn run() {
     init_logging();
 
+    // Hold a shared runtime lease before any manager opens user data. A queued
+    // export first waits exclusively for the preceding process and browser to exit.
+    let _data_lease = match crate::storage::export::startup(
+        &crate::utils::path::get_user_data_dir(), crate::utils::pid_file::is_process_alive,
+    ) {
+        Ok(lease)=>lease,
+        Err(error)=>{
+            eprintln!("无法建立用户数据写入屏障: {error}");
+            #[cfg(windows)] {
+                use windows::core::PCWSTR;
+                use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW,MB_ICONERROR,MB_OK};
+                let text:Vec<u16>=format!("无法完成备份：{error}").encode_utf16().chain(Some(0)).collect();
+                let title:Vec<u16>="Vivian".encode_utf16().chain(Some(0)).collect();
+                unsafe{MessageBoxW(None,PCWSTR(text.as_ptr()),PCWSTR(title.as_ptr()),MB_ICONERROR|MB_OK);}
+            }
+            return;
+        }
+    };
+
     // 恢复出厂清扫：必须在 AppState::new()（及任何数据模块打开文件）之前执行，
     // 此时 vectors.db 等尚未被 SQLite 打开，可无锁删除。
     if let Err(e) = commands::system::factory_reset_sweep_if_pending() {
@@ -448,6 +467,7 @@ pub fn run() {
             commands::system::factory_reset,
             commands::system::reinitialize,
             commands::backup::backup_user_data,
+            commands::backup::take_backup_result,
             commands::backup::restore_user_data,
             commands::storage::get_storage_usage,
             commands::storage::open_storage_folder,
@@ -535,6 +555,10 @@ pub fn run() {
             commands::plugins::plugin_paths,
             commands::plugins::plugin_diagnostics,
             commands::plugins::list_skills,
+            commands::plugins::read_skill_detail,
+            commands::plugins::save_skill,
+            commands::plugins::delete_skill,
+            commands::plugins::validate_skill,
             commands::plugins::list_provider_presets,
             stickers::list_stickers,
             stickers::set_sticker_frequency,
@@ -620,8 +644,6 @@ pub fn run() {
             commands::persona::get_persona_sections,
             commands::persona::set_persona_section,
             commands::persona::reset_persona_section,
-            commands::persona::get_few_shot_examples,
-            commands::persona::set_few_shot_examples,
             commands::persona::get_style_prompt,
             commands::persona::list_persona_cards,
             commands::persona::get_active_persona_card,
@@ -744,6 +766,9 @@ pub fn run() {
             video_animation::video_animation_auto_tick,
         ])
         .setup(|app| {
+            if crate::utils::path::get_user_data_dir().join(".backup.result.json").exists() {
+                crate::startup::open_config_after_backup(app.handle());
+            }
             // 初始化 Windows Job Object（KILL_ON_JOB_CLOSE 兜底）
             // 必须在任何子进程启动前完成，确保所有子进程都能被绑定
             crate::utils::job_object::init();
@@ -1592,6 +1617,7 @@ pub fn run() {
                             if let Some(state) = app_handle
                                 .try_state::<std::sync::Arc<crate::state::AppState>>()
                             {
+                                crate::commands::backup::flush_pending_on_exit(state.inner());
                                 {
                                     let chars = state.characters.read();
                                     for (id, instance) in chars.iter() {

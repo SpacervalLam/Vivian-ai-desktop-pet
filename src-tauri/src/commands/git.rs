@@ -25,19 +25,19 @@ use serde::Serialize;
 /// 不加这个标志时，每次轮询状态都会在屏幕上闪一次黑框——状态是定时刷新的，
 /// 闪烁频率足以让人无法工作。
 #[cfg(windows)]
-fn hide_console(cmd: &mut Command) {
+pub(crate) fn hide_console(cmd: &mut Command) {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     cmd.creation_flags(CREATE_NO_WINDOW);
 }
 #[cfg(not(windows))]
-fn hide_console(_cmd: &mut Command) {}
+pub(crate) fn hide_console(_cmd: &mut Command) {}
 
 /// 执行一次 git 子命令，成功返回 stdout（已 trim）。
 ///
 /// `core.quotepath=false` 是必须的：默认 git 会把非 ASCII 路径转义成
 /// `\344\270\255` 这种八进制串，中文目录名在界面上会变成天书。
-fn run_git(dir: &str, args: &[&str]) -> Result<String, String> {
+pub(crate) fn run_git(dir: &str, args: &[&str]) -> Result<String, String> {
     let mut cmd = Command::new("git");
     cmd.arg("-c")
         .arg("core.quotepath=false")
@@ -63,7 +63,7 @@ fn run_git(dir: &str, args: &[&str]) -> Result<String, String> {
 ///
 /// 大量 git 探测的「失败」本身就是有效信息：没有 upstream、没有 origin、
 /// 空仓库没有 HEAD —— 这些不是异常，不该冒泡成错误。
-fn run_git_opt(dir: &str, args: &[&str]) -> Option<String> {
+pub(crate) fn run_git_opt(dir: &str, args: &[&str]) -> Option<String> {
     run_git(dir, args).ok().filter(|s| !s.is_empty())
 }
 
@@ -385,6 +385,40 @@ pub fn git_repo_status(working_directory: String) -> GitRepoStatus {
     }
 }
 
+/// 推测默认比较基准：远端默认 HEAD 指向的分支 > origin/main > origin/master > main > master。
+///
+/// 供分支清单展示与代码审查工具解析基准复用。
+pub(crate) fn detect_default_base(dir: &str) -> Option<String> {
+    let local: Vec<String> = run_git_opt(dir, &["branch", "--format=%(refname:short)"])
+        .map(|s| {
+            s.lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    let remote: Vec<String> = run_git_opt(dir, &["branch", "-r", "--format=%(refname:short)"])
+        .map(|s| {
+            s.lines()
+                .map(|l| l.trim().to_string())
+                // `origin/HEAD` 是指针不是分支
+                .filter(|l| !l.is_empty() && !l.ends_with("/HEAD"))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let remote_head = run_git_opt(dir, &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
+        .map(|s| s.trim().to_string());
+    remote_head
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            ["origin/main", "origin/master", "main", "master"]
+                .iter()
+                .find(|c| local.iter().any(|l| l == *c) || remote.iter().any(|r| r == *c))
+                .map(|c| c.to_string())
+        })
+}
+
 /// 列出本地与远端分支，并推测一个默认比较基准。
 #[tauri::command]
 pub fn git_list_branches(working_directory: String) -> GitBranchList {
@@ -405,22 +439,10 @@ pub fn git_list_branches(working_directory: String) -> GitBranchList {
         })
         .unwrap_or_default();
 
-    // 基准优先级：远端默认 HEAD 指向的分支 > origin/main > origin/master > main > master
-    let remote_head = run_git_opt(dir, &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
-        .map(|s| s.trim().to_string());
-    let default_base = remote_head
-        .filter(|s| !s.is_empty())
-        .or_else(|| {
-            ["origin/main", "origin/master", "main", "master"]
-                .iter()
-                .find(|c| local.iter().any(|l| l == *c) || remote.iter().any(|r| r == *c))
-                .map(|c| c.to_string())
-        });
-
     GitBranchList {
         local,
         remote,
-        default_base,
+        default_base: detect_default_base(dir),
     }
 }
 

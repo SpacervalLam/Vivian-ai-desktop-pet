@@ -388,7 +388,12 @@ pub fn confirmation_info(tool_name: &str, args: &serde_json::Value) -> (Confirma
             "将在网页中执行 JavaScript 代码".to_string(),
         ),
         "take_screenshot" | "screenshot_analyze" => {
-            (ConfirmationRisk::Medium, "将截取当前屏幕".to_string())
+            let reason = if args.get("analyze").and_then(|value| value.as_bool()).unwrap_or(true) {
+                "将截取当前屏幕并发送至配置的视觉模型分析，画面可能包含敏感信息"
+            } else {
+                "将截取当前屏幕，画面可能包含敏感信息"
+            };
+            (ConfirmationRisk::Medium, reason.to_string())
         }
         "manage_scheduled" | "cancel_scheduled" => {
             let id = args.get("id").and_then(|v| v.as_str()).unwrap_or("?");

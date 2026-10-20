@@ -148,17 +148,19 @@ fn ensure_loaded(state: &mut StoreState) {
 }
 
 /// 原子落盘：先写 .tmp 再 rename，避免半写文件。
+fn flush_locked_result(state: &StoreState) -> Result<(), String> {
+    if let Some(error) = &state.read_error { return Err(error.clone()); }
+    if !state.loaded { return Ok(()); }
+    let json=serde_json::to_string_pretty(&state.cache).map_err(|e|e.to_string())?;
+    crate::utils::fs::write_atomic(&store_path(),&json).map_err(|e|e.to_string())
+}
 fn flush_locked(state: &StoreState) {
-    if !state.loaded || state.read_error.is_some() { return; }
-    let path = store_path();
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    if let Ok(json) = serde_json::to_string_pretty(&state.cache) {
-        if let Err(error) = crate::utils::fs::write_atomic(&path, &json) {
-            tracing::error!("[usage_store] 用量落盘失败 {}: {}", path.display(), error);
-        }
-    }
+    if let Err(error)=flush_locked_result(state) { tracing::error!("[usage_store] 用量落盘失败: {error}"); }
+}
+
+pub fn try_flush() -> Result<(),String> {
+    let state=STATE.lock().map_err(|_| "用量存储锁不可用")?;
+    flush_locked_result(&state)
 }
 
 /// 防抖落盘：已有待执行的落盘任务时不重复调度。

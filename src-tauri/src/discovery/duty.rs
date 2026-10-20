@@ -343,7 +343,7 @@ pub async fn run_duty_now(char_id: &str) -> DutyOutcome {
     profile.save(char_id);
 
     let picked = recommend::pick_bilibili_recommendations(char_id, remaining, DUTY_MAX_AGE_SECS);
-    let mut section = build_report_section(&picked, result.subtitle_skipped);
+    let mut section = build_report_section(&picked, result.evidence_missing);
     for warning in &result.warnings {
         section.push_str(&format!("\n本轮异常：{warning}\n"));
     }
@@ -352,7 +352,7 @@ pub async fn run_duty_now(char_id: &str) -> DutyOutcome {
             ran: true,
             reason,
             picked: already,
-            subtitle_skipped: result.subtitle_skipped,
+            subtitle_skipped: result.evidence_missing,
             report,
             digest: None,
         };
@@ -385,14 +385,14 @@ pub async fn run_duty_now(char_id: &str) -> DutyOutcome {
         char_id,
         picked.len(),
         quota,
-        result.subtitle_skipped
+        result.evidence_missing
     );
 
     DutyOutcome {
         ran: true,
         reason: format!("本轮挑了 {} 条", picked.len()),
         picked: day_count,
-        subtitle_skipped: result.subtitle_skipped,
+        subtitle_skipped: result.evidence_missing,
         report,
         digest: digest.map(|p| p.to_string_lossy().to_string()),
     }

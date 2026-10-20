@@ -241,7 +241,15 @@ impl ToolSystem {
         self.disabled_tools
             .read()
             .get(&side)
-            .map(|set| set.contains(name))
+            .map(|set| {
+                let canonical = self.find_tool(name);
+                let canonical = canonical.as_ref().map(|tool| tool.name()).unwrap_or(name);
+                set.iter().any(|disabled| {
+                    self.find_tool(disabled)
+                        .map(|tool| tool.name() == canonical)
+                        .unwrap_or(disabled == canonical)
+                })
+            })
             .unwrap_or(false)
     }
 

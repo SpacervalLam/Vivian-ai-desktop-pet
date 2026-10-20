@@ -406,10 +406,27 @@ pub fn show_startup_toast() {
 }
 
 
+/// 打开设置，让前端读取并展示重启后的备份结果。
+pub(crate) fn open_config_after_backup(handle: &AppHandle) {
+    if let Some(win) = handle.get_webview_window("config") {
+        let _ = win.show();
+        let _ = win.set_focus();
+        return;
+    }
+    let _ = WebviewWindowBuilder::new(handle, "config", WebviewUrl::App("index.html?view=config".into()))
+        .title("设置")
+        .inner_size(1120.0, 760.0)
+        .min_inner_size(880.0, 600.0)
+        .decorations(false)
+        .transparent(false)
+        .shadow(true)
+        .resizable(true)
+        .center()
+        .build();
+}
+
 /// 打开设置窗口，并请求其展示配置说明弹窗。
-///
-/// 若设置窗口已存在则聚焦并广播 `setup-guide:show`；否则直接以
-/// `/?view=config&guide=1` 创建，ConfigWindow 挂载时会根据 URL 参数自动弹窗。
+/// 若窗口已存在则聚焦并广播 `setup-guide:show`，否则通过 URL 参数请求弹窗。
 pub(crate) fn open_config_with_guide(handle: &AppHandle) {
     const LABEL: &str = "config";
     if let Some(win) = handle.get_webview_window(LABEL) {

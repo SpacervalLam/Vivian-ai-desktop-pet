@@ -104,6 +104,9 @@ unsafe fn text(get: impl FnOnce(*mut PWSTR) -> windows::core::Result<()>) -> Str
 fn root() -> std::path::PathBuf {
     crate::utils::path::get_user_data_dir().join("browser")
 }
+fn backup_pending() -> bool {
+    crate::utils::path::get_user_data_dir().join(".backup.pending.json").exists()
+}
 static REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 fn publish(host: &HostRef, persist: bool) {
     let (app, owner, state) = {
@@ -116,28 +119,75 @@ fn publish(host: &HostRef, persist: bool) {
     if persist {
         let saved = state.saved();
         // UI owns the snapshot; the serialized write is queued in order off the STA thread.
-        PERSIST_TX.send(saved).ok();
+        PERSIST_TX.send(BrowserPersist::Save(saved)).ok();
     }
     let _ = app.emit_to(&owner, "browser:state", &state);
 }
-static PERSIST_TX: once_cell::sync::Lazy<std::sync::mpsc::Sender<BrowserSaved>> =
+enum BrowserPersist {
+    Save(BrowserSaved),
+    Flush(std::sync::mpsc::Sender<Result<(), String>>),
+}
+static PERSIST_TX: once_cell::sync::Lazy<std::sync::mpsc::Sender<BrowserPersist>> =
     once_cell::sync::Lazy::new(|| {
-        let (tx, rx) = std::sync::mpsc::channel::<BrowserSaved>();
+        let (tx, rx) = std::sync::mpsc::channel::<BrowserPersist>();
         std::thread::spawn(move || {
-            while let Ok(saved) = rx.recv() {
-                let result = serde_json::to_string(&saved)
-                    .map_err(|e| e.to_string())
-                    .and_then(|body| {
-                        crate::utils::fs::write_atomic(&root().join("state.json"), &body)
-                            .map_err(|e| e.to_string())
-                    });
-                if let Err(error) = result {
-                    tracing::error!("Browser persistence: {error}");
+            let mut last = Ok(());
+            while let Ok(message) = rx.recv() {
+                match message {
+                    BrowserPersist::Save(saved) => {
+                        last = serde_json::to_string(&saved).map_err(|e| e.to_string())
+                            .and_then(|body| crate::utils::fs::write_atomic(&root().join("state.json"), &body).map_err(|e| e.to_string()));
+                        if let Err(error) = &last {
+                            tracing::error!("Browser persistence: {error}");
+                        }
+                    }
+                    BrowserPersist::Flush(ack) => {
+                        let _ = ack.send(last.clone());
+                    }
                 }
             }
         });
         tx
     });
+
+pub(crate) fn flush_persistence() -> Result<(), String> {
+    let Some(sender) = once_cell::sync::Lazy::get(&PERSIST_TX) else { return Ok(()); };
+    let (tx, rx) = std::sync::mpsc::channel();
+    sender.send(BrowserPersist::Flush(tx)).map_err(|e| e.to_string())?;
+    rx.recv_timeout(std::time::Duration::from_secs(5)).map_err(|e| e.to_string())?
+}
+
+pub(crate) async fn shutdown_for_backup(app: tauri::AppHandle) -> Result<Vec<u32>, String> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.run_on_main_thread(move || {
+        let hosts: Vec<_> = HOSTS.with(|hosts| hosts.borrow_mut().drain().map(|(_, h)| h).collect());
+        let mut pids = Vec::new();
+        for host in hosts {
+            let (saved, tabs) = {
+                let mut h = host.borrow_mut();
+                h.cookies = None;
+                h.environment = None;
+                h.extensions.clear();
+                h.downloads.clear();
+                (h.state.saved(), std::mem::take(&mut h.tabs))
+            };
+            let _ = PERSIST_TX.send(BrowserPersist::Save(saved));
+            for (_, tab) in tabs {
+                unsafe {
+                    let mut pid = 0;
+                    let _ = tab.core.BrowserProcessId(&mut pid);
+                    if pid != 0 { pids.push(pid); }
+                    let _ = tab.controller.Close();
+                }
+            }
+        }
+        pids.sort_unstable();
+        pids.dedup();
+        let _ = tx.send(flush_persistence().map(|_| pids));
+    }).map_err(|e| e.to_string())?;
+    rx.await.map_err(|e| e.to_string())?
+}
+
 fn fail(host: &HostRef, error: impl std::fmt::Display) {
     host.borrow_mut().state.error = Some(error.to_string());
     publish(host, false);
@@ -280,6 +330,7 @@ fn refresh(host: &HostRef, id: &str, history: bool) {
     }
 }
 fn initialize(app: tauri::AppHandle, owner: String) -> Result<HostRef, String> {
+    if backup_pending() {return Err("浏览器正在保存以进行备份".into());}
     if let Some(host) = HOSTS.with(|hosts| hosts.borrow().get(&owner).cloned()) {
         return Ok(host);
     }
@@ -381,6 +432,7 @@ fn initialize(app: tauri::AppHandle, owner: String) -> Result<HostRef, String> {
                         fail(&host, "WebView2 environment is unavailable");
                         return Ok(());
                     };
+                    if backup_pending() {return Ok(());}
                     host.borrow_mut().environment = Some(environment);
                     let tabs = host.borrow().state.tabs.clone();
                     for tab in tabs {
@@ -452,6 +504,7 @@ fn create_tab(
                         }
                         return Ok(());
                     }
+                    if backup_pending() {let _=controller.Close();return Ok(());}
                     let core = controller.CoreWebView2()?;
                     let parent = host.borrow().surface_hwnd;
                     controller.SetParentWindow(if host.borrow().tasks.contains_key(&id) {

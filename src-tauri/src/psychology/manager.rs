@@ -14,7 +14,6 @@ use std::sync::Arc;
 use chrono::Timelike;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use tokio::sync::Mutex;
 
 use super::appraisal::Appraisal;
 use super::behavior_drive::{BehaviorDrive, RuleBasedDriveResolver};
@@ -77,7 +76,7 @@ pub struct PsychologyManager {
     state: Arc<RwLock<PsychologySnapshot>>,
     persistence_path: std::path::PathBuf,
     /// 持久化锁，防止并发写
-    persist_lock: Mutex<()>,
+    persist_lock: Arc<parking_lot::Mutex<()>>,
     /// micro_tick 累计计数（达到阈值后持久化一次）
     micro_tick_count: parking_lot::Mutex<u32>,
     /// 当前角色的 ResourceManifest（用于交互反馈表情映射）
@@ -123,7 +122,7 @@ impl PsychologyManager {
         Self {
             state: Arc::new(RwLock::new(snapshot)),
             persistence_path,
-            persist_lock: Mutex::new(()),
+            persist_lock: Arc::new(parking_lot::Mutex::new(())),
             micro_tick_count: parking_lot::Mutex::new(0),
             manifest: None,
             pet_interactions: parking_lot::Mutex::new(Default::default()),
@@ -437,6 +436,20 @@ impl PsychologyManager {
         if let Err(e) = self.record_interaction(sentiment, intensity) {
             tracing::warn!("[PsychologyManager] turn boundary 交互统计更新失败: {}", e);
         }
+
+        // Step 4: 轮次级情绪回落 —— 与高频 micro_tick 的物理时间衰减互补，
+        // 让仍高于稳态的负面情绪（anger/sadness/fear）在数轮对话内平滑平复，
+        // 修复"情绪一轮就消失"的断裂感。仅作用于 companion 对话轮；
+        // work agent 不接入 PsychologyManager 情绪子系统，不受影响。
+        {
+            let mut state = self.state.write();
+            let snapshot: &mut PsychologySnapshot = &mut *state;
+            HomeostasisEngine::apply_turn_boundary_decay(
+                &mut snapshot.emotion,
+                &snapshot.persona.emotion_set_points,
+            );
+        }
+        let _ = self.persist();
     }
 
     /// 计算规则驱动的 Behavior Drive（主动行为 tick 用）
@@ -931,31 +944,28 @@ impl PsychologyManager {
         self.state.read().clone()
     }
 
-    /// 持久化到文件（后台线程写，避免阻塞 invoke 调用线程）
-    ///
-    /// 序列化在持锁期间完成后立即释放锁，实际磁盘 I/O 在独立线程执行，
-    /// 不阻塞调用方。失败仅记录日志。
+    /// 等待在途写入后，同步提交当前状态；失败传播给备份调用方。
+    pub(crate) fn flush_for_backup(&self) -> Result<(), String> {
+        let _guard = self.persist_lock.lock();
+        let json = serde_json::to_string(&*self.state.read()).map_err(|e| e.to_string())?;
+        crate::utils::fs::write_atomic(&self.persistence_path, &json).map_err(|e| e.to_string())
+    }
+
+    /// 后台原子写入；同一管理器串行保存，失败记日志。
     fn persist(&self) -> Result<(), String> {
-        let _guard = self.persist_lock.try_lock();
-        let (json, path) = {
-            let state = self.state.read();
-            let json = serde_json::to_string(&*state)
-                .map_err(|e| format!("序列化失败: {}", e))?;
-            (json, self.persistence_path.clone())
-        };
-        // 后台线程写盘，不阻塞调用方
-        std::thread::spawn(move || {
-            if let Some(parent) = path.parent() {
-                if let Err(e) = std::fs::create_dir_all(parent) {
-                    tracing::warn!("psychology.json 创建目录失败: {}", e);
-                    return;
-                }
+        let state = self.state.clone();
+        let path = self.persistence_path.clone();
+        let lock = self.persist_lock.clone();
+        // Serialize only after acquiring the I/O lock. A delayed worker must
+        // never overwrite a newer flush with an old pre-collected snapshot.
+        std::thread::Builder::new().name("psychology-persist".into()).spawn(move || {
+            let _guard = lock.lock();
+            let result = serde_json::to_string(&*state.read()).map_err(|e| e.to_string())
+                .and_then(|json| crate::utils::fs::write_atomic(&path, &json).map_err(|e| e.to_string()));
+            if let Err(error) = result {
+                tracing::warn!("psychology.json 写入失败: {error}");
             }
-            if let Err(e) = std::fs::write(&path, json) {
-                tracing::warn!("psychology.json 写入失败: {}", e);
-            }
-        });
-        Ok(())
+        }).map(|_| ()).map_err(|e| e.to_string())
     }
 
     /// 获取 Persona 引用（用于初始化或其他模块读取）

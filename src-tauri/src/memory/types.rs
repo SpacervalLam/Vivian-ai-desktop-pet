@@ -130,7 +130,7 @@ pub fn canonical_tags() -> &'static [&'static str] {
         "user", "feedback", "project", "reference", "general",
         "preference", "identity", "important_event", "knowledge",
         "temporary_context", "casual_conversation",
-        "session_summary", "insight", "inner_monologue",
+        "session_summary", "insight", "inner_monologue", "daily_presence",
         // 语义类型标签（SemanticType.as_str）
         "shared_memory", "relationship",
         // 来源/来源标签
@@ -225,6 +225,12 @@ pub enum MemoryType {
     Insight,
     /// 内心独白：Vivian 在用户不交互时自主思考的记录，写入记忆供将来检索
     InnerMonologue,
+    /// 日常在场：她「此刻在做什么 / 在想什么」的一句话，由内心独白一并产出。
+    ///
+    /// 与 InnerMonologue 相对：独白是私有内心 OS、永不进入检索；这一条是可
+    /// 对用户说出口的当下状态，进入检索并作为"她今天也有自己的事"被引用，
+    /// 24h 后过期（保留规则见 retention::default_rules）。
+    DailyPresence,
 }
 
 impl MemoryType {
@@ -248,6 +254,7 @@ impl MemoryType {
             "session_summary" => Some(MemoryType::SessionSummary),
             "insight" => Some(MemoryType::Insight),
             "inner_monologue" => Some(MemoryType::InnerMonologue),
+            "daily_presence" => Some(MemoryType::DailyPresence),
             _ => None,
         }
     }
@@ -272,6 +279,7 @@ impl MemoryType {
             MemoryType::SessionSummary => "session_summary",
             MemoryType::Insight => "insight",
             MemoryType::InnerMonologue => "inner_monologue",
+            MemoryType::DailyPresence => "daily_presence",
         }
     }
 
@@ -282,6 +290,8 @@ impl MemoryType {
             MemoryType::MidTerm | MemoryType::TemporaryContext => Granularity::Session,
             // SessionSummary 与 Insight 与 InnerMonologue 都按摘要粒度沉淀
             MemoryType::SessionSummary | MemoryType::Insight | MemoryType::InnerMonologue => Granularity::Summary,
+            // 日常在场是一句完整的话，按摘要粒度沉淀
+            MemoryType::DailyPresence => Granularity::Summary,
             // 长期/偏好/身份/重要事件/知识 都按摘要粒度沉淀
             MemoryType::LongTerm
             | MemoryType::User

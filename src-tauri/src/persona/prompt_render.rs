@@ -10,7 +10,7 @@
 use once_cell::sync::Lazy;
 use regex::Regex;
 
-use super::schemas::{FewShotExample, FewShotExamplesConfig, FewShotIntent, PersonaConfig, SceneMode};
+use super::schemas::{PersonaConfig, SceneMode};
 use crate::types::response::ChatMessage;
 
 /// 编译时嵌入共享人格协议（PERSONA_PROTOCOL，角色无关）。
@@ -197,17 +197,10 @@ fn user_override_for<'a>(config: &'a PersonaConfig, section: CharacterSection) -
 
 /// 获取某个段落的最终生效文本（用户覆盖或出厂默认）
 ///
-/// CanonQuotes 永远使用出厂默认（语气基准不可覆盖）
-pub fn resolve_section(config: &PersonaConfig, section: CharacterSection, lang: &str) -> String {
+/// Examples 与 CanonQuotes 永远使用出厂默认：示例由每轮检索提供，语气基准不可覆盖
+pub fn resolve_section(config: &PersonaConfig, section: CharacterSection, _lang: &str) -> String {
     match section {
-        CharacterSection::Examples => {
-            if !config.few_shot_examples.examples.is_empty() {
-                render_examples_markdown(&config.few_shot_examples, lang)
-            } else {
-                default_section_for(&config.identity.name, section).to_string()
-            }
-        }
-        CharacterSection::CanonQuotes => {
+        CharacterSection::Examples | CharacterSection::CanonQuotes => {
             default_section_for(&config.identity.name, section).to_string()
         }
         _ => {
@@ -220,167 +213,6 @@ pub fn resolve_section(config: &PersonaConfig, section: CharacterSection, lang: 
             }
         }
     }
-}
-
-// ============================================================================
-// Few-shot 示例：结构化 ↔ Markdown 互转
-// ============================================================================
-
-/// 将结构化 FewShotExamplesConfig 渲染为 LLM 所需的 Markdown 格式
-pub fn render_examples_markdown(cfg: &FewShotExamplesConfig, lang: &str) -> String {
-    let header = crate::pipeline::prompt_modules::section_heading("examples", lang);
-    let mut out = format!("{}\n\n", header);
-    if !cfg.intro.trim().is_empty() {
-        out.push_str(cfg.intro.trim());
-        out.push_str("\n\n");
-    }
-    for (i, ex) in cfg.examples.iter().enumerate() {
-        let num = i + 1;
-        let scenario = if ex.scenario.trim().is_empty() {
-            format!("Example {}", num)
-        } else {
-            format!("Example {} - {}", num, ex.scenario.trim())
-        };
-        out.push_str(&format!("**{}**\n", scenario));
-        out.push_str(&format!("User: \"{}\"\n", ex.user_input.trim()));
-
-        let intent = ex.intent.as_str();
-        let text = ex.response_text.as_str();
-
-        match (&ex.tool, &ex.arguments) {
-            (Some(tool), Some(args)) => {
-                let args_str = serde_json::to_string(args).unwrap_or_default();
-                out.push_str(&format!(
-                    "Response: {{\"text\": \"{}\", \"intent\": \"{}\", \"tool\": \"{}\", \"arguments\": {}}}\n\n",
-                    escape_json_str(text), intent, tool, args_str
-                ));
-            }
-            (Some(tool), None) => {
-                out.push_str(&format!(
-                    "Response: {{\"text\": \"{}\", \"intent\": \"{}\", \"tool\": \"{}\"}}\n\n",
-                    escape_json_str(text), intent, tool
-                ));
-            }
-            _ => {
-                out.push_str(&format!(
-                    "Response: {{\"text\": \"{}\", \"intent\": \"{}\"}}\n\n",
-                    escape_json_str(text), intent
-                ));
-            }
-        }
-    }
-    out
-}
-
-fn escape_json_str(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"")
-}
-
-/// 将出厂 Markdown 解析为结构化 FewShotExamplesConfig（用于默认值和迁移）
-pub fn parse_examples_markdown(md: &str) -> FewShotExamplesConfig {
-    let mut intro_lines: Vec<&str> = Vec::new();
-    let mut examples: Vec<FewShotExample> = Vec::new();
-
-    let lines: Vec<&str> = md.lines().collect();
-    let mut i = 0;
-
-    while i < lines.len() {
-        let line = lines[i].trim();
-
-        if line.starts_with("## ") {
-            i += 1;
-            continue;
-        }
-
-        if line.starts_with("**Example") {
-            let scenario = line
-                .trim_start_matches("**")
-                .trim_end_matches("**")
-                .trim();
-            let scenario = scenario
-                .strip_prefix("Example")
-                .unwrap_or(scenario)
-                .trim_start_matches(|c: char| c.is_ascii_digit() || c == '-' || c.is_whitespace())
-                .trim()
-                .to_string();
-
-            i += 1;
-
-            let mut user_input = String::new();
-            while i < lines.len() {
-                let ul = lines[i].trim();
-                if ul.starts_with("User:") {
-                    user_input = ul
-                        .trim_start_matches("User:")
-                        .trim()
-                        .trim_matches('"')
-                        .to_string();
-                    i += 1;
-                    break;
-                }
-                i += 1;
-            }
-
-            let mut response_line = String::new();
-            while i < lines.len() {
-                let rl = lines[i].trim();
-                if rl.starts_with("Response:") {
-                    response_line = rl.trim_start_matches("Response:").trim().to_string();
-                    i += 1;
-                    break;
-                }
-                i += 1;
-            }
-
-            if !user_input.is_empty() {
-                let (response_text, intent, tool, arguments) = parse_response_json(&response_line);
-                examples.push(FewShotExample {
-                    scenario,
-                    user_input,
-                    response_text,
-                    intent,
-                    tool,
-                    arguments,
-                });
-            }
-            continue;
-        }
-
-        if !line.is_empty() {
-            intro_lines.push(lines[i]);
-        }
-        i += 1;
-    }
-
-    FewShotExamplesConfig {
-        intro: intro_lines.join("\n").trim().to_string(),
-        examples,
-    }
-}
-
-fn parse_response_json(s: &str) -> (String, FewShotIntent, Option<String>, Option<serde_json::Value>) {
-    let trimmed = s.trim();
-    if trimmed.is_empty() {
-        return (String::new(), FewShotIntent::ShortReply, None, None);
-    }
-
-    let parsed: serde_json::Value = match serde_json::from_str(trimmed) {
-        Ok(v) => v,
-        Err(_) => {
-            return (trimmed.to_string(), FewShotIntent::ShortReply, None, None);
-        }
-    };
-
-    let text = parsed.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let intent = match parsed.get("intent").and_then(|v| v.as_str()).unwrap_or("short_reply") {
-        "reply" => FewShotIntent::Reply,
-        "no_reply" => FewShotIntent::NoReply,
-        _ => FewShotIntent::ShortReply,
-    };
-    let tool = parsed.get("tool").and_then(|v| v.as_str()).map(|s| s.to_string());
-    let arguments = parsed.get("arguments").cloned();
-
-    (text, intent, tool, arguments)
 }
 
 // ============================================================================
@@ -713,8 +545,8 @@ pub fn render_persona_config_block(config: &PersonaConfig) -> String {
 /// 代码消费——卡片里设的口头禅 / 语气词 / 长度偏好全部空转，实际只有自然语言
 /// `speech.md` 生效。此处把它压成紧凑规则块，补上这条通路。
 ///
-/// 与 `chat_style_framework()` 一致统一用英文：项目约定规则类内容英文，回复语言
-/// 由 `LANG_*` 标志与 output_format 的 "same language as user input" 控制。
+/// 这里统一用英文：它是口癖配置的紧凑规则块（结构类），语气框架的三语化
+/// 由 `pipeline::prompt_modules::tone_rule` 负责，两者分工不同。
 ///
 /// 只输出有信息量的行：空列表与关闭项不占 token。整个块最多 7 行。
 pub fn render_language_style_block(config: &PersonaConfig) -> String {
@@ -893,7 +725,6 @@ pub fn render_dialogue_seed_examples(config: &PersonaConfig, learned: &[String])
 }
 
 pub fn render_dialogue_seed_examples_for_contact(config: &PersonaConfig, learned: &[String], first_contact: bool) -> Option<String> {
-    if !config.few_shot_examples.examples.is_empty() { return None; }
     let source = default_section_for(&config.identity.name, CharacterSection::Examples);
     let offsets: Vec<_> = source.match_indices("**Example ").map(|(offset, _)| offset).collect();
     let mut references = Vec::new();
@@ -1003,11 +834,11 @@ pub fn render_examples_block(config: &PersonaConfig, lang: &str) -> String {
 }
 
 /// Familiar relationships have actual shared history. Keep the seed examples
-/// that teach short replies, silence and care, while leaving user-authored
-/// examples intact. The full factory examples remain for early encounters.
+/// that teach short replies, silence and care. The full factory examples remain
+/// for early encounters.
 pub fn render_examples_block_tiered(config: &PersonaConfig, lang: &str, tier: CharacterBlockTier) -> String {
     let full = render_examples_block(config, lang);
-    if tier == CharacterBlockTier::Full || !config.few_shot_examples.examples.is_empty() {
+    if tier == CharacterBlockTier::Full {
         return full;
     }
     full.find("**Example 5 - ")
@@ -1020,21 +851,16 @@ mod example_budget_tests {
     use super::*;
     use crate::persona::schemas::default_persona_for;
 
+    /// Compact 档只保留前四条出厂示例；示例内容不可被用户覆盖。
     #[test]
-    fn familiar_character_keeps_core_examples_and_custom_overrides() {
-        let mut config = default_persona_for("nana");
+    fn familiar_character_trims_extended_factory_examples() {
+        let config = default_persona_for("nana");
         let full = render_examples_block_tiered(&config, "zh", CharacterBlockTier::Full);
         let compact = render_examples_block_tiered(&config, "zh", CharacterBlockTier::Compact);
         assert!(compact.len() < full.len());
         assert!(compact.contains("no_reply"));
         assert!(compact.contains("**Example 4"));
         assert!(!compact.contains("**Example 5"));
-        config.few_shot_examples.examples.push(crate::persona::schemas::FewShotExample {
-            scenario: "custom".into(), user_input: "hello".into(), response_text: "hi".into(),
-            intent: Default::default(), tool: None, arguments: None,
-        });
-        assert_eq!(render_examples_block_tiered(&config, "zh", CharacterBlockTier::Compact),
-                   render_examples_block_tiered(&config, "zh", CharacterBlockTier::Full));
     }
 }
 

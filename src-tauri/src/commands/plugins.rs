@@ -13,21 +13,124 @@ use tauri::State;
 
 use crate::state::AppState;
 
-/// 单个技能条目（含来源与作用域徽章所需信息）
+/// 单个技能条目（含来源、形态与作用域徽章所需信息）
 #[derive(Debug, Clone, Serialize)]
 pub struct SkillEntryInfo {
     pub name: String,
     pub description: String,
     /// 作用域：`None` = 全局（所有角色可见）；`Some(char_id)` = 仅该角色
     pub scope: Option<String>,
-    /// 来源：`builtin`（内置风格预设）/ `user`（用户技能目录）/ `plugin`（插件贡献）
+    /// 来源：`builtin`（内置）/ `user`（用户技能目录）/ `plugin`（插件贡献）
     pub origin: String,
+    /// 磁盘形态：`folder`（`<名称>/SKILL.md`）/ `flat`（单文件）/ `inline`（内置或插件，无磁盘目录）
+    pub kind: String,
+    /// 技能来源路径；内置技能为 None
+    pub dir: Option<String>,
+    /// 技能目录内的支撑资源相对路径
+    pub resources: Vec<String>,
+    /// 是否可在设置页编辑（仅用户技能为 true）
+    pub editable: bool,
     /// 正文长度（字符数，供概览判断体量）
     pub body_len: usize,
 }
 
-/// 内置风格预设技能名（用于区分技能来源，与 create_skill 的防覆盖名单共用）。
-use crate::skills::BUILTIN_SKILL_NAMES;
+/// 技能支撑资源条目（详情页展示）。
+#[derive(Debug, Clone, Serialize)]
+pub struct SkillResourceInfo {
+    pub path: String,
+    pub size: u64,
+}
+
+/// 技能详情（设置页编辑器数据源）。
+#[derive(Debug, Clone, Serialize)]
+pub struct SkillDetailInfo {
+    pub name: String,
+    pub description: String,
+    pub origin: String,
+    pub kind: String,
+    pub dir: Option<String>,
+    pub body: String,
+    pub keywords: Vec<String>,
+    pub resources: Vec<SkillResourceInfo>,
+    pub editable: bool,
+}
+
+/// 设置页提交的资源写入项。
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct SkillResourceInput {
+    pub path: String,
+    pub content: String,
+}
+
+/// 单个资源文件上限（与 create_skill 保持一致）。
+const SKILL_RESOURCE_MAX_BYTES: usize = 256 * 1024;
+
+/// 内置名单（区分技能来源，同时是 create_skill / save_skill 的防覆盖名单）。
+use crate::skills::{BUILTIN_SKILL_NAMES, BUILTIN_STYLE_SKILLS};
+
+/// 技能来源：`plugin`（命名空间 `插件/技能`）/ `builtin`（内置）/ `user`（其余）。
+pub(crate) fn skill_origin(name: &str) -> &'static str {
+    if name.contains('/') {
+        "plugin"
+    } else if BUILTIN_SKILL_NAMES.contains(&name) {
+        "builtin"
+    } else {
+        "user"
+    }
+}
+
+/// 只有用户目录技能可被设置页编辑：内置与插件技能一律拒绝。
+pub(crate) fn ensure_user_skill(name: &str) -> Result<(), String> {
+    if name.contains('/') {
+        return Err("插件技能由插件管理，不能在此编辑或删除".into());
+    }
+    if BUILTIN_SKILL_NAMES.contains(&name) {
+        return Err(format!("「{name}」是内置技能，不可编辑或删除"));
+    }
+    Ok(())
+}
+
+/// 技能磁盘形态。
+fn skill_kind(skill: &crate::skills::Skill) -> &'static str {
+    match skill.path.as_deref() {
+        Some(path) if std::path::Path::new(path).is_dir() => "folder",
+        Some(_) => "flat",
+        None => "inline",
+    }
+}
+
+/// 组装技能详情（含资源清单与文件大小）。
+fn detail_of(skill: crate::skills::Skill) -> SkillDetailInfo {
+    let origin = skill_origin(&skill.name).to_string();
+    let dir = skill.path.clone();
+    let resources = dir
+        .as_deref()
+        .filter(|path| std::path::Path::new(path).is_dir())
+        .map(|path| {
+            let base = std::path::Path::new(path);
+            crate::skills::collect_skill_resources(base)
+                .into_iter()
+                .map(|relative| {
+                    let size = std::fs::metadata(base.join(&relative))
+                        .map(|meta| meta.len())
+                        .unwrap_or(0);
+                    SkillResourceInfo { path: relative, size }
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    SkillDetailInfo {
+        editable: origin == "user",
+        name: skill.name.clone(),
+        description: skill.description.clone(),
+        kind: skill_kind(&skill).to_string(),
+        origin,
+        dir,
+        body: skill.body.clone(),
+        keywords: skill.keywords.clone(),
+        resources,
+    }
+}
 
 /// 插件清单（盘点插件目录，只读不装载；附带信任状态供设置页展示）。
 #[tauri::command]
@@ -240,27 +343,200 @@ pub fn plugin_diagnostics() -> serde_json::Value {
     })
 }
 
-/// 技能清单（用户/插件技能，含来源与作用域；内置风格预设不展示）。
+/// 技能清单（用户/插件/内置指导型技能；内置风格预设不展示）。
 #[tauri::command]
 pub fn list_skills(state: State<'_, Arc<AppState>>) -> Vec<SkillEntryInfo> {
     state
         .skill_service
         .list_all()
         .into_iter()
-        // 内置风格预设不出现在设置窗口，只列用户与插件技能
-        .filter(|s| !BUILTIN_SKILL_NAMES.contains(&s.name.as_str()))
-        .map(|s| {
-            // 命名空间 `plugin/xxx` → 插件贡献；其余为用户目录技能
-            let origin = if s.name.contains('/') { "plugin" } else { "user" };
-            SkillEntryInfo {
-                body_len: s.body.chars().count(),
-                name: s.name,
-                description: s.description,
-                scope: s.scope,
-                origin: origin.to_string(),
-            }
+        // 内置风格预设不出现在设置窗口；两枚内置指导型技能照常展示
+        .filter(|s| !BUILTIN_STYLE_SKILLS.contains(&s.name.as_str()))
+        .map(|s| SkillEntryInfo {
+            origin: skill_origin(&s.name).to_string(),
+            kind: skill_kind(&s).to_string(),
+            editable: skill_origin(&s.name) == "user",
+            body_len: s.body.chars().count(),
+            dir: s.path.clone(),
+            resources: s.resources.clone(),
+            name: s.name,
+            description: s.description,
+            scope: s.scope,
         })
         .collect()
+}
+
+/// 技能详情：正文、关键词、资源清单与是否可编辑（内置技能可读不可编辑）。
+#[tauri::command]
+pub fn read_skill_detail(
+    state: State<'_, Arc<AppState>>,
+    name: String,
+) -> Result<SkillDetailInfo, String> {
+    let name = name.trim();
+    let skill = state
+        .skill_service
+        .find(name)
+        .ok_or_else(|| format!("未找到技能「{name}」"))?;
+    Ok(detail_of(skill))
+}
+
+/// 保存用户技能（目录形态 `<名称>/SKILL.md` + 可选 `references/`、`scripts/` 资源）。
+///
+/// 只在设置窗口可用；内置与插件技能被后端拒绝。写入前跑同一套形态校验，
+/// 硬错误直接拒绝，避免落盘即坏。保存后立即注册，不等 30s 热重载。
+#[tauri::command]
+pub fn save_skill(
+    window: tauri::WebviewWindow,
+    state: State<'_, Arc<AppState>>,
+    name: String,
+    description: String,
+    body: String,
+    keywords: Vec<String>,
+    resources: Option<Vec<SkillResourceInput>>,
+    create_new: bool,
+) -> Result<SkillDetailInfo, String> {
+    ensure_config_window(&window)?;
+    let name = name.trim().to_string();
+    let description = description.replace(['\r', '\n'], " ").trim().to_string();
+    let body = body.trim().to_string();
+    if !crate::skills::is_valid_skill_name(&name) {
+        return Err("技能名仅允许字母、数字、下划线、连字符或中文（≤64 字符）".into());
+    }
+    if description.is_empty() {
+        return Err("description 不能为空".into());
+    }
+    if body.is_empty() {
+        return Err("技能正文不能为空".into());
+    }
+    if create_new {
+        if name.contains('/') || BUILTIN_SKILL_NAMES.contains(&name.as_str()) {
+            return Err(format!("「{name}」与内置或插件技能重名，请换一个名称"));
+        }
+    } else {
+        ensure_user_skill(&name)?;
+    }
+
+    let dir = crate::skills::SkillService::default_dir();
+    let skill_dir = dir.join(&name);
+    // 单文件形态不在设置页编辑：提示用户先迁移，避免同名双份
+    if !skill_dir.is_dir() && dir.join(format!("{name}.md")).is_file() {
+        return Err(format!(
+            "「{name}」目前是单文件技能（{name}.md），设置页只编辑目录技能；请先删除该文件或直接编辑它"
+        ));
+    }
+
+    let keywords: Vec<String> = keywords
+        .into_iter()
+        .map(|token| token.trim().to_string())
+        .filter(|token| !token.is_empty())
+        .collect();
+    let kw_line = keywords.join(", ");
+    let content =
+        format!("---\nname: {name}\ndescription: {description}\nkeywords: {kw_line}\n---\n\n{body}\n");
+
+    let validation = crate::skills::validate::validate_skill_text(&name, &content);
+    if !validation.ok {
+        let errors: Vec<String> = validation
+            .issues
+            .iter()
+            .filter(|issue| issue.level == "error")
+            .map(|issue| issue.message.clone())
+            .collect();
+        return Err(format!("技能未通过校验：{}", errors.join("；")));
+    }
+
+    std::fs::create_dir_all(&skill_dir).map_err(|e| format!("创建技能目录失败: {e}"))?;
+    std::fs::write(skill_dir.join("SKILL.md"), content)
+        .map_err(|e| format!("写入 SKILL.md 失败: {e}"))?;
+
+    if let Some(resources) = resources {
+        for item in resources {
+            let relative = item.path.trim();
+            if !crate::skills::is_safe_skill_rel_path(relative) {
+                return Err(format!(
+                    "资源路径「{relative}」不合法：仅允许 references/ 或 scripts/ 下的一层文件名"
+                ));
+            }
+            if item.content.len() > SKILL_RESOURCE_MAX_BYTES {
+                return Err(format!("资源「{relative}」超过 256 KiB"));
+            }
+            let target = skill_dir.join(relative);
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| format!("创建资源目录失败: {e}"))?;
+            }
+            std::fs::write(&target, item.content).map_err(|e| format!("写入资源失败: {e}"))?;
+        }
+    }
+
+    // 立即注册（不等 30s 热重载）
+    let skill = crate::skills::Skill::global(name.clone(), description, body)
+        .with_keywords(keywords)
+        .with_path(skill_dir.display().to_string())
+        .with_resources(crate::skills::collect_skill_resources(&skill_dir));
+    state.skill_service.replace_or_register(skill);
+
+    state
+        .skill_service
+        .find(&name)
+        .map(detail_of)
+        .ok_or_else(|| "保存后未能重新读取技能".to_string())
+}
+
+/// 删除用户技能（目录或单文件）。内置与插件技能被后端拒绝。
+#[tauri::command]
+pub fn delete_skill(
+    window: tauri::WebviewWindow,
+    state: State<'_, Arc<AppState>>,
+    name: String,
+) -> Result<(), String> {
+    ensure_config_window(&window)?;
+    let name = name.trim().to_string();
+    ensure_user_skill(&name)?;
+
+    let dir = crate::skills::SkillService::default_dir();
+    let skill_dir = dir.join(&name);
+    let flat = dir.join(format!("{name}.md"));
+    let mut removed = false;
+    if skill_dir.is_dir() {
+        std::fs::remove_dir_all(&skill_dir).map_err(|e| format!("删除技能目录失败: {e}"))?;
+        removed = true;
+    }
+    if flat.is_file() {
+        std::fs::remove_file(&flat).map_err(|e| format!("删除技能文件失败: {e}"))?;
+        removed = true;
+    }
+    if !removed {
+        return Err(format!("未找到可删除的用户技能「{name}」"));
+    }
+    state.skill_service.remove_exact(&name);
+    Ok(())
+}
+
+/// 校验技能形态：传 `content` 校验草稿；传 `name` 校验技能目录。
+#[tauri::command]
+pub fn validate_skill(
+    name: Option<String>,
+    content: Option<String>,
+) -> Result<crate::skills::validate::SkillValidation, String> {
+    let content = content.filter(|text| !text.trim().is_empty());
+    let name = name
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    match (content, name) {
+        (Some(content), name) => Ok(crate::skills::validate::validate_skill_text(
+            name.as_deref().unwrap_or("skill"),
+            &content,
+        )),
+        (None, Some(name)) => {
+            let skill_dir = crate::skills::SkillService::default_dir().join(&name);
+            if skill_dir.is_dir() {
+                Ok(crate::skills::validate::validate_skill_dir(&skill_dir))
+            } else {
+                Err(format!("未找到技能目录「{name}」"))
+            }
+        }
+        (None, None) => Err("name 与 content 至少给一项".into()),
+    }
 }
 
 /// Reasoning-only preview. Contains no key, endpoint credentials, messages or tools.

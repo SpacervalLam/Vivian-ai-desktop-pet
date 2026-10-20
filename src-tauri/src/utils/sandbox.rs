@@ -33,8 +33,11 @@ pub struct SandboxOutput {
 
 const LOW_IL_SID: &str = "S-1-16-4096";
 
-/// 单路输出读取上限（字节）；与 DynamicTool 的字符截断互补
-const OUTPUT_CAP: usize = 4 * 1024 * 1024;
+/// 策略类型（网络模式、执行请求描述）放在零依赖的 `sandbox_policy` 里：
+/// 隔离层不该反向依赖配置层，且那部分要能在隔离 harness 里单独编译验证。
+///
+/// 单路输出上限的默认 4 MiB 见 `SandboxRequest::cap`。
+pub use crate::utils::sandbox_policy::{SandboxNetworkMode, SandboxRequest};
 
 // ============================================================================
 // 辅助
@@ -83,6 +86,64 @@ fn scratch_dir() -> Result<PathBuf, String> {
     apply_scratch_security(&dir)?;
     let _ = DIR.set(dir.clone());
     Ok(dir)
+}
+
+/// 按会话隔离的 scratch 目录：`%TEMP%\vivian-sandbox-low\s-<会话标识>`
+///
+/// 共享 scratch 有个实际问题：会话 A 落盘的脚本与临时文件，会话 B 的沙箱进程
+/// 同样能读——两个会话的模型是不是该互相看到对方的中间产物，答案显然是否定的。
+/// 隔离后每个会话只看得见自己的目录（父目录仍可列举出兄弟目录名，但内容读不到
+/// 也无意义：脚本文件名是 uuid）。
+fn scratch_dir_for(session_id: &str) -> Result<PathBuf, String> {
+    let base = scratch_dir()?;
+    if session_id.trim().is_empty() {
+        return Ok(base);
+    }
+    // 会话 ID 可能含路径分隔符，只保留安全字符
+    let safe: String = session_id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .take(64)
+        .collect();
+    let dir = base.join(format!("s-{}", if safe.is_empty() { "default" } else { &safe }));
+    std::fs::create_dir_all(&dir).map_err(|e| format!("创建会话 scratch 目录失败: {e}"))?;
+    // 父目录已经带 Low IL 标签且带继承标志，子目录自动继承，无需再设
+    Ok(dir)
+}
+
+/// 为请求里声明的工作区授予沙箱写权限
+///
+/// 授权是一次性的持久改动，失败只降级（工作区变只读），不阻断命令执行。
+/// 返回 (成功数, 首条错误)。
+fn grant_workspaces(req: &SandboxRequest) -> (usize, Option<String>) {
+    let mut ok = 0usize;
+    let mut first_err: Option<String> = None;
+    for dir in &req.workspace_dirs {
+        if dir.trim().is_empty() {
+            continue;
+        }
+        let path = PathBuf::from(dir);
+        if !path.exists() {
+            continue;
+        }
+        let outcome = crate::utils::sandbox_workspace::grant_workspace_write(&path);
+        if outcome.tagged > 0 && outcome.error.is_none() {
+            ok += 1;
+        } else if let Some(e) = outcome.error {
+            if first_err.is_none() {
+                first_err = Some(format!("{}: {}", dir, e));
+            }
+        }
+    }
+    if ok > 0 || !req.workspace_dirs.is_empty() {
+        tracing::info!(
+            "[sandbox] 工作区授权: 成功 {}/{}，错误 {:?}",
+            ok,
+            req.workspace_dirs.len(),
+            first_err
+        );
+    }
+    (ok, first_err)
 }
 
 /// 给 scratch 目录打 Low IL 标签 + Everyone 完全访问 DACL
@@ -240,7 +301,11 @@ fn string_to_sid(sddl: &str) -> Result<Vec<u8>, String> {
 // ============================================================================
 
 /// 用受限令牌构造环境块，TMP/TEMP 重定向到 scratch
-fn build_env_block(token: HANDLE, scratch: &std::path::Path) -> Result<Vec<u16>, String> {
+fn build_env_block(
+    token: HANDLE,
+    scratch: &std::path::Path,
+    req: &SandboxRequest,
+) -> Result<Vec<u16>, String> {
     use windows::Win32::System::Environment::{CreateEnvironmentBlock, DestroyEnvironmentBlock};
 
     unsafe {
@@ -261,6 +326,8 @@ fn build_env_block(token: HANDLE, scratch: &std::path::Path) -> Result<Vec<u16>,
         vars.push(("TMP".into(), scratch_str.clone()));
         vars.push(("TEMP".into(), scratch_str));
 
+        apply_network_env(&mut vars, req);
+
         // 双 null 结尾的 UTF-16 块：NAME=VALUE\0 ... \0\0
         let mut block: Vec<u16> = Vec::new();
         for (k, v) in &vars {
@@ -272,6 +339,47 @@ fn build_env_block(token: HANDLE, scratch: &std::path::Path) -> Result<Vec<u16>,
         }
         block.push(0);
         Ok(block)
+    }
+}
+
+/// 按网络模式注入代理环境变量
+///
+/// **这是协作式约束，不是内核级边界。** 走环境变量意味着子进程里的程序只要
+/// 不理这几个变量（直接 socket、显式 `-NoProxy`、自己构造 WebRequest）就能绕开。
+/// 在受限令牌 + 低完整性这条路线上，Windows 没有轻量手段做按进程的网络过滤
+/// （Job Object 只能限速不能断网，WFP 要驱动）——要真正的强制出口，得换成
+/// 独立账户 + 按账户的防火墙规则，那是另一套架构。这里的目标是：让**按约定
+/// 行事**的程序（curl / PowerShell / npm / git / .NET）按策略走，而不是假装
+/// 挡得住有意绕行的代码。
+fn apply_network_env(vars: &mut Vec<(String, String)>, req: &SandboxRequest) {
+    let proxy_keys = [
+        "HTTP_PROXY",
+        "http_proxy",
+        "HTTPS_PROXY",
+        "https_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+    ];
+    vars.retain(|(k, _)| !proxy_keys.iter().any(|p| k.eq_ignore_ascii_case(p)));
+
+    let target: Option<String> = match req.network_mode {
+        SandboxNetworkMode::Allow => None,
+        SandboxNetworkMode::Proxy => req
+            .proxy_addr
+            .as_ref()
+            .map(|a| a.trim().to_string())
+            .filter(|a| !a.is_empty())
+            .map(|a| format!("http://{a}")),
+        // 指向必然拒绝连接的回环端口：不依赖代理进程是否活着，
+        // 未被白名单放行的请求连不上就是连不上
+        SandboxNetworkMode::Blocked => Some("http://127.0.0.1:0".to_string()),
+    };
+
+    if let Some(url) = target {
+        for k in proxy_keys {
+            vars.push((k.to_string(), url.clone()));
+        }
+        tracing::info!("[sandbox] 网络模式 {:?}，代理出口 {}", req.network_mode, url);
     }
 }
 
@@ -313,6 +421,26 @@ pub fn run_powershell_sandboxed(
     stdin_payload: &str,
     timeout_secs: u64,
 ) -> Result<SandboxOutput, String> {
+    run_powershell_sandboxed_with(
+        &SandboxRequest::default(),
+        script,
+        stdin_payload,
+        timeout_secs,
+        None,
+    )
+}
+
+/// 带完整请求描述执行 PowerShell 脚本（插件脚本路径）
+///
+/// `cwd` 为 None 时子进程工作目录落在 scratch；传工作区时要求该目录已经过
+/// `grant_workspaces` 授权，否则进程能进目录但写不进去。
+pub fn run_powershell_sandboxed_with(
+    req: &SandboxRequest,
+    script: &str,
+    stdin_payload: &str,
+    timeout_secs: u64,
+    cwd: Option<&std::path::Path>,
+) -> Result<SandboxOutput, String> {
     use windows::core::{PCWSTR, PWSTR};
     use windows::Win32::Security::SECURITY_ATTRIBUTES;
     use windows::Win32::Foundation::{SetHandleInformation, HANDLE_FLAG_INHERIT, HANDLE_FLAGS};
@@ -325,9 +453,10 @@ pub fn run_powershell_sandboxed(
         PROC_THREAD_ATTRIBUTE_HANDLE_LIST, STARTF_USESTDHANDLES, STARTUPINFOEXW,
     };
 
-    let scratch = scratch_dir()?;
+    let scratch = scratch_dir_for(&req.session_id)?;
     let token = build_restricted_token()?;
-    let env_block = build_env_block(token.get(), &scratch)?;
+    let env_block = build_env_block(token.get(), &scratch, req)?;
+    let _ = grant_workspaces(req);
 
     // 脚本落盘（BOM），用后删除
     let script_path =
@@ -343,7 +472,7 @@ pub fn run_powershell_sandboxed(
         script_path.display()
     ));
     let appname = wide(&ps_exe);
-    let cwd = wide(&scratch.to_string_lossy());
+    let cwd = wide(&cwd.unwrap_or(scratch.as_path()).to_string_lossy());
 
     unsafe {
         // 三对匿名管道；子进程侧句柄可继承，父进程侧关闭继承位
@@ -445,6 +574,7 @@ pub fn run_powershell_sandboxed(
         std::mem::forget(stdin_write);
 
         // stdout/stderr 后台读取（限幅）；File 接管父侧读句柄，读取完成后 drop 关闭
+        let cap = req.cap();
         let read_pipe = |handle: HANDLE| -> std::thread::JoinHandle<Vec<u8>> {
             let raw = handle.0 as usize; // HANDLE 非 Send，线程内按裸值重建
             std::thread::spawn(move || {
@@ -453,7 +583,7 @@ pub fn run_powershell_sandboxed(
                 let mut file = std::fs::File::from_raw_handle(raw as *mut _);
                 let mut out = Vec::new();
                 let mut chunk = [0u8; 8192];
-                while out.len() < OUTPUT_CAP {
+                while out.len() < cap {
                     match file.read(&mut chunk) {
                         Ok(0) | Err(_) => break,
                         Ok(n) => out.extend_from_slice(&chunk[..n]),
@@ -489,6 +619,211 @@ pub fn run_powershell_sandboxed(
             stdout,
             stderr,
             timed_out,
+        })
+    }
+}
+
+// ============================================================================
+// 通用命令执行（one-shot）
+// ============================================================================
+
+/// 在沙箱里执行一条 PowerShell 命令（one-shot，跑完即走）
+///
+/// 命令走脚本文件而不是 `-Command`：PowerShell 5.1 的命令行引号转义是个已知的
+/// 坑，`-File` 把原文整段交给解释器，语义与在持久终端里敲进去的一致。
+///
+/// 末尾补 `exit $LASTEXITCODE` 是为了把外部程序的退出码带出来——`-File` 结束
+/// 默认返回 0，不加这句的话构建/测试的失败会被吞成成功。
+pub fn run_command_sandboxed(
+    req: &SandboxRequest,
+    command: &str,
+    timeout_secs: u64,
+    cwd: Option<&std::path::Path>,
+) -> Result<SandboxOutput, String> {
+    let script = format!("{command}\nexit $LASTEXITCODE\n");
+    run_powershell_sandboxed_with(req, &script, "", timeout_secs, cwd)
+}
+
+// ============================================================================
+// 持久 shell（终端会话）
+// ============================================================================
+
+/// 沙箱内的持久 PowerShell 进程
+///
+/// 三个 stdio 交给 `std::fs::File` 持有（drop 即 CloseHandle），进程句柄按裸值
+/// 保存——`HANDLE` 不是 `Send`，而终端句柄要跨 await 存活。
+///
+/// 与 one-shot 路径的区别：stdin **不关闭**，进程一直活着等下一条命令。
+pub struct SandboxedShell {
+    process: usize,
+    pub stdin: std::fs::File,
+    pub stdout: std::fs::File,
+    pub stderr: std::fs::File,
+}
+
+impl SandboxedShell {
+    /// 进程句柄裸值（供 Job Object 归属与等待）
+    pub fn process_raw(&self) -> usize {
+        self.process
+    }
+
+    /// 进程是否已退出；返回退出码
+    pub fn try_wait(&self) -> Option<i32> {
+        use windows::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject};
+        let h = HANDLE(self.process as *mut core::ffi::c_void);
+        let _ = unsafe { WaitForSingleObject(h, 0) };
+        let mut code: u32 = 0;
+        if unsafe { GetExitCodeProcess(h, &mut code) }.is_ok() {
+            // STILL_ACTIVE (259) 表示还在跑
+            if code != 259 {
+                return Some(code as i32);
+            }
+        }
+        None
+    }
+
+    /// 终止进程（终端关闭 / 超时兜底）
+    pub fn kill(&self) {
+        use windows::Win32::System::Threading::TerminateProcess;
+        let h = HANDLE(self.process as *mut core::ffi::c_void);
+        let _ = unsafe { TerminateProcess(h, 1) };
+    }
+}
+
+impl Drop for SandboxedShell {
+    fn drop(&mut self) {
+        let _ = unsafe { CloseHandle(HANDLE(self.process as *mut core::ffi::c_void)) };
+    }
+}
+
+/// 在沙箱里起一个长期活着的 PowerShell（`terminal_open` 用）
+///
+/// 与 one-shot 同一套受限令牌 / 低完整性 / 环境块，只是 stdin 保持打开，进程
+/// 常驻。`cwd` 传工作区时该目录需要先经过授权，否则 `cd` 过去只能读。
+pub fn spawn_sandboxed_shell(
+    req: &SandboxRequest,
+    cwd: Option<&std::path::Path>,
+) -> Result<SandboxedShell, String> {
+    use windows::core::{PCWSTR, PWSTR};
+    use windows::Win32::Foundation::{
+        SetHandleInformation, HANDLE_FLAG_INHERIT, HANDLE_FLAGS,
+    };
+    use windows::Win32::Security::SECURITY_ATTRIBUTES;
+    use windows::Win32::System::Pipes::CreatePipe;
+    use windows::Win32::System::Threading::{
+        CreateProcessAsUserW, DeleteProcThreadAttributeList,
+        InitializeProcThreadAttributeList, UpdateProcThreadAttribute,
+        EXTENDED_STARTUPINFO_PRESENT, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION,
+        PROC_THREAD_ATTRIBUTE_HANDLE_LIST, STARTF_USESTDHANDLES, STARTUPINFOEXW,
+    };
+
+    let scratch = scratch_dir_for(&req.session_id)?;
+    let token = build_restricted_token()?;
+    let env_block = build_env_block(token.get(), &scratch, req)?;
+    let _ = grant_workspaces(req);
+
+    let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into());
+    let ps_exe = format!("{system_root}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
+    let mut cmdline = wide(&format!("\"{ps_exe}\" -NoProfile -NonInteractive -Command -"));
+    let appname = wide(&ps_exe);
+    let cwd_w = wide(&cwd.unwrap_or(scratch.as_path()).to_string_lossy());
+
+    unsafe {
+        let make_pipe = |name: &str| -> Result<(HandleWrap, HandleWrap), String> {
+            let sa = SECURITY_ATTRIBUTES {
+                nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+                lpSecurityDescriptor: std::ptr::null_mut(),
+                bInheritHandle: true.into(),
+            };
+            let mut read = HANDLE::default();
+            let mut write = HANDLE::default();
+            CreatePipe(&mut read, &mut write, Some(&sa), 0)
+                .map_err(|e| format!("创建{name}管道失败: {e}"))?;
+            Ok((HandleWrap::new(read), HandleWrap::new(write)))
+        };
+        let (stdin_read, stdin_write) = make_pipe("stdin")?;
+        let (stdout_read, stdout_write) = make_pipe("stdout")?;
+        let (stderr_read, stderr_write) = make_pipe("stderr")?;
+
+        // 父侧句柄清继承位：子进程只能拿到白名单里的三个子侧句柄
+        for h in [stdin_write.get(), stdout_read.get(), stderr_read.get()] {
+            SetHandleInformation(h, HANDLE_FLAG_INHERIT.0, HANDLE_FLAGS(0))
+                .map_err(|e| format!("清除父侧句柄继承失败: {e}"))?;
+        }
+
+        let inherit_list: Vec<HANDLE> =
+            vec![stdin_read.get(), stdout_write.get(), stderr_write.get()];
+
+        let mut attr_size: usize = 0;
+        let _ = InitializeProcThreadAttributeList(None, 1, None, &mut attr_size);
+        let mut attr_buf = vec![0u8; attr_size];
+        let attr_list =
+            LPPROC_THREAD_ATTRIBUTE_LIST(attr_buf.as_mut_ptr() as *mut core::ffi::c_void);
+        InitializeProcThreadAttributeList(Some(attr_list), 1, None, &mut attr_size)
+            .map_err(|e| format!("初始化属性列表失败: {e}"))?;
+        UpdateProcThreadAttribute(
+            attr_list,
+            0,
+            PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
+            Some(inherit_list.as_ptr() as *const _ as *mut core::ffi::c_void),
+            std::mem::size_of::<HANDLE>() * inherit_list.len(),
+            None,
+            None,
+        )
+        .map_err(|e| format!("设置句柄白名单失败: {e}"))?;
+
+        let mut siex = STARTUPINFOEXW::default();
+        siex.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
+        siex.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+        siex.StartupInfo.hStdInput = stdin_read.get();
+        siex.StartupInfo.hStdOutput = stdout_write.get();
+        siex.StartupInfo.hStdError = stderr_write.get();
+        siex.lpAttributeList = attr_list;
+
+        let mut pi = PROCESS_INFORMATION::default();
+        CreateProcessAsUserW(
+            Some(token.get()),
+            PCWSTR(appname.as_ptr()),
+            Some(PWSTR(cmdline.as_mut_ptr())),
+            None,
+            None,
+            true,
+            EXTENDED_STARTUPINFO_PRESENT,
+            Some(env_block.as_ptr() as *const core::ffi::c_void),
+            PCWSTR(cwd_w.as_ptr()),
+            &siex.StartupInfo,
+            &mut pi,
+        )
+        .map_err(|e| format!("沙箱启动持久终端失败: {e}"))?;
+
+        drop(stdin_read);
+        drop(stdout_write);
+        drop(stderr_write);
+        DeleteProcThreadAttributeList(attr_list);
+
+        // 主线程句柄不需要：只留进程句柄做等待与终止
+        if !pi.hThread.is_invalid() {
+            let _ = CloseHandle(pi.hThread);
+        }
+
+        // Job Object 兜底：宿主崩溃时 OS 回收进程树
+        crate::utils::job_object::assign_process(pi.hProcess.0 as isize);
+
+        use std::os::windows::io::FromRawHandle;
+        let stdin = std::fs::File::from_raw_handle(stdin_write.get().0 as *mut _);
+        let stdout = std::fs::File::from_raw_handle(stdout_read.get().0 as *mut _);
+        let stderr = std::fs::File::from_raw_handle(stderr_read.get().0 as *mut _);
+        std::mem::forget(stdin_write);
+        std::mem::forget(stdout_read);
+        std::mem::forget(stderr_read);
+
+        tracing::info!("[sandbox] 持久终端已在受限令牌下启动，cwd={:?}", cwd.map(|p| p.display().to_string()));
+
+        Ok(SandboxedShell {
+            process: pi.hProcess.0 as usize,
+            stdin,
+            stdout,
+            stderr,
         })
     }
 }

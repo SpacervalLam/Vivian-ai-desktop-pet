@@ -5,6 +5,6 @@ mod secret_store;
 
 pub use catalog::{build_catalog, SettingControl, SettingEntry, SettingLayer};
 pub use manager::{
-    AppConfig, ConfigManager, SearXngConfig, TavilyConfig, WebSearchConfig,
-    WebSearchDeepSeekConfig, WorldConfig, WorkModelProfile, WorkModelsInfo,
+    AppConfig, ConfigManager, SandboxConfig, SandboxNetworkMode, SearXngConfig, TavilyConfig,
+    WebSearchConfig, WebSearchDeepSeekConfig, WorldConfig, WorkModelProfile, WorkModelsInfo,
 };

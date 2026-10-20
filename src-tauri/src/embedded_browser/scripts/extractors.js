@@ -36,3 +36,76 @@ globalThis.vivianExtractPlatform = function (platform) {
   }
   return Array.from(items.values());
 };
+
+// Packaged detail extractor: body text + visible top comments for a single item page.
+// Fixed selectors per platform — no arbitrary code. Results are untrusted page data.
+// Anti-change strategy (from bb-browser): try several selectors, then fall back to
+// semantic elements (article / role=main) instead of relying on one class name.
+globalThis.vivianExtractDetail = function () {
+  const host = location.hostname;
+  const onHost = (domain) => host === domain || host.endsWith('.' + domain);
+  const readText = (el) => (el ? String(el.innerText ?? el.textContent ?? '').replace(/\s+/g, ' ').trim() : '');
+  const pickBody = (selectors) => {
+    for (const selector of selectors) {
+      for (const el of document.querySelectorAll(selector)) {
+        const text = readText(el);
+        if (text.length >= 10) return text.slice(0, 6000);
+      }
+    }
+    // 语义兜底：不依赖 class，取最长的那块 article/main
+    let best = '';
+    for (const el of document.querySelectorAll('article, main article, [role="main"]')) {
+      const text = readText(el);
+      if (text.length > best.length) best = text;
+    }
+    return best.length >= 40 ? best.slice(0, 6000) : '';
+  };
+  const pickComments = (selectors, max) => {
+    const out = [];
+    const seen = new Set();
+    for (const selector of selectors) {
+      for (const el of document.querySelectorAll(selector)) {
+        const text = readText(el);
+        if (text.length < 2 || seen.has(text)) continue;
+        seen.add(text);
+        out.push(text.slice(0, 500));
+        if (out.length >= max) return out;
+      }
+    }
+    return out;
+  };
+
+  let plan;
+  if (onHost('x.com') || onHost('twitter.com')) {
+    // 主推文 = 第一条 article；后续 article 视为可见回复
+    const tweets = Array.from(document.querySelectorAll('article[data-testid="tweet"]'))
+      .map((a) => readText(a.querySelector('[data-testid="tweetText"]')))
+      .filter((t) => t);
+    const body = tweets[0] || readText(document.querySelector('article[role="article"]')) || '';
+    const comments = tweets
+      .slice(1)
+      .filter((t) => t !== body)
+      .slice(0, 5)
+      .map((t) => t.slice(0, 500));
+    return { body: body.slice(0, 6000), comments };
+  }
+  if (onHost('zhihu.com')) {
+    plan = {
+      body: ['.RichContent-inner', '.Post-RichTextContainer', '.RichText', 'article .RichText'],
+      comments: ['.CommentContent', '.CommentItemV2 .content', '.Comments-container .content'],
+    };
+  } else if (onHost('xiaohongshu.com')) {
+    plan = {
+      body: ['#detail-desc', '.note-text', '.desc', '.note-content'],
+      comments: ['.comment-item .content', '.comments-container .content', '.comment-item .note-text'],
+    };
+  } else if (onHost('douyin.com')) {
+    plan = {
+      body: ['[data-e2e="video-desc"]', '[data-e2e="video-desc-container"]', '.video-info-detail'],
+      comments: ['[data-e2e="comment-item"]', '[class*="comment-item"] [class*="content"]'],
+    };
+  } else {
+    throw new Error('Detail extractor does not match the current platform');
+  }
+  return { body: pickBody(plan.body), comments: pickComments(plan.comments, 5) };
+};

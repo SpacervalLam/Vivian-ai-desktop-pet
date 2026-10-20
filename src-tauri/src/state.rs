@@ -114,6 +114,10 @@ impl AppState {
         crate::config::personalization::initialize(config.clone());
         let asr_config = AsrConfig::from_speech_config(&config.get_all().speech_recognition);
         let tool_config = &config.get_all().tools;
+        // 沙箱运行时：按配置决定是否启动本地代理，并记住它**实际**监听的端口
+        // （配置为 0 时由系统分配）。改动网络/端口配置需重启应用才生效——代理
+        // 一旦绑定端口就是长生命周期对象，热切换会让已在沙箱里跑着的进程失去出口。
+        crate::tools::sandbox_env::install(config.get_all().sandbox.clone());
         let tool_system = Arc::new(ToolSystem::with_tool_config(
             tool_config.cache_ttl_secs,
             tool_config.cache_max_size,
@@ -192,6 +196,8 @@ impl AppState {
         // 同步注册全局句柄，供管线步骤（陪伴上下文注入任务状态/报告）访问
         crate::brain::task_service::set_global(Arc::clone(&task_service));
 
+        let session_coordinator = crate::utils::SessionCoordinator::new();
+        world_provider.environment.bind_priority(session_coordinator.background_priority());
         Self {
             config: Arc::new(RwLock::new(config)),
             characters: Arc::new(RwLock::new(HashMap::new())),
@@ -216,7 +222,7 @@ impl AppState {
             factory_reset_in_progress: Arc::new(AtomicBool::new(false)),
             rebuild_in_progress: Arc::new(AtomicBool::new(false)),
             playback_gate: crate::utils::PlaybackGate::new(),
-            session_coordinator: crate::utils::SessionCoordinator::new(),
+            session_coordinator,
             leader_coordinator: crate::utils::ProactiveLeaderCoordinator::new(),
             world_provider,
             ctx,

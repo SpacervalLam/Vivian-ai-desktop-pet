@@ -1,4 +1,4 @@
-//! 系统工具 - open_application, close_application, take_screenshot, screenshot_analyze
+//! 系统工具 - open_application, close_application, take_screenshot
 
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
@@ -1897,8 +1897,106 @@ impl Tool for CloseApplicationTool {
     }
 }
 
-/// take_screenshot 工具 - 截屏
 pub struct TakeScreenshotTool;
+
+#[derive(Clone, Copy, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct ScreenInspectionRegion {
+    x: i64,
+    y: i64,
+    width: u32,
+    height: u32,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScreenshotOptions {
+    #[serde(default)]
+    region: Option<ScreenInspectionRegion>,
+    #[serde(default)]
+    question: Option<String>,
+    #[serde(default = "default_screenshot_analysis")]
+    analyze: bool,
+    #[serde(default)]
+    save: bool,
+    #[serde(default)]
+    copy_to_clipboard: bool,
+}
+
+fn default_screenshot_analysis() -> bool {
+    true
+}
+
+fn parse_screen_inspection_args(args: &Value) -> Result<ScreenshotOptions, String> {
+    let mut options: ScreenshotOptions = serde_json::from_value(args.clone())
+        .map_err(|error| format!("Invalid screenshot options: {error}"))?;
+    if let Some(region) = options.region {
+        if region.width < 2 || region.height < 2 {
+            return Err("region width and height must be at least 2 pixels".into());
+        }
+    }
+    if let Some(question) = &mut options.question {
+        *question = question.trim().to_string();
+        if !options.analyze || question.is_empty() || question.chars().count() > 500 {
+            return Err("question requires analysis and must contain 1–500 characters".into());
+        }
+    }
+    if !options.analyze && !options.save && !options.copy_to_clipboard {
+        return Err("Select at least one screenshot output: analyze, save or copy_to_clipboard".into());
+    }
+    Ok(options)
+}
+
+#[cfg(test)]
+mod screen_inspection_tests {
+    use super::*;
+
+    #[test]
+    fn capture_outputs_are_explicit_and_share_one_tool() {
+        let options = parse_screen_inspection_args(&json!({})).unwrap();
+        assert!(options.analyze);
+        assert!(!options.save);
+        assert!(!options.copy_to_clipboard);
+        for outputs in [
+            json!({"analyze":false,"save":true}),
+            json!({"analyze":false,"copy_to_clipboard":true}),
+            json!({"analyze":true,"save":true,"copy_to_clipboard":true}),
+        ] {
+            assert!(parse_screen_inspection_args(&outputs).is_ok());
+        }
+        let system = crate::tools::registry::ToolSystem::new();
+        system.register_tool(std::sync::Arc::new(TakeScreenshotTool::new()));
+        assert!(system.register_alias("screenshot_analyze", "take_screenshot"));
+        assert_eq!(system.list_tool_names(), vec!["take_screenshot"]);
+        assert_eq!(system.find_tool("screenshot_analyze").unwrap().name(), "take_screenshot");
+        system.set_disabled_tools(vec!["screenshot_analyze".into()], vec![]);
+        assert!(system.is_tool_disabled("take_screenshot", crate::tools::registry::AgentSide::Companion));
+        system.set_disabled_tools(vec!["take_screenshot".into()], vec![]);
+        assert!(system.is_tool_disabled("screenshot_analyze", crate::tools::registry::AgentSide::Companion));
+    }
+
+    #[test]
+    fn rejects_invalid_inspection_before_desktop_input() {
+        for args in [
+            json!({"region":{"x":0,"y":0,"width":1,"height":20}}),
+            json!({"region":{"x":0,"y":0,"width":20,"height":20.5}}),
+            json!({"analyze":false}),
+            json!({"save":"yes"}),
+            json!({"unknown":true}),
+            json!({"analyze":false,"save":true,"question":"Read this"}),
+            json!({"question":"  "}),
+            json!({"question":7}),
+        ] {
+            assert!(parse_screen_inspection_args(&args).is_err(), "{args}");
+        }
+        let options = parse_screen_inspection_args(&json!({
+            "region":{"x":-1920,"y":10,"width":100,"height":40},
+            "question":"  Did the dialog close?  "
+        })).unwrap();
+        assert_eq!(options.region.unwrap().x, -1920);
+        assert_eq!(options.question.as_deref(), Some("Did the dialog close?"));
+    }
+}
 
 impl TakeScreenshotTool {
     pub fn new() -> Self {
@@ -1919,333 +2017,13 @@ impl Tool for TakeScreenshotTool {
     }
 
     fn description(&self) -> &str {
-        "Capture the entire virtual desktop at physical pixel resolution, save a PNG, and copy it to the clipboard. Returns the file path, not an image description. To look at or read the screen use screenshot_analyze; success here does not test vision capability."
+        "Capture the current screen or a physical-pixel region. Analyze the image by default and return objective observations. Set save=true to save a PNG in the system Screenshots folder, copy_to_clipboard=true to copy it, or analyze=false to skip vision. Capture once for all selected outputs. Requires user confirmation."
     }
 
     fn description_in(&self, lang: &str) -> &str {
         match lang {
-            "zh" => "按物理像素截取整个桌面，保存 PNG 并复制到剪贴板，仅返回文件路径，不会读图。用户让你看看屏幕、读图或识别画面时用 screenshot_analyze；本工具成功不代表已分析画面，也不能据此声称无法读图。",
-            "ja" => "現在の画面をキャプチャし、PNG ファイルとして保存し、クリップボードにコピーする。ファイルパスを返す。",
-            _ => self.description(),
-        }
-    }
-
-    fn usage_corpus(&self, lang: &str) -> &'static str {
-        match lang {
-            "zh" => "截个图\n保存截图\n截屏\n抓一下屏幕",
-            "en" => "take a screenshot\ncapture my screen\nscreenshot this",
-            "ja" => "スクリーンショットを撮って\n画面をキャプチャして\n画面を保存して",
-            _ => "",
-        }
-    }
-
-    fn parameters_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "output_path": {
-                    "type": "string",
-                    "description": "Screenshot save path (optional; defaults to the temp directory)"
-                }
-            }
-        })
-    }
-
-    fn parameters_schema_in(&self, lang: &str) -> Value {
-        match lang {
-            "zh" => json!({
-                "type": "object",
-                "properties": {
-                    "output_path": {
-                        "type": "string",
-                        "description": "截图保存路径（可选；默认为临时目录）"
-                    }
-                }
-            }),
-            "ja" => json!({
-                "type": "object",
-                "properties": {
-                    "output_path": {
-                        "type": "string",
-                        "description": "スクリーンショットの保存パス（任意；デフォルトは一時ディレクトリ）"
-                    }
-                }
-            }),
-            _ => self.parameters_schema(),
-        }
-    }
-
-    async fn validate_input(&self, _input: &Value, _context: &ToolUseContext) -> ValidationResult {
-        ValidationResult::success(None)
-    }
-
-    async fn check_permissions(
-        &self,
-        _input: &Value,
-        _context: &ToolUseContext,
-    ) -> PermissionResult {
-        PermissionResult::ask("take_screenshot 涉及屏幕截取，需要用户确认")
-    }
-
-    async fn call(&self, args: Value, _context: &ToolUseContext) -> ToolResult {
-        let output_path = args
-            .get("output_path")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| {
-                let mut p = crate::utils::path::get_user_data_dir();
-                p.push("screenshots");
-                let _ = std::fs::create_dir_all(&p);
-                p.push(format!(
-                    "screenshot_{}.png",
-                    chrono::Local::now().format("%Y%m%d_%H%M%S")
-                ));
-                p.to_string_lossy().to_string()
-            });
-
-        let path_obj = std::path::Path::new(&output_path);
-        if !output_path.ends_with(".png") {
-            return ToolResult::standard_error(
-                "输出路径必须以 .png 结尾",
-                Some("ScreenshotFailed"),
-                None,
-            );
-        }
-        if output_path.contains("..") {
-            return ToolResult::standard_error(
-                "输出路径包含非法字符 ..",
-                Some("ScreenshotFailed"),
-                None,
-            );
-        }
-        if let Some(parent) = path_obj.parent() {
-            if !parent.as_os_str().is_empty() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-        }
-
-        #[cfg(target_os = "windows")]
-        {
-            use std::fs;
-
-            fn is_safe_path_for_ps(p: &str) -> bool {
-                p.chars()
-                    .all(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '.' | '\\' | ':' | ' ' | '/'))
-            }
-            if !is_safe_path_for_ps(&output_path) {
-                return ToolResult::standard_error(
-                    &format!("输出路径含非法字符（拒绝反引号/$/括号等以避免命令注入）: {}", output_path),
-                    Some("ScreenshotFailed"),
-                    None,
-                );
-            }
-
-            let escaped_path = output_path.replace('\'', "''");
-            let ps_script = format!(
-                r#"
-{}
-$bmp = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
-$graphics = [System.Drawing.Graphics]::FromImage($bmp)
-$graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
-$bmp.Save('{}', [System.Drawing.Imaging.ImageFormat]::Png)
-[System.Windows.Forms.Clipboard]::SetImage($bmp)
-$graphics.Dispose()
-$bmp.Dispose()
-"#,
-                WINDOWS_SCREEN_CAPTURE_SETUP, escaped_path
-            );
-
-            let ps_script_for_task = ps_script.clone();
-            let output_path_for_task = output_path.clone();
-            let task_result = tokio::task::spawn_blocking(move || {
-                let mut cmd = silent_command("powershell");
-                cmd.arg("-STA")
-                    .arg("-NoProfile")
-                    .arg("-NonInteractive")
-                    .arg("-Command")
-                    .arg(&ps_script_for_task);
-                match cmd.output() {
-                    Ok(output) => {
-                        if output.status.success()
-                            && std::path::Path::new(&output_path_for_task).exists()
-                        {
-                            let size = fs::metadata(&output_path_for_task)
-                                .map(|m| m.len())
-                                .unwrap_or(0);
-                            ToolResult::standard_success(
-                                "截屏成功，已复制到剪贴板",
-                                Some(json!({
-                                    "output_path": output_path_for_task,
-                                    "size_bytes": size,
-                                    "in_clipboard": true,
-                                })),
-                            )
-                        } else {
-                            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-                            ToolResult::standard_error(
-                                &format!("截屏失败: {}", stderr),
-                                Some("ScreenshotFailed"),
-                                None,
-                            )
-                        }
-                    }
-                    Err(e) => ToolResult::standard_error(
-                        &format!("启动 PowerShell 失败: {}", e),
-                        Some("ScreenshotFailed"),
-                        None,
-                    ),
-                }
-            })
-            .await;
-
-            match task_result {
-                Ok(result) => return result,
-                Err(e) => {
-                    return ToolResult::standard_error(
-                        &format!("截屏任务执行失败: {}", e),
-                        Some("ScreenshotFailed"),
-                        None,
-                    );
-                }
-            }
-        }
-
-        #[cfg(not(target_os = "windows"))]
-        {
-            let _ = path_obj;
-            ToolResult::standard_error(
-                "截屏功能在当前平台未实现",
-                Some("ScreenshotFailed"),
-                None,
-            )
-        }
-    }
-
-    fn is_read_only(&self) -> bool {
-        false
-    }
-
-    fn category(&self) -> ToolCategory {
-        ToolCategory::System
-    }
-
-    /// 始终全量加载（核心工具）
-    fn always_load(&self) -> bool {
-        true
-    }
-
-    /// 搜索提示
-    fn search_hint(&self) -> &str {
-        "take screenshot"
-    }
-
-    fn risk(&self) -> ToolRiskTier {
-        ToolRiskTier::Safe
-    }
-}
-
-// ============================================================================
-// ScreenshotAnalyzeTool - 截屏并送视觉理解
-// ============================================================================
-
-/// screenshot_analyze 工具 - 截屏并识图
-///
-/// 与 `take_screenshot` 并列的姊妹工具：截取当前屏幕后**不保存、不复制剪贴板**，
-/// 直接将 PNG base64 送入视觉理解流程（`vision_describe` 任务路由），
-/// 返回 LLM 对屏幕内容的客观描述；主智能体负责判断与角色表达。
-///
-/// 适用场景：用户让你"看看屏幕"/"看一下这个界面"/"我屏幕上显示什么"等
-/// 需要视觉上下文才能回答的情况。需要保存截图文件请用 `take_screenshot`。
-pub struct ScreenshotAnalyzeTool;
-
-#[derive(Clone, Copy, serde::Deserialize, serde::Serialize)]
-#[serde(deny_unknown_fields)]
-struct ScreenInspectionRegion {
-    x: i64,
-    y: i64,
-    width: u32,
-    height: u32,
-}
-
-fn parse_screen_inspection_args(args: &Value) -> Result<(Option<ScreenInspectionRegion>, Option<String>), String> {
-    let region = args.get("region").map(|value| -> Result<ScreenInspectionRegion, String> {
-        let region: ScreenInspectionRegion = serde_json::from_value(value.clone())
-            .map_err(|_| "region must contain integer x, y, width and height".to_string())?;
-        if region.width < 2 || region.height < 2 {
-            return Err("region width and height must be at least 2 pixels".into());
-        }
-        Ok(region)
-    }).transpose()?;
-    let question = args.get("question").map(|value| -> Result<String, String> {
-        let question = value.as_str().ok_or("question must be a string")?.trim();
-        if question.is_empty() || question.chars().count() > 500 {
-            return Err("question must contain 1–500 characters".into());
-        }
-        Ok(question.to_string())
-    }).transpose()?;
-    Ok((region, question))
-}
-
-#[cfg(test)]
-mod screen_inspection_tests {
-    use super::*;
-
-    #[test]
-    fn rejects_invalid_inspection_before_desktop_input() {
-        for args in [
-            json!({"region":{"x":0,"y":0,"width":1,"height":20}}),
-            json!({"region":{"x":0,"y":0,"width":20,"height":20.5}}),
-            json!({"region":null}),
-            json!({"question":"  "}),
-            json!({"question":7}),
-        ] {
-            assert!(parse_screen_inspection_args(&args).is_err(), "{args}");
-        }
-        let (region, question) = parse_screen_inspection_args(&json!({
-            "region":{"x":-1920,"y":10,"width":100,"height":40},
-            "question":"  Did the dialog close?  "
-        })).unwrap();
-        assert_eq!(region.unwrap().x, -1920);
-        assert_eq!(question.as_deref(), Some("Did the dialog close?"));
-    }
-}
-
-impl ScreenshotAnalyzeTool {
-    pub fn new() -> Self {
-        Self
-    }
-}
-
-impl Default for ScreenshotAnalyzeTool {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[async_trait]
-impl Tool for ScreenshotAnalyzeTool {
-    fn name(&self) -> &str {
-        "screenshot_analyze"
-    }
-
-    fn description(&self) -> &str {
-        "Capture the current screen and send it to a vision-capable LLM for understanding. \
-         Returns objective observations only; the companion decides what to say. \
-         Does NOT save the image to disk or copy it to the clipboard. \
-         Optionally inspect a physical-pixel region and ask a specific visual question. \
-         Use this when the user asks you to 'look at' / 'see' / 'check' their screen, \
-         or when visual context is needed to answer (e.g. '我屏幕上是什么', '帮我看看这个界面')."
-    }
-
-    fn description_in(&self, lang: &str) -> &str {
-        match lang {
-            "zh" => "截取当前屏幕并送视觉模型理解，可指定物理像素区域与具体观察问题；仅返回屏幕内容的客观描述，由主智能体判断和回复。\
-            不保存图片、不复制剪贴板。当用户让你“看看屏幕”/“看一下这个界面”/“我屏幕上显示什么”等\
-            需要视觉上下文的场景使用。",
-            "ja" => "現在の画面をキャプチャし、視覚モデルに送って理解させる。\
-            画面内容の客観的説明だけを返し、会話の返答は主エージェントが行う。\
-            画像を保存せず、クリップボードにもコピーしない。\
-            ユーザーが「画面を見て」「この画面どう思う」など視覚コンテキストを求める場面で使用。",
+            "zh" => "截取当前屏幕或指定物理像素区域。默认分析画面并返回客观观察；save=true 保存 PNG 到系统截图目录，copy_to_clipboard=true 复制图片，analyze=false 跳过识图。各输出共用一次捕获，执行前需要用户确认。",
+            "ja" => "画面または物理ピクセル領域を一度キャプチャする。既定では画像を分析する。save=true で保存、copy_to_clipboard=true でコピー、analyze=false で分析を省略する。実行前にユーザーの確認が必要。",
             _ => self.description(),
         }
     }
@@ -2264,8 +2042,11 @@ impl Tool for ScreenshotAnalyzeTool {
             "region": {"type":"object","description":"Optional crop in physical virtual-desktop coordinates, including negative monitor origins.",
                 "properties":{"x":{"type":"integer"},"y":{"type":"integer"},"width":{"type":"integer","minimum":2},"height":{"type":"integer","minimum":2}},
                 "required":["x","y","width","height"],"additionalProperties":false},
-            "question": {"type":"string","minLength":1,"maxLength":500,"description":"Specific visual detail to check in this observation."}
-        } })
+            "question": {"type":"string","minLength":1,"maxLength":500,"description":"Specific visual detail to check in this observation."},
+            "analyze": {"type":"boolean","default":true,"description":"Send the captured image to the configured vision model."},
+            "save": {"type":"boolean","default":false,"description":"Save the captured PNG in the system Screenshots folder."},
+            "copy_to_clipboard": {"type":"boolean","default":false,"description":"Copy the captured PNG to the clipboard."}
+        }, "additionalProperties": false })
     }
 
     fn parameters_schema_in(&self, lang: &str) -> Value {
@@ -2285,72 +2066,76 @@ impl Tool for ScreenshotAnalyzeTool {
         _input: &Value,
         _context: &ToolUseContext,
     ) -> PermissionResult {
-        PermissionResult::ask("screenshot_analyze 涉及屏幕截取与视觉理解，需要用户确认")
+        PermissionResult::ask("截屏可能包含敏感信息，需要用户确认")
     }
 
     async fn call(&self, args: Value, context: &ToolUseContext) -> ToolResult {
-        let (region, question) = match parse_screen_inspection_args(&args) {
+        let options = match parse_screen_inspection_args(&args) {
             Ok(parsed) => parsed,
             Err(error) => return ToolResult::standard_error(&error, Some("InvalidScreenInspection"), None),
         };
-        // 1. 拿 AppHandle → AppState → ModelRouter / Config
-        let app_handle = match APP_HANDLE.read().clone() {
-            Some(h) => h,
-            None => {
-                return ToolResult::standard_error(
-                    "AppHandle 未注入，无法调用视觉模型",
-                    Some("ScreenshotAnalyzeFailed"),
-                    None,
-                )
-            }
-        };
-        let state = match app_handle.try_state::<std::sync::Arc<AppState>>() {
-            Some(s) => s,
-            None => {
-                return ToolResult::standard_error(
-                    "AppState 未初始化",
-                    Some("ScreenshotAnalyzeFailed"),
-                    None,
-                )
-            }
-        };
-
-        // 2. 检查视觉功能是否启用
-        if !state
-            .config
-            .read()
-            .get_typed::<bool>("ai.enable_vision", false)
-        {
-            return ToolResult::standard_error(
-                "视觉功能未启用（ai.enable_vision=false）",
-                Some("ScreenshotAnalyzeFailed"),
-                None,
-            );
-        }
-
-        // 3. 拿 ModelRouter（克隆一份避免长生命周期锁）
-        let router = {
-            let guard = state.model_router.read();
-            match guard.as_ref() {
-                Some(r) => r.clone(),
+        let vision = if options.analyze {
+            let app_handle = match APP_HANDLE.read().clone() {
+                Some(h) => h,
                 None => {
                     return ToolResult::standard_error(
-                        "ModelRouter 未初始化",
+                        "AppHandle 未注入，无法调用视觉模型",
                         Some("ScreenshotAnalyzeFailed"),
                         None,
                     )
                 }
+            };
+            let state = match app_handle.try_state::<std::sync::Arc<AppState>>() {
+                Some(s) => s,
+                None => {
+                    return ToolResult::standard_error(
+                        "AppState 未初始化",
+                        Some("ScreenshotAnalyzeFailed"),
+                        None,
+                    )
+                }
+            };
+
+            // 2. 检查视觉功能是否启用
+            if !state
+                .config
+                .read()
+                .get_typed::<bool>("ai.enable_vision", false)
+            {
+                return ToolResult::standard_error(
+                    "视觉功能未启用（ai.enable_vision=false）",
+                    Some("ScreenshotAnalyzeFailed"),
+                    None,
+                );
             }
+
+            // 3. 拿 ModelRouter（克隆一份避免长生命周期锁）
+            let router = {
+                let guard = state.model_router.read();
+                match guard.as_ref() {
+                    Some(r) => r.clone(),
+                    None => {
+                        return ToolResult::standard_error(
+                            "ModelRouter 未初始化",
+                            Some("ScreenshotAnalyzeFailed"),
+                            None,
+                        )
+                    }
+                }
+            };
+
+            Some((router, std::sync::Arc::clone(state.inner())))
+        } else {
+            None
         };
 
-        // 4. 截屏（直接在内存编码，不保存文件或复制剪贴板）
         let frame = match crate::screen_capture::capture_desktop().await {
             Ok(frame) => frame,
             Err(e) => {
                 return ToolResult::standard_error(&e, Some("ScreenshotAnalyzeFailed"), None)
             }
         };
-        let png_bytes = match region {
+        let png_bytes = match options.region {
             Some(region) => frame.crop_physical_png(region.x, region.y, region.width, region.height),
             None => frame.png(),
         };
@@ -2359,8 +2144,40 @@ impl Tool for ScreenshotAnalyzeTool {
             Err(error) => return ToolResult::standard_error(&error, Some("InvalidScreenInspection"), None),
         };
 
-        // 5. 送视觉理解流程
-        Self::run_vision_describe(&router, &state, png_bytes, context, question.as_deref(), region).await
+        let output_path = if options.save {
+            match crate::screen_capture::save_selected_png(&png_bytes).await {
+                Ok(path) => Some(path),
+                Err(error) => return ToolResult::standard_error(&error, Some("ScreenshotSaveFailed"), None),
+            }
+        } else {
+            None
+        };
+        let mut data = json!({
+            "region": options.region,
+            "output_path": output_path,
+            "in_clipboard": false,
+            "analyzed": false,
+        });
+        if options.copy_to_clipboard {
+            if let Err(error) = crate::desktop_clipboard::copy_png(&png_bytes).await {
+                return ToolResult::standard_error(&error, Some("ScreenshotCopyFailed"), Some(data));
+            }
+            data["in_clipboard"] = json!(true);
+        }
+        if let Some((router, state)) = vision {
+            match Self::run_vision_describe(
+                &router, &state, png_bytes, context, options.question.as_deref(), options.region,
+            ).await {
+                Ok(description) => {
+                    data["description"] = json!(description);
+                    data["analyzed"] = json!(true);
+                }
+                Err(error) => return ToolResult::standard_error(
+                    &error, Some("ScreenshotAnalyzeFailed"), Some(data),
+                ),
+            }
+        }
+        ToolResult::standard_success("截屏完成", Some(data))
     }
 
     fn is_read_only(&self) -> bool {
@@ -2371,7 +2188,6 @@ impl Tool for ScreenshotAnalyzeTool {
         ToolCategory::System
     }
 
-    /// 与保存截图工具同时可见，避免模型只看到截图工具而误以为不能读图。
     fn always_load(&self) -> bool {
         true
     }
@@ -2388,15 +2204,9 @@ impl Tool for ScreenshotAnalyzeTool {
         ToolRiskTier::Safe
     }
 
-    fn anti_use_cases(&self) -> &[&str] {
-        &[
-            "需要把截图保存为文件时使用 take_screenshot，而非本工具",
-            "用户只是想截图保存分享时不要调用本工具（会消耗 LLM 配额）",
-        ]
-    }
 }
 
-impl ScreenshotAnalyzeTool {
+impl TakeScreenshotTool {
     /// 调用 vision_describe 任务路由，让多模态 LLM 理解截图内容
     async fn run_vision_describe(
         router: &crate::providers::router::ModelRouter,
@@ -2405,7 +2215,7 @@ impl ScreenshotAnalyzeTool {
         context: &ToolUseContext,
         question: Option<&str>,
         region: Option<ScreenInspectionRegion>,
-    ) -> ToolResult {
+    ) -> Result<String, String> {
         let image_detail = state
             .config
             .read()
@@ -2441,46 +2251,15 @@ impl ScreenshotAnalyzeTool {
             }
         };
 
-        match describe_screen_bytes(router, image_detail, png_bytes, &ctx_block).await {
-            Ok((description, _)) => ToolResult::standard_success(
-                "截屏并完成视觉理解",
-                Some(json!({
-                    "description": description,
-                    "region": region,
-                })),
-            ),
-            Err(e) => ToolResult::standard_error(
-                &e,
-                Some("ScreenshotAnalyzeFailed"),
-                None,
-            ),
-        }
+        describe_screen_bytes(router, image_detail, png_bytes, &ctx_block)
+            .await
+            .map(|(description, _)| description)
     }
 }
 
 // ============================================================================
-// 可复用的截屏/视觉理解原语（主动交互 screen-peek 与 screenshot_analyze 共享）
+// 可复用的截屏/视觉理解原语（主动交互 screen-peek 与 take_screenshot 共享）
 // ============================================================================
-
-// PowerShell 默认无 DPI 感知。先切换线程为 Per-Monitor V2，再读取桌面范围，
-// 保证多显示器及不同缩放比例下 CopyFromScreen 使用物理像素而非逻辑尺寸。
-#[cfg(target_os = "windows")]
-const WINDOWS_SCREEN_CAPTURE_SETUP: &str = r#"
-$ErrorActionPreference = 'Stop'
-Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-public static class VivianCaptureDpi {
-    [DllImport("user32.dll", SetLastError = true)]
-    public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
-}
-'@
-$previousDpi = [VivianCaptureDpi]::SetThreadDpiAwarenessContext([IntPtr](-4))
-if ($previousDpi -eq [IntPtr]::Zero) { throw 'Cannot enable per-monitor DPI awareness for screenshot capture' }
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
-$bounds = [System.Windows.Forms.SystemInformation]::VirtualScreen
-"#;
 
 /// Capture directly to memory. No temporary file or clipboard side effect.
 pub(crate) async fn capture_screen_png_bytes() -> Result<Vec<u8>, String> {

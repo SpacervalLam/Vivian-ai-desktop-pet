@@ -391,6 +391,7 @@ impl Tool for WorkDelegateTool {
                     .unwrap_or(AgentAccessLevel::FsWrite),
                 char_id: context.char_id.clone(),
                 cancel,
+                job_id: Some(job_id.clone()),
             };
             let app2 = app.clone();
             let jobs2 = Arc::clone(&jobs);
@@ -445,6 +446,7 @@ impl Tool for WorkDelegateTool {
                 .unwrap_or(AgentAccessLevel::FsWrite),
             char_id: context.char_id.clone(),
             cancel: None,
+            job_id: None,
         };
 
         match run_subagent(&router, &tool_system, Some(&app), request).await {

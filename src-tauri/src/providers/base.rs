@@ -206,6 +206,8 @@ pub const TASK_TOOL_EXECUTION: &str = "tool_execution";
 /// 不依赖服务端 Conversation State,避免双 Context 问题。Responses API 始终当 Stateless 用。
 #[derive(Debug, Clone)]
 pub struct LLMRequest {
+    /// Local audit correlation only; never sent to the provider.
+    pub audit_request_id: Option<String>,
     pub include_framework_instructions: Option<bool>,
     /// 任务类型(路由 key):chat / reasoning / reflection / consolidation /
     /// inner_monologue / vision_describe 等
@@ -252,6 +254,7 @@ impl LLMRequest {
     pub fn new(task_type: impl Into<String>, messages: Vec<ChatMessage>) -> Self {
         Self {
             include_framework_instructions: None,
+            audit_request_id: None,
             task_type: task_type.into(),
             usage_tag: None,
             messages,
@@ -644,6 +647,10 @@ pub fn record_response_usage(model: &str, response: &Value) {
         cache_write_tokens,
     }) = usage.and_then(parse_stream_usage)
     {
+        crate::brain::coding_event_log::current_record("model_usage", serde_json::json!({
+            "model":model,"input_tokens":input_tokens,"output_tokens":output_tokens,
+            "cache_read_tokens":cache_read_tokens,"cache_write_tokens":cache_write_tokens,
+        }));
         crate::providers::usage_store::record_usage(
             model,
             input_tokens,

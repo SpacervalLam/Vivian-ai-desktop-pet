@@ -172,6 +172,7 @@ pub fn create_backend(engine: &super::tts::TtsEngine) -> VivianResult<Box<dyn Tt
         TtsEngine::MiniMax => Box::new(super::tts_minimax::MiniMaxBackend::new()),
         TtsEngine::Doubao => Box::new(super::tts_doubao::DoubaoBackend::new()),
         TtsEngine::Mimo => Box::new(super::tts_mimo::MimoBackend::new()),
+        TtsEngine::ElevenLabs => Box::new(super::tts_elevenlabs::ElevenLabsBackend::new()),
     })
 }
 

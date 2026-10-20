@@ -19,9 +19,25 @@ const TEMPORARY_SHORT_THRESHOLD: usize = 20;
 /// 权重过低的截断阈值
 const MIN_MEMORY_WEIGHT: f64 = 0.01;
 
-/// 放松阶梯最小结果数：strict 路径返回少于此值时逐级放松约束。
+/// 放松阶梯最小结果数：strict 路径返回少于此值时逐级放宽约束。
 ///
 const RELAXATION_MIN_RESULTS: usize = 3;
+
+/// 作者亲写的自我肌理在新会话候选里的固定名额。
+///
+/// 这类条目的 importance 天生就低（0.25~0.65），永远过不了 strict 阶段的
+/// 0.7 门槛，而阶梯在核心设定（0.75~0.9）满足 min_results 后就不再放宽；
+/// 若不单独留名额，她自己的日常碎片在每次新会话都会被整体排除。
+/// 只留 1 个：自我肌理是背景质感，不该挤掉关于用户的事实。
+const AUTHORED_SELF_QUOTA: usize = 1;
+
+/// 自我肌理进入新会话的最低 importance。
+///
+/// 不用 0.7：该阈值是为「关于用户的事实」设计的。种子文件里这批条目本身
+/// 就横跨 0.2~0.65——0.2 是最低的那条（「找一个忘了的视频」这类无关紧要的
+/// 碎片），阈值高于它会让豁免形同虚设。真正决定「谁进来」的是配额里的
+/// 按 importance 排序，不是这道下限。
+const AUTHORED_SELF_MIN_IMPORTANCE: f64 = 0.2;
 
 /// 记忆过滤器：跨会话过滤临时话题、保留长期偏好的核心组件。
 pub struct MemoryFilter {
@@ -157,6 +173,20 @@ impl MemoryFilter {
         })
     }
 
+    /// 是否为「作者亲写的自我肌理」：角色自己的日常碎片与性格缺陷。
+    ///
+    /// 与「关于用户的事实」相对：它不指向任何用户信息，只说明她是什么样的人
+    /// （收藏癖、三分钟热度、嘴硬、半夜点到一个奇怪网站……）。种子文件用
+    /// `personal` / `daily_fragment` / `flaw` 三个标签标注这批条目。
+    ///
+    /// 之所以要单独识别，是因为两条通用规则都会误伤它：
+    /// 种子生命周期衰减把它压到统一下限，新会话过滤又要求 importance ≥ 0.7。
+    pub fn is_authored_self_texture(memory: &MemoryItem) -> bool {
+        memory.tags.iter().any(|tag| {
+            matches!(tag.to_lowercase().as_str(), "personal" | "daily_fragment" | "flaw")
+        })
+    }
+
     /// 计算记忆权重：长期偏好基础 1.0 慢衰减，临时话题基础 0.3 快衰减；
     /// 超过 1 小时的临时话题额外减半。
     pub fn calculate_memory_weight(memory: &MemoryItem) -> f64 {
@@ -183,6 +213,10 @@ impl MemoryFilter {
     }
 
     /// 新会话时仅保留偏好/身份类且重要性 ≥ 0.7 的记忆。
+    ///
+    /// 例外：作者亲写的自我肌理不适用 0.7 门槛。该门槛是为「关于用户的事实」
+    /// 设计的——比起把用户档案记错，漏掉一条人物肌理只是少了点生气。若让她
+    /// 自己的日常碎片也用同一把尺子，新会话一开始就把她最像人的那批素材删光。
     pub fn filter_for_session(
         &mut self,
         memories: Vec<MemoryItem>,
@@ -192,6 +226,9 @@ impl MemoryFilter {
             memories
                 .into_iter()
                 .filter(|m| {
+                    if Self::is_authored_self_texture(m) {
+                        return m.importance >= AUTHORED_SELF_MIN_IMPORTANCE;
+                    }
                     let is_preference_or_identity = Self::is_tagged_long_term(m)
                         || m.tags.iter().any(|t| {
                             let lower = t.to_lowercase();
@@ -277,6 +314,11 @@ impl MemoryFilter {
     ///
     /// 仅在「新会话且未提及旧话题」时调用。逐阶尝试，首个结果充足的阶梯胜出；
     /// 全部不足时回退到 no_filters（保证有上下文可注入，避免空检索）。
+    ///
+    /// 阶梯之外额外留出 `AUTHORED_SELF_QUOTA` 个名额给作者亲写的自我肌理：
+    /// 核心设定（0.75~0.9）在 stage 0 就满足 min_results，阶梯不会继续放宽，
+    /// 而那批 0.25~0.65 的日常碎片此时根本进不了候选。名额单独追加、且放在
+    /// 末位，保证它既不挤掉核心设定，又不会在随后的截断里被丢掉。
     fn relaxed_strict_filter(memories: &[MemoryItem], k: usize) -> Vec<(MemoryItem, f64)> {
         let ladder = RelaxationLadder::new(RELAXATION_MIN_RESULTS);
         let allowed = ladder.run(memories, |stage, m| Self::relaxation_allows(stage, m));
@@ -289,7 +331,30 @@ impl MemoryFilter {
             })
             .collect();
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        scored.truncate(k);
+
+        // 配额条目：尚未出现在核心结果里的自我肌理，按 importance 取最高的若干条
+        let mut quota: Vec<MemoryItem> = memories
+            .iter()
+            .filter(|m| {
+                Self::is_authored_self_texture(m)
+                    && m.importance >= AUTHORED_SELF_MIN_IMPORTANCE
+                    && !scored.iter().any(|(s, _)| s.id == m.id)
+            })
+            .cloned()
+            .collect();
+        quota.sort_by(|a, b| {
+            b.importance
+                .partial_cmp(&a.importance)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        quota.truncate(AUTHORED_SELF_QUOTA.min(k));
+
+        // 先按名额腾出位置再追加，避免追加的条目在截断时被权重排序挤掉
+        scored.truncate(k.saturating_sub(quota.len()));
+        scored.extend(quota.into_iter().map(|m| {
+            let w = Self::calculate_memory_weight(&m);
+            (m, w)
+        }));
         scored
     }
 

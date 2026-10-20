@@ -89,8 +89,7 @@ fn builtin_safety_profiles() -> HashMap<&'static str, ToolSafetyProfile> {
         "search_files",
         "grep",
         "take_screenshot",
-        "screenshot_analyze",
-        "web_search",
+            "web_search",
         "share_link",
     ] {
         m.insert(name, ToolSafetyProfile::new(ToolRiskLevel::Safe));
@@ -121,7 +120,7 @@ fn builtin_safety_profiles() -> HashMap<&'static str, ToolSafetyProfile> {
     m
 }
 
-/// 危险命令模式（正则）
+/// 危险命令模式（正则）——与解释器无关的破坏性片段
 static DANGEROUS_COMMAND_PATTERNS: Lazy<Vec<Regex>> = Lazy::new(|| {
     vec![
         Regex::new(r"(?i)\brm\s+(-[a-zA-Z]*r[a-zA-Z]*\s+-[a-zA-Z]*f[a-zA-Z]*|-[a-zA-Z]*f[a-zA-Z]*\s+-[a-zA-Z]*r[a-zA-Z]*|-rf?|-fr)\b").unwrap(),
@@ -137,11 +136,25 @@ static DANGEROUS_COMMAND_PATTERNS: Lazy<Vec<Regex>> = Lazy::new(|| {
         Regex::new(r"(?i)>\s*/dev/(null|zero|sda)").unwrap(),
         Regex::new(r"(?i)\bchmod\s+-R\s+777\b").unwrap(),
         Regex::new(r"(?i)\|.*\b(sh|bash|zsh|cmd|powershell)\b").unwrap(),
-        Regex::new(r"(?i)`[^`]+`").unwrap(),
-        Regex::new(r"(?i)\$\([^)]+\)").unwrap(),
         Regex::new(r"(?i)wget\s+.*\|\s*(sh|bash)").unwrap(),
         Regex::new(r"(?i)curl\s+.*\|\s*(sh|bash)").unwrap(),
         Regex::new(r"(?i)\btaskkill\s+/F\b").unwrap(),
+    ]
+});
+
+/// 只在 POSIX shell 语义下才构成危险的**语法**模式。
+///
+/// `$(...)` 在 bash 里是命令替换，在 PowerShell 里是普通子表达式
+/// （`"count=$($m.Count)"` 这种写法满街都是）；反引号同理——bash 里是命令替换，
+/// PowerShell 里是转义符。run_command 在 Windows 上一律走 PowerShell，把这套
+/// POSIX 规则套上去就是纯误伤：工作会话里解析图片直链的命令就因此被拦下。
+///
+/// 语法本身不是风险面——`$(Remove-Item -Recurse -Force C:\)` 里的破坏性内容
+/// 仍会被上面那组内容级模式命中。所以这里按解释器分流，而不是删掉检测。
+static POSIX_ONLY_COMMAND_PATTERNS: Lazy<Vec<Regex>> = Lazy::new(|| {
+    vec![
+        Regex::new(r"(?i)`[^`]+`").unwrap(),
+        Regex::new(r"(?i)\$\([^)]+\)").unwrap(),
     ]
 });
 
@@ -269,7 +282,7 @@ impl ToolSandbox {
         // 1. 危险命令检查（命令文本在 2.5 复用，故先取出来）
         let command = extract_command(args);
         if let Some(cmd) = &command {
-            if is_dangerous_command(cmd) {
+            if is_dangerous_command(cmd, command_shell(tool_name)) {
                 return SafetyResult::denied(format!(
                     "检测到危险命令被沙箱拦截: {}",
                     tool_name
@@ -604,13 +617,36 @@ fn collect_paths_recursive(value: &Value, out: &mut Vec<String>) {
 }
 
 /// 检查命令是否危险
-pub fn is_dangerous_command(command: &str) -> bool {
-    for pattern in DANGEROUS_COMMAND_PATTERNS.iter() {
-        if pattern.is_match(command) {
-            return true;
-        }
+/// 命令解释器语义——决定「语法级」危险模式是否适用。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CommandShell {
+    PowerShell,
+    Posix,
+}
+
+/// 按工具名判定它实际调用的解释器。
+///
+/// `run_command` / `run_job` 在 Windows 上固定以 `powershell -Command` 执行，
+/// 因此按 PowerShell 语义判定；其余工具（以及非 Windows 构建）沿用 POSIX。
+pub fn command_shell(tool_name: &str) -> CommandShell {
+    if cfg!(windows) && matches!(tool_name, "run_command" | "run_job") {
+        CommandShell::PowerShell
+    } else {
+        CommandShell::Posix
     }
-    false
+}
+
+pub fn is_dangerous_command(command: &str, shell: CommandShell) -> bool {
+    if DANGEROUS_COMMAND_PATTERNS
+        .iter()
+        .any(|pattern| pattern.is_match(command))
+    {
+        return true;
+    }
+    shell == CommandShell::Posix
+        && POSIX_ONLY_COMMAND_PATTERNS
+            .iter()
+            .any(|pattern| pattern.is_match(command))
 }
 
 /// 检查路径是否安全（无穿越序列）
@@ -779,5 +815,42 @@ mod tests {
             Some(&ctx),
         );
         assert!(!r.allowed, "命令里的 .. 穿越仍应被拦");
+    }
+
+    #[test]
+    fn powershell_subexpression_is_not_a_dangerous_command() {
+        // 实测被误拦的写法：PowerShell 的子表达式 `$(...)` 被当成 bash 命令替换
+        let cmd = r#"$h=Get-Content page.html -Raw; $m=[regex]::Matches($h,'murl'); "count=$($m.Count)""#;
+        assert!(
+            !is_dangerous_command(cmd, CommandShell::PowerShell),
+            "PowerShell 下的 $(...) 是普通子表达式，不该拦"
+        );
+        assert!(
+            is_dangerous_command(cmd, CommandShell::Posix),
+            "POSIX 下 $(...) 仍是命令替换，应保持拦截"
+        );
+    }
+
+    #[test]
+    fn destructive_fragments_stay_blocked_in_both_shells() {
+        for shell in [CommandShell::PowerShell, CommandShell::Posix] {
+            assert!(is_dangerous_command(r"del /f /s /q C:\data", shell));
+            assert!(is_dangerous_command("rm -rf /tmp/x", shell));
+            assert!(is_dangerous_command("format C:", shell));
+            // 内容级检测覆盖了语法豁免：子表达式里塞破坏性命令照样命中
+            assert!(is_dangerous_command(r"$(rm -rf /)", shell));
+        }
+    }
+
+    #[test]
+    fn run_command_maps_to_powershell_on_windows() {
+        let expected = if cfg!(windows) {
+            CommandShell::PowerShell
+        } else {
+            CommandShell::Posix
+        };
+        assert_eq!(command_shell("run_command"), expected);
+        assert_eq!(command_shell("run_job"), expected);
+        assert_eq!(command_shell("read_file"), CommandShell::Posix);
     }
 }

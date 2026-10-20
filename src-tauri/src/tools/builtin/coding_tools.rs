@@ -37,6 +37,50 @@ const CMD_OUTPUT_MAX_CHARS: usize = 8000;
 /// 命令执行超时（秒）
 const CMD_TIMEOUT_SECS: u64 = 120;
 
+/// 让 PowerShell 以 UTF-8 读写管道的启动前缀。
+///
+/// PowerShell 5.1 在中文 Windows 上按 OEM 代码页（CP936）编码自己的 stdout，
+/// 而 Rust 侧按 UTF-8 读——每个汉字都会退化成 U+FFFD，模型看到的工具结果是
+/// 一团乱码（实测 `目录:` → `Ŀ¼:`、`娘` → `��`），连报错原因都读不出来。
+/// 前缀把控制台输出编码切到 UTF-8；`$OutputEncoding` 负责管道进原生进程的编码。
+const UTF8_CONSOLE_PREFIX: &str =
+    "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; $OutputEncoding=[Console]::OutputEncoding; ";
+
+/// 解码控制台输出字节。
+///
+/// UTF-8 合法时原样返回。否则先按 GBK（CP936，中文 Windows 的 OEM 代码页）解——
+/// 这条路是确定性的，比"拿几十个字节去猜编码"可靠得多；GBK 也解不干净时再交给
+/// chardetng。兜住的是绕过启动前缀的场景，例如经 `cmd /c` 透传的原生工具输出。
+fn decode_console(bytes: &[u8]) -> String {
+    if let Ok(s) = std::str::from_utf8(bytes) {
+        return s.to_string();
+    }
+    #[cfg(windows)]
+    {
+        let (text, _, had_errors) = encoding_rs::GBK.decode(bytes);
+        if !had_errors {
+            return text.into_owned();
+        }
+    }
+    let mut detector = chardetng::EncodingDetector::new();
+    detector.feed(bytes, true);
+    detector.guess(None, true).decode(bytes).0.into_owned()
+}
+
+/// 外层超时相对内层预算的余量（秒）。
+///
+/// 让工具自己的超时先触发，好让它带着「命令执行超时（N 秒），已终止」返回；
+/// 外层只在进程真的收不掉时兜底。
+const EXEC_TIMEOUT_GRACE_SECS: u64 = 15;
+
+/// 解析 `timeout_secs` 参数（clamp 到 5..600），未给则用默认值。
+fn command_timeout_secs(args: &Value) -> u64 {
+    args.get("timeout_secs")
+        .and_then(|v| v.as_u64())
+        .map(|v| v.clamp(5, 600))
+        .unwrap_or(CMD_TIMEOUT_SECS)
+}
+
 fn is_binary_ext(path: &std::path::Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
@@ -703,11 +747,7 @@ impl Tool for RunCommandTool {
 
     async fn call(&self, args: Value, ctx: &ToolUseContext) -> ToolResult {
         let command = args.get("command").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
-        let timeout = args
-            .get("timeout_secs")
-            .and_then(|v| v.as_u64())
-            .map(|v| v.clamp(5, 600))
-            .unwrap_or(CMD_TIMEOUT_SECS);
+        let timeout = command_timeout_secs(&args);
 
         let cwd = if ctx.working_directory.is_empty() {
             None
@@ -715,8 +755,83 @@ impl Tool for RunCommandTool {
             Some(std::path::PathBuf::from(&ctx.working_directory))
         };
 
+        // 隔离层（Windows）：命令跑在受限令牌 + 低完整性沙箱里，而不是全权限
+        // 子进程。沙箱建立失败 = 拒绝执行，不回退全权限——与插件脚本路径同一口径。
+        #[cfg(windows)]
+        if crate::tools::sandbox_env::enabled() {
+            let req = crate::tools::sandbox_env::request_for(ctx);
+            let wrapped = format!("{UTF8_CONSOLE_PREFIX}{command}");
+            let cwd_opt = cwd.clone();
+            let secs = timeout;
+            let out = match tokio::task::spawn_blocking(move || {
+                crate::utils::sandbox::run_command_sandboxed(
+                    &req,
+                    &wrapped,
+                    secs,
+                    cwd_opt.as_deref(),
+                )
+            })
+            .await
+            {
+                Ok(Ok(o)) => o,
+                Ok(Err(e)) => {
+                    return ToolResult::standard_error(
+                        &format!("沙箱执行不可用，已拒绝执行命令: {e}"),
+                        Some("SandboxUnavailable"),
+                        None,
+                    )
+                }
+                Err(e) => {
+                    return ToolResult::standard_error(
+                        &format!("沙箱任务失败: {e}"),
+                        Some("SandboxFailed"),
+                        None,
+                    )
+                }
+            };
+            if out.timed_out {
+                return ToolResult::standard_error(
+                    &format!("命令执行超时（{timeout} 秒），已终止"),
+                    Some("timeout"),
+                    Some(json!({ "command": command })),
+                );
+            }
+            let stdout = out.stdout;
+            let stderr = out.stderr;
+            let code = out.exit_code;
+            let truncated = stdout.len() + stderr.len() > CMD_OUTPUT_MAX_CHARS;
+            let stdout_t = truncate_chars(&stdout, CMD_OUTPUT_MAX_CHARS);
+            let stderr_t = truncate_chars(&stderr, CMD_OUTPUT_MAX_CHARS / 2);
+            return ToolResult::standard_success(
+                &format!("命令退出码 {code}{}", if truncated { "（输出已截断）" } else { "" }),
+                Some(json!({
+                    "command": command,
+                    "exit_code": code,
+                    "success": code == 0,
+                    "stdout": stdout_t,
+                    "stderr": stderr_t,
+                    "truncated": truncated,
+                    "sandboxed": true,
+                })),
+            );
+        }
+
+        // 走到这里说明没有沙箱可用（非 Windows，或沙箱被关闭）。配置要求必须有
+        // 隔离时就地拒绝——宁可不跑，也不退回全权限子进程。
+        if crate::tools::sandbox_env::require_isolation() {
+            return ToolResult::standard_error(
+                "当前环境没有可用的 OS 级沙箱，已按配置拒绝执行命令。若要执行请关闭「要求 OS 级隔离」。",
+                Some("SandboxRequired"),
+                None,
+            );
+        }
+
         let mut cmd = tokio::process::Command::new("powershell");
-        cmd.args(["-NoProfile", "-NonInteractive", "-Command", &command])
+        // 前缀与用户命令同处一个 -Command 串：`;` 连接不影响末条命令的退出码，
+        // 也不会改变 cwd / 变量作用域。
+        let wrapped = format!("{UTF8_CONSOLE_PREFIX}{command}");
+        cmd.args(["-NoProfile", "-NonInteractive", "-Command", &wrapped])
+            .kill_on_drop(true)
             .creation_flags_windows();
         if let Some(dir) = cwd.as_ref() {
             cmd.current_dir(dir);
@@ -735,8 +850,8 @@ impl Tool for RunCommandTool {
             ),
             Ok(Err(e)) => ToolResult::standard_error(&format!("启动命令失败: {e}"), None, None),
             Ok(Ok(out)) => {
-                let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-                let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+                let stdout = decode_console(&out.stdout);
+                let stderr = decode_console(&out.stderr);
                 let code = out.status.code().unwrap_or(-1);
                 let truncated = stdout.len() + stderr.len() > CMD_OUTPUT_MAX_CHARS;
                 let stdout_t = truncate_chars(&stdout, CMD_OUTPUT_MAX_CHARS);
@@ -761,12 +876,21 @@ impl Tool for RunCommandTool {
         false
     }
 
-    fn category(&self) -> ToolCategory {
-        ToolCategory::System
+    /// 外层的静态超时是按工具名登记的 120 秒，会被调用方传入的 `timeout_secs`
+    /// 覆盖——否则 `timeout_secs: 300` 的命令在 120 秒被外层砍断，模型收到的
+    /// 只是「操作超时」，拿不到工具内层那句带秒数的超时说明。
+    fn execution_timeout(&self, args: &Value) -> Option<std::time::Duration> {
+        Some(std::time::Duration::from_secs(
+            command_timeout_secs(args) + EXEC_TIMEOUT_GRACE_SECS,
+        ))
     }
 
     fn risk(&self) -> ToolRiskTier {
         ToolRiskTier::Shell
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::System
     }
 
     fn search_hint(&self) -> &str {
@@ -1123,6 +1247,237 @@ impl Tool for ListDirTool {
     }
 }
 
+// ============================================================================
+// GlobTool
+// ============================================================================
+
+/// 按 glob 模式定位文件（`glob`）。
+///
+/// 与 `grep_search` 的分工：grep 是「我知道内容长什么样」，glob 是「我只知道文件名
+/// 大概长什么样」。按名字找文件时用 grep 会先把整个目录的内容读一遍——又慢又费 context。
+pub struct GlobTool;
+
+impl GlobTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for GlobTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// glob → 正则：`**` 跨目录、`*` 不跨 `/`、`?` 匹配单字符。
+fn glob_to_regex(pattern: &str) -> Option<regex::Regex> {
+    let mut re = String::from("(?i)^");
+    let chars: Vec<char> = pattern.replace('\\', "/").chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            '*' => {
+                if i + 1 < chars.len() && chars[i + 1] == '*' {
+                    // `**/` 允许零层目录；`**` 单独出现则跨任意层
+                    if i + 2 < chars.len() && chars[i + 2] == '/' {
+                        re.push_str("(?:.*/)?");
+                        i += 3;
+                        continue;
+                    }
+                    re.push_str(".*");
+                    i += 2;
+                    continue;
+                }
+                re.push_str("[^/]*");
+            }
+            '?' => re.push_str("[^/]"),
+            c => re.push_str(&regex::escape(&c.to_string())),
+        }
+        i += 1;
+    }
+    re.push('$');
+    regex::Regex::new(&re).ok()
+}
+
+fn collect_glob(
+    dir: &std::path::Path,
+    base: &std::path::Path,
+    re: &regex::Regex,
+    out: &mut Vec<String>,
+    limit: usize,
+    depth: usize,
+) {
+    if depth == 0 || out.len() >= limit {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let mut items: Vec<_> = entries.flatten().collect();
+    items.sort_by_key(|e| e.file_name());
+    for entry in items {
+        if out.len() >= limit {
+            return;
+        }
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if path.is_dir() {
+            if SKIP_DIRS.contains(&name.as_str()) {
+                continue;
+            }
+            collect_glob(&path, base, re, out, limit, depth - 1);
+        } else {
+            let rel = path
+                .strip_prefix(base)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            if re.is_match(&rel) || re.is_match(&name) {
+                out.push(rel);
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for GlobTool {
+    fn name(&self) -> &str {
+        "glob"
+    }
+
+    fn description(&self) -> &str {
+        "Find files by glob pattern (e.g. \"**/*.rs\", \"src/**/mod.*\", \"*.md\"). \
+         Use this when you know roughly what the filename looks like but not its location — \
+         it is much cheaper than grep_search, which reads file contents. Returns paths relative to the base directory."
+    }
+
+    fn description_in(&self, lang: &str) -> &str {
+        match lang {
+            "zh" => "按 glob 模式找文件（如 \"**/*.rs\"、\"src/**/mod.*\"、\"*.md\"）。\
+                     知道文件名大概长什么样、但不知道它在哪时用它——比 grep_search 便宜得多，\
+                     因为 grep 要读内容。返回相对基准目录的路径。",
+            "ja" => "glob パターンでファイルを探す（例 \"**/*.rs\"、\"src/**/mod.*\"、\"*.md\"）。\
+                     ファイル名の見当はつくが場所が分からないときに使う。grep_search は中身を読むため、こちらが安い。\
+                     基準ディレクトリからの相対パスを返す。",
+            _ => self.description(),
+        }
+    }
+
+    fn usage_corpus(&self, lang: &str) -> &'static str {
+        match lang {
+            "zh" => "找一下这个文件\n哪些文件叫这个名\n列出所有配置文件",
+            "en" => "find files named like\nlist all config files\nwhere is that file",
+            "ja" => "このファイルを探して\n設定ファイルを全部\nどこにある",
+            _ => "",
+        }
+    }
+
+    fn parameters_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "pattern": { "type": "string", "description": "glob 模式，如 **/*.ts（`**` 跨目录，`*` 不跨目录，`?` 单字符）" },
+                "directory": { "type": "string", "description": "基准目录（默认工作目录）" },
+                "limit": { "type": "integer", "description": "最多返回多少条（默认 200，上限 500）", "minimum": 1 }
+            },
+            "required": ["pattern"]
+        })
+    }
+
+    fn parameters_schema_in(&self, _lang: &str) -> Value {
+        self.parameters_schema()
+    }
+
+    async fn validate_input(&self, input: &Value, _ctx: &ToolUseContext) -> ValidationResult {
+        let pattern = input.get("pattern").and_then(|v| v.as_str()).unwrap_or("").trim();
+        if pattern.is_empty() {
+            return ValidationResult::failure("pattern 不能为空", 2);
+        }
+        if let Some(dir) = input.get("directory").and_then(|v| v.as_str()) {
+            if !is_path_safe(dir) {
+                return ValidationResult::failure("路径包含穿越序列（..），已被沙箱拦截", 2);
+            }
+        }
+        ValidationResult::success(None)
+    }
+
+    async fn check_permissions(&self, _input: &Value, _ctx: &ToolUseContext) -> PermissionResult {
+        PermissionResult::allow()
+    }
+
+    async fn call(&self, args: Value, ctx: &ToolUseContext) -> ToolResult {
+        let pattern = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+        let base = args
+            .get("directory")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| ctx.working_directory.clone());
+        let limit = args
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(200)
+            .clamp(1, 500) as usize;
+
+        if base.trim().is_empty() {
+            return ToolResult::standard_error(
+                "没有可用的基准目录：本会话未绑定工作区，请在 directory 里给出绝对路径。",
+                Some("InvalidInput"),
+                None,
+            );
+        }
+        let base_path = std::path::PathBuf::from(&base);
+        if !base_path.is_dir() {
+            return ToolResult::standard_error(
+                &format!("目录不存在或不是目录：{base}"),
+                Some("InvalidInput"),
+                None,
+            );
+        }
+        let Some(re) = glob_to_regex(&pattern) else {
+            return ToolResult::standard_error(
+                &format!("glob 模式无法解析：{pattern}"),
+                Some("InvalidInput"),
+                None,
+            );
+        };
+
+        let mut hits = Vec::new();
+        collect_glob(&base_path, &base_path, &re, &mut hits, limit, 12);
+        if hits.is_empty() {
+            return ToolResult::standard_success(
+                &format!("没有匹配「{pattern}」的文件（基准：{base}）。换更宽松的模式，或先用 list_dir 看结构。"),
+                Some(json!({"pattern": pattern, "directory": base, "count": 0, "files": []})),
+            );
+        }
+        let count = hits.len();
+        let mut text = format!("匹配「{pattern}」：{count} 个文件（基准：{base}）\n");
+        for h in &hits {
+            text.push_str(&format!("- {h}\n"));
+        }
+        if count >= limit {
+            text.push_str(&format!("（已达上限 {limit}，用更精确的模式或提高 limit）\n"));
+        }
+        ToolResult::standard_success(
+            &text,
+            Some(json!({"pattern": pattern, "directory": base, "count": count, "files": hits})),
+        )
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::File
+    }
+
+    fn risk(&self) -> ToolRiskTier {
+        ToolRiskTier::FsRead
+    }
+
+    fn search_hint(&self) -> &str {
+        "glob find file by name pattern 找文件 文件名 通配符"
+    }
+}
+
 /// 递归构建目录树文本（限制总条目 400）。
 fn walk_tree(dir: &std::path::Path, prefix: &str, depth: usize, out: &mut Vec<String>, count: &mut usize) {
     if depth == 0 || *count >= 400 {
@@ -1220,5 +1575,38 @@ mod write_diff_tests {
         assert!(d.contains("已截断"), "应标注截断:\n{d}");
         // 兜底路径同样受行数预算约束
         assert!(d.lines().count() <= WRITE_DIFF_MAX_LINES + 1, "not capped");
+    }
+}
+
+#[cfg(test)]
+mod console_decode_tests {
+    use super::*;
+
+    /// UTF-8 合法时不能被动过。
+    #[test]
+    fn keeps_utf8_untouched() {
+        assert_eq!(decode_console("中文测试".as_bytes()), "中文测试");
+        assert_eq!(decode_console(b"plain ascii"), "plain ascii");
+        assert_eq!(decode_console(b""), "");
+    }
+
+    /// 中文 Windows 的 PowerShell 按 CP936 写管道：`中文` = D6 D0 CE C4，
+    /// 这两个字节序列都不是合法 UTF-8，旧的 from_utf8_lossy 会变成两个 U+FFFD。
+    #[cfg(windows)]
+    #[test]
+    fn decodes_cp936_console_output() {
+        assert_eq!(decode_console(&[0xD6, 0xD0, 0xCE, 0xC4]), "中文");
+    }
+
+    /// 旧行为回归防线：GBK 字节经 lossy 会丢字，这里确认新路径不丢。
+    #[cfg(windows)]
+    #[test]
+    fn no_replacement_chars_for_gbk() {
+        let gbk = [0xC4, 0xBF, 0xC2, 0xBC]; // 「目录」
+        let decoded = decode_console(&gbk);
+        assert!(
+            !decoded.contains('\u{FFFD}'),
+            "不应产出替换字符，实际: {decoded:?}"
+        );
     }
 }

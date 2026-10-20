@@ -6752,6 +6752,7 @@ dependencies = [
  "chardetng",
  "chrono",
  "cpal",
+ "encoding_rs",
  "fs2",
  "futures",
  "glob",

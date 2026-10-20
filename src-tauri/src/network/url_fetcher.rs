@@ -16,12 +16,20 @@ pub struct PageLink {
     pub title: String,
     pub url: String,
 }
+/// Candidate image locations, not a claim that their contents have been inspected.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PageImage {
+    pub url: String,
+    pub alt: String,
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FetchedPage {
     pub url: String,
     pub title: String,
     pub text: String,
     pub links: Vec<PageLink>,
+    #[serde(default)]
+    pub images: Vec<PageImage>,
     pub content_type: String,
     pub retrieved_at: String,
     pub published_at: Option<String>,
@@ -30,6 +38,9 @@ pub struct FetchedPage {
     /// Original PDF retained independently of the bounded text preview.
     #[serde(skip)]
     pub raw_pdf: Option<Arc<Vec<u8>>>,
+    /// Raster bytes travel as a multimodal part, never in JSON text.
+    #[serde(skip)]
+    pub raw_image: Option<Arc<Vec<u8>>>,
 }
 static CACHE: Lazy<Mutex<HashMap<String, (Instant, Arc<FetchedPage>)>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
@@ -98,14 +109,22 @@ async fn fetch_document(url: &str, refresh: bool, allow_local: bool) -> VivianRe
         bytes.extend_from_slice(&chunk);
     }
     let decode_url = url.clone();
+    let raster_mime = image_mime(&bytes);
+    let content_type = raster_mime.unwrap_or(&content_type).to_string();
     let decode_type = content_type.clone();
     let raw_pdf = (content_type.contains("application/pdf") || bytes.starts_with(b"%PDF-"))
         .then(|| Arc::new(bytes.clone()));
-    let (title, text, links, published_at) =
-        tokio::task::spawn_blocking(move || decode_document(&decode_url, &decode_type, &bytes))
+    let raw_image = raster_mime.map(|_| Arc::new(bytes.clone()));
+    let (title, text, links, images, published_at) =
+        tokio::task::spawn_blocking(move || {
+            if raster_mime.is_some() {
+                return Ok((decode_url.clone(), String::new(), vec![], vec![PageImage { url: decode_url, alt: String::new() }], None));
+            }
+            decode_document(&decode_url, &decode_type, &bytes)
+        })
             .await
             .map_err(|e| VivianError::Other(format!("解析失败: {e}")))??;
-    if text.trim().is_empty() && raw_pdf.is_none() {
+    if text.trim().is_empty() && raw_pdf.is_none() && raw_image.is_none() && images.is_empty() {
         return Err(VivianError::Other("未提取到正文；可能需要登录、浏览器渲染或扫描 PDF 的 OCR。可使用已连接的浏览器桥读取页面。".into()));
     }
     let page = FetchedPage {
@@ -114,11 +133,13 @@ async fn fetch_document(url: &str, refresh: bool, allow_local: bool) -> VivianRe
         truncated: text.chars().count() > MAX_TEXT,
         text: text.chars().take(MAX_TEXT).collect(),
         links,
+        images,
         content_type,
         retrieved_at: chrono::Utc::now().to_rfc3339(),
         published_at,
         cached: false,
         raw_pdf,
+        raw_image,
     };
     let mut cache = CACHE.lock();
     cache.retain(|_, (at, _)| at.elapsed() < Duration::from_secs(300));
@@ -133,6 +154,16 @@ async fn fetch_document(url: &str, refresh: bool, allow_local: bool) -> VivianRe
     }
     cache.insert(key, (Instant::now(), Arc::new(page.clone())));
     Ok(page)
+}
+pub fn image_mime(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") { Some("image/png") }
+    else if bytes.starts_with(&[0xff, 0xd8, 0xff]) { Some("image/jpeg") }
+    else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") { Some("image/gif") }
+    else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") { Some("image/webp") }
+    else { None }
+}
+pub fn image_extension(mime: &str) -> Option<&'static str> {
+    match mime { "image/png" => Some("png"), "image/jpeg" => Some("jpg"), "image/gif" => Some("gif"), "image/webp" => Some("webp"), _ => None }
 }
 fn public_ip(ip: std::net::IpAddr) -> bool {
     match ip {
@@ -229,10 +260,10 @@ fn decode_document(
     url: &str,
     ct: &str,
     bytes: &[u8],
-) -> VivianResult<(String, String, Vec<PageLink>, Option<String>)> {
+) -> VivianResult<(String, String, Vec<PageLink>, Vec<PageImage>, Option<String>)> {
     if ct.contains("application/pdf") || bytes.starts_with(b"%PDF-") {
         let text = pdf_extract::extract_text_from_mem(bytes).unwrap_or_default();
-        return Ok((url.into(), text, vec![], None));
+        return Ok((url.into(), text, vec![], vec![], None));
     }
     let mut detector = chardetng::EncodingDetector::new();
     detector.feed(bytes, true);
@@ -241,13 +272,13 @@ fn decode_document(
         return Ok(extract_html(url, &text));
     }
     if ct.starts_with("text/") || ct.contains("json") || ct.contains("xml") {
-        return Ok((url.into(), text.into_owned(), vec![], None));
+        return Ok((url.into(), text.into_owned(), vec![], vec![], None));
     }
     Err(VivianError::Other(format!(
         "不支持 {ct}；支持 HTML、文本、Markdown、JSON、XML 和 PDF 文本"
     )))
 }
-fn extract_html(url: &str, html: &str) -> (String, String, Vec<PageLink>, Option<String>) {
+fn extract_html(url: &str, html: &str) -> (String, String, Vec<PageLink>, Vec<PageImage>, Option<String>) {
     let document = Html::parse_document(html);
     let title_selector = Selector::parse("title").expect("constant selector");
     let title = document
@@ -262,6 +293,19 @@ fn extract_html(url: &str, html: &str) -> (String, String, Vec<PageLink>, Option
         .next()
         .unwrap_or_else(|| document.root_element());
     let text = markdown_element(root, url).trim().to_string();
+    let image_selector = Selector::parse("img").expect("constant selector");
+    let mut seen_images = std::collections::HashSet::new();
+    let mut images: Vec<PageImage> = root.select(&image_selector)
+        .filter_map(|el| image_candidate(el, url))
+        .filter(|image| seen_images.insert(image.url.clone()))
+        .take(100).collect();
+    let social_selector = Selector::parse("meta[property='og:image'], meta[name='twitter:image']").expect("constant selector");
+    for el in document.select(&social_selector) {
+        if images.len() >= 100 { break; }
+        if let Some(target) = el.value().attr("content").and_then(|s| image_url(url, s)) {
+            if seen_images.insert(target.clone()) { images.push(PageImage { url: target, alt: String::new() }); }
+        }
+    }
     let link_selector = Selector::parse("a[href]").expect("constant selector");
     let base = reqwest::Url::parse(url).ok();
     let mut seen = std::collections::HashSet::new();
@@ -287,7 +331,33 @@ fn extract_html(url: &str, html: &str) -> (String, String, Vec<PageLink>, Option
             .filter(|s| !s.is_empty())
             .map(str::to_string)
     });
-    (title.trim().into(), text, links, published_at)
+    (title.trim().into(), text, links, images, published_at)
+}
+fn image_url(base: &str, target: &str) -> Option<String> {
+    let url = reqwest::Url::parse(base).ok()?.join(target.trim()).ok()?;
+    validate_url(url.as_str()).ok()?;
+    (!target.trim().is_empty()).then(|| url.to_string())
+}
+fn srcset_url(base: &str, srcset: &str) -> Option<String> {
+    // Prefer the last (usually largest) responsive candidate; preserve its actual URL.
+    srcset.split(',').rev().find_map(|entry| image_url(base, entry.split_whitespace().next()?))
+}
+fn image_candidate(el: scraper::ElementRef<'_>, base: &str) -> Option<PageImage> {
+    let e = el.value();
+    let lazy = ["data-original", "data-src", "data-lazy-src", "data-url"].iter()
+        .find_map(|key| e.attr(key).and_then(|s| image_url(base, s)));
+    let responsive = || ["data-srcset", "srcset"].iter()
+        .find_map(|key| e.attr(key).and_then(|s| srcset_url(base, s)))
+        .or_else(|| {
+            let parent = scraper::ElementRef::wrap(el.parent()?)?;
+            if parent.value().name() != "picture" { return None; }
+            parent.select(&Selector::parse("source[srcset]").ok()?)
+                .find_map(|source| srcset_url(base, source.value().attr("srcset")?))
+        });
+    Some(PageImage {
+        url: lazy.or_else(responsive).or_else(|| e.attr("src").and_then(|s| image_url(base, s)))?,
+        alt: e.attr("alt").unwrap_or("").chars().take(500).collect(),
+    })
 }
 /// Preserve source structure, especially code, lists and tables; discard executable/UI noise.
 fn markdown_element(element: scraper::ElementRef<'_>, base: &str) -> String {
@@ -334,6 +404,13 @@ fn markdown_at_depth(element: scraper::ElementRef<'_>, base: &str, depth: usize)
                 + 1,
         );
         return format!("\n\n{fence}\n{raw}\n{fence}\n\n");
+    }
+    if e.name() == "img" {
+        return image_candidate(element, base).map(|image| {
+            let alt = image.alt.replace(['[', ']', '\n', '\r'], " ");
+            let url = image.url.replace('(', "%28").replace(')', "%29");
+            format!("\n![{alt}]({url})\n")
+        }).unwrap_or_default();
     }
     let mut body = String::new();
     for child in element.children() {
@@ -416,7 +493,7 @@ mod tests {
     use super::*;
     #[test]
     fn web_markdown_preserves_code_tables_and_lists() {
-        let (_,text,_,_)=extract_html("https://example.com", "<main><h2>Evidence</h2><ul><li>one</li><li>two</li></ul><pre>  a\n    b</pre><table><tr><th>Name</th><th>Value</th></tr><tr><td>AI</td><td>42</td></tr></table></main>");
+        let (_,text,_,_,_)=extract_html("https://example.com", "<main><h2>Evidence</h2><ul><li>one</li><li>two</li></ul><pre>  a\n    b</pre><table><tr><th>Name</th><th>Value</th></tr><tr><td>AI</td><td>42</td></tr></table></main>");
         assert!(text.contains("## Evidence"));
         assert!(text.contains("- one"));
         assert!(text.contains("- two"));
@@ -504,7 +581,7 @@ mod tests {
         pdf.push_str(&format!(
             "trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF"
         ));
-        let (_, text, _, _) = decode_document(
+        let (_, text, _, _, _) = decode_document(
             "https://example.com/test.pdf",
             "application/pdf",
             pdf.as_bytes(),
@@ -514,7 +591,7 @@ mod tests {
     }
     #[test]
     fn html_evidence() {
-        let (title, text, links, _) = extract_html("https://example.com/docs/", "<title>T &amp; X</title><nav>noise</nav><main><h1>标题</h1><p>第一段 &#x4e2d;<b>文</b></p><script>bad()</script><p hidden>隐藏</p><a href='../next'>下一页</a></main>");
+        let (title, text, links, _, _) = extract_html("https://example.com/docs/", "<title>T &amp; X</title><nav>noise</nav><main><h1>标题</h1><p>第一段 &#x4e2d;<b>文</b></p><script>bad()</script><p hidden>隐藏</p><a href='../next'>下一页</a></main>");
         assert_eq!(title, "T & X");
         assert!(text.contains("第一段 中文"));
         assert!(!text.contains("bad()"));
@@ -524,7 +601,7 @@ mod tests {
     }
     #[test]
     fn long_document() {
-        let (_, text, _, _) = extract_html(
+        let (_, text, _, _, _) = extract_html(
             "https://example.com",
             &format!("<main>{}</main>", "中".repeat(40_000)),
         );
@@ -544,5 +621,60 @@ mod tests {
                 .1,
             "# hello"
         );
+    }
+    #[test]
+    fn web_reference_images_survive_html_extraction() {
+        let (_, text, _, images, _) = extract_html("https://example.com/gallery/", r#"
+            <meta property="og:image" content="//cdn.example.com/cover.png">
+            <main><h2>Character A</h2><img src="/a.png" alt="A &amp; B">
+            <img src="data:image/gif;base64,AAAA" data-src="../b.webp">
+            <img src="/a.png" alt="duplicate">
+            <picture><source srcset="/c-small.png 1x, /c-large.png 2x"><img src="data:image/gif;base64,AAAA"></picture>
+            <img src="/placeholder.gif" data-original="//cdn.example.com/d.jpg">
+            <img src="javascript:alert(1)"><img src="https://user:secret@example.com/private.png">
+            </main>"#);
+        assert_eq!(images.iter().map(|i| i.url.as_str()).collect::<Vec<_>>(), vec![
+            "https://example.com/a.png", "https://example.com/b.webp", "https://example.com/c-large.png",
+            "https://cdn.example.com/d.jpg", "https://cdn.example.com/cover.png"]);
+        assert!(text.contains("![A & B](https://example.com/a.png)"));
+        assert!(text.contains("https://example.com/b.webp"));
+        assert!(!text.contains("javascript:") && !text.contains("secret"));
+    }
+    #[tokio::test]
+    async fn web_image_only_page_and_raster_fetch() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use base64::Engine;
+        let png = base64::engine::general_purpose::STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=").unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let expected = png.clone();
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = [0; 4096];
+                let n = stream.read(&mut request).await.unwrap();
+                let (ct, body) = if String::from_utf8_lossy(&request[..n]).starts_with("GET /art.png ") {
+                    ("application/octet-stream", png.clone())
+                } else { ("text/html", b"<main><img data-src='/art.png'></main>".to_vec()) };
+                stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: {ct}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).as_bytes()).await.unwrap();
+                stream.write_all(&body).await.unwrap();
+            }
+        });
+        let gallery = fetch_document(&format!("http://{address}/gallery"), true, true).await.unwrap();
+        assert_eq!(gallery.images.len(), 1);
+        let image = fetch_document(&gallery.images[0].url, true, true).await.unwrap();
+        assert_eq!(image.content_type, "image/png");
+        assert_eq!(image.raw_image.as_ref().unwrap().as_slice(), expected);
+        assert_eq!(image.images[0].url, gallery.images[0].url);
+        assert!(image.raw_pdf.is_none());
+        server.abort();
+    }
+    #[test]
+    fn web_old_cached_pages_and_untrusted_image_mime() {
+        let old = serde_json::json!({"url":"https://example.com", "title":"old", "text":"text", "links":[], "content_type":"text/html", "retrieved_at":"now", "published_at":null,"truncated":false,"cached":true});
+        let page: FetchedPage = serde_json::from_value(old).unwrap();
+        assert!(page.images.is_empty() && page.raw_image.is_none());
+        assert!(image_mime(b"<html>captcha</html>").is_none());
+        assert!(decode_document("https://example.com/fake.png", "image/png", b"<html>challenge</html>").is_err());
     }
 }

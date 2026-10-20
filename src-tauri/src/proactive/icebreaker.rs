@@ -161,12 +161,12 @@ impl IcebreakerGenerator {
             parts.push(format!("{}:\n{}", recent_label, dialogue_history));
         }
         parts.push(instr.to_string());
-        parts.push(include_str!("../../prompts/framework/proactive_companionship.en.md").to_string());
+        parts.push(crate::pipeline::prompt_modules::proactive_companionship_rules(lang_norm).to_string());
         parts.push("No greeting is required. Continue only a specific, still-relevant thread when it naturally fits; otherwise text and expression can be empty. A remembered preference alone does not justify checking up on the user.".to_string());
         let prompt = parts.join("\n\n");
 
         Some(vec![
-            ChatMessage::system(format!("{sys}\n{}", crate::pipeline::prompt_modules::human_feel_rules())),
+            ChatMessage::system(format!("{sys}\n{}", crate::pipeline::prompt_modules::human_feel_rules(lang_norm))),
             ChatMessage::user(prompt),
         ])
     }

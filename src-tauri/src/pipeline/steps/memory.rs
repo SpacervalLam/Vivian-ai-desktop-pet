@@ -193,13 +193,27 @@ impl MemoryRetrievalStep {
     }
 }
 
+/// Typed, request-local base recall; never serialized into the prompt or shared globally.
+pub(super) struct PrefetchedMemory {
+    query: String,
+    items: Vec<crate::memory::MemoryItem>,
+    budget: crate::memory::retrieval_budget::Budget,
+    ready_at: std::time::Instant,
+}
+
 #[async_trait]
 impl Runnable for MemoryRetrievalStep {
     async fn ainvoke(&self, input: Value, _config: Option<RunnableConfig>) -> VivianResult<Value> {
         let mut state = PipelineState::from_json(input);
+        let base = self.prefetch(&mut state).await;
+        self.finish_recall(state, base).await
+    }
+}
 
+impl MemoryRetrievalStep {
+    pub(super) async fn prefetch(&self, state: &mut PipelineState) -> Option<PrefetchedMemory> {
         if state.user_input.is_empty() {
-            return Ok(state.to_json());
+            return None;
         }
 
         // FLARE 式按需检索：上游 QueryRewriteStep 判断为无需检索时直接跳过
@@ -219,14 +233,13 @@ impl Runnable for MemoryRetrievalStep {
                 reason
             );
             state.metadata["memory_retrieval_skipped"] = json!(true);
-            return Ok(state.to_json());
+            return None;
         }
 
         let mut retrieval_budget = crate::memory::retrieval_budget::Budget::new(std::time::Duration::from_millis(1800));
         let retrieval_query = Self::build_retrieval_query(&state);
 
         let strategy = self.strategy.unwrap_or(RetrievalStrategy::Auto);
-        let strategy_name = format!("{:?}", strategy);
         // 兼容旧库：原先的 OS/话题/工具记录可能占据候选位，先多取再按陪伴记忆边界过滤。
         let limit = 24;
         let items = match retrieval_budget.run("base", std::time::Duration::from_millis(900),
@@ -234,6 +247,20 @@ impl Runnable for MemoryRetrievalStep {
             Some(Ok(items)) => items,
             result => { tracing::warn!(?result, "[MemoryRetrieval] base arm unavailable; continuing without fabricated recall"); Vec::new() }
         };
+
+        Some(PrefetchedMemory { query: retrieval_query, items, budget: retrieval_budget,
+            ready_at: std::time::Instant::now() })
+    }
+
+    pub(super) async fn finish_recall(&self, mut state: PipelineState, base: Option<PrefetchedMemory>) -> VivianResult<Value> {
+        let Some(PrefetchedMemory { query: retrieval_query, items, mut budget, ready_at }) = base else {
+            return Ok(state.to_json());
+        };
+        budget.exclude_dependency_wait(ready_at);
+        let mut retrieval_budget = budget;
+        let strategy = self.strategy.unwrap_or(RetrievalStrategy::Auto);
+        let strategy_name = format!("{:?}", strategy);
+        let limit = 24;
 
         // 过滤掉与当前用户输入相同的记忆条目：
         // UserMemorySaving（步骤2）刚将当前输入写入 ShortTerm，

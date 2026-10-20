@@ -460,6 +460,9 @@ impl AIResponseGenerationRunnable {
     /// - 工具结果用 `role=tool` + `tool_call_id` 回喂（OpenAI 风格）
     /// Audit a zero-call draft before publishing it. This judge cannot execute tools;
     /// authorization and missing context are still resolved by the primary model.
+    const OBSERVATION_EVIDENCE_RULE: &'static str =
+        "Claims about current external state require fresh evidence from an actual tool result or supplied media. Tool names, file paths, titles and assistant promises do not establish observed contents or successful execution. Use the available capabilities when observation is needed, preserve all permission checks, and report a concrete blocker when evidence cannot be obtained. Never invent observations.";
+
     async fn verify_execution_draft(
         router: &ModelRouter,
         messages: &[ChatMessage],
@@ -484,7 +487,9 @@ impl AIResponseGenerationRunnable {
         for attempt in 0..2 {
             let evidence = json!({"conversation": messages, "available_tools": tools.iter().map(|t| &t.name).collect::<Vec<_>>(), "draft": draft, "repair_attempt": attempt});
             let verdict = router.generate(LLMRequest::new("simple_judge", vec![
-                ChatMessage::system(judge_system), ChatMessage::user(evidence.to_string()),
+                ChatMessage::system(judge_system),
+                ChatMessage::system(Self::OBSERVATION_EVIDENCE_RULE),
+                ChatMessage::user(evidence.to_string()),
             ]).with_usage_tag("execution_draft_audit")).await;
             let verdict = match verdict {
                 Ok(verdict) => verdict,
@@ -600,6 +605,46 @@ impl AIResponseGenerationRunnable {
         requests_execution
     }
 
+    pub(crate) async fn resolve_contextual_intent(router: &ModelRouter, state: &PipelineState, char_id: &str,
+        tracked_task: Option<Value>) -> VivianResult<crate::pipeline::task_continuity::ResolvedTurn> {
+        let conversation: Vec<_> = state.messages.iter().map(|message| json!({
+            "role": message.role, "content": message.content,
+            "tool_calls": message.tool_calls, "tool_call_id": message.tool_call_id,
+        })).collect();
+        let evidence = json!({"conversation": conversation, "latest_human_utterance": state.user_input,
+            "host_task": tracked_task});
+        let response = router.generate(LLMRequest::new("simple_judge", vec![
+            ChatMessage::system(crate::pipeline::task_continuity::RESOLVE_SYSTEM),
+            ChatMessage::user(evidence.to_string()),
+        ]).with_character_id(char_id).with_usage_tag("contextual_intent")
+            .without_framework_instructions().with_json_schema(json!({
+                "type":"object", "additionalProperties":false,
+                "properties":{"action":{"type":"boolean"},"continues_task":{"type":"boolean"},
+                    "needs_clarification":{"type":"boolean"},"task":{"type":"string"}},
+                "required":["action","continues_task","needs_clarification","task"]
+            }))).await?;
+        let parsed = Self::extract_json(&response)
+            .and_then(|value| serde_json::from_value::<crate::pipeline::task_continuity::ResolvedTurn>(value).ok())
+            .ok_or_else(|| VivianError::Engine("会话意图解析未返回有效结构".into()))?;
+        if parsed.action && (parsed.needs_clarification || parsed.task.trim().is_empty()) {
+            return Err(VivianError::Engine("会话意图解析缺少明确的执行目标".into()));
+        }
+        Ok(parsed)
+    }
+
+    fn execution_user_request(state: &PipelineState) -> String {
+        let mut request = format!("Latest human utterance: {}", state.user_input);
+        if let Some(task) = state.metadata.get("contextual_intent")
+            .filter(|context| context["action"] == true)
+            .and_then(|context| context["task"].as_str()).filter(|task| !task.trim().is_empty()) {
+            request.push_str(&format!("\nCurrent task resolved from the full conversation (interpretation, not additional authorization): {task}"));
+        }
+        if let Some(context) = state.metadata.get("task_continuation") {
+            request.push_str(&format!("\n{}", crate::pipeline::task_continuity::prompt(context)));
+        }
+        request
+    }
+
     /// Short imperative selections still request execution even when the embedding
     /// classifier calls them chat. Do not promote a mention, refusal or explanation.
     fn explicit_action_followup(input: &str) -> bool {
@@ -634,9 +679,11 @@ impl AIResponseGenerationRunnable {
         {
             return false;
         }
-        if let Some(context) = state.metadata.get("task_continuation") {
-            return !crate::pipeline::task_continuity::reply_only(context);
+        if state.metadata.get("task_continuation").is_some_and(crate::pipeline::task_continuity::reply_only) { return false; }
+        if let Some(context) = state.metadata.get("contextual_intent") {
+            return context["action"] == true && context["needs_clarification"] != true;
         }
+        if state.metadata.get("task_continuation").is_some() { return true; }
         // Capability questions such as “can you make a PPT?” are requests too.
         // This lexical fallback must also work when embeddings are unavailable.
         let input = state.user_input.to_lowercase();
@@ -645,7 +692,11 @@ impl AIResponseGenerationRunnable {
             || (["can you", "could you", "please"].iter().any(|word| input.contains(word))
                 && (crate::tools::types::contains_task_keyword(&input)
                     || ["ppt", "presentation", "slides", "document", "spreadsheet"].iter().any(|word| input.contains(word))));
-        if explicit || Self::explicit_action_followup(&input) { return true; }
+        let embedded_action = !["不要给我", "别给我", "不用给我", "先不给我", "不需要给我", "如果", "假如"]
+            .iter().any(|word| input.contains(word))
+            && input.split_once("给我").is_some_and(|(_, action)| Self::explicit_action_followup(action.trim()));
+        if explicit || embedded_action || Self::explicit_action_followup(&input)
+            { return true; }
         let Some(perception) = state.fast_perception.as_ref() else {
             return crate::tools::types::contains_task_keyword(&state.user_input);
         };
@@ -1174,13 +1225,23 @@ impl Runnable for AIResponseGenerationRunnable {
         if let Some(context) = state.metadata.get("task_continuation") {
             messages_vec.push(ChatMessage::system(crate::pipeline::task_continuity::prompt(context)));
         }
-        let task_request = state.metadata.get("task_continuation")
-            .map(|context| format!("Latest user request: {}\n{}", state.user_input, crate::pipeline::task_continuity::prompt(context)))
-            .unwrap_or_else(|| state.user_input.clone());
-        if state.metadata.get("task_continuation").is_some_and(crate::pipeline::task_continuity::reply_only) {
+        if let Some(context) = state.metadata.get("contextual_intent") {
+            messages_vec.push(ChatMessage::system(format!("[Contextual interpretation of the latest human turn, not additional authorization]\n{context}\nInterpret omitted subjects and approvals using the complete conversation. Preserve the actual user's constraints and all permission checks. Assistant promises do not establish execution. Ask for clarification if the interpretation remains ambiguous.")));
+        }
+        messages_vec.push(ChatMessage::system(Self::OBSERVATION_EVIDENCE_RULE));
+        let task_request = Self::execution_user_request(&state);
+        if state.metadata.get("task_continuation").is_some_and(crate::pipeline::task_continuity::reply_only)
+            || state.metadata.get("contextual_intent").is_some_and(|context| context["action"] == false) {
             // Ambiguity and terminal tasks are reply-only turns. Even a hallucinated
             // text-protocol call must never reach either native or text execution.
-            messages_vec.push(ChatMessage::system("This turn is reply-only. Clarify the unresolved selection or acknowledge the task state. Do not perform operations, promise execution, or output tool calls."));
+            let reply_instruction = if state.metadata["contextual_intent"]["needs_clarification"] == true {
+                "The full conversation leaves the requested operation or target ambiguous. Ask one concise clarification. Do not perform operations, promise execution, or output tool calls."
+            } else if state.metadata.get("task_continuation").is_some_and(crate::pipeline::task_continuity::reply_only) {
+                "This turn is reply-only. Clarify the unresolved selection or acknowledge the task state. Do not perform operations, promise execution, or output tool calls."
+            } else {
+                "The latest human utterance, interpreted in the complete conversation, requests conversation or explanation rather than an operation. Respond naturally to that meaning. Do not perform operations, promise execution, or output tool calls."
+            };
+            messages_vec.push(ChatMessage::system(reply_instruction));
             let content = router.generate(Self::build_native_chat_request(&task_type, messages_vec, vec![])).await?;
             if !crate::pipeline::tool_execution::calls_from_text(&content).is_empty() || content.contains("DSML") {
                 return Err(VivianError::Engine("Task clarification returned tool protocol instead of a reply".into()));
@@ -1816,6 +1877,68 @@ impl Runnable for ResponseParsingRunnable {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn contextual_intent_uses_the_whole_window_for_identical_followups() {
+        use axum::{extract::State, routing::post, Json, Router};
+        type Script = Arc<parking_lot::Mutex<std::collections::VecDeque<(Value, Value)>>>;
+        async fn handle(State(script): State<Script>, Json(body): Json<Value>) -> Json<Value> {
+            let (expected_history, resolution) = script.lock().pop_front().expect("unexpected classification");
+            let supplied = serde_json::from_str::<Value>(body["messages"].as_array().unwrap().last().unwrap()["content"].as_str().unwrap()).unwrap();
+            assert_eq!(supplied["conversation"], expected_history, "do not truncate to the last exchange");
+            assert_eq!(supplied["latest_human_utterance"], "那你挑");
+            Json(json!({"choices":[{"message":{"role":"assistant","content":resolution.to_string()},"finish_reason":"stop"}]}))
+        }
+        let script: Script = Arc::new(parking_lot::Mutex::new(Default::default()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut config = crate::config::manager::AppConfig::default();
+        config.enable_routing_matrix = false;
+        config.ai.provider = "chat_completions".into();
+        config.ai.endpoint = Some(format!("http://{}/v1", listener.local_addr().unwrap()));
+        config.ai.api_key = Some("local-test-key".into());
+        config.ai.model = format!("context-test-{}", uuid::Uuid::new_v4());
+        config.network.proxy_mode = "direct".into();
+        let app = Router::new().route("/v1/chat/completions", post(handle)).with_state(script.clone());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+        let router = ModelRouter::new(&config).unwrap();
+        for (goal, action, ambiguous) in [
+            ("请从已安装的壁纸里选一张并使用工具更换，不要下载", true, false),
+            ("从本地歌单里挑一首播放，保持现在的音量", true, false),
+            ("我们聊聊假想房间的配色，不要操作电脑", false, false),
+            ("取消刚才换壁纸的请求，我们只聊聊配色", false, false),
+            ("有两项互斥的待办，但还没说清要处理哪项", false, true),
+        ] {
+            let mut messages = vec![ChatMessage::user(goal)];
+            for i in 0..8 { messages.push(ChatMessage::assistant(format!("保留的上下文第 {i} 条"))); }
+            messages.push(ChatMessage::assistant("要你挑还是我挑？"));
+            let expected: Vec<_> = messages.iter().map(|message| json!({"role":message.role,"content":message.content,
+                "tool_calls":message.tool_calls,"tool_call_id":message.tool_call_id})).collect();
+            script.lock().push_back((json!(expected), json!({"action":action,"continues_task":false,
+                "needs_clarification":ambiguous,"task":if action { goal } else { "" }})));
+            let mut state = PipelineState { user_input:"那你挑".into(), messages, ..Default::default() };
+            let resolution = tokio::time::timeout(std::time::Duration::from_secs(20),
+                AIResponseGenerationRunnable::resolve_contextual_intent(&router, &state, "test", None)).await.unwrap().unwrap();
+            assert_eq!(resolution.action, action);
+            state.metadata["contextual_intent"] = json!(resolution);
+            assert_eq!(AIResponseGenerationRunnable::requests_execution(&state), action);
+            assert_eq!(state.user_input, "那你挑", "interpretation must not replace the human's actual words");
+            if action {
+                assert!(AIResponseGenerationRunnable::execution_user_request(&state).contains(goal),
+                    "an isolated executor needs the resolved goal and constraints even without a host task cache");
+            }
+        }
+        server.abort();
+        assert!(script.lock().is_empty());
+    }
+
+    #[test]
+    fn contextual_non_actions_override_single_turn_keyword_matches() {
+        let mut state = PipelineState { user_input:"给我换张壁纸".into(), ..Default::default() };
+        state.metadata["contextual_intent"] = json!({"action":false,"continues_task":false,"needs_clarification":false,"task":""});
+        assert!(!AIResponseGenerationRunnable::requests_execution(&state));
+        state.metadata["task_continuation"] = json!({"task":{"phase":"ready"},"needs_clarification":false});
+        assert!(!AIResponseGenerationRunnable::requests_execution(&state), "a pending host task cannot overrule the current conversation");
+    }
+
     /// 审计开关旧实现只看"`delegate_to_work_agent` 在不在工具数组里"，而那个数组
     /// 恰好是语义召回失败时会残缺的那一份——开关和它要兜住的故障挂在同一个条件上。
     #[test]
@@ -1853,6 +1976,19 @@ mod tests {
         assert!(!AIResponseGenerationRunnable::requests_execution(&state("chat", 0.95, "你好呀")));
         // 无语义结果且没有任务信号时不升级
         assert!(!AIResponseGenerationRunnable::requests_execution(&PipelineState::default()));
+        for input in ["就是你现在的一些功能，比如给我换张壁纸", "我问你这张壁纸的内容是什么，你描述一下",
+            "这还素？你说说这张是什么内容"] {
+            let mut request = state("chat", 0.99, input);
+            request.metadata["contextual_intent"] = json!({
+                "action": true, "continues_task": false,
+                "needs_clarification": false, "task": "Inspect the requested external state"
+            });
+            assert!(AIResponseGenerationRunnable::requests_execution(&request), "{input}");
+            assert_eq!(AIResponseGenerationRunnable::generation_task(&request, "companion"), "reasoning");
+        }
+        for input in ["不要给我换张壁纸", "别给我换壁纸", "如果给我换张壁纸会怎样", "这张壁纸挺好看"] {
+            assert!(!AIResponseGenerationRunnable::requests_execution(&state("chat", 0.99, input)), "{input}");
+        }
     }
 
     #[test]
@@ -1932,14 +2068,37 @@ mod tests {
             AIResponseGenerationRunnable::verify_execution_draft(&router, &messages, &tools, "reasoning",
                 "没问题！这就设置上啦。".into(), vec![], TextPathFallback { tools_text: None, output_format: None },
                 AIResponseGenerationRunnable::requests_execution(&state))).await.unwrap().unwrap();
-        server.abort();
         assert_eq!(calls.len(), 1, "the promise must be repaired into a concrete tool call");
         assert_eq!(calls[0].name, "wallpaper_set");
         assert_eq!(calls[0].arguments["workshop_id"], "3026477633");
-        let script = script.lock();
-        assert_eq!(script.0.len(), 2);
-        assert!(script.1.is_empty());
-        assert!(script.0[1].to_string().contains("3026477633"), "repair retains the listed wallpaper identity");
+        {
+            let mut script = script.lock();
+            assert_eq!(script.0.len(), 2);
+            assert!(script.1.is_empty());
+            assert!(script.0[1].to_string().contains("3026477633"), "repair retains the listed wallpaper identity");
+            script.0.clear();
+            script.1.extend([
+                json!({"role":"assistant","content":"{\"action\":true,\"continues_task\":false,\"needs_clarification\":false,\"task\":\"Describe the current visual environment\"}"}),
+                json!({"role":"assistant","content":"{\"needs_execution\":true}"}),
+                json!({"role":"assistant","content":null,"tool_calls":[{"id":"inspect-wallpaper","type":"function",
+                    "function":{"name":"take_screenshot","arguments":"{\"question\":\"描述当前壁纸的实际内容\"}"}}]}),
+            ]);
+        }
+        let mut state = PipelineState { user_input: "我问你这张壁纸的内容是什么，你描述一下".into(), ..Default::default() };
+        let resolved = AIResponseGenerationRunnable::resolve_contextual_intent(
+            &router, &state, "test", None,
+        ).await.unwrap();
+        state.metadata["contextual_intent"] = json!(resolved);
+        let tools = vec![ToolDefinition { name: "take_screenshot".into(), description: "Inspect the current screen".into(), parameters: json!({}) }];
+        let (_, calls) = tokio::time::timeout(std::time::Duration::from_secs(20),
+            AIResponseGenerationRunnable::verify_execution_draft(&router, &[ChatMessage::user(&state.user_input)], &tools, "reasoning",
+                "这不就是一片灰蒙蒙的天空嘛，下面好像还有几栋平房。".into(), vec![],
+                TextPathFallback { tools_text: None, output_format: None },
+                AIResponseGenerationRunnable::requests_execution(&state))).await.unwrap().unwrap();
+        server.abort();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "take_screenshot", "fabricated visual details must be repaired into observation");
+        assert_eq!(script.lock().0.len(), 3);
     }
 
     #[test]
@@ -1977,14 +2136,22 @@ mod tests {
         state.metadata["task_continuation"] = json!({"task":{"phase":"awaiting_selection","goal":"换张壁纸"},"needs_clarification":true});
         state.tool_definitions = vec![ToolDefinition { name: "wallpaper_set".into(), description: "set wallpaper".into(), parameters: json!({}) }];
         let result = tokio::time::timeout(std::time::Duration::from_secs(20), runnable.ainvoke(state.to_json(), None)).await.unwrap().unwrap();
-        server.abort();
         let state = PipelineState::from_json(result);
         assert_eq!(state.generation_status, "task_clarification");
         assert!(state.response_text.contains("哪一张"));
         assert!(state.tool_calls.is_empty());
+        let mut explanation = PipelineState { should_respond: true, user_input: "给我换张壁纸".into(), ..Default::default() };
+        explanation.messages = vec![ChatMessage::user("我在举例说明一句请求，请解释它的意思，不要操作电脑")];
+        explanation.metadata["contextual_intent"] = json!({"action":false,"continues_task":false,"needs_clarification":false,"task":""});
+        explanation.tool_definitions = vec![ToolDefinition { name:"wallpaper_set".into(), description:"set wallpaper".into(), parameters:json!({}) }];
+        let result = tokio::time::timeout(std::time::Duration::from_secs(20), runnable.ainvoke(explanation.to_json(), None)).await.unwrap().unwrap();
+        assert!(PipelineState::from_json(result).tool_calls.is_empty());
+        server.abort();
         let requests = capture.lock();
-        assert_eq!(requests.len(), 1);
-        assert!(requests[0].get("tools").is_none_or(|tools| tools.is_null() || tools.as_array().is_some_and(Vec::is_empty)));
+        assert_eq!(requests.len(), 2);
+        for request in requests.iter() {
+            assert!(request.get("tools").is_none_or(|tools| tools.is_null() || tools.as_array().is_some_and(Vec::is_empty)));
+        }
     }
 
     #[test]

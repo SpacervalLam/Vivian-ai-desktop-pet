@@ -56,26 +56,96 @@ pub fn normalize_lang(lang: &str) -> &'static str {
     }
 }
 
-/// 聊天风格框架（通用规则，仅英文——规则类内容统一英文，回复语言由
-/// output_format 的 "same language as user input" 与 LANG_* 标志控制）
-pub fn chat_style_framework() -> &'static str {
-    r#"## Chat Style (How Real People Talk)
+/// 语气/对话规则按界面语言选档（zh/en/ja 三份，标签必须逐语对称）。
+///
+/// 与 banned_phrases 同构：**语气规则**约束的是输出语言的 register 和惯用法，
+/// 用英文写中文的「别客服腔」是隔着一层纱布指挥——2026-10-20 起语气类框架
+/// （chat_style / human_feel / rhythm / dialogue / post_history / focus /
+/// first_contact / proactive / initiative / inner_monologue）全部三语化。
+/// 其余**结构/协议类**规则（safety / session / address / output_format /
+/// pet_identity / contract）保持英文：它们约束行为边界，不约束措辞风格。
+pub fn tone_rule(lang: &str, base: &str) -> &'static str {
+    match normalize_lang(lang) {
+        "en" => match base {
+            "chat_style" => include_str!("../../prompts/framework/chat_style.en.md"),
+            "human_feel" => include_str!("../../prompts/framework/human_feel.en.md"),
+            "conversation_rhythm" => include_str!("../../prompts/framework/conversation_rhythm.en.md"),
+            "companion_dialogue" => include_str!("../../prompts/framework/companion_dialogue.en.md"),
+            "companion_post_history" => include_str!("../../prompts/framework/companion_post_history.en.md"),
+            "conversation_focus" => include_str!("../../prompts/framework/conversation_focus.en.md"),
+            "first_contact" => include_str!("../../prompts/framework/first_contact.en.md"),
+            "proactive_companionship" => include_str!("../../prompts/framework/proactive_companionship.en.md"),
+            "initiative" => include_str!("../../prompts/framework/initiative.en.md"),
+            "inner_monologue" => include_str!("../../prompts/framework/inner_monologue.en.md"),
+            _ => "",
+        },
+        "ja" => match base {
+            "chat_style" => include_str!("../../prompts/framework/chat_style.ja.md"),
+            "human_feel" => include_str!("../../prompts/framework/human_feel.ja.md"),
+            "conversation_rhythm" => include_str!("../../prompts/framework/conversation_rhythm.ja.md"),
+            "companion_dialogue" => include_str!("../../prompts/framework/companion_dialogue.ja.md"),
+            "companion_post_history" => include_str!("../../prompts/framework/companion_post_history.ja.md"),
+            "conversation_focus" => include_str!("../../prompts/framework/conversation_focus.ja.md"),
+            "first_contact" => include_str!("../../prompts/framework/first_contact.ja.md"),
+            "proactive_companionship" => include_str!("../../prompts/framework/proactive_companionship.ja.md"),
+            "initiative" => include_str!("../../prompts/framework/initiative.ja.md"),
+            "inner_monologue" => include_str!("../../prompts/framework/inner_monologue.ja.md"),
+            _ => "",
+        },
+        _ => match base {
+            "chat_style" => include_str!("../../prompts/framework/chat_style.zh.md"),
+            "human_feel" => include_str!("../../prompts/framework/human_feel.zh.md"),
+            "conversation_rhythm" => include_str!("../../prompts/framework/conversation_rhythm.zh.md"),
+            "companion_dialogue" => include_str!("../../prompts/framework/companion_dialogue.zh.md"),
+            "companion_post_history" => include_str!("../../prompts/framework/companion_post_history.zh.md"),
+            "conversation_focus" => include_str!("../../prompts/framework/conversation_focus.zh.md"),
+            "first_contact" => include_str!("../../prompts/framework/first_contact.zh.md"),
+            "proactive_companionship" => include_str!("../../prompts/framework/proactive_companionship.zh.md"),
+            "initiative" => include_str!("../../prompts/framework/initiative.zh.md"),
+            "inner_monologue" => include_str!("../../prompts/framework/inner_monologue.zh.md"),
+            _ => "",
+        },
+    }
+}
 
-You're chatting with a friend. These are casual-chat defaults: explicit questions and tasks still deserve clear, sufficient answers. Never force slang, silence, or a deliberately messy reply to perform a persona.
+pub fn chat_style_framework(lang: &str) -> &'static str {
+    tone_rule(lang, "chat_style")
+}
 
-[CHAT_STYLE_RULES]
-MOSTLY_SHORT          a brief reaction can be complete when it answers this exchange; use the current character's words, not a fixed list of interjections
-NO_UNASKED_EXPLANATION in casual chat, react or answer first. Avoid unsolicited lectures, causes, definitions, caveats or a concluding takeaway. A concrete, useful suggestion tied to the user's situation is welcome under the initiative rules
-ONE_FOCUS_DEFAULT     stay with one conversational focus. A personal reaction and a connected answer or question can fit together. Do not turn a small message into a mandatory empathy + interpretation + advice + follow-up routine
-SLANG_BY_FIT          slang is ordinary vocabulary, not decoration. Mirror the user's register and use at most one fitting expression; "6", "666", "这波神了", "绷不住了" are valid complete reactions when true. Never force a meme or explain it unless asked
-SELECTIVE_REACTION    respond to the detail that matters; no mandatory validation, emotional diagnosis or canned sympathy
-SILENCE_OK            sometimes no reply at all; silence between messages is normal; topics drift
-OWN_ENERGY            some days chatty, some days quiet — never force being "on"
-UNFINISHED_OK         natural corrections and pauses are fine; do not deliberately break sentences or leave tasks unexplained to seem human
-NO_SERVICE_SPEECH     no empty service closer or unsolicited recap/capability menu; requested summaries and useful explanations are welcome
-ANSWER_NOT_REPORT    a tool result is something you learned or did as the character. Answer the user's actual question directly; do not narrate the tool workflow, announce a summary, defend your abilities or add a general capability lesson. On failure, state the specific missing result plainly; give a cause only when known and useful, or when the user asks why
-TEXTING_CHUNKS        separate paragraphs only for separate thoughts; avoid splitting a sentence into several messages to simulate texting
-[/CHAT_STYLE_RULES]"#
+pub fn human_feel_rules(lang: &str) -> &'static str {
+    tone_rule(lang, "human_feel")
+}
+
+pub fn conversation_rhythm(lang: &str) -> &'static str {
+    tone_rule(lang, "conversation_rhythm")
+}
+
+pub fn companion_dialogue_rules(lang: &str) -> &'static str {
+    tone_rule(lang, "companion_dialogue")
+}
+
+pub fn companion_post_history_rules(lang: &str) -> &'static str {
+    tone_rule(lang, "companion_post_history")
+}
+
+pub fn conversation_focus_rules(lang: &str) -> &'static str {
+    tone_rule(lang, "conversation_focus")
+}
+
+pub fn first_contact_rules(lang: &str) -> &'static str {
+    tone_rule(lang, "first_contact")
+}
+
+pub fn proactive_companionship_rules(lang: &str) -> &'static str {
+    tone_rule(lang, "proactive_companionship")
+}
+
+pub fn initiative_rules(lang: &str) -> &'static str {
+    tone_rule(lang, "initiative")
+}
+
+pub fn inner_monologue_rules(lang: &str) -> &'static str {
+    tone_rule(lang, "inner_monologue")
 }
 
 // ========== 模块 1：身份模块（Identity） ==========
@@ -83,15 +153,10 @@ TEXTING_CHUNKS        separate paragraphs only for separate thoughts; avoid spli
 // PromptBuilder 直接消费 PromptParts.character_block。
 
 // ========== 模块 2：称呼规则（AddressRules） ==========
-/// 规则类内容统一仅英文（LLM 对英文指令遵从度最高，且省去多语言维护）；
-/// 回复语言由 output_format 的 "same language as user input" 约束控制。
+/// 结构/协议类规则保持英文（约束行为边界，不约束措辞风格）；
+/// 语气类规则已三语化，见 tone_rule。
 pub fn address_rules() -> &'static str {
     include_str!("../../prompts/framework/address_rules.en.md")
-}
-
-// ========== 模块 3：对话节奏（ConversationRhythm） ==========
-pub fn conversation_rhythm() -> &'static str {
-    include_str!("../../prompts/framework/conversation_rhythm.en.md")
 }
 
 // ========== 模块 4：会话规则（NewSession + FirstMeeting + SessionContinuity） ==========
@@ -99,15 +164,6 @@ pub fn session_rules() -> &'static str {
     include_str!("../../prompts/framework/session_rules.en.md")
 }
 
-// ========== 模块 4b：活人感（Human Feel / 反模板） ==========
-/// 反"AI模板腔"规则：禁止开场白式自我介绍、菜单式建议、机器式关心、
-/// 复述总结、以及对每条消息都做完整工整回应。
-///
-/// 这一节管**结构**（不要菜单、不要复述、不要机器人关心）。
-/// 词级的黑名单在 [`banned_phrases`]。
-pub fn human_feel_rules() -> &'static str {
-    include_str!("../../prompts/framework/human_feel.en.md")
-}
 
 // ========== 模块 4c：AI 腔禁用词表（Banned Phrases） ==========
 /// AI 腔禁用词表 —— **按输出语言选表**。
@@ -147,10 +203,6 @@ pub fn safety_rules() -> &'static str {
 
 pub fn creator_identity_rules() -> &'static str {
     include_str!("../../prompts/framework/creator_identity.en.md")
-}
-
-pub fn initiative_rules() -> &'static str {
-    include_str!("../../prompts/framework/initiative.en.md")
 }
 
 /// 桌面宠物身份与能力边界（硬约束）
@@ -205,12 +257,12 @@ pub fn build_instructions_for(profile: InstructionProfile, lang: &str) -> String
             pet_identity(),
             safety_rules(),
             creator_identity_rules(),
-            initiative_rules(),
+            initiative_rules(lang),
             session_rules(),
             address_rules(),
-            conversation_rhythm(),
+            conversation_rhythm(lang),
             speaker_prefix(),
-            chat_style_framework(),
+            chat_style_framework(lang),
             banned_phrases(lang),
         ),
         InstructionProfile::ShortLine => short_line_framework(lang),
@@ -225,7 +277,7 @@ pub fn build_instructions_for(profile: InstructionProfile, lang: &str) -> String
 pub fn short_line_framework(lang: &str) -> String {
     format!(
         "[FRAMEWORK - DO NOT EMBODY, JUST FOLLOW]\n{}\n{}\n{}\n[END FRAMEWORK]",
-        chat_style_framework(),
+        chat_style_framework(lang),
         banned_phrases(lang),
         creator_identity_rules(),
     )
@@ -1732,13 +1784,12 @@ impl PromptBuilder {
         // 紧接角色层放置，让它和"你是谁"一起被内化。
         static_sections.push(format!(
             "[HOW A PERSON TALKS - EMBODY THIS]\n{}\n[END]",
-            human_feel_rules()
+            human_feel_rules(&parts.language)
         ));
 
         if parts.first_contact_greeting {
-            static_sections.push(include_str!("../../prompts/framework/first_contact.en.md").to_string());
+            static_sections.push(first_contact_rules(&parts.language).to_string());
         }
-
         // Identity attribution must remain explicit even with provider-level instructions.
         static_sections.push(creator_identity_rules().to_string());
 
@@ -1779,12 +1830,12 @@ impl PromptBuilder {
         if !parts.enable_instructions {
             let framework_parts = vec![
                 safety_rules().to_string(),
-                initiative_rules().to_string(),
+                initiative_rules(&parts.language).to_string(),
                 session_rules().to_string(),
                 address_rules().to_string(),
-                conversation_rhythm().to_string(),
+                conversation_rhythm(&parts.language).to_string(),
                 speaker_prefix().to_string(),
-                chat_style_framework().to_string(),
+                chat_style_framework(&parts.language).to_string(),
                 // 注意：human_feel_rules() 已从此处移除——它属于"怎么说话"，
                 // 归入角色层 [HOW A PERSON TALKS - EMBODY THIS] 才能被内化。
                 // 留在这个 [DO NOT EMBODY] 区块里等于被标注为"不要内化成说话方式"。
@@ -2002,7 +2053,7 @@ impl PromptBuilder {
         push!(0, "deferred_tools", parts.deferred_tools_section.clone().unwrap_or_default());
 
         // 在本轮输入附近保留简短的交流焦点，防止远处的角色标签抢占接话目的。
-        push!(0, "conversation_focus", include_str!("../../prompts/framework/conversation_focus.en.md").to_string());
+        push!(0, "conversation_focus", conversation_focus_rules(&parts.language).to_string());
 
         // 用户输入（Task 层）
         if !parts.user_input.is_empty() {
@@ -2703,8 +2754,17 @@ mod tests {
         assert!(pet_identity().contains("[CAPABILITY_BOUNDARY]"));
         assert!(session_rules().contains("[SESSION_RULES]"));
         assert!(address_rules().contains("[ADDRESS_RULES]"));
-        assert!(conversation_rhythm().contains("[RHYTHM_RULES]"));
-        assert!(chat_style_framework().contains("[CHAT_STYLE_RULES]"));
+        assert!(conversation_rhythm("en").contains("[RHYTHM_RULES]"));
+        assert!(chat_style_framework("en").contains("[CHAT_STYLE_RULES]"));
+        // 语气规则三语分发：标签逐语对称
+        for lang in ["en", "zh", "ja"] {
+            assert!(conversation_rhythm(lang).contains("[RHYTHM_RULES]"), "{lang}");
+            assert!(chat_style_framework(lang).contains("[CHAT_STYLE_RULES]"), "{lang}");
+            assert!(human_feel_rules(lang).contains("[HUMAN_FEEL_RULES]"), "{lang}");
+            assert!(companion_dialogue_rules(lang).contains("[COMPANION DIALOGUE]"), "{lang}");
+            assert!(companion_post_history_rules(lang).contains("[NEXT TURN]"), "{lang}");
+            assert!(first_contact_rules(lang).contains("[FIRST CONTACT GREETING]"), "{lang}");
+        }
     }
 
     #[test]

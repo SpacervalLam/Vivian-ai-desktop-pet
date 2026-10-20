@@ -71,7 +71,7 @@ pub fn save(note: &NoteBook) -> Result<(), String> {
     std::fs::write(&html_path, html)
         .map_err(|e| format!("写入笔记 HTML 失败: {}", e))?;
 
-    // 复制本地手写字体到笔记目录（fonts/ma-shan-zheng.woff2），
+    // 复用本地手写字体，保留笔记路径 fonts/ma-shan-zheng.woff2，
     // 使 HTML 通过相对路径引用、离线可用；失败时静默跳过（浏览器回退系统中文字体）。
     let _ = copy_font_assets(&dir);
 
@@ -201,7 +201,7 @@ fn upsert_index(char_id: &str, summary: NoteSummary) -> Result<(), String> {
     write_index(char_id, &summaries)
 }
 
-/// 将本地中文手写字体 `ma-shan-zheng.woff2` 复制到笔记目录 `fonts/` 子目录。
+/// 按内容复用本地手写字体；笔记仍保留 fonts/ 下的相对路径，支持独立离线打开。
 ///
 /// 源文件位于项目 `public/fonts/ma-shan-zheng.woff2`，经 `CARGO_MANIFEST_DIR`
 /// （= src-tauri 目录）向上定位；源文件不存在时静默跳过。
@@ -215,9 +215,19 @@ fn copy_font_assets(dir: &std::path::Path) -> Result<(), String> {
     }
     let fonts_dir = dir.join("fonts");
     ensure_dir(&fonts_dir).map_err(|e| format!("创建字体目录失败: {}", e))?;
-    std::fs::copy(src, fonts_dir.join("ma-shan-zheng.woff2"))
-        .map_err(|e| format!("复制字体失败: {}", e))?;
+    let bytes = std::fs::read(src).map_err(|e| format!("读取字体失败: {e}"))?;
+    crate::utils::assets::materialize(
+        &font_object_dir(),
+        &fonts_dir.join("ma-shan-zheng.woff2"),
+        &bytes,
+    )
+    .map_err(|e| format!("保存字体失败: {e}"))?;
     Ok(())
+}
+
+fn font_object_dir() -> PathBuf {
+    // The pool is rebuildable from note-local aliases, and stays out of backups.
+    crate::utils::path::get_user_data_dir().join("cache/assets/notebook-fonts")
 }
 
 /// 读取笔记完整数据

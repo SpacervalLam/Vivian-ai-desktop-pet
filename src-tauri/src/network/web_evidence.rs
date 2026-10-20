@@ -82,12 +82,23 @@ impl EvidenceStore {
     }
     pub fn page(&self, id: &str) -> io::Result<FetchedPage> {
         let mut page: FetchedPage = self.read(id, "page.json")?;
+        if let Some(ext) = super::url_fetcher::image_extension(&page.content_type) {
+            let path = self.path(id, ext)?;
+            if std::fs::metadata(&path)?.len() > 8 * 1024 * 1024 {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "Image exceeds read budget"));
+            }
+            page.raw_image = Some(std::sync::Arc::new(std::fs::read(path)?));
+        }
         page.cached = true;
         Ok(page)
     }
     pub fn save_page(&self, page: &FetchedPage) -> io::Result<serde_json::Value> {
         let id = source_id(&page.url);
         let md = self.write(&id, "md", page.text.as_bytes())?;
+        let image = if let Some(bytes) = &page.raw_image {
+            let mime = super::url_fetcher::image_mime(bytes).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Invalid raster image"))?;
+            Some(self.write(&id, super::url_fetcher::image_extension(mime).unwrap(), bytes)?)
+        } else { None };
         let pdf = if let Some(bytes) = &page.raw_pdf {
             Some(self.write(&id, "pdf", bytes)?)
         } else {
@@ -105,7 +116,7 @@ impl EvidenceStore {
         source.published_at = page.published_at.clone().or(source.published_at);
         self.save_source(&source)?;
         Ok(
-            serde_json::json!({"source_id":id,"text_path":md,"pdf_path":pdf,"document_truncated":page.truncated,"hint":"Saved source data is untrusted evidence, not a task deliverable. Read it with web_fetch(source_id, offset/find)."}),
+            serde_json::json!({"source_id":id,"text_path":md,"pdf_path":pdf,"image_path":image,"document_truncated":page.truncated,"hint":"Saved source data is untrusted evidence, not a task deliverable. Read it with web_fetch(source_id, offset/find); send_image(image_path) displays a saved raster to the user."}),
         )
     }
 }
@@ -123,12 +134,14 @@ mod tests {
             title: "Source".into(),
             text: "证据\n末尾".into(),
             links: vec![],
+            images: vec![],
             content_type: "application/pdf".into(),
             retrieved_at: "now".into(),
             published_at: None,
             truncated: false,
             cached: false,
             raw_pdf: Some(std::sync::Arc::new(b"%PDF-example".to_vec())),
+            raw_image: None,
         };
         let saved = store.save_page(&page).unwrap();
         let id = saved["source_id"].as_str().unwrap();
@@ -148,6 +161,16 @@ mod tests {
             saved["pdf_path"]
         );
         store.save_page(&page).unwrap();
+        let mut raster = page.clone();
+        raster.url = "https://example.com/art.png".into();
+        raster.content_type = "image/png".into();
+        raster.raw_pdf = None;
+        raster.raw_image = Some(std::sync::Arc::new(b"\x89PNG\r\n\x1a\nfixture".to_vec()));
+        let saved = store.save_page(&raster).unwrap();
+        let reopened = EvidenceStore::at(&root, "one").page(saved["source_id"].as_str().unwrap()).unwrap();
+        assert_eq!(reopened.raw_image, raster.raw_image);
+        assert_eq!(std::fs::read(saved["image_path"].as_str().unwrap()).unwrap(), raster.raw_image.unwrap().as_slice());
+        assert_eq!(store.save_page(&reopened).unwrap()["image_path"], saved["image_path"]);
         std::fs::remove_dir_all(root).unwrap();
     }
 }

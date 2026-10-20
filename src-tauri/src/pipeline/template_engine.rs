@@ -491,9 +491,9 @@ fn extract_section_content(id: &str, parts: &PromptParts, lang: &str) -> String 
                     safety_rules().to_string(),
                     session_rules().to_string(),
                     address_rules().to_string(),
-                    conversation_rhythm().to_string(),
+                    conversation_rhythm(lang).to_string(),
                     speaker_prefix().to_string(),
-                    chat_style_framework().to_string(),
+                    chat_style_framework(lang).to_string(),
                 ];
                 format!(
                     "[FRAMEWORK - DO NOT EMBODY, JUST FOLLOW]\n{}\n[END FRAMEWORK]",

@@ -13,6 +13,12 @@ pub enum RecordKind {
     Reference,
     Subjective,
     Observation,
+    /// 她「此刻在做什么 / 在想什么」的自述状态（daily_presence）。
+    ///
+    /// 与 Subjective（私有想法，永不召回）相反：这一条是**可以说出口**的当下，
+    /// 进入检索供对话引用，但不是关于用户的事实——不参与事实合并，也不路由到
+    /// 共享世界层。生命周期由 24h 保留规则控制。
+    SelfState,
     Internal,
 }
 
@@ -37,6 +43,7 @@ pub fn initialize_record(item: &mut MemoryItem) {
             "session_summary" => RecordKind::SessionSummary,
             "inner_monologue" | "insight" => RecordKind::Subjective,
             "observation_note" => RecordKind::Observation,
+            "daily_presence" => RecordKind::SelfState,
             // 采集资料是外部内容，不是「关于用户的事实」：`reference` 是用户口述的
             // 资料性事实（save_memory 的 category），仍属事实层。
             "knowledge" => RecordKind::Reference,
@@ -57,6 +64,8 @@ pub fn initialize_record(item: &mut MemoryItem) {
         serde_json::json!(match record_kind {
             RecordKind::Dialogue => "window",
             RecordKind::Subjective | RecordKind::Internal | RecordKind::Observation => "ephemeral",
+            // 自述状态是临时的"此刻"，过期由 daily_presence 的 24h 规则接管
+            RecordKind::SelfState => "ephemeral",
             // 采集资料按自身 TTL/expires_at 过期，不因类别被提前淘汰。
             RecordKind::Reference | RecordKind::Fact | RecordKind::SessionSummary => "durable",
         })
@@ -113,6 +122,9 @@ pub fn recallable(item: &MemoryItem) -> bool {
                 | RecordKind::SessionSummary
                 | RecordKind::Dialogue
                 | RecordKind::Reference
+                // 自述状态可被召回：她"今天也有自己的事"要能说出口。
+                // 但它不是关于用户的事实，见 SelfState 的注释。
+                | RecordKind::SelfState
         )
 }
 

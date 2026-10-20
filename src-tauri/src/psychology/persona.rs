@@ -233,9 +233,12 @@ impl PersonaProfile {
         self.recovery_rates.expression = 0.05 * resilience_mult;
 
         self.recovery_rates.joy = 0.04 * resilience_mult;
-        self.recovery_rates.sadness = 0.06 * resilience_mult;
-        self.recovery_rates.anger = 0.08 * resilience_mult;
-        self.recovery_rates.fear = 0.05 * resilience_mult;
+        // 负面情绪恢复速率压低（与 RecoveryRateProfile::default 一致）：让 micro_tick 的
+        // 物理时间衰减变缓，再由 apply_turn_boundary_decay 按对话轮做轻量回落，修复
+        // "情绪一轮就消失"的断裂感。joy 等正面通道维持原速率。
+        self.recovery_rates.sadness = 0.02 * resilience_mult;
+        self.recovery_rates.anger = 0.02 * resilience_mult;
+        self.recovery_rates.fear = 0.015 * resilience_mult;
         self.recovery_rates.closeness = 0.04 * resilience_mult;
         self.recovery_rates.loneliness = 0.05 * resilience_mult;
         self.recovery_rates.curiosity = 0.05 * resilience_mult;

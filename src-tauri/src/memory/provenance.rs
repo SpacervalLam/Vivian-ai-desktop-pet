@@ -46,6 +46,7 @@ pub fn recall_label(meta: &Value) -> &'static str {
         Some("session_summary") => "对话摘要；非逐字原话",
         Some("subjective") => "角色想法；非已确认事实",
         Some("reference") => "参考资料；非用户经历",
+        Some("self_state") => "她自述的当前状态；非用户经历",
         Some("fact")
             if field(meta, "subject") == Some("user")
                 && field(meta, "evidence_kind") == Some("quoted") =>

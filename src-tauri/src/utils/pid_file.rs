@@ -121,18 +121,20 @@ pub fn cleanup_orphan(name: &str, exe_name: &str) {
 
 /// 检查进程是否存活
 #[cfg(windows)]
-fn is_process_alive(pid: u32) -> bool {
+pub(crate) fn is_process_alive(pid: u32) -> bool {
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Threading::{
-        OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        OpenProcess, GetExitCodeProcess, PROCESS_QUERY_LIMITED_INFORMATION,
     };
     unsafe {
         match OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) {
             Ok(h) => {
+                let mut code=0u32;
+                let alive=GetExitCodeProcess(h,&mut code).map(|_| code==259).unwrap_or(true);
                 let _ = CloseHandle(h);
-                true
+                alive
             }
-            Err(_) => false,
+            Err(error) => error.code().0 as u32 == 0x80070005,
         }
     }
 }
@@ -169,7 +171,7 @@ fn process_exe_name(_pid: u32) -> Option<String> {
 }
 
 #[cfg(not(windows))]
-fn is_process_alive(pid: u32) -> bool {
+pub(crate) fn is_process_alive(pid: u32) -> bool {
     unsafe { libc::kill(pid as i32, 0) == 0 }
 }
 

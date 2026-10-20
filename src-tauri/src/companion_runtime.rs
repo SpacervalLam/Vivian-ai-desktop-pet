@@ -36,6 +36,7 @@ pub fn quiet_reason(state: &AppState) -> Option<&'static str> {
 pub fn tick(app: &tauri::AppHandle) {
     let state = app.state::<Arc<AppState>>();
     if !state.initialized.load(Ordering::Relaxed) || state.is_factory_reset_in_progress() { return; }
+    state.world_provider.environment.tick(&state);
     flush_interaction_episodes(&state);
     let cfg = state.config.read().get_all();
     RESOURCE_FEEDBACK.store(cfg.companion.resource_feedback && cfg.proactive.enable_system_pressure_trigger, Ordering::Relaxed);
@@ -67,6 +68,7 @@ pub fn tick(app: &tauri::AppHandle) {
     let network_changed = connected.is_some() && feedback.network.is_some() && connected != feedback.network;
     if connected.is_some() { feedback.network = connected; }
     let eligible = quiet.is_none() && !busy && !FEEDBACK_IN_FLIGHT.load(Ordering::Acquire)
+        && !state.world_provider.environment.contact_suppressed(now.timestamp() as f64)
         && crate::utils::get_system_idle_seconds().is_some_and(|s| s < 300.0);
     let zh = cfg.base.language.starts_with("zh");
     let ja = cfg.base.language.starts_with("ja");

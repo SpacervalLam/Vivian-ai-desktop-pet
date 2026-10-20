@@ -66,6 +66,49 @@ pub fn write_atomic(path: &Path, content: &str) -> std::io::Result<()> {
     atomic_write(path, content.as_bytes())
 }
 
+/// Publish a fully synced private staging file without overwriting another file.
+/// The destination check and publication are one filesystem operation.
+#[cfg(not(windows))]
+pub fn publish_atomic_file(staging: &Path, target: &Path) -> std::io::Result<()> {
+    std::fs::hard_link(staging, target)?;
+    if let Some(parent) = target.parent() {
+        fsync_dir(parent)?;
+    }
+    std::fs::remove_file(staging)
+}
+
+#[cfg(windows)]
+pub fn publish_atomic_file(staging: &Path, target: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_WRITE_THROUGH};
+    let from: Vec<u16> = staging.as_os_str().encode_wide().chain(Some(0)).collect();
+    let to: Vec<u16> = target.as_os_str().encode_wide().chain(Some(0)).collect();
+    unsafe {
+        MoveFileExW(PCWSTR(from.as_ptr()), PCWSTR(to.as_ptr()), MOVEFILE_WRITE_THROUGH)
+            .map_err(|_| std::io::Error::last_os_error())
+    }
+}
+
+/// Publish an immutable asset at another path without duplicating its blocks.
+/// Replace the directory entry atomically; never overwrite a linked file in place.
+/// Filesystems without hard links get an ordinary atomic copy instead.
+pub fn link_or_copy_atomic(source: &Path, target: &Path) -> std::io::Result<()> {
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let name = target.file_name().unwrap_or_default().to_string_lossy();
+    let staging = target.with_file_name(format!(".{name}.{}.tmp", uuid::Uuid::new_v4()));
+    if std::fs::hard_link(source, &staging).is_err() {
+        return atomic_write(target, &std::fs::read(source)?);
+    }
+    let result = replace_file(&staging, target);
+    if result.is_err() {
+        let _ = std::fs::remove_file(&staging);
+    }
+    result
+}
+
 /// 原子替换目录：把已经完全写好的临时目录 `staging` 整体替换为 `target`。
 ///
 /// 与单文件 [`atomic_write`] 同构，只是交换单位是整棵目录树：
@@ -214,6 +257,22 @@ mod tests {
     #[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
     struct Sample {
         count: u32,
+    }
+
+    #[test]
+    fn archive_publication_cannot_replace_a_destination_created_after_preflight() {
+        let dir = tempfile::tempdir().unwrap();
+        let staging = dir.path().join("private.part");
+        let target = dir.path().join("backup.altn");
+        atomic_write(&staging, b"new archive").unwrap();
+        atomic_write(&target, b"other archive").unwrap();
+        assert!(publish_atomic_file(&staging, &target).is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), b"other archive");
+        assert_eq!(std::fs::read(&staging).unwrap(), b"new archive");
+        std::fs::remove_file(&target).unwrap();
+        publish_atomic_file(&staging, &target).unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"new archive");
+        assert!(!staging.exists());
     }
 
     #[test]

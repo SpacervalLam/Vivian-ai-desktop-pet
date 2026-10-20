@@ -266,6 +266,13 @@ pub struct ToolResult {
     /// 上下文修改器（不参与序列化，工具执行后由编排器应用）
     #[serde(skip)]
     pub context_modifier: Option<ContextModifier>,
+    /// 工具产出的图片（仅 read_image 这类「让模型看见」的工具会填）。
+    ///
+    /// 为什么不塞进 `data`：图片一旦序列化进 JSON 文本就是 base64 字符串，
+    /// 既吃满上下文预算，又不可能被模型真的「看懂」。这里单独走一条通道，
+    /// 由调用方映射成 provider 的 image part。
+    #[serde(skip)]
+    pub images: Option<Vec<crate::brain::coding_agent::CodingImage>>,
 }
 
 impl std::fmt::Debug for ToolResult {
@@ -292,6 +299,7 @@ impl ToolResult {
             success: true,
             goal_completed: false,
             context_modifier: None,
+            images: None,
         }
     }
 
@@ -309,6 +317,7 @@ impl ToolResult {
             success: true,
             goal_completed: false,
             context_modifier: None,
+            images: None,
         }
     }
 
@@ -326,6 +335,7 @@ impl ToolResult {
             success: false,
             goal_completed: false,
             context_modifier: None,
+            images: None,
         }
     }
 
@@ -338,6 +348,7 @@ impl ToolResult {
             success: false,
             goal_completed: false,
             context_modifier: None,
+            images: None,
         }
     }
 
@@ -364,6 +375,7 @@ impl Default for ToolResult {
             success: false,
             goal_completed: false,
             context_modifier: None,
+            images: None,
         }
     }
 }
@@ -423,6 +435,13 @@ pub struct ToolUseContext {
     ///   挂起等待会永久阻塞，必须让模型把未决问题写进最终结果带回父级
     #[serde(default)]
     pub subagent_depth: usize,
+    /// 本轮实际暴露给模型的工具名（含运行时注入的浏览器工具与自建工具）。
+    ///
+    /// `tool_list` 用它划范围：元工具的价值是「告诉我现在能做什么」，如果它列出
+    /// 一个本轮没注入的工具，模型会照着去调，然后吃一个"未提供"的错误——比没有
+    /// 清单更糟。None 表示调用方没声明（非智能体场景），此时按工作侧全量列。
+    #[serde(default)]
+    pub allowed_tools: Option<Vec<String>>,
 }
 
 impl Default for ToolUseContext {
@@ -444,6 +463,7 @@ impl Default for ToolUseContext {
             access_level: None,
             agent_kind: "chat".to_string(),
             subagent_depth: 0,
+            allowed_tools: None,
         }
     }
 }
@@ -467,6 +487,7 @@ impl ToolUseContext {
             access_level: None,
             agent_kind: "chat".to_string(),
             subagent_depth: 0,
+            allowed_tools: None,
         }
     }
 
@@ -948,13 +969,6 @@ pub struct PermissionContext {
     /// 始终询问的工具规则
     #[serde(default)]
     pub always_ask: Vec<String>,
-    /// 本轮用户消息原文。
-    ///
-    /// 供「预授权」档判定用：用户已经说清目标（"帮我把壁纸换成这张"）时，
-    /// 对应的低风险工具不再重复弹窗确认。为 `None` 时预授权一律不成立——
-    /// 也就是"拿不到用户原话就当没说清"，宁可多问一次。
-    #[serde(default)]
-    pub current_user_input: Option<String>,
 }
 
 fn default_access_level_enum() -> AgentAccessLevel {
@@ -981,7 +995,6 @@ impl Default for PermissionContext {
             always_allow: Vec::new(),
             always_deny: Vec::new(),
             always_ask: Vec::new(),
-            current_user_input: None,
         }
     }
 }
@@ -1212,6 +1225,20 @@ pub trait Tool: Send + Sync {
     /// 是否破坏性操作（默认 false）
     fn is_destructive(&self) -> bool {
         false
+    }
+
+    /// 本次调用的执行预算（覆盖执行器的外层超时）。
+    ///
+    /// 外层超时（`executor::get_tool_timeout`）是**按工具名**登记的静态值，
+    /// 而部分工具的耗时由**调用参数**决定——`run_command` 的 `timeout_secs`
+    /// 最高可到 600 秒，外层却固定 120 秒。两层各自计时时外层总是先到，
+    /// 工具内部精心写的「命令执行超时（N 秒）」永远不可达，模型只收到一句
+    /// 无信息量的「操作超时」，无法判断是命令跑太久还是卡死。
+    ///
+    /// 覆盖此方法即可让外层放宽到工具自己需要的预算；返回 None 表示沿用
+    /// 静态登记值。
+    fn execution_timeout(&self, _args: &Value) -> Option<std::time::Duration> {
+        None
     }
 
     /// 工具风险分级（默认 Safe）

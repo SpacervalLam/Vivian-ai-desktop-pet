@@ -121,9 +121,12 @@ impl Default for RecoveryRateProfile {
             novelty: 0.06,
             expression: 0.05,
             joy: 0.04,
-            sadness: 0.06,
-            anger: 0.08,
-            fear: 0.05,
+            // 负面情绪恢复速率刻意压低：物理时间衰减（micro_tick 每 3-5s）太快会让情绪
+            // 在短暂对话间隔里归零，破坏"情绪连续性"。压低 base 后时间轴衰减变缓，
+            // 再由 apply_turn_boundary_decay 按对话轮做轻量回落（见本文件末尾方法）。
+            sadness: 0.02,
+            anger: 0.02,
+            fear: 0.015,
             closeness: 0.04,
             loneliness: 0.05,
             curiosity: 0.05,
@@ -463,6 +466,40 @@ impl HomeostasisEngine {
         emotion.closeness = fluctuate(emotion.closeness, (emotion_set_points.closeness + circadian.closeness_delta).clamp(0.0, 1.0), recovery_rates.closeness * circadian.recovery_mult, dt, 0.007 * circadian.positive_noise_mult);
         emotion.loneliness = fluctuate(emotion.loneliness, (emotion_set_points.loneliness + circadian.loneliness_delta).clamp(0.0, 1.0), recovery_rates.loneliness * circadian.recovery_mult, dt, 0.006 * circadian.negative_noise_mult);
         emotion.curiosity = fluctuate(emotion.curiosity, (emotion_set_points.curiosity + circadian.curiosity_delta).clamp(0.0, 1.0), recovery_rates.curiosity * circadian.recovery_mult, dt, 0.008 * circadian.positive_noise_mult);
+    }
+
+    /// 轮次级轻量衰减 —— 对话边界处的"情绪回落"。
+    ///
+    /// 与高频 `micro_tick`（按真实时间衰减）互补，构成情绪连续性的两个轴：
+    /// - **时间轴**（`micro_tick` + 离线压缩）：用户沉默的秒数里情绪缓慢回落；
+    /// - **对话轮轴**（本函数）：每轮用户发言后，仍高于稳态的负面情绪向 set_point
+    ///   温和拉回一截，使强烈情绪（如被冒犯）在数轮内逐渐平复，而不是一轮就消失
+    ///   —— 之前物理时间衰减太快，导致"翻脸比翻书快"的断裂感。
+    ///
+    /// 仅作用于**高于 set_point** 的维度（避免人为抬高本就低落的情绪），
+    /// 且只针对负面情绪通道（anger / sadness / fear）—— 它们的连续性缺失
+    /// 最让角色显得不真实。正面情绪（joy / closeness 等）维持既有时间轴行为，
+    /// 不在此额外衰减，避免角色"瞬间遗忘开心"。
+    ///
+    /// `dt` 取 1.0 代表"一轮"：单轮拉回比例 = 1 - exp(-rate)。
+    /// 注意：本函数不持久化，调用方负责落盘。
+    pub fn apply_turn_boundary_decay(
+        emotion: &mut super::emotion::EmotionState,
+        set_points: &EmotionSetPoints,
+    ) {
+        const ANGER_RATE: f64 = 0.16; // 约 15% / 轮（每轮温和回落，保留连续性）
+        const SADNESS_RATE: f64 = 0.13; // 约 12% / 轮（悲伤天然更持久，回落更慢）
+        const FEAR_RATE: f64 = 0.11; // 约 10% / 轮
+
+        if emotion.anger > set_points.anger {
+            emotion.anger = regress(emotion.anger, set_points.anger, ANGER_RATE, 1.0);
+        }
+        if emotion.sadness > set_points.sadness {
+            emotion.sadness = regress(emotion.sadness, set_points.sadness, SADNESS_RATE, 1.0);
+        }
+        if emotion.fear > set_points.fear {
+            emotion.fear = regress(emotion.fear, set_points.fear, FEAR_RATE, 1.0);
+        }
     }
 }
 

@@ -81,8 +81,11 @@ boa_engine = { version = "0.21", features = [] }
 zip = { version = "2.4", default-features = false, features = ["deflate"] }
 # 随机数（TTS 口型同步随机开合值）
 rand = "0.9"
-# 非 UTF-8（GBK 等）文本检测与解码（encoding_rs 由 chardetng 自带，不直接声明）
+# 非 UTF-8（GBK 等）文本检测与解码
 chardetng = "0.1"
+# 控制台输出兜底解码：中文 Windows 的 OEM 代码页是 CP936，GBK 直接解码的
+# 确定性高于靠少量字节猜编码（chardetng 会把它带进来，这里显式声明是为了能用）
+encoding_rs = "0.8"
 
 # Cryptography (for caching hashes + asset decryption)
 md-5 = "0.10"
@@ -103,7 +106,7 @@ webview2-com = "0.38.2"
 windows-core = "0.61"
 
 # Database & storage
-rusqlite = { version = "0.32", features = ["bundled", "load_extension"] }
+rusqlite = { version = "0.32", features = ["bundled", "load_extension", "backup"] }
 
 # Chinese tokenization (for RAG/BM25)
 jieba-rs = "0.7"

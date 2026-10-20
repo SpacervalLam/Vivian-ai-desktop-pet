@@ -6,10 +6,6 @@
 //! - `reset_persona_section` 恢复出厂默认
 //! - `get_persona_sections` 读取 7 段文本（含是否自定义标记）
 //!
-//! Few-shot 示例使用结构化表单编辑：
-//! - `get_few_shot_examples` 获取结构化示例数据
-//! - `set_few_shot_examples` 保存结构化示例数据
-//!
 //! 人格卡片（PersonaCard）是表达侧面的演化系统：可创建/更新/切换/归档/删除，
 //! 但 Core Persona（Character 层）永远不被卡片覆盖。
 
@@ -19,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::State;
 
-use crate::persona::{FewShotExamplesConfig, PersonaCard};
+use crate::persona::PersonaCard;
 use crate::state::AppState;
 
 const CHARACTER_SECTIONS: &[&str] = &[
@@ -101,46 +97,11 @@ pub fn reset_persona_section(
 ) -> Result<String, String> {
     let brain = state.get_character(character_id.as_deref())?.brain;
     let persona = &brain.persona;
-    if section == "examples" {
-        persona.reset_persona_section("examples").map_err(|e| e.to_string())?;
-        return Ok(String::new());
-    }
     if !CHARACTER_SECTIONS.contains(&section.as_str()) {
         return Err(format!("未知人设段落: {}", section));
     }
     persona.reset_persona_section(&section).map_err(|e| e.to_string())?;
     persona.get_section_definition(&section).map_err(|e| e.to_string())
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct FewShotExamplesResponse {
-    pub data: FewShotExamplesConfig,
-    pub customized: bool,
-}
-
-/// 获取结构化 Few-shot 示例
-#[tauri::command]
-pub fn get_few_shot_examples(
-    state: State<'_, Arc<AppState>>,
-    character_id: Option<String>,
-) -> Result<FewShotExamplesResponse, String> {
-    let brain = state.get_character(character_id.as_deref())?.brain;
-    let customized = brain.persona.is_section_customized("examples");
-    Ok(FewShotExamplesResponse {
-        data: brain.persona.get_few_shot_examples(),
-        customized,
-    })
-}
-
-/// 保存结构化 Few-shot 示例
-#[tauri::command]
-pub fn set_few_shot_examples(
-    state: State<'_, Arc<AppState>>,
-    character_id: Option<String>,
-    data: FewShotExamplesConfig,
-) -> Result<(), String> {
-    let brain = state.get_character(character_id.as_deref())?.brain;
-    brain.persona.set_few_shot_examples(data).map_err(|e| e.to_string())
 }
 
 /// 获取人格配置

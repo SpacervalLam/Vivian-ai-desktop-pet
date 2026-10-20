@@ -85,7 +85,7 @@ fn fallback_label(id: &str, lang: &str) -> &'static str {
 
 /// Request-local candidates independent of query embeddings and retrieval results.
 /// Reports, topic counters, current mind state and tool scope are intentionally finalized later.
-struct PreparedPromptContext {
+pub(super) struct PreparedPromptContext {
     character_block: Option<String>,
     character_note_section: Option<String>,
     examples_block: Option<String>,
@@ -125,6 +125,14 @@ impl OptionalContextSelection {
     }
 }
 
+/// Per-request tool/example candidates. Only the final prompt builder consumes this value.
+pub(super) struct PreparedQueryContext {
+    tool_scope: Option<ToolScope>,
+    examples: Option<String>,
+    tone_injection: Option<String>,
+    elapsed_ms: u64,
+}
+
 /// Prepare stable candidates while the dependent semantic/retrieval/web chain runs.
 /// The typed snapshot stays inside this invocation, never serialized into intermediate states.
 pub struct PreparedPromptPipeline {
@@ -157,7 +165,7 @@ impl Runnable for PreparedPromptPipeline {
         };
         let ((prepared, prep_ms, prep_ok), context) = tokio::join!(preparation, self.context.ainvoke(input, config.clone()));
         let start = std::time::Instant::now();
-        let mut output = self.prompt.ainvoke_prepared(context?, config, prepared).await?;
+        let mut output = self.prompt.ainvoke_prepared(context?, config, prepared, None).await?;
         let finalize_ms = start.elapsed().as_millis() as u64;
         let timings = &mut output["metadata"]["timings"];
         if !timings.is_array() { *timings = json!([]); }
@@ -611,7 +619,9 @@ impl PromptBuildingStep {
 
         let recall = self.tool_semantic_filter.as_ref().and_then(|filter| {
             let (input, _) = crate::cross_character::parse_speaker_prefix(&state.user_input);
-            let goal = state.metadata.get("task_continuation").and_then(|context| context["task"]["goal"].as_str())
+            let goal = state.metadata.get("contextual_intent").and_then(|context| context["task"].as_str())
+                .filter(|task| !task.trim().is_empty())
+                .or_else(|| state.metadata.get("task_continuation").and_then(|context| context["task"]["goal"].as_str()))
                 .filter(|_| super::generation::AIResponseGenerationRunnable::requests_execution(state));
             let input = goal.map(|goal| format!("{goal}\nCurrent selection: {input}")).unwrap_or(input);
             if input.trim().is_empty() && state.fast_perception.as_ref().is_none_or(|fp| fp.query_embedding.is_empty()) { return Some(Vec::new()); }
@@ -639,7 +649,7 @@ impl PromptBuildingStep {
                 && !crate::tools::should_filter_tools(&fp.intent.label)
         }).unwrap_or(false);
         let hidden = if quiet_chat && !super::generation::AIResponseGenerationRunnable::requests_execution(state) && recalled.as_ref().map(|hits| hits.is_empty()).unwrap_or(false) {
-            hidden.into_iter().chain(ts.list_tool_names().into_iter().filter(|name| name != "tool_search" && name != "get_roommate_status")).collect()
+            hidden.into_iter().chain(ts.list_tool_names().into_iter().filter(|name| name != "tool_search" && !crate::tools::tool_call_manager::is_core_tool(name))).collect()
         } else { hidden };
 
         ToolScope {
@@ -660,10 +670,10 @@ impl PromptBuildingStep {
         state: &PipelineState,
         tool_scope: Option<&ToolScope>,
     ) -> PromptParts {
-        self.build_parts_prepared(state, tool_scope, None)
+        self.build_parts_prepared(state, tool_scope, None, None)
     }
 
-    fn prepare_context(&self) -> PreparedPromptContext {
+    pub(super) fn prepare_context(&self) -> PreparedPromptContext {
         // Scene prototypes are independent of this message's semantic classification.
         if let Some(injector) = &self.tone_injector { injector.preload(); }
         // Character 块（身份+人格+背景+兴趣+外观+说话风格+关系）/ 风格约束（场景 + 禁忌）/ Few-shot 示例
@@ -687,8 +697,8 @@ impl PromptBuildingStep {
                 let style = p.dialogue_preferences();
                 let cfg = p.get_config();
                 let preset = crate::persona::prompt_render::render_style_preset_block(&cfg, &self.language);
-                // Explicit user-authored examples retain precedence. Factory examples are retrieved per turn.
-                let examples = if self.tone_injector.is_none() || !cfg.few_shot_examples.examples.is_empty() {
+                // 示例由每轮检索提供；无检索器时回落到角色卡出厂示例。
+                let examples = if self.tone_injector.is_none() {
                     Some(crate::persona::prompt_render::render_examples_block_tiered(&cfg, &self.language, tier))
                 } else { None };
                 (Some(p.dialogue_card()), examples, Some(style), if preset.is_empty() { None } else { Some(preset) })
@@ -741,7 +751,7 @@ impl PromptBuildingStep {
         })
     }
 
-    fn build_parts_prepared(&self, state: &PipelineState, tool_scope: Option<&ToolScope>, prepared: Option<PreparedPromptContext>) -> PromptParts {
+    fn build_parts_prepared(&self, state: &PipelineState, tool_scope: Option<&ToolScope>, prepared: Option<PreparedPromptContext>, query: Option<&PreparedQueryContext>) -> PromptParts {
         let selection = OptionalContextSelection::for_state(state);
         let PreparedPromptContext { character_block, character_note_section, examples_block, style_block, style_preset_block,
             memory_md_section, user_facts_section, skill_section } = prepared.unwrap_or_else(|| self.prepare_context());
@@ -994,13 +1004,8 @@ impl PromptBuildingStep {
 
         // 场景语气只匹配当前发言，避免用户换话题后仍沿用上一轮的场景表演。
         // 命中时只注入少量可选节奏参考，不要求复刻台词。
-        let tone_injection = self.tone_injector.as_ref().and_then(|injector| {
-            let entries = self.persona.as_ref().map(|p| p.evolution_entries()).unwrap_or_default();
-            let learned: Vec<_> = entries.iter().filter(|e| e.active()).map(|e| e.scope.as_str()).collect();
-            let (text, _, _) = crate::cross_character::parse_any_speaker_prefix(&state.user_input);
-            let embedding = state.fast_perception.as_ref().map(|perception| perception.query_embedding.as_slice());
-            injector.build_tone_injection_with_embedding(&text, &self.language, &learned, embedding)
-        });
+        let tone_injection = query.map(|query| query.tone_injection.clone())
+            .unwrap_or_else(|| self.match_tone(state));
 
         // 情绪表达偏置：注入连续效价/激活/主导强度，按比例影响节奏
         // 每轮最多体现一个轻微线索，避免跨阈值突然进入表演模式
@@ -1551,19 +1556,25 @@ impl Default for PromptBuildingStep {
 #[async_trait]
 impl Runnable for PromptBuildingStep {
     async fn ainvoke(&self, input: Value, config: Option<RunnableConfig>) -> VivianResult<Value> {
-        self.ainvoke_prepared(input, config, None).await
+        self.ainvoke_prepared(input, config, None, None).await
     }
 }
 
 impl PromptBuildingStep {
-    async fn ainvoke_prepared(&self, input: Value, config: Option<RunnableConfig>, prepared: Option<PreparedPromptContext>) -> VivianResult<Value> {
-        let mut state = PipelineState::from_json(input);
+    fn match_tone(&self, state: &PipelineState) -> Option<String> {
+        self.tone_injector.as_ref().and_then(|injector| {
+            let entries = self.persona.as_ref().map(|p| p.evolution_entries()).unwrap_or_default();
+            let learned: Vec<_> = entries.iter().filter(|e| e.active()).map(|e| e.scope.as_str()).collect();
+            let (text, _, _) = crate::cross_character::parse_any_speaker_prefix(&state.user_input);
+            let embedding = state.fast_perception.as_ref().map(|perception| perception.query_embedding.as_slice());
+            injector.build_tone_injection_with_embedding(&text, &self.language, &learned, embedding)
+        })
+    }
 
-        state.metadata["semantic_prompt_selection"] = json!(OptionalContextSelection::for_state(&state));
-
-        // Context embedding, lazy tool indexing and learned-vector rebuilding all perform
-        // blocking I/O. Compute the one shared scope off the async executor.
-        let tool_scope = if let Some(ts) = self.tool_system.clone() {
+    /// Query-derived candidates run beside recall/web; final visibility uses completed memory.
+    pub(super) async fn prepare_query_context(&self, state: &PipelineState) -> VivianResult<PreparedQueryContext> {
+        let started = std::time::Instant::now();
+        let tool_scope = async { if let Some(ts) = self.tool_system.clone() {
             let step = self.clone();
             let snapshot = state.clone();
             let scope = tokio::task::spawn_blocking(move || {
@@ -1573,21 +1584,11 @@ impl PromptBuildingStep {
                     step.tool_semantic_filter.as_ref().and_then(|filter| filter.embed_query(&text).ok())) };
                 step.compute_tool_scope(&ts, &snapshot, context.as_deref())
             }).await.map_err(|e| crate::error::VivianError::Other(format!("Tool retrieval worker failed: {e}")))?;
-            state.metadata["tool_semantic_selection"] = json!({"current_weight":0.8,"context_weight":0.2,
-                "selected":scope.recalled_order,"discovery":"tool_search"});
-            tracing::debug!(scene = ?scope.scene, recalled = ?scope.recalled_order,
-                loaded = ?scope.recalled, hidden = ?scope.hidden, "[PromptBuilder] tool selection");
-            Some(scope)
-        } else { None };
-
-        // 使用模块化提示词构建器 + 模板引擎元数据（Section Schema 驱动）
-        if let Some(psy) = &self.psychology {
-            state.metadata["mood_before_reply"] = json!(psy.compute_mood());
-        }
-        let mut parts = self.build_parts_prepared(&state, tool_scope.as_ref(), prepared);
+            Ok::<_, crate::error::VivianError>(Some(scope))
+        } else { Ok(None) } };
         // Contextual embeddings perform network I/O; keep them off async workers.
         // Retrieved examples belong in the dynamic zone, preserving the stable prefix.
-        if parts.examples_block.is_none() {
+        let examples = async {
             if let Some(injector) = self.tone_injector.clone() {
                 let (user, _, _) = crate::cross_character::parse_any_speaker_prefix(&state.user_input);
                 let messages = state.messages.clone();
@@ -1596,10 +1597,46 @@ impl PromptBuildingStep {
                     .into_iter().filter(|e| e.active()).map(|e| e.scope).collect();
                 let examples = tokio::task::spawn_blocking(move || injector.examples.retrieve(&user, &messages, query.as_ref().map(|q| q.as_slice()), &learned))
                     .await.ok().flatten();
-                if let Some(examples) = examples {
-                    state.metadata["retrieved_example_chars"] = json!(examples.chars().count());
-                    parts.examples_block = Some(examples);
-                }
+                examples
+            } else { None }
+        };
+        let tone = async {
+            let step = self.clone();
+            let snapshot = state.clone();
+            tokio::task::spawn_blocking(move || step.match_tone(&snapshot)).await.ok().flatten()
+        };
+        let (tool_scope, examples, tone_injection) = tokio::join!(tool_scope, examples, tone);
+        Ok(PreparedQueryContext { tool_scope: tool_scope?, examples, tone_injection,
+            elapsed_ms: started.elapsed().as_millis() as u64 })
+    }
+
+    pub(super) async fn ainvoke_prepared(&self, input: Value, config: Option<RunnableConfig>, prepared: Option<PreparedPromptContext>, query: Option<PreparedQueryContext>) -> VivianResult<Value> {
+        let mut state = PipelineState::from_json(input);
+
+        state.metadata["semantic_prompt_selection"] = json!(OptionalContextSelection::for_state(&state));
+
+        let mut query = match query {
+            Some(query) => query,
+            None => self.prepare_query_context(&state).await?,
+        };
+        // Recall may have completed after candidate retrieval. Reapply only cheap final gates.
+        if let (Some(ts), Some(scope)) = (self.tool_system.as_ref(), query.tool_scope.as_mut()) {
+            scope.hidden.extend(self.resolve_tool_scope(ts, &state).1);
+            state.metadata["tool_semantic_selection"] = json!({"current_weight":0.8,"context_weight":0.2,
+                "selected":scope.recalled_order,"discovery":"tool_search"});
+            tracing::debug!(scene = ?scope.scene, recalled = ?scope.recalled_order,
+                loaded = ?scope.recalled, hidden = ?scope.hidden, "[PromptBuilder] tool selection");
+        }
+        state.metadata["query_prompt_preparation_ms"] = json!(query.elapsed_ms);
+        if let Some(psy) = &self.psychology {
+            state.metadata["mood_before_reply"] = json!(psy.compute_mood());
+        }
+        let tool_scope = query.tool_scope.as_ref();
+        let mut parts = self.build_parts_prepared(&state, tool_scope, prepared, Some(&query));
+        if parts.examples_block.is_none() {
+            if let Some(examples) = query.examples {
+                state.metadata["retrieved_example_chars"] = json!(examples.chars().count());
+                parts.examples_block = Some(examples);
             }
         }
         if parts.examples_block.is_none() {
@@ -1633,7 +1670,7 @@ impl PromptBuildingStep {
         // 同步生成结构化工具定义（原生 function calling 路径用；文本路径忽略此字段）。
         // 直接复用 ainvoke 开头算好的共享 ToolScope——场景/隐藏集/语义召回与文本通道
         // 完全一致：完整 schema = 保底集 ∪ 常驻集 ∪ 召回集，其余降级为仅名称（可用 tool_search 取回）。
-        if let (Some(ts), Some(scope)) = (self.tool_system.as_ref(), tool_scope.as_ref()) {
+        if let (Some(ts), Some(scope)) = (self.tool_system.as_ref(), tool_scope) {
             state.tool_definitions = ToolListTool::new(Arc::clone(ts))
                 .get_tool_definitions_for_scene(scope.scene, &scope.hidden, scope.recalled.as_ref(), &self.language);
         }
@@ -1644,7 +1681,7 @@ impl PromptBuildingStep {
         // 索引，由 prompt 侧作为独立段落注入。文本路径已经把索引含在 `parts.tools` 里，
         // 不需要重复注入。
         if self.enable_native_fc {
-            if let (Some(ts), Some(scope)) = (self.tool_system.as_ref(), tool_scope.as_ref()) {
+            if let (Some(ts), Some(scope)) = (self.tool_system.as_ref(), tool_scope) {
                 let index = ToolListTool::new(Arc::clone(ts)).get_deferred_tools_index(
                     scope.scene, &scope.hidden, scope.recalled.as_ref(), &self.language);
                 if !index.is_empty() {
@@ -1976,6 +2013,7 @@ mod component_selection_tests {
     fn task_schemas_survive_failed_recall_and_status_stays_core() {
         let ts = Arc::new(ToolSystem::new());
         ts.register_tool(Arc::new(crate::tools::builtin::file_tools::ReadFileTool));
+        ts.register_tool(Arc::new(crate::tools::builtin::cross_character_tools::TalkToCharacterTool::new()));
         ts.register_tool(Arc::new(crate::tools::builtin::cross_character_tools::GetRoommateStatusTool::new()));
         let mut step = PromptBuildingStep::new();
         step.tool_semantic_filter = Some(Arc::new(crate::tools::ToolSemanticFilter::new(
@@ -1992,6 +2030,13 @@ mod component_selection_tests {
         let scope = step.compute_tool_scope(&ts, &quiet, None);
         assert!(list.get_tool_definitions_for_scene(scope.scene, &scope.hidden, scope.recalled.as_ref(), "en")
             .iter().any(|tool| tool.name == "get_roommate_status"));
+        assert!(list.get_tool_definitions_for_scene(scope.scene, &scope.hidden, scope.recalled.as_ref(), "en")
+            .iter().any(|tool| tool.name == "talk_to_character"));
+
+        let cross = PipelineState { current_channel: "cross_character".into(), ..quiet.clone() };
+        let scope = step.compute_tool_scope(&ts, &cross, None);
+        assert!(!list.get_tool_definitions_for_scene(scope.scene, &scope.hidden, scope.recalled.as_ref(), "en")
+            .iter().any(|tool| tool.name == "talk_to_character"));
     }
 
     #[tokio::test]
@@ -2116,7 +2161,7 @@ mod component_selection_tests {
         let prepared = PreparedPromptContext { character_block: Some("core_identity".into()),
             character_note_section: None, examples_block: None, style_block: None, style_preset_block: None,
             memory_md_section: Some("durable_notes".into()), user_facts_section: Some("user_facts".into()), skill_section: None };
-        let parts = PromptBuildingStep::new().build_parts_prepared(&state, None, Some(prepared));
+        let parts = PromptBuildingStep::new().build_parts_prepared(&state, None, Some(prepared), None);
         assert_eq!(parts.character_block.as_deref(), Some("core_identity"));
         assert_eq!(parts.memory_md_section.as_deref(), Some("durable_notes"));
         assert_eq!(parts.user_facts_section.as_deref(), Some("user_facts"));

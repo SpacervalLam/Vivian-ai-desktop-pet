@@ -14,6 +14,7 @@
 //! - `gpt_sovits_service`：GPT-SoVITS api_v2.py 子进程管理（一键启动/停止）
 //! - `tts_fish_speech`：Fish Speech 后端（fishaudio/fish-speech，/v1/tts）
 //! - `tts_minimax`：MiniMax 语音合成后端（WebSocket 流式协议，云端）
+//! - `tts_elevenlabs`：ElevenLabs 语音合成后端（云端，音色库/克隆 + 字符级时间轴）
 //! - `tts_windows`：Windows 原生 WinRT TTS 后端（离线 fallback）
 //! - `tts_audio`：MCI 进程内音频播放器
 //! - `realtime_voice`：豆包端到端实时语音（SC2.0，独立全双工通话模式）
@@ -38,6 +39,7 @@ pub mod tts_azure;
 pub mod tts_backend;
 pub mod tts_doubao;
 pub mod tts_edge;
+pub mod tts_elevenlabs;
 pub mod tts_fish_speech;
 pub mod tts_gpt_sovits;
 pub mod tts_minimax;

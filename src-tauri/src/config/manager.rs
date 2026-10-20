@@ -64,6 +64,9 @@ pub struct AppConfig {
     /// 工作页「新建任务」的默认工作区目录（None/空串使用系统文档目录下的 Vivian 文件夹）。
     #[serde(default)]
     pub default_workspace: Option<String>,
+    /// 工具沙箱配置（命令执行隔离层：受限令牌作用域、网络出口、工作区写授权）
+    #[serde(default)]
+    pub sandbox: SandboxConfig,
 }
 
 /// 音乐驱动动画配置
@@ -873,6 +876,117 @@ impl Default for ToolConfig {
             disabled_tools: DisabledTools::default(),
         }
     }
+}
+
+// ============================================================================
+// 工具沙箱（命令执行隔离层）
+// ============================================================================
+
+/// 沙箱网络出口模式（定义在零依赖的 `utils::sandbox_policy`，此处转出供配置层使用）
+pub use crate::utils::sandbox_policy::SandboxNetworkMode;
+
+/// 工具沙箱配置（命令执行隔离层）
+///
+/// 覆盖 one-shot 命令（`run_command` / 编程智能体命令 / 插件脚本）与持久终端
+/// 会话。网络三项只在 `network_mode` 为 `proxy` 时生效——默认 `allow` 保持
+/// 与隔离层接入前一致的行为，需要收紧时再逐条打开。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SandboxConfig {
+    /// 是否启用 OS 级隔离（Windows 受限令牌 + 低完整性级别）。
+    ///
+    /// 关闭后所有命令执行退回普通子进程——只用于排查沙箱本身的问题，正常
+    /// 使用不应关闭。
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// 网络出口模式：`allow` / `proxy` / `blocked`
+    #[serde(default)]
+    pub network_mode: SandboxNetworkMode,
+
+    /// 沙箱代理监听端口（`network_mode = proxy` 时生效）。
+    ///
+    /// **0 = 启动时自动挑一个空闲端口**。端口不写成固定值：本机可能已经跑着
+    /// 别的服务，硬编码端口会在启动时撞车，且撞车后无从恢复。
+    #[serde(default)]
+    pub proxy_port: u16,
+
+    /// 沙箱代理监听地址。默认只绑回环——代理面向的是本机的沙箱子进程，
+    /// 绑 0.0.0.0 等于把内网出口一并开放出去。
+    #[serde(default = "default_sandbox_proxy_host")]
+    pub proxy_host: String,
+
+    /// 代理域名白名单（`network_mode = proxy` 时生效），逗号分隔。
+    ///
+    /// 匹配：精确相等；以 `.` 开头表示后缀匹配（`.example.com` 命中
+    /// `a.example.com`）。**留空 = 拒绝全部出口**，需要联网时逐条显式放行。
+    ///
+    /// 用逗号分隔的单个字符串而不是 `Vec<String>`：设置界面是自由输入而不是
+    /// 预设选项列表，两个字段表达同一件事迟早会漂移。
+    #[serde(default)]
+    pub proxy_allow_domains: String,
+
+    /// 是否给会话工作区授予沙箱写权限。
+    ///
+    /// 开启后对主工作区与附加工作区打低完整性标签并授予写 ACL，沙箱进程在
+    /// 工作区内可读可写，工作区之外仍然只写 scratch。关闭则工作区只读。
+    #[serde(default = "default_true")]
+    pub grant_workspace_write: bool,
+
+    /// scratch 目录按会话隔离，避免不同会话的脚本与临时文件互相可见
+    #[serde(default = "default_true")]
+    pub per_session_scratch: bool,
+
+    /// 持久终端（`terminal_open`）是否也放进沙箱。
+    ///
+    /// 依赖 `grant_workspace_write`：工作区不授权时，终端 cd 过去只能读。
+    #[serde(default = "default_true")]
+    pub sandbox_terminal: bool,
+
+    /// 是否要求必须有 OS 级隔离。
+    ///
+    /// 开启后，平台没有可用沙箱（或沙箱被关闭）时**直接拒绝执行命令**，而不是
+    /// 退回全权限子进程。默认关闭 = 降级执行——桌宠在非 Windows 上还跑不起来，
+    /// 一刀切拒绝会让整个工具链不可用。要的是"宁可不跑也不裸跑"时打开它。
+    #[serde(default)]
+    pub require_isolation: bool,
+
+    /// one-shot 沙箱命令默认超时（秒）
+    #[serde(default = "default_sandbox_command_timeout_secs")]
+    pub command_timeout_secs: u64,
+
+    /// 沙箱命令单路输出上限（字节）
+    #[serde(default = "default_sandbox_output_cap_bytes")]
+    pub output_cap_bytes: usize,
+}
+
+impl Default for SandboxConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            network_mode: SandboxNetworkMode::Allow,
+            proxy_port: 0,
+            proxy_host: default_sandbox_proxy_host(),
+            proxy_allow_domains: String::new(),
+            grant_workspace_write: true,
+            per_session_scratch: true,
+            sandbox_terminal: true,
+            require_isolation: false,
+            command_timeout_secs: default_sandbox_command_timeout_secs(),
+            output_cap_bytes: default_sandbox_output_cap_bytes(),
+        }
+    }
+}
+
+fn default_sandbox_proxy_host() -> String {
+    "127.0.0.1".to_string()
+}
+
+fn default_sandbox_command_timeout_secs() -> u64 {
+    120
+}
+
+fn default_sandbox_output_cap_bytes() -> usize {
+    4 * 1024 * 1024
 }
 
 fn default_tool_max_iterations() -> u32 {
@@ -1720,6 +1834,7 @@ impl Default for AppConfig {
             work_models: Vec::new(),
             active_work_model: None,
             default_workspace: None,
+            sandbox: SandboxConfig::default(),
         }
     }
 }
@@ -1732,16 +1847,29 @@ pub struct ConfigManager {
     revision: Arc<std::sync::atomic::AtomicU64>,
 }
 
+/// 把任务目录里新增的任务补进已保存的配置。
+///
+/// 老配置文件里没有新任务的键；不补的话，读取方（如生图路由）会拿到 None，
+/// 表现成"功能存在但永远不可用"，而用户在界面上改了又因为对不上键而无效。
+/// 只补缺失项，绝不覆盖用户已填的值。
+fn ensure_task_routes(cfg: &mut AppConfig) {
+    for spec in crate::providers::task_catalog::TASK_ROUTES.iter() {
+        cfg.routing_matrix.entry(spec.id.clone()).or_default();
+    }
+}
+
 impl ConfigManager {
     pub fn new() -> Self {
         let app_dir = path::get_user_data_dir();
         let config_file = app_dir.join("config.yaml");
 
         let config = if config_file.exists() {
-            Self::load_from_file(&config_file).unwrap_or_else(|e| {
+            let mut loaded = Self::load_from_file(&config_file).unwrap_or_else(|e| {
                 tracing::warn!("加载配置失败: {}, 使用默认配置", e);
                 AppConfig::default()
-            })
+            });
+            ensure_task_routes(&mut loaded);
+            loaded
         } else {
             // 首次启动：根据系统语言设置默认界面语言，避免用户来不及改设置就触发英文问候
             let mut default = AppConfig::default();

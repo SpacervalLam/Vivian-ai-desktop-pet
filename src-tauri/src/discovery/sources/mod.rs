@@ -16,6 +16,7 @@ use super::bilibili::VideoInfo;
 pub mod bangumi;
 pub mod bilibili_auth;
 pub mod browser_signals;
+pub mod content_detail;
 pub mod reddit;
 pub mod task_tabs;
 pub mod v2ex;

@@ -104,6 +104,16 @@ async fn smoke(app: tauri::AppHandle, base: String) {
     assert_eq!(renamed.saved().bookmarks[0].title, "Custom bookmark");
     assert!(native::request(app.clone(), "memory".into(), BrowserRequest::RenameBookmark { url:original.url.clone(), title:"   ".into() }).await.is_err());
     native::request(app.clone(), "memory".into(), BrowserRequest::RemoveBookmark { url:original.url }).await.unwrap();
+    if std::env::var_os("VIVIAN_BROWSER_BACKUP_ONLY").is_some() {
+        native::request(app.clone(), "memory".into(), BrowserRequest::Bookmark { id:first.clone() }).await.unwrap();
+        backup_roundtrip(&app).await;
+        native::request(app.clone(), "memory".into(), BrowserRequest::Navigate { id:first.clone(), input:format!("{base}/two") }).await.unwrap();
+        wait(&app, |s| s.tabs.iter().any(|t| t.id == first && !t.loading && t.title == "storage-retained")).await;
+        println!("PASS: backup flush, browser shutdown, admission gate, restored tabs/bookmarks and retained cookies/localStorage.");
+        EXIT_CODE.store(0, std::sync::atomic::Ordering::Relaxed);
+        app.exit(0);
+        return;
+    }
     if std::env::var_os("VIVIAN_BROWSER_OVERLAY_ONLY").is_some() {
         assert!(native::automation::capture_viewport(&app, "inactive-tab").await.is_err());
         native::request(app.clone(), "memory".into(), BrowserRequest::Navigate { id:first.clone(), input:format!("{base}/overlay") }).await.unwrap();
@@ -438,6 +448,7 @@ async fn smoke(app: tauri::AppHandle, base: String) {
     )
     .await
     .unwrap();
+    backup_roundtrip(&app).await;
     let (tx, rx) = tokio::sync::oneshot::channel();
     app.run_on_main_thread(move || {
         native::destroy("memory");
@@ -448,6 +459,23 @@ async fn smoke(app: tauri::AppHandle, base: String) {
     println!("PASS: real WebView2 navigation, history, cookies/storage, private isolation, bookmarks, zoom, popup opener/close, native find, clear site data, extensions and ordered layout.");
     EXIT_CODE.store(0, std::sync::atomic::Ordering::Relaxed);
     app.exit(0);
+}
+
+async fn backup_roundtrip(app: &tauri::AppHandle) {
+    println!("Checking backup flush, browser shutdown, admission gate and profile restoration...");
+    let state = native::request(app.clone(), "memory".into(), BrowserRequest::Init).await.unwrap();
+    let expected = state.saved();
+    let pids = native::shutdown_for_backup(app.clone()).await.unwrap();
+    assert!(!pids.is_empty());
+    let root = crate::utils::path::get_user_data_dir();
+    let saved: BrowserSaved = serde_json::from_slice(&std::fs::read(root.join("browser/state.json")).unwrap()).unwrap();
+    assert_eq!(serde_json::to_value(&saved).unwrap(), serde_json::to_value(&expected).unwrap());
+    std::fs::write(root.join(".backup.pending.json"), "test gate").unwrap();
+    assert!(native::request(app.clone(), "memory".into(), BrowserRequest::Init).await.is_err());
+    std::fs::remove_file(root.join(".backup.pending.json")).unwrap();
+    let restored = wait(app, |s| !s.tabs.is_empty() && s.tabs.iter().all(|t| !t.loading)).await;
+    assert_eq!(serde_json::to_value(restored.bookmarks).unwrap(), serde_json::to_value(expected.bookmarks).unwrap());
+    assert_eq!(restored.tabs.iter().map(|t| &t.url).collect::<Vec<_>>(), expected.tabs.iter().map(|t| &t.url).collect::<Vec<_>>());
 }
 
 async fn browser_tool(

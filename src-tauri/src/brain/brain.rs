@@ -654,7 +654,10 @@ impl Brain {
         );
 
         // 主动对话冷却重置（关系更新由 chat_chain 在 MoodStep 后基于真实情绪执行）
-        let _ = self.proactive.on_user_interacted();
+        // A roommate reply is not evidence that the user engaged with an earlier greeting.
+        if self.dialogue.get_channel() != "cross_character" {
+            let _ = self.proactive.on_user_interacted();
+        }
 
         // Attention boost：用户输入驱动注意力聚焦（纯规则，不调 LLM，毫秒级）
         let now = chrono::Utc::now().timestamp();
@@ -1526,7 +1529,7 @@ impl Brain {
         // 4. Framework — static: universal rules
         sections.push(("Framework (Safety)", crate::pipeline::prompt_modules::safety_rules().to_string()));
         sections.push(("Framework (Address Rules)", crate::pipeline::prompt_modules::address_rules().to_string()));
-        sections.push(("Framework (Conversation Rhythm)", crate::pipeline::prompt_modules::conversation_rhythm().to_string()));
+        sections.push(("Framework (Conversation Rhythm)", crate::pipeline::prompt_modules::conversation_rhythm(&self.persona.get_language()).to_string()));
         sections.push(("Framework (Session Rules)", crate::pipeline::prompt_modules::session_rules().to_string()));
         sections.push(("Framework (Output Format)", crate::pipeline::prompt_modules::output_format().to_string()));
         sections.push(("Framework (Speaker Prefix)", crate::pipeline::prompt_modules::speaker_prefix().to_string()));

@@ -12,6 +12,9 @@ pub mod activity_classifier;
 pub mod activity_corpus;
 pub mod entity_state;
 pub mod events;
+pub mod environment_agent;
+pub mod environment_input;
+pub mod environment_policy;
 pub mod foreground_window;
 pub mod geolocation;
 pub mod music;
@@ -168,6 +171,8 @@ fn format_hhmm(hour: f64) -> String {
 ///
 /// 内部缓存天气（TTL 由配置决定，默认 1 小时），时间感知纯本地实时计算。
 pub struct WorldStateProvider {
+    /// Shared non-character coordinator; survives individual Brain reinitialization.
+    pub environment: Arc<environment_agent::EnvironmentAgent>,
     config: RwLock<WorldConfig>,
     weather_source: RwLock<Option<Arc<WeatherSource>>>,
     /// 缓存的世界快照（每次 snapshot() 时若过期则刷新天气）
@@ -208,6 +213,7 @@ pub type ForegroundListener = Arc<dyn Fn(&ForegroundWindowSnapshot) + Send + Syn
 impl WorldStateProvider {
     pub fn new(config: WorldConfig) -> Self {
         Self {
+            environment: Arc::new(environment_agent::EnvironmentAgent::default()),
             config: RwLock::new(config),
             weather_source: RwLock::new(None),
             cached_weather: RwLock::new(None),

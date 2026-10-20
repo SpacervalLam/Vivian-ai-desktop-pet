@@ -20,23 +20,9 @@ pub struct MemoryEntryStore {
     conn: Mutex<Connection>,
     /// 明文镜像目录（与数据库同级的 plain/ 子目录）
     plain_dir: PathBuf,
-    /// WAL 文件路径（entries.db-wal），用于按体积触发 checkpoint
-    wal_path: PathBuf,
     /// Human-readable mirrors duplicate private content and are therefore opt-in.
     plain_mirror_enabled: bool,
 }
-
-/// SQLite 页缓存上限（KB）。负值表示以 KiB 计的软上限。
-///
-/// 默认的 2MB 页缓存会随查询不断扩张；记忆库是行级 JSON 存储，
-/// 4MB 足够，多出来的缓存只是挤占常驻内存。
-const SQLITE_CACHE_SIZE_KIB: i64 = -4096;
-
-/// WAL 体积超过此阈值时触发 TRUNCATE checkpoint（字节）。
-///
-/// 不做 checkpoint 的话 WAL 只增不减：实测主库 4KB 而 WAL 已涨到 2MB，
-/// 每次启动都要把整个 WAL 回放一遍再全量 load_all。
-const WAL_CHECKPOINT_THRESHOLD: u64 = 1024 * 1024;
 
 impl MemoryEntryStore {
     /// 打开（或创建）条目存储。
@@ -47,25 +33,17 @@ impl MemoryEntryStore {
         }
         let conn = Connection::open(&db_path)
             .map_err(|e| VivianError::Memory(format!("打开记忆数据库失败: {e}")))?;
-        // PRAGMA 不支持绑定参数，只能拼字符串
-        conn.execute_batch(&format!(
-            "PRAGMA journal_mode=WAL;
-             PRAGMA synchronous=NORMAL;
-             PRAGMA cache_size={};",
-            SQLITE_CACHE_SIZE_KIB
-        ))
-        .map_err(|e| VivianError::Memory(format!("设置数据库参数失败: {e}")))?;
+        crate::utils::sqlite::configure(&conn, crate::utils::sqlite::DataClass::Authoritative)
+            .map_err(|e| VivianError::Memory(format!("设置数据库参数失败: {e}")))?;
         conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS entries (
-                id TEXT PRIMARY KEY,
-                json TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS meta (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL
-            );",
+            "CREATE TABLE IF NOT EXISTS entries (id TEXT PRIMARY KEY, json TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
         )
-        .map_err(|e| VivianError::Memory(format!("创建记忆表失败: {e}")))?;
+        .map_err(|e| VivianError::Memory(format!("初始化记忆数据库失败: {e}")))?;
+        conn.prepare("SELECT id, json FROM entries LIMIT 0")
+            .map_err(|e| VivianError::Memory(format!("记忆表结构无效: {e}")))?;
+        conn.prepare("SELECT key, value FROM meta LIMIT 0")
+            .map_err(|e| VivianError::Memory(format!("记忆元数据表结构无效: {e}")))?;
 
         let plain_dir = db_path
             .parent()
@@ -78,20 +56,11 @@ impl MemoryEntryStore {
             let _ = std::fs::create_dir_all(&plain_dir);
         }
 
-        // SQLite 的 WAL 路径固定为主库路径 + "-wal"
-        let mut wal_path = db_path.clone().into_os_string();
-        wal_path.push("-wal");
-
         let store = Self {
             conn: Mutex::new(conn),
             plain_dir,
-            wal_path: PathBuf::from(wal_path),
             plain_mirror_enabled,
         };
-
-        // 启动时先把历史遗留的 WAL 收进主库，避免 load_all 回放一大段 WAL
-        store.checkpoint_if_needed(0);
-
         Ok(store)
     }
 
@@ -143,25 +112,6 @@ impl MemoryEntryStore {
         Ok(items)
     }
 
-    /// WAL 体积超过 `threshold` 时执行 TRUNCATE checkpoint。
-    ///
-    /// `threshold = 0` 表示无条件执行（启动时用，用于回收历史遗留的 WAL）。
-    /// checkpoint 失败只记日志不返回错误——它纯粹是空间回收，不影响数据正确性。
-    fn checkpoint_if_needed(&self, threshold: u64) {
-        if threshold > 0 {
-            let wal_size = std::fs::metadata(&self.wal_path)
-                .map(|m| m.len())
-                .unwrap_or(0);
-            if wal_size < threshold {
-                return;
-            }
-        }
-        let conn = self.conn.lock();
-        if let Err(e) = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);") {
-            tracing::warn!("[MemoryEntryStore] WAL checkpoint 失败（不影响数据）: {e}");
-        }
-    }
-
     /// 单事务内执行行级 upsert/delete，并在提交后同步可选明文镜像。
     pub fn write_rows(
         &self,
@@ -207,8 +157,8 @@ impl MemoryEntryStore {
         for id in deletes {
             let _ = std::fs::remove_file(self.plain_dir.join(format!("{id}.txt")));
         }
-        // WAL 体积超阈值时收进主库（阈值传 0 表示无条件检查，此处按实际阈值）
-        self.checkpoint_if_needed(WAL_CHECKPOINT_THRESHOLD);
+        // Shared SQLite policy performs passive automatic checkpoints. Durable
+        // commits do not require forcing readers out with a TRUNCATE checkpoint.
         // Plaintext mirrors are opt-in because they duplicate private memory outside
         // the canonical database. Existing mirrors are not deleted automatically.
         if self.plain_mirror_enabled {
@@ -219,7 +169,10 @@ impl MemoryEntryStore {
                     item.memory_type,
                     item.importance,
                     chrono::DateTime::<chrono::Utc>::from_timestamp(item.timestamp as i64, 0)
-                        .map(|dt| dt.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string())
+                        .map(|dt| dt
+                            .with_timezone(&chrono::Local)
+                            .format("%Y-%m-%d %H:%M")
+                            .to_string())
                         .unwrap_or_default(),
                     item.tags.join(", "),
                     item.content,
@@ -264,4 +217,30 @@ pub fn fingerprint_all(entries: &[MemoryItem]) -> HashMap<String, u64> {
         .iter()
         .map(|e| (e.id.clone(), entry_fingerprint(e)))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn storage_entries_create_current_schema_and_reopen_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("entries.db");
+        let store = MemoryEntryStore::open(path.clone()).unwrap();
+        store.set_meta("version", "4").unwrap();
+        drop(store);
+        let conn = Connection::open(&path).unwrap();
+        conn.execute("INSERT INTO entries VALUES ('retained', '{}')", [])
+            .unwrap();
+        drop(conn);
+        let store = MemoryEntryStore::open(path).unwrap();
+        assert_eq!(store.get_meta("version").as_deref(), Some("4"));
+        let count: i64 = store
+            .conn
+            .lock()
+            .query_row("SELECT count(*) FROM entries", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+    }
 }

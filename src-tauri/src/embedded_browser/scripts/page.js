@@ -742,6 +742,15 @@ globalThis.vivianCreatePage = () => {
       case 'browser_wait': return waitAction(args);
       case 'browser_eval_js': return evalJsAction(args);
       case 'browser_extract': return extractAction(args);
+      case 'browser_platform_detail': {
+        await waitForPageSettled(EXPLICIT_WAIT_SETTLE);
+        // 评论区多为懒加载：滚到底再等一会儿，只取当前可见的少量评论
+        try {
+          window.scrollTo(0, document.body.scrollHeight);
+          await sleep(600);
+        } catch (_) { /* 页面不允许滚动时按可见内容提取 */ }
+        return { text: JSON.stringify(globalThis.vivianExtractDetail()) };
+      }
       case 'browser_bilibili_history': {
         if (location.hostname !== 'api.bilibili.com' || location.pathname !== '/x/web-interface/history/cursor') throw new ActionError('wrong-platform', 'Not a Bilibili history endpoint');
         const body = JSON.parse(document.body.textContent);

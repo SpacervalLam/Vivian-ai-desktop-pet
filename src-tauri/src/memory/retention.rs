@@ -249,6 +249,10 @@ impl MemoryRetentionGuard {
             MemoryExpirationRule::new("inner_monologue", 168.0)
                 .with_max_count(200)
                 .with_min_importance(1.0),
+            // DailyPresence：她"此刻在做什么/在想什么"的一句话。24h 过期，
+            // min_importance=1.0 保证没有例外——"当下"的价值就在于它是当下的，
+            // 昨天的她在做什么对今天没有参考价值，留着只会变成又一批静态设定。
+            MemoryExpirationRule::new("daily_presence", 24.0).with_min_importance(1.0),
         ]
     }
 
@@ -484,13 +488,14 @@ mod tests {
     #[test]
     fn test_default_rules() {
         let c = MemoryRetentionGuard::new();
-        assert_eq!(c.rules().len(), 6);
+        assert_eq!(c.rules().len(), 7);
         assert_eq!(c.rules()[0].memory_type, "casual_conversation");
         assert_eq!(c.rules()[1].memory_type, "temporary_context");
         assert_eq!(c.rules()[2].memory_type, "long_term");
         assert_eq!(c.rules()[3].memory_type, "knowledge");
         assert_eq!(c.rules()[4].memory_type, "insight");
         assert_eq!(c.rules()[5].memory_type, "inner_monologue");
+        assert_eq!(c.rules()[6].memory_type, "daily_presence");
         assert_eq!(c.rules()[0].max_age_hours, 24.0);
         assert_eq!(c.rules()[1].max_age_hours, 6.0);
         assert_eq!(c.rules()[2].max_age_hours, 720.0);
@@ -504,6 +509,8 @@ mod tests {
         assert_eq!(c.rules()[5].max_count, Some(200));
         assert_eq!(c.rules()[5].max_age_hours, 168.0);
         assert_eq!(c.rules()[5].min_importance, 1.0);
+        assert_eq!(c.rules()[6].max_age_hours, 24.0);
+        assert_eq!(c.rules()[6].min_importance, 1.0);
     }
 
     // ── 证据驱动归档测试 ──

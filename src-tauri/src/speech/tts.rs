@@ -1,6 +1,7 @@
 //! 语音合成（TTS）- 多后端统一管理器
 //!
-//! - `TtsEngine` 枚举: None / EdgeTts / Azure / GptSoVits / FishSpeech / MiniMax / Windows
+//! - `TtsEngine` 枚举: None / EdgeTts / Azure / GptSoVits / FishSpeech / MiniMax /
+//!   Doubao / Mimo / ElevenLabs / Windows
 //! - `TtsConfig`: 统一配置(主后端 + fallback 后端 + 各后端独立字段)
 //! - `TtsManager`: 持有 `Box<dyn TtsBackend>` + fallback 链 + 重试 + WordBoundary 事件回调
 //! - 播放使用 `MciPlayer`(进程内 MCI,替代 PowerShell + taskkill)
@@ -84,6 +85,8 @@ pub enum TtsEngine {
     Doubao,
     /// 小米 MiMo 语音合成(云端,语音克隆,chat/completions 接口一次性合成)
     Mimo,
+    /// ElevenLabs 语音合成(云端,音色库/克隆,字符级时间轴驱动唇形)
+    ElevenLabs,
     /// Windows 原生 WinRT(离线 fallback)
     Windows,
 }
@@ -414,6 +417,35 @@ pub struct TtsConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mimo_style_prompt: Option<String>,
 
+    // ── ElevenLabs 配置 ──
+    /// ElevenLabs API Key(请求头 `xi-api-key`)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elevenlabs_key: Option<String>,
+    /// 音色 ID(控制台 Voices 页复制,预置音色或克隆音色均可)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elevenlabs_voice_id: Option<String>,
+    /// 合成模型(默认 eleven_multilingual_v2;turbo/flash 系列延迟更低)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elevenlabs_model: Option<String>,
+    /// 输出格式(默认 mp3_44100_128,另有 mp3_22050_32 / pcm_24000 等)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elevenlabs_output_format: Option<String>,
+    /// 服务入口(留空用官方 https://api.elevenlabs.io,可填自建反代)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elevenlabs_endpoint: Option<String>,
+    /// 稳定性(0.0-1.0,越高越稳越平,token 串音少;默认 0.5)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elevenlabs_stability: Option<f64>,
+    /// 相似度增强(0.0-1.0,越高越贴近原音色但对文本容错更低;默认 0.75)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elevenlabs_similarity_boost: Option<f64>,
+    /// 风格强度(0.0-1.0,放大音色的戏剧化/情绪表达;默认 0.0)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elevenlabs_style: Option<f64>,
+    /// 说话人增强(默认 true,提升音色还原度)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elevenlabs_speaker_boost: Option<bool>,
+
     // ── Emotion Prosody 配置 ──
     /// 通用音高偏移(半音,-12 到 +12 为合理范围;正值升高,负值降低)
     ///
@@ -523,6 +555,15 @@ impl Default for TtsConfig {
             mimo_model: None,
             mimo_endpoint: None,
             mimo_style_prompt: None,
+            elevenlabs_key: None,
+            elevenlabs_voice_id: None,
+            elevenlabs_model: None,
+            elevenlabs_output_format: None,
+            elevenlabs_endpoint: None,
+            elevenlabs_stability: None,
+            elevenlabs_similarity_boost: None,
+            elevenlabs_style: None,
+            elevenlabs_speaker_boost: None,
             pitch: None,
             emotion_voice_profile_map: None,
             current_emotion: None,
@@ -549,6 +590,37 @@ impl TtsConfig {
             "top_p": self.gpt_sovits_top_p,
             "temperature": self.gpt_sovits_temperature,
         }).to_string()
+    }
+
+    /// Identity of all ElevenLabs inputs that change the resulting audio.
+    ///
+    /// voice_id 只是音色的一部分：模型与 stability/similarity/style 同样改变输出，
+    /// 换任何一个都必须让缓存失效。
+    fn elevenlabs_cache_identity(&self) -> String {
+        serde_json::json!({
+            "version": 1,
+            "endpoint": self.elevenlabs_endpoint,
+            "voice": self.elevenlabs_voice_id,
+            "model": self.elevenlabs_model,
+            "format": self.elevenlabs_output_format,
+            "stability": self.elevenlabs_stability,
+            "similarity": self.elevenlabs_similarity_boost,
+            "style": self.elevenlabs_style,
+            "speaker_boost": self.elevenlabs_speaker_boost,
+        })
+        .to_string()
+    }
+
+    /// 缓存键里的"音色标识"——按引擎选出生效的那份身份
+    ///
+    /// 通用后端直接用 `voice_id`；GPT-SoVITS 与 ElevenLabs 的音色/输出
+    /// 由多个字段共同决定，走各自的 identity。
+    fn voice_cache_identity(&self, engine_name: &str) -> String {
+        match engine_name {
+            "gpt-sovits" => self.gpt_sovits_cache_identity(),
+            "elevenlabs" => self.elevenlabs_cache_identity(),
+            _ => self.voice_id.clone().unwrap_or_default(),
+        }
     }
 
     /// 是否应在应用启动时拉起 GPT-SoVITS 本地服务。
@@ -1105,13 +1177,10 @@ impl TtsManager {
         }
 
         // 检查缓存命中
-        // GPT-SoVITS 的音色由参考音频决定(voice_id 恒为空),
-        // 将模型、服务地址和参考音频等参数纳入缓存，避免换音色命中旧音频。
-        let voice_str = if engine_name == "gpt-sovits" {
-            config.gpt_sovits_cache_identity()
-        } else {
-            config.voice_id.clone().unwrap_or_default()
-        };
+        // 不同后端的"音色"来源不同：GPT-SoVITS 由参考音频决定(voice_id 恒为空)，
+        // ElevenLabs 由 voice_id + 模型 + 韵律参数决定，都必须整体纳入缓存键，
+        // 否则换音色/换模型会命中旧音频。
+        let voice_str = config.voice_cache_identity(engine_name);
         if let Some(cached) = self.cache.get(
             text,
             &voice_str,

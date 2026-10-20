@@ -4,6 +4,7 @@
 //! - 顶层（本文件）：日记条目 CRUD、配置持久化、统计 — 与原 `diary.rs` 完全一致
 //! - `intelligent_generator`：基于 LLM 的智能日记生成
 
+pub mod growth;
 pub mod intelligent_generator;
 pub mod ongoing_stories;
 

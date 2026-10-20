@@ -108,6 +108,8 @@ pub async fn send_message(
         return Err("智能体正在初始化，请稍候...".to_string());
     }
 
+    let _foreground = state.session_coordinator.background_priority().enter();
+
     // 主 LLM API 必须配置，否则发 `chat:config_error` 并终止
     if !main_api_configured(&state) {
         let _ = app.emit(
@@ -322,6 +324,8 @@ async fn send_message_stream_impl(
     if !state.is_initialized() {
         return Err("智能体正在初始化，请稍候...".to_string());
     }
+
+    let _foreground = state.session_coordinator.background_priority().enter();
 
     // 主 LLM API 必须配置，否则发 `chat:config_error` 并终止
     if !main_api_configured(&state) {
@@ -979,6 +983,8 @@ async fn send_message_stream_impl(
                 let speaker_id = char_id.clone();
                 let user_msg_full = message.trim().to_string();
                 let agent_reply_full = response.text.trim().to_string();
+                // Only public direct exchanges are input to internal intent orchestration.
+                state.world_provider.environment.record_user_exchange(&speaker_id, &user_msg_full, &agent_reply_full);
                 // Link observations to the actual adjacent turn pair; never invent source IDs.
                 let observed_sources = brain.dialogue.get_all_history().ok().and_then(|history| {
                     history.windows(2).rev().find(|pair| {
@@ -1027,6 +1033,7 @@ async fn send_message_stream_impl(
                         .collect()
                 };
                 let playback_gate = state.playback_gate.clone();
+                let environment_state = state.clone();
                 tokio::spawn(async move {
                     for (other_id, online_lock, observer_memory, observer_proactive, observer_psychology, observer_persona, observer_dialogue, observer_name, observer_brain, observer_think_lock) in observers {
                         // 仅在线角色能旁观（Online 状态；Busy/Rest/Offline 不旁观）
@@ -1109,11 +1116,8 @@ async fn send_message_stream_impl(
                             }),
                         );
 
-                        // 三人共处一室语义：以低概率 cue 旁观者，让它有机会插话加入对话
-                        // 不需要说话角色在文本里真的提到旁观者，系统层 cue 即可触发旁观者的插话意愿
-                        if crate::proactive::roll_with_probability(0.08) {
-                            let topic_brief: String = user_msg_full.chars().take(20).collect();
-                            observer_proactive.seed_roommate_cue(&speaker_name, &topic_brief);
+                        if !crate::world::environment_agent::allows_interjection(&environment_state, &other_id) {
+                            continue;
                         }
 
                         // 主动旁观插话评估：用轻量 LLM 判断 B 是否有动机插话
@@ -1168,6 +1172,7 @@ async fn send_message_stream_impl(
                             let observer_brain_clone = observer_brain.clone();
                             let observer_proactive_clone = observer_proactive.clone();
                             let observer_think_lock_clone = observer_think_lock.clone();
+                            let environment_state = environment_state.clone();
                             tokio::spawn(async move {
                                 // 基础延迟：让 A 的气泡/TTS 先显示
                                 tokio::time::sleep(Duration::from_secs(3)).await;
@@ -1182,25 +1187,16 @@ async fn send_message_stream_impl(
 
                                 // 调用主对话流程生成插话内容
                                 // 串行化 brain.think，与 send_message_stream 共用 brain_lock。
-                                // 插话是可选的锦上添花：等不到锁就直接放弃，绝不无限等待
-                                // （否则旁观者任务会永久挂住，并连带占住这把锁）。
+                                // 插话只在锁空闲时进入，避免排队抢在用户输入之前。
                                 let _brain_lock = observer_think_lock_clone.clone();
-                                let _brain_guard = match tokio::time::timeout(
-                                    Duration::from_secs(20),
-                                    _brain_lock.lock(),
-                                )
-                                .await
-                                {
-                                    Ok(guard) => guard,
-                                    Err(_) => {
-                                        tracing::info!(
-                                            "[Chat] 旁观者 {}({}) 等待 think_lock 超时，跳过本次插话",
-                                            other_name_clone,
-                                            other_id_clone
-                                        );
-                                        return;
-                                    }
-                                };
+                                let Ok(_brain_guard) = _brain_lock.try_lock() else { return; };
+
+                                if !crate::world::environment_agent::allows_interjection(&environment_state, &other_id_clone) {
+                                    return;
+                                }
+
+                                let Some(_interjection_turn) = environment_state.session_coordinator.try_enter_proactive_turn(
+                                    &other_id_clone, &observer_memory_clone, &observer_dialogue_clone) else { return; };
 
                                 // 设置渠道为 proactive，让 dialogue 写入标记为主动气泡路径
                                 let prev_channel = observer_dialogue_clone.get_channel();
@@ -1212,9 +1208,9 @@ async fn send_message_stream_impl(
                                     .map(|conv| conv.id);
                                 observer_dialogue_clone.set_session_id(interjection_session.clone());
                                 // 内部指令以 system 身份生成，不写入用户历史或记忆。
-                                let result = observer_brain_clone
-                                    .think_system_directive(&interjection.directive)
-                                    .await;
+                                let priority = environment_state.session_coordinator.background_priority();
+                                let result = priority.run(observer_brain_clone
+                                    .think_system_directive(&interjection.directive)).await;
 
                                 // 恢复渠道
                                 observer_dialogue_clone.set_channel(&prev_channel);
@@ -1222,8 +1218,9 @@ async fn send_message_stream_impl(
                                 drop(_brain_guard);
 
                                 let response = match result {
-                                    Ok(r) => r,
-                                    Err(e) => {
+                                    Some(Ok(r)) => r,
+                                    None => return,
+                                    Some(Err(e)) => {
                                         tracing::warn!(
                                             "[Chat] 旁观者 {}({}) 插话生成失败: {}",
                                             other_name_clone,
@@ -1270,6 +1267,10 @@ async fn send_message_stream_impl(
                                         meta,
                                     )
                                     .await;
+
+                                if !crate::world::environment_agent::allows_interjection(&environment_state, &other_id_clone) {
+                                    return;
+                                }
 
                                 // emit proactive:bubble 事件，前端监听后 showBubble + TTS
                                 if let Err(error) = app_clone2.emit(
@@ -1387,6 +1388,7 @@ pub async fn wake_from_presence(
     character_id: Option<String>,
     stream_id: String,
 ) -> Result<(), String> {
+    let _foreground = state.session_coordinator.background_priority().enter();
     let char_id = character_id
         .clone()
         .unwrap_or_else(|| state.active_character_id.read().clone());

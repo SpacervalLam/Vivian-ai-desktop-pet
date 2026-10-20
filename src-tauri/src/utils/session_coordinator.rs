@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use parking_lot::Mutex;
@@ -15,11 +16,14 @@ pub enum TurnKind {
 }
 
 struct TurnSlot {
+    id: u64,
     kind: TurnKind,
     started_at: Instant,
 }
 
 struct CoordinatorInner {
+    next_turn: AtomicU64,
+    background_priority: Arc<super::background_priority::BackgroundPriority>,
     current_turns: Mutex<HashMap<String, TurnSlot>>,
     pending_user: Mutex<HashMap<String, bool>>,
 }
@@ -32,20 +36,29 @@ impl SessionCoordinator {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(CoordinatorInner {
+                next_turn: AtomicU64::new(1),
+                background_priority: Arc::new(super::background_priority::BackgroundPriority::default()),
                 current_turns: Mutex::new(HashMap::new()),
                 pending_user: Mutex::new(HashMap::new()),
             }),
         }
     }
 
-    fn register_turn(&self, char_id: &str, kind: TurnKind) {
+    fn register_turn(&self, char_id: &str, kind: TurnKind) -> u64 {
+        let id = self.inner.next_turn.fetch_add(1, Ordering::Relaxed);
         self.inner.current_turns.lock().insert(
             char_id.to_string(),
             TurnSlot {
+                id,
                 kind,
                 started_at: Instant::now(),
             },
         );
+        id
+    }
+
+    pub fn background_priority(&self) -> Arc<super::background_priority::BackgroundPriority> {
+        self.inner.background_priority.clone()
     }
 
     fn clear_pending(&self, char_id: &str) {
@@ -62,6 +75,7 @@ impl SessionCoordinator {
             .pending_user
             .lock()
             .insert(char_id.to_string(), true);
+        self.inner.background_priority.interrupt();
     }
 
     /// 用户对话 turn：设置 memory + dialogue 的 session_id，登记 turn ownership。
@@ -79,8 +93,9 @@ impl SessionCoordinator {
         memory.set_session_id(Some(session_id.to_string()));
         dialogue.set_session_id(Some(session_id.to_string()));
         self.clear_pending(char_id);
-        self.register_turn(char_id, TurnKind::UserChat);
+        let turn_id = self.register_turn(char_id, TurnKind::UserChat);
         TurnGuard {
+            turn_id,
             inner: self.inner.clone(),
             char_id: char_id.to_string(),
             memory: memory.clone(),
@@ -112,8 +127,9 @@ impl SessionCoordinator {
         let prev_dialogue_sid = dialogue.get_session_id();
         memory.set_session_id(Some(session_id.to_string()));
         dialogue.set_session_id(Some(session_id.to_string()));
-        self.register_turn(char_id, TurnKind::CrossCharacter);
+        let turn_id = self.register_turn(char_id, TurnKind::CrossCharacter);
         Some(TurnGuard {
+            turn_id,
             inner: self.inner.clone(),
             char_id: char_id.to_string(),
             memory: memory.clone(),
@@ -146,8 +162,9 @@ impl SessionCoordinator {
                 return None;
             }
         }
-        self.register_turn(char_id, TurnKind::ProactiveTick);
+        let turn_id = self.register_turn(char_id, TurnKind::ProactiveTick);
         Some(TurnGuard {
+            turn_id,
             inner: self.inner.clone(),
             char_id: char_id.to_string(),
             memory: memory.clone(),
@@ -156,6 +173,11 @@ impl SessionCoordinator {
             prev_memory_sid: None,
             prev_dialogue_sid: None,
         })
+    }
+
+    pub fn any_user_turn_active(&self) -> bool {
+        self.inner.current_turns.lock().values().any(|turn| turn.kind == TurnKind::UserChat)
+            || self.inner.pending_user.lock().values().any(|pending| *pending)
     }
 
     /// 查询指定角色当前 turn 类型（None = 空闲）
@@ -194,6 +216,7 @@ impl Default for SessionCoordinator {
 }
 
 pub struct TurnGuard {
+    turn_id: u64,
     inner: Arc<CoordinatorInner>,
     char_id: String,
     memory: Arc<MemoryManager>,
@@ -209,6 +232,7 @@ impl TurnGuard {
             .current_turns
             .lock()
             .get(&self.char_id)
+            .filter(|slot| slot.id == self.turn_id)
             .map(|s| s.kind)
     }
 
@@ -219,10 +243,14 @@ impl TurnGuard {
 
 impl Drop for TurnGuard {
     fn drop(&mut self) {
+        // A cancelled background turn must never erase the user's newer ownership.
+        let mut turns = self.inner.current_turns.lock();
+        if !turns.get(&self.char_id).is_some_and(|slot| slot.id == self.turn_id) { return; }
+        turns.remove(&self.char_id);
+        drop(turns);
         if self.owns_session_id {
             self.memory.set_session_id(self.prev_memory_sid.take());
             self.dialogue.set_session_id(self.prev_dialogue_sid.take());
         }
-        self.inner.current_turns.lock().remove(&self.char_id);
     }
 }

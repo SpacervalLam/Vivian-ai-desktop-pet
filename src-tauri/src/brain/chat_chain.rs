@@ -52,9 +52,10 @@ use crate::pipeline::steps::memory::{
 };
 use crate::pipeline::steps::mood::MoodStep;
 use crate::pipeline::steps::pre_processing::PreProcessingStep;
-use crate::pipeline::steps::prompt::{PromptBuildingStep, PreparedPromptPipeline};
+use crate::pipeline::steps::prompt::PromptBuildingStep;
+use crate::pipeline::steps::context_gather::CompanionContextGather;
 use crate::pipeline::steps::query_rewrite::QueryRewriteStep;
-use crate::pipeline::steps::fast_semantic_step::{FastSemanticStep, ParallelStep};
+use crate::pipeline::steps::fast_semantic_step::FastSemanticStep;
 use crate::pipeline::steps::reflection::ReflectionRunnable;
 use crate::pipeline::steps::web_context::WebContextRunnable;
 use crate::providers::base::{LLMRequest, ProviderCallOptions};
@@ -264,41 +265,17 @@ impl BrainChatChain {
             "user_memory_saving",
             Box::new(UserMemorySavingRunnable::with_memory(memory.clone())),
         )));
-        let mut context_steps = RunnableSequence::new();
-        // 查询重写 ∥ 快速语义感知：两者互不依赖，并行执行缩短用户等待时间
-        // - QueryRewriteStep：LLM 改写查询（用于记忆检索）
-        // - FastSemanticStep：嵌入分类（情绪/意图/话题，用于 prompt 动态组装）
-        // 并行后耗时 = max(LLM改写, 嵌入) 而非 sum
-        if let Some(fast_sem) = &fast_semantic {
-            let parallel = ParallelStep::new(
-                Box::new(QueryRewriteStep::new(router.clone(), memory.clone())),
-                Box::new(FastSemanticStep::new(fast_sem.clone(), char_id.to_string())),
-            );
-            context_steps.add_step(Box::new(TimingMiddleware::new(
-                "query_rewrite_and_fast_semantic",
-                Box::new(parallel),
-            )));
-        } else {
-            context_steps.add_step(Box::new(TimingMiddleware::new(
-                "query_rewrite",
-                Box::new(QueryRewriteStep::new(router.clone(), memory.clone())),
-            )));
-        }
-        // 记忆检索（带 MemoryFilter 跨会话过滤，策略由 config.memory.retrieval_strategy 决定）
-        // 注入 Mind 启用 Attention-weighted 重排序：当前注意力聚焦的实体相关记忆优先保留
-        context_steps.add_step(Box::new(TimingMiddleware::new(
-            "memory_retrieval",
-            Box::new(
-                MemoryRetrievalStep::with_filter_and_strategy(
-                    memory.clone(),
-                    memory_filter.clone(),
-                    retrieval_strategy,
-                )
-                .with_mind(mind.clone())
-                .with_router(router.clone())
-                .with_user_model(user_model.clone()),
-            ),
-        )));
+        // Shared semantics and rewrite/base recall start together; only dependent
+        // enrichment waits for semantics. Tools, examples and web run in their own lane.
+        let semantic: Option<Box<dyn Runnable>> = fast_semantic.as_ref().map(|fast_sem| {
+            Box::new(TimingMiddleware::new("fast_semantic",
+                Box::new(FastSemanticStep::new(fast_sem.clone(), char_id.to_string())))) as Box<dyn Runnable>
+        });
+        let rewrite = Box::new(TimingMiddleware::new("query_rewrite",
+            Box::new(QueryRewriteStep::new(router.clone(), memory.clone()))));
+        let retrieval = MemoryRetrievalStep::with_filter_and_strategy(
+            memory.clone(), memory_filter.clone(), retrieval_strategy)
+            .with_mind(mind.clone()).with_router(router.clone()).with_user_model(user_model.clone());
         // Prompt 组装：注入 PsychologyManager，提供五层心理架构 + 关系上下文
         // 同时注入 ToolSystem，启用场景化工具筛选（按情绪/关系阶段/前台应用过滤）
         // 同时注入 UserFactStore，提供结构化用户事实画像
@@ -374,16 +351,11 @@ impl BrainChatChain {
         let prompt_step = prompt_step.with_topic_injection(topic_injection_mgr);
         // 克隆一份供 ProactiveOrchestrator 复用主对话完整 prompt（人设/记忆/知识库/环境等）
         let prompt_step_shared = prompt_step.clone();
-        // Web 检索决策：在生成前根据用户问题决定是否开启联网搜索
-        context_steps.add_step(Box::new(TimingMiddleware::new(
-            "web_context",
-            Box::new(WebContextRunnable::with_router(router.clone())),
-        )));
-        // Independent prompt candidates run beside the semantic/retrieval/web chain.
-        // Tool scope, retrieved evidence and semantic selections remain a final barrier.
         steps.add_step(Box::new(TimingMiddleware::new(
             "context_and_prompt",
-            Box::new(PreparedPromptPipeline::new(Box::new(context_steps), prompt_step)),
+            Box::new(CompanionContextGather::new(rewrite, semantic, retrieval,
+                Box::new(TimingMiddleware::new("web_context",
+                    Box::new(WebContextRunnable::with_router(router.clone())))), prompt_step)),
         )));
         // AI 响应生成（智能路由 + 故障降级 + JSON 提取 + 工具调用执行）
         // 工具调用管理器：max_iterations / feedback_history_chars 从 config.tools 读取
@@ -972,7 +944,7 @@ Choose the appropriate expression and motion. Leave empty if nothing fits.",
         }
 
         // 快速语义感知已迁移至 FastSemanticStep，与 QueryRewriteStep 并行执行
-        // （见 BrainChatChain::new 中 ParallelStep 组装逻辑）
+        // （见 BrainChatChain::new 中 CompanionContextGather 组装逻辑）
         Ok(state)
     }
 
@@ -1152,11 +1124,18 @@ Choose the appropriate expression and motion. Leave empty if nothing fits.",
         &self, user_input: &str, stream: bool, skip_dialogue_write: bool, visual_evidence: Option<&str>,
     ) -> VivianResult<AiResponse> {
         let mut state = self.prepare_pipeline_state(user_input).await?;
-        if !skip_dialogue_write && state.current_channel != "cross_character" {
+        if !skip_dialogue_write && !state.is_command && !user_input.trim().is_empty() && state.current_channel != "cross_character"
+            && state.metadata["system_directive"] != true && state.metadata["proactive_greeting"] != true {
+            let tracked = self.task_tracker.lock().snapshot(crate::memory::types::current_timestamp());
+            let resolved = AIResponseGenerationRunnable::resolve_contextual_intent(&self.router, &state, &self.char_id, tracked).await?;
+            tracing::debug!(character = %self.char_id, action = resolved.action,
+                continues_task = resolved.continues_task, needs_clarification = resolved.needs_clarification,
+                "[ContextualIntent] full conversation interpretation");
+            state.metadata["contextual_intent"] = serde_json::json!(resolved);
             let request = AIResponseGenerationRunnable::requests_execution(&state);
-            let (revision, context) = self.task_tracker.lock().begin(user_input, request,
+            let (revision, context) = self.task_tracker.lock().begin_resolved(user_input, request,
                 !state.messages.iter().any(|message| matches!(message.role.as_str(), "user" | "assistant")),
-                crate::memory::types::current_timestamp());
+                crate::memory::types::current_timestamp(), Some(&resolved));
             state.metadata["task_turn_revision"] = serde_json::json!(revision);
             if let Some(context) = context {
                 tracing::debug!(character = %self.char_id, phase = ?context.task.phase,

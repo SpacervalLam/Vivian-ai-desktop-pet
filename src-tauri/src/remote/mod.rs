@@ -601,6 +601,16 @@ async fn update_discovery_profile(
         "add_dislike" => discovery::add_discovery_dislike(char_id, req.value).map(|_| String::new()),
         "respond_probe" => discovery::respond_interest_probe(char_id, req.value, req.response),
         "import_bangumi" => discovery::bootstrap_from_bangumi(char_id, req.value).await.map(|domains| format!("已导入 {} 个兴趣域", domains.len())),
+        "get_duty" => discovery::get_discovery_duty(char_id)
+            .and_then(|v| serde_json::to_string(&v).map_err(|e| e.to_string())),
+        "set_duty_quota" => req
+            .value
+            .trim()
+            .parse::<usize>()
+            .map_err(|_| "quota 必须是数字".to_string())
+            .and_then(|q| discovery::set_discovery_duty_quota(char_id, q))
+            .and_then(|v| serde_json::to_string(&v).map_err(|e| e.to_string())),
+        "run_duty" => discovery::run_discovery_duty(char_id).await.map(|o| o.reason),
         _ => return Err((StatusCode::BAD_REQUEST, "未知的兴趣画像操作".to_string())),
     }.map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     Ok(Json(serde_json::json!({ "ok": true, "result": result })))
@@ -700,6 +710,8 @@ async fn chat_handler(
     if req.message.trim().is_empty() {
         return Err((StatusCode::BAD_REQUEST, "消息不能为空".to_string()));
     }
+
+    let _foreground = state.app_state.session_coordinator.background_priority().enter();
 
     if !main_api_configured(&state.app_state) {
         return Err((

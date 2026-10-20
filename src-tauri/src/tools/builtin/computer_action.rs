@@ -2,7 +2,7 @@
 use async_trait::async_trait;
 use serde_json::{json,Value};
 use crate::tools::types::{Tool,ToolResult,ToolCategory,ToolRiskTier,ToolUseContext,ValidationResult,PermissionResult};
-use super::{desktop_runtime, input_control_tools, system_ops::ScreenshotAnalyzeTool};
+use super::{desktop_runtime, input_control_tools, system_ops::TakeScreenshotTool};
 
 pub struct ComputerActionTool;
 
@@ -46,7 +46,7 @@ impl Tool for ComputerActionTool {
         if let Some(region)=input.get("observe_region") {inspection.insert("region".into(),region.clone());}
         if let Some(question)=input.get("observe_question") {inspection.insert("question".into(),question.clone());}
         let inspection=Value::Object(inspection);
-        let inspection_valid=ScreenshotAnalyzeTool::new().validate_input(&inspection,ctx).await;
+        let inspection_valid=TakeScreenshotTool::new().validate_input(&inspection,ctx).await;
         if !inspection_valid.result {return inspection_valid;}
         if let Some(region)=input.get("observe_region") {
             let x=region["x"].as_i64().unwrap();
@@ -105,7 +105,7 @@ impl Tool for ComputerActionTool {
             let mut inspection=serde_json::Map::new();
             if let Some(region)=args.get("observe_region") {inspection.insert("region".into(),region.clone());}
             if let Some(question)=args.get("observe_question") {inspection.insert("question".into(),question.clone());}
-            let result=ScreenshotAnalyzeTool::new().call(Value::Object(inspection),ctx).await;
+            let result=TakeScreenshotTool::new().call(Value::Object(inspection),ctx).await;
             if result.success {Ok(result.data)} else {Err(result.error.unwrap_or_else(||"Observation failed".into()))}
         };
         match crate::desktop_contract::run_observed_operation(perform,observe,args["observe_after"].as_bool().unwrap_or(true)).await {

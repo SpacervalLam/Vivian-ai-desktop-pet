@@ -29,6 +29,8 @@ pub mod provider_preset_tools;
 pub mod presence_tools;
 pub mod question_tools;
 pub mod research_tool;
+/// 代码审查：review_diff（只读解析审查目标、变更文件与规约文件）。
+pub mod review_tools;
 pub mod scheduler_tools;
 pub mod send_image_tool;
 pub mod send_chat_message_tool;
@@ -51,6 +53,20 @@ pub mod work_question_tools;
 pub mod work_subagent_tools;
 pub mod work_worktree_tools;
 pub mod workflow_tools;
+/// 会话元工具：目标（goal）与交付声明（present）。
+pub mod agent_meta_tools;
+/// 多智能体协作：队友管理、团队任务板、消息投递、目标迭代。
+pub mod agent_control_tools;
+/// 编辑与看图：str_replace_editor（可撤销）、read_image（真正看见图）。
+pub mod editor_tools;
+/// 运行时环境：工作目录切换、依赖探测、运行时自省。
+pub mod runtime_env_tools;
+/// 会话历史检索（跨会话回忆）。
+pub mod session_query_tools;
+/// 持久终端：terminal_* 六件套 + pwsh_persistent。
+pub mod terminal_tools;
+/// 生图：文生图 + 参考图引导，结果落盘并回传。
+pub mod image_gen_tool;
 
 /// 注册所有内置工具到工具系统
 pub fn register_builtin_tools(tool_system: &Arc<ToolSystem>) {
@@ -59,7 +75,6 @@ pub fn register_builtin_tools(tool_system: &Arc<ToolSystem>) {
         Arc::new(system_ops::OpenApplicationTool::new()),
         Arc::new(system_ops::CloseApplicationTool::new()),
         Arc::new(system_ops::TakeScreenshotTool::new()),
-        Arc::new(system_ops::ScreenshotAnalyzeTool::new()),
         Arc::new(computer_action::ComputerActionTool),
         // 扩展系统工具
         Arc::new(extended_system_ops::OpenUrlTool::new()),
@@ -99,6 +114,9 @@ pub fn register_builtin_tools(tool_system: &Arc<ToolSystem>) {
         Arc::new(work_subagent_tools::WorkDelegateTool::new()),
         // 后台子任务的收集 / 取消 / 列表
         Arc::new(work_subagent_tools::WorkJobTool::new()),
+        // 工作侧会话元工具：目标（一句话终态，跨轮持久）与交付声明（登记已存在的产物）
+        Arc::new(agent_meta_tools::GoalTool::new()),
+        Arc::new(agent_meta_tools::PresentTool::new()),
         // 工作智能体隔离执行工具（工作树生命周期：列出 / 新建 / 移除）
         Arc::new(work_worktree_tools::WorkIsolateTool::new()),
         // 定时任务工具
@@ -170,6 +188,10 @@ pub fn register_builtin_tools(tool_system: &Arc<ToolSystem>) {
         Arc::new(skill_tools::CreateSkillTool::new()),
         // 技能召回（按自然语言 BM25 检索名称/描述/关键词，返回候选供 use_skill 加载正文）
         Arc::new(skill_tools::SearchSkillTool::new()),
+        // 技能校验（交付前检查 front-matter / 命名 / 占位符 / 附属文档）
+        Arc::new(skill_tools::ValidateSkillTool::new()),
+        // 代码审查输入（只读解析审查目标：未提交/基准分支/提交，附变更文件与规约文件）
+        Arc::new(review_tools::ReviewDiffTool::new()),
         // 笔记本工具（创建/查看/修改/分享卡片风格 HTML 笔记）
         Arc::new(notebook_tools::CreateNotebookTool::new()),
         Arc::new(notebook_tools::ListNotebooksTool::new()),
@@ -187,6 +209,43 @@ pub fn register_builtin_tools(tool_system: &Arc<ToolSystem>) {
         Arc::new(coding_tools::RunCommandTool::new()),
         Arc::new(coding_tools::GrepSearchTool::new()),
         Arc::new(coding_tools::ListDirTool::new()),
+        Arc::new(coding_tools::GlobTool::new()),
+        // 可撤销编辑器 + 看图（让模型真的看见图，而不是猜文件名）
+        Arc::new(editor_tools::StrReplaceEditorTool::new()),
+        Arc::new(editor_tools::ReadImageTool::new()),
+        // 生图（文生图 + 参考图引导；结果落盘并随工具结果回传）
+        Arc::new(image_gen_tool::GenerateImageTool::new()),
+        // 运行时环境：工作目录、依赖路径、能力自省
+        Arc::new(runtime_env_tools::WorkingDirectoryTool::new()),
+        Arc::new(runtime_env_tools::LoadWorkspaceDependenciesTool::new()),
+        Arc::new(runtime_env_tools::RuntimeInspectListTool::new(Arc::downgrade(tool_system))),
+        Arc::new(runtime_env_tools::RuntimeInspectQueryTool::new(Arc::downgrade(tool_system))),
+        // 跨会话历史检索
+        Arc::new(session_query_tools::SessionSearchTool::new()),
+        Arc::new(session_query_tools::SessionTraceTool::new()),
+        Arc::new(session_query_tools::SessionEventSearchTool::new()),
+        Arc::new(session_query_tools::SessionEventReadTool::new()),
+        Arc::new(session_query_tools::SessionEventTraceTool::new()),
+        // 持久终端（跨调用保留状态）
+        Arc::new(terminal_tools::TerminalOpenTool::new()),
+        Arc::new(terminal_tools::TerminalSendTool::new()),
+        Arc::new(terminal_tools::TerminalReadTool::new()),
+        Arc::new(terminal_tools::TerminalSignalTool::new()),
+        Arc::new(terminal_tools::TerminalListTool::new()),
+        Arc::new(terminal_tools::TerminalCloseTool::new()),
+        Arc::new(terminal_tools::PwshPersistentTool::new()),
+        // 多智能体协作
+        Arc::new(agent_control_tools::ListAgentsTool::new()),
+        Arc::new(agent_control_tools::InterruptAgentTool::new()),
+        Arc::new(agent_control_tools::SendMessageTool::new()),
+        Arc::new(agent_control_tools::WaitAgentTool::new()),
+        Arc::new(agent_control_tools::ListSubagentModelsTool::new()),
+        Arc::new(agent_control_tools::SpawnTeammateTool::new()),
+        Arc::new(agent_control_tools::TeamTaskCreateTool::new()),
+        Arc::new(agent_control_tools::TeamTaskListTool::new()),
+        Arc::new(agent_control_tools::TeamTaskGetTool::new()),
+        Arc::new(agent_control_tools::TeamTaskUpdateTool::new()),
+        Arc::new(agent_control_tools::RalphTool::new()),
         // 天气预报（Open-Meteo 免费 API，支持 1~16 天预报）
         Arc::new(weather_tools::GetWeatherForecastTool::new()),
         // 内容发现闭环（B 站推荐 / 反馈 / 兴趣探针）
@@ -194,6 +253,8 @@ pub fn register_builtin_tools(tool_system: &Arc<ToolSystem>) {
         Arc::new(discovery_tools::SubmitContentFeedbackTool::new()),
         Arc::new(discovery_tools::GetInterestProbesTool::new()),
         Arc::new(discovery_tools::AnswerInterestProbeTool::new()),
+        // 按链接读取平台正文 + 热评（复用浏览器登录态）
+        Arc::new(discovery_tools::ReadPlatformContentTool::new()),
     ];
 
     // 浏览器自动化工具（经精简 Chrome 扩展控制用户真实浏览器，保留登录态）
@@ -212,6 +273,7 @@ pub fn register_builtin_tools(tool_system: &Arc<ToolSystem>) {
     //
     // 目标未注册的条目被 `register_alias` 忽略并 warn，表内可保留暂未注册的名字而不报错。
     let alias_pairs: &[(&str, &str)] = &[
+        ("screenshot_analyze", "take_screenshot"),
         ("set_wallpaper", "wallpaper_set"),
         ("set_wallpaper_from_file", "wallpaper_set"),
         ("list_directory", "list_dir"),
@@ -234,8 +296,16 @@ pub fn register_builtin_tools(tool_system: &Arc<ToolSystem>) {
     tool_system.register_tool(Arc::new(
         crate::tools::tool_call_manager::ToolSearchTool::new(snapshot, Arc::downgrade(tool_system)),
     ));
+    // 可用工具清单（能力面目录）。与 tool_search 分工：这个回答"我有什么"，
+    // 那个回答"某个工具怎么调"。二者共用同一份快照与弱引用。
+    tool_system.register_tool(Arc::new(
+        crate::tools::tool_call_manager::AvailableToolsTool::new(
+            Arc::new(tools.clone()),
+            Arc::downgrade(tool_system),
+        ),
+    ));
 
-    tracing::info!("已注册 {} 个内置工具（含 tool_search 元工具）", count + 1);
+    tracing::info!("已注册 {} 个内置工具（含 tool_search / tool_list 元工具）", count + 2);
 }
 
 /// 在所有内置和运行时工具注册完成后检查确认名单。

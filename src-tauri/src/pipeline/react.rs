@@ -833,7 +833,7 @@ mod tests {
             assert_eq!(lp.messages[0].content, "Vivian persona and speech style");
             assert_eq!(lp.messages[1].content, "看看我在用什么");
             // 后续截图调用也保持人设；第二轮最终文本需要正常推送。
-            lp.enter_execution(&[call("screenshot_analyze")], "recalled memory", channel);
+            lp.enter_execution(&[call("take_screenshot")], "recalled memory", channel);
             assert_eq!(lp.phase, DialoguePhase::Persona);
             assert!(!persona_reply_was_already_streamed(2));
         }

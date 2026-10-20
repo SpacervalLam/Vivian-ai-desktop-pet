@@ -18,6 +18,7 @@ pub mod context_compress;
 pub mod decorators;
 pub mod doom_loop;
 pub mod errors;
+pub(crate) mod gather;
 pub mod inline_tag_scanner;
 pub mod injection_guard;
 pub mod message_context;

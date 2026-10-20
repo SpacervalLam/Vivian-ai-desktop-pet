@@ -1376,7 +1376,7 @@ fn scene_label(scene: ToolScene) -> &'static str {
 /// 是变化驱动注入的（稳态不注入），按需查询是它留下的唯一缺口。若查询工具只在
 /// Chat 场景降级为 Lazy，模型就得先 `tool_search` 再调用——一个无参数查询走两步，
 /// 结果多半是模型放弃查询直接猜。
-fn is_core_tool(name: &str) -> bool {
+pub(crate) fn is_core_tool(name: &str) -> bool {
     matches!(name, "search_memory" | "talk_to_character" | "get_roommate_status")
 }
 
@@ -1666,6 +1666,173 @@ impl ToolSearchTool {
         }
         lines.push("</functions>".to_string());
         lines.join("\n")
+    }
+}
+
+/// 可用工具清单（`tool_list`）。
+///
+/// 与 `tool_search` 的分工：`tool_search` 是「我知道名字或关键词，去拿完整 schema」；
+/// `tool_list` 是「我根本不知道有什么，先看一眼目录」。开放式任务开头最该做的就是
+/// 后者——先确认自己的能力面，再决定打法，而不是凭印象挑一个工具硬上。
+///
+/// 范围由 [`ToolUseContext::allowed_tools`] 决定：只列**本轮真的注入了 schema** 的工具。
+/// 列出一个调不通的名字比不列更糟：模型会照着调，然后吃一个「未提供」的错误。
+pub struct AvailableToolsTool {
+    tools_snapshot: Arc<Vec<Arc<dyn Tool>>>,
+    /// 同 ToolSearchTool：优先读活注册表，Weak 避免 Arc 循环
+    system: std::sync::Weak<ToolSystem>,
+}
+
+impl AvailableToolsTool {
+    pub fn new(tools_snapshot: Arc<Vec<Arc<dyn Tool>>>, system: std::sync::Weak<ToolSystem>) -> Self {
+        Self { tools_snapshot, system }
+    }
+
+    fn live_tools(&self) -> Vec<Arc<dyn Tool>> {
+        match self.system.upgrade() {
+            Some(ts) => ts.list_tools(),
+            None => self.tools_snapshot.as_ref().clone(),
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for AvailableToolsTool {
+    fn name(&self) -> &str {
+        "tool_list"
+    }
+
+    fn description(&self) -> &str {
+        "List what you can actually do this turn: every tool currently exposed to you, one line each (name + one-line purpose).\n\
+         Use it at the start of open-ended work to see your capability surface before committing to an approach, \
+         and before concluding \"I can't do that\" — the capability may exist under a name you didn't think of.\n\
+         Returns names and purposes only. For a tool's full parameter schema, call tool_search with \"select:<name>\"."
+    }
+
+    fn description_in(&self, lang: &str) -> &str {
+        match lang {
+            "zh" => "列出**本轮真实可用**的全部工具（每行：名称 + 一句话用途）。\n\
+                     开放式任务开头先用它看一遍自己的能力面再定打法；得出「这个我做不到」的结论之前也先看一眼——\
+                     能力可能就存在，只是名字跟你想的不一样。\n\
+                     这里只给名称和用途；要某个工具的完整参数 schema，用 tool_search 传 \"select:<名字>\"。",
+            "ja" => "このターンで実際に使えるツールを一覧表示する（1 行 1 件：名前 + 一行の用途）。\n\
+                     自由形式の作業を始める前に、まず自分の能力面を確認してから方針を決める。\
+                     「これはできない」と結論づける前にも確認すること——名前が違うだけで存在する場合がある。\n\
+                     ここでは名前と用途のみ。完全なパラメータ schema は tool_search に \"select:<名前>\" を渡して取得する。",
+            _ => self.description(),
+        }
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string", "description": "可选：按名称/用途关键词过滤（不区分大小写的子串匹配）" },
+                "category": { "type": "string", "description": "可选：按类别过滤（file / system / memory / network / mcp 等）" },
+                "offset": { "type": "integer", "description": "分页起点，默认 0", "minimum": 0 },
+                "limit": { "type": "integer", "description": "本页最多返回多少条，默认 60，上限 200", "minimum": 1 }
+            },
+            "required": []
+        })
+    }
+
+    fn parameters_schema_in(&self, _lang: &str) -> serde_json::Value {
+        self.parameters_schema()
+    }
+
+    async fn validate_input(&self, _input: &Value, _ctx: &ToolUseContext) -> ValidationResult {
+        ValidationResult::success(None)
+    }
+
+    async fn check_permissions(&self, _input: &Value, _ctx: &ToolUseContext) -> PermissionResult {
+        PermissionResult::allow()
+    }
+
+    async fn call(&self, args: Value, ctx: &ToolUseContext) -> ToolResult {
+        let query = args.get("query").and_then(|v| v.as_str()).map(|s| s.to_lowercase());
+        let category = args.get("category").and_then(|v| v.as_str()).map(|s| s.to_lowercase());
+        let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+        let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(60).clamp(1, 200) as usize;
+
+        // allowed_tools 存在时以它为准——那是本轮 schema 的真实内容，
+        // 不掺任何"注册表里有就算"的推断。
+        let allowed: Option<std::collections::HashSet<&str>> = ctx
+            .allowed_tools
+            .as_ref()
+            .map(|list| list.iter().map(|s| s.as_str()).collect());
+
+        let mut rows: Vec<(String, String, String)> = self
+            .live_tools()
+            .into_iter()
+            .filter(|t| allowed.as_ref().map_or(true, |set| set.contains(t.name())))
+            .filter_map(|t| {
+                let name = t.name().to_string();
+                let desc = t.description().lines().next().unwrap_or("").trim().to_string();
+                let cat = format!("{:?}", t.category()).to_lowercase();
+                if let Some(q) = &query {
+                    if !name.to_lowercase().contains(q) && !desc.to_lowercase().contains(q) {
+                        return None;
+                    }
+                }
+                if let Some(c) = &category {
+                    if &cat != c {
+                        return None;
+                    }
+                }
+                Some((name, desc, cat))
+            })
+            .collect();
+        rows.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let total = rows.len();
+        if total == 0 {
+            let payload = serde_json::json!({"total": 0, "offset": offset, "returned": 0, "tools": []});
+            return ToolResult::standard_success("没有匹配的工具（可去掉 query/category 再试）。", Some(payload));
+        }
+
+        let page: Vec<_> = rows.iter().skip(offset).take(limit).collect();
+        let mut lines = vec![format!(
+            "本轮可用工具：共 {total} 个，本页 {} 个（offset={offset}）。",
+            page.len()
+        )];
+        for (name, desc, cat) in &page {
+            let d: String = desc.chars().take(120).collect();
+            lines.push(format!("- {name} [{cat}] — {d}"));
+        }
+        if offset + page.len() < total {
+            lines.push(format!(
+                "还有 {} 个未显示：用 offset={} 继续，或用 query/category 过滤。",
+                total - offset - page.len(),
+                offset + page.len()
+            ));
+        }
+        lines.push("要某个工具的完整参数 schema：tool_search 传 \"select:<名字>\"。".to_string());
+
+        let payload = serde_json::json!({
+            "total": total,
+            "offset": offset,
+            "returned": page.len(),
+            "tools": page.iter().map(|(n, d, c)| serde_json::json!({
+                "name": n, "purpose": d, "category": c
+            })).collect::<Vec<_>>(),
+        });
+        ToolResult::standard_success(&lines.join("\n"), Some(payload))
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::System
+    }
+
+    fn risk(&self) -> crate::tools::types::ToolRiskTier {
+        crate::tools::types::ToolRiskTier::Safe
+    }
+
+    fn search_hint(&self) -> &str {
+        "tool list available capability 工具清单 能用什么 有哪些能力"
     }
 }
 
@@ -2153,11 +2320,11 @@ mod tests {
     #[tokio::test]
     async fn screenshot_without_confirmation_returns_real_failure_in_both_paths() {
         let system = Arc::new(ToolSystem::new());
-        system.register_tool(Arc::new(crate::tools::builtin::system_ops::ScreenshotAnalyzeTool::new()));
-        system.register_alias("take_screenshot", "screenshot_analyze");
+        system.register_tool(Arc::new(crate::tools::builtin::system_ops::TakeScreenshotTool::new()));
+        system.register_alias("screenshot_analyze", "take_screenshot");
         let manager = ToolCallManager::new(system, ToolUseContext::default());
         let calls = [crate::providers::base::StructuredToolCall {
-            id: "screenshot_call".into(), name: "take_screenshot".into(), arguments: json!({}),
+            id: "screenshot_call".into(), name: "screenshot_analyze".into(), arguments: json!({}),
         }];
         let native = manager.execute_structured_calls(&calls).await;
         let text = manager.execute_multi_step(r#"{"tool":"take_screenshot","arguments":{}}"#).await;

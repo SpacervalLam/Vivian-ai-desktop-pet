@@ -26,7 +26,7 @@ pub use persona_decision::PersonaDecisionWeights;
 pub use prompt_render::StylePreset;
 pub use tone_injector::ToneInjector;
 pub use schemas::{
-    CharacterExpression, FewShotExample, FewShotExamplesConfig, FewShotIntent, IdentityLayer,
+    CharacterExpression, IdentityLayer,
     LanguageStyle, PersonaConfig, PerformanceRule, SceneMode, SceneModeConfig,
     DEFAULT_NANA_PERSONA, DEFAULT_PERSONA, default_persona_for,
 };
@@ -117,14 +117,8 @@ impl PersonaEngine {
         if content.trim().is_empty() {
             return Ok(schemas::default_persona_for(char_id));
         }
-        let mut config: PersonaConfig = serde_json::from_str(&content)
+        let config: PersonaConfig = serde_json::from_str(&content)
             .map_err(|e| VivianError::Memory(format!("解析人格文件失败: {e}")))?;
-
-        if !config._examples_definition_compat.trim().is_empty() && config.few_shot_examples.examples.is_empty() {
-            let parsed = prompt_render::parse_examples_markdown(&config._examples_definition_compat);
-            config.few_shot_examples = parsed;
-            config._examples_definition_compat = String::new();
-        }
 
         Ok(config)
     }
@@ -182,7 +176,6 @@ impl PersonaEngine {
     ///
     /// section_key 使用 CharacterSection::as_key() 返回的值：
     /// identity/personality/background/interests/appearance/speech/relationships。
-    /// 注意：examples 不再通过此方法设置，请使用 set_few_shot_examples。
     /// 传入空串则回退到出厂默认。
     pub fn set_section_definition(&self, section_key: &str, body: &str) -> VivianResult<()> {
         use crate::persona::prompt_render::CharacterSection;
@@ -194,11 +187,6 @@ impl PersonaEngine {
             "appearance" => CharacterSection::Appearance,
             "speech" => CharacterSection::Speech,
             "relationships" => CharacterSection::Relationships,
-            "examples" => {
-                return Err(crate::error::VivianError::Config(
-                    "examples 请使用 set_few_shot_examples 设置结构化数据".to_string(),
-                ));
-            }
             "canon_quotes" => {
                 return Err(crate::error::VivianError::Config(
                     "canon_quotes 是语气基准，不可编辑；如需调整语气请修改 speech".to_string(),
@@ -261,14 +249,6 @@ impl PersonaEngine {
 
     /// 重置角色段落到出厂默认
     pub fn reset_persona_section(&self, section_key: &str) -> VivianResult<()> {
-        if section_key == "examples" {
-            {
-                let mut config = self.config.write();
-                config.few_shot_examples = schemas::FewShotExamplesConfig::default();
-            }
-            self.bump_config_revision();
-            return self.save_to();
-        }
         self.set_section_definition(section_key, "")
     }
 
@@ -283,30 +263,8 @@ impl PersonaEngine {
             "appearance" => !config.appearance_definition.trim().is_empty(),
             "speech" => !config.speech_definition.trim().is_empty(),
             "relationships" => !config.relationships_definition.trim().is_empty(),
-            "examples" => !config.few_shot_examples.examples.is_empty(),
             _ => false,
         }
-    }
-
-    /// 获取结构化 Few-shot 示例配置
-    pub fn get_few_shot_examples(&self) -> schemas::FewShotExamplesConfig {
-        let config = self.config.read();
-        if !config.few_shot_examples.examples.is_empty() {
-            config.few_shot_examples.clone()
-        } else {
-            let default_md = prompt_render::default_section_for(&config.identity.name, prompt_render::CharacterSection::Examples);
-            prompt_render::parse_examples_markdown(default_md)
-        }
-    }
-
-    /// 设置结构化 Few-shot 示例配置并持久化
-    pub fn set_few_shot_examples(&self, data: schemas::FewShotExamplesConfig) -> VivianResult<()> {
-        {
-            let mut config = self.config.write();
-            config.few_shot_examples = data;
-        }
-        self.bump_config_revision();
-        self.save_to()
     }
 
     /// 兼容旧 API：设置身份定位层

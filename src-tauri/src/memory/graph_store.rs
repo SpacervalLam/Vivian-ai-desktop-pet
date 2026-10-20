@@ -11,10 +11,11 @@
 //! - 增加 source_memory_id 溯源（每条边关联到来源记忆）
 
 use std::collections::{HashMap, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
+use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
 use super::entity_extract::{EntityType, RelationType};
@@ -76,39 +77,233 @@ impl GraphStoreData {
     }
 }
 
+/// 边的稳定行键：同一 (source, target, relation) 三元组只允许一条边（与内存去重规则一致）。
+fn edge_row_id(edge: &GraphEdge) -> String {
+    format!("{}\u{1}{}\u{1}{:?}", edge.source, edge.target, edge.relation_type)
+}
+
+/// 行级持久化封装：实体、边各占一行，保存时仅写入新增/变化行、删除已移除行。
+struct GraphDb {
+    conn: Connection,
+    /// id -> json 快照（实体：id=实体名）
+    nodes: HashMap<String, String>,
+    /// id -> json 快照（边：id=三元组行键）
+    edges: HashMap<String, String>,
+}
+
+impl GraphDb {
+    fn open(path: &Path) -> Result<Self, String> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("创建图谱目录失败: {e}"))?;
+        }
+        let conn = Connection::open(path).map_err(|e| format!("打开图谱数据库失败: {e}"))?;
+        crate::utils::sqlite::configure(&conn, crate::utils::sqlite::DataClass::Authoritative)
+            .map_err(|e| format!("设置图谱数据库参数失败: {e}"))?;
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS graph_nodes (id TEXT PRIMARY KEY, json TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS graph_edges (id TEXT PRIMARY KEY, json TEXT NOT NULL);",
+        )
+        .map_err(|e| format!("初始化图谱数据库失败: {e}"))?;
+        conn.prepare("SELECT id, json FROM graph_nodes LIMIT 0")
+            .map_err(|e| format!("图谱节点表结构无效: {e}"))?;
+        conn.prepare("SELECT id, json FROM graph_edges LIMIT 0")
+            .map_err(|e| format!("图谱边表结构无效: {e}"))?;
+        let nodes = read_rows(&conn, "SELECT id, json FROM graph_nodes")?;
+        let edges = read_rows(&conn, "SELECT id, json FROM graph_edges")?;
+        Ok(Self { conn, nodes, edges })
+    }
+
+    fn is_empty(&self) -> bool {
+        self.nodes.is_empty() && self.edges.is_empty()
+    }
+
+    /// 单事务内执行节点/边的行级 upsert/delete。
+    fn apply(
+        &mut self,
+        node_upserts: &[(String, String)],
+        node_deletes: &[String],
+        edge_upserts: &[(String, String)],
+        edge_deletes: &[String],
+    ) -> Result<(), String> {
+        if node_upserts.is_empty()
+            && node_deletes.is_empty()
+            && edge_upserts.is_empty()
+            && edge_deletes.is_empty()
+        {
+            return Ok(());
+        }
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|e| format!("开启图谱事务失败: {e}"))?;
+        write_rows(&tx, "graph_nodes", node_upserts, node_deletes)?;
+        write_rows(&tx, "graph_edges", edge_upserts, edge_deletes)?;
+        tx.commit().map_err(|e| format!("提交图谱事务失败: {e}"))?;
+        Ok(())
+    }
+}
+
+fn read_rows(conn: &Connection, sql: &str) -> Result<HashMap<String, String>, String> {
+    let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })
+        .map_err(|e| e.to_string())?;
+    let mut out = HashMap::new();
+    for row in rows {
+        let (id, json) = row.map_err(|e| e.to_string())?;
+        out.insert(id, json);
+    }
+    Ok(out)
+}
+
+fn write_rows(
+    tx: &rusqlite::Transaction<'_>,
+    table: &str,
+    upserts: &[(String, String)],
+    deletes: &[String],
+) -> Result<(), String> {
+    if !upserts.is_empty() {
+        let sql = format!(
+            "INSERT INTO {table}(id, json) VALUES(?1, ?2)
+             ON CONFLICT(id) DO UPDATE SET json = excluded.json"
+        );
+        let mut stmt = tx.prepare(&sql).map_err(|e| e.to_string())?;
+        for (id, json) in upserts {
+            stmt.execute([id.as_str(), json.as_str()])
+                .map_err(|e| format!("写入 {table} 行失败: {e}"))?;
+        }
+    }
+    if !deletes.is_empty() {
+        let sql = format!("DELETE FROM {table} WHERE id = ?1");
+        let mut stmt = tx.prepare(&sql).map_err(|e| e.to_string())?;
+        for id in deletes {
+            stmt.execute([id.as_str()])
+                .map_err(|e| format!("删除 {table} 行失败: {e}"))?;
+        }
+    }
+    Ok(())
+}
+
 /// 知识图谱存储
 ///
-/// 内存 HashMap + JSON 文件持久化。
+/// 内存 HashMap + SQLite 行级持久化。
 /// 写入时更新内存 + 标记脏数据，5 秒节流落盘。
 pub struct KnowledgeGraph {
     inner: Arc<RwLock<GraphStoreData>>,
-    store_path: PathBuf,
+    /// 行级 SQLite 存储；初始化失败时为 None（退化为纯内存态）
+    db: Option<Mutex<GraphDb>>,
     dirty: Arc<RwLock<bool>>,
 }
 
 impl KnowledgeGraph {
     /// 创建新的知识图谱存储
     pub fn new(store_path: PathBuf) -> Self {
+        let db_path = store_path.with_extension("db");
         let mut store = GraphStoreData::new();
-        
-        // 尝试从磁盘加载
-        if store_path.exists() {
-            if let Ok(content) = std::fs::read_to_string(&store_path) {
-                if let Ok(loaded) = serde_json::from_str::<GraphStoreData>(&content) {
-                    store = loaded;
-                    tracing::info!(
-                        "[KnowledgeGraph] 加载 {} 个实体 / {} 条边",
-                        store.entities.len(),
-                        store.edges.len()
-                    );
+        let db = match GraphDb::open(&db_path) {
+            Ok(mut db) => {
+                // 首次迁移：库为空且存在旧 JSON 时导入，成功后归档旧文件（不删除用户数据）
+                if db.is_empty() && store_path.exists() {
+                    Self::import_legacy_json(&mut db, &store_path);
                 }
+                for json in db.nodes.values() {
+                    match serde_json::from_str::<GraphEntity>(json) {
+                        Ok(entity) => {
+                            store.entities.insert(entity.name.clone(), entity);
+                        }
+                        Err(e) => tracing::warn!("[KnowledgeGraph] 单条实体解析失败，跳过: {e}"),
+                    }
+                }
+                let mut edge_rows: Vec<(String, GraphEdge)> = Vec::with_capacity(db.edges.len());
+                for (id, json) in &db.edges {
+                    match serde_json::from_str::<GraphEdge>(json) {
+                        Ok(edge) => edge_rows.push((id.clone(), edge)),
+                        Err(e) => tracing::warn!("[KnowledgeGraph] 单条边解析失败，跳过: {e}"),
+                    }
+                }
+                // 行键排序，确保每次启动的边顺序稳定
+                edge_rows.sort_by(|a, b| a.0.cmp(&b.0));
+                store.edges = edge_rows.into_iter().map(|(_, edge)| edge).collect();
+                tracing::info!(
+                    "[KnowledgeGraph] 加载 {} 个实体 / {} 条边",
+                    store.entities.len(),
+                    store.edges.len()
+                );
+                Some(db)
             }
-        }
+            Err(e) => {
+                tracing::error!("[KnowledgeGraph] 打开图谱数据库失败，退化为仅内存态: {e}");
+                None
+            }
+        };
 
         Self {
             inner: Arc::new(RwLock::new(store)),
-            store_path,
+            db: db.map(Mutex::new),
             dirty: Arc::new(RwLock::new(false)),
+        }
+    }
+
+    /// 一次性迁移：把旧 `knowledge_graph.json` 导入数据库，成功后归档为 `.json.migrated`。
+    ///
+    /// 失败时不阻塞启动、不改动旧文件（下次启动可重试）。
+    fn import_legacy_json(db: &mut GraphDb, json_path: &Path) {
+        let content = match std::fs::read_to_string(json_path) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!("[KnowledgeGraph] 读取旧图谱文件失败，跳过迁移: {e}");
+                return;
+            }
+        };
+        let file_name = json_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let migrated = json_path.with_file_name(format!("{file_name}.migrated"));
+        if content.trim().is_empty() {
+            let _ = std::fs::rename(json_path, &migrated);
+            return;
+        }
+        let store: GraphStoreData = match serde_json::from_str(&content) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("[KnowledgeGraph] 解析旧图谱文件失败，跳过迁移: {e}");
+                return;
+            }
+        };
+        if store.entities.is_empty() && store.edges.is_empty() {
+            let _ = std::fs::rename(json_path, &migrated);
+            return;
+        }
+        let node_upserts: Vec<(String, String)> = store
+            .entities
+            .iter()
+            .filter_map(|(name, entity)| {
+                serde_json::to_string(entity).ok().map(|json| (name.clone(), json))
+            })
+            .collect();
+        let edge_upserts: Vec<(String, String)> = store
+            .edges
+            .iter()
+            .filter_map(|edge| {
+                serde_json::to_string(edge).ok().map(|json| (edge_row_id(edge), json))
+            })
+            .collect();
+        if let Err(e) = db.apply(&node_upserts, &[], &edge_upserts, &[]) {
+            tracing::warn!("[KnowledgeGraph] 旧图谱导入数据库失败: {e}");
+            return;
+        }
+        for (id, json) in node_upserts {
+            db.nodes.insert(id, json);
+        }
+        for (id, json) in edge_upserts {
+            db.edges.insert(id, json);
+        }
+        tracing::info!("[KnowledgeGraph] 旧图谱迁移完成");
+        if let Err(e) = std::fs::rename(json_path, &migrated) {
+            tracing::warn!("[KnowledgeGraph] 归档旧图谱文件失败: {e}");
         }
     }
 
@@ -453,16 +648,57 @@ impl KnowledgeGraph {
         self.inner.read().edges.len()
     }
 
-    /// 持久化到磁盘（5 秒节流由调用方管理）
+    /// 持久化到磁盘：只 upsert 新增/变化的实体、边行，删除已移除的行（5 秒节流由调用方管理）
     pub fn save_to_disk(&self) -> Result<(), String> {
         let store = self.inner.read();
-        let content = serde_json::to_string_pretty(&*store)
-            .map_err(|e| format!("序列化图谱失败: {e}"))?;
-        
-        // 原子写：自带 fsync + UUID 临时名，比手写 tmp + rename 多一层断电保护与并发安全
-        crate::utils::fs::write_atomic(&self.store_path, &content)
-            .map_err(|e| format!("写入图谱文件失败: {e}"))?;
-        
+        let Some(db_mutex) = self.db.as_ref() else {
+            *self.dirty.write() = false;
+            return Ok(());
+        };
+
+        let mut node_rows: HashMap<String, String> = HashMap::with_capacity(store.entities.len());
+        for (name, entity) in &store.entities {
+            let json = serde_json::to_string(entity)
+                .map_err(|e| format!("序列化图谱实体失败: {e}"))?;
+            node_rows.insert(name.clone(), json);
+        }
+        let mut edge_rows: HashMap<String, String> = HashMap::with_capacity(store.edges.len());
+        for edge in &store.edges {
+            let json =
+                serde_json::to_string(edge).map_err(|e| format!("序列化图谱边失败: {e}"))?;
+            edge_rows.insert(edge_row_id(edge), json);
+        }
+
+        let mut db = db_mutex.lock();
+        let mut node_upserts: Vec<(String, String)> = Vec::new();
+        for (id, json) in &node_rows {
+            if db.nodes.get(id).map(|existing| existing != json).unwrap_or(true) {
+                node_upserts.push((id.clone(), json.clone()));
+            }
+        }
+        let node_deletes: Vec<String> = db
+            .nodes
+            .keys()
+            .filter(|id| !node_rows.contains_key(*id))
+            .cloned()
+            .collect();
+        let mut edge_upserts: Vec<(String, String)> = Vec::new();
+        for (id, json) in &edge_rows {
+            if db.edges.get(id).map(|existing| existing != json).unwrap_or(true) {
+                edge_upserts.push((id.clone(), json.clone()));
+            }
+        }
+        let edge_deletes: Vec<String> = db
+            .edges
+            .keys()
+            .filter(|id| !edge_rows.contains_key(*id))
+            .cloned()
+            .collect();
+
+        db.apply(&node_upserts, &node_deletes, &edge_upserts, &edge_deletes)?;
+        db.nodes = node_rows;
+        db.edges = edge_rows;
+        drop(db);
         *self.dirty.write() = false;
         Ok(())
     }
@@ -580,6 +816,19 @@ mod tests {
         let _ = graph.get_entity("不存在");
     }
 
+    /// 清理图谱测试产生的库文件（含 WAL/SHM 旁文件）。
+    fn cleanup_graph_files(path: &std::path::Path) {
+        let db = path.with_extension("db");
+        for p in [
+            db.clone(),
+            db.with_extension("db-wal"),
+            db.with_extension("db-shm"),
+        ] {
+            let _ = std::fs::remove_file(p);
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
     #[test]
     fn test_save_and_load() {
         let path = temp_dir().join(format!("test_graph_save_{}.json", uuid::Uuid::new_v4()));
@@ -591,9 +840,104 @@ mod tests {
         // 重新加载
         let graph2 = KnowledgeGraph::new(path.clone());
         assert!(graph2.entity_count() > 0 || graph2.edge_count() > 0);
-        
+
         // 清理
-        let _ = std::fs::remove_file(&path);
+        cleanup_graph_files(&path);
+    }
+
+    #[test]
+    fn test_sqlite_rows_survive_reopen() {
+        let path = temp_dir().join(format!("test_graph_reopen_{}.json", uuid::Uuid::new_v4()));
+        let entities;
+        let edges;
+        let names;
+        {
+            let graph = KnowledgeGraph::new(path.clone());
+            graph.ingest_from_memory("mem1", "马化腾创建了腾讯", 1000.0);
+            graph.ingest_concepts(
+                "agent_autonomy",
+                &["proactive".to_string()],
+                &["insight1".to_string()],
+                1000.0,
+            );
+            graph.save_to_disk().unwrap();
+            entities = graph.entity_count();
+            edges = graph.edge_count();
+            let mut n = graph.list_entity_names();
+            n.sort();
+            names = n;
+        }
+        let reopened = KnowledgeGraph::new(path.clone());
+        assert_eq!(reopened.entity_count(), entities);
+        assert_eq!(reopened.edge_count(), edges);
+        let mut reopened_names = reopened.list_entity_names();
+        reopened_names.sort();
+        assert_eq!(reopened_names, names);
+        cleanup_graph_files(&path);
+    }
+
+    #[test]
+    fn test_single_mutation_does_not_rewrite_unaffected_rows() {
+        let path = temp_dir().join(format!("test_graph_diff_{}.json", uuid::Uuid::new_v4()));
+        let graph = KnowledgeGraph::new(path.clone());
+        graph.ingest_concepts(
+            "agent_autonomy",
+            &["proactive".to_string(), "inner_monologue".to_string()],
+            &["m1".to_string()],
+            1000.0,
+        );
+        graph.save_to_disk().unwrap();
+        let after_first = graph.db.as_ref().unwrap().lock().conn.total_changes();
+        // 内容未变化：第二次保存不应产生任何写入
+        graph.save_to_disk().unwrap();
+        let after_second = graph.db.as_ref().unwrap().lock().conn.total_changes();
+        assert_eq!(after_first, after_second, "未变化的实体/边行不应被重写");
+        // 新增一个概念：2 个新实体 + 1 条新边 = 仅 3 行被写入
+        graph.ingest_concepts("memory_system", &["recall".to_string()], &["m2".to_string()], 2000.0);
+        graph.save_to_disk().unwrap();
+        let after_add = graph.db.as_ref().unwrap().lock().conn.total_changes();
+        assert_eq!(after_add - after_second, 3, "单次新增只应写入相关行");
+        cleanup_graph_files(&path);
+    }
+
+    #[test]
+    fn test_legacy_json_imported_and_archived() {
+        let path = temp_dir().join(format!("test_graph_legacy_{}.json", uuid::Uuid::new_v4()));
+        let mut data = GraphStoreData::new();
+        data.entities.insert(
+            "腾讯".to_string(),
+            GraphEntity {
+                name: "腾讯".to_string(),
+                entity_type: EntityType::Concept,
+                salience: 0.8,
+                memory_ids: vec!["m1".to_string()],
+                created_at: 1.0,
+                updated_at: 1.0,
+            },
+        );
+        data.edges.push(GraphEdge {
+            source: "腾讯".to_string(),
+            target: "马化腾".to_string(),
+            relation_type: RelationType::Mentions,
+            weight: 0.7,
+            source_memory_id: "m1".to_string(),
+            context: String::new(),
+            created_at: 1.0,
+        });
+        std::fs::write(&path, serde_json::to_string(&data).unwrap()).unwrap();
+
+        let graph = KnowledgeGraph::new(path.clone());
+        assert_eq!(graph.entity_count(), 1);
+        assert_eq!(graph.edge_count(), 1);
+        // 旧文件已归档为 <name>.migrated，不删除用户数据
+        assert!(!path.exists());
+        let migrated = path.with_file_name(format!(
+            "{}.migrated",
+            path.file_name().unwrap().to_string_lossy()
+        ));
+        assert!(migrated.exists());
+        let _ = std::fs::remove_file(&migrated);
+        cleanup_graph_files(&path);
     }
 
     #[test]

@@ -525,8 +525,10 @@ pub fn coding_rename_session(session_id: String, title: String) -> Result<Coding
 
 /// 取消正在运行的会话任务。
 #[tauri::command]
-pub fn coding_cancel_session(session_id: String) -> Result<bool, String> {
-    Ok(CODING_AGENT.cancel(&session_id))
+pub async fn coding_cancel_session(session_id: String) -> Result<bool, String> {
+    // Persisting cancellation must not block the inspector's UI thread.
+    tokio::task::spawn_blocking(move || CODING_AGENT.cancel(&session_id))
+        .await.map_err(|error| error.to_string())
 }
 
 /// 发送用户消息并驱动 agent loop（事件实时广播 coding:*）。图片与文件引用随消息注入上下文。

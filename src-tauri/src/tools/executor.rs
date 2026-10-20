@@ -36,10 +36,10 @@ static TOOL_TIMEOUTS: Lazy<HashMap<&'static str, u64>> = Lazy::new(|| {
     m.insert("list_directory", 15);
     m.insert("search_files", 60);
     m.insert("grep", 60);
+    m.insert("review_diff", 60);
     m.insert("web_search", 60);
-    m.insert("take_screenshot", 30);
     // 截屏识图含 LLM 视觉调用，给 90s 余量（截屏 1~2s + 视觉模型 10~60s）
-    m.insert("screenshot_analyze", 90);
+    m.insert("take_screenshot", 90);
     m.insert("computer_action", 180);
     m.insert("open_application", 30);
     m.insert("close_application", 30);
@@ -506,6 +506,23 @@ pub async fn execute_tool_use(
     let tool = match tool_system.find_tool(tool_name) {
         Some(t) => t,
         None => {
+            // 浏览器类工具在桥未连接时整体不注入 schema，但提示词是**按能力**写的，
+            // 会提到这些名字，模型可能照着调用。此时给「为什么没有 + 接下来能做什么」，
+            // 而不是一句「工具不存在」——后者会让它以为只是名字写错，换个拼写继续试。
+            if tool_name.starts_with("mcp__browser__") || tool_name.starts_with("browser_") {
+                let ready = crate::browser_bridge::tools::global_bridge()
+                    .is_some_and(|b| b.is_connected());
+                let hint = if ready {
+                    "该浏览器工具本轮没有提供给你（可能在工作侧被禁用）。改用 web_fetch 取内容；\
+                     仍然取不到时请用户确认浏览器设置，不要反复换名字或换写法调用。"
+                } else {
+                    "浏览器桥本轮未连接，所有 browser_* 工具都不可用。JS 渲染页、登录页、\
+                     反爬挑战页在这个状态下取不到内容：改用 web_fetch，或找不需要浏览器的替代源；\
+                     确实必须用浏览器时，用 work_ask_user 请用户连接。不要靠换 UA／换接口／\
+                     换脚本继续试，失败原因不会变。"
+                };
+                return ToolResult::standard_error(hint, Some("BrowserUnavailable"), None);
+            }
             let info = ToolErrorCode::ToolNotFound.get_error_info();
             return ToolResult::standard_error(
                 &info.suggestion,
@@ -514,6 +531,8 @@ pub async fn execute_tool_use(
             );
         }
     };
+
+    let tool_name = tool.name();
 
     // 1.05 用户在**本侧**禁用的工具直接拒绝（正常情况下禁用工具不会出现在该侧
     // LLM 工具列表中，此处防御幻觉调用旧工具名 / 历史消息重放）。
@@ -640,7 +659,7 @@ pub async fn execute_tool_use(
     // Web tools own freshness and document caches; generic cache lacks caller/config/freshness keys.
     // 前台应用是实时状态，不能返回几分钟前的窗口或进程。
     let is_read_only = tool.is_read_only() && !matches!(tool.name(),
-        "web_search" | "web_fetch" | "get_foreground_app_context" | "get_active_window");
+        "web_search" | "web_fetch" | "session_event_read" | "get_foreground_app_context" | "get_active_window");
     if is_read_only {
         if let Some(cached) = tool_system.cache.get(tool_name, &validated_args) {
             tracing::debug!("工具 {} 命中缓存", tool_name);
@@ -653,11 +672,6 @@ pub async fn execute_tool_use(
     // 会话级访问级别覆盖优先（编程智能体按会话权限控制），否则回退全局 runtime config
     let access_level = context.access_level.unwrap_or(runtime_cfg.access_level);
     let mut permission_context = PermissionContext::default().with_access_level(access_level);
-    // 注入本轮用户原话，供「预授权」档判定：用户已说清目标（"帮我把壁纸换成这张"）
-    // 时，对应低风险工具不再重复弹窗。为 None 时预授权一律不成立（宁可多问一次）。
-    if let Some(user_message) = context.user_message.as_deref() {
-        permission_context.current_user_input = Some(user_message.to_string());
-    }
     // 注册工具上下文的工作目录为已授权目录：工作目录内的读写操作免用户确认
     // （路径范围已由各工具 validate_input 的沙箱校验限制在工作目录内；
     //   ReadOnly 访问级别注册为只读目录，写入仍会被权限检查拒绝）
@@ -813,8 +827,14 @@ pub async fn execute_tool_use(
     }
 
     // 6. 执行（带超时）
-    // 别名应使用实际工具的执行预算（take_screenshot 别名实际包含视觉模型调用）。
-    let timeout = get_tool_timeout(tool.name());
+    // 别名应使用实际工具的执行预算。
+    // 工具可按**本次参数**声明预算（如 run_command 的 timeout_secs）：静态登记
+    // 值只是下限，否则外层会先于内层触发，把工具自己的超时说明挡在外面。
+    let base_timeout = get_tool_timeout(tool.name());
+    let timeout = tool
+        .execution_timeout(&validated_args)
+        .map(|t| t.max(base_timeout))
+        .unwrap_or(base_timeout);
     let obs_record = tool_system
         .observability
         .start_call(tool_name, validated_args.clone());
