@@ -130,6 +130,16 @@ pub fn run() {
     // 此时数据文件未被打开，可无锁覆盖）
     commands::backup::restore_pending_if_any();
 
+    // Establish the shared story clock before characters/model configuration initialize.
+    // Factory reset removes it; restoring a backup preserves that installation's clock.
+    if let Err(error) = memory::seed::load_or_create_anchor(
+        &crate::utils::path::get_user_data_dir().join(memory::seed::CLOCK_RELATIVE_PATH),
+        memory::types::current_timestamp(),
+    ) {
+        tracing::error!("无法初始化种子记忆时间: {error}");
+        return;
+    }
+
     let app_state = AppState::new();
     companion_quiet::restore(app_state.config.read().get_all().companion.do_not_disturb);
 

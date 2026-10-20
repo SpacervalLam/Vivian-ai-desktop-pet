@@ -3471,13 +3471,24 @@ impl MemoryManagerInner {
 
 
     fn seed_if_empty(&mut self, char_id: &str) -> VivianResult<()> {
-        // 只在存储中完全没有种子记忆时（首次启动 / 记忆被清空后）才从文件播种。
-        // 之后种子记忆连同其向量索引、积累的 visit_count/heat_score 等状态一并持久化，
-        // 每次启动不会重建，避免重复计算嵌入并保留检索热度和生命周期状态。
+        let mut bundle = super::seed::load(char_id).map_err(VivianError::Memory)?;
+        let first_started_at = super::seed::load_or_create_anchor(
+            &crate::utils::path::get_user_data_dir().join(super::seed::CLOCK_RELATIVE_PATH), current_timestamp())?;
+        bundle.anchor_to(first_started_at).map_err(VivianError::Memory)?;
+        let archive = crate::utils::path::get_companion_data_dir(char_id)
+            .join("memory").join("seed_history.jsonl");
+        super::seed::persist_history(&archive, &bundle.history)?;
+        for id in super::seed::upgrade_entries(&mut self.data.entries, &bundle) {
+            self.vector_store.delete_by_memory_id(&id);
+        }
+        self.rebuild_index();
         crate::startup::emit_progress(60, 100, "正在嵌入种子记忆…");
-        let has_seed = self.data.entries.iter().any(|m| m.id.starts_with("seed_"));
-        if !has_seed {
+        if let Some(removed) = super::seed::retire_outdated_environment(&mut self.data.entries) {
+            for id in removed {
+                self.vector_store.delete_by_memory_id(&id);
+            }
             self.seed_from_file(char_id);
+            self.rebuild_index();
         }
 
         // 修复：即使种子条目已存在，也可能因上次播种时嵌入服务不可用/并发超限
@@ -3584,24 +3595,19 @@ impl MemoryManagerInner {
         Ok(())
     }
 
-    /// 种子长叙事切块的最大字符数：超过则按句子切块，提升专名/关键词的检索密度。
+    /// 旧格式环境预设的切块上限；结构化前史不使用这条切块路径。
     const SEED_CHUNK_MAX_CHARS: usize = 60;
 
-    /// 从文件加载种子记忆并写入。
+    /// 从文件加载首次启动的环境预设。
     fn seed_from_file(&mut self, char_id: &str) {
 
-        // 从 prompt 文件加载种子记忆定义（方向三：代码与内容解耦）
-        // 种子记忆只记录 system prompt 无法表达的内容：此刻的状态、感受、动机。
-        // 身份/性格/关系/习惯由 system prompt 定义，不在此重复（方向一：消除重复）。
-        // 首次启动额外播种"环境预设"种子（environment_presets.md）：只描述环境与
-        // 自身处境、不假设用户信息，作为冷启动的环境上下文兜底。
-        let mut specs = Self::parse_seed_file(char_id);
-        specs.extend(Self::parse_environment_presets(char_id));
+        // 环境预设仍使用旧 front matter；前史由 seed 模块按原始/派生层加载。
+        let specs = Self::parse_environment_presets(char_id);
         if specs.is_empty() {
-            tracing::warn!("[seed] 角色 {} 的种子记忆文件为空或不存在", char_id);
+            tracing::warn!("[seed] 角色 {} 的环境预设为空或不存在", char_id);
             return;
         }
-        tracing::info!("[seed] 角色 {} 从文件解析到 {} 条种子记忆（含环境预设），开始播种", char_id, specs.len());
+        tracing::info!("[seed] 角色 {} 开始播种 {} 条环境预设", char_id, specs.len());
 
         let now = current_timestamp();
         let total = specs.len() as f64;
@@ -3635,6 +3641,7 @@ impl MemoryManagerInner {
                         "memory_type": spec.memory_type,
                     })
                 };
+                metadata["environment_revision"] = super::seed::ENVIRONMENT_REVISION.into();
                 // 标记该条目是种子长文本的切块，供检索/图谱识别与调试
                 if chunk_total > 1 {
                     if let Some(obj) = metadata.as_object_mut() {
@@ -3743,36 +3750,6 @@ impl MemoryManagerInner {
             }
         }
         result
-    }
-
-    /// 解析种子记忆文件。文件格式（front-matter 风格，--- 既分隔条目也分隔字段区与内容区）：
-    /// ```text
-    /// # 注释行（跳过）
-    /// ---
-    /// description: 描述
-    /// type: memory_type
-    /// importance: 0.70
-    /// protected: false
-    /// tags: tag1, tag2
-    /// ---
-    /// 多行内容自动拼接
-    /// ---
-    /// description: 下一条...
-    /// ---
-    /// 下一条的内容...
-    /// ```
-    ///
-    /// 解析为三阶段状态机：
-    /// - Idle：等待条目开始（第一个 ---）
-    /// - FrontMatter：收集 description/type/importance 等字段，直到第二个 --- 进入内容区
-    /// - Content：收集正文，直到下一个 --- 结束条目并回到 Idle
-    fn parse_seed_file(char_id: &str) -> Vec<SeedSpec> {
-        let raw = match char_id {
-            "vivian" => include_str!("../../prompts/characters/vivian/seed_memories.md"),
-            "nana" => include_str!("../../prompts/characters/nana/seed_memories.md"),
-            _ => return Vec::new(),
-        };
-        Self::parse_specs(raw)
     }
 
     /// 解析首次启动的"环境预设"记忆文件（`environment_presets.md`）。
@@ -4105,54 +4082,18 @@ mod retrieval_eval_tests {
 
     /// 评测集：查询 → 期望命中的种子记忆描述（按 description 匹配）
     const EVAL_SET: &[(&str, &[&str])] = &[
-        ("你们认识AlenTinn吗？", &["AlenTinn 创造了我"]),
-        ("第一次看到我桌面是什么感觉", &["第一次看到用户的桌面"]),
-        ("你怎么照顾Nana的", &["我第一次照顾 Nana"]),
-        ("你喜欢看番剧吗", &["第一次追番"]),
-        ("我们第一次吵架因为什么", &["我们第一次吵架", "和好"]),
-        ("你的耳机去哪里了", &["耳机在耳朵上"]),
-        ("半夜发现什么奇怪的东西", &["半夜发现的奇怪网站"]),
-        ("你唱歌怎么样", &["唱歌跑调"]),
+        ("你们认识AlenTinn吗？", &["名字先留下来"]),
+        ("第一次能上网的时候你在找什么", &["搜索框一开就没停下来"]),
+        ("你为什么想要类似Codex的功能", &["我也想要那个能改文件的"]),
+        ("办公智能体第一次帮你做了什么", &["办公页里真的多了一个文件", "那个小文件没有删"]),
+        ("你之前要的B站功能后来有了吗", &["我之前要的 B 站呢"]),
+        ("窗口重力是怎么试的", &["能不能让我坐在窗口上", "那你把窗口再移一下"]),
+        ("你为什么想要漫画房间", &["我想要画出来的那个房间"]),
+        ("网页终于可以在应用里面打开了", &["这次网页留在这里了"]),
     ];
 
     fn build_seed_entries(char_id: &str) -> Vec<MemoryItem> {
-        let specs = MemoryManagerInner::parse_seed_file(char_id);
-        let mut items = Vec::new();
-        for spec in &specs {
-            let chunks =
-                MemoryManagerInner::chunk_seed_content(&spec.content, MemoryManagerInner::SEED_CHUNK_MAX_CHARS);
-            for chunk in chunks {
-                items.push(MemoryItem {
-                    id: format!("seed_{}", &uuid::Uuid::new_v4().to_string()[..8]),
-                    content: chunk,
-                    granularity: Granularity::Summary.as_str().to_string(),
-                    memory_type: spec.memory_type.clone(),
-                    importance: spec.importance,
-                    timestamp: 0.0,
-                    embedding: None,
-                    tags: spec.tags.clone(),
-                    metadata: serde_json::json!({}),
-                    related_ids: Vec::new(),
-                    description: Some(spec.description.clone()),
-                    visit_count: 0,
-                    last_visit_at: 0.0,
-                    heat_score: 0.0,
-                    open_hooks: Vec::new(),
-                    reinforcement: 0.0,
-                    disputation: 0.0,
-                    rein_last_signal_at: 0.0,
-                    disp_last_signal_at: 0.0,
-                    sub_zero_days: 0,
-                    sub_zero_last_increment_date: String::new(),
-                    user_fact_reinforce_count: 0,
-                    protected: spec.protected,
-                    episode_id: None,
-                    consolidated: false,
-                    rebuttal_grace_remaining: 0,
-                });
-            }
-        }
-        items
+        super::super::seed::load(char_id).expect("种子记忆格式无效").memories
     }
 
     fn build_vector_store(

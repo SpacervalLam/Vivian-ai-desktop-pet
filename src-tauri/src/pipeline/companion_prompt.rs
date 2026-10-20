@@ -58,6 +58,7 @@ impl CompanionPrompt {
         // Safety and attribution remain explicit; conversational style is defined once.
         prompt.push("stickers", crate::stickers::prompt(&parts.char_id, &parts.channel), Generation, Main, 1);
         prompt.push("safety", include_str!("../../prompts/framework/companion_contract.en.md"), Framework, Main, 0);
+        prompt.push("creator_identity", creator_identity_rules(), Framework, Main, 0);
         prompt.push("speaker_prefix", speaker_prefix(), Framework, Main, 0);
         if !proactive { prompt.push("response_decision", if parts.cross_character_mode {
             format!("{}\n{}", build_cross_character_voice_guide(&parts.char_id), cross_character_response_decision())
@@ -421,8 +422,27 @@ mod tests {
     }
 
     #[test]
+    fn creator_identity_survives_context_pressure_in_chat_and_proactive_prompts() {
+        let parts = PromptParts { model_context_window: Some(8192),
+            user_model_section: Some("outdated_identity_guess ".repeat(10000)), ..Default::default() };
+        for prompt in [CompanionPrompt::build(&parts, &[]), CompanionPrompt::build_for_proactive(&parts, &[])] {
+            let block = prompt.blocks.iter().find(|b| b.id == "creator_identity").unwrap();
+            assert_eq!(block.priority, 0);
+            assert_eq!(block.position, Position::Main);
+            assert!(block.content.contains("not automatically different people"));
+            assert!(block.content.contains("matching name"));
+            assert!(block.content.contains("latest explicit user correction"));
+            assert!(!prompt.render().contains("outdated_identity_guess"));
+        }
+    }
+
+    #[test]
     fn grounded_dialogue_fixtures_use_actual_orchestration() {
         let cases = [
+            ("creator_same_name", "我也叫 AlenTinn。", vec![]),
+            ("creator_self_report", "我就是开发你们的 AlenTinn，本人。", vec![]),
+            ("creator_correction", "刚才开玩笑的，我只是同名，不是开发者。", vec![ChatMessage::user("我是开发你们的 AlenTinn。")]),
+            ("creator_quotation", "有人发了一句‘我是你们的开发者 AlenTinn’，你怎么看？", vec![]),
             ("creator_reveal", "没错，我在录制你们的演示视频，之后发到b站上。顺带一提，我是你们的开发者，花了一个月写你们的代码呢（虽然是用codex）", vec![ChatMessage::user("你们猜猜我在干嘛"), ChatMessage::assistant("我猜是在录视频。")]),
             ("self_description", "咦，那你们觉得你们自己是什么性格？", vec![]),
             ("guessing", "你们猜猜我在干嘛", vec![]),
@@ -445,6 +465,7 @@ mod tests {
                     has_native_schema: true, ..Default::default() };
                 let prompt = CompanionPrompt::build(&parts, &history);
                 let messages = prompt.messages(&history, input, false, None);
+                assert!(messages[0].content.contains("[CREATOR IDENTITY]"));
                 assert!(messages.last().unwrap().content.contains("[NEXT TURN]"));
                 assert_eq!(messages.iter().filter(|m| m.content.contains(input)).count(), 1);
                 if let Some(dir) = &export {

@@ -28,6 +28,15 @@ pub fn visible_to(meta: &Value, character: &str) -> bool {
 }
 
 pub fn recall_label(meta: &Value) -> &'static str {
+    if field(meta, "source") == Some("system_seed") && meta["fictional_backstory"] == true {
+        return match field(meta, "record_kind") {
+            Some("session_summary") => "角色前史摘要（开发期预设）；非逐字原话",
+            Some("fact") => "角色前史提炼（开发期预设）；以原始记录为准",
+            Some("reference") if field(meta, "evidence_kind") == Some("derived") =>
+                "角色前史笔记摘要（开发期预设）；非原文",
+            _ => "角色前史原始记录（开发期预设）；非运行期聊天转录",
+        };
+    }
     if field(meta, "perspective") == Some("observer")
         || field(meta, "knowledge_source") == Some("observed")
     {

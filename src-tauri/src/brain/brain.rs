@@ -85,8 +85,8 @@ pub struct Brain {
 fn fixed_startup_greeting(char_id: &str, first_meeting: bool) -> Option<&'static str> {
     if !first_meeting { return None; }
     match char_id {
-        "vivian" => Some("嗨，我是 Vivian！第一次见面，你叫什么名字？"),
-        "nana" => Some("你好呀，我是 Nana。很高兴认识你。"),
+        "vivian" => Some("嗨，我是 Vivian！刚到你这儿，先打个招呼。你叫什么名字？"),
+        "nana" => Some("你好呀，我是 Nana。刚到这里，很高兴认识你。"),
         _ => None,
     }
 }
@@ -2118,9 +2118,9 @@ mod first_contact_tests {
     #[test]
     fn companion_contact_uses_exact_greetings_only_for_first_meeting() {
         assert_eq!(super::fixed_startup_greeting("vivian", true),
-            Some("嗨，我是 Vivian！第一次见面，你叫什么名字？"));
+            Some("嗨，我是 Vivian！刚到你这儿，先打个招呼。你叫什么名字？"));
         assert_eq!(super::fixed_startup_greeting("nana", true),
-            Some("你好呀，我是 Nana。很高兴认识你。"));
+            Some("你好呀，我是 Nana。刚到这里，很高兴认识你。"));
         assert_eq!(super::fixed_startup_greeting("vivian", false), None);
         assert_eq!(super::fixed_startup_greeting("nana", false), None);
         assert_eq!(super::fixed_startup_greeting("unknown", true), None);

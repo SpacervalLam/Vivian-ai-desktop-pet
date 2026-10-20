@@ -207,10 +207,73 @@ pub mod memory {
     }
 }
 `;
-const modules = ['types', 'kinds', 'provenance', 'conversations', 'conversation_semantics', 'session_summary', 'companion_policy', 'pipeline'];
+const modules = ['types', 'kinds', 'provenance', 'conversations', 'conversation_semantics', 'session_summary', 'companion_policy', 'pipeline', 'seed'];
 source = source.replace('__HISTORY_ENTRY__', entry).replace('__STRIP__', strip).replace('__PREFIX__', prefix)
   .replace('__PROMPT_TIME__', `#[path="${rustPath('src-tauri/src/utils/prompt_time.rs')}"] pub mod prompt_time;`)
   .replace('__MODULES__', modules.map((name) => `#[path="${rustPath(`src-tauri/src/memory/${name}.rs`)}"] pub mod ${name};`).join('\n'));
+// Exercise the actual recall-time formatter too: authored dates must survive prompt assembly.
+const memoryStep = await readFile(path.join(root, 'src-tauri/src/pipeline/steps/memory.rs'), 'utf8');
+const authoredStart = memoryStep.indexOf('fn is_authored_context(');
+const authoredEnd = memoryStep.indexOf('// ============================================================================', authoredStart);
+if (authoredStart < 0 || authoredEnd < authoredStart) throw new Error('authored recall formatter not found');
+source = source.replace('pub mod memory {', 'pub mod memory { pub use types::MemoryItem;');
+source += `mod seed_prompt { use serde_json::Value;
+${memoryStep.slice(authoredStart, authoredEnd)}
+#[test] fn recall_keeps_authored_dates_and_distinguishes_environment_presets() {
+    let bundle = crate::memory::seed::load("vivian").unwrap();
+    let mut item = bundle.memories[0].clone();
+    let expected = crate::utils::prompt_time::format_prompt_time(item.timestamp);
+    assert!(memory_time_label(&item).starts_with("前史设定时间："));
+    assert!(memory_time_label(&item).contains(&expected));
+    item.metadata = serde_json::json!({"source":"environment_preset"});
+    assert_eq!(memory_time_label(&item), "预置背景");
+    item.id = "runtime".into(); item.metadata = serde_json::json!({"source":"direct"});
+    assert_eq!(memory_time_label(&item), expected);
+}}
+`;
+// Run the production reset sweep against an isolated root, including the shared clock.
+const systemSource = await readFile(path.join(root, 'src-tauri/src/commands/system.rs'), 'utf8');
+const resetConstants = systemSource.slice(systemSource.indexOf('const FACTORY_RESET_MARKER:'), systemSource.indexOf('/// 写入恢复出厂清扫标记'));
+const sweepStart = systemSource.indexOf('fn sweep_factory_reset_dir(');
+const sweepEnd = systemSource.indexOf('#[cfg(test)]', sweepStart);
+if (!resetConstants.includes('fn remove_memory_path(') || sweepStart < 0 || sweepEnd < sweepStart) throw new Error('reset sweep slice not found');
+source += `mod seed_reset {
+${resetConstants}
+${systemSource.slice(sweepStart, sweepEnd)}
+#[test] fn factory_reset_clears_launch_anchor_and_next_start_uses_new_clock() {
+    let root = std::env::temp_dir().join(format!("seed-reset-{}",uuid::Uuid::new_v4()));
+    let clock = root.join(crate::memory::seed::CLOCK_RELATIVE_PATH);
+    let first = crate::memory::seed::load_or_create_anchor(&clock,2_000_000_000.0).unwrap();
+    sweep_factory_reset_dir(&root).unwrap(); assert!(clock.exists());
+    std::fs::write(root.join(FACTORY_RESET_MARKER), "1").unwrap();
+    sweep_factory_reset_dir(&root).unwrap(); assert!(!clock.exists());
+    let second = crate::memory::seed::load_or_create_anchor(&clock,first+86400.0).unwrap();
+    assert_eq!(second-first,86400.0);
+    let mut before = crate::memory::seed::load("vivian").unwrap(); before.anchor_to(first).unwrap();
+    let mut after = crate::memory::seed::load("vivian").unwrap(); after.anchor_to(second).unwrap();
+    assert_eq!(after.history[0].timestamp-before.history[0].timestamp,86400.0);
+    std::fs::remove_dir_all(root).unwrap();
+}}
+`;
+const brainSource = await readFile(path.join(root, 'src-tauri/src/brain/brain.rs'), 'utf8');
+const greetingStart = brainSource.indexOf('fn fixed_startup_greeting(');
+const greetingEnd = brainSource.indexOf('\nimpl Brain {', greetingStart);
+if (greetingStart < 0 || greetingEnd < greetingStart) throw new Error('first greeting slice not found');
+source += `mod seed_arrival {
+${brainSource.slice(greetingStart, greetingEnd)}
+#[test] fn first_arrival_greets_the_new_user_and_returning_sessions_stay_contextual() {
+    for (character,name) in [("vivian","Vivian"),("nana","Nana")] {
+        let greeting = fixed_startup_greeting(character,true).unwrap();
+        assert!(greeting.contains(name) && greeting.contains("刚到"));
+        assert!(fixed_startup_greeting(character,false).is_none());
+        let mut bundle = crate::memory::seed::load(character).unwrap(); bundle.anchor_to(2_000_000_000.0).unwrap();
+        assert!(bundle.memories.iter().any(|m| m.content.contains("毕业")));
+        assert!(bundle.memories.iter().any(|m| m.content.contains("第一站") && m.content.contains("AlenTinn")));
+        assert!(bundle.memories.iter().all(|m| !crate::memory::provenance::recall_label(&m.metadata).contains("非当前用户经历")));
+        assert!(bundle.history.iter().all(|h| h.metadata["listener"] != "user"));
+    }
+}}
+`;
 source += `
 #[cfg(test)] mod golden_companion_policy {
     use crate::memory::{types::{MemoryItem,Granularity},kinds,companion_policy};

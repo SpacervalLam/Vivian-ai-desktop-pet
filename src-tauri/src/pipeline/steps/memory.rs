@@ -30,6 +30,16 @@ fn is_authored_context(memory: &crate::memory::MemoryItem) -> bool {
     )
 }
 
+fn memory_time_label(memory: &crate::memory::MemoryItem) -> String {
+    if memory.metadata["source"] == "system_seed" && memory.metadata["fictional_backstory"] == true {
+        format!("前史设定时间：{}", crate::utils::prompt_time::format_prompt_time(memory.timestamp))
+    } else if is_authored_context(memory) {
+        "预置背景".into()
+    } else {
+        crate::utils::prompt_time::format_prompt_time(memory.timestamp)
+    }
+}
+
 // ============================================================================
 // MemoryRetrievalStep：原有检索步骤（保留，扩展 MemoryFilter 接入点）
 // ============================================================================
@@ -484,7 +494,7 @@ impl Runnable for MemoryRetrievalStep {
             // Give the strongest two episodes room for context, while retaining the total budget.
             let content = crate::utils::truncate_chars(&mem.content, if index < 2 { 800 } else { 180 });
             let authored_context = is_authored_context(mem);
-            let type_label = if authored_context { "角色预设；非真实共同经历" }
+            let type_label = if authored_context && mem.metadata["fictional_backstory"] != true { "角色预置背景；非运行期对话" }
                 else { crate::memory::provenance::recall_label(&mem.metadata) };
             let mut attribution = crate::memory::provenance::attribution(&mem.metadata);
             if let Some(timestamp) = mem.metadata["source_timestamp"].as_f64().filter(|t| t.is_finite() && *t > 0.0) {
@@ -496,11 +506,7 @@ impl Runnable for MemoryRetrievalStep {
             let role_prefix = if attribution.is_empty() { String::new() } else { format!("{}：", attribution) };
             // Escape retrieved text; it remains evidence inside the retrieval data boundary.
             let content = content.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
-            let time = if authored_context {
-                "预置背景".to_owned()
-            } else {
-                crate::utils::prompt_time::format_prompt_time(mem.timestamp)
-            };
+            let time = memory_time_label(mem);
             let stale_hint = staleness_text(mem.timestamp, now)
                 .map(|s| format!(" [{}]", s))
                 .unwrap_or_default();
@@ -1158,6 +1164,18 @@ mod tests {
         }
         memory.metadata = json!({"source":"direct", "speaker":"user"});
         assert!(!is_authored_context(&memory));
+    }
+
+    #[test]
+    fn dated_backstory_retains_its_authored_time_in_recall() {
+        let bundle = crate::memory::seed::load("vivian").unwrap();
+        let memory = &bundle.memories[0];
+        let label = memory_time_label(memory);
+        assert!(label.starts_with("前史设定时间："));
+        assert!(label.contains(&crate::utils::prompt_time::format_prompt_time(memory.timestamp)));
+        let mut environment = memory.clone();
+        environment.metadata = json!({"source":"environment_preset"});
+        assert_eq!(memory_time_label(&environment), "预置背景");
     }
 
     #[test]

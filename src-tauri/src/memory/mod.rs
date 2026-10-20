@@ -46,6 +46,7 @@ pub mod retention;
 pub mod retriever;
 pub mod session_compressor;
 pub mod session_summary;
+pub mod seed;
 pub mod step_health;
 pub mod strategy;
 pub mod takes_fence;

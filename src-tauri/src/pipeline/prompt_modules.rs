@@ -145,6 +145,10 @@ pub fn safety_rules() -> &'static str {
     include_str!("../../prompts/framework/safety.en.md")
 }
 
+pub fn creator_identity_rules() -> &'static str {
+    include_str!("../../prompts/framework/creator_identity.en.md")
+}
+
 pub fn initiative_rules() -> &'static str {
     include_str!("../../prompts/framework/initiative.en.md")
 }
@@ -197,9 +201,10 @@ pub fn build_instructions(lang: &str) -> String {
 pub fn build_instructions_for(profile: InstructionProfile, lang: &str) -> String {
     match profile {
         InstructionProfile::Full => format!(
-            "[FRAMEWORK - DO NOT EMBODY, JUST FOLLOW]\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n[END FRAMEWORK]",
+            "[FRAMEWORK - DO NOT EMBODY, JUST FOLLOW]\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n[END FRAMEWORK]",
             pet_identity(),
             safety_rules(),
+            creator_identity_rules(),
             initiative_rules(),
             session_rules(),
             address_rules(),
@@ -219,9 +224,10 @@ pub fn build_instructions_for(profile: InstructionProfile, lang: &str) -> String
 /// 「晚上好呀~ 今天过得怎么样呢」这种客服腔。
 pub fn short_line_framework(lang: &str) -> String {
     format!(
-        "[FRAMEWORK - DO NOT EMBODY, JUST FOLLOW]\n{}\n{}\n[END FRAMEWORK]",
+        "[FRAMEWORK - DO NOT EMBODY, JUST FOLLOW]\n{}\n{}\n{}\n[END FRAMEWORK]",
         chat_style_framework(),
         banned_phrases(lang),
+        creator_identity_rules(),
     )
 }
 
@@ -1732,6 +1738,9 @@ impl PromptBuilder {
         if parts.first_contact_greeting {
             static_sections.push(include_str!("../../prompts/framework/first_contact.en.md").to_string());
         }
+
+        // Identity attribution must remain explicit even with provider-level instructions.
+        static_sections.push(creator_identity_rules().to_string());
 
         // ===== Layer 2: Advanced（高级配置，人格的延伸） =====
         if let Some(style) = &parts.style_block {

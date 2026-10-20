@@ -30,6 +30,16 @@ pub async fn get_memory_conversations(state: State<'_, Arc<AppState>>, character
 pub async fn summarize_memory_conversation(state: State<'_, Arc<AppState>>,
     character_id: Option<String>, conversation_id: String) -> Result<Value, String> {
     let character = state.get_character(character_id.as_deref())?;
+    // Authored originals have their own completed summary. They must not be
+    // reprocessed as a real conversation with the current user.
+    if conversation_id.starts_with(&format!("conversation:{}:seed_", character.brain.memory.char_id())) {
+        let item = character.brain.memory.get_all_memories().await.map_err(err_str)?
+            .into_iter().find(|m| m.metadata["source"] == "system_seed"
+                && m.metadata["conversation_id"] == conversation_id
+                && m.memory_type == "session_summary")
+            .ok_or_else(|| "这段角色前史的摘要已不存在，原始记录仍然保留".to_string())?;
+        return Ok(item_to_value(&item));
+    }
     let chain = character.brain.chat_chain.as_ref().ok_or_else(|| "记忆整理尚未初始化".to_string())?;
     let item = chain.pipeline.summarize_session(&character.brain.memory, &conversation_id).await.map_err(err_str)?;
     Ok(item_to_value(&item))
@@ -37,8 +47,7 @@ pub async fn summarize_memory_conversation(state: State<'_, Arc<AppState>>,
 
 /// 获取所有记忆（记忆管理窗口使用）
 ///
-/// 过滤配置预设与系统 seed 记忆 —— 这些是身份锚点与
-/// 首次启动里程碑，属于系统内置恒久记忆，不应在 UI 中展示或被用户误删。
+/// 配置预设与旧身份 seed 不展示；结构化前史的对话摘要随标明来源的原文展示。
 ///
 /// `character_id` 由前端按当前窗口角色传入（None 时回退到活跃角色），
 /// 确保每个角色的记忆面板只展示该角色自己的记忆。
@@ -53,6 +62,11 @@ pub async fn get_memories(
     Ok(items
         .into_iter()
         .filter(|m| {
+            if m.metadata["source"] == "system_seed"
+                && m.metadata["fictional_backstory"] == true
+                && m.memory_type == "session_summary" {
+                return true;
+            }
             m.metadata
                 .get("source")
                 .and_then(|v| v.as_str())
