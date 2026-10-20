@@ -41,34 +41,29 @@ pub struct InteractionMapping {
     pub duration_ms: Option<u64>,
 }
 
-/// 空闲触发映射（按空闲时长阈值触发）
+/// 空闲触发映射（按空闲阶段触发）
+///
+/// 出手时机与概率都不在这里：阶段边界与每阶段的出手概率写在 `auto_trigger` 的
+/// `IdleStage` 上。此处只声明每个阶段播什么、播多久。
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct IdleTrigger {
-    /// 空闲阈值（秒）
-    pub threshold_secs: u64,
     pub expression: String,
     #[serde(default)]
     pub motion: String,
     #[serde(default)]
-    pub action: String,
-    #[serde(default)]
     pub duration_ms: Option<u64>,
-    #[serde(default)]
-    pub probability: f64,
 }
 
 /// 程序事件触发映射
+///
+/// 事件是否放行由 `auto_trigger` 的冷却窗口决定，此处只声明播什么、播多久。
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct EventTrigger {
     pub expression: String,
     #[serde(default)]
     pub motion: String,
     #[serde(default)]
-    pub action: String,
-    #[serde(default)]
     pub duration_ms: Option<u64>,
-    #[serde(default)]
-    pub probability: f64,
 }
 
 /// 心情持续表情配置
@@ -267,18 +262,9 @@ impl ModelManifest {
                 idle_triggers.insert(
                     key.clone(),
                     IdleTrigger {
-                        threshold_secs: value
-                            .get("threshold_secs")
-                            .and_then(|value| value.as_u64())
-                            .unwrap_or(0),
                         expression: json_str(value, "expression").unwrap_or_default(),
                         motion: json_str(value, "motion").unwrap_or_default(),
-                        action: String::new(),
                         duration_ms: value.get("duration_ms").and_then(|value| value.as_u64()),
-                        probability: value
-                            .get("probability")
-                            .and_then(|value| value.as_f64())
-                            .unwrap_or(0.0),
                     },
                 );
             }
@@ -292,12 +278,7 @@ impl ModelManifest {
                     EventTrigger {
                         expression: json_str(value, "expression").unwrap_or_default(),
                         motion: json_str(value, "motion").unwrap_or_default(),
-                        action: String::new(),
                         duration_ms: value.get("duration_ms").and_then(|value| value.as_u64()),
-                        probability: value
-                            .get("probability")
-                            .and_then(|value| value.as_f64())
-                            .unwrap_or(0.0),
                     },
                 );
             }
@@ -735,8 +716,8 @@ impl ResourceManifest {
         (expr_name, motion, fb.action.clone(), fb.duration_ms)
     }
 
-    /// 获取空闲触发配置
-    pub fn get_idle_trigger(&self, trigger_key: &str) -> Option<(String, String, String, Option<u64>, f64)> {
+    /// 获取空闲触发配置：(expression, motion, duration_ms)
+    pub fn get_idle_trigger(&self, trigger_key: &str) -> Option<(String, String, Option<u64>)> {
         let mf = self.model_manifest.as_ref()?;
         let trigger = mf.idle_triggers.get(trigger_key)?;
         let expr_name = if trigger.expression.is_empty()
@@ -757,11 +738,11 @@ impl ResourceManifest {
         } else {
             self.normalize_motion(&trigger.motion)
         };
-        Some((expr_name, motion, trigger.action.clone(), trigger.duration_ms, trigger.probability))
+        Some((expr_name, motion, trigger.duration_ms))
     }
 
-    /// 获取程序事件触发配置
-    pub fn get_event_trigger(&self, event_key: &str) -> Option<(String, String, String, Option<u64>, f64)> {
+    /// 获取程序事件触发配置：(expression, motion, duration_ms)
+    pub fn get_event_trigger(&self, event_key: &str) -> Option<(String, String, Option<u64>)> {
         let mf = self.model_manifest.as_ref()?;
         let trigger = mf.event_triggers.get(event_key)?;
         let expr_name = if trigger.expression.is_empty()
@@ -779,7 +760,7 @@ impl ResourceManifest {
         } else {
             self.normalize_motion(&trigger.motion)
         };
-        Some((expr_name, motion, trigger.action.clone(), trigger.duration_ms, trigger.probability))
+        Some((expr_name, motion, trigger.duration_ms))
     }
 
     /// 获取心情持续表情

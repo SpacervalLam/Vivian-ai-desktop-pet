@@ -55,6 +55,32 @@ export type ChibiMotionSpec = ChibiPoseSpec | ChibiAnimationSpec;
 export const ATLAS_COLS: number = vocab.atlas.cols;
 export const ATLAS_ROWS: number = vocab.atlas.rows;
 
+/**
+ * 待机点缀：静息期间周期性插播的小动作。
+ *
+ * 后端的空闲阶段机只在 Active→Short→Medium→Long→Asleep 的跃迁上出手，天然做不出
+ * 「每十几秒动一下」的节奏，也感知不到桌宠此刻是否被按住 / 拖动 / 正在漫步；这类点缀
+ * 因此改由前端推进器消费（见 ChibiPetCanvas），与后端 `idle_triggers` 分开命名，
+ * 免得一个键被两边各按各的语义解读。
+ */
+export interface IdleAccentSpec {
+  motion: string;
+  intervalSecs: number;
+  probability: number;
+  durationMs: number;
+}
+
+export const IDLE_ACCENT: IdleAccentSpec | null = (() => {
+  const raw = (vocab as unknown as { idle_accent?: Partial<IdleAccentSpec> }).idle_accent;
+  if (!raw?.motion) return null;
+  return {
+    motion: raw.motion,
+    intervalSecs: Math.max(4, raw.intervalSecs ?? 12),
+    probability: Math.min(1, Math.max(0, raw.probability ?? 0.7)),
+    durationMs: Math.max(400, raw.durationMs ?? 2600),
+  };
+})();
+
 const POSE_SPECS: ChibiPoseSpec[] = vocab.atlas.poses.map((pose, slot) => ({
   kind: 'pose' as const,
   name: pose.name,
@@ -63,6 +89,9 @@ const POSE_SPECS: ChibiPoseSpec[] = vocab.atlas.poses.map((pose, slot) => ({
   promptable: pose.promptable,
   slot,
 }));
+
+/** 格位按名索引：帧序列被角色门挡下时，用它回落到同名神态。 */
+const POSE_BY_NAME = new Map<string, ChibiPoseSpec>(POSE_SPECS.map((spec) => [spec.name, spec]));
 
 const ANIMATION_SPECS: ChibiAnimationSpec[] = vocab.animations.map((animation) => ({
   kind: 'animation' as const,
@@ -123,7 +152,10 @@ export function resolveMotion(raw: string | undefined | null, character?: string
   const aliased = ALIASES[name];
   const spec = direct ?? (aliased ? BY_NAME.get(aliased) ?? fuzzyResolve(aliased) : fuzzyResolve(name));
   if (character && spec.kind === 'animation' && spec.characters && !spec.characters.includes(character)) {
-    return BY_NAME.get('idle')!;
+    // 角色专属帧序列只画过该角色的图集，另一角色不应该去请求不存在的雪碧图；但图集里可能
+    // 仍有同名格位（如 nana 的 happy 只画在图集上），那就落到那张神态上，只有两者都没有
+    // 才回 idle——否则画好的格位永远上不了场。
+    return POSE_BY_NAME.get(spec.name) ?? BY_NAME.get('idle')!;
   }
   return spec;
 }

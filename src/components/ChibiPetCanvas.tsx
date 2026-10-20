@@ -23,6 +23,7 @@ import {
   frameDurationMs,
   frameStyle,
   getMotion,
+  IDLE_ACCENT,
   pose,
   resolveMotion,
   reversePlayback,
@@ -157,6 +158,8 @@ const BLINK_FRAMES = Array.from({ length: BLINK_SPEC.frames }, (_, index) => ind
 
 const BLINK_MIN_DELAY_MS = 3_200;
 const BLINK_DELAY_RANGE_MS = 4_300;
+/** 待机点缀被占用（说话/忙碌/拖动/漫步/逃离）时的重试间隔（ms），远短于点缀本身间隔。 */
+const IDLE_ACCENT_RETRY_MS = 3_000;
 /** 双击/单击等交互让动作停留的默认时长。 */
 const POSE_HOLD_MS = 900;
 
@@ -1028,6 +1031,39 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
         if (timer !== null) window.clearTimeout(timer);
       };
     }, [characterId, isAtRest, playFrames, returnToTone]);
+
+    // 待机点缀：静息时按间隔插播一次循环小动作（如四处张望）。
+    //
+    // 与自然眨眼同一层——都只发生在基准姿态上，被按住 / 说话 / 忙碌 / 避让 / 拖动挡下时
+    // 顺延重试，而不消耗一个间隔。推进放在前端而非后端空闲阶段机，是因为只有这里知道
+    // 桌宠此刻是否真的在待机（后端只看「距上次交互多久」，避让与拖动它都看不见）。
+    useEffect(() => {
+      if (!IDLE_ACCENT || !ambientMotionEnabled || previewMode) return undefined;
+      const { motion, intervalSecs, probability, durationMs } = IDLE_ACCENT;
+      let cancelled = false;
+      let timer: number | null = null;
+      const arm = (delayMs: number) => {
+        if (cancelled) return;
+        if (timer !== null) window.clearTimeout(timer);
+        timer = window.setTimeout(() => {
+          timer = null;
+          if (cancelled) return;
+          const free = isAtRest() && !pressAliveRef.current && !positioningCoordinator.fleeInFlight
+            && !positioningCoordinator.ambientMoveInFlight && !positioningCoordinator.dragInFlight;
+          if (!free) {
+            arm(IDLE_ACCENT_RETRY_MS);
+            return;
+          }
+          if (Math.random() < probability) applyMotion(motion, durationMs);
+          arm(intervalSecs * 1_000);
+        }, delayMs);
+      };
+      arm(intervalSecs * 1_000);
+      return () => {
+        cancelled = true;
+        if (timer !== null) window.clearTimeout(timer);
+      };
+    }, [ambientMotionEnabled, applyMotion, isAtRest, previewMode]);
 
     useEffect(() => {
       if (previewMode) {

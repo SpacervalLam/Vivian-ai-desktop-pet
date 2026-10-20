@@ -361,31 +361,6 @@
       ]
     },
     {
-      "name": "busy-out",
-      "label": "忙碌-收起手机",
-      "category": "state",
-      "promptable": false,
-      "sheet": "/chibi/motion/{character}/{character}-busy-out-sheet.webp",
-      "cols": 4,
-      "rows": 3,
-      "frames": 12,
-      "loop": false,
-      "durations": [
-        90,
-        85,
-        85,
-        80,
-        80,
-        85,
-        90,
-        95,
-        95,
-        90,
-        85,
-        80
-      ]
-    },
-    {
       "name": "tend",
       "characters": [
         "nana"
@@ -633,9 +608,25 @@
       "durations": [
         2500
       ]
+    },
+    {
+      "name": "look",
+      "label": "四处张望",
+      "category": "emote",
+      "promptable": true,
+      "sheet": "/chibi/motion/{character}/{character}-look-sheet.webp",
+      "cols": 4,
+      "rows": 4,
+      "frames": 16,
+      "loop": true,
+      "durations": [180,150,150,150,150,150,150,150,150,150,150,150,150,150,150,180]
     }
   ],
   "expression_aliases": {
+    "look": "look",
+    "look_around": "look",
+    "张望": "look",
+    "四处张望": "look",
     "reach-out": "rps-paper",
     "伸手": "rps-paper",
     "cheer": "rps-rock",
@@ -686,58 +677,52 @@
   },
   "idle_triggers": {
     "idle_short": {
-      "threshold_secs": 45,
       "expression": "",
       "motion": "think",
-      "duration_ms": 2600,
-      "probability": 0.4
+      "duration_ms": 2600
     },
     "idle_medium": {
-      "threshold_secs": 150,
       "expression": "",
       "motion": "think",
-      "duration_ms": 3200,
-      "probability": 0.6
+      "duration_ms": 3200
     },
     "idle_long": {
-      "threshold_secs": 360,
       "expression": "",
       "motion": "smug",
-      "duration_ms": 3000,
-      "probability": 0.8
+      "duration_ms": 3000
     },
     "idle_asleep": {
-      "threshold_secs": 720,
       "expression": "",
       "motion": "sleep",
-      "duration_ms": 4000,
-      "probability": 0.95
+      "duration_ms": 4000
     }
+  },
+  "idle_accent": {
+    "motion": "look",
+    "interval_secs": 12,
+    "probability": 0.7,
+    "duration_ms": 2600
   },
   "event_triggers": {
     "user_return": {
       "expression": "",
       "motion": "happy",
-      "duration_ms": 2400,
-      "probability": 0.85
+      "duration_ms": 2400
     },
     "chat_end": {
       "expression": "",
       "motion": "happy",
-      "duration_ms": 2000,
-      "probability": 0.5
+      "duration_ms": 2000
     },
     "music_start": {
       "expression": "",
       "motion": "happy",
-      "duration_ms": 2200,
-      "probability": 0.6
+      "duration_ms": 2200
     },
     "battery_low": {
       "expression": "",
       "motion": "angry",
-      "duration_ms": 2600,
-      "probability": 0.7
+      "duration_ms": 2600
     }
   },
   "mood_idle_expressions": {
@@ -769,14 +754,5 @@
       "expression": "dizzy",
       "priority": 4
     }
-  },
-  "smug_cues": [
-    "得意",
-    "傲娇",
-    "嘴硬",
-    "本小姐",
-    "被夸",
-    "赢了",
-    "炫耀"
-  ]
+  }
 }

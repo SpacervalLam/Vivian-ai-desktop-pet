@@ -21,8 +21,8 @@ use crate::engine::manifest::ResourceManifest;
 use crate::psychology::mood::MoodSnapshot;
 use crate::psychology::mood_cue::mood_to_cue;
 
-/// 触发器结果：(expression, motion, action, duration_ms, probability)
-type TriggerResult = (String, String, String, Option<u64>, f64);
+/// 触发器结果：(expression, motion, duration_ms)
+type TriggerResult = (String, String, Option<u64>);
 
 /// 同一心情下两次点缀动画的最小间隔：心情没变时别反复闪同一个表情
 const ACCENT_COOLDOWN: Duration = Duration::from_secs(8);
@@ -251,7 +251,7 @@ impl AutoExpressionTrigger {
                     // get_mood_idle_expression返回(expr, priority)，包装成TriggerResult
                     if let Some((expr_name, _priority)) = manifest.get_mood_idle_expression(mood_label) {
                         if expr_name != "dizzy" && rand::random::<f64>() < 0.25 {
-                            results.push((expr_name, String::new(), String::new(), Some(3000), 0.25));
+                            results.push((expr_name, String::new(), Some(3000)));
                             state.last_mood_idle_time = now;
                         }
                     }
@@ -317,7 +317,7 @@ fn push_action(char_id: &str, kind: &str, target: &str, params: serde_json::Valu
 
 /// 应用触发器结果到动作队列
 fn apply_trigger_result(char_id: &str, result: &TriggerResult) {
-    let (expr, motion, _action, duration_opt, _prob) = result;
+    let (expr, motion, duration_opt) = result;
     let duration = duration_opt.unwrap_or(3000) as u32;
 
     // 触发表情

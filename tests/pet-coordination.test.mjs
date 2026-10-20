@@ -31,7 +31,7 @@ assert.equal(cross.update(event('missed-start'), true), false);
 cross.update(event('c'));
 cross.clear();
 assert.equal(cross.update(event('c'), true), false, 'user takeover invalidates interrupted peer speech');
-for (const physical of ['drag', 'walk', 'turn', 'cast', 'sleep', 'wake', 'tend', 'busy-in', 'busy-out']) {
+for (const physical of ['drag', 'walk', 'turn', 'cast', 'sleep', 'wake', 'tend', 'busy-in']) {
   assert.equal(speechDisplayMotion(physical, false, false, 'listen'), physical);
 }
 assert.equal(speechDisplayMotion('idle', false, false, 'listen'), 'listen');

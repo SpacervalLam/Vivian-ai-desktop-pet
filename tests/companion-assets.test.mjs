@@ -3,7 +3,7 @@ import { readFile, readdir } from 'node:fs/promises';
 import sharp from 'sharp';
 import { build } from 'esbuild';
 const manifest = JSON.parse(await readFile('src/chibi/animations.json', 'utf8'));
-const groups = [['nana', 'sleep',24], ['nana','wake',8], ['vivian','remind',12], ['nana','remind',12], ['vivian','tired',8], ['nana','tired',8], ['vivian','umbrella',8], ['nana','umbrella',8], ['vivian','music',8], ['nana','music',8], ['vivian','clipboard',1], ['nana','clipboard',1]];
+const groups = [['nana', 'sleep',24], ['nana','wake',8], ['vivian','remind',12], ['nana','remind',12], ['vivian','tired',8], ['nana','tired',8], ['vivian','umbrella',8], ['nana','umbrella',8], ['vivian','music',8], ['nana','music',8], ['vivian','clipboard',1], ['nana','clipboard',1], ['vivian','look',16], ['nana','look',16]];
 for (const character of ['vivian', 'nana']) for (const hand of ['rock', 'scissors', 'paper']) groups.push([character, `rps-${hand}`, 1]);
 for (const [character, name, count] of groups) {
   const spec = manifest.animations.find(s => s.name === name);
@@ -46,8 +46,10 @@ const { resolveMotion } = await import(`data:text/javascript;base64,${Buffer.fro
 assert.equal(resolveMotion('gift', 'nana').name, 'idle');
 assert.equal(resolveMotion('gift', 'vivian').name, 'idle');
 assert.equal(resolveMotion('tend', 'vivian').name, 'idle');
-assert.equal(resolveMotion('happy', 'nana').name, 'idle');
+// nana 没有 happy 帧序列，但图集里画过同名格位：角色门应回落到那张神态，而不是抹成 idle。
+assert.equal(resolveMotion('happy', 'nana').name, 'happy');
 assert.equal(resolveMotion('happy', 'vivian').name, 'happy');
+for (const character of ['nana', 'vivian']) assert.equal(resolveMotion('look', character).name, 'look');
 for (const character of ['nana', 'vivian']) {
   for (const name of ['music', 'clipboard', 'umbrella', 'rps-rock', 'rps-scissors', 'rps-paper']) assert.equal(resolveMotion(name, character).name, name);
   for (const [alias, name] of [['reach-out','rps-paper'],['伸手','rps-paper'],['cheer','rps-rock'],['加油打气','rps-rock'],['victory','rps-scissors'],['比耶','rps-scissors']]) {

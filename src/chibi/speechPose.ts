@@ -1,5 +1,5 @@
 // Physical actions and timed conversational gestures keep their sprites during speech.
-const PHYSICAL_MOTIONS = new Set(['drag', 'dizzy', 'walk', 'turn', 'cast', 'sleep', 'wake', 'tend', 'tend-out', 'busy-in', 'busy-out']);
+const PHYSICAL_MOTIONS = new Set(['drag', 'dizzy', 'walk', 'turn', 'cast', 'sleep', 'wake', 'tend', 'tend-out', 'busy-in']);
 export const CONVERSATION_GESTURES = new Set(['rps-paper', 'rps-rock', 'rps-scissors']);
 
 export function speechDisplayMotion(motion: string, speaking: boolean, pressed: boolean, crossMotion: 'talk' | 'listen' | null = null): string {
