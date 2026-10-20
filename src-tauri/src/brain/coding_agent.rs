@@ -4099,6 +4099,7 @@ impl CodingAgentService {
             &session.extra_workspaces,
             mode,
         );
+        system.push_str(&crate::config::personalization::prompt_section());
         system.push_str(
             "\n\n# 工作进度回调\n\
              - 无论用户直接在办公页发起，还是由桌宠委派，关键节点、重要发现与真实阻塞都要向本会话所属的陪伴人格回调，由它主动用角色口吻转达。每节点一次，不要每小步通知。\n\

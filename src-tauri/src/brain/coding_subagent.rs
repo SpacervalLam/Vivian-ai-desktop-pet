@@ -243,13 +243,13 @@ pub async fn run_subagent(
     }
 
     let mut messages: Vec<ChatMessage> = vec![
-        ChatMessage::system(format!("{}\n\n{}", subagent_system_prompt(
+        ChatMessage::system(format!("{}\n\n{}{}", subagent_system_prompt(
             &req.working_directory,
             &req.extra_workspaces,
             req.workspaces_restricted,
             child_depth,
             max_rounds,
-        ), work_contract::RETURN_INSTRUCTIONS)),
+        ), work_contract::RETURN_INSTRUCTIONS, crate::config::personalization::prompt_section())),
         ChatMessage::user(user_prompt),
     ];
 

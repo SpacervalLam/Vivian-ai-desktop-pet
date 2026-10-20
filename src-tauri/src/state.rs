@@ -111,6 +111,7 @@ pub struct AppState {
 impl AppState {
     pub fn new() -> Self {
         let config = ConfigManager::new();
+        crate::config::personalization::initialize(config.clone());
         let asr_config = AsrConfig::from_speech_config(&config.get_all().speech_recognition);
         let tool_config = &config.get_all().tools;
         let tool_system = Arc::new(ToolSystem::with_tool_config(

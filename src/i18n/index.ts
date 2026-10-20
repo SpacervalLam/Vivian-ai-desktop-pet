@@ -3,12 +3,14 @@ import { initReactI18next } from 'react-i18next';
 import { stickerTranslations } from './stickers';
 import { speechSettingsTranslations } from './speechSettings';
 import { comicTranslations } from './comic';
+import { storageSettingsTranslations } from './storageSettings';
 
 const resources = {
   'zh-CN': {
     translation: {
       stickers: stickerTranslations['zh-CN'],
       speechSettings: speechSettingsTranslations['zh-CN'],
+      storageSettings: storageSettingsTranslations['zh-CN'],
       comic: comicTranslations['zh-CN'],
       comic_vivian_current_thought: 'Vivian 当前想法',
       comic_nana_current_thought: 'Nana 当前想法',
@@ -2921,6 +2923,7 @@ const resources = {
     translation: {
       stickers: stickerTranslations.en,
       speechSettings: speechSettingsTranslations.en,
+      storageSettings: storageSettingsTranslations.en,
       comic: comicTranslations.en,
       comic_vivian_current_thought: "Vivian’s current thought",
       comic_nana_current_thought: "Nana’s current thought",
@@ -5781,6 +5784,7 @@ const resources = {
     translation: {
       stickers: stickerTranslations.ja,
       speechSettings: speechSettingsTranslations.ja,
+      storageSettings: storageSettingsTranslations.ja,
       comic: comicTranslations.ja,
       comic_vivian_current_thought: 'Vivian の今の想い',
       comic_nana_current_thought: 'Nana の今の想い',

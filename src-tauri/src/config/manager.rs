@@ -1052,6 +1052,9 @@ pub struct WorkModelsInfo {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryConfig {
+    /// 用户在设置中明确保存的办公侧智能体偏好，不用于陪伴聊天。
+    #[serde(default)]
+    pub custom_instructions: String,
     pub max_short_term_memory: usize,
     pub retrieval_strategy: String,
     pub enable_expiration: bool,
@@ -1684,6 +1687,7 @@ impl Default for AppConfig {
                 m
             },
             memory: MemoryConfig {
+                custom_instructions: String::new(),
                 max_short_term_memory: 20,
                 retrieval_strategy: "auto".to_string(),
                 enable_expiration: true,
@@ -1790,6 +1794,11 @@ impl ConfigManager {
             .map_err(|_| VivianError::Config("设置修订号冲突（其他人已修改，请重读后重试）".into()))?;
         self.set_no_save(key, value)?;
         self.save()
+    }
+
+    /// Read just the user preferences without serializing unrelated settings.
+    pub fn custom_instructions(&self) -> String {
+        self.config.read().memory.custom_instructions.clone()
     }
 
     /// 修改内存中的配置但不写入磁盘 —— 用于批量修改后统一保存
@@ -2085,5 +2094,38 @@ mod web_search_migration_tests {
         ConfigManager::migrate_web_search_providers(&mut config);
         assert_eq!(config.web_search.providers, default_web_search_providers());
         assert!(config.web_search.provider.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod custom_instruction_tests {
+    use super::*;
+
+    #[test]
+    fn old_configs_default_to_empty_custom_instructions() {
+        let mut value = serde_json::to_value(AppConfig::default()).unwrap();
+        value["memory"].as_object_mut().unwrap().remove("custom_instructions");
+        let loaded: AppConfig = serde_json::from_value(value).unwrap();
+        assert!(loaded.memory.custom_instructions.is_empty());
+    }
+
+    #[test]
+    fn saved_instructions_round_trip_and_shared_readers_observe_edits() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = ConfigManager {
+            config: Arc::new(RwLock::new(AppConfig::default())),
+            config_file: dir.path().join("config.yaml"),
+            revision: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+        };
+        let reader = manager.clone();
+        let text = "回答用中文\nCode comments in English.";
+        manager.set_no_save("memory.custom_instructions", serde_json::json!(text)).unwrap();
+        manager.save().unwrap();
+        assert_eq!(reader.custom_instructions(), text);
+        assert_eq!(ConfigManager::load_from_file(&manager.config_file).unwrap().memory.custom_instructions, text);
+        manager.set_no_save("memory.custom_instructions", serde_json::json!("")).unwrap();
+        assert!(reader.custom_instructions().is_empty());
+        manager.reload().unwrap();
+        assert_eq!(reader.custom_instructions(), text);
     }
 }

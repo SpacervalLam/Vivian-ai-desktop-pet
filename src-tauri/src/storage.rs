@@ -1,3 +1,8 @@
+#[path = "storage/policy.rs"]
+pub mod policy;
+#[path = "storage/usage.rs"]
+pub mod usage;
+
 //! 存储抽象 —— 命名域 KV（domain KV）+ 变更事件。
 //!
 //! 领域数据（待办/设置/工作区等）以「域」为单位挂载：每个域是一张持久化 KV 表

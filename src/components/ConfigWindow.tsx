@@ -35,6 +35,8 @@ import SchemaSettings from './settings/SchemaSettings';
 import CompanionSettings from './settings/CompanionSettings';
 import './settings/SettingsWindow.css';
 import WeatherKitPrivateKeyField from './settings/WeatherKitPrivateKeyField';
+import StorageSettings from './settings/StorageSettings';
+import PersonalInstructionsSettings from './settings/PersonalInstructionsSettings';
 
 interface TtsConfigState {
   enabled: boolean;
@@ -2818,7 +2820,8 @@ const ConfigWindow: React.FC = () => {
                 helpKey="config.shortcut_screen_analyze_help"
               />
             </ShortcutsDrawer>
-
+            <div style={{ ...sectionTitleStyle, marginTop: 28 }}>{t('storageSettings.title')}</div>
+            <StorageSettings onManageData={() => setActiveTab('data')} />
           </>
         );
       case 'world':
@@ -3870,6 +3873,9 @@ const ConfigWindow: React.FC = () => {
       case 'memory':
         return (
           <>
+            <div style={sectionTitleStyle}>{t('storageSettings.instructions')}</div>
+            <PersonalInstructionsSettings value={get<string>('memory.custom_instructions', '')}
+              onChange={v => setNested('memory.custom_instructions', v)} />
             <div style={sectionTitleStyle}>{t('config.section_memory')}</div>
             <NumberField
               label={t('config.field_short_term_limit')}
