@@ -16,13 +16,48 @@ use super::store::{ContentItem, ContentStore};
 /// 选取推荐（不标记已推荐；由调用方在用户实际看到后调用 mark_recommended）
 pub fn pick_recommendations(char_id: &str, limit: usize) -> Vec<ContentItem> {
     let store = ContentStore::load(char_id);
+    pick_from_store(&store, limit, |_| true)
+}
+
+/// 值班挑选前先过滤平台与发布时间，避免跨平台库存/旧视频占用日报配额。
+pub fn pick_bilibili_recommendations(
+    char_id: &str,
+    limit: usize,
+    max_age_secs: i64,
+) -> Vec<ContentItem> {
+    let store = ContentStore::load(char_id);
+    pick_bilibili_from_store(&store, limit, max_age_secs)
+}
+
+fn pick_bilibili_from_store(
+    store: &ContentStore,
+    limit: usize,
+    max_age_secs: i64,
+) -> Vec<ContentItem> {
+    let cutoff = chrono::Utc::now().timestamp() - max_age_secs;
+    pick_from_store(store, limit, |i| {
+        i.platform == "bilibili" && i.pubdate >= cutoff
+    })
+}
+
+fn pick_from_store(
+    store: &ContentStore,
+    limit: usize,
+    eligible: impl Fn(&ContentItem) -> bool,
+) -> Vec<ContentItem> {
     let now = chrono::Utc::now().timestamp();
 
     // 候选：未推荐 + 未反馈
     let mut candidates: Vec<&ContentItem> = store
         .items
         .iter()
-        .filter(|i| i.recommended_count == 0 && i.feedback.is_empty())
+        .filter(|i| i.recommended_count == 0 && i.feedback.is_empty() && eligible(i))
+        .filter(|i| {
+            !store.recommended_ledger.iter().any(|key| {
+                key == &format!("{}:{}", i.platform, i.bvid)
+                    || (i.platform == "bilibili" && key == &i.bvid)
+            })
+        })
         .collect();
 
     // 主题疲劳：最近 24h 推荐过的主题降权
@@ -66,10 +101,7 @@ fn effective_score(item: &ContentItem, recent_topics: &[String]) -> f64 {
 
 /// LLM 生成朋友式推荐文案（批量，一次调用）
 /// 返回与输入一一对应的 expression；LLM 失败或个别条目解析失败时回退到评估 reason。
-pub async fn generate_expressions(
-    profile: &InterestProfile,
-    items: &[ContentItem],
-) -> Vec<String> {
+pub async fn generate_expressions(profile: &InterestProfile, items: &[ContentItem]) -> Vec<String> {
     if items.is_empty() {
         return Vec::new();
     }
@@ -85,7 +117,8 @@ pub async fn generate_expressions(
         })
         .collect();
 
-    let system = "你要像一个真正懂这个人的朋友一样，为多条候选内容（来自 B 站/Bangumi/V2EX 等平台）\
+    let system =
+        "你要像一个真正懂这个人的朋友一样，为多条候选内容（来自 B 站/Bangumi/V2EX 等平台）\
 各写一段推荐话。像朋友私聊，不是推荐引擎。\
 输出严格 JSON 数组，长度与输入一致，顺序一一对应，每项原样带回 id。";
 
@@ -105,6 +138,7 @@ pub async fn generate_expressions(
                 "author": i.up_name,
                 "duration_secs": i.duration_secs,
                 "internal_reason": i.reason,
+                "content_evidence": i.content_evidence,
             })
         })
         .collect();
@@ -115,7 +149,8 @@ pub async fn generate_expressions(
 2. 必须引用至少一个具体内容细节（标题关键词、作者特点、独特切入角度），不要说空话\n\
 3. 避免：算法套话、信息密度、高质量、深度好文、值得一看、强烈推荐\n\
 4. 每条开头措辞必须不同，禁止重复同一句式\n\
-5. 避开画像中用户不喜欢的主题或话术模式\n\n\
+5. 避开画像中用户不喜欢的主题或话术模式\n\
+6. 只能引用已提供的标题、简介和匹配依据；不得编造视频细节或声称亲自看完/听过。content_evidence 为空表示历史阅读依据未知，subtitle_excerpt 表示只读过首个分P的部分字幕\n\n\
 严格输出 JSON：[{{\"id\":\"...\",\"expression\":\"...\"}}]\n\n\
 ## 候选内容\n{}",
         profile.to_prompt_context(),
@@ -170,6 +205,34 @@ pub async fn generate_expressions(
 mod tests {
     use super::*;
     use crate::discovery::bilibili::VideoInfo;
+
+    #[test]
+    fn duty_filters_before_ranking_and_checks_ledger() {
+        let mut recent = make_item("BVrecent", 0.7, "科技", 0);
+        recent.pubdate = chrono::Utc::now().timestamp() - 3600;
+        let mut foreign = recent.clone();
+        foreign.bvid = "foreign".into();
+        foreign.platform = "v2ex".into();
+        foreign.score = 1.0;
+        let mut stale = recent.clone();
+        stale.bvid = "BVstale".into();
+        stale.pubdate -= 8 * 86400;
+        stale.score = 1.0;
+        let mut unknown_date = recent.clone();
+        unknown_date.bvid = "BVunknown".into();
+        unknown_date.pubdate = 0;
+        let mut recommended = recent.clone();
+        recommended.bvid = "BVseen".into();
+        recommended.score = 1.0;
+        let store = ContentStore {
+            items: vec![foreign, stale, unknown_date, recommended, recent],
+            recommended_ledger: vec!["BVseen".into()],
+        };
+        let picked = pick_bilibili_from_store(&store, 3, 7 * 86400);
+        assert_eq!(picked.len(), 1);
+        assert_eq!(picked[0].bvid, "BVrecent");
+        assert!(pick_bilibili_from_store(&store, 0, 7 * 86400).is_empty());
+    }
 
     fn make_item(bvid: &str, score: f64, topic: &str, recommended: u32) -> ContentItem {
         let mut item = ContentItem::from_video(

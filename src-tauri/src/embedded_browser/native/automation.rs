@@ -696,6 +696,8 @@ pub(crate) struct Credentials {
     pub status: HashMap<String, bool>,
     pub x: Option<String>,
     pub reddit: Option<String>,
+    /// B 站登录态全量 cookie 头（供 discovery 字幕/评论重放；需 bili_jct/buvid3 时不能只存 SESSDATA）
+    pub bilibili: Option<String>,
 }
 async fn cookies(
     app: &tauri::AppHandle,
@@ -785,6 +787,15 @@ pub(crate) async fn credentials(app: tauri::AppHandle) -> Result<Credentials, St
             }
             if platform == "reddit" && values.contains_key(sentinel) {
                 out.reddit = Some(
+                    values
+                        .iter()
+                        .map(|(name, value)| format!("{name}={value}"))
+                        .collect::<Vec<_>>()
+                        .join("; "),
+                );
+            }
+            if platform == "bilibili" && values.contains_key(sentinel) {
+                out.bilibili = Some(
                     values
                         .iter()
                         .map(|(name, value)| format!("{name}={value}"))

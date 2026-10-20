@@ -21,6 +21,7 @@ struct SessionState {
     platforms: Option<(u64, HashMap<String, bool>)>,
     x: Option<String>,
     reddit: Option<(u64, String)>,
+    bilibili: Option<(u64, String)>,
     error: Option<String>,
 }
 impl BridgeState {
@@ -31,6 +32,14 @@ impl BridgeState {
         state.x = snapshot.x;
         if state.reddit.as_ref().map(|(_, cookie)| cookie) != snapshot.reddit.as_ref() {
             state.reddit = snapshot.reddit.map(|cookie| (now, cookie));
+        }
+        if state
+            .bilibili
+            .as_ref()
+            .map(|(_, cookie)| cookie)
+            != snapshot.bilibili.as_ref()
+        {
+            state.bilibili = snapshot.bilibili.map(|cookie| (now, cookie));
         }
         state.error = None;
         self.ready.store(true, Ordering::Relaxed);
@@ -67,6 +76,9 @@ impl BridgeState {
     pub fn reddit_cookie(&self) -> Option<(u64, String)> {
         self.credentials.read().reddit.clone()
     }
+    pub fn bilibili_cookie(&self) -> Option<(u64, String)> {
+        self.credentials.read().bilibili.clone()
+    }
     pub fn error(&self) -> Option<String> {
         self.credentials.read().error.clone()
     }
@@ -96,6 +108,7 @@ impl BridgeState {
                 state.platforms = None;
                 state.x = None;
                 state.reddit = None;
+                state.bilibili = None;
                 self.ready.store(false, Ordering::Relaxed);
             }
         }
@@ -142,14 +155,20 @@ mod tests {
             status: HashMap::from([("twitter".into(), true), ("reddit".into(), true)]),
             x: Some("synthetic-x".into()),
             reddit: Some("synthetic-reddit".into()),
+            bilibili: Some("SESSDATA=synthetic".into()),
         };
         bridge.record(snapshot(), 100);
         assert_eq!(
             bridge.reddit_cookie(),
             Some((100, "synthetic-reddit".into()))
         );
+        assert_eq!(
+            bridge.bilibili_cookie(),
+            Some((100, "SESSDATA=synthetic".into()))
+        );
         bridge.record(snapshot(), 200);
         assert_eq!(bridge.reddit_cookie().unwrap().0, 100);
+        assert_eq!(bridge.bilibili_cookie().unwrap().0, 100);
         bridge.record(
             Credentials {
                 status: HashMap::from([("twitter".into(), false), ("reddit".into(), false)]),
@@ -158,6 +177,7 @@ mod tests {
             300,
         );
         assert!(bridge.x_cookie().is_none() && bridge.reddit_cookie().is_none());
+        assert!(bridge.bilibili_cookie().is_none());
         assert_eq!(bridge.platform_status().unwrap().0, 300);
     }
 }

@@ -46,6 +46,9 @@ pub struct ContentItem {
     pub last_recommended_at: i64,
     /// 用户反馈：like / dislike / neutral（未反馈为空）
     pub feedback: String,
+    /// 评估时实际读到的证据；旧库存为空，不能推断为读过字幕。
+    #[serde(default)]
+    pub content_evidence: String,
 }
 
 fn default_platform() -> String {
@@ -89,6 +92,7 @@ impl ContentItem {
             recommended_count: 0,
             last_recommended_at: 0,
             feedback: String::new(),
+            content_evidence: String::new(),
         }
     }
 }
@@ -261,6 +265,15 @@ mod tests {
             String::new(),
             topic.to_string(),
         )
+    }
+
+    #[test]
+    fn legacy_inventory_loads_without_reading_evidence() {
+        let mut saved = serde_json::to_value(item("BV1", 0.8, "科技")).unwrap();
+        saved.as_object_mut().unwrap().remove("content_evidence");
+        let restored: ContentItem = serde_json::from_value(saved).unwrap();
+        assert!(restored.content_evidence.is_empty());
+        assert_eq!(restored.bvid, "BV1");
     }
 
     #[test]

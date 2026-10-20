@@ -27,9 +27,9 @@ const VOUCHER_STREAK_THRESHOLD: u32 = 3;
 
 /// WBI mixin key 重排表（64 项，取前 32）
 const WBI_MIXIN_KEY_ENC_TAB: [usize; 64] = [
-    46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35, 27, 43, 5, 49, 33, 9, 42, 19,
-    29, 28, 14, 39, 12, 38, 41, 13, 37, 48, 7, 16, 24, 55, 40, 61, 26, 17, 0, 1, 60, 51, 30, 4,
-    22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11, 36, 20, 34, 44, 52,
+    46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35, 27, 43, 5, 49, 33, 9, 42, 19, 29,
+    28, 14, 39, 12, 38, 41, 13, 37, 48, 7, 16, 24, 55, 40, 61, 26, 17, 0, 1, 60, 51, 30, 4, 22, 25,
+    54, 21, 56, 59, 6, 63, 57, 62, 11, 36, 20, 34, 44, 52,
 ];
 
 const UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
@@ -50,6 +50,21 @@ pub struct VideoInfo {
     pub pubdate: i64,
     /// 发现来源：search:{query} / popular
     pub source: String,
+}
+
+/// 视频元信息（view 接口返回的 cid / aid，字幕与评论接口要用）
+#[derive(Debug, Clone, Default)]
+pub struct VideoMeta {
+    pub cid: u64,
+    pub aid: u64,
+    pub title: String,
+}
+
+/// 评论样本（字幕/评论判断用的一条热门评论）
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct CommentSample {
+    pub text: String,
+    pub like: u64,
 }
 
 impl VideoInfo {
@@ -97,10 +112,16 @@ impl VideoInfo {
             bvid,
             title: Self::clean_text(item.get("title").and_then(|v| v.as_str()).unwrap_or("")),
             description: Self::clean_text(
-                item.get("description").and_then(|v| v.as_str()).unwrap_or(""),
+                item.get("description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(""),
             ),
             up_name: Self::clean_text(item.get("author").and_then(|v| v.as_str()).unwrap_or("")),
-            cover_url: item.get("pic").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            cover_url: item
+                .get("pic")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
             duration_secs: Self::parse_duration(item.get("duration").unwrap_or(&Value::Null)),
             view_count: item.get("play").and_then(|v| v.as_u64()).unwrap_or(0),
             like_count: item.get("like").and_then(|v| v.as_u64()).unwrap_or(0),
@@ -122,16 +143,18 @@ impl VideoInfo {
         Some(Self {
             bvid,
             title: Self::clean_text(item.get("title").and_then(|v| v.as_str()).unwrap_or("")),
-            description: Self::clean_text(
-                item.get("desc").and_then(|v| v.as_str()).unwrap_or(""),
-            ),
+            description: Self::clean_text(item.get("desc").and_then(|v| v.as_str()).unwrap_or("")),
             up_name: item
                 .get("owner")
                 .and_then(|o| o.get("name"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string(),
-            cover_url: item.get("pic").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            cover_url: item
+                .get("pic")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
             duration_secs: item.get("duration").and_then(|v| v.as_u64()).unwrap_or(0),
             view_count: stat.get("view").and_then(|v| v.as_u64()).unwrap_or(0),
             like_count: stat.get("like").and_then(|v| v.as_u64()).unwrap_or(0),
@@ -177,10 +200,17 @@ impl BilibiliClient {
         path: &str,
         query: &[(String, String)],
         headers: &[(String, String)],
+        cookie: Option<&str>,
     ) -> Result<Value, String> {
         let client = get_global_client();
         let url = format!("{}{}", BASE_URL, path);
         let mut req = client.get(&url).query(query).header("User-Agent", UA);
+        // 登录态请求：带 Cookie，并默认带 B 站 Referer（显式 headers 可覆盖）
+        if let Some(c) = cookie {
+            req = req
+                .header("Cookie", c)
+                .header("Referer", "https://www.bilibili.com/");
+        }
         for (k, v) in headers {
             req = req.header(k.as_str(), v.as_str());
         }
@@ -198,7 +228,7 @@ impl BilibiliClient {
     }
 
     /// 获取 WBI 密钥（img_key, sub_key），带 5 分钟缓存
-    async fn get_wbi_keys(&self) -> Result<(String, String), String> {
+    pub(crate) async fn get_wbi_keys(&self) -> Result<(String, String), String> {
         {
             let cached = self.wbi_keys.lock();
             if let Some(((img, sub), at)) = cached.as_ref() {
@@ -208,14 +238,22 @@ impl BilibiliClient {
             }
         }
 
-        let payload = self.get_json("/x/web-interface/nav", &[], &[]).await?;
+        let payload = self
+            .get_json("/x/web-interface/nav", &[], &[], None)
+            .await?;
         let wbi_img = payload
             .get("data")
             .and_then(|d| d.get("wbi_img"))
             .cloned()
             .unwrap_or(Value::Null);
-        let img_url = wbi_img.get("img_url").and_then(|v| v.as_str()).unwrap_or("");
-        let sub_url = wbi_img.get("sub_url").and_then(|v| v.as_str()).unwrap_or("");
+        let img_url = wbi_img
+            .get("img_url")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let sub_url = wbi_img
+            .get("sub_url")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         let img_key = extract_key_component(img_url);
         let sub_key = extract_key_component(sub_url);
         if img_key.is_empty() || sub_key.is_empty() {
@@ -226,7 +264,7 @@ impl BilibiliClient {
     }
 
     /// WBI 参数签名：mixin_key 重排 → wts 注入 → 排序 → 过滤特殊字符 → MD5
-    fn sign_wbi_params(
+    pub(crate) fn sign_wbi_params(
         params: &[(String, String)],
         img_key: &str,
         sub_key: &str,
@@ -268,6 +306,17 @@ impl BilibiliClient {
         page: u32,
         page_size: u32,
     ) -> Result<Vec<VideoInfo>, String> {
+        self.search_ordered(keyword, page, page_size, false).await
+    }
+
+    /// 值班使用最新排序，避免第一页综合排序被旧热门占满后又全被新鲜度过滤。
+    pub async fn search_ordered(
+        &self,
+        keyword: &str,
+        page: u32,
+        page_size: u32,
+        newest_first: bool,
+    ) -> Result<Vec<VideoInfo>, String> {
         use std::sync::atomic::Ordering;
 
         {
@@ -293,7 +342,10 @@ impl BilibiliClient {
                 ("search_type".to_string(), "video".to_string()),
                 ("page".to_string(), page.to_string()),
                 ("page_size".to_string(), page_size.to_string()),
-                ("order".to_string(), "totalrank".to_string()),
+                (
+                    "order".to_string(),
+                    if newest_first { "pubdate" } else { "totalrank" }.to_string(),
+                ),
                 ("web_location".to_string(), SEARCH_WEB_LOCATION.to_string()),
             ];
             let signed = Self::sign_wbi_params(&params, &img_key, &sub_key);
@@ -312,6 +364,7 @@ impl BilibiliClient {
                             "https://search.bilibili.com".to_string(),
                         ),
                     ],
+                    None,
                 )
                 .await;
 
@@ -355,6 +408,7 @@ impl BilibiliClient {
                 return Ok(Vec::new());
             }
 
+            check_api_response(&payload)?;
             self.voucher_streak.store(0, Ordering::Relaxed);
             let results = data
                 .get("result")
@@ -382,8 +436,10 @@ impl BilibiliClient {
                     "Referer".to_string(),
                     "https://www.bilibili.com".to_string(),
                 )],
+                None,
             )
             .await?;
+        check_api_response(&payload)?;
         let list = payload
             .get("data")
             .and_then(|d| d.get("list"))
@@ -395,6 +451,169 @@ impl BilibiliClient {
             .filter_map(VideoInfo::from_popular_item)
             .collect())
     }
+
+    /// 拉取绝对 URL 的 JSON（字幕 CDN 在 BASE_URL 之外，不能用 get_json）
+    async fn get_absolute_json(&self, url: &str) -> Result<Value, String> {
+        let client = get_global_client();
+        let req = client
+            .get(url)
+            .header("User-Agent", UA)
+            .header("Referer", "https://www.bilibili.com/");
+        let resp = req
+            .timeout(Duration::from_secs(20))
+            .send()
+            .await
+            .map_err(|e| format!("request failed: {}", e))?;
+        if !resp.status().is_success() {
+            return Err(format!("http status {}", resp.status()));
+        }
+        resp.json::<Value>()
+            .await
+            .map_err(|e| format!("json parse failed: {}", e))
+    }
+
+    /// 视频元信息：`/x/web-interface/view` → cid / aid（无需 WBI）
+    pub async fn video_view(&self, bvid: &str, cookie: Option<&str>) -> Result<VideoMeta, String> {
+        let payload = self
+            .get_json(
+                "/x/web-interface/view",
+                &[("bvid".to_string(), bvid.to_string())],
+                &[],
+                cookie,
+            )
+            .await?;
+        check_api_response(&payload)?;
+        let data = payload.get("data").cloned().unwrap_or(Value::Null);
+        let cid = data.get("cid").and_then(|v| v.as_u64()).unwrap_or(0);
+        let aid = data.get("aid").and_then(|v| v.as_u64()).unwrap_or(0);
+        if cid == 0 || aid == 0 {
+            return Err("view 接口缺少 cid/aid".to_string());
+        }
+        Ok(VideoMeta {
+            cid,
+            aid,
+            title: data
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+        })
+    }
+
+    /// 字幕全文：`/x/player/wbi/v2`（WBI 签名 + 登录态）→ subtitle_url → 字幕 JSON
+    ///
+    /// 无可读字幕返回 `Ok(None)`；不能由此判断视频是否有语音或硬字幕。
+    pub async fn subtitles(
+        &self,
+        bvid: &str,
+        cid: u64,
+        cookie: Option<&str>,
+    ) -> Result<Option<String>, String> {
+        let (img_key, sub_key) = self.get_wbi_keys().await?;
+        let params = vec![
+            ("bvid".to_string(), bvid.to_string()),
+            ("cid".to_string(), cid.to_string()),
+        ];
+        let signed = Self::sign_wbi_params(&params, &img_key, &sub_key);
+        let payload = self
+            .get_json("/x/player/wbi/v2", &signed, &[], cookie)
+            .await?;
+        check_api_response(&payload)?;
+        let subtitles = payload
+            .get("data")
+            .and_then(|d| d.get("subtitle"))
+            .and_then(|s| s.get("subtitles"))
+            .and_then(|s| s.as_array())
+            .ok_or_else(|| "字幕列表响应缺失".to_string())?;
+        if subtitles.is_empty() {
+            return Ok(None);
+        }
+        // 优先 AI 中文字幕，否则取第一条
+        let target = subtitles
+            .iter()
+            .find(|s| {
+                matches!(
+                    s.get("lan").and_then(|l| l.as_str()).unwrap_or(""),
+                    "ai-zh" | "zh-CN" | "zh"
+                )
+            })
+            .or_else(|| subtitles.first());
+        let Some(target) = target else {
+            return Ok(None);
+        };
+        let raw_url = target
+            .get("subtitle_url")
+            .and_then(|u| u.as_str())
+            .unwrap_or("");
+        if raw_url.is_empty() {
+            return Err("字幕轨缺少下载地址".to_string());
+        }
+        let sub = self
+            // CDN 不需要账号 Cookie，避免向接口返回的任意地址发送登录凭据。
+            .get_absolute_json(&normalize_subtitle_url(raw_url))
+            .await?;
+        if sub.get("body").and_then(Value::as_array).is_none() {
+            return Err("字幕正文响应缺失".to_string());
+        }
+        let text = extract_subtitle_text(&sub);
+        if text.trim().is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(text))
+        }
+    }
+
+    /// 热门评论：`/x/v2/reply/wbi/main`（WBI 签名 + 登录态，按热度）
+    ///
+    /// 风控或业务错误交由富化层标为不可用，不冒充空评论。
+    pub async fn top_comments(
+        &self,
+        bvid: &str,
+        aid: u64,
+        cookie: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<CommentSample>, String> {
+        let (img_key, sub_key) = self.get_wbi_keys().await?;
+        let params = vec![
+            ("oid".to_string(), aid.to_string()),
+            ("type".to_string(), "1".to_string()),
+            ("mode".to_string(), "3".to_string()),
+            ("ps".to_string(), "20".to_string()),
+        ];
+        let signed = Self::sign_wbi_params(&params, &img_key, &sub_key);
+        let referer = format!("https://www.bilibili.com/video/{}", bvid);
+        let payload = self
+            .get_json(
+                "/x/v2/reply/wbi/main",
+                &signed,
+                &[("Referer".to_string(), referer)],
+                cookie,
+            )
+            .await;
+        let payload = payload?;
+        check_api_response(&payload)?;
+        Ok(extract_comments(&payload, limit))
+    }
+}
+
+/// HTTP 200 仍可能是登录失效/风控；不能把业务错误当成「没有字幕/评论」。
+fn check_api_response(payload: &Value) -> Result<(), String> {
+    let code = payload.get("code").and_then(Value::as_i64);
+    if code != Some(0)
+        || payload.get("v_voucher").is_some()
+        || payload
+            .get("data")
+            .and_then(|d| d.get("v_voucher"))
+            .is_some()
+    {
+        // 不回显上游正文，避免把账号信息或令牌混入日志。
+        return Err(format!(
+            "B站接口不可用（code={}）",
+            code.map(|c| c.to_string())
+                .unwrap_or_else(|| "unknown".to_string())
+        ));
+    }
+    Ok(())
 }
 
 impl Default for BilibiliClient {
@@ -419,6 +638,65 @@ fn sanitize_value(v: &str) -> String {
     v.chars()
         .filter(|c| !matches!(c, '!' | '\'' | '(' | ')' | '*'))
         .collect()
+}
+
+/// 字幕 URL 归一化：`//host/path` → `https://host/path`
+pub fn normalize_subtitle_url(url: &str) -> String {
+    let url = url.trim();
+    match url.strip_prefix("//") {
+        Some(rest) => format!("https://{}", rest),
+        None => url.to_string(),
+    }
+}
+
+/// 从字幕 JSON 拼接全文（`body[].content`）
+pub fn extract_subtitle_text(value: &Value) -> String {
+    value
+        .get("body")
+        .and_then(|b| b.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|item| item.get("content").and_then(|c| c.as_str()))
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .unwrap_or_default()
+}
+
+/// 从评论 JSON 抽取样本：按赞降序、文本去重、截断到 limit
+pub fn extract_comments(value: &Value, limit: usize) -> Vec<CommentSample> {
+    let replies = value
+        .get("data")
+        .and_then(|d| d.get("replies"))
+        .and_then(|r| r.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut out: Vec<CommentSample> = replies
+        .iter()
+        .filter_map(|r| {
+            let text = r
+                .get("content")
+                .and_then(|c| c.get("message"))
+                .and_then(|m| m.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if text.is_empty() {
+                return None;
+            }
+            Some(CommentSample {
+                text,
+                like: r.get("like").and_then(|l| l.as_u64()).unwrap_or(0),
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| b.like.cmp(&a.like));
+    let mut seen = std::collections::HashSet::new();
+    out.retain(|c| seen.insert(c.text.clone()));
+    out.truncate(limit);
+    out
 }
 
 /// 查询串百分号编码（application/x-www-form-urlencoded 风格，
@@ -451,6 +729,20 @@ fn md5_hex(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn api_errors_are_not_empty_content() {
+        assert!(check_api_response(&serde_json::json!({"code": 0, "data": {}})).is_ok());
+        for payload in [
+            serde_json::json!({"code": -101}),
+            serde_json::json!({"code": -352}),
+            serde_json::json!({"code": 0, "data": {"v_voucher": "challenge"}}),
+            serde_json::json!({"code": 0, "v_voucher": "challenge"}),
+            serde_json::json!({"message": "not an API response"}),
+        ] {
+            assert!(check_api_response(&payload).is_err());
+        }
+    }
 
     #[test]
     fn test_urlencode() {
@@ -497,5 +789,52 @@ mod tests {
             3723
         );
         assert_eq!(VideoInfo::parse_duration(&serde_json::json!(95)), 95);
+    }
+
+    #[test]
+    fn test_normalize_subtitle_url() {
+        assert_eq!(
+            normalize_subtitle_url("//aisubtitle.hdslb.com/bfs/a.json"),
+            "https://aisubtitle.hdslb.com/bfs/a.json"
+        );
+        assert_eq!(
+            normalize_subtitle_url("https://i0.hdslb.com/x.json"),
+            "https://i0.hdslb.com/x.json"
+        );
+    }
+
+    #[test]
+    fn test_extract_subtitle_text_joins_and_filters_empty() {
+        let v = serde_json::json!({
+            "body": [
+                {"content": " 第一段 "},
+                {"content": ""},
+                {"content": "第二段"}
+            ]
+        });
+        assert_eq!(extract_subtitle_text(&v), "第一段 第二段");
+        assert_eq!(extract_subtitle_text(&serde_json::json!({})), "");
+        assert_eq!(extract_subtitle_text(&serde_json::json!({"body": []})), "");
+    }
+
+    #[test]
+    fn test_extract_comments_sorts_dedupes_truncates() {
+        let v = serde_json::json!({
+            "data": {"replies": [
+                {"content": {"message": "低赞"}, "like": 1},
+                {"content": {"message": "高赞"}, "like": 99},
+                {"content": {"message": "高赞"}, "like": 5},
+                {"content": {"message": "   "}, "like": 50}
+            ]}
+        });
+        let out = extract_comments(&v, 5);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].text, "高赞");
+        assert_eq!(out[0].like, 99);
+        assert_eq!(out[1].text, "低赞");
+        // limit 生效
+        assert_eq!(extract_comments(&v, 1).len(), 1);
+        // 结构缺失时为空
+        assert!(extract_comments(&serde_json::json!({}), 5).is_empty());
     }
 }

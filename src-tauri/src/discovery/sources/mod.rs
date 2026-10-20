@@ -14,6 +14,7 @@ use async_trait::async_trait;
 use super::bilibili::VideoInfo;
 
 pub mod bangumi;
+pub mod bilibili_auth;
 pub mod browser_signals;
 pub mod reddit;
 pub mod task_tabs;

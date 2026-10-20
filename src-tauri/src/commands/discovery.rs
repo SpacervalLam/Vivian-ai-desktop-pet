@@ -207,3 +207,52 @@ pub async fn bootstrap_from_bangumi(
     }
     Ok(domains)
 }
+
+/// 前端视图：每日刷B站值班状态
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DutyView {
+    pub quota_per_day: usize,
+    pub picked_today: usize,
+    pub remaining_today: usize,
+    pub report_path: String,
+    pub report_exists: bool,
+    pub last_round_date: String,
+    pub last_digest_month: String,
+}
+
+fn duty_view(character_id: &str) -> DutyView {
+    use crate::discovery::duty;
+    let state = duty::load_state(character_id);
+    let picked = duty::count_picked_today(character_id);
+    let report = duty::today_report_path(character_id);
+    DutyView {
+        quota_per_day: state.quota_per_day,
+        picked_today: picked,
+        remaining_today: duty::daily_remaining(picked, &state, state.quota_per_day),
+        report_exists: report.exists(),
+        report_path: report.to_string_lossy().to_string(),
+        last_round_date: state.last_round_date,
+        last_digest_month: state.last_digest_month,
+    }
+}
+
+/// 读「每日刷B站」值班状态（配额 / 今日已挑 / 日报路径）
+#[tauri::command]
+pub fn get_discovery_duty(character_id: String) -> Result<DutyView, String> {
+    Ok(duty_view(&character_id))
+}
+
+/// 设置每天配额（1-10），返回更新后的状态
+#[tauri::command]
+pub fn set_discovery_duty_quota(character_id: String, quota: usize) -> Result<DutyView, String> {
+    crate::discovery::duty::set_quota(&character_id, quota);
+    Ok(duty_view(&character_id))
+}
+
+/// 立刻跑一轮值班（不等周期）
+#[tauri::command]
+pub async fn run_discovery_duty(
+    character_id: String,
+) -> Result<crate::discovery::duty::DutyOutcome, String> {
+    Ok(crate::discovery::duty::run_duty_now(&character_id).await)
+}

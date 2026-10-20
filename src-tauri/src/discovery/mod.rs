@@ -17,6 +17,7 @@
 //! content_store.json / speculative_state.json），全部原子写。
 
 pub mod bilibili;
+pub mod duty;
 pub mod engine;
 pub mod profile;
 pub mod recommend;
@@ -178,6 +179,9 @@ pub async fn maintenance_pass(char_id: &str) {
                 .collect::<Vec<_>>()
         );
     }
+
+    // 每日刷B站值班（一天最多一轮）：日报 + 月度归档 + 每天配额
+    duty::maybe_run_daily(char_id).await;
 
     // 2. 登录态被动采集：受控标签页恰好在 B 站时读取观看历史 → LLM 提炼兴趣（6 小时冷却）
     if history_collect_due(char_id) {

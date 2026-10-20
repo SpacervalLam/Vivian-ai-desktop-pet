@@ -1,13 +1,13 @@
-#[path = "storage/policy.rs"]
-pub mod policy;
-#[path = "storage/usage.rs"]
-pub mod usage;
-
 //! 存储抽象 —— 命名域 KV（domain KV）+ 变更事件。
 //!
 //! 领域数据（待办/设置/工作区等）以「域」为单位挂载：每个域是一张持久化 KV 表
 //!（JSON 后端，原子写），读走内存权威态、写经串行化链路，变更后广播
 //! `domain/changed` 事件供订阅者（前端刷新/联动逻辑）响应。
+
+#[path = "storage/policy.rs"]
+pub mod policy;
+#[path = "storage/usage.rs"]
+pub mod usage;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
