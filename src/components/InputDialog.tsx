@@ -468,7 +468,6 @@ const InputDialog: React.FC<InputDialogProps> = ({
             title={t('input_dialog.whisper_hint')} onClick={() => setWhisper(previous => !previous)}>
             <LockKeyhole size={13} />{whisper ? t('input_dialog.whisper_label', { defaultValue: '悄悄话' }) : null}
           </button>}
-          <button className="quick-compose-close" type="button" aria-label={t('input_dialog.close', { defaultValue: '关闭' })} title="Esc" onClick={handleClose}><X size={17} /></button>
         </header>
         {draftImages.length > 0 && <div className="quick-compose-drafts">
           {draftImages.map(image => <button type="button" key={image.id} title={t('input_dialog.remove_image', { defaultValue: '移除图片' })}

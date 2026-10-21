@@ -140,79 +140,67 @@ impl ToolChain {
         tool_system: &ToolSystem,
         context: &ToolUseContext,
     ) -> ToolChainResult {
-        let mut current_input = initial_input.clone();
+        let mut previous_output = initial_input.clone();
         let mut step_results = Vec::with_capacity(self.steps.len());
-        let mut last_output: Value = Value::Null;
-
+        let mut context = context.clone();
         for step in &self.steps {
-            let step_input = (step.input_transform)(&current_input, &last_output);
-
-            let tool = match tool_system.find_tool(&step.tool_name) {
-                Some(t) => t,
-                None => {
-                    let err = format!("工具 {} 不存在", step.tool_name);
-                    step_results.push(ChainStepResult {
-                        tool_name: step.tool_name.clone(),
-                        success: false,
-                        output: Value::Null,
-                        error: Some(err.clone()),
-                        duration_ms: 0.0,
-                    });
-                    if step.on_failure == FailurePolicy::Stop {
-                        return ToolChainResult {
-                            success: false,
-                            steps: step_results,
-                            final_output: Value::Null,
-                            error: Some(err),
-                        };
-                    }
-                    continue;
+            let step_input = (step.input_transform)(&previous_output, &initial_input);
+            let start = std::time::Instant::now();
+            let execution = super::executor::execute_tool_use(
+                &step.tool_name,
+                step_input,
+                tool_system,
+                &context,
+                None,
+            );
+            let mut result = if step.timeout_secs == 0 {
+                execution.await
+            } else {
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(step.timeout_secs),
+                    execution,
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(_) => super::types::ToolResult::standard_error(
+                        "工具链步骤超时",
+                        Some("ChainStepTimeout"),
+                        None,
+                    ),
                 }
             };
-
-            let start = std::time::Instant::now();
-            let result = tool.call(step_input.clone(), context).await;
-            let duration_ms = start.elapsed().as_secs_f64() * 1000.0;
-
-            let step_result = ChainStepResult {
+            if let Some(modifier) = result.context_modifier.take() {
+                modifier(&mut context);
+            }
+            let output = result.data.unwrap_or(Value::Null);
+            step_results.push(ChainStepResult {
                 tool_name: step.tool_name.clone(),
                 success: result.success,
-                output: result.data.clone().unwrap_or(Value::Null),
-                error: result.error.clone(),
-                duration_ms,
-            };
-
-            let success = result.success;
-            last_output = result.data.unwrap_or(Value::Null);
-            current_input = step_input;
-            step_results.push(step_result);
-
-            if !success {
+                output: output.clone(),
+                error: result.error,
+                duration_ms: start.elapsed().as_secs_f64() * 1000.0,
+            });
+            if !result.success {
                 match step.on_failure {
                     FailurePolicy::Stop => {
                         return ToolChainResult {
                             success: false,
                             steps: step_results,
-                            final_output: last_output,
+                            final_output: output,
                             error: Some(format!("步骤 {} 失败", step.tool_name)),
-                        };
+                        }
                     }
-                    FailurePolicy::Skip => {
-                        // 跳过本步，下一步的 current_input 不变
-                        continue;
-                    }
-                    FailurePolicy::Continue => {
-                        // 错误作为下一步输入
-                        // current_input 已是 step_input，last_output 是错误数据
-                    }
+                    FailurePolicy::Skip => continue,
+                    FailurePolicy::Continue => {}
                 }
             }
+            previous_output = output;
         }
-
         ToolChainResult {
-            success: step_results.iter().all(|s| s.success),
+            success: step_results.iter().all(|step| step.success),
             steps: step_results,
-            final_output: last_output,
+            final_output: previous_output,
             error: None,
         }
     }
@@ -325,20 +313,17 @@ impl ToolChainer {
         let mut templates: HashMap<IntentType, Vec<String>> = HashMap::new();
         templates.insert(
             IntentType::DesktopContext,
-            vec!["get_active_window".to_string(), "take_screenshot".to_string()],
+            vec![
+                "get_active_window".to_string(),
+                "take_screenshot".to_string(),
+            ],
         );
-        templates.insert(
-            IntentType::FileOperation,
-            vec!["read_file".to_string()],
-        );
+        templates.insert(IntentType::FileOperation, vec!["read_file".to_string()]);
         templates.insert(
             IntentType::AppManagement,
             vec!["open_application".to_string()],
         );
-        templates.insert(
-            IntentType::WebResearch,
-            vec!["web_search".to_string()],
-        );
+        templates.insert(IntentType::WebResearch, vec!["web_search".to_string()]);
 
         Self {
             recognizer: IntentRecognizer::new(),

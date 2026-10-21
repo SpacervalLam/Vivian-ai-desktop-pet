@@ -4,6 +4,12 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SelectionAction { Analyze, Save, SaveAndAnalyze, Copy, CopyAndAnalyze, Freeze, Cancel }
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AnalysisCharacter { Vivian, Nana }
+impl AnalysisCharacter {
+    pub fn id(self) -> &'static str { match self { Self::Vivian => "vivian", Self::Nana => "nana" } }
+}
 impl SelectionAction {
     pub fn copies(self) -> bool { matches!(self, Self::Copy | Self::CopyAndAnalyze) }
     pub fn saves(self) -> bool { matches!(self, Self::Save | Self::SaveAndAnalyze) }
@@ -168,6 +174,15 @@ pub async fn save_selected_png(bytes: &[u8]) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn analysis_character_protocol_preserves_explicit_targets() {
+        for target in [AnalysisCharacter::Vivian, AnalysisCharacter::Nana] {
+            let encoded = serde_json::to_string(&target).unwrap();
+            assert_eq!(encoded, format!("\"{}\"", target.id()));
+            assert_eq!(serde_json::from_str::<AnalysisCharacter>(&encoded).unwrap(), target);
+        }
+        assert!(serde_json::from_str::<AnalysisCharacter>("\"unknown\"").is_err());
+    }
     #[test]
     fn only_explicit_save_actions_write_files() {
         assert!(!SelectionAction::Freeze.copies());

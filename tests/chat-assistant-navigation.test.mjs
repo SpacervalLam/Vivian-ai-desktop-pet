@@ -22,9 +22,12 @@ try {
  assert.match(chat,/from '\.\/assistantPanels'/,'tool page titles come from the shared catalogue');
  assert.match(chat,/assistantPanelTitle\(assistantTarget\.panel/,'the header title follows the active tool page');
  assert.match(chat,/else setView\('home'\);/,'the header back key leaves a tool page straight to home');
- // 首页三点改为呼出下拉；私聊三点仍是进聊天详情。
- assert.match(chat,/const \[headerMenuOpen, setHeaderMenuOpen\] = useState\(false\)/,'the header three-dot owns a dropdown');
- assert.match(chat,/if \(view === 'home'\) setHeaderMenuOpen\(\(open\) => !open\); else setView\('details'\)/,'home toggles the menu, private still opens details');
+// 首页三点改为呼出下拉；私聊三点进聊天详情——但聊天专属角色（chat-only partner）
+// 例外：它们的模型路由不进通用设置页，三点必须留在自己会话里当菜单入口。
+assert.match(chat,/const \[headerMenuOpen, setHeaderMenuOpen\] = useState\(false\)/,'the header three-dot owns a dropdown');
+assert.match(chat,/if \(view === 'home'\) setHeaderMenuOpen\(\(open\) => !open\)/,'home toggles the menu');
+assert.match(chat,/else if \(isChatPartner\(privateCharId\)\) setHeaderMenuOpen\(\(open\) => !open\)/,'chat-only partners open their own menu');
+assert.match(chat,/else setView\('details'\);/,'ordinary characters still open details');
  assert.match(chat,/role="menu"/,'the dropdown is a menu');
  for (const id of ['notes','shortcuts','screen','settings']) assert.match(chat,new RegExp(`id: '${id}'`),`the dropdown keeps the ${id} entry`);
  assert.doesNotMatch(chat,/t\('chat\.desktop_assistant'/,'the three-dot no longer jumps to a page');

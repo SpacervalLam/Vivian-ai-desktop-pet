@@ -31,6 +31,7 @@ pub enum Stimulus {
     WorldChanged,
     CharacterState,
     UserDialogue,
+    CharacterEvent,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -69,6 +70,14 @@ pub struct IntentAssessment {
 pub struct PlanningDecision {
     pub user_intent: Option<IntentAssessment>,
     pub opportunity: Option<Selection>,
+    #[serde(default, deserialize_with = "optional_guidance")]
+    pub guidance: Option<super::interaction_guidance::Suggestion>,
+}
+
+fn optional_guidance<'de, D: serde::Deserializer<'de>>(deserializer: D)
+    -> Result<Option<super::interaction_guidance::Suggestion>, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value(value).ok())
 }
 
 impl PlanningDecision {
@@ -105,6 +114,7 @@ pub struct Opportunity {
     /// Frozen recipient, never redirected if this character leaves.
     pub listener_id: String,
     pub stimulus: Stimulus,
+    pub created_at: f64,
     pub not_before: f64,
     pub expires_at: f64,
 }
@@ -124,6 +134,9 @@ pub struct ScenePolicy {
 }
 
 impl ScenePolicy {
+    pub fn cancel_pending(&mut self) { self.pending = None; }
+    pub fn pending_listener(&self) -> Option<&str> { self.pending.as_ref().map(|pending| pending.listener_id.as_str()) }
+    pub fn pending_deadline(&self) -> Option<f64> { self.pending.as_ref().map(|pending| pending.expires_at) }
     pub fn invalidate(&mut self) {
         self.events.clear();
         self.pending = None;
@@ -262,6 +275,10 @@ impl ScenePolicy {
         if self.seen.contains_key(&event.id) {
             return;
         }
+        if event.stimulus == Stimulus::CharacterEvent && self.pending.as_ref().is_some_and(|pending|
+            event.owner.as_ref() == Some(&pending.speaker_id) && event.at >= pending.created_at) {
+            self.pending = None;
+        }
         self.seen.insert(event.id.clone(), event.at);
         self.events.push_back(event);
         while self.events.len() > 16 {
@@ -370,6 +387,7 @@ impl ScenePolicy {
             speaker_id: speaker.id.clone(),
             listener_id,
             stimulus: event.stimulus,
+            created_at: now,
             not_before: now + selection.delay_seconds as f64,
             expires_at: now + selection.delay_seconds as f64 + 120.0,
         };
@@ -509,6 +527,18 @@ mod tests {
         let mut p = policy();
         assert!(p.accept(selection("nana", "user"), &roles(), true, false, 1000.0));
         assert!(p.take("nana", 1120.0).is_none());
+    }
+    #[test]
+    fn new_owned_activity_retires_a_delayed_older_beat_without_losing_other_roles_events() {
+        let mut p=policy();let mut delayed=selection("vivian","user");delayed.delay_seconds=300;
+        assert!(p.accept(delayed,&roles(),true,false,1000.0));
+        p.observe(SceneEvent{id:"nana:collected".into(),stimulus:Stimulus::CharacterEvent,
+            fact:"Nana 收好了资料".into(),owner:Some("nana".into()),at:1001.0});
+        assert_eq!(p.pending_listener(),Some("user"));
+        p.observe(SceneEvent{id:"vivian:finished".into(),stimulus:Stimulus::CharacterEvent,
+            fact:"Vivian 的后续操作已完成".into(),owner:Some("vivian".into()),at:1002.0});
+        assert!(p.take("vivian",1301.0).is_none());
+        assert_eq!(p.events(1301.0).len(),2);
     }
     #[test]
     fn personal_state_is_owned_and_duplicate_observations_do_not_rearm() {
@@ -698,6 +728,10 @@ mod tests {
         let plan = PlanningDecision::parse(raw).unwrap();
         assert_eq!(plan.user_intent.unwrap().kind, IntentKind::NeedsSpace);
         assert!(plan.opportunity.is_none());
+        let malformed_hint = raw.replace("\"opportunity\":null", "\"opportunity\":null,\"guidance\":\"invalid\"");
+        let plan = PlanningDecision::parse(&malformed_hint).unwrap();
+        assert!(plan.guidance.is_none());
+        assert_eq!(plan.user_intent.unwrap().kind,IntentKind::NeedsSpace);
         assert!(PlanningDecision::parse(r#"{"user_intent":{"kind":"execute_shell"}}"#).is_none());
         assert!(PlanningDecision::parse("not JSON").is_none());
     }

@@ -1,6 +1,13 @@
 //! Source attribution shared by recall, tools and conversation evidence.
 use serde_json::Value;
 
+/// UI visibility does not affect storage or recall eligibility.
+pub fn visible_in_memory_page(meta: &Value) -> bool {
+    meta["fictional_backstory"] != true
+        && !matches!(meta["source"].as_str(),
+            Some("system_seed" | "environment_preset" | "quiet_control"))
+}
+
 pub fn field<'a>(meta: &'a Value, key: &str) -> Option<&'a str> {
     meta.get(key)
         .and_then(Value::as_str)

@@ -1,6 +1,7 @@
 //! Non-character environment agent: one observation stream and one bounded planning budget.
 //! It reports observations and selects an opportunity. Character brains retain all speech.
 use super::environment_input::EnvironmentInput;
+use super::interaction_guidance::{Evidence, HintCache, Suggestion};
 use super::{
     environment_policy::{
         Opportunity, Participant, PlanningDecision, SceneEvent, ScenePolicy, Stimulus,
@@ -29,6 +30,8 @@ struct Observations {
     processed_input_revision: u64,
     hint: String,
     epoch: u64,
+    last_focus: HashMap<String, f64>,
+    priority_revision: u64,
 }
 
 #[derive(Default)]
@@ -40,6 +43,7 @@ pub struct EnvironmentAgent {
     last_sample: AtomicI64,
     sampling: AtomicBool,
     suppressed_until: AtomicU64,
+    hints: Mutex<HintCache>,
 }
 
 struct SamplingGuard<'a>(&'a AtomicBool);
@@ -129,6 +133,49 @@ pub fn allows_peer_contact(state: &AppState, source_id: &str, target_id: &str) -
 }
 
 impl EnvironmentAgent {
+    /// This foreground helper is optional and bounded; failure never prevents the role's reply.
+    pub async fn reply_guidance(&self, router: &crate::providers::ModelRouter, character: &str,
+        listener: &str, material: serde_json::Value, evidence: Vec<Evidence>) -> Option<String> {
+        let _permit = self.planning.clone().try_lock_owned().ok()?;
+        let raw = tokio::time::timeout(Duration::from_millis(2500), router.generate(
+            LLMRequest::new("environment_judge", vec![
+                ChatMessage::system(include_str!("../../prompts/framework/interaction_guidance.en.md")),
+                ChatMessage::user(material.to_string()),
+            ]).with_character_id(character).without_framework_instructions()
+                .with_temperature(0.2).with_max_tokens(420).with_reasoning(false)
+        )).await.ok()?.ok()?;
+        let value = raw.get(raw.find('{')?..=raw.rfind('}')?)?;
+        let suggestion: Option<Suggestion> = serde_json::from_str::<serde_json::Value>(value).ok()?
+            .get("guidance").cloned().and_then(|value| serde_json::from_value(value).ok());
+        suggestion?.grounded(character,listener,&evidence,chrono::Utc::now().timestamp() as f64)
+            .map(|hint| hint.render())
+    }
+
+    pub fn interaction_hint(&self, character: &str, listener: &str) -> Option<String> {
+        let revision = self.background_priority()?.revision();
+        self.hints.lock().get(character,listener,revision,chrono::Utc::now().timestamp() as f64)
+    }
+
+    /// Fresh, bounded observations for startup; no planner analysis or authored speech.
+    /// First contact describes this installation's history, not the user's identity.
+    pub fn startup_context(&self, snapshot: &WorldSnapshot, first_contact: bool) -> serde_json::Value {
+        json!({
+            "event": if first_contact { "first_contact_in_this_installation" } else { "returning_startup" },
+            "first_contact": first_contact,
+            "observed_at": snapshot.timestamp,
+            "local_time": snapshot.local_time,
+            "weather": snapshot.weather.as_ref().map(|weather| json!({
+                "description": weather.description,
+                "temperature_celsius": weather.temperature,
+                "observed_at": weather.cached_at,
+            })),
+            "city": snapshot.location.as_ref().and_then(|location| location.city.as_deref()),
+            "foreground_app": snapshot.foreground_window.as_ref()
+                .map(|window| window.process.as_str()).filter(|process| !process.is_empty()),
+            "user_identity": "unknown_from_startup",
+        })
+    }
+
     pub fn bind_priority(&self, priority: Arc<BackgroundPriority>) {
         let _ = self.priority.set(priority);
     }
@@ -180,6 +227,7 @@ impl EnvironmentAgent {
             self.suppressed_until.store(0, Ordering::Release);
             obs.hint.clear();
             obs.epoch = obs.epoch.wrapping_add(1);
+            self.hints.lock().clear();
             return;
         }
         let Some(idle) = crate::utils::get_system_idle_seconds() else {
@@ -192,10 +240,35 @@ impl EnvironmentAgent {
             || (crate::conversation::CONVERSATION_MANAGER.is_any_user_session_active()
                 && idle < 90.0);
         let snap = state.world_provider.snapshot(None);
+        // Each model invocation sees one role's permitted material, not a mix of private stores.
+        let focus_id = {
+            let obs = self.observations.lock();
+            let recent_speaker = obs.policy.recent_user_turns(now).into_iter().rev()
+                .find(|turn| now-turn.at < 90.0 && roles.iter().any(|role| role.available && role.id == turn.character_id))
+                .map(|turn| turn.character_id);
+            let waiting_owner = obs.policy.events(now).into_iter().rev().filter_map(|event| event.owner)
+                .find(|owner| roles.iter().any(|role| role.available && &role.id == owner));
+            recent_speaker.or(waiting_owner).or_else(|| roles.iter().filter(|role| role.available).min_by(|a,b|
+                obs.last_focus.get(&a.id).copied().unwrap_or(0.0)
+                    .total_cmp(&obs.last_focus.get(&b.id).copied().unwrap_or(0.0)))
+                .map(|role| role.id.clone()))
+        };
+        let Some(focus_id) = focus_id else { return; };
+        let focus = state.characters.read().get(&focus_id).cloned();
+        let Some(focus) = focus else { return; };
+        let evidence: Vec<_> = scene_evidence(&focus_id,Some(&focus.brain.memory),now)
+            .into_iter().filter(|source| source.shareable).collect();
         let (events, user_turns, current_intent, epoch, input_revision) = {
             let mut inputs = self.input.drain();
             inputs.sort_by_key(|input| input.revision);
             let mut obs = self.observations.lock();
+            let priority_revision = self.background_priority().map_or(0,|priority| priority.revision());
+            if obs.priority_revision != priority_revision {
+                obs.priority_revision = priority_revision;
+                obs.policy.cancel_pending();
+                obs.epoch = obs.epoch.wrapping_add(1);
+                self.hints.lock().clear();
+            }
             for input in inputs {
                 obs.policy.record_user_turn(
                     &input.character_id,
@@ -212,15 +285,30 @@ impl EnvironmentAgent {
                 self.suppressed_until.store(0, Ordering::Release);
                 return;
             }
+            let had_pending = obs.policy.pending_deadline().is_some();
             observe(&mut obs, &snap, &roles, idle, now);
+            for source in &evidence {
+                if source.kind != "dialogue" && now - source.at < 1800.0 {
+                    obs.policy.observe(SceneEvent { id:source.id.clone(),stimulus:Stimulus::CharacterEvent,
+                        fact:source.text.clone(),owner:Some(focus_id.clone()),at:source.at });
+                }
+            }
             obs.policy.reconcile(&roles, user_available, chatting, now);
-            if !obs.policy.begin_plan(now, &roles) {
+            if had_pending && obs.policy.pending_deadline().is_none() { self.hints.lock().clear(); }
+            let events: Vec<_> = obs.policy.events(now).into_iter().filter(|event|
+                event.owner.as_ref().is_none_or(|owner| owner == &focus_id)
+                    && (event.stimulus != Stimulus::UserDialogue || obs.policy.recent_user_turns(now).iter()
+                        .any(|turn| turn.id == event.id && turn.character_id == focus_id))).collect();
+            if events.is_empty() || !obs.policy.begin_plan(now, &roles) {
                 return;
             }
+            obs.last_focus.insert(focus_id.clone(),now);
             (
-                obs.policy.events(now),
-                obs.policy.recent_user_turns(now),
-                obs.policy.current_intent(now).cloned(),
+                events,
+                obs.policy.recent_user_turns(now).into_iter().filter(|turn|
+                    turn.character_id == focus_id).collect::<Vec<_>>(),
+                obs.policy.current_intent(now).filter(|intent| obs.policy.recent_user_turns(now).iter()
+                    .any(|turn| turn.id == intent.turn_id && turn.character_id == focus_id)).cloned(),
                 obs.epoch,
                 obs.processed_input_revision,
             )
@@ -230,10 +318,7 @@ impl EnvironmentAgent {
         };
         let router = {
             let characters = state.characters.read();
-            roles
-                .iter()
-                .find(|r| r.available)
-                .and_then(|r| characters.get(&r.id))
+            characters.get(&focus_id)
                 .map(|c| c.brain.router.clone())
         };
         let Some(router) = router else {
@@ -243,6 +328,11 @@ impl EnvironmentAgent {
             return;
         };
         let scene = self.observations.lock().hint.clone();
+        let world_observations = scene_observations(self,&snap);
+        let activity = focus.brain.proactive.activity_journal().to_brief();
+        let language = focus.brain.config.base.language.clone();
+        let planning_roles: Vec<_> = roles.iter().map(|role| if role.id == focus_id { json!(role) }
+            else { json!({"id":role.id,"available":role.available,"can_address_user":role.can_address_user}) }).collect();
         let agent = self.clone();
         let state = state.clone();
         tauri::async_runtime::spawn(async move {
@@ -252,8 +342,9 @@ impl EnvironmentAgent {
                     "../../prompts/framework/environment_agent.en.md"
                 )),
                 ChatMessage::user(
-                    json!({"scene":scene,"user_available":user_available,
-                    "user_chatting":chatting,"participants":roles,"events":events,
+                    json!({"scene":scene,"observations":world_observations,"activity":activity,
+                    "focus_character_id":focus_id,"language":language,"evidence":evidence,"user_available":user_available,
+                    "user_chatting":chatting,"participants":planning_roles,"events":events,
                     "recent_user_turns":user_turns,"current_intent":current_intent})
                     .to_string(),
                 ),
@@ -261,7 +352,7 @@ impl EnvironmentAgent {
             let request = LLMRequest::new("environment_judge", messages)
                 .without_framework_instructions()
                 .with_temperature(0.0)
-                .with_max_tokens(512);
+                .with_max_tokens(800).with_reasoning(false);
             let Some(result) = priority
                 .run(tokio::time::timeout(
                     Duration::from_secs(12),
@@ -300,7 +391,7 @@ impl EnvironmentAgent {
                     obs.policy
                         .apply_intent(intent, chrono::Local::now().timestamp() as f64);
                 }
-                let accepted = decision.opportunity.is_some_and(|selection| {
+                let accepted = decision.opportunity.filter(|selection| selection.speaker_id == focus_id).is_some_and(|selection| {
                     obs.policy.accept(
                         selection,
                         &current_roles,
@@ -310,6 +401,17 @@ impl EnvironmentAgent {
                         chrono::Local::now().timestamp() as f64,
                     )
                 });
+                if accepted {
+                    if let Some(suggestion) = decision.guidance {
+                        if let Some(listener) = obs.policy.pending_listener() {
+                            if let Some(mut hint) = suggestion.grounded(&focus_id,listener,&evidence,
+                                chrono::Utc::now().timestamp() as f64) {
+                                hint.expires_at = obs.policy.pending_deadline().unwrap_or(hint.expires_at);
+                                agent.hints.lock().insert(priority.revision(),hint);
+                            }
+                        }
+                    }
+                }
                 agent
                     .suppressed_until
                     .store(obs.policy.suppressed_until().to_bits(), Ordering::Release);
@@ -406,8 +508,58 @@ impl EnvironmentAgent {
         obs.policy.nominated_user_speaker(now)
     }
     pub fn take_opportunity(&self, id: &str, now: f64) -> Option<Opportunity> {
-        self.observations.lock().policy.take(id, now)
+        let mut obs = self.observations.lock();
+        let revision = self.background_priority().map_or(0,|priority| priority.revision());
+        if revision != obs.priority_revision {
+            obs.priority_revision = revision;
+            obs.policy.cancel_pending();
+            self.hints.lock().clear();
+            return None;
+        }
+        obs.policy.take(id, now)
     }
+}
+
+pub(crate) fn scene_observations(agent: &EnvironmentAgent, snapshot: &WorldSnapshot) -> serde_json::Value {
+    let mut observed = agent.startup_context(snapshot,false);
+    if let Some(map) = observed.as_object_mut() {
+        for key in ["event","first_contact","user_identity"] { map.remove(key); }
+        map.insert("music".into(),json!(snapshot.music));
+        map.insert("volume".into(),json!(snapshot.volume));
+        map.insert("network".into(),json!(snapshot.network_status));
+        map.insert("calendar".into(),json!({"is_weekend":snapshot.is_weekend,"season":snapshot.season,
+            "solar_term":snapshot.solar_term,"festival":snapshot.festival}));
+        map.insert("system_load".into(),json!(snapshot.system.as_ref().map(|system|
+            json!({"cpu_percent":system.cpu_usage,"memory_percent":system.memory_usage_pct}))));
+        map.insert("user_presence".into(),json!(snapshot.user_presence.as_ref().map(|user| &user.presence)));
+    }
+    observed
+}
+
+pub(crate) fn scene_evidence(character: &str, memory: Option<&crate::memory::MemoryManager>, now: f64) -> Vec<Evidence> {
+    use crate::memory::unified_event_ledger::{unified_event_ledger,EventVisibility};
+    let mut evidence: Vec<_> = unified_event_ledger().recent_scene_events_visible_to(character,24)
+        .into_iter().filter(|event| event.timestamp.is_finite() && event.timestamp <= now + 1.0
+            && now - event.timestamp < 7200.0 && !event.content_preview.trim().is_empty()
+            && !event.context_tags.iter().any(|tag| matches!(tag.as_str(),"quiet_control"|"system_seed")))
+        .map(|event| Evidence{id:event.id,at:event.timestamp,character_id:character.into(),kind:event.event_type.clone(),
+            text:format!("[所属角色：{}] {} → {}: {}",event.associated_char_id.as_deref().unwrap_or("共享场景"),
+                event.sender,event.receiver,event.content_preview),
+            shareable:event.visibility == EventVisibility::Public || event.event_type == "tool_result"
+                || event.context_tags.iter().any(|tag| tag == "shareable_activity")}).collect();
+    if let Some(memory) = memory {
+        for item in memory.recent_by_type(crate::memory::MemoryType::Knowledge,4) {
+            if now - item.timestamp >= 7200.0 || item.metadata["source"] == "system_seed"
+                || item.metadata["fictional_backstory"] == true { continue; }
+            let id = format!("knowledge:{}",item.id);
+            evidence.retain(|old| old.id != id);
+            evidence.push(Evidence {id,at:item.timestamp,character_id:character.into(),kind:"knowledge_acquired".into(),
+                text:format!("{} 保存的采集资料（不代表已分享或读完全部原文）：{}",character,
+                    item.content.chars().take(600).collect::<String>()),
+                shareable:item.metadata["source"] == "web" && item.metadata["private"] != true});
+        }
+    }
+    evidence
 }
 
 fn observe(

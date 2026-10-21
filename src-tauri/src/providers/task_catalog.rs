@@ -12,6 +12,12 @@ pub struct TaskRouteSpec {
     pub concurrency: String,
     pub spoken: bool,
     pub fallback: Option<String>,
+    /// 不放进设置窗口的路由矩阵列表（该路由由专属界面自行提供配置入口）。
+    ///
+    /// 与"内部任务"不同：hidden 的路由依然是一条完整可配置路由，只是通用设置页
+    /// 不渲染它；用量统计、路由连通性测试等其余入口照常可见。
+    #[serde(default)]
+    pub hidden: bool,
     pub instruction: String,
 }
 

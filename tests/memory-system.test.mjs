@@ -70,11 +70,13 @@ pub mod providers {
     }
 }
 pub mod dialogue {
+    use crate::error::VivianResult;
     #[derive(Debug,Clone,serde::Serialize,serde::Deserialize)] __HISTORY_ENTRY__
-    pub struct DialogueManager { pub entries:parking_lot::RwLock<Vec<HistoryEntry>>,
+    pub struct DialogueManager { pub entries:parking_lot::RwLock<Vec<HistoryEntry>>, pub char_id:String,
         pub conversation_boundaries:crate::memory::conversation_semantics::ConversationBoundaryStore }
     impl DialogueManager {
-        pub fn new(entries:Vec<HistoryEntry>)->Self{Self{entries:parking_lot::RwLock::new(entries),conversation_boundaries:crate::memory::conversation_semantics::ConversationBoundaryStore::new(std::env::temp_dir().join(format!("vivian-grouping-test-{}.json",uuid::Uuid::new_v4())))}}
+        pub fn new(entries:Vec<HistoryEntry>)->Self{Self{char_id:"vivian".into(),entries:parking_lot::RwLock::new(entries),conversation_boundaries:crate::memory::conversation_semantics::ConversationBoundaryStore::new(std::env::temp_dir().join(format!("vivian-grouping-test-{}.json",uuid::Uuid::new_v4())))}}
+        __VISIBLE_CONVERSATIONS__
         pub fn get_all_history(&self)->crate::error::VivianResult<Vec<HistoryEntry>>{Ok(self.entries.read().clone())}
         pub fn memory_conversations(&self)->crate::error::VivianResult<Vec<crate::memory::conversations::ConversationRecord>>{
             let (_,d)=self.conversation_boundaries.snapshot();Ok(crate::memory::conversations::project_conversations(&self.entries.read(),"vivian",&d).0)}
@@ -208,6 +210,9 @@ pub mod memory {
 }
 `;
 const modules = ['types', 'kinds', 'provenance', 'conversations', 'conversation_semantics', 'session_summary', 'companion_policy', 'pipeline', 'seed'];
+const visibleConversations = history.match(/    pub fn visible_memory_conversations\([\s\S]*?\n    \}/)?.[0];
+if (!visibleConversations) throw new Error('UI conversation projection not found');
+source = source.replace('__VISIBLE_CONVERSATIONS__', visibleConversations);
 source = source.replace('__HISTORY_ENTRY__', entry).replace('__STRIP__', strip).replace('__PREFIX__', prefix)
   .replace('__PROMPT_TIME__', `#[path="${rustPath('src-tauri/src/utils/prompt_time.rs')}"] pub mod prompt_time;`)
   .replace('__MODULES__', modules.map((name) => `#[path="${rustPath(`src-tauri/src/memory/${name}.rs`)}"] pub mod ${name};`).join('\n'));
@@ -255,23 +260,36 @@ ${systemSource.slice(sweepStart, sweepEnd)}
     std::fs::remove_dir_all(root).unwrap();
 }}
 `;
-const brainSource = await readFile(path.join(root, 'src-tauri/src/brain/brain.rs'), 'utf8');
-const greetingStart = brainSource.indexOf('fn fixed_startup_greeting(');
-const greetingEnd = brainSource.indexOf('\nimpl Brain {', greetingStart);
-if (greetingStart < 0 || greetingEnd < greetingStart) throw new Error('first greeting slice not found');
 source += `mod seed_arrival {
-${brainSource.slice(greetingStart, greetingEnd)}
-#[test] fn first_arrival_greets_the_new_user_and_returning_sessions_stay_contextual() {
-    for (character,name) in [("vivian","Vivian"),("nana","Nana")] {
-        let greeting = fixed_startup_greeting(character,true).unwrap();
-        assert!(greeting.contains(name) && greeting.contains("刚到"));
-        assert!(fixed_startup_greeting(character,false).is_none());
+#[test] fn graduation_leaves_the_next_encounter_open_without_claiming_current_user_history() {
+    for character in ["vivian","nana"] {
         let mut bundle = crate::memory::seed::load(character).unwrap(); bundle.anchor_to(2_000_000_000.0).unwrap();
         assert!(bundle.memories.iter().any(|m| m.content.contains("毕业")));
         assert!(bundle.memories.iter().any(|m| m.content.contains("第一站") && m.content.contains("AlenTinn")));
         assert!(bundle.memories.iter().all(|m| !crate::memory::provenance::recall_label(&m.metadata).contains("非当前用户经历")));
         assert!(bundle.history.iter().all(|h| h.metadata["listener"] != "user"));
     }
+}}
+`;
+source += `mod seed_ui_visibility {
+#[test] fn hides_backstory_originals_and_summaries_without_removing_stored_records() {
+    use crate::{dialogue::{DialogueManager,HistoryEntry},memory::{seed,provenance}};
+    for character in ["vivian","nana"] {
+        let bundle = seed::load(character).unwrap();
+        assert!(bundle.memories.iter().all(|m| !provenance::visible_in_memory_page(&m.metadata)));
+        let mut originals = bundle.history;
+        let stored_count = originals.len()+1;
+        originals.push(HistoryEntry{id:"live_user_message".into(),role:"user".into(),content:"今天开始学画画".into(),timestamp:2_000_000_000.0,session_id:Some("live".into()),metadata:serde_json::json!({"source":"direct","speaker":"user","listener":character})});
+        let mut dialogue = DialogueManager::new(originals); dialogue.char_id = character.into();
+        let visible = dialogue.visible_memory_conversations().unwrap();
+        assert_eq!(visible.len(),1);
+        assert_eq!(visible[0].turns.len(),1);
+        assert_eq!(visible[0].turns[0].id,"live_user_message");
+        assert_eq!(dialogue.get_all_history().unwrap().len(),stored_count);
+    }
+    assert!(provenance::visible_in_memory_page(&serde_json::json!({"source":"direct","record_kind":"session_summary"})));
+    assert!(provenance::visible_in_memory_page(&serde_json::json!({})));
+    assert!(!provenance::visible_in_memory_page(&serde_json::json!({"source":"environment_preset"})));
 }}
 `;
 source += `

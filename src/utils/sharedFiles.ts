@@ -7,12 +7,12 @@ export interface SharedFile {
   size: number;
 }
 
-export function saveSharedFile(sourcePath: string): Promise<SharedFile> {
-  return invoke('save_shared_file', { sourcePath });
+export function saveSharedFile(sourcePath: string, characterId?: string): Promise<SharedFile> {
+  return invoke('save_shared_file', { sourcePath, ...(characterId ? { characterId } : {}) });
 }
 
-export async function prepareSharedFile(sourcePath: string) {
-  const file = await saveSharedFile(sourcePath);
+export async function prepareSharedFile(sourcePath: string, characterId?: string) {
+  const file = await saveSharedFile(sourcePath, characterId);
   let result: FileTextResult;
   try {
     result = await invoke<FileTextResult>('extract_file_text', { sourcePath: file.path });

@@ -819,6 +819,21 @@ impl UnifiedEventLedger {
         result
     }
 
+    /// Bounded chronological scene input; private recent actions cannot be crowded out by public dialogue.
+    pub fn recent_scene_events_visible_to(&self, char_id: &str, n: usize) -> Vec<UnifiedEvent> {
+        self.purge_expired();
+        let inner = self.inner.read();
+        let limit = n.min(32);
+        let mut events: Vec<_> = inner.public_events.iter().rev().take(limit)
+            .chain(inner.character_events.get(char_id).into_iter().flatten().rev().take(limit))
+            .filter(|event| self.is_visible(event, char_id)).cloned().collect();
+        events.sort_by(|a,b| b.timestamp.total_cmp(&a.timestamp).then_with(|| a.id.cmp(&b.id)));
+        events.dedup_by(|a,b| a.id == b.id);
+        events.truncate(limit);
+        events.reverse();
+        events
+    }
+
     pub fn events_on_date(
         &self,
         char_id: &str,
@@ -1305,9 +1320,16 @@ pub fn register_world_event(
     }
 }
 
-/// 从对话消息注册一条环境事件
-///
-/// 在 `DialogueManager::add_message_with_metadata` 中调用。
+/// Completed character activity remains private until that character elects to share it.
+pub fn register_character_activity(char_id: &str, id: String, event_type: &str,
+    content: &str, timestamp: f64, tags: Vec<String>) {
+    if char_id.is_empty() { return; }
+    register_event(UnifiedEvent { id, timestamp, sender:char_id.into(), receiver:char_id.into(),
+        event_type:event_type.into(),content_preview:content.chars().take(CONTENT_PREVIEW_MAX_CHARS).collect(),
+        context_tags:tags,visibility:EventVisibility::Private(char_id.into()),associated_char_id:Some(char_id.into()) });
+}
+
+/// 在 `DialogueManager::add_message_with_metadata` 中注册实际对话消息。
 pub fn register_event_from_dialogue(
     char_id: &str,
     content: &str,
@@ -1443,6 +1465,20 @@ mod tests {
             compacting: std::sync::atomic::AtomicBool::new(false),
             router: Mutex::new(None),
         }
+    }
+
+    #[test]
+    fn scene_query_keeps_recent_owned_actions_beside_public_traffic_without_private_cross_talk() {
+        let now=chrono::Utc::now().timestamp() as f64;
+        let public=(0..100).map(|i| make_event("user","all",EventVisibility::Public,now-200.0+i as f64)).collect();
+        let mut own=make_event("vivian","vivian",EventVisibility::Private("vivian".into()),now-1.0);
+        own.event_type="knowledge_acquired".into();own.content_preview="刚收好的摘录".into();
+        let ledger=make_ledger(LedgerInner{public_events:public,
+            character_events:HashMap::from([("vivian".into(),vec![own.clone()])]),..Default::default()});
+        let visible=ledger.recent_scene_events_visible_to("vivian",4);
+        assert_eq!(visible.len(),4);assert_eq!(visible.last().unwrap().id,own.id);
+        assert!(ledger.recent_scene_events_visible_to("nana",4).iter().all(|event| event.id != own.id));
+        assert!(ledger.recent_scene_events_visible_to("vivian",0).is_empty());
     }
 
     /// 把账本持久化切到指定目录下的文件库，用于重启/持久化测试。

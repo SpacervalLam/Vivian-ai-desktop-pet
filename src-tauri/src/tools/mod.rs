@@ -14,15 +14,17 @@
 //! # 工具执行管线
 //! [`executor::execute_tool_use`] 实现完整管线：
 //! 1. 查找工具
-//! 2. 沙箱安全检查
-//! 3. 输入验证
-//! 4. 缓存检查（只读工具）
-//! 5. 权限检查
-//! 6. 执行（带超时）
-//! 7. 缓存写入（只读工具）
+//! 2. 输入验证与参数规范化
+//! 3. 沙箱、Hook、权限与策略检查
+//! 4. 按调用上下文检查缓存（显式启用的只读工具）
+//! 5. 执行（带超时）
+//! 6. 结果预算、缓存写入与后置策略；所有结果均记录可观测性
 
 pub mod builtin;
+pub(crate) mod arguments;
 pub mod cache;
+pub(crate) mod catalog;
+mod catalog_tools;
 pub mod chainer;
 pub mod confirmation;
 pub mod custom_tools;

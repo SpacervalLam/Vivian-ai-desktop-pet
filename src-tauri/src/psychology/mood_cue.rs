@@ -86,11 +86,29 @@ impl MoodCueMapper {
     /// 按规则顺序评估，返回第一个匹配的 cue。
     /// 无匹配时返回空 cue（保持当前状态）。
     pub fn map(&self, mood: &MoodSnapshot) -> MoodCue {
+        self.map_ctx(None, mood)
+    }
+
+    /// 带角色上下文的映射（产线路径走这个）
+    ///
+    /// 日志必须能回答三件事：**哪个角色**命中了**哪条规则**、命中的**情绪长什么样**。
+    /// 早先这条 debug 只打规则名和 accent，于是两个角色在同一 tick 各自命中时，
+    /// 日志里只是两行一模一样的记录——分不清是"一个角色闪两次"还是"两个角色各闪一次"，
+    /// 排查启动期表情问题会直接卡在这一步。现在把主情绪档位/效价/疲劳/压力/负向情感
+    /// 一起打出来，单次启动即可把每条点缀归到角色。
+    pub fn map_ctx(&self, char_id: Option<&str>, mood: &MoodSnapshot) -> MoodCue {
         for rule in &self.rules {
             if (rule.condition)(mood) {
                 tracing::debug!(
+                    char = char_id.unwrap_or("-"),
                     rule = rule.name,
                     accent = %rule.cue.accent,
+                    primary = mood.primary_emotion.as_str(),
+                    intensity = mood.primary_intensity,
+                    valence = mood.valence,
+                    negative_affect = mood.negative_affect,
+                    fatigue = mood.fatigue,
+                    stress = mood.stress,
                     "[MoodCue] 命中规则"
                 );
                 return rule.cue.clone();
@@ -489,6 +507,11 @@ static GLOBAL_MAPPER: once_cell::sync::Lazy<MoodCueMapper> =
 /// 便捷接口：从 MoodSnapshot 映射 MoodCue
 pub fn mood_to_cue(mood: &MoodSnapshot) -> MoodCue {
     GLOBAL_MAPPER.map(mood)
+}
+
+/// 便捷接口（产线）：带上角色 ID，命中日志可按角色归属
+pub fn mood_to_cue_for(char_id: &str, mood: &MoodSnapshot) -> MoodCue {
+    GLOBAL_MAPPER.map_ctx(Some(char_id), mood)
 }
 
 #[cfg(test)]

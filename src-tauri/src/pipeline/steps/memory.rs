@@ -521,8 +521,11 @@ impl MemoryRetrievalStep {
             // Give the strongest two episodes room for context, while retaining the total budget.
             let content = crate::utils::truncate_chars(&mem.content, if index < 2 { 800 } else { 180 });
             let authored_context = is_authored_context(mem);
-            let type_label = if authored_context && mem.metadata["fictional_backstory"] != true { "角色预置背景；非运行期对话" }
-                else { crate::memory::provenance::recall_label(&mem.metadata) };
+            let type_label = if mem.metadata["fictional_backstory"] == true {
+                format!("{}；仅在用户问及或当前话题确有需要时回应，不主动以此开启或延续话题，也不当作与当前用户的共同经历",
+                    crate::memory::provenance::recall_label(&mem.metadata))
+            } else if authored_context { "角色预置背景；非运行期对话".to_string() }
+                else { crate::memory::provenance::recall_label(&mem.metadata).to_string() };
             let mut attribution = crate::memory::provenance::attribution(&mem.metadata);
             if let Some(timestamp) = mem.metadata["source_timestamp"].as_f64().filter(|t| t.is_finite() && *t > 0.0) {
                 attribution.push_str(&format!("；原话时间：{}", crate::utils::prompt_time::format_prompt_time(timestamp)));

@@ -2,12 +2,11 @@
 //!
 //! 完整执行流程：
 //! 1. 查找工具
-//! 2. 沙箱安全检查
-//! 3. 输入验证
-//! 4. 缓存检查
-//! 5. 权限检查
-//! 6. 执行（带超时）
-//! 7. 缓存写入
+//! 2. 输入验证与参数规范化
+//! 3. 沙箱、Hook、权限与策略检查
+//! 4. 按调用上下文检查缓存
+//! 5. 执行（带超时）
+//! 6. 结果预算、缓存写入与后置策略；所有结果均记录可观测性
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -23,6 +22,10 @@ use super::registry::{is_work_agent_only, AgentSide, ToolSystem};
 use super::types::{
     AgentAccessLevel, PermissionContext, ToolErrorCode, ToolResult, ToolUseContext,
 };
+
+#[cfg(test)]
+#[path = "executor_tests.rs"]
+mod contract_tests;
 
 /// 用户确认回调：返回 true 表示允许执行，false 表示拒绝
 pub type CanUseTool = Arc<dyn Fn(&str, &Value) -> bool + Send + Sync>;
@@ -375,113 +378,9 @@ pub fn get_tool_timeout(tool_name: &str) -> Duration {
     )
 }
 
-/// 参数名归一化：LLM 经常幻视参数名（如 app_path → application），
-/// 根据工具 schema 的 properties + required 做子串匹配修正。
-///
-/// 策略：对于 LLM 传来的每个 key，如果 schema.properties 里没有同名项，
-/// 就找"该 key 是某个 canonical 名的子串"或"某个 canonical 名是该 key 的子串"的候选，
-/// 优先匹配 required 参数。
-fn normalize_key(key: &str) -> String {
-    key.chars()
-        .filter(|c| c.is_alphanumeric())
-        .map(|c| c.to_ascii_lowercase())
-        .collect()
-}
-
+/// Repair unique name differences while preserving exact keys and ambiguous input.
 fn normalize_arguments(tool: &dyn super::types::Tool, arguments: Value) -> Value {
-    let schema = tool.parameters_schema();
-    let properties = match schema.get("properties").and_then(|p| p.as_object()) {
-        Some(p) => p,
-        None => return arguments,
-    };
-
-    let required: Vec<&str> = schema
-        .get("required")
-        .and_then(|r| r.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str())
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let canonical_keys: Vec<&str> = properties.keys().map(|k| k.as_str()).collect();
-
-    let obj = match arguments.as_object() {
-        Some(o) => o,
-        None => return arguments,
-    };
-
-    let mut normalized = serde_json::Map::new();
-    let mut used_canonicals: std::collections::HashSet<String> = std::collections::HashSet::new();
-
-    for (key, value) in obj {
-        if let Some(canonical) = canonical_keys.iter().find(|ck| *ck == key) {
-            if used_canonicals.insert(canonical.to_string()) {
-                normalized.insert(key.clone(), value.clone());
-            } else {
-                tracing::warn!(
-                    "[executor] 参数名归一化: 跳过重复 key '{}'",
-                    key
-                );
-            }
-            continue;
-        }
-
-        let key_norm = normalize_key(key);
-        let mut candidates: Vec<&&str> = Vec::new();
-        for ck in &canonical_keys {
-            let ck_norm = normalize_key(ck);
-            if key_norm == ck_norm {
-                candidates.push(ck);
-            }
-        }
-
-        if candidates.is_empty() {
-            for ck in &canonical_keys {
-                let ck_norm = normalize_key(ck);
-                if (key_norm.len() >= 3 && ck_norm.starts_with(&key_norm))
-                    || (ck_norm.len() >= 3 && key_norm.starts_with(&ck_norm))
-                {
-                    candidates.push(ck);
-                }
-            }
-        }
-
-        candidates.sort_by_key(|ck| {
-            (
-                if required.contains(ck) { 0 } else { 1 },
-                normalize_key(ck).len().abs_diff(key_norm.len()),
-            )
-        });
-
-        let mut matched = None;
-        for candidate in candidates {
-            if used_canonicals.insert(candidate.to_string()) {
-                matched = Some(*candidate);
-                break;
-            }
-        }
-
-        if let Some(canonical) = matched {
-            tracing::info!(
-                "[executor] 参数名归一化: '{}' → '{}' (工具: {})",
-                key,
-                canonical,
-                tool.name()
-            );
-            normalized.insert(canonical.to_string(), value.clone());
-        } else {
-            tracing::debug!(
-                "[executor] 参数名 '{}' 无法匹配到 schema，保留原样 (工具: {})",
-                key,
-                tool.name()
-            );
-            normalized.insert(key.clone(), value.clone());
-        }
-    }
-
-    Value::Object(normalized)
+    super::arguments::normalize_tool_arguments(&tool.parameters_schema(), arguments)
 }
 
 /// 执行工具调用 - 完整的执行管线
@@ -502,8 +401,58 @@ pub async fn execute_tool_use(
     context: &ToolUseContext,
     can_use_tool: Option<CanUseTool>,
 ) -> ToolResult {
+    use futures::FutureExt;
+    let resolved = tool_system.find_tool_versioned(tool_name);
+    let name = resolved.as_ref()
+        .map(|(tool, _)| tool.name().to_string()).unwrap_or_else(|| tool_name.to_string());
+    let mut observed = ObservedExecution {
+        observability: &tool_system.observability,
+        record: Some(tool_system.observability.start_call(&name, arguments.clone())),
+        trace: ExecutionTrace { phase: "lookup", cache_hit: false },
+    };
+    let outcome = std::panic::AssertUnwindSafe(execute_tool_use_inner(
+        tool_name, arguments, tool_system, context, can_use_tool, &mut observed.trace, resolved,
+    )).catch_unwind().await;
+    let result = outcome.unwrap_or_else(|_| ToolResult::standard_error(
+        "Tool pipeline panicked", Some("ToolExecutionPanic"), None));
+    observed.finish(&result);
+    result
+}
+
+struct ExecutionTrace { phase: &'static str, cache_hit: bool }
+struct ObservedExecution<'a> {
+    observability: &'a super::observability::ToolObservability,
+    record: Option<super::observability::ObsRecord>,
+    trace: ExecutionTrace,
+}
+impl ObservedExecution<'_> {
+    fn finish(&mut self, result: &ToolResult) {
+        if let Some(record) = self.record.take() {
+            self.observability.end_call_with_metadata(record, result.success, result.data.clone(),
+                result.error.clone(), self.trace.cache_hit, self.trace.phase);
+        }
+    }
+}
+impl Drop for ObservedExecution<'_> {
+    fn drop(&mut self) {
+        if let Some(record) = self.record.take() {
+            self.observability.end_call_with_metadata(record, false, None,
+                Some("ToolCancelled".into()), self.trace.cache_hit, self.trace.phase);
+        }
+    }
+}
+
+async fn execute_tool_use_inner(
+    tool_name: &str,
+    arguments: Value,
+    tool_system: &ToolSystem,
+    context: &ToolUseContext,
+    can_use_tool: Option<CanUseTool>,
+    trace: &mut ExecutionTrace,
+    resolved: Option<(Arc<dyn super::types::Tool>, u64)>,
+) -> ToolResult {
     // 1. 查找工具
-    let tool = match tool_system.find_tool(tool_name) {
+    let (tool, registry_revision) = match resolved {
         Some(t) => t,
         None => {
             // 浏览器类工具在桥未连接时整体不注入 schema，但提示词是**按能力**写的，
@@ -533,6 +482,7 @@ pub async fn execute_tool_use(
     };
 
     let tool_name = tool.name();
+    trace.phase = "availability";
 
     // 1.05 用户在**本侧**禁用的工具直接拒绝（正常情况下禁用工具不会出现在该侧
     // LLM 工具列表中，此处防御幻觉调用旧工具名 / 历史消息重放）。
@@ -575,16 +525,24 @@ pub async fn execute_tool_use(
     // 1.5 参数名归一化（LLM 经常用错参数名，如 app_path → application）
     let arguments = normalize_arguments(tool.as_ref(), arguments);
 
+    trace.phase = "validation";
+    let validation = tool.validate_input(&arguments, context).await;
+    if !validation.result {
+        return ToolResult::standard_error(&validation.message, Some("InvalidInput"), None);
+    }
+    let validated_args = validation.data.unwrap_or(arguments);
+
+    trace.phase = "sandbox";
     // 2. 沙箱安全检查
     let safety = tool_system
         .sandbox
-        .check_tool_safety(tool_name, &arguments, Some(context));
+        .check_tool_safety(tool_name, &validated_args, Some(context));
     let mut action_confirmed = false;
     if !safety.allowed {
         if safety.requires_confirmation {
             // 委托给 can_use_tool 回调
             if let Some(cb) = &can_use_tool {
-                if !cb(tool_name, &arguments) {
+                if !cb(tool_name, &validated_args) {
                     return ToolResult::standard_error(
                         "用户拒绝了沙箱确认请求",
                         Some("UserDenied"),
@@ -595,13 +553,13 @@ pub async fn execute_tool_use(
             } else if is_session_allowed(tool_name) {
                 action_confirmed = true;
             } else {
-                let (risk, reason) = confirmation_info(tool_name, &arguments);
+                let (risk, reason) = confirmation_info(tool_name, &validated_args);
                 let scope = if tool_name == "open_application" { "persistent" } else { "session" };
-                match tool_system.request_confirmation(tool_name, &arguments,
+                match tool_system.request_confirmation(tool_name, &validated_args,
                     format!("{reason}\n{}", safety.warning), risk, &context.char_id, scope).await
                 {
                     Some(response @ (ConfirmationResponse::AllowOnce | ConfirmationResponse::AllowAlways)) => {
-                        remember_confirmation(tool_name, &arguments, response);
+                        remember_confirmation(tool_name, &validated_args, response);
                         action_confirmed = true;
                     }
                     Some(ConfirmationResponse::Deny) => return ToolResult::standard_error(
@@ -619,21 +577,11 @@ pub async fn execute_tool_use(
         }
     }
 
-    // 3. 输入验证
-    let validation = tool.validate_input(&arguments, context).await;
-    if !validation.result {
-        return ToolResult::standard_error(
-            &validation.message,
-            Some("InvalidInput"),
-            None,
-        );
-    }
-    let validated_args = validation.data.unwrap_or(arguments.clone());
-    // A validator may normalize or replace the target. Approval of the original preview
-    // must not silently authorize a different operation.
-    action_confirmed &= validated_args == arguments && tool_name != "create_tool";
+    // Evolution still requires its concrete preview even after sandbox approval.
+    action_confirmed &= tool_name != "create_tool";
 
     // 3.5 PreToolUse Hook 拦截（外部脚本可 deny 阻止执行）
+    trace.phase = "pre_hook";
     {
         let registry = HOOK_REGISTRY.read().clone(); // clone to avoid holding guard across await
         if registry.has_pre_tool_hooks() {
@@ -655,19 +603,8 @@ pub async fn execute_tool_use(
         }
     }
 
-    // 4. 缓存检查（只读工具）
-    // Web tools own freshness and document caches; generic cache lacks caller/config/freshness keys.
-    // 前台应用是实时状态，不能返回几分钟前的窗口或进程。
-    let is_read_only = tool.is_read_only() && !matches!(tool.name(),
-        "web_search" | "web_fetch" | "session_event_read" | "get_foreground_app_context" | "get_active_window");
-    if is_read_only {
-        if let Some(cached) = tool_system.cache.get(tool_name, &validated_args) {
-            tracing::debug!("工具 {} 命中缓存", tool_name);
-            return ToolResult::success(cached);
-        }
-    }
-
     // 5. 权限检查
+    trace.phase = "permission";
     let runtime_cfg = current_runtime_config();
     // 会话级访问级别覆盖优先（编程智能体按会话权限控制），否则回退全局 runtime config
     let access_level = context.access_level.unwrap_or(runtime_cfg.access_level);
@@ -686,16 +623,26 @@ pub async fn execute_tool_use(
     for dir in &context.extra_working_directories {
         permission_context.add_working_directory(dir.path.clone(), dir.is_read_only);
     }
-    if requires_permission(tool.as_ref(), &validated_args, &permission_context) {
-        let permission =
+    {
+        let permission = if requires_permission(tool.as_ref(), &validated_args, &permission_context) {
             check_tool_permission(tool.as_ref(), &validated_args, context, &permission_context)
-                .await;
+                .await
+        } else {
+            tool.check_permissions(&validated_args, context).await
+        };
 
         if permission.is_denied() {
             return ToolResult::standard_error(
                 &permission.message,
                 Some("PermissionDenied"),
                 None,
+            );
+        }
+
+        if permission.updated_input.as_ref().is_some_and(|input| input != &validated_args) {
+            return ToolResult::standard_error(
+                "权限检查改写了调用参数，请用新参数重新发起调用以完成校验和授权。",
+                Some("PermissionInputChanged"), permission.updated_input,
             );
         }
 
@@ -777,6 +724,7 @@ pub async fn execute_tool_use(
     }
 
     // 5.5 策略缝 guard 阶段：pre-execute 瀑布（可插桩；未注入 ctx 或空注册时静默跳过）
+    trace.phase = "guard";
     if let Some(policy_ctx) = tool_system.policy_ctx() {
         use super::policy::{ToolGuardDecision, ToolGuardFlow};
         let flow = ToolGuardFlow {
@@ -826,73 +774,57 @@ pub async fn execute_tool_use(
         }
     }
 
-    // 6. 执行（带超时）
-    // 别名应使用实际工具的执行预算。
-    // 工具可按**本次参数**声明预算（如 run_command 的 timeout_secs）：静态登记
-    // 值只是下限，否则外层会先于内层触发，把工具自己的超时说明挡在外面。
-    let base_timeout = get_tool_timeout(tool.name());
-    let timeout = tool
-        .execution_timeout(&validated_args)
-        .map(|t| t.max(base_timeout))
-        .unwrap_or(base_timeout);
-    let obs_record = tool_system
-        .observability
-        .start_call(tool_name, validated_args.clone());
-
-    let exec_tool = Arc::clone(&tool);
-    let exec_args = validated_args.clone();
-    let exec_context = context.clone();
-    let exec_future = async move {
-        use futures::FutureExt;
-        match std::panic::AssertUnwindSafe(exec_tool.call(exec_args, &exec_context)).catch_unwind().await {
-            Ok(result) => result,
-            Err(_) => ToolResult::standard_error("Tool execution panicked", Some("ToolExecutionPanic"), None),
-        }
-    };
-
-    let mut result = match tokio::time::timeout(timeout, exec_future).await {
-        Ok(r) => r,
-        Err(_) => {
-            tool_system.observability.end_call(
-                obs_record,
-                false,
-                None,
-                Some(format!("工具执行超时（{}秒）", timeout.as_secs())),
-            );
-            let info = ToolErrorCode::TimeoutError.get_error_info();
-            return ToolResult::standard_error(
-                &info.suggestion,
-                Some(&info.name),
-                None,
-            );
-        }
-    };
-
-    // 7. 可观测性记录 + 缓存写入 + 结果预算
-    if result.success {
-        // 全量数据先写入 observability（保留完整结果供二次查询）
-        tool_system
-            .observability
-            .end_call(obs_record, true, result.data.clone(), None);
-
-        if let Some(full_data) = result.data.take() {
-            // 应用字符预算：超阈值则截断为预览版
-            let budgeted = enforce_result_budget(tool_name, full_data.clone(), current_runtime_config().max_result_chars);
-            // 只读工具缓存的是预览版（避免缓存膨胀 + 让 LLM 看到的就是缓存版）
-            if is_read_only {
-                tool_system
-                    .cache
-                    .set(tool_name, &validated_args, budgeted.clone());
-            }
-            result.data = Some(budgeted);
-        }
+    // Caches never bypass the current permission, hook or policy gates.
+    trace.phase = "cache";
+    let cacheable = tool.is_read_only() && tool.is_cacheable();
+    let cache_scope = cacheable.then(|| {
+        let mut caller = serde_json::to_value(context).expect("serializable tool context");
+        caller.as_object_mut().unwrap().remove("timestamp");
+        serde_json::json!({
+            "caller": caller, "registry_revision": registry_revision,
+            "epoch": tool_system.cache.generation(),
+            "access_level": access_level.as_str(), "max_result_chars": runtime_cfg.max_result_chars,
+        })
+    });
+    let cached = cache_scope.as_ref().and_then(|scope| {
+        tool_system.cache.get_scoped(tool_name, &validated_args, scope)
+            .and_then(|value| serde_json::from_value::<ToolResult>(value).ok())
+    });
+    trace.cache_hit = cached.is_some();
+    let mut result = if let Some(cached) = cached {
+        cached
     } else {
-        tool_system.observability.end_call(
-            obs_record,
-            false,
-            None,
-            result.error.clone(),
-        );
+        trace.phase = "execution";
+        let base_timeout = get_tool_timeout(tool_name);
+        let timeout = tool.execution_timeout(&validated_args)
+            .map(|budget| budget.max(base_timeout)).unwrap_or(base_timeout);
+        // Invalidate before and after mutations, including partial failures/cancellation.
+        let mutation = if !tool.is_read_only() {
+            tool_system.cache.clear();
+            Some(MutationInvalidation(&tool_system.cache))
+        } else { None };
+        let outcome = tokio::time::timeout(timeout, tool.call(validated_args.clone(), context)).await;
+        drop(mutation);
+        match outcome {
+            Ok(result) => result,
+            Err(_) => {
+                let info = ToolErrorCode::TimeoutError.get_error_info();
+                return ToolResult::standard_error(&info.suggestion, Some(&info.name),
+                    Some(serde_json::json!({"timeout_secs": timeout.as_secs()})));
+            }
+        }
+    };
+    trace.phase = "result";
+    if let Some(data) = result.data.take() {
+        result.data = Some(enforce_result_budget(tool_name, data, runtime_cfg.max_result_chars));
+    }
+    if result.success && tool.signals_goal_completion() { result.goal_completed = true; }
+    // Closures and image parts cannot survive JSON serialization; always execute those tools.
+    if cacheable && !trace.cache_hit && result.success
+        && result.context_modifier.is_none() && result.images.is_none() {
+        if let (Some(scope), Ok(payload)) = (cache_scope.as_ref(), serde_json::to_value(&result)) {
+            tool_system.cache.set_scoped(tool_name, &validated_args, scope, payload);
+        }
     }
 
     // 7.5 PostToolUse Hook 通知（信息性，无 deny 能力）
@@ -917,17 +849,7 @@ pub async fn execute_tool_use(
         }
     }
 
-    // 8. Goal Satisfaction 检测：工具声明"成功即任务完成"且本调用成功 →
-    //    标记 goal_completed，让上层 Agent 循环可据此提前终止，避免 LLM
-    //    在任务已达成时继续推理出多余动作。
-    if result.success && tool.signals_goal_completion() {
-        result.goal_completed = true;
-        tracing::info!(
-            "[executor] 工具 {} 声明 goal_completion，本次调用成功 → 标记任务完成",
-            tool_name
-        );
-    }
-
+    trace.phase = "post_policy";
     // 9. 策略缝 post-execute 阶段（可插桩；可替换结果/阻断。未注入 ctx 或空注册时静默即透传）
     if let Some(policy_ctx) = tool_system.policy_ctx() {
         use super::policy::ToolPostExecute;
@@ -946,13 +868,31 @@ pub async fn execute_tool_use(
                 pe.into_result(current_runtime_config().max_result_chars)
             {
                 // 保留 goal_completed 语义，避免 post 改写破坏任务完成判定
-                rewritten.goal_completed = result.goal_completed;
+                rewritten.goal_completed = rewritten.success && result.goal_completed;
+                if rewritten.success {
+                    rewritten.context_modifier = result.context_modifier.clone();
+                    rewritten.images = result.images.clone();
+                }
                 result = rewritten;
             }
+        } else {
+            return ToolResult::standard_error("结果被 post-execute 策略阻断", Some("PostExecuteBlocked"), None);
         }
     }
 
+    crate::memory::unified_event_ledger::register_character_activity(&context.char_id,
+        format!("tool:{}",uuid::Uuid::new_v4()),"tool_result",
+        &format!("{} 侧的工具 {} 本次调用{}；仅说明此次工具调用的结果，不代表整个任务完成。",
+            context.agent_kind,tool_name,if result.success { "成功" } else { "失败" }),
+        chrono::Utc::now().timestamp() as f64,
+        vec!["tool_result".into(),context.agent_kind.clone(),tool_name.into()]);
+    trace.phase = "complete";
     result
+}
+
+struct MutationInvalidation<'a>(&'a super::cache::ToolCache);
+impl Drop for MutationInvalidation<'_> {
+    fn drop(&mut self) { self.0.clear(); }
 }
 
 /// 执行多个工具调用（顺序执行）
@@ -978,28 +918,32 @@ pub async fn execute_tool_calls_parallel(
     context: ToolUseContext,
     can_use_tool: Option<CanUseTool>,
 ) -> Vec<ToolResult> {
-    let mut futures = Vec::with_capacity(calls.len());
-    for (tool_name, args) in calls {
-        let ts = Arc::clone(&tool_system);
-        let ctx = context.clone();
-        let cb = can_use_tool.clone();
-        futures.push(tokio::spawn(async move {
-            execute_tool_use(&tool_name, args, &ts, &ctx, cb).await
-        }));
-    }
-
-    let mut results = Vec::with_capacity(futures.len());
-    for f in futures {
-        match f.await {
-            Ok(r) => results.push(r),
-            Err(e) => results.push(ToolResult::standard_error(
-                &format!("工具任务异常: {}", e),
-                Some("TaskJoinError"),
-                None,
-            )),
+    let mut results = Vec::with_capacity(calls.len());
+    let mut reads = Vec::new();
+    for (name, args) in calls {
+        if tool_system.find_tool(&name).is_some_and(|tool| tool.is_read_only()) {
+            reads.push((name, args));
+        } else {
+            flush_reads(&mut reads, &mut results, &tool_system, &context, &can_use_tool).await;
+            results.push(execute_tool_use(&name, args, &tool_system, &context, can_use_tool.clone()).await);
         }
     }
+    flush_reads(&mut reads, &mut results, &tool_system, &context, &can_use_tool).await;
     results
+}
+
+pub(crate) const MAX_PARALLEL_READS: usize = 8;
+
+async fn flush_reads(
+    reads: &mut Vec<(String, Value)>, results: &mut Vec<ToolResult>,
+    system: &ToolSystem, context: &ToolUseContext, callback: &Option<CanUseTool>,
+) {
+    use futures::StreamExt;
+    let completed: Vec<_> = futures::stream::iter(reads.drain(..).map(|(name, args)| {
+        let callback = callback.clone();
+        async move { execute_tool_use(&name, args, system, context, callback).await }
+    })).buffered(MAX_PARALLEL_READS).collect().await;
+    results.extend(completed);
 }
 
 #[cfg(test)]
@@ -1089,11 +1033,19 @@ mod initiative_confirmation_tests {
     async fn sandbox_confirmation_without_a_user_interface_does_not_execute() {
         let system = ToolSystem::new();
         system.register_tool(Arc::new(crate::tools::builtin::coding_tools::WriteFileTool::new()));
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("initiative-test-must-not-be-created.txt");
+        let context = ToolUseContext::default().with_working_directory(directory.path().to_string_lossy());
         let result = execute_tool_use("write_file", serde_json::json!({
-            "path": "initiative-test-must-not-be-created.txt", "content": "not approved"
-        }), &system, &ToolUseContext::default(), None).await;
+            "path": path, "content": "not approved"
+        }), &system, &context, None).await;
         assert!(!result.success);
-        assert!(system.observability.get_recent_records("write_file", 1, false).is_empty());
+        assert_eq!(result.error.as_deref(), Some("SandboxConfirmationRequired"));
+        assert!(!path.exists());
+        let records = system.observability.get_recent_records("write_file", 1, false);
+        assert_eq!(records.len(), 1);
+        assert!(!records[0].success);
+        assert_eq!(records[0].phase, "sandbox");
     }
 
     #[test]

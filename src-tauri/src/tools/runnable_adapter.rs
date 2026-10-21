@@ -16,23 +16,25 @@ use serde_json::Value;
 
 use crate::error::{VivianError, VivianResult};
 use crate::pipeline::base::{Runnable, RunnableConfig};
-use crate::tools::types::{PermissionBehavior, Tool, ToolUseContext};
+use crate::tools::types::{Tool, ToolUseContext};
+use crate::tools::ToolSystem;
 
 /// Tool → Runnable 适配器
 pub struct ToolRunnableAdapter {
     tool: Arc<dyn Tool>,
     /// 默认上下文（当 input 未携带 `_context` 时使用）
     default_context: ToolUseContext,
-    /// 是否跳过权限检查（pipeline 已在外层处理时设为 true）
-    skip_permissions: bool,
+    tool_system: Arc<ToolSystem>,
 }
 
 impl ToolRunnableAdapter {
     pub fn new(tool: Arc<dyn Tool>) -> Self {
+        let tool_system = Arc::new(ToolSystem::new());
+        tool_system.register_tool(tool.clone());
         Self {
             tool,
             default_context: ToolUseContext::default(),
-            skip_permissions: false,
+            tool_system,
         }
     }
 
@@ -41,8 +43,15 @@ impl ToolRunnableAdapter {
         self
     }
 
-    pub fn with_skip_permissions(mut self, skip: bool) -> Self {
-        self.skip_permissions = skip;
+    /// Reuse the application's live registry, permissions, policies and telemetry.
+    /// The tool must already be registered in this system.
+    pub fn with_tool_system(mut self, system: Arc<ToolSystem>) -> Self {
+        self.tool_system = system;
+        self
+    }
+
+    /// Compatibility setter: unified execution always applies security checks.
+    pub fn with_skip_permissions(self, _skip: bool) -> Self {
         self
     }
 
@@ -63,43 +72,12 @@ impl ToolRunnableAdapter {
 
 #[async_trait]
 impl Runnable for ToolRunnableAdapter {
-    async fn ainvoke(
-        &self,
-        input: Value,
-        _config: Option<RunnableConfig>,
-    ) -> VivianResult<Value> {
+    async fn ainvoke(&self, input: Value, _config: Option<RunnableConfig>) -> VivianResult<Value> {
         let (args, ctx) = self.split_input(&input);
 
-        // 1. 输入验证
-        let validation = self.tool.validate_input(&args, &ctx).await;
-        if !validation.result {
-            return Err(VivianError::Tool(format!(
-                "输入验证失败: {} (code={})",
-                validation.message, validation.error_code
-            )));
-        }
-        let final_args = validation.data.unwrap_or(args);
-
-        // 2. 权限检查（可跳过）
-        if !self.skip_permissions {
-            let perm = self.tool.check_permissions(&final_args, &ctx).await;
-            match perm.behavior {
-                PermissionBehavior::Deny => {
-                    return Err(VivianError::Permission(perm.message));
-                }
-                PermissionBehavior::Ask => {
-                    return Err(VivianError::Permission(format!(
-                        "工具 {} 需要用户确认: {}",
-                        self.tool.name(),
-                        perm.message
-                    )));
-                }
-                PermissionBehavior::Allow | PermissionBehavior::Passthrough => {}
-            }
-        }
-
-        // 3. 执行
-        let result = self.tool.call(final_args, &ctx).await;
+        let result =
+            crate::tools::execute_tool_use(self.tool.name(), args, &self.tool_system, &ctx, None)
+                .await;
         if result.success {
             Ok(result.data.unwrap_or(Value::Null))
         } else {
@@ -125,7 +103,7 @@ impl ToolRunnableExt for Arc<dyn Tool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::types::{ToolCategory, ToolResult};
+    use crate::tools::types::{PermissionBehavior, ToolCategory, ToolResult};
     use async_trait::async_trait;
     use serde_json::json;
 
@@ -160,11 +138,7 @@ mod tests {
                 updated_input: None,
             }
         }
-        async fn call(
-            &self,
-            args: Value,
-            _context: &ToolUseContext,
-        ) -> ToolResult {
+        async fn call(&self, args: Value, _context: &ToolUseContext) -> ToolResult {
             ToolResult::success(args)
         }
         fn is_read_only(&self) -> bool {

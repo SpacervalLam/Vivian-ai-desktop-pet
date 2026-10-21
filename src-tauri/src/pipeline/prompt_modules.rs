@@ -1397,6 +1397,8 @@ pub struct PromptParts {
     /// 在 LLM 生成前主动搜索并将结果注入。让角色基于实际资料回答，而非猜测或幻觉。
     /// 注入位置在记忆段落之后、用户输入之前，确保 LLM 生成时能看到搜索结果。
     pub proactive_search_section: Option<String>,
+    /// Ephemeral, attributed scene continuity. Never persisted as conversation or memory.
+    pub interaction_guidance_section: Option<String>,
     /// 是否为跨角色对话场景（A↔B）
     ///
     /// true 时注入 `CROSS_CHARACTER_RESPONSE_DECISION` 段落，告诉 LLM 可以选择
@@ -1970,6 +1972,7 @@ impl PromptBuilder {
         // 提到 rank=1：这是"刚刚发生了什么"的唯一来源，是开口就能说的具体素材。
         push!(0, "pet_actions", parts.pet_action_section.clone().unwrap_or_default());
         push!(1, "environment_events", parts.environment_events.clone().unwrap_or_default());
+        push!(1, "scene_continuity", parts.interaction_guidance_section.clone().unwrap_or_default());
 
         // 共享世界知识：两角色共同知晓的世界事实。
         // 不并入 who_else——它讲的是"世界是什么样"，不是"谁在场"，

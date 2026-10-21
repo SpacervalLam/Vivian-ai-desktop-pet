@@ -729,15 +729,28 @@ impl ReactLoop {
 /// 入口已获取首轮响应并推送首轮文本；本函数接管其余一切：首轮工具执行、
 /// 执行态切换、后续轮次（窗口压缩 → 非流式响应 → 处置）、以及四类终止
 /// 条件下的表达态收尾。
-pub(crate) async fn run_react_loop(
+#[inline(never)]
+pub(crate) fn run_react_loop<'a>(
+    router: &'a ModelRouter,
+    tool_call_manager: &'a ToolCallManager,
+    emitter: &'a SharedStreamEmitter,
+    params: ReactParams,
+) -> futures::future::BoxFuture<'a, crate::error::VivianResult<(String, Vec<ToolCallResult>, usize, Option<f64>)>> {
+    // Choose before constructing a state machine: the unused legacy loop must
+    // not inflate every companion call's parent futures and polling stack.
+    if takes_over_execution(&params.channel, &params.first_calls, params.executable_intent) {
+        Box::pin(super::tool_execution::run_companion_tools(router, tool_call_manager, emitter, params))
+    } else {
+        Box::pin(run_legacy_react_loop(router, tool_call_manager, emitter, params))
+    }
+}
+
+async fn run_legacy_react_loop(
     router: &ModelRouter,
     tool_call_manager: &ToolCallManager,
     emitter: &SharedStreamEmitter,
     params: ReactParams,
 ) -> crate::error::VivianResult<(String, Vec<ToolCallResult>, usize, Option<f64>)> {
-    if takes_over_execution(&params.channel, &params.first_calls, params.executable_intent) {
-        return super::tool_execution::run_companion_tools(router, tool_call_manager, emitter, params).await;
-    }
     let ReactParams {
         first_content,
         first_calls,

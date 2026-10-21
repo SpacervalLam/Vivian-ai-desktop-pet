@@ -1143,8 +1143,32 @@ impl AIResponseGenerationRunnable {
 #[async_trait]
 impl Runnable for AIResponseGenerationRunnable {
     async fn ainvoke(&self, input: Value, config: Option<RunnableConfig>) -> VivianResult<Value> {
-        let mut state = PipelineState::from_json(input);
+        let state = PipelineState::from_json(input);
+        let options = ProviderCallOptions::current();
+        let suppress_framework = state.metadata.get("companion_prompt").is_some()
+            && options.include_framework_instructions != Some(false);
+        let generation = self.generation_future(state, config);
+        if suppress_framework {
+            if let Some(router) = &self.router {
+                return router.scope_call_options(ProviderCallOptions {
+                    include_framework_instructions: Some(false),
+                    ..ProviderCallOptions::default()
+                }, generation).await;
+            }
+        }
+        generation.await
+    }
+}
 
+impl AIResponseGenerationRunnable {
+    // Keep the large state machine out of the scope wrapper's stack frame.
+    #[inline(never)]
+    fn generation_future(&self, state: PipelineState, config: Option<RunnableConfig>)
+        -> futures::future::BoxFuture<'_, VivianResult<Value>> {
+        Box::pin(self.generate_response(state, config))
+    }
+
+    async fn generate_response(&self, mut state: PipelineState, config: Option<RunnableConfig>) -> VivianResult<Value> {
         // 命令或不应答：跳过 LLM 调用
         if !state.should_respond || state.is_command {
             return Ok(state.to_json());
@@ -1157,22 +1181,6 @@ impl Runnable for AIResponseGenerationRunnable {
                 return Err(VivianError::Engine("router 未注入".to_string()));
             }
         };
-
-        // 用 task-local 递归进入一次有作用域的调用，避免修改共享 provider 状态。
-        let options = ProviderCallOptions::current();
-        let suppress_framework = state.metadata.get("companion_prompt").is_some()
-            && options.include_framework_instructions != Some(false);
-        if suppress_framework {
-            return router
-                .scope_call_options(
-                    ProviderCallOptions {
-                        include_framework_instructions: Some(false),
-                        ..ProviderCallOptions::default()
-                    },
-                    self.ainvoke(state.to_json(), config),
-                )
-                .await;
-        }
 
         let stream = Self::is_streaming(&config);
         let caller_task = Self::task_type(&config);

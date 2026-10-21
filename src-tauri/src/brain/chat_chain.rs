@@ -284,6 +284,7 @@ impl BrainChatChain {
             emotion_bridge.clone(),
         )
         .with_psychology(psychology.clone())
+        .with_interaction_router(router.clone())
         .with_tool_system(tool_system.clone())
         .with_environment(environment.clone())
         .with_user_facts(user_facts.clone())

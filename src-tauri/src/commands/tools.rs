@@ -33,6 +33,8 @@ pub fn list_tools(state: State<'_, Arc<AppState>>) -> Result<Value, String> {
                 "description": t.description_in(normalized),
                 "input_schema": t.parameters_schema_in(normalized),
                 "is_read_only": t.is_read_only(),
+                "is_cacheable": t.is_cacheable(),
+                "risk": t.risk().as_str(),
                 "category": t.category(),
                 "is_custom": t.is_custom(),
                 "scope": tool_scope(name).as_str(),

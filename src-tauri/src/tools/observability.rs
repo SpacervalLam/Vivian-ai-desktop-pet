@@ -21,13 +21,17 @@ pub struct ToolCallRecord {
     pub success: bool,
     pub output_data: Option<Value>,
     pub error: Option<String>,
+    #[serde(default)]
+    pub cache_hit: bool,
+    #[serde(default)]
+    pub phase: String,
 }
 
 impl ToolCallRecord {
     fn new(tool_name: &str, input_data: Value) -> Self {
         Self {
             tool_name: tool_name.to_string(),
-            call_id: Uuid::new_v4().to_string()[..8].to_string(),
+            call_id: Uuid::new_v4().to_string(),
             input_data,
             start_time_ms: chrono::Utc::now().timestamp_millis(),
             end_time_ms: 0,
@@ -35,6 +39,8 @@ impl ToolCallRecord {
             success: false,
             output_data: None,
             error: None,
+            cache_hit: false,
+            phase: String::new(),
         }
     }
 }
@@ -52,6 +58,8 @@ pub struct ToolMetrics {
     pub total_input_chars: u64,
     pub total_output_chars: u64,
     pub last_called_at_ms: i64,
+    #[serde(default)]
+    pub cached_calls: u64,
 }
 
 impl ToolMetrics {
@@ -67,6 +75,7 @@ impl ToolMetrics {
             total_input_chars: 0,
             total_output_chars: 0,
             last_called_at_ms: 0,
+            cached_calls: 0,
         }
     }
 
@@ -158,6 +167,18 @@ impl ToolObservability {
         output: Option<Value>,
         error: Option<String>,
     ) {
+        self.end_call_with_metadata(record, success, output, error, false, "execution");
+    }
+
+    pub fn end_call_with_metadata(
+        &self,
+        record: ObsRecord,
+        success: bool,
+        output: Option<Value>,
+        error: Option<String>,
+        cache_hit: bool,
+        phase: &str,
+    ) {
         let duration_ms = record.start.elapsed().as_secs_f64() * 1000.0;
         let end_time_ms = chrono::Utc::now().timestamp_millis();
 
@@ -165,15 +186,17 @@ impl ToolObservability {
         record.inner.end_time_ms = end_time_ms;
         record.inner.duration_ms = duration_ms;
         record.inner.success = success;
-        record.inner.output_data = output.clone();
+        record.inner.cache_hit = cache_hit;
+        record.inner.phase = phase.to_string();
         record.inner.error = error;
 
         let tool_name = record.inner.tool_name.clone();
-        let input_chars = record.inner.input_data.to_string().len() as u64;
+        let input_chars = record.inner.input_data.to_string().chars().count() as u64;
         let output_chars = output
             .as_ref()
-            .map(|o| o.to_string().len() as u64)
+            .map(|o| o.to_string().chars().count() as u64)
             .unwrap_or(0);
+        record.inner.output_data = output;
 
         let mut inner = self.inner.write();
         let metrics = inner
@@ -181,6 +204,7 @@ impl ToolObservability {
             .entry(tool_name.clone())
             .or_insert_with(|| ToolMetrics::new(&tool_name));
         metrics.total_calls += 1;
+        metrics.cached_calls += u64::from(cache_hit);
         if success {
             metrics.successful_calls += 1;
         } else {
@@ -198,10 +222,7 @@ impl ToolObservability {
         metrics.last_called_at_ms = end_time_ms;
 
         let max = inner.max_records_per_tool;
-        let records = inner
-            .records
-            .entry(tool_name)
-            .or_insert_with(Vec::new);
+        let records = inner.records.entry(tool_name).or_insert_with(Vec::new);
         records.push(record.inner);
         if records.len() > max {
             let drop_count = records.len() - max;
@@ -228,14 +249,13 @@ impl ToolObservability {
     ) -> Vec<ToolCallRecord> {
         let inner = self.inner.read();
         match inner.records.get(tool_name) {
-            Some(records) => {
-                let filtered: Vec<_> = if success_only {
-                    records.iter().filter(|r| r.success).cloned().collect()
-                } else {
-                    records.clone()
-                };
-                filtered.into_iter().rev().take(limit).collect()
-            }
+            Some(records) => records
+                .iter()
+                .rev()
+                .filter(|r| !success_only || r.success)
+                .take(limit)
+                .cloned()
+                .collect(),
             None => Vec::new(),
         }
     }
@@ -260,11 +280,8 @@ impl ToolObservability {
         let inner = self.inner.read();
         let total_calls: u64 = inner.metrics.values().map(|m| m.total_calls).sum();
         let total_failures: u64 = inner.metrics.values().map(|m| m.failed_calls).sum();
-        let total_duration: f64 = inner
-            .metrics
-            .values()
-            .map(|m| m.total_duration_ms)
-            .sum();
+        let cached_calls: u64 = inner.metrics.values().map(|m| m.cached_calls).sum();
+        let total_duration: f64 = inner.metrics.values().map(|m| m.total_duration_ms).sum();
         let tools_tracked = inner.metrics.len();
         let uptime_seconds = inner.global_start.elapsed().as_secs_f64();
 
@@ -297,6 +314,7 @@ impl ToolObservability {
             "uptime_seconds": uptime_seconds,
             "total_calls": total_calls,
             "total_failures": total_failures,
+            "cached_calls": cached_calls,
             "overall_success_rate": overall_success_rate,
             "total_duration_ms": total_duration,
             "tools_tracked": tools_tracked,
@@ -317,4 +335,56 @@ impl ToolObservability {
 /// 创建默认的可观测性实例
 pub fn default_observability() -> Arc<ToolObservability> {
     Arc::new(ToolObservability::new(1000))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn bounded_history_tracks_cache_failures_and_unicode_characters() {
+        let obs = ToolObservability::new(2);
+        for (success, hit) in [(true, false), (true, true), (false, false)] {
+            let record = obs.start_call("probe", json!("中🙂"));
+            obs.end_call_with_metadata(
+                record,
+                success,
+                Some(json!("字")),
+                if success { None } else { Some("denied".into()) },
+                hit,
+                "permission",
+            );
+        }
+        let metrics = obs.get_metrics("probe").unwrap();
+        assert_eq!(
+            (
+                metrics.total_calls,
+                metrics.cached_calls,
+                metrics.failed_calls
+            ),
+            (3, 1, 1)
+        );
+        assert_eq!(metrics.total_input_chars, 12); // JSON quotes + two Unicode characters
+        assert_eq!(metrics.total_output_chars, 9);
+        let records = obs.get_recent_records("probe", 10, false);
+        assert_eq!(records.len(), 2);
+        assert_ne!(records[0].call_id, records[1].call_id);
+        assert_eq!(records[0].phase, "permission");
+        assert_eq!(obs.get_recent_records("probe", 1, true)[0].cache_hit, true);
+        assert_eq!(obs.summary()["cached_calls"], 1);
+    }
+
+    #[test]
+    fn metrics_remain_available_when_history_is_disabled() {
+        let obs = ToolObservability::new(0);
+        obs.end_call(
+            obs.start_call("probe", Value::Null),
+            false,
+            None,
+            Some("failure".into()),
+        );
+        assert!(obs.get_recent_records("probe", 1, false).is_empty());
+        assert_eq!(obs.summary()["total_failures"], 1);
+    }
 }

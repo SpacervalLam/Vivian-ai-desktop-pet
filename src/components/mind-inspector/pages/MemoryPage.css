@@ -109,7 +109,16 @@
 .memory-thread-speaker { justify-self: start; padding: 3px 8px; border-radius: 8px; color: var(--codex-accent-deep, #596d7d); background: var(--codex-accent-soft, #e7eff3); font-size: 11px; font-weight: 700; }
 .memory-thread-turn p { margin: 1px 0 0; color: var(--memory-ink); font-size: 13px; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
 .memory-thread-turn-plain { display: block; }
-.memory-profile-panel { padding: 2px 0 12px; }
+.memory-profile-panel { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px; align-items: start; padding: 2px 0 12px; }
+.memory-profile-perspective { min-width: 0; }
+.memory-profile-heading { margin: 0 0 18px; padding-bottom: 12px; border-bottom: 1px solid var(--memory-line); color: var(--memory-ink); font-size: 16px; font-weight: 600; }
+.memory-profile-panel .memory-profile-perspective .profile-hero { flex-direction: column; align-items: stretch; gap: 20px; padding: 22px; }
+.memory-profile-panel .memory-profile-perspective .profile-hero-stats { width: 100%; min-width: 0; }
+.memory-profile-panel .memory-profile-perspective .profile-hero-stats > div { flex: 1; min-width: 0; padding: 0 10px; }
+.memory-profile-panel .memory-profile-perspective .profile-identity-grid { grid-template-columns: minmax(0, 1fr); }
+.memory-profile-panel .memory-profile-perspective .profile-identity-grid > .profile-identity-row:nth-child(odd) { border-right: 0; }
+.memory-profile-panel .memory-profile-perspective .profile-identity-grid > .profile-identity-row:not(:last-child) { border-bottom: 1px solid var(--memory-line); }
+@media (max-width: 760px) { .memory-profile-panel { grid-template-columns: minmax(0, 1fr); gap: 32px; } }
 
 @media (max-width: 1100px) { .memory-layer-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 720px) { .memory-page-header { flex-direction: column; } .memory-entry-grid { columns: 1; } .memory-list-toolbar { align-items: stretch; flex-direction: column; } .memory-search { width: 100%; box-sizing: border-box; } .memory-layer-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }

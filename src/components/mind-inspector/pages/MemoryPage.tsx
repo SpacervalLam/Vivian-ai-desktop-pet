@@ -208,7 +208,7 @@ const MemoryPage: React.FC<{ initialLayer?: Layer; embedded?: boolean; latestOnl
       </button>)}
     </nav>
 
-    {layer === 'profile' ? <div className="memory-profile-panel">{(['vivian', 'nana'] as const).map(owner => <div key={owner}><h3>{t('comic.memoryProfileUnderstanding', { name: owner === 'vivian' ? 'Vivian' : 'Nana' })}</h3><UserProfilePage characterId={owner} embedded /></div>)}</div> : <><div className="memory-list-toolbar">
+    {layer === 'profile' ? <div className="memory-profile-panel">{(['vivian', 'nana'] as const).map(owner => <section className={`memory-profile-perspective memory-profile-perspective-${owner}`} key={owner} aria-labelledby={`memory-profile-${owner}`}><h3 id={`memory-profile-${owner}`} className="memory-profile-heading">{t('comic.memoryProfileUnderstanding', { name: owner === 'vivian' ? 'Vivian' : 'Nana' })}</h3><UserProfilePage characterId={owner} embedded /></section>)}</div> : <><div className="memory-list-toolbar">
       <div className="memory-list-heading"><activeTab.icon size={17} /><strong>{localize(activeTab.title)}</strong><span>{counts[layer]} {layer === 'recent' ? t('comic.memoryGroup') : t('comic.memoryItem')}</span></div>
       <label className="memory-search"><Search size={16} /><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder={t('comic.memorySearchPlaceholder')} aria-label={t('comic.memorySearch')} /></label>
     </div>

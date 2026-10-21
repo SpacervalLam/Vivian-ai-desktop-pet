@@ -61,3 +61,57 @@ test('fixed Bilibili history parser validates host, session and returns only bou
   context.document.body.textContent='{"code":-101}';await assert.rejects(invoke('browser_bilibili_history',{}),/会话无效/);
   context.location.hostname='bilibili.com.evil.example';await assert.rejects(invoke('browser_bilibili_history',{}),/Not a Bilibili/);
 });
+
+test('platform search extractors return bounded, deduplicated links and reject lookalike hosts', async () => {
+  const cases = [
+    ['weibo', 's.weibo.com', 'https://weibo.com/123456/AbCd123', 'AbCd123'],
+    ['weibo', 'weibo.com', '/detail/987654321', '987654321'],
+    ['twitter', 'x.com', 'https://twitter.com/alice/status/123456', '123456'],
+    ['reddit', 'www.reddit.com', '/r/rust/comments/abc123/rust_news/', 'abc123'],
+    ['github', 'github.com', '/rust-lang/rust', 'rust-lang/rust'],
+    ['github', 'github.com', '/rust-lang/rust/issues/123', 'rust-lang/rust/issues/123'],
+    ['arxiv', 'arxiv.org', '/abs/2410.12345v2', '2410.12345v2'],
+    ['arxiv', 'arxiv.org', '/abs/hep-th/9901001', 'hep-th/9901001'],
+    ['youtube', 'www.youtube.com', '/watch?v=abcdefghijk&list=original', 'abcdefghijk'],
+    ['youtube', 'www.youtube.com', '/shorts/abcdefghijk', 'abcdefghijk'],
+  ];
+  for (const [extractor, host, href, id] of cases) {
+    const {context, invoke} = page(host, [anchor(href, 'Content title'), anchor(href, 'Duplicate'),
+      anchor('https://evil.example' + new URL(href, 'https://' + host).pathname, 'Offsite')]);
+    const items = JSON.parse((await invoke('browser_extract', {extractor})).text);
+    assert.equal(items.length, 1, extractor);
+    assert.equal(items[0].id, id);
+    context.location.hostname = host + '.evil.example';
+    await assert.rejects(invoke('browser_extract', {extractor}), /does not match/);
+  }
+  const {invoke} = page('github.com', [anchor('/topics/rust', 'Navigation'), anchor('/settings/profile', 'Settings'),
+    ...Array.from({length:30}, (_, i) => anchor(`/owner/repo${i}`, `Repository ${i}`))]);
+  const items = JSON.parse((await invoke('browser_extract', {extractor:'github'})).text);
+  assert.equal(items.length, 20);
+  assert.equal(items[0].id, 'owner/repo0');
+});
+
+test('platform detail uses article evidence, bounded comments and semantic fallback', () => {
+  for (const host of ['www.bilibili.com', 'weibo.com', 'www.reddit.com', 'github.com', 'arxiv.org', 'www.youtube.com']) {
+    const {context} = page(host);
+    context.document.querySelectorAll = selector => selector === 'article, main article, [role="main"]'
+      ? [{textContent:'Article evidence '.repeat(500)}] : [];
+    let detail = vm.runInContext('vivianExtractDetail()', context);
+    assert.equal(detail.body.length, 6000, host);
+    assert.equal(detail.comments.length, 0);
+    context.document.querySelectorAll = selector => selector === 'article, main article, [role="main"]' ? []
+      : selector.includes('comment') || selector.includes('reply') ? [{textContent:'A reader opinion'}] : [];
+    detail = vm.runInContext('vivianExtractDetail()', context);
+    assert.equal(detail.body, '', 'comments cannot substitute for missing article evidence');
+    assert.ok(detail.comments.length <= 5);
+    context.location.hostname = host + '.evil.example';
+    assert.throws(() => vm.runInContext('vivianExtractDetail()', context), /does not match/);
+  }
+});
+
+test('login redirects cannot become platform article evidence', () => {
+  const {context} = page('github.com');
+  context.location.pathname = '/login';
+  context.document.querySelectorAll = () => [{textContent:'Sign in to your account '.repeat(50)}];
+  assert.throws(() => vm.runInContext('vivianExtractDetail()', context), /sign-in manually/);
+});

@@ -424,6 +424,23 @@ pub fn analyze_emotion_instant(
         }));
     }
 
+    // 聊天窗口专属角色没有桌宠表情通道（也没有 Brain 的情绪桥），
+    // 直接给中性结果，避免前端每条消息都弹一次「即时情绪分析失败」。
+    if character_id
+        .as_deref()
+        .is_some_and(|id| crate::chat_partner::get(id).is_some())
+    {
+        return Ok(serde_json::json!({
+            "emotion": "neutral",
+            "intensity": 0.0,
+            "valence": 0.0,
+            "arousal": 0.3,
+            "source": "chat_partner",
+            "pet_emotion": "curiosity",
+            "facs": default_facs(),
+        }));
+    }
+
     let brain = state.get_character(character_id.as_deref())?.brain;
     let result = brain.emotion_bridge.classify_instant(&text)?;
 

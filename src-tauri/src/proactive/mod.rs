@@ -1741,7 +1741,7 @@ impl ProactiveOrchestrator {
         } else if !context.can_address_user() || !context.is_speaking_leader {
             return false;
         }
-        // The coordinator can select only a native control-flow input, never prompt text.
+        // Routing is host-validated; any scene continuity is separately grounded and optional.
         let trigger = if peer { ProactiveTrigger::CrossCharacterReply } else {
             match opportunity.stimulus {
                 crate::world::environment_policy::Stimulus::CharacterState => ProactiveTrigger::MoodDriven,
@@ -3157,8 +3157,10 @@ impl ProactiveOrchestrator {
 
     /// 构建今日摘要（供深层反思使用）
     fn build_today_summary(&self, memory: &Arc<MemoryManager>) -> Option<String> {
-        let recent = memory.recent_by_type(MemoryType::ShortTerm, 10);
-        let casual = memory.recent_by_type(MemoryType::CasualConversation, 10);
+        let recent: Vec<_> = memory.recent_by_type(MemoryType::ShortTerm, 24).into_iter()
+            .filter(crate::memory::companion_policy::is_runtime_material).take(10).collect();
+        let casual: Vec<_> = memory.recent_by_type(MemoryType::CasualConversation, 24).into_iter()
+            .filter(crate::memory::companion_policy::is_runtime_material).take(10).collect();
         let mut parts = Vec::new();
 
         if !casual.is_empty() {
@@ -4845,7 +4847,8 @@ impl ProactiveOrchestrator {
                     {
                         Ok(items) if !items.is_empty() => {
                             let items = crate::memory::companion_policy::dedup_recall(
-                                items, crate::memory::types::current_timestamp(), 3,
+                                items.into_iter().filter(crate::memory::companion_policy::is_runtime_material).collect(),
+                                crate::memory::types::current_timestamp(), 3,
                             );
                             let lang_norm_mem =
                                 crate::pipeline::prompt_modules::normalize_lang(&lang_clone);
@@ -4970,6 +4973,10 @@ impl ProactiveOrchestrator {
                     "The topic channel is locked to {}. {} Write for this medium; return delivery_channel={} in JSON. Do not move an ongoing conversation to another medium.",
                     llm_ctx.channel, crate::pipeline::prompt_modules::build_channel_style_guide(&llm_ctx.channel),
                     if llm_ctx.channel == "wechat" { "chat_window" } else { "bubble" })));
+                if let Some(hint) = self.world_provider.read().as_ref()
+                    .and_then(|world| world.environment.interaction_hint(&self.char_id,&recipient.0)) {
+                    messages.push(ChatMessage::system(hint));
+                }
                 if let Some(callback) = &work_callback {
                     messages.push(ChatMessage::user(serde_json::json!({
                         "source": "work_session_callback", "evidence": callback

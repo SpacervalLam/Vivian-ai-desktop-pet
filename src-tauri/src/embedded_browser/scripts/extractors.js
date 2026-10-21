@@ -6,23 +6,35 @@ globalThis.vivianExtractPlatform = function (platform) {
     xiaohongshu: { host: 'xiaohongshu.com', selector: 'a[href*="/explore/"], a[href*="/search_result/"]', pattern: /\/(?:explore|search_result)\/([0-9a-f]{8,})/ },
     douyin: { host: 'douyin.com', selector: 'a[href*="/video/"]', pattern: /\/video\/(\d+)/ },
     zhihu: { host: 'zhihu.com', selector: 'a[href*="/question/"], a[href*="/p/"]', pattern: /\/(?:question|p)\/(\d+)/ },
+    weibo: { host: 'weibo.com', selector: 'a[href]', pattern: /^\/(?:\d+\/([A-Za-z0-9]+)|detail\/(\d+))\/?$/ },
+    twitter: { host: 'x.com', aliases: ['twitter.com'], selector: 'a[href*="/status/"]', pattern: /\/status\/(\d+)/ },
+    reddit: { host: 'reddit.com', selector: 'a[href*="/comments/"]', pattern: /\/comments\/([A-Za-z0-9]+)/ },
+    github: { host: 'github.com', selector: 'a[href]', pattern: /^\/([^/]+\/[^/]+(?:\/(?:issues|pull|discussions)\/\d+)?)\/?$/ },
+    arxiv: { host: 'arxiv.org', selector: 'a[href*="/abs/"]', pattern: /\/abs\/(\d{4}\.\d+(?:v\d+)?|[a-z-]+\/\d+(?:v\d+)?)/i },
+    youtube: { host: 'youtube.com', selector: 'a[href*="/watch?"], a[href*="/shorts/"]', pattern: /\/shorts\/([A-Za-z0-9_-]+)/ },
   };
   const plan = plans[platform];
   if (!plan) throw new Error('Unsupported extractor: ' + platform);
-  const onHost = (host) => host === plan.host || host.endsWith('.' + plan.host);
+  const onHost = (host) => [plan.host, ...(plan.aliases || [])].some(domain => host === domain || host.endsWith('.' + domain));
   if (!onHost(location.hostname)) throw new Error('Extractor does not match the current platform');
   const items = new Map();
   for (const anchor of document.querySelectorAll(plan.selector)) {
     let url;
     try { url = new URL(anchor.getAttribute('href'), location.href); } catch (_) { continue; }
     if (!['http:', 'https:'].includes(url.protocol) || !onHost(url.hostname) || url.username || url.password) continue;
-    const id = url.pathname.match(plan.pattern)?.[1];
+    const match = url.pathname.match(plan.pattern);
+    const id = platform === 'youtube' && url.pathname === '/watch'
+      ? url.searchParams.get('v')?.match(/^[A-Za-z0-9_-]{11}$/)?.[0]
+      : match?.slice(1).find(Boolean);
     if (!id) continue;
+    if (platform === 'github' && /^(search|topics|collections|marketplace|settings|orgs|users|features|sponsors)\//.test(id)) continue;
     // Many feeds use separate cover/title anchors inside the same card.
-    const card = anchor.closest('section, article, .note-item, .bili-video-card, .HotItem') || anchor;
+    const card = anchor.closest('article, .note-item, .bili-video-card, .HotItem, .card-wrap, shreddit-post, ytd-video-renderer, li.arxiv-result, section') || anchor;
     const image = card.querySelector('img');
-    const title = (anchor.getAttribute('title') || anchor.textContent?.trim()
-      || card.querySelector('.title, h2, h3')?.textContent || image?.alt || '').trim().slice(0, 160);
+    const contentTitle = platform === 'twitter' ? card.querySelector('[data-testid="tweetText"]')?.textContent
+      : platform === 'arxiv' ? card.querySelector('.title')?.textContent : '';
+    const title = (contentTitle || anchor.getAttribute('title') || anchor.textContent?.trim()
+      || card.querySelector('.title, h2, h3, [data-testid="tweetText"], .txt, #video-title')?.textContent || image?.alt || '').trim().slice(0, 160);
     if (!title) continue;
     const previous = items.get(id);
     // Prefer a title anchor, but preserve access tokens from the cover URL.
@@ -30,7 +42,8 @@ globalThis.vivianExtractPlatform = function (platform) {
       if (!new URL(previous.url).search && url.search) previous.url = url.href;
       continue;
     }
-    items.set(id, { id, title, desc: title, url: url.href,
+    const description = (card.querySelector('.abstract, .desc, .txt, [data-testid="tweetText"], .search-title')?.textContent || title).trim().slice(0, 1000);
+    items.set(id, { id, title, desc: description, url: url.href,
       author: '', cover: image?.src || '', views: 0, likes: 0 });
     if (items.size >= 20) break;
   }
@@ -43,6 +56,9 @@ globalThis.vivianExtractPlatform = function (platform) {
 // semantic elements (article / role=main) instead of relying on one class name.
 globalThis.vivianExtractDetail = function () {
   const host = location.hostname;
+  if (/\/(?:login|signin|passport)(?:\/|$)|\/i\/flow\/login/.test(location.pathname)) {
+    throw new Error('Login page: complete sign-in manually in the browser');
+  }
   const onHost = (domain) => host === domain || host.endsWith('.' + domain);
   const readText = (el) => (el ? String(el.innerText ?? el.textContent ?? '').replace(/\s+/g, ' ').trim() : '');
   const pickBody = (selectors) => {
@@ -104,6 +120,18 @@ globalThis.vivianExtractDetail = function () {
       body: ['[data-e2e="video-desc"]', '[data-e2e="video-desc-container"]', '.video-info-detail'],
       comments: ['[data-e2e="comment-item"]', '[class*="comment-item"] [class*="content"]'],
     };
+  } else if (onHost('bilibili.com')) {
+    plan = { body: ['#v_desc', '.basic-desc-info', '.video-desc', 'article'], comments: ['.reply-content', '.root-reply .reply-content-container'] };
+  } else if (onHost('weibo.com')) {
+    plan = { body: ['[class*="detail_wbtext"]', '.WB_text', '.txt', 'article'], comments: ['.WB_text [node-type="replywrap"]', '[class*="comment_text"]'] };
+  } else if (onHost('reddit.com')) {
+    plan = { body: ['[slot="text-body"]', '.usertext-body', 'shreddit-post'], comments: ['shreddit-comment [slot="comment"]', '.comment .md'] };
+  } else if (onHost('github.com')) {
+    plan = { body: ['article.markdown-body', '.markdown-body', '[data-testid="issue-body"]'], comments: ['.timeline-comment .comment-body'] };
+  } else if (onHost('arxiv.org')) {
+    plan = { body: ['blockquote.abstract', '.abstract', 'article'], comments: [] };
+  } else if (onHost('youtube.com')) {
+    plan = { body: ['#description-inline-expander', '#description', 'ytd-text-inline-expander'], comments: ['ytd-comment-thread-renderer #content-text'] };
   } else {
     throw new Error('Detail extractor does not match the current platform');
   }

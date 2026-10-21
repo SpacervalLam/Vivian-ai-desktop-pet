@@ -19,7 +19,7 @@ use tracing::debug;
 
 use crate::engine::manifest::ResourceManifest;
 use crate::psychology::mood::MoodSnapshot;
-use crate::psychology::mood_cue::mood_to_cue;
+use crate::psychology::mood_cue::mood_to_cue_for;
 
 /// 触发器结果：(expression, motion, duration_ms)
 type TriggerResult = (String, String, Option<u64>);
@@ -28,6 +28,16 @@ type TriggerResult = (String, String, Option<u64>);
 const ACCENT_COOLDOWN: Duration = Duration::from_secs(8);
 /// 点缀与上一次相同、又过了冷却时，以该概率再放一次（点缀换了则必定放）
 const ACCENT_IDLE_PROBABILITY: f64 = 0.3;
+/// 启动宽限期：进程刚起的一小段时间内不投任何心情点缀
+///
+/// 存在的理由不是审美，是**启动那一刻的情绪还不可信**：`psychology.json` 里的
+/// emotion 是上次退出时的快照，进程起来后边要跑首个稳态结算（按离线时长回归）、
+/// 边要等开场流水线把心理状态写完。这段时间里 `mood_to_cue` 读到的可能是一个
+/// 正在跳变的中间值——拿它去点一张脸，用户看到的就是"一启动就莫名其妙闪几下
+/// 晕/生气/低落"。
+///
+/// 宽限期只压点缀，不碰空闲阶段触发与程序事件（时刻问候、窗口聚焦这些照常）。
+const MOOD_ACCENT_STARTUP_GRACE: Duration = Duration::from_secs(20);
 /// 心情点缀的展示时长（ms）
 ///
 /// 对图集格位（`dizzy`）是**必需**的：格位自己不会计时，没有时长就一直挂着。
@@ -87,6 +97,8 @@ struct TriggerState {
     last_accent: String,
     /// 上次点缀动画播放时间（用于 ACCENT_COOLDOWN）
     last_accent_time: Instant,
+    /// 本状态创建时刻（≈ 该角色本进程第一次 auto tick），用于启动宽限
+    created_at: Instant,
     /// 事件触发冷却表
     event_cooldowns: HashMap<String, Instant>,
 }
@@ -101,6 +113,7 @@ impl Default for TriggerState {
             last_mood_idle_time: Instant::now(),
             last_accent: String::new(),
             last_accent_time: Instant::now(),
+            created_at: Instant::now(),
             event_cooldowns: HashMap::new(),
         }
     }
@@ -156,13 +169,18 @@ impl AutoExpressionTrigger {
     /// 触发条件：命中的点缀与上一次不同（状态换了，立刻给反应），或冷却已过再按概率补
     /// 一次（状态没变，时不时动一下）。
     pub fn update_mood(&self, char_id: &str, mood: &MoodSnapshot) -> Option<String> {
-        let cue = mood_to_cue(mood);
+        let cue = mood_to_cue_for(char_id, mood);
         if cue.accent.is_empty() {
             return None;
         }
 
         self.with_state(char_id, |state| {
             state.current_mood_label = mood.primary_emotion.as_str().to_string();
+            // 启动宽限：此时心情还在做首次稳态结算，读到的可能是跳变中间值
+            // （见 MOOD_ACCENT_STARTUP_GRACE 的说明）。此处直接不出表情。
+            if Instant::now().saturating_duration_since(state.created_at) < MOOD_ACCENT_STARTUP_GRACE {
+                return None;
+            }
             if cue.accent == "dizzy"
                 && Instant::now().saturating_duration_since(state.last_interaction).as_secs() >= 301
             {
@@ -403,8 +421,35 @@ mod tests {
         let trigger = AutoExpressionTrigger::new();
         trigger.with_state("vivian", |state| {
             state.last_interaction = Instant::now() - Duration::from_secs(360);
+            // 越过启动宽限，否则这条用例会被宽限而不是被空闲判定挡住
+            state.created_at = Instant::now() - MOOD_ACCENT_STARTUP_GRACE - Duration::from_secs(1);
         });
         assert!(trigger.update_mood("vivian", &grieving_mood()).is_none());
+    }
+
+    /// 启动宽限期：情绪还在首次结算时不投点缀；过了宽限该恢复。
+    ///
+    /// 这条守的是「一启动就闪几下坏表情」这个现象：`psychology.json` 里存的是上次
+    /// 退出时的情绪，进程起来那一刻它正在被稳态结算改写，此时表情判断读到的可能是
+    /// 中间值。宽限期把这个窗口盖住。
+    #[test]
+    fn startup_grace_suppresses_mood_accent() {
+        let char_id = "test_startup_grace_suppresses_mood_accent";
+        let trigger = AutoExpressionTrigger::new();
+
+        assert!(
+            trigger.update_mood(char_id, &grieving_mood()).is_none(),
+            "启动宽限期内不该投心情点缀"
+        );
+
+        trigger.with_state(char_id, |state| {
+            state.created_at = Instant::now() - MOOD_ACCENT_STARTUP_GRACE - Duration::from_secs(1);
+        });
+        assert_eq!(
+            trigger.update_mood(char_id, &grieving_mood()).as_deref(),
+            Some("dizzy"),
+            "宽限期过后心情点缀应恢复"
+        );
     }
 
     /// 严重悲伤 → `sadness_grieving` → 点缀 `dizzy`（图集格位，不是帧序列）。
@@ -422,6 +467,16 @@ mod tests {
         }
     }
 
+    /// 把该角色的启动宽限推过去。
+    ///
+    /// 下面两条用例关心的是点缀本身的语义（限时、不重复复燃），不是宽限；
+    /// 不推过去它们会被宽限挡在门外，变成"因为没投递所以断言成立"的空用例。
+    fn expire_startup_grace(char_id: &str) {
+        AUTO_TRIGGER.with_state(char_id, |state| {
+            state.created_at = Instant::now() - MOOD_ACCENT_STARTUP_GRACE - Duration::from_secs(1);
+        });
+    }
+
     /// 心情点缀必须是**限时**的。
     ///
     /// `dizzy` 是图集格位，自己不会计时：动作里少了 `duration_ms`，前端就会把那张脸
@@ -431,6 +486,7 @@ mod tests {
     #[test]
     fn mood_accent_is_always_timed() {
         let char_id = "test_mood_accent_is_always_timed";
+        expire_startup_grace(char_id);
         update_mood_state(char_id, &grieving_mood());
 
         let actions = drain_pending_actions(Some(char_id));
@@ -453,6 +509,7 @@ mod tests {
     fn mood_accent_does_not_refire_same_state() {
         let char_id = "test_mood_accent_does_not_refire_same_state";
         let mood = grieving_mood();
+        expire_startup_grace(char_id);
         update_mood_state(char_id, &mood);
         drain_pending_actions(Some(char_id));
 

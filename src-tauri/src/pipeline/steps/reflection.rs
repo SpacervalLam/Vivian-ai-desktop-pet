@@ -360,6 +360,22 @@ impl ReflectionRunnable {
         // Do not also write unscoped pattern-library rules from the same reflection.
     }
 
+    fn apply_self_profile(&self, json: &Value, state: &PipelineState) {
+        let Some(persona) = self.persona.as_ref() else { return; };
+        for update in json.get("self_profile").and_then(Value::as_array).into_iter().flatten().take(2) {
+            // A user interest alone does not establish the companion's interest.
+            let Some(_) = update["response_quote"].as_str().map(str::trim)
+                .filter(|q| (6..=300).contains(&q.chars().count()) && state.text.contains(*q)) else { continue; };
+            let Some(source) = growth_evidence(state, update) else { continue; };
+            let evidence = crate::persona::self_profile::SelfEvidence {
+                source:crate::persona::self_profile::ExperienceSource::Chat,
+                source_id:source.memory_id, fingerprint:source.fingerprint,
+                quote:source.quote, observed_at:source.timestamp,
+            };
+            crate::persona::self_development::record_interpretation(persona, update, evidence, &state.user_input);
+        }
+    }
+
     fn char_display_name(&self) -> &str {
         match self.char_id.as_str() {
             "nana" => "Nana",
@@ -441,7 +457,7 @@ impl ReflectionRunnable {
             let learned: Vec<_> = p.evolution_entries().into_iter().filter(|e| e.active()).map(|e|
                 serde_json::json!({"scope":e.scope,"text":e.text})).collect();
             format!("\n角色视角（保留用户设置）：{}\n已生效理解：{}\n待验证候选（不是事实，仅本轮新增证据可支持）：{}\n",
-                p.reflection_profile(), serde_json::to_string(&learned).unwrap_or_default(),
+                format!("{}\n{}", p.reflection_profile(), p.private_self_context()), serde_json::to_string(&learned).unwrap_or_default(),
                 serde_json::to_string(&items).unwrap_or_default())
         }).unwrap_or_default();
         let goals = self.user_goals.as_ref().map(|ledger| {
@@ -637,6 +653,7 @@ impl Runnable for ReflectionRunnable {
                     self.apply_goal_updates(&json);
                 }
                 self.apply_evolution(&json, &state);
+                self.apply_self_profile(&json, &state);
                 self.record_expression_learning(&state);
             }
             Ok(None) => {
@@ -722,6 +739,7 @@ impl ReflectionRunnable {
                     self.apply_goal_updates(&json);
                 }
                 self.apply_evolution(&json, &state);
+                self.apply_self_profile(&json, &state);
             }
             Ok(None) => {
                 tracing::debug!("[Reflection:{}] 内联模式无 LLM 输出", self.char_id);

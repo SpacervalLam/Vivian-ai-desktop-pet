@@ -735,26 +735,11 @@ impl DialogueManager {
     /// UI projection; internal memory processing continues to use the complete history.
     pub fn visible_memory_conversations(&self) -> VivianResult<Vec<crate::memory::conversations::ConversationRecord>> {
         let (_, decisions) = self.conversation_boundaries.snapshot();
-        // Quiet-mode notices remain in storage for internal context, but are not user dialogue.
+        // Internal notices and authored backstory stay in storage, outside the UI projection.
         let history: Vec<_> = self.get_all_history()?.into_iter()
-            .filter(|entry| entry.metadata["source"] != "quiet_control")
+            .filter(|entry| crate::memory::provenance::visible_in_memory_page(&entry.metadata))
             .collect();
-        let mut records = crate::memory::conversations::project_conversations(&history, &self.char_id, &decisions).0;
-        // Authored originals share the history schema, but never enter current chat,
-        // user history counts, or automatic consolidation of real conversations.
-        let archive = crate::utils::path::get_companion_data_dir(&self.char_id)
-            .join("memory").join("seed_history.jsonl");
-        let seeds = crate::memory::seed::read_history(&archive)?;
-        for mut record in crate::memory::conversations::build_conversations(&seeds, &self.char_id) {
-            let title = record.turns.first().and_then(|turn|
-                seeds.iter().find(|entry| entry.id == turn.id))
-                .and_then(|entry| entry.metadata["title"].as_str())
-                .unwrap_or(&record.title);
-            record.title = format!("角色前史（预设） · {title}");
-            records.push(record);
-        }
-        records.sort_by(|a, b| a.started_at.total_cmp(&b.started_at).then_with(|| a.id.cmp(&b.id)));
-        Ok(records)
+        Ok(crate::memory::conversations::project_conversations(&history, &self.char_id, &decisions).0)
     }
 
     pub fn notify_conversation_grouping_changed(&self) {

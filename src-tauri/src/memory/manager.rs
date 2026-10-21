@@ -1411,6 +1411,16 @@ impl MemoryManager {
             }
         }
 
+        if item.memory_type == "knowledge" && item.metadata["source"] != "system_seed"
+            && item.metadata["fictional_backstory"] != true {
+            let mut activity_tags = vec!["knowledge_acquired".into(),item.id.clone()];
+            if item.metadata["source"] == "web" && item.metadata["private"] != true {
+                activity_tags.push("shareable_activity".into());
+            }
+            super::unified_event_ledger::register_character_activity(self.char_id(),
+                format!("knowledge:{}",item.id),"knowledge_acquired",&item.content,item.timestamp,
+                activity_tags);
+        }
         self.emit_memory_updated();
 
         // Memory Router：同步路由判断是否应额外写入共享世界记忆层
@@ -2905,6 +2915,11 @@ impl MemoryManager {
 
         inner.save_throttled()?;
         drop(inner);
+        let mut activity_tags = vec!["knowledge_acquired".into(),item.id.clone()];
+        if source == "web" { activity_tags.push("shareable_activity".into()); }
+        super::unified_event_ledger::register_character_activity(self.char_id(),
+            format!("knowledge:{}",item.id),"knowledge_acquired",
+            &format!("保存了资料《{}》：{}",title,item.content),item.timestamp,activity_tags);
         Ok(item)
     }
 

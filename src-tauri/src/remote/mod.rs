@@ -498,13 +498,8 @@ async fn get_memories(
     let values: Vec<serde_json::Value> = items
         .iter()
         .rev()
+        .filter(|m| crate::memory::provenance::visible_in_memory_page(&m.metadata))
         .take(limit)
-        .filter(|m| {
-            m.metadata
-                .get("source")
-                .and_then(|v| v.as_str())
-                .map_or(true, |s| s != "system_seed")
-        })
         .map(|m| {
             serde_json::json!({
                 "id": m.id,
@@ -529,10 +524,10 @@ async fn get_memory_view(
     let instance = state.app_state.get_character(Some(&char_id))
         .map_err(|e| (StatusCode::NOT_FOUND, e))?;
     let items = instance.brain.memory.get_all_memories().await.map_err(err_status)?;
-    let memories: Vec<_> = items.into_iter().filter(|m| {
-        !matches!(m.metadata.get("source").and_then(|v| v.as_str()), Some("system_seed" | "environment_preset"))
-    }).map(|mut m| { m.embedding = None; m }).collect();
-    let conversations = instance.brain.dialogue.memory_conversations().map_err(err_status)?;
+    let memories: Vec<_> = items.into_iter()
+        .filter(|m| crate::memory::provenance::visible_in_memory_page(&m.metadata))
+        .map(|mut m| { m.embedding = None; m }).collect();
+    let conversations = instance.brain.dialogue.visible_memory_conversations().map_err(err_status)?;
     Ok(Json(serde_json::json!({ "memories": memories, "conversations": conversations })))
 }
 

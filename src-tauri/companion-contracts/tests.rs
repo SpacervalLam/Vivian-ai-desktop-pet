@@ -32,6 +32,8 @@ mod session_coordinator;
 mod environment_input;
 #[path = "../src/world/environment_policy.rs"]
 mod environment_policy;
+#[path = "../src/world/interaction_guidance.rs"]
+mod interaction_guidance;
 #[path = "../src/proactive/interjection.rs"]
 mod interjection;
 #[path = "../src/proactive/thought_lifecycle.rs"]

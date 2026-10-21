@@ -38,6 +38,9 @@ pub async fn start_realtime_call(
     state: State<'_, Arc<AppState>>,
     character_id: Option<String>,
 ) -> Result<(), String> {
+    if character_id.as_deref().is_some_and(|id| crate::chat_partner::get(id).is_some()) {
+        return Err("聊天专属角色不支持实时通话，可使用语音转写聊天".into());
+    }
     let config = {
         let cm = state.config.read();
         cm.get_all().realtime_voice.clone()

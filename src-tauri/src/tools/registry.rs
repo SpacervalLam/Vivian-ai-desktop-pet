@@ -12,6 +12,8 @@ use serde_json::Value;
 use tauri::{AppHandle, Emitter};
 
 use super::cache::ToolCache;
+use super::catalog::ToolCatalog;
+pub use super::catalog::normalize_tool_name;
 use super::confirmation::{
     ConfirmationRequest, ConfirmationResponse, ConfirmationRisk, ToolConfirmationRegistry,
 };
@@ -120,19 +122,8 @@ pub fn is_tool_locked(name: &str, side: AgentSide) -> bool {
 
 /// 工具系统 - 整合所有工具组件的统一入口
 pub struct ToolSystem {
-    /// 已注册的工具（工具名 → 工具实例）
-    tools: RwLock<HashMap<String, Arc<dyn Tool>>>,
-    /// 工具来源（工具名 → owner key）；None 表示内置/历史注册项。
-    tool_owners: RwLock<HashMap<String, Option<String>>>,
-    /// 工具别名（别名 → 工具名）
-    aliases: RwLock<HashMap<String, String>>,
-    /// 规范化工具名索引（lowercase + 去分隔符 → 工具名）。
-    ///
-    /// `find_tool` 的容错匹配在工具数量增长后会被频繁调用；维护索引后，
-    /// 大小写/分隔符偏差不再需要每次线性扫描全量工具。
-    normalized_names: RwLock<HashMap<String, String>>,
-    /// 按类别组织的工具名
-    categories: RwLock<HashMap<ToolCategory, Vec<String>>>,
+    /// Names, aliases, ownership and revision change atomically.
+    catalog: RwLock<ToolCatalog<Arc<dyn Tool>>>,
     /// 工具结果缓存
     pub cache: Arc<ToolCache>,
     /// 沙箱
@@ -171,11 +162,7 @@ impl ToolSystem {
     /// 创建新的工具系统（使用默认配置：缓存 TTL=300s / max=1000 / 确认超时=600s）
     pub fn new() -> Self {
         Self {
-            tools: RwLock::new(HashMap::new()),
-            tool_owners: RwLock::new(HashMap::new()),
-            aliases: RwLock::new(HashMap::new()),
-            normalized_names: RwLock::new(HashMap::new()),
-            categories: RwLock::new(HashMap::new()),
+            catalog: RwLock::new(ToolCatalog::default()),
             cache: Arc::new(ToolCache::new(300, 1000)),
             sandbox: Arc::new(ToolSandbox::new(ProtectionMode::Cautious, 600)),
             observability: Arc::new(ToolObservability::new(1000)),
@@ -190,7 +177,7 @@ impl ToolSystem {
 
     /// 使用 ToolConfig 创建工具系统（缓存 TTL/max_size 与确认超时从配置读取）
     ///
-    /// 当 `enable_cache=false` 时，TTL 设为 0 使所有条目立即过期（等效禁用缓存）。
+    /// 当 `enable_cache=false` 时，TTL=0 禁用缓存读写。
     pub fn with_tool_config(
         cache_ttl_secs: u64,
         cache_max_size: u32,
@@ -199,11 +186,7 @@ impl ToolSystem {
     ) -> Self {
         let effective_ttl = if enable_cache { cache_ttl_secs } else { 0 };
         Self {
-            tools: RwLock::new(HashMap::new()),
-            tool_owners: RwLock::new(HashMap::new()),
-            aliases: RwLock::new(HashMap::new()),
-            normalized_names: RwLock::new(HashMap::new()),
-            categories: RwLock::new(HashMap::new()),
+            catalog: RwLock::new(ToolCatalog::default()),
             cache: Arc::new(ToolCache::new(effective_ttl, cache_max_size as usize)),
             sandbox: Arc::new(ToolSandbox::new(ProtectionMode::Cautious, 600)),
             observability: Arc::new(ToolObservability::new(1000)),
@@ -235,19 +218,17 @@ impl ToolSystem {
     /// 锁定工具（如工作侧 read_file）恒为 false ——
     /// 它们不可被禁用，配置里即使残留对应条目也不生效。
     pub fn is_tool_disabled(&self, name: &str, side: AgentSide) -> bool {
-        if is_tool_locked(name, side) {
+        let catalog = self.catalog.read();
+        let canonical = catalog.resolve(name).unwrap_or(name);
+        if is_tool_locked(canonical, side) {
             return false;
         }
         self.disabled_tools
             .read()
             .get(&side)
             .map(|set| {
-                let canonical = self.find_tool(name);
-                let canonical = canonical.as_ref().map(|tool| tool.name()).unwrap_or(name);
                 set.iter().any(|disabled| {
-                    self.find_tool(disabled)
-                        .map(|tool| tool.name() == canonical)
-                        .unwrap_or(disabled == canonical)
+                    catalog.resolve(disabled).unwrap_or(disabled) == canonical
                 })
             })
             .unwrap_or(false)
@@ -266,6 +247,20 @@ impl ToolSystem {
     /// 热更新确认超时（秒）—— 由 ChatChain 在 reinitialize 时调用
     pub fn update_confirmation_timeout(&self, secs: u64) {
         *self.confirmation_timeout_secs.write() = secs.max(10);
+    }
+
+    /// One path for save, reload and reinitialization of tool runtime settings.
+    pub fn apply_config(&self, config: &crate::config::manager::ToolConfig) {
+        self.set_disabled_tools(config.disabled_tools.companion.clone(), config.disabled_tools.work.clone());
+        self.update_confirmation_timeout(config.confirmation_timeout_secs);
+        self.cache.reconfigure(if config.enable_cache { config.cache_ttl_secs } else { 0 }, config.cache_max_size as usize);
+        // Saved app settings can change tool dependencies (location, providers, etc.).
+        self.cache.clear();
+        super::executor::update_runtime_config(&super::executor::ToolRuntimeConfig {
+            default_tool_timeout_secs: config.default_tool_timeout_secs,
+            max_result_chars: config.max_result_chars as usize,
+            access_level: super::types::AgentAccessLevel::from_str(&config.access_level),
+        });
     }
 
     /// 记录一次工具调用（由 `execute_tool_use` 在工具找到后立即调用）
@@ -394,20 +389,8 @@ impl ToolSystem {
         let category = tool.category();
         tracing::debug!("注册工具: {} (类别: {:?}, owner: {:?})", name, category, owner);
 
-        let mut tools = self.tools.write();
-        tools.insert(name.clone(), tool);
-        self.tool_owners.write().insert(name.clone(), owner);
-        self.normalized_names
-            .write()
-            .entry(normalize_tool_name(&name))
-            .or_insert_with(|| name.clone());
-
-        let mut categories = self.categories.write();
-        let list = categories.entry(category).or_insert_with(Vec::new);
-        // 幂等：同名重复注册（自建工具更新/热重载）时只保留一条类别记录
-        if !list.contains(&name) {
-            list.push(name);
-        }
+        self.catalog.write().register(name.clone(), tool, owner);
+        self.cache.invalidate(&name);
     }
 
     /// 注册工具别名：`from` 会解析到 `to`。
@@ -421,18 +404,7 @@ impl ToolSystem {
     ///
     /// 返回是否注册成功（`to` 未注册时返回 false，避免留下指向空目标的悬空别名）。
     pub fn register_alias(&self, from: &str, to: &str) -> bool {
-        let from = from.trim();
-        let to = to.trim();
-        if from.is_empty() || to.is_empty() || from == to {
-            return false;
-        }
-        if !self.tools.read().contains_key(to) {
-            tracing::warn!("注册别名失败：目标工具 '{}' 未注册（别名 '{}' 被忽略）", to, from);
-            return false;
-        }
-        self.aliases.write().insert(from.to_string(), to.to_string());
-        tracing::debug!("注册工具别名: {} → {}", from, to);
-        true
+        self.catalog.write().register_alias(from, to)
     }
 
     /// 注册一批别名，返回成功注册的数量。
@@ -448,49 +420,16 @@ impl ToolSystem {
 
     /// 仅当当前注册项仍归指定 owner 时注销工具。
     pub fn unregister_tool_if_owner(&self, name: &str, owner: &str) -> bool {
-        let mut tools = self.tools.write();
-        if self
-            .tool_owners
-            .read()
-            .get(name)
-            .and_then(|value| value.as_deref())
-            != Some(owner)
-        {
-            return false;
-        }
-        if tools.remove(name).is_none() {
-            return false;
-        }
-        self.tool_owners.write().remove(name);
-        let mut aliases = self.aliases.write();
-        aliases.retain(|_, v| v != name);
-        *self.normalized_names.write() = rebuild_normalized_index(&tools);
-        let mut categories = self.categories.write();
-        for names in categories.values_mut() {
-            names.retain(|n| n != name);
-        }
-        tracing::debug!("已注销 owner 匹配的工具: {} ({})", name, owner);
-        true
+        let removed = self.catalog.write().remove(name, Some(owner));
+        if removed { self.cache.invalidate(name); }
+        removed
     }
 
     /// 注销工具
     pub fn unregister_tool(&self, name: &str) -> bool {
-        let mut tools = self.tools.write();
-        if tools.remove(name).is_some() {
-            self.tool_owners.write().remove(name);
-            let mut aliases = self.aliases.write();
-            aliases.retain(|_, v| v != name);
-            *self.normalized_names.write() = rebuild_normalized_index(&tools);
-
-            let mut categories = self.categories.write();
-            for names in categories.values_mut() {
-                names.retain(|n| n != name);
-            }
-            tracing::debug!("已注销工具: {}", name);
-            true
-        } else {
-            false
-        }
+        let removed = self.catalog.write().remove(name, None);
+        if removed { self.cache.invalidate(name); }
+        removed
     }
 
     /// 查找工具
@@ -500,24 +439,13 @@ impl ToolSystem {
     /// 2. 别名匹配
     /// 3. 规范化匹配（lowercase + 去除 `_`/`-`/`.` 分隔符），容错 LLM 输出大小写或分隔符偏差
     pub fn find_tool(&self, name: &str) -> Option<Arc<dyn Tool>> {
-        let tools = self.tools.read();
-        if let Some(tool) = tools.get(name) {
-            return Some(Arc::clone(tool));
-        }
-        let aliases = self.aliases.read();
-        if let Some(real_name) = aliases.get(name) {
-            if let Some(tool) = tools.get(real_name) {
-                return Some(Arc::clone(tool));
-            }
-        }
-        // 规范化匹配：lowercase + 去分隔符，容错 LLM 输出偏差
-        let normalized = normalize_tool_name(name);
-        if let Some(real_name) = self.normalized_names.read().get(&normalized) {
-            if let Some(tool) = tools.get(real_name) {
-                return Some(Arc::clone(tool));
-            }
-        }
-        None
+        self.catalog.read().find(name).cloned()
+    }
+
+    /// The implementation and revision must come from the same registry snapshot.
+    pub(crate) fn find_tool_versioned(&self, name: &str) -> Option<(Arc<dyn Tool>, u64)> {
+        let catalog = self.catalog.read();
+        Some((catalog.find(name)?.clone(), catalog.revision()))
     }
 
     /// 是否存在指定工具
@@ -527,8 +455,7 @@ impl ToolSystem {
 
     /// 列出所有工具
     pub fn list_tools(&self) -> Vec<Arc<dyn Tool>> {
-        let tools = self.tools.read();
-        tools.values().map(Arc::clone).collect()
+        self.catalog.read().values().cloned().collect()
     }
 
     /// 按场景列出工具
@@ -547,39 +474,32 @@ impl ToolSystem {
     /// 白名单 ∩ `get_tool_schemas`），其禁用集合是独立的 `...work`，
     /// 两侧互不影响。
     pub fn list_tools_for_scene(&self, _scene: ToolScene) -> Vec<Arc<dyn Tool>> {
-        let tools = self.tools.read();
-        tools
-            .values()
-            .filter(|t| tool_scope(t.name()).includes(AgentSide::Companion))
-            .filter(|t| !self.is_tool_disabled(t.name(), AgentSide::Companion))
-            .map(Arc::clone)
-            .collect()
+        self.list_tools_for_side(AgentSide::Companion)
+    }
+
+    /// Shared discovery boundary, including live per-side user switches.
+    pub fn list_tools_for_side(&self, side: AgentSide) -> Vec<Arc<dyn Tool>> {
+        self.list_tools().into_iter()
+            .filter(|t| side == AgentSide::Work || tool_scope(t.name()).includes(side))
+            .filter(|t| !self.is_tool_disabled(t.name(), side)).collect()
     }
 
     /// 列出所有工具名
     pub fn list_tool_names(&self) -> Vec<String> {
-        let tools = self.tools.read();
-        tools.keys().cloned().collect()
+        self.catalog.read().names().cloned().collect()
     }
 
     /// 按类别列出工具
     pub fn list_tools_by_category(&self, category: ToolCategory) -> Vec<Arc<dyn Tool>> {
-        let categories = self.categories.read();
-        let tools = self.tools.read();
-        categories
-            .get(&category)
-            .map(|names| {
-                names
-                    .iter()
-                    .filter_map(|n| tools.get(n).map(Arc::clone))
-                    .collect()
-            })
-            .unwrap_or_default()
+        self.list_tools().into_iter().filter(|t| t.category() == category).collect()
     }
 
     /// 获取所有类别
     pub fn get_categories(&self) -> Vec<ToolCategory> {
-        self.categories.read().keys().copied().collect()
+        let mut categories: Vec<_> = self.list_tools().iter().map(|t| t.category()).collect();
+        categories.sort_by_key(|category| category.as_str());
+        categories.dedup();
+        categories
     }
 
     /// 获取所有工具的 schema 定义（**工作侧**视角）。
@@ -588,21 +508,14 @@ impl ToolSystem {
     /// 编程智能体的 FC tools 字段由此生成（再与 `CODING_TOOLS` 白名单取交集）。
     /// 陪伴侧的过滤在 [`Self::list_tools_for_scene`] 中按陪伴侧集合独立进行。
     pub fn get_tool_schemas(&self) -> Vec<ToolDefinition> {
-        let tools = self.tools.read();
-        tools
-            .values()
-            .filter(|t| !self.is_tool_disabled(t.name(), AgentSide::Work))
-            .map(|t| t.to_definition())
-            .collect()
+        self.list_tools_for_side(AgentSide::Work).iter().map(|t| t.to_definition()).collect()
     }
 
     /// 获取所有工具的 OpenAI 格式定义
     pub fn work_extension_names(&self) -> Vec<String> {
-        let tools = self.tools.read();
-        let mut names: Vec<_> = tools.values()
+        let mut names: Vec<_> = self.list_tools_for_side(AgentSide::Work).iter()
             .filter(|t| t.is_custom() || t.category() == ToolCategory::Mcp)
             .filter(|t| !t.name().starts_with("mcp__browser__"))
-            .filter(|t| !self.is_tool_disabled(t.name(), AgentSide::Work))
             .map(|t| t.name().to_string()).collect();
         names.sort();
         names
@@ -610,32 +523,25 @@ impl ToolSystem {
 
     /// 获取所有工具的 OpenAI 格式定义
     pub fn get_openai_tools(&self) -> Vec<Value> {
-        let tools = self.tools.read();
-        tools.values().map(|t| t.to_openai_format()).collect()
+        self.list_tools().iter().map(|t| t.to_openai_format()).collect()
     }
 
     /// 简单搜索工具（按名称/描述匹配）
     pub fn search(&self, query: &str) -> Vec<Arc<dyn Tool>> {
         let query_lower = query.to_lowercase();
-        let tools = self.tools.read();
-        tools
-            .values()
+        self.list_tools()
+            .into_iter()
             .filter(|t| {
                 t.name().to_lowercase().contains(&query_lower)
                     || t.description().to_lowercase().contains(&query_lower)
             })
-            .map(Arc::clone)
             .collect()
     }
 
     /// 清空所有工具
     pub fn clear(&self) {
-        let mut tools = self.tools.write();
-        tools.clear();
-        self.tool_owners.write().clear();
-        self.aliases.write().clear();
-        self.normalized_names.write().clear();
-        self.categories.write().clear();
+        self.catalog.write().clear();
+        self.cache.clear();
     }
 
     /// 清空缓存
@@ -658,29 +564,6 @@ impl Default for ToolSystem {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// 工具名规范化：lowercase + 去除 `_`/`-`/`.` 分隔符
-///
-/// 用于容错 LLM 输出的工具名偏差，例如 `Wallpaper_List` / `wallpaper-list` /
-/// `WALLPAPER.LIST` 都能匹配到 `wallpaper_list`。
-pub fn normalize_tool_name(name: &str) -> String {
-    name.to_lowercase()
-        .chars()
-        .filter(|c| *c != '_' && *c != '-' && *c != '.')
-        .collect()
-}
-
-fn rebuild_normalized_index(tools: &HashMap<String, Arc<dyn Tool>>) -> HashMap<String, String> {
-    let mut index = HashMap::with_capacity(tools.len());
-    let mut names: Vec<&String> = tools.keys().collect();
-    names.sort();
-    for name in names {
-        index
-            .entry(normalize_tool_name(name))
-            .or_insert_with(|| name.clone());
-    }
-    index
 }
 
 #[cfg(test)]
@@ -814,5 +697,41 @@ mod tests {
         assert!(ts.find_tool("set_wallpaper").is_some());
         assert!(ts.find_tool("list_directory").is_some());
         assert!(ts.find_tool("grep").is_none());
+    }
+
+    #[test]
+    fn locked_tools_remain_enabled_when_addressed_by_an_alias() {
+        let system = system_with(&["read_file"]);
+        system.register_alias("legacy_read", "read_file");
+        system.set_disabled_tools(Vec::new(), vec!["legacy_read".into()]);
+        assert!(!system.is_tool_disabled("legacy_read", AgentSide::Work));
+        assert!(!system.is_tool_disabled("read_file", AgentSide::Work));
+    }
+
+    #[test]
+    fn concurrent_catalog_reads_and_hot_reloads_finish_without_lock_inversion() {
+        let system = Arc::new(system_with(&["read_file", "wallpaper_set"]));
+        let (tx, rx) = std::sync::mpsc::channel();
+        for writer in [true, false, false] {
+            let system = system.clone();
+            let tx = tx.clone();
+            std::thread::spawn(move || {
+                for _ in 0..300 {
+                    if writer {
+                        system.register_tool_with_owner(Arc::new(NamedTool("reload")), Some("plugin".into()));
+                        system.register_alias("old_reload", "reload");
+                        system.unregister_tool_if_owner("reload", "plugin");
+                    } else {
+                        system.find_tool("old_reload");
+                        system.list_tools_by_category(ToolCategory::System);
+                        system.list_tools_for_side(AgentSide::Companion);
+                        system.get_tool_schemas();
+                    }
+                }
+                tx.send(()).unwrap();
+            });
+        }
+        for _ in 0..3 { rx.recv_timeout(std::time::Duration::from_secs(10)).expect("catalog deadlock"); }
+        assert_eq!(system.list_tool_names(), ["read_file", "wallpaper_set"]);
     }
 }

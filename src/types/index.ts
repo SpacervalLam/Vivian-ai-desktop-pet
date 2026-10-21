@@ -245,7 +245,11 @@ export interface ToolInfo {
   category: string;
   /** 后端字段名为 input_schema（此处为历史别名，部分调用方仍用它） */
   parameters_schema?: Record<string, unknown>;
+  input_schema?: Record<string, unknown>;
   is_read_only?: boolean;
+  /** 是否明确允许按调用上下文复用结果；只读工具不一定可缓存。 */
+  is_cacheable?: boolean;
+  risk?: 'safe' | 'fs-read' | 'fs-write' | 'shell' | 'network' | 'input-control';
   /** 是否为智能体自进化创建的自建工具 */
   is_custom?: boolean;
   /** 工具归属侧别（后端由单一真相源推导） */

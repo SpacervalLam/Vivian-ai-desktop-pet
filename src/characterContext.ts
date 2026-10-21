@@ -40,3 +40,5 @@ export function resolveAvatarUrl(characterId: string): Promise<string> {
   avatarUrlCache.set(characterId, pending);
   return pending;
 }
+
+export function clearAvatarUrlCache(id?: string): void { if (id) avatarUrlCache.delete(id); else avatarUrlCache.clear(); }

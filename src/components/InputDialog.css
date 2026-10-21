@@ -46,8 +46,7 @@
 .quick-compose button:focus-visible { outline: 2px solid var(--compose-accent); outline-offset: 3px; }
 .quick-compose-whisper { gap: 5px; color: var(--compose-muted); background: transparent; border-radius: 8px; min-height: 26px; padding: 0 7px; font-size: 11px; }
 .quick-compose-whisper[aria-pressed='true'] { background: var(--compose-tint); color: var(--compose-accent); }
-.quick-compose-close { margin-left: auto; width: 26px; height: 26px; border-radius: 50%; background: transparent; color: var(--compose-muted); }
-.quick-compose-close:hover, .quick-compose-whisper:hover { background: var(--compose-tint); }
+.quick-compose-whisper:hover { background: var(--compose-tint); }
 .quick-compose-row { display: flex; gap: 6px; align-items: center; min-height: 48px; padding: 4px 6px 4px 13px; border-radius: 16px; background: var(--compose-tint); box-sizing: border-box; }
 .quick-compose-row input { min-width: 0; flex: 1; width: 0; padding: 8px 0; background: transparent; border: 0; outline: 0; color: var(--compose-text); font: inherit; font-size: 14px; caret-color: var(--compose-accent); }
 .quick-compose-row input::placeholder { color: var(--compose-muted); }

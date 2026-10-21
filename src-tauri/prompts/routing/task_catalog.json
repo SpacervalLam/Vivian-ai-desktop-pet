@@ -30,6 +30,17 @@
     "instruction": "Answer the user directly in the caller’s character identity, language and requested dialogue format. For a completed desktop-pet tool loop, render a natural reply from host-verified receipts and the actual stop reason. Distinguish success, failure, blocked work and a delegated task that is only started. Do not execute tools, invent results or repeat side effects in this reply stage. Preserve the caller’s schema or plain-text format."
   },
   {
+    "id": "chat_partner",
+    "groupKey": "config.routing_group_conversation",
+    "labelKey": "config.routing_chat_partner",
+    "helpKey": "config.routing_chat_partner_help",
+    "concurrency": "interactive",
+    "spoken": true,
+    "fallback": "companion",
+    "hidden": true,
+    "instruction": "Stay in the caller’s chat-only character identity and answer in short spoken chat register for the channel in context. No tool loop, no desktop-pet action, no internal planning inside the reply. In a group channel you are one of several speakers: brevity is correct, silence is allowed when the message is not for you."
+  },
+  {
     "id": "vision_describe",
     "groupKey": "config.routing_group_conversation",
     "labelKey": "config.routing_vision_describe",
@@ -167,7 +178,7 @@
     "concurrency": "environment",
     "spoken": false,
     "fallback": "simple_judge",
-    "instruction": "Act as an internal workflow planner: analyze the latest public user utterance with cited evidence, then pause, defer or dispatch at most one existing character flow. Never expose planning to a character, author dialogue, execute user work, invent facts or change settings. Respect availability, privacy and silence constraints. Return only the caller's structured control decision."
+    "instruction": "Combine permitted dialogue, environment observations, attributed event and knowledge records, and ongoing context to decide whether to wait, pause or dispatch at most one existing character flow, or provide grounded optional natural-language interaction guidance in the caller's schema. Keep your identity and private analysis invisible. Never author spoken dialogue, execute user work, invent facts or change settings. Respect availability, privacy, attribution and silence constraints."
   },
   {
     "id": "bystander_judge",

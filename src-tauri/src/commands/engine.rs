@@ -155,6 +155,11 @@ pub fn get_avatar_url(
     let char_id = character_id
         .clone()
         .unwrap_or_else(|| state.active_character_id.read().clone());
+    // 聊天窗口专属角色不在角色配置里，但同样有自己的头像资源
+    if let Some(partner)=crate::chat_partner::get(&char_id) {
+        let avatar=partner.profile.read().avatar.clone();
+        return Ok(if avatar.is_empty(){"/favicon.ico".into()}else{avatar});
+    }
     // 校验角色存在，保持原有错误语义（配置找不到角色时返回明确错误）
     state
         .config
@@ -169,6 +174,8 @@ pub fn get_avatar_url(
 }
 
 /// 拼接角色头像的同源绝对路径 URL（dev / release 一致：`/icons/charaters/<id>.webp`）
+///
+/// 聊天窗口专属角色与普通角色共用同一套位图头像规范（450×450 webp）。
 fn avatar_icon_url(character_id: &str) -> String {
     format!("/icons/charaters/{}.webp", character_id)
 }

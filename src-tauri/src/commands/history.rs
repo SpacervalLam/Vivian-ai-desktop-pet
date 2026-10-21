@@ -31,8 +31,8 @@ pub async fn get_chat_history(
     character_id: Option<String>,
     limit: Option<usize>, before_id: Option<String>, channel: Option<String>,
 ) -> Result<Vec<Value>, String> {
-    let instance = state.get_character(character_id.as_deref())?;
-    let dialogue = instance.brain.dialogue.clone();
+    // 普通角色取 brain.dialogue；聊天窗口专属角色取自己的轻量会话
+    let (dialogue, _, _) = crate::chat_partner::resolve_dialogue(state.inner(), character_id.as_deref())?;
     let entries = tokio::task::spawn_blocking(move || if let Some(limit) = limit {
         dialogue.history_page_before(before_id.as_deref(), limit, channel.as_deref()).map(|(rows, _)| rows)
     } else { dialogue.get_all_history() })
@@ -61,10 +61,14 @@ pub async fn clear_chat_history(
     state: State<'_, Arc<AppState>>,
     character_id: Option<String>,
 ) -> Result<(), String> {
-    let instance = state.get_character(character_id.as_deref())?;
-    let dialogue = instance.brain.dialogue.clone();
+    let target = character_id.clone().unwrap_or_else(|| state.active_character_id.read().clone());
+    if let Some(partner) = crate::chat_partner::get(&target) {
+        return partner.clear_history().await;
+    }
+    let (dialogue, char_id, _) =
+        crate::chat_partner::resolve_dialogue(state.inner(), character_id.as_deref())?;
     dialogue.clear_history_file().map_err(|e| e.to_string())?;
-    tracing::info!("[{}] 聊天历史已清空", instance.id);
+    tracing::info!("[{}] 聊天历史已清空", char_id);
     Ok(())
 }
 
@@ -76,20 +80,8 @@ pub async fn clear_chat_history(
 pub async fn get_chat_history_all(
     state: State<'_, Arc<AppState>>,
 ) -> Result<Vec<Value>, String> {
-    let chars: Vec<(Arc<DialogueManager>, String, String)> = {
-        let characters = state.characters.read();
-        characters
-            .values()
-            .filter(|c| *c.online.read())
-            .map(|c| {
-                (
-                    c.brain.dialogue.clone(),
-                    c.id.clone(),
-                    c.name.clone(),
-                )
-            })
-            .collect()
-    };
+    let chars: Vec<(Arc<DialogueManager>, String, String)> =
+        crate::chat_partner::online_dialogues(state.inner());
     let mut all_entries = tokio::task::spawn_blocking(move || -> Result<Vec<Value>, String> {
         let mut entries: Vec<Value> = Vec::new();
         for (dialogue, cid, cname) in chars {
@@ -143,14 +135,8 @@ pub async fn search_chat_history(
         return Ok(Vec::new());
     }
     const MAX_RESULTS: usize = 50;
-    let chars: Vec<(Arc<DialogueManager>, String, String)> = {
-        let characters = state.characters.read();
-        characters
-            .values()
-            .filter(|c| *c.online.read())
-            .map(|c| (c.brain.dialogue.clone(), c.id.clone(), c.name.clone()))
-            .collect()
-    };
+    let chars: Vec<(Arc<DialogueManager>, String, String)> =
+        crate::chat_partner::online_dialogues(state.inner());
     let result = tokio::task::spawn_blocking(move || -> Result<Vec<Value>, String> {
         let mut groups: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
         let mut order: Vec<(f64, String)> = Vec::new();
@@ -229,14 +215,8 @@ pub async fn get_latest_previews(
     state: State<'_, Arc<AppState>>,
     last_seen: Option<std::collections::HashMap<String, f64>>,
 ) -> Result<Value, String> {
-    let chars: Vec<(Arc<DialogueManager>, String, String)> = {
-        let characters = state.characters.read();
-        characters
-            .values()
-            .filter(|c| *c.online.read())
-            .map(|c| (c.brain.dialogue.clone(), c.id.clone(), c.name.clone()))
-            .collect()
-    };
+    let chars: Vec<(Arc<DialogueManager>, String, String)> =
+        crate::chat_partner::online_dialogues(state.inner());
     let is_first_load = last_seen.is_none();
     let seen = last_seen.unwrap_or_default();
     let result = tokio::task::spawn_blocking(move || -> Result<Value, String> {

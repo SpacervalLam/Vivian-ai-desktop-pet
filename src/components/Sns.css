@@ -1,0 +1,80 @@
+/* SNS 子页（添加/编辑好友、创建群聊/群聊信息）：聊天窗口内容区的在流子页，
+   形态与随手记 / 快捷启动一致——顶部留给灵动岛、状态栏和导航栏，自己只占内容区。
+   表单走 iOS 式 inset grouped 卡片：字段不自带边框，容器即分组。
+   （.sns-page 那种全屏覆盖层是群聊页的形态，子页不再共用。） */
+.sns-subpage { position:relative; flex:1; min-height:0; display:flex; flex-direction:column; background:var(--wx-bg); color:var(--wx-text); font-family:inherit; }
+.sns-page { position:absolute; inset:0; z-index:600; display:flex; flex-direction:column; min-height:0; background:var(--wx-bg); color:var(--wx-text); font-family:inherit; }
+.sns-header { display:flex; align-items:center; justify-content:space-between; gap:10px; min-height:54px; padding:14px 16px 8px; flex-shrink:0; background:var(--wx-bg-surface); border-bottom:1px solid var(--wx-border-light); }
+.sns-header strong { font-size:16px; flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; text-align:center; }.sns-header button,.sns-header>span { min-width:50px; }
+.sns-page button,.sns-subpage button { font-family:inherit; cursor:pointer; border:0; border-radius:8px; color:var(--wx-text); background:var(--wx-bg-active); padding:9px 12px; }.sns-page button:disabled,.sns-subpage button:disabled { opacity:.5; cursor:default; }
+
+/* ── 子页表单：分组卡片 ── */
+.sns-form { flex:1; min-height:0; overflow:auto; padding:20px 16px 32px; }
+.sns-card { background:var(--wx-bg-surface); border-radius:14px; padding:0 14px; margin:0 0 18px; }
+.sns-card-title { margin:0; padding:12px 0 4px; font-size:13px; font-weight:500; color:var(--wx-text-secondary); }
+.sns-field { display:block; margin:0; padding:11px 0; font-size:13px; font-weight:500; color:var(--wx-text-secondary); }
+.sns-field + .sns-field,.sns-card-title + .sns-member,.sns-member + .sns-member,.sns-field + .sns-hint-inline,.sns-hint-inline + .sns-field { border-top:0.5px solid var(--wx-border-light); }
+.sns-field + .sns-hint-inline { padding-top:10px; }
+.sns-form input:not([type=checkbox]),.sns-form textarea { display:block; box-sizing:border-box; width:100%; font:inherit; color:var(--wx-text); background:transparent; border:0; border-radius:0; padding:7px 0 0; margin:0; outline:none; }
+.sns-form input::placeholder,.sns-form textarea::placeholder { color:var(--wx-text-tertiary); }
+.sns-form input[readonly] { opacity:.65; }
+.sns-form textarea { resize:none; line-height:1.6; min-height:150px; }
+
+/* 头像区：有头像整块可点（呼出大图）；没头像就是灰框上传入口 */
+.sns-avatar-editor { display:flex; align-items:center; gap:18px; margin:0 0 18px; }
+.sns-subpage .sns-avatar,.sns-subpage .sns-upload { flex-shrink:0; width:68px; height:68px; border-radius:15px; padding:0; }
+.sns-subpage .sns-avatar { border:0; background:none; overflow:hidden; }
+.sns-subpage .sns-avatar img { display:block; width:100%; height:100%; object-fit:cover; }
+.sns-subpage .sns-avatar:active { opacity:.85; }
+/* 上传框：深灰边框 / 深灰加号 / 浅灰底，无文本 */
+.sns-subpage .sns-upload { display:grid; place-items:center; border:1px solid var(--wx-icon); background:var(--wx-bg-active); color:var(--wx-icon); transition:background .15s ease; }
+.sns-subpage .sns-upload:hover { background:var(--wx-bg-hover); }
+.sns-file-input { display:none; }
+
+/* 群成员选择：头像 + 名字 + 右侧勾选。
+   span 不参与增长（flex:0 1 auto）——若给它 flex:1，空闲空间会被吃光，
+   复选框的 margin-left:auto 解析成 0，永远贴不上右边。 */
+.sns-member { display:flex; align-items:center; gap:12px; margin:0; padding:11px 0; font-size:15px; font-weight:400; color:var(--wx-text); }
+.sns-member img { width:36px; height:36px; border-radius:9px; object-fit:cover; flex-shrink:0; }
+.sns-member span { flex:0 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.sns-member input { margin:0 0 0 auto; width:18px; height:18px; accent-color:#07c160; flex-shrink:0; }
+
+/* 群聊设置页：成员网格（参考聊天信息页）——头像 + 名字，末尾虚线「+」呼出成员选择 */
+.sns-member-grid { display:grid; grid-template-columns:repeat(5,1fr); gap:16px 6px; margin:0 0 20px; }
+.sns-grid-cell { display:flex; flex-direction:column; align-items:center; gap:6px; min-width:0; }
+.sns-grid-cell img { width:48px; height:48px; border-radius:10px; object-fit:cover; }
+.sns-grid-cell span { max-width:100%; font-size:11px; line-height:1.3; color:var(--wx-text-secondary); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.sns-subpage .sns-grid-add { width:48px; height:48px; padding:0; border-radius:10px; border:1px dashed var(--wx-icon); background:transparent; color:var(--wx-icon); display:grid; place-items:center; }
+.sns-subpage .sns-grid-add:hover { background:var(--wx-bg-active); }
+/* 单行设置项：标签在左、值在右（参考聊天信息页的 Group Name 行） */
+.sns-settings-row { display:flex; align-items:center; justify-content:space-between; gap:14px; padding:13px 0; margin:0; font-size:15px; font-weight:400; color:var(--wx-text); }
+.sns-settings-row input { flex:1; min-width:0; text-align:right; font-size:15px; }
+
+/* 主按钮：参考聊天信息页底部动作钮（浅色 Messages 细边框 + 图标 / 深色 Add 近无框纯文字）——
+   透明底 + 语义细边框（浅色下 ≈#E0E0E0，深色下近无框）+ 正文色，不再用绿色实底。
+   边框走 --wx-border 而非 --wx-icon：后者在深色下会变成一条醒目的灰框，不像 Add。 */
+.sns-subpage .sns-primary { display:inline-flex; align-items:center; justify-content:center; gap:8px; width:100%; height:46px; border-radius:12px; border:1px solid var(--wx-border); background:transparent; color:var(--wx-text); font-size:16px; font-weight:500; }
+.sns-subpage .sns-primary:active { background:var(--wx-bg-active); }
+.sns-hint { color:var(--wx-text-secondary); font-size:12px; line-height:1.6; margin:5px 0 18px; }
+.sns-hint-inline { margin:0; padding:0 0 12px; }
+.sns-error { color:#ef5350; font-size:13px; line-height:1.6; padding:8px 12px; overflow-wrap:anywhere; }
+.sns-delete { margin:20px 0 0; padding-top:16px; border-top:0.5px solid var(--wx-border-light); }
+.sns-delete-hint { margin:0 0 10px; color:var(--wx-text-secondary); font-size:12px; line-height:1.7; }
+/* 删除 / 解散：参考微信「Leave」——纯红字、无底色、整行居中，与上方主按钮等宽。
+   二次确认态两钮各半（合计仍是一条宽）：取消＝正文色，删除＝红字。 */
+.sns-delete-actions { display:flex; gap:12px; }
+.sns-delete-actions button { flex:1; height:46px; border-radius:12px; font-size:16px; font-weight:500; padding:0; background:transparent; text-align:center; }
+.sns-delete-actions button:active { opacity:.6; }
+.sns-subpage .sns-danger { color:#ef5350; }
+.sns-subpage .sns-ghost { color:var(--wx-text); }
+
+/* 头像大图预览：盖住手机屏幕（不越机身），点暗处关闭 */
+.sns-avatar-modal { position:absolute; inset:0; z-index:20; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:28px; background:rgba(0,0,0,.92); }
+.sns-avatar-modal-img { max-width:76%; max-height:60%; border-radius:18px; object-fit:contain; }
+.sns-subpage .sns-avatar-modal-action { padding:11px 28px; border-radius:23px; background:rgba(255,255,255,.14); color:#fff; font-size:15px; }
+.sns-subpage .sns-avatar-modal-action:hover { background:rgba(255,255,255,.22); }
+
+/* ── 群聊页（SnsGroupChat，全屏覆盖层形态）与首页群入口，保持不变 ── */
+.sns-page .sns-primary { background:#07c160; color:white; width:100%; font-weight:600; }.sns-page .sns-danger { color:#ef5350; margin:8px 0; }
+.sns-input textarea { display:block; box-sizing:border-box; width:100%; font:inherit; color:var(--wx-text); background:var(--wx-bg-surface); border:1px solid var(--wx-border); border-radius:9px; padding:10px 12px; margin-top:6px; outline:none; }
+.sns-transcript { flex:1; min-height:0; overflow:auto; padding:14px 16px; }.sns-message { display:flex; gap:8px; margin:16px 0; align-items:flex-start; }.sns-message.user { flex-direction:row-reverse; }.sns-message img.sns-speaker-avatar { width:34px; height:34px; border-radius:8px; object-fit:cover; flex-shrink:0; }.sns-message>div { max-width:78%; min-width:0; }.sns-message small { display:block; font-size:11px; color:var(--wx-text-secondary); margin:0 3px 5px; }.sns-bubble { background:var(--wx-bg-surface); border-radius:10px; padding:10px 12px; white-space:pre-wrap; overflow-wrap:anywhere; font-size:14px; line-height:1.6; }.sns-message.user .sns-bubble { background:#95ec69; color:#161d17; }.sns-bubble img { display:block; max-width:100%; max-height:220px; border-radius:6px; }.sns-input { padding:12px 16px 20px; background:var(--wx-bg-surface); border-top:1px solid var(--wx-border-light); }.sns-input-row { display:flex; gap:8px; align-items:flex-end; }.sns-input textarea { flex:1; resize:none; margin:0; min-height:40px; max-height:120px; }.sns-input .sns-primary { width:auto; }.sns-image-draft { display:flex; justify-content:space-between; align-items:center; font-size:12px; margin-bottom:10px; }.sns-group-row { display:flex; width:100%; gap:12px; align-items:center; padding:12px 14px; background:transparent; border:0; text-align:left; color:var(--wx-text); cursor:pointer; font:inherit; }.sns-group-icon { width:44px; height:44px; display:grid; place-items:center; border-radius:9px; background:linear-gradient(135deg,#5ac8fa,#007aff); color:white; font-size:22px; flex-shrink:0; }.sns-group-row strong { font-size:15px; font-weight:500; }.sns-group-row small { display:block; color:var(--wx-text-secondary); font-size:12px; margin-top:5px; max-width:240px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }

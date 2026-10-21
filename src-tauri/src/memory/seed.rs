@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::{collections::HashSet, path::Path};
 
 pub const SCHEMA_VERSION: u64 = 2;
-pub const ENVIRONMENT_REVISION: &str = "identity-open-arrival-1";
+pub const ENVIRONMENT_REVISION: &str = "quiet-backstory-arrival-2";
 // This shared memory path is already removed by the factory-reset sweep.
 pub const CLOCK_RELATIVE_PATH: &str = "companion-v2/memory/seed_clock.json";
 
@@ -237,6 +237,31 @@ mod tests {
     }
     fn parse_value(value: &Value) -> Result<SeedBundle, String> {
         parse(&format!("```json\n{}\n```", value), "vivian")
+    }
+
+    #[test]
+    fn graduation_and_departure_are_a_week_before_first_start_and_never_ambient_topics() {
+        let launch = 2_000_000_000.0;
+        let mut latest = 0.0_f64;
+        for character in ["vivian", "nana"] {
+            let mut bundle = load(character).unwrap();
+            bundle.anchor_to(launch).unwrap();
+            for entry in &bundle.history {
+                assert!(entry.timestamp <= launch - 7.0 * 86400.0);
+                if entry.id.contains("graduates") || entry.id.contains("departure_together") {
+                    assert!(entry.timestamp >= launch - 7.0 * 86400.0 - 3600.0);
+                }
+            }
+            for item in &bundle.memories {
+                latest = latest.max(item.timestamp);
+                assert!(item.timestamp <= launch - 7.0 * 86400.0);
+                assert!(!super::super::companion_policy::is_runtime_material(item));
+            }
+            // Asking about the past can still retrieve the original authored records.
+            assert!(bundle.memories.iter().any(|m|
+                super::super::companion_policy::is_recallable(m, launch)));
+        }
+        assert_eq!(latest, launch - 7.0 * 86400.0);
     }
 
     #[test]

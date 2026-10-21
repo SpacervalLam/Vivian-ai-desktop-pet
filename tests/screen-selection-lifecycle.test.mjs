@@ -6,7 +6,7 @@ const fixtures={
  react:`export const useState=v=>globalThis.__selector.state(v),useRef=v=>globalThis.__selector.ref(v),useCallback=f=>f,useEffect=f=>globalThis.__selector.effect(f);`,
  'react/jsx-runtime':`export const jsx=(type,props)=>({type,props}),jsxs=jsx;`,
  'react-i18next':`export const useTranslation=()=>({i18n:globalThis.__selector.language});`,
- 'lucide-react':`export const Copy=()=>null,Download=()=>null,ScanLine=()=>null,Sparkles=()=>null,X=()=>null;`,
+ 'lucide-react':`export const ChevronDown=()=>null,Copy=()=>null,Download=()=>null,ScanLine=()=>null,Sparkles=()=>null,X=()=>null;`,
  '@tauri-apps/api/core':`export const invoke=(...args)=>globalThis.__selector.invoke(...args);`,
  '@tauri-apps/api/event':`export const listen=(name,fn)=>globalThis.__selector.listen(name,fn);`,
 };
@@ -55,12 +55,13 @@ try{
  tree=render();effects[1]();
  keys.get('keydown')({key:'Enter',preventDefault(){}});await flush();
  assert.deepEqual(calls.at(-1).args,{sessionId:'current',region:{x:20,y:30,width:200,height:100},action:'freeze'});
- const nodeText=node=>node==null?'':Array.isArray(node)?node.map(nodeText).join(''):typeof node==='object'?nodeText(node.props?.children):String(node);
+ const nodeText=node=>node==null||typeof node==='boolean'?'':Array.isArray(node)?node.map(nodeText).join(''):typeof node==='object'?nodeText(node.props?.children):String(node);
+ const buttons=node=>!node||typeof node!=='object'?[]:[...(node.type==='button'?[node]:[]),...[node.props?.children].flat(Infinity).flatMap(buttons)];
  for(const [language,expected] of [['en',['Cancel','Save','Analyze','Copy to clipboard','Copy & analyze','Save & analyze','Freeze↵']],['ja',['キャンセル','保存','分析','クリップボードにコピー','コピーして分析','保存して分析','画面を固定↵']],['zh-CN',['取消','保存','分析','复制到剪贴板','复制并分析','保存并分析','定格画面↵']]]){
    events.get('config:language-changed')({payload:{language}});
    tree=render();
    const toolbar=find(tree,n=>n.props?.className==='screen-selection-toolbar');
-   assert.deepEqual(toolbar.props.children.filter(n=>n.type==='button').map(nodeText),expected);
+   assert.deepEqual(buttons(toolbar).filter(n=>!n.props['aria-haspopup']).map(nodeText),expected);
    assert.equal(find(tree,n=>n.type==='img').props.src,'blob:selector-0','language switching preserves the current screenshot');
  }
  const oldSessionTree=tree;
@@ -78,7 +79,32 @@ try{
  effects[1]();keys.get('keydown')({key:'Escape',preventDefault(){}});await flush();
  assert.equal(calls.at(-1).args.action,'cancel');
  const beforeCancel=calls.length;oldTree.props.onContextMenu({preventDefault(){}});await flush();assert.equal(calls.length,beforeCancel,'old UI callbacks cannot cancel the new session');
- begin('late');cleanup();requests.get('late')([1]);await flush();assert.equal(urls.length,3);assert.equal(events.size,0);assert.ok(revoked.includes('blob:selector-2'));
+ for(const [action,label] of [['analyze','分析'],['save_and_analyze','保存并分析']]) {
+   for(const character of ['vivian','nana',null]) {
+     const id=`${action}-${character}`;begin(id);requests.get(id)([137,80,78,71]);await flush();tree=render();
+     tree.props.ref.current={getBoundingClientRect:target.getBoundingClientRect};
+     tree.props.onPointerDown(pointer(20,30));tree.props.onPointerUp(pointer(220,130));tree=render();
+     const toggle=buttons(tree).find(n=>n.props['aria-label']===`${label} · 选择分析桌宠`);
+     assert.ok(toggle,'analysis buttons expose a separate drawer');
+     const before=calls.length;
+     toggle.props.onClick({currentTarget:{getBoundingClientRect:()=>({right:1900,top:1020,bottom:1054})}});tree=render();
+     let menu=find(tree,n=>n.props?.role==='menu');assert.ok(menu);assert.equal(calls.length,before,'opening the drawer does not submit the screenshot');
+     assert.ok(menu.props.style.left+280<=1920&&menu.props.style.top+124<=1080,'menu stays within the screen');
+     assert.deepEqual(buttons(menu).map(button=>nodeText(button.props.children[1])),['Vivian','Nana'].map(name=>`${action==='save_and_analyze'?'保存并':''}交由${name}分析`));
+     effects[1]();keys.get('keydown')({key:'Escape',preventDefault(){}});tree=render();
+     assert.equal(find(tree,n=>n.props?.role==='menu'),null);assert.equal(calls.length,before,'Escape dismisses the menu without cancelling capture');
+     if(character) {
+       toggle.props.onClick({currentTarget:{getBoundingClientRect:()=>({right:1900,top:1020,bottom:1054})}});tree=render();menu=find(tree,n=>n.props?.role==='menu');
+       buttons(menu)[character==='vivian'?0:1].props.onClick();await flush();
+       assert.deepEqual(calls.at(-1).args,{sessionId:id,region:{x:20,y:30,width:200,height:100},action,analysisCharacter:character});
+     } else {
+       buttons(tree).find(n=>nodeText(n)===label).props.onClick();await flush();
+       assert.equal(calls.at(-1).args.action,action);assert.equal(calls.at(-1).args.analysisCharacter,undefined,'main button leaves random selection to the backend');
+     }
+   }
+ }
+ const urlCount=urls.length;
+ begin('late');cleanup();requests.get('late')([1]);await flush();assert.equal(urls.length,urlCount);assert.equal(events.size,0);assert.ok(revoked.includes('blob:selector-2'));
  console.log('Reusable selector: ready ordering, binary preview, stale sessions, decoded-image presentation, pixel cleanup, reuse and unmount passed');
 }finally{
  for(const key of ['window','requestAnimationFrame','cancelAnimationFrame']){if(prior[key]===undefined)delete globalThis[key];else globalThis[key]=prior[key];}

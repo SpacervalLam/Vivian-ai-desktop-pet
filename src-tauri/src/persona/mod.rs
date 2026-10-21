@@ -16,6 +16,9 @@ pub mod persona_decision;
 pub mod prompt_render;
 pub mod schemas;
 pub mod scene_selector;
+pub mod self_profile;
+pub(crate) mod self_profile_store;
+pub(crate) mod self_development;
 pub mod tone_injector;
 pub mod worldbook;
 
@@ -52,6 +55,7 @@ pub struct PersonaEngine {
     language: RwLock<String>,
     /// 自我进化覆盖层（独立于原始人设文件，智能体反思中自行调整语气/性格）
     evolution: PersonaEvolutionStore,
+    pub(crate) self_profile: self_profile_store::SelfProfileStore,
     /// 人设配置修订号（任何 config 变更时递增，驱动 Character 块渲染缓存失效）
     config_revision: std::sync::atomic::AtomicU64,
     /// Character 块渲染缓存：(tier, lang, config修订, evolution更新时间, 渲染文本)
@@ -106,6 +110,7 @@ impl PersonaEngine {
             base_expression: RwLock::new(config.expression),
             language: RwLock::new("zh".to_string()),
             evolution,
+            self_profile: self_profile_store::SelfProfileStore::new(persona_dir.join("self_profile.json")),
             config_revision: std::sync::atomic::AtomicU64::new(0),
             character_block_cache: RwLock::new(None),
         })
@@ -392,7 +397,16 @@ impl PersonaEngine {
             card.push_str("\n\n");
             card.push_str(&learned);
         }
+        let private = self.private_self_context();
+        if !private.is_empty() {
+            card.push_str("\n\n");
+            card.push_str(&private);
+        }
         card
+    }
+
+    pub(crate) fn private_self_context(&self) -> String {
+        self.self_profile.render(crate::memory::types::current_timestamp())
     }
 
     pub fn dialogue_preferences(&self) -> String {
@@ -433,6 +447,10 @@ impl PersonaEngine {
             .map(|content| content.contains(&e.quote)
                 && format!("{:x}", Sha256::digest(content.trim().as_bytes())) == e.fingerprint)
             .unwrap_or(false));
+        self.self_profile.reconcile_chat(|e| memory.get_memory_content_by_id(&e.source_id)
+            .map(|content| content.contains(&e.quote)
+                && format!("{:x}", Sha256::digest(content.trim().as_bytes())) == e.fingerprint)
+            .unwrap_or(false));
     }
 
     pub fn evolution_history(&self) -> Vec<EvolutionEntry> { self.evolution.history() }
@@ -451,6 +469,7 @@ impl PersonaEngine {
     /// 恢复出厂：清空自我进化覆盖层（原始人设文件不受影响）
     pub fn reset_evolution(&self) {
         self.evolution.reset();
+        self.self_profile.reset();
         tracing::info!("[PersonaEngine] 自我进化覆盖层已清空（恢复出厂）");
     }
 
@@ -701,6 +720,7 @@ impl Default for PersonaEngine {
                 base_expression: RwLock::new(default_config.expression),
                 language: RwLock::new("zh".to_string()),
                 evolution: PersonaEvolutionStore::fallback(),
+                self_profile: self_profile_store::SelfProfileStore::fallback(),
                 config_revision: std::sync::atomic::AtomicU64::new(0),
                 character_block_cache: RwLock::new(None),
             }

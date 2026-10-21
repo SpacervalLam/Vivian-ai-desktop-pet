@@ -230,7 +230,10 @@ impl PsychologyManager {
         let circadian = CircadianFactors::at_hour(hour);
 
         if dt_raw > 3600.0 {
-            HomeostasisEngine::tick(
+            // 离线结算：用 1 小时封顶做一次**确定性**回归，再按各通道压缩系数结算。
+            // 这里刻意不用 `tick`：它会给情绪注入随机噪声，而"离线了多久"不该被
+            // 翻译成"情绪被随机大跳一次"——那正是启动即闪坏表情的来源之一。
+            HomeostasisEngine::tick_offline(
                 &mut snapshot.needs,
                 &mut snapshot.emotion,
                 &mut snapshot.persona.need_set_points,
@@ -287,7 +290,8 @@ impl PsychologyManager {
                 let circadian = CircadianFactors::at_hour(hour);
 
                 if dt_raw > 3600.0 {
-                    HomeostasisEngine::tick(
+                    // 同上：长离线走确定性结算，不让随机噪声替"离线多久"发言
+                    HomeostasisEngine::tick_offline(
                         &mut snapshot.needs,
                         &mut snapshot.emotion,
                         &mut snapshot.persona.need_set_points,

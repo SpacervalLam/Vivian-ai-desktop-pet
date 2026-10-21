@@ -74,12 +74,9 @@ pub fn save_config(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<()
         &state.config.read().get_all(),
     );
     crate::network::http_client::reload_global_client(pc);
-    // 工具开关可能已变更：同步用户禁用的工具（分陪伴侧 / 工作侧）到 ToolSystem
-    // （即时生效，禁用工具立即从对应侧的 LLM 工具列表移除并被执行入口拒绝）
-    let disabled = state.config.read().get_all().tools.disabled_tools.clone();
-    state
-        .tool_system
-        .set_disabled_tools(disabled.companion, disabled.work);
+    // Refresh per-side switches, cache settings, timeouts, budgets and access level.
+    let tools = state.config.read().get_all().tools;
+    state.tool_system.apply_config(&tools);
     // 远程访问配置可能已变更（启用开关 / 端口），同步服务器状态。
     // 若应用尚未完成初始化（含种子记忆注入与语料嵌入预加载），先不启动远程 HTTP 服务，
     // 待 lib.rs 在初始化完成后统一调用 sync_remote_server 开放 API。
@@ -97,6 +94,9 @@ pub fn save_config(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<()
 pub fn reload_config(state: State<'_, Arc<AppState>>) -> Result<(), String> {
     let config = state.config.read();
     config.reload().map_err(err_str)?;
+    let tools = config.get_all().tools;
+    drop(config);
+    state.tool_system.apply_config(&tools);
     Ok(())
 }
 

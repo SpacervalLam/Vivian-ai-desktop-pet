@@ -8,6 +8,11 @@ pub mod embedded_browser;
 pub mod bundle_reader;
 pub mod character_behavior;
 pub mod character_registry;
+pub mod chat_partner;
+pub mod chat_partner_memory;
+pub mod sns_store;
+pub mod sns_runtime;
+pub mod chat_partner_policy;
 pub mod commands;
 pub mod config;
 pub mod companion_policy;
@@ -341,6 +346,17 @@ pub fn run() {
             embedded_browser::embedded_browser_layout,
             embedded_browser::embedded_browser_capture,
             commands::characters::list_characters,
+            commands::characters::list_chat_partners,
+            commands::sns::sns_save_contact,
+            commands::sns::sns_get_contact,
+            commands::sns::sns_delete_contact,
+            commands::sns::sns_list_groups,
+            commands::sns::sns_save_group,
+            commands::sns::sns_delete_group,
+            commands::sns::sns_group_history,
+            commands::sns::sns_send_group_message,
+            commands::characters::get_chat_partner_model,
+            commands::characters::set_chat_partner_model,
             desktop_terrain::get_desktop_terrain,
             commands::characters::set_character_online,
             commands::characters::set_character_offline,

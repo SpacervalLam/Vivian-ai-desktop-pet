@@ -5,6 +5,7 @@ pub mod backup;
 pub mod storage;
 pub mod browser;
 pub mod chat;
+pub mod sns;
 pub mod coding_agent;
 pub mod config;
 pub mod diary;

@@ -4807,6 +4807,7 @@ pub(crate) fn web_capability_section() -> String {
          - 真实浏览器：**已连接**，`browser_task_tab` / `browser_extract` / `browser_navigate` / \
          `browser_snapshot` / `browser_get_text` 等本轮可用。动态渲染页、登录页、反爬页一律走它，\
          不要用 `run_command` 拼命令行去模拟浏览器。\n\
+         - 平台冲浪：`browser_task_tab` 可用 platform + query 搜索 B站、小红书、抖音、知乎、微博、Twitter/X、Reddit、GitHub、arXiv、YouTube；从返回链接选择相关条目，用 url + extractor=detail 读取页面文字。保留链接访问参数，视频页文字不代表已看视频；登录/验证交给用户处理。平台来源按需要选用，不要求逐个平台访问。\n\
          - 取页面图片：静态页可先用 `web_fetch` 的 images[]；动态页按本轮浏览器工具 schema 提取图片。\n\
          - 查看与展示：`web_fetch` 图片 URL 会返回像素和 artifact.image_path，再用 `send_image(path)` 展示给用户并附来源页。\n"
             .to_string()

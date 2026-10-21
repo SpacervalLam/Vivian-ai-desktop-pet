@@ -120,6 +120,16 @@ pub async fn analyze_screen(app: &AppHandle, state: &Arc<AppState>, character_id
     }
     for window in guard.0.drain(..) { let _ = window.show(); }
     SCREEN_CAPTURING.store(false, std::sync::atomic::Ordering::Release);
+    let analysis_character = if matches!(selected.action, crate::screen_capture::SelectionAction::Analyze | crate::screen_capture::SelectionAction::SaveAndAnalyze) {
+        if let Some(target) = selected.analysis_character {
+            state.get_character(Some(target.id()))?;
+            target.id()
+        } else {
+            let candidates: Vec<_> = ["vivian", "nana"].into_iter().filter(|id| state.get_character(Some(id)).is_ok()).collect();
+            if candidates.is_empty() { return Err("暂无可用的分析桌宠".into()); }
+            candidates[rand::random_range(0..candidates.len())]
+        }
+    } else { character_id };
     let copied = selected.action.copies();
     if copied { crate::desktop_clipboard::copy_png(&selected.png).await?; }
     let saved_path = if selected.action.saves() {
@@ -128,11 +138,11 @@ pub async fn analyze_screen(app: &AppHandle, state: &Arc<AppState>, character_id
     if !selected.action.analyzes() {
         return Ok(json!({"saved_path":saved_path,"copied":copied}));
     }
-    let analysis = analyze_snapshot(app, state, character_id, selected.png).await;
+    let analysis = analyze_snapshot(app, state, analysis_character, selected.png).await;
     let turn = analysis.map_err(|error| if saved_path.is_some() {
         format!("截图已保存至系统截图目录，但分析失败：{error}")
     } else { error })?;
-    relay_visual_description(app, state, character_id, turn.description);
+    relay_visual_description(app, state, analysis_character, turn.description);
     Ok(json!({"handled":true,"saved_path":saved_path,"copied":copied}))
 }
 

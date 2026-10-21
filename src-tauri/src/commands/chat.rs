@@ -291,6 +291,7 @@ fn scan_group_addressing(state: &Arc<AppState>, self_id: &str, message: &str) ->
 #[tauri::command]
 pub async fn send_message_stream(
     state: State<'_, Arc<AppState>>,
+    window: tauri::WebviewWindow,
     message: String,
     stream_id: String,
     character_id: Option<String>,
@@ -299,6 +300,14 @@ pub async fn send_message_stream(
     file_metadata: Option<serde_json::Value>,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
+    if channel.as_deref().and_then(crate::sns_store::group_id).is_some(){return Err("请从群聊界面发送消息".into());}
+    let target = character_id.clone().unwrap_or_else(|| state.active_character_id.read().clone());
+    if crate::chat_partner::get(&target).is_some() {
+        crate::chat_partner_policy::validate_origin(window.label(), channel.as_deref().unwrap_or("wechat"))?;
+        if whisper.unwrap_or(false) {
+            return Err("聊天专属角色不支持桌宠悄悄话".into());
+        }
+    }
     send_message_stream_impl(state.inner(), message, stream_id, character_id, channel, whisper, file_metadata, app, None).await.map(|_| ())
 }
 
@@ -323,6 +332,21 @@ async fn send_message_stream_impl(
 
     if !state.is_initialized() {
         return Err("智能体正在初始化，请稍候...".to_string());
+    }
+
+    // 聊天窗口专属角色：不走本机桌宠 Brain，使用独立的轻量会话和片段记忆。
+    // 事件契约与普通角色一致（chat:start / chunk / done），前端无需区分。
+    if let Some(partner) = crate::chat_partner::get(&char_id) {
+        return crate::chat_partner::stream_reply(
+            state,
+            &app,
+            partner,
+            message,
+            stream_id,
+            channel_str,
+            file_metadata,
+        )
+        .await;
     }
 
     let _foreground = state.session_coordinator.background_priority().enter();
@@ -1365,8 +1389,8 @@ pub async fn update_last_assistant_timestamp(
     character_id: Option<String>,
     timestamp_ms: i64,
 ) -> Result<(), String> {
-    let instance = state.get_character(character_id.as_deref())?;
-    let dialogue = instance.brain.dialogue.clone();
+    let (dialogue, _, _) =
+        crate::chat_partner::resolve_dialogue(state.inner(), character_id.as_deref())?;
     tokio::task::spawn_blocking(move || dialogue.patch_last_assistant_timestamp(timestamp_ms))
         .await
         .map_err(|e| format!("任务执行失败: {}", e))?;
@@ -1686,7 +1710,7 @@ mod image_future_stack_tests {
     fn image_ipc_futures_fit_small_stacks() {
         fn image_size<F: Future>(_: impl FnOnce(&'static Arc<AppState>, &'static tauri::AppHandle, &'static str, &'static str,
             MessageImage, &'static str, Option<&'static str>, &'static str) -> F) -> usize { std::mem::size_of::<F>() }
-        fn command_size<F: Future>(_: impl FnOnce(State<'static, Arc<AppState>>, String, Option<String>, Option<String>, tauri::AppHandle) -> F) -> usize { std::mem::size_of::<F>() }
+        fn command_size<F: Future>(_: impl FnOnce(tauri::WebviewWindow, State<'static, Arc<AppState>>, String, Option<String>, Option<String>, tauri::AppHandle) -> F) -> usize { std::mem::size_of::<F>() }
         fn frozen_size<F: Future>(_: impl FnOnce(tauri::WebviewWindow, State<'static, Arc<AppState>>) -> F) -> usize { std::mem::size_of::<F>() }
         fn capture_size<F: Future>(_: impl FnOnce(tauri::AppHandle, State<'static, Arc<AppState>>) -> F) -> usize { std::mem::size_of::<F>() }
         for (name, bytes) in [
@@ -1712,6 +1736,7 @@ mod image_future_stack_tests {
 /// 6. 把图片描述写入记忆系统（content=description，metadata 携带 image_path）。
 #[tauri::command]
 pub async fn send_image_message(
+    window: tauri::WebviewWindow,
     state: State<'_, Arc<AppState>>,
     source_path: String,
     character_id: Option<String>,
@@ -1722,6 +1747,11 @@ pub async fn send_image_message(
         .clone()
         .unwrap_or_else(|| state.active_character_id.read().clone());
     let channel_str = channel.unwrap_or_else(|| "wechat".to_string());
+
+    if let Some(partner)=crate::chat_partner::get(&char_id) {
+        crate::chat_partner_policy::validate_origin(window.label(), &channel_str)?;
+        return Box::pin(crate::sns_runtime::private_image(state.inner(),&app,partner,source_path,channel_str)).await;
+    }
 
     // 主 LLM API 必须配置
     if !main_api_configured(&state) {
@@ -1883,15 +1913,19 @@ pub struct SharedFile {
 
 /// Keep an independent copy so a shared attachment survives moving its source.
 #[tauri::command]
-pub async fn save_shared_file(source_path: String) -> Result<SharedFile, String> {
+pub async fn save_shared_file(source_path: String,character_id:Option<String>) -> Result<SharedFile, String> {
+    let owner=character_id.as_deref().and_then(crate::chat_partner::get);
     tokio::task::spawn_blocking(move || {
+        let _files=owner.as_ref().map(|partner|partner.memory_write_lock.lock());
+        if owner.as_ref().is_some_and(|partner|partner.is_deleted()){return Err("好友已删除".into());}
         let source = std::path::Path::new(&source_path);
         if !source.is_file() {
             return Err("请选择文件，不能分享文件夹".to_string());
         }
         let filename = source.file_name().ok_or("文件名无效")?;
-        let dir = crate::utils::path::get_user_data_dir()
-            .join("attachments").join(uuid::Uuid::new_v4().to_string());
+        let root=crate::utils::path::get_user_data_dir();
+        let dir=if let Some(owner)=&owner {crate::sns_store::owned_directory(&root,&owner.id,false)?.join("media").join(uuid::Uuid::new_v4().to_string())}
+            else{root.join("attachments").join(uuid::Uuid::new_v4().to_string())};
         std::fs::create_dir_all(&dir).map_err(|e| format!("保存文件失败：{e}"))?;
         let target = dir.join(filename);
         let size = match std::fs::copy(source, &target) {
@@ -2009,6 +2043,7 @@ pub async fn save_temp_image(
 pub async fn save_voice_audio(
     base64_data: String,
     mime: String,
+    character_id:Option<String>,
 ) -> Result<String, String> {
     let bytes = STANDARD
         .decode(base64_data.trim())
@@ -2023,8 +2058,11 @@ pub async fn save_voice_audio(
         _ => "webm",
     };
 
-    let data_dir = crate::utils::path::get_user_data_dir();
-    let audio_dir = data_dir.join("audio");
+    let data_dir=crate::utils::path::get_user_data_dir();
+    let owner=character_id.as_deref().and_then(crate::chat_partner::get);
+    let _files=owner.as_ref().map(|partner|partner.memory_write_lock.lock());
+    if owner.as_ref().is_some_and(|partner|partner.is_deleted()){return Err("好友已删除".into());}
+    let audio_dir=if let Some(owner)=&owner {crate::sns_store::owned_directory(&data_dir,&owner.id,false)?.join("media")}else{data_dir.join("audio")};
     crate::utils::path::ensure_dir(&audio_dir)
         .map_err(|e| format!("创建音频目录失败: {}", e))?;
 
@@ -2033,7 +2071,7 @@ pub async fn save_voice_audio(
     std::fs::write(&saved_path, &bytes)
         .map_err(|e| format!("保存音频文件失败: {}", e))?;
 
-    let rel_path = format!("audio/{}", saved_name);
+    let rel_path=saved_path.strip_prefix(&data_dir).map_err(|e|e.to_string())?.to_string_lossy().replace('\\',"/");
     Ok(rel_path)
 }
 

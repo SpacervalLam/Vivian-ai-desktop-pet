@@ -159,6 +159,10 @@ impl Tool for GetWeatherForecastTool {
         true
     }
 
+    fn is_cacheable(&self) -> bool {
+        true
+    }
+
     fn category(&self) -> ToolCategory {
         ToolCategory::System
     }

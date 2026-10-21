@@ -3,6 +3,12 @@ use std::collections::HashSet;
 
 use super::types::MemoryItem;
 
+/// Authored history informs identity; it is not a fresh event or an unsolicited topic.
+pub fn is_runtime_material(item: &MemoryItem) -> bool {
+    item.metadata["fictional_backstory"] != true
+        && !matches!(item.metadata["source"].as_str(), Some("system_seed" | "environment_preset"))
+}
+
 /// 内心活动和机器生成的索引不是用户经历的证据。类别由写入方明确声明。
 pub fn is_dialogue_evidence(item: &MemoryItem) -> bool {
     super::kinds::recallable(item)
@@ -56,6 +62,19 @@ pub fn compact_excerpt(content: &str, max_chars: usize) -> String {
 mod tests {
     use super::*;
     use crate::memory::types::Granularity;
+
+    #[test]
+    fn runtime_conversations_about_the_developer_are_not_filtered_as_backstory() {
+        let mut live = MemoryItem::new("用户问起 AlenTinn 和毕业前的开发故事".into(), Granularity::Summary, 0.5);
+        live.metadata = serde_json::json!({"source":"direct"});
+        assert!(is_runtime_material(&live));
+        for metadata in [serde_json::json!({"source":"system_seed"}),
+            serde_json::json!({"source":"environment_preset"}),
+            serde_json::json!({"fictional_backstory":true})] {
+            let mut authored = live.clone(); authored.metadata = metadata;
+            assert!(!is_runtime_material(&authored));
+        }
+    }
 
     #[test]
     fn private_thoughts_and_duplicate_turns_stay_out_of_recall() {

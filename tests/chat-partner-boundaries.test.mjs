@@ -1,0 +1,63 @@
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+
+const read = async path => (await readFile(path, 'utf8')).replaceAll('\r\n', '\n');
+const chat = await read('src-tauri/src/commands/chat.rs');
+const command = chat.slice(chat.indexOf('pub async fn send_message_stream('), chat.indexOf('async fn send_message_stream_impl('));
+assert.match(command, /window: tauri::WebviewWindow/);
+assert.match(command, /validate_origin\(window.label\(\)/, 'origin comes from Tauri, never a caller-provided label');
+const branchStart = chat.indexOf('if let Some(partner) = crate::chat_partner::get(&char_id)');
+const branch = chat.slice(branchStart, chat.indexOf('let _foreground', branchStart));
+assert.match(branch, /channel_str,\s*file_metadata,/, 'voice/file presentation metadata reaches the chat-only path');
+const image = chat.slice(chat.indexOf('pub async fn send_image_message('));
+assert.match(image, /validate_origin\(window.label\(\), &channel_str\)/);
+assert.match(image, /sns_runtime::private_image/);
+const runtime = await read('src-tauri/src/sns_runtime.rs');
+assert.match(runtime, /vision::recognize_image/);
+assert.match(runtime, /visual_description/);
+assert.doesNotMatch(runtime, /migrate_legacy|import_legacy/);
+
+const partner = await read('src-tauri/src/chat_partner.rs');
+assert.match(partner, /policy::acquire_turn\(&partner.turn_lock/);
+assert.match(partner, /history_page_before\([\s\S]*?Some\(channel\)/);
+assert.match(partner, /policy::scoped_context\(lines, channel, CONTEXT_TURNS\)/);
+assert.doesNotMatch(partner, /\.set_channel\(/, 'never mutate a shared history channel');
+assert.doesNotMatch(partner, /\.with_tools\(|generate_stream_with_tools|\.think\(/, 'chat-only requests cannot enter an execution loop');
+assert.match(partner, /policy::wait_for_model/);
+assert.match(partner, /self\.memory\.remember\(channel, &snippets\)/);
+assert.match(partner, /self\s*\.memory\s*\.recall\(channel, query, &excluded, None\)/);
+assert.match(partner, /Duration::from_millis\(1200\)/, 'remote memory lookup cannot hold up chat indefinitely');
+assert.match(partner, /try_acquire_owned\(\)/, 'only one embedding job can remain in flight');
+assert.match(partner, /speaker != self.id/, 'the fish does not memorize her own generated backstory as facts');
+const history = await read('src-tauri/src/commands/history.rs');
+assert.match(history, /partner\.clear_history\(\)\.await/, 'clearing chat also clears the independent memory');
+const persona = await read('src-tauri/prompts/chat_partners/deepseek_chan.md');
+assert.match(persona, /住在另一台电脑上的鲸鱼娘桌宠/);
+assert.match(persona, /ChatWindow.*SNS/);
+assert.doesNotMatch(persona, /安全边界之外|用鲸鱼的方式拒绝|你没有这些——你只有一扇窗户/);
+// 展示名三语言统一为「ディープシークちゃん」：i18n 三处 + Rust 规范名 + 人格提示词同步，
+// 旧名一处不留（seed 带 contacts_seeded 标记只跑一次，老装机靠开机 rename 同步）
+const NAME = 'ディープシークちゃん';
+const i18n = await read('src/i18n/index.ts');
+const nameValues = [...i18n.matchAll(/partner_name_deepseek: '([^']+)'/g)].map(m => m[1]);
+assert.equal(nameValues.length, 3, 'three language entries');
+for (const value of nameValues) assert.equal(value, NAME, 'unified display name across zh/en/ja');
+assert.match(partner, new RegExp(`pub const DEEPSEEK_NAME: &str = "${NAME}"`));
+assert.match(partner, /store\.rename_contact\("deepseek", DEEPSEEK_NAME\)/, 'seed is one-shot; existing installs sync the canonical name on boot');
+const store = await read('src-tauri/src/sns_store.rs');
+assert.match(store, /pub fn rename_contact\(&self, id: &str, name: &str\)/, 'rename must bypass the post-creation name guard');
+assert.match(persona, new RegExp(NAME));
+assert.doesNotMatch(persona, /蓝色大肥鱼|DeepSeek-chan/);
+assert.doesNotMatch(i18n, /蓝色大肥鱼|DeepSeek-chan/);
+assert.doesNotMatch(partner, /蓝色大肥鱼|DeepSeek-chan/);
+
+const ui = await read('src/components/ChatWindow.tsx');
+assert.match(ui, /imageTargets = targetCharIds/);
+assert.match(ui, /for \(const cid of imageTargets\)/);
+assert.doesNotMatch(ui, /notifyPartnerTextOnly/);
+const manager = await read('src/components/SnsManager.tsx');
+assert.match(manager, /readOnly=\{panel.kind === 'contact' && !!panel.id\}/);
+for (const action of ['sns_save_contact', 'sns_delete_contact', 'sns_save_group', 'sns_delete_group']) assert.ok(manager.includes(action));
+assert.match(ui, /id: 'add_contacts'/);
+assert.match(ui, /<SnsGroupChat/);
+console.log('SNS: native origin, scoped context, memory, image evidence and contact/group UI wiring passed');

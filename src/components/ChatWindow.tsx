@@ -3,6 +3,7 @@ import StickerImage from './stickers/StickerImage';
 import { parseSticker, stickerLabel } from './stickers/stickers';
 import type { StickerRef } from '../types';
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { invoke, convertFileSrc } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
@@ -15,7 +16,7 @@ import { useVirtualizer } from '@tanstack/react-virtual';
 import i18n, { changeLanguage } from '../i18n';
 import LoadingSpinner from './LoadingSpinner';
 import { ChatController } from '../controllers/ChatController';
-import { resolveAvatarUrl } from '../characterContext';
+import { resolveAvatarUrl, clearAvatarUrlCache } from '../characterContext';
 import RealtimeCallOverlay, { RealtimeCallBubble } from './RealtimeCallWindow';
 import ImageViewer from './ImageViewer';
 import { useAppStore } from '../stores/useAppStore';
@@ -24,11 +25,14 @@ import { stripActions } from '../utils/ActionText';
 import { routeAssistantMessage } from '../utils/chatMessageRouting';
 import { hasVisibleChatText, isVisibleChatMessage } from '../utils/chatMessageContent';
 import { analyzeScreen } from '../utils/companionScreenAnalyze';
-import { NotebookPen, Rocket, ScanLine, Settings } from 'lucide-react';
+import { Cpu, Info, NotebookPen, Rocket, ScanLine, Settings, UserPlus, Users, ContactRound } from 'lucide-react';
 import { assistantPanelTitle, isAssistantPanel } from './assistantPanels';
 import DynamicIsland from './DynamicIsland';
 import './ChatWindow.css';
 import ChatPageTransition from './ChatPageTransition';
+import ChatPartnerModelSheet from './ChatPartnerModelSheet';
+import SnsManager, { snsPanelTitle, type SnsGroup, type SnsPanel, type SnsPerson } from './SnsManager';
+import SnsGroupChat from './SnsGroupChat';
 const DesktopAssistantPanel = React.lazy(() => import('./DesktopAssistantPanel'));
 type Role = 'user' | 'assistant';
 
@@ -403,6 +407,15 @@ const UserAvatar: React.FC<{ size: number }> = ({ size }) => {
   const userAvatarUrl = useAppStore((s) => s.userAvatarUrl);
   const { uploadAvatar, clearAvatar } = useUserAvatarActions();
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  useLayoutEffect(() => {
+    if (!menu || !menuRef.current) return;
+    const element = menuRef.current;
+    const { width, height } = element.getBoundingClientRect();
+    element.style.left = `${Math.max(8, Math.min(menu.x, window.innerWidth - width - 8))}px`;
+    element.style.top = `${Math.max(8, Math.min(menu.y, window.innerHeight - height - 8))}px`;
+  }, [menu, userAvatarUrl]);
 
   const handleContextMenu = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -469,14 +482,18 @@ const UserAvatar: React.FC<{ size: number }> = ({ size }) => {
           onContextMenu={handleContextMenu}
         >{t('chat.user_avatar')}</div>
       )}
-      {menu && (
+      {menu && createPortal(
         <div
+          ref={menuRef}
           style={{
             position: 'fixed',
-            left: Math.min(menu.x, window.innerWidth - 160),
-            top: Math.min(menu.y, window.innerHeight - 90),
+            left: menu.x,
+            top: menu.y,
             zIndex: 9999,
             minWidth: 140,
+            maxWidth: 'calc(100vw - 16px)',
+            maxHeight: 'calc(100vh - 16px)',
+            overflowY: 'auto',
             padding: '4px',
             borderRadius: 10,
             background: 'var(--wx-menu-bg)',
@@ -502,7 +519,7 @@ const UserAvatar: React.FC<{ size: number }> = ({ size }) => {
               onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; }}
             >{t('chat.avatar_clear')}</button>
           )}
-        </div>
+        </div>, document.body
       )}
     </>
   );
@@ -537,9 +554,12 @@ const AiAvatar: React.FC<{ size: number; characterId?: string }> = ({ size, char
     void resolveAvatarUrl(characterId).then((url) => {
       if (!cancelled) setSrc(url);
     });
-    return () => {
-      cancelled = true;
-    };
+    let unlisten: UnlistenFn | undefined;
+    void listen<{ contact_id?: string }>('sns:changed', event => {
+      if (event.payload.contact_id !== characterId || !characterId) return;
+      clearAvatarUrlCache(characterId); void resolveAvatarUrl(characterId).then(url => { if (!cancelled) setSrc(url); });
+    }).then(fn => { if (cancelled) fn(); else unlisten = fn; });
+    return () => { cancelled = true; unlisten?.(); };
   }, [characterId]);
   return (
     <img
@@ -563,9 +583,12 @@ const ContactAvatar: React.FC<{ characterId: string; name: string; size?: number
     void resolveAvatarUrl(characterId).then((url) => {
       if (!cancelled) setSrc(url);
     });
-    return () => {
-      cancelled = true;
-    };
+    let unlisten: UnlistenFn | undefined;
+    void listen<{ contact_id?: string }>('sns:changed', event => {
+      if (event.payload.contact_id !== characterId || !characterId) return;
+      clearAvatarUrlCache(characterId); void resolveAvatarUrl(characterId).then(url => { if (!cancelled) setSrc(url); });
+    }).then(fn => { if (cancelled) fn(); else unlisten = fn; });
+    return () => { cancelled = true; unlisten?.(); };
   }, [characterId]);
   return (
     <img
@@ -596,6 +619,8 @@ const UnreadBadge: React.FC<{ count: number }> = ({ count }) => {
 interface BubbleProps {
   message: ChatMessage;
   onOpenImage?: (src: string) => void;
+  /** 点击 AI 头像时的回调（聊天专属角色用它打开模型设置） */
+  onAvatarClick?: () => void;
 }
 
 /** 图片缩略图气泡（微信风格）：懒加载历史图片 data URL，点击查看大图 */
@@ -765,7 +790,7 @@ const VoiceBubble = React.memo(function VoiceBubble({ message, isUser }: { messa
   );
 });
 
-const Bubble = React.memo(function Bubble({ message, onOpenImage, senderName, characterId }: BubbleProps & { senderName?: string; characterId?: string }) {
+const Bubble = React.memo(function Bubble({ message, onOpenImage, onAvatarClick, senderName, characterId }: BubbleProps & { senderName?: string; characterId?: string }) {
   const isUser = message.role === 'user';
   const entranceRef = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
@@ -828,8 +853,8 @@ const Bubble = React.memo(function Bubble({ message, onOpenImage, senderName, ch
     }
     try {
       await openWebsite(url);
-    } catch {
-      window.open(url, '_blank', 'noopener,noreferrer');
+    } catch (error) {
+      console.error('打开网页链接失败:', error);
     }
   }, []);
 
@@ -838,7 +863,22 @@ const Bubble = React.memo(function Bubble({ message, onOpenImage, senderName, ch
       display: 'flex', flexDirection: isUser ? 'row-reverse' : 'row',
       alignItems: 'flex-start', gap: 8, marginBottom: 16,
     }}>
-      {isUser ? <UserAvatar size={avatarSize} /> : <AiAvatar size={avatarSize} characterId={characterId ?? message.character_id} />}
+      {isUser ? <UserAvatar size={avatarSize} /> : (
+        onAvatarClick ? (
+          <button
+            type="button"
+            onClick={onAvatarClick}
+            title={characterId ? `${characterId}` : undefined}
+            aria-label="avatar"
+            style={{
+              padding: 0, border: 'none', background: 'transparent',
+              cursor: 'pointer', display: 'flex', borderRadius: 8,
+            }}
+          >
+            <AiAvatar size={avatarSize} characterId={characterId ?? message.character_id} />
+          </button>
+        ) : <AiAvatar size={avatarSize} characterId={characterId ?? message.character_id} />
+      )}
       <div ref={entranceRef} style={{
         display: 'flex', flexDirection: 'column',
         alignItems: isUser ? 'flex-end' : 'flex-start', maxWidth: '68%',
@@ -1505,8 +1545,17 @@ type RenderItem =
 
 const ChatWindow: React.FC = () => {
   const { t } = useTranslation();
-  /** 当前视图包含聊天首页、私聊、群聊、详情和工具子页（随手记 / 快捷启动）。 */
-  const [view, setView] = useState<'home' | 'private' | 'group' | 'details' | 'assistant'>(() => isAssistantPanel(new URLSearchParams(window.location.search).get('assistant_panel')) ? 'assistant' : 'home');
+  const [snsPanel, setSnsPanel] = useState<SnsPanel | null>(null);
+  /**
+   * SNS 子页的来源视图：关闭子页时回到那里。
+   * 群聊设置是从群聊覆盖层进来的，来源还要记下群 ID——覆盖层先收起，
+   * 返回时再原样放回来（子页本身不盖灵动岛和导航栏）。
+   */
+  const [snsOrigin, setSnsOrigin] = useState<{ view: 'home' | 'private' | 'group'; groupId: string | null }>({ view: 'home', groupId: null });
+  const [snsGroups, setSnsGroups] = useState<SnsGroup[]>([]);
+  const [activeSnsGroup, setActiveSnsGroup] = useState<string | null>(null);
+  /** 当前视图包含聊天首页、私聊、群聊、详情、工具子页（随手记 / 快捷启动）和 SNS 子页（好友 / 群聊管理）。 */
+  const [view, setView] = useState<'home' | 'private' | 'group' | 'details' | 'assistant' | 'sns'>(() => isAssistantPanel(new URLSearchParams(window.location.search).get('assistant_panel')) ? 'assistant' : 'home');
   const [assistantTarget, setAssistantTarget] = useState(() => ({ character: new URLSearchParams(window.location.search).get('assistant_character') ?? 'vivian', panel: new URLSearchParams(window.location.search).get('assistant_panel') ?? 'notes' }));
   /** 头部三点下拉（仅首页）。私聊的三点仍是「进聊天详情」，不弹菜单。 */
   const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
@@ -1531,8 +1580,29 @@ const ChatWindow: React.FC = () => {
     setAssistantTarget((target) => ({ ...target, panel }));
     setView('assistant');
   };
+  /**
+   * 打开 SNS 子页（添加 / 编辑好友、创建群聊 / 群聊信息）。
+   * 与工具子页同一形态：切到 sns 视图，在导航栏下方展开，不盖灵动岛和状态栏。
+   * 来源默认取当前视图；群聊设置从群聊覆盖层进来，显式带上群 ID。
+   */
+  const openSnsPanel = (panel: SnsPanel, origin?: { view: 'home' | 'private' | 'group'; groupId?: string | null }) => {
+    const from = origin ?? { view: view === 'private' ? 'private' as const : view === 'group' ? 'group' as const : 'home' as const };
+    setSnsOrigin({ view: from.view, groupId: from.groupId ?? null });
+    // 从群聊覆盖层进设置：先收起覆盖层，子页独占内容区；关闭时再放回来
+    if (from.view === 'group' && from.groupId) setActiveSnsGroup(null);
+    setSnsPanel(panel);
+    setView('sns');
+  };
+  /** 关闭 SNS 子页并回到来源视图（群聊设置则恢复群聊覆盖层）。 */
+  const closeSnsPanel = () => {
+    setSnsPanel(null);
+    if (snsOrigin.view === 'group' && snsOrigin.groupId) setActiveSnsGroup(snsOrigin.groupId);
+    setView(snsOrigin.view === 'group' ? 'home' : snsOrigin.view);
+  };
   /** 头部三点下拉的四个入口。 */
   const headerTools = [
+    { id: 'add_contacts', Icon: UserPlus, label: t('chat.sns_add_contacts'), run: () => openSnsPanel({ kind: 'contact' }) },
+    { id: 'create_group', Icon: Users, label: t('chat.sns_create_group'), run: () => openSnsPanel({ kind: 'group' }) },
     { id: 'notes', Icon: NotebookPen, label: t('chat.tool_notes', { defaultValue: '随手记' }), run: () => openToolPanel('notes') },
     { id: 'shortcuts', Icon: Rocket, label: t('chat.tool_shortcuts', { defaultValue: '快捷启动' }), run: () => openToolPanel('shortcuts') },
     {
@@ -1549,9 +1619,13 @@ const ChatWindow: React.FC = () => {
     { id: 'settings', Icon: Settings, label: t('chat.tool_settings', { defaultValue: '设置' }), run: () => { void emit('tray:menu_action', { action: 'settings' }); } },
   ];
   /** 在线角色列表 */
-  const [characters, setCharacters] = useState<Array<{ id: string; name: string; online: boolean }>>([]);
+  const [characters, setCharacters] = useState<Array<SnsPerson & { online: boolean }>>([]);
+  /** 聊天专属角色的 ID 集合：只有它们有「模型设置」入口（其余角色走全局设置页的路由矩阵） */
+  const [chatPartnerIds, setChatPartnerIds] = useState<string[]>([]);
+  /** 当前打开的模型设置面板对应的角色 ID（null = 关闭） */
+  const [partnerModelTarget, setPartnerModelTarget] = useState<string | null>(null);
   // characters 的 ref 镜像，供 setInterval 等闭包读取最新值，避免在 state 更新器内执行副作用
-  const charactersRef = useRef<Array<{ id: string; name: string; online: boolean }>>([]);
+  const charactersRef = useRef<Array<SnsPerson & { online: boolean }>>([]);
   useEffect(() => { charactersRef.current = characters; }, [characters]);
   /** 各角色在场状态（presence）：online / busy / rest / offline，独立于窗口 online 标志 */
   const [presenceStates, setPresenceStates] = useState<Record<string, string>>({});
@@ -1571,6 +1645,13 @@ const ChatWindow: React.FC = () => {
   const [searching, setSearching] = useState(false);
   /** 当前私聊的角色 ID（仅 private 视图使用） */
   const [privateCharId, setPrivateCharId] = useState<string | null>(null);
+  /** 该角色是否是聊天专属角色（只有它们有聊天窗口内的模型设置入口） */
+  const isChatPartner = useCallback(
+    (id: string | null | undefined) => !!id && chatPartnerIds.includes(id),
+    [chatPartnerIds],
+  );
+  const partnerPrivateChat = view === 'private' && isChatPartner(privateCharId);
+
   /** 群聊消息列表（独立于私聊 messages） */
   const [groupMessages, setGroupMessages] = useState<ChatMessage[]>([]);
   /** 群聊流式缓冲：按 `charId:streamId` 索引累积未换行文本 */
@@ -1838,7 +1919,7 @@ const ChatWindow: React.FC = () => {
         setView('private');
         markConversationRead(initPrivate);
       } else if (initView === 'group') {
-        setView('group');
+        setView('home');
       }
     } catch { /* ignore */ }
     return () => { cancelled = true; };
@@ -1864,7 +1945,7 @@ const ChatWindow: React.FC = () => {
               return;
             }
             if (p.view === 'group') {
-              setView('group');
+              setView('home');
               return;
             }
             if (p.view === 'home' || !p.character_id) {
@@ -1927,8 +2008,22 @@ const ChatWindow: React.FC = () => {
     const maxRetries = 4;
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       try {
-        const result = await invoke<{ active_id: string; characters: Array<{ id: string; name: string; online: boolean }> }>('list_characters');
-        setCharacters(result.characters ?? []);
+        const result = await invoke<{ active_id: string; characters: Array<SnsPerson & { online: boolean }> }>('list_characters');
+        // 聊天窗口专属角色（没有本机桌宠窗口或心理状态，有独立的轻量聊天记忆）。
+        // 它们不在角色配置里，由 list_chat_partners 单独返回，这里合并成一份联系人列表：
+        // 首页私聊入口、群发对象、@ 提及都直接复用 characters，无需额外分支。
+        let partners: Array<SnsPerson & { online: boolean }> = [];
+        try {
+          const resp = await invoke<{ characters: Array<SnsPerson & { online: boolean }> }>('list_chat_partners');
+          partners = (resp.characters ?? []).map((p) => ({
+            ...p,
+            name: p.name,
+          }));
+          setChatPartnerIds(partners.map((p) => p.id));
+        } catch {
+          // 老版本后端没有该命令：忽略即可，不影响普通角色列表
+        }
+        setCharacters([...(result.characters ?? []), ...partners]);
         return;
       } catch (e) {
         if (attempt === maxRetries) {
@@ -1939,7 +2034,7 @@ const ChatWindow: React.FC = () => {
         await new Promise((r) => setTimeout(r, 200 * Math.pow(2, attempt)));
       }
     }
-  }, []);
+  }, [t]);
 
   useEffect(() => {
     void refreshCharacters();
@@ -1971,6 +2066,28 @@ const ChatWindow: React.FC = () => {
     })();
     return () => { unlisten?.(); if (retryTimer) clearInterval(retryTimer); };
   }, [refreshCharacters]);
+
+  const refreshSnsGroups = useCallback(async () => {
+    try { setSnsGroups(await invoke<SnsGroup[]>('sns_list_groups')); }
+    catch (error) { console.warn('[SNS] 加载群聊失败:', error); }
+  }, []);
+  useEffect(() => {
+    let disposed = false; let unlisten: UnlistenFn | undefined;
+    void refreshSnsGroups();
+    void listen<{ contact_id?: string; deleted_contact?: string; deleted_group?: string }>('sns:changed', event => {
+      if (disposed) return;
+      clearAvatarUrlCache(event.payload.contact_id ?? event.payload.deleted_contact);
+      void refreshCharacters(); void refreshSnsGroups(); void refreshLastPreviews();
+      const id = event.payload.deleted_contact;
+      if (id) {
+        for (const update of [setCharRemarks, setChatBackgrounds]) update(previous => { const next = { ...previous }; delete next[id]; return next; });
+        delete lastSeenRef.current[id]; persistLastSeen();
+        if (privateCharIdRef.current === id) { setPrivateCharId(null); setView('home'); setMessages([]); setPartnerModelTarget(null); }
+      }
+      if (event.payload.deleted_group) setActiveSnsGroup(previous => previous === event.payload.deleted_group ? null : previous);
+    }).then(fn => { if (disposed) fn(); else unlisten = fn; });
+    return () => { disposed = true; unlisten?.(); };
+  }, [refreshCharacters, refreshSnsGroups, refreshLastPreviews, persistLastSeen]);
 
   // 加载各角色在场状态（presence），并监听 presence:changed 实时更新
   useEffect(() => {
@@ -3076,7 +3193,9 @@ const ChatWindow: React.FC = () => {
     const mentioned = new Set<string>();
     for (const c of characters) {
       if (!c.online) continue;
-      const regex = new RegExp(`@${c.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
+      // 结尾用 ASCII 词边界而非 `\b`：角色名可能是非 ASCII（如中文、日文名），
+      // JS 的 `\b` 只在 ASCII 单词字符旁成立，中文名后面跟空格/汉字时匹配不到
+      const regex = new RegExp(`@${c.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![A-Za-z0-9_])`, 'i');
       if (regex.test(text)) mentioned.add(c.id);
     }
     return mentioned;
@@ -3105,7 +3224,7 @@ const ChatWindow: React.FC = () => {
       reader.onerror = () => { done += 1; };
       reader.readAsDataURL(file);
     }
-  }, []);
+  }, [partnerPrivateChat]);
 
   /** 移除一张草稿图片 */
   const removeDraftImage = useCallback((id: string) => {
@@ -3120,8 +3239,10 @@ const ChatWindow: React.FC = () => {
       : view === 'group'
         ? characters.filter((c) => c.online).map((c) => c.id)
         : [];
+    // Both desktop pets and SNS contacts use the routed image recognizer.
+    const imageTargets = targetCharIds;
     const channel = view === 'group' ? 'wechat_group' : 'wechat';
-    if (targetCharIds.length === 0) return { failed: draft };
+    if (imageTargets.length === 0) return { failed: draft };
     for (let i = 0; i < draft.length; i += 1) {
       const img = draft[i];
       try {
@@ -3129,7 +3250,7 @@ const ChatWindow: React.FC = () => {
         const base64 = img.dataUrl.split(',')[1] ?? '';
         if (!base64) { failed.push(img); continue; }
         const tmpPath = await invoke<string>('save_temp_image', { base64Data: base64, mime: img.mime });
-        for (const cid of targetCharIds) {
+        for (const cid of imageTargets) {
           await invoke('send_image_message', { sourcePath: tmpPath, characterId: cid, channel });
         }
       } catch (e) {
@@ -3138,18 +3259,18 @@ const ChatWindow: React.FC = () => {
       }
     }
     return { failed };
-  }, [view, privateCharId, characters]);
+  }, [view, privateCharId, characters, isChatPartner]);
 
   const handleSend = useCallback(async () => {
     const text = input.trim();
     const hasImages = draftImages.length > 0;
     if (!text && !hasImages) return;
     // 发送成功后才清空；失败恢复草稿
-    const pendingDrafts = draftImages;
+    const pendingDrafts = hasImages ? draftImages : [];
     setInput('');
     setMentionState({ active: false, query: '', startIndex: -1, selectedIndex: 0 });
 
-    if (view === 'group') {
+    if (view === 'group' && text) {
       // 群聊：用户消息只添加一次，然后发给目标角色
       const userTs = Date.now();
       setGroupMessages((prev) => [...prev, { id: nextId(), role: 'user', content: text, timestamp: userTs }]);
@@ -3175,6 +3296,7 @@ const ChatWindow: React.FC = () => {
           console.warn(`[群发] 角色 ${c.id} 发送失败:`, err);
           groupStreamCharMapRef.current.delete(sid);
           groupStreamBuffersRef.current.delete(sid);
+          if (groupStreamCharMapRef.current.size === 0) setGroupStreaming(false);
         });
       }
       if (onlineChars.length > 0) setGroupStreaming(true);
@@ -3214,7 +3336,7 @@ const ChatWindow: React.FC = () => {
     if (!view || (view as string) === '') {
       // no-op
     }
-  }, [input, view, characters, privateCharId, parseMentionedCharIds, presenceStates, draftImages, sendDraftImages]);
+  }, [input, view, characters, privateCharId, parseMentionedCharIds, presenceStates, draftImages, sendDraftImages, partnerPrivateChat]);
 
   const toggleRecording = useCallback(async () => {
     const isRecording = recordingRef.current;
@@ -3698,7 +3820,7 @@ const ChatWindow: React.FC = () => {
         // 保存音频文件到用户数据目录
         let audioPath: string | undefined;
         try {
-          audioPath = await invoke<string>('save_voice_audio', { base64Data, mime: finalMime });
+          audioPath = await invoke<string>('save_voice_audio', { base64Data, mime: finalMime, characterId: targetView === 'private' ? targetCharId : undefined });
         } catch (err) {
           console.warn('[voice] 保存音频失败:', err);
         }
@@ -3779,6 +3901,7 @@ const ChatWindow: React.FC = () => {
               console.warn(`[语音群发] 角色 ${c.id} 发送失败:`, err);
               groupStreamCharMapRef.current.delete(sid);
               groupStreamBuffersRef.current.delete(sid);
+              if (groupStreamCharMapRef.current.size === 0) setGroupStreaming(false);
             });
           }
           if (onlineChars.length > 0) setGroupStreaming(true);
@@ -3885,7 +4008,7 @@ const ChatWindow: React.FC = () => {
     } catch (e) {
       void emit('toast:show', { message: String(e), type: 'error', duration: 3000, key: Date.now() });
     }
-  }, [t, addDraftImages]);
+  }, [t, addDraftImages, partnerPrivateChat]);
 
   // ── 文件拖放：通过 Tauri 原生 onDragDropEvent 获取文件路径 ──
   const [isDragOver, setIsDragOver] = useState(false);
@@ -3893,6 +4016,7 @@ const ChatWindow: React.FC = () => {
   // Drop 逻辑用 ref 保存最新闭包，避免 onDragDropEvent 监听器持有过时状态
   const handleFileDropRef = useRef<(paths: string[]) => void>(() => {});
   handleFileDropRef.current = (paths: string[]) => {
+    if (snsPanel || activeSnsGroup) return;
     if (paths.length === 0) return;
 
     if (view === 'home') {
@@ -3915,7 +4039,7 @@ const ChatWindow: React.FC = () => {
     void (async () => {
       for (const filePath of paths) {
         try {
-          const { file, result } = await prepareSharedFile(filePath);
+          const { file, result } = await prepareSharedFile(filePath, view === 'private' ? privateCharId ?? undefined : undefined);
 
           if (result.file_type === 'image') {
             // 图片进入草稿（预览后可随文本一起发送），不再直接发送
@@ -3994,7 +4118,7 @@ const ChatWindow: React.FC = () => {
       const charId = privateCharId;
       if (!charId) return;
 
-      const { file, result } = await prepareSharedFile(filePath);
+      const { file, result } = await prepareSharedFile(filePath, charId);
 
       if (result.file_type === 'image') {
         // 用户在文件选择器中选了图片：走多模态图片发送流程
@@ -4009,7 +4133,7 @@ const ChatWindow: React.FC = () => {
         type: 'error', duration: 5000, key: Date.now(),
       });
     }
-  }, [t, privateCharId]);
+  }, [t, privateCharId, isChatPartner]);
 
   // ── 摄像头拍摄：打开拍摄模态，拍照后保存为临时文件并走 send_image_message ──
   const [cameraOpen, setCameraOpen] = useState(false);
@@ -4017,7 +4141,7 @@ const ChatWindow: React.FC = () => {
   const handleCapturePhoto = useCallback(() => {
     setBottomPanel('none');
     setCameraOpen(true);
-  }, []);
+  }, [partnerPrivateChat]);
 
   /** 拍照完成回调：base64 → save_temp_image → send_image_message */
   const handlePhotoCaptured = useCallback(async (base64Data: string, mime: string) => {
@@ -4033,7 +4157,7 @@ const ChatWindow: React.FC = () => {
         type: 'error', duration: 5000, key: Date.now(),
       });
     }
-  }, [privateCharId, t]);
+  }, [privateCharId, t, isChatPartner]);
 
   const mdStyles = useMemo(() => (
     <style>{`
@@ -4245,6 +4369,28 @@ const ChatWindow: React.FC = () => {
 
   const onlineCharacters = useMemo(() => characters.filter((c) => c.online), [characters]);
 
+  /**
+   * 聊天专属角色私聊页的三点菜单项。
+   *
+   * 它们的模型路由（routing_matrix.chat_partner）不进通用设置页，
+   * 所以「模型设置」必须挂在她自己的会话上。
+   */
+  const partnerMenuItems = useMemo(() => [
+    { id: 'edit_contact', Icon: ContactRound, label: t('chat.sns_edit_contact'), run: () => { if (privateCharId) openSnsPanel({ kind: 'contact', id: privateCharId }, { view: 'private' }); } },
+    {
+      id: 'chat_info',
+      Icon: Info,
+      label: t('chat.details_title'),
+      run: () => setView('details'),
+    },
+    {
+      id: 'chat_model',
+      Icon: Cpu,
+      label: t('chat.menu_model_settings', { defaultValue: '模型设置' }),
+      run: () => { if (privateCharId) setPartnerModelTarget(privateCharId); },
+    },
+  ], [t, privateCharId]);
+
   /** 聊天记录全局搜索（防抖 300ms） */
   const searchTimerRef = useRef<number | null>(null);
   useEffect(() => {
@@ -4321,6 +4467,20 @@ const ChatWindow: React.FC = () => {
         </div>
       )}
 
+      {activeSnsGroup && snsGroups.find(group => group.id === activeSnsGroup) && (
+        <SnsGroupChat key={activeSnsGroup} group={snsGroups.find(group => group.id === activeSnsGroup)!} people={characters}
+          onClose={() => setActiveSnsGroup(null)} onSettings={() => openSnsPanel({ kind: 'group', id: activeSnsGroup }, { view: 'group', groupId: activeSnsGroup })} />
+      )}
+
+      {/* ===== 聊天专属角色的模型设置（点头像 / 私聊三点菜单进入） ===== */}
+      {partnerModelTarget && (
+        <ChatPartnerModelSheet
+          partnerId={partnerModelTarget}
+          partnerName={charNameMap.get(partnerModelTarget) ?? partnerModelTarget}
+          onClose={() => setPartnerModelTarget(null)}
+        />
+      )}
+
       {/* ===== Dynamic Island：媒体紧凑态，悬停展开 ===== */}
       <DynamicIsland />
 
@@ -4343,7 +4503,9 @@ const ChatWindow: React.FC = () => {
       <ChatPageTransition
         pageKey={view === 'private' ? `private:${privateCharId}`
           : view === 'details' ? `details:${privateCharId}:${detailsSubView}`
-          : view === 'assistant' ? `assistant:${assistantTarget.character}:${assistantTarget.panel}` : view}
+          : view === 'assistant' ? `assistant:${assistantTarget.character}:${assistantTarget.panel}`
+          : view === 'sns' && snsPanel ? `sns:${snsPanel.kind}:${snsPanel.id ?? 'new'}`
+          : view}
         depth={view === 'home' ? 0 : view === 'details' ? (detailsSubView === 'search' ? 3 : 2) : 1}
       >
       {/* ===== 第二行：导航栏 ===== */}
@@ -4353,12 +4515,13 @@ const ChatWindow: React.FC = () => {
         background: 'var(--wx-bg)',
         borderBottom: '0.5px solid var(--wx-border)',
       }}>
-        {/* 左：返回按钮（home 关闭窗口，details 返回 private，工具子页 / private / group 返回 home）。
-            工具子页没有上一层总览，所以返回键只有「回首页」一个语义。 */}
+        {/* 左：返回按钮（home 关闭窗口，sns 子页回到来源，details 返回 private，其余回 home）。
+            工具子页没有上一层总览，所以只有「回首页」一个语义；SNS 子页记得来源，原路返回。 */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
           <button
             onClick={() => {
               if (view === 'home') void closeWindow();
+              else if (view === 'sns') closeSnsPanel();
               else if (view === 'details' && detailsSubView === 'search') setDetailsSubView('main');
               else if (view === 'details') { setView('private'); setDetailsSubView('main'); }
               else setView('home');
@@ -4393,6 +4556,7 @@ const ChatWindow: React.FC = () => {
             fontSize: 17, fontWeight: 600, letterSpacing: -0.2, color: 'var(--wx-text)',
           }}>
             {view === 'home' ? t('chat.home_title')
+              : view === 'sns' && snsPanel ? snsPanelTitle(snsPanel, t)
               : view === 'assistant' ? (assistantPanelTitle(assistantTarget.panel, i18n.language) ?? t('chat.title'))
               : view === 'group' ? t('chat.group_title')
               : view === 'details' ? t('chat.details_title')
@@ -4406,11 +4570,16 @@ const ChatWindow: React.FC = () => {
         {(view === 'private' || view === 'home') && (
           <div ref={headerMenuRef} style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
             <button
-              onClick={() => { if (view === 'home') setHeaderMenuOpen((open) => !open); else setView('details'); }}
+              onClick={() => {
+                if (view === 'home') setHeaderMenuOpen((open) => !open);
+                // 聊天专属角色的三点是菜单入口（聊天信息 / 模型设置）；其他角色仍直接进详情
+                else if (isChatPartner(privateCharId)) setHeaderMenuOpen((open) => !open);
+                else setView('details');
+              }}
               title={t('chat.btn_more')}
               aria-label={t('chat.btn_more')}
-              aria-haspopup={view === 'home' ? 'menu' : undefined}
-              aria-expanded={view === 'home' ? headerMenuOpen : undefined}
+              aria-haspopup={(view === 'home' || isChatPartner(privateCharId)) ? 'menu' : undefined}
+              aria-expanded={(view === 'home' || isChatPartner(privateCharId)) ? headerMenuOpen : undefined}
               style={navBtn}
               onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--wx-bg-active)')}
               onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
@@ -4424,7 +4593,7 @@ const ChatWindow: React.FC = () => {
 
             {/* 深色半透明面板，贴着按钮右下角（与截图里的微信一致）。
                 点外部或 Esc 关闭，见上面的 document 监听。 */}
-            {headerMenuOpen && view === 'home' && (
+            {headerMenuOpen && (view === 'home' || (view === 'private' && isChatPartner(privateCharId))) && (
               <div role="menu" style={{
                 position: 'absolute', top: '100%', right: 0, marginTop: 6,
                 zIndex: 300, minWidth: 158, padding: 5,
@@ -4434,7 +4603,7 @@ const ChatWindow: React.FC = () => {
                 border: '1px solid var(--wx-border)',
                 boxShadow: '0 12px 32px var(--wx-menu-shadow)',
               }}>
-                {headerTools.map(({ id, Icon, label, run }) => (
+                {(view === 'home' ? headerTools : partnerMenuItems).map(({ id, Icon, label, run }) => (
                   <button
                     key={id}
                     role="menuitem"
@@ -4469,6 +4638,24 @@ const ChatWindow: React.FC = () => {
           panel={assistantTarget.panel}
         />
       </React.Suspense>}
+
+      {/* ===== SNS 子页：添加 / 编辑好友、创建群聊 / 群聊信息（形态同工具子页） ===== */}
+      {view === 'sns' && snsPanel && <SnsManager key={`sns:${snsPanel.kind}:${snsPanel.id ?? 'new'}`} panel={snsPanel} people={characters} groups={snsGroups}
+        onSaved={(kind, item) => {
+          const wasNew = !snsPanel.id;
+          void refreshCharacters(); void refreshSnsGroups();
+          if (kind === 'contact' && wasNew) { setSnsPanel(null); setPrivateCharId(item.id); setView('private'); }
+          // 新建群聊保存后直接进群：群聊页是全屏覆盖层，与来源（首页）天然衔接
+          else if (kind === 'group' && wasNew) { setSnsPanel(null); setActiveSnsGroup(item.id); }
+          // 编辑：回到来源视图
+          else closeSnsPanel();
+        }}
+        onDeleted={(kind, id) => {
+          setSnsPanel(null);
+          if (kind === 'group') { setActiveSnsGroup(null); setView('home'); }
+          else if (privateCharId === id) { setPrivateCharId(null); setView('home'); }
+          else closeSnsPanel();
+        }} />}
 
       {/* ===== Home 视图：微信风格聊天列表 + 搜索栏 ===== */}
       {view === 'home' && (
@@ -4564,8 +4751,7 @@ const ChatWindow: React.FC = () => {
                       onClick={() => {
                         if (r.source === 'group') {
                           markConversationRead('group');
-                          setView('group');
-                          setGroupMessages([]);
+                          setView('home');
                         } else {
                           markConversationRead(r.character_id);
                           setPrivateCharId(r.character_id);
@@ -4648,46 +4834,12 @@ const ChatWindow: React.FC = () => {
             ) : (
               /* 聊天列表（默认） */
               <div style={{ padding: '4px 0' }}>
-                {/* 群聊入口 */}
-                <button
-                  onClick={() => { markConversationRead('group'); setView('group'); setGroupMessages([]); }}
-                  style={{
-                    display: 'flex', alignItems: 'center', gap: 12, width: '100%',
-                    padding: '10px 14px',
-                    background: 'transparent',
-                    borderBottom: '0.5px solid var(--wx-border-light)',
-                    border: 'none',
-                    cursor: 'pointer',
-                    color: 'var(--wx-text)', fontFamily: 'inherit', textAlign: 'left',
-                    transition: 'background 0.15s ease',
-                  }}
-                  onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--wx-bg-hover)')}
-                  onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
-                >
-                  <div style={{
-                    position: 'relative',
-                    width: 44, height: 44, borderRadius: 8, flexShrink: 0,
-                    background: 'linear-gradient(135deg, #5ac8fa, #007aff)',
-                    display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  }}>
-                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
-                      <circle cx="9" cy="9" r="3.5" stroke="#fff" strokeWidth="1.8" />
-                      <circle cx="16" cy="10" r="2.8" stroke="#fff" strokeWidth="1.8" />
-                      <path d="M3 19c0-3 3-5 6-5s6 2 6 5" stroke="#fff" strokeWidth="1.8" strokeLinecap="round" />
-                      <path d="M14 17c1-2 3-3 5-3s4 1 4 4" stroke="#fff" strokeWidth="1.8" strokeLinecap="round" />
-                    </svg>
-                    <UnreadBadge count={unreadCounts['group'] ?? 0} />
-                  </div>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 15, fontWeight: 500, color: 'var(--wx-text)' }}>{t('chat.home_group_entry')}</div>
-                    <div style={{
-                      fontSize: 12, color: 'var(--wx-text-secondary)', marginTop: 2,
-                      overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                    }}>
-                      {formatPreview('group')}
-                    </div>
-                  </div>
-                </button>
+                {snsGroups.slice().sort((a, b) => b.updated_at - a.updated_at).map(group => (
+                  <button key={group.id} className="sns-group-row" onClick={() => setActiveSnsGroup(group.id)}>
+                    <span className="sns-group-icon"><Users size={25} /></span>
+                    <span style={{ minWidth: 0 }}><strong>{group.name}</strong><small>{group.preview || t('chat.sns_group_members_count', { count: group.members.length + 1 })}</small></span>
+                  </button>
+                ))}
 
                 {/* 在线角色列表 */}
                 {onlineCharacters.map((c) => {
@@ -4780,7 +4932,8 @@ const ChatWindow: React.FC = () => {
                           }}>{item.text}</span>
                         </div>
                       ) : item.kind === 'msg' ? (
-                        <Bubble message={item.msg} onOpenImage={setImageViewerSrc} senderName={privateCharName} characterId={privateCharId ?? undefined} />
+                        <Bubble message={item.msg} onOpenImage={setImageViewerSrc} senderName={privateCharName} characterId={privateCharId ?? undefined}
+                          onAvatarClick={isChatPartner(privateCharId) ? () => setPartnerModelTarget(privateCharId ?? null) : undefined} />
                       ) : (
                         <LinkageCard card={item.card} t={t} characterId={privateCharId ?? undefined} />
                       )}
@@ -5171,7 +5324,7 @@ const ChatWindow: React.FC = () => {
             </button>
 
             <div style={{
-              flex: 1, display: 'flex', alignItems: 'center',
+              flex: 1, minWidth: 0, display: 'flex', alignItems: 'center',
               background: 'var(--wx-input-bg)', borderRadius: 20,
               border: '0.5px solid var(--wx-border)',
               padding: '0 4px 0 14px', minHeight: 36,
@@ -5201,7 +5354,7 @@ const ChatWindow: React.FC = () => {
                 rows={1}
                 className="vivian-chat-input"
                 style={{
-                  flex: 1, border: 'none', outline: 'none', resize: 'none', background: 'transparent',
+                  flex: 1, minWidth: 0, border: 'none', outline: 'none', resize: 'none', background: 'transparent',
                   color: 'var(--wx-text)', fontSize: 15, fontFamily: 'inherit',
                   lineHeight: 1.4, maxHeight: 80, padding: '8px 0',
                 }}
@@ -5328,21 +5481,23 @@ const ChatWindow: React.FC = () => {
                   display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12,
                   alignContent: 'center', justifyItems: 'center',
                 }}>
-                  <button
-                    onClick={() => { setBottomPanel('none'); void emit('toast:show', { message: t('chat.voice_call_disabled'), type: 'info', duration: 3000, key: Date.now() }); }}
-                    style={{
-                      display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6,
-                      background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--wx-text)',
-                    }}
-                  >
-                    <div style={{
-                      width: 48, height: 48, borderRadius: 14,
-                      background: 'var(--wx-bg-active)',
-                      display: 'flex', alignItems: 'center', justifyContent: 'center',
-                      color: 'var(--wx-icon)',
-                    }}><PhoneIcon /></div>
-                    <span style={{ fontSize: 11 }}>{t('chat.realtime_call_entry')}</span>
-                  </button>
+                  {!partnerPrivateChat && (
+                    <button
+                      onClick={() => { setBottomPanel('none'); void emit('toast:show', { message: t('chat.voice_call_disabled'), type: 'info', duration: 3000, key: Date.now() }); }}
+                      style={{
+                        display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6,
+                        background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--wx-text)',
+                      }}
+                    >
+                      <div style={{
+                        width: 48, height: 48, borderRadius: 14,
+                        background: 'var(--wx-bg-active)',
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        color: 'var(--wx-icon)',
+                      }}><PhoneIcon /></div>
+                      <span style={{ fontSize: 11 }}>{t('chat.realtime_call_entry')}</span>
+                    </button>
+                  )}
                   <button
                     onClick={handleSendImage}
                     style={{
@@ -5358,6 +5513,7 @@ const ChatWindow: React.FC = () => {
                     }}><ImageIcon /></div>
                     <span style={{ fontSize: 11 }}>{t('chat.send_image_entry')}</span>
                   </button>
+
                   <button
                     onClick={handleSendFile}
                     style={{
@@ -5388,6 +5544,7 @@ const ChatWindow: React.FC = () => {
                     }}><CameraIcon /></div>
                     <span style={{ fontSize: 11 }}>{t('chat.capture_photo_entry')}</span>
                   </button>
+
                 </div>
               </div>
             )}

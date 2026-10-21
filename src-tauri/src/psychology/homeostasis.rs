@@ -149,20 +149,36 @@ fn regress(value: f64, set_point: f64, rate: f64, dt: f64) -> f64 {
     value + (set_point - value) * alpha
 }
 
+/// 噪声 / 极值回拉的 dt 上限（秒）
+///
+/// 回归量**应该**随 dt 走（离线越久越接近稳态），但噪声和极值回拉**不应该**：
+/// 它们公式里带 `√dt` / `×dt`，把离线时长直接喂进来，一次 tick 就成了一记重锤。
+/// 实际后果是「启动即闪一脸坏情绪」：离线 85 分钟后首次稳态结算走
+/// `tick(..., 3600.0, ...)`，负向情绪噪声幅度 = 0.005×√3600 = ±0.30（正向 ±0.48），
+/// 一次就能把主导情绪踢过判档线；极端值回拉更狠，`(v-0.85)×0.2×3600` 直接拍到 0.15。
+///
+/// 噪声的本义是「此刻的心理微扰」，与离线多久无关，所以按 60s 封顶——
+/// 60s 正是 `micro_tick` 单次允许的最大 dt，也就是正常运行本来就可能出现的最大扰动。
+const NOISE_DT_CAP: f64 = 60.0;
+
 /// 带微噪声的回归 — 让情绪持续"活着"，不静止
 ///
 /// 三层机制：
 /// 1. 正常回归到 set_point（稳态）
 /// 2. 小幅随机噪声（模拟心理活动的自然波动，随 √dt 缩放保证时间不变性）
 /// 3. 极值回避：接近 0 或 1 时施加更强的向中拉力，防止卡在极端值
+///
+/// 第 2、3 层的 dt 由 [`NOISE_DT_CAP`] 封顶：回归可以跟着离线时长走，
+/// 随机扰动不行——否则「离线一长」会被翻译成「情绪被随机大跳一次」。
 fn fluctuate(value: f64, set_point: f64, rate: f64, dt: f64, noise_amp: f64) -> f64 {
     let regressed = regress(value, set_point, rate, dt);
+    let dt_noise = dt.min(NOISE_DT_CAP);
     let mut rng = rand::rng();
-    let noise = rng.random_range(-1.0..1.0) * noise_amp * dt.sqrt();
+    let noise = rng.random_range(-1.0..1.0) * noise_amp * dt_noise.sqrt();
     let extreme_pull = if regressed > 0.85 {
-        -(regressed - 0.85) * 0.20 * dt
+        -(regressed - 0.85) * 0.20 * dt_noise
     } else if regressed < 0.15 {
-        (0.15 - regressed) * 0.20 * dt
+        (0.15 - regressed) * 0.20 * dt_noise
     } else {
         0.0
     };
@@ -186,7 +202,8 @@ fn need_decay(
     let target = (*set_point + circadian_offset).clamp(0.0, 1.0);
     let diff = target - value;
     let mut rng = rand::rng();
-    let noise = rng.random_range(-1.0..1.0) * 0.003 * dt.sqrt();
+    // 噪声 dt 封顶，理由同 fluctuate：需求噪声也不该随离线时长放大
+    let noise = rng.random_range(-1.0..1.0) * 0.003 * dt.min(NOISE_DT_CAP).sqrt();
     if diff > 0.0 {
         // 已满足 → 缓慢回归到目标
         (regress(value, target, rate * 0.5, dt) + noise).clamp(0.0, 1.0)
@@ -449,6 +466,37 @@ impl HomeostasisEngine {
         dt: f64,
         circadian: CircadianFactors,
     ) {
+        Self::tick_scaled(needs, emotion, need_set_points, emotion_set_points, recovery_rates, dt, circadian, 1.0);
+    }
+
+    /// 离线结算专用：情绪只做确定性回归，**不注入随机噪声**
+    ///
+    /// 进程刚起时首次稳态 tick 的 dt 就是「离线时长」。那段时间里没人看见角色，
+    /// 结论就应该是确定的：按恢复率把情绪拉向稳态、再交给 [`Self::apply_offline_compression`]
+    /// 结算，而不是掷一次骰子。随机扰动属于「在线微扰」，只该发生在被看见的时候。
+    pub fn tick_offline(
+        needs: &mut super::needs::NeedsState,
+        emotion: &mut super::emotion::EmotionState,
+        need_set_points: &mut NeedSetPoints,
+        emotion_set_points: &EmotionSetPoints,
+        recovery_rates: &RecoveryRateProfile,
+        dt: f64,
+        circadian: CircadianFactors,
+    ) {
+        Self::tick_scaled(needs, emotion, need_set_points, emotion_set_points, recovery_rates, dt, circadian, 0.0);
+    }
+
+    /// 实际实现：`noise_scale` 缩放情绪随机扰动（0.0 = 确定性结算）
+    fn tick_scaled(
+        needs: &mut super::needs::NeedsState,
+        emotion: &mut super::emotion::EmotionState,
+        need_set_points: &mut NeedSetPoints,
+        emotion_set_points: &EmotionSetPoints,
+        recovery_rates: &RecoveryRateProfile,
+        dt: f64,
+        circadian: CircadianFactors,
+        noise_scale: f64,
+    ) {
         // Needs 稳态（带饥饿感 + 昼夜节律临时偏移目标）
         needs.belonging = need_decay(needs.belonging, &mut need_set_points.belonging, circadian.belonging_delta, recovery_rates.belonging * circadian.recovery_mult, dt);
         needs.autonomy = need_decay(needs.autonomy, &mut need_set_points.autonomy, circadian.autonomy_delta, recovery_rates.autonomy * circadian.recovery_mult, dt);
@@ -458,14 +506,15 @@ impl HomeostasisEngine {
 
         // Emotion 稳态（带微噪声波动 + 极值回避 + 昼夜节律）
         // 噪声幅度：正面情绪 0.008，负面情绪 0.005（负面波动更小，避免无原因的大幅波动）
-        // 正面/负面噪声分别受 positive_noise_mult / negative_noise_mult 调制
-        emotion.joy = fluctuate(emotion.joy, (emotion_set_points.joy + circadian.joy_delta).clamp(0.0, 1.0), recovery_rates.joy * circadian.recovery_mult, dt, 0.008 * circadian.positive_noise_mult);
-        emotion.sadness = fluctuate(emotion.sadness, (emotion_set_points.sadness + circadian.sadness_delta).clamp(0.0, 1.0), recovery_rates.sadness * circadian.recovery_mult, dt, 0.005 * circadian.negative_noise_mult);
-        emotion.anger = fluctuate(emotion.anger, (emotion_set_points.anger + circadian.anger_delta).clamp(0.0, 1.0), recovery_rates.anger * circadian.recovery_mult, dt, 0.005 * circadian.negative_noise_mult);
-        emotion.fear = fluctuate(emotion.fear, (emotion_set_points.fear + circadian.fear_delta).clamp(0.0, 1.0), recovery_rates.fear * circadian.recovery_mult, dt, 0.005 * circadian.negative_noise_mult);
-        emotion.closeness = fluctuate(emotion.closeness, (emotion_set_points.closeness + circadian.closeness_delta).clamp(0.0, 1.0), recovery_rates.closeness * circadian.recovery_mult, dt, 0.007 * circadian.positive_noise_mult);
-        emotion.loneliness = fluctuate(emotion.loneliness, (emotion_set_points.loneliness + circadian.loneliness_delta).clamp(0.0, 1.0), recovery_rates.loneliness * circadian.recovery_mult, dt, 0.006 * circadian.negative_noise_mult);
-        emotion.curiosity = fluctuate(emotion.curiosity, (emotion_set_points.curiosity + circadian.curiosity_delta).clamp(0.0, 1.0), recovery_rates.curiosity * circadian.recovery_mult, dt, 0.008 * circadian.positive_noise_mult);
+        // 正面/负面噪声分别受 positive_noise_mult / negative_noise_mult 调制，
+        // 再由 noise_scale 统一缩放（离线结算为 0 = 不带随机性）。
+        emotion.joy = fluctuate(emotion.joy, (emotion_set_points.joy + circadian.joy_delta).clamp(0.0, 1.0), recovery_rates.joy * circadian.recovery_mult, dt, 0.008 * circadian.positive_noise_mult * noise_scale);
+        emotion.sadness = fluctuate(emotion.sadness, (emotion_set_points.sadness + circadian.sadness_delta).clamp(0.0, 1.0), recovery_rates.sadness * circadian.recovery_mult, dt, 0.005 * circadian.negative_noise_mult * noise_scale);
+        emotion.anger = fluctuate(emotion.anger, (emotion_set_points.anger + circadian.anger_delta).clamp(0.0, 1.0), recovery_rates.anger * circadian.recovery_mult, dt, 0.005 * circadian.negative_noise_mult * noise_scale);
+        emotion.fear = fluctuate(emotion.fear, (emotion_set_points.fear + circadian.fear_delta).clamp(0.0, 1.0), recovery_rates.fear * circadian.recovery_mult, dt, 0.005 * circadian.negative_noise_mult * noise_scale);
+        emotion.closeness = fluctuate(emotion.closeness, (emotion_set_points.closeness + circadian.closeness_delta).clamp(0.0, 1.0), recovery_rates.closeness * circadian.recovery_mult, dt, 0.007 * circadian.positive_noise_mult * noise_scale);
+        emotion.loneliness = fluctuate(emotion.loneliness, (emotion_set_points.loneliness + circadian.loneliness_delta).clamp(0.0, 1.0), recovery_rates.loneliness * circadian.recovery_mult, dt, 0.006 * circadian.negative_noise_mult * noise_scale);
+        emotion.curiosity = fluctuate(emotion.curiosity, (emotion_set_points.curiosity + circadian.curiosity_delta).clamp(0.0, 1.0), recovery_rates.curiosity * circadian.recovery_mult, dt, 0.008 * circadian.positive_noise_mult * noise_scale);
     }
 
     /// 轮次级轻量衰减 —— 对话边界处的"情绪回落"。
@@ -617,5 +666,50 @@ mod tests {
         HomeostasisEngine::apply_offline_compression(&mut emotion, &sp, &rr, 600.0, circadian);
 
         assert!(emotion.loneliness > loneliness_before);
+    }
+
+    /// 离线时长不该被翻译成「情绪被随机大跳一次」。
+    ///
+    /// 回归量跟着 dt 走没问题，但噪声幅度若用 `√dt` 不封顶，离线 1 小时封顶结算
+    /// （dt=3600）会给出 ±0.30（负向）/ ±0.48（正向）的一次扰动——足够把主导情绪
+    /// 踢过判档线，表现就是启动即闪一脸坏表情。封顶后单次扰动应远小于 0.05。
+    #[test]
+    fn test_noise_is_not_scaled_by_offline_dt() {
+        for _ in 0..500 {
+            let value = fluctuate(0.5, 0.5, 0.0, 3600.0, 0.005);
+            assert!(
+                (value - 0.5).abs() <= 0.04,
+                "离线 dt 把噪声放大了: {value}"
+            );
+        }
+    }
+
+    /// 离线结算是确定性的：同样的情绪起点，两次冲结果一致。
+    ///
+    /// 进程起来时刻没人看着角色，结论不该取决于一次掷骰子。
+    #[test]
+    fn test_offline_tick_is_deterministic() {
+        let circadian = CircadianFactors::at_hour(20.0);
+        let esp = EmotionSetPoints::default();
+        let rr = RecoveryRateProfile::default();
+
+        let mut emotion_a = super::super::emotion::EmotionState {
+            joy: 0.9,
+            sadness: 0.8,
+            anger: 0.7,
+            ..Default::default()
+        };
+        let mut emotion_b = emotion_a.clone();
+        let mut needs_a = super::super::needs::NeedsState::default();
+        let mut needs_b = super::super::needs::NeedsState::default();
+        let mut sp_a = NeedSetPoints::default();
+        let mut sp_b = NeedSetPoints::default();
+
+        HomeostasisEngine::tick_offline(&mut needs_a, &mut emotion_a, &mut sp_a, &esp, &rr, 3600.0, circadian);
+        HomeostasisEngine::tick_offline(&mut needs_b, &mut emotion_b, &mut sp_b, &esp, &rr, 3600.0, circadian);
+
+        assert!((emotion_a.sadness - emotion_b.sadness).abs() < 1e-12);
+        assert!((emotion_a.anger - emotion_b.anger).abs() < 1e-12);
+        assert!((emotion_a.joy - emotion_b.joy).abs() < 1e-12);
     }
 }

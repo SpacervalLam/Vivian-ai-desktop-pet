@@ -195,6 +195,14 @@ async fn enrich_candidates(
     (contexts, evidence_missing)
 }
 
+fn reflect_on_reading(char_id: &str, candidates: &[ContentCandidate], contexts: &HashMap<String, ContentDetail>) {
+    let readings = candidates.iter().filter_map(|candidate|
+        contexts.get(&candidate.key()).and_then(|detail| detail.body.as_ref()).map(|body|
+            crate::persona::self_development::ReadingExperience { url:candidate.url.clone(), body:body.clone() }))
+        .collect();
+    crate::persona::self_development::spawn_from_reading(char_id, readings);
+}
+
 /// 单轮发现结果摘要
 #[derive(Debug, Default, Clone)]
 pub struct DiscoverResult {
@@ -394,6 +402,7 @@ async fn discover_round_scoped(
 
     // 2.5 富化：为候选抓正文/字幕 + 热门评论（抓不到就退回只看标题）
     let (contexts, evidence_missing) = enrich_candidates(&candidates).await;
+    reflect_on_reading(char_id, &candidates, &contexts);
     result.evidence_missing = evidence_missing;
 
     // 3. LLM 批量评估
@@ -464,6 +473,7 @@ pub async fn admit_candidates(char_id: &str, candidates: Vec<ContentCandidate>) 
     }
 
     let (contexts, _) = enrich_candidates(&fresh).await;
+    reflect_on_reading(char_id, &fresh, &contexts);
     let profile = InterestProfile::load(char_id);
     let Some(evaluations) = evaluate_batch(&profile, &fresh, &contexts).await else {
         return 0;
@@ -577,6 +587,7 @@ pub async fn discover_for_topic(
     }
 
     let (contexts, _) = enrich_candidates(&candidates).await;
+    reflect_on_reading(char_id, &candidates, &contexts);
     let Some(evaluations) = evaluate_batch(profile, &candidates, &contexts).await else {
         return Vec::new();
     };

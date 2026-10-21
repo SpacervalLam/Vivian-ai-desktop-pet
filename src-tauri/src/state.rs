@@ -335,6 +335,10 @@ impl AppState {
 
         crate::startup::emit_progress(50, 100, "正在初始化模型路由与工具系统…");
 
+        // 聊天窗口专属角色（无桌宠 / 无 Brain，只有一条独立会话与人格提示词）。
+        // 必须在这里初始化：DialogueManager 的后台刷盘任务需要在 tokio 运行时内启动。
+        crate::chat_partner::init().map_err(crate::error::VivianError::Config)?;
+
         // Shared ModelRouter
         let router = ModelRouter::new(&config)?;
         let verifier_llm: Arc<dyn VerifierLlmClient> = Arc::new(router.clone());

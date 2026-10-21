@@ -4127,11 +4127,6 @@ export default function App() {
           ambientMotionEnabled={presenceState === 'online'}
           desktopPhysicsEnabled={desktopPhysicsEnabled}
           onInteraction={handleChibiInteraction}
-          onOpenQuickChat={() => {
-            lastActivityRef.current = Date.now();
-            lastBubbleFromProactiveRef.current = 0;
-            void openQuickInput();
-          }}
           onReady={() => {
             setModelReady(true);
             // 按角色模型画布比例设置窗口尺寸

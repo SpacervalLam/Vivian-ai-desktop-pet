@@ -11,10 +11,16 @@ export interface ConfigObject {
   [key: string]: ConfigValue;
 }
 
-/** Shared with Rust defaults, routing semantics, and task-specific prompt contracts. */
-export const ROUTING_TASKS = taskCatalog.map(({ groupKey, labelKey, id, helpKey }) => ({
-  groupKey, labelKey, taskType: id, helpKey,
-}));
+/** Shared with Rust defaults, routing semantics, and task-specific prompt contracts.
+ *
+ *  catalog 里标了 `hidden` 的路由不出现在这里：它们不放进通用设置页的路由矩阵，
+ *  由各自的专属界面提供配置入口（如聊天专属角色的模型面板）。后端仍完整支持
+ *  这些路由——解析、fallback、用量统计、连通性测试都照常。 */
+export const ROUTING_TASKS = taskCatalog
+  .filter((task) => !(task as { hidden?: boolean }).hidden)
+  .map(({ groupKey, labelKey, id, helpKey }) => ({
+    groupKey, labelKey, taskType: id, helpKey,
+  }));
 
 /** 厂商下的一个嵌入模型（插件 llm-providers 的 embedding-providers.json） */
 interface EmbeddingProviderModelPreset {

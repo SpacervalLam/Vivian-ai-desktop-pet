@@ -374,21 +374,16 @@ async fn task(
     if args.get("extractor").is_some()
         && !matches!(
             extractor,
-            Some("bilibili" | "xiaohongshu" | "douyin" | "zhihu" | "images" | "detail")
+            Some("bilibili" | "xiaohongshu" | "douyin" | "zhihu" | "weibo" | "twitter" | "reddit" | "github" | "arxiv" | "youtube" | "images" | "detail")
         )
     {
         return Err("未知平台提取器".into());
     }
-    // 详情提取器只用于这三家的单条内容页：先校验 host，避免拿它去开任意页面
+    // Host validation also runs in the isolated-world extractor after redirects.
     if extractor == Some("detail") {
-        const DETAIL_HOSTS: [&str; 3] = ["zhihu.com", "xiaohongshu.com", "douyin.com"];
         let parsed = tauri::Url::parse(&url).map_err(|e| e.to_string())?;
-        let host = parsed.host_str().unwrap_or("").to_ascii_lowercase();
-        let allowed = DETAIL_HOSTS
-            .iter()
-            .any(|d| host == *d || host.ends_with(&format!(".{}", d)));
-        if !allowed {
-            return Err("详情提取器目前只支持知乎 / 小红书 / 抖音".into());
+        if !crate::browser_bridge::sites::supports_host(parsed.host_str().unwrap_or("")) {
+            return Err("详情提取器不支持该平台".into());
         }
     }
     let wait = match args.get("waitMs") {

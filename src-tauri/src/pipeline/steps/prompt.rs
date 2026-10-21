@@ -130,6 +130,7 @@ pub(super) struct PreparedQueryContext {
     tool_scope: Option<ToolScope>,
     examples: Option<String>,
     tone_injection: Option<String>,
+    interaction_guidance: Option<String>,
     elapsed_ms: u64,
 }
 
@@ -180,6 +181,7 @@ impl Runnable for PreparedPromptPipeline {
 
 #[derive(Clone)]
 pub struct PromptBuildingStep {
+    interaction_router: Option<Arc<crate::providers::ModelRouter>>,
     pub persona: Option<Arc<PersonaEngine>>,
     pub emotion_bridge: Option<Arc<EmotionBridge>>,
     /// 心理系统管理器：注入后提供五层心理架构 + 关系上下文
@@ -323,6 +325,7 @@ pub(crate) struct ToolScope {
 impl PromptBuildingStep {
     pub fn new() -> Self {
         Self {
+            interaction_router: None,
             persona: None,
             emotion_bridge: None,
             psychology: None,
@@ -356,6 +359,7 @@ impl PromptBuildingStep {
         emotion_bridge: Arc<EmotionBridge>,
     ) -> Self {
         Self {
+            interaction_router: None,
             persona: Some(persona),
             emotion_bridge: Some(emotion_bridge),
             psychology: None,
@@ -456,6 +460,11 @@ impl PromptBuildingStep {
     }
 
     /// 注入 EnvironmentManager，启用 Focus 场景触发（检测工作类应用时筛选娱乐工具）
+    pub fn with_interaction_router(mut self, router: Arc<crate::providers::ModelRouter>) -> Self {
+        self.interaction_router = Some(router);
+        self
+    }
+
     pub fn with_environment(mut self, environment: Arc<EnvironmentManager>) -> Self {
         self.environment = Some(environment);
         self
@@ -787,7 +796,8 @@ impl PromptBuildingStep {
         // PsychologyManager 是情绪/心理上下文的唯一来源；未注入时为 None
         // "近期重要事件"段落由 MemoryManager 查询 ImportantEvent 最近 5 条提供
         let recent_events_desc = self.memory.as_ref().map_or(String::new(), |mem| {
-            let items = mem.recent_by_type(MemoryType::ImportantEvent, 5);
+            let items: Vec<_> = mem.recent_by_type(MemoryType::ImportantEvent, 24).into_iter()
+                .filter(crate::memory::companion_policy::is_runtime_material).take(5).collect();
             if items.is_empty() {
                 "无".to_string()
             } else {
@@ -1192,6 +1202,7 @@ impl PromptBuildingStep {
             schedule_signals_section: state.schedule_assessment.as_ref().and_then(format_schedule_signals),
             user_model_section: if state.user_model_text.is_empty() { None } else { Some(state.user_model_text.clone()) },
             proactive_search_section: if state.web_context.is_empty() { None } else { Some(state.web_context.clone()) },
+            interaction_guidance_section: query.and_then(|query| query.interaction_guidance.clone()),
             is_first_meeting,
             first_contact_greeting: state.metadata.get("first_contact_greeting")
                 .and_then(serde_json::Value::as_bool).unwrap_or(false),
@@ -1571,6 +1582,50 @@ impl PromptBuildingStep {
         })
     }
 
+    /// Bounded scene continuity runs alongside retrieval and never becomes a conversation turn.
+    async fn prepare_interaction_guidance(&self, state: &PipelineState) -> Option<String> {
+        if state.is_command || state.metadata["system_directive"] == true
+            || state.metadata["proactive_greeting"] == true || state.user_input.trim().is_empty() { return None; }
+        let world = self.world_provider.clone()?;
+        let router = self.interaction_router.as_ref()?;
+        let character = self.char_id.clone();
+        let (_, speaker, _) = crate::cross_character::parse_any_speaker_prefix(&state.user_input);
+        let listener = if state.current_channel == "cross_character" {
+            speaker.filter(|speaker| speaker != &character && speaker != "user")?
+        } else { "user".into() };
+        let memory = self.memory.clone();
+        let snapshot = state.clone();
+        let activity = self.activity_journal.clone();
+        let language = self.language.clone();
+        let target = listener.clone();
+        let owner = character.clone();
+        let provider = world.clone();
+        let (material,evidence) = tokio::task::spawn_blocking(move || {
+            use crate::world::{environment_agent::{scene_evidence,scene_observations},interaction_guidance::Evidence};
+            let now = crate::memory::types::current_timestamp();
+            let mut evidence = scene_evidence(&owner,memory.as_deref(),now);
+            if target != "user" { evidence.retain(|source| source.shareable); }
+            evidence.push(Evidence{id:"current_turn".into(),at:now,character_id:owner.clone(),kind:"current_utterance".into(),
+                text:snapshot.user_input.chars().take(1600).collect(),shareable:target != "user"});
+            let history: Vec<_> = snapshot.messages.iter().rev().filter(|message|
+                matches!(message.role.as_str(),"user"|"assistant") && (target == "user" || message.meta.as_ref()
+                    .and_then(|meta| meta.channel.as_deref()).is_some_and(|channel|
+                        matches!(channel,"direct"|"cross_character"|"broadcast"|"wechat_group"))))
+                .take(8).collect::<Vec<_>>().into_iter().rev().map(|message| json!({
+                    "role":message.role,"text":message.content.chars().take(600).collect::<String>(),
+                    "at":message.timestamp,"communication":message.meta.as_ref().and_then(|meta| meta.communication.as_ref())
+                })).collect();
+            let material=json!({"character_id":owner,"listener_id":target,"language":language,
+                "current_utterance":snapshot.user_input.chars().take(2000).collect::<String>(),"history":history,
+                "observations":scene_observations(&provider.environment,&provider.snapshot(None)),
+                "activity":activity.map(|journal| journal.to_brief()),"evidence":evidence,
+                "ongoing_task":(target == "user").then(|| snapshot.metadata.get("task_continuation")).flatten(),
+                "latest_intent":(target == "user").then(|| snapshot.metadata.get("contextual_intent")).flatten()});
+            (material,evidence)
+        }).await.ok()?;
+        world.environment.reply_guidance(router,&character,&listener,material,evidence).await
+    }
+
     /// Query-derived candidates run beside recall/web; final visibility uses completed memory.
     pub(super) async fn prepare_query_context(&self, state: &PipelineState) -> VivianResult<PreparedQueryContext> {
         let started = std::time::Instant::now();
@@ -1605,8 +1660,10 @@ impl PromptBuildingStep {
             let snapshot = state.clone();
             tokio::task::spawn_blocking(move || step.match_tone(&snapshot)).await.ok().flatten()
         };
-        let (tool_scope, examples, tone_injection) = tokio::join!(tool_scope, examples, tone);
-        Ok(PreparedQueryContext { tool_scope: tool_scope?, examples, tone_injection,
+        let guidance = async { tokio::time::timeout(std::time::Duration::from_millis(2800),
+            self.prepare_interaction_guidance(state)).await.ok().flatten() };
+        let (tool_scope, examples, tone_injection, interaction_guidance) = tokio::join!(tool_scope, examples, tone, guidance);
+        Ok(PreparedQueryContext { tool_scope: tool_scope?, examples, tone_injection, interaction_guidance,
             elapsed_ms: started.elapsed().as_millis() as u64 })
     }
 

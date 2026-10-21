@@ -21,6 +21,17 @@
 .selection-confirm { display: flex; align-items: center; gap: 8px; height: 34px; padding: 0 12px; background: #007aff; color: #fff; border-radius: 10px; font-size: 13px; font-weight: 600; }
 .selection-confirm:hover { background: #1887ff; }
 .selection-confirm kbd { padding-left: 5px; }
+.selection-split-button { display: inline-flex; align-items: stretch; border-radius: 10px; }
+.selection-split-button > button:first-child { border-radius: 10px 0 0 10px; }
+.selection-drawer-toggle { display: flex; align-items: center; justify-content: center; width: 26px; border-radius: 0 10px 10px 0; color: #ebedf2; border-left: 1px solid #ffffff26; }
+.selection-drawer-toggle:hover, .selection-drawer-toggle[aria-expanded="true"] { background: #ffffff20; }
+.selection-split-primary .selection-drawer-toggle { background: #007aff; }
+.selection-split-primary .selection-drawer-toggle:hover, .selection-split-primary .selection-drawer-toggle[aria-expanded="true"] { background: #1887ff; }
+.selection-character-menu { position: absolute; z-index: 4; width: 280px; max-width: calc(100vw - 16px); max-height: calc(100vh - 16px); overflow: auto; padding: 6px; border: 1px solid #ffffff26; border-radius: 14px; background: rgba(27,31,39,.97); box-shadow: 0 10px 32px #0006; cursor: default; }
+.selection-character-menu > button { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 50px; padding: 8px 10px; border-radius: 9px; text-align: left; font-size: 13px; }
+.selection-character-menu > button:hover { background: #ffffff17; }
+.selection-character-avatar { display: grid; place-items: center; flex: 0 0 30px; height: 30px; border-radius: 10px; font-weight: 600; background: #436a91; color: #eef6ff; }
+.selection-character-avatar.avatar-nana { background: #765d89; }
 .screen-selection button:focus-visible { outline: 2px solid #a5c8ff; outline-offset: 2px; }
 .screen-selection button:disabled { opacity: .5; cursor: default; }
 .screen-selection-error { position: absolute; bottom: 24px; left: 50%; transform: translateX(-50%); padding: 11px 16px; border-radius: 12px; background: rgba(60,25,30,.92); font-size: 13px; }

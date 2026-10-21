@@ -1199,6 +1199,13 @@ pub trait Tool: Send + Sync {
     /// 是否只读操作
     fn is_read_only(&self) -> bool;
 
+    /// Opt in only when identical caller context and arguments may reuse a result.
+    /// Read-only alone says nothing about freshness (files, desktop state, MCP,
+    /// tool discovery and memory can change outside the tool executor).
+    fn is_cacheable(&self) -> bool {
+        false
+    }
+
     /// 工具语义：工具循环收尾方式的判定依据
     ///
     /// 默认从 [`Tool::is_read_only`] 推导——只读工具产出信息，归检索类。

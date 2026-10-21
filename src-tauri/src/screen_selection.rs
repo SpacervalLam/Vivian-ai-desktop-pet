@@ -4,9 +4,9 @@ use parking_lot::Mutex;
 use serde_json::json;
 use tauri::{AppHandle, Emitter, Manager, WebviewWindow, WebviewWindowBuilder, WebviewUrl, WindowEvent};
 use tokio::sync::{oneshot, Notify};
-use crate::screen_capture::{CaptureRegion, SelectionAction};
-pub struct SelectedCapture { pub png: Vec<u8>, pub action: SelectionAction, pub region: CaptureRegion, pub left: i32, pub top: i32, pub(crate) overlay: Option<SelectionGuard> }
-struct SelectedArea { region: CaptureRegion, action: SelectionAction }
+use crate::screen_capture::{AnalysisCharacter, CaptureRegion, SelectionAction};
+pub struct SelectedCapture { pub png: Vec<u8>, pub action: SelectionAction, pub analysis_character: Option<AnalysisCharacter>, pub region: CaptureRegion, pub left: i32, pub top: i32, pub(crate) overlay: Option<SelectionGuard> }
+struct SelectedArea { region: CaptureRegion, action: SelectionAction, analysis_character: Option<AnalysisCharacter> }
 const WINDOW_LABEL: &str = "screen_selection";
 struct SelectionSession {
     id: String, preview: Vec<u8>, width: u32, height: u32,
@@ -81,11 +81,14 @@ pub async fn hide_capture_entry(app: &AppHandle) -> Result<Vec<WebviewWindow>, S
     receiver.await.map_err(|_| "截图入口隐藏中断".to_string())?
 }
 
-fn finish(id: &str, region: Option<CaptureRegion>, action: SelectionAction) -> Result<(), String> {
+fn finish(id: &str, region: Option<CaptureRegion>, action: SelectionAction, analysis_character: Option<AnalysisCharacter>) -> Result<(), String> {
+    if analysis_character.is_some() && !matches!(action, SelectionAction::Analyze | SelectionAction::SaveAndAnalyze) {
+        return Err("当前操作不支持指定分析角色".into());
+    }
     let mut session = SESSION.lock();
     let current = session.as_ref().filter(|s| s.id == id).ok_or("截图选区已结束")?;
     let selected = if action == SelectionAction::Cancel { None } else {
-        Some(SelectedArea { region: region.ok_or("请先框选区域")?.validate(current.width, current.height)?, action })
+        Some(SelectedArea { region: region.ok_or("请先框选区域")?.validate(current.width, current.height)?, action, analysis_character })
     };
     let current = session.take().expect("validated session");
     drop(session);
@@ -100,7 +103,7 @@ impl SelectionGuard {
 }
 impl Drop for SelectionGuard {
     fn drop(&mut self) {
-        let _ = finish(&self.id, None, SelectionAction::Cancel);
+        let _ = finish(&self.id, None, SelectionAction::Cancel, None);
         let _ = self.window.hide();
         let _ = self.window.emit("screen_selection:reset", json!({"session_id":self.id}));
     }
@@ -215,9 +218,9 @@ pub async fn screen_selection_present(window: WebviewWindow, session_id: String)
     receiver.await.map_err(|_| "截图遮罩显示中断".to_string())?
 }
 #[tauri::command]
-pub fn screen_selection_finish(window: WebviewWindow, session_id: String, region: Option<CaptureRegion>, action: SelectionAction) -> Result<(), String> {
+pub fn screen_selection_finish(window: WebviewWindow, session_id: String, region: Option<CaptureRegion>, action: SelectionAction, analysis_character: Option<AnalysisCharacter>) -> Result<(), String> {
     if window.label() != WINDOW_LABEL { return Err("无效截图窗口".into()); }
-    finish(&session_id, region, action)
+    finish(&session_id, region, action, analysis_character)
 }
 
 pub async fn select_region(app: &AppHandle) -> Result<Option<SelectedCapture>, String> {
@@ -256,7 +259,7 @@ pub async fn select_region(app: &AppHandle) -> Result<Option<SelectedCapture>, S
         .map_err(|_| "截图窗口已关闭".to_string())?;
     let freezing = region.as_ref().is_some_and(|selected| selected.action == SelectionAction::Freeze);
     if !freezing { hide_capture_windows(app, vec![window]).await?; }
-    let mut selected = tokio::task::spawn_blocking(move || region.map(|selected| frame.crop_png(selected.region).map(|png| SelectedCapture { png, action: selected.action, region: selected.region, left: frame.left, top: frame.top, overlay: None })).transpose())
+    let mut selected = tokio::task::spawn_blocking(move || region.map(|selected| frame.crop_png(selected.region).map(|png| SelectedCapture { png, action: selected.action, analysis_character: selected.analysis_character, region: selected.region, left: frame.left, top: frame.top, overlay: None })).transpose())
         .await.map_err(|e| e.to_string())??;
     if freezing {
         if let Some(selected) = selected.as_mut() { selected.overlay = Some(guard); }
