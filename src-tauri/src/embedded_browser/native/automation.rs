@@ -107,13 +107,19 @@ async fn cdp(
             }
             let host = initialize(app_copy, OWNER.into())?;
             let core = get_core(&host, &id)?;
+            let weak = Rc::downgrade(&host);
+            let epoch = host.borrow().lifecycle.epoch();
             unsafe {
                 core.CallDevToolsProtocolMethod(
                     PCWSTR(wide(&method).as_ptr()),
                     PCWSTR(wide(&params.to_string()).as_ptr()),
                     &CallDevToolsProtocolMethodCompletedHandler::create(Box::new(
                         move |result, body| {
-                            let result = result.map_err(|e| e.to_string()).and_then(|_| {
+                            let result = weak.upgrade()
+                                .filter(|h| h.borrow().lifecycle.current(epoch))
+                                .ok_or_else(|| "浏览器已重建，请重新读取页面".to_string())
+                                .and_then(|host| result.map_err(|e| com_failure(&host, "读取或操作网页", e)))
+                                .and_then(|_| {
                                 serde_json::from_str(&body).map_err(|e| e.to_string())
                             });
                             if let Some(tx) = callback_sender.lock().unwrap().take() {
@@ -123,7 +129,7 @@ async fn cdp(
                         },
                     )),
                 )
-                .map_err(|e| e.to_string())
+                .map_err(|e| com_failure(&host, "请求网页操作", e))
             }
         })();
         if let Err(error) = result {
@@ -229,11 +235,83 @@ async fn ready(app: &tauri::AppHandle, op: &Operation) -> Result<(), String> {
                     return Err(error.clone());
                 }
             }
-            Ok(h.environment.is_some() && h.cookies.is_some())
+            Ok(h.environment.is_some())
         })
         .await?;
         if ready {
             return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+/// Engine availability is independent of credential reads and page load state.
+pub(crate) async fn engine_ready(app: &tauri::AppHandle) -> Result<bool, String> {
+    engine_process_id(app).await.map(|pid| pid.is_some())
+}
+
+pub(crate) async fn engine_process_id(app: &tauri::AppHandle) -> Result<Option<u32>, String> {
+    let op = Operation {
+        cancelled: Arc::new(AtomicBool::new(false)),
+        deadline: Instant::now() + Duration::from_secs(3),
+    };
+    let _cancel = CancelOnDrop(op.clone());
+    tokio::time::timeout(Duration::from_secs(3), main(app, &op, |host| {
+        let h = host.borrow();
+        if h.environment.is_none() {
+            if let Some(error) = &h.state.error { return Err(error.clone()); }
+        }
+        if h.environment.is_none() { return Ok(None); }
+        let Some(tab) = h.tabs.values().next() else { return Ok(None); };
+        let core = tab.core.clone();
+        drop(h);
+        let mut pid = 0;
+        match unsafe { core.BrowserProcessId(&mut pid) } {
+            Ok(()) => Ok((pid != 0).then_some(pid)),
+            Err(error) if invalid_state(&error) => {
+                invalidate_engine(&host, engine_error("检查浏览器进程", &error));
+                Ok(None)
+            }
+            Err(error) => Err(engine_error("检查浏览器进程", &error)),
+        }
+    })).await.map_err(|_| "浏览器引擎状态检测超时".to_string())?
+}
+
+/// CookieManager is owned by its controller. Never cache one from a closed tab.
+fn cookie_manager(host: &HostRef) -> Result<Option<ICoreWebView2CookieManager>, String> {
+    let core = {
+        let h = host.borrow();
+        h.tabs.iter().find(|(id, _)| h.tab(id).is_some_and(|tab| !tab.private))
+            .map(|(_, tab)| tab.core.clone())
+    };
+    match core {
+        Some(core) => unsafe {
+            core.cast::<ICoreWebView2_2>().and_then(|core| core.CookieManager())
+                .map(Some).map_err(|e| engine_error("获取普通配置凭据管理器", &e))
+        },
+        None => Ok(None),
+    }
+}
+
+async fn cookie_access(app: &tauri::AppHandle, op: &Operation) -> Result<bool, String> {
+    let grace = (Instant::now() + Duration::from_secs(3)).min(op.deadline);
+    loop {
+        let available = main(app, op, |host| {
+            let h = host.borrow();
+            if h.environment.is_none() {
+                if let Some(error) = &h.state.error {
+                    return Err(error.clone());
+                }
+            }
+            let initialized = h.environment.is_some();
+            drop(h);
+            Ok(initialized && cookie_manager(&host)?.is_some())
+        })
+        .await?;
+        if available {
+            return Ok(true);
+        }
+        if Instant::now() >= grace {
+            return Ok(false);
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -708,11 +786,13 @@ pub(crate) struct Credentials {
     /// B 站登录态全量 cookie 头（供 discovery 字幕/评论重放；需 bili_jct/buvid3 时不能只存 SESSDATA）
     pub bilibili: Option<String>,
 }
+/// 读取某站点的 Cookie。`Ok(None)` 表示普通配置的 Cookie 管理器尚未就绪或已失效
+/// （例如普通标签全部关闭、浏览器进程已退出），调用方应视为「浏览器未连接」而非错误。
 async fn cookies(
     app: &tauri::AppHandle,
     op: &Operation,
     url: &str,
-) -> Result<HashMap<String, String>, String> {
+) -> Result<Option<HashMap<String, String>>, String> {
     let (tx, rx) = tokio::sync::oneshot::channel();
     let app_copy = app.clone();
     let url = url.to_string();
@@ -720,41 +800,69 @@ async fn cookies(
     let sender = Arc::new(std::sync::Mutex::new(Some(tx)));
     let callback = sender.clone();
     app.run_on_main_thread(move || {
-        let result = (|| {
+        let result = (|| -> Result<(), String> {
             op.check()?;
-            let h = initialize(app_copy, OWNER.into())?;
-            let manager = h.borrow().cookies.clone().ok_or("浏览器配置尚未就绪")?;
+            let host = initialize(app_copy, OWNER.into())?;
+            let Some(manager) = cookie_manager(&host)? else {
+                if let Some(tx) = sender.lock().unwrap().take() {
+                    let _ = tx.send(Ok(None));
+                }
+                return Ok(());
+            };
+            let weak = Rc::downgrade(&host);
+            let epoch = host.borrow().lifecycle.epoch();
             unsafe {
-                manager
-                    .GetCookies(
+                let started = manager.GetCookies(
                         PCWSTR(wide(&url).as_ptr()),
                         &GetCookiesCompletedHandler::create(Box::new(move |result, list| {
+                            let host = weak.upgrade().filter(|h| h.borrow().lifecycle.current(epoch));
+                            if host.is_none() {
+                                if let Some(tx) = callback.lock().unwrap().take() { let _ = tx.send(Ok(None)); }
+                                return Ok(());
+                            }
                             let parsed = (|| {
-                                result.map_err(|e| e.to_string())?;
-                                let mut values = HashMap::new();
-                                if let Some(list) = list {
-                                    let mut count = 0;
-                                    list.Count(&mut count).map_err(|e| e.to_string())?;
-                                    for i in 0..count {
-                                        let cookie =
-                                            list.GetValueAtIndex(i).map_err(|e| e.to_string())?;
-                                        let name = text(|p| cookie.Name(p));
-                                        let value = text(|p| cookie.Value(p));
-                                        if !value.is_empty() {
-                                            values.insert(name, value);
+                                match result {
+                                    Ok(()) => {
+                                        let mut values = HashMap::new();
+                                        if let Some(list) = list {
+                                            let mut count = 0;
+                                            list.Count(&mut count).map_err(|e| e.to_string())?;
+                                            for i in 0..count {
+                                                let cookie =
+                                                    list.GetValueAtIndex(i).map_err(|e| e.to_string())?;
+                                                let name = text(|p| cookie.Name(p));
+                                                let value = text(|p| cookie.Value(p));
+                                                if !value.is_empty() {
+                                                    values.insert(name, value);
+                                                }
+                                            }
                                         }
+                                        Ok(Some(values))
                                     }
+                                    Err(error) if invalid_state(&error) => {
+                                        // The source controller may have closed during this read.
+                                        // Next refresh obtains a manager from another live normal tab.
+                                        Ok(None)
+                                    }
+                                    Err(error) => Err(engine_error("读取平台凭据", &error)),
                                 }
-                                Ok(values)
                             })();
                             if let Some(tx) = callback.lock().unwrap().take() {
                                 let _ = tx.send(parsed);
                             }
                             Ok(())
                         })),
-                    )
-                    .map_err(|e| e.to_string())
+                    );
+                if let Err(error) = started {
+                    let message = engine_error("请求平台凭据", &error);
+                    if invalid_state(&error) {
+                        if let Some(tx) = sender.lock().unwrap().take() { let _ = tx.send(Ok(None)); }
+                        return Ok(());
+                    }
+                    return Err(message);
+                }
             }
+            Ok(())
         })();
         if let Err(error) = result {
             if let Some(tx) = sender.lock().unwrap().take() {
@@ -765,14 +873,18 @@ async fn cookies(
     .map_err(|e| e.to_string())?;
     rx.await.map_err(|_| "浏览器凭据读取已关闭".to_string())?
 }
-pub(crate) async fn credentials(app: tauri::AppHandle) -> Result<Credentials, String> {
+/// 读取普通配置的全部登录状态。`Ok(None)` 表示浏览器不可用（未打开或标签已全部关闭），
+/// 与真实的读取失败区分开，调用方据此展示「未连接」而不是错误。
+pub(crate) async fn credentials(app: tauri::AppHandle) -> Result<Option<Credentials>, String> {
     let op = Operation {
         cancelled: Arc::new(AtomicBool::new(false)),
         deadline: Instant::now() + Duration::from_secs(15),
     };
     let _cancel = CancelOnDrop(op.clone());
     tokio::time::timeout(Duration::from_secs(15), async {
-        ready(&app, &op).await?;
+        if !cookie_access(&app, &op).await? {
+            return Ok(None);
+        }
         let mut out = Credentials::default();
         for (platform, url, sentinel) in [
             ("bilibili", "https://www.bilibili.com/", "SESSDATA"),
@@ -786,7 +898,9 @@ pub(crate) async fn credentials(app: tauri::AppHandle) -> Result<Credentials, St
             ("twitter", "https://x.com/", "auth_token"),
             ("reddit", "https://www.reddit.com/", "reddit_session"),
         ] {
-            let values = cookies(&app, &op, url).await?;
+            let Some(values) = cookies(&app, &op, url).await? else {
+                return Ok(None);
+            };
             out.status
                 .insert(platform.into(), values.contains_key(sentinel));
             if platform == "twitter" {
@@ -813,7 +927,7 @@ pub(crate) async fn credentials(app: tauri::AppHandle) -> Result<Credentials, St
                 );
             }
         }
-        Ok(out)
+        Ok(Some(out))
     })
     .await
     .map_err(|_| "浏览器凭据检测超时".to_string())?

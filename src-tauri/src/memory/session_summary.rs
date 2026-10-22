@@ -340,6 +340,8 @@ mod tests {
                 knowledge_source: "direct".into(),
                 observer_id: None,
                 sticker: None,
+                image_path: None,
+                visual_description: None,
             }],
         }
     }

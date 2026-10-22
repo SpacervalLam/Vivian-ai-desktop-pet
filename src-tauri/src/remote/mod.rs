@@ -1176,8 +1176,8 @@ async fn image_chat_handler(
                 match memory_mgr
                     .add_memory_with_metadata(
                         &description_for_memory,
-                        MemoryType::General,
-                        0.5,
+                        MemoryType::ShortTerm,
+                        0.4,
                         vec![
                             "image".to_string(),
                             "shared_memory".to_string(),
@@ -1196,7 +1196,7 @@ async fn image_chat_handler(
                                 "image_path": rel,
                                 "source": "chat",
                                 "role": "user",
-                                "memory_type": "general",
+                                "memory_type": "short_term",
                                 "semantic_type": "shared_memory",
                             }),
                         );

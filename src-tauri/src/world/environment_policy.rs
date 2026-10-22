@@ -353,6 +353,20 @@ impl ScenePolicy {
         if event.owner.as_ref().is_some_and(|id| id != &speaker.id) {
             return false;
         }
+        // 刚完成的一轮对话不再作为「续话题」立刻还给同一位说话者。
+        //
+        // record_user_turn 记录的是 user + assistant 都已说完的完整回合，此时再让
+        // 参与者对用户开口，模型最容易把刚发过的回复复述一遍（实测相隔 9 秒）。
+        // 话题延续应交给后续静默后的触发器；本事件仍可让她向室友转述这次对话。
+        let speaker_owns_turn = event.stimulus == Stimulus::UserDialogue
+            && self
+                .user_turns
+                .iter()
+                .find(|turn| turn.id == event.id)
+                .is_some_and(|turn| turn.character_id == speaker.id);
+        if speaker_owns_turn && selection.audience == "user" {
+            return false;
+        }
         let listener_id = match selection.audience.as_str() {
             "user"
                 if user_available
@@ -634,6 +648,36 @@ mod tests {
             false,
             1000.0
         ));
+    }
+
+    #[test]
+    fn a_completed_turn_is_not_reissued_to_the_same_speaker_as_continuation() {
+        let mut p = ScenePolicy::default();
+        p.record_user_turn(
+            "nana",
+            "你看这张图",
+            "这图挺有意境的。不过你发给我，是想让我评价一下当壁纸怎么样吗？",
+            1000.0,
+        );
+        let turn_id = p.user_turns.back().unwrap().id.clone();
+        let to_user = Selection {
+            event_id: turn_id.clone(),
+            speaker_id: "nana".into(),
+            audience: "user".into(),
+            confidence: 0.9,
+            delay_seconds: 0,
+        };
+        assert!(!p.accept(to_user, &roles(), true, false, 1001.0));
+
+        // 同一次对话仍允许转述给室友，只是不能马上又对用户续话。
+        let to_roommate = Selection {
+            event_id: turn_id,
+            speaker_id: "nana".into(),
+            audience: "roommate".into(),
+            confidence: 0.9,
+            delay_seconds: 0,
+        };
+        assert!(p.accept(to_roommate, &roles(), true, false, 1002.0));
     }
 
     fn intent(

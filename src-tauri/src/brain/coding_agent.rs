@@ -4804,7 +4804,7 @@ pub(crate) fn web_capability_section() -> String {
     if browser_ready {
         "\n\n# 本轮联网能力\n\
          - 静态抓取：`web_fetch`（不执行 JS，过不了反爬挑战页）。\n\
-         - 真实浏览器：**已连接**，`browser_task_tab` / `browser_extract` / `browser_navigate` / \
+         - 内嵌浏览器：**引擎就绪**，`browser_task_tab` / `browser_extract` / `browser_navigate` / \
          `browser_snapshot` / `browser_get_text` 等本轮可用。动态渲染页、登录页、反爬页一律走它，\
          不要用 `run_command` 拼命令行去模拟浏览器。\n\
          - 平台冲浪：`browser_task_tab` 可用 platform + query 搜索 B站、小红书、抖音、知乎、微博、Twitter/X、Reddit、GitHub、arXiv、YouTube；从返回链接选择相关条目，用 url + extractor=detail 读取页面文字。保留链接访问参数，视频页文字不代表已看视频；登录/验证交给用户处理。平台来源按需要选用，不要求逐个平台访问。\n\
@@ -4815,7 +4815,7 @@ pub(crate) fn web_capability_section() -> String {
         "\n\n# 本轮联网能力（有限，先读再动手）\n\
          - 可用 `web_search` 搜候选来源，`web_fetch` 静态读取正文与 images[] 图片地址；它不执行 JS。\n\
          - 图片 URL 可直接用 `web_fetch` 读取像素并保存 artifact.image_path，再用 `send_image(path)` 展示给用户，附上原来源页。\n\
-         - **浏览器桥本轮未连接**：需要真实浏览器才能完成的登录、动态渲染和挑战验证暂不可用；不能由一个网页失败推断所有来源不可访问。\n\
+         - **内嵌浏览器引擎本轮尚未就绪**：需要真实浏览器才能完成的登录、动态渲染和挑战验证暂不可用；不能由一个网页失败推断所有来源不可访问。\n\
          - 同一来源最多尝试 2 种取法。仍失败就停止该来源的抓取，回到已有搜索候选或补充检索，找可读取的作者页、合集、素材仓库或公开文件。\n\
          不要靠换 UA、换端口、换接口、换脚本语言重复同一个失败；权限拒绝不可绕过。\n\
          - 替代来源也无法补齐必要证据时，如实说明已取得内容与缺口；只有确实必须使用浏览器时，才请用户连接浏览器。\n"

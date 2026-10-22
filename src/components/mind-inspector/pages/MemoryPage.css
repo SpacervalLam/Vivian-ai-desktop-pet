@@ -91,6 +91,13 @@
 .memory-entry-recent { border-left-color: #bba5b7; }
 .memory-entry-top { display: flex; align-items: center; gap: 10px; color: var(--memory-muted); font-size: 11px; }
 .memory-entry-kind { padding: 4px 8px; border-radius: 999px; color: var(--codex-accent-deep, #596d7d); background: var(--codex-accent-soft, #e7eff3); font-weight: 700; }
+/* 归属徽章：事实层是 vivian / nana 两个记忆库合并成的一张列表，一条群发消息会被
+   两个角色各自抽取成一条（内容一模一样），卡片上不标「谁记的」就只剩两张相同的
+   卡。配色沿用漫画子页的作者徽章（UnifiedComicBook.css 的 .record-diary-author），
+   两个角色全站一套色，不另起一套。 */
+.memory-entry-owner { padding: 4px 8px; border-radius: 999px; font-weight: 700; letter-spacing: .02em; white-space: nowrap; }
+.memory-entry-owner.is-vivian { color: #68521f; background: #f5ebc8; }
+.memory-entry-owner.is-nana { color: #554876; background: #e7e1f0; }
 .memory-entry-top time { margin-left: auto; white-space: nowrap; }
 .memory-entry-speaker { display: inline-flex; align-items: center; margin-top: 10px; padding: 3px 8px; border: 1px solid var(--memory-line); border-radius: 7px; color: var(--codex-accent-deep, #596d7d); background: color-mix(in srgb, var(--codex-accent-soft, #e7eff3) 55%, transparent); font-size: 11px; font-weight: 650; }
 .memory-entry-content { margin: 9px 0 0; color: var(--memory-ink); white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.6; font-size: 13px; }
@@ -109,6 +116,9 @@
 .memory-thread-speaker { justify-self: start; padding: 3px 8px; border-radius: 8px; color: var(--codex-accent-deep, #596d7d); background: var(--codex-accent-soft, #e7eff3); font-size: 11px; font-weight: 700; }
 .memory-thread-turn p { margin: 1px 0 0; color: var(--memory-ink); font-size: 13px; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
 .memory-thread-turn-plain { display: block; }
+/* 图片消息：正文已经是识图结果，原图走这个胶囊按钮回看 */
+.memory-thread-image { display: inline-flex; align-items: center; gap: 5px; margin-top: 7px; padding: 3px 9px; border: 1px solid var(--memory-line); border-radius: 999px; background: transparent; color: var(--codex-accent-deep, #596d7d); font-size: 11px; line-height: 1.5; cursor: pointer; }
+.memory-thread-image:hover { background: var(--codex-accent-soft, #e7eff3); }
 .memory-profile-panel { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px; align-items: start; padding: 2px 0 12px; }
 .memory-profile-perspective { min-width: 0; }
 .memory-profile-heading { margin: 0 0 18px; padding-bottom: 12px; border-bottom: 1px solid var(--memory-line); color: var(--memory-ink); font-size: 16px; font-weight: 600; }
@@ -147,4 +157,4 @@
 .memory-event-phase { padding: 3px 8px; border-radius: 6px; background: var(--codex-accent-soft, #e7eff3); color: var(--codex-accent-deep, #596d7d); font-weight: 650; }
 .memory-event-phase.phase-completed { color: #4f6c46; background: #91ad7c20; }
 .memory-event-phase.phase-cancelled { color: var(--memory-muted); background: var(--memory-line); }
-@media (max-width: 520px) { .memory-event-card { padding: 14px; } .memory-event-progress .memory-entry-top { flex-wrap: wrap; } }
+@media (max-width: 520px) { .memory-event-card { padding: 14px; } .memory-event-progress .memory-entry-top { flex-wrap: wrap; } .memory-entry-grid .memory-entry-top { flex-wrap: wrap; } }

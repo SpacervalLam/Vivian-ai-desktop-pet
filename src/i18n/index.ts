@@ -1432,8 +1432,8 @@ const resources = {
         section_builtin: '内置连接器',
         builtin_description: '桌宠与工作智能体可在内嵌浏览器读取页面、点击与填表，并沿用其中的登录状态。',
         bridge_name: '内嵌浏览器',
-        bridge_connected: '已就绪',
-        bridge_disconnected: '正在启动或不可用',
+        bridge_connected: '引擎就绪',
+        bridge_disconnected: '未启动或不可用',
         bridge_tools: '已注册工具（{{count}} 个）',
         // 桥工具的展示别名。后端只有技术名（mcp__browser__*）和给模型看的长描述，
         // 没有面向人的短标签——那一层属于 UI 关注点，放这里而不是塞进 Rust 工具定义。
@@ -1458,11 +1458,15 @@ const resources = {
 
       // ===== 浏览器桥相关文案（被 ConnectionsPanel 复用）=====
       browser: {
-        connected_hint: '直接读取当前网页或使用共享登录状态的后台任务页，无需 Chrome 扩展。',
+        connected_hint: '读取网页、点击与输入，沿用内嵌浏览器中的登录状态。',
         disconnected_hint: '浏览器由应用管理，可直接打开；启动失败时会在下方显示原因。',
         open_browser: '打开内嵌浏览器',
         platforms_need_connection: '浏览器引擎就绪后显示平台登录状态',
         platforms_detecting: '正在检测平台登录状态…',
+        status_refresh_failed: '状态刷新失败',
+        credentials_checked: '上次检测：{{time}}',
+        credentials_stale: '凭据检测暂不可用，显示 {{time}} 的结果，正在自动重试。',
+        credentials_previously_detected: '上次检测到凭据',
         verify_page: '验证当前页面读取',
         probing: '正在读取…',
         verify_hint: '在内嵌浏览器打开目标页面，再验证实时内容。请核对返回的网址、账号和内容。',
@@ -4478,8 +4482,8 @@ const resources = {
         section_builtin: 'Built-in connectors',
         builtin_description: 'Companion and work agents can read, click and fill pages using the embedded browser’s login session.',
         bridge_name: 'Embedded browser',
-        bridge_connected: 'Ready',
-        bridge_disconnected: 'Starting or unavailable',
+        bridge_connected: 'Engine ready',
+        bridge_disconnected: 'Not started or unavailable',
         bridge_tools: 'Registered tools ({{count}})',
         // Display aliases for the bridge tools; falls back to the technical name when missing.
         tool_back: 'Go back',
@@ -4502,11 +4506,15 @@ const resources = {
 
       // ===== 浏览器桥相关文案（被 ConnectionsPanel 复用）=====
       browser: {
-        connected_hint: 'Read the current page or use background tabs sharing its login profile. No Chrome extension is needed.',
+        connected_hint: 'Read, click and type on webpages using the embedded browser’s login session.',
         disconnected_hint: 'The app manages the browser. Open it directly; startup errors appear below.',
         open_browser: 'Open embedded browser',
         platforms_need_connection: 'Platform login status appears when the browser engine is ready',
         platforms_detecting: 'Detecting platform login status…',
+        status_refresh_failed: 'Status refresh failed',
+        credentials_checked: 'Last checked: {{time}}',
+        credentials_stale: 'Credential check unavailable. Showing results from {{time}}; retrying automatically.',
+        credentials_previously_detected: 'Previously detected credentials',
         verify_page: 'Verify current page reading',
         probing: 'Reading…',
         verify_hint: 'Open the target page in the embedded browser, then verify its live URL, account and content.',
@@ -7492,8 +7500,8 @@ const resources = {
         section_builtin: '組み込みコネクタ',
         builtin_description: 'デスクトップペットと作業エージェントが内蔵ブラウザーのログイン状態でページの読み取り、クリック、入力を行えます。',
         bridge_name: '内蔵ブラウザー',
-        bridge_connected: '準備完了',
-        bridge_disconnected: '起動中または利用不可',
+        bridge_connected: 'エンジン準備完了',
+        bridge_disconnected: '未起動または利用不可',
         bridge_tools: '登録済みツール（{{count}} 個）',
         // 橋ツールの表示名。未定義のものは技術名にフォールバックする。
         tool_back: '戻る',
@@ -7516,11 +7524,15 @@ const resources = {
 
       // ===== 浏览器桥相关文案（被 ConnectionsPanel 复用）=====
       browser: {
-        connected_hint: '現在のページやログイン状態を共有するバックグラウンドタブを読み取ります。Chrome 拡張は不要です。',
+        connected_hint: '内蔵ブラウザーのログイン状態で、ページの読み取り・クリック・入力ができます。',
         disconnected_hint: 'ブラウザーはアプリが管理します。直接開くことができ、起動エラーは下に表示されます。',
         open_browser: '内蔵ブラウザーを開く',
         platforms_need_connection: 'ブラウザーの準備完了後にログイン状態を表示します',
         platforms_detecting: 'ログイン状態を検出中…',
+        status_refresh_failed: '状態の更新に失敗',
+        credentials_checked: '最終確認：{{time}}',
+        credentials_stale: '認証情報を確認できません。{{time}} の結果を表示し、自動再試行しています。',
+        credentials_previously_detected: '前回の認証情報あり',
         verify_page: '現在のページの読み取りを確認',
         probing: '読み取り中…',
         verify_hint: '内蔵ブラウザーで対象ページを開き、リアルタイムの URL・アカウント・内容を確認してください。',

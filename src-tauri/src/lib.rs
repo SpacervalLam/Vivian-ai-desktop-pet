@@ -490,6 +490,7 @@ pub fn run() {
             commands::storage::get_storage_usage,
             commands::storage::open_storage_folder,
             commands::storage::clear_storage_cache,
+            commands::storage::clear_browser_cache,
             commands::system::get_system_info,
             commands::system::get_running_processes,
             commands::system::open_application,

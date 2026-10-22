@@ -5,6 +5,8 @@ use std::{cell::RefCell, collections::HashMap, rc::Rc};
 use tauri::{Emitter, Manager};
 use webview2_com::{Microsoft::Web::WebView2::Win32::*, *};
 pub(crate) mod automation;
+mod lifecycle;
+use lifecycle::{engine_error, invalid_state, EngineLifecycle};
 use windows::{
     core::{Interface, BOOL, PCWSTR, PWSTR},
     Win32::{
@@ -45,10 +47,10 @@ struct Host {
     clip: Option<BrowserClip>,
     state: BrowserSnapshot,
     environment: Option<ICoreWebView2Environment>,
+    lifecycle: EngineLifecycle,
     tabs: HashMap<String, NativeTab>,
     tasks: HashMap<String, BrowserTab>,
     selections: HashMap<String, (String, u64)>,
-    cookies: Option<ICoreWebView2CookieManager>,
     pending: HashMap<String, Permission>,
     downloads: HashMap<String, ICoreWebView2DownloadOperation>,
     extensions: HashMap<String, ICoreWebView2BrowserExtension>,
@@ -165,7 +167,6 @@ pub(crate) async fn shutdown_for_backup(app: tauri::AppHandle) -> Result<Vec<u32
         for host in hosts {
             let (saved, tabs) = {
                 let mut h = host.borrow_mut();
-                h.cookies = None;
                 h.environment = None;
                 h.extensions.clear();
                 h.downloads.clear();
@@ -191,6 +192,11 @@ pub(crate) async fn shutdown_for_backup(app: tauri::AppHandle) -> Result<Vec<u32
 fn fail(host: &HostRef, error: impl std::fmt::Display) {
     host.borrow_mut().state.error = Some(error.to_string());
     publish(host, false);
+}
+fn com_failure(host: &HostRef, stage: &str, error: windows::core::Error) -> String {
+    let message = engine_error(stage, &error);
+    if invalid_state(&error) { invalidate_engine(host, message.clone()); }
+    message
 }
 fn create_surface(parent: HWND) -> windows::core::Result<HWND> {
     unsafe { CreateWindowExW(WINDOW_EX_STYLE(0), PCWSTR(wide("STATIC").as_ptr()),
@@ -332,6 +338,7 @@ fn refresh(host: &HostRef, id: &str, history: bool) {
 fn initialize(app: tauri::AppHandle, owner: String) -> Result<HostRef, String> {
     if backup_pending() {return Err("浏览器正在保存以进行备份".into());}
     if let Some(host) = HOSTS.with(|hosts| hosts.borrow().get(&owner).cloned()) {
+        ensure_engine(&host)?;
         return Ok(host);
     }
     let saved = if root().join("state.json").exists() {
@@ -391,10 +398,10 @@ fn initialize(app: tauri::AppHandle, owner: String) -> Result<HostRef, String> {
         clip: None,
         state,
         environment: None,
+        lifecycle: EngineLifecycle::default(),
         tabs: HashMap::new(),
         tasks: HashMap::new(),
         selections: HashMap::new(),
-        cookies: None,
         pending: HashMap::new(),
         downloads: HashMap::new(),
         extensions: HashMap::new(),
@@ -405,48 +412,111 @@ fn initialize(app: tauri::AppHandle, owner: String) -> Result<HostRef, String> {
         scrollbar_css: String::new(),
     }));
     HOSTS.with(|hosts| hosts.borrow_mut().insert(owner, host.clone()));
-    let weak = Rc::downgrade(&host);
+    ensure_engine(&host)?;
+    Ok(host)
+}
+
+/// Keep profile data and UI layout while replacing COM objects from a dead process.
+fn invalidate_engine(host: &HostRef, error: String) {
+    let (tabs, permissions) = {
+        let mut h = host.borrow_mut();
+        h.lifecycle.failed();
+        h.environment = None;
+        h.extensions.clear();
+        h.state.extensions.clear();
+        h.downloads.clear();
+        h.selections.clear();
+        h.tasks.clear();
+        h.state.error = Some(error.clone());
+        for tab in &mut h.state.tabs {
+            tab.loading = true;
+            tab.error = None;
+            tab.can_back = false;
+            tab.can_forward = false;
+        }
+        (std::mem::take(&mut h.tabs), std::mem::take(&mut h.pending))
+    };
+    // Release RefCell borrows before Close/Complete: these can dispatch COM events.
     unsafe {
-        let options: ICoreWebView2EnvironmentOptions =
-            CoreWebView2EnvironmentOptions::default().into();
-        options
-            .cast::<ICoreWebView2EnvironmentOptions6>()
-            .map_err(|e| e.to_string())?
-            .SetAreBrowserExtensionsEnabled(true)
-            .map_err(|e| e.to_string())?;
-        let directory = wide(&root().join("engine").to_string_lossy());
-        CreateCoreWebView2EnvironmentWithOptions(
-            PCWSTR::null(),
-            PCWSTR(directory.as_ptr()),
-            &options,
-            &CreateCoreWebView2EnvironmentCompletedHandler::create(Box::new(
-                move |result, environment| {
-                    let Some(host) = weak.upgrade() else {
-                        return Ok(());
+        for (_, permission) in permissions {
+            let _ = permission.args.SetState(COREWEBVIEW2_PERMISSION_STATE_DENY);
+            let _ = permission.deferral.Complete();
+        }
+        for (_, tab) in tabs { let _ = tab.controller.Close(); }
+    }
+    tracing::warn!("Embedded browser engine invalidated: {error}");
+    publish(host, false);
+}
+
+fn ensure_engine(host: &HostRef) -> Result<(), String> {
+    if host.borrow().lifecycle.timed_out() {
+        invalidate_engine(host, "浏览器初始化超时，正在延迟重试".into());
+        return Ok(());
+    }
+    if host.borrow().environment.is_some() || !host.borrow().lifecycle.can_start() {
+        return Ok(());
+    }
+    if backup_pending() { return Err("浏览器正在保存以进行备份".into()); }
+    let epoch = host.borrow_mut().lifecycle.begin();
+    let weak = Rc::downgrade(host);
+    let result = (|| -> windows::core::Result<()> {
+        unsafe {
+            let options: ICoreWebView2EnvironmentOptions = CoreWebView2EnvironmentOptions::default().into();
+            options.cast::<ICoreWebView2EnvironmentOptions6>()?.SetAreBrowserExtensionsEnabled(true)?;
+            let directory = wide(&root().join("engine").to_string_lossy());
+            CreateCoreWebView2EnvironmentWithOptions(
+                PCWSTR::null(), PCWSTR(directory.as_ptr()), &options,
+                &CreateCoreWebView2EnvironmentCompletedHandler::create(Box::new(move |result, environment| {
+                    let Some(host) = weak.upgrade() else { return Ok(()); };
+                    if !host.borrow().lifecycle.current(epoch) { return Ok(()); }
+                    let environment = match result.and_then(|_| environment.ok_or_else(|| windows::core::Error::from_hresult(windows::core::HRESULT(0x80004005u32 as i32)))) {
+                        Ok(environment) => environment,
+                        Err(error) => {
+                            invalidate_engine(&host, engine_error("创建浏览器环境", &error));
+                            return Ok(());
+                        }
                     };
-                    if let Err(error) = result {
-                        fail(&host, error);
-                        return Ok(());
+                    if backup_pending() { return Ok(()); }
+                    // Normal exits (all controllers closed / runtime update) also invalidate cached COM objects.
+                    if let Ok(events) = environment.cast::<ICoreWebView2Environment5>() {
+                        let weak = Rc::downgrade(&host);
+                        let mut token = 0;
+                        if let Err(error) = events.add_BrowserProcessExited(
+                            &BrowserProcessExitedEventHandler::create(Box::new(move |_, _| {
+                                if let Some(host) = weak.upgrade().filter(|h| h.borrow().lifecycle.current(epoch)) {
+                                    invalidate_engine(&host, "浏览器进程已结束，正在重新初始化".into());
+                                }
+                                Ok(())
+                            })), &mut token,
+                        ) {
+                            invalidate_engine(&host, engine_error("监听浏览器进程", &error));
+                            return Ok(());
+                        }
                     }
-                    let Some(environment) = environment else {
-                        fail(&host, "WebView2 environment is unavailable");
-                        return Ok(());
-                    };
-                    if backup_pending() {return Ok(());}
                     host.borrow_mut().environment = Some(environment);
                     let tabs = host.borrow().state.tabs.clone();
+                    if tabs.is_empty() {
+                        host.borrow_mut().lifecycle.succeeded();
+                        host.borrow_mut().state.error = None;
+                        publish(&host, false);
+                    }
                     for tab in tabs {
                         if let Err(error) = create_tab(&host, tab, None) {
-                            fail(&host, error);
+                            invalidate_engine(&host, engine_error("创建浏览器标签", &error));
+                            break;
                         }
                     }
                     Ok(())
-                },
-            )),
-        )
-        .map_err(|e| e.to_string())?;
+                })),
+            )
+        }
+    })();
+    if let Err(error) = result {
+        let error = engine_error("启动浏览器环境", &error);
+        invalidate_engine(host, error.clone());
+        return Err(error);
     }
-    Ok(host)
+    Ok(())
 }
 
 fn create_tab(
@@ -457,6 +527,7 @@ fn create_tab(
         ICoreWebView2Deferral,
     )>,
 ) -> windows::core::Result<()> {
+    let epoch = host.borrow().lifecycle.epoch();
     unsafe {
         let (environment, hwnd) = {
             let h = host.borrow();
@@ -487,14 +558,20 @@ fn create_tab(
                         }
                         return Ok(());
                     };
+                    if !host.borrow().lifecycle.current(epoch) {
+                        if let Some(controller) = controller { let _ = controller.Close(); }
+                        if let Some((_, deferral)) = &popup { let _ = deferral.Complete(); }
+                        return Ok(());
+                    }
                     if let Err(error) = result {
-                        fail(&host, error);
+                        invalidate_engine(&host, engine_error("创建浏览器控制器", &error));
                         if let Some((_, d)) = &popup {
                             let _ = d.Complete();
                         }
                         return Ok(());
                     }
                     let Some(controller) = controller else {
+                        invalidate_engine(&host, "WebView2 未返回浏览器控制器，正在重试".into());
                         return Ok(());
                     };
                     if host.borrow().tab(&id).is_none() {
@@ -505,68 +582,84 @@ fn create_tab(
                         return Ok(());
                     }
                     if backup_pending() {let _=controller.Close();return Ok(());}
-                    let core = controller.CoreWebView2()?;
-                    let parent = host.borrow().surface_hwnd;
-                    controller.SetParentWindow(if host.borrow().tasks.contains_key(&id) {
-                        host.borrow().parked_hwnd
-                    } else {
-                        parent
-                    })?;
-                    if !tab.private {
-                        host.borrow_mut().cookies =
-                            Some(core.cast::<ICoreWebView2_2>()?.CookieManager()?);
-                    }
-                    if host.borrow().tasks.contains_key(&id) {
-                        core.cast::<ICoreWebView2_8>()?.SetIsMuted(true)?;
-                        controller.SetBounds(RECT {
-                            left: 0,
-                            top: 0,
-                            right: 1280,
-                            bottom: 900,
+                    let setup = (|| -> windows::core::Result<()> {
+                        let core = controller.CoreWebView2()?;
+                        let parent = host.borrow().surface_hwnd;
+                        controller.SetParentWindow(if host.borrow().tasks.contains_key(&id) {
+                            host.borrow().parked_hwnd
+                        } else {
+                            parent
                         })?;
-                    }
-                    let settings = core.Settings()?;
-                    settings.SetIsScriptEnabled(true)?;
-                    settings.SetAreDefaultContextMenusEnabled(true)?;
-                    settings.SetAreDefaultScriptDialogsEnabled(true)?;
-                    if host.borrow().tasks.contains_key(&id) {
-                        settings.SetAreDefaultScriptDialogsEnabled(false)?;
-                    }
-                    settings.SetAreDevToolsEnabled(true)?;
-                    settings
-                        .cast::<ICoreWebView2Settings3>()?
-                        .SetAreBrowserAcceleratorKeysEnabled(true)?;
-                    if !tab.private {
-                        if let Ok(settings) = settings.cast::<ICoreWebView2Settings4>() {
-                            settings.SetIsPasswordAutosaveEnabled(true)?;
-                            settings.SetIsGeneralAutofillEnabled(true)?;
+                        if host.borrow().tasks.contains_key(&id) {
+                            core.cast::<ICoreWebView2_8>()?.SetIsMuted(true)?;
+                            controller.SetBounds(RECT {
+                                left: 0,
+                                top: 0,
+                                right: 1280,
+                                bottom: 900,
+                            })?;
                         }
-                    }
-                    controller.SetZoomFactor(tab.zoom)?;
-                    host.borrow_mut().tabs.insert(
-                        id.clone(),
-                        NativeTab {
-                            controller: controller.clone(),
-                            core: core.clone(),
-                            find_term: String::new(),
-                            fullscreen: false,
-                            generation: 0,
-                            world: None,
-                            input_parked: false,
-                        },
-                    );
-                    wire(&host, &id, &core, &controller)?;
-                    apply_bounds(&host)?;
-                    if let Some((args, deferral)) = &popup {
-                        args.SetNewWindow(&core)?;
-                        args.SetHandled(true)?;
-                        deferral.Complete()?;
-                    } else {
-                        core.Navigate(PCWSTR(wide(&tab.url).as_ptr()))?;
-                    }
-                    refresh(&host, &id, false);
-                    if !host.borrow().tasks.contains_key(&id) {
-                        extensions(&host, &core)?;
+                        let settings = core.Settings()?;
+                        settings.SetIsScriptEnabled(true)?;
+                        settings.SetAreDefaultContextMenusEnabled(true)?;
+                        settings.SetAreDefaultScriptDialogsEnabled(true)?;
+                        if host.borrow().tasks.contains_key(&id) {
+                            settings.SetAreDefaultScriptDialogsEnabled(false)?;
+                        }
+                        settings.SetAreDevToolsEnabled(true)?;
+                        settings
+                            .cast::<ICoreWebView2Settings3>()?
+                            .SetAreBrowserAcceleratorKeysEnabled(true)?;
+                        if !tab.private {
+                            if let Ok(settings) = settings.cast::<ICoreWebView2Settings4>() {
+                                settings.SetIsPasswordAutosaveEnabled(true)?;
+                                settings.SetIsGeneralAutofillEnabled(true)?;
+                            }
+                        }
+                        controller.SetZoomFactor(tab.zoom)?;
+                        host.borrow_mut().tabs.insert(
+                            id.clone(),
+                            NativeTab {
+                                controller: controller.clone(),
+                                core: core.clone(),
+                                find_term: String::new(),
+                                fullscreen: false,
+                                generation: epoch << 32,
+                                world: None,
+                                input_parked: false,
+                            },
+                        );
+                        wire(&host, &id, &core, &controller)?;
+                        apply_bounds(&host)?;
+                        if let Some((args, deferral)) = &popup {
+                            args.SetNewWindow(&core)?;
+                            args.SetHandled(true)?;
+                            deferral.Complete()?;
+                        } else {
+                            core.Navigate(PCWSTR(wide(&tab.url).as_ptr()))?;
+                        }
+                        refresh(&host, &id, false);
+                        if !host.borrow().tasks.contains_key(&id) {
+                            if let Err(error) = extensions(&host, &core) {
+                                fail(&host, engine_error("读取浏览器扩展", &error));
+                            }
+                        }
+                        Ok(())
+                    })();
+                    match setup {
+                        Ok(()) => {
+                            host.borrow_mut().lifecycle.succeeded();
+                            // Do not erase independent extension-management errors.
+                            if host.borrow().state.error.as_deref().is_some_and(|e| !e.starts_with("读取浏览器扩展")) {
+                                host.borrow_mut().state.error = None;
+                            }
+                            publish(&host, false);
+                        }
+                        Err(error) => {
+                            let _ = controller.Close();
+                            if let Some((_, d)) = &popup { let _ = d.Complete(); }
+                            invalidate_engine(&host, engine_error("配置浏览器控制器", &error));
+                        }
                     }
                     Ok(())
                 },
@@ -581,12 +674,37 @@ unsafe fn wire(
     core: &ICoreWebView2,
     controller: &ICoreWebView2Controller,
 ) -> windows::core::Result<()> {
+    let epoch = host.borrow().lifecycle.epoch();
     let weak = Rc::downgrade(host);
     let key = id.to_string();
     let mut token = 0;
+    core.add_ProcessFailed(
+        &ProcessFailedEventHandler::create(Box::new(move |_, args| {
+            let (Some(h), Some(args)) = (weak.upgrade().filter(|h| h.borrow().lifecycle.current(epoch)), args) else { return Ok(()); };
+            if !h.borrow().lifecycle.current(epoch) { return Ok(()); }
+            let mut kind = COREWEBVIEW2_PROCESS_FAILED_KIND::default();
+            args.ProcessFailedKind(&mut kind)?;
+            if kind == COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED {
+                invalidate_engine(&h, "浏览器进程已退出，正在自动恢复".into());
+            } else if kind == COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED {
+                if let Some(tab) = h.borrow_mut().tabs.get_mut(&key) {
+                    tab.generation += 1;
+                    tab.world = None;
+                }
+                if let Some(tab) = h.borrow_mut().tab_mut(&key) {
+                    tab.loading = false;
+                    tab.error = Some("网页渲染进程已退出，请刷新后重新读取页面".into());
+                }
+                publish(&h, false);
+            }
+            Ok(())
+        })), &mut token,
+    )?;
+    let weak = Rc::downgrade(host);
+    let key = id.to_string();
     core.add_SourceChanged(
         &SourceChangedEventHandler::create(Box::new(move |_, _| {
-            if let Some(h) = weak.upgrade() {
+            if let Some(h) = weak.upgrade().filter(|h| h.borrow().lifecycle.current(epoch)) {
                 refresh(&h, &key, false);
             }
             Ok(())
@@ -597,7 +715,7 @@ unsafe fn wire(
     let key = id.to_string();
     core.add_DocumentTitleChanged(
         &DocumentTitleChangedEventHandler::create(Box::new(move |_, _| {
-            if let Some(h) = weak.upgrade() {
+            if let Some(h) = weak.upgrade().filter(|h| h.borrow().lifecycle.current(epoch)) {
                 refresh(&h, &key, false);
             }
             Ok(())
@@ -608,7 +726,7 @@ unsafe fn wire(
     let key = id.to_string();
     core.add_HistoryChanged(
         &HistoryChangedEventHandler::create(Box::new(move |_, _| {
-            if let Some(h) = weak.upgrade() {
+            if let Some(h) = weak.upgrade().filter(|h| h.borrow().lifecycle.current(epoch)) {
                 refresh(&h, &key, false);
             }
             Ok(())
@@ -619,7 +737,7 @@ unsafe fn wire(
     let key = id.to_string();
     core.add_NavigationStarting(
         &NavigationStartingEventHandler::create(Box::new(move |_, _| {
-            if let Some(h) = weak.upgrade() {
+            if let Some(h) = weak.upgrade().filter(|h| h.borrow().lifecycle.current(epoch)) {
                 if let Some(t) = h.borrow_mut().tab_mut(&key) {
                     t.loading = true;
                     t.error = None;
@@ -638,7 +756,7 @@ unsafe fn wire(
     let key = id.to_string();
     core.add_NavigationCompleted(
         &NavigationCompletedEventHandler::create(Box::new(move |_, args| {
-            if let Some(h) = weak.upgrade() {
+            if let Some(h) = weak.upgrade().filter(|h| h.borrow().lifecycle.current(epoch)) {
                 let mut success = BOOL::default();
                 let mut status = COREWEBVIEW2_WEB_ERROR_STATUS::default();
                 if let Some(args) = args {
@@ -666,7 +784,7 @@ unsafe fn wire(
     let key = id.to_string();
     core.add_NewWindowRequested(
         &NewWindowRequestedEventHandler::create(Box::new(move |_, args| {
-            let (Some(h), Some(args)) = (weak.upgrade(), args) else {
+            let (Some(h), Some(args)) = (weak.upgrade().filter(|h| h.borrow().lifecycle.current(epoch)), args) else {
                 return Ok(());
             };
             let url = text(|p| args.Uri(p));
@@ -694,7 +812,7 @@ unsafe fn wire(
             args.SetHandled(true)?;
             if let Err(error) = create_tab(&h, tab, Some((args, deferral.clone()))) {
                 let _ = deferral.Complete();
-                fail(&h, error);
+                fail(&h, engine_error("创建浏览器弹窗", &error));
             }
             publish(&h, true);
             Ok(())
@@ -705,7 +823,7 @@ unsafe fn wire(
     let key = id.to_string();
     core.add_PermissionRequested(
         &PermissionRequestedEventHandler::create(Box::new(move |_, args| {
-            let (Some(h), Some(args)) = (weak.upgrade(), args) else {
+            let (Some(h), Some(args)) = (weak.upgrade().filter(|h| h.borrow().lifecycle.current(epoch)), args) else {
                 return Ok(());
             };
             let mut kind = COREWEBVIEW2_PERMISSION_KIND::default();
@@ -736,7 +854,7 @@ unsafe fn wire(
     let key = id.to_string();
     core.add_ContainsFullScreenElementChanged(
         &ContainsFullScreenElementChangedEventHandler::create(Box::new(move |sender, _| {
-            if let (Some(h), Some(core)) = (weak.upgrade(), sender) {
+            if let (Some(h), Some(core)) = (weak.upgrade().filter(|h| h.borrow().lifecycle.current(epoch)), sender) {
                 let mut full = BOOL::default();
                 core.ContainsFullScreenElement(&mut full)?;
                 if let Some(t) = h.borrow_mut().tabs.get_mut(&key) {
@@ -752,7 +870,7 @@ unsafe fn wire(
     let key = id.to_string();
     core.add_WindowCloseRequested(
         &WindowCloseRequestedEventHandler::create(Box::new(move |_, _| {
-            if let Some(h) = weak.upgrade() {
+            if let Some(h) = weak.upgrade().filter(|h| h.borrow().lifecycle.current(epoch)) {
                 let (app, owner) = {
                     let h = h.borrow();
                     (h.app.clone(), h.owner.clone())
@@ -774,7 +892,7 @@ unsafe fn wire(
     let key = id.to_string();
     controller.add_ZoomFactorChanged(
         &ZoomFactorChangedEventHandler::create(Box::new(move |sender, _| {
-            if let (Some(h), Some(controller)) = (weak.upgrade(), sender) {
+            if let (Some(h), Some(controller)) = (weak.upgrade().filter(|h| h.borrow().lifecycle.current(epoch)), sender) {
                 let mut zoom = 1.0;
                 controller.ZoomFactor(&mut zoom)?;
                 if let Some(t) = h.borrow_mut().state.tabs.iter_mut().find(|t| t.id == key) {
@@ -790,7 +908,7 @@ unsafe fn wire(
     let key = id.to_string();
     controller.add_AcceleratorKeyPressed(
         &AcceleratorKeyPressedEventHandler::create(Box::new(move |_, args| {
-            let (Some(h), Some(args)) = (weak.upgrade(), args) else {
+            let (Some(h), Some(args)) = (weak.upgrade().filter(|h| h.borrow().lifecycle.current(epoch)), args) else {
                 return Ok(());
             };
             let mut kind = COREWEBVIEW2_KEY_EVENT_KIND::default();
@@ -846,7 +964,7 @@ unsafe fn wire(
     let key = id.to_string();
     core.cast::<ICoreWebView2_4>()?.add_DownloadStarting(
         &DownloadStartingEventHandler::create(Box::new(move |_, args| {
-            if let (Some(h), Some(args)) = (weak.upgrade(), args) {
+            if let (Some(h), Some(args)) = (weak.upgrade().filter(|h| h.borrow().lifecycle.current(epoch)), args) {
                 if let Some(task) = h.borrow_mut().tasks.get_mut(&key) {
                     task.error = Some("后台读取遇到下载，请在可见浏览器中操作".into());
                     args.SetCancel(true)?;
@@ -866,6 +984,7 @@ unsafe fn watch_download(
     host: &HostRef,
     operation: ICoreWebView2DownloadOperation,
 ) -> windows::core::Result<()> {
+    let epoch = host.borrow().lifecycle.epoch();
     let id = uuid::Uuid::new_v4().to_string();
     host.borrow_mut()
         .downloads
@@ -900,7 +1019,7 @@ unsafe fn watch_download(
     let mut token = 0;
     operation.add_BytesReceivedChanged(
         &BytesReceivedChangedEventHandler::create(Box::new(move |sender, _| {
-            if let (Some(h), Some(op)) = (weak.upgrade(), sender) {
+            if let (Some(h), Some(op)) = (weak.upgrade().filter(|h| h.borrow().lifecycle.current(epoch)), sender) {
                 update(&h, &key, &op);
             }
             Ok(())
@@ -910,7 +1029,7 @@ unsafe fn watch_download(
     let weak = Rc::downgrade(host);
     operation.add_StateChanged(
         &StateChangedEventHandler::create(Box::new(move |sender, _| {
-            if let (Some(h), Some(op)) = (weak.upgrade(), sender) {
+            if let (Some(h), Some(op)) = (weak.upgrade().filter(|h| h.borrow().lifecycle.current(epoch)), sender) {
                 update(&h, &id, &op);
             }
             Ok(())
@@ -923,10 +1042,11 @@ unsafe fn extensions(host: &HostRef, core: &ICoreWebView2) -> windows::core::Res
     let profile = core.cast::<ICoreWebView2_13>()?.Profile()?;
     let private = text(|p| profile.ProfileName(p)) == "Private";
     let profile = profile.cast::<ICoreWebView2Profile7>()?;
+    let epoch = host.borrow().lifecycle.epoch();
     let weak = Rc::downgrade(host);
     profile.GetBrowserExtensions(&ProfileGetBrowserExtensionsCompletedHandler::create(
         Box::new(move |result, list| {
-            let Some(h) = weak.upgrade() else {
+            let Some(h) = weak.upgrade().filter(|h| h.borrow().lifecycle.current(epoch)) else {
                 return Ok(());
             };
             if !h.borrow().state.tabs.iter().any(|tab| {
@@ -934,7 +1054,11 @@ unsafe fn extensions(host: &HostRef, core: &ICoreWebView2) -> windows::core::Res
             }) {
                 return Ok(());
             }
-            result?;
+            if let Err(error) = result {
+                if invalid_state(&error) { invalidate_engine(&h, engine_error("读取浏览器扩展", &error)); }
+                else { fail(&h, engine_error("读取浏览器扩展", &error)); }
+                return Ok(());
+            }
             let Some(list) = list else {
                 return Ok(());
             };
@@ -979,6 +1103,7 @@ unsafe fn find(
     action: &str,
     term: &str,
 ) -> windows::core::Result<()> {
+    let epoch = host.borrow().lifecycle.epoch();
     let find = core.cast::<ICoreWebView2_28>()?.Find()?;
     if action == "find_stop" || term.is_empty() {
         if let Some(tab) = host.borrow_mut().tabs.get_mut(id) {
@@ -1012,7 +1137,7 @@ unsafe fn find(
     find.Start(
         &options,
         &FindStartCompletedHandler::create(Box::new(move |result| {
-            if let (Some(h), Err(error)) = (weak.upgrade(), result) {
+            if let (Some(h), Err(error)) = (weak.upgrade().filter(|h| h.borrow().lifecycle.current(epoch)), result) {
                 fail(&h, error);
             }
             Ok(())
@@ -1021,6 +1146,7 @@ unsafe fn find(
 }
 
 fn operate(host: &HostRef, request: BrowserRequest) -> Result<(), String> {
+    let epoch = host.borrow().lifecycle.epoch();
     unsafe {
         match request {
             BrowserRequest::Init => {}
@@ -1031,7 +1157,7 @@ fn operate(host: &HostRef, request: BrowserRequest) -> Result<(), String> {
                     h.state.active = Some(tab.id.clone());
                     h.state.tabs.push(tab.clone());
                 }
-                create_tab(host, tab, None).map_err(|e| e.to_string())?;
+                create_tab(host, tab, None).map_err(|e| com_failure(host, "操作浏览器", e))?;
             }
             BrowserRequest::Select { id } => {
                 if !host.borrow().state.tabs.iter().any(|t| t.id == id) {
@@ -1039,20 +1165,20 @@ fn operate(host: &HostRef, request: BrowserRequest) -> Result<(), String> {
                 }
                 host.borrow_mut().state.active = Some(id.clone());
                 let controller = host.borrow().tabs.get(&id).map(|t| t.controller.clone());
-                apply_bounds(host).map_err(|e| e.to_string())?;
+                apply_bounds(host).map_err(|e| com_failure(host, "操作浏览器", e))?;
                 if let Some(controller) = controller {
                     controller
                         .MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC)
-                        .map_err(|e| e.to_string())?;
+                        .map_err(|e| com_failure(host, "操作浏览器", e))?;
                 }
                 if let Ok(core) = get_core(host, &id) {
-                    extensions(host, &core).map_err(|e| e.to_string())?;
+                    extensions(host, &core).map_err(|e| com_failure(host, "操作浏览器", e))?;
                 }
             }
             BrowserRequest::Close { id } => {
                 let native = host.borrow_mut().tabs.remove(&id);
                 if let Some(tab) = native {
-                    tab.controller.Close().map_err(|e| e.to_string())?;
+                    tab.controller.Close().map_err(|e| com_failure(host, "操作浏览器", e))?;
                 }
                 {
                     let mut h = host.borrow_mut();
@@ -1096,14 +1222,14 @@ fn operate(host: &HostRef, request: BrowserRequest) -> Result<(), String> {
                     tab.id = uuid::Uuid::new_v4().to_string();
                     host.borrow_mut().state.tabs.push(tab.clone());
                     host.borrow_mut().state.active = Some(tab.id.clone());
-                    create_tab(host, tab, None).map_err(|e| e.to_string())?;
+                    create_tab(host, tab, None).map_err(|e| com_failure(host, "操作浏览器", e))?;
                 }
             }
             BrowserRequest::Navigate { id, input } => {
                 let url = address(&input)?;
                 let core = get_core(host, &id)?;
                 core.Navigate(PCWSTR(wide(&url).as_ptr()))
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| com_failure(host, "操作浏览器", e))?;
             }
             BrowserRequest::Action {
                 id,
@@ -1163,15 +1289,15 @@ fn operate(host: &HostRef, request: BrowserRequest) -> Result<(), String> {
                             .cast::<ICoreWebView2_13>()
                             .and_then(|c| c.Profile())
                             .and_then(|p| p.cast::<ICoreWebView2Profile2>())
-                            .map_err(|e| e.to_string())?;
+                            .map_err(|e| com_failure(host, "操作浏览器", e))?;
                         profile.ClearBrowsingData(
                             COREWEBVIEW2_BROWSING_DATA_KINDS_ALL_SITE
                                 | COREWEBVIEW2_BROWSING_DATA_KINDS_DISK_CACHE
                                 | COREWEBVIEW2_BROWSING_DATA_KINDS_SETTINGS,
                             &ClearBrowsingDataCompletedHandler::create(Box::new(move |result| {
-                                if let Some(h) = weak.upgrade() {
+                                if let Some(h) = weak.upgrade().filter(|h| h.borrow().lifecycle.current(epoch)) {
                                     if let Err(error) = result {
-                                        fail(&h, error);
+                                        fail(&h, engine_error("浏览器操作回调", &error));
                                     } else {
                                         publish(&h, false);
                                     }
@@ -1187,7 +1313,7 @@ fn operate(host: &HostRef, request: BrowserRequest) -> Result<(), String> {
                     }),
                     _ => return Err("Unknown browser action".into()),
                 };
-                result.map_err(|e| format!("{name}: {e}"))?;
+                result.map_err(|e| com_failure(host, &name, e))?;
             }
             BrowserRequest::Bookmark { id } => {
                 let mut h = host.borrow_mut();
@@ -1231,8 +1357,8 @@ fn operate(host: &HostRef, request: BrowserRequest) -> Result<(), String> {
                     } else {
                         COREWEBVIEW2_PERMISSION_STATE_DENY
                     })
-                    .map_err(|e| e.to_string())?;
-                permission.deferral.Complete().map_err(|e| e.to_string())?;
+                    .map_err(|e| com_failure(host, "操作浏览器", e))?;
+                permission.deferral.Complete().map_err(|e| com_failure(host, "操作浏览器", e))?;
             }
             BrowserRequest::Download { id, name } => {
                 let op = host
@@ -1247,7 +1373,7 @@ fn operate(host: &HostRef, request: BrowserRequest) -> Result<(), String> {
                     "cancel" => op.Cancel(),
                     _ => return Err("Unknown download action".into()),
                 }
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| com_failure(host, "操作浏览器", e))?;
             }
             BrowserRequest::Extension { id, name, path } => {
                 let active = host.borrow().state.active.clone().ok_or("No active tab")?;
@@ -1264,14 +1390,14 @@ fn operate(host: &HostRef, request: BrowserRequest) -> Result<(), String> {
                     core.cast::<ICoreWebView2_13>()
                         .and_then(|c| c.Profile())
                         .and_then(|p| p.cast::<ICoreWebView2Profile7>())
-                        .map_err(|e| e.to_string())?
+                        .map_err(|e| com_failure(host, "操作浏览器", e))?
                         .AddBrowserExtension(
                             PCWSTR(wide(&path).as_ptr()),
                             &ProfileAddBrowserExtensionCompletedHandler::create(Box::new(
                                 move |result, _| {
-                                    if let Some(h) = weak.upgrade() {
+                                    if let Some(h) = weak.upgrade().filter(|h| h.borrow().lifecycle.current(epoch)) {
                                         if let Err(e) = result {
-                                            fail(&h, e);
+                                            fail(&h, engine_error("浏览器扩展管理", &e));
                                         } else {
                                             extensions(&h, &core_copy)?;
                                         }
@@ -1280,7 +1406,7 @@ fn operate(host: &HostRef, request: BrowserRequest) -> Result<(), String> {
                                 },
                             )),
                         )
-                        .map_err(|e| e.to_string())?;
+                        .map_err(|e| com_failure(host, "操作浏览器", e))?;
                 } else {
                     let ext = host
                         .borrow()
@@ -1292,9 +1418,9 @@ fn operate(host: &HostRef, request: BrowserRequest) -> Result<(), String> {
                     if name == "remove" {
                         ext.Remove(&BrowserExtensionRemoveCompletedHandler::create(Box::new(
                             move |result| {
-                                if let Some(h) = weak.upgrade() {
+                                if let Some(h) = weak.upgrade().filter(|h| h.borrow().lifecycle.current(epoch)) {
                                     if let Err(e) = result {
-                                        fail(&h, e);
+                                        fail(&h, engine_error("浏览器扩展管理", &e));
                                     } else {
                                         extensions(&h, &core)?;
                                     }
@@ -1302,15 +1428,15 @@ fn operate(host: &HostRef, request: BrowserRequest) -> Result<(), String> {
                                 Ok(())
                             },
                         )))
-                        .map_err(|e| e.to_string())?;
+                        .map_err(|e| com_failure(host, "操作浏览器", e))?;
                     } else {
                         ext.Enable(
                             name == "enable",
                             &BrowserExtensionEnableCompletedHandler::create(Box::new(
                                 move |result| {
-                                    if let Some(h) = weak.upgrade() {
+                                    if let Some(h) = weak.upgrade().filter(|h| h.borrow().lifecycle.current(epoch)) {
                                         if let Err(e) = result {
-                                            fail(&h, e);
+                                            fail(&h, engine_error("浏览器扩展管理", &e));
                                         } else {
                                             extensions(&h, &core)?;
                                         }
@@ -1319,13 +1445,13 @@ fn operate(host: &HostRef, request: BrowserRequest) -> Result<(), String> {
                                 },
                             )),
                         )
-                        .map_err(|e| e.to_string())?;
+                        .map_err(|e| com_failure(host, "操作浏览器", e))?;
                     }
                 }
             }
             BrowserRequest::ClearHistory => host.borrow_mut().state.history.clear(),
         }
-        apply_bounds(host).map_err(|e| e.to_string())?;
+        apply_bounds(host).map_err(|e| com_failure(host, "操作浏览器", e))?;
         publish(host, true);
         Ok(())
     }
@@ -1346,16 +1472,6 @@ pub async fn request(
     let (tx, rx) = tokio::sync::oneshot::channel();
     let app_copy = app.clone();
     app.run_on_main_thread(move || {
-        if matches!(request, BrowserRequest::Init) {
-            let retry = HOSTS.with(|hosts| {
-                hosts.borrow().get(&owner).is_some_and(|h| {
-                    h.borrow().environment.is_none() && h.borrow().state.error.is_some()
-                })
-            });
-            if retry {
-                destroy(&owner);
-            }
-        }
         let result = initialize(app_copy, owner.clone()).and_then(|h| {
             if !matches!(request, BrowserRequest::Init) {
                 h.borrow_mut().state.error = None;

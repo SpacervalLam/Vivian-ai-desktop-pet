@@ -45,13 +45,29 @@ try {
   const render = () => { stateIndex = refIndex = 0; effects.length = 0; const tree = Pet({ ambientMotionEnabled: false }, {}); initial = false; return tree; };
   const sprite = tree => find(tree, node => node.props?.className === 'chibi-pet-sprite');
   const pose = tree => find(tree, node => node.props?.className?.includes('chibi-pet-stage')).props.className;
-  const frame = () => { const [x, y] = sprite(render()).props.style.backgroundPosition.split(' ').map(parseFloat); return Math.round(y / 50) * 4 + Math.round(x / (100 / 3)); };
+  const frame = () => { const style = sprite(render()).props.style; const rows = parseFloat(style.backgroundSize.split(' ')[1]) / 100; const [x, y] = style.backgroundPosition.split(' ').map(parseFloat); return Math.round(y * (rows - 1) / 100) * 4 + Math.round(x / (100 / 3)); };
   const send = (name, payload) => listeners.get(name)({ payload: { character_id: character, ...payload } });
   const tick = () => {
     const entry = [...timers.entries()].find(([, timer]) => timer.ms < 1000);
     assert.ok(entry, 'animation has a pending frame');
     timers.delete(entry[0]); entry[1].fn();
   };
+  render();
+  handle.setExpression('busy-loop');
+  render();
+  const busyCleanup = effects.find(fn => fn.toString().includes('targetFrames'))();
+  const busyFrames = [frame()];
+  const busyDelays = [];
+  for (let i = 0; i < 28; i++) {
+    busyDelays.push([...timers.values()].find(timer => timer.ms < 1000).ms);
+    tick(); busyFrames.push(frame());
+  }
+  assert.deepEqual(busyFrames, [0,1,2,3,4,5,6,7,6,5,4,3,2,1,0,1,2,3,4,5,6,7,6,5,4,3,2,1,0], 'busy loops reverse smoothly at both endpoints');
+  assert.deepEqual(busyDelays.slice(0, 14), [420,240,200,180,180,200,240,420,240,200,180,180,200,240], 'busy slows down and pauses at each turn');
+  assert.equal(busyDelays.slice(0, 14).reduce((sum, ms) => sum + ms, 0), 3320);
+  busyCleanup();
+  assert.ok([...timers.values()].every(timer => timer.ms >= 1000), 'leaving busy cancels its pending frame');
+  handle.resetExpression();
   render();
   const eventCleanup = effects.find(fn => fn.toString().includes('tts:started'))();
   await flush();

@@ -97,6 +97,18 @@ pub fn browser_cache(relative: &Path) -> bool {
             }))
 }
 
+/// 可整体清理的浏览器缓存目录；崩溃报告与运行指标属于诊断数据，不在此列。
+pub fn clearable_browser_cache(relative: &Path) -> bool {
+    if !browser_cache(relative) {
+        return false;
+    }
+    let name = relative
+        .file_name()
+        .map(|n| n.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    !matches!(name.as_str(), "crashpad" | "browsermetrics")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -168,6 +180,27 @@ mod tests {
             "browser/engine/EBWebView/component_crx_cache/package",
         ] {
             assert!(browser_cache(Path::new(rel)), "{rel}");
+        }
+    }
+
+    #[test]
+    fn only_cache_directories_are_clearable() {
+        for rel in [
+            "browser/engine/EBWebView/WV2Profile_default/Cache",
+            "browser/engine/EBWebView/Default/Code Cache",
+            "browser/engine/EBWebView/GrShaderCache",
+            "browser/engine/EBWebView/component_crx_cache",
+        ] {
+            assert!(clearable_browser_cache(Path::new(rel)), "{rel}");
+        }
+        for rel in [
+            "browser/engine/EBWebView/Crashpad",
+            "browser/engine/EBWebView/BrowserMetrics",
+            "browser/engine/EBWebView/WV2Profile_default/Network",
+            "browser/engine/EBWebView/WV2Profile_default/Network/Cookies",
+            "browser/engine/EBWebView/WV2Profile_default/Local Storage/leveldb",
+        ] {
+            assert!(!clearable_browser_cache(Path::new(rel)), "{rel}");
         }
     }
 }

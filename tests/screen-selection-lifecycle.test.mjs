@@ -57,7 +57,7 @@ try{
  assert.deepEqual(calls.at(-1).args,{sessionId:'current',region:{x:20,y:30,width:200,height:100},action:'freeze'});
  const nodeText=node=>node==null||typeof node==='boolean'?'':Array.isArray(node)?node.map(nodeText).join(''):typeof node==='object'?nodeText(node.props?.children):String(node);
  const buttons=node=>!node||typeof node!=='object'?[]:[...(node.type==='button'?[node]:[]),...[node.props?.children].flat(Infinity).flatMap(buttons)];
- for(const [language,expected] of [['en',['Cancel','Save','Analyze','Copy to clipboard','Copy & analyze','Save & analyze','Freeze↵']],['ja',['キャンセル','保存','分析','クリップボードにコピー','コピーして分析','保存して分析','画面を固定↵']],['zh-CN',['取消','保存','分析','复制到剪贴板','复制并分析','保存并分析','定格画面↵']]]){
+ for(const [language,expected] of [['en',['Cancel','Save','Analyze','Copy to clipboard','Save & analyze','Freeze↵']],['ja',['キャンセル','保存','分析','クリップボードにコピー','保存して分析','画面を固定↵']],['zh-CN',['取消','保存','分析','复制到剪贴板','保存并分析','定格画面↵']]]){
    events.get('config:language-changed')({payload:{language}});
    tree=render();
    const toolbar=find(tree,n=>n.props?.className==='screen-selection-toolbar');

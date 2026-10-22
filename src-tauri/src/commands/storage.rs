@@ -20,3 +20,9 @@ pub async fn clear_storage_cache() -> Result<(), String> {
     tokio::task::spawn_blocking(|| crate::storage::usage::clear_cache(&crate::utils::path::get_user_data_dir()))
         .await.map_err(|e| e.to_string())?
 }
+
+#[tauri::command]
+pub async fn clear_browser_cache() -> Result<crate::storage::usage::BrowserCacheClear, String> {
+    tokio::task::spawn_blocking(|| crate::storage::usage::clear_browser_cache(&crate::utils::path::get_user_data_dir()))
+        .await.map_err(|e| e.to_string())?
+}

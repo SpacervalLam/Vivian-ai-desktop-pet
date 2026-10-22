@@ -257,7 +257,7 @@ pub fn register_builtin_tools(tool_system: &Arc<ToolSystem>) {
         Arc::new(discovery_tools::ReadPlatformContentTool::new()),
     ];
 
-    // 浏览器自动化工具（经精简 Chrome 扩展控制用户真实浏览器，保留登录态）
+    // 内嵌浏览器工具（经 browser_bridge 调用进程内 WebView2，共享普通配置的登录态）
     tools.extend(crate::browser_bridge::tools::all_browser_tools());
 
     let count = tools.len();

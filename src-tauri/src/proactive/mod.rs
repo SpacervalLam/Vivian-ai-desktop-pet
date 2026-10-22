@@ -378,6 +378,14 @@ const GREETING_SUPPRESSION_AFTER_SELF_SPEECH_SECS: f64 = 600.0;
 /// 即时响应，不受这条限制；工作结果另有专门的通知路径。
 const OPTIONAL_PROACTIVE_SPEECH_GAP_SECS: f64 = 900.0;
 
+/// 「把话题续下去」与角色自己上一条发言之间的最小间隔（秒）。
+///
+/// 普通聊天回复不更新 `last_proactive_speech_time`，所以刚回完一句时
+/// TopicExtension 仍可能在几秒后触发，把同一句话再生成一遍。这里要求
+/// 对话确实停了一会儿才允许续话题；它是时间语义，不做文本比对，因此
+/// 不伤害真正需要重复某个表达的语境。
+const TOPIC_EXTENSION_SELF_SPEECH_GAP_SECS: f64 = 90.0;
+
 static RNG_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// 生成 [0, 1) 区间伪随机浮点数
@@ -1015,6 +1023,17 @@ impl ProactiveOrchestrator {
 
     pub fn seconds_since_user_interaction(&self) -> f64 {
         (chrono::Local::now().timestamp() as f64 - self.state.read().last_interaction_time).max(0.0)
+    }
+
+    /// 距角色自己上一条发言（任何渠道，含普通聊天回复）过去了多少秒。
+    ///
+    /// 没有可用的对话历史时返回 `None`，调用方应放行而不是误判为「刚说过」。
+    fn seconds_since_own_utterance(&self, now: f64) -> Option<f64> {
+        let dialogue = self.dialogue.read().clone();
+        dialogue
+            .as_ref()
+            .and_then(|d| d.last_assistant_timestamp())
+            .map(|ts| (now - ts).max(0.0))
     }
 
     /// 注入 LLM 路由器（注入后 BehaviorDecider / IcebreakerGenerator / MemoryRecall
@@ -1749,6 +1768,14 @@ impl ProactiveOrchestrator {
                 _ => ProactiveTrigger::Spontaneous,
             }
         };
+        // 这条机会路径不经过 check_trigger，续话题的「自己刚说完」门槛在这里补一次。
+        if trigger == ProactiveTrigger::TopicExtension
+            && self
+                .seconds_since_own_utterance(now)
+                .is_some_and(|secs| secs < TOPIC_EXTENSION_SELF_SPEECH_GAP_SECS)
+        {
+            return false;
+        }
         {
             let state = self.state.read();
             if (!peer && state.last_proactive_speech_time > 0.0
@@ -4007,6 +4034,17 @@ impl ProactiveOrchestrator {
         }
 
         // TopicExtension / MemoryRecall 仅检查冷却，跳过时机/概率/冷却系数
+        //
+        // 但 TopicExtension 还要额外满足「自己确实已经停了一会儿」：
+        // 普通聊天回复不受上面的 last_proactive_speech_time 覆盖，若不看自己
+        // 上一条发言，刚回完几秒就会把同一句内容当成新话题再说一遍。
+        if trigger == ProactiveTrigger::TopicExtension
+            && self
+                .seconds_since_own_utterance(now)
+                .is_some_and(|secs| secs < TOPIC_EXTENSION_SELF_SPEECH_GAP_SECS)
+        {
+            return false;
+        }
         let cooldown_only = matches!(
             trigger,
             ProactiveTrigger::TopicExtension | ProactiveTrigger::MemoryRecall
@@ -4712,7 +4750,17 @@ impl ProactiveOrchestrator {
                                     )
                                 })
                                 .unwrap_or_default();
-                            format!("{}{}: {}", ts_prefix, m.role, m.content)
+                            // 明确区分「你」与「用户」：直接暴露 assistant/user 会让模型
+                            // 把自己上一句当成上下文素材继续改写，正是 TopicExtension 复读的来源之一。
+                            let speaker = match (lang_norm, m.role.as_str()) {
+                                ("en", "assistant") => "you",
+                                ("en", "user") => "user",
+                                ("ja", "assistant") => "あなた",
+                                ("ja", "user") => "ユーザー",
+                                ("assistant", _) => "你",
+                                _ => "用户",
+                            };
+                            format!("{}{}: {}", ts_prefix, speaker, m.content)
                         })
                         .collect::<Vec<_>>()
                         .join("\n");
@@ -4721,6 +4769,20 @@ impl ProactiveOrchestrator {
                 .unwrap_or_default();
             (sys, intimacy, history, recent_messages, lang)
         };
+
+        // 自己上一条发言：供 TopicExtension 判断「续话题」是否只是复读。
+        let (last_own_utterance, seconds_since_own_utterance) = dialogue_messages
+            .iter()
+            .rev()
+            .find(|m| m.role == "assistant")
+            .map(|m| {
+                let secs = m
+                    .timestamp
+                    .map(|t| (ctx.now - t.timestamp() as f64).max(0.0))
+                    .unwrap_or(f64::MAX);
+                (m.content.clone(), secs)
+            })
+            .unwrap_or_else(|| (String::new(), f64::MAX));
 
         // Freeze the addressee before composing; ordinary proactive turns address the user.
         let recipient = if trigger == ProactiveTrigger::CrossCharacterReply {
@@ -4753,6 +4815,8 @@ impl ProactiveOrchestrator {
             memory_hint: mem.clone(),
             mood_hint: ctx.user_emotion.clone(),
             dialogue_history,
+            last_own_utterance,
+            seconds_since_own_utterance,
             intimacy,
             away_seconds: ctx.away_seconds,
             active_window: self.last_app_category.read().clone(),

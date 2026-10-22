@@ -10,7 +10,7 @@ import { synchronizeWindowLanguage } from '../utils/windowLanguage';
 import './ScreenSelectionWindow.css';
 
 interface Frame { image: string; width: number; height: number }
-type SelectionAction = 'analyze' | 'save' | 'save_and_analyze' | 'copy' | 'copy_and_analyze' | 'freeze' | 'cancel';
+type SelectionAction = 'analyze' | 'save' | 'save_and_analyze' | 'copy' | 'freeze' | 'cancel';
 type AnalysisAction = 'analyze' | 'save_and_analyze';
 type AnalysisCharacter = 'vivian' | 'nana';
 
@@ -21,9 +21,9 @@ export default function ScreenSelectionWindow() {
   // and close in rendered width across languages: 6 / 14 / 7 characters for
   // `select` (CJK glyphs are ~2x a Latin glyph) and 2 / 6 / 5 for `cancel`.
   const copy = {
-    zh: { freeze: '定格画面', select: '拖动选择区域', cancel: '取消', save: '保存', saveAnalyze: '保存并分析', analyze: '分析', copy: '复制到剪贴板', copyAnalyze: '复制并分析', screen: '屏幕快照' },
-    en: { freeze: 'Freeze', select: 'Drag to select', cancel: 'Cancel', save: 'Save', saveAnalyze: 'Save & analyze', analyze: 'Analyze', copy: 'Copy to clipboard', copyAnalyze: 'Copy & analyze', screen: 'Screen snapshot' },
-    ja: { freeze: '画面を固定', select: 'ドラッグで選択', cancel: 'キャンセル', save: '保存', saveAnalyze: '保存して分析', analyze: '分析', copy: 'クリップボードにコピー', copyAnalyze: 'コピーして分析', screen: '画面のスナップショット' },
+    zh: { freeze: '定格画面', select: '拖动选择区域', cancel: '取消', save: '保存', saveAnalyze: '保存并分析', analyze: '分析', copy: '复制到剪贴板', screen: '屏幕快照' },
+    en: { freeze: 'Freeze', select: 'Drag to select', cancel: 'Cancel', save: 'Save', saveAnalyze: 'Save & analyze', analyze: 'Analyze', copy: 'Copy to clipboard', screen: 'Screen snapshot' },
+    ja: { freeze: '画面を固定', select: 'ドラッグで選択', cancel: 'キャンセル', save: '保存', saveAnalyze: '保存して分析', analyze: '分析', copy: 'クリップボードにコピー', screen: '画面のスナップショット' },
   }[language];
   const [sessionId, setSessionId] = useState<string | null>(null);
   const activeSession = useRef<string | null>(null);
@@ -198,7 +198,6 @@ export default function ScreenSelectionWindow() {
       <button className="selection-text-button" onClick={() => void finish('save')} disabled={submitting}><Download size={16} /><span>{copy.save}</span></button>
       {analysisButton('analyze')}
       <button className="selection-text-button" onClick={() => void finish('copy')} disabled={submitting}><Copy size={16} /><span>{copy.copy}</span></button>
-      <button className="selection-text-button" onClick={() => void finish('copy_and_analyze')} disabled={submitting}>{copy.copyAnalyze}</button>
       {analysisButton('save_and_analyze')}
       <span className="selection-toolbar-divider" />
       <button className="selection-text-button" onClick={() => void finish('freeze')} disabled={submitting}><ScanLine size={16} /><span>{copy.freeze}</span><kbd>↵</kbd></button>

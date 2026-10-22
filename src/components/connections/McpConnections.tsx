@@ -1,7 +1,8 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { invoke } from '@tauri-apps/api/core';
-import { TextField, ToggleField, SelectField, inputStyle, labelStyle, sectionTitleStyle } from '../settings/SettingsFields';
+import { Cable, ChevronRight, Globe, Loader, Package, Pencil, Plus, Power, RotateCcw, Terminal, Trash2, Check } from 'lucide-react';
+import { TextField, ToggleField, SelectField, inputStyle, labelStyle } from '../settings/SettingsFields';
 import { parseMcpArguments, parseMcpMap, type McpConfig } from './mcpConfig';
 
 interface ServerView {
@@ -11,7 +12,6 @@ interface ServerView {
 }
 interface Editor { config: McpConfig; args: string; env: string; headers: string; existing: boolean }
 const emptyConfig = (): McpConfig => ({ id: '', name: '', transport: 'stdio', command: '', args: [], env: {}, headers: {}, cwd: null, url: null, enabled: true });
-const button: React.CSSProperties = { padding: '5px 10px', borderRadius: 7, border: '1px solid var(--panel-border)', background: 'var(--panel-surface)', color: 'var(--panel-text)', cursor: 'pointer' };
 
 export default function McpConnections() {
   const { i18n } = useTranslation();
@@ -21,6 +21,7 @@ export default function McpConnections() {
   const [configs, setConfigs] = useState<McpConfig[]>([]);
   const [editor, setEditor] = useState<Editor | null>(null);
   const [busy, setBusy] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [test, setTest] = useState<{ tool_count: number; tools: { name: string; inputSchema: unknown }[] } | null>(null);
   const alive = useRef(true);
@@ -34,7 +35,7 @@ export default function McpConnections() {
   }, []);
   useEffect(() => {
     alive.current = true;
-    void refresh(true).catch(e => { if (alive.current) setError(String(e)); });
+    void refresh(true).catch(e => { if (alive.current) setError(String(e)); }).finally(() => { if (alive.current) setLoading(false); });
     const interval = window.setInterval(() => { void refresh().catch(e => { if (alive.current) setError(String(e)); }); }, 4000);
     return () => { alive.current = false; window.clearInterval(interval); };
   }, [refresh]);
@@ -67,30 +68,63 @@ export default function McpConnections() {
       <div style={{ fontSize: 11, color: 'var(--panel-text-secondary)' }}>{help}</div>
     </div>
   );
-  return <section style={{ marginTop: 28 }}>
-    <div style={sectionTitleStyle}>MCP</div>
-    <p style={{ fontSize: 12, color: 'var(--panel-text-secondary)' }}>{say('连接本地工具或 Streamable HTTP 服务，工具可用于陪伴和工作会话。', 'Connect local tools or Streamable HTTP services for companion and work sessions.', 'ローカルツールまたは Streamable HTTP サービスを接続します。')}</p>
-    {error && <div role="alert" style={{ color: 'var(--panel-danger, #b33)', whiteSpace: 'pre-wrap', marginBottom: 12 }}>{error}</div>}
-    {servers.map(server => <div key={server.id} style={{ border: '1px solid var(--panel-border)', borderRadius: 9, padding: 12, marginBottom: 9 }}>
-      <div style={{ display: 'flex', gap: 9, flexWrap: 'wrap', alignItems: 'center' }}>
-        <strong>{server.name}</strong><code>{server.id}</code><span>{server.transport}</span>
-        <span style={{ marginLeft: 'auto', color: server.alive ? 'var(--panel-success)' : 'var(--panel-text-secondary)' }}>{status(server.status)} · {server.tool_count} {say('个工具', 'tools', 'ツール')}</span>
+  return <section className="mcp-connections">
+    <div className="mcp-section-heading">
+      <div className="connection-section-heading">
+        <div className="connection-title-row"><h3>{say('MCP 服务', 'MCP services', 'MCP サービス')}</h3>
+          {servers.length > 0 && <span className="connection-count">{servers.filter(server => server.alive).length}/{servers.length} {say('已连接', 'connected', '接続済み')}</span>}
+        </div>
+        <p>{say('连接本地工具或远程服务，为陪伴和工作会话扩展能力。', 'Connect local tools or remote services for companion and work sessions.', 'ローカルツールやリモートサービスで会話の機能を拡張します。')}</p>
       </div>
-      {server.source_plugin && <small>{say('来源插件：', 'Plugin: ', 'プラグイン：')}{server.source_plugin}</small>}
-      {server.last_error && <p style={{ margin: '7px 0', fontSize: 12, overflowWrap: 'anywhere' }}>{server.last_error}</p>}
-      {server.reconnect_attempts > 0 && <small>{say('已重试', 'Retry attempts', '再試行回数')} {server.reconnect_attempts}/5</small>}
-      {server.tools.length > 0 && <details><summary>{say('可用工具', 'Available tools', '利用可能なツール')}</summary><pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{server.tools.join('\n')}</pre></details>}
-      <div style={{ display: 'flex', gap: 7, marginTop: 9, flexWrap: 'wrap' }}>
-        <button type="button" style={button} disabled={busy} onClick={() => { const config = configs.find(c => c.id === server.id); if (config) edit(config, true); }}>{say('编辑', 'Edit', '編集')}</button>
-        <button type="button" style={button} disabled={busy || !server.enabled || server.status === 'blocked'} onClick={() => void act(() => invoke('reconnect_mcp_server', { serverId: server.id }))}>{say('重新连接', 'Reconnect', '再接続')}</button>
-        <button type="button" style={button} disabled={busy} onClick={() => void act(async () => { const config = configs.find(c => c.id === server.id); if (config) await invoke('add_mcp_server', { config: { ...config, enabled: !server.enabled } }); })}>{server.enabled ? say('停用', 'Disable', '無効化') : say('启用', 'Enable', '有効化')}</button>
-        {server.source_plugin ? <button type="button" style={button} disabled={busy} onClick={() => void act(() => invoke('reset_mcp_server_override', { serverId: server.id }))}>{say('恢复插件默认', 'Restore plugin defaults', 'プラグインの既定値に戻す')}</button> : <button type="button" style={button} disabled={busy} onClick={() => void act(() => invoke('remove_mcp_server', { serverId: server.id }))}>{say('移除连接', 'Remove', '削除')}</button>}
-      </div>
-    </div>)}
-    {editor ? <fieldset disabled={busy} style={{ border: '1px solid var(--panel-border)', borderRadius: 9, padding: 14 }}>
+      {!editor && <button type="button" className="connection-button connection-button-primary" disabled={busy} onClick={() => edit()}><Plus size={15} />{say('添加 MCP 连接', 'Add MCP connection', 'MCP 接続を追加')}</button>}
+    </div>
+    {error && <div role="alert" className="connection-alert">{error}</div>}
+    {loading ? <div className="connection-empty-inline" role="status"><Loader size={17} className="connection-spin" />{say('正在加载服务…', 'Loading services…', 'サービスを読み込み中…')}</div>
+      : servers.length === 0 && !editor ? <div className="mcp-empty">
+        <span className="mcp-empty-icon"><Cable size={26} /></span>
+        <strong>{say('还没有 MCP 服务', 'No MCP services yet', 'MCP サービスはまだありません')}</strong>
+        <p>{say('添加一个连接，让常用工具在会话中随时可用。', 'Add a connection to make your tools available in conversations.', '接続を追加すると、会話でツールを利用できます。')}</p>
+      </div> : null}
+    <div className="mcp-server-list">
+      {servers.map(server => {
+        const config = configs.find(c => c.id === server.id);
+        const endpoint = server.transport === 'http' ? config?.url : config?.command;
+        return <article key={server.id} className="mcp-server-card">
+          <div className="mcp-server-header">
+            <span className="connection-service-icon">{server.transport === 'http' ? <Globe size={20} /> : <Terminal size={20} />}</span>
+            <div className="connection-service-title">
+              <div className="connection-title-row"><h4>{server.name}</h4>
+                <span className={`connection-status${server.alive ? ' is-connected' : server.status === 'failed' ? ' is-failed' : ''}`}><span className="connection-status-dot" />{status(server.status)}</span>
+              </div>
+              <div className="mcp-server-meta">
+                <span>{server.transport === 'http' ? 'Streamable HTTP' : say('本地进程', 'Local process', 'ローカルプロセス')}</span>
+                <span className="mcp-meta-separator" />
+                <span>{server.tool_count} {say('个工具', 'tools', 'ツール')}</span>
+                {server.source_plugin && <span className="mcp-plugin-source"><Package size={12} />{server.source_plugin}</span>}
+              </div>
+            </div>
+          </div>
+          <div className="mcp-server-identity"><code title={server.id}>{server.id}</code>{endpoint && <span title={endpoint}>{endpoint}</span>}</div>
+          {server.last_error && <div className="mcp-server-error" role="status">{server.last_error}
+            {server.reconnect_attempts > 0 && <span>{say('已重试', 'Retry attempts', '再試行回数')} {server.reconnect_attempts}/5</span>}
+          </div>}
+          {server.tools.length > 0 && <details className="mcp-tool-details"><summary><ChevronRight size={14} />{say('可用工具', 'Available tools', '利用可能なツール')}<span>{server.tools.length}</span></summary><div className="mcp-tool-tags">{server.tools.map(tool => <code key={tool}>{tool}</code>)}</div></details>}
+          <div className="mcp-server-actions">
+            <button type="button" className="connection-button" disabled={busy || !config} onClick={() => { if (config) edit(config, true); }}><Pencil size={13} />{say('编辑', 'Edit', '編集')}</button>
+            <button type="button" className="connection-button" disabled={busy || !server.enabled || server.status === 'blocked'} onClick={() => void act(() => invoke('reconnect_mcp_server', { serverId: server.id }))}><RotateCcw size={13} />{say('重新连接', 'Reconnect', '再接続')}</button>
+            <button type="button" className="connection-button" disabled={busy || !config} onClick={() => void act(async () => { if (config) await invoke('add_mcp_server', { config: { ...config, enabled: !server.enabled } }); })}><Power size={13} />{server.enabled ? say('停用', 'Disable', '無効化') : say('启用', 'Enable', '有効化')}</button>
+            {server.source_plugin ? <button type="button" className="connection-button mcp-remove" disabled={busy} onClick={() => void act(() => invoke('reset_mcp_server_override', { serverId: server.id }))}><RotateCcw size={13} />{say('恢复插件默认', 'Restore plugin defaults', 'プラグインの既定値に戻す')}</button>
+              : <button type="button" className="connection-button connection-button-danger mcp-remove" disabled={busy} onClick={() => void act(() => invoke('remove_mcp_server', { serverId: server.id }))}><Trash2 size={13} />{say('移除连接', 'Remove', '削除')}</button>}
+          </div>
+        </article>;
+      })}
+    </div>
+    {editor ? <fieldset disabled={busy} className="mcp-editor">
       <legend>{say(editor.existing ? '编辑连接' : '添加连接', editor.existing ? 'Edit connection' : 'Add connection', '接続の設定')}</legend>
+      <div className="mcp-editor-grid">
       <TextField label="ID" value={editor.config.id} disabled={editor.existing} onChange={id => update({ id })} />
       <TextField label={say('名称', 'Name', '名前')} value={editor.config.name} onChange={name => update({ name })} />
+      </div>
       <SelectField label={say('连接方式', 'Transport', '接続方式')} value={editor.config.transport} options={[{ value: 'stdio', label: say('本地进程（stdio）', 'Local process (stdio)') }, { value: 'http', label: 'Streamable HTTP' }]} onChange={transport => update({ transport: transport as McpConfig['transport'] })} />
       {editor.config.transport === 'stdio' ? <>
         <TextField label={say('启动命令', 'Command', '起動コマンド')} value={editor.config.command} onChange={command => update({ command })} placeholder="npx" />
@@ -102,13 +136,13 @@ export default function McpConnections() {
         {area(say('请求头', 'HTTP headers', 'HTTP ヘッダー'), 'headers', say('JSON 对象或每行 KEY=VALUE，例如 Authorization=Bearer …。', 'JSON object or KEY=VALUE lines, e.g. Authorization=Bearer …'))}
       </>}
       <ToggleField label={say('启用连接', 'Enable connection', '接続を有効にする')} value={editor.config.enabled} onChange={enabled => update({ enabled })} />
-      <div style={{ display: 'flex', gap: 8 }}>
-        <button type="button" style={button} onClick={() => void act(async () => { const result = await invoke<NonNullable<typeof test>>('test_mcp_server', { config: parsed() }); if (alive.current) setTest(result); })}>{say('测试连接', 'Test connection', '接続テスト')}</button>
-        <button type="button" style={button} onClick={() => void act(async () => { await invoke('add_mcp_server', { config: parsed() }); if (alive.current) setEditor(null); })}>{say('保存', 'Save', '保存')}</button>
-        <button type="button" style={button} onClick={() => setEditor(null)}>{say('取消', 'Cancel', 'キャンセル')}</button>
+      <div className="mcp-editor-actions">
+        <button type="button" className="connection-button" onClick={() => void act(async () => { const result = await invoke<NonNullable<typeof test>>('test_mcp_server', { config: parsed() }); if (alive.current) setTest(result); })}><Cable size={14} />{say('测试连接', 'Test connection', '接続テスト')}</button>
+        <button type="button" className="connection-button connection-button-primary" onClick={() => void act(async () => { await invoke('add_mcp_server', { config: parsed() }); if (alive.current) setEditor(null); })}><Check size={14} />{say('保存', 'Save', '保存')}</button>
+        <button type="button" className="connection-button" onClick={() => setEditor(null)}>{say('取消', 'Cancel', 'キャンセル')}</button>
       </div>
-      {test && <div role="status" style={{ marginTop: 10 }}>{say('测试成功，发现', 'Connected, discovered', 'テスト成功：')} {test.tool_count} {say('个工具', 'tools', 'ツール')}<details><summary>{say('查看工具参数', 'Inspect tool schemas', '引数を確認')}</summary><pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{JSON.stringify(test.tools, null, 2)}</pre></details></div>}
-    </fieldset> : <button type="button" style={button} disabled={busy} onClick={() => edit()}>{say('添加 MCP 连接', 'Add MCP connection', 'MCP 接続を追加')}</button>}
-    {busy && <p role="status">{say('正在处理…', 'Working…', '処理中…')}</p>}
+      {test && <div role="status" className="mcp-test-result">{say('测试成功，发现', 'Connected, discovered', 'テスト成功：')} {test.tool_count} {say('个工具', 'tools', 'ツール')}<details><summary>{say('查看工具参数', 'Inspect tool schemas', '引数を確認')}</summary><pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{JSON.stringify(test.tools, null, 2)}</pre></details></div>}
+    </fieldset> : null}
+    {busy && <div className="mcp-busy" role="status"><Loader size={14} className="connection-spin" />{say('正在处理…', 'Working…', '処理中…')}</div>}
   </section>;
 }

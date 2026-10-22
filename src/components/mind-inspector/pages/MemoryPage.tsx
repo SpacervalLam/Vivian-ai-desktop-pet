@@ -3,9 +3,10 @@ import { useTranslation } from 'react-i18next';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { BookOpen, Clock3, Heart, MessageCircle, RefreshCw, Search, UserCircle, Sparkles, ArrowUpRight } from 'lucide-react';
+import { BookOpen, Clock3, Heart, Image as ImageIcon, MessageCircle, RefreshCw, Search, UserCircle, Sparkles, ArrowUpRight } from 'lucide-react';
 import UserProfilePage from './UserProfilePage';
 import StickerImage from '../../stickers/StickerImage';
+import ImageViewer from '../../ImageViewer';
 import { unifiedConversationThreads, sharedEventTimeline, isVisibleMemoryFact, isMemorySummary, type Character, type MemoryRecord, type ConversationRecord } from './memoryPresentation';
 import './MemoryPage.css';
 import './ClaudeTheme.css';
@@ -41,6 +42,12 @@ const TABS = [
 const layerOf = (item: MemoryRecord): Layer | null => {
   return isVisibleMemoryFact(item) ? 'facts' : null;
 };
+
+/* 事实层是「两个角色合并后的一张列表」（见 load() 的 flatMap），且群发消息会被
+   vivian / nana 各自抽取成一条内容相同的记录。卡片上不标归属，这两条就长得一模
+   一样，看起来像重复渲染。owner 只能是 load() 里写进 id 前缀的那两个角色。 */
+const ownerOf = (item: MemoryRecord): Character => item.id.startsWith('nana:') ? 'nana' : 'vivian';
+const ownerName = (owner: Character) => owner === 'nana' ? 'Nana' : 'Vivian';
 
 const memoryDateText = (value: number, language: string) => {
   const millis = value < 1e12 ? value * 1000 : value;
@@ -80,6 +87,7 @@ const MemoryPage: React.FC<{ initialLayer?: Layer; embedded?: boolean; latestOnl
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [cardViews, setCardViews] = useState<Set<string>>(new Set());
+  const [viewerSrc, setViewerSrc] = useState<string | null>(null);
   const toggleCardView = (id: string) => setCardViews((value) => {
     const next = new Set(value);
     if (next.has(id)) next.delete(id); else next.add(id);
@@ -150,6 +158,14 @@ const MemoryPage: React.FC<{ initialLayer?: Layer; embedded?: boolean; latestOnl
   const showOriginal = (id: string) => {
     const target = recentThreads.find(thread => thread.sourceIds.includes(id))?.id ?? id;
     setExpanded((value) => new Set(value).add(target)); setFocused(target); setQuery(''); setLayer('recent');
+  };
+  /** 记忆页回看原图：图片实体存在 `<user_data_dir>/images/`，与聊天窗口同一份文件 */
+  const openStoredImage = async (path: string) => {
+    try {
+      const src = await invoke<string | null>('get_image_data_url', { imagePath: path });
+      if (src) setViewerSrc(src);
+      else setNotice(t('comic.memoryImageMissing'));
+    } catch (e) { setError(String(e)); }
   };
   useEffect(() => {
     if (layer !== 'recent' || !focused || loading) return;
@@ -229,10 +245,19 @@ const MemoryPage: React.FC<{ initialLayer?: Layer; embedded?: boolean; latestOnl
     </div> : layer === 'recent' ? <div className="memory-thread-list">
       {visibleThreads.map((thread) => <article className={`memory-thread${focused === thread.id ? ' memory-thread-focused' : ''}`} id={`memory-conversation-${encodeURIComponent(thread.id)}`} key={thread.id}>
         <div className="memory-thread-header"><span className="memory-thread-title"><MessageCircle size={15} />{thread.title}</span><span className="memory-thread-count">{t('comic.memoryMessages', { n: thread.turns.length })}</span><time>{dateText(thread.startedAt ?? thread.time)}{thread.startedAt !== thread.time && thread.startedAt ? ` — ${dateText(thread.time)}` : ''}</time></div>
-        {cardViews.has(`${thread.owner}:thread:${thread.id}`) && summaries.get(thread.id)?.content ? <p className="memory-entry-content"><SearchHighlightedText text={summaries.get(thread.id)!.content} query={query} /></p> : <div className="memory-thread-turns">{(expanded.has(thread.id) || query.trim() ? thread.turns : thread.turns.slice(0, 6)).map((turn, index) => <div className={`memory-thread-turn${turn.speaker ? '' : ' memory-thread-turn-plain'}`} key={turn.id ?? `${thread.id}-${index}`}>
-          {turn.speaker && <span className="memory-thread-speaker" title={turn.audience ? t('comic.audience', { name: displaySpeaker(turn.audience) }) : undefined}>{displaySpeaker(turn.speaker)}</span>}
-          <div><p><DialogueHighlightedText text={turn.text} query={query} /></p>{turn.sticker && <StickerImage sticker={turn.sticker} size={96} />}</div>
-        </div>)}</div>}
+        {cardViews.has(`${thread.owner}:thread:${thread.id}`) && summaries.get(thread.id)?.content ? <p className="memory-entry-content"><SearchHighlightedText text={summaries.get(thread.id)!.content} query={query} /></p> : <div className="memory-thread-turns">{(expanded.has(thread.id) || query.trim() ? thread.turns : thread.turns.slice(0, 6)).map((turn, index) => {
+          const imagePath = turn.image?.path;
+          return <div className={`memory-thread-turn${turn.speaker ? '' : ' memory-thread-turn-plain'}`} key={turn.id ?? `${thread.id}-${index}`}>
+            {turn.speaker && <span className="memory-thread-speaker" title={turn.audience ? t('comic.audience', { name: displaySpeaker(turn.audience) }) : undefined}>{displaySpeaker(turn.speaker)}</span>}
+            <div>
+              <p><DialogueHighlightedText text={turn.text} query={query} /></p>
+              {imagePath && <button type="button" className="memory-thread-image" onClick={() => void openStoredImage(imagePath)}>
+                <ImageIcon size={14} />{t('comic.memoryViewImage')}
+              </button>}
+              {turn.sticker && <StickerImage sticker={turn.sticker} size={96} />}
+            </div>
+          </div>;
+        })}</div>}
         <div className="memory-session-actions">
           {!cardViews.has(`${thread.owner}:thread:${thread.id}`) && thread.turns.length > 6 && !query.trim() && <button type="button" onClick={() => setExpanded((value) => {
             const next = new Set(value); if (next.has(thread.id)) next.delete(thread.id); else next.add(thread.id); return next;
@@ -243,6 +268,7 @@ const MemoryPage: React.FC<{ initialLayer?: Layer; embedded?: boolean; latestOnl
       </article>)}
     </div> : <div className="memory-entry-grid">
       {visible.map((item, index) => {
+        const owner = ownerOf(item);
         const rawQuote = typeof item.metadata?.source_quote === 'string' ? item.metadata.source_quote : '';
         const quote = rawQuote;
         const hooks = (item.open_hooks ?? []).filter((hook) => hook.closed_at == null);
@@ -256,7 +282,7 @@ const MemoryPage: React.FC<{ initialLayer?: Layer; embedded?: boolean; latestOnl
           {index === 0 && !embedded && <ComicChapterInset image={character === 'vivian' ? 'vivian-seat-selected-v24' : 'nana-nai-face-adjusted-v19'}
             caption={t('comic.memoryKept')} position={character === 'vivian' ? '50% 30%' : '50% 35%'} />}
           <div className="memory-narration-body">
-          <div className="memory-entry-top"><span className="memory-entry-kind">{localize(categoryName(item))}</span><time>{dateText(typeof item.metadata?.started_at === 'number' ? item.metadata.started_at : item.created_at)}</time></div>
+          <div className="memory-entry-top"><span className="memory-entry-kind">{localize(categoryName(item))}</span><span className={`memory-entry-owner is-${owner}`}>{ownerName(owner)}</span><time>{dateText(typeof item.metadata?.started_at === 'number' ? item.metadata.started_at : item.created_at)}</time></div>
           {typeof item.metadata?.title === 'string' && <h3 className="memory-session-title">{item.metadata.title}</h3>}
           <p className="memory-entry-content"><SearchHighlightedText text={body} query={query} /></p>
           {topics.length > 0 && <div className="memory-topic-tags">{topics.map((topic) => <span key={topic}>{topicName(topic) === topic ? topic : localize(topicName(topic))}</span>)}</div>}
@@ -275,6 +301,7 @@ const MemoryPage: React.FC<{ initialLayer?: Layer; embedded?: boolean; latestOnl
       })}
     </div>}</>}
     </div>
+    <ImageViewer src={viewerSrc} onClose={() => setViewerSrc(null)} />
   </section>;
 };
 

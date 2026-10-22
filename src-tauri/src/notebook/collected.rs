@@ -17,7 +17,7 @@
 use super::{storage, Block, Cover, Layout, NoteBook, Palette};
 
 /// 采集类笔记的 id 前缀，便于与用户手写笔记区分。
-const COLLECTED_PREFIX: &str = "note_collected_";
+pub(crate) const COLLECTED_PREFIX: &str = "note_collected_";
 
 /// 采集笔记的固定分类标签。
 ///

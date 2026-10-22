@@ -57,6 +57,7 @@ const rows = {
   memoryEvidence: ['原话依据','Original Evidence','元の発言による根拠'], memorySource: ['查看来源会话','View Source Conversation','元の会話を見る'],
   memoryCollapse: ['收起','Collapse','折りたたむ'], memoryOrganizing: ['正在整理…','Organizing…','整理中…'], memoryContinue: ['继续整理','Continue Organizing','整理を続ける'], memoryUpdateSummary: ['更新摘要','Update Summary','要約を更新'], memoryOrganize: ['整理这次对话','Organize This Conversation','この会話を整理'],
   memoryOriginal: ['查看原始会话','View Original Conversation','元の会話を見る'], memoryViewSummary: ['查看会话摘要','View Summary','会話の要約を見る'], memoryKept: ['留下的记忆','Memories Kept','残された記憶'],
+  memoryViewImage: ['查看原图','View Original Image','元の画像を見る'], memoryImageMissing: ['原图文件已不在本地，可能已被清理','The original image is gone from disk','元画像がローカルに残っていません'],
   memoryQuote: ['来自原话','From the Original Words','元の発言より'], memoryFollowUp: ['待跟进','Follow Up','要フォロー'], memoryView: ['查看会话','View Conversation','会話を見る'], memoryExtracted: ['原话提取','Extracted from Original Words','元の発言から抽出'], memoryNoEvidence: ['未标注证据','No Evidence Marked','根拠の指定なし'], memoryImportant: ['重要事件','Important Event','重要な出来事'],
   memoryProfileUnderstanding: ['{{name}} 的了解',"{{name}}’s Understanding",'{{name}} が知っていること'],
   memoryEmpty: ['还没有{{name}}的记录','No {{name}} records yet','{{name}}の記録はまだありません'],

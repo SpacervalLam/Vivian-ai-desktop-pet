@@ -1820,7 +1820,11 @@ pub async fn send_image_message(
     let result = Box::pin(respond_to_image(state.inner(), &app, &char_id, &channel_str, image,
         "📷 [图片]", Some(&rel_path), "chat")).await?;
 
-    // 6. 图片描述写入记忆系统（content=description，metadata 携带 image_path）
+    // 6. 识图描述按「对话记忆」落库（content=description，metadata 携带 image_path）
+    //
+    // 这是一轮对话里对图片的观察，不是关于用户的事实：用 short_term 落库后
+    // record_kind 为 dialogue、retention 为 window —— 仍可被检索召回，但不会出现在
+    // 记忆页「长期记忆 · 事实与资料」里，也不会随窗口淘汰之外长期占据事实层。
     let description_for_memory = result.description.clone();
     let memory_mgr = state
         .get_character(Some(&char_id))
@@ -1838,8 +1842,8 @@ pub async fn send_image_message(
         match memory_mgr
             .add_memory_with_metadata(
                 &description_for_memory,
-                MemoryType::General,
-                0.5,
+                MemoryType::ShortTerm,
+                0.4,
                 vec![
                     "image".to_string(),
                     "shared_memory".to_string(),
@@ -1858,7 +1862,7 @@ pub async fn send_image_message(
                         "image_path": rel_path,
                         "source": "chat",
                         "role": "user",
-                        "memory_type": "general",
+                        "memory_type": "short_term",
                         "semantic_type": "shared_memory",
                     }),
                 ) {

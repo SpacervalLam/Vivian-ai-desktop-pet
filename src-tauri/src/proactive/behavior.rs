@@ -177,8 +177,12 @@ pub struct LlmContext {
     pub mind_state: String,
     pub memory_hint: String,
     pub mood_hint: String,
-    /// 最近对话历史（每行一条，已格式化为 "role: content"）
+    /// 最近对话历史（每行一条，已格式化为 "speaker: content"）
     pub dialogue_history: String,
+    /// 角色自己上一条发言的原文（用于提醒模型不要复读刚说过的话）
+    pub last_own_utterance: String,
+    /// 距角色自己上一条发言的秒数；无历史时为 f64::MAX
+    pub seconds_since_own_utterance: f64,
     /// 当前亲密度（0-100），用于调整语气
     pub intimacy: f64,
     /// 用户离开的秒数（WelcomeBack 触发器使用）
@@ -489,6 +493,31 @@ fn ignored_directive(rounds: u32, lang: &str) -> String {
     }
 }
 
+/// TopicExtension 的防复读提示：把「你刚说过什么」明确摆给模型。
+///
+/// 这不是程序去重：不比较、不丢弃文本，只是把时间与上文说清楚，
+/// 让模型自己判断「续话题」是否还有新内容。
+fn own_utterance_echo_guard(ctx: &LlmContext, lang_norm: &str) -> String {
+    const ECHO_WINDOW_SECS: f64 = 900.0;
+    let text = ctx.last_own_utterance.trim();
+    if text.is_empty() || ctx.seconds_since_own_utterance >= ECHO_WINDOW_SECS {
+        return String::new();
+    }
+    let secs = ctx.seconds_since_own_utterance.round().max(0.0) as u64;
+    let quoted = crate::utils::truncate_chars(text, 160);
+    match lang_norm {
+        "en" => format!(
+            "\n\nYou said this {secs}s ago: \"{quoted}\". That is already expressed and is not fresh material for extending the topic. If your next message would merely restate, rephrase, or re-ask it, choose DONT_NOTIFY. Speak only if there is a genuinely unspoken angle."
+        ),
+        "ja" => format!(
+            "\n\nあなたは{secs}秒前にこう言いました：「{quoted}」。これは既に言った内容で、話題を広げる新しい材料ではない。これから言うことがその復述・言い換え・同じ質問の繰り返しなら DONT_NOTIFY を選ぶ。まだ話していない具体的な角度がある時だけ話す。"
+        ),
+        _ => format!(
+            "\n\n你 {secs} 秒前刚说过：「{quoted}」。这只是你已经表达过的内容，不是续话题的新素材。如果接下来要说的话只是复述它、换个说法或同义重问，选择 DONT_NOTIFY。只有确实还有没聊到的具体角度时才开口。"
+        ),
+    }
+}
+
 fn build_proactive_directive(
     trigger: ProactiveTrigger,
     ctx: &LlmContext,
@@ -565,7 +594,7 @@ fn build_proactive_directive(
                 "ja" => ("シーン：話題を振って会話を広げたい。".to_string(), format!("今の話や自分の興味（{}）から具体的な新しい思いがある時だけ伝える。質問は必須ではなく、視聴や活動を捏造しない。なければ DONT_NOTIFY。", interest_ja)),
                 _ => ("场景：你想抛个话题把对话延续下去。".to_string(), format!("只有当前话题或自己的兴趣（{}）里有具体的新想法且适合此刻时才分享。陈述也可以，不凑泛泛的问题，不编造观看或活动；否则选择 DONT_NOTIFY。", interest_zh)),
             };
-            (s, String::new(), c)
+            (s, String::new(), format!("{c}{}", own_utterance_echo_guard(ctx, lang_norm)))
         }
         ProactiveTrigger::MoodDriven => {
             let (s, c) = match lang_norm {
@@ -904,6 +933,29 @@ mod structured_context_tests {
         assert!(!messages.iter().any(|m| m.role == "assistant" && m.content.contains("Nana private experience fixture")));
         assert!(!messages.iter().any(|m| m.content.contains("FLATTENED_DUPLICATE_HISTORY")));
         assert!(messages.last().unwrap().content.contains("DONT_NOTIFY"));
+    }
+
+    #[test]
+    fn topic_extension_names_the_just_spoken_line_and_asks_for_a_new_angle() {
+        let ctx = LlmContext {
+            last_own_utterance: "这图挺有意境的。".into(),
+            seconds_since_own_utterance: 9.0,
+            ..Default::default()
+        };
+        let directive =
+            build_proactive_directive(ProactiveTrigger::TopicExtension, &ctx, "zh", "nana").unwrap();
+        assert!(directive.contains("这图挺有意境的。"));
+        assert!(directive.contains("复述"));
+        assert!(directive.contains("DONT_NOTIFY"));
+
+        let stale = LlmContext {
+            last_own_utterance: "很久以前说过的话".into(),
+            seconds_since_own_utterance: 3600.0,
+            ..Default::default()
+        };
+        let directive =
+            build_proactive_directive(ProactiveTrigger::TopicExtension, &stale, "zh", "nana").unwrap();
+        assert!(!directive.contains("秒前刚说过"));
     }
 
     #[test]

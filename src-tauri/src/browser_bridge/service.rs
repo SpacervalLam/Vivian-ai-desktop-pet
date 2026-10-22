@@ -23,6 +23,7 @@ struct SessionState {
     reddit: Option<(u64, String)>,
     bilibili: Option<(u64, String)>,
     error: Option<String>,
+    credential_error: Option<String>,
 }
 impl BridgeState {
     #[cfg(windows)]
@@ -41,8 +42,7 @@ impl BridgeState {
         {
             state.bilibili = snapshot.bilibili.map(|cookie| (now, cookie));
         }
-        state.error = None;
-        self.ready.store(true, Ordering::Relaxed);
+        state.credential_error = None;
     }
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
@@ -82,6 +82,28 @@ impl BridgeState {
     pub fn error(&self) -> Option<String> {
         self.credentials.read().error.clone()
     }
+    pub fn credential_error(&self) -> Option<String> {
+        self.credentials.read().credential_error.clone()
+    }
+    /// Keep the last display snapshot, but revoke credentials consumed by background jobs.
+    fn mark_credentials_failed(&self, error: String) {
+        let mut state = self.credentials.write();
+        state.x = None;
+        state.reddit = None;
+        state.bilibili = None;
+        state.credential_error = Some(error);
+    }
+    /// 浏览器不可用时回到未连接状态：不保留陈旧的登录态或错误信息。
+    fn mark_disconnected(&self, error: Option<String>) {
+        let mut state = self.credentials.write();
+        state.platforms = None;
+        state.x = None;
+        state.reddit = None;
+        state.bilibili = None;
+        state.error = error;
+        state.credential_error = None;
+        self.ready.store(false, Ordering::Relaxed);
+    }
     pub async fn refresh_credentials(&self) {
         let Ok(_refresh) = self.refresh.try_lock() else {
             return;
@@ -90,31 +112,43 @@ impl BridgeState {
             return;
         };
         #[cfg(windows)]
-        let result = crate::embedded_browser::native::automation::credentials(app).await;
+        match crate::embedded_browser::native::automation::engine_ready(&app).await {
+            Ok(true) => {
+                self.ready.store(true, Ordering::Relaxed);
+                self.credentials.write().error = None;
+            }
+            Ok(false) => { self.mark_disconnected(None); return; }
+            Err(error) => { self.mark_disconnected(Some(error)); return; }
+        }
+        #[cfg(windows)]
+        let result = crate::embedded_browser::native::automation::credentials(app.clone()).await;
         #[cfg(not(windows))]
-        let result: Result<(), String> = {
+        let result: Result<Option<()>, String> = {
             let _ = app;
             Err("内嵌浏览器需要 Windows WebView2".into())
         };
         #[cfg(windows)]
         match result {
-            Ok(snapshot) => {
+            Ok(Some(snapshot)) => {
                 let now = chrono::Utc::now().timestamp_millis() as u64;
                 self.record(snapshot, now);
             }
-            Err(error) => {
-                let mut state = self.credentials.write();
-                state.error = Some(error);
-                state.platforms = None;
-                state.x = None;
-                state.reddit = None;
-                state.bilibili = None;
-                self.ready.store(false, Ordering::Relaxed);
+            result => {
+                // A controller may close while credentials are read. Recheck the engine
+                // before deciding whether this is a credential failure or a disconnection.
+                match crate::embedded_browser::native::automation::engine_ready(&app).await {
+                    Ok(true) => self.mark_credentials_failed(match result {
+                        Err(error) => error,
+                        _ => "普通浏览配置尚未就绪，正在重试凭据检测".into(),
+                    }),
+                    Ok(false) => self.mark_disconnected(None),
+                    Err(error) => self.mark_disconnected(Some(error)),
+                }
             }
         }
         #[cfg(not(windows))]
         if let Err(error) = result {
-            self.credentials.write().error = Some(error);
+            self.mark_disconnected(Some(error));
         }
     }
     pub async fn request_tool(
@@ -158,6 +192,7 @@ mod tests {
             bilibili: Some("SESSDATA=synthetic".into()),
         };
         bridge.record(snapshot(), 100);
+        assert!(!bridge.is_connected(), "credential reads do not establish engine readiness");
         assert_eq!(
             bridge.reddit_cookie(),
             Some((100, "synthetic-reddit".into()))
@@ -179,5 +214,47 @@ mod tests {
         assert!(bridge.x_cookie().is_none() && bridge.reddit_cookie().is_none());
         assert!(bridge.bilibili_cookie().is_none());
         assert_eq!(bridge.platform_status().unwrap().0, 300);
+    }
+    #[test]
+    fn credential_failure_preserves_display_but_revokes_background_credentials() {
+        let bridge = BridgeState::new();
+        bridge.ready.store(true, Ordering::Relaxed);
+        bridge.record(Credentials {
+            status: HashMap::from([("bilibili".into(), true)]),
+            x: Some("synthetic-x".into()),
+            reddit: Some("synthetic-reddit".into()),
+            bilibili: Some("synthetic-bilibili".into()),
+        }, 100);
+        bridge.mark_credentials_failed("timeout".into());
+        assert!(bridge.is_connected());
+        assert_eq!(bridge.platform_status().unwrap().0, 100);
+        assert_eq!(bridge.credential_error().as_deref(), Some("timeout"));
+        assert!(bridge.error().is_none());
+        assert!(bridge.x_cookie().is_none() && bridge.reddit_cookie().is_none());
+        assert!(bridge.bilibili_cookie().is_none());
+        bridge.record(Credentials::default(), 200);
+        assert!(bridge.credential_error().is_none());
+        assert_eq!(bridge.platform_status().unwrap().0, 200);
+    }
+    #[test]
+    fn unavailable_browser_reports_disconnected_without_error_or_stale_credentials() {
+        let bridge = BridgeState::new();
+        bridge.record(
+            Credentials {
+                status: HashMap::from([("bilibili".into(), true)]),
+                x: Some("synthetic-x".into()),
+                reddit: Some("synthetic-reddit".into()),
+                bilibili: Some("SESSDATA=synthetic".into()),
+            },
+            100,
+        );
+        bridge.ready.store(true, Ordering::Relaxed);
+        assert!(bridge.is_connected());
+        bridge.mark_disconnected(None);
+        assert!(!bridge.is_connected());
+        assert!(bridge.platform_status().is_none());
+        assert!(bridge.error().is_none());
+        assert!(bridge.x_cookie().is_none() && bridge.reddit_cookie().is_none());
+        assert!(bridge.bilibili_cookie().is_none());
     }
 }

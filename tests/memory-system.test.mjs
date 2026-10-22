@@ -137,6 +137,22 @@ pub mod memory {
         assert_eq!(router.prompts.lock().len(),2);
         assert_eq!(m.items.read().len(),2);
     }
+    #[test] fn image_turns_expose_stored_path_and_recognition_text() {
+        let now=current_timestamp()-10.0;
+        let mut image=record("img","s1",now,"📷 [图片]");
+        image.metadata=serde_json::json!({"kind":"image","image_path":"images/a.png",
+            "visual_description":"海滩上的少女","channel":"wechat"});
+        let turn=&build_conversations(&[image],"vivian")[0].turns[0];
+        assert_eq!(turn.image_path.as_deref(),Some("images/a.png"));
+        assert_eq!(turn.visual_description.as_deref(),Some("海滩上的少女"));
+        let spoken=build_conversations(&[record("txt","s2",now+1.0,"你看这张图")],"vivian");
+        assert!(spoken[0].turns[0].image_path.is_none());
+        assert!(spoken[0].turns[0].visual_description.is_none());
+        let mut captionless=record("img2","s3",now+2.0,"📷 [图片]");
+        captionless.metadata=serde_json::json!({"kind":"image","channel":"wechat"});
+        let bare=&build_conversations(&[captionless],"vivian")[0].turns[0];
+        assert!(bare.image_path.is_none() && bare.visual_description.is_none());
+    }
     #[tokio::test] async fn identical_topic_in_different_sessions_keeps_two_summaries() {
         let now=current_timestamp()-100.0;
         let mut b=record("b","s2",now+1.0,"明天看电影");b.metadata=serde_json::json!({"conversation_boundary":"new"});

@@ -465,9 +465,9 @@ async fn execute_tool_use_inner(
                     "该浏览器工具本轮没有提供给你（可能在工作侧被禁用）。改用 web_fetch 取内容；\
                      仍然取不到时请用户确认浏览器设置，不要反复换名字或换写法调用。"
                 } else {
-                    "浏览器桥本轮未连接，所有 browser_* 工具都不可用。JS 渲染页、登录页、\
+                    "内嵌浏览器引擎本轮尚未就绪，所有 browser_* 工具都不可用。JS 渲染页、登录页、\
                      反爬挑战页在这个状态下取不到内容：改用 web_fetch，或找不需要浏览器的替代源；\
-                     确实必须用浏览器时，用 work_ask_user 请用户连接。不要靠换 UA／换接口／\
+                     确实必须用浏览器时，用 work_ask_user 请用户打开内嵌浏览器并检查引擎状态。不要靠换 UA／换接口／\
                      换脚本继续试，失败原因不会变。"
                 };
                 return ToolResult::standard_error(hint, Some("BrowserUnavailable"), None);

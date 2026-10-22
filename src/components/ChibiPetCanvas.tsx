@@ -355,6 +355,7 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
     const crossPresentationRef = useRef(new CrossPresentation(characterId));
     const [, setCrossVersion] = useState(0);
     const [audioPlaying, setAudioPlaying] = useState(false);
+    const [fling, setFling] = useState({ generation: 0, active: false });
     const visibleSpeech = useAppStore(state => !!state.currentBubble?.trim()
       || state.settledBubbles.some(bubble => !!bubble.text.trim()));
     const speakingRef = useRef(false);
@@ -926,7 +927,7 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
         if ((['remind', 'tired', 'umbrella', 'music', 'clipboard'].includes(spec.name) || CONVERSATION_GESTURES.has(spec.name)) && (pressedRef.current
           || busyPhaseRef.current !== 'idle' || positioningCoordinator.fleeInFlight
           || positioningCoordinator.ambientMoveInFlight || positioningCoordinator.dragInFlight || positioningCoordinator.physicsInFlight)) return;
-        if (waitingForReplyRef.current && resolveMotion(name, characterId).name !== 'drag') return;
+        if (waitingForReplyRef.current && !['drag', 'dizzy'].includes(spec.name)) return;
         if (spec.kind === 'animation' && spec.directions) {
           setWalkDirection(/right|east|右/i.test(name) ? 'right' : 'left');
         }
@@ -1013,6 +1014,7 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
       const frameDelay = walkFrameDelayMsRef.current;
       const targetFrames = walkTargetFramesRef.current;
       const thinking = spec.name === 'thinking';
+      const busy = spec.name === 'busy-loop';
       const thinkingLoopStart = characterId === 'nana' ? 2 : 3;
       const advance = (current: number, shown: number, direction = 1) => {
         // 指定了帧数时播满即停。帧数由位移时长与帧间隔推导（不保证是周期的整数倍），
@@ -1033,9 +1035,15 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
             if (current >= 8) direction = -1;
             else if (current <= thinkingLoopStart) direction = 1;
           }
+          // 看手机只有八张近似关键帧；往返播放避免末帧直接跳回首帧。
+          // 端点的停顿由词表时长控制，不重复端点，也不影响走路等顺序循环。
+          if (busy) {
+            if (current >= spec.frames - 1) direction = -1;
+            else if (current <= 0) direction = 1;
+          }
           const next = thinking
             ? current + (thinkingExitRef.current ? 1 : direction)
-            : (current + 1) % spec.frames;
+            : busy ? current + direction : (current + 1) % spec.frames;
           setFrame(next);
           advance(next, shown + 1, direction);
         }, frameDelay ?? frameDurationMs(spec, current));
@@ -1163,6 +1171,14 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
 
       const mayShowSpeechFeedback = () => !waitingForReplyRef.current && !pressAliveRef.current &&
         !positioningCoordinator.dragInFlight && speechDisplayMotion(poseNameRef.current, true, false) === 'talk';
+      void add<{ character_id: string; generation: number; active: boolean }>('drag:fling', p => {
+        if (!mine(p.character_id) || !Number.isSafeInteger(p.generation) || p.generation <= 0) return;
+        setFling(previous => {
+          if (p.generation < previous.generation
+            || (p.generation === previous.generation && !previous.active)) return previous;
+          return { generation: p.generation, active: p.active };
+        });
+      });
       void add<{ character_id?: string }>('tts:started', (p) => {
         if (mine(p.character_id)) setAudioPlaying(true);
         // Audio is a display overlay; it must not cancel dragging, sleep or walking.
@@ -1674,7 +1690,9 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
      * 帧序列图集可用时按帧序列取格；不可用时退回主图集的 `idle` 格位——帧序列的
      * `frame` 序号在主图集里没有意义，拿它去定位只会取到无关的一格。
      */
-    const physicalMotion = physics.airborne && poseName !== 'dizzy' && !positioningCoordinator.dragInFlight ? 'drag' : poseName;
+    // Both frontend gravity and backend inertial flings use atlas slot 3 (drag).
+    // A collision's dizzy pose stays above this overlay, including during speech.
+    const physicalMotion = (physics.airborne || fling.active) && poseName !== 'dizzy' && !positioningCoordinator.dragInFlight ? 'drag' : poseName;
     // Incoming text/audio must not hide the remaining thought exit frames.
     const displayMotion = physicalMotion === 'thinking' ? 'thinking'
       : speechDisplayMotion(physicalMotion, speakingRef.current, pressed, crossPresentationRef.current.motion);

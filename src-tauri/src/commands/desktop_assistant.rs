@@ -139,14 +139,14 @@ pub async fn analyze_screen(app: &AppHandle, state: &Arc<AppState>, character_id
         return Ok(json!({"saved_path":saved_path,"copied":copied}));
     }
     let analysis = analyze_snapshot(app, state, analysis_character, selected.png).await;
-    let turn = analysis.map_err(|error| if saved_path.is_some() {
+    let description = analysis.map_err(|error| if saved_path.is_some() {
         format!("截图已保存至系统截图目录，但分析失败：{error}")
     } else { error })?;
-    relay_visual_description(app, state, analysis_character, turn.description);
+    relay_visual_description(app, state, analysis_character, description);
     Ok(json!({"handled":true,"saved_path":saved_path,"copied":copied}))
 }
 
-pub(crate) async fn analyze_snapshot(app: &AppHandle, state: &Arc<AppState>, character_id: &str, png: Vec<u8>) -> Result<crate::visual_evidence::ImageTurnResult, String> {
+pub(crate) async fn analyze_snapshot(_app: &AppHandle, state: &Arc<AppState>, character_id: &str, png: Vec<u8>) -> Result<String, String> {
     if crate::companion_quiet::active() { return Err("勿扰模式下已暂停陪伴分析，请先关闭勿扰".into()); }
     if state.tool_system.is_tool_disabled("take_screenshot", crate::tools::registry::AgentSide::Companion) {
         return Err("截图分析已在工具设置中禁用".to_string());
@@ -154,12 +154,19 @@ pub(crate) async fn analyze_snapshot(app: &AppHandle, state: &Arc<AppState>, cha
     if !state.config.read().get_typed::<bool>("ai.enable_vision", false) {
         return Err("请先在设置中启用视觉功能".to_string());
     }
+    let instance = state.get_character(Some(character_id))?;
+    if !state.is_initialized() { return Err("智能体正在初始化，请稍候...".into()); }
+    let router = state.model_router.read().as_ref().cloned().ok_or("模型路由未初始化")?;
+    let recent = instance.brain.dialogue.get_history().into_iter().rev().take(6)
+        .map(|message| format!("{}: {}", message.role, message.content)).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n");
+    let context = format!("用户主动请求桌面截图分析。最近对话仅用于理解图片意图：\n{recent}");
     use base64::{engine::general_purpose::STANDARD, Engine as _};
     let image_detail = state.config.read().get_typed::<String>("ai.image_detail", "auto".into());
     let image = crate::types::response::MessageImage { media_type: "image/png".into(), data: STANDARD.encode(png), url: None, detail: Some(image_detail) };
     tracing::info!(character_id, "开始分析截图快照");
-    Box::pin(crate::commands::chat::respond_to_image(state, app, character_id, "wechat", image,
-        "📷 [图片]", None, "screen_selection")).await
+    // Desktop screenshots produce a pet bubble, not a persisted chat turn.
+    // Calling respond_to_image here emits chat:start and records the image marker.
+    Box::pin(crate::vision::recognize_image(&router, image, &context, Some(character_id))).await
 }
 
 pub(crate) async fn analyze_frozen_snapshot(app: &AppHandle, state: &Arc<AppState>, character_id: &str, png: Vec<u8>) -> Result<(), String> {
@@ -167,8 +174,8 @@ pub(crate) async fn analyze_frozen_snapshot(app: &AppHandle, state: &Arc<AppStat
         return Err("截图分析正在进行中".into());
     }
     let _guard = ScreenGuard(Vec::new());
-    let turn = analyze_snapshot(app, state, character_id, png).await?;
-    relay_visual_description(app, state, character_id, turn.description);
+    let description = analyze_snapshot(app, state, character_id, png).await?;
+    relay_visual_description(app, state, character_id, description);
     Ok(())
 }
 
@@ -184,8 +191,7 @@ pub(crate) fn relay_visual_description(app: &AppHandle, state: &Arc<AppState>, c
             "character_id": character,
             "content": line,
             "motion": "happy",
-            // 图片轮的回复气泡/朗读通常还在进行，前端那道 `currentBubble` 门会把这句
-            // 悄悄吃掉；标 replace 让它替换掉旧气泡，保证「用户要的结果」一定说得出来。
+            // 用户主动请求的截图结果应替换旧气泡，避免被正在显示的闲聊挡住。
             "replace": true,
         }));
     });

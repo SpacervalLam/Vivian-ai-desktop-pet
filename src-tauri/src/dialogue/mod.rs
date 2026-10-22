@@ -1011,6 +1011,20 @@ impl DialogueManager {
         self.messages.lock().last().cloned()
     }
 
+    /// 最近一条 assistant 发言的 Unix 秒时间戳。
+    ///
+    /// 供主动对话判断「自己刚说过话」。普通聊天回复只写入本管理器，不更新
+    /// `ProactiveState::last_proactive_speech_time`，因此需要直接读这里。
+    pub fn last_assistant_timestamp(&self) -> Option<f64> {
+        self.messages
+            .lock()
+            .iter()
+            .rev()
+            .find(|msg| msg.role == "assistant")
+            .and_then(|msg| msg.timestamp)
+            .map(|ts| ts.timestamp() as f64)
+    }
+
     /// 用前端渲染时刻回传的时间戳覆盖最后一条 assistant 消息的 timestamp。
     ///
     /// 后端 `add_message` 持久化时用的是后端构造消息时刻（T1），而前端 `chat:done`

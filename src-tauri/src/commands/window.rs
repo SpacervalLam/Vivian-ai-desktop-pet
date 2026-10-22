@@ -784,6 +784,13 @@ fn start_fling(win: WebviewWindow, label: &str, vx: f64, vy: f64, session_id: Op
         let _ = thread::Builder::new()
             .name(format!("fling-{label}"))
             .spawn(move || {
+                {
+                    let gens = FLING_GEN.lock();
+                    if gens.get(&label).copied() != Some(gen) { return; }
+                    let _ = win.emit_to(&label, "drag:fling", json!({
+                        "character_id": &label, "generation": gen, "active": true,
+                    }));
+                }
                 let mut vx = vx;
                 let mut vy = vy;
                 let mut last = std::time::Instant::now();
@@ -876,6 +883,15 @@ fn start_fling(win: WebviewWindow, label: &str, vx: f64, vy: f64, session_id: Op
 
                     if vx.hypot(vy) < FLING_STOP_VELOCITY {
                         break;
+                    }
+                }
+                // An older flight must never clear the presentation of its successor.
+                {
+                    let gens = FLING_GEN.lock();
+                    if gens.get(&label).copied() == Some(gen) {
+                        let _ = win.emit_to(&label, "drag:fling", json!({
+                            "character_id": &label, "generation": gen, "active": false,
+                        }));
                     }
                 }
                 tracing::debug!("[fling] 甩飞结束: {label}");

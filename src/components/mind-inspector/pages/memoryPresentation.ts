@@ -14,11 +14,13 @@ export type MemoryRecord = {
 
 export type Character = 'vivian' | 'nana';
 import type { StickerRef } from '../../../types';
-export type MemoryTurn = { id?: string; speaker: string; audience?: string; text: string; timestamp?: number; sticker?: StickerRef };
+/** 图片消息的展示信息：相对 `<user_data_dir>` 的路径 + 识图结果文本 */
+export type MemoryImage = { path?: string; description?: string };
+export type MemoryTurn = { id?: string; speaker: string; audience?: string; text: string; timestamp?: number; sticker?: StickerRef; image?: MemoryImage };
 export type ConversationRecord = {
   id: string; source_session_id?: string; title: string; participants: string[]; channels: string[];
   started_at: number; ended_at: number;
-  turns: Array<{ id: string; utterance_id?: string; speaker: string; listener: string; text: string; timestamp: number; channel: string; sticker?: StickerRef }>;
+  turns: Array<{ id: string; utterance_id?: string; speaker: string; listener: string; text: string; timestamp: number; channel: string; sticker?: StickerRef; image_path?: string; visual_description?: string }>;
 };
 export type RecentThread = {
   id: string;
@@ -42,9 +44,11 @@ const speakerName = (value: string, character: Character) => {
 
 export const isMemoryFact = (item: MemoryRecord): boolean => item.metadata?.record_kind === 'fact';
 export const isMemorySummary = (item: MemoryRecord): boolean => item.metadata?.record_kind === 'session_summary';
+/** 识图结果是「对这一张图的观察」，不是关于用户的事实：无论落在哪层都不进事实卡。 */
+const isImageObservation = (item: MemoryRecord): boolean => item.metadata?.kind === 'image';
 export const isVisibleMemoryFact = (item: MemoryRecord): boolean =>
   !['system_seed', 'environment_preset'].includes(String(item.metadata?.source ?? ''))
-  && !!item.content.trim() && !item.consolidated
+  && !!item.content.trim() && !item.consolidated && !isImageObservation(item)
   && !['subjective', 'observation', 'internal'].includes(String(item.metadata?.record_kind ?? ''))
   && isMemoryFact(item);
 
@@ -104,12 +108,21 @@ export function conversationTitle(record: ConversationRecord, character: Charact
   return comicText('conversationParticipants', language).replace('{{first}}', name(first))
     .replace('{{others}}', participants.filter(person => person !== first).map(name).join(comicLocale(language) === 'en' ? ', ' : '、'));
 }
+/** 图片消息用识图结果当正文，`📷 [图片]` 只是没有描述时的兜底占位。 */
+const turnImage = (turn: ConversationRecord['turns'][number]): MemoryImage | undefined => {
+  const description = turn.visual_description?.trim();
+  if (!description && !turn.image_path) return undefined;
+  return { path: turn.image_path, description: description || undefined };
+};
+const turnText = (turn: ConversationRecord['turns'][number]): string =>
+  turn.visual_description?.trim() || turn.text;
+
 export const conversationThreads = (records: ConversationRecord[], character: Character, language = 'zh-CN'): RecentThread[] => records.map((record) => ({
   id: record.id, title: conversationTitle(record, character, language), time: record.ended_at, startedAt: record.started_at, canonical: true,
   turns: record.turns.map((turn) => ({ id: turn.id, speaker: speakerName(turn.speaker, character),
     audience: speakerName(turn.listener === 'all' ? '大家' : turn.listener, character),
-    text: turn.text, timestamp: turn.timestamp, sticker: turn.sticker })),
-  items: [], searchText: `${[...new Set([conversationTitle(record, character, language), record.title])].join(' ')} ${record.turns.map((turn) => turn.text).join(' ')}`,
+    text: turnText(turn), timestamp: turn.timestamp, sticker: turn.sticker, image: turnImage(turn) })),
+  items: [], searchText: `${[...new Set([conversationTitle(record, character, language), record.title])].join(' ')} ${record.turns.map(turnText).join(' ')}`,
 })).sort((a, b) => b.time - a.time);
 
 export type UnifiedThread = RecentThread & { owner: Character; sourceIds: string[] };

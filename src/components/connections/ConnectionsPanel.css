@@ -1,0 +1,88 @@
+.external-connections, .mcp-connections { color: var(--panel-text); font-size: 13px; }
+.external-connections *, .mcp-connections * { box-sizing: border-box; }
+.connection-section-heading { flex: 1; min-width: 0; margin-bottom: 14px; }
+.connection-section-heading h3 { margin: 0; font-size: 14px; font-weight: 700; letter-spacing: .2px; }
+.connection-section-heading p { margin: 6px 0 0; color: var(--panel-text-secondary); font-size: 12px; line-height: 1.7; }
+.connection-browser-card, .mcp-server-card, .mcp-editor { border: 1px solid var(--panel-border); border-radius: 14px; background: var(--panel-surface); overflow: hidden; }
+.connection-browser-header { display: flex; align-items: center; flex-wrap: wrap; gap: 14px; padding: 20px; }
+.connection-service-icon { display: inline-flex; align-items: center; justify-content: center; width: 42px; height: 42px; flex-shrink: 0; border: 1px solid var(--panel-border-light); border-radius: 12px; background: var(--panel-bg-surface); color: var(--panel-text-secondary); }
+.connection-service-title { flex: 1; min-width: 180px; }
+.connection-title-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.connection-title-row h4 { margin: 0; font-size: 14px; font-weight: 650; overflow-wrap: anywhere; }
+.connection-service-title > p { margin: 6px 0 0; font-size: 12px; color: var(--panel-text-secondary); line-height: 1.7; }
+.connection-status { display: inline-flex; align-items: center; gap: 6px; padding: 3px 8px; font-size: 11px; line-height: 1.4; border-radius: 6px; color: var(--panel-text-tertiary); background: var(--panel-bg-surface); }
+.connection-status.is-connected { color: var(--panel-success); background: color-mix(in srgb, var(--panel-success) 8%, transparent); }
+.connection-status.is-failed { color: var(--panel-danger); background: color-mix(in srgb, var(--panel-danger) 7%, transparent); }
+.connection-status-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex-shrink: 0; }
+.connection-button { display: inline-flex; justify-content: center; align-items: center; gap: 6px; padding: 7px 11px; min-height: 32px; border: 1px solid var(--panel-border); border-radius: 8px; background: transparent; color: var(--panel-text-secondary); font: inherit; font-size: 12px; font-weight: 500; line-height: 1.4; cursor: pointer; transition: background .15s, border-color .15s, opacity .15s; }
+.connection-button:hover:not(:disabled) { background: var(--panel-bg-surface); border-color: var(--panel-text-tertiary); color: var(--panel-text); }
+.connection-button-primary { background: var(--panel-accent); color: var(--panel-bg); border-color: var(--panel-accent); font-weight: 600; }
+.connection-button-primary:hover:not(:disabled) { background: var(--panel-accent); color: var(--panel-bg); border-color: var(--panel-accent); opacity: .86; }
+.connection-button-danger { color: var(--panel-danger); }
+.connection-button-danger:hover:not(:disabled) { color: var(--panel-danger); background: color-mix(in srgb, var(--panel-danger) 7%, transparent); border-color: color-mix(in srgb, var(--panel-danger) 30%, transparent); }
+.connection-button:disabled { opacity: .4; cursor: not-allowed; }
+.connection-button:focus-visible, .connection-login:focus-visible, .mcp-tool-details summary:focus-visible { outline: 2px solid var(--panel-accent); outline-offset: 3px; }
+.connection-platform-section { border-top: 1px solid var(--panel-border-light); padding: 17px 20px 20px; }
+.connection-platform-heading { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.connection-platform-heading h5 { font-size: 12px; margin: 0; font-weight: 650; }
+.connection-count { color: var(--panel-text-tertiary); font-size: 11px; background: var(--panel-bg-surface); border-radius: 5px; padding: 3px 7px; }
+.connection-checked { margin-left: auto; color: var(--panel-text-tertiary); font-size: 11px; }
+.connection-hint { margin: 8px 0 13px; font-size: 11px; line-height: 1.7; color: var(--panel-text-tertiary); overflow-wrap: anywhere; }
+.connection-platform-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 185px), 1fr)); gap: 8px; }
+.connection-platform { display: flex; align-items: center; gap: 9px; min-width: 0; padding: 12px; border: 1px solid var(--panel-border-light); border-radius: 9px; color: var(--panel-text-tertiary); }
+.connection-platform.has-credentials { background: color-mix(in srgb, var(--panel-success) 4%, var(--panel-surface)); color: var(--panel-success); }
+.connection-platform-name { flex: 1; min-width: 0; }
+.connection-platform-name strong { display: block; font-size: 12px; font-weight: 600; color: var(--panel-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.connection-platform-name > span { display: block; font-size: 11px; margin-top: 3px; }
+.connection-login { display: inline-flex; align-items: center; gap: 3px; border: 0; border-radius: 5px; padding: 5px 0 5px 5px; background: transparent; color: var(--panel-text-secondary); font: inherit; font-size: 11px; cursor: pointer; white-space: nowrap; }
+.connection-login:hover { color: var(--panel-text); text-decoration: underline; }
+.connection-empty-inline { display: flex; justify-content: center; align-items: center; gap: 8px; padding: 24px 12px; color: var(--panel-text-tertiary); font-size: 12px; border-radius: 10px; background: var(--panel-bg-surface); }
+.connection-alert { padding: 11px 14px; border: 1px solid color-mix(in srgb, var(--panel-danger) 22%, transparent); border-radius: 9px; color: var(--panel-danger); background: color-mix(in srgb, var(--panel-danger) 5%, transparent); font-size: 12px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; margin-bottom: 12px; }
+.connection-browser-card > .connection-alert { margin: 0 20px 20px; }
+.mcp-connections { margin-top: 28px; }
+.mcp-section-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 14px; }
+.mcp-section-heading .connection-section-heading { margin-bottom: 0; min-width: 200px; }
+.mcp-section-heading > button { flex-shrink: 0; }
+.mcp-server-list { display: grid; gap: 12px; }
+.mcp-server-header { display: flex; gap: 12px; align-items: center; padding: 18px 18px 12px; }
+.mcp-server-meta { display: flex; flex-wrap: wrap; gap: 7px; align-items: center; margin-top: 7px; color: var(--panel-text-tertiary); font-size: 11px; }
+.mcp-meta-separator { width: 3px; height: 3px; background: currentColor; border-radius: 50%; }
+.mcp-plugin-source { display: inline-flex; gap: 4px; align-items: center; margin-left: 4px; }
+.mcp-server-identity { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; padding: 0 18px 14px 72px; color: var(--panel-text-tertiary); font-size: 11px; }
+.mcp-server-identity code { flex-shrink: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; padding: 2px 5px; border-radius: 4px; background: var(--panel-bg-surface); }
+.mcp-server-identity > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.mcp-server-error { margin: 0 18px 12px; padding: 9px 11px; border-left: 2px solid color-mix(in srgb, var(--panel-danger) 50%, transparent); border-radius: 0 6px 6px 0; background: color-mix(in srgb, var(--panel-danger) 4%, transparent); color: var(--panel-text-secondary); font-size: 11px; line-height: 1.7; overflow-wrap: anywhere; white-space: pre-wrap; }
+.mcp-server-error > span { display: block; color: var(--panel-text-tertiary); margin-top: 4px; }
+.mcp-tool-details { padding: 0 18px 12px; font-size: 11px; color: var(--panel-text-secondary); }
+.mcp-tool-details summary { display: flex; align-items: center; gap: 5px; width: fit-content; cursor: pointer; list-style: none; border-radius: 4px; }
+.mcp-tool-details summary::-webkit-details-marker { display: none; }
+.mcp-tool-details summary > span { color: var(--panel-text-tertiary); margin-left: 2px; }
+.mcp-tool-details[open] summary > svg { transform: rotate(90deg); }
+.mcp-tool-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; max-height: 180px; overflow: auto; }
+.mcp-tool-tags code { padding: 4px 7px; border: 1px solid var(--panel-border-light); border-radius: 5px; overflow-wrap: anywhere; }
+.mcp-server-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding: 10px 14px; border-top: 1px solid var(--panel-border-light); }
+.mcp-server-actions .connection-button { border-color: transparent; min-height: 30px; font-size: 11px; padding: 5px 8px; }
+.mcp-server-actions .mcp-remove { margin-left: auto; }
+.mcp-empty { display: flex; flex-direction: column; align-items: center; text-align: center; padding: 36px 20px; border: 1px dashed var(--panel-border); border-radius: 14px; }
+.mcp-empty-icon { display: flex; align-items: center; justify-content: center; width: 54px; height: 54px; margin-bottom: 14px; border-radius: 16px; color: var(--panel-text-tertiary); background: var(--panel-bg-surface); }
+.mcp-empty strong { font-size: 13px; font-weight: 600; }
+.mcp-empty p { max-width: 360px; margin: 8px 0 0; color: var(--panel-text-tertiary); font-size: 12px; line-height: 1.7; }
+.mcp-editor { margin: 18px 0 0; padding: 18px; min-width: 0; }
+.mcp-editor legend { font-size: 13px; font-weight: 650; padding: 0 7px; }
+.mcp-editor-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.mcp-editor-actions { display: flex; flex-wrap: wrap; gap: 8px; padding-top: 8px; }
+.mcp-editor-actions .connection-button-primary { margin-left: auto; order: 1; }
+.mcp-test-result { margin-top: 16px; border-radius: 9px; padding: 12px; color: var(--panel-success); background: color-mix(in srgb, var(--panel-success) 6%, transparent); font-size: 12px; line-height: 1.7; }
+.mcp-test-result details { margin-top: 8px; color: var(--panel-text-secondary); }
+.mcp-test-result pre { max-height: 200px; overflow: auto; font-size: 11px; }
+.mcp-busy { display: flex; align-items: center; gap: 6px; color: var(--panel-text-tertiary); font-size: 12px; margin-top: 12px; }
+.connection-spin { animation: connection-spin 1.1s linear infinite; }
+@keyframes connection-spin { to { transform: rotate(360deg); } }
+@media (max-width: 650px) {
+  .connection-browser-header, .connection-platform-section { padding: 16px; }
+  .connection-browser-header > button { margin-left: 56px; }
+  .connection-checked { margin-left: 0; }
+  .mcp-server-identity { padding-left: 18px; }
+  .mcp-editor-grid { grid-template-columns: 1fr; gap: 0; }
+}
+@media (prefers-reduced-motion: reduce) { .connection-spin { animation: none; } }

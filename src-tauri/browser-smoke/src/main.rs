@@ -1,3 +1,6 @@
+#[path = "../../../src-tauri/src/browser_bridge/sites.rs"]
+pub mod browser_sites;
+pub mod browser_bridge { pub use crate::browser_sites as sites; }
 #[path = "../../../src-tauri/src/embedded_browser/mod.rs"]
 mod embedded_browser;
 #[path = "../../../src-tauri/src/browser_bridge/service.rs"]
@@ -76,6 +79,12 @@ async fn smoke(app: tauri::AppHandle, base: String) {
             .any(|t| t.id == first && !t.loading && t.title == "one")
     })
     .await;
+    if std::env::var_os("VIVIAN_BROWSER_RECOVERY_ONLY").is_some() {
+        recovery_smoke(&app, &base, &first).await;
+        EXIT_CODE.store(0, std::sync::atomic::Ordering::Relaxed);
+        app.exit(0);
+        return;
+    }
     println!("Checking native viewport capture for browser overlays...");
     let frame = native::automation::capture_viewport(&app, &first).await.unwrap();
     assert!(frame.starts_with("data:image/png;base64,iVBOR"));
@@ -478,6 +487,62 @@ async fn backup_roundtrip(app: &tauri::AppHandle) {
     assert_eq!(restored.tabs.iter().map(|t| &t.url).collect::<Vec<_>>(), expected.tabs.iter().map(|t| &t.url).collect::<Vec<_>>());
 }
 
+/// Kill only the isolated embedded process to exercise real WebView2 invalidation.
+async fn recovery_smoke(app: &tauri::AppHandle, base: &str, first: &str) {
+    use std::os::windows::process::CommandExt;
+    use serde_json::json;
+    println!("Checking engine crash recovery without erasing profile data...");
+    native::request(app.clone(), "memory".into(), BrowserRequest::Bookmark { id: first.into() }).await.unwrap();
+    native::request(app.clone(), "memory".into(), BrowserRequest::Navigate {
+        id: first.into(), input: format!("{base}/account"),
+    }).await.unwrap();
+    wait(app, |s| s.tabs.iter().any(|t| t.id == first && !t.loading && t.title == "fixture account")).await;
+    let text = browser_tool(app, "browser_snapshot", json!({"tab_id":first}), 10000).await.unwrap();
+    assert!(text.contains("Logged in as fixture-user"));
+    // Close once normally so this assertion tests an already persisted profile, not pending disk writes.
+    backup_roundtrip(app).await;
+    let text = browser_tool(app, "browser_snapshot", json!({"tab_id":first}), 10000).await.unwrap();
+    assert!(text.contains("Logged in as fixture-user"));
+    let pid = native::automation::engine_process_id(app).await.unwrap().unwrap();
+    assert_ne!(pid, std::process::id());
+    assert!(std::process::Command::new("taskkill.exe").args(["/PID", &pid.to_string(), "/F"])
+        .creation_flags(0x08000000).status().unwrap().success());
+    let mut restored = None;
+    for _ in 0..600 {
+        if let Ok(state) = native::request(app.clone(), "memory".into(), BrowserRequest::Init).await {
+            if state.error.is_none() && state.tabs.iter().any(|t| t.id == first && !t.loading && !t.title.is_empty())
+                && native::automation::engine_process_id(app).await.ok().flatten().is_some_and(|new| new != pid) {
+                restored = Some(state); break;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let state = restored.expect("engine must automatically recover within 30 seconds");
+    assert!(state.bookmarks.iter().any(|entry| entry.url == format!("{base}/one")));
+    let error = browser_tool(app, "browser_click", json!({"tab_id":first,"index":0}), 10000).await.unwrap_err();
+    assert!(error.contains("快照"), "old element selections survived engine recovery: {error}");
+    let text = browser_tool(app, "browser_snapshot", json!({"tab_id":first}), 10000).await.unwrap();
+    assert!(text.contains("Logged in as fixture-user"), "persistent login cookie lost during recovery");
+    let bridge = BROWSER_SERVICE.get().unwrap();
+    bridge.refresh_credentials().await;
+    assert!(bridge.is_connected());
+    assert!(bridge.error().is_none());
+    assert!(bridge.credential_error().is_none());
+    assert_eq!(bridge.platform_status().unwrap().1.len(), 10);
+    // A private-only browser remains usable, but cannot supply normal-profile credentials.
+    native::request(app.clone(), "memory".into(), BrowserRequest::NewTab {
+        input: format!("{base}/account"), private: true,
+    }).await.unwrap();
+    wait(app, |s| s.tabs.iter().any(|t| t.private && !t.loading && t.title == "login required")).await;
+    native::request(app.clone(), "memory".into(), BrowserRequest::Close { id: first.into() }).await.unwrap();
+    bridge.refresh_credentials().await;
+    assert!(bridge.is_connected(), "private-only browser must retain engine readiness");
+    assert!(bridge.credential_error().is_some());
+    let text = browser_tool(app, "browser_task_tab", json!({"url":format!("{base}/account"),"waitMs":0}), 10000).await.unwrap();
+    assert!(text.contains("Logged in as fixture-user"));
+    println!("PASS: browser crash recovery, retained tabs/bookmarks/login profile, revoked element selections, private-only engine readiness and browser_bridge credentials.");
+}
+
 async fn browser_tool(
     app: &tauri::AppHandle,
     name: &str,
@@ -534,7 +599,10 @@ async fn agent_smoke(app: &tauri::AppHandle, base: &str, first: &str, private: &
         .unwrap();
     assert!(page_text.contains("Logged in as fixture-user"));
     assert!(!page_text.contains("synthetic-api-key"));
-    let credentials = native::automation::credentials(app.clone()).await.unwrap();
+    let credentials = native::automation::credentials(app.clone())
+        .await
+        .unwrap()
+        .expect("browser cookie access is available in the smoke harness");
     assert_eq!(credentials.status.len(), 10);
     assert!(credentials.status.values().all(|logged_in| !*logged_in));
     assert!(credentials.x.is_none() && credentials.reddit.is_none());
@@ -820,7 +888,7 @@ fn main() {
             );
             let body = body.replace("<p id=key></p>", "<p id=key></p><p id=key-diagnostic></p><script>document.addEventListener('keydown',e=>document.getElementById('key-diagnostic').textContent='target='+e.target.id+' key='+e.key+' focus='+document.hasFocus());document.addEventListener('focusin',e=>document.getElementById('key-diagnostic').textContent='focused='+e.target.id)</script>");
             let cookie = if path == "/one" {
-                "Set-Cookie: login-session=synthetic-session; HttpOnly; Path=/; SameSite=Lax\r\n"
+                "Set-Cookie: login-session=synthetic-session; HttpOnly; Path=/; SameSite=Lax; Max-Age=3600\r\n"
             } else {
                 ""
             };

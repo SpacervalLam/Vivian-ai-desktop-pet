@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useTranslation } from 'react-i18next';
-import { Copy, FolderOpen, HardDrive, RefreshCw } from 'lucide-react';
+import { Copy, FolderOpen, HardDrive, RefreshCw, Trash2 } from 'lucide-react';
 
 interface StorageCategory {
   id: string;
@@ -14,6 +14,11 @@ export interface StorageUsage {
   total_bytes: number;
   categories: StorageCategory[];
   skipped_entries: number;
+}
+
+interface BrowserCacheClearResult {
+  freed_bytes: number;
+  failed_entries: number;
 }
 
 export function formatStorageBytes(bytes: number): string {
@@ -71,7 +76,8 @@ export default function StorageSettings() {
     finally { if (mounted.current) setBusy(false); }
   };
 
-  const categories = usage ? usage.categories.filter(c => c.bytes > 0).sort((a, b) => b.bytes - a.bytes) : [];
+  const categories = usage ? usage.categories.filter(c => c.bytes > 0).sort((a, b) =>
+    Number(a.id === 'other') - Number(b.id === 'other') || b.bytes - a.bytes) : [];
   const percent = (bytes: number) => usage?.total_bytes ? bytes / usage.total_bytes * 100 : 0;
   const formatPercent = (bytes: number) => new Intl.NumberFormat(i18n.language, { style: 'percent', maximumFractionDigits: 1 }).format(percent(bytes) / 100);
 
@@ -122,6 +128,23 @@ export default function StorageSettings() {
               <span>{t(`storageSettings.${child.id}`)}</span><strong>{formatStorageBytes(child.bytes)}</strong>
             </li>)}
           </ul>}
+          {c.id === 'browserCache' && <div className="settings-storage-category-action">
+            <button type="button" className="settings-data-button settings-data-button-danger" disabled={busy}
+              onClick={() => {
+                if (!window.confirm(t('storageSettings.clearBrowserCacheConfirm'))) return;
+                void action(async () => {
+                  const result = await invoke<BrowserCacheClearResult>('clear_browser_cache');
+                  await refresh();
+                  if (mounted.current) setStatus(result.failed_entries > 0
+                    ? t(result.freed_bytes > 0 ? 'storageSettings.browserCachePartial' : 'storageSettings.browserCacheBusy', {
+                      size: formatStorageBytes(result.freed_bytes), count: result.failed_entries,
+                    })
+                    : t('storageSettings.browserCacheCleared', { size: formatStorageBytes(result.freed_bytes) }));
+                });
+              }}>
+              <Trash2 size={15} />{t('storageSettings.clearBrowserCache')}
+            </button>
+          </div>}
         </dd>
       </div>)}</dl>
       <p className="settings-storage-note">{t('storageSettings.scope')}</p>

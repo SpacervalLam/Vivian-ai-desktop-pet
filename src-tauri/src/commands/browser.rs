@@ -41,6 +41,7 @@ pub struct BrowserStatus {
     pub platforms: Vec<PlatformStatusView>,
     pub reported_at_ms: u64,
     pub error: Option<String>,
+    pub credential_error: Option<String>,
 }
 
 #[tauri::command]
@@ -65,6 +66,7 @@ pub fn get_browser_platforms(state: State<'_, Arc<AppState>>) -> BrowserStatus {
         platforms,
         reported_at_ms,
         error: bridge.error(),
+        credential_error: bridge.credential_error(),
     }
 }
 

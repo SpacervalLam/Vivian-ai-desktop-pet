@@ -125,7 +125,7 @@ async fn fetch_document(url: &str, refresh: bool, allow_local: bool) -> VivianRe
             .await
             .map_err(|e| VivianError::Other(format!("解析失败: {e}")))??;
     if text.trim().is_empty() && raw_pdf.is_none() && raw_image.is_none() && images.is_empty() {
-        return Err(VivianError::Other("未提取到正文；可能需要登录、浏览器渲染或扫描 PDF 的 OCR。可使用已连接的浏览器桥读取页面。".into()));
+        return Err(VivianError::Other("未提取到正文；可能需要登录、浏览器渲染或扫描 PDF 的 OCR。可使用已就绪的内嵌浏览器读取页面。".into()));
     }
     let page = FetchedPage {
         url,

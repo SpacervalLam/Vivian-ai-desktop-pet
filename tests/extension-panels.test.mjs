@@ -21,12 +21,13 @@ const mocks = {
   'react-i18next': `export const useTranslation=()=>({i18n:{language:'zh'},t:key=>key});`,
   '@tauri-apps/api/core': `export const invoke=(...args)=>globalThis.__extensionUI.invoke(...args);`,
   '@tauri-apps/plugin-dialog': `export const open=async()=>globalThis.__extensionUI.selected;`,
-  'lucide-react': `export const Globe='icon',Plug='icon',Unplug='icon',Loader='icon';`,
+  'lucide-react': `export const Globe='icon',Plug='icon',Unplug='icon',Loader='icon',ArrowUpRight='icon',Cable='icon',ChevronRight='icon',Package='icon',Pencil='icon',Plus='icon',Power='icon',RotateCcw='icon',Terminal='icon',Trash2='icon',Check='icon';`,
   fields: `export const TextField='text-field',ToggleField='toggle-field',SelectField='select-field';export const inputStyle={},labelStyle={},sectionTitleStyle={};`,
 };
 async function load(entry) {
   const bundle = await build({ entryPoints: [entry], bundle: true, write: false, platform: 'node', format: 'esm', plugins: [{ name: 'ui-fixtures', setup(b) {
     b.onResolve({ filter: /^react$|^react\/jsx-runtime$|^react-i18next$|^@tauri-apps\/|^lucide-react$/ }, ({ path }) => ({ path, namespace: 'fixture' }));
+    b.onLoad({ filter: /\.css$/ }, () => ({ contents: '', loader: 'js' }));
     b.onResolve({ filter: /SettingsFields$/ }, () => ({ path: 'fields', namespace: 'fixture' }));
     b.onLoad({ filter: /.*/, namespace: 'fixture' }, ({ path }) => ({ contents: mocks[path] }));
   } }] });
@@ -115,10 +116,11 @@ globalThis.__extensionUI.invoke=async(command,args)=>{
   if(command==='verify_browser_page')return 'Live account: fixture-user';
   throw Error('Unexpected command: '+command);
 };
-render();await settle();await click('browser.open_browser');await click('browser.go_login');await click('browser.verify_page');
+render();await settle();await click('browser.open_browser');await click('browser.go_login');
 assert.ok(globalThis.__extensionUI.calls.some(c=>c.command==='open_embedded_browser'&&c.args?.url==='https://passport.bilibili.com/login'));
-assert.ok(text(tree).includes('Live account: fixture-user'));
+assert.ok(!globalThis.__extensionUI.calls.some(c=>c.command==='verify_browser_page'||c.command==='list_tools'), 'Settings only loads browser status');
+assert.ok(!text(tree).includes('browser.privacy_note'));
 browserReady=false;for(const tick of timers.values())tick();await settle();
 assert.ok(text(find(n=>n.props?.role==='alert')).includes('fixture engine error'));
 reset();assert.equal(timers.size,0,'Browser status polling stops on unmount');
-console.log('Extension panels: MCP editing, reviewed ZIP install, native browser login/read/error and polling cleanup passed.');
+console.log('Extension panels: MCP editing, reviewed ZIP install, native browser login/error and polling cleanup passed.');

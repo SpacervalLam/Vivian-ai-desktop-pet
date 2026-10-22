@@ -18,6 +18,13 @@ pub struct ConversationTurn {
     #[serde(default)] pub observer_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sticker: Option<serde_json::Value>,
+    /// 图片消息在 `<user_data_dir>` 下的相对路径（如 `images/xxx.png`）。
+    /// 与识图描述一起透出，让记忆页直接展示「这张图说了什么」并能回看原图，
+    /// 而不是只有一行 `📷 [图片]` 占位。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visual_description: Option<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConversationRecord {
@@ -141,6 +148,7 @@ pub fn project_conversations(
         } else {
             participants.iter().cloned().collect::<Vec<_>>().join(",")
         };
+        let is_image = meta_str(entry, "kind") == Some("image");
         let turn = ConversationTurn {
             id: entry.id.clone(),
             utterance_id: meta_str(entry, "utterance_id").map(str::to_owned),
@@ -150,6 +158,12 @@ pub fn project_conversations(
             timestamp: entry.timestamp,
             channel: meta_str(entry, "channel").unwrap_or("direct").into(),
             sticker: entry.metadata.get("sticker").cloned(),
+            image_path: is_image
+                .then(|| meta_str(entry, "image_path").map(str::to_owned))
+                .flatten(),
+            visual_description: is_image
+                .then(|| meta_str(entry, "visual_description").map(str::to_owned))
+                .flatten(),
             knowledge_source: meta_str(entry, "knowledge_source").unwrap_or("unspecified").into(),
             observer_id: meta_str(entry, "observer_id").map(str::to_owned),
         };

@@ -138,6 +138,7 @@
 .settings-storage-breakdown li { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 10px; line-height: 1.6; }
 .settings-storage-breakdown li + li { margin-top: 6px; }
 .settings-storage-breakdown li strong { font-size: 11px; }
+.settings-storage-category-action { margin-top: 12px; }
 .settings-storage-legend dd strong { color: var(--panel-text); font-size: 13px; font-weight: 600; }
 .settings-storage-path { display: block; padding: 10px 12px; margin-top: 14px; border: 1px solid var(--panel-border); border-radius: 7px; background: var(--panel-surface); color: var(--panel-text-secondary); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; user-select: text; }
 .settings-storage-note { margin: 8px 0 0; font-size: 11px; color: var(--panel-text-tertiary); line-height: 1.7; }

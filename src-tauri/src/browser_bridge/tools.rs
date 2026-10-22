@@ -349,7 +349,7 @@ impl Tool for BrowserTool {
 
     async fn call(&self, args: Value, context: &ToolUseContext) -> ToolResult {
         let Some(bridge) = bridge() else {
-            return ToolResult::error("浏览器桥未初始化");
+            return ToolResult::error("内嵌浏览器尚未初始化");
         };
         let args = if self.name == "browser_task_tab" {
             match super::sites::task_args(&args) {

@@ -37,6 +37,14 @@ fn default_render_type() -> String {
     "structured".to_string()
 }
 
+/// 手写字体文件名。
+const FONT_FILE: &str = "ma-shan-zheng.woff2";
+/// 旧版把字体复制到 `<note>/fonts/`，HTML 用相对路径引用。
+const LEGACY_FONT_URL: &str = "fonts/ma-shan-zheng.woff2";
+/// 共享字体在数据目录根部；note.html 位于 `characters/<char>/notebook/<note>/`，
+/// 相对上溯四级即可引用，独立打开笔记仍能离线加载。
+const SHARED_FONT_URL: &str = "../../../../fonts/ma-shan-zheng.woff2";
+
 /// 获取角色的笔记目录
 fn notebook_dir(char_id: &str) -> PathBuf {
     let dir = get_character_data_dir(char_id).join("notebook");
@@ -71,9 +79,11 @@ pub fn save(note: &NoteBook) -> Result<(), String> {
     std::fs::write(&html_path, html)
         .map_err(|e| format!("写入笔记 HTML 失败: {}", e))?;
 
-    // 复用本地手写字体，保留笔记路径 fonts/ma-shan-zheng.woff2，
-    // 使 HTML 通过相对路径引用、离线可用；失败时静默跳过（浏览器回退系统中文字体）。
-    let _ = copy_font_assets(&dir);
+    // 字体只保留数据目录根部的一份共享副本，不再逐篇挂载。
+    // 结构化模板本身不引用字体文件；旧的逐篇副本在共享字体可用时清理。
+    if ensure_shared_font().is_some() {
+        remove_note_local_font(&dir);
+    }
 
     update_index(&note.char_id, note)?;
 
@@ -117,10 +127,15 @@ pub fn save_raw_html(
     html: &str,
 ) -> Result<(), String> {
     let html = sanitize_html(html);
+    let shared_font = ensure_shared_font();
+    let html = if shared_font.is_some() { rewrite_font_url(&html) } else { html };
     let dir = note_dir(char_id, note_id);
     let html_path = dir.join("note.html");
     std::fs::write(&html_path, html)
         .map_err(|e| format!("写入笔记 HTML 失败: {}", e))?;
+    if shared_font.is_some() {
+        remove_note_local_font(&dir);
+    }
 
     let now = chrono::Local::now().timestamp() as f64;
     let summary = NoteSummary {
@@ -201,33 +216,78 @@ fn upsert_index(char_id: &str, summary: NoteSummary) -> Result<(), String> {
     write_index(char_id, &summaries)
 }
 
-/// 按内容复用本地手写字体；笔记仍保留 fonts/ 下的相对路径，支持独立离线打开。
-///
-/// 源文件位于项目 `public/fonts/ma-shan-zheng.woff2`，经 `CARGO_MANIFEST_DIR`
-/// （= src-tauri 目录）向上定位；源文件不存在时静默跳过。
-fn copy_font_assets(dir: &std::path::Path) -> Result<(), String> {
-    let src = std::path::Path::new(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../public/fonts/ma-shan-zheng.woff2"
-    ));
-    if !src.exists() {
-        return Ok(());
-    }
-    let fonts_dir = dir.join("fonts");
-    ensure_dir(&fonts_dir).map_err(|e| format!("创建字体目录失败: {}", e))?;
-    let bytes = std::fs::read(src).map_err(|e| format!("读取字体失败: {e}"))?;
-    crate::utils::assets::materialize(
-        &font_object_dir(),
-        &fonts_dir.join("ma-shan-zheng.woff2"),
-        &bytes,
-    )
-    .map_err(|e| format!("保存字体失败: {e}"))?;
-    Ok(())
+/// 数据目录根部共享的手写字体，所有笔记共用同一份。
+fn shared_font_path() -> PathBuf {
+    crate::utils::path::get_user_data_dir().join("fonts").join(FONT_FILE)
 }
 
+/// 内容寻址对象池：共享字体按内容复用，可随时重建，不进入备份。
 fn font_object_dir() -> PathBuf {
-    // The pool is rebuildable from note-local aliases, and stays out of backups.
     crate::utils::path::get_user_data_dir().join("cache/assets/notebook-fonts")
+}
+
+/// 确保共享字体存在（首次保存时从可选资源包物化一份）。
+///
+/// 资源包未安装或读取失败时返回 None，笔记回退系统中文字体；此时保留旧版
+/// 逐篇副本，避免迁移反而让离线打开失效。
+fn ensure_shared_font() -> Option<PathBuf> {
+    let target = shared_font_path();
+    if target.metadata().is_ok_and(|meta| meta.is_file() && meta.len() > 0) {
+        return Some(target);
+    }
+    let source = crate::commands::optional_resources::resource_path(
+        "fonts",
+        &format!("fonts/{FONT_FILE}"),
+    )?;
+    let bytes = std::fs::read(source).ok()?;
+    crate::utils::assets::materialize(&font_object_dir(), &target, &bytes).ok()?;
+    target.metadata().ok().filter(|meta| meta.is_file() && meta.len() > 0).map(|_| target)
+}
+
+/// 旧版 HTML 使用 `fonts/ma-shan-zheng.woff2`，迁移时改写为共享字体的相对路径。
+fn rewrite_font_url(html: &str) -> String {
+    if !has_legacy_font_url(html) {
+        return html.to_string();
+    }
+    html.replace(LEGACY_FONT_URL, SHARED_FONT_URL)
+}
+
+/// 共享路径本身也包含 `fonts/ma-shan-zheng.woff2` 子串，必须先确认尚未迁移，
+/// 否则重复迁移会不断叠加 `../`。
+fn has_legacy_font_url(html: &str) -> bool {
+    html.contains(LEGACY_FONT_URL) && !html.contains(SHARED_FONT_URL)
+}
+
+/// 删除某篇笔记旧版复制的字体；只动已知字体文件，目录空了才移除。
+fn remove_note_local_font(dir: &std::path::Path) {
+    let fonts_dir = dir.join("fonts");
+    if std::fs::remove_file(fonts_dir.join(FONT_FILE)).is_ok() {
+        let _ = std::fs::remove_dir(&fonts_dir);
+    }
+}
+
+/// 把目录内所有笔记的逐篇字体迁移到共享副本。
+///
+/// 只在共享字体可用时执行：先把 HTML 中的旧相对路径改写为共享路径，
+/// 再删除本地副本，保证笔记独立打开仍然可用。幂等，已迁移的目录只剩元数据扫描。
+fn migrate_legacy_fonts(dir: &std::path::Path) {
+    if ensure_shared_font().is_none() {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let note_dir = entry.path();
+        if !note_dir.is_dir() || !note_dir.join("fonts").join(FONT_FILE).exists() {
+            continue;
+        }
+        let html_path = note_dir.join("note.html");
+        if let Ok(html) = std::fs::read_to_string(&html_path) {
+            if has_legacy_font_url(&html) {
+                let _ = std::fs::write(&html_path, rewrite_font_url(&html));
+            }
+        }
+        remove_note_local_font(&note_dir);
+    }
 }
 
 /// 读取笔记完整数据
@@ -257,6 +317,17 @@ pub fn load_html(char_id: &str, note_id: &str) -> Result<String, String> {
             .map_err(|e| format!("更新笔记模板失败: {}", e))?;
         return Ok(html);
     }
+    // 旧版 raw_html 笔记仍引用 note-local 字体；共享字体可用时就地迁移，
+    // 之后独立打开 note.html 也不会因副本被清理而回退字体。
+    if let Ok(html) = &cached {
+        if has_legacy_font_url(html) && ensure_shared_font().is_some() {
+            let migrated = rewrite_font_url(html);
+            std::fs::write(&html_path, &migrated)
+                .map_err(|e| format!("迁移笔记字体失败: {}", e))?;
+            remove_note_local_font(&dir);
+            return Ok(migrated);
+        }
+    }
     cached.map_err(|e| format!("读取笔记 HTML 失败: {}", e))
 }
 
@@ -273,18 +344,11 @@ pub fn notebook_html_path(char_id: &str, note_id: &str) -> Option<String> {
     }
 }
 
-/// 笔记目录下本地手写字体文件的绝对路径（不存在时返回 None）。
+/// 共享手写字体文件的绝对路径（不存在时返回 None）。
 ///
-/// 供前端改写笔记 HTML 中的相对字体路径为 Tauri asset URL。
-pub fn notebook_font_path(char_id: &str, note_id: &str) -> Option<String> {
-    let p = note_dir(char_id, note_id)
-        .join("fonts")
-        .join("ma-shan-zheng.woff2");
-    if p.exists() {
-        Some(p.to_string_lossy().to_string())
-    } else {
-        None
-    }
+/// 供前端以 asset 协议 URL 加载字体；所有笔记共用同一份，不再逐篇存放。
+pub fn notebook_font_path(_char_id: &str, _note_id: &str) -> Option<String> {
+    ensure_shared_font().map(|p| p.to_string_lossy().to_string())
 }
 
 /// 列出角色的所有笔记摘要
@@ -293,6 +357,7 @@ pub fn notebook_font_path(char_id: &str, note_id: &str) -> Option<String> {
 /// 没有 note.json（仅有 note.html），需从索引文件中补全，否则不会出现在列表里。
 pub fn list(char_id: &str) -> Result<Vec<NoteSummary>, String> {
     let dir = notebook_dir(char_id);
+    migrate_legacy_fonts(&dir);
     let mut summaries = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
@@ -417,4 +482,30 @@ fn write_index(char_id: &str, summaries: &[NoteSummary]) -> Result<(), String> {
         .map_err(|e| format!("序列化索引失败: {}", e))?;
     std::fs::write(&path, json_str)
         .map_err(|e| format!("写入索引失败: {}", e))
+}
+
+#[cfg(test)]
+mod font_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_font_url_migrates_once() {
+        let legacy = "src: url('fonts/ma-shan-zheng.woff2') format('woff2')";
+        let shared = rewrite_font_url(legacy);
+        assert_eq!(shared, "src: url('../../../../fonts/ma-shan-zheng.woff2') format('woff2')");
+        assert_eq!(rewrite_font_url(&shared), shared);
+    }
+
+    #[test]
+    fn removing_note_font_keeps_note_html() {
+        let dir = tempfile::tempdir().unwrap();
+        let note = dir.path().join("note");
+        let fonts = note.join("fonts");
+        std::fs::create_dir_all(&fonts).unwrap();
+        std::fs::write(fonts.join(FONT_FILE), b"font").unwrap();
+        std::fs::write(note.join("note.html"), b"html").unwrap();
+        remove_note_local_font(&note);
+        assert!(!fonts.exists());
+        assert!(note.join("note.html").exists());
+    }
 }
