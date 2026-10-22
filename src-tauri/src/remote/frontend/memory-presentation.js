@@ -136,6 +136,8 @@ var MemoryPresentation = (() => {
     memoryOriginal: ["\u67E5\u770B\u539F\u59CB\u4F1A\u8BDD", "View Original Conversation", "\u5143\u306E\u4F1A\u8A71\u3092\u898B\u308B"],
     memoryViewSummary: ["\u67E5\u770B\u4F1A\u8BDD\u6458\u8981", "View Summary", "\u4F1A\u8A71\u306E\u8981\u7D04\u3092\u898B\u308B"],
     memoryKept: ["\u7559\u4E0B\u7684\u8BB0\u5FC6", "Memories Kept", "\u6B8B\u3055\u308C\u305F\u8A18\u61B6"],
+    memoryViewImage: ["\u67E5\u770B\u539F\u56FE", "View Original Image", "\u5143\u306E\u753B\u50CF\u3092\u898B\u308B"],
+    memoryImageMissing: ["\u539F\u56FE\u6587\u4EF6\u5DF2\u4E0D\u5728\u672C\u5730\uFF0C\u53EF\u80FD\u5DF2\u88AB\u6E05\u7406", "The original image is gone from disk", "\u5143\u753B\u50CF\u304C\u30ED\u30FC\u30AB\u30EB\u306B\u6B8B\u3063\u3066\u3044\u307E\u305B\u3093"],
     memoryQuote: ["\u6765\u81EA\u539F\u8BDD", "From the Original Words", "\u5143\u306E\u767A\u8A00\u3088\u308A"],
     memoryFollowUp: ["\u5F85\u8DDF\u8FDB", "Follow Up", "\u8981\u30D5\u30A9\u30ED\u30FC"],
     memoryView: ["\u67E5\u770B\u4F1A\u8BDD", "View Conversation", "\u4F1A\u8A71\u3092\u898B\u308B"],
@@ -282,7 +284,8 @@ var MemoryPresentation = (() => {
   };
   var isMemoryFact = (item) => item.metadata?.record_kind === "fact";
   var isMemorySummary = (item) => item.metadata?.record_kind === "session_summary";
-  var isVisibleMemoryFact = (item) => !["system_seed", "environment_preset"].includes(String(item.metadata?.source ?? "")) && !!item.content.trim() && !item.consolidated && !["subjective", "observation", "internal"].includes(String(item.metadata?.record_kind ?? "")) && isMemoryFact(item);
+  var isImageObservation = (item) => item.metadata?.kind === "image";
+  var isVisibleMemoryFact = (item) => !["system_seed", "environment_preset"].includes(String(item.metadata?.source ?? "")) && !!item.content.trim() && !item.consolidated && !isImageObservation(item) && !["subjective", "observation", "internal"].includes(String(item.metadata?.record_kind ?? "")) && isMemoryFact(item);
   var sharedEventTimeline = (items, records) => {
     const originals = new Map(records.flatMap((record) => record.turns.map((turn) => [turn.id, { turn, conversationId: record.id }])));
     const groups = /* @__PURE__ */ new Map();
@@ -324,6 +327,12 @@ var MemoryPresentation = (() => {
     const name = (person) => person === "user" ? comicText("conversationYou", language) : speakerName(person, character);
     return comicText("conversationParticipants", language).replace("{{first}}", name(first)).replace("{{others}}", participants.filter((person) => person !== first).map(name).join(comicLocale(language) === "en" ? ", " : "\u3001"));
   }
+  var turnImage = (turn) => {
+    const description = turn.visual_description?.trim();
+    if (!description && !turn.image_path) return void 0;
+    return { path: turn.image_path, description: description || void 0 };
+  };
+  var turnText = (turn) => turn.visual_description?.trim() || turn.text;
   var conversationThreads = (records, character, language = "zh-CN") => records.map((record) => ({
     id: record.id,
     title: conversationTitle(record, character, language),
@@ -334,12 +343,13 @@ var MemoryPresentation = (() => {
       id: turn.id,
       speaker: speakerName(turn.speaker, character),
       audience: speakerName(turn.listener === "all" ? "\u5927\u5BB6" : turn.listener, character),
-      text: turn.text,
+      text: turnText(turn),
       timestamp: turn.timestamp,
-      sticker: turn.sticker
+      sticker: turn.sticker,
+      image: turnImage(turn)
     })),
     items: [],
-    searchText: `${[.../* @__PURE__ */ new Set([conversationTitle(record, character, language), record.title])].join(" ")} ${record.turns.map((turn) => turn.text).join(" ")}`
+    searchText: `${[.../* @__PURE__ */ new Set([conversationTitle(record, character, language), record.title])].join(" ")} ${record.turns.map(turnText).join(" ")}`
   })).sort((a, b) => b.time - a.time);
 
   // src/utils/ActionText.ts
