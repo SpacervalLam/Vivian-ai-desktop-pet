@@ -34,33 +34,33 @@ try{
  const stage=tree=>find(tree,node=>node.props?.className?.includes('chibi-pet-stage'));
  const sprite=tree=>find(tree,node=>node.props?.className==='chibi-pet-sprite');
 
- // 关闭环境动效时推进器会被注册，但跑一遍不得挂任何计时器（与自主漫步同一开关）。
- render({ambientMotionEnabled:false});
+ // 预览不启动自主张望。
+ render({previewMode:true});
  const disabledAccent=effects.find(fn=>fn.toString().includes('intervalSecs'));
  assert.ok(disabledAccent,'accent driver is registered');
  disabledAccent();
- assert.equal(timerWith(12000),undefined,'disabled ambience must not arm the idle accent');
+ assert.equal(timers.size,0,'preview must not arm the idle accent');
 
- // 打开后按配置间隔只挂一个计时器（12000ms），其余推进器是各自的间隔。
- render();
+ // 张望与自主漫步解耦，游戏模式、漫步关闭时仍按 4 秒间隔触发。
+ render({ambientMotionEnabled:false,gameMode:true});
  const accent=effects.find(fn=>fn.toString().includes('intervalSecs'));
  assert.ok(accent,'idle accent driver is registered');
- accent();
- const armed=timerWith(12000);
+ const cleanup=accent();
+ const armed=timerWith(4000);
  assert.ok(armed,'idle accent arms the configured interval');
- assert.equal([...timers.values()].filter(timer=>timer.ms===12000).length,1,'only the accent uses the configured interval');
+ assert.equal([...timers.values()].filter(timer=>timer.ms===4000).length,1,'only one accent timer is armed');
 
  // 说话 / 被占用时顺延：不改姿态，改用短重试间隔。
  speechStore.currentBubble='正在说话';
  render();
- Math.random=()=>0;
+ Math.random=()=>0.999;
  fire(armed[0]);
- const retry=timerWith(3000);
+ const retry=timerWith(1000);
  assert.ok(retry,'a blocked accent retries on the short interval');
  let tree=render();
  assert.doesNotMatch(stage(tree).props.className,/pose-look/,'speaking defers the idle accent');
 
- // 静息时按概率插播：进入张望循环，并按配置时长保持。
+ // 无需随机抽中：空闲即播放，并按配置时长保持。
  speechStore.currentBubble=null;
  render();
  fire(retry[0]);
@@ -68,6 +68,11 @@ try{
  assert.match(stage(tree).props.className,/pose-look/,'idle accent plays the look loop');
  assert.match(sprite(tree).props.style.backgroundImage,/nana-look-sheet\.webp/, 'idle accent loads the look sheet for the active character');
  assert.ok(timerWith(2600),'accent is held for the configured duration');
+ const next=timerWith(4000);
+ fire(next[0]);
+ assert.ok(timerWith(1000),'an active animation is not restarted or interrupted');
+ cleanup();
+ assert.equal(timerWith(1000),undefined,'unmount cancels the pending retry');
  console.log('pet idle accent passed');
 } finally {
  globalThis.setTimeout=priorTimeout;globalThis.clearTimeout=priorClearTimeout;globalThis.window=priorWindow;Math.random=priorRandom;

@@ -30,6 +30,9 @@ impl Evidence {
     pub fn from_state(state: &PipelineState) -> Self {
         let mut evidence = Self { assistant_reply: state.text.clone(), sources: vec![], assistant_context: vec![] };
         evidence.add("current_user", "current_user", &state.user_input, 4000);
+        if let Some(observations) = state.metadata.get("current_desktop_observations").and_then(Value::as_str) {
+            evidence.add("current_desktop", "cached_observation_with_source_and_time", observations, 4000);
+        }
         // tool_calls 也可能由模型正文解析而来，只有宿主执行器写入的 metadata 可信。
         let receipts = state.metadata.get("verified_tool_receipts").and_then(Value::as_array)
             .map(Vec::as_slice).unwrap_or(&[]);

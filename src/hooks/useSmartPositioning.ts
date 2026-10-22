@@ -162,30 +162,38 @@ export function useSmartPositioning(
         if (!userInteractingRef.current) petRef.current?.resetExpression();
       };
 
-      // 有水平分量才转身起步。腿是侧向的，纵向挪动既不需要转身也不需要摆腿，
-      // 由窗口滑动本身表达；这类位移此前会播一段与移动方向无关的碎步。
+      // 水平分量足够时转身行走；近乎垂直的升降使用正面悬浮动画。
       // 转身是位移的入场过渡：转完停在侧身（playTurn 不回落基准姿态），紧接着起步。
       let walkDone: Promise<boolean> | undefined;
+      let stopVerticalMove: (() => void) | null | undefined;
       if (plan.walking) {
         const turned = await petRef.current?.playTurn(plan.direction);
         if (shouldAbort()) return abortToRest();
         if (turned) {
           walkDone = petRef.current?.playWalk(plan.direction, plan.frames, plan.frameDelayMs);
         }
+      } else if (targetY !== startY) {
+        stopVerticalMove = await petRef.current?.startVerticalMove();
+        if (shouldAbort()) { stopVerticalMove?.(); return abortToRest(); }
       }
 
       // 窗口按计划时长滑到位。时间轴是共享的：walkPlan 保证 durationMs === frames ×
       // frameDelayMs，且 durationMs 与 slideMs 相差不超过一个帧间隔，所以走动的播放
       // 窗口与这段滑动基本等长、快慢同涨同落。
-      const completed = await runSlide({
-        fromX: startX,
-        fromY: startY,
-        toX: targetX,
-        toY: targetY,
-        durationMs: plan.durationMs,
-        apply: (x, y) => invoke('set_window_position', { x, y }),
-        shouldAbort,
-      });
+      let completed: boolean;
+      try {
+        completed = await runSlide({
+          fromX: startX,
+          fromY: startY,
+          toX: targetX,
+          toY: targetY,
+          durationMs: plan.durationMs,
+          apply: (x, y) => invoke('set_window_position', { x, y }),
+          shouldAbort,
+        });
+      } finally {
+        stopVerticalMove?.();
+      }
       if (!completed) return abortToRest();
 
       // 走动与滑动共用同一段时间轴，等走动收尾再回身：否则角色会停在抬腿到一半的

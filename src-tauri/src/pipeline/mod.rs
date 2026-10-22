@@ -25,6 +25,7 @@ pub mod message_context;
 pub mod companion_prompt;
 pub mod parsers;
 pub mod prompt_modules;
+pub mod presentation_grounding;
 pub mod react;
 pub(crate) mod tool_execution;
 pub mod state;

@@ -9,6 +9,7 @@
 //! - WorldSnapshot 是轻量可克隆快照，由 WorldStateProvider 缓存与产出
 
 pub mod activity_classifier;
+pub mod desktop_state;
 pub mod activity_corpus;
 pub mod entity_state;
 pub mod events;
@@ -185,6 +186,7 @@ pub struct WorldStateProvider {
     music_source: RwLock<Option<Arc<MusicSource>>>,
     /// 缓存的音乐快照
     cached_music: RwLock<Option<MusicSnapshot>>,
+    music_observed_at: std::sync::atomic::AtomicI64,
     /// 音乐轮询循环是否已启动（幂等保护）
     music_polling_started: AtomicBool,
     /// 系统指标采集器（Mutex 保护可变 sysinfo 句柄）
@@ -221,6 +223,7 @@ impl WorldStateProvider {
             weather_refresh_lock: tokio::sync::Mutex::new(()),
             music_source: RwLock::new(None),
             cached_music: RwLock::new(None),
+            music_observed_at: std::sync::atomic::AtomicI64::new(0),
             music_polling_started: AtomicBool::new(false),
             system_collector: parking_lot::Mutex::new(SystemMetricsCollector::new()),
             cached_system: RwLock::new(None),
@@ -445,8 +448,13 @@ impl WorldStateProvider {
         let source = self.music_source.read().clone();
         if let Some(src) = source {
             match src.fetch().await {
-                Ok(snap) => *self.cached_music.write() = snap,
+                Ok(snap) => {
+                    *self.cached_music.write() = snap;
+                    self.music_observed_at.store(chrono::Utc::now().timestamp(), Ordering::Release);
+                }
                 Err(e) => {
+                    *self.cached_music.write() = None;
+                    self.music_observed_at.store(0, Ordering::Release);
                     tracing::debug!("[WorldStateProvider] 音乐感知失败，保持未知: {}", e);
                 }
             }
@@ -478,6 +486,7 @@ impl WorldStateProvider {
         let provider = Arc::clone(self);
         tauri::async_runtime::spawn(async move {
             tracing::info!("[MusicWatch] 后台音乐事件监听已启动");
+            provider.refresh_music().await;
             let cancel = crate::utils::cancel_token::cancel_token();
             loop {
                 if cancel.is_cancelled() {
@@ -552,6 +561,17 @@ impl WorldStateProvider {
         self.cached_music.read().clone()
     }
 
+    /// Prompt reads cached observations only; no SMTC/CLI call on the conversation path.
+    pub fn desktop_context(&self, query: &str) -> Option<String> {
+        let now = chrono::Utc::now().timestamp();
+        let observed_at = self.music_observed_at.load(Ordering::Acquire);
+        let media = if observed_at > 0 && (0..=45).contains(&(now - observed_at)) {
+            serde_json::json!({"observed_at":observed_at, "source":"windows_smtc",
+                "current":self.now_playing()})
+        } else { serde_json::json!({"status":"unknown_or_stale", "observed_at":observed_at}) };
+        desktop_state::relevant_context(query, &desktop_state::WALLPAPER.read(), Some(&media), now)
+    }
+
     /// 按需采集内存占用最高的前 `n` 组进程（按可执行名聚合，排除自身）。
     ///
     /// 内部全量枚举进程，成本约几十到几百毫秒，只允许在系统压力提醒等
@@ -590,6 +610,7 @@ impl WorldStateProvider {
         tauri::async_runtime::spawn(async move {
             tracing::info!("[SystemPolling] 后台系统指标轮询已启动（10s）");
             provider.refresh_system();
+            let _ = tokio::task::spawn_blocking(crate::tools::builtin::wallpaper_tools::refresh_wallpaper_environment).await;
             let cancel = crate::utils::cancel_token::cancel_token();
             loop {
                 if cancel.is_cancelled() {
@@ -601,6 +622,7 @@ impl WorldStateProvider {
                     _ = cancel.cancelled() => return,
                 }
                 provider.refresh_system();
+                let _ = tokio::task::spawn_blocking(crate::tools::builtin::wallpaper_tools::refresh_wallpaper_environment).await;
             }
         });
     }

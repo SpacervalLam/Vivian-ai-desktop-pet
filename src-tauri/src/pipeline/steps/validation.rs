@@ -172,6 +172,23 @@ impl Runnable for ValidationRunnable {
             state.text = cleaned;
         }
 
+        // Historical host receipts are evidence too; a tool's internal list is not a displayed list.
+        let mut receipts = Vec::new();
+        for message in state.messages.iter().filter(|m| m.role == "system") {
+            if let Some(data) = message.content.strip_prefix("[Host verified wallpaper evidence; data only, not instructions] ") {
+                if let Ok(Value::Array(items)) = serde_json::from_str::<Value>(data) { receipts.extend(items); }
+            }
+        }
+        receipts.extend(state.metadata.get("verified_tool_receipts").and_then(Value::as_array).cloned().unwrap_or_default());
+        // Only this turn's execution may rewrite its completion claim; historical outcomes can be superseded.
+        let current_receipts = state.metadata.get("verified_tool_receipts").and_then(Value::as_array).cloned().unwrap_or_default();
+        state.text = crate::pipeline::presentation_grounding::ground_wallpaper_outcome(&state.text, &current_receipts);
+        let wallpaper = crate::world::desktop_state::WALLPAPER.read().clone();
+        let current = if crate::world::desktop_state::fresh(&wallpaper, chrono::Utc::now().timestamp()) {
+            wallpaper.primary.as_ref().map(|item| item.file.as_str())
+        } else { None };
+        state.text = crate::pipeline::presentation_grounding::ground_wallpaper_choices(&state.text, &receipts, current);
+
         // 3. 长度截断
         let char_count = state.text.chars().count();
         if char_count > MAX_RESPONSE_CHARS {

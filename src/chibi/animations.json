@@ -48,6 +48,18 @@
   },
   "animations": [
     {
+      "name": "float",
+      "label": "升降悬浮",
+      "category": "state",
+      "promptable": false,
+      "sheet": "/chibi/motion/{character}/{character}-float-sheet.webp",
+      "cols": 4,
+      "rows": 2,
+      "frames": 8,
+      "loop": true,
+      "durations": [140, 140, 140, 140, 140, 140, 140, 140]
+    },
+    {
       "name": "walk",
       "label": "走动",
       "category": "action",
@@ -699,8 +711,8 @@
   },
   "idle_accent": {
     "motion": "look",
-    "interval_secs": 12,
-    "probability": 0.7,
+    "interval_secs": 4,
+    "probability": 1,
     "duration_ms": 2600
   },
   "event_triggers": {

@@ -159,7 +159,7 @@ const BLINK_FRAMES = Array.from({ length: BLINK_SPEC.frames }, (_, index) => ind
 const BLINK_MIN_DELAY_MS = 3_200;
 const BLINK_DELAY_RANGE_MS = 4_300;
 /** 待机点缀被占用（说话/忙碌/拖动/漫步/逃离）时的重试间隔（ms），远短于点缀本身间隔。 */
-const IDLE_ACCENT_RETRY_MS = 3_000;
+const IDLE_ACCENT_RETRY_MS = 1_000;
 /** 双击/单击等交互让动作停留的默认时长。 */
 const POSE_HOLD_MS = 900;
 
@@ -282,6 +282,8 @@ export interface ChibiPetCanvasHandle {
    * false 表示被新动作或用户按压打断。
    */
   playWalk: (direction: 'left' | 'right', frames: number, frameDelayMs: number) => Promise<boolean>;
+  /** Load and start vertical hovering; returned cleanup only stops this movement. */
+  startVerticalMove: () => Promise<(() => void) | null>;
   /** 长按进度环出现时开始"施法召唤窗口"动画：durationMs 内正向播完（与进度环填充同步）；不被 pressed 状态打断。 */
   startCast: (durationMs: number) => void;
   /** 长按取消：从当前帧倒放回初始帧，随后回 idle。 */
@@ -349,6 +351,7 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
     const [poseName, setPoseName] = useState<ChibiPose>('idle');
     const poseNameRef = useRef<ChibiPose>('idle');
     const waitingForReplyRef = useRef(false);
+    const thinkingExitRef = useRef<{ motion: string; durationMs?: number } | null>(null);
     const crossPresentationRef = useRef(new CrossPresentation(characterId));
     const [, setCrossVersion] = useState(0);
     const [audioPlaying, setAudioPlaying] = useState(false);
@@ -664,6 +667,18 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
      */
     const applyMotion = useCallback((raw: string, durationMs?: number) => {
       const name = raw.trim().toLowerCase();
+      if (poseNameRef.current === 'thinking'
+        && !['drag', 'dizzy', 'sleep', 'wake'].includes(name)) {
+        if (name === 'thinking') {
+          // A new request takes over without restarting the current thought frame.
+          thinkingExitRef.current = null;
+        } else if (!waitingForReplyRef.current) {
+          // Keep the latest reply gesture until the thought animation has left naturally.
+          thinkingExitRef.current = { motion: raw, durationMs };
+        }
+        return;
+      }
+      thinkingExitRef.current = null;
       if (name === 'sleep' || (name === 'tend' && characterId === 'nana')) {
         startIdleRoutine(name as 'sleep' | 'tend');
         return;
@@ -831,6 +846,25 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
       frameDelayMs: number,
     ): Promise<boolean> => beginWalk(direction, frames, frameDelayMs).done, [beginWalk]);
 
+    const startVerticalMove = useCallback(async (): Promise<(() => void) | null> => {
+      if (wakeUp()) return null;
+      clearPoseTimer();
+      const token = ++sequenceTokenRef.current;
+      const spec = animation('float');
+      const ready = await sheetLoader.load(sheetUrl(spec, characterId, walkDirectionRef.current));
+      if (!ready || sequenceTokenRef.current !== token || pressedRef.current) return null;
+      walkFrameDelayMsRef.current = null;
+      walkTargetFramesRef.current = null;
+      thinkingExitRef.current = null;
+      setFrame(0);
+      setActivePose(spec.name);
+      return () => {
+        if (sequenceTokenRef.current !== token) return;
+        sequenceTokenRef.current += 1;
+        returnToTone();
+      };
+    }, [characterId, clearPoseTimer, returnToTone, setActivePose, sheetLoader, wakeUp]);
+
     // 长按"施法召唤窗口"：与进度环同步的正向播放 + 取消倒放。
     // 会话（token/当前帧/缩放后帧时长）记在 ref，取消/完成据此从当前帧接续；
     // 自行控制帧推进，不被 pressedRef 打断（用户此时仍按着左键）。
@@ -937,10 +971,11 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
       playTurn,
       playTurnBack,
       playWalk,
+      startVerticalMove,
       startCast,
       cancelCast,
       stopCast,
-    }), [applyMotion, cancelCast, clearPoseTimer, onScaleChange, previewBlink, previewTurn, previewWalk, returnToTone, startBusy, startCast, stopBusy, stopCast, playTurn, playTurnBack, playWalk, wakeUp]);
+    }), [applyMotion, cancelCast, clearPoseTimer, onScaleChange, previewBlink, previewTurn, previewWalk, returnToTone, startBusy, startCast, stopBusy, stopCast, playTurn, playTurnBack, playWalk, startVerticalMove, wakeUp]);
 
     // 仅加载当前动作；等待或缺图时维持主图集，避免空白精灵。
     useEffect(() => {
@@ -977,15 +1012,32 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
       let timer: number | null = null;
       const frameDelay = walkFrameDelayMsRef.current;
       const targetFrames = walkTargetFramesRef.current;
-      const advance = (current: number, shown: number) => {
+      const thinking = spec.name === 'thinking';
+      const thinkingLoopStart = characterId === 'nana' ? 2 : 3;
+      const advance = (current: number, shown: number, direction = 1) => {
         // 指定了帧数时播满即停。帧数由位移时长与帧间隔推导（不保证是周期的整数倍），
         // 停在哪一格都有可能；紧随其后的回身动画会立即接管这一格。
         if (targetFrames != null && shown >= targetFrames) return;
         timer = window.setTimeout(() => {
           if (cancelled) return;
-          const next = (current + 1) % spec.frames;
+          if (thinking && thinkingExitRef.current && current === spec.frames - 1) {
+            const nextMotion = thinkingExitRef.current;
+            thinkingExitRef.current = null;
+            setActivePose('idle');
+            applyMotion(nextMotion.motion, nextMotion.durationMs);
+            return;
+          }
+          // One-based loop bounds: Vivian 4..9, Nana 3..9.
+          // Play the intro, then ping-pong without repeating endpoints.
+          if (thinking && !thinkingExitRef.current) {
+            if (current >= 8) direction = -1;
+            else if (current <= thinkingLoopStart) direction = 1;
+          }
+          const next = thinking
+            ? current + (thinkingExitRef.current ? 1 : direction)
+            : (current + 1) % spec.frames;
           setFrame(next);
-          advance(next, shown + 1);
+          advance(next, shown + 1, direction);
         }, frameDelay ?? frameDurationMs(spec, current));
       };
       advance(0, 0);
@@ -993,7 +1045,7 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
         cancelled = true;
         if (timer !== null) window.clearTimeout(timer);
       };
-    }, [poseName]);
+    }, [poseName, characterId, applyMotion, setActivePose]);
 
     // 自然眨眼：只在待机且未被按压时插入，偶尔连眨两下
     useEffect(() => {
@@ -1041,11 +1093,10 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
 
     // 待机点缀：静息时按间隔插播一次循环小动作（如四处张望）。
     //
-    // 与自然眨眼同一层——都只发生在基准姿态上，被按住 / 说话 / 忙碌 / 避让 / 拖动挡下时
-    // 顺延重试，而不消耗一个间隔。推进放在前端而非后端空闲阶段机，是因为只有这里知道
-    // 桌宠此刻是否真的在待机（后端只看「距上次交互多久」，避让与拖动它都看不见）。
+    // 张望独立于自主漫步开关：游戏模式、非在线状态也允许空闲时播放。
+    // 只避开正在说话、已有姿态或按压拖动，不打断睡眠和用户交互。
     useEffect(() => {
-      if (!IDLE_ACCENT || !ambientMotionEnabled || previewMode) return undefined;
+      if (!IDLE_ACCENT || previewMode) return undefined;
       const { motion, intervalSecs, probability, durationMs } = IDLE_ACCENT;
       let cancelled = false;
       let timer: number | null = null;
@@ -1055,8 +1106,7 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
         timer = window.setTimeout(() => {
           timer = null;
           if (cancelled) return;
-          const free = isAtRest() && !pressAliveRef.current && !positioningCoordinator.fleeInFlight
-            && !positioningCoordinator.ambientMoveInFlight && !positioningCoordinator.dragInFlight;
+          const free = isAtRest() && !pressAliveRef.current && !positioningCoordinator.dragInFlight;
           if (!free) {
             arm(IDLE_ACCENT_RETRY_MS);
             return;
@@ -1070,7 +1120,7 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
         cancelled = true;
         if (timer !== null) window.clearTimeout(timer);
       };
-    }, [ambientMotionEnabled, applyMotion, isAtRest, previewMode]);
+    }, [applyMotion, isAtRest, previewMode]);
 
     useEffect(() => {
       if (previewMode) {
@@ -1624,7 +1674,10 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
      * 帧序列图集可用时按帧序列取格；不可用时退回主图集的 `idle` 格位——帧序列的
      * `frame` 序号在主图集里没有意义，拿它去定位只会取到无关的一格。
      */
-    const displayMotion = speechDisplayMotion(physics.airborne && poseName !== 'dizzy' && !positioningCoordinator.dragInFlight ? 'drag' : poseName, speakingRef.current, pressed, crossPresentationRef.current.motion);
+    const physicalMotion = physics.airborne && poseName !== 'dizzy' && !positioningCoordinator.dragInFlight ? 'drag' : poseName;
+    // Incoming text/audio must not hide the remaining thought exit frames.
+    const displayMotion = physicalMotion === 'thinking' ? 'thinking'
+      : speechDisplayMotion(physicalMotion, speakingRef.current, pressed, crossPresentationRef.current.motion);
     const activeSpec = resolveMotion(displayMotion, characterId);
     const activeSheet =
       activeSpec.kind === 'animation'

@@ -41,7 +41,7 @@ try{
  send('tts:finished',{character_id:'nana'});await flush();tree=render();assert.doesNotMatch(stage(tree).props.className,/pose-talk/);
  speechStore.settledBubbles=[{text:'还有一段没读完的气泡'}];tree=render();assert.match(stage(tree).props.className,/pose-talk/,'settled text remains spoken while visible');
  speechStore.settledBubbles=[{text:'',sticker:{}}];tree=render();assert.doesNotMatch(stage(tree).props.className,/pose-talk/,'sticker alone is not speech');
- send('chat:waiting',{character_id:'nana',stream_id:'new'});send('tts:started',{character_id:'nana'});tree=render();assert.match(stage(tree).props.className,/pose-talk/,'playback takes precedence over a queued thinking reply');
+ send('chat:waiting',{character_id:'nana',stream_id:'new'});send('tts:started',{character_id:'nana'});tree=render();assert.match(stage(tree).props.className,/pose-thinking/,'speech preserves the thinking animation until its end signal and natural outro');
  send('presentation:stop',{speaker_id:'nana'});tree=render();assert.doesNotMatch(stage(tree).props.className,/pose-talk/);
  send('chat:error',{character_id:'nana',stream_id:'new'});send('tts:started',{character_id:'nana'});
  handle.setExpression('drag');tree=render();assert.match(stage(tree).props.className,/pose-drag/,'dragging is not overwritten by speech');
@@ -57,6 +57,9 @@ try{
  send('cross:error',{stream_id:'pair-2',source_id:'vivian',target_id:'nana'});tree=render();assert.match(stage(tree).props.className,/pose-idle/,'error releases listening');
  send('cross:start',{stream_id:'pair-3',speaker_id:'vivian',listener_id:'nana'});send('chat:waiting',{character_id:'nana',stream_id:'user'});send('cross:chunk',{stream_id:'pair-3',speaker_id:'vivian',listener_id:'nana',text:'late'});tree=render();assert.doesNotMatch(stage(tree).props.className,/pose-listen/,'late peer text cannot reclaim a user conversation');
  send('chat:error',{character_id:'nana',stream_id:'user'});
+ // Finish the thought presentation before testing unrelated peer ownership.
+ // The frame-driven natural outro is exercised in pet-thinking-loop.test.mjs.
+ handle.resetExpression();
  send('cross:start',{stream_id:'pair-4',speaker_id:'vivian',listener_id:'nana'});send('character:online_changed',{character_id:'vivian',online:false});tree=render();assert.match(stage(tree).props.className,/pose-idle/,'offline peer releases presentation');
  send('cross:start',{stream_id:'pair-5',speaker_id:'vivian',listener_id:'nana'});const watchdog=[...timers.values()].find(timer=>timer.ms===180000);assert.ok(watchdog);watchdog.fn();tree=render();assert.match(stage(tree).props.className,/pose-idle/,'missing terminal event cannot leave listening forever');
  for(const [alias,motion] of [['伸手','rps-paper'],['加油打气','rps-rock'],['比耶','rps-scissors']]){

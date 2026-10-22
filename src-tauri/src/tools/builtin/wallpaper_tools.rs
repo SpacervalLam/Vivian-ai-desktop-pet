@@ -28,6 +28,37 @@ use crate::utils::process::silent_command;
 /// Wallpaper Engine 在 Steam 中的 App ID
 const WALLPAPER_ENGINE_APP_ID: &str = "431960";
 
+fn read_wallpaper_environment(exe: &Path) -> crate::world::desktop_state::WallpaperState {
+    use crate::world::desktop_state::{configured_wallpapers, WallpaperState};
+    let mut state = WallpaperState { observed_at: chrono::Utc::now().timestamp(),
+        source: "wallpaper_engine_config".into(), ..WallpaperState::default() };
+    let config = exe.parent().map(|dir| dir.join("config.json"))
+        .and_then(|path| std::fs::read(path).ok()).and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+    if let Some(config) = config {
+        state.monitors = configured_wallpapers(&config, &std::env::var("USERNAME").unwrap_or_default());
+        for item in &mut state.monitors {
+            if let Some(folder) = Path::new(&item.file).parent() {
+                item.title = std::fs::read(folder.join("project.json")).ok()
+                    .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                    .and_then(|project| project["title"].as_str().map(str::to_owned));
+            }
+        }
+        state.primary = state.monitors.iter().find(|item| item.monitor.eq_ignore_ascii_case("Monitor0")).cloned()
+            .or_else(|| (state.monitors.len() == 1).then(|| state.monitors[0].clone()));
+    }
+    state
+}
+
+/// Background sampling reads configuration without spawning a CLI window every tick.
+pub fn refresh_wallpaper_environment() {
+    let state = find_wallpaper_engine_exe().filter(|_| is_wallpaper_engine_running())
+        .map(|exe| read_wallpaper_environment(&exe)).unwrap_or_else(|| crate::world::desktop_state::WallpaperState {
+            observed_at: chrono::Utc::now().timestamp(), source:"unavailable".into(),
+            ..Default::default()
+        });
+    *crate::world::desktop_state::WALLPAPER.write() = state;
+}
+
 // ============================================================================
 // 解析层：Steam / Wallpaper Engine 路径与壁纸元数据
 // ============================================================================
@@ -498,6 +529,7 @@ impl Tool for WallpaperListTool {
         let wallpapers: Vec<_> = wallpapers.into_iter().skip(offset).take(limit).collect();
 
         // 序列化为紧凑视图（避免 description 过长污染 LLM 上下文）
+        let current = crate::world::desktop_state::WALLPAPER.read().clone();
         let items: Vec<Value> = wallpapers
             .iter()
             .map(|w| {
@@ -507,6 +539,9 @@ impl Tool for WallpaperListTool {
                     "type": w.wallpaper_type,
                     "tags": w.tags,
                     "folder_path": w.folder_path,
+                    "is_current": if crate::world::desktop_state::fresh(&current, chrono::Utc::now().timestamp()) {
+                        current.primary.as_ref().map(|item| crate::world::desktop_state::same_wallpaper(&item.file, &Path::new(&w.folder_path).join("project.json").to_string_lossy()))
+                    } else { None },
                 })
             })
             .collect();
@@ -515,6 +550,7 @@ impl Tool for WallpaperListTool {
             &format!("共 {} 个壁纸（过滤后 {}，返回 {}）", total, filtered_count, items.len()),
             Some(json!({
                 "wallpapers": items,
+                "current_wallpaper": current,
                 "total_installed": total,
                 "filtered_count": filtered_count,
                 "returned": items.len(),
@@ -557,7 +593,7 @@ impl Tool for WallpaperListTool {
 /// wallpaper_set 工具 - 切换到指定壁纸
 ///
 /// 通过 Wallpaper Engine CLI `-control openWallpaper -file <folder>\project.json` 切换壁纸，
-/// 切换后轮询 `-control getWallpaper` 验证壁纸是否真正生效。
+/// 切换后读回活动配置验证是否改为另一个壁纸项目。
 /// 支持三种定位方式（按优先级）：
 /// 1. `workshop_id`：从 wallpaper_list 获取的 ID
 /// 2. `folder_path`：壁纸文件夹完整路径
@@ -592,7 +628,7 @@ impl Tool for WallpaperSetTool {
          Note: do not fabricate workshop_id; it must come from the real return value of wallpaper_list.\n\
          When multiple matches exist, autonomously pick the most relevant one and switch directly; do not pop a dialog or return candidates for the user to pick.\n\
          \n\
-         IMPORTANT: A successful wallpaper_set means the user's request is COMPLETE. Do NOT call any further tools\
+         IMPORTANT: Only goal_completed=true and changed=true establish completion; success alone can mean command sent. Do NOT call any further tools\
          (especially web_search for \"higher resolution wallpapers\" or similar). Just reply to the user with the result."
     }
 
@@ -607,7 +643,7 @@ impl Tool for WallpaperSetTool {
          注意：不要编造 workshop_id；它必须来自 wallpaper_list 的真实返回值。\n\
          当存在多重匹配时，自主选择最相关的一个并直接切换；不要弹出对话框或返回候选让用户选择。\n\
          \n\
-         重要：wallpaper_set 成功即表示用户请求完成。不要再调用任何其他工具\
+         重要：仅 goal_completed=true 且 changed=true 才表示已确认完成；success 也可能仅代表命令发送。不要再调用任何其他工具\
          （特别是 web_search 查找\"更高分辨率壁纸\"等）。只需向用户回复结果。",
             "ja" => "Wallpaper Engine で現在再生中の壁紙を切り替える。これは壁紙切り替えフローの2番目のステップで、\
          通常 wallpaper_list を呼び出して候補壁紙を取得した後に使用する。\n\
@@ -618,7 +654,7 @@ impl Tool for WallpaperSetTool {
          注意：workshop_id をでっち上げないこと；wallpaper_list の実際の戻り値から来る必要がある。\n\
          複数マッチが存在する場合、自律的に最も関連するものを選んで直接切り替える；ダイアログをポップアップしたり候補を返してユーザーに選ばせたりしない。\n\
          \n\
-         重要：wallpaper_set の成功はユーザーリクエストの完了を意味する。（特に\"より高解像度の壁紙\"を探す web_search など）\
+         重要：goal_completed=true と changed=true の場合のみ完了。success だけでは送信済みの場合がある。（特に\"より高解像度の壁紙\"を探す web_search など）\
          他のツールを呼び出さないこと。ユーザーに結果を返答するだけ。",
             _ => self.description(),
         }
@@ -813,11 +849,15 @@ impl Tool for WallpaperSetTool {
         //    官方文档要求 -file 指向 project.json / 视频文件 / index.html，不能传文件夹
         let project_json = target_folder.join("project.json");
         let file_str = project_json.to_string_lossy().to_string();
-        let folder_str = target_folder.to_string_lossy().to_string();
 
-        // 切换前记录当前壁纸到历史栈，供 wallpaper_previous 回退使用
-        if let Some(current) = get_current_wallpaper_path(&exe) {
-            push_wallpaper_history(current);
+        // Compare actual project identity before issuing any side effect, even if the model ignored the prompt.
+        let previous = get_current_wallpaper_path(&exe);
+        if previous.as_ref().is_some_and(|current| crate::world::desktop_state::same_wallpaper(current, &file_str)) {
+            return ToolResult::standard_error(
+                "目标就是当前壁纸，没有执行切换。用户要求换一张时，请排除当前项目并选择其他候选。",
+                Some("AlreadyCurrentWallpaper"),
+                Some(json!({"current_wallpaper":previous, "target":file_str, "changed":false})),
+            );
         }
 
         let mut cmd = silent_command(&exe);
@@ -848,98 +888,14 @@ impl Tool for WallpaperSetTool {
             }
         }
 
-        // 5. 单次 getWallpaper 验证（等待壁纸加载后检查一次）
-        //    不再轮询 10 次：每次 spawn wallpaper64.exe 都会导致前台窗口闪烁，
-        //    且 getWallpaper 的 IPC 响应可能不被子进程捕获而返回空串。
-        //    命令已成功发送且 WE 正在运行 → 视为切换成功；验证仅作辅助信息。
+        // Only a readback supports completion. Sending the command is not proof of a change.
         let exe_clone = exe.clone();
-        let folder_clone = folder_str.clone();
-        let verification = tokio::task::spawn_blocking(move || {
+        let observed = tokio::task::spawn_blocking(move || {
             std::thread::sleep(std::time::Duration::from_millis(1500));
-            let out = match silent_command(&exe_clone)
-                .arg("-control")
-                .arg("getWallpaper")
-                .output()
-            {
-                Ok(o) => o,
-                Err(e) => {
-                    tracing::debug!("[wallpaper_set] getWallpaper 启动失败: {}", e);
-                    return None::<bool>;
-                }
-            };
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            tracing::debug!(
-                "[wallpaper_set] getWallpaper stdout={:?} stderr={:?}",
-                stdout.trim(),
-                stderr.trim()
-            );
-            let target_name = Path::new(&folder_clone)
-                .file_name()
-                .map(|n| n.to_string_lossy().to_lowercase());
-            let combined = format!("{} {}", stdout, stderr);
-            if let Some(name) = &target_name {
-                if !combined.is_empty() && combined.to_lowercase().contains(name) {
-                    return Some(true);
-                }
-            }
-            // 空输出表示 IPC 响应未被捕获，无法判定 → None（不 conclusive）
-            if combined.trim().is_empty() {
-                None
-            } else {
-                Some(false)
-            }
-        })
-        .await
-        .unwrap_or(None);
-
-        match verification {
-            Some(true) => {
-                tracing::info!("[wallpaper_set] 壁纸切换已验证: {}", file_str);
-                ToolResult::standard_success(
-                    &format!("壁纸已切换成功: {}", folder_str),
-                    Some(json!({
-                        "wallpaper_folder": folder_str,
-                        "exe": exe.to_string_lossy(),
-                        "verification_status": "verified",
-                    })),
-                )
-            }
-            None => {
-                // getWallpaper IPC 响应未被捕获（空输出），无法判定
-                // 但壁纸切换命令已成功发送给 Wallpaper Engine → 视为成功
-                tracing::info!(
-                    "[wallpaper_set] 壁纸切换命令已发送，验证不可用 (目标: {})",
-                    file_str
-                );
-                ToolResult::standard_success(
-                    &format!("壁纸切换命令已成功发送给 Wallpaper Engine: {}", folder_str),
-                    Some(json!({
-                        "wallpaper_folder": folder_str,
-                        "exe": exe.to_string_lossy(),
-                        "verification_status": "unverifiable",
-                        "note": "Wallpaper Engine 已接收切换命令，但 IPC 验证不可用。壁纸实际已切换，无需重试。",
-                    })),
-                )
-            }
-            Some(false) => {
-                // getWallpaper 返回了内容但未匹配目标（可能切换中或匹配逻辑误差）
-                // 命令已成功发送，仍视为成功
-                tracing::info!(
-                    "[wallpaper_set] 壁纸切换命令已发送，验证未匹配 (目标: {})",
-                    file_str
-                );
-                ToolResult::standard_success(
-                    &format!("壁纸切换命令已成功发送给 Wallpaper Engine: {}", folder_str),
-                    Some(json!({
-                        "wallpaper_folder": folder_str,
-                        "exe": exe.to_string_lossy(),
-                        "verification_status": "unverified",
-                        "note": "Wallpaper Engine 已接收切换命令。验证未匹配目标名称，但命令已成功发送，无需重试。",
-                    })),
-                )
-            }
-        }
+            let observed = get_current_wallpaper_path(&exe_clone);
+            observed
+        }).await.unwrap_or(None);
+        wallpaper_switch_result(previous.as_deref(), observed.as_deref(), &file_str, true)
     }
 
     fn is_read_only(&self) -> bool {
@@ -968,10 +924,9 @@ impl Tool for WallpaperSetTool {
         false
     }
 
-    /// 壁纸切换成功即标志用户目标达成：Executor 会自动设置 goal_completed，
-    /// Agent 循环检测到后立即终止，避免 LLM 继续推理出 web_search 找图等多余动作。
+    // Completion is set per receipt, only after readback confirms a different project.
     fn signals_goal_completion(&self) -> bool {
-        true
+        false
     }
 }
 
@@ -1008,34 +963,45 @@ static WALLPAPER_MUTED: AtomicBool = AtomicBool::new(false);
 /// 壁纸历史栈：记录切换前的壁纸 project.json 路径，用于 wallpaper_previous 回退
 ///
 /// CLI 不支持原生"换回上一张"，需应用层维护。
-/// wallpaper_set 切换前压栈（先调用 getWallpaper 获取当前壁纸），
+/// wallpaper_set 读回确认变化后，将原壁纸压栈，
 /// wallpaper_previous 弹栈调用 openWallpaper 切换回去。
 /// 容量上限 20，防止内存无限增长。
 static WALLPAPER_HISTORY: Mutex<Vec<String>> = Mutex::new(Vec::new());
 const WALLPAPER_HISTORY_MAX: usize = 20;
 
-/// 获取当前壁纸路径（通过 getWallpaper 命令读取 stdout）
+/// 获取主屏已配置的壁纸路径，同时刷新环境缓存。
 ///
 /// 返回 None 表示获取失败或无壁纸。
 fn get_current_wallpaper_path(exe: &Path) -> Option<String> {
-    let out = silent_command(exe)
-        .arg("-control")
-        .arg("getWallpaper")
-        .output()
-        .ok()?;
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    let combined = format!("{} {}", stdout.trim(), stderr.trim());
-    if combined.trim().is_empty() {
-        None
-    } else {
-        // 取 stdout 优先（官方文档说明输出到 stdout）
-        let path = stdout.trim();
-        if path.is_empty() {
-            None
-        } else {
-            Some(path.to_string())
+    // CLI stdout is unavailable in some WE builds; keep configuration evidence labelled as such.
+    let state = read_wallpaper_environment(exe);
+    let path = state.primary.as_ref().map(|item| item.file.clone());
+    *crate::world::desktop_state::WALLPAPER.write() = state;
+    path
+}
+
+fn wallpaper_switch_result(previous: Option<&str>, observed: Option<&str>, target: &str, record_history: bool) -> ToolResult {
+    use crate::world::desktop_state::{verify_switch, SwitchVerification};
+    let verification = verify_switch(previous, observed, target);
+    let changed = verification == SwitchVerification::Changed;
+    if changed {
+        if record_history {
+            if let Some(previous) = previous { push_wallpaper_history(previous.to_string()); }
         }
+        let mut result = ToolResult::standard_success("已读回确认壁纸配置切换到了另一个项目。", Some(json!({
+            "wallpaper_file":target, "previous_wallpaper":previous, "observed_wallpaper":observed,
+            "verification_status":"verified_configuration", "verification_source":"wallpaper_engine_config",
+            "changed":true, "note":"配置读回确认，不代表已进行桌面视觉检查。"
+        })));
+        result.goal_completed = true;
+        result
+    } else {
+        ToolResult::standard_success("已发送壁纸切换命令，但尚未确认换成了不同壁纸。", Some(json!({
+            "wallpaper_file":target, "previous_wallpaper":previous, "observed_wallpaper":observed,
+            "verification_status":if verification == SwitchVerification::Unverifiable { "unverifiable" } else { "unverified" },
+            "changed":false, "command_sent":true,
+            "note":"不能声称已经换好，也不要自动重复发送相同切换命令；如用户纠正，应接受纠正并重新核实。"
+        })))
     }
 }
 
@@ -1365,10 +1331,11 @@ impl Tool for WallpaperControlTool {
                         Some(json!({"exe": exe.to_string_lossy()})),
                     );
                 }
-                // 切换前记录当前壁纸到历史栈
-                if let Some(current) = get_current_wallpaper_path(&exe) {
-                    push_wallpaper_history(current);
-                }
+                let before = read_wallpaper_environment(&exe);
+                let previous = match monitor {
+                    Some(index) => before.monitors.iter().find(|item| item.monitor == format!("Monitor{index}")),
+                    None => before.primary.as_ref(),
+                }.map(|item| item.file.clone());
                 let mut cmd = silent_command(&exe);
                 cmd.arg("-control").arg("nextWallpaper");
                 if let Some(m) = monitor {
@@ -1382,15 +1349,18 @@ impl Tool for WallpaperControlTool {
                             pid,
                             monitor
                         );
-                        ToolResult::standard_success(
-                            "已切换到下一张壁纸",
-                            Some(json!({
-                                "exe": exe.to_string_lossy(),
-                                "pid": pid,
-                                "monitor": monitor,
-                                "note": "若未生效，请检查 Wallpaper Engine 中是否配置了播放列表。",
-                            })),
-                        )
+                        let exe_clone = exe.clone();
+                        let observed = tokio::task::spawn_blocking(move || {
+                            std::thread::sleep(std::time::Duration::from_millis(1500));
+                            let state = read_wallpaper_environment(&exe_clone);
+                            let observed = match monitor {
+                                Some(index) => state.monitors.iter().find(|item| item.monitor == format!("Monitor{index}")),
+                                None => state.primary.as_ref(),
+                            }.map(|item| item.file.clone());
+                            *crate::world::desktop_state::WALLPAPER.write() = state;
+                            observed
+                        }).await.unwrap_or(None);
+                        wallpaper_switch_result(previous.as_deref(), observed.as_deref(), observed.as_deref().unwrap_or(""), true)
                     }
                     Err(e) => ToolResult::standard_error(
                         &format!("启动 Wallpaper Engine CLI 失败: {}", e),
@@ -1408,6 +1378,7 @@ impl Tool for WallpaperControlTool {
                         Some(json!({"exe": exe.to_string_lossy()})),
                     );
                 }
+                let current = get_current_wallpaper_path(&exe);
                 let previous_path = match pop_wallpaper_history() {
                     Some(p) => p,
                     None => {
@@ -1438,16 +1409,16 @@ impl Tool for WallpaperControlTool {
                             previous_path,
                             pid
                         );
-                        let history_size = WALLPAPER_HISTORY.lock().len();
-                        ToolResult::standard_success(
-                            &format!("已换回上一张壁纸: {}", previous_path),
-                            Some(json!({
-                                "exe": exe.to_string_lossy(),
-                                "pid": pid,
-                                "wallpaper_file": previous_path,
-                                "remaining_history_size": history_size,
-                            })),
-                        )
+                        let exe_clone = exe.clone();
+                        let observed = tokio::task::spawn_blocking(move || {
+                            std::thread::sleep(std::time::Duration::from_millis(1500));
+                            get_current_wallpaper_path(&exe_clone)
+                        }).await.unwrap_or(None);
+                        if crate::world::desktop_state::verify_switch(current.as_deref(), observed.as_deref(), &previous_path)
+                            != crate::world::desktop_state::SwitchVerification::Changed {
+                            push_wallpaper_history(previous_path.clone());
+                        }
+                        wallpaper_switch_result(current.as_deref(), observed.as_deref(), &previous_path, false)
                     }
                     Err(e) => ToolResult::standard_error(
                         &format!("启动 Wallpaper Engine CLI 失败: {}", e),
@@ -1490,7 +1461,7 @@ impl Tool for WallpaperControlTool {
     }
 
     fn signals_goal_completion(&self) -> bool {
-        true
+        false
     }
 }
 

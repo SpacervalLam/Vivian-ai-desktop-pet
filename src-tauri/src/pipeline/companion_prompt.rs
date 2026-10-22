@@ -113,6 +113,7 @@ impl CompanionPrompt {
         prompt.push("working_memory", parts.working_memory_section.clone().unwrap_or_default(), Mind, Context, 2);
         prompt.push("self_state", parts.self_state_section.clone().unwrap_or_default(), Mind, Context, 1);
         prompt.push("environment", build_context_block(&parts.environment_context.clone().unwrap_or_else(EnvironmentContext::now), &parts.language), World, Context, 2);
+        prompt.push("current_desktop", parts.environment_context.as_ref().and_then(|env| env.desktop_state.clone()).unwrap_or_default(), World, Context, 0);
         for (id, value) in [
             ("user_presence", &parts.user_entity_section), ("observation", &parts.observation_section),
             ("activity", &parts.activity_brief),

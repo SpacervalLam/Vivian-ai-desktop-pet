@@ -71,13 +71,15 @@ export interface IdleAccentSpec {
 }
 
 export const IDLE_ACCENT: IdleAccentSpec | null = (() => {
-  const raw = (vocab as unknown as { idle_accent?: Partial<IdleAccentSpec> }).idle_accent;
+  const raw = (vocab as unknown as { idle_accent?: {
+    motion?: string; interval_secs?: number; probability?: number; duration_ms?: number;
+  } }).idle_accent;
   if (!raw?.motion) return null;
   return {
     motion: raw.motion,
-    intervalSecs: Math.max(4, raw.intervalSecs ?? 12),
+    intervalSecs: Math.max(4, raw.interval_secs ?? 12),
     probability: Math.min(1, Math.max(0, raw.probability ?? 0.7)),
-    durationMs: Math.max(400, raw.durationMs ?? 2600),
+    durationMs: Math.max(400, raw.duration_ms ?? 2600),
   };
 })();
 

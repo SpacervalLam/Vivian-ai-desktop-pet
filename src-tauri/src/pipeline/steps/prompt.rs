@@ -863,6 +863,14 @@ impl PromptBuildingStep {
             }
         }
 
+        let recent: Vec<_> = state.messages.iter().filter(|m| m.role == "user" || m.role == "assistant")
+            .rev().take(2).map(|m| crate::utils::truncate_chars(&m.content, 400)).collect::<Vec<_>>()
+            .into_iter().rev().collect();
+        let desktop_query = crate::world::desktop_state::topic_query(&state.user_input, &recent);
+        // Media is maintained continuously, but only relevant topics enter this prompt.
+        env_ctx.music = None;
+        env_ctx.desktop_state = self.world_provider.as_ref().and_then(|wp| wp.desktop_context(&desktop_query));
+
         // Worldbook selection is read-only and scoped to this conversation. Prompt
         // previews, retries and proactive preparation must not advance global state.
         let worldbook_block = {
@@ -1690,6 +1698,7 @@ impl PromptBuildingStep {
         }
         let tool_scope = query.tool_scope.as_ref();
         let mut parts = self.build_parts_prepared(&state, tool_scope, prepared, Some(&query));
+        state.metadata["current_desktop_observations"] = json!(parts.environment_context.as_ref().and_then(|env| env.desktop_state.as_deref()));
         if parts.examples_block.is_none() {
             if let Some(examples) = query.examples {
                 state.metadata["retrieved_example_chars"] = json!(examples.chars().count());

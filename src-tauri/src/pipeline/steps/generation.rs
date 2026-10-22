@@ -461,7 +461,7 @@ impl AIResponseGenerationRunnable {
     /// Audit a zero-call draft before publishing it. This judge cannot execute tools;
     /// authorization and missing context are still resolved by the primary model.
     const OBSERVATION_EVIDENCE_RULE: &'static str =
-        "Claims about current external state require fresh evidence from an actual tool result or supplied media. Tool names, file paths, titles and assistant promises do not establish observed contents or successful execution. Use the available capabilities when observation is needed, preserve all permission checks, and report a concrete blocker when evidence cannot be obtained. Never invent observations.";
+        "Claims about current external state require fresh evidence from an actual tool result, supplied media, or host current desktop observations with a source and observation time. Unknown/stale observations do not establish current state. Configuration readback is not visual inspection. Tool names, file paths, titles and assistant promises do not establish observed contents or successful execution. Use the available capabilities when observation is needed, preserve all permission checks, and report a concrete blocker when evidence cannot be obtained. A user's correction of an operation's outcome takes precedence over earlier assistant success claims. Never invent observations or presentation: an internal list is not shown to the user until actual names are included in the reply or previews are delivered.";
 
     async fn verify_execution_draft(
         router: &ModelRouter,

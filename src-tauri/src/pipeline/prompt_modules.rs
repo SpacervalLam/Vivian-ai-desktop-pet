@@ -1118,6 +1118,7 @@ pub fn build_tool_parameter_guide_prompt(
 /// 环境上下文（时间/季节/活动应用/语言 + 世界感知）
 #[derive(Debug, Clone, Default)]
 pub struct EnvironmentContext {
+    pub desktop_state: Option<String>,
     pub time: String,
     pub season: String,
     pub active_app: String,
@@ -1146,6 +1147,7 @@ impl EnvironmentContext {
     /// 基于当前时间构造默认环境上下文
     pub fn now() -> Self {
         Self {
+            desktop_state: None,
             time: Local::now().format("%Y-%m-%d %H:%M:%S %A").to_string(),
             season: current_season(),
             active_app: String::new(),
