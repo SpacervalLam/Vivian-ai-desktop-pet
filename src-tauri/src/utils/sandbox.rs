@@ -199,23 +199,154 @@ fn apply_scratch_security(dir: &std::path::Path) -> Result<(), String> {
 }
 
 // ============================================================================
+// 完整性级别（宿主自检）
+// ============================================================================
+
+/// 进程完整性级别（Windows 强制完整性控制，SID 前缀 `S-1-16-*`）。
+///
+/// 这里只做**观测**：一旦宿主主令牌被降成 Low，进程自己升不回去
+/// （no-write-up 同样作用于令牌对象），唯一的出路是重启进程换一份干净令牌。
+/// 所以调用方拿到 [`IntegrityLevel::Low`] 时该做的是告警并引导用户重启，
+/// 而不是尝试修正。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntegrityLevel {
+    Untrusted,
+    Low,
+    Medium,
+    High,
+    System,
+    /// 读不到（无权限或非预期 SID）。按"未知"处理，不当成异常。
+    Unknown,
+}
+
+impl IntegrityLevel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Untrusted => "untrusted",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::System => "system",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    fn from_rid(rid: u32) -> Self {
+        match rid & 0x0000_F000 {
+            0x0000_0000 => Self::Untrusted,
+            0x0000_1000 => Self::Low,
+            0x0000_2000 => Self::Medium,
+            0x0000_3000 => Self::High,
+            0x0000_4000 => Self::System,
+            _ => Self::Unknown,
+        }
+    }
+
+    /// 宿主写自己的用户数据目录（`%APPDATA%\vivian`）至少需要 Medium。
+    ///
+    /// Low 及以下在 no-write-up 规则下对所有 Medium 对象 `ACCESS_DENIED`，
+    /// 表现为配置保存、记忆、日志、心理状态全线失败——而读取一切正常，
+    /// 因此很容易被误判成"某个按钮坏了"。
+    pub fn can_write_user_data(self) -> bool {
+        !matches!(self, Self::Untrusted | Self::Low)
+    }
+}
+
+/// 读某个令牌对象的完整性级别。
+///
+/// `TOKEN_MANDATORY_LABEL` 尾部的 SID 就是 IL：`S-1-16-<rid>`，
+/// 最后一个 sub-authority 决定档位（0x1000 = Low，0x2000 = Medium...）。
+fn token_integrity_level(token: HANDLE) -> IntegrityLevel {
+    use windows::Win32::Security::{
+        GetTokenInformation, TokenIntegrityLevel, TOKEN_MANDATORY_LABEL,
+    };
+
+    unsafe {
+        let mut needed = 0u32;
+        // 第一次只为拿长度，失败即视为读不到
+        let _ = GetTokenInformation(token, TokenIntegrityLevel, None, 0, &mut needed);
+        if needed == 0 {
+            return IntegrityLevel::Unknown;
+        }
+        let mut buf = vec![0u8; needed as usize];
+        if GetTokenInformation(
+            token,
+            TokenIntegrityLevel,
+            Some(buf.as_mut_ptr() as *mut core::ffi::c_void),
+            needed,
+            &mut needed,
+        )
+        .is_err()
+        {
+            return IntegrityLevel::Unknown;
+        }
+        let label = &*(buf.as_ptr() as *const TOKEN_MANDATORY_LABEL);
+        let sid = label.Label.Sid;
+        if sid.0.is_null() {
+            return IntegrityLevel::Unknown;
+        }
+        // SID 布局：Revision(1) + SubAuthorityCount(1) + IdentifierAuthority(6) + u32 * count
+        let count = *(sid.0 as *const u8).add(1) as usize;
+        if count == 0 {
+            return IntegrityLevel::Unknown;
+        }
+        let last = std::ptr::read_unaligned(
+            (sid.0 as *const u8).add(8 + 4 * (count - 1)) as *const u32,
+        );
+        IntegrityLevel::from_rid(last)
+    }
+}
+
+/// 当前进程的完整性级别。
+pub fn current_integrity_level() -> IntegrityLevel {
+    use windows::Win32::Security::TOKEN_QUERY;
+    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    unsafe {
+        let mut token = HANDLE::default();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).is_err() {
+            return IntegrityLevel::Unknown;
+        }
+        let token = HandleWrap::new(token);
+        token_integrity_level(token.get())
+    }
+}
+
+// ============================================================================
 // 受限令牌
 // ============================================================================
 
 /// 当前进程令牌 → 受限主令牌（全特权剥离 + Everyone/Users restricting SID + Low IL）
+///
+/// **绝不改动当前进程的令牌。** `OpenProcessToken(GetCurrentProcess())` 打开的是本进程
+/// 那个主令牌对象本身，不是副本；在它上面写 `TokenIntegrityLevel` 会把整个应用永久降成
+/// Low IL（降得下去、升不回来）。后果是宿主此后写自己的配置 / 记忆 / 日志全部
+/// `ACCESS_DENIED`，工作区授权也拿不到 `WRITE_DAC`——从调用方看像是「沙箱坏了」，
+/// 实际是宿主被自己拖下了水。
+///
+/// 正确的派生顺序（每一步都在副本上）：
+/// 1. 用未改动的进程令牌 `CreateRestrictedToken` —— 必须是原令牌，这样内核才认它
+///    是「调用方自己主令牌的受限版本」，`CreateProcessAsUser` 不需要
+///    `SeAssignPrimaryTokenPrivilege`（标准用户没有这个特权）
+/// 2. `DuplicateTokenEx` 把受限令牌复制成独立的主令牌副本
+/// 3. 只在副本上降 IL。**必须先复制再降**：直接在受限令牌上降 IL 会让第 1 步的
+///    豁免失效，`CreateProcessAsUser` 以 `ERROR_ACCESS_DENIED(5)` 失败
 fn build_restricted_token() -> Result<HandleWrap, String> {
     use windows::Win32::Security::{
-        CreateRestrictedToken, CreateWellKnownSid, SetTokenInformation, DISABLE_MAX_PRIVILEGE,
-        SID_AND_ATTRIBUTES, TOKEN_ADJUST_DEFAULT, TOKEN_DUPLICATE, TOKEN_MANDATORY_LABEL,
-        TOKEN_QUERY, TokenIntegrityLevel, WinBuiltinUsersSid, WinWorldSid,
+        CreateRestrictedToken, CreateWellKnownSid, DuplicateTokenEx, SecurityImpersonation,
+        SetTokenInformation, TokenIntegrityLevel, TokenPrimary, WinBuiltinUsersSid, WinWorldSid,
+        DISABLE_MAX_PRIVILEGE, SID_AND_ATTRIBUTES, TOKEN_ALL_ACCESS, TOKEN_DUPLICATE,
+        TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
     };
     use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
     unsafe {
         let mut base = HANDLE::default();
+        // 只要读 + 派生权限：这里**不申请** TOKEN_ADJUST_DEFAULT，从权限层面就杜绝
+        // 误改进程自身令牌的可能
         OpenProcessToken(
             GetCurrentProcess(),
-            TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ADJUST_DEFAULT,
+            TOKEN_QUERY | TOKEN_DUPLICATE,
             &mut base,
         )
             .map_err(|e| format!("打开进程令牌失败: {e}"))?;
@@ -238,26 +369,7 @@ fn build_restricted_token() -> Result<HandleWrap, String> {
             });
         }
 
-        // 先在主令牌副本上降完整性（SetTokenInformation 需要 TOKEN_ADJUST_DEFAULT，
-        // 且必须发生在 CreateRestrictedToken 之前——IL 随令牌派生，受限令牌上
-        // 直接改 IL 会被拒绝）
-        let low_sid_buf = string_to_sid(LOW_IL_SID)?;
-        let label = TOKEN_MANDATORY_LABEL {
-            Label: SID_AND_ATTRIBUTES {
-                Sid: windows::Win32::Security::PSID(low_sid_buf.as_ptr() as *mut _),
-                Attributes: 0,
-            },
-        };
-        let label_size = std::mem::size_of::<TOKEN_MANDATORY_LABEL>() + low_sid_buf.len();
-        SetTokenInformation(
-            base.get(),
-            TokenIntegrityLevel,
-            &label as *const _ as *const core::ffi::c_void,
-            label_size as u32,
-        )
-        .map_err(|e| format!("设置完整性级别失败: {e}"))?;
-
-        // 再从低完整性主令牌派生受限令牌（本身就是 primary，可直接 spawn）
+        // 第 1 步：从**未改动的**进程令牌派生受限令牌
         let mut restricted = HANDLE::default();
         CreateRestrictedToken(
             base.get(),
@@ -268,9 +380,54 @@ fn build_restricted_token() -> Result<HandleWrap, String> {
             &mut restricted,
         )
         .map_err(|e| format!("构造受限令牌失败: {e}"))?;
-        Ok(HandleWrap::new(restricted))
+        let restricted = HandleWrap::new(restricted);
+
+        // 第 2 步：复制成独立的主令牌副本——只有副本可以随便改
+        let mut primary = HANDLE::default();
+        DuplicateTokenEx(
+            restricted.get(),
+            TOKEN_ALL_ACCESS,
+            None,
+            SecurityImpersonation,
+            TokenPrimary,
+            &mut primary,
+        )
+        .map_err(|e| format!("复制受限令牌失败: {e}"))?;
+        let primary = HandleWrap::new(primary);
+
+        // 第 3 步：在副本上降完整性（SetTokenInformation 需要 TOKEN_ADJUST_DEFAULT，
+        // 副本带 TOKEN_ALL_ACCESS，够用）
+        let low_sid_buf = string_to_sid(LOW_IL_SID)?;
+        let label = TOKEN_MANDATORY_LABEL {
+            Label: SID_AND_ATTRIBUTES {
+                Sid: windows::Win32::Security::PSID(low_sid_buf.as_ptr() as *mut _),
+                Attributes: 0,
+            },
+        };
+        let label_size = std::mem::size_of::<TOKEN_MANDATORY_LABEL>() + low_sid_buf.len();
+        SetTokenInformation(
+            primary.get(),
+            TokenIntegrityLevel,
+            &label as *const _ as *const core::ffi::c_void,
+            label_size as u32,
+        )
+        .map_err(|e| format!("设置完整性级别失败: {e}"))?;
+
+        // 护栏：派生只该影响副本。宿主被降权过就再也升不回去，宁可在这里
+        // 大声报错，也不要让用户几天后从"某个按钮点了没反应"反推。
+        let host = current_integrity_level();
+        if !host.can_write_user_data() {
+            tracing::error!(
+                "[sandbox] 派生受限令牌后宿主完整性级别降为 {}：主令牌被改动，\
+                 此后配置/记忆/日志写入将全部 ACCESS_DENIED（需重启进程）",
+                host.as_str()
+            );
+        }
+
+        Ok(primary)
     }
 }
+
 
 /// SDDL 字符串 → 自有缓冲的 SID 字节
 fn string_to_sid(sddl: &str) -> Result<Vec<u8>, String> {
@@ -831,6 +988,65 @@ pub fn spawn_sandboxed_shell(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restricted_token_never_downgrades_the_host() {
+        // 这是本模块最贵的一条教训：`OpenProcessToken(GetCurrentProcess())` 拿到的是
+        // 进程主令牌本身，在它上面写 `TokenIntegrityLevel` 会把整个应用永久降成
+        // Low IL（降得下去、升不回来），此后宿主写自己的配置/记忆/日志全部
+        // ACCESS_DENIED——对外表现为"侧边栏某个按钮点了没反应"。
+        // 旧实现正是这么干的，这条测试就是那次回归的围栏。
+        let before = current_integrity_level();
+        assert!(
+            before.can_write_user_data(),
+            "测试进程本身已是 {} 完整性，无法验证派生行为（请从普通终端启动测试）",
+            before.as_str()
+        );
+
+        let token = build_restricted_token().expect("从宿主令牌派生受限令牌应成功");
+
+        let after = current_integrity_level();
+        assert_eq!(
+            before,
+            after,
+            "派生沙箱令牌把宿主降成了 {}——降下去升不回来",
+            after.as_str()
+        );
+        // 反过来也要守住：交给子进程的那份令牌必须真的是 Low，否则沙箱形同虚设。
+        assert_eq!(
+            token_integrity_level(token.get()),
+            IntegrityLevel::Low,
+            "沙箱子令牌必须是 Low IL"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires Windows restricted-token process privileges; run test:windows-integration in a supported environment"]
+    fn sandbox_command_keeps_host_integrity() {
+        // 端到端版：真的跑一次沙箱命令，宿主完整性级别必须原样。
+        // 派生令牌是否干净由 restricted_token_never_downgrades_the_host 守住，
+        // 这条守的是 spawn 路径（环境块 / 句柄继承 / CreateProcessAsUser）。
+        // 不断言命令必须跑成功——注入进程创建钩子的宿主环境会让它返回
+        // ERROR_INVALID_PARAMETER，那与"有没有污染宿主"是两件事。
+        let before = current_integrity_level();
+        assert!(
+            before.can_write_user_data(),
+            "宿主需以 Medium 及以上完整性运行才能验证这件事，实测 {}",
+            before.as_str()
+        );
+        match run_powershell_sandboxed("Write-Output 'sandbox-ok'", "", 60) {
+            Ok(out) => tracing::info!("沙箱执行: exit={} stdout={}", out.exit_code, out.stdout),
+            Err(error) => tracing::warn!("沙箱执行未成功（不影响本断言）: {error}"),
+        }
+        let after = current_integrity_level();
+        assert_eq!(
+            after,
+            before,
+            "沙箱命令改动了宿主完整性级别（{} -> {}），宿主被自己降级",
+            before.as_str(),
+            after.as_str()
+        );
+    }
 
     fn run(script: &str, payload: &str) -> SandboxOutput {
         run_powershell_sandboxed(script, payload, 60).expect("沙箱执行应成功")

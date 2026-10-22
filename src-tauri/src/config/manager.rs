@@ -2099,9 +2099,16 @@ impl ConfigManager {
         let yaml = serde_yaml::to_string(&value)
             .map_err(|e| VivianError::Serialization(e.to_string()))?;
         crate::utils::fs::write_atomic(path, &yaml).map_err(|e| {
+            // 权限类失败最常见的原因是宿主被降成了低完整性级别（或目录被安全软件
+            // 独占）：此时读取一切正常、只有写入被拒，光看 "os error 5" 无从下手。
+            let hint = if e.kind() == std::io::ErrorKind::PermissionDenied {
+                "（用户数据目录不可写：可能以低权限/沙箱方式启动，或目录被安全软件占用）"
+            } else {
+                ""
+            };
             VivianError::Io(std::io::Error::new(
                 e.kind(),
-                format!("写入配置文件失败 [{}]: {}", path.display(), e),
+                format!("写入配置文件失败 [{}]: {}{}", path.display(), e, hint),
             ))
         })?;
         // 配置文件含 API key 等敏感信息，Unix 下收紧权限为 0o600（仅属主可读写）

@@ -792,6 +792,32 @@ pub fn run() {
             // 必须在任何子进程启动前完成，确保所有子进程都能被绑定
             crate::utils::job_object::init();
 
+            // 完整性级别自检：宿主一旦被拖成 Low IL（沙箱派生逻辑曾经误改主令牌），
+            // 进程自己升不回去，写 %APPDATA%\vivian 全部 ACCESS_DENIED——配置保存、
+            // 记忆、日志、心理状态静默失败，而读取一切正常，用户只会看到
+            // "右侧边栏某个按钮点了没反应"。这里在启动时把话说明白。
+            // 走系统通知而不是只写日志：此刻日志文件本身也可能写不进去。
+            #[cfg(windows)]
+            {
+                let level = crate::utils::sandbox::current_integrity_level();
+                tracing::info!("[sandbox] 宿主完整性级别: {}", level.as_str());
+                if !level.can_write_user_data() {
+                    tracing::error!(
+                        "[sandbox] 宿主完整性级别为 {}，用户数据目录不可写——\
+                         设置与记忆都不会落盘。请完全退出 Vivian（含托盘），\
+                         再从开始菜单或资源管理器重新启动。",
+                        level.as_str()
+                    );
+                    use tauri_plugin_notification::NotificationExt;
+                    let _ = app
+                        .notification()
+                        .builder()
+                        .title("Vivian 运行权限异常")
+                        .body("当前以低完整性级别运行，设置与记忆无法保存。请完全退出 Vivian，再从开始菜单重新启动。")
+                        .show();
+                }
+            }
+
             // 初始化全局 HTTP 客户端（注入代理配置，影响天气/Edge TTS/URL 抓取等境外请求）
             // 必须在任何外部网络请求发生前完成
             {

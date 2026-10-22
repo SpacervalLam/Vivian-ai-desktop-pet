@@ -1837,6 +1837,27 @@ tools::types::is_path_within_any(path, primary, extras)
 （Job Object / 受限令牌 / AppContainer），是独立课题。本层的目标是挡住「模型随手写了个工作区外的
 绝对路径」这类**意外越界**，并给出一条可学习的出路：需要访问就挂成附加工作区。
 
+**受限令牌子进程沙箱（已落地，[`utils/sandbox.rs`](src-tauri/src/utils/sandbox.rs)）**：
+PowerShell 工具脚本经 `CreateProcessAsUserW` + 派生受限主令牌执行（`DISABLE_MAX_PRIVILEGE`
+剥特权 + Everyone/BUILTIN\Users restricting SID + Low IL），可写面只剩打了 Low 标签的
+scratch（`%TEMP%\vivian-sandbox-low`），TMP/TEMP 重定向过去。
+
+⚠️ **降 IL 只能改在副本上。** `OpenProcessToken(GetCurrentProcess())` 拿到的句柄指向进程
+主令牌对象本身；在它上面写 `TokenIntegrityLevel` 会把**整个应用**永久降成 Low IL
+（降得下去、升不回来——no-write-up 同样作用于令牌对象，Low 没资格把标签写回 Medium）。
+后果是宿主此后写自己的 `%APPDATA%\vivian` 全部 `ACCESS_DENIED`：配置保存、记忆、日志、
+`psychology.json`、对话缓冲全线静默失败，**而读取一切正常**，对外只表现为
+「右侧边栏某个按钮点了没反应」。正确顺序：① 用**未改动的**进程令牌
+`CreateRestrictedToken` → ② `DuplicateTokenEx` 复制成独立主令牌副本 → ③ **只在副本上**
+降 IL；`OpenProcessToken` 也不申请 `TOKEN_ADJUST_DEFAULT`，从权限层面堵死改自身令牌。
+
+三道护栏：`restricted_token_never_downgrades_the_host`（单测，不 ignore——派生后宿主 IL
+必须不变、且子令牌必须是 Low，否则沙箱形同虚设）、`sandbox_command_keeps_host_integrity`
+（`#[ignore]`，真跑一次沙箱命令后宿主 IL 不变）、以及启动自检：`lib.rs` 的 `setup` 读一次
+自身 IL，非 Medium 以上就写 error 日志并发系统通知（此刻日志文件本身也可能写不进去），
+引导用户完全退出后从开始菜单重启。
+
+
 **嵌套工作区取最长匹配。** 多个工作区可以互相嵌套（附加目录落在主工作区内），
 `check_file_permission` 与 `PermissionContext::get_working_directory_permissions` 都按
 `max_by_key(|wd| wd.path.len())` 取**最具体的那个**。取第一个匹配会让结论随 `HashMap` 迭代顺序摆动：
