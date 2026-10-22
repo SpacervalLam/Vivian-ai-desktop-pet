@@ -1,0 +1,30 @@
+import assert from 'node:assert/strict';
+import {build} from 'esbuild';
+const built=await build({stdin:{contents:`export {IdleAccentRhythm} from './src/chibi/idleAccentRhythm';export {SheetLoader} from './src/chibi/sheetLoader';`,resolveDir:process.cwd()},bundle:true,write:false,platform:'node',format:'esm'});
+const {IdleAccentRhythm,SheetLoader}=await import('data:text/javascript;base64,'+Buffer.from(built.outputFiles[0].text).toString('base64'));
+const rhythm=new IdleAccentRhythm(30_000,0,()=>0);
+assert.equal(rhythm.ready(0,true),false);
+assert.equal(rhythm.ready(23_999,true),false);
+assert.equal(rhythm.ready(24_000,true),true);
+rhythm.played(24_000,2600);
+assert.equal(rhythm.ready(28_000,true),false,'no four-second repeat');
+assert.equal(rhythm.ready(100_000,false),false);
+assert.equal(rhythm.ready(101_000,true),false,'a long busy period cannot cause an immediate gesture');
+assert.equal(rhythm.ready(103_000,true),true);
+const slow=new IdleAccentRhythm(30_000,0,()=>1);
+slow.ready(0,true);
+assert.equal(slow.ready(41_999,true),false);
+assert.equal(slow.ready(42_000,true),true,'random intervals span 24 to 42 seconds');
+const prior=globalThis.Image;
+globalThis.Image=class {set src(value){if(value)queueMicrotask(()=>this.onload?.());}};
+try{
+ const cache=new SheetLoader();cache.setCapacity(1);
+ await cache.pin('idle');await cache.load('look');await cache.load('blink');
+ assert.equal(cache.isReady('idle'),true,'idle survives LRU eviction');
+ assert.equal(cache.isReady('look'),false);
+ cache.clear(true);
+ assert.equal(cache.isReady('idle'),true,'game-mode cleanup retains idle');
+ assert.equal(cache.isReady('blink'),false);
+ cache.clear();assert.equal(cache.isReady('idle'),false,'unmount releases pinned frames');
+}finally{if(prior===undefined)delete globalThis.Image;else globalThis.Image=prior;}
+console.log('Idle rhythm cooldown, quiet-time grace, jitter and pinned-frame cache passed.');

@@ -3,6 +3,8 @@ import { build } from 'esbuild';
 const states=[],refs=[],effects=[],listeners=new Map(),timers=new Map();let stateIndex=0,refIndex=0,initial=true,timerId=0;
 const speechStore={currentBubble:null,settledBubbles:[]};
 const priorTimeout=globalThis.setTimeout,priorClearTimeout=globalThis.clearTimeout,priorWindow=globalThis.window,priorRandom=Math.random;
+const priorPerformance=globalThis.performance;let clock=0;
+globalThis.performance={now:()=>clock};
 globalThis.__idlePet={
  state(value){const index=stateIndex++;if(initial)states[index]=typeof value==='function'?value():value;return [states[index],value=>states[index]=typeof value==='function'?value(states[index]):value];},
  ref(value){const index=refIndex++;if(initial)refs[index]={current:value};return refs[index];},
@@ -41,34 +43,40 @@ try{
  disabledAccent();
  assert.equal(timers.size,0,'preview must not arm the idle accent');
 
- // 张望与自主漫步解耦，游戏模式、漫步关闭时仍按 4 秒间隔触发。
+ // 张望仍与漫步解耦，但使用随机冷却，不再每四秒播放。
+ Math.random=()=>0;
  render({ambientMotionEnabled:false,gameMode:true});
  const accent=effects.find(fn=>fn.toString().includes('intervalSecs'));
  assert.ok(accent,'idle accent driver is registered');
  const cleanup=accent();
- const armed=timerWith(4000);
+ const armed=timerWith(1000);
  assert.ok(armed,'idle accent arms the configured interval');
- assert.equal([...timers.values()].filter(timer=>timer.ms===4000).length,1,'only one accent timer is armed');
+ assert.equal([...timers.values()].filter(timer=>timer.ms===1000).length,1,'only one accent timer is armed');
+ assert.match(sprite(render()).props.style.backgroundImage,/nana-idle-sheet\.webp/,'idle uses the cached look opening frame');
 
  // 说话 / 被占用时顺延：不改姿态，改用短重试间隔。
  speechStore.currentBubble='正在说话';
  render();
- Math.random=()=>0.999;
+ clock=25_000;
  fire(armed[0]);
  const retry=timerWith(1000);
  assert.ok(retry,'a blocked accent retries on the short interval');
  let tree=render();
  assert.doesNotMatch(stage(tree).props.className,/pose-look/,'speaking defers the idle accent');
 
- // 无需随机抽中：空闲即播放，并按配置时长保持。
+ // 冷却已到，也必须先安静两秒，避免刚结束说话就立刻张望。
  speechStore.currentBubble=null;
  render();
+ clock=26_000;
  fire(retry[0]);
+ assert.doesNotMatch(stage(render()).props.className,/pose-look/);
+ clock=28_000;
+ fire(timerWith(1000)[0]);
  tree=render();
  assert.match(stage(tree).props.className,/pose-look/,'idle accent plays the look loop');
  assert.match(sprite(tree).props.style.backgroundImage,/nana-look-sheet\.webp/, 'idle accent loads the look sheet for the active character');
  assert.ok(timerWith(2600),'accent is held for the configured duration');
- const next=timerWith(4000);
+ const next=timerWith(1000);
  fire(next[0]);
  assert.ok(timerWith(1000),'an active animation is not restarted or interrupted');
  cleanup();
@@ -76,4 +84,5 @@ try{
  console.log('pet idle accent passed');
 } finally {
  globalThis.setTimeout=priorTimeout;globalThis.clearTimeout=priorClearTimeout;globalThis.window=priorWindow;Math.random=priorRandom;
+ globalThis.performance=priorPerformance;
 }

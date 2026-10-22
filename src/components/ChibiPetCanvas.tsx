@@ -40,6 +40,7 @@ import { runFlee, FLEE_TAKEOVER_HOLD_MS, type FleeEnv } from '../chibi/fleeTrack
 import type { FleeGeometry } from '../chibi/fleePlan';
 import { TapAngerLedger } from '../chibi/tapAnger';
 import { SheetLoader } from '../chibi/sheetLoader';
+import { IdleAccentRhythm } from '../chibi/idleAccentRhythm';
 import './ChibiPetCanvas.css';
 
 /**
@@ -367,8 +368,16 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
     useEffect(() => { sheetLoader.setCapacity(gameMode ? 1 : 2); }, [gameMode, sheetLoader]);
     const [, setSheetVersion] = useState(0);
     useEffect(() => {
-      if (gameMode && poseName === 'idle') sheetLoader.clear();
+      if (gameMode && poseName === 'idle') sheetLoader.clear(true);
     }, [gameMode, poseName, sheetLoader]);
+    const idleSheet = `/chibi/motion/${characterId}/${characterId}-idle-sheet.webp`;
+    useEffect(() => {
+      let cancelled = false;
+      void sheetLoader.pin(idleSheet).then(() => {
+        if (!cancelled) setSheetVersion(version => version + 1);
+      });
+      return () => { cancelled = true; };
+    }, [idleSheet, sheetLoader]);
     const [frame, setFrame] = useState(0);
     /** 智能避让指定的走动帧间隔（ms）；为 null 时按图集固有节奏播放。 */
     const walkFrameDelayMsRef = useRef<number | null>(null);
@@ -1106,6 +1115,7 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
     useEffect(() => {
       if (!IDLE_ACCENT || previewMode) return undefined;
       const { motion, intervalSecs, probability, durationMs } = IDLE_ACCENT;
+      const rhythm = new IdleAccentRhythm(intervalSecs * 1000, performance.now());
       let cancelled = false;
       let timer: number | null = null;
       const arm = (delayMs: number) => {
@@ -1115,15 +1125,15 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
           timer = null;
           if (cancelled) return;
           const free = isAtRest() && !pressAliveRef.current && !positioningCoordinator.dragInFlight;
-          if (!free) {
-            arm(IDLE_ACCENT_RETRY_MS);
-            return;
+          const now = performance.now();
+          if (rhythm.ready(now, free)) {
+            if (Math.random() < probability) applyMotion(motion, durationMs);
+            rhythm.played(now, durationMs);
           }
-          if (Math.random() < probability) applyMotion(motion, durationMs);
-          arm(intervalSecs * 1_000);
+          arm(IDLE_ACCENT_RETRY_MS);
         }, delayMs);
       };
-      arm(intervalSecs * 1_000);
+      arm(IDLE_ACCENT_RETRY_MS);
       return () => {
         cancelled = true;
         if (timer !== null) window.clearTimeout(timer);
@@ -1701,9 +1711,12 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
       activeSpec.kind === 'animation'
         ? sheetUrl(activeSpec, characterId, walkDirection)
         : null;
-    const spriteFrameStyle =
+    const idleFrameStyle = sheetLoader.isReady(idleSheet)
+      ? { backgroundImage: `url('${idleSheet}')`, backgroundSize: '100% 100%', backgroundPosition: '0% 0%' }
+      : frameStyle(IDLE_SPEC, IDLE_SLOT, characterId, walkDirection);
+    const spriteFrameStyle = activeSpec.name === 'idle' ? idleFrameStyle :
       activeSheet !== null && !sheetLoader.isReady(activeSheet)
-        ? frameStyle(IDLE_SPEC, IDLE_SLOT, characterId, walkDirection)
+        ? idleFrameStyle
         : frameStyle(activeSpec, activeSpec.kind === 'pose' ? activeSpec.slot : frame, characterId, walkDirection);
 
     return (

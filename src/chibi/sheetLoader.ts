@@ -4,10 +4,21 @@ export class SheetLoader {
   private failed = new Set<string>();
   private pending = new Map<string, { promise: Promise<boolean>; cancel: () => void }>();
   private capacity = 2;
+  private pinned = new Set<string>();
+
+  private evict(): void {
+    const disposable = [...this.images.keys()].filter(source => !this.pinned.has(source));
+    while (disposable.length > this.capacity) this.images.delete(disposable.shift()!);
+  }
+
+  pin(source: string): Promise<boolean> {
+    this.pinned.add(source);
+    return this.load(source);
+  }
 
   setCapacity(capacity: number): void {
     this.capacity = Math.max(1, Math.floor(capacity));
-    while (this.images.size > this.capacity) this.images.delete(this.images.keys().next().value!);
+    this.evict();
   }
 
   isReady(source: string): boolean {
@@ -34,7 +45,7 @@ export class SheetLoader {
       this.pending.delete(source);
       if (ready) {
         this.images.set(source, image);
-        while (this.images.size > this.capacity) this.images.delete(this.images.keys().next().value!);
+        this.evict();
       } else {
         this.failed.add(source);
       }
@@ -47,9 +58,13 @@ export class SheetLoader {
     return promise;
   }
 
-  clear(): void {
-    for (const { cancel } of [...this.pending.values()]) cancel();
-    this.images.clear();
-    this.failed.clear();
+  clear(keepPinned = false): void {
+    for (const [source, { cancel }] of [...this.pending]) {
+      if (!keepPinned || !this.pinned.has(source)) cancel();
+    }
+    for (const source of [...this.images.keys()]) {
+      if (!keepPinned || !this.pinned.has(source)) this.images.delete(source);
+    }
+    if (!keepPinned) { this.failed.clear(); this.pinned.clear(); }
   }
 }

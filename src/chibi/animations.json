@@ -711,7 +711,7 @@
   },
   "idle_accent": {
     "motion": "look",
-    "interval_secs": 4,
+    "interval_secs": 30,
     "probability": 1,
     "duration_ms": 2600
   },

@@ -75,15 +75,14 @@
 .pose-listen .chibi-pet-sprite { animation: chibi-listen 1.3s ease-in-out infinite alternate; }
 .pose-walk .chibi-pet-sprite { animation: chibi-walk-step 420ms ease-in-out infinite alternate; }
 
-/* 转身与眨眼的帧序列画的就是整体形变，叠加 CSS 形变会互相打架，故关掉呼吸； */
+/* 整体形变图集关闭额外呼吸；眼部眨眼沿用 idle 呼吸，避免切换瞬间位置跳动。 */
 /* 表情类动作（cast/angry/smug/think）保持默认呼吸，与改版前一致 */
 .pose-turn .chibi-pet-sprite,
 .pose-float .chibi-pet-sprite,
 .pose-sleep .chibi-pet-sprite,
 .pose-wake .chibi-pet-sprite,
 .pose-tend .chibi-pet-sprite,
-.pose-tend-out .chibi-pet-sprite,
-.pose-blink .chibi-pet-sprite {
+.pose-tend-out .chibi-pet-sprite {
   animation: none;
 }
 
