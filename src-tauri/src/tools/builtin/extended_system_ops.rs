@@ -247,47 +247,12 @@ impl Tool for GetActiveWindowTool {
     }
 
     async fn call(&self, _args: Value, _context: &ToolUseContext) -> ToolResult {
-        #[cfg(target_os = "windows")]
-        {
-            let script = r#"
-Add-Type @"
-using System;
-using System.Runtime.InteropServices;
-using System.Text;
-public class Win32 {
-    [DllImport("user32.dll")]
-    public static extern IntPtr GetForegroundWindow();
-    [DllImport("user32.dll")]
-    public static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);
-}
-"@
-$h = [Win32]::GetForegroundWindow()
-$sb = New-Object System.Text.StringBuilder 256
-[Win32]::GetWindowText($h, $sb, 256) | Out-Null
-Write-Output $sb.ToString()
-"#;
-            match silent_command("powershell")
-                .args(["-NoProfile", "-NonInteractive", "-Command", script])
-                .output()
-            {
-                Ok(o) if o.status.success() => {
-                    let title = String::from_utf8_lossy(&o.stdout)
-                        .trim_end_matches(['\r', '\n'])
-                        .to_string();
-                    return ToolResult::standard_success(
-                        "获取活动窗口成功",
-                        Some(json!({ "title": title })),
-                    );
-                }
-                _ => {
-                    return ToolResult::standard_error("获取活动窗口失败", None, None);
-                }
-            }
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
-            ToolResult::standard_error("当前平台不支持获取活动窗口", None, None)
-        }
+        let Some(environment) = crate::world::environment_agent::shared() else {
+            return ToolResult::standard_error("环境智能体尚未就绪", Some("EnvironmentUnavailable"), None);
+        };
+        let context = environment.refresh_foreground();
+        let window = context.current_window(chrono::Utc::now().timestamp_millis()).unwrap_or_default();
+        ToolResult::standard_success("获取活动窗口成功", Some(json!({"title": window.title})))
     }
 
     fn is_read_only(&self) -> bool {

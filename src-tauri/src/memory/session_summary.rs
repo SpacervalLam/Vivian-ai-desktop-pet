@@ -344,6 +344,20 @@ mod tests {
         }
     }
     #[test]
+    fn sticker_only_turns_are_covered_and_changed_artwork_invalidates_summary() {
+        let mut session = session(String::new());
+        session.turns[0].speaker = "nana".into();
+        session.turns[0].listener = "user".into();
+        session.turns[0].sticker = Some(serde_json::json!({"id":"nana_thanks_01","version":"2","label":"谢谢","meaning":"感谢对方的用心"}));
+        let chunks = plan_chunks(&session);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].slices[0].message_id, "source");
+        assert!(chunks[0].transcript.contains("感谢对方的用心"));
+        assert!(chunks[0].transcript.contains("nana → user"));
+        session.turns[0].sticker.as_mut().unwrap()["version"] = serde_json::json!("custom-version");
+        assert_ne!(chunks[0].fingerprint, plan_chunks(&session)[0].fingerprint);
+    }
+    #[test]
     fn long_unicode_messages_are_fully_covered_without_truncation() {
         let session = session("中文🙂".repeat(6000));
         let chunks = plan_chunks(&session);

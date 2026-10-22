@@ -1026,7 +1026,6 @@ impl MemorySavingRunnable {
                 responses.push(final_text.to_string());
             }
         }
-        if responses.is_empty() && state.sticker.is_some() {responses.push("[表情包]".into());}
         responses
     }
 }
@@ -1079,10 +1078,18 @@ impl Runnable for MemorySavingRunnable {
                 .unwrap_or("neutral");
 
             // 防御性清理：避免原始 JSON 串写入长期记忆
-            let clean_responses: Vec<String> = ai_responses
+            let mut clean_responses: Vec<String> = ai_responses
                 .iter()
                 .map(|r| Self::strip_json_if_any(r))
                 .collect();
+            if let Some(sticker) = &state.sticker {
+                let metadata = json!({"sticker":sticker});
+                if let Some(last) = clean_responses.last_mut() {
+                    *last = crate::memory::extraction_queue::content_with_sticker(last, &metadata);
+                } else {
+                    clean_responses.push(crate::memory::extraction_queue::content_with_sticker("", &metadata));
+                }
+            }
 
             // 根据 current_channel / 输入前缀构造正确的 metadata
             // 跨角色对话时，AI 回复的 speaker 是自己，listener 是对方角色
@@ -1178,6 +1185,34 @@ impl Runnable for MemorySavingRunnable {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn sent_stickers_are_searchable_memory_with_original_reference() {
+        let owner = format!("sticker-memory-{}", uuid::Uuid::new_v4());
+        let memory = Arc::new(MemoryManager::new(&crate::config::AppConfig::default(), &owner).unwrap());
+        let saver = MemorySavingRunnable::with_memory(memory.clone());
+        for text in ["", "谢谢你帮忙"] {
+            let mut state = PipelineState::default();
+            state.should_respond = true;
+            state.current_channel = "wechat".into();
+            state.text = text.into();
+            state.sticker = Some(crate::stickers::StickerRef {
+                id:"vivian_thanks_01".into(),character_id:"vivian".into(),version:"2".into(),
+                label:"谢谢".into(),meaning:"感谢对方的用心".into(),
+            });
+            saver.ainvoke(state.to_json(), None).await.unwrap();
+        }
+        let memories = memory.get_all_memories().await.unwrap();
+        let sent: Vec<_> = memories.iter().filter(|m|m.metadata["sticker"]["id"]=="vivian_thanks_01").collect();
+        assert_eq!(sent.len(), 2);
+        assert!(sent.iter().all(|m| m.content.contains("发送贴纸") && m.content.contains("感谢对方的用心") && m.metadata["sticker"]["version"]=="2"));
+        assert!(sent.iter().any(|m|m.content.starts_with("谢谢你帮忙\n")));
+        let mut suppressed = PipelineState::default();
+        suppressed.should_respond = true;
+        suppressed.sticker_id = Some("vivian_happy_01".into());
+        saver.ainvoke(suppressed.to_json(), None).await.unwrap();
+        assert_eq!(memory.get_all_memories().await.unwrap().len(), memories.len());
+    }
 
     #[test]
     fn authored_context_is_distinct_from_user_history() {

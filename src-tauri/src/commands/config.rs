@@ -34,6 +34,8 @@ pub fn set_config(
     key: String,
     value: Value,
 ) -> Result<(), String> {
+    // The game observer owns this learned table; legacy settings snapshots must not erase it.
+    if key == "companion.game_processes" { return Ok(()); }
     let config = state.config.read();
     config.set_no_save(&key, value).map_err(err_str)
 }

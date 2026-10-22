@@ -3,6 +3,12 @@ export class SheetLoader {
   private images = new Map<string, HTMLImageElement>();
   private failed = new Set<string>();
   private pending = new Map<string, { promise: Promise<boolean>; cancel: () => void }>();
+  private capacity = 2;
+
+  setCapacity(capacity: number): void {
+    this.capacity = Math.max(1, Math.floor(capacity));
+    while (this.images.size > this.capacity) this.images.delete(this.images.keys().next().value!);
+  }
 
   isReady(source: string): boolean {
     return this.images.has(source);
@@ -28,7 +34,7 @@ export class SheetLoader {
       this.pending.delete(source);
       if (ready) {
         this.images.set(source, image);
-        while (this.images.size > 2) this.images.delete(this.images.keys().next().value!);
+        while (this.images.size > this.capacity) this.images.delete(this.images.keys().next().value!);
       } else {
         this.failed.add(source);
       }

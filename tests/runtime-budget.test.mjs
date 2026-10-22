@@ -23,6 +23,18 @@ for (const source of ['blink', 'sleep']) {
 assert.equal(loader.isReady('walk-left'), false, 'old decoded image must be released');
 assert.equal(loader.isReady('blink'), true);
 assert.equal(loader.isReady('sleep'), true);
+loader.setCapacity(1);
+assert.equal(loader.isReady('blink'), false, 'game mode immediately releases the older decoded sheet');
+assert.equal(loader.isReady('sleep'), true, 'current sheet remains available');
+const gameSheet = loader.load('game-reaction');
+created.at(-1).onload();
+assert.equal(await gameSheet, true);
+assert.equal(loader.isReady('sleep'), false, 'new sheets obey the game budget');
+loader.setCapacity(2);
+const restoredSheet = loader.load('wake');
+created.at(-1).onload();
+await restoredSheet;
+assert.equal(loader.isReady('game-reaction'), true, 'normal two-sheet cache resumes after gaming');
 const missing = loader.load('missing');
 created.at(-1).onerror();
 assert.equal(await missing, false);

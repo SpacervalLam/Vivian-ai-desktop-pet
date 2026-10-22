@@ -1,6 +1,7 @@
 //! Non-character environment agent: one observation stream and one bounded planning budget.
 //! It reports observations and selects an opportunity. Character brains retain all speech.
 use super::environment_input::EnvironmentInput;
+use super::foreground_context::{ForegroundContext, ForegroundWindowSnapshot};
 use super::interaction_guidance::{Evidence, HintCache, Suggestion};
 use super::{
     environment_policy::{
@@ -15,7 +16,7 @@ use serde_json::json;
 use std::{
     collections::HashMap,
     sync::{
-        atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering},
         Arc, OnceLock,
     },
     time::Duration,
@@ -36,6 +37,11 @@ struct Observations {
 
 #[derive(Default)]
 pub struct EnvironmentAgent {
+    foreground: Mutex<ForegroundContext>,
+    foreground_started: AtomicBool,
+    foreground_provider: OnceLock<std::sync::Weak<super::WorldStateProvider>>,
+    game_input_pid: AtomicU32,
+    game_input: OnceLock<super::game_input::GameInputMonitor>,
     observations: Mutex<Observations>,
     planning: Arc<tokio::sync::Mutex<()>>,
     input: EnvironmentInput,
@@ -51,6 +57,11 @@ impl Drop for SamplingGuard<'_> {
     fn drop(&mut self) {
         self.0.store(false, Ordering::Release);
     }
+}
+
+pub fn shared() -> Option<Arc<EnvironmentAgent>> {
+    crate::cordis::global_ctx()?.get_service::<Arc<EnvironmentAgent>>()
+        .map(|environment| Arc::clone(environment.as_ref()))
 }
 
 pub fn participants(state: &AppState) -> Vec<Participant> {
@@ -133,6 +144,98 @@ pub fn allows_peer_contact(state: &AppState, source_id: &str, target_id: &str) -
 }
 
 impl EnvironmentAgent {
+    pub fn foreground_context(&self) -> ForegroundContext { self.foreground.lock().clone() }
+
+    pub fn external_foreground(&self) -> Option<ForegroundWindowSnapshot> {
+        self.foreground.lock().current_window(chrono::Utc::now().timestamp_millis())
+            .filter(|window| window.pid != std::process::id())
+    }
+
+    pub fn game_foreground(&self, existing_game_pid: u32) -> Option<ForegroundWindowSnapshot> {
+        self.foreground.lock().game_window(std::process::id(), existing_game_pid, chrono::Utc::now().timestamp_millis())
+    }
+
+    pub(crate) fn observe_foreground(&self, window: ForegroundWindowSnapshot, at: i64) -> bool {
+        let changed = self.foreground.lock().observe(window, std::process::id(), at);
+        self.sync_game_input();
+        changed
+    }
+
+    /// Game companionship selects a game; only this agent starts/scopes the input source.
+    pub fn set_game_input_target(&self, pid: u32) {
+        self.game_input_pid.store(pid, Ordering::Release);
+        self.sync_game_input();
+    }
+
+    fn sync_game_input(&self) {
+        let expected = self.game_input_pid.load(Ordering::Acquire);
+        let actual = self.external_foreground().map(|window| window.pid).unwrap_or(0);
+        let target = if actual == expected { expected } else { 0 };
+        if target != 0 {
+            self.game_input.get_or_init(super::game_input::GameInputMonitor::new).set_target(target);
+        } else if let Some(input) = self.game_input.get() { input.set_target(0); }
+    }
+
+    pub fn game_input_activity(&self) -> super::game_input_policy::InputActivity {
+        self.game_input.get().map(|input| input.snapshot()).unwrap_or_default()
+    }
+
+    /// Explicit tool queries refresh through the same owner and notify the same subscribers.
+    pub fn refresh_foreground(&self) -> ForegroundContext {
+        let window = super::foreground_window::get_current_foreground_window();
+        let at = chrono::Utc::now().timestamp_millis();
+        if let Some(provider) = self.foreground_provider.get().and_then(|provider| provider.upgrade()) {
+            provider.update_foreground_at(window, at);
+        } else {
+            self.observe_foreground(window, at);
+        }
+        self.foreground_context()
+    }
+
+    /// One event stream for every character, independent of quiet mode and planner admission.
+    pub fn start_foreground_events(self: &Arc<Self>, provider: std::sync::Weak<super::WorldStateProvider>) {
+        if self.foreground_started.swap(true, Ordering::AcqRel) { return; }
+        let _ = self.foreground_provider.set(provider.clone());
+        let agent = self.clone();
+        tauri::async_runtime::spawn(async move {
+            let _started = SamplingGuard(&agent.foreground_started);
+            tracing::info!("[EnvironmentAgent] 前台应用跟踪已启动");
+            agent.refresh_foreground();
+            let cancel = crate::utils::cancel_token::cancel_token();
+            // Keep one notification bridge and one hook guard for the loop's lifetime.
+            let notify = super::foreground_window::foreground_event_notify();
+            let mut guard = None;
+            loop {
+                if cancel.is_cancelled() || provider.strong_count() == 0 { return; }
+                if super::foreground_window::foreground_hook_needs_install(&guard) {
+                    let notify = notify.clone();
+                    guard = tokio::task::spawn_blocking(move || super::foreground_window::subscribe_foreground_events(notify))
+                        .await.unwrap_or(None);
+                }
+                if guard.is_some() {
+                    tokio::select! {
+                        _ = notify.notified() => {},
+                        _ = tokio::time::sleep(Duration::from_secs(10)) => {},
+                        _ = cancel.cancelled() => return,
+                    }
+                } else {
+                    tokio::select! {
+                        _ = tokio::time::sleep(Duration::from_secs(5)) => {},
+                        _ = cancel.cancelled() => return,
+                    }
+                }
+                let Some(provider) = provider.upgrade() else { return; };
+                // Drain HWND observations before polling: a quick switch into chat must not
+                // lose the external app that was actually focused when the event fired.
+                for (window, at) in super::foreground_window::drain_foreground_events() {
+                    provider.update_foreground_at(window, at);
+                }
+                drop(provider);
+                agent.refresh_foreground();
+            }
+        });
+    }
+
     /// This foreground helper is optional and bounded; failure never prevents the role's reply.
     pub async fn reply_guidance(&self, router: &crate::providers::ModelRouter, character: &str,
         listener: &str, material: serde_json::Value, evidence: Vec<Evidence>) -> Option<String> {

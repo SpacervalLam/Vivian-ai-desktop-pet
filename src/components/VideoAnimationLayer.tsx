@@ -42,6 +42,7 @@ export function VideoAnimationLayer({
   useEffect(() => {
     let cancelled = false;
     const unlisteners: Array<() => void> = [];
+    const videos = [videoARef.current, videoBRef.current];
 
     const finish = (gen: number) => {
       if (cancelled || genRef.current !== gen) return;
@@ -119,8 +120,12 @@ export function VideoAnimationLayer({
       unlisteners.length = 0;
       genRef.current++;
       // 卸载时暂停视频释放资源
-      videoARef.current?.pause();
-      videoBRef.current?.pause();
+      for (const video of videos) {
+        if (!video) continue;
+        video.pause();
+        video.removeAttribute('src');
+        video.load();
+      }
     };
   }, [characterId]);
 

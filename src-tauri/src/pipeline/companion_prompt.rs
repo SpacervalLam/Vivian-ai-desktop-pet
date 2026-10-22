@@ -55,9 +55,15 @@ impl CompanionPrompt {
         prompt.push("style_preset", parts.style_preset_block.clone().unwrap_or_default(), Character, Main, 0);
         prompt.push("explicit_preferences", parts.style_block.clone().unwrap_or_default(), Character, Main, 0);
         // Safety and attribution remain explicit; conversational style is defined once.
-        prompt.push("stickers", crate::stickers::prompt(&parts.char_id, &parts.channel), Generation, Main, 1);
+        if !proactive {
+            prompt.push("stickers", crate::stickers::prompt(&parts.char_id, &parts.channel, &parts.user_input, history), Generation, Main, 1);
+        }
         prompt.push("safety", include_str!("../../prompts/framework/companion_contract.en.md"), Framework, Main, 0);
         prompt.push("creator_identity", creator_identity_rules(), Framework, Main, 0);
+        if let Some(context) = crate::game_companion::prompt_context() {
+            prompt.push("game_companion_guide", crate::game_companion::GAME_GUIDE, Generation, Main, 0);
+            prompt.push("game_companion", context, World, Context, 0);
+        }
         if parts.first_contact_greeting {
             prompt.push("first_contact", first_contact_rules(&parts.language), Framework, Main, 0);
         }

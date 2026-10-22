@@ -72,6 +72,14 @@ pub mod utils {
 
 #[path = "../src/companion_policy.rs"]
 pub mod companion_policy;
+#[path = "../src/game_policy.rs"]
+pub mod game_policy;
+#[path = "../src/world/foreground_context.rs"]
+pub mod foreground_context;
+#[path = "../src/world/game_input_policy.rs"]
+pub mod game_input_policy;
+#[path = "../src/world/game_input.rs"]
+mod game_input;
 
 #[path = "../src/voice_diagnostics.rs"]
 pub mod voice_diagnostics;

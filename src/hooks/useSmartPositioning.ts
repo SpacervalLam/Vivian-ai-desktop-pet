@@ -200,7 +200,7 @@ export function useSmartPositioning(
 
     const runCheck = async (force = false) => {
       if (inFlightRef.current) return;
-      if (cancelled || !enabledRef.current || !modelReadyRef.current) return;
+      if (cancelled || positioningCoordinator.gameMode || !enabledRef.current || !modelReadyRef.current) return;
       // 桌宠整体不可见（离线藏入托盘、进入公寓被 Rust 隐藏、WebView 冻结失败等）
       // 时，屏幕捕获与纯色分析毫无意义：跳过本次检测，定时截图随之停止。
       // isVisible 是轻量 IPC，隐藏期间把它当作低频心跳即可。

@@ -17,6 +17,8 @@ pub mod commands;
 pub mod config;
 pub mod companion_policy;
 pub mod companion_runtime;
+pub mod game_policy;
+pub mod game_companion;
 pub mod desktop_clipboard;
 pub mod drag_motion;
 pub mod desktop_terrain;
@@ -921,7 +923,6 @@ pub fn run() {
                     // API 就绪，全部就绪后才允许初始化角色、开放 API。
                     if !crate::startup::preflight(&handle, &state).await {
                         tracing::info!("[Startup] 启动预检未通过，等待用户完成配置");
-                        crate::startup::emit_progress(100, 100, "请完成配置");
                         crate::startup::finish_startup();
                         // 关闭提前创建的角色窗口：无后端支撑的窗口只会报错，
                         // 配置引导由设置窗口承接

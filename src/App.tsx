@@ -31,6 +31,7 @@ import { LifecycleController } from './controllers/LifecycleController';
 import { useHiding } from './hooks/useHiding';
 import type { Corner, HideReason } from './hooks/useHiding';
 import { useSmartPositioning } from './hooks/useSmartPositioning';
+import { useGameCompanion } from './hooks/useGameCompanion';
 import { positioningCoordinator } from './hooks/positioningCoordinator';
 import { FLEE_TAKEOVER_HOLD_MS } from './chibi/fleeTrack';
 import { changeLanguage } from './i18n';
@@ -747,6 +748,8 @@ export default function App() {
   const scaleDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   /** 视频动画演出层是否在播放（播放期间隐藏 桌宠本体） */
   const [videoActive, setVideoActive] = useState(false);
+  const game = useGameCompanion(modelReady);
+  useEffect(() => { if (game.active) setVideoActive(false); }, [game.active]);
   /** Ollama 就绪 toast 是否已弹出（每个应用生命周期只弹一次） */
   const ollamaToastedRef = useRef(false);
   const quietModeRef = useRef(false);
@@ -787,8 +790,8 @@ export default function App() {
     restoreFromSleep,
     hideForOffline,
     restoreFromOffline,
-  } = useHiding(petRef, modelReady, smartPositioningEnabled, petHideHookRef, quietModeRef);
-  useSmartPositioning(petRef, modelReady, smartPositioningEnabled && !desktopPhysicsEnabled);
+  } = useHiding(petRef, modelReady, smartPositioningEnabled && !game.active, petHideHookRef, quietModeRef);
+  useSmartPositioning(petRef, modelReady, smartPositioningEnabled && !desktopPhysicsEnabled && !game.active);
 
   useEffect(() => {
     let disposed = false;
@@ -4115,17 +4118,18 @@ export default function App() {
           position: 'absolute',
           inset: 0,
           // 视频动画演出层播放期间隐藏 Q 版本体，避免两个角色同时出现
-          opacity: videoActive ? 0 : 1,
+          opacity: videoActive ? 0 : game.active ? 0.72 : 1,
           transition: 'opacity .25s ease',
         }}
       >
         <ModelCanvas
           ref={petRef}
-          mouseFollowMode={mouseFollowMode}
+          mouseFollowMode={game.active ? 'off' : mouseFollowMode}
           onScaleChange={handleScaleChange}
           onResetScale={() => { void handleResetScale(); }}
-          ambientMotionEnabled={presenceState === 'online'}
-          desktopPhysicsEnabled={desktopPhysicsEnabled}
+          ambientMotionEnabled={presenceState === 'online' && !game.active}
+          desktopPhysicsEnabled={desktopPhysicsEnabled && !game.active}
+          gameMode={game.active}
           onInteraction={handleChibiInteraction}
           onReady={() => {
             setModelReady(true);
@@ -4174,10 +4178,10 @@ export default function App() {
 
       <ClipboardHint onSend={async message => { await ChatController.sendMessage(message, getCharacterId() ?? undefined, 'direct'); }} />
       {/* 视频动画演出层：监听 video:animation 事件播放透明动画素材（缺素材优雅跳过） */}
-      <VideoAnimationLayer
+      {!game.active && <VideoAnimationLayer
         characterId={getCharacterId() ?? undefined}
         onActiveChange={setVideoActive}
-      />
+      />}
 
       {/* 角落感知按钮 —— 隐藏到角落时显示，悬停可见，点击召回桌宠 + 唤醒睡眠 */}
       {hiddenCorner && (

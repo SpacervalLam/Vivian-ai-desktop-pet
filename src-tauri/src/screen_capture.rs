@@ -84,6 +84,15 @@ pub async fn capture_desktop() -> Result<DesktopFrame, String> {
     tokio::task::spawn_blocking(capture_desktop_sync).await.map_err(|e| e.to_string())?
 }
 fn capture_desktop_sync() -> Result<DesktopFrame, String> {
+    capture_pixels(None)
+}
+
+/// Bounded capture of the actual foreground game only; no desktop-sized intermediate bitmap.
+pub async fn capture_game_window(pid: u32) -> Result<Vec<u8>, String> {
+    tokio::task::spawn_blocking(move || capture_pixels(Some(pid))?.png()).await.map_err(|e| e.to_string())?
+}
+
+fn capture_pixels(game_pid: Option<u32>) -> Result<DesktopFrame, String> {
     #[cfg(windows)]
     {
         use windows::Win32::Graphics::Gdi::*;
@@ -97,10 +106,32 @@ fn capture_desktop_sync() -> Result<DesktopFrame, String> {
             let previous_dpi = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
             if previous_dpi.0.is_null() { return Err("无法读取屏幕物理坐标".into()); }
             let _dpi = DpiGuard(previous_dpi);
-            let left = GetSystemMetrics(SM_XVIRTUALSCREEN);
-            let top = GetSystemMetrics(SM_YVIRTUALSCREEN);
-            let width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
-            let height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+            let mut left = GetSystemMetrics(SM_XVIRTUALSCREEN);
+            let mut top = GetSystemMetrics(SM_YVIRTUALSCREEN);
+            let mut source_width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+            let mut source_height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+            let mut captured_window = None;
+            if let Some(expected) = game_pid {
+                use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId, GetWindowRect, IsWindowVisible};
+                let hwnd = GetForegroundWindow();
+                let mut actual = 0;
+                GetWindowThreadProcessId(hwnd, Some(&mut actual));
+                if actual == 0 || actual != expected || !IsWindowVisible(hwnd).as_bool() {
+                    return Err("游戏窗口已不在前台".into());
+                }
+                captured_window = Some(hwnd);
+                let mut rect = windows::Win32::Foundation::RECT::default();
+                GetWindowRect(hwnd, &mut rect).map_err(|e| e.to_string())?;
+                let right = rect.right.min(left + source_width);
+                let bottom = rect.bottom.min(top + source_height);
+                left = rect.left.max(left);
+                top = rect.top.max(top);
+                source_width = right - left;
+                source_height = bottom - top;
+            }
+            let scale = if game_pid.is_some() { (1280.0 / f64::from(source_width.max(source_height).max(1))).min(1.0) } else { 1.0 };
+            let width = (f64::from(source_width) * scale).round() as i32;
+            let height = (f64::from(source_height) * scale).round() as i32;
             let length = (width as i64).checked_mul(height as i64).and_then(|v| v.checked_mul(4))
                 .filter(|v| width > 0 && height > 0 && *v <= 256 * 1024 * 1024)
                 .ok_or("屏幕尺寸无效或过大")? as usize;
@@ -118,7 +149,11 @@ fn capture_desktop_sync() -> Result<DesktopFrame, String> {
                 return Err("无法创建截图位图".into());
             }
             let previous = SelectObject(memory, HGDIOBJ(bitmap.0));
-            let copied = BitBlt(memory, 0, 0, width, height, Some(screen), left, top, SRCCOPY | CAPTUREBLT);
+            let copied = if game_pid.is_some() {
+                StretchBlt(memory, 0, 0, width, height, Some(screen), left, top, source_width, source_height, SRCCOPY | CAPTUREBLT).as_bool()
+            } else {
+                BitBlt(memory, 0, 0, width, height, Some(screen), left, top, SRCCOPY | CAPTUREBLT).is_ok()
+            };
             // GetDIBits requires that the bitmap is not selected into a DC.
             SelectObject(memory, previous);
             let mut info: BITMAPINFO = std::mem::zeroed();
@@ -132,13 +167,16 @@ fn capture_desktop_sync() -> Result<DesktopFrame, String> {
             let _ = DeleteObject(HGDIOBJ(bitmap.0));
             let _ = DeleteDC(memory);
             ReleaseDC(None, screen);
-            if copied.is_err() || rows != height { return Err("截取屏幕失败".into()); }
+            if !copied || rows != height { return Err("截取屏幕失败".into()); }
+            if captured_window.is_some_and(|hwnd| hwnd != windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow()) {
+                return Err("截图期间前台窗口发生变化".into());
+            }
             for pixel in rgba.chunks_exact_mut(4) { pixel.swap(0, 2); pixel[3] = 255; }
             Ok(DesktopFrame { left, top, width: width as u32, height: height as u32, rgba })
         }
     }
     #[cfg(not(windows))]
-    { Err("当前平台暂不支持屏幕框选".into()) }
+    { let _ = game_pid; Err("当前平台暂不支持屏幕框选".into()) }
 }
 
 /// Explicit save actions use Windows' redirected Screenshots known folder (including OneDrive).

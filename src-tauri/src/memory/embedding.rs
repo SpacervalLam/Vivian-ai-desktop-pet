@@ -248,6 +248,23 @@ fn batch_chunk_ranges(len: usize, cap: usize) -> Vec<std::ops::Range<usize>> {
         .collect()
 }
 
+/// 余额/配额耗尽不会通过短暂退避恢复；保留普通 429 的限流重试。
+fn quota_exhausted(body: &str) -> bool {
+    let value = serde_json::from_str::<serde_json::Value>(body).unwrap_or_default();
+    let error = value.get("error").unwrap_or(&value);
+    let code = error.get("code").map(|v| v.to_string()).unwrap_or_default();
+    let kind = error.get("type").and_then(|v| v.as_str()).unwrap_or_default();
+    code.trim_matches('"') == "1113"
+        || code.contains("insufficient_quota")
+        || kind == "insufficient_quota"
+        || body.contains("余额不足")
+}
+
+/// 只有批次/输入格式错误值得拆成单条；鉴权、限流、网络故障不能放大成 N 次请求。
+pub(crate) fn can_retry_embedding_individually(error: &VivianError) -> bool {
+    matches!(error, VivianError::ProviderHttp { status: 400 | 413 | 422, .. })
+}
+
 /// OpenAI 兼容嵌入服务 - 通过 reqwest 调用 `/v1/embeddings`
 pub struct OpenAIEmbedding {
     client: reqwest::Client,
@@ -424,7 +441,8 @@ impl OpenAIEmbedding {
             if status.is_success() {
                 return serde_json::from_str(&response_body).map_err(Into::into);
             }
-            let retryable = status.as_u16() == 429 || status.is_server_error();
+            let retryable = !quota_exhausted(&response_body)
+                && (status.as_u16() == 429 || status.is_server_error());
             if retryable && attempt < 3 {
                 tracing::warn!(
                     "[MemoryEmbedding] HTTP {}，准备第 {} 次重试",
@@ -442,11 +460,11 @@ impl OpenAIEmbedding {
                         .map(|m| m.to_string())
                 })
                 .unwrap_or_else(|| response_body.chars().take(500).collect());
-            return Err(VivianError::Provider(format!(
-                "embedding HTTP {}: {}",
-                status.as_u16(),
-                detail
-            )));
+            return Err(VivianError::ProviderHttp {
+                status: status.as_u16(),
+                message: format!("embedding: {}", detail),
+                retry_after_secs: None,
+            });
         }
         Err(VivianError::Network("embedding 请求重试耗尽".into()))
     }
@@ -825,6 +843,25 @@ fn preset_capabilities(model: &str) -> (Option<String>, usize) {
     (preset.dimension_param, max_batch)
 }
 
+/// 在创建任何角色前验证云端嵌入，避免每个角色用全部种子反复探测失效服务。
+pub async fn check_remote_embedding(config: &AppConfig) -> VivianResult<()> {
+    let emb = &config.memory.embedding;
+    let (dimension_param, max_batch) = preset_capabilities(&emb.model);
+    let provider = OpenAIEmbedding::new(
+        emb.api_key.trim().to_string(),
+        Some(emb.endpoint.trim().to_string()),
+        Some(emb.model.clone()),
+    )
+    .with_dimension(super::embedding_registry::normalize_dimension(&emb.model, emb.dimension))
+    .with_capabilities(dimension_param, max_batch);
+    // 异步超时直接取消 HTTP future，不留下同步后台探测任务。
+    let inputs = ["Vivian startup check".to_string()];
+    tokio::time::timeout(Duration::from_secs(15), provider.post_batch_chunk(&inputs))
+        .await
+        .map_err(|_| VivianError::Timeout("嵌入服务检查超时（15 秒）".into()))??;
+    Ok(())
+}
+
 /// 嵌入服务工厂：根据 `MemoryConfig.embedding` 选择远程或哈希
 ///
 /// 选择规则（统一优先使用用户配置的嵌入模型，未配置才回退到哈希）：
@@ -924,6 +961,55 @@ pub fn build_embedding(config: &AppConfig) -> Arc<dyn MemoryEmbeddingProvider> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn startup_embedding_quota_fails_once_but_rate_limit_recovers() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        for (failure, expected_requests) in [
+            (serde_json::json!({"code":"1113","message":"余额不足或无可用资源包,请充值。"}), 1),
+            (serde_json::json!({"error":{"code":"insufficient_quota"}}), 1),
+            (serde_json::json!({"error":{"code":"rate_limit_exceeded"}}), 2),
+        ] {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let handler_calls = calls.clone();
+            let app = axum::Router::new().route("/embeddings", axum::routing::post(move || {
+                let calls = handler_calls.clone();
+                let failure = failure.clone();
+                async move {
+                    if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                        (axum::http::StatusCode::TOO_MANY_REQUESTS, axum::Json(failure))
+                    } else {
+                        (axum::http::StatusCode::OK, axum::Json(serde_json::json!({
+                            "data":[{"embedding":[1.0, 0.0],"index":0}]
+                        })))
+                    }
+                }
+            }));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = format!("http://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let provider = OpenAIEmbedding::new("test".into(), Some(endpoint), None).with_dimension(2);
+            let result = provider.embed("startup quota regression").await;
+            assert_eq!(calls.load(Ordering::SeqCst), expected_requests);
+            if expected_requests == 1 {
+                let error = result.unwrap_err();
+                assert!(matches!(error, VivianError::ProviderHttp { status: 429, .. }));
+                assert!(!can_retry_embedding_individually(&error));
+            } else {
+                assert_eq!(result.unwrap(), vec![1.0, 0.0]);
+            }
+            server.abort();
+        }
+    }
+
+    #[test]
+    fn startup_embedding_fallback_only_splits_invalid_batches() {
+        for status in [400, 413, 422, 401, 403, 429, 500, 503] {
+            let error = VivianError::ProviderHttp { status, message: "test".into(), retry_after_secs: None };
+            assert_eq!(can_retry_embedding_individually(&error), matches!(status, 400 | 413 | 422));
+        }
+        assert!(!can_retry_embedding_individually(&VivianError::Network("offline".into())));
+    }
 
     #[test]
     fn test_hashing_embedding_deterministic() {

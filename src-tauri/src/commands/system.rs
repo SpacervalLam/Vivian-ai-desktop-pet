@@ -466,12 +466,10 @@ pub async fn reinitialize(
     // 与启动流程一致：重新初始化前先确保主 LLM / 嵌入服务配置完成，
     // 本地 Ollama 场景下先启动服务并等待模型可用。
     if !crate::startup::preflight(&app, state.inner()).await {
-        crate::startup::emit_progress(100, 100, "请完成配置");
         crate::startup::finish_startup();
-        return Err(
-            "启动预检未通过：请先完成主 LLM / 嵌入服务配置，并确保 Ollama 已启动且模型已就绪"
-                .to_string(),
-        );
+        return Err(crate::startup::progress_snapshot().1
+            .map(|progress| progress.stage)
+            .unwrap_or_else(|| "启动预检未通过，请检查主 LLM 与嵌入服务配置".to_string()));
     }
 
     if let Err(e) = state.initialize().await {

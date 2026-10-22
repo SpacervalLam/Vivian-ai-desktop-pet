@@ -11,6 +11,7 @@ pub struct CompanionConfig {
     pub quiet_start: u32,
     pub quiet_end: u32,
     pub game_quiet: bool,
+    pub game_companion: bool,
     pub game_processes: Vec<String>,
     pub sound: bool,
     pub resource_feedback: bool,
@@ -33,7 +34,7 @@ pub struct DesktopShortcut {
 impl Default for CompanionConfig {
     fn default() -> Self {
         Self { do_not_disturb: false, hourly_chime: false, focus_mode: false, quiet_hours: false,
-            quiet_start: 23, quiet_end: 7, game_quiet: true,
+            quiet_start: 23, quiet_end: 7, game_quiet: true, game_companion: false,
             game_processes: vec!["League of Legends.exe".into(), "GenshinImpact.exe".into()],
             sound: true, resource_feedback: true, network_feedback: false, clipboard_hint: true, weather_feedback: false,
             music_feedback: false, shortcuts: vec![
@@ -43,6 +44,14 @@ impl Default for CompanionConfig {
     }
 }
 impl CompanionConfig {
+    pub fn remember_game(&mut self, process: &str) -> bool {
+        let process = crate::game_policy::normalize_process(process);
+        if !self.game_companion || process.is_empty() || crate::game_policy::excluded(&process)
+            || self.game_processes.iter().any(|p| crate::game_policy::same_process(p, &process)) { return false; }
+        self.game_processes.push(process);
+        true
+    }
+
     pub fn quiet_reason(&self, hour: u32, process: &str) -> Option<&'static str> {
         if self.focus_mode { return Some("focus"); }
         let start = self.quiet_start.min(23);
@@ -50,8 +59,8 @@ impl CompanionConfig {
         let inside = if start < end { hour >= start && hour < end }
             else if start > end { hour >= start || hour < end } else { false };
         if self.quiet_hours && inside { return Some("quiet_hours"); }
-        if self.game_quiet && !process.is_empty() && self.game_processes.iter()
-            .any(|p| !p.trim().is_empty() && p.trim().eq_ignore_ascii_case(process)) {
+        if self.game_quiet && !process.is_empty() && !crate::game_policy::shared_host(process) && self.game_processes.iter()
+            .any(|p| !p.trim().is_empty() && crate::game_policy::same_process(p, process)) {
             return Some("game");
         }
         None
@@ -100,6 +109,20 @@ impl HourlyClock {
 mod tests {
     use super::*;
     #[test]
+    fn learned_games_survive_restart_without_duplicates_or_launcher_entries() {
+        let mut config = CompanionConfig::default();
+        assert!(!config.remember_game("NewGame.exe"), "disabled mode cannot grow the table");
+        config.game_companion = true;
+        assert!(config.remember_game("NewGame.exe"));
+        assert!(!config.remember_game("newgame"));
+        assert!(!config.remember_game("STEAM.EXE"));
+        assert!(config.remember_game("javaw.exe"));
+        assert_eq!(config.quiet_reason(12, "javaw"), None, "a shared runtime name alone cannot silence unrelated apps");
+        let restored: CompanionConfig = serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
+        assert!(crate::game_policy::known_game("newgame.EXE", &restored.game_processes));
+        assert_eq!(restored.game_processes.iter().filter(|p| crate::game_policy::same_process(p, "newgame")).count(), 1);
+    }
+    #[test]
     fn clipboard_hints_require_a_change_and_ignore_unavailable_samples() {
         assert!(CompanionConfig::default().clipboard_hint);
         let mut changes = ClipboardChanges::default();
@@ -116,6 +139,7 @@ mod tests {
     fn quiet_state_survives_serialization_and_old_configs_default_to_off() {
         let old: CompanionConfig = serde_json::from_value(serde_json::json!({})).unwrap();
         assert!(!old.do_not_disturb);
+        assert!(!old.game_companion);
         for enabled in [true, false] {
             let config = CompanionConfig { do_not_disturb: enabled, ..Default::default() };
             let saved = serde_json::to_value(config).unwrap();
@@ -155,6 +179,7 @@ mod tests {
         assert_eq!(c.quiet_reason(6, ""), Some("quiet_hours"));
         assert_eq!(c.quiet_reason(7, ""), None);
         assert_eq!(c.quiet_reason(12, "genshinimpact.EXE"), Some("game"));
+        assert_eq!(c.quiet_reason(12, "GenshinImpact"), Some("game"));
         assert_eq!(c.quiet_reason(12, "GenshinImpact.exe.bak"), None);
         c.focus_mode = true;
         assert_eq!(c.quiet_reason(12, ""), Some("focus"));

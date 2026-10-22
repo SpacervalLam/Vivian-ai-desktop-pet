@@ -77,6 +77,7 @@ pub fn get_music_reactive(
 /// - 启用：启动 WASAPI 回环捕获线程，持续 emit `audio:pcm`（Vec<f32> 单声道）
 /// - 停用：置停止标志，线程在下一轮循环（≤50ms）内退出
 pub fn set_enabled(app: AppHandle, enabled: bool) -> Result<(), String> {
+    let enabled = enabled && !crate::game_companion::active();
     let mut guard = CAPTURE.lock();
     if enabled == guard.is_some() {
         return Ok(());

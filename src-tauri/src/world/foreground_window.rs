@@ -3,67 +3,22 @@
 //! 事件驱动：通过 SetWinEventHook(EVENT_SYSTEM_FOREGROUND) 监听前台窗口切换。
 //! 10s 兜底刷新防止事件丢失。
 
-use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+pub use super::foreground_context::{ExternalAppObservation, ForegroundWindowSnapshot};
 
-/// 前台窗口快照
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ForegroundWindowSnapshot {
-    /// 窗口标题
-    pub title: String,
-    /// 进程名
-    pub process: String,
-    /// 进程 ID
-    pub pid: u32,
+// Bounded transport queue only. The environment agent owns all current/history state.
+static FOREGROUND_EVENTS: parking_lot::Mutex<std::collections::VecDeque<(ForegroundWindowSnapshot, i64)>> =
+    parking_lot::Mutex::new(std::collections::VecDeque::new());
+
+pub(crate) fn drain_foreground_events() -> Vec<(ForegroundWindowSnapshot, i64)> {
+    FOREGROUND_EVENTS.lock().drain(..).collect()
 }
 
-/// 仅保存在本次运行内；历史应用不等同于当前前台或仍在运行。
-#[derive(Debug, Clone, Serialize)]
-pub struct ExternalAppObservation {
-    pub window: ForegroundWindowSnapshot,
-    pub observed_at_unix_ms: i64,
-}
-
-static LAST_EXTERNAL_APP: parking_lot::Mutex<Option<ExternalAppObservation>> = parking_lot::Mutex::new(None);
-
-fn remember_external_app(
-    cache: &mut Option<ExternalAppObservation>,
-    window: &ForegroundWindowSnapshot,
-    companion_pid: u32,
-    observed_at_unix_ms: i64,
-) {
-    if window.pid != 0 && window.pid != companion_pid {
-        *cache = Some(ExternalAppObservation { window: window.clone(), observed_at_unix_ms });
-    }
-}
-
-pub fn last_external_app() -> Option<ExternalAppObservation> {
-    LAST_EXTERNAL_APP.lock().clone()
-}
-
-fn record_external_app(window: &ForegroundWindowSnapshot) {
-    remember_external_app(&mut LAST_EXTERNAL_APP.lock(), window, std::process::id(), chrono::Utc::now().timestamp_millis());
-}
-
-/// 获取当前前台窗口信息（Windows 平台通过 Win32 API 直接获取，无进程创建开销）。
-///
-/// 非 Windows 平台返回默认值。
-pub fn get_foreground_window() -> ForegroundWindowSnapshot {
-    let window = get_current_foreground_window();
-    if window.pid == std::process::id() {
-        ForegroundWindowSnapshot::default()
-    } else {
-        window
-    }
-}
-
-/// 用户主动查询时保留自身窗口，避免把聊天窗口获得焦点误报为感知失败。
-pub fn get_current_foreground_window() -> ForegroundWindowSnapshot {
+/// Stateless OS primitive. Application tracking and history belong to EnvironmentAgent.
+pub(super) fn get_current_foreground_window() -> ForegroundWindowSnapshot {
     #[cfg(target_os = "windows")]
     {
-        let window = try_get_foreground_windows().unwrap_or_default();
-        record_external_app(&window);
-        window
+        try_get_foreground_windows().unwrap_or_default()
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -207,6 +162,13 @@ pub fn foreground_hook_needs_install(_guard: &Option<()>) -> bool {
 #[cfg(windows)]
 static FOREGROUND_NOTIFY: std::sync::OnceLock<Arc<tokio::sync::Notify>> = std::sync::OnceLock::new();
 
+pub(super) fn foreground_event_notify() -> Arc<tokio::sync::Notify> {
+    #[cfg(windows)]
+    { FOREGROUND_NOTIFY.get_or_init(|| Arc::new(tokio::sync::Notify::new())).clone() }
+    #[cfg(not(windows))]
+    { Arc::new(tokio::sync::Notify::new()) }
+}
+
 #[cfg(windows)]
 unsafe extern "system" fn win_event_proc(
     _hook: windows::Win32::UI::Accessibility::HWINEVENTHOOK,
@@ -219,7 +181,9 @@ unsafe extern "system" fn win_event_proc(
 ) {
     // 用事件携带的 HWND 保存观察，避免异步消费者醒来时焦点已切到聊天窗口。
     if let Some(window) = try_get_window_windows(hwnd) {
-        record_external_app(&window);
+        let mut events = FOREGROUND_EVENTS.lock();
+        if events.len() >= 64 { events.pop_front(); }
+        events.push_back((window, chrono::Utc::now().timestamp_millis()));
     }
     if let Some(n) = FOREGROUND_NOTIFY.get() {
         n.notify_one();
@@ -270,7 +234,7 @@ pub fn subscribe_foreground_events(
                 }
 
                 tracing::info!("[ForegroundHook] 前台窗口事件钩子已安装");
-                let _ = get_current_foreground_window();
+                if let Some(notify) = FOREGROUND_NOTIFY.get() { notify.notify_one(); }
 
                 let mut msg = std::mem::zeroed();
                 while !stop_clone.load(Ordering::SeqCst) {
@@ -293,33 +257,6 @@ pub fn subscribe_foreground_events(
         stop,
         thread_id,
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn chat_focus_and_missing_window_preserve_last_external_observation() {
-        let mut cache = None;
-        let external = ForegroundWindowSnapshot { title: "Editing".into(), process: "editor".into(), pid: 7 };
-        remember_external_app(&mut cache, &external, 42, 1000);
-        remember_external_app(&mut cache, &ForegroundWindowSnapshot { pid: 42, ..Default::default() }, 42, 2000);
-        remember_external_app(&mut cache, &ForegroundWindowSnapshot::default(), 42, 3000);
-        let observation = cache.unwrap();
-        assert_eq!(observation.window.pid, 7);
-        assert_eq!(observation.observed_at_unix_ms, 1000);
-    }
-
-    #[test]
-    fn next_external_app_replaces_previous_observation() {
-        let mut cache = None;
-        remember_external_app(&mut cache, &ForegroundWindowSnapshot { pid: 7, ..Default::default() }, 42, 1000);
-        remember_external_app(&mut cache, &ForegroundWindowSnapshot { pid: 8, ..Default::default() }, 42, 4000);
-        let observation = cache.unwrap();
-        assert_eq!(observation.window.pid, 8);
-        assert_eq!(observation.observed_at_unix_ms, 4000);
-    }
 }
 
 #[cfg(not(windows))]

@@ -1729,7 +1729,8 @@ const ConfigWindow: React.FC = () => {
       setSetupGuideOpen(true);
     }
     // 从工作侧"去设置 LLM"等入口直达指定页签（URL 带 tab=xxx）
-    const tabParam = new URLSearchParams(window.location.search).get('tab');
+    const requestedTab = new URLSearchParams(window.location.search).get('tab');
+    const tabParam = requestedTab === 'search' ? 'network' : requestedTab;
     if (tabParam && tabs.some((t) => t.key === tabParam)) {
       setActiveTab(tabParam as TabKey);
     }
@@ -1797,7 +1798,7 @@ const ConfigWindow: React.FC = () => {
     let unlisten: (() => void) | undefined;
     void (async () => {
       unlisten = await listen<{ tab: string }>('config:open-tab', (e) => {
-        const tab = e.payload?.tab;
+        const tab = e.payload?.tab === 'search' ? 'network' : e.payload?.tab;
         if (tab && tabs.some((t) => t.key === tab)) {
           setActiveTab(tab as TabKey);
         }
@@ -2468,6 +2469,8 @@ const ConfigWindow: React.FC = () => {
     const setDeep = async (obj: ConfigObject, prefix = '') => {
       for (const key of Object.keys(obj)) {
         const fullKey = prefix ? `${prefix}.${key}` : key;
+        // Runtime-owned discoveries may have grown since this settings snapshot was opened.
+        if (fullKey === 'companion.game_processes') continue;
         const v = obj[key];
         if (v && typeof v === 'object' && !Array.isArray(v)) {
           await setDeep(v as ConfigObject, fullKey);
@@ -2845,8 +2848,6 @@ const ConfigWindow: React.FC = () => {
                 helpKey="config.shortcut_screen_analyze_help"
               />
             </ShortcutsDrawer>
-            <div style={{ ...sectionTitleStyle, marginTop: 28 }}>{t('storageSettings.title')}</div>
-            <StorageSettings onManageData={() => setActiveTab('data')} />
           </>
         );
       case 'world':
@@ -3070,6 +3071,13 @@ const ConfigWindow: React.FC = () => {
               />
             ) : null}
 
+          </>
+        );
+      case 'storage':
+        return (
+          <>
+            <div style={{ ...sectionTitleStyle, marginTop: 28 }}>{t('storageSettings.title')}</div>
+            <StorageSettings />
           </>
         );
       case 'data':
@@ -6836,11 +6844,6 @@ const ConfigWindow: React.FC = () => {
             />
 
             {/* ── 网络搜索（已并入网络页签，多引擎混用）── */}
-          </>
-        );
-      case 'search':
-        return (
-          <>
             <div style={{ ...sectionTitleStyle, marginTop: 24 }}>
               {t('config.section_web_search')}
             </div>
@@ -7420,7 +7423,7 @@ const ConfigWindow: React.FC = () => {
           setSetupGuideOpen(false);
         }}
         onGoSearch={() => {
-          setActiveTab('search');
+          setActiveTab('network');
           setSetupGuideOpen(false);
         }}
         status={{

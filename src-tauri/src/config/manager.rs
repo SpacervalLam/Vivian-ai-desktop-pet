@@ -1952,6 +1952,23 @@ impl ConfigManager {
         self.config.read().clone()
     }
 
+    /// The one-second game observer needs only these preferences, not model keys/history caches.
+    pub fn game_preferences(&self) -> (crate::companion_policy::CompanionConfig, bool, bool) {
+        let config = self.config.read();
+        (config.companion.clone(), config.ai.enable_vision, config.proactive.enabled)
+    }
+
+    /// Merge discoveries under the same lock as settings edits; never replace a stale table.
+    pub fn remember_game_process(&self, process: &str) -> VivianResult<()> {
+        let mut config = self.config.write();
+        if !config.companion.remember_game(process) { return Ok(()); }
+        if let Err(error) = Self::save_to_file(&self.config_file, &config) {
+            config.companion.game_processes.pop();
+            return Err(error);
+        }
+        Ok(())
+    }
+
     pub fn save(&self) -> VivianResult<()> {
         Self::save_to_file(&self.config_file, &*self.config.read())
     }

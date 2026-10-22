@@ -81,8 +81,12 @@ impl Tool for GetForegroundAppContextTool {
         if scope != "foreground" {
             return ToolResult::standard_error("scope 必须为 foreground 或 running_apps", Some("InvalidScope"), None);
         }
-        let window = crate::world::foreground_window::get_current_foreground_window();
-        foreground_context_result(window, std::process::id(), crate::world::foreground_window::last_external_app(), chrono::Utc::now().timestamp_millis())
+        let Some(environment) = crate::world::environment_agent::shared() else {
+            return ToolResult::standard_error("环境智能体尚未就绪", Some("EnvironmentUnavailable"), None);
+        };
+        let context = environment.refresh_foreground();
+        let now = chrono::Utc::now().timestamp_millis();
+        foreground_context_result(context.current_window(now).unwrap_or_default(), std::process::id(), context.last_external, now)
     }
 
     fn is_read_only(&self) -> bool {

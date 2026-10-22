@@ -28,10 +28,10 @@ assert.deepEqual(findSettingsPages('代理', settingsCopy.zh, translate).map((pa
 assert.deepEqual(findSettingsPages('SPEECH output', settingsCopy.en, translate).map((page) => page.key), ['speech']);
 assert.deepEqual(findSettingsPages('Token', settingsCopy.zh, translate).map((page) => page.key), ['usage']);
 assert.equal(findSettingsPages('no-such-setting-xyz', settingsCopy.zh, translate).length, 0);
-assert.deepEqual(findSettingsPages('存储空间', settingsCopy.zh, translate).map((page) => page.key), ['general']);
+assert.deepEqual(findSettingsPages('存储空间', settingsCopy.zh, translate).map((page) => page.key), ['storage']);
 assert.deepEqual(findSettingsPages('个性化指令', settingsCopy.zh, translate).map((page) => page.key), ['memory']);
 assert.deepEqual(findSettingsPages('custom instructions', settingsCopy.en, translate).map((page) => page.key), ['memory']);
-assert.ok(source.includes("onGoSearch={() => {\n          setActiveTab('search')"), 'Setup guide opens the new search destination');
+assert.ok(source.includes("onGoSearch={() => {\n          setActiveTab('network')"), 'Setup guide opens the merged network destination');
 assert.ok(source.includes("onGoVoice={() => {\n          setActiveTab('speech')"), 'Setup guide opens speech output');
 const sectionsBundle = buildSync({ entryPoints: ['src/components/settings/SettingsSections.tsx'], bundle: true, write: false, format: 'esm', platform: 'node' });
 const { default: SettingsSections } = await import(`data:text/javascript;base64,${Buffer.from(sectionsBundle.outputFiles[0].text).toString('base64')}`);

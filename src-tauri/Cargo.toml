@@ -179,6 +179,7 @@ windows = { version = "0.61", features = [
     "Win32_System_JobObjects",
     # 进程存活检测: OpenProcess / PROCESS_QUERY_LIMITED_INFORMATION
     "Win32_System_Threading",
+    "Win32_System_LibraryLoader",
     # 受限令牌沙箱: CreateEnvironmentBlock（受限令牌子进程环境块）
     "Win32_System_Environment",
     # 受限令牌沙箱: 安全描述符字符串 / SetNamedSecurityInfo（scratch 目录 ACL+IL 标签）

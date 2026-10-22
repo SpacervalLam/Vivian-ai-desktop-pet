@@ -15,6 +15,28 @@ pub struct SourceTurn {
     pub session_id: Option<String>,
     pub metadata: Value,
 }
+/// Semantic projection for memory only; the original spoken text stays unchanged.
+pub fn content_with_sticker(content: &str, metadata: &Value) -> String {
+    let Some(sticker) = metadata.get("sticker").filter(|s| s.is_object()) else {
+        return content.to_owned();
+    };
+    let mut semantic = serde_json::Map::new();
+    for key in ["id", "character_id", "version", "label", "meaning"] {
+        if let Some(value) = sticker.get(key).and_then(Value::as_str) {
+            semantic.insert(key.into(), Value::String(value.into()));
+        }
+    }
+    if semantic.get("id").and_then(Value::as_str).is_none_or(str::is_empty) {
+        return content.to_owned();
+    }
+    let annotation = format!("[发送贴纸：{}]", Value::Object(semantic));
+    if content.trim().is_empty() { annotation } else { format!("{content}\n{annotation}") }
+}
+impl SourceTurn {
+    pub fn evidence_text(&self) -> String {
+        content_with_sticker(&self.content, &self.metadata)
+    }
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Batch {
     pub id: String,
@@ -210,13 +232,39 @@ pub fn source_for_quote<'a>(
             "self" => speaker == char_id && s.role == "assistant",
             _ => false,
         };
-        permitted && s.content.contains(quote)
+        permitted && (s.content.contains(quote)
+            || (subject == "self" && s.evidence_text().contains(quote)))
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn sticker_evidence_survives_restart_and_is_not_user_testimony() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stickers.json");
+        let mut turn = source("sticker-turn");
+        turn.role = "assistant".into();
+        turn.content.clear();
+        turn.metadata = serde_json::json!({"speaker":"vivian","sticker":{
+            "id":"vivian_thanks_01","character_id":"vivian","version":"2",
+            "label":"谢谢","meaning":"感谢对方的用心","filename":"unused.webp"}});
+        let queue = Queue::new(&path);
+        queue.enqueue(vec![turn], 0.0).unwrap();
+        drop(queue);
+        let batch = Queue::new(&path).ready(60.0).unwrap().unwrap();
+        let evidence = batch.sources[0].evidence_text();
+        assert!(evidence.contains("发送贴纸"));
+        assert!(evidence.contains("vivian_thanks_01"));
+        assert!(evidence.contains("感谢对方的用心"));
+        assert!(!evidence.contains("filename"));
+        assert!(batch.sources[0].content.is_empty());
+        assert!(source_for_quote(&batch.sources,"self","感谢对方的用心","vivian").is_some());
+        assert!(source_for_quote(&batch.sources,"user","感谢对方的用心","vivian").is_none());
+        assert_eq!(content_with_sticker("原话", &serde_json::json!({"sticker":null})), "原话");
+        assert_eq!(content_with_sticker("原话", &serde_json::json!({"sticker":{}})), "原话");
+    }
     fn source(id: &str) -> SourceTurn {
         SourceTurn {
             id: id.into(),

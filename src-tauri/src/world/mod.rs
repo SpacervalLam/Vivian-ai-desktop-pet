@@ -17,6 +17,9 @@ pub mod environment_input;
 pub mod environment_policy;
 pub mod interaction_guidance;
 pub mod foreground_window;
+pub mod foreground_context;
+pub mod game_input_policy;
+mod game_input;
 pub mod geolocation;
 pub mod music;
 pub mod network_status;
@@ -48,8 +51,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::WorldConfig;
 
 pub use events::{WorldEvent, WorldEventDetector, WorldEventKind};
-pub use foreground_window::{get_foreground_window, subscribe_foreground_events, ForegroundWindowSnapshot};
-pub use foreground_window::foreground_hook_needs_install;
+pub use foreground_context::ForegroundWindowSnapshot;
 pub use music::{MusicSnapshot, MusicSource, PlaybackAction, PlaybackStatus};
 pub use network_status::{get_network_status, NetworkStatusSnapshot};
 pub use network_watch::subscribe_network_events;
@@ -197,8 +199,6 @@ pub struct WorldStateProvider {
     cached_volume: RwLock<Option<VolumeSnapshot>>,
     /// 缓存的网络连接状态快照
     cached_network_status: RwLock<Option<NetworkStatusSnapshot>>,
-    /// 缓存的前台窗口快照
-    cached_foreground_window: RwLock<Option<ForegroundWindowSnapshot>>,
     /// 前台窗口切换监听器（按角色 ID 唯一，由各角色 ActivityJournal 注入）
     ///
     /// 设置保存会重建 Brain。若这里只追加，旧 listener 的闭包会继续持有旧
@@ -228,7 +228,6 @@ impl WorldStateProvider {
             cached_location: RwLock::new(None),
             cached_volume: RwLock::new(None),
             cached_network_status: RwLock::new(None),
-            cached_foreground_window: RwLock::new(None),
             foreground_listeners: RwLock::new(HashMap::new()),
             cached_user_presence: RwLock::new(None),
         }
@@ -329,7 +328,7 @@ impl WorldStateProvider {
         });
         let volume = self.cached_volume.read().clone();
         let network_status = self.cached_network_status.read().clone();
-        let foreground_window = self.cached_foreground_window.read().clone();
+        let foreground_window = self.environment.external_foreground();
         let user_presence = self.cached_user_presence.read().clone();
 
         WorldSnapshot {
@@ -533,7 +532,7 @@ impl WorldStateProvider {
 
     /// Lightweight cached observations for the scheduler heartbeat; no collection or prompt context.
     pub fn companion_observation(&self) -> (String, Option<bool>, Option<SystemMetrics>) {
-        let process = self.cached_foreground_window.read().as_ref()
+        let process = self.environment.external_foreground().as_ref()
             .map(|window| window.process.clone()).unwrap_or_default();
         let connected = self.cached_network_status.read().as_ref().map(|status| status.connected);
         (process, connected, self.cached_system.read().clone())
@@ -650,93 +649,21 @@ impl WorldStateProvider {
         });
     }
 
-    /// 启动前台窗口事件监听循环（SetWinEventHook 常驻 + 10s 兜底刷新）。
-    ///
-    /// **钩子全生命周期只装一次**。两个约束必须同时满足：
-    ///
-    /// 1. `win_event_proc` 是裸 `extern "system"` 回调，无法携带 user-data，
-    ///    只能经 `FOREGROUND_NOTIFY` 全局单例桥接，而 `get_or_init` **只在第一次生效**。
-    ///    所以 `notify` 必须在**循环外**创建并复用——若每轮新建，
-    ///    第 2 轮起 `select!` 等的是一个永远不会被通知的新 notify，事件分支永久失效
-    ///    （退化成 10s 轮询，且 `SetWinEventHook` 的能力被完全浪费）。
-    /// 2. guard 必须持有到退出为止。每轮重建会 `UnhookWinEvent` → `SetWinEventHook`，
-    ///    **间隙内的前台切换事件全部丢失**。
-    ///
-    /// 10s 超时只做**兜底刷新**（重读前台窗口），不再重建钩子。
+    /// The environment agent owns the shared foreground event stream and its application history.
     pub fn start_foreground_events(self: &Arc<Self>) {
-        let provider = Arc::clone(self);
-        tauri::async_runtime::spawn(async move {
-            tracing::info!("[ForegroundWatch] 前台窗口事件监听已启动");
-            // 初始刷新
-            let fw = get_foreground_window();
-            provider.update_foreground(fw);
-
-            let cancel = crate::utils::cancel_token::cancel_token();
-            // notify 只建一次：必须是 FOREGROUND_NOTIFY 单例里存的那一个
-            let notify = std::sync::Arc::new(tokio::sync::Notify::new());
-            // 钩子 guard 持有到函数退出，Drop 时自动卸载
-            let mut guard = None;
-
-            loop {
-                if cancel.is_cancelled() {
-                    tracing::info!("[ForegroundWatch] 收到取消信号，退出");
-                    return;
-                }
-
-                // 仅当钩子缺失、或钩子线程已退出时才（重）装
-                if foreground_hook_needs_install(&guard) {
-                    guard = tokio::task::spawn_blocking({
-                        let n = notify.clone();
-                        move || subscribe_foreground_events(n)
-                    })
-                    .await
-                    .unwrap_or(None);
-                }
-
-                if guard.is_some() {
-                    tokio::select! {
-                        _ = notify.notified() => {
-                            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                        }
-                        // 兜底刷新：只重读前台窗口，不重建钩子
-                        _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => {}
-                        _ = cancel.cancelled() => return,
-                    }
-                } else {
-                    // 钩子装不上（如 SetWinEventHook 失败），退避重试
-                    tokio::select! {
-                        _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {}
-                        _ = cancel.cancelled() => return,
-                    }
-                }
-
-                let fw = get_foreground_window();
-                provider.update_foreground(fw);
-            }
-        });
+        self.environment.start_foreground_events(Arc::downgrade(self));
     }
 
-    /// 更新缓存的前台窗口快照，并在 title 变化时通知监听器。
-    ///
-    /// - pid 为 0（无前台窗口/获取失败）时跳过
-    /// - 与缓存 title 不同时回调 foreground_listener（驱动 ActivityJournal 记录）
-    fn update_foreground(&self, fw: ForegroundWindowSnapshot) {
-        if fw.pid == 0 {
-            return;
-        }
-        let title_changed = {
-            let cached = self.cached_foreground_window.read();
-            match cached.as_ref() {
-                Some(prev) => prev.title != fw.title,
-                None => true,
-            }
-        };
-        *self.cached_foreground_window.write() = Some(fw.clone());
-        if title_changed {
+    #[cfg(test)]
+    fn update_foreground(&self, window: ForegroundWindowSnapshot) {
+        self.update_foreground_at(window, chrono::Utc::now().timestamp_millis());
+    }
+
+    pub(crate) fn update_foreground_at(&self, window: ForegroundWindowSnapshot, at: i64) {
+        let changed = self.environment.observe_foreground(window.clone(), at);
+        if changed && window.pid != 0 && window.pid != std::process::id() {
             let listeners = self.foreground_listeners.read().clone();
-            for listener in listeners.values() {
-                listener(&fw);
-            }
+            for listener in listeners.values() { listener(&window); }
         }
     }
 

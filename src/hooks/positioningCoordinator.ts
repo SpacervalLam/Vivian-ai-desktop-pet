@@ -16,6 +16,7 @@
  */
 
 export interface PositioningCoordinator {
+  gameMode: boolean;
   physicsEnabled: boolean;
   physicsInFlight: boolean;
   physicsLane: { minX: number; maxX: number } | null;
@@ -60,6 +61,7 @@ export interface PositioningCoordinator {
 }
 
 export const positioningCoordinator: PositioningCoordinator = {
+  gameMode: false,
   physicsEnabled: false,
   physicsInFlight: false,
   physicsLane: null,

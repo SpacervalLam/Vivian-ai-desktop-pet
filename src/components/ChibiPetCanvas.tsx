@@ -307,6 +307,7 @@ export interface ChibiPetCanvasProps {
   /** Kept compatible with ModelCanvas while stage walking is coordinated above the renderer. */
   ambientMotionEnabled?: boolean;
   desktopPhysicsEnabled?: boolean;
+  gameMode?: boolean;
   /** Browser-only visual QA route; avoids subscribing to unavailable Tauri events. */
   previewMode?: boolean;
 }
@@ -336,6 +337,7 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
       onOpenQuickChat,
       ambientMotionEnabled = true,
       desktopPhysicsEnabled = false,
+      gameMode = false,
       previewMode = false,
     },
     ref,
@@ -358,7 +360,11 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
     const walkDirectionRef = useRef<ChibiDirection>('left');
     walkDirectionRef.current = walkDirection;
     const [sheetLoader] = useState(() => new SheetLoader());
+    useEffect(() => { sheetLoader.setCapacity(gameMode ? 1 : 2); }, [gameMode, sheetLoader]);
     const [, setSheetVersion] = useState(0);
+    useEffect(() => {
+      if (gameMode && poseName === 'idle') sheetLoader.clear();
+    }, [gameMode, poseName, sheetLoader]);
     const [frame, setFrame] = useState(0);
     /** 智能避让指定的走动帧间隔（ms）；为 null 时按图集固有节奏播放。 */
     const walkFrameDelayMsRef = useRef<number | null>(null);
@@ -991,6 +997,7 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
 
     // 自然眨眼：只在待机且未被按压时插入，偶尔连眨两下
     useEffect(() => {
+      if (gameMode) return;
       let cancelled = false;
       let timer: number | null = null;
       const schedule = () => {
@@ -1030,7 +1037,7 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
         cancelled = true;
         if (timer !== null) window.clearTimeout(timer);
       };
-    }, [characterId, isAtRest, playFrames, returnToTone]);
+    }, [characterId, gameMode, isAtRest, playFrames, returnToTone]);
 
     // 待机点缀：静息时按间隔插播一次循环小动作（如四处张望）。
     //

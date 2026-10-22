@@ -192,7 +192,7 @@ pub fn emit_progress(current: usize, total: usize, stage: &str) {
 ///    `reinitialize` 触发时执行）；
 /// 2. 嵌入配置为本地 Ollama 时立即启动服务并等待 HTTP API 就绪、确保模型可用，
 ///    就绪后才放行 `state.initialize()`（嵌入任务在 Ollama 可用后才开始）；
-/// 3. 嵌入配置为云端 API 时不启动任何本地服务，直接放行。
+/// 3. 嵌入配置为云端 API 时检查实际可用性，失败则打开配置引导。
 ///
 /// 返回 `true` 表示可以继续 `state.initialize()`；`false` 表示需要用户先完成设置。
 pub async fn preflight(handle: &AppHandle, state: &Arc<AppState>) -> bool {
@@ -290,6 +290,16 @@ pub async fn preflight(handle: &AppHandle, state: &Arc<AppState>) -> bool {
         }
         tracing::info!("[Startup] Ollama 嵌入服务与模型已就绪");
         emit_progress(35, 100, "Ollama 嵌入服务与模型已就绪");
+    }
+
+    if emb.enabled && emb.source != "local" {
+        emit_progress(20, 100, "正在检查云端嵌入服务…");
+        if let Err(error) = crate::memory::embedding::check_remote_embedding(&cfg).await {
+            tracing::error!("[Startup] 云端嵌入服务不可用: {}", error);
+            emit_progress(100, 100, &format!("嵌入服务不可用：{}；请检查设置", error));
+            open_config_with_guide(handle);
+            return false;
+        }
     }
 
     emit_progress(40, 100, "启动预检完成，准备初始化角色…");

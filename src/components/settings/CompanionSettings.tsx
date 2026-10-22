@@ -1,4 +1,4 @@
-import { NumberField, TextField, ToggleField, sectionTitleStyle } from './SettingsFields';
+import { NumberField, ToggleField, sectionTitleStyle } from './SettingsFields';
 
 type SettingValue = boolean | number | string[];
 export default function CompanionSettings({ language, get, set }: {
@@ -33,8 +33,10 @@ export default function CompanionSettings({ language, get, set }: {
       <NumberField label={text('结束时间（小时）', '終了時刻', 'End hour')} min={0} max={23} step={1}
         value={get('companion.quiet_end', 7)} onChange={value => set('companion.quiet_end', Math.min(23, Math.max(0, Math.round(value))))} />
     </>}
-    <TextField label={text('游戏进程名（用英文逗号分隔）', 'ゲームのプロセス名（カンマ区切り）', 'Game process names (comma separated)')}
-      value={get('companion.game_processes', ['League of Legends.exe', 'GenshinImpact.exe']).join(',')}
-      onChange={value => set('companion.game_processes', value.split(','))} />
+    <ToggleField label={text('游戏陪伴', 'ゲームに寄り添う', 'Game companionship')}
+      value={get('companion.game_companion', false)} onChange={value => set('companion.game_companion', value)} />
+    <p>{text('自动识别并记住游戏，下次进入游戏时自动陪伴。游戏中减少无关打扰和演出，桌宠退到边缘并避开鼠标操作区域。环境智能体统计键鼠操作强度，激烈操作及短暂冷却期间暂缓主动插话。启用视觉功能后，最多每分钟分析一次游戏窗口画面；不保存具体按键内容或截图。',
+      'ゲームを自動判別して記憶し、次回から自動で寄り添います。不要な演出を抑え、操作を避けて画面端に移動します。環境エージェントがキー・マウス操作の頻度を集計し、激しい操作と直後の間は声掛けを控えます。視覚機能が有効な場合は最大毎分1回画面を分析します。キーの内容や画像は保存しません。',
+      'Automatically recognizes and remembers games. Reduces unrelated effects and moves the pet away from your cursor. The environment agent estimates keyboard/mouse activity and pauses unsolicited comments during intense input and a short cooldown. With vision enabled, analyzes the game window at most once a minute. Specific keystrokes and screenshots are not stored.')}</p>
   </>;
 }

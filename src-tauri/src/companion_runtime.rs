@@ -29,13 +29,16 @@ pub fn music_feedback_enabled() -> bool { MUSIC_FEEDBACK.load(Ordering::Relaxed)
 pub fn quiet_reason(state: &AppState) -> Option<&'static str> {
     if crate::companion_quiet::active() { return Some("do_not_disturb"); }
     let config = state.config.read().get_all().companion;
+    if config.game_companion && crate::game_companion::active() { return Some("game_companion"); }
     let (process, _, _) = state.world_provider.companion_observation();
     config.quiet_reason(chrono::Local::now().hour(), &process)
 }
 
 pub fn tick(app: &tauri::AppHandle) {
     let state = app.state::<Arc<AppState>>();
-    if !state.initialized.load(Ordering::Relaxed) || state.is_factory_reset_in_progress() { return; }
+    if !state.initialized.load(Ordering::Relaxed) { return; }
+    crate::game_companion::tick(app, &state);
+    if state.is_factory_reset_in_progress() { return; }
     state.world_provider.environment.tick(&state);
     flush_interaction_episodes(&state);
     let cfg = state.config.read().get_all();
@@ -189,5 +192,7 @@ fn flush_interaction_episodes(state: &Arc<AppState>) {
 pub fn companion_status(state: tauri::State<'_, Arc<AppState>>) -> serde_json::Value {
     let feedback = FEEDBACK.lock();
     json!({"quiet_reason": quiet_reason(&state), "cpu_pressure":feedback.cpu.active,
-        "memory_pressure":feedback.memory.active,"network_connected":feedback.network})
+        "memory_pressure":feedback.memory.active,"network_connected":feedback.network,
+        "game":crate::game_companion::status(),
+        "game_input":state.world_provider.environment.game_input_activity()})
 }

@@ -105,10 +105,9 @@ src/*Preview.tsx
 
 # 美术工程与发布产物
 # 仓库根目录的本地动画装配脚本与中间帧，不属于运行资源。
-/_*.py
-/_*.png
-/_*.mp4
-/_tmp_*/
+# 按 `_` 前缀统一忽略：此前逐扩展名列举漏掉了 .jpg 与 _t1/_t2_* 目录，
+# 每次新增一种产物格式都要补一行，改为前缀规则后不再需要。
+/_*
 /output/
 # Keep the runtime asset audit alongside packaging scripts.
 !/scripts/audit-mind-comic-assets.mjs

@@ -23,7 +23,7 @@ export function useDesktopPhysics(enabled: boolean, layer: RefObject<HTMLDivElem
     const win = getCurrentWindow();
     coordinator.physicsEnabled = true;
     coordinator.abortSmartMove?.();
-    const busy = () => cancelled || held || coordinator.dragInFlight || coordinator.fullscreenHidden ||
+    const busy = () => cancelled || held || coordinator.gameMode || coordinator.dragInFlight || coordinator.fullscreenHidden ||
       coordinator.fullscreenInFlight || coordinator.fleeInFlight || coordinator.smartPositioningInFlight;
     const begin = () => { held = true; dragSessionId = undefined; coordinator.physicsInFlight = false; };
     const end = () => { held = false; };

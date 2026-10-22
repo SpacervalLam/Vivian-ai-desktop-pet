@@ -682,6 +682,7 @@ impl MemoryManager {
                 &(|_, _| {}),
             ) {
                 Ok(all) => all,
+                Err(e) if !super::embedding::can_retry_embedding_individually(&e) => return Err(e),
                 Err(e) => {
                     tracing::warn!(
                         "[RebuildEmbeddings] 批量嵌入失败（{} 条），降级逐条重试: {e}",
@@ -691,6 +692,7 @@ impl MemoryManager {
                     for input in &inputs {
                         match embedding.embed(input) {
                             Ok(emb) => fallback.push(emb),
+                            Err(e2) if !super::embedding::can_retry_embedding_individually(&e2) => return Err(e2),
                             Err(e2) => {
                                 tracing::warn!("[RebuildEmbeddings] 嵌入失败: {e2}");
                                 fallback.push(Vec::new());
@@ -1655,13 +1657,18 @@ impl MemoryManager {
                 ai_emo.to_string(),
             ];
             let prefixed_content = add_prefix_if_needed(trimmed, &effective_ai_meta);
+            let mut response_meta = effective_ai_meta.clone();
+            // An attached sticker belongs to the final response, not earlier segments.
+            if i + 1 < ai_responses.len() {
+                if let Some(meta) = response_meta.as_object_mut() { meta.remove("sticker"); }
+            }
             if let Err(e) = self
                 .add_memory_with_metadata(
                     &prefixed_content,
                     MemoryType::ShortTerm,
                     imp,
                     tags,
-                    effective_ai_meta.clone(),
+                    response_meta,
                 )
                 .await
             {
@@ -3556,7 +3563,7 @@ impl MemoryManagerInner {
         let total = missing_entries.len();
         crate::startup::emit_progress(60, 100, &format!("正在嵌入种子记忆… 0/{}", total));
 
-        // 批量嵌入（分块 + 进度上报），失败块降级逐条重试
+        // 批量嵌入（分块 + 进度上报）；仅输入/批次错误降级逐条重试。
         let inputs: Vec<String> = missing_entries.iter().map(embed_input_for).collect();
         const SEED_CHUNK: usize = 16;
         let embeddings = match self.embedding.embed_batch_chunked(
@@ -3571,6 +3578,7 @@ impl MemoryManagerInner {
             },
         ) {
             Ok(all) => all,
+            Err(e) if !super::embedding::can_retry_embedding_individually(&e) => return Err(e),
             Err(e) => {
                 tracing::warn!(
                     "[seed] 批量嵌入失败，降级逐条重试: {}（剩余 {} 条）",
@@ -3581,6 +3589,7 @@ impl MemoryManagerInner {
                 for input in &inputs {
                     match self.embedding.embed(input) {
                         Ok(emb) => fallback.push(emb),
+                        Err(e2) if !super::embedding::can_retry_embedding_individually(&e2) => return Err(e2),
                         Err(e2) => {
                             tracing::warn!("[seed] 种子记忆嵌入失败: {}", e2);
                             fallback.push(Vec::new());

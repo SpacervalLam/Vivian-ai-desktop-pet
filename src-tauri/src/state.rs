@@ -37,6 +37,8 @@ pub struct CharacterInstance {
 }
 
 pub struct AppState {
+    /// Keep the shared environment lookup registered for the AppState lifetime.
+    _environment_registration: crate::cordis::Disposer,
     pub config: Arc<RwLock<ConfigManager>>,
     /// All character instances (indexed by ID)
     pub characters: Arc<RwLock<HashMap<String, CharacterInstance>>>,
@@ -156,6 +158,7 @@ impl AppState {
         // scheduler / mcp_manager / model_router）以"服务"方式挂到 ctx 上，
         // 并把工具流水线策略注册为 ctx 事件总线上的监听器。
         let ctx = Arc::new(crate::cordis::RuntimeContext::new());
+        let environment_registration = ctx.set_service(Arc::clone(&world_provider.environment));
         // 注册共享服务到运行时（可逆注册；进程生命周期内持存）
         {
             ctx.set_service(Arc::clone(&tool_system));
@@ -199,6 +202,7 @@ impl AppState {
         let session_coordinator = crate::utils::SessionCoordinator::new();
         world_provider.environment.bind_priority(session_coordinator.background_priority());
         Self {
+            _environment_registration: environment_registration,
             config: Arc::new(RwLock::new(config)),
             characters: Arc::new(RwLock::new(HashMap::new())),
             active_character_id: Arc::new(RwLock::new(String::new())),

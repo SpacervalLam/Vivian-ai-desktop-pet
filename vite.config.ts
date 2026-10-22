@@ -158,6 +158,7 @@ export default defineConfig(async () => ({
     target: "es2022",
     chunkSizeWarningLimit: 1000,
     rollupOptions: {
+      input: resolve(process.cwd(), "index.html"),
       output: {
         // 按稳定 vendor 分组拆包，便于多 Tauri 窗口之间共享缓存、并行加载：
         // - react/tauri/i18n：高频稳定依赖，各自独立缓存
