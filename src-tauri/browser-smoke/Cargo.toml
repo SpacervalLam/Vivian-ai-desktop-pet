@@ -19,6 +19,7 @@ urlencoding = "2"
 tauri-build = "2"
 [patch.crates-io]
 wry = { path = "../../src-tauri/vendor/wry" }
+tao = { path = "../vendor/tao" }
 
 [dev-dependencies]
 tempfile = "3"
