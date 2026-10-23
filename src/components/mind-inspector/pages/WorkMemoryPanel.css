@@ -1,15 +1,637 @@
-.work-memory-dialog { width: min(720px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); padding: 0; border: 1px solid var(--codex-line, #d6d0c6); border-radius: 12px; color: var(--codex-ink, #302c28); background: var(--codex-paper, #fffaf2); box-shadow: 0 18px 70px #0003; }
-.work-memory-dialog::backdrop { background: #0006; }
-.work-memory-dialog header, .work-memory-dialog footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 20px; }
-.work-memory-dialog footer { flex-wrap: wrap; justify-content: flex-end; border-top: 1px solid var(--codex-line, #d6d0c6); }
-.work-memory-dialog button, .work-memory-dialog select { color: inherit; background: transparent; border: 1px solid var(--codex-line, #d6d0c6); border-radius: 6px; padding: 7px 12px; cursor: pointer; }
-.work-memory-dialog button:disabled { opacity: .5; cursor: default; }
-.work-memory-body { padding: 0 20px; overflow: auto; max-height: calc(100dvh - 180px); }
-.work-memory-body fieldset { display: flex; flex-wrap: wrap; gap: 10px 20px; border: 0; padding: 10px 0; margin: 0; }
-.work-memory-body label { display: flex; align-items: center; gap: 7px; }
-.work-memory-body p { font-size: 12px; line-height: 1.6; opacity: .8; }
-.work-memory-body textarea { box-sizing: border-box; width: 100%; height: 260px; resize: vertical; border: 1px solid var(--codex-line, #d6d0c6); border-radius: 6px; padding: 12px; font: 13px/1.6 var(--codex-mono, monospace); color: inherit; background: transparent; }
-.work-memory-path { display: block; overflow-wrap: anywhere; margin: 10px 0; font-size: 11px; }
-.work-memory-body pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
-.work-memory-body details code { overflow-wrap: anywhere; }
-.work-memory-body .work-memory-error { color: #c53030; opacity: 1; }
+/* 「记忆与项目规约」弹窗。
+   ---------------------------------------------------------------------------
+   配色一律走 --codex-*（由 .codex-theme 提供，手账 / 极简、浅色 / 深色四套都有值），
+   本文件开头把它收成一组 --wm-* 别名：一来选择器短了，二来 fallback 只写一处，
+   弹窗在脱离 .codex-theme 的场合（如静态预览页）也不会掉成纯黑或纯白。
+
+   两个必须显式写、否则会坏的点：
+
+   ① 居中：`position: fixed; inset: 0; margin: auto; height: fit-content;`
+
+      第一层坑 —— global.css 开头的 `* { margin: 0 }` 压掉了 UA 给 dialog 的
+      `margin: auto`，而那是 dialog 居中的唯一机制；不写回来就贴在左上角。
+      同仓的 .assistant-shortcut-dialog 也是这么补的。
+
+      第二层坑（只补 margin 还是不够）—— `inset: 0` 把上下左右都钉死之后，
+      按 CSS 2.1 §10.6.4：**宽/高为 auto 时，自动外边距一律按 0 处理**，
+      于是只能在「水平」方向居中（那里 width 是显式的），竖直方向被顶到最上面。
+      实测 860 高的视口里 top=20px，而真正居中应该是 67px。
+      给定 `height: fit-content`（不再是 auto）后，规则切到「三者均非 auto」，
+      上下 auto 边距才会平分剩余空间，两个方向都居中。
+      内容高于 max-height 时高度被夹住，仍然居中，正文在 .wm-body 里滚 —— 对。
+
+   ② `[open]` 才给 display: flex
+      dialog 未打开时靠 UA 的 `dialog:not([open]) { display: none }` 隐藏，作者样式表
+      优先级高于 UA，直接写 `.work-memory-dialog { display: flex }` 会让它一直可见。
+      组件本身是 open 才挂载，这里再加一道保险。 */
+
+.work-memory-dialog {
+  --wm-surface: var(--codex-paper-card, #fffcf3);
+  --wm-inset: var(--codex-paper, #f6efe1);
+  --wm-line: var(--codex-line, #d8ccb4);
+  --wm-line-soft: var(--codex-line-light, #e5dccb);
+  --wm-ink: var(--codex-ink, #3b3428);
+  --wm-ink-soft: var(--codex-ink-soft, #6b6158);
+  --wm-ink-faint: var(--codex-ink-faint, #9a8f7d);
+  --wm-accent: var(--codex-accent, #537d96);
+  --wm-accent-deep: var(--codex-accent-deep, #3f6179);
+  --wm-accent-soft: var(--codex-accent-soft, rgba(83, 125, 150, .12));
+  --wm-danger: var(--codex-danger, #b3402f);
+  --wm-danger-soft: var(--codex-danger-soft, rgba(179, 64, 47, .1));
+  --wm-warning: var(--codex-warning, #b2822a);
+  --wm-warning-soft: var(--codex-warning-soft, rgba(178, 130, 42, .16));
+  --wm-hover: color-mix(in srgb, var(--wm-ink) 6%, transparent);
+  --wm-mono: var(--codex-mono, 'Cascadia Code', Consolas, monospace);
+
+  position: fixed;
+  inset: 0;
+  margin: auto;
+  /* 竖直居中的前提，见文件头 ①。没有它 = 只在水平方向居中、贴顶。 */
+  height: fit-content;
+  z-index: 1200;
+  box-sizing: border-box;
+  width: min(720px, calc(100vw - 32px));
+  max-height: min(760px, calc(100dvh - 40px));
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--wm-line);
+  border-radius: 16px;
+  color: var(--wm-ink);
+  background: var(--wm-surface);
+  font-family: var(--codex-font);
+  font-size: 13px;
+  box-shadow: var(--codex-shadow-lg, 0 10px 28px rgba(59, 52, 40, .18));
+}
+
+.work-memory-dialog[open] {
+  display: flex;
+  flex-direction: column;
+  animation: wm-dialog-in 160ms ease-out;
+}
+
+.work-memory-dialog::backdrop {
+  background: rgba(20, 16, 12, .38);
+  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(2px);
+}
+
+/* 原生 <select> 的下拉列表由系统绘制，靠 color-scheme 让它跟主题深浅一致。 */
+:root[data-theme="dark"] .work-memory-dialog { color-scheme: dark; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .work-memory-dialog { color-scheme: dark; }
+}
+
+@keyframes wm-dialog-in {
+  from { opacity: 0; transform: translateY(8px) scale(.992); }
+  to { opacity: 1; transform: none; }
+}
+
+/* ============================== 头部 ============================== */
+
+.wm-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 12px 12px 12px 16px;
+  border-bottom: 1px solid var(--wm-line-soft);
+  background: color-mix(in srgb, var(--wm-inset) 55%, var(--wm-surface));
+}
+
+.wm-head-icon {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 24px;
+  height: 24px;
+  border-radius: 8px;
+  background: var(--wm-accent-soft);
+  color: var(--wm-accent-deep);
+}
+
+.wm-head-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--wm-ink);
+  font-size: 13.5px;
+  font-weight: 650;
+  letter-spacing: .2px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wm-icon-btn {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--wm-ink-faint);
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.wm-icon-btn:hover:not(:disabled) { background: var(--wm-hover); color: var(--wm-ink); }
+.wm-icon-btn:disabled { opacity: .45; cursor: default; }
+
+/* ============================== 主体 ============================== */
+
+/* 滚动交给 body，头部与底部动作条常驻 —— 弹窗高度由内容决定、上限 760px。 */
+.wm-body {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+  padding: 14px 16px 12px;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+/* --- 两个开关 --- */
+
+.wm-policy {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.wm-policy:disabled { opacity: .55; }
+
+.wm-toggle {
+  display: flex;
+  flex: 1 1 240px;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  padding: 9px 11px;
+  border: 1px solid var(--wm-line-soft);
+  border-radius: 10px;
+  background: var(--wm-inset);
+  color: var(--wm-ink);
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: border-color 130ms ease, background 130ms ease;
+}
+
+.wm-toggle:hover { border-color: var(--wm-line); }
+
+/* 开启态整块轻染强调色：一眼能看出「这条是打开的」，不必去数滑块位置。 */
+.wm-toggle:has(input:checked) {
+  border-color: color-mix(in srgb, var(--wm-accent) 42%, var(--wm-line-soft));
+  background: color-mix(in srgb, var(--wm-accent-soft) 55%, var(--wm-inset));
+}
+
+.wm-toggle > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 原生 checkbox 只留语义与键盘行为，外观压成滑块。 */
+.wm-toggle > input {
+  position: relative;
+  flex: none;
+  width: 34px;
+  height: 20px;
+  margin: 0;
+  border: 1px solid var(--wm-line);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--wm-ink-faint) 20%, transparent);
+  appearance: none;
+  -webkit-appearance: none;
+  cursor: pointer;
+  transition: background 150ms ease, border-color 150ms ease;
+}
+
+.wm-toggle > input::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--wm-surface);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, .28);
+  transition: transform 150ms ease;
+}
+
+.wm-toggle > input:checked {
+  border-color: var(--wm-accent);
+  background: var(--wm-accent);
+}
+
+.wm-toggle > input:checked::after { transform: translateX(14px); }
+
+/* --- 说明文字：三层灰阶，越靠后越轻 --- */
+
+.wm-note {
+  margin: 0;
+  color: var(--wm-ink-soft);
+  font-size: 11.5px;
+  line-height: 1.65;
+}
+
+.wm-note-foot {
+  padding-top: 10px;
+  border-top: 1px dashed var(--wm-line-soft);
+  color: var(--wm-ink-faint);
+}
+
+.wm-section-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 2px 0 -4px;
+  color: var(--wm-ink-faint);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: .5px;
+}
+
+.wm-rule-line { flex: 1 1 auto; height: 1px; background: var(--wm-line-soft); }
+
+/* --- 文档选择 + 编辑区 --- */
+
+.wm-doc-group {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.wm-doc {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.wm-select-wrap {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.wm-select {
+  box-sizing: border-box;
+  width: 100%;
+  height: 32px;
+  padding: 0 30px 0 10px;
+  border: 1px solid var(--wm-line-soft);
+  border-radius: 9px;
+  background: var(--wm-inset);
+  color: var(--wm-ink);
+  font-family: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+  transition: border-color 130ms ease, box-shadow 130ms ease;
+}
+
+.wm-select:hover:not(:disabled) { border-color: var(--wm-line); }
+.wm-select:focus-visible { outline: none; border-color: var(--wm-accent); box-shadow: 0 0 0 3px var(--wm-accent-soft); }
+.wm-select:disabled { opacity: .55; cursor: default; }
+
+.wm-caret {
+  position: absolute;
+  top: 50%;
+  right: 9px;
+  color: var(--wm-ink-faint);
+  pointer-events: none;
+  transform: translateY(-50%);
+}
+
+.wm-dirty {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: var(--wm-warning-soft);
+  color: var(--wm-warning);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.wm-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+/* 路径是次要信息：单行、可截断，完整值走 title 悬浮。 */
+.wm-path {
+  display: block;
+  overflow: hidden;
+  color: var(--wm-ink-faint);
+  font-family: var(--wm-mono);
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wm-editor {
+  box-sizing: border-box;
+  width: 100%;
+  /* 高度跟着窗口走：800px 高的窗口下是 250px，矮窗口自动收，避免正文全被挤进滚动区。 */
+  height: clamp(150px, 30vh, 250px);
+  min-height: 120px;
+  padding: 12px 14px;
+  border: 1px solid var(--wm-line-soft);
+  border-radius: 10px;
+  background: var(--wm-inset);
+  color: var(--wm-ink);
+  font-family: var(--wm-mono);
+  font-size: 12.5px;
+  line-height: 1.75;
+  resize: vertical;
+  tab-size: 2;
+  transition: border-color 130ms ease, box-shadow 130ms ease;
+}
+
+.wm-editor:focus { outline: none; border-color: var(--wm-accent); box-shadow: 0 0 0 3px var(--wm-accent-soft); }
+.wm-editor:disabled { opacity: .55; }
+.wm-editor::placeholder { color: var(--wm-ink-faint); }
+
+/* --- 折叠区 --- */
+
+.wm-fold { border-top: 1px solid var(--wm-line-soft); }
+
+.wm-fold > summary {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 10px 2px;
+  color: var(--wm-ink-soft);
+  font-size: 12px;
+  font-weight: 600;
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+}
+
+.wm-fold > summary::-webkit-details-marker { display: none; }
+.wm-fold > summary:hover { color: var(--wm-ink); }
+
+.wm-fold-caret {
+  flex: none;
+  color: var(--wm-ink-faint);
+  transition: transform 140ms ease;
+}
+
+.wm-fold[open] .wm-fold-caret { transform: rotate(90deg); }
+
+.wm-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 17px;
+  margin-left: auto;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--wm-hover);
+  color: var(--wm-ink-faint);
+  font-family: var(--wm-mono);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.wm-fold-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 0 0 12px 20px;
+}
+
+.wm-fold-body.is-jobs { padding-left: 6px; }
+
+.wm-rule {
+  padding: 9px 11px;
+  border: 1px solid var(--wm-line-soft);
+  border-left: 2px solid color-mix(in srgb, var(--wm-accent) 55%, var(--wm-line-soft));
+  border-radius: 4px 9px 9px 4px;
+  background: var(--wm-inset);
+}
+
+.wm-rule-path {
+  display: block;
+  color: var(--wm-ink);
+  font-family: var(--wm-mono);
+  font-size: 10.5px;
+  overflow-wrap: anywhere;
+}
+
+.wm-rule-scope {
+  margin: 3px 0 0;
+  color: var(--wm-ink-faint);
+  font-size: 10.5px;
+}
+
+.wm-rule-body {
+  margin: 7px 0 0;
+  padding-top: 7px;
+  border-top: 1px dashed var(--wm-line-soft);
+  color: var(--wm-ink-soft);
+  font-family: var(--wm-mono);
+  font-size: 11px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.wm-job {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 2px;
+  border-bottom: 1px dashed var(--wm-line-soft);
+}
+
+.wm-job:last-child { border-bottom: 0; }
+
+.wm-job-id {
+  flex: none;
+  max-width: 42%;
+  overflow: hidden;
+  color: var(--wm-ink-soft);
+  font-family: var(--wm-mono);
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wm-tag {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--wm-warning-soft);
+  color: var(--wm-warning);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.wm-job-meta {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--wm-ink-faint);
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wm-empty {
+  margin: 0;
+  padding: 8px 2px;
+  color: var(--wm-ink-faint);
+  font-size: 11.5px;
+}
+
+/* --- 错误 / 状态 --- */
+
+.wm-alert {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--wm-danger) 32%, transparent);
+  border-radius: 8px;
+  background: var(--wm-danger-soft);
+  color: var(--wm-danger);
+  font-size: 11.5px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+/* 常驻一行（含空串），避开「加载中」出现时整块内容跳动。 */
+.wm-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 15px;
+  margin: 0;
+  color: var(--wm-ink-faint);
+  font-size: 11px;
+}
+
+.wm-spin {
+  width: 9px;
+  height: 9px;
+  border: 1.5px solid color-mix(in srgb, var(--wm-accent) 30%, transparent);
+  border-top-color: var(--wm-accent);
+  border-radius: 50%;
+  animation: wm-spin 700ms linear infinite;
+}
+
+@keyframes wm-spin { to { transform: rotate(360deg); } }
+
+/* ============================== 底部动作条 ============================== */
+
+.wm-foot {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 9px 16px 11px;
+  border-top: 1px solid var(--wm-line-soft);
+  background: color-mix(in srgb, var(--wm-inset) 55%, var(--wm-surface));
+}
+
+/* 常驻一行高度：加载 / 已保存 / 错误在这条槽里轮流出现，按钮不会跟着跳。 */
+.wm-foot-note { min-height: 17px; }
+
+.wm-foot-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.wm-foot-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.wm-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 11px;
+  border: 1px solid var(--wm-line-soft);
+  border-radius: 8px;
+  background: var(--wm-surface);
+  color: var(--wm-ink-soft);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+.wm-btn:hover:not(:disabled) {
+  border-color: var(--wm-line);
+  background: var(--wm-hover);
+  color: var(--wm-ink);
+}
+
+.wm-btn:active:not(:disabled) { transform: translateY(.5px); }
+.wm-btn:disabled { opacity: .42; cursor: default; }
+.wm-btn > svg { flex: none; opacity: .8; }
+
+/* 主行动（保存）。用「墨色底 + 纸色字」而不是 --codex-accent 实心：
+   深色极简下 accent 本身是近白，白字会直接看不见；这对颜色在四套主题里都成立。 */
+.wm-btn-primary {
+  border-color: transparent;
+  background: var(--wm-ink);
+  color: var(--wm-inset);
+}
+
+.wm-btn-primary > svg { opacity: .9; }
+
+.wm-btn-primary:hover:not(:disabled) {
+  border-color: transparent;
+  background: color-mix(in srgb, var(--wm-ink) 84%, var(--wm-accent));
+  color: var(--wm-inset);
+}
+
+.wm-btn-primary:disabled { opacity: .3; }
+
+.wm-btn:focus-visible,
+.wm-icon-btn:focus-visible,
+.wm-fold > summary:focus-visible {
+  outline: 2px solid var(--wm-accent);
+  outline-offset: 2px;
+}
+
+/* ============================== 窄窗 ============================== */
+
+@media (max-width: 560px) {
+  .wm-body { padding: 12px 12px 4px; }
+  .wm-head { padding: 10px 8px 10px 12px; }
+  .wm-foot { padding: 10px 12px; }
+  .wm-foot-group { flex: 1 1 auto; }
+  .wm-foot-group:last-child { justify-content: flex-end; }
+  .wm-fold-body { padding-left: 8px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .work-memory-dialog[open] { animation: none; }
+  .wm-spin { animation-duration: 2s; }
+  .wm-toggle > input,
+  .wm-toggle > input::after,
+  .wm-fold-caret { transition: none; }
+}
